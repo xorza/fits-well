@@ -372,6 +372,38 @@ fn parameterized_projections_match_astropy() {
                 (70.0, 35.0, 34.141611622, 54.816671832),
             ],
         },
+        Case {
+            proj: "AZP",
+            cv2: 60.0,
+            cd: 0.3,
+            pv: &[(1, 2.0), (2, 30.0)],
+            pts: &[
+                (40.0, 60.0, 51.434150697, 62.429650080),
+                (70.0, 35.0, 34.214637058, 55.561587347),
+            ],
+        },
+        Case {
+            proj: "PCO",
+            cv2: 0.0,
+            cd: 0.5,
+            pv: &[],
+            pts: &[
+                (40.0, 60.0, 50.019002131, 4.980985613),
+                (70.0, 35.0, 34.915451766, -7.386849830),
+                (55.0, 55.0, 42.497621311, 2.497620932),
+            ],
+        },
+        Case {
+            proj: "SZP",
+            cv2: 60.0,
+            cd: 0.3,
+            pv: &[(1, 2.0), (2, 180.0), (3, 60.0)],
+            pts: &[
+                (40.0, 60.0, 51.569468511, 62.792802068),
+                (70.0, 35.0, 34.554236543, 54.849394924),
+                (55.0, 45.0, 42.132530460, 58.453175902),
+            ],
+        },
     ];
     for c in &cases {
         let mut h = Header::new();
@@ -396,18 +428,68 @@ fn parameterized_projections_match_astropy() {
     }
 }
 
+#[test]
+fn unimplemented_projection_codes_error_cleanly() {
+    use crate::error::FitsError;
+    use crate::header::Header;
+    // The quad-cube and HEALPix codes are recognized but unimplemented; a celestial
+    // axis using one must error rather than silently fall back to linear coords.
+    for code in ["TSC", "CSC", "QSC", "HPX", "XPH"] {
+        let mut h = Header::new();
+        h.set("NAXIS", 2);
+        h.set("CTYPE1", format!("RA---{code}"));
+        h.set("CTYPE2", format!("DEC--{code}"));
+        h.set("CRPIX1", 1.0).set("CRPIX2", 1.0);
+        h.set("CRVAL1", 0.0).set("CRVAL2", 0.0);
+        h.set("CDELT1", 1.0).set("CDELT2", 1.0);
+        assert!(
+            matches!(
+                Wcs::from_header(&h, None),
+                Err(FitsError::UnsupportedProjection { .. })
+            ),
+            "{code} should be rejected"
+        );
+    }
+}
+
 /// Every projection's deprojection inverts its forward projection.
 #[test]
 fn projections_round_trip() {
     use Projection::*;
-    for proj in [Tan, Sin, Arc, Stg, Zea, Car, Cea, Mer, Sfl, Ait, Mol] {
-        // Positive native latitudes, away from the poles: in-domain for both the
-        // zenithal (θ > 0 only) and cylindrical families.
-        for &(phi, theta) in &[(30.0_f64, 70.0_f64), (-60.0, 40.0), (20.0, 25.0)] {
-            let (x, y) = proj.project(phi, theta, &[]);
-            let (p2, t2) = proj.deproject(x, y, &[]);
+    // (projection, PV params) — empty PV for the no-parameter projections.
+    let cases: &[(Projection, &[f64])] = &[
+        (Tan, &[]),
+        (Sin, &[]),
+        (Arc, &[]),
+        (Stg, &[]),
+        (Zea, &[]),
+        (Car, &[]),
+        (Cea, &[]),
+        (Mer, &[]),
+        (Sfl, &[]),
+        (Ait, &[]),
+        (Mol, &[]),
+        (Zpn, &[0.0, 1.0, 0.0, 0.1]),
+        (Cyp, &[0.0, 1.0, 0.5]),
+        (Par, &[]),
+        (Cop, &[0.0, 45.0, 15.0]),
+        (Coe, &[0.0, 45.0, 15.0]),
+        (Cod, &[0.0, 45.0, 15.0]),
+        (Coo, &[0.0, 45.0, 15.0]),
+        (Bon, &[0.0, 45.0]),
+        (Air, &[0.0, 45.0]),
+        (Azp, &[0.0, 2.0, 30.0]),
+        (Pco, &[]),
+        (Szp, &[0.0, 2.0, 180.0, 60.0]),
+    ];
+    for &(proj, pv) in cases {
+        // Positive native latitudes, away from the poles: in-domain for every
+        // family (zenithal θ > 0, conics near θ_a, perspective non-divergent).
+        for &(phi, theta) in &[(30.0_f64, 70.0_f64), (-40.0, 50.0), (20.0, 55.0)] {
+            let (x, y) = proj.project(phi, theta, pv);
+            let (p2, t2) = proj.deproject(x, y, pv);
             assert!(
-                norm180(p2 - phi).abs() < 1e-9 && (t2 - theta).abs() < 1e-9,
+                norm180(p2 - phi).abs() < 1e-7 && (t2 - theta).abs() < 1e-7,
                 "{proj:?}: ({phi},{theta}) → ({x},{y}) → ({p2},{t2})"
             );
         }

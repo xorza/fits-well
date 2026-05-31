@@ -13,11 +13,12 @@
 //! matrix inversion for the reverse direction, and full `PVi_m` parameters
 //! (φ₀/θ₀/LONPOLE/LATPOLE overrides plus per-projection params). Projections, via
 //! the general fiducial-point pole computation: zenithal `TAN`/`SIN`/`ARC`/`STG`/
-//! `ZEA`/`ZPN`/`AIR`, cylindrical `CAR`/`CEA`/`MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/
-//! `PAR`, conic `COP`/`COE`/`COD`/`COO`, and pseudoconic `BON`. Reference-frame
-//! transforms live in [`frame`]. All validated against `astropy.wcs` (wcslib).
-//! Not yet: the perspective `AZP`/`SZP`, polyconic `PCO`, quad-cube `TSC`/`CSC`/
-//! `QSC`, HEALPix `HPX`/`XPH`, and the non-linear spectral algorithms.
+//! `ZEA`/`ZPN`/`AIR`, zenithal-perspective `AZP`/`SZP`, cylindrical `CAR`/`CEA`/
+//! `MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic `COP`/`COE`/`COD`/`COO`,
+//! pseudoconic `BON`, and polyconic `PCO`. Reference-frame transforms live in
+//! [`frame`]. All validated against `astropy.wcs` (wcslib). Unimplemented codes
+//! error cleanly via [`FitsError::UnsupportedProjection`]. Not yet: the quad-cube
+//! `TSC`/`CSC`/`QSC`, HEALPix `HPX`/`XPH`, and the non-linear spectral algorithms.
 
 pub mod frame;
 
@@ -72,6 +73,12 @@ pub enum Projection {
     Bon,
     /// `AIR` — Airy (zenithal, minimum-error; `θ_b = PVi_1`).
     Air,
+    /// `AZP` — zenithal perspective (`μ = PVi_1`, tilt `γ = PVi_2`).
+    Azp,
+    /// `PCO` — polyconic.
+    Pco,
+    /// `SZP` — slant zenithal perspective (`μ = PVi_1`, `φc = PVi_2`, `θc = PVi_3`).
+    Szp,
 }
 
 impl Projection {
@@ -97,6 +104,9 @@ impl Projection {
             "COO" => Projection::Coo,
             "BON" => Projection::Bon,
             "AIR" => Projection::Air,
+            "AZP" => Projection::Azp,
+            "PCO" => Projection::Pco,
+            "SZP" => Projection::Szp,
             _ => return None,
         })
     }
@@ -124,10 +134,10 @@ impl Projection {
         )
     }
 
-    /// The fiducial point `(φ₀, θ₀)` in degrees. Zenithal: `(0, 90)`; conics:
-    /// `(0, θ_a)` where `θ_a = PVi_1`; everything else `(0, 0)`.
+    /// The fiducial point `(φ₀, θ₀)` in degrees. Zenithal (incl. the perspective
+    /// `AZP`): `(0, 90)`; conics: `(0, θ_a)` where `θ_a = PVi_1`; else `(0, 0)`.
     fn reference_point(self, pv: &[f64]) -> (f64, f64) {
-        if self.is_zenithal() {
+        if self.is_zenithal() || matches!(self, Projection::Azp | Projection::Szp) {
             (0.0, 90.0)
         } else if self.is_conic() {
             (0.0, pv.get(1).copied().unwrap_or(0.0))
@@ -139,6 +149,73 @@ impl Projection {
     /// Deproject intermediate world `(x, y)` (deg) to native `(φ, θ)` (deg).
     /// `pv` holds the latitude axis's `PVi_0…` projection parameters.
     fn deproject(self, x: f64, y: f64, pv: &[f64]) -> (f64, f64) {
+        if matches!(self, Projection::Azp) {
+            // Tilted zenithal perspective (CG 2002 §5.1.1): undo the γ shear, then
+            // solve A·sinθ + B·cosθ = C for θ.
+            let (mu, gr) = (pv[1], pv[2] * D2R);
+            let yc = y * gr.cos();
+            let r = x.hypot(yc) / R2D;
+            let phi = x.atan2(-yc);
+            let (a, b, c) = (r, r * phi.cos() * gr.tan() - (mu + 1.0), -r * mu);
+            let rad = a.hypot(b);
+            let psi = b.atan2(a);
+            let base = (c / rad).clamp(-1.0, 1.0).asin();
+            // Pick the θ root nearest the native pole (θ = 90°).
+            let half_pi = std::f64::consts::FRAC_PI_2;
+            let cand = [base - psi, std::f64::consts::PI - base - psi];
+            let theta = cand
+                .into_iter()
+                .min_by(|p, q| {
+                    (p - half_pi)
+                        .abs()
+                        .partial_cmp(&(q - half_pi).abs())
+                        .unwrap()
+                })
+                .unwrap();
+            return (phi * R2D, theta * R2D);
+        }
+        if matches!(self, Projection::Szp) {
+            // Slant zenithal perspective (CG 2002 §5.1.2). With the vertex
+            // P = (xp, yp, zp), substitute σ = 1 − sinθ and reduce to a quadratic
+            // `zp²(2σ − σ²) = A² + B²` with A, B linear in σ.
+            let (xp, yp, zp) = szp_vertex(pv);
+            let (cx, cy) = (x / R2D, y / R2D);
+            // A = a0 + a1·σ, B = b0 + b1·σ.
+            let (a0, a1) = (cx * zp, -(cx - xp));
+            let (b0, b1) = (-cy * zp, cy - yp);
+            let qa = a1 * a1 + b1 * b1 + zp * zp;
+            let qb = 2.0 * (a0 * a1 + b0 * b1) - 2.0 * zp * zp;
+            let qc = a0 * a0 + b0 * b0;
+            let disc = (qb * qb - 4.0 * qa * qc).max(0.0).sqrt();
+            let s1 = (-qb - disc) / (2.0 * qa);
+            let s2 = (-qb + disc) / (2.0 * qa);
+            // σ ∈ [0, 2]; prefer the visible-hemisphere root (smaller σ).
+            let sigma = if (0.0..=2.0).contains(&s1) { s1 } else { s2 };
+            let theta = (1.0 - sigma).clamp(-1.0, 1.0).asin();
+            let (a, b) = (a0 + a1 * sigma, b0 + b1 * sigma);
+            let phi = a.atan2(b);
+            return (phi * R2D, theta * R2D);
+        }
+        if matches!(self, Projection::Szp) {
+            // Slant zenithal perspective (CG 2002 §5.1.2): the projection ray from
+            // the vertex (xp, yp, zp) hits the plane; solve the quadratic in
+            // σ = 1 − sinθ, then recover φ.
+            let (xp, yp, zp) = szp_vertex(pv);
+            let (cx, cy) = (x / R2D, y / R2D);
+            let a = (xp - cx).powi(2) + (yp - cy).powi(2) + zp * zp;
+            let b = 2.0 * zp * (cx * (xp - cx) + cy * (yp - cy) - zp);
+            let c = zp * zp * (cx * cx + cy * cy) - zp * zp;
+            let disc = (b * b - 4.0 * a * c).max(0.0).sqrt();
+            // Two σ roots; choose the one giving |sinθ| ≤ 1, preferring the larger
+            // sinθ (near hemisphere).
+            let r1 = (-b - disc) / (2.0 * a);
+            let r2 = (-b + disc) / (2.0 * a);
+            let sigma = if (1.0 - r1).abs() <= 1.0 { r1 } else { r2 };
+            let theta = (1.0 - sigma).clamp(-1.0, 1.0).asin();
+            let u = cx * (zp - sigma) + xp * sigma;
+            let v = cy * (zp - sigma) + yp * sigma;
+            return (u.atan2(-v) * R2D, theta * R2D);
+        }
         if self.is_conic() {
             let (c, y0) = self.conic_consts(pv);
             let s = pv[1].signum();
@@ -210,6 +287,30 @@ impl Projection {
                     let theta = 3.0 * (y / 180.0).clamp(-1.0, 1.0).asin();
                     (x / (2.0 * (2.0 * theta / 3.0).cos() - 1.0), theta * R2D)
                 }
+                // Polyconic inverse (CG 2002 §5.6.1): Newton on
+                // f(θ) = X² + (Y−θ)² − 2(Y−θ)cotθ = 0, then recover φ.
+                Projection::Pco => {
+                    let (xr, yr) = (x * D2R, y * D2R);
+                    if yr.abs() < 1e-12 {
+                        return (x, 0.0);
+                    }
+                    let mut th = yr;
+                    for _ in 0..100 {
+                        let d = yr - th;
+                        let cot = 1.0 / th.tan();
+                        let f = xr * xr + d * d - 2.0 * d * cot;
+                        let fp = -2.0 * d + 2.0 * cot + 2.0 * d / th.sin().powi(2);
+                        let step = f / fp;
+                        th -= step;
+                        if step.abs() < 1e-13 {
+                            break;
+                        }
+                    }
+                    let d = yr - th;
+                    let tanth = th.tan();
+                    let omega = (xr * tanth).atan2(1.0 - d * tanth);
+                    (omega / th.sin() * R2D, th * R2D)
+                }
                 // Bonne's pseudoconic inverse (CG 2002 §5.5.1), θ₁ = PVi_1.
                 Projection::Bon => {
                     let t1 = pv[1] * D2R;
@@ -228,6 +329,22 @@ impl Projection {
 
     /// Project native `(φ, θ)` (deg) to intermediate world `(x, y)` (deg).
     fn project(self, phi: f64, theta: f64, pv: &[f64]) -> (f64, f64) {
+        if matches!(self, Projection::Azp) {
+            let (mu, gr) = (pv[1], pv[2] * D2R);
+            let (tr, pr) = (theta * D2R, phi * D2R);
+            let denom = (mu + tr.sin()) + tr.cos() * pr.cos() * gr.tan();
+            let r = R2D * (mu + 1.0) * tr.cos() / denom;
+            return (r * pr.sin(), -r * pr.cos() / gr.cos());
+        }
+        if matches!(self, Projection::Szp) {
+            let (xp, yp, zp) = szp_vertex(pv);
+            let (tr, pr) = (theta * D2R, phi * D2R);
+            let sigma = 1.0 - tr.sin();
+            let denom = zp - sigma;
+            let x = R2D * (zp * tr.cos() * pr.sin() - xp * sigma) / denom;
+            let y = R2D * (-zp * tr.cos() * pr.cos() - yp * sigma) / denom;
+            return (x, y);
+        }
         if self.is_conic() {
             let (c, y0) = self.conic_consts(pv);
             let r = self.conic_radius(theta, pv);
@@ -243,7 +360,7 @@ impl Projection {
                 Projection::Zea => 2.0 * R2D * (zeta / 2.0).sin(),
                 Projection::Stg => 2.0 * R2D * (zeta / 2.0).tan(),
                 Projection::Zpn => R2D * zpn_poly(zeta, pv),
-                Projection::Air => R2D * air_radius(zeta, pv[1]),
+                Projection::Air => R2D * air_radius_u(zeta, pv[1]),
                 _ => unreachable!(),
             };
             let p = phi * D2R;
@@ -299,6 +416,17 @@ impl Projection {
                     let r = y0 - t;
                     let aphi = phi * D2R * t.cos() / r;
                     (R2D * r * aphi.sin(), R2D * (y0 - r * aphi.cos()))
+                }
+                Projection::Pco => {
+                    if theta.abs() < 1e-12 {
+                        return (phi, 0.0);
+                    }
+                    let omega = phi * D2R * t.sin();
+                    let cot = 1.0 / t.tan();
+                    (
+                        R2D * cot * omega.sin(),
+                        theta + R2D * cot * (1.0 - omega.cos()),
+                    )
                 }
                 _ => unreachable!(),
             }
@@ -391,6 +519,18 @@ impl Projection {
     }
 }
 
+/// SZP projection vertex `(x_p, y_p, z_p)` from `μ = PVi_1`, `φc = PVi_2`,
+/// `θc = PVi_3` (CG 2002 §5.1.2).
+fn szp_vertex(pv: &[f64]) -> (f64, f64, f64) {
+    let mu = pv[1];
+    let (phic, thetac) = (pv[2] * D2R, pv[3] * D2R);
+    (
+        -mu * thetac.cos() * phic.sin(),
+        mu * thetac.cos() * phic.cos(),
+        mu * thetac.sin() + 1.0,
+    )
+}
+
 /// AIR `K = ln(cos ξ_b)/tan²ξ_b` constant (`ξ_b = (90°−θ_b)/2`); the `θ_b = 90`
 /// limit is `−1/2`.
 fn air_k(theta_b: f64) -> f64 {
@@ -410,11 +550,6 @@ fn air_radius_u(zeta: f64, theta_b: f64) -> f64 {
         return 0.0;
     }
     -2.0 * (xi.cos().ln() / xi.tan() + air_k(theta_b) * xi.tan())
-}
-
-/// AIR radius in degrees.
-fn air_radius(zeta: f64, theta_b: f64) -> f64 {
-    R2D * air_radius_u(zeta, theta_b)
 }
 
 /// Invert the AIR radius for ζ given `u = R/(180/π)` (Newton).
@@ -524,6 +659,13 @@ impl Wcs {
         let crval = axis_vec(header, "CRVAL", &a, naxis, 0.0);
         let crpix = axis_vec(header, "CRPIX", &a, naxis, 0.0);
         let cdelt = axis_vec(header, "CDELT", &a, naxis, 1.0);
+
+        // A celestial axis with a projection code we don't implement (the quad-cube
+        // TSC/CSC/QSC or HEALPix HPX/XPH) is an error, not a silent linear
+        // pass-through that would hand back wrong coordinates.
+        if let Some(code) = unsupported_celestial_code(&ctype) {
+            return Err(FitsError::UnsupportedProjection { code });
+        }
 
         // Build the linear transform A. Precedence: CD, then PC×CDELT, then the
         // legacy CROTA rotation, then a bare CDELT diagonal.
@@ -662,6 +804,24 @@ impl Wcs {
 }
 
 /// Identify the longitude/latitude axis pair and projection from `CTYPE`s.
+/// If a celestial axis (`RA`/`DEC`/`xLON`/`xLAT`) carries a 3-letter projection
+/// code this library doesn't implement, return it; else `None`.
+fn unsupported_celestial_code(ctype: &[String]) -> Option<String> {
+    for t in ctype {
+        let head = t.split('-').next().unwrap_or("");
+        let celestial =
+            head == "RA" || head == "DEC" || head.ends_with("LON") || head.ends_with("LAT");
+        if celestial
+            && let Some(code) = t.rsplit('-').find(|s| !s.is_empty())
+            && code.len() == 3
+            && Projection::from_code(code).is_none()
+        {
+            return Some(code.to_string());
+        }
+    }
+    None
+}
+
 fn find_celestial(ctype: &[String]) -> Option<(usize, usize, Projection)> {
     let mut lng = None;
     let mut lat = None;

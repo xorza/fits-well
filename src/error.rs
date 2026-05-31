@@ -55,6 +55,10 @@ pub enum FitsError {
     NotCompressedTable,
     /// A celestial reference-frame transform is not yet supported (e.g. FK4).
     UnsupportedFrame,
+    /// A celestial axis uses a projection code this library doesn't implement.
+    UnsupportedProjection {
+        code: String,
+    },
     /// A tiled-image compression algorithm or variant is not yet supported.
     UnsupportedCompression {
         name: String,
@@ -117,6 +121,9 @@ impl fmt::Display for FitsError {
             FitsError::NotCompressedImage => write!(f, "HDU is not a tiled-compressed image"),
             FitsError::NotCompressedTable => write!(f, "HDU is not a tiled-compressed table"),
             FitsError::UnsupportedFrame => write!(f, "unsupported reference-frame transform"),
+            FitsError::UnsupportedProjection { code } => {
+                write!(f, "unsupported WCS projection code: {code}")
+            }
             FitsError::UnsupportedCompression { name } => {
                 write!(f, "unsupported tiled compression: {name}")
             }

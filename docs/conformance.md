@@ -599,11 +599,11 @@ compression §10 from the same reference file are audited separately.)
 The reference sets a deliberately low bar — *"a v1 can parse/preserve the
 keywords as ordinary header records and add typed support incrementally"* — which
 the ordered header model already satisfies for lossless round-trip. The actual
-implementation goes far beyond that: a typed pixel↔world transform for **eleven
-projections plus four reference frames (ICRS, FK5 at any equinox, Galactic, and
-FK4 B1950), all validated against `astropy.wcs` (wcslib) / `SkyCoord` golden
-values**. The gaps below are unimplemented advanced features (most flagged TODO
-in the module doc), not defects in what exists.
+implementation goes far beyond that: a typed pixel↔world transform for **23
+projections (with full `PVi_m` parameters) plus four reference frames (ICRS, FK5
+at any equinox, Galactic, and FK4 B1950), all validated against `astropy.wcs`
+(wcslib) / `SkyCoord` golden values**. The gaps below are unimplemented advanced
+features (most flagged TODO in the module doc), not defects in what exists.
 
 ### Conformance matrix
 
@@ -618,13 +618,16 @@ in the module doc), not defects in what exists.
 | `CROTAi` legacy (only without `PC`) | `wcs/mod.rs:276` | ✅ |
 | `LONPOLEa`/`LATPOLEa` + defaults | `compute_pole` (`wcs/mod.rs:415`) | ✅ |
 | Pixel↔world pipeline + matrix inverse | `pixel_to_world` (`wcs/mod.rs:323`) / `world_to_pixel` (`:344`) | ✅ |
-| Zenithal `TAN`/`SIN`/`ARC`/`STG`/`ZEA` | `Projection` (`wcs/mod.rs:32`) | ✅ |
-| Cylindrical `CAR`/`CEA`/`MER` + pseudo-cyl. `SFL` | `Projection` | ✅ |
-| All-sky `AIT`/`MOL` (Hammer-Aitoff, Mollweide) | `Projection` (`wcs/mod.rs:51`) | ✅ |
+| Zenithal `TAN`/`SIN`/`ARC`/`STG`/`ZEA`/`ZPN`/`AIR` | `Projection` (`wcs/mod.rs:35`) | ✅ |
+| Zenithal-perspective `AZP`/`SZP` | `Projection` (`wcs/mod.rs:76`) | ✅ |
+| Cylindrical `CAR`/`CEA`/`MER`/`SFL`/`CYP` | `Projection` | ✅ |
+| All-sky pseudo-cyl. `AIT`/`MOL`/`PAR` | `Projection` (`wcs/mod.rs:54`) | ✅ |
+| Conic `COP`/`COE`/`COD`/`COO` + pseudoconic `BON` + polyconic `PCO` | `Projection` (`wcs/mod.rs:64`) | ✅ |
+| Quad-cube `TSC`/`CSC`/`QSC`, HEALPix `HPX`/`XPH` | `unsupported_celestial_code` (`wcs/mod.rs:809`) | 🟡 clean error |
 | `RADESYSa`/`EQUINOXa`; ICRS/FK5/Galactic | `frame.rs` (`matrix`, `wcs/frame.rs:100`) | ✅ |
 | `FK4`/`FK4-NO-E` **B1950** (frame rotation + E-terms) | `to_icrs_vec` (`frame.rs:68`), `ETERMS`/`FK4_TO_FK5` (`:112`,`:132`) | ✅ B1950 / 🟡 other equinoxes error |
 | Alternate WCS `a ∈ A–Z` | `alt` param | ✅ (untested) |
-| `PVi_ma`/`PSi_ma` projection params | — | 🟡 not implemented |
+| `PVi_ma` projection params (`PSi_ma` unused) | threaded through project/deproject | ✅ |
 | `CUNITia` (esp. celestial = degrees) | not read; degrees assumed | 🟡 ignored |
 | Spectral WCS §8.4 (`FREQ-F2W`, …) | non-celestial ⇒ linear only | 🟡 not implemented |
 | BINTABLE column WCS (`TCTYPn`/`iCTYPn`, Table 22) | — | 🟡 not implemented |
@@ -634,11 +637,13 @@ in the module doc), not defects in what exists.
 
 ### Gaps
 
-1. 🟡 **`PVi_ma`/`PSi_ma` projection parameters not supported.** The transform
-   uses parameter-free projection defaults, so slant `SIN` (`PV2_1`/`PV2_2`),
-   `CEA` with `λ ≠ 1` (`PV2_1`), `ZPN`, `SZP`, and any `φ₀`/`θ₀` override are
-   wrong or unrepresentable. The module doc flags this (`wcs/mod.rs:18`).
-   Param-free `SIN`/`CEA`/`AIT`/`MOL` are correct and tested.
+1. 🟡 **Quad-cube and HEALPix projections not implemented.** `TSC`/`CSC`/`QSC`
+   (quad-cube) and `HPX`/`XPH` (HEALPix) are recognized as celestial codes but
+   unimplemented; `from_header` returns `FitsError::UnsupportedProjection`
+   (`unsupported_celestial_code`, `wcs/mod.rs:809`) rather than silently
+   mis-transforming. `PVi_m` parameters *are* supported across all 23 implemented
+   projections (slant `SIN`, `CEA` λ, `ZPN`, `AZP`/`SZP`/`CYP`/conic params, and
+   `φ₀`/`θ₀`/LONPOLE/LATPOLE overrides), each astropy-validated.
 
 2. 🟡 **`CUNITia` is ignored.** Celestial axes are assumed to be in degrees
    (`CRVAL`/`CDELT` taken as degrees) and `CUNIT` is never read, so a celestial
@@ -684,11 +689,15 @@ Strong and unusually rigorous — golden values come from `astropy.wcs` / astrop
 checked (`wcs/tests.rs`): `parses_tan_header` (`:24`) + `pixel_to_world_matches_astropy`
 (`:36`, six TAN points to 1e-9); `world_to_pixel_inverts_pixel_to_world` (`:54`);
 `reference_pixel_maps_to_crval` (`:71`); `sin_projection_matches_astropy` (`:168`);
-`legacy_crota_rotation_matches_astropy` (`:195`); `allsky_projections_match_astropy`
-(`:222`, `AIT`+`MOL` goldens); `projections_match_astropy` (`:270`,
-`STG`/`ZEA`/`CAR`/`CEA`/`MER`/`SFL` goldens, cylindrical `CRVAL` chosen so the
-general pole computation runs); `projections_round_trip` (`:250`, all **eleven**
-projections project→deproject); a standalone `matrix_inverse_is_correct` (`:154`);
+`legacy_crota_rotation_matches_astropy`; `allsky_projections_match_astropy`
+(`AIT`+`MOL` goldens); `projections_match_astropy` (`STG`/`ZEA`/`CAR`/`CEA`/`MER`/`SFL`
+goldens); `cea_lambda_pv_matches_astropy` (the `CEA` `PV2_1` λ parameter);
+`parameterized_projections_match_astropy` (the broad golden table covering the
+`PVi_m`-parameterized and conic/perspective/polyconic projections — `ZPN`/`AIR`/
+`AZP`/`SZP`/`CYP`/`PAR`/`COP`/`COE`/`COD`/`COO`/`BON`/`PCO`);
+`unimplemented_projection_codes_error_cleanly` (quad-cube/HEALPix codes →
+`UnsupportedProjection`); `projections_round_trip` (every implemented projection
+project→deproject); a standalone `matrix_inverse_is_correct`;
 and the frame block — `frame_transforms_match_astropy` (`:79`) now pins ICRS→FK5(J2000),
 ICRS→FK5(J1975), and ICRS→Galactic to **1e-8°** (the J2000 frame bias and exact
 Galactic matrix), adds an ICRS→FK4(B1950) golden, and asserts FK4 at J1975 →

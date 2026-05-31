@@ -23,17 +23,21 @@ core crate is dependency-free by default (the `compression` feature pulls in
 (primary + `IMAGE`/`TABLE`/`BINTABLE` extensions) write; binary-table `P`/`Q` heap
 arrays and per-column `TSCAL`/`TZERO` decode; random groups read; `CONTINUE`,
 `HIERARCH`, and `CHECKSUM`/`DATASUM` (verify + write) are supported. A typed
-**WCS** layer (`wcs` feature) does pixel↔world for eleven projections
-(`TAN`/`SIN`/`ARC`/`STG`/`ZEA`/`CAR`/`CEA`/`MER`/`SFL`/`AIT`/`MOL`, with `PC`/`CD`/`CROTA`)
-plus ICRS/FK5/Galactic/FK4 frame transforms, and a typed **time** layer (`time` feature)
+**WCS** layer (`wcs` feature) does pixel↔world for 23 projections — zenithal
+`TAN`/`SIN`/`ARC`/`STG`/`ZEA`/`ZPN`/`AIR`, zenithal-perspective `AZP`/`SZP`,
+cylindrical `CAR`/`CEA`/`MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic
+`COP`/`COE`/`COD`/`COO`, pseudoconic `BON`, polyconic `PCO` — with `PC`/`CD`/`CROTA`
+and full `PVi_m` parameters, plus ICRS/FK5/Galactic/FK4-B1950 frame transforms, and
+a typed **time** layer (`time` feature)
 handles ISO-8601/JD/MJD, epochs, `UTC`…`TCB`/`GPS`/UT1 scale conversions, and time
 WCS axes — both validated against astropy. Tiled **image and table** compression
 work behind
 the `compression` feature: all five image codecs (`GZIP_1`, `GZIP_2`, `RICE_1`,
 `PLIO_1`, `HCOMPRESS_1` with `SMOOTH=1` decode), quantized-float read+write
 (`NO_DITHER`/`SUBTRACTIVE_DITHER_1`/`SUBTRACTIVE_DITHER_2`, `ZBLANK`/NaN), and §10.3
-fixed-width table compression. Some advanced WCS features (`PVi_m` parameters,
-spectral axes) remain — the
+fixed-width table compression. The remaining WCS frontier (quad-cube/HEALPix
+projections, non-linear spectral axes, FK4 at non-B1950 equinoxes — all of which
+error cleanly today) — the
 module map below shows what is built versus planned, and
 [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks the path to feature-complete. The design principles there remain the spec; follow them when
 filling the scaffolds in.
@@ -61,8 +65,11 @@ cargo test --features compression && cargo clippy --all-targets --features compr
 ## The FITS format in one screen
 
 Read this before touching parsing/writing code; the full reference lives in
-[`docs/refs/`](docs/refs/) (curated markdown) with the normative PDF at
-`docs/refs/fits_standard40.pdf`.
+[`docs/refs/`](docs/refs/) — curated, implementation-focused markdown indexed by
+[`docs/refs/README.md`](docs/refs/README.md). The FITS 4.0 standard itself is
+included verbatim as both [`docs/refs/fits_standard40.md`](docs/refs/fits_standard40.md)
+(full PDF→markdown conversion with reconstructed TOC, handy for grep/linking) and
+the normative [`docs/refs/fits_standard40.pdf`](docs/refs/fits_standard40.pdf).
 
 - A file is a sequence of **HDUs** (Header/Data Units). HDU 0 is the **primary**
   (`SIMPLE = T`); the rest are **extensions** (`XTENSION = 'IMAGE'|'TABLE'|'BINTABLE'`).
@@ -90,6 +97,11 @@ Quick map of the reference notes:
 | Binary tables, heap, VLAs | `docs/refs/06-binary-tables.md` |
 | WCS / time / compression | `docs/refs/07-wcs-time-compression.md` |
 | CONTINUE / CHECKSUM / HIERARCH conventions | `docs/refs/08-conventions.md` |
+
+The conformance audit in [`docs/conformance.md`](docs/conformance.md) maps each
+reference file to the code that implements it, flags gaps (with severity and
+`file:line` anchors), and rates test coverage — check it before treating a
+section as spec-complete.
 
 ## Architecture
 
@@ -123,7 +135,7 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `groups/` | random-groups (§6) read: params + arrays, `PSCALn`/`PZEROn` physical | read done (no write — deprecated) |
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
 | `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3), reassembly + encode | all 5 image codecs read+write; float quant all 3 dither methods + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode + lossy `SCALE>0` write; fixed-width table compression read+write |
-| `wcs/` (feature `wcs`) | typed WCS: keyword parse, linear transform (PC/CD/CROTA + inverse), 11 projections (zenithal + cylindrical + all-sky AIT/MOL) via general pole computation, `pixel_to_world`/`world_to_pixel`; `frame.rs` ICRS/FK5/Galactic/FK4-B1950 transforms | v2 done (PVi_m, spectral, FK4 non-B1950 TODO) |
+| `wcs/` (feature `wcs`) | typed WCS: keyword parse, linear transform (PC/CD/CROTA + `PVi_m` + inverse), 23 projections (zenithal + perspective AZP/SZP + cylindrical + all-sky + conic + BON + PCO) via general pole computation, `pixel_to_world`/`world_to_pixel`; `frame.rs` ICRS/FK5/Galactic/FK4-B1950 transforms; unimplemented codes → `UnsupportedProjection` | v2 done (quad-cube/HEALPix, spectral, FK4 non-B1950 TODO) |
 | `time/` (feature `time`) | typed time (§9): `Datetime` (ISO-8601↔JD/MJD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), `FitsTime` header view + time WCS axis | v2 done |
 | `error.rs` | `FitsError` + `Result` | done |
 
