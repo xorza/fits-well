@@ -120,6 +120,46 @@ impl Header {
         }
         Ok(axes)
     }
+
+    /// Create an empty header. Build it up with [`Header::set`] and friends.
+    pub fn new() -> Header {
+        Header::default()
+    }
+
+    /// Insert a valued keyword, or replace the value of an existing one, keeping
+    /// the keyword index in sync. Returns `&mut self` for chaining. The keyword
+    /// must be a valid FITS keyword name (≤ 8 chars of `A–Z`, `0–9`, `-`, `_`).
+    pub fn set(&mut self, keyword: &str, value: impl Into<Value>) -> &mut Self {
+        let value = value.into();
+        if let Some(&i) = self.index.get(keyword) {
+            self.cards[i].value = Some(value);
+        } else {
+            self.index.insert(keyword.to_string(), self.cards.len());
+            self.cards.push(Card::value(keyword, value));
+        }
+        self
+    }
+
+    /// Attach (or replace) the inline comment of an existing valued keyword;
+    /// a no-op if the keyword is absent.
+    pub fn comment(&mut self, keyword: &str, text: &str) -> &mut Self {
+        if let Some(&i) = self.index.get(keyword) {
+            self.cards[i].comment = Some(text.to_string());
+        }
+        self
+    }
+
+    /// Append a `COMMENT` card.
+    pub fn push_comment(&mut self, text: &str) -> &mut Self {
+        self.cards.push(Card::commentary("COMMENT", text));
+        self
+    }
+
+    /// Append a `HISTORY` card.
+    pub fn push_history(&mut self, text: &str) -> &mut Self {
+        self.cards.push(Card::commentary("HISTORY", text));
+        self
+    }
 }
 
 /// Fold a `CONTINUE` substring into the preceding long-string value card,
@@ -237,6 +277,52 @@ mod tests {
     fn missing_end_record_is_an_error() {
         let bytes = header_bytes(&["SIMPLE  =                    T"]);
         assert!(matches!(Header::parse(&bytes), Err(FitsError::MissingEnd)));
+    }
+
+    #[test]
+    fn builder_sets_replaces_and_indexes_keywords() {
+        let mut h = Header::new();
+        h.set("SIMPLE", true)
+            .comment("SIMPLE", "conforms")
+            .set("BITPIX", 16)
+            .set("OBJECT", "NGC4151");
+        assert_eq!(h.get_logical("SIMPLE"), Some(true));
+        assert_eq!(h.get_integer("BITPIX"), Some(16));
+        assert_eq!(h.get_text("OBJECT"), Some("NGC4151"));
+        assert_eq!(h.cards.len(), 3);
+
+        // Re-setting a keyword replaces in place — no duplicate card, index stable.
+        h.set("BITPIX", -32);
+        assert_eq!(h.get_integer("BITPIX"), Some(-32));
+        assert_eq!(h.cards.len(), 3);
+        // The attached comment survives on its card.
+        assert_eq!(h.cards[0].comment.as_deref(), Some("conforms"));
+    }
+
+    #[test]
+    fn builder_appends_commentary_cards() {
+        let mut h = Header::new();
+        h.set("SIMPLE", true)
+            .push_comment("made by fits")
+            .push_history("step 1");
+        assert_eq!(h.cards.len(), 3);
+        assert_eq!(h.cards[1].kind, CardKind::Commentary);
+        assert_eq!(h.cards[1].keyword, "COMMENT");
+        assert_eq!(h.cards[2].keyword, "HISTORY");
+        // Commentary cards are not keyword-indexed.
+        assert_eq!(h.get("COMMENT"), None);
+    }
+
+    #[test]
+    fn built_header_round_trips_through_render_and_parse() {
+        let mut h = Header::new();
+        h.set("SIMPLE", true)
+            .set("BITPIX", 8)
+            .set("NAXIS", 0)
+            .set("OBJECT", "test");
+        let bytes = crate::writer::render_header(&h);
+        let back = Header::parse(&bytes).unwrap();
+        assert_eq!(back.cards, h.cards);
     }
 
     #[test]

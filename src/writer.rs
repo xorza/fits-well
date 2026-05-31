@@ -10,6 +10,8 @@ use std::io::Write;
 use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
 use crate::block::SPACE_FILL;
+use crate::block::ZERO_FILL;
+use crate::data::Image;
 use crate::error::Result;
 use crate::header::Header;
 
@@ -65,17 +67,69 @@ impl<W: Write> FitsWriter<W> {
         Ok(())
     }
 
+    /// Write `image` as a primary HDU: a synthesized mandatory header
+    /// (`SIMPLE`/`BITPIX`/`NAXISn`, plus `BSCALE`/`BZERO`/`BLANK` when the scaling
+    /// is non-trivial) followed by the big-endian data unit.
+    pub fn write_image(&mut self, image: &Image) -> Result<()> {
+        let expected = if image.shape.is_empty() {
+            0
+        } else {
+            image.shape.iter().product::<usize>()
+        };
+        assert_eq!(
+            image.samples.len(),
+            expected,
+            "image sample count must match the shape product"
+        );
+        self.write_header(&primary_image_header(image))?;
+        self.write_data_unit(&image.samples.encode(), ZERO_FILL)
+    }
+
     pub fn into_inner(self) -> W {
         self.sink
     }
+}
+
+/// Build the mandatory primary-array header for an image (§4.4.1).
+fn primary_image_header(image: &Image) -> Header {
+    let mut header = Header::new();
+    header
+        .set("SIMPLE", true)
+        .comment("SIMPLE", "file conforms to FITS standard");
+    header
+        .set("BITPIX", image.samples.bitpix().code())
+        .comment("BITPIX", "number of bits per data pixel");
+    header
+        .set("NAXIS", image.shape.len() as i64)
+        .comment("NAXIS", "number of data axes");
+    for (i, &n) in image.shape.iter().enumerate() {
+        header.set(&format!("NAXIS{}", i + 1), n as i64);
+    }
+    // Emit scaling only when it carries information beyond the identity map.
+    if !image.scaling.is_identity() {
+        header.set("BZERO", image.scaling.bzero);
+        header.set("BSCALE", image.scaling.bscale);
+    }
+    if let Some(blank) = image.scaling.blank {
+        header.set("BLANK", blank);
+    }
+    header
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::block::ZERO_FILL;
+    use crate::data::{ImageData, Scaling};
+    use crate::hdu::HduKind;
     use crate::reader::FitsReader;
     use std::io::Cursor;
+
+    fn write_to_vec(image: &Image) -> Vec<u8> {
+        let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+        w.write_image(image).unwrap();
+        w.into_inner().into_inner()
+    }
 
     fn header(lines: &[&str]) -> Header {
         let mut buf = Vec::new();
@@ -139,6 +193,48 @@ mod tests {
         ]);
         let reparsed = Header::parse(&render_header(&original)).unwrap();
         assert_eq!(reparsed.cards, original.cards);
+    }
+
+    #[test]
+    fn image_round_trips_through_write_image_and_read_image() {
+        let image = Image {
+            shape: vec![2, 3],
+            samples: ImageData::I16(vec![1, -2, 3, -4, 5, -6]),
+            scaling: Scaling {
+                bscale: 1.0,
+                bzero: 0.0,
+                blank: None,
+            },
+        };
+        let bytes = write_to_vec(&image);
+        assert_eq!(bytes.len(), 2 * BLOCK_SIZE); // one header block + one data block
+
+        let mut r = FitsReader::open(Cursor::new(bytes)).unwrap();
+        assert_eq!(r.hdus.len(), 1);
+        assert_eq!(r.hdus[0].kind, HduKind::Primary);
+        let back = r.read_image(0).unwrap();
+        assert_eq!(back.shape, vec![2, 3]);
+        assert_eq!(back.samples, ImageData::I16(vec![1, -2, 3, -4, 5, -6]));
+    }
+
+    #[test]
+    fn write_image_emits_scaling_keywords_and_preserves_unsigned_values() {
+        // u16 data stored as signed-16 with BZERO = 32768.
+        let image = Image {
+            shape: vec![3],
+            samples: ImageData::I16(vec![-32768, 0, 32767]),
+            scaling: Scaling {
+                bscale: 1.0,
+                bzero: 32768.0,
+                blank: None,
+            },
+        };
+        let mut r = FitsReader::open(Cursor::new(write_to_vec(&image))).unwrap();
+        assert_eq!(r.hdus[0].header.get_real("BZERO"), Some(32768.0));
+        assert_eq!(r.hdus[0].header.get_real("BSCALE"), Some(1.0));
+        let back = r.read_image(0).unwrap();
+        assert_eq!(back.samples, ImageData::I16(vec![-32768, 0, 32767]));
+        assert_eq!(back.physical(), vec![0.0, 32768.0, 65535.0]);
     }
 
     #[test]

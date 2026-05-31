@@ -37,6 +37,26 @@ pub struct Card {
 }
 
 impl Card {
+    /// A valued keyword card (`KEYWORD = value`), comment optional.
+    pub(crate) fn value(keyword: &str, value: Value) -> Card {
+        Card {
+            keyword: keyword.to_string(),
+            value: Some(value),
+            comment: None,
+            kind: CardKind::Value,
+        }
+    }
+
+    /// A commentary card (`COMMENT`/`HISTORY`/blank keyword) carrying free text.
+    pub(crate) fn commentary(keyword: &str, text: &str) -> Card {
+        Card {
+            keyword: keyword.to_string(),
+            value: None,
+            comment: Some(text.to_string()),
+            kind: CardKind::Commentary,
+        }
+    }
+
     /// Parse a single 80-byte record.
     pub fn parse(raw: &[u8; CARD_SIZE]) -> Result<Card> {
         // FITS header records are restricted ASCII (§4.1). Rejecting non-ASCII up

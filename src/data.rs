@@ -68,6 +68,20 @@ impl ImageData {
             Bitpix::F64 => ImageData::F64(from_be(bytes, f64::from_be_bytes)),
         }
     }
+
+    /// Encode the samples to a big-endian byte buffer — the inverse of
+    /// [`ImageData::decode`]. This is the unpadded data unit; the writer pads it
+    /// to the 2880-byte block grid.
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        match self {
+            ImageData::U8(v) => v.clone(),
+            ImageData::I16(v) => to_be(v, i16::to_be_bytes),
+            ImageData::I32(v) => to_be(v, i32::to_be_bytes),
+            ImageData::I64(v) => to_be(v, i64::to_be_bytes),
+            ImageData::F32(v) => to_be(v, f32::to_be_bytes),
+            ImageData::F64(v) => to_be(v, f64::to_be_bytes),
+        }
+    }
 }
 
 /// Decode a packed big-endian buffer into host-endian values of a fixed-width
@@ -78,6 +92,15 @@ fn from_be<const N: usize, T>(bytes: &[u8], conv: fn([u8; N]) -> T) -> Vec<T> {
         .chunks_exact(N)
         .map(|c| conv(c.try_into().expect("chunks_exact yields N-byte arrays")))
         .collect()
+}
+
+/// Pack fixed-width values into a big-endian byte buffer.
+fn to_be<const N: usize, T: Copy>(values: &[T], conv: fn(T) -> [u8; N]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * N);
+    for &v in values {
+        out.extend_from_slice(&conv(v));
+    }
+    out
 }
 
 /// An N-dimensional image: a flat, Fortran-ordered buffer (axis 0 varies
@@ -212,6 +235,31 @@ mod tests {
             ImageData::decode(&[0x3F, 0xF0, 0, 0, 0, 0, 0, 0], Bitpix::F64),
             ImageData::F64(vec![1.0])
         );
+    }
+
+    #[test]
+    fn encode_produces_big_endian_bytes() {
+        assert_eq!(
+            ImageData::I16(vec![1, -1]).encode(),
+            vec![0x00, 0x01, 0xFF, 0xFF]
+        );
+        assert_eq!(ImageData::U8(vec![1, 2, 3]).encode(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn encode_is_the_inverse_of_decode() {
+        let cases = [
+            ImageData::U8(vec![0, 1, 255]),
+            ImageData::I16(vec![1, -1, -32768, 32767]),
+            ImageData::I32(vec![256, -1, i32::MIN]),
+            ImageData::I64(vec![5, -5, i64::MAX]),
+            ImageData::F32(vec![1.0, -2.5, 0.0]),
+            ImageData::F64(vec![1.0, -2.5, f64::MAX]),
+        ];
+        for data in cases {
+            let bytes = data.encode();
+            assert_eq!(ImageData::decode(&bytes, data.bitpix()), data);
+        }
     }
 
     #[test]

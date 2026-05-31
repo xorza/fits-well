@@ -11,7 +11,7 @@ use std::env;
 use std::fs::File;
 use std::io::Cursor;
 
-use fits::{FitsReader, FitsWriter, HduKind, ImageData, ZERO_FILL};
+use fits::{FitsReader, FitsWriter, HduKind, Image, ImageData, Scaling, ZERO_FILL};
 
 fn main() -> fits::Result<()> {
     let path = env::args()
@@ -114,6 +114,31 @@ fn main() -> fits::Result<()> {
         written.len(),
         reopened.hdus.len(),
         reopened.hdus[0].header.axes()?
+    );
+
+    // ---- build an image from scratch and write a complete FITS file ----
+    // `write_image` synthesizes the mandatory header (SIMPLE/BITPIX/NAXISn, plus
+    // BSCALE/BZERO here) and the big-endian data unit.
+    let made = Image {
+        shape: vec![3, 2],
+        samples: ImageData::I16(vec![10, 20, 30, 40, 50, 60]),
+        scaling: Scaling {
+            bscale: 1.0,
+            bzero: 32768.0, // store these as unsigned 16-bit
+            blank: None,
+        },
+    };
+    let mut maker = FitsWriter::new(Cursor::new(Vec::new()));
+    maker.write_image(&made)?;
+    let made_bytes = maker.into_inner().into_inner();
+
+    let mut made_reader = FitsReader::open(Cursor::new(made_bytes))?;
+    let read_back = made_reader.read_image(0)?;
+    println!(
+        "from scratch: wrote a {:?} image; read back raw {:?} → physical {:?}",
+        made.shape,
+        read_back.samples,
+        read_back.physical()
     );
 
     Ok(())

@@ -56,6 +56,42 @@ impl Value {
     }
 }
 
+impl From<bool> for Value {
+    fn from(b: bool) -> Self {
+        Value::Logical(b)
+    }
+}
+
+impl From<i64> for Value {
+    fn from(i: i64) -> Self {
+        Value::Integer(i)
+    }
+}
+
+impl From<i32> for Value {
+    fn from(i: i32) -> Self {
+        Value::Integer(i as i64)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(r: f64) -> Self {
+        Value::Real(r)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(s: &str) -> Self {
+        Value::Text(s.to_string())
+    }
+}
+
+impl From<String> for Value {
+    fn from(s: String) -> Self {
+        Value::Text(s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,5 +116,15 @@ mod tests {
         assert_eq!(Value::Real(1.5).as_real(), Some(1.5));
         assert_eq!(Value::Integer(3).as_real(), Some(3.0));
         assert_eq!(Value::Logical(true).as_real(), None);
+    }
+
+    #[test]
+    fn from_conversions_pick_the_right_variant() {
+        assert_eq!(Value::from(true), Value::Logical(true));
+        assert_eq!(Value::from(16_i32), Value::Integer(16));
+        assert_eq!(Value::from(16_i64), Value::Integer(16));
+        assert_eq!(Value::from(1.5_f64), Value::Real(1.5));
+        assert_eq!(Value::from("hi"), Value::Text("hi".into()));
+        assert_eq!(Value::from(String::from("hi")), Value::Text("hi".into()));
     }
 }

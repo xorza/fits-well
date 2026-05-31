@@ -17,9 +17,9 @@ goals shape every decision:
 The structural spine is built and tested: the 2880-byte block layer, an ordered
 header model (with `CONTINUE` long-string read/write), HDU classification and
 boundary sizing, a lazy seeking reader, and a header / raw-data-unit writer. The
-core crate is dependency-free. Typed data decode, table columns + heap, WCS, and
-tiled compression are scaffolded — the module map below shows what is built
-versus planned. The design principles there remain the spec; follow them when
+core crate is dependency-free. Typed image read/write is done (decode/encode +
+`BSCALE`/`BZERO`); table columns + heap, WCS, and tiled compression are scaffolded
+— the module map below shows what is built versus planned. The design principles there remain the spec; follow them when
 filling the scaffolds in.
 
 ## Commands
@@ -91,11 +91,11 @@ bytes  ──►  block layer   ──►  HDU layer   ──►  header model  
 |--------|------|--------|
 | `block.rs` | 2880-byte grid, padding, rounding math | done |
 | `bitpix.rs` | `BITPIX` element type + element sizes | done |
-| `header/{value,card,mod}.rs` | ordered card model, parse/render, `CONTINUE` folding, keyword index + typed getters | done |
+| `header/{value,card,mod}.rs` | ordered card model, parse/render, `CONTINUE` folding, keyword index, typed getters + builder (`set`/`comment`/`push_*`) | done |
 | `hdu.rs` | HDU classification + data-unit sizing (Eq. 2, incl. random groups) | done |
 | `reader.rs` | lazy seeking HDU scan; raw `DataUnit` fetch | done |
-| `writer.rs` | header + raw data-unit serialization | header/raw done; typed encoding TODO |
-| `data.rs` | typed `Image`/`ImageData`, big-endian decode, `BSCALE`/`BZERO` physical plane | image read done; encode + SIMD/parallel TODO |
+| `writer.rs` | header + data-unit serialization; `write_image` (primary array) | image write done; tables/extension write TODO |
+| `data.rs` | typed `Image`/`ImageData`, big-endian decode+encode, `BSCALE`/`BZERO` physical plane | image read+write done; SIMD/parallel TODO |
 | `error.rs` | `FitsError` + `Result` | done |
 
 `lib.rs` is the only place that defines the public surface (`pub use`). Card
