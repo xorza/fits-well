@@ -20,7 +20,8 @@ boundary sizing, a lazy seeking reader, and a header / raw-data-unit writer. The
 core crate is dependency-free. Typed image read/write is done (decode/encode +
 `BSCALE`/`BZERO`), and binary tables are read (fixed-width columns, `TSCAL`/`TZERO`
 scaling, and `P`/`Q` heap arrays); table *writing*, WCS, and tiled compression are
-scaffolded — the module map below shows what is built versus planned. The design principles there remain the spec; follow them when
+scaffolded — the module map below shows what is built versus planned, and
+[`docs/ROADMAP.md`](docs/ROADMAP.md) lays out the path to feature-complete. The design principles there remain the spec; follow them when
 filling the scaffolds in.
 
 ## Commands
