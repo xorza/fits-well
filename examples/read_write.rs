@@ -11,7 +11,7 @@ use std::env;
 use std::fs::File;
 use std::io::Cursor;
 
-use fits::{FitsReader, FitsWriter, HduKind, Image, ImageData, Scaling, ZERO_FILL};
+use fits::{ColumnData, FitsReader, FitsWriter, HduKind, Image, ImageData, Scaling, ZERO_FILL};
 
 fn main() -> fits::Result<()> {
     let path = env::args()
@@ -90,6 +90,36 @@ fn main() -> fits::Result<()> {
             "  physical: min={min}, max={max}, mean={:.2}\n",
             sum / n as f64
         );
+    }
+
+    // ---- decode a binary table, if the file has one ----
+    if let Some(index) = reader.hdus.iter().position(|h| h.kind == HduKind::BinTable) {
+        let table = reader.read_table(index)?;
+        println!(
+            "read_table({index}): {} rows × {} columns",
+            table.nrows,
+            table.columns.len()
+        );
+        for col in table.columns.iter().take(5) {
+            println!(
+                "  {:8} {}{}{}",
+                col.name.as_deref().unwrap_or("-"),
+                col.tform.repeat,
+                col.tform.kind.code(),
+                col.unit
+                    .as_deref()
+                    .map(|u| format!("  [{u}]"))
+                    .unwrap_or_default()
+            );
+        }
+        // Decode the first column and show a few values.
+        match table.read_column(0)? {
+            ColumnData::Text(v) => println!("  column 0 (first 3): {:?}", &v[..3.min(v.len())]),
+            ColumnData::F64(v) => println!("  column 0 (first 4): {:?}", &v[..4.min(v.len())]),
+            ColumnData::I32(v) => println!("  column 0 (first 4): {:?}", &v[..4.min(v.len())]),
+            other => println!("  column 0: {other:?}"),
+        }
+        println!();
     }
 
     // ---- the raw data unit: padded on-disk bytes plus the real-data range ----
