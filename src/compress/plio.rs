@@ -1,7 +1,110 @@
 //! `PLIO_1` tile codec — the IRAF PLIO line-list RLE (a port of cfitsio's
-//! `pl_l2pi`). The compressed cell is an i16 instruction list (opcode in the top
-//! nibble, 12-bit data) that programs a run-length mask, tracking a current
-//! "high" value `pv`.
+//! `pl_l2pi`/`pl_p2li`). The compressed cell is an i16 instruction list (opcode in
+//! the top nibble, 12-bit data) that programs a run-length mask, tracking a
+//! current "high" value `pv`. PLIO is a *mask* codec: values must be non-negative
+//! and fit in 24 bits; the encoder clamps negatives to zero, matching cfitsio.
+
+/// Encode `values` (one tile, `npix` non-negative mask pixels) as an IRAF PLIO
+/// line list — a port of cfitsio's `pl_p2li` with `xs = 1`. The returned i16 list
+/// round-trips through [`plio_decode`].
+pub(super) fn plio_encode(values: &[i64], npix: usize) -> Vec<i16> {
+    // Header words (1-based lldst[1..=7]): the `-100` at index 3 selects the
+    // 30-bit-length form the decoder reads from words 4/5; index 2 (=7) is the
+    // header length, so instructions begin at word 8.
+    let mut ll: Vec<i16> = vec![0, 7, -100, 0, 0, 0, 0];
+    if npix == 0 {
+        return ll;
+    }
+    // 1-based pixel access, clamping negative values to zero (PLIO masks are ≥ 0).
+    let pix = |i1: usize| values.get(i1 - 1).copied().unwrap_or(0).max(0);
+
+    let xs = 1usize;
+    let xe = xs + npix - 1;
+    let mut pv = pix(xs);
+    let mut x1 = xs as i64;
+    let mut iz = xs as i64;
+    let mut hi: i64 = 1;
+    let mut nv: i64 = 0;
+
+    for ip in xs..=xe {
+        let mut flush = true;
+        if ip < xe {
+            nv = pix(ip + 1);
+            if nv == pv {
+                flush = false; // extend the current run
+            } else if pv == 0 {
+                pv = nv;
+                x1 = (ip + 1) as i64;
+                flush = false;
+            }
+        } else if pv == 0 {
+            x1 = xe as i64 + 1;
+        }
+
+        if flush {
+            let mut np = ip as i64 - x1 + 1; // high-pixel count in this segment
+            let mut nz = x1 - iz; // leading zero count
+            let mut done = false;
+
+            if pv > 0 {
+                let dv = pv - hi; // change in the "high" value since last segment
+                if dv != 0 {
+                    hi = pv;
+                    if dv.abs() > 4095 {
+                        // Two-word absolute set: low 12 bits (opcode 1) then high bits.
+                        ll.push(((pv & 4095) + 4096) as i16);
+                        ll.push((pv / 4096) as i16);
+                    } else {
+                        // One-word relative adjust: opcode 2 (up) or 3 (down).
+                        ll.push(if dv < 0 {
+                            (-dv + 12288) as i16
+                        } else {
+                            (dv + 8192) as i16
+                        });
+                        // A lone high pixel with no leading zeros folds into the
+                        // adjust word as opcode 6/7 (single high pixel).
+                        if np == 1 && nz == 0 {
+                            let last = ll.last_mut().unwrap();
+                            *last |= 16384;
+                            done = true;
+                        }
+                    }
+                }
+            }
+
+            if !done && nz > 0 {
+                while nz > 0 {
+                    ll.push(nz.min(4095) as i16);
+                    nz -= 4095;
+                }
+                // A lone high pixel after the zeros folds into the last zero word
+                // as opcode 5 (zero run whose final pixel is set high).
+                if np == 1 && pv > 0 {
+                    let last = ll.last_mut().unwrap();
+                    *last = (*last as i64 + 20481) as i16;
+                    done = true;
+                }
+            }
+
+            if !done {
+                while np > 0 {
+                    ll.push((np.min(4095) + 16384) as i16); // opcode 4: high run
+                    np -= 4095;
+                }
+            }
+
+            x1 = (ip + 1) as i64;
+            iz = x1;
+            pv = nv;
+        }
+    }
+
+    // Total list length (= cfitsio's `op - 1`) split across words 4/5.
+    let total = ll.len();
+    ll[3] = (total % 32768) as i16;
+    ll[4] = (total / 32768) as i16;
+    ll
+}
 
 /// Decode an IRAF PLIO line list into `npix` mask values.
 pub(super) fn plio_decode(ll: &[i16], npix: usize) -> Vec<i64> {

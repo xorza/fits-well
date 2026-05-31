@@ -1,9 +1,13 @@
-//! `HCOMPRESS_1` tile codec — a port of cfitsio's `fits_hdecompress` (32-bit).
+//! `HCOMPRESS_1` tile codec — a port of cfitsio's `fits_hdecompress`/
+//! `fits_hcompress` (32-bit).
 //!
 //! Decoding is: read the header + quadtree-coded bit planes (`decode`/`dodecode`/
 //! `qtree_decode`), undigitize (multiply by the scale), then invert the
-//! H-transform (`hinv`). Smoothing (`SMOOTH = 1`) is not implemented; the common
-//! `SMOOTH = 0` path is.
+//! H-transform (`hinv`). Encoding is the mirror: forward H-transform (`htrans`),
+//! digitize, then quadtree bit-plane coding (`encode`/`doencode`/`qtree_encode`).
+//! Smoothing (`SMOOTH = 1`) is not implemented; the common `SMOOTH = 0`, lossless
+//! (`scale = 0`) path is. Like the decoder this is the 32-bit codec, so tile
+//! values must fit the int H-transform without overflow (i16 and moderate i32).
 
 use crate::error::FitsError;
 use crate::error::Result;
@@ -15,6 +19,553 @@ const MAGIC: [u8; 2] = [0xDD, 0x99];
 pub(super) fn hcompress_tile(bytes: &[u8]) -> Result<Vec<i64>> {
     let (a, _nx, _ny) = hdecompress(bytes)?;
     Ok(a.into_iter().map(|v| v as i64).collect())
+}
+
+/// Encode one tile (`vals` in `ny`-fastest order, `tdims[0]` = ny = FITS axis-1)
+/// as an `HCOMPRESS_1` byte stream. `scale = 0` is lossless. The result decodes
+/// back through [`hcompress_tile`] to the original values.
+pub(super) fn hcompress_tile_encode(vals: &[i64], tdims: &[usize], scale: i32) -> Result<Vec<u8>> {
+    let ny = tdims.first().copied().unwrap_or(vals.len()).max(1);
+    let nx = (vals.len() / ny).max(1);
+    if nx * ny != vals.len() {
+        return Err(FitsError::UnsupportedCompression {
+            name: "HCOMPRESS_1: tile is not 2-D".to_string(),
+        });
+    }
+    let mut a: Vec<i32> = vals.iter().map(|&v| v as i32).collect();
+    htrans(&mut a, nx, ny);
+    digitize(&mut a, nx, ny, scale);
+    let mut enc = BitOutput::new();
+    enc.encode(&mut a, nx, ny, scale);
+    Ok(enc.out)
+}
+
+/// `CODE`/`NCODE`: the fixed Huffman code (value, bit length) for each 4-bit
+/// quadtree symbol 0–15 (cfitsio `code[]`/`ncode[]`).
+const CODE: [i32; 16] = [
+    0x3e, 0x00, 0x01, 0x08, 0x02, 0x09, 0x1a, 0x1b, 0x03, 0x1c, 0x0a, 0x1d, 0x0b, 0x1e, 0x3f, 0x0c,
+];
+const NCODE: [i32; 16] = [6, 3, 3, 4, 3, 4, 5, 5, 3, 5, 4, 5, 4, 5, 6, 4];
+
+/// Bit/byte output buffer (replaces cfitsio's file + `buffer2`/`bits_to_go2`
+/// globals). Holds the compressed byte stream.
+struct BitOutput {
+    out: Vec<u8>,
+    buffer2: i32,
+    bits_to_go2: i32,
+}
+
+impl BitOutput {
+    fn new() -> Self {
+        BitOutput {
+            out: Vec::new(),
+            buffer2: 0,
+            bits_to_go2: 8,
+        }
+    }
+
+    fn writeint(&mut self, a: i32) {
+        self.out.extend_from_slice(&a.to_be_bytes());
+    }
+
+    fn writelonglong(&mut self, a: i64) {
+        self.out.extend_from_slice(&a.to_be_bytes());
+    }
+
+    fn start_outputing_bits(&mut self) {
+        self.buffer2 = 0;
+        self.bits_to_go2 = 8;
+    }
+
+    /// Output the low `n` bits of `bits` (`n` ≤ 8), MSB-first.
+    fn output_nbits(&mut self, bits: i32, n: i32) {
+        const MASK: [i32; 9] = [0, 1, 3, 7, 15, 31, 63, 127, 255];
+        self.buffer2 = self.buffer2.wrapping_shl(n as u32) | (bits & MASK[n as usize]);
+        self.bits_to_go2 -= n;
+        if self.bits_to_go2 <= 0 {
+            self.out
+                .push(((self.buffer2 >> (-self.bits_to_go2)) & 0xff) as u8);
+            self.bits_to_go2 += 8;
+        }
+    }
+
+    fn output_nybble(&mut self, bits: i32) {
+        self.buffer2 = self.buffer2.wrapping_shl(4) | (bits & 15);
+        self.bits_to_go2 -= 4;
+        if self.bits_to_go2 <= 0 {
+            self.out
+                .push(((self.buffer2 >> (-self.bits_to_go2)) & 0xff) as u8);
+            self.bits_to_go2 += 8;
+        }
+    }
+
+    /// Output `n` 4-bit nybbles from `array` (cfitsio's byte-aligned fast path).
+    fn output_nnybble(&mut self, n: usize, array: &[u8]) {
+        if n == 1 {
+            self.output_nybble(array[0] as i32);
+            return;
+        }
+        let mut kk = 0usize;
+        if self.bits_to_go2 <= 4 {
+            self.output_nybble(array[0] as i32);
+            kk += 1;
+            if n == 2 {
+                self.output_nybble(array[1] as i32);
+                return;
+            }
+        }
+        let shift = 8 - self.bits_to_go2;
+        let jj = (n - kk) / 2;
+        if self.bits_to_go2 == 8 {
+            self.buffer2 = 0;
+            for _ in 0..jj {
+                self.out
+                    .push(((array[kk] & 15) << 4) | (array[kk + 1] & 15));
+                kk += 2;
+            }
+        } else {
+            for _ in 0..jj {
+                self.buffer2 = self.buffer2.wrapping_shl(8)
+                    | (((array[kk] as i32 & 15) << 4) | (array[kk + 1] as i32 & 15));
+                kk += 2;
+                self.out.push(((self.buffer2 >> shift) & 0xff) as u8);
+            }
+        }
+        if kk != n {
+            self.output_nybble(array[n - 1] as i32);
+        }
+    }
+
+    fn done_outputing_bits(&mut self) {
+        if self.bits_to_go2 < 8 {
+            self.out.push((self.buffer2 << self.bits_to_go2) as u8);
+        }
+    }
+
+    /// Write the header, extract sign bits, compute per-quadrant bit-plane counts,
+    /// quadtree-encode the planes, then append the sign bytes (cfitsio `encode`).
+    fn encode(&mut self, a: &mut [i32], nx: usize, ny: usize, scale: i32) {
+        let nel = nx * ny;
+        self.out.extend_from_slice(&MAGIC);
+        self.writeint(nx as i32);
+        self.writeint(ny as i32);
+        self.writeint(scale);
+        self.writelonglong(a[0] as i64);
+        a[0] = 0;
+
+        // Sign bits (one per non-zero element, MSB-first within each byte); a[i]
+        // is replaced by its absolute value.
+        let mut signbits = vec![0u8; nel.div_ceil(8)];
+        let mut nsign = 0usize;
+        let mut bits_to_go = 8i32;
+        for v in a.iter_mut().take(nel) {
+            if *v > 0 {
+                signbits[nsign] <<= 1;
+                bits_to_go -= 1;
+            } else if *v < 0 {
+                signbits[nsign] = (signbits[nsign] << 1) | 1;
+                bits_to_go -= 1;
+                *v = -*v;
+            }
+            if bits_to_go == 0 {
+                bits_to_go = 8;
+                nsign += 1;
+            }
+        }
+        if bits_to_go != 8 {
+            signbits[nsign] <<= bits_to_go;
+            nsign += 1;
+        }
+
+        // Per-quadrant maximum, then bit-plane count = bits needed for that max.
+        let nx2 = nx.div_ceil(2);
+        let ny2 = ny.div_ceil(2);
+        let mut vmax = [0i32; 3];
+        let mut j = 0usize;
+        let mut k = 0usize;
+        for &v in a.iter().take(nel) {
+            let q = (j >= ny2) as usize + (k >= nx2) as usize;
+            if vmax[q] < v {
+                vmax[q] = v;
+            }
+            j += 1;
+            if j >= ny {
+                j = 0;
+                k += 1;
+            }
+        }
+        let mut nbitplanes = [0u8; 3];
+        for q in 0..3 {
+            let mut m = vmax[q];
+            while m > 0 {
+                m >>= 1;
+                nbitplanes[q] += 1;
+            }
+        }
+        self.out.extend_from_slice(&nbitplanes);
+
+        self.doencode(a, nx, ny, &nbitplanes);
+        self.out.extend_from_slice(&signbits[..nsign]);
+    }
+
+    /// Quadtree-encode the four quadrants, then an EOF nybble (cfitsio `doencode`).
+    fn doencode(&mut self, a: &[i32], nx: usize, ny: usize, nbitplanes: &[u8; 3]) {
+        let nx2 = nx.div_ceil(2);
+        let ny2 = ny.div_ceil(2);
+        self.start_outputing_bits();
+        self.qtree_encode(&a[0..], ny, nx2, ny2, nbitplanes[0] as i32);
+        self.qtree_encode(&a[ny2..], ny, nx2, ny / 2, nbitplanes[1] as i32);
+        self.qtree_encode(&a[ny * nx2..], ny, nx / 2, ny2, nbitplanes[1] as i32);
+        self.qtree_encode(
+            &a[ny * nx2 + ny2..],
+            ny,
+            nx / 2,
+            ny / 2,
+            nbitplanes[2] as i32,
+        );
+        self.output_nybble(0);
+        self.done_outputing_bits();
+    }
+
+    /// Quadtree-code one quadrant's bit planes, top plane first (cfitsio
+    /// `qtree_encode`). Falls back to a direct bitmap when the quadtree expands.
+    fn qtree_encode(&mut self, a: &[i32], n: usize, nqx: usize, nqy: usize, nbitplanes: i32) {
+        let nqmax = nqx.max(nqy);
+        let mut log2n = ((nqmax as f64).ln() / 2f64.ln() + 0.5) as i32;
+        if nqmax > (1 << log2n) {
+            log2n += 1;
+        }
+        let nqx2 = nqx.div_ceil(2);
+        let nqy2 = nqy.div_ceil(2);
+        let bmax = (nqx2 * nqy2).div_ceil(2);
+        let mut scratch = vec![0u8; (nqx2 * nqy2).max(1)];
+        let mut buffer = vec![0u8; bmax.max(1)];
+
+        for bit in (0..nbitplanes).rev() {
+            let mut b = 0usize;
+            let mut bitbuffer = 0i32;
+            let mut bits_to_go3 = 0i32;
+            qtree_onebit(a, n, nqx, nqy, &mut scratch, bit);
+            let mut nx = (nqx + 1) >> 1;
+            let mut ny = (nqy + 1) >> 1;
+            let mut overflow = bufcopy(
+                &scratch,
+                nx * ny,
+                &mut buffer,
+                &mut b,
+                bmax,
+                &mut bitbuffer,
+                &mut bits_to_go3,
+            );
+            for _ in 1..log2n {
+                if overflow {
+                    break;
+                }
+                qtree_reduce(&mut scratch, ny, nx, ny);
+                nx = (nx + 1) >> 1;
+                ny = (ny + 1) >> 1;
+                overflow = bufcopy(
+                    &scratch,
+                    nx * ny,
+                    &mut buffer,
+                    &mut b,
+                    bmax,
+                    &mut bitbuffer,
+                    &mut bits_to_go3,
+                );
+            }
+            if overflow {
+                self.write_bdirect(a, n, nqx, nqy, &mut scratch, bit);
+                continue;
+            }
+            // Quadtree code: a 0xF marker, the leftover Huffman bits, then the
+            // buffered code bytes in reverse order.
+            self.output_nybble(0xF);
+            if b == 0 {
+                if bits_to_go3 > 0 {
+                    self.output_nbits(bitbuffer & ((1 << bits_to_go3) - 1), bits_to_go3);
+                } else {
+                    self.output_nbits(CODE[0], NCODE[0]);
+                }
+            } else {
+                if bits_to_go3 > 0 {
+                    self.output_nbits(bitbuffer & ((1 << bits_to_go3) - 1), bits_to_go3);
+                }
+                for i in (0..b).rev() {
+                    self.output_nbits(buffer[i] as i32, 8);
+                }
+            }
+        }
+    }
+
+    /// Direct (un-quadtree) bitmap fallback: a 0x0 marker, then the packed nybbles.
+    fn write_bdirect(
+        &mut self,
+        a: &[i32],
+        n: usize,
+        nqx: usize,
+        nqy: usize,
+        scratch: &mut [u8],
+        bit: i32,
+    ) {
+        self.output_nybble(0x0);
+        qtree_onebit(a, n, nqx, nqy, scratch, bit);
+        self.output_nnybble(nqx.div_ceil(2) * nqy.div_ceil(2), scratch);
+    }
+}
+
+/// Forward H-transform (in place), the inverse of [`hinv`] (cfitsio `htrans`).
+fn htrans(a: &mut [i32], nx: usize, ny: usize) {
+    let nmax = nx.max(ny);
+    let mut log2n = ((nmax as f64).ln() / 2f64.ln() + 0.5) as i32;
+    if nmax > (1 << log2n) {
+        log2n += 1;
+    }
+    let mut tmp = vec![0i32; nmax.div_ceil(2).max(1)];
+
+    let mut shift = 0u32;
+    let mut mask = -2i32;
+    let mut mask2 = mask << 1;
+    let mut prnd = 1i32;
+    let mut prnd2 = prnd << 1;
+    let mut nrnd2 = prnd2 - 1;
+
+    let mut nxtop = nx;
+    let mut nytop = ny;
+    for _ in 0..log2n {
+        let oddx = nxtop % 2;
+        let oddy = nytop % 2;
+        let mut i = 0usize;
+        while i < nxtop - oddx {
+            let mut s00 = i * ny;
+            let mut s10 = s00 + ny;
+            let mut j = 0usize;
+            while j < nytop - oddy {
+                let h0 = (a[s10 + 1]
+                    .wrapping_add(a[s10])
+                    .wrapping_add(a[s00 + 1])
+                    .wrapping_add(a[s00]))
+                    >> shift;
+                let hx = (a[s10 + 1]
+                    .wrapping_add(a[s10])
+                    .wrapping_sub(a[s00 + 1])
+                    .wrapping_sub(a[s00]))
+                    >> shift;
+                let hy = (a[s10 + 1]
+                    .wrapping_sub(a[s10])
+                    .wrapping_add(a[s00 + 1])
+                    .wrapping_sub(a[s00]))
+                    >> shift;
+                let hc = (a[s10 + 1]
+                    .wrapping_sub(a[s10])
+                    .wrapping_sub(a[s00 + 1])
+                    .wrapping_add(a[s00]))
+                    >> shift;
+                a[s10 + 1] = hc;
+                a[s10] = (if hx >= 0 { hx + prnd } else { hx }) & mask;
+                a[s00 + 1] = (if hy >= 0 { hy + prnd } else { hy }) & mask;
+                a[s00] = (if h0 >= 0 { h0 + prnd2 } else { h0 + nrnd2 }) & mask2;
+                s00 += 2;
+                s10 += 2;
+                j += 2;
+            }
+            if oddy != 0 {
+                let h0 = a[s10].wrapping_add(a[s00]).wrapping_shl(1 - shift);
+                let hx = a[s10].wrapping_sub(a[s00]).wrapping_shl(1 - shift);
+                a[s10] = (if hx >= 0 { hx + prnd } else { hx }) & mask;
+                a[s00] = (if h0 >= 0 { h0 + prnd2 } else { h0 + nrnd2 }) & mask2;
+            }
+            i += 2;
+        }
+        if oddx != 0 {
+            let mut s00 = i * ny;
+            let mut j = 0usize;
+            while j < nytop - oddy {
+                let h0 = a[s00 + 1].wrapping_add(a[s00]).wrapping_shl(1 - shift);
+                let hy = a[s00 + 1].wrapping_sub(a[s00]).wrapping_shl(1 - shift);
+                a[s00 + 1] = (if hy >= 0 { hy + prnd } else { hy }) & mask;
+                a[s00] = (if h0 >= 0 { h0 + prnd2 } else { h0 + nrnd2 }) & mask2;
+                s00 += 2;
+                j += 2;
+            }
+            if oddy != 0 {
+                let h0 = a[i * ny].wrapping_shl(2 - shift);
+                a[i * ny] = (if h0 >= 0 { h0 + prnd2 } else { h0 + nrnd2 }) & mask2;
+            }
+        }
+        for i in 0..nxtop {
+            shuffle(&mut a[ny * i..], nytop, 1, &mut tmp);
+        }
+        for j in 0..nytop {
+            shuffle(&mut a[j..], nxtop, ny, &mut tmp);
+        }
+        nxtop = (nxtop + 1) >> 1;
+        nytop = (nytop + 1) >> 1;
+        shift = 1;
+        mask = mask2;
+        prnd = prnd2;
+        mask2 <<= 1;
+        prnd2 <<= 1;
+        nrnd2 = prnd2 - 1;
+    }
+}
+
+/// Group coefficients by order: de-interleave even/odd elements (the inverse of
+/// the decoder's `unshuffle`; cfitsio `shuffle`).
+fn shuffle(a: &mut [i32], n: usize, n2: usize, tmp: &mut [i32]) {
+    let mut pt = 0usize;
+    let mut i = 1usize;
+    while i < n {
+        tmp[pt] = a[n2 * i];
+        pt += 1;
+        i += 2;
+    }
+    let mut p1 = n2;
+    let mut p2 = n2 + n2;
+    let mut i = 2usize;
+    while i < n {
+        a[p1] = a[p2];
+        p1 += n2;
+        p2 += n2 + n2;
+        i += 2;
+    }
+    let mut pt = 0usize;
+    let mut i = 1usize;
+    while i < n {
+        a[p1] = tmp[pt];
+        p1 += n2;
+        pt += 1;
+        i += 2;
+    }
+}
+
+/// Digitize: round each coefficient to a multiple of `scale` (no-op for lossless
+/// `scale ≤ 1`; cfitsio `digitize`).
+fn digitize(a: &mut [i32], nx: usize, ny: usize, scale: i32) {
+    if scale <= 1 {
+        return;
+    }
+    let d = (scale + 1) / 2 - 1;
+    for v in a.iter_mut().take(nx * ny) {
+        *v = if *v > 0 { *v + d } else { *v - d } / scale;
+    }
+}
+
+/// First quadtree reduction step on bit `bit` of `a` → 4-bit codes in `b`
+/// (cfitsio `qtree_onebit`). `a` is non-negative here, so shifts can't sign-fill.
+fn qtree_onebit(a: &[i32], n: usize, nx: usize, ny: usize, b: &mut [u8], bit: i32) {
+    let b0 = 1i32 << bit;
+    let b1 = b0 << 1;
+    let b2 = b0 << 2;
+    let b3 = b0 << 3;
+    let mut k = 0usize;
+    let mut i = 0usize;
+    while i + 1 < nx {
+        let mut s00 = n * i;
+        let mut s10 = s00 + n;
+        let mut j = 0usize;
+        while j + 1 < ny {
+            b[k] = (((a[s10 + 1] & b0)
+                | (a[s10].wrapping_shl(1) & b1)
+                | (a[s00 + 1].wrapping_shl(2) & b2)
+                | (a[s00].wrapping_shl(3) & b3))
+                >> bit) as u8;
+            k += 1;
+            s00 += 2;
+            s10 += 2;
+            j += 2;
+        }
+        if j < ny {
+            b[k] = (((a[s10].wrapping_shl(1) & b1) | (a[s00].wrapping_shl(3) & b3)) >> bit) as u8;
+            k += 1;
+        }
+        i += 2;
+    }
+    if i < nx {
+        let mut s00 = n * i;
+        let mut j = 0usize;
+        while j + 1 < ny {
+            b[k] =
+                (((a[s00 + 1].wrapping_shl(2) & b2) | (a[s00].wrapping_shl(3) & b3)) >> bit) as u8;
+            k += 1;
+            s00 += 2;
+            j += 2;
+        }
+        if j < ny {
+            b[k] = ((a[s00].wrapping_shl(3) & b3) >> bit) as u8;
+        }
+    }
+}
+
+/// One quadtree reduction step (in place): a 4-bit cell is non-zero where any of
+/// its four children are (cfitsio `qtree_reduce` with `a == b`).
+fn qtree_reduce(a: &mut [u8], n: usize, nx: usize, ny: usize) {
+    let mut k = 0usize;
+    let mut i = 0usize;
+    while i + 1 < nx {
+        let mut s00 = n * i;
+        let mut s10 = s00 + n;
+        let mut j = 0usize;
+        while j + 1 < ny {
+            a[k] = (a[s10 + 1] != 0) as u8
+                | (((a[s10] != 0) as u8) << 1)
+                | (((a[s00 + 1] != 0) as u8) << 2)
+                | (((a[s00] != 0) as u8) << 3);
+            k += 1;
+            s00 += 2;
+            s10 += 2;
+            j += 2;
+        }
+        if j < ny {
+            a[k] = (((a[s10] != 0) as u8) << 1) | (((a[s00] != 0) as u8) << 3);
+            k += 1;
+        }
+        i += 2;
+    }
+    if i < nx {
+        let mut s00 = n * i;
+        let mut j = 0usize;
+        while j + 1 < ny {
+            a[k] = (((a[s00 + 1] != 0) as u8) << 2) | (((a[s00] != 0) as u8) << 3);
+            k += 1;
+            s00 += 2;
+            j += 2;
+        }
+        if j < ny {
+            a[k] = ((a[s00] != 0) as u8) << 3;
+        }
+    }
+}
+
+/// Append Huffman codes for the non-zero cells of `a[0..n]` to `buffer`, packing
+/// 8 bits at a time. Returns `true` if the buffer fills (the quadtree is
+/// expanding the data, so the caller falls back to a direct bitmap).
+#[allow(clippy::too_many_arguments)]
+fn bufcopy(
+    a: &[u8],
+    n: usize,
+    buffer: &mut [u8],
+    b: &mut usize,
+    bmax: usize,
+    bitbuffer: &mut i32,
+    bits_to_go3: &mut i32,
+) -> bool {
+    for &cell in a.iter().take(n) {
+        if cell != 0 {
+            *bitbuffer |= CODE[cell as usize] << *bits_to_go3;
+            *bits_to_go3 += NCODE[cell as usize];
+            if *bits_to_go3 >= 8 {
+                buffer[*b] = (*bitbuffer & 0xFF) as u8;
+                *b += 1;
+                if *b >= bmax {
+                    return true;
+                }
+                *bitbuffer >>= 8;
+                *bits_to_go3 -= 8;
+            }
+        }
+    }
+    false
 }
 
 /// Bit/byte input over the compressed stream (replaces cfitsio's file globals).

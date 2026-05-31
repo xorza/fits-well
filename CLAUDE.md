@@ -23,9 +23,11 @@ core crate is dependency-free by default (the `compression` feature pulls in
 (primary + `IMAGE`/`TABLE`/`BINTABLE` extensions) write; binary-table `P`/`Q` heap
 arrays and per-column `TSCAL`/`TZERO` decode; random groups read; `CONTINUE`,
 `HIERARCH`, and `CHECKSUM`/`DATASUM` (verify + write) are supported. WCS, time
-coordinates are not yet typed. Tiled image **decompression** (`GZIP_1`/`RICE_1`)
-works behind the `compression` feature; the remaining codecs (`HCOMPRESS_1`/
-`PLIO_1`), float quantization, compression *writing*, WCS, and time remain — the
+coordinates are not yet typed. Tiled image **compression and decompression** work
+behind the `compression` feature for all five codecs (`GZIP_1`, `GZIP_2`,
+`RICE_1`, `PLIO_1`, `HCOMPRESS_1` with SMOOTH=0), including quantized-float read
+and write (`NO_DITHER` + `SUBTRACTIVE_DITHER_1`); tiled *table* compression
+(§10.3), HCOMPRESS smoothing, `ZBLANK`, WCS, and time remain — the
 module map below shows what is built versus planned, and
 [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks the path to feature-complete. The design principles there remain the spec; follow them when
 filling the scaffolds in.
@@ -110,7 +112,7 @@ bytes  ──►  block layer   ──►  HDU layer   ──►  header model  
 | `ascii.rs` | `TABLE` (ASCII) read: `TBCOLn`/Fortran `TFORMn` → `AsciiColumn`/`ColumnData` | read done (write in `writer.rs`) |
 | `groups.rs` | random-groups (§6) read: params + arrays, `PSCALn`/`PZEROn` physical | read done (no write — deprecated) |
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
-| `compress.rs` (feature `compression`) | tiled-image decompress: `GZIP_1` (flate2) + `RICE_1`, tile reassembly | `GZIP_1`/`RICE_1` done; HCOMPRESS/PLIO/quantize/write TODO |
+| `compress/` (feature `compression`) | tiled-image (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), tile reassembly + encode | all 5 codecs read+write; float quant `NO_DITHER`+`SUBTRACTIVE_DITHER_1`; HCOMPRESS smoothing / §10.3 tables TODO |
 | `error.rs` | `FitsError` + `Result` | done |
 
 `lib.rs` is the only place that defines the public surface (`pub use`). Card

@@ -177,8 +177,11 @@ impl<W: Write> FitsWriter<W> {
     }
 
     /// Write `image` as a tiled-compressed `BINTABLE` extension (§10.1), using the
-    /// `ZCMPTYPE` codec (`GZIP_1`/`GZIP_2`/`RICE_1`) and the given tile shape (empty
-    /// ⇒ row tiling). Requires the `compression` feature; integer images only.
+    /// `ZCMPTYPE` codec and the given tile shape (empty ⇒ row tiling). Requires the
+    /// `compression` feature. Integer images support `GZIP_1`/`GZIP_2`/`RICE_1`/
+    /// `PLIO_1`/`HCOMPRESS_1`; float images are quantized (`SUBTRACTIVE_DITHER_1`)
+    /// and compressed with `GZIP_1`/`GZIP_2`/`RICE_1`. `HCOMPRESS_1` needs a 2-D
+    /// tile shape, and `PLIO_1` a non-negative (mask) image.
     #[cfg(feature = "compression")]
     pub fn write_compressed_image(
         &mut self,
