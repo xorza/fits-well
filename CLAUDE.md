@@ -32,7 +32,8 @@ work behind
 the `compression` feature: all five image codecs (`GZIP_1`, `GZIP_2`, `RICE_1`,
 `PLIO_1`, `HCOMPRESS_1` with `SMOOTH=1` decode), quantized-float read+write
 (`NO_DITHER`/`SUBTRACTIVE_DITHER_1`/`SUBTRACTIVE_DITHER_2`, `ZBLANK`/NaN), and §10.3
-fixed-width table compression. More WCS projections and typed time remain — the
+fixed-width table compression. Some advanced WCS features (`PVi_m` parameters,
+spectral axes) remain — the
 module map below shows what is built versus planned, and
 [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks the path to feature-complete. The design principles there remain the spec; follow them when
 filling the scaffolds in.

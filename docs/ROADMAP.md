@@ -29,10 +29,11 @@ coordinate systems and the in-standard conventions (`CONTINUE`, `CHECKSUM`/
 - **Random groups** — read (params + arrays, `PSCAL`/`PZERO`). *(§6)*
 - **Conventions** — `CHECKSUM`/`DATASUM` verify + write; `HIERARCH` parse/render. *(§J)*
 
-97 tests, validated against real sample files (incl. astropy-generated compressed
-fixtures). Phases 1–5 are **complete**: full tiled image compression (all five
-codecs, quantized float with both dither methods, `ZBLANK`, HCOMPRESS smoothing)
-and tiled table compression, read and write. WCS and time (6–7) remain.
+140 tests, validated against real sample files (incl. astropy-generated compressed
+fixtures). Phases 1–7 are **complete**: full tiled image compression (all five
+codecs, quantized float with all three dither methods, `ZBLANK`, HCOMPRESS
+smoothing) and tiled table compression, read and write; and the typed WCS (§8)
+and time (§9) layers, both validated against astropy.
 
 ---
 

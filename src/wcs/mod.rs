@@ -14,9 +14,11 @@
 //! `TAN`/`SIN`/`ARC`/`STG`/`ZEA`, cylindrical `CAR`/`CEA`/`MER`/`SFL`, and all-sky
 //! `AIT`/`MOL`, via the general fiducial-point pole computation (so non-zenithal
 //! projections work); non-celestial axes pass through linearly. Reference-frame
-//! transforms live in [`frame`]. All validated against `astropy.wcs` (wcslib).
-//! Not yet: `PVi_m` projection parameters (SIN slant, CEA λ, φ₀/θ₀ overrides) and
-//! the non-linear spectral algorithms (`FREQ`↔`WAVE`↔`VELO`).
+//! transforms live in [`frame`]. `PVi_m` projection parameters are threaded
+//! through (φ₀/θ₀/LONPOLE/LATPOLE overrides; CEA λ); more parameterized
+//! projections build on this. All validated against `astropy.wcs` (wcslib).
+//! Not yet: the perspective/conic/polyconic/quad-cube/HEALPix projection codes
+//! and the non-linear spectral algorithms (`FREQ`↔`WAVE`↔`VELO`).
 
 pub mod frame;
 
@@ -81,17 +83,26 @@ impl Projection {
         )
     }
 
-    /// The fiducial point `(φ₀, θ₀)` in degrees — `(0, 90)` zenithal, `(0, 0)` else.
-    fn reference_point(self) -> (f64, f64) {
+    /// Whether this is a conic projection (`θ₀ = θ_a = PVi_1`).
+    fn is_conic(self) -> bool {
+        false
+    }
+
+    /// The fiducial point `(φ₀, θ₀)` in degrees. Zenithal: `(0, 90)`; conics:
+    /// `(0, θ_a)` where `θ_a = PVi_1`; everything else `(0, 0)`.
+    fn reference_point(self, pv: &[f64]) -> (f64, f64) {
         if self.is_zenithal() {
             (0.0, 90.0)
+        } else if self.is_conic() {
+            (0.0, pv.get(1).copied().unwrap_or(0.0))
         } else {
             (0.0, 0.0)
         }
     }
 
     /// Deproject intermediate world `(x, y)` (deg) to native `(φ, θ)` (deg).
-    fn deproject(self, x: f64, y: f64) -> (f64, f64) {
+    /// `pv` holds the latitude axis's `PVi_0…` projection parameters.
+    fn deproject(self, x: f64, y: f64, pv: &[f64]) -> (f64, f64) {
         if self.is_zenithal() {
             let r = x.hypot(y);
             let phi = if r == 0.0 { 0.0 } else { x.atan2(-y) * R2D };
@@ -109,7 +120,11 @@ impl Projection {
         } else {
             match self {
                 Projection::Car => (x, y),
-                Projection::Cea => (x, (y / R2D).clamp(-1.0, 1.0).asin() * R2D),
+                // CEA: λ = PVi_1 (default 1); θ = asin(λ·y/(180/π)).
+                Projection::Cea => {
+                    let lambda = pv.get(1).filter(|&&v| v != 0.0).copied().unwrap_or(1.0);
+                    (x, (lambda * y / R2D).clamp(-1.0, 1.0).asin() * R2D)
+                }
                 Projection::Mer => (x, (2.0 * (y / R2D).exp().atan()) * R2D - 90.0),
                 Projection::Sfl => (x / (y * D2R).cos(), y),
                 // Hammer–Aitoff inverse (CG 2002 eq. 51).
@@ -136,7 +151,7 @@ impl Projection {
     }
 
     /// Project native `(φ, θ)` (deg) to intermediate world `(x, y)` (deg).
-    fn project(self, phi: f64, theta: f64) -> (f64, f64) {
+    fn project(self, phi: f64, theta: f64, pv: &[f64]) -> (f64, f64) {
         if self.is_zenithal() {
             let zeta = (90.0 - theta) * D2R;
             let r = match self {
@@ -153,7 +168,10 @@ impl Projection {
             let t = theta * D2R;
             match self {
                 Projection::Car => (phi, theta),
-                Projection::Cea => (phi, R2D * t.sin()),
+                Projection::Cea => {
+                    let lambda = pv.get(1).filter(|&&v| v != 0.0).copied().unwrap_or(1.0);
+                    (phi, R2D * t.sin() / lambda)
+                }
                 Projection::Mer => (phi, R2D * ((45.0 + theta / 2.0) * D2R).tan().ln()),
                 Projection::Sfl => (phi * t.cos(), theta),
                 Projection::Ait => {
@@ -207,7 +225,7 @@ pub struct Wcs {
     celestial: Option<Celestial>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Celestial {
     lng: usize,
     lat: usize,
@@ -215,6 +233,8 @@ struct Celestial {
     /// Celestial pole `(α_p, δ_p)` and native longitude of the pole `φ_p`
     /// (LONPOLE), all degrees, computed from the fiducial point.
     pole: (f64, f64, f64),
+    /// Latitude-axis `PVi_0…` projection parameters.
+    pv: Vec<f64>,
 }
 
 impl Wcs {
@@ -290,20 +310,41 @@ impl Wcs {
         })?;
 
         let celestial = find_celestial(&ctype).map(|(lng, lat, proj)| {
-            let (phi0, theta0) = proj.reference_point();
+            // Latitude-axis PVi_0..PVi_20 — the projection parameters.
+            let pv: Vec<f64> = (0..=20)
+                .map(|m| {
+                    header
+                        .get_real(&format!("PV{}_{m}{a}", lat + 1))
+                        .unwrap_or(0.0)
+                })
+                .collect();
+            // Fiducial point: projection default, overridable by PVi_1a/PVi_2a on
+            // the longitude axis (§8.3).
+            let (mut phi0, mut theta0) = proj.reference_point(&pv);
+            if let Some(v) = header.get_real(&format!("PV{}_1{a}", lng + 1)) {
+                phi0 = v;
+            }
+            if let Some(v) = header.get_real(&format!("PV{}_2{a}", lng + 1)) {
+                theta0 = v;
+            }
             let (alpha0, delta0) = (crval[lng], crval[lat]);
-            // LONPOLE default: φ0 if δ0 ≥ θ0, else φ0 + 180° (§8.3).
+            // LONPOLE (= LONPOLEa or PVi_3a): default φ0 if δ0 ≥ θ0, else φ0 + 180°.
             let phip = header
                 .get_real(&format!("LONPOLE{a}"))
+                .or_else(|| header.get_real(&format!("PV{}_3{a}", lng + 1)))
                 .unwrap_or(if delta0 >= theta0 { phi0 } else { phi0 + 180.0 });
-            // LATPOLE default 90° (disambiguates the two δ_p solutions).
-            let thetap = header.get_real(&format!("LATPOLE{a}")).unwrap_or(90.0);
+            // LATPOLE (= LATPOLEa or PVi_4a): default 90°.
+            let thetap = header
+                .get_real(&format!("LATPOLE{a}"))
+                .or_else(|| header.get_real(&format!("PV{}_4{a}", lng + 1)))
+                .unwrap_or(90.0);
             let pole = compute_pole(phi0, theta0, alpha0, delta0, phip, thetap);
             Celestial {
                 lng,
                 lat,
                 proj,
                 pole,
+                pv,
             }
         });
 
@@ -330,8 +371,8 @@ impl Wcs {
         for i in 0..self.naxis {
             world[i] = self.crval[i] + inter[i];
         }
-        if let Some(c) = self.celestial {
-            let (phi, theta) = c.proj.deproject(inter[c.lng], inter[c.lat]);
+        if let Some(c) = &self.celestial {
+            let (phi, theta) = c.proj.deproject(inter[c.lng], inter[c.lat], &c.pv);
             let (ra, dec) = native_to_celestial(c.pole, phi, theta);
             world[c.lng] = ra;
             world[c.lat] = dec;
@@ -348,9 +389,9 @@ impl Wcs {
         for i in 0..self.naxis {
             inter[i] = world[i] - self.crval[i];
         }
-        if let Some(c) = self.celestial {
+        if let Some(c) = &self.celestial {
             let (phi, theta) = celestial_to_native(c.pole, world[c.lng], world[c.lat]);
-            let (x, y) = c.proj.project(phi, theta);
+            let (x, y) = c.proj.project(phi, theta, &c.pv);
             inter[c.lng] = x;
             inter[c.lat] = y;
         }

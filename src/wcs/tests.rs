@@ -245,6 +245,31 @@ fn allsky_projections_match_astropy() {
     }
 }
 
+#[test]
+fn cea_lambda_pv_matches_astropy() {
+    use crate::header::Header;
+    // CEA with λ = PV2_1 = 0.5. astropy golden.
+    let mut h = Header::new();
+    h.set("NAXIS", 2);
+    h.set("CTYPE1", "RA---CEA").set("CTYPE2", "DEC--CEA");
+    h.set("CRPIX1", 50.0).set("CRPIX2", 50.0);
+    h.set("CRVAL1", 45.0).set("CRVAL2", 30.0);
+    h.set("CDELT1", -0.05).set("CDELT2", 0.05);
+    h.set("PV2_1", 0.5);
+    let w = Wcs::from_header(&h, None).unwrap();
+    let golden: &[(f64, f64, f64, f64)] = &[
+        (20.0, 70.0, 46.7406870828, 30.4886140110),
+        (80.0, 30.0, 43.2767613377, 29.4887155113),
+    ];
+    for &(px, py, ra, dec) in golden {
+        let out = w.pixel_to_world(&[px, py]);
+        assert!(
+            (out[0] - ra).abs() < 1e-8 && (out[1] - dec).abs() < 1e-8,
+            "CEA λ at ({px},{py}): got {out:?}, want ({ra},{dec})"
+        );
+    }
+}
+
 /// Every projection's deprojection inverts its forward projection.
 #[test]
 fn projections_round_trip() {
@@ -253,8 +278,8 @@ fn projections_round_trip() {
         // Positive native latitudes, away from the poles: in-domain for both the
         // zenithal (θ > 0 only) and cylindrical families.
         for &(phi, theta) in &[(30.0_f64, 70.0_f64), (-60.0, 40.0), (20.0, 25.0)] {
-            let (x, y) = proj.project(phi, theta);
-            let (p2, t2) = proj.deproject(x, y);
+            let (x, y) = proj.project(phi, theta, &[]);
+            let (p2, t2) = proj.deproject(x, y, &[]);
             assert!(
                 norm180(p2 - phi).abs() < 1e-9 && (t2 - theta).abs() < 1e-9,
                 "{proj:?}: ({phi},{theta}) → ({x},{y}) → ({p2},{t2})"
