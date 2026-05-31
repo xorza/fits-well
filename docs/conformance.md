@@ -592,17 +592,18 @@ Coverage gaps:
 ## §8 — World Coordinate Systems (`docs/refs/07-wcs-time-compression.md` §7.1)
 
 Audited code: `wcs/mod.rs` (`Wcs`, `Projection`, the pixel↔world pipeline,
-`compute_pole`, matrix inversion) and `wcs/frame.rs` (`Frame`, precession,
-frame bias, Galactic + FK4 rotations), behind the `wcs` feature. (Time §9 and
+`compute_pole`, matrix inversion), behind the `wcs` feature. (Time §9 and
 compression §10 from the same reference file are audited separately.)
 
 The reference sets a deliberately low bar — *"a v1 can parse/preserve the
 keywords as ordinary header records and add typed support incrementally"* — which
 the ordered header model already satisfies for lossless round-trip. The actual
 implementation goes far beyond that: a typed pixel↔world transform for **23
-projections (with full `PVi_m` parameters) plus four reference frames (ICRS, FK5
-at any equinox, Galactic, and FK4 B1950), all validated against `astropy.wcs`
-(wcslib) / `SkyCoord` golden values**. The gaps below are unimplemented advanced
+projections with full `PVi_m` parameters, validated against `astropy.wcs` (wcslib)
+golden values**, yielding coordinates in the frame the file declares
+(`RADESYS`/`EQUINOX`). Converting *between* reference frames (FK4↔FK5↔Galactic↔ICRS)
+is astrometry beyond the FITS standard and is **deliberately out of scope** —
+delegate it to astropy `SkyCoord` / ERFA. The gaps below are unimplemented advanced
 features (most flagged TODO in the module doc), not defects in what exists.
 
 ### Conformance matrix
@@ -618,20 +619,18 @@ features (most flagged TODO in the module doc), not defects in what exists.
 | `CROTAi` legacy (only without `PC`) | `wcs/mod.rs:276` | ✅ |
 | `LONPOLEa`/`LATPOLEa` + defaults | `compute_pole` (`wcs/mod.rs:415`) | ✅ |
 | Pixel↔world pipeline + matrix inverse | `pixel_to_world` (`wcs/mod.rs:323`) / `world_to_pixel` (`:344`) | ✅ |
-| Zenithal `TAN`/`SIN`/`ARC`/`STG`/`ZEA`/`ZPN`/`AIR` | `Projection` (`wcs/mod.rs:35`) | ✅ |
-| Zenithal-perspective `AZP`/`SZP` | `Projection` (`wcs/mod.rs:76`) | ✅ |
+| Zenithal `TAN`/`SIN`/`ARC`/`STG`/`ZEA`/`ZPN`/`AIR` | `Projection` (`wcs/mod.rs:37`) | ✅ |
+| Zenithal-perspective `AZP`/`SZP` | `Projection` (`wcs/mod.rs:78`) | ✅ |
 | Cylindrical `CAR`/`CEA`/`MER`/`SFL`/`CYP` | `Projection` | ✅ |
-| All-sky pseudo-cyl. `AIT`/`MOL`/`PAR` | `Projection` (`wcs/mod.rs:54`) | ✅ |
-| Conic `COP`/`COE`/`COD`/`COO` + pseudoconic `BON` + polyconic `PCO` | `Projection` (`wcs/mod.rs:64`) | ✅ |
-| Quad-cube `TSC`/`CSC`/`QSC`, HEALPix `HPX`/`XPH` | `unsupported_celestial_code` (`wcs/mod.rs:809`) | 🟡 clean error |
-| `RADESYSa`/`EQUINOXa`; ICRS/FK5/Galactic | `frame.rs` (`matrix`, `wcs/frame.rs:100`) | ✅ |
-| `FK4`/`FK4-NO-E` **B1950** (frame rotation + E-terms) | `to_icrs_vec` (`frame.rs:68`), `ETERMS`/`FK4_TO_FK5` (`:112`,`:132`) | ✅ B1950 / 🟡 other equinoxes error |
+| All-sky pseudo-cyl. `AIT`/`MOL`/`PAR` | `Projection` (`wcs/mod.rs:56`) | ✅ |
+| Conic `COP`/`COE`/`COD`/`COO` + pseudoconic `BON` + polyconic `PCO` | `Projection` (`wcs/mod.rs:66`) | ✅ |
+| Quad-cube `TSC`/`CSC`/`QSC`, HEALPix `HPX`/`XPH` | `unsupported_celestial_code` (`wcs/mod.rs:811`) | 🟡 clean error |
+| `RADESYSa`/`EQUINOXa` parse; inter-frame conversion | preserved as header keywords; no transform | ⚪ out of scope (astrometry) |
 | Alternate WCS `a ∈ A–Z` | `alt` param | ✅ (untested) |
 | `PVi_ma` projection params (`PSi_ma` unused) | threaded through project/deproject | ✅ |
 | `CUNITia` (esp. celestial = degrees) | not read; degrees assumed | 🟡 ignored |
 | Spectral WCS §8.4 (`FREQ-F2W`, …) | non-celestial ⇒ linear only | 🟡 not implemented |
 | BINTABLE column WCS (`TCTYPn`/`iCTYPn`, Table 22) | — | 🟡 not implemented |
-| `GAPPT` reference frame | unrecognized → equinox default | 🟡 not implemented |
 | `WCSNAMEa`/`CNAMEia`, `CRDERia`/`CSYERia` | — | 🟢 not exposed |
 | Conventional `'STOKES'`/`'COMPLEX'` | linear pass-through | ✅ (degenerate) |
 
@@ -640,7 +639,7 @@ features (most flagged TODO in the module doc), not defects in what exists.
 1. 🟡 **Quad-cube and HEALPix projections not implemented.** `TSC`/`CSC`/`QSC`
    (quad-cube) and `HPX`/`XPH` (HEALPix) are recognized as celestial codes but
    unimplemented; `from_header` returns `FitsError::UnsupportedProjection`
-   (`unsupported_celestial_code`, `wcs/mod.rs:809`) rather than silently
+   (`unsupported_celestial_code`, `wcs/mod.rs:811`) rather than silently
    mis-transforming. `PVi_m` parameters *are* supported across all 23 implemented
    projections (slant `SIN`, `CEA` λ, `ZPN`, `AZP`/`SZP`/`CYP`/conic params, and
    `φ₀`/`θ₀`/LONPOLE/LATPOLE overrides), each astropy-validated.
@@ -660,32 +659,22 @@ features (most flagged TODO in the module doc), not defects in what exists.
    keywords are parsed; the column-indexed forms (`TCTYPn`, `TCRPXn`, `iCTYPn`, …)
    have no support.
 
-5. 🟡 **FK4 is supported only at B1950; `GAPPT` is unrecognized.** FK4 (and
-   `FK4-NO-E`) at the B1950 equinox is fully transformed — frame rotation
-   (`FK4_TO_FK5`, `frame.rs:132`) plus the E-terms of aberration
-   (`remove_eterms`/`add_eterms`, `frame.rs:115`,`:121`) — and astropy-checked.
-   FK4 at *any other* equinox returns `FitsError::UnsupportedFrame`
-   (`frame.rs:71`,`:89`; it would need Newcomb pre-precession to B1950 first).
-   `GAPPT` (geocentric apparent place) is not recognized and falls through to the
-   equinox-based default frame.
+5. ⚪ **Reference-frame conversion is out of scope (deliberate).** `RADESYS`/
+   `EQUINOX` are parsed and preserved as header keywords, and pixel↔world returns
+   coordinates in the file's *declared* frame, but transforming between frames
+   (FK4↔FK5↔Galactic↔ICRS — precession, E-terms of aberration, the ICRS↔FK5 frame
+   bias) is astrometry outside the FITS standard; delegate it to astropy
+   `SkyCoord` / ERFA. `GAPPT` (geocentric apparent place) is likewise not
+   interpreted.
 
 6. 🟢 **Lenient on illegal combinations / unexposed metadata.** `PC`+`CD` both
    present is not rejected (`CD` wins); `CROTA`+`PC` is not rejected (`PC` wins);
-   `WCSNAMEa`/`CNAMEia` and `CRDERia`/`CSYERia` are not exposed. (The ICRS↔FK5
-   ~25 mas frame bias, formerly omitted, is now applied — `FK5_FROM_ICRS`,
-   `frame.rs:171` — so FK5 J2000 matches astropy to ~1e-8°.)
-
-7. 🟢 **FK5 uses the FITS-WCS IAU-1976 precession, not astropy's IAU-2006.**
-   `precession_fk5` (`frame.rs:142`) is the Lieske IAU-1976 model (bit-identical
-   to `erfa.pmat76`, the FITS-WCS convention); astropy applies the newer IAU-2006
-   model to FK5, so the two diverge by ~tens of mas at equinoxes far from J2000
-   (~68 mas at J1975). This is a deliberate, documented standard-conformance
-   choice, not a defect — and the J2000 frame bias is exact either way.
+   `WCSNAMEa`/`CNAMEia` and `CRDERia`/`CSYERia` are not exposed.
 
 ### Test coverage
 
-Strong and unusually rigorous — golden values come from `astropy.wcs` / astropy
-`SkyCoord`, so the formulas (not merely forward/inverse self-consistency) are
+Strong and unusually rigorous — golden values come from `astropy.wcs` (wcslib),
+so the formulas (not merely forward/inverse self-consistency) are
 checked (`wcs/tests.rs`): `parses_tan_header` (`:24`) + `pixel_to_world_matches_astropy`
 (`:36`, six TAN points to 1e-9); `world_to_pixel_inverts_pixel_to_world` (`:54`);
 `reference_pixel_maps_to_crval` (`:71`); `sin_projection_matches_astropy` (`:168`);
@@ -697,12 +686,7 @@ goldens); `cea_lambda_pv_matches_astropy` (the `CEA` `PV2_1` λ parameter);
 `AZP`/`SZP`/`CYP`/`PAR`/`COP`/`COE`/`COD`/`COO`/`BON`/`PCO`);
 `unimplemented_projection_codes_error_cleanly` (quad-cube/HEALPix codes →
 `UnsupportedProjection`); `projections_round_trip` (every implemented projection
-project→deproject); a standalone `matrix_inverse_is_correct`;
-and the frame block — `frame_transforms_match_astropy` (`:79`) now pins ICRS→FK5(J2000),
-ICRS→FK5(J1975), and ICRS→Galactic to **1e-8°** (the J2000 frame bias and exact
-Galactic matrix), adds an ICRS→FK4(B1950) golden, and asserts FK4 at J1975 →
-`UnsupportedFrame`; plus `frame_round_trips` (`:124`) and `frame_parses_from_header`
-(`:135`).
+project→deproject); and a standalone `matrix_inverse_is_correct`.
 
 Coverage gaps:
 
@@ -713,8 +697,7 @@ Coverage gaps:
   `CDELT` are exercised).
 - No singular-matrix → `InvalidValue` error test, no `WCSAXES`-vs-`NAXIS` default
   test, and no all-linear (no celestial pair) `Wcs` test.
-- `CUNIT`, `PVi_m`, spectral, and table-WCS paths are untested (unimplemented);
-  the `FK4-NO-E` (E-term-free) variant is not separately exercised from `FK4`.
+- `CUNIT`, spectral, and table-WCS paths are untested (unimplemented).
 
 ---
 

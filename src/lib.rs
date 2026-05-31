@@ -63,8 +63,6 @@ pub use table::{BinTable, Column, ColumnData, Tform, TformKind};
 #[cfg(feature = "time")]
 pub use time::{Datetime, Epoch, FitsTime, TimeScale};
 #[cfg(feature = "wcs")]
-pub use wcs::frame::Frame;
-#[cfg(feature = "wcs")]
 pub use wcs::{Projection, Wcs};
 pub use writer::{AsciiWriteColumn, FitsWriter, WriteColumn};
 

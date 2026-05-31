@@ -15,12 +15,14 @@
 //! the general fiducial-point pole computation: zenithal `TAN`/`SIN`/`ARC`/`STG`/
 //! `ZEA`/`ZPN`/`AIR`, zenithal-perspective `AZP`/`SZP`, cylindrical `CAR`/`CEA`/
 //! `MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic `COP`/`COE`/`COD`/`COO`,
-//! pseudoconic `BON`, and polyconic `PCO`. Reference-frame transforms live in
-//! [`frame`]. All validated against `astropy.wcs` (wcslib). Unimplemented codes
-//! error cleanly via [`FitsError::UnsupportedProjection`]. Not yet: the quad-cube
-//! `TSC`/`CSC`/`QSC`, HEALPix `HPX`/`XPH`, and the non-linear spectral algorithms.
-
-pub mod frame;
+//! pseudoconic `BON`, and polyconic `PCO`. All validated against `astropy.wcs`
+//! (wcslib). Unimplemented codes error cleanly via
+//! [`FitsError::UnsupportedProjection`]. Not yet: the quad-cube `TSC`/`CSC`/`QSC`,
+//! HEALPix `HPX`/`XPH`, and the non-linear spectral algorithms.
+//!
+//! Pixel↔world yields celestial coordinates in the frame the file declares
+//! (`RADESYS`/`EQUINOX`); converting *between* reference frames is astrometry
+//! beyond the FITS standard and is intentionally out of scope.
 
 use crate::error::FitsError;
 use crate::error::Result;

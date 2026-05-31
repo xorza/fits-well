@@ -27,8 +27,8 @@ arrays and per-column `TSCAL`/`TZERO` decode; random groups read; `CONTINUE`,
 `TAN`/`SIN`/`ARC`/`STG`/`ZEA`/`ZPN`/`AIR`, zenithal-perspective `AZP`/`SZP`,
 cylindrical `CAR`/`CEA`/`MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic
 `COP`/`COE`/`COD`/`COO`, pseudoconic `BON`, polyconic `PCO` — with `PC`/`CD`/`CROTA`
-and full `PVi_m` parameters, plus ICRS/FK5/Galactic/FK4-B1950 frame transforms, and
-a typed **time** layer (`time` feature)
+and full `PVi_m` parameters, yielding coordinates in the frame the file declares
+(`RADESYS`/`EQUINOX`). A typed **time** layer (`time` feature)
 handles ISO-8601/JD/MJD, epochs, `UTC`…`TCB`/`GPS`/UT1 scale conversions, and time
 WCS axes — both validated against astropy. Tiled **image and table** compression
 work behind
@@ -36,10 +36,16 @@ the `compression` feature: all five image codecs (`GZIP_1`, `GZIP_2`, `RICE_1`,
 `PLIO_1`, `HCOMPRESS_1` with `SMOOTH=1` decode), quantized-float read+write
 (`NO_DITHER`/`SUBTRACTIVE_DITHER_1`/`SUBTRACTIVE_DITHER_2`, `ZBLANK`/NaN), and §10.3
 fixed-width table compression. The remaining WCS frontier (quad-cube/HEALPix
-projections, non-linear spectral axes, FK4 at non-B1950 equinoxes — all of which
-error cleanly today) is charted in the module map below, which shows what is built
-versus planned. The design principles in this file remain the spec; follow them
-when filling the scaffolds in.
+projections, non-linear spectral axes — both of which error cleanly today) is
+charted in the module map below, which shows what is built versus planned. The
+design principles in this file remain the spec; follow them when filling the
+scaffolds in.
+
+**Out of scope (deliberately):** converting *between* celestial reference frames
+(FK4↔FK5↔Galactic↔ICRS — precession, E-terms, frame bias) is astrometry, not part
+of the FITS standard. The WCS layer parses `RADESYS`/`EQUINOX` and returns world
+coordinates in the file's own declared frame; transforming them into a different
+frame is the job of an astrometry library (astropy `SkyCoord`, ERFA), not this one.
 
 ## Commands
 
@@ -134,7 +140,7 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `groups/` | random-groups (§6) read: params + arrays, `PSCALn`/`PZEROn` physical | read done (no write — deprecated) |
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
 | `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3), reassembly + encode | all 5 image codecs read+write; float quant all 3 dither methods + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode + lossy `SCALE>0` write; fixed-width table compression read+write |
-| `wcs/` (feature `wcs`) | typed WCS: keyword parse, linear transform (PC/CD/CROTA + `PVi_m` + inverse), 23 projections (zenithal + perspective AZP/SZP + cylindrical + all-sky + conic + BON + PCO) via general pole computation, `pixel_to_world`/`world_to_pixel`; `frame.rs` ICRS/FK5/Galactic/FK4-B1950 transforms; unimplemented codes → `UnsupportedProjection` | v2 done (quad-cube/HEALPix, spectral, FK4 non-B1950 TODO) |
+| `wcs/` (feature `wcs`) | typed WCS: keyword parse, linear transform (PC/CD/CROTA + `PVi_m` + inverse), 23 projections (zenithal + perspective AZP/SZP + cylindrical + all-sky + conic + BON + PCO) via general pole computation, `pixel_to_world`/`world_to_pixel`; unimplemented codes → `UnsupportedProjection` | v2 done (quad-cube/HEALPix, spectral TODO; inter-frame transforms out of scope) |
 | `time/` (feature `time`) | typed time (§9): `Datetime` (ISO-8601↔JD/MJD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), `FitsTime` header view + time WCS axis | v2 done |
 | `error.rs` | `FitsError` + `Result` | done |
 
