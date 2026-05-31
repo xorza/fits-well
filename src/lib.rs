@@ -36,6 +36,7 @@ mod error;
 mod hdu;
 mod header;
 mod reader;
+mod table;
 mod writer;
 
 pub use bitpix::Bitpix;
@@ -46,6 +47,7 @@ pub use header::Header;
 pub use header::card::{Card, CardKind};
 pub use header::value::Value;
 pub use reader::{DataUnit, FitsReader, Hdu};
+pub use table::{BinTable, Column, ColumnData, Tform, TformKind};
 pub use writer::FitsWriter;
 
 pub use block::{BLOCK_SIZE, CARD_SIZE, CARDS_PER_BLOCK, SPACE_FILL, ZERO_FILL};

@@ -13,6 +13,7 @@ use crate::error::Result;
 use crate::hdu::HduKind;
 use crate::hdu::data_extent;
 use crate::header::Header;
+use crate::table::BinTable;
 
 /// One Header/Data Unit located by the reader.
 ///
@@ -127,6 +128,18 @@ impl<R: Read + Seek> FitsReader<R> {
             samples,
             scaling,
         })
+    }
+
+    /// Read a `BINTABLE` extension and parse its column structure. Decode
+    /// individual columns lazily with [`BinTable::read_column`]. Errors with
+    /// [`FitsError::NotABinTable`] for any other HDU kind.
+    pub fn read_table(&mut self, index: usize) -> Result<BinTable> {
+        let unit = self.read_data_raw(index)?; // also bounds-checks the index
+        let hdu = &self.hdus[index];
+        if hdu.kind != HduKind::BinTable {
+            return Err(FitsError::NotABinTable);
+        }
+        BinTable::from_data(&hdu.header, unit.bytes)
     }
 }
 

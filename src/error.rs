@@ -41,6 +41,27 @@ pub enum FitsError {
     /// `read_image` was called on an HDU that is not an image array (a table,
     /// random-groups, or unmodelled extension).
     NotAnImage,
+    /// `read_table` was called on an HDU that is not a binary table.
+    NotABinTable,
+    /// A `TFORMn` value could not be parsed as a binary-table column format.
+    InvalidTform {
+        tform: String,
+    },
+    /// A column format is valid but not yet decodable (the `P`/`Q`
+    /// variable-length-array descriptors).
+    UnsupportedColumn {
+        tform: String,
+    },
+    /// A column index named a field beyond the table's column list.
+    ColumnIndexOutOfBounds {
+        index: usize,
+        len: usize,
+    },
+    /// The summed column widths disagree with the declared row width (`NAXIS1`).
+    RowWidthMismatch {
+        computed: usize,
+        declared: usize,
+    },
 }
 
 impl fmt::Display for FitsError {
@@ -65,6 +86,24 @@ impl fmt::Display for FitsError {
                 write!(f, "HDU index {index} out of bounds (file has {len} HDUs)")
             }
             FitsError::NotAnImage => write!(f, "HDU is not an image array"),
+            FitsError::NotABinTable => write!(f, "HDU is not a binary table"),
+            FitsError::InvalidTform { tform } => write!(f, "invalid column format {tform:?}"),
+            FitsError::UnsupportedColumn { tform } => {
+                write!(
+                    f,
+                    "column format {tform:?} (variable-length array) is not yet supported"
+                )
+            }
+            FitsError::ColumnIndexOutOfBounds { index, len } => {
+                write!(
+                    f,
+                    "column index {index} out of bounds (table has {len} columns)"
+                )
+            }
+            FitsError::RowWidthMismatch { computed, declared } => write!(
+                f,
+                "column widths sum to {computed} bytes but NAXIS1 declares {declared}"
+            ),
         }
     }
 }
