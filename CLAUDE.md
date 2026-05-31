@@ -18,8 +18,8 @@ The structural spine is built and tested: the 2880-byte block layer, an ordered
 header model (with `CONTINUE` long-string read/write), HDU classification and
 boundary sizing, a lazy seeking reader, and a header / raw-data-unit writer. The
 core crate is dependency-free. Typed image read/write is done (decode/encode +
-`BSCALE`/`BZERO`), and binary-table fixed-width columns are read; the table
-heap/variable-length arrays + per-column scaling, WCS, and tiled compression are
+`BSCALE`/`BZERO`), and binary tables are read (fixed-width columns, `TSCAL`/`TZERO`
+scaling, and `P`/`Q` heap arrays); table *writing*, WCS, and tiled compression are
 scaffolded — the module map below shows what is built versus planned. The design principles there remain the spec; follow them when
 filling the scaffolds in.
 
@@ -97,7 +97,7 @@ bytes  ──►  block layer   ──►  HDU layer   ──►  header model  
 | `reader.rs` | lazy seeking HDU scan; `DataUnit` fetch, `read_image`, `read_table` | done |
 | `writer.rs` | header + data-unit serialization; `write_image` (primary array) | image write done; tables/extension write TODO |
 | `data.rs` | typed `Image`/`ImageData`, big-endian decode+encode, `BSCALE`/`BZERO` physical plane | image read+write done; SIMD/parallel TODO |
-| `table.rs` | `BINTABLE` parsing (`Tform`/`Column`) + fixed-width column decode (`ColumnData`) | fixed-width read done; heap/VLA + `TSCAL`/`TZERO` TODO |
+| `table.rs` | `BINTABLE` parsing (`Tform`/`Column`); fixed-width decode (`ColumnData`), `TSCAL`/`TZERO` physical plane, `P`/`Q` heap VLAs | read done; table write TODO |
 | `error.rs` | `FitsError` + `Result` | done |
 
 `lib.rs` is the only place that defines the public surface (`pub use`). Card

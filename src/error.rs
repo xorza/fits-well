@@ -47,10 +47,19 @@ pub enum FitsError {
     InvalidTform {
         tform: String,
     },
-    /// A column format is valid but not yet decodable (the `P`/`Q`
-    /// variable-length-array descriptors).
-    UnsupportedColumn {
-        tform: String,
+    /// `read_column` was called on a variable-length-array (`P`/`Q`) column;
+    /// use `read_vla_column` instead.
+    VariableLengthColumn {
+        code: char,
+    },
+    /// `read_vla_column` was called on a fixed-width column.
+    NotAVla {
+        code: char,
+    },
+    /// `read_column_physical` was called on a column with no numeric physical
+    /// value (`A`/`L`/`X`/`C`/`M`).
+    NonNumericColumn {
+        code: char,
     },
     /// A column index named a field beyond the table's column list.
     ColumnIndexOutOfBounds {
@@ -88,11 +97,15 @@ impl fmt::Display for FitsError {
             FitsError::NotAnImage => write!(f, "HDU is not an image array"),
             FitsError::NotABinTable => write!(f, "HDU is not a binary table"),
             FitsError::InvalidTform { tform } => write!(f, "invalid column format {tform:?}"),
-            FitsError::UnsupportedColumn { tform } => {
-                write!(
-                    f,
-                    "column format {tform:?} (variable-length array) is not yet supported"
-                )
+            FitsError::VariableLengthColumn { code } => write!(
+                f,
+                "column format '{code}' is a variable-length array; use read_vla_column"
+            ),
+            FitsError::NotAVla { code } => {
+                write!(f, "column format '{code}' is not a variable-length array")
+            }
+            FitsError::NonNumericColumn { code } => {
+                write!(f, "column format '{code}' has no numeric physical value")
             }
             FitsError::ColumnIndexOutOfBounds { index, len } => {
                 write!(
