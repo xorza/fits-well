@@ -302,8 +302,15 @@ fn parse_string(token: &str, raw: &[u8; CARD_SIZE]) -> Result<String> {
             }
         }
     }
+    let had_content = !out.is_empty();
     while out.ends_with(' ') {
         out.pop();
+    }
+    // §4.2.1.1: trailing blanks are insignificant, but an all-blank (non-null)
+    // string keeps one significant space — that single space is what distinguishes
+    // `'   '` (empty string, length 1) from `''` (null string, length 0).
+    if out.is_empty() && had_content {
+        out.push(' ');
     }
     Ok(out)
 }
@@ -457,12 +464,20 @@ fn format_value(value: &Value) -> String {
 
 /// Render a real so it always reads back as [`Value::Real`] (never a bare integer).
 fn format_real(r: f64) -> String {
-    let s = format!("{r}");
-    if looks_real(&s) || !r.is_finite() {
-        s
-    } else {
-        format!("{s}.0")
+    if !r.is_finite() {
+        return format!("{r}");
     }
+    // Rust's `Display` never uses exponent notation, so an extreme magnitude (e.g.
+    // `1e300`) balloons to hundreds of digits and overflows the value field. Fall
+    // back to the §4.2.4 uppercase-`E` exponent form, which always fits, when the
+    // plain decimal grows long.
+    let plain = format!("{r}");
+    let s = if plain.len() > 20 && format!("{r:E}").len() < plain.len() {
+        format!("{r:E}")
+    } else {
+        plain
+    };
+    if looks_real(&s) { s } else { format!("{s}.0") }
 }
 
 /// Pad a string value to the 8-character minimum many writers emit; the extra

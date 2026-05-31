@@ -68,6 +68,43 @@ fn encode_is_the_inverse_of_decode() {
 }
 
 #[test]
+fn float_inf_and_nan_payloads_round_trip_bit_for_bit() {
+    // §3.4 / Appendix E mandate preserving ±Inf and signaling/quiet NaN payloads
+    // without canonicalizing. PartialEq can't compare NaN, so check raw bits.
+    let f32_bits: [u32; 5] = [
+        0x7F80_0000, // +Inf
+        0xFF80_0000, // -Inf
+        0x7FC0_0000, // quiet NaN
+        0x7F80_0001, // signaling NaN, payload 1
+        0x7FAB_CDEF, // NaN with a payload
+    ];
+    let f32s: Vec<f32> = f32_bits.iter().map(|&b| f32::from_bits(b)).collect();
+    let decoded = ImageData::decode(&ImageData::F32(f32s).encode(), Bitpix::F32);
+    let ImageData::F32(out) = decoded else {
+        panic!("expected F32")
+    };
+    for (i, (&b, o)) in f32_bits.iter().zip(&out).enumerate() {
+        assert_eq!(o.to_bits(), b, "f32 pattern {i}");
+    }
+
+    let f64_bits: [u64; 5] = [
+        0x7FF0_0000_0000_0000, // +Inf
+        0xFFF0_0000_0000_0000, // -Inf
+        0x7FF8_0000_0000_0000, // quiet NaN
+        0x7FF0_0000_0000_0001, // signaling NaN, payload 1
+        0x7FF0_0000_DEAD_BEEF, // NaN with a payload
+    ];
+    let f64s: Vec<f64> = f64_bits.iter().map(|&b| f64::from_bits(b)).collect();
+    let decoded = ImageData::decode(&ImageData::F64(f64s).encode(), Bitpix::F64);
+    let ImageData::F64(out) = decoded else {
+        panic!("expected F64")
+    };
+    for (i, (&b, o)) in f64_bits.iter().zip(&out).enumerate() {
+        assert_eq!(o.to_bits(), b, "f64 pattern {i}");
+    }
+}
+
+#[test]
 fn physical_applies_scaling_and_maps_blank_to_nan() {
     // 10 -> 5 + 2·10 = 25 ; 20 == BLANK -> NaN ; -5 -> 5 + 2·-5 = -5
     let img = image(

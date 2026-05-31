@@ -56,6 +56,81 @@ fn reads_dataless_primary_then_bintable() {
 }
 
 #[test]
+fn trailing_special_records_and_partial_blocks_are_ignored() {
+    use crate::block::BLOCK_SIZE;
+    use std::io::Cursor;
+    // A valid single-HDU file, then §3.5 special records / §3.6 trailing fill and
+    // partial blocks appended — none carrying an `END`. The reader must still find
+    // exactly the one real HDU and not error on the trailing bytes.
+    let mut bytes = std::fs::read("tests/data/fits/UITfuv2582gc.fits").unwrap();
+    bytes.extend(std::iter::repeat_n(0u8, BLOCK_SIZE)); // trailing all-zero fill block
+    bytes.extend(std::iter::repeat_n(b'x', BLOCK_SIZE)); // a special record (no END)
+    bytes.extend_from_slice(b"a truncated tail"); // sub-block partial remnant
+    let f = FitsReader::open(Cursor::new(bytes)).unwrap();
+    assert_eq!(f.hdus.len(), 1);
+    assert_eq!(f.hdus[0].kind, HduKind::Primary);
+}
+
+/// Assemble an in-memory FITS file from card strings + a raw data unit, both
+/// block-padded (header with spaces, data with NUL).
+fn fits_file(cards: &[&str], data: &[u8]) -> Vec<u8> {
+    use crate::block::BLOCK_SIZE;
+    let mut buf = Vec::new();
+    let mut push_card = |text: &str| {
+        let mut card = [b' '; 80];
+        card[..text.len()].copy_from_slice(text.as_bytes());
+        buf.extend_from_slice(&card);
+    };
+    for c in cards {
+        push_card(c);
+    }
+    push_card("END");
+    while buf.len() % BLOCK_SIZE != 0 {
+        buf.push(b' ');
+    }
+    buf.extend_from_slice(data);
+    while buf.len() % BLOCK_SIZE != 0 {
+        buf.push(0);
+    }
+    buf
+}
+
+#[test]
+fn malformed_image_pcount_is_rejected_not_panicked() {
+    use std::io::Cursor;
+    // A primary array with PCOUNT=5 is non-conforming (§4.3). `data_extent` sizes
+    // (10+5) bytes, so the old `assert_eq!` would panic; now it is a clean error.
+    let bytes = fits_file(
+        &[
+            "SIMPLE  = T",
+            "BITPIX  = 8",
+            "NAXIS   = 1",
+            "NAXIS1  = 10",
+            "PCOUNT  = 5",
+            "GCOUNT  = 1",
+        ],
+        &[0u8; 15],
+    );
+    let mut r = FitsReader::open(Cursor::new(bytes)).unwrap();
+    assert!(matches!(
+        r.read_image(0),
+        Err(FitsError::WrongValueType { name: "PCOUNT" })
+    ));
+}
+
+#[test]
+fn content_before_any_valid_hdu_is_rejected() {
+    use crate::block::BLOCK_SIZE;
+    use std::io::Cursor;
+    // Garbage with no `END` and no preceding HDU is not a FITS file.
+    let bytes = vec![b'x'; BLOCK_SIZE + 17];
+    assert!(matches!(
+        FitsReader::open(Cursor::new(bytes)),
+        Err(FitsError::UnexpectedEof)
+    ));
+}
+
+#[test]
 fn last_data_unit_ends_exactly_at_end_of_file() {
     for name in [
         "UITfuv2582gc.fits",

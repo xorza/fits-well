@@ -71,20 +71,30 @@ impl<R: Read + Seek> FitsReader<R> {
     /// range of each data unit.
     pub fn open(mut source: R) -> Result<Self> {
         let mut hdus = Vec::new();
-        while let Some(header_bytes) = read_header_unit(&mut source)? {
-            let header = Header::parse(&header_bytes)?;
-            let kind = HduKind::classify(&header);
-            let data_offset = source.stream_position()?;
-            let extent = data_extent(&header)?;
-            source.seek(SeekFrom::Current(extent.padded_bytes as i64))?;
-            hdus.push(Hdu {
-                header,
-                kind,
-                header_bytes,
-                data_offset,
-                data_bytes: extent.data_bytes,
-                data_len: extent.padded_bytes,
-            });
+        loop {
+            match read_header_unit(&mut source)? {
+                NextHeader::Found(header_bytes) => {
+                    let header = Header::parse(&header_bytes)?;
+                    let kind = HduKind::classify(&header);
+                    let data_offset = source.stream_position()?;
+                    let extent = data_extent(&header)?;
+                    source.seek(SeekFrom::Current(extent.padded_bytes as i64))?;
+                    hdus.push(Hdu {
+                        header,
+                        kind,
+                        header_bytes,
+                        data_offset,
+                        data_bytes: extent.data_bytes,
+                        data_len: extent.padded_bytes,
+                    });
+                }
+                NextHeader::End => break,
+                // §3.5/§3.6: special records and a trailing partial / fill block may
+                // follow the last HDU; a reader disregards them. But the same shape
+                // *before* any valid HDU means there is no conforming primary.
+                NextHeader::Trailing if hdus.is_empty() => return Err(FitsError::UnexpectedEof),
+                NextHeader::Trailing => break,
+            }
         }
         Ok(FitsReader { source, hdus })
     }
@@ -126,6 +136,15 @@ impl<R: Read + Seek> FitsReader<R> {
         if !matches!(hdu.kind, HduKind::Primary | HduKind::Image) {
             return Err(FitsError::NotAnImage);
         }
+        // §4.3: a plain image array has no group structure. A non-conforming
+        // `PCOUNT`/`GCOUNT` would make `data_extent` size extra bytes, so reject it
+        // up front (on untrusted input) rather than decode mismatched samples.
+        if hdu.header.get_integer("PCOUNT").unwrap_or(0) != 0 {
+            return Err(FitsError::WrongValueType { name: "PCOUNT" });
+        }
+        if hdu.header.get_integer("GCOUNT").unwrap_or(1) != 1 {
+            return Err(FitsError::WrongValueType { name: "GCOUNT" });
+        }
         let bitpix = hdu.header.bitpix()?;
         let shape = hdu.header.axes()?;
         let scaling = Scaling::from_header(&hdu.header);
@@ -136,11 +155,12 @@ impl<R: Read + Seek> FitsReader<R> {
         } else {
             shape.iter().product::<usize>()
         };
-        assert_eq!(
-            samples.len(),
-            expected,
-            "decoded sample count must match the NAXISn product"
-        );
+        if samples.len() != expected {
+            return Err(FitsError::DataSizeMismatch {
+                expected,
+                got: samples.len(),
+            });
+        }
         Ok(Image {
             shape,
             samples,
@@ -233,19 +253,31 @@ pub struct ChecksumReport {
     pub checksum_ok: Option<bool>,
 }
 
+/// Outcome of scanning for the next header unit.
+enum NextHeader {
+    /// A complete header unit terminated by an `END` card.
+    Found(Vec<u8>),
+    /// Clean end of stream at a block boundary — no more HDUs.
+    End,
+    /// Trailing bytes carrying no `END`: special records (§3.5) or a trailing
+    /// partial / fill block (§3.6). Disregarded after the last HDU.
+    Trailing,
+}
+
 /// Read one header unit: consume 2880-byte blocks until one carries the `END`
-/// record. Returns `None` at a clean end of stream (no HDU left to read).
-fn read_header_unit<R: Read>(source: &mut R) -> Result<Option<Vec<u8>>> {
+/// record.
+fn read_header_unit<R: Read>(source: &mut R) -> Result<NextHeader> {
     let mut bytes = Vec::new();
     loop {
         let mut block = [0u8; BLOCK_SIZE];
         match fill_block(source, &mut block)? {
-            BlockRead::Eof if bytes.is_empty() => return Ok(None),
-            BlockRead::Eof => return Err(FitsError::UnexpectedEof),
+            BlockRead::Eof if bytes.is_empty() => return Ok(NextHeader::End),
+            // EOF or a sub-block remnant with no `END` seen: trailing content.
+            BlockRead::Eof | BlockRead::Partial => return Ok(NextHeader::Trailing),
             BlockRead::Full => {
                 bytes.extend_from_slice(&block);
                 if block_has_end(&block) {
-                    return Ok(Some(bytes));
+                    return Ok(NextHeader::Found(bytes));
                 }
             }
         }
@@ -254,11 +286,12 @@ fn read_header_unit<R: Read>(source: &mut R) -> Result<Option<Vec<u8>>> {
 
 enum BlockRead {
     Full,
+    Partial,
     Eof,
 }
 
 /// Read exactly one block, distinguishing a clean EOF (zero bytes) from a
-/// truncated unit (a partial block before EOF).
+/// trailing partial block (a sub-block remnant before EOF).
 fn fill_block<R: Read>(source: &mut R, block: &mut [u8; BLOCK_SIZE]) -> Result<BlockRead> {
     let mut filled = 0;
     while filled < BLOCK_SIZE {
@@ -271,7 +304,7 @@ fn fill_block<R: Read>(source: &mut R, block: &mut [u8; BLOCK_SIZE]) -> Result<B
     match filled {
         0 => Ok(BlockRead::Eof),
         BLOCK_SIZE => Ok(BlockRead::Full),
-        _ => Err(FitsError::UnexpectedEof),
+        _ => Ok(BlockRead::Partial),
     }
 }
 

@@ -33,6 +33,12 @@ pub enum FitsError {
     /// The data-unit size implied by the header overflows a 64-bit byte count
     /// (a malformed or hostile header with absurd `NAXISn`/`PCOUNT`/`GCOUNT`).
     DataUnitOverflow,
+    /// A decoded data unit held a different element count than the header's
+    /// declared geometry — a corrupt or truncated data unit.
+    DataSizeMismatch {
+        expected: usize,
+        got: usize,
+    },
     /// A data-unit read named an HDU index beyond the parsed sequence.
     HduIndexOutOfBounds {
         index: usize,
@@ -108,6 +114,12 @@ impl fmt::Display for FitsError {
             FitsError::UnexpectedEof => write!(f, "unexpected end of stream inside a FITS unit"),
             FitsError::DataUnitOverflow => {
                 write!(f, "header-implied data-unit size overflows 64 bits")
+            }
+            FitsError::DataSizeMismatch { expected, got } => {
+                write!(
+                    f,
+                    "decoded data unit has {got} elements, header implies {expected}"
+                )
             }
             FitsError::HduIndexOutOfBounds { index, len } => {
                 write!(f, "HDU index {index} out of bounds (file has {len} HDUs)")
