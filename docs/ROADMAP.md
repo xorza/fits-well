@@ -29,8 +29,9 @@ coordinate systems and the in-standard conventions (`CONTINUE`, `CHECKSUM`/
 - **Random groups** — read (params + arrays, `PSCAL`/`PZERO`). *(§6)*
 - **Conventions** — `CHECKSUM`/`DATASUM` verify + write; `HIERARCH` parse/render. *(§J)*
 
-93 tests, validated against real sample files. Phases 1–4 below are **complete**;
-WCS, time, and tiled compression (Phases 5–7) remain.
+97 tests, validated against real sample files (incl. astropy-generated compressed
+fixtures). Phases 1–4 are **complete** and Phase 5a (tiled `GZIP_1`/`RICE_1`
+decompression) is done; the rest of Phase 5, plus WCS and time (6–7), remain.
 
 ---
 
@@ -79,13 +80,14 @@ Already classified and sized; add typed access.
 - **Deliverable:** checksum verify against a CFITSIO/astropy-written file; HIERARCH
   parse + render round-trip.
 
-## Phase 5 — Tiled compression  *(size: L)*
+## Phase 5 — Tiled compression  🟡 5a partial  *(size: L)*
 Highest-value remaining *read* gap — most modern archive images are compressed.
 These are functional codecs (decode/encode), not the deferred speed work.
 
 - **5a. Tiled image decompression** — the `ZIMAGE` BINTABLE container, tile
-  reassembly into the `ZNAXISn` image, and the codecs: `GZIP_1`/`GZIP_2`, `RICE_1`,
-  `PLIO_1`, `HCOMPRESS_1`. *(§10.1)*
+  reassembly into the `ZNAXISn` image, and the codecs. *(§10.1)*
+  ✅ **`GZIP_1` + `RICE_1` done** — `read_compressed_image` behind the `compression`
+  feature, validated against astropy fixtures. `GZIP_2`, `PLIO_1`, `HCOMPRESS_1` TODO.
 - **5b. Floating-point quantization** — `ZSCALE`/`ZZERO`, `ZQUANTIZ`, subtractive
   dithering (`ZDITHER0`), NaN preservation. *(§10.2)*
 - **5c. Tiled table compression.** *(§10.3)*

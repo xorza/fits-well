@@ -47,6 +47,13 @@ pub enum FitsError {
     NotRandomGroups,
     /// `read_ascii_table` was called on an HDU that is not an ASCII table.
     NotAnAsciiTable,
+    /// `read_compressed_image` was called on an HDU that is not a tiled-compressed
+    /// image (no `ZIMAGE = T`).
+    NotCompressedImage,
+    /// A tiled-image compression algorithm or variant is not yet supported.
+    UnsupportedCompression {
+        name: String,
+    },
     /// A `TFORMn` value could not be parsed as a binary-table column format.
     InvalidTform {
         tform: String,
@@ -102,6 +109,10 @@ impl fmt::Display for FitsError {
             FitsError::NotABinTable => write!(f, "HDU is not a binary table"),
             FitsError::NotRandomGroups => write!(f, "HDU is not a random-groups primary"),
             FitsError::NotAnAsciiTable => write!(f, "HDU is not an ASCII table"),
+            FitsError::NotCompressedImage => write!(f, "HDU is not a tiled-compressed image"),
+            FitsError::UnsupportedCompression { name } => {
+                write!(f, "unsupported tiled compression: {name}")
+            }
             FitsError::InvalidTform { tform } => write!(f, "invalid column format {tform:?}"),
             FitsError::VariableLengthColumn { code } => write!(
                 f,

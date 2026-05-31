@@ -171,6 +171,16 @@ impl<R: Read + Seek> FitsReader<R> {
         RandomGroups::from_data(&hdu.header, unit.data())
     }
 
+    /// Read a tiled-compressed image (§10.1) — a `BINTABLE` with `ZIMAGE = T` —
+    /// and decompress it into the full [`Image`]. Supports `GZIP_1` and `RICE_1`.
+    /// Requires the `compression` feature.
+    #[cfg(feature = "compression")]
+    pub fn read_compressed_image(&mut self, index: usize) -> Result<Image> {
+        let table = self.read_table(index)?;
+        let header = &self.hdus[index].header;
+        crate::compress::decompress_image(header, &table)
+    }
+
     /// Verify the `DATASUM`/`CHECKSUM` integrity keywords of an HDU (§J). Each
     /// field of the report is `None` if that keyword is absent, else `Some(true)`
     /// when it matches the recomputed checksum.

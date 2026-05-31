@@ -33,6 +33,8 @@ mod ascii;
 mod bitpix;
 mod block;
 mod checksum;
+#[cfg(feature = "compression")]
+mod compress;
 mod data;
 mod error;
 mod groups;

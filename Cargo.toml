@@ -9,6 +9,7 @@ keywords = ["fits", "astronomy", "image", "fileformat"]
 categories = ["science", "parser-implementations"]
 
 [dependencies]
+flate2 = { version = "1.1", optional = true }
 
 [features]
 default = []
@@ -18,5 +19,5 @@ parallel = []
 mmap = []
 # typed World Coordinate System layer (projections, spherical rotations) over parsed headers.
 wcs = []
-# tiled image compression: RICE_1, GZIP_1/2, HCOMPRESS_1, PLIO_1.
-compression = []
+# tiled image decompression: GZIP_1 (via flate2) and RICE_1; HCOMPRESS_1/PLIO_1 TODO.
+compression = ["dep:flate2"]
