@@ -1,6 +1,1 @@
-astropy has no compressed-table support — validation will be self-round-trip against the exact cfitsio format. Let me read
-  fits_compress_table:
-
-
-
 whole table gates by compress feature?

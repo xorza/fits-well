@@ -98,8 +98,10 @@ These are functional codecs (decode/encode), not the deferred speed work.
 - **5c. Tiled table compression.** *(§10.3)*
   ✅ **Read + write** — `read_compressed_table`/`write_compressed_table` for
   fixed-width columns (`GZIP_1`/`GZIP_2`/`RICE_1` per column, `ZCTYPn`), the row-tile
-  transpose + byte-shuffle, `1QB` heap layout. Round-trips byte-exact; the written
-  `ZTABLE` container parses structurally in astropy. (VLA columns are rejected.)
+  transpose + byte-shuffle, `1QB` heap layout. Validated against **cfitsio
+  ground truth** (`fpack`/`funpack`): our decode reproduces an `fpack`-compressed
+  table byte-exact, and cfitsio's `funpack` reads our compressed output back to the
+  original. (VLA columns are rejected.)
 - **5d. Compression writing** (encode tiles).
   ✅ **All five image codecs + quantized float + tables** write and round-trip.
 - *(ref 07.) Gated behind the `compression` feature; scalar reference impls — the

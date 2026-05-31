@@ -512,6 +512,35 @@ fn table_compression_round_trips() {
 }
 
 #[test]
+fn decodes_a_cfitsio_compressed_table() {
+    // Ground truth: `comp_table_cfitsio.fits` was produced by cfitsio's `fpack
+    // -tableonly` from `comp_table_ref.fits` (500 rows, 6 fixed-width columns).
+    // fpack chose a real mix of per-column codecs — GZIP_2 (short/float/double),
+    // RICE_1 (the int32 columns), GZIP_1 (byte) — so this exercises every decode
+    // path against an independent implementation. Our uncompressed output must be
+    // byte-identical to the original table.
+    let restored = open("comp_table_cfitsio.fits")
+        .read_compressed_table(1)
+        .unwrap();
+    let original = open("comp_table_ref.fits").read_table(1).unwrap();
+
+    assert_eq!(restored.nrows, 500);
+    assert_eq!(restored.nrows, original.nrows);
+    assert_eq!(restored.row_width(), original.row_width());
+    assert_eq!(restored.columns.len(), 6);
+    assert_eq!(
+        restored.raw_rows(),
+        original.raw_rows(),
+        "decoded cfitsio-compressed table must match the original bytes"
+    );
+    // Spot-check a decoded value against the known formula (INT = i·100000 − 5).
+    match original.read_column(1).unwrap() {
+        ColumnData::I32(v) => assert_eq!(v[3], 3 * 100_000 - 5),
+        other => panic!("expected I32, got {other:?}"),
+    }
+}
+
+#[test]
 fn read_compressed_table_rejects_a_plain_bintable() {
     let mut f = open("DDTSUVDATA.fits");
     assert!(matches!(
