@@ -684,8 +684,8 @@ UTC/TAI/TT/TCG/TDB/TCB/GPS/UT1 scale-conversion lattice (UTC↔TAI via an embedd
 IERS leap table, TDB via the standard periodic series, UT1 via caller-supplied
 ΔUT1), and a `FitsTime` header view resolving the reference epoch/unit/scale and
 relative→absolute MJD for the global keywords and a `CTYPEi='TIME'` image axis.
-The gaps are the metadata-only / table-context / nice-to-have parts of §9, plus
-two correctness bugs (the `TIMEUNIT` table and the split-reference precedence).
+The remaining gaps are the metadata-only / table-context / nice-to-have parts of
+§9; the former `TIMEUNIT`, split-reference, and realization-suffix bugs are fixed.
 
 **Scope.** Time-*scale* conversion (the TT-pivot lattice with the defining
 `L_G`/`L_B` relations, leap seconds, the TDB series) is in scope: FITS §9.2.1
@@ -704,7 +704,7 @@ to an astronomy library (astropy `SkyCoord`/`time`, ERFA), not implemented here.
 | 9.2.1 | `TIMESYS` (default `UTC`); other values allowed | `FitsTime::from_header` (`time/mod.rs:388`) | ✅ |
 | 9.2.1 | Table 30 scales (`TAI/TT/TCG/TDB/TCB/UTC/UT1/GPS/…`) | `TimeScale::parse` (`time/mod.rs:215`) | ✅ |
 | 9.2.1 | Aliases `TDT`/`ET`→`TT`, `IAT`→`TAI` | `parse` arms (`time/mod.rs:215`) | ✅ |
-| 9.2.1 | Realization suffix `TT(TAI)`, `UTC(NIST)` | matched whole-string ⇒ falls to `Local` | 🔴 not stripped |
+| 9.2.1 | Realization suffix `TT(TAI)`, `UTC(NIST)` | `TimeScale::parse` strips `(...)` before matching | ✅ |
 | 9.2.1 | `GMT` (continuous with UTC) | no arm ⇒ `Local` | 🟡 should alias `Utc` |
 | 9.2.1 | TT-pivot lattice; `TT↔TCG` (`L_G`), `TDB↔TCB` (`L_B`) | `to_tt`/`from_tt` (`time/mod.rs:245`,`:269`) | ✅ |
 | 9.2.1 | TDB periodic series | `tdb_minus_tt` (`time/mod.rs:297`) | ✅ (no `TDB_0`) |
@@ -717,9 +717,9 @@ to an astronomy library (astropy `SkyCoord`/`time`, ERFA), not implemented here.
 | 9.1.2/9.5 | `JEPOCH` (TDB) / `BEPOCH` (ET) **keywords** | `Epoch` type not wired to header | 🟡 not read |
 | 9.2.2 | Reference in ISO / JD / MJD; defaults | `reference_mjd` (`time/mod.rs:454`) | ✅ |
 | 9.2.2 | `[M]JDREFI`+`[M]JDREFF` integer+fraction split | summed (`time/mod.rs:459`) | ✅ |
-| 9.2.2 | **Split takes precedence over single** when all present | single `MJDREF` returned first (`time/mod.rs:455`) | 🔴 wrong precedence |
+| 9.2.2 | **Split takes precedence over single** when all present | `resolve_split_ref`: `MJDREFI+MJDREFF` win over `MJDREF` | ✅ |
 | 9.2.2 | Kind precedence `MJDREF > JDREF > DATEREF` | checked in that order (`time/mod.rs:455`,`:462`,`:469`) | ✅ |
-| 9.3 | `TIMEUNIT` (default `s`); Table 34 units | `unit_seconds` (`time/mod.rs:404`) | 🔴 only `s`/`d`/`a`; `min`/`h`/`cy`→`1.0` |
+| 9.3 | `TIMEUNIT` (default `s`); Table 34 units | `unit_seconds`: `s`/`min`/`h`/`d`/`a`/`yr`/`y`/`cy`/`ta`/`Ba` | ✅ |
 | 9.2.3 | `TREFPOS` keyword (Table 31); position-dependent light-travel correction | stored verbatim (`time/mod.rs:394`) | ✅ read / ⚪ correction out of scope |
 | 9.2.4 | `TREFDIR`/`TRDIRn` reference direction (correction geometry) | — | ⚪ out of scope (astronomy) |
 | 9.2.5 | `PLEPHEM` (default `DE405`) planetary ephemeris | — | ⚪ out of scope (astronomy) |
@@ -737,32 +737,27 @@ The normative computational core — the Table-30 scale set with the canonical
 aliases, the TT-pivot conversion lattice including the defining `L_G`/`L_B`
 relations, ISO-8601↔JD/MJD calendar math, the `[M]JDREF`/`JDREF`/`DATEREF`
 resolution with kind-precedence, J/B epochs, and a working `CTYPEi='TIME'` axis —
-is implemented and astropy-validated. The gaps cluster in metadata semantics,
-table-only constructs, the non-`TIME` time axes, and two outright bugs.
+is implemented and astropy-validated. The remaining gaps cluster in metadata
+semantics, table-only constructs, and the non-`TIME` time axes.
 
 ### Gaps
 
-1. 🔴 **`TIMEUNIT` table is incomplete — `min`/`h`/`cy`/`ta`/`Ba` silently scale
-   as seconds (§9.3, Table 34).** `unit_seconds` matches only `d`/`day`,
-   `a`/`yr`/`y`, and falls through to `1.0` otherwise (`time/mod.rs:404`). Table 34
-   also defines `'min'` (60 s), `'h'` (3600 s), `'cy'` (Julian century), and the
-   discouraged `'ta'`/`'Ba'`. `TIMEUNIT='min'` therefore makes `relative_to_mjd` /
-   `time_axis_mjd` off by 60×, `'h'` by 3600×, with no error.
+1. ✅ **FIXED — `TIMEUNIT` table complete (§9.3, Table 34).** `unit_seconds` now
+   handles `s`/`min`/`h`/`d`/`a`/`yr`/`y`/`cy` with exact factors plus the
+   deprecated `ta`/`Ba` (conventional year lengths); an unknown unit still falls
+   back to seconds. So `TIMEUNIT='min'` is 60×, `'h'` 3600×, `'cy'` a Julian
+   century — no longer silently 1 s. Covered by
+   `timeunit_minute_hour_century_scale_correctly`.
 
-2. 🔴 **Split reference parts do not take precedence over the single value
-   (§9.2.2).** The standard: *"If [M]JDREF and both [M]JDREFI and [M]JDREFF are
-   present, the integer and fractional values shall have precedence over the
-   single value."* `reference_mjd` returns `MJDREF` as soon as it is present
-   (`time/mod.rs:455`), *before* looking at `MJDREFI`/`MJDREFF` (`:458`) — the
-   reverse of the rule when all three are present. (The "single wins if present
-   with only one part" sub-rule is met only by accident.) Same on the
-   `JDREF`/`JDREFI`/`JDREFF` branch (`time/mod.rs:462`).
+2. ✅ **FIXED — split reference parts take precedence (§9.2.2).** `resolve_split_ref`
+   returns `MJDREFI + MJDREFF` when *both* are present (wins over the single
+   `MJDREF`), else the single value, else a lone split part — for both the
+   `MJDREF`/`MJDREFI`/`MJDREFF` and `JDREF`/`JDREFI`/`JDREFF` branches. Covered by
+   `split_reference_takes_precedence_over_single_mjdref`.
 
-3. 🔴 **Time-scale realization suffix not stripped (§9.2.1).** High-precision
-   values append a realization — `'TT(TAI)'`, `'UTC(NIST)'`. `TimeScale::parse`
-   matches the whole upper-cased string (`time/mod.rs:215`), so `"TT(TAI)"` matches
-   no arm and falls to `TimeScale::Local` — a recognized scale misread as an
-   unconvertible local clock. The suffix must be split off before matching.
+3. ✅ **FIXED — time-scale realization suffix stripped (§9.2.1).** `TimeScale::parse`
+   splits off the `(...)` realization before matching, so `'TT(TAI)'` → `TT`,
+   `'UTC(NIST)'` → `UTC`. Covered by `time_scale_parse_strips_realization_and_aliases`.
 
 4. 🟡 **`GMT` maps to `LOCAL` instead of `UTC` (§9.2.1, Table 30).** `GMT` is a
    recognized value (continuous with UTC), but `TimeScale::parse` has no `GMT` arm
@@ -826,13 +821,12 @@ round-trip, + the ΔUT1=0 default); `leap_seconds_match_iers_table` (counts at
 
 Coverage gaps:
 
-- **The two 🔴 bugs are untested** (a test would fail today): no header with
-  *both* `MJDREF` and `MJDREFI`/`MJDREFF` to expose the split-precedence inversion
-  (gap #2 — the split is only ever tested *alone*), and no `TIMEUNIT='min'`/`'h'`/
-  `'cy'` test to expose the silent seconds-fallback (gap #1).
-- No `TimeScale::parse` test at all — the Table-30 string→variant map, the
-  `TDT`/`ET`/`IAT` aliases, the `'TT(TAI)'` realization suffix (gap #3), the `GMT`
-  value (gap #4), and the unknown→`Local` fallback are all unexercised.
+- The three former 🔴 bugs are now tested: `split_reference_takes_precedence_over_single_mjdref`
+  (gap #2, both single + split present), `timeunit_minute_hour_century_scale_correctly`
+  (gap #1), and `time_scale_parse_strips_realization_and_aliases` (gap #3).
+- `TimeScale::parse` now has a test covering the realization suffix, the
+  `TDT`/`ET`/`IAT` aliases, and the unknown→`Local` fallback; the `GMT` value
+  (gap #4) and the full Table-30 map are still only partially exercised.
 - No signed-5-digit-year, leading-zero-omission (gap #6), or explicit `Z`-suffix
   rejection test; no `JDREF`/`DATEREF` resolution or kind-precedence test (only
   `MJDREF` and the split are exercised).

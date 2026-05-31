@@ -213,7 +213,10 @@ impl TimeScale {
     /// Parse a `TIMESYS`/`CTYPE` time-scale string (case-insensitive); accepts the
     /// `TDT`/`ET` → `TT` and `IAT` → `TAI` aliases. Unknown values map to `LOCAL`.
     pub fn parse(s: &str) -> TimeScale {
-        match s.trim().to_ascii_uppercase().as_str() {
+        // A high-precision value appends a realization in parentheses — `TT(TAI)`,
+        // `UTC(NIST)` (§9.2.1); strip it before matching the scale name.
+        let base = s.trim().split('(').next().unwrap_or("").trim();
+        match base.to_ascii_uppercase().as_str() {
             "UTC" => TimeScale::Utc,
             "UT1" | "UT" => TimeScale::Ut1,
             "TAI" | "IAT" => TimeScale::Tai,
@@ -402,10 +405,18 @@ impl FitsTime {
 
     /// `TIMEUNIT` expressed in seconds (`s`, `d`/day, `a`/`yr` Julian year).
     pub fn unit_seconds(&self) -> f64 {
+        // Table 34. The deprecated tropical/Besselian years use their conventional
+        // lengths; a truly unknown unit falls back to seconds (the default).
         match self.timeunit.trim() {
+            "s" => 1.0,
+            "min" => 60.0,
+            "h" => 3600.0,
             "d" | "day" => SEC_PER_DAY,
-            "a" | "yr" | "y" => 365.25 * SEC_PER_DAY,
-            _ => 1.0, // seconds (the default)
+            "a" | "yr" | "y" => 365.25 * SEC_PER_DAY, // Julian year
+            "cy" => 36525.0 * SEC_PER_DAY,            // Julian century = 100 a
+            "ta" => 365.24219 * SEC_PER_DAY,          // tropical year (deprecated)
+            "Ba" => 365.2421988 * SEC_PER_DAY,        // Besselian year (deprecated)
+            _ => 1.0,
         }
     }
 
@@ -452,25 +463,33 @@ pub fn is_time_ctype(ctype: &str) -> bool {
 /// The reference epoch as MJD: `MJDREF` (or `MJDREFI`+`MJDREFF`), else `JDREF`
 /// (or `JDREFI`+`JDREFF`), else `DATEREF`, else `0.0`.
 fn reference_mjd(header: &Header) -> f64 {
-    if let Some(mjd) = header.get_real("MJDREF") {
+    if let Some(mjd) = resolve_split_ref(header, "MJDREF", "MJDREFI", "MJDREFF") {
         return mjd;
     }
-    if header.get_real("MJDREFI").is_some() || header.get_real("MJDREFF").is_some() {
-        return header.get_real("MJDREFI").unwrap_or(0.0)
-            + header.get_real("MJDREFF").unwrap_or(0.0);
-    }
-    if let Some(jd) = header.get_real("JDREF") {
+    if let Some(jd) = resolve_split_ref(header, "JDREF", "JDREFI", "JDREFF") {
         return jd - MJD0;
-    }
-    if header.get_real("JDREFI").is_some() || header.get_real("JDREFF").is_some() {
-        return header.get_real("JDREFI").unwrap_or(0.0) + header.get_real("JDREFF").unwrap_or(0.0)
-            - MJD0;
     }
     header
         .get_text("DATEREF")
         .and_then(|s| Datetime::parse(s).ok())
         .map(|d| d.to_mjd())
         .unwrap_or(0.0)
+}
+
+/// Resolve a reference epoch from its single (`MJDREF`) and split-precision
+/// (`MJDREFI`+`MJDREFF`) keywords. Per §9.2.2 a *full* integer+fractional split
+/// takes precedence over the single value; otherwise the single value is used,
+/// falling back to a lone split part.
+fn resolve_split_ref(header: &Header, single: &str, int: &str, frac: &str) -> Option<f64> {
+    let i = header.get_real(int);
+    let f = header.get_real(frac);
+    match (i, f) {
+        (Some(i), Some(f)) => Some(i + f),
+        _ => header.get_real(single).or_else(|| match (i, f) {
+            (None, None) => None,
+            _ => Some(i.unwrap_or(0.0) + f.unwrap_or(0.0)),
+        }),
+    }
 }
 
 #[cfg(test)]

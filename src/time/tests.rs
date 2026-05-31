@@ -201,3 +201,56 @@ fn fits_time_reads_split_and_day_unit_references() {
     // 2 days past the reference.
     assert!((t.relative_to_mjd(2.0) - 58002.25).abs() < 1e-12);
 }
+
+#[test]
+fn time_scale_parse_strips_realization_and_aliases() {
+    // §9.2.1: a parenthesised realization suffix is stripped before matching.
+    assert_eq!(TimeScale::parse("TT(TAI)"), TimeScale::Tt);
+    assert_eq!(TimeScale::parse("UTC(NIST)"), TimeScale::Utc);
+    assert_eq!(TimeScale::parse("tt"), TimeScale::Tt);
+    assert_eq!(TimeScale::parse("TDT"), TimeScale::Tt); // alias
+    assert_eq!(TimeScale::parse("IAT"), TimeScale::Tai); // alias
+    assert_eq!(TimeScale::parse("BOGUS"), TimeScale::Local);
+}
+
+#[test]
+fn timeunit_minute_hour_century_scale_correctly() {
+    use crate::header::Header;
+    let unit = |u: &str| {
+        let mut h = Header::new();
+        h.set("TIMEUNIT", u);
+        FitsTime::from_header(&h).unit_seconds()
+    };
+    // Previously min/h/cy silently fell through to 1 s; Table 34 fixes that.
+    assert_eq!(unit("min"), 60.0);
+    assert_eq!(unit("h"), 3600.0);
+    assert_eq!(unit("d"), 86400.0);
+    assert_eq!(unit("a"), 365.25 * 86400.0); // Julian year
+    assert_eq!(unit("cy"), 36525.0 * 86400.0); // Julian century
+    assert_eq!(unit("s"), 1.0);
+    assert_eq!(unit("bogus"), 1.0); // unknown ⇒ seconds (lenient default)
+    // Deprecated tropical/Besselian years are ~a year, not seconds.
+    assert!((unit("ta") / 86400.0 - 365.24219).abs() < 1e-6);
+    assert!((unit("Ba") / 86400.0 - 365.2421988).abs() < 1e-6);
+}
+
+#[test]
+fn split_reference_takes_precedence_over_single_mjdref() {
+    use crate::header::Header;
+    let mjdref = |pairs: &[(&str, f64)]| {
+        let mut h = Header::new();
+        for &(k, v) in pairs {
+            h.set(k, v);
+        }
+        FitsTime::from_header(&h).mjdref
+    };
+    // §9.2.2: a full integer+fractional split wins over the single value.
+    assert!(
+        (mjdref(&[("MJDREF", 58000.0), ("MJDREFI", 59000.0), ("MJDREFF", 0.5)]) - 59000.5).abs()
+            < 1e-9
+    );
+    // Single value alone is used as-is.
+    assert!((mjdref(&[("MJDREF", 58000.0)]) - 58000.0).abs() < 1e-9);
+    // An incomplete split (integer part only) defers to the single value.
+    assert!((mjdref(&[("MJDREF", 58000.0), ("MJDREFI", 59000.0)]) - 58000.0).abs() < 1e-9);
+}
