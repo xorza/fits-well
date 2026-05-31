@@ -37,10 +37,9 @@ the `compression` feature: all five image codecs (`GZIP_1`, `GZIP_2`, `RICE_1`,
 (`NO_DITHER`/`SUBTRACTIVE_DITHER_1`/`SUBTRACTIVE_DITHER_2`, `ZBLANK`/NaN), and §10.3
 fixed-width table compression. The remaining WCS frontier (quad-cube/HEALPix
 projections, non-linear spectral axes, FK4 at non-B1950 equinoxes — all of which
-error cleanly today) — the
-module map below shows what is built versus planned, and
-[`docs/ROADMAP.md`](docs/ROADMAP.md) tracks the path to feature-complete. The design principles there remain the spec; follow them when
-filling the scaffolds in.
+error cleanly today) is charted in the module map below, which shows what is built
+versus planned. The design principles in this file remain the spec; follow them
+when filling the scaffolds in.
 
 ## Commands
 
