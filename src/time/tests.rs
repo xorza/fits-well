@@ -108,6 +108,44 @@ fn scale_conversions_match_astropy() {
 }
 
 #[test]
+fn ut1_uses_explicit_dut1() {
+    const MJD0: f64 = 2_400_000.5;
+    let utc_jd = 60462.0 + MJD0;
+    let dut1 = -0.020434661; // astropy ΔUT1 = UT1 − UTC at 2024-06-01
+    let ut1 = TimeScale::Utc.convert_dut1(utc_jd, TimeScale::Ut1, dut1) - MJD0;
+    // astropy UT1 MJD, as the day-fraction beyond 60462 (UT1 − 60462).
+    let want = -0.000000236512;
+    assert!(
+        (ut1 - 60462.0 - want).abs() < 1e-9,
+        "UT1 {ut1:.12} (Δ={:.4e} s)",
+        (ut1 - 60462.0 - want) * 86400.0
+    );
+    // Round-trip back to UTC.
+    let back = TimeScale::Ut1.convert_dut1(ut1 + MJD0, TimeScale::Utc, dut1) - MJD0;
+    assert!((back - 60462.0).abs() < 1e-9);
+    // With ΔUT1 = 0, UT1 collapses to UTC (the `convert` default).
+    assert_eq!(TimeScale::Utc.convert(utc_jd, TimeScale::Ut1), utc_jd);
+}
+
+#[test]
+fn time_axis_resolves_to_mjd() {
+    use crate::header::Header;
+    let mut h = Header::new();
+    h.set("MJDREF", 58000.0);
+    h.set("TIMESYS", "TT");
+    h.set("TIMEUNIT", "s");
+    h.set("CTYPE3", "TIME");
+    h.set("CRPIX3", 1.0).set("CRVAL3", 0.0).set("CDELT3", 10.0); // 10 s / pixel
+    let t = FitsTime::from_header(&h);
+    // Pixel 1 → 0 s → MJDREF; pixel 11 → 100 s later.
+    assert!((t.time_axis_mjd(&h, 3, 1.0).unwrap() - 58000.0).abs() < 1e-12);
+    assert!((t.time_axis_mjd(&h, 3, 11.0).unwrap() - (58000.0 + 100.0 / 86400.0)).abs() < 1e-12);
+    // A non-time axis returns None.
+    h.set("CTYPE1", "RA---TAN");
+    assert!(t.time_axis_mjd(&h, 1, 1.0).is_none());
+}
+
+#[test]
 fn leap_seconds_match_iers_table() {
     let at = |y, m, d| {
         leap_seconds(

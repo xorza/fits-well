@@ -27,8 +27,9 @@ fn parses_tan_header() {
     assert_eq!(w.ctype, vec!["RA---TAN", "DEC--TAN"]);
     assert_eq!(w.crval, vec![150.0, 2.5]);
     assert_eq!(w.crpix, vec![256.0, 256.0]);
-    assert_eq!(w.lonpole, 180.0);
-    assert!(w.celestial.is_some());
+    // Zenithal pole reduces to (CRVAL, LONPOLE=180).
+    let c = w.celestial.expect("celestial");
+    assert_eq!(c.pole, (150.0, 2.5, 180.0));
 }
 
 #[test]
@@ -116,17 +117,90 @@ fn sin_projection_matches_astropy() {
     }
 }
 
-/// `SIN` and `ARC` deprojections invert their forward projections.
 #[test]
-fn sin_and_arc_round_trip_through_projection() {
-    for proj in [Projection::Sin, Projection::Arc, Projection::Tan] {
-        for &(phi, theta) in &[(30.0_f64, 80.0_f64), (-120.0, 85.0), (170.0, 60.0)] {
-            let (x, y) = project(proj, phi, theta);
-            let (p2, t2) = deproject(proj, x, y);
+fn legacy_crota_rotation_matches_astropy() {
+    use crate::header::Header;
+    // CDELT + CROTA2 (no PC/CD) — the legacy rotation convention.
+    let mut h = Header::new();
+    h.set("NAXIS", 2);
+    h.set("CTYPE1", "RA---TAN").set("CTYPE2", "DEC--TAN");
+    h.set("CRPIX1", 128.0).set("CRPIX2", 128.0);
+    h.set("CRVAL1", 83.6).set("CRVAL2", 22.0);
+    h.set("CDELT1", -0.0005).set("CDELT2", 0.0005);
+    h.set("CROTA2", 25.0);
+    let w = Wcs::from_header(&h, None).unwrap();
+    let golden: &[(f64, f64, f64, f64)] = &[
+        (128.0, 128.0, 83.6000000000, 22.0000000000),
+        (1.0, 1.0, 83.6909943156, 21.9692606492),
+        (256.0, 200.0, 83.5210288338, 22.0055606050),
+        (64.0, 192.0, 83.6166986376, 22.0425247793),
+    ];
+    for &(px, py, ra, dec) in golden {
+        let out = w.pixel_to_world(&[px, py]);
+        assert!(
+            (out[0] - ra).abs() < 1e-8 && (out[1] - dec).abs() < 1e-8,
+            "CROTA at ({px},{py}): got {out:?}, want ({ra},{dec})"
+        );
+    }
+}
+
+/// Every projection's deprojection inverts its forward projection.
+#[test]
+fn projections_round_trip() {
+    use Projection::*;
+    for proj in [Tan, Sin, Arc, Stg, Zea, Car, Cea, Mer, Sfl] {
+        // Positive native latitudes, away from the poles: in-domain for both the
+        // zenithal (θ > 0 only) and cylindrical families.
+        for &(phi, theta) in &[(30.0_f64, 70.0_f64), (-60.0, 40.0), (20.0, 25.0)] {
+            let (x, y) = proj.project(phi, theta);
+            let (p2, t2) = proj.deproject(x, y);
             assert!(
-                (norm180(p2 - phi)).abs() < 1e-9 && (t2 - theta).abs() < 1e-9,
+                norm180(p2 - phi).abs() < 1e-9 && (t2 - theta).abs() < 1e-9,
                 "{proj:?}: ({phi},{theta}) → ({x},{y}) → ({p2},{t2})"
             );
         }
+    }
+}
+
+/// Golden pixel→world for all v2 projections, from `astropy.wcs`. Each header is
+/// `<RA|DEC>---<PROJ>`, CRPIX 50/50, CDELT (−0.05, 0.05); zenithal use CRVAL
+/// (150, 2.5), cylindrical CRVAL (45, 30) so the full pole computation runs.
+#[test]
+fn projections_match_astropy() {
+    use crate::header::Header;
+    let golden: &[(&str, f64, f64, f64, f64, f64, f64)] = &[
+        ("STG", 150.0, 2.5, 10.0, 80.0, 152.0043337166, 3.9979316935),
+        ("STG", 150.0, 2.5, 90.0, 20.0, 148.0002415773, 0.9990200798),
+        ("ZEA", 150.0, 2.5, 10.0, 80.0, 152.0048114944, 3.9982876800),
+        ("ZEA", 150.0, 2.5, 30.0, 60.0, 151.0013752965, 2.9996013662),
+        ("CAR", 45.0, 30.0, 10.0, 80.0, 47.3445169495, 31.4795416251),
+        ("CAR", 45.0, 30.0, 90.0, 20.0, 42.7252855755, 28.4801507052),
+        ("CEA", 45.0, 30.0, 10.0, 80.0, 47.3445210618, 31.4797129894),
+        ("CEA", 45.0, 30.0, 30.0, 60.0, 46.1605080109, 30.4949427609),
+        ("MER", 45.0, 30.0, 10.0, 80.0, 47.3445128393, 31.4793703430),
+        ("MER", 45.0, 30.0, 90.0, 20.0, 42.7252817062, 28.4803219894),
+        ("SFL", 45.0, 30.0, 10.0, 80.0, 47.3453204029, 31.4795275997),
+        ("SFL", 45.0, 30.0, 30.0, 60.0, 46.1605521236, 30.4949360292),
+    ];
+    for &(proj, cv1, cv2, px, py, ra, dec) in golden {
+        let mut h = Header::new();
+        h.set("NAXIS", 2);
+        h.set("CTYPE1", format!("RA---{proj}"));
+        h.set("CTYPE2", format!("DEC--{proj}"));
+        h.set("CRPIX1", 50.0).set("CRPIX2", 50.0);
+        h.set("CRVAL1", cv1).set("CRVAL2", cv2);
+        h.set("CDELT1", -0.05).set("CDELT2", 0.05);
+        let w = Wcs::from_header(&h, None).unwrap();
+        let out = w.pixel_to_world(&[px, py]);
+        assert!(
+            (out[0] - ra).abs() < 1e-8 && (out[1] - dec).abs() < 1e-8,
+            "{proj} at ({px},{py}): got {out:?}, want ({ra},{dec})"
+        );
+        // Full round-trip.
+        let back = w.world_to_pixel(&out);
+        assert!(
+            (back[0] - px).abs() < 1e-6 && (back[1] - py).abs() < 1e-6,
+            "{proj} round-trip: {back:?}"
+        );
     }
 }

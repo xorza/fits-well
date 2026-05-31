@@ -226,23 +226,34 @@ impl TimeScale {
         }
     }
 
-    /// Convert a Julian Date in this scale to a JD in `target`. `Local`/`Ut1`
-    /// approximations: `Local` passes through unchanged; `Ut1` is treated as UTC.
+    /// Convert a Julian Date in this scale to a JD in `target`, treating `UT1` as
+    /// `UTC` (ΔUT1 = 0). Use [`TimeScale::convert_dut1`] to supply a real ΔUT1.
     pub fn convert(self, jd: f64, target: TimeScale) -> f64 {
-        if self == target {
-            return jd;
-        }
-        from_tt(self.to_tt(jd), target)
+        self.convert_dut1(jd, target, 0.0)
     }
 
-    /// This scale's JD expressed as TT (the common pivot).
-    fn to_tt(self, jd: f64) -> f64 {
+    /// Convert a Julian Date with an explicit `dut1 = UT1 − UTC` (seconds, from
+    /// IERS) so conversions to/from `UT1` are exact. `Local` passes through.
+    pub fn convert_dut1(self, jd: f64, target: TimeScale, dut1: f64) -> f64 {
+        if self == target || self == TimeScale::Local || target == TimeScale::Local {
+            return jd;
+        }
+        from_tt(self.to_tt(jd, dut1), target, dut1)
+    }
+
+    /// This scale's JD expressed as TT (the common pivot). `dut1 = UT1 − UTC` (s).
+    fn to_tt(self, jd: f64, dut1: f64) -> f64 {
         match self {
             TimeScale::Tt => jd,
             TimeScale::Tai => jd + TT_TAI / SEC_PER_DAY,
             TimeScale::Gps => jd + (TT_TAI + TAI_GPS) / SEC_PER_DAY,
-            TimeScale::Utc | TimeScale::Ut1 | TimeScale::Local => {
+            TimeScale::Utc | TimeScale::Local => {
                 jd + (TT_TAI + leap_seconds(jd - MJD0)) / SEC_PER_DAY
+            }
+            // UT1 → UTC (subtract ΔUT1) → TT.
+            TimeScale::Ut1 => {
+                let utc = jd - dut1 / SEC_PER_DAY;
+                utc + (TT_TAI + leap_seconds(utc - MJD0)) / SEC_PER_DAY
             }
             TimeScale::Tcg => jd - L_G * (jd - T1977_JD),
             TimeScale::Tdb => jd - tdb_minus_tt(jd) / SEC_PER_DAY,
@@ -255,16 +266,22 @@ impl TimeScale {
 }
 
 /// TT (as a JD) expressed in `target` — the inverse of [`TimeScale::to_tt`].
-fn from_tt(tt: f64, target: TimeScale) -> f64 {
+fn from_tt(tt: f64, target: TimeScale, dut1: f64) -> f64 {
     match target {
         TimeScale::Tt => tt,
         TimeScale::Tai => tt - TT_TAI / SEC_PER_DAY,
         TimeScale::Gps => tt - (TT_TAI + TAI_GPS) / SEC_PER_DAY,
-        TimeScale::Utc | TimeScale::Ut1 | TimeScale::Local => {
+        TimeScale::Utc | TimeScale::Local => {
             let tai = tt - TT_TAI / SEC_PER_DAY;
             // leap is a function of UTC; one lookup at the TAI date suffices away
             // from the ≤1 s boundary ambiguity inherent to UTC.
             tai - leap_seconds(tai - MJD0) / SEC_PER_DAY
+        }
+        // TT → UTC → UT1 (add ΔUT1).
+        TimeScale::Ut1 => {
+            let tai = tt - TT_TAI / SEC_PER_DAY;
+            let utc = tai - leap_seconds(tai - MJD0) / SEC_PER_DAY;
+            utc + dut1 / SEC_PER_DAY
         }
         TimeScale::Tcg => tt + L_G * (tt - T1977_JD),
         TimeScale::Tdb => tt + tdb_minus_tt(tt) / SEC_PER_DAY,
@@ -408,6 +425,28 @@ impl FitsTime {
             .and_then(|s| Datetime::parse(s).ok())
             .map(|d| d.to_mjd())
     }
+
+    /// If WCS axis `axis` (1-based) is a time axis (`CTYPEi = 'TIME'` or a
+    /// time-scale name, §9.2.3), convert a 1-based pixel coordinate along it to an
+    /// absolute MJD in the frame's scale: the linear axis value (elapsed time in
+    /// `TIMEUNIT` from `MJDREF`) plus the reference. `None` if not a time axis.
+    pub fn time_axis_mjd(&self, header: &Header, axis: usize, pixel: f64) -> Option<f64> {
+        let ctype = header.get_text(&format!("CTYPE{axis}"))?;
+        if !is_time_ctype(ctype) {
+            return None;
+        }
+        let crpix = header.get_real(&format!("CRPIX{axis}")).unwrap_or(0.0);
+        let crval = header.get_real(&format!("CRVAL{axis}")).unwrap_or(0.0);
+        let cdelt = header.get_real(&format!("CDELT{axis}")).unwrap_or(1.0);
+        Some(self.relative_to_mjd(crval + cdelt * (pixel - crpix)))
+    }
+}
+
+/// True if a `CTYPE` denotes a time axis: `'TIME'` or a recognized time-scale
+/// name (`'UTC'`, `'TT'`, …).
+pub fn is_time_ctype(ctype: &str) -> bool {
+    let head = ctype.split('-').next().unwrap_or("").trim();
+    head == "TIME" || !matches!(TimeScale::parse(head), TimeScale::Local)
 }
 
 /// The reference epoch as MJD: `MJDREF` (or `MJDREFI`+`MJDREFF`), else `JDREF`
