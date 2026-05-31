@@ -95,7 +95,7 @@ bytes  ──►  block layer   ──►  HDU layer   ──►  header model  
 | `hdu.rs` | HDU classification + data-unit sizing (Eq. 2, incl. random groups) | done |
 | `reader.rs` | lazy seeking HDU scan; raw `DataUnit` fetch | done |
 | `writer.rs` | header + raw data-unit serialization | header/raw done; typed encoding TODO |
-| `data.rs` | typed `Image`/`ImageData` + `BSCALE`/`BZERO` `Scaling` | scaling done; bulk decode TODO |
+| `data.rs` | typed `Image`/`ImageData`, big-endian decode, `BSCALE`/`BZERO` physical plane | image read done; encode + SIMD/parallel TODO |
 | `error.rs` | `FitsError` + `Result` | done |
 
 `lib.rs` is the only place that defines the public surface (`pub use`). Card

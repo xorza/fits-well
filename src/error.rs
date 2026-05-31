@@ -38,6 +38,9 @@ pub enum FitsError {
         index: usize,
         len: usize,
     },
+    /// `read_image` was called on an HDU that is not an image array (a table,
+    /// random-groups, or unmodelled extension).
+    NotAnImage,
 }
 
 impl fmt::Display for FitsError {
@@ -61,6 +64,7 @@ impl fmt::Display for FitsError {
             FitsError::HduIndexOutOfBounds { index, len } => {
                 write!(f, "HDU index {index} out of bounds (file has {len} HDUs)")
             }
+            FitsError::NotAnImage => write!(f, "HDU is not an image array"),
         }
     }
 }

@@ -5,6 +5,9 @@ use std::ops::Range;
 
 use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
+use crate::data::Image;
+use crate::data::ImageData;
+use crate::data::Scaling;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::HduKind;
@@ -92,6 +95,38 @@ impl<R: Read + Seek> FitsReader<R> {
         let mut bytes = vec![0u8; hdu.data_len as usize];
         self.source.read_exact(&mut bytes)?;
         Ok(DataUnit { bytes, data_range })
+    }
+
+    /// Read an HDU's data unit and decode it into a typed [`Image`]: host-endian
+    /// raw samples (`samples`) plus the [`Scaling`] map for the physical plane.
+    /// Errors with [`FitsError::NotAnImage`] for tables, random groups, and
+    /// unmodelled extensions.
+    pub fn read_image(&mut self, index: usize) -> Result<Image> {
+        let unit = self.read_data_raw(index)?; // also bounds-checks the index
+        let hdu = &self.hdus[index];
+        if !matches!(hdu.kind, HduKind::Primary | HduKind::Image) {
+            return Err(FitsError::NotAnImage);
+        }
+        let bitpix = hdu.header.bitpix()?;
+        let shape = hdu.header.axes()?;
+        let scaling = Scaling::from_header(&hdu.header);
+        let samples = ImageData::decode(unit.data(), bitpix);
+
+        let expected = if shape.is_empty() {
+            0
+        } else {
+            shape.iter().product::<usize>()
+        };
+        assert_eq!(
+            samples.len(),
+            expected,
+            "decoded sample count must match the NAXISn product"
+        );
+        Ok(Image {
+            shape,
+            samples,
+            scaling,
+        })
     }
 }
 
@@ -237,5 +272,39 @@ mod tests {
             f.read_data_raw(5),
             Err(FitsError::HduIndexOutOfBounds { index: 5, len: 1 })
         ));
+    }
+
+    #[test]
+    fn read_image_decodes_the_primary_array_shape_and_type() {
+        let mut f = open("UITfuv2582gc.fits");
+        let img = f.read_image(0).unwrap();
+        assert_eq!(img.shape, vec![512, 512]);
+        assert_eq!(img.samples.bitpix(), Bitpix::I16);
+        assert_eq!(img.samples.len(), 512 * 512);
+        assert_eq!(img.physical().len(), 512 * 512);
+    }
+
+    #[test]
+    fn read_image_raw_samples_match_a_manual_big_endian_decode() {
+        let mut f = open("UITfuv2582gc.fits");
+        // Independently decode the first few pixels straight from the data bytes.
+        let unit = f.read_data_raw(0).unwrap();
+        let manual: Vec<i16> = unit.data()[..8]
+            .chunks_exact(2)
+            .map(|c| i16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        let img = f.read_image(0).unwrap();
+        match img.samples {
+            ImageData::I16(v) => assert_eq!(&v[..4], manual.as_slice()),
+            other => panic!("expected I16 samples, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_image_rejects_non_image_hdus() {
+        // hdu[0] is random groups, hdu[1] is a binary table — neither is an image.
+        let mut f = open("DDTSUVDATA.fits");
+        assert!(matches!(f.read_image(0), Err(FitsError::NotAnImage)));
+        assert!(matches!(f.read_image(1), Err(FitsError::NotAnImage)));
     }
 }
