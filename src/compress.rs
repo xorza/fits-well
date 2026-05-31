@@ -2,10 +2,13 @@
 //!
 //! A compressed image is a `BINTABLE` with `ZIMAGE = T`: the original image
 //! (`ZBITPIX`, `ZNAXISn`) is split into `ZTILEn` tiles, each compressed and stored
-//! as a variable-length byte array in the `COMPRESSED_DATA` column. This module
-//! decompresses the tiles (`GZIP_1`, `RICE_1`) and reassembles the full image.
-//! Floating-point quantization (`ZSCALE`/`ZZERO`) and `HCOMPRESS_1`/`PLIO_1` are
-//! not yet handled.
+//! in `COMPRESSED_DATA` (with `GZIP_COMPRESSED_DATA`/`UNCOMPRESSED_DATA` fallbacks).
+//! This module decompresses the tiles and reassembles the full image.
+//!
+//! Supported: `GZIP_1`, `GZIP_2`, `RICE_1`; float images via per-tile
+//! `ZSCALE`/`ZZERO` linear dequantization (`NO_DITHER`) or the raw-float gzip
+//! fallback. Not yet: `PLIO_1`, `HCOMPRESS_1`, subtractive dithering, `ZBLANK`,
+//! and all compression *writing*.
 
 use std::io::Read;
 
@@ -29,12 +32,7 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
             .get_integer("ZBITPIX")
             .ok_or(FitsError::MissingKeyword { name: "ZBITPIX" })?,
     )?;
-    if zbitpix.is_float() {
-        // Float images are quantized to integers (ZSCALE/ZZERO) — not yet handled.
-        return Err(FitsError::UnsupportedCompression {
-            name: "floating-point quantization".to_string(),
-        });
-    }
+    let is_float = zbitpix.is_float();
     let cmptype = header
         .get_text("ZCMPTYPE")
         .ok_or(FitsError::MissingKeyword { name: "ZCMPTYPE" })?
@@ -54,14 +52,32 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
         .collect();
 
     let (blocksize, bytepix) = rice_params(header, zbitpix);
+    // Float pixels are quantized to integers of `bytepix` bytes; decode the tile
+    // as that integer type, then dequantize. Integer images decode as `zbitpix`.
+    let int_bitpix = if is_float {
+        bytepix_to_bitpix(bytepix)
+    } else {
+        zbitpix
+    };
 
-    // The compressed tile bytes: one variable-length byte array per row/tile.
-    let col = table
-        .column_index("COMPRESSED_DATA")
-        .ok_or(FitsError::MissingKeyword {
-            name: "COMPRESSED_DATA",
-        })?;
-    let tile_bytes = table.read_vla_column(col)?;
+    // Float quantization: NO_DITHER (linear) is supported; dithering is not yet.
+    let zquantiz = header
+        .get_text("ZQUANTIZ")
+        .unwrap_or("NO_DITHER")
+        .to_string();
+    if is_float && zquantiz != "NO_DITHER" {
+        return Err(FitsError::UnsupportedCompression {
+            name: format!("float quantization {zquantiz}"),
+        });
+    }
+
+    // Per-tile compressed data, with the conventional fallback columns.
+    let primary = read_tiles(table, "COMPRESSED_DATA")?;
+    let gzip_fallback = read_tiles(table, "GZIP_COMPRESSED_DATA")?;
+    let uncompressed = read_tiles(table, "UNCOMPRESSED_DATA")?;
+    // Per-tile linear dequantization parameters (float only).
+    let zscale = read_f64_column(table, "ZSCALE");
+    let zzero = read_f64_column(table, "ZZERO");
 
     let ntiles_axis: Vec<usize> = dims
         .iter()
@@ -69,31 +85,18 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
         .map(|(&n, &t)| n.div_ceil(t))
         .collect();
     let ntiles: usize = ntiles_axis.iter().product();
-    if tile_bytes.len() != ntiles {
-        return Err(FitsError::RowWidthMismatch {
-            computed: tile_bytes.len(),
-            declared: ntiles,
-        });
-    }
 
-    // Strides for the full image (axis 0 fastest).
     let mut stride = vec![1usize; znaxis];
     for i in 1..znaxis {
         stride[i] = stride[i - 1] * dims[i - 1];
     }
 
     let total: usize = dims.iter().product();
-    let mut out = vec![0i64; total];
-    for (t, cell) in tile_bytes.iter().enumerate() {
-        let bytes = match cell {
-            ColumnData::Bytes(b) => b.as_slice(),
-            _ => {
-                return Err(FitsError::UnsupportedCompression {
-                    name: "COMPRESSED_DATA is not a byte array".to_string(),
-                });
-            }
-        };
-        // Tile origin and (possibly clipped at edges) dimensions.
+    let mut out_i = vec![0i64; if is_float { 0 } else { total }];
+    let mut out_f = vec![0f64; if is_float { total } else { 0 }];
+
+    for t in 0..ntiles {
+        // Tile origin and (edge-clipped) dimensions.
         let mut origin = vec![0usize; znaxis];
         let mut tdims = vec![0usize; znaxis];
         let mut rem = t;
@@ -104,15 +107,221 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
             tdims[i] = tiles[i].min(dims[i] - origin[i]);
         }
         let tile_elems: usize = tdims.iter().product();
-        let values = decode_tile(&cmptype, bytes, tile_elems, zbitpix, blocksize, bytepix)?;
-        scatter_tile(&mut out, &values, &origin, &tdims, &stride);
+
+        let indices = tile_flat_indices(&origin, &tdims, &stride);
+        if is_float {
+            let s = column_at(&zscale, t).unwrap_or(1.0);
+            let z = column_at(&zzero, t).unwrap_or(0.0);
+            let vals = decode_float_tile(
+                &cmptype,
+                primary.get(t),
+                gzip_fallback.get(t),
+                uncompressed.get(t),
+                tile_elems,
+                zbitpix,
+                int_bitpix,
+                blocksize,
+                bytepix,
+                s,
+                z,
+            )?;
+            for (&flat, &v) in indices.iter().zip(&vals) {
+                out_f[flat] = v;
+            }
+        } else {
+            let vals = decode_one_tile(
+                &cmptype,
+                primary.get(t),
+                gzip_fallback.get(t),
+                uncompressed.get(t),
+                tile_elems,
+                int_bitpix,
+                blocksize,
+                bytepix,
+            )?;
+            for (&flat, &v) in indices.iter().zip(&vals) {
+                out_i[flat] = v;
+            }
+        }
     }
 
+    let samples = if is_float {
+        float_samples(out_f, zbitpix)
+    } else {
+        narrow(out_i, zbitpix)
+    };
     Ok(Image {
         shape: dims,
-        samples: narrow(out, zbitpix),
+        samples,
         scaling: Scaling::from_header(header),
     })
+}
+
+/// Read a compressed-data column's per-tile cells, or `None` if absent.
+fn read_tiles(table: &BinTable, name: &str) -> Result<Vec<ColumnData>> {
+    match table.column_index(name) {
+        Some(c) => table.read_vla_column(c),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Read a per-tile `f64` column (e.g. `ZSCALE`/`ZZERO`), or `None` if absent.
+fn read_f64_column(table: &BinTable, name: &str) -> Option<Vec<f64>> {
+    let c = table.column_index(name)?;
+    match table.read_column(c) {
+        Ok(ColumnData::F64(v)) => Some(v),
+        _ => None,
+    }
+}
+
+fn column_at(col: &Option<Vec<f64>>, t: usize) -> Option<f64> {
+    col.as_ref().and_then(|v| v.get(t).copied())
+}
+
+/// Decode one tile, honoring the fallback columns: the primary `COMPRESSED_DATA`
+/// (via `ZCMPTYPE`), else gzip'd `GZIP_COMPRESSED_DATA`, else raw `UNCOMPRESSED_DATA`.
+#[allow(clippy::too_many_arguments)]
+fn decode_one_tile(
+    cmptype: &str,
+    primary: Option<&ColumnData>,
+    gzip_fallback: Option<&ColumnData>,
+    uncompressed: Option<&ColumnData>,
+    tile_elems: usize,
+    int_bitpix: Bitpix,
+    blocksize: usize,
+    bytepix: usize,
+) -> Result<Vec<i64>> {
+    if let Some(cell) = primary.filter(|c| cell_len(c) > 0) {
+        decode_tile_cell(cmptype, cell, tile_elems, int_bitpix, blocksize, bytepix)
+    } else if let Some(cell) = gzip_fallback.filter(|c| cell_len(c) > 0) {
+        gzip_tile(as_bytes(cell)?, tile_elems, int_bitpix)
+    } else if let Some(cell) = uncompressed.filter(|c| cell_len(c) > 0) {
+        Ok(cell_to_i64(cell))
+    } else {
+        Err(FitsError::UnsupportedCompression {
+            name: "empty tile (no compressed or uncompressed data)".to_string(),
+        })
+    }
+}
+
+/// Decode one tile of a *float* image. A primary `COMPRESSED_DATA` cell holds
+/// quantized integers (dequantized as `scale·int + zero`); otherwise the
+/// `GZIP_COMPRESSED_DATA`/`UNCOMPRESSED_DATA` fallbacks hold the raw float values.
+#[allow(clippy::too_many_arguments)]
+fn decode_float_tile(
+    cmptype: &str,
+    primary: Option<&ColumnData>,
+    gzip_fallback: Option<&ColumnData>,
+    uncompressed: Option<&ColumnData>,
+    tile_elems: usize,
+    zbitpix: Bitpix,
+    int_bitpix: Bitpix,
+    blocksize: usize,
+    bytepix: usize,
+    scale: f64,
+    zero: f64,
+) -> Result<Vec<f64>> {
+    if let Some(cell) = primary.filter(|c| cell_len(c) > 0) {
+        let ints = decode_tile_cell(cmptype, cell, tile_elems, int_bitpix, blocksize, bytepix)?;
+        Ok(ints.iter().map(|&v| scale * v as f64 + zero).collect())
+    } else if let Some(cell) = gzip_fallback.filter(|c| cell_len(c) > 0) {
+        Ok(be_floats(&gunzip(as_bytes(cell)?)?, zbitpix))
+    } else if let Some(cell) = uncompressed.filter(|c| cell_len(c) > 0) {
+        Ok(cell_to_f64(cell, zbitpix))
+    } else {
+        Err(FitsError::UnsupportedCompression {
+            name: "empty float tile".to_string(),
+        })
+    }
+}
+
+/// Decode a big-endian buffer of `bitpix` floats into `f64`.
+fn be_floats(bytes: &[u8], bitpix: Bitpix) -> Vec<f64> {
+    match bitpix {
+        Bitpix::F32 => bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]) as f64)
+            .collect(),
+        Bitpix::F64 => bytes
+            .chunks_exact(8)
+            .map(|c| f64::from_be_bytes(c.try_into().expect("8-byte chunk")))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Widen a raw (`UNCOMPRESSED_DATA`) float tile cell to `f64`.
+fn cell_to_f64(cell: &ColumnData, zbitpix: Bitpix) -> Vec<f64> {
+    match cell {
+        ColumnData::F32(v) => v.iter().map(|&x| x as f64).collect(),
+        ColumnData::F64(v) => v.clone(),
+        ColumnData::Bytes(b) => be_floats(b, zbitpix),
+        _ => Vec::new(),
+    }
+}
+
+/// Strides give the flat indices in the full image for a tile's row-major elements.
+fn tile_flat_indices(origin: &[usize], tdims: &[usize], stride: &[usize]) -> Vec<usize> {
+    let tile_elems: usize = tdims.iter().product();
+    (0..tile_elems)
+        .map(|local| {
+            let mut rem = local;
+            let mut flat = 0;
+            for i in 0..tdims.len() {
+                let c = rem % tdims[i];
+                rem /= tdims[i];
+                flat += (origin[i] + c) * stride[i];
+            }
+            flat
+        })
+        .collect()
+}
+
+fn cell_len(cell: &ColumnData) -> usize {
+    match cell {
+        ColumnData::Bytes(v) => v.len(),
+        ColumnData::I16(v) => v.len(),
+        ColumnData::I32(v) => v.len(),
+        ColumnData::I64(v) => v.len(),
+        _ => 0,
+    }
+}
+
+fn as_bytes(cell: &ColumnData) -> Result<&[u8]> {
+    match cell {
+        ColumnData::Bytes(b) => Ok(b),
+        _ => Err(FitsError::UnsupportedCompression {
+            name: "compressed cell is not a byte array".to_string(),
+        }),
+    }
+}
+
+/// Widen a raw (`UNCOMPRESSED_DATA`) tile cell to `i64` values.
+fn cell_to_i64(cell: &ColumnData) -> Vec<i64> {
+    match cell {
+        ColumnData::Bytes(v) => v.iter().map(|&b| b as i64).collect(),
+        ColumnData::I16(v) => v.iter().map(|&x| x as i64).collect(),
+        ColumnData::I32(v) => v.iter().map(|&x| x as i64).collect(),
+        ColumnData::I64(v) => v.clone(),
+        _ => Vec::new(),
+    }
+}
+
+fn bytepix_to_bitpix(bytepix: usize) -> Bitpix {
+    match bytepix {
+        1 => Bitpix::U8,
+        2 => Bitpix::I16,
+        8 => Bitpix::I64,
+        _ => Bitpix::I32,
+    }
+}
+
+/// Build float samples from a dequantized `f64` buffer.
+fn float_samples(values: Vec<f64>, zbitpix: Bitpix) -> ImageData {
+    match zbitpix {
+        Bitpix::F32 => ImageData::F32(values.iter().map(|&v| v as f32).collect()),
+        _ => ImageData::F64(values),
+    }
 }
 
 /// Read `PREFIX1..PREFIXn` integer axis lengths.
@@ -146,49 +355,55 @@ fn rice_params(header: &Header, zbitpix: Bitpix) -> (usize, usize) {
     (blocksize, bytepix)
 }
 
-/// Scatter a row-major tile (`tdims`, axis 0 fastest) into the full image `out`.
-fn scatter_tile(
-    out: &mut [i64],
-    values: &[i64],
-    origin: &[usize],
-    tdims: &[usize],
-    stride: &[usize],
-) {
-    for (local, &v) in values.iter().enumerate() {
-        let mut rem = local;
-        let mut flat = 0;
-        for i in 0..tdims.len() {
-            let c = rem % tdims[i];
-            rem /= tdims[i];
-            flat += (origin[i] + c) * stride[i];
-        }
-        out[flat] = v;
-    }
-}
-
-/// Decode one tile's compressed bytes into `tile_elems` integer values.
-fn decode_tile(
+/// Decode one tile's primary `COMPRESSED_DATA` cell into `tile_elems` integer
+/// values, per `ZCMPTYPE`. The cell is a byte array except for `PLIO_1` (i16).
+fn decode_tile_cell(
     cmptype: &str,
-    bytes: &[u8],
+    cell: &ColumnData,
     tile_elems: usize,
-    zbitpix: Bitpix,
+    int_bitpix: Bitpix,
     blocksize: usize,
     bytepix: usize,
 ) -> Result<Vec<i64>> {
     match cmptype {
-        "GZIP_1" => gzip_tile(bytes, tile_elems, zbitpix),
-        "RICE_1" => Ok(rice_decode(bytes, tile_elems, bytepix, blocksize)),
+        "GZIP_1" => gzip_tile(as_bytes(cell)?, tile_elems, int_bitpix),
+        "GZIP_2" => gzip2_tile(as_bytes(cell)?, tile_elems, int_bitpix),
+        "RICE_1" => Ok(rice_decode(as_bytes(cell)?, tile_elems, bytepix, blocksize)),
         other => Err(FitsError::UnsupportedCompression {
             name: other.to_string(),
         }),
     }
 }
 
-/// `GZIP_1`: inflate to the tile's big-endian byte stream, then decode per `ZBITPIX`.
-fn gzip_tile(bytes: &[u8], tile_elems: usize, zbitpix: Bitpix) -> Result<Vec<i64>> {
-    let mut raw = Vec::with_capacity(tile_elems * zbitpix.elem_size());
-    flate2::read::GzDecoder::new(bytes).read_to_end(&mut raw)?;
-    Ok(be_to_i64(&raw, zbitpix))
+/// Inflate a gzip stream to its raw bytes.
+fn gunzip(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(bytes).read_to_end(&mut out)?;
+    Ok(out)
+}
+
+/// `GZIP_1`: inflate to the tile's big-endian byte stream, then decode per `bitpix`.
+fn gzip_tile(bytes: &[u8], _tile_elems: usize, bitpix: Bitpix) -> Result<Vec<i64>> {
+    Ok(be_to_i64(&gunzip(bytes)?, bitpix))
+}
+
+/// `GZIP_2`: like `GZIP_1` but the bytes are shuffled into significance planes
+/// (all most-significant bytes first, …) before gzip. Inflate, then un-shuffle.
+fn gzip2_tile(bytes: &[u8], _tile_elems: usize, bitpix: Bitpix) -> Result<Vec<i64>> {
+    let width = bitpix.elem_size();
+    let shuffled = gunzip(bytes)?;
+    if width == 1 {
+        return Ok(be_to_i64(&shuffled, bitpix));
+    }
+    let n = shuffled.len() / width;
+    let mut raw = vec![0u8; shuffled.len()];
+    // Plane p (p=0 most significant) holds byte p of every value, in order.
+    for p in 0..width {
+        for i in 0..n {
+            raw[i * width + p] = shuffled[p * n + i];
+        }
+    }
+    Ok(be_to_i64(&raw, bitpix))
 }
 
 /// Decode a big-endian buffer of `bitpix` integers into widened `i64` values.
@@ -354,6 +569,39 @@ mod tests {
     #[test]
     fn decompresses_rice_1_tiled_image() {
         check_decoded("comp_rice_i16.fits");
+    }
+
+    #[test]
+    fn decompresses_gzip_2_tiled_image() {
+        check_decoded("comp_gzip2_i16.fits");
+    }
+
+    /// Compare a compressed-float decode against astropy's reconstructed reference.
+    fn check_float(compressed: &str, reference: &str) {
+        let got = match open(compressed).read_compressed_image(1).unwrap().samples {
+            ImageData::F32(v) => v,
+            other => panic!("expected F32, got {other:?}"),
+        };
+        let want = match open(reference).read_image(0).unwrap().samples {
+            ImageData::F32(v) => v,
+            other => panic!("expected F32 reference, got {other:?}"),
+        };
+        assert_eq!(got.len(), 24 * 16);
+        assert_eq!(got, want, "{compressed} must match astropy");
+    }
+
+    #[test]
+    fn decompresses_unquantized_float_via_gzip_fallback() {
+        // Smooth data stored losslessly: ZSCALE=0, raw floats gzip'd in
+        // GZIP_COMPRESSED_DATA (COMPRESSED_DATA empty).
+        check_float("comp_ricef_nodither.fits", "comp_ref_f32.fits");
+    }
+
+    #[test]
+    fn decompresses_quantized_float_no_dither() {
+        // Noisy data genuinely quantized: per-tile ZSCALE≠0, integers RICE-packed in
+        // COMPRESSED_DATA, dequantized as ZSCALE·int + ZZERO.
+        check_float("comp_ricef_quant.fits", "comp_ref_quant_f32.fits");
     }
 
     #[test]
