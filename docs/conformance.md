@@ -705,7 +705,7 @@ to an astronomy library (astropy `SkyCoord`/`time`, ERFA), not implemented here.
 | 9.2.1 | Table 30 scales (`TAI/TT/TCG/TDB/TCB/UTC/UT1/GPS/…`) | `TimeScale::parse` (`time/mod.rs:215`) | ✅ |
 | 9.2.1 | Aliases `TDT`/`ET`→`TT`, `IAT`→`TAI` | `parse` arms (`time/mod.rs:215`) | ✅ |
 | 9.2.1 | Realization suffix `TT(TAI)`, `UTC(NIST)` | `TimeScale::parse` strips `(...)` before matching | ✅ |
-| 9.2.1 | `GMT` (continuous with UTC) | no arm ⇒ `Local` | 🟡 should alias `Utc` |
+| 9.2.1 | `GMT` (continuous with UTC) | `parse` aliases `GMT` → `Utc` | ✅ |
 | 9.2.1 | TT-pivot lattice; `TT↔TCG` (`L_G`), `TDB↔TCB` (`L_B`) | `to_tt`/`from_tt` (`time/mod.rs:245`,`:269`) | ✅ |
 | 9.2.1 | TDB periodic series | `tdb_minus_tt` (`time/mod.rs:297`) | ✅ (no `TDB_0`) |
 | 9.2.1 | `UT1` via ΔUT1; `LOCAL` pass-through | `convert_dut1` (`time/mod.rs:237`) | ✅ caller ΔUT1 / 🟡 no bundled table |
