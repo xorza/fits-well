@@ -5,9 +5,10 @@
 //! `qtree_decode`), undigitize (multiply by the scale), then invert the
 //! H-transform (`hinv`). Encoding is the mirror: forward H-transform (`htrans`),
 //! digitize, then quadtree bit-plane coding (`encode`/`doencode`/`qtree_encode`).
-//! Smoothing (`SMOOTH = 1`) is not implemented; the common `SMOOTH = 0`, lossless
-//! (`scale = 0`) path is. Like the decoder this is the 32-bit codec, so tile
-//! values must fit the int H-transform without overflow (i16 and moderate i32).
+//! Decode supports `SMOOTH = 1` (inverse-transform smoothing) and lossy
+//! `scale > 0`; encode supports lossless and lossy (`scale`) but always
+//! `SMOOTH = 0`. Like the decoder this is the 32-bit codec, so tile values must
+//! fit the int H-transform without overflow (i16 and moderate i32).
 
 use crate::error::FitsError;
 use crate::error::Result;
