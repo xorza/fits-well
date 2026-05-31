@@ -1,18 +1,5 @@
 use super::*;
-use crate::block::CARD_SIZE;
-
-fn header(lines: &[&str]) -> Header {
-    let mut buf = Vec::new();
-    for line in lines {
-        let mut card = [b' '; CARD_SIZE];
-        card[..line.len()].copy_from_slice(line.as_bytes());
-        buf.extend_from_slice(&card);
-    }
-    let mut end = [b' '; CARD_SIZE];
-    end[..3].copy_from_slice(b"END");
-    buf.extend_from_slice(&end);
-    Header::parse(&buf).unwrap()
-}
+use crate::header::from_card_lines as header;
 
 fn image(samples: ImageData, scaling: Scaling) -> Image {
     Image {

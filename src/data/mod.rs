@@ -7,6 +7,8 @@
 //! types here are its target; the scaling map is already modelled and tested.
 
 use crate::bitpix::Bitpix;
+use crate::endian::decode_be;
+use crate::endian::encode_be;
 use crate::header::Header;
 
 /// An owned, host-endian sample buffer, tagged by its `BITPIX` element type.
@@ -61,11 +63,11 @@ impl ImageData {
         );
         match bitpix {
             Bitpix::U8 => ImageData::U8(bytes.to_vec()),
-            Bitpix::I16 => ImageData::I16(from_be(bytes, i16::from_be_bytes)),
-            Bitpix::I32 => ImageData::I32(from_be(bytes, i32::from_be_bytes)),
-            Bitpix::I64 => ImageData::I64(from_be(bytes, i64::from_be_bytes)),
-            Bitpix::F32 => ImageData::F32(from_be(bytes, f32::from_be_bytes)),
-            Bitpix::F64 => ImageData::F64(from_be(bytes, f64::from_be_bytes)),
+            Bitpix::I16 => ImageData::I16(decode_be(bytes, i16::from_be_bytes)),
+            Bitpix::I32 => ImageData::I32(decode_be(bytes, i32::from_be_bytes)),
+            Bitpix::I64 => ImageData::I64(decode_be(bytes, i64::from_be_bytes)),
+            Bitpix::F32 => ImageData::F32(decode_be(bytes, f32::from_be_bytes)),
+            Bitpix::F64 => ImageData::F64(decode_be(bytes, f64::from_be_bytes)),
         }
     }
 
@@ -75,32 +77,13 @@ impl ImageData {
     pub(crate) fn encode(&self) -> Vec<u8> {
         match self {
             ImageData::U8(v) => v.clone(),
-            ImageData::I16(v) => to_be(v, i16::to_be_bytes),
-            ImageData::I32(v) => to_be(v, i32::to_be_bytes),
-            ImageData::I64(v) => to_be(v, i64::to_be_bytes),
-            ImageData::F32(v) => to_be(v, f32::to_be_bytes),
-            ImageData::F64(v) => to_be(v, f64::to_be_bytes),
+            ImageData::I16(v) => encode_be(v, i16::to_be_bytes),
+            ImageData::I32(v) => encode_be(v, i32::to_be_bytes),
+            ImageData::I64(v) => encode_be(v, i64::to_be_bytes),
+            ImageData::F32(v) => encode_be(v, f32::to_be_bytes),
+            ImageData::F64(v) => encode_be(v, f64::to_be_bytes),
         }
     }
-}
-
-/// Decode a packed big-endian buffer into host-endian values of a fixed-width
-/// type. `chunks_exact` consumes every element; any partial tail is impossible
-/// because the caller passes whole elements only.
-fn from_be<const N: usize, T>(bytes: &[u8], conv: fn([u8; N]) -> T) -> Vec<T> {
-    bytes
-        .chunks_exact(N)
-        .map(|c| conv(c.try_into().expect("chunks_exact yields N-byte arrays")))
-        .collect()
-}
-
-/// Pack fixed-width values into a big-endian byte buffer.
-fn to_be<const N: usize, T: Copy>(values: &[T], conv: fn(T) -> [u8; N]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(values.len() * N);
-    for &v in values {
-        out.extend_from_slice(&conv(v));
-    }
-    out
 }
 
 /// An N-dimensional image: a flat, Fortran-ordered buffer (axis 0 varies
