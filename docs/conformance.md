@@ -7,7 +7,10 @@ severity and `file:line` anchors), and assesses test coverage.
 
 Severity legend: 🔴 correctness bug (rejects valid files or produces wrong
 output) · 🟡 lenient/permissive beyond the standard (safe for a reader, but not
-strictly conforming) · 🟢 missing nice-to-have / "should" clause.
+strictly conforming) · 🟢 missing nice-to-have / "should" clause · ⚪ deliberately
+out of scope — astronomy/metrology computed *on top of* the keywords (frame
+rotations, light-travel/ephemeris corrections), beyond the FITS *format* standard
+and not a gap to close.
 
 ---
 
@@ -723,6 +726,16 @@ relative→absolute MJD for the global keywords and a `CTYPEi='TIME'` image axis
 The gaps are the metadata-only / table-context / nice-to-have parts of §9, plus
 two correctness bugs (the `TIMEUNIT` table and the split-reference precedence).
 
+**Scope.** Time-*scale* conversion (the TT-pivot lattice with the defining
+`L_G`/`L_B` relations, leap seconds, the TDB series) is in scope: FITS §9.2.1
+defines the scales and their relationships, and reading a stated time correctly
+requires it. *Out of scope* — the same boundary drawn for celestial frames in §8 —
+is the geometry that turns a stated `TREFPOS`/`TREFDIR`/`PLEPHEM` into an actual
+light-travel / reference-position correction (observatory location + solar-system
+ephemeris), and maintaining IERS-observed data such as a bundled ΔUT1 table. Those
+keywords are read and preserved; the position-dependent corrections are delegated
+to an astronomy library (astropy `SkyCoord`/`time`, ERFA), not implemented here.
+
 ### Conformance matrix
 
 | Doc § | Requirement | Code | Status |
@@ -746,9 +759,9 @@ two correctness bugs (the `TIMEUNIT` table and the split-reference precedence).
 | 9.2.2 | **Split takes precedence over single** when all present | single `MJDREF` returned first (`time/mod.rs:455`) | 🔴 wrong precedence |
 | 9.2.2 | Kind precedence `MJDREF > JDREF > DATEREF` | checked in that order (`time/mod.rs:455`,`:462`,`:469`) | ✅ |
 | 9.3 | `TIMEUNIT` (default `s`); Table 34 units | `unit_seconds` (`time/mod.rs:404`) | 🔴 only `s`/`d`/`a`; `min`/`h`/`cy`→`1.0` |
-| 9.2.3 | `TREFPOS` (default `TOPOCENTER`) + Table 31; `TRPOSn` | stored verbatim (`time/mod.rs:394`) | 🟡 no default/validation |
-| 9.2.4 | `TREFDIR`/`TRDIRn` reference direction | — | 🟢 not implemented |
-| 9.2.5 | `PLEPHEM` (default `DE405`) | — | 🟢 not implemented |
+| 9.2.3 | `TREFPOS` keyword (Table 31); position-dependent light-travel correction | stored verbatim (`time/mod.rs:394`) | ✅ read / ⚪ correction out of scope |
+| 9.2.4 | `TREFDIR`/`TRDIRn` reference direction (correction geometry) | — | ⚪ out of scope (astronomy) |
+| 9.2.5 | `PLEPHEM` (default `DE405`) planetary ephemeris | — | ⚪ out of scope (astronomy) |
 | 9.4.1 | `TIMEOFFS` added to reference time | not read; `relative_to_mjd` (`time/mod.rs:414`) omits it | 🟡 not applied |
 | 9.4.2 | `TIMEDEL` / `TIMEPIXR` binning | — | 🟡 not implemented |
 | 9.4.3 | `TIMSYER` / `TIMRDER` time errors | — | 🟢 not implemented |
@@ -811,19 +824,21 @@ table-only constructs, the non-`TIME` time axes, and two outright bugs.
    `FitsTime::from_header` never reads `JEPOCH` (implied TDB) or `BEPOCH` (implied
    ET), nor attaches the implied scales.
 
-8. 🟡 **`UT1`/ΔUT1 are caller-supplied; no bundled IERS ΔUT1 table.**
-   `TimeScale::convert` treats `UT1` as `UTC` (ΔUT1 = 0) unless the caller routes
-   through `convert_dut1` with an external ΔUT1 (`time/mod.rs:231`,`:237`). The
-   module doc states this.
+8. ⚪ **`UT1`/ΔUT1 are caller-supplied by design; bundling an IERS ΔUT1 table is
+   out of scope.** `TimeScale::convert` treats `UT1` as `UTC` (ΔUT1 = 0) unless the
+   caller routes through `convert_dut1` with an external ΔUT1 (`time/mod.rs:231`,`:237`).
+   ΔUT1 is an IERS-observed quantity, not a FITS keyword; maintaining that table is
+   astronomy-library territory, so caller-supplied ΔUT1 is the deliberate boundary.
 
-9. 🟢 **Metadata-only / table-context §9 features unimplemented:** `TREFPOS`
-   stored without default/validation/`TRPOSn` (`time/mod.rs:394`); no `TREFDIR`
-   (§9.2.4), `PLEPHEM` (§9.2.5), `OBSGEO-*` location, `TIMEDEL`/`TIMEPIXR`
-   binning (§9.4.2), `TIMSYER`/`TIMRDER` errors (§9.4.3); only `DATE-OBS`/`MJD-OBS`
-   (no typed `DATE-BEG`/`-END`/`MJD-BEG`/`-END`); no `XPOSURE`/`TELAPSE` durations
-   or GTI `START`/`STOP` (§9.7); no `'PHASE'`/`'TIMELAG'`/`'FREQUENCY'` axes or
+9. 🟢 **Typed reading of metadata-only / table-context §9 keywords unimplemented
+   (all remain readable as raw cards):** `TIMEDEL`/`TIMEPIXR` binning (§9.4.2),
+   `TIMSYER`/`TIMRDER` errors (§9.4.3); only `DATE-OBS`/`MJD-OBS` (no typed
+   `DATE-BEG`/`-END`/`MJD-BEG`/`-END`); no `XPOSURE`/`TELAPSE` durations or GTI
+   `START`/`STOP` (§9.7); no `'PHASE'`/`'TIMELAG'`/`'FREQUENCY'` axes or
    `CZPHSia`/`CPERIia` (§9.6) — `is_time_ctype` recognizes only `'TIME'` and
-   Table-30 scale names (`time/mod.rs:447`). All remain readable as raw cards.
+   Table-30 scale names (`time/mod.rs:447`). (`TREFPOS`/`TREFDIR`/`PLEPHEM`/`OBSGEO-*`
+   are read or preserved as cards, but their position-dependent corrections are out
+   of scope — see the §9 scope note above.)
 
 10. 🟢 **`TDB_0` constant offset omitted.** The §9.2.1 TCB→TDB relation includes
    `TDB_0 = −6.55 × 10⁻⁵ s`; the periodic `tdb_minus_tt` series (`time/mod.rs:297`)
@@ -860,9 +875,8 @@ Coverage gaps:
 - No signed-5-digit-year, leading-zero-omission (gap #6), or explicit `Z`-suffix
   rejection test; no `JDREF`/`DATEREF` resolution or kind-precedence test (only
   `MJDREF` and the split are exercised).
-- Everything in gaps #5/#7/#9 (TIMEOFFS, epoch keywords, TREFPOS validation,
-  binning, durations, GTI, PHASE/TIMELAG/FREQUENCY) is untested because
-  unimplemented.
+- Everything in gaps #5/#7/#9 (TIMEOFFS, epoch keywords, binning, durations, GTI,
+  PHASE/TIMELAG/FREQUENCY) is untested because unimplemented.
 
 ---
 
