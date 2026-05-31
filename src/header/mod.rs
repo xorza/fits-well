@@ -57,7 +57,7 @@ impl Header {
                         card.kind = CardKind::Commentary;
                         card.value = None;
                     }
-                    if card.kind == CardKind::Value {
+                    if matches!(card.kind, CardKind::Value | CardKind::Hierarch) {
                         index.entry(card.keyword.clone()).or_insert(cards.len());
                     }
                     cards.push(card);

@@ -18,10 +18,13 @@ The structural spine is built and tested: the 2880-byte block layer, an ordered
 header model (with `CONTINUE` long-string read/write), HDU classification and
 boundary sizing, a lazy seeking reader, and a header / raw-data-unit writer. The
 core crate is dependency-free. Typed image read/write is done (decode/encode +
-`BSCALE`/`BZERO`), and binary tables are read (fixed-width columns, `TSCAL`/`TZERO`
-scaling, and `P`/`Q` heap arrays); table *writing*, WCS, and tiled compression are
-scaffolded — the module map below shows what is built versus planned, and
-[`docs/ROADMAP.md`](docs/ROADMAP.md) lays out the path to feature-complete. The design principles there remain the spec; follow them when
+`BSCALE`/`BZERO`). Binary and ASCII tables read and write; multi-HDU files
+(primary + `IMAGE`/`TABLE`/`BINTABLE` extensions) write; binary-table `P`/`Q` heap
+arrays and per-column `TSCAL`/`TZERO` decode; random groups read; `CONTINUE`,
+`HIERARCH`, and `CHECKSUM`/`DATASUM` (verify + write) are supported. WCS, time
+coordinates, and tiled compression remain — the module map below shows what is
+built versus planned, and [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks the path to
+feature-complete. The design principles there remain the spec; follow them when
 filling the scaffolds in.
 
 ## Commands
@@ -93,12 +96,15 @@ bytes  ──►  block layer   ──►  HDU layer   ──►  header model  
 |--------|------|--------|
 | `block.rs` | 2880-byte grid, padding, rounding math | done |
 | `bitpix.rs` | `BITPIX` element type + element sizes | done |
-| `header/{value,card,mod}.rs` | ordered card model, parse/render, `CONTINUE` folding, keyword index, typed getters + builder (`set`/`comment`/`push_*`) | done |
+| `header/{value,card,mod}.rs` | ordered card model, parse/render, `CONTINUE` folding, `HIERARCH`, keyword index, typed getters + builder | done |
 | `hdu.rs` | HDU classification + data-unit sizing (Eq. 2, incl. random groups) | done |
-| `reader.rs` | lazy seeking HDU scan; `DataUnit` fetch, `read_image`, `read_table` | done |
-| `writer.rs` | header + data-unit serialization; `write_image` (primary array) | image write done; tables/extension write TODO |
+| `reader.rs` | lazy seeking HDU scan; `DataUnit`/`read_image`/`read_table`/`read_ascii_table`/`read_groups`/`verify_checksum` | done |
+| `writer.rs` | multi-HDU writer: `write_image` (primary + `IMAGE` ext), `write_table`, `write_ascii_table`, `with_checksums` | done; binary-table VLA write TODO |
 | `data.rs` | typed `Image`/`ImageData`, big-endian decode+encode, `BSCALE`/`BZERO` physical plane | image read+write done; SIMD/parallel TODO |
-| `table.rs` | `BINTABLE` parsing (`Tform`/`Column`); fixed-width decode (`ColumnData`), `TSCAL`/`TZERO` physical plane, `P`/`Q` heap VLAs | read done; table write TODO |
+| `table.rs` | `BINTABLE` parsing (`Tform`/`Column`); fixed-width decode (`ColumnData`), `TSCAL`/`TZERO` physical plane, `P`/`Q` heap VLAs | read done |
+| `ascii.rs` | `TABLE` (ASCII) read: `TBCOLn`/Fortran `TFORMn` → `AsciiColumn`/`ColumnData` | read done (write in `writer.rs`) |
+| `groups.rs` | random-groups (§6) read: params + arrays, `PSCALn`/`PZEROn` physical | read done (no write — deprecated) |
+| `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
 | `error.rs` | `FitsError` + `Result` | done |
 
 `lib.rs` is the only place that defines the public surface (`pub use`). Card

@@ -29,25 +29,30 @@
 //! ASCII/binary tables, WCS, and tiled compression are scaffolded — see their
 //! module docs for the intended design.
 
+mod ascii;
 mod bitpix;
 mod block;
+mod checksum;
 mod data;
 mod error;
+mod groups;
 mod hdu;
 mod header;
 mod reader;
 mod table;
 mod writer;
 
+pub use ascii::{AsciiColumn, AsciiKind, AsciiTable};
 pub use bitpix::Bitpix;
 pub use data::{Image, ImageData, Scaling};
 pub use error::{FitsError, Result};
+pub use groups::RandomGroups;
 pub use hdu::HduKind;
 pub use header::Header;
 pub use header::card::{Card, CardKind};
 pub use header::value::Value;
-pub use reader::{DataUnit, FitsReader, Hdu};
+pub use reader::{ChecksumReport, DataUnit, FitsReader, Hdu};
 pub use table::{BinTable, Column, ColumnData, Tform, TformKind};
-pub use writer::FitsWriter;
+pub use writer::{AsciiWriteColumn, FitsWriter, WriteColumn};
 
 pub use block::{BLOCK_SIZE, CARD_SIZE, CARDS_PER_BLOCK, SPACE_FILL, ZERO_FILL};

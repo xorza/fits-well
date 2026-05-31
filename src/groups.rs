@@ -1,0 +1,181 @@
+//! Random-groups primary array (§6) — read only.
+//!
+//! A legacy structure (radio interferometry `uv` data): `GROUPS = T`, `NAXIS1 =
+//! 0`, and the data is `GCOUNT` groups, each `PCOUNT` parameters followed by an
+//! array of `NAXIS2 × … × NAXISm` elements. Per "once FITS, always FITS" this is
+//! decoded but never written.
+
+use crate::bitpix::Bitpix;
+use crate::data::ImageData;
+use crate::data::Scaling;
+use crate::error::FitsError;
+use crate::error::Result;
+use crate::header::Header;
+
+/// A decoded random-groups primary array.
+#[derive(Debug, Clone)]
+pub struct RandomGroups {
+    /// `PTYPEn` parameter names, in order (length `pcount`).
+    pub parameter_names: Vec<String>,
+    /// The per-group array shape (`NAXIS2..NAXISm`; the `NAXIS1` zero sentinel is
+    /// dropped).
+    pub group_shape: Vec<usize>,
+    pub gcount: usize,
+    pub pcount: usize,
+    bitpix: Bitpix,
+    array_scaling: Scaling,
+    /// `(PSCALn, PZEROn)` per parameter.
+    param_scaling: Vec<(f64, f64)>,
+    /// Flat host-endian samples: `gcount` groups of `pcount + array_len` elements.
+    samples: ImageData,
+}
+
+impl RandomGroups {
+    pub(crate) fn from_data(header: &Header, data: &[u8]) -> Result<RandomGroups> {
+        let bitpix = header.bitpix()?;
+        let axes = header.axes()?;
+        // NAXIS1 is the zero sentinel; the per-group array spans the rest.
+        let group_shape: Vec<usize> = axes.iter().skip(1).copied().collect();
+        let pcount = match header.get_integer("PCOUNT") {
+            Some(p) if p < 0 => return Err(FitsError::WrongValueType { name: "PCOUNT" }),
+            Some(p) => p as usize,
+            None => 0,
+        };
+        let gcount = match header.get_integer("GCOUNT") {
+            Some(g) if g < 1 => return Err(FitsError::WrongValueType { name: "GCOUNT" }),
+            Some(g) => g as usize,
+            None => 1,
+        };
+
+        let mut parameter_names = Vec::with_capacity(pcount);
+        let mut param_scaling = Vec::with_capacity(pcount);
+        for j in 1..=pcount {
+            parameter_names.push(
+                header
+                    .get_text(&format!("PTYPE{j}"))
+                    .unwrap_or("")
+                    .to_string(),
+            );
+            param_scaling.push((
+                header.get_real(&format!("PSCAL{j}")).unwrap_or(1.0),
+                header.get_real(&format!("PZERO{j}")).unwrap_or(0.0),
+            ));
+        }
+
+        let samples = ImageData::decode(data, bitpix);
+        let groups = RandomGroups {
+            parameter_names,
+            group_shape,
+            gcount,
+            pcount,
+            bitpix,
+            array_scaling: Scaling::from_header(header),
+            param_scaling,
+            samples,
+        };
+        assert_eq!(
+            groups.samples.len(),
+            groups.gcount * groups.group_len(),
+            "decoded sample count must match GCOUNT × (PCOUNT + array size)"
+        );
+        Ok(groups)
+    }
+
+    /// `BITPIX` element type of the stored samples.
+    pub fn bitpix(&self) -> Bitpix {
+        self.bitpix
+    }
+
+    /// Elements in one group's array (`Π NAXIS2..NAXISm`; 0 if there is no array).
+    pub fn array_len(&self) -> usize {
+        if self.group_shape.is_empty() {
+            0
+        } else {
+            self.group_shape.iter().product()
+        }
+    }
+
+    /// The physical parameter values of group `g`: `PZEROn + PSCALn × raw`.
+    pub fn parameters_physical(&self, group: usize) -> Vec<f64> {
+        let base = group * self.group_len();
+        (0..self.pcount)
+            .map(|j| {
+                let (pscal, pzero) = self.param_scaling[j];
+                pzero + pscal * elem_f64(&self.samples, base + j)
+            })
+            .collect()
+    }
+
+    /// The physical array values of group `g`: `BZERO + BSCALE × raw`.
+    pub fn array_physical(&self, group: usize) -> Vec<f64> {
+        let base = group * self.group_len() + self.pcount;
+        (0..self.array_len())
+            .map(|k| {
+                self.array_scaling.bzero
+                    + self.array_scaling.bscale * elem_f64(&self.samples, base + k)
+            })
+            .collect()
+    }
+
+    fn group_len(&self) -> usize {
+        self.pcount + self.array_len()
+    }
+}
+
+/// Read sample `i` of a typed buffer as `f64` (widening).
+fn elem_f64(samples: &ImageData, i: usize) -> f64 {
+    match samples {
+        ImageData::U8(v) => v[i] as f64,
+        ImageData::I16(v) => v[i] as f64,
+        ImageData::I32(v) => v[i] as f64,
+        ImageData::I64(v) => v[i] as f64,
+        ImageData::F32(v) => v[i] as f64,
+        ImageData::F64(v) => v[i],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reader::FitsReader;
+    use std::fs::File;
+
+    #[test]
+    fn reads_the_real_uv_random_groups() {
+        let file = File::open("tests/data/fits/DDTSUVDATA.fits").unwrap();
+        let mut reader = FitsReader::open(file).unwrap();
+        let groups = reader.read_groups(0).unwrap();
+
+        assert_eq!(groups.gcount, 7956);
+        assert_eq!(groups.pcount, 6);
+        assert_eq!(groups.group_shape, vec![3, 4, 1, 1, 1]);
+        assert_eq!(groups.array_len(), 12);
+        assert_eq!(groups.bitpix(), Bitpix::F32);
+        assert_eq!(
+            groups.parameter_names,
+            vec!["UU--", "VV--", "WW--", "BASELINE", "DATE", "DATE"]
+        );
+
+        // Each group yields PCOUNT params and an array of 12 elements.
+        let params = groups.parameters_physical(0);
+        assert_eq!(params.len(), 6);
+        assert_eq!(groups.array_physical(0).len(), 12);
+        // The DATE parameter (index 4) has PZERO5 = 2445728.5 (a Julian date), so
+        // its physical value lands in that range, not near zero.
+        assert!(
+            params[4] > 2_445_728.0 && params[4] < 2_445_730.0,
+            "DATE param = {}",
+            params[4]
+        );
+    }
+
+    #[test]
+    fn read_groups_rejects_non_random_groups_hdus() {
+        let file = File::open("tests/data/fits/UITfuv2582gc.fits").unwrap();
+        let mut reader = FitsReader::open(file).unwrap();
+        assert!(matches!(
+            reader.read_groups(0),
+            Err(FitsError::NotRandomGroups)
+        ));
+    }
+}

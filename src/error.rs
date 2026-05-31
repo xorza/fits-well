@@ -43,6 +43,10 @@ pub enum FitsError {
     NotAnImage,
     /// `read_table` was called on an HDU that is not a binary table.
     NotABinTable,
+    /// `read_groups` was called on an HDU that is not a random-groups primary.
+    NotRandomGroups,
+    /// `read_ascii_table` was called on an HDU that is not an ASCII table.
+    NotAnAsciiTable,
     /// A `TFORMn` value could not be parsed as a binary-table column format.
     InvalidTform {
         tform: String,
@@ -96,6 +100,8 @@ impl fmt::Display for FitsError {
             }
             FitsError::NotAnImage => write!(f, "HDU is not an image array"),
             FitsError::NotABinTable => write!(f, "HDU is not a binary table"),
+            FitsError::NotRandomGroups => write!(f, "HDU is not a random-groups primary"),
+            FitsError::NotAnAsciiTable => write!(f, "HDU is not an ASCII table"),
             FitsError::InvalidTform { tform } => write!(f, "invalid column format {tform:?}"),
             FitsError::VariableLengthColumn { code } => write!(
                 f,

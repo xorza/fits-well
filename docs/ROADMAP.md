@@ -18,19 +18,23 @@ coordinate systems and the in-standard conventions (`CONTINUE`, `CHECKSUM`/
 
 ## Current status (done)
 - **Structural spine** — 2880 block layer; ordered header model with all value
-  types, `CONTINUE` folding, and a keyword builder; HDU classification + data-unit
-  sizing; lazy seeking reader. *(§3–§5)*
-- **Images** — read (`read_image`) and **primary** write (`write_image`), big-endian
-  decode/encode, `BSCALE`/`BZERO` physical plane, `BLANK`, unsigned-int trick. *(§5, §7.1)*
-- **Binary tables** — read fully: fixed-width columns of every `TFORM` type,
-  `TSCALn`/`TZEROn` physical plane, and `P`/`Q` heap variable-length arrays. *(§7.3)*
+  types, `CONTINUE` folding, `HIERARCH`, and a keyword builder; HDU classification
+  + data-unit sizing; lazy seeking reader. *(§3–§5)*
+- **Images** — read + write, big-endian decode/encode, `BSCALE`/`BZERO` physical
+  plane, `BLANK`, unsigned-int trick. *(§5, §7.1)*
+- **Binary tables** — read (every `TFORM` type, `TSCALn`/`TZEROn`, `P`/`Q` heap
+  VLAs) and write (fixed-width). *(§7.3)*
+- **ASCII tables** — read + write (`Aw`/`Iw`/`Fw.d`/`Ew.d`/`Dw.d`). *(§7.2)*
+- **Multi-HDU files** — write primary + `IMAGE`/`TABLE`/`BINTABLE` extensions.
+- **Random groups** — read (params + arrays, `PSCAL`/`PZERO`). *(§6)*
+- **Conventions** — `CHECKSUM`/`DATASUM` verify + write; `HIERARCH` parse/render. *(§J)*
 
-80 tests, validated against real sample files. ~80% of the common *read* path,
-~30% of *write*, ~5% of the semantic layers.
+93 tests, validated against real sample files. Phases 1–4 below are **complete**;
+WCS, time, and tiled compression (Phases 5–7) remain.
 
 ---
 
-## Phase 1 — Complete the write path  *(size: M)*
+## Phase 1 — Complete the write path  ✅ DONE (binary-table VLA write still TODO)  *(size: M)*
 The reader is far ahead of the writer; close the gap so anything readable is
 writable.
 
@@ -46,7 +50,7 @@ writable.
 - **Deliverable:** round-trip tests — build → write → read → identical — for
   multi-HDU image files and binary tables (incl. a VLA column).
 
-## Phase 2 — ASCII tables (`TABLE`)  *(size: M)*
+## Phase 2 — ASCII tables (`TABLE`)  ✅ DONE  *(size: M)*
 The one standard data structure with no support yet.
 
 - Parse `TBCOLn`/`TFORMn` Fortran formats (`Aw`, `Iw`, `Fw.d`, `Ew.d`, `Dw.d`),
@@ -57,7 +61,7 @@ The one standard data structure with no support yet.
 - **Deliverable:** round-trip + a real/synthetic `TABLE` fixture; explicit
   blank-integer-field-=-0 vs `TNULLn` semantics tested.
 
-## Phase 3 — Random-groups decode (read-only)  *(size: S)*
+## Phase 3 — Random-groups decode (read-only)  ✅ DONE  *(size: S)*
 Already classified and sized; add typed access.
 
 - Decode `GCOUNT` groups, each = `PCOUNT` parameters (`PTYPEn`, `PSCALn`/`PZEROn`)
@@ -66,7 +70,7 @@ Already classified and sized; add typed access.
 - **Deliverable:** decode the bundled `DDTSUVDATA.fits` primary; hand-checked
   group/param counts and a sample parameter value.
 
-## Phase 4 — In-standard conventions  *(size: S–M)*
+## Phase 4 — In-standard conventions  ✅ DONE  *(size: S–M)*
 - **4a. `CHECKSUM`/`DATASUM`** — the 32-bit ones'-complement accumulator,
   `verify()` on read and `update()` on write (DATASUM before CHECKSUM, fixed-format
   16-char encoding). *(§J; ref 08)*

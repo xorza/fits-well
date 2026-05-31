@@ -16,6 +16,10 @@ pub enum CardKind {
     /// the preceding value card and never stores it, so a `Continue` card never
     /// reaches the writer.
     Continue,
+    /// An ESO `HIERARCH` record (registered convention): `HIERARCH a b c = value`.
+    /// [`Card::keyword`] holds the space-joined hierarchical key (no `HIERARCH`
+    /// prefix); it is value-indexed like a [`CardKind::Value`] card.
+    Hierarch,
     /// The `END` record that terminates a header unit.
     End,
 }
@@ -85,6 +89,24 @@ impl Card {
                 keyword,
             });
         }
+        // A HIERARCH record: `HIERARCH key path = value`. The value indicator is
+        // the first `=` (hierarchical keys never contain one). Store the
+        // space-joined key without the prefix.
+        if keyword == "HIERARCH"
+            && let Some(eq) = text.find('=')
+        {
+            let key = text[8..eq].trim();
+            if !key.is_empty() {
+                let split = split_value_comment(&text[eq + 1..]);
+                let value = parse_value(split.value_token, raw)?;
+                return Ok(Card {
+                    keyword: key.to_string(),
+                    value: Some(value),
+                    comment: split.comment,
+                    kind: CardKind::Hierarch,
+                });
+            }
+        }
         // A CONTINUE record (no value indicator; substring quoted from byte 11)
         // carries one piece of a long string. `Header::parse` folds it into the
         // preceding value card. A malformed CONTINUE falls through to commentary.
@@ -126,6 +148,17 @@ impl Card {
     /// later concern handled by the writer layer.
     pub fn render(&self) -> [u8; CARD_SIZE] {
         let mut buf = [b' '; CARD_SIZE];
+        // HIERARCH lays out the whole card itself ("HIERARCH key = value"); the
+        // key has spaces and is not an 8-byte field, so it bypasses the layout below.
+        if self.kind == CardKind::Hierarch {
+            let value = format_value(self.value.as_ref().expect("HIERARCH card carries a value"));
+            let body = format!("HIERARCH {} = {value}", self.keyword);
+            write_at(&mut buf, 0, &body);
+            if let Some(comment) = &self.comment {
+                write_at(&mut buf, body.len(), &format!(" / {comment}"));
+            }
+            return buf;
+        }
         let kw = self.keyword.as_bytes();
         let n = kw.len().min(8);
         buf[..n].copy_from_slice(&kw[..n]);
@@ -153,6 +186,7 @@ impl Card {
                 let s = self.value.as_ref().and_then(Value::as_text).unwrap_or("");
                 write_at(&mut buf, 10, &format!("'{}'", s.replace('\'', "''")));
             }
+            CardKind::Hierarch => unreachable!("HIERARCH is rendered before this match"),
         }
         buf
     }
@@ -594,6 +628,23 @@ mod tests {
             Card::parse(&raw("object  = 'x'")),
             Err(FitsError::InvalidKeyword { .. })
         ));
+    }
+
+    #[test]
+    fn parses_and_round_trips_a_hierarch_record() {
+        let card = parse("HIERARCH ESO DET CHIP1 NAME = 'CCD-44' / detector");
+        assert_eq!(card.kind, CardKind::Hierarch);
+        assert_eq!(card.keyword, "ESO DET CHIP1 NAME");
+        assert_eq!(card.value, Some(Value::Text("CCD-44".into())));
+        assert_eq!(card.comment.as_deref(), Some("detector"));
+        // Render → parse round-trips the compound key and value.
+        let reparsed = Card::parse(&card.render()).unwrap();
+        assert_eq!(reparsed, card);
+
+        // A numeric HIERARCH value too.
+        let n = parse("HIERARCH ESO DET EXPTIME = 1200");
+        assert_eq!(n.keyword, "ESO DET EXPTIME");
+        assert_eq!(n.value, Some(Value::Integer(1200)));
     }
 
     #[test]
