@@ -4,8 +4,19 @@ version = "0.1.0"
 edition = "2024"
 description = "A blazing-fast reader and writer for FITS (Flexible Image Transport System) files, targeting the full FITS 4.0 standard."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/xxorza/fits"
+repository = "https://github.com/xorza/fits"
 keywords = ["fits", "astronomy", "image", "fileformat"]
 categories = ["science", "parser-implementations"]
 
 [dependencies]
+
+[features]
+default = []
+# rayon-backed parallel bulk endian-swap + BSCALE/BZERO scaling (scalar fallback otherwise).
+parallel = []
+# memory-mapped read sources for zero-copy access over large files.
+mmap = []
+# typed World Coordinate System layer (projections, spherical rotations) over parsed headers.
+wcs = []
+# tiled image compression: RICE_1, GZIP_1/2, HCOMPRESS_1, PLIO_1.
+compression = []
