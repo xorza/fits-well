@@ -32,6 +32,11 @@ pub struct AsciiColumn {
     pub width: usize,
     /// Digits after the decimal point (`Fw.d`); 0 for non-floats.
     pub decimals: usize,
+    /// `TSCALn` / `TZEROn` for the physical plane (`physical = TZERO + TSCAL·raw`).
+    pub tscale: f64,
+    pub tzero: f64,
+    /// `TNULLn`: the exact field text that marks an undefined value (§7.2.5).
+    pub null: Option<String>,
 }
 
 /// A parsed ASCII table plus its row bytes.
@@ -80,6 +85,11 @@ impl AsciiTable {
                 start: (tbcol.max(1) - 1) as usize,
                 width,
                 decimals,
+                tscale: header.get_real(&format!("TSCAL{n}")).unwrap_or(1.0),
+                tzero: header.get_real(&format!("TZERO{n}")).unwrap_or(0.0),
+                null: header
+                    .get_text(&format!("TNULL{n}"))
+                    .map(|s| s.trim().to_string()),
             });
         }
 
@@ -94,42 +104,34 @@ impl AsciiTable {
         })
     }
 
-    /// The index of the first column with this (case-sensitive) name.
+    /// The index of the first column whose `TTYPEn` matches `name`, compared
+    /// case-insensitively per §7.2.2.
     pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.columns
-            .iter()
-            .position(|c| c.name.as_deref() == Some(name))
+        self.columns.iter().position(|c| {
+            c.name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        })
     }
 
     /// Decode column `index` into a typed [`ColumnData`] (`Text`/`I64`/`F64`).
-    /// A blank numeric field decodes to 0; a non-blank unparseable field errors.
+    /// A blank numeric field decodes to 0 (§7.2.5); a field equal to `TNULLn`
+    /// (undefined) decodes to a 0 placeholder in this raw plane — use
+    /// [`AsciiTable::read_column_physical`] to get `NaN` for undefined values.
+    /// A non-blank, non-null unparseable field errors.
     pub fn read_column(&self, index: usize) -> Result<ColumnData> {
-        let col = self
-            .columns
-            .get(index)
-            .ok_or(FitsError::ColumnIndexOutOfBounds {
-                index,
-                len: self.columns.len(),
-            })?;
-        let field = |r: usize| -> &str {
-            let row = &self.bytes[r * self.row_len..(r + 1) * self.row_len];
-            let end = (col.start + col.width).min(row.len());
-            let raw = if col.start < end {
-                &row[col.start..end]
-            } else {
-                &[]
-            };
-            std::str::from_utf8(raw).unwrap_or("").trim()
-        };
+        let col = self.column(index)?;
         match col.kind {
             AsciiKind::Char => Ok(ColumnData::Text(
-                (0..self.nrows).map(field).map(str::to_string).collect(),
+                (0..self.nrows)
+                    .map(|r| self.field(col, r).to_string())
+                    .collect(),
             )),
             AsciiKind::Integer => {
                 let mut out = Vec::with_capacity(self.nrows);
                 for r in 0..self.nrows {
-                    let s = field(r);
-                    out.push(if s.is_empty() {
+                    let s = self.field(col, r);
+                    out.push(if s.is_empty() || col.is_null(s) {
                         0
                     } else {
                         s.parse().map_err(|_| FitsError::InvalidValue {
@@ -142,22 +144,96 @@ impl AsciiTable {
             AsciiKind::Float => {
                 let mut out = Vec::with_capacity(self.nrows);
                 for r in 0..self.nrows {
-                    let s = field(r);
-                    out.push(if s.is_empty() {
+                    let s = self.field(col, r);
+                    out.push(if s.is_empty() || col.is_null(s) {
                         0.0
                     } else {
-                        // FITS reals allow a Fortran `D` exponent.
-                        s.replace(['D', 'd'], "E")
-                            .parse()
-                            .map_err(|_| FitsError::InvalidValue {
+                        parse_ascii_float(s, col.decimals).ok_or_else(|| {
+                            FitsError::InvalidValue {
                                 card: s.to_string(),
-                            })?
+                            }
+                        })?
                     });
                 }
                 Ok(ColumnData::F64(out))
             }
         }
     }
+
+    /// Decode a numeric column into its physical `f64` plane: `TZEROn + TSCALn ×
+    /// field` (§7.2.2). A blank field is 0 before scaling; a field equal to
+    /// `TNULLn` is undefined and maps to `NaN`. Errors on a character column.
+    pub fn read_column_physical(&self, index: usize) -> Result<Vec<f64>> {
+        let col = self.column(index)?;
+        if col.kind == AsciiKind::Char {
+            return Err(FitsError::NonNumericColumn { code: 'A' });
+        }
+        let mut out = Vec::with_capacity(self.nrows);
+        for r in 0..self.nrows {
+            let s = self.field(col, r);
+            if col.is_null(s) {
+                out.push(f64::NAN);
+                continue;
+            }
+            let raw = if s.is_empty() {
+                0.0
+            } else {
+                parse_ascii_float(s, col.decimals).ok_or_else(|| FitsError::InvalidValue {
+                    card: s.to_string(),
+                })?
+            };
+            out.push(col.tzero + col.tscale * raw);
+        }
+        Ok(out)
+    }
+
+    fn column(&self, index: usize) -> Result<&AsciiColumn> {
+        self.columns
+            .get(index)
+            .ok_or(FitsError::ColumnIndexOutOfBounds {
+                index,
+                len: self.columns.len(),
+            })
+    }
+
+    /// The trimmed text of column `col` in row `r`.
+    fn field(&self, col: &AsciiColumn, r: usize) -> &str {
+        let row = &self.bytes[r * self.row_len..(r + 1) * self.row_len];
+        let end = (col.start + col.width).min(row.len());
+        let raw = if col.start < end {
+            &row[col.start..end]
+        } else {
+            &[]
+        };
+        std::str::from_utf8(raw).unwrap_or("").trim()
+    }
+}
+
+impl AsciiColumn {
+    /// Whether the trimmed field text marks an undefined value (`TNULLn`).
+    fn is_null(&self, field: &str) -> bool {
+        self.null.as_deref() == Some(field)
+    }
+}
+
+/// Parse a Fortran `Fw.d`/`Ew.d`/`Dw.d` field. When the mantissa carries no
+/// explicit `.`, the decimal point is implied `decimals` digits from the right
+/// (§7.2.1, deprecated): the integer mantissa is scaled by `10⁻ᵈ`.
+fn parse_ascii_float(field: &str, decimals: usize) -> Option<f64> {
+    let normalized = field.replace(['D', 'd'], "E");
+    let (mantissa, exponent) = match normalized.split_once(['E', 'e']) {
+        Some((m, e)) => (m, Some(e)),
+        None => (normalized.as_str(), None),
+    };
+    let mut value: f64 = if mantissa.contains('.') || decimals == 0 {
+        mantissa.parse().ok()?
+    } else {
+        mantissa.parse::<f64>().ok()? / 10f64.powi(decimals as i32)
+    };
+    if let Some(e) = exponent {
+        value *= 10f64.powi(e.trim().parse::<i32>().ok()?);
+    }
+    Some(value)
 }
 
 /// Parse an ASCII `TFORMn` (`Aw`, `Iw`, `Fw.d`, `Ew.d`, `Dw.d`) into kind, width,

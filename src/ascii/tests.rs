@@ -57,6 +57,76 @@ fn decodes_hand_built_ascii_rows() {
 }
 
 #[test]
+fn applies_tscal_tzero_and_maps_tnull_to_nan() {
+    // One `I6` column, TSCAL=2, TZERO=10, TNULL='***'. Row 0 = 123, row 1 = null.
+    let mut header = Header::new();
+    header
+        .set("XTENSION", "TABLE")
+        .set("BITPIX", 8)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 6)
+        .set("NAXIS2", 2)
+        .set("PCOUNT", 0)
+        .set("GCOUNT", 1)
+        .set("TFIELDS", 1)
+        .set("TBCOL1", 1)
+        .set("TFORM1", "I6")
+        .set("TSCAL1", 2.0)
+        .set("TZERO1", 10.0)
+        .set("TNULL1", "***");
+    let data = b"   123   ***".to_vec();
+    let table = AsciiTable::from_data(&header, data).unwrap();
+    // Raw: the null field is a 0 placeholder; physical: TZERO + TSCAL·field, null → NaN.
+    assert_eq!(table.read_column(0).unwrap(), ColumnData::I64(vec![123, 0]));
+    let phys = table.read_column_physical(0).unwrap();
+    assert_eq!(phys[0], 256.0); // 10 + 2·123
+    assert!(phys[1].is_nan());
+}
+
+#[test]
+fn implicit_decimal_point_scales_by_ten_to_the_d() {
+    // `F8.3`: a field with no explicit point has the point implied 3 from the right.
+    let mut header = Header::new();
+    header
+        .set("XTENSION", "TABLE")
+        .set("BITPIX", 8)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 8)
+        .set("NAXIS2", 2)
+        .set("PCOUNT", 0)
+        .set("GCOUNT", 1)
+        .set("TFIELDS", 1)
+        .set("TBCOL1", 1)
+        .set("TFORM1", "F8.3");
+    let data = b"   12345  12.345".to_vec(); // implicit "12345" → 12.345 ; explicit 12.345
+    let table = AsciiTable::from_data(&header, data).unwrap();
+    assert_eq!(
+        table.read_column(0).unwrap(),
+        ColumnData::F64(vec![12.345, 12.345])
+    );
+}
+
+#[test]
+fn ascii_column_index_is_case_insensitive() {
+    let mut header = Header::new();
+    header
+        .set("XTENSION", "TABLE")
+        .set("BITPIX", 8)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 4)
+        .set("NAXIS2", 1)
+        .set("PCOUNT", 0)
+        .set("GCOUNT", 1)
+        .set("TFIELDS", 1)
+        .set("TBCOL1", 1)
+        .set("TFORM1", "I4")
+        .set("TTYPE1", "Count");
+    let table = AsciiTable::from_data(&header, b"   7".to_vec()).unwrap();
+    assert_eq!(table.column_index("COUNT"), Some(0));
+    assert_eq!(table.column_index("count"), Some(0));
+}
+
+#[test]
 fn ascii_table_round_trips_through_write_and_read() {
     let columns = vec![
         AsciiWriteColumn {

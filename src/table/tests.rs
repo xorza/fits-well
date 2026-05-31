@@ -154,7 +154,8 @@ fn decodes_variable_length_arrays_from_the_heap() {
     // One `PE` column (f32 heap arrays), two rows of different lengths.
     // Main table = two 8-byte `P` descriptors; the heap follows at THEAP
     // (default = main size = 16).
-    let header = table_header(8, 2, &["1PE(3)"]);
+    let mut header = table_header(8, 2, &["1PE(3)"]);
+    header.set("PCOUNT", 12); // heap = 3 × f32
     let mut data = Vec::new();
     // descriptors: row 0 → (nelem 2, offset 0), row 1 → (nelem 1, offset 8)
     for (nelem, offset) in [(2i32, 0i32), (1, 8)] {
@@ -171,6 +172,70 @@ fn decodes_variable_length_arrays_from_the_heap() {
         table.read_vla_column(0).unwrap(),
         vec![ColumnData::F32(vec![1.0, 2.0]), ColumnData::F32(vec![3.0]),]
     );
+}
+
+#[test]
+fn vla_descriptor_overrunning_the_heap_is_rejected() {
+    // §6.6: a span must lie within the heap (`PCOUNT` bytes), not the block fill.
+    // Heap is 8 bytes (PCOUNT=8) but the descriptor claims 3 f32 = 12 bytes.
+    let mut header = table_header(8, 1, &["1PE(3)"]);
+    header.set("PCOUNT", 8);
+    let mut data = Vec::new();
+    data.extend_from_slice(&3i32.to_be_bytes()); // nelem = 3
+    data.extend_from_slice(&0i32.to_be_bytes()); // offset = 0
+    data.extend_from_slice(&[0u8; 8]); // only 8 heap bytes (then block fill)
+    data.resize(2880, 0); // block-padded fill that must NOT be read as heap
+    let table = BinTable::from_data(&header, data).unwrap();
+    assert!(matches!(
+        table.read_vla_column(0),
+        Err(FitsError::UnexpectedEof)
+    ));
+}
+
+#[test]
+fn x_bit_column_unpacks_msb_first() {
+    // One `12X` column, 2 bytes/row. 0xAB 0xC0 = 1010_1011 1100_0000; the first
+    // 12 bits MSB-first are 1010_1011_1100.
+    let header = table_header(2, 1, &["12X"]);
+    let table = BinTable::from_data(&header, vec![0xAB, 0xC0]).unwrap();
+    let bits = table.read_bit_column(0).unwrap();
+    let expect = [
+        true, false, true, false, true, false, true, true, true, true, false, false,
+    ];
+    assert_eq!(bits, vec![expect.to_vec()]);
+    // read_column still yields the raw packed bytes.
+    assert_eq!(
+        table.read_column(0).unwrap(),
+        ColumnData::Bytes(vec![0xAB, 0xC0])
+    );
+}
+
+#[test]
+fn read_bit_column_on_a_non_bit_column_errors() {
+    let header = table_header(4, 1, &["1J"]);
+    let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
+    assert!(matches!(
+        table.read_bit_column(0),
+        Err(FitsError::NotABitColumn { code: 'J' })
+    ));
+}
+
+#[test]
+fn column_index_is_case_insensitive() {
+    let mut header = table_header(4, 1, &["1J"]);
+    header.set("TTYPE1", "Flux");
+    let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
+    assert_eq!(table.column_index("FLUX"), Some(0));
+    assert_eq!(table.column_index("flux"), Some(0));
+    assert_eq!(table.column_index("missing"), None);
+}
+
+#[test]
+fn a_column_terminates_at_the_first_nul() {
+    // §6.3: an embedded NUL ends the `A` string; bytes after it are dropped.
+    assert_eq!(trim_text(b"AB\0CD\0\0"), "AB");
+    assert_eq!(trim_text(b"hello   "), "hello"); // trailing spaces still trimmed
+    assert_eq!(trim_text(b"\0junk"), ""); // leading NUL → empty
 }
 
 #[test]

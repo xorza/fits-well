@@ -196,6 +196,9 @@ pub struct BinTable {
     row_len: usize,
     /// Byte offset of the heap within `bytes` (`THEAP`, default = main-table size).
     heap_offset: usize,
+    /// Byte offset just past the real heap data (`nrows·row_len + PCOUNT`). `P`/`Q`
+    /// spans must lie within `[heap_offset, heap_end)`, never the block fill beyond.
+    heap_end: usize,
     /// The whole data unit (the `nrows * row_len` main table, then the heap and
     /// block fill). Fixed-width reads index the main-table prefix; `P`/`Q` columns
     /// follow their descriptors into the heap.
@@ -257,11 +260,18 @@ impl BinTable {
         let heap_offset = header
             .get_integer("THEAP")
             .map_or(nrows * row_len, |t| t.max(0) as usize);
+        // PCOUNT counts the gap-plus-heap bytes after the main table, so the real
+        // heap ends here — anything past it is block fill (§6.6).
+        let pcount = header
+            .get_integer("PCOUNT")
+            .map_or(0, |p| p.max(0) as usize);
+        let heap_end = (nrows * row_len + pcount).min(data.len());
         Ok(BinTable {
             nrows,
             columns,
             row_len,
             heap_offset,
+            heap_end,
             bytes: data,
         })
     }
@@ -278,11 +288,14 @@ impl BinTable {
         self.row_len
     }
 
-    /// The index of the first column with this (case-sensitive) name.
+    /// The index of the first column whose `TTYPEn` matches `name`, compared
+    /// case-insensitively per §6.7.
     pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.columns
-            .iter()
-            .position(|c| c.name.as_deref() == Some(name))
+        self.columns.iter().position(|c| {
+            c.name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        })
     }
 
     /// Decode the fixed-width column at `index` into a typed, row-flattened
@@ -310,6 +323,28 @@ impl BinTable {
         } else {
             decode_array(col.tform.kind, &self.flatten(col))
         })
+    }
+
+    /// Decode an `X` (bit-array) column, unpacking each row's `repeat` bits
+    /// MSB-first (bit 0 is the most significant bit of the first byte, §7.3.2)
+    /// into one `Vec<bool>` per row. Errors on any non-`X` column.
+    pub fn read_bit_column(&self, index: usize) -> Result<Vec<Vec<bool>>> {
+        let col = self.column(index)?;
+        if col.tform.kind != TformKind::Bit {
+            return Err(FitsError::NotABitColumn {
+                code: col.tform.kind.code(),
+            });
+        }
+        let nbits = col.tform.repeat;
+        let mut out = Vec::with_capacity(self.nrows);
+        for r in 0..self.nrows {
+            let cell = self.cell(col, r); // ceil(nbits/8) bytes
+            let bits = (0..nbits)
+                .map(|i| (cell[i / 8] >> (7 - (i % 8))) & 1 == 1)
+                .collect();
+            out.push(bits);
+        }
+        Ok(out)
     }
 
     /// Decode a numeric column and apply its scaling: `physical = TZEROn + TSCALn
@@ -372,10 +407,12 @@ impl BinTable {
                 _ => nelem * elem.elem_size(),
             };
             let start = self.heap_offset + offset;
-            let slice = self
-                .bytes
-                .get(start..start + nbytes)
-                .ok_or(FitsError::UnexpectedEof)?;
+            let end = start + nbytes;
+            // The span must lie within the heap proper, not the trailing block fill.
+            if end > self.heap_end {
+                return Err(FitsError::UnexpectedEof);
+            }
+            let slice = self.bytes.get(start..end).ok_or(FitsError::UnexpectedEof)?;
             out.push(decode_array(elem, slice));
         }
         Ok(out)
@@ -444,13 +481,13 @@ fn decode_array(kind: TformKind, bytes: &[u8]) -> ColumnData {
     }
 }
 
-/// Decode an `A`-field cell: ASCII text with trailing spaces and NULs trimmed.
+/// Decode an `A`-field cell: ASCII text truncated at the first NUL (§6.3 — a NUL
+/// terminates the string early), then with trailing spaces removed.
 fn trim_text(cell: &[u8]) -> String {
-    let end = cell
-        .iter()
-        .rposition(|&b| b != b' ' && b != 0)
-        .map_or(0, |i| i + 1);
-    String::from_utf8_lossy(&cell[..end]).into_owned()
+    let nul = cell.iter().position(|&b| b == 0).unwrap_or(cell.len());
+    let head = &cell[..nul];
+    let end = head.iter().rposition(|&b| b != b' ').map_or(0, |i| i + 1);
+    String::from_utf8_lossy(&head[..end]).into_owned()
 }
 
 fn be_u32(b: &[u8]) -> usize {

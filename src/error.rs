@@ -80,6 +80,10 @@ pub enum FitsError {
     NotAVla {
         code: char,
     },
+    /// `read_bit_column` was called on a column that is not an `X` bit array.
+    NotABitColumn {
+        code: char,
+    },
     /// `read_column_physical` was called on a column with no numeric physical
     /// value (`A`/`L`/`X`/`C`/`M`).
     NonNumericColumn {
@@ -143,6 +147,9 @@ impl fmt::Display for FitsError {
             ),
             FitsError::NotAVla { code } => {
                 write!(f, "column format '{code}' is not a variable-length array")
+            }
+            FitsError::NotABitColumn { code } => {
+                write!(f, "column format '{code}' is not an X bit array")
             }
             FitsError::NonNumericColumn { code } => {
                 write!(f, "column format '{code}' has no numeric physical value")

@@ -36,25 +36,21 @@ Audited code: `block.rs`, `bitpix.rs`, `hdu/`, `reader/`, `writer/`,
 | 1.4 | XTENSION space-padded to 8 | `pad_string` in `format_value` | ✅ |
 | 1.4 | Mandatory ext. keyword **order** on write | writer emits in order | ✅ write / ❌ not validated on read |
 | 1.4 | PCOUNT/GCOUNT semantics + any-order extensions | `data_extent`, reader loop | ✅ |
-| 1.5 | Special records (§3.5) | — | 🔴 not handled |
-| 1.6 | Trailing partial / zero-fill block (§3.6) | `fill_block` errors | 🔴 rejects file |
+| 1.5 | Special records (§3.5) | `NextHeader::Trailing` → scan stops | ✅ disregarded |
+| 1.6 | Trailing partial / zero-fill block (§3.6) | `fill_block` → `Partial`/`Eof` → `Trailing` | ✅ disregarded |
 | 1.6 | Eq 1 / Eq 2 / Eq 4 sizing; `ceil(Nbits/8/2880)` | `data_extent`, `padded_len` | ✅ |
 | 1.6 | Nbits non-negative; overflow-safe | checked arithmetic + PCOUNT/GCOUNT guards | ✅ |
 | 1.7 | "Once FITS always FITS" (random groups) | `read_groups`, `classify` | ✅ |
 
 ### Gaps
 
-1. 🔴 **Special records / trailing blocks make `open()` fail (§3.5–3.6).**
-   `FitsReader::open` loops `read_header_unit`, which reads 2880-byte blocks
-   until one carries an `END` card (`reader/mod.rs:238`). After the last HDU,
-   *any* trailing content — special records, or even a single trailing all-zero
-   padding block that some writers append — has no `END`, so blocks accumulate
-   until EOF and `read_header_unit` returns `Err(UnexpectedEof)`
-   (`reader/mod.rs:244`). The standard says a reader *may ignore* special
-   records and *disregard* trailing partial blocks; this code rejects the whole
-   file. A trailing partial (sub-2880) block likewise hits
-   `Err(UnexpectedEof)` in `fill_block` (`reader/mod.rs:274`). No test exercises
-   trailing content.
+1. ✅ **FIXED — special records / trailing blocks are now disregarded (§3.5–3.6).**
+   `read_header_unit` returns a `NextHeader::Trailing` outcome for any post-HDU
+   content carrying no `END` — special records, a trailing all-zero fill block, or
+   a sub-2880 partial remnant — and `open()` stops the scan there instead of
+   erroring. The same shape *before* any valid HDU is still rejected (no conforming
+   primary). Covered by `trailing_special_records_and_partial_blocks_are_ignored`
+   and `content_before_any_valid_hdu_is_rejected`.
 
 2. 🟡 **Mandatory extension keyword order not validated on read (§3.4.1,
    Table 10).** The reader fetches `XTENSION`/`BITPIX`/`NAXIS`/`PCOUNT`/`GCOUNT`
@@ -107,11 +103,11 @@ Audited code: `header/card/mod.rs` (parse + render), `header/value.rs`
 | 2.2 | Logical `T`/`F`; integer; complex int/real | `parse_value` / `parse_complex` | ✅ |
 | 2.2 | Real, exponent `E`/`D` **upper-case** (§4.2.4) | reader accepts lower `e`/`d` (`card/mod.rs:338`) | 🟡 lenient on read |
 | 2.2 | Date = ISO-8601 string | stored as `Value::Text` (time layer parses) | ✅ |
-| 2.2 | **Null vs empty string distinct** (§4.2.1.1) | `parse_string` strips *all* trailing spaces | 🔴 conflated |
+| 2.2 | **Null vs empty string distinct** (§4.2.1.1) | `parse_string` keeps one space for all-blank | ✅ |
 | 2.2 | Undefined = blank value field, no quotes | `Value::Undefined` (`card/mod.rs:267`) | ✅ |
 | 2.2 | ≤68 chars/record; longer ⇒ CONTINUE | `render_records` / `render_long_string` | ✅ |
 | 2.2 | XTENSION padded to 8; no other min length | `pad_string` (`card/mod.rs:470`) | ✅ |
-| 2.2 | Numbers fit field; no thousands separators | `i64`/`f64` parse rejects separators | ✅ (large reals: see gap #4) |
+| 2.2 | Numbers fit field; no thousands separators | parse rejects separators; `format_real` uses `E` form for large reals | ✅ |
 | 2.3 | Units = opaque comment text | comments stored verbatim | ✅ |
 | 2.3 | Expose helper to parse `[...]` unit prefix | — | 🟢 not implemented |
 | 2.4 | Primary mandatory keywords + presence errors | `bitpix()`/`naxis()`/`axes()` → `MissingKeyword` | ✅ |
@@ -124,19 +120,10 @@ Audited code: `header/card/mod.rs` (parse + render), `header/value.rs`
 
 ### Gaps
 
-1. 🔴 **Null string and empty (all-blank) string are conflated (§4.2.1.1).**
-   The doc is explicit: `KEYWORD= ''` is a *null* string (length 0), while
-   `KEYWORD= '   '` is an *empty* string that, because the first space is
-   significant and only trailing spaces are dropped, reduces to a **single
-   space (length 1)** — and that one space is exactly what distinguishes it
-   from the null string. `parse_string` strips *all* trailing spaces with
-   `while out.ends_with(' ') { out.pop(); }` (`card/mod.rs:305`), so `'   '`
-   collapses to `""`, identical to `''`. Worse, the existing test
-   **asserts the wrong behavior**: `parse("BLANKS  = '      '")` is asserted to
-   equal `Value::Text(String::new())` (`card/tests.rs:71`). The all-blank case
-   should yield `Value::Text(" ")` and must compare unequal to the `''` null
-   case. Fix the parser to preserve one significant space when the string is
-   non-empty but all-blank, and correct the test.
+1. ✅ **FIXED — null string and empty (all-blank) string are now distinct
+   (§4.2.1.1).** `parse_string` preserves one significant space when a string is
+   non-empty but all-blank, so `''` → length 0 and `'   '` → length 1, comparing
+   unequal. The previously-wrong test was corrected to assert this.
 
 2. 🟡 **Restricted-ASCII range not enforced (§4.1).** Headers are limited to
    decimal 32–126, but `Card::parse` only rejects bytes ≥ 128 via
@@ -149,14 +136,11 @@ Audited code: `header/card/mod.rs` (parse + render), `header/value.rs`
    (`card/mod.rs:125`) and ignores column 10. Safe in practice (commentary
    keywords are matched first) but not a strict `"= "` check.
 
-4. 🔴 **Large-magnitude reals can overflow the value field on write.**
-   `format_real` uses Rust's `{}` Display (`card/mod.rs:459`), which never emits
-   exponent notation, so e.g. `1e300` renders as a 301-digit decimal. The value
-   field is only ~70 bytes (cols 11–80) and `render_records` emits a CONTINUE
-   chain **only for strings**, not numbers; `write_at` then silently clamps to
-   80 bytes (`card/mod.rs:478`), truncating the number into a wrong value. Edge
-   case, but a silent-corruption bug. (Also why the §4.2.4 "upper-case exponent"
-   rule is trivially met on write — exponents are never emitted at all.)
+4. ✅ **FIXED — large-magnitude reals no longer overflow the value field on
+   write.** `format_real` now falls back to the §4.2.4 uppercase-`E` exponent form
+   when the plain `Display` decimal would grow long (e.g. `1e300` → `1E300`), so
+   the value always fits and round-trips. Covered by
+   `large_magnitude_real_renders_with_exponent_and_round_trips`.
 
 5. 🟢 **No `[...]` unit-prefix helper (§4.3).** The doc says the library should
    expose a helper to parse the bracketed unit prefix of a comment; comments are
@@ -267,15 +251,11 @@ keywords / unsigned-not-identity.
 
 Coverage gaps:
 
-- 🔴 **NaN/Inf bit-for-bit round-trip is the headline gap.** §3.4 *mandates*
-  preserving ±Inf and signaling/quiet NaN payloads and not canonicalizing the
-  quiet/signaling bit, and the project's own correctness rules require a
-  float-NaN/Inf round-trip test — yet `encode_is_the_inverse_of_decode` uses only
-  `1.0, -2.5, 0.0, f64::MAX`. The code *is* correct (`to_bits`/`from_bits` are
-  bit-exact) but unverified. Need a test that round-trips the Appendix-E patterns
-  (`+∞` = `0x7F800000` / `0x7FF0000000000000`, a signaling NaN such as
-  `0x7F800001` / `0x7FF0000000000001`) and asserts `to_bits()` is identical for
-  both `f32` and `f64`.
+- ✅ **FIXED — NaN/Inf bit-for-bit round-trip is now tested.**
+  `float_inf_and_nan_payloads_round_trip_bit_for_bit` round-trips ±Inf and
+  signaling/quiet NaN payloads (the Appendix-E patterns) for both `f32` and `f64`,
+  asserting `to_bits()` is identical — confirming `to_bits`/`from_bits` never
+  canonicalize.
 - Only the `u16` unsigned convention is tested; `u32` (`BZERO=2³¹`), `u64`
   (`BZERO=2⁶³`, which exposes gap #2), and signed-8 (`BZERO=-128`) are untested.
 - `Inf` propagation through non-identity scaling is untested (only NaN is).
@@ -302,7 +282,7 @@ Audited code: `data/` (`Image`/`ImageData`), `reader/` (`read_image`),
 | 4.2 | No random groups + normal array at once | `GROUPS=T` wins in `classify` | ✅ |
 | 4.3 | IMAGE = same data model in an extension | `read_image` accepts `Image` kind | ✅ |
 | 4.3 | Mandatory keys in order; `PCOUNT=0`, `GCOUNT=1` | `image_extension_header` | ✅ write / ⚠️ values unasserted on read |
-| 4.3 | IMAGE with `PCOUNT≠0`/`GCOUNT≠1` is malformed | `read_image` `assert_eq!` panics | 🟡 panics, not a clean error |
+| 4.3 | IMAGE with `PCOUNT≠0`/`GCOUNT≠1` is malformed | `read_image` rejects up front (`WrongValueType`) | ✅ clean error |
 | 4.3 | Reserved: `BUNIT`/`DATAMIN`/`DATAMAX`/`EXTNAME`/`EXTVER`/`EXTLEVEL` | readable generically; no typed accessors | 🟢 |
 | 4.4 | Random groups: `NAXIS1=0`, `GROUPS=T`, `PCOUNT`/`GCOUNT` | `classify` → `RandomGroups`, `from_data` | ✅ |
 | 4.4 | Group = `PCOUNT` params then `NAXIS2…m` array | `group_len`, base offsets (`groups/mod.rs:99`) | ✅ |
@@ -318,19 +298,13 @@ decoding.
 
 ### Gaps
 
-1. 🟡 **A malformed IMAGE panics instead of erroring.** `read_image` asserts
-   `samples.len() == NAXISn product` (`reader/mod.rs:139`). For an `IMAGE`
-   extension (or primary) with a non-conforming `PCOUNT > 0` or `GCOUNT > 1`,
-   `data_extent` sizes the data unit as `elem × GCOUNT × (PCOUNT + product)`, so
-   the decoded sample count exceeds the product and the assertion fires — a panic
-   on untrusted file content, which the project's rules say should be a `Result`
-   error, not an assert. Validate `PCOUNT == 0 && GCOUNT == 1` for image HDUs and
-   return a `FitsError` instead. The same untrusted-input panic shape recurs in
-   `RandomGroups::from_data`, whose closing `assert_eq!` on the decoded sample
-   count (`groups/mod.rs:76`) fires on a corrupt random-groups header (the
-   negative-`PCOUNT` / `GCOUNT < 1` cases *are* `Result`-guarded). By contrast the
-   `write_image` `assert_eq!` (`writer/mod.rs:165`) is an intentional logic-error
-   guard on a caller-built `Image`, not a read-side defect.
+1. ✅ **FIXED — a malformed IMAGE now errors instead of panicking.** `read_image`
+   rejects an image HDU with `PCOUNT ≠ 0` / `GCOUNT ≠ 1` up front
+   (`WrongValueType`), and its sample-count check is now a `DataSizeMismatch`
+   error rather than an `assert_eq!`. `RandomGroups::from_data`'s closing assert is
+   likewise a `DataSizeMismatch` error. The `write_image` assert (a logic-error
+   guard on a caller-built `Image`) is intentionally left. Covered by
+   `malformed_image_pcount_is_rejected_not_panicked`.
 
 2. 🟢 **No coordinate-indexing / strided-view API (§4.1).** `Image` stores the
    flat buffer (correctly in Fortran order) and the `shape`, but exposes no
@@ -391,17 +365,17 @@ Audited code: `ascii/` (`AsciiTable`/`AsciiColumn`/`parse_ascii_tform`,
 | 5.1 | Fields may overlap; gap bytes any 7-bit ASCII; CR/LF allowed | reads only each field slice; tolerant of gaps | ✅ |
 | 5.1 | Data unit padded with **spaces** | `write_ascii_table` → `SPACE_FILL` | ✅ code / ⚠️ untested |
 | 5.1 | Blank numeric field reads as **0** (§7.2.5) | `if s.is_empty() { 0 }` (`ascii/mod.rs:132,146`) | ✅ untested |
-| 5.1 | Field matching `TNULLn` is **undefined** | not read at all | 🟡 missing |
+| 5.1 | Field matching `TNULLn` is **undefined** | `AsciiColumn.null`; raw → 0, physical → `NaN` | ✅ |
 | 5.2 | Mandatory keys present + in order | read requires `NAXIS1/2`,`TFIELDS`,`TBCOLn`,`TFORMn`; write emits in order | ✅ |
 | 5.2 | `TFIELDS` 0…999 | no upper-bound check | 🟢 (as §3 999) |
 | 5.3 | `Aw`/`Iw`/`Fw.d`/`Ew.d`/`Dw.d`, upper-case only | `parse_ascii_tform` matches `A/I/F/E/D` only | ✅ |
 | 5.3 | Scalar cells, no repeat/arrays | no repeat parsing | ✅ |
 | 5.3 | `F`/`E`/`D` parse identically; base-ten; sign+exp | all → `Float`, `f64` parse, `D`→`E` | ✅ |
-| 5.3 | Implicit decimal point (deprecated) | `decimals` ignored on read | 🟡 not handled |
-| 5.4 | `TTYPEn` name, compared **case-insensitively** | stored; `column_index` is case-**sensitive** | 🟡 |
+| 5.3 | Implicit decimal point (deprecated) | `parse_ascii_float` applies ×10⁻ᵈ | ✅ |
+| 5.4 | `TTYPEn` name, compared **case-insensitively** | `column_index` uses `eq_ignore_ascii_case` | ✅ |
 | 5.4 | `TUNITn` units | read into `unit` | ✅ |
-| 5.4 | `TSCALn`/`TZEROn` scaling (not on `A`) | not implemented for ASCII | 🟡 missing |
-| 5.4 | `TNULLn` (string) undefined marker | not implemented | 🟡 missing |
+| 5.4 | `TSCALn`/`TZEROn` scaling (not on `A`) | `read_column_physical` applies `TZERO + TSCAL·field` | ✅ |
+| 5.4 | `TNULLn` (string) undefined marker | `AsciiColumn.null`; physical → `NaN` | ✅ |
 | 5.4 | `TDISPn`, `TDMINn`/`TDMAXn`, `TLMINn`/`TLMAXn` | not implemented | 🟢 |
 | impl | Right-justify numerics, left-justify strings, gap-fill spaces | `format_ascii_field` | ✅ |
 | impl | Overflow handling | `*`-fill per §7.2.5 (`writer/mod.rs:656`) | ✅ |
@@ -414,28 +388,21 @@ are implemented.
 
 ### Gaps
 
-1. 🟡 **`TNULLn` undefined values not handled (§7.2.5).** `read_column` never
-   reads `TNULLn`, and `ColumnData` (`I64`/`F64`/`Text`, dense `Vec`s) has no
-   per-cell undefined representation. A conforming table whose null marker is a
-   non-numeric string (e.g. `'NULL'`/`'***'`) therefore fails to read: the
-   `Integer`/`Float` branch hits `s.parse()` and returns
-   `FitsError::InvalidValue` (`ascii/mod.rs:135,152`). Needs both `TNULLn`
-   detection and a nullable column representation.
+1. ✅ **FIXED — `TNULLn` undefined values handled (§7.2.5).** `AsciiColumn` now
+   reads `TNULLn`; a field equal to the marker is a 0 placeholder in the raw
+   `read_column` plane and `NaN` in `read_column_physical`, so a table whose null
+   marker is `'NULL'`/`'***'` no longer fails to read.
 
-2. 🟡 **`TSCALn`/`TZEROn` scaling not applied to ASCII columns (§7.2.2).**
-   `AsciiColumn` carries no scaling and `read_column` returns the raw field value;
-   `physical = TZEROn + TSCALn × field` is never computed. (Binary tables
-   implement this; ASCII tables do not — an asymmetry.)
+2. ✅ **FIXED — `TSCALn`/`TZEROn` scaling applied to ASCII columns (§7.2.2).** New
+   `AsciiTable::read_column_physical` computes `TZEROn + TSCALn × field` (mirroring
+   binary tables), mapping blanks to 0 and `TNULLn` to `NaN`.
 
-3. 🟡 **Implicit decimal point not handled (§7.2.1, deprecated).** For an
-   `Fw.d`/`Ew.d`/`Dw.d` field with no explicit `.`, the decimal point is implied
-   `d` digits from the right (value × 10⁻ᵈ). `read_column` ignores `decimals` and
-   parses the digits as-is (`ascii/mod.rs:150`), so such a (deprecated but legal)
-   field is read off by a factor of 10ᵈ.
+3. ✅ **FIXED — implicit decimal point handled (§7.2.1).** `parse_ascii_float`
+   applies the implied point `d` digits from the right (×10⁻ᵈ) when an
+   `Fw.d`/`Ew.d`/`Dw.d` field carries no explicit `.`.
 
-4. 🟡 **`column_index` is case-sensitive (§7.2.2).** `TTYPEn` is to be compared
-   case-insensitively, but `column_index` matches with `== Some(name)`
-   (`ascii/mod.rs:101`), so `column_index("ra")` misses a `TTYPE='RA'` column.
+4. ✅ **FIXED — `column_index` is now case-insensitive (§7.2.2).** Matching uses
+   `eq_ignore_ascii_case`, so `column_index("ra")` finds a `TTYPE='RA'` column.
 
 5. 🟢 **No typed accessors** for `TDISPn`, `TDMINn`/`TDMAXn`, `TLMINn`/`TLMAXn`,
    `EXTNAME`/`EXTVER`/`EXTLEVEL`, `AUTHOR`, `REFERENC` — readable only as raw
@@ -483,22 +450,22 @@ binary-table path (`bintable_header`, `column_code`, `check_column`, `pack_rows`
 | 6.3 | `rTa`: repeat (≥0, default 1), type code, trailing | `Tform::parse` (`table/mod.rs:113`) | ✅ |
 | 6.3 | All 13 codes `LXBIJKAEDCMPQ` + byte sizes | `TformKind`, `elem_size`, `byte_width` | ✅ |
 | 6.3 | `r=0` empty cell; repeat element-wise | `byte_width` 0; flat decode | ✅ |
-| 6.3 | `rA` = one string; early `NUL` terminates | `trim_text` strips trailing sp/NUL, no early cut | 🟡 early-NUL not honored |
+| 6.3 | `rA` = one string; early `NUL` terminates | `trim_text` truncates at first NUL | ✅ |
 | 6.3 | `P`/`Q` repeat only 0 or 1 | not validated | 🟢 |
 | 6.4 | `physical = TZEROn + TSCALn × stored` (Eq. 7) | `read_column_physical` (`table/mod.rs:314`) | ✅ |
 | 6.4 | Not applied to `A`/`L`/`X` | `_ ⇒ NonNumericColumn` (also rejects `C`/`M`) | ✅ (C/M over-rejected) |
 | 6.4 | Unsigned `B`/`I`/`J`/`K` via `TZEROn` | `physical()` f64 plane | ✅ values / 🟡 no typed `uN`, u64 precision |
 | 6.4 | `TNULLn` matched on **stored** value before Eq. 7 | `scaled_int` checks `tnull` pre-scale (`table/mod.rs:318`) | ✅ |
 | 6.4 | Scaling on `P`/`Q` heap values, not descriptor | `read_vla_column` returns raw, no scaling | 🟡 missing |
-| 6.5 | `TDIMn` multidimensional cell reshape | not parsed | 🟡 missing |
+| 6.5 | `TDIMn` multidimensional cell reshape | `Column.tdim` parsed; written from `WriteColumn::dims` | ✅ shape exposed |
 | 6.6 | `P`/`Q` descriptor `(nelem, offset)`, signed; heap decode | `read_vla_column` (`table/mod.rs:345`) | ✅ |
 | 6.6 | Default `THEAP` = main-table size; gap allowed | `heap_offset` default | ✅ (min not validated) |
 | 6.6 | `nelem=0` ⇒ no heap data | empty slice | ✅ (garbage offset may error) |
-| 6.6 | Span must lie within **heap** (not data unit) | bounds-checked vs whole `bytes` (incl fill) | 🟡 over-permissive |
-| 6.7 | `TTYPEn` name, compared case-insensitively | stored; `column_index` case-**sensitive** | 🟡 |
+| 6.6 | Span must lie within **heap** (not data unit) | bounds-checked vs `heap_end` (`nrows·row_len + PCOUNT`) | ✅ |
+| 6.7 | `TTYPEn` name, compared case-insensitively | `column_index` uses `eq_ignore_ascii_case` | ✅ |
 | 6.7 | `TUNITn`, `TSCALn`, `TZEROn`, `TNULLn`, `THEAP` | parsed | ✅ |
 | 6.7 | `TDISPn`, `TDIMn`, `TDMINn`/`TDMAXn`, `TLMINn`/`TLMAXn` | not implemented | 🟡 `TDIM` / 🟢 rest |
-| impl | `X` bit columns unpacked MSB-first | returned as raw packed `Bytes` | 🟡 not unpacked |
+| impl | `X` bit columns unpacked MSB-first | `read_bit_column` → `Vec<bool>`/row; `read_column` keeps packed bytes | ✅ |
 | impl | Column-oriented / SIMD / zero-copy fast path | `read_column` copies via `flatten` | 🟢 perf |
 
 Fixed-width decoding (all 13 type codes, repeat/byte-width including `X` =
@@ -510,49 +477,42 @@ beyond plain fixed-width decode.
 
 ### Gaps
 
-1. 🟡 **`TDIMn` multidimensional cells not implemented (§6.5).** No `TDIM`
-   parsing exists; `Column` carries no shape and `read_column` returns a flat,
-   row-flattened vector. A `60A` + `TDIM='(5,4,3)'` string array, or any reshaped
-   numeric cell, is readable only as raw flat data with the dimensionality lost.
+1. ✅ **`TDIMn` multidimensional cells read + write (§6.5).** `Column.tdim` parses
+   `TDIMn` into a shape (`parse_tdim`) and the writer emits it from
+   `WriteColumn::dims`. `read_column` returns the flat row-major buffer with the
+   per-cell shape on `Column.tdim` for reshaping. (Added earlier; the prior gap
+   entry was stale.)
 
-2. 🟡 **VLA heap bounds checked against the whole data unit, not the heap
-   (§6.6 + impl note).** `read_vla_column` validates `start + nbytes` with
-   `self.bytes.get(start..start+nbytes)` (`table/mod.rs:371`) — `self.bytes` is the
-   entire data unit including trailing block fill — instead of against the heap
-   extent (`PCOUNT − gap`). A descriptor overrunning the heap into the padding is
-   silently accepted and decodes fill bytes as array elements.
+2. ✅ **FIXED — VLA heap bounds now checked against the heap (§6.6).** `BinTable`
+   carries `heap_end = nrows·row_len + PCOUNT`, and `read_vla_column` rejects any
+   span past it, so trailing block fill is never decoded as array elements.
+   Covered by `vla_descriptor_overrunning_the_heap_is_rejected`.
 
-3. 🟡 **`X` (bit) columns are not unpacked.** `decode_array` returns `X` as raw
-   packed `ColumnData::Bytes` (`table/mod.rs:410`) rather than unpacking bits
-   MSB-first into a bit/bool array, and the writer has no `X` encoding
-   (`column_code` maps `Bytes`→`B`), so a bit column cannot round-trip as `X`.
+3. ✅ **`X` (bit) columns round-trip (§6.3).** The writer emits `<nbits>X` from
+   packed bytes (`WriteColumn::bits`), and `read_bit_column` unpacks each row's
+   bits MSB-first into `Vec<bool>`; `read_column` still returns the lossless packed
+   bytes. Covered by `x_bit_column_unpacks_msb_first` and
+   `writes_tdim_q_vla_and_bit_columns`. (Write added earlier; read-unpacking is new.)
 
-4. 🟡 **VLA columns have no scaling/null/physical path (§6.4).**
-   `read_vla_column` returns raw heap arrays; `TSCALn`/`TZEROn`/`TNULLn` on the
-   heap element type are never applied (there is no `read_vla_column_physical`).
+4. 🟡 **VLA columns still have no scaling/null/physical path (§6.4).**
+   `read_vla_column` returns raw heap arrays; there is no `read_vla_column_physical`
+   applying `TSCALn`/`TZEROn`/`TNULLn` to heap elements. **Open.**
 
-5. 🟡 **`rA` early-NUL termination not honored (§6.3).** `trim_text`
-   (`table/mod.rs:435`) strips only *trailing* spaces and NULs, so a cell like
-   `AB\0CD` decodes to `"AB\0CD"` instead of being truncated at the first NUL to
-   `"AB"`.
+5. ✅ **FIXED — `rA` early-NUL termination honored (§6.3).** `trim_text` truncates
+   at the first NUL before stripping trailing spaces, so `AB\0CD` → `"AB"`. Covered
+   by `a_column_terminates_at_the_first_nul`.
 
-6. 🟡 **`column_index` is case-sensitive (§6.7).** Same issue as ASCII tables —
-   `TTYPEn` is to be matched case-insensitively but `column_index`
-   (`table/mod.rs:278`) uses `== Some(name)`.
+6. ✅ **FIXED — `column_index` now case-insensitive (§6.7),** via
+   `eq_ignore_ascii_case`. Covered by `column_index_is_case_insensitive`.
 
-7. 🟡 **No native unsigned (`uN`) exposure / `u64` precision loss.** Mirrors the
-   §5 image gap: integer `TFORM` + `TZEROn = 2^(n-1)` + `TSCALn = 1` is realized
-   only through the `f64` `read_column_physical` plane, with no typed
-   `u16`/`u32`/`u64` column and rounding for `u64` values > 2⁵³.
+7. 🟡 **No native unsigned (`uN`) exposure / `u64` precision loss.** Integer
+   `TFORM` + `TZEROn = 2^(n-1)` + `TSCALn = 1` is realized only through the `f64`
+   `read_column_physical` plane, with no typed `u16`/`u32`/`u64` column and
+   rounding for `u64` values > 2⁵³. **Open** (shared with §5).
 
-8. 🟡 **VLA (`P`) write is implemented but 32-bit-only.** `write_table` now
-   builds the heap and emits `P` array descriptors (`WriteColumn::vla`,
-   `writer/mod.rs:79`; round-tripped by `writes_and_reads_back_variable_length_arrays`,
-   `writer/tests.rs:54`) — so the once-TODO binary-table VLA write path exists.
-   But it always writes 32-bit `1P` descriptors and casts `nelem`/`offset`
-   `as i32` (`writer/mod.rs:211`): a heap larger than 2 GiB, or a single row with
-   more than `i32::MAX` elements, silently truncates, with no `Q` (64-bit)
-   fallback. (Decode handles both `P` and `Q`.)
+8. ✅ **`Q` (64-bit) VLA write supported (§6.6).** `WriteColumn::q()` emits `1Q`
+   descriptors for heaps beyond the 32-bit `1P` range; `1P` remains the default.
+   (Added earlier; the prior gap entry was stale.)
 
 9. 🟢 **Minor/unvalidated:** `P`/`Q` repeat not restricted to {0,1}; `THEAP`
    minimum (≥ main-table size) not enforced; `C`/`M` complex columns are rejected
