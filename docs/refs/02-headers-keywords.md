@@ -37,15 +37,17 @@ accept free-format for everything.
 | Character string | single-quoted; `''` escapes a literal quote; leading spaces significant, trailing not | `'Cygnus X-1'` |
 | Logical | `T` or `F` (fixed: byte 30) | `T` |
 | Integer | optional sign + digits | `16` |
-| Real float | Fortran/`C` float; `E`/`D`/`e` exponents allowed | `1.5`, `3.14E2`, `2.0D0` |
+| Real float | Fortran/`C` float; exponent letter `E` or `D`, **upper-case only** (§4.2.4) | `1.5`, `3.14E2`, `2.0D0` |
 | Complex integer | `(re, im)` | `(3, 4)` |
 | Complex float | `(re, im)` | `(1.0, -2.5)` |
 | Date | string in ISO-8601 (`YYYY-MM-DD[Thh:mm:ss[.sss…]]`) | `'2006-10-22'` |
 
 - Three distinct string-ish cases (§4.2.1) — do **not** conflate them:
   - `KEYWORD= ''` — a **null** (zero-length) string.
-  - `KEYWORD= '        '` — an **empty** string (all spaces; trailing spaces are
-    not significant, so it reduces to length 0).
+  - `KEYWORD= '   '` — an **empty** string. Per §4.2.1.1 the *first* space is
+    significant and trailing spaces are not, so it reduces to a single space
+    (length 1), **not** length 0 — that one significant space is exactly what
+    distinguishes the empty string from the null string above.
   - `KEYWORD=` (blank value field, no quotes) — an **undefined** value.
 - No minimum string length is required, *except* `XTENSION` values must be padded
   to 8 characters for backward compatibility (e.g. `'IMAGE   '`).

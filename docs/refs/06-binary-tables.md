@@ -12,7 +12,7 @@ lives.
   the repeat count and `b_n` the element size of column n's `TFORMn`.
 - After the main table comes the **heap** (variable-length array storage),
   optionally offset by `THEAP` from the start of the data unit.
-- `PCOUNT` = number of bytes in the heap (incl. any gap). `GCOUNT = 1`.
+- `PCOUNT` = size of the supplemental data area (gap + heap), in bytes. `GCOUNT = 1`.
 - All numeric data big-endian; same encodings as [§5](03-data-representation.md).
 
 ## 6.2 Mandatory keywords (Table 17, in order)
@@ -24,7 +24,7 @@ lives.
 | `NAXIS` | `2` |
 | `NAXIS1` | row width in bytes |
 | `NAXIS2` | number of rows |
-| `PCOUNT` | heap size in bytes |
+| `PCOUNT` | supplemental area (gap + heap) size in bytes |
 | `GCOUNT` | `1` |
 | `TFIELDS` | number of columns (0…999) |
 | `TFORMn` | n = 1…TFIELDS, format of column n |
@@ -54,7 +54,10 @@ a single **type code** `T`, and optional trailing chars `a` (undefined by spec).
 † `X`: `r` is the number of bits; storage is ⌈r/8⌉ bytes.
 
 - `rA` is a character string of length `r` (one cell), not `r` separate strings.
+  May be `NUL`-terminated early; chars after the first `NUL` are undefined.
 - `r = 0` is allowed (empty cell). Repeat `r` applies element-wise for numerics.
+- `P`/`Q` (array-descriptor) columns permit **only** repeat count 0 or 1 — a cell
+  holds at most one descriptor.
 
 ## 6.4 Scaling & nulls
 
@@ -70,33 +73,55 @@ a single **type code** `T`, and optional trailing chars `a` (undefined by spec).
   | `J` | signed | unsigned 32-bit | `2147483648` (2³¹) |
   | `K` | signed | unsigned 64-bit | `9223372036854775808` (2⁶³) |
 
-- `TNULLn` (integer columns only) = the stored integer value denoting undefined.
-  Float columns use IEEE NaN for undefined.
+- `TNULLn` = the **raw stored** integer denoting undefined, for `B`/`I`/`J`/`K`
+  columns (and `P`/`Q` descriptors pointing to integer arrays); forbidden on other
+  types. It is matched against the stored value **before** Eq. 7, not the physical
+  value — e.g. an unsigned-16 column (`TZEROn = 32768`) whose physical-0 means
+  undefined needs `TNULLn = -32768`. Float/complex columns use IEEE NaN instead (no
+  `TNULLn`).
 
 ## 6.5 Multidimensional cells — `TDIMn`
 
-A vector cell can be reshaped into an N-D array via `TDIMn = '(d1,d2,…)'`, with
-`Π di = r` (the repeat count). Fortran order (d1 fastest).
+A vector cell can be reshaped into an N-D array via `TDIMn = '(d1,d2,…)'`. The
+product `Π di` *must be ≤* `r` (the `TFORMn` repeat count; for `P`/`Q`, ≤ the
+descriptor's stored array length); any trailing unused elements are undefined fill.
+Fortran order (d1 fastest). String arrays use the same notation: `TFORMn = '60A'`
+with `TDIMn = '(5,4,3)'` is a 4×3 array of 5-character strings.
 
 ## 6.6 Variable-length arrays (§7.3.5–7.3.6)
 
 Columns of type `P`/`Q` store a fixed-size **array descriptor** in the row and the
 actual data in the heap.
 
-- Descriptor layout: `(nelem, byte_offset)` — two 32-bit ints for `P`, two 64-bit
-  ints for `Q`. `byte_offset` is relative to the start of the heap.
-- `TFORMn = 'rPt(emax)'` / `'rQt(emax)'`: `t` is the element type code, `emax` is
-  the maximum element count across rows (guideline, aids preallocation).
-- Heap begins `THEAP` bytes from the start of the data unit (default = end of the
-  main table, i.e. `NAXIS1 × NAXIS2`). Heap size counted in `PCOUNT`.
-- Guidelines (§7.3.6): writers should pack the heap with no gaps and in row order;
-  readers must not assume either.
+- Descriptor layout: `(nelem, byte_offset)` — two 32-bit **signed** ints for `P`,
+  two 64-bit **signed** ints for `Q`. `byte_offset` is zero-indexed from the start
+  of the heap. (Repeat count on the column itself is 0 or 1 only — see §6.3.)
+- `TFORMn = 'rPt(emax)'` / `'rQt(emax)'`: `t` is the element type code (any type but
+  `P`/`Q`), `emax` is the maximum element count across rows (guideline, aids
+  preallocation); extra trailing chars after `(emax)` are allowed.
+- Heap begins `THEAP` bytes from the start of the data unit (default *and minimum* =
+  end of the main table, `NAXIS1 × NAXIS2`); a larger `THEAP` leaves a gap before
+  the heap. `PCOUNT` counts gap + heap. `THEAP` must not appear when `PCOUNT = 0`.
+- Zero-length array (`nelem = 0`): no heap data, `byte_offset` is undefined (write
+  0). The referenced span `byte_offset + nelem×bytes` must lie entirely within the
+  heap; negative descriptor values are undefined.
+- Guidelines (§7.3.6): heap data may be stored in any row order, with gaps, and with
+  pointer aliasing (two descriptors → one span); readers must assume none of these,
+  and no element alignment is guaranteed.
 
 ## 6.7 Reserved keywords (§7.3.2)
 
 `TTYPEn` (name; case-insensitive, recommend `[A-Za-z0-9_]`), `TUNITn`,
-`TSCALn`, `TZEROn`, `TNULLn`, `TDISPn`, `TDIMn`, `THEAP`, plus
-`EXTNAME`/`EXTVER`/`EXTLEVEL`, `AUTHOR`, `REFERENC`.
+`TSCALn`, `TZEROn`, `TNULLn`, `TDISPn`, `TDIMn`, `THEAP`,
+`TDMINn`/`TDMAXn` (actual min/max physical value in the column),
+`TLMINn`/`TLMAXn` (legal value range, e.g. histogram bounds), plus
+`EXTNAME`/`EXTVER`/`EXTLEVEL`, `AUTHOR`, `REFERENC`. All §4.4.2 reserved keywords
+apply here **except** `EXTEND` and `BLOCKED`.
+
+`TDISPn` display formats (Table 20) are Fortran-style: `Aw` `Lw` `Iw.m` `Bw.m`
+`Ow.m` `Zw.m` `Fw.d` `Ew.dEe` `ENw.d` `ESw.d` `Gw.dEe` `Dw.dEe` — the ASCII-table
+codes plus binary/octal/hex (`B`/`O`/`Z`) and logical (`L`). Display-only metadata;
+the scaled physical value (Eq. 7) is what gets formatted.
 
 ## Implementation notes (this library)
 
@@ -110,5 +135,6 @@ actual data in the heap.
 - Unsigned detection mirrors images: integer `TFORM` + `TZEROn == 2^(n-1)` +
   `TSCALn == 1` ⇒ expose `uN`.
 - Heap/VLA: parse descriptors lazily; expose per-row array slices into the heap.
-  Validate `byte_offset + nelem×bytes ≤ PCOUNT`.
+  Validate `byte_offset + nelem×bytes ≤ heap length` (= `PCOUNT − gap`, where
+  `gap = THEAP − NAXIS1×NAXIS2`), not against `PCOUNT` directly.
 - `X` (bit) columns: pack/unpack MSB-first within each byte.

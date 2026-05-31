@@ -2,7 +2,10 @@
 
 A FITS file is a sequence of one or more **Header/Data Units (HDUs)**, each
 laid out on a strict 2880-byte grid. Everything is big-endian and built from
-ASCII-text headers followed by optional binary data.
+ASCII-text headers followed by optional binary data. In order (§3.1): the
+**primary HDU**, then zero or more **conforming extensions**, then optional
+**special records**. A primary-only file is a *Single Image FITS* (SIF); one
+with extensions, a *Multi-Extension FITS* (MEF).
 
 ## 1.1 The 2880-byte block
 
@@ -47,14 +50,16 @@ The fundamental unit of layout is the **logical record / block = 2880 bytes**
   `NAXIS1..NAXISn`, … , `END` (see [headers](02-headers-keywords.md)).
 - `SIMPLE = T` asserts the file conforms to the Standard. `SIMPLE = F` is
   permitted but means the file departs from the Standard in unspecified ways.
-- The primary data array, if present, is a single contiguous N-dimensional array.
+- The primary data array, if present, is a single contiguous array of **1 to 999
+  axes** (`NAXIS`), stored in Fortran order — Axis 1 varies fastest (§3.3.2).
 - `EXTEND = T` is a (reserved, advisory) flag that extensions *may* follow.
 
 ## 1.4 Extensions (§3.4)
 
 A **conforming extension** satisfies the generic requirements of §3.4.1
-(mandatory keyword order below). A **standard extension** is one of the three
-IAUFWG-registered types:
+(mandatory keyword order below) and has an IAUFWG-registered `XTENSION` type name
+(Appendix F). A **standard extension** is one of the three types whose content is
+fully specified in §7; other conforming types exist but are outside this Standard:
 
 | `XTENSION` value | Meaning | Ref |
 |------------------|---------|-----|
@@ -80,6 +85,8 @@ IAUFWG-registered types:
 - `PCOUNT`: 0 for IMAGE/TABLE; = heap byte count for BINTABLE; = parameter count
   for random groups.
 - `GCOUNT`: 1 for IMAGE/TABLE/BINTABLE; = number of groups for random groups.
+- The keywords above are **ordered and mandatory**; no other keyword may
+  intervene between `XTENSION` and `GCOUNT` (§4.4.1.2).
 
 ### Order of extensions (§3.4.3)
 
@@ -90,27 +97,45 @@ extension.)
 
 ## 1.5 Special records & physical blocking (§3.5–3.6)
 
-- **Special records** (§3.5): blocks after the last standard HDU whose content is
-  not defined by the Standard. Restricted use; a reader may ignore them.
+- **Special records** (§3.5): 2880-byte blocks after the last HDU whose structure
+  is not defined by the Standard. Their first 8 bytes *must not* be `XTENSION`
+  (and *should not* be `SIMPLE␣␣`), so a reader can tell them from an extension.
+  Restricted use; a reader may ignore them.
 - **Physical blocking** (§3.6): on sequential media, blocks of 1–10 logical
   records (i.e. 2880–28800 bytes). On disk this is irrelevant — read/write the
-  byte stream directly.
+  byte stream directly. Bytes past the FITS end in a trailing partial physical
+  block are zero-filled on write and disregarded on read; sub-2880-byte files
+  (e.g. tape labels) are not part of the FITS file.
 
 ## 1.6 Sizing formulas
 
-Data-array size in bits (excluding fill), for primary array / IMAGE:
+Data size in bits (excluding fill) has three cases, each with its own equation in
+the Standard (numbers match §4.4.1 / §6.1):
 
 ```
-Nbits = |BITPIX| × (NAXIS1 × NAXIS2 × … × NAXISm)        (Eq. 1)
+primary array (§4.4.1.1):
+  Nbits = |BITPIX| × (NAXIS1 × NAXIS2 × … × NAXISm)                    (Eq. 1)
+
+conforming extension (§4.4.1.2):
+  Nbits = |BITPIX| × GCOUNT × (PCOUNT + NAXIS1 × NAXIS2 × … × NAXISm)  (Eq. 2)
+
+random groups (§6.1; NAXIS1 = 0 is the format signature):
+  Nbits = |BITPIX| × GCOUNT × (PCOUNT + NAXIS2 × NAXIS3 × … × NAXISm)  (Eq. 4)
 ```
 
-For conforming extensions (and random groups), including PCOUNT/GCOUNT:
-
-```
-Nbits = |BITPIX| × GCOUNT × (PCOUNT + NAXIS1 × … × NAXISm)   (Eq. 2)
-```
+`Nbits` must be non-negative. An `IMAGE` extension uses Eq. 2 with `PCOUNT = 0`
+and `GCOUNT = 1`, so it reduces to Eq. 1. **Random groups skip `NAXIS1`** (the
+zero sentinel) and need Eq. 4 — applying Eq. 2 verbatim would wrongly zero the
+array term.
 
 Data-unit byte length = `ceil(Nbits / 8 / 2880) × 2880`.
+
+## 1.7 Restrictions on changes (§3.7)
+
+"Once *FITS*, always *FITS*": any structure valid under this Standard stays valid
+forever. A later revision may *deprecate* a structure (e.g. random groups) but
+never invalidate it — so a reader must keep handling legacy forms indefinitely,
+even ones a writer should no longer emit.
 
 ## Implementation notes (this library)
 

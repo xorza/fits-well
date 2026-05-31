@@ -986,10 +986,7 @@ energy [∗]        - eV electron volt 1.6021765 × 10 [−][19] J
 
              - erg erg 10 [−][7] J
 
-2
-
-1 2π _e_ [2] 2
-Ry rydberg 2 � _hc_ � _m_ _e_ _c_ = 13.605692 eV
+Ry rydberg ½(2π _e_ [2] / _hc_ ) [2] _m_ _e_ _c_ [2] = 13.605692 eV
 
 mass [∗] solMass solar mass 1.9891 × 10 [30] kg
 u unified atomic mass unit 1.6605387 × 10 [−][27] kg
@@ -1510,7 +1507,7 @@ string, when available (e.g., ’1994A&AS..103..135A’ or
 These keywords provide commentary information about the
 contents or history of the _FITS_ file and _may_ occur any number of
 times in a header. These keywords _shall_ have no associated value
-even if the value indicator characters �=␣' appear in Bytes 9 and
+even if the value indicator characters '=␣' appear in Bytes 9 and
 10 (hence it is _recommended_ that these keywords not contain the
 value indicator). Bytes 9 through 80 _may_ contain any of the restricted set of ASCII-text characters, decimal 32 through 126
 (hexadecimal 20 through 7E).
@@ -1602,7 +1599,7 @@ units _must_ follow the prescriptions of Sect. 4.3.
 
 BLANK keyword. This keyword _shall_ be used only in headers
 with positive values of BITPIX (i.e., in arrays with integer data).
-Bytes 1 through 8 contain the string �BLANK␣␣␣' (ASCII spaces
+Bytes 1 through 8 contain the string 'BLANK␣␣␣' (ASCII spaces
 in Bytes 6 through 8). The value field _shall_ contain an integer
 that specifies the value that is used within the integer array to
 represent pixels that have an undefined physical value.
@@ -2498,12 +2495,7 @@ lists the number of bytes each data type occupies in a table row.
 The first field of a row is numbered 1. The total number of bytes
 _n_ row in a table row is given by
 
-TFIELDS
-
-_n_ row = _r_ _i_ _b_ _i_ (8)
-�
-
-_i_ =1
+_n_ row = Σ_{i=1}^{TFIELDS} _r_ _i_ _b_ _i_ (8)
 
 where _r_ _i_ is the repeat count for Field _i_, _b_ _i_ is the number of bytes
 for the data type in Field _i_, and TFIELDS is the value of that
@@ -2986,9 +2978,9 @@ value) is either very small or very large. Specifically, for real
 values outside the range 0.1 − 0.5 × 10 [−] [d] [−][1] ≤ value < 10 [d] −
 0.5, it is equivalent to Ew.dEe. For real values within the above
 range, it is equivalent to Fw [′] .d [′] followed by 2 + e spaces, where
-datum value lies in the range 10 _[k]_ [−][1] [ �] 1 − 0.5×10 [−] [d][�] ≤ value ≤
+datum value lies in the range 10 _[k]_ [−][1] (1 − 0.5×10 [−] [d] ) ≤ value ≤
 
-10 _[k]_ [ �] 1 − 0.5×10 [−] [d][�] .
+10 _[k]_ (1 − 0.5×10 [−] [d] ) .
 
 Complex data. If the table column contains complex data (with
 TFORM _n_ = ’rC’, or ’rM’) then they _may_ be displayed with any
@@ -3259,12 +3251,7 @@ definitions of the keywords appear in the following subsections.
 The conversion of image pixel coordinates to world coordinates is a multi-step process, as illustrated in Fig. 2.
 For all coordinate types, the first step is a linear transformation applied via matrix multiplication of the vector of pixelcoordinate elements, _p_ _j_ :
 
-_q_ _i_ =
-
-_N_
-� _m_ _i j_ ( _p_ _j_ − _r_ _j_ ) (9)
-
-_j_ =1
+_q_ _i_ = Σ_{j=1}^{N} _m_ _i j_ ( _p_ _j_ − _r_ _j_ ) (9)
 
 Table 21: WCS and celestial coordinates notation.
 
@@ -3334,12 +3321,7 @@ possible that the images contained in a given column of the
 table have different coordinate transformation values. Table 9
 of Calabretta & Greisen (2002) illustrates a technique (com
 
-_x_ _i_ =
-
-_N_
-�( _s_ _i_ _m_ _i j_ )( _p_ _j_ − _r_ _j_ ) (11)
-
-_j_ =1
+_x_ _i_ = Σ_{j=1}^{N} ( _s_ _i_ _m_ _i j_ )( _p_ _j_ − _r_ _j_ ) (11)
 
 and the CD _i j_ keywords encode the product _s_ _i_ _m_ _i j_ . The third convention was widely used before the development of the two previously described conventions and uses the CDELT _i_ keywords
 to define the image scale and the CROTA2 keyword to specify
@@ -4422,12 +4404,7 @@ _Z_ = ( _N_ ( _B_ )(1 − _e_ [2] ) + _H_ ) sin( _B_ )
 
 where:
 
-_a_
-_N_ ( _B_ ) =
-
-1 − _e_ [2] sin [2] ( _B_ )
-
-�
+_N_ ( _B_ ) = _a_ / √(1 − _e_ [2] sin [2] ( _B_ ))
 
 _e_ [2] = 2 _f_ − _f_ [2]
 
@@ -5061,12 +5038,7 @@ ZSCALE – [floating-point; _optional_ ] This column _shall_ be used
 to contain linear scale factors that, along with ZZERO, transform the floating-point pixel values in each tile to integers
 via,
 
-_F_ _i_ − ZZERO
-_I_ _i_ = round
-� ZSCALE
-
-(12)
-�
+_I_ _i_ = round( ( _F_ _i_ − ZZERO) / ZSCALE ) (12)
 
 value. However, these pixel values will be altered when using
 the quantization method described in Sect. 10.2 to compress
@@ -5148,9 +5120,7 @@ values by introducing random noise during the quantization process. So instead o
 way using Eq. 12, the quantized levels are randomized by using
 this slightly modified equation:
 
-_F_ _i_ − ZZERO
-_I_ _i_ = round + _R_ _i_ − 0.5 (13)
-� ZSCALE �
+_I_ _i_ = round( ( _F_ _i_ − ZZERO) / ZSCALE + _R_ _i_ − 0.5 ) (13)
 
 where _R_ _i_ is a random number between 0.0 and 1.0, and 0.5 is
 subtracted so that the mean quantity equals 0. Then restoring the
@@ -6049,7 +6019,7 @@ ASCII control ASCII text
 
 dec hex char dec hex char dec hex char dec hex char
 
-0 00 NUL 32 20 SP 64 40 @ 96 60 �
+0 00 NUL 32 20 SP 64 40 @ 96 60 `
 
 1 01 SOH 33 21 ! 65 41 A 97 61 a
 
@@ -6161,20 +6131,20 @@ E.1.1. Single
 
 A 32-bit single-format number _X_ is divided as shown in Fig. E.1. The value _v_ of _X_ is inferred from its constituent fields.
 
-1. If _e_ = 255 and _f_ � 0, then _v_ is NaN regardless of _s_ .
+1. If _e_ = 255 and _f_ ≠ 0, then _v_ is NaN regardless of _s_ .
 2. If _e_ = 255 and _f_ = 0, then _v_ = (−1) _[s]_ ∞.
 3. If 0 < _e_ < 255, then _v_ = (−1) _[s]_ 2 _[e]_ [−][127] (1 • _f_ ).
-4. If _e_ = 0 and _f_ � 0, then _v_ = (−1) _[s]_ 2 _[e]_ [−][126] (0 • _f_ ) (denormalized numbers).
+4. If _e_ = 0 and _f_ ≠ 0, then _v_ = (−1) _[s]_ 2 _[e]_ [−][126] (0 • _f_ ) (denormalized numbers).
 5. If _e_ = 0 and _f_ = 0, then _v_ = (−1) _[s]_ 0 (zero).
 
 E.1.2. Double
 
 A 64-bit double-format number _X_ is divided as shown in Fig. E.2. The value _v_ of _X_ is inferred from its constituent fields.
 
-1. If _e_ = 2047 and _f_ � 0, then _v_ is NaN regardless of _s_ .
+1. If _e_ = 2047 and _f_ ≠ 0, then _v_ is NaN regardless of _s_ .
 2. If _e_ = 2047 and _f_ = 0, then _v_ = (−1) _[s]_ ∞.
 3. If 0 < _e_ < 2047, then _v_ = (−1) _[s]_ 2 _[e]_ [−][1023] (1 • _f_ ).
-4. If _e_ = 0 and _f_ � 0, then _v_ = (−1) _[s]_ 2 _[e]_ [−][1022] (0 • _f_ ) (denormalized numbers).
+4. If _e_ = 0 and _f_ ≠ 0, then _v_ = (−1) _[s]_ 2 _[e]_ [−][1022] (0 • _f_ ) (denormalized numbers).
 5. If _e_ = 0 and _f_ = 0, then _v_ = (−1) _[s]_ 0 (zero).
 
 E.2. Byte patterns
@@ -6818,7 +6788,7 @@ in the range 0–9, A–Z, and a–z.
 
 Fig. J.1: Only ASCII alpha-numeric characters are used to encode the checksum – punctuation is excluded
 
-**2** ~~2222222222222222222222222222222222222222222222222222222222222222222222~~ 222222222222222222222222222222222222222222222222222222222222222222222
+
 
 0 _30_ 1 _31_ 2 _32_ 3 _33_ 4 _34_ 5 _35_ 6 _36_ 7 _37_ 8 _38_ 9 _39_
 
@@ -6834,7 +6804,7 @@ b _62_ c _63_ d _64_ e _65_ f _66_ g _67_ h _68_ i _69_ j _6a_ k _6b_
 
 l _6c_ m _6d_ n _6e_ o _6f_ p _70_ q _71_ r _72_
 
-~~**2**~~ 2222222222222222222222222222222222222222222222222222222222222222222222 Figure 1. Only ASCII alpha-numerics are used to encode the checksum — punctuation is excluded. ~~222222222222222222222222222222222222222222222222222222222222222222222~~
+
 
 1. Begin with the ones’ complement (replace 0s with 1s and
 1s with 0s) of the 32-bit checksum accumulated over all the
