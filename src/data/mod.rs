@@ -11,11 +11,12 @@ use crate::endian::decode_be;
 use crate::endian::encode_be;
 use crate::header::Header;
 
-/// The `BZERO` offsets that realize the FITS unsigned-integer convention: a
-/// sign-bit flip (`2^(n-1)`), exactly representable as `f64`.
-const U16_OFFSET: f64 = 32_768.0; // 2¹⁵
-const U32_OFFSET: f64 = 2_147_483_648.0; // 2³¹
-const U64_OFFSET: f64 = 9_223_372_036_854_775_808.0; // 2⁶³
+/// The `BZERO`/`TZEROn` offsets that realize the FITS unsigned-integer convention:
+/// a sign-bit flip (`2^(n-1)`), exactly representable as `f64`. Shared by the image
+/// (`BZERO`) and binary-table (`TZEROn`) unsigned paths.
+pub(crate) const U16_OFFSET: f64 = 32_768.0; // 2¹⁵
+pub(crate) const U32_OFFSET: f64 = 2_147_483_648.0; // 2³¹
+pub(crate) const U64_OFFSET: f64 = 9_223_372_036_854_775_808.0; // 2⁶³
 
 /// An owned, host-endian sample buffer, tagged by its `BITPIX` element type.
 #[derive(Debug, Clone, PartialEq)]

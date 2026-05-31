@@ -92,7 +92,10 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
         }
     };
     let zdither0 = header.get_integer("ZDITHER0").unwrap_or(1);
-    let zblank = header.get_integer("ZBLANK");
+    // ZBLANK may be a keyword (constant) or a per-tile column; §10.1.3 says the
+    // column value wins where present.
+    let zblank_keyword = header.get_integer("ZBLANK");
+    let zblank_column = read_i64_column(table, "ZBLANK");
     let smooth = hcompress_smooth(header);
 
     // Per-tile compressed data, with the conventional fallback columns.
@@ -150,7 +153,10 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
                 z,
                 method,
                 t as i64 + zdither0,
-                zblank,
+                zblank_column
+                    .as_ref()
+                    .and_then(|v| v.get(t).copied())
+                    .or(zblank_keyword),
             )?;
             for (&flat, &v) in indices.iter().zip(&vals) {
                 out_f[flat] = v;
@@ -548,6 +554,19 @@ fn read_f64_column(table: &BinTable, name: &str) -> Option<Vec<f64>> {
     let c = table.column_index(name)?;
     match table.read_column(c) {
         Ok(ColumnData::F64(v)) => Some(v),
+        _ => None,
+    }
+}
+
+/// Read a per-tile integer column (e.g. a `ZBLANK` column), widening any integer
+/// `TFORM` to `i64`, or `None` if absent.
+fn read_i64_column(table: &BinTable, name: &str) -> Option<Vec<i64>> {
+    let c = table.column_index(name)?;
+    match table.read_column(c) {
+        Ok(ColumnData::Bytes(v)) => Some(v.iter().map(|&x| x as i64).collect()),
+        Ok(ColumnData::I16(v)) => Some(v.iter().map(|&x| x as i64).collect()),
+        Ok(ColumnData::I32(v)) => Some(v.iter().map(|&x| x as i64).collect()),
+        Ok(ColumnData::I64(v)) => Some(v),
         _ => None,
     }
 }

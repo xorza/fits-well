@@ -7,6 +7,10 @@
 //! `TSCALn`/`TZEROn` physical plane ([`BinTable::read_column_physical`]), and
 //! `P`/`Q` variable-length arrays out of the heap ([`BinTable::read_vla_column`]).
 
+use crate::data::U16_OFFSET;
+use crate::data::U32_OFFSET;
+use crate::data::U64_OFFSET;
+use crate::data::UnsignedView;
 use crate::endian::decode_be;
 use crate::error::FitsError;
 use crate::error::Result;
@@ -354,6 +358,37 @@ impl BinTable {
         let col = self.column(index)?;
         let data = self.read_column(index)?;
         column_data_physical(&data, col.tform.kind, col.tscale, col.tzero, col.tnull)
+    }
+
+    /// If column `index` uses exactly the FITS unsigned (or signed-byte)
+    /// convention — `TSCALn == 1`, no `TNULLn`, and `TZEROn` the matching sign-bit
+    /// offset on a `B`/`I`/`J`/`K` column — decode it as exact typed integers (no
+    /// `f64` rounding, unlike [`BinTable::read_column_physical`]). Array columns
+    /// flatten row-major. Returns `Ok(None)` for any other column. Errors only on a
+    /// bad index or a variable-length column.
+    pub fn read_column_unsigned(&self, index: usize) -> Result<Option<UnsignedView>> {
+        let col = self.column(index)?;
+        if col.tscale != 1.0 || col.tnull.is_some() {
+            return Ok(None);
+        }
+        let tzero = col.tzero;
+        Ok(match (self.read_column(index)?, col.tform.kind) {
+            (ColumnData::Bytes(v), TformKind::Byte) if tzero == -128.0 => Some(UnsignedView::I8(
+                v.iter().map(|&x| (x ^ 0x80) as i8).collect(),
+            )),
+            (ColumnData::I16(v), _) if tzero == U16_OFFSET => Some(UnsignedView::U16(
+                v.iter().map(|&x| (x as u16) ^ 0x8000).collect(),
+            )),
+            (ColumnData::I32(v), _) if tzero == U32_OFFSET => Some(UnsignedView::U32(
+                v.iter().map(|&x| (x as u32) ^ 0x8000_0000).collect(),
+            )),
+            (ColumnData::I64(v), _) if tzero == U64_OFFSET => Some(UnsignedView::U64(
+                v.iter()
+                    .map(|&x| (x as u64) ^ 0x8000_0000_0000_0000)
+                    .collect(),
+            )),
+            _ => None,
+        })
     }
 
     /// Decode a variable-length-array (`P`/`Q`) column: one [`ColumnData`] per

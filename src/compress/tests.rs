@@ -503,6 +503,56 @@ fn decompresses_nocompress_tile_verbatim() {
     assert_eq!(img.samples, ImageData::I16(vec![1, 2, 3, 4]));
 }
 
+#[test]
+fn zblank_column_overrides_keyword_per_tile() {
+    use crate::data::ImageData;
+    use crate::header::Header;
+    use crate::table::BinTable;
+    // A 2×1 float image, one NOCOMPRESS tile of quantized i32 [10, 99]. ZSCALE=2,
+    // ZZERO=5 ⇒ pixel 0 = 25.0; pixel 1's quantized int equals the per-tile ZBLANK
+    // *column* value (99), so it decodes to NaN — proving the column drives nulls.
+    let mut h = Header::new();
+    h.set("XTENSION", "BINTABLE")
+        .set("BITPIX", 8)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 28) // 1P(8) + 1D + 1D + 1J
+        .set("NAXIS2", 1)
+        .set("PCOUNT", 8)
+        .set("GCOUNT", 1)
+        .set("TFIELDS", 4)
+        .set("TFORM1", "1PB(8)")
+        .set("TTYPE1", "COMPRESSED_DATA")
+        .set("TFORM2", "1D")
+        .set("TTYPE2", "ZSCALE")
+        .set("TFORM3", "1D")
+        .set("TTYPE3", "ZZERO")
+        .set("TFORM4", "1J")
+        .set("TTYPE4", "ZBLANK")
+        .set("ZIMAGE", true)
+        .set("ZCMPTYPE", "NOCOMPRESS")
+        .set("ZBITPIX", -32)
+        .set("ZNAXIS", 2)
+        .set("ZNAXIS1", 2)
+        .set("ZNAXIS2", 1)
+        .set("ZTILE1", 2)
+        .set("ZTILE2", 1);
+    let mut data = Vec::new();
+    data.extend_from_slice(&8i32.to_be_bytes()); // descriptor nelem
+    data.extend_from_slice(&0i32.to_be_bytes()); // descriptor offset
+    data.extend_from_slice(&2.0f64.to_be_bytes()); // ZSCALE
+    data.extend_from_slice(&5.0f64.to_be_bytes()); // ZZERO
+    data.extend_from_slice(&99i32.to_be_bytes()); // ZBLANK column value
+    data.extend_from_slice(&10i32.to_be_bytes()); // heap: quantized int 0
+    data.extend_from_slice(&99i32.to_be_bytes()); // heap: quantized int 1 (== ZBLANK)
+    let table = BinTable::from_data(&h, data).unwrap();
+    let img = decompress_image(&h, &table).unwrap();
+    let ImageData::F32(px) = img.samples else {
+        panic!("expected F32")
+    };
+    assert_eq!(px[0], 25.0);
+    assert!(px[1].is_nan());
+}
+
 fn check_table_roundtrip(algo: &str, rows_per_tile: usize) {
     use crate::table::ColumnData;
     use crate::writer::{FitsWriter, WriteColumn};

@@ -450,7 +450,7 @@ binary-table path (`bintable_header`, `column_code`, `check_column`, `pack_rows`
 | 6.3 | `P`/`Q` repeat only 0 or 1 | not validated | 🟢 |
 | 6.4 | `physical = TZEROn + TSCALn × stored` (Eq. 7) | `read_column_physical` (`table/mod.rs:314`) | ✅ |
 | 6.4 | Not applied to `A`/`L`/`X` | `_ ⇒ NonNumericColumn` (also rejects `C`/`M`) | ✅ (C/M over-rejected) |
-| 6.4 | Unsigned `B`/`I`/`J`/`K` via `TZEROn` | `physical()` f64 plane | ✅ values / 🟡 no typed `uN`, u64 precision |
+| 6.4 | Unsigned `B`/`I`/`J`/`K` via `TZEROn` | `physical()` plane + exact typed `read_column_unsigned()` | ✅ |
 | 6.4 | `TNULLn` matched on **stored** value before Eq. 7 | `scaled_int` checks `tnull` pre-scale (`table/mod.rs:318`) | ✅ |
 | 6.4 | Scaling on `P`/`Q` heap values, not descriptor | `read_vla_column_physical` scales heap elements | ✅ |
 | 6.5 | `TDIMn` multidimensional cell reshape | `Column.tdim` parsed; written from `WriteColumn::dims` | ✅ shape exposed |
@@ -503,11 +503,13 @@ beyond plain fixed-width decode.
 6. ✅ **FIXED — `column_index` now case-insensitive (§6.7),** via
    `eq_ignore_ascii_case`. Covered by `column_index_is_case_insensitive`.
 
-7. 🟡 **No native unsigned (`uN`) exposure for *table* columns / `u64` precision.**
-   Integer `TFORM` + `TZEROn = 2^(n-1)` + `TSCALn = 1` is realized only through the
-   `f64` `read_column_physical` plane, with no typed `u16`/`u32`/`u64` column and
-   rounding for `u64` values > 2⁵³. **Open** — the analogous *image* path is now
-   done (`Image::unsigned()`, §5); the table column accessor is not yet built.
+7. ✅ **FIXED — native unsigned (`uN`) exposure for table columns.**
+   `BinTable::read_column_unsigned` returns a typed `UnsignedView`
+   (`U16`/`U32`/`U64`/signed-byte `I8`) when a `B`/`I`/`J`/`K` column uses exactly
+   the convention (`TSCALn == 1`, no `TNULLn`, `TZEROn = 2^(n-1)`), exact past 2⁵³
+   where `read_column_physical` rounds. Reuses the image `UnsignedView`. Covered by
+   `read_column_unsigned_recovers_typed_values` and
+   `read_column_unsigned_is_exact_for_u64_and_none_otherwise`.
 
 8. ✅ **`Q` (64-bit) VLA write supported (§6.6).** `WriteColumn::q()` emits `1Q`
    descriptors for heaps beyond the 32-bit `1P` range; `1P` remains the default.
@@ -883,7 +885,7 @@ reconstruction keywords, in-table VLA columns), not defects in the core codecs.
 | 10.1.3 | `GZIP_COMPRESSED_DATA` fallback (null `COMPRESSED_DATA` descr.) | read+write (`compress/mod.rs:100`) | ✅ |
 | 10.1.3 | No `UNCOMPRESSED_DATA` column in 4.0 | read as 3rd fallback (`compress/mod.rs:101`) | 🟡 lenient (reads pre-standard column) |
 | 10.1.3 | `NULL_PIXEL_MASK` for lossy-codec nulls | — | 🟢 not implemented |
-| 10.1.3 | `ZBLANK` (column or keyword); column wins | keyword only (`compress/mod.rs`) | 🟡 keyword only |
+| 10.1.3 | `ZBLANK` (column or keyword); column wins | per-tile column overrides the keyword (`read_i64_column`) | ✅ |
 | 10.2 | `physical = ZZERO + ZSCALE × I` (Eq. 12) / dithered Eq. 14 | `dequantize` (`compress/quantize.rs:97`) | ✅ |
 | 10.2.1 | `SUBTRACTIVE_DITHER_2`: exact `0.0` ↔ `ZERO_VALUE` | `ZERO_VALUE` (`compress/quantize.rs:19`) | ✅ |
 | 10.2.1 / App. I | Park–Miller PRNG, 10000th seed = 1043618065 | `random_values` (`compress/quantize.rs:40`,`:53`) | ✅ |
@@ -931,12 +933,12 @@ reconstruction keywords, in-table VLA columns), not defects in the core codecs.
    VLA fixture errors rather than misreads), but the §10.3.6 two-stage
    descriptor-compression procedure is absent.
 
-6. 🟡 **Image encoders write only 32-bit `1P` descriptors, and `ZBLANK` is read
-   only as a keyword (§10.1.3).** Both image encoders emit `1P` (`i32`)
-   descriptors; the standard requires `1Q` (64-bit) once the heap exceeds ~2.1 GB,
-   which this writer cannot produce (decode of `1Q` works). Separately,
-   `decompress_image` reads only the `ZBLANK` *keyword*, never the legal per-tile
-   `ZBLANK` *column* (which the standard says wins over the keyword).
+6. 🟡 **Image encoders write only 32-bit `1P` descriptors (§10.1.3).** Both image
+   encoders emit `1P` (`i32`) descriptors; the standard requires `1Q` (64-bit) once
+   the heap exceeds ~2.1 GB, which this writer cannot produce (decode of `1Q`
+   works). **Open** (read side fine). ✅ **The `ZBLANK` *column* is now read** — a
+   per-tile `ZBLANK` column overrides the keyword (`read_i64_column`,
+   `zblank_column_overrides_keyword_per_tile`), per §10.1.3.
 
 7. 🟡 **Mild under-validation.** `ZCMPTYPE` is not checked against Table 36 up
    front (an unknown value fails only when a tile is decoded); `read_axes` accepts
