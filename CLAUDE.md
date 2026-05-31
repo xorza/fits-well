@@ -14,9 +14,13 @@ goals shape every decision:
    tables, binary tables with heap/variable-length arrays, random groups for
    read, WCS, time coordinates, tiled compression).
 
-The project is at an early stage: `src/lib.rs` still holds the `cargo init`
-placeholder. The architecture below is the intended design, not yet built —
-follow it when adding code.
+The structural spine is built and tested: the 2880-byte block layer, an ordered
+header model (with `CONTINUE` long-string read/write), HDU classification and
+boundary sizing, a lazy seeking reader, and a header / raw-data-unit writer. The
+core crate is dependency-free. Typed data decode, table columns + heap, WCS, and
+tiled compression are scaffolded — the module map below shows what is built
+versus planned. The design principles there remain the spec; follow them when
+filling the scaffolds in.
 
 ## Commands
 
@@ -69,7 +73,7 @@ Quick map of the reference notes:
 | WCS / time / compression | `docs/refs/07-wcs-time-compression.md` |
 | CONTINUE / CHECKSUM / HIERARCH conventions | `docs/refs/08-conventions.md` |
 
-## Intended architecture
+## Architecture
 
 The format's structure maps cleanly onto modules. Keep layers separate so the
 hot decode path stays lean and optional semantics (WCS, compression) are opt-in.
@@ -80,6 +84,23 @@ bytes  ──►  block layer   ──►  HDU layer   ──►  header model  
              padding,           scan, lazy      records +           tables,
              I/O quantum)       seeking)        keyword index)      heap, VLAs)
 ```
+
+### Module layout (`src/`)
+
+| Module | Role | Status |
+|--------|------|--------|
+| `block.rs` | 2880-byte grid, padding, rounding math | done |
+| `bitpix.rs` | `BITPIX` element type + element sizes | done |
+| `header/{value,card,mod}.rs` | ordered card model, parse/render, `CONTINUE` folding, keyword index + typed getters | done |
+| `hdu.rs` | HDU classification + data-unit sizing (Eq. 2, incl. random groups) | done |
+| `reader.rs` | lazy seeking HDU scan; raw `DataUnit` fetch | done |
+| `writer.rs` | header + raw data-unit serialization | header/raw done; typed encoding TODO |
+| `data.rs` | typed `Image`/`ImageData` + `BSCALE`/`BZERO` `Scaling` | scaling done; bulk decode TODO |
+| `error.rs` | `FitsError` + `Result` | done |
+
+`lib.rs` is the only place that defines the public surface (`pub use`). Card
+rendering is free-format today, so header round-trips reproduce the *model*
+exactly but not yet the original byte layout.
 
 Design principles specific to this crate:
 
@@ -126,4 +147,6 @@ Appendix J), and the registered `HIERARCH` long-keyword convention. These are
 covered in `docs/refs/08-conventions.md`; the full registry (Green Bank,
 inheritance, ESO, …) is at <https://fits.gsfc.nasa.gov/fits_registry.html>.
 Support the in-standard ones first and treat purely-registered ones as optional,
-feature-flagged layers.
+feature-flagged layers. `CONTINUE` long strings are implemented (read and
+write); `CHECKSUM`/`DATASUM` and `HIERARCH` are not yet — a `HIERARCH` card
+currently falls back to a commentary record so the file stays readable.
