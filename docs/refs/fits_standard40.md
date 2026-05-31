@@ -64,12 +64,13 @@
 - [Appendix E. IEEE floating-point formats](#appendix-e-ieee-floating-point-formats)
 - [Appendix F. Reserved extension type names](#appendix-f-reserved-extension-type-names)
 - [Appendix G. MIME types](#appendix-g-mime-types)
-- [Appendix H. Past changes or clarifications to the](#appendix-h-past-changes-or-clarifications-to-the)
+- [Appendix H. Past changes or clarifications to the formal definition of FITS](#appendix-h-past-changes-or-clarifications-to-the-formal-definition-of-fits)
 - [Appendix I. Random-number generator](#appendix-i-random-number-generator)
 - [Appendix J. CHECKSUM implementation guidelines](#appendix-j-checksum-implementation-guidelines)
 - [Appendix K. Header inheritance convention](#appendix-k-header-inheritance-convention)
 - [Appendix L. Green Bank convention](#appendix-l-green-bank-convention)
 - [References](#references)
+- [Index](#index)
 
 <a id="1-introduction"></a>
 ## 1. Introduction
@@ -2548,7 +2549,8 @@ Table 18: Valid TFORM _n_ data types in BINTABLE extensions.
 TFORM _n_ value Description Eight-bit Bytes
 
 ’L’ Logical 1
-’X’ Bit   ’B’ Unsigned byte 1
+’X’ Bit †
+’B’ Unsigned byte 1
 ’I’ 16-bit integer 2
 ’J’ 32-bit integer 4
 ’K’ 64-bit integer 8
@@ -6477,9 +6479,8 @@ presume that a file name ending in ‘.fits’ is intended to be
 a _FITS_ file. Nevertheless, there are other commonly used extensions; e.g., ‘.fit’, ‘.fts’, and many others not suitable for
 listing in a media type registration.
 
-<a id="appendix-h-past-changes-or-clarifications-to-the"></a>
-## Appendix H. Past changes or clarifications to the
-**formal definition of** **FITS**
+<a id="appendix-h-past-changes-or-clarifications-to-the-formal-definition-of-fits"></a>
+## Appendix H. Past changes or clarifications to the formal definition of FITS
 
 _This appendix is not part of the FITS Standard, but is included_
 _for informational purposes_ .
@@ -7263,7 +7264,8 @@ Ziv, J., & Lempel, A. 1977, IEEE Transactions on Information Theory, 23 (3),
 
 67
 
-**Index**
+<a id="index"></a>
+## Index
 
 _N_ bits, 11, 12, 17
 

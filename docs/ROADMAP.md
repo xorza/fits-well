@@ -126,12 +126,21 @@ behind the `wcs` feature (`Wcs::from_header` + `pixel_to_world`/`world_to_pixel`
   `CROTAi` legacy rotation, `PVi_m` projection parameters (e.g. `SIN` slant),
   spectral (`FREQ`/`WAVE`) and `RADESYS`/`EQUINOX` frame conversion.
 
-## Phase 7 — Typed time coordinates  *(size: M)*
-- `TIMESYS`, `MJDREF`/`JDREF`/`DATEREF`, `TREFPOS`, ISO-8601 datetimes, Julian/
-  Besselian epochs, global time keywords; time as a WCS axis or table column.
-  *(§9; ref 07)*
-- **Deliverable:** parse/compute the bundled files' time keywords; epoch + scale
-  conversions hand-checked.
+## Phase 7 — Typed time coordinates  🟢 done  *(size: M)*
+Behind the `time` feature: `Datetime`, `Epoch`, `TimeScale`, `FitsTime`.
+
+- ✅ ISO-8601 datetimes ↔ Julian Date / MJD (proleptic-Gregorian calendar math,
+  forward + inverse); `J`/`B` epochs → JD.
+- ✅ `TimeScale` conversions among `UTC`/`UT1`/`TAI`/`TT`/`GPS`/`TCG`/`TDB`/`TCB`:
+  exact fixed offsets, UTC↔TAI via an embedded IERS leap-second table, TCG/TCB
+  rates, and the standard TDB periodic approximation.
+- ✅ `FitsTime::from_header`: `TIMESYS`, `MJDREF`/`MJDREFI`+`MJDREFF`/`JDREF*`/
+  `DATEREF`, `TIMEUNIT`, `TREFPOS`; resolves `DATE-OBS`/`MJD-OBS` and relative
+  (`TSTART`/`TSTOP`) times to absolute MJD.
+- ✅ **Deliverable met:** ISO/JD, epochs, and all six scale conversions validated
+  against `astropy.time` (ERFA) to 1e-9 day; leap seconds vs the IERS table.
+- **Remaining (v2):** `ΔUT1` for true UT1, time as a WCS axis / table column,
+  `TREFDIR`/topocentric light-travel corrections.
 
 ---
 

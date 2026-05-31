@@ -19,5 +19,7 @@ parallel = []
 mmap = []
 # typed World Coordinate System layer (projections, spherical rotations) over parsed headers.
 wcs = []
+# typed time coordinates: ISO-8601/JD/MJD, epochs, time-scale conversions (§9).
+time = []
 # tiled image decompression: GZIP_1 (via flate2) and RICE_1; HCOMPRESS_1/PLIO_1 TODO.
 compression = ["dep:flate2"]
