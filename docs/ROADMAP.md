@@ -110,16 +110,21 @@ These are functional codecs (decode/encode), not the deferred speed work.
 - **Remaining (minor):** HCOMPRESS lossy *write* (`SMOOTH`/`SCALE>0` encode) and
   VLA columns inside compressed tables.
 
-## Phase 6 — Typed World Coordinate System  *(size: L)*
-Keywords already round-trip as header cards; add the typed transform layer.
+## Phase 6 — Typed World Coordinate System  🟢 v1 done  *(size: L)*
+Keywords already round-trip as header cards; this adds the typed transform layer
+behind the `wcs` feature (`Wcs::from_header` + `pixel_to_world`/`world_to_pixel`).
 
-- Parse `WCSAXES`/`CTYPEi`/`CRPIXi`/`CRVALi`/`CDELTi`/`PCi_j`|`CDi_j`/`CUNITi`,
-  alternate axes (`…a`), `RADESYS`/`EQUINOX`.
-- Pixel→world pipeline: offset → linear transform → projection. Celestial
-  projections (`TAN`, `SIN`, `ARC`, …) and spherical rotation; spectral and
-  conventional axis types. *(§8; ref 07.) Behind the `wcs` feature.*
-- **Deliverable:** pixel↔world round-trip for a `TAN`-projected fixture against
-  known coordinates.
+- ✅ Parse `WCSAXES`/`CTYPEi`/`CRPIXi`/`CRVALi`/`CDELTi`/`PCi_j`|`CDi_j`,
+  alternate axes (`…a`), `LONPOLE`. Build the linear transform `A` (PC×CDELT or
+  CD) with general matrix inversion for the reverse direction.
+- ✅ Pixel↔world pipeline: offset → linear → deproject → spherical rotation.
+  Zenithal celestial projections `TAN`/`SIN`/`ARC` + the native↔celestial rotation
+  (CG 2002 eqs. 2/5); non-celestial axes pass through linearly.
+- ✅ **Deliverable met:** `TAN` and `SIN` pixel→world validated pixel-exact against
+  `astropy.wcs` (wcslib) to 1e-9°; full pixel↔world round-trip.
+- **Remaining (v2):** more projections (`STG`/`ZEA`/`CAR`/`SFL`/cylindrical/conic),
+  `CROTAi` legacy rotation, `PVi_m` projection parameters (e.g. `SIN` slant),
+  spectral (`FREQ`/`WAVE`) and `RADESYS`/`EQUINOX` frame conversion.
 
 ## Phase 7 — Typed time coordinates  *(size: M)*
 - `TIMESYS`, `MJDREF`/`JDREF`/`DATEREF`, `TREFPOS`, ISO-8601 datetimes, Julian/

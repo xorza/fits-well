@@ -22,12 +22,14 @@ core crate is dependency-free by default (the `compression` feature pulls in
 `BSCALE`/`BZERO`). Binary and ASCII tables read and write; multi-HDU files
 (primary + `IMAGE`/`TABLE`/`BINTABLE` extensions) write; binary-table `P`/`Q` heap
 arrays and per-column `TSCAL`/`TZERO` decode; random groups read; `CONTINUE`,
-`HIERARCH`, and `CHECKSUM`/`DATASUM` (verify + write) are supported. WCS, time
-coordinates are not yet typed. Tiled **image and table** compression work behind
+`HIERARCH`, and `CHECKSUM`/`DATASUM` (verify + write) are supported. A typed
+**WCS** layer (behind the `wcs` feature) parses the linear keywords and does
+pixel↔world for the `TAN`/`SIN`/`ARC` celestial projections (validated against
+`astropy.wcs`). Tiled **image and table** compression work behind
 the `compression` feature: all five image codecs (`GZIP_1`, `GZIP_2`, `RICE_1`,
 `PLIO_1`, `HCOMPRESS_1` with `SMOOTH=1` decode), quantized-float read+write
 (`NO_DITHER`/`SUBTRACTIVE_DITHER_1`/`SUBTRACTIVE_DITHER_2`, `ZBLANK`/NaN), and §10.3
-fixed-width table compression. WCS and time remain — the
+fixed-width table compression. More WCS projections and typed time remain — the
 module map below shows what is built versus planned, and
 [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks the path to feature-complete. The design principles there remain the spec; follow them when
 filling the scaffolds in.
@@ -99,20 +101,25 @@ bytes  ──►  block layer   ──►  HDU layer   ──►  header model  
 
 ### Module layout (`src/`)
 
+Most modules are directories — `<name>/{mod.rs, tests.rs}` — with the tests
+split out per the global rule; single-file modules keep the `.rs` suffix below.
+
 | Module | Role | Status |
 |--------|------|--------|
 | `block.rs` | 2880-byte grid, padding, rounding math | done |
 | `bitpix.rs` | `BITPIX` element type + element sizes | done |
-| `header/{value,card,mod}.rs` | ordered card model, parse/render, `CONTINUE` folding, `HIERARCH`, keyword index, typed getters + builder | done |
-| `hdu.rs` | HDU classification + data-unit sizing (Eq. 2, incl. random groups) | done |
-| `reader.rs` | lazy seeking HDU scan; `DataUnit`/`read_image`/`read_table`/`read_ascii_table`/`read_groups`/`verify_checksum` | done |
-| `writer.rs` | multi-HDU writer: `write_image` (primary + `IMAGE` ext), `write_table`, `write_ascii_table`, `with_checksums` | done; binary-table VLA write TODO |
-| `data.rs` | typed `Image`/`ImageData`, big-endian decode+encode, `BSCALE`/`BZERO` physical plane | image read+write done; SIMD/parallel TODO |
-| `table.rs` | `BINTABLE` parsing (`Tform`/`Column`); fixed-width decode (`ColumnData`), `TSCAL`/`TZERO` physical plane, `P`/`Q` heap VLAs | read done |
-| `ascii.rs` | `TABLE` (ASCII) read: `TBCOLn`/Fortran `TFORMn` → `AsciiColumn`/`ColumnData` | read done (write in `writer.rs`) |
-| `groups.rs` | random-groups (§6) read: params + arrays, `PSCALn`/`PZEROn` physical | read done (no write — deprecated) |
+| `endian.rs` | big-endian scalar (de)serialization shared by image/table/compression decode + encode | done |
+| `header/` | ordered card model (`value.rs`, `card/`, `mod.rs`): parse/render, `CONTINUE` folding, `HIERARCH` compound keys, keyword index, typed getters + builder | done |
+| `hdu/` | HDU classification + data-unit sizing (Eq. 2, incl. random groups) | done |
+| `reader/` | lazy seeking HDU scan; `read_image`/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_image`/`read_compressed_table`/`verify_checksum`, raw `DataUnit` | done |
+| `writer/` | multi-HDU writer: `write_image`/`write_table`/`write_ascii_table`/`write_compressed_image`/`write_compressed_table`, `with_checksums` | done; binary-table VLA (heap) write TODO |
+| `data/` | typed `Image`/`ImageData`, big-endian decode+encode, `BSCALE`/`BZERO` physical plane | image read+write done; SIMD/parallel TODO |
+| `table/` | `BINTABLE` parsing (`Tform`/`Column`); fixed-width decode (`ColumnData`), `TSCAL`/`TZERO` physical plane, `P`/`Q` heap VLAs | read done (write in `writer/`) |
+| `ascii/` | `TABLE` (ASCII) read: `TBCOLn`/Fortran `TFORMn` → `AsciiColumn`/`ColumnData` | read done (write in `writer/`) |
+| `groups/` | random-groups (§6) read: params + arrays, `PSCALn`/`PZEROn` physical | read done (no write — deprecated) |
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
 | `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3), reassembly + encode | all 5 image codecs read+write; float quant all 3 dither methods + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode; fixed-width table compression read+write |
+| `wcs/` (feature `wcs`) | typed World Coordinate System: keyword parse, linear transform (PC/CD + inverse), `TAN`/`SIN`/`ARC` projections + spherical rotation, `pixel_to_world`/`world_to_pixel` | v1 done (more projections, time, frames TODO) |
 | `error.rs` | `FitsError` + `Result` | done |
 
 `lib.rs` is the only place that defines the public surface (`pub use`). Card
@@ -163,7 +170,7 @@ Real files lean on a few near-ubiquitous conventions — `CONTINUE` long strings
 Appendix J), and the registered `HIERARCH` long-keyword convention. These are
 covered in `docs/refs/08-conventions.md`; the full registry (Green Bank,
 inheritance, ESO, …) is at <https://fits.gsfc.nasa.gov/fits_registry.html>.
-Support the in-standard ones first and treat purely-registered ones as optional,
-feature-flagged layers. `CONTINUE` long strings are implemented (read and
-write); `CHECKSUM`/`DATASUM` and `HIERARCH` are not yet — a `HIERARCH` card
-currently falls back to a commentary record so the file stays readable.
+All three are implemented: `CONTINUE` long strings (read + write), `HIERARCH`
+compound keywords (parsed to a space-joined key, read + write), and
+`CHECKSUM`/`DATASUM` (verify on read; solve + write via `with_checksums`).
+Purely-registered conventions beyond these stay optional, feature-flagged layers.

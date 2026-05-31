@@ -43,6 +43,8 @@ mod hdu;
 mod header;
 mod reader;
 mod table;
+#[cfg(feature = "wcs")]
+mod wcs;
 mod writer;
 
 pub use ascii::{AsciiColumn, AsciiKind, AsciiTable};
@@ -56,6 +58,8 @@ pub use header::card::{Card, CardKind};
 pub use header::value::Value;
 pub use reader::{ChecksumReport, DataUnit, FitsReader, Hdu};
 pub use table::{BinTable, Column, ColumnData, Tform, TformKind};
+#[cfg(feature = "wcs")]
+pub use wcs::{Projection, Wcs};
 pub use writer::{AsciiWriteColumn, FitsWriter, WriteColumn};
 
 pub use block::{BLOCK_SIZE, CARD_SIZE, CARDS_PER_BLOCK, SPACE_FILL, ZERO_FILL};
