@@ -186,5 +186,21 @@ fn fold_continuation(cards: &mut [Card], cont: &Card) -> bool {
     true
 }
 
+/// Build a header from left-justified 80-column card text lines, appending the
+/// `END` record. Shared test helper for modules that exercise parsed headers.
+#[cfg(test)]
+pub(crate) fn from_card_lines(lines: &[&str]) -> Header {
+    let mut buf = Vec::with_capacity((lines.len() + 1) * CARD_SIZE);
+    for line in lines {
+        let mut card = [b' '; CARD_SIZE];
+        card[..line.len()].copy_from_slice(line.as_bytes());
+        buf.extend_from_slice(&card);
+    }
+    let mut end = [b' '; CARD_SIZE];
+    end[..3].copy_from_slice(b"END");
+    buf.extend_from_slice(&end);
+    Header::parse(&buf).unwrap()
+}
+
 #[cfg(test)]
 mod tests;

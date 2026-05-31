@@ -13,6 +13,7 @@ use crate::block::SPACE_FILL;
 use crate::block::ZERO_FILL;
 use crate::checksum;
 use crate::data::Image;
+use crate::endian::extend_be;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -411,12 +412,6 @@ fn pack_cell(out: &mut Vec<u8>, col: &WriteColumn, r: usize) {
             out.extend_from_slice(&bytes[..n]);
             out.extend(std::iter::repeat_n(b' ', rep - n));
         }
-    }
-}
-
-fn extend_be<const N: usize, T: Copy>(out: &mut Vec<u8>, values: &[T], conv: fn(T) -> [u8; N]) {
-    for &v in values {
-        out.extend_from_slice(&conv(v));
     }
 }
 

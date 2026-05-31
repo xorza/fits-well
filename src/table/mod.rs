@@ -7,6 +7,7 @@
 //! `TSCALn`/`TZEROn` physical plane ([`BinTable::read_column_physical`]), and
 //! `P`/`Q` variable-length arrays out of the heap ([`BinTable::read_vla_column`]).
 
+use crate::endian::decode_be;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -392,28 +393,22 @@ impl BinTable {
 /// Decode `bytes` as a contiguous run of `kind` elements. Shared by fixed-width
 /// reads (concatenated cells) and heap arrays.
 fn decode_array(kind: TformKind, bytes: &[u8]) -> ColumnData {
-    fn conv<const N: usize, T>(bytes: &[u8], f: fn([u8; N]) -> T) -> Vec<T> {
-        bytes
-            .chunks_exact(N)
-            .map(|c| f(c.try_into().expect("chunks_exact yields N-byte arrays")))
-            .collect()
-    }
     match kind {
         TformKind::Logical => ColumnData::Logical(bytes.iter().map(|&b| b == b'T').collect()),
         TformKind::Byte | TformKind::Bit => ColumnData::Bytes(bytes.to_vec()),
         TformKind::Char => ColumnData::Text(vec![trim_text(bytes)]),
-        TformKind::I16 => ColumnData::I16(conv(bytes, i16::from_be_bytes)),
-        TformKind::I32 => ColumnData::I32(conv(bytes, i32::from_be_bytes)),
-        TformKind::I64 => ColumnData::I64(conv(bytes, i64::from_be_bytes)),
-        TformKind::F32 => ColumnData::F32(conv(bytes, f32::from_be_bytes)),
-        TformKind::F64 => ColumnData::F64(conv(bytes, f64::from_be_bytes)),
-        TformKind::ComplexF32 => ColumnData::ComplexF32(conv(bytes, |b: [u8; 8]| {
+        TformKind::I16 => ColumnData::I16(decode_be(bytes, i16::from_be_bytes)),
+        TformKind::I32 => ColumnData::I32(decode_be(bytes, i32::from_be_bytes)),
+        TformKind::I64 => ColumnData::I64(decode_be(bytes, i64::from_be_bytes)),
+        TformKind::F32 => ColumnData::F32(decode_be(bytes, f32::from_be_bytes)),
+        TformKind::F64 => ColumnData::F64(decode_be(bytes, f64::from_be_bytes)),
+        TformKind::ComplexF32 => ColumnData::ComplexF32(decode_be(bytes, |b: [u8; 8]| {
             (
                 f32::from_be_bytes([b[0], b[1], b[2], b[3]]),
                 f32::from_be_bytes([b[4], b[5], b[6], b[7]]),
             )
         })),
-        TformKind::ComplexF64 => ColumnData::ComplexF64(conv(bytes, |b: [u8; 16]| {
+        TformKind::ComplexF64 => ColumnData::ComplexF64(decode_be(bytes, |b: [u8; 16]| {
             (
                 f64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
                 f64::from_be_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]),

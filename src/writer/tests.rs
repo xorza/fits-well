@@ -2,6 +2,7 @@ use super::*;
 use crate::block::ZERO_FILL;
 use crate::data::{ImageData, Scaling};
 use crate::hdu::HduKind;
+use crate::header::from_card_lines as header;
 use crate::reader::FitsReader;
 use crate::table::ColumnData;
 use std::io::Cursor;
@@ -96,19 +97,6 @@ fn writes_and_reads_back_a_binary_table() {
         t.read_column(2).unwrap(),
         ColumnData::Text(vec!["AB".into(), "CDE".into(), "F".into()])
     );
-}
-
-fn header(lines: &[&str]) -> Header {
-    let mut buf = Vec::new();
-    for line in lines {
-        let mut card = [b' '; CARD_SIZE];
-        card[..line.len()].copy_from_slice(line.as_bytes());
-        buf.extend_from_slice(&card);
-    }
-    let mut end = [b' '; CARD_SIZE];
-    end[..3].copy_from_slice(b"END");
-    buf.extend_from_slice(&end);
-    Header::parse(&buf).unwrap()
 }
 
 #[test]

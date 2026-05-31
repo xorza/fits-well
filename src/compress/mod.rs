@@ -19,6 +19,7 @@ use crate::bitpix::Bitpix;
 use crate::data::Image;
 use crate::data::ImageData;
 use crate::data::Scaling;
+use crate::endian::decode_be;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -345,19 +346,19 @@ fn cell_to_f64(cell: &ColumnData, zbitpix: Bitpix) -> Vec<f64> {
 /// Decode a big-endian buffer of `bitpix` integers into widened `i64` values.
 fn be_to_i64(bytes: &[u8], bitpix: Bitpix) -> Vec<i64> {
     match bitpix {
-        Bitpix::U8 => bytes.iter().map(|&b| b as i64).collect(),
-        Bitpix::I16 => bytes
-            .chunks_exact(2)
-            .map(|c| i16::from_be_bytes([c[0], c[1]]) as i64)
+        Bitpix::U8 => decode_be(bytes, u8::from_be_bytes)
+            .iter()
+            .map(|&x| x as i64)
             .collect(),
-        Bitpix::I32 => bytes
-            .chunks_exact(4)
-            .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]) as i64)
+        Bitpix::I16 => decode_be(bytes, i16::from_be_bytes)
+            .iter()
+            .map(|&x| x as i64)
             .collect(),
-        Bitpix::I64 => bytes
-            .chunks_exact(8)
-            .map(|c| i64::from_be_bytes(c.try_into().expect("8-byte chunk")))
+        Bitpix::I32 => decode_be(bytes, i32::from_be_bytes)
+            .iter()
+            .map(|&x| x as i64)
             .collect(),
+        Bitpix::I64 => decode_be(bytes, i64::from_be_bytes),
         Bitpix::F32 | Bitpix::F64 => Vec::new(), // excluded before this point
     }
 }
@@ -365,14 +366,11 @@ fn be_to_i64(bytes: &[u8], bitpix: Bitpix) -> Vec<i64> {
 /// Decode a big-endian buffer of `bitpix` floats into `f64`.
 fn be_floats(bytes: &[u8], bitpix: Bitpix) -> Vec<f64> {
     match bitpix {
-        Bitpix::F32 => bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]]) as f64)
+        Bitpix::F32 => decode_be(bytes, f32::from_be_bytes)
+            .iter()
+            .map(|&x| x as f64)
             .collect(),
-        Bitpix::F64 => bytes
-            .chunks_exact(8)
-            .map(|c| f64::from_be_bytes(c.try_into().expect("8-byte chunk")))
-            .collect(),
+        Bitpix::F64 => decode_be(bytes, f64::from_be_bytes),
         _ => Vec::new(),
     }
 }

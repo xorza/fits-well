@@ -36,6 +36,7 @@ mod checksum;
 #[cfg(feature = "compression")]
 mod compress;
 mod data;
+mod endian;
 mod error;
 mod groups;
 mod hdu;
