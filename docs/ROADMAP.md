@@ -30,9 +30,9 @@ coordinate systems and the in-standard conventions (`CONTINUE`, `CHECKSUM`/
 - **Conventions** — `CHECKSUM`/`DATASUM` verify + write; `HIERARCH` parse/render. *(§J)*
 
 97 tests, validated against real sample files (incl. astropy-generated compressed
-fixtures). Phases 1–4 are **complete**; Phase 5 reads and writes all five image
-codecs (including quantized-float with subtractive dithering). Tiled *table*
-compression (§10.3), HCOMPRESS smoothing, `ZBLANK`, and WCS/time (6–7) remain.
+fixtures). Phases 1–5 are **complete**: full tiled image compression (all five
+codecs, quantized float with both dither methods, `ZBLANK`, HCOMPRESS smoothing)
+and tiled table compression, read and write. WCS and time (6–7) remain.
 
 ---
 
@@ -81,32 +81,32 @@ Already classified and sized; add typed access.
 - **Deliverable:** checksum verify against a CFITSIO/astropy-written file; HIERARCH
   parse + render round-trip.
 
-## Phase 5 — Tiled compression  🟢 image (de)compression done  *(size: L)*
+## Phase 5 — Tiled compression  ✅ DONE  *(size: L)*
 Highest-value remaining *read* gap — most modern archive images are compressed.
 These are functional codecs (decode/encode), not the deferred speed work.
 
-- **5a. Tiled image decompression** — the `ZIMAGE` BINTABLE container, tile
+- **5a. Tiled image (de)compression** — the `ZIMAGE` BINTABLE container, tile
   reassembly into the `ZNAXISn` image, and the codecs. *(§10.1)*
-  ✅ **All five codecs done** — `read_compressed_image` behind the `compression`
-  feature: `GZIP_1`, `GZIP_2`, `RICE_1`, `PLIO_1`, `HCOMPRESS_1` (SMOOTH=0), all
-  validated pixel-exact against astropy fixtures.
+  ✅ **All five codecs, both directions** — `GZIP_1`, `GZIP_2`, `RICE_1`, `PLIO_1`,
+  `HCOMPRESS_1` (incl. `SMOOTH=1` decode), validated pixel-exact against astropy.
 - **5b. Floating-point quantization** — `ZSCALE`/`ZZERO`, `ZQUANTIZ`, subtractive
   dithering (`ZDITHER0`), NaN preservation. *(§10.2)*
-  ✅ **Decode + encode done** — `NO_DITHER` linear and `SUBTRACTIVE_DITHER_1`
-  (cfitsio noise-3 estimator + `fits_init_randoms` table), raw-float gzip fallback
-  for constant tiles, both directions validated against astropy (reconstruction
-  within the 0.5·`ZSCALE` quantization bound). TODO: `ZBLANK`/NaN, `DITHER_2`.
-- **5c. Tiled table compression.** *(§10.3)* — not started.
+  ✅ **Decode + encode done** — `NO_DITHER`, `SUBTRACTIVE_DITHER_1`, and
+  `SUBTRACTIVE_DITHER_2` (cfitsio noise-3 estimator + `fits_init_randoms` table),
+  `ZBLANK`/NaN nulls, raw-gzip fallback for constant tiles. Validated against
+  astropy (reconstruction within the 0.5·`ZSCALE` bound; smoothing bit-for-bit).
+- **5c. Tiled table compression.** *(§10.3)*
+  ✅ **Read + write** — `read_compressed_table`/`write_compressed_table` for
+  fixed-width columns (`GZIP_1`/`GZIP_2`/`RICE_1` per column, `ZCTYPn`), the row-tile
+  transpose + byte-shuffle, `1QB` heap layout. Round-trips byte-exact; the written
+  `ZTABLE` container parses structurally in astropy. (VLA columns are rejected.)
 - **5d. Compression writing** (encode tiles).
-  ✅ **All five codecs write** — `write_compressed_image` builds the `ZIMAGE`
-  BINTABLE; integer (`GZIP_1`/`GZIP_2`/`RICE_1`/`PLIO_1`/`HCOMPRESS_1`) and quantized
-  float (`GZIP_1`/`GZIP_2`/`RICE_1`) output round-trips through the decoder and is
-  read pixel-exact (or within the quantization bound) by astropy.
-- *(ref 07.) Gate behind the `compression` feature; the decoders themselves are
-  the deliverable, not their performance.*
+  ✅ **All five image codecs + quantized float + tables** write and round-trip.
+- *(ref 07.) Gated behind the `compression` feature; scalar reference impls — the
+  SIMD/parallel speed work is deferred to a later optimization pass.*
 - **Deliverable:** ✅ round-trip every codec through astropy, both read and write.
-- **Remaining:** HCOMPRESS smoothing (`SMOOTH=1`), `SUBTRACTIVE_DITHER_2`, `ZBLANK`,
-  and tiled *table* compression (§10.3).
+- **Remaining (minor):** HCOMPRESS lossy *write* (`SMOOTH`/`SCALE>0` encode) and
+  VLA columns inside compressed tables.
 
 ## Phase 6 — Typed World Coordinate System  *(size: L)*
 Keywords already round-trip as header cards; add the typed transform layer.

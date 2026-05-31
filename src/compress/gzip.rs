@@ -30,6 +30,37 @@ pub(super) fn gzip2_encode(raw: &[u8], width: usize) -> Vec<u8> {
     gzip_encode(&shuffled)
 }
 
+/// Shuffle `raw` into `width`-byte significance planes (all byte-0s, then all
+/// byte-1s, …) — the `GZIP_2` pre-pass. `width ≤ 1` is a no-op.
+pub(super) fn shuffle_bytes(raw: &[u8], width: usize) -> Vec<u8> {
+    if width <= 1 {
+        return raw.to_vec();
+    }
+    let n = raw.len() / width;
+    let mut out = vec![0u8; raw.len()];
+    for p in 0..width {
+        for i in 0..n {
+            out[p * n + i] = raw[i * width + p];
+        }
+    }
+    out
+}
+
+/// Inverse of [`shuffle_bytes`]: gather significance planes back into elements.
+pub(super) fn unshuffle_bytes(shuffled: &[u8], width: usize) -> Vec<u8> {
+    if width <= 1 {
+        return shuffled.to_vec();
+    }
+    let n = shuffled.len() / width;
+    let mut out = vec![0u8; shuffled.len()];
+    for p in 0..width {
+        for i in 0..n {
+            out[i * width + p] = shuffled[p * n + i];
+        }
+    }
+    out
+}
+
 /// Inflate a gzip stream to its raw bytes.
 pub(super) fn gunzip(bytes: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();

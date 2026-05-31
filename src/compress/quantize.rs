@@ -13,6 +13,28 @@ const N_RANDOM: usize = 10000;
 const N_RESERVED_VALUES: f64 = 10.0;
 const INT_MAX: f64 = 2147483647.0;
 
+/// Quantized integer reserved to mark an undefined (null/NaN) pixel.
+pub(super) const NULL_VALUE: i32 = -2147483647;
+/// Quantized integer reserved by `SUBTRACTIVE_DITHER_2` to mark exact zero.
+pub(super) const ZERO_VALUE: i32 = -2147483646;
+
+/// Float quantization dithering method (`ZQUANTIZ`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DitherMethod {
+    /// `NO_DITHER` — plain linear quantization.
+    None,
+    /// `SUBTRACTIVE_DITHER_1` — per-pixel dither from the random sequence.
+    Subtractive1,
+    /// `SUBTRACTIVE_DITHER_2` — like 1, but exact zeros map to [`ZERO_VALUE`].
+    Subtractive2,
+}
+
+impl DitherMethod {
+    fn dithered(self) -> bool {
+        !matches!(self, DitherMethod::None)
+    }
+}
+
 /// The shared dither sequence (cfitsio `fits_init_randoms`): a Park–Miller
 /// minstd generator (`a = 16807`, `m = 2³¹−1`) seeded at 1, scaled to `[0, 1)`.
 pub(super) fn random_values() -> &'static [f32] {
@@ -68,6 +90,36 @@ impl Dither {
     }
 }
 
+/// Invert a quantized integer plane back to floats (cfitsio `unquantize_i4r4`).
+/// `f = (i − dither + 0.5)·scale + zero`, with reserved integers handled first:
+/// a value equal to `zblank` becomes `NaN`, and (for `Subtractive2`) [`ZERO_VALUE`]
+/// becomes exactly `0.0`. The dither cursor advances per pixel regardless.
+pub(super) fn dequantize(
+    ints: &[i64],
+    scale: f64,
+    zero: f64,
+    method: DitherMethod,
+    irow: i64,
+    zblank: Option<i64>,
+) -> Vec<f64> {
+    let dither2 = method == DitherMethod::Subtractive2;
+    let mut d = method.dithered().then(|| Dither::new(irow));
+    ints.iter()
+        .map(|&v| {
+            let r = d.as_mut().map_or(0.0, Dither::next);
+            if zblank == Some(v) {
+                f64::NAN
+            } else if dither2 && v == ZERO_VALUE as i64 {
+                0.0
+            } else if method.dithered() {
+                (v as f64 - r + 0.5) * scale + zero
+            } else {
+                scale * v as f64 + zero
+            }
+        })
+        .collect()
+}
+
 /// Round-to-nearest, ties away from zero (cfitsio `NINT`).
 fn nint(x: f64) -> i32 {
     if x >= 0.0 {
@@ -77,15 +129,19 @@ fn nint(x: f64) -> i32 {
     }
 }
 
-/// Background-noise estimate of a tile (cfitsio `FnNoise3_float`, no null check).
+/// Background-noise estimate of a tile (cfitsio `FnNoise3_float`).
 struct Noise {
     min: f64,
     max: f64,
     noise: f64,
+    /// True when at least one finite (non-null) pixel was seen.
+    any_good: bool,
 }
 
 /// 3rd-order MAD noise: `0.6052697 · median(|2·f(i) − f(i−2) − f(i+2)|)`, taken as
-/// the median of per-row medians. Returns `noise = 0` for constant data.
+/// the median of per-row medians. Non-finite pixels (NaN/Inf) are treated as nulls
+/// and skipped, matching cfitsio's `nullcheck`. Returns `noise = 0` for constant
+/// data and `any_good = false` for an all-null tile.
 fn noise3(data: &[f64], nx_in: usize, ny_in: usize) -> Noise {
     let (mut nx, mut ny) = (nx_in.max(1), ny_in.max(1));
     if nx < 5 {
@@ -94,30 +150,28 @@ fn noise3(data: &[f64], nx_in: usize, ny_in: usize) -> Noise {
     }
     let mut xmin = f64::MAX;
     let mut xmax = f64::MIN;
-    if nx < 5 {
-        for &v in data.iter().take(nx) {
-            xmin = xmin.min(v);
-            xmax = xmax.max(v);
-        }
-        return Noise {
-            min: xmin,
-            max: xmax,
-            noise: 0.0,
-        };
-    }
-
+    let mut any_good = false;
     let mut row_meds: Vec<f64> = Vec::with_capacity(ny);
+
     for jj in 0..ny {
-        let row = &data[jj * nx..jj * nx + nx];
-        let (mut v1, mut v2, mut v3, mut v4) = (row[0], row[1], row[2], row[3]);
-        for &v in [v1, v2, v3, v4].iter() {
+        // Compact the row to its finite pixels — cfitsio advances past nulls, so
+        // differences are taken between consecutive *valid* pixels.
+        let good: Vec<f64> = data[jj * nx..jj * nx + nx]
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
+        for &v in &good {
             xmin = xmin.min(v);
             xmax = xmax.max(v);
+            any_good = true;
         }
-        let mut diffs: Vec<f64> = Vec::with_capacity(nx);
-        for &v5 in &row[4..] {
-            xmin = xmin.min(v5);
-            xmax = xmax.max(v5);
+        if good.len() < 5 || nx < 5 {
+            continue; // need 4 skipped + ≥1 more for a 3rd-order difference
+        }
+        let (mut v1, mut v2, mut v3, mut v4) = (good[0], good[1], good[2], good[3]);
+        let mut diffs: Vec<f64> = Vec::with_capacity(good.len());
+        for &v5 in &good[4..] {
             if !(v1 == v2 && v2 == v3 && v3 == v4 && v4 == v5) {
                 diffs.push((2.0 * v3 - v1 - v5).abs());
             }
@@ -126,10 +180,9 @@ fn noise3(data: &[f64], nx_in: usize, ny_in: usize) -> Noise {
             v3 = v4;
             v4 = v5;
         }
-        if diffs.is_empty() {
-            continue;
+        if !diffs.is_empty() {
+            row_meds.push(lower_median(&mut diffs));
         }
-        row_meds.push(lower_median(&mut diffs));
     }
 
     let noise = if row_meds.is_empty() {
@@ -141,6 +194,7 @@ fn noise3(data: &[f64], nx_in: usize, ny_in: usize) -> Noise {
         min: xmin,
         max: xmax,
         noise,
+        any_good,
     }
 }
 
@@ -159,23 +213,26 @@ fn proper_median(v: &mut [f64]) -> f64 {
 }
 
 /// A quantized tile: the integer plane plus the `BSCALE`/`BZERO` (`ZSCALE`/`ZZERO`)
-/// that invert it.
+/// that invert it, and whether any pixel was a null (mapped to [`NULL_VALUE`]).
 pub(super) struct Quantized {
     pub(super) idata: Vec<i32>,
     pub(super) bscale: f64,
     pub(super) bzero: f64,
+    pub(super) has_null: bool,
 }
 
-/// Quantize a float tile (cfitsio `fits_quantize_float`, no-null branch). `qlevel`
-/// is the noise divisor (0 ⇒ default of 4). When `dither` is set, `irow` drives
-/// the subtractive-dither sequence. Returns `None` when the tile can't be
-/// quantized (constant data, or a range wider than the int domain).
+/// Quantize a float tile (cfitsio `fits_quantize_float`). `qlevel` is the noise
+/// divisor (0 ⇒ default of 4). `method` selects dithering; `irow` drives the
+/// subtractive-dither sequence. Non-finite pixels become [`NULL_VALUE`] and, for
+/// `Subtractive2`, exact zeros become [`ZERO_VALUE`]. Returns `None` when the tile
+/// can't be quantized (no finite data, constant data, or a range wider than the
+/// int domain) — the caller then stores the raw floats losslessly.
 pub(super) fn quantize_tile(
     fdata: &[f64],
     nx: usize,
     ny: usize,
     qlevel: f64,
-    dither: bool,
+    method: DitherMethod,
     irow: i64,
 ) -> Option<Quantized> {
     let n = nx * ny;
@@ -183,6 +240,9 @@ pub(super) fn quantize_tile(
         return None;
     }
     let est = noise3(fdata, nx, ny);
+    if !est.any_good {
+        return None; // all-null tile → store raw (preserves the NaNs exactly)
+    }
     let delta = if qlevel == 0.0 {
         est.noise / 4.0
     } else {
@@ -195,9 +255,14 @@ pub(super) fn quantize_tile(
         return None;
     }
 
-    // Zero point fudged to an integer multiple of delta so repeated compress/
-    // decompress cycles reproduce the same scaling (the common cfitsio branch).
-    let zeropt = if (est.max - est.min) / delta < INT_MAX - N_RESERVED_VALUES {
+    let has_null = fdata.iter().take(n).any(|v| !v.is_finite());
+    let dither2 = method == DitherMethod::Subtractive2;
+    // When nulls are present (or for DITHER_2), shift the range above the reserved
+    // values so NULL_VALUE/ZERO_VALUE never collide with real data; otherwise fudge
+    // the zero point to an integer multiple of delta (stable across re-compression).
+    let zeropt = if has_null || dither2 {
+        est.min - delta * (NULL_VALUE as f64 + N_RESERVED_VALUES)
+    } else if (est.max - est.min) / delta < INT_MAX - N_RESERVED_VALUES {
         let iqfactor = (est.min / delta + 0.5) as i64;
         iqfactor as f64 * delta
     } else {
@@ -205,19 +270,24 @@ pub(super) fn quantize_tile(
     };
 
     let mut idata = vec![0i32; n];
-    if dither {
-        let mut d = Dither::new(irow);
-        for (i, &f) in fdata.iter().enumerate().take(n) {
-            idata[i] = nint((f - zeropt) / delta + d.next() - 0.5);
-        }
-    } else {
-        for (i, &f) in fdata.iter().enumerate().take(n) {
-            idata[i] = nint((f - zeropt) / delta);
-        }
+    let mut d = method.dithered().then(|| Dither::new(irow));
+    for (i, &f) in fdata.iter().enumerate().take(n) {
+        // The dither cursor advances per pixel regardless of branch taken.
+        let r = d.as_mut().map_or(0.0, Dither::next);
+        idata[i] = if !f.is_finite() {
+            NULL_VALUE
+        } else if dither2 && f == 0.0 {
+            ZERO_VALUE
+        } else if method.dithered() {
+            nint((f - zeropt) / delta + r - 0.5)
+        } else {
+            nint((f - zeropt) / delta)
+        };
     }
     Some(Quantized {
         idata,
         bscale: delta,
         bzero: zeropt,
+        has_null,
     })
 }

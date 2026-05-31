@@ -140,6 +140,29 @@ impl Header {
         self
     }
 
+    /// Remove every card with this keyword and rebuild the index. A no-op if the
+    /// keyword is absent. Used when transforming headers (e.g. stripping the `Z*`
+    /// keywords when uncompressing a tiled table).
+    #[cfg(feature = "compression")]
+    pub(crate) fn remove(&mut self, keyword: &str) -> &mut Self {
+        if self.index.contains_key(keyword) {
+            self.cards.retain(|c| c.keyword != keyword);
+            self.reindex();
+        }
+        self
+    }
+
+    /// Rebuild the keyword → first-card index after a structural edit.
+    #[cfg(feature = "compression")]
+    fn reindex(&mut self) {
+        self.index.clear();
+        for (i, card) in self.cards.iter().enumerate() {
+            if matches!(card.kind, CardKind::Value | CardKind::Hierarch) {
+                self.index.entry(card.keyword.clone()).or_insert(i);
+            }
+        }
+    }
+
     /// Attach (or replace) the inline comment of an existing valued keyword;
     /// a no-op if the keyword is absent.
     pub fn comment(&mut self, keyword: &str, text: &str) -> &mut Self {

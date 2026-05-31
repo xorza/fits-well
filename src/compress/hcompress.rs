@@ -16,8 +16,8 @@ const MAGIC: [u8; 2] = [0xDD, 0x99];
 
 /// Decode an `HCOMPRESS_1` tile into row-major integer values (`ny` fastest, the
 /// FITS axis-1 order the orchestrator expects).
-pub(super) fn hcompress_tile(bytes: &[u8]) -> Result<Vec<i64>> {
-    let (a, _nx, _ny) = hdecompress(bytes)?;
+pub(super) fn hcompress_tile(bytes: &[u8], smooth: bool) -> Result<Vec<i64>> {
+    let (a, _nx, _ny) = hdecompress(bytes, smooth)?;
     Ok(a.into_iter().map(|v| v as i64).collect())
 }
 
@@ -711,7 +711,7 @@ impl<'a> BitInput<'a> {
 }
 
 /// Top-level: header → quadtree decode → undigitize → inverse H-transform.
-fn hdecompress(input: &[u8]) -> Result<(Vec<i32>, usize, usize)> {
+fn hdecompress(input: &[u8], smooth: bool) -> Result<(Vec<i32>, usize, usize)> {
     let mut bi = BitInput::new(input);
     if bi.read_bytes(2) != MAGIC {
         return Err(FitsError::UnsupportedCompression {
@@ -729,7 +729,7 @@ fn hdecompress(input: &[u8]) -> Result<(Vec<i32>, usize, usize)> {
     a[0] = sumall as i32;
 
     undigitize(&mut a, scale);
-    hinv(&mut a, nx, ny, scale);
+    hinv(&mut a, nx, ny, scale, smooth);
     Ok((a, nx, ny))
 }
 
@@ -995,14 +995,13 @@ fn read_bdirect(
 }
 
 /// Inverse H-transform (in place), `SMOOTH = 0`.
-fn hinv(a: &mut [i32], nx: usize, ny: usize, scale: i32) {
+fn hinv(a: &mut [i32], nx: usize, ny: usize, scale: i32, smooth: bool) {
     let nmax = nx.max(ny);
     let mut log2n = ((nmax as f64).ln() / 2f64.ln() + 0.5) as i32;
     if nmax > (1 << log2n) {
         log2n += 1;
     }
     let mut tmp = vec![0i32; nmax.div_ceil(2)];
-    let _ = scale; // only used for smoothing, which is not implemented
 
     let mut shift = 1;
     let mut bit0 = 1i32 << (log2n - 1);
@@ -1048,6 +1047,10 @@ fn hinv(a: &mut [i32], nx: usize, ny: usize, scale: i32) {
         }
         for j in 0..nytop {
             unshuffle(&mut a[j..], nxtop, ny, &mut tmp);
+        }
+        // Smooth by interpolating coefficients (SMOOTH=1, lossy scale>1 only).
+        if smooth {
+            hsmooth(a, nxtop, nytop, ny, scale);
         }
         let oddx = nxtop % 2;
         let oddy = nytop % 2;
@@ -1125,6 +1128,106 @@ fn hinv(a: &mut [i32], nx: usize, ny: usize, scale: i32) {
 /// constant per the sign of `v`.
 fn round_signed(v: i32, prnd: i32, nrnd: i32, mask: i32) -> i32 {
     (v + if v >= 0 { prnd } else { nrnd }) & mask
+}
+
+/// Smooth H-transform coefficients by interpolation (cfitsio `hsmooth`): adjust
+/// the x, y, and curvature differences toward what the neighbouring zones imply,
+/// each change clamped to ±scale/2 (the rounding slack from digitization).
+/// Only meaningful for lossy decoding (`scale > 1`, `SMOOTH = 1`). Intermediates
+/// use `i64` so the difference/shift arithmetic can't overflow.
+fn hsmooth(a: &mut [i32], nxtop: usize, nytop: usize, ny: usize, scale: i32) {
+    let smax = (scale >> 1) as i64;
+    if smax <= 0 {
+        return;
+    }
+    // Integer divide-by-2^k matching C's rounding-toward-zero on negatives.
+    let shr = |s: i64, k: u32| {
+        if s >= 0 {
+            s >> k
+        } else {
+            (s + (1 << k) - 1) >> k
+        }
+    };
+    let ny2 = ny * 2;
+
+    // Adjust x difference hx (edges left untouched: i from 2 to nxtop-2).
+    let mut i = 2;
+    while i + 2 < nxtop {
+        let (mut s00, mut s10) = (ny * i, ny * i + ny);
+        let mut j = 0;
+        while j < nytop {
+            let hm = a[s00 - ny2] as i64;
+            let h0 = a[s00] as i64;
+            let hp = a[s00 + ny2] as i64;
+            let mut diff = hp - hm;
+            let dmax = ((hp - h0).min(h0 - hm)).max(0) << 2;
+            let dmin = ((hp - h0).max(h0 - hm)).min(0) << 2;
+            if dmin < dmax {
+                diff = diff.clamp(dmin, dmax);
+                let s = shr(diff - ((a[s10] as i64) << 3), 3).clamp(-smax, smax);
+                a[s10] = (a[s10] as i64 + s) as i32;
+            }
+            s00 += 2;
+            s10 += 2;
+            j += 2;
+        }
+        i += 2;
+    }
+
+    // Adjust y difference hy.
+    let mut i = 0;
+    while i < nxtop {
+        let mut s00 = ny * i + 2;
+        let mut j = 2;
+        while j + 2 < nytop {
+            let hm = a[s00 - 2] as i64;
+            let h0 = a[s00] as i64;
+            let hp = a[s00 + 2] as i64;
+            let mut diff = hp - hm;
+            let dmax = ((hp - h0).min(h0 - hm)).max(0) << 2;
+            let dmin = ((hp - h0).max(h0 - hm)).min(0) << 2;
+            if dmin < dmax {
+                diff = diff.clamp(dmin, dmax);
+                let s = shr(diff - ((a[s00 + 1] as i64) << 3), 3).clamp(-smax, smax);
+                a[s00 + 1] = (a[s00 + 1] as i64 + s) as i32;
+            }
+            s00 += 2;
+            j += 2;
+        }
+        i += 2;
+    }
+
+    // Adjust curvature difference hc.
+    let mut i = 2;
+    while i + 2 < nxtop {
+        let (mut s00, mut s10) = (ny * i + 2, ny * i + 2 + ny);
+        let mut j = 2;
+        while j + 2 < nytop {
+            let hmm = a[s00 - ny2 - 2] as i64;
+            let hpm = a[s00 + ny2 - 2] as i64;
+            let hmp = a[s00 - ny2 + 2] as i64;
+            let hpp = a[s00 + ny2 + 2] as i64;
+            let h0 = a[s00] as i64;
+            let mut diff = hpp + hmm - hmp - hpm;
+            let hx2 = (a[s10] as i64) << 1;
+            let hy2 = (a[s00 + 1] as i64) << 1;
+            let m1 = ((hpp - h0).max(0) - hx2 - hy2).min((h0 - hpm).max(0) + hx2 - hy2);
+            let m2 = ((h0 - hmp).max(0) - hx2 + hy2).min((hmm - h0).max(0) + hx2 + hy2);
+            let dmax = m1.min(m2) << 4;
+            let m1 = ((hpp - h0).min(0) - hx2 - hy2).max((h0 - hpm).min(0) + hx2 - hy2);
+            let m2 = ((h0 - hmp).min(0) - hx2 + hy2).max((hmm - h0).min(0) + hx2 + hy2);
+            let dmin = m1.max(m2) << 4;
+            if dmin < dmax {
+                diff = diff.clamp(dmin, dmax);
+                let s = shr(diff - ((a[s10 + 1] as i64) << 6), 6).clamp(-smax, smax);
+                a[s10 + 1] = (a[s10 + 1] as i64 + s) as i32;
+            }
+            s00 += 2;
+            s10 += 2;
+            j += 2;
+        }
+        i += 2;
+    }
 }
 
 /// Interleave coefficients: inverse of the shuffle done during compression.

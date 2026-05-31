@@ -43,6 +43,67 @@ fn decompresses_hcompress_1_tiled_image() {
     check_decoded("comp_hcomp_i16.fits");
 }
 
+/// Decode an i32 image and compare pixel-exact against astropy's reconstruction
+/// stored as a plain-image reference.
+fn check_i32_against_ref(compressed: &str, reference: &str) {
+    let got = match open(compressed).read_compressed_image(1).unwrap().samples {
+        ImageData::I32(v) => v,
+        other => panic!("expected I32, got {other:?}"),
+    };
+    let want = match open(reference).read_image(0).unwrap().samples {
+        ImageData::I32(v) => v,
+        other => panic!("expected I32 reference, got {other:?}"),
+    };
+    assert_eq!(got, want, "{compressed} must match astropy {reference}");
+}
+
+#[test]
+fn decompresses_hcompress_lossy() {
+    // Lossy HCOMPRESS (SCALE=4, SMOOTH=0): exercises undigitize (×scale).
+    check_i32_against_ref("comp_hcomp_lossy.fits", "comp_ref_hcomp_lossy.fits");
+}
+
+#[test]
+fn decompresses_hcompress_smoothed() {
+    // SMOOTH=1: the SMOOTH ZVAL triggers inverse-transform smoothing, which must
+    // reproduce astropy's smoothed reconstruction bit-for-bit.
+    check_i32_against_ref("comp_hcomp_smooth.fits", "comp_ref_hcomp_smooth.fits");
+}
+
+#[test]
+fn decompresses_subtractive_dither_2() {
+    // SUBTRACTIVE_DITHER_2 float: must match astropy's dithered reconstruction.
+    check_float("comp_dither2_f32.fits", "comp_ref_dither2_f32.fits");
+}
+
+#[test]
+fn decompresses_float_with_nan_nulls() {
+    // SUBTRACTIVE_DITHER_1 with ZBLANK: null pixels decode to NaN, the rest match.
+    let got = match open("comp_nan_f32.fits")
+        .read_compressed_image(1)
+        .unwrap()
+        .samples
+    {
+        ImageData::F32(v) => v,
+        other => panic!("expected F32, got {other:?}"),
+    };
+    let want = match open("comp_ref_nan_f32.fits").read_image(0).unwrap().samples {
+        ImageData::F32(v) => v,
+        other => panic!("expected F32 reference, got {other:?}"),
+    };
+    assert_eq!(got.len(), want.len());
+    let mut nan_count = 0;
+    for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+        if w.is_nan() {
+            assert!(g.is_nan(), "pixel {i} should be NaN");
+            nan_count += 1;
+        } else {
+            assert_eq!(g, w, "pixel {i}");
+        }
+    }
+    assert_eq!(nan_count, 2, "expected 2 null pixels");
+}
+
 /// Emit compressed files written by this crate for external (astropy) validation.
 /// Run with `cargo test --features compression -- --ignored emit_`.
 #[test]
@@ -208,6 +269,83 @@ fn float_quantize_write_round_trips_within_tolerance() {
 }
 
 #[test]
+fn float_write_preserves_nan_nulls() {
+    use crate::data::{Image, ImageData, Scaling};
+    use crate::writer::FitsWriter;
+    use std::io::Cursor;
+
+    let mut orig = float_field();
+    orig[5 + 3 * 24] = f32::NAN;
+    orig[20 + 10 * 24] = f32::NAN;
+    let image = Image {
+        shape: vec![24, 16],
+        samples: ImageData::F32(orig.clone()),
+        scaling: Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    };
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_compressed_image(&image, "RICE_1", &[24, 16])
+        .unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let back = match r.read_compressed_image(1).unwrap().samples {
+        ImageData::F32(v) => v,
+        other => panic!("expected F32, got {other:?}"),
+    };
+    for (i, (&o, &b)) in orig.iter().zip(&back).enumerate() {
+        if o.is_nan() {
+            assert!(b.is_nan(), "null pixel {i} must round-trip to NaN");
+        } else {
+            assert!((o - b).abs() < 0.2, "pixel {i}: {o} vs {b}");
+        }
+    }
+}
+
+#[test]
+fn dither2_quantize_round_trips() {
+    use super::quantize::{DitherMethod, dequantize, quantize_tile};
+
+    // 8×8 field with genuine noise and a scattering of exact zeros.
+    let mut data: Vec<f64> = (0..64)
+        .map(|i| {
+            let mut z = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            z ^= z >> 31;
+            10.0 + (z % 1000) as f64 / 100.0
+        })
+        .collect();
+    for &k in &[0usize, 13, 27, 40, 63] {
+        data[k] = 0.0;
+    }
+    let irow = 7;
+    let q = quantize_tile(&data, 8, 8, 0.0, DitherMethod::Subtractive2, irow).unwrap();
+    // Exact zeros must encode to the reserved ZERO_VALUE.
+    for &k in &[0usize, 13, 27, 40, 63] {
+        assert_eq!(q.idata[k], super::quantize::ZERO_VALUE, "zero pixel {k}");
+    }
+    let ints: Vec<i64> = q.idata.iter().map(|&v| v as i64).collect();
+    let back = dequantize(
+        &ints,
+        q.bscale,
+        q.bzero,
+        DitherMethod::Subtractive2,
+        irow,
+        None,
+    );
+    for (i, (&o, &b)) in data.iter().zip(&back).enumerate() {
+        if o == 0.0 {
+            assert_eq!(b, 0.0, "zero pixel {i} must decode to exactly 0.0");
+        } else {
+            assert!(
+                (o - b).abs() <= 0.5 * q.bscale + 1e-9,
+                "pixel {i}: {o} vs {b}"
+            );
+        }
+    }
+}
+
+#[test]
 fn plio_write_round_trips_through_decode() {
     use crate::data::{Image, ImageData, Scaling};
     use crate::writer::FitsWriter;
@@ -283,6 +421,103 @@ fn decompresses_quantized_float_no_dither() {
     // Noisy data genuinely quantized: per-tile ZSCALE≠0, integers RICE-packed in
     // COMPRESSED_DATA, dequantized as ZSCALE·int + ZZERO.
     check_float("comp_ricef_quant.fits", "comp_ref_quant_f32.fits");
+}
+
+/// Build a fixed-width BINTABLE, write it, then round-trip it through table
+/// compression with `algo`/`rows_per_tile` and assert the data is byte-identical.
+fn check_table_roundtrip(algo: &str, rows_per_tile: usize) {
+    use crate::table::ColumnData;
+    use crate::writer::{FitsWriter, WriteColumn};
+    use std::io::Cursor;
+
+    let nrows = 10;
+    let col = |name: &str, data, repeat| WriteColumn {
+        name: name.to_string(),
+        unit: None,
+        data,
+        repeat,
+    };
+    let columns = vec![
+        col(
+            "SHORT",
+            ColumnData::I16((0..nrows).map(|i| i as i16 * 7 - 30).collect()),
+            1,
+        ),
+        col(
+            "INT",
+            ColumnData::I32((0..nrows).map(|i| (i as i32) * 100_000 - 5).collect()),
+            1,
+        ),
+        col(
+            "FLT",
+            ColumnData::F32((0..nrows).map(|i| i as f32 * 1.5 - 3.25).collect()),
+            1,
+        ),
+        col(
+            "DBL",
+            ColumnData::F64((0..nrows).map(|i| i as f64 * 0.1).collect()),
+            1,
+        ),
+        col(
+            "BYTE",
+            ColumnData::Bytes((0..nrows).map(|i| (i * 3) as u8).collect()),
+            1,
+        ),
+        // A multi-element (repeat=3) short column.
+        col(
+            "VEC",
+            ColumnData::I16((0..nrows * 3).map(|i| (i * 2) as i16).collect()),
+            3,
+        ),
+    ];
+
+    // 1. Write an uncompressed table and read it back.
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_table(nrows, &columns).unwrap();
+    let bytes = w.into_inner().into_inner();
+    let mut r = FitsReader::open(Cursor::new(bytes)).unwrap();
+    let orig = r.read_table(1).unwrap();
+    let orig_header = r.hdu(1).header.clone();
+
+    // 2. Compress it, then read + uncompress.
+    let mut cw = FitsWriter::new(Cursor::new(Vec::new()));
+    cw.write_compressed_table(&orig_header, &orig, rows_per_tile, algo)
+        .unwrap();
+    let cbytes = cw.into_inner().into_inner();
+    let mut cr = FitsReader::open(Cursor::new(cbytes)).unwrap();
+    let restored = cr.read_compressed_table(1).unwrap();
+
+    // 3. The uncompressed table must be byte-identical to the original.
+    assert_eq!(restored.nrows, orig.nrows, "{algo}/{rows_per_tile} nrows");
+    assert_eq!(
+        restored.row_width(),
+        orig.row_width(),
+        "{algo}/{rows_per_tile} row width"
+    );
+    assert_eq!(
+        restored.raw_rows(),
+        orig.raw_rows(),
+        "{algo}/{rows_per_tile} data mismatch"
+    );
+}
+
+#[test]
+fn table_compression_round_trips() {
+    // One tile, several tiles, and a tile smaller than the table — across codecs.
+    for &rpt in &[10usize, 4, 1] {
+        check_table_roundtrip("GZIP_1", rpt);
+        check_table_roundtrip("GZIP_2", rpt);
+        check_table_roundtrip("RICE_1", rpt);
+    }
+}
+
+#[test]
+fn read_compressed_table_rejects_a_plain_bintable() {
+    let mut f = open("DDTSUVDATA.fits");
+    assert!(matches!(
+        f.read_compressed_table(1),
+        Err(FitsError::NotCompressedTable)
+    ));
 }
 
 #[test]
