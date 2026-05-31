@@ -10,15 +10,14 @@
 //! ```
 //!
 //! The linear layer is `PC`+`CDELT`, `CD`, or legacy `CDELT`+`CROTA`, with general
-//! matrix inversion for the reverse direction. Projections: zenithal
-//! `TAN`/`SIN`/`ARC`/`STG`/`ZEA`, cylindrical `CAR`/`CEA`/`MER`/`SFL`, and all-sky
-//! `AIT`/`MOL`, via the general fiducial-point pole computation (so non-zenithal
-//! projections work); non-celestial axes pass through linearly. Reference-frame
-//! transforms live in [`frame`]. `PVi_m` projection parameters are threaded
-//! through (φ₀/θ₀/LONPOLE/LATPOLE overrides; CEA λ); more parameterized
-//! projections build on this. All validated against `astropy.wcs` (wcslib).
-//! Not yet: the perspective/conic/polyconic/quad-cube/HEALPix projection codes
-//! and the non-linear spectral algorithms (`FREQ`↔`WAVE`↔`VELO`).
+//! matrix inversion for the reverse direction, and full `PVi_m` parameters
+//! (φ₀/θ₀/LONPOLE/LATPOLE overrides plus per-projection params). Projections, via
+//! the general fiducial-point pole computation: zenithal `TAN`/`SIN`/`ARC`/`STG`/
+//! `ZEA`/`ZPN`/`AIR`, cylindrical `CAR`/`CEA`/`MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/
+//! `PAR`, conic `COP`/`COE`/`COD`/`COO`, and pseudoconic `BON`. Reference-frame
+//! transforms live in [`frame`]. All validated against `astropy.wcs` (wcslib).
+//! Not yet: the perspective `AZP`/`SZP`, polyconic `PCO`, quad-cube `TSC`/`CSC`/
+//! `QSC`, HEALPix `HPX`/`XPH`, and the non-linear spectral algorithms.
 
 pub mod frame;
 
@@ -28,6 +27,7 @@ use crate::header::Header;
 
 const R2D: f64 = 180.0 / std::f64::consts::PI;
 const D2R: f64 = std::f64::consts::PI / 180.0;
+const FRAC_PI_4: f64 = std::f64::consts::FRAC_PI_4;
 
 /// A celestial projection algorithm — the 3-letter `CTYPE` code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +54,24 @@ pub enum Projection {
     Ait,
     /// `MOL` — Mollweide (all-sky, pseudo-cylindrical).
     Mol,
+    /// `ZPN` — zenithal polynomial (`PVi_m` coefficients).
+    Zpn,
+    /// `CYP` — cylindrical perspective (`μ = PVi_1`, `λ = PVi_2`).
+    Cyp,
+    /// `PAR` — parabolic (pseudo-cylindrical).
+    Par,
+    /// `COP` — conic perspective (`θ_a = PVi_1`, `η = PVi_2`).
+    Cop,
+    /// `COE` — conic equal-area.
+    Coe,
+    /// `COD` — conic equidistant.
+    Cod,
+    /// `COO` — conic orthomorphic.
+    Coo,
+    /// `BON` — Bonne's equal-area (pseudo-conic, `θ₁ = PVi_1`).
+    Bon,
+    /// `AIR` — Airy (zenithal, minimum-error; `θ_b = PVi_1`).
+    Air,
 }
 
 impl Projection {
@@ -70,6 +88,15 @@ impl Projection {
             "SFL" => Projection::Sfl,
             "AIT" => Projection::Ait,
             "MOL" => Projection::Mol,
+            "ZPN" => Projection::Zpn,
+            "CYP" => Projection::Cyp,
+            "PAR" => Projection::Par,
+            "COP" => Projection::Cop,
+            "COE" => Projection::Coe,
+            "COD" => Projection::Cod,
+            "COO" => Projection::Coo,
+            "BON" => Projection::Bon,
+            "AIR" => Projection::Air,
             _ => return None,
         })
     }
@@ -79,13 +106,22 @@ impl Projection {
     fn is_zenithal(self) -> bool {
         matches!(
             self,
-            Projection::Tan | Projection::Sin | Projection::Arc | Projection::Stg | Projection::Zea
+            Projection::Tan
+                | Projection::Sin
+                | Projection::Arc
+                | Projection::Stg
+                | Projection::Zea
+                | Projection::Zpn
+                | Projection::Air
         )
     }
 
     /// Whether this is a conic projection (`θ₀ = θ_a = PVi_1`).
     fn is_conic(self) -> bool {
-        false
+        matches!(
+            self,
+            Projection::Cop | Projection::Coe | Projection::Cod | Projection::Coo
+        )
     }
 
     /// The fiducial point `(φ₀, θ₀)` in degrees. Zenithal: `(0, 90)`; conics:
@@ -103,6 +139,13 @@ impl Projection {
     /// Deproject intermediate world `(x, y)` (deg) to native `(φ, θ)` (deg).
     /// `pv` holds the latitude axis's `PVi_0…` projection parameters.
     fn deproject(self, x: f64, y: f64, pv: &[f64]) -> (f64, f64) {
+        if self.is_conic() {
+            let (c, y0) = self.conic_consts(pv);
+            let s = pv[1].signum();
+            let r = s * x.hypot(y0 - y);
+            let phi = (s * x).atan2(s * (y0 - y)) * R2D / c;
+            return (phi, self.conic_theta(r, pv, c));
+        }
         if self.is_zenithal() {
             let r = x.hypot(y);
             let phi = if r == 0.0 { 0.0 } else { x.atan2(-y) * R2D };
@@ -114,6 +157,10 @@ impl Projection {
                 Projection::Arc => u,
                 Projection::Zea => 2.0 * (u / 2.0).clamp(-1.0, 1.0).asin(),
                 Projection::Stg => 2.0 * (u / 2.0).atan(),
+                // ZPN: solve Σ Pₘ ζᵐ = u for ζ (Newton from ζ = u).
+                Projection::Zpn => zpn_zeta(u, pv),
+                // AIR: solve the transcendental radius for ζ (Newton).
+                Projection::Air => air_zeta(u, pv[1]),
                 _ => unreachable!(),
             };
             (phi, 90.0 - zeta * R2D)
@@ -145,6 +192,35 @@ impl Projection {
                     let phi = std::f64::consts::PI * x / (2.0 * s2 * gamma.cos());
                     (phi, theta)
                 }
+                // CYP inverse: φ = x/λ; θ from η = (y/(180/π))/(μ+λ).
+                Projection::Cyp => {
+                    let (mu, lambda) = (
+                        pv[1],
+                        pv.get(2).filter(|&&v| v != 0.0).copied().unwrap_or(1.0),
+                    );
+                    let eta = (y / R2D) / (mu + lambda);
+                    let theta = eta.atan2(1.0)
+                        + (eta * mu / (1.0 + eta * eta).sqrt())
+                            .clamp(-1.0, 1.0)
+                            .asin();
+                    (x / lambda, theta * R2D)
+                }
+                // PAR inverse (CG 2002 eq. 49).
+                Projection::Par => {
+                    let theta = 3.0 * (y / 180.0).clamp(-1.0, 1.0).asin();
+                    (x / (2.0 * (2.0 * theta / 3.0).cos() - 1.0), theta * R2D)
+                }
+                // Bonne's pseudoconic inverse (CG 2002 §5.5.1), θ₁ = PVi_1.
+                Projection::Bon => {
+                    let t1 = pv[1] * D2R;
+                    let y0 = t1 + 1.0 / t1.tan();
+                    let s = pv[1].signum();
+                    let yc = y0 - y * D2R;
+                    let r = s * (x * D2R).hypot(yc);
+                    let tr = y0 - r;
+                    let aphi = (s * x * D2R).atan2(s * yc);
+                    (aphi * r / tr.cos() * R2D, tr * R2D)
+                }
                 _ => unreachable!(),
             }
         }
@@ -152,6 +228,12 @@ impl Projection {
 
     /// Project native `(φ, θ)` (deg) to intermediate world `(x, y)` (deg).
     fn project(self, phi: f64, theta: f64, pv: &[f64]) -> (f64, f64) {
+        if self.is_conic() {
+            let (c, y0) = self.conic_consts(pv);
+            let r = self.conic_radius(theta, pv);
+            let cp = (c * phi) * D2R;
+            return (r * cp.sin(), y0 - r * cp.cos());
+        }
         if self.is_zenithal() {
             let zeta = (90.0 - theta) * D2R;
             let r = match self {
@@ -160,6 +242,8 @@ impl Projection {
                 Projection::Arc => R2D * zeta,
                 Projection::Zea => 2.0 * R2D * (zeta / 2.0).sin(),
                 Projection::Stg => 2.0 * R2D * (zeta / 2.0).tan(),
+                Projection::Zpn => R2D * zpn_poly(zeta, pv),
+                Projection::Air => R2D * air_radius(zeta, pv[1]),
                 _ => unreachable!(),
             };
             let p = phi * D2R;
@@ -198,10 +282,186 @@ impl Projection {
                         s2 * R2D * g.sin(),
                     )
                 }
+                Projection::Cyp => {
+                    let (mu, lambda) = (
+                        pv[1],
+                        pv.get(2).filter(|&&v| v != 0.0).copied().unwrap_or(1.0),
+                    );
+                    (lambda * phi, R2D * (mu + lambda) * t.sin() / (mu + t.cos()))
+                }
+                Projection::Par => (
+                    phi * (2.0 * (2.0 * t / 3.0).cos() - 1.0),
+                    180.0 * (t / 3.0).sin(),
+                ),
+                Projection::Bon => {
+                    let t1 = pv[1] * D2R;
+                    let y0 = t1 + 1.0 / t1.tan();
+                    let r = y0 - t;
+                    let aphi = phi * D2R * t.cos() / r;
+                    (R2D * r * aphi.sin(), R2D * (y0 - r * aphi.cos()))
+                }
                 _ => unreachable!(),
             }
         }
     }
+
+    /// Conic constants `(C, Y0)` (CG 2002 §3.4): `θ_a = PVi_1`, `η = PVi_2` (deg).
+    fn conic_consts(self, pv: &[f64]) -> (f64, f64) {
+        let (ta, eta) = (pv[1] * D2R, pv[2] * D2R);
+        let (t1, t2) = (ta - eta, ta + eta);
+        match self {
+            Projection::Cop => {
+                let c = ta.sin();
+                (c, R2D * eta.cos() / ta.tan())
+            }
+            Projection::Coe => {
+                let (s1, s2) = (t1.sin(), t2.sin());
+                let c = (s1 + s2) / 2.0;
+                let y0 = R2D / c * (1.0 + s1 * s2 - 2.0 * c * ta.sin()).max(0.0).sqrt();
+                (c, y0)
+            }
+            Projection::Cod => {
+                // Equidistant: C = sinθ_a·sinη/η; R = Y0 + (θ_a − θ) deg, with
+                // Y0 = (180/π)·(η/tanη)·cotθ_a (η→0 ⇒ η/tanη→1).
+                let (c, k) = if eta.abs() < 1e-12 {
+                    (ta.sin(), 1.0)
+                } else {
+                    (ta.sin() * eta.sin() / eta, eta / eta.tan())
+                };
+                (c, R2D * k / ta.tan())
+            }
+            Projection::Coo => {
+                let c = if eta.abs() < 1e-12 {
+                    ta.sin()
+                } else {
+                    (t2.cos() / t1.cos()).ln()
+                        / ((FRAC_PI_4 - t2 / 2.0).tan() / (FRAC_PI_4 - t1 / 2.0).tan()).ln()
+                };
+                let psi = R2D * t1.cos() / (c * (FRAC_PI_4 - t1 / 2.0).tan().powf(c));
+                (c, psi * (FRAC_PI_4 - ta / 2.0).tan().powf(c))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Conic radius `R_θ` (deg) for a native latitude `θ` (deg).
+    fn conic_radius(self, theta: f64, pv: &[f64]) -> f64 {
+        let (c, y0) = self.conic_consts(pv);
+        let (ta, eta, t) = (pv[1] * D2R, pv[2] * D2R, theta * D2R);
+        let (t1, t2) = (ta - eta, ta + eta);
+        match self {
+            Projection::Cop => R2D * eta.cos() * (1.0 / ta.tan() - (t - ta).tan()),
+            Projection::Coe => {
+                let (s1, s2) = (t1.sin(), t2.sin());
+                R2D / c * (1.0 + s1 * s2 - 2.0 * c * t.sin()).max(0.0).sqrt()
+            }
+            Projection::Cod => y0 + (pv[1] - theta),
+            Projection::Coo => {
+                let psi = R2D * t1.cos() / (c * (FRAC_PI_4 - t1 / 2.0).tan().powf(c));
+                psi * (FRAC_PI_4 - t / 2.0).tan().powf(c)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Native latitude `θ` (deg) for a conic radius `R_θ` (deg).
+    fn conic_theta(self, r: f64, pv: &[f64], c: f64) -> f64 {
+        let (ta, eta) = (pv[1] * D2R, pv[2] * D2R);
+        let (t1, t2) = (ta - eta, ta + eta);
+        match self {
+            Projection::Cop => {
+                let tan = 1.0 / ta.tan() - r / (R2D * eta.cos());
+                pv[1] + tan.atan() * R2D
+            }
+            Projection::Coe => {
+                let (s1, s2) = (t1.sin(), t2.sin());
+                let sin_t = (1.0 + s1 * s2 - (r * c / R2D).powi(2)) / (2.0 * c);
+                sin_t.clamp(-1.0, 1.0).asin() * R2D
+            }
+            Projection::Cod => {
+                let y0 = self.conic_consts(pv).1;
+                pv[1] - (r - y0)
+            }
+            Projection::Coo => {
+                let psi = R2D * t1.cos() / (c * (FRAC_PI_4 - t1 / 2.0).tan().powf(c));
+                90.0 - 2.0 * (r / psi).powf(1.0 / c).atan() * R2D
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+/// AIR `K = ln(cos ξ_b)/tan²ξ_b` constant (`ξ_b = (90°−θ_b)/2`); the `θ_b = 90`
+/// limit is `−1/2`.
+fn air_k(theta_b: f64) -> f64 {
+    let xi_b = (90.0 - theta_b) * D2R / 2.0;
+    if xi_b.abs() < 1e-12 {
+        -0.5
+    } else {
+        xi_b.cos().ln() / xi_b.tan().powi(2)
+    }
+}
+
+/// AIR radius `R/(180/π)` for colatitude `ζ` (rad): `−2[ln(cos ξ)/tan ξ + K tan ξ]`,
+/// `ξ = ζ/2`.
+fn air_radius_u(zeta: f64, theta_b: f64) -> f64 {
+    let xi = zeta / 2.0;
+    if xi.abs() < 1e-12 {
+        return 0.0;
+    }
+    -2.0 * (xi.cos().ln() / xi.tan() + air_k(theta_b) * xi.tan())
+}
+
+/// AIR radius in degrees.
+fn air_radius(zeta: f64, theta_b: f64) -> f64 {
+    R2D * air_radius_u(zeta, theta_b)
+}
+
+/// Invert the AIR radius for ζ given `u = R/(180/π)` (Newton).
+fn air_zeta(u: f64, theta_b: f64) -> f64 {
+    let mut z = u.max(1e-6); // start near ζ ≈ u
+    for _ in 0..100 {
+        let f = air_radius_u(z, theta_b) - u;
+        let d = (air_radius_u(z + 1e-7, theta_b) - air_radius_u(z - 1e-7, theta_b)) / 2e-7;
+        if d == 0.0 {
+            break;
+        }
+        let step = f / d;
+        z -= step;
+        if step.abs() < 1e-13 {
+            break;
+        }
+    }
+    z
+}
+
+/// ZPN forward polynomial `R/(180/π) = Σ Pₘ ζᵐ` (ζ in radians, `pv[m] = PVi_m`).
+fn zpn_poly(zeta: f64, pv: &[f64]) -> f64 {
+    pv.iter().rev().fold(0.0, |acc, &p| acc * zeta + p)
+}
+
+/// Invert the ZPN polynomial for ζ given `u = R/(180/π)` (Newton from ζ = u).
+fn zpn_zeta(u: f64, pv: &[f64]) -> f64 {
+    let mut z = u;
+    for _ in 0..100 {
+        let f = zpn_poly(z, pv) - u;
+        // derivative Σ m·Pₘ ζ^(m-1)
+        let d: f64 = pv
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(m, &p)| m as f64 * p * z.powi(m as i32 - 1))
+            .sum();
+        if d == 0.0 {
+            break;
+        }
+        let step = f / d;
+        z -= step;
+        if step.abs() < 1e-14 {
+            break;
+        }
+    }
+    z
 }
 
 /// A parsed world coordinate system for one (optionally alternate) axis set.

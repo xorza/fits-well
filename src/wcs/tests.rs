@@ -270,6 +270,132 @@ fn cea_lambda_pv_matches_astropy() {
     }
 }
 
+#[test]
+fn parameterized_projections_match_astropy() {
+    use crate::header::Header;
+    // (proj, crval2, cdelt, PVs, [(px,py,ra,dec)…]) golden from astropy.
+    struct Case {
+        proj: &'static str,
+        cv2: f64,
+        cd: f64,
+        pv: &'static [(usize, f64)],
+        pts: &'static [(f64, f64, f64, f64)],
+    }
+    let cases = [
+        Case {
+            proj: "ZPN",
+            cv2: 30.0,
+            cd: 0.2,
+            pv: &[(1, 1.0), (3, 0.1)],
+            pts: &[
+                (20.0, 70.0, 52.208830352, 33.797790311),
+                (80.0, 30.0, 38.346539565, 25.839502283),
+            ],
+        },
+        Case {
+            proj: "CYP",
+            cv2: 0.0,
+            cd: 0.5,
+            pv: &[(1, 1.0), (2, 0.5)],
+            pts: &[
+                (20.0, 70.0, 75.0, 13.273646093),
+                (80.0, 30.0, 15.0, -13.273646093),
+            ],
+        },
+        Case {
+            proj: "PAR",
+            cv2: 0.0,
+            cd: 0.5,
+            pv: &[],
+            pts: &[
+                (20.0, 70.0, 60.1875, 9.554215610),
+                (80.0, 30.0, 29.8125, -9.554215610),
+            ],
+        },
+        Case {
+            proj: "COP",
+            cv2: 45.0,
+            cd: 0.5,
+            pv: &[(1, 45.0), (2, 15.0)],
+            pts: &[
+                (20.0, 70.0, 70.886680135, 52.802260739),
+                (80.0, 30.0, 26.716181056, 33.063457476),
+            ],
+        },
+        Case {
+            proj: "COE",
+            cv2: 45.0,
+            cd: 0.5,
+            pv: &[(1, 45.0), (2, 15.0)],
+            pts: &[
+                (20.0, 70.0, 70.744981732, 52.427253763),
+                (80.0, 30.0, 26.612080121, 33.642902217),
+            ],
+        },
+        Case {
+            proj: "COD",
+            cv2: 45.0,
+            cd: 0.5,
+            pv: &[(1, 45.0), (2, 15.0)],
+            pts: &[
+                (20.0, 70.0, 70.845584231, 52.615170165),
+                (80.0, 30.0, 26.678352755, 33.316436438),
+            ],
+        },
+        Case {
+            proj: "COO",
+            cv2: 45.0,
+            cd: 0.5,
+            pv: &[(1, 45.0), (2, 15.0)],
+            pts: &[
+                (20.0, 70.0, 70.936065152, 52.798760425),
+                (80.0, 30.0, 26.752614879, 32.966997552),
+            ],
+        },
+        Case {
+            proj: "BON",
+            cv2: 30.0,
+            cd: 0.5,
+            pv: &[(1, 45.0)],
+            pts: &[
+                (40.0, 60.0, 51.090826613, 34.738247010),
+                (70.0, 35.0, 34.224478842, 21.570942288),
+            ],
+        },
+        Case {
+            proj: "AIR",
+            cv2: 60.0,
+            cd: 0.3,
+            pv: &[(1, 45.0)],
+            pts: &[
+                (40.0, 60.0, 51.871584561, 62.956093827),
+                (70.0, 35.0, 34.141611622, 54.816671832),
+            ],
+        },
+    ];
+    for c in &cases {
+        let mut h = Header::new();
+        h.set("NAXIS", 2);
+        h.set("CTYPE1", format!("RA---{}", c.proj));
+        h.set("CTYPE2", format!("DEC--{}", c.proj));
+        h.set("CRPIX1", 50.0).set("CRPIX2", 50.0);
+        h.set("CRVAL1", 45.0).set("CRVAL2", c.cv2);
+        h.set("CDELT1", -c.cd).set("CDELT2", c.cd);
+        for &(m, v) in c.pv {
+            h.set(&format!("PV2_{m}"), v);
+        }
+        let w = Wcs::from_header(&h, None).unwrap();
+        for &(px, py, ra, dec) in c.pts {
+            let out = w.pixel_to_world(&[px, py]);
+            assert!(
+                (out[0] - ra).abs() < 1e-7 && (out[1] - dec).abs() < 1e-7,
+                "{} at ({px},{py}): got {out:?}, want ({ra},{dec})",
+                c.proj
+            );
+        }
+    }
+}
+
 /// Every projection's deprojection inverts its forward projection.
 #[test]
 fn projections_round_trip() {
