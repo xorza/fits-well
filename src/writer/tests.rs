@@ -80,6 +80,43 @@ fn writes_and_reads_back_variable_length_arrays() {
 }
 
 #[test]
+fn writes_tdim_q_vla_and_bit_columns() {
+    use crate::table::TformKind;
+    let columns = vec![
+        // 2×2 multidimensional column (TDIM '(2,2)'), 4 elements/row.
+        WriteColumn::fixed("MAT", ColumnData::I32((1..=8).collect()), 4).with_tdim(vec![2, 2]),
+        // 64-bit Q VLA column.
+        WriteColumn::vla(
+            "QV",
+            vec![ColumnData::I16(vec![7, 8, 9]), ColumnData::I16(vec![1])],
+        )
+        .wide(),
+        // 12-bit X column: 2 bytes/row.
+        WriteColumn::bits("FLAGS", ColumnData::Bytes(vec![0xAB, 0xC0, 0x12, 0x30]), 12),
+    ];
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_table(2, &columns).unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let t = r.read_table(1).unwrap();
+
+    // TDIM parsed back as a shape.
+    assert_eq!(t.columns[0].tdim, Some(vec![2, 2]));
+    // Q descriptor type, and the VLA reads back.
+    assert_eq!(t.columns[1].tform.kind, TformKind::ArrayDesc64);
+    match &t.read_vla_column(1).unwrap()[0] {
+        ColumnData::I16(v) => assert_eq!(v, &[7, 8, 9]),
+        other => panic!("{other:?}"),
+    }
+    // X column: TFORM 12X, packed bytes preserved.
+    assert_eq!(t.columns[2].tform.kind, TformKind::Bit);
+    assert_eq!(t.columns[2].tform.repeat, 12);
+    match t.read_column(2).unwrap() {
+        ColumnData::Bytes(b) => assert_eq!(b, vec![0xAB, 0xC0, 0x12, 0x30]),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn writes_and_reads_back_a_binary_table() {
     let columns = vec![
         WriteColumn::fixed("NOSTA", ColumnData::I32(vec![1, 2, 3]), 1),

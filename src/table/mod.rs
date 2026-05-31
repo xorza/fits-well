@@ -161,6 +161,9 @@ pub struct Column {
     pub tzero: f64,
     /// `TNULLn`, the integer value denoting an undefined element, if declared.
     pub tnull: Option<i64>,
+    /// `TDIMn` array shape (e.g. `'(4,4)'` → `[4, 4]`), if declared — reshapes the
+    /// `repeat` elements of each row into a multidimensional array (§7.3.2).
+    pub tdim: Option<Vec<usize>>,
     /// Byte offset of this column from the start of a row.
     pub byte_offset: usize,
 }
@@ -236,6 +239,7 @@ impl BinTable {
                 tscale: header.get_real(&format!("TSCAL{n}")).unwrap_or(1.0),
                 tzero: header.get_real(&format!("TZERO{n}")).unwrap_or(0.0),
                 tnull: header.get_integer(&format!("TNULL{n}")),
+                tdim: header.get_text(&format!("TDIM{n}")).and_then(parse_tdim),
                 byte_offset: offset,
             });
             offset += tform.byte_width();
@@ -400,6 +404,15 @@ impl BinTable {
         }
         out
     }
+}
+
+/// Parse a `TDIMn` value `'(d1,d2,…)'` into axis lengths (fastest-varying first).
+fn parse_tdim(value: &str) -> Option<Vec<usize>> {
+    let inner = value.trim().strip_prefix('(')?.strip_suffix(')')?;
+    inner
+        .split(',')
+        .map(|s| s.trim().parse::<usize>().ok())
+        .collect()
 }
 
 /// Decode `bytes` as a contiguous run of `kind` elements. Shared by fixed-width

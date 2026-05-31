@@ -61,6 +61,12 @@ pub struct WriteColumn {
     pub data: ColumnData,
     pub repeat: usize,
     pub vla: Option<Vec<ColumnData>>,
+    /// `TDIMn` array shape (fastest axis first) for a multidimensional column.
+    pub tdim: Option<Vec<usize>>,
+    /// Use 64-bit `Q` descriptors instead of 32-bit `P` for a VLA column.
+    pub wide: bool,
+    /// Bit count for an `X` (bit-array) column; `data` is the packed bytes.
+    pub bits: Option<usize>,
 }
 
 impl WriteColumn {
@@ -72,10 +78,14 @@ impl WriteColumn {
             data,
             repeat,
             vla: None,
+            tdim: None,
+            wide: false,
+            bits: None,
         }
     }
 
-    /// A variable-length (`P`) column: `rows[r]` is row `r`'s array.
+    /// A variable-length (`P`, or `Q` via [`WriteColumn::wide`]) column: `rows[r]`
+    /// is row `r`'s array.
     pub fn vla(name: impl Into<String>, rows: Vec<ColumnData>) -> WriteColumn {
         // The element type tag for `data` is the first row's kind, or empty bytes.
         let tag = rows
@@ -83,17 +93,38 @@ impl WriteColumn {
             .cloned()
             .unwrap_or(ColumnData::Bytes(Vec::new()));
         WriteColumn {
-            name: name.into(),
-            unit: None,
             data: tag,
             repeat: 0,
             vla: Some(rows),
+            ..WriteColumn::fixed(name, ColumnData::Bytes(Vec::new()), 0)
+        }
+    }
+
+    /// An `X` (bit-array) column of `nbits` bits per row, `data` the packed bytes
+    /// (`ceil(nbits/8)` per row). `repeat` is the byte width so the bytes pack
+    /// directly; `TFORMn` is rendered as `<nbits>X`.
+    pub fn bits(name: impl Into<String>, data: ColumnData, nbits: usize) -> WriteColumn {
+        WriteColumn {
+            bits: Some(nbits),
+            ..WriteColumn::fixed(name, data, nbits.div_ceil(8))
         }
     }
 
     /// Attach a unit (`TUNITn`).
     pub fn with_unit(mut self, unit: impl Into<String>) -> WriteColumn {
         self.unit = Some(unit.into());
+        self
+    }
+
+    /// Attach a `TDIMn` array shape (fastest axis first).
+    pub fn with_tdim(mut self, shape: Vec<usize>) -> WriteColumn {
+        self.tdim = Some(shape);
+        self
+    }
+
+    /// Use 64-bit `Q` descriptors for this VLA column.
+    pub fn wide(mut self) -> WriteColumn {
+        self.wide = true;
         self
     }
 }
@@ -208,8 +239,13 @@ impl<W: Write> FitsWriter<W> {
                 if col.vla.is_some() {
                     let (n, o) = descs[ci][cursor[ci]];
                     cursor[ci] += 1;
-                    data.extend_from_slice(&(n as i32).to_be_bytes());
-                    data.extend_from_slice(&(o as i32).to_be_bytes());
+                    if col.wide {
+                        data.extend_from_slice(&(n as i64).to_be_bytes());
+                        data.extend_from_slice(&(o as i64).to_be_bytes());
+                    } else {
+                        data.extend_from_slice(&(n as i32).to_be_bytes());
+                        data.extend_from_slice(&(o as i32).to_be_bytes());
+                    }
                 } else {
                     pack_cell(&mut data, col, r);
                 }
@@ -425,6 +461,10 @@ fn bintable_header(
         if let Some(unit) = &col.unit {
             header.set(&format!("TUNIT{n}"), unit.as_str());
         }
+        if let Some(shape) = &col.tdim {
+            let dims: Vec<String> = shape.iter().map(|d| d.to_string()).collect();
+            header.set(&format!("TDIM{n}"), format!("({})", dims.join(",")));
+        }
     }
     header
 }
@@ -447,11 +487,15 @@ fn column_code(data: &ColumnData) -> (char, usize) {
 
 fn tform_of(col: &WriteColumn) -> String {
     let (code, _) = column_code(&col.data);
+    if let Some(nbits) = col.bits {
+        return format!("{nbits}X");
+    }
     match &col.vla {
-        // `1P<code>(maxnelem)` — the max array length sizes the heap descriptor.
+        // `1P<code>(maxnelem)`, or `1Q…` for 64-bit descriptors.
         Some(rows) => {
             let max = rows.iter().map(count_of).max().unwrap_or(0);
-            format!("1P{code}({max})")
+            let p = if col.wide { 'Q' } else { 'P' };
+            format!("1{p}{code}({max})")
         }
         None => format!("{}{}", col.repeat, code),
     }
@@ -467,7 +511,8 @@ fn check_column(col: &WriteColumn, nrows: usize) -> Result<usize> {
                 declared: nrows,
             });
         }
-        return Ok(8); // a `P` descriptor is two 32-bit integers
+        // `P` descriptor = two 32-bit ints; `Q` = two 64-bit.
+        return Ok(if col.wide { 16 } else { 8 });
     }
     let mismatch = || FitsError::RowWidthMismatch {
         computed: count_of(&col.data),
