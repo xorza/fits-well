@@ -110,21 +110,21 @@ These are functional codecs (decode/encode), not the deferred speed work.
 - **Remaining (minor):** HCOMPRESS lossy *write* (`SMOOTH`/`SCALE>0` encode) and
   VLA columns inside compressed tables.
 
-## Phase 6 — Typed World Coordinate System  🟢 v1 done  *(size: L)*
-Keywords already round-trip as header cards; this adds the typed transform layer
-behind the `wcs` feature (`Wcs::from_header` + `pixel_to_world`/`world_to_pixel`).
+## Phase 6 — Typed World Coordinate System  🟢 v2 done  *(size: L)*
+Behind the `wcs` feature: `Wcs::from_header` + `pixel_to_world`/`world_to_pixel`,
+plus reference frames in `wcs::frame::Frame`.
 
-- ✅ Parse `WCSAXES`/`CTYPEi`/`CRPIXi`/`CRVALi`/`CDELTi`/`PCi_j`|`CDi_j`,
-  alternate axes (`…a`), `LONPOLE`. Build the linear transform `A` (PC×CDELT or
-  CD) with general matrix inversion for the reverse direction.
-- ✅ Pixel↔world pipeline: offset → linear → deproject → spherical rotation.
-  Zenithal celestial projections `TAN`/`SIN`/`ARC` + the native↔celestial rotation
-  (CG 2002 eqs. 2/5); non-celestial axes pass through linearly.
-- ✅ **Deliverable met:** `TAN` and `SIN` pixel→world validated pixel-exact against
-  `astropy.wcs` (wcslib) to 1e-9°; full pixel↔world round-trip.
-- **Remaining (v2):** more projections (`STG`/`ZEA`/`CAR`/`SFL`/cylindrical/conic),
-  `CROTAi` legacy rotation, `PVi_m` projection parameters (e.g. `SIN` slant),
-  spectral (`FREQ`/`WAVE`) and `RADESYS`/`EQUINOX` frame conversion.
+- ✅ Linear layer: `PC`+`CDELT`, `CD`, or legacy `CDELT`+`CROTA`, alternate axes
+  (`…a`), `LONPOLE`/`LATPOLE`; general matrix inversion for the reverse direction.
+- ✅ Projections: zenithal `TAN`/`SIN`/`ARC`/`STG`/`ZEA` and cylindrical
+  `CAR`/`CEA`/`MER`/`SFL`, via the general fiducial-point pole computation (CG 2002
+  §2.4); non-celestial axes pass through linearly.
+- ✅ Reference frames (`RADESYS`/`EQUINOX`): ICRS, FK5 at any equinox (IAU-1976
+  precession), Galactic.
+- ✅ **Validated** pixel-exact against `astropy.wcs` (every projection + CROTA to
+  1e-8°) and frames against `astropy` `SkyCoord`.
+- **Remaining (v2+):** `PVi_m` projection parameters (`SIN` slant, `CEA` λ), all-sky
+  `AIT`/`MOL`, the ~25 mas ICRS↔FK5 frame bias, FK4 (B1950) E-terms, spectral axes.
 
 ## Phase 7 — Typed time coordinates  🟢 done  *(size: M)*
 Behind the `time` feature: `Datetime`, `Epoch`, `TimeScale`, `FitsTime`.
@@ -137,10 +137,11 @@ Behind the `time` feature: `Datetime`, `Epoch`, `TimeScale`, `FitsTime`.
 - ✅ `FitsTime::from_header`: `TIMESYS`, `MJDREF`/`MJDREFI`+`MJDREFF`/`JDREF*`/
   `DATEREF`, `TIMEUNIT`, `TREFPOS`; resolves `DATE-OBS`/`MJD-OBS` and relative
   (`TSTART`/`TSTOP`) times to absolute MJD.
-- ✅ **Deliverable met:** ISO/JD, epochs, and all six scale conversions validated
-  against `astropy.time` (ERFA) to 1e-9 day; leap seconds vs the IERS table.
-- **Remaining (v2):** `ΔUT1` for true UT1, time as a WCS axis / table column,
-  `TREFDIR`/topocentric light-travel corrections.
+- ✅ **Validated** against `astropy.time` (ERFA) to 1e-9 day: ISO/JD, epochs, all
+  six scale conversions, UT1 via explicit `ΔUT1`; leap seconds vs the IERS table.
+- ✅ Time as a WCS axis (`CTYPEi = 'TIME'`) → absolute MJD (`FitsTime::time_axis_mjd`).
+- **Remaining (v2+):** `TREFDIR`/topocentric light-travel corrections, bundled
+  `ΔUT1` table (currently caller-supplied).
 
 ---
 

@@ -9,10 +9,15 @@
 //!        ─► rotate (CRVAL, LONPOLE) ─► celestial (α, δ)
 //! ```
 //!
-//! v1 covers the linear layer (`PC`+`CDELT` or `CD`, with general matrix
-//! inversion for the reverse direction) and the zenithal celestial projections
-//! `TAN`/`SIN`/`ARC`; non-celestial axes pass through linearly. Validated against
-//! `astropy.wcs` (wcslib).
+//! The linear layer is `PC`+`CDELT`, `CD`, or legacy `CDELT`+`CROTA`, with general
+//! matrix inversion for the reverse direction. Projections: zenithal
+//! `TAN`/`SIN`/`ARC`/`STG`/`ZEA` and cylindrical `CAR`/`CEA`/`MER`/`SFL`, via the
+//! general fiducial-point pole computation (so non-zenithal projections work);
+//! non-celestial axes pass through linearly. Reference-frame transforms live in
+//! [`frame`]. All validated against `astropy.wcs` (wcslib). Not yet: `PVi_m`
+//! projection parameters (SIN slant, CEA λ) and the all-sky `AIT`/`MOL`.
+
+pub mod frame;
 
 use crate::error::FitsError;
 use crate::error::Result;
@@ -71,7 +76,11 @@ impl Projection {
 
     /// The fiducial point `(φ₀, θ₀)` in degrees — `(0, 90)` zenithal, `(0, 0)` else.
     fn reference_point(self) -> (f64, f64) {
-        if self.is_zenithal() { (0.0, 90.0) } else { (0.0, 0.0) }
+        if self.is_zenithal() {
+            (0.0, 90.0)
+        } else {
+            (0.0, 0.0)
+        }
     }
 
     /// Deproject intermediate world `(x, y)` (deg) to native `(φ, θ)` (deg).
@@ -213,9 +222,7 @@ impl Wcs {
             }
             // Legacy CROTA: rotate the celestial 2-axis sub-block (only when no PC
             // was given, per the convention that CROTA and PC are exclusive).
-            if !has_pc
-                && let Some((lng, lat, _)) = find_celestial(&ctype)
-            {
+            if !has_pc && let Some((lng, lat, _)) = find_celestial(&ctype) {
                 let rho = header
                     .get_real(&format!("CROTA{}{a}", lat + 1))
                     .or_else(|| header.get_real(&format!("CROTA{}{a}", lng + 1)))
@@ -356,7 +363,14 @@ fn celestial_to_native(pole: (f64, f64, f64), ra: f64, dec: f64) -> (f64, f64) {
 /// Compute the celestial pole `(α_p, δ_p, φ_p)` from the fiducial point
 /// `(φ₀, θ₀) → (α₀, δ₀)`, `φ_p` (LONPOLE), and `θ_p` (LATPOLE) (CG 2002 §2.4).
 /// Zenithal (`θ₀ = 90°`) reduces to `(α₀, δ₀, φ_p)`.
-fn compute_pole(phi0: f64, theta0: f64, a0: f64, d0: f64, phip: f64, thetap: f64) -> (f64, f64, f64) {
+fn compute_pole(
+    phi0: f64,
+    theta0: f64,
+    a0: f64,
+    d0: f64,
+    phip: f64,
+    thetap: f64,
+) -> (f64, f64, f64) {
     if (theta0 - 90.0).abs() < 1e-12 {
         return (a0, d0, phip);
     }
@@ -371,7 +385,8 @@ fn compute_pole(phi0: f64, theta0: f64, a0: f64, d0: f64, phip: f64, thetap: f64
     // Two δ_p solutions; pick the one in range nearest LATPOLE.
     let c1 = beta + ac;
     let c2 = beta - ac;
-    let in_range = |x: f64| (-std::f64::consts::FRAC_PI_2..=std::f64::consts::FRAC_PI_2).contains(&x);
+    let in_range =
+        |x: f64| (-std::f64::consts::FRAC_PI_2..=std::f64::consts::FRAC_PI_2).contains(&x);
     let dpr = match (in_range(c1), in_range(c2)) {
         (true, true) => {
             if (c1 - thetap * D2R).abs() <= (c2 - thetap * D2R).abs() {

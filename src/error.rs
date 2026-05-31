@@ -53,6 +53,8 @@ pub enum FitsError {
     /// `read_compressed_table` was called on an HDU that is not a tiled-compressed
     /// table (no `ZTABLE = T`).
     NotCompressedTable,
+    /// A celestial reference-frame transform is not yet supported (e.g. FK4).
+    UnsupportedFrame,
     /// A tiled-image compression algorithm or variant is not yet supported.
     UnsupportedCompression {
         name: String,
@@ -114,6 +116,7 @@ impl fmt::Display for FitsError {
             FitsError::NotAnAsciiTable => write!(f, "HDU is not an ASCII table"),
             FitsError::NotCompressedImage => write!(f, "HDU is not a tiled-compressed image"),
             FitsError::NotCompressedTable => write!(f, "HDU is not a tiled-compressed table"),
+            FitsError::UnsupportedFrame => write!(f, "unsupported reference-frame transform"),
             FitsError::UnsupportedCompression { name } => {
                 write!(f, "unsupported tiled compression: {name}")
             }

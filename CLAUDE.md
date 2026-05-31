@@ -23,10 +23,12 @@ core crate is dependency-free by default (the `compression` feature pulls in
 (primary + `IMAGE`/`TABLE`/`BINTABLE` extensions) write; binary-table `P`/`Q` heap
 arrays and per-column `TSCAL`/`TZERO` decode; random groups read; `CONTINUE`,
 `HIERARCH`, and `CHECKSUM`/`DATASUM` (verify + write) are supported. A typed
-**WCS** layer (`wcs` feature) does pixel↔world for the `TAN`/`SIN`/`ARC`
-projections, and a typed **time** layer (`time` feature) handles ISO-8601/JD/MJD,
-epochs, and `UTC`/`TAI`/`TT`/`TCG`/`TDB`/`TCB`/`GPS` scale conversions — both
-validated against astropy. Tiled **image and table** compression work behind
+**WCS** layer (`wcs` feature) does pixel↔world for nine projections
+(`TAN`/`SIN`/`ARC`/`STG`/`ZEA`/`CAR`/`CEA`/`MER`/`SFL`, with `PC`/`CD`/`CROTA`) plus
+ICRS/FK5/Galactic frame transforms, and a typed **time** layer (`time` feature)
+handles ISO-8601/JD/MJD, epochs, `UTC`…`TCB`/`GPS`/UT1 scale conversions, and time
+WCS axes — both validated against astropy. Tiled **image and table** compression
+work behind
 the `compression` feature: all five image codecs (`GZIP_1`, `GZIP_2`, `RICE_1`,
 `PLIO_1`, `HCOMPRESS_1` with `SMOOTH=1` decode), quantized-float read+write
 (`NO_DITHER`/`SUBTRACTIVE_DITHER_1`/`SUBTRACTIVE_DITHER_2`, `ZBLANK`/NaN), and §10.3
@@ -120,8 +122,8 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `groups/` | random-groups (§6) read: params + arrays, `PSCALn`/`PZEROn` physical | read done (no write — deprecated) |
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
 | `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3), reassembly + encode | all 5 image codecs read+write; float quant all 3 dither methods + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode; fixed-width table compression read+write |
-| `wcs/` (feature `wcs`) | typed World Coordinate System: keyword parse, linear transform (PC/CD + inverse), `TAN`/`SIN`/`ARC` projections + spherical rotation, `pixel_to_world`/`world_to_pixel` | v1 done (more projections, frames TODO) |
-| `time/` (feature `time`) | typed time (§9): `Datetime` (ISO-8601↔JD/MJD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS), `FitsTime` header view | v1 done (UT1/WCS-time-axis TODO) |
+| `wcs/` (feature `wcs`) | typed WCS: keyword parse, linear transform (PC/CD/CROTA + inverse), 9 projections (zenithal + cylindrical) via general pole computation, `pixel_to_world`/`world_to_pixel`; `frame.rs` ICRS/FK5/Galactic transforms | v2 done (PVi_m, AIT/MOL, FK4 E-terms TODO) |
+| `time/` (feature `time`) | typed time (§9): `Datetime` (ISO-8601↔JD/MJD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), `FitsTime` header view + time WCS axis | v2 done |
 | `error.rs` | `FitsError` + `Result` | done |
 
 `lib.rs` is the only place that defines the public surface (`pub use`). Card

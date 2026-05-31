@@ -75,6 +75,72 @@ fn reference_pixel_maps_to_crval() {
     assert!((out[1] - 2.5).abs() < 1e-12);
 }
 
+#[test]
+fn frame_transforms_match_astropy() {
+    use super::frame::Frame;
+    // Crab nebula in ICRS.
+    let (ra, dec) = (83.633212, 22.014460);
+
+    // ICRS → FK5(J2000): essentially identity (the ~25 mas frame bias is omitted),
+    // so it must agree with astropy to better than that bias.
+    let (r, d) = Frame::Icrs
+        .transform(ra, dec, Frame::Fk5 { equinox: 2000.0 })
+        .unwrap();
+    assert!((r - 83.6332196247).abs() < 1e-4 && (d - 22.0144547866).abs() < 1e-4);
+
+    // ICRS → FK5(J1975): IAU-1976 precession (~0.4°). astropy golden.
+    let (r, d) = Frame::Icrs
+        .transform(ra, dec, Frame::Fk5 { equinox: 1975.0 })
+        .unwrap();
+    assert!(
+        (r - 83.2570686203).abs() < 1e-4 && (d - 21.9985676945).abs() < 1e-4,
+        "FK5(J1975): got ({r},{d})"
+    );
+
+    // ICRS → Galactic: the classic Hipparcos matrix differs from astropy's
+    // ICRS-native matrix by the same ~25 mas frame-bias level.
+    let (l, b) = Frame::Icrs.transform(ra, dec, Frame::Galactic).unwrap();
+    assert!(
+        (l - 184.5575560202).abs() < 1e-4 && (b - (-5.7842773615)).abs() < 1e-4,
+        "Galactic: got ({l},{b})"
+    );
+
+    // FK4 transforms are not yet implemented.
+    assert!(matches!(
+        Frame::Icrs.transform(ra, dec, Frame::Fk4 { equinox: 1950.0 }),
+        Err(crate::error::FitsError::UnsupportedFrame)
+    ));
+}
+
+#[test]
+fn frame_round_trips() {
+    use super::frame::Frame;
+    let (ra, dec) = (200.0, -45.0);
+    for to in [Frame::Fk5 { equinox: 1975.0 }, Frame::Galactic] {
+        let (x, y) = Frame::Icrs.transform(ra, dec, to).unwrap();
+        let (r, d) = to.transform(x, y, Frame::Icrs).unwrap();
+        assert!((r - ra).abs() < 1e-9 && (d - dec).abs() < 1e-9, "{to:?}");
+    }
+}
+
+#[test]
+fn frame_parses_from_header() {
+    use super::frame::Frame;
+    use crate::header::Header;
+    let mut h = Header::new();
+    h.set("RADESYS", "FK5").set("EQUINOX", 2000.0);
+    assert_eq!(Frame::from_header(&h, None), Frame::Fk5 { equinox: 2000.0 });
+    // Legacy: EQUINOX < 1984 with no RADESYS ⇒ FK4.
+    let mut h2 = Header::new();
+    h2.set("EQUINOX", 1950.0);
+    assert_eq!(
+        Frame::from_header(&h2, None),
+        Frame::Fk4 { equinox: 1950.0 }
+    );
+    // Nothing ⇒ ICRS.
+    assert_eq!(Frame::from_header(&Header::new(), None), Frame::Icrs);
+}
+
 /// A matrix inversion sanity check independent of any fixture.
 #[test]
 fn matrix_inverse_is_correct() {
