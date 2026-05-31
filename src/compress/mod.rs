@@ -6,12 +6,13 @@
 //! This module orchestrates tile reassembly and dequantization; the per-codec
 //! decoders live in [`gzip`], [`rice`], and [`plio`].
 //!
-//! Supported: `GZIP_1`, `GZIP_2`, `RICE_1`, `PLIO_1`; float images via per-tile
-//! `ZSCALE`/`ZZERO` linear dequantization (`NO_DITHER`) or the raw-float gzip
-//! fallback. Not yet: `HCOMPRESS_1`, subtractive dithering, `ZBLANK`, and all
-//! compression *writing*.
+//! Supported: `GZIP_1`, `GZIP_2`, `RICE_1`, `PLIO_1`, `HCOMPRESS_1` (SMOOTH=0);
+//! float images via per-tile `ZSCALE`/`ZZERO` linear dequantization (`NO_DITHER`)
+//! or the raw-float gzip fallback. Not yet: HCOMPRESS smoothing, subtractive
+//! dithering, `ZBLANK`, and all compression *writing*.
 
 mod gzip;
+mod hcompress;
 mod plio;
 mod rice;
 
@@ -259,6 +260,7 @@ fn decode_tile_cell(
             blocksize,
         )),
         "PLIO_1" => Ok(plio::plio_decode(as_i16(cell)?, tile_elems)),
+        "HCOMPRESS_1" => hcompress::hcompress_tile(as_bytes(cell)?),
         other => Err(FitsError::UnsupportedCompression {
             name: other.to_string(),
         }),

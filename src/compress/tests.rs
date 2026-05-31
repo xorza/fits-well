@@ -38,6 +38,12 @@ fn decompresses_rice_1_tiled_image() {
 }
 
 #[test]
+fn decompresses_hcompress_1_tiled_image() {
+    // Lossless HCOMPRESS (SCALE=0), single 24×16 tile.
+    check_decoded("comp_hcomp_i16.fits");
+}
+
+#[test]
 fn decompresses_gzip_2_tiled_image() {
     check_decoded("comp_gzip2_i16.fits");
 }
