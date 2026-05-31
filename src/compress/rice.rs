@@ -71,6 +71,165 @@ fn sign_extend(v: u64, nbits: u32) -> i64 {
     ((v << shift) as i64) >> shift
 }
 
+/// Encode `values` as a `RICE_1` tile (a port of cfitsio's `fits_rcomp`),
+/// parameterized by `bytepix` (1/2/4). Differences are taken modulo the pixel
+/// width so the stream round-trips through [`rice_decode`].
+pub(super) fn rice_encode(values: &[i64], bytepix: usize, blocksize: usize) -> Vec<u8> {
+    let nbits = (8 * bytepix) as u32;
+    let (fsbits, fsmax) = match bytepix {
+        1 => (3i32, 6i32),
+        2 => (4, 14),
+        _ => (5, 25),
+    };
+    let mask: u64 = if nbits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << nbits) - 1
+    };
+    let half: u64 = 1u64 << (nbits - 1);
+
+    let mut bo = BitOutput::new();
+    let first = (*values.first().unwrap_or(&0) as u64) & mask;
+    bo.output_nbits(first as i64, nbits as i32);
+    let mut lastpix = first;
+
+    let mut i = 0;
+    while i < values.len() {
+        let thisblock = blocksize.min(values.len() - i);
+        let mut diffs = Vec::with_capacity(thisblock);
+        let mut pixelsum = 0.0f64;
+        for j in 0..thisblock {
+            let next = (values[i + j] as u64) & mask;
+            // signed difference reduced to the pixel width, then zigzag-mapped
+            let raw = next.wrapping_sub(lastpix) & mask;
+            let s = if raw >= half {
+                raw as i64 - (mask as i64) - 1
+            } else {
+                raw as i64
+            };
+            let d = if s >= 0 {
+                (s as u64) << 1
+            } else {
+                (((-s) as u64) << 1) - 1
+            };
+            diffs.push(d);
+            pixelsum += d as f64;
+            lastpix = next;
+        }
+
+        let dpsum = ((pixelsum - thisblock as f64 / 2.0 - 1.0) / thisblock as f64).max(0.0);
+        let mut psum = (dpsum as u64) >> 1;
+        let mut fs = 0i32;
+        while psum > 0 {
+            fs += 1;
+            psum >>= 1;
+        }
+
+        if fs >= fsmax {
+            bo.output_nbits((fsmax + 1) as i64, fsbits);
+            for &d in &diffs {
+                bo.output_nbits(d as i64, nbits as i32);
+            }
+        } else if fs == 0 && pixelsum == 0.0 {
+            bo.output_nbits(0, fsbits);
+        } else {
+            bo.output_nbits((fs + 1) as i64, fsbits);
+            let fsmask = (1i64 << fs) - 1;
+            for &d in &diffs {
+                bo.output_rice_value(d as i64, fs, fsmask);
+            }
+        }
+        i += thisblock;
+    }
+    bo.done();
+    bo.out
+}
+
+/// MSB-first bit output, mirroring cfitsio's `Buffer`/`output_nbits`.
+struct BitOutput {
+    out: Vec<u8>,
+    bitbuffer: i64,
+    bits_to_go: i32,
+}
+
+impl BitOutput {
+    fn new() -> Self {
+        BitOutput {
+            out: Vec::new(),
+            bitbuffer: 0,
+            bits_to_go: 8,
+        }
+    }
+
+    fn putc(out: &mut Vec<u8>, c: i64) {
+        out.push((c & 0xff) as u8);
+    }
+
+    fn output_nbits(&mut self, bits: i64, mut n: i32) {
+        let mask = |k: i32| {
+            if k >= 32 {
+                0xFFFF_FFFFi64
+            } else {
+                (1i64 << k) - 1
+            }
+        };
+        let mut lb = self.bitbuffer;
+        let mut ltg = self.bits_to_go;
+        if ltg + n > 32 {
+            lb <<= ltg;
+            lb |= (bits >> (n - ltg)) & mask(ltg);
+            Self::putc(&mut self.out, lb & 0xff);
+            n -= ltg;
+            ltg = 8;
+        }
+        lb <<= n;
+        lb |= bits & mask(n);
+        ltg -= n;
+        while ltg <= 0 {
+            Self::putc(&mut self.out, (lb >> (-ltg)) & 0xff);
+            ltg += 8;
+        }
+        self.bitbuffer = lb;
+        self.bits_to_go = ltg;
+    }
+
+    /// Output one Rice-coded value: `top = v >> fs` zero bits, a 1, then the low
+    /// `fs` bits of `v`.
+    fn output_rice_value(&mut self, v: i64, fs: i32, fsmask: i64) {
+        let top = v >> fs;
+        if (self.bits_to_go as i64) > top {
+            self.bitbuffer <<= top + 1;
+            self.bitbuffer |= 1;
+            self.bits_to_go -= (top + 1) as i32;
+        } else {
+            self.bitbuffer <<= self.bits_to_go;
+            Self::putc(&mut self.out, self.bitbuffer & 0xff);
+            let mut t = top - self.bits_to_go as i64;
+            while t >= 8 {
+                Self::putc(&mut self.out, 0);
+                t -= 8;
+            }
+            self.bitbuffer = 1;
+            self.bits_to_go = 7 - t as i32;
+        }
+        if fs > 0 {
+            self.bitbuffer <<= fs;
+            self.bitbuffer |= v & fsmask;
+            self.bits_to_go -= fs;
+            while self.bits_to_go <= 0 {
+                Self::putc(&mut self.out, (self.bitbuffer >> (-self.bits_to_go)) & 0xff);
+                self.bits_to_go += 8;
+            }
+        }
+    }
+
+    fn done(&mut self) {
+        if self.bits_to_go < 8 {
+            Self::putc(&mut self.out, self.bitbuffer << self.bits_to_go);
+        }
+    }
+}
+
 /// A MSB-first bit reader over a compressed byte stream.
 pub(super) struct BitReader<'a> {
     bytes: &'a [u8],

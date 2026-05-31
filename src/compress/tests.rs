@@ -43,6 +43,65 @@ fn decompresses_hcompress_1_tiled_image() {
     check_decoded("comp_hcomp_i16.fits");
 }
 
+/// Emit compressed files written by this crate for external (astropy) validation.
+/// Run with `cargo test --features compression -- --ignored emit_`.
+#[test]
+#[ignore]
+fn emit_compressed_files_for_astropy() {
+    use crate::data::{Image, ImageData, Scaling};
+    use crate::writer::FitsWriter;
+    use std::fs::File;
+
+    let samples: Vec<i16> = (0..24 * 16)
+        .map(|i| (i % 24) as i16 * 7 - (i / 24) as i16 * 5)
+        .collect();
+    let image = Image {
+        shape: vec![24, 16],
+        samples: ImageData::I16(samples),
+        scaling: Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    };
+    for cmptype in ["GZIP_1", "GZIP_2", "RICE_1"] {
+        let f = File::create(format!(".tmp/wr_{}.fits", cmptype.to_lowercase())).unwrap();
+        let mut w = FitsWriter::new(f);
+        w.write_compressed_image(&image, cmptype, &[]).unwrap();
+    }
+}
+
+#[test]
+fn compression_write_round_trips_through_decode() {
+    use crate::data::{Image, ImageData, Scaling};
+    use crate::writer::FitsWriter;
+    use std::io::Cursor;
+
+    let samples: Vec<i16> = (0..24 * 16)
+        .map(|i| (i % 24) as i16 * 7 - (i / 24) as i16 * 5)
+        .collect();
+    let image = Image {
+        shape: vec![24, 16],
+        samples: ImageData::I16(samples.clone()),
+        scaling: Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    };
+    for cmptype in ["GZIP_1", "GZIP_2", "RICE_1"] {
+        let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+        w.write_compressed_image(&image, cmptype, &[]).unwrap(); // default row tiling
+        let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+        let back = r.read_compressed_image(1).unwrap();
+        assert_eq!(back.shape, vec![24, 16], "{cmptype}");
+        match back.samples {
+            ImageData::I16(v) => assert_eq!(v, samples, "{cmptype} round-trip"),
+            other => panic!("{cmptype}: expected I16, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn decompresses_gzip_2_tiled_image() {
     check_decoded("comp_gzip2_i16.fits");

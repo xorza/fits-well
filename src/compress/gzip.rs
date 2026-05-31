@@ -1,11 +1,34 @@
 //! `GZIP_1` and `GZIP_2` tile codecs (via `flate2`).
 
 use std::io::Read;
+use std::io::Write;
 
 use crate::bitpix::Bitpix;
 use crate::error::Result;
 
 use super::be_to_i64;
+
+/// Gzip a raw big-endian byte buffer (the `GZIP_1` tile encoder).
+pub(super) fn gzip_encode(raw: &[u8]) -> Vec<u8> {
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(raw).expect("gzip into a Vec cannot fail");
+    enc.finish().expect("gzip finish into a Vec cannot fail")
+}
+
+/// `GZIP_2` encoder: shuffle `raw` into significance byte-planes, then gzip.
+pub(super) fn gzip2_encode(raw: &[u8], width: usize) -> Vec<u8> {
+    if width <= 1 {
+        return gzip_encode(raw);
+    }
+    let n = raw.len() / width;
+    let mut shuffled = vec![0u8; raw.len()];
+    for p in 0..width {
+        for i in 0..n {
+            shuffled[p * n + i] = raw[i * width + p];
+        }
+    }
+    gzip_encode(&shuffled)
+}
 
 /// Inflate a gzip stream to its raw bytes.
 pub(super) fn gunzip(bytes: &[u8]) -> Result<Vec<u8>> {
