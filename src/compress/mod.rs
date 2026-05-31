@@ -193,6 +193,7 @@ pub(crate) fn encode_image(
     image: &Image,
     cmptype: &str,
     tile_shape: &[usize],
+    scale: i32,
 ) -> Result<(Header, Vec<u8>)> {
     let bitpix = image.samples.bitpix();
     if bitpix.is_float() {
@@ -240,7 +241,9 @@ pub(crate) fn encode_image(
             "GZIP_2" => TileCell::Bytes(gzip::gzip2_encode(&i64_to_be(&vals, bitpix), bytepix)),
             "RICE_1" => TileCell::Bytes(rice::rice_encode(&vals, bytepix, 32)),
             "PLIO_1" => TileCell::I16(plio::plio_encode(&vals, vals.len())),
-            "HCOMPRESS_1" => TileCell::Bytes(hcompress::hcompress_tile_encode(&vals, &tdims, 0)?),
+            "HCOMPRESS_1" => {
+                TileCell::Bytes(hcompress::hcompress_tile_encode(&vals, &tdims, scale)?)
+            }
             other => {
                 return Err(FitsError::UnsupportedCompression {
                     name: format!("{other} (write)"),
@@ -287,7 +290,7 @@ pub(crate) fn encode_image(
             h.set("ZNAME2", "BYTEPIX").set("ZVAL2", bytepix as i64);
         }
         "HCOMPRESS_1" => {
-            h.set("ZNAME1", "SCALE").set("ZVAL1", 0);
+            h.set("ZNAME1", "SCALE").set("ZVAL1", scale as i64);
             h.set("ZNAME2", "SMOOTH").set("ZVAL2", 0);
         }
         _ => {}

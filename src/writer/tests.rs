@@ -52,26 +52,48 @@ fn writes_a_multi_hdu_image_file() {
 }
 
 #[test]
+fn writes_and_reads_back_variable_length_arrays() {
+    // A fixed column plus a `P` VLA column with rows of differing length.
+    let vla_rows = vec![
+        ColumnData::I32(vec![10, 20]),
+        ColumnData::I32(vec![]), // empty cell
+        ColumnData::I32(vec![1, 2, 3, 4, 5]),
+    ];
+    let columns = vec![
+        WriteColumn::fixed("ID", ColumnData::I32(vec![1, 2, 3]), 1),
+        WriteColumn::vla("DATA", vla_rows.clone()),
+    ];
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_table(3, &columns).unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let table = r.read_table(1).unwrap();
+    // TFORM2 should be a P descriptor sized to the longest row (5).
+    assert_eq!(table.columns[1].tform.kind.code(), 'P');
+    let got = table.read_vla_column(1).unwrap();
+    assert_eq!(got.len(), 3);
+    for (g, want) in got.iter().zip(&vla_rows) {
+        match (g, want) {
+            (ColumnData::I32(a), ColumnData::I32(b)) => assert_eq!(a, b),
+            _ => panic!("expected I32 VLA cell, got {g:?}"),
+        }
+    }
+}
+
+#[test]
 fn writes_and_reads_back_a_binary_table() {
     let columns = vec![
-        WriteColumn {
-            name: "NOSTA".into(),
-            unit: None,
-            data: ColumnData::I32(vec![1, 2, 3]),
-            repeat: 1,
-        },
-        WriteColumn {
-            name: "XYZ".into(),
-            unit: Some("m".into()),
-            data: ColumnData::F32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
-            repeat: 3, // 3 floats per row
-        },
-        WriteColumn {
-            name: "NAME".into(),
-            unit: None,
-            data: ColumnData::Text(vec!["AB".into(), "CDE".into(), "F".into()]),
-            repeat: 3, // 3-char field
-        },
+        WriteColumn::fixed("NOSTA", ColumnData::I32(vec![1, 2, 3]), 1),
+        WriteColumn::fixed(
+            "XYZ",
+            ColumnData::F32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
+            3, // 3 floats per row
+        )
+        .with_unit("m"),
+        WriteColumn::fixed(
+            "NAME",
+            ColumnData::Text(vec!["AB".into(), "CDE".into(), "F".into()]),
+            3, // 3-char field
+        ),
     ];
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     w.write_table(3, &columns).unwrap();

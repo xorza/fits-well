@@ -346,6 +346,43 @@ fn dither2_quantize_round_trips() {
 }
 
 #[test]
+fn hcompress_lossy_write_round_trips_within_scale() {
+    use crate::data::{Image, ImageData, Scaling};
+    use crate::writer::FitsWriter;
+    use std::io::Cursor;
+
+    // A smooth-ish 32×32 i32 image; lossy HCOMPRESS with SCALE=4.
+    let samples: Vec<i32> = (0..32 * 32)
+        .map(|i| (100 + 5 * (i % 32) + 3 * (i / 32)) as i32)
+        .collect();
+    let image = Image {
+        shape: vec![32, 32],
+        samples: ImageData::I32(samples.clone()),
+        scaling: Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    };
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_compressed_image_lossy(&image, "HCOMPRESS_1", &[32, 32], 4)
+        .unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let back = match r.read_compressed_image(1).unwrap().samples {
+        ImageData::I32(v) => v,
+        other => panic!("expected I32, got {other:?}"),
+    };
+    // Lossy: each pixel within the quantization scale (±scale), and not identical.
+    let max_err = samples
+        .iter()
+        .zip(&back)
+        .map(|(a, b)| (a - b).abs())
+        .max()
+        .unwrap();
+    assert!(max_err <= 4, "HCOMPRESS lossy error {max_err} exceeds scale");
+}
+
+#[test]
 fn plio_write_round_trips_through_decode() {
     use crate::data::{Image, ImageData, Scaling};
     use crate::writer::FitsWriter;
@@ -431,12 +468,7 @@ fn check_table_roundtrip(algo: &str, rows_per_tile: usize) {
     use std::io::Cursor;
 
     let nrows = 10;
-    let col = |name: &str, data, repeat| WriteColumn {
-        name: name.to_string(),
-        unit: None,
-        data,
-        repeat,
-    };
+    let col = |name: &str, data, repeat| WriteColumn::fixed(name, data, repeat);
     let columns = vec![
         col(
             "SHORT",
@@ -558,6 +590,18 @@ fn decodes_a_cfitsio_compressed_table() {
         ColumnData::I32(v) => assert_eq!(v[3], 3 * 100_000 - 5),
         other => panic!("expected I32, got {other:?}"),
     }
+}
+
+#[test]
+fn compressed_table_with_vla_column_is_rejected_cleanly() {
+    // `comp_table_vla.fits` (from `fpack -tableonly` of a table with a `PJ` VLA
+    // column) — decoding VLA columns inside a compressed table is not yet
+    // implemented, so it must error rather than misread or panic.
+    let mut f = open("comp_table_vla.fits");
+    assert!(matches!(
+        f.read_compressed_table(1),
+        Err(FitsError::UnsupportedCompression { .. })
+    ));
 }
 
 #[test]

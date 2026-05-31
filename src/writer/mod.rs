@@ -50,12 +50,52 @@ pub(crate) fn pad_to_block(buf: &mut Vec<u8>, fill: u8) {
 /// One column to write into a binary table: its name, optional unit, data, and
 /// the number of elements per row (`repeat`). For [`ColumnData::Text`], `repeat`
 /// is the fixed character width of the field.
+///
+/// When `vla` is `Some`, the column is written as a variable-length (`P`) array:
+/// each entry is one row's array and `data`/`repeat` are ignored (the element
+/// type comes from the first row, or from `data` if there are no rows).
 #[derive(Debug, Clone)]
 pub struct WriteColumn {
     pub name: String,
     pub unit: Option<String>,
     pub data: ColumnData,
     pub repeat: usize,
+    pub vla: Option<Vec<ColumnData>>,
+}
+
+impl WriteColumn {
+    /// A fixed-width column of `repeat` elements per row.
+    pub fn fixed(name: impl Into<String>, data: ColumnData, repeat: usize) -> WriteColumn {
+        WriteColumn {
+            name: name.into(),
+            unit: None,
+            data,
+            repeat,
+            vla: None,
+        }
+    }
+
+    /// A variable-length (`P`) column: `rows[r]` is row `r`'s array.
+    pub fn vla(name: impl Into<String>, rows: Vec<ColumnData>) -> WriteColumn {
+        // The element type tag for `data` is the first row's kind, or empty bytes.
+        let tag = rows
+            .first()
+            .cloned()
+            .unwrap_or(ColumnData::Bytes(Vec::new()));
+        WriteColumn {
+            name: name.into(),
+            unit: None,
+            data: tag,
+            repeat: 0,
+            vla: Some(rows),
+        }
+    }
+
+    /// Attach a unit (`TUNITn`).
+    pub fn with_unit(mut self, unit: impl Into<String>) -> WriteColumn {
+        self.unit = Some(unit.into());
+        self
+    }
 }
 
 /// One column to write into an ASCII table: data (`Text`/`I64`/`F64` only), the
@@ -138,15 +178,46 @@ impl<W: Write> FitsWriter<W> {
 
     /// Write a binary table as a `BINTABLE` extension. A dataless primary HDU is
     /// written automatically first if nothing has been written yet (a table can
-    /// never be the primary HDU). Fixed-width columns only.
+    /// never be the primary HDU). Fixed-width and variable-length (`P`) columns
+    /// are both supported — VLA columns write a heap after the main table.
     pub fn write_table(&mut self, nrows: usize, columns: &[WriteColumn]) -> Result<()> {
         self.ensure_primary()?;
         let mut row_len = 0;
         for col in columns {
             row_len += check_column(col, nrows)?;
         }
-        let header = bintable_header(nrows, row_len, columns);
-        self.write_hdu(header, pack_rows(nrows, row_len, columns), ZERO_FILL)
+        // Build the heap (row-major) and per-VLA-column descriptors first, so the
+        // main table can carry the `P` (count, offset) pairs.
+        let mut heap: Vec<u8> = Vec::new();
+        let mut descs: Vec<Vec<(u32, u32)>> = vec![Vec::new(); columns.len()];
+        for r in 0..nrows {
+            for (ci, col) in columns.iter().enumerate() {
+                if let Some(rows) = &col.vla {
+                    let cell = &rows[r];
+                    descs[ci].push((count_of(cell) as u32, heap.len() as u32));
+                    append_be(&mut heap, cell);
+                }
+            }
+        }
+        // Main table: fixed cells inline, VLA columns as `P` descriptors (consumed
+        // per column in the same row order they were built).
+        let mut data = Vec::with_capacity(nrows * row_len + heap.len());
+        let mut cursor = vec![0usize; columns.len()];
+        for r in 0..nrows {
+            for (ci, col) in columns.iter().enumerate() {
+                if col.vla.is_some() {
+                    let (n, o) = descs[ci][cursor[ci]];
+                    cursor[ci] += 1;
+                    data.extend_from_slice(&(n as i32).to_be_bytes());
+                    data.extend_from_slice(&(o as i32).to_be_bytes());
+                } else {
+                    pack_cell(&mut data, col, r);
+                }
+            }
+        }
+        data.extend_from_slice(&heap);
+        let header = bintable_header(nrows, row_len, columns, heap.len());
+        self.write_hdu(header, data, ZERO_FILL)
     }
 
     /// Write an ASCII table as a `TABLE` extension (a dataless primary is written
@@ -189,8 +260,22 @@ impl<W: Write> FitsWriter<W> {
         cmptype: &str,
         tile_shape: &[usize],
     ) -> Result<()> {
+        self.write_compressed_image_lossy(image, cmptype, tile_shape, 0)
+    }
+
+    /// Like [`FitsWriter::write_compressed_image`] but with an `HCOMPRESS_1`
+    /// quantization `scale` (`0` = lossless; larger = more lossy compression). The
+    /// scale is ignored by the other codecs.
+    #[cfg(feature = "compression")]
+    pub fn write_compressed_image_lossy(
+        &mut self,
+        image: &Image,
+        cmptype: &str,
+        tile_shape: &[usize],
+        scale: i32,
+    ) -> Result<()> {
         self.ensure_primary()?;
-        let (header, data) = crate::compress::encode_image(image, cmptype, tile_shape)?;
+        let (header, data) = crate::compress::encode_image(image, cmptype, tile_shape, scale)?;
         self.write_hdu(header, data, ZERO_FILL)
     }
 
@@ -312,7 +397,12 @@ fn add_scaling(header: &mut Header, image: &Image) {
 }
 
 /// `BINTABLE` extension header (§7.3.1) for the given columns.
-fn bintable_header(nrows: usize, row_len: usize, columns: &[WriteColumn]) -> Header {
+fn bintable_header(
+    nrows: usize,
+    row_len: usize,
+    columns: &[WriteColumn],
+    heap_len: usize,
+) -> Header {
     let mut header = Header::new();
     header
         .set("XTENSION", "BINTABLE")
@@ -324,7 +414,7 @@ fn bintable_header(nrows: usize, row_len: usize, columns: &[WriteColumn]) -> Hea
     header
         .set("NAXIS2", nrows as i64)
         .comment("NAXIS2", "number of rows");
-    header.set("PCOUNT", 0).set("GCOUNT", 1);
+    header.set("PCOUNT", heap_len as i64).set("GCOUNT", 1);
     header
         .set("TFIELDS", columns.len() as i64)
         .comment("TFIELDS", "number of columns");
@@ -357,12 +447,28 @@ fn column_code(data: &ColumnData) -> (char, usize) {
 
 fn tform_of(col: &WriteColumn) -> String {
     let (code, _) = column_code(&col.data);
-    format!("{}{}", col.repeat, code)
+    match &col.vla {
+        // `1P<code>(maxnelem)` — the max array length sizes the heap descriptor.
+        Some(rows) => {
+            let max = rows.iter().map(count_of).max().unwrap_or(0);
+            format!("1P{code}({max})")
+        }
+        None => format!("{}{}", col.repeat, code),
+    }
 }
 
 /// Validate a column against `nrows` and return its per-row byte width.
 fn check_column(col: &WriteColumn, nrows: usize) -> Result<usize> {
     let (_, elem) = column_code(&col.data);
+    if let Some(rows) = &col.vla {
+        if rows.len() != nrows {
+            return Err(FitsError::RowWidthMismatch {
+                computed: rows.len(),
+                declared: nrows,
+            });
+        }
+        return Ok(8); // a `P` descriptor is two 32-bit integers
+    }
     let mismatch = || FitsError::RowWidthMismatch {
         computed: count_of(&col.data),
         declared: nrows * col.repeat,
@@ -402,15 +508,35 @@ fn count_of(data: &ColumnData) -> usize {
     }
 }
 
-/// Pack the table into `nrows × row_len` big-endian bytes, row-major.
-fn pack_rows(nrows: usize, row_len: usize, columns: &[WriteColumn]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(nrows * row_len);
-    for r in 0..nrows {
-        for col in columns {
-            pack_cell(&mut out, col, r);
+/// Append a whole column cell (a VLA row's array) to the heap, big-endian.
+fn append_be(out: &mut Vec<u8>, cell: &ColumnData) {
+    match cell {
+        ColumnData::Logical(v) => out.extend(v.iter().map(|&b| if b { b'T' } else { b'F' })),
+        ColumnData::Bytes(v) => out.extend_from_slice(v),
+        ColumnData::I16(v) => extend_be(out, v, i16::to_be_bytes),
+        ColumnData::I32(v) => extend_be(out, v, i32::to_be_bytes),
+        ColumnData::I64(v) => extend_be(out, v, i64::to_be_bytes),
+        ColumnData::F32(v) => extend_be(out, v, f32::to_be_bytes),
+        ColumnData::F64(v) => extend_be(out, v, f64::to_be_bytes),
+        ColumnData::ComplexF32(v) => {
+            for &(re, im) in v {
+                out.extend_from_slice(&re.to_be_bytes());
+                out.extend_from_slice(&im.to_be_bytes());
+            }
+        }
+        ColumnData::ComplexF64(v) => {
+            for &(re, im) in v {
+                out.extend_from_slice(&re.to_be_bytes());
+                out.extend_from_slice(&im.to_be_bytes());
+            }
+        }
+        // Character VLAs (`PA`) concatenate the strings' bytes.
+        ColumnData::Text(v) => {
+            for s in v {
+                out.extend_from_slice(s.as_bytes());
+            }
         }
     }
-    out
 }
 
 fn pack_cell(out: &mut Vec<u8>, col: &WriteColumn, r: usize) {
