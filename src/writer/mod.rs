@@ -194,6 +194,23 @@ impl<W: Write> FitsWriter<W> {
         self.write_hdu(header, data, ZERO_FILL)
     }
 
+    /// Write a fixed-width `BINTABLE` as a tiled-compressed table (§10.3). `header`
+    /// is the original table's header (column metadata is copied from it), `table`
+    /// its parsed data, `rows_per_tile` the tile height, and `algo` the per-column
+    /// codec (`GZIP_1`/`GZIP_2`/`RICE_1`). Requires the `compression` feature.
+    #[cfg(feature = "compression")]
+    pub fn write_compressed_table(
+        &mut self,
+        header: &Header,
+        table: &crate::table::BinTable,
+        rows_per_tile: usize,
+        algo: &str,
+    ) -> Result<()> {
+        self.ensure_primary()?;
+        let (h, data) = crate::compress::compress_table(header, table, rows_per_tile, algo)?;
+        self.write_hdu(h, data, ZERO_FILL)
+    }
+
     /// Write a dataless primary HDU if none has been written yet, so subsequent
     /// extensions are well-formed.
     fn ensure_primary(&mut self) -> Result<()> {

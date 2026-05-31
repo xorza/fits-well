@@ -89,6 +89,17 @@ impl<R: Read + Seek> FitsReader<R> {
         Ok(FitsReader { source, hdus })
     }
 
+    /// The HDUs discovered by the lazy scan, in file order (HDU 0 is the primary).
+    pub fn hdus(&self) -> &[Hdu] {
+        &self.hdus
+    }
+
+    /// The HDU at `index` (panics if out of range — use [`FitsReader::hdus`] to
+    /// check the count first).
+    pub fn hdu(&self, index: usize) -> &Hdu {
+        &self.hdus[index]
+    }
+
     /// Read the raw, still-encoded (big-endian, unscaled) data unit. The returned
     /// [`DataUnit`] carries the full block-padded bytes plus the range of actual
     /// data within them, so a decoder consumes [`DataUnit::data`] and the block
@@ -179,6 +190,17 @@ impl<R: Read + Seek> FitsReader<R> {
         let table = self.read_table(index)?;
         let header = &self.hdus[index].header;
         crate::compress::decompress_image(header, &table)
+    }
+
+    /// Read a tiled-compressed table (§10.3) — a `BINTABLE` with `ZTABLE = T` —
+    /// and uncompress it into the original [`BinTable`]. Fixed-width columns only
+    /// (`GZIP_1`/`GZIP_2`/`RICE_1`). Requires the `compression` feature.
+    #[cfg(feature = "compression")]
+    pub fn read_compressed_table(&mut self, index: usize) -> Result<BinTable> {
+        let table = self.read_table(index)?;
+        let header = self.hdus[index].header.clone();
+        let (out_header, data) = crate::compress::uncompress_table(&header, &table)?;
+        BinTable::from_data(&out_header, data)
     }
 
     /// Verify the `DATASUM`/`CHECKSUM` integrity keywords of an HDU (§J). Each

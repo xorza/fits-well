@@ -262,6 +262,18 @@ impl BinTable {
         })
     }
 
+    /// The fixed-width main table (`nrows × NAXIS1` bytes), excluding the heap.
+    #[cfg(feature = "compression")]
+    pub(crate) fn raw_rows(&self) -> &[u8] {
+        &self.bytes[..self.nrows * self.row_len]
+    }
+
+    /// Row width in bytes (`NAXIS1`).
+    #[cfg(feature = "compression")]
+    pub(crate) fn row_width(&self) -> usize {
+        self.row_len
+    }
+
     /// The index of the first column with this (case-sensitive) name.
     pub fn column_index(&self, name: &str) -> Option<usize> {
         self.columns

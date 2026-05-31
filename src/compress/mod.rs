@@ -7,17 +7,21 @@
 //! work lives in [`gzip`], [`rice`], [`plio`], and [`hcompress`].
 //!
 //! Decode and encode ([`encode_image`]) cover all five codecs: `GZIP_1`,
-//! `GZIP_2`, `RICE_1`, `PLIO_1`, and `HCOMPRESS_1` (SMOOTH=0). Float images are
-//! quantized per-tile (`ZSCALE`/`ZZERO`) with `NO_DITHER` or `SUBTRACTIVE_DITHER_1`
-//! in both directions, falling back to raw gzip'd floats for constant tiles. Not
-//! yet: HCOMPRESS smoothing, `SUBTRACTIVE_DITHER_2`, `ZBLANK`, and tiled *table*
-//! compression (§10.3).
+//! `GZIP_2`, `RICE_1`, `PLIO_1`, and `HCOMPRESS_1` (with `SMOOTH=1` decode). Float
+//! images are quantized per-tile (`ZSCALE`/`ZZERO`) with `NO_DITHER`,
+//! `SUBTRACTIVE_DITHER_1`, or `SUBTRACTIVE_DITHER_2`, with `ZBLANK`/NaN nulls and a
+//! raw-gzip fallback for constant tiles. Tiled *table* compression (§10.3) lives in
+//! [`table`] ([`compress_table`]/[`uncompress_table`]).
 
 mod gzip;
 mod hcompress;
 mod plio;
 mod quantize;
 mod rice;
+mod table;
+
+pub(crate) use table::compress_table;
+pub(crate) use table::uncompress_table;
 
 use crate::bitpix::Bitpix;
 use crate::data::Image;
@@ -69,19 +73,27 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
         zbitpix
     };
 
-    // Float quantization: NO_DITHER (linear) and SUBTRACTIVE_DITHER_1 are
-    // supported; SUBTRACTIVE_DITHER_2's zero-value handling is not.
+    // Float quantization: NO_DITHER, SUBTRACTIVE_DITHER_1, and SUBTRACTIVE_DITHER_2.
     let zquantiz = header
         .get_text("ZQUANTIZ")
         .unwrap_or("NO_DITHER")
         .to_string();
-    let dither = zquantiz == "SUBTRACTIVE_DITHER_1";
-    if is_float && zquantiz != "NO_DITHER" && !dither {
-        return Err(FitsError::UnsupportedCompression {
-            name: format!("float quantization {zquantiz}"),
-        });
-    }
+    let method = match zquantiz.as_str() {
+        "NO_DITHER" => quantize::DitherMethod::None,
+        "SUBTRACTIVE_DITHER_1" => quantize::DitherMethod::Subtractive1,
+        "SUBTRACTIVE_DITHER_2" => quantize::DitherMethod::Subtractive2,
+        other => {
+            if is_float {
+                return Err(FitsError::UnsupportedCompression {
+                    name: format!("float quantization {other}"),
+                });
+            }
+            quantize::DitherMethod::None
+        }
+    };
     let zdither0 = header.get_integer("ZDITHER0").unwrap_or(1);
+    let zblank = header.get_integer("ZBLANK");
+    let smooth = hcompress_smooth(header);
 
     // Per-tile compressed data, with the conventional fallback columns.
     let primary = read_tiles(table, "COMPRESSED_DATA")?;
@@ -136,8 +148,9 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
                 bytepix,
                 s,
                 z,
-                dither,
+                method,
                 t as i64 + zdither0,
+                zblank,
             )?;
             for (&flat, &v) in indices.iter().zip(&vals) {
                 out_f[flat] = v;
@@ -152,6 +165,7 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
                 int_bitpix,
                 blocksize,
                 bytepix,
+                smooth,
             )?;
             for (&flat, &v) in indices.iter().zip(&vals) {
                 out_i[flat] = v;
@@ -322,12 +336,14 @@ fn encode_float_image(
 
     let zdither0 = 1i64; // deterministic dither seed (any 1..=10000 is valid)
     let int_bitpix = Bitpix::I32; // quantized planes are always int32
+    let method = quantize::DitherMethod::Subtractive1; // cfitsio's default
 
     let mut cd_desc: Vec<(usize, usize)> = Vec::with_capacity(ntiles);
     let mut gz_desc: Vec<(usize, usize)> = Vec::with_capacity(ntiles);
     let mut zscale = vec![0f64; ntiles];
     let mut zzero = vec![0f64; ntiles];
     let mut heap: Vec<u8> = Vec::new();
+    let mut any_null = false;
 
     for t in 0..ntiles {
         let mut origin = vec![0usize; znaxis];
@@ -348,10 +364,11 @@ fn encode_float_image(
             .collect();
         let irow = t as i64 + zdither0; // = (1-based tile row) + ZDITHER0 - 1
 
-        match quantize::quantize_tile(&vals, nx, ny, 0.0, true, irow) {
+        match quantize::quantize_tile(&vals, nx, ny, 0.0, method, irow) {
             Some(q) => {
                 zscale[t] = q.bscale;
                 zzero[t] = q.bzero;
+                any_null |= q.has_null;
                 let ints: Vec<i64> = q.idata.iter().map(|&v| v as i64).collect();
                 let bytes = match cmptype {
                     "GZIP_1" => gzip::gzip_encode(&i64_to_be(&ints, int_bitpix)),
@@ -419,9 +436,23 @@ fn encode_float_image(
         // Tell the decoder the quantized integers are 4 bytes wide.
         h.set("ZNAME1", "BYTEPIX").set("ZVAL1", 4);
     }
-    h.set("ZQUANTIZ", "SUBTRACTIVE_DITHER_1");
+    h.set("ZQUANTIZ", dither_name(method));
     h.set("ZDITHER0", zdither0);
+    if any_null {
+        // Quantized nulls are stored as this reserved integer; ZBLANK tells the
+        // decoder which value maps back to a blank (NaN) pixel.
+        h.set("ZBLANK", quantize::NULL_VALUE as i64);
+    }
     Ok((h, data))
+}
+
+/// The `ZQUANTIZ` keyword string for a dither method.
+fn dither_name(method: quantize::DitherMethod) -> &'static str {
+    match method {
+        quantize::DitherMethod::None => "NO_DITHER",
+        quantize::DitherMethod::Subtractive1 => "SUBTRACTIVE_DITHER_1",
+        quantize::DitherMethod::Subtractive2 => "SUBTRACTIVE_DITHER_2",
+    }
 }
 
 /// Widen float image samples to `f64` (integer buffers yield empty).
@@ -534,9 +565,12 @@ fn decode_one_tile(
     int_bitpix: Bitpix,
     blocksize: usize,
     bytepix: usize,
+    smooth: bool,
 ) -> Result<Vec<i64>> {
     if let Some(cell) = primary.filter(|c| cell_len(c) > 0) {
-        decode_tile_cell(cmptype, cell, tile_elems, int_bitpix, blocksize, bytepix)
+        decode_tile_cell(
+            cmptype, cell, tile_elems, int_bitpix, blocksize, bytepix, smooth,
+        )
     } else if let Some(cell) = gzip_fallback.filter(|c| cell_len(c) > 0) {
         gzip::gzip_tile(as_bytes(cell)?, int_bitpix)
     } else if let Some(cell) = uncompressed.filter(|c| cell_len(c) > 0) {
@@ -564,21 +598,18 @@ fn decode_float_tile(
     bytepix: usize,
     scale: f64,
     zero: f64,
-    dither: bool,
+    method: quantize::DitherMethod,
     irow: i64,
+    zblank: Option<i64>,
 ) -> Result<Vec<f64>> {
     if let Some(cell) = primary.filter(|c| cell_len(c) > 0) {
-        let ints = decode_tile_cell(cmptype, cell, tile_elems, int_bitpix, blocksize, bytepix)?;
-        if dither {
-            // Subtractive dither: f = (i − rand + 0.5)·scale + zero.
-            let mut d = quantize::Dither::new(irow);
-            Ok(ints
-                .iter()
-                .map(|&v| (v as f64 - d.next() + 0.5) * scale + zero)
-                .collect())
-        } else {
-            Ok(ints.iter().map(|&v| scale * v as f64 + zero).collect())
-        }
+        // Quantized integers; float images never use HCOMPRESS, so smooth=false.
+        let ints = decode_tile_cell(
+            cmptype, cell, tile_elems, int_bitpix, blocksize, bytepix, false,
+        )?;
+        Ok(quantize::dequantize(
+            &ints, scale, zero, method, irow, zblank,
+        ))
     } else if let Some(cell) = gzip_fallback.filter(|c| cell_len(c) > 0) {
         Ok(be_floats(&gzip::gunzip(as_bytes(cell)?)?, zbitpix))
     } else if let Some(cell) = uncompressed.filter(|c| cell_len(c) > 0) {
@@ -599,6 +630,7 @@ fn decode_tile_cell(
     int_bitpix: Bitpix,
     blocksize: usize,
     bytepix: usize,
+    smooth: bool,
 ) -> Result<Vec<i64>> {
     match cmptype {
         "GZIP_1" => gzip::gzip_tile(as_bytes(cell)?, int_bitpix),
@@ -610,11 +642,24 @@ fn decode_tile_cell(
             blocksize,
         )),
         "PLIO_1" => Ok(plio::plio_decode(as_i16(cell)?, tile_elems)),
-        "HCOMPRESS_1" => hcompress::hcompress_tile(as_bytes(cell)?),
+        "HCOMPRESS_1" => hcompress::hcompress_tile(as_bytes(cell)?, smooth),
         other => Err(FitsError::UnsupportedCompression {
             name: other.to_string(),
         }),
     }
+}
+
+/// HCOMPRESS smoothing flag: the `SMOOTH` `ZVALn` is non-zero (cfitsio applies
+/// inverse-transform smoothing to suppress blocking in lossy images).
+fn hcompress_smooth(header: &Header) -> bool {
+    let mut i = 1;
+    while let Some(name) = header.get_text(&format!("ZNAME{i}")) {
+        if name == "SMOOTH" {
+            return header.get_integer(&format!("ZVAL{i}")).unwrap_or(0) != 0;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Strides give the flat indices in the full image for a tile's row-major elements.
