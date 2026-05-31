@@ -20,6 +20,7 @@ lookup while coding.
 | [`05-ascii-tables.md`](05-ascii-tables.md) | TABLE extension, Fortran TFORM codes | 7.2 |
 | [`06-binary-tables.md`](06-binary-tables.md) | BINTABLE, TFORM data types, heap, variable-length arrays | 7.3 |
 | [`07-wcs-time-compression.md`](07-wcs-time-compression.md) | WCS, time coordinates, tiled image compression (overview) | 8, 9, 10 |
+| [`08-conventions.md`](08-conventions.md) | CONTINUE long strings, CHECKSUM/DATASUM, HIERARCH | 4.2.1.2, 4.4.2.7, App. J, registry |
 
 ## Primary sources
 

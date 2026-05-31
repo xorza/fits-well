@@ -67,6 +67,7 @@ Quick map of the reference notes:
 | ASCII tables | `docs/refs/05-ascii-tables.md` |
 | Binary tables, heap, VLAs | `docs/refs/06-binary-tables.md` |
 | WCS / time / compression | `docs/refs/07-wcs-time-compression.md` |
+| CONTINUE / CHECKSUM / HIERARCH conventions | `docs/refs/08-conventions.md` |
 
 ## Intended architecture
 
@@ -119,7 +120,10 @@ FITS is full of fiddly invariants that silent bugs hide in — test them explici
 
 ## Conventions registry
 
-Beyond the core standard, real files use registered conventions (CONTINUE long
-strings, CHECKSUM/DATASUM, HIERARCH, ESO conventions). They live at
-<https://fits.gsfc.nasa.gov/fits_registry.html>. Several were folded into 4.0;
-support the in-standard ones first, treat the rest as optional layers.
+Real files lean on a few near-ubiquitous conventions — `CONTINUE` long strings
+(now normative, §4.2.1.2), `CHECKSUM`/`DATASUM` integrity keywords (§4.4.2.7 +
+Appendix J), and the registered `HIERARCH` long-keyword convention. These are
+covered in `docs/refs/08-conventions.md`; the full registry (Green Bank,
+inheritance, ESO, …) is at <https://fits.gsfc.nasa.gov/fits_registry.html>.
+Support the in-standard ones first and treat purely-registered ones as optional,
+feature-flagged layers.
