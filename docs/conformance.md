@@ -825,12 +825,13 @@ Coverage gaps:
   (gap #2, both single + split present), `timeunit_minute_hour_century_scale_correctly`
   (gap #1), and `time_scale_parse_strips_realization_and_aliases` (gap #3).
 - `TimeScale::parse` now has a test covering the realization suffix, the
-  `TDT`/`ET`/`IAT` aliases, and the unknown→`Local` fallback; the `GMT` value
-  (gap #4) and the full Table-30 map are still only partially exercised.
+  `TDT`/`ET`/`IAT` and `GMT` aliases, and the unknown→`Local` fallback; the full
+  Table-30 map is still only partially exercised.
 - No signed-5-digit-year, leading-zero-omission (gap #6), or explicit `Z`-suffix
   rejection test; no `JDREF`/`DATEREF` resolution or kind-precedence test (only
   `MJDREF` and the split are exercised).
-- Everything in gaps #5/#7/#9 (TIMEOFFS, epoch keywords, binning, durations, GTI,
+- `TIMEOFFS` is now applied and tested (`timeoffs_shifts_relative_times`); the
+  rest of gaps #7/#9 (epoch keywords, binning, durations, GTI,
   PHASE/TIMELAG/FREQUENCY) is untested because unimplemented.
 
 ---
