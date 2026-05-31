@@ -465,6 +465,44 @@ fn decompresses_quantized_float_no_dither() {
 
 /// Build a fixed-width BINTABLE, write it, then round-trip it through table
 /// compression with `algo`/`rows_per_tile` and assert the data is byte-identical.
+#[test]
+fn decompresses_nocompress_tile_verbatim() {
+    use crate::data::ImageData;
+    use crate::header::Header;
+    use crate::table::BinTable;
+    // A 2×2 i16 image as a single NOCOMPRESS tile: the COMPRESSED_DATA cell holds
+    // the four pixels verbatim as big-endian i16.
+    let mut h = Header::new();
+    h.set("XTENSION", "BINTABLE")
+        .set("BITPIX", 8)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 8) // one 1P descriptor
+        .set("NAXIS2", 1) // one tile
+        .set("PCOUNT", 8) // heap = 8 raw bytes
+        .set("GCOUNT", 1)
+        .set("TFIELDS", 1)
+        .set("TFORM1", "1PB(8)")
+        .set("TTYPE1", "COMPRESSED_DATA")
+        .set("ZIMAGE", true)
+        .set("ZCMPTYPE", "NOCOMPRESS")
+        .set("ZBITPIX", 16)
+        .set("ZNAXIS", 2)
+        .set("ZNAXIS1", 2)
+        .set("ZNAXIS2", 2)
+        .set("ZTILE1", 2)
+        .set("ZTILE2", 2);
+    let mut data = Vec::new();
+    data.extend_from_slice(&8i32.to_be_bytes()); // descriptor nelem = 8 bytes
+    data.extend_from_slice(&0i32.to_be_bytes()); // descriptor offset = 0
+    for x in [1i16, 2, 3, 4] {
+        data.extend_from_slice(&x.to_be_bytes());
+    }
+    let table = BinTable::from_data(&h, data).unwrap();
+    let img = decompress_image(&h, &table).unwrap();
+    assert_eq!(img.shape, vec![2, 2]);
+    assert_eq!(img.samples, ImageData::I16(vec![1, 2, 3, 4]));
+}
+
 fn check_table_roundtrip(algo: &str, rows_per_tile: usize) {
     use crate::table::ColumnData;
     use crate::writer::{FitsWriter, WriteColumn};

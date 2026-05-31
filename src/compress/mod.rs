@@ -646,6 +646,8 @@ fn decode_tile_cell(
         )),
         "PLIO_1" => Ok(plio::plio_decode(as_i16(cell)?, tile_elems)),
         "HCOMPRESS_1" => hcompress::hcompress_tile(as_bytes(cell)?, smooth),
+        // §10.4: a tile stored verbatim — the cell is the raw big-endian pixels.
+        "NOCOMPRESS" => Ok(be_to_i64(as_bytes(cell)?, int_bitpix)),
         other => Err(FitsError::UnsupportedCompression {
             name: other.to_string(),
         }),

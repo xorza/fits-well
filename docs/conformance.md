@@ -187,7 +187,7 @@ decode/encode, physical plane), with `ascii/` and `table/` for character data.
 | 3.2 | Characters = 7-bit ASCII, high bit zero | header rejects ≥128; ASCII/`A`-cols lenient | 🟡 not enforced in table/ascii |
 | 3.3 | Integers two's-complement, big-endian | `decode_be` (`endian.rs:7`) | ✅ |
 | 3.3 | 8-bit unsigned; 16/32/64 signed | `Bitpix` → `ImageData` mapping | ✅ |
-| 3.3 | Unsigned 16/32/64 + signed-8 via `BZERO`/`TZEROn` | `physical()` float plane | ✅ values / 🟡 no typed `uN` |
+| 3.3 | Unsigned 16/32/64 + signed-8 via `BZERO`/`TZEROn` | `physical()` plane + typed `Image::unsigned()` → `UnsignedView` | ✅ |
 | 3.4 | `-32`/`-64` IEEE-754, big-endian | `f32`/`f64::from_be_bytes` (`data/mod.rs:69`) | ✅ |
 | 3.4 | NaN = blank float; no float `BLANK` | `scale_ints` for ints only; float NaN propagates | ✅ |
 | 3.4 | Preserve ±Inf + signaling/quiet NaN payload on round-trip | `to_bits`/`from_bits` are bit-exact | ✅ code / ⚠️ untested |
@@ -195,11 +195,11 @@ decode/encode, physical plane), with `ascii/` and `table/` for character data.
 | 3.5 | `physical = BZERO + BSCALE × stored` (Eq. 3) | `scale` closure (`data/mod.rs:110`) | ✅ |
 | 3.5 | Defaults `BSCALE=1.0`, `BZERO=0.0` | `from_header` `unwrap_or` (`data/mod.rs:150`) | ✅ |
 | 3.5 | `BLANK` integer-only, applied *before* scaling | `scale_ints` sentinel→NaN pre-scale (`data/mod.rs:124`) | ✅ |
-| 3.5 | Unsigned convention table (8/16/32/64) | `physical()` | ✅ values (u64: gap #2) |
+| 3.5 | Unsigned convention table (8/16/32/64) | `physical()` + exact typed `Image::unsigned()` | ✅ |
 | 3.5 | `TZEROn`/`TSCALn` binary-table analogue | `table/` layer | ✅ (audited under §6) |
 | 3.6 | Time defers to §9 | `time/` feature | ✅ (audited under §9) |
 | impl | Zero-copy raw + SIMD bulk byte-swap | `decode` always allocates + converts | 🟢 TODO (perf) |
-| impl | Detect + expose as `uN` | no `U16`/`U32`/`U64` variant | 🟡 not implemented |
+| impl | Detect + expose as `uN` | `Image::unsigned()` → `UnsignedView::{I8,U16,U32,U64}` | ✅ |
 | impl | `BLANK` → `Option`/mask | NaN in physical plane | 🟢 by design |
 
 The normative core of §5 (BITPIX types, big-endian two's-complement integers,
@@ -209,22 +209,18 @@ edge-precision items, not wrong decoding.
 
 ### Gaps
 
-1. 🟡 **No native unsigned (`uN`) typed exposure.** The design principle
-   (CLAUDE.md: "detect and expose as `uN`") and the §3 impl-notes call for
-   exposing `BITPIX` integer + `BZERO == 2^(n-1)` + `BSCALE == 1` as a typed
-   `u16`/`u32`/`u64` (and signed-8 as `i8`). `ImageData` has only
-   `U8/I16/I32/I64/F32/F64` (`data/mod.rs:16`), so unsigned 16/32/64 and signed
-   bytes are readable *only* through the `f64` `physical()` plane — there is no
-   zero-copy typed unsigned buffer, and no encode helper that takes a `uN` buffer
-   and applies the inverse offset (the caller must pre-offset into signed storage,
-   as the writer test does).
+1. ✅ **FIXED — native unsigned (`uN`) typed exposure.** `Image::unsigned()`
+   returns a typed `UnsignedView` (`U16`/`U32`/`U64`/signed-byte `I8`) when the
+   scaling is exactly the FITS unsigned convention (`BSCALE == 1`, no `BLANK`,
+   `BZERO == 2^(n-1)`), recovering exact values by flipping the stored sign bit.
+   The `Image::from_u16`/`from_u32`/`from_u64`/`from_i8` constructors are the encode
+   side (signed storage + the offset `BZERO`, which the writer emits). Covered by
+   `unsigned_views_round_trip_every_width_exactly` and the write→read round-trip.
 
-2. 🟡 **`u64`/large-`i64` physical values lose precision.** `physical()` returns
-   `f64`, computed as `xi as f64` (`data/mod.rs:134`). For 64-bit integers whose
-   magnitude exceeds 2⁵³ — including any `u64` unsigned value realized via
-   `BZERO = 2⁶³` — the physical value is rounded. The raw sample plane is exact;
-   only the derived `f64` plane is lossy. A native `uN`/`i64` path (gap #1) would
-   avoid this.
+2. ✅ **FIXED — `u64`/large-`i64` precision via the typed path.** `Image::unsigned()`
+   yields exact integers even past 2⁵³, where the `f64` `physical()` plane rounds.
+   Covered by `unsigned_u64_view_is_exact_where_physical_rounds`. (`physical()`
+   itself is unchanged — `f64` by definition for the general scaled plane.)
 
 3. 🟡 **§5.1 7-bit/high-bit-zero not enforced for character data.** The header
    parser rejects bytes ≥ 128 (but admits control 0–31, see §4 gap #2). ASCII
@@ -456,7 +452,7 @@ binary-table path (`bintable_header`, `column_code`, `check_column`, `pack_rows`
 | 6.4 | Not applied to `A`/`L`/`X` | `_ ⇒ NonNumericColumn` (also rejects `C`/`M`) | ✅ (C/M over-rejected) |
 | 6.4 | Unsigned `B`/`I`/`J`/`K` via `TZEROn` | `physical()` f64 plane | ✅ values / 🟡 no typed `uN`, u64 precision |
 | 6.4 | `TNULLn` matched on **stored** value before Eq. 7 | `scaled_int` checks `tnull` pre-scale (`table/mod.rs:318`) | ✅ |
-| 6.4 | Scaling on `P`/`Q` heap values, not descriptor | `read_vla_column` returns raw, no scaling | 🟡 missing |
+| 6.4 | Scaling on `P`/`Q` heap values, not descriptor | `read_vla_column_physical` scales heap elements | ✅ |
 | 6.5 | `TDIMn` multidimensional cell reshape | `Column.tdim` parsed; written from `WriteColumn::dims` | ✅ shape exposed |
 | 6.6 | `P`/`Q` descriptor `(nelem, offset)`, signed; heap decode | `read_vla_column` (`table/mod.rs:345`) | ✅ |
 | 6.6 | Default `THEAP` = main-table size; gap allowed | `heap_offset` default | ✅ (min not validated) |
@@ -494,9 +490,11 @@ beyond plain fixed-width decode.
    bytes. Covered by `x_bit_column_unpacks_msb_first` and
    `writes_tdim_q_vla_and_bit_columns`. (Write added earlier; read-unpacking is new.)
 
-4. 🟡 **VLA columns still have no scaling/null/physical path (§6.4).**
-   `read_vla_column` returns raw heap arrays; there is no `read_vla_column_physical`
-   applying `TSCALn`/`TZEROn`/`TNULLn` to heap elements. **Open.**
+4. ✅ **FIXED — VLA columns have a scaling/null/physical path (§6.4).**
+   `read_vla_column_physical` applies `TZEROn + TSCALn × element` to each row's heap
+   array, mapping integers equal to `TNULLn` to `NaN` (shared with the fixed-width
+   `column_data_physical` helper). Covered by
+   `read_vla_column_physical_scales_heap_arrays_and_nulls`.
 
 5. ✅ **FIXED — `rA` early-NUL termination honored (§6.3).** `trim_text` truncates
    at the first NUL before stripping trailing spaces, so `AB\0CD` → `"AB"`. Covered
@@ -505,10 +503,11 @@ beyond plain fixed-width decode.
 6. ✅ **FIXED — `column_index` now case-insensitive (§6.7),** via
    `eq_ignore_ascii_case`. Covered by `column_index_is_case_insensitive`.
 
-7. 🟡 **No native unsigned (`uN`) exposure / `u64` precision loss.** Integer
-   `TFORM` + `TZEROn = 2^(n-1)` + `TSCALn = 1` is realized only through the `f64`
-   `read_column_physical` plane, with no typed `u16`/`u32`/`u64` column and
-   rounding for `u64` values > 2⁵³. **Open** (shared with §5).
+7. 🟡 **No native unsigned (`uN`) exposure for *table* columns / `u64` precision.**
+   Integer `TFORM` + `TZEROn = 2^(n-1)` + `TSCALn = 1` is realized only through the
+   `f64` `read_column_physical` plane, with no typed `u16`/`u32`/`u64` column and
+   rounding for `u64` values > 2⁵³. **Open** — the analogous *image* path is now
+   done (`Image::unsigned()`, §5); the table column accessor is not yet built.
 
 8. ✅ **`Q` (64-bit) VLA write supported (§6.6).** `WriteColumn::q()` emits `1Q`
    descriptors for heaps beyond the 32-bit `1P` range; `1P` remains the default.
@@ -892,7 +891,7 @@ reconstruction keywords, in-table VLA columns), not defects in the core codecs.
 | 10.4.2 | `GZIP_1` DEFLATE; `GZIP_2` MSB-first shuffle | `compress/gzip.rs` | ✅ |
 | 10.4.3 | `PLIO_1` IRAF mask RLE (ints 0–2²⁴) | `compress/plio.rs` | ✅ |
 | 10.4.4 | `HCOMPRESS_1` 2-D; `SCALE` param; `SMOOTH` decode | `compress/hcompress.rs`; `hcompress_smooth` (`compress/mod.rs:657`) | ✅ decode / 🟡 no `SMOOTH` encode |
-| 10.4 | `NOCOMPRESS` stored uncompressed | `other` arm ⇒ `UnsupportedCompression` | 🟢 not implemented |
+| 10.4 | `NOCOMPRESS` stored uncompressed | `decode_tile_cell` decodes verbatim big-endian pixels (read) | ✅ read / 🟢 no encode |
 | 10.3 | `ZTABLE = T`; one row per row-tile, `1QB` columns | `uncompress_table`/`compress_table` (`compress/table.rs:234`,`:158`) | ✅ |
 | 10.3.1 | `ZNAXIS1`/`ZNAXIS2`/`ZPCOUNT`/`ZFORMn`/`ZCTYPn`/`ZTILELEN` | parsed + written (`compress/table.rs`) | ✅ |
 | 10.3.5 | Tables: lossless `RICE_1`/`GZIP_1`/`GZIP_2` only | `Algo::parse` rejects others (`compress/table.rs:43`) | ✅ (no `NOCOMPRESS`) |
@@ -901,11 +900,11 @@ reconstruction keywords, in-table VLA columns), not defects in the core codecs.
 
 ### Gaps
 
-1. 🟢 **`NOCOMPRESS` is not supported (§10.4, Table 36).** It appears in neither
-   the decode dispatch (`decode_tile_cell`'s `other` arm → `UnsupportedCompression`,
-   `compress/mod.rs:629`) nor the encoders nor `Algo::parse` for tables
-   (`compress/table.rs:43`). A `ZCMPTYPE='NOCOMPRESS'` HDU (raw pixel bytes per
-   tile) fails to read.
+1. ✅ **`NOCOMPRESS` images now read (§10.4, Table 36).** `decode_tile_cell` has a
+   `NOCOMPRESS` arm decoding the verbatim big-endian pixels of a tile (integer and
+   float-quantized paths both flow through it). Covered by
+   `decompresses_nocompress_tile_verbatim`. (No *encoder* — we never emit
+   `NOCOMPRESS` — and table `ZCMPTYPE` still excludes it per §10.3.5.)
 
 2. 🟡 **A pre-standard `UNCOMPRESSED_DATA` column is read (§10.1.3).** FITS 4.0
    defines **no** such column, yet `decompress_image` reads it as a third per-tile

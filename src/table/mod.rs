@@ -352,30 +352,8 @@ impl BinTable {
     /// non-numeric kinds (`A`/`L`/`X`/`C`/`M`) and variable-length columns.
     pub fn read_column_physical(&self, index: usize) -> Result<Vec<f64>> {
         let col = self.column(index)?;
-        let scale = |x: f64| col.tzero + col.tscale * x;
-        let tnull = col.tnull;
-        let scaled_int = |xi: i64| {
-            if tnull == Some(xi) {
-                f64::NAN
-            } else {
-                scale(xi as f64)
-            }
-        };
-        Ok(match self.read_column(index)? {
-            ColumnData::Bytes(v) if col.tform.kind == TformKind::Byte => {
-                v.iter().map(|&b| scaled_int(b as i64)).collect()
-            }
-            ColumnData::I16(v) => v.iter().map(|&x| scaled_int(x as i64)).collect(),
-            ColumnData::I32(v) => v.iter().map(|&x| scaled_int(x as i64)).collect(),
-            ColumnData::I64(v) => v.iter().map(|&x| scaled_int(x)).collect(),
-            ColumnData::F32(v) => v.iter().map(|&x| scale(x as f64)).collect(),
-            ColumnData::F64(v) => v.iter().map(|&x| scale(x)).collect(),
-            _ => {
-                return Err(FitsError::NonNumericColumn {
-                    code: col.tform.kind.code(),
-                });
-            }
-        })
+        let data = self.read_column(index)?;
+        column_data_physical(&data, col.tform.kind, col.tscale, col.tzero, col.tnull)
     }
 
     /// Decode a variable-length-array (`P`/`Q`) column: one [`ColumnData`] per
@@ -418,6 +396,22 @@ impl BinTable {
         Ok(out)
     }
 
+    /// Decode a `P`/`Q` column and scale each row's heap array to its physical
+    /// plane: `physical = TZEROn + TSCALn × element`, mapping integers equal to
+    /// `TNULLn` to `NaN` (§6.4 — scaling applies to the heap values, not the
+    /// descriptor). Errors for fixed-width columns and non-numeric heap elements.
+    pub fn read_vla_column_physical(&self, index: usize) -> Result<Vec<Vec<f64>>> {
+        let rows = self.read_vla_column(index)?; // validates VLA + heap bounds
+        let col = self.column(index)?;
+        let elem = col
+            .tform
+            .vla_elem
+            .expect("read_vla_column succeeded ⇒ vla_elem is Some");
+        rows.iter()
+            .map(|row| column_data_physical(row, elem, col.tscale, col.tzero, col.tnull))
+            .collect()
+    }
+
     fn column(&self, index: usize) -> Result<&Column> {
         self.columns
             .get(index)
@@ -450,6 +444,38 @@ fn parse_tdim(value: &str) -> Option<Vec<usize>> {
         .split(',')
         .map(|s| s.trim().parse::<usize>().ok())
         .collect()
+}
+
+/// Scale a decoded numeric [`ColumnData`] to its physical `f64` plane:
+/// `TZEROn + TSCALn × element`, mapping integers equal to `TNULLn` to `NaN`.
+/// `kind` disambiguates `Bytes` (`B` integer vs `X` bits). Errors for the
+/// non-numeric kinds (`A`/`L`/`X`/`C`/`M`).
+fn column_data_physical(
+    data: &ColumnData,
+    kind: TformKind,
+    tscale: f64,
+    tzero: f64,
+    tnull: Option<i64>,
+) -> Result<Vec<f64>> {
+    let scale = |x: f64| tzero + tscale * x;
+    let scaled_int = |xi: i64| {
+        if tnull == Some(xi) {
+            f64::NAN
+        } else {
+            scale(xi as f64)
+        }
+    };
+    Ok(match data {
+        ColumnData::Bytes(v) if kind == TformKind::Byte => {
+            v.iter().map(|&b| scaled_int(b as i64)).collect()
+        }
+        ColumnData::I16(v) => v.iter().map(|&x| scaled_int(x as i64)).collect(),
+        ColumnData::I32(v) => v.iter().map(|&x| scaled_int(x as i64)).collect(),
+        ColumnData::I64(v) => v.iter().map(|&x| scaled_int(x)).collect(),
+        ColumnData::F32(v) => v.iter().map(|&x| scale(x as f64)).collect(),
+        ColumnData::F64(v) => v.iter().map(|&x| scale(x)).collect(),
+        _ => return Err(FitsError::NonNumericColumn { code: kind.code() }),
+    })
 }
 
 /// Decode `bytes` as a contiguous run of `kind` elements. Shared by fixed-width

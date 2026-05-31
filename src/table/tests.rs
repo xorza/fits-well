@@ -175,6 +175,30 @@ fn decodes_variable_length_arrays_from_the_heap() {
 }
 
 #[test]
+fn read_vla_column_physical_scales_heap_arrays_and_nulls() {
+    // 1PJ column, TSCAL=2, TZERO=10, TNULL=99. Row 0 = [5, 99(null)], row 1 = [3].
+    let mut header = table_header(8, 2, &["1PJ(2)"]);
+    header
+        .set("PCOUNT", 12)
+        .set("TSCAL1", 2.0)
+        .set("TZERO1", 10.0)
+        .set("TNULL1", 99);
+    let mut data = Vec::new();
+    for (nelem, offset) in [(2i32, 0i32), (1, 8)] {
+        data.extend_from_slice(&nelem.to_be_bytes());
+        data.extend_from_slice(&offset.to_be_bytes());
+    }
+    for x in [5i32, 99, 3] {
+        data.extend_from_slice(&x.to_be_bytes());
+    }
+    let table = BinTable::from_data(&header, data).unwrap();
+    let phys = table.read_vla_column_physical(0).unwrap();
+    assert_eq!(phys[0][0], 20.0); // 10 + 2·5
+    assert!(phys[0][1].is_nan()); // 99 == TNULL
+    assert_eq!(phys[1], vec![16.0]); // 10 + 2·3
+}
+
+#[test]
 fn vla_descriptor_overrunning_the_heap_is_rejected() {
     // §6.6: a span must lie within the heap (`PCOUNT` bytes), not the block fill.
     // Heap is 8 bytes (PCOUNT=8) but the descriptor claims 3 f32 = 12 bytes.
