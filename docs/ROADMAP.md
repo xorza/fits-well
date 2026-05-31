@@ -36,7 +36,7 @@ and tiled table compression, read and write. WCS and time (6–7) remain.
 
 ---
 
-## Phase 1 — Complete the write path  ✅ DONE (binary-table VLA write still TODO)  *(size: M)*
+## Phase 1 — Complete the write path  ✅ DONE (incl. binary-table `P` VLA write)  *(size: M)*
 The reader is far ahead of the writer; close the gap so anything readable is
 writable.
 
@@ -107,8 +107,10 @@ These are functional codecs (decode/encode), not the deferred speed work.
 - *(ref 07.) Gated behind the `compression` feature; scalar reference impls — the
   SIMD/parallel speed work is deferred to a later optimization pass.*
 - **Deliverable:** ✅ round-trip every codec through astropy, both read and write.
-- **Remaining (minor):** HCOMPRESS lossy *write* (`SMOOTH`/`SCALE>0` encode) and
-  VLA columns inside compressed tables.
+- ✅ HCOMPRESS lossy *write* (`SCALE>0`) — `write_compressed_image_lossy`,
+  round-trips within the scale and is read by astropy.
+- **Remaining (minor):** decoding VLA (`P`/`Q`) columns *inside* a compressed table
+  (cfitsio's two-descriptor-set heap) — detected and rejected cleanly for now.
 
 ## Phase 6 — Typed World Coordinate System  🟢 v2 done  *(size: L)*
 Behind the `wcs` feature: `Wcs::from_header` + `pixel_to_world`/`world_to_pixel`,
@@ -119,12 +121,15 @@ plus reference frames in `wcs::frame::Frame`.
 - ✅ Projections: zenithal `TAN`/`SIN`/`ARC`/`STG`/`ZEA` and cylindrical
   `CAR`/`CEA`/`MER`/`SFL`, via the general fiducial-point pole computation (CG 2002
   §2.4); non-celestial axes pass through linearly.
-- ✅ Reference frames (`RADESYS`/`EQUINOX`): ICRS, FK5 at any equinox (IAU-1976
-  precession), Galactic.
+- ✅ Projections also include all-sky `AIT`/`MOL`. Reference frames
+  (`RADESYS`/`EQUINOX`): ICRS, FK5 at any equinox (IAU-2000 frame bias + IAU-1976
+  precession), Galactic, and FK4 B1950 (frame rotation + E-terms).
 - ✅ **Validated** pixel-exact against `astropy.wcs` (every projection + CROTA to
-  1e-8°) and frames against `astropy` `SkyCoord`.
-- **Remaining (v2+):** `PVi_m` projection parameters (`SIN` slant, `CEA` λ), all-sky
-  `AIT`/`MOL`, the ~25 mas ICRS↔FK5 frame bias, FK4 (B1950) E-terms, spectral axes.
+  1e-8°) and frames against `astropy` `SkyCoord` (FK5/Galactic to 1e-8; FK4 to ~mas).
+- **Remaining (v2+):** `PVi_m` projection parameters (`SIN` slant, `CEA` λ, φ₀/θ₀
+  overrides), FK4 at non-B1950 equinoxes (Newcomb pre-precession), and the
+  non-linear spectral-axis algorithms (`FREQ`↔`WAVE`↔`VELO`) — linear spectral
+  axes already pass through.
 
 ## Phase 7 — Typed time coordinates  🟢 done  *(size: M)*
 Behind the `time` feature: `Datetime`, `Epoch`, `TimeScale`, `FitsTime`.
@@ -140,8 +145,10 @@ Behind the `time` feature: `Datetime`, `Epoch`, `TimeScale`, `FitsTime`.
 - ✅ **Validated** against `astropy.time` (ERFA) to 1e-9 day: ISO/JD, epochs, all
   six scale conversions, UT1 via explicit `ΔUT1`; leap seconds vs the IERS table.
 - ✅ Time as a WCS axis (`CTYPEi = 'TIME'`) → absolute MJD (`FitsTime::time_axis_mjd`).
-- **Remaining (v2+):** `TREFDIR`/topocentric light-travel corrections, bundled
-  `ΔUT1` table (currently caller-supplied).
+- **Remaining (v2+):** `TREFDIR`/topocentric light-travel corrections (need a
+  planetary ephemeris — out of scope without that dependency). `ΔUT1` stays
+  caller-supplied (`convert_dut1`); a bundled IERS table is intentionally omitted
+  (it needs periodic updates and the full daily series for accuracy).
 
 ---
 

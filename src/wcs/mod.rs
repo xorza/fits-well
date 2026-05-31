@@ -11,11 +11,12 @@
 //!
 //! The linear layer is `PC`+`CDELT`, `CD`, or legacy `CDELT`+`CROTA`, with general
 //! matrix inversion for the reverse direction. Projections: zenithal
-//! `TAN`/`SIN`/`ARC`/`STG`/`ZEA` and cylindrical `CAR`/`CEA`/`MER`/`SFL`, via the
-//! general fiducial-point pole computation (so non-zenithal projections work);
-//! non-celestial axes pass through linearly. Reference-frame transforms live in
-//! [`frame`]. All validated against `astropy.wcs` (wcslib). Not yet: `PVi_m`
-//! projection parameters (SIN slant, CEA λ) and the all-sky `AIT`/`MOL`.
+//! `TAN`/`SIN`/`ARC`/`STG`/`ZEA`, cylindrical `CAR`/`CEA`/`MER`/`SFL`, and all-sky
+//! `AIT`/`MOL`, via the general fiducial-point pole computation (so non-zenithal
+//! projections work); non-celestial axes pass through linearly. Reference-frame
+//! transforms live in [`frame`]. All validated against `astropy.wcs` (wcslib).
+//! Not yet: `PVi_m` projection parameters (SIN slant, CEA λ, φ₀/θ₀ overrides) and
+//! the non-linear spectral algorithms (`FREQ`↔`WAVE`↔`VELO`).
 
 pub mod frame;
 
@@ -47,6 +48,10 @@ pub enum Projection {
     Mer,
     /// `SFL` — Sanson–Flamsteed (pseudo-cylindrical).
     Sfl,
+    /// `AIT` — Hammer–Aitoff (all-sky, pseudo-cylindrical).
+    Ait,
+    /// `MOL` — Mollweide (all-sky, pseudo-cylindrical).
+    Mol,
 }
 
 impl Projection {
@@ -61,6 +66,8 @@ impl Projection {
             "CEA" => Projection::Cea,
             "MER" => Projection::Mer,
             "SFL" => Projection::Sfl,
+            "AIT" => Projection::Ait,
+            "MOL" => Projection::Mol,
             _ => return None,
         })
     }
@@ -105,6 +112,24 @@ impl Projection {
                 Projection::Cea => (x, (y / R2D).clamp(-1.0, 1.0).asin() * R2D),
                 Projection::Mer => (x, (2.0 * (y / R2D).exp().atan()) * R2D - 90.0),
                 Projection::Sfl => (x / (y * D2R).cos(), y),
+                // Hammer–Aitoff inverse (CG 2002 eq. 51).
+                Projection::Ait => {
+                    let (u, v) = (x * D2R, y * D2R);
+                    let z2 = (1.0 - (u / 4.0).powi(2) - (v / 2.0).powi(2)).max(0.0);
+                    let z = z2.sqrt();
+                    let phi = 2.0 * (z * u / 2.0).atan2(2.0 * z2 - 1.0) * R2D;
+                    let theta = (v * z).clamp(-1.0, 1.0).asin() * R2D;
+                    (phi, theta)
+                }
+                // Mollweide inverse (CG 2002 eq. 55).
+                Projection::Mol => {
+                    let s2 = std::f64::consts::SQRT_2;
+                    let gamma = (y / (s2 * R2D)).clamp(-1.0, 1.0).asin();
+                    let theta =
+                        ((2.0 * gamma + (2.0 * gamma).sin()) / std::f64::consts::PI).asin() * R2D;
+                    let phi = std::f64::consts::PI * x / (2.0 * s2 * gamma.cos());
+                    (phi, theta)
+                }
                 _ => unreachable!(),
             }
         }
@@ -131,6 +156,30 @@ impl Projection {
                 Projection::Cea => (phi, R2D * t.sin()),
                 Projection::Mer => (phi, R2D * ((45.0 + theta / 2.0) * D2R).tan().ln()),
                 Projection::Sfl => (phi * t.cos(), theta),
+                Projection::Ait => {
+                    let pr = phi * D2R;
+                    let gamma = R2D * (2.0 / (1.0 + t.cos() * (pr / 2.0).cos())).sqrt();
+                    (2.0 * gamma * t.cos() * (pr / 2.0).sin(), gamma * t.sin())
+                }
+                Projection::Mol => {
+                    // Solve 2γ + sin2γ = π·sinθ for γ (Newton).
+                    let s2 = std::f64::consts::SQRT_2;
+                    let target = std::f64::consts::PI * t.sin();
+                    let mut g = t; // initial guess
+                    for _ in 0..100 {
+                        let f = 2.0 * g + (2.0 * g).sin() - target;
+                        let d = 2.0 + 2.0 * (2.0 * g).cos();
+                        let step = f / d;
+                        g -= step;
+                        if step.abs() < 1e-14 {
+                            break;
+                        }
+                    }
+                    (
+                        (2.0 * s2 / std::f64::consts::PI) * phi * g.cos(),
+                        s2 * R2D * g.sin(),
+                    )
+                }
                 _ => unreachable!(),
             }
         }

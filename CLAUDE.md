@@ -23,9 +23,9 @@ core crate is dependency-free by default (the `compression` feature pulls in
 (primary + `IMAGE`/`TABLE`/`BINTABLE` extensions) write; binary-table `P`/`Q` heap
 arrays and per-column `TSCAL`/`TZERO` decode; random groups read; `CONTINUE`,
 `HIERARCH`, and `CHECKSUM`/`DATASUM` (verify + write) are supported. A typed
-**WCS** layer (`wcs` feature) does pixel↔world for nine projections
-(`TAN`/`SIN`/`ARC`/`STG`/`ZEA`/`CAR`/`CEA`/`MER`/`SFL`, with `PC`/`CD`/`CROTA`) plus
-ICRS/FK5/Galactic frame transforms, and a typed **time** layer (`time` feature)
+**WCS** layer (`wcs` feature) does pixel↔world for eleven projections
+(`TAN`/`SIN`/`ARC`/`STG`/`ZEA`/`CAR`/`CEA`/`MER`/`SFL`/`AIT`/`MOL`, with `PC`/`CD`/`CROTA`)
+plus ICRS/FK5/Galactic/FK4 frame transforms, and a typed **time** layer (`time` feature)
 handles ISO-8601/JD/MJD, epochs, `UTC`…`TCB`/`GPS`/UT1 scale conversions, and time
 WCS axes — both validated against astropy. Tiled **image and table** compression
 work behind
@@ -115,14 +115,14 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `header/` | ordered card model (`value.rs`, `card/`, `mod.rs`): parse/render, `CONTINUE` folding, `HIERARCH` compound keys, keyword index, typed getters + builder | done |
 | `hdu/` | HDU classification + data-unit sizing (Eq. 2, incl. random groups) | done |
 | `reader/` | lazy seeking HDU scan; `read_image`/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_image`/`read_compressed_table`/`verify_checksum`, raw `DataUnit` | done |
-| `writer/` | multi-HDU writer: `write_image`/`write_table`/`write_ascii_table`/`write_compressed_image`/`write_compressed_table`, `with_checksums` | done; binary-table VLA (heap) write TODO |
+| `writer/` | multi-HDU writer: `write_image`/`write_table` (fixed + `P` VLA columns)/`write_ascii_table`/`write_compressed_image`(`_lossy`)/`write_compressed_table`, `with_checksums` | done |
 | `data/` | typed `Image`/`ImageData`, big-endian decode+encode, `BSCALE`/`BZERO` physical plane | image read+write done; SIMD/parallel TODO |
 | `table/` | `BINTABLE` parsing (`Tform`/`Column`); fixed-width decode (`ColumnData`), `TSCAL`/`TZERO` physical plane, `P`/`Q` heap VLAs | read done (write in `writer/`) |
 | `ascii/` | `TABLE` (ASCII) read: `TBCOLn`/Fortran `TFORMn` → `AsciiColumn`/`ColumnData` | read done (write in `writer/`) |
 | `groups/` | random-groups (§6) read: params + arrays, `PSCALn`/`PZEROn` physical | read done (no write — deprecated) |
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
-| `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3), reassembly + encode | all 5 image codecs read+write; float quant all 3 dither methods + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode; fixed-width table compression read+write |
-| `wcs/` (feature `wcs`) | typed WCS: keyword parse, linear transform (PC/CD/CROTA + inverse), 9 projections (zenithal + cylindrical) via general pole computation, `pixel_to_world`/`world_to_pixel`; `frame.rs` ICRS/FK5/Galactic transforms | v2 done (PVi_m, AIT/MOL, FK4 E-terms TODO) |
+| `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3), reassembly + encode | all 5 image codecs read+write; float quant all 3 dither methods + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode + lossy `SCALE>0` write; fixed-width table compression read+write |
+| `wcs/` (feature `wcs`) | typed WCS: keyword parse, linear transform (PC/CD/CROTA + inverse), 11 projections (zenithal + cylindrical + all-sky AIT/MOL) via general pole computation, `pixel_to_world`/`world_to_pixel`; `frame.rs` ICRS/FK5/Galactic/FK4-B1950 transforms | v2 done (PVi_m, spectral, FK4 non-B1950 TODO) |
 | `time/` (feature `time`) | typed time (§9): `Datetime` (ISO-8601↔JD/MJD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), `FitsTime` header view + time WCS axis | v2 done |
 | `error.rs` | `FitsError` + `Result` | done |
 
