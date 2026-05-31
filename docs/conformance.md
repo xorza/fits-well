@@ -130,7 +130,7 @@ Audited code: `header/card/mod.rs` (parse + render), `header/value.rs`
    `while out.ends_with(' ') { out.pop(); }` (`card/mod.rs:305`), so `'   '`
    collapses to `""`, identical to `''`. Worse, the existing test
    **asserts the wrong behavior**: `parse("BLANKS  = '      '")` is asserted to
-   equal `Value::Text(String::new())` (`card/tests.rs:70`). The all-blank case
+   equal `Value::Text(String::new())` (`card/tests.rs:71`). The all-blank case
    should yield `Value::Text(" ")` and must compare unequal to the `''` null
    case. Fix the parser to preserve one significant space when the string is
    non-empty but all-blank, and correct the test.
@@ -175,7 +175,7 @@ round-trips; `Value` accessor/`From` behavior.
 Coverage gaps:
 
 - **Null vs empty string** — not only untested, the existing test
-  (`card/tests.rs:70`) locks in the conflated behavior (gap #1). Need a test
+  (`card/tests.rs:71`) locks in the conflated behavior (gap #1). Need a test
   asserting `''` → len 0, `'   '` → len 1, and the two compare unequal.
 - No byte-position assertions for fixed-format rendering (logical/integer/real
   right-justified ending at column 30; string opening quote at column 11) — only
@@ -233,7 +233,7 @@ edge-precision items, not wrong decoding.
    as the writer test does).
 
 2. 🟡 **`u64`/large-`i64` physical values lose precision.** `physical()` returns
-   `f64`, computed as `xi as f64` (`data/mod.rs:131`). For 64-bit integers whose
+   `f64`, computed as `xi as f64` (`data/mod.rs:134`). For 64-bit integers whose
    magnitude exceeds 2⁵³ — including any `u64` unsigned value realized via
    `BZERO = 2⁶³` — the physical value is rounded. The raw sample plane is exact;
    only the derived `f64` plane is lossy. A native `uN`/`i64` path (gap #1) would
@@ -322,7 +322,12 @@ decoding.
    the decoded sample count exceeds the product and the assertion fires — a panic
    on untrusted file content, which the project's rules say should be a `Result`
    error, not an assert. Validate `PCOUNT == 0 && GCOUNT == 1` for image HDUs and
-   return a `FitsError` instead.
+   return a `FitsError` instead. The same untrusted-input panic shape recurs in
+   `RandomGroups::from_data`, whose closing `assert_eq!` on the decoded sample
+   count (`groups/mod.rs:76`) fires on a corrupt random-groups header (the
+   negative-`PCOUNT` / `GCOUNT < 1` cases *are* `Result`-guarded). By contrast the
+   `write_image` `assert_eq!` (`writer/mod.rs:165`) is an intentional logic-error
+   guard on a caller-built `Image`, not a read-side defect.
 
 2. 🟢 **No coordinate-indexing / strided-view API (§4.1).** `Image` stores the
    flat buffer (correctly in Fortran order) and the `shape`, but exposes no
@@ -396,7 +401,7 @@ Audited code: `ascii/` (`AsciiTable`/`AsciiColumn`/`parse_ascii_tform`,
 | 5.4 | `TNULLn` (string) undefined marker | not implemented | 🟡 missing |
 | 5.4 | `TDISPn`, `TDMINn`/`TDMAXn`, `TLMINn`/`TLMAXn` | not implemented | 🟢 |
 | impl | Right-justify numerics, left-justify strings, gap-fill spaces | `format_ascii_field` | ✅ |
-| impl | Overflow handling | `*`-fill per §7.2.5 (`writer/mod.rs:530`) | ✅ |
+| impl | Overflow handling | `*`-fill per §7.2.5 (`writer/mod.rs:656`) | ✅ |
 | impl | Float-precision lint on write | — | 🟢 |
 
 `TFORMn` parsing, field slicing, and the write→read round-trip are correct. The
@@ -537,15 +542,23 @@ beyond plain fixed-width decode.
    only through the `f64` `read_column_physical` plane, with no typed
    `u16`/`u32`/`u64` column and rounding for `u64` values > 2⁵³.
 
-8. 🟢 **Minor/unvalidated:** `P`/`Q` repeat not restricted to {0,1}; `THEAP`
+8. 🟡 **VLA (`P`) write is implemented but 32-bit-only.** `write_table` now
+   builds the heap and emits `P` array descriptors (`WriteColumn::vla`,
+   `writer/mod.rs:79`; round-tripped by `writes_and_reads_back_variable_length_arrays`,
+   `writer/tests.rs:54`) — so the once-TODO binary-table VLA write path exists.
+   But it always writes 32-bit `1P` descriptors and casts `nelem`/`offset`
+   `as i32` (`writer/mod.rs:211`): a heap larger than 2 GiB, or a single row with
+   more than `i32::MAX` elements, silently truncates, with no `Q` (64-bit)
+   fallback. (Decode handles both `P` and `Q`.)
+
+9. 🟢 **Minor/unvalidated:** `P`/`Q` repeat not restricted to {0,1}; `THEAP`
    minimum (≥ main-table size) not enforced; `C`/`M` complex columns are rejected
    from `read_column_physical` (complex scaling unsupported, and `Vec<f64>` could
    not hold it anyway); a `nelem=0` descriptor with a garbage offset beyond the
-   buffer raises `UnexpectedEof` instead of yielding empty; the writer has no
-   `TSCAL`/`TZERO`/`TNULL`/`X`/VLA write path (binary-table VLA write is a
-   documented TODO).
+   buffer raises `UnexpectedEof` instead of yielding empty; and the writer has no
+   `TSCAL`/`TZERO`/`TNULL`/`X` write path.
 
-9. 🟢 **No typed accessors** for `TDISPn`, `TDMINn`/`TDMAXn`, `TLMINn`/`TLMAXn`,
+10. 🟢 **No typed accessors** for `TDISPn`, `TDMINn`/`TDMAXn`, `TLMINn`/`TLMAXn`,
    `EXTNAME`/`EXTVER`/`EXTLEVEL`, `AUTHOR`, `REFERENC`; and no column-oriented /
    SIMD / zero-copy fast path (`read_column` strides and copies via `flatten`).
 
@@ -580,39 +593,42 @@ Coverage gaps:
 
 Audited code: `wcs/mod.rs` (`Wcs`, `Projection`, the pixel↔world pipeline,
 `compute_pole`, matrix inversion) and `wcs/frame.rs` (`Frame`, precession,
-Galactic rotation), behind the `wcs` feature. (Time §9 and compression §10 from
-the same reference file are audited separately.)
+frame bias, Galactic + FK4 rotations), behind the `wcs` feature. (Time §9 and
+compression §10 from the same reference file are audited separately.)
 
 The reference sets a deliberately low bar — *"a v1 can parse/preserve the
 keywords as ordinary header records and add typed support incrementally"* — which
 the ordered header model already satisfies for lossless round-trip. The actual
-implementation goes far beyond that: a typed pixel↔world transform for **nine
-projections plus three reference frames, all validated against `astropy.wcs`
-(wcslib) golden values**. The gaps below are unimplemented advanced features
-(most flagged TODO in the module doc), not defects in what exists.
+implementation goes far beyond that: a typed pixel↔world transform for **eleven
+projections plus four reference frames (ICRS, FK5 at any equinox, Galactic, and
+FK4 B1950), all validated against `astropy.wcs` (wcslib) / `SkyCoord` golden
+values**. The gaps below are unimplemented advanced features (most flagged TODO
+in the module doc), not defects in what exists.
 
 ### Conformance matrix
 
 | Keyword / feature | Code | Status |
 |---|---|---|
-| `WCSAXES` (default `NAXIS`) | `from_header` (`wcs/mod.rs:176`) | ✅ |
-| `CTYPEia` 4-3 form; `RA`/`DEC` + `xLON`/`xLAT` | `find_celestial` (`wcs/mod.rs:315`) | ✅ |
-| `CRPIXja` (default 0), `CRVALia` (default 0), `CDELTia` (default 1) | `axis_vec` | ✅ |
+| `WCSAXES` (default `NAXIS`) | `from_header` (`wcs/mod.rs:223`) | ✅ |
+| `CTYPEia` 4-3 form; `RA`/`DEC` + `xLON`/`xLAT` | `find_celestial` (`wcs/mod.rs:364`) | ✅ |
+| `CRPIXja` (default 0), `CRVALia` (default 0), `CDELTia` (default 1) | `from_header` axis read | ✅ |
 | `CDELT` non-zero | not checked (singular matrix ⇒ error) | ✅ effectively |
-| `PCi_ja` × `CDELT` / `CDi_ja` linear layer | matrix build (`wcs/mod.rs:201`) | ✅ |
+| `PCi_ja` × `CDELT` / `CDi_ja` linear layer | matrix build (`wcs/mod.rs:254`) | ✅ |
 | `PC`/`CD` mutually exclusive | `CD` silently wins if both present | 🟢 not rejected |
-| `CROTAi` legacy (only without `PC`) | `wcs/mod.rs:225` | ✅ |
-| `LONPOLEa`/`LATPOLEa` + defaults | `compute_pole` (`wcs/mod.rs:243`) | ✅ |
-| Pixel↔world pipeline + matrix inverse | `pixel_to_world`/`world_to_pixel` | ✅ |
-| Zenithal `TAN`/`SIN`/`ARC`/`STG`/`ZEA` | `Projection` (`wcs/mod.rs:87`) | ✅ |
-| Cylindrical `CAR`/`CEA`/`MER`/`SFL` | `Projection` | ✅ |
-| `RADESYSa`/`EQUINOXa`; ICRS/FK5/Galactic | `frame.rs` | ✅ |
+| `CROTAi` legacy (only without `PC`) | `wcs/mod.rs:276` | ✅ |
+| `LONPOLEa`/`LATPOLEa` + defaults | `compute_pole` (`wcs/mod.rs:415`) | ✅ |
+| Pixel↔world pipeline + matrix inverse | `pixel_to_world` (`wcs/mod.rs:323`) / `world_to_pixel` (`:344`) | ✅ |
+| Zenithal `TAN`/`SIN`/`ARC`/`STG`/`ZEA` | `Projection` (`wcs/mod.rs:32`) | ✅ |
+| Cylindrical `CAR`/`CEA`/`MER` + pseudo-cyl. `SFL` | `Projection` | ✅ |
+| All-sky `AIT`/`MOL` (Hammer-Aitoff, Mollweide) | `Projection` (`wcs/mod.rs:51`) | ✅ |
+| `RADESYSa`/`EQUINOXa`; ICRS/FK5/Galactic | `frame.rs` (`matrix`, `wcs/frame.rs:100`) | ✅ |
+| `FK4`/`FK4-NO-E` **B1950** (frame rotation + E-terms) | `to_icrs_vec` (`frame.rs:68`), `ETERMS`/`FK4_TO_FK5` (`:112`,`:132`) | ✅ B1950 / 🟡 other equinoxes error |
 | Alternate WCS `a ∈ A–Z` | `alt` param | ✅ (untested) |
 | `PVi_ma`/`PSi_ma` projection params | — | 🟡 not implemented |
 | `CUNITia` (esp. celestial = degrees) | not read; degrees assumed | 🟡 ignored |
 | Spectral WCS §8.4 (`FREQ-F2W`, …) | non-celestial ⇒ linear only | 🟡 not implemented |
 | BINTABLE column WCS (`TCTYPn`/`iCTYPn`, Table 22) | — | 🟡 not implemented |
-| `FK4`/`FK4-NO-E` (E-terms); `GAPPT` | `UnsupportedFrame`; `GAPPT` unrecognized | 🟡 not implemented |
+| `GAPPT` reference frame | unrecognized → equinox default | 🟡 not implemented |
 | `WCSNAMEa`/`CNAMEia`, `CRDERia`/`CSYERia` | — | 🟢 not exposed |
 | Conventional `'STOKES'`/`'COMPLEX'` | linear pass-through | ✅ (degenerate) |
 
@@ -620,9 +636,9 @@ projections plus three reference frames, all validated against `astropy.wcs`
 
 1. 🟡 **`PVi_ma`/`PSi_ma` projection parameters not supported.** The transform
    uses parameter-free projection defaults, so slant `SIN` (`PV2_1`/`PV2_2`),
-   `CEA` with `λ ≠ 1` (`PV2_1`), `ZPN`, `SZP`, etc. are wrong or unrepresentable.
-   The module doc flags this (`SIN` slant, `CEA` λ). Param-free `SIN`/`CEA` are
-   correct and tested.
+   `CEA` with `λ ≠ 1` (`PV2_1`), `ZPN`, `SZP`, and any `φ₀`/`θ₀` override are
+   wrong or unrepresentable. The module doc flags this (`wcs/mod.rs:18`).
+   Param-free `SIN`/`CEA`/`AIT`/`MOL` are correct and tested.
 
 2. 🟡 **`CUNITia` is ignored.** Celestial axes are assumed to be in degrees
    (`CRVAL`/`CDELT` taken as degrees) and `CUNIT` is never read, so a celestial
@@ -639,27 +655,45 @@ projections plus three reference frames, all validated against `astropy.wcs`
    keywords are parsed; the column-indexed forms (`TCTYPn`, `TCRPXn`, `iCTYPn`, …)
    have no support.
 
-5. 🟡 **`FK4`/`FK4-NO-E` transforms unimplemented.** `to_icrs_matrix` returns
-   `None` → `FitsError::UnsupportedFrame` (E-term model is a documented TODO), and
-   `GAPPT` is not recognized (falls to the equinox-based default).
+5. 🟡 **FK4 is supported only at B1950; `GAPPT` is unrecognized.** FK4 (and
+   `FK4-NO-E`) at the B1950 equinox is fully transformed — frame rotation
+   (`FK4_TO_FK5`, `frame.rs:132`) plus the E-terms of aberration
+   (`remove_eterms`/`add_eterms`, `frame.rs:115`,`:121`) — and astropy-checked.
+   FK4 at *any other* equinox returns `FitsError::UnsupportedFrame`
+   (`frame.rs:71`,`:89`; it would need Newcomb pre-precession to B1950 first).
+   `GAPPT` (geocentric apparent place) is not recognized and falls through to the
+   equinox-based default frame.
 
-6. 🟢 **Lenient on illegal combinations / missing metadata.** `PC`+`CD` both
+6. 🟢 **Lenient on illegal combinations / unexposed metadata.** `PC`+`CD` both
    present is not rejected (`CD` wins); `CROTA`+`PC` is not rejected (`PC` wins);
-   `WCSNAMEa`/`CNAMEia` and `CRDERia`/`CSYERia` are not exposed; and the
-   ICRS↔FK5-J2000 ~25 mas frame bias is omitted (documented approximation).
+   `WCSNAMEa`/`CNAMEia` and `CRDERia`/`CSYERia` are not exposed. (The ICRS↔FK5
+   ~25 mas frame bias, formerly omitted, is now applied — `FK5_FROM_ICRS`,
+   `frame.rs:171` — so FK5 J2000 matches astropy to ~1e-8°.)
+
+7. 🟢 **FK5 uses the FITS-WCS IAU-1976 precession, not astropy's IAU-2006.**
+   `precession_fk5` (`frame.rs:142`) is the Lieske IAU-1976 model (bit-identical
+   to `erfa.pmat76`, the FITS-WCS convention); astropy applies the newer IAU-2006
+   model to FK5, so the two diverge by ~tens of mas at equinoxes far from J2000
+   (~68 mas at J1975). This is a deliberate, documented standard-conformance
+   choice, not a defect — and the J2000 frame bias is exact either way.
 
 ### Test coverage
 
-Strong and unusually rigorous — golden values come from `astropy.wcs`, so the
-formulas (not merely forward/inverse self-consistency) are checked: `TAN` parse
-plus six astropy points; `SIN` astropy golden; an all-nine-projection
-project→deproject round-trip; `STG`/`ZEA`/`CAR`/`CEA`/`MER`/`SFL` astropy golden
-+ full round-trip (with cylindrical `CRVAL` chosen so the general pole
-computation actually runs); legacy `CDELT`+`CROTA2` astropy golden;
-reference-pixel→`CRVAL`; `world_to_pixel` inverts `pixel_to_world`; a standalone
-matrix-inverse check; and frame transforms (FK5 J2000/J1975, Galactic) against
-astropy with round-trips and the `FK4`-unsupported error, plus `Frame::from_header`
-parsing.
+Strong and unusually rigorous — golden values come from `astropy.wcs` / astropy
+`SkyCoord`, so the formulas (not merely forward/inverse self-consistency) are
+checked (`wcs/tests.rs`): `parses_tan_header` (`:24`) + `pixel_to_world_matches_astropy`
+(`:36`, six TAN points to 1e-9); `world_to_pixel_inverts_pixel_to_world` (`:54`);
+`reference_pixel_maps_to_crval` (`:71`); `sin_projection_matches_astropy` (`:168`);
+`legacy_crota_rotation_matches_astropy` (`:195`); `allsky_projections_match_astropy`
+(`:222`, `AIT`+`MOL` goldens); `projections_match_astropy` (`:270`,
+`STG`/`ZEA`/`CAR`/`CEA`/`MER`/`SFL` goldens, cylindrical `CRVAL` chosen so the
+general pole computation runs); `projections_round_trip` (`:250`, all **eleven**
+projections project→deproject); a standalone `matrix_inverse_is_correct` (`:154`);
+and the frame block — `frame_transforms_match_astropy` (`:79`) now pins ICRS→FK5(J2000),
+ICRS→FK5(J1975), and ICRS→Galactic to **1e-8°** (the J2000 frame bias and exact
+Galactic matrix), adds an ICRS→FK4(B1950) golden, and asserts FK4 at J1975 →
+`UnsupportedFrame`; plus `frame_round_trips` (`:124`) and `frame_parses_from_header`
+(`:135`).
 
 Coverage gaps:
 
@@ -670,7 +704,318 @@ Coverage gaps:
   `CDELT` are exercised).
 - No singular-matrix → `InvalidValue` error test, no `WCSAXES`-vs-`NAXIS` default
   test, and no all-linear (no celestial pair) `Wcs` test.
-- `CUNIT`, `PVi_m`, spectral, and table-WCS paths are untested (unimplemented).
+- `CUNIT`, `PVi_m`, spectral, and table-WCS paths are untested (unimplemented);
+  the `FK4-NO-E` (E-term-free) variant is not separately exercised from `FK4`.
+
+---
+
+## §9 — Representations of Time Coordinates (`docs/refs/07-wcs-time-compression.md` §7.2)
+
+Audited code: `time/mod.rs` (`Datetime`, `Epoch`, `TimeScale`, `FitsTime`,
+`is_time_ctype`, plus the leap-second / `tdb_minus_tt` / proleptic-Gregorian
+helpers) and `time/tests.rs`, behind the `time` feature.
+
+§9 layers a full time framework onto the WCS spine: a time scale (`TIMESYS` +
+Table 30), a reference value (`MJDREF`/`JDREF`/`DATEREF`, optionally split into
+integer + fractional parts), a reference position/direction
+(`TREFPOS`/`TREFDIR`), a time unit (`TIMEUNIT` + Table 34), ISO-8601 datetime
+strings (§9.1.1), Julian/Besselian epochs (§9.1.2), global bound keywords
+(§9.5), offset/binning/error keywords (§9.4), durations (§9.7), and a set of
+time-related coordinate axes (§9.6). The implementation covers the
+*computational core* and is **validated against `astropy.time` (ERFA)**:
+ISO-8601↔JD/MJD calendar math, `J`/`B` epochs→JD, a full
+UTC/TAI/TT/TCG/TDB/TCB/GPS/UT1 scale-conversion lattice (UTC↔TAI via an embedded
+IERS leap table, TDB via the standard periodic series, UT1 via caller-supplied
+ΔUT1), and a `FitsTime` header view resolving the reference epoch/unit/scale and
+relative→absolute MJD for the global keywords and a `CTYPEi='TIME'` image axis.
+The gaps are the metadata-only / table-context / nice-to-have parts of §9, plus
+two correctness bugs (the `TIMEUNIT` table and the split-reference precedence).
+
+### Conformance matrix
+
+| Doc § | Requirement | Code | Status |
+|---|---|---|---|
+| 9.2.1 | `TIMESYS` (default `UTC`); other values allowed | `FitsTime::from_header` (`time/mod.rs:388`) | ✅ |
+| 9.2.1 | Table 30 scales (`TAI/TT/TCG/TDB/TCB/UTC/UT1/GPS/…`) | `TimeScale::parse` (`time/mod.rs:215`) | ✅ |
+| 9.2.1 | Aliases `TDT`/`ET`→`TT`, `IAT`→`TAI` | `parse` arms (`time/mod.rs:215`) | ✅ |
+| 9.2.1 | Realization suffix `TT(TAI)`, `UTC(NIST)` | matched whole-string ⇒ falls to `Local` | 🔴 not stripped |
+| 9.2.1 | `GMT` (continuous with UTC) | no arm ⇒ `Local` | 🟡 should alias `Utc` |
+| 9.2.1 | TT-pivot lattice; `TT↔TCG` (`L_G`), `TDB↔TCB` (`L_B`) | `to_tt`/`from_tt` (`time/mod.rs:245`,`:269`) | ✅ |
+| 9.2.1 | TDB periodic series | `tdb_minus_tt` (`time/mod.rs:297`) | ✅ (no `TDB_0`) |
+| 9.2.1 | `UT1` via ΔUT1; `LOCAL` pass-through | `convert_dut1` (`time/mod.rs:237`) | ✅ caller ΔUT1 / 🟡 no bundled table |
+| 9.1.1 | ISO-8601 `[±C]CCYY-MM-DD[Thh:mm:ss[.s…]]`; parts optional | `Datetime::parse` (`time/mod.rs:45`) | ✅ |
+| 9.1.1 | Leading zeros **must not** be omitted | integer parse accepts `2024-1-1` | 🟡 not enforced |
+| 9.1.1 | **No** timezone designator (`Z` forbidden) | rejected only incidentally (f64 parse) | 🟡 not explicit |
+| 9.1.1 | Seconds `00–60` UTC (leap), `00–59` else | `0.0..61.0` for all scales (`time/mod.rs:93`) | 🟡 scale-agnostic |
+| 9.1.2 | Julian/Besselian epoch strings → JD | `Epoch::to_jd` (`time/mod.rs:176`) | ✅ |
+| 9.1.2/9.5 | `JEPOCH` (TDB) / `BEPOCH` (ET) **keywords** | `Epoch` type not wired to header | 🟡 not read |
+| 9.2.2 | Reference in ISO / JD / MJD; defaults | `reference_mjd` (`time/mod.rs:454`) | ✅ |
+| 9.2.2 | `[M]JDREFI`+`[M]JDREFF` integer+fraction split | summed (`time/mod.rs:459`) | ✅ |
+| 9.2.2 | **Split takes precedence over single** when all present | single `MJDREF` returned first (`time/mod.rs:455`) | 🔴 wrong precedence |
+| 9.2.2 | Kind precedence `MJDREF > JDREF > DATEREF` | checked in that order (`time/mod.rs:455`,`:462`,`:469`) | ✅ |
+| 9.3 | `TIMEUNIT` (default `s`); Table 34 units | `unit_seconds` (`time/mod.rs:404`) | 🔴 only `s`/`d`/`a`; `min`/`h`/`cy`→`1.0` |
+| 9.2.3 | `TREFPOS` (default `TOPOCENTER`) + Table 31; `TRPOSn` | stored verbatim (`time/mod.rs:394`) | 🟡 no default/validation |
+| 9.2.4 | `TREFDIR`/`TRDIRn` reference direction | — | 🟢 not implemented |
+| 9.2.5 | `PLEPHEM` (default `DE405`) | — | 🟢 not implemented |
+| 9.4.1 | `TIMEOFFS` added to reference time | not read; `relative_to_mjd` (`time/mod.rs:414`) omits it | 🟡 not applied |
+| 9.4.2 | `TIMEDEL` / `TIMEPIXR` binning | — | 🟡 not implemented |
+| 9.4.3 | `TIMSYER` / `TIMRDER` time errors | — | 🟢 not implemented |
+| 9.5 | `DATE-OBS` / `MJD-OBS` start time | `obs_mjd` (`time/mod.rs:419`) | ✅ |
+| 9.5 | `DATE-BEG`/`-END`, `MJD-BEG`/`-END` typed | — | 🟢 raw cards only |
+| 9.5 | `TSTART`/`TSTOP` (rel. to `[M]JDREF`, in `TIMEUNIT`) | `relative_to_mjd` (`time/mod.rs:414`) | ✅ / 🟡 ignores `TIMEOFFS` |
+| 9.6 | `CTYPEi='TIME'` image time axis → world time | `time_axis_mjd` (`time/mod.rs:433`) | ✅ |
+| 9.6 | `'PHASE'`/`'TIMELAG'`/`'FREQUENCY'`; `CZPHSia`/`CPERIia` | `is_time_ctype` recognizes `'TIME'`+scales only (`time/mod.rs:447`) | 🟢 not implemented |
+| 9.7 | `XPOSURE` / `TELAPSE` durations; GTI `START`/`STOP` | — | 🟢 raw cards only |
+
+The normative computational core — the Table-30 scale set with the canonical
+aliases, the TT-pivot conversion lattice including the defining `L_G`/`L_B`
+relations, ISO-8601↔JD/MJD calendar math, the `[M]JDREF`/`JDREF`/`DATEREF`
+resolution with kind-precedence, J/B epochs, and a working `CTYPEi='TIME'` axis —
+is implemented and astropy-validated. The gaps cluster in metadata semantics,
+table-only constructs, the non-`TIME` time axes, and two outright bugs.
+
+### Gaps
+
+1. 🔴 **`TIMEUNIT` table is incomplete — `min`/`h`/`cy`/`ta`/`Ba` silently scale
+   as seconds (§9.3, Table 34).** `unit_seconds` matches only `d`/`day`,
+   `a`/`yr`/`y`, and falls through to `1.0` otherwise (`time/mod.rs:404`). Table 34
+   also defines `'min'` (60 s), `'h'` (3600 s), `'cy'` (Julian century), and the
+   discouraged `'ta'`/`'Ba'`. `TIMEUNIT='min'` therefore makes `relative_to_mjd` /
+   `time_axis_mjd` off by 60×, `'h'` by 3600×, with no error.
+
+2. 🔴 **Split reference parts do not take precedence over the single value
+   (§9.2.2).** The standard: *"If [M]JDREF and both [M]JDREFI and [M]JDREFF are
+   present, the integer and fractional values shall have precedence over the
+   single value."* `reference_mjd` returns `MJDREF` as soon as it is present
+   (`time/mod.rs:455`), *before* looking at `MJDREFI`/`MJDREFF` (`:458`) — the
+   reverse of the rule when all three are present. (The "single wins if present
+   with only one part" sub-rule is met only by accident.) Same on the
+   `JDREF`/`JDREFI`/`JDREFF` branch (`time/mod.rs:462`).
+
+3. 🔴 **Time-scale realization suffix not stripped (§9.2.1).** High-precision
+   values append a realization — `'TT(TAI)'`, `'UTC(NIST)'`. `TimeScale::parse`
+   matches the whole upper-cased string (`time/mod.rs:215`), so `"TT(TAI)"` matches
+   no arm and falls to `TimeScale::Local` — a recognized scale misread as an
+   unconvertible local clock. The suffix must be split off before matching.
+
+4. 🟡 **`GMT` maps to `LOCAL` instead of `UTC` (§9.2.1, Table 30).** `GMT` is a
+   recognized value (continuous with UTC), but `TimeScale::parse` has no `GMT` arm
+   so it falls to `Local` (`time/mod.rs:225`) and is treated as unconvertible.
+
+5. 🟡 **`TIMEOFFS` (§9.4.1) not applied.** A bulk clock correction added to the
+   reference time. `relative_to_mjd` (`time/mod.rs:414`) omits the `TIMEOFFS` term,
+   so `TSTART`/`TSTOP` and table time-pixel values resolve to the wrong absolute
+   MJD when an offset is present.
+
+6. 🟡 **ISO-8601 syntax is lenient (§9.1.1).** `Datetime::parse` uses integer
+   `.parse()` per field (`time/mod.rs:45`), so `'2024-1-1'` (leading zeros omitted,
+   forbidden) is accepted; the forbidden `Z` suffix is rejected only incidentally
+   (it breaks the seconds `f64` parse). The leap-second range `0.0..61.0`
+   (`time/mod.rs:93`) is applied in every scale, whereas §9.1.1 permits second 60
+   only in UTC.
+
+7. 🟡 **Julian/Besselian epoch *keywords* are not read (§9.5).** `Epoch` parses
+   `'J2000.0'`/`'B1950.0'` strings and computes their JD, but
+   `FitsTime::from_header` never reads `JEPOCH` (implied TDB) or `BEPOCH` (implied
+   ET), nor attaches the implied scales.
+
+8. 🟡 **`UT1`/ΔUT1 are caller-supplied; no bundled IERS ΔUT1 table.**
+   `TimeScale::convert` treats `UT1` as `UTC` (ΔUT1 = 0) unless the caller routes
+   through `convert_dut1` with an external ΔUT1 (`time/mod.rs:231`,`:237`). The
+   module doc states this.
+
+9. 🟢 **Metadata-only / table-context §9 features unimplemented:** `TREFPOS`
+   stored without default/validation/`TRPOSn` (`time/mod.rs:394`); no `TREFDIR`
+   (§9.2.4), `PLEPHEM` (§9.2.5), `OBSGEO-*` location, `TIMEDEL`/`TIMEPIXR`
+   binning (§9.4.2), `TIMSYER`/`TIMRDER` errors (§9.4.3); only `DATE-OBS`/`MJD-OBS`
+   (no typed `DATE-BEG`/`-END`/`MJD-BEG`/`-END`); no `XPOSURE`/`TELAPSE` durations
+   or GTI `START`/`STOP` (§9.7); no `'PHASE'`/`'TIMELAG'`/`'FREQUENCY'` axes or
+   `CZPHSia`/`CPERIia` (§9.6) — `is_time_ctype` recognizes only `'TIME'` and
+   Table-30 scale names (`time/mod.rs:447`). All remain readable as raw cards.
+
+10. 🟢 **`TDB_0` constant offset omitted.** The §9.2.1 TCB→TDB relation includes
+   `TDB_0 = −6.55 × 10⁻⁵ s`; the periodic `tdb_minus_tt` series (`time/mod.rs:297`)
+   omits the constant term — below the astropy test tolerance, but not the literal
+   defining equation.
+
+### Test coverage
+
+Strong on the computational core, with golden values from `astropy.time` (ERFA)
+(`time/tests.rs`): `iso_to_jd_and_mjd_match_astropy` (six ISO strings → JD/MJD
+within 1e-7, incl. the MJD zero point, a fractional second, a leap-second label
+`…23:59:60`, and a date-only midnight); `datetime_round_trips_through_jd`;
+`rejects_malformed_datetimes` (empty, too-short, out-of-range month/day/hour);
+`epochs_match_astropy` (`J2000`/`J2015.5`, `B1950`/`B1900` within 1e-5);
+`scale_conversions_match_astropy` (UTC→{TAI,TT,TCG,TDB,TCB,GPS} each to 1e-9 day
++ round-trip — pins the 37 s leap value, `TT−TAI`, the GPS offset, and the
+`L_G`/`L_B`/TDB rates at once); `ut1_uses_explicit_dut1` (astropy ΔUT1, +
+round-trip, + the ΔUT1=0 default); `leap_seconds_match_iers_table` (counts at
+1972/1980/1999/2017/2024 + the step just before the 1999 insertion);
+`time_axis_resolves_to_mjd` (`CTYPE3='TIME'`, pixel→MJD, and a non-time axis →
+`None`); `fits_time_resolves_reference_and_relative_times` (scale/mjdref/trefpos
++ `TSTART`/`TSTOP`/`DATE-OBS`); and `fits_time_reads_split_and_day_unit_references`
+(the `MJDREFI`+`MJDREFF` split alone, default UTC, `TIMEUNIT='d'`).
+
+Coverage gaps:
+
+- **The two 🔴 bugs are untested** (a test would fail today): no header with
+  *both* `MJDREF` and `MJDREFI`/`MJDREFF` to expose the split-precedence inversion
+  (gap #2 — the split is only ever tested *alone*), and no `TIMEUNIT='min'`/`'h'`/
+  `'cy'` test to expose the silent seconds-fallback (gap #1).
+- No `TimeScale::parse` test at all — the Table-30 string→variant map, the
+  `TDT`/`ET`/`IAT` aliases, the `'TT(TAI)'` realization suffix (gap #3), the `GMT`
+  value (gap #4), and the unknown→`Local` fallback are all unexercised.
+- No signed-5-digit-year, leading-zero-omission (gap #6), or explicit `Z`-suffix
+  rejection test; no `JDREF`/`DATEREF` resolution or kind-precedence test (only
+  `MJDREF` and the split are exercised).
+- Everything in gaps #5/#7/#9 (TIMEOFFS, epoch keywords, TREFPOS validation,
+  binning, durations, GTI, PHASE/TIMELAG/FREQUENCY) is untested because
+  unimplemented.
+
+---
+
+## §10 — Representations of Compressed Data (`docs/refs/07-wcs-time-compression.md` §7.3)
+
+Audited code: `compress/mod.rs` (`decompress_image`/`encode_image`, tile
+reassembly, `ZIMAGE` container, fallback columns), `compress/{gzip,rice,plio,
+hcompress,quantize,table}.rs`, and the entry points `read_compressed_image` /
+`read_compressed_table` (`reader/mod.rs:189`,`:199`) and `write_compressed_image`
+/ `write_compressed_image_lossy` / `write_compressed_table` (`writer/mod.rs:257`,
+`:270`,`:287`), behind the `compression` feature.
+
+§10 stores a compressed image (or table) *inside* a `BINTABLE`: the image is
+split into `ZTILEn` tiles, each compressed with `ZCMPTYPE` and stored as a VLA
+cell in `COMPRESSED_DATA`, with the original geometry in `ZBITPIX`/`ZNAXIS`/
+`ZNAXISn`; floating-point images are first quantized per-tile (`ZSCALE`/`ZZERO`)
+with optional Appendix-I subtractive dithering. The implementation is unusually
+complete: **all five image codecs (`RICE_1`, `GZIP_1`, `GZIP_2`, `PLIO_1`,
+`HCOMPRESS_1`) read and write** — including lossy `HCOMPRESS` (`SCALE > 0`) write
+and `SMOOTH = 1` decode; float quantization with all three `ZQUANTIZ` methods,
+`ZBLANK`/NaN nulls, and a raw-gzip fallback for un-quantizable tiles; and §10.3
+fixed-width table compression read and write. The codecs are ports of cfitsio's
+`fits_rdecomp`/`fits_hdecompress`/`pl_l2pi`/`fits_quantize_float`, and the decode
+paths are cross-checked against **astropy- and cfitsio/`fpack`-produced golden
+files**. The gaps are missing optional pieces (`NOCOMPRESS`, `ZMASKCMP`/
+`NULL_PIXEL_MASK`, lossy-`HCOMPRESS` *encode* smoothing, the verbatim-copy
+reconstruction keywords, in-table VLA columns), not defects in the core codecs.
+
+### Conformance matrix
+
+| Doc § | Requirement | Code | Status |
+|---|---|---|---|
+| 10.1 | Compressed image = `BINTABLE`; tiles row-major, one per row | `decompress_image` (`compress/mod.rs:39`), `encode_image` (`:192`) | ✅ |
+| 10.1.1 | `ZIMAGE = T` mandatory | `NotCompressedImage` if absent (`compress/mod.rs:40`) | ✅ |
+| 10.1.1 | `ZCMPTYPE` mandatory; Table-36 values only | `decode_tile_cell` dispatch (`compress/mod.rs:629`) | ✅ read / 🟡 value not pre-validated |
+| 10.1.1 | `ZBITPIX` = original `BITPIX` | `Bitpix::from_code` (`compress/mod.rs:43`) | ✅ |
+| 10.1.1 | `ZNAXIS`/`ZNAXISn` = original dims | `read_axes` (`compress/mod.rs:686`) | ✅ / 🟡 `.max(0)` not `>0` |
+| 10.1.2 | `ZTILEn` tiling; default row-by-row | tile build (`compress/mod.rs`) | ✅ |
+| 10.1.2 / 10.4.1 | `ZNAMEi`/`ZVALi`: Rice `BLOCKSIZE` (16/**32**), `BYTEPIX` (1/2/4/**8**, def 4) | `rice_params` (`compress/rice.rs:8`) | ✅ |
+| 10.1.2 | `ZQUANTIZ` `NO_DITHER`/`SUBTRACTIVE_DITHER_1`/`_2` (def `NO_DITHER`) | `DitherMethod` (`compress/mod.rs`) | ✅ |
+| 10.1.2 | `ZDITHER0` (1–10000) dither seed | read (`compress/mod.rs`) | ✅ / 🟡 range unchecked |
+| 10.1.2 | `ZMASKCMP` null-mask codec | — | 🟢 not implemented |
+| 10.1.2 | `ZSIMPLE`/`ZTENSION`/`ZPCOUNT`/`ZHECKSUM`/… verbatim-copy (image) | not read/written | 🟢 not implemented |
+| 10.1.3 | `COMPRESSED_DATA` (`1P(B/I/J)` or `1Q…`) | `read_tiles` (`compress/mod.rs:539`); written `1P` | ✅ (P only; gap #6) |
+| 10.1.3 | `GZIP_COMPRESSED_DATA` fallback (null `COMPRESSED_DATA` descr.) | read+write (`compress/mod.rs:100`) | ✅ |
+| 10.1.3 | No `UNCOMPRESSED_DATA` column in 4.0 | read as 3rd fallback (`compress/mod.rs:101`) | 🟡 lenient (reads pre-standard column) |
+| 10.1.3 | `NULL_PIXEL_MASK` for lossy-codec nulls | — | 🟢 not implemented |
+| 10.1.3 | `ZBLANK` (column or keyword); column wins | keyword only (`compress/mod.rs`) | 🟡 keyword only |
+| 10.2 | `physical = ZZERO + ZSCALE × I` (Eq. 12) / dithered Eq. 14 | `dequantize` (`compress/quantize.rs:97`) | ✅ |
+| 10.2.1 | `SUBTRACTIVE_DITHER_2`: exact `0.0` ↔ `ZERO_VALUE` | `ZERO_VALUE` (`compress/quantize.rs:19`) | ✅ |
+| 10.2.1 / App. I | Park–Miller PRNG, 10000th seed = 1043618065 | `random_values` (`compress/quantize.rs:40`,`:53`) | ✅ |
+| 10.4.1 | `RICE_1` (integer only) | `rice_decode`/`rice_encode` (`compress/rice.rs:26`,`:77`) | ✅ |
+| 10.4.2 | `GZIP_1` DEFLATE; `GZIP_2` MSB-first shuffle | `compress/gzip.rs` | ✅ |
+| 10.4.3 | `PLIO_1` IRAF mask RLE (ints 0–2²⁴) | `compress/plio.rs` | ✅ |
+| 10.4.4 | `HCOMPRESS_1` 2-D; `SCALE` param; `SMOOTH` decode | `compress/hcompress.rs`; `hcompress_smooth` (`compress/mod.rs:657`) | ✅ decode / 🟡 no `SMOOTH` encode |
+| 10.4 | `NOCOMPRESS` stored uncompressed | `other` arm ⇒ `UnsupportedCompression` | 🟢 not implemented |
+| 10.3 | `ZTABLE = T`; one row per row-tile, `1QB` columns | `uncompress_table`/`compress_table` (`compress/table.rs:234`,`:158`) | ✅ |
+| 10.3.1 | `ZNAXIS1`/`ZNAXIS2`/`ZPCOUNT`/`ZFORMn`/`ZCTYPn`/`ZTILELEN` | parsed + written (`compress/table.rs`) | ✅ |
+| 10.3.5 | Tables: lossless `RICE_1`/`GZIP_1`/`GZIP_2` only | `Algo::parse` rejects others (`compress/table.rs:43`) | ✅ (no `NOCOMPRESS`) |
+| 10.3.4 | `ZTHEAP`/`ZHECKSUM`/`ZDATASUM` verbatim-copy (table) | only `ZPCOUNT` preserved | 🟢 not implemented |
+| 10.3.6 | VLA columns in a compressed table | rejected (`col_meta`, `compress/table.rs:122`) | 🟡 rejected, not compressed |
+
+### Gaps
+
+1. 🟢 **`NOCOMPRESS` is not supported (§10.4, Table 36).** It appears in neither
+   the decode dispatch (`decode_tile_cell`'s `other` arm → `UnsupportedCompression`,
+   `compress/mod.rs:629`) nor the encoders nor `Algo::parse` for tables
+   (`compress/table.rs:43`). A `ZCMPTYPE='NOCOMPRESS'` HDU (raw pixel bytes per
+   tile) fails to read.
+
+2. 🟡 **A pre-standard `UNCOMPRESSED_DATA` column is read (§10.1.3).** FITS 4.0
+   defines **no** such column, yet `decompress_image` reads it as a third per-tile
+   fallback (`compress/mod.rs:101`). Lenient/legacy-tolerant for a reader and
+   harmless, but it accepts a column the current standard does not sanction.
+
+3. 🟢 **Verbatim-copy reconstruction keywords neither read nor written (§10.1.2,
+   §10.3.4).** For images, `ZSIMPLE`/`ZTENSION`/`ZPCOUNT`/`ZHECKSUM`/`ZDATASUM`
+   (meant to rebuild a byte-identical original HDU) are ignored — `decompress_image`
+   returns a freshly-built `Image`. For tables, only `ZPCOUNT` is preserved;
+   `ZTHEAP`/`ZHECKSUM`/`ZDATASUM` are not. A compress→decompress cycle loses the
+   original SIMPLE/XTENSION/PCOUNT/checksum keywords.
+
+4. 🟢 **`NULL_PIXEL_MASK` / `ZMASKCMP` lossy-null preservation unimplemented
+   (§10.1.3, §10.2.2).** For lossy codecs (e.g. `HCOMPRESS` `SCALE > 0`),
+   undefined pixels must be recorded via a compressed mask. Neither keyword nor
+   column is referenced, so a lossy image carrying a null mask loses its
+   blank-pixel locations on decode (integer `BLANK` and float `ZBLANK`/NaN paths
+   *are* handled — gap #6 — so this affects only the lossy-mask case).
+
+5. 🟡 **VLA columns inside a compressed table are rejected, not compressed
+   (§10.3.6).** `col_meta` returns `UnsupportedCompression` for any `P`/`Q` source
+   column (`compress/table.rs:122`). The behavior is *clean* (the cfitsio-`fpack`
+   VLA fixture errors rather than misreads), but the §10.3.6 two-stage
+   descriptor-compression procedure is absent.
+
+6. 🟡 **Image encoders write only 32-bit `1P` descriptors, and `ZBLANK` is read
+   only as a keyword (§10.1.3).** Both image encoders emit `1P` (`i32`)
+   descriptors; the standard requires `1Q` (64-bit) once the heap exceeds ~2.1 GB,
+   which this writer cannot produce (decode of `1Q` works). Separately,
+   `decompress_image` reads only the `ZBLANK` *keyword*, never the legal per-tile
+   `ZBLANK` *column* (which the standard says wins over the keyword).
+
+7. 🟡 **Mild under-validation.** `ZCMPTYPE` is not checked against Table 36 up
+   front (an unknown value fails only when a tile is decoded); `read_axes` accepts
+   `ZNAXISn ≤ 0` via `.max(0)` (`compress/mod.rs:686`); `ZDITHER0` is not range-
+   checked (1–10000). All lenient-reader choices, none wrong on conforming files.
+
+### Test coverage
+
+Strong, anchored on independent golden files (astropy and cfitsio/`fpack`)
+(`compress/tests.rs`). Image decode: `decompresses_{gzip_1,gzip_2,rice_1,
+hcompress_1}_tiled_image` decode a 24×16 `i16` fixture asserting every pixel
+equals `x·7 − y·5`; `decompresses_plio_1_mask` asserts `(x+y)%7` per pixel.
+Lossy/quantized decode is pixel-exact against astropy: `decompresses_hcompress_lossy`
+(SCALE=4), `decompresses_hcompress_smoothed` (SMOOTH=1, bit-for-bit),
+`decompresses_subtractive_dither_2`, `decompresses_quantized_float_no_dither`,
+`decompresses_unquantized_float_via_gzip_fallback` (the `ZSCALE=0` path), and
+`decompresses_float_with_nan_nulls` (exactly 2 `ZBLANK`→NaN pixels). Encode is
+exercised by round-trip + cross-check: `compression_write_round_trips_through_decode`
+(all four integer codecs), `plio_write_round_trips_through_decode`,
+`float_quantize_write_round_trips_within_tolerance` (asserts both `max_err < 0.2`
+*and* that the tile actually quantized), `float_write_preserves_nan_nulls`,
+`hcompress_lossy_write_round_trips_within_scale` (`|err| ≤ scale`), and
+`dither2_quantize_round_trips` (exact zeros → `ZERO_VALUE` → exactly `0.0`). The
+PRNG has a built-in `debug_assert_eq!(seed, 1_043_618_065)`. Table compression:
+`table_compression_round_trips` (6-column table × `GZIP_1`/`GZIP_2`/`RICE_1` ×
+tile heights {10,4,1}, byte-identical); `decodes_a_cfitsio_compressed_table`
+(500-row `fpack -tableonly` file, mixed per-column codecs, byte-identical);
+`compressed_table_with_vla_column_is_rejected_cleanly`; and both readers reject a
+plain `BINTABLE`. Two `#[ignore]` emitters regenerate the write-side fixtures for
+external (astropy / `funpack`) validation.
+
+Coverage gaps:
+
+- No `NOCOMPRESS` (gap #1), `UNCOMPRESSED_DATA`-fallback decode (gap #2), or
+  `ZMASKCMP`/`NULL_PIXEL_MASK` (gap #4) test; no HDU-reconstruction test for the
+  verbatim-copy keywords (gap #3).
+- `RICE_1` is only tested at `BYTEPIX = 2`/`4`; `BYTEPIX = 1`/`8` and
+  `BLOCKSIZE = 16` are never decoded. `GZIP_2` is exercised only on `i16` outside
+  the float/table paths.
+- No `i64`/`u8` (`ZBITPIX = 64`/`8`) image and no ≥3-D compressed cube — all image
+  fixtures are 2-D `i16`/`i32`/`f32`, so multi-axis `ZTILEn` tiling is unexercised.
+- No `ZBLANK`-as-column (gap #6), `1Q`-descriptor write (gap #6), or non-default-
+  tiled image test; `ZTHEAP`/`ZHECKSUM`/`ZDATASUM` table preservation (gap #3) is
+  untested.
 
 ---
 
@@ -699,8 +1044,8 @@ tests. Findings are minor or design-level.
 | CONTINUE | Not applied to mandatory/reserved keywords | not enforced (moot: those aren't long strings) | 🟢 |
 | CONTINUE | Preserve original physical byte layout on round-trip | folds + canonical re-emit | 🟡 logical-only |
 | CHECKSUM | 32-bit ones'-complement sum, BE words, end-around carry | `accumulate` (`checksum.rs:9`) | ✅ |
-| DATASUM | Decimal string of **data-only** sum; `'0'` if no data; before CHECKSUM | `write_hdu` (`writer/mod.rs:228`) | ✅ |
-| CHECKSUM | 16-char ASCII, fixed cols 11/28; whole-HDU sum = −0 | placeholder + `patch_checksum` (`writer/mod.rs:455`) | ✅ |
+| DATASUM | Decimal string of **data-only** sum; `'0'` if no data; before CHECKSUM | `write_hdu` (`writer/mod.rs:314`) | ✅ |
+| CHECKSUM | 16-char ASCII, fixed cols 11/28; whole-HDU sum = −0 | placeholder + `patch_checksum` (`writer/mod.rs:581`) | ✅ |
 | CHECKSUM | Verify = sum HDU → `0xFFFFFFFF` | `verify_checksum` (`reader/mod.rs:209`) | ✅ |
 | CHECKSUM | J.2 ASCII encode, alphanumeric, punctuation fix-up | `encode` (`checksum.rs:25`) | ✅ |
 | CHECKSUM | Recommended timestamp comment | not written | 🟢 |
