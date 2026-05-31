@@ -176,6 +176,21 @@ impl<W: Write> FitsWriter<W> {
         self.write_hdu(header, data, SPACE_FILL)
     }
 
+    /// Write `image` as a tiled-compressed `BINTABLE` extension (§10.1), using the
+    /// `ZCMPTYPE` codec (`GZIP_1`/`GZIP_2`/`RICE_1`) and the given tile shape (empty
+    /// ⇒ row tiling). Requires the `compression` feature; integer images only.
+    #[cfg(feature = "compression")]
+    pub fn write_compressed_image(
+        &mut self,
+        image: &Image,
+        cmptype: &str,
+        tile_shape: &[usize],
+    ) -> Result<()> {
+        self.ensure_primary()?;
+        let (header, data) = crate::compress::encode_image(image, cmptype, tile_shape)?;
+        self.write_hdu(header, data, ZERO_FILL)
+    }
+
     /// Write a dataless primary HDU if none has been written yet, so subsequent
     /// extensions are well-formed.
     fn ensure_primary(&mut self) -> Result<()> {

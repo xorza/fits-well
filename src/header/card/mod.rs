@@ -143,9 +143,9 @@ impl Card {
         })
     }
 
-    /// Serialize back to an 80-byte record. Free-format: scalar values start at
-    /// column 11. A fixed-format writer (mandatory keywords right-justified) is a
-    /// later concern handled by the writer layer.
+    /// Serialize back to an 80-byte record in fixed format (§4.2): logical,
+    /// integer, real, and complex values are right-justified ending at column 30;
+    /// character strings keep their opening quote at column 11.
     pub fn render(&self) -> [u8; CARD_SIZE] {
         let mut buf = [b' '; CARD_SIZE];
         // HIERARCH lays out the whole card itself ("HIERARCH key = value"); the
@@ -172,11 +172,25 @@ impl Card {
             }
             CardKind::Value => {
                 buf[8] = b'=';
-                let body = format_value(self.value.as_ref().expect("value card carries a value"));
-                write_at(&mut buf, 10, &body);
+                let value = self.value.as_ref().expect("value card carries a value");
+                let body = format_value(value);
+                // Fixed format (§4.2.3–4.2.4): logical/integer/real/complex values
+                // are right-justified ending at column 30; character strings keep
+                // their opening quote at column 11 (left-justified). astropy and
+                // cfitsio both warn on a non-fixed-format mandatory keyword.
+                let end = match value {
+                    Value::Text(_) | Value::Undefined => {
+                        write_at(&mut buf, 10, &body);
+                        10 + body.len()
+                    }
+                    _ => {
+                        let end = (10 + body.len()).max(30);
+                        write_at(&mut buf, end - body.len(), &body);
+                        end
+                    }
+                };
                 if let Some(comment) = &self.comment {
-                    let pos = 10 + body.len();
-                    write_at(&mut buf, pos, &format!(" / {comment}"));
+                    write_at(&mut buf, end, &format!(" / {comment}"));
                 }
             }
             // A lone CONTINUE record: the substring (already a string value) sits

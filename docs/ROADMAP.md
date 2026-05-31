@@ -30,8 +30,9 @@ coordinate systems and the in-standard conventions (`CONTINUE`, `CHECKSUM`/
 - **Conventions** — `CHECKSUM`/`DATASUM` verify + write; `HIERARCH` parse/render. *(§J)*
 
 97 tests, validated against real sample files (incl. astropy-generated compressed
-fixtures). Phases 1–4 are **complete** and Phase 5a (tiled `GZIP_1`/`RICE_1`
-decompression) is done; the rest of Phase 5, plus WCS and time (6–7), remain.
+fixtures). Phases 1–4 are **complete**; Phase 5 decodes all five codecs and writes
+three (`GZIP_1`/`GZIP_2`/`RICE_1`). Float-quant write, `PLIO_1`/`HCOMPRESS_1`
+encoders, tiled table compression, and WCS/time (6–7) remain.
 
 ---
 
@@ -80,18 +81,26 @@ Already classified and sized; add typed access.
 - **Deliverable:** checksum verify against a CFITSIO/astropy-written file; HIERARCH
   parse + render round-trip.
 
-## Phase 5 — Tiled compression  🟡 5a partial  *(size: L)*
+## Phase 5 — Tiled compression  🟡 decode done; write partial  *(size: L)*
 Highest-value remaining *read* gap — most modern archive images are compressed.
 These are functional codecs (decode/encode), not the deferred speed work.
 
 - **5a. Tiled image decompression** — the `ZIMAGE` BINTABLE container, tile
   reassembly into the `ZNAXISn` image, and the codecs. *(§10.1)*
-  ✅ **`GZIP_1` + `RICE_1` done** — `read_compressed_image` behind the `compression`
-  feature, validated against astropy fixtures. `GZIP_2`, `PLIO_1`, `HCOMPRESS_1` TODO.
+  ✅ **All five codecs done** — `read_compressed_image` behind the `compression`
+  feature: `GZIP_1`, `GZIP_2`, `RICE_1`, `PLIO_1`, `HCOMPRESS_1` (SMOOTH=0), all
+  validated pixel-exact against astropy fixtures.
 - **5b. Floating-point quantization** — `ZSCALE`/`ZZERO`, `ZQUANTIZ`, subtractive
   dithering (`ZDITHER0`), NaN preservation. *(§10.2)*
-- **5c. Tiled table compression.** *(§10.3)*
-- **5d. Compression writing** (encode tiles). 
+  ✅ **Decode of `NO_DITHER` linear dequantization + raw-float gzip fallback done**
+  (validated against astropy). TODO: subtractive dithering, `ZBLANK`/NaN, and
+  quantization on the *write* path.
+- **5c. Tiled table compression.** *(§10.3)* — not started.
+- **5d. Compression writing** (encode tiles).
+  ✅ **`GZIP_1`/`GZIP_2`/`RICE_1` integer write done** — `write_compressed_image`
+  builds the `ZIMAGE` BINTABLE; output round-trips through the decoder and is read
+  pixel-exact by astropy. TODO: `PLIO_1`/`HCOMPRESS_1` encoders, float
+  quantization-encode (with dithering).
 - *(ref 07.) Gate behind the `compression` feature; the decoders themselves are
   the deliverable, not their performance.*
 - **Deliverable:** decode a Rice/GZIP-compressed image fixture and match the
