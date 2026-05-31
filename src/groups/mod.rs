@@ -73,11 +73,13 @@ impl RandomGroups {
             param_scaling,
             samples,
         };
-        assert_eq!(
-            groups.samples.len(),
-            groups.gcount * groups.group_len(),
-            "decoded sample count must match GCOUNT × (PCOUNT + array size)"
-        );
+        let expected = groups.gcount * groups.group_len();
+        if groups.samples.len() != expected {
+            return Err(FitsError::DataSizeMismatch {
+                expected,
+                got: groups.samples.len(),
+            });
+        }
         Ok(groups)
     }
 

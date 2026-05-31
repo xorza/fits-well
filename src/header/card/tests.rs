@@ -63,14 +63,35 @@ fn string_unescapes_quotes_and_trims_only_trailing_spaces() {
         parse("LEAD    = '   keep'").value,
         Some(Value::Text("   keep".into()))
     );
-    assert_eq!(
-        parse("EMPTY   = ''").value,
-        Some(Value::Text(String::new()))
-    );
-    assert_eq!(
-        parse("BLANKS  = '      '").value,
-        Some(Value::Text(String::new()))
-    );
+    // §4.2.1.1: `''` is the null string (length 0); an all-blank string keeps one
+    // significant space (length 1), and the two must compare unequal.
+    let null = parse("EMPTY   = ''").value;
+    assert_eq!(null, Some(Value::Text(String::new())));
+    let blank = parse("BLANKS  = '      '").value;
+    assert_eq!(blank, Some(Value::Text(" ".into())));
+    assert_ne!(null, blank);
+}
+
+#[test]
+fn large_magnitude_real_renders_with_exponent_and_round_trips() {
+    // Display would expand 1e300 to 301 digits and overflow the 80-byte card;
+    // format_real must use the §4.2.4 uppercase-`E` form instead (no truncation).
+    for &r in &[1e300_f64, -1e300, 1e-300, 2.5e123] {
+        let card = Card {
+            keyword: "BIG".into(),
+            value: Some(Value::Real(r)),
+            comment: None,
+            kind: CardKind::Value,
+        };
+        let rendered = card.render();
+        let text = std::str::from_utf8(&rendered).unwrap();
+        assert!(
+            text.contains('E') && !text.contains('e'),
+            "expected uppercase exponent, got {text:?}"
+        );
+        let reparsed = Card::parse(&rendered).unwrap();
+        assert_eq!(reparsed.value, Some(Value::Real(r)), "round-trip {r}");
+    }
 }
 
 #[test]
