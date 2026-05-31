@@ -210,7 +210,23 @@ fn time_scale_parse_strips_realization_and_aliases() {
     assert_eq!(TimeScale::parse("tt"), TimeScale::Tt);
     assert_eq!(TimeScale::parse("TDT"), TimeScale::Tt); // alias
     assert_eq!(TimeScale::parse("IAT"), TimeScale::Tai); // alias
+    assert_eq!(TimeScale::parse("GMT"), TimeScale::Utc); // §9.2.1: GMT ≡ UTC
     assert_eq!(TimeScale::parse("BOGUS"), TimeScale::Local);
+}
+
+#[test]
+fn timeoffs_shifts_relative_times() {
+    use crate::header::Header;
+    // MJDREF=58000, TIMEUNIT=s, TIMEOFFS=10 s: the offset is added before scaling,
+    // so a relative value of 0 lands 10 s past the reference (§9.4.1).
+    let mut h = Header::new();
+    h.set("MJDREF", 58000.0);
+    h.set("TIMEUNIT", "s");
+    h.set("TIMEOFFS", 10.0);
+    let t = FitsTime::from_header(&h);
+    assert_eq!(t.timeoffs, 10.0);
+    assert!((t.relative_to_mjd(0.0) - (58000.0 + 10.0 / 86400.0)).abs() < 1e-12);
+    assert!((t.relative_to_mjd(5.0) - (58000.0 + 15.0 / 86400.0)).abs() < 1e-12);
 }
 
 #[test]

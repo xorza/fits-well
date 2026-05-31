@@ -759,14 +759,14 @@ semantics, table-only constructs, and the non-`TIME` time axes.
    splits off the `(...)` realization before matching, so `'TT(TAI)'` → `TT`,
    `'UTC(NIST)'` → `UTC`. Covered by `time_scale_parse_strips_realization_and_aliases`.
 
-4. 🟡 **`GMT` maps to `LOCAL` instead of `UTC` (§9.2.1, Table 30).** `GMT` is a
-   recognized value (continuous with UTC), but `TimeScale::parse` has no `GMT` arm
-   so it falls to `Local` (`time/mod.rs:225`) and is treated as unconvertible.
+4. ✅ **FIXED — `GMT` aliases `UTC` (§9.2.1, Table 30).** `TimeScale::parse` maps
+   `GMT` (continuous with UTC) to `Utc`. Covered by
+   `time_scale_parse_strips_realization_and_aliases`.
 
-5. 🟡 **`TIMEOFFS` (§9.4.1) not applied.** A bulk clock correction added to the
-   reference time. `relative_to_mjd` (`time/mod.rs:414`) omits the `TIMEOFFS` term,
-   so `TSTART`/`TSTOP` and table time-pixel values resolve to the wrong absolute
-   MJD when an offset is present.
+5. ✅ **FIXED — `TIMEOFFS` applied (§9.4.1).** `FitsTime.timeoffs` is read and
+   `relative_to_mjd` adds it (in `TIMEUNIT`) before scaling, so `TSTART`/`TSTOP`
+   and the time axis resolve correctly when a bulk clock correction is present.
+   Covered by `timeoffs_shifts_relative_times`.
 
 6. 🟡 **ISO-8601 syntax is lenient (§9.1.1).** `Datetime::parse` uses integer
    `.parse()` per field (`time/mod.rs:45`), so `'2024-1-1'` (leading zeros omitted,

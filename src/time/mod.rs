@@ -217,7 +217,7 @@ impl TimeScale {
         // `UTC(NIST)` (§9.2.1); strip it before matching the scale name.
         let base = s.trim().split('(').next().unwrap_or("").trim();
         match base.to_ascii_uppercase().as_str() {
-            "UTC" => TimeScale::Utc,
+            "UTC" | "GMT" => TimeScale::Utc, // §9.2.1: GMT is continuous with UTC
             "UT1" | "UT" => TimeScale::Ut1,
             "TAI" | "IAT" => TimeScale::Tai,
             "TT" | "TDT" | "ET" => TimeScale::Tt,
@@ -382,6 +382,9 @@ pub struct FitsTime {
     pub mjdref: f64,
     /// `TIMEUNIT` (default `'s'`).
     pub timeunit: String,
+    /// `TIMEOFFS` (§9.4.1): a uniform additive clock correction in `TIMEUNIT`,
+    /// equivalent to shifting the reference time. Default `0.0`.
+    pub timeoffs: f64,
     /// `TREFPOS` (reference position, e.g. `'TOPOCENTER'`), if present.
     pub trefpos: Option<String>,
 }
@@ -399,6 +402,7 @@ impl FitsTime {
             scale,
             mjdref: reference_mjd(header),
             timeunit,
+            timeoffs: header.get_real("TIMEOFFS").unwrap_or(0.0),
             trefpos,
         }
     }
@@ -421,9 +425,10 @@ impl FitsTime {
     }
 
     /// Resolve a time value measured *relative* to `MJDREF` (e.g. `TSTART`,
-    /// `TSTOP`), in `TIMEUNIT`, to an absolute MJD in the frame's own scale.
+    /// `TSTOP`), in `TIMEUNIT`, to an absolute MJD in the frame's own scale. The
+    /// `TIMEOFFS` clock correction (§9.4.1) is added before scaling.
     pub fn relative_to_mjd(&self, value: f64) -> f64 {
-        self.mjdref + value * self.unit_seconds() / SEC_PER_DAY
+        self.mjdref + (value + self.timeoffs) * self.unit_seconds() / SEC_PER_DAY
     }
 
     /// The observation MJD from `MJD-OBS`, else `DATE-OBS`, else `None`.
