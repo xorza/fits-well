@@ -728,7 +728,7 @@ to an astronomy library (astropy `SkyCoord`/`time`, ERFA), not implemented here.
 | 9.4.3 | `TIMSYER` / `TIMRDER` time errors | — | 🟢 not implemented |
 | 9.5 | `DATE-OBS` / `MJD-OBS` start time | `obs_mjd` (`time/mod.rs:419`) | ✅ |
 | 9.5 | `DATE-BEG`/`-END`, `MJD-BEG`/`-END` typed | — | 🟢 raw cards only |
-| 9.5 | `TSTART`/`TSTOP` (rel. to `[M]JDREF`, in `TIMEUNIT`) | `relative_to_mjd` (`time/mod.rs:414`) | ✅ / 🟡 ignores `TIMEOFFS` |
+| 9.5 | `TSTART`/`TSTOP` (rel. to `[M]JDREF`, in `TIMEUNIT`) | `relative_to_mjd` (incl. `TIMEOFFS`) | ✅ |
 | 9.6 | `CTYPEi='TIME'` image time axis → world time | `time_axis_mjd` (`time/mod.rs:433`) | ✅ |
 | 9.6 | `'PHASE'`/`'TIMELAG'`/`'FREQUENCY'`; `CZPHSia`/`CPERIia` | `is_time_ctype` recognizes `'TIME'`+scales only (`time/mod.rs:447`) | 🟢 not implemented |
 | 9.7 | `XPOSURE` / `TELAPSE` durations; GTI `START`/`STOP` | — | 🟢 raw cards only |
