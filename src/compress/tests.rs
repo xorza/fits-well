@@ -353,7 +353,7 @@ fn hcompress_lossy_write_round_trips_within_scale() {
 
     // A smooth-ish 32×32 i32 image; lossy HCOMPRESS with SCALE=4.
     let samples: Vec<i32> = (0..32 * 32)
-        .map(|i| (100 + 5 * (i % 32) + 3 * (i / 32)) as i32)
+        .map(|i| 100 + 5 * (i % 32) + 3 * (i / 32))
         .collect();
     let image = Image {
         shape: vec![32, 32],
@@ -379,7 +379,10 @@ fn hcompress_lossy_write_round_trips_within_scale() {
         .map(|(a, b)| (a - b).abs())
         .max()
         .unwrap();
-    assert!(max_err <= 4, "HCOMPRESS lossy error {max_err} exceeds scale");
+    assert!(
+        max_err <= 4,
+        "HCOMPRESS lossy error {max_err} exceeds scale"
+    );
 }
 
 #[test]

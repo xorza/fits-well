@@ -81,33 +81,41 @@ fn frame_transforms_match_astropy() {
     // Crab nebula in ICRS.
     let (ra, dec) = (83.633212, 22.014460);
 
-    // ICRS → FK5(J2000): essentially identity (the ~25 mas frame bias is omitted),
-    // so it must agree with astropy to better than that bias.
+    // ICRS → FK5(J2000): the IAU-2000 frame bias (~25 mas), matched to astropy.
     let (r, d) = Frame::Icrs
         .transform(ra, dec, Frame::Fk5 { equinox: 2000.0 })
         .unwrap();
-    assert!((r - 83.6332196247).abs() < 1e-4 && (d - 22.0144547866).abs() < 1e-4);
+    assert!((r - 83.6332196247).abs() < 1e-8 && (d - 22.0144547866).abs() < 1e-8);
 
-    // ICRS → FK5(J1975): IAU-1976 precession (~0.4°). astropy golden.
+    // ICRS → FK5(J1975): frame bias + IAU-1976 precession. Golden is bias·pmat76
+    // (our precession matrix is bit-identical to `erfa.pmat76`). astropy uses the
+    // IAU-2006 model for FK5 and so differs by ~68 mas over these 25 years.
     let (r, d) = Frame::Icrs
         .transform(ra, dec, Frame::Fk5 { equinox: 1975.0 })
         .unwrap();
     assert!(
-        (r - 83.2570686203).abs() < 1e-4 && (d - 21.9985676945).abs() < 1e-4,
+        (r - 83.2570463443).abs() < 1e-8 && (d - 21.9985649535).abs() < 1e-8,
         "FK5(J1975): got ({r},{d})"
     );
 
-    // ICRS → Galactic: the classic Hipparcos matrix differs from astropy's
-    // ICRS-native matrix by the same ~25 mas frame-bias level.
+    // ICRS → Galactic: the exact astropy matrix.
     let (l, b) = Frame::Icrs.transform(ra, dec, Frame::Galactic).unwrap();
     assert!(
-        (l - 184.5575560202).abs() < 1e-4 && (b - (-5.7842773615)).abs() < 1e-4,
+        (l - 184.5575560202).abs() < 1e-8 && (b - (-5.7842773615)).abs() < 1e-8,
         "Galactic: got ({l},{b})"
     );
 
-    // FK4 transforms are not yet implemented.
+    // ICRS → FK4(B1950): precession + E-terms. astropy golden (~few mas accuracy).
+    let (r, d) = Frame::Icrs
+        .transform(ra, dec, Frame::Fk4 { equinox: 1950.0 })
+        .unwrap();
+    assert!(
+        (r - 82.8809530677).abs() < 1e-4 && (d - 21.9817695456).abs() < 1e-4,
+        "FK4(B1950): got ({r},{d})"
+    );
+    // FK4 at a non-B1950 equinox needs Newcomb pre-precession — not yet supported.
     assert!(matches!(
-        Frame::Icrs.transform(ra, dec, Frame::Fk4 { equinox: 1950.0 }),
+        Frame::Icrs.transform(ra, dec, Frame::Fk4 { equinox: 1975.0 }),
         Err(crate::error::FitsError::UnsupportedFrame)
     ));
 }
@@ -210,11 +218,38 @@ fn legacy_crota_rotation_matches_astropy() {
     }
 }
 
+#[test]
+fn allsky_projections_match_astropy() {
+    use crate::header::Header;
+    // AIT/MOL, CRPIX 50/50, CRVAL 45/30, CDELT (−0.2, 0.2). astropy golden.
+    let golden: &[(&str, f64, f64, f64, f64)] = &[
+        ("AIT", 20.0, 70.0, 52.2235197328, 33.8100763254),
+        ("AIT", 80.0, 30.0, 38.3347274957, 25.8258310813),
+        ("MOL", 20.0, 70.0, 52.9816602799, 33.3699739563),
+        ("MOL", 80.0, 30.0, 37.5753525553, 26.1818233270),
+    ];
+    for &(proj, px, py, ra, dec) in golden {
+        let mut h = Header::new();
+        h.set("NAXIS", 2);
+        h.set("CTYPE1", format!("RA---{proj}"));
+        h.set("CTYPE2", format!("DEC--{proj}"));
+        h.set("CRPIX1", 50.0).set("CRPIX2", 50.0);
+        h.set("CRVAL1", 45.0).set("CRVAL2", 30.0);
+        h.set("CDELT1", -0.2).set("CDELT2", 0.2);
+        let w = Wcs::from_header(&h, None).unwrap();
+        let out = w.pixel_to_world(&[px, py]);
+        assert!(
+            (out[0] - ra).abs() < 1e-7 && (out[1] - dec).abs() < 1e-7,
+            "{proj} at ({px},{py}): got {out:?}, want ({ra},{dec})"
+        );
+    }
+}
+
 /// Every projection's deprojection inverts its forward projection.
 #[test]
 fn projections_round_trip() {
     use Projection::*;
-    for proj in [Tan, Sin, Arc, Stg, Zea, Car, Cea, Mer, Sfl] {
+    for proj in [Tan, Sin, Arc, Stg, Zea, Car, Cea, Mer, Sfl, Ait, Mol] {
         // Positive native latitudes, away from the poles: in-domain for both the
         // zenithal (θ > 0 only) and cylindrical families.
         for &(phi, theta) in &[(30.0_f64, 70.0_f64), (-60.0, 40.0), (20.0, 25.0)] {
