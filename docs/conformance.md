@@ -723,7 +723,7 @@ to an astronomy library (astropy `SkyCoord`/`time`, ERFA), not implemented here.
 | 9.2.3 | `TREFPOS` keyword (Table 31); position-dependent light-travel correction | stored verbatim (`time/mod.rs:394`) | ✅ read / ⚪ correction out of scope |
 | 9.2.4 | `TREFDIR`/`TRDIRn` reference direction (correction geometry) | — | ⚪ out of scope (astronomy) |
 | 9.2.5 | `PLEPHEM` (default `DE405`) planetary ephemeris | — | ⚪ out of scope (astronomy) |
-| 9.4.1 | `TIMEOFFS` added to reference time | not read; `relative_to_mjd` (`time/mod.rs:414`) omits it | 🟡 not applied |
+| 9.4.1 | `TIMEOFFS` added to reference time | `FitsTime.timeoffs` added in `relative_to_mjd` | ✅ |
 | 9.4.2 | `TIMEDEL` / `TIMEPIXR` binning | — | 🟡 not implemented |
 | 9.4.3 | `TIMSYER` / `TIMRDER` time errors | — | 🟢 not implemented |
 | 9.5 | `DATE-OBS` / `MJD-OBS` start time | `obs_mjd` (`time/mod.rs:419`) | ✅ |
