@@ -2,10 +2,10 @@
 //!
 //! A binary table is `NAXIS2` rows of `NAXIS1` bytes; each of `TFIELDS` columns
 //! occupies a fixed byte range in every row, typed by its `TFORMn` code. This
-//! module parses that structure into [`Column`] descriptors and decodes the
-//! fixed-width fields into typed [`ColumnData`]. Variable-length arrays (`P`/`Q`
-//! descriptors into the heap) and per-column `TSCALn`/`TZEROn` physical scaling
-//! are parsed-for-layout but not yet decoded — see [`ColumnData`].
+//! module parses that structure into [`Column`] descriptors and decodes:
+//! fixed-width fields into typed [`ColumnData`] ([`BinTable::read_column`]), the
+//! `TSCALn`/`TZEROn` physical plane ([`BinTable::read_column_physical`]), and
+//! `P`/`Q` variable-length arrays out of the heap ([`BinTable::read_vla_column`]).
 
 use crate::error::FitsError;
 use crate::error::Result;
@@ -95,12 +95,16 @@ impl TformKind {
     }
 }
 
-/// A parsed `TFORMn` value: a repeat count and an element kind. The `rTa` form's
-/// trailing `a` (e.g. the `(emax)` of a variable-length array) is not retained.
+/// A parsed `TFORMn` value: a repeat count, an element kind, and (for the `P`/`Q`
+/// variable-length-array descriptors) the kind of the array elements in the heap.
+/// The `rTa` form's trailing `(emax)` size hint is not retained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tform {
     pub repeat: usize,
     pub kind: TformKind,
+    /// For `P`/`Q` columns, the element kind of the heap array (the `t` in
+    /// `rPt(emax)`); `None` for fixed-width columns.
+    pub vla_elem: Option<TformKind>,
 }
 
 impl Tform {
@@ -120,7 +124,18 @@ impl Tform {
             s[..pos].parse().map_err(|_| invalid())?
         };
         let kind = TformKind::from_code(s.as_bytes()[pos]).ok_or_else(invalid)?;
-        Ok(Tform { repeat, kind })
+        // A P/Q descriptor is followed by its heap element-type letter (`rPt`).
+        let vla_elem = if matches!(kind, TformKind::ArrayDesc32 | TformKind::ArrayDesc64) {
+            let elem = s.as_bytes().get(pos + 1).copied().ok_or_else(invalid)?;
+            Some(TformKind::from_code(elem).ok_or_else(invalid)?)
+        } else {
+            None
+        };
+        Ok(Tform {
+            repeat,
+            kind,
+            vla_elem,
+        })
     }
 
     /// The number of bytes this column occupies in every row.
@@ -139,9 +154,9 @@ pub struct Column {
     pub name: Option<String>,
     pub unit: Option<String>,
     pub tform: Tform,
-    /// `TSCALn` (default 1.0) — not yet applied by [`BinTable::read_column`].
+    /// `TSCALn` (default 1.0); applied by [`BinTable::read_column_physical`].
     pub tscale: f64,
-    /// `TZEROn` (default 0.0) — not yet applied by [`BinTable::read_column`].
+    /// `TZEROn` (default 0.0); applied by [`BinTable::read_column_physical`].
     pub tzero: f64,
     /// `TNULLn`, the integer value denoting an undefined element, if declared.
     pub tnull: Option<i64>,
@@ -175,9 +190,11 @@ pub struct BinTable {
     pub nrows: usize,
     pub columns: Vec<Column>,
     row_len: usize,
+    /// Byte offset of the heap within `bytes` (`THEAP`, default = main-table size).
+    heap_offset: usize,
     /// The whole data unit (the `nrows * row_len` main table, then the heap and
-    /// block fill). Column reads index the main-table prefix; the heap is kept
-    /// for future `P`/`Q` variable-length-array decoding.
+    /// block fill). Fixed-width reads index the main-table prefix; `P`/`Q` columns
+    /// follow their descriptors into the heap.
     bytes: Vec<u8>,
 }
 
@@ -232,10 +249,14 @@ impl BinTable {
         if data.len() < nrows * row_len {
             return Err(FitsError::UnexpectedEof);
         }
+        let heap_offset = header
+            .get_integer("THEAP")
+            .map_or(nrows * row_len, |t| t.max(0) as usize);
         Ok(BinTable {
             nrows,
             columns,
             row_len,
+            heap_offset,
             bytes: data,
         })
     }
@@ -247,48 +268,109 @@ impl BinTable {
             .position(|c| c.name.as_deref() == Some(name))
     }
 
-    /// Decode the column at `index` into a typed, row-flattened [`ColumnData`].
+    /// Decode the fixed-width column at `index` into a typed, row-flattened
+    /// [`ColumnData`]. Variable-length (`P`/`Q`) columns error here — use
+    /// [`BinTable::read_vla_column`].
     pub fn read_column(&self, index: usize) -> Result<ColumnData> {
-        let col = self
-            .columns
+        let col = self.column(index)?;
+        if matches!(
+            col.tform.kind,
+            TformKind::ArrayDesc32 | TformKind::ArrayDesc64
+        ) {
+            return Err(FitsError::VariableLengthColumn {
+                code: col.tform.kind.code(),
+            });
+        }
+        // `A` is one string per row; every other fixed kind decodes uniformly
+        // from the concatenated cell bytes — cell boundaries land on element
+        // boundaries, so the flat decode is exact.
+        Ok(if col.tform.kind == TformKind::Char {
+            ColumnData::Text(
+                (0..self.nrows)
+                    .map(|r| trim_text(self.cell(col, r)))
+                    .collect(),
+            )
+        } else {
+            decode_array(col.tform.kind, &self.flatten(col))
+        })
+    }
+
+    /// Decode a numeric column and apply its scaling: `physical = TZEROn + TSCALn
+    /// × raw`, mapping integers equal to `TNULLn` to `NaN`. Errors for the
+    /// non-numeric kinds (`A`/`L`/`X`/`C`/`M`) and variable-length columns.
+    pub fn read_column_physical(&self, index: usize) -> Result<Vec<f64>> {
+        let col = self.column(index)?;
+        let scale = |x: f64| col.tzero + col.tscale * x;
+        let tnull = col.tnull;
+        let scaled_int = |xi: i64| {
+            if tnull == Some(xi) {
+                f64::NAN
+            } else {
+                scale(xi as f64)
+            }
+        };
+        Ok(match self.read_column(index)? {
+            ColumnData::Bytes(v) if col.tform.kind == TformKind::Byte => {
+                v.iter().map(|&b| scaled_int(b as i64)).collect()
+            }
+            ColumnData::I16(v) => v.iter().map(|&x| scaled_int(x as i64)).collect(),
+            ColumnData::I32(v) => v.iter().map(|&x| scaled_int(x as i64)).collect(),
+            ColumnData::I64(v) => v.iter().map(|&x| scaled_int(x)).collect(),
+            ColumnData::F32(v) => v.iter().map(|&x| scale(x as f64)).collect(),
+            ColumnData::F64(v) => v.iter().map(|&x| scale(x)).collect(),
+            _ => {
+                return Err(FitsError::NonNumericColumn {
+                    code: col.tform.kind.code(),
+                });
+            }
+        })
+    }
+
+    /// Decode a variable-length-array (`P`/`Q`) column: one [`ColumnData`] per
+    /// row, each holding that row's heap array (which may be empty). Errors for
+    /// fixed-width columns.
+    pub fn read_vla_column(&self, index: usize) -> Result<Vec<ColumnData>> {
+        let col = self.column(index)?;
+        let (elem, wide) = match (col.tform.kind, col.tform.vla_elem) {
+            (TformKind::ArrayDesc32, Some(e)) => (e, false),
+            (TformKind::ArrayDesc64, Some(e)) => (e, true),
+            _ => {
+                return Err(FitsError::NotAVla {
+                    code: col.tform.kind.code(),
+                });
+            }
+        };
+        let mut out = Vec::with_capacity(self.nrows);
+        for r in 0..self.nrows {
+            let desc = self.cell(col, r);
+            // The descriptor is (element count, byte offset into the heap), as a
+            // pair of 32-bit (`P`) or 64-bit (`Q`) big-endian integers.
+            let (nelem, offset) = if wide {
+                (be_u64(&desc[0..8]), be_u64(&desc[8..16]))
+            } else {
+                (be_u32(&desc[0..4]), be_u32(&desc[4..8]))
+            };
+            let nbytes = match elem {
+                TformKind::Bit => nelem.div_ceil(8),
+                _ => nelem * elem.elem_size(),
+            };
+            let start = self.heap_offset + offset;
+            let slice = self
+                .bytes
+                .get(start..start + nbytes)
+                .ok_or(FitsError::UnexpectedEof)?;
+            out.push(decode_array(elem, slice));
+        }
+        Ok(out)
+    }
+
+    fn column(&self, index: usize) -> Result<&Column> {
+        self.columns
             .get(index)
             .ok_or(FitsError::ColumnIndexOutOfBounds {
                 index,
                 len: self.columns.len(),
-            })?;
-        Ok(match col.tform.kind {
-            TformKind::Char => ColumnData::Text(
-                (0..self.nrows)
-                    .map(|r| trim_text(self.cell(col, r)))
-                    .collect(),
-            ),
-            TformKind::Logical => {
-                ColumnData::Logical(self.flatten(col).iter().map(|&b| b == b'T').collect())
-            }
-            TformKind::Byte | TformKind::Bit => ColumnData::Bytes(self.flatten(col)),
-            TformKind::I16 => ColumnData::I16(self.elems(col, i16::from_be_bytes)),
-            TformKind::I32 => ColumnData::I32(self.elems(col, i32::from_be_bytes)),
-            TformKind::I64 => ColumnData::I64(self.elems(col, i64::from_be_bytes)),
-            TformKind::F32 => ColumnData::F32(self.elems(col, f32::from_be_bytes)),
-            TformKind::F64 => ColumnData::F64(self.elems(col, f64::from_be_bytes)),
-            TformKind::ComplexF32 => ColumnData::ComplexF32(self.elems(col, |b: [u8; 8]| {
-                (
-                    f32::from_be_bytes([b[0], b[1], b[2], b[3]]),
-                    f32::from_be_bytes([b[4], b[5], b[6], b[7]]),
-                )
-            })),
-            TformKind::ComplexF64 => ColumnData::ComplexF64(self.elems(col, |b: [u8; 16]| {
-                (
-                    f64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
-                    f64::from_be_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]),
-                )
-            })),
-            TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
-                return Err(FitsError::UnsupportedColumn {
-                    tform: format!("{}{}", col.tform.repeat, col.tform.kind.code()),
-                });
-            }
-        })
+            })
     }
 
     /// The raw bytes of column `col` in row `r`.
@@ -305,18 +387,40 @@ impl BinTable {
         }
         out
     }
+}
 
-    /// Decode every `N`-byte big-endian element of `col` across all rows.
-    fn elems<const N: usize, T>(&self, col: &Column, conv: fn([u8; N]) -> T) -> Vec<T> {
-        let mut out = Vec::with_capacity(self.nrows * col.tform.repeat);
-        for r in 0..self.nrows {
-            for chunk in self.cell(col, r).chunks_exact(N) {
-                out.push(conv(
-                    chunk.try_into().expect("chunks_exact yields N-byte arrays"),
-                ));
-            }
-        }
-        out
+/// Decode `bytes` as a contiguous run of `kind` elements. Shared by fixed-width
+/// reads (concatenated cells) and heap arrays.
+fn decode_array(kind: TformKind, bytes: &[u8]) -> ColumnData {
+    fn conv<const N: usize, T>(bytes: &[u8], f: fn([u8; N]) -> T) -> Vec<T> {
+        bytes
+            .chunks_exact(N)
+            .map(|c| f(c.try_into().expect("chunks_exact yields N-byte arrays")))
+            .collect()
+    }
+    match kind {
+        TformKind::Logical => ColumnData::Logical(bytes.iter().map(|&b| b == b'T').collect()),
+        TformKind::Byte | TformKind::Bit => ColumnData::Bytes(bytes.to_vec()),
+        TformKind::Char => ColumnData::Text(vec![trim_text(bytes)]),
+        TformKind::I16 => ColumnData::I16(conv(bytes, i16::from_be_bytes)),
+        TformKind::I32 => ColumnData::I32(conv(bytes, i32::from_be_bytes)),
+        TformKind::I64 => ColumnData::I64(conv(bytes, i64::from_be_bytes)),
+        TformKind::F32 => ColumnData::F32(conv(bytes, f32::from_be_bytes)),
+        TformKind::F64 => ColumnData::F64(conv(bytes, f64::from_be_bytes)),
+        TformKind::ComplexF32 => ColumnData::ComplexF32(conv(bytes, |b: [u8; 8]| {
+            (
+                f32::from_be_bytes([b[0], b[1], b[2], b[3]]),
+                f32::from_be_bytes([b[4], b[5], b[6], b[7]]),
+            )
+        })),
+        TformKind::ComplexF64 => ColumnData::ComplexF64(conv(bytes, |b: [u8; 16]| {
+            (
+                f64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+                f64::from_be_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]),
+            )
+        })),
+        // A heap element can't itself be a descriptor; keep the raw bytes.
+        TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => ColumnData::Bytes(bytes.to_vec()),
     }
 }
 
@@ -327,6 +431,14 @@ fn trim_text(cell: &[u8]) -> String {
         .rposition(|&b| b != b' ' && b != 0)
         .map_or(0, |i| i + 1);
     String::from_utf8_lossy(&cell[..end]).into_owned()
+}
+
+fn be_u32(b: &[u8]) -> usize {
+    i32::from_be_bytes([b[0], b[1], b[2], b[3]]).max(0) as usize
+}
+
+fn be_u64(b: &[u8]) -> usize {
+    i64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]).max(0) as usize
 }
 
 #[cfg(test)]
@@ -351,28 +463,43 @@ mod tests {
         h
     }
 
+    fn tform(repeat: usize, kind: TformKind, vla_elem: Option<TformKind>) -> Tform {
+        Tform {
+            repeat,
+            kind,
+            vla_elem,
+        }
+    }
+
     #[test]
     fn parses_tform_repeat_and_kind() {
         let cases = [
-            ("8A", 8, TformKind::Char),
-            ("3D", 3, TformKind::F64),
-            ("0D", 0, TformKind::F64),
-            ("1J", 1, TformKind::I32),
-            ("E", 1, TformKind::F32), // bare code ⇒ repeat 1
-            ("16X", 16, TformKind::Bit),
-            ("1PE(5)", 1, TformKind::ArrayDesc32),
+            ("8A", tform(8, TformKind::Char, None)),
+            ("3D", tform(3, TformKind::F64, None)),
+            ("0D", tform(0, TformKind::F64, None)),
+            ("1J", tform(1, TformKind::I32, None)),
+            ("E", tform(1, TformKind::F32, None)), // bare code ⇒ repeat 1
+            ("16X", tform(16, TformKind::Bit, None)),
+            // P/Q carry the heap element type.
+            (
+                "1PE(5)",
+                tform(1, TformKind::ArrayDesc32, Some(TformKind::F32)),
+            ),
+            (
+                "1QD",
+                tform(1, TformKind::ArrayDesc64, Some(TformKind::F64)),
+            ),
         ];
-        for (s, repeat, kind) in cases {
-            assert_eq!(Tform::parse(s).unwrap(), Tform { repeat, kind }, "{s}");
+        for (s, expected) in cases {
+            assert_eq!(Tform::parse(s).unwrap(), expected, "{s}");
         }
-        assert!(matches!(
-            Tform::parse("9Z"),
-            Err(FitsError::InvalidTform { .. })
-        ));
-        assert!(matches!(
-            Tform::parse(""),
-            Err(FitsError::InvalidTform { .. })
-        ));
+        for bad in ["9Z", "", "1P"] {
+            // "1P" lacks the required heap element-type letter.
+            assert!(
+                matches!(Tform::parse(bad), Err(FitsError::InvalidTform { .. })),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
@@ -382,7 +509,8 @@ mod tests {
         assert_eq!(Tform::parse("0D").unwrap().byte_width(), 0);
         assert_eq!(Tform::parse("16X").unwrap().byte_width(), 2); // 16 bits = 2 bytes
         assert_eq!(Tform::parse("9X").unwrap().byte_width(), 2); //  9 bits = 2 bytes
-        assert_eq!(Tform::parse("1P").unwrap().byte_width(), 8); // 32-bit descriptor
+        assert_eq!(Tform::parse("1PB").unwrap().byte_width(), 8); // 32-bit descriptor
+        assert_eq!(Tform::parse("1QB").unwrap().byte_width(), 16); // 64-bit descriptor
     }
 
     #[test]
@@ -428,12 +556,75 @@ mod tests {
     }
 
     #[test]
-    fn variable_length_array_column_is_reported_unsupported() {
+    fn read_column_physical_applies_tscal_tzero_and_tnull() {
+        let mut header = table_header(2, 3, &["1I"]); // i16 column
+        header
+            .set("TSCAL1", 2.0)
+            .set("TZERO1", 10.0)
+            .set("TNULL1", 5);
+        let mut data = Vec::new();
+        for x in [3i16, 5, 7] {
+            data.extend_from_slice(&x.to_be_bytes());
+        }
+        let table = BinTable::from_data(&header, data).unwrap();
+        let phys = table.read_column_physical(0).unwrap();
+        // 3 → 10 + 2·3 = 16 ; 5 == TNULL → NaN ; 7 → 10 + 2·7 = 24
+        assert_eq!(phys[0], 16.0);
+        assert!(phys[1].is_nan());
+        assert_eq!(phys[2], 24.0);
+    }
+
+    #[test]
+    fn read_column_physical_rejects_non_numeric_columns() {
+        let header = table_header(3, 1, &["3A"]);
+        let table = BinTable::from_data(&header, b"abc".to_vec()).unwrap();
+        assert!(matches!(
+            table.read_column_physical(0),
+            Err(FitsError::NonNumericColumn { code: 'A' })
+        ));
+    }
+
+    #[test]
+    fn read_column_on_a_vla_directs_to_read_vla_column() {
         let header = table_header(8, 1, &["1PE(3)"]);
         let table = BinTable::from_data(&header, vec![0u8; 8]).unwrap();
         assert!(matches!(
             table.read_column(0),
-            Err(FitsError::UnsupportedColumn { .. })
+            Err(FitsError::VariableLengthColumn { code: 'P' })
+        ));
+    }
+
+    #[test]
+    fn decodes_variable_length_arrays_from_the_heap() {
+        // One `PE` column (f32 heap arrays), two rows of different lengths.
+        // Main table = two 8-byte `P` descriptors; the heap follows at THEAP
+        // (default = main size = 16).
+        let header = table_header(8, 2, &["1PE(3)"]);
+        let mut data = Vec::new();
+        // descriptors: row 0 → (nelem 2, offset 0), row 1 → (nelem 1, offset 8)
+        for (nelem, offset) in [(2i32, 0i32), (1, 8)] {
+            data.extend_from_slice(&nelem.to_be_bytes());
+            data.extend_from_slice(&offset.to_be_bytes());
+        }
+        // heap: [1.0, 2.0] then [3.0]
+        for x in [1.0f32, 2.0, 3.0] {
+            data.extend_from_slice(&x.to_be_bytes());
+        }
+
+        let table = BinTable::from_data(&header, data).unwrap();
+        assert_eq!(
+            table.read_vla_column(0).unwrap(),
+            vec![ColumnData::F32(vec![1.0, 2.0]), ColumnData::F32(vec![3.0]),]
+        );
+    }
+
+    #[test]
+    fn read_vla_on_a_fixed_column_is_an_error() {
+        let header = table_header(4, 1, &["1J"]);
+        let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
+        assert!(matches!(
+            table.read_vla_column(0),
+            Err(FitsError::NotAVla { code: 'J' })
         ));
     }
 
@@ -470,27 +661,9 @@ mod tests {
         assert_eq!(table.columns.len(), 12);
         // ANNAME = 8A, STABXYZ = 3D, ORBPARM = 0D, NOSTA = 1J ...
         assert_eq!(table.columns[0].name.as_deref(), Some("ANNAME"));
-        assert_eq!(
-            table.columns[0].tform,
-            Tform {
-                repeat: 8,
-                kind: TformKind::Char
-            }
-        );
-        assert_eq!(
-            table.columns[1].tform,
-            Tform {
-                repeat: 3,
-                kind: TformKind::F64
-            }
-        );
-        assert_eq!(
-            table.columns[2].tform,
-            Tform {
-                repeat: 0,
-                kind: TformKind::F64
-            }
-        );
+        assert_eq!(table.columns[0].tform, tform(8, TformKind::Char, None));
+        assert_eq!(table.columns[1].tform, tform(3, TformKind::F64, None));
+        assert_eq!(table.columns[2].tform, tform(0, TformKind::F64, None));
         // The 0D ORBPARM column contributes no width, so NOSTA shares its offset.
         assert_eq!(table.columns[2].byte_offset, 32);
         assert_eq!(table.columns[3].byte_offset, 32);
