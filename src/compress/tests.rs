@@ -511,6 +511,26 @@ fn table_compression_round_trips() {
     }
 }
 
+/// Emit our `write_compressed_table` output for external (cfitsio) validation of
+/// the *encode* direction. After running, verify with cfitsio:
+///   `funpack -O .tmp/my_unpk.fits .tmp/my_ctable.fits`
+/// then compare `.tmp/my_unpk.fits` against `comp_table_ref.fits` — they match.
+/// Run with `cargo test --features compression -- --ignored emit_compressed_table`.
+#[test]
+#[ignore]
+fn emit_compressed_table_for_funpack() {
+    use crate::writer::FitsWriter;
+    use std::fs::File;
+
+    let src = std::fs::read("tests/data/fits/comp_table_ref.fits").unwrap();
+    let mut r = FitsReader::open(std::io::Cursor::new(src)).unwrap();
+    let table = r.read_table(1).unwrap();
+    let header = r.hdu(1).header.clone();
+    let mut w = FitsWriter::new(File::create(".tmp/my_ctable.fits").unwrap());
+    w.write_compressed_table(&header, &table, 100, "RICE_1")
+        .unwrap();
+}
+
 #[test]
 fn decodes_a_cfitsio_compressed_table() {
     // Ground truth: `comp_table_cfitsio.fits` was produced by cfitsio's `fpack
