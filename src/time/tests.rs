@@ -86,18 +86,18 @@ fn reads_jepoch_and_bepoch_keywords() {
     // JEPOCH=2000.0 ⇒ J2000.0 = MJD 51544.5, implied scale TDB.
     let mut hj = Header::new();
     hj.set("JEPOCH", 2000.0);
-    let ej = FitsTime::from_header(&hj).epoch(&hj).unwrap();
+    let ej = FitsTime::epoch(&hj).unwrap();
     assert!((ej.mjd - 51544.5).abs() < 1e-6);
     assert_eq!(ej.scale, TimeScale::Tdb);
     // BEPOCH=1950.0 ⇒ B1950.0 = MJD 33281.92345905, implied scale ET ≈ TT.
     let mut hb = Header::new();
     hb.set("BEPOCH", 1950.0);
-    let eb = FitsTime::from_header(&hb).epoch(&hb).unwrap();
+    let eb = FitsTime::epoch(&hb).unwrap();
     assert!((eb.mjd - 33281.92345905).abs() < 1e-4);
     assert_eq!(eb.scale, TimeScale::Tt);
     // Neither keyword ⇒ None.
     let empty = Header::new();
-    assert!(FitsTime::from_header(&empty).epoch(&empty).is_none());
+    assert!(FitsTime::epoch(&empty).is_none());
 }
 
 #[test]
@@ -111,7 +111,7 @@ fn reads_bound_duration_and_error_keywords() {
     h.set("TELAPSE", 1500.0);
     h.set("TIMEDEL", 0.1);
     h.set("TIMSYER", 1e-6);
-    let b = FitsTime::from_header(&h).bounds(&h);
+    let b = FitsTime::bounds(&h);
     assert_eq!(b.beg_mjd, Some(58000.0));
     let end = Datetime::parse("2017-09-05T00:00:00").unwrap().to_mjd();
     assert!((b.end_mjd.unwrap() - end).abs() < 1e-9); // resolved from DATE-END
@@ -169,8 +169,7 @@ fn reads_phase_axis_and_folds() {
     h.set("CTYPE2", "PHASE");
     h.set("CZPHS2", 5.0);
     h.set("CPERI2", 2.0);
-    let t = FitsTime::from_header(&h);
-    let pa = t.phase_axis(&h, 2).unwrap();
+    let pa = FitsTime::phase_axis(&h, 2).unwrap();
     assert_eq!(pa.zero_phase, 5.0);
     assert_eq!(pa.period, 2.0);
     // Fold: ((8 − 5)/2) mod 1 = 1.5 mod 1 = 0.5; the zero-phase time folds to 0.
@@ -178,7 +177,7 @@ fn reads_phase_axis_and_folds() {
     assert_eq!(pa.fold(5.0), 0.0);
     // A non-phase axis yields nothing.
     h.set("CTYPE1", "RA---TAN");
-    assert_eq!(t.phase_axis(&h, 1), None);
+    assert_eq!(FitsTime::phase_axis(&h, 1), None);
 }
 
 #[test]
@@ -187,11 +186,10 @@ fn obs_mjd_falls_back_to_jepoch() {
     // §9.5: absent DATE-OBS/MJD-OBS, JEPOCH stands in for the observation time.
     let mut h = Header::new();
     h.set("JEPOCH", 2000.0); // J2000.0 = MJD 51544.5
-    let t = FitsTime::from_header(&h);
-    assert!((t.obs_mjd(&h).unwrap() - 51544.5).abs() < 1e-6);
+    assert!((FitsTime::obs_mjd(&h).unwrap() - 51544.5).abs() < 1e-6);
     // An explicit MJD-OBS still wins.
     h.set("MJD-OBS", 58000.0);
-    assert_eq!(t.obs_mjd(&h), Some(58000.0));
+    assert_eq!(FitsTime::obs_mjd(&h), Some(58000.0));
 }
 
 #[test]
@@ -317,7 +315,7 @@ fn fits_time_resolves_reference_and_relative_times() {
     assert!((t.relative_to_mjd(0.0) - 58000.0).abs() < 1e-12);
     assert!((t.relative_to_mjd(86400.0) - 58001.0).abs() < 1e-12);
     // DATE-OBS 2017-09-04 = MJD 58000.0.
-    assert!((t.obs_mjd(&h).unwrap() - 58000.0).abs() < 1e-9);
+    assert!((FitsTime::obs_mjd(&h).unwrap() - 58000.0).abs() < 1e-9);
 }
 
 #[test]

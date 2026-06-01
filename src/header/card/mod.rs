@@ -5,7 +5,7 @@ use crate::header::value::Value;
 
 /// What role an 80-byte record plays in a header unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CardKind {
+pub(crate) enum CardKind {
     /// `KEYWORD = value [/ comment]` — a value indicator sits in bytes 9–10.
     Value,
     /// `COMMENT`, `HISTORY`, or the blank keyword — free text in bytes 9–80,
@@ -29,7 +29,7 @@ pub enum CardKind {
 /// A header is an *ordered* list of these; duplicates and order are significant,
 /// so the model never collapses cards into a map.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Card {
+pub(crate) struct Card {
     /// Keyword name, trailing spaces stripped. Empty for the blank keyword.
     pub(crate) keyword: String,
     /// Present only for [`CardKind::Value`] cards.
@@ -61,17 +61,8 @@ impl Card {
         }
     }
 
-    /// The units string from a `[unit]` prefix on the comment (§4.3), e.g.
-    /// `'[m/s] line-of-sight speed'` → `Some("m/s")`. `None` if the comment is
-    /// absent or has no (non-empty) bracketed prefix.
-    pub fn unit(&self) -> Option<&str> {
-        let inner = self.comment.as_deref()?.trim_start().strip_prefix('[')?;
-        let unit = inner[..inner.find(']')?].trim();
-        (!unit.is_empty()).then_some(unit)
-    }
-
     /// Parse a single 80-byte record.
-    pub fn parse(raw: &[u8; CARD_SIZE]) -> Result<Card> {
+    pub(crate) fn parse(raw: &[u8; CARD_SIZE]) -> Result<Card> {
         // FITS header records are restricted ASCII (§4.1). Rejecting non-ASCII up
         // front both enforces that and guarantees every fixed-column slice below
         // lands on a char boundary — a valid UTF-8 *multibyte* card would
@@ -155,7 +146,7 @@ impl Card {
     /// Serialize back to an 80-byte record in fixed format (§4.2): logical,
     /// integer, real, and complex values are right-justified ending at column 30;
     /// character strings keep their opening quote at column 11.
-    pub fn render(&self) -> [u8; CARD_SIZE] {
+    pub(crate) fn render(&self) -> [u8; CARD_SIZE] {
         let mut buf = [b' '; CARD_SIZE];
         // HIERARCH lays out the whole card itself ("HIERARCH key = value"); the
         // key has spaces and is not an 8-byte field, so it bypasses the layout below.
