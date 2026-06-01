@@ -165,16 +165,14 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
 
     let geom = TileGeometry::new(&dims, &tiles);
     let ntiles = geom.ntiles();
-
-    // Decode every tile (the compute-bound, independent step — parallel under the
-    // `parallel` feature), collecting the per-tile values in tile order. Scatter them
-    // into the typed output afterwards, narrowing each value to `ZBITPIX` as it lands
-    // — there is no whole-image `i64`/`f64` intermediate. Tiles partition the image,
-    // so a tile's positions are recomputed from the geometry and never overlap.
     let mut samples = zeroed_samples(zbitpix, total);
+
+    // Decode and scatter each tile in one fused pass — parallel under the `parallel`
+    // feature, where tiles write disjoint regions of `samples` concurrently (they
+    // partition the image). Each value is narrowed to `ZBITPIX` as it lands, so there
+    // is no whole-image `i64`/`f64` intermediate and no separate serial scatter tail.
     if is_float {
-        let tile_vals = map_tiles(ntiles, TileScratch::default, |scratch, t| {
-            geom.tile_into(t, scratch);
+        let decode = |t: usize, s: &TileScratch| {
             let cols = TileColumns {
                 primary: primary.get(t),
                 gzip: gzip_fallback.get(t),
@@ -190,32 +188,33 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
             decode_float_tile(
                 &cmptype,
                 cols,
-                scratch.indices.len(),
+                s.indices.len(),
                 zbitpix,
                 int_bitpix,
                 codec,
                 dq,
             )
-        })?;
-        let mut scratch = TileScratch::default();
-        for (t, vals) in tile_vals.iter().enumerate() {
-            geom.tile_into(t, &mut scratch);
-            scatter_f64(&mut samples, &scratch.indices, vals);
+        };
+        match &mut samples {
+            ImageData::F32(o) => run_decode_scatter(ntiles, &geom, o, decode, |v| v as f32)?,
+            ImageData::F64(o) => run_decode_scatter(ntiles, &geom, o, decode, |v| v)?,
+            _ => unreachable!("a float ZBITPIX yields a float sample buffer"),
         }
     } else {
-        let tile_vals = map_tiles(ntiles, TileScratch::default, |scratch, t| {
-            geom.tile_into(t, scratch);
+        let decode = |t: usize, s: &TileScratch| {
             let cols = TileColumns {
                 primary: primary.get(t),
                 gzip: gzip_fallback.get(t),
                 uncompressed: uncompressed.get(t),
             };
-            decode_one_tile(&cmptype, cols, scratch.indices.len(), int_bitpix, codec)
-        })?;
-        let mut scratch = TileScratch::default();
-        for (t, vals) in tile_vals.iter().enumerate() {
-            geom.tile_into(t, &mut scratch);
-            scatter_i64(&mut samples, &scratch.indices, vals);
+            decode_one_tile(&cmptype, cols, s.indices.len(), int_bitpix, codec)
+        };
+        match &mut samples {
+            ImageData::U8(o) => run_decode_scatter(ntiles, &geom, o, decode, |v| v as u8)?,
+            ImageData::I16(o) => run_decode_scatter(ntiles, &geom, o, decode, |v| v as i16)?,
+            ImageData::I32(o) => run_decode_scatter(ntiles, &geom, o, decode, |v| v as i32)?,
+            ImageData::I64(o) => run_decode_scatter(ntiles, &geom, o, decode, |v| v)?,
+            _ => unreachable!("an integer ZBITPIX yields an integer sample buffer"),
         }
     }
     Ok(Image {
@@ -223,6 +222,91 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
         samples,
         scaling: Scaling::from_header(header),
     })
+}
+
+/// Decode every tile and scatter its values into `out` at the tile's positions,
+/// narrowing each with `convert`. Under `parallel` the tiles run concurrently and
+/// write disjoint regions of `out` directly (no collect, no serial scatter);
+/// otherwise it is a plain fused loop.
+fn run_decode_scatter<S, D>(
+    ntiles: usize,
+    geom: &TileGeometry,
+    out: &mut [D],
+    decode: impl Fn(usize, &TileScratch) -> Result<Vec<S>> + Sync + Send,
+    convert: impl Fn(S) -> D + Sync + Send,
+) -> Result<()>
+where
+    S: Copy,
+{
+    #[cfg(feature = "parallel")]
+    {
+        let sink = DisjointOut::new(out);
+        map_tiles(ntiles, TileScratch::default, |scratch, t| -> Result<()> {
+            geom.tile_into(t, scratch);
+            let vals = decode(t, scratch)?;
+            // SAFETY: the image tiles partition the pixel grid, so this tile's flat
+            // indices are disjoint from every other tile's — concurrent writes
+            // through `sink` never target the same element. `tile_into` clips indices
+            // to the image, which sized `out`, so each index is in bounds.
+            unsafe { sink.scatter(&scratch.indices, &vals, &convert) };
+            Ok(())
+        })?;
+        Ok(())
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut scratch = TileScratch::default();
+        for t in 0..ntiles {
+            geom.tile_into(t, &mut scratch);
+            let vals = decode(t, &scratch)?;
+            for (&flat, &v) in scratch.indices.iter().zip(&vals) {
+                out[flat] = convert(v);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A raw pointer into the decode output, shared across rayon workers so each tile
+/// scatters its decoded values in place. The `Sync` impl is sound *only* under the
+/// contract that callers write disjoint index sets — which holds because the image
+/// tiles partition the pixel grid (see [`run_decode_scatter`]).
+#[cfg(feature = "parallel")]
+struct DisjointOut<D> {
+    ptr: *mut D,
+    len: usize,
+}
+
+// SAFETY: see the type doc — concurrent use only writes disjoint, in-bounds indices.
+#[cfg(feature = "parallel")]
+unsafe impl<D> Sync for DisjointOut<D> {}
+
+#[cfg(feature = "parallel")]
+impl<D> DisjointOut<D> {
+    fn new(out: &mut [D]) -> DisjointOut<D> {
+        DisjointOut {
+            ptr: out.as_mut_ptr(),
+            len: out.len(),
+        }
+    }
+
+    /// Write `convert(vals[k])` to `out[indices[k]]`.
+    ///
+    /// # Safety
+    /// Every index must be `< self.len` and disjoint from those passed by any
+    /// concurrent call, so no two writes alias.
+    unsafe fn scatter<S: Copy>(&self, indices: &[usize], vals: &[S], convert: impl Fn(S) -> D) {
+        for (&flat, &v) in indices.iter().zip(vals) {
+            debug_assert!(
+                flat < self.len,
+                "tile index {flat} out of bounds {}",
+                self.len
+            );
+            // SAFETY: `flat < len` (debug-asserted; guaranteed by the tile geometry)
+            // and the disjointness contract make this a non-aliasing in-bounds write.
+            unsafe { self.ptr.add(flat).write(convert(v)) };
+        }
+    }
 }
 
 /// Per-worker tile-encode scratch, reused across the tiles one rayon worker
@@ -1007,40 +1091,6 @@ fn zeroed_samples(bitpix: Bitpix, len: usize) -> ImageData {
         Bitpix::I64 => ImageData::I64(vec![0; len]),
         Bitpix::F32 => ImageData::F32(vec![0.0; len]),
         Bitpix::F64 => ImageData::F64(vec![0.0; len]),
-    }
-}
-
-/// Scatter a decoded integer tile into the typed output at `indices`, narrowing
-/// each `i64` to the output element type. `out` is integer-typed (the integer
-/// decode path); a float buffer is a logic error.
-fn scatter_i64(out: &mut ImageData, indices: &[usize], vals: &[i64]) {
-    match out {
-        ImageData::U8(o) => scatter(o, indices, vals, |v| v as u8),
-        ImageData::I16(o) => scatter(o, indices, vals, |v| v as i16),
-        ImageData::I32(o) => scatter(o, indices, vals, |v| v as i32),
-        ImageData::I64(o) => scatter(o, indices, vals, |v| v),
-        ImageData::F32(_) | ImageData::F64(_) => unreachable!("integer decode, float output"),
-    }
-}
-
-/// Scatter a dequantized float tile into the typed output at `indices`, narrowing
-/// to the output element type (`f32`/`f64`; `NaN` nulls survive the cast).
-fn scatter_f64(out: &mut ImageData, indices: &[usize], vals: &[f64]) {
-    match out {
-        ImageData::F32(o) => scatter(o, indices, vals, |v| v as f32),
-        ImageData::F64(o) => scatter(o, indices, vals, |v| v),
-        _ => unreachable!("float decode, integer output"),
-    }
-}
-
-/// Write `convert(vals[k])` into `out[indices[k]]` for each tile element. Tiles
-/// partition the image, so the index sets never overlap.
-fn scatter<S, D>(out: &mut [D], indices: &[usize], vals: &[S], convert: impl Fn(S) -> D)
-where
-    S: Copy,
-{
-    for (&flat, &v) in indices.iter().zip(vals) {
-        out[flat] = convert(v);
     }
 }
 
