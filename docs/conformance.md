@@ -25,7 +25,7 @@ write-side non-conformance · 🟢 missing standard feature · ⚪ out of scope.
 | 6 / 7.1 | Images, random groups (incl. §6.3 addend summing) | ✅ complete |
 | 7.2 | ASCII `TABLE` (read incl. bare-sign exponents; write incl. `TSCAL`/`TZERO`/`TNULL`) | ✅ complete |
 | 7.3 | Binary `TABLE` (incl. logical-NULL three-state, `1PX` VLA bit-unpack) | ✅ complete |
-| 8 | World Coordinate Systems | ✅ for all implemented projections + `CUNIT` + table WCS (pixel-list & vector-cell); ⚠️ quad-cube/HEALPix/non-linear-spectral error cleanly |
+| 8 | World Coordinate Systems | ✅ all implemented projections + `CUNIT` + table WCS (pixel-list & vector-cell); quad-cube/HEALPix/non-linear-spectral axes decode through the linear stage and are flagged in `unsupported_axes` (read, never silent-wrong, never fail) |
 | 9 | Time coordinates | ✅ complete (scales, references, bounds incl. `DATE-AVG`, `PHASE` axis) |
 | 10 | Tiled compression | ✅ all codecs decode; encode incl. `NOCOMPRESS` + `1Q`; null-mask/VLA-table = reference doesn't emit |
 
@@ -72,21 +72,21 @@ than silently becoming `Real(inf)`.
 
 ---
 
-## Deliberately error-cleanly / not implemented (with rationale)
+## Read but not fully decoded (with rationale)
 
-These return a clean error (or a documented no-op) instead of wrong output. Each
-is either underspecified, unproducible by the reference implementation, or rare
-enough that a verified implementation isn't achievable — so erroring is the
-honest, conformant-in-practice behavior.
+**Every conforming file reads.** The data unit and all header keywords are
+accessible regardless of these features — the data readers (`read_image`/
+`read_table`/…) never consult WCS, projection, or spectral keywords. The items
+below are the only ones whose highest *semantic* layer is not fully evaluated;
+none produces a silent wrong result, and none fails the whole read.
 
-| Item | § | Behavior | Why not implemented |
-|------|---|----------|---------------------|
-| Non-linear spectral axes (`-F2W`, `-LOG`, …) | 8.4 | `UnsupportedSpectral` error | The Paper III transforms are large; erroring beats the previous *silent linear* (wrong) result. Bare linear spectral types (`FREQ`, `WAVE`, …) work via the linear path. |
-| Quad-cube `TSC`/`CSC`/`QSC` | 8.3 | `UnsupportedProjection` error | Obsolete (COBE-era); exact forward distortion-polynomial formulas need a verified reference. |
-| HEALPix `HPX`/`XPH` | 8.3 | `UnsupportedProjection` error | Rare as a WCS projection (HEALPix data uses table pixelisation); formulas need a verified reference. |
-| `RICE_1` `BYTEPIX=8` (64-bit) | 10.4.1 | `UnsupportedCompression` error | Table 37 permits it, but the 8-byte Rice bitstream params are unspecified and no reference implementation (cfitsio) produces it — a clean error beats a guessed, non-interoperable codec. |
+| Item | § | Behavior | Why not fully decoded |
+|------|---|----------|-----------------------|
+| Non-linear spectral axes (`-F2W`, `-LOG`, …) | 8.4 | axis decoded through the **linear stage** → intermediate world coordinate, listed in `Wcs::unsupported_axes`; all other axes (incl. the celestial pair) decode normally | Paper III transforms are large; the linear-stage value is a correct *partial* result, and the flag means it's never mistaken for fully decoded. A bare linear type (`FREQ`, `WAVE`, …) is fully decoded. |
+| Quad-cube `TSC`/`CSC`/`QSC`, HEALPix `HPX`/`XPH` | 8.3 | celestial axes decoded through the linear stage → intermediate world coordinate, flagged in `Wcs::unsupported_axes` | Obsolete / rare; exact projection formulas need a verified reference. The linear stage (matrix → intermediate world) is still exact. |
+| `RICE_1` `BYTEPIX=8` (64-bit) | 10.4.1 | `read_compressed_image` errors; the raw compressed `BINTABLE` still reads via `read_table` | Table 37 permits it, but the 8-byte Rice bitstream params are unspecified and no reference (cfitsio) produces it — a guessed, non-interoperable codec would be worse. |
 | `NULL_PIXEL_MASK` / `ZMASKCMP` | 10.2.2 | float nulls handled via `ZBLANK`/NaN | Verified empirically: `fpack` never emits the mask — it uses `ZBLANK` (which we support). The mask construct does not occur in practice. |
-| §10.3.6 compressed-table VLA | 10.3.6 | `UnsupportedCompression` on write | Verified empirically: `fpack` passes VLA tables through *uncompressed* rather than emitting a compressed-VLA `ZTABLE`; the construct does not occur in practice. |
+| §10.3.6 compressed-table VLA | 10.3.6 | rejected on write; such tables read fine *uncompressed* | Verified empirically: `fpack` passes VLA tables through uncompressed rather than emitting a compressed-VLA `ZTABLE`; the construct does not occur in practice. |
 
 ---
 

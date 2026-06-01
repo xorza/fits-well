@@ -59,16 +59,6 @@ pub enum FitsError {
     /// `read_compressed_table` was called on an HDU that is not a tiled-compressed
     /// table (no `ZTABLE = T`).
     NotCompressedTable,
-    /// A celestial axis uses a projection code this library doesn't implement.
-    UnsupportedProjection {
-        code: String,
-    },
-    /// A spectral axis uses a non-linear sampling algorithm (§8.4, e.g. `-F2W`,
-    /// `-LOG`) this library does not yet evaluate — reported instead of silently
-    /// returning a wrong linear value.
-    UnsupportedSpectral {
-        ctype: String,
-    },
     /// Two mutually-exclusive WCS keyword conventions are both present (e.g. `PC`
     /// and `CD`, or `CROTA` and `PC`); a conforming header uses only one (§8).
     ConflictingWcsKeywords {
@@ -149,12 +139,6 @@ impl fmt::Display for FitsError {
             FitsError::NotAnAsciiTable => write!(f, "HDU is not an ASCII table"),
             FitsError::NotCompressedImage => write!(f, "HDU is not a tiled-compressed image"),
             FitsError::NotCompressedTable => write!(f, "HDU is not a tiled-compressed table"),
-            FitsError::UnsupportedProjection { code } => {
-                write!(f, "unsupported WCS projection code: {code}")
-            }
-            FitsError::UnsupportedSpectral { ctype } => {
-                write!(f, "unsupported non-linear spectral axis: {ctype}")
-            }
             FitsError::ConflictingWcsKeywords { detail } => {
                 write!(f, "conflicting WCS keywords: {detail}")
             }

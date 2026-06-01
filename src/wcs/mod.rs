@@ -16,9 +16,14 @@
 //! `ZEA`/`ZPN`/`AIR`, zenithal-perspective `AZP`/`SZP`, cylindrical `CAR`/`CEA`/
 //! `MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic `COP`/`COE`/`COD`/`COO`,
 //! pseudoconic `BON`, and polyconic `PCO`. All validated against `astropy.wcs`
-//! (wcslib). Unimplemented codes error cleanly via
-//! [`FitsError::UnsupportedProjection`]. Not yet: the quad-cube `TSC`/`CSC`/`QSC`,
-//! HEALPix `HPX`/`XPH`, and the non-linear spectral algorithms.
+//! (wcslib). The unimplemented non-linear transforms — quad-cube `TSC`/`CSC`/`QSC`,
+//! HEALPix `HPX`/`XPH`, and the non-linear spectral algorithms (§8.4) — are not
+//! evaluated: such an axis passes through the linear stage only (its intermediate
+//! world coordinate) and is listed in [`Wcs::unsupported_axes`], so a file using
+//! one still reads, just with that axis not fully decoded.
+//!
+//! Binary-table WCS (Table 22) is supported for both the pixel-list
+//! ([`Wcs::from_pixel_list`]) and vector-cell ([`Wcs::from_array_column`]) forms.
 //!
 //! Pixel↔world yields celestial coordinates in the frame the file declares
 //! (`RADESYS`/`EQUINOX`); converting *between* reference frames is astrometry
@@ -607,6 +612,11 @@ pub struct Wcs {
     /// The (longitude axis, latitude axis, projection, celestial pole) when a
     /// celestial pair is present; `None` for an all-linear system.
     celestial: Option<Celestial>,
+    /// Axes (0-based) whose non-linear transform is not evaluated — an unsupported
+    /// projection (quad-cube/HEALPix) or a non-linear spectral algorithm (§8.3/§8.4).
+    /// [`Wcs::pixel_to_world`] returns their *intermediate* world coordinate (the
+    /// linear stage only), not a fully decoded celestial/spectral value.
+    pub unsupported_axes: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -658,18 +668,14 @@ impl Wcs {
             .collect();
         let celestial_axes = find_celestial(&ctype);
 
-        // A celestial axis with a projection code we don't implement (the quad-cube
-        // TSC/CSC/QSC) is an error, not a silent linear pass-through that would hand
-        // back wrong coordinates.
-        if let Some(code) = unsupported_celestial_code(&ctype) {
-            return Err(FitsError::UnsupportedProjection { code });
-        }
-        // A non-linearly-sampled spectral axis (§8.4) is not yet evaluated; error
-        // rather than hand back a wrong linear value (a bare spectral type is
-        // genuinely linear and flows through the linear path below).
-        if let Some(ctype) = unsupported_spectral_code(&ctype) {
-            return Err(FitsError::UnsupportedSpectral { ctype });
-        }
+        // Axes whose non-linear transform this library doesn't evaluate — an
+        // unsupported celestial projection (quad-cube `TSC`/`CSC`/`QSC`, HEALPix
+        // `HPX`/`XPH`) or a non-linearly-sampled spectral axis (§8.4). Rather than
+        // fail the whole WCS, these pass through the linear stage only, so
+        // `pixel_to_world` returns their *intermediate* world coordinate;
+        // `unsupported_axes` records them so a caller never mistakes that for a
+        // fully-decoded sky/spectral value.
+        let unsupported_axes = nonlinear_unsupported_axes(&ctype);
 
         // Build the linear transform A. Precedence: CD, then PC×CDELT, then the
         // legacy CROTA rotation, then a bare CDELT diagonal.
@@ -786,6 +792,7 @@ impl Wcs {
             matrix,
             inverse,
             celestial,
+            unsupported_axes,
         })
     }
 
@@ -958,40 +965,34 @@ impl Wcs {
     }
 }
 
-/// Identify the longitude/latitude axis pair and projection from `CTYPE`s.
-/// If a celestial axis (`RA`/`DEC`/`xLON`/`xLAT`) carries a 3-letter projection
-/// code this library doesn't implement, return it; else `None`.
-fn unsupported_celestial_code(ctype: &[String]) -> Option<String> {
-    for t in ctype {
-        let head = t.split('-').next().unwrap_or("");
-        let celestial = head == "RA"
+/// Axis indices (0-based) whose non-linear transform this library does not
+/// evaluate: a celestial axis whose 3-letter projection code is unimplemented
+/// (quad-cube/HEALPix), or a non-linearly-sampled spectral axis (`TTTT-AAA`,
+/// §8.4). Such an axis is taken through the linear stage only (its intermediate
+/// world coordinate). The supported projections and a bare spectral type (which
+/// is genuinely linear) are not flagged.
+fn nonlinear_unsupported_axes(ctype: &[String]) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (i, t) in ctype.iter().enumerate() {
+        let head = t.split('-').next().unwrap_or("").trim_end();
+        let is_celestial = head == "RA"
             || head == "DEC"
             || head.ends_with("LON")
             || head.ends_with("LAT")
             || (head.len() == 4 && (head.ends_with("LN") || head.ends_with("LT")));
-        if celestial
+        if is_celestial
             && let Some(code) = t.rsplit('-').find(|s| !s.is_empty())
             && code.len() == 3
             && Projection::from_code(code).is_none()
         {
-            return Some(code.to_string());
+            out.push(i);
+        } else if SPECTRAL_TYPES.contains(&head)
+            && t.get(5..).map(str::trim).is_some_and(|s| !s.is_empty())
+        {
+            out.push(i);
         }
     }
-    None
-}
-
-/// A spectral axis sampled non-linearly carries a `TTTT-AAA` algorithm code
-/// (§8.4); return it so `from_header` errors instead of silently applying a linear
-/// transform. A bare spectral type (linear sampling) returns `None`.
-fn unsupported_spectral_code(ctype: &[String]) -> Option<String> {
-    for t in ctype {
-        let head = t.split('-').next().unwrap_or("").trim_end();
-        let has_algorithm = t.get(5..).map(str::trim).is_some_and(|s| !s.is_empty());
-        if SPECTRAL_TYPES.contains(&head) && has_algorithm {
-            return Some(t.clone());
-        }
-    }
-    None
+    out
 }
 
 /// Degrees per `CUNITia` angle unit; `1.0` for an absent, unknown, or `deg` unit.
