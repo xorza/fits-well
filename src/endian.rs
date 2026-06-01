@@ -4,7 +4,15 @@
 
 /// Decode a packed big-endian buffer into host-endian values of a fixed-width
 /// type, e.g. `decode_be(bytes, i16::from_be_bytes)`.
-pub(crate) fn decode_be<const N: usize, T>(bytes: &[u8], conv: fn([u8; N]) -> T) -> Vec<T> {
+///
+/// `conv` is a generic `Fn`, not a `fn` pointer: each call site passes a zero-sized
+/// fn *item* (`i32::from_be_bytes`, …), so the per-element conversion monomorphizes
+/// to a direct, inlinable call and the loop autovectorizes — a `fn`-pointer
+/// parameter would force an indirect call per element and block both.
+pub(crate) fn decode_be<const N: usize, T, F>(bytes: &[u8], conv: F) -> Vec<T>
+where
+    F: Fn([u8; N]) -> T,
+{
     bytes
         .chunks_exact(N)
         .map(|c| conv(c.try_into().expect("chunks_exact yields N-byte arrays")))
@@ -12,19 +20,22 @@ pub(crate) fn decode_be<const N: usize, T>(bytes: &[u8], conv: fn([u8; N]) -> T)
 }
 
 /// Encode fixed-width values into a big-endian byte buffer, e.g.
-/// `encode_be(values, i16::to_be_bytes)`.
-pub(crate) fn encode_be<const N: usize, T: Copy>(values: &[T], conv: fn(T) -> [u8; N]) -> Vec<u8> {
+/// `encode_be(values, i16::to_be_bytes)`. `conv` is a generic `Fn` for the same
+/// inlining/vectorization reason as [`decode_be`].
+pub(crate) fn encode_be<const N: usize, T: Copy, F>(values: &[T], conv: F) -> Vec<u8>
+where
+    F: Fn(T) -> [u8; N],
+{
     let mut out = Vec::with_capacity(values.len() * N);
     extend_be(&mut out, values, conv);
     out
 }
 
 /// Append fixed-width values to `out` in big-endian order.
-pub(crate) fn extend_be<const N: usize, T: Copy>(
-    out: &mut Vec<u8>,
-    values: &[T],
-    conv: fn(T) -> [u8; N],
-) {
+pub(crate) fn extend_be<const N: usize, T: Copy, F>(out: &mut Vec<u8>, values: &[T], conv: F)
+where
+    F: Fn(T) -> [u8; N],
+{
     for &v in values {
         out.extend_from_slice(&conv(v));
     }
