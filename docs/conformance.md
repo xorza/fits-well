@@ -187,7 +187,7 @@ decode/encode, physical plane), with `ascii/` and `table/` for character data.
 | 3.2 | Characters = 7-bit ASCII, high bit zero | header rejects ≥128; ASCII/`A`-cols lenient | 🟡 not enforced in table/ascii |
 | 3.3 | Integers two's-complement, big-endian | `decode_be` (`endian.rs:7`) | ✅ |
 | 3.3 | 8-bit unsigned; 16/32/64 signed | `Bitpix` → `ImageData` mapping | ✅ |
-| 3.3 | Unsigned 16/32/64 + signed-8 via `BZERO`/`TZEROn` | `physical()` float plane | ✅ values / 🟡 no typed `uN` |
+| 3.3 | Unsigned 16/32/64 + signed-8 via `BZERO`/`TZEROn` | `physical()` plane + typed `Image::unsigned()` → `UnsignedView` | ✅ |
 | 3.4 | `-32`/`-64` IEEE-754, big-endian | `f32`/`f64::from_be_bytes` (`data/mod.rs:69`) | ✅ |
 | 3.4 | NaN = blank float; no float `BLANK` | `scale_ints` for ints only; float NaN propagates | ✅ |
 | 3.4 | Preserve ±Inf + signaling/quiet NaN payload on round-trip | `to_bits`/`from_bits` are bit-exact | ✅ code / ⚠️ untested |
@@ -195,11 +195,11 @@ decode/encode, physical plane), with `ascii/` and `table/` for character data.
 | 3.5 | `physical = BZERO + BSCALE × stored` (Eq. 3) | `scale` closure (`data/mod.rs:110`) | ✅ |
 | 3.5 | Defaults `BSCALE=1.0`, `BZERO=0.0` | `from_header` `unwrap_or` (`data/mod.rs:150`) | ✅ |
 | 3.5 | `BLANK` integer-only, applied *before* scaling | `scale_ints` sentinel→NaN pre-scale (`data/mod.rs:124`) | ✅ |
-| 3.5 | Unsigned convention table (8/16/32/64) | `physical()` | ✅ values (u64: gap #2) |
+| 3.5 | Unsigned convention table (8/16/32/64) | `physical()` + exact typed `Image::unsigned()` | ✅ |
 | 3.5 | `TZEROn`/`TSCALn` binary-table analogue | `table/` layer | ✅ (audited under §6) |
 | 3.6 | Time defers to §9 | `time/` feature | ✅ (audited under §9) |
 | impl | Zero-copy raw + SIMD bulk byte-swap | `decode` always allocates + converts | 🟢 TODO (perf) |
-| impl | Detect + expose as `uN` | no `U16`/`U32`/`U64` variant | 🟡 not implemented |
+| impl | Detect + expose as `uN` | `Image::unsigned()` → `UnsignedView::{I8,U16,U32,U64}` | ✅ |
 | impl | `BLANK` → `Option`/mask | NaN in physical plane | 🟢 by design |
 
 The normative core of §5 (BITPIX types, big-endian two's-complement integers,
@@ -209,16 +209,19 @@ edge-precision items, not wrong decoding.
 
 ### Gaps
 
-1. 🟡 **No native unsigned (`uN`) typed exposure.** Unsigned 16/32/64 and signed
-   bytes are readable only through the `f64` `physical()` plane — there is no typed
-   `u16`/`u32`/`u64` buffer. (A typed `Image::unsigned()` view was prototyped and
-   removed: `physical()` already exposes the values, and the only added benefit —
-   exactness past 2⁵³ — wasn't worth the API surface.)
+1. ✅ **Native unsigned (`uN`) typed exposure — image read side.** `Image::unsigned()`
+   returns a typed `UnsignedView` (`U16`/`U32`/`U64`/signed-byte `I8`) when the
+   scaling is exactly the FITS unsigned convention (`BSCALE == 1`, no `BLANK`,
+   `BZERO == 2^(n-1)`), recovering exact values by flipping the stored sign bit.
+   `ImageData` stays the raw BITPIX-storage type — the offset is *not* baked in, so
+   the raw/physical split holds. Covered by `unsigned_view_recovers_exact_typed_integers`.
+   (Read accessor only: no `from_uN` write constructors, and the binary-table
+   parallel is intentionally not provided — see §7.3 gap #7.)
 
-2. 🟡 **`u64`/large-`i64` physical values lose precision.** `physical()` returns
-   `f64`; a 64-bit integer whose magnitude exceeds 2⁵³ (including any `u64` realized
-   via `BZERO = 2⁶³`) is rounded. The raw sample plane is exact; only the derived
-   `f64` plane is lossy.
+2. ✅ **`u64`/large-`i64` exactness via the typed path.** `Image::unsigned()` yields
+   exact integers even past 2⁵³, where the `f64` `physical()` plane rounds. Covered
+   by `unsigned_u64_view_is_exact_where_physical_rounds`. (`physical()` itself is
+   unchanged — `f64` by definition for the general scaled plane.)
 
 3. 🟡 **§5.1 7-bit/high-bit-zero not enforced for character data.** The header
    parser rejects bytes ≥ 128 (but admits control 0–31, see §4 gap #2). ASCII
@@ -504,7 +507,8 @@ beyond plain fixed-width decode.
 7. 🟡 **No native unsigned (`uN`) exposure for table columns / `u64` precision.**
    Integer `TFORM` + `TZEROn = 2^(n-1)` + `TSCALn = 1` is realized only through the
    `f64` `read_column_physical` plane, with no typed `u16`/`u32`/`u64` column and
-   rounding for `u64` values > 2⁵³. (Same removed-prototype rationale as §5 gap #1.)
+   rounding for `u64` values > 2⁵³. **Open** — the *image* analogue is now provided
+   (`Image::unsigned()`, §5 gap #1); the binary-table accessor is not.
 
 8. ✅ **`Q` (64-bit) VLA write supported (§6.6).** `WriteColumn::q()` emits `1Q`
    descriptors for heaps beyond the 32-bit `1P` range; `1P` remains the default.

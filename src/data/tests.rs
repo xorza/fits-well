@@ -122,6 +122,89 @@ fn physical_applies_scaling_and_maps_blank_to_nan() {
 }
 
 #[test]
+fn unsigned_view_recovers_exact_typed_integers() {
+    // Signed storage + the matching BZERO offset decodes back to the unsigned (or
+    // signed-byte) values by flipping the stored sign bit.
+    let u16_img = image(
+        ImageData::I16(vec![-32768, 0, 32767]),
+        Scaling {
+            bscale: 1.0,
+            bzero: 32768.0,
+            blank: None,
+        },
+    );
+    assert_eq!(
+        u16_img.unsigned(),
+        Some(UnsignedView::U16(vec![0, 32768, 65535]))
+    );
+    let u32_img = image(
+        ImageData::I32(vec![i32::MIN, 0, i32::MAX]),
+        Scaling {
+            bscale: 1.0,
+            bzero: 2_147_483_648.0,
+            blank: None,
+        },
+    );
+    assert_eq!(
+        u32_img.unsigned(),
+        Some(UnsignedView::U32(vec![0, 2_147_483_648, u32::MAX]))
+    );
+    let i8_img = image(
+        ImageData::U8(vec![0, 128, 255]),
+        Scaling {
+            bscale: 1.0,
+            bzero: -128.0,
+            blank: None,
+        },
+    );
+    assert_eq!(
+        i8_img.unsigned(),
+        Some(UnsignedView::I8(vec![-128, 0, 127]))
+    );
+}
+
+#[test]
+fn unsigned_u64_view_is_exact_where_physical_rounds() {
+    // 2⁵³+1 is the smallest integer f64 cannot represent. The typed view recovers
+    // it exactly; physical() (f64) rounds it to 2⁵³.
+    let exact = 9_007_199_254_740_993u64; // 2⁵³ + 1
+    let stored = (exact ^ 0x8000_0000_0000_0000) as i64;
+    let img = image(
+        ImageData::I64(vec![stored]),
+        Scaling {
+            bscale: 1.0,
+            bzero: 9_223_372_036_854_775_808.0, // 2⁶³
+            blank: None,
+        },
+    );
+    assert_eq!(img.unsigned(), Some(UnsignedView::U64(vec![exact])));
+    assert_eq!(img.physical()[0] as u64, exact - 1); // rounded to 2⁵³
+}
+
+#[test]
+fn unsigned_returns_none_for_non_unsigned_scaling() {
+    // Plain signed (BZERO=0) and a genuinely scaled image are not unsigned views.
+    let signed = image(
+        ImageData::I16(vec![1, 2, 3]),
+        Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    );
+    assert_eq!(signed.unsigned(), None);
+    let scaled = image(
+        ImageData::I16(vec![1, 2]),
+        Scaling {
+            bscale: 2.0,
+            bzero: 32768.0,
+            blank: None,
+        },
+    );
+    assert_eq!(scaled.unsigned(), None); // BSCALE ≠ 1
+}
+
+#[test]
 fn physical_realizes_unsigned_16_bit_via_the_bzero_offset() {
     // u16 trick: signed-16 storage with BSCALE=1, BZERO=32768.
     // -32768 -> 0, 0 -> 32768, 32767 -> 65535.

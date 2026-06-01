@@ -49,7 +49,7 @@ mod writer;
 
 pub use ascii::{AsciiColumn, AsciiKind, AsciiTable};
 pub use bitpix::Bitpix;
-pub use data::{Image, ImageData, Scaling};
+pub use data::{Image, ImageData, Scaling, UnsignedView};
 pub use error::{FitsError, Result};
 pub use groups::RandomGroups;
 pub use hdu::HduKind;
