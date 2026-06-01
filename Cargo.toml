@@ -34,3 +34,10 @@ internals = []
 name = "decode"
 harness = false
 required-features = ["internals"]
+
+# Compression-codec throughput (`cargo bench --features compression --bench compress`),
+# reported in uncompressed bytes/s so it's comparable to the raw `decode` numbers.
+[[bench]]
+name = "compress"
+harness = false
+required-features = ["compression"]
