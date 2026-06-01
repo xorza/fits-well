@@ -297,4 +297,16 @@ mod tests {
         assert_eq!(br.read(4), 0b0010);
         assert_eq!(br.read(4), 0b1111);
     }
+
+    #[test]
+    fn truncated_stream_terminates_instead_of_hanging() {
+        // A stream that enters a Rice zero-run (fs = 0) but ends before the
+        // terminating 1-bit. byte0 is the literal first pixel; byte1 = 0b001_00000
+        // gives the 3-bit fs field `001` (→ fs = 0), after which only zero bits
+        // remain and `read` zero-fills past EOF. Without the exhaustion guard in
+        // `read_zeros` this would spin forever; the decode must return (here, two
+        // bounded values) — reaching this assert at all is the guarantee.
+        let out = super::rice_decode(&[0x00, 0x20], 2, 1, 32);
+        assert_eq!(out.len(), 2);
+    }
 }

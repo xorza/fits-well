@@ -64,6 +64,13 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
         .get_integer("ZNAXIS")
         .ok_or(FitsError::MissingKeyword { name: "ZNAXIS" })? as usize;
     let dims = read_axes(header, "ZNAXIS", znaxis)?;
+    // `ZNAXISn` are untrusted; guard the product up front — before reading any tile
+    // — so a wrapped value can't mis-size the output buffer below (the un-wrapped
+    // strides would then scatter out of bounds). Mirrors `hdu::data_extent`.
+    let total = dims
+        .iter()
+        .try_fold(1usize, |acc, &n| acc.checked_mul(n))
+        .ok_or(FitsError::DataUnitOverflow)?;
     let tiles: Vec<usize> = (1..=znaxis)
         .map(|i| {
             header
@@ -120,13 +127,6 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
     let zscale = read_f64_column(table, "ZSCALE");
     let zzero = read_f64_column(table, "ZZERO");
 
-    // `ZNAXISn` are untrusted; a wrapped product would mis-size the output buffer
-    // (and the un-wrapped tile strides would then scatter out of bounds). Guard it
-    // like the HDU sizing layer (`hdu::data_extent`) does.
-    let total = dims
-        .iter()
-        .try_fold(1usize, |acc, &n| acc.checked_mul(n))
-        .ok_or(FitsError::DataUnitOverflow)?;
     let geom = TileGeometry::new(&dims, &tiles);
     let mut out_i = vec![0i64; if is_float { 0 } else { total }];
     let mut out_f = vec![0f64; if is_float { total } else { 0 }];

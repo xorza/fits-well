@@ -258,17 +258,19 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
         });
     }
 
+    // `ZNAXIS2 · ZNAXIS1` from untrusted header values (`nrows` is unbounded):
+    // guard the product up front — before reading any tile — so it can't wrap to a
+    // too-small output buffer.
+    let total = nrows
+        .checked_mul(naxis1)
+        .ok_or(FitsError::DataUnitOverflow)?;
+
     let nchunks = nrows.div_ceil(rpt.max(1));
     // Each column's per-chunk compressed cells.
     let cells: Vec<Vec<ColumnData>> = (0..ncols)
         .map(|ci| table.read_vla_column(ci))
         .collect::<Result<_>>()?;
 
-    // `ZNAXIS2 · ZNAXIS1` from untrusted header values (`nrows` is unbounded):
-    // guard the product so it can't wrap to a too-small output buffer.
-    let total = nrows
-        .checked_mul(naxis1)
-        .ok_or(FitsError::DataUnitOverflow)?;
     let mut out = vec![0u8; total];
     for chunk in 0..nchunks {
         let r0 = chunk * rpt;

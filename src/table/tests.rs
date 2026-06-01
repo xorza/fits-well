@@ -473,3 +473,29 @@ fn tfields_beyond_999_is_rejected() {
         Err(FitsError::KeywordOutOfRange { name: "TFIELDS" })
     ));
 }
+
+#[test]
+fn hostile_tform_repeat_saturates_to_a_width_mismatch() {
+    // A `TFORMn` repeat near usize::MAX makes `repeat × elem_size` overflow. The
+    // saturating `byte_width` clamps to usize::MAX rather than wrapping to a small
+    // value that could equal NAXIS1 and then slice out of bounds in `cell()`; the
+    // result is a clean row-width mismatch, not a panic. (`…9J` ≈ 1e19 < usize::MAX
+    // so it parses, then ×8 saturates.)
+    let header = table_header(8, 1, &["9999999999999999999J"]);
+    assert!(matches!(
+        BinTable::from_data(&header, vec![0u8; 8]),
+        Err(FitsError::RowWidthMismatch { .. })
+    ));
+}
+
+#[test]
+fn row_count_times_width_overflow_is_rejected_not_wrapped() {
+    // NAXIS2·NAXIS1 from untrusted axes must not wrap a usize to a small product
+    // that passes the length check. One 8-byte row (`1K`) × 3e18 rows = 2.4e19 >
+    // usize::MAX, so `from_data` must error rather than truncate.
+    let header = table_header(8, 3_000_000_000_000_000_000, &["1K"]);
+    assert!(matches!(
+        BinTable::from_data(&header, vec![0u8; 8]),
+        Err(FitsError::UnexpectedEof)
+    ));
+}

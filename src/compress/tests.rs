@@ -813,3 +813,86 @@ fn compressed_image_descriptor_switches_to_q_for_large_offsets() {
     assert_eq!(p.len(), 8);
     assert_eq!(i32::from_be_bytes(p[4..8].try_into().unwrap()), 40);
 }
+
+#[test]
+fn hcompress_tile_rejects_dimension_mismatch() {
+    // Encode a valid 2×3 tile, then decode it claiming a different element count.
+    // The decoder reads nx/ny from the stream and must cross-check them against the
+    // tile size it was handed — rather than allocate/transform `nx*ny` blindly
+    // (a wild-allocation / overflow / empty-buffer-panic guard, R2-4).
+    let vals: Vec<i64> = vec![10, 20, 30, 40, 50, 60];
+    let bytes = hcompress::hcompress_tile_encode(&vals, &[2, 3], 0).unwrap();
+    // The correct element count round-trips losslessly (scale 0).
+    assert_eq!(hcompress::hcompress_tile(&bytes, false, 6).unwrap(), vals);
+    // A mismatched element count is rejected, not decoded.
+    assert!(hcompress::hcompress_tile(&bytes, false, 7).is_err());
+    assert!(hcompress::hcompress_tile(&bytes, false, 5).is_err());
+}
+
+#[test]
+fn decompress_image_rejects_overflowing_znaxis_product() {
+    use crate::error::FitsError;
+    use crate::header::Header;
+    use crate::table::BinTable;
+    // ZNAXIS1·ZNAXIS2 = 5e9·5e9 = 2.5e19 overflows usize; decode must reject the
+    // header up front (before allocating the output plane), not wrap to a small
+    // buffer and then scatter out of bounds (R2-2).
+    let mut h = Header::new();
+    h.set("XTENSION", "BINTABLE")
+        .set("BITPIX", 8)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 8)
+        .set("NAXIS2", 1)
+        .set("PCOUNT", 0)
+        .set("GCOUNT", 1)
+        .set("TFIELDS", 1)
+        .set("TFORM1", "1PB(0)")
+        .set("TTYPE1", "COMPRESSED_DATA")
+        .set("ZIMAGE", true)
+        .set("ZCMPTYPE", "GZIP_1")
+        .set("ZBITPIX", 16)
+        .set("ZNAXIS", 2)
+        .set("ZNAXIS1", 5_000_000_000i64)
+        .set("ZNAXIS2", 5_000_000_000i64);
+    let mut data = Vec::new();
+    data.extend_from_slice(&0i32.to_be_bytes()); // empty P descriptor: nelem
+    data.extend_from_slice(&0i32.to_be_bytes()); // offset
+    let table = BinTable::from_data(&h, data).unwrap();
+    assert!(matches!(
+        decompress_image(&h, &table),
+        Err(FitsError::DataUnitOverflow)
+    ));
+}
+
+#[test]
+fn uncompress_table_rejects_overflowing_row_product() {
+    use crate::error::FitsError;
+    use crate::header::Header;
+    use crate::table::BinTable;
+    // ZNAXIS2·ZNAXIS1 = 3e18·8 = 2.4e19 overflows usize; uncompress must reject the
+    // header before allocating the row buffer (R2-3).
+    let mut h = Header::new();
+    h.set("XTENSION", "BINTABLE")
+        .set("BITPIX", 8)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 16) // one 1QB descriptor row
+        .set("NAXIS2", 1)
+        .set("PCOUNT", 0)
+        .set("GCOUNT", 1)
+        .set("TFIELDS", 1)
+        .set("TFORM1", "1QB")
+        .set("TTYPE1", "C1")
+        .set("ZTABLE", true)
+        .set("ZTILELEN", 1)
+        .set("ZNAXIS1", 8)
+        .set("ZNAXIS2", 3_000_000_000_000_000_000i64)
+        .set("ZFORM1", "1K");
+    let mut data = Vec::new();
+    data.extend_from_slice(&0i64.to_be_bytes()); // Q descriptor: nelem
+    data.extend_from_slice(&0i64.to_be_bytes()); // offset
+    let table = BinTable::from_data(&h, data).unwrap();
+    assert!(matches!(
+        uncompress_table(&h, &table),
+        Err(FitsError::DataUnitOverflow)
+    ));
+}

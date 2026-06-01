@@ -78,8 +78,8 @@ Correctly **absent** — adding them would exceed the FITS *format* standard:
 ## Verification
 
 ```
-cargo test                                                        → 177 passed
-cargo test --features compression                                 → 206 passed, 2 ignored (fixture emitters)
+cargo test                                                        → 181 passed
+cargo test --features compression                                 → 214 passed, 2 ignored (fixture emitters)
 cargo fmt --all                                                   → applied
 cargo clippy --all-targets -- -D warnings                         → clean
 cargo clippy --all-targets --features compression -- -D warnings  → clean

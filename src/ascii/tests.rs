@@ -294,3 +294,25 @@ fn ascii_tfields_beyond_999_is_rejected() {
         Err(FitsError::KeywordOutOfRange { name: "TFIELDS" })
     ));
 }
+
+#[test]
+fn ascii_row_count_times_width_overflow_is_rejected() {
+    // NAXIS2·NAXIS1 from untrusted axes must not wrap a usize to a small product.
+    // 3e18 rows × 8 chars = 2.4e19 > usize::MAX, so `from_data` must error.
+    let mut header = Header::new();
+    header
+        .set("XTENSION", "TABLE")
+        .set("BITPIX", 8)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 8)
+        .set("NAXIS2", 3_000_000_000_000_000_000i64)
+        .set("PCOUNT", 0)
+        .set("GCOUNT", 1)
+        .set("TFIELDS", 1)
+        .set("TBCOL1", 1)
+        .set("TFORM1", "I8");
+    assert!(matches!(
+        AsciiTable::from_data(&header, vec![0u8; 8]),
+        Err(FitsError::UnexpectedEof)
+    ));
+}

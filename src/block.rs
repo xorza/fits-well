@@ -78,4 +78,19 @@ mod tests {
             assert_eq!(padded_len(aligned), aligned);
         }
     }
+
+    #[test]
+    fn padded_len_saturates_instead_of_wrapping() {
+        // An absurd length (only reachable from a hostile header) must clamp to
+        // u64::MAX, never wrap: `blocks_for(u64::MAX) · 2880` overflows u64, and a
+        // wrapping multiply yields a value far *smaller* than the input — which
+        // would corrupt the next-HDU seek. Saturating keeps padded_len ≥ its input.
+        assert_eq!(padded_len(u64::MAX), u64::MAX);
+        // Demonstrate the naive multiply really would wrap to something tiny.
+        let wrapped = blocks_for(u64::MAX).wrapping_mul(BLOCK_SIZE as u64);
+        assert!(
+            wrapped < u64::MAX,
+            "the unguarded multiply wraps below the input"
+        );
+    }
 }
