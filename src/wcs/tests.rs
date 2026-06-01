@@ -355,26 +355,25 @@ fn parameterized_projections_match_astropy() {
 }
 
 #[test]
-fn unimplemented_projection_codes_error_cleanly() {
-    use crate::error::FitsError;
+fn unimplemented_projection_codes_fall_back_to_intermediate() {
     use crate::header::Header;
-    // The quad-cube and HEALPix codes are recognized but unimplemented; a celestial
-    // axis using one must error rather than silently fall back to linear coords.
+    // Quad-cube and HEALPix codes are recognized but their projection math is not
+    // implemented. Rather than fail (which would also lose any other axis), the WCS
+    // still builds: the axes are listed in `unsupported_axes` and pixel_to_world
+    // returns their intermediate (linear-stage) world coordinate, never silently.
     for code in ["TSC", "CSC", "QSC", "HPX", "XPH"] {
         let mut h = Header::new();
         h.set("NAXIS", 2);
         h.set("CTYPE1", format!("RA---{code}"));
         h.set("CTYPE2", format!("DEC--{code}"));
         h.set("CRPIX1", 1.0).set("CRPIX2", 1.0);
-        h.set("CRVAL1", 0.0).set("CRVAL2", 0.0);
-        h.set("CDELT1", 1.0).set("CDELT2", 1.0);
-        assert!(
-            matches!(
-                Wcs::from_header(&h, None),
-                Err(FitsError::UnsupportedProjection { .. })
-            ),
-            "{code} should be rejected"
-        );
+        h.set("CRVAL1", 10.0).set("CRVAL2", 20.0);
+        h.set("CDELT1", 2.0).set("CDELT2", 3.0);
+        let w = Wcs::from_header(&h, None).unwrap();
+        assert_eq!(w.unsupported_axes, vec![0, 1], "{code} axes flagged");
+        assert!(w.celestial.is_none(), "{code} not decoded as a projection");
+        // Intermediate world at pixel (3,4): CRVAL + CDELT·(pixel − CRPIX).
+        assert_eq!(w.pixel_to_world(&[3.0, 4.0]), vec![14.0, 29.0], "{code}");
     }
 }
 
@@ -567,10 +566,12 @@ fn planetary_solar_lonlat_axes_are_celestial() {
 }
 
 #[test]
-fn linear_spectral_axis_resolves_nonlinear_errors_cleanly() {
-    // §8.4: a bare spectral type (`FREQ`) is linearly sampled and resolves through
-    // the generic linear axis; a non-linear algorithm code (`-LOG`) is not yet
-    // evaluated and must error rather than return a wrong linear value.
+fn linear_spectral_resolves_nonlinear_falls_back_to_intermediate() {
+    use crate::header::Header;
+    // §8.4: a bare spectral type (`FREQ`) is linearly sampled and fully resolves.
+    // A non-linear algorithm code (`-LOG`) is not evaluated, so that axis is flagged
+    // and returns its intermediate (linear-stage) value — while the celestial pair
+    // on the same cube still decodes fully (the whole WCS is no longer lost).
     let build = |t3: &str| {
         let mut h = Header::new();
         h.set("NAXIS", 3);
@@ -584,15 +585,22 @@ fn linear_spectral_axis_resolves_nonlinear_errors_cleanly() {
         h.set("CDELT1", -1e-3)
             .set("CDELT2", 1e-3)
             .set("CDELT3", 1e6);
-        Wcs::from_header(&h, None)
+        Wcs::from_header(&h, None).unwrap()
     };
-    // FREQ axis at pixel 3: 1.4e9 + (3−1)·1e6 = 1.402e9 Hz.
-    let out = build("FREQ").unwrap().pixel_to_world(&[1.0, 1.0, 3.0]);
-    assert!((out[2] - 1.402e9).abs() < 1.0, "{}", out[2]);
-    assert!(matches!(
-        build("FREQ-LOG"),
-        Err(FitsError::UnsupportedSpectral { .. })
-    ));
+    // Bare FREQ: fully linear, nothing flagged. At pixel 3: 1.4e9 + 2·1e6 = 1.402e9.
+    let lin = build("FREQ");
+    assert!(lin.unsupported_axes.is_empty());
+    assert!((lin.pixel_to_world(&[1.0, 1.0, 3.0])[2] - 1.402e9).abs() < 1.0);
+    // FREQ-LOG: axis index 2 flagged; it returns the intermediate value, and the
+    // RA/DEC pair still decodes (reference pixel → CRVAL exactly).
+    let log = build("FREQ-LOG");
+    assert_eq!(log.unsupported_axes, vec![2]);
+    assert!((log.pixel_to_world(&[1.0, 1.0, 3.0])[2] - 1.402e9).abs() < 1.0);
+    let r = log.pixel_to_world(&[1.0, 1.0, 1.0]);
+    assert!(
+        (r[0] - 45.0).abs() < 1e-9 && (r[1] - 30.0).abs() < 1e-9,
+        "{r:?}"
+    );
 }
 
 #[test]
