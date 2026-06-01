@@ -284,18 +284,39 @@ impl<'a> BitReader<'a> {
     }
 
     /// Count and consume leading zero bits up to (and including) the next 1.
-    /// Stops once the real input is exhausted: `read` zero-fills past EOF, so a
-    /// truncated/malformed tile with no terminating 1 bit would otherwise spin this
-    /// loop forever (a DoS on untrusted compressed bytes).
+    ///
+    /// Scans the zero run a whole word at a time via `leading_zeros` rather than one
+    /// `read(1)` per bit — the unary quotient decode is the hot path of Rice decode.
+    /// Stops once the real input is exhausted (a truncated tile with no terminating
+    /// 1 bit would otherwise loop forever — a DoS on untrusted bytes); the exact
+    /// count past EOF is unspecified (the data is corrupt), only termination matters.
     pub(super) fn read_zeros(&mut self) -> u64 {
-        let mut z = 0;
-        while self.read(1) == 0 {
-            if self.pos > self.bytes.len() {
-                break;
+        let mut z = 0u64;
+        loop {
+            if self.nbits == 0 {
+                // Refill one byte; at EOF there is no terminating 1 bit, so stop.
+                if self.pos >= self.bytes.len() {
+                    return z;
+                }
+                self.acc = (self.acc << 8) | self.bytes[self.pos] as u64;
+                self.pos += 1;
+                self.nbits += 8;
             }
-            z += 1;
+            // Left-align the valid low `nbits` bits so the next-to-read bit is the
+            // MSB, then count zeros up to the first 1 (capped at the valid bits, since
+            // the shifted-in low bits read as zero).
+            let run = (self.acc << (64 - self.nbits))
+                .leading_zeros()
+                .min(self.nbits);
+            if run < self.nbits {
+                // Terminating 1 found within the valid bits: consume the zeros + the 1.
+                self.nbits -= run + 1;
+                return z + run as u64;
+            }
+            // All valid bits were zero: consume them and refill on the next pass.
+            z += self.nbits as u64;
+            self.nbits = 0;
         }
-        z
     }
 }
 
@@ -310,6 +331,29 @@ mod tests {
         assert_eq!(br.read(3), 0b011);
         assert_eq!(br.read(4), 0b0010);
         assert_eq!(br.read(4), 0b1111);
+    }
+
+    #[test]
+    fn read_zeros_counts_runs_across_bytes_and_leftover_bits() {
+        // MSB-first. 0x00 0x80 = 0000_0000 1000_0000: an 8-bit zero run spanning the
+        // first byte, terminated by the leading 1 of the second (exercises the
+        // cross-byte refill mid-run). Consumes 9 bits, leaving 7 trailing zeros which
+        // then hit EOF and stop (count past EOF is unspecified — here the 7 zeros).
+        let mut br = BitReader::new(&[0x00, 0x80]);
+        assert_eq!(br.read_zeros(), 8);
+        assert_eq!(br.read_zeros(), 7);
+
+        // 0x01 = 0000_0001: 7 zeros then a 1, entirely within one byte.
+        let mut br = BitReader::new(&[0x01]);
+        assert_eq!(br.read_zeros(), 7);
+
+        // Leftover bits before a run: read(4) leaves 4 valid bits, then read_zeros
+        // works from them. 0x08 = 0000_1000 → high nibble 0, then the '1' is next
+        // (run 0); 0x40 = 0100_0000 → 3 trailing zeros of byte0 + 1 zero → run 4.
+        let mut br = BitReader::new(&[0x08, 0x40]);
+        assert_eq!(br.read(4), 0);
+        assert_eq!(br.read_zeros(), 0);
+        assert_eq!(br.read_zeros(), 4);
     }
 
     #[test]
