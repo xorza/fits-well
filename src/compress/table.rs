@@ -371,7 +371,9 @@ fn decompress_column(bytes: &[u8], m: &ColMeta, rows: usize) -> Result<Vec<u8>> 
                 name: format!("RICE_1 on a {} column", m.kind.code()),
             })?;
             let nelem = rows * m.repeat;
-            i64_to_be(&rice::rice_decode(bytes, nelem, bytepix, 32), bytepix)
+            let mut ints = Vec::new();
+            rice::rice_decode_into(bytes, nelem, bytepix, 32, &mut ints);
+            i64_to_be(&ints, bytepix)
         }
     };
     if cm.len() != rows * m.width {

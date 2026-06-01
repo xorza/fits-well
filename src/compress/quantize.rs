@@ -94,30 +94,31 @@ impl Dither {
 /// `f = (i − dither + 0.5)·scale + zero`, with reserved integers handled first:
 /// a value equal to `zblank` becomes `NaN`, and (for `Subtractive2`) [`ZERO_VALUE`]
 /// becomes exactly `0.0`. The dither cursor advances per pixel regardless.
-pub(super) fn dequantize(
+pub(super) fn dequantize_into(
     ints: &[i64],
     scale: f64,
     zero: f64,
     method: DitherMethod,
     irow: i64,
     zblank: Option<i64>,
-) -> Vec<f64> {
+    out: &mut Vec<f64>,
+) {
     let dither2 = method == DitherMethod::Subtractive2;
     let mut d = method.dithered().then(|| Dither::new(irow));
-    ints.iter()
-        .map(|&v| {
-            let r = d.as_mut().map_or(0.0, Dither::next);
-            if zblank == Some(v) {
-                f64::NAN
-            } else if dither2 && v == ZERO_VALUE as i64 {
-                0.0
-            } else if method.dithered() {
-                (v as f64 - r + 0.5) * scale + zero
-            } else {
-                scale * v as f64 + zero
-            }
-        })
-        .collect()
+    out.clear();
+    out.reserve(ints.len());
+    out.extend(ints.iter().map(|&v| {
+        let r = d.as_mut().map_or(0.0, Dither::next);
+        if zblank == Some(v) {
+            f64::NAN
+        } else if dither2 && v == ZERO_VALUE as i64 {
+            0.0
+        } else if method.dithered() {
+            (v as f64 - r + 0.5) * scale + zero
+        } else {
+            scale * v as f64 + zero
+        }
+    }));
 }
 
 /// Round-to-nearest, ties away from zero (cfitsio `NINT`).

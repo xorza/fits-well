@@ -308,7 +308,7 @@ fn float_write_preserves_nan_nulls() {
 
 #[test]
 fn dither2_quantize_round_trips() {
-    use super::quantize::{DitherMethod, dequantize, quantize_tile};
+    use super::quantize::{DitherMethod, dequantize_into, quantize_tile};
 
     // 8×8 field with genuine noise and a scattering of exact zeros.
     let mut data: Vec<f64> = (0..64)
@@ -328,13 +328,15 @@ fn dither2_quantize_round_trips() {
         assert_eq!(q.idata[k], super::quantize::ZERO_VALUE, "zero pixel {k}");
     }
     let ints: Vec<i64> = q.idata.iter().map(|&v| v as i64).collect();
-    let back = dequantize(
+    let mut back = Vec::new();
+    dequantize_into(
         &ints,
         q.bscale,
         q.bzero,
         DitherMethod::Subtractive2,
         irow,
         None,
+        &mut back,
     );
     for (i, (&o, &b)) in data.iter().zip(&back).enumerate() {
         if o == 0.0 {
@@ -839,10 +841,12 @@ fn hcompress_tile_rejects_dimension_mismatch() {
     let vals: Vec<i64> = vec![10, 20, 30, 40, 50, 60];
     let bytes = hcompress::hcompress_tile_encode(&vals, &[2, 3], 0).unwrap();
     // The correct element count round-trips losslessly (scale 0).
-    assert_eq!(hcompress::hcompress_tile(&bytes, false, 6).unwrap(), vals);
+    let mut out = Vec::new();
+    hcompress::hcompress_tile_into(&bytes, false, 6, &mut out).unwrap();
+    assert_eq!(out, vals);
     // A mismatched element count is rejected, not decoded.
-    assert!(hcompress::hcompress_tile(&bytes, false, 7).is_err());
-    assert!(hcompress::hcompress_tile(&bytes, false, 5).is_err());
+    assert!(hcompress::hcompress_tile_into(&bytes, false, 7, &mut out).is_err());
+    assert!(hcompress::hcompress_tile_into(&bytes, false, 5, &mut out).is_err());
 }
 
 #[test]
@@ -920,8 +924,10 @@ fn i64_be_round_trip_and_buffer_reuse() {
     let vals = [0i64, 1, -1, 258, -2];
     let want = [0, 0, 0, 1, 0xFF, 0xFF, 0x01, 0x02, 0xFF, 0xFE];
     assert_eq!(i64_to_be(&vals, Bitpix::I16), want);
-    // Decode is the exact inverse (sign-extending back to i64).
-    assert_eq!(be_to_i64(&want, Bitpix::I16), vals);
+    // Decode is the exact inverse (sign-extending back to i64), into a reused buffer.
+    let mut d = Vec::new();
+    be_to_i64_into(&want, Bitpix::I16, &mut d);
+    assert_eq!(d, vals);
 
     // I32 packs four bytes/elem; 0x00010203 = 66051, -1 → all-ones.
     let i32_vals = [66051i64, -1];
@@ -929,14 +935,13 @@ fn i64_be_round_trip_and_buffer_reuse() {
         i64_to_be(&i32_vals, Bitpix::I32),
         [0x00, 0x01, 0x02, 0x03, 0xFF, 0xFF, 0xFF, 0xFF]
     );
-    assert_eq!(
-        be_to_i64(&[0, 1, 2, 3, 0xFF, 0xFF, 0xFF, 0xFF], Bitpix::I32),
-        i32_vals
-    );
+    be_to_i64_into(&[0, 1, 2, 3, 0xFF, 0xFF, 0xFF, 0xFF], Bitpix::I32, &mut d);
+    assert_eq!(d, i32_vals);
 
     // U8 and I64 ends of the range.
     assert_eq!(i64_to_be(&[255, 0], Bitpix::U8), [0xFF, 0x00]);
-    assert_eq!(be_to_i64(&[0xFF, 0x00], Bitpix::U8), [255, 0]);
+    be_to_i64_into(&[0xFF, 0x00], Bitpix::U8, &mut d);
+    assert_eq!(d, [255, 0]);
     assert_eq!(i64_to_be(&[-1], Bitpix::I64), [0xFF; 8]);
 
     // `i64_to_be_into` clears + resizes its scratch: a long fill followed by a short
