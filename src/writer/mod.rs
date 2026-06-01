@@ -342,11 +342,11 @@ impl<W: Write> FitsWriter<W> {
         scale: i32,
     ) -> Result<()> {
         self.ensure_primary()?;
-        let mut enc = crate::compress::encode_image(image, cmptype, tile_shape, scale)?;
-        // The codec already produced an owned data unit; move it into the reused
-        // scratch (no copy) rather than building in place.
-        std::mem::swap(&mut self.scratch, &mut enc.data);
-        self.write_hdu(enc.header, ZERO_FILL)
+        // The codec assembles the compressed data unit directly into the reused
+        // scratch and hands back just the header.
+        let header =
+            crate::compress::encode_image(image, cmptype, tile_shape, scale, &mut self.scratch)?;
+        self.write_hdu(header, ZERO_FILL)
     }
 
     /// Write a fixed-width `BINTABLE` as a tiled-compressed table (§10.3). `header`
@@ -362,9 +362,9 @@ impl<W: Write> FitsWriter<W> {
         algo: &str,
     ) -> Result<()> {
         self.ensure_primary()?;
-        let mut enc = crate::compress::compress_table(header, table, rows_per_tile, algo)?;
-        std::mem::swap(&mut self.scratch, &mut enc.data);
-        self.write_hdu(enc.header, ZERO_FILL)
+        let zheader =
+            crate::compress::compress_table(header, table, rows_per_tile, algo, &mut self.scratch)?;
+        self.write_hdu(zheader, ZERO_FILL)
     }
 
     /// Write a dataless primary HDU if none has been written yet, so subsequent

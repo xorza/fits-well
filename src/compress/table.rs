@@ -149,7 +149,8 @@ pub(crate) fn compress_table(
     table: &BinTable,
     rows_per_tile: usize,
     default_algo: &str,
-) -> Result<HduParts> {
+    out: &mut Vec<u8>,
+) -> Result<Header> {
     let default_algo = Algo::parse(default_algo)?;
     let ncols = table.columns.len();
     let nrows = table.nrows;
@@ -185,12 +186,13 @@ pub(crate) fn compress_table(
     }
 
     // Data unit: nchunks rows of ncols 16-byte Q descriptors, then the heap.
-    let mut data = Vec::with_capacity(nchunks * ncols * 16 + heap.len());
+    out.clear();
+    out.reserve(nchunks * ncols * 16 + heap.len());
     for &(nelem, off) in &descriptors {
-        data.extend_from_slice(&(nelem as i64).to_be_bytes());
-        data.extend_from_slice(&(off as i64).to_be_bytes());
+        out.extend_from_slice(&(nelem as i64).to_be_bytes());
+        out.extend_from_slice(&(off as i64).to_be_bytes());
     }
-    data.extend_from_slice(&heap);
+    out.extend_from_slice(&heap);
 
     // Header: copy the original, then layer on the Z* keywords.
     let mut h = header.clone();
@@ -215,7 +217,7 @@ pub(crate) fn compress_table(
     h.set("NAXIS2", nchunks as i64);
     h.set("PCOUNT", heap.len() as i64);
     h.set("GCOUNT", 1);
-    Ok(HduParts { header: h, data })
+    Ok(h)
 }
 
 /// Uncompress a `ZTABLE` container back into its original fixed-width `BINTABLE`.
