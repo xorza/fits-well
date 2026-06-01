@@ -101,6 +101,65 @@ fn reads_jepoch_and_bepoch_keywords() {
 }
 
 #[test]
+fn reads_bound_duration_and_error_keywords() {
+    use crate::header::Header;
+    let mut h = Header::new();
+    h.set("MJD-BEG", 58000.0);
+    h.set("DATE-END", "2017-09-05T00:00:00");
+    h.set("XPOSURE", 1200.0);
+    h.set("TELAPSE", 1500.0);
+    h.set("TIMEDEL", 0.1);
+    h.set("TIMSYER", 1e-6);
+    let b = FitsTime::from_header(&h).bounds(&h);
+    assert_eq!(b.beg_mjd, Some(58000.0));
+    let end = Datetime::parse("2017-09-05T00:00:00").unwrap().to_mjd();
+    assert!((b.end_mjd.unwrap() - end).abs() < 1e-9); // resolved from DATE-END
+    assert_eq!(b.xposure, Some(1200.0));
+    assert_eq!(b.telapse, Some(1500.0));
+    assert_eq!(b.timedel, Some(0.1));
+    assert_eq!(b.timepixr, 0.5); // default when absent
+    assert_eq!(b.timsyer, Some(1e-6));
+    assert_eq!(b.timrder, None);
+}
+
+#[test]
+fn gti_intervals_convert_to_absolute_mjd() {
+    use crate::header::Header;
+    let mut h = Header::new();
+    h.set("MJDREF", 58000.0);
+    h.set("TIMEUNIT", "d");
+    let t = FitsTime::from_header(&h);
+    let gtis = t.gti_intervals(&[0.0, 2.0], &[1.0, 3.0]);
+    assert_eq!(
+        gtis,
+        vec![
+            GtiInterval {
+                start_mjd: 58000.0,
+                stop_mjd: 58001.0,
+            },
+            GtiInterval {
+                start_mjd: 58002.0,
+                stop_mjd: 58003.0,
+            },
+        ]
+    );
+}
+
+#[test]
+fn classifies_time_related_axes() {
+    use TimeAxisKind::*;
+    assert_eq!(time_axis_kind("TIME"), Some(Time));
+    assert_eq!(time_axis_kind("UTC"), Some(Time)); // a scale name is a time axis
+    assert_eq!(time_axis_kind("PHASE"), Some(Phase));
+    assert_eq!(time_axis_kind("TIMELAG"), Some(Timelag));
+    assert_eq!(time_axis_kind("FREQUENCY"), Some(Frequency));
+    assert_eq!(time_axis_kind("RA---TAN"), None);
+    // is_time_ctype is true only for the absolute-time kind.
+    assert!(is_time_ctype("TIME"));
+    assert!(!is_time_ctype("PHASE"));
+}
+
+#[test]
 fn epochs_match_astropy() {
     let cases: &[(&str, f64)] = &[
         ("J2000.0", 2451545.0),

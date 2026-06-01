@@ -43,9 +43,7 @@ mod hdu;
 mod header;
 mod reader;
 mod table;
-#[cfg(feature = "time")]
 mod time;
-#[cfg(feature = "wcs")]
 mod wcs;
 mod writer;
 
@@ -60,9 +58,10 @@ pub use header::card::{Card, CardKind};
 pub use header::value::Value;
 pub use reader::{ChecksumReport, DataUnit, FitsReader, Hdu};
 pub use table::{BinTable, Column, ColumnData, Tform, TformKind};
-#[cfg(feature = "time")]
-pub use time::{Datetime, Epoch, EpochTime, FitsTime, TimeScale};
-#[cfg(feature = "wcs")]
+pub use time::{
+    Datetime, Epoch, EpochTime, FitsTime, GtiInterval, TimeAxisKind, TimeBounds, TimeScale,
+    time_axis_kind,
+};
 pub use wcs::{Projection, Wcs};
 pub use writer::{AsciiWriteColumn, FitsWriter, WriteColumn};
 

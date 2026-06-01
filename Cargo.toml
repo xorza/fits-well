@@ -17,9 +17,6 @@ default = []
 parallel = []
 # memory-mapped read sources for zero-copy access over large files.
 mmap = []
-# typed World Coordinate System layer (projections, spherical rotations) over parsed headers.
-wcs = []
-# typed time coordinates: ISO-8601/JD/MJD, epochs, time-scale conversions (§9).
-time = []
 # tiled image decompression: GZIP_1 (via flate2) and RICE_1; HCOMPRESS_1/PLIO_1 TODO.
+# The WCS (§8) and time (§9) layers are dependency-free and always compiled.
 compression = ["dep:flate2"]

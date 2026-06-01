@@ -310,7 +310,7 @@ decoding.
 
 3. 🟢 **Reserved image keywords have no typed accessors (§7.1.2).** `BUNIT`,
    `DATAMIN`, `DATAMAX`, `EXTNAME`, `EXTVER`, `EXTLEVEL` are readable only as raw
-   header cards; `Scaling` covers `BSCALE`/`BZERO`/`BLANK` and the `wcs` feature
+   header cards; `Scaling` covers `BSCALE`/`BZERO`/`BLANK` and the `wcs` layer
    covers WCS, but the others have no typed surface. Optional, but listed by the
    doc.
 
@@ -556,8 +556,8 @@ Coverage gaps:
 ## §8 — World Coordinate Systems (`docs/refs/07-wcs-time-compression.md` §7.1)
 
 Audited code: `wcs/mod.rs` (`Wcs`, `Projection`, the pixel↔world pipeline,
-`compute_pole`, matrix inversion), behind the `wcs` feature. (Time §9 and
-compression §10 from the same reference file are audited separately.)
+`compute_pole`, matrix inversion). (Time §9 and compression §10 from the same
+reference file are audited separately.)
 
 The reference sets a deliberately low bar — *"a v1 can parse/preserve the
 keywords as ordinary header records and add typed support incrementally"* — which
@@ -669,7 +669,7 @@ Coverage gaps:
 
 Audited code: `time/mod.rs` (`Datetime`, `Epoch`, `TimeScale`, `FitsTime`,
 `is_time_ctype`, plus the leap-second / `tdb_minus_tt` / proleptic-Gregorian
-helpers) and `time/tests.rs`, behind the `time` feature.
+helpers) and `time/tests.rs`.
 
 §9 layers a full time framework onto the WCS spine: a time scale (`TIMESYS` +
 Table 30), a reference value (`MJDREF`/`JDREF`/`DATEREF`, optionally split into
@@ -724,14 +724,14 @@ to an astronomy library (astropy `SkyCoord`/`time`, ERFA), not implemented here.
 | 9.2.4 | `TREFDIR`/`TRDIRn` reference direction (correction geometry) | — | ⚪ out of scope (astronomy) |
 | 9.2.5 | `PLEPHEM` (default `DE405`) planetary ephemeris | — | ⚪ out of scope (astronomy) |
 | 9.4.1 | `TIMEOFFS` added to reference time | `FitsTime.timeoffs` added in `relative_to_mjd` | ✅ |
-| 9.4.2 | `TIMEDEL` / `TIMEPIXR` binning | — | 🟡 not implemented |
-| 9.4.3 | `TIMSYER` / `TIMRDER` time errors | — | 🟢 not implemented |
+| 9.4.2 | `TIMEDEL` / `TIMEPIXR` binning | `TimeBounds` (`TIMEPIXR` default 0.5) | ✅ |
+| 9.4.3 | `TIMSYER` / `TIMRDER` time errors | `TimeBounds` | ✅ |
 | 9.5 | `DATE-OBS` / `MJD-OBS` start time | `obs_mjd` (`time/mod.rs:419`) | ✅ |
-| 9.5 | `DATE-BEG`/`-END`, `MJD-BEG`/`-END` typed | — | 🟢 raw cards only |
+| 9.5 | `DATE-BEG`/`-END`, `MJD-BEG`/`-END` typed | `TimeBounds.beg_mjd`/`end_mjd` (MJD else DATE→MJD) | ✅ |
 | 9.5 | `TSTART`/`TSTOP` (rel. to `[M]JDREF`, in `TIMEUNIT`) | `relative_to_mjd` (incl. `TIMEOFFS`) | ✅ |
 | 9.6 | `CTYPEi='TIME'` image time axis → world time | `time_axis_mjd` (`time/mod.rs:433`) | ✅ |
-| 9.6 | `'PHASE'`/`'TIMELAG'`/`'FREQUENCY'`; `CZPHSia`/`CPERIia` | `is_time_ctype` recognizes `'TIME'`+scales only (`time/mod.rs:447`) | 🟢 not implemented |
-| 9.7 | `XPOSURE` / `TELAPSE` durations; GTI `START`/`STOP` | — | 🟢 raw cards only |
+| 9.6 | `'PHASE'`/`'TIMELAG'`/`'FREQUENCY'`; `CZPHSia`/`CPERIia` | `time_axis_kind` classifies the axis | ✅ recognition / 🟢 no value calc |
+| 9.7 | `XPOSURE` / `TELAPSE` durations; GTI `START`/`STOP` | `TimeBounds`; `gti_intervals` → `GtiInterval` | ✅ |
 
 The normative computational core — the Table-30 scale set with the canonical
 aliases, the TT-pivot conversion lattice including the defining `L_G`/`L_B`
@@ -786,20 +786,22 @@ semantics, table-only constructs, and the non-`TIME` time axes.
    ΔUT1 is an IERS-observed quantity, not a FITS keyword; maintaining that table is
    astronomy-library territory, so caller-supplied ΔUT1 is the deliberate boundary.
 
-9. 🟢 **Typed reading of metadata-only / table-context §9 keywords unimplemented
-   (all remain readable as raw cards):** `TIMEDEL`/`TIMEPIXR` binning (§9.4.2),
-   `TIMSYER`/`TIMRDER` errors (§9.4.3); only `DATE-OBS`/`MJD-OBS` (no typed
-   `DATE-BEG`/`-END`/`MJD-BEG`/`-END`); no `XPOSURE`/`TELAPSE` durations or GTI
-   `START`/`STOP` (§9.7); no `'PHASE'`/`'TIMELAG'`/`'FREQUENCY'` axes or
-   `CZPHSia`/`CPERIia` (§9.6) — `is_time_ctype` recognizes only `'TIME'` and
-   Table-30 scale names (`time/mod.rs:447`). (`TREFPOS`/`TREFDIR`/`PLEPHEM`/`OBSGEO-*`
-   are read or preserved as cards, but their position-dependent corrections are out
-   of scope — see the §9 scope note above.)
+9. ✅ **Typed reading of the metadata/table-context §9 keywords.**
+   `FitsTime::bounds` returns a `TimeBounds` of the global bound/duration/error
+   keywords — `MJD-BEG`/`DATE-BEG`, `MJD-END`/`DATE-END`, `XPOSURE`, `TELAPSE`,
+   `TIMEDEL`, `TIMEPIXR` (default 0.5), `TIMSYER`, `TIMRDER` (§9.4/§9.5/§9.7);
+   `FitsTime::gti_intervals` converts GTI `START`/`STOP` column values to
+   absolute-MJD `GtiInterval`s (§9.7); and `time_axis_kind` classifies a `CTYPE` as
+   `TIME`/`PHASE`/`TIMELAG`/`FREQUENCY` (§9.6). Covered by
+   `reads_bound_duration_and_error_keywords`, `gti_intervals_convert_to_absolute_mjd`,
+   and `classifies_time_related_axes`. (Pixel→value for the non-`TIME` axes, and
+   `CZPHSia`/`CPERIia`, are not computed — recognition only.)
 
-10. 🟢 **`TDB_0` constant offset omitted.** The §9.2.1 TCB→TDB relation includes
-   `TDB_0 = −6.55 × 10⁻⁵ s`; the periodic `tdb_minus_tt` series (`time/mod.rs:297`)
-   omits the constant term — below the astropy test tolerance, but not the literal
-   defining equation.
+10. ✅ **`TDB_0` constant applied (IAU 2006).** The `TDB − TT` series stays purely
+   periodic (matching ERFA `dtdb`, which the suite validates against); the
+   `TDB_0 = −6.55 × 10⁻⁵ s` constant lives in the `TCB ↔ TDB` relation where the
+   IAU definition places it (`to_tt`/`from_tt` `Tcb` arms), still astropy-validated
+   by `scale_conversions_match_astropy`.
 
 ### Test coverage
 
@@ -832,8 +834,9 @@ Coverage gaps:
   epoch keywords (gap #7). No `JDREF`/`DATEREF` resolution or kind-precedence test
   yet (only `MJDREF` and the split are exercised).
 - `TIMEOFFS` is applied and tested (`timeoffs_shifts_relative_times`); the
-  remaining gap #9 keywords (binning, durations, GTI, PHASE/TIMELAG/FREQUENCY) are
-  untested because unimplemented.
+  metadata/duration/GTI keywords and axis classification are covered by
+  `reads_bound_duration_and_error_keywords`, `gti_intervals_convert_to_absolute_mjd`,
+  and `classifies_time_related_axes`.
 
 ---
 

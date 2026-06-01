@@ -23,12 +23,12 @@ core crate is dependency-free by default (the `compression` feature pulls in
 (primary + `IMAGE`/`TABLE`/`BINTABLE` extensions) write; binary-table `P`/`Q` heap
 arrays and per-column `TSCAL`/`TZERO` decode; random groups read; `CONTINUE`,
 `HIERARCH`, and `CHECKSUM`/`DATASUM` (verify + write) are supported. A typed
-**WCS** layer (`wcs` feature) does pixel↔world for 23 projections — zenithal
+**WCS** layer does pixel↔world for 23 projections — zenithal
 `TAN`/`SIN`/`ARC`/`STG`/`ZEA`/`ZPN`/`AIR`, zenithal-perspective `AZP`/`SZP`,
 cylindrical `CAR`/`CEA`/`MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic
 `COP`/`COE`/`COD`/`COO`, pseudoconic `BON`, polyconic `PCO` — with `PC`/`CD`/`CROTA`
 and full `PVi_m` parameters, yielding coordinates in the frame the file declares
-(`RADESYS`/`EQUINOX`). A typed **time** layer (`time` feature)
+(`RADESYS`/`EQUINOX`). A typed **time** layer
 handles ISO-8601/JD/MJD, epochs, `UTC`…`TCB`/`GPS`/UT1 scale conversions, and time
 WCS axes — both validated against astropy. Tiled **image and table** compression
 work behind
@@ -140,8 +140,8 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `groups/` | random-groups (§6) read: params + arrays, `PSCALn`/`PZEROn` physical | read done (no write — deprecated) |
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
 | `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3), reassembly + encode | all 5 image codecs read+write; float quant all 3 dither methods + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode + lossy `SCALE>0` write; fixed-width table compression read+write |
-| `wcs/` (feature `wcs`) | typed WCS: keyword parse, linear transform (PC/CD/CROTA + `PVi_m` + inverse), 23 projections (zenithal + perspective AZP/SZP + cylindrical + all-sky + conic + BON + PCO) via general pole computation, `pixel_to_world`/`world_to_pixel`; unimplemented codes → `UnsupportedProjection` | v2 done (quad-cube/HEALPix, spectral TODO; inter-frame transforms out of scope) |
-| `time/` (feature `time`) | typed time (§9): `Datetime` (ISO-8601↔JD/MJD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), `FitsTime` header view + time WCS axis | v2 done |
+| `wcs/` | typed WCS: keyword parse, linear transform (PC/CD/CROTA + `PVi_m` + inverse), 23 projections (zenithal + perspective AZP/SZP + cylindrical + all-sky + conic + BON + PCO) via general pole computation, `pixel_to_world`/`world_to_pixel`; unimplemented codes → `UnsupportedProjection` | v2 done (quad-cube/HEALPix, spectral TODO; inter-frame transforms out of scope) |
+| `time/` | typed time (§9): `Datetime` (ISO-8601↔JD/MJD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), `FitsTime` header view + time WCS axis | v2 done |
 | `error.rs` | `FitsError` + `Result` | done |
 
 `lib.rs` is the only place that defines the public surface (`pub use`). Card
@@ -164,9 +164,11 @@ Design principles specific to this crate:
 - **SIMD/parallel the bulk ops.** Endian swap + `BSCALE/BZERO` (and per-column
   `TSCAL/TZERO`) are embarrassingly parallel; tile images and table columns for
   multi-threaded decode. Gate threading behind a feature, keep a scalar fallback.
-- **Feature-flag the heavy layers.** Core read/write of images+tables stays
-  dependency-light; put WCS math and tiled compression (`RICE_1`, `GZIP`,
-  `HCOMPRESS`, `PLIO`) behind features so the base crate is small.
+- **Feature-flag only the layers that carry a dependency.** Tiled compression
+  (`RICE_1`, `GZIP`, `HCOMPRESS`, `PLIO`) pulls in `flate2`, so it lives behind the
+  `compression` feature. WCS (§8) and time (§9) are dependency-free pure math and
+  part of the standard, so they are always compiled (no feature gate); the whole
+  crate stays dependency-free by default regardless.
 - **"Once FITS, always FITS."** The format never breaks backward compatibility.
   Keep reading legacy structures (random groups, `SIMPLE = F`) forever; just
   don't *write* deprecated forms.

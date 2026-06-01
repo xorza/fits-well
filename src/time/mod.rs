@@ -1,4 +1,4 @@
-//! Typed time coordinates (§9) — behind the `time` feature.
+//! Typed time coordinates (§9).
 //!
 //! Covers the computational core: ISO-8601 datetimes ↔ Julian Date / MJD
 //! (proleptic-Gregorian calendar math), `J`/`B` epochs → JD, time-scale
@@ -24,6 +24,8 @@ const TAI_GPS: f64 = 19.0;
 const L_G: f64 = 6.969_290_134e-10;
 /// TCB rate: `(TCB − TDB) ≈ L_B · (TDB − 1977.0)` (IAU 2006 Resolution B3).
 const L_B: f64 = 1.550_519_768e-8;
+/// `TDB_0`: the constant term of the `TDB − TT` relation (IAU 2006 Resolution B3).
+const TDB_0: f64 = -6.55e-5;
 const SEC_PER_DAY: f64 = 86_400.0;
 
 /// A calendar datetime (proleptic Gregorian, UTC-agnostic). `second` may reach
@@ -278,7 +280,7 @@ impl TimeScale {
             TimeScale::Tcg => jd - L_G * (jd - T1977_JD),
             TimeScale::Tdb => jd - tdb_minus_tt(jd) / SEC_PER_DAY,
             TimeScale::Tcb => {
-                let tdb = jd - L_B * (jd - T1977_JD);
+                let tdb = jd - L_B * (jd - T1977_JD) + TDB_0 / SEC_PER_DAY;
                 tdb - tdb_minus_tt(tdb) / SEC_PER_DAY
             }
         }
@@ -307,7 +309,7 @@ fn from_tt(tt: f64, target: TimeScale, dut1: f64) -> f64 {
         TimeScale::Tdb => tt + tdb_minus_tt(tt) / SEC_PER_DAY,
         TimeScale::Tcb => {
             let tdb = tt + tdb_minus_tt(tt) / SEC_PER_DAY;
-            tdb + L_B * (tdb - T1977_JD)
+            tdb + L_B * (tdb - T1977_JD) - TDB_0 / SEC_PER_DAY
         }
     }
 }
@@ -394,6 +396,35 @@ fn jdn_to_gregorian(jdn: i64) -> (i64, u32, u32) {
 pub struct EpochTime {
     pub mjd: f64,
     pub scale: TimeScale,
+}
+
+/// The global bound / duration / error time keywords (§9.4, §9.5, §9.7), as read
+/// by [`FitsTime::bounds`]. Start/end are absolute MJD; the rest are in `TIMEUNIT`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimeBounds {
+    /// Observation start: `MJD-BEG`, else `DATE-BEG` → MJD.
+    pub beg_mjd: Option<f64>,
+    /// Observation end: `MJD-END`, else `DATE-END` → MJD.
+    pub end_mjd: Option<f64>,
+    /// `XPOSURE` — effective exposure time.
+    pub xposure: Option<f64>,
+    /// `TELAPSE` — total elapsed time.
+    pub telapse: Option<f64>,
+    /// `TIMEDEL` — time resolution / bin width.
+    pub timedel: Option<f64>,
+    /// `TIMEPIXR` — pixel position within a bin (0–1, default 0.5).
+    pub timepixr: f64,
+    /// `TIMSYER` — systematic time error.
+    pub timsyer: Option<f64>,
+    /// `TIMRDER` — random time error.
+    pub timrder: Option<f64>,
+}
+
+/// A Good Time Interval as absolute MJD (§9.7).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GtiInterval {
+    pub start_mjd: f64,
+    pub stop_mjd: f64,
 }
 
 /// A header's time coordinate frame (§9): the reference epoch, scale, unit, and
@@ -484,6 +515,44 @@ impl FitsTime {
         })
     }
 
+    /// The global bound / duration / error time keywords (§9.4, §9.5, §9.7). The
+    /// start/end are resolved to absolute MJD (`MJD-BEG`/`-END`, else `DATE-BEG`/
+    /// `-END`); durations and errors are returned as stored, in `TIMEUNIT`.
+    pub fn bounds(&self, header: &Header) -> TimeBounds {
+        let mjd_or_date = |mjd: &str, date: &str| {
+            header.get_real(mjd).or_else(|| {
+                header
+                    .get_text(date)
+                    .and_then(|s| Datetime::parse(s).ok())
+                    .map(|d| d.to_mjd())
+            })
+        };
+        TimeBounds {
+            beg_mjd: mjd_or_date("MJD-BEG", "DATE-BEG"),
+            end_mjd: mjd_or_date("MJD-END", "DATE-END"),
+            xposure: header.get_real("XPOSURE"),
+            telapse: header.get_real("TELAPSE"),
+            timedel: header.get_real("TIMEDEL"),
+            timepixr: header.get_real("TIMEPIXR").unwrap_or(0.5), // §9.4.2 default
+            timsyer: header.get_real("TIMSYER"),
+            timrder: header.get_real("TIMRDER"),
+        }
+    }
+
+    /// Convert Good Time Interval `START`/`STOP` column values (relative to
+    /// `MJDREF`, in `TIMEUNIT`) to absolute-MJD intervals (§9.7). Pairs are taken
+    /// element-wise up to the shorter slice.
+    pub fn gti_intervals(&self, starts: &[f64], stops: &[f64]) -> Vec<GtiInterval> {
+        starts
+            .iter()
+            .zip(stops)
+            .map(|(&s, &e)| GtiInterval {
+                start_mjd: self.relative_to_mjd(s),
+                stop_mjd: self.relative_to_mjd(e),
+            })
+            .collect()
+    }
+
     /// If WCS axis `axis` (1-based) is a time axis (`CTYPEi = 'TIME'` or a
     /// time-scale name, §9.2.3), convert a 1-based pixel coordinate along it to an
     /// absolute MJD in the frame's scale: the linear axis value (elapsed time in
@@ -500,11 +569,36 @@ impl FitsTime {
     }
 }
 
-/// True if a `CTYPE` denotes a time axis: `'TIME'` or a recognized time-scale
-/// name (`'UTC'`, `'TT'`, …).
-pub fn is_time_ctype(ctype: &str) -> bool {
+/// A time-related WCS axis type (§9.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeAxisKind {
+    /// `'TIME'` or a time-scale name — an absolute time axis (→ MJD).
+    Time,
+    /// `'PHASE'` — phase folded on a period (`CPERIia`, zero `CZPHSia`).
+    Phase,
+    /// `'TIMELAG'` — a correlation/cross-spectral time lag.
+    Timelag,
+    /// `'FREQUENCY'` — a frequency axis.
+    Frequency,
+}
+
+/// Classify a `CTYPE` as a time-related axis (§9.6), or `None` if it is not one.
+pub fn time_axis_kind(ctype: &str) -> Option<TimeAxisKind> {
     let head = ctype.split('-').next().unwrap_or("").trim();
-    head == "TIME" || !matches!(TimeScale::parse(head), TimeScale::Local)
+    match head {
+        "TIME" => Some(TimeAxisKind::Time),
+        "PHASE" => Some(TimeAxisKind::Phase),
+        "TIMELAG" => Some(TimeAxisKind::Timelag),
+        "FREQUENCY" => Some(TimeAxisKind::Frequency),
+        _ if !matches!(TimeScale::parse(head), TimeScale::Local) => Some(TimeAxisKind::Time),
+        _ => None,
+    }
+}
+
+/// True if a `CTYPE` denotes an absolute *time* axis (`'TIME'` or a time-scale
+/// name) — the kind [`FitsTime::time_axis_mjd`] resolves to an MJD.
+pub fn is_time_ctype(ctype: &str) -> bool {
+    time_axis_kind(ctype) == Some(TimeAxisKind::Time)
 }
 
 /// The reference epoch as MJD: `MJDREF` (or `MJDREFI`+`MJDREFF`), else `JDREF`
