@@ -8,6 +8,7 @@
 use crate::bitpix::Bitpix;
 use crate::data::ImageData;
 use crate::data::Scaling;
+use crate::data::shape_product;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -90,11 +91,7 @@ impl RandomGroups {
 
     /// Elements in one group's array (`Π NAXIS2..NAXISm`; 0 if there is no array).
     pub fn array_len(&self) -> usize {
-        if self.group_shape.is_empty() {
-            0
-        } else {
-            self.group_shape.iter().product()
-        }
+        shape_product(&self.group_shape)
     }
 
     /// The physical parameter values of group `g`: `PZEROn + PSCALn × raw`.

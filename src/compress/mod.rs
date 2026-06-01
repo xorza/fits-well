@@ -36,6 +36,14 @@ use crate::header::Header;
 use crate::table::BinTable;
 use crate::table::ColumnData;
 
+/// A header and its data unit — what the (de)compression entry points return
+/// (a named result instead of a bare `(Header, Vec<u8>)` tuple).
+#[derive(Debug)]
+pub(crate) struct HduParts {
+    pub header: Header,
+    pub data: Vec<u8>,
+}
+
 /// Decompress a tiled-image `BINTABLE` into the full [`Image`] it encodes.
 pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Image> {
     if header.get_logical("ZIMAGE") != Some(true) {
@@ -107,36 +115,14 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
     let zscale = read_f64_column(table, "ZSCALE");
     let zzero = read_f64_column(table, "ZZERO");
 
-    let ntiles_axis: Vec<usize> = dims
-        .iter()
-        .zip(&tiles)
-        .map(|(&n, &t)| n.div_ceil(t))
-        .collect();
-    let ntiles: usize = ntiles_axis.iter().product();
-
-    let mut stride = vec![1usize; znaxis];
-    for i in 1..znaxis {
-        stride[i] = stride[i - 1] * dims[i - 1];
-    }
-
+    let geom = TileGeometry::new(&dims, &tiles);
     let total: usize = dims.iter().product();
     let mut out_i = vec![0i64; if is_float { 0 } else { total }];
     let mut out_f = vec![0f64; if is_float { total } else { 0 }];
 
-    for t in 0..ntiles {
-        // Tile origin and (edge-clipped) dimensions.
-        let mut origin = vec![0usize; znaxis];
-        let mut tdims = vec![0usize; znaxis];
-        let mut rem = t;
-        for i in 0..znaxis {
-            let ti = rem % ntiles_axis[i];
-            rem /= ntiles_axis[i];
-            origin[i] = ti * tiles[i];
-            tdims[i] = tiles[i].min(dims[i] - origin[i]);
-        }
-        let tile_elems: usize = tdims.iter().product();
-
-        let indices = tile_flat_indices(&origin, &tdims, &stride);
+    for t in 0..geom.ntiles() {
+        let tile = geom.tile(t);
+        let tile_elems = tile.indices.len();
         if is_float {
             let s = column_at(&zscale, t).unwrap_or(1.0);
             let z = column_at(&zzero, t).unwrap_or(0.0);
@@ -154,12 +140,9 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
                 z,
                 method,
                 t as i64 + zdither0,
-                zblank_column
-                    .as_ref()
-                    .and_then(|v| v.get(t).copied())
-                    .or(zblank_keyword),
+                column_at(&zblank_column, t).or(zblank_keyword),
             )?;
-            for (&flat, &v) in indices.iter().zip(&vals) {
+            for (&flat, &v) in tile.indices.iter().zip(&vals) {
                 out_f[flat] = v;
             }
         } else {
@@ -174,7 +157,7 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
                 bytepix,
                 smooth,
             )?;
-            for (&flat, &v) in indices.iter().zip(&vals) {
+            for (&flat, &v) in tile.indices.iter().zip(&vals) {
                 out_i[flat] = v;
             }
         }
@@ -201,7 +184,7 @@ pub(crate) fn encode_image(
     cmptype: &str,
     tile_shape: &[usize],
     scale: i32,
-) -> Result<(Header, Vec<u8>)> {
+) -> Result<HduParts> {
     let bitpix = image.samples.bitpix();
     if bitpix.is_float() {
         return encode_float_image(image, cmptype, tile_shape);
@@ -225,39 +208,22 @@ pub(crate) fn encode_image(
     };
 
     let flat = widen(&image.samples);
-    let mut stride = vec![1usize; znaxis];
-    for i in 1..znaxis {
-        stride[i] = stride[i - 1] * dims[i - 1];
-    }
-    let ntiles_axis: Vec<usize> = dims
-        .iter()
-        .zip(&tiles)
-        .map(|(&n, &t)| n.div_ceil(t))
-        .collect();
-    let ntiles: usize = ntiles_axis.iter().product();
+    let geom = TileGeometry::new(dims, &tiles);
+    let ntiles = geom.ntiles();
     let bytepix = bitpix.elem_size();
 
     let mut descriptors: Vec<(usize, usize)> = Vec::with_capacity(ntiles);
     let mut heap: Vec<u8> = Vec::new();
     for t in 0..ntiles {
-        let mut origin = vec![0usize; znaxis];
-        let mut tdims = vec![0usize; znaxis];
-        let mut rem = t;
-        for i in 0..znaxis {
-            let ti = rem % ntiles_axis[i];
-            rem /= ntiles_axis[i];
-            origin[i] = ti * tiles[i];
-            tdims[i] = tiles[i].min(dims[i] - origin[i]);
-        }
-        let elems: Vec<usize> = tile_flat_indices(&origin, &tdims, &stride);
-        let vals: Vec<i64> = elems.iter().map(|&i| flat[i]).collect();
+        let tile = geom.tile(t);
+        let vals: Vec<i64> = tile.indices.iter().map(|&i| flat[i]).collect();
         let cell = match cmptype {
             "GZIP_1" => TileCell::Bytes(gzip::gzip_encode(&i64_to_be(&vals, bitpix))),
             "GZIP_2" => TileCell::Bytes(gzip::gzip2_encode(&i64_to_be(&vals, bitpix), bytepix)),
             "RICE_1" => TileCell::Bytes(rice::rice_encode(&vals, bytepix, 32)),
             "PLIO_1" => TileCell::I16(plio::plio_encode(&vals, vals.len())),
             "HCOMPRESS_1" => {
-                TileCell::Bytes(hcompress::hcompress_tile_encode(&vals, &tdims, scale)?)
+                TileCell::Bytes(hcompress::hcompress_tile_encode(&vals, &tile.tdims, scale)?)
             }
             // §10.4: store the tile's raw big-endian pixels, uncompressed.
             "NOCOMPRESS" => TileCell::Bytes(i64_to_be(&vals, bitpix)),
@@ -327,7 +293,7 @@ pub(crate) fn encode_image(
     if let Some(blank) = image.scaling.blank {
         h.set("BLANK", blank);
     }
-    Ok((h, data))
+    Ok(HduParts { header: h, data })
 }
 
 /// Encode a float [`Image`] as a quantized, tiled-compressed `BINTABLE`
@@ -336,11 +302,7 @@ pub(crate) fn encode_image(
 /// a tile that can't be quantized (constant data) is stored as raw gzip'd floats
 /// in `GZIP_COMPRESSED_DATA`. The table has four columns: `COMPRESSED_DATA`,
 /// `GZIP_COMPRESSED_DATA`, `ZSCALE`, `ZZERO`.
-fn encode_float_image(
-    image: &Image,
-    cmptype: &str,
-    tile_shape: &[usize],
-) -> Result<(Header, Vec<u8>)> {
+fn encode_float_image(image: &Image, cmptype: &str, tile_shape: &[usize]) -> Result<HduParts> {
     if !matches!(cmptype, "GZIP_1" | "GZIP_2" | "RICE_1") {
         return Err(FitsError::UnsupportedCompression {
             name: format!("{cmptype} for float images (write)"),
@@ -358,16 +320,8 @@ fn encode_float_image(
     };
 
     let flat = widen_floats(&image.samples);
-    let mut stride = vec![1usize; znaxis];
-    for i in 1..znaxis {
-        stride[i] = stride[i - 1] * dims[i - 1];
-    }
-    let ntiles_axis: Vec<usize> = dims
-        .iter()
-        .zip(&tiles)
-        .map(|(&n, &t)| n.div_ceil(t))
-        .collect();
-    let ntiles: usize = ntiles_axis.iter().product();
+    let geom = TileGeometry::new(dims, &tiles);
+    let ntiles = geom.ntiles();
 
     let zdither0 = 1i64; // deterministic dither seed (any 1..=10000 is valid)
     let int_bitpix = Bitpix::I32; // quantized planes are always int32
@@ -381,22 +335,11 @@ fn encode_float_image(
     let mut any_null = false;
 
     for t in 0..ntiles {
-        let mut origin = vec![0usize; znaxis];
-        let mut tdims = vec![0usize; znaxis];
-        let mut rem = t;
-        for i in 0..znaxis {
-            let ti = rem % ntiles_axis[i];
-            rem /= ntiles_axis[i];
-            origin[i] = ti * tiles[i];
-            tdims[i] = tiles[i].min(dims[i] - origin[i]);
-        }
-        let tile_elems: usize = tdims.iter().product();
-        let nx = tdims[0];
+        let tile = geom.tile(t);
+        let tile_elems = tile.indices.len();
+        let nx = tile.tdims[0];
         let ny = tile_elems / nx;
-        let vals: Vec<f64> = tile_flat_indices(&origin, &tdims, &stride)
-            .iter()
-            .map(|&i| flat[i])
-            .collect();
+        let vals: Vec<f64> = tile.indices.iter().map(|&i| flat[i]).collect();
         let irow = t as i64 + zdither0; // = (1-based tile row) + ZDITHER0 - 1
 
         match quantize::quantize_tile(&vals, nx, ny, 0.0, method, irow) {
@@ -478,7 +421,7 @@ fn encode_float_image(
         // decoder which value maps back to a blank (NaN) pixel.
         h.set("ZBLANK", quantize::NULL_VALUE as i64);
     }
-    Ok((h, data))
+    Ok(HduParts { header: h, data })
 }
 
 /// The `ZQUANTIZ` keyword string for a dither method.
@@ -597,7 +540,7 @@ fn read_i64_column(table: &BinTable, name: &str) -> Option<Vec<i64>> {
     }
 }
 
-fn column_at(col: &Option<Vec<f64>>, t: usize) -> Option<f64> {
+fn column_at<T: Copy>(col: &Option<Vec<T>>, t: usize) -> Option<T> {
     col.as_ref().and_then(|v| v.get(t).copied())
 }
 
@@ -719,6 +662,66 @@ fn hcompress_smooth(header: &Header) -> bool {
     false
 }
 
+/// The tiling of an N-d image: axis lengths, per-axis tile sizes, and the derived
+/// strides and per-axis tile counts. Iterating `0..ntiles()` and calling `tile(t)`
+/// yields each tile's clipped dimensions and flat pixel indices — the geometry
+/// shared by image decompress and both encoders.
+#[derive(Debug)]
+struct TileGeometry {
+    dims: Vec<usize>,
+    tiles: Vec<usize>,
+    stride: Vec<usize>,
+    ntiles_axis: Vec<usize>,
+}
+
+/// One tile: its edge-clipped dimensions and the flat (row-major) indices of its
+/// pixels in the full image.
+#[derive(Debug)]
+struct Tile {
+    tdims: Vec<usize>,
+    indices: Vec<usize>,
+}
+
+impl TileGeometry {
+    fn new(dims: &[usize], tiles: &[usize]) -> TileGeometry {
+        let n = dims.len();
+        let ntiles_axis = dims
+            .iter()
+            .zip(tiles)
+            .map(|(&d, &t)| d.div_ceil(t))
+            .collect();
+        let mut stride = vec![1usize; n];
+        for i in 1..n {
+            stride[i] = stride[i - 1] * dims[i - 1];
+        }
+        TileGeometry {
+            dims: dims.to_vec(),
+            tiles: tiles.to_vec(),
+            stride,
+            ntiles_axis,
+        }
+    }
+
+    fn ntiles(&self) -> usize {
+        self.ntiles_axis.iter().product()
+    }
+
+    fn tile(&self, t: usize) -> Tile {
+        let n = self.dims.len();
+        let mut origin = vec![0usize; n];
+        let mut tdims = vec![0usize; n];
+        let mut rem = t;
+        for i in 0..n {
+            let ti = rem % self.ntiles_axis[i];
+            rem /= self.ntiles_axis[i];
+            origin[i] = ti * self.tiles[i];
+            tdims[i] = self.tiles[i].min(self.dims[i] - origin[i]);
+        }
+        let indices = tile_flat_indices(&origin, &tdims, &self.stride);
+        Tile { tdims, indices }
+    }
+}
+
 /// Strides give the flat indices in the full image for a tile's row-major elements.
 fn tile_flat_indices(origin: &[usize], tdims: &[usize], stride: &[usize]) -> Vec<usize> {
     let tile_elems: usize = tdims.iter().product();
@@ -739,11 +742,10 @@ fn tile_flat_indices(origin: &[usize], tdims: &[usize], stride: &[usize]) -> Vec
 /// Read `PREFIX1..PREFIXn` integer axis lengths.
 fn read_axes(header: &Header, prefix: &str, n: usize) -> Result<Vec<usize>> {
     (1..=n)
-        .map(|i| {
-            header
-                .get_integer(&format!("{prefix}{i}"))
-                .map(|v| v.max(0) as usize)
-                .ok_or(FitsError::MissingKeyword { name: "ZNAXISn" })
+        .map(|i| match header.get_integer(&format!("{prefix}{i}")) {
+            Some(v) if v >= 0 => Ok(v as usize),
+            Some(_) => Err(FitsError::WrongValueType { name: "ZNAXISn" }),
+            None => Err(FitsError::MissingKeyword { name: "ZNAXISn" }),
         })
         .collect()
 }

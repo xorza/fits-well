@@ -10,6 +10,7 @@ use crate::checksum;
 use crate::data::Image;
 use crate::data::ImageData;
 use crate::data::Scaling;
+use crate::data::shape_product;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::groups::RandomGroups;
@@ -148,11 +149,7 @@ impl<R: Read + Seek> FitsReader<R> {
         let scaling = Scaling::from_header(&hdu.header);
         let samples = ImageData::decode(unit.data(), bitpix);
 
-        let expected = if shape.is_empty() {
-            0
-        } else {
-            shape.iter().product::<usize>()
-        };
+        let expected = shape_product(&shape);
         if samples.len() != expected {
             return Err(FitsError::DataSizeMismatch {
                 expected,
@@ -217,8 +214,8 @@ impl<R: Read + Seek> FitsReader<R> {
     pub fn read_compressed_table(&mut self, index: usize) -> Result<BinTable> {
         let table = self.read_table(index)?;
         let header = self.hdus[index].header.clone();
-        let (out_header, data) = crate::compress::uncompress_table(&header, &table)?;
-        BinTable::from_data(&out_header, data)
+        let parts = crate::compress::uncompress_table(&header, &table)?;
+        BinTable::from_data(&parts.header, parts.data)
     }
 
     /// Verify the `DATASUM`/`CHECKSUM` integrity keywords of an HDU (§J). Each

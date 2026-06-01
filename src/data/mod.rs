@@ -22,6 +22,16 @@ pub enum ImageData {
     F64(Vec<f64>),
 }
 
+/// Element count for an N-d `shape`: the product of the axis lengths, or `0` for
+/// an empty shape (`NAXIS = 0` ⇒ no data, not the empty-product `1`).
+pub(crate) fn shape_product(shape: &[usize]) -> usize {
+    if shape.is_empty() {
+        0
+    } else {
+        shape.iter().product()
+    }
+}
+
 impl ImageData {
     /// The `BITPIX` element kind backing this buffer.
     pub fn bitpix(&self) -> Bitpix {
@@ -108,6 +118,29 @@ pub enum UnsignedView {
     U64(Vec<u64>),
 }
 
+impl UnsignedView {
+    /// Recover unsigned values from sign-bit-offset storage (the §5.2.5 / Table 19
+    /// convention) by flipping the sign bit. Shared by [`Image::unsigned`] and
+    /// `BinTable::read_column_unsigned` so the bit math has one definition.
+    pub(crate) fn from_signed_byte(stored: &[u8]) -> UnsignedView {
+        UnsignedView::I8(stored.iter().map(|&x| (x ^ 0x80) as i8).collect())
+    }
+    pub(crate) fn from_offset_i16(stored: &[i16]) -> UnsignedView {
+        UnsignedView::U16(stored.iter().map(|&x| (x as u16) ^ 0x8000).collect())
+    }
+    pub(crate) fn from_offset_i32(stored: &[i32]) -> UnsignedView {
+        UnsignedView::U32(stored.iter().map(|&x| (x as u32) ^ 0x8000_0000).collect())
+    }
+    pub(crate) fn from_offset_i64(stored: &[i64]) -> UnsignedView {
+        UnsignedView::U64(
+            stored
+                .iter()
+                .map(|&x| (x as u64) ^ 0x8000_0000_0000_0000)
+                .collect(),
+        )
+    }
+}
+
 /// An N-dimensional image: a flat, Fortran-ordered buffer (axis 0 varies
 /// fastest), the axis lengths from `NAXISn`, and the scaling map that turns its
 /// stored (raw) samples into physical values.
@@ -184,20 +217,10 @@ impl Image {
         }
         let bzero = self.scaling.bzero;
         match &self.samples {
-            ImageData::U8(v) if bzero == -128.0 => Some(UnsignedView::I8(
-                v.iter().map(|&x| (x ^ 0x80) as i8).collect(),
-            )),
-            ImageData::I16(v) if bzero == U16_OFFSET => Some(UnsignedView::U16(
-                v.iter().map(|&x| (x as u16) ^ 0x8000).collect(),
-            )),
-            ImageData::I32(v) if bzero == U32_OFFSET => Some(UnsignedView::U32(
-                v.iter().map(|&x| (x as u32) ^ 0x8000_0000).collect(),
-            )),
-            ImageData::I64(v) if bzero == U64_OFFSET => Some(UnsignedView::U64(
-                v.iter()
-                    .map(|&x| (x as u64) ^ 0x8000_0000_0000_0000)
-                    .collect(),
-            )),
+            ImageData::U8(v) if bzero == -128.0 => Some(UnsignedView::from_signed_byte(v)),
+            ImageData::I16(v) if bzero == U16_OFFSET => Some(UnsignedView::from_offset_i16(v)),
+            ImageData::I32(v) if bzero == U32_OFFSET => Some(UnsignedView::from_offset_i32(v)),
+            ImageData::I64(v) if bzero == U64_OFFSET => Some(UnsignedView::from_offset_i64(v)),
             _ => None,
         }
     }

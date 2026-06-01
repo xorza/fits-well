@@ -73,7 +73,7 @@ impl Datetime {
         let year = sign * y_str.parse::<i64>().map_err(|_| invalid())?;
         let month = parse_fixed(m_str, 2).ok_or_else(invalid)?;
         let day = parse_fixed(d_str, 2).ok_or_else(invalid)?;
-        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
             return Err(invalid());
         }
 
@@ -369,6 +369,22 @@ fn leap_seconds(mjd: f64) -> f64 {
 
 /// Julian Day Number at noon of a proleptic-Gregorian calendar date (the standard
 /// integer formula).
+/// Whether `year` is a leap year in the proleptic Gregorian calendar.
+fn is_leap_year(year: i64) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+/// Number of days in `month` (1–12) of `year`; `0` for an out-of-range month.
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
 fn gregorian_to_jdn(year: i64, month: i64, day: i64) -> i64 {
     let a = (14 - month) / 12;
     let y = year + 4800 - a;

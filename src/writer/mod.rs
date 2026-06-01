@@ -13,6 +13,7 @@ use crate::block::SPACE_FILL;
 use crate::block::ZERO_FILL;
 use crate::checksum;
 use crate::data::Image;
+use crate::data::shape_product;
 use crate::endian::extend_be;
 use crate::endian::push_pq_descriptor;
 use crate::error::FitsError;
@@ -220,11 +221,7 @@ impl<W: Write> FitsWriter<W> {
     /// `BITPIX`, `NAXISn`, plus `BSCALE`/`BZERO`/`BLANK` when scaling is
     /// non-trivial), followed by the big-endian data unit.
     pub fn write_image(&mut self, image: &Image) -> Result<()> {
-        let expected = if image.shape.is_empty() {
-            0
-        } else {
-            image.shape.iter().product::<usize>()
-        };
+        let expected = shape_product(&image.shape);
         assert_eq!(
             image.samples.len(),
             expected,
@@ -257,7 +254,7 @@ impl<W: Write> FitsWriter<W> {
             for (ci, col) in columns.iter().enumerate() {
                 if let Some(rows) = &col.vla {
                     let cell = &rows[r];
-                    descs[ci].push((count_of(cell) as u64, heap.len() as u64));
+                    descs[ci].push((cell.element_count() as u64, heap.len() as u64));
                     append_be(&mut heap, cell);
                 }
             }
@@ -337,8 +334,8 @@ impl<W: Write> FitsWriter<W> {
         scale: i32,
     ) -> Result<()> {
         self.ensure_primary()?;
-        let (header, data) = crate::compress::encode_image(image, cmptype, tile_shape, scale)?;
-        self.write_hdu(header, data, ZERO_FILL)
+        let enc = crate::compress::encode_image(image, cmptype, tile_shape, scale)?;
+        self.write_hdu(enc.header, enc.data, ZERO_FILL)
     }
 
     /// Write a fixed-width `BINTABLE` as a tiled-compressed table (§10.3). `header`
@@ -354,8 +351,8 @@ impl<W: Write> FitsWriter<W> {
         algo: &str,
     ) -> Result<()> {
         self.ensure_primary()?;
-        let (h, data) = crate::compress::compress_table(header, table, rows_per_tile, algo)?;
-        self.write_hdu(h, data, ZERO_FILL)
+        let enc = crate::compress::compress_table(header, table, rows_per_tile, algo)?;
+        self.write_hdu(enc.header, enc.data, ZERO_FILL)
     }
 
     /// Write a dataless primary HDU if none has been written yet, so subsequent
@@ -531,7 +528,11 @@ fn tform_of(col: &WriteColumn) -> String {
     match &col.vla {
         // `1P<code>(maxnelem)`, or `1Q…` for 64-bit descriptors.
         Some(rows) => {
-            let max = rows.iter().map(count_of).max().unwrap_or(0);
+            let max = rows
+                .iter()
+                .map(ColumnData::element_count)
+                .max()
+                .unwrap_or(0);
             let p = if col.wide { 'Q' } else { 'P' };
             format!("1{p}{code}({max})")
         }
@@ -553,7 +554,7 @@ fn check_column(col: &WriteColumn, nrows: usize) -> Result<usize> {
         return Ok(if col.wide { 16 } else { 8 });
     }
     let mismatch = || FitsError::RowWidthMismatch {
-        computed: count_of(&col.data),
+        computed: col.data.element_count(),
         declared: nrows * col.repeat,
     };
     match &col.data {
@@ -567,7 +568,7 @@ fn check_column(col: &WriteColumn, nrows: usize) -> Result<usize> {
             Ok(col.repeat) // field width in bytes
         }
         _ => {
-            if count_of(&col.data) != nrows * col.repeat {
+            if col.data.element_count() != nrows * col.repeat {
                 return Err(mismatch());
             }
             Ok(col.repeat * elem)
@@ -576,21 +577,6 @@ fn check_column(col: &WriteColumn, nrows: usize) -> Result<usize> {
 }
 
 /// Number of elements (or strings) in a column's data.
-fn count_of(data: &ColumnData) -> usize {
-    match data {
-        ColumnData::Logical(v) => v.len(),
-        ColumnData::Bytes(v) => v.len(),
-        ColumnData::I16(v) => v.len(),
-        ColumnData::I32(v) => v.len(),
-        ColumnData::I64(v) => v.len(),
-        ColumnData::F32(v) => v.len(),
-        ColumnData::F64(v) => v.len(),
-        ColumnData::ComplexF32(v) => v.len(),
-        ColumnData::ComplexF64(v) => v.len(),
-        ColumnData::Text(v) => v.len(),
-    }
-}
-
 /// Append a whole column cell (a VLA row's array) to the heap, big-endian.
 fn append_be(out: &mut Vec<u8>, cell: &ColumnData) {
     match cell {

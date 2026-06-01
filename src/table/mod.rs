@@ -281,6 +281,24 @@ pub enum ColumnData {
     Text(Vec<String>),
 }
 
+impl ColumnData {
+    /// Total element count across all rows (the backing `Vec`'s length).
+    pub fn element_count(&self) -> usize {
+        match self {
+            ColumnData::Logical(v) => v.len(),
+            ColumnData::Bytes(v) => v.len(),
+            ColumnData::I16(v) => v.len(),
+            ColumnData::I32(v) => v.len(),
+            ColumnData::I64(v) => v.len(),
+            ColumnData::F32(v) => v.len(),
+            ColumnData::F64(v) => v.len(),
+            ColumnData::ComplexF32(v) => v.len(),
+            ColumnData::ComplexF64(v) => v.len(),
+            ColumnData::Text(v) => v.len(),
+        }
+    }
+}
+
 /// A binary table's structure plus its data unit.
 #[derive(Debug, Clone)]
 pub struct BinTable {
@@ -503,20 +521,18 @@ impl BinTable {
         }
         let tzero = col.tzero;
         Ok(match (self.read_column(index)?, col.tform.kind) {
-            (ColumnData::Bytes(v), TformKind::Byte) if tzero == -128.0 => Some(UnsignedView::I8(
-                v.iter().map(|&x| (x ^ 0x80) as i8).collect(),
-            )),
-            (ColumnData::I16(v), _) if tzero == U16_OFFSET => Some(UnsignedView::U16(
-                v.iter().map(|&x| (x as u16) ^ 0x8000).collect(),
-            )),
-            (ColumnData::I32(v), _) if tzero == U32_OFFSET => Some(UnsignedView::U32(
-                v.iter().map(|&x| (x as u32) ^ 0x8000_0000).collect(),
-            )),
-            (ColumnData::I64(v), _) if tzero == U64_OFFSET => Some(UnsignedView::U64(
-                v.iter()
-                    .map(|&x| (x as u64) ^ 0x8000_0000_0000_0000)
-                    .collect(),
-            )),
+            (ColumnData::Bytes(v), TformKind::Byte) if tzero == -128.0 => {
+                Some(UnsignedView::from_signed_byte(&v))
+            }
+            (ColumnData::I16(v), _) if tzero == U16_OFFSET => {
+                Some(UnsignedView::from_offset_i16(&v))
+            }
+            (ColumnData::I32(v), _) if tzero == U32_OFFSET => {
+                Some(UnsignedView::from_offset_i32(&v))
+            }
+            (ColumnData::I64(v), _) if tzero == U64_OFFSET => {
+                Some(UnsignedView::from_offset_i64(&v))
+            }
             _ => None,
         })
     }

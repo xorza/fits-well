@@ -11,6 +11,7 @@
 //!
 //! Variable-length (`P`/`Q`) source columns are not supported and are rejected.
 
+use super::HduParts;
 use super::gzip;
 use super::rice;
 use crate::endian::decode_be;
@@ -160,7 +161,7 @@ pub(crate) fn compress_table(
     table: &BinTable,
     rows_per_tile: usize,
     default_algo: &str,
-) -> Result<(Header, Vec<u8>)> {
+) -> Result<HduParts> {
     let default_algo = Algo::parse(default_algo)?;
     let ncols = table.columns.len();
     let nrows = table.nrows;
@@ -226,12 +227,12 @@ pub(crate) fn compress_table(
     h.set("NAXIS2", nchunks as i64);
     h.set("PCOUNT", heap.len() as i64);
     h.set("GCOUNT", 1);
-    Ok((h, data))
+    Ok(HduParts { header: h, data })
 }
 
 /// Uncompress a `ZTABLE` container back into its original fixed-width `BINTABLE`.
 /// Returns the restored header and row-major data unit.
-pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<(Header, Vec<u8>)> {
+pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduParts> {
     if header.get_logical("ZTABLE") != Some(true) {
         return Err(FitsError::NotCompressedTable);
     }
@@ -314,7 +315,10 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<(Hea
     ] {
         h.remove(key);
     }
-    Ok((h, out))
+    Ok(HduParts {
+        header: h,
+        data: out,
+    })
 }
 
 /// Compress one tile's column-major raw bytes per the column's algorithm.

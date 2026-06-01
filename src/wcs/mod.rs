@@ -619,14 +619,22 @@ pub struct Wcs {
     pub unsupported_axes: Vec<usize>,
 }
 
+/// The rotation from native to celestial coordinates: the celestial pole
+/// `(α_p, δ_p)` and the native longitude of the pole `φ_p` (LONPOLE), all degrees.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CelestialPole {
+    ra: f64,
+    dec: f64,
+    lonpole: f64,
+}
+
 #[derive(Debug, Clone)]
 struct Celestial {
     lng: usize,
     lat: usize,
     proj: Projection,
-    /// Celestial pole `(α_p, δ_p)` and native longitude of the pole `φ_p`
-    /// (LONPOLE), all degrees, computed from the fiducial point.
-    pole: (f64, f64, f64),
+    /// The native→celestial pole, computed from the fiducial point.
+    pole: CelestialPole,
     /// Latitude-axis `PVi_0…` projection parameters.
     pv: Vec<f64>,
 }
@@ -1041,8 +1049,12 @@ fn find_celestial(ctype: &[String]) -> Option<(usize, usize, Projection)> {
 
 /// Native spherical (φ, θ) → celestial (α, δ), all degrees, given the celestial
 /// pole `(α_p, δ_p, φ_p)` (CG 2002 eq. 2).
-fn native_to_celestial(pole: (f64, f64, f64), phi: f64, theta: f64) -> (f64, f64) {
-    let (ap, dp, fp) = pole;
+fn native_to_celestial(pole: CelestialPole, phi: f64, theta: f64) -> (f64, f64) {
+    let CelestialPole {
+        ra: ap,
+        dec: dp,
+        lonpole: fp,
+    } = pole;
     let (tr, dpr, dphi) = (theta * D2R, dp * D2R, (phi - fp) * D2R);
     let sin_d = tr.sin() * dpr.sin() + tr.cos() * dpr.cos() * dphi.cos();
     let dec = sin_d.clamp(-1.0, 1.0).asin() * R2D;
@@ -1052,8 +1064,12 @@ fn native_to_celestial(pole: (f64, f64, f64), phi: f64, theta: f64) -> (f64, f64
 }
 
 /// Celestial (α, δ) → native spherical (φ, θ), all degrees (CG 2002 eq. 5).
-fn celestial_to_native(pole: (f64, f64, f64), ra: f64, dec: f64) -> (f64, f64) {
-    let (ap, dp, fp) = pole;
+fn celestial_to_native(pole: CelestialPole, ra: f64, dec: f64) -> (f64, f64) {
+    let CelestialPole {
+        ra: ap,
+        dec: dp,
+        lonpole: fp,
+    } = pole;
     let (dr, dpr, dalpha) = (dec * D2R, dp * D2R, (ra - ap) * D2R);
     let sin_t = dr.sin() * dpr.sin() + dr.cos() * dpr.cos() * dalpha.cos();
     let theta = sin_t.clamp(-1.0, 1.0).asin() * R2D;
@@ -1065,16 +1081,13 @@ fn celestial_to_native(pole: (f64, f64, f64), ra: f64, dec: f64) -> (f64, f64) {
 /// Compute the celestial pole `(α_p, δ_p, φ_p)` from the fiducial point
 /// `(φ₀, θ₀) → (α₀, δ₀)`, `φ_p` (LONPOLE), and `θ_p` (LATPOLE) (CG 2002 §2.4).
 /// Zenithal (`θ₀ = 90°`) reduces to `(α₀, δ₀, φ_p)`.
-fn compute_pole(
-    phi0: f64,
-    theta0: f64,
-    a0: f64,
-    d0: f64,
-    phip: f64,
-    thetap: f64,
-) -> (f64, f64, f64) {
+fn compute_pole(phi0: f64, theta0: f64, a0: f64, d0: f64, phip: f64, thetap: f64) -> CelestialPole {
     if (theta0 - 90.0).abs() < 1e-12 {
-        return (a0, d0, phip);
+        return CelestialPole {
+            ra: a0,
+            dec: d0,
+            lonpole: phip,
+        };
     }
     let (t0, d0r) = (theta0 * D2R, d0 * D2R);
     let dphi = (phip - phi0) * D2R;
@@ -1107,7 +1120,11 @@ fn compute_pole(
     let y = -t0.cos() * fphi.sin();
     let x = t0.sin() * dpr.cos() - t0.cos() * dpr.sin() * fphi.cos();
     let ap = a0 - y.atan2(x) * R2D;
-    (norm360(ap), dp, phip)
+    CelestialPole {
+        ra: norm360(ap),
+        dec: dp,
+        lonpole: phip,
+    }
 }
 
 /// Read `PREFIX1..PREFIXn` (with alternate suffix) into a vector, defaulting
