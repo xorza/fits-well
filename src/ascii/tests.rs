@@ -165,3 +165,52 @@ fn ascii_table_round_trips_through_write_and_read() {
     assert_eq!(t.read_column(1).unwrap(), ColumnData::I64(vec![7, -3]));
     assert_eq!(t.read_column(2).unwrap(), ColumnData::F64(vec![1.5, -2.25]));
 }
+
+#[test]
+fn signed_exponent_without_letter_parses_as_fortran_real() {
+    // §7.2.5 rule 3(a): a numeric field may be terminated by a bare '+'/'-' that
+    // introduces the exponent (no E/D letter), e.g. 3.14159-2 = 3.14159 × 10⁻².
+    let approx = |got: Option<f64>, want: f64| {
+        let g = got.expect("should parse");
+        assert!((g - want).abs() < 1e-12, "got {g}, want {want}");
+    };
+    approx(parse_ascii_float("3.14159-2", 5), 0.0314159);
+    approx(parse_ascii_float("2.5+3", 1), 2500.0);
+    approx(parse_ascii_float("-3.0-1", 1), -0.3);
+    // The leading mantissa sign is NOT an exponent; implicit decimal still applies.
+    approx(parse_ascii_float("-12", 3), -0.012);
+    // Explicit E/D forms keep working.
+    approx(parse_ascii_float("1.5E2", 1), 150.0);
+    approx(parse_ascii_float("1.5D-2", 1), 0.015);
+
+    assert_eq!(
+        split_mantissa_exponent("3.14159-2"),
+        Some(("3.14159", "-2"))
+    );
+    assert_eq!(split_mantissa_exponent("-3.0-1"), Some(("-3.0", "-1")));
+    assert_eq!(split_mantissa_exponent("1.5E2"), Some(("1.5", "2")));
+    assert_eq!(split_mantissa_exponent("123"), None);
+}
+
+#[test]
+fn reads_a_column_with_a_bare_sign_exponent_field() {
+    // The letter-less exponent form (CFITSIO emits it) must read, not error.
+    let mut header = Header::new();
+    header
+        .set("XTENSION", "TABLE")
+        .set("BITPIX", 8)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 12)
+        .set("NAXIS2", 1)
+        .set("PCOUNT", 0)
+        .set("GCOUNT", 1)
+        .set("TFIELDS", 1)
+        .set("TBCOL1", 1)
+        .set("TFORM1", "E12.5");
+    let data = b"   3.14159-2".to_vec(); // 12 chars; 3.14159-2 = 0.0314159
+    let table = AsciiTable::from_data(&header, data).unwrap();
+    match table.read_column(0).unwrap() {
+        ColumnData::F64(v) => assert!((v[0] - 0.0314159).abs() < 1e-12, "{}", v[0]),
+        other => panic!("expected F64, got {other:?}"),
+    }
+}

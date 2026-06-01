@@ -351,3 +351,59 @@ fn written_file_reads_back_with_matching_boundaries() {
     assert_eq!(f.hdus[0].data_len, BLOCK_SIZE as u64);
     assert_eq!(f.hdus[0].header.axes().unwrap(), vec![10]);
 }
+
+#[test]
+fn vla_descriptor_q_form_carries_full_64_bit_count_and_offset() {
+    // A `Q` (wide) descriptor must not truncate count/offset to 32 bits — that is
+    // the whole reason to choose `Q` over `P` (heaps/counts beyond 4 GiB).
+    let count = u32::MAX as u64 + 5; // does not fit in u32
+    let offset = 0x3_0000_0002u64;
+    let mut q = Vec::new();
+    push_vla_descriptor(&mut q, true, count, offset);
+    assert_eq!(q.len(), 16);
+    assert_eq!(
+        i64::from_be_bytes(q[0..8].try_into().unwrap()),
+        count as i64
+    );
+    assert_eq!(
+        i64::from_be_bytes(q[8..16].try_into().unwrap()),
+        offset as i64
+    );
+
+    // The 32-bit `P` form packs two i32s.
+    let mut p = Vec::new();
+    push_vla_descriptor(&mut p, false, 7, 40);
+    assert_eq!(p.len(), 8);
+    assert_eq!(i32::from_be_bytes(p[0..4].try_into().unwrap()), 7);
+    assert_eq!(i32::from_be_bytes(p[4..8].try_into().unwrap()), 40);
+}
+
+#[test]
+fn blank_is_emitted_only_for_integer_images() {
+    // §4.4.2.5: BLANK applies only to integer (positive-BITPIX) images.
+    let int_img = Image {
+        shape: vec![2],
+        samples: ImageData::I16(vec![1, 2]),
+        scaling: Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: Some(-32768),
+        },
+    };
+    let mut h = Header::new();
+    add_scaling(&mut h, &int_img);
+    assert_eq!(h.get_integer("BLANK"), Some(-32768));
+
+    let float_img = Image {
+        shape: vec![2],
+        samples: ImageData::F32(vec![1.0, 2.0]),
+        scaling: Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: Some(-32768),
+        },
+    };
+    let mut h2 = Header::new();
+    add_scaling(&mut h2, &float_img);
+    assert_eq!(h2.get_integer("BLANK"), None);
+}

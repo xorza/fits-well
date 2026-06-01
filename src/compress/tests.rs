@@ -713,3 +713,60 @@ fn read_compressed_image_rejects_a_plain_bintable() {
         Err(FitsError::NotCompressedImage)
     ));
 }
+
+#[test]
+fn integer_image_compression_preserves_bscale_bzero_and_blank() {
+    use crate::data::{Image, ImageData, Scaling};
+    use crate::writer::FitsWriter;
+    use std::io::Cursor;
+    // §10.2: the compressed tiles store *raw* stored integers, so BSCALE/BZERO and
+    // the BLANK sentinel must survive in the rebuilt header (was dropped before).
+    let samples: Vec<i16> = (0..24 * 16).map(|i| (i % 50) as i16 - 5).collect();
+    let image = Image {
+        shape: vec![24, 16],
+        samples: ImageData::I16(samples.clone()),
+        scaling: Scaling {
+            bscale: 2.5,
+            bzero: 100.0,
+            blank: Some(-5),
+        },
+    };
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_compressed_image(&image, "GZIP_1", &[]).unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let back = r.read_compressed_image(1).unwrap();
+
+    match back.samples {
+        ImageData::I16(v) => assert_eq!(v, samples, "raw samples"),
+        other => panic!("expected I16, got {other:?}"),
+    }
+    assert_eq!(back.scaling.bscale, 2.5);
+    assert_eq!(back.scaling.bzero, 100.0);
+    assert_eq!(back.scaling.blank, Some(-5));
+}
+
+#[test]
+fn rice_rejects_64_bit_pixels() {
+    use crate::data::{Image, ImageData, Scaling};
+    use crate::writer::FitsWriter;
+    use std::io::Cursor;
+    // Table 37 permits BYTEPIX 8, but the 64-bit RICE bitstream is unsupported; it
+    // must error cleanly rather than panic / silently corrupt.
+    let image = Image {
+        shape: vec![4],
+        samples: ImageData::I64(vec![1, 2, 3, 4]),
+        scaling: Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    };
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        w.write_compressed_image(&image, "RICE_1", &[]),
+        Err(FitsError::UnsupportedCompression { .. })
+    ));
+    // GZIP handles 64-bit fine — the rejection is RICE-specific.
+    let mut w2 = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(w2.write_compressed_image(&image, "GZIP_1", &[]).is_ok());
+}

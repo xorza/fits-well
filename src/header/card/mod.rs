@@ -359,8 +359,14 @@ fn looks_real(token: &str) -> bool {
 }
 
 /// Parse a FITS real, accepting the Fortran `D`/`d` double-precision exponent.
+/// Non-finite results (`inf`/`NaN`, which Rust's parser accepts and which an
+/// overflowing magnitude produces) are rejected — §4.2.4 has no such value form.
 fn parse_real(token: &str) -> Option<f64> {
-    token.replace(['d', 'D'], "E").parse().ok()
+    token
+        .replace(['d', 'D'], "E")
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite())
 }
 
 fn validate_keyword(name: &str) -> Result<()> {
@@ -504,9 +510,10 @@ fn format_value(value: &Value) -> String {
 
 /// Render a real so it always reads back as [`Value::Real`] (never a bare integer).
 fn format_real(r: f64) -> String {
-    if !r.is_finite() {
-        return format!("{r}");
-    }
+    assert!(
+        r.is_finite(),
+        "FITS keyword reals must be finite — §4.2.4 has no inf/NaN value form (got {r})"
+    );
     // Rust's `Display` never uses exponent notation, so an extreme magnitude (e.g.
     // `1e300`) balloons to hundreds of digits and overflows the value field. Fall
     // back to the §4.2.4 uppercase-`E` exponent form, which always fits, when the

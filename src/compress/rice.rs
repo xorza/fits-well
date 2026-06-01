@@ -260,7 +260,8 @@ impl<'a> BitReader<'a> {
             self.nbits += 8;
         }
         self.nbits -= n;
-        (self.acc >> self.nbits) & ((1u64 << n) - 1)
+        let mask = if n >= 64 { u64::MAX } else { (1u64 << n) - 1 };
+        (self.acc >> self.nbits) & mask
     }
 
     /// Count and consume leading zero bits up to (and including) the next 1.

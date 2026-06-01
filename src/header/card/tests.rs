@@ -292,3 +292,30 @@ fn render_then_parse_round_trips_the_model() {
         assert_eq!(card, reparsed, "round-trip failed for {text:?}");
     }
 }
+
+#[test]
+fn non_finite_reals_are_rejected_on_read() {
+    // §4.2.4 has no inf/NaN value form; Rust's float parser would accept them (and
+    // an overflowing magnitude yields inf), so the reader must reject them.
+    for token in ["inf", "Infinity", "nan", "-inf", "1E400"] {
+        let card = format!("BADREAL = {token}");
+        assert!(
+            Card::parse(&raw(&card)).is_err(),
+            "expected {token:?} to be rejected, not parsed as a real"
+        );
+    }
+    assert_eq!(parse("OK      = 1.5").value, Some(Value::Real(1.5)));
+}
+
+#[test]
+#[should_panic(expected = "must be finite")]
+fn rendering_a_non_finite_real_panics() {
+    // The writer must never emit a non-conforming inf/NaN value field (logic error).
+    let card = Card {
+        keyword: "BAD".into(),
+        value: Some(Value::Real(f64::INFINITY)),
+        comment: None,
+        kind: CardKind::Value,
+    };
+    let _ = card.render();
+}
