@@ -202,18 +202,28 @@ fn noise3(data: &[f64], nx_in: usize, ny_in: usize) -> Noise {
 /// Lower median (element at index `(n−1)/2` of the sorted values), matching
 /// cfitsio's per-row `quick_select_float`.
 fn lower_median(v: &mut [f64]) -> f64 {
-    // `noise3` filters to finite values before any median, so `partial_cmp` is a
-    // total order here and the `unwrap` cannot fire on a NaN.
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    v[(v.len() - 1) / 2]
+    // Only the middle order statistic is needed, so quickselect (O(n)) suffices — no
+    // full O(n log n) sort. `noise3` filters to finite values before any median, so
+    // `partial_cmp` is a total order here and the `unwrap` cannot fire on a NaN.
+    let k = (v.len() - 1) / 2;
+    *v.select_nth_unstable_by(k, |a, b| a.partial_cmp(b).unwrap())
+        .1
 }
 
 /// Proper median (average of the two middle values for even counts), matching
 /// cfitsio's final cross-row `qsort` median.
 fn proper_median(v: &mut [f64]) -> f64 {
-    // Finite input (see `lower_median`), so the comparison never sees a NaN.
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    (v[(v.len() - 1) / 2] + v[v.len() / 2]) / 2.0
+    // Finite input (see `lower_median`). Quickselect the upper-middle element; for an
+    // even count the lower-middle is the largest of the partition below it (already
+    // separated out by `select_nth_unstable_by`), so no full sort is needed.
+    let n = v.len();
+    let (below, &mut upper, _) = v.select_nth_unstable_by(n / 2, |a, b| a.partial_cmp(b).unwrap());
+    if n % 2 == 1 {
+        upper
+    } else {
+        let lower = below.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        (lower + upper) / 2.0
+    }
 }
 
 /// A quantized tile: the integer plane plus the `BSCALE`/`BZERO` (`ZSCALE`/`ZZERO`)
