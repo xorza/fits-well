@@ -47,6 +47,7 @@ none produces a silent wrong result, and none fails the whole read.
 |------|---|----------|-----------------------|
 | Non-linear spectral axes (`-F2W`, `-LOG`, …) | 8.4 | axis decoded through the **linear stage** → intermediate world coordinate, listed in `Wcs::unsupported_axes`; all other axes (incl. the celestial pair) decode normally | Paper III transforms are large; the linear-stage value is a correct *partial* result, and the flag means it's never mistaken for fully decoded. A bare linear type (`FREQ`, `WAVE`, …) is fully decoded. |
 | Quad-cube `TSC`/`CSC`/`QSC`, HEALPix `HPX`/`XPH` | 8.3 | celestial axes decoded through the linear stage → intermediate world coordinate, flagged in `Wcs::unsupported_axes` | Obsolete / rare; exact projection formulas need a verified reference. The linear stage (matrix → intermediate world) is still exact. |
+| Conic (`COP`/`COE`/`COD`/`COO`) with its mandatory `PVi_1` (θ_a) absent or 0 | 8.3 | celestial axes decoded through the linear stage → intermediate world coordinate, flagged in `Wcs::unsupported_axes` | θ_a = 0 is a degenerate cone (`1/tan 0`); rather than return NaN, the axes pass through the linear stage and are flagged. A conic *with* a valid `PVi_1` is fully decoded — and `BON` at θ₁ = 0 is *not* degenerate (it is the sinusoidal `SFL`, decoded as such). |
 | `RICE_1` `BYTEPIX=8` (64-bit) | 10.4.1 | `read_compressed_image` errors; the raw compressed `BINTABLE` still reads via `read_table` | Table 37 permits it, but the 8-byte Rice bitstream params are unspecified and no reference (cfitsio) produces it — a guessed, non-interoperable codec would be worse. |
 | `NULL_PIXEL_MASK` / `ZMASKCMP` | 10.2.2 | float nulls handled via `ZBLANK`/NaN | Verified empirically: `fpack` never emits the mask — it uses `ZBLANK` (which we support). The mask construct does not occur in practice. |
 | §10.3.6 compressed-table VLA | 10.3.6 | rejected on write; such tables read fine *uncompressed* | Verified empirically: `fpack` passes VLA tables through uncompressed rather than emitting a compressed-VLA `ZTABLE`; the construct does not occur in practice. |
@@ -78,8 +79,8 @@ Correctly **absent** — adding them would exceed the FITS *format* standard:
 ## Verification
 
 ```
-cargo test                                                        → 180 passed
-cargo test --features compression                                 → 213 passed, 2 ignored (fixture emitters)
+cargo test                                                        → 182 passed
+cargo test --features compression                                 → 215 passed, 2 ignored (fixture emitters)
 cargo fmt --all                                                   → applied
 cargo clippy --all-targets -- -D warnings                         → clean
 cargo clippy --all-targets --features compression -- -D warnings  → clean

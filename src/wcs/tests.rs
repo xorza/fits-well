@@ -385,6 +385,80 @@ fn unimplemented_projection_codes_fall_back_to_intermediate() {
 }
 
 #[test]
+fn degenerate_conic_without_pv1_falls_back_to_intermediate() {
+    use crate::header::Header;
+    // A conic's mid-latitude θ_a = PVi_1 is mandatory and must be non-zero; absent
+    // (→ 0) the cone is degenerate (1/tan 0 → NaN). Rather than return NaN, the WCS
+    // flags the celestial axes and passes them through the linear stage, exactly
+    // like an unimplemented projection — never silently wrong.
+    for code in ["COP", "COE", "COD", "COO"] {
+        let mut h = Header::new();
+        h.set("NAXIS", 2);
+        h.set("CTYPE1", format!("RA---{code}"));
+        h.set("CTYPE2", format!("DEC--{code}"));
+        h.set("CRPIX1", 1.0).set("CRPIX2", 1.0);
+        h.set("CRVAL1", 10.0).set("CRVAL2", 20.0);
+        h.set("CDELT1", 2.0).set("CDELT2", 3.0);
+        // No PV2_1 ⇒ θ_a = 0.
+        let w = Wcs::from_header(&h, None).unwrap();
+        assert_eq!(w.unsupported_axes, vec![0, 1], "{code} axes flagged");
+        assert!(w.celestial.is_none(), "{code} degenerate, not deprojected");
+        let out = w.pixel_to_world(&[3.0, 4.0]);
+        assert_eq!(out, vec![14.0, 29.0], "{code} intermediate");
+        assert!(out.iter().all(|v| v.is_finite()), "{code} no NaN");
+    }
+    // A conic *with* a valid θ_a is still decoded normally (not flagged).
+    let mut ok = Header::new();
+    ok.set("NAXIS", 2);
+    ok.set("CTYPE1", "RA---COP").set("CTYPE2", "DEC--COP");
+    ok.set("CRPIX1", 1.0).set("CRPIX2", 1.0);
+    ok.set("CRVAL1", 10.0).set("CRVAL2", 45.0);
+    ok.set("CDELT1", 0.5).set("CDELT2", 0.5).set("PV2_1", 45.0);
+    let w = Wcs::from_header(&ok, None).unwrap();
+    assert!(w.unsupported_axes.is_empty() && w.celestial.is_some());
+}
+
+#[test]
+fn bonne_with_zero_theta1_equals_sfl() {
+    use crate::header::Header;
+    // §5.5.1: Bonne's projection at θ₁ = 0 is exactly the sinusoidal SFL. A BON
+    // header with PV2_1 = 0 must decode identically to an SFL header (and never hit
+    // the 1/tan 0 singularity), so it is *decoded* — not flagged unsupported.
+    let build = |proj: &str, pv1: Option<f64>| {
+        let mut h = Header::new();
+        h.set("NAXIS", 2);
+        h.set("CTYPE1", format!("RA---{proj}"));
+        h.set("CTYPE2", format!("DEC--{proj}"));
+        h.set("CRPIX1", 50.0).set("CRPIX2", 50.0);
+        h.set("CRVAL1", 45.0).set("CRVAL2", 0.0);
+        h.set("CDELT1", -0.5).set("CDELT2", 0.5);
+        if let Some(v) = pv1 {
+            h.set("PV2_1", v);
+        }
+        Wcs::from_header(&h, None).unwrap()
+    };
+    let bon = build("BON", Some(0.0));
+    let sfl = build("SFL", None);
+    assert!(bon.celestial.is_some() && bon.unsupported_axes.is_empty());
+    for &(px, py) in &[(20.0, 70.0), (80.0, 30.0), (55.0, 45.0)] {
+        let b = bon.pixel_to_world(&[px, py]);
+        let s = sfl.pixel_to_world(&[px, py]);
+        assert!(
+            (b[0] - s[0]).abs() < 1e-10 && (b[1] - s[1]).abs() < 1e-10,
+            "BON θ₁=0 vs SFL at ({px},{py}): {b:?} vs {s:?}"
+        );
+        assert!(b.iter().all(|v| v.is_finite()));
+    }
+    // The forward (SFL) path round-trips too.
+    let w = bon.pixel_to_world(&[40.0, 60.0]);
+    let p = bon.world_to_pixel(&w);
+    assert!(
+        (p[0] - 40.0).abs() < 1e-7 && (p[1] - 60.0).abs() < 1e-7,
+        "BON θ₁=0 round-trip: {p:?}"
+    );
+}
+
+#[test]
 fn conflicting_linear_keywords_are_rejected() {
     use crate::error::FitsError;
     use crate::header::Header;

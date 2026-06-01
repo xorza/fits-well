@@ -310,6 +310,11 @@ impl Projection {
                 }
                 // Bonne's pseudoconic inverse (CG 2002 §5.5.1), θ₁ = PVi_1.
                 Projection::Bon => {
+                    // §5.5.1: BON degenerates to the sinusoidal SFL at θ₁ = 0
+                    // (avoiding the `1/tan 0` singularity below).
+                    if pv[1] == 0.0 {
+                        return (x / (y * D2R).cos(), y);
+                    }
                     let t1 = pv[1] * D2R;
                     let y0 = t1 + 1.0 / t1.tan();
                     let s = pv[1].signum();
@@ -405,6 +410,10 @@ impl Projection {
                     180.0 * (t / 3.0).sin(),
                 ),
                 Projection::Bon => {
+                    // §5.5.1: BON degenerates to the sinusoidal SFL at θ₁ = 0.
+                    if pv[1] == 0.0 {
+                        return (phi * t.cos(), theta);
+                    }
                     let t1 = pv[1] * D2R;
                     let y0 = t1 + 1.0 / t1.tan();
                     let r = y0 - t;
@@ -683,7 +692,7 @@ impl Wcs {
         // `pixel_to_world` returns their *intermediate* world coordinate;
         // `unsupported_axes` records them so a caller never mistakes that for a
         // fully-decoded sky/spectral value.
-        let unsupported_axes = nonlinear_unsupported_axes(&ctype);
+        let mut unsupported_axes = nonlinear_unsupported_axes(&ctype);
 
         // Build the linear transform A. Precedence: CD, then PC×CDELT, then the
         // legacy CROTA rotation, then a bare CDELT diagonal.
@@ -753,44 +762,59 @@ impl Wcs {
             card: "singular WCS transform matrix".to_string(),
         })?;
 
-        let celestial = celestial_axes.map(|(lng, lat, proj)| {
-            // Latitude-axis PVi_0..PVi_20 — the projection parameters.
-            let pv: Vec<f64> = (0..=20)
-                .map(|m| {
-                    header
-                        .get_real(&format!("PV{}_{m}{a}", lat + 1))
-                        .unwrap_or(0.0)
-                })
-                .collect();
-            // Fiducial point: projection default, overridable by PVi_1a/PVi_2a on
-            // the longitude axis (§8.3).
-            let (mut phi0, mut theta0) = proj.reference_point(&pv);
-            if let Some(v) = header.get_real(&format!("PV{}_1{a}", lng + 1)) {
-                phi0 = v;
+        let celestial = match celestial_axes {
+            Some((lng, lat, proj)) => {
+                // Latitude-axis PVi_0..PVi_20 — the projection parameters.
+                let pv: Vec<f64> = (0..=20)
+                    .map(|m| {
+                        header
+                            .get_real(&format!("PV{}_{m}{a}", lat + 1))
+                            .unwrap_or(0.0)
+                    })
+                    .collect();
+                // A conic's mid-latitude θ_a = PVi_1 is mandatory and must be
+                // non-zero; θ_a = 0 (absent, or explicitly 0) is a degenerate cone
+                // (`1/tan 0`). Treat it like an unimplemented projection — flag the
+                // axes and skip deprojection so they pass through the linear stage
+                // (an intermediate world coordinate) rather than returning NaN.
+                if proj.is_conic() && pv[1] == 0.0 {
+                    unsupported_axes.push(lng);
+                    unsupported_axes.push(lat);
+                    unsupported_axes.sort_unstable();
+                    None
+                } else {
+                    // Fiducial point: projection default, overridable by PVi_1a/
+                    // PVi_2a on the longitude axis (§8.3).
+                    let (mut phi0, mut theta0) = proj.reference_point(&pv);
+                    if let Some(v) = header.get_real(&format!("PV{}_1{a}", lng + 1)) {
+                        phi0 = v;
+                    }
+                    if let Some(v) = header.get_real(&format!("PV{}_2{a}", lng + 1)) {
+                        theta0 = v;
+                    }
+                    let (alpha0, delta0) = (crval[lng], crval[lat]);
+                    // LONPOLE (= LONPOLEa or PVi_3a): default φ0 if δ0 ≥ θ0, else φ0 + 180°.
+                    let phip = header
+                        .get_real(&format!("LONPOLE{a}"))
+                        .or_else(|| header.get_real(&format!("PV{}_3{a}", lng + 1)))
+                        .unwrap_or(if delta0 >= theta0 { phi0 } else { phi0 + 180.0 });
+                    // LATPOLE (= LATPOLEa or PVi_4a): default 90°.
+                    let thetap = header
+                        .get_real(&format!("LATPOLE{a}"))
+                        .or_else(|| header.get_real(&format!("PV{}_4{a}", lng + 1)))
+                        .unwrap_or(90.0);
+                    let pole = compute_pole(phi0, theta0, alpha0, delta0, phip, thetap);
+                    Some(Celestial {
+                        lng,
+                        lat,
+                        proj,
+                        pole,
+                        pv,
+                    })
+                }
             }
-            if let Some(v) = header.get_real(&format!("PV{}_2{a}", lng + 1)) {
-                theta0 = v;
-            }
-            let (alpha0, delta0) = (crval[lng], crval[lat]);
-            // LONPOLE (= LONPOLEa or PVi_3a): default φ0 if δ0 ≥ θ0, else φ0 + 180°.
-            let phip = header
-                .get_real(&format!("LONPOLE{a}"))
-                .or_else(|| header.get_real(&format!("PV{}_3{a}", lng + 1)))
-                .unwrap_or(if delta0 >= theta0 { phi0 } else { phi0 + 180.0 });
-            // LATPOLE (= LATPOLEa or PVi_4a): default 90°.
-            let thetap = header
-                .get_real(&format!("LATPOLE{a}"))
-                .or_else(|| header.get_real(&format!("PV{}_4{a}", lng + 1)))
-                .unwrap_or(90.0);
-            let pole = compute_pole(phi0, theta0, alpha0, delta0, phip, thetap);
-            Celestial {
-                lng,
-                lat,
-                proj,
-                pole,
-                pv,
-            }
-        });
+            None => None,
+        };
 
         Ok(Wcs {
             naxis,
