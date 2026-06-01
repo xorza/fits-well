@@ -62,6 +62,45 @@ fn rejects_malformed_datetimes() {
 }
 
 #[test]
+fn iso_8601_strictness() {
+    // §9.1.1: omitted leading zeros, a `Z` designator, and a <4-digit year are
+    // all rejected.
+    for bad in [
+        "2024-1-01",            // 1-digit month
+        "2024-01-1",            // 1-digit day
+        "2024-01-01T6:30:00",   // 1-digit hour
+        "2024-01-01T06:30:5",   // 1-digit second
+        "2024-01-01T06:30:00Z", // forbidden Z designator
+        "999-01-01",            // 3-digit year
+    ] {
+        assert!(Datetime::parse(bad).is_err(), "{bad:?} should be rejected");
+    }
+    // Signed / extended years (with their leading zeros) are accepted.
+    assert_eq!(Datetime::parse("-0044-03-15").unwrap().year, -44);
+    assert_eq!(Datetime::parse("+12024-06-01").unwrap().year, 12024);
+}
+
+#[test]
+fn reads_jepoch_and_bepoch_keywords() {
+    use crate::header::Header;
+    // JEPOCH=2000.0 ⇒ J2000.0 = MJD 51544.5, implied scale TDB.
+    let mut hj = Header::new();
+    hj.set("JEPOCH", 2000.0);
+    let ej = FitsTime::from_header(&hj).epoch(&hj).unwrap();
+    assert!((ej.mjd - 51544.5).abs() < 1e-6);
+    assert_eq!(ej.scale, TimeScale::Tdb);
+    // BEPOCH=1950.0 ⇒ B1950.0 = MJD 33281.92345905, implied scale ET ≈ TT.
+    let mut hb = Header::new();
+    hb.set("BEPOCH", 1950.0);
+    let eb = FitsTime::from_header(&hb).epoch(&hb).unwrap();
+    assert!((eb.mjd - 33281.92345905).abs() < 1e-4);
+    assert_eq!(eb.scale, TimeScale::Tt);
+    // Neither keyword ⇒ None.
+    let empty = Header::new();
+    assert!(FitsTime::from_header(&empty).epoch(&empty).is_none());
+}
+
+#[test]
 fn epochs_match_astropy() {
     let cases: &[(&str, f64)] = &[
         ("J2000.0", 2451545.0),
