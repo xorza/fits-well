@@ -132,9 +132,10 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
     let mut out_i = vec![0i64; if is_float { 0 } else { total }];
     let mut out_f = vec![0f64; if is_float { total } else { 0 }];
 
+    let mut scratch = TileScratch::default();
     for t in 0..geom.ntiles() {
-        let tile = geom.tile(t);
-        let tile_elems = tile.indices.len();
+        geom.tile_into(t, &mut scratch);
+        let tile_elems = scratch.indices.len();
         let cols = TileColumns {
             primary: primary.get(t),
             gzip: gzip_fallback.get(t),
@@ -150,12 +151,12 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
             };
             let vals =
                 decode_float_tile(&cmptype, cols, tile_elems, zbitpix, int_bitpix, codec, dq)?;
-            for (&flat, &v) in tile.indices.iter().zip(&vals) {
+            for (&flat, &v) in scratch.indices.iter().zip(&vals) {
                 out_f[flat] = v;
             }
         } else {
             let vals = decode_one_tile(&cmptype, cols, tile_elems, int_bitpix, codec)?;
-            for (&flat, &v) in tile.indices.iter().zip(&vals) {
+            for (&flat, &v) in scratch.indices.iter().zip(&vals) {
                 out_i[flat] = v;
             }
         }
@@ -205,17 +206,22 @@ pub(crate) fn encode_image(
 
     let mut descriptors: Vec<(usize, usize)> = Vec::with_capacity(ntiles);
     let mut heap: Vec<u8> = Vec::new();
+    let mut scratch = TileScratch::default();
+    let mut vals: Vec<i64> = Vec::new();
     for t in 0..ntiles {
-        let tile = geom.tile(t);
-        let vals: Vec<i64> = tile.indices.iter().map(|&i| flat[i]).collect();
+        geom.tile_into(t, &mut scratch);
+        vals.clear();
+        vals.extend(scratch.indices.iter().map(|&i| flat[i]));
         let cell = match cmptype {
             "GZIP_1" => TileCell::Bytes(gzip::gzip_encode(&i64_to_be(&vals, bitpix))),
             "GZIP_2" => TileCell::Bytes(gzip::gzip2_encode(&i64_to_be(&vals, bitpix), bytepix)),
             "RICE_1" => TileCell::Bytes(rice::rice_encode(&vals, bytepix, 32)),
             "PLIO_1" => TileCell::I16(plio::plio_encode(&vals, vals.len())),
-            "HCOMPRESS_1" => {
-                TileCell::Bytes(hcompress::hcompress_tile_encode(&vals, &tile.tdims, scale)?)
-            }
+            "HCOMPRESS_1" => TileCell::Bytes(hcompress::hcompress_tile_encode(
+                &vals,
+                &scratch.tdims,
+                scale,
+            )?),
             // §10.4: store the tile's raw big-endian pixels, uncompressed.
             "NOCOMPRESS" => TileCell::Bytes(i64_to_be(&vals, bitpix)),
             other => {
@@ -308,12 +314,15 @@ fn encode_float_image(image: &Image, cmptype: &str, tile_shape: &[usize]) -> Res
     let mut heap: Vec<u8> = Vec::new();
     let mut any_null = false;
 
+    let mut scratch = TileScratch::default();
+    let mut vals: Vec<f64> = Vec::new();
     for t in 0..ntiles {
-        let tile = geom.tile(t);
-        let tile_elems = tile.indices.len();
-        let nx = tile.tdims[0];
+        geom.tile_into(t, &mut scratch);
+        let tile_elems = scratch.indices.len();
+        let nx = scratch.tdims[0];
         let ny = tile_elems / nx;
-        let vals: Vec<f64> = tile.indices.iter().map(|&i| flat[i]).collect();
+        vals.clear();
+        vals.extend(scratch.indices.iter().map(|&i| flat[i]));
         let irow = t as i64 + zdither0; // = (1-based tile row) + ZDITHER0 - 1
 
         match quantize::quantize_tile(&vals, nx, ny, 0.0, method, irow) {
@@ -701,11 +710,16 @@ struct TileGeometry {
     ntiles_axis: Vec<usize>,
 }
 
-/// One tile: its edge-clipped dimensions and the flat (row-major) indices of its
-/// pixels in the full image.
-#[derive(Debug)]
-struct Tile {
+/// Reusable per-tile scratch, filled by [`TileGeometry::tile_into`] each
+/// iteration so a tile loop allocates these buffers once instead of per tile
+/// (the `indices` buffer is `tile_elems` long — the dominant per-tile cost).
+#[derive(Debug, Default)]
+struct TileScratch {
+    /// Per-axis origin of the current tile (scratch for the index computation).
+    origin: Vec<usize>,
+    /// Edge-clipped per-axis extent of the tile (`ny` fastest); used by HCOMPRESS.
     tdims: Vec<usize>,
+    /// Flat (row-major) indices of the tile's pixels in the full image.
     indices: Vec<usize>,
 }
 
@@ -733,37 +747,34 @@ impl TileGeometry {
         self.ntiles_axis.iter().product()
     }
 
-    fn tile(&self, t: usize) -> Tile {
+    /// Fill `s` (reusing its buffers) with tile `t`'s edge-clipped extent and the
+    /// flat indices of its pixels in the full image.
+    fn tile_into(&self, t: usize, s: &mut TileScratch) {
         let n = self.dims.len();
-        let mut origin = vec![0usize; n];
-        let mut tdims = vec![0usize; n];
+        s.origin.clear();
+        s.tdims.clear();
         let mut rem = t;
         for i in 0..n {
             let ti = rem % self.ntiles_axis[i];
             rem /= self.ntiles_axis[i];
-            origin[i] = ti * self.tiles[i];
-            tdims[i] = self.tiles[i].min(self.dims[i] - origin[i]);
+            let origin = ti * self.tiles[i];
+            s.origin.push(origin);
+            s.tdims.push(self.tiles[i].min(self.dims[i] - origin));
         }
-        let indices = tile_flat_indices(&origin, &tdims, &self.stride);
-        Tile { tdims, indices }
-    }
-}
-
-/// Strides give the flat indices in the full image for a tile's row-major elements.
-fn tile_flat_indices(origin: &[usize], tdims: &[usize], stride: &[usize]) -> Vec<usize> {
-    let tile_elems: usize = tdims.iter().product();
-    (0..tile_elems)
-        .map(|local| {
+        let tile_elems: usize = s.tdims.iter().product();
+        s.indices.clear();
+        s.indices.reserve(tile_elems);
+        for local in 0..tile_elems {
             let mut rem = local;
             let mut flat = 0;
-            for i in 0..tdims.len() {
-                let c = rem % tdims[i];
-                rem /= tdims[i];
-                flat += (origin[i] + c) * stride[i];
+            for i in 0..n {
+                let c = rem % s.tdims[i];
+                rem /= s.tdims[i];
+                flat += (s.origin[i] + c) * self.stride[i];
             }
-            flat
-        })
-        .collect()
+            s.indices.push(flat);
+        }
+    }
 }
 
 /// Read `PREFIX1..PREFIXn` integer axis lengths.
