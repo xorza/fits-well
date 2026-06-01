@@ -583,6 +583,45 @@ fn bufcopy(
 }
 
 /// Bit/byte input over the compressed stream (replaces cfitsio's file globals).
+/// Fast-decode table for the fixed Huffman code: index by the next 6 bits
+/// (MSB-first; 6 = the longest code), yielding the decoded value 0–15 and the code
+/// length (3–6) to consume. Built from the same prefix-code map as the bit-serial
+/// walk in [`BitInput::input_huffman`], so it decodes identically in one lookup.
+const HUFFMAN_DECODE: [(u8, i32); 64] = {
+    let mut t = [(0u8, 0i32); 64];
+    let mut p = 0usize;
+    while p < 64 {
+        let c3 = p >> 3; // first 3 bits
+        t[p] = if c3 < 4 {
+            (1u8 << c3, 3)
+        } else if p >> 2 < 13 {
+            let v = match p >> 2 {
+                8 => 3,
+                9 => 5,
+                10 => 10,
+                11 => 12,
+                _ => 15, // 12
+            };
+            (v, 4)
+        } else if p >> 1 < 31 {
+            let v = match p >> 1 {
+                26 => 6,
+                27 => 7,
+                28 => 9,
+                29 => 11,
+                _ => 13, // 30
+            };
+            (v, 5)
+        } else if p == 62 {
+            (0, 6)
+        } else {
+            (14, 6) // 63
+        };
+        p += 1;
+    }
+    t
+};
+
 struct BitInput<'a> {
     data: &'a [u8],
     pos: usize,
@@ -693,34 +732,19 @@ impl<'a> BitInput<'a> {
         }
     }
 
-    /// Huffman decode a fixed code into a value 0–15.
+    /// Huffman decode a fixed code into a value 0–15, via a single 6-bit peek and a
+    /// [`HUFFMAN_DECODE`] table lookup — no per-bit branch walk. The longest code is
+    /// 6 bits, so one refill guarantees enough buffered bits; only the code's actual
+    /// length is consumed.
     fn input_huffman(&mut self) -> u8 {
-        let mut c = self.input_nbits(3);
-        if c < 4 {
-            return (1 << c) as u8;
+        if self.bits_to_go < 6 {
+            self.buffer = (self.buffer << 8) | self.byte();
+            self.bits_to_go += 8;
         }
-        c = self.input_bit() | (c << 1);
-        if c < 13 {
-            return match c {
-                8 => 3,
-                9 => 5,
-                10 => 10,
-                11 => 12,
-                _ => 15, // c == 12
-            };
-        }
-        c = self.input_bit() | (c << 1);
-        if c < 31 {
-            return match c {
-                26 => 6,
-                27 => 7,
-                28 => 9,
-                29 => 11,
-                _ => 13, // c == 30
-            };
-        }
-        c = self.input_bit() | (c << 1);
-        if c == 62 { 0 } else { 14 }
+        let peek = ((self.buffer >> (self.bits_to_go - 6)) & 0x3F) as usize;
+        let (value, len) = HUFFMAN_DECODE[peek];
+        self.bits_to_go -= len;
+        value
     }
 }
 
