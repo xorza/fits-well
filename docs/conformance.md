@@ -1,6 +1,6 @@
 # FITS 4.0 Conformance Audit
 
-Audit of the `fits` implementation against the FITS 4.0 standard (the curated
+Audit of the `fits-well` implementation against the FITS 4.0 standard (the curated
 notes in [`refs/`](refs/) and the normative [`refs/fits_standard40.pdf`]).
 
 **The bar — "full compatibility, nothing more":** read every conforming FITS 4.0

@@ -18,7 +18,7 @@ use std::io::Cursor;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use fits::{Bitpix, FitsReader, FitsWriter, Image, ImageData, Scaling};
+use fits_well::{Bitpix, FitsReader, FitsWriter, Image, ImageData, Scaling};
 
 /// Data-unit size per type — 64 MiB clears the last-level cache, so the staging
 /// copy is real DRAM traffic rather than a cache hit.

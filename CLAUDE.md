@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`fits` is a Rust library to **read and write FITS** (Flexible Image Transport
+`fits-well` is a Rust library to **read and write FITS** (Flexible Image Transport
 System) files — the standard data format of astronomy. The two non-negotiable
 goals shape every decision:
 
