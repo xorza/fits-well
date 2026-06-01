@@ -119,9 +119,22 @@ impl<R: Read + Seek> FitsReader<R> {
             index,
             len: self.hdus.len(),
         })?;
+        let data_offset = hdu.data_offset;
+        let data_len = hdu.data_len;
         let data_range = 0..hdu.data_bytes as usize;
-        self.source.seek(SeekFrom::Start(hdu.data_offset))?;
-        let mut bytes = vec![0u8; hdu.data_len as usize];
+        // Bound the allocation by the source's real length: a hostile header can
+        // claim a data unit far larger than the file, which would otherwise drive a
+        // huge `vec![0u8; data_len]` before `read_exact` ever fails. Refuse up front
+        // when the declared unit can't physically fit in the stream.
+        let stream_len = self.source.seek(SeekFrom::End(0))?;
+        if data_offset
+            .checked_add(data_len)
+            .is_none_or(|end| end > stream_len)
+        {
+            return Err(FitsError::UnexpectedEof);
+        }
+        self.source.seek(SeekFrom::Start(data_offset))?;
+        let mut bytes = vec![0u8; data_len as usize];
         self.source.read_exact(&mut bytes)?;
         Ok(DataUnit { bytes, data_range })
     }

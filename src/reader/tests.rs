@@ -116,6 +116,26 @@ fn malformed_image_pcount_is_rejected_not_panicked() {
 }
 
 #[test]
+fn data_unit_larger_than_the_file_is_rejected_not_allocated() {
+    use std::io::Cursor;
+    // A header claiming a ~1 MB data unit in a file that holds only a single data
+    // block must error up front, not attempt the header-sized allocation.
+    let bytes = fits_file(
+        &[
+            "SIMPLE  = T",
+            "BITPIX  = 8",
+            "NAXIS   = 1",
+            "NAXIS1  = 1000000",
+            "PCOUNT  = 0",
+            "GCOUNT  = 1",
+        ],
+        &[0u8; 16],
+    );
+    let mut r = FitsReader::open(Cursor::new(bytes)).unwrap();
+    assert!(matches!(r.read_image(0), Err(FitsError::UnexpectedEof)));
+}
+
+#[test]
 fn content_before_any_valid_hdu_is_rejected() {
     use crate::block::BLOCK_SIZE;
     use std::io::Cursor;
