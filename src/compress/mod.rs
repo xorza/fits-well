@@ -183,10 +183,11 @@ pub(crate) fn encode_image(
     cmptype: &str,
     tile_shape: &[usize],
     scale: i32,
-) -> Result<HduParts> {
+    out: &mut Vec<u8>,
+) -> Result<Header> {
     let bitpix = image.samples.bitpix();
     if bitpix.is_float() {
-        return encode_float_image(image, cmptype, tile_shape);
+        return encode_float_image(image, cmptype, tile_shape, out);
     }
     // RICE handles only 1/2/4-byte pixels (cfitsio parity); refuse the 64-bit path
     // rather than silently corrupting. Table 37 lists BYTEPIX 8 as permitted, but
@@ -240,11 +241,13 @@ pub(crate) fn encode_image(
     let wide = heap.len() > i32::MAX as usize || maxnelem > i32::MAX as usize;
 
     // Data unit: an array descriptor (count, heap offset) per tile, then the heap.
-    let mut data = Vec::with_capacity(ntiles * if wide { 16 } else { 8 } + heap.len());
+    // Built into the caller's reused buffer (the writer's scratch).
+    out.clear();
+    out.reserve(ntiles * if wide { 16 } else { 8 } + heap.len());
     for &(nelem, offset) in &descriptors {
-        push_pq_descriptor(&mut data, wide, nelem as u64, offset as u64);
+        push_pq_descriptor(out, wide, nelem as u64, offset as u64);
     }
-    data.extend_from_slice(&heap);
+    out.extend_from_slice(&heap);
 
     let tform_letter = if cmptype == "PLIO_1" { 'I' } else { 'B' };
     let desc = if wide { 'Q' } else { 'P' };
@@ -280,7 +283,7 @@ pub(crate) fn encode_image(
     if let Some(blank) = image.scaling.blank {
         h.set("BLANK", blank);
     }
-    Ok(HduParts { header: h, data })
+    Ok(h)
 }
 
 /// Encode a float [`Image`] as a quantized, tiled-compressed `BINTABLE`
@@ -289,7 +292,12 @@ pub(crate) fn encode_image(
 /// a tile that can't be quantized (constant data) is stored as raw gzip'd floats
 /// in `GZIP_COMPRESSED_DATA`. The table has four columns: `COMPRESSED_DATA`,
 /// `GZIP_COMPRESSED_DATA`, `ZSCALE`, `ZZERO`.
-fn encode_float_image(image: &Image, cmptype: &str, tile_shape: &[usize]) -> Result<HduParts> {
+fn encode_float_image(
+    image: &Image,
+    cmptype: &str,
+    tile_shape: &[usize],
+    out: &mut Vec<u8>,
+) -> Result<Header> {
     if !matches!(cmptype, "GZIP_1" | "GZIP_2" | "RICE_1") {
         return Err(FitsError::UnsupportedCompression {
             name: format!("{cmptype} for float images (write)"),
@@ -353,16 +361,17 @@ fn encode_float_image(image: &Image, cmptype: &str, tile_shape: &[usize]) -> Res
 
     // Fixed table: per tile, the two `P` descriptors then the `ZSCALE`/`ZZERO`
     // doubles (row width 32), followed by the heap.
-    let mut data = Vec::with_capacity(ntiles * 32 + heap.len());
+    out.clear();
+    out.reserve(ntiles * 32 + heap.len());
     for t in 0..ntiles {
         // Two 32-bit `P` descriptors (COMPRESSED_DATA, GZIP_COMPRESSED_DATA) then
         // the ZSCALE/ZZERO doubles — the §10 quantized-float row layout.
-        push_pq_descriptor(&mut data, false, cd_desc[t].0 as u64, cd_desc[t].1 as u64);
-        push_pq_descriptor(&mut data, false, gz_desc[t].0 as u64, gz_desc[t].1 as u64);
-        data.extend_from_slice(&zscale[t].to_be_bytes());
-        data.extend_from_slice(&zzero[t].to_be_bytes());
+        push_pq_descriptor(out, false, cd_desc[t].0 as u64, cd_desc[t].1 as u64);
+        push_pq_descriptor(out, false, gz_desc[t].0 as u64, gz_desc[t].1 as u64);
+        out.extend_from_slice(&zscale[t].to_be_bytes());
+        out.extend_from_slice(&zzero[t].to_be_bytes());
     }
-    data.extend_from_slice(&heap);
+    out.extend_from_slice(&heap);
 
     let max_cd = cd_desc.iter().map(|&(n, _)| n).max().unwrap_or(0);
     let max_gz = gz_desc.iter().map(|&(n, _)| n).max().unwrap_or(0);
@@ -394,7 +403,7 @@ fn encode_float_image(image: &Image, cmptype: &str, tile_shape: &[usize]) -> Res
         // decoder which value maps back to a blank (NaN) pixel.
         h.set("ZBLANK", quantize::NULL_VALUE as i64);
     }
-    Ok(HduParts { header: h, data })
+    Ok(h)
 }
 
 /// The `ZQUANTIZ` keyword string for a dither method.
