@@ -238,15 +238,7 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
                 irow: t as i64 + zdither0,
                 zblank: column_at(&zblank_column, t).or(zblank_keyword),
             };
-            decode_float_tile(
-                &cmptype,
-                cols,
-                s.indices.len(),
-                zbitpix,
-                int_bitpix,
-                codec,
-                dq,
-            )
+            decode_float_tile(&cmptype, cols, s.nelem(), zbitpix, int_bitpix, codec, dq)
         };
         match &mut samples {
             ImageData::F32(o) => run_decode_scatter(ntiles, &geom, o, decode, |v| v as f32)?,
@@ -260,7 +252,7 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
                 gzip: gzip_fallback.get(t),
                 uncompressed: uncompressed.get(t),
             };
-            decode_one_tile(&cmptype, cols, s.indices.len(), int_bitpix, codec)
+            decode_one_tile(&cmptype, cols, s.nelem(), int_bitpix, codec)
         };
         match &mut samples {
             ImageData::U8(o) => run_decode_scatter(ntiles, &geom, o, decode, |v| v as u8)?,
@@ -297,11 +289,11 @@ where
         map_tiles(ntiles, TileScratch::default, |scratch, t| -> Result<()> {
             geom.tile_into(t, scratch);
             let vals = decode(t, scratch)?;
-            // SAFETY: the image tiles partition the pixel grid, so this tile's flat
-            // indices are disjoint from every other tile's — concurrent writes
-            // through `sink` never target the same element. `tile_into` clips indices
-            // to the image, which sized `out`, so each index is in bounds.
-            unsafe { sink.scatter(&scratch.indices, &vals, &convert) };
+            // SAFETY: the image tiles partition the pixel grid, so this tile's row
+            // ranges are disjoint from every other tile's — concurrent writes through
+            // `sink` never alias. `tile_into` clips rows to the image, which sized
+            // `out`, so each row is in bounds.
+            unsafe { sink.scatter_rows(&scratch.row_bases, scratch.row_len, &vals, &convert) };
             Ok(())
         })?;
         Ok(())
@@ -312,11 +304,34 @@ where
         for t in 0..ntiles {
             geom.tile_into(t, &mut scratch);
             let vals = decode(t, &scratch)?;
-            for (&flat, &v) in scratch.indices.iter().zip(&vals) {
-                out[flat] = convert(v);
-            }
+            scatter_rows(out, &scratch.row_bases, scratch.row_len, &vals, &convert);
         }
         Ok(())
+    }
+}
+
+/// Scatter `vals` (the tile's pixels in row-major order) into `out` one contiguous
+/// row at a time: `row_len` values land at each `row_bases` offset, narrowed by
+/// `convert`. A `vals` shorter than the tile fills only what it covers (matching the
+/// old index-zip), so a malformed tile can't index out of bounds.
+#[cfg(not(feature = "parallel"))]
+fn scatter_rows<S: Copy, D>(
+    out: &mut [D],
+    row_bases: &[usize],
+    row_len: usize,
+    vals: &[S],
+    convert: &impl Fn(S) -> D,
+) {
+    let mut off = 0;
+    for &base in row_bases {
+        if off >= vals.len() {
+            break;
+        }
+        let rl = row_len.min(vals.len() - off);
+        for (d, &v) in out[base..base + rl].iter_mut().zip(&vals[off..off + rl]) {
+            *d = convert(v);
+        }
+        off += row_len;
     }
 }
 
@@ -343,21 +358,35 @@ impl<D> DisjointOut<D> {
         }
     }
 
-    /// Write `convert(vals[k])` to `out[indices[k]]`.
+    /// Write `vals` (row-major) into the tile's contiguous rows: `row_len` values at
+    /// each `row_bases` offset, narrowed by `convert`. A short `vals` fills only what
+    /// it covers (matching the serial [`scatter_rows`]).
     ///
     /// # Safety
-    /// Every index must be `< self.len` and disjoint from those passed by any
-    /// concurrent call, so no two writes alias.
-    unsafe fn scatter<S: Copy>(&self, indices: &[usize], vals: &[S], convert: impl Fn(S) -> D) {
-        for (&flat, &v) in indices.iter().zip(vals) {
-            debug_assert!(
-                flat < self.len,
-                "tile index {flat} out of bounds {}",
-                self.len
-            );
-            // SAFETY: `flat < len` (debug-asserted; guaranteed by the tile geometry)
-            // and the disjointness contract make this a non-aliasing in-bounds write.
-            unsafe { self.ptr.add(flat).write(convert(v)) };
+    /// Each `[base, base + row_len)` range must be `<= self.len` and disjoint from
+    /// those passed by any concurrent call, so no two writes alias.
+    unsafe fn scatter_rows<S: Copy>(
+        &self,
+        row_bases: &[usize],
+        row_len: usize,
+        vals: &[S],
+        convert: &impl Fn(S) -> D,
+    ) {
+        let mut off = 0;
+        for &base in row_bases {
+            if off >= vals.len() {
+                break;
+            }
+            let rl = row_len.min(vals.len() - off);
+            debug_assert!(base + rl <= self.len, "tile row out of bounds {}", self.len);
+            // SAFETY: `[base, base + rl)` is in bounds (debug-asserted; guaranteed by
+            // the tile geometry) and disjoint across tiles, so these are non-aliasing
+            // in-bounds writes over one contiguous run.
+            let dst = unsafe { std::slice::from_raw_parts_mut(self.ptr.add(base), rl) };
+            for (d, &v) in dst.iter_mut().zip(&vals[off..off + rl]) {
+                *d = convert(v);
+            }
+            off += row_len;
         }
     }
 }
@@ -416,7 +445,12 @@ pub(crate) fn encode_image(
         geom.tile_into(t, &mut s.tile);
         // Gather + widen this tile's pixels straight from the typed source — no
         // whole-image `i64` buffer.
-        gather_i64(&image.samples, &s.tile.indices, &mut s.ints);
+        gather_i64(
+            &image.samples,
+            &s.tile.row_bases,
+            s.tile.row_len,
+            &mut s.ints,
+        );
         let vals = &s.ints;
         Ok(match cmptype {
             "GZIP_1" => {
@@ -553,9 +587,14 @@ fn encode_float_image(
         |s, t| -> Result<FloatTile> {
             geom.tile_into(t, &mut s.tile);
             let nx = s.tile.tdims[0];
-            let ny = s.tile.indices.len() / nx;
+            let ny = s.tile.row_bases.len();
             // Gather + widen this tile's pixels straight from the typed source.
-            gather_f64(&image.samples, &s.tile.indices, &mut s.floats);
+            gather_f64(
+                &image.samples,
+                &s.tile.row_bases,
+                s.tile.row_len,
+                &mut s.floats,
+            );
             let irow = t as i64 + zdither0; // = (1-based tile row) + ZDITHER0 - 1
             Ok(
                 match quantize::quantize_tile(&s.floats, nx, ny, qlevel, method, irow) {
@@ -674,11 +713,19 @@ fn dither_name(method: quantize::DitherMethod) -> &'static str {
 /// Gather a tile's float pixels straight from the typed source into `out`,
 /// widening to `f64` — so float encoding never materializes a whole-image `f64`
 /// buffer. Integer sources yield nothing (they take the integer path).
-fn gather_f64(samples: &ImageData, indices: &[usize], out: &mut Vec<f64>) {
+fn gather_f64(samples: &ImageData, row_bases: &[usize], row_len: usize, out: &mut Vec<f64>) {
     out.clear();
     match samples {
-        ImageData::F32(v) => out.extend(indices.iter().map(|&i| v[i] as f64)),
-        ImageData::F64(v) => out.extend(indices.iter().map(|&i| v[i])),
+        ImageData::F32(v) => {
+            for &b in row_bases {
+                out.extend(v[b..b + row_len].iter().map(|&x| x as f64));
+            }
+        }
+        ImageData::F64(v) => {
+            for &b in row_bases {
+                out.extend_from_slice(&v[b..b + row_len]);
+            }
+        }
         _ => {}
     }
 }
@@ -762,13 +809,29 @@ fn set_zimage_axes(
 /// Gather a tile's integer pixels straight from the typed source into `out`,
 /// widening to `i64` — so integer encoding never materializes a whole-image `i64`
 /// buffer. Float sources yield nothing (they take the quantized float path).
-fn gather_i64(samples: &ImageData, indices: &[usize], out: &mut Vec<i64>) {
+fn gather_i64(samples: &ImageData, row_bases: &[usize], row_len: usize, out: &mut Vec<i64>) {
     out.clear();
     match samples {
-        ImageData::U8(v) => out.extend(indices.iter().map(|&i| v[i] as i64)),
-        ImageData::I16(v) => out.extend(indices.iter().map(|&i| v[i] as i64)),
-        ImageData::I32(v) => out.extend(indices.iter().map(|&i| v[i] as i64)),
-        ImageData::I64(v) => out.extend(indices.iter().map(|&i| v[i])),
+        ImageData::U8(v) => {
+            for &b in row_bases {
+                out.extend(v[b..b + row_len].iter().map(|&x| x as i64));
+            }
+        }
+        ImageData::I16(v) => {
+            for &b in row_bases {
+                out.extend(v[b..b + row_len].iter().map(|&x| x as i64));
+            }
+        }
+        ImageData::I32(v) => {
+            for &b in row_bases {
+                out.extend(v[b..b + row_len].iter().map(|&x| x as i64));
+            }
+        }
+        ImageData::I64(v) => {
+            for &b in row_bases {
+                out.extend_from_slice(&v[b..b + row_len]);
+            }
+        }
         _ => {}
     }
 }
@@ -1013,11 +1076,22 @@ struct TileScratch {
     origin: Vec<usize>,
     /// Edge-clipped per-axis extent of the tile (`ny` fastest); used by HCOMPRESS.
     tdims: Vec<usize>,
-    /// Flat (row-major) indices of the tile's pixels in the full image.
-    indices: Vec<usize>,
+    /// Flat start of each contiguous tile row in the full image (length = the product
+    /// of `tdims[1..]`). Axis 0 has stride 1, so a row is `row_len` contiguous
+    /// elements — gather/scatter copy it as a slice instead of per-pixel indexing.
+    row_bases: Vec<usize>,
+    /// Elements per row (`tdims[0]`): the fastest-axis extent.
+    row_len: usize,
     /// Per-axis local coordinate, the odometer state [`TileGeometry::tile_into`]
-    /// walks to emit `indices` without per-pixel division.
+    /// walks (over the higher axes) to emit `row_bases` without per-pixel division.
     coord: Vec<usize>,
+}
+
+impl TileScratch {
+    /// Total pixels in the current tile (`row_len × nrows`).
+    fn nelem(&self) -> usize {
+        self.row_len * self.row_bases.len()
+    }
 }
 
 impl TileGeometry {
@@ -1058,23 +1132,26 @@ impl TileGeometry {
             s.origin.push(origin);
             s.tdims.push(self.tiles[i].min(self.dims[i] - origin));
         }
-        let tile_elems: usize = s.tdims.iter().product();
-        s.indices.clear();
-        s.indices.reserve(tile_elems);
-        if tile_elems == 0 {
-            return;
-        }
-        // Walk the tile's local coordinates as an odometer (fastest axis first),
-        // maintaining `flat` by adding each axis stride and undoing it on carry. This
-        // replaces the per-pixel `%`/`/` decomposition — integer division dominated
-        // tiled decode (see profiling) — with adds. The emission order is identical
-        // to the decomposition, so decoded values still land in the right pixels.
+        // Axis 0 has stride 1, so each tile row is `row_len` contiguous elements and the
+        // tile is `nrows` such rows (the product of the higher-axis extents). Emit only
+        // the row starts — walking the *higher* axes as an odometer, `flat` maintained
+        // by stride adds with no per-pixel division — and let gather/scatter copy each
+        // row as a contiguous slice. The row order matches a row-major pixel walk, so
+        // decoded values still land in the right pixels.
+        s.row_len = if n == 0 { 1 } else { s.tdims[0] };
+        let nrows: usize = if n <= 1 {
+            1
+        } else {
+            s.tdims[1..].iter().product()
+        };
         let mut flat: usize = (0..n).map(|i| s.origin[i] * self.stride[i]).sum();
+        s.row_bases.clear();
+        s.row_bases.reserve(nrows);
         s.coord.clear();
         s.coord.resize(n, 0);
-        for _ in 0..tile_elems {
-            s.indices.push(flat);
-            for i in 0..n {
+        for _ in 0..nrows {
+            s.row_bases.push(flat);
+            for i in 1..n {
                 s.coord[i] += 1;
                 flat += self.stride[i];
                 if s.coord[i] < s.tdims[i] {

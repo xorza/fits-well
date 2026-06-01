@@ -948,30 +948,43 @@ fn i64_be_round_trip_and_buffer_reuse() {
 }
 
 #[test]
-fn tile_into_indices_match_layout() {
+fn tile_into_rows_match_layout() {
+    // Expand the row representation (row_bases + row_len) back to the full flat-index
+    // list it stands for, so the hand-computed expectations still describe pixels.
+    fn flat(s: &TileScratch) -> Vec<usize> {
+        let mut v = Vec::new();
+        for &b in &s.row_bases {
+            v.extend(b..b + s.row_len);
+        }
+        v
+    }
+
     // 4×3 image (x fastest, strides [1, 4]) tiled 2×2 → 4 tiles; the top row of tiles
-    // is edge-clipped to height 1. Indices are hand-computed flat positions, and the
-    // same scratch is reused across tiles (must not leak stale indices).
+    // is edge-clipped to height 1. Same scratch reused across tiles (no stale rows).
     let geom = TileGeometry::new(&[4, 3], &[2, 2]);
     assert_eq!(geom.ntiles(), 4);
     let mut s = TileScratch::default();
     let expect = [
-        vec![0, 1, 4, 5], // origin (0,0), full 2×2
-        vec![2, 3, 6, 7], // origin (2,0)
-        vec![8, 9],       // origin (0,2), clipped to height 1
-        vec![10, 11],     // origin (2,2), clipped to height 1
+        (vec![0, 4], 2, vec![0, 1, 4, 5]), // origin (0,0), full 2×2: two rows of 2
+        (vec![2, 6], 2, vec![2, 3, 6, 7]), // origin (2,0)
+        (vec![8], 2, vec![8, 9]),          // origin (0,2), clipped to height 1
+        (vec![10], 2, vec![10, 11]),       // origin (2,2), clipped to height 1
     ];
-    for (t, want) in expect.iter().enumerate() {
+    for (t, (bases, row_len, pixels)) in expect.iter().enumerate() {
         geom.tile_into(t, &mut s);
-        assert_eq!(&s.indices, want, "tile {t}");
+        assert_eq!(&s.row_bases, bases, "tile {t} row bases");
+        assert_eq!(s.row_len, *row_len, "tile {t} row len");
+        assert_eq!(s.nelem(), pixels.len(), "tile {t} nelem");
+        assert_eq!(&flat(&s), pixels, "tile {t} pixels");
     }
 
     // 4×2×2 image (strides [1, 4, 8]) tiled 2×2×2 → 2 tiles: exercises the odometer
-    // carrying across all three axes within one tile.
+    // carrying across the two higher axes; each tile is 4 rows of 2.
     let geom3 = TileGeometry::new(&[4, 2, 2], &[2, 2, 2]);
     assert_eq!(geom3.ntiles(), 2);
     geom3.tile_into(0, &mut s);
-    assert_eq!(s.indices, vec![0, 1, 4, 5, 8, 9, 12, 13]);
+    assert_eq!(s.row_bases, vec![0, 4, 8, 12]);
+    assert_eq!(flat(&s), vec![0, 1, 4, 5, 8, 9, 12, 13]);
     geom3.tile_into(1, &mut s);
-    assert_eq!(s.indices, vec![2, 3, 6, 7, 10, 11, 14, 15]);
+    assert_eq!(flat(&s), vec![2, 3, 6, 7, 10, 11, 14, 15]);
 }
