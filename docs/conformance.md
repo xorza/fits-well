@@ -209,14 +209,17 @@ edge-precision items, not wrong decoding.
 
 ### Gaps
 
-1. ✅ **Native unsigned (`uN`) typed exposure — image read side.** `Image::unsigned()`
-   returns a typed `UnsignedView` (`U16`/`U32`/`U64`/signed-byte `I8`) when the
-   scaling is exactly the FITS unsigned convention (`BSCALE == 1`, no `BLANK`,
-   `BZERO == 2^(n-1)`), recovering exact values by flipping the stored sign bit.
-   `ImageData` stays the raw BITPIX-storage type — the offset is *not* baked in, so
-   the raw/physical split holds. Covered by `unsigned_view_recovers_exact_typed_integers`.
-   (Read accessor only: no `from_uN` write constructors, and the binary-table
-   parallel is intentionally not provided — see §7.3 gap #7.)
+1. ✅ **Native unsigned (`uN`) typed exposure.** `Image::unsigned()` returns a typed
+   `UnsignedView` (`U16`/`U32`/`U64`/signed-byte `I8`) when the scaling is exactly
+   the FITS unsigned convention (`BSCALE == 1`, no `BLANK`, `BZERO == 2^(n-1)`),
+   recovering exact values by flipping the stored sign bit; `Image::from_u16`/
+   `from_u32`/`from_u64`/`from_i8` are the write side (signed storage + the `BZERO`
+   offset the writer emits). `ImageData` stays the raw BITPIX-storage type — the
+   offset is *not* baked in, so the raw/physical split holds. Covered by
+   `unsigned_view_recovers_exact_typed_integers`,
+   `from_unsigned_constructors_invert_the_unsigned_view`, and the write→read
+   round-trip. The binary-table parallel is `BinTable::read_column_unsigned`
+   (§7.3 gap #7).
 
 2. ✅ **`u64`/large-`i64` exactness via the typed path.** `Image::unsigned()` yields
    exact integers even past 2⁵³, where the `f64` `physical()` plane rounds. Covered
@@ -451,7 +454,7 @@ binary-table path (`bintable_header`, `column_code`, `check_column`, `pack_rows`
 | 6.3 | `P`/`Q` repeat only 0 or 1 | not validated | 🟢 |
 | 6.4 | `physical = TZEROn + TSCALn × stored` (Eq. 7) | `read_column_physical` (`table/mod.rs:314`) | ✅ |
 | 6.4 | Not applied to `A`/`L`/`X` | `_ ⇒ NonNumericColumn` (also rejects `C`/`M`) | ✅ (C/M over-rejected) |
-| 6.4 | Unsigned `B`/`I`/`J`/`K` via `TZEROn` | `physical()` f64 plane | ✅ values / 🟡 no typed `uN`, u64 precision |
+| 6.4 | Unsigned `B`/`I`/`J`/`K` via `TZEROn` | `physical()` plane + exact typed `read_column_unsigned()` | ✅ |
 | 6.4 | `TNULLn` matched on **stored** value before Eq. 7 | `scaled_int` checks `tnull` pre-scale (`table/mod.rs:318`) | ✅ |
 | 6.4 | Scaling on `P`/`Q` heap values, not descriptor | `read_vla_column_physical` scales heap elements | ✅ |
 | 6.5 | `TDIMn` multidimensional cell reshape | `Column.tdim` parsed; written from `WriteColumn::dims` | ✅ shape exposed |
@@ -504,11 +507,12 @@ beyond plain fixed-width decode.
 6. ✅ **FIXED — `column_index` now case-insensitive (§6.7),** via
    `eq_ignore_ascii_case`. Covered by `column_index_is_case_insensitive`.
 
-7. 🟡 **No native unsigned (`uN`) exposure for table columns / `u64` precision.**
-   Integer `TFORM` + `TZEROn = 2^(n-1)` + `TSCALn = 1` is realized only through the
-   `f64` `read_column_physical` plane, with no typed `u16`/`u32`/`u64` column and
-   rounding for `u64` values > 2⁵³. **Open** — the *image* analogue is now provided
-   (`Image::unsigned()`, §5 gap #1); the binary-table accessor is not.
+7. ✅ **Native unsigned (`uN`) exposure for table columns.** `BinTable::read_column_unsigned`
+   returns a typed `UnsignedView` (`U16`/`U32`/`U64`/signed-byte `I8`) when a
+   `B`/`I`/`J`/`K` column uses exactly the convention (`TSCALn == 1`, no `TNULLn`,
+   `TZEROn = 2^(n-1)`), exact past 2⁵³ where `read_column_physical` rounds. Mirrors
+   `Image::unsigned`. Covered by `read_column_unsigned_recovers_typed_values` and
+   `read_column_unsigned_is_exact_for_u64_and_none_otherwise`.
 
 8. ✅ **`Q` (64-bit) VLA write supported (§6.6).** `WriteColumn::q()` emits `1Q`
    descriptors for heaps beyond the 32-bit `1P` range; `1P` remains the default.

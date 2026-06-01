@@ -1,6 +1,6 @@
 use super::*;
 use crate::block::ZERO_FILL;
-use crate::data::{ImageData, Scaling};
+use crate::data::{ImageData, Scaling, UnsignedView};
 use crate::hdu::HduKind;
 use crate::header::from_card_lines as header;
 use crate::reader::FitsReader;
@@ -268,6 +268,19 @@ fn write_image_emits_scaling_keywords_and_preserves_unsigned_values() {
     let back = r.read_image(0).unwrap();
     assert_eq!(back.samples, ImageData::I16(vec![-32768, 0, 32767]));
     assert_eq!(back.physical(), vec![0.0, 32768.0, 65535.0]);
+}
+
+#[test]
+fn from_u16_round_trips_through_write_and_read() {
+    // The `from_u16` constructor + writer emit BZERO=32768 so the exact u16 values
+    // come back via the typed `unsigned()` view.
+    let built = Image::from_u16(vec![3], &[0, 32768, 65535]);
+    let mut r = FitsReader::open(Cursor::new(write_to_vec(&built))).unwrap();
+    assert_eq!(r.hdus[0].header.get_real("BZERO"), Some(32768.0));
+    assert_eq!(
+        r.read_image(0).unwrap().unsigned(),
+        Some(UnsignedView::U16(vec![0, 32768, 65535]))
+    );
 }
 
 #[test]

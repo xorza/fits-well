@@ -164,6 +164,27 @@ fn unsigned_view_recovers_exact_typed_integers() {
 }
 
 #[test]
+fn from_unsigned_constructors_invert_the_unsigned_view() {
+    // from_uN builds the signed storage + BZERO offset; unsigned() recovers it.
+    let u16s = vec![0u16, 1, 32768, 65535];
+    let img = Image::from_u16(vec![4], &u16s);
+    assert_eq!(img.samples, ImageData::I16(vec![-32768, -32767, 0, 32767]));
+    assert_eq!(img.scaling.bzero, 32768.0);
+    assert_eq!(img.unsigned(), Some(UnsignedView::U16(u16s)));
+
+    let u64s = vec![0u64, 1u64 << 63, u64::MAX];
+    assert_eq!(
+        Image::from_u64(vec![3], &u64s).unsigned(),
+        Some(UnsignedView::U64(u64s))
+    );
+    let i8s = vec![i8::MIN, 0, i8::MAX];
+    assert_eq!(
+        Image::from_i8(vec![3], &i8s).unsigned(),
+        Some(UnsignedView::I8(i8s))
+    );
+}
+
+#[test]
 fn unsigned_u64_view_is_exact_where_physical_rounds() {
     // 2⁵³+1 is the smallest integer f64 cannot represent. The typed view recovers
     // it exactly; physical() (f64) rounds it to 2⁵³.

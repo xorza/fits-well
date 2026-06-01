@@ -86,11 +86,12 @@ impl ImageData {
     }
 }
 
-/// The `BZERO` offsets that realize the FITS unsigned-integer convention: a
-/// sign-bit flip (`2^(n-1)`), exactly representable as `f64`.
-const U16_OFFSET: f64 = 32_768.0; // 2¹⁵
-const U32_OFFSET: f64 = 2_147_483_648.0; // 2³¹
-const U64_OFFSET: f64 = 9_223_372_036_854_775_808.0; // 2⁶³
+/// The `BZERO`/`TZEROn` offsets that realize the FITS unsigned-integer convention:
+/// a sign-bit flip (`2^(n-1)`), exactly representable as `f64`. Shared by the image
+/// (`BZERO`) and binary-table (`TZEROn`) unsigned paths.
+pub(crate) const U16_OFFSET: f64 = 32_768.0; // 2¹⁵
+pub(crate) const U32_OFFSET: f64 = 2_147_483_648.0; // 2³¹
+pub(crate) const U64_OFFSET: f64 = 9_223_372_036_854_775_808.0; // 2⁶³
 
 /// A typed integer realization of the FITS unsigned (and signed-byte) storage
 /// conventions — `BSCALE == 1` with `BZERO` the sign-bit offset. Values are exact
@@ -118,6 +119,60 @@ pub struct Image {
 }
 
 impl Image {
+    /// Build an image storing a `u16` buffer via the FITS unsigned convention
+    /// (`BITPIX = 16`, `BZERO = 2¹⁵`, `BSCALE = 1`) — the inverse of
+    /// [`Image::unsigned`]. The writer emits the `BZERO` keyword so it round-trips.
+    pub fn from_u16(shape: Vec<usize>, data: &[u16]) -> Image {
+        Image::offset_image(
+            shape,
+            ImageData::I16(data.iter().map(|&x| (x ^ 0x8000) as i16).collect()),
+            U16_OFFSET,
+        )
+    }
+
+    /// Build an image storing a `u32` buffer (`BITPIX = 32`, `BZERO = 2³¹`).
+    pub fn from_u32(shape: Vec<usize>, data: &[u32]) -> Image {
+        Image::offset_image(
+            shape,
+            ImageData::I32(data.iter().map(|&x| (x ^ 0x8000_0000) as i32).collect()),
+            U32_OFFSET,
+        )
+    }
+
+    /// Build an image storing a `u64` buffer (`BITPIX = 64`, `BZERO = 2⁶³`).
+    pub fn from_u64(shape: Vec<usize>, data: &[u64]) -> Image {
+        Image::offset_image(
+            shape,
+            ImageData::I64(
+                data.iter()
+                    .map(|&x| (x ^ 0x8000_0000_0000_0000) as i64)
+                    .collect(),
+            ),
+            U64_OFFSET,
+        )
+    }
+
+    /// Build an image storing a signed-`i8` buffer (`BITPIX = 8`, `BZERO = -128`).
+    pub fn from_i8(shape: Vec<usize>, data: &[i8]) -> Image {
+        Image::offset_image(
+            shape,
+            ImageData::U8(data.iter().map(|&x| (x as u8) ^ 0x80).collect()),
+            -128.0,
+        )
+    }
+
+    fn offset_image(shape: Vec<usize>, samples: ImageData, bzero: f64) -> Image {
+        Image {
+            shape,
+            samples,
+            scaling: Scaling {
+                bscale: 1.0,
+                bzero,
+                blank: None,
+            },
+        }
+    }
+
     /// Reinterpret the stored buffer as exact typed integers when the scaling is
     /// precisely a FITS unsigned-integer (or signed-byte) convention: `BSCALE == 1`,
     /// no `BLANK`, and `BZERO` the matching sign-bit offset. Unlike
