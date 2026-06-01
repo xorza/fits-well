@@ -20,8 +20,9 @@ default = []
 # rayon-backed tile-parallel (de)compression — the codecs are compute-bound and
 # tiles are independent, so this scales near-linearly. Scalar fallback otherwise.
 # (The raw byte-swap / BSCALE-BZERO paths are memory-bound; SIMD is their lever,
-# not threads, so they are deliberately not parallelized.)
-parallel = ["dep:rayon"]
+# not threads, so they are deliberately not parallelized.) Implies `compression`,
+# since the codecs are the only thing parallelized.
+parallel = ["compression", "dep:rayon"]
 # memory-mapped read sources for zero-copy access over large files.
 mmap = []
 # tiled image decompression: GZIP_1 (via flate2) and RICE_1; HCOMPRESS_1/PLIO_1 TODO.
