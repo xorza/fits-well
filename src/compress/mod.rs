@@ -37,6 +37,49 @@ use crate::keyword::key;
 use crate::table::BinTable;
 use crate::table::ColumnData;
 
+/// Write-time tuning for [`crate::FitsWriter::write_compressed_image`]. Each field
+/// applies only to the codecs that use it; the rest ignore it. Every field defaults
+/// to conventional behavior, so `CompressOptions::default()` (row tiling) or
+/// `CompressOptions::tiled(shape)` is the common case.
+#[derive(Debug, Clone)]
+pub struct CompressOptions {
+    /// Tile shape, fastest axis first. Empty ⇒ one tile per row (the default).
+    /// `HCOMPRESS_1` requires a 2-D shape.
+    pub tile_shape: Vec<usize>,
+    /// `flate2` deflate level (0–9) for `GZIP_1`/`GZIP_2`. Lossless — only the
+    /// speed↔ratio tradeoff changes.
+    pub gzip_level: u32,
+    /// `HCOMPRESS_1` quantization scale: `0` = lossless, larger = more lossy / smaller.
+    pub hcompress_scale: i32,
+    /// Float quantization noise divisor (`qlevel`): `0` ⇒ cfitsio's default of
+    /// noise/4; larger keeps more precision (and grows the output). Ignored by the
+    /// integer codecs.
+    pub quantize_level: f64,
+}
+
+impl Default for CompressOptions {
+    fn default() -> CompressOptions {
+        CompressOptions {
+            tile_shape: Vec::new(),
+            gzip_level: gzip::DEFAULT_GZIP_LEVEL,
+            hcompress_scale: 0,
+            quantize_level: 0.0,
+        }
+    }
+}
+
+impl CompressOptions {
+    /// Default options with an explicit tile shape (fastest axis first; empty ⇒ row
+    /// tiling). Tune further with struct-update syntax:
+    /// `CompressOptions { gzip_level: 9, ..CompressOptions::tiled([256, 256]) }`.
+    pub fn tiled(tile_shape: impl Into<Vec<usize>>) -> CompressOptions {
+        CompressOptions {
+            tile_shape: tile_shape.into(),
+            ..CompressOptions::default()
+        }
+    }
+}
+
 /// A restored header and its decompressed data unit — the result of
 /// [`uncompress_table`] (a named pair rather than a bare `(Header, Vec<u8>)`).
 #[derive(Debug)]
@@ -335,18 +378,17 @@ struct EncodeScratch {
 
 /// Encode an integer [`Image`] as a tiled-compressed `BINTABLE`: returns the
 /// `ZIMAGE` header and the data unit (per-tile `P` descriptors + the heap of
-/// compressed tile bytes). `tile_shape` of the wrong length falls back to
+/// compressed tile bytes). A tile shape of the wrong length falls back to
 /// row-tiling. Float images and codecs without an encoder are rejected.
 pub(crate) fn encode_image(
     image: &Image,
     cmptype: &str,
-    tile_shape: &[usize],
-    scale: i32,
+    options: &CompressOptions,
     out: &mut Vec<u8>,
 ) -> Result<Header> {
     let bitpix = image.samples.bitpix();
     if bitpix.is_float() {
-        return encode_float_image(image, cmptype, tile_shape, out);
+        return encode_float_image(image, cmptype, options, out);
     }
     // RICE handles only 1/2/4-byte pixels (cfitsio parity); refuse the 64-bit path
     // rather than silently corrupting. Table 37 lists BYTEPIX 8 as permitted, but
@@ -357,11 +399,12 @@ pub(crate) fn encode_image(
         });
     }
     let dims = &image.shape;
-    let tiles = resolve_tile_shape(dims, tile_shape);
+    let tiles = resolve_tile_shape(dims, &options.tile_shape);
 
     let geom = TileGeometry::new(dims, &tiles);
     let ntiles = geom.ntiles();
     let bytepix = bitpix.elem_size();
+    let (gzip_level, scale) = (options.gzip_level, options.hcompress_scale);
 
     // Compress every tile independently (the compute-bound step — parallel under
     // the `parallel` feature). The heap layout is sequential (each descriptor's
@@ -373,8 +416,12 @@ pub(crate) fn encode_image(
         gather_i64(&image.samples, &s.tile.indices, &mut s.ints);
         let vals = &s.ints;
         Ok(match cmptype {
-            "GZIP_1" => TileCell::Bytes(gzip::gzip_encode(&i64_to_be(vals, bitpix))),
-            "GZIP_2" => TileCell::Bytes(gzip::gzip2_encode(&i64_to_be(vals, bitpix), bytepix)),
+            "GZIP_1" => TileCell::Bytes(gzip::gzip_encode(&i64_to_be(vals, bitpix), gzip_level)),
+            "GZIP_2" => TileCell::Bytes(gzip::gzip2_encode(
+                &i64_to_be(vals, bitpix),
+                bytepix,
+                gzip_level,
+            )),
             "RICE_1" => TileCell::Bytes(rice::rice_encode(vals, bytepix, 32)),
             "PLIO_1" => TileCell::I16(plio::plio_encode(vals, vals.len())),
             "HCOMPRESS_1" => TileCell::Bytes(hcompress::hcompress_tile_encode(
@@ -472,7 +519,7 @@ struct FloatTile {
 fn encode_float_image(
     image: &Image,
     cmptype: &str,
-    tile_shape: &[usize],
+    options: &CompressOptions,
     out: &mut Vec<u8>,
 ) -> Result<Header> {
     if !matches!(cmptype, "GZIP_1" | "GZIP_2" | "RICE_1") {
@@ -482,7 +529,7 @@ fn encode_float_image(
     }
     let zbitpix = image.samples.bitpix();
     let dims = &image.shape;
-    let tiles = resolve_tile_shape(dims, tile_shape);
+    let tiles = resolve_tile_shape(dims, &options.tile_shape);
 
     let geom = TileGeometry::new(dims, &tiles);
     let ntiles = geom.ntiles();
@@ -490,6 +537,7 @@ fn encode_float_image(
     let zdither0 = 1i64; // deterministic dither seed (any 1..=10000 is valid)
     let int_bitpix = Bitpix::I32; // quantized planes are always int32
     let method = quantize::DitherMethod::Subtractive1; // cfitsio's default
+    let (gzip_level, qlevel) = (options.gzip_level, options.quantize_level);
 
     // Quantize + compress each tile independently (the compute-bound step —
     // parallel under the `parallel` feature); the §10 row layout and heap offsets
@@ -505,13 +553,17 @@ fn encode_float_image(
             gather_f64(&image.samples, &s.tile.indices, &mut s.floats);
             let irow = t as i64 + zdither0; // = (1-based tile row) + ZDITHER0 - 1
             Ok(
-                match quantize::quantize_tile(&s.floats, nx, ny, 0.0, method, irow) {
+                match quantize::quantize_tile(&s.floats, nx, ny, qlevel, method, irow) {
                     Some(q) => {
                         s.ints.clear();
                         s.ints.extend(q.idata.iter().map(|&v| v as i64));
                         let bytes = match cmptype {
-                            "GZIP_1" => gzip::gzip_encode(&i64_to_be(&s.ints, int_bitpix)),
-                            "GZIP_2" => gzip::gzip2_encode(&i64_to_be(&s.ints, int_bitpix), 4),
+                            "GZIP_1" => {
+                                gzip::gzip_encode(&i64_to_be(&s.ints, int_bitpix), gzip_level)
+                            }
+                            "GZIP_2" => {
+                                gzip::gzip2_encode(&i64_to_be(&s.ints, int_bitpix), 4, gzip_level)
+                            }
                             "RICE_1" => rice::rice_encode(&s.ints, 4, 32),
                             _ => unreachable!(),
                         };
@@ -525,7 +577,7 @@ fn encode_float_image(
                     }
                     // Constant tile: store the raw floats, gzip'd, in the fallback.
                     None => FloatTile {
-                        bytes: gzip::gzip_encode(&float_to_be(&s.floats, zbitpix)),
+                        bytes: gzip::gzip_encode(&float_to_be(&s.floats, zbitpix), gzip_level),
                         zscale: 0.0,
                         zzero: 0.0,
                         quantized: false,

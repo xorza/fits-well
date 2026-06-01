@@ -50,6 +50,8 @@ mod writer;
 
 pub use ascii::{AsciiColumn, AsciiKind, AsciiTable};
 pub use bitpix::Bitpix;
+#[cfg(feature = "compression")]
+pub use compress::CompressOptions;
 pub use data::{Image, ImageData, Scaling, UnsignedView};
 pub use error::{FitsError, Result};
 pub use groups::RandomGroups;

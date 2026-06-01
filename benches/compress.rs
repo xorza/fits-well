@@ -20,8 +20,14 @@ use std::io::Cursor;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use fits::{
-    BinTable, ColumnData, FitsReader, FitsWriter, Header, Image, ImageData, Scaling, WriteColumn,
+    BinTable, ColumnData, CompressOptions, FitsReader, FitsWriter, Header, Image, ImageData,
+    Scaling, WriteColumn,
 };
+
+/// Image-compression options pinned to the bench tile shape.
+fn opts() -> CompressOptions {
+    CompressOptions::tiled(TILE)
+}
 
 const NX: usize = 2048;
 const NY: usize = 2048;
@@ -80,7 +86,7 @@ fn science_f32() -> Image {
 
 fn compressed(img: &Image, codec: &str) -> Vec<u8> {
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(img, codec, &TILE).unwrap();
+    w.write_compressed_image(img, codec, &opts()).unwrap();
     w.into_inner().into_inner()
 }
 
@@ -138,7 +144,7 @@ fn compress(c: &mut Criterion) {
             b.iter(|| {
                 buf.clear();
                 FitsWriter::new(&mut buf)
-                    .write_compressed_image(black_box(&int), codec, &TILE)
+                    .write_compressed_image(black_box(&int), codec, &opts())
                     .unwrap();
                 black_box(buf.len())
             })
@@ -151,7 +157,7 @@ fn compress(c: &mut Criterion) {
         b.iter(|| {
             buf.clear();
             FitsWriter::new(&mut buf)
-                .write_compressed_image(black_box(&mask), "PLIO_1", &TILE)
+                .write_compressed_image(black_box(&mask), "PLIO_1", &opts())
                 .unwrap();
             black_box(buf.len())
         })
@@ -164,7 +170,7 @@ fn compress(c: &mut Criterion) {
             b.iter(|| {
                 buf.clear();
                 FitsWriter::new(&mut buf)
-                    .write_compressed_image(black_box(&flt), codec, &TILE)
+                    .write_compressed_image(black_box(&flt), codec, &opts())
                     .unwrap();
                 black_box(buf.len())
             })

@@ -14,6 +14,8 @@ use crate::block::CARD_SIZE;
 use crate::block::SPACE_FILL;
 use crate::block::ZERO_FILL;
 use crate::checksum;
+#[cfg(feature = "compression")]
+use crate::compress::CompressOptions;
 use crate::data::Image;
 use crate::data::shape_product;
 use crate::endian::extend_be;
@@ -317,37 +319,23 @@ impl<W: Write> FitsWriter<W> {
     }
 
     /// Write `image` as a tiled-compressed `BINTABLE` extension (§10.1), using the
-    /// `ZCMPTYPE` codec and the given tile shape (empty ⇒ row tiling). Requires the
-    /// `compression` feature. Integer images support `GZIP_1`/`GZIP_2`/`RICE_1`/
-    /// `PLIO_1`/`HCOMPRESS_1`; float images are quantized (`SUBTRACTIVE_DITHER_1`)
-    /// and compressed with `GZIP_1`/`GZIP_2`/`RICE_1`. `HCOMPRESS_1` needs a 2-D
-    /// tile shape, and `PLIO_1` a non-negative (mask) image.
+    /// `ZCMPTYPE` codec and the given [`CompressOptions`] (tile shape, gzip level,
+    /// HCOMPRESS scale, float quantization level — each used only by the codecs it
+    /// applies to). Requires the `compression` feature. Integer images support
+    /// `GZIP_1`/`GZIP_2`/`RICE_1`/`PLIO_1`/`HCOMPRESS_1`; float images are quantized
+    /// (`SUBTRACTIVE_DITHER_1`) and compressed with `GZIP_1`/`GZIP_2`/`RICE_1`.
+    /// `HCOMPRESS_1` needs a 2-D tile shape, and `PLIO_1` a non-negative (mask) image.
     #[cfg(feature = "compression")]
     pub fn write_compressed_image(
         &mut self,
         image: &Image,
         cmptype: &str,
-        tile_shape: &[usize],
-    ) -> Result<()> {
-        self.write_compressed_image_lossy(image, cmptype, tile_shape, 0)
-    }
-
-    /// Like [`FitsWriter::write_compressed_image`] but with an `HCOMPRESS_1`
-    /// quantization `scale` (`0` = lossless; larger = more lossy compression). The
-    /// scale is ignored by the other codecs.
-    #[cfg(feature = "compression")]
-    pub fn write_compressed_image_lossy(
-        &mut self,
-        image: &Image,
-        cmptype: &str,
-        tile_shape: &[usize],
-        scale: i32,
+        options: &CompressOptions,
     ) -> Result<()> {
         self.ensure_primary()?;
         // The codec assembles the compressed data unit directly into the reused
         // scratch and hands back just the header.
-        let header =
-            crate::compress::encode_image(image, cmptype, tile_shape, scale, &mut self.scratch)?;
+        let header = crate::compress::encode_image(image, cmptype, options, &mut self.scratch)?;
         self.write_hdu(header, ZERO_FILL)
     }
 

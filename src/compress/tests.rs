@@ -134,7 +134,8 @@ fn emit_compressed_files_for_astropy() {
     ] {
         let f = File::create(format!(".tmp/wr_{}.fits", cmptype.to_lowercase())).unwrap();
         let mut w = FitsWriter::new(f);
-        w.write_compressed_image(&image, cmptype, tiles).unwrap();
+        w.write_compressed_image(&image, cmptype, &CompressOptions::tiled(tiles))
+            .unwrap();
     }
 
     // PLIO needs a non-negative mask image.
@@ -150,7 +151,7 @@ fn emit_compressed_files_for_astropy() {
     };
     let f = File::create(".tmp/wr_plio_1.fits").unwrap();
     let mut w = FitsWriter::new(f);
-    w.write_compressed_image(&mask_image, "PLIO_1", &[])
+    w.write_compressed_image(&mask_image, "PLIO_1", &CompressOptions::default())
         .unwrap();
 
     // Quantized float (SUBTRACTIVE_DITHER_1) for astropy to reconstruct.
@@ -165,7 +166,7 @@ fn emit_compressed_files_for_astropy() {
     };
     let f = File::create(".tmp/wr_ricef.fits").unwrap();
     let mut w = FitsWriter::new(f);
-    w.write_compressed_image(&fimage, "RICE_1", &[24, 16])
+    w.write_compressed_image(&fimage, "RICE_1", &CompressOptions::tiled([24, 16]))
         .unwrap();
 }
 
@@ -195,7 +196,8 @@ fn compression_write_round_trips_through_decode() {
         ("HCOMPRESS_1", &[24, 16]),
     ] {
         let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-        w.write_compressed_image(&image, cmptype, tiles).unwrap();
+        w.write_compressed_image(&image, cmptype, &CompressOptions::tiled(tiles))
+            .unwrap();
         let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
         let back = r.read_compressed_image(1).unwrap();
         assert_eq!(back.shape, vec![24, 16], "{cmptype}");
@@ -246,7 +248,7 @@ fn float_quantize_write_round_trips_within_tolerance() {
     for cmptype in ["RICE_1", "GZIP_1", "GZIP_2"] {
         let mut w = FitsWriter::new(Cursor::new(Vec::new()));
         // Whole-image tile so the noise estimate sees the full field.
-        w.write_compressed_image(&image, cmptype, &[24, 16])
+        w.write_compressed_image(&image, cmptype, &CompressOptions::tiled([24, 16]))
             .unwrap();
         let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
         let back = match r.read_compressed_image(1).unwrap().samples {
@@ -288,7 +290,7 @@ fn float_write_preserves_nan_nulls() {
         },
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(&image, "RICE_1", &[24, 16])
+    w.write_compressed_image(&image, "RICE_1", &CompressOptions::tiled([24, 16]))
         .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let back = match r.read_compressed_image(1).unwrap().samples {
@@ -366,8 +368,15 @@ fn hcompress_lossy_write_round_trips_within_scale() {
         },
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image_lossy(&image, "HCOMPRESS_1", &[32, 32], 4)
-        .unwrap();
+    w.write_compressed_image(
+        &image,
+        "HCOMPRESS_1",
+        &CompressOptions {
+            hcompress_scale: 4,
+            ..CompressOptions::tiled([32, 32])
+        },
+    )
+    .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let back = match r.read_compressed_image(1).unwrap().samples {
         ImageData::I32(v) => v,
@@ -405,7 +414,8 @@ fn plio_write_round_trips_through_decode() {
         },
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(&image, "PLIO_1", &[]).unwrap();
+    w.write_compressed_image(&image, "PLIO_1", &CompressOptions::default())
+        .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     match r.read_compressed_image(1).unwrap().samples {
         ImageData::I32(v) => assert_eq!(v, samples, "PLIO_1 round-trip"),
@@ -732,7 +742,8 @@ fn integer_image_compression_preserves_bscale_bzero_and_blank() {
         },
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(&image, "GZIP_1", &[]).unwrap();
+    w.write_compressed_image(&image, "GZIP_1", &CompressOptions::default())
+        .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let back = r.read_compressed_image(1).unwrap();
 
@@ -763,12 +774,15 @@ fn rice_rejects_64_bit_pixels() {
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        w.write_compressed_image(&image, "RICE_1", &[]),
+        w.write_compressed_image(&image, "RICE_1", &CompressOptions::default()),
         Err(FitsError::UnsupportedCompression { .. })
     ));
     // GZIP handles 64-bit fine — the rejection is RICE-specific.
     let mut w2 = FitsWriter::new(Cursor::new(Vec::new()));
-    assert!(w2.write_compressed_image(&image, "GZIP_1", &[]).is_ok());
+    assert!(
+        w2.write_compressed_image(&image, "GZIP_1", &CompressOptions::default())
+            .is_ok()
+    );
 }
 
 #[test]
@@ -790,7 +804,8 @@ fn nocompress_image_round_trips() {
         },
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(&image, "NOCOMPRESS", &[]).unwrap();
+    w.write_compressed_image(&image, "NOCOMPRESS", &CompressOptions::default())
+        .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     match r.read_compressed_image(1).unwrap().samples {
         ImageData::I16(v) => assert_eq!(v, samples),

@@ -349,8 +349,11 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
 /// Compress one tile's column-major raw bytes per the column's algorithm.
 fn compress_column(cm: &[u8], m: &ColMeta) -> Result<Vec<u8>> {
     Ok(match m.algo {
-        Algo::Gzip1 => gzip::gzip_encode(cm),
-        Algo::Gzip2 => gzip::gzip_encode(&gzip::shuffle_bytes(cm, m.shuffle_width())),
+        Algo::Gzip1 => gzip::gzip_encode(cm, gzip::DEFAULT_GZIP_LEVEL),
+        Algo::Gzip2 => gzip::gzip_encode(
+            &gzip::shuffle_bytes(cm, m.shuffle_width()),
+            gzip::DEFAULT_GZIP_LEVEL,
+        ),
         Algo::Rice1 => {
             let bytepix = m.rice_bytepix().ok_or(FitsError::UnsupportedCompression {
                 name: format!("RICE_1 on a {} column", m.kind.code()),
