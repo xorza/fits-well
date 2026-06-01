@@ -21,6 +21,40 @@ fn reads_a_single_hdu_image_with_exact_boundaries() {
 }
 
 #[test]
+fn read_data_into_reuses_one_buffer_across_reads() {
+    let mut f = open("UITfuv2582gc.fits");
+    let owned = f.read_data_raw(0).unwrap();
+    let mut buf = Vec::new();
+    let len = f.read_data_into(0, &mut buf).unwrap();
+    assert_eq!(
+        &buf[..len],
+        owned.data(),
+        "into-buffer data matches the owned read"
+    );
+    // A second read into the same buffer reuses the allocation — no realloc.
+    let cap = buf.capacity();
+    let len2 = f.read_data_into(0, &mut buf).unwrap();
+    assert_eq!(&buf[..len2], owned.data());
+    assert_eq!(
+        buf.capacity(),
+        cap,
+        "buffer reused across reads, not reallocated"
+    );
+}
+
+#[test]
+fn read_image_into_matches_read_image() {
+    let mut f = open("UITfuv2582gc.fits");
+    let want = f.read_image(0).unwrap();
+    let mut staging = Vec::new();
+    let got = f.read_image_into(0, &mut staging).unwrap();
+    assert_eq!(got.shape, want.shape);
+    assert_eq!(got.samples, want.samples);
+    // The staging buffer holds the raw padded unit and is the caller's to reuse.
+    assert_eq!(staging.len(), padded_len(f.hdus[0].data_bytes) as usize);
+}
+
+#[test]
 fn reads_random_groups_primary_plus_bintable_extension() {
     let f = open("DDTSUVDATA.fits");
     assert_eq!(f.hdus.len(), 2);

@@ -120,18 +120,35 @@ impl<R: Read + Seek> FitsReader<R> {
     /// [`DataUnit`] carries the full block-padded bytes plus the range of actual
     /// data within them, so a decoder consumes [`DataUnit::data`] and the block
     /// fill is never mistaken for samples. Typed decoding is the data layer's job.
+    ///
+    /// This allocates a fresh buffer each call; to reuse one buffer across many
+    /// HDUs (or files), use [`FitsReader::read_data_into`].
     pub fn read_data_raw(&mut self, index: usize) -> Result<DataUnit> {
+        let mut bytes = Vec::new();
+        let data_bytes = self.read_data_into(index, &mut bytes)?;
+        Ok(DataUnit {
+            bytes,
+            data_range: 0..data_bytes,
+        })
+    }
+
+    /// Read the block-padded data unit of HDU `index` into `buf` (resized to the
+    /// unit's on-disk length), returning the length of the *meaningful* data:
+    /// `buf[..len]` is the data and `buf[len..]` is block fill. Reusing one `buf`
+    /// across HDUs amortizes the staging allocation to zero — the caller owns the
+    /// pool. Typed decoding is the data layer's job (decode from `&buf[..len]`).
+    pub fn read_data_into(&mut self, index: usize, buf: &mut Vec<u8>) -> Result<usize> {
         let hdu = self.hdus.get(index).ok_or(FitsError::HduIndexOutOfBounds {
             index,
             len: self.hdus.len(),
         })?;
         let data_offset = hdu.data_offset;
+        let data_bytes = hdu.data_bytes as usize;
         let data_len = padded_len(hdu.data_bytes);
-        let data_range = 0..hdu.data_bytes as usize;
-        // Bound the allocation by the source's real length (captured at open): a
-        // hostile header can claim a data unit far larger than the file, which would
-        // otherwise drive a huge `vec![0u8; data_len]` before `read_exact` ever
-        // fails. Refuse up front when the declared unit can't physically fit.
+        // Bound by the source's real length (captured at open): a hostile header can
+        // claim a data unit far larger than the file, which would otherwise drive a
+        // huge `buf` resize before `read_exact` ever fails. Refuse up front when the
+        // declared unit can't physically fit.
         if data_offset
             .checked_add(data_len)
             .is_none_or(|end| end > self.stream_len)
@@ -139,17 +156,31 @@ impl<R: Read + Seek> FitsReader<R> {
             return Err(FitsError::UnexpectedEof);
         }
         self.source.seek(SeekFrom::Start(data_offset))?;
-        let mut bytes = vec![0u8; data_len as usize];
-        self.source.read_exact(&mut bytes)?;
-        Ok(DataUnit { bytes, data_range })
+        // Resize keeps `buf`'s capacity across calls (shrinking is len-only), so a
+        // reused buffer reallocates only when a larger unit appears.
+        buf.resize(data_len as usize, 0);
+        self.source.read_exact(buf.as_mut_slice())?;
+        Ok(data_bytes)
     }
 
     /// Read an HDU's data unit and decode it into a typed [`Image`]: host-endian
     /// raw samples (`samples`) plus the [`Scaling`] map for the physical plane.
     /// Errors with [`FitsError::NotAnImage`] for tables, random groups, and
     /// unmodelled extensions.
+    ///
+    /// Allocates a transient staging buffer each call; reading many images with
+    /// [`FitsReader::read_image_into`] reuses one.
     pub fn read_image(&mut self, index: usize) -> Result<Image> {
-        let unit = self.read_data_raw(index)?; // also bounds-checks the index
+        let mut staging = Vec::new();
+        self.read_image_into(index, &mut staging)
+    }
+
+    /// Like [`FitsReader::read_image`], but stages the raw data unit through the
+    /// caller-provided `staging` buffer instead of a fresh allocation. The decoded
+    /// [`Image`] still owns its `samples`; reusing `staging` across image reads
+    /// amortizes the *I/O* allocation to zero (the caller owns that pool).
+    pub fn read_image_into(&mut self, index: usize, staging: &mut Vec<u8>) -> Result<Image> {
+        let data_bytes = self.read_data_into(index, staging)?; // also bounds-checks the index
         let hdu = &self.hdus[index];
         if !matches!(hdu.kind, HduKind::Primary | HduKind::Image) {
             return Err(FitsError::NotAnImage);
@@ -165,7 +196,7 @@ impl<R: Read + Seek> FitsReader<R> {
         let bitpix = hdu.header.bitpix()?;
         let shape = hdu.header.axes()?;
         let scaling = Scaling::from_header(&hdu.header);
-        let samples = ImageData::decode(unit.data(), bitpix);
+        let samples = ImageData::decode(&staging[..data_bytes], bitpix);
 
         // With PCOUNT=0/GCOUNT=1 (checked above), `data_extent` sized the unit as
         // `elem · Π(axes)`, so `decode` yields exactly `shape_product` samples. This
