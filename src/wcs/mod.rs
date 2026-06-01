@@ -1,4 +1,4 @@
-//! Typed World Coordinate System (§8) — behind the `wcs` feature.
+//! Typed World Coordinate System (§8).
 //!
 //! Parses the per-axis WCS keywords from a [`Header`] and evaluates the standard
 //! pixel↔world pipeline (Greisen & Calabretta, FITS WCS papers I & II):
