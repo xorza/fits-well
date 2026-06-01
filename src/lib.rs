@@ -24,10 +24,10 @@
 //!
 //! # Status
 //!
-//! The structural spine (blocks, headers, HDU boundaries, lazy reading) is
-//! implemented and tested. Typed data decode ([`data`]), the writer ([`writer`]),
-//! ASCII/binary tables, WCS, and tiled compression are scaffolded — see their
-//! module docs for the intended design.
+//! The structural spine (blocks, headers, HDU boundaries, lazy reading) plus
+//! typed image decode/encode ([`data`]), the multi-HDU writer ([`writer`]),
+//! ASCII/binary tables, WCS, time coordinates, and tiled image+table compression
+//! are implemented and tested — see each module's docs for its design.
 
 mod ascii;
 mod bitpix;

@@ -1,10 +1,13 @@
-//! Typed data model (partial scaffold).
+//! Typed image data model.
 //!
 //! FITS exposes data on two planes: a zero-copy *raw* plane (the stored,
 //! big-endian samples) and a *physical* plane (`BZERO + BSCALE × stored`). The
-//! bulk decode path that fills these from a [`crate::FitsReader`] data unit —
-//! the SIMD/parallel endian-swap and scaling — is the next layer to build. The
-//! types here are its target; the scaling map is already modelled and tested.
+//! bulk decode/encode path that fills these from a [`crate::FitsReader`] data
+//! unit is implemented here: [`ImageData::decode`] swaps a big-endian unit into
+//! host-endian samples and [`ImageData::encode_into`] writes them back. Those
+//! per-element loops are memory-bandwidth-bound, so they lean on
+//! autovectorization rather than threads (the thread-parallel layer is the
+//! compute-bound tiled codecs in the `compress` module, not this path).
 
 use crate::bitpix::Bitpix;
 use crate::endian::decode_be;

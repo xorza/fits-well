@@ -25,8 +25,9 @@ default = ["parallel", "compression"]
 parallel = ["compression", "dep:rayon"]
 # memory-mapped read sources for zero-copy access over large files.
 mmap = []
-# tiled image decompression: GZIP_1 (via flate2) and RICE_1; HCOMPRESS_1/PLIO_1 TODO.
-# The WCS (§8) and time (§9) layers are dependency-free and always compiled.
+# tiled image + table (de)compression: all five image codecs (GZIP_1, GZIP_2,
+# RICE_1, PLIO_1, HCOMPRESS_1) plus §10.3 tables. Pulls in flate2 for the gzip
+# codecs. The WCS (§8) and time (§9) layers are dependency-free and always compiled.
 compression = ["dep:flate2"]
 # Re-expose the hot internal decode/encode entry points for microbenchmarks only.
 # NOT a stable API surface — the benches under `benches/` enable it.
