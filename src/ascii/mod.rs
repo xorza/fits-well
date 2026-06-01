@@ -58,10 +58,13 @@ impl AsciiTable {
             .get_integer("NAXIS2")
             .ok_or(FitsError::MissingKeyword { name: "NAXIS2" })?
             .max(0) as usize;
-        let tfields = header
-            .get_integer("TFIELDS")
-            .ok_or(FitsError::MissingKeyword { name: "TFIELDS" })?
-            .max(0) as usize;
+        // §7.2.1: `0 ≤ TFIELDS ≤ 999` — also a guard, since `tfields` sizes the
+        // column `Vec` and drives the `TFORMn` loop (an absurd value would abort).
+        let tfields = match header.get_integer("TFIELDS") {
+            Some(t) if (0..=999).contains(&t) => t as usize,
+            Some(_) => return Err(FitsError::WrongValueType { name: "TFIELDS" }),
+            None => return Err(FitsError::MissingKeyword { name: "TFIELDS" }),
+        };
 
         let mut columns = Vec::with_capacity(tfields);
         for n in 1..=tfields {

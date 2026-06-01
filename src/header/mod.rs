@@ -104,7 +104,13 @@ impl Header {
         let n = self
             .get_integer("NAXIS")
             .ok_or(FitsError::MissingKeyword { name: "NAXIS" })?;
-        usize::try_from(n).map_err(|_| FitsError::WrongValueType { name: "NAXIS" })
+        // §4.4.1: `0 ≤ NAXIS ≤ 999`. Rejecting an out-of-range value is both
+        // conformance and a guard — `axes()` reserves `Vec::with_capacity(NAXIS)`,
+        // so an absurd `NAXIS` from an untrusted header would otherwise abort.
+        match usize::try_from(n) {
+            Ok(n) if n <= 999 => Ok(n),
+            _ => Err(FitsError::WrongValueType { name: "NAXIS" }),
+        }
     }
 
     /// The axis lengths `NAXIS1..NAXIS{NAXIS}`, in order.

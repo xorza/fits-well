@@ -267,3 +267,22 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     assert_eq!(flux[0], 1.5);
     assert!(flux[1].is_nan());
 }
+
+#[test]
+fn ascii_tfields_beyond_999_is_rejected() {
+    // §7.2.1 caps TFIELDS at 999; an absurd value must error, not size a huge Vec.
+    let mut header = Header::new();
+    header
+        .set("XTENSION", "TABLE")
+        .set("BITPIX", 8)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 0)
+        .set("NAXIS2", 0)
+        .set("PCOUNT", 0)
+        .set("GCOUNT", 1)
+        .set("TFIELDS", 1000);
+    assert!(matches!(
+        AsciiTable::from_data(&header, vec![]),
+        Err(FitsError::WrongValueType { name: "TFIELDS" })
+    ));
+}
