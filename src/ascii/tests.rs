@@ -135,6 +135,9 @@ fn ascii_table_round_trips_through_write_and_read() {
             data: ColumnData::Text(vec!["alpha".into(), "beta".into()]),
             width: 6,
             decimals: 0,
+            tscale: None,
+            tzero: None,
+            tnull: None,
         },
         AsciiWriteColumn {
             name: "N".into(),
@@ -142,6 +145,9 @@ fn ascii_table_round_trips_through_write_and_read() {
             data: ColumnData::I64(vec![7, -3]),
             width: 5,
             decimals: 0,
+            tscale: None,
+            tzero: None,
+            tnull: None,
         },
         AsciiWriteColumn {
             name: "X".into(),
@@ -149,6 +155,9 @@ fn ascii_table_round_trips_through_write_and_read() {
             data: ColumnData::F64(vec![1.5, -2.25]),
             width: 8,
             decimals: 2,
+            tscale: None,
+            tzero: None,
+            tnull: None,
         },
     ];
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
@@ -213,4 +222,48 @@ fn reads_a_column_with_a_bare_sign_exponent_field() {
         ColumnData::F64(v) => assert!((v[0] - 0.0314159).abs() < 1e-12, "{}", v[0]),
         other => panic!("expected F64, got {other:?}"),
     }
+}
+
+#[test]
+fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
+    // A scaled integer column (raw values + TSCAL/TZERO) and a float column whose
+    // undefined cell is written via TNULL and reads back as NaN (§7.2.2/§7.2.4).
+    let columns = vec![
+        AsciiWriteColumn {
+            name: "RAW".into(),
+            unit: None,
+            data: ColumnData::I64(vec![5, 10]),
+            width: 6,
+            decimals: 0,
+            tscale: Some(2.0),
+            tzero: Some(100.0),
+            tnull: None,
+        },
+        AsciiWriteColumn {
+            name: "FLUX".into(),
+            unit: None,
+            data: ColumnData::F64(vec![1.5, f64::NAN]),
+            width: 10,
+            decimals: 3,
+            tscale: None,
+            tzero: None,
+            tnull: Some("NULL".into()),
+        },
+    ];
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_ascii_table(2, &columns).unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+
+    assert_eq!(r.hdus[1].header.get_real("TSCAL1"), Some(2.0));
+    assert_eq!(r.hdus[1].header.get_real("TZERO1"), Some(100.0));
+    assert_eq!(r.hdus[1].header.get_text("TNULL2"), Some("NULL"));
+
+    let t = r.read_ascii_table(1).unwrap();
+    // Raw stored integers, then the scaled physical plane TZERO + TSCAL·field.
+    assert_eq!(t.read_column(0).unwrap(), ColumnData::I64(vec![5, 10]));
+    assert_eq!(t.read_column_physical(0).unwrap(), vec![110.0, 120.0]);
+    // The TNULL-marked float cell reads back as NaN.
+    let flux = t.read_column_physical(1).unwrap();
+    assert_eq!(flux[0], 1.5);
+    assert!(flux[1].is_nan());
 }

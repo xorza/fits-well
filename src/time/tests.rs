@@ -106,6 +106,7 @@ fn reads_bound_duration_and_error_keywords() {
     let mut h = Header::new();
     h.set("MJD-BEG", 58000.0);
     h.set("DATE-END", "2017-09-05T00:00:00");
+    h.set("MJD-AVG", 58000.5);
     h.set("XPOSURE", 1200.0);
     h.set("TELAPSE", 1500.0);
     h.set("TIMEDEL", 0.1);
@@ -114,6 +115,7 @@ fn reads_bound_duration_and_error_keywords() {
     assert_eq!(b.beg_mjd, Some(58000.0));
     let end = Datetime::parse("2017-09-05T00:00:00").unwrap().to_mjd();
     assert!((b.end_mjd.unwrap() - end).abs() < 1e-9); // resolved from DATE-END
+    assert_eq!(b.avg_mjd, Some(58000.5)); // §9.5 midpoint
     assert_eq!(b.xposure, Some(1200.0));
     assert_eq!(b.telapse, Some(1500.0));
     assert_eq!(b.timedel, Some(0.1));
@@ -157,6 +159,39 @@ fn classifies_time_related_axes() {
     // is_time_ctype is true only for the absolute-time kind.
     assert!(is_time_ctype("TIME"));
     assert!(!is_time_ctype("PHASE"));
+}
+
+#[test]
+fn reads_phase_axis_and_folds() {
+    use crate::header::Header;
+    // §9.6: a PHASE axis carries CZPHSia (zero-phase time) and CPERIia (period).
+    let mut h = Header::new();
+    h.set("CTYPE2", "PHASE");
+    h.set("CZPHS2", 5.0);
+    h.set("CPERI2", 2.0);
+    let t = FitsTime::from_header(&h);
+    let pa = t.phase_axis(&h, 2).unwrap();
+    assert_eq!(pa.zero_phase, 5.0);
+    assert_eq!(pa.period, 2.0);
+    // Fold: ((8 − 5)/2) mod 1 = 1.5 mod 1 = 0.5; the zero-phase time folds to 0.
+    assert_eq!(pa.fold(8.0), 0.5);
+    assert_eq!(pa.fold(5.0), 0.0);
+    // A non-phase axis yields nothing.
+    h.set("CTYPE1", "RA---TAN");
+    assert_eq!(t.phase_axis(&h, 1), None);
+}
+
+#[test]
+fn obs_mjd_falls_back_to_jepoch() {
+    use crate::header::Header;
+    // §9.5: absent DATE-OBS/MJD-OBS, JEPOCH stands in for the observation time.
+    let mut h = Header::new();
+    h.set("JEPOCH", 2000.0); // J2000.0 = MJD 51544.5
+    let t = FitsTime::from_header(&h);
+    assert!((t.obs_mjd(&h).unwrap() - 51544.5).abs() < 1e-6);
+    // An explicit MJD-OBS still wins.
+    h.set("MJD-OBS", 58000.0);
+    assert_eq!(t.obs_mjd(&h), Some(58000.0));
 }
 
 #[test]

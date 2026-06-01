@@ -430,3 +430,35 @@ fn read_table_rejects_non_bintable_hdus() {
     // HDU 0 is a random-groups primary, not a binary table.
     assert!(matches!(reader.read_table(0), Err(FitsError::NotABinTable)));
 }
+
+#[test]
+fn vla_bit_column_unpacks_msb_first() {
+    // A `1PX` column: row 0 = 12 bits (0xAB 0xC0), row 1 = 4 bits (0xF0), MSB-first.
+    let mut header = Header::new();
+    header
+        .set("XTENSION", "BINTABLE")
+        .set("BITPIX", 8)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 8) // one P descriptor (2 × i32) per row
+        .set("NAXIS2", 2)
+        .set("PCOUNT", 3) // heap bytes
+        .set("GCOUNT", 1)
+        .set("TFIELDS", 1)
+        .set("TFORM1", "1PX");
+    let mut data = Vec::new();
+    data.extend_from_slice(&12i32.to_be_bytes()); // row 0: 12 bits …
+    data.extend_from_slice(&0i32.to_be_bytes()); //        … at heap offset 0
+    data.extend_from_slice(&4i32.to_be_bytes()); // row 1: 4 bits …
+    data.extend_from_slice(&2i32.to_be_bytes()); //        … at heap offset 2
+    data.extend_from_slice(&[0xAB, 0xC0, 0xF0]); // heap
+    let table = BinTable::from_data(&header, data).unwrap();
+
+    let rows = table.read_vla_bit_column(0).unwrap();
+    assert_eq!(
+        rows[0],
+        vec![
+            true, false, true, false, true, false, true, true, true, true, false, false
+        ]
+    );
+    assert_eq!(rows[1], vec![true, true, true, true]);
+}

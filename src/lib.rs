@@ -59,8 +59,8 @@ pub use header::value::Value;
 pub use reader::{ChecksumReport, DataUnit, FitsReader, Hdu};
 pub use table::{BinTable, Column, ColumnData, TDisp, TDispKind, Tform, TformKind};
 pub use time::{
-    Datetime, Epoch, EpochTime, FitsTime, GtiInterval, TimeAxisKind, TimeBounds, TimeScale,
-    time_axis_kind,
+    Datetime, Epoch, EpochTime, FitsTime, GtiInterval, PhaseAxis, TimeAxisKind, TimeBounds,
+    TimeScale, time_axis_kind,
 };
 pub use wcs::{Projection, Wcs};
 pub use writer::{AsciiWriteColumn, FitsWriter, WriteColumn};

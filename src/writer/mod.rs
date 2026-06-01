@@ -161,6 +161,14 @@ pub struct AsciiWriteColumn {
     pub data: ColumnData,
     pub width: usize,
     pub decimals: usize,
+    /// Emit `TSCALn`/`TZEROn` (§7.2.2): `data` holds the stored field values and a
+    /// reader recovers `TZEROn + TSCALn × field` physically.
+    pub tscale: Option<f64>,
+    pub tzero: Option<f64>,
+    /// Emit `TNULLn`, the field text marking an undefined value (§7.2.4). A
+    /// non-finite `F64` cell is written as this marker (or a blank field — which
+    /// reads back as 0 per §7.2.5 — when no marker is set).
+    pub tnull: Option<String>,
 }
 
 /// Writes FITS HDUs to a byte sink. The first HDU written becomes the primary
@@ -599,7 +607,11 @@ fn count_of(data: &ColumnData) -> usize {
 /// Append a whole column cell (a VLA row's array) to the heap, big-endian.
 fn append_be(out: &mut Vec<u8>, cell: &ColumnData) {
     match cell {
-        ColumnData::Logical(v) => out.extend(v.iter().map(|&b| if b { b'T' } else { b'F' })),
+        ColumnData::Logical(v) => out.extend(v.iter().map(|&b| match b {
+            Some(true) => b'T',
+            Some(false) => b'F',
+            None => 0, // §7.3.3 null
+        })),
         ColumnData::Bytes(v) => out.extend_from_slice(v),
         ColumnData::I16(v) => extend_be(out, v, i16::to_be_bytes),
         ColumnData::I32(v) => extend_be(out, v, i32::to_be_bytes),
@@ -633,7 +645,11 @@ fn pack_cell(out: &mut Vec<u8>, col: &WriteColumn, r: usize) {
     match &col.data {
         ColumnData::Logical(v) => {
             for k in 0..rep {
-                out.push(if v[base + k] { b'T' } else { b'F' });
+                out.push(match v[base + k] {
+                    Some(true) => b'T',
+                    Some(false) => b'F',
+                    None => 0, // §7.3.3 null
+                });
             }
         }
         ColumnData::Bytes(v) => out.extend_from_slice(&v[base..base + rep]),
@@ -717,6 +733,15 @@ fn ascii_table_header(
         if let Some(unit) = &col.unit {
             header.set(&format!("TUNIT{n}"), unit.as_str());
         }
+        if let Some(tscale) = col.tscale {
+            header.set(&format!("TSCAL{n}"), tscale);
+        }
+        if let Some(tzero) = col.tzero {
+            header.set(&format!("TZERO{n}"), tzero);
+        }
+        if let Some(tnull) = &col.tnull {
+            header.set(&format!("TNULL{n}"), tnull.as_str());
+        }
     }
     header
 }
@@ -736,6 +761,9 @@ fn format_ascii_field(out: &mut Vec<u8>, col: &AsciiWriteColumn, r: usize) {
     let (text, left) = match &col.data {
         ColumnData::Text(v) => (v[r].clone(), true),
         ColumnData::I64(v) => (v[r].to_string(), false),
+        // A non-finite cell has no §7.2.5 real representation: write the TNULLn
+        // marker if set, else a blank field (which a reader takes as 0).
+        ColumnData::F64(v) if !v[r].is_finite() => (col.tnull.clone().unwrap_or_default(), false),
         ColumnData::F64(v) => (format!("{:.*}", col.decimals, v[r]), false),
         _ => (String::new(), true),
     };

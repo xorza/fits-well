@@ -407,3 +407,20 @@ fn blank_is_emitted_only_for_integer_images() {
     add_scaling(&mut h2, &float_img);
     assert_eq!(h2.get_integer("BLANK"), None);
 }
+
+#[test]
+fn logical_column_round_trips_with_null_state() {
+    // §7.3.3: `L` is three-state — `T`/`F`/`0x00` (null); the null must survive.
+    let columns = vec![WriteColumn::fixed(
+        "FLAG",
+        ColumnData::Logical(vec![Some(true), None, Some(false)]),
+        1,
+    )];
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_table(3, &columns).unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    assert_eq!(
+        r.read_table(1).unwrap().read_column(0).unwrap(),
+        ColumnData::Logical(vec![Some(true), None, Some(false)])
+    );
+}

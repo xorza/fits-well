@@ -406,6 +406,8 @@ pub struct TimeBounds {
     pub beg_mjd: Option<f64>,
     /// Observation end: `MJD-END`, else `DATE-END` → MJD.
     pub end_mjd: Option<f64>,
+    /// Observation midpoint: `MJD-AVG`, else `DATE-AVG` → MJD (§9.5, Table 35).
+    pub avg_mjd: Option<f64>,
     /// `XPOSURE` — effective exposure time.
     pub xposure: Option<f64>,
     /// `TELAPSE` — total elapsed time.
@@ -425,6 +427,26 @@ pub struct TimeBounds {
 pub struct GtiInterval {
     pub start_mjd: f64,
     pub stop_mjd: f64,
+}
+
+/// The §9.6 `'PHASE'` axis folding parameters: the zero-phase reference time
+/// `CZPHSia` and the period `CPERIia`, in `TIMEUNIT` relative to the time
+/// reference (the `TSTART` convention).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PhaseAxis {
+    pub zero_phase: f64,
+    pub period: f64,
+}
+
+impl PhaseAxis {
+    /// Fold a relative time (in `TIMEUNIT`) to a phase in `[0, 1)`; `0.0` if the
+    /// period is zero.
+    pub fn fold(&self, time: f64) -> f64 {
+        if self.period == 0.0 {
+            return 0.0;
+        }
+        ((time - self.zero_phase) / self.period).rem_euclid(1.0)
+    }
 }
 
 /// A header's time coordinate frame (§9): the reference epoch, scale, unit, and
@@ -492,10 +514,14 @@ impl FitsTime {
         if let Some(mjd) = header.get_real("MJD-OBS") {
             return Some(mjd);
         }
-        header
+        if let Some(d) = header
             .get_text("DATE-OBS")
             .and_then(|s| Datetime::parse(s).ok())
-            .map(|d| d.to_mjd())
+        {
+            return Some(d.to_mjd());
+        }
+        // §9.5: with no DATE-OBS/MJD-OBS, JEPOCH/BEPOCH stand in for the observation time.
+        self.epoch(header).map(|e| e.mjd)
     }
 
     /// The Julian (`JEPOCH`, implied scale TDB) or Besselian (`BEPOCH`, implied
@@ -530,6 +556,7 @@ impl FitsTime {
         TimeBounds {
             beg_mjd: mjd_or_date("MJD-BEG", "DATE-BEG"),
             end_mjd: mjd_or_date("MJD-END", "DATE-END"),
+            avg_mjd: mjd_or_date("MJD-AVG", "DATE-AVG"),
             xposure: header.get_real("XPOSURE"),
             telapse: header.get_real("TELAPSE"),
             timedel: header.get_real("TIMEDEL"),
@@ -566,6 +593,19 @@ impl FitsTime {
         let crval = header.get_real(&format!("CRVAL{axis}")).unwrap_or(0.0);
         let cdelt = header.get_real(&format!("CDELT{axis}")).unwrap_or(1.0);
         Some(self.relative_to_mjd(crval + cdelt * (pixel - crpix)))
+    }
+
+    /// The §9.6 `'PHASE'` axis parameters (`CZPHSia` zero-phase time, `CPERIia`
+    /// period) for WCS axis `axis` (1-based), or `None` if it is not a phase axis.
+    pub fn phase_axis(&self, header: &Header, axis: usize) -> Option<PhaseAxis> {
+        let ctype = header.get_text(&format!("CTYPE{axis}"))?;
+        if time_axis_kind(ctype) != Some(TimeAxisKind::Phase) {
+            return None;
+        }
+        Some(PhaseAxis {
+            zero_phase: header.get_real(&format!("CZPHS{axis}")).unwrap_or(0.0),
+            period: header.get_real(&format!("CPERI{axis}")).unwrap_or(0.0),
+        })
     }
 }
 

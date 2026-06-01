@@ -500,3 +500,131 @@ fn projections_match_astropy() {
         );
     }
 }
+
+#[test]
+fn cunit_scales_celestial_axes_to_degrees() {
+    // §8.2: CRVAL/CDELT are in CUNITia units. The same physical TAN WCS expressed
+    // in degrees and in arcseconds must yield identical world coordinates.
+    let build = |scale: f64, unit: Option<&str>| {
+        let mut h = Header::new();
+        h.set("NAXIS", 2);
+        h.set("CTYPE1", "RA---TAN").set("CTYPE2", "DEC--TAN");
+        h.set("CRPIX1", 50.0).set("CRPIX2", 50.0);
+        h.set("CRVAL1", 150.0 * scale).set("CRVAL2", 30.0 * scale);
+        h.set("CDELT1", -5e-4 * scale).set("CDELT2", 5e-4 * scale);
+        if let Some(u) = unit {
+            h.set("CUNIT1", u).set("CUNIT2", u);
+        }
+        Wcs::from_header(&h, None).unwrap()
+    };
+    let w_deg = build(1.0, None);
+    let w_asec = build(3600.0, Some("arcsec"));
+    for &(px, py) in &[(1.0, 1.0), (50.0, 50.0), (80.0, 20.0), (33.0, 77.0)] {
+        let a = w_deg.pixel_to_world(&[px, py]);
+        let b = w_asec.pixel_to_world(&[px, py]);
+        assert!(
+            (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
+            "deg {a:?} vs arcsec {b:?} at ({px},{py})"
+        );
+    }
+    // The reference pixel maps exactly to CRVAL = (150°, 30°) — proving the arcsec
+    // CRVAL was scaled to degrees, not taken literally.
+    let r = w_asec.pixel_to_world(&[50.0, 50.0]);
+    assert!(
+        (r[0] - 150.0).abs() < 1e-9 && (r[1] - 30.0).abs() < 1e-9,
+        "{r:?}"
+    );
+}
+
+#[test]
+fn planetary_solar_lonlat_axes_are_celestial() {
+    // §8.2: `yzLN`/`yzLT` (here helioprojective `HPLN`/`HPLT`) are celestial axis
+    // types; with the same projection + CRVAL they transform exactly like RA/DEC
+    // (the frame label is preserved, never converted — that is out of scope).
+    let build = |t1: &str, t2: &str| {
+        let mut h = Header::new();
+        h.set("NAXIS", 2);
+        h.set("CTYPE1", t1).set("CTYPE2", t2);
+        h.set("CRPIX1", 64.0).set("CRPIX2", 64.0);
+        h.set("CRVAL1", 10.0).set("CRVAL2", -20.0);
+        h.set("CDELT1", -1e-3).set("CDELT2", 1e-3);
+        Wcs::from_header(&h, None).unwrap()
+    };
+    let radec = build("RA---TAN", "DEC--TAN");
+    let helio = build("HPLN-TAN", "HPLT-TAN");
+    assert!(
+        helio.celestial.is_some(),
+        "HPLN/HPLT must be recognized as a celestial pair"
+    );
+    for &(px, py) in &[(1.0, 1.0), (64.0, 64.0), (100.0, 30.0)] {
+        let a = radec.pixel_to_world(&[px, py]);
+        let b = helio.pixel_to_world(&[px, py]);
+        assert!(
+            (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
+            "RA/DEC {a:?} vs HPLN/HPLT {b:?}"
+        );
+    }
+}
+
+#[test]
+fn linear_spectral_axis_resolves_nonlinear_errors_cleanly() {
+    // §8.4: a bare spectral type (`FREQ`) is linearly sampled and resolves through
+    // the generic linear axis; a non-linear algorithm code (`-LOG`) is not yet
+    // evaluated and must error rather than return a wrong linear value.
+    let build = |t3: &str| {
+        let mut h = Header::new();
+        h.set("NAXIS", 3);
+        h.set("CTYPE1", "RA---TAN")
+            .set("CTYPE2", "DEC--TAN")
+            .set("CTYPE3", t3);
+        h.set("CRPIX1", 1.0).set("CRPIX2", 1.0).set("CRPIX3", 1.0);
+        h.set("CRVAL1", 45.0)
+            .set("CRVAL2", 30.0)
+            .set("CRVAL3", 1.4e9);
+        h.set("CDELT1", -1e-3)
+            .set("CDELT2", 1e-3)
+            .set("CDELT3", 1e6);
+        Wcs::from_header(&h, None)
+    };
+    // FREQ axis at pixel 3: 1.4e9 + (3−1)·1e6 = 1.402e9 Hz.
+    let out = build("FREQ").unwrap().pixel_to_world(&[1.0, 1.0, 3.0]);
+    assert!((out[2] - 1.402e9).abs() < 1.0, "{}", out[2]);
+    assert!(matches!(
+        build("FREQ-LOG"),
+        Err(FitsError::UnsupportedSpectral { .. })
+    ));
+}
+
+#[test]
+fn pixel_list_wcs_matches_the_equivalent_image_wcs() {
+    // §8.5: a pixel-list (event) WCS on columns 2,3 must transform identically to
+    // an image WCS with the same CTYPE/CRPIX/CRVAL/CDELT and PC rotation.
+    let mut tab = Header::new();
+    tab.set("TCTYP2", "RA---TAN").set("TCTYP3", "DEC--TAN");
+    tab.set("TCRPX2", 256.0).set("TCRPX3", 256.0);
+    tab.set("TCRVL2", 150.0).set("TCRVL3", 30.0);
+    tab.set("TCDLT2", -1e-3).set("TCDLT3", 1e-3);
+    tab.set("TPC2_2", 1.0).set("TPC2_3", -0.05);
+    tab.set("TPC3_2", 0.05).set("TPC3_3", 1.0);
+    let wt = Wcs::from_pixel_list(&tab, &[2, 3], None).unwrap();
+
+    let mut img = Header::new();
+    img.set("NAXIS", 2);
+    img.set("CTYPE1", "RA---TAN").set("CTYPE2", "DEC--TAN");
+    img.set("CRPIX1", 256.0).set("CRPIX2", 256.0);
+    img.set("CRVAL1", 150.0).set("CRVAL2", 30.0);
+    img.set("CDELT1", -1e-3).set("CDELT2", 1e-3);
+    img.set("PC1_1", 1.0).set("PC1_2", -0.05);
+    img.set("PC2_1", 0.05).set("PC2_2", 1.0);
+    let wi = Wcs::from_header(&img, None).unwrap();
+
+    assert!(wt.celestial.is_some(), "pixel-list pair must be celestial");
+    for &(px, py) in &[(256.0, 256.0), (1.0, 1.0), (300.0, 100.0), (50.0, 400.0)] {
+        let a = wt.pixel_to_world(&[px, py]);
+        let b = wi.pixel_to_world(&[px, py]);
+        assert!(
+            (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
+            "pixel-list {a:?} vs image {b:?} at ({px},{py})"
+        );
+    }
+}

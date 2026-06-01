@@ -770,3 +770,47 @@ fn rice_rejects_64_bit_pixels() {
     let mut w2 = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(w2.write_compressed_image(&image, "GZIP_1", &[]).is_ok());
 }
+
+#[test]
+fn nocompress_image_round_trips() {
+    use crate::data::{Image, ImageData, Scaling};
+    use crate::writer::FitsWriter;
+    use std::io::Cursor;
+    // §10.4: tiles stored verbatim (uncompressed big-endian pixels) round-trip.
+    let samples: Vec<i16> = (0..24 * 16)
+        .map(|i| (i % 24) as i16 * 7 - (i / 24) as i16 * 5)
+        .collect();
+    let image = Image {
+        shape: vec![24, 16],
+        samples: ImageData::I16(samples.clone()),
+        scaling: Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    };
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_compressed_image(&image, "NOCOMPRESS", &[]).unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    match r.read_compressed_image(1).unwrap().samples {
+        ImageData::I16(v) => assert_eq!(v, samples),
+        other => panic!("expected I16, got {other:?}"),
+    }
+}
+
+#[test]
+fn compressed_image_descriptor_switches_to_q_for_large_offsets() {
+    // §10.1.3: a heap offset beyond the 32-bit P range needs a 64-bit Q descriptor.
+    let mut q = Vec::new();
+    super::push_compressed_descriptor(&mut q, true, 3, u32::MAX as u64 + 8);
+    assert_eq!(q.len(), 16);
+    assert_eq!(i64::from_be_bytes(q[0..8].try_into().unwrap()), 3);
+    assert_eq!(
+        i64::from_be_bytes(q[8..16].try_into().unwrap()),
+        u32::MAX as i64 + 8
+    );
+    let mut p = Vec::new();
+    super::push_compressed_descriptor(&mut p, false, 3, 40);
+    assert_eq!(p.len(), 8);
+    assert_eq!(i32::from_be_bytes(p[4..8].try_into().unwrap()), 40);
+}

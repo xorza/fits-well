@@ -266,7 +266,8 @@ pub struct Column {
 /// not `TSCALn`/`TZEROn`-scaled).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColumnData {
-    Logical(Vec<bool>),
+    /// `L` — `Some(true)`/`Some(false)`, or `None` for the `0x00` null value (§7.3.3).
+    Logical(Vec<Option<bool>>),
     /// `B` (bytes) and `X` (packed bits).
     Bytes(Vec<u8>),
     I16(Vec<i16>),
@@ -440,6 +441,43 @@ impl BinTable {
                 .map(|i| (cell[i / 8] >> (7 - (i % 8))) & 1 == 1)
                 .collect();
             out.push(bits);
+        }
+        Ok(out)
+    }
+
+    /// Decode a variable-length `X` (bit-array) column (`1PX`/`1QX`), unpacking
+    /// each row's bits MSB-first into one `Vec<bool>` (§7.3.2/§7.3.5 — the
+    /// descriptor's element count is the bit count). Errors on any non-bit VLA.
+    pub fn read_vla_bit_column(&self, index: usize) -> Result<Vec<Vec<bool>>> {
+        let col = self.column(index)?;
+        let wide = match (col.tform.kind, col.tform.vla_elem) {
+            (TformKind::ArrayDesc32, Some(TformKind::Bit)) => false,
+            (TformKind::ArrayDesc64, Some(TformKind::Bit)) => true,
+            _ => {
+                return Err(FitsError::NotABitColumn {
+                    code: col.tform.kind.code(),
+                });
+            }
+        };
+        let mut out = Vec::with_capacity(self.nrows);
+        for r in 0..self.nrows {
+            let desc = self.cell(col, r);
+            let (nbits, offset) = if wide {
+                (be_u64(&desc[0..8]), be_u64(&desc[8..16]))
+            } else {
+                (be_u32(&desc[0..4]), be_u32(&desc[4..8]))
+            };
+            let start = self.heap_offset + offset;
+            let end = start + nbits.div_ceil(8);
+            if end > self.heap_end {
+                return Err(FitsError::UnexpectedEof);
+            }
+            let cell = self.bytes.get(start..end).ok_or(FitsError::UnexpectedEof)?;
+            out.push(
+                (0..nbits)
+                    .map(|i| (cell[i / 8] >> (7 - (i % 8))) & 1 == 1)
+                    .collect(),
+            );
         }
         Ok(out)
     }
@@ -630,7 +668,16 @@ fn column_data_physical(
 /// reads (concatenated cells) and heap arrays.
 fn decode_array(kind: TformKind, bytes: &[u8]) -> ColumnData {
     match kind {
-        TformKind::Logical => ColumnData::Logical(bytes.iter().map(|&b| b == b'T').collect()),
+        TformKind::Logical => ColumnData::Logical(
+            bytes
+                .iter()
+                .map(|&b| match b {
+                    b'T' => Some(true),
+                    b'F' => Some(false),
+                    _ => None, // 0x00 (or any non-T/F byte) is the undefined value
+                })
+                .collect(),
+        ),
         TformKind::Byte | TformKind::Bit => ColumnData::Bytes(bytes.to_vec()),
         TformKind::Char => ColumnData::Text(vec![trim_text(bytes)]),
         TformKind::I16 => ColumnData::I16(decode_be(bytes, i16::from_be_bytes)),

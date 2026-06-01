@@ -32,6 +32,13 @@ const R2D: f64 = 180.0 / std::f64::consts::PI;
 const D2R: f64 = std::f64::consts::PI / 180.0;
 const FRAC_PI_4: f64 = std::f64::consts::FRAC_PI_4;
 
+/// The §8.4 spectral coordinate types (the 4-character `CTYPE` prefix). A bare
+/// type is sampled linearly (handled by the generic linear axis); a `TTTT-AAA`
+/// algorithm suffix means non-linear sampling, which is not yet evaluated.
+const SPECTRAL_TYPES: &[&str] = &[
+    "FREQ", "ENER", "WAVN", "VRAD", "WAVE", "VOPT", "ZOPT", "AWAV", "VELO", "BETA",
+];
+
 /// A celestial projection algorithm — the 3-letter `CTYPE` code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Projection {
@@ -638,15 +645,30 @@ impl Wcs {
                     .to_string()
             })
             .collect();
-        let crval = axis_vec(header, "CRVAL", &a, naxis, 0.0);
+        let mut crval = axis_vec(header, "CRVAL", &a, naxis, 0.0);
         let crpix = axis_vec(header, "CRPIX", &a, naxis, 0.0);
         let cdelt = axis_vec(header, "CDELT", &a, naxis, 1.0);
+        let cunit: Vec<String> = (1..=naxis)
+            .map(|i| {
+                header
+                    .get_text(&format!("CUNIT{i}{a}"))
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        let celestial_axes = find_celestial(&ctype);
 
         // A celestial axis with a projection code we don't implement (the quad-cube
-        // TSC/CSC/QSC or HEALPix HPX/XPH) is an error, not a silent linear
-        // pass-through that would hand back wrong coordinates.
+        // TSC/CSC/QSC) is an error, not a silent linear pass-through that would hand
+        // back wrong coordinates.
         if let Some(code) = unsupported_celestial_code(&ctype) {
             return Err(FitsError::UnsupportedProjection { code });
+        }
+        // A non-linearly-sampled spectral axis (§8.4) is not yet evaluated; error
+        // rather than hand back a wrong linear value (a bare spectral type is
+        // genuinely linear and flows through the linear path below).
+        if let Some(ctype) = unsupported_spectral_code(&ctype) {
+            return Err(FitsError::UnsupportedSpectral { ctype });
         }
 
         // Build the linear transform A. Precedence: CD, then PC×CDELT, then the
@@ -687,7 +709,7 @@ impl Wcs {
             }
             // Legacy CROTA: rotate the celestial 2-axis sub-block (only when no PC
             // was given, per the convention that CROTA and PC are exclusive).
-            if !has_pc && let Some((lng, lat, _)) = find_celestial(&ctype) {
+            if !has_pc && let Some((lng, lat, _)) = celestial_axes {
                 let rho = header
                     .get_real(&format!("CROTA{}{a}", lat + 1))
                     .or_else(|| header.get_real(&format!("CROTA{}{a}", lng + 1)))
@@ -701,11 +723,23 @@ impl Wcs {
                 }
             }
         }
+        // §8.2: CRVAL/CDELT are in CUNITia units, but the projection math runs in
+        // degrees — scale each celestial axis's reference value and its matrix row
+        // (the inverse is computed after, so both directions stay consistent).
+        if let Some((lng, lat, _)) = celestial_axes {
+            for ax in [lng, lat] {
+                let f = unit_to_degrees(&cunit[ax]);
+                crval[ax] *= f;
+                for j in 0..naxis {
+                    matrix[ax * naxis + j] *= f;
+                }
+            }
+        }
         let inverse = invert(&matrix, naxis).ok_or(FitsError::InvalidValue {
             card: "singular WCS transform matrix".to_string(),
         })?;
 
-        let celestial = find_celestial(&ctype).map(|(lng, lat, proj)| {
+        let celestial = celestial_axes.map(|(lng, lat, proj)| {
             // Latitude-axis PVi_0..PVi_20 — the projection parameters.
             let pv: Vec<f64> = (0..=20)
                 .map(|m| {
@@ -753,6 +787,62 @@ impl Wcs {
             inverse,
             celestial,
         })
+    }
+
+    /// Build a WCS for a binary-table **pixel list** (event list, §8.5, Table 22):
+    /// `columns` lists the 1-based table column numbers forming the coordinate axes
+    /// in order. Reads the column-indexed keyword family — `TCTYPn`/`TCRPXn`/
+    /// `TCRVLn`/`TCDLTn`/`TCROTn`/`TCUNIn`, the `TPCn_ka`/`TCDn_ka` matrices, and
+    /// `TPVn_ma` parameters — then evaluates it through the same pipeline as image
+    /// WCS (so projections, `CUNIT`, and the pole computation all apply).
+    pub fn from_pixel_list(header: &Header, columns: &[usize], alt: Option<char>) -> Result<Wcs> {
+        let a = alt.map(|c| c.to_string()).unwrap_or_default();
+        // Translate the column-indexed keywords into an equivalent image header,
+        // mapping column number `cN` → axis index `i+1`.
+        let mut h = Header::new();
+        h.set("WCSAXES", columns.len() as i64);
+        for (i, &c) in columns.iter().enumerate() {
+            let ax = i + 1;
+            if let Some(t) = header.get_text(&format!("TCTYP{c}{a}")) {
+                h.set(&format!("CTYPE{ax}"), t);
+            }
+            for (root, dst) in [
+                ("TCRPX", "CRPIX"),
+                ("TCRVL", "CRVAL"),
+                ("TCDLT", "CDELT"),
+                ("TCROT", "CROTA"),
+            ] {
+                if let Some(v) = header.get_real(&format!("{root}{c}{a}")) {
+                    h.set(&format!("{dst}{ax}"), v);
+                }
+            }
+            if let Some(t) = header.get_text(&format!("TCUNI{c}{a}")) {
+                h.set(&format!("CUNIT{ax}"), t);
+            }
+            for m in 0..=20 {
+                if let Some(v) = header.get_real(&format!("TPV{c}_{m}{a}")) {
+                    h.set(&format!("PV{ax}_{m}"), v);
+                }
+            }
+        }
+        // Linear-transform matrices: TPCn_ka / TCDn_ka, indexed by column pair.
+        for (i, &ci) in columns.iter().enumerate() {
+            for (j, &cj) in columns.iter().enumerate() {
+                if let Some(v) = header.get_real(&format!("TPC{ci}_{cj}{a}")) {
+                    h.set(&format!("PC{}_{}", i + 1, j + 1), v);
+                }
+                if let Some(v) = header.get_real(&format!("TCD{ci}_{cj}{a}")) {
+                    h.set(&format!("CD{}_{}", i + 1, j + 1), v);
+                }
+            }
+        }
+        if let Some(v) = header.get_real(&format!("LONP{a}")) {
+            h.set("LONPOLE", v);
+        }
+        if let Some(v) = header.get_real(&format!("LATP{a}")) {
+            h.set("LATPOLE", v);
+        }
+        Wcs::from_header(&h, None)
     }
 
     /// Map 1-based pixel coordinates to world coordinates. Celestial axes return
@@ -803,8 +893,11 @@ impl Wcs {
 fn unsupported_celestial_code(ctype: &[String]) -> Option<String> {
     for t in ctype {
         let head = t.split('-').next().unwrap_or("");
-        let celestial =
-            head == "RA" || head == "DEC" || head.ends_with("LON") || head.ends_with("LAT");
+        let celestial = head == "RA"
+            || head == "DEC"
+            || head.ends_with("LON")
+            || head.ends_with("LAT")
+            || (head.len() == 4 && (head.ends_with("LN") || head.ends_with("LT")));
         if celestial
             && let Some(code) = t.rsplit('-').find(|s| !s.is_empty())
             && code.len() == 3
@@ -816,14 +909,47 @@ fn unsupported_celestial_code(ctype: &[String]) -> Option<String> {
     None
 }
 
+/// A spectral axis sampled non-linearly carries a `TTTT-AAA` algorithm code
+/// (§8.4); return it so `from_header` errors instead of silently applying a linear
+/// transform. A bare spectral type (linear sampling) returns `None`.
+fn unsupported_spectral_code(ctype: &[String]) -> Option<String> {
+    for t in ctype {
+        let head = t.split('-').next().unwrap_or("").trim_end();
+        let has_algorithm = t.get(5..).map(str::trim).is_some_and(|s| !s.is_empty());
+        if SPECTRAL_TYPES.contains(&head) && has_algorithm {
+            return Some(t.clone());
+        }
+    }
+    None
+}
+
+/// Degrees per `CUNITia` angle unit; `1.0` for an absent, unknown, or `deg` unit.
+fn unit_to_degrees(unit: &str) -> f64 {
+    match unit.trim() {
+        "arcmin" => 1.0 / 60.0,
+        "arcsec" => 1.0 / 3600.0,
+        "mas" => 1.0 / 3_600_000.0,
+        "rad" => R2D,
+        _ => 1.0, // "deg", "", or anything unrecognized
+    }
+}
+
 fn find_celestial(ctype: &[String]) -> Option<(usize, usize, Projection)> {
     let mut lng = None;
     let mut lat = None;
     let mut proj = None;
     for (i, t) in ctype.iter().enumerate() {
         let head = t.split('-').next().unwrap_or("");
-        let is_lng = head == "RA" || head.ends_with("LON") || head == "LON";
-        let is_lat = head == "DEC" || head.ends_with("LAT") || head == "LAT";
+        // RA/DEC, the `xLON`/`xLAT` frames, and the planetary/solar `yzLN`/`yzLT`
+        // forms (§8.2, e.g. `HPLN`/`HPLT`).
+        let is_lng = head == "RA"
+            || head.ends_with("LON")
+            || head == "LON"
+            || (head.len() == 4 && head.ends_with("LN"));
+        let is_lat = head == "DEC"
+            || head.ends_with("LAT")
+            || head == "LAT"
+            || (head.len() == 4 && head.ends_with("LT"));
         if (is_lng || is_lat)
             && let Some(code) = t.rsplit('-').find(|s| !s.is_empty())
         {

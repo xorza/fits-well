@@ -258,6 +258,8 @@ pub(crate) fn encode_image(
             "HCOMPRESS_1" => {
                 TileCell::Bytes(hcompress::hcompress_tile_encode(&vals, &tdims, scale)?)
             }
+            // §10.4: store the tile's raw big-endian pixels, uncompressed.
+            "NOCOMPRESS" => TileCell::Bytes(i64_to_be(&vals, bitpix)),
             other => {
                 return Err(FitsError::UnsupportedCompression {
                     name: format!("{other} (write)"),
@@ -268,16 +270,20 @@ pub(crate) fn encode_image(
         cell.extend_heap(&mut heap);
     }
 
-    // Data unit: a `P` array descriptor (count, heap offset) per tile, then the heap.
-    let mut data = Vec::with_capacity(ntiles * 8 + heap.len());
+    let maxnelem = descriptors.iter().map(|&(n, _)| n).max().unwrap_or(0);
+    // §10.1.3: use 64-bit `Q` descriptors once the heap or a tile's element count
+    // exceeds the 32-bit `P` range; otherwise the compact `P` form.
+    let wide = heap.len() > i32::MAX as usize || maxnelem > i32::MAX as usize;
+
+    // Data unit: an array descriptor (count, heap offset) per tile, then the heap.
+    let mut data = Vec::with_capacity(ntiles * if wide { 16 } else { 8 } + heap.len());
     for &(nelem, offset) in &descriptors {
-        data.extend_from_slice(&(nelem as i32).to_be_bytes());
-        data.extend_from_slice(&(offset as i32).to_be_bytes());
+        push_compressed_descriptor(&mut data, wide, nelem as u64, offset as u64);
     }
     data.extend_from_slice(&heap);
 
-    let maxnelem = descriptors.iter().map(|&(n, _)| n).max().unwrap_or(0);
     let tform_letter = if cmptype == "PLIO_1" { 'I' } else { 'B' };
+    let desc = if wide { 'Q' } else { 'P' };
     let mut h = Header::new();
     h.set("XTENSION", "BINTABLE")
         .comment("XTENSION", "binary table extension");
@@ -286,7 +292,7 @@ pub(crate) fn encode_image(
     h.set("PCOUNT", heap.len() as i64).set("GCOUNT", 1);
     h.set("TFIELDS", 1);
     h.set("TTYPE1", "COMPRESSED_DATA");
-    h.set("TFORM1", format!("1P{tform_letter}({maxnelem})"));
+    h.set("TFORM1", format!("1{desc}{tform_letter}({maxnelem})"));
     h.set("ZIMAGE", true)
         .comment("ZIMAGE", "this is a tiled-compressed image");
     h.set("ZCMPTYPE", cmptype);
@@ -320,6 +326,18 @@ pub(crate) fn encode_image(
         h.set("BLANK", blank);
     }
     Ok((h, data))
+}
+
+/// Write a compressed-tile array descriptor (element count, heap byte offset) as a
+/// big-endian `Q` (64-bit) or `P` (32-bit) pair (§10.1.3).
+fn push_compressed_descriptor(data: &mut Vec<u8>, wide: bool, count: u64, offset: u64) {
+    if wide {
+        data.extend_from_slice(&(count as i64).to_be_bytes());
+        data.extend_from_slice(&(offset as i64).to_be_bytes());
+    } else {
+        data.extend_from_slice(&(count as i32).to_be_bytes());
+        data.extend_from_slice(&(offset as i32).to_be_bytes());
+    }
 }
 
 /// Encode a float [`Image`] as a quantized, tiled-compressed `BINTABLE`
