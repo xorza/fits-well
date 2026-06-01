@@ -9,7 +9,8 @@ System) files — the standard data format of astronomy. The two non-negotiable
 goals shape every decision:
 
 1. **Blazing fast** — zero-copy where the format allows, SIMD bulk byte-swap /
-   scaling, parallel-friendly decode, lazy HDU access via seeking.
+   scaling, tile-parallel (de)compression, reused read/write scratch buffers,
+   lazy HDU access via seeking.
 2. **Whole-standard coverage** — the full **FITS 4.0** standard (images, ASCII
    tables, binary tables with heap/variable-length arrays, random groups for
    read, WCS, time coordinates, tiled compression).
@@ -17,8 +18,9 @@ goals shape every decision:
 The structural spine is built and tested: the 2880-byte block layer, an ordered
 header model (with `CONTINUE` long-string read/write), HDU classification and
 boundary sizing, a lazy seeking reader, and a header / raw-data-unit writer. The
-core crate is dependency-free by default (the `compression` feature pulls in
-`flate2`). Typed image read/write is done (decode/encode +
+default build enables `compression` + `parallel` (pulling `flate2` + `rayon`);
+`--no-default-features` gives the dependency-free pure-Rust core (block / header /
+HDU / reader / writer / WCS / time). Typed image read/write is done (decode/encode +
 `BSCALE`/`BZERO`). Binary and ASCII tables read and write; multi-HDU files
 (primary + `IMAGE`/`TABLE`/`BINTABLE` extensions) write; binary-table `P`/`Q` heap
 arrays and per-column `TSCAL`/`TZERO` decode; random groups read; `CONTINUE`,
@@ -35,7 +37,10 @@ work behind
 the `compression` feature: all five image codecs (`GZIP_1`, `GZIP_2`, `RICE_1`,
 `PLIO_1`, `HCOMPRESS_1` with `SMOOTH=1` decode), quantized-float read+write
 (`NO_DITHER`/`SUBTRACTIVE_DITHER_1`/`SUBTRACTIVE_DITHER_2`, `ZBLANK`/NaN), and §10.3
-fixed-width table compression. The remaining WCS frontier (quad-cube/HEALPix
+fixed-width table compression. All tile (de)compression fans out across the rayon
+pool under the default-on `parallel` feature (a scalar fallback runs without it),
+which the codec benches measure at ~2.5–3× on decompress and ~4–6.5× on compress.
+The remaining WCS frontier (quad-cube/HEALPix
 projections, non-linear spectral axes — both of which error cleanly today) is
 charted in the module map below, which shows what is built versus planned. The
 design principles in this file remain the spec; follow them when filling the
@@ -59,12 +64,18 @@ cargo bench                      # run benchmarks (once criterion benches exist)
 cargo doc --open                 # render API docs
 ```
 
-Before confirming any change is done, run the full gate (per global rules):
+Before confirming any change is done, run the full gate (per global rules). The
+default features now include `compression` + `parallel`, so the first line already
+exercises the codecs on the rayon path:
 
 ```bash
 cargo test && cargo fmt --all && cargo check && cargo clippy --all-targets -- -D warnings
-# also exercise the optional codecs:
-cargo test --features compression && cargo clippy --all-targets --features compression -- -D warnings
+# also check the dependency-free core and the serial-codec (no-rayon) fallback:
+cargo test --no-default-features
+cargo clippy --all-targets --no-default-features -- -D warnings
+cargo test --no-default-features --features compression
+# microbench entry points (decode/encode/read_image) compile under `internals`:
+cargo clippy --all-targets --features internals -- -D warnings
 ```
 
 ## The FITS format in one screen
@@ -134,12 +145,12 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `hdu/` | HDU classification + data-unit sizing (Eq. 2, incl. random groups) | done |
 | `reader/` | lazy seeking HDU scan; `read_image`/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_image`/`read_compressed_table`/`verify_checksum`, raw `DataUnit` | done |
 | `writer/` | multi-HDU writer: `write_image`/`write_table` (fixed + `P` VLA columns)/`write_ascii_table`/`write_compressed_image`(`_lossy`)/`write_compressed_table`, `with_checksums` | done |
-| `data/` | typed `Image`/`ImageData`, big-endian decode+encode, `BSCALE`/`BZERO` physical plane | image read+write done; SIMD/parallel TODO |
+| `data/` | typed `Image`/`ImageData`, big-endian decode+encode (`encode_into` reuses the writer's buffer), `BSCALE`/`BZERO` physical plane | image read+write done; memory-bound, SIMD bulk-swap TODO |
 | `table/` | `BINTABLE` parsing (`Tform`/`Column`); fixed-width decode (`ColumnData`), `TSCAL`/`TZERO` physical plane, `P`/`Q` heap VLAs | read done (write in `writer/`) |
 | `ascii/` | `TABLE` (ASCII) read: `TBCOLn`/Fortran `TFORMn` → `AsciiColumn`/`ColumnData` | read done (write in `writer/`) |
 | `groups/` | random-groups (§6) read: params + arrays, `PSCALn`/`PZEROn` physical | read done (no write — deprecated) |
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
-| `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3), reassembly + encode | all 5 image codecs read+write; float quant all 3 dither methods + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode + lossy `SCALE>0` write; fixed-width table compression read+write |
+| `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3), reassembly + encode; `map_tiles` fans the per-tile codec work across rayon under `parallel` | all 5 image codecs read+write; float quant all 3 dither methods + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode + lossy `SCALE>0` write; fixed-width table compression read+write; tile-parallel ((de)compress, image + table) |
 | `wcs/` | typed WCS: keyword parse, linear transform (PC/CD/CROTA + `PVi_m` + inverse), 23 projections (zenithal + perspective AZP/SZP + cylindrical + all-sky + conic + BON + PCO) via general pole computation, `pixel_to_world`/`world_to_pixel`; unimplemented codes → `UnsupportedProjection` | v2 done (quad-cube/HEALPix, spectral TODO; inter-frame transforms out of scope) |
 | `time/` | typed time (§9): `Datetime` (ISO-8601↔JD/MJD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), `FitsTime` header view + time WCS axis | v2 done |
 | `error.rs` | `FitsError` + `Result` | done |
@@ -161,14 +172,26 @@ Design principles specific to this crate:
 - **Headers round-trip exactly.** Model a header as an *ordered list* of records
   with a side index for lookup — not a hash map. Duplicate `COMMENT`/`HISTORY`
   and record order are significant and must be preserved byte-for-byte.
-- **SIMD/parallel the bulk ops.** Endian swap + `BSCALE/BZERO` (and per-column
-  `TSCAL/TZERO`) are embarrassingly parallel; tile images and table columns for
-  multi-threaded decode. Gate threading behind a feature, keep a scalar fallback.
-- **Feature-flag only the layers that carry a dependency.** Tiled compression
-  (`RICE_1`, `GZIP`, `HCOMPRESS`, `PLIO`) pulls in `flate2`, so it lives behind the
-  `compression` feature. WCS (§8) and time (§9) are dependency-free pure math and
-  part of the standard, so they are always compiled (no feature gate); the whole
-  crate stays dependency-free by default regardless.
+- **Parallelize the compute-bound layer; SIMD the memory-bound one.** The benches
+  settled where threads pay: the tiled codecs are compute-bound (100s of MiB/s,
+  ~100× below the memory wall) and tiles are independent, so `compress::map_tiles`
+  fans the per-tile (de)compression across rayon under the `parallel` feature for a
+  near-linear speedup — map the tiles in parallel, then fold serially (scatter into
+  the image / concatenate the heap, where order matters). The raw byte-swap +
+  `BSCALE/BZERO` / `TSCAL/TZERO` paths are *memory-bandwidth-bound* (~40 GiB/s ≈
+  `memcpy`), so threading them buys little — SIMD/autovectorization is their lever,
+  not threads, and they are deliberately left serial. Always keep a scalar fallback
+  behind the feature gate.
+- **Reuse buffers across calls.** `FitsReader`/`FitsWriter` each own a `scratch`
+  `Vec<u8>` reused across reads/writes, so steady-state staging allocates nothing;
+  decode/encode expose `*_into` forms that append into a caller buffer. The codecs
+  build their data unit straight into the writer's scratch.
+- **Feature-flag the layers that carry a dependency — but they're on by default.**
+  Tiled compression pulls in `flate2` (`compression` feature) and tile parallelism
+  pulls in `rayon` (`parallel`, which implies `compression`); both are in the
+  default feature set for batteries-included performance. WCS (§8) and time (§9) are
+  dependency-free pure math and always compiled. `--no-default-features` yields the
+  dependency-free core; gate any new dependency the same way.
 - **"Once FITS, always FITS."** The format never breaks backward compatibility.
   Keep reading legacy structures (random groups, `SIMPLE = F`) forever; just
   don't *write* deprecated forms.

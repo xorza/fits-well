@@ -13,6 +13,7 @@
 
 use super::HduParts;
 use super::gzip;
+use super::map_tiles;
 use super::rice;
 use crate::endian::decode_be;
 use crate::endian::encode_be;
@@ -166,23 +167,35 @@ pub(crate) fn compress_table(
     let rpt = rows_per_tile.clamp(1, nrows.max(1));
     let nchunks = nrows.div_ceil(rpt);
 
-    // Per (chunk, column) Q descriptor (nelem, heap offset), and the heap.
-    let mut descriptors = vec![(0u64, 0u64); nchunks * ncols];
-    let mut heap: Vec<u8> = Vec::new();
-    for chunk in 0..nchunks {
-        let r0 = chunk * rpt;
-        let rows = rpt.min(nrows - r0);
-        for (ci, m) in metas.iter().enumerate() {
+    // Compress each (chunk, column) tile independently — the compute-bound step,
+    // parallel under the `parallel` feature, indexed `chunk * ncols + ci` so the
+    // results land in the same flat order the descriptor rows expect. The reused
+    // per-worker buffer holds the column's transposed bytes.
+    let comps = map_tiles(
+        nchunks * ncols,
+        Vec::<u8>::new,
+        |cm, i| -> Result<Vec<u8>> {
+            let chunk = i / ncols;
+            let m = &metas[i % ncols];
+            let r0 = chunk * rpt;
+            let rows = rpt.min(nrows - r0);
             // Transpose: gather this column's bytes across the tile's rows.
-            let mut cm = Vec::with_capacity(rows * m.width);
+            cm.clear();
+            cm.reserve(rows * m.width);
             for r in 0..rows {
                 let off = (r0 + r) * naxis1 + m.offset;
                 cm.extend_from_slice(&raw[off..off + m.width]);
             }
-            let comp = compress_column(&cm, m)?;
-            descriptors[chunk * ncols + ci] = (comp.len() as u64, heap.len() as u64);
-            heap.extend_from_slice(&comp);
-        }
+            compress_column(cm, m)
+        },
+    )?;
+
+    // Per (chunk, column) Q descriptor (nelem, heap offset), and the heap.
+    let mut descriptors = vec![(0u64, 0u64); nchunks * ncols];
+    let mut heap: Vec<u8> = Vec::new();
+    for (i, comp) in comps.iter().enumerate() {
+        descriptors[i] = (comp.len() as u64, heap.len() as u64);
+        heap.extend_from_slice(comp);
     }
 
     // Data unit: nchunks rows of ncols 16-byte Q descriptors, then the heap.
@@ -274,12 +287,18 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
         .map(|ci| table.read_vla_column(ci))
         .collect::<Result<_>>()?;
 
-    let mut out = vec![0u8; total];
-    for chunk in 0..nchunks {
-        let r0 = chunk * rpt;
-        let rows = rpt.min(nrows - r0);
-        for (ci, m) in metas.iter().enumerate() {
-            let cell = cells[ci].get(chunk).ok_or(FitsError::UnexpectedEof)?;
+    // Decompress each (chunk, column) tile independently (the compute-bound step —
+    // parallel under the `parallel` feature), in flat `chunk * ncols + ci` order.
+    let decompressed = map_tiles(
+        nchunks * ncols,
+        || (),
+        |_unit, i| -> Result<Vec<u8>> {
+            let chunk = i / ncols;
+            let m = &metas[i % ncols];
+            let rows = rpt.min(nrows - chunk * rpt);
+            let cell = cells[i % ncols]
+                .get(chunk)
+                .ok_or(FitsError::UnexpectedEof)?;
             let bytes = match cell {
                 ColumnData::Bytes(b) => b.as_slice(),
                 _ => {
@@ -288,12 +307,21 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
                     });
                 }
             };
-            let cm = decompress_column(bytes, m, rows)?;
-            // Transpose back: scatter column-major bytes into the output rows.
-            for r in 0..rows {
-                let dst = (r0 + r) * naxis1 + m.offset;
-                out[dst..dst + m.width].copy_from_slice(&cm[r * m.width..(r + 1) * m.width]);
-            }
+            decompress_column(bytes, m, rows)
+        },
+    )?;
+
+    // Transpose back: scatter each tile's column-major bytes into the output rows
+    // (disjoint byte ranges per (chunk, column), so the order is free to vary).
+    let mut out = vec![0u8; total];
+    for (i, cm) in decompressed.iter().enumerate() {
+        let chunk = i / ncols;
+        let m = &metas[i % ncols];
+        let r0 = chunk * rpt;
+        let rows = rpt.min(nrows - r0);
+        for r in 0..rows {
+            let dst = (r0 + r) * naxis1 + m.offset;
+            out[dst..dst + m.width].copy_from_slice(&cm[r * m.width..(r + 1) * m.width]);
         }
     }
 
