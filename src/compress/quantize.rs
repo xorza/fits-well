@@ -201,6 +201,8 @@ fn noise3(data: &[f64], nx_in: usize, ny_in: usize) -> Noise {
 /// Lower median (element at index `(n−1)/2` of the sorted values), matching
 /// cfitsio's per-row `quick_select_float`.
 fn lower_median(v: &mut [f64]) -> f64 {
+    // `noise3` filters to finite values before any median, so `partial_cmp` is a
+    // total order here and the `unwrap` cannot fire on a NaN.
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     v[(v.len() - 1) / 2]
 }
@@ -208,6 +210,7 @@ fn lower_median(v: &mut [f64]) -> f64 {
 /// Proper median (average of the two middle values for even counts), matching
 /// cfitsio's final cross-row `qsort` median.
 fn proper_median(v: &mut [f64]) -> f64 {
+    // Finite input (see `lower_median`), so the comparison never sees a NaN.
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     (v[(v.len() - 1) / 2] + v[v.len() / 2]) / 2.0
 }

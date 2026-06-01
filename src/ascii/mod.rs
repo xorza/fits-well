@@ -62,7 +62,7 @@ impl AsciiTable {
         // column `Vec` and drives the `TFORMn` loop (an absurd value would abort).
         let tfields = match header.get_integer("TFIELDS") {
             Some(t) if (0..=999).contains(&t) => t as usize,
-            Some(_) => return Err(FitsError::WrongValueType { name: "TFIELDS" }),
+            Some(_) => return Err(FitsError::KeywordOutOfRange { name: "TFIELDS" }),
             None => return Err(FitsError::MissingKeyword { name: "TFIELDS" }),
         };
 
@@ -74,7 +74,7 @@ impl AsciiTable {
             let tform = header
                 .get_text(&format!("TFORM{n}"))
                 .ok_or(FitsError::MissingKeyword { name: "TFORMn" })?;
-            let (kind, width, decimals) = parse_ascii_tform(tform)?;
+            let fmt = parse_ascii_tform(tform)?;
             columns.push(AsciiColumn {
                 name: header
                     .get_text(&format!("TTYPE{n}"))
@@ -84,10 +84,10 @@ impl AsciiTable {
                     .get_text(&format!("TUNIT{n}"))
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
-                kind,
+                kind: fmt.kind,
                 start: (tbcol.max(1) - 1) as usize,
-                width,
-                decimals,
+                width: fmt.width,
+                decimals: fmt.decimals,
                 tscale: header.get_real(&format!("TSCAL{n}")).unwrap_or(1.0),
                 tzero: header.get_real(&format!("TZERO{n}")).unwrap_or(0.0),
                 null: header
@@ -96,7 +96,10 @@ impl AsciiTable {
             });
         }
 
-        if data.len() < nrows * row_len {
+        // `nrows · row_len` from untrusted axes: check the product can't overflow
+        // (a 32-bit-usize hazard `data_extent`'s u64 math wouldn't catch).
+        let total = nrows.checked_mul(row_len).ok_or(FitsError::UnexpectedEof)?;
+        if data.len() < total {
             return Err(FitsError::UnexpectedEof);
         }
         Ok(AsciiTable {
@@ -252,9 +255,16 @@ fn split_mantissa_exponent(s: &str) -> Option<(&str, &str)> {
         .map(|(i, _)| (&s[..i], &s[i..]))
 }
 
-/// Parse an ASCII `TFORMn` (`Aw`, `Iw`, `Fw.d`, `Ew.d`, `Dw.d`) into kind, width,
-/// and decimal count.
-fn parse_ascii_tform(value: &str) -> Result<(AsciiKind, usize, usize)> {
+/// A parsed ASCII `TFORMn`: element kind, field width, and decimal count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AsciiFormat {
+    kind: AsciiKind,
+    width: usize,
+    decimals: usize,
+}
+
+/// Parse an ASCII `TFORMn` (`Aw`, `Iw`, `Fw.d`, `Ew.d`, `Dw.d`).
+fn parse_ascii_tform(value: &str) -> Result<AsciiFormat> {
     let s = value.trim();
     let invalid = || FitsError::InvalidTform {
         tform: value.to_string(),
@@ -274,7 +284,11 @@ fn parse_ascii_tform(value: &str) -> Result<(AsciiKind, usize, usize)> {
         ),
         None => (rest.trim().parse().map_err(|_| invalid())?, 0),
     };
-    Ok((kind, width, decimals))
+    Ok(AsciiFormat {
+        kind,
+        width,
+        decimals,
+    })
 }
 
 #[cfg(test)]

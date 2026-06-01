@@ -65,7 +65,7 @@ fn theap_below_the_main_table_is_rejected() {
     header.set("PCOUNT", 4).set("THEAP", 4); // THEAP 4 < 8
     assert!(matches!(
         BinTable::from_data(&header, vec![0u8; 12]),
-        Err(FitsError::WrongValueType { name: "THEAP" })
+        Err(FitsError::KeywordOutOfRange { name: "THEAP" })
     ));
 }
 
@@ -470,6 +470,6 @@ fn tfields_beyond_999_is_rejected() {
     header.set("TFIELDS", 1000);
     assert!(matches!(
         BinTable::from_data(&header, vec![]),
-        Err(FitsError::WrongValueType { name: "TFIELDS" })
+        Err(FitsError::KeywordOutOfRange { name: "TFIELDS" })
     ));
 }

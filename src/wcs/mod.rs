@@ -29,12 +29,16 @@
 //! (`RADESYS`/`EQUINOX`); converting *between* reference frames is astrometry
 //! beyond the FITS standard and is intentionally out of scope.
 
+use std::f64::consts::FRAC_PI_2;
+use std::f64::consts::PI;
+use std::f64::consts::SQRT_2;
+
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
 
-const R2D: f64 = 180.0 / std::f64::consts::PI;
-const D2R: f64 = std::f64::consts::PI / 180.0;
+const R2D: f64 = 180.0 / PI;
+const D2R: f64 = PI / 180.0;
 const FRAC_PI_4: f64 = std::f64::consts::FRAC_PI_4;
 
 /// The §8.4 spectral coordinate types (the 4-character `CTYPE` prefix). A bare
@@ -175,8 +179,8 @@ impl Projection {
             let psi = b.atan2(a);
             let base = (c / rad).clamp(-1.0, 1.0).asin();
             // Pick the θ root nearest the native pole (θ = 90°).
-            let half_pi = std::f64::consts::FRAC_PI_2;
-            let cand = [base - psi, std::f64::consts::PI - base - psi];
+            let half_pi = FRAC_PI_2;
+            let cand = [base - psi, PI - base - psi];
             let theta = cand
                 .into_iter()
                 .min_by(|p, q| {
@@ -256,11 +260,10 @@ impl Projection {
                 }
                 // Mollweide inverse (CG 2002 eq. 55).
                 Projection::Mol => {
-                    let s2 = std::f64::consts::SQRT_2;
+                    let s2 = SQRT_2;
                     let gamma = (y / (s2 * R2D)).clamp(-1.0, 1.0).asin();
-                    let theta =
-                        ((2.0 * gamma + (2.0 * gamma).sin()) / std::f64::consts::PI).asin() * R2D;
-                    let phi = std::f64::consts::PI * x / (2.0 * s2 * gamma.cos());
+                    let theta = ((2.0 * gamma + (2.0 * gamma).sin()) / PI).asin() * R2D;
+                    let phi = PI * x / (2.0 * s2 * gamma.cos());
                     (phi, theta)
                 }
                 // CYP inverse: φ = x/λ; θ from η = (y/(180/π))/(μ+λ).
@@ -376,8 +379,8 @@ impl Projection {
                 }
                 Projection::Mol => {
                     // Solve 2γ + sin2γ = π·sinθ for γ (Newton).
-                    let s2 = std::f64::consts::SQRT_2;
-                    let target = std::f64::consts::PI * t.sin();
+                    let s2 = SQRT_2;
+                    let target = PI * t.sin();
                     let mut g = t; // initial guess
                     for _ in 0..100 {
                         let f = 2.0 * g + (2.0 * g).sin() - target;
@@ -388,10 +391,7 @@ impl Projection {
                             break;
                         }
                     }
-                    (
-                        (2.0 * s2 / std::f64::consts::PI) * phi * g.cos(),
-                        s2 * R2D * g.sin(),
-                    )
+                    ((2.0 * s2 / PI) * phi * g.cos(), s2 * R2D * g.sin())
                 }
                 Projection::Cyp => {
                     let (mu, lambda) = (
@@ -1100,8 +1100,7 @@ fn compute_pole(phi0: f64, theta0: f64, a0: f64, d0: f64, phip: f64, thetap: f64
     // Two δ_p solutions; pick the one in range nearest LATPOLE.
     let c1 = beta + ac;
     let c2 = beta - ac;
-    let in_range =
-        |x: f64| (-std::f64::consts::FRAC_PI_2..=std::f64::consts::FRAC_PI_2).contains(&x);
+    let in_range = |x: f64| (-FRAC_PI_2..=FRAC_PI_2).contains(&x);
     let dpr = match (in_range(c1), in_range(c2)) {
         (true, true) => {
             if (c1 - thetap * D2R).abs() <= (c2 - thetap * D2R).abs() {
@@ -1112,7 +1111,7 @@ fn compute_pole(phi0: f64, theta0: f64, a0: f64, d0: f64, phip: f64, thetap: f64
         }
         (true, false) => c1,
         (false, true) => c2,
-        (false, false) => c1.clamp(-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2),
+        (false, false) => c1.clamp(-FRAC_PI_2, FRAC_PI_2),
     };
     let dp = dpr * R2D;
     // α_p from the fiducial constraint (inverting eq. 2 at (φ0, θ0)).

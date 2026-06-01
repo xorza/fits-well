@@ -73,11 +73,11 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
         })
         .collect();
 
-    let (blocksize, bytepix) = rice::rice_params(header, zbitpix);
+    let rice = rice::rice_params(header, zbitpix);
     // Float pixels are quantized to integers of `bytepix` bytes; decode the tile
     // as that integer type, then dequantize. Integer images decode as `zbitpix`.
     let int_bitpix = if is_float {
-        bytepix_to_bitpix(bytepix)
+        bytepix_to_bitpix(rice.bytepix)
     } else {
         zbitpix
     };
@@ -107,8 +107,8 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
     let zblank_column = read_i64_column(table, "ZBLANK");
     let smooth = hcompress_smooth(header);
     let codec = CodecParams {
-        blocksize,
-        bytepix,
+        blocksize: rice.blocksize,
+        bytepix: rice.bytepix,
         smooth,
     };
 
@@ -120,8 +120,14 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
     let zscale = read_f64_column(table, "ZSCALE");
     let zzero = read_f64_column(table, "ZZERO");
 
+    // `ZNAXISn` are untrusted; a wrapped product would mis-size the output buffer
+    // (and the un-wrapped tile strides would then scatter out of bounds). Guard it
+    // like the HDU sizing layer (`hdu::data_extent`) does.
+    let total = dims
+        .iter()
+        .try_fold(1usize, |acc, &n| acc.checked_mul(n))
+        .ok_or(FitsError::DataUnitOverflow)?;
     let geom = TileGeometry::new(&dims, &tiles);
-    let total: usize = dims.iter().product();
     let mut out_i = vec![0i64; if is_float { 0 } else { total }];
     let mut out_f = vec![0f64; if is_float { total } else { 0 }];
 
@@ -189,14 +195,7 @@ pub(crate) fn encode_image(
         });
     }
     let dims = &image.shape;
-    let znaxis = dims.len();
-    let tiles: Vec<usize> = if tile_shape.len() == znaxis {
-        tile_shape.iter().map(|&t| t.max(1)).collect()
-    } else {
-        (0..znaxis)
-            .map(|i| if i == 0 { dims[0].max(1) } else { 1 })
-            .collect()
-    };
+    let tiles = resolve_tile_shape(dims, tile_shape);
 
     let flat = widen(&image.samples);
     let geom = TileGeometry::new(dims, &tiles);
@@ -252,17 +251,7 @@ pub(crate) fn encode_image(
     h.set("TFIELDS", 1);
     h.set("TTYPE1", "COMPRESSED_DATA");
     h.set("TFORM1", format!("1{desc}{tform_letter}({maxnelem})"));
-    h.set("ZIMAGE", true)
-        .comment("ZIMAGE", "this is a tiled-compressed image");
-    h.set("ZCMPTYPE", cmptype);
-    h.set("ZBITPIX", bitpix.code());
-    h.set("ZNAXIS", znaxis as i64);
-    for (i, &n) in dims.iter().enumerate() {
-        h.set(&format!("ZNAXIS{}", i + 1), n as i64);
-    }
-    for (i, &t) in tiles.iter().enumerate() {
-        h.set(&format!("ZTILE{}", i + 1), t as i64);
-    }
+    set_zimage_axes(&mut h, cmptype, bitpix, dims, &tiles);
     match cmptype {
         "RICE_1" => {
             h.set("ZNAME1", "BLOCKSIZE").set("ZVAL1", 32);
@@ -301,14 +290,7 @@ fn encode_float_image(image: &Image, cmptype: &str, tile_shape: &[usize]) -> Res
     }
     let zbitpix = image.samples.bitpix();
     let dims = &image.shape;
-    let znaxis = dims.len();
-    let tiles: Vec<usize> = if tile_shape.len() == znaxis {
-        tile_shape.iter().map(|&t| t.max(1)).collect()
-    } else {
-        (0..znaxis)
-            .map(|i| if i == 0 { dims[0].max(1) } else { 1 })
-            .collect()
-    };
+    let tiles = resolve_tile_shape(dims, tile_shape);
 
     let flat = widen_floats(&image.samples);
     let geom = TileGeometry::new(dims, &tiles);
@@ -363,10 +345,10 @@ fn encode_float_image(image: &Image, cmptype: &str, tile_shape: &[usize]) -> Res
     // doubles (row width 32), followed by the heap.
     let mut data = Vec::with_capacity(ntiles * 32 + heap.len());
     for t in 0..ntiles {
-        data.extend_from_slice(&(cd_desc[t].0 as i32).to_be_bytes());
-        data.extend_from_slice(&(cd_desc[t].1 as i32).to_be_bytes());
-        data.extend_from_slice(&(gz_desc[t].0 as i32).to_be_bytes());
-        data.extend_from_slice(&(gz_desc[t].1 as i32).to_be_bytes());
+        // Two 32-bit `P` descriptors (COMPRESSED_DATA, GZIP_COMPRESSED_DATA) then
+        // the ZSCALE/ZZERO doubles — the §10 quantized-float row layout.
+        push_pq_descriptor(&mut data, false, cd_desc[t].0 as u64, cd_desc[t].1 as u64);
+        push_pq_descriptor(&mut data, false, gz_desc[t].0 as u64, gz_desc[t].1 as u64);
         data.extend_from_slice(&zscale[t].to_be_bytes());
         data.extend_from_slice(&zzero[t].to_be_bytes());
     }
@@ -387,17 +369,7 @@ fn encode_float_image(image: &Image, cmptype: &str, tile_shape: &[usize]) -> Res
         .set("TFORM2", format!("1PB({max_gz})"));
     h.set("TTYPE3", "ZSCALE").set("TFORM3", "1D");
     h.set("TTYPE4", "ZZERO").set("TFORM4", "1D");
-    h.set("ZIMAGE", true)
-        .comment("ZIMAGE", "this is a tiled-compressed image");
-    h.set("ZCMPTYPE", cmptype);
-    h.set("ZBITPIX", zbitpix.code());
-    h.set("ZNAXIS", znaxis as i64);
-    for (i, &n) in dims.iter().enumerate() {
-        h.set(&format!("ZNAXIS{}", i + 1), n as i64);
-    }
-    for (i, &t) in tiles.iter().enumerate() {
-        h.set(&format!("ZTILE{}", i + 1), t as i64);
-    }
+    set_zimage_axes(&mut h, cmptype, zbitpix, dims, &tiles);
     if cmptype == "RICE_1" {
         h.set("ZNAME1", "BLOCKSIZE").set("ZVAL1", 32);
         h.set("ZNAME2", "BYTEPIX").set("ZVAL2", 4);
@@ -470,6 +442,42 @@ impl TileCell {
                 }
             }
         }
+    }
+}
+
+/// Resolve the tile shape for an image: the caller's `tile_shape` (each axis
+/// clamped to ≥1) when it has the right rank, else row-tiling — the first axis
+/// whole, the rest 1.
+fn resolve_tile_shape(dims: &[usize], tile_shape: &[usize]) -> Vec<usize> {
+    if tile_shape.len() == dims.len() {
+        tile_shape.iter().map(|&t| t.max(1)).collect()
+    } else {
+        (0..dims.len())
+            .map(|i| if i == 0 { dims[i].max(1) } else { 1 })
+            .collect()
+    }
+}
+
+/// Append the `ZIMAGE`/`ZCMPTYPE`/`ZBITPIX`/`ZNAXIS` keywords plus the per-axis
+/// `ZNAXISn`/`ZTILEn` series — the block shared verbatim by both the integer and
+/// float `ZIMAGE` headers.
+fn set_zimage_axes(
+    h: &mut Header,
+    cmptype: &str,
+    zbitpix: Bitpix,
+    dims: &[usize],
+    tiles: &[usize],
+) {
+    h.set("ZIMAGE", true)
+        .comment("ZIMAGE", "this is a tiled-compressed image");
+    h.set("ZCMPTYPE", cmptype);
+    h.set("ZBITPIX", zbitpix.code());
+    h.set("ZNAXIS", dims.len() as i64);
+    for (i, &n) in dims.iter().enumerate() {
+        h.set(&format!("ZNAXIS{}", i + 1), n as i64);
+    }
+    for (i, &t) in tiles.iter().enumerate() {
+        h.set(&format!("ZTILE{}", i + 1), t as i64);
     }
 }
 
@@ -658,7 +666,7 @@ fn decode_tile_cell(
             ))
         }
         "PLIO_1" => Ok(plio::plio_decode(as_i16(cell)?, tile_elems)),
-        "HCOMPRESS_1" => hcompress::hcompress_tile(as_bytes(cell)?, codec.smooth),
+        "HCOMPRESS_1" => hcompress::hcompress_tile(as_bytes(cell)?, codec.smooth, tile_elems),
         // §10.4: a tile stored verbatim — the cell is the raw big-endian pixels.
         "NOCOMPRESS" => Ok(be_to_i64(as_bytes(cell)?, int_bitpix)),
         other => Err(FitsError::UnsupportedCompression {
@@ -762,7 +770,7 @@ fn read_axes(header: &Header, prefix: &str, n: usize) -> Result<Vec<usize>> {
     (1..=n)
         .map(|i| match header.get_integer(&format!("{prefix}{i}")) {
             Some(v) if v >= 0 => Ok(v as usize),
-            Some(_) => Err(FitsError::WrongValueType { name: "ZNAXISn" }),
+            Some(_) => Err(FitsError::KeywordOutOfRange { name: "ZNAXISn" }),
             None => Err(FitsError::MissingKeyword { name: "ZNAXISn" }),
         })
         .collect()

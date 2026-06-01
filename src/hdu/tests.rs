@@ -63,7 +63,7 @@ fn rejects_malformed_pcount_and_gcount_instead_of_clamping() {
     ]);
     assert!(matches!(
         data_extent(&neg_pcount),
-        Err(FitsError::WrongValueType { name: "PCOUNT" })
+        Err(FitsError::KeywordOutOfRange { name: "PCOUNT" })
     ));
 
     let zero_gcount = header(&[
@@ -75,7 +75,7 @@ fn rejects_malformed_pcount_and_gcount_instead_of_clamping() {
     ]);
     assert!(matches!(
         data_extent(&zero_gcount),
-        Err(FitsError::WrongValueType { name: "GCOUNT" })
+        Err(FitsError::KeywordOutOfRange { name: "GCOUNT" })
     ));
 }
 

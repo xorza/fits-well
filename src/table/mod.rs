@@ -89,7 +89,7 @@ impl TformKind {
 
     /// Bytes per element. For `X` this is the per-*bit* size (1) — use
     /// [`Tform::byte_width`] for a column's true in-row width.
-    fn elem_size(self) -> usize {
+    pub(crate) fn elem_size(self) -> usize {
         match self {
             TformKind::Logical | TformKind::Bit | TformKind::Byte | TformKind::Char => 1,
             TformKind::I16 => 2,
@@ -151,7 +151,10 @@ impl Tform {
     pub fn byte_width(self) -> usize {
         match self.kind {
             TformKind::Bit => self.repeat.div_ceil(8),
-            _ => self.repeat * self.kind.elem_size(),
+            // Saturating: an absurd `repeat` from a hostile `TFORMn` saturates to
+            // `usize::MAX` rather than wrapping to a small width that could slip
+            // past the row-width check in `from_data`.
+            _ => self.repeat.saturating_mul(self.kind.elem_size()),
         }
     }
 }
@@ -332,7 +335,7 @@ impl BinTable {
         // column `Vec` and drives the `TFORMn` loop (an absurd value would abort).
         let tfields = match header.get_integer("TFIELDS") {
             Some(t) if (0..=999).contains(&t) => t as usize,
-            Some(_) => return Err(FitsError::WrongValueType { name: "TFIELDS" }),
+            Some(_) => return Err(FitsError::KeywordOutOfRange { name: "TFIELDS" }),
             None => return Err(FitsError::MissingKeyword { name: "TFIELDS" }),
         };
 
@@ -360,7 +363,7 @@ impl BinTable {
                 tdisp: header.get_text(&format!("TDISP{n}")).and_then(TDisp::parse),
                 byte_offset: offset,
             });
-            offset += tform.byte_width();
+            offset = offset.saturating_add(tform.byte_width());
         }
         if offset != row_len {
             return Err(FitsError::RowWidthMismatch {
@@ -369,22 +372,28 @@ impl BinTable {
             });
         }
 
-        if data.len() < nrows * row_len {
+        // `nrows · row_len` from untrusted axes: check once (guards a 32-bit-usize
+        // overflow that `data_extent`'s u64 math wouldn't catch) and reuse.
+        let main_table = nrows.checked_mul(row_len).ok_or(FitsError::UnexpectedEof)?;
+        if data.len() < main_table {
             return Err(FitsError::UnexpectedEof);
         }
         let heap_offset = header
             .get_integer("THEAP")
-            .map_or(nrows * row_len, |t| t.max(0) as usize);
+            .map_or(main_table, |t| t.max(0) as usize);
         // §6.6: the heap follows the main table, so THEAP must be ≥ its size.
-        if heap_offset < nrows * row_len {
-            return Err(FitsError::WrongValueType { name: "THEAP" });
+        if heap_offset < main_table {
+            return Err(FitsError::KeywordOutOfRange { name: "THEAP" });
         }
         // PCOUNT counts the gap-plus-heap bytes after the main table, so the real
         // heap ends here — anything past it is block fill (§6.6).
         let pcount = header
             .get_integer("PCOUNT")
             .map_or(0, |p| p.max(0) as usize);
-        let heap_end = (nrows * row_len + pcount).min(data.len());
+        let heap_end = main_table
+            .checked_add(pcount)
+            .ok_or(FitsError::UnexpectedEof)?
+            .min(data.len());
         Ok(BinTable {
             nrows,
             columns,

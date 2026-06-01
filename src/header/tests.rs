@@ -156,7 +156,7 @@ fn naxis_beyond_999_is_rejected() {
     h.set("NAXIS", 1000);
     assert!(matches!(
         h.naxis(),
-        Err(FitsError::WrongValueType { name: "NAXIS" })
+        Err(FitsError::KeywordOutOfRange { name: "NAXIS" })
     ));
     h.set("NAXIS", 3);
     assert_eq!(h.naxis().unwrap(), 3);

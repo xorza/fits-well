@@ -6,19 +6,27 @@ use std::io::Cursor;
 
 #[test]
 fn parses_ascii_tform_codes() {
-    assert_eq!(parse_ascii_tform("A8").unwrap(), (AsciiKind::Char, 8, 0));
+    let fmt = |kind, width, decimals| AsciiFormat {
+        kind,
+        width,
+        decimals,
+    };
+    assert_eq!(parse_ascii_tform("A8").unwrap(), fmt(AsciiKind::Char, 8, 0));
     assert_eq!(
         parse_ascii_tform("I10").unwrap(),
-        (AsciiKind::Integer, 10, 0)
+        fmt(AsciiKind::Integer, 10, 0)
     );
-    assert_eq!(parse_ascii_tform("F8.2").unwrap(), (AsciiKind::Float, 8, 2));
+    assert_eq!(
+        parse_ascii_tform("F8.2").unwrap(),
+        fmt(AsciiKind::Float, 8, 2)
+    );
     assert_eq!(
         parse_ascii_tform("E15.7").unwrap(),
-        (AsciiKind::Float, 15, 7)
+        fmt(AsciiKind::Float, 15, 7)
     );
     assert_eq!(
         parse_ascii_tform("D25.17").unwrap(),
-        (AsciiKind::Float, 25, 17)
+        fmt(AsciiKind::Float, 25, 17)
     );
     assert!(parse_ascii_tform("Z3").is_err());
 }
@@ -283,6 +291,6 @@ fn ascii_tfields_beyond_999_is_rejected() {
         .set("TFIELDS", 1000);
     assert!(matches!(
         AsciiTable::from_data(&header, vec![]),
-        Err(FitsError::WrongValueType { name: "TFIELDS" })
+        Err(FitsError::KeywordOutOfRange { name: "TFIELDS" })
     ));
 }

@@ -17,7 +17,7 @@ fn reads_a_single_hdu_image_with_exact_boundaries() {
     assert_eq!(p.header.bitpix().unwrap(), Bitpix::I16);
     assert_eq!(p.header.axes().unwrap(), vec![512, 512]);
     assert_eq!(p.data_offset, 11_520);
-    assert_eq!(p.data_len, 527_040);
+    assert_eq!(padded_len(p.data_bytes), 527_040);
 }
 
 #[test]
@@ -30,12 +30,12 @@ fn reads_random_groups_primary_plus_bintable_extension() {
     assert_eq!(g.header.bitpix().unwrap(), Bitpix::F32);
     assert_eq!(g.header.axes().unwrap(), vec![0, 3, 4, 1, 1, 1]);
     assert_eq!(g.data_offset, 14_400);
-    assert_eq!(g.data_len, 573_120);
+    assert_eq!(padded_len(g.data_bytes), 573_120);
 
     let t = &f.hdus[1];
     assert_eq!(t.kind, HduKind::BinTable);
     assert_eq!(t.data_offset, 593_280);
-    assert_eq!(t.data_len, 2_880);
+    assert_eq!(padded_len(t.data_bytes), 2_880);
 }
 
 #[test]
@@ -47,12 +47,12 @@ fn reads_dataless_primary_then_bintable() {
     assert_eq!(p.kind, HduKind::Primary);
     assert_eq!(p.header.naxis().unwrap(), 0);
     assert_eq!(p.data_offset, 28_800);
-    assert_eq!(p.data_len, 0);
+    assert_eq!(padded_len(p.data_bytes), 0);
 
     let t = &f.hdus[1];
     assert_eq!(t.kind, HduKind::BinTable);
     assert_eq!(t.data_offset, 34_560);
-    assert_eq!(t.data_len, 14_400);
+    assert_eq!(padded_len(t.data_bytes), 14_400);
 }
 
 #[test]
@@ -159,7 +159,11 @@ fn last_data_unit_ends_exactly_at_end_of_file() {
         let file_len = std::fs::metadata(format!("tests/data/fits/{name}"))
             .unwrap()
             .len();
-        assert_eq!(last.data_offset + last.data_len, file_len, "{name}");
+        assert_eq!(
+            last.data_offset + padded_len(last.data_bytes),
+            file_len,
+            "{name}"
+        );
     }
 }
 

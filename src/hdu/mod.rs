@@ -63,12 +63,12 @@ pub(crate) fn data_extent(header: &Header) -> Result<DataExtent> {
     // plausible-but-wrong extent and a bad seek). Absence keeps the primary/IMAGE
     // defaults of 0 and 1.
     let pcount = match header.get_integer("PCOUNT") {
-        Some(p) if p < 0 => return Err(FitsError::WrongValueType { name: "PCOUNT" }),
+        Some(p) if p < 0 => return Err(FitsError::KeywordOutOfRange { name: "PCOUNT" }),
         Some(p) => p as u64,
         None => 0,
     };
     let gcount = match header.get_integer("GCOUNT") {
-        Some(g) if g < 1 => return Err(FitsError::WrongValueType { name: "GCOUNT" }),
+        Some(g) if g < 1 => return Err(FitsError::KeywordOutOfRange { name: "GCOUNT" }),
         Some(g) => g as u64,
         None => 1,
     };

@@ -126,7 +126,7 @@ fn col_meta(tform: &Tform, offset: usize, algo: Algo) -> Result<ColMeta> {
             name: "variable-length column in a compressed table".to_string(),
         });
     }
-    let elem_size = tform_elem_size(tform.kind);
+    let elem_size = tform.kind.elem_size();
     // Bit columns pack `repeat` bits into bytes; the in-row width is the byte_width.
     let width = tform.byte_width();
     let repeat = if width == 0 { 0 } else { width / elem_size };
@@ -138,19 +138,6 @@ fn col_meta(tform: &Tform, offset: usize, algo: Algo) -> Result<ColMeta> {
         offset,
         algo: pick_algo(tform.kind, algo),
     })
-}
-
-/// In-row element size in bytes for a column kind (`A`/`X` count as 1).
-fn tform_elem_size(kind: TformKind) -> usize {
-    match kind {
-        TformKind::Logical | TformKind::Bit | TformKind::Byte | TformKind::Char => 1,
-        TformKind::I16 => 2,
-        TformKind::I32 | TformKind::F32 => 4,
-        TformKind::I64 | TformKind::F64 | TformKind::ComplexF32 => 8,
-        TformKind::ComplexF64 => 16,
-        TformKind::ArrayDesc32 => 8,
-        TformKind::ArrayDesc64 => 16,
-    }
 }
 
 /// Compress a fixed-width `BINTABLE` into a `ZTABLE` container. `rows_per_tile`
@@ -277,7 +264,12 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
         .map(|ci| table.read_vla_column(ci))
         .collect::<Result<_>>()?;
 
-    let mut out = vec![0u8; nrows * naxis1];
+    // `ZNAXIS2 · ZNAXIS1` from untrusted header values (`nrows` is unbounded):
+    // guard the product so it can't wrap to a too-small output buffer.
+    let total = nrows
+        .checked_mul(naxis1)
+        .ok_or(FitsError::DataUnitOverflow)?;
+    let mut out = vec![0u8; total];
     for chunk in 0..nchunks {
         let r0 = chunk * rpt;
         let rows = rpt.min(nrows - r0);

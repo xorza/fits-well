@@ -121,16 +121,16 @@ impl Datetime {
         // Split into integer day (JDN at noon) and the fraction past midnight.
         let z = (jd + 0.5).floor();
         let frac = (jd + 0.5) - z;
-        let (year, month, day) = jdn_to_gregorian(z as i64);
+        let date = jdn_to_gregorian(z as i64);
         let mut secs = frac * SEC_PER_DAY;
         let hour = (secs / 3600.0).floor();
         secs -= hour * 3600.0;
         let minute = (secs / 60.0).floor();
         secs -= minute * 60.0;
         Datetime {
-            year,
-            month,
-            day,
+            year: date.year,
+            month: date.month,
+            day: date.day,
             hour: hour as u32,
             minute: minute as u32,
             second: secs,
@@ -269,9 +269,7 @@ impl TimeScale {
             TimeScale::Tt => jd,
             TimeScale::Tai => jd + TT_TAI / SEC_PER_DAY,
             TimeScale::Gps => jd + (TT_TAI + TAI_GPS) / SEC_PER_DAY,
-            TimeScale::Utc | TimeScale::Local => {
-                jd + (TT_TAI + leap_seconds(jd - MJD0)) / SEC_PER_DAY
-            }
+            TimeScale::Utc => jd + (TT_TAI + leap_seconds(jd - MJD0)) / SEC_PER_DAY,
             // UT1 → UTC (subtract ΔUT1) → TT.
             TimeScale::Ut1 => {
                 let utc = jd - dut1 / SEC_PER_DAY;
@@ -283,6 +281,8 @@ impl TimeScale {
                 let tdb = jd - L_B * (jd - T1977_JD) + TDB_0 / SEC_PER_DAY;
                 tdb - tdb_minus_tt(tdb) / SEC_PER_DAY
             }
+            // convert_dut1 returns early for Local, so it never reaches the pivot.
+            TimeScale::Local => unreachable!("convert_dut1 short-circuits Local"),
         }
     }
 }
@@ -293,7 +293,7 @@ fn from_tt(tt: f64, target: TimeScale, dut1: f64) -> f64 {
         TimeScale::Tt => tt,
         TimeScale::Tai => tt - TT_TAI / SEC_PER_DAY,
         TimeScale::Gps => tt - (TT_TAI + TAI_GPS) / SEC_PER_DAY,
-        TimeScale::Utc | TimeScale::Local => {
+        TimeScale::Utc => {
             let tai = tt - TT_TAI / SEC_PER_DAY;
             // leap is a function of UTC; one lookup at the TAI date suffices away
             // from the ≤1 s boundary ambiguity inherent to UTC.
@@ -311,6 +311,8 @@ fn from_tt(tt: f64, target: TimeScale, dut1: f64) -> f64 {
             let tdb = tt + tdb_minus_tt(tt) / SEC_PER_DAY;
             tdb + L_B * (tdb - T1977_JD) - TDB_0 / SEC_PER_DAY
         }
+        // convert_dut1 returns early for Local, so it never reaches the pivot.
+        TimeScale::Local => unreachable!("convert_dut1 short-circuits Local"),
     }
 }
 
@@ -392,8 +394,16 @@ fn gregorian_to_jdn(year: i64, month: i64, day: i64) -> i64 {
     day + (153 * m + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32045
 }
 
-/// Inverse of [`gregorian_to_jdn`]: JDN → `(year, month, day)`.
-fn jdn_to_gregorian(jdn: i64) -> (i64, u32, u32) {
+/// A proleptic-Gregorian calendar date — the result of [`jdn_to_gregorian`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CalendarDate {
+    year: i64,
+    month: u32,
+    day: u32,
+}
+
+/// Inverse of [`gregorian_to_jdn`]: JDN → calendar date.
+fn jdn_to_gregorian(jdn: i64) -> CalendarDate {
     let a = jdn + 32044;
     let b = (4 * a + 3) / 146097;
     let c = a - (146097 * b) / 4;
@@ -403,7 +413,11 @@ fn jdn_to_gregorian(jdn: i64) -> (i64, u32, u32) {
     let day = e - (153 * m + 2) / 5 + 1;
     let month = m + 3 - 12 * (m / 10);
     let year = 100 * b + d - 4800 + m / 10;
-    (year, month as u32, day as u32)
+    CalendarDate {
+        year,
+        month: month as u32,
+        day: day as u32,
+    }
 }
 
 /// A time from a `JEPOCH`/`BEPOCH` keyword: its MJD and the scale the keyword
@@ -653,7 +667,7 @@ pub fn time_axis_kind(ctype: &str) -> Option<TimeAxisKind> {
 
 /// True if a `CTYPE` denotes an absolute *time* axis (`'TIME'` or a time-scale
 /// name) — the kind [`FitsTime::time_axis_mjd`] resolves to an MJD.
-pub(crate) fn is_time_ctype(ctype: &str) -> bool {
+fn is_time_ctype(ctype: &str) -> bool {
     time_axis_kind(ctype) == Some(TimeAxisKind::Time)
 }
 

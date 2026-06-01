@@ -17,8 +17,8 @@ const MAGIC: [u8; 2] = [0xDD, 0x99];
 
 /// Decode an `HCOMPRESS_1` tile into row-major integer values (`ny` fastest, the
 /// FITS axis-1 order the orchestrator expects).
-pub(super) fn hcompress_tile(bytes: &[u8], smooth: bool) -> Result<Vec<i64>> {
-    let (a, _nx, _ny) = hdecompress(bytes, smooth)?;
+pub(super) fn hcompress_tile(bytes: &[u8], smooth: bool, tile_elems: usize) -> Result<Vec<i64>> {
+    let a = hdecompress(bytes, smooth, tile_elems)?;
     Ok(a.into_iter().map(|v| v as i64).collect())
 }
 
@@ -47,6 +47,17 @@ const CODE: [i32; 16] = [
     0x3e, 0x00, 0x01, 0x08, 0x02, 0x09, 0x1a, 0x1b, 0x03, 0x1c, 0x0a, 0x1d, 0x0b, 0x1e, 0x3f, 0x0c,
 ];
 const NCODE: [i32; 16] = [6, 3, 3, 4, 3, 4, 5, 5, 3, 5, 4, 5, 4, 5, 6, 4];
+
+/// `ceil(log2(n))` via cfitsio's exact float method (the `+0.5` round then a
+/// `> 1<<k` correction). Kept in floating point — not `usize::ilog2` — to stay
+/// bit-for-bit identical to the reference codec the golden tests check against.
+fn log2_ceil(n: usize) -> i32 {
+    let mut log2n = ((n as f64).ln() / 2f64.ln() + 0.5) as i32;
+    if n > (1 << log2n) {
+        log2n += 1;
+    }
+    log2n
+}
 
 /// Bit/byte output buffer (replaces cfitsio's file + `buffer2`/`bits_to_go2`
 /// globals). Holds the compressed byte stream.
@@ -232,10 +243,7 @@ impl BitOutput {
     /// `qtree_encode`). Falls back to a direct bitmap when the quadtree expands.
     fn qtree_encode(&mut self, a: &[i32], n: usize, nqx: usize, nqy: usize, nbitplanes: i32) {
         let nqmax = nqx.max(nqy);
-        let mut log2n = ((nqmax as f64).ln() / 2f64.ln() + 0.5) as i32;
-        if nqmax > (1 << log2n) {
-            log2n += 1;
-        }
+        let log2n = log2_ceil(nqmax);
         let nqx2 = nqx.div_ceil(2);
         let nqy2 = nqy.div_ceil(2);
         let bmax = (nqx2 * nqy2).div_ceil(2);
@@ -318,10 +326,7 @@ impl BitOutput {
 /// Forward H-transform (in place), the inverse of [`hinv`] (cfitsio `htrans`).
 fn htrans(a: &mut [i32], nx: usize, ny: usize) {
     let nmax = nx.max(ny);
-    let mut log2n = ((nmax as f64).ln() / 2f64.ln() + 0.5) as i32;
-    if nmax > (1 << log2n) {
-        log2n += 1;
-    }
+    let log2n = log2_ceil(nmax);
     let mut tmp = vec![0i32; nmax.div_ceil(2).max(1)];
 
     let mut shift = 0u32;
@@ -712,7 +717,7 @@ impl<'a> BitInput<'a> {
 }
 
 /// Top-level: header → quadtree decode → undigitize → inverse H-transform.
-fn hdecompress(input: &[u8], smooth: bool) -> Result<(Vec<i32>, usize, usize)> {
+fn hdecompress(input: &[u8], smooth: bool, tile_elems: usize) -> Result<Vec<i32>> {
     let mut bi = BitInput::new(input);
     if bi.read_bytes(2) != MAGIC {
         return Err(FitsError::UnsupportedCompression {
@@ -721,17 +726,26 @@ fn hdecompress(input: &[u8], smooth: bool) -> Result<(Vec<i32>, usize, usize)> {
     }
     let nx = bi.readint() as usize;
     let ny = bi.readint() as usize;
+    // nx/ny come from the untrusted stream; cross-check them against the tile's
+    // known element count before allocating/transforming. cfitsio sizes from these
+    // blindly — guarding here stops a hostile header from driving a wild `nx*ny`
+    // allocation (or an overflow, or an empty-buffer panic at `a[0]` below).
+    if tile_elems == 0 || nx.checked_mul(ny) != Some(tile_elems) {
+        return Err(FitsError::UnsupportedCompression {
+            name: "HCOMPRESS_1: tile dimensions do not match the tile size".to_string(),
+        });
+    }
     let scale = bi.readint();
     let sumall = bi.readlonglong();
     let nbitplanes = bi.read_bytes(3);
 
-    let mut a = vec![0i32; nx * ny];
+    let mut a = vec![0i32; tile_elems];
     dodecode(&mut bi, &mut a, nx, ny, &nbitplanes)?;
     a[0] = sumall as i32;
 
     undigitize(&mut a, scale);
     hinv(&mut a, nx, ny, scale, smooth);
-    Ok((a, nx, ny))
+    Ok(a)
 }
 
 fn undigitize(a: &mut [i32], scale: i32) {
@@ -799,10 +813,7 @@ fn qtree_decode(
     nbitplanes: i32,
 ) -> Result<()> {
     let nqmax = nqx.max(nqy);
-    let mut log2n = ((nqmax as f64).ln() / 2f64.ln() + 0.5) as i32;
-    if nqmax > (1 << log2n) {
-        log2n += 1;
-    }
+    let log2n = log2_ceil(nqmax);
     let nqx2 = nqx.div_ceil(2);
     let nqy2 = nqy.div_ceil(2);
     let mut scratch = vec![0u8; nqx2 * nqy2];
@@ -998,10 +1009,7 @@ fn read_bdirect(
 /// Inverse H-transform (in place), `SMOOTH = 0`.
 fn hinv(a: &mut [i32], nx: usize, ny: usize, scale: i32, smooth: bool) {
     let nmax = nx.max(ny);
-    let mut log2n = ((nmax as f64).ln() / 2f64.ln() + 0.5) as i32;
-    if nmax > (1 << log2n) {
-        log2n += 1;
-    }
+    let log2n = log2_ceil(nmax);
     let mut tmp = vec![0i32; nmax.div_ceil(2)];
 
     let mut shift = 1;

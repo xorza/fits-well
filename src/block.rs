@@ -28,8 +28,13 @@ pub fn blocks_for(len: u64) -> u64 {
 }
 
 /// `len` rounded up to the next 2880-byte boundary (the on-disk unit length).
+///
+/// Saturating: an absurd `len` (within `2880` of `u64::MAX`, only reachable from
+/// a hostile header) clamps to `u64::MAX` rather than wrapping to a too-small
+/// length that would corrupt the next-HDU seek. `data_extent` already rejects
+/// such sizes upstream; this keeps the rounding itself defense-complete.
 pub fn padded_len(len: u64) -> u64 {
-    blocks_for(len) * BLOCK_SIZE as u64
+    blocks_for(len).saturating_mul(BLOCK_SIZE as u64)
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ use std::ops::Range;
 use crate::ascii::AsciiTable;
 use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
+use crate::block::padded_len;
 use crate::checksum;
 use crate::data::Image;
 use crate::data::ImageData;
@@ -34,10 +35,8 @@ pub struct Hdu {
     /// Byte offset of the data unit from the start of the source.
     pub(crate) data_offset: u64,
     /// Unpadded data length (`Nbits / 8`) — where the meaningful data ends within
-    /// the padded unit.
+    /// the padded unit. The on-disk length is `padded_len(data_bytes)`.
     pub(crate) data_bytes: u64,
-    /// On-disk (block-padded) length of the data unit in bytes.
-    pub(crate) data_len: u64,
 }
 
 /// A data unit read from the source: the full block-padded bytes plus the range
@@ -65,6 +64,9 @@ impl DataUnit {
 pub struct FitsReader<R> {
     source: R,
     pub hdus: Vec<Hdu>,
+    /// The source's total length, captured once at open — used to reject a header
+    /// that claims a data unit larger than the file before allocating for it.
+    stream_len: u64,
 }
 
 impl<R: Read + Seek> FitsReader<R> {
@@ -91,7 +93,6 @@ impl<R: Read + Seek> FitsReader<R> {
                         header_bytes,
                         data_offset,
                         data_bytes: extent.data_bytes,
-                        data_len: extent.padded_bytes,
                     });
                 }
                 NextHeader::End => break,
@@ -102,7 +103,12 @@ impl<R: Read + Seek> FitsReader<R> {
                 NextHeader::Trailing => break,
             }
         }
-        Ok(FitsReader { source, hdus })
+        let stream_len = source.seek(SeekFrom::End(0))?;
+        Ok(FitsReader {
+            source,
+            hdus,
+            stream_len,
+        })
     }
 
     /// The HDU at `index` (panics if out of range — check `self.hdus.len()` first).
@@ -120,16 +126,15 @@ impl<R: Read + Seek> FitsReader<R> {
             len: self.hdus.len(),
         })?;
         let data_offset = hdu.data_offset;
-        let data_len = hdu.data_len;
+        let data_len = padded_len(hdu.data_bytes);
         let data_range = 0..hdu.data_bytes as usize;
-        // Bound the allocation by the source's real length: a hostile header can
-        // claim a data unit far larger than the file, which would otherwise drive a
-        // huge `vec![0u8; data_len]` before `read_exact` ever fails. Refuse up front
-        // when the declared unit can't physically fit in the stream.
-        let stream_len = self.source.seek(SeekFrom::End(0))?;
+        // Bound the allocation by the source's real length (captured at open): a
+        // hostile header can claim a data unit far larger than the file, which would
+        // otherwise drive a huge `vec![0u8; data_len]` before `read_exact` ever
+        // fails. Refuse up front when the declared unit can't physically fit.
         if data_offset
             .checked_add(data_len)
-            .is_none_or(|end| end > stream_len)
+            .is_none_or(|end| end > self.stream_len)
         {
             return Err(FitsError::UnexpectedEof);
         }
@@ -162,13 +167,15 @@ impl<R: Read + Seek> FitsReader<R> {
         let scaling = Scaling::from_header(&hdu.header);
         let samples = ImageData::decode(unit.data(), bitpix);
 
-        let expected = shape_product(&shape);
-        if samples.len() != expected {
-            return Err(FitsError::DataSizeMismatch {
-                expected,
-                got: samples.len(),
-            });
-        }
+        // With PCOUNT=0/GCOUNT=1 (checked above), `data_extent` sized the unit as
+        // `elem · Π(axes)`, so `decode` yields exactly `shape_product` samples. This
+        // is an invariant between `data_extent` and `decode`, not a runtime failure
+        // mode — assert it rather than return a `DataSizeMismatch` that can't occur.
+        debug_assert_eq!(
+            samples.len(),
+            shape_product(&shape),
+            "image decode element count must match the axis product"
+        );
         Ok(Image {
             shape,
             samples,

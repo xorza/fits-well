@@ -3,9 +3,16 @@
 use crate::bitpix::Bitpix;
 use crate::header::Header;
 
-/// Rice `(blocksize, bytepix)` from the `ZNAMEi`/`ZVALi` parameters, defaulting to
-/// 32 and `|ZBITPIX|/8`.
-pub(super) fn rice_params(header: &Header, zbitpix: Bitpix) -> (usize, usize) {
+/// Rice block size and pixel width, from the `ZNAMEi`/`ZVALi` parameters.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RiceParams {
+    pub blocksize: usize,
+    pub bytepix: usize,
+}
+
+/// Rice parameters from the `ZNAMEi`/`ZVALi` keywords, defaulting to a block size
+/// of 32 and `bytepix = |ZBITPIX|/8`.
+pub(super) fn rice_params(header: &Header, zbitpix: Bitpix) -> RiceParams {
     let mut blocksize = 32;
     let mut bytepix = zbitpix.elem_size();
     let mut i = 1;
@@ -19,7 +26,7 @@ pub(super) fn rice_params(header: &Header, zbitpix: Bitpix) -> (usize, usize) {
         }
         i += 1;
     }
-    (blocksize, bytepix)
+    RiceParams { blocksize, bytepix }
 }
 
 /// Decode a `RICE_1` tile into `nx` integer values.
@@ -161,10 +168,6 @@ impl BitOutput {
         }
     }
 
-    fn putc(out: &mut Vec<u8>, c: i64) {
-        out.push((c & 0xff) as u8);
-    }
-
     fn output_nbits(&mut self, bits: i64, mut n: i32) {
         let mask = |k: i32| {
             if k >= 32 {
@@ -178,7 +181,7 @@ impl BitOutput {
         if ltg + n > 32 {
             lb <<= ltg;
             lb |= (bits >> (n - ltg)) & mask(ltg);
-            Self::putc(&mut self.out, lb & 0xff);
+            self.out.push((lb & 0xff) as u8);
             n -= ltg;
             ltg = 8;
         }
@@ -186,7 +189,7 @@ impl BitOutput {
         lb |= bits & mask(n);
         ltg -= n;
         while ltg <= 0 {
-            Self::putc(&mut self.out, (lb >> (-ltg)) & 0xff);
+            self.out.push(((lb >> (-ltg)) & 0xff) as u8);
             ltg += 8;
         }
         self.bitbuffer = lb;
@@ -203,10 +206,10 @@ impl BitOutput {
             self.bits_to_go -= (top + 1) as i32;
         } else {
             self.bitbuffer <<= self.bits_to_go;
-            Self::putc(&mut self.out, self.bitbuffer & 0xff);
+            self.out.push((self.bitbuffer & 0xff) as u8);
             let mut t = top - self.bits_to_go as i64;
             while t >= 8 {
-                Self::putc(&mut self.out, 0);
+                self.out.push(0);
                 t -= 8;
             }
             self.bitbuffer = 1;
@@ -217,7 +220,8 @@ impl BitOutput {
             self.bitbuffer |= v & fsmask;
             self.bits_to_go -= fs;
             while self.bits_to_go <= 0 {
-                Self::putc(&mut self.out, (self.bitbuffer >> (-self.bits_to_go)) & 0xff);
+                self.out
+                    .push(((self.bitbuffer >> (-self.bits_to_go)) & 0xff) as u8);
                 self.bits_to_go += 8;
             }
         }
@@ -225,7 +229,8 @@ impl BitOutput {
 
     fn done(&mut self) {
         if self.bits_to_go < 8 {
-            Self::putc(&mut self.out, self.bitbuffer << self.bits_to_go);
+            self.out
+                .push(((self.bitbuffer << self.bits_to_go) & 0xff) as u8);
         }
     }
 }
@@ -265,9 +270,15 @@ impl<'a> BitReader<'a> {
     }
 
     /// Count and consume leading zero bits up to (and including) the next 1.
+    /// Stops once the real input is exhausted: `read` zero-fills past EOF, so a
+    /// truncated/malformed tile with no terminating 1 bit would otherwise spin this
+    /// loop forever (a DoS on untrusted compressed bytes).
     pub(super) fn read_zeros(&mut self) -> u64 {
         let mut z = 0;
         while self.read(1) == 0 {
+            if self.pos > self.bytes.len() {
+                break;
+            }
             z += 1;
         }
         z

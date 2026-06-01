@@ -25,10 +25,18 @@ pub struct RandomGroups {
     pub pcount: usize,
     bitpix: Bitpix,
     array_scaling: Scaling,
-    /// `(PSCALn, PZEROn)` per parameter.
-    param_scaling: Vec<(f64, f64)>,
+    /// `PSCALn`/`PZEROn` per parameter.
+    param_scaling: Vec<ParamScale>,
     /// Flat host-endian samples: `gcount` groups of `pcount + array_len` elements.
     samples: ImageData,
+}
+
+/// `PSCALn`/`PZEROn` linear scaling for one group parameter
+/// (`physical = pzero + pscal · raw`).
+#[derive(Debug, Clone, Copy)]
+struct ParamScale {
+    pscal: f64,
+    pzero: f64,
 }
 
 impl RandomGroups {
@@ -38,12 +46,12 @@ impl RandomGroups {
         // NAXIS1 is the zero sentinel; the per-group array spans the rest.
         let group_shape: Vec<usize> = axes.iter().skip(1).copied().collect();
         let pcount = match header.get_integer("PCOUNT") {
-            Some(p) if p < 0 => return Err(FitsError::WrongValueType { name: "PCOUNT" }),
+            Some(p) if p < 0 => return Err(FitsError::KeywordOutOfRange { name: "PCOUNT" }),
             Some(p) => p as usize,
             None => 0,
         };
         let gcount = match header.get_integer("GCOUNT") {
-            Some(g) if g < 1 => return Err(FitsError::WrongValueType { name: "GCOUNT" }),
+            Some(g) if g < 1 => return Err(FitsError::KeywordOutOfRange { name: "GCOUNT" }),
             Some(g) => g as usize,
             None => 1,
         };
@@ -57,10 +65,10 @@ impl RandomGroups {
                     .unwrap_or("")
                     .to_string(),
             );
-            param_scaling.push((
-                header.get_real(&format!("PSCAL{j}")).unwrap_or(1.0),
-                header.get_real(&format!("PZERO{j}")).unwrap_or(0.0),
-            ));
+            param_scaling.push(ParamScale {
+                pscal: header.get_real(&format!("PSCAL{j}")).unwrap_or(1.0),
+                pzero: header.get_real(&format!("PZERO{j}")).unwrap_or(0.0),
+            });
         }
 
         let samples = ImageData::decode(data, bitpix);
@@ -99,7 +107,7 @@ impl RandomGroups {
         let base = group * self.group_len();
         (0..self.pcount)
             .map(|j| {
-                let (pscal, pzero) = self.param_scaling[j];
+                let ParamScale { pscal, pzero } = self.param_scaling[j];
                 pzero + pscal * elem_f64(&self.samples, base + j)
             })
             .collect()
@@ -117,7 +125,7 @@ impl RandomGroups {
         for j in 0..self.pcount {
             if self.parameter_names[j] == name {
                 found = true;
-                let (pscal, pzero) = self.param_scaling[j];
+                let ParamScale { pscal, pzero } = self.param_scaling[j];
                 sum += pzero + pscal * elem_f64(&self.samples, base + j);
             }
         }

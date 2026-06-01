@@ -109,7 +109,7 @@ impl Header {
         // so an absurd `NAXIS` from an untrusted header would otherwise abort.
         match usize::try_from(n) {
             Ok(n) if n <= 999 => Ok(n),
-            _ => Err(FitsError::WrongValueType { name: "NAXIS" }),
+            _ => Err(FitsError::KeywordOutOfRange { name: "NAXIS" }),
         }
     }
 
@@ -122,7 +122,8 @@ impl Header {
                 .get_integer(&format!("NAXIS{n}"))
                 .ok_or(FitsError::MissingKeyword { name: "NAXISn" })?;
             axes.push(
-                usize::try_from(len).map_err(|_| FitsError::WrongValueType { name: "NAXISn" })?,
+                usize::try_from(len)
+                    .map_err(|_| FitsError::KeywordOutOfRange { name: "NAXISn" })?,
             );
         }
         Ok(axes)

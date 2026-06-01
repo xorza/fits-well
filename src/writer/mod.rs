@@ -227,11 +227,7 @@ impl<W: Write> FitsWriter<W> {
             expected,
             "image sample count must match the shape product"
         );
-        let header = if self.has_primary {
-            image_extension_header(image)
-        } else {
-            primary_image_header(image)
-        };
+        let header = image_header(image, !self.has_primary);
         self.has_primary = true;
         self.write_hdu(header, image.samples.encode(), ZERO_FILL)
     }
@@ -287,9 +283,10 @@ impl<W: Write> FitsWriter<W> {
         let mut tbcols = Vec::with_capacity(columns.len());
         let mut row_len = 0;
         for col in columns {
-            if ascii_count(&col.data)? != nrows {
+            let count = ascii_count(&col.data)?;
+            if count != nrows {
                 return Err(FitsError::RowWidthMismatch {
-                    computed: ascii_count(&col.data)?,
+                    computed: count,
                     declared: nrows,
                 });
             }
@@ -404,28 +401,26 @@ fn empty_primary_header() -> Header {
     header
 }
 
-/// Primary-array header for an image (§4.4.1).
-fn primary_image_header(image: &Image) -> Header {
+/// Image header: the primary array (§4.4.1) when `primary`, else an `IMAGE`
+/// extension (§7.1). The two differ only in the prologue (`SIMPLE`+`EXTEND` vs
+/// `XTENSION`+`PCOUNT`/`GCOUNT`); the axes and scaling keywords are identical.
+fn image_header(image: &Image, primary: bool) -> Header {
     let mut header = Header::new();
-    header
-        .set("SIMPLE", true)
-        .comment("SIMPLE", "file conforms to FITS standard");
-    add_image_axes(&mut header, image);
-    header
-        .set("EXTEND", true)
-        .comment("EXTEND", "extensions may follow");
-    add_scaling(&mut header, image);
-    header
-}
-
-/// `IMAGE` extension header (§7.1).
-fn image_extension_header(image: &Image) -> Header {
-    let mut header = Header::new();
-    header
-        .set("XTENSION", "IMAGE")
-        .comment("XTENSION", "image extension");
-    add_image_axes(&mut header, image);
-    header.set("PCOUNT", 0).set("GCOUNT", 1);
+    if primary {
+        header
+            .set("SIMPLE", true)
+            .comment("SIMPLE", "file conforms to FITS standard");
+        add_image_axes(&mut header, image);
+        header
+            .set("EXTEND", true)
+            .comment("EXTEND", "extensions may follow");
+    } else {
+        header
+            .set("XTENSION", "IMAGE")
+            .comment("XTENSION", "image extension");
+        add_image_axes(&mut header, image);
+        header.set("PCOUNT", 0).set("GCOUNT", 1);
+    }
     add_scaling(&mut header, image);
     header
 }
@@ -504,9 +499,15 @@ fn bintable_header(
     header
 }
 
-/// The `(code letter, element byte size)` for a column's data kind.
-fn column_code(data: &ColumnData) -> (char, usize) {
-    match data {
+/// The `TFORMn` letter and element byte size for a column's data kind.
+#[derive(Debug, Clone, Copy)]
+struct ColumnCode {
+    letter: char,
+    elem_size: usize,
+}
+
+fn column_code(data: &ColumnData) -> ColumnCode {
+    let (letter, elem_size) = match data {
         ColumnData::Logical(_) => ('L', 1),
         ColumnData::Bytes(_) => ('B', 1),
         ColumnData::I16(_) => ('I', 2),
@@ -517,11 +518,12 @@ fn column_code(data: &ColumnData) -> (char, usize) {
         ColumnData::ComplexF32(_) => ('C', 8),
         ColumnData::ComplexF64(_) => ('M', 16),
         ColumnData::Text(_) => ('A', 1),
-    }
+    };
+    ColumnCode { letter, elem_size }
 }
 
 fn tform_of(col: &WriteColumn) -> String {
-    let (code, _) = column_code(&col.data);
+    let code = column_code(&col.data).letter;
     if let Some(nbits) = col.bits {
         return format!("{nbits}X");
     }
@@ -542,7 +544,7 @@ fn tform_of(col: &WriteColumn) -> String {
 
 /// Validate a column against `nrows` and return its per-row byte width.
 fn check_column(col: &WriteColumn, nrows: usize) -> Result<usize> {
-    let (_, elem) = column_code(&col.data);
+    let elem = column_code(&col.data).elem_size;
     if let Some(rows) = &col.vla {
         if rows.len() != nrows {
             return Err(FitsError::RowWidthMismatch {

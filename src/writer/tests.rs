@@ -1,5 +1,6 @@
 use super::*;
 use crate::block::ZERO_FILL;
+use crate::block::padded_len;
 use crate::data::{ImageData, Scaling, UnsignedView};
 use crate::hdu::HduKind;
 use crate::header::from_card_lines as header;
@@ -348,7 +349,7 @@ fn written_file_reads_back_with_matching_boundaries() {
     let f = FitsReader::open(Cursor::new(bytes)).unwrap();
     assert_eq!(f.hdus.len(), 1);
     assert_eq!(f.hdus[0].data_offset, BLOCK_SIZE as u64);
-    assert_eq!(f.hdus[0].data_len, BLOCK_SIZE as u64);
+    assert_eq!(padded_len(f.hdus[0].data_bytes), BLOCK_SIZE as u64);
     assert_eq!(f.hdus[0].header.axes().unwrap(), vec![10]);
 }
 

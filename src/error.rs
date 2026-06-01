@@ -24,8 +24,10 @@ pub enum FitsError {
     MissingKeyword {
         name: &'static str,
     },
-    /// A keyword was present but held the wrong value type for its role.
-    WrongValueType {
+    /// A keyword was present and well-typed but its value lies outside the range
+    /// the standard permits for its role (e.g. `NAXIS > 999`, `PCOUNT < 0`,
+    /// `GCOUNT < 1`, a negative axis length, or a `THEAP` that precedes the heap).
+    KeywordOutOfRange {
         name: &'static str,
     },
     /// The byte stream ended in the middle of a header or data unit.
@@ -120,8 +122,8 @@ impl fmt::Display for FitsError {
             FitsError::InvalidBitpix { code } => write!(f, "invalid BITPIX value {code}"),
             FitsError::MissingEnd => write!(f, "header unit ended without an END record"),
             FitsError::MissingKeyword { name } => write!(f, "missing mandatory keyword {name}"),
-            FitsError::WrongValueType { name } => {
-                write!(f, "keyword {name} has the wrong value type")
+            FitsError::KeywordOutOfRange { name } => {
+                write!(f, "keyword {name} has an out-of-range value")
             }
             FitsError::UnexpectedEof => write!(f, "unexpected end of stream inside a FITS unit"),
             FitsError::DataUnitOverflow => {
