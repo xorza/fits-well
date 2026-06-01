@@ -10,14 +10,18 @@ categories = ["science", "parser-implementations"]
 
 [dependencies]
 flate2 = { version = "1.1", optional = true }
+rayon = { version = "1", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
 
 [features]
 default = []
-# rayon-backed parallel bulk endian-swap + BSCALE/BZERO scaling (scalar fallback otherwise).
-parallel = []
+# rayon-backed tile-parallel (de)compression — the codecs are compute-bound and
+# tiles are independent, so this scales near-linearly. Scalar fallback otherwise.
+# (The raw byte-swap / BSCALE-BZERO paths are memory-bound; SIMD is their lever,
+# not threads, so they are deliberately not parallelized.)
+parallel = ["dep:rayon"]
 # memory-mapped read sources for zero-copy access over large files.
 mmap = []
 # tiled image decompression: GZIP_1 (via flate2) and RICE_1; HCOMPRESS_1/PLIO_1 TODO.
