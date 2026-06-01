@@ -209,16 +209,20 @@ impl Card {
     /// single record is split into a `CONTINUE` chain (§4.2.1.2) instead of being
     /// silently truncated; every other card renders to exactly one record.
     pub(crate) fn render_records(&self) -> Vec<[u8; CARD_SIZE]> {
-        if self.kind == CardKind::Value
-            && let Some(Value::Text(s)) = &self.value
-        {
-            // The value field spans bytes 11–80 (70 bytes). If the quoted (escaped)
-            // value plus any " / comment" overflows it, emit a CONTINUE chain.
-            // Short-string padding is ignored — padded strings never overflow.
+        // A string value that overflows one record emits a CONTINUE chain (§4.2.1.2)
+        // instead of being truncated — for both plain value cards (value field at
+        // byte 11) and HIERARCH cards (whose `HIERARCH key = ` prefix is longer).
+        if let Some(Value::Text(s)) = &self.value {
             let value_len = 2 + s.replace('\'', "''").len();
             let comment_len = self.comment.as_ref().map_or(0, |c| 3 + c.len());
-            if 10 + value_len + comment_len > CARD_SIZE {
-                return render_long_string(&self.keyword, s, self.comment.as_deref());
+            let prefix_len = match self.kind {
+                CardKind::Value => 10,
+                CardKind::Hierarch => "HIERARCH ".len() + self.keyword.len() + " = ".len(),
+                _ => usize::MAX, // other kinds never use the chain
+            };
+            if prefix_len != usize::MAX && prefix_len + value_len + comment_len > CARD_SIZE {
+                let hierarch = self.kind == CardKind::Hierarch;
+                return render_long_string(&self.keyword, s, self.comment.as_deref(), hierarch);
             }
         }
         vec![self.render()]
@@ -391,34 +395,55 @@ fn comment_text(field: &str) -> Option<String> {
 /// holds `KEYWORD= 'sub&'`, each following one `CONTINUE  'sub&'`, and the final
 /// substring drops the `&` and carries any comment. The string value is never
 /// lost; only an over-long comment on the final record may be clipped.
-fn render_long_string(keyword: &str, value: &str, comment: Option<&str>) -> Vec<[u8; CARD_SIZE]> {
+fn render_long_string(
+    keyword: &str,
+    value: &str,
+    comment: Option<&str>,
+    hierarch: bool,
+) -> Vec<[u8; CARD_SIZE]> {
     // Bytes 12–79 hold the quoted substring (68 chars); reserve one for the
-    // continuation `&`, leaving 67 escaped characters per record.
+    // continuation `&`, leaving 67 escaped characters per continuation record.
     const PER_RECORD: usize = 67;
-    let subs = split_escaped(value, PER_RECORD);
+    // A HIERARCH first record is `HIERARCH key = '…&'`, so its prefix shrinks the
+    // budget for that record's substring; otherwise the first record matches the
+    // 67-char continuation budget.
+    let prefix = hierarch.then(|| format!("HIERARCH {keyword} = "));
+    let first_budget = prefix
+        .as_ref()
+        .map_or(PER_RECORD, |p| CARD_SIZE.saturating_sub(p.len() + 3));
+    let subs = split_escaped(value, first_budget, PER_RECORD);
     let last = subs.len() - 1;
     subs.iter()
         .enumerate()
         .map(|(i, sub)| {
             let mut buf = [b' '; CARD_SIZE];
-            if i == 0 {
-                let kw = keyword.as_bytes();
-                let n = kw.len().min(8);
-                buf[..n].copy_from_slice(&kw[..n]);
-                buf[8] = b'=';
-            } else {
-                buf[..8].copy_from_slice(b"CONTINUE");
-            }
             let body = if i == last {
                 format!("'{sub}'")
             } else {
                 format!("'{sub}&'")
             };
-            write_at(&mut buf, 10, &body);
+            let body_start = match (i, &prefix) {
+                (0, Some(p)) => {
+                    write_at(&mut buf, 0, p);
+                    p.len()
+                }
+                (0, None) => {
+                    let kw = keyword.as_bytes();
+                    let n = kw.len().min(8);
+                    buf[..n].copy_from_slice(&kw[..n]);
+                    buf[8] = b'=';
+                    10
+                }
+                _ => {
+                    buf[..8].copy_from_slice(b"CONTINUE");
+                    10
+                }
+            };
+            write_at(&mut buf, body_start, &body);
             if i == last
                 && let Some(c) = comment
             {
-                write_at(&mut buf, 10 + body.len(), &format!(" / {c}"));
+                write_at(&mut buf, body_start + body.len(), &format!(" / {c}"));
             }
             buf
         })
@@ -428,12 +453,18 @@ fn render_long_string(keyword: &str, value: &str, comment: Option<&str>) -> Vec<
 /// Split `value` into substrings whose *escaped* form (`'` → `''`) is at most
 /// `budget` characters. Splitting on source characters keeps an escaped quote
 /// pair atomic, so a `''` never straddles a record boundary.
-fn split_escaped(value: &str, budget: usize) -> Vec<String> {
+fn split_escaped(value: &str, first_budget: usize, rest_budget: usize) -> Vec<String> {
     let mut subs = Vec::new();
     let mut cur = String::new();
     let mut len = 0;
     for ch in value.chars() {
         let w = if ch == '\'' { 2 } else { 1 };
+        // The first record may hold fewer chars (a HIERARCH prefix eats into it).
+        let budget = if subs.is_empty() {
+            first_budget
+        } else {
+            rest_budget
+        };
         if len + w > budget {
             subs.push(std::mem::take(&mut cur));
             len = 0;
