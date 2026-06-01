@@ -11,6 +11,9 @@ categories = ["science", "parser-implementations"]
 [dependencies]
 flate2 = { version = "1.1", optional = true }
 
+[dev-dependencies]
+criterion = "0.8"
+
 [features]
 default = []
 # rayon-backed parallel bulk endian-swap + BSCALE/BZERO scaling (scalar fallback otherwise).
@@ -20,3 +23,14 @@ mmap = []
 # tiled image decompression: GZIP_1 (via flate2) and RICE_1; HCOMPRESS_1/PLIO_1 TODO.
 # The WCS (§8) and time (§9) layers are dependency-free and always compiled.
 compression = ["dep:flate2"]
+# Re-expose the hot internal decode/encode entry points for microbenchmarks only.
+# NOT a stable API surface — the benches under `benches/` enable it.
+internals = []
+
+# Throughput benchmarks: `cargo bench --features internals`. The data unit is
+# black-boxed and tagged with `Throughput::Bytes`, so results read in GiB/s and are
+# directly comparable to memory bandwidth.
+[[bench]]
+name = "decode"
+harness = false
+required-features = ["internals"]
