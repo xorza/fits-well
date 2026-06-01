@@ -29,7 +29,14 @@ fn parses_tan_header() {
     assert_eq!(w.crpix, vec![256.0, 256.0]);
     // Zenithal pole reduces to (CRVAL, LONPOLE=180).
     let c = w.celestial.expect("celestial");
-    assert_eq!(c.pole, (150.0, 2.5, 180.0));
+    assert_eq!(
+        c.pole,
+        CelestialPole {
+            ra: 150.0,
+            dec: 2.5,
+            lonpole: 180.0
+        }
+    );
 }
 
 #[test]
