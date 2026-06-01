@@ -86,6 +86,27 @@ impl ImageData {
     }
 }
 
+/// The `BZERO` offsets that realize the FITS unsigned-integer convention: a
+/// sign-bit flip (`2^(n-1)`), exactly representable as `f64`.
+const U16_OFFSET: f64 = 32_768.0; // 2¹⁵
+const U32_OFFSET: f64 = 2_147_483_648.0; // 2³¹
+const U64_OFFSET: f64 = 9_223_372_036_854_775_808.0; // 2⁶³
+
+/// A typed integer realization of the FITS unsigned (and signed-byte) storage
+/// conventions — `BSCALE == 1` with `BZERO` the sign-bit offset. Values are exact
+/// (no `f64` rounding), recovered by flipping the stored sign bit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnsignedView {
+    /// `BITPIX = 8`, `BZERO = -128`: stored `u8` → `i8`.
+    I8(Vec<i8>),
+    /// `BITPIX = 16`, `BZERO = 2¹⁵`: stored `i16` → `u16`.
+    U16(Vec<u16>),
+    /// `BITPIX = 32`, `BZERO = 2³¹`: stored `i32` → `u32`.
+    U32(Vec<u32>),
+    /// `BITPIX = 64`, `BZERO = 2⁶³`: stored `i64` → `u64`.
+    U64(Vec<u64>),
+}
+
 /// An N-dimensional image: a flat, Fortran-ordered buffer (axis 0 varies
 /// fastest), the axis lengths from `NAXISn`, and the scaling map that turns its
 /// stored (raw) samples into physical values.
@@ -97,6 +118,35 @@ pub struct Image {
 }
 
 impl Image {
+    /// Reinterpret the stored buffer as exact typed integers when the scaling is
+    /// precisely a FITS unsigned-integer (or signed-byte) convention: `BSCALE == 1`,
+    /// no `BLANK`, and `BZERO` the matching sign-bit offset. Unlike
+    /// [`Image::physical`], this is exact for all 64-bit values (no `f64` rounding
+    /// past 2⁵³). Returns `None` for any other scaling or element type.
+    pub fn unsigned(&self) -> Option<UnsignedView> {
+        if self.scaling.bscale != 1.0 || self.scaling.blank.is_some() {
+            return None;
+        }
+        let bzero = self.scaling.bzero;
+        match &self.samples {
+            ImageData::U8(v) if bzero == -128.0 => Some(UnsignedView::I8(
+                v.iter().map(|&x| (x ^ 0x80) as i8).collect(),
+            )),
+            ImageData::I16(v) if bzero == U16_OFFSET => Some(UnsignedView::U16(
+                v.iter().map(|&x| (x as u16) ^ 0x8000).collect(),
+            )),
+            ImageData::I32(v) if bzero == U32_OFFSET => Some(UnsignedView::U32(
+                v.iter().map(|&x| (x as u32) ^ 0x8000_0000).collect(),
+            )),
+            ImageData::I64(v) if bzero == U64_OFFSET => Some(UnsignedView::U64(
+                v.iter()
+                    .map(|&x| (x as u64) ^ 0x8000_0000_0000_0000)
+                    .collect(),
+            )),
+            _ => None,
+        }
+    }
+
     /// The physical-plane values: `BZERO + BSCALE × sample` for every sample
     /// (§3.4). Integer samples equal to the `BLANK` sentinel become `NaN`; float
     /// `NaN`/`Inf` pass through. The unsigned-integer convention falls out for
