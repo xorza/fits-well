@@ -16,8 +16,8 @@
 //!
 //! - [`block`] — the 2880-byte block grid, padding rules, and rounding math.
 //! - [`Bitpix`] — the array element type selector (`BITPIX`).
-//! - [`Header`], [`Card`], [`Value`] — an *ordered* header model that round-trips
-//!   byte-for-byte, with a side index for O(1) keyword lookup.
+//! - [`Header`], [`Value`] — an *ordered* header model (an internal `Card` list)
+//!   that round-trips byte-for-byte, with a side index for O(1) keyword lookup.
 //! - [`HduKind`] — HDU classification and the data-unit sizing formula that makes
 //!   boundaries computable from headers alone (no data read required).
 //! - [`FitsReader`] — lazy, seeking access to the HDU sequence of a file.
@@ -54,7 +54,6 @@ pub use error::{FitsError, Result};
 pub use groups::RandomGroups;
 pub use hdu::HduKind;
 pub use header::Header;
-pub use header::card::{Card, CardKind};
 pub use header::value::Value;
 pub use reader::{ChecksumReport, DataUnit, FitsReader, Hdu};
 pub use table::{BinTable, Column, ColumnData, TDisp, TDispKind, Tform, TformKind};
