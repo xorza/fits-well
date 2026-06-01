@@ -66,3 +66,25 @@ pub use wcs::{Projection, Wcs};
 pub use writer::{AsciiWriteColumn, FitsWriter, WriteColumn};
 
 pub use block::{BLOCK_SIZE, CARD_SIZE, CARDS_PER_BLOCK, SPACE_FILL, ZERO_FILL};
+
+/// Hot internal entry points re-exposed **for benchmarking only** (the `internals`
+/// feature). These wrap crate-private functions so the benches under `benches/`
+/// can measure them in isolation; they are **not** a stable API — do not depend on
+/// them.
+#[cfg(feature = "internals")]
+pub mod internals {
+    use crate::bitpix::Bitpix;
+    use crate::data::ImageData;
+
+    /// Decode a big-endian data unit into host-endian samples — the per-element
+    /// byte-swap (`ImageData::decode`).
+    pub fn decode_image(bytes: &[u8], bitpix: Bitpix) -> ImageData {
+        ImageData::decode(bytes, bitpix)
+    }
+
+    /// Encode samples back to a big-endian buffer — the inverse swap
+    /// (`ImageData::encode`).
+    pub fn encode_image(data: &ImageData) -> Vec<u8> {
+        data.encode()
+    }
+}
