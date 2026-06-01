@@ -235,6 +235,20 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
     })
 }
 
+/// Per-worker tile-encode scratch, reused across the tiles one rayon worker
+/// handles (via `map_tiles`'s `init`): the tile geometry plus the widened pixel
+/// buffers the codec reads from. Reusing them means steady-state tile compression
+/// allocates only each tile's compressed output, not the gather buffers.
+#[derive(Debug, Default)]
+struct EncodeScratch {
+    tile: TileScratch,
+    /// The tile's pixels widened to `i64` — the integer codec input (and the
+    /// quantized int32 plane for float images).
+    ints: Vec<i64>,
+    /// The tile's pixels as `f64` (float images only; stays empty otherwise).
+    floats: Vec<f64>,
+}
+
 /// Encode an integer [`Image`] as a tiled-compressed `BINTABLE`: returns the
 /// `ZIMAGE` header and the data unit (per-tile `P` descriptors + the heap of
 /// compressed tile bytes). `tile_shape` of the wrong length falls back to
@@ -269,32 +283,30 @@ pub(crate) fn encode_image(
     // Compress every tile independently (the compute-bound step — parallel under
     // the `parallel` feature). The heap layout is sequential (each descriptor's
     // offset is the running heap length), so concatenate the cells serially after.
-    let cells = map_tiles(
-        ntiles,
-        TileScratch::default,
-        |scratch, t| -> Result<TileCell> {
-            geom.tile_into(t, scratch);
-            let vals: Vec<i64> = scratch.indices.iter().map(|&i| flat[i]).collect();
-            Ok(match cmptype {
-                "GZIP_1" => TileCell::Bytes(gzip::gzip_encode(&i64_to_be(&vals, bitpix))),
-                "GZIP_2" => TileCell::Bytes(gzip::gzip2_encode(&i64_to_be(&vals, bitpix), bytepix)),
-                "RICE_1" => TileCell::Bytes(rice::rice_encode(&vals, bytepix, 32)),
-                "PLIO_1" => TileCell::I16(plio::plio_encode(&vals, vals.len())),
-                "HCOMPRESS_1" => TileCell::Bytes(hcompress::hcompress_tile_encode(
-                    &vals,
-                    &scratch.tdims,
-                    scale,
-                )?),
-                // §10.4: store the tile's raw big-endian pixels, uncompressed.
-                "NOCOMPRESS" => TileCell::Bytes(i64_to_be(&vals, bitpix)),
-                other => {
-                    return Err(FitsError::UnsupportedCompression {
-                        name: format!("{other} (write)"),
-                    });
-                }
-            })
-        },
-    )?;
+    let cells = map_tiles(ntiles, EncodeScratch::default, |s, t| -> Result<TileCell> {
+        geom.tile_into(t, &mut s.tile);
+        s.ints.clear();
+        s.ints.extend(s.tile.indices.iter().map(|&i| flat[i]));
+        let vals = &s.ints;
+        Ok(match cmptype {
+            "GZIP_1" => TileCell::Bytes(gzip::gzip_encode(&i64_to_be(vals, bitpix))),
+            "GZIP_2" => TileCell::Bytes(gzip::gzip2_encode(&i64_to_be(vals, bitpix), bytepix)),
+            "RICE_1" => TileCell::Bytes(rice::rice_encode(vals, bytepix, 32)),
+            "PLIO_1" => TileCell::I16(plio::plio_encode(vals, vals.len())),
+            "HCOMPRESS_1" => TileCell::Bytes(hcompress::hcompress_tile_encode(
+                vals,
+                &s.tile.tdims,
+                scale,
+            )?),
+            // §10.4: store the tile's raw big-endian pixels, uncompressed.
+            "NOCOMPRESS" => TileCell::Bytes(i64_to_be(vals, bitpix)),
+            other => {
+                return Err(FitsError::UnsupportedCompression {
+                    name: format!("{other} (write)"),
+                });
+            }
+        })
+    })?;
 
     let mut descriptors: Vec<(usize, usize)> = Vec::with_capacity(ntiles);
     let mut heap: Vec<u8> = Vec::new();
@@ -401,21 +413,23 @@ fn encode_float_image(
     // are assembled serially after, since they are sequential.
     let tiles_out = map_tiles(
         ntiles,
-        TileScratch::default,
-        |scratch, t| -> Result<FloatTile> {
-            geom.tile_into(t, scratch);
-            let nx = scratch.tdims[0];
-            let ny = scratch.indices.len() / nx;
-            let vals: Vec<f64> = scratch.indices.iter().map(|&i| flat[i]).collect();
+        EncodeScratch::default,
+        |s, t| -> Result<FloatTile> {
+            geom.tile_into(t, &mut s.tile);
+            let nx = s.tile.tdims[0];
+            let ny = s.tile.indices.len() / nx;
+            s.floats.clear();
+            s.floats.extend(s.tile.indices.iter().map(|&i| flat[i]));
             let irow = t as i64 + zdither0; // = (1-based tile row) + ZDITHER0 - 1
             Ok(
-                match quantize::quantize_tile(&vals, nx, ny, 0.0, method, irow) {
+                match quantize::quantize_tile(&s.floats, nx, ny, 0.0, method, irow) {
                     Some(q) => {
-                        let ints: Vec<i64> = q.idata.iter().map(|&v| v as i64).collect();
+                        s.ints.clear();
+                        s.ints.extend(q.idata.iter().map(|&v| v as i64));
                         let bytes = match cmptype {
-                            "GZIP_1" => gzip::gzip_encode(&i64_to_be(&ints, int_bitpix)),
-                            "GZIP_2" => gzip::gzip2_encode(&i64_to_be(&ints, int_bitpix), 4),
-                            "RICE_1" => rice::rice_encode(&ints, 4, 32),
+                            "GZIP_1" => gzip::gzip_encode(&i64_to_be(&s.ints, int_bitpix)),
+                            "GZIP_2" => gzip::gzip2_encode(&i64_to_be(&s.ints, int_bitpix), 4),
+                            "RICE_1" => rice::rice_encode(&s.ints, 4, 32),
                             _ => unreachable!(),
                         };
                         FloatTile {
@@ -428,7 +442,7 @@ fn encode_float_image(
                     }
                     // Constant tile: store the raw floats, gzip'd, in the fallback.
                     None => FloatTile {
-                        bytes: gzip::gzip_encode(&float_to_be(&vals, zbitpix)),
+                        bytes: gzip::gzip_encode(&float_to_be(&s.floats, zbitpix)),
                         zscale: 0.0,
                         zzero: 0.0,
                         quantized: false,
