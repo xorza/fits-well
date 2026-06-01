@@ -6,7 +6,7 @@ use std::io::Write;
 use crate::bitpix::Bitpix;
 use crate::error::Result;
 
-use super::be_to_i64;
+use super::be_to_i64_into;
 
 /// Default deflate level — the [`crate::CompressOptions`] default and the fixed
 /// level for table-column gzip. Level 1 favors write speed (gzip was the slowest
@@ -65,14 +65,17 @@ pub(super) fn gunzip(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// `GZIP_1`: inflate to the tile's big-endian byte stream, then decode per `bitpix`.
-pub(super) fn gzip_tile(bytes: &[u8], bitpix: Bitpix) -> Result<Vec<i64>> {
-    Ok(be_to_i64(&gunzip(bytes)?, bitpix))
+/// `GZIP_1`: inflate to the tile's big-endian byte stream, then decode per `bitpix`
+/// into `out` (a reused buffer).
+pub(super) fn gzip_tile_into(bytes: &[u8], bitpix: Bitpix, out: &mut Vec<i64>) -> Result<()> {
+    be_to_i64_into(&gunzip(bytes)?, bitpix, out);
+    Ok(())
 }
 
 /// `GZIP_2`: like `GZIP_1` but the bytes are shuffled into significance planes
 /// (all most-significant bytes first, …) before gzip. Inflate, then un-shuffle.
-pub(super) fn gzip2_tile(bytes: &[u8], bitpix: Bitpix) -> Result<Vec<i64>> {
+pub(super) fn gzip2_tile_into(bytes: &[u8], bitpix: Bitpix, out: &mut Vec<i64>) -> Result<()> {
     let raw = unshuffle_bytes(&gunzip(bytes)?, bitpix.elem_size());
-    Ok(be_to_i64(&raw, bitpix))
+    be_to_i64_into(&raw, bitpix, out);
+    Ok(())
 }

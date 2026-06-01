@@ -6,7 +6,7 @@
 
 /// Encode `values` (one tile, `npix` non-negative mask pixels) as an IRAF PLIO
 /// line list — a port of cfitsio's `pl_p2li` with `xs = 1`. The returned i16 list
-/// round-trips through [`plio_decode`].
+/// round-trips through [`plio_decode_into`].
 pub(super) fn plio_encode(values: &[i64], npix: usize) -> Vec<i16> {
     // Header words (1-based lldst[1..=7]): the `-100` at index 3 selects the
     // 30-bit-length form the decoder reads from words 4/5; index 2 (=7) is the
@@ -106,11 +106,13 @@ pub(super) fn plio_encode(values: &[i64], npix: usize) -> Vec<i16> {
     ll
 }
 
-/// Decode an IRAF PLIO line list into `npix` mask values.
-pub(super) fn plio_decode(ll: &[i16], npix: usize) -> Vec<i64> {
-    let mut px = vec![0i64; npix];
+/// Decode an IRAF PLIO line list into `npix` mask values, written into `px` (cleared
+/// and zero-filled first; a reused buffer).
+pub(super) fn plio_decode_into(ll: &[i16], npix: usize, px: &mut Vec<i64>) {
+    px.clear();
+    px.resize(npix, 0);
     if npix == 0 {
-        return px;
+        return;
     }
     // List header: a positive ll[2] gives the length directly (older form); else
     // the length is a 30-bit value in ll[3..5] and instructions start at ll[1]+1.
@@ -124,7 +126,7 @@ pub(super) fn plio_decode(ll: &[i16], npix: usize) -> Vec<i64> {
         ((hi << 15) + lo, start)
     };
     if lllen == 0 {
-        return px;
+        return;
     }
 
     let xe = npix as i64; // pixel coordinates are 1-based; xs = 1
@@ -195,5 +197,4 @@ pub(super) fn plio_decode(ll: &[i16], npix: usize) -> Vec<i64> {
         }
         ip += 1;
     }
-    px
 }

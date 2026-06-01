@@ -30,8 +30,15 @@ pub(super) fn rice_params(header: &Header, zbitpix: Bitpix) -> RiceParams {
     RiceParams { blocksize, bytepix }
 }
 
-/// Decode a `RICE_1` tile into `nx` integer values.
-pub(super) fn rice_decode(bytes: &[u8], nx: usize, bytepix: usize, blocksize: usize) -> Vec<i64> {
+/// Decode a `RICE_1` tile of `nx` integer values into `out` (cleared first; a reused
+/// buffer, so steady-state decode allocates nothing).
+pub(super) fn rice_decode_into(
+    bytes: &[u8],
+    nx: usize,
+    bytepix: usize,
+    blocksize: usize,
+    out: &mut Vec<i64>,
+) {
     let nbits_pp = (8 * bytepix) as u32;
     let (fsbits, fsmax) = match bytepix {
         1 => (3u32, 6u32),
@@ -46,7 +53,8 @@ pub(super) fn rice_decode(bytes: &[u8], nx: usize, bytepix: usize, blocksize: us
 
     let mut br = BitReader::new(bytes);
     let mut lastpix = br.read(nbits_pp); // literal first pixel (big-endian)
-    let mut out = Vec::with_capacity(nx);
+    out.clear();
+    out.reserve(nx);
     let mut i = 0;
     while i < nx {
         let fs = br.read(fsbits) as i64 - 1;
@@ -70,7 +78,6 @@ pub(super) fn rice_decode(bytes: &[u8], nx: usize, bytepix: usize, blocksize: us
         }
         i = imax;
     }
-    out
 }
 
 /// Interpret the low `nbits` of `v` as a two's-complement signed value.
@@ -81,7 +88,7 @@ fn sign_extend(v: u64, nbits: u32) -> i64 {
 
 /// Encode `values` as a `RICE_1` tile (a port of cfitsio's `fits_rcomp`),
 /// parameterized by `bytepix` (1/2/4). Differences are taken modulo the pixel
-/// width so the stream round-trips through [`rice_decode`].
+/// width so the stream round-trips through [`rice_decode_into`].
 pub(super) fn rice_encode(values: &[i64], bytepix: usize, blocksize: usize) -> Vec<u8> {
     let nbits = (8 * bytepix) as u32;
     let (fsbits, fsmax) = match bytepix {
@@ -313,7 +320,8 @@ mod tests {
         // remain and `read` zero-fills past EOF. Without the exhaustion guard in
         // `read_zeros` this would spin forever; the decode must return (here, two
         // bounded values) — reaching this assert at all is the guarantee.
-        let out = super::rice_decode(&[0x00, 0x20], 2, 1, 32);
+        let mut out = Vec::new();
+        super::rice_decode_into(&[0x00, 0x20], 2, 1, 32, &mut out);
         assert_eq!(out.len(), 2);
     }
 }

@@ -27,7 +27,6 @@ use crate::bitpix::Bitpix;
 use crate::data::Image;
 use crate::data::ImageData;
 use crate::data::Scaling;
-use crate::endian::decode_be;
 use crate::endian::encode_be;
 use crate::endian::push_pq_descriptor;
 use crate::error::FitsError;
@@ -224,8 +223,14 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
     // feature, where tiles write disjoint regions of `samples` concurrently (they
     // partition the image). Each value is narrowed to `ZBITPIX` as it lands, so there
     // is no whole-image `i64`/`f64` intermediate and no separate serial scatter tail.
+    let ctx = DecodeCtx {
+        cmptype: &cmptype,
+        zbitpix,
+        int_bitpix,
+        codec,
+    };
     if is_float {
-        let decode = |t: usize, s: &TileScratch| {
+        let decode = |t: usize, s: &TileScratch, out: &mut Vec<f64>, ints: &mut Vec<i64>| {
             let cols = TileColumns {
                 primary: primary.get(t),
                 gzip: gzip_fallback.get(t),
@@ -238,7 +243,7 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
                 irow: t as i64 + zdither0,
                 zblank: column_at(&zblank_column, t).or(zblank_keyword),
             };
-            decode_float_tile(&cmptype, cols, s.nelem(), zbitpix, int_bitpix, codec, dq)
+            decode_float_tile_into(&ctx, cols, s.nelem(), dq, out, ints)
         };
         match &mut samples {
             ImageData::F32(o) => run_decode_scatter(ntiles, &geom, o, decode, |v| v as f32)?,
@@ -246,13 +251,13 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
             _ => unreachable!("a float ZBITPIX yields a float sample buffer"),
         }
     } else {
-        let decode = |t: usize, s: &TileScratch| {
+        let decode = |t: usize, s: &TileScratch, out: &mut Vec<i64>, _ints: &mut Vec<i64>| {
             let cols = TileColumns {
                 primary: primary.get(t),
                 gzip: gzip_fallback.get(t),
                 uncompressed: uncompressed.get(t),
             };
-            decode_one_tile(&cmptype, cols, s.nelem(), int_bitpix, codec)
+            decode_one_tile_into(&ctx, cols, s.nelem(), out)
         };
         match &mut samples {
             ImageData::U8(o) => run_decode_scatter(ntiles, &geom, o, decode, |v| v as u8)?,
@@ -277,23 +282,29 @@ fn run_decode_scatter<S, D>(
     ntiles: usize,
     geom: &TileGeometry,
     out: &mut [D],
-    decode: impl Fn(usize, &TileScratch) -> Result<Vec<S>> + Sync + Send,
+    decode: impl Fn(usize, &TileScratch, &mut Vec<S>, &mut Vec<i64>) -> Result<()> + Sync + Send,
     convert: impl Fn(S) -> D + Sync + Send,
 ) -> Result<()>
 where
-    S: Copy,
+    S: Copy + Send,
 {
+    // Per-worker decode buffers, reused across that worker's tiles (one set per rayon
+    // worker via `map_init`, a single set serially): `vals` is the decoded tile (the
+    // scatter source), `ints` the float path's quantized-int temp (unused otherwise).
+    // Reusing them means steady-state decode allocates nothing per tile, and the
+    // buffers stay cache-resident across tiles.
     #[cfg(feature = "parallel")]
     {
         let sink = DisjointOut::new(out);
-        map_tiles(ntiles, TileScratch::default, |scratch, t| -> Result<()> {
+        let init = || (TileScratch::default(), Vec::<S>::new(), Vec::<i64>::new());
+        map_tiles(ntiles, init, |(scratch, vals, ints), t| -> Result<()> {
             geom.tile_into(t, scratch);
-            let vals = decode(t, scratch)?;
+            decode(t, scratch, vals, ints)?;
             // SAFETY: the image tiles partition the pixel grid, so this tile's row
             // ranges are disjoint from every other tile's — concurrent writes through
             // `sink` never alias. `tile_into` clips rows to the image, which sized
             // `out`, so each row is in bounds.
-            unsafe { sink.scatter_rows(&scratch.row_bases, scratch.row_len, &vals, &convert) };
+            unsafe { sink.scatter_rows(&scratch.row_bases, scratch.row_len, vals, &convert) };
             Ok(())
         })?;
         Ok(())
@@ -301,9 +312,11 @@ where
     #[cfg(not(feature = "parallel"))]
     {
         let mut scratch = TileScratch::default();
+        let mut vals: Vec<S> = Vec::new();
+        let mut ints: Vec<i64> = Vec::new();
         for t in 0..ntiles {
             geom.tile_into(t, &mut scratch);
-            let vals = decode(t, &scratch)?;
+            decode(t, &scratch, &mut vals, &mut ints)?;
             scatter_rows(out, &scratch.row_bases, scratch.row_len, &vals, &convert);
         }
         Ok(())
@@ -966,76 +979,102 @@ struct Dequant {
     zblank: Option<i64>,
 }
 
-fn decode_one_tile(
-    cmptype: &str,
-    cols: TileColumns,
-    tile_elems: usize,
-    int_bitpix: Bitpix,
-    codec: CodecParams,
-) -> Result<Vec<i64>> {
-    match cols.resolve()? {
-        TileSource::Compressed(cell) => {
-            decode_tile_cell(cmptype, cell, tile_elems, int_bitpix, codec)
-        }
-        TileSource::Gzip(cell) => gzip::gzip_tile(as_bytes(cell)?, int_bitpix),
-        TileSource::Uncompressed(cell) => Ok(cell_to_i64(cell)),
-    }
-}
-
-/// Decode one tile of a *float* image. A primary `COMPRESSED_DATA` cell holds
-/// quantized integers (dequantized as `scale·int + zero`); otherwise the
-/// `GZIP_COMPRESSED_DATA`/`UNCOMPRESSED_DATA` fallbacks hold the raw float values.
-fn decode_float_tile(
-    cmptype: &str,
-    cols: TileColumns,
-    tile_elems: usize,
+/// The decode parameters constant across all of a tiled image's tiles: the codec
+/// name, the stored/quantized integer bitpix (and float `ZBITPIX`), and the codec
+/// knobs. Bundled so the per-tile decode helpers take one context rather than a long
+/// parameter list.
+struct DecodeCtx<'a> {
+    cmptype: &'a str,
     zbitpix: Bitpix,
     int_bitpix: Bitpix,
     codec: CodecParams,
-    dq: Dequant,
-) -> Result<Vec<f64>> {
+}
+
+fn decode_one_tile_into(
+    ctx: &DecodeCtx,
+    cols: TileColumns,
+    tile_elems: usize,
+    out: &mut Vec<i64>,
+) -> Result<()> {
     match cols.resolve()? {
-        TileSource::Compressed(cell) => {
-            // Quantized integers (float images never use HCOMPRESS).
-            let ints = decode_tile_cell(cmptype, cell, tile_elems, int_bitpix, codec)?;
-            Ok(quantize::dequantize(
-                &ints, dq.scale, dq.zero, dq.method, dq.irow, dq.zblank,
-            ))
+        TileSource::Compressed(cell) => decode_tile_cell_into(ctx, cell, tile_elems, out),
+        TileSource::Gzip(cell) => gzip::gzip_tile_into(as_bytes(cell)?, ctx.int_bitpix, out),
+        TileSource::Uncompressed(cell) => {
+            cell_to_i64_into(cell, out);
+            Ok(())
         }
-        TileSource::Gzip(cell) => Ok(be_floats(&gzip::gunzip(as_bytes(cell)?)?, zbitpix)),
-        TileSource::Uncompressed(cell) => Ok(cell_to_f64(cell, zbitpix)),
     }
 }
 
-/// Decode one tile's primary `COMPRESSED_DATA` cell into `tile_elems` integer
-/// values, per `ZCMPTYPE`. The cell is a byte array except for `PLIO_1` (i16).
-fn decode_tile_cell(
-    cmptype: &str,
+/// Decode one tile of a *float* image into `out`. A primary `COMPRESSED_DATA` cell
+/// holds quantized integers (decoded into the reused `ints` buffer, then dequantized
+/// as `scale·int + zero`); otherwise the `GZIP_COMPRESSED_DATA`/`UNCOMPRESSED_DATA`
+/// fallbacks hold the raw float values.
+fn decode_float_tile_into(
+    ctx: &DecodeCtx,
+    cols: TileColumns,
+    tile_elems: usize,
+    dq: Dequant,
+    out: &mut Vec<f64>,
+    ints: &mut Vec<i64>,
+) -> Result<()> {
+    match cols.resolve()? {
+        TileSource::Compressed(cell) => {
+            // Quantized integers (float images never use HCOMPRESS).
+            decode_tile_cell_into(ctx, cell, tile_elems, ints)?;
+            quantize::dequantize_into(ints, dq.scale, dq.zero, dq.method, dq.irow, dq.zblank, out);
+            Ok(())
+        }
+        TileSource::Gzip(cell) => {
+            be_floats_into(&gzip::gunzip(as_bytes(cell)?)?, ctx.zbitpix, out);
+            Ok(())
+        }
+        TileSource::Uncompressed(cell) => {
+            cell_to_f64_into(cell, ctx.zbitpix, out);
+            Ok(())
+        }
+    }
+}
+
+/// Decode one tile's primary `COMPRESSED_DATA` cell into `tile_elems` integer values
+/// in `out`, per `ZCMPTYPE`. The cell is a byte array except for `PLIO_1` (i16).
+fn decode_tile_cell_into(
+    ctx: &DecodeCtx,
     cell: &ColumnData,
     tile_elems: usize,
-    int_bitpix: Bitpix,
-    codec: CodecParams,
-) -> Result<Vec<i64>> {
-    match cmptype {
-        "GZIP_1" => gzip::gzip_tile(as_bytes(cell)?, int_bitpix),
-        "GZIP_2" => gzip::gzip2_tile(as_bytes(cell)?, int_bitpix),
+    out: &mut Vec<i64>,
+) -> Result<()> {
+    let codec = ctx.codec;
+    match ctx.cmptype {
+        "GZIP_1" => gzip::gzip_tile_into(as_bytes(cell)?, ctx.int_bitpix, out),
+        "GZIP_2" => gzip::gzip2_tile_into(as_bytes(cell)?, ctx.int_bitpix, out),
         "RICE_1" => {
             if codec.bytepix > 4 {
                 return Err(FitsError::UnsupportedCompression {
                     name: "RICE_1 with BYTEPIX > 4 (64-bit pixels)".to_string(),
                 });
             }
-            Ok(rice::rice_decode(
+            rice::rice_decode_into(
                 as_bytes(cell)?,
                 tile_elems,
                 codec.bytepix,
                 codec.blocksize,
-            ))
+                out,
+            );
+            Ok(())
         }
-        "PLIO_1" => Ok(plio::plio_decode(as_i16(cell)?, tile_elems)),
-        "HCOMPRESS_1" => hcompress::hcompress_tile(as_bytes(cell)?, codec.smooth, tile_elems),
+        "PLIO_1" => {
+            plio::plio_decode_into(as_i16(cell)?, tile_elems, out);
+            Ok(())
+        }
+        "HCOMPRESS_1" => {
+            hcompress::hcompress_tile_into(as_bytes(cell)?, codec.smooth, tile_elems, out)
+        }
         // §10.4: a tile stored verbatim — the cell is the raw big-endian pixels.
-        "NOCOMPRESS" => Ok(be_to_i64(as_bytes(cell)?, int_bitpix)),
+        "NOCOMPRESS" => {
+            be_to_i64_into(as_bytes(cell)?, ctx.int_bitpix, out);
+            Ok(())
+        }
         other => Err(FitsError::UnsupportedCompression {
             name: other.to_string(),
         }),
@@ -1204,55 +1243,70 @@ fn as_i16(cell: &ColumnData) -> Result<&[i16]> {
 }
 
 /// Widen a raw (`UNCOMPRESSED_DATA`) tile cell to `i64` values.
-fn cell_to_i64(cell: &ColumnData) -> Vec<i64> {
+fn cell_to_i64_into(cell: &ColumnData, out: &mut Vec<i64>) {
+    out.clear();
     match cell {
-        ColumnData::Bytes(v) => v.iter().map(|&b| b as i64).collect(),
-        ColumnData::I16(v) => v.iter().map(|&x| x as i64).collect(),
-        ColumnData::I32(v) => v.iter().map(|&x| x as i64).collect(),
-        ColumnData::I64(v) => v.clone(),
-        _ => Vec::new(),
+        ColumnData::Bytes(v) => out.extend(v.iter().map(|&b| b as i64)),
+        ColumnData::I16(v) => out.extend(v.iter().map(|&x| x as i64)),
+        ColumnData::I32(v) => out.extend(v.iter().map(|&x| x as i64)),
+        ColumnData::I64(v) => out.extend_from_slice(v),
+        _ => {}
     }
 }
 
-/// Widen a raw (`UNCOMPRESSED_DATA`) float tile cell to `f64`.
-fn cell_to_f64(cell: &ColumnData, zbitpix: Bitpix) -> Vec<f64> {
+/// Widen a raw (`UNCOMPRESSED_DATA`) float tile cell to `f64` in `out`.
+fn cell_to_f64_into(cell: &ColumnData, zbitpix: Bitpix, out: &mut Vec<f64>) {
+    out.clear();
     match cell {
-        ColumnData::F32(v) => v.iter().map(|&x| x as f64).collect(),
-        ColumnData::F64(v) => v.clone(),
-        ColumnData::Bytes(b) => be_floats(b, zbitpix),
-        _ => Vec::new(),
+        ColumnData::F32(v) => out.extend(v.iter().map(|&x| x as f64)),
+        ColumnData::F64(v) => out.extend_from_slice(v),
+        ColumnData::Bytes(b) => be_floats_into(b, zbitpix, out),
+        _ => {}
     }
 }
 
-/// Decode a big-endian buffer of `bitpix` integers into widened `i64` values.
-fn be_to_i64(bytes: &[u8], bitpix: Bitpix) -> Vec<i64> {
-    // Decode + widen in one pass, straight into the `i64` output — no intermediate
-    // narrowed `Vec`. The `from_be_bytes` + `as i64` closure inlines and vectorizes
-    // like `decode_be` itself.
+/// Decode a big-endian buffer of `bitpix` integers into widened `i64` values in `out`
+/// (cleared first). Single pass — no intermediate narrowed `Vec`; the
+/// `from_be_bytes` + `as i64` closure inlines and vectorizes like `decode_be`.
+fn be_to_i64_into(bytes: &[u8], bitpix: Bitpix, out: &mut Vec<i64>) {
+    out.clear();
     match bitpix {
-        Bitpix::U8 => bytes.iter().map(|&b| b as i64).collect(),
-        Bitpix::I16 => bytes
-            .chunks_exact(2)
-            .map(|c| i16::from_be_bytes(c.try_into().unwrap()) as i64)
-            .collect(),
-        Bitpix::I32 => bytes
-            .chunks_exact(4)
-            .map(|c| i32::from_be_bytes(c.try_into().unwrap()) as i64)
-            .collect(),
-        Bitpix::I64 => decode_be(bytes, i64::from_be_bytes),
-        Bitpix::F32 | Bitpix::F64 => Vec::new(), // excluded before this point
+        Bitpix::U8 => out.extend(bytes.iter().map(|&b| b as i64)),
+        Bitpix::I16 => out.extend(
+            bytes
+                .chunks_exact(2)
+                .map(|c| i16::from_be_bytes(c.try_into().unwrap()) as i64),
+        ),
+        Bitpix::I32 => out.extend(
+            bytes
+                .chunks_exact(4)
+                .map(|c| i32::from_be_bytes(c.try_into().unwrap()) as i64),
+        ),
+        Bitpix::I64 => out.extend(
+            bytes
+                .chunks_exact(8)
+                .map(|c| i64::from_be_bytes(c.try_into().unwrap())),
+        ),
+        Bitpix::F32 | Bitpix::F64 => {} // excluded before this point
     }
 }
 
-/// Decode a big-endian buffer of `bitpix` floats into `f64`, widening in one pass.
-fn be_floats(bytes: &[u8], bitpix: Bitpix) -> Vec<f64> {
+/// Decode a big-endian buffer of `bitpix` floats into `f64` in `out`, widening in one
+/// pass.
+fn be_floats_into(bytes: &[u8], bitpix: Bitpix, out: &mut Vec<f64>) {
+    out.clear();
     match bitpix {
-        Bitpix::F32 => bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_be_bytes(c.try_into().unwrap()) as f64)
-            .collect(),
-        Bitpix::F64 => decode_be(bytes, f64::from_be_bytes),
-        _ => Vec::new(),
+        Bitpix::F32 => out.extend(
+            bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_be_bytes(c.try_into().unwrap()) as f64),
+        ),
+        Bitpix::F64 => out.extend(
+            bytes
+                .chunks_exact(8)
+                .map(|c| f64::from_be_bytes(c.try_into().unwrap())),
+        ),
+        _ => {}
     }
 }
 
