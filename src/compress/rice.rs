@@ -267,20 +267,37 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// Read `n` bits (MSB-first); past end-of-input reads as zero bits.
+    /// Read `n` bits (MSB-first, `n ≤ 32`); past end-of-input reads as zero bits.
     pub(super) fn read(&mut self, n: u32) -> u64 {
-        if n == 0 {
-            return 0;
+        if self.nbits < n {
+            self.fill();
         }
-        while self.nbits < n {
+        self.nbits -= n;
+        let mask = if n >= 64 { u64::MAX } else { (1u64 << n) - 1 };
+        (self.acc >> self.nbits) & mask
+    }
+
+    /// Top up the accumulator so a subsequent `read` of up to 32 bits needs no
+    /// refill, or the input is exhausted (past which bytes read as zero). Loads a
+    /// whole 8-byte word at once when the accumulator is empty and a word remains —
+    /// the common mid-stream case — instead of eight separate bounds-checked loads.
+    #[inline]
+    fn fill(&mut self) {
+        if self.nbits == 0 && self.pos + 8 <= self.bytes.len() {
+            let word = self.bytes[self.pos..self.pos + 8].try_into().unwrap();
+            self.acc = u64::from_be_bytes(word);
+            self.pos += 8;
+            self.nbits = 64;
+            return;
+        }
+        // Load whole bytes until another would overflow the 64-bit accumulator;
+        // that leaves ≥ 57 bits, enough for any single ≤ 32-bit read.
+        while self.nbits <= 56 {
             let byte = self.bytes.get(self.pos).copied().unwrap_or(0);
             self.pos += 1;
             self.acc = (self.acc << 8) | byte as u64;
             self.nbits += 8;
         }
-        self.nbits -= n;
-        let mask = if n >= 64 { u64::MAX } else { (1u64 << n) - 1 };
-        (self.acc >> self.nbits) & mask
     }
 
     /// Count and consume leading zero bits up to (and including) the next 1.
