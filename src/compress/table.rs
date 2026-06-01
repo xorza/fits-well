@@ -15,8 +15,6 @@ use super::HduParts;
 use super::gzip;
 use super::map_tiles;
 use super::rice;
-use crate::endian::decode_be;
-use crate::endian::encode_be;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -384,34 +382,44 @@ fn decompress_column(bytes: &[u8], m: &ColMeta, rows: usize) -> Result<Vec<u8>> 
     Ok(cm)
 }
 
-/// Decode big-endian integers of `bytepix` bytes into `i64` values (signed).
+/// Decode big-endian integers of `bytepix` bytes into `i64` values (signed),
+/// widening in a single pass (no intermediate narrowed `Vec`).
 fn be_to_i64(bytes: &[u8], bytepix: usize) -> Vec<i64> {
     match bytepix {
         1 => bytes.iter().map(|&b| b as i8 as i64).collect(),
-        2 => decode_be(bytes, i16::from_be_bytes)
-            .iter()
-            .map(|&x| x as i64)
+        2 => bytes
+            .chunks_exact(2)
+            .map(|c| i16::from_be_bytes(c.try_into().unwrap()) as i64)
             .collect(),
-        _ => decode_be(bytes, i32::from_be_bytes)
-            .iter()
-            .map(|&x| x as i64)
+        _ => bytes
+            .chunks_exact(4)
+            .map(|c| i32::from_be_bytes(c.try_into().unwrap()) as i64)
             .collect(),
     }
 }
 
-/// Encode `i64` values as big-endian integers of `bytepix` bytes.
+/// Encode `i64` values as big-endian integers of `bytepix` bytes, narrowing +
+/// packing in a single pass into a buffer grown once.
 fn i64_to_be(vals: &[i64], bytepix: usize) -> Vec<u8> {
+    let mut out = vec![0u8; vals.len() * bytepix];
     match bytepix {
-        1 => vals.iter().map(|&v| v as u8).collect(),
-        2 => encode_be(
-            &vals.iter().map(|&v| v as i16).collect::<Vec<_>>(),
-            i16::to_be_bytes,
-        ),
-        _ => encode_be(
-            &vals.iter().map(|&v| v as i32).collect::<Vec<_>>(),
-            i32::to_be_bytes,
-        ),
+        1 => {
+            for (slot, &v) in out.iter_mut().zip(vals) {
+                *slot = v as u8;
+            }
+        }
+        2 => {
+            for (slot, &v) in out.chunks_exact_mut(2).zip(vals) {
+                slot.copy_from_slice(&(v as i16).to_be_bytes());
+            }
+        }
+        _ => {
+            for (slot, &v) in out.chunks_exact_mut(4).zip(vals) {
+                slot.copy_from_slice(&(v as i32).to_be_bytes());
+            }
+        }
     }
+    out
 }
 
 fn req_int(header: &Header, key: &'static str) -> Result<i64> {

@@ -912,3 +912,37 @@ fn uncompress_table_rejects_overflowing_row_product() {
         Err(FitsError::DataUnitOverflow)
     ));
 }
+
+#[test]
+fn i64_be_round_trip_and_buffer_reuse() {
+    // I16: narrowing (`as i16`) then big-endian packing, hand-computed. -1 → 0xFFFF,
+    // 258 → 0x0102, -2 → 0xFFFE.
+    let vals = [0i64, 1, -1, 258, -2];
+    let want = [0, 0, 0, 1, 0xFF, 0xFF, 0x01, 0x02, 0xFF, 0xFE];
+    assert_eq!(i64_to_be(&vals, Bitpix::I16), want);
+    // Decode is the exact inverse (sign-extending back to i64).
+    assert_eq!(be_to_i64(&want, Bitpix::I16), vals);
+
+    // I32 packs four bytes/elem; 0x00010203 = 66051, -1 → all-ones.
+    let i32_vals = [66051i64, -1];
+    assert_eq!(
+        i64_to_be(&i32_vals, Bitpix::I32),
+        [0x00, 0x01, 0x02, 0x03, 0xFF, 0xFF, 0xFF, 0xFF]
+    );
+    assert_eq!(
+        be_to_i64(&[0, 1, 2, 3, 0xFF, 0xFF, 0xFF, 0xFF], Bitpix::I32),
+        i32_vals
+    );
+
+    // U8 and I64 ends of the range.
+    assert_eq!(i64_to_be(&[255, 0], Bitpix::U8), [0xFF, 0x00]);
+    assert_eq!(be_to_i64(&[0xFF, 0x00], Bitpix::U8), [255, 0]);
+    assert_eq!(i64_to_be(&[-1], Bitpix::I64), [0xFF; 8]);
+
+    // `i64_to_be_into` clears + resizes its scratch: a long fill followed by a short
+    // one must leave exactly the short result (no stale tail), matching the owning form.
+    let mut buf = Vec::new();
+    i64_to_be_into(&[7, 8, 9, 10], Bitpix::I16, &mut buf);
+    i64_to_be_into(&vals, Bitpix::I16, &mut buf);
+    assert_eq!(buf, want);
+}

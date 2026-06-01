@@ -11,7 +11,9 @@ use std::env;
 use std::fs::File;
 use std::io::Cursor;
 
-use fits_well::{ColumnData, FitsReader, FitsWriter, HduKind, Image, ImageData, Scaling, ZERO_FILL};
+use fits_well::{
+    ColumnData, FitsReader, FitsWriter, HduKind, Image, ImageData, Scaling, ZERO_FILL,
+};
 
 fn main() -> fits_well::Result<()> {
     let path = env::args()

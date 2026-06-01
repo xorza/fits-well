@@ -97,14 +97,20 @@ pub(super) fn rice_encode(values: &[i64], bytepix: usize, blocksize: usize) -> V
     let half: u64 = 1u64 << (nbits - 1);
 
     let mut bo = BitOutput::new();
+    // Rice output is at most a few bytes per pixel; reserve a pixel's worth up front
+    // so the bitstream rarely reallocates mid-tile.
+    bo.out.reserve(values.len());
     let first = (*values.first().unwrap_or(&0) as u64) & mask;
     bo.output_nbits(first as i64, nbits as i32);
     let mut lastpix = first;
 
+    // One difference buffer reused across blocks (cleared each block) rather than a
+    // fresh allocation per block — a tile has thousands of blocks.
+    let mut diffs: Vec<u64> = Vec::with_capacity(blocksize);
     let mut i = 0;
     while i < values.len() {
         let thisblock = blocksize.min(values.len() - i);
-        let mut diffs = Vec::with_capacity(thisblock);
+        diffs.clear();
         let mut pixelsum = 0.0f64;
         for j in 0..thisblock {
             let next = (values[i + j] as u64) & mask;

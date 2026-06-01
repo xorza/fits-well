@@ -374,6 +374,9 @@ struct EncodeScratch {
     ints: Vec<i64>,
     /// The tile's pixels as `f64` (float images only; stays empty otherwise).
     floats: Vec<f64>,
+    /// The tile's pixels packed to big-endian bytes — the gzip codecs' input,
+    /// reused so each tile allocates only its compressed output.
+    be: Vec<u8>,
 }
 
 /// Encode an integer [`Image`] as a tiled-compressed `BINTABLE`: returns the
@@ -416,12 +419,14 @@ pub(crate) fn encode_image(
         gather_i64(&image.samples, &s.tile.indices, &mut s.ints);
         let vals = &s.ints;
         Ok(match cmptype {
-            "GZIP_1" => TileCell::Bytes(gzip::gzip_encode(&i64_to_be(vals, bitpix), gzip_level)),
-            "GZIP_2" => TileCell::Bytes(gzip::gzip2_encode(
-                &i64_to_be(vals, bitpix),
-                bytepix,
-                gzip_level,
-            )),
+            "GZIP_1" => {
+                i64_to_be_into(vals, bitpix, &mut s.be);
+                TileCell::Bytes(gzip::gzip_encode(&s.be, gzip_level))
+            }
+            "GZIP_2" => {
+                i64_to_be_into(vals, bitpix, &mut s.be);
+                TileCell::Bytes(gzip::gzip2_encode(&s.be, bytepix, gzip_level))
+            }
             "RICE_1" => TileCell::Bytes(rice::rice_encode(vals, bytepix, 32)),
             "PLIO_1" => TileCell::I16(plio::plio_encode(vals, vals.len())),
             "HCOMPRESS_1" => TileCell::Bytes(hcompress::hcompress_tile_encode(
@@ -559,10 +564,12 @@ fn encode_float_image(
                         s.ints.extend(q.idata.iter().map(|&v| v as i64));
                         let bytes = match cmptype {
                             "GZIP_1" => {
-                                gzip::gzip_encode(&i64_to_be(&s.ints, int_bitpix), gzip_level)
+                                i64_to_be_into(&s.ints, int_bitpix, &mut s.be);
+                                gzip::gzip_encode(&s.be, gzip_level)
                             }
                             "GZIP_2" => {
-                                gzip::gzip2_encode(&i64_to_be(&s.ints, int_bitpix), 4, gzip_level)
+                                i64_to_be_into(&s.ints, int_bitpix, &mut s.be);
+                                gzip::gzip2_encode(&s.be, 4, gzip_level)
                             }
                             "RICE_1" => rice::rice_encode(&s.ints, 4, 32),
                             _ => unreachable!(),
@@ -766,21 +773,44 @@ fn gather_i64(samples: &ImageData, indices: &[usize], out: &mut Vec<i64>) {
     }
 }
 
-/// Encode `i64` values as a big-endian buffer of `bitpix`-width integers.
-fn i64_to_be(vals: &[i64], bitpix: Bitpix) -> Vec<u8> {
+/// Narrow + pack `i64` values to big-endian `bitpix`-width integers in `out`, in a
+/// single pass (no intermediate narrowed `Vec`). `out` is cleared first, so it can
+/// be a reused scratch buffer. Grows once then writes each `N`-byte slot, the
+/// vectorizable shape [`extend_be`] uses.
+fn i64_to_be_into(vals: &[i64], bitpix: Bitpix, out: &mut Vec<u8>) {
+    out.clear();
+    out.resize(vals.len() * bitpix.elem_size(), 0);
     match bitpix {
-        Bitpix::U8 => vals.iter().map(|&v| v as u8).collect(),
-        Bitpix::I16 => encode_be(
-            &vals.iter().map(|&v| v as i16).collect::<Vec<_>>(),
-            i16::to_be_bytes,
-        ),
-        Bitpix::I32 => encode_be(
-            &vals.iter().map(|&v| v as i32).collect::<Vec<_>>(),
-            i32::to_be_bytes,
-        ),
-        Bitpix::I64 => encode_be(vals, i64::to_be_bytes),
-        _ => Vec::new(),
+        Bitpix::U8 => {
+            for (slot, &v) in out.iter_mut().zip(vals) {
+                *slot = v as u8;
+            }
+        }
+        Bitpix::I16 => {
+            for (slot, &v) in out.chunks_exact_mut(2).zip(vals) {
+                slot.copy_from_slice(&(v as i16).to_be_bytes());
+            }
+        }
+        Bitpix::I32 => {
+            for (slot, &v) in out.chunks_exact_mut(4).zip(vals) {
+                slot.copy_from_slice(&(v as i32).to_be_bytes());
+            }
+        }
+        Bitpix::I64 => {
+            for (slot, &v) in out.chunks_exact_mut(8).zip(vals) {
+                slot.copy_from_slice(&v.to_be_bytes());
+            }
+        }
+        _ => {}
     }
+}
+
+/// Owning form of [`i64_to_be_into`], for the few sites that keep the bytes (the
+/// `NOCOMPRESS` cell is stored verbatim, so it can't share the reused scratch).
+fn i64_to_be(vals: &[i64], bitpix: Bitpix) -> Vec<u8> {
+    let mut out = Vec::new();
+    i64_to_be_into(vals, bitpix, &mut out);
+    out
 }
 
 /// Read a compressed-data column's per-tile cells, or empty if the column is absent.
@@ -1103,30 +1133,30 @@ fn cell_to_f64(cell: &ColumnData, zbitpix: Bitpix) -> Vec<f64> {
 
 /// Decode a big-endian buffer of `bitpix` integers into widened `i64` values.
 fn be_to_i64(bytes: &[u8], bitpix: Bitpix) -> Vec<i64> {
+    // Decode + widen in one pass, straight into the `i64` output — no intermediate
+    // narrowed `Vec`. The `from_be_bytes` + `as i64` closure inlines and vectorizes
+    // like `decode_be` itself.
     match bitpix {
-        Bitpix::U8 => decode_be(bytes, u8::from_be_bytes)
-            .iter()
-            .map(|&x| x as i64)
+        Bitpix::U8 => bytes.iter().map(|&b| b as i64).collect(),
+        Bitpix::I16 => bytes
+            .chunks_exact(2)
+            .map(|c| i16::from_be_bytes(c.try_into().unwrap()) as i64)
             .collect(),
-        Bitpix::I16 => decode_be(bytes, i16::from_be_bytes)
-            .iter()
-            .map(|&x| x as i64)
-            .collect(),
-        Bitpix::I32 => decode_be(bytes, i32::from_be_bytes)
-            .iter()
-            .map(|&x| x as i64)
+        Bitpix::I32 => bytes
+            .chunks_exact(4)
+            .map(|c| i32::from_be_bytes(c.try_into().unwrap()) as i64)
             .collect(),
         Bitpix::I64 => decode_be(bytes, i64::from_be_bytes),
         Bitpix::F32 | Bitpix::F64 => Vec::new(), // excluded before this point
     }
 }
 
-/// Decode a big-endian buffer of `bitpix` floats into `f64`.
+/// Decode a big-endian buffer of `bitpix` floats into `f64`, widening in one pass.
 fn be_floats(bytes: &[u8], bitpix: Bitpix) -> Vec<f64> {
     match bitpix {
-        Bitpix::F32 => decode_be(bytes, f32::from_be_bytes)
-            .iter()
-            .map(|&x| x as f64)
+        Bitpix::F32 => bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_be_bytes(c.try_into().unwrap()) as f64)
             .collect(),
         Bitpix::F64 => decode_be(bytes, f64::from_be_bytes),
         _ => Vec::new(),
