@@ -1004,6 +1004,9 @@ fn hinv(a: &mut [i32], nx: usize, ny: usize, scale: i32, smooth: bool) {
     let nmax = nx.max(ny);
     let log2n = log2_ceil(nmax);
     let mut tmp = vec![0i32; nmax.div_ceil(2)];
+    // Holds the 2nd-half rows during the column-direction unshuffle (done as whole-row
+    // moves — see `unshuffle_rows`): up to `nx/2` rows of `ny`.
+    let mut row_tmp = vec![0i32; nx.div_ceil(2) * ny];
 
     let mut shift = 1;
     let mut bit0 = 1i32 << (log2n - 1);
@@ -1047,9 +1050,7 @@ fn hinv(a: &mut [i32], nx: usize, ny: usize, scale: i32, smooth: bool) {
         for i in 0..nxtop {
             unshuffle(&mut a[ny * i..], nytop, 1, &mut tmp);
         }
-        for j in 0..nytop {
-            unshuffle(&mut a[j..], nxtop, ny, &mut tmp);
-        }
+        unshuffle_rows(a, nxtop, nytop, ny, &mut row_tmp);
         // Smooth by interpolating coefficients (SMOOTH=1, lossy scale>1 only).
         if smooth {
             hsmooth(a, nxtop, nytop, ny, scale);
@@ -1248,6 +1249,36 @@ fn unshuffle(a: &mut [i32], n: usize, n2: usize, tmp: &mut [i32]) {
     let mut i = 1;
     while i < n {
         a[n2 * i] = tmp[pt];
+        pt += 1;
+        i += 2;
+    }
+}
+
+/// Column-direction inverse shuffle for the whole `nxtop × nytop` block (row stride
+/// `ny`). The per-column [`unshuffle`] permutes the row index *identically* for every
+/// column, so it's a whole-row permutation: applying it to contiguous `nytop`-element
+/// row segments replaces the cache-thrashing strided column access (one cache line
+/// per element) with sequential `copy_from_slice`/`copy_within` row moves. `row_tmp`
+/// holds the 2nd-half rows during redistribution (`⌈nxtop/2⌉ × nytop`).
+fn unshuffle_rows(a: &mut [i32], nxtop: usize, nytop: usize, ny: usize, row_tmp: &mut [i32]) {
+    let nhalf = nxtop.div_ceil(2);
+    // Save 2nd-half rows so distributing the 1st half can't clobber them.
+    for i in nhalf..nxtop {
+        let src = ny * i;
+        let dst = (i - nhalf) * nytop;
+        row_tmp[dst..dst + nytop].copy_from_slice(&a[src..src + nytop]);
+    }
+    // 1st-half rows go to even output rows; reverse order so a row isn't overwritten
+    // before it's moved (dst = 2·src·… ≥ src, and the ranges don't overlap for i ≥ 1).
+    for i in (0..nhalf).rev() {
+        a.copy_within(ny * i..ny * i + nytop, ny * 2 * i);
+    }
+    // Saved 2nd-half rows go to odd output rows.
+    let mut pt = 0;
+    let mut i = 1;
+    while i < nxtop {
+        let dst = ny * i;
+        a[dst..dst + nytop].copy_from_slice(&row_tmp[pt * nytop..pt * nytop + nytop]);
         pt += 1;
         i += 2;
     }
