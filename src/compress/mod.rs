@@ -165,13 +165,13 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
 
     let geom = TileGeometry::new(&dims, &tiles);
     let ntiles = geom.ntiles();
-    let mut out_i = vec![0i64; if is_float { 0 } else { total }];
-    let mut out_f = vec![0f64; if is_float { total } else { 0 }];
 
     // Decode every tile (the compute-bound, independent step — parallel under the
-    // `parallel` feature), collecting the per-tile values in tile order. Scatter
-    // them into the output afterwards: tiles partition the image, so a tile's
-    // positions are recomputed from the geometry and never overlap another's.
+    // `parallel` feature), collecting the per-tile values in tile order. Scatter them
+    // into the typed output afterwards, narrowing each value to `ZBITPIX` as it lands
+    // — there is no whole-image `i64`/`f64` intermediate. Tiles partition the image,
+    // so a tile's positions are recomputed from the geometry and never overlap.
+    let mut samples = zeroed_samples(zbitpix, total);
     if is_float {
         let tile_vals = map_tiles(ntiles, TileScratch::default, |scratch, t| {
             geom.tile_into(t, scratch);
@@ -200,9 +200,7 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
         let mut scratch = TileScratch::default();
         for (t, vals) in tile_vals.iter().enumerate() {
             geom.tile_into(t, &mut scratch);
-            for (&flat, &v) in scratch.indices.iter().zip(vals) {
-                out_f[flat] = v;
-            }
+            scatter_f64(&mut samples, &scratch.indices, vals);
         }
     } else {
         let tile_vals = map_tiles(ntiles, TileScratch::default, |scratch, t| {
@@ -217,17 +215,9 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
         let mut scratch = TileScratch::default();
         for (t, vals) in tile_vals.iter().enumerate() {
             geom.tile_into(t, &mut scratch);
-            for (&flat, &v) in scratch.indices.iter().zip(vals) {
-                out_i[flat] = v;
-            }
+            scatter_i64(&mut samples, &scratch.indices, vals);
         }
     }
-
-    let samples = if is_float {
-        float_samples(out_f, zbitpix)
-    } else {
-        narrow(out_i, zbitpix)
-    };
     Ok(Image {
         shape: dims,
         samples,
@@ -275,7 +265,6 @@ pub(crate) fn encode_image(
     let dims = &image.shape;
     let tiles = resolve_tile_shape(dims, tile_shape);
 
-    let flat = widen(&image.samples);
     let geom = TileGeometry::new(dims, &tiles);
     let ntiles = geom.ntiles();
     let bytepix = bitpix.elem_size();
@@ -285,8 +274,9 @@ pub(crate) fn encode_image(
     // offset is the running heap length), so concatenate the cells serially after.
     let cells = map_tiles(ntiles, EncodeScratch::default, |s, t| -> Result<TileCell> {
         geom.tile_into(t, &mut s.tile);
-        s.ints.clear();
-        s.ints.extend(s.tile.indices.iter().map(|&i| flat[i]));
+        // Gather + widen this tile's pixels straight from the typed source — no
+        // whole-image `i64` buffer.
+        gather_i64(&image.samples, &s.tile.indices, &mut s.ints);
         let vals = &s.ints;
         Ok(match cmptype {
             "GZIP_1" => TileCell::Bytes(gzip::gzip_encode(&i64_to_be(vals, bitpix))),
@@ -400,7 +390,6 @@ fn encode_float_image(
     let dims = &image.shape;
     let tiles = resolve_tile_shape(dims, tile_shape);
 
-    let flat = widen_floats(&image.samples);
     let geom = TileGeometry::new(dims, &tiles);
     let ntiles = geom.ntiles();
 
@@ -418,8 +407,8 @@ fn encode_float_image(
             geom.tile_into(t, &mut s.tile);
             let nx = s.tile.tdims[0];
             let ny = s.tile.indices.len() / nx;
-            s.floats.clear();
-            s.floats.extend(s.tile.indices.iter().map(|&i| flat[i]));
+            // Gather + widen this tile's pixels straight from the typed source.
+            gather_f64(&image.samples, &s.tile.indices, &mut s.floats);
             let irow = t as i64 + zdither0; // = (1-based tile row) + ZDITHER0 - 1
             Ok(
                 match quantize::quantize_tile(&s.floats, nx, ny, 0.0, method, irow) {
@@ -529,12 +518,15 @@ fn dither_name(method: quantize::DitherMethod) -> &'static str {
     }
 }
 
-/// Widen float image samples to `f64` (integer buffers yield empty).
-fn widen_floats(samples: &ImageData) -> Vec<f64> {
+/// Gather a tile's float pixels straight from the typed source into `out`,
+/// widening to `f64` — so float encoding never materializes a whole-image `f64`
+/// buffer. Integer sources yield nothing (they take the integer path).
+fn gather_f64(samples: &ImageData, indices: &[usize], out: &mut Vec<f64>) {
+    out.clear();
     match samples {
-        ImageData::F32(v) => v.iter().map(|&x| x as f64).collect(),
-        ImageData::F64(v) => v.clone(),
-        _ => Vec::new(),
+        ImageData::F32(v) => out.extend(indices.iter().map(|&i| v[i] as f64)),
+        ImageData::F64(v) => out.extend(indices.iter().map(|&i| v[i])),
+        _ => {}
     }
 }
 
@@ -614,14 +606,17 @@ fn set_zimage_axes(
     }
 }
 
-/// Widen integer image samples to `i64` (float buffers yield empty).
-fn widen(samples: &ImageData) -> Vec<i64> {
+/// Gather a tile's integer pixels straight from the typed source into `out`,
+/// widening to `i64` — so integer encoding never materializes a whole-image `i64`
+/// buffer. Float sources yield nothing (they take the quantized float path).
+fn gather_i64(samples: &ImageData, indices: &[usize], out: &mut Vec<i64>) {
+    out.clear();
     match samples {
-        ImageData::U8(v) => v.iter().map(|&x| x as i64).collect(),
-        ImageData::I16(v) => v.iter().map(|&x| x as i64).collect(),
-        ImageData::I32(v) => v.iter().map(|&x| x as i64).collect(),
-        ImageData::I64(v) => v.clone(),
-        _ => Vec::new(),
+        ImageData::U8(v) => out.extend(indices.iter().map(|&i| v[i] as i64)),
+        ImageData::I16(v) => out.extend(indices.iter().map(|&i| v[i] as i64)),
+        ImageData::I32(v) => out.extend(indices.iter().map(|&i| v[i] as i64)),
+        ImageData::I64(v) => out.extend(indices.iter().map(|&i| v[i])),
+        _ => {}
     }
 }
 
@@ -1001,23 +996,51 @@ fn bytepix_to_bitpix(bytepix: usize) -> Bitpix {
     }
 }
 
-/// Narrow a widened `i64` buffer back to the typed samples of `bitpix`.
-fn narrow(values: Vec<i64>, bitpix: Bitpix) -> ImageData {
+/// A zeroed typed sample buffer of `len` elements — the decompression output the
+/// tiles scatter into (narrowing as they land), so there is no whole-image `i64`
+/// or `f64` intermediate to narrow afterwards.
+fn zeroed_samples(bitpix: Bitpix, len: usize) -> ImageData {
     match bitpix {
-        Bitpix::U8 => ImageData::U8(values.iter().map(|&v| v as u8).collect()),
-        Bitpix::I16 => ImageData::I16(values.iter().map(|&v| v as i16).collect()),
-        Bitpix::I32 => ImageData::I32(values.iter().map(|&v| v as i32).collect()),
-        Bitpix::I64 => ImageData::I64(values),
-        Bitpix::F32 => ImageData::F32(Vec::new()),
-        Bitpix::F64 => ImageData::F64(Vec::new()),
+        Bitpix::U8 => ImageData::U8(vec![0; len]),
+        Bitpix::I16 => ImageData::I16(vec![0; len]),
+        Bitpix::I32 => ImageData::I32(vec![0; len]),
+        Bitpix::I64 => ImageData::I64(vec![0; len]),
+        Bitpix::F32 => ImageData::F32(vec![0.0; len]),
+        Bitpix::F64 => ImageData::F64(vec![0.0; len]),
     }
 }
 
-/// Build float samples from a dequantized `f64` buffer.
-fn float_samples(values: Vec<f64>, zbitpix: Bitpix) -> ImageData {
-    match zbitpix {
-        Bitpix::F32 => ImageData::F32(values.iter().map(|&v| v as f32).collect()),
-        _ => ImageData::F64(values),
+/// Scatter a decoded integer tile into the typed output at `indices`, narrowing
+/// each `i64` to the output element type. `out` is integer-typed (the integer
+/// decode path); a float buffer is a logic error.
+fn scatter_i64(out: &mut ImageData, indices: &[usize], vals: &[i64]) {
+    match out {
+        ImageData::U8(o) => scatter(o, indices, vals, |v| v as u8),
+        ImageData::I16(o) => scatter(o, indices, vals, |v| v as i16),
+        ImageData::I32(o) => scatter(o, indices, vals, |v| v as i32),
+        ImageData::I64(o) => scatter(o, indices, vals, |v| v),
+        ImageData::F32(_) | ImageData::F64(_) => unreachable!("integer decode, float output"),
+    }
+}
+
+/// Scatter a dequantized float tile into the typed output at `indices`, narrowing
+/// to the output element type (`f32`/`f64`; `NaN` nulls survive the cast).
+fn scatter_f64(out: &mut ImageData, indices: &[usize], vals: &[f64]) {
+    match out {
+        ImageData::F32(o) => scatter(o, indices, vals, |v| v as f32),
+        ImageData::F64(o) => scatter(o, indices, vals, |v| v),
+        _ => unreachable!("float decode, integer output"),
+    }
+}
+
+/// Write `convert(vals[k])` into `out[indices[k]]` for each tile element. Tiles
+/// partition the image, so the index sets never overlap.
+fn scatter<S, D>(out: &mut [D], indices: &[usize], vals: &[S], convert: impl Fn(S) -> D)
+where
+    S: Copy,
+{
+    for (&flat, &v) in indices.iter().zip(vals) {
+        out[flat] = convert(v);
     }
 }
 
