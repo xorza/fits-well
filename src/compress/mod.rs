@@ -106,6 +106,11 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
     let zblank_keyword = header.get_integer("ZBLANK");
     let zblank_column = read_i64_column(table, "ZBLANK");
     let smooth = hcompress_smooth(header);
+    let codec = CodecParams {
+        blocksize,
+        bytepix,
+        smooth,
+    };
 
     // Per-tile compressed data, with the conventional fallback columns.
     let primary = read_tiles(table, "COMPRESSED_DATA")?;
@@ -123,40 +128,26 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
     for t in 0..geom.ntiles() {
         let tile = geom.tile(t);
         let tile_elems = tile.indices.len();
+        let cols = TileColumns {
+            primary: primary.get(t),
+            gzip: gzip_fallback.get(t),
+            uncompressed: uncompressed.get(t),
+        };
         if is_float {
-            let s = column_at(&zscale, t).unwrap_or(1.0);
-            let z = column_at(&zzero, t).unwrap_or(0.0);
-            let vals = decode_float_tile(
-                &cmptype,
-                primary.get(t),
-                gzip_fallback.get(t),
-                uncompressed.get(t),
-                tile_elems,
-                zbitpix,
-                int_bitpix,
-                blocksize,
-                bytepix,
-                s,
-                z,
+            let dq = Dequant {
+                scale: column_at(&zscale, t).unwrap_or(1.0),
+                zero: column_at(&zzero, t).unwrap_or(0.0),
                 method,
-                t as i64 + zdither0,
-                column_at(&zblank_column, t).or(zblank_keyword),
-            )?;
+                irow: t as i64 + zdither0,
+                zblank: column_at(&zblank_column, t).or(zblank_keyword),
+            };
+            let vals =
+                decode_float_tile(&cmptype, cols, tile_elems, zbitpix, int_bitpix, codec, dq)?;
             for (&flat, &v) in tile.indices.iter().zip(&vals) {
                 out_f[flat] = v;
             }
         } else {
-            let vals = decode_one_tile(
-                &cmptype,
-                primary.get(t),
-                gzip_fallback.get(t),
-                uncompressed.get(t),
-                tile_elems,
-                int_bitpix,
-                blocksize,
-                bytepix,
-                smooth,
-            )?;
+            let vals = decode_one_tile(&cmptype, cols, tile_elems, int_bitpix, codec)?;
             for (&flat, &v) in tile.indices.iter().zip(&vals) {
                 out_i[flat] = v;
             }
@@ -546,69 +537,98 @@ fn column_at<T: Copy>(col: &Option<Vec<T>>, t: usize) -> Option<T> {
 
 /// Decode one tile, honoring the fallback columns: the primary `COMPRESSED_DATA`
 /// (via `ZCMPTYPE`), else gzip'd `GZIP_COMPRESSED_DATA`, else raw `UNCOMPRESSED_DATA`.
-#[allow(clippy::too_many_arguments)]
-fn decode_one_tile(
-    cmptype: &str,
-    primary: Option<&ColumnData>,
-    gzip_fallback: Option<&ColumnData>,
-    uncompressed: Option<&ColumnData>,
-    tile_elems: usize,
-    int_bitpix: Bitpix,
+/// The three per-tile source columns (§10.1.3): the primary `COMPRESSED_DATA` and
+/// the `GZIP_COMPRESSED_DATA` / `UNCOMPRESSED_DATA` fallbacks.
+#[derive(Debug, Clone, Copy)]
+struct TileColumns<'a> {
+    primary: Option<&'a ColumnData>,
+    gzip: Option<&'a ColumnData>,
+    uncompressed: Option<&'a ColumnData>,
+}
+
+/// The resolved source for one tile — which non-empty column holds its bytes.
+enum TileSource<'a> {
+    Compressed(&'a ColumnData),
+    Gzip(&'a ColumnData),
+    Uncompressed(&'a ColumnData),
+}
+
+impl<'a> TileColumns<'a> {
+    /// Pick the first non-empty source: primary `COMPRESSED_DATA`, then the
+    /// gzip and uncompressed fallbacks; error if every column's cell is empty.
+    fn resolve(&self) -> Result<TileSource<'a>> {
+        if let Some(c) = self.primary.filter(|c| cell_len(c) > 0) {
+            Ok(TileSource::Compressed(c))
+        } else if let Some(c) = self.gzip.filter(|c| cell_len(c) > 0) {
+            Ok(TileSource::Gzip(c))
+        } else if let Some(c) = self.uncompressed.filter(|c| cell_len(c) > 0) {
+            Ok(TileSource::Uncompressed(c))
+        } else {
+            Err(FitsError::UnsupportedCompression {
+                name: "empty tile (no compressed or uncompressed data)".to_string(),
+            })
+        }
+    }
+}
+
+/// The codec knobs from `ZNAMEi`/`ZVALi`: Rice block size & pixel width, and the
+/// HCOMPRESS `SMOOTH` flag.
+#[derive(Debug, Clone, Copy)]
+struct CodecParams {
     blocksize: usize,
     bytepix: usize,
     smooth: bool,
+}
+
+/// Per-tile float dequantization parameters (§10.2): `physical = zero + scale·I`,
+/// the dither method/seed, and the integer null sentinel.
+#[derive(Debug)]
+struct Dequant {
+    scale: f64,
+    zero: f64,
+    method: quantize::DitherMethod,
+    irow: i64,
+    zblank: Option<i64>,
+}
+
+fn decode_one_tile(
+    cmptype: &str,
+    cols: TileColumns,
+    tile_elems: usize,
+    int_bitpix: Bitpix,
+    codec: CodecParams,
 ) -> Result<Vec<i64>> {
-    if let Some(cell) = primary.filter(|c| cell_len(c) > 0) {
-        decode_tile_cell(
-            cmptype, cell, tile_elems, int_bitpix, blocksize, bytepix, smooth,
-        )
-    } else if let Some(cell) = gzip_fallback.filter(|c| cell_len(c) > 0) {
-        gzip::gzip_tile(as_bytes(cell)?, int_bitpix)
-    } else if let Some(cell) = uncompressed.filter(|c| cell_len(c) > 0) {
-        Ok(cell_to_i64(cell))
-    } else {
-        Err(FitsError::UnsupportedCompression {
-            name: "empty tile (no compressed or uncompressed data)".to_string(),
-        })
+    match cols.resolve()? {
+        TileSource::Compressed(cell) => {
+            decode_tile_cell(cmptype, cell, tile_elems, int_bitpix, codec)
+        }
+        TileSource::Gzip(cell) => gzip::gzip_tile(as_bytes(cell)?, int_bitpix),
+        TileSource::Uncompressed(cell) => Ok(cell_to_i64(cell)),
     }
 }
 
 /// Decode one tile of a *float* image. A primary `COMPRESSED_DATA` cell holds
 /// quantized integers (dequantized as `scale·int + zero`); otherwise the
 /// `GZIP_COMPRESSED_DATA`/`UNCOMPRESSED_DATA` fallbacks hold the raw float values.
-#[allow(clippy::too_many_arguments)]
 fn decode_float_tile(
     cmptype: &str,
-    primary: Option<&ColumnData>,
-    gzip_fallback: Option<&ColumnData>,
-    uncompressed: Option<&ColumnData>,
+    cols: TileColumns,
     tile_elems: usize,
     zbitpix: Bitpix,
     int_bitpix: Bitpix,
-    blocksize: usize,
-    bytepix: usize,
-    scale: f64,
-    zero: f64,
-    method: quantize::DitherMethod,
-    irow: i64,
-    zblank: Option<i64>,
+    codec: CodecParams,
+    dq: Dequant,
 ) -> Result<Vec<f64>> {
-    if let Some(cell) = primary.filter(|c| cell_len(c) > 0) {
-        // Quantized integers; float images never use HCOMPRESS, so smooth=false.
-        let ints = decode_tile_cell(
-            cmptype, cell, tile_elems, int_bitpix, blocksize, bytepix, false,
-        )?;
-        Ok(quantize::dequantize(
-            &ints, scale, zero, method, irow, zblank,
-        ))
-    } else if let Some(cell) = gzip_fallback.filter(|c| cell_len(c) > 0) {
-        Ok(be_floats(&gzip::gunzip(as_bytes(cell)?)?, zbitpix))
-    } else if let Some(cell) = uncompressed.filter(|c| cell_len(c) > 0) {
-        Ok(cell_to_f64(cell, zbitpix))
-    } else {
-        Err(FitsError::UnsupportedCompression {
-            name: "empty float tile".to_string(),
-        })
+    match cols.resolve()? {
+        TileSource::Compressed(cell) => {
+            // Quantized integers (float images never use HCOMPRESS).
+            let ints = decode_tile_cell(cmptype, cell, tile_elems, int_bitpix, codec)?;
+            Ok(quantize::dequantize(
+                &ints, dq.scale, dq.zero, dq.method, dq.irow, dq.zblank,
+            ))
+        }
+        TileSource::Gzip(cell) => Ok(be_floats(&gzip::gunzip(as_bytes(cell)?)?, zbitpix)),
+        TileSource::Uncompressed(cell) => Ok(cell_to_f64(cell, zbitpix)),
     }
 }
 
@@ -619,15 +639,13 @@ fn decode_tile_cell(
     cell: &ColumnData,
     tile_elems: usize,
     int_bitpix: Bitpix,
-    blocksize: usize,
-    bytepix: usize,
-    smooth: bool,
+    codec: CodecParams,
 ) -> Result<Vec<i64>> {
     match cmptype {
         "GZIP_1" => gzip::gzip_tile(as_bytes(cell)?, int_bitpix),
         "GZIP_2" => gzip::gzip2_tile(as_bytes(cell)?, int_bitpix),
         "RICE_1" => {
-            if bytepix > 4 {
+            if codec.bytepix > 4 {
                 return Err(FitsError::UnsupportedCompression {
                     name: "RICE_1 with BYTEPIX > 4 (64-bit pixels)".to_string(),
                 });
@@ -635,12 +653,12 @@ fn decode_tile_cell(
             Ok(rice::rice_decode(
                 as_bytes(cell)?,
                 tile_elems,
-                bytepix,
-                blocksize,
+                codec.bytepix,
+                codec.blocksize,
             ))
         }
         "PLIO_1" => Ok(plio::plio_decode(as_i16(cell)?, tile_elems)),
-        "HCOMPRESS_1" => hcompress::hcompress_tile(as_bytes(cell)?, smooth),
+        "HCOMPRESS_1" => hcompress::hcompress_tile(as_bytes(cell)?, codec.smooth),
         // §10.4: a tile stored verbatim — the cell is the raw big-endian pixels.
         "NOCOMPRESS" => Ok(be_to_i64(as_bytes(cell)?, int_bitpix)),
         other => Err(FitsError::UnsupportedCompression {

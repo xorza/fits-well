@@ -64,9 +64,12 @@ Correctly **absent** — adding them would exceed the FITS *format* standard:
   observational astronomy, not the format. (The leap-second table and TDB series
   *are* kept: they are the defining UTC↔TAI and TDB relations §9.2.1 needs.)
 - ⚪ **Reader strictness tightening** (rejecting control chars, the col-10 value
-  indicator, the 999-axis bound, extension-keyword order). The standard does not
-  require a *reader* to reject these, so enforcing them risks rejecting readable
-  files without improving compatibility.
+  indicator, extension-keyword order). The standard does not require a *reader* to
+  reject these, so enforcing them risks rejecting readable files without improving
+  compatibility. (The `NAXIS`/`TFIELDS ≤ 999` cap is the one exception, now
+  enforced: a value over 999 is non-conforming *and* could never name its own
+  `NAXISn`/`TFORMn` keyword, so rejecting it drops no readable file while closing
+  an allocation DoS — `axes()`/`from_data` size a `Vec` straight from the count.)
 - ⚪ **Ergonomics / performance** — coordinate-index/strided image API, SIMD /
   zero-copy decode, trivial typed accessors. Not part of the standard.
 
@@ -75,8 +78,8 @@ Correctly **absent** — adding them would exceed the FITS *format* standard:
 ## Verification
 
 ```
-cargo test                                                        → 173 passed
-cargo test --features compression                                 → 202 passed, 2 ignored (fixture emitters)
+cargo test                                                        → 177 passed
+cargo test --features compression                                 → 206 passed, 2 ignored (fixture emitters)
 cargo fmt --all                                                   → applied
 cargo clippy --all-targets -- -D warnings                         → clean
 cargo clippy --all-targets --features compression -- -D warnings  → clean

@@ -147,3 +147,17 @@ fn missing_mandatory_keyword_is_reported() {
         Err(FitsError::MissingKeyword { name: "NAXIS" })
     ));
 }
+
+#[test]
+fn naxis_beyond_999_is_rejected() {
+    // §4.4.1 caps NAXIS at 999; an absurd value must error rather than drive
+    // `Vec::with_capacity(NAXIS)` in `axes()` (an allocation DoS from a tiny header).
+    let mut h = Header::new();
+    h.set("NAXIS", 1000);
+    assert!(matches!(
+        h.naxis(),
+        Err(FitsError::WrongValueType { name: "NAXIS" })
+    ));
+    h.set("NAXIS", 3);
+    assert_eq!(h.naxis().unwrap(), 3);
+}

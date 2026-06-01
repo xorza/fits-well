@@ -462,3 +462,14 @@ fn vla_bit_column_unpacks_msb_first() {
     );
     assert_eq!(rows[1], vec![true, true, true, true]);
 }
+
+#[test]
+fn tfields_beyond_999_is_rejected() {
+    // §7.3.1 caps TFIELDS at 999; an absurd value must error, not size a huge Vec.
+    let mut header = table_header(0, 0, &[]);
+    header.set("TFIELDS", 1000);
+    assert!(matches!(
+        BinTable::from_data(&header, vec![]),
+        Err(FitsError::WrongValueType { name: "TFIELDS" })
+    ));
+}
