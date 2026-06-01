@@ -60,7 +60,7 @@ cargo build --release            # optimized — benchmark against this, never d
 cargo test                       # run all tests
 cargo test <name>                # run tests matching a substring
 cargo test --lib module::tests   # run one module's tests
-cargo bench                      # run benchmarks (once criterion benches exist)
+cargo bench --features internals # throughput benches (decode path + codecs)
 cargo doc --open                 # render API docs
 ```
 
@@ -141,6 +141,7 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `block.rs` | 2880-byte grid, padding, rounding math | done |
 | `bitpix.rs` | `BITPIX` element type + element sizes | done |
 | `endian.rs` | big-endian scalar (de)serialization shared by image/table/compression decode + encode | done |
+| `keyword.rs` | stack-allocated indexed-keyword formatting (`key!` macro / `KeyBuf`): builds `NAXISn`/`PVi_m`/`CTYPEn`-style keys without the per-lookup `format!` heap alloc (one WCS parse does ~90) | done |
 | `header/` | ordered card model (`value.rs`, `card/`, `mod.rs`): parse/render, `CONTINUE` folding, `HIERARCH` compound keys, keyword index, typed getters + builder | done |
 | `hdu/` | HDU classification + data-unit sizing (Eq. 2, incl. random groups) | done |
 | `reader/` | lazy seeking HDU scan; `read_image`/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_image`/`read_compressed_table`/`verify_checksum`, raw `DataUnit` | done |
@@ -168,7 +169,8 @@ Design principles specific to this crate:
   they didn't ask for.
 - **Lazy by default.** HDU boundaries are computable from headers alone
   (`|BITPIX|·GCOUNT·(PCOUNT + Π NAXISn)` rounded to a block) — never read data to
-  find the next HDU. Support `Read + Seek` and memory-mapped sources.
+  find the next HDU. Reads over any `Read + Seek` source; the `mmap` feature is
+  reserved for zero-copy memory-mapped sources but isn't wired up yet.
 - **Headers round-trip exactly.** Model a header as an *ordered list* of records
   with a side index for lookup — not a hash map. Duplicate `COMMENT`/`HISTORY`
   and record order are significant and must be preserved byte-for-byte.
