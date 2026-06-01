@@ -67,6 +67,12 @@ pub struct WriteColumn {
     pub wide: bool,
     /// Bit count for an `X` (bit-array) column; `data` is the packed bytes.
     pub bits: Option<usize>,
+    /// `TSCALn`/`TZEROn` to emit: `data` holds the stored values, and a reader's
+    /// `read_column_physical` recovers `TZEROn + TSCALn × stored`.
+    pub tscale: Option<f64>,
+    pub tzero: Option<f64>,
+    /// `TNULLn`: the stored integer marking an undefined element.
+    pub tnull: Option<i64>,
 }
 
 impl WriteColumn {
@@ -81,6 +87,9 @@ impl WriteColumn {
             tdim: None,
             wide: false,
             bits: None,
+            tscale: None,
+            tzero: None,
+            tnull: None,
         }
     }
 
@@ -125,6 +134,20 @@ impl WriteColumn {
     /// Use 64-bit `Q` descriptors for this VLA column.
     pub fn wide(mut self) -> WriteColumn {
         self.wide = true;
+        self
+    }
+
+    /// Emit `TSCALn`/`TZEROn` so the stored `data` reads back as
+    /// `TZEROn + TSCALn × stored` physically.
+    pub fn scaled(mut self, tscale: f64, tzero: f64) -> WriteColumn {
+        self.tscale = Some(tscale);
+        self.tzero = Some(tzero);
+        self
+    }
+
+    /// Emit `TNULLn`, the stored integer denoting an undefined element.
+    pub fn with_null(mut self, tnull: i64) -> WriteColumn {
+        self.tnull = Some(tnull);
         self
     }
 }
@@ -464,6 +487,15 @@ fn bintable_header(
         if let Some(shape) = &col.tdim {
             let dims: Vec<String> = shape.iter().map(|d| d.to_string()).collect();
             header.set(&format!("TDIM{n}"), format!("({})", dims.join(",")));
+        }
+        if let Some(tscale) = col.tscale {
+            header.set(&format!("TSCAL{n}"), tscale);
+        }
+        if let Some(tzero) = col.tzero {
+            header.set(&format!("TZERO{n}"), tzero);
+        }
+        if let Some(tnull) = col.tnull {
+            header.set(&format!("TNULL{n}"), tnull);
         }
     }
     header

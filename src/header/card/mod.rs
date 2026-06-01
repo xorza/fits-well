@@ -61,6 +61,15 @@ impl Card {
         }
     }
 
+    /// The units string from a `[unit]` prefix on the comment (§4.3), e.g.
+    /// `'[m/s] line-of-sight speed'` → `Some("m/s")`. `None` if the comment is
+    /// absent or has no (non-empty) bracketed prefix.
+    pub fn unit(&self) -> Option<&str> {
+        let inner = self.comment.as_deref()?.trim_start().strip_prefix('[')?;
+        let unit = inner[..inner.find(']')?].trim();
+        (!unit.is_empty()).then_some(unit)
+    }
+
     /// Parse a single 80-byte record.
     pub fn parse(raw: &[u8; CARD_SIZE]) -> Result<Card> {
         // FITS header records are restricted ASCII (§4.1). Rejecting non-ASCII up

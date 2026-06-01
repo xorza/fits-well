@@ -48,13 +48,25 @@ fn parses_tform_repeat_and_kind() {
     for (s, expected) in cases {
         assert_eq!(Tform::parse(s).unwrap(), expected, "{s}");
     }
-    for bad in ["9Z", "", "1P"] {
-        // "1P" lacks the required heap element-type letter.
+    for bad in ["9Z", "", "1P", "2PE(5)", "3QD"] {
+        // "1P" lacks the heap element-type letter; "2PE"/"3QD" violate the §6.3
+        // rule that a P/Q descriptor's repeat count is 0 or 1.
         assert!(
             matches!(Tform::parse(bad), Err(FitsError::InvalidTform { .. })),
             "{bad}"
         );
     }
+}
+
+#[test]
+fn theap_below_the_main_table_is_rejected() {
+    // §6.6: the heap follows the main table, so THEAP < NAXIS1·NAXIS2 is invalid.
+    let mut header = table_header(4, 2, &["1J"]); // main table = 8 bytes
+    header.set("PCOUNT", 4).set("THEAP", 4); // THEAP 4 < 8
+    assert!(matches!(
+        BinTable::from_data(&header, vec![0u8; 12]),
+        Err(FitsError::WrongValueType { name: "THEAP" })
+    ));
 }
 
 #[test]
@@ -175,39 +187,52 @@ fn decodes_variable_length_arrays_from_the_heap() {
 }
 
 #[test]
-fn read_column_unsigned_recovers_typed_values() {
-    // `1I` with TZERO=2¹⁵ → u16; `1B` with TZERO=-128 → i8.
-    let mut header = table_header(3, 1, &["1I", "1B"]);
-    header.set("TZERO1", 32768.0).set("TZERO2", -128.0);
-    let mut data = Vec::new();
-    data.extend_from_slice(&((50000u16 ^ 0x8000) as i16).to_be_bytes());
-    data.push(((-10i8) as u8) ^ 0x80);
-    let table = BinTable::from_data(&header, data).unwrap();
-    assert_eq!(
-        table.read_column_unsigned(0).unwrap(),
-        Some(UnsignedView::U16(vec![50000]))
-    );
-    assert_eq!(
-        table.read_column_unsigned(1).unwrap(),
-        Some(UnsignedView::I8(vec![-10]))
-    );
+fn parses_tdisp_display_formats() {
+    use TDispKind::*;
+    let d = |kind, width, decimals, exponent| TDisp {
+        kind,
+        width,
+        decimals,
+        exponent,
+    };
+    let cases = [
+        ("I5", d(Integer, 5, None, None)),
+        ("F8.2", d(Float, 8, Some(2), None)),
+        ("E12.5E3", d(Exponential, 12, Some(5), Some(3))),
+        ("ES15.6", d(Scientific, 15, Some(6), None)),
+        ("EN10.3", d(Engineering, 10, Some(3), None)),
+        ("A20", d(Char, 20, None, None)),
+        ("Z8", d(Hex, 8, None, None)),
+    ];
+    for (s, want) in cases {
+        assert_eq!(TDisp::parse(s), Some(want), "{s}");
+    }
+    assert_eq!(TDisp::parse("Q5"), None); // unknown letter
+    assert_eq!(TDisp::parse("F"), None); // missing width
+    // The column reads TDISPn into a parsed TDisp.
+    let mut header = table_header(4, 1, &["1J"]);
+    header.set("TDISP1", "I5");
+    let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
+    assert_eq!(table.columns[0].tdisp, Some(d(Integer, 5, None, None)));
 }
 
 #[test]
-fn read_column_unsigned_is_exact_for_u64_and_none_otherwise() {
-    // `1K` with TZERO=2⁶³ → u64, exact past 2⁵³; a plain `1J` (TZERO=0) is not
-    // an unsigned column.
-    let mut header = table_header(12, 1, &["1K", "1J"]);
-    header.set("TZERO1", 9_223_372_036_854_775_808.0); // 2⁶³
+fn read_column_complex_widens_and_scales() {
+    // `1C` (single-precision complex), TSCAL=2, TZERO=1 ⇒ each part scaled.
+    let mut header = table_header(8, 1, &["1C"]);
+    header.set("TSCAL1", 2.0).set("TZERO1", 1.0);
     let mut data = Vec::new();
-    data.extend_from_slice(&((u64::MAX ^ 0x8000_0000_0000_0000) as i64).to_be_bytes());
-    data.extend_from_slice(&7i32.to_be_bytes());
+    data.extend_from_slice(&3.0f32.to_be_bytes());
+    data.extend_from_slice(&4.0f32.to_be_bytes());
     let table = BinTable::from_data(&header, data).unwrap();
-    assert_eq!(
-        table.read_column_unsigned(0).unwrap(),
-        Some(UnsignedView::U64(vec![u64::MAX]))
-    );
-    assert_eq!(table.read_column_unsigned(1).unwrap(), None); // TZERO=0
+    assert_eq!(table.read_column_complex(0).unwrap(), vec![(7.0, 9.0)]); // 1+2·3, 1+2·4
+    // A non-complex column errors.
+    let h2 = table_header(4, 1, &["1J"]);
+    let t2 = BinTable::from_data(&h2, vec![0u8; 4]).unwrap();
+    assert!(matches!(
+        t2.read_column_complex(0),
+        Err(FitsError::NotAComplexColumn { code: 'J' })
+    ));
 }
 
 #[test]

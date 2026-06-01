@@ -7,10 +7,6 @@
 //! `TSCALn`/`TZEROn` physical plane ([`BinTable::read_column_physical`]), and
 //! `P`/`Q` variable-length arrays out of the heap ([`BinTable::read_vla_column`]).
 
-use crate::data::U16_OFFSET;
-use crate::data::U32_OFFSET;
-use crate::data::U64_OFFSET;
-use crate::data::UnsignedView;
 use crate::endian::decode_be;
 use crate::error::FitsError;
 use crate::error::Result;
@@ -132,6 +128,10 @@ impl Tform {
         // A P/Q descriptor is followed by its heap element-type letter (`rPt`).
         let vla_elem = if matches!(kind, TformKind::ArrayDesc32 | TformKind::ArrayDesc64) {
             let elem = s.as_bytes().get(pos + 1).copied().ok_or_else(invalid)?;
+            // §6.3: a `P`/`Q` descriptor's repeat count is restricted to 0 or 1.
+            if repeat > 1 {
+                return Err(invalid());
+            }
             Some(TformKind::from_code(elem).ok_or_else(invalid)?)
         } else {
             None
@@ -152,6 +152,88 @@ impl Tform {
     }
 }
 
+/// The format letter of a `TDISPn` display format (§7.3.4, Table 20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TDispKind {
+    /// `Aw` character.
+    Char,
+    /// `Lw` logical.
+    Logical,
+    /// `Iw[.m]` integer.
+    Integer,
+    /// `Bw[.m]` binary.
+    Binary,
+    /// `Ow[.m]` octal.
+    Octal,
+    /// `Zw[.m]` hexadecimal.
+    Hex,
+    /// `Fw.d` fixed-point float.
+    Float,
+    /// `Ew.d[Ee]` exponential.
+    Exponential,
+    /// `ENw.d` engineering (exponent a multiple of 3).
+    Engineering,
+    /// `ESw.d` scientific (mantissa 1–10).
+    Scientific,
+    /// `Gw.d[Ee]` general.
+    General,
+    /// `Dw.d[Ee]` double-precision exponential.
+    Double,
+}
+
+/// A parsed `TDISPn` display format: the format letter, field width, optional
+/// decimal places (`.d`/`.m`), and optional exponent width (a trailing `Ee`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TDisp {
+    pub kind: TDispKind,
+    pub width: usize,
+    pub decimals: Option<usize>,
+    pub exponent: Option<usize>,
+}
+
+impl TDisp {
+    /// Parse a `TDISPn` value such as `"I5"`, `"F8.2"`, `"E12.5E3"`, `"ES15.6"`, or
+    /// `"A20"`. Returns `None` if the format letter or width is missing/invalid.
+    pub fn parse(s: &str) -> Option<TDisp> {
+        let s = s.trim().to_ascii_uppercase();
+        let (kind, rest) = if let Some(r) = s.strip_prefix("EN") {
+            (TDispKind::Engineering, r)
+        } else if let Some(r) = s.strip_prefix("ES") {
+            (TDispKind::Scientific, r)
+        } else {
+            let kind = match s.bytes().next()? {
+                b'A' => TDispKind::Char,
+                b'L' => TDispKind::Logical,
+                b'I' => TDispKind::Integer,
+                b'B' => TDispKind::Binary,
+                b'O' => TDispKind::Octal,
+                b'Z' => TDispKind::Hex,
+                b'F' => TDispKind::Float,
+                b'E' => TDispKind::Exponential,
+                b'G' => TDispKind::General,
+                b'D' => TDispKind::Double,
+                _ => return None,
+            };
+            (kind, &s[1..])
+        };
+        // rest = width[.decimals][E exponent]
+        let (main, exponent) = match rest.split_once('E') {
+            Some((m, e)) => (m, Some(e.parse().ok()?)),
+            None => (rest, None),
+        };
+        let (width, decimals) = match main.split_once('.') {
+            Some((w, d)) => (w, Some(d.parse().ok()?)),
+            None => (main, None),
+        };
+        Some(TDisp {
+            kind,
+            width: width.parse().ok()?,
+            decimals,
+            exponent,
+        })
+    }
+}
+
 /// One column of a binary table: its `TFORMn` format, optional name/unit, the
 /// `TSCALn`/`TZEROn`/`TNULLn` metadata, and its byte offset within a row.
 #[derive(Debug, Clone)]
@@ -168,6 +250,8 @@ pub struct Column {
     /// `TDIMn` array shape (e.g. `'(4,4)'` → `[4, 4]`), if declared — reshapes the
     /// `repeat` elements of each row into a multidimensional array (§7.3.2).
     pub tdim: Option<Vec<usize>>,
+    /// `TDISPn` display format (§7.3.4), parsed, if declared.
+    pub tdisp: Option<TDisp>,
     /// Byte offset of this column from the start of a row.
     pub byte_offset: usize,
 }
@@ -247,6 +331,7 @@ impl BinTable {
                 tzero: header.get_real(&format!("TZERO{n}")).unwrap_or(0.0),
                 tnull: header.get_integer(&format!("TNULL{n}")),
                 tdim: header.get_text(&format!("TDIM{n}")).and_then(parse_tdim),
+                tdisp: header.get_text(&format!("TDISP{n}")).and_then(TDisp::parse),
                 byte_offset: offset,
             });
             offset += tform.byte_width();
@@ -264,6 +349,10 @@ impl BinTable {
         let heap_offset = header
             .get_integer("THEAP")
             .map_or(nrows * row_len, |t| t.max(0) as usize);
+        // §6.6: the heap follows the main table, so THEAP must be ≥ its size.
+        if heap_offset < nrows * row_len {
+            return Err(FitsError::WrongValueType { name: "THEAP" });
+        }
         // PCOUNT counts the gap-plus-heap bytes after the main table, so the real
         // heap ends here — anything past it is block fill (§6.6).
         let pcount = header
@@ -360,34 +449,23 @@ impl BinTable {
         column_data_physical(&data, col.tform.kind, col.tscale, col.tzero, col.tnull)
     }
 
-    /// If column `index` uses exactly the FITS unsigned (or signed-byte)
-    /// convention — `TSCALn == 1`, no `TNULLn`, and `TZEROn` the matching sign-bit
-    /// offset on a `B`/`I`/`J`/`K` column — decode it as exact typed integers (no
-    /// `f64` rounding, unlike [`BinTable::read_column_physical`]). Array columns
-    /// flatten row-major. Returns `Ok(None)` for any other column. Errors only on a
-    /// bad index or a variable-length column.
-    pub fn read_column_unsigned(&self, index: usize) -> Result<Option<UnsignedView>> {
+    /// Decode a `C`/`M` complex column into `f64` `(re, im)` pairs, applying
+    /// `TZEROn + TSCALn ×` to each component (§6.4). Errors on non-complex columns —
+    /// the real numeric kinds go through [`BinTable::read_column_physical`].
+    pub fn read_column_complex(&self, index: usize) -> Result<Vec<(f64, f64)>> {
         let col = self.column(index)?;
-        if col.tscale != 1.0 || col.tnull.is_some() {
-            return Ok(None);
-        }
-        let tzero = col.tzero;
-        Ok(match (self.read_column(index)?, col.tform.kind) {
-            (ColumnData::Bytes(v), TformKind::Byte) if tzero == -128.0 => Some(UnsignedView::I8(
-                v.iter().map(|&x| (x ^ 0x80) as i8).collect(),
-            )),
-            (ColumnData::I16(v), _) if tzero == U16_OFFSET => Some(UnsignedView::U16(
-                v.iter().map(|&x| (x as u16) ^ 0x8000).collect(),
-            )),
-            (ColumnData::I32(v), _) if tzero == U32_OFFSET => Some(UnsignedView::U32(
-                v.iter().map(|&x| (x as u32) ^ 0x8000_0000).collect(),
-            )),
-            (ColumnData::I64(v), _) if tzero == U64_OFFSET => Some(UnsignedView::U64(
-                v.iter()
-                    .map(|&x| (x as u64) ^ 0x8000_0000_0000_0000)
-                    .collect(),
-            )),
-            _ => None,
+        let scale = |x: f64| col.tzero + col.tscale * x;
+        Ok(match self.read_column(index)? {
+            ColumnData::ComplexF32(v) => v
+                .iter()
+                .map(|&(re, im)| (scale(re as f64), scale(im as f64)))
+                .collect(),
+            ColumnData::ComplexF64(v) => v.iter().map(|&(re, im)| (scale(re), scale(im))).collect(),
+            _ => {
+                return Err(FitsError::NotAComplexColumn {
+                    code: col.tform.kind.code(),
+                });
+            }
         })
     }
 

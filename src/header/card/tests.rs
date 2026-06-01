@@ -256,6 +256,18 @@ fn long_hierarch_string_splits_into_a_continue_chain() {
 }
 
 #[test]
+fn unit_extracts_the_bracketed_comment_prefix() {
+    // §4.3: a `[unit]` prefix on the comment is the column's units.
+    assert_eq!(
+        parse("VELOC   = 1.5 / [m/s] line of sight").unit(),
+        Some("m/s")
+    );
+    assert_eq!(parse("X       = 1 / no units here").unit(), None);
+    assert_eq!(parse("Y       = 1 / [] empty brackets").unit(), None);
+    assert_eq!(parse("Z       = 1").unit(), None); // no comment at all
+}
+
+#[test]
 fn short_string_renders_to_a_single_record() {
     let card = parse("OBJECT  = 'Cygnus X-1'");
     assert_eq!(card.render_records().len(), 1);

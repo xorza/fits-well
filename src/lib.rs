@@ -49,7 +49,7 @@ mod writer;
 
 pub use ascii::{AsciiColumn, AsciiKind, AsciiTable};
 pub use bitpix::Bitpix;
-pub use data::{Image, ImageData, Scaling, UnsignedView};
+pub use data::{Image, ImageData, Scaling};
 pub use error::{FitsError, Result};
 pub use groups::RandomGroups;
 pub use hdu::HduKind;
@@ -57,7 +57,7 @@ pub use header::Header;
 pub use header::card::{Card, CardKind};
 pub use header::value::Value;
 pub use reader::{ChecksumReport, DataUnit, FitsReader, Hdu};
-pub use table::{BinTable, Column, ColumnData, Tform, TformKind};
+pub use table::{BinTable, Column, ColumnData, TDisp, TDispKind, Tform, TformKind};
 pub use time::{
     Datetime, Epoch, EpochTime, FitsTime, GtiInterval, TimeAxisKind, TimeBounds, TimeScale,
     time_axis_kind,

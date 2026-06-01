@@ -675,6 +675,18 @@ impl Wcs {
             .any(|i| (1..=naxis).any(|j| header.get_real(&format!("CD{i}_{j}{a}")).is_some()));
         let has_pc = (1..=naxis)
             .any(|i| (1..=naxis).any(|j| header.get_real(&format!("PC{i}_{j}{a}")).is_some()));
+        let has_crota = (1..=naxis).any(|i| header.get_real(&format!("CROTA{i}{a}")).is_some());
+        // §8: the PC/CDELT, CD, and legacy CROTA conventions are mutually exclusive.
+        if has_cd && has_pc {
+            return Err(FitsError::ConflictingWcsKeywords {
+                detail: "PC and CD both present",
+            });
+        }
+        if has_pc && has_crota {
+            return Err(FitsError::ConflictingWcsKeywords {
+                detail: "CROTA and PC both present",
+            });
+        }
         let mut matrix = vec![0.0; naxis * naxis];
         if has_cd {
             for i in 0..naxis {

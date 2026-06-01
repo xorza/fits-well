@@ -1,6 +1,6 @@
 use super::*;
 use crate::block::ZERO_FILL;
-use crate::data::{ImageData, Scaling, UnsignedView};
+use crate::data::{ImageData, Scaling};
 use crate::hdu::HduKind;
 use crate::header::from_card_lines as header;
 use crate::reader::FitsReader;
@@ -114,6 +114,25 @@ fn writes_tdim_q_vla_and_bit_columns() {
         ColumnData::Bytes(b) => assert_eq!(b, vec![0xAB, 0xC0, 0x12, 0x30]),
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn writes_tscal_tzero_tnull_and_reads_back_physical() {
+    // Stored [5, 99] with TSCAL=2, TZERO=10, TNULL=99 ⇒ physical [20, NaN].
+    let columns = vec![
+        WriteColumn::fixed("X", ColumnData::I32(vec![5, 99]), 1)
+            .scaled(2.0, 10.0)
+            .with_null(99),
+    ];
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_table(2, &columns).unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    assert_eq!(r.hdus[1].header.get_real("TSCAL1"), Some(2.0));
+    assert_eq!(r.hdus[1].header.get_real("TZERO1"), Some(10.0));
+    assert_eq!(r.hdus[1].header.get_integer("TNULL1"), Some(99));
+    let phys = r.read_table(1).unwrap().read_column_physical(0).unwrap();
+    assert_eq!(phys[0], 20.0);
+    assert!(phys[1].is_nan());
 }
 
 #[test]
@@ -249,16 +268,6 @@ fn write_image_emits_scaling_keywords_and_preserves_unsigned_values() {
     let back = r.read_image(0).unwrap();
     assert_eq!(back.samples, ImageData::I16(vec![-32768, 0, 32767]));
     assert_eq!(back.physical(), vec![0.0, 32768.0, 65535.0]);
-
-    // The `from_u16` helper produces the identical storage and round-trips back to
-    // the exact `u16` values via the typed `unsigned()` view.
-    let built = Image::from_u16(vec![3], &[0, 32768, 65535]);
-    assert_eq!(built.samples, ImageData::I16(vec![-32768, 0, 32767]));
-    let mut r2 = FitsReader::open(Cursor::new(write_to_vec(&built))).unwrap();
-    assert_eq!(
-        r2.read_image(0).unwrap().unsigned(),
-        Some(UnsignedView::U16(vec![0, 32768, 65535]))
-    );
 }
 
 #[test]

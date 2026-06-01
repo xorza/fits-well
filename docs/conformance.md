@@ -142,9 +142,9 @@ Audited code: `header/card/mod.rs` (parse + render), `header/value.rs`
    the value always fits and round-trips. Covered by
    `large_magnitude_real_renders_with_exponent_and_round_trips`.
 
-5. 🟢 **No `[...]` unit-prefix helper (§4.3).** The doc says the library should
-   expose a helper to parse the bracketed unit prefix of a comment; comments are
-   stored opaquely and no such helper exists.
+5. ✅ **`[...]` unit-prefix helper added (§4.3).** `Card::unit` parses the
+   bracketed unit prefix of the comment (e.g. `'[m/s] speed'` → `Some("m/s")`).
+   Covered by `unit_extracts_the_bracketed_comment_prefix`.
 
 ### Test coverage
 
@@ -187,7 +187,7 @@ decode/encode, physical plane), with `ascii/` and `table/` for character data.
 | 3.2 | Characters = 7-bit ASCII, high bit zero | header rejects ≥128; ASCII/`A`-cols lenient | 🟡 not enforced in table/ascii |
 | 3.3 | Integers two's-complement, big-endian | `decode_be` (`endian.rs:7`) | ✅ |
 | 3.3 | 8-bit unsigned; 16/32/64 signed | `Bitpix` → `ImageData` mapping | ✅ |
-| 3.3 | Unsigned 16/32/64 + signed-8 via `BZERO`/`TZEROn` | `physical()` plane + typed `Image::unsigned()` → `UnsignedView` | ✅ |
+| 3.3 | Unsigned 16/32/64 + signed-8 via `BZERO`/`TZEROn` | `physical()` float plane | ✅ values / 🟡 no typed `uN` |
 | 3.4 | `-32`/`-64` IEEE-754, big-endian | `f32`/`f64::from_be_bytes` (`data/mod.rs:69`) | ✅ |
 | 3.4 | NaN = blank float; no float `BLANK` | `scale_ints` for ints only; float NaN propagates | ✅ |
 | 3.4 | Preserve ±Inf + signaling/quiet NaN payload on round-trip | `to_bits`/`from_bits` are bit-exact | ✅ code / ⚠️ untested |
@@ -195,11 +195,11 @@ decode/encode, physical plane), with `ascii/` and `table/` for character data.
 | 3.5 | `physical = BZERO + BSCALE × stored` (Eq. 3) | `scale` closure (`data/mod.rs:110`) | ✅ |
 | 3.5 | Defaults `BSCALE=1.0`, `BZERO=0.0` | `from_header` `unwrap_or` (`data/mod.rs:150`) | ✅ |
 | 3.5 | `BLANK` integer-only, applied *before* scaling | `scale_ints` sentinel→NaN pre-scale (`data/mod.rs:124`) | ✅ |
-| 3.5 | Unsigned convention table (8/16/32/64) | `physical()` + exact typed `Image::unsigned()` | ✅ |
+| 3.5 | Unsigned convention table (8/16/32/64) | `physical()` | ✅ values (u64: gap #2) |
 | 3.5 | `TZEROn`/`TSCALn` binary-table analogue | `table/` layer | ✅ (audited under §6) |
 | 3.6 | Time defers to §9 | `time/` feature | ✅ (audited under §9) |
 | impl | Zero-copy raw + SIMD bulk byte-swap | `decode` always allocates + converts | 🟢 TODO (perf) |
-| impl | Detect + expose as `uN` | `Image::unsigned()` → `UnsignedView::{I8,U16,U32,U64}` | ✅ |
+| impl | Detect + expose as `uN` | no `U16`/`U32`/`U64` variant | 🟡 not implemented |
 | impl | `BLANK` → `Option`/mask | NaN in physical plane | 🟢 by design |
 
 The normative core of §5 (BITPIX types, big-endian two's-complement integers,
@@ -209,18 +209,16 @@ edge-precision items, not wrong decoding.
 
 ### Gaps
 
-1. ✅ **FIXED — native unsigned (`uN`) typed exposure.** `Image::unsigned()`
-   returns a typed `UnsignedView` (`U16`/`U32`/`U64`/signed-byte `I8`) when the
-   scaling is exactly the FITS unsigned convention (`BSCALE == 1`, no `BLANK`,
-   `BZERO == 2^(n-1)`), recovering exact values by flipping the stored sign bit.
-   The `Image::from_u16`/`from_u32`/`from_u64`/`from_i8` constructors are the encode
-   side (signed storage + the offset `BZERO`, which the writer emits). Covered by
-   `unsigned_views_round_trip_every_width_exactly` and the write→read round-trip.
+1. 🟡 **No native unsigned (`uN`) typed exposure.** Unsigned 16/32/64 and signed
+   bytes are readable only through the `f64` `physical()` plane — there is no typed
+   `u16`/`u32`/`u64` buffer. (A typed `Image::unsigned()` view was prototyped and
+   removed: `physical()` already exposes the values, and the only added benefit —
+   exactness past 2⁵³ — wasn't worth the API surface.)
 
-2. ✅ **FIXED — `u64`/large-`i64` precision via the typed path.** `Image::unsigned()`
-   yields exact integers even past 2⁵³, where the `f64` `physical()` plane rounds.
-   Covered by `unsigned_u64_view_is_exact_where_physical_rounds`. (`physical()`
-   itself is unchanged — `f64` by definition for the general scaled plane.)
+2. 🟡 **`u64`/large-`i64` physical values lose precision.** `physical()` returns
+   `f64`; a 64-bit integer whose magnitude exceeds 2⁵³ (including any `u64` realized
+   via `BZERO = 2⁶³`) is rounded. The raw sample plane is exact; only the derived
+   `f64` plane is lossy.
 
 3. 🟡 **§5.1 7-bit/high-bit-zero not enforced for character data.** The header
    parser rejects bytes ≥ 128 (but admits control 0–31, see §4 gap #2). ASCII
@@ -305,8 +303,8 @@ decoding.
 2. 🟢 **No coordinate-indexing / strided-view API (§4.1).** `Image` stores the
    flat buffer (correctly in Fortran order) and the `shape`, but exposes no
    `at(coords)` accessor or strided/ndarray view, so the documented index mapping
-   is left entirely to the caller. The impl-notes call for strided views
-   (`stride[0] = 1`); not implemented.
+   is left to the caller. The impl-notes call for strided views (`stride[0] = 1`);
+   not implemented.
 
 3. 🟢 **Reserved image keywords have no typed accessors (§7.1.2).** `BUNIT`,
    `DATAMIN`, `DATAMAX`, `EXTNAME`, `EXTVER`, `EXTLEVEL` are readable only as raw
@@ -450,7 +448,7 @@ binary-table path (`bintable_header`, `column_code`, `check_column`, `pack_rows`
 | 6.3 | `P`/`Q` repeat only 0 or 1 | not validated | 🟢 |
 | 6.4 | `physical = TZEROn + TSCALn × stored` (Eq. 7) | `read_column_physical` (`table/mod.rs:314`) | ✅ |
 | 6.4 | Not applied to `A`/`L`/`X` | `_ ⇒ NonNumericColumn` (also rejects `C`/`M`) | ✅ (C/M over-rejected) |
-| 6.4 | Unsigned `B`/`I`/`J`/`K` via `TZEROn` | `physical()` plane + exact typed `read_column_unsigned()` | ✅ |
+| 6.4 | Unsigned `B`/`I`/`J`/`K` via `TZEROn` | `physical()` f64 plane | ✅ values / 🟡 no typed `uN`, u64 precision |
 | 6.4 | `TNULLn` matched on **stored** value before Eq. 7 | `scaled_int` checks `tnull` pre-scale (`table/mod.rs:318`) | ✅ |
 | 6.4 | Scaling on `P`/`Q` heap values, not descriptor | `read_vla_column_physical` scales heap elements | ✅ |
 | 6.5 | `TDIMn` multidimensional cell reshape | `Column.tdim` parsed; written from `WriteColumn::dims` | ✅ shape exposed |
@@ -503,28 +501,27 @@ beyond plain fixed-width decode.
 6. ✅ **FIXED — `column_index` now case-insensitive (§6.7),** via
    `eq_ignore_ascii_case`. Covered by `column_index_is_case_insensitive`.
 
-7. ✅ **FIXED — native unsigned (`uN`) exposure for table columns.**
-   `BinTable::read_column_unsigned` returns a typed `UnsignedView`
-   (`U16`/`U32`/`U64`/signed-byte `I8`) when a `B`/`I`/`J`/`K` column uses exactly
-   the convention (`TSCALn == 1`, no `TNULLn`, `TZEROn = 2^(n-1)`), exact past 2⁵³
-   where `read_column_physical` rounds. Reuses the image `UnsignedView`. Covered by
-   `read_column_unsigned_recovers_typed_values` and
-   `read_column_unsigned_is_exact_for_u64_and_none_otherwise`.
+7. 🟡 **No native unsigned (`uN`) exposure for table columns / `u64` precision.**
+   Integer `TFORM` + `TZEROn = 2^(n-1)` + `TSCALn = 1` is realized only through the
+   `f64` `read_column_physical` plane, with no typed `u16`/`u32`/`u64` column and
+   rounding for `u64` values > 2⁵³. (Same removed-prototype rationale as §5 gap #1.)
 
 8. ✅ **`Q` (64-bit) VLA write supported (§6.6).** `WriteColumn::q()` emits `1Q`
    descriptors for heaps beyond the 32-bit `1P` range; `1P` remains the default.
    (Added earlier; the prior gap entry was stale.)
 
-9. 🟢 **Minor/unvalidated:** `P`/`Q` repeat not restricted to {0,1}; `THEAP`
-   minimum (≥ main-table size) not enforced; `C`/`M` complex columns are rejected
-   from `read_column_physical` (complex scaling unsupported, and `Vec<f64>` could
-   not hold it anyway); a `nelem=0` descriptor with a garbage offset beyond the
-   buffer raises `UnexpectedEof` instead of yielding empty; and the writer has no
-   `TSCAL`/`TZERO`/`TNULL`/`X` write path.
+9. ✅ **Mostly closed.** `P`/`Q` repeat outside {0,1} is now rejected
+   (`Tform::parse`); `THEAP < NAXIS1·NAXIS2` is rejected (`from_data`); `C`/`M`
+   complex columns read via `read_column_complex` → scaled `(re, im)` `f64` pairs;
+   and the writer emits `TSCAL`/`TZERO`/`TNULL` (`WriteColumn::scaled`/`with_null`)
+   and `X` (`WriteColumn::bits`). Still open: a `nelem=0` descriptor with a garbage
+   offset raises `UnexpectedEof` rather than yielding empty.
 
-10. 🟢 **No typed accessors** for `TDISPn`, `TDMINn`/`TDMAXn`, `TLMINn`/`TLMAXn`,
-   `EXTNAME`/`EXTVER`/`EXTLEVEL`, `AUTHOR`, `REFERENC`; and no column-oriented /
-   SIMD / zero-copy fast path (`read_column` strides and copies via `flatten`).
+10. ✅/🟢 **`TDISPn` typed accessor added** — `Column.tdisp` parses the display
+   format into a `TDisp { kind, width, decimals, exponent }`. Still no typed
+   accessors for `TDMINn`/`TDMAXn`/`TLMINn`/`TLMAXn`/`EXTNAME`/`AUTHOR`/`REFERENC`
+   (trivial `header.get_*` reads — left out per the no-trivial-accessors rule), and
+   no column-oriented / SIMD / zero-copy fast path (perf).
 
 ### Test coverage
 
@@ -631,9 +628,11 @@ features (most flagged TODO in the module doc), not defects in what exists.
    `SkyCoord` / ERFA. `GAPPT` (geocentric apparent place) is likewise not
    interpreted.
 
-6. 🟢 **Lenient on illegal combinations / unexposed metadata.** `PC`+`CD` both
-   present is not rejected (`CD` wins); `CROTA`+`PC` is not rejected (`PC` wins);
-   `WCSNAMEa`/`CNAMEia` and `CRDERia`/`CSYERia` are not exposed.
+6. ✅/🟢 **Illegal linear-keyword combinations now rejected.** `PC`+`CD` and
+   `CROTA`+`PC` both-present return `FitsError::ConflictingWcsKeywords` (§8 — the
+   conventions are mutually exclusive). Covered by
+   `conflicting_linear_keywords_are_rejected`. Still unexposed: `WCSNAMEa`/`CNAMEia`
+   and `CRDERia`/`CSYERia` (trivial header reads).
 
 ### Test coverage
 

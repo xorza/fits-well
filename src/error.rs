@@ -63,6 +63,11 @@ pub enum FitsError {
     UnsupportedProjection {
         code: String,
     },
+    /// Two mutually-exclusive WCS keyword conventions are both present (e.g. `PC`
+    /// and `CD`, or `CROTA` and `PC`); a conforming header uses only one (§8).
+    ConflictingWcsKeywords {
+        detail: &'static str,
+    },
     /// A tiled-image compression algorithm or variant is not yet supported.
     UnsupportedCompression {
         name: String,
@@ -82,6 +87,10 @@ pub enum FitsError {
     },
     /// `read_bit_column` was called on a column that is not an `X` bit array.
     NotABitColumn {
+        code: char,
+    },
+    /// `read_column_complex` was called on a column that is not `C`/`M` complex.
+    NotAComplexColumn {
         code: char,
     },
     /// `read_column_physical` was called on a column with no numeric physical
@@ -137,6 +146,9 @@ impl fmt::Display for FitsError {
             FitsError::UnsupportedProjection { code } => {
                 write!(f, "unsupported WCS projection code: {code}")
             }
+            FitsError::ConflictingWcsKeywords { detail } => {
+                write!(f, "conflicting WCS keywords: {detail}")
+            }
             FitsError::UnsupportedCompression { name } => {
                 write!(f, "unsupported tiled compression: {name}")
             }
@@ -150,6 +162,9 @@ impl fmt::Display for FitsError {
             }
             FitsError::NotABitColumn { code } => {
                 write!(f, "column format '{code}' is not an X bit array")
+            }
+            FitsError::NotAComplexColumn { code } => {
+                write!(f, "column format '{code}' is not a C/M complex column")
             }
             FitsError::NonNumericColumn { code } => {
                 write!(f, "column format '{code}' has no numeric physical value")

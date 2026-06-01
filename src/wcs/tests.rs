@@ -378,6 +378,42 @@ fn unimplemented_projection_codes_error_cleanly() {
     }
 }
 
+#[test]
+fn conflicting_linear_keywords_are_rejected() {
+    use crate::error::FitsError;
+    use crate::header::Header;
+    let base = || {
+        let mut h = Header::new();
+        h.set("NAXIS", 2)
+            .set("CTYPE1", "RA---TAN")
+            .set("CTYPE2", "DEC--TAN")
+            .set("CRPIX1", 1.0)
+            .set("CRPIX2", 1.0)
+            .set("CRVAL1", 0.0)
+            .set("CRVAL2", 0.0)
+            .set("CDELT1", 1.0)
+            .set("CDELT2", 1.0);
+        h
+    };
+    // §8: PC, CD, and CROTA are mutually exclusive.
+    let mut pc_cd = base();
+    pc_cd.set("PC1_1", 1.0).set("CD1_1", 1.0);
+    assert!(matches!(
+        Wcs::from_header(&pc_cd, None),
+        Err(FitsError::ConflictingWcsKeywords { .. })
+    ));
+    let mut crota_pc = base();
+    crota_pc.set("PC1_1", 1.0).set("CROTA2", 30.0);
+    assert!(matches!(
+        Wcs::from_header(&crota_pc, None),
+        Err(FitsError::ConflictingWcsKeywords { .. })
+    ));
+    // A single convention (CD alone) is accepted.
+    let mut cd_only = base();
+    cd_only.set("CD1_1", 1.0).set("CD2_2", 1.0);
+    assert!(Wcs::from_header(&cd_only, None).is_ok());
+}
+
 /// Every projection's deprojection inverts its forward projection.
 #[test]
 fn projections_round_trip() {

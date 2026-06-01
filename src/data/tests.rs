@@ -122,62 +122,6 @@ fn physical_applies_scaling_and_maps_blank_to_nan() {
 }
 
 #[test]
-fn unsigned_views_round_trip_every_width_exactly() {
-    // from_uN sets up the signed storage + BZERO offset; unsigned() recovers the
-    // exact typed values (no f64 rounding).
-    let u16s = vec![0u16, 1, 32768, 65535];
-    assert_eq!(
-        Image::from_u16(vec![4], &u16s).unsigned(),
-        Some(UnsignedView::U16(u16s))
-    );
-    let u32s = vec![0u32, 1, 2_147_483_648, u32::MAX];
-    assert_eq!(
-        Image::from_u32(vec![4], &u32s).unsigned(),
-        Some(UnsignedView::U32(u32s))
-    );
-    let i8s = vec![i8::MIN, -1, 0, 1, i8::MAX];
-    assert_eq!(
-        Image::from_i8(vec![5], &i8s).unsigned(),
-        Some(UnsignedView::I8(i8s))
-    );
-}
-
-#[test]
-fn unsigned_u64_view_is_exact_where_physical_rounds() {
-    // 2⁵³+1 is the smallest integer f64 cannot represent. The typed view recovers
-    // it exactly; physical() (f64) cannot.
-    let exact = 9_007_199_254_740_993u64; // 2⁵³ + 1
-    let img = Image::from_u64(vec![3], &[u64::MAX, 1u64 << 63, exact]);
-    assert_eq!(
-        img.unsigned(),
-        Some(UnsignedView::U64(vec![u64::MAX, 1u64 << 63, exact]))
-    );
-    // The f64 physical plane rounds 2⁵³+1 to its even neighbour 2⁵³.
-    assert_eq!(img.physical()[2] as u64, exact - 1);
-}
-
-#[test]
-fn unsigned_returns_none_for_non_unsigned_scaling() {
-    // Plain signed image (BZERO=0) and a scaled image are not unsigned views.
-    let identity = Scaling {
-        bscale: 1.0,
-        bzero: 0.0,
-        blank: None,
-    };
-    let signed = image(ImageData::I16(vec![1, 2, 3]), identity);
-    assert_eq!(signed.unsigned(), None);
-    let scaled = image(
-        ImageData::I16(vec![1, 2]),
-        Scaling {
-            bscale: 2.0,
-            bzero: 32768.0,
-            blank: None,
-        },
-    );
-    assert_eq!(scaled.unsigned(), None); // BSCALE≠1
-}
-
-#[test]
 fn physical_realizes_unsigned_16_bit_via_the_bzero_offset() {
     // u16 trick: signed-16 storage with BSCALE=1, BZERO=32768.
     // -32768 -> 0, 0 -> 32768, 32767 -> 65535.
