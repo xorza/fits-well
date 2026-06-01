@@ -76,6 +76,13 @@ impl AsciiTable {
                 .get_text(key!("TFORM{n}").as_str())
                 .ok_or(FitsError::MissingKeyword { name: "TFORMn" })?;
             let fmt = parse_ascii_tform(tform)?;
+            let start = (tbcol.max(1) - 1) as usize;
+            // §7.2.3: each field must lie within the row (`NAXIS1`). A column declared
+            // past the row width is malformed — reject it rather than let `field()`
+            // silently truncate to empty.
+            if start.checked_add(fmt.width).is_none_or(|end| end > row_len) {
+                return Err(FitsError::KeywordOutOfRange { name: "TBCOLn" });
+            }
             columns.push(AsciiColumn {
                 name: header
                     .get_text(key!("TTYPE{n}").as_str())
@@ -86,7 +93,7 @@ impl AsciiTable {
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
                 kind: fmt.kind,
-                start: (tbcol.max(1) - 1) as usize,
+                start,
                 width: fmt.width,
                 decimals: fmt.decimals,
                 tscale: header.get_real(key!("TSCAL{n}").as_str()).unwrap_or(1.0),

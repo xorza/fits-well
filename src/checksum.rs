@@ -10,7 +10,7 @@ pub(crate) fn accumulate(bytes: &[u8], seed: u32) -> u32 {
     // Callers pass block-padded units (720-word multiples), so the split is exact;
     // assert it so a future caller passing an unaligned slice can't silently drop a
     // tail of up to 3 bytes from the sum.
-    debug_assert_eq!(bytes.len() % 4, 0, "checksum input must be word-aligned");
+    assert_eq!(bytes.len() % 4, 0, "checksum input must be word-aligned");
     let mut sum = seed as u64;
     for word in bytes.chunks_exact(4) {
         sum += u32::from_be_bytes([word[0], word[1], word[2], word[3]]) as u64;

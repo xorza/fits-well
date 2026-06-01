@@ -31,7 +31,9 @@ pub trait Source {
     ) -> Result<&'a [u8]>;
 
     /// The `len` bytes at `offset` in a fresh owned buffer — used where the bytes
-    /// must outlive the read (the parsed table / ASCII-table backing store).
+    /// must outlive the read (the parsed table / ASCII-table backing store). Kept
+    /// distinct from `slice().to_vec()` so a streaming source reads straight into
+    /// the owned buffer (one copy) instead of staging through `scratch` first (two).
     fn read_owned(&mut self, offset: u64, len: usize) -> Result<Vec<u8>>;
 }
 

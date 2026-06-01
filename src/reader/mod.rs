@@ -152,6 +152,15 @@ impl<S: Source> FitsReader<S> {
         &self.hdus[index]
     }
 
+    /// The HDU at `index`, or [`FitsError::HduIndexOutOfBounds`] — the checked form
+    /// the `read_*` methods bound-check through.
+    fn checked_hdu(&self, index: usize) -> Result<&Hdu> {
+        self.hdus.get(index).ok_or(FitsError::HduIndexOutOfBounds {
+            index,
+            len: self.hdus.len(),
+        })
+    }
+
     /// Read the raw, still-encoded (big-endian, unscaled) data unit into a fresh,
     /// caller-owned buffer. The returned [`DataUnit`] carries the full block-padded
     /// bytes plus the range of actual data within them, so a decoder consumes
@@ -161,10 +170,7 @@ impl<S: Source> FitsReader<S> {
     /// the parsed table's storage). Image and random-groups reads instead stage
     /// through the reader's reused internal scratch — see [`FitsReader::read_image`].
     pub fn read_data_raw(&mut self, index: usize) -> Result<DataUnit> {
-        let hdu = self.hdus.get(index).ok_or(FitsError::HduIndexOutOfBounds {
-            index,
-            len: self.hdus.len(),
-        })?;
+        let hdu = self.checked_hdu(index)?;
         let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
         let bytes = self
             .source
@@ -184,10 +190,7 @@ impl<S: Source> FitsReader<S> {
     /// so reading many images allocates only each decoded `Image`'s `samples` —
     /// never the staging (which grows once to the largest unit seen, then holds).
     pub fn read_image(&mut self, index: usize) -> Result<Image> {
-        let hdu = self.hdus.get(index).ok_or(FitsError::HduIndexOutOfBounds {
-            index,
-            len: self.hdus.len(),
-        })?;
+        let hdu = self.checked_hdu(index)?;
         if !matches!(hdu.kind, HduKind::Primary | HduKind::Image) {
             return Err(FitsError::NotAnImage);
         }
@@ -252,10 +255,7 @@ impl<S: Source> FitsReader<S> {
     /// Read and decode a random-groups primary array (§6). Errors with
     /// [`FitsError::NotRandomGroups`] for any other HDU.
     pub fn read_groups(&mut self, index: usize) -> Result<RandomGroups> {
-        let hdu = self.hdus.get(index).ok_or(FitsError::HduIndexOutOfBounds {
-            index,
-            len: self.hdus.len(),
-        })?;
+        let hdu = self.checked_hdu(index)?;
         if hdu.kind != HduKind::RandomGroups {
             return Err(FitsError::NotRandomGroups);
         }
@@ -293,10 +293,7 @@ impl<S: Source> FitsReader<S> {
     /// field of the report is `None` if that keyword is absent, else `Some(true)`
     /// when it matches the recomputed checksum.
     pub fn verify_checksum(&mut self, index: usize) -> Result<ChecksumReport> {
-        let hdu = self.hdus.get(index).ok_or(FitsError::HduIndexOutOfBounds {
-            index,
-            len: self.hdus.len(),
-        })?;
+        let hdu = self.checked_hdu(index)?;
         let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
         // The block-padded data unit (length = the padded size — the checksum covers
         // the block fill too).

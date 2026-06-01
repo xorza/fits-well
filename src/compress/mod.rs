@@ -37,8 +37,8 @@ use crate::keyword::key;
 use crate::table::BinTable;
 use crate::table::ColumnData;
 
-/// A header and its data unit — what the (de)compression entry points return
-/// (a named result instead of a bare `(Header, Vec<u8>)` tuple).
+/// A restored header and its decompressed data unit — the result of
+/// [`uncompress_table`] (a named pair rather than a bare `(Header, Vec<u8>)`).
 #[derive(Debug)]
 pub(crate) struct HduParts {
     pub header: Header,
@@ -100,6 +100,16 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
         .get_integer("ZNAXIS")
         .ok_or(FitsError::MissingKeyword { name: "ZNAXIS" })? as usize;
     let dims = read_axes(header, "ZNAXIS", znaxis)?;
+    // A `ZNAXIS = 0` ZIMAGE has no data array (as an uncompressed `NAXIS = 0` does).
+    // Return empty before building the geometry, which would otherwise size `total`
+    // as the empty product (1) and fabricate a phantom one-pixel tile.
+    if dims.is_empty() {
+        return Ok(Image {
+            shape: dims,
+            samples: zeroed_samples(zbitpix, 0),
+            scaling: Scaling::from_header(header),
+        });
+    }
     // `ZNAXISn` are untrusted; guard the product up front — before reading any tile
     // — so a wrapped value can't mis-size the output buffer below (the un-wrapped
     // strides would then scatter out of bounds). Mirrors `hdu::data_extent`.

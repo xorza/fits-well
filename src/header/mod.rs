@@ -28,7 +28,8 @@ pub struct Header {
     pub(crate) cards: Vec<Card>,
     /// First occurrence of each valued keyword → index into `cards`.
     ///
-    /// Invariant: every entry points at a [`CardKind::Value`] card in `cards`.
+    /// Invariant: every entry points at a card that carries a value — a
+    /// [`CardKind::Value`] or [`CardKind::Hierarch`] — in `cards`.
     /// `cards` is only ever appended/extended in place during `parse`, never
     /// reordered, so the index stays valid. Any future card-mutation API must
     /// rebuild this (or it must be made a method that maintains it) — do not

@@ -1,9 +1,11 @@
 //! Header and data-unit serialization.
 //!
-//! Header units and pre-encoded data units round-trip through this layer today.
-//! Typed *encoding* — building a conforming header from an [`crate::Image`] or
-//! table and emitting the inverse `BSCALE`/`BZERO` scaling — is the next layer;
-//! it will sit on top of [`FitsWriter::write_data_unit`].
+//! The high-level writers — [`FitsWriter::write_image`], `write_table`,
+//! `write_ascii_table`, and the compressed forms — synthesize the mandatory header
+//! and emit the data unit through `write_hdu` (which pads to the block grid and
+//! embeds `CHECKSUM`/`DATASUM` when enabled), assembling each unit in the writer's
+//! reused `scratch`. [`FitsWriter::write_header`] / [`FitsWriter::write_data_unit`]
+//! are the low-level escape hatches for callers driving the layout themselves.
 
 use std::io::Write;
 

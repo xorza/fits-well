@@ -347,6 +347,21 @@ impl BinTable {
                 .get_text(key!("TFORM{n}").as_str())
                 .ok_or(FitsError::MissingKeyword { name: "TFORMn" })?;
             let tform = Tform::parse(tform_value)?;
+            let tdim = header
+                .get_text(key!("TDIM{n}").as_str())
+                .and_then(parse_tdim);
+            // §7.3.2: for a fixed-width column a `TDIMn` shape must reshape exactly the
+            // repeat count (checked product so a hostile shape can't overflow past the
+            // equality). Variable-length (`P`/`Q`) columns are exempt — there `TDIMn`
+            // describes the heap array's shape, not the descriptor repeat (1), as in a
+            // §10.3 compressed-table container that carries the original column's TDIM.
+            let is_vla = matches!(tform.kind, TformKind::ArrayDesc32 | TformKind::ArrayDesc64);
+            if let Some(dims) = &tdim
+                && !is_vla
+                && dims.iter().try_fold(1usize, |a, &x| a.checked_mul(x)) != Some(tform.repeat)
+            {
+                return Err(FitsError::KeywordOutOfRange { name: "TDIMn" });
+            }
             columns.push(Column {
                 name: header
                     .get_text(key!("TTYPE{n}").as_str())
@@ -360,9 +375,7 @@ impl BinTable {
                 tscale: header.get_real(key!("TSCAL{n}").as_str()).unwrap_or(1.0),
                 tzero: header.get_real(key!("TZERO{n}").as_str()).unwrap_or(0.0),
                 tnull: header.get_integer(key!("TNULL{n}").as_str()),
-                tdim: header
-                    .get_text(key!("TDIM{n}").as_str())
-                    .and_then(parse_tdim),
+                tdim,
                 tdisp: header
                     .get_text(key!("TDISP{n}").as_str())
                     .and_then(TDisp::parse),
@@ -466,10 +479,7 @@ impl BinTable {
         let mut out = Vec::with_capacity(self.nrows);
         for r in 0..self.nrows {
             let cell = self.cell(col, r); // ceil(nbits/8) bytes
-            let bits = (0..nbits)
-                .map(|i| (cell[i / 8] >> (7 - (i % 8))) & 1 == 1)
-                .collect();
-            out.push(bits);
+            out.push(unpack_bits(cell, nbits));
         }
         Ok(out)
     }
@@ -490,28 +500,10 @@ impl BinTable {
         };
         let mut out = Vec::with_capacity(self.nrows);
         for r in 0..self.nrows {
-            let desc = self.cell(col, r);
-            let (nbits, offset) = if wide {
-                (be_u64(&desc[0..8]), be_u64(&desc[8..16]))
-            } else {
-                (be_u32(&desc[0..4]), be_u32(&desc[4..8]))
-            };
-            let start = self
-                .heap_offset
-                .checked_add(offset)
-                .ok_or(FitsError::UnexpectedEof)?;
-            let end = start
-                .checked_add(nbits.div_ceil(8))
-                .ok_or(FitsError::UnexpectedEof)?;
-            if end > self.heap_end {
-                return Err(FitsError::UnexpectedEof);
-            }
-            let cell = self.bytes.get(start..end).ok_or(FitsError::UnexpectedEof)?;
-            out.push(
-                (0..nbits)
-                    .map(|i| (cell[i / 8] >> (7 - (i % 8))) & 1 == 1)
-                    .collect(),
-            );
+            // The descriptor's element count is the bit count (§7.3.2).
+            let d = decode_descriptor(self.cell(col, r), wide);
+            let cell = self.bounded_heap(d.offset, d.nelem.div_ceil(8))?;
+            out.push(unpack_bits(cell, d.nelem));
         }
         Ok(out)
     }
@@ -574,6 +566,21 @@ impl BinTable {
         })
     }
 
+    /// The `nbytes` of heap at descriptor `offset`, bounds-checked against the heap.
+    /// All arithmetic is checked so a crafted `P`/`Q` descriptor (huge offset/count)
+    /// cannot wrap past the guard or read outside the heap proper.
+    fn bounded_heap(&self, offset: usize, nbytes: usize) -> Result<&[u8]> {
+        let start = self
+            .heap_offset
+            .checked_add(offset)
+            .ok_or(FitsError::UnexpectedEof)?;
+        let end = start.checked_add(nbytes).ok_or(FitsError::UnexpectedEof)?;
+        if end > self.heap_end {
+            return Err(FitsError::UnexpectedEof);
+        }
+        self.bytes.get(start..end).ok_or(FitsError::UnexpectedEof)
+    }
+
     /// Decode a variable-length-array (`P`/`Q`) column: one [`ColumnData`] per
     /// row, each holding that row's heap array (which may be empty). Errors for
     /// fixed-width columns.
@@ -590,32 +597,15 @@ impl BinTable {
         };
         let mut out = Vec::with_capacity(self.nrows);
         for r in 0..self.nrows {
-            let desc = self.cell(col, r);
-            // The descriptor is (element count, byte offset into the heap), as a
-            // pair of 32-bit (`P`) or 64-bit (`Q`) big-endian integers.
-            let (nelem, offset) = if wide {
-                (be_u64(&desc[0..8]), be_u64(&desc[8..16]))
-            } else {
-                (be_u32(&desc[0..4]), be_u32(&desc[4..8]))
-            };
+            let d = decode_descriptor(self.cell(col, r), wide);
             let nbytes = match elem {
-                TformKind::Bit => nelem.div_ceil(8),
-                _ => nelem
+                TformKind::Bit => d.nelem.div_ceil(8),
+                _ => d
+                    .nelem
                     .checked_mul(elem.elem_size())
                     .ok_or(FitsError::UnexpectedEof)?,
             };
-            // Checked: a crafted `Q` descriptor (huge nelem/offset) must not wrap
-            // past the heap-bounds guard. The span must lie within the heap proper.
-            let start = self
-                .heap_offset
-                .checked_add(offset)
-                .ok_or(FitsError::UnexpectedEof)?;
-            let end = start.checked_add(nbytes).ok_or(FitsError::UnexpectedEof)?;
-            if end > self.heap_end {
-                return Err(FitsError::UnexpectedEof);
-            }
-            let slice = self.bytes.get(start..end).ok_or(FitsError::UnexpectedEof)?;
-            out.push(decode_array(elem, slice));
+            out.push(decode_array(elem, self.bounded_heap(d.offset, nbytes)?));
         }
         Ok(out)
     }
@@ -749,12 +739,47 @@ fn trim_text(cell: &[u8]) -> String {
     String::from_utf8_lossy(&head[..end]).into_owned()
 }
 
+/// A decoded `P`/`Q` array descriptor: a row's heap array element count and byte
+/// offset into the heap.
+#[derive(Debug, Clone, Copy)]
+struct Descriptor {
+    nelem: usize,
+    offset: usize,
+}
+
+/// Decode an array descriptor — a pair of 32-bit (`P`) or 64-bit (`Q`) big-endian
+/// integers — from a variable-length column cell.
+fn decode_descriptor(desc: &[u8], wide: bool) -> Descriptor {
+    if wide {
+        Descriptor {
+            nelem: be_u64(&desc[0..8]),
+            offset: be_u64(&desc[8..16]),
+        }
+    } else {
+        Descriptor {
+            nelem: be_u32(&desc[0..4]),
+            offset: be_u32(&desc[4..8]),
+        }
+    }
+}
+
+/// Unpack the first `nbits` of `cell` MSB-first (bit 0 is the MSB of byte 0, §7.3.2)
+/// into one `bool` each.
+fn unpack_bits(cell: &[u8], nbits: usize) -> Vec<bool> {
+    (0..nbits)
+        .map(|i| (cell[i / 8] >> (7 - (i % 8))) & 1 == 1)
+        .collect()
+}
+
+/// Decode a big-endian `P`/`Q` array-descriptor field (element count or heap
+/// offset). The standard treats these as unsigned; an out-of-range value is left
+/// to the heap-bounds check to reject (rather than silently clamping it to 0).
 fn be_u32(b: &[u8]) -> usize {
-    i32::from_be_bytes([b[0], b[1], b[2], b[3]]).max(0) as usize
+    u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize
 }
 
 fn be_u64(b: &[u8]) -> usize {
-    i64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]).max(0) as usize
+    u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as usize
 }
 
 #[cfg(test)]
