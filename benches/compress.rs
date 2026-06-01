@@ -19,7 +19,7 @@ use std::io::Cursor;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use fits::{
+use fits_well::{
     BinTable, ColumnData, CompressOptions, FitsReader, FitsWriter, Header, Image, ImageData,
     Scaling, WriteColumn,
 };

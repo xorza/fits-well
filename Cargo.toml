@@ -1,5 +1,5 @@
 [package]
-name = "fits"
+name = "fits-well"
 version = "0.1.0"
 edition = "2024"
 description = "A blazing-fast reader and writer for FITS (Flexible Image Transport System) files, targeting the full FITS 4.0 standard."

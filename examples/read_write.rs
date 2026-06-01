@@ -11,9 +11,9 @@ use std::env;
 use std::fs::File;
 use std::io::Cursor;
 
-use fits::{ColumnData, FitsReader, FitsWriter, HduKind, Image, ImageData, Scaling, ZERO_FILL};
+use fits_well::{ColumnData, FitsReader, FitsWriter, HduKind, Image, ImageData, Scaling, ZERO_FILL};
 
-fn main() -> fits::Result<()> {
+fn main() -> fits_well::Result<()> {
     let path = env::args()
         .nth(1)
         .unwrap_or_else(|| "tests/data/fits/UITfuv2582gc.fits".to_string());

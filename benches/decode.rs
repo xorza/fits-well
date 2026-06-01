@@ -20,8 +20,8 @@ use std::io::Cursor;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use fits::internals::{decode_image, encode_image};
-use fits::{Bitpix, FitsReader, FitsWriter, Image, ImageData, Scaling};
+use fits_well::internals::{decode_image, encode_image};
+use fits_well::{Bitpix, FitsReader, FitsWriter, Image, ImageData, Scaling};
 
 /// Bytes moved per typed bench. 64 MiB is comfortably past the last-level cache
 /// (incl. Apple Silicon's large L2 + system-level cache), so even the 1-byte type
