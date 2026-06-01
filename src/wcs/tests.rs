@@ -628,3 +628,39 @@ fn pixel_list_wcs_matches_the_equivalent_image_wcs() {
         );
     }
 }
+
+#[test]
+fn vector_cell_wcs_matches_the_equivalent_image_wcs() {
+    // §8 Table 22: an image in a binary-table vector cell (here column 5) uses the
+    // axis+column-indexed keyword family (`iCTYPn`, `ijPCn`, …, with leading-digit
+    // keyword names); it must transform exactly like the equivalent image WCS.
+    let mut tab = Header::new();
+    tab.set("1CTYP5", "RA---TAN").set("2CTYP5", "DEC--TAN");
+    tab.set("1CRPX5", 256.0).set("2CRPX5", 256.0);
+    tab.set("1CRVL5", 150.0).set("2CRVL5", 30.0);
+    tab.set("1CDLT5", -1e-3).set("2CDLT5", 1e-3);
+    tab.set("11PC5", 1.0).set("12PC5", -0.05);
+    tab.set("21PC5", 0.05).set("22PC5", 1.0);
+    let wt = Wcs::from_array_column(&tab, 5, None).unwrap();
+
+    let mut img = Header::new();
+    img.set("NAXIS", 2);
+    img.set("CTYPE1", "RA---TAN").set("CTYPE2", "DEC--TAN");
+    img.set("CRPIX1", 256.0).set("CRPIX2", 256.0);
+    img.set("CRVAL1", 150.0).set("CRVAL2", 30.0);
+    img.set("CDELT1", -1e-3).set("CDELT2", 1e-3);
+    img.set("PC1_1", 1.0).set("PC1_2", -0.05);
+    img.set("PC2_1", 0.05).set("PC2_2", 1.0);
+    let wi = Wcs::from_header(&img, None).unwrap();
+
+    assert_eq!(wt.naxis, 2); // rank inferred from the iCTYP5 keywords
+    assert!(wt.celestial.is_some(), "vector-cell pair must be celestial");
+    for &(px, py) in &[(256.0, 256.0), (1.0, 1.0), (300.0, 100.0), (50.0, 400.0)] {
+        let a = wt.pixel_to_world(&[px, py]);
+        let b = wi.pixel_to_world(&[px, py]);
+        assert!(
+            (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
+            "vector-cell {a:?} vs image {b:?} at ({px},{py})"
+        );
+    }
+}

@@ -25,7 +25,7 @@ write-side non-conformance · 🟢 missing standard feature · ⚪ out of scope.
 | 6 / 7.1 | Images, random groups (incl. §6.3 addend summing) | ✅ complete |
 | 7.2 | ASCII `TABLE` (read incl. bare-sign exponents; write incl. `TSCAL`/`TZERO`/`TNULL`) | ✅ complete |
 | 7.3 | Binary `TABLE` (incl. logical-NULL three-state, `1PX` VLA bit-unpack) | ✅ complete |
-| 8 | World Coordinate Systems | ✅ for all implemented projections + `CUNIT` + pixel-list WCS; ⚠️ quad-cube/HEALPix/non-linear-spectral error cleanly |
+| 8 | World Coordinate Systems | ✅ for all implemented projections + `CUNIT` + table WCS (pixel-list & vector-cell); ⚠️ quad-cube/HEALPix/non-linear-spectral error cleanly |
 | 9 | Time coordinates | ✅ complete (scales, references, bounds incl. `DATE-AVG`, `PHASE` axis) |
 | 10 | Tiled compression | ✅ all codecs decode; encode incl. `NOCOMPRESS` + `1Q`; null-mask/VLA-table = reference doesn't emit |
 
@@ -60,7 +60,8 @@ than return wrong coordinates.
 | Compress | `1Q` compressed-image descriptors (auto-switch past 4 GiB) | 10.1.3 | `compress::push_compressed_descriptor` | `compressed_image_descriptor_switches_to_q_for_large_offsets` |
 | WCS | `yzLN`/`yzLT` celestial axes (planetary/solar, incl. `HPLN`/`HPLT`) | 8.2 | `wcs::find_celestial` | `planetary_solar_lonlat_axes_are_celestial` |
 | WCS | `CUNITia` → scale celestial axes to degrees | 8.2 | `wcs::unit_to_degrees`, `from_header` | `cunit_scales_celestial_axes_to_degrees` |
-| WCS | Pixel-list (event-list) WCS, `TCTYPn` family (Table 22) | 8.5 | `Wcs::from_pixel_list` | `pixel_list_wcs_matches_the_equivalent_image_wcs` |
+| WCS | Pixel-list (event-list) WCS, `TCTYPn` family (Table 22) | 8 | `Wcs::from_pixel_list` | `pixel_list_wcs_matches_the_equivalent_image_wcs` |
+| WCS | Binary-table vector-cell WCS, `iCTYPn`/`ijPCn` family (Table 22) | 8 | `Wcs::from_array_column` | `vector_cell_wcs_matches_the_equivalent_image_wcs` |
 | Time | `DATE-AVG`/`MJD-AVG` observation midpoint | 9.5 | `TimeBounds::avg_mjd` | `reads_bound_duration_and_error_keywords` |
 | Time | `obs_mjd` JEPOCH/BEPOCH fallback | 9.5 | `FitsTime::obs_mjd` | `obs_mjd_falls_back_to_jepoch` |
 | Time | `PHASE` axis `CZPHSia`/`CPERIia` + fold | 9.6 | `FitsTime::phase_axis`, `PhaseAxis` | `reads_phase_axis_and_folds` |
@@ -86,7 +87,6 @@ honest, conformant-in-practice behavior.
 | `RICE_1` `BYTEPIX=8` (64-bit) | 10.4.1 | `UnsupportedCompression` error | Table 37 permits it, but the 8-byte Rice bitstream params are unspecified and no reference implementation (cfitsio) produces it — a clean error beats a guessed, non-interoperable codec. |
 | `NULL_PIXEL_MASK` / `ZMASKCMP` | 10.2.2 | float nulls handled via `ZBLANK`/NaN | Verified empirically: `fpack` never emits the mask — it uses `ZBLANK` (which we support). The mask construct does not occur in practice. |
 | §10.3.6 compressed-table VLA | 10.3.6 | `UnsupportedCompression` on write | Verified empirically: `fpack` passes VLA tables through *uncompressed* rather than emitting a compressed-VLA `ZTABLE`; the construct does not occur in practice. |
-| Vector-form table WCS (`iCTYPn` for array cells) | 8.5 | not parsed | The high-value pixel-list form (`TCTYPn`) is implemented; the array-in-cell form is a smaller follow-up. |
 
 ---
 
@@ -112,8 +112,8 @@ Correctly **absent** — adding them would exceed the FITS *format* standard:
 ## Verification
 
 ```
-cargo test                                                        → 172 passed
-cargo test --features compression                                 → 201 passed, 2 ignored (fixture emitters)
+cargo test                                                        → 173 passed
+cargo test --features compression                                 → 202 passed, 2 ignored (fixture emitters)
 cargo fmt --all                                                   → applied
 cargo clippy --all-targets -- -D warnings                         → clean
 cargo clippy --all-targets --features compression -- -D warnings  → clean

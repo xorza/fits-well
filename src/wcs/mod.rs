@@ -845,6 +845,77 @@ impl Wcs {
         Wcs::from_header(&h, None)
     }
 
+    /// Build a WCS for an image stored in a binary-table **vector cell** (§8,
+    /// Table 22): `column` is the 1-based table column whose cells hold a
+    /// multidimensional array. Reads the axis-and-column-indexed keyword family —
+    /// `iCTYPn`/`iCRVLn`/`iCDLTn`/`jCRPXn`/`iCROTn`/`iCUNIn`, the `ijPCn`/`ijCDn`
+    /// matrices, and `iPVn_ma` (or abbreviated `iVn_ma`) parameters, where `i`/`j`
+    /// are the array axis and `n` the column — then evaluates it through the same
+    /// pipeline as image WCS. The rank is taken from `WCAXna`, else inferred from
+    /// the highest axis index present.
+    pub fn from_array_column(header: &Header, column: usize, alt: Option<char>) -> Result<Wcs> {
+        let a = alt.map(|c| c.to_string()).unwrap_or_default();
+        let naxis = header
+            .get_integer(&format!("WCAX{column}{a}"))
+            .map(|v| v.max(0) as usize)
+            .filter(|&n| n > 0)
+            .unwrap_or_else(|| {
+                (1..=99)
+                    .rev()
+                    .find(|&i| {
+                        header.get_text(&format!("{i}CTYP{column}{a}")).is_some()
+                            || ["CRVL", "CDLT", "CRPX"]
+                                .iter()
+                                .any(|r| header.get_real(&format!("{i}{r}{column}{a}")).is_some())
+                    })
+                    .unwrap_or(0)
+            });
+        if naxis == 0 {
+            return Err(FitsError::MissingKeyword { name: "iCTYPn" });
+        }
+        let mut h = Header::new();
+        h.set("WCSAXES", naxis as i64);
+        for ax in 1..=naxis {
+            if let Some(t) = header.get_text(&format!("{ax}CTYP{column}{a}")) {
+                h.set(&format!("CTYPE{ax}"), t);
+            }
+            if let Some(t) = header.get_text(&format!("{ax}CUNI{column}{a}")) {
+                h.set(&format!("CUNIT{ax}"), t);
+            }
+            for (root, dst) in [
+                ("CRPX", "CRPIX"),
+                ("CRVL", "CRVAL"),
+                ("CDLT", "CDELT"),
+                ("CROT", "CROTA"),
+            ] {
+                if let Some(v) = header.get_real(&format!("{ax}{root}{column}{a}")) {
+                    h.set(&format!("{dst}{ax}"), v);
+                }
+            }
+            // PVi_m arrives as `iPVn_ma`, or the abbreviated `iVn_ma`.
+            for m in 0..=20 {
+                if let Some(v) = header
+                    .get_real(&format!("{ax}PV{column}_{m}{a}"))
+                    .or_else(|| header.get_real(&format!("{ax}V{column}_{m}{a}")))
+                {
+                    h.set(&format!("PV{ax}_{m}"), v);
+                }
+            }
+        }
+        // Linear-transform matrices: `ijPCn` / `ijCDn`, indexed by axis pair.
+        for i in 1..=naxis {
+            for j in 1..=naxis {
+                if let Some(v) = header.get_real(&format!("{i}{j}PC{column}{a}")) {
+                    h.set(&format!("PC{i}_{j}"), v);
+                }
+                if let Some(v) = header.get_real(&format!("{i}{j}CD{column}{a}")) {
+                    h.set(&format!("CD{i}_{j}"), v);
+                }
+            }
+        }
+        Wcs::from_header(&h, None)
+    }
+
     /// Map 1-based pixel coordinates to world coordinates. Celestial axes return
     /// `(α, δ)` in degrees; other axes return `CRVAL + ` the linear value.
     pub fn pixel_to_world(&self, pixel: &[f64]) -> Vec<f64> {
