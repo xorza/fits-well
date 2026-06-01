@@ -95,34 +95,27 @@ fn decompress(c: &mut Criterion) {
     let flt = science_f32();
     let mut g = c.benchmark_group("decompress");
 
+    // Open each compressed fixture once and reuse the reader, so we measure
+    // decompression per call — not repeated header parsing.
     for &codec in &["GZIP_1", "GZIP_2", "RICE_1", "HCOMPRESS_1"] {
-        let file = compressed(&int, codec);
+        let mut r = FitsReader::open(Cursor::new(compressed(&int, codec))).unwrap();
         g.throughput(Throughput::Bytes(INT_BYTES));
         g.bench_function(codec, |b| {
-            b.iter(|| {
-                let mut r = FitsReader::open(Cursor::new(black_box(file.as_slice()))).unwrap();
-                black_box(r.read_compressed_image(1).unwrap())
-            })
+            b.iter(|| black_box(r.read_compressed_image(1).unwrap()))
         });
     }
 
-    let plio = compressed(&mask, "PLIO_1");
+    let mut rp = FitsReader::open(Cursor::new(compressed(&mask, "PLIO_1"))).unwrap();
     g.throughput(Throughput::Bytes(INT_BYTES));
     g.bench_function("PLIO_1", |b| {
-        b.iter(|| {
-            let mut r = FitsReader::open(Cursor::new(black_box(plio.as_slice()))).unwrap();
-            black_box(r.read_compressed_image(1).unwrap())
-        })
+        b.iter(|| black_box(rp.read_compressed_image(1).unwrap()))
     });
 
     for &codec in &["RICE_1", "GZIP_1"] {
-        let file = compressed(&flt, codec);
+        let mut r = FitsReader::open(Cursor::new(compressed(&flt, codec))).unwrap();
         g.throughput(Throughput::Bytes(FLOAT_BYTES));
         g.bench_function(BenchmarkId::new("float", codec), |b| {
-            b.iter(|| {
-                let mut r = FitsReader::open(Cursor::new(black_box(file.as_slice()))).unwrap();
-                black_box(r.read_compressed_image(1).unwrap())
-            })
+            b.iter(|| black_box(r.read_compressed_image(1).unwrap()))
         });
     }
     g.finish();
@@ -135,22 +128,46 @@ fn compress(c: &mut Criterion) {
     let flt = science_f32();
     let mut g = c.benchmark_group("compress");
 
+    // Reuse the sink `Vec` across iterations so the per-iter output allocation
+    // isn't measured — only the codec work (which still allocates per tile, as the
+    // implementation inherently does).
     for &codec in &["GZIP_1", "GZIP_2", "RICE_1", "HCOMPRESS_1"] {
+        let mut buf = Vec::new();
         g.throughput(Throughput::Bytes(INT_BYTES));
         g.bench_function(codec, |b| {
-            b.iter(|| black_box(compressed(black_box(&int), codec)))
+            b.iter(|| {
+                buf.clear();
+                FitsWriter::new(&mut buf)
+                    .write_compressed_image(black_box(&int), codec, &TILE)
+                    .unwrap();
+                black_box(buf.len())
+            })
         });
     }
 
+    let mut buf = Vec::new();
     g.throughput(Throughput::Bytes(INT_BYTES));
     g.bench_function("PLIO_1", |b| {
-        b.iter(|| black_box(compressed(black_box(&mask), "PLIO_1")))
+        b.iter(|| {
+            buf.clear();
+            FitsWriter::new(&mut buf)
+                .write_compressed_image(black_box(&mask), "PLIO_1", &TILE)
+                .unwrap();
+            black_box(buf.len())
+        })
     });
 
     for &codec in &["RICE_1", "GZIP_1"] {
+        let mut buf = Vec::new();
         g.throughput(Throughput::Bytes(FLOAT_BYTES));
         g.bench_function(BenchmarkId::new("float", codec), |b| {
-            b.iter(|| black_box(compressed(black_box(&flt), codec)))
+            b.iter(|| {
+                buf.clear();
+                FitsWriter::new(&mut buf)
+                    .write_compressed_image(black_box(&flt), codec, &TILE)
+                    .unwrap();
+                black_box(buf.len())
+            })
         });
     }
     g.finish();
@@ -227,32 +244,35 @@ fn decompress_table(c: &mut Criterion) {
     let bytes = table_bytes(&header, &table);
     let mut g = c.benchmark_group("decompress_table");
     for &algo in &["GZIP_1", "GZIP_2", "RICE_1"] {
-        let file = compressed_table(&header, &table, algo);
+        let mut r = FitsReader::open(Cursor::new(compressed_table(&header, &table, algo))).unwrap();
         g.throughput(Throughput::Bytes(bytes));
         g.bench_function(algo, |b| {
-            b.iter(|| {
-                let mut r = FitsReader::open(Cursor::new(black_box(file.as_slice()))).unwrap();
-                black_box(r.read_compressed_table(1).unwrap())
-            })
+            b.iter(|| black_box(r.read_compressed_table(1).unwrap()))
         });
     }
     g.finish();
 }
 
-/// `compress_table` — `write_compressed_table` per column codec.
+/// `compress_table` — `write_compressed_table` per column codec (reused sink).
 fn compress_table(c: &mut Criterion) {
     let (header, table) = table_fixture();
     let bytes = table_bytes(&header, &table);
     let mut g = c.benchmark_group("compress_table");
     for &algo in &["GZIP_1", "GZIP_2", "RICE_1"] {
+        let mut buf = Vec::new();
         g.throughput(Throughput::Bytes(bytes));
         g.bench_function(algo, |b| {
             b.iter(|| {
-                black_box(compressed_table(
-                    black_box(&header),
-                    black_box(&table),
-                    algo,
-                ))
+                buf.clear();
+                FitsWriter::new(&mut buf)
+                    .write_compressed_table(
+                        black_box(&header),
+                        black_box(&table),
+                        ROWS_PER_TILE,
+                        algo,
+                    )
+                    .unwrap();
+                black_box(buf.len())
             })
         });
     }

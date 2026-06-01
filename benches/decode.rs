@@ -139,13 +139,15 @@ fn read_image(c: &mut Criterion) {
         };
         let mut w = FitsWriter::new(Cursor::new(Vec::new()));
         w.write_image(&img).unwrap();
-        let file = w.into_inner().into_inner();
+        // Open once and reuse the staging buffer (T2's `read_image_into`), so we
+        // measure the per-call read — seek + staging memcpy + decode — not repeated
+        // header parsing or staging allocation. The decoded `Image` is
+        // intrinsically fresh per call.
+        let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+        let mut staging = Vec::new();
         g.throughput(Throughput::Bytes((n * elem_bytes(bitpix)) as u64));
         g.bench_function(name, |b| {
-            b.iter(|| {
-                let mut r = FitsReader::open(Cursor::new(black_box(file.as_slice()))).unwrap();
-                black_box(r.read_image(0).unwrap())
-            })
+            b.iter(|| black_box(r.read_image_into(0, &mut staging).unwrap()))
         });
     }
     g.finish();
