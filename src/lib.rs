@@ -61,7 +61,7 @@ pub use header::value::Value;
 pub use reader::{ChecksumReport, DataUnit, FitsReader, Hdu};
 pub use table::{BinTable, Column, ColumnData, Tform, TformKind};
 #[cfg(feature = "time")]
-pub use time::{Datetime, Epoch, FitsTime, TimeScale};
+pub use time::{Datetime, Epoch, EpochTime, FitsTime, TimeScale};
 #[cfg(feature = "wcs")]
 pub use wcs::{Projection, Wcs};
 pub use writer::{AsciiWriteColumn, FitsWriter, WriteColumn};

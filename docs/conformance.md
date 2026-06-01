@@ -710,11 +710,11 @@ to an astronomy library (astropy `SkyCoord`/`time`, ERFA), not implemented here.
 | 9.2.1 | TDB periodic series | `tdb_minus_tt` (`time/mod.rs:297`) | ✅ (no `TDB_0`) |
 | 9.2.1 | `UT1` via ΔUT1; `LOCAL` pass-through | `convert_dut1` (`time/mod.rs:237`) | ✅ caller ΔUT1 / 🟡 no bundled table |
 | 9.1.1 | ISO-8601 `[±C]CCYY-MM-DD[Thh:mm:ss[.s…]]`; parts optional | `Datetime::parse` (`time/mod.rs:45`) | ✅ |
-| 9.1.1 | Leading zeros **must not** be omitted | integer parse accepts `2024-1-1` | 🟡 not enforced |
-| 9.1.1 | **No** timezone designator (`Z` forbidden) | rejected only incidentally (f64 parse) | 🟡 not explicit |
+| 9.1.1 | Leading zeros **must not** be omitted | `parse_fixed` requires exact 2-digit fields, ≥4-digit year | ✅ |
+| 9.1.1 | **No** timezone designator (`Z` forbidden) | `Datetime::parse` rejects `Z` explicitly | ✅ |
 | 9.1.1 | Seconds `00–60` UTC (leap), `00–59` else | `0.0..61.0` for all scales (`time/mod.rs:93`) | 🟡 scale-agnostic |
 | 9.1.2 | Julian/Besselian epoch strings → JD | `Epoch::to_jd` (`time/mod.rs:176`) | ✅ |
-| 9.1.2/9.5 | `JEPOCH` (TDB) / `BEPOCH` (ET) **keywords** | `Epoch` type not wired to header | 🟡 not read |
+| 9.1.2/9.5 | `JEPOCH` (TDB) / `BEPOCH` (ET) **keywords** | `FitsTime::epoch` → `EpochTime { mjd, scale }` | ✅ |
 | 9.2.2 | Reference in ISO / JD / MJD; defaults | `reference_mjd` (`time/mod.rs:454`) | ✅ |
 | 9.2.2 | `[M]JDREFI`+`[M]JDREFF` integer+fraction split | summed (`time/mod.rs:459`) | ✅ |
 | 9.2.2 | **Split takes precedence over single** when all present | `resolve_split_ref`: `MJDREFI+MJDREFF` win over `MJDREF` | ✅ |
@@ -768,17 +768,17 @@ semantics, table-only constructs, and the non-`TIME` time axes.
    and the time axis resolve correctly when a bulk clock correction is present.
    Covered by `timeoffs_shifts_relative_times`.
 
-6. 🟡 **ISO-8601 syntax is lenient (§9.1.1).** `Datetime::parse` uses integer
-   `.parse()` per field (`time/mod.rs:45`), so `'2024-1-1'` (leading zeros omitted,
-   forbidden) is accepted; the forbidden `Z` suffix is rejected only incidentally
-   (it breaks the seconds `f64` parse). The leap-second range `0.0..61.0`
-   (`time/mod.rs:93`) is applied in every scale, whereas §9.1.1 permits second 60
-   only in UTC.
+6. ✅ **FIXED — ISO-8601 field widths enforced (§9.1.1).** `Datetime::parse` now
+   requires a ≥4-digit (optionally signed) year and exactly-2-digit month / day /
+   hour / minute / integer-seconds fields, and rejects a `Z` designator explicitly.
+   Covered by `iso_8601_strictness`. (One leniency remains by design: second 60 is
+   accepted in any scale because `Datetime` is scale-agnostic — the "only in UTC"
+   rule is the caller's, since the type can't see `TIMESYS`.)
 
-7. 🟡 **Julian/Besselian epoch *keywords* are not read (§9.5).** `Epoch` parses
-   `'J2000.0'`/`'B1950.0'` strings and computes their JD, but
-   `FitsTime::from_header` never reads `JEPOCH` (implied TDB) or `BEPOCH` (implied
-   ET), nor attaches the implied scales.
+7. ✅ **FIXED — Julian/Besselian epoch keywords are read (§9.5, §9.1.2).**
+   `FitsTime::epoch` reads the numeric `JEPOCH` (implied scale TDB) / `BEPOCH`
+   (ET ≈ TT) keywords and returns an `EpochTime { mjd, scale }`. Covered by
+   `reads_jepoch_and_bepoch_keywords`.
 
 8. ⚪ **`UT1`/ΔUT1 are caller-supplied by design; bundling an IERS ΔUT1 table is
    out of scope.** `TimeScale::convert` treats `UT1` as `UTC` (ΔUT1 = 0) unless the
@@ -827,12 +827,13 @@ Coverage gaps:
 - `TimeScale::parse` now has a test covering the realization suffix, the
   `TDT`/`ET`/`IAT` and `GMT` aliases, and the unknown→`Local` fallback; the full
   Table-30 map is still only partially exercised.
-- No signed-5-digit-year, leading-zero-omission (gap #6), or explicit `Z`-suffix
-  rejection test; no `JDREF`/`DATEREF` resolution or kind-precedence test (only
-  `MJDREF` and the split are exercised).
-- `TIMEOFFS` is now applied and tested (`timeoffs_shifts_relative_times`); the
-  rest of gaps #7/#9 (epoch keywords, binning, durations, GTI,
-  PHASE/TIMELAG/FREQUENCY) is untested because unimplemented.
+- `iso_8601_strictness` covers signed/extended years, leading-zero omission, and
+  the `Z`-suffix rejection (gap #6); `reads_jepoch_and_bepoch_keywords` covers the
+  epoch keywords (gap #7). No `JDREF`/`DATEREF` resolution or kind-precedence test
+  yet (only `MJDREF` and the split are exercised).
+- `TIMEOFFS` is applied and tested (`timeoffs_shifts_relative_times`); the
+  remaining gap #9 keywords (binning, durations, GTI, PHASE/TIMELAG/FREQUENCY) are
+  untested because unimplemented.
 
 ---
 

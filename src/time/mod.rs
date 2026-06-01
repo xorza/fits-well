@@ -47,49 +47,44 @@ impl Datetime {
             card: format!("DATE '{s}'"),
         };
         let s = s.trim();
+        // §9.1.1: no timezone designator is permitted (`Z` or a numeric offset).
+        if s.contains(['Z', 'z']) {
+            return Err(invalid());
+        }
         let (date, time) = match s.split_once('T') {
             Some((d, t)) => (d, Some(t)),
             None => (s, None),
         };
-        let mut dp = date.split('-');
-        // A leading '-' (negative year) splits into an empty first field.
-        let (neg, y_str) = match dp.next() {
-            Some("") => (true, dp.next().ok_or_else(invalid)?),
-            Some(y) => (false, y),
-            None => return Err(invalid()),
+        // `[±]CCYY-MM-DD`: the year has ≥4 digits and an optional sign; month/day
+        // are exactly two digits (§9.1.1 — leading zeros may not be omitted).
+        let (sign, rest) = match date.strip_prefix('-') {
+            Some(r) => (-1, r),
+            None => (1, date.strip_prefix('+').unwrap_or(date)),
         };
-        let year: i64 = y_str.parse().map_err(|_| invalid())?;
-        let year = if neg { -year } else { year };
-        let month: u32 = dp
-            .next()
-            .ok_or_else(invalid)?
-            .parse()
-            .map_err(|_| invalid())?;
-        let day: u32 = dp
-            .next()
-            .ok_or_else(invalid)?
-            .parse()
-            .map_err(|_| invalid())?;
-        if dp.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        let mut dp = rest.split('-');
+        let y_str = dp.next().ok_or_else(invalid)?;
+        let m_str = dp.next().ok_or_else(invalid)?;
+        let d_str = dp.next().ok_or_else(invalid)?;
+        if dp.next().is_some() || y_str.len() < 4 || !all_digits(y_str) {
+            return Err(invalid());
+        }
+        let year = sign * y_str.parse::<i64>().map_err(|_| invalid())?;
+        let month = parse_fixed(m_str, 2).ok_or_else(invalid)?;
+        let day = parse_fixed(d_str, 2).ok_or_else(invalid)?;
+        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
             return Err(invalid());
         }
 
         let (mut hour, mut minute, mut second) = (0u32, 0u32, 0.0f64);
         if let Some(t) = time {
             let mut tp = t.split(':');
-            hour = tp
-                .next()
-                .ok_or_else(invalid)?
-                .parse()
-                .map_err(|_| invalid())?;
-            minute = tp
-                .next()
-                .ok_or_else(invalid)?
-                .parse()
-                .map_err(|_| invalid())?;
+            hour = parse_fixed(tp.next().ok_or_else(invalid)?, 2).ok_or_else(invalid)?;
+            minute = parse_fixed(tp.next().ok_or_else(invalid)?, 2).ok_or_else(invalid)?;
             if let Some(sec) = tp.next() {
-                second = sec.parse().map_err(|_| invalid())?;
+                second = parse_seconds(sec).ok_or_else(invalid)?;
             }
+            // Second 60 is the leap second; this type is scale-agnostic, so the
+            // "only in UTC" restriction is left to the caller.
             if tp.next().is_some() || hour >= 24 || minute >= 60 || !(0.0..61.0).contains(&second) {
                 return Err(invalid());
             }
@@ -139,6 +134,28 @@ impl Datetime {
             second: secs,
         }
     }
+}
+
+/// True if `s` is non-empty and all ASCII digits.
+fn all_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Parse a fixed-width all-digit field (§9.1.1 forbids omitted leading zeros, so
+/// the length must be exact).
+fn parse_fixed(s: &str, width: usize) -> Option<u32> {
+    (s.len() == width && all_digits(s))
+        .then(|| s.parse().ok())
+        .flatten()
+}
+
+/// Parse a `ss[.s…]` seconds field: exactly two integer digits, optional fraction.
+fn parse_seconds(s: &str) -> Option<f64> {
+    let (int, frac) = s.split_once('.').map_or((s, None), |(i, f)| (i, Some(f)));
+    if int.len() != 2 || !all_digits(int) || frac.is_some_and(|f| !all_digits(f)) {
+        return None;
+    }
+    s.parse().ok()
 }
 
 /// A reference epoch: Julian (`J2000.0`) or Besselian (`B1950.0`).
@@ -371,6 +388,14 @@ fn jdn_to_gregorian(jdn: i64) -> (i64, u32, u32) {
     (year, month as u32, day as u32)
 }
 
+/// A time from a `JEPOCH`/`BEPOCH` keyword: its MJD and the scale the keyword
+/// implies (TDB for `JEPOCH`, ET ≈ TT for `BEPOCH`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EpochTime {
+    pub mjd: f64,
+    pub scale: TimeScale,
+}
+
 /// A header's time coordinate frame (§9): the reference epoch, scale, unit, and
 /// the resolved global time keywords.
 #[derive(Debug, Clone)]
@@ -440,6 +465,23 @@ impl FitsTime {
             .get_text("DATE-OBS")
             .and_then(|s| Datetime::parse(s).ok())
             .map(|d| d.to_mjd())
+    }
+
+    /// The Julian (`JEPOCH`, implied scale TDB) or Besselian (`BEPOCH`, implied
+    /// scale ET ≈ TT) epoch keyword as an [`EpochTime`], if present (§9.1.2, §9.5).
+    /// `JEPOCH` wins if both appear.
+    pub fn epoch(&self, header: &Header) -> Option<EpochTime> {
+        if let Some(j) = header.get_real("JEPOCH") {
+            return Some(EpochTime {
+                mjd: Epoch::Julian(j).to_mjd(),
+                scale: TimeScale::Tdb,
+            });
+        }
+        let b = header.get_real("BEPOCH")?;
+        Some(EpochTime {
+            mjd: Epoch::Besselian(b).to_mjd(),
+            scale: TimeScale::Tt, // ET ≈ TT
+        })
     }
 
     /// If WCS axis `axis` (1-based) is a time axis (`CTYPEi = 'TIME'` or a
