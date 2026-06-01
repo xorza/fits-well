@@ -19,7 +19,9 @@ use std::io::Cursor;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use fits::{FitsReader, FitsWriter, Image, ImageData, Scaling};
+use fits::{
+    BinTable, ColumnData, FitsReader, FitsWriter, Header, Image, ImageData, Scaling, WriteColumn,
+};
 
 const NX: usize = 2048;
 const NY: usize = 2048;
@@ -154,5 +156,114 @@ fn compress(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, decompress, compress);
+// --- §10.3 tiled table compression (a separate path from image tiles) ---
+
+const TABLE_ROWS: usize = 200_000;
+/// Rows per §10.3 tile — a chunk, so the table splits into ~49 independent tiles
+/// (each column transposed and compressed per tile).
+const ROWS_PER_TILE: usize = 4096;
+
+/// A mixed-column binary table (i16/i32/f32/f64/byte + a repeat-3 vector), written
+/// then read back as a `BinTable` + its header — the input to table compression.
+fn table_fixture() -> (Header, BinTable) {
+    let n = TABLE_ROWS;
+    let columns = vec![
+        WriteColumn::fixed(
+            "SHORT",
+            ColumnData::I16((0..n).map(|i| i as i16).collect()),
+            1,
+        ),
+        WriteColumn::fixed(
+            "INT",
+            ColumnData::I32((0..n).map(|i| i as i32 * 7).collect()),
+            1,
+        ),
+        WriteColumn::fixed(
+            "FLT",
+            ColumnData::F32((0..n).map(|i| i as f32 * 1.5).collect()),
+            1,
+        ),
+        WriteColumn::fixed(
+            "DBL",
+            ColumnData::F64((0..n).map(|i| i as f64 * 0.1).collect()),
+            1,
+        ),
+        WriteColumn::fixed(
+            "BYTE",
+            ColumnData::Bytes((0..n).map(|i| i as u8).collect()),
+            1,
+        ),
+        WriteColumn::fixed(
+            "VEC",
+            ColumnData::I16((0..n * 3).map(|i| i as i16).collect()),
+            3,
+        ),
+    ];
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_table(n, &columns).unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let table = r.read_table(1).unwrap();
+    let header = r.hdu(1).header.clone();
+    (header, table)
+}
+
+/// Uncompressed data-unit size = `NAXIS1` (row width, from the public header) ×
+/// `NAXIS2` rows.
+fn table_bytes(header: &Header, table: &BinTable) -> u64 {
+    header.get_integer("NAXIS1").unwrap() as u64 * table.nrows as u64
+}
+
+fn compressed_table(header: &Header, table: &BinTable, algo: &str) -> Vec<u8> {
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_compressed_table(header, table, ROWS_PER_TILE, algo)
+        .unwrap();
+    w.into_inner().into_inner()
+}
+
+/// `decompress_table` — `read_compressed_table` per column codec (uncompressed
+/// bytes/s); the compressed table is HDU 1.
+fn decompress_table(c: &mut Criterion) {
+    let (header, table) = table_fixture();
+    let bytes = table_bytes(&header, &table);
+    let mut g = c.benchmark_group("decompress_table");
+    for &algo in &["GZIP_1", "GZIP_2", "RICE_1"] {
+        let file = compressed_table(&header, &table, algo);
+        g.throughput(Throughput::Bytes(bytes));
+        g.bench_function(algo, |b| {
+            b.iter(|| {
+                let mut r = FitsReader::open(Cursor::new(black_box(file.as_slice()))).unwrap();
+                black_box(r.read_compressed_table(1).unwrap())
+            })
+        });
+    }
+    g.finish();
+}
+
+/// `compress_table` — `write_compressed_table` per column codec.
+fn compress_table(c: &mut Criterion) {
+    let (header, table) = table_fixture();
+    let bytes = table_bytes(&header, &table);
+    let mut g = c.benchmark_group("compress_table");
+    for &algo in &["GZIP_1", "GZIP_2", "RICE_1"] {
+        g.throughput(Throughput::Bytes(bytes));
+        g.bench_function(algo, |b| {
+            b.iter(|| {
+                black_box(compressed_table(
+                    black_box(&header),
+                    black_box(&table),
+                    algo,
+                ))
+            })
+        });
+    }
+    g.finish();
+}
+
+criterion_group!(
+    benches,
+    decompress,
+    compress,
+    decompress_table,
+    compress_table
+);
 criterion_main!(benches);
