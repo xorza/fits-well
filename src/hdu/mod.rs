@@ -57,7 +57,6 @@ pub(crate) struct DataExtent {
 /// Compute the data-unit extent from a parsed header (Eq. 2).
 pub(crate) fn data_extent(header: &Header) -> Result<DataExtent> {
     let elem = header.bitpix()?.elem_size() as u64;
-    let naxis = header.naxis()?;
     let axes = header.axes()?;
     // PCOUNT/GCOUNT are mandatory ≥0 / ≥1 integers; a present-but-out-of-range
     // value is malformed and must not be silently clamped (it would yield a
@@ -80,7 +79,7 @@ pub(crate) fn data_extent(header: &Header) -> Result<DataExtent> {
     // for random groups. All arithmetic is checked: the axis lengths come from an
     // untrusted file and an overflowed product would drive a wild allocation in
     // the reader.
-    let array_elems = if naxis == 0 {
+    let array_elems = if axes.is_empty() {
         0
     } else {
         let array_axes: &[usize] = if random_groups { &axes[1..] } else { &axes };

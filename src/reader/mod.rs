@@ -78,7 +78,12 @@ impl<R: Read + Seek> FitsReader<R> {
                     let kind = HduKind::classify(&header);
                     let data_offset = source.stream_position()?;
                     let extent = data_extent(&header)?;
-                    source.seek(SeekFrom::Current(extent.padded_bytes as i64))?;
+                    // Seek by absolute position (not a signed `Current` offset) so a
+                    // hostile padded size can't cast to a negative seek and rewind.
+                    let next = data_offset
+                        .checked_add(extent.padded_bytes)
+                        .ok_or(FitsError::DataUnitOverflow)?;
+                    source.seek(SeekFrom::Start(next))?;
                     hdus.push(Hdu {
                         header,
                         kind,
@@ -99,13 +104,7 @@ impl<R: Read + Seek> FitsReader<R> {
         Ok(FitsReader { source, hdus })
     }
 
-    /// The HDUs discovered by the lazy scan, in file order (HDU 0 is the primary).
-    pub fn hdus(&self) -> &[Hdu] {
-        &self.hdus
-    }
-
-    /// The HDU at `index` (panics if out of range — use [`FitsReader::hdus`] to
-    /// check the count first).
+    /// The HDU at `index` (panics if out of range — check `self.hdus.len()` first).
     pub fn hdu(&self, index: usize) -> &Hdu {
         &self.hdus[index]
     }
@@ -139,11 +138,10 @@ impl<R: Read + Seek> FitsReader<R> {
         // §4.3: a plain image array has no group structure. A non-conforming
         // `PCOUNT`/`GCOUNT` would make `data_extent` size extra bytes, so reject it
         // up front (on untrusted input) rather than decode mismatched samples.
-        if hdu.header.get_integer("PCOUNT").unwrap_or(0) != 0 {
-            return Err(FitsError::WrongValueType { name: "PCOUNT" });
-        }
-        if hdu.header.get_integer("GCOUNT").unwrap_or(1) != 1 {
-            return Err(FitsError::WrongValueType { name: "GCOUNT" });
+        if hdu.header.get_integer("PCOUNT").unwrap_or(0) != 0
+            || hdu.header.get_integer("GCOUNT").unwrap_or(1) != 1
+        {
+            return Err(FitsError::ImageHasGroups);
         }
         let bitpix = hdu.header.bitpix()?;
         let shape = hdu.header.axes()?;

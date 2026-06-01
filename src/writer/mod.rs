@@ -14,6 +14,7 @@ use crate::block::ZERO_FILL;
 use crate::checksum;
 use crate::data::Image;
 use crate::endian::extend_be;
+use crate::endian::push_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -270,7 +271,7 @@ impl<W: Write> FitsWriter<W> {
                 if col.vla.is_some() {
                     let (n, o) = descs[ci][cursor[ci]];
                     cursor[ci] += 1;
-                    push_vla_descriptor(&mut data, col.wide, n, o);
+                    push_pq_descriptor(&mut data, col.wide, n, o);
                 } else {
                     pack_cell(&mut data, col, r);
                 }
@@ -575,20 +576,6 @@ fn check_column(col: &WriteColumn, nrows: usize) -> Result<usize> {
 }
 
 /// Number of elements (or strings) in a column's data.
-/// Encode a VLA descriptor — element count and heap byte offset — as a big-endian
-/// `Q` (64-bit, `wide`) or `P` (32-bit) pair. The values are carried as `u64` up
-/// to this point so a `Q` column can address a heap or count beyond the 4 GiB the
-/// 32-bit `P` form allows (truncating earlier would defeat the point of `Q`).
-fn push_vla_descriptor(data: &mut Vec<u8>, wide: bool, count: u64, offset: u64) {
-    if wide {
-        data.extend_from_slice(&(count as i64).to_be_bytes());
-        data.extend_from_slice(&(offset as i64).to_be_bytes());
-    } else {
-        data.extend_from_slice(&(count as i32).to_be_bytes());
-        data.extend_from_slice(&(offset as i32).to_be_bytes());
-    }
-}
-
 fn count_of(data: &ColumnData) -> usize {
     match data {
         ColumnData::Logical(v) => v.len(),

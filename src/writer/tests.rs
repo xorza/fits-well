@@ -359,7 +359,7 @@ fn vla_descriptor_q_form_carries_full_64_bit_count_and_offset() {
     let count = u32::MAX as u64 + 5; // does not fit in u32
     let offset = 0x3_0000_0002u64;
     let mut q = Vec::new();
-    push_vla_descriptor(&mut q, true, count, offset);
+    push_pq_descriptor(&mut q, true, count, offset);
     assert_eq!(q.len(), 16);
     assert_eq!(
         i64::from_be_bytes(q[0..8].try_into().unwrap()),
@@ -372,7 +372,7 @@ fn vla_descriptor_q_form_carries_full_64_bit_count_and_offset() {
 
     // The 32-bit `P` form packs two i32s.
     let mut p = Vec::new();
-    push_vla_descriptor(&mut p, false, 7, 40);
+    push_pq_descriptor(&mut p, false, 7, 40);
     assert_eq!(p.len(), 8);
     assert_eq!(i32::from_be_bytes(p[0..4].try_into().unwrap()), 7);
     assert_eq!(i32::from_be_bytes(p[4..8].try_into().unwrap()), 40);

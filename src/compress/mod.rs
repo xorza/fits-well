@@ -29,6 +29,7 @@ use crate::data::ImageData;
 use crate::data::Scaling;
 use crate::endian::decode_be;
 use crate::endian::encode_be;
+use crate::endian::push_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -278,7 +279,7 @@ pub(crate) fn encode_image(
     // Data unit: an array descriptor (count, heap offset) per tile, then the heap.
     let mut data = Vec::with_capacity(ntiles * if wide { 16 } else { 8 } + heap.len());
     for &(nelem, offset) in &descriptors {
-        push_compressed_descriptor(&mut data, wide, nelem as u64, offset as u64);
+        push_pq_descriptor(&mut data, wide, nelem as u64, offset as u64);
     }
     data.extend_from_slice(&heap);
 
@@ -288,7 +289,8 @@ pub(crate) fn encode_image(
     h.set("XTENSION", "BINTABLE")
         .comment("XTENSION", "binary table extension");
     h.set("BITPIX", 8).set("NAXIS", 2);
-    h.set("NAXIS1", 8).set("NAXIS2", ntiles as i64);
+    h.set("NAXIS1", if wide { 16 } else { 8 })
+        .set("NAXIS2", ntiles as i64);
     h.set("PCOUNT", heap.len() as i64).set("GCOUNT", 1);
     h.set("TFIELDS", 1);
     h.set("TTYPE1", "COMPRESSED_DATA");
@@ -326,18 +328,6 @@ pub(crate) fn encode_image(
         h.set("BLANK", blank);
     }
     Ok((h, data))
-}
-
-/// Write a compressed-tile array descriptor (element count, heap byte offset) as a
-/// big-endian `Q` (64-bit) or `P` (32-bit) pair (§10.1.3).
-fn push_compressed_descriptor(data: &mut Vec<u8>, wide: bool, count: u64, offset: u64) {
-    if wide {
-        data.extend_from_slice(&(count as i64).to_be_bytes());
-        data.extend_from_slice(&(offset as i64).to_be_bytes());
-    } else {
-        data.extend_from_slice(&(count as i32).to_be_bytes());
-        data.extend_from_slice(&(offset as i32).to_be_bytes());
-    }
 }
 
 /// Encode a float [`Image`] as a quantized, tiled-compressed `BINTABLE`

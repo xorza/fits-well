@@ -112,10 +112,7 @@ fn malformed_image_pcount_is_rejected_not_panicked() {
         &[0u8; 15],
     );
     let mut r = FitsReader::open(Cursor::new(bytes)).unwrap();
-    assert!(matches!(
-        r.read_image(0),
-        Err(FitsError::WrongValueType { name: "PCOUNT" })
-    ));
+    assert!(matches!(r.read_image(0), Err(FitsError::ImageHasGroups)));
 }
 
 #[test]

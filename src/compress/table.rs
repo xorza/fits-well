@@ -164,7 +164,7 @@ pub(crate) fn compress_table(
     let default_algo = Algo::parse(default_algo)?;
     let ncols = table.columns.len();
     let nrows = table.nrows;
-    let naxis1 = table.row_width();
+    let naxis1 = table.row_len;
     let raw = table.raw_rows();
 
     let metas: Vec<ColMeta> = table

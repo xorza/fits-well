@@ -222,7 +222,7 @@ impl Card {
         // instead of being truncated — for both plain value cards (value field at
         // byte 11) and HIERARCH cards (whose `HIERARCH key = ` prefix is longer).
         if let Some(Value::Text(s)) = &self.value {
-            let value_len = 2 + s.replace('\'', "''").len();
+            let value_len = 2 + s.len() + s.bytes().filter(|&b| b == b'\'').count();
             let comment_len = self.comment.as_ref().map_or(0, |c| 3 + c.len());
             let prefix_len = match self.kind {
                 CardKind::Value => 10,
@@ -362,14 +362,17 @@ fn looks_real(token: &str) -> bool {
 /// Non-finite results (`inf`/`NaN`, which Rust's parser accepts and which an
 /// overflowing magnitude produces) are rejected — §4.2.4 has no such value form.
 fn parse_real(token: &str) -> Option<f64> {
-    token
-        .replace(['d', 'D'], "E")
-        .parse::<f64>()
-        .ok()
-        .filter(|v| v.is_finite())
+    // Only the Fortran `D`/`d` exponent needs rewriting; skip the allocation for
+    // the common `E`/`e`/plain decimal forms.
+    let parsed = if token.bytes().any(|b| b == b'd' || b == b'D') {
+        token.replace(['d', 'D'], "E").parse::<f64>()
+    } else {
+        token.parse::<f64>()
+    };
+    parsed.ok().filter(|v| v.is_finite())
 }
 
-fn validate_keyword(name: &str) -> Result<()> {
+pub(crate) fn validate_keyword(name: &str) -> Result<()> {
     let ok = name.len() <= 8
         && !name.is_empty()
         && name

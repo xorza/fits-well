@@ -30,6 +30,20 @@ pub(crate) fn extend_be<const N: usize, T: Copy>(
     }
 }
 
+/// Append a variable-length-array descriptor — element count and heap byte offset
+/// — as a big-endian `Q` (64-bit, `wide`) or `P` (32-bit) pair. The values are
+/// carried as `u64` up to here so a `Q` descriptor can address a heap or count
+/// beyond the 4 GiB a `P` allows (truncating earlier would defeat `Q`'s purpose).
+pub(crate) fn push_pq_descriptor(out: &mut Vec<u8>, wide: bool, count: u64, offset: u64) {
+    if wide {
+        out.extend_from_slice(&(count as i64).to_be_bytes());
+        out.extend_from_slice(&(offset as i64).to_be_bytes());
+    } else {
+        out.extend_from_slice(&(count as i32).to_be_bytes());
+        out.extend_from_slice(&(offset as i32).to_be_bytes());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

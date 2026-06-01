@@ -637,7 +637,7 @@ pub fn time_axis_kind(ctype: &str) -> Option<TimeAxisKind> {
 
 /// True if a `CTYPE` denotes an absolute *time* axis (`'TIME'` or a time-scale
 /// name) — the kind [`FitsTime::time_axis_mjd`] resolves to an MJD.
-pub fn is_time_ctype(ctype: &str) -> bool {
+pub(crate) fn is_time_ctype(ctype: &str) -> bool {
     time_axis_kind(ctype) == Some(TimeAxisKind::Time)
 }
 

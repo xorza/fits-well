@@ -17,17 +17,7 @@ pub(super) fn gzip_encode(raw: &[u8]) -> Vec<u8> {
 
 /// `GZIP_2` encoder: shuffle `raw` into significance byte-planes, then gzip.
 pub(super) fn gzip2_encode(raw: &[u8], width: usize) -> Vec<u8> {
-    if width <= 1 {
-        return gzip_encode(raw);
-    }
-    let n = raw.len() / width;
-    let mut shuffled = vec![0u8; raw.len()];
-    for p in 0..width {
-        for i in 0..n {
-            shuffled[p * n + i] = raw[i * width + p];
-        }
-    }
-    gzip_encode(&shuffled)
+    gzip_encode(&shuffle_bytes(raw, width))
 }
 
 /// Shuffle `raw` into `width`-byte significance planes (all byte-0s, then all
@@ -76,18 +66,6 @@ pub(super) fn gzip_tile(bytes: &[u8], bitpix: Bitpix) -> Result<Vec<i64>> {
 /// `GZIP_2`: like `GZIP_1` but the bytes are shuffled into significance planes
 /// (all most-significant bytes first, …) before gzip. Inflate, then un-shuffle.
 pub(super) fn gzip2_tile(bytes: &[u8], bitpix: Bitpix) -> Result<Vec<i64>> {
-    let width = bitpix.elem_size();
-    let shuffled = gunzip(bytes)?;
-    if width == 1 {
-        return Ok(be_to_i64(&shuffled, bitpix));
-    }
-    let n = shuffled.len() / width;
-    let mut raw = vec![0u8; shuffled.len()];
-    // Plane p (p=0 most significant) holds byte p of every value, in order.
-    for p in 0..width {
-        for i in 0..n {
-            raw[i * width + p] = shuffled[p * n + i];
-        }
-    }
+    let raw = unshuffle_bytes(&gunzip(bytes)?, bitpix.elem_size());
     Ok(be_to_i64(&raw, bitpix))
 }

@@ -47,6 +47,9 @@ pub enum FitsError {
     /// `read_image` was called on an HDU that is not an image array (a table,
     /// random-groups, or unmodelled extension).
     NotAnImage,
+    /// An IMAGE/primary HDU carries group structure (`PCOUNT ≠ 0` or `GCOUNT ≠ 1`),
+    /// which a plain image array must not have (§4.3).
+    ImageHasGroups,
     /// `read_table` was called on an HDU that is not a binary table.
     NotABinTable,
     /// `read_groups` was called on an HDU that is not a random-groups primary.
@@ -134,6 +137,12 @@ impl fmt::Display for FitsError {
                 write!(f, "HDU index {index} out of bounds (file has {len} HDUs)")
             }
             FitsError::NotAnImage => write!(f, "HDU is not an image array"),
+            FitsError::ImageHasGroups => {
+                write!(
+                    f,
+                    "image HDU has group structure (PCOUNT ≠ 0 or GCOUNT ≠ 1)"
+                )
+            }
             FitsError::NotABinTable => write!(f, "HDU is not a binary table"),
             FitsError::NotRandomGroups => write!(f, "HDU is not a random-groups primary"),
             FitsError::NotAnAsciiTable => write!(f, "HDU is not an ASCII table"),

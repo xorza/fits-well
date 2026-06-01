@@ -286,7 +286,7 @@ pub enum ColumnData {
 pub struct BinTable {
     pub nrows: usize,
     pub columns: Vec<Column>,
-    row_len: usize,
+    pub(crate) row_len: usize,
     /// Byte offset of the heap within `bytes` (`THEAP`, default = main-table size).
     heap_offset: usize,
     /// Byte offset just past the real heap data (`nrows·row_len + PCOUNT`). `P`/`Q`
@@ -380,12 +380,6 @@ impl BinTable {
         &self.bytes[..self.nrows * self.row_len]
     }
 
-    /// Row width in bytes (`NAXIS1`).
-    #[cfg(feature = "compression")]
-    pub(crate) fn row_width(&self) -> usize {
-        self.row_len
-    }
-
     /// The index of the first column whose `TTYPEn` matches `name`, compared
     /// case-insensitively per §6.7.
     pub fn column_index(&self, name: &str) -> Option<usize> {
@@ -467,8 +461,13 @@ impl BinTable {
             } else {
                 (be_u32(&desc[0..4]), be_u32(&desc[4..8]))
             };
-            let start = self.heap_offset + offset;
-            let end = start + nbits.div_ceil(8);
+            let start = self
+                .heap_offset
+                .checked_add(offset)
+                .ok_or(FitsError::UnexpectedEof)?;
+            let end = start
+                .checked_add(nbits.div_ceil(8))
+                .ok_or(FitsError::UnexpectedEof)?;
             if end > self.heap_end {
                 return Err(FitsError::UnexpectedEof);
             }
@@ -568,11 +567,17 @@ impl BinTable {
             };
             let nbytes = match elem {
                 TformKind::Bit => nelem.div_ceil(8),
-                _ => nelem * elem.elem_size(),
+                _ => nelem
+                    .checked_mul(elem.elem_size())
+                    .ok_or(FitsError::UnexpectedEof)?,
             };
-            let start = self.heap_offset + offset;
-            let end = start + nbytes;
-            // The span must lie within the heap proper, not the trailing block fill.
+            // Checked: a crafted `Q` descriptor (huge nelem/offset) must not wrap
+            // past the heap-bounds guard. The span must lie within the heap proper.
+            let start = self
+                .heap_offset
+                .checked_add(offset)
+                .ok_or(FitsError::UnexpectedEof)?;
+            let end = start.checked_add(nbytes).ok_or(FitsError::UnexpectedEof)?;
             if end > self.heap_end {
                 return Err(FitsError::UnexpectedEof);
             }

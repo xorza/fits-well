@@ -613,8 +613,7 @@ fn check_table_roundtrip(algo: &str, rows_per_tile: usize) {
     // 3. The uncompressed table must be byte-identical to the original.
     assert_eq!(restored.nrows, orig.nrows, "{algo}/{rows_per_tile} nrows");
     assert_eq!(
-        restored.row_width(),
-        orig.row_width(),
+        restored.row_len, orig.row_len,
         "{algo}/{rows_per_tile} row width"
     );
     assert_eq!(
@@ -669,7 +668,7 @@ fn decodes_a_cfitsio_compressed_table() {
 
     assert_eq!(restored.nrows, 500);
     assert_eq!(restored.nrows, original.nrows);
-    assert_eq!(restored.row_width(), original.row_width());
+    assert_eq!(restored.row_len, original.row_len);
     assert_eq!(restored.columns.len(), 6);
     assert_eq!(
         restored.raw_rows(),
@@ -802,7 +801,7 @@ fn nocompress_image_round_trips() {
 fn compressed_image_descriptor_switches_to_q_for_large_offsets() {
     // §10.1.3: a heap offset beyond the 32-bit P range needs a 64-bit Q descriptor.
     let mut q = Vec::new();
-    super::push_compressed_descriptor(&mut q, true, 3, u32::MAX as u64 + 8);
+    super::push_pq_descriptor(&mut q, true, 3, u32::MAX as u64 + 8);
     assert_eq!(q.len(), 16);
     assert_eq!(i64::from_be_bytes(q[0..8].try_into().unwrap()), 3);
     assert_eq!(
@@ -810,7 +809,7 @@ fn compressed_image_descriptor_switches_to_q_for_large_offsets() {
         u32::MAX as i64 + 8
     );
     let mut p = Vec::new();
-    super::push_compressed_descriptor(&mut p, false, 3, 40);
+    super::push_pq_descriptor(&mut p, false, 3, 40);
     assert_eq!(p.len(), 8);
     assert_eq!(i32::from_be_bytes(p[4..8].try_into().unwrap()), 40);
 }

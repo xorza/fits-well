@@ -9,6 +9,7 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::card::Card;
 use crate::header::card::CardKind;
+use crate::header::card::validate_keyword;
 use crate::header::value::Value;
 
 /// A parsed header unit: an *ordered* list of content cards plus a side index
@@ -130,6 +131,10 @@ impl Header {
     /// the keyword index in sync. Returns `&mut self` for chaining. The keyword
     /// must be a valid FITS keyword name (≤ 8 chars of `A–Z`, `0–9`, `-`, `_`).
     pub fn set(&mut self, keyword: &str, value: impl Into<Value>) -> &mut Self {
+        assert!(
+            validate_keyword(keyword).is_ok(),
+            "Header::set: invalid FITS keyword {keyword:?}"
+        );
         let value = value.into();
         if let Some(&i) = self.index.get(keyword) {
             self.cards[i].value = Some(value);
