@@ -47,3 +47,9 @@ required-features = ["internals"]
 name = "compress"
 harness = false
 required-features = ["compression"]
+
+# Read-path throughput: seeking (copy-into-scratch) vs in-memory borrow. Uses only
+# the public API; the mmap arm is `#[cfg]`-gated on the `mmap` feature.
+[[bench]]
+name = "read"
+harness = false
