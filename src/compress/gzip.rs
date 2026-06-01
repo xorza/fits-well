@@ -8,16 +8,23 @@ use crate::error::Result;
 
 use super::be_to_i64;
 
-/// Gzip a raw big-endian byte buffer (the `GZIP_1` tile encoder).
-pub(super) fn gzip_encode(raw: &[u8]) -> Vec<u8> {
-    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+/// Default deflate level — the [`crate::CompressOptions`] default and the fixed
+/// level for table-column gzip. Level 1 favors write speed (gzip was the slowest
+/// compress path at the higher default); raise `CompressOptions::gzip_level` for a
+/// tighter ratio.
+pub(super) const DEFAULT_GZIP_LEVEL: u32 = 1;
+
+/// Gzip a raw big-endian byte buffer at deflate `level` (0–9; the `GZIP_1` tile
+/// encoder). The level is lossless — only the speed↔ratio tradeoff changes.
+pub(super) fn gzip_encode(raw: &[u8], level: u32) -> Vec<u8> {
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(level));
     enc.write_all(raw).expect("gzip into a Vec cannot fail");
     enc.finish().expect("gzip finish into a Vec cannot fail")
 }
 
-/// `GZIP_2` encoder: shuffle `raw` into significance byte-planes, then gzip.
-pub(super) fn gzip2_encode(raw: &[u8], width: usize) -> Vec<u8> {
-    gzip_encode(&shuffle_bytes(raw, width))
+/// `GZIP_2` encoder: shuffle `raw` into significance byte-planes, then gzip at `level`.
+pub(super) fn gzip2_encode(raw: &[u8], width: usize, level: u32) -> Vec<u8> {
+    gzip_encode(&shuffle_bytes(raw, width), level)
 }
 
 /// Shuffle `raw` into `width`-byte significance planes (all byte-0s, then all
