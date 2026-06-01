@@ -1015,6 +1015,9 @@ struct TileScratch {
     tdims: Vec<usize>,
     /// Flat (row-major) indices of the tile's pixels in the full image.
     indices: Vec<usize>,
+    /// Per-axis local coordinate, the odometer state [`TileGeometry::tile_into`]
+    /// walks to emit `indices` without per-pixel division.
+    coord: Vec<usize>,
 }
 
 impl TileGeometry {
@@ -1058,15 +1061,28 @@ impl TileGeometry {
         let tile_elems: usize = s.tdims.iter().product();
         s.indices.clear();
         s.indices.reserve(tile_elems);
-        for local in 0..tile_elems {
-            let mut rem = local;
-            let mut flat = 0;
-            for i in 0..n {
-                let c = rem % s.tdims[i];
-                rem /= s.tdims[i];
-                flat += (s.origin[i] + c) * self.stride[i];
-            }
+        if tile_elems == 0 {
+            return;
+        }
+        // Walk the tile's local coordinates as an odometer (fastest axis first),
+        // maintaining `flat` by adding each axis stride and undoing it on carry. This
+        // replaces the per-pixel `%`/`/` decomposition — integer division dominated
+        // tiled decode (see profiling) — with adds. The emission order is identical
+        // to the decomposition, so decoded values still land in the right pixels.
+        let mut flat: usize = (0..n).map(|i| s.origin[i] * self.stride[i]).sum();
+        s.coord.clear();
+        s.coord.resize(n, 0);
+        for _ in 0..tile_elems {
             s.indices.push(flat);
+            for i in 0..n {
+                s.coord[i] += 1;
+                flat += self.stride[i];
+                if s.coord[i] < s.tdims[i] {
+                    break;
+                }
+                s.coord[i] = 0;
+                flat -= s.tdims[i] * self.stride[i];
+            }
         }
     }
 }
