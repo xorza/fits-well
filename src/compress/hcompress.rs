@@ -937,38 +937,29 @@ fn expand_blocks(a: &mut [u8], nx: usize, ny: usize, n: usize) {
 /// Insert the 4-bit codes of `a[(nqx+1)/2,(nqy+1)/2]` into bit plane `bit` of
 /// `b[nqx,nqy]` (declared row stride `n`), expanding each to 2×2.
 fn qtree_bitins(a: &[u8], nqx: usize, nqy: usize, b: &mut [i32], n: usize, bit: i32) {
-    let plane = 1i32 << bit;
+    // Each 4-bit code maps to a 2×2 block; the four codes are *data-dependent* and
+    // unpredictable, so branching on them (`if v & 1`) mispredicts heavily. Instead
+    // OR the extracted bit unconditionally — `|= 0` is a no-op for clear bits — which
+    // is branchless: shift the code's bit to plane `bit` and OR it in.
     let mut k = 0;
     let mut i = 0;
     while i + 1 < nqx {
         let mut s00 = n * i;
         let mut j = 0;
         while j + 1 < nqy {
-            let v = a[k];
-            if v & 1 != 0 {
-                b[s00 + n + 1] |= plane;
-            }
-            if v & 2 != 0 {
-                b[s00 + n] |= plane;
-            }
-            if v & 4 != 0 {
-                b[s00 + 1] |= plane;
-            }
-            if v & 8 != 0 {
-                b[s00] |= plane;
-            }
+            let v = a[k] as i32;
+            b[s00 + n + 1] |= (v & 1) << bit;
+            b[s00 + n] |= ((v >> 1) & 1) << bit;
+            b[s00 + 1] |= ((v >> 2) & 1) << bit;
+            b[s00] |= ((v >> 3) & 1) << bit;
             s00 += 2;
             k += 1;
             j += 2;
         }
         if j < nqy {
-            let v = a[k];
-            if v & 2 != 0 {
-                b[s00 + n] |= plane;
-            }
-            if v & 8 != 0 {
-                b[s00] |= plane;
-            }
+            let v = a[k] as i32;
+            b[s00 + n] |= ((v >> 1) & 1) << bit;
+            b[s00] |= ((v >> 3) & 1) << bit;
             k += 1;
         }
         i += 2;
@@ -977,22 +968,16 @@ fn qtree_bitins(a: &[u8], nqx: usize, nqy: usize, b: &mut [i32], n: usize, bit: 
         let mut s00 = n * i;
         let mut j = 0;
         while j + 1 < nqy {
-            let v = a[k];
-            if v & 4 != 0 {
-                b[s00 + 1] |= plane;
-            }
-            if v & 8 != 0 {
-                b[s00] |= plane;
-            }
+            let v = a[k] as i32;
+            b[s00 + 1] |= ((v >> 2) & 1) << bit;
+            b[s00] |= ((v >> 3) & 1) << bit;
             s00 += 2;
             k += 1;
             j += 2;
         }
         if j < nqy {
-            let v = a[k];
-            if v & 8 != 0 {
-                b[s00] |= plane;
-            }
+            let v = a[k] as i32;
+            b[s00] |= ((v >> 3) & 1) << bit;
             k += 1;
         }
     }
