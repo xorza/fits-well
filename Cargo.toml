@@ -16,7 +16,7 @@ rayon = { version = "1", optional = true }
 criterion = "0.8"
 
 [features]
-default = []
+default = ["parallel", "compression"]
 # rayon-backed tile-parallel (de)compression — the codecs are compute-bound and
 # tiles are independent, so this scales near-linearly. Scalar fallback otherwise.
 # (The raw byte-swap / BSCALE-BZERO paths are memory-bound; SIMD is their lever,
