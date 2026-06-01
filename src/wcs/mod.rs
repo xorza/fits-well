@@ -684,7 +684,7 @@ impl Wcs {
                     .to_string()
             })
             .collect();
-        let celestial_axes = find_celestial(&ctype);
+        let celestial_axes = find_celestial(&ctype)?;
 
         // Axes whose non-linear transform this library doesn't evaluate — an
         // unsupported celestial projection (quad-cube `TSC`/`CSC`/`QSC`, HEALPix
@@ -1003,6 +1003,37 @@ impl Wcs {
     }
 }
 
+/// Which celestial coordinate an axis carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CelestialAxis {
+    Longitude,
+    Latitude,
+}
+
+/// The celestial coordinate an axis carries, from its `CTYPE` head (§8.2): `RA` and
+/// the `xLON`/`yzLN` forms are longitudes; `DEC` and `xLAT`/`yzLT` are latitudes;
+/// `None` for any non-celestial axis. One classifier shared by [`find_celestial`]
+/// and [`nonlinear_unsupported_axes`] so the two cannot drift.
+fn celestial_axis(ctype: &str) -> Option<CelestialAxis> {
+    let head = ctype.split('-').next().unwrap_or("").trim();
+    if head == "RA" || head.ends_with("LON") || (head.len() == 4 && head.ends_with("LN")) {
+        Some(CelestialAxis::Longitude)
+    } else if head == "DEC" || head.ends_with("LAT") || (head.len() == 4 && head.ends_with("LT")) {
+        Some(CelestialAxis::Latitude)
+    } else {
+        None
+    }
+}
+
+/// The trailing projection/algorithm code of a `CTYPE` (`RA---TAN` → `TAN`); `None`
+/// when there is no hyphen-delimited suffix (a bare `RA`/`GLON`).
+fn projection_code(ctype: &str) -> Option<&str> {
+    ctype
+        .rsplit_once('-')
+        .map(|(_, code)| code)
+        .filter(|c| !c.is_empty())
+}
+
 /// Axis indices (0-based) whose non-linear transform this library does not
 /// evaluate: a celestial axis whose 3-letter projection code is unimplemented
 /// (quad-cube/HEALPix), or a non-linearly-sampled spectral axis (`TTTT-AAA`,
@@ -1012,22 +1043,20 @@ impl Wcs {
 fn nonlinear_unsupported_axes(ctype: &[String]) -> Vec<usize> {
     let mut out = Vec::new();
     for (i, t) in ctype.iter().enumerate() {
-        let head = t.split('-').next().unwrap_or("").trim_end();
-        let is_celestial = head == "RA"
-            || head == "DEC"
-            || head.ends_with("LON")
-            || head.ends_with("LAT")
-            || (head.len() == 4 && (head.ends_with("LN") || head.ends_with("LT")));
-        if is_celestial
-            && let Some(code) = t.rsplit('-').find(|s| !s.is_empty())
-            && code.len() == 3
-            && Projection::from_code(code).is_none()
-        {
-            out.push(i);
-        } else if SPECTRAL_TYPES.contains(&head)
-            && t.get(5..).map(str::trim).is_some_and(|s| !s.is_empty())
-        {
-            out.push(i);
+        if celestial_axis(t).is_some() {
+            if let Some(code) = projection_code(t)
+                && code.len() == 3
+                && Projection::from_code(code).is_none()
+            {
+                out.push(i);
+            }
+        } else {
+            let head = t.split('-').next().unwrap_or("").trim_end();
+            if SPECTRAL_TYPES.contains(&head)
+                && t.get(5..).map(str::trim).is_some_and(|s| !s.is_empty())
+            {
+                out.push(i);
+            }
         }
     }
     out
@@ -1044,37 +1073,32 @@ fn unit_to_degrees(unit: &str) -> f64 {
     }
 }
 
-fn find_celestial(ctype: &[String]) -> Option<(usize, usize, Projection)> {
+/// Locate the celestial longitude/latitude axis pair and their shared projection,
+/// or `None` if the header has no complete celestial pair. Errors if the two axes
+/// declare *different* projection codes — §8.2 requires them to match, so a
+/// mismatch (or one axis projected and the other not) is a malformed header rather
+/// than grounds to silently pick one.
+fn find_celestial(ctype: &[String]) -> Result<Option<(usize, usize, Projection)>> {
     let mut lng = None;
     let mut lat = None;
-    let mut proj = None;
     for (i, t) in ctype.iter().enumerate() {
-        let head = t.split('-').next().unwrap_or("");
-        // RA/DEC, the `xLON`/`xLAT` frames, and the planetary/solar `yzLN`/`yzLT`
-        // forms (§8.2, e.g. `HPLN`/`HPLT`).
-        let is_lng = head == "RA"
-            || head.ends_with("LON")
-            || head == "LON"
-            || (head.len() == 4 && head.ends_with("LN"));
-        let is_lat = head == "DEC"
-            || head.ends_with("LAT")
-            || head == "LAT"
-            || (head.len() == 4 && head.ends_with("LT"));
-        if (is_lng || is_lat)
-            && let Some(code) = t.rsplit('-').find(|s| !s.is_empty())
-        {
-            proj = proj.or_else(|| Projection::from_code(code));
-        }
-        if is_lng {
-            lng = Some(i);
-        } else if is_lat {
-            lat = Some(i);
+        match celestial_axis(t) {
+            Some(CelestialAxis::Longitude) => lng = lng.or(Some(i)),
+            Some(CelestialAxis::Latitude) => lat = lat.or(Some(i)),
+            None => {}
         }
     }
-    match (lng, lat, proj) {
-        (Some(lng), Some(lat), Some(proj)) => Some((lng, lat, proj)),
-        _ => None,
+    let (Some(lng), Some(lat)) = (lng, lat) else {
+        return Ok(None);
+    };
+    if projection_code(&ctype[lng]) != projection_code(&ctype[lat]) {
+        return Err(FitsError::ConflictingWcsKeywords {
+            detail: "celestial longitude and latitude axes declare different projections",
+        });
     }
+    Ok(projection_code(&ctype[lng])
+        .and_then(Projection::from_code)
+        .map(|proj| (lng, lat, proj)))
 }
 
 /// Native spherical (φ, θ) → celestial (α, δ), all degrees, given the celestial

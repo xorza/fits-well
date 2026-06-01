@@ -385,6 +385,39 @@ fn unimplemented_projection_codes_fall_back_to_intermediate() {
 }
 
 #[test]
+fn mismatched_celestial_projections_are_rejected() {
+    use crate::error::FitsError;
+    use crate::header::Header;
+    // §8.2: the longitude and latitude axes must share one projection. Pairing
+    // RA---TAN with DEC--SIN is malformed — reject it rather than silently adopt
+    // whichever axis is seen first.
+    let mut h = Header::new();
+    h.set("NAXIS", 2);
+    h.set("CTYPE1", "RA---TAN").set("CTYPE2", "DEC--SIN");
+    h.set("CRPIX1", 1.0).set("CRPIX2", 1.0);
+    h.set("CRVAL1", 10.0).set("CRVAL2", 20.0);
+    h.set("CDELT1", 1.0).set("CDELT2", 1.0);
+    assert!(matches!(
+        Wcs::from_header(&h, None),
+        Err(FitsError::ConflictingWcsKeywords { .. })
+    ));
+
+    // A galactic-frame pair sharing TAN builds fine — exercises the one shared
+    // classifier on the non-RA/DEC longitude/latitude forms (`GLON`/`GLAT`).
+    let mut g = Header::new();
+    g.set("NAXIS", 2);
+    g.set("CTYPE1", "GLON-TAN").set("CTYPE2", "GLAT-TAN");
+    g.set("CRPIX1", 1.0).set("CRPIX2", 1.0);
+    g.set("CRVAL1", 30.0).set("CRVAL2", 10.0);
+    g.set("CDELT1", -1.0).set("CDELT2", 1.0);
+    let w = Wcs::from_header(&g, None).unwrap();
+    assert!(
+        w.celestial.is_some(),
+        "GLON/GLAT TAN pair is a celestial WCS"
+    );
+}
+
+#[test]
 fn degenerate_conic_without_pv1_falls_back_to_intermediate() {
     use crate::header::Header;
     // A conic's mid-latitude θ_a = PVi_1 is mandatory and must be non-zero; absent
