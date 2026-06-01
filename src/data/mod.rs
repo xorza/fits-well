@@ -8,7 +8,7 @@
 
 use crate::bitpix::Bitpix;
 use crate::endian::decode_be;
-use crate::endian::encode_be;
+use crate::endian::extend_be;
 use crate::header::Header;
 
 /// An owned, host-endian sample buffer, tagged by its `BITPIX` element type.
@@ -81,17 +81,18 @@ impl ImageData {
         }
     }
 
-    /// Encode the samples to a big-endian byte buffer — the inverse of
+    /// Append the samples to `out` in big-endian order — the inverse of
     /// [`ImageData::decode`]. This is the unpadded data unit; the writer pads it
-    /// to the 2880-byte block grid.
-    pub(crate) fn encode(&self) -> Vec<u8> {
+    /// to the 2880-byte block grid. Appends (never clears), so a writer reusing one
+    /// buffer across HDUs clears it first and pays no per-image staging allocation.
+    pub(crate) fn encode_into(&self, out: &mut Vec<u8>) {
         match self {
-            ImageData::U8(v) => v.clone(),
-            ImageData::I16(v) => encode_be(v, i16::to_be_bytes),
-            ImageData::I32(v) => encode_be(v, i32::to_be_bytes),
-            ImageData::I64(v) => encode_be(v, i64::to_be_bytes),
-            ImageData::F32(v) => encode_be(v, f32::to_be_bytes),
-            ImageData::F64(v) => encode_be(v, f64::to_be_bytes),
+            ImageData::U8(v) => out.extend_from_slice(v),
+            ImageData::I16(v) => extend_be(out, v, i16::to_be_bytes),
+            ImageData::I32(v) => extend_be(out, v, i32::to_be_bytes),
+            ImageData::I64(v) => extend_be(out, v, i64::to_be_bytes),
+            ImageData::F32(v) => extend_be(out, v, f32::to_be_bytes),
+            ImageData::F64(v) => extend_be(out, v, f64::to_be_bytes),
         }
     }
 }

@@ -83,8 +83,10 @@ pub mod internals {
     }
 
     /// Encode samples back to a big-endian buffer — the inverse swap
-    /// (`ImageData::encode`).
+    /// (`ImageData::encode_into` into a fresh buffer).
     pub fn encode_image(data: &ImageData) -> Vec<u8> {
-        data.encode()
+        let mut out = Vec::new();
+        data.encode_into(&mut out);
+        out
     }
 }

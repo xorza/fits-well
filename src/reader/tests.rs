@@ -21,37 +21,43 @@ fn reads_a_single_hdu_image_with_exact_boundaries() {
 }
 
 #[test]
-fn read_data_into_reuses_one_buffer_across_reads() {
+fn read_data_raw_is_stable_across_reads() {
     let mut f = open("UITfuv2582gc.fits");
-    let owned = f.read_data_raw(0).unwrap();
-    let mut buf = Vec::new();
-    let len = f.read_data_into(0, &mut buf).unwrap();
+    let a = f.read_data_raw(0).unwrap();
+    let b = f.read_data_raw(0).unwrap();
     assert_eq!(
-        &buf[..len],
-        owned.data(),
-        "into-buffer data matches the owned read"
+        a.data(),
+        b.data(),
+        "repeated raw reads yield identical data"
     );
-    // A second read into the same buffer reuses the allocation — no realloc.
-    let cap = buf.capacity();
-    let len2 = f.read_data_into(0, &mut buf).unwrap();
-    assert_eq!(&buf[..len2], owned.data());
     assert_eq!(
-        buf.capacity(),
-        cap,
-        "buffer reused across reads, not reallocated"
+        a.bytes.len(),
+        padded_len(f.hdus[0].data_bytes) as usize,
+        "owned buffer is the full block-padded unit"
     );
 }
 
 #[test]
-fn read_image_into_matches_read_image() {
+fn read_image_reuses_internal_scratch_across_reads() {
     let mut f = open("UITfuv2582gc.fits");
-    let want = f.read_image(0).unwrap();
-    let mut staging = Vec::new();
-    let got = f.read_image_into(0, &mut staging).unwrap();
-    assert_eq!(got.shape, want.shape);
-    assert_eq!(got.samples, want.samples);
-    // The staging buffer holds the raw padded unit and is the caller's to reuse.
-    assert_eq!(staging.len(), padded_len(f.hdus[0].data_bytes) as usize);
+    let first = f.read_image(0).unwrap();
+    // The reader staged the raw unit through its internal scratch, which now holds
+    // the full block-padded data unit and is reused (not reallocated) on the next
+    // read — only each decoded `Image` is freshly allocated.
+    assert_eq!(
+        f.scratch.len(),
+        padded_len(f.hdus[0].data_bytes) as usize,
+        "scratch holds the padded data unit after a read"
+    );
+    let cap = f.scratch.capacity();
+    let second = f.read_image(0).unwrap();
+    assert_eq!(first.shape, second.shape);
+    assert_eq!(first.samples, second.samples);
+    assert_eq!(
+        f.scratch.capacity(),
+        cap,
+        "internal scratch reused across image reads, not reallocated"
+    );
 }
 
 #[test]

@@ -67,6 +67,11 @@ pub struct FitsReader<R> {
     /// The source's total length, captured once at open — used to reject a header
     /// that claims a data unit larger than the file before allocating for it.
     stream_len: u64,
+    /// Reused staging buffer for the transient-decode reads (`read_image`,
+    /// `read_groups`, `verify_checksum`): each fills it with the raw block-padded
+    /// data unit and decodes out of it, so across calls only the decoded result is
+    /// freshly allocated. Grows once to the largest data unit touched, then holds.
+    scratch: Vec<u8>,
 }
 
 impl<R: Read + Seek> FitsReader<R> {
@@ -108,6 +113,7 @@ impl<R: Read + Seek> FitsReader<R> {
             source,
             hdus,
             stream_len,
+            scratch: Vec::new(),
         })
     }
 
@@ -116,51 +122,65 @@ impl<R: Read + Seek> FitsReader<R> {
         &self.hdus[index]
     }
 
-    /// Read the raw, still-encoded (big-endian, unscaled) data unit. The returned
-    /// [`DataUnit`] carries the full block-padded bytes plus the range of actual
-    /// data within them, so a decoder consumes [`DataUnit::data`] and the block
-    /// fill is never mistaken for samples. Typed decoding is the data layer's job.
+    /// Read the raw, still-encoded (big-endian, unscaled) data unit into a fresh,
+    /// caller-owned buffer. The returned [`DataUnit`] carries the full block-padded
+    /// bytes plus the range of actual data within them, so a decoder consumes
+    /// [`DataUnit::data`] and the block fill is never mistaken for samples.
     ///
-    /// This allocates a fresh buffer each call; to reuse one buffer across many
-    /// HDUs (or files), use [`FitsReader::read_data_into`].
+    /// This is the owned form, backing the table readers (which keep the bytes as
+    /// the parsed table's storage). Image and random-groups reads instead stage
+    /// through the reader's reused internal scratch — see [`FitsReader::read_image`].
     pub fn read_data_raw(&mut self, index: usize) -> Result<DataUnit> {
-        let mut bytes = Vec::new();
-        let data_bytes = self.read_data_into(index, &mut bytes)?;
-        Ok(DataUnit {
-            bytes,
-            data_range: 0..data_bytes,
-        })
-    }
-
-    /// Read the block-padded data unit of HDU `index` into `buf` (resized to the
-    /// unit's on-disk length), returning the length of the *meaningful* data:
-    /// `buf[..len]` is the data and `buf[len..]` is block fill. Reusing one `buf`
-    /// across HDUs amortizes the staging allocation to zero — the caller owns the
-    /// pool. Typed decoding is the data layer's job (decode from `&buf[..len]`).
-    pub fn read_data_into(&mut self, index: usize, buf: &mut Vec<u8>) -> Result<usize> {
         let hdu = self.hdus.get(index).ok_or(FitsError::HduIndexOutOfBounds {
             index,
             len: self.hdus.len(),
         })?;
-        let data_offset = hdu.data_offset;
-        let data_bytes = hdu.data_bytes as usize;
-        let data_len = padded_len(hdu.data_bytes);
+        let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
+        let mut bytes = Vec::new();
+        let n = Self::read_unit_into(
+            &mut self.source,
+            self.stream_len,
+            data_offset,
+            data_bytes,
+            &mut bytes,
+        )?;
+        Ok(DataUnit {
+            bytes,
+            data_range: 0..n,
+        })
+    }
+
+    /// Read HDU `index`'s block-padded data unit into `buf` (resized to the unit's
+    /// on-disk length), returning the length of the *meaningful* data: `buf[..len]`
+    /// is the data and `buf[len..]` is block fill.
+    ///
+    /// An associated fn over the individual fields rather than a `&mut self` method,
+    /// so a caller can pass `&mut self.scratch` next to `&mut self.source` — two
+    /// disjoint field borrows the `self`-method form would reject.
+    fn read_unit_into(
+        source: &mut R,
+        stream_len: u64,
+        data_offset: u64,
+        data_bytes: u64,
+        buf: &mut Vec<u8>,
+    ) -> Result<usize> {
+        let data_len = padded_len(data_bytes);
         // Bound by the source's real length (captured at open): a hostile header can
         // claim a data unit far larger than the file, which would otherwise drive a
         // huge `buf` resize before `read_exact` ever fails. Refuse up front when the
         // declared unit can't physically fit.
         if data_offset
             .checked_add(data_len)
-            .is_none_or(|end| end > self.stream_len)
+            .is_none_or(|end| end > stream_len)
         {
             return Err(FitsError::UnexpectedEof);
         }
-        self.source.seek(SeekFrom::Start(data_offset))?;
+        source.seek(SeekFrom::Start(data_offset))?;
         // Resize keeps `buf`'s capacity across calls (shrinking is len-only), so a
         // reused buffer reallocates only when a larger unit appears.
         buf.resize(data_len as usize, 0);
-        self.source.read_exact(buf.as_mut_slice())?;
-        Ok(data_bytes)
+        source.read_exact(buf.as_mut_slice())?;
+        Ok(data_bytes as usize)
     }
 
     /// Read an HDU's data unit and decode it into a typed [`Image`]: host-endian
@@ -168,20 +188,14 @@ impl<R: Read + Seek> FitsReader<R> {
     /// Errors with [`FitsError::NotAnImage`] for tables, random groups, and
     /// unmodelled extensions.
     ///
-    /// Allocates a transient staging buffer each call; reading many images with
-    /// [`FitsReader::read_image_into`] reuses one.
+    /// The raw data unit is staged through the reader's reused internal scratch,
+    /// so reading many images allocates only each decoded `Image`'s `samples` —
+    /// never the staging (which grows once to the largest unit seen, then holds).
     pub fn read_image(&mut self, index: usize) -> Result<Image> {
-        let mut staging = Vec::new();
-        self.read_image_into(index, &mut staging)
-    }
-
-    /// Like [`FitsReader::read_image`], but stages the raw data unit through the
-    /// caller-provided `staging` buffer instead of a fresh allocation. The decoded
-    /// [`Image`] still owns its `samples`; reusing `staging` across image reads
-    /// amortizes the *I/O* allocation to zero (the caller owns that pool).
-    pub fn read_image_into(&mut self, index: usize, staging: &mut Vec<u8>) -> Result<Image> {
-        let data_bytes = self.read_data_into(index, staging)?; // also bounds-checks the index
-        let hdu = &self.hdus[index];
+        let hdu = self.hdus.get(index).ok_or(FitsError::HduIndexOutOfBounds {
+            index,
+            len: self.hdus.len(),
+        })?;
         if !matches!(hdu.kind, HduKind::Primary | HduKind::Image) {
             return Err(FitsError::NotAnImage);
         }
@@ -196,7 +210,15 @@ impl<R: Read + Seek> FitsReader<R> {
         let bitpix = hdu.header.bitpix()?;
         let shape = hdu.header.axes()?;
         let scaling = Scaling::from_header(&hdu.header);
-        let samples = ImageData::decode(&staging[..data_bytes], bitpix);
+        let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
+        let n = Self::read_unit_into(
+            &mut self.source,
+            self.stream_len,
+            data_offset,
+            data_bytes,
+            &mut self.scratch,
+        )?;
+        let samples = ImageData::decode(&self.scratch[..n], bitpix);
 
         // With PCOUNT=0/GCOUNT=1 (checked above), `data_extent` sized the unit as
         // `elem · Π(axes)`, so `decode` yields exactly `shape_product` samples. This
@@ -240,12 +262,22 @@ impl<R: Read + Seek> FitsReader<R> {
     /// Read and decode a random-groups primary array (§6). Errors with
     /// [`FitsError::NotRandomGroups`] for any other HDU.
     pub fn read_groups(&mut self, index: usize) -> Result<RandomGroups> {
-        let unit = self.read_data_raw(index)?;
-        let hdu = &self.hdus[index];
+        let hdu = self.hdus.get(index).ok_or(FitsError::HduIndexOutOfBounds {
+            index,
+            len: self.hdus.len(),
+        })?;
         if hdu.kind != HduKind::RandomGroups {
             return Err(FitsError::NotRandomGroups);
         }
-        RandomGroups::from_data(&hdu.header, unit.data())
+        let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
+        let n = Self::read_unit_into(
+            &mut self.source,
+            self.stream_len,
+            data_offset,
+            data_bytes,
+            &mut self.scratch,
+        )?;
+        RandomGroups::from_data(&self.hdus[index].header, &self.scratch[..n])
     }
 
     /// Read a tiled-compressed image (§10.1) — a `BINTABLE` with `ZIMAGE = T` —
@@ -273,11 +305,24 @@ impl<R: Read + Seek> FitsReader<R> {
     /// field of the report is `None` if that keyword is absent, else `Some(true)`
     /// when it matches the recomputed checksum.
     pub fn verify_checksum(&mut self, index: usize) -> Result<ChecksumReport> {
-        let data = self.read_data_raw(index)?.bytes; // block-padded data unit
+        let hdu = self.hdus.get(index).ok_or(FitsError::HduIndexOutOfBounds {
+            index,
+            len: self.hdus.len(),
+        })?;
+        let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
+        Self::read_unit_into(
+            &mut self.source,
+            self.stream_len,
+            data_offset,
+            data_bytes,
+            &mut self.scratch,
+        )?;
+        // `scratch` now holds the block-padded data unit (length = the padded size).
         let hdu = &self.hdus[index];
-        let data_sum = checksum::accumulate(&data, 0);
+        let data_sum = checksum::accumulate(&self.scratch, 0);
         // Whole HDU = header (incl. the stored CHECKSUM card) then data.
-        let hdu_sum = checksum::accumulate(&data, checksum::accumulate(&hdu.header_bytes, 0));
+        let hdu_sum =
+            checksum::accumulate(&self.scratch, checksum::accumulate(&hdu.header_bytes, 0));
         Ok(ChecksumReport {
             datasum_ok: hdu
                 .header
@@ -313,7 +358,9 @@ enum NextHeader {
 /// Read one header unit: consume 2880-byte blocks until one carries the `END`
 /// record.
 fn read_header_unit<R: Read>(source: &mut R) -> Result<NextHeader> {
-    let mut bytes = Vec::new();
+    // Most headers are a single block; reserve it so the common case parses with
+    // one allocation and only multi-block headers grow.
+    let mut bytes = Vec::with_capacity(BLOCK_SIZE);
     loop {
         let mut block = [0u8; BLOCK_SIZE];
         match fill_block(source, &mut block)? {

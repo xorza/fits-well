@@ -40,8 +40,13 @@ impl Header {
     /// Parse a header unit from its raw bytes (a whole number of 80-byte cards;
     /// the reader supplies block-aligned input). Stops at the `END` record.
     pub fn parse(bytes: &[u8]) -> Result<Header> {
-        let mut cards: Vec<Card> = Vec::new();
-        let mut index = HashMap::new();
+        // One record per card is the upper bound (CONTINUE folding only merges,
+        // never adds; commentary cards skip the index), so reserve both once and
+        // let parsing fill them without the grow-reallocations a small header would
+        // otherwise pay on every push.
+        let ncards = bytes.len() / CARD_SIZE;
+        let mut cards: Vec<Card> = Vec::with_capacity(ncards);
+        let mut index = HashMap::with_capacity(ncards);
         for chunk in bytes.chunks_exact(CARD_SIZE) {
             let card = Card::parse(
                 chunk

@@ -181,6 +181,10 @@ pub struct FitsWriter<W> {
     sink: W,
     has_primary: bool,
     checksum: bool,
+    /// Reused buffer the data unit is assembled into before padding + writing, so
+    /// writing many HDUs allocates no per-call staging. Each high-level write
+    /// `clear`s it, builds the unit, and hands it to [`FitsWriter::write_hdu`].
+    scratch: Vec<u8>,
 }
 
 impl<W: Write> FitsWriter<W> {
@@ -189,6 +193,7 @@ impl<W: Write> FitsWriter<W> {
             sink,
             has_primary: false,
             checksum: false,
+            scratch: Vec::new(),
         }
     }
 
@@ -230,7 +235,9 @@ impl<W: Write> FitsWriter<W> {
         );
         let header = image_header(image, !self.has_primary);
         self.has_primary = true;
-        self.write_hdu(header, image.samples.encode(), ZERO_FILL)
+        self.scratch.clear();
+        image.samples.encode_into(&mut self.scratch);
+        self.write_hdu(header, ZERO_FILL)
     }
 
     /// Write a binary table as a `BINTABLE` extension. A dataless primary HDU is
@@ -257,23 +264,25 @@ impl<W: Write> FitsWriter<W> {
             }
         }
         // Main table: fixed cells inline, VLA columns as `P` descriptors (consumed
-        // per column in the same row order they were built).
-        let mut data = Vec::with_capacity(nrows * row_len + heap.len());
+        // per column in the same row order they were built). Built into the reused
+        // scratch, with the heap appended after.
+        self.scratch.clear();
+        self.scratch.reserve(nrows * row_len + heap.len());
         let mut cursor = vec![0usize; columns.len()];
         for r in 0..nrows {
             for (ci, col) in columns.iter().enumerate() {
                 if col.vla.is_some() {
                     let (n, o) = descs[ci][cursor[ci]];
                     cursor[ci] += 1;
-                    push_pq_descriptor(&mut data, col.wide, n, o);
+                    push_pq_descriptor(&mut self.scratch, col.wide, n, o);
                 } else {
-                    pack_cell(&mut data, col, r);
+                    pack_cell(&mut self.scratch, col, r);
                 }
             }
         }
-        data.extend_from_slice(&heap);
+        self.scratch.extend_from_slice(&heap);
         let header = bintable_header(nrows, row_len, columns, heap.len());
-        self.write_hdu(header, data, ZERO_FILL)
+        self.write_hdu(header, ZERO_FILL)
     }
 
     /// Write an ASCII table as a `TABLE` extension (a dataless primary is written
@@ -295,13 +304,14 @@ impl<W: Write> FitsWriter<W> {
             row_len += col.width;
         }
         let header = ascii_table_header(nrows, row_len, columns, &tbcols);
-        let mut data = Vec::with_capacity(nrows * row_len);
+        self.scratch.clear();
+        self.scratch.reserve(nrows * row_len);
         for r in 0..nrows {
             for col in columns {
-                format_ascii_field(&mut data, col, r);
+                format_ascii_field(&mut self.scratch, col, r);
             }
         }
-        self.write_hdu(header, data, SPACE_FILL)
+        self.write_hdu(header, SPACE_FILL)
     }
 
     /// Write `image` as a tiled-compressed `BINTABLE` extension (§10.1), using the
@@ -332,8 +342,11 @@ impl<W: Write> FitsWriter<W> {
         scale: i32,
     ) -> Result<()> {
         self.ensure_primary()?;
-        let enc = crate::compress::encode_image(image, cmptype, tile_shape, scale)?;
-        self.write_hdu(enc.header, enc.data, ZERO_FILL)
+        let mut enc = crate::compress::encode_image(image, cmptype, tile_shape, scale)?;
+        // The codec already produced an owned data unit; move it into the reused
+        // scratch (no copy) rather than building in place.
+        std::mem::swap(&mut self.scratch, &mut enc.data);
+        self.write_hdu(enc.header, ZERO_FILL)
     }
 
     /// Write a fixed-width `BINTABLE` as a tiled-compressed table (§10.3). `header`
@@ -349,37 +362,47 @@ impl<W: Write> FitsWriter<W> {
         algo: &str,
     ) -> Result<()> {
         self.ensure_primary()?;
-        let enc = crate::compress::compress_table(header, table, rows_per_tile, algo)?;
-        self.write_hdu(enc.header, enc.data, ZERO_FILL)
+        let mut enc = crate::compress::compress_table(header, table, rows_per_tile, algo)?;
+        std::mem::swap(&mut self.scratch, &mut enc.data);
+        self.write_hdu(enc.header, ZERO_FILL)
     }
 
     /// Write a dataless primary HDU if none has been written yet, so subsequent
     /// extensions are well-formed.
     fn ensure_primary(&mut self) -> Result<()> {
         if !self.has_primary {
-            self.write_hdu(empty_primary_header(), Vec::new(), ZERO_FILL)?;
+            self.scratch.clear();
+            self.write_hdu(empty_primary_header(), ZERO_FILL)?;
             self.has_primary = true;
         }
         Ok(())
     }
 
-    /// Render and write one HDU (header + block-padded data), embedding
-    /// `DATASUM`/`CHECKSUM` when checksums are enabled.
-    fn write_hdu(&mut self, mut header: Header, mut data: Vec<u8>, fill: u8) -> Result<()> {
-        pad_to_block(&mut data, fill);
+    /// Render and write one HDU: the unpadded data unit the caller has assembled in
+    /// `self.scratch`, padded to a block and framed by the header (with
+    /// `DATASUM`/`CHECKSUM` embedded when checksums are enabled).
+    ///
+    /// Takes the data via the reused `scratch` field rather than an owned argument,
+    /// so the high-level writers build into one buffer that survives across HDUs.
+    fn write_hdu(&mut self, mut header: Header, fill: u8) -> Result<()> {
+        pad_to_block(&mut self.scratch, fill);
         if self.checksum {
-            header.set("DATASUM", checksum::accumulate(&data, 0).to_string());
+            header.set(
+                "DATASUM",
+                checksum::accumulate(&self.scratch, 0).to_string(),
+            );
             header.set("CHECKSUM", PLACEHOLDER_CHECKSUM);
         }
         let mut header_bytes = render_header(&header);
         if self.checksum {
             // Re-sum with the zero placeholder, then encode the value that forces
             // the whole-HDU checksum to negative zero, and patch it in place.
-            let hdu_sum = checksum::accumulate(&data, checksum::accumulate(&header_bytes, 0));
+            let hdu_sum =
+                checksum::accumulate(&self.scratch, checksum::accumulate(&header_bytes, 0));
             patch_checksum(&mut header_bytes, &checksum::encode(hdu_sum, true));
         }
         self.sink.write_all(&header_bytes)?;
-        self.sink.write_all(&data)?;
+        self.sink.write_all(&self.scratch)?;
         Ok(())
     }
 

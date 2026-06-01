@@ -9,6 +9,14 @@ fn image(samples: ImageData, scaling: Scaling) -> Image {
     }
 }
 
+/// Encode to a fresh buffer — the allocating shorthand over `encode_into` the
+/// round-trip tests read against.
+fn encoded(data: &ImageData) -> Vec<u8> {
+    let mut out = Vec::new();
+    data.encode_into(&mut out);
+    out
+}
+
 #[test]
 fn decodes_big_endian_integers_and_floats() {
     // i16: 0x0001=1, 0xFFFF=-1, 0x8000=-32768 (the unsigned-u16 min sentinel).
@@ -45,10 +53,10 @@ fn decodes_big_endian_integers_and_floats() {
 #[test]
 fn encode_produces_big_endian_bytes() {
     assert_eq!(
-        ImageData::I16(vec![1, -1]).encode(),
+        encoded(&ImageData::I16(vec![1, -1])),
         vec![0x00, 0x01, 0xFF, 0xFF]
     );
-    assert_eq!(ImageData::U8(vec![1, 2, 3]).encode(), vec![1, 2, 3]);
+    assert_eq!(encoded(&ImageData::U8(vec![1, 2, 3])), vec![1, 2, 3]);
 }
 
 #[test]
@@ -62,7 +70,7 @@ fn encode_is_the_inverse_of_decode() {
         ImageData::F64(vec![1.0, -2.5, f64::MAX]),
     ];
     for data in cases {
-        let bytes = data.encode();
+        let bytes = encoded(&data);
         assert_eq!(ImageData::decode(&bytes, data.bitpix()), data);
     }
 }
@@ -79,7 +87,7 @@ fn float_inf_and_nan_payloads_round_trip_bit_for_bit() {
         0x7FAB_CDEF, // NaN with a payload
     ];
     let f32s: Vec<f32> = f32_bits.iter().map(|&b| f32::from_bits(b)).collect();
-    let decoded = ImageData::decode(&ImageData::F32(f32s).encode(), Bitpix::F32);
+    let decoded = ImageData::decode(&encoded(&ImageData::F32(f32s)), Bitpix::F32);
     let ImageData::F32(out) = decoded else {
         panic!("expected F32")
     };
@@ -95,7 +103,7 @@ fn float_inf_and_nan_payloads_round_trip_bit_for_bit() {
         0x7FF0_0000_DEAD_BEEF, // NaN with a payload
     ];
     let f64s: Vec<f64> = f64_bits.iter().map(|&b| f64::from_bits(b)).collect();
-    let decoded = ImageData::decode(&ImageData::F64(f64s).encode(), Bitpix::F64);
+    let decoded = ImageData::decode(&encoded(&ImageData::F64(f64s)), Bitpix::F64);
     let ImageData::F64(out) = decoded else {
         panic!("expected F64")
     };

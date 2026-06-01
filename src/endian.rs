@@ -19,9 +19,14 @@ where
         .collect()
 }
 
-/// Encode fixed-width values into a big-endian byte buffer, e.g.
+/// Encode fixed-width values into a *fresh* big-endian byte buffer, e.g.
 /// `encode_be(values, i16::to_be_bytes)`. `conv` is a generic `Fn` for the same
 /// inlining/vectorization reason as [`decode_be`].
+///
+/// Only the compression codecs need the owning form (they build many small,
+/// independent per-tile buffers); the image and table writers append in place via
+/// [`extend_be`] into a reused buffer, so this is gated to where it is used.
+#[cfg(feature = "compression")]
 pub(crate) fn encode_be<const N: usize, T: Copy, F>(values: &[T], conv: F) -> Vec<u8>
 where
     F: Fn(T) -> [u8; N],
@@ -72,11 +77,13 @@ mod tests {
             decode_be(&[0x00, 0x01, 0xFF, 0xFF], i16::from_be_bytes),
             vec![1i16, -1]
         );
-        assert_eq!(
-            encode_be(&[1i16, -1], i16::to_be_bytes),
-            vec![0, 1, 0xFF, 0xFF]
-        );
+        // Encode direction via the always-compiled in-place primitive (the path the
+        // image/table writers use); `encode_be` is the same write into a fresh Vec.
+        let mut enc = Vec::new();
+        extend_be(&mut enc, &[1i16, -1], i16::to_be_bytes);
+        assert_eq!(enc, vec![0, 1, 0xFF, 0xFF]);
 
+        // Appending starts at the buffer's current end, leaving prior bytes intact.
         let mut out = vec![0xAAu8];
         extend_be(&mut out, &[256i32], i32::to_be_bytes);
         assert_eq!(out, vec![0xAA, 0, 0, 1, 0]);
