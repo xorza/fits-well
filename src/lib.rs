@@ -41,6 +41,7 @@ mod error;
 mod groups;
 mod hdu;
 mod header;
+mod keyword;
 mod reader;
 mod table;
 mod time;

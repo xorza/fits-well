@@ -11,6 +11,7 @@ use crate::header::card::Card;
 use crate::header::card::CardKind;
 use crate::header::card::validate_keyword;
 use crate::header::value::Value;
+use crate::keyword::key;
 
 /// A parsed header unit: an *ordered* list of content cards plus a side index
 /// for O(1) keyword lookup.
@@ -119,7 +120,7 @@ impl Header {
         let mut axes = Vec::with_capacity(naxis);
         for n in 1..=naxis {
             let len = self
-                .get_integer(&format!("NAXIS{n}"))
+                .get_integer(key!("NAXIS{n}").as_str())
                 .ok_or(FitsError::MissingKeyword { name: "NAXISn" })?;
             axes.push(
                 usize::try_from(len)

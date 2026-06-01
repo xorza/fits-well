@@ -12,6 +12,7 @@ use crate::data::shape_product;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use crate::keyword::key;
 
 /// A decoded random-groups primary array.
 #[derive(Debug, Clone)]
@@ -61,13 +62,13 @@ impl RandomGroups {
         for j in 1..=pcount {
             parameter_names.push(
                 header
-                    .get_text(&format!("PTYPE{j}"))
+                    .get_text(key!("PTYPE{j}").as_str())
                     .unwrap_or("")
                     .to_string(),
             );
             param_scaling.push(ParamScale {
-                pscal: header.get_real(&format!("PSCAL{j}")).unwrap_or(1.0),
-                pzero: header.get_real(&format!("PZERO{j}")).unwrap_or(0.0),
+                pscal: header.get_real(key!("PSCAL{j}").as_str()).unwrap_or(1.0),
+                pzero: header.get_real(key!("PZERO{j}").as_str()).unwrap_or(0.0),
             });
         }
 

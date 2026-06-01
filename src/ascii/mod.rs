@@ -8,6 +8,7 @@
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use crate::keyword::key;
 use crate::table::ColumnData;
 
 /// The value type of an ASCII-table column.
@@ -69,29 +70,29 @@ impl AsciiTable {
         let mut columns = Vec::with_capacity(tfields);
         for n in 1..=tfields {
             let tbcol = header
-                .get_integer(&format!("TBCOL{n}"))
+                .get_integer(key!("TBCOL{n}").as_str())
                 .ok_or(FitsError::MissingKeyword { name: "TBCOLn" })?;
             let tform = header
-                .get_text(&format!("TFORM{n}"))
+                .get_text(key!("TFORM{n}").as_str())
                 .ok_or(FitsError::MissingKeyword { name: "TFORMn" })?;
             let fmt = parse_ascii_tform(tform)?;
             columns.push(AsciiColumn {
                 name: header
-                    .get_text(&format!("TTYPE{n}"))
+                    .get_text(key!("TTYPE{n}").as_str())
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
                 unit: header
-                    .get_text(&format!("TUNIT{n}"))
+                    .get_text(key!("TUNIT{n}").as_str())
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
                 kind: fmt.kind,
                 start: (tbcol.max(1) - 1) as usize,
                 width: fmt.width,
                 decimals: fmt.decimals,
-                tscale: header.get_real(&format!("TSCAL{n}")).unwrap_or(1.0),
-                tzero: header.get_real(&format!("TZERO{n}")).unwrap_or(0.0),
+                tscale: header.get_real(key!("TSCAL{n}").as_str()).unwrap_or(1.0),
+                tzero: header.get_real(key!("TZERO{n}").as_str()).unwrap_or(0.0),
                 null: header
-                    .get_text(&format!("TNULL{n}"))
+                    .get_text(key!("TNULL{n}").as_str())
                     .map(|s| s.trim().to_string()),
             });
         }

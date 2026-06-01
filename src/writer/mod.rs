@@ -19,6 +19,7 @@ use crate::endian::push_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use crate::keyword::key;
 use crate::table::ColumnData;
 
 /// 16-zero `CHECKSUM` value written before the real checksum is solved and
@@ -434,7 +435,7 @@ fn add_image_axes(header: &mut Header, image: &Image) {
         .set("NAXIS", image.shape.len() as i64)
         .comment("NAXIS", "number of data axes");
     for (i, &n) in image.shape.iter().enumerate() {
-        header.set(&format!("NAXIS{}", i + 1), n as i64);
+        header.set(key!("NAXIS{}", i + 1).as_str(), n as i64);
     }
 }
 
@@ -477,23 +478,23 @@ fn bintable_header(
         .comment("TFIELDS", "number of columns");
     for (i, col) in columns.iter().enumerate() {
         let n = i + 1;
-        header.set(&format!("TFORM{n}"), tform_of(col));
-        header.set(&format!("TTYPE{n}"), col.name.as_str());
+        header.set(key!("TFORM{n}").as_str(), tform_of(col));
+        header.set(key!("TTYPE{n}").as_str(), col.name.as_str());
         if let Some(unit) = &col.unit {
-            header.set(&format!("TUNIT{n}"), unit.as_str());
+            header.set(key!("TUNIT{n}").as_str(), unit.as_str());
         }
         if let Some(shape) = &col.tdim {
             let dims: Vec<String> = shape.iter().map(|d| d.to_string()).collect();
-            header.set(&format!("TDIM{n}"), format!("({})", dims.join(",")));
+            header.set(key!("TDIM{n}").as_str(), format!("({})", dims.join(",")));
         }
         if let Some(tscale) = col.tscale {
-            header.set(&format!("TSCAL{n}"), tscale);
+            header.set(key!("TSCAL{n}").as_str(), tscale);
         }
         if let Some(tzero) = col.tzero {
-            header.set(&format!("TZERO{n}"), tzero);
+            header.set(key!("TZERO{n}").as_str(), tzero);
         }
         if let Some(tnull) = col.tnull {
-            header.set(&format!("TNULL{n}"), tnull);
+            header.set(key!("TNULL{n}").as_str(), tnull);
         }
     }
     header
@@ -702,20 +703,20 @@ fn ascii_table_header(
         .comment("TFIELDS", "number of columns");
     for (i, col) in columns.iter().enumerate() {
         let n = i + 1;
-        header.set(&format!("TBCOL{n}"), tbcols[i] as i64);
-        header.set(&format!("TFORM{n}"), ascii_tform(col));
-        header.set(&format!("TTYPE{n}"), col.name.as_str());
+        header.set(key!("TBCOL{n}").as_str(), tbcols[i] as i64);
+        header.set(key!("TFORM{n}").as_str(), ascii_tform(col));
+        header.set(key!("TTYPE{n}").as_str(), col.name.as_str());
         if let Some(unit) = &col.unit {
-            header.set(&format!("TUNIT{n}"), unit.as_str());
+            header.set(key!("TUNIT{n}").as_str(), unit.as_str());
         }
         if let Some(tscale) = col.tscale {
-            header.set(&format!("TSCAL{n}"), tscale);
+            header.set(key!("TSCAL{n}").as_str(), tscale);
         }
         if let Some(tzero) = col.tzero {
-            header.set(&format!("TZERO{n}"), tzero);
+            header.set(key!("TZERO{n}").as_str(), tzero);
         }
         if let Some(tnull) = &col.tnull {
-            header.set(&format!("TNULL{n}"), tnull.as_str());
+            header.set(key!("TNULL{n}").as_str(), tnull.as_str());
         }
     }
     header

@@ -36,6 +36,7 @@ use std::f64::consts::SQRT_2;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use crate::keyword::key;
 
 const R2D: f64 = 180.0 / PI;
 const D2R: f64 = PI / 180.0;
@@ -654,7 +655,7 @@ impl Wcs {
     pub fn from_header(header: &Header, alt: Option<char>) -> Result<Wcs> {
         let a = alt.map(|c| c.to_string()).unwrap_or_default();
         let naxis = header
-            .get_integer(&format!("WCSAXES{a}"))
+            .get_integer(key!("WCSAXES{a}").as_str())
             .or_else(|| header.get_integer("NAXIS"))
             .ok_or(FitsError::MissingKeyword { name: "WCSAXES" })?
             .max(0) as usize;
@@ -667,7 +668,7 @@ impl Wcs {
         let ctype: Vec<String> = (1..=naxis)
             .map(|i| {
                 header
-                    .get_text(&format!("CTYPE{i}{a}"))
+                    .get_text(key!("CTYPE{i}{a}").as_str())
                     .unwrap_or("")
                     .to_string()
             })
@@ -678,7 +679,7 @@ impl Wcs {
         let cunit: Vec<String> = (1..=naxis)
             .map(|i| {
                 header
-                    .get_text(&format!("CUNIT{i}{a}"))
+                    .get_text(key!("CUNIT{i}{a}").as_str())
                     .unwrap_or("")
                     .to_string()
             })
@@ -697,10 +698,11 @@ impl Wcs {
         // Build the linear transform A. Precedence: CD, then PC×CDELT, then the
         // legacy CROTA rotation, then a bare CDELT diagonal.
         let has_cd = (1..=naxis)
-            .any(|i| (1..=naxis).any(|j| header.get_real(&format!("CD{i}_{j}{a}")).is_some()));
+            .any(|i| (1..=naxis).any(|j| header.get_real(key!("CD{i}_{j}{a}").as_str()).is_some()));
         let has_pc = (1..=naxis)
-            .any(|i| (1..=naxis).any(|j| header.get_real(&format!("PC{i}_{j}{a}")).is_some()));
-        let has_crota = (1..=naxis).any(|i| header.get_real(&format!("CROTA{i}{a}")).is_some());
+            .any(|i| (1..=naxis).any(|j| header.get_real(key!("PC{i}_{j}{a}").as_str()).is_some()));
+        let has_crota =
+            (1..=naxis).any(|i| header.get_real(key!("CROTA{i}{a}").as_str()).is_some());
         // §8: the PC/CDELT, CD, and legacy CROTA conventions are mutually exclusive.
         if has_cd && has_pc {
             return Err(FitsError::ConflictingWcsKeywords {
@@ -717,7 +719,7 @@ impl Wcs {
             for i in 0..naxis {
                 for j in 0..naxis {
                     matrix[i * naxis + j] = header
-                        .get_real(&format!("CD{}_{}{a}", i + 1, j + 1))
+                        .get_real(key!("CD{}_{}{a}", i + 1, j + 1).as_str())
                         .unwrap_or(0.0);
                 }
             }
@@ -725,7 +727,7 @@ impl Wcs {
             for i in 0..naxis {
                 for j in 0..naxis {
                     let pc = header
-                        .get_real(&format!("PC{}_{}{a}", i + 1, j + 1))
+                        .get_real(key!("PC{}_{}{a}", i + 1, j + 1).as_str())
                         .unwrap_or(if i == j { 1.0 } else { 0.0 });
                     matrix[i * naxis + j] = cdelt[i] * pc;
                 }
@@ -734,8 +736,8 @@ impl Wcs {
             // was given, per the convention that CROTA and PC are exclusive).
             if !has_pc && let Some((lng, lat, _)) = celestial_axes {
                 let rho = header
-                    .get_real(&format!("CROTA{}{a}", lat + 1))
-                    .or_else(|| header.get_real(&format!("CROTA{}{a}", lng + 1)))
+                    .get_real(key!("CROTA{}{a}", lat + 1).as_str())
+                    .or_else(|| header.get_real(key!("CROTA{}{a}", lng + 1).as_str()))
                     .unwrap_or(0.0);
                 if rho != 0.0 {
                     let (c, s) = ((rho * D2R).cos(), (rho * D2R).sin());
@@ -768,7 +770,7 @@ impl Wcs {
                 let pv: Vec<f64> = (0..=20)
                     .map(|m| {
                         header
-                            .get_real(&format!("PV{}_{m}{a}", lat + 1))
+                            .get_real(key!("PV{}_{m}{a}", lat + 1).as_str())
                             .unwrap_or(0.0)
                     })
                     .collect();
@@ -786,22 +788,22 @@ impl Wcs {
                     // Fiducial point: projection default, overridable by PVi_1a/
                     // PVi_2a on the longitude axis (§8.3).
                     let (mut phi0, mut theta0) = proj.reference_point(&pv);
-                    if let Some(v) = header.get_real(&format!("PV{}_1{a}", lng + 1)) {
+                    if let Some(v) = header.get_real(key!("PV{}_1{a}", lng + 1).as_str()) {
                         phi0 = v;
                     }
-                    if let Some(v) = header.get_real(&format!("PV{}_2{a}", lng + 1)) {
+                    if let Some(v) = header.get_real(key!("PV{}_2{a}", lng + 1).as_str()) {
                         theta0 = v;
                     }
                     let (alpha0, delta0) = (crval[lng], crval[lat]);
                     // LONPOLE (= LONPOLEa or PVi_3a): default φ0 if δ0 ≥ θ0, else φ0 + 180°.
                     let phip = header
-                        .get_real(&format!("LONPOLE{a}"))
-                        .or_else(|| header.get_real(&format!("PV{}_3{a}", lng + 1)))
+                        .get_real(key!("LONPOLE{a}").as_str())
+                        .or_else(|| header.get_real(key!("PV{}_3{a}", lng + 1).as_str()))
                         .unwrap_or(if delta0 >= theta0 { phi0 } else { phi0 + 180.0 });
                     // LATPOLE (= LATPOLEa or PVi_4a): default 90°.
                     let thetap = header
-                        .get_real(&format!("LATPOLE{a}"))
-                        .or_else(|| header.get_real(&format!("PV{}_4{a}", lng + 1)))
+                        .get_real(key!("LATPOLE{a}").as_str())
+                        .or_else(|| header.get_real(key!("PV{}_4{a}", lng + 1).as_str()))
                         .unwrap_or(90.0);
                     let pole = compute_pole(phi0, theta0, alpha0, delta0, phip, thetap);
                     Some(Celestial {
@@ -842,8 +844,8 @@ impl Wcs {
         h.set("WCSAXES", columns.len() as i64);
         for (i, &c) in columns.iter().enumerate() {
             let ax = i + 1;
-            if let Some(t) = header.get_text(&format!("TCTYP{c}{a}")) {
-                h.set(&format!("CTYPE{ax}"), t);
+            if let Some(t) = header.get_text(key!("TCTYP{c}{a}").as_str()) {
+                h.set(key!("CTYPE{ax}").as_str(), t);
             }
             for (root, dst) in [
                 ("TCRPX", "CRPIX"),
@@ -851,34 +853,34 @@ impl Wcs {
                 ("TCDLT", "CDELT"),
                 ("TCROT", "CROTA"),
             ] {
-                if let Some(v) = header.get_real(&format!("{root}{c}{a}")) {
-                    h.set(&format!("{dst}{ax}"), v);
+                if let Some(v) = header.get_real(key!("{root}{c}{a}").as_str()) {
+                    h.set(key!("{dst}{ax}").as_str(), v);
                 }
             }
-            if let Some(t) = header.get_text(&format!("TCUNI{c}{a}")) {
-                h.set(&format!("CUNIT{ax}"), t);
+            if let Some(t) = header.get_text(key!("TCUNI{c}{a}").as_str()) {
+                h.set(key!("CUNIT{ax}").as_str(), t);
             }
             for m in 0..=20 {
-                if let Some(v) = header.get_real(&format!("TPV{c}_{m}{a}")) {
-                    h.set(&format!("PV{ax}_{m}"), v);
+                if let Some(v) = header.get_real(key!("TPV{c}_{m}{a}").as_str()) {
+                    h.set(key!("PV{ax}_{m}").as_str(), v);
                 }
             }
         }
         // Linear-transform matrices: TPCn_ka / TCDn_ka, indexed by column pair.
         for (i, &ci) in columns.iter().enumerate() {
             for (j, &cj) in columns.iter().enumerate() {
-                if let Some(v) = header.get_real(&format!("TPC{ci}_{cj}{a}")) {
-                    h.set(&format!("PC{}_{}", i + 1, j + 1), v);
+                if let Some(v) = header.get_real(key!("TPC{ci}_{cj}{a}").as_str()) {
+                    h.set(key!("PC{}_{}", i + 1, j + 1).as_str(), v);
                 }
-                if let Some(v) = header.get_real(&format!("TCD{ci}_{cj}{a}")) {
-                    h.set(&format!("CD{}_{}", i + 1, j + 1), v);
+                if let Some(v) = header.get_real(key!("TCD{ci}_{cj}{a}").as_str()) {
+                    h.set(key!("CD{}_{}", i + 1, j + 1).as_str(), v);
                 }
             }
         }
-        if let Some(v) = header.get_real(&format!("LONP{a}")) {
+        if let Some(v) = header.get_real(key!("LONP{a}").as_str()) {
             h.set("LONPOLE", v);
         }
-        if let Some(v) = header.get_real(&format!("LATP{a}")) {
+        if let Some(v) = header.get_real(key!("LATP{a}").as_str()) {
             h.set("LATPOLE", v);
         }
         Wcs::from_header(&h, None)
@@ -895,17 +897,21 @@ impl Wcs {
     pub fn from_array_column(header: &Header, column: usize, alt: Option<char>) -> Result<Wcs> {
         let a = alt.map(|c| c.to_string()).unwrap_or_default();
         let naxis = header
-            .get_integer(&format!("WCAX{column}{a}"))
+            .get_integer(key!("WCAX{column}{a}").as_str())
             .map(|v| v.max(0) as usize)
             .filter(|&n| n > 0)
             .unwrap_or_else(|| {
                 (1..=99)
                     .rev()
                     .find(|&i| {
-                        header.get_text(&format!("{i}CTYP{column}{a}")).is_some()
-                            || ["CRVL", "CDLT", "CRPX"]
-                                .iter()
-                                .any(|r| header.get_real(&format!("{i}{r}{column}{a}")).is_some())
+                        header
+                            .get_text(key!("{i}CTYP{column}{a}").as_str())
+                            .is_some()
+                            || ["CRVL", "CDLT", "CRPX"].iter().any(|r| {
+                                header
+                                    .get_real(key!("{i}{r}{column}{a}").as_str())
+                                    .is_some()
+                            })
                     })
                     .unwrap_or(0)
             });
@@ -915,11 +921,11 @@ impl Wcs {
         let mut h = Header::new();
         h.set("WCSAXES", naxis as i64);
         for ax in 1..=naxis {
-            if let Some(t) = header.get_text(&format!("{ax}CTYP{column}{a}")) {
-                h.set(&format!("CTYPE{ax}"), t);
+            if let Some(t) = header.get_text(key!("{ax}CTYP{column}{a}").as_str()) {
+                h.set(key!("CTYPE{ax}").as_str(), t);
             }
-            if let Some(t) = header.get_text(&format!("{ax}CUNI{column}{a}")) {
-                h.set(&format!("CUNIT{ax}"), t);
+            if let Some(t) = header.get_text(key!("{ax}CUNI{column}{a}").as_str()) {
+                h.set(key!("CUNIT{ax}").as_str(), t);
             }
             for (root, dst) in [
                 ("CRPX", "CRPIX"),
@@ -927,28 +933,28 @@ impl Wcs {
                 ("CDLT", "CDELT"),
                 ("CROT", "CROTA"),
             ] {
-                if let Some(v) = header.get_real(&format!("{ax}{root}{column}{a}")) {
-                    h.set(&format!("{dst}{ax}"), v);
+                if let Some(v) = header.get_real(key!("{ax}{root}{column}{a}").as_str()) {
+                    h.set(key!("{dst}{ax}").as_str(), v);
                 }
             }
             // PVi_m arrives as `iPVn_ma`, or the abbreviated `iVn_ma`.
             for m in 0..=20 {
                 if let Some(v) = header
-                    .get_real(&format!("{ax}PV{column}_{m}{a}"))
-                    .or_else(|| header.get_real(&format!("{ax}V{column}_{m}{a}")))
+                    .get_real(key!("{ax}PV{column}_{m}{a}").as_str())
+                    .or_else(|| header.get_real(key!("{ax}V{column}_{m}{a}").as_str()))
                 {
-                    h.set(&format!("PV{ax}_{m}"), v);
+                    h.set(key!("PV{ax}_{m}").as_str(), v);
                 }
             }
         }
         // Linear-transform matrices: `ijPCn` / `ijCDn`, indexed by axis pair.
         for i in 1..=naxis {
             for j in 1..=naxis {
-                if let Some(v) = header.get_real(&format!("{i}{j}PC{column}{a}")) {
-                    h.set(&format!("PC{i}_{j}"), v);
+                if let Some(v) = header.get_real(key!("{i}{j}PC{column}{a}").as_str()) {
+                    h.set(key!("PC{i}_{j}").as_str(), v);
                 }
-                if let Some(v) = header.get_real(&format!("{i}{j}CD{column}{a}")) {
-                    h.set(&format!("CD{i}_{j}"), v);
+                if let Some(v) = header.get_real(key!("{i}{j}CD{column}{a}").as_str()) {
+                    h.set(key!("CD{i}_{j}").as_str(), v);
                 }
             }
         }
@@ -1156,7 +1162,7 @@ fn axis_vec(header: &Header, prefix: &str, alt: &str, naxis: usize, default: f64
     (1..=naxis)
         .map(|i| {
             header
-                .get_real(&format!("{prefix}{i}{alt}"))
+                .get_real(key!("{prefix}{i}{alt}").as_str())
                 .unwrap_or(default)
         })
         .collect()

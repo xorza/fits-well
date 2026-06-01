@@ -19,6 +19,7 @@ use crate::endian::encode_be;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use crate::keyword::key;
 use crate::table::BinTable;
 use crate::table::ColumnData;
 use crate::table::Tform;
@@ -203,12 +204,12 @@ pub(crate) fn compress_table(
     for (ci, m) in metas.iter().enumerate() {
         let n = ci + 1;
         let zform = header
-            .get_text(&format!("TFORM{n}"))
+            .get_text(key!("TFORM{n}").as_str())
             .unwrap_or("")
             .to_string();
-        h.set(&format!("ZFORM{n}"), zform);
-        h.set(&format!("TFORM{n}"), "1QB");
-        h.set(&format!("ZCTYP{n}"), m.algo.name());
+        h.set(key!("ZFORM{n}").as_str(), zform);
+        h.set(key!("TFORM{n}").as_str(), "1QB");
+        h.set(key!("ZCTYP{n}").as_str(), m.algo.name());
     }
     h.set("NAXIS1", (ncols * 16) as i64);
     h.set("NAXIS2", nchunks as i64);
@@ -238,11 +239,11 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
     let mut offset = 0;
     for n in 1..=ncols {
         let zform = header
-            .get_text(&format!("ZFORM{n}"))
+            .get_text(key!("ZFORM{n}").as_str())
             .ok_or(FitsError::MissingKeyword { name: "ZFORMn" })?
             .to_string();
         let tform = Tform::parse(&zform)?;
-        let algo = match header.get_text(&format!("ZCTYP{n}")) {
+        let algo = match header.get_text(key!("ZCTYP{n}").as_str()) {
             Some(s) => Algo::parse(s)?,
             None => Algo::Gzip2, // cfitsio's default when ZCTYPn is absent
         };
@@ -300,9 +301,9 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
     h.set("NAXIS2", nrows as i64);
     h.set("PCOUNT", zpcount);
     for (n, zform) in zforms.iter().enumerate() {
-        h.set(&format!("TFORM{}", n + 1), zform.clone());
-        h.remove(&format!("ZFORM{}", n + 1));
-        h.remove(&format!("ZCTYP{}", n + 1));
+        h.set(key!("TFORM{}", n + 1).as_str(), zform.clone());
+        h.remove(key!("ZFORM{}", n + 1).as_str());
+        h.remove(key!("ZCTYP{}", n + 1).as_str());
     }
     for key in [
         "ZTABLE", "ZTILELEN", "ZNAXIS1", "ZNAXIS2", "ZPCOUNT", "ZHEAPPTR",

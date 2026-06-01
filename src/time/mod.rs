@@ -11,6 +11,7 @@
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use crate::keyword::key;
 
 /// JD of the MJD zero point (1858-11-17T00:00 UTC).
 const MJD0: f64 = 2_400_000.5;
@@ -617,13 +618,13 @@ impl FitsTime {
     /// absolute MJD in the frame's scale: the linear axis value (elapsed time in
     /// `TIMEUNIT` from `MJDREF`) plus the reference. `None` if not a time axis.
     pub fn time_axis_mjd(&self, header: &Header, axis: usize, pixel: f64) -> Option<f64> {
-        let ctype = header.get_text(&format!("CTYPE{axis}"))?;
+        let ctype = header.get_text(key!("CTYPE{axis}").as_str())?;
         if !is_time_ctype(ctype) {
             return None;
         }
-        let crpix = header.get_real(&format!("CRPIX{axis}")).unwrap_or(0.0);
-        let crval = header.get_real(&format!("CRVAL{axis}")).unwrap_or(0.0);
-        let cdelt = header.get_real(&format!("CDELT{axis}")).unwrap_or(1.0);
+        let crpix = header.get_real(key!("CRPIX{axis}").as_str()).unwrap_or(0.0);
+        let crval = header.get_real(key!("CRVAL{axis}").as_str()).unwrap_or(0.0);
+        let cdelt = header.get_real(key!("CDELT{axis}").as_str()).unwrap_or(1.0);
         Some(self.relative_to_mjd(crval + cdelt * (pixel - crpix)))
     }
 
@@ -631,13 +632,13 @@ impl FitsTime {
     /// period) for WCS axis `axis` (1-based), or `None` if it is not a phase axis.
     /// Reads only the header, so it takes no `self`.
     pub fn phase_axis(header: &Header, axis: usize) -> Option<PhaseAxis> {
-        let ctype = header.get_text(&format!("CTYPE{axis}"))?;
+        let ctype = header.get_text(key!("CTYPE{axis}").as_str())?;
         if time_axis_kind(ctype) != Some(TimeAxisKind::Phase) {
             return None;
         }
         Some(PhaseAxis {
-            zero_phase: header.get_real(&format!("CZPHS{axis}")).unwrap_or(0.0),
-            period: header.get_real(&format!("CPERI{axis}")).unwrap_or(0.0),
+            zero_phase: header.get_real(key!("CZPHS{axis}").as_str()).unwrap_or(0.0),
+            period: header.get_real(key!("CPERI{axis}").as_str()).unwrap_or(0.0),
         })
     }
 }

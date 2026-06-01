@@ -2,6 +2,7 @@
 
 use crate::bitpix::Bitpix;
 use crate::header::Header;
+use crate::keyword::key;
 
 /// Rice block size and pixel width, from the `ZNAMEi`/`ZVALi` parameters.
 #[derive(Debug, Clone, Copy)]
@@ -16,8 +17,8 @@ pub(super) fn rice_params(header: &Header, zbitpix: Bitpix) -> RiceParams {
     let mut blocksize = 32;
     let mut bytepix = zbitpix.elem_size();
     let mut i = 1;
-    while let Some(name) = header.get_text(&format!("ZNAME{i}")) {
-        if let Some(v) = header.get_integer(&format!("ZVAL{i}")) {
+    while let Some(name) = header.get_text(key!("ZNAME{i}").as_str()) {
+        if let Some(v) = header.get_integer(key!("ZVAL{i}").as_str()) {
             match name {
                 "BLOCKSIZE" => blocksize = v.max(1) as usize,
                 "BYTEPIX" => bytepix = v.max(1) as usize,

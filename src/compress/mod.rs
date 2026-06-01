@@ -33,6 +33,7 @@ use crate::endian::push_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use crate::keyword::key;
 use crate::table::BinTable;
 use crate::table::ColumnData;
 
@@ -74,7 +75,7 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
     let tiles: Vec<usize> = (1..=znaxis)
         .map(|i| {
             header
-                .get_integer(&format!("ZTILE{i}"))
+                .get_integer(key!("ZTILE{i}").as_str())
                 .map(|v| v.max(1) as usize)
                 .unwrap_or(if i == 1 { dims[0] } else { 1 })
         })
@@ -474,10 +475,10 @@ fn set_zimage_axes(
     h.set("ZBITPIX", zbitpix.code());
     h.set("ZNAXIS", dims.len() as i64);
     for (i, &n) in dims.iter().enumerate() {
-        h.set(&format!("ZNAXIS{}", i + 1), n as i64);
+        h.set(key!("ZNAXIS{}", i + 1).as_str(), n as i64);
     }
     for (i, &t) in tiles.iter().enumerate() {
-        h.set(&format!("ZTILE{}", i + 1), t as i64);
+        h.set(key!("ZTILE{}", i + 1).as_str(), t as i64);
     }
 }
 
@@ -679,9 +680,9 @@ fn decode_tile_cell(
 /// inverse-transform smoothing to suppress blocking in lossy images).
 fn hcompress_smooth(header: &Header) -> bool {
     let mut i = 1;
-    while let Some(name) = header.get_text(&format!("ZNAME{i}")) {
+    while let Some(name) = header.get_text(key!("ZNAME{i}").as_str()) {
         if name == "SMOOTH" {
-            return header.get_integer(&format!("ZVAL{i}")).unwrap_or(0) != 0;
+            return header.get_integer(key!("ZVAL{i}").as_str()).unwrap_or(0) != 0;
         }
         i += 1;
     }
@@ -768,7 +769,7 @@ fn tile_flat_indices(origin: &[usize], tdims: &[usize], stride: &[usize]) -> Vec
 /// Read `PREFIX1..PREFIXn` integer axis lengths.
 fn read_axes(header: &Header, prefix: &str, n: usize) -> Result<Vec<usize>> {
     (1..=n)
-        .map(|i| match header.get_integer(&format!("{prefix}{i}")) {
+        .map(|i| match header.get_integer(key!("{prefix}{i}").as_str()) {
             Some(v) if v >= 0 => Ok(v as usize),
             Some(_) => Err(FitsError::KeywordOutOfRange { name: "ZNAXISn" }),
             None => Err(FitsError::MissingKeyword { name: "ZNAXISn" }),

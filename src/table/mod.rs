@@ -15,6 +15,7 @@ use crate::endian::decode_be;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use crate::keyword::key;
 
 /// The element type of a binary-table column, from the letter of its `TFORMn`
 /// code (Table 18).
@@ -343,24 +344,28 @@ impl BinTable {
         let mut offset = 0;
         for n in 1..=tfields {
             let tform_value = header
-                .get_text(&format!("TFORM{n}"))
+                .get_text(key!("TFORM{n}").as_str())
                 .ok_or(FitsError::MissingKeyword { name: "TFORMn" })?;
             let tform = Tform::parse(tform_value)?;
             columns.push(Column {
                 name: header
-                    .get_text(&format!("TTYPE{n}"))
+                    .get_text(key!("TTYPE{n}").as_str())
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
                 unit: header
-                    .get_text(&format!("TUNIT{n}"))
+                    .get_text(key!("TUNIT{n}").as_str())
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
                 tform,
-                tscale: header.get_real(&format!("TSCAL{n}")).unwrap_or(1.0),
-                tzero: header.get_real(&format!("TZERO{n}")).unwrap_or(0.0),
-                tnull: header.get_integer(&format!("TNULL{n}")),
-                tdim: header.get_text(&format!("TDIM{n}")).and_then(parse_tdim),
-                tdisp: header.get_text(&format!("TDISP{n}")).and_then(TDisp::parse),
+                tscale: header.get_real(key!("TSCAL{n}").as_str()).unwrap_or(1.0),
+                tzero: header.get_real(key!("TZERO{n}").as_str()).unwrap_or(0.0),
+                tnull: header.get_integer(key!("TNULL{n}").as_str()),
+                tdim: header
+                    .get_text(key!("TDIM{n}").as_str())
+                    .and_then(parse_tdim),
+                tdisp: header
+                    .get_text(key!("TDISP{n}").as_str())
+                    .and_then(TDisp::parse),
                 byte_offset: offset,
             });
             offset = offset.saturating_add(tform.byte_width());
