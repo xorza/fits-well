@@ -25,6 +25,9 @@ use source::SliceSource;
 use source::Source;
 use source::StreamSource;
 
+#[cfg(feature = "compression")]
+use crate::compress::{decompress_image, uncompress_table};
+
 /// One Header/Data Unit located by the reader.
 ///
 /// The data unit itself is read lazily via [`FitsReader::read_data_raw`]; this
@@ -275,7 +278,7 @@ impl<S: Source> FitsReader<S> {
     pub fn read_compressed_image(&mut self, index: usize) -> Result<Image> {
         let table = self.read_table(index)?;
         let header = &self.hdus[index].header;
-        crate::compress::decompress_image(header, &table)
+        decompress_image(header, &table)
     }
 
     /// Read a tiled-compressed table (§10.3) — a `BINTABLE` with `ZTABLE = T` —
@@ -285,7 +288,7 @@ impl<S: Source> FitsReader<S> {
     pub fn read_compressed_table(&mut self, index: usize) -> Result<BinTable> {
         let table = self.read_table(index)?;
         let header = self.hdus[index].header.clone();
-        let parts = crate::compress::uncompress_table(&header, &table)?;
+        let parts = uncompress_table(&header, &table)?;
         BinTable::from_data(&parts.header, parts.data)
     }
 
