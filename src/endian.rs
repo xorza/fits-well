@@ -26,18 +26,25 @@ pub(crate) fn encode_be<const N: usize, T: Copy, F>(values: &[T], conv: F) -> Ve
 where
     F: Fn(T) -> [u8; N],
 {
-    let mut out = Vec::with_capacity(values.len() * N);
+    let mut out = Vec::new();
     extend_be(&mut out, values, conv);
     out
 }
 
 /// Append fixed-width values to `out` in big-endian order.
+///
+/// Grows `out` once and writes each element into its `N`-byte slot, rather than a
+/// per-element `extend_from_slice` (a capacity check + memcpy per element that
+/// dominates and won't vectorize). With `conv` inlined (see [`decode_be`]) the
+/// fixed-stride write loop vectorizes like the decode path.
 pub(crate) fn extend_be<const N: usize, T: Copy, F>(out: &mut Vec<u8>, values: &[T], conv: F)
 where
     F: Fn(T) -> [u8; N],
 {
-    for &v in values {
-        out.extend_from_slice(&conv(v));
+    let start = out.len();
+    out.resize(start + values.len() * N, 0);
+    for (slot, &v) in out[start..].chunks_exact_mut(N).zip(values) {
+        slot.copy_from_slice(&conv(v));
     }
 }
 
