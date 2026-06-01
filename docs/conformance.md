@@ -1032,12 +1032,11 @@ tests. Findings are minor or design-level.
    the crate's general byte-for-byte header round-trip principle — `CONTINUE` is
    the one documented exception.
 
-2. 🟡 **Long `HIERARCH` string values can truncate on write.** `render_records`
-   only splits a `CardKind::Value` text into a `CONTINUE` chain; a `HIERARCH`
-   card renders through `render`, where `write_at` silently clamps to 80 bytes
-   (`card/mod.rs:478`). A `HIERARCH` key plus a long string value that overflows
-   the card is truncated rather than continued. (Edge case; mirrors the §4
-   large-real overflow.)
+2. ✅ **FIXED — long `HIERARCH` string values continue instead of truncating.**
+   `render_records` now emits a `CONTINUE` chain for an overflowing `HIERARCH`
+   string too — the first record is `HIERARCH key = '…&'` (with its prefix shrinking
+   that record's substring budget), the rest are standard `CONTINUE` records.
+   Covered by `long_hierarch_string_splits_into_a_continue_chain`.
 
 3. 🟢 **Minor / optional, unimplemented:** the `CONTINUE`-on-reserved-keyword
    restriction is not enforced (moot — mandatory keywords aren't strings); no

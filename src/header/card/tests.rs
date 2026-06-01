@@ -230,6 +230,32 @@ fn long_string_splits_into_a_continue_chain() {
 }
 
 #[test]
+fn long_hierarch_string_splits_into_a_continue_chain() {
+    // A HIERARCH card whose key + long string value overflows one record must
+    // continue, not silently truncate at 80 bytes.
+    let value = "x".repeat(120);
+    let card = Card {
+        keyword: "ESO DET CHIP1 LONGNAME".into(),
+        value: Some(Value::Text(value.clone())),
+        comment: Some("note".into()),
+        kind: CardKind::Hierarch,
+    };
+    let records = card.render_records();
+    assert!(records.len() >= 2, "expected a CONTINUE chain");
+    // First record carries the HIERARCH prefix and a continued ('&) substring.
+    let first = std::str::from_utf8(&records[0]).unwrap();
+    assert!(first.starts_with("HIERARCH ESO DET CHIP1 LONGNAME = '"));
+    assert!(first.trim_end().ends_with("&'"));
+    assert_eq!(&records[1][..8], b"CONTINUE");
+    // Reassembles to the full value — nothing truncated.
+    let bytes: Vec<u8> = records.iter().flatten().copied().collect();
+    let mut with_end = bytes;
+    with_end.extend_from_slice(&raw("END"));
+    let h = crate::header::Header::parse(&with_end).unwrap();
+    assert_eq!(h.get_text("ESO DET CHIP1 LONGNAME"), Some(value.as_str()));
+}
+
+#[test]
 fn short_string_renders_to_a_single_record() {
     let card = parse("OBJECT  = 'Cygnus X-1'");
     assert_eq!(card.render_records().len(), 1);
