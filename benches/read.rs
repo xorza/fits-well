@@ -74,6 +74,28 @@ fn read_image(c: &mut Criterion) {
         g.bench_function(BenchmarkId::new("seek", name), |b| {
             b.iter(|| black_box(seek.read_image(0).unwrap()))
         });
+
+        // In-memory borrow source: decode straight from the bytes — no staging copy.
+        let mut slice = FitsReader::from_bytes(&bytes).unwrap();
+        g.bench_function(BenchmarkId::new("slice", name), |b| {
+            b.iter(|| black_box(slice.read_image(0).unwrap()))
+        });
+
+        // mmap source: same zero-copy decode, but over a real mapped file.
+        #[cfg(feature = "mmap")]
+        {
+            use std::io::Write;
+            std::fs::create_dir_all(".tmp").unwrap();
+            let path = format!(".tmp/read_bench_{name}.fits");
+            std::fs::File::create(&path)
+                .unwrap()
+                .write_all(&bytes)
+                .unwrap();
+            let mut mmap = FitsReader::open_mmap(&path).unwrap();
+            g.bench_function(BenchmarkId::new("mmap", name), |b| {
+                b.iter(|| black_box(mmap.read_image(0).unwrap()))
+            });
+        }
     }
     g.finish();
 }

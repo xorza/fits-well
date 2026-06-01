@@ -56,6 +56,9 @@ pub use groups::RandomGroups;
 pub use hdu::HduKind;
 pub use header::Header;
 pub use header::value::Value;
+#[cfg(feature = "mmap")]
+pub use reader::source::MmapSource;
+pub use reader::source::{SliceSource, Source, StreamSource};
 pub use reader::{ChecksumReport, DataUnit, FitsReader, Hdu};
 pub use table::{BinTable, Column, ColumnData, TDisp, TDispKind, Tform, TformKind};
 pub use time::{

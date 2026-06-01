@@ -1,8 +1,9 @@
 use super::*;
 use crate::bitpix::Bitpix;
+use crate::reader::source::StreamSource;
 use std::fs::File;
 
-fn open(name: &str) -> FitsReader<File> {
+fn open(name: &str) -> FitsReader<StreamSource<File>> {
     let path = format!("tests/data/fits/{name}");
     FitsReader::open(File::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}")))
         .unwrap_or_else(|e| panic!("parse {name}: {e}"))
@@ -34,6 +35,21 @@ fn read_data_raw_is_stable_across_reads() {
         a.bytes.len(),
         padded_len(f.hdus[0].data_bytes) as usize,
         "owned buffer is the full block-padded unit"
+    );
+}
+
+#[cfg(feature = "mmap")]
+#[test]
+fn mmap_read_matches_seeking_read() {
+    let path = "tests/data/fits/UITfuv2582gc.fits";
+    let want = open("UITfuv2582gc.fits").read_image(0).unwrap();
+    let mut m = FitsReader::open_mmap(path).unwrap();
+    let got = m.read_image(0).unwrap();
+    assert_eq!(m.hdus.len(), 1);
+    assert_eq!(got.shape, want.shape);
+    assert_eq!(
+        got.samples, want.samples,
+        "mmap decode matches the seeking read"
     );
 }
 

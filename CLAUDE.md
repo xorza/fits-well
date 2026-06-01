@@ -144,7 +144,7 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `keyword.rs` | stack-allocated indexed-keyword formatting (`key!` macro / `KeyBuf`): builds `NAXISn`/`PVi_m`/`CTYPEn`-style keys without the per-lookup `format!` heap alloc (one WCS parse does ~90) | done |
 | `header/` | ordered card model (`value.rs`, `card/`, `mod.rs`): parse/render, `CONTINUE` folding, `HIERARCH` compound keys, keyword index, typed getters + builder | done |
 | `hdu/` | HDU classification + data-unit sizing (Eq. 2, incl. random groups) | done |
-| `reader/` | lazy seeking HDU scan; `read_image`/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_image`/`read_compressed_table`/`verify_checksum`, raw `DataUnit` | done |
+| `reader/` | HDU scan over a `Source` (`source.rs`: `StreamSource` copies, `SliceSource`/`MmapSource` borrow zero-copy); `open`/`from_bytes`/`open_mmap`; `read_image`/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_image`/`read_compressed_table`/`verify_checksum`, raw `DataUnit` | done |
 | `writer/` | multi-HDU writer: `write_image`/`write_table` (fixed + `P` VLA columns)/`write_ascii_table`/`write_compressed_image`(`_lossy`)/`write_compressed_table`, `with_checksums` | done |
 | `data/` | typed `Image`/`ImageData`, big-endian decode+encode (`encode_into` reuses the writer's buffer), `BSCALE`/`BZERO` physical plane | image read+write done; memory-bound, SIMD bulk-swap TODO |
 | `table/` | `BINTABLE` parsing (`Tform`/`Column`); fixed-width decode (`ColumnData`), `TSCAL`/`TZERO` physical plane, `P`/`Q` heap VLAs | read done (write in `writer/`) |
@@ -169,8 +169,11 @@ Design principles specific to this crate:
   they didn't ask for.
 - **Lazy by default.** HDU boundaries are computable from headers alone
   (`|BITPIX|·GCOUNT·(PCOUNT + Π NAXISn)` rounded to a block) — never read data to
-  find the next HDU. Reads over any `Read + Seek` source; the `mmap` feature is
-  reserved for zero-copy memory-mapped sources but isn't wired up yet.
+  find the next HDU. The reader is generic over a `Source` (`reader/source.rs`):
+  a `StreamSource` over any `Read + Seek` copies each data unit into the reused
+  scratch, while an in-memory `SliceSource` (`from_bytes`) or `MmapSource`
+  (`open_mmap`, `mmap` feature) hands back a zero-copy borrow — so the decode reads
+  straight from the bytes, skipping the staging copy (≈2× on `read_image`).
 - **Headers round-trip exactly.** Model a header as an *ordered list* of records
   with a side index for lookup — not a hash map. Duplicate `COMMENT`/`HISTORY`
   and record order are significant and must be preserved byte-for-byte.

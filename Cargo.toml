@@ -11,6 +11,7 @@ categories = ["science", "parser-implementations"]
 [dependencies]
 flate2 = { version = "1.1", optional = true }
 rayon = { version = "1", optional = true }
+memmap2 = { version = "0.9", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
@@ -23,8 +24,9 @@ default = ["parallel", "compression"]
 # not threads, so they are deliberately not parallelized.) Implies `compression`,
 # since the codecs are the only thing parallelized.
 parallel = ["compression", "dep:rayon"]
-# memory-mapped read sources for zero-copy access over large files.
-mmap = []
+# memory-mapped read sources (via memmap2) for zero-copy access over large files:
+# data units decode straight from the mapped pages, skipping the staging copy.
+mmap = ["dep:memmap2"]
 # tiled image + table (de)compression: all five image codecs (GZIP_1, GZIP_2,
 # RICE_1, PLIO_1, HCOMPRESS_1) plus §10.3 tables. Pulls in flate2 for the gzip
 # codecs. The WCS (§8) and time (§9) layers are dependency-free and always compiled.

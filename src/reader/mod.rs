@@ -1,6 +1,5 @@
 use std::io::Read;
 use std::io::Seek;
-use std::io::SeekFrom;
 use std::ops::Range;
 
 use crate::ascii::AsciiTable;
@@ -19,6 +18,12 @@ use crate::hdu::HduKind;
 use crate::hdu::data_extent;
 use crate::header::Header;
 use crate::table::BinTable;
+
+pub(crate) mod source;
+
+use source::SliceSource;
+use source::Source;
+use source::StreamSource;
 
 /// One Header/Data Unit located by the reader.
 ///
@@ -61,37 +66,60 @@ impl DataUnit {
 /// A FITS file opened over a seekable byte source. Opening scans HDU boundaries
 /// from headers alone (no data is read); data units are fetched on demand.
 #[derive(Debug)]
-pub struct FitsReader<R> {
-    source: R,
+pub struct FitsReader<S> {
+    source: S,
     pub hdus: Vec<Hdu>,
-    /// The source's total length, captured once at open — used to reject a header
-    /// that claims a data unit larger than the file before allocating for it.
-    stream_len: u64,
-    /// Reused staging buffer for the transient-decode reads (`read_image`,
-    /// `read_groups`, `verify_checksum`): each fills it with the raw block-padded
-    /// data unit and decodes out of it, so across calls only the decoded result is
-    /// freshly allocated. Grows once to the largest data unit touched, then holds.
+    /// Reused staging buffer for the seeking-source reads: a [`StreamSource`] copies
+    /// each data unit here before decoding (an in-memory source borrows instead, so
+    /// this stays empty). Grows once to the largest unit touched, then holds.
     scratch: Vec<u8>,
 }
 
-impl<R: Read + Seek> FitsReader<R> {
+impl<R: Read + Seek> FitsReader<StreamSource<R>> {
+    /// Open a seekable byte source (file, cursor). Data units are copied into the
+    /// reader's scratch on demand; for an in-memory file prefer
+    /// [`FitsReader::from_bytes`], which decodes straight from the bytes.
+    pub fn open(source: R) -> Result<FitsReader<StreamSource<R>>> {
+        FitsReader::from_source(StreamSource::new(source)?)
+    }
+}
+
+impl<'a> FitsReader<SliceSource<'a>> {
+    /// Open an in-memory FITS file — the whole thing as a byte slice (e.g. an mmap,
+    /// or bytes already in RAM). Data units decode straight from the borrowed bytes
+    /// with no staging copy, and no scratch allocation.
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<FitsReader<SliceSource<'a>>> {
+        FitsReader::from_source(SliceSource::new(bytes))
+    }
+}
+
+#[cfg(feature = "mmap")]
+impl FitsReader<source::MmapSource> {
+    /// Memory-map a FITS file and read it zero-copy: data units decode straight from
+    /// the mapped pages (no staging copy, no read syscalls). Best for large files
+    /// and random HDU access. Requires the `mmap` feature.
+    pub fn open_mmap(path: impl AsRef<std::path::Path>) -> Result<FitsReader<source::MmapSource>> {
+        FitsReader::from_source(source::MmapSource::open(path.as_ref())?)
+    }
+}
+
+impl<S: Source> FitsReader<S> {
     /// Scan the whole HDU sequence, parsing every header and recording the byte
-    /// range of each data unit.
-    pub fn open(mut source: R) -> Result<Self> {
+    /// range of each data unit — without reading any data.
+    fn from_source(mut source: S) -> Result<FitsReader<S>> {
+        let mut scratch = Vec::new();
         let mut hdus = Vec::new();
+        let mut offset = 0u64;
         loop {
-            match read_header_unit(&mut source)? {
+            match scan_header_unit(&mut source, &mut offset, &mut scratch)? {
                 NextHeader::Found(header_bytes) => {
                     let header = Header::parse(&header_bytes)?;
                     let kind = HduKind::classify(&header);
-                    let data_offset = source.stream_position()?;
+                    let data_offset = offset;
                     let extent = data_extent(&header)?;
-                    // Seek by absolute position (not a signed `Current` offset) so a
-                    // hostile padded size can't cast to a negative seek and rewind.
                     let next = data_offset
                         .checked_add(extent.padded_bytes)
                         .ok_or(FitsError::DataUnitOverflow)?;
-                    source.seek(SeekFrom::Start(next))?;
                     hdus.push(Hdu {
                         header,
                         kind,
@@ -99,6 +127,10 @@ impl<R: Read + Seek> FitsReader<R> {
                         data_offset,
                         data_bytes: extent.data_bytes,
                     });
+                    // Skip past the data unit to the next header. Clamp at the source
+                    // end so a declared unit larger than the file just ends the scan
+                    // (the HDU is still recorded; a later read bounds-checks it).
+                    offset = next.min(source.size());
                 }
                 NextHeader::End => break,
                 // §3.5/§3.6: special records and a trailing partial / fill block may
@@ -108,12 +140,10 @@ impl<R: Read + Seek> FitsReader<R> {
                 NextHeader::Trailing => break,
             }
         }
-        let stream_len = source.seek(SeekFrom::End(0))?;
         Ok(FitsReader {
             source,
             hdus,
-            stream_len,
-            scratch: Vec::new(),
+            scratch,
         })
     }
 
@@ -136,51 +166,13 @@ impl<R: Read + Seek> FitsReader<R> {
             len: self.hdus.len(),
         })?;
         let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
-        let mut bytes = Vec::new();
-        let n = Self::read_unit_into(
-            &mut self.source,
-            self.stream_len,
-            data_offset,
-            data_bytes,
-            &mut bytes,
-        )?;
+        let bytes = self
+            .source
+            .read_owned(data_offset, padded_len(data_bytes) as usize)?;
         Ok(DataUnit {
             bytes,
-            data_range: 0..n,
+            data_range: 0..data_bytes as usize,
         })
-    }
-
-    /// Read HDU `index`'s block-padded data unit into `buf` (resized to the unit's
-    /// on-disk length), returning the length of the *meaningful* data: `buf[..len]`
-    /// is the data and `buf[len..]` is block fill.
-    ///
-    /// An associated fn over the individual fields rather than a `&mut self` method,
-    /// so a caller can pass `&mut self.scratch` next to `&mut self.source` — two
-    /// disjoint field borrows the `self`-method form would reject.
-    fn read_unit_into(
-        source: &mut R,
-        stream_len: u64,
-        data_offset: u64,
-        data_bytes: u64,
-        buf: &mut Vec<u8>,
-    ) -> Result<usize> {
-        let data_len = padded_len(data_bytes);
-        // Bound by the source's real length (captured at open): a hostile header can
-        // claim a data unit far larger than the file, which would otherwise drive a
-        // huge `buf` resize before `read_exact` ever fails. Refuse up front when the
-        // declared unit can't physically fit.
-        if data_offset
-            .checked_add(data_len)
-            .is_none_or(|end| end > stream_len)
-        {
-            return Err(FitsError::UnexpectedEof);
-        }
-        source.seek(SeekFrom::Start(data_offset))?;
-        // Resize keeps `buf`'s capacity across calls (shrinking is len-only), so a
-        // reused buffer reallocates only when a larger unit appears.
-        buf.resize(data_len as usize, 0);
-        source.read_exact(buf.as_mut_slice())?;
-        Ok(data_bytes as usize)
     }
 
     /// Read an HDU's data unit and decode it into a typed [`Image`]: host-endian
@@ -211,14 +203,12 @@ impl<R: Read + Seek> FitsReader<R> {
         let shape = hdu.header.axes()?;
         let scaling = Scaling::from_header(&hdu.header);
         let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
-        let n = Self::read_unit_into(
-            &mut self.source,
-            self.stream_len,
+        let unit = self.source.slice(
             data_offset,
-            data_bytes,
+            padded_len(data_bytes) as usize,
             &mut self.scratch,
         )?;
-        let samples = ImageData::decode(&self.scratch[..n], bitpix);
+        let samples = ImageData::decode(&unit[..data_bytes as usize], bitpix);
 
         // With PCOUNT=0/GCOUNT=1 (checked above), `data_extent` sized the unit as
         // `elem · Π(axes)`, so `decode` yields exactly `shape_product` samples. This
@@ -270,14 +260,12 @@ impl<R: Read + Seek> FitsReader<R> {
             return Err(FitsError::NotRandomGroups);
         }
         let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
-        let n = Self::read_unit_into(
-            &mut self.source,
-            self.stream_len,
+        let unit = self.source.slice(
             data_offset,
-            data_bytes,
+            padded_len(data_bytes) as usize,
             &mut self.scratch,
         )?;
-        RandomGroups::from_data(&self.hdus[index].header, &self.scratch[..n])
+        RandomGroups::from_data(&self.hdus[index].header, &unit[..data_bytes as usize])
     }
 
     /// Read a tiled-compressed image (§10.1) — a `BINTABLE` with `ZIMAGE = T` —
@@ -310,19 +298,17 @@ impl<R: Read + Seek> FitsReader<R> {
             len: self.hdus.len(),
         })?;
         let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
-        Self::read_unit_into(
-            &mut self.source,
-            self.stream_len,
+        // The block-padded data unit (length = the padded size — the checksum covers
+        // the block fill too).
+        let unit = self.source.slice(
             data_offset,
-            data_bytes,
+            padded_len(data_bytes) as usize,
             &mut self.scratch,
         )?;
-        // `scratch` now holds the block-padded data unit (length = the padded size).
+        let data_sum = checksum::accumulate(unit, 0);
         let hdu = &self.hdus[index];
-        let data_sum = checksum::accumulate(&self.scratch, 0);
         // Whole HDU = header (incl. the stored CHECKSUM card) then data.
-        let hdu_sum =
-            checksum::accumulate(&self.scratch, checksum::accumulate(&hdu.header_bytes, 0));
+        let hdu_sum = checksum::accumulate(unit, checksum::accumulate(&hdu.header_bytes, 0));
         Ok(ChecksumReport {
             datasum_ok: hdu
                 .header
@@ -355,53 +341,37 @@ enum NextHeader {
     Trailing,
 }
 
-/// Read one header unit: consume 2880-byte blocks until one carries the `END`
-/// record.
-fn read_header_unit<R: Read>(source: &mut R) -> Result<NextHeader> {
-    // Most headers are a single block; reserve it so the common case parses with
-    // one allocation and only multi-block headers grow.
+/// Read one header unit at `*offset`, advancing `offset` past each consumed block,
+/// until a block carries the `END` record. Blocks come through [`Source::slice`], so
+/// the same scan drives both seeking and in-memory sources.
+fn scan_header_unit<S: Source>(
+    source: &mut S,
+    offset: &mut u64,
+    scratch: &mut Vec<u8>,
+) -> Result<NextHeader> {
+    let size = source.size();
+    // Most headers are a single block; reserve it so the common case parses with one
+    // allocation and only multi-block headers grow.
     let mut bytes = Vec::with_capacity(BLOCK_SIZE);
     loop {
-        let mut block = [0u8; BLOCK_SIZE];
-        match fill_block(source, &mut block)? {
-            BlockRead::Eof if bytes.is_empty() => return Ok(NextHeader::End),
-            // EOF or a sub-block remnant with no `END` seen: trailing content.
-            BlockRead::Eof | BlockRead::Partial => return Ok(NextHeader::Trailing),
-            BlockRead::Full => {
-                bytes.extend_from_slice(&block);
-                if block_has_end(&block) {
-                    return Ok(NextHeader::Found(bytes));
-                }
-            }
+        match size - *offset {
+            // Clean end at a block boundary, or trailing blocks with no `END`.
+            0 if bytes.is_empty() => return Ok(NextHeader::End),
+            0 => return Ok(NextHeader::Trailing),
+            // A sub-block remnant before EOF: trailing content (§3.6).
+            avail if avail < BLOCK_SIZE as u64 => return Ok(NextHeader::Trailing),
+            _ => {}
+        }
+        let block = source.slice(*offset, BLOCK_SIZE, scratch)?;
+        *offset += BLOCK_SIZE as u64;
+        bytes.extend_from_slice(block);
+        if block_has_end(block) {
+            return Ok(NextHeader::Found(bytes));
         }
     }
 }
 
-enum BlockRead {
-    Full,
-    Partial,
-    Eof,
-}
-
-/// Read exactly one block, distinguishing a clean EOF (zero bytes) from a
-/// trailing partial block (a sub-block remnant before EOF).
-fn fill_block<R: Read>(source: &mut R, block: &mut [u8; BLOCK_SIZE]) -> Result<BlockRead> {
-    let mut filled = 0;
-    while filled < BLOCK_SIZE {
-        let n = source.read(&mut block[filled..])?;
-        if n == 0 {
-            break;
-        }
-        filled += n;
-    }
-    match filled {
-        0 => Ok(BlockRead::Eof),
-        BLOCK_SIZE => Ok(BlockRead::Full),
-        _ => Ok(BlockRead::Partial),
-    }
-}
-
-fn block_has_end(block: &[u8; BLOCK_SIZE]) -> bool {
+fn block_has_end(block: &[u8]) -> bool {
     block
         .chunks_exact(CARD_SIZE)
         .any(|card| &card[..3] == b"END" && card[3..].iter().all(|&b| b == b' '))
