@@ -336,6 +336,9 @@ fn htrans(a: &mut [i32], nx: usize, ny: usize) {
     let nmax = nx.max(ny);
     let log2n = log2_ceil(nmax);
     let mut tmp = vec![0i32; nmax.div_ceil(2).max(1)];
+    // Holds the odd rows during the column-direction shuffle (done as whole-row moves
+    // — see `shuffle_rows`): up to `nx/2` rows of `ny`.
+    let mut row_tmp = vec![0i32; nx.div_ceil(2) * ny.max(1)];
 
     let mut shift = 0u32;
     let mut mask = -2i32;
@@ -410,9 +413,7 @@ fn htrans(a: &mut [i32], nx: usize, ny: usize) {
         for i in 0..nxtop {
             shuffle(&mut a[ny * i..], nytop, 1, &mut tmp);
         }
-        for j in 0..nytop {
-            shuffle(&mut a[j..], nxtop, ny, &mut tmp);
-        }
+        shuffle_rows(a, nxtop, nytop, ny, &mut row_tmp);
         nxtop = (nxtop + 1) >> 1;
         nytop = (nytop + 1) >> 1;
         shift = 1;
@@ -450,6 +451,35 @@ fn shuffle(a: &mut [i32], n: usize, n2: usize, tmp: &mut [i32]) {
         p1 += n2;
         pt += 1;
         i += 2;
+    }
+}
+
+/// Column-direction [`shuffle`] for the whole `nxtop × nytop` block (row stride `ny`),
+/// as whole-row moves. The per-column `shuffle` de-interleaves the row index
+/// identically for every column, so applying it to contiguous `nytop`-element row
+/// segments replaces the strided column access with sequential row copies (mirror of
+/// [`unshuffle_rows`]). `row_tmp` holds the odd rows during compaction (`⌊nxtop/2⌋ ×
+/// nytop`).
+fn shuffle_rows(a: &mut [i32], nxtop: usize, nytop: usize, ny: usize, row_tmp: &mut [i32]) {
+    let ne = nxtop.div_ceil(2); // even rows land in [0, ne); odds follow
+    // Save odd rows (1, 3, 5, …) so compacting the evens can't clobber them.
+    let mut pt = 0;
+    let mut i = 1;
+    while i < nxtop {
+        let src = ny * i;
+        row_tmp[pt * nytop..pt * nytop + nytop].copy_from_slice(&a[src..src + nytop]);
+        pt += 1;
+        i += 2;
+    }
+    // Compact even rows to the front (row 2k → row k); forward order is safe since
+    // row 2k is read before iteration 2k would overwrite it.
+    for k in 1..ne {
+        a.copy_within(ny * 2 * k..ny * 2 * k + nytop, ny * k);
+    }
+    // Append the saved odd rows after the evens.
+    for m in 0..pt {
+        let dst = ny * (ne + m);
+        a[dst..dst + nytop].copy_from_slice(&row_tmp[m * nytop..m * nytop + nytop]);
     }
 }
 
