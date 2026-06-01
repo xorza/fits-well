@@ -1,8 +1,7 @@
 # FITS 4.0 Conformance Audit
 
 Audit of the `fits` implementation against the FITS 4.0 standard (the curated
-notes in [`refs/`](refs/) and the normative [`refs/fits_standard40.pdf`]). Last
-reviewed 2026-06-01, after the conformance-completion pass recorded below.
+notes in [`refs/`](refs/) and the normative [`refs/fits_standard40.pdf`]).
 
 **The bar — "full compatibility, nothing more":** read every conforming FITS 4.0
 file and expose its data *and* coordinate semantics correctly, and write only
@@ -33,42 +32,6 @@ The structural and data-format layers (§3–§7, §10 decode) are complete. §8
 complete for every projection it implements plus `CUNIT` and pixel-list WCS; the
 unimplemented projections and non-linear spectral axes **error cleanly** rather
 than return wrong coordinates.
-
----
-
-## Fixes applied — review pass
-
-| Sev | Fix | § | Code |
-|-----|-----|---|------|
-| 🔴 | ASCII bare-sign exponent (`3.14159-2`) was rejected, erroring the column read | 7.2.5 | `ascii::split_mantissa_exponent` |
-| 🔴 | Compressing an integer image dropped `BZERO`/`BSCALE`/`BLANK` | 10.2 | `compress::encode_image` |
-| 🔴 | `RICE_1` `BYTEPIX=8` panicked / corrupted → clean error (see deferred) | 10.4.1 | `compress`, `rice::BitReader` |
-| 🔴 | `Q` (64-bit) VLA descriptors truncated to 32 bits | 7.3.5 | `writer::push_vla_descriptor` |
-| 🟡 | `BLANK` card emitted for float images | 4.4.2.5 | `writer::add_scaling` |
-| 🟡 | `inf`/`NaN` accepted (read) and emitted (write) in keyword values | 4.2.4 | `card::parse_real`/`format_real` |
-| — | Dead, unreachable duplicate `SZP` projection block removed | 8 | `wcs` |
-| 🟢 | Random-groups §6.3 addend summing | 6.3 | `RandomGroups::parameter_physical` |
-
-## Fixes applied — completion pass
-
-| Area | Item | § | Code | Test |
-|------|------|---|------|------|
-| ASCII | Write `TSCALn`/`TZEROn`/`TNULLn`; non-finite cell → marker/blank | 7.2.2/.4 | `AsciiWriteColumn`, `ascii_table_header`, `format_ascii_field` | `ascii_write_emits_tscal_tzero_tnull_and_round_trips` |
-| BINTABLE | Logical three-state `T`/`F`/`0x00`(null) | 7.3.3 | `ColumnData::Logical(Vec<Option<bool>>)` | `logical_column_round_trips_with_null_state` |
-| BINTABLE | `1PX`/`1QX` VLA bit-array unpack (MSB-first) | 7.3 | `BinTable::read_vla_bit_column` | `vla_bit_column_unpacks_msb_first` |
-| Compress | `NOCOMPRESS` encoder | 10.4 | `compress::encode_image` | `nocompress_image_round_trips` |
-| Compress | `1Q` compressed-image descriptors (auto-switch past 4 GiB) | 10.1.3 | `compress::push_compressed_descriptor` | `compressed_image_descriptor_switches_to_q_for_large_offsets` |
-| WCS | `yzLN`/`yzLT` celestial axes (planetary/solar, incl. `HPLN`/`HPLT`) | 8.2 | `wcs::find_celestial` | `planetary_solar_lonlat_axes_are_celestial` |
-| WCS | `CUNITia` → scale celestial axes to degrees | 8.2 | `wcs::unit_to_degrees`, `from_header` | `cunit_scales_celestial_axes_to_degrees` |
-| WCS | Pixel-list (event-list) WCS, `TCTYPn` family (Table 22) | 8 | `Wcs::from_pixel_list` | `pixel_list_wcs_matches_the_equivalent_image_wcs` |
-| WCS | Binary-table vector-cell WCS, `iCTYPn`/`ijPCn` family (Table 22) | 8 | `Wcs::from_array_column` | `vector_cell_wcs_matches_the_equivalent_image_wcs` |
-| Time | `DATE-AVG`/`MJD-AVG` observation midpoint | 9.5 | `TimeBounds::avg_mjd` | `reads_bound_duration_and_error_keywords` |
-| Time | `obs_mjd` JEPOCH/BEPOCH fallback | 9.5 | `FitsTime::obs_mjd` | `obs_mjd_falls_back_to_jepoch` |
-| Time | `PHASE` axis `CZPHSia`/`CPERIia` + fold | 9.6 | `FitsTime::phase_axis`, `PhaseAxis` | `reads_phase_axis_and_folds` |
-
-**Behavior change to note:** a header card whose value field is `inf`/`NaN`/an
-overflowing real (e.g. `1E400`) is now a hard `InvalidValue` parse error rather
-than silently becoming `Real(inf)`.
 
 ---
 
