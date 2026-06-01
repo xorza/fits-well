@@ -205,6 +205,14 @@ pub(crate) fn encode_image(
     if bitpix.is_float() {
         return encode_float_image(image, cmptype, tile_shape);
     }
+    // RICE handles only 1/2/4-byte pixels (cfitsio parity); refuse the 64-bit path
+    // rather than silently corrupting. Table 37 lists BYTEPIX 8 as permitted, but
+    // neither this encoder nor the decoder implements the 64-bit bitstream.
+    if cmptype == "RICE_1" && bitpix.elem_size() > 4 {
+        return Err(FitsError::UnsupportedCompression {
+            name: "RICE_1 with BYTEPIX > 4 (64-bit pixels)".to_string(),
+        });
+    }
     let dims = &image.shape;
     let znaxis = dims.len();
     let tiles: Vec<usize> = if tile_shape.len() == znaxis {
@@ -300,6 +308,16 @@ pub(crate) fn encode_image(
             h.set("ZNAME2", "SMOOTH").set("ZVAL2", 0);
         }
         _ => {}
+    }
+    // §10.2: tiles store the *raw* stored integers, so the original image's
+    // physical scaling and undefined-pixel sentinel must travel in the header to
+    // be reconstructed on decode (`bitpix` is integer here — floats diverted above).
+    if !image.scaling.is_identity() {
+        h.set("BZERO", image.scaling.bzero);
+        h.set("BSCALE", image.scaling.bscale);
+    }
+    if let Some(blank) = image.scaling.blank {
+        h.set("BLANK", blank);
     }
     Ok((h, data))
 }
@@ -657,12 +675,19 @@ fn decode_tile_cell(
     match cmptype {
         "GZIP_1" => gzip::gzip_tile(as_bytes(cell)?, int_bitpix),
         "GZIP_2" => gzip::gzip2_tile(as_bytes(cell)?, int_bitpix),
-        "RICE_1" => Ok(rice::rice_decode(
-            as_bytes(cell)?,
-            tile_elems,
-            bytepix,
-            blocksize,
-        )),
+        "RICE_1" => {
+            if bytepix > 4 {
+                return Err(FitsError::UnsupportedCompression {
+                    name: "RICE_1 with BYTEPIX > 4 (64-bit pixels)".to_string(),
+                });
+            }
+            Ok(rice::rice_decode(
+                as_bytes(cell)?,
+                tile_elems,
+                bytepix,
+                blocksize,
+            ))
+        }
         "PLIO_1" => Ok(plio::plio_decode(as_i16(cell)?, tile_elems)),
         "HCOMPRESS_1" => hcompress::hcompress_tile(as_bytes(cell)?, smooth),
         // §10.4: a tile stored verbatim — the cell is the raw big-endian pixels.

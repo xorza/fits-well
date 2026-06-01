@@ -108,6 +108,25 @@ impl RandomGroups {
             .collect()
     }
 
+    /// The physical value of the named group parameter (§6.3): when extra
+    /// precision splits one logical parameter into two or more group parameters
+    /// sharing a `PTYPEn` name, the value is the **sum** of those addends'
+    /// physical values. `None` if no parameter has the name. (For the raw
+    /// per-addend values, use [`RandomGroups::parameters_physical`].)
+    pub fn parameter_physical(&self, group: usize, name: &str) -> Option<f64> {
+        let base = group * self.group_len();
+        let mut sum = 0.0;
+        let mut found = false;
+        for j in 0..self.pcount {
+            if self.parameter_names[j] == name {
+                found = true;
+                let (pscal, pzero) = self.param_scaling[j];
+                sum += pzero + pscal * elem_f64(&self.samples, base + j);
+            }
+        }
+        found.then_some(sum)
+    }
+
     /// The physical array values of group `g`: `BZERO + BSCALE × raw`.
     pub fn array_physical(&self, group: usize) -> Vec<f64> {
         let base = group * self.group_len() + self.pcount;

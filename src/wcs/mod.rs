@@ -198,26 +198,6 @@ impl Projection {
             let phi = a.atan2(b);
             return (phi * R2D, theta * R2D);
         }
-        if matches!(self, Projection::Szp) {
-            // Slant zenithal perspective (CG 2002 §5.1.2): the projection ray from
-            // the vertex (xp, yp, zp) hits the plane; solve the quadratic in
-            // σ = 1 − sinθ, then recover φ.
-            let (xp, yp, zp) = szp_vertex(pv);
-            let (cx, cy) = (x / R2D, y / R2D);
-            let a = (xp - cx).powi(2) + (yp - cy).powi(2) + zp * zp;
-            let b = 2.0 * zp * (cx * (xp - cx) + cy * (yp - cy) - zp);
-            let c = zp * zp * (cx * cx + cy * cy) - zp * zp;
-            let disc = (b * b - 4.0 * a * c).max(0.0).sqrt();
-            // Two σ roots; choose the one giving |sinθ| ≤ 1, preferring the larger
-            // sinθ (near hemisphere).
-            let r1 = (-b - disc) / (2.0 * a);
-            let r2 = (-b + disc) / (2.0 * a);
-            let sigma = if (1.0 - r1).abs() <= 1.0 { r1 } else { r2 };
-            let theta = (1.0 - sigma).clamp(-1.0, 1.0).asin();
-            let u = cx * (zp - sigma) + xp * sigma;
-            let v = cy * (zp - sigma) + yp * sigma;
-            return (u.atan2(-v) * R2D, theta * R2D);
-        }
         if self.is_conic() {
             let (c, y0) = self.conic_consts(pv);
             let s = pv[1].signum();

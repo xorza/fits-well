@@ -243,12 +243,12 @@ impl<W: Write> FitsWriter<W> {
         // Build the heap (row-major) and per-VLA-column descriptors first, so the
         // main table can carry the `P` (count, offset) pairs.
         let mut heap: Vec<u8> = Vec::new();
-        let mut descs: Vec<Vec<(u32, u32)>> = vec![Vec::new(); columns.len()];
+        let mut descs: Vec<Vec<(u64, u64)>> = vec![Vec::new(); columns.len()];
         for r in 0..nrows {
             for (ci, col) in columns.iter().enumerate() {
                 if let Some(rows) = &col.vla {
                     let cell = &rows[r];
-                    descs[ci].push((count_of(cell) as u32, heap.len() as u32));
+                    descs[ci].push((count_of(cell) as u64, heap.len() as u64));
                     append_be(&mut heap, cell);
                 }
             }
@@ -262,13 +262,7 @@ impl<W: Write> FitsWriter<W> {
                 if col.vla.is_some() {
                     let (n, o) = descs[ci][cursor[ci]];
                     cursor[ci] += 1;
-                    if col.wide {
-                        data.extend_from_slice(&(n as i64).to_be_bytes());
-                        data.extend_from_slice(&(o as i64).to_be_bytes());
-                    } else {
-                        data.extend_from_slice(&(n as i32).to_be_bytes());
-                        data.extend_from_slice(&(o as i32).to_be_bytes());
-                    }
+                    push_vla_descriptor(&mut data, col.wide, n, o);
                 } else {
                     pack_cell(&mut data, col, r);
                 }
@@ -450,7 +444,10 @@ fn add_scaling(header: &mut Header, image: &Image) {
         header.set("BZERO", image.scaling.bzero);
         header.set("BSCALE", image.scaling.bscale);
     }
-    if let Some(blank) = image.scaling.blank {
+    // §4.4.2.5: BLANK applies only to integer images (positive BITPIX).
+    if let Some(blank) = image.scaling.blank
+        && image.samples.bitpix().is_integer()
+    {
         header.set("BLANK", blank);
     }
 }
@@ -570,6 +567,20 @@ fn check_column(col: &WriteColumn, nrows: usize) -> Result<usize> {
 }
 
 /// Number of elements (or strings) in a column's data.
+/// Encode a VLA descriptor — element count and heap byte offset — as a big-endian
+/// `Q` (64-bit, `wide`) or `P` (32-bit) pair. The values are carried as `u64` up
+/// to this point so a `Q` column can address a heap or count beyond the 4 GiB the
+/// 32-bit `P` form allows (truncating earlier would defeat the point of `Q`).
+fn push_vla_descriptor(data: &mut Vec<u8>, wide: bool, count: u64, offset: u64) {
+    if wide {
+        data.extend_from_slice(&(count as i64).to_be_bytes());
+        data.extend_from_slice(&(offset as i64).to_be_bytes());
+    } else {
+        data.extend_from_slice(&(count as i32).to_be_bytes());
+        data.extend_from_slice(&(offset as i32).to_be_bytes());
+    }
+}
+
 fn count_of(data: &ColumnData) -> usize {
     match data {
         ColumnData::Logical(v) => v.len(),

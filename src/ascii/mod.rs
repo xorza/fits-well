@@ -221,7 +221,7 @@ impl AsciiColumn {
 /// (§7.2.1, deprecated): the integer mantissa is scaled by `10⁻ᵈ`.
 fn parse_ascii_float(field: &str, decimals: usize) -> Option<f64> {
     let normalized = field.replace(['D', 'd'], "E");
-    let (mantissa, exponent) = match normalized.split_once(['E', 'e']) {
+    let (mantissa, exponent) = match split_mantissa_exponent(&normalized) {
         Some((m, e)) => (m, Some(e)),
         None => (normalized.as_str(), None),
     };
@@ -234,6 +234,19 @@ fn parse_ascii_float(field: &str, decimals: usize) -> Option<f64> {
         value *= 10f64.powi(e.trim().parse::<i32>().ok()?);
     }
     Some(value)
+}
+
+/// Split a normalized (`D`→`E`) numeric string into mantissa and exponent text.
+/// §7.2.5 rule 3: the exponent is introduced by `E`/`e`, **or** by a bare `+`/`-`
+/// sign past the leading mantissa sign (Fortran's letter-less form, e.g.
+/// `3.14159-2` = 3.14159 × 10⁻²).
+fn split_mantissa_exponent(s: &str) -> Option<(&str, &str)> {
+    if let Some(i) = s.find(['E', 'e']) {
+        return Some((&s[..i], &s[i + 1..]));
+    }
+    s.char_indices()
+        .find(|&(i, c)| i > 0 && (c == '+' || c == '-'))
+        .map(|(i, _)| (&s[..i], &s[i..]))
 }
 
 /// Parse an ASCII `TFORMn` (`Aw`, `Iw`, `Fw.d`, `Ew.d`, `Dw.d`) into kind, width,
