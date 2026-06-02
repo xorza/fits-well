@@ -3,9 +3,11 @@
 //!
 //! # Layering
 //!
-//! The format's structure maps onto a stack of layers; each only depends on the
-//! ones below it, so the hot decode path stays lean and the optional semantic
-//! layers (WCS, compression) are opt-in.
+//! The format's structure maps onto a stack of layers, so the hot decode path
+//! stays lean and the semantic layers compute only on demand. WCS (§8) and time
+//! (§9) are dependency-free pure math, always compiled and surfaced directly as
+//! [`Header`] getters ([`Header::wcs`], [`Header::time`]); tiled compression carries
+//! a dependency and stays behind the `compression` feature.
 //!
 //! ```text
 //! bytes ─► block layer ─► HDU layer ─► header model ─► typed data
@@ -14,10 +16,11 @@
 //!          I/O quantum)   seeking)     keyword index)  heap, VLAs)
 //! ```
 //!
-//! - [`block`] — the 2880-byte block grid, padding rules, and rounding math.
+//! - [`BLOCK_SIZE`] — the 2880-byte block grid, padding rules, and rounding math.
 //! - [`Bitpix`] — the array element type selector (`BITPIX`).
 //! - [`Header`], [`Value`] — an *ordered* header model (an internal `Card` list)
-//!   that round-trips byte-for-byte, with a side index for O(1) keyword lookup.
+//!   that round-trips byte-for-byte, with a side index for O(1) keyword lookup; it
+//!   also parses the WCS and time layers on request ([`Header::wcs`]/[`Header::time`]).
 //! - [`HduKind`] — HDU classification and the data-unit sizing formula that makes
 //!   boundaries computable from headers alone (no data read required).
 //! - [`FitsReader`] — lazy, seeking access to the HDU sequence of a file.
@@ -25,7 +28,7 @@
 //! # Status
 //!
 //! The structural spine (blocks, headers, HDU boundaries, lazy reading) plus
-//! typed image decode/encode ([`data`]), the multi-HDU writer ([`writer`]),
+//! typed image decode/encode ([`Image`]), the multi-HDU writer ([`FitsWriter`]),
 //! ASCII/binary tables, WCS, time coordinates, and tiled image+table compression
 //! are implemented and tested — see each module's docs for its design.
 

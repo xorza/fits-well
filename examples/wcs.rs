@@ -1,36 +1,39 @@
-//! Convert between pixel and world (sky) coordinates with a WCS header:
+//! Read the WCS (World Coordinate System) from a FITS file's header and convert
+//! between pixel and sky coordinates:
 //!
 //! ```sh
 //! cargo run --example wcs
 //! ```
 
-use fits_well::{Header, Wcs};
+use std::fs::File;
+
+use fits_well::FitsReader;
 
 fn main() -> fits_well::Result<()> {
-    // A gnomonic (TAN) projection centred on RA = 250°, Dec = 30°, at 0.001°/pixel.
-    // In practice these keywords come straight from a file's header; here we build
-    // one by hand so the example is self-contained.
-    let mut header = Header::new();
-    header
-        .set("NAXIS", 2)
-        .set("CTYPE1", "RA---TAN")
-        .set("CTYPE2", "DEC--TAN")
-        .set("CRPIX1", 50.0) // reference pixel …
-        .set("CRPIX2", 50.0)
-        .set("CRVAL1", 250.0) // … and the sky coordinate it sits at
-        .set("CRVAL2", 30.0)
-        .set("CDELT1", -0.001)
-        .set("CDELT2", 0.001);
+    // A FITS image stores its WCS as header keywords — CTYPEn (projection), CRPIXn
+    // (reference pixel), CRVALn (its sky coordinate), CDELTn (scale), and so on.
+    // This bundled file uses a TAN (gnomonic) projection.
+    let reader = FitsReader::open(File::open("tests/data/fits/wcs_tan.fits")?)?;
+    let header = &reader.hdu(0).header;
 
-    let wcs = Wcs::from_header(&header, None)?;
+    // `header.wcs(..)` parses those keywords into a usable transform. `None` selects
+    // the primary WCS (an alternate would be `Some('A')`, etc.).
+    let wcs = header.wcs(None)?;
+    println!("axes: {:?}", wcs.ctype);
 
-    // Pixel → world: the reference pixel maps to the reference coordinate.
-    let sky = wcs.pixel_to_world(&[50.0, 50.0]);
-    println!("pixel (50, 50)  ->  RA/Dec {sky:?}");
+    // Pixel → world: the reference pixel (CRPIXn) maps to the reference sky
+    // coordinate (CRVALn). This file's reference pixel is (256, 256).
+    let reference = wcs.pixel_to_world(&[256.0, 256.0]);
+    println!("pixel (256, 256) -> RA/Dec {reference:?}");
 
-    // World → pixel is the inverse transform.
-    let pixel = wcs.world_to_pixel(&[250.05, 30.05]);
-    println!("RA/Dec (250.05, 30.05)  ->  pixel {pixel:?}");
+    // One pixel over in X moves a small amount across the sky.
+    let neighbour = wcs.pixel_to_world(&[257.0, 256.0]);
+    println!("pixel (257, 256) -> RA/Dec {neighbour:?}");
+
+    // World → pixel is the inverse — mapping the reference coordinate back lands on
+    // the reference pixel again.
+    let pixel = wcs.world_to_pixel(&reference);
+    println!("that RA/Dec       -> pixel {pixel:?}");
 
     Ok(())
 }
