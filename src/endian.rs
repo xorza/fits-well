@@ -13,31 +13,30 @@ pub(crate) fn decode_be<const N: usize, T, F>(bytes: &[u8], conv: F) -> Vec<T>
 where
     F: Fn([u8; N]) -> T,
 {
-    let mut out = Vec::new();
-    decode_be_into(bytes, conv, &mut out);
-    out
+    bytes
+        .chunks_exact(N)
+        .map(|c| conv(c.try_into().expect("chunks_exact yields N-byte arrays")))
+        .collect()
 }
 
-/// Decode a big-endian buffer into `out`, *reusing* its allocation — clear it, then
-/// refill from `bytes`. The buffer-reusing counterpart to [`decode_be`], mirroring
-/// [`extend_be`] on the encode side.
-///
-/// Profiling showed a fresh-`Vec`-per-call decode is dominated not by the byte-swap
-/// but by the kernel faulting in the new output pages (`clear_page` + the
-/// page-fault machinery, ~65% of the time) — so a caller decoding many same-typed
-/// images into one `out` pays that fault traffic once, not per call (~4× on the
-/// repeated path). After `clear()`, `extend` over the `ExactSizeIterator` reserves
-/// once and reuses the capacity on every later call.
-pub(crate) fn decode_be_into<const N: usize, T, F>(bytes: &[u8], conv: F, out: &mut Vec<T>)
+/// Decode a big-endian buffer into the host-endian slice `dst` (one element per
+/// `N`-byte chunk; `dst.len()` must be `bytes.len() / N`). The slice-writing
+/// counterpart to [`decode_be`] — used by the reader's view path, which decodes into
+/// a reused, `u64`-aligned scratch reinterpreted as `&mut [T]` so a hot read loop
+/// reuses the (already-faulted) output pages instead of allocating per image.
+/// `conv` is inlined per the [`decode_be`] note, so the fixed-stride loop vectorizes.
+pub(crate) fn decode_be_into_slice<const N: usize, T, F>(bytes: &[u8], dst: &mut [T], conv: F)
 where
     F: Fn([u8; N]) -> T,
 {
-    out.clear();
-    out.extend(
-        bytes
-            .chunks_exact(N)
-            .map(|c| conv(c.try_into().expect("chunks_exact yields N-byte arrays"))),
+    debug_assert_eq!(
+        dst.len(),
+        bytes.len() / N,
+        "dst must hold one element per chunk"
     );
+    for (d, c) in dst.iter_mut().zip(bytes.chunks_exact(N)) {
+        *d = conv(c.try_into().expect("chunks_exact yields N-byte arrays"));
+    }
 }
 
 /// Encode fixed-width values into a *fresh* big-endian byte buffer, e.g.

@@ -8,10 +8,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 System) files — the standard data format of astronomy. The two non-negotiable
 goals shape every decision:
 
-1. **Blazing fast** — zero-copy where the format allows, single-pass byte-swap /
-   scaling into caller-reusable buffers (`decode_into`/`encode_into`, so a typed
-   read isn't page-fault-bound), tile-parallel (de)compression, reused read/write
-   scratch buffers, lazy HDU access via seeking.
+1. **Blazing fast** — zero-copy where the format allows, a borrowed read view
+   (`read_image_view` → `ImageView`) that byte-swaps into a caller-owned reused
+   scratch so a hot read loop isn't page-fault-bound, single-pass byte-swap / scaling, tile-parallel
+   (de)compression, reused read/write scratch buffers, lazy HDU access via seeking.
 2. **Whole-standard coverage** — the full **FITS 4.0** standard (images, ASCII
    tables, binary tables with heap/variable-length arrays, random groups for
    read, WCS, time coordinates, tiled compression).
@@ -151,9 +151,9 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `keyword.rs` | stack-allocated indexed-keyword formatting (`key!` macro / `KeyBuf`): builds `NAXISn`/`PVi_m`/`CTYPEn`-style keys without the per-lookup `format!` heap alloc (one WCS parse does ~90) | done |
 | `header/` | ordered card model (`value.rs`, `card/`, `mod.rs`): parse/render, `CONTINUE` folding, `HIERARCH` compound keys, keyword index, typed getters + builder | done |
 | `hdu/` | HDU classification + data-unit sizing (Eq. 2, incl. random groups) | done |
-| `reader/` | HDU scan over a `Source` (`source.rs`: `StreamSource` copies, `SliceSource`/`MmapSource` borrow zero-copy); `open`/`from_bytes`/`open_mmap`; `read_image` (transparently decompresses a `ZIMAGE` `CompressedImage`)/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_table`/`verify_checksum`, raw `DataUnit` | done |
+| `reader/` | HDU scan over a `Source` (`source.rs`: `StreamSource` copies, `SliceSource`/`MmapSource` borrow zero-copy); `open`/`from_bytes`/`open_mmap`; `read_image` (owned, transparently decompresses a `ZIMAGE` `CompressedImage`)/`read_image_view(idx, &mut Vec<u64>)` (borrowed `ImageView` swapped into a caller-owned `u64` scratch — the page-fault-free read-loop path; the reader retains nothing image-sized)/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_table`/`verify_checksum`, raw `DataUnit` | done |
 | `writer/` | multi-HDU writer: `write_image`/`write_table` (fixed + `P` VLA columns)/`write_ascii_table`/`write_compressed_image`(`_lossy`)/`write_compressed_table`, `with_checksums` | done |
-| `data/` | typed `Image`/`ImageData`/`RawImage` (zero-copy raw plane), big-endian decode+encode (`decode_into`/`encode_into` reuse the caller's buffer), `BSCALE`/`BZERO` physical plane + `SampleType`/`UnsignedView` resolution; `ImageArray` n-D bridge (feature `ndarray`, FITS axis order) | image read+write done; the read path's lever is `decode_into` buffer reuse — a fresh-`Vec`-per-call decode is page-fault-bound (~65% of cycles), ~4–8× slower (profiled). The per-element swap itself is write-allocate/RFO-bound (~8 GiB/s); SIMD does **not** help it (AVX2/blocked variants measured slower) — so no SIMD-swap TODO |
+| `data/` | typed owned `Image`/`ImageData`/`RawImage` (zero-copy raw plane) + borrowed `ImageView` (the read-loop view, slices over a caller-owned `u64`-aligned scratch), big-endian decode+encode (`encode_into` reuses the writer's buffer), `BSCALE`/`BZERO` physical plane + `SampleType`/`UnsignedView` resolution; `ImageArray` n-D bridge (feature `ndarray`, FITS axis order) | image read+write done; the read-loop lever is `read_image_view`→`ImageView` — owned `read_image().decode()` is page-fault-bound (~65% of cycles, profiled), so the view byte-swaps into a reused scratch (no per-call alloc, ~4–5×; `BITPIX = 8` is zero-copy). The swap itself is write-allocate/RFO-bound (~8–9 GiB/s); SIMD does **not** help it (AVX2/blocked variants measured slower) — so no SIMD-swap TODO |
 | `table/` | `BINTABLE` parsing (`Tform`/`Column`); per-column `ColumnReader` handles decode on demand to `ColumnData` (`BitColumn` for `X`, `num-complex` for `C`/`M`), `TSCAL`/`TZERO` physical plane, `P`/`Q` heap VLAs | read done (write in `writer/`) |
 | `ascii/` | `TABLE` (ASCII) read: `TBCOLn`/Fortran `TFORMn` → `AsciiColumn`/`ColumnData` | read done (write in `writer/`) |
 | `groups/` | random-groups (§6) read: params + arrays, `PSCALn`/`PZEROn` physical | read done (no write — deprecated) |
@@ -196,9 +196,10 @@ Design principles specific to this crate:
   and cache-blocked swaps measure *slower*, not faster; threading them buys little
   either, so they stay serial. Their real cost is the per-call output allocation — a
   fresh-`Vec`-per-call decode is page-fault-bound (~65% of cycles) — so the lever is
-  the `*_into` buffer-reuse forms (`decode_into`/`encode_into`): a caller reusing one
-  buffer across reads/writes pays the allocation once (~4–8×). Always keep a scalar
-  fallback behind the feature gate.
+  buffer reuse: the read loop uses `read_image_view`→`ImageView` (swap into a
+  caller-owned reused scratch; `BITPIX = 8` borrows zero-copy), the writer reuses its
+  buffer via `encode_into`, each paying the allocation once (~4–5×). Always keep a
+  scalar fallback behind the feature gate.
 - **Reuse buffers across calls.** `FitsReader`/`FitsWriter` each own a `scratch`
   `Vec<u8>` reused across reads/writes, so steady-state staging allocates nothing;
   decode/encode expose `*_into` forms that append into a caller buffer. The codecs

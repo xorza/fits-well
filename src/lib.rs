@@ -64,7 +64,7 @@ pub use bitvec;
 pub use compress::CompressOptions;
 #[cfg(feature = "ndarray")]
 pub use data::ImageArray;
-pub use data::{Image, ImageData, RawImage, SampleType, Scaling, UnsignedView};
+pub use data::{Image, ImageData, ImageView, RawImage, SampleType, Scaling, UnsignedView};
 pub use error::{FitsError, Result};
 pub use groups::RandomGroups;
 pub use hdu::HduKind;
@@ -107,12 +107,6 @@ pub mod internals {
     /// byte-swap (`ImageData::decode`).
     pub fn decode_image(bytes: &[u8], bitpix: Bitpix) -> ImageData {
         ImageData::decode(bytes, bitpix)
-    }
-
-    /// Decode into a reused buffer — the buffer-reusing path
-    /// (`ImageData::decode_into`), which skips the per-call output allocation.
-    pub fn decode_image_into(bytes: &[u8], bitpix: Bitpix, out: &mut ImageData) {
-        ImageData::decode_into(bytes, bitpix, out)
     }
 
     /// Encode samples back to a big-endian buffer — the inverse swap
