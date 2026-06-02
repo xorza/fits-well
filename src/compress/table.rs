@@ -384,11 +384,13 @@ fn decompress_column(bytes: &[u8], m: &ColMeta, rows: usize) -> Result<Vec<u8>> 
     Ok(cm)
 }
 
-/// Decode big-endian integers of `bytepix` bytes into `i64` values (signed),
-/// widening in a single pass (no intermediate narrowed `Vec`).
+/// Decode big-endian integers of `bytepix` bytes into `i64`, widening in a single
+/// pass. A `B` column is an *unsigned* byte (matching the image RICE path); the
+/// 16/32-bit forms are signed two's-complement. Sign is moot for the RICE round-trip
+/// (the codec masks to the pixel width) but this keeps one convention across paths.
 fn be_to_i64(bytes: &[u8], bytepix: usize) -> Vec<i64> {
     match bytepix {
-        1 => bytes.iter().map(|&b| b as i8 as i64).collect(),
+        1 => bytes.iter().map(|&b| b as i64).collect(),
         2 => bytes
             .chunks_exact(2)
             .map(|c| i16::from_be_bytes(c.try_into().unwrap()) as i64)

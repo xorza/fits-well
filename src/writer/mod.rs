@@ -270,7 +270,15 @@ impl<W: Write> FitsWriter<W> {
             for (ci, col) in columns.iter().enumerate() {
                 if let Some(rows) = &col.vla {
                     let cell = &rows[r];
-                    descs[ci].push((cell.element_count() as u64, heap.len() as u64));
+                    let (n, o) = (cell.element_count() as u64, heap.len() as u64);
+                    // A `P` (32-bit) descriptor can't address a count/offset past
+                    // u32::MAX; refuse rather than silently truncate into an
+                    // unreadable file. `WriteColumn::wide()` (a `Q` descriptor) is the
+                    // 64-bit path for >4 GiB heaps or huge cells.
+                    if !col.wide && (n > u32::MAX as u64 || o > u32::MAX as u64) {
+                        return Err(FitsError::DataUnitOverflow);
+                    }
+                    descs[ci].push((n, o));
                     append_be(&mut heap, cell);
                 }
             }
@@ -403,6 +411,10 @@ impl<W: Write> FitsWriter<W> {
         Ok(())
     }
 
+    /// Consume the writer and return the underlying sink. HDUs are written eagerly,
+    /// so an unbuffered sink (e.g. a `File`) holds the complete file. This does **not**
+    /// flush: if the sink is a `BufWriter`, flush it (or rely on its `Drop`) before
+    /// trusting the bytes, and check the flush result if you need write errors surfaced.
     pub fn into_inner(self) -> W {
         self.sink
     }

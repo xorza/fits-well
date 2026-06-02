@@ -973,6 +973,11 @@ impl Wcs {
 
     /// Map 1-based pixel coordinates to world coordinates. Celestial axes return
     /// `(α, δ)` in degrees; other axes return `CRVAL + ` the linear value.
+    ///
+    /// # Panics
+    /// If `pixel.len() != self.naxis`. The coordinate count is a structural
+    /// precondition (you know the WCS rank from [`Wcs::naxis`]), so a mismatch is a
+    /// caller bug, not runtime data — hence an assert rather than a `Result`.
     pub fn pixel_to_world(&self, pixel: &[f64]) -> Vec<f64> {
         assert_eq!(pixel.len(), self.naxis, "pixel coordinate count");
         // Offset, then apply the linear transform → intermediate world coords.
@@ -994,6 +999,10 @@ impl Wcs {
 
     /// Map world coordinates back to 1-based pixel coordinates (the inverse of
     /// [`Wcs::pixel_to_world`]).
+    ///
+    /// # Panics
+    /// If `world.len() != self.naxis` (see [`Wcs::pixel_to_world`] — the count is a
+    /// caller-controlled precondition, not runtime data).
     pub fn world_to_pixel(&self, world: &[f64]) -> Vec<f64> {
         assert_eq!(world.len(), self.naxis, "world coordinate count");
         // Recover the intermediate world coordinates.

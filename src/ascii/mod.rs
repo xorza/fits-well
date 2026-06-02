@@ -138,13 +138,13 @@ impl AsciiTable {
         match col.kind {
             AsciiKind::Char => Ok(ColumnData::Text(
                 (0..self.nrows)
-                    .map(|r| self.field(col, r).to_string())
-                    .collect(),
+                    .map(|r| Ok(self.field(col, r)?.to_string()))
+                    .collect::<Result<_>>()?,
             )),
             AsciiKind::Integer => {
                 let mut out = Vec::with_capacity(self.nrows);
                 for r in 0..self.nrows {
-                    let s = self.field(col, r);
+                    let s = self.field(col, r)?;
                     out.push(if s.is_empty() || col.is_null(s) {
                         0
                     } else {
@@ -158,7 +158,7 @@ impl AsciiTable {
             AsciiKind::Float => {
                 let mut out = Vec::with_capacity(self.nrows);
                 for r in 0..self.nrows {
-                    let s = self.field(col, r);
+                    let s = self.field(col, r)?;
                     out.push(if s.is_empty() || col.is_null(s) {
                         0.0
                     } else {
@@ -184,7 +184,7 @@ impl AsciiTable {
         }
         let mut out = Vec::with_capacity(self.nrows);
         for r in 0..self.nrows {
-            let s = self.field(col, r);
+            let s = self.field(col, r)?;
             if col.is_null(s) {
                 out.push(f64::NAN);
                 continue;
@@ -210,8 +210,11 @@ impl AsciiTable {
             })
     }
 
-    /// The trimmed text of column `col` in row `r`.
-    fn field(&self, col: &AsciiColumn, r: usize) -> &str {
+    /// The trimmed text of column `col` in row `r`. Errors on non-UTF-8 bytes — a
+    /// FITS ASCII table is ASCII, so a non-ASCII field is malformed; surfacing it
+    /// (rather than the old `unwrap_or("")`) stops a corrupt byte from masquerading
+    /// as a blank field and silently decoding to 0 in a numeric column.
+    fn field(&self, col: &AsciiColumn, r: usize) -> Result<&str> {
         let row = &self.bytes[r * self.row_len..(r + 1) * self.row_len];
         let end = (col.start + col.width).min(row.len());
         let raw = if col.start < end {
@@ -219,7 +222,10 @@ impl AsciiTable {
         } else {
             &[]
         };
-        std::str::from_utf8(raw).unwrap_or("").trim()
+        let text = std::str::from_utf8(raw).map_err(|_| FitsError::InvalidValue {
+            card: "non-UTF-8 bytes in ASCII-table field".to_string(),
+        })?;
+        Ok(text.trim())
     }
 }
 

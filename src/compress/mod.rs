@@ -1064,9 +1064,12 @@ fn decode_tile_cell_into(
         "GZIP_1" => gzip::gzip_tile_into(as_bytes(cell)?, ctx.int_bitpix, out),
         "GZIP_2" => gzip::gzip2_tile_into(as_bytes(cell)?, ctx.int_bitpix, out),
         "RICE_1" => {
-            if codec.bytepix > 4 {
+            // Only 1/2/4-byte pixels are defined (cfitsio parity). A `BYTEPIX` of
+            // 3/5/6/7 from an untrusted header would otherwise decode with mismatched
+            // `fsbits`/mask and emit garbage instead of erroring.
+            if !matches!(codec.bytepix, 1 | 2 | 4) {
                 return Err(FitsError::UnsupportedCompression {
-                    name: "RICE_1 with BYTEPIX > 4 (64-bit pixels)".to_string(),
+                    name: format!("RICE_1 with BYTEPIX = {} (only 1/2/4)", codec.bytepix),
                 });
             }
             rice::rice_decode_into(
