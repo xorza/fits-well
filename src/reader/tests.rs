@@ -345,7 +345,7 @@ fn read_image_exposes_big_endian_bytes_for_multibyte_types() {
     // A type that needs byte-swapping has no zero-copy typed view.
     assert_eq!(raw.u8(), None);
     // The raw bytes are big-endian: 1 → 0x0001, -2 → 0xFFFE, 300 → 0x012C.
-    assert_eq!(raw.bytes, &[0, 1, 255, 254, 1, 44]);
+    assert_eq!(raw.raw_bytes(), Some(&[0, 1, 255, 254, 1, 44][..]));
     // `decode()` swaps them into the same host-endian samples it borrowed.
     assert_eq!(raw.decode(), ImageData::I16(vec![1, -2, 300]));
 }

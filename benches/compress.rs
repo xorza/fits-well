@@ -93,7 +93,7 @@ fn compressed(img: &Image, codec: &str) -> Vec<u8> {
 const INT_BYTES: u64 = (NX * NY * 2) as u64;
 const FLOAT_BYTES: u64 = (NX * NY * 4) as u64;
 
-/// `decompress` — `read_compressed_image`, per codec, throughput in uncompressed
+/// `decompress` — `read_image`, per codec, throughput in uncompressed
 /// bytes (the compressed image is HDU 1, after the auto dataless primary).
 fn decompress(c: &mut Criterion) {
     let int = science_i16();
@@ -107,21 +107,30 @@ fn decompress(c: &mut Criterion) {
         let mut r = FitsReader::open(Cursor::new(compressed(&int, codec))).unwrap();
         g.throughput(Throughput::Bytes(INT_BYTES));
         g.bench_function(codec, |b| {
-            b.iter(|| black_box(r.read_compressed_image(1).unwrap()))
+            b.iter(|| {
+                let img = r.read_image(1).unwrap();
+                black_box(&img);
+            })
         });
     }
 
     let mut rp = FitsReader::open(Cursor::new(compressed(&mask, "PLIO_1"))).unwrap();
     g.throughput(Throughput::Bytes(INT_BYTES));
     g.bench_function("PLIO_1", |b| {
-        b.iter(|| black_box(rp.read_compressed_image(1).unwrap()))
+        b.iter(|| {
+            let img = rp.read_image(1).unwrap();
+            black_box(&img);
+        })
     });
 
     for &codec in &["RICE_1", "GZIP_1"] {
         let mut r = FitsReader::open(Cursor::new(compressed(&flt, codec))).unwrap();
         g.throughput(Throughput::Bytes(FLOAT_BYTES));
         g.bench_function(BenchmarkId::new("float", codec), |b| {
-            b.iter(|| black_box(r.read_compressed_image(1).unwrap()))
+            b.iter(|| {
+                let img = r.read_image(1).unwrap();
+                black_box(&img);
+            })
         });
     }
     g.finish();

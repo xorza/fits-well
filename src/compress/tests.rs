@@ -15,9 +15,9 @@ fn expect_pixel(flat: usize) -> i16 {
 
 fn check_decoded(name: &str) {
     let mut f = open(name);
-    let img = f.read_compressed_image(1).unwrap();
+    let img = f.read_image(1).unwrap();
     assert_eq!(img.shape, vec![24, 16]);
-    match img.samples {
+    match img.decode() {
         ImageData::I16(v) => {
             assert_eq!(v.len(), 24 * 16);
             for (i, &got) in v.iter().enumerate() {
@@ -47,7 +47,7 @@ fn decompresses_hcompress_1_tiled_image() {
 /// Decode an i32 image and compare pixel-exact against astropy's reconstruction
 /// stored as a plain-image reference.
 fn check_i32_against_ref(compressed: &str, reference: &str) {
-    let got = match open(compressed).read_compressed_image(1).unwrap().samples {
+    let got = match open(compressed).read_image(1).unwrap().decode() {
         ImageData::I32(v) => v,
         other => panic!("expected I32, got {other:?}"),
     };
@@ -80,11 +80,7 @@ fn decompresses_subtractive_dither_2() {
 #[test]
 fn decompresses_float_with_nan_nulls() {
     // SUBTRACTIVE_DITHER_1 with ZBLANK: null pixels decode to NaN, the rest match.
-    let got = match open("comp_nan_f32.fits")
-        .read_compressed_image(1)
-        .unwrap()
-        .samples
-    {
+    let got = match open("comp_nan_f32.fits").read_image(1).unwrap().decode() {
         ImageData::F32(v) => v,
         other => panic!("expected F32, got {other:?}"),
     };
@@ -203,9 +199,9 @@ fn compression_write_round_trips_through_decode() {
         w.write_compressed_image(&image, cmptype, &CompressOptions::tiled(tiles))
             .unwrap();
         let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
-        let back = r.read_compressed_image(1).unwrap();
+        let back = r.read_image(1).unwrap();
         assert_eq!(back.shape, vec![24, 16], "{cmptype}");
-        match back.samples {
+        match back.decode() {
             ImageData::I16(v) => assert_eq!(v, samples, "{cmptype} round-trip"),
             other => panic!("{cmptype}: expected I16, got {other:?}"),
         }
@@ -255,7 +251,7 @@ fn float_quantize_write_round_trips_within_tolerance() {
         w.write_compressed_image(&image, cmptype, &CompressOptions::tiled([24, 16]))
             .unwrap();
         let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
-        let back = match r.read_compressed_image(1).unwrap().samples {
+        let back = match r.read_image(1).unwrap().decode() {
             ImageData::F32(v) => v,
             other => panic!("{cmptype}: expected F32, got {other:?}"),
         };
@@ -297,7 +293,7 @@ fn float_write_preserves_nan_nulls() {
     w.write_compressed_image(&image, "RICE_1", &CompressOptions::tiled([24, 16]))
         .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
-    let back = match r.read_compressed_image(1).unwrap().samples {
+    let back = match r.read_image(1).unwrap().decode() {
         ImageData::F32(v) => v,
         other => panic!("expected F32, got {other:?}"),
     };
@@ -384,7 +380,7 @@ fn hcompress_lossy_write_round_trips_within_scale() {
     )
     .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
-    let back = match r.read_compressed_image(1).unwrap().samples {
+    let back = match r.read_image(1).unwrap().decode() {
         ImageData::I32(v) => v,
         other => panic!("expected I32, got {other:?}"),
     };
@@ -423,7 +419,7 @@ fn plio_write_round_trips_through_decode() {
     w.write_compressed_image(&image, "PLIO_1", &CompressOptions::default())
         .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
-    match r.read_compressed_image(1).unwrap().samples {
+    match r.read_image(1).unwrap().decode() {
         ImageData::I32(v) => assert_eq!(v, samples, "PLIO_1 round-trip"),
         other => panic!("PLIO_1: expected I32, got {other:?}"),
     }
@@ -438,9 +434,9 @@ fn decompresses_gzip_2_tiled_image() {
 fn decompresses_plio_1_mask() {
     // PLIO fixture encodes value(x, y) = (x + y) % 7 as an i32 mask.
     let mut f = open("comp_plio_i32.fits");
-    let img = f.read_compressed_image(1).unwrap();
+    let img = f.read_image(1).unwrap();
     assert_eq!(img.shape, vec![24, 16]);
-    match img.samples {
+    match img.decode() {
         ImageData::I32(v) => {
             assert_eq!(v.len(), 24 * 16);
             for (i, &got) in v.iter().enumerate() {
@@ -454,7 +450,7 @@ fn decompresses_plio_1_mask() {
 
 /// Compare a compressed-float decode against astropy's reconstructed reference.
 fn check_float(compressed: &str, reference: &str) {
-    let got = match open(compressed).read_compressed_image(1).unwrap().samples {
+    let got = match open(compressed).read_image(1).unwrap().decode() {
         ImageData::F32(v) => v,
         other => panic!("expected F32, got {other:?}"),
     };
@@ -721,11 +717,16 @@ fn read_compressed_table_rejects_a_plain_bintable() {
 }
 
 #[test]
-fn read_compressed_image_rejects_a_plain_bintable() {
+fn reading_a_plain_bintable_as_an_image_is_rejected() {
     // DDTSUVDATA hdu 1 is an ordinary BINTABLE (no ZIMAGE).
     let mut f = open("DDTSUVDATA.fits");
+    // Public path: `read_image` sees a non-ZIMAGE bintable and rejects it as a
+    // non-image (it never reaches the decompressor).
+    assert!(matches!(f.read_image(1), Err(FitsError::NotAnImage)));
+    // The decompressor itself still guards its `ZIMAGE` precondition.
+    let table = f.read_table(1).unwrap();
     assert!(matches!(
-        f.read_compressed_image(1),
+        decompress_image(&f.hdus[1].header, &table),
         Err(FitsError::NotCompressedImage)
     ));
 }
@@ -751,9 +752,9 @@ fn integer_image_compression_preserves_bscale_bzero_and_blank() {
     w.write_compressed_image(&image, "GZIP_1", &CompressOptions::default())
         .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
-    let back = r.read_compressed_image(1).unwrap();
+    let back = r.read_image(1).unwrap();
 
-    match back.samples {
+    match back.decode() {
         ImageData::I16(v) => assert_eq!(v, samples, "raw samples"),
         other => panic!("expected I16, got {other:?}"),
     }
@@ -813,7 +814,7 @@ fn nocompress_image_round_trips() {
     w.write_compressed_image(&image, "NOCOMPRESS", &CompressOptions::default())
         .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
-    match r.read_compressed_image(1).unwrap().samples {
+    match r.read_image(1).unwrap().decode() {
         ImageData::I16(v) => assert_eq!(v, samples),
         other => panic!("expected I16, got {other:?}"),
     }

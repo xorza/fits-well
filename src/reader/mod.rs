@@ -7,8 +7,6 @@ use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
 use crate::block::padded_len;
 use crate::checksum;
-#[cfg(feature = "compression")]
-use crate::data::Image;
 use crate::data::RawImage;
 use crate::data::Scaling;
 use crate::data::shape_product;
@@ -180,21 +178,32 @@ impl<S: Source> FitsReader<S> {
         })
     }
 
-    /// Borrow an HDU's data unit as a [`RawImage`] — the stored big-endian bytes
-    /// viewed in place (over the in-memory source, or the reader's reused scratch for
-    /// a seeking source), plus the shape, `BITPIX`, and [`Scaling`] needed to
-    /// interpret them. **Zero-copy**: nothing is decoded until you ask. Errors with
-    /// [`FitsError::NotAnImage`] for tables, random groups, and unmodelled extensions.
+    /// Read an HDU's image as a [`RawImage`], transparently handling **both** plain
+    /// and tiled-compressed (`ZIMAGE`) images — the caller doesn't need to know which.
+    /// Errors with [`FitsError::NotAnImage`] for tables, random groups, and unmodelled
+    /// extensions.
     ///
-    /// The result borrows the reader, so it can't outlive it and only one is live at
-    /// a time — own what you need first: [`RawImage::u8`] for the zero-copy `BITPIX =
-    /// 8` plane, [`RawImage::decode`] for host-endian samples, [`RawImage::physical`]
-    /// for the scaled plane.
-    ///
-    /// For a tiled-compressed image (`ZIMAGE`), use
-    /// [`FitsReader::read_compressed_image`] instead — it returns an owned [`Image`]
-    /// (the pixels are reconstructed, so there is nothing to borrow).
+    /// A plain image is **zero-copy**: its big-endian bytes are viewed in place over
+    /// the source (or the reader's reused scratch for a seeking source), decoded only
+    /// when you ask. A compressed image is decompressed into an owned buffer (with the
+    /// `compression` feature; without it a `ZIMAGE` HDU reads as a plain `BINTABLE`, so
+    /// this returns [`FitsError::NotAnImage`]). Either way, reach for the samples via
+    /// [`RawImage::u8`] (zero-copy `BITPIX = 8`), [`RawImage::decode`] (host-endian),
+    /// or [`RawImage::physical`] (scaled). The result borrows the reader, so handle
+    /// one image before reading the next.
     pub fn read_image(&mut self, index: usize) -> Result<RawImage<'_>> {
+        // §10.1: a tiled-compressed image is a `BINTABLE` with `ZIMAGE = T`. Route it
+        // through the decompressor so callers see one image API regardless of storage.
+        #[cfg(feature = "compression")]
+        {
+            let hdu = self.checked_hdu(index)?;
+            if hdu.kind == HduKind::BinTable && hdu.header.get_logical("ZIMAGE") == Some(true) {
+                let table = self.read_table(index)?;
+                let img = decompress_image(&self.hdus[index].header, &table)?;
+                return Ok(RawImage::decoded(img.samples, img.shape, img.scaling));
+            }
+        }
+
         let hdu = self.checked_hdu(index)?;
         if !matches!(hdu.kind, HduKind::Primary | HduKind::Image) {
             return Err(FitsError::NotAnImage);
@@ -227,12 +236,7 @@ impl<S: Source> FitsReader<S> {
             shape_product(&shape) * bitpix.elem_size(),
             "image data length must match the axis product"
         );
-        Ok(RawImage {
-            shape,
-            bitpix,
-            scaling,
-            bytes,
-        })
+        Ok(RawImage::raw(shape, bitpix, scaling, bytes))
     }
 
     /// Read a `BINTABLE` extension and parse its column structure. Decode
@@ -272,22 +276,6 @@ impl<S: Source> FitsReader<S> {
             &mut self.scratch,
         )?;
         RandomGroups::from_data(&self.hdus[index].header, &unit[..data_bytes as usize])
-    }
-
-    /// Read a tiled-compressed image (§10.1) — a `BINTABLE` with `ZIMAGE = T` —
-    /// and decompress it into the full [`Image`]. Supports `GZIP_1` and `RICE_1`.
-    /// Requires the `compression` feature.
-    ///
-    /// Returns an **owned** [`Image`] (shape + decoded `samples` + scaling), not the
-    /// borrowed [`RawImage`] that [`FitsReader::read_image`] yields: decompression
-    /// reconstructs the pixels into a fresh buffer, so there is nothing in the source
-    /// to borrow. Use [`Image::physical`]/[`Image::unsigned`] on the result just as
-    /// you would on a `RawImage`.
-    #[cfg(feature = "compression")]
-    pub fn read_compressed_image(&mut self, index: usize) -> Result<Image> {
-        let table = self.read_table(index)?;
-        let header = &self.hdus[index].header;
-        decompress_image(header, &table)
     }
 
     /// Read a tiled-compressed table (§10.3) — a `BINTABLE` with `ZTABLE = T` —

@@ -141,48 +141,117 @@ impl ImageData {
     }
 }
 
-/// A borrowed, **undecoded** image: the data unit's raw big-endian bytes viewed in
-/// place over an in-memory source (zero-copy), with the shape, `BITPIX`, and scaling
-/// needed to interpret them. Returned by [`crate::FitsReader::read_image`] for
-/// the in-memory readers ([`crate::FitsReader::from_bytes`] / `open_mmap`).
+/// An image read from an HDU, in whichever form the reader could give cheaply —
+/// returned by [`crate::FitsReader::read_image`] for *both* plain and tiled-
+/// compressed images, so callers needn't know which they have. Carries the shape,
+/// `BITPIX`, and [`Scaling`]; the pixels are exposed lazily through [`decode`],
+/// [`u8`], [`physical`], and [`unsigned`].
 ///
-/// For `BITPIX = 8` the bytes *are* the host-endian samples (a byte has no byte
-/// order), so [`RawImage::u8`] hands them back with no copy — the no-swap fast path.
-/// Wider element types are stored big-endian and must be swapped into host order, so
-/// use [`RawImage::decode`] (or [`crate::FitsReader::read_image`]) for those.
+/// A **plain** image borrows the data unit's big-endian bytes in place (zero-copy);
+/// a **compressed** one (`ZIMAGE`) holds the reconstructed host-endian samples it had
+/// to decompress. The accessors paper over the difference — e.g. [`u8`] is the
+/// zero-copy `BITPIX = 8` plane either way — so you only reach for [`raw_bytes`] when
+/// you specifically want the undecoded on-disk bytes (plain images only).
+///
+/// [`decode`]: RawImage::decode
+/// [`u8`]: RawImage::u8
+/// [`physical`]: RawImage::physical
+/// [`unsigned`]: RawImage::unsigned
+/// [`raw_bytes`]: RawImage::raw_bytes
 #[derive(Debug)]
 pub struct RawImage<'a> {
     pub shape: Vec<usize>,
     pub bitpix: Bitpix,
     pub scaling: Scaling,
-    /// The meaningful data bytes (`Π(shape) · bitpix.elem_size()`), big-endian.
-    pub bytes: &'a [u8],
+    data: ImageBytes<'a>,
+}
+
+/// The two forms a [`RawImage`]'s pixels can take, by how it was read.
+#[derive(Debug)]
+enum ImageBytes<'a> {
+    /// Plain image: the data unit's big-endian on-disk bytes, viewed in place over
+    /// the source (or the reader's reused scratch for a seeking source).
+    Raw(&'a [u8]),
+    /// Compressed image (`ZIMAGE`): pixels reconstructed into an owned, host-endian
+    /// buffer (only the `compression` feature ever builds this).
+    #[cfg_attr(not(feature = "compression"), allow(dead_code))]
+    Decoded(ImageData),
 }
 
 impl<'a> RawImage<'a> {
-    /// The samples as a borrowed `&[u8]` when no byte-swap is needed (`BITPIX = 8`,
-    /// any host) — the zero-copy `U8` read plane. `None` for multi-byte element
-    /// types, whose big-endian bytes must be swapped (use [`RawImage::decode`]).
-    pub fn u8(&self) -> Option<&'a [u8]> {
-        matches!(self.bitpix, Bitpix::U8).then_some(self.bytes)
+    /// A plain image over borrowed big-endian bytes.
+    pub(crate) fn raw(
+        shape: Vec<usize>,
+        bitpix: Bitpix,
+        scaling: Scaling,
+        bytes: &'a [u8],
+    ) -> RawImage<'a> {
+        RawImage {
+            shape,
+            bitpix,
+            scaling,
+            data: ImageBytes::Raw(bytes),
+        }
     }
 
-    /// Decode into an owned, host-endian [`ImageData`] (byte-swapping the stored
-    /// samples), releasing the borrow on the source.
+    /// A compressed image over its reconstructed, host-endian samples.
+    #[cfg(feature = "compression")]
+    pub(crate) fn decoded(samples: ImageData, shape: Vec<usize>, scaling: Scaling) -> RawImage<'a> {
+        RawImage {
+            shape,
+            bitpix: samples.bitpix(),
+            scaling,
+            data: ImageBytes::Decoded(samples),
+        }
+    }
+
+    /// The host-endian samples. For a plain image this byte-swaps the on-disk bytes
+    /// into an owned buffer; a compressed image's pixels are already decoded (cloned
+    /// out here).
     pub fn decode(&self) -> ImageData {
-        ImageData::decode(self.bytes, self.bitpix)
+        match &self.data {
+            ImageBytes::Raw(bytes) => ImageData::decode(bytes, self.bitpix),
+            ImageBytes::Decoded(samples) => samples.clone(),
+        }
+    }
+
+    /// The samples as a borrowed `&[u8]` when no byte-swap is needed (`BITPIX = 8`):
+    /// a plain image's borrowed on-disk bytes, or a compressed image's decoded `u8`
+    /// buffer. `None` for multi-byte element types — use [`RawImage::decode`].
+    pub fn u8(&self) -> Option<&[u8]> {
+        match &self.data {
+            ImageBytes::Raw(bytes) if self.bitpix == Bitpix::U8 => Some(bytes),
+            ImageBytes::Decoded(ImageData::U8(v)) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The undecoded big-endian on-disk bytes — `Some` only for a **plain** image
+    /// (zero-copy borrow); `None` for a compressed one, whose pixels were
+    /// reconstructed and have no on-disk byte form. Use [`RawImage::decode`] for the
+    /// samples regardless of form.
+    pub fn raw_bytes(&self) -> Option<&[u8]> {
+        match &self.data {
+            ImageBytes::Raw(bytes) => Some(bytes),
+            ImageBytes::Decoded(_) => None,
+        }
     }
 
     /// The physical-plane values: `BZERO + BSCALE × sample`, `BLANK` → `NaN` (§3.4).
-    /// Decodes into an owned buffer first, then scales.
     pub fn physical(&self) -> Vec<f64> {
-        self.decode().physical(&self.scaling)
+        match &self.data {
+            ImageBytes::Raw(bytes) => ImageData::decode(bytes, self.bitpix).physical(&self.scaling),
+            ImageBytes::Decoded(samples) => samples.physical(&self.scaling),
+        }
     }
 
     /// Exact typed integers when the scaling is the FITS unsigned (or signed-byte)
     /// convention; `None` otherwise — same rule as [`Image::unsigned`].
     pub fn unsigned(&self) -> Option<UnsignedView> {
-        self.decode().unsigned(&self.scaling)
+        match &self.data {
+            ImageBytes::Raw(bytes) => ImageData::decode(bytes, self.bitpix).unsigned(&self.scaling),
+            ImageBytes::Decoded(samples) => samples.unsigned(&self.scaling),
+        }
     }
 }
 

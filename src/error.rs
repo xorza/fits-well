@@ -58,8 +58,9 @@ pub enum FitsError {
     NotRandomGroups,
     /// `read_ascii_table` was called on an HDU that is not an ASCII table.
     NotAnAsciiTable,
-    /// `read_compressed_image` was called on an HDU that is not a tiled-compressed
-    /// image (no `ZIMAGE = T`).
+    /// The decompressor was handed an HDU that is not a tiled-compressed image (no
+    /// `ZIMAGE = T`). `read_image` guards this and returns [`FitsError::NotAnImage`]
+    /// for a plain `BINTABLE`, so this surfaces only via the internal decode path.
     NotCompressedImage,
     /// `read_compressed_table` was called on an HDU that is not a tiled-compressed
     /// table (no `ZTABLE = T`).
