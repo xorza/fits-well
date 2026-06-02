@@ -72,6 +72,11 @@ impl Datetime {
             return Err(invalid());
         }
         let year = sign * y_str.parse::<i64>().map_err(|_| invalid())?;
+        // `to_jd` computes `365·(year + 4800)` in `i64`; bound the year so a hostile
+        // DATE can't overflow that. Any real observation/epoch date is far inside ±10⁶.
+        if year.unsigned_abs() > 1_000_000 {
+            return Err(invalid());
+        }
         let month = parse_fixed(m_str, 2).ok_or_else(invalid)?;
         let day = parse_fixed(d_str, 2).ok_or_else(invalid)?;
         if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {

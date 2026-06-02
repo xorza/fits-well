@@ -786,3 +786,15 @@ fn vector_cell_wcs_matches_the_equivalent_image_wcs() {
         );
     }
 }
+
+#[test]
+fn rejects_absurd_wcsaxes() {
+    // WCSAXES is untrusted; a value past the §4.4.1/§8 999-axis limit must be
+    // rejected before it sizes the naxis² matrix or drives the per-axis loops.
+    let mut h = Header::new();
+    h.set("WCSAXES", 1000i64);
+    assert!(matches!(
+        Wcs::from_header(&h, None),
+        Err(FitsError::KeywordOutOfRange { name: "WCSAXES" })
+    ));
+}

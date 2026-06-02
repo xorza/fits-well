@@ -31,6 +31,7 @@
 //! beyond the FITS standard and is intentionally out of scope.
 
 use std::f64::consts::FRAC_PI_2;
+use std::f64::consts::FRAC_PI_4;
 use std::f64::consts::PI;
 use std::f64::consts::SQRT_2;
 
@@ -41,7 +42,6 @@ use crate::keyword::key;
 
 const R2D: f64 = 180.0 / PI;
 const D2R: f64 = PI / 180.0;
-const FRAC_PI_4: f64 = std::f64::consts::FRAC_PI_4;
 
 /// The §8.4 spectral coordinate types (the 4-character `CTYPE` prefix). A bare
 /// type is sampled linearly (handled by the generic linear axis); a `TTTT-AAA`
@@ -683,6 +683,12 @@ impl Wcs {
                 card: "WCSAXES = 0".to_string(),
             });
         }
+        // §4.4.1/§8: at most 999 axes. `naxis` is untrusted and sizes the transform
+        // matrix (`naxis²`) and every per-axis keyword loop below, so bound it like
+        // the table's `TFIELDS` and the reader's `ZNAXIS` before looping/allocating.
+        if naxis > 999 {
+            return Err(FitsError::KeywordOutOfRange { name: "WCSAXES" });
+        }
 
         let ctype: Vec<String> = (1..=naxis)
             .map(|i| {
@@ -944,6 +950,11 @@ impl Wcs {
             });
         if naxis == 0 {
             return Err(FitsError::MissingKeyword { name: "iCTYPn" });
+        }
+        // Bound the untrusted rank before the per-axis synthesis loop below (a hostile
+        // `WCAXna` would otherwise drive an enormous loop); `from_header` re-checks too.
+        if naxis > 999 {
+            return Err(FitsError::KeywordOutOfRange { name: "WCAXn" });
         }
         let mut h = Header::new();
         h.set("WCSAXES", naxis as i64);

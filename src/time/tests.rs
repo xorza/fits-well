@@ -72,12 +72,16 @@ fn iso_8601_strictness() {
         "2024-01-01T06:30:5",   // 1-digit second
         "2024-01-01T06:30:00Z", // forbidden Z designator
         "999-01-01",            // 3-digit year
+        "100000000-01-01",      // year past the ±10⁶ overflow guard (still fits i64)
+        "-100000000-01-01",     // same, negative
     ] {
         assert!(Datetime::parse(bad).is_err(), "{bad:?} should be rejected");
     }
     // Signed / extended years (with their leading zeros) are accepted.
     assert_eq!(Datetime::parse("-0044-03-15").unwrap().year, -44);
     assert_eq!(Datetime::parse("+12024-06-01").unwrap().year, 12024);
+    // A large-but-in-bounds extended year stays accepted (the guard is generous).
+    assert_eq!(Datetime::parse("+999999-06-01").unwrap().year, 999999);
 }
 
 #[test]
