@@ -114,6 +114,12 @@ pub enum FitsError {
         computed: usize,
         declared: usize,
     },
+    /// A requested compression tile shape has a different rank (axis count) than the
+    /// image it tiles. Pass an empty shape for the default row-tiling instead.
+    TileShapeRankMismatch {
+        tile_rank: usize,
+        image_rank: usize,
+    },
 }
 
 impl fmt::Display for FitsError {
@@ -190,6 +196,13 @@ impl fmt::Display for FitsError {
             FitsError::RowWidthMismatch { computed, declared } => write!(
                 f,
                 "column widths sum to {computed} bytes but NAXIS1 declares {declared}"
+            ),
+            FitsError::TileShapeRankMismatch {
+                tile_rank,
+                image_rank,
+            } => write!(
+                f,
+                "tile shape has {tile_rank} axes but the image has {image_rank}"
             ),
         }
     }

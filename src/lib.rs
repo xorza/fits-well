@@ -61,7 +61,7 @@ pub use bitpix::Bitpix;
 /// version-skewed `bitvec` dependency.
 pub use bitvec;
 #[cfg(feature = "compression")]
-pub use compress::CompressOptions;
+pub use compress::{CompressOptions, DitherMethod};
 #[cfg(feature = "ndarray")]
 pub use data::ImageArray;
 pub use data::{Image, ImageData, ImageView, RawImage, SampleType, Scaling, UnsignedView};

@@ -12,6 +12,7 @@
 //! Variable-length (`P`/`Q`) source columns are not supported and are rejected.
 
 use super::HduParts;
+use super::convert;
 use super::gzip;
 use super::map_tiles;
 use super::rice;
@@ -114,7 +115,10 @@ fn pick_algo(kind: TformKind, requested: Algo) -> Algo {
             }
         }
         TformKind::I16 | TformKind::I32 | TformKind::Byte => requested,
-        TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => requested,
+        // `col_meta` rejects array-descriptor columns before `pick_algo` is reached.
+        TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
+            unreachable!("variable-length columns are rejected before algo selection")
+        }
     }
 }
 
@@ -297,15 +301,7 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
             let cell = cells[i % ncols]
                 .get(chunk)
                 .ok_or(FitsError::UnexpectedEof)?;
-            let bytes = match cell {
-                ColumnData::Bytes(b) => b.as_slice(),
-                _ => {
-                    return Err(FitsError::UnsupportedCompression {
-                        name: "compressed table cell is not a byte array".to_string(),
-                    });
-                }
-            };
-            decompress_column(bytes, m, rows)
+            decompress_column(convert::as_bytes(cell)?, m, rows)
         },
     )?;
 
@@ -356,7 +352,11 @@ fn compress_column(cm: &[u8], m: &ColMeta) -> Result<Vec<u8>> {
             let bytepix = m.rice_bytepix().ok_or(FitsError::UnsupportedCompression {
                 name: format!("RICE_1 on a {} column", m.kind.code()),
             })?;
-            rice::rice_encode(&be_to_i64(cm, bytepix), bytepix, 32)
+            rice::rice_encode(
+                &convert::be_to_i64(cm, convert::bytepix_to_bitpix(bytepix)),
+                bytepix,
+                32,
+            )
         }
     })
 }
@@ -373,7 +373,7 @@ fn decompress_column(bytes: &[u8], m: &ColMeta, rows: usize) -> Result<Vec<u8>> 
             let nelem = rows * m.repeat;
             let mut ints = Vec::new();
             rice::rice_decode_into(bytes, nelem, bytepix, 32, &mut ints);
-            i64_to_be(&ints, bytepix)
+            convert::i64_to_be(&ints, convert::bytepix_to_bitpix(bytepix))
         }
     };
     if cm.len() != rows * m.width {
@@ -382,48 +382,6 @@ fn decompress_column(bytes: &[u8], m: &ColMeta, rows: usize) -> Result<Vec<u8>> 
         });
     }
     Ok(cm)
-}
-
-/// Decode big-endian integers of `bytepix` bytes into `i64`, widening in a single
-/// pass. A `B` column is an *unsigned* byte (matching the image RICE path); the
-/// 16/32-bit forms are signed two's-complement. Sign is moot for the RICE round-trip
-/// (the codec masks to the pixel width) but this keeps one convention across paths.
-fn be_to_i64(bytes: &[u8], bytepix: usize) -> Vec<i64> {
-    match bytepix {
-        1 => bytes.iter().map(|&b| b as i64).collect(),
-        2 => bytes
-            .chunks_exact(2)
-            .map(|c| i16::from_be_bytes(c.try_into().unwrap()) as i64)
-            .collect(),
-        _ => bytes
-            .chunks_exact(4)
-            .map(|c| i32::from_be_bytes(c.try_into().unwrap()) as i64)
-            .collect(),
-    }
-}
-
-/// Encode `i64` values as big-endian integers of `bytepix` bytes, narrowing +
-/// packing in a single pass into a buffer grown once.
-fn i64_to_be(vals: &[i64], bytepix: usize) -> Vec<u8> {
-    let mut out = vec![0u8; vals.len() * bytepix];
-    match bytepix {
-        1 => {
-            for (slot, &v) in out.iter_mut().zip(vals) {
-                *slot = v as u8;
-            }
-        }
-        2 => {
-            for (slot, &v) in out.chunks_exact_mut(2).zip(vals) {
-                slot.copy_from_slice(&(v as i16).to_be_bytes());
-            }
-        }
-        _ => {
-            for (slot, &v) in out.chunks_exact_mut(4).zip(vals) {
-                slot.copy_from_slice(&(v as i32).to_be_bytes());
-            }
-        }
-    }
-    out
 }
 
 fn req_int(header: &Header, key: &'static str) -> Result<i64> {

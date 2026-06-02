@@ -13,12 +13,31 @@
 //! raw-gzip fallback for constant tiles. Tiled *table* compression (§10.3) lives in
 //! [`table`] ([`compress_table`]/[`uncompress_table`]).
 
+mod convert;
+mod geometry;
 mod gzip;
 mod hcompress;
 mod plio;
 mod quantize;
 mod rice;
 mod table;
+
+use convert::as_bytes;
+use convert::as_i16;
+use convert::be_floats_into;
+use convert::be_to_i64_into;
+use convert::bytepix_to_bitpix;
+use convert::cell_len;
+use convert::cell_to_f64_into;
+use convert::cell_to_i64_into;
+use convert::float_to_be;
+use convert::gather_f64;
+use convert::gather_i64;
+use convert::i64_to_be;
+use convert::i64_to_be_into;
+use convert::zeroed_samples;
+use geometry::TileGeometry;
+use geometry::TileScratch;
 
 pub(crate) use table::compress_table;
 pub(crate) use table::uncompress_table;
@@ -27,7 +46,6 @@ use crate::bitpix::Bitpix;
 use crate::data::Image;
 use crate::data::ImageData;
 use crate::data::Scaling;
-use crate::endian::encode_be;
 use crate::endian::push_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
@@ -35,6 +53,29 @@ use crate::header::Header;
 use crate::keyword::key;
 use crate::table::BinTable;
 use crate::table::ColumnData;
+
+/// Float-quantization dithering for [`crate::FitsWriter::write_compressed_image`]
+/// (`ZQUANTIZ`, §10.2). Applies only when compressing a float image; the integer
+/// codecs ignore it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DitherMethod {
+    /// `NO_DITHER` — plain linear quantization.
+    None,
+    /// `SUBTRACTIVE_DITHER_1` — per-pixel dither from the shared random sequence
+    /// (cfitsio's default).
+    #[default]
+    Subtractive1,
+    /// `SUBTRACTIVE_DITHER_2` — like `Subtractive1`, but exact zeros are preserved
+    /// (stored as a reserved integer rather than dithered).
+    Subtractive2,
+}
+
+impl DitherMethod {
+    /// Whether this method applies a per-pixel dither (everything but `None`).
+    pub(crate) fn dithered(self) -> bool {
+        !matches!(self, DitherMethod::None)
+    }
+}
 
 /// Write-time tuning for [`crate::FitsWriter::write_compressed_image`]. Each field
 /// applies only to the codecs that use it; the rest ignore it. Every field defaults
@@ -54,6 +95,9 @@ pub struct CompressOptions {
     /// noise/4; larger keeps more precision (and grows the output). Ignored by the
     /// integer codecs.
     pub quantize_level: f64,
+    /// Dithering for float quantization (`ZQUANTIZ`). Defaults to
+    /// `SUBTRACTIVE_DITHER_1`. Ignored by the integer codecs.
+    pub dither: DitherMethod,
 }
 
 impl Default for CompressOptions {
@@ -63,6 +107,7 @@ impl Default for CompressOptions {
             gzip_level: gzip::DEFAULT_GZIP_LEVEL,
             hcompress_scale: 0,
             quantize_level: 0.0,
+            dither: DitherMethod::Subtractive1,
         }
     }
 }
@@ -190,16 +235,16 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
         .unwrap_or("NO_DITHER")
         .to_string();
     let method = match zquantiz.as_str() {
-        "NO_DITHER" => quantize::DitherMethod::None,
-        "SUBTRACTIVE_DITHER_1" => quantize::DitherMethod::Subtractive1,
-        "SUBTRACTIVE_DITHER_2" => quantize::DitherMethod::Subtractive2,
+        "NO_DITHER" => DitherMethod::None,
+        "SUBTRACTIVE_DITHER_1" => DitherMethod::Subtractive1,
+        "SUBTRACTIVE_DITHER_2" => DitherMethod::Subtractive2,
         other => {
             if is_float {
                 return Err(FitsError::UnsupportedCompression {
                     name: format!("float quantization {other}"),
                 });
             }
-            quantize::DitherMethod::None
+            DitherMethod::None
         }
     };
     let zdither0 = header.get_integer("ZDITHER0").unwrap_or(1);
@@ -208,7 +253,7 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
     let zblank_keyword = header.get_integer("ZBLANK");
     let zblank_column = read_i64_column(table, "ZBLANK");
     let smooth = hcompress_smooth(header);
-    let codec = CodecParams {
+    let params = CodecParams {
         blocksize: rice.blocksize,
         bytepix: rice.bytepix,
         smooth,
@@ -231,10 +276,10 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
     // partition the image). Each value is narrowed to `ZBITPIX` as it lands, so there
     // is no whole-image `i64`/`f64` intermediate and no separate serial scatter tail.
     let ctx = DecodeCtx {
-        cmptype: &cmptype,
+        codec: ImageCodec::parse(&cmptype)?,
         zbitpix,
         int_bitpix,
-        codec,
+        params,
     };
     if is_float {
         let decode = |t: usize, s: &TileScratch, out: &mut Vec<f64>, ints: &mut Vec<i64>| {
@@ -428,10 +473,39 @@ struct EncodeScratch {
     be: Vec<u8>,
 }
 
+/// The tiled-image codec selected by `ZCMPTYPE`, parsed once from the keyword string
+/// then matched exhaustively — the image-path counterpart to the table path's `Algo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageCodec {
+    Gzip1,
+    Gzip2,
+    Rice1,
+    Plio1,
+    Hcompress1,
+    NoCompress,
+}
+
+impl ImageCodec {
+    fn parse(s: &str) -> Result<ImageCodec> {
+        Ok(match s {
+            "GZIP_1" => ImageCodec::Gzip1,
+            "GZIP_2" => ImageCodec::Gzip2,
+            "RICE_1" => ImageCodec::Rice1,
+            "PLIO_1" => ImageCodec::Plio1,
+            "HCOMPRESS_1" => ImageCodec::Hcompress1,
+            "NOCOMPRESS" => ImageCodec::NoCompress,
+            other => {
+                return Err(FitsError::UnsupportedCompression {
+                    name: other.to_string(),
+                });
+            }
+        })
+    }
+}
+
 /// Encode an integer [`Image`] as a tiled-compressed `BINTABLE`: returns the
 /// `ZIMAGE` header and the data unit (per-tile `P` descriptors + the heap of
-/// compressed tile bytes). A tile shape of the wrong length falls back to
-/// row-tiling. Float images and codecs without an encoder are rejected.
+/// compressed tile bytes). Float images and codecs without an encoder are rejected.
 pub(crate) fn encode_image(
     image: &Image,
     cmptype: &str,
@@ -442,10 +516,11 @@ pub(crate) fn encode_image(
     if bitpix.is_float() {
         return encode_float_image(image, cmptype, options, out);
     }
+    let codec = ImageCodec::parse(cmptype)?;
     // RICE handles only 1/2/4-byte pixels (cfitsio parity); refuse the 64-bit path
     // rather than silently corrupting. Table 37 lists BYTEPIX 8 as permitted, but
     // neither this encoder nor the decoder implements the 64-bit bitstream.
-    if cmptype == "RICE_1" && bitpix.elem_size() > 4 {
+    if codec == ImageCodec::Rice1 && bitpix.elem_size() > 4 {
         return Err(FitsError::UnsupportedCompression {
             name: "RICE_1 with BYTEPIX > 4 (64-bit pixels)".to_string(),
         });
@@ -453,13 +528,13 @@ pub(crate) fn encode_image(
     // HCOMPRESS is a 32-bit transform; an I64 image would be silently truncated to
     // i32 by the encoder. Refuse it rather than corrupt (I32 stays supported, with
     // the documented "moderate values" caveat against H-transform overflow).
-    if cmptype == "HCOMPRESS_1" && bitpix.elem_size() > 4 {
+    if codec == ImageCodec::Hcompress1 && bitpix.elem_size() > 4 {
         return Err(FitsError::UnsupportedCompression {
             name: "HCOMPRESS_1 with 64-bit pixels".to_string(),
         });
     }
     let dims = &image.shape;
-    let tiles = resolve_tile_shape(dims, &options.tile_shape);
+    let tiles = resolve_tile_shape(dims, &options.tile_shape)?;
 
     let geom = TileGeometry::new(dims, &tiles);
     let ntiles = geom.ntiles();
@@ -480,29 +555,24 @@ pub(crate) fn encode_image(
             &mut s.ints,
         );
         let vals = &s.ints;
-        Ok(match cmptype {
-            "GZIP_1" => {
+        Ok(match codec {
+            ImageCodec::Gzip1 => {
                 i64_to_be_into(vals, bitpix, &mut s.be);
                 TileCell::Bytes(gzip::gzip_encode(&s.be, gzip_level))
             }
-            "GZIP_2" => {
+            ImageCodec::Gzip2 => {
                 i64_to_be_into(vals, bitpix, &mut s.be);
                 TileCell::Bytes(gzip::gzip2_encode(&s.be, bytepix, gzip_level))
             }
-            "RICE_1" => TileCell::Bytes(rice::rice_encode(vals, bytepix, 32)),
-            "PLIO_1" => TileCell::I16(plio::plio_encode(vals, vals.len())),
-            "HCOMPRESS_1" => TileCell::Bytes(hcompress::hcompress_tile_encode(
+            ImageCodec::Rice1 => TileCell::Bytes(rice::rice_encode(vals, bytepix, 32)),
+            ImageCodec::Plio1 => TileCell::I16(plio::plio_encode(vals, vals.len())),
+            ImageCodec::Hcompress1 => TileCell::Bytes(hcompress::hcompress_tile_encode(
                 vals,
                 &s.tile.tdims,
                 scale,
             )?),
             // §10.4: store the tile's raw big-endian pixels, uncompressed.
-            "NOCOMPRESS" => TileCell::Bytes(i64_to_be(vals, bitpix)),
-            other => {
-                return Err(FitsError::UnsupportedCompression {
-                    name: format!("{other} (write)"),
-                });
-            }
+            ImageCodec::NoCompress => TileCell::Bytes(i64_to_be(vals, bitpix)),
         })
     })?;
 
@@ -527,7 +597,7 @@ pub(crate) fn encode_image(
     }
     out.extend_from_slice(&heap);
 
-    let tform_letter = if cmptype == "PLIO_1" { 'I' } else { 'B' };
+    let tform_letter = if codec == ImageCodec::Plio1 { 'I' } else { 'B' };
     let desc = if wide { 'Q' } else { 'P' };
     let mut h = Header::new();
     h.set("XTENSION", "BINTABLE")
@@ -540,12 +610,12 @@ pub(crate) fn encode_image(
     h.set("TTYPE1", "COMPRESSED_DATA");
     h.set("TFORM1", format!("1{desc}{tform_letter}({maxnelem})"));
     set_zimage_axes(&mut h, cmptype, bitpix, dims, &tiles);
-    match cmptype {
-        "RICE_1" => {
+    match codec {
+        ImageCodec::Rice1 => {
             h.set("ZNAME1", "BLOCKSIZE").set("ZVAL1", 32);
             h.set("ZNAME2", "BYTEPIX").set("ZVAL2", bytepix as i64);
         }
-        "HCOMPRESS_1" => {
+        ImageCodec::Hcompress1 => {
             h.set("ZNAME1", "SCALE").set("ZVAL1", scale as i64);
             h.set("ZNAME2", "SMOOTH").set("ZVAL2", 0);
         }
@@ -589,21 +659,25 @@ fn encode_float_image(
     options: &CompressOptions,
     out: &mut Vec<u8>,
 ) -> Result<Header> {
-    if !matches!(cmptype, "GZIP_1" | "GZIP_2" | "RICE_1") {
+    let codec = ImageCodec::parse(cmptype)?;
+    if !matches!(
+        codec,
+        ImageCodec::Gzip1 | ImageCodec::Gzip2 | ImageCodec::Rice1
+    ) {
         return Err(FitsError::UnsupportedCompression {
             name: format!("{cmptype} for float images (write)"),
         });
     }
     let zbitpix = image.samples.bitpix();
     let dims = &image.shape;
-    let tiles = resolve_tile_shape(dims, &options.tile_shape);
+    let tiles = resolve_tile_shape(dims, &options.tile_shape)?;
 
     let geom = TileGeometry::new(dims, &tiles);
     let ntiles = geom.ntiles();
 
     let zdither0 = 1i64; // deterministic dither seed (any 1..=10000 is valid)
     let int_bitpix = Bitpix::I32; // quantized planes are always int32
-    let method = quantize::DitherMethod::Subtractive1; // cfitsio's default
+    let method = options.dither;
     let (gzip_level, qlevel) = (options.gzip_level, options.quantize_level);
 
     // Quantize + compress each tile independently (the compute-bound step —
@@ -629,16 +703,16 @@ fn encode_float_image(
                     Some(q) => {
                         s.ints.clear();
                         s.ints.extend(q.idata.iter().map(|&v| v as i64));
-                        let bytes = match cmptype {
-                            "GZIP_1" => {
+                        let bytes = match codec {
+                            ImageCodec::Gzip1 => {
                                 i64_to_be_into(&s.ints, int_bitpix, &mut s.be);
                                 gzip::gzip_encode(&s.be, gzip_level)
                             }
-                            "GZIP_2" => {
+                            ImageCodec::Gzip2 => {
                                 i64_to_be_into(&s.ints, int_bitpix, &mut s.be);
                                 gzip::gzip2_encode(&s.be, 4, gzip_level)
                             }
-                            "RICE_1" => rice::rice_encode(&s.ints, 4, 32),
+                            ImageCodec::Rice1 => rice::rice_encode(&s.ints, 4, 32),
                             _ => unreachable!(),
                         };
                         FloatTile {
@@ -712,7 +786,7 @@ fn encode_float_image(
     h.set("TTYPE3", "ZSCALE").set("TFORM3", "1D");
     h.set("TTYPE4", "ZZERO").set("TFORM4", "1D");
     set_zimage_axes(&mut h, cmptype, zbitpix, dims, &tiles);
-    if cmptype == "RICE_1" {
+    if codec == ImageCodec::Rice1 {
         h.set("ZNAME1", "BLOCKSIZE").set("ZVAL1", 32);
         h.set("ZNAME2", "BYTEPIX").set("ZVAL2", 4);
     } else {
@@ -730,42 +804,11 @@ fn encode_float_image(
 }
 
 /// The `ZQUANTIZ` keyword string for a dither method.
-fn dither_name(method: quantize::DitherMethod) -> &'static str {
+fn dither_name(method: DitherMethod) -> &'static str {
     match method {
-        quantize::DitherMethod::None => "NO_DITHER",
-        quantize::DitherMethod::Subtractive1 => "SUBTRACTIVE_DITHER_1",
-        quantize::DitherMethod::Subtractive2 => "SUBTRACTIVE_DITHER_2",
-    }
-}
-
-/// Gather a tile's float pixels straight from the typed source into `out`,
-/// widening to `f64` — so float encoding never materializes a whole-image `f64`
-/// buffer. Integer sources yield nothing (they take the integer path).
-fn gather_f64(samples: &ImageData, row_bases: &[usize], row_len: usize, out: &mut Vec<f64>) {
-    out.clear();
-    match samples {
-        ImageData::F32(v) => {
-            for &b in row_bases {
-                out.extend(v[b..b + row_len].iter().map(|&x| x as f64));
-            }
-        }
-        ImageData::F64(v) => {
-            for &b in row_bases {
-                out.extend_from_slice(&v[b..b + row_len]);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Encode `f64` values as a big-endian buffer of `bitpix`-width floats.
-fn float_to_be(vals: &[f64], bitpix: Bitpix) -> Vec<u8> {
-    match bitpix {
-        Bitpix::F32 => encode_be(
-            &vals.iter().map(|&v| v as f32).collect::<Vec<_>>(),
-            f32::to_be_bytes,
-        ),
-        _ => encode_be(vals, f64::to_be_bytes),
+        DitherMethod::None => "NO_DITHER",
+        DitherMethod::Subtractive1 => "SUBTRACTIVE_DITHER_1",
+        DitherMethod::Subtractive2 => "SUBTRACTIVE_DITHER_2",
     }
 }
 
@@ -798,16 +841,21 @@ impl TileCell {
     }
 }
 
-/// Resolve the tile shape for an image: the caller's `tile_shape` (each axis
-/// clamped to ≥1) when it has the right rank, else row-tiling — the first axis
-/// whole, the rest 1.
-fn resolve_tile_shape(dims: &[usize], tile_shape: &[usize]) -> Vec<usize> {
-    if tile_shape.len() == dims.len() {
-        tile_shape.iter().map(|&t| t.max(1)).collect()
-    } else {
-        (0..dims.len())
+/// Resolve the tile shape for an image: an empty `tile_shape` defaults to row-tiling
+/// (the first axis whole, the rest 1); a non-empty one is used as given (each axis
+/// clamped to ≥1) and must match the image rank, else [`FitsError::TileShapeRankMismatch`].
+fn resolve_tile_shape(dims: &[usize], tile_shape: &[usize]) -> Result<Vec<usize>> {
+    if tile_shape.is_empty() {
+        Ok((0..dims.len())
             .map(|i| if i == 0 { dims[i].max(1) } else { 1 })
-            .collect()
+            .collect())
+    } else if tile_shape.len() == dims.len() {
+        Ok(tile_shape.iter().map(|&t| t.max(1)).collect())
+    } else {
+        Err(FitsError::TileShapeRankMismatch {
+            tile_rank: tile_shape.len(),
+            image_rank: dims.len(),
+        })
     }
 }
 
@@ -832,76 +880,6 @@ fn set_zimage_axes(
     for (i, &t) in tiles.iter().enumerate() {
         h.set(key!("ZTILE{}", i + 1).as_str(), t as i64);
     }
-}
-
-/// Gather a tile's integer pixels straight from the typed source into `out`,
-/// widening to `i64` — so integer encoding never materializes a whole-image `i64`
-/// buffer. Float sources yield nothing (they take the quantized float path).
-fn gather_i64(samples: &ImageData, row_bases: &[usize], row_len: usize, out: &mut Vec<i64>) {
-    out.clear();
-    match samples {
-        ImageData::U8(v) => {
-            for &b in row_bases {
-                out.extend(v[b..b + row_len].iter().map(|&x| x as i64));
-            }
-        }
-        ImageData::I16(v) => {
-            for &b in row_bases {
-                out.extend(v[b..b + row_len].iter().map(|&x| x as i64));
-            }
-        }
-        ImageData::I32(v) => {
-            for &b in row_bases {
-                out.extend(v[b..b + row_len].iter().map(|&x| x as i64));
-            }
-        }
-        ImageData::I64(v) => {
-            for &b in row_bases {
-                out.extend_from_slice(&v[b..b + row_len]);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Narrow + pack `i64` values to big-endian `bitpix`-width integers in `out`, in a
-/// single pass (no intermediate narrowed `Vec`). `out` is cleared first, so it can
-/// be a reused scratch buffer. Grows once then writes each `N`-byte slot, the
-/// vectorizable shape [`extend_be`] uses.
-fn i64_to_be_into(vals: &[i64], bitpix: Bitpix, out: &mut Vec<u8>) {
-    out.clear();
-    out.resize(vals.len() * bitpix.elem_size(), 0);
-    match bitpix {
-        Bitpix::U8 => {
-            for (slot, &v) in out.iter_mut().zip(vals) {
-                *slot = v as u8;
-            }
-        }
-        Bitpix::I16 => {
-            for (slot, &v) in out.chunks_exact_mut(2).zip(vals) {
-                slot.copy_from_slice(&(v as i16).to_be_bytes());
-            }
-        }
-        Bitpix::I32 => {
-            for (slot, &v) in out.chunks_exact_mut(4).zip(vals) {
-                slot.copy_from_slice(&(v as i32).to_be_bytes());
-            }
-        }
-        Bitpix::I64 => {
-            for (slot, &v) in out.chunks_exact_mut(8).zip(vals) {
-                slot.copy_from_slice(&v.to_be_bytes());
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Owning form of [`i64_to_be_into`], for the few sites that keep the bytes (the
-/// `NOCOMPRESS` cell is stored verbatim, so it can't share the reused scratch).
-fn i64_to_be(vals: &[i64], bitpix: Bitpix) -> Vec<u8> {
-    let mut out = Vec::new();
-    i64_to_be_into(vals, bitpix, &mut out);
-    out
 }
 
 /// Read a compressed-data column's per-tile cells, or empty if the column is absent.
@@ -989,20 +967,20 @@ struct CodecParams {
 struct Dequant {
     scale: f64,
     zero: f64,
-    method: quantize::DitherMethod,
+    method: DitherMethod,
     irow: i64,
     zblank: Option<i64>,
 }
 
-/// The decode parameters constant across all of a tiled image's tiles: the codec
-/// name, the stored/quantized integer bitpix (and float `ZBITPIX`), and the codec
-/// knobs. Bundled so the per-tile decode helpers take one context rather than a long
+/// The decode parameters constant across all of a tiled image's tiles: the codec,
+/// the stored/quantized integer bitpix (and float `ZBITPIX`), and the codec knobs.
+/// Bundled so the per-tile decode helpers take one context rather than a long
 /// parameter list.
-struct DecodeCtx<'a> {
-    cmptype: &'a str,
+struct DecodeCtx {
+    codec: ImageCodec,
     zbitpix: Bitpix,
     int_bitpix: Bitpix,
-    codec: CodecParams,
+    params: CodecParams,
 }
 
 fn decode_one_tile_into(
@@ -1059,43 +1037,40 @@ fn decode_tile_cell_into(
     tile_elems: usize,
     out: &mut Vec<i64>,
 ) -> Result<()> {
-    let codec = ctx.codec;
-    match ctx.cmptype {
-        "GZIP_1" => gzip::gzip_tile_into(as_bytes(cell)?, ctx.int_bitpix, out),
-        "GZIP_2" => gzip::gzip2_tile_into(as_bytes(cell)?, ctx.int_bitpix, out),
-        "RICE_1" => {
+    let params = ctx.params;
+    match ctx.codec {
+        ImageCodec::Gzip1 => gzip::gzip_tile_into(as_bytes(cell)?, ctx.int_bitpix, out),
+        ImageCodec::Gzip2 => gzip::gzip2_tile_into(as_bytes(cell)?, ctx.int_bitpix, out),
+        ImageCodec::Rice1 => {
             // Only 1/2/4-byte pixels are defined (cfitsio parity). A `BYTEPIX` of
             // 3/5/6/7 from an untrusted header would otherwise decode with mismatched
             // `fsbits`/mask and emit garbage instead of erroring.
-            if !matches!(codec.bytepix, 1 | 2 | 4) {
+            if !matches!(params.bytepix, 1 | 2 | 4) {
                 return Err(FitsError::UnsupportedCompression {
-                    name: format!("RICE_1 with BYTEPIX = {} (only 1/2/4)", codec.bytepix),
+                    name: format!("RICE_1 with BYTEPIX = {} (only 1/2/4)", params.bytepix),
                 });
             }
             rice::rice_decode_into(
                 as_bytes(cell)?,
                 tile_elems,
-                codec.bytepix,
-                codec.blocksize,
+                params.bytepix,
+                params.blocksize,
                 out,
             );
             Ok(())
         }
-        "PLIO_1" => {
+        ImageCodec::Plio1 => {
             plio::plio_decode_into(as_i16(cell)?, tile_elems, out);
             Ok(())
         }
-        "HCOMPRESS_1" => {
-            hcompress::hcompress_tile_into(as_bytes(cell)?, codec.smooth, tile_elems, out)
+        ImageCodec::Hcompress1 => {
+            hcompress::hcompress_tile_into(as_bytes(cell)?, params.smooth, tile_elems, out)
         }
         // §10.4: a tile stored verbatim — the cell is the raw big-endian pixels.
-        "NOCOMPRESS" => {
+        ImageCodec::NoCompress => {
             be_to_i64_into(as_bytes(cell)?, ctx.int_bitpix, out);
             Ok(())
         }
-        other => Err(FitsError::UnsupportedCompression {
-            name: other.to_string(),
-        }),
     }
 }
 
@@ -1112,115 +1087,6 @@ fn hcompress_smooth(header: &Header) -> bool {
     false
 }
 
-/// The tiling of an N-d image: axis lengths, per-axis tile sizes, and the derived
-/// strides and per-axis tile counts. Iterating `0..ntiles()` and calling `tile(t)`
-/// yields each tile's clipped dimensions and flat pixel indices — the geometry
-/// shared by image decompress and both encoders.
-#[derive(Debug)]
-struct TileGeometry {
-    dims: Vec<usize>,
-    tiles: Vec<usize>,
-    stride: Vec<usize>,
-    ntiles_axis: Vec<usize>,
-}
-
-/// Reusable per-tile scratch, filled by [`TileGeometry::tile_into`] each
-/// iteration so a tile loop allocates these buffers once instead of per tile
-/// (the `indices` buffer is `tile_elems` long — the dominant per-tile cost).
-#[derive(Debug, Default)]
-struct TileScratch {
-    /// Per-axis origin of the current tile (scratch for the index computation).
-    origin: Vec<usize>,
-    /// Edge-clipped per-axis extent of the tile (`ny` fastest); used by HCOMPRESS.
-    tdims: Vec<usize>,
-    /// Flat start of each contiguous tile row in the full image (length = the product
-    /// of `tdims[1..]`). Axis 0 has stride 1, so a row is `row_len` contiguous
-    /// elements — gather/scatter copy it as a slice instead of per-pixel indexing.
-    row_bases: Vec<usize>,
-    /// Elements per row (`tdims[0]`): the fastest-axis extent.
-    row_len: usize,
-    /// Per-axis local coordinate, the odometer state [`TileGeometry::tile_into`]
-    /// walks (over the higher axes) to emit `row_bases` without per-pixel division.
-    coord: Vec<usize>,
-}
-
-impl TileScratch {
-    /// Total pixels in the current tile (`row_len × nrows`).
-    fn nelem(&self) -> usize {
-        self.row_len * self.row_bases.len()
-    }
-}
-
-impl TileGeometry {
-    fn new(dims: &[usize], tiles: &[usize]) -> TileGeometry {
-        let n = dims.len();
-        let ntiles_axis = dims
-            .iter()
-            .zip(tiles)
-            .map(|(&d, &t)| d.div_ceil(t))
-            .collect();
-        let mut stride = vec![1usize; n];
-        for i in 1..n {
-            stride[i] = stride[i - 1] * dims[i - 1];
-        }
-        TileGeometry {
-            dims: dims.to_vec(),
-            tiles: tiles.to_vec(),
-            stride,
-            ntiles_axis,
-        }
-    }
-
-    fn ntiles(&self) -> usize {
-        self.ntiles_axis.iter().product()
-    }
-
-    /// Fill `s` (reusing its buffers) with tile `t`'s edge-clipped extent and the
-    /// flat indices of its pixels in the full image.
-    fn tile_into(&self, t: usize, s: &mut TileScratch) {
-        let n = self.dims.len();
-        s.origin.clear();
-        s.tdims.clear();
-        let mut rem = t;
-        for i in 0..n {
-            let ti = rem % self.ntiles_axis[i];
-            rem /= self.ntiles_axis[i];
-            let origin = ti * self.tiles[i];
-            s.origin.push(origin);
-            s.tdims.push(self.tiles[i].min(self.dims[i] - origin));
-        }
-        // Axis 0 has stride 1, so each tile row is `row_len` contiguous elements and the
-        // tile is `nrows` such rows (the product of the higher-axis extents). Emit only
-        // the row starts — walking the *higher* axes as an odometer, `flat` maintained
-        // by stride adds with no per-pixel division — and let gather/scatter copy each
-        // row as a contiguous slice. The row order matches a row-major pixel walk, so
-        // decoded values still land in the right pixels.
-        s.row_len = if n == 0 { 1 } else { s.tdims[0] };
-        let nrows: usize = if n <= 1 {
-            1
-        } else {
-            s.tdims[1..].iter().product()
-        };
-        let mut flat: usize = (0..n).map(|i| s.origin[i] * self.stride[i]).sum();
-        s.row_bases.clear();
-        s.row_bases.reserve(nrows);
-        s.coord.clear();
-        s.coord.resize(n, 0);
-        for _ in 0..nrows {
-            s.row_bases.push(flat);
-            for i in 1..n {
-                s.coord[i] += 1;
-                flat += self.stride[i];
-                if s.coord[i] < s.tdims[i] {
-                    break;
-                }
-                s.coord[i] = 0;
-                flat -= s.tdims[i] * self.stride[i];
-            }
-        }
-    }
-}
-
 /// Read `PREFIX1..PREFIXn` integer axis lengths.
 fn read_axes(header: &Header, prefix: &str, n: usize) -> Result<Vec<usize>> {
     (1..=n)
@@ -1230,125 +1096,6 @@ fn read_axes(header: &Header, prefix: &str, n: usize) -> Result<Vec<usize>> {
             None => Err(FitsError::MissingKeyword { name: "ZNAXISn" }),
         })
         .collect()
-}
-
-fn cell_len(cell: &ColumnData) -> usize {
-    match cell {
-        ColumnData::Bytes(v) => v.len(),
-        ColumnData::I16(v) => v.len(),
-        ColumnData::I32(v) => v.len(),
-        ColumnData::I64(v) => v.len(),
-        _ => 0,
-    }
-}
-
-fn as_bytes(cell: &ColumnData) -> Result<&[u8]> {
-    match cell {
-        ColumnData::Bytes(b) => Ok(b),
-        _ => Err(FitsError::UnsupportedCompression {
-            name: "compressed cell is not a byte array".to_string(),
-        }),
-    }
-}
-
-fn as_i16(cell: &ColumnData) -> Result<&[i16]> {
-    match cell {
-        ColumnData::I16(v) => Ok(v),
-        _ => Err(FitsError::UnsupportedCompression {
-            name: "PLIO_1 data is not an i16 list".to_string(),
-        }),
-    }
-}
-
-/// Widen a raw (`UNCOMPRESSED_DATA`) tile cell to `i64` values.
-fn cell_to_i64_into(cell: &ColumnData, out: &mut Vec<i64>) {
-    out.clear();
-    match cell {
-        ColumnData::Bytes(v) => out.extend(v.iter().map(|&b| b as i64)),
-        ColumnData::I16(v) => out.extend(v.iter().map(|&x| x as i64)),
-        ColumnData::I32(v) => out.extend(v.iter().map(|&x| x as i64)),
-        ColumnData::I64(v) => out.extend_from_slice(v),
-        _ => {}
-    }
-}
-
-/// Widen a raw (`UNCOMPRESSED_DATA`) float tile cell to `f64` in `out`.
-fn cell_to_f64_into(cell: &ColumnData, zbitpix: Bitpix, out: &mut Vec<f64>) {
-    out.clear();
-    match cell {
-        ColumnData::F32(v) => out.extend(v.iter().map(|&x| x as f64)),
-        ColumnData::F64(v) => out.extend_from_slice(v),
-        ColumnData::Bytes(b) => be_floats_into(b, zbitpix, out),
-        _ => {}
-    }
-}
-
-/// Decode a big-endian buffer of `bitpix` integers into widened `i64` values in `out`
-/// (cleared first). Single pass — no intermediate narrowed `Vec`; the
-/// `from_be_bytes` + `as i64` closure inlines and vectorizes like `decode_be`.
-fn be_to_i64_into(bytes: &[u8], bitpix: Bitpix, out: &mut Vec<i64>) {
-    out.clear();
-    match bitpix {
-        Bitpix::U8 => out.extend(bytes.iter().map(|&b| b as i64)),
-        Bitpix::I16 => out.extend(
-            bytes
-                .chunks_exact(2)
-                .map(|c| i16::from_be_bytes(c.try_into().unwrap()) as i64),
-        ),
-        Bitpix::I32 => out.extend(
-            bytes
-                .chunks_exact(4)
-                .map(|c| i32::from_be_bytes(c.try_into().unwrap()) as i64),
-        ),
-        Bitpix::I64 => out.extend(
-            bytes
-                .chunks_exact(8)
-                .map(|c| i64::from_be_bytes(c.try_into().unwrap())),
-        ),
-        Bitpix::F32 | Bitpix::F64 => {} // excluded before this point
-    }
-}
-
-/// Decode a big-endian buffer of `bitpix` floats into `f64` in `out`, widening in one
-/// pass.
-fn be_floats_into(bytes: &[u8], bitpix: Bitpix, out: &mut Vec<f64>) {
-    out.clear();
-    match bitpix {
-        Bitpix::F32 => out.extend(
-            bytes
-                .chunks_exact(4)
-                .map(|c| f32::from_be_bytes(c.try_into().unwrap()) as f64),
-        ),
-        Bitpix::F64 => out.extend(
-            bytes
-                .chunks_exact(8)
-                .map(|c| f64::from_be_bytes(c.try_into().unwrap())),
-        ),
-        _ => {}
-    }
-}
-
-fn bytepix_to_bitpix(bytepix: usize) -> Bitpix {
-    match bytepix {
-        1 => Bitpix::U8,
-        2 => Bitpix::I16,
-        8 => Bitpix::I64,
-        _ => Bitpix::I32,
-    }
-}
-
-/// A zeroed typed sample buffer of `len` elements — the decompression output the
-/// tiles scatter into (narrowing as they land), so there is no whole-image `i64`
-/// or `f64` intermediate to narrow afterwards.
-fn zeroed_samples(bitpix: Bitpix, len: usize) -> ImageData {
-    match bitpix {
-        Bitpix::U8 => ImageData::U8(vec![0; len]),
-        Bitpix::I16 => ImageData::I16(vec![0; len]),
-        Bitpix::I32 => ImageData::I32(vec![0; len]),
-        Bitpix::I64 => ImageData::I64(vec![0; len]),
-        Bitpix::F32 => ImageData::F32(vec![0.0; len]),
-        Bitpix::F64 => ImageData::F64(vec![0.0; len]),
-    }
 }
 
 #[cfg(test)]

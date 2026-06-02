@@ -271,6 +271,83 @@ fn float_quantize_write_round_trips_within_tolerance() {
 }
 
 #[test]
+fn dither_option_sets_zquantiz_and_round_trips() {
+    use crate::data::{Image, ImageData, Scaling};
+    use crate::writer::FitsWriter;
+    use std::io::Cursor;
+
+    let image = Image {
+        shape: vec![24, 16],
+        samples: ImageData::F32(float_field()),
+        scaling: Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    };
+    // Each `DitherMethod` writes its `ZQUANTIZ` keyword and round-trips; the option is
+    // honored rather than always emitting the hardcoded SUBTRACTIVE_DITHER_1.
+    for (dither, zquantiz) in [
+        (DitherMethod::None, "NO_DITHER"),
+        (DitherMethod::Subtractive1, "SUBTRACTIVE_DITHER_1"),
+        (DitherMethod::Subtractive2, "SUBTRACTIVE_DITHER_2"),
+    ] {
+        let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+        w.write_compressed_image(
+            &image,
+            "RICE_1",
+            &CompressOptions {
+                dither,
+                ..CompressOptions::tiled([24, 16])
+            },
+        )
+        .unwrap();
+        let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+        assert_eq!(
+            r.hdus()[1].header.get_text("ZQUANTIZ"),
+            Some(zquantiz),
+            "{dither:?} must write {zquantiz}"
+        );
+        match r.read_image(1).unwrap().decode() {
+            ImageData::F32(v) => assert_eq!(v.len(), 24 * 16, "{dither:?}"),
+            other => panic!("{dither:?}: expected F32, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn tile_shape_with_wrong_rank_is_rejected() {
+    use crate::data::{Image, ImageData, Scaling};
+    use crate::error::FitsError;
+    use crate::writer::FitsWriter;
+    use std::io::Cursor;
+
+    // A 2-D image with a 3-axis tile shape: a wrong-rank request errors rather than
+    // silently row-tiling (an empty shape is still the row-tiling default).
+    let image = Image {
+        shape: vec![4, 3],
+        samples: ImageData::I16((0..12).map(|i| i as i16).collect()),
+        scaling: Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    };
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    let err = w.write_compressed_image(&image, "RICE_1", &CompressOptions::tiled([2, 2, 2]));
+    assert!(
+        matches!(
+            err,
+            Err(FitsError::TileShapeRankMismatch {
+                tile_rank: 3,
+                image_rank: 2,
+            })
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
 fn float_write_preserves_nan_nulls() {
     use crate::data::{Image, ImageData, Scaling};
     use crate::writer::FitsWriter;
@@ -307,7 +384,8 @@ fn float_write_preserves_nan_nulls() {
 
 #[test]
 fn dither2_quantize_round_trips() {
-    use super::quantize::{DitherMethod, dequantize_into, quantize_tile};
+    use super::DitherMethod;
+    use super::quantize::{dequantize_into, quantize_tile};
 
     // 8×8 field with genuine noise and a scattering of exact zeros.
     let mut data: Vec<f64> = (0..64)

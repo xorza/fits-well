@@ -9,6 +9,8 @@
 
 use std::sync::OnceLock;
 
+use super::DitherMethod;
+
 const N_RANDOM: usize = 10000;
 const N_RESERVED_VALUES: f64 = 10.0;
 const INT_MAX: f64 = 2147483647.0;
@@ -17,23 +19,6 @@ const INT_MAX: f64 = 2147483647.0;
 pub(super) const NULL_VALUE: i32 = -2147483647;
 /// Quantized integer reserved by `SUBTRACTIVE_DITHER_2` to mark exact zero.
 pub(super) const ZERO_VALUE: i32 = -2147483646;
-
-/// Float quantization dithering method (`ZQUANTIZ`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DitherMethod {
-    /// `NO_DITHER` — plain linear quantization.
-    None,
-    /// `SUBTRACTIVE_DITHER_1` — per-pixel dither from the random sequence.
-    Subtractive1,
-    /// `SUBTRACTIVE_DITHER_2` — like 1, but exact zeros map to [`ZERO_VALUE`].
-    Subtractive2,
-}
-
-impl DitherMethod {
-    fn dithered(self) -> bool {
-        !matches!(self, DitherMethod::None)
-    }
-}
 
 /// The shared dither sequence (cfitsio `fits_init_randoms`): a Park–Miller
 /// minstd generator (`a = 16807`, `m = 2³¹−1`) seeded at 1, scaled to `[0, 1)`.
