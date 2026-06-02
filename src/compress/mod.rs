@@ -140,7 +140,14 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
 
     let znaxis = header
         .get_integer("ZNAXIS")
-        .ok_or(FitsError::MissingKeyword { name: "ZNAXIS" })? as usize;
+        .ok_or(FitsError::MissingKeyword { name: "ZNAXIS" })?;
+    // `ZNAXIS` is untrusted; cap it like the uncompressed `NAXIS` path (§4.4.1) so a
+    // negative value can't wrap through `as usize` and a huge one can't drive the
+    // per-axis keyword loops below.
+    if !(0..=999).contains(&znaxis) {
+        return Err(FitsError::KeywordOutOfRange { name: "ZNAXIS" });
+    }
+    let znaxis = znaxis as usize;
     let dims = read_axes(header, "ZNAXIS", znaxis)?;
     // A `ZNAXIS = 0` ZIMAGE has no data array (as an uncompressed `NAXIS = 0` does).
     // Return empty before building the geometry, which would otherwise size `total`
@@ -441,6 +448,14 @@ pub(crate) fn encode_image(
     if cmptype == "RICE_1" && bitpix.elem_size() > 4 {
         return Err(FitsError::UnsupportedCompression {
             name: "RICE_1 with BYTEPIX > 4 (64-bit pixels)".to_string(),
+        });
+    }
+    // HCOMPRESS is a 32-bit transform; an I64 image would be silently truncated to
+    // i32 by the encoder. Refuse it rather than corrupt (I32 stays supported, with
+    // the documented "moderate values" caveat against H-transform overflow).
+    if cmptype == "HCOMPRESS_1" && bitpix.elem_size() > 4 {
+        return Err(FitsError::UnsupportedCompression {
+            name: "HCOMPRESS_1 with 64-bit pixels".to_string(),
         });
     }
     let dims = &image.shape;
