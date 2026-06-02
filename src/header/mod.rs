@@ -40,6 +40,20 @@ pub struct Header {
     index: HashMap<String, usize>,
 }
 
+/// A read-only view of one stored header record, yielded by [`Header::iter`].
+///
+/// `value` is `None` for commentary (`COMMENT`/`HISTORY`/blank-keyword) cards and
+/// `Some` for valued ones — that distinction is all a caller needs, so the internal
+/// `CardKind` (which also tags transient parse states) stays private. `comment`
+/// carries the inline `/`-comment of a valued card, or the whole free text of a
+/// commentary card.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeaderEntry<'a> {
+    pub keyword: &'a str,
+    pub value: Option<&'a Value>,
+    pub comment: Option<&'a str>,
+}
+
 impl Header {
     /// Parse a header unit from its raw bytes (a whole number of 80-byte cards;
     /// the reader supplies block-aligned input). Stops at the `END` record.
@@ -99,6 +113,19 @@ impl Header {
 
     pub fn get_text(&self, keyword: &str) -> Option<&str> {
         self.get(keyword)?.as_text()
+    }
+
+    /// Every stored record in file order, as [`HeaderEntry`] views — duplicates and
+    /// order preserved (the whole point of the ordered model), so `COMMENT`/`HISTORY`
+    /// runs and repeated keywords come through intact. The implicit `END` is not a
+    /// record and is never yielded. For valued keywords only, filter on
+    /// `e.value`: `header.iter().filter_map(|e| Some((e.keyword, e.value?)))`.
+    pub fn iter(&self) -> impl Iterator<Item = HeaderEntry<'_>> {
+        self.cards.iter().map(|c| HeaderEntry {
+            keyword: c.keyword.as_str(),
+            value: c.value.as_ref(),
+            comment: c.comment.as_deref(),
+        })
     }
 
     /// `BITPIX`, mapped to the typed element kind.

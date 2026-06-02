@@ -50,6 +50,37 @@ fn keyword_lookup_returns_first_occurrence() {
 }
 
 #[test]
+fn iter_yields_every_record_in_order_with_duplicates() {
+    let h = sample();
+    let entries: Vec<_> = h.iter().collect();
+
+    // Every stored card, END excluded — same count `end_is_implicit` checks.
+    assert_eq!(entries.len(), 8);
+    let keywords: Vec<&str> = entries.iter().map(|e| e.keyword).collect();
+    assert_eq!(
+        keywords,
+        [
+            "SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "OBJECT", "COMMENT", "OBJECT"
+        ]
+    );
+
+    // A valued card carries its Value; the commentary card carries text, no value.
+    assert_eq!(entries[0].value.and_then(|v| v.as_logical()), Some(true)); // SIMPLE = T
+    assert_eq!(entries[6].keyword, "COMMENT");
+    assert_eq!(entries[6].value, None);
+    // Commentary text starts at column 9, so the leading space is significant.
+    assert_eq!(entries[6].comment, Some(" some annotation"));
+
+    // Duplicates are preserved in order — unlike `get`, which collapses to the first.
+    assert_eq!(
+        entries[5].value.and_then(|v| v.as_text()),
+        Some("Cygnus X-1")
+    );
+    assert_eq!(entries[7].value.and_then(|v| v.as_text()), Some("shadowed"));
+    assert_eq!(h.get_text("OBJECT"), Some("Cygnus X-1"));
+}
+
+#[test]
 fn continue_records_reassemble_a_long_string() {
     let h = Header::parse(&header_bytes(&[
         "WEATHER = 'Partly cloudy during the evening f&'",
