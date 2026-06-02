@@ -246,16 +246,32 @@ pub(super) fn bytepix_to_bitpix(bytepix: usize) -> Bitpix {
     }
 }
 
+/// Allocate a zero-filled `Vec<T>` of `len` elements, failing with
+/// [`FitsError::DataUnitTooLarge`] instead of aborting the process when `len`
+/// (driven by an untrusted `ZNAXISn`/`ZNAXIS2`) is too large for the allocator.
+/// `try_reserve_exact` turns the would-be out-of-memory abort into a recoverable
+/// error — and also rejects a capacity whose byte size overflows `isize`.
+pub(super) fn try_zeroed<T: Clone>(value: T, len: usize) -> Result<Vec<T>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(len)
+        .map_err(|_| FitsError::DataUnitTooLarge {
+            bytes: len.saturating_mul(std::mem::size_of::<T>()),
+        })?;
+    v.resize(len, value);
+    Ok(v)
+}
+
 /// A zeroed typed sample buffer of `len` elements — the decompression output the
 /// tiles scatter into (narrowing as they land), so there is no whole-image `i64`
-/// or `f64` intermediate to narrow afterwards.
-pub(super) fn zeroed_samples(bitpix: Bitpix, len: usize) -> ImageData {
-    match bitpix {
-        Bitpix::U8 => ImageData::U8(vec![0; len]),
-        Bitpix::I16 => ImageData::I16(vec![0; len]),
-        Bitpix::I32 => ImageData::I32(vec![0; len]),
-        Bitpix::I64 => ImageData::I64(vec![0; len]),
-        Bitpix::F32 => ImageData::F32(vec![0.0; len]),
-        Bitpix::F64 => ImageData::F64(vec![0.0; len]),
-    }
+/// or `f64` intermediate to narrow afterwards. Allocated fallibly (see
+/// [`try_zeroed`]): `len` comes from untrusted dimension keywords.
+pub(super) fn zeroed_samples(bitpix: Bitpix, len: usize) -> Result<ImageData> {
+    Ok(match bitpix {
+        Bitpix::U8 => ImageData::U8(try_zeroed(0u8, len)?),
+        Bitpix::I16 => ImageData::I16(try_zeroed(0i16, len)?),
+        Bitpix::I32 => ImageData::I32(try_zeroed(0i32, len)?),
+        Bitpix::I64 => ImageData::I64(try_zeroed(0i64, len)?),
+        Bitpix::F32 => ImageData::F32(try_zeroed(0.0f32, len)?),
+        Bitpix::F64 => ImageData::F64(try_zeroed(0.0f64, len)?),
+    })
 }

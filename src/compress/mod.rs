@@ -200,7 +200,7 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
     if dims.is_empty() {
         return Ok(Image {
             shape: dims,
-            samples: zeroed_samples(zbitpix, 0),
+            samples: zeroed_samples(zbitpix, 0)?,
             scaling: Scaling::from_header(header),
         });
     }
@@ -269,7 +269,7 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
 
     let geom = TileGeometry::new(&dims, &tiles);
     let ntiles = geom.ntiles();
-    let mut samples = zeroed_samples(zbitpix, total);
+    let mut samples = zeroed_samples(zbitpix, total)?;
 
     // Decode and scatter each tile in one fused pass — parallel under the `parallel`
     // feature, where tiles write disjoint regions of `samples` concurrently (they
@@ -1001,7 +1001,9 @@ fn decode_one_tile_into(
 ) -> Result<()> {
     match cols.resolve()? {
         TileSource::Compressed(cell) => decode_tile_cell_into(ctx, cell, tile_elems, out),
-        TileSource::Gzip(cell) => gzip::gzip_tile_into(as_bytes(cell)?, ctx.int_bitpix, out),
+        TileSource::Gzip(cell) => {
+            gzip::gzip_tile_into(as_bytes(cell)?, ctx.int_bitpix, tile_elems, out)
+        }
         TileSource::Uncompressed(cell) => {
             cell_to_i64_into(cell, out);
             Ok(())
@@ -1029,7 +1031,9 @@ fn decode_float_tile_into(
             Ok(())
         }
         TileSource::Gzip(cell) => {
-            be_floats_into(&gzip::gunzip(as_bytes(cell)?)?, ctx.zbitpix, out);
+            // Raw floats, bounded at the tile's known byte size (`tile_elems` floats).
+            let max = tile_elems.saturating_mul(ctx.zbitpix.elem_size());
+            be_floats_into(&gzip::gunzip(as_bytes(cell)?, max)?, ctx.zbitpix, out);
             Ok(())
         }
         TileSource::Uncompressed(cell) => {
@@ -1049,8 +1053,10 @@ fn decode_tile_cell_into(
 ) -> Result<()> {
     let params = ctx.params;
     match ctx.codec {
-        ImageCodec::Gzip1 => gzip::gzip_tile_into(as_bytes(cell)?, ctx.int_bitpix, out),
-        ImageCodec::Gzip2 => gzip::gzip2_tile_into(as_bytes(cell)?, ctx.int_bitpix, out),
+        ImageCodec::Gzip1 => gzip::gzip_tile_into(as_bytes(cell)?, ctx.int_bitpix, tile_elems, out),
+        ImageCodec::Gzip2 => {
+            gzip::gzip2_tile_into(as_bytes(cell)?, ctx.int_bitpix, tile_elems, out)
+        }
         ImageCodec::Rice1 => {
             // Only 1/2/4-byte pixels are defined (cfitsio parity). A `BYTEPIX` of
             // 3/5/6/7 from an untrusted header would otherwise decode with mismatched

@@ -1040,6 +1040,59 @@ fn uncompress_table_rejects_overflowing_row_product() {
 }
 
 #[test]
+fn decompress_image_rejects_oversized_znaxis_product() {
+    use crate::error::FitsError;
+    use crate::header::Header;
+    use crate::table::BinTable;
+    // ZNAXIS1 = 2^60 does NOT overflow usize (so the overflow guard passes), but
+    // allocating that many bytes would abort the process. The output plane is
+    // allocated fallibly (`try_reserve`), so decode must return a recoverable error.
+    let mut h = Header::new();
+    h.set("XTENSION", "BINTABLE")
+        .set("BITPIX", 8)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 8)
+        .set("NAXIS2", 1)
+        .set("PCOUNT", 0)
+        .set("GCOUNT", 1)
+        .set("TFIELDS", 1)
+        .set("TFORM1", "1PB(0)")
+        .set("TTYPE1", "COMPRESSED_DATA")
+        .set("ZIMAGE", true)
+        .set("ZCMPTYPE", "GZIP_1")
+        .set("ZBITPIX", 8)
+        .set("ZNAXIS", 1)
+        .set("ZNAXIS1", 1i64 << 60);
+    let mut data = Vec::new();
+    data.extend_from_slice(&0i32.to_be_bytes()); // empty P descriptor: nelem
+    data.extend_from_slice(&0i32.to_be_bytes()); // offset
+    let table = BinTable::from_data(&h, data).unwrap();
+    assert!(matches!(
+        decompress_image(&h, &table),
+        Err(FitsError::DataUnitTooLarge { .. })
+    ));
+}
+
+#[test]
+fn gunzip_rejects_a_stream_larger_than_its_tile() {
+    use crate::error::FitsError;
+    // A decompression bomb: a tiny gzip stream inflating far past the tile's known
+    // byte size must be rejected, not allocated unbounded.
+    let big = vec![0u8; 100_000];
+    let bomb = super::gzip::gzip_encode(&big, 9);
+    assert!(bomb.len() < 1000, "an all-zero buffer compresses tiny");
+    // Bounded at 1 KiB (a small tile): inflating to 100 KB overruns → error.
+    assert!(matches!(
+        super::gzip::gunzip(&bomb, 1024),
+        Err(FitsError::UnsupportedCompression { .. })
+    ));
+    // One byte short of the true size still overruns (the +1 detection boundary).
+    assert!(super::gzip::gunzip(&bomb, big.len() - 1).is_err());
+    // Bounded at the true size: decodes to exactly the original bytes.
+    assert_eq!(super::gzip::gunzip(&bomb, big.len()).unwrap(), big);
+}
+
+#[test]
 fn i64_be_round_trip_and_buffer_reuse() {
     // I16: narrowing (`as i16`) then big-endian packing, hand-computed. -1 → 0xFFFF,
     // 258 → 0x0102, -2 → 0xFFFE.

@@ -308,7 +308,8 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
 
     // Transpose back: scatter each tile's column-major bytes into the output rows
     // (disjoint byte ranges per (chunk, column), so the order is free to vary).
-    let mut out = vec![0u8; total];
+    // `total` comes from untrusted `ZNAXIS2`/`ZNAXIS1`, so allocate it fallibly.
+    let mut out = convert::try_zeroed(0u8, total)?;
     for (i, cm) in decompressed.iter().enumerate() {
         let chunk = i / ncols;
         let m = &metas[i % ncols];
@@ -364,9 +365,13 @@ fn compress_column(cm: &[u8], m: &ColMeta) -> Result<Vec<u8>> {
 
 /// Decompress one tile's column cell back to `rows × width` column-major bytes.
 fn decompress_column(bytes: &[u8], m: &ColMeta, rows: usize) -> Result<Vec<u8>> {
+    // The decompressed column is exactly this many bytes; bound the gzip inflate at it
+    // so a crafted cell can't expand unbounded (`rows × width ≤ ZNAXIS2 × ZNAXIS1`,
+    // already checked non-overflowing by the caller).
+    let expect = rows * m.width;
     let cm = match m.algo {
-        Algo::Gzip1 => gzip::gunzip(bytes)?,
-        Algo::Gzip2 => gzip::unshuffle_bytes(&gzip::gunzip(bytes)?, m.shuffle_width()),
+        Algo::Gzip1 => gzip::gunzip(bytes, expect)?,
+        Algo::Gzip2 => gzip::unshuffle_bytes(&gzip::gunzip(bytes, expect)?, m.shuffle_width()),
         Algo::Rice1 => {
             let bytepix = m.rice_bytepix().ok_or(FitsError::UnsupportedCompression {
                 name: format!("RICE_1 on a {} column", m.kind.code()),
@@ -377,7 +382,7 @@ fn decompress_column(bytes: &[u8], m: &ColMeta, rows: usize) -> Result<Vec<u8>> 
             convert::i64_to_be(&ints, convert::bytepix_to_bitpix(bytepix))
         }
     };
-    if cm.len() != rows * m.width {
+    if cm.len() != expect {
         return Err(FitsError::UnsupportedCompression {
             name: "decompressed column size mismatch".to_string(),
         });

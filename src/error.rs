@@ -35,6 +35,14 @@ pub enum FitsError {
     /// The data-unit size implied by the header overflows a 64-bit byte count
     /// (a malformed or hostile header with absurd `NAXISn`/`PCOUNT`/`GCOUNT`).
     DataUnitOverflow,
+    /// The data-unit size implied by the header is non-overflowing but too large to
+    /// allocate — a malformed or hostile header declaring an absurd (yet in-range)
+    /// `NAXISn`/`ZNAXISn`/`ZNAXIS2`. The output buffer is allocated fallibly
+    /// (`try_reserve`), so this surfaces as a recoverable error rather than an
+    /// out-of-memory process abort.
+    DataUnitTooLarge {
+        bytes: usize,
+    },
     /// A decoded data unit held a different element count than the header's
     /// declared geometry — a corrupt or truncated data unit.
     DataSizeMismatch {
@@ -140,6 +148,12 @@ impl fmt::Display for FitsError {
             FitsError::DataUnitOverflow => {
                 write!(f, "header-implied data-unit size overflows 64 bits")
             }
+            FitsError::DataUnitTooLarge { bytes } => {
+                write!(
+                    f,
+                    "header-implied data-unit size ({bytes} bytes) is too large to allocate"
+                )
+            }
             FitsError::DataSizeMismatch { expected, got } => {
                 write!(
                     f,
@@ -236,6 +250,10 @@ mod tests {
         assert_eq!(
             FitsError::DataUnitOverflow.to_string(),
             "header-implied data-unit size overflows 64 bits"
+        );
+        assert_eq!(
+            FitsError::DataUnitTooLarge { bytes: 1 << 60 }.to_string(),
+            "header-implied data-unit size (1152921504606846976 bytes) is too large to allocate"
         );
         assert_eq!(
             FitsError::MissingKeyword { name: "NAXIS" }.to_string(),

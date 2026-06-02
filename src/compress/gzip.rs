@@ -4,6 +4,7 @@ use std::io::Read;
 use std::io::Write;
 
 use crate::bitpix::Bitpix;
+use crate::error::FitsError;
 use crate::error::Result;
 
 use super::be_to_i64_into;
@@ -58,24 +59,52 @@ pub(super) fn unshuffle_bytes(shuffled: &[u8], width: usize) -> Vec<u8> {
     out
 }
 
-/// Inflate a gzip stream to its raw bytes.
-pub(super) fn gunzip(bytes: &[u8]) -> Result<Vec<u8>> {
+/// Inflate a gzip stream, capping the output at `max_out` bytes — the tile's known
+/// decompressed size. A stream that expands past that (a decompression bomb in an
+/// untrusted file) is rejected rather than driving an unbounded allocation; a shorter
+/// result is left to the caller's downstream size handling (lenient for image tiles,
+/// exact-checked for table columns).
+pub(super) fn gunzip(bytes: &[u8], max_out: usize) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    flate2::read::GzDecoder::new(bytes).read_to_end(&mut out)?;
+    // Read at most one byte past the limit: getting that extra byte proves the stream
+    // is larger than the tile claims to be, so reject it.
+    flate2::read::GzDecoder::new(bytes)
+        .take(max_out.saturating_add(1) as u64)
+        .read_to_end(&mut out)?;
+    if out.len() > max_out {
+        return Err(FitsError::UnsupportedCompression {
+            name: "gzip tile expands beyond its declared tile size".to_string(),
+        });
+    }
     Ok(out)
 }
 
 /// `GZIP_1`: inflate to the tile's big-endian byte stream, then decode per `bitpix`
-/// into `out` (a reused buffer).
-pub(super) fn gzip_tile_into(bytes: &[u8], bitpix: Bitpix, out: &mut Vec<i64>) -> Result<()> {
-    be_to_i64_into(&gunzip(bytes)?, bitpix, out);
+/// into `out` (a reused buffer). The tile holds `tile_elems` values, bounding the
+/// inflated size at `tile_elems × bitpix` bytes.
+pub(super) fn gzip_tile_into(
+    bytes: &[u8],
+    bitpix: Bitpix,
+    tile_elems: usize,
+    out: &mut Vec<i64>,
+) -> Result<()> {
+    let raw = gunzip(bytes, tile_elems.saturating_mul(bitpix.elem_size()))?;
+    be_to_i64_into(&raw, bitpix, out);
     Ok(())
 }
 
 /// `GZIP_2`: like `GZIP_1` but the bytes are shuffled into significance planes
 /// (all most-significant bytes first, …) before gzip. Inflate, then un-shuffle.
-pub(super) fn gzip2_tile_into(bytes: &[u8], bitpix: Bitpix, out: &mut Vec<i64>) -> Result<()> {
-    let raw = unshuffle_bytes(&gunzip(bytes)?, bitpix.elem_size());
+pub(super) fn gzip2_tile_into(
+    bytes: &[u8],
+    bitpix: Bitpix,
+    tile_elems: usize,
+    out: &mut Vec<i64>,
+) -> Result<()> {
+    let raw = unshuffle_bytes(
+        &gunzip(bytes, tile_elems.saturating_mul(bitpix.elem_size()))?,
+        bitpix.elem_size(),
+    );
     be_to_i64_into(&raw, bitpix, out);
     Ok(())
 }
