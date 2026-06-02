@@ -8,7 +8,6 @@
 use crate::bitpix::Bitpix;
 use crate::data::ImageData;
 use crate::data::Scaling;
-use crate::data::shape_product;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -24,7 +23,7 @@ pub struct RandomGroups {
     pub group_shape: Vec<usize>,
     pub gcount: usize,
     pub pcount: usize,
-    bitpix: Bitpix,
+    pub bitpix: Bitpix,
     array_scaling: Scaling,
     /// `PSCALn`/`PZEROn` per parameter.
     param_scaling: Vec<ParamScale>,
@@ -93,14 +92,13 @@ impl RandomGroups {
         Ok(groups)
     }
 
-    /// `BITPIX` element type of the stored samples.
-    pub fn bitpix(&self) -> Bitpix {
-        self.bitpix
-    }
-
-    /// Elements in one group's array (`Π NAXIS2..NAXISm`; 0 if there is no array).
+    /// Elements in one group's array — `Π NAXIS2..NAXISm`, the FITS Eq. 2 product.
+    /// With no array axis (`NAXIS = 1`) this is the empty product `1`, not `0`,
+    /// matching how [`crate::hdu`]'s `data_extent` sizes the group (one array element
+    /// per group); `shape_product`'s image-specific "empty ⇒ 0" rule must *not* be
+    /// used here, or the two disagree and a `NAXIS = 1` group fails the size check.
     pub fn array_len(&self) -> usize {
-        shape_product(&self.group_shape)
+        self.group_shape.iter().product()
     }
 
     /// The physical parameter values of group `g`: `PZEROn + PSCALn × raw`.

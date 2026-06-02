@@ -12,7 +12,7 @@ fn reads_the_real_uv_random_groups() {
     assert_eq!(groups.pcount, 6);
     assert_eq!(groups.group_shape, vec![3, 4, 1, 1, 1]);
     assert_eq!(groups.array_len(), 12);
-    assert_eq!(groups.bitpix(), Bitpix::F32);
+    assert_eq!(groups.bitpix, Bitpix::F32);
     assert_eq!(
         groups.parameter_names,
         vec!["UU--", "VV--", "WW--", "BASELINE", "DATE", "DATE"]
@@ -71,6 +71,36 @@ fn parameter_physical_sums_addends_sharing_a_ptype() {
     // Summed logical DATE = (2445728.5 + 10) + (0.25 + 0.5) = 2445739.25.
     assert_eq!(groups.parameter_physical(0, "DATE"), Some(2_445_739.25));
     assert_eq!(groups.parameter_physical(0, "NONE"), None);
+}
+
+#[test]
+fn naxis1_group_has_one_array_element_matching_data_extent() {
+    // A `NAXIS = 1` random group (only the `NAXIS1 = 0` sentinel, no array axis) has,
+    // per Eq. 2, PCOUNT params + an empty-product array of 1 element per group — the
+    // way `data_extent` sizes the unit. `array_len` must agree (1, not 0), or
+    // `from_data` rejects a unit the reader already sized as readable.
+    let mut header = Header::new();
+    header
+        .set("BITPIX", -32)
+        .set("NAXIS", 1)
+        .set("NAXIS1", 0)
+        .set("GROUPS", true)
+        .set("PCOUNT", 1)
+        .set("GCOUNT", 2)
+        .set("PTYPE1", "P");
+    // 2 groups × (1 param + 1 array element) = 4 floats.
+    let mut data = Vec::new();
+    for v in [1.0f32, 10.0, 2.0, 20.0] {
+        data.extend_from_slice(&v.to_be_bytes());
+    }
+    let groups = RandomGroups::from_data(&header, &data).unwrap();
+    assert!(groups.group_shape.is_empty());
+    assert_eq!(groups.array_len(), 1); // empty product, not 0
+    // group 0: param 1.0, array [10.0]; group 1: param 2.0, array [20.0].
+    assert_eq!(groups.parameters_physical(0), vec![1.0]);
+    assert_eq!(groups.array_physical(0), vec![10.0]);
+    assert_eq!(groups.parameters_physical(1), vec![2.0]);
+    assert_eq!(groups.array_physical(1), vec![20.0]);
 }
 
 #[test]
