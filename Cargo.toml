@@ -55,3 +55,9 @@ required-features = ["compression"]
 [[bench]]
 name = "read"
 harness = false
+
+# The `compression` example uses the tiled-compression API, so it only builds with
+# that feature (the others are auto-discovered and feature-free).
+[[example]]
+name = "compression"
+required-features = ["compression"]
