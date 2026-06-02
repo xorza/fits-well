@@ -8,9 +8,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 System) files — the standard data format of astronomy. The two non-negotiable
 goals shape every decision:
 
-1. **Blazing fast** — zero-copy where the format allows, SIMD bulk byte-swap /
-   scaling, tile-parallel (de)compression, reused read/write scratch buffers,
-   lazy HDU access via seeking.
+1. **Blazing fast** — zero-copy where the format allows, single-pass byte-swap /
+   scaling into caller-reusable buffers (`decode_into`/`encode_into`, so a typed
+   read isn't page-fault-bound), tile-parallel (de)compression, reused read/write
+   scratch buffers, lazy HDU access via seeking.
 2. **Whole-standard coverage** — the full **FITS 4.0** standard (images, ASCII
    tables, binary tables with heap/variable-length arrays, random groups for
    read, WCS, time coordinates, tiled compression).
@@ -183,16 +184,21 @@ Design principles specific to this crate:
 - **Headers round-trip exactly.** Model a header as an *ordered list* of records
   with a side index for lookup — not a hash map. Duplicate `COMMENT`/`HISTORY`
   and record order are significant and must be preserved byte-for-byte.
-- **Parallelize the compute-bound layer; SIMD the memory-bound one.** The benches
-  settled where threads pay: the tiled codecs are compute-bound (100s of MiB/s,
+- **Parallelize the compute-bound layer; reuse buffers on the memory-bound one.** The
+  benches settled where threads pay: the tiled codecs are compute-bound (100s of MiB/s,
   ~100× below the memory wall) and tiles are independent, so `compress::map_tiles`
   fans the per-tile (de)compression across rayon under the `parallel` feature for a
   near-linear speedup — map the tiles in parallel, then fold serially (scatter into
   the image / concatenate the heap, where order matters). The raw byte-swap +
-  `BSCALE/BZERO` / `TSCAL/TZERO` paths are *memory-bandwidth-bound* (~40 GiB/s ≈
-  `memcpy`), so threading them buys little — SIMD/autovectorization is their lever,
-  not threads, and they are deliberately left serial. Always keep a scalar fallback
-  behind the feature gate.
+  `BSCALE/BZERO` / `TSCAL/TZERO` paths are *memory-bound*, but SIMD is **not** their
+  lever: a transforming store-loop runs at write-allocate/RFO speed (~8 GiB/s on a
+  Zen3 core, ~½ the single-thread `memcpy` wall), and profiling found explicit-AVX2
+  and cache-blocked swaps measure *slower*, not faster; threading them buys little
+  either, so they stay serial. Their real cost is the per-call output allocation — a
+  fresh-`Vec`-per-call decode is page-fault-bound (~65% of cycles) — so the lever is
+  the `*_into` buffer-reuse forms (`decode_into`/`encode_into`): a caller reusing one
+  buffer across reads/writes pays the allocation once (~4–8×). Always keep a scalar
+  fallback behind the feature gate.
 - **Reuse buffers across calls.** `FitsReader`/`FitsWriter` each own a `scratch`
   `Vec<u8>` reused across reads/writes, so steady-state staging allocates nothing;
   decode/encode expose `*_into` forms that append into a caller buffer. The codecs
