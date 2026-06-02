@@ -54,10 +54,10 @@ mod writer;
 pub use ascii::{AsciiColumn, AsciiColumnReader, AsciiKind, AsciiTable};
 pub use bitpix::Bitpix;
 
-/// Re-exported so callers can name the borrowed [`bitvec::slice::BitSlice`] views
-/// that [`ColumnReader::bits`]/[`ColumnReader::vla_bits`] return (and call
-/// `.to_bitvec()` to own a row) without taking their own version-skewed `bitvec`
-/// dependency.
+/// Re-exported so callers can name the borrowed [`bitvec::slice::BitSlice`] rows that
+/// a [`BitColumn`] (from [`ColumnReader::bits`]/[`ColumnReader::vla_bits`]) yields —
+/// to index, iterate, or `.to_bitvec()` them — without taking their own
+/// version-skewed `bitvec` dependency.
 pub use bitvec;
 #[cfg(feature = "compression")]
 pub use compress::CompressOptions;
@@ -76,7 +76,9 @@ pub use num_complex::Complex;
 pub use reader::source::MmapSource;
 pub use reader::source::{SliceSource, Source, StreamSource};
 pub use reader::{ChecksumReport, DataUnit, FitsReader, Hdu};
-pub use table::{BinTable, Column, ColumnData, ColumnReader, TDisp, TDispKind, Tform, TformKind};
+pub use table::{
+    BinTable, BitColumn, Column, ColumnData, ColumnReader, TDisp, TDispKind, Tform, TformKind,
+};
 pub use time::{
     Datetime, Epoch, EpochTime, FitsTime, GtiInterval, PhaseAxis, TimeAxisKind, TimeBounds,
     TimeScale,

@@ -336,11 +336,19 @@ fn x_bit_column_unpacks_msb_first() {
     let header = table_header(2, 1, &["12X"]);
     let table = BinTable::from_data(&header, vec![0xAB, 0xC0]).unwrap();
     let bits = table.column_by_idx(0).unwrap().bits().unwrap();
-    assert_eq!(bits.len(), 1);
+    assert_eq!(bits.nrows(), 1);
     assert_eq!(
-        bits[0],
+        bits.row(0),
         bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0].as_bitslice()
     );
+    assert_eq!(bits.get(0, 0), Some(true)); // first bit (MSB)
+    assert_eq!(bits.get(0, 1), Some(false));
+    assert_eq!(bits.get(0, 12), None); // past the 12 bits
+    // Indexing: `bits[row]` is the row, `bits[row][col]` and `bits[(row, col)]` the bit.
+    assert!(bits[0][0]);
+    assert!(!bits[0][1]);
+    assert!(bits[(0, 0)]);
+    assert!(!bits[(0, 1)]);
     // `raw()` still yields the packed bytes.
     assert_eq!(
         table.column_by_idx(0).unwrap().raw().unwrap(),
@@ -507,11 +515,14 @@ fn vla_bit_column_unpacks_msb_first() {
     let table = BinTable::from_data(&header, data).unwrap();
 
     let rows = table.column_by_idx(0).unwrap().vla_bits().unwrap();
+    assert_eq!(rows.nrows(), 2);
     assert_eq!(
-        rows[0],
+        rows.row(0),
         bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0].as_bitslice()
     );
-    assert_eq!(rows[1], bitvec![u8, Msb0; 1, 1, 1, 1].as_bitslice());
+    // Jagged: row 1 is only 4 bits wide.
+    assert_eq!(rows.row(1), bitvec![u8, Msb0; 1, 1, 1, 1].as_bitslice());
+    assert_eq!(rows.row(1).len(), 4);
 }
 
 #[test]
