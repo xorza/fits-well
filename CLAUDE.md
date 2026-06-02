@@ -18,10 +18,12 @@ goals shape every decision:
 The structural spine is built and tested: the 2880-byte block layer, an ordered
 header model (with `CONTINUE` long-string read/write), HDU classification and
 boundary sizing, a lazy seeking reader, and a header / raw-data-unit writer. The
-default build enables `compression` + `parallel` (pulling `flate2` + `rayon`);
-`--no-default-features` gives the pure-Rust core (block / header / HDU / reader /
-writer / WCS / time) — whose only unconditional dependencies are `bitvec` (packed
-`X` bit-array columns) and `num-complex` (`C`/`M` complex columns). Typed image read/write is done (decode/encode +
+default build enables `compression` + `parallel` (pulling `flate2` + `rayon`), with
+opt-in `mmap` (memmap2, zero-copy memory-mapped reads) and `ndarray` (n-D array
+bridge) features off by default; `--no-default-features` gives the pure-Rust core
+(block / header / HDU / reader / writer / WCS / time) — whose only unconditional
+dependencies are `bitvec` (packed `X` bit-array columns) and `num-complex`
+(`C`/`M` complex columns). Typed image read/write is done (decode/encode +
 `BSCALE`/`BZERO`). Binary and ASCII tables read and write; multi-HDU files
 (primary + `IMAGE`/`TABLE`/`BINTABLE` extensions) write; binary-table `P`/`Q` heap
 arrays and per-column `TSCAL`/`TZERO` decode; random groups read; `CONTINUE`,
@@ -75,6 +77,8 @@ cargo test && cargo fmt --all && cargo check && cargo clippy --all-targets -- -D
 cargo test --no-default-features
 cargo clippy --all-targets --no-default-features -- -D warnings
 cargo test --no-default-features --features compression
+# the opt-in (non-default) feature builds — memory-mapped reads and the n-D bridge:
+cargo clippy --all-targets --features "mmap ndarray" -- -D warnings
 # microbench entry points (decode/encode/read_image) compile under `internals`:
 cargo clippy --all-targets --features internals -- -D warnings
 ```
@@ -147,8 +151,8 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `hdu/` | HDU classification + data-unit sizing (Eq. 2, incl. random groups) | done |
 | `reader/` | HDU scan over a `Source` (`source.rs`: `StreamSource` copies, `SliceSource`/`MmapSource` borrow zero-copy); `open`/`from_bytes`/`open_mmap`; `read_image`/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_image`/`read_compressed_table`/`verify_checksum`, raw `DataUnit` | done |
 | `writer/` | multi-HDU writer: `write_image`/`write_table` (fixed + `P` VLA columns)/`write_ascii_table`/`write_compressed_image`(`_lossy`)/`write_compressed_table`, `with_checksums` | done |
-| `data/` | typed `Image`/`ImageData`, big-endian decode+encode (`encode_into` reuses the writer's buffer), `BSCALE`/`BZERO` physical plane | image read+write done; memory-bound, SIMD bulk-swap TODO |
-| `table/` | `BINTABLE` parsing (`Tform`/`Column`); fixed-width decode (`ColumnData`), `TSCAL`/`TZERO` physical plane, `P`/`Q` heap VLAs | read done (write in `writer/`) |
+| `data/` | typed `Image`/`ImageData`/`RawImage` (zero-copy raw plane), big-endian decode+encode (`encode_into` reuses the writer's buffer), `BSCALE`/`BZERO` physical plane + `SampleType`/`UnsignedView` resolution; `ImageArray` n-D bridge (feature `ndarray`, FITS axis order) | image read+write done; memory-bound, SIMD bulk-swap TODO |
+| `table/` | `BINTABLE` parsing (`Tform`/`Column`); per-column `ColumnReader` handles decode on demand to `ColumnData` (`BitColumn` for `X`, `num-complex` for `C`/`M`), `TSCAL`/`TZERO` physical plane, `P`/`Q` heap VLAs | read done (write in `writer/`) |
 | `ascii/` | `TABLE` (ASCII) read: `TBCOLn`/Fortran `TFORMn` → `AsciiColumn`/`ColumnData` | read done (write in `writer/`) |
 | `groups/` | random-groups (§6) read: params + arrays, `PSCALn`/`PZEROn` physical | read done (no write — deprecated) |
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
@@ -195,7 +199,11 @@ Design principles specific to this crate:
 - **Feature-flag the layers that carry a dependency — but they're on by default.**
   Tiled compression pulls in `flate2` (`compression` feature) and tile parallelism
   pulls in `rayon` (`parallel`, which implies `compression`); both are in the
-  default feature set for batteries-included performance. WCS (§8) and time (§9) are
+  default feature set for batteries-included performance. Two further opt-in
+  features carry a dependency but stay *off* by default: `mmap` (memmap2) adds
+  zero-copy memory-mapped read sources (`FitsReader::open_mmap`/`MmapSource`), and
+  `ndarray` (ndarray) adds the n-D array bridge (`RawImage`/`Image` → `ImageArray` /
+  physical `ArrayD<f64>`). WCS (§8) and time (§9) are
   dependency-free pure math and always compiled. `--no-default-features` yields the
   pure-Rust core, whose only unconditional dependencies are `bitvec` (packed `X`
   bit-array columns) and `num-complex` (`C`/`M` complex columns) — both back core
