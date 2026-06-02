@@ -106,14 +106,14 @@ impl ImageData {
     /// × sample` (§3.4), with integer samples equal to the `BLANK` sentinel mapped
     /// to `NaN` (float `NaN`/`Inf` pass through). Shared by [`Image::physical`] and
     /// [`RawImage::physical`].
-    pub(crate) fn physical(&self, scaling: &Scaling) -> Vec<f64> {
+    fn physical(&self, scaling: &Scaling) -> Vec<f64> {
         self.physical_as(scaling)
     }
 
     /// The physical plane narrowed to `f32` in a single pass — see
     /// [`RawImage::physical_f32`]. Scaling is still evaluated in `f64`, so each
     /// element is the correctly-rounded `f32` of the true physical value.
-    pub(crate) fn physical_f32(&self, scaling: &Scaling) -> Vec<f32> {
+    fn physical_f32(&self, scaling: &Scaling) -> Vec<f32> {
         self.physical_as(scaling)
     }
 
@@ -139,15 +139,19 @@ impl ImageData {
     /// `BZERO` the matching sign-bit offset); `None` otherwise. Exact for all 64-bit
     /// values (no `f64` rounding). Shared by [`Image::unsigned`]/[`RawImage::unsigned`].
     pub(crate) fn unsigned(&self, scaling: &Scaling) -> Option<UnsignedView> {
-        if scaling.bscale != 1.0 || scaling.blank.is_some() {
+        // `BLANK` marks null samples that have no exact integer value, so an unsigned
+        // view can't represent them; `SampleType` deliberately ignores `BLANK`, so
+        // guard it here. The `BSCALE`/`BZERO`-offset convention itself is resolved
+        // once, by `SampleType::from_scaling`, rather than re-checked against the
+        // offset constants a second time.
+        if scaling.blank.is_some() {
             return None;
         }
-        let bzero = scaling.bzero;
-        match self {
-            ImageData::U8(v) if bzero == -128.0 => Some(UnsignedView::from_signed_byte(v)),
-            ImageData::I16(v) if bzero == U16_OFFSET => Some(UnsignedView::from_offset_i16(v)),
-            ImageData::I32(v) if bzero == U32_OFFSET => Some(UnsignedView::from_offset_i32(v)),
-            ImageData::I64(v) if bzero == U64_OFFSET => Some(UnsignedView::from_offset_i64(v)),
+        match (self, SampleType::from_scaling(self.bitpix(), scaling)) {
+            (ImageData::U8(v), SampleType::I8) => Some(UnsignedView::from_signed_byte(v)),
+            (ImageData::I16(v), SampleType::U16) => Some(UnsignedView::from_offset_i16(v)),
+            (ImageData::I32(v), SampleType::U32) => Some(UnsignedView::from_offset_i32(v)),
+            (ImageData::I64(v), SampleType::U64) => Some(UnsignedView::from_offset_i64(v)),
             _ => None,
         }
     }

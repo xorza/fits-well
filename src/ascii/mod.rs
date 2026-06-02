@@ -280,10 +280,9 @@ impl AsciiColumn {
 /// explicit `.`, the decimal point is implied `decimals` digits from the right
 /// (§7.2.1, deprecated): the integer mantissa is scaled by `10⁻ᵈ`.
 fn parse_ascii_float(field: &str, decimals: usize) -> Option<f64> {
-    let normalized = field.replace(['D', 'd'], "E");
-    let (mantissa, exponent) = match split_mantissa_exponent(&normalized) {
+    let (mantissa, exponent) = match split_mantissa_exponent(field) {
         Some((m, e)) => (m, Some(e)),
-        None => (normalized.as_str(), None),
+        None => (field, None),
     };
     let mut value: f64 = if mantissa.contains('.') || decimals == 0 {
         mantissa.parse().ok()?
@@ -296,12 +295,13 @@ fn parse_ascii_float(field: &str, decimals: usize) -> Option<f64> {
     Some(value)
 }
 
-/// Split a normalized (`D`→`E`) numeric string into mantissa and exponent text.
-/// §7.2.5 rule 3: the exponent is introduced by `E`/`e`, **or** by a bare `+`/`-`
-/// sign past the leading mantissa sign (Fortran's letter-less form, e.g.
-/// `3.14159-2` = 3.14159 × 10⁻²).
+/// Split a numeric string into mantissa and exponent text. The exponent is
+/// introduced by `E`/`e` or the Fortran double-precision `D`/`d` (§7.2.1), **or** by
+/// a bare `+`/`-` sign past the leading mantissa sign (the letter-less form, §7.2.5
+/// rule 3, e.g. `3.14159-2` = 3.14159 × 10⁻²). Matching `D`/`d` here means the parse
+/// never has to normalize the field into a fresh `String` first.
 fn split_mantissa_exponent(s: &str) -> Option<(&str, &str)> {
-    if let Some(i) = s.find(['E', 'e']) {
+    if let Some(i) = s.find(['E', 'e', 'D', 'd']) {
         return Some((&s[..i], &s[i + 1..]));
     }
     s.char_indices()
