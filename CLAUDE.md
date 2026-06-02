@@ -20,8 +20,8 @@ header model (with `CONTINUE` long-string read/write), HDU classification and
 boundary sizing, a lazy seeking reader, and a header / raw-data-unit writer. The
 default build enables `compression` + `parallel` (pulling `flate2` + `rayon`);
 `--no-default-features` gives the pure-Rust core (block / header / HDU / reader /
-writer / WCS / time) — whose one unconditional dependency is `bitvec`, backing the
-packed `X` bit-array columns. Typed image read/write is done (decode/encode +
+writer / WCS / time) — whose only unconditional dependencies are `bitvec` (packed
+`X` bit-array columns) and `num-complex` (`C`/`M` complex columns). Typed image read/write is done (decode/encode +
 `BSCALE`/`BZERO`). Binary and ASCII tables read and write; multi-HDU files
 (primary + `IMAGE`/`TABLE`/`BINTABLE` extensions) write; binary-table `P`/`Q` heap
 arrays and per-column `TSCAL`/`TZERO` decode; random groups read; `CONTINUE`,
@@ -197,9 +197,10 @@ Design principles specific to this crate:
   pulls in `rayon` (`parallel`, which implies `compression`); both are in the
   default feature set for batteries-included performance. WCS (§8) and time (§9) are
   dependency-free pure math and always compiled. `--no-default-features` yields the
-  pure-Rust core, whose only unconditional dependency is `bitvec` (packed `X`
-  bit-array columns are core `BINTABLE`, so it can't be feature-gated cleanly); gate
-  any *new* dependency behind a feature the same way unless it's likewise core.
+  pure-Rust core, whose only unconditional dependencies are `bitvec` (packed `X`
+  bit-array columns) and `num-complex` (`C`/`M` complex columns) — both back core
+  `BINTABLE` kinds that can't be feature-gated cleanly; gate any *other* new
+  dependency behind a feature the same way unless it's likewise core.
 - **"Once FITS, always FITS."** The format never breaks backward compatibility.
   Keep reading legacy structures (random groups, `SIMPLE = F`) forever; just
   don't *write* deprecated forms.

@@ -36,7 +36,6 @@ mod ascii;
 mod bitpix;
 mod block;
 mod checksum;
-mod complex;
 #[cfg(feature = "compression")]
 mod compress;
 mod data;
@@ -54,7 +53,6 @@ mod writer;
 
 pub use ascii::{AsciiColumn, AsciiColumnReader, AsciiKind, AsciiTable};
 pub use bitpix::Bitpix;
-pub use complex::Complex;
 
 /// Re-exported so callers can name the borrowed [`bitvec::slice::BitSlice`] views
 /// that [`ColumnReader::bits`]/[`ColumnReader::vla_bits`] return (and call
@@ -69,6 +67,11 @@ pub use groups::RandomGroups;
 pub use hdu::HduKind;
 pub use header::Header;
 pub use header::value::Value;
+/// The complex element type of `C`/`M` columns — the ecosystem-standard
+/// [`num_complex::Complex`]. Re-exported (crate and type) so callers can name it and
+/// stay on the same version this crate returns.
+pub use num_complex;
+pub use num_complex::Complex;
 #[cfg(feature = "mmap")]
 pub use reader::source::MmapSource;
 pub use reader::source::{SliceSource, Source, StreamSource};

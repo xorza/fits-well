@@ -11,8 +11,8 @@
 use bitvec::order::Msb0;
 use bitvec::slice::BitSlice;
 use bitvec::view::BitView;
+use num_complex::Complex;
 
-use crate::complex::Complex;
 use crate::data::U16_OFFSET;
 use crate::data::U32_OFFSET;
 use crate::data::U64_OFFSET;

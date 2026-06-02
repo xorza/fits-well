@@ -9,12 +9,13 @@
 
 use std::io::Write;
 
+use num_complex::Complex;
+
 use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
 use crate::block::SPACE_FILL;
 use crate::block::ZERO_FILL;
 use crate::checksum;
-use crate::complex::Complex;
 #[cfg(feature = "compression")]
 use crate::compress::{CompressOptions, compress_table, encode_image};
 use crate::data::Image;
