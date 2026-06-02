@@ -1,5 +1,6 @@
 use super::*;
 use crate::reader::FitsReader;
+use bitvec::bitvec;
 use std::fs::File;
 
 fn table_header(naxis1: usize, naxis2: usize, tforms: &[&str]) -> Header {
@@ -338,10 +339,10 @@ fn x_bit_column_unpacks_msb_first() {
         .unwrap()
         .bits(&table.columns[0])
         .unwrap();
-    let expect = [
-        true, false, true, false, true, false, true, true, true, true, false, false,
-    ];
-    assert_eq!(bits, vec![expect.to_vec()]);
+    assert_eq!(
+        bits,
+        vec![bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0]]
+    );
     // read_column still yields the raw packed bytes.
     assert_eq!(
         table.read_column(0).unwrap(),
@@ -474,11 +475,9 @@ fn vla_bit_column_unpacks_msb_first() {
     let rows = table.read_vla_bit_column(0).unwrap();
     assert_eq!(
         rows[0],
-        vec![
-            true, false, true, false, true, false, true, true, true, true, false, false
-        ]
+        bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0]
     );
-    assert_eq!(rows[1], vec![true, true, true, true]);
+    assert_eq!(rows[1], bitvec![u8, Msb0; 1, 1, 1, 1]);
 }
 
 #[test]

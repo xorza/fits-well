@@ -7,6 +7,10 @@
 //! `TSCALn`/`TZEROn` physical plane ([`ColumnData::physical`]), and `P`/`Q`
 //! variable-length arrays out of the heap ([`BinTable::read_vla_column`]).
 
+use bitvec::order::Msb0;
+use bitvec::vec::BitVec;
+use bitvec::view::BitView;
+
 use crate::complex::Complex;
 use crate::data::U16_OFFSET;
 use crate::data::U32_OFFSET;
@@ -365,12 +369,13 @@ impl ColumnData {
     }
 
     /// Unpack an `X` (bit-array) column — decoded by [`BinTable::read_column`] into
-    /// the packed [`ColumnData::Bytes`] — into one `Vec<bool>` per row, MSB-first
-    /// (bit 0 is the most significant bit of the first byte, §7.3.2). `col` supplies
-    /// the per-row bit count (`TFORMn` repeat). Errors on any non-`X` column. A
-    /// zero-bit `X` column yields no rows (its per-row structure isn't recoverable
-    /// from the empty byte buffer alone).
-    pub fn bits(&self, col: &Column) -> Result<Vec<Vec<bool>>> {
+    /// the packed [`ColumnData::Bytes`] — into one packed [`BitVec`] per row,
+    /// MSB-first (bit 0 is the most significant bit of the first byte, §7.3.2). The
+    /// `Msb0` order matches that layout, so each row is the cell's `ceil(nbits/8)`
+    /// bytes truncated to the `TFORMn` repeat `col` declares. Errors on any non-`X`
+    /// column. A zero-bit `X` column yields no rows (its per-row structure isn't
+    /// recoverable from the empty byte buffer alone).
+    pub fn bits(&self, col: &Column) -> Result<Vec<BitVec<u8, Msb0>>> {
         if col.tform.kind != TformKind::Bit {
             return Err(FitsError::NotABitColumn {
                 code: col.tform.kind.code(),
@@ -388,7 +393,7 @@ impl ColumnData {
         }
         Ok(bytes
             .chunks(row_bytes)
-            .map(|cell| unpack_bits(cell, nbits))
+            .map(|cell| cell.view_bits::<Msb0>()[..nbits].to_bitvec())
             .collect())
     }
 }
@@ -556,9 +561,9 @@ impl BinTable {
     }
 
     /// Decode a variable-length `X` (bit-array) column (`1PX`/`1QX`), unpacking
-    /// each row's bits MSB-first into one `Vec<bool>` (§7.3.2/§7.3.5 — the
+    /// each row's bits MSB-first into one packed [`BitVec`] (§7.3.2/§7.3.5 — the
     /// descriptor's element count is the bit count). Errors on any non-bit VLA.
-    pub fn read_vla_bit_column(&self, index: usize) -> Result<Vec<Vec<bool>>> {
+    pub fn read_vla_bit_column(&self, index: usize) -> Result<Vec<BitVec<u8, Msb0>>> {
         let col = self.column(index)?;
         let wide = match (col.tform.kind, col.tform.vla_elem) {
             (TformKind::ArrayDesc32, Some(TformKind::Bit)) => false,
@@ -574,7 +579,7 @@ impl BinTable {
             // The descriptor's element count is the bit count (§7.3.2).
             let d = decode_descriptor(self.cell(col, r), wide);
             let cell = self.bounded_heap(d.offset, d.nelem.div_ceil(8))?;
-            out.push(unpack_bits(cell, d.nelem));
+            out.push(cell.view_bits::<Msb0>()[..d.nelem].to_bitvec());
         }
         Ok(out)
     }
@@ -770,14 +775,6 @@ fn decode_descriptor(desc: &[u8], wide: bool) -> Descriptor {
             offset: be_u32(&desc[4..8]),
         }
     }
-}
-
-/// Unpack the first `nbits` of `cell` MSB-first (bit 0 is the MSB of byte 0, §7.3.2)
-/// into one `bool` each.
-fn unpack_bits(cell: &[u8], nbits: usize) -> Vec<bool> {
-    (0..nbits)
-        .map(|i| (cell[i / 8] >> (7 - (i % 8))) & 1 == 1)
-        .collect()
 }
 
 /// Decode a big-endian `P`/`Q` array-descriptor field (element count or heap
