@@ -130,6 +130,37 @@ fn physical_applies_scaling_and_maps_blank_to_nan() {
 }
 
 #[test]
+fn physical_f32_is_the_single_pass_narrowing_of_physical() {
+    // Same fixture as physical: 10 -> 25, 20 == BLANK -> NaN, -5 -> -5.
+    let img = image(
+        ImageData::I16(vec![10, 20, -5]),
+        Scaling {
+            bscale: 2.0,
+            bzero: 5.0,
+            blank: Some(20),
+        },
+    );
+    let f32s = img.physical_f32();
+    assert_eq!(f32s[0], 25.0_f32);
+    assert!(f32s[1].is_nan());
+    assert_eq!(f32s[2], -5.0_f32);
+
+    // It equals the f64 plane narrowed element-wise, even where f32 must round:
+    // BSCALE = 0.1 is not representable, so the scaling accrues error that the
+    // shared f64 evaluation then narrows identically in both methods.
+    let rounded = image(
+        ImageData::I32(vec![0, 7, 123_456_789]),
+        Scaling {
+            bscale: 0.1,
+            bzero: 0.0,
+            blank: None,
+        },
+    );
+    let via_f64: Vec<f32> = rounded.physical().into_iter().map(|v| v as f32).collect();
+    assert_eq!(rounded.physical_f32(), via_f64);
+}
+
+#[test]
 fn unsigned_view_recovers_exact_typed_integers() {
     // Signed storage + the matching BZERO offset decodes back to the unsigned (or
     // signed-byte) values by flipping the stored sign bit.
