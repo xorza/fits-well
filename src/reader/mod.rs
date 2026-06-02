@@ -78,11 +78,24 @@ pub struct FitsReader<S> {
     scratch: Vec<u8>,
 }
 
+/// A [`FitsReader`] over a seeking byte source (`Read + Seek`, e.g. a `File`) — the
+/// type [`FitsReader::open`] returns. A friendlier name for `FitsReader<StreamSource<R>>`.
+pub type StreamReader<R> = FitsReader<StreamSource<R>>;
+
+/// A [`FitsReader`] over an in-memory byte slice — the type [`FitsReader::from_bytes`]
+/// returns. The lifetime is that of the borrowed bytes.
+pub type SliceReader<'a> = FitsReader<SliceSource<'a>>;
+
+/// A [`FitsReader`] over a memory-mapped file — the type [`FitsReader::open_mmap`]
+/// returns. Requires the `mmap` feature.
+#[cfg(feature = "mmap")]
+pub type MmapReader = FitsReader<source::MmapSource>;
+
 impl<R: Read + Seek> FitsReader<StreamSource<R>> {
     /// Open a seekable byte source (file, cursor). Data units are copied into the
     /// reader's scratch on demand; for an in-memory file prefer
     /// [`FitsReader::from_bytes`], which decodes straight from the bytes.
-    pub fn open(source: R) -> Result<FitsReader<StreamSource<R>>> {
+    pub fn open(source: R) -> Result<StreamReader<R>> {
         FitsReader::from_source(StreamSource::new(source)?)
     }
 }
@@ -91,7 +104,7 @@ impl<'a> FitsReader<SliceSource<'a>> {
     /// Open an in-memory FITS file — the whole thing as a byte slice (e.g. an mmap,
     /// or bytes already in RAM). Data units decode straight from the borrowed bytes
     /// with no staging copy, and no scratch allocation.
-    pub fn from_bytes(bytes: &'a [u8]) -> Result<FitsReader<SliceSource<'a>>> {
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<SliceReader<'a>> {
         FitsReader::from_source(SliceSource::new(bytes))
     }
 }
@@ -101,7 +114,7 @@ impl FitsReader<source::MmapSource> {
     /// Memory-map a FITS file and read it zero-copy: data units decode straight from
     /// the mapped pages (no staging copy, no read syscalls). Best for large files
     /// and random HDU access. Requires the `mmap` feature.
-    pub fn open_mmap(path: impl AsRef<std::path::Path>) -> Result<FitsReader<source::MmapSource>> {
+    pub fn open_mmap(path: impl AsRef<std::path::Path>) -> Result<MmapReader> {
         FitsReader::from_source(source::MmapSource::open(path.as_ref())?)
     }
 }

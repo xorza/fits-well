@@ -75,9 +75,11 @@ pub use header::value::Value;
 pub use num_complex;
 pub use num_complex::Complex;
 #[cfg(feature = "mmap")]
+pub use reader::MmapReader;
+#[cfg(feature = "mmap")]
 pub use reader::source::MmapSource;
 pub use reader::source::{SliceSource, Source, StreamSource};
-pub use reader::{ChecksumReport, DataUnit, FitsReader, Hdu};
+pub use reader::{ChecksumReport, DataUnit, FitsReader, Hdu, SliceReader, StreamReader};
 pub use table::{
     BinTable, BitColumn, Column, ColumnData, ColumnReader, TDisp, TDispKind, Tform, TformKind,
 };
