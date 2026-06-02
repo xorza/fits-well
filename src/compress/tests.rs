@@ -1,9 +1,8 @@
 use super::*;
-use crate::reader::FitsReader;
-use crate::reader::source::StreamSource;
+use crate::reader::{FitsReader, StreamReader};
 use std::fs::File;
 
-fn open(name: &str) -> FitsReader<StreamSource<File>> {
+fn open(name: &str) -> StreamReader<File> {
     FitsReader::open(File::open(format!("tests/data/fits/{name}")).unwrap()).unwrap()
 }
 

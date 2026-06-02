@@ -2,12 +2,11 @@ use super::*;
 use crate::bitpix::Bitpix;
 use crate::data::Image;
 use crate::data::ImageData;
-use crate::reader::source::StreamSource;
 use crate::writer::FitsWriter;
 use std::fs::File;
 use std::io::Cursor;
 
-fn open(name: &str) -> FitsReader<StreamSource<File>> {
+fn open(name: &str) -> StreamReader<File> {
     let path = format!("tests/data/fits/{name}");
     FitsReader::open(File::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}")))
         .unwrap_or_else(|e| panic!("parse {name}: {e}"))
