@@ -145,7 +145,9 @@ fn read_image(c: &mut Criterion) {
         // intrinsically fresh per call.
         let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
         g.throughput(Throughput::Bytes((n * elem_bytes(bitpix)) as u64));
-        g.bench_function(name, |b| b.iter(|| black_box(r.read_image(0).unwrap())));
+        g.bench_function(name, |b| {
+            b.iter(|| black_box(r.read_image(0).unwrap().decode()))
+        });
     }
     g.finish();
 }

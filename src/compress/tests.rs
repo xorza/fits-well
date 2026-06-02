@@ -51,7 +51,7 @@ fn check_i32_against_ref(compressed: &str, reference: &str) {
         ImageData::I32(v) => v,
         other => panic!("expected I32, got {other:?}"),
     };
-    let want = match open(reference).read_image(0).unwrap().samples {
+    let want = match open(reference).read_image(0).unwrap().decode() {
         ImageData::I32(v) => v,
         other => panic!("expected I32 reference, got {other:?}"),
     };
@@ -88,7 +88,11 @@ fn decompresses_float_with_nan_nulls() {
         ImageData::F32(v) => v,
         other => panic!("expected F32, got {other:?}"),
     };
-    let want = match open("comp_ref_nan_f32.fits").read_image(0).unwrap().samples {
+    let want = match open("comp_ref_nan_f32.fits")
+        .read_image(0)
+        .unwrap()
+        .decode()
+    {
         ImageData::F32(v) => v,
         other => panic!("expected F32 reference, got {other:?}"),
     };
@@ -454,7 +458,7 @@ fn check_float(compressed: &str, reference: &str) {
         ImageData::F32(v) => v,
         other => panic!("expected F32, got {other:?}"),
     };
-    let want = match open(reference).read_image(0).unwrap().samples {
+    let want = match open(reference).read_image(0).unwrap().decode() {
         ImageData::F32(v) => v,
         other => panic!("expected F32 reference, got {other:?}"),
     };

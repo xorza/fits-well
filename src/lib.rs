@@ -63,7 +63,7 @@ pub use complex::Complex;
 pub use bitvec;
 #[cfg(feature = "compression")]
 pub use compress::CompressOptions;
-pub use data::{Image, ImageData, Scaling, UnsignedView};
+pub use data::{Image, ImageData, RawImage, Scaling, UnsignedView};
 pub use error::{FitsError, Result};
 pub use groups::RandomGroups;
 pub use hdu::HduKind;

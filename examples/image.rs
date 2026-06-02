@@ -36,16 +36,20 @@ fn main() -> fits_well::Result<()> {
     writer.into_inner().sync_all()?;
     println!("wrote {}", path.display());
 
-    // Read it back from the primary HDU (index 0).
+    // Read it back from the primary HDU (index 0). `read_image` borrows the data
+    // unit in place (zero-copy) as a `RawImage`: shape and BITPIX are ready at once,
+    // while the samples stay undecoded until you ask.
     let mut reader = FitsReader::open(File::open(&path)?)?;
-    let loaded = reader.read_image(0)?;
+    let raw = reader.read_image(0)?;
+    println!("shape {:?}, {:?}", raw.shape, raw.bitpix);
 
-    println!("shape {:?}, {:?}", loaded.shape, loaded.samples.bitpix());
-    if let ImageData::I16(pixels) = &loaded.samples {
+    // `decode()` byte-swaps the stored big-endian samples into an owned, host-endian
+    // buffer. (For a BITPIX=8 image, `raw.u8()` hands the bytes back with no copy.)
+    if let ImageData::I16(pixels) = raw.decode() {
         println!("pixels  {pixels:?}");
     }
     // `physical()` applies BSCALE/BZERO and turns any BLANK value into NaN.
-    println!("physical {:?}", loaded.physical());
+    println!("physical {:?}", raw.physical());
 
     Ok(())
 }

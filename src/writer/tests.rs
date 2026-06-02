@@ -43,11 +43,11 @@ fn writes_a_multi_hdu_image_file() {
     assert_eq!(r.hdus[0].kind, HduKind::Primary);
     assert_eq!(r.hdus[1].kind, HduKind::Image);
     assert_eq!(
-        r.read_image(0).unwrap().samples,
+        r.read_image(0).unwrap().decode(),
         ImageData::U8(vec![1, 2, 3, 4])
     );
     assert_eq!(
-        r.read_image(1).unwrap().samples,
+        r.read_image(1).unwrap().decode(),
         ImageData::I16(vec![10, 20, 30])
     );
 }
@@ -249,7 +249,7 @@ fn image_round_trips_through_write_image_and_read_image() {
     assert_eq!(r.hdus[0].kind, HduKind::Primary);
     let back = r.read_image(0).unwrap();
     assert_eq!(back.shape, vec![2, 3]);
-    assert_eq!(back.samples, ImageData::I16(vec![1, -2, 3, -4, 5, -6]));
+    assert_eq!(back.decode(), ImageData::I16(vec![1, -2, 3, -4, 5, -6]));
 }
 
 #[test]
@@ -268,7 +268,7 @@ fn write_image_emits_scaling_keywords_and_preserves_unsigned_values() {
     assert_eq!(r.hdus[0].header.get_real("BZERO"), Some(32768.0));
     assert_eq!(r.hdus[0].header.get_real("BSCALE"), Some(1.0));
     let back = r.read_image(0).unwrap();
-    assert_eq!(back.samples, ImageData::I16(vec![-32768, 0, 32767]));
+    assert_eq!(back.decode(), ImageData::I16(vec![-32768, 0, 32767]));
     assert_eq!(back.physical(), vec![0.0, 32768.0, 65535.0]);
 }
 

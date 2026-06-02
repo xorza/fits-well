@@ -1,7 +1,11 @@
 use super::*;
 use crate::bitpix::Bitpix;
+use crate::data::Image;
+use crate::data::ImageData;
 use crate::reader::source::StreamSource;
+use crate::writer::FitsWriter;
 use std::fs::File;
+use std::io::Cursor;
 
 fn open(name: &str) -> FitsReader<StreamSource<File>> {
     let path = format!("tests/data/fits/{name}");
@@ -42,13 +46,18 @@ fn read_data_raw_is_stable_across_reads() {
 #[test]
 fn mmap_read_matches_seeking_read() {
     let path = "tests/data/fits/UITfuv2582gc.fits";
-    let want = open("UITfuv2582gc.fits").read_image(0).unwrap();
+    let mut seek = open("UITfuv2582gc.fits");
+    let want = seek.read_image(0).unwrap();
+    let want_shape = want.shape.clone();
+    let want_samples = want.decode(); // own, releasing the borrow on `seek`
+
     let mut m = FitsReader::open_mmap(path).unwrap();
-    let got = m.read_image(0).unwrap();
     assert_eq!(m.hdus.len(), 1);
-    assert_eq!(got.shape, want.shape);
+    let got = m.read_image(0).unwrap();
+    assert_eq!(got.shape, want_shape);
     assert_eq!(
-        got.samples, want.samples,
+        got.decode(),
+        want_samples,
         "mmap decode matches the seeking read"
     );
 }
@@ -56,19 +65,23 @@ fn mmap_read_matches_seeking_read() {
 #[test]
 fn read_image_reuses_internal_scratch_across_reads() {
     let mut f = open("UITfuv2582gc.fits");
-    let first = f.read_image(0).unwrap();
+    let raw1 = f.read_image(0).unwrap();
+    let shape1 = raw1.shape.clone();
+    let data1 = raw1.decode(); // own the samples, releasing the borrow on `f`
     // The reader staged the raw unit through its internal scratch, which now holds
     // the full block-padded data unit and is reused (not reallocated) on the next
-    // read — only each decoded `Image` is freshly allocated.
+    // read — only each `decode()` freshly allocates.
     assert_eq!(
         f.scratch.len(),
         padded_len(f.hdus[0].data_bytes) as usize,
         "scratch holds the padded data unit after a read"
     );
     let cap = f.scratch.capacity();
-    let second = f.read_image(0).unwrap();
-    assert_eq!(first.shape, second.shape);
-    assert_eq!(first.samples, second.samples);
+    let raw2 = f.read_image(0).unwrap();
+    let shape2 = raw2.shape.clone();
+    let data2 = raw2.decode();
+    assert_eq!(shape1, shape2);
+    assert_eq!(data1, data2);
     assert_eq!(
         f.scratch.capacity(),
         cap,
@@ -247,11 +260,11 @@ fn read_data_raw_rejects_out_of_bounds_index() {
 #[test]
 fn read_image_decodes_the_primary_array_shape_and_type() {
     let mut f = open("UITfuv2582gc.fits");
-    let img = f.read_image(0).unwrap();
-    assert_eq!(img.shape, vec![512, 512]);
-    assert_eq!(img.samples.bitpix(), Bitpix::I16);
-    assert_eq!(img.samples.len(), 512 * 512);
-    assert_eq!(img.physical().len(), 512 * 512);
+    let raw = f.read_image(0).unwrap();
+    assert_eq!(raw.shape, vec![512, 512]);
+    assert_eq!(raw.bitpix, Bitpix::I16);
+    assert_eq!(raw.physical().len(), 512 * 512);
+    assert_eq!(raw.decode().len(), 512 * 512);
 }
 
 #[test]
@@ -264,7 +277,7 @@ fn read_image_raw_samples_match_a_manual_big_endian_decode() {
         .map(|c| i16::from_be_bytes([c[0], c[1]]))
         .collect();
     let img = f.read_image(0).unwrap();
-    match img.samples {
+    match img.decode() {
         ImageData::I16(v) => assert_eq!(&v[..4], manual.as_slice()),
         other => panic!("expected I16 samples, got {other:?}"),
     }
@@ -276,4 +289,63 @@ fn read_image_rejects_non_image_hdus() {
     let mut f = open("DDTSUVDATA.fits");
     assert!(matches!(f.read_image(0), Err(FitsError::NotAnImage)));
     assert!(matches!(f.read_image(1), Err(FitsError::NotAnImage)));
+}
+
+fn write_to_vec(image: &Image) -> Vec<u8> {
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_image(image).unwrap();
+    w.into_inner().into_inner()
+}
+
+#[test]
+fn read_image_borrows_u8_samples_with_zero_copy() {
+    let image = Image {
+        shape: vec![4],
+        samples: ImageData::U8(vec![10, 20, 30, 40]),
+        scaling: Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    };
+    let buf = write_to_vec(&image);
+
+    let mut reader = FitsReader::from_bytes(&buf).unwrap();
+    let raw = reader.read_image(0).unwrap();
+    assert_eq!(raw.shape, vec![4]);
+    assert_eq!(raw.bitpix, Bitpix::U8);
+    // U8 needs no byte-swap, so `.u8()` hands back the stored bytes directly.
+    let view = raw.u8().expect("a U8 image has a zero-copy u8 view");
+    assert_eq!(view, &[10, 20, 30, 40]);
+    // Prove it is a borrow into the source buffer, not a copy: the view's address
+    // lies within `buf`.
+    let base = buf.as_ptr() as usize;
+    let view_ptr = view.as_ptr() as usize;
+    assert!(
+        (base..base + buf.len()).contains(&view_ptr),
+        "the u8 view must point inside the source buffer (zero-copy)"
+    );
+}
+
+#[test]
+fn read_image_exposes_big_endian_bytes_for_multibyte_types() {
+    let image = Image {
+        shape: vec![3],
+        samples: ImageData::I16(vec![1, -2, 300]),
+        scaling: Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    };
+    let buf = write_to_vec(&image);
+
+    let mut reader = FitsReader::from_bytes(&buf).unwrap();
+    let raw = reader.read_image(0).unwrap();
+    // A type that needs byte-swapping has no zero-copy typed view.
+    assert_eq!(raw.u8(), None);
+    // The raw bytes are big-endian: 1 → 0x0001, -2 → 0xFFFE, 300 → 0x012C.
+    assert_eq!(raw.bytes, &[0, 1, 255, 254, 1, 44]);
+    // `decode()` swaps them into the same host-endian samples it borrowed.
+    assert_eq!(raw.decode(), ImageData::I16(vec![1, -2, 300]));
 }

@@ -7,8 +7,9 @@ use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
 use crate::block::padded_len;
 use crate::checksum;
+#[cfg(feature = "compression")]
 use crate::data::Image;
-use crate::data::ImageData;
+use crate::data::RawImage;
 use crate::data::Scaling;
 use crate::data::shape_product;
 use crate::error::FitsError;
@@ -184,22 +185,24 @@ impl<S: Source> FitsReader<S> {
         })
     }
 
-    /// Read an HDU's data unit and decode it into a typed [`Image`]: host-endian
-    /// raw samples (`samples`) plus the [`Scaling`] map for the physical plane.
-    /// Errors with [`FitsError::NotAnImage`] for tables, random groups, and
-    /// unmodelled extensions.
+    /// Borrow an HDU's data unit as a [`RawImage`] — the stored big-endian bytes
+    /// viewed in place (over the in-memory source, or the reader's reused scratch for
+    /// a seeking source), plus the shape, `BITPIX`, and [`Scaling`] needed to
+    /// interpret them. **Zero-copy**: nothing is decoded until you ask. Errors with
+    /// [`FitsError::NotAnImage`] for tables, random groups, and unmodelled extensions.
     ///
-    /// The raw data unit is staged through the reader's reused internal scratch,
-    /// so reading many images allocates only each decoded `Image`'s `samples` —
-    /// never the staging (which grows once to the largest unit seen, then holds).
-    pub fn read_image(&mut self, index: usize) -> Result<Image> {
+    /// The result borrows the reader, so it can't outlive it and only one is live at
+    /// a time — own what you need first: [`RawImage::u8`] for the zero-copy `BITPIX =
+    /// 8` plane, [`RawImage::decode`] for host-endian samples, [`RawImage::physical`]
+    /// for the scaled plane.
+    pub fn read_image(&mut self, index: usize) -> Result<RawImage<'_>> {
         let hdu = self.checked_hdu(index)?;
         if !matches!(hdu.kind, HduKind::Primary | HduKind::Image) {
             return Err(FitsError::NotAnImage);
         }
         // §4.3: a plain image array has no group structure. A non-conforming
         // `PCOUNT`/`GCOUNT` would make `data_extent` size extra bytes, so reject it
-        // up front (on untrusted input) rather than decode mismatched samples.
+        // up front (on untrusted input) rather than expose mismatched samples.
         if hdu.header.get_integer("PCOUNT").unwrap_or(0) != 0
             || hdu.header.get_integer("GCOUNT").unwrap_or(1) != 1
         {
@@ -214,21 +217,22 @@ impl<S: Source> FitsReader<S> {
             padded_len(data_bytes) as usize,
             &mut self.scratch,
         )?;
-        let samples = ImageData::decode(&unit[..data_bytes as usize], bitpix);
+        let bytes = &unit[..data_bytes as usize];
 
         // With PCOUNT=0/GCOUNT=1 (checked above), `data_extent` sized the unit as
-        // `elem · Π(axes)`, so `decode` yields exactly `shape_product` samples. This
-        // is an invariant between `data_extent` and `decode`, not a runtime failure
-        // mode — assert it rather than return a `DataSizeMismatch` that can't occur.
+        // `elem · Π(axes)`, so the borrowed data is exactly `shape_product` elements
+        // wide. This is an invariant between `data_extent` and the shape, not a
+        // runtime failure mode — assert it rather than return an error that can't occur.
         debug_assert_eq!(
-            samples.len(),
-            shape_product(&shape),
-            "image decode element count must match the axis product"
+            bytes.len(),
+            shape_product(&shape) * bitpix.elem_size(),
+            "image data length must match the axis product"
         );
-        Ok(Image {
+        Ok(RawImage {
             shape,
-            samples,
+            bitpix,
             scaling,
+            bytes,
         })
     }
 

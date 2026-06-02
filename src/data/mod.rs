@@ -1,13 +1,15 @@
 //! Typed image data model.
 //!
-//! FITS exposes data on two planes: a zero-copy *raw* plane (the stored,
-//! big-endian samples) and a *physical* plane (`BZERO + BSCALE × stored`). The
-//! bulk decode/encode path that fills these from a [`crate::FitsReader`] data
-//! unit is implemented here: [`ImageData::decode`] swaps a big-endian unit into
-//! host-endian samples and [`ImageData::encode_into`] writes them back. Those
-//! per-element loops are memory-bandwidth-bound, so they lean on
-//! autovectorization rather than threads (the thread-parallel layer is the
-//! compute-bound tiled codecs in the `compress` module, not this path).
+//! FITS exposes image data on two planes: a *raw* plane (the stored samples) and a
+//! *physical* plane (`BZERO + BSCALE × raw`). The stored samples are big-endian, so
+//! [`ImageData::decode`] swaps a data unit into an owned, host-endian [`ImageData`]
+//! and [`ImageData::encode_into`] writes them back. When no swap is needed
+//! (`BITPIX = 8`, or a big-endian host) an in-memory reader can skip even that copy
+//! and borrow the data unit in place — see [`RawImage`] /
+//! [`crate::FitsReader::read_image`]. The per-element swap loops are
+//! memory-bandwidth-bound, so they lean on autovectorization rather than threads
+//! (the thread-parallel layer is the compute-bound tiled codecs in the `compress`
+//! module, not this path).
 
 use crate::bitpix::Bitpix;
 use crate::endian::decode_be;
@@ -97,6 +99,90 @@ impl ImageData {
             ImageData::F32(v) => extend_be(out, v, f32::to_be_bytes),
             ImageData::F64(v) => extend_be(out, v, f64::to_be_bytes),
         }
+    }
+
+    /// The physical-plane values for these samples under `scaling`: `BZERO + BSCALE
+    /// × sample` (§3.4), with integer samples equal to the `BLANK` sentinel mapped
+    /// to `NaN` (float `NaN`/`Inf` pass through). Shared by [`Image::physical`] and
+    /// [`RawImage::physical`].
+    pub(crate) fn physical(&self, scaling: &Scaling) -> Vec<f64> {
+        let Scaling {
+            bscale,
+            bzero,
+            blank,
+        } = *scaling;
+        let scale = |x: f64| bzero + bscale * x;
+        match self {
+            ImageData::U8(v) => scale_ints(v, blank, scale),
+            ImageData::I16(v) => scale_ints(v, blank, scale),
+            ImageData::I32(v) => scale_ints(v, blank, scale),
+            ImageData::I64(v) => scale_ints(v, blank, scale),
+            ImageData::F32(v) => v.iter().map(|&x| scale(x as f64)).collect(),
+            ImageData::F64(v) => v.iter().map(|&x| scale(x)).collect(),
+        }
+    }
+
+    /// Exact typed unsigned (or signed-byte) reinterpretation when `scaling` is
+    /// precisely the FITS unsigned convention (`BSCALE == 1`, no `BLANK`, and
+    /// `BZERO` the matching sign-bit offset); `None` otherwise. Exact for all 64-bit
+    /// values (no `f64` rounding). Shared by [`Image::unsigned`]/[`RawImage::unsigned`].
+    pub(crate) fn unsigned(&self, scaling: &Scaling) -> Option<UnsignedView> {
+        if scaling.bscale != 1.0 || scaling.blank.is_some() {
+            return None;
+        }
+        let bzero = scaling.bzero;
+        match self {
+            ImageData::U8(v) if bzero == -128.0 => Some(UnsignedView::from_signed_byte(v)),
+            ImageData::I16(v) if bzero == U16_OFFSET => Some(UnsignedView::from_offset_i16(v)),
+            ImageData::I32(v) if bzero == U32_OFFSET => Some(UnsignedView::from_offset_i32(v)),
+            ImageData::I64(v) if bzero == U64_OFFSET => Some(UnsignedView::from_offset_i64(v)),
+            _ => None,
+        }
+    }
+}
+
+/// A borrowed, **undecoded** image: the data unit's raw big-endian bytes viewed in
+/// place over an in-memory source (zero-copy), with the shape, `BITPIX`, and scaling
+/// needed to interpret them. Returned by [`crate::FitsReader::read_image`] for
+/// the in-memory readers ([`crate::FitsReader::from_bytes`] / `open_mmap`).
+///
+/// For `BITPIX = 8` the bytes *are* the host-endian samples (a byte has no byte
+/// order), so [`RawImage::u8`] hands them back with no copy — the no-swap fast path.
+/// Wider element types are stored big-endian and must be swapped into host order, so
+/// use [`RawImage::decode`] (or [`crate::FitsReader::read_image`]) for those.
+#[derive(Debug)]
+pub struct RawImage<'a> {
+    pub shape: Vec<usize>,
+    pub bitpix: Bitpix,
+    pub scaling: Scaling,
+    /// The meaningful data bytes (`Π(shape) · bitpix.elem_size()`), big-endian.
+    pub bytes: &'a [u8],
+}
+
+impl<'a> RawImage<'a> {
+    /// The samples as a borrowed `&[u8]` when no byte-swap is needed (`BITPIX = 8`,
+    /// any host) — the zero-copy `U8` read plane. `None` for multi-byte element
+    /// types, whose big-endian bytes must be swapped (use [`RawImage::decode`]).
+    pub fn u8(&self) -> Option<&'a [u8]> {
+        matches!(self.bitpix, Bitpix::U8).then_some(self.bytes)
+    }
+
+    /// Decode into an owned, host-endian [`ImageData`] (byte-swapping the stored
+    /// samples), releasing the borrow on the source.
+    pub fn decode(&self) -> ImageData {
+        ImageData::decode(self.bytes, self.bitpix)
+    }
+
+    /// The physical-plane values: `BZERO + BSCALE × sample`, `BLANK` → `NaN` (§3.4).
+    /// Decodes into an owned buffer first, then scales.
+    pub fn physical(&self) -> Vec<f64> {
+        self.decode().physical(&self.scaling)
+    }
+
+    /// Exact typed integers when the scaling is the FITS unsigned (or signed-byte)
+    /// convention; `None` otherwise — same rule as [`Image::unsigned`].
+    pub fn unsigned(&self) -> Option<UnsignedView> {
+        self.decode().unsigned(&self.scaling)
     }
 }
 
@@ -216,17 +302,7 @@ impl Image {
     /// [`Image::physical`], this is exact for all 64-bit values (no `f64` rounding
     /// past 2⁵³). Returns `None` for any other scaling or element type.
     pub fn unsigned(&self) -> Option<UnsignedView> {
-        if self.scaling.bscale != 1.0 || self.scaling.blank.is_some() {
-            return None;
-        }
-        let bzero = self.scaling.bzero;
-        match &self.samples {
-            ImageData::U8(v) if bzero == -128.0 => Some(UnsignedView::from_signed_byte(v)),
-            ImageData::I16(v) if bzero == U16_OFFSET => Some(UnsignedView::from_offset_i16(v)),
-            ImageData::I32(v) if bzero == U32_OFFSET => Some(UnsignedView::from_offset_i32(v)),
-            ImageData::I64(v) if bzero == U64_OFFSET => Some(UnsignedView::from_offset_i64(v)),
-            _ => None,
-        }
+        self.samples.unsigned(&self.scaling)
     }
 
     /// The physical-plane values: `BZERO + BSCALE × sample` for every sample
@@ -234,20 +310,7 @@ impl Image {
     /// `NaN`/`Inf` pass through. The unsigned-integer convention falls out for
     /// free — e.g. a signed-16 buffer with `BZERO = 32768` yields the `u16` value.
     pub fn physical(&self) -> Vec<f64> {
-        let Scaling {
-            bscale,
-            bzero,
-            blank,
-        } = self.scaling;
-        let scale = |x: f64| bzero + bscale * x;
-        match &self.samples {
-            ImageData::U8(v) => scale_ints(v, blank, scale),
-            ImageData::I16(v) => scale_ints(v, blank, scale),
-            ImageData::I32(v) => scale_ints(v, blank, scale),
-            ImageData::I64(v) => scale_ints(v, blank, scale),
-            ImageData::F32(v) => v.iter().map(|&x| scale(x as f64)).collect(),
-            ImageData::F64(v) => v.iter().map(|&x| scale(x)).collect(),
-        }
+        self.samples.physical(&self.scaling)
     }
 }
 

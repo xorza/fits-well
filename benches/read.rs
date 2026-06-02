@@ -72,13 +72,13 @@ fn read_image(c: &mut Criterion) {
         // then decodes out of it (two passes over the data).
         let mut seek = FitsReader::open(Cursor::new(bytes.clone())).unwrap();
         g.bench_function(BenchmarkId::new("seek", name), |b| {
-            b.iter(|| black_box(seek.read_image(0).unwrap()))
+            b.iter(|| black_box(seek.read_image(0).unwrap().decode()))
         });
 
         // In-memory borrow source: decode straight from the bytes — no staging copy.
         let mut slice = FitsReader::from_bytes(&bytes).unwrap();
         g.bench_function(BenchmarkId::new("slice", name), |b| {
-            b.iter(|| black_box(slice.read_image(0).unwrap()))
+            b.iter(|| black_box(slice.read_image(0).unwrap().decode()))
         });
 
         // mmap source: same zero-copy decode, but over a real mapped file.
@@ -93,7 +93,7 @@ fn read_image(c: &mut Criterion) {
                 .unwrap();
             let mut mmap = FitsReader::open_mmap(&path).unwrap();
             g.bench_function(BenchmarkId::new("mmap", name), |b| {
-                b.iter(|| black_box(mmap.read_image(0).unwrap()))
+                b.iter(|| black_box(mmap.read_image(0).unwrap().decode()))
             });
         }
     }
