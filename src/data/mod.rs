@@ -106,12 +106,23 @@ impl ImageData {
     /// to `NaN` (float `NaN`/`Inf` pass through). Shared by [`Image::physical`] and
     /// [`RawImage::physical`].
     pub(crate) fn physical(&self, scaling: &Scaling) -> Vec<f64> {
+        self.physical_as(scaling)
+    }
+
+    /// The physical plane narrowed to `f32` in a single pass — see
+    /// [`RawImage::physical_f32`]. Scaling is still evaluated in `f64`, so each
+    /// element is the correctly-rounded `f32` of the true physical value.
+    pub(crate) fn physical_f32(&self, scaling: &Scaling) -> Vec<f32> {
+        self.physical_as(scaling)
+    }
+
+    fn physical_as<O: PhysicalOut>(&self, scaling: &Scaling) -> Vec<O> {
         let Scaling {
             bscale,
             bzero,
             blank,
         } = *scaling;
-        let scale = |x: f64| bzero + bscale * x;
+        let scale = |x: f64| O::from_f64(bzero + bscale * x);
         match self {
             ImageData::U8(v) => scale_ints(v, blank, scale),
             ImageData::I16(v) => scale_ints(v, blank, scale),
@@ -242,6 +253,22 @@ impl<'a> RawImage<'a> {
         match &self.data {
             ImageBytes::Raw(bytes) => ImageData::decode(bytes, self.bitpix).physical(&self.scaling),
             ImageBytes::Decoded(samples) => samples.physical(&self.scaling),
+        }
+    }
+
+    /// The physical plane narrowed to `f32` in a single pass — the compact, lossy
+    /// counterpart to [`physical`](RawImage::physical). The scaling is still evaluated
+    /// in `f64` (so each value is the correctly-rounded `f32`), but only one `Vec<f32>`
+    /// is allocated rather than a `Vec<f64>` the caller then re-walks to narrow. Prefer
+    /// it when the consumer wants `f32` regardless (display, GPU upload, `f32`
+    /// pipelines); use [`physical`](RawImage::physical) when you need double precision —
+    /// e.g. large `BITPIX = 64` integers or fine `BSCALE`/`BZERO` past `f32`'s range.
+    pub fn physical_f32(&self) -> Vec<f32> {
+        match &self.data {
+            ImageBytes::Raw(bytes) => {
+                ImageData::decode(bytes, self.bitpix).physical_f32(&self.scaling)
+            }
+            ImageBytes::Decoded(samples) => samples.physical_f32(&self.scaling),
         }
     }
 
@@ -464,6 +491,12 @@ impl Image {
         self.samples.physical(&self.scaling)
     }
 
+    /// The physical plane narrowed to `f32` in a single pass — the compact, lossy
+    /// counterpart to [`physical`](Image::physical); see [`RawImage::physical_f32`].
+    pub fn physical_f32(&self) -> Vec<f32> {
+        self.samples.physical_f32(&self.scaling)
+    }
+
     /// The effective element type these samples represent, resolving the unsigned and
     /// signed-byte conventions from the stored `BITPIX` + [`Scaling`].
     pub fn sample_type(&self) -> SampleType {
@@ -473,20 +506,41 @@ impl Image {
 
 /// Scale an integer sample buffer to the physical plane, mapping the `BLANK`
 /// sentinel (a stored integer value) to `NaN`.
-fn scale_ints<T>(v: &[T], blank: Option<i64>, scale: impl Fn(f64) -> f64) -> Vec<f64>
+fn scale_ints<T, O>(v: &[T], blank: Option<i64>, scale: impl Fn(f64) -> O) -> Vec<O>
 where
     T: Copy + Into<i64>,
+    O: PhysicalOut,
 {
     v.iter()
         .map(|&x| {
             let xi: i64 = x.into();
             if blank == Some(xi) {
-                f64::NAN
+                O::from_f64(f64::NAN)
             } else {
                 scale(xi as f64)
             }
         })
         .collect()
+}
+
+/// Output element type of the physical-plane map. Private, hence sealed: the only
+/// implementors are `f64` (the canonical plane, [`ImageData::physical`]) and `f32`
+/// (the compact plane, [`ImageData::physical_f32`]). The scaling arithmetic always
+/// runs in `f64`; `from_f64` is the final per-element narrowing.
+trait PhysicalOut: Copy {
+    fn from_f64(value: f64) -> Self;
+}
+
+impl PhysicalOut for f64 {
+    fn from_f64(value: f64) -> f64 {
+        value
+    }
+}
+
+impl PhysicalOut for f32 {
+    fn from_f64(value: f64) -> f32 {
+        value as f32
+    }
 }
 
 /// The linear `BSCALE`/`BZERO` map from a stored value to its physical value,
