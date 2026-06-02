@@ -78,24 +78,24 @@ pub enum FitsError {
     InvalidTform {
         tform: String,
     },
-    /// `read_column` was called on a variable-length-array (`P`/`Q`) column;
-    /// use `read_vla_column` instead.
+    /// `ColumnReader::raw` was called on a variable-length-array (`P`/`Q`) column;
+    /// use `ColumnReader::vla` instead.
     VariableLengthColumn {
         code: char,
     },
-    /// `read_vla_column` was called on a fixed-width column.
+    /// `ColumnReader::vla` was called on a fixed-width column.
     NotAVla {
         code: char,
     },
-    /// `ColumnData::bits` was called on a column that is not an `X` bit array.
+    /// `ColumnReader::bits` was called on a column that is not an `X` bit array.
     NotABitColumn {
         code: char,
     },
-    /// `ColumnData::complex` was called on a column that is not `C`/`M` complex.
+    /// `ColumnReader::complex` was called on a column that is not `C`/`M` complex.
     NotAComplexColumn {
         code: char,
     },
-    /// `ColumnData::physical` was called on a column with no numeric physical
+    /// `ColumnReader::physical` was called on a column with no numeric physical
     /// value (`A`/`L`/`X`/`C`/`M`).
     NonNumericColumn {
         code: char,
@@ -104,6 +104,10 @@ pub enum FitsError {
     ColumnIndexOutOfBounds {
         index: usize,
         len: usize,
+    },
+    /// No column with the requested `TTYPEn` name exists in the table.
+    ColumnNotFound {
+        name: String,
     },
     /// The summed column widths disagree with the declared row width (`NAXIS1`).
     RowWidthMismatch {
@@ -160,7 +164,7 @@ impl fmt::Display for FitsError {
             FitsError::InvalidTform { tform } => write!(f, "invalid column format {tform:?}"),
             FitsError::VariableLengthColumn { code } => write!(
                 f,
-                "column format '{code}' is a variable-length array; use read_vla_column"
+                "column format '{code}' is a variable-length array; use the column reader's vla()"
             ),
             FitsError::NotAVla { code } => {
                 write!(f, "column format '{code}' is not a variable-length array")
@@ -179,6 +183,9 @@ impl fmt::Display for FitsError {
                     f,
                     "column index {index} out of bounds (table has {len} columns)"
                 )
+            }
+            FitsError::ColumnNotFound { name } => {
+                write!(f, "no column named {name:?} in the table")
             }
             FitsError::RowWidthMismatch { computed, declared } => write!(
                 f,

@@ -689,7 +689,7 @@ fn decodes_a_cfitsio_compressed_table() {
         "decoded cfitsio-compressed table must match the original bytes"
     );
     // Spot-check a decoded value against the known formula (INT = i·100000 − 5).
-    match original.read_column(1).unwrap() {
+    match original.column_by_idx(1).unwrap().raw().unwrap() {
         ColumnData::I32(v) => assert_eq!(v[3], 3 * 100_000 - 5),
         other => panic!("expected I32, got {other:?}"),
     }

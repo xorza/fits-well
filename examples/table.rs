@@ -34,19 +34,19 @@ fn main() -> fits_well::Result<()> {
     let table = reader.read_table(1)?;
 
     println!("{} rows, {} columns", table.nrows, table.columns.len());
-    println!("ID   = {:?}", table.read_column(0)?);
-    println!("NAME = {:?}", table.read_column(1)?);
-    println!("MAG  = {:?}", table.read_column(2)?);
+    // Address a column by index or by `TTYPEn` name; the handle decodes on demand.
+    println!("ID   = {:?}", table.column_by_idx(0)?.raw()?);
+    println!("NAME = {:?}", table.column_by_name("NAME")?.raw()?);
+    println!("MAG  = {:?}", table.column_by_name("MAG")?.raw()?);
 
-    // `read_column` gives the raw, typed plane. To interpret a column, chain a
-    // combinator onto it: `.physical()` applies `TZEROn + TSCALn ×` and maps
-    // `TNULLn` to NaN, widening any numeric column to `f64` (MAG is unscaled here,
-    // so these are just the stored values). `.unsigned()`, `.complex()`, and
-    // `.bits()` cover the unsigned, complex, and bit-array columns the same way.
-    let mag = &table.columns[2];
+    // `.raw()` is the stored, typed plane. The handle also interprets: `.physical()`
+    // applies `TZEROn + TSCALn ×` and maps `TNULLn` to NaN, widening any numeric
+    // column to `f64` (MAG is unscaled here, so these are just the stored values).
+    // `.unsigned()`, `.complex()`, and `.bits()` cover the unsigned, complex, and
+    // bit-array columns the same way — no need to pass the column descriptor back.
     println!(
         "MAG (physical) = {:?}",
-        table.read_column(2)?.physical(mag)?
+        table.column_by_name("MAG")?.physical()?
     );
 
     Ok(())

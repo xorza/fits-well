@@ -2,10 +2,11 @@
 //!
 //! A binary table is `NAXIS2` rows of `NAXIS1` bytes; each of `TFIELDS` columns
 //! occupies a fixed byte range in every row, typed by its `TFORMn` code. This
-//! module parses that structure into [`Column`] descriptors and decodes:
-//! fixed-width fields into typed [`ColumnData`] ([`BinTable::read_column`]), the
-//! `TSCALn`/`TZEROn` physical plane ([`ColumnData::physical`]), and `P`/`Q`
-//! variable-length arrays out of the heap ([`BinTable::read_vla_column`]).
+//! module parses that structure into [`Column`] descriptors; decoding goes through
+//! a [`ColumnReader`] (from [`BinTable::column_by_idx`] / [`BinTable::column_by_name`]),
+//! whose methods yield typed [`ColumnData`] ([`ColumnReader::raw`]), the
+//! `TSCALn`/`TZEROn` physical plane ([`ColumnReader::physical`]), and `P`/`Q`
+//! variable-length arrays out of the heap ([`ColumnReader::vla`]).
 
 use bitvec::order::Msb0;
 use bitvec::slice::BitSlice;
@@ -254,9 +255,9 @@ pub struct Column {
     pub name: Option<String>,
     pub unit: Option<String>,
     pub tform: Tform,
-    /// `TSCALn` (default 1.0); applied by [`ColumnData::physical`].
+    /// `TSCALn` (default 1.0); applied by [`ColumnReader::physical`].
     pub tscale: f64,
-    /// `TZEROn` (default 0.0); applied by [`ColumnData::physical`].
+    /// `TZEROn` (default 0.0); applied by [`ColumnReader::physical`].
     pub tzero: f64,
     /// `TNULLn`, the integer value denoting an undefined element, if declared.
     pub tnull: Option<i64>,
@@ -305,98 +306,6 @@ impl ColumnData {
             ColumnData::ComplexF64(v) => v.len(),
             ColumnData::Text(v) => v.len(),
         }
-    }
-
-    /// Scale this decoded column to its physical `f64` plane using `col`'s
-    /// `TSCALn`/`TZEROn`/`TNULLn`: `physical = TZEROn + TSCALn × raw`, mapping
-    /// integers equal to `TNULLn` to `NaN`. `col` supplies both the scaling and the
-    /// `TFORMn` kind that disambiguates `B` (numeric byte) from `X` (packed bits).
-    /// Errors for the non-numeric kinds (`A`/`L`/`X`/`C`/`M`).
-    pub fn physical(&self, col: &Column) -> Result<Vec<f64>> {
-        column_data_physical(self, col.tform.kind, col.tscale, col.tzero, col.tnull)
-    }
-
-    /// If `col` uses exactly the FITS unsigned (or signed-byte) convention —
-    /// `TSCALn == 1`, no `TNULLn`, and `TZEROn` the matching sign-bit offset on a
-    /// `B`/`I`/`J`/`K` column — reinterpret this column as exact typed integers (no
-    /// `f64` rounding, unlike [`ColumnData::physical`]). Array columns stay
-    /// row-major-flattened. Returns `None` for any other column. Mirrors
-    /// [`crate::Image::unsigned`].
-    pub fn unsigned(&self, col: &Column) -> Option<UnsignedView> {
-        if col.tscale != 1.0 || col.tnull.is_some() {
-            return None;
-        }
-        let tzero = col.tzero;
-        match (self, col.tform.kind) {
-            (ColumnData::Bytes(v), TformKind::Byte) if tzero == -128.0 => {
-                Some(UnsignedView::from_signed_byte(v))
-            }
-            (ColumnData::I16(v), _) if tzero == U16_OFFSET => {
-                Some(UnsignedView::from_offset_i16(v))
-            }
-            (ColumnData::I32(v), _) if tzero == U32_OFFSET => {
-                Some(UnsignedView::from_offset_i32(v))
-            }
-            (ColumnData::I64(v), _) if tzero == U64_OFFSET => {
-                Some(UnsignedView::from_offset_i64(v))
-            }
-            _ => None,
-        }
-    }
-
-    /// Scale a `C`/`M` complex column to [`Complex<f64>`] values, applying `TZEROn +
-    /// TSCALn ×` to each component (§6.4). Errors on non-complex columns — the real
-    /// numeric kinds go through [`ColumnData::physical`].
-    pub fn complex(&self, col: &Column) -> Result<Vec<Complex<f64>>> {
-        let scale = |re: f64, im: f64| Complex {
-            re: col.tzero + col.tscale * re,
-            im: col.tzero + col.tscale * im,
-        };
-        Ok(match self {
-            ColumnData::ComplexF32(v) => v
-                .iter()
-                .map(|&Complex { re, im }| scale(re as f64, im as f64))
-                .collect(),
-            ColumnData::ComplexF64(v) => {
-                v.iter().map(|&Complex { re, im }| scale(re, im)).collect()
-            }
-            _ => {
-                return Err(FitsError::NotAComplexColumn {
-                    code: col.tform.kind.code(),
-                });
-            }
-        })
-    }
-
-    /// View an `X` (bit-array) column — decoded by [`BinTable::read_column`] into
-    /// the packed [`ColumnData::Bytes`] — as one borrowed [`BitSlice`] per row,
-    /// MSB-first (bit 0 is the most significant bit of the first byte, §7.3.2). The
-    /// `Msb0` order matches that layout, so each row is the cell's `ceil(nbits/8)`
-    /// bytes viewed in place and truncated to the `TFORMn` repeat `col` declares —
-    /// no per-row allocation; call `.to_bitvec()` on a row to own it. The views
-    /// borrow this [`ColumnData`], so bind it to a local first. Errors on any non-`X`
-    /// column. A zero-bit `X` column yields no rows (its per-row structure isn't
-    /// recoverable from the empty byte buffer alone).
-    pub fn bits(&self, col: &Column) -> Result<Vec<&BitSlice<u8, Msb0>>> {
-        if col.tform.kind != TformKind::Bit {
-            return Err(FitsError::NotABitColumn {
-                code: col.tform.kind.code(),
-            });
-        }
-        let nbits = col.tform.repeat;
-        let row_bytes = nbits.div_ceil(8);
-        let ColumnData::Bytes(bytes) = self else {
-            return Err(FitsError::NotABitColumn {
-                code: col.tform.kind.code(),
-            });
-        };
-        if row_bytes == 0 {
-            return Ok(Vec::new());
-        }
-        Ok(bytes
-            .chunks(row_bytes)
-            .map(|cell| &cell.view_bits::<Msb0>()[..nbits])
-            .collect())
     }
 }
 
@@ -535,57 +444,32 @@ impl BinTable {
         })
     }
 
-    /// Decode the fixed-width column at `index` into a typed, row-flattened
-    /// [`ColumnData`]. Variable-length (`P`/`Q`) columns error here — use
-    /// [`BinTable::read_vla_column`].
-    pub fn read_column(&self, index: usize) -> Result<ColumnData> {
-        let col = self.column(index)?;
-        if matches!(
-            col.tform.kind,
-            TformKind::ArrayDesc32 | TformKind::ArrayDesc64
-        ) {
-            return Err(FitsError::VariableLengthColumn {
-                code: col.tform.kind.code(),
-            });
-        }
-        // `A` is one string per row; every other fixed kind decodes uniformly
-        // from the concatenated cell bytes — cell boundaries land on element
-        // boundaries, so the flat decode is exact.
-        Ok(if col.tform.kind == TformKind::Char {
-            ColumnData::Text(
-                (0..self.nrows)
-                    .map(|r| trim_text(self.cell(col, r)))
-                    .collect(),
-            )
-        } else {
-            decode_array(col.tform.kind, &self.flatten(col))
-        })
+    fn column_index_checked(&self, name: &str) -> Result<usize> {
+        self.column_index(name)
+            .ok_or_else(|| FitsError::ColumnNotFound {
+                name: name.to_string(),
+            })
     }
 
-    /// View a variable-length `X` (bit-array) column (`1PX`/`1QX`) as one borrowed
-    /// [`BitSlice`] per row, MSB-first (§7.3.2/§7.3.5 — the descriptor's element
-    /// count is the bit count). Each row's heap span is a contiguous slice of the
-    /// data unit, so the views borrow `self` directly with no gather or per-row
-    /// allocation; call `.to_bitvec()` on a row to own it. Errors on any non-bit VLA.
-    pub fn read_vla_bit_column(&self, index: usize) -> Result<Vec<&BitSlice<u8, Msb0>>> {
-        let col = self.column(index)?;
-        let wide = match (col.tform.kind, col.tform.vla_elem) {
-            (TformKind::ArrayDesc32, Some(TformKind::Bit)) => false,
-            (TformKind::ArrayDesc64, Some(TformKind::Bit)) => true,
-            _ => {
-                return Err(FitsError::NotABitColumn {
-                    code: col.tform.kind.code(),
-                });
-            }
-        };
-        let mut out = Vec::with_capacity(self.nrows);
-        for r in 0..self.nrows {
-            // The descriptor's element count is the bit count (§7.3.2).
-            let d = decode_descriptor(self.cell(col, r), wide);
-            let cell = self.bounded_heap(d.offset, d.nelem.div_ceil(8))?;
-            out.push(&cell.view_bits::<Msb0>()[..d.nelem]);
+    /// A reader handle for the column at `index`. Decode through it — [`ColumnReader`]
+    /// exposes `raw`/`physical`/`unsigned`/`complex`/`bits` and the `vla*` variants —
+    /// without re-passing the column descriptor. Errors with
+    /// [`FitsError::ColumnIndexOutOfBounds`] for a bad index.
+    pub fn column_by_idx(&self, index: usize) -> Result<ColumnReader<'_>> {
+        if index >= self.columns.len() {
+            return Err(FitsError::ColumnIndexOutOfBounds {
+                index,
+                len: self.columns.len(),
+            });
         }
-        Ok(out)
+        Ok(ColumnReader { table: self, index })
+    }
+
+    /// A reader handle for the column named `name` (`TTYPEn`, case-insensitive, §6.7).
+    /// Errors with [`FitsError::ColumnNotFound`] if no such column exists.
+    pub fn column_by_name(&self, name: &str) -> Result<ColumnReader<'_>> {
+        let index = self.column_index_checked(name)?;
+        Ok(ColumnReader { table: self, index })
     }
 
     /// The `nbytes` of heap at descriptor `offset`, bounds-checked against the heap.
@@ -603,60 +487,6 @@ impl BinTable {
         self.bytes.get(start..end).ok_or(FitsError::UnexpectedEof)
     }
 
-    /// Decode a variable-length-array (`P`/`Q`) column: one [`ColumnData`] per
-    /// row, each holding that row's heap array (which may be empty). Errors for
-    /// fixed-width columns.
-    pub fn read_vla_column(&self, index: usize) -> Result<Vec<ColumnData>> {
-        let col = self.column(index)?;
-        let (elem, wide) = match (col.tform.kind, col.tform.vla_elem) {
-            (TformKind::ArrayDesc32, Some(e)) => (e, false),
-            (TformKind::ArrayDesc64, Some(e)) => (e, true),
-            _ => {
-                return Err(FitsError::NotAVla {
-                    code: col.tform.kind.code(),
-                });
-            }
-        };
-        let mut out = Vec::with_capacity(self.nrows);
-        for r in 0..self.nrows {
-            let d = decode_descriptor(self.cell(col, r), wide);
-            let nbytes = match elem {
-                TformKind::Bit => d.nelem.div_ceil(8),
-                _ => d
-                    .nelem
-                    .checked_mul(elem.elem_size())
-                    .ok_or(FitsError::UnexpectedEof)?,
-            };
-            out.push(decode_array(elem, self.bounded_heap(d.offset, nbytes)?));
-        }
-        Ok(out)
-    }
-
-    /// Decode a `P`/`Q` column and scale each row's heap array to its physical
-    /// plane: `physical = TZEROn + TSCALn × element`, mapping integers equal to
-    /// `TNULLn` to `NaN` (§6.4 — scaling applies to the heap values, not the
-    /// descriptor). Errors for fixed-width columns and non-numeric heap elements.
-    pub fn read_vla_column_physical(&self, index: usize) -> Result<Vec<Vec<f64>>> {
-        let rows = self.read_vla_column(index)?; // validates VLA + heap bounds
-        let col = self.column(index)?;
-        let elem = col
-            .tform
-            .vla_elem
-            .expect("read_vla_column succeeded ⇒ vla_elem is Some");
-        rows.iter()
-            .map(|row| column_data_physical(row, elem, col.tscale, col.tzero, col.tnull))
-            .collect()
-    }
-
-    fn column(&self, index: usize) -> Result<&Column> {
-        self.columns
-            .get(index)
-            .ok_or(FitsError::ColumnIndexOutOfBounds {
-                index,
-                len: self.columns.len(),
-            })
-    }
-
     /// The raw bytes of column `col` in row `r`.
     fn cell(&self, col: &Column, r: usize) -> &[u8] {
         let start = r * self.row_len + col.byte_offset;
@@ -670,6 +500,205 @@ impl BinTable {
             out.extend_from_slice(self.cell(col, r));
         }
         out
+    }
+}
+
+/// A handle to one column of a [`BinTable`], from [`BinTable::column_by_idx`] or
+/// [`BinTable::column_by_name`]. Decode through it without re-passing the column
+/// descriptor: [`raw`](Self::raw) for the typed values, [`physical`](Self::physical)
+/// for the scaled `f64` plane, [`unsigned`](Self::unsigned)/[`complex`](Self::complex)/
+/// [`bits`](Self::bits) for the special kinds, and [`vla`](Self::vla) (+
+/// [`vla_physical`](Self::vla_physical)/[`vla_bits`](Self::vla_bits)) for
+/// variable-length `P`/`Q` columns. Borrows the table, so it cannot outlive it.
+#[derive(Debug, Clone, Copy)]
+pub struct ColumnReader<'a> {
+    table: &'a BinTable,
+    index: usize,
+}
+
+impl<'a> ColumnReader<'a> {
+    /// The column's [`Column`] descriptor — name, `TFORMn`, `TSCALn`/`TZEROn`/`TNULLn`,
+    /// `TDIMn`, `TDISPn`.
+    pub fn descriptor(&self) -> &'a Column {
+        &self.table.columns[self.index]
+    }
+
+    /// Decode a fixed-width column into a typed, row-flattened [`ColumnData`]: `A` is
+    /// one [`String`] per row, every other fixed kind decodes from the concatenated
+    /// cell bytes. Variable-length (`P`/`Q`) columns error here — use
+    /// [`ColumnReader::vla`].
+    pub fn raw(&self) -> Result<ColumnData> {
+        let col = self.descriptor();
+        if matches!(
+            col.tform.kind,
+            TformKind::ArrayDesc32 | TformKind::ArrayDesc64
+        ) {
+            return Err(FitsError::VariableLengthColumn {
+                code: col.tform.kind.code(),
+            });
+        }
+        Ok(if col.tform.kind == TformKind::Char {
+            ColumnData::Text(
+                (0..self.table.nrows)
+                    .map(|r| trim_text(self.table.cell(col, r)))
+                    .collect(),
+            )
+        } else {
+            decode_array(col.tform.kind, &self.table.flatten(col))
+        })
+    }
+
+    /// The numeric column scaled to its physical `f64` plane: `TZEROn + TSCALn × raw`,
+    /// mapping integers equal to `TNULLn` to `NaN`. Errors for the non-numeric kinds
+    /// (`A`/`L`/`X`/`C`/`M`) and variable-length columns.
+    pub fn physical(&self) -> Result<Vec<f64>> {
+        let col = self.descriptor();
+        column_data_physical(
+            &self.raw()?,
+            col.tform.kind,
+            col.tscale,
+            col.tzero,
+            col.tnull,
+        )
+    }
+
+    /// Exact typed integers when the column uses the FITS unsigned (or signed-byte)
+    /// convention — `TSCALn == 1`, no `TNULLn`, `TZEROn` the matching sign-bit offset
+    /// on a `B`/`I`/`J`/`K` column — without the `f64` rounding of
+    /// [`physical`](Self::physical). `Ok(None)` for any other column; errors only for a
+    /// variable-length column. Mirrors [`crate::Image::unsigned`].
+    pub fn unsigned(&self) -> Result<Option<UnsignedView>> {
+        let col = self.descriptor();
+        if col.tscale != 1.0 || col.tnull.is_some() {
+            return Ok(None);
+        }
+        let tzero = col.tzero;
+        Ok(match (self.raw()?, col.tform.kind) {
+            (ColumnData::Bytes(v), TformKind::Byte) if tzero == -128.0 => {
+                Some(UnsignedView::from_signed_byte(&v))
+            }
+            (ColumnData::I16(v), _) if tzero == U16_OFFSET => {
+                Some(UnsignedView::from_offset_i16(&v))
+            }
+            (ColumnData::I32(v), _) if tzero == U32_OFFSET => {
+                Some(UnsignedView::from_offset_i32(&v))
+            }
+            (ColumnData::I64(v), _) if tzero == U64_OFFSET => {
+                Some(UnsignedView::from_offset_i64(&v))
+            }
+            _ => None,
+        })
+    }
+
+    /// A `C`/`M` complex column as [`Complex<f64>`] values, applying `TZEROn + TSCALn ×`
+    /// to each component (§6.4). Errors on non-complex columns.
+    pub fn complex(&self) -> Result<Vec<Complex<f64>>> {
+        let col = self.descriptor();
+        let scale = |re: f64, im: f64| Complex {
+            re: col.tzero + col.tscale * re,
+            im: col.tzero + col.tscale * im,
+        };
+        Ok(match self.raw()? {
+            ColumnData::ComplexF32(v) => v
+                .iter()
+                .map(|&Complex { re, im }| scale(re as f64, im as f64))
+                .collect(),
+            ColumnData::ComplexF64(v) => {
+                v.iter().map(|&Complex { re, im }| scale(re, im)).collect()
+            }
+            _ => {
+                return Err(FitsError::NotAComplexColumn {
+                    code: col.tform.kind.code(),
+                });
+            }
+        })
+    }
+
+    /// An `X` (bit-array) column as one borrowed [`BitSlice`] per row, MSB-first (bit 0
+    /// is the MSB of the first byte, §7.3.2) — viewed in place over the data unit with
+    /// no per-row allocation; call `.to_bitvec()` on a row to own it. Errors on any
+    /// non-`X` column.
+    pub fn bits(&self) -> Result<Vec<&'a BitSlice<u8, Msb0>>> {
+        let col = self.descriptor();
+        if col.tform.kind != TformKind::Bit {
+            return Err(FitsError::NotABitColumn {
+                code: col.tform.kind.code(),
+            });
+        }
+        let nbits = col.tform.repeat;
+        Ok((0..self.table.nrows)
+            .map(|r| &self.table.cell(col, r).view_bits::<Msb0>()[..nbits])
+            .collect())
+    }
+
+    /// Decode a variable-length (`P`/`Q`) column: one [`ColumnData`] per row, each
+    /// holding that row's heap array (which may be empty). Errors for fixed-width
+    /// columns.
+    pub fn vla(&self) -> Result<Vec<ColumnData>> {
+        let col = self.descriptor();
+        let (elem, wide) = match (col.tform.kind, col.tform.vla_elem) {
+            (TformKind::ArrayDesc32, Some(e)) => (e, false),
+            (TformKind::ArrayDesc64, Some(e)) => (e, true),
+            _ => {
+                return Err(FitsError::NotAVla {
+                    code: col.tform.kind.code(),
+                });
+            }
+        };
+        let mut out = Vec::with_capacity(self.table.nrows);
+        for r in 0..self.table.nrows {
+            let d = decode_descriptor(self.table.cell(col, r), wide);
+            let nbytes = match elem {
+                TformKind::Bit => d.nelem.div_ceil(8),
+                _ => d
+                    .nelem
+                    .checked_mul(elem.elem_size())
+                    .ok_or(FitsError::UnexpectedEof)?,
+            };
+            out.push(decode_array(
+                elem,
+                self.table.bounded_heap(d.offset, nbytes)?,
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Scale each row of a `P`/`Q` column to its physical plane: `TZEROn + TSCALn ×
+    /// element`, mapping integers equal to `TNULLn` to `NaN` (§6.4 — scaling applies to
+    /// the heap values). Errors for fixed-width or non-numeric-heap columns.
+    pub fn vla_physical(&self) -> Result<Vec<Vec<f64>>> {
+        let rows = self.vla()?; // validates VLA + heap bounds
+        let col = self.descriptor();
+        let elem = col
+            .tform
+            .vla_elem
+            .expect("vla() succeeded ⇒ vla_elem is Some");
+        rows.iter()
+            .map(|row| column_data_physical(row, elem, col.tscale, col.tzero, col.tnull))
+            .collect()
+    }
+
+    /// A variable-length `X` (`1PX`/`1QX`) column as one borrowed [`BitSlice`] per row,
+    /// MSB-first (§7.3.2/§7.3.5 — the descriptor's element count is the bit count).
+    /// Errors on any non-bit VLA.
+    pub fn vla_bits(&self) -> Result<Vec<&'a BitSlice<u8, Msb0>>> {
+        let col = self.descriptor();
+        let wide = match (col.tform.kind, col.tform.vla_elem) {
+            (TformKind::ArrayDesc32, Some(TformKind::Bit)) => false,
+            (TformKind::ArrayDesc64, Some(TformKind::Bit)) => true,
+            _ => {
+                return Err(FitsError::NotABitColumn {
+                    code: col.tform.kind.code(),
+                });
+            }
+        };
+        let mut out = Vec::with_capacity(self.table.nrows);
+        for r in 0..self.table.nrows {
+            let d = decode_descriptor(self.table.cell(col, r), wide);
+            let cell = self.table.bounded_heap(d.offset, d.nelem.div_ceil(8))?;
+            out.push(&cell.view_bits::<Msb0>()[..d.nelem]);
+        }
+        Ok(out)
     }
 }
 

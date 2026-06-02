@@ -128,91 +128,31 @@ impl AsciiTable {
         })
     }
 
-    /// Decode column `index` into a typed [`ColumnData`] (`Text`/`I64`/`F64`).
-    /// A blank numeric field decodes to 0 (§7.2.5); a field equal to `TNULLn`
-    /// (undefined) decodes to a 0 placeholder in this raw plane — use
-    /// [`AsciiTable::read_column_physical`] to get `NaN` for undefined values.
-    /// A non-blank, non-null unparseable field errors.
-    pub fn read_column(&self, index: usize) -> Result<ColumnData> {
-        let col = self.column(index)?;
-        match col.kind {
-            AsciiKind::Char => Ok(ColumnData::Text(
-                (0..self.nrows)
-                    .map(|r| Ok(self.field(col, r)?.to_string()))
-                    .collect::<Result<_>>()?,
-            )),
-            AsciiKind::Integer => {
-                let mut out = Vec::with_capacity(self.nrows);
-                for r in 0..self.nrows {
-                    let s = self.field(col, r)?;
-                    out.push(if s.is_empty() || col.is_null(s) {
-                        0
-                    } else {
-                        s.parse().map_err(|_| FitsError::InvalidValue {
-                            card: s.to_string(),
-                        })?
-                    });
-                }
-                Ok(ColumnData::I64(out))
-            }
-            AsciiKind::Float => {
-                let mut out = Vec::with_capacity(self.nrows);
-                for r in 0..self.nrows {
-                    let s = self.field(col, r)?;
-                    out.push(if s.is_empty() || col.is_null(s) {
-                        0.0
-                    } else {
-                        parse_ascii_float(s, col.decimals).ok_or_else(|| {
-                            FitsError::InvalidValue {
-                                card: s.to_string(),
-                            }
-                        })?
-                    });
-                }
-                Ok(ColumnData::F64(out))
-            }
-        }
+    fn column_index_checked(&self, name: &str) -> Result<usize> {
+        self.column_index(name)
+            .ok_or_else(|| FitsError::ColumnNotFound {
+                name: name.to_string(),
+            })
     }
 
-    /// Decode a numeric column into its physical `f64` plane: `TZEROn + TSCALn ×
-    /// field` (§7.2.2). A blank field is 0 before scaling; a field equal to
-    /// `TNULLn` is undefined and maps to `NaN`. Errors on a character column.
-    ///
-    /// This stays a dedicated method, rather than a [`ColumnData::physical`]
-    /// combinator like the binary-table path uses, on purpose: recovering `TNULLn`
-    /// nulls as `NaN` needs the original field text, which the raw
-    /// [`AsciiTable::read_column`] plane has already collapsed to `0`.
-    pub fn read_column_physical(&self, index: usize) -> Result<Vec<f64>> {
-        let col = self.column(index)?;
-        if col.kind == AsciiKind::Char {
-            return Err(FitsError::NonNumericColumn { code: 'A' });
-        }
-        let mut out = Vec::with_capacity(self.nrows);
-        for r in 0..self.nrows {
-            let s = self.field(col, r)?;
-            if col.is_null(s) {
-                out.push(f64::NAN);
-                continue;
-            }
-            let raw = if s.is_empty() {
-                0.0
-            } else {
-                parse_ascii_float(s, col.decimals).ok_or_else(|| FitsError::InvalidValue {
-                    card: s.to_string(),
-                })?
-            };
-            out.push(col.tzero + col.tscale * raw);
-        }
-        Ok(out)
-    }
-
-    fn column(&self, index: usize) -> Result<&AsciiColumn> {
-        self.columns
-            .get(index)
-            .ok_or(FitsError::ColumnIndexOutOfBounds {
+    /// A reader handle for the column at `index`. Decode through it —
+    /// [`AsciiColumnReader::raw`]/[`physical`](AsciiColumnReader::physical) — without
+    /// re-passing the descriptor. Errors with [`FitsError::ColumnIndexOutOfBounds`].
+    pub fn column_by_idx(&self, index: usize) -> Result<AsciiColumnReader<'_>> {
+        if index >= self.columns.len() {
+            return Err(FitsError::ColumnIndexOutOfBounds {
                 index,
                 len: self.columns.len(),
-            })
+            });
+        }
+        Ok(AsciiColumnReader { table: self, index })
+    }
+
+    /// A reader handle for the column named `name` (`TTYPEn`, case-insensitive, §7.2.2).
+    /// Errors with [`FitsError::ColumnNotFound`] if no such column exists.
+    pub fn column_by_name(&self, name: &str) -> Result<AsciiColumnReader<'_>> {
+        let index = self.column_index_checked(name)?;
+        Ok(AsciiColumnReader { table: self, index })
     }
 
     /// The trimmed text of column `col` in row `r`. Errors on non-UTF-8 bytes — a
@@ -231,6 +171,101 @@ impl AsciiTable {
             card: "non-UTF-8 bytes in ASCII-table field".to_string(),
         })?;
         Ok(text.trim())
+    }
+}
+
+/// A handle to one column of an [`AsciiTable`], from [`AsciiTable::column_by_idx`] or
+/// [`AsciiTable::column_by_name`]. Decode through it without re-passing the
+/// descriptor: [`raw`](Self::raw) for the typed values, [`physical`](Self::physical)
+/// for the scaled plane. Borrows the table, so it cannot outlive it.
+#[derive(Debug, Clone, Copy)]
+pub struct AsciiColumnReader<'a> {
+    table: &'a AsciiTable,
+    index: usize,
+}
+
+impl<'a> AsciiColumnReader<'a> {
+    /// The column's [`AsciiColumn`] descriptor.
+    pub fn descriptor(&self) -> &'a AsciiColumn {
+        &self.table.columns[self.index]
+    }
+
+    /// Decode the column into a typed [`ColumnData`] (`Text`/`I64`/`F64`). A blank
+    /// numeric field decodes to 0 (§7.2.5); a field equal to `TNULLn` decodes to a 0
+    /// placeholder in this raw plane — use [`physical`](Self::physical) for `NaN`. A
+    /// non-blank, non-null unparseable field errors.
+    pub fn raw(&self) -> Result<ColumnData> {
+        let table = self.table;
+        let col = self.descriptor();
+        match col.kind {
+            AsciiKind::Char => Ok(ColumnData::Text(
+                (0..table.nrows)
+                    .map(|r| Ok(table.field(col, r)?.to_string()))
+                    .collect::<Result<_>>()?,
+            )),
+            AsciiKind::Integer => {
+                let mut out = Vec::with_capacity(table.nrows);
+                for r in 0..table.nrows {
+                    let s = table.field(col, r)?;
+                    out.push(if s.is_empty() || col.is_null(s) {
+                        0
+                    } else {
+                        s.parse().map_err(|_| FitsError::InvalidValue {
+                            card: s.to_string(),
+                        })?
+                    });
+                }
+                Ok(ColumnData::I64(out))
+            }
+            AsciiKind::Float => {
+                let mut out = Vec::with_capacity(table.nrows);
+                for r in 0..table.nrows {
+                    let s = table.field(col, r)?;
+                    out.push(if s.is_empty() || col.is_null(s) {
+                        0.0
+                    } else {
+                        parse_ascii_float(s, col.decimals).ok_or_else(|| {
+                            FitsError::InvalidValue {
+                                card: s.to_string(),
+                            }
+                        })?
+                    });
+                }
+                Ok(ColumnData::F64(out))
+            }
+        }
+    }
+
+    /// The numeric column on its physical `f64` plane: `TZEROn + TSCALn × field`
+    /// (§7.2.2). A blank field is 0 before scaling; a field equal to `TNULLn` is
+    /// undefined and maps to `NaN`. Errors on a character column.
+    ///
+    /// Unlike the binary-table [`ColumnReader::physical`](crate::ColumnReader::physical),
+    /// this re-reads the field text (the raw plane has already collapsed nulls to 0),
+    /// which is how `TNULLn` survives as `NaN`.
+    pub fn physical(&self) -> Result<Vec<f64>> {
+        let table = self.table;
+        let col = self.descriptor();
+        if col.kind == AsciiKind::Char {
+            return Err(FitsError::NonNumericColumn { code: 'A' });
+        }
+        let mut out = Vec::with_capacity(table.nrows);
+        for r in 0..table.nrows {
+            let s = table.field(col, r)?;
+            if col.is_null(s) {
+                out.push(f64::NAN);
+                continue;
+            }
+            let raw = if s.is_empty() {
+                0.0
+            } else {
+                parse_ascii_float(s, col.decimals).ok_or_else(|| FitsError::InvalidValue {
+                    card: s.to_string(),
+                })?
+            };
+            out.push(col.tzero + col.tscale * raw);
+        }
+        Ok(out)
     }
 }
 

@@ -282,7 +282,7 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
     let nchunks = nrows.div_ceil(rpt.max(1));
     // Each column's per-chunk compressed cells.
     let cells: Vec<Vec<ColumnData>> = (0..ncols)
-        .map(|ci| table.read_vla_column(ci))
+        .map(|ci| table.column_by_idx(ci)?.vla())
         .collect::<Result<_>>()?;
 
     // Decompress each (chunk, column) tile independently (the compute-bound step —

@@ -907,7 +907,7 @@ fn i64_to_be(vals: &[i64], bitpix: Bitpix) -> Vec<u8> {
 /// Read a compressed-data column's per-tile cells, or empty if the column is absent.
 fn read_tiles(table: &BinTable, name: &str) -> Result<Vec<ColumnData>> {
     match table.column_index(name) {
-        Some(c) => table.read_vla_column(c),
+        Some(c) => table.column_by_idx(c)?.vla(),
         None => Ok(Vec::new()),
     }
 }
@@ -915,7 +915,7 @@ fn read_tiles(table: &BinTable, name: &str) -> Result<Vec<ColumnData>> {
 /// Read a per-tile `f64` column (e.g. `ZSCALE`/`ZZERO`), or `None` if absent.
 fn read_f64_column(table: &BinTable, name: &str) -> Option<Vec<f64>> {
     let c = table.column_index(name)?;
-    match table.read_column(c) {
+    match table.column_by_idx(c).and_then(|col| col.raw()) {
         Ok(ColumnData::F64(v)) => Some(v),
         _ => None,
     }
@@ -925,7 +925,7 @@ fn read_f64_column(table: &BinTable, name: &str) -> Option<Vec<f64>> {
 /// `TFORM` to `i64`, or `None` if absent.
 fn read_i64_column(table: &BinTable, name: &str) -> Option<Vec<i64>> {
     let c = table.column_index(name)?;
-    match table.read_column(c) {
+    match table.column_by_idx(c).and_then(|col| col.raw()) {
         Ok(ColumnData::Bytes(v)) => Some(v.iter().map(|&x| x as i64).collect()),
         Ok(ColumnData::I16(v)) => Some(v.iter().map(|&x| x as i64).collect()),
         Ok(ColumnData::I32(v)) => Some(v.iter().map(|&x| x as i64).collect()),
