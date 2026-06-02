@@ -226,7 +226,7 @@ fn table_fixture() -> (Header, BinTable) {
     w.write_table(n, &columns).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let table = r.read_table(1).unwrap();
-    let header = r.hdu(1).header.clone();
+    let header = r.hdus[1].header.clone();
     (header, table)
 }
 

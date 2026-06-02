@@ -14,7 +14,7 @@ fn main() -> fits_well::Result<()> {
     // (reference pixel), CRVALn (its sky coordinate), CDELTn (scale), and so on.
     // This bundled file uses a TAN (gnomonic) projection.
     let reader = FitsReader::open(File::open("tests/data/fits/wcs_tan.fits")?)?;
-    let header = &reader.hdu(0).header;
+    let header = &reader.hdus[0].header;
 
     // `header.wcs(..)` parses those keywords into a usable transform. `None` selects
     // the primary WCS (an alternate would be `Some('A')`, etc.).

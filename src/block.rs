@@ -10,20 +10,17 @@ pub const BLOCK_SIZE: usize = 2880;
 /// A keyword record (card) is 80 bytes of restricted ASCII.
 pub const CARD_SIZE: usize = 80;
 
-/// `BLOCK_SIZE / CARD_SIZE` — exactly 36 cards per header block.
-pub const CARDS_PER_BLOCK: usize = BLOCK_SIZE / CARD_SIZE;
-
 /// Fill byte for header units and ASCII-table data units: ASCII space.
-pub const SPACE_FILL: u8 = b' ';
+pub(crate) const SPACE_FILL: u8 = b' ';
 
 /// Fill byte for all data units except ASCII tables: NUL (all bits zero).
-pub const ZERO_FILL: u8 = 0;
+pub(crate) const ZERO_FILL: u8 = 0;
 
 /// Number of whole 2880-byte blocks needed to hold `len` bytes, rounding up.
 ///
 /// `blocks_for(0) == 0` — a zero-length unit (e.g. `NAXIS = 0` data) occupies no
 /// blocks at all.
-pub fn blocks_for(len: u64) -> u64 {
+fn blocks_for(len: u64) -> u64 {
     len.div_ceil(BLOCK_SIZE as u64)
 }
 
@@ -33,7 +30,7 @@ pub fn blocks_for(len: u64) -> u64 {
 /// a hostile header) clamps to `u64::MAX` rather than wrapping to a too-small
 /// length that would corrupt the next-HDU seek. `data_extent` already rejects
 /// such sizes upstream; this keeps the rounding itself defense-complete.
-pub fn padded_len(len: u64) -> u64 {
+pub(crate) fn padded_len(len: u64) -> u64 {
     blocks_for(len).saturating_mul(BLOCK_SIZE as u64)
 }
 
@@ -45,8 +42,9 @@ mod tests {
     fn block_geometry_constants_are_consistent() {
         assert_eq!(BLOCK_SIZE, 2880);
         assert_eq!(CARD_SIZE, 80);
-        assert_eq!(CARDS_PER_BLOCK, 36);
-        assert_eq!(CARDS_PER_BLOCK * CARD_SIZE, BLOCK_SIZE);
+        // Exactly 36 cards of 80 bytes fill a 2880-byte block.
+        assert_eq!(BLOCK_SIZE / CARD_SIZE, 36);
+        assert_eq!(BLOCK_SIZE % CARD_SIZE, 0);
     }
 
     #[test]
