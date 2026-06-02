@@ -334,14 +334,13 @@ fn x_bit_column_unpacks_msb_first() {
     // 12 bits MSB-first are 1010_1011_1100.
     let header = table_header(2, 1, &["12X"]);
     let table = BinTable::from_data(&header, vec![0xAB, 0xC0]).unwrap();
-    let bits = table
-        .read_column(0)
-        .unwrap()
-        .bits(&table.columns[0])
-        .unwrap();
+    // The borrowed bit views tie to the ColumnData, so bind it to a local first.
+    let cd = table.read_column(0).unwrap();
+    let bits = cd.bits(&table.columns[0]).unwrap();
+    assert_eq!(bits.len(), 1);
     assert_eq!(
-        bits,
-        vec![bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0]]
+        bits[0],
+        bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0].as_bitslice()
     );
     // read_column still yields the raw packed bytes.
     assert_eq!(
@@ -475,9 +474,9 @@ fn vla_bit_column_unpacks_msb_first() {
     let rows = table.read_vla_bit_column(0).unwrap();
     assert_eq!(
         rows[0],
-        bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0]
+        bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0].as_bitslice()
     );
-    assert_eq!(rows[1], bitvec![u8, Msb0; 1, 1, 1, 1]);
+    assert_eq!(rows[1], bitvec![u8, Msb0; 1, 1, 1, 1].as_bitslice());
 }
 
 #[test]

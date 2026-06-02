@@ -56,9 +56,10 @@ pub use ascii::{AsciiColumn, AsciiKind, AsciiTable};
 pub use bitpix::Bitpix;
 pub use complex::Complex;
 
-/// Re-exported so callers can name the [`bitvec::vec::BitVec`] that
-/// [`ColumnData::bits`]/[`BinTable::read_vla_bit_column`] return without taking
-/// their own (version-skewed) `bitvec` dependency.
+/// Re-exported so callers can name the borrowed [`bitvec::slice::BitSlice`] views
+/// that [`ColumnData::bits`]/[`BinTable::read_vla_bit_column`] return (and call
+/// `.to_bitvec()` to own a row) without taking their own version-skewed `bitvec`
+/// dependency.
 pub use bitvec;
 #[cfg(feature = "compression")]
 pub use compress::CompressOptions;

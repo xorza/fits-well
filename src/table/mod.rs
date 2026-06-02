@@ -8,7 +8,7 @@
 //! variable-length arrays out of the heap ([`BinTable::read_vla_column`]).
 
 use bitvec::order::Msb0;
-use bitvec::vec::BitVec;
+use bitvec::slice::BitSlice;
 use bitvec::view::BitView;
 
 use crate::complex::Complex;
@@ -368,14 +368,16 @@ impl ColumnData {
         })
     }
 
-    /// Unpack an `X` (bit-array) column — decoded by [`BinTable::read_column`] into
-    /// the packed [`ColumnData::Bytes`] — into one packed [`BitVec`] per row,
+    /// View an `X` (bit-array) column — decoded by [`BinTable::read_column`] into
+    /// the packed [`ColumnData::Bytes`] — as one borrowed [`BitSlice`] per row,
     /// MSB-first (bit 0 is the most significant bit of the first byte, §7.3.2). The
     /// `Msb0` order matches that layout, so each row is the cell's `ceil(nbits/8)`
-    /// bytes truncated to the `TFORMn` repeat `col` declares. Errors on any non-`X`
+    /// bytes viewed in place and truncated to the `TFORMn` repeat `col` declares —
+    /// no per-row allocation; call `.to_bitvec()` on a row to own it. The views
+    /// borrow this [`ColumnData`], so bind it to a local first. Errors on any non-`X`
     /// column. A zero-bit `X` column yields no rows (its per-row structure isn't
     /// recoverable from the empty byte buffer alone).
-    pub fn bits(&self, col: &Column) -> Result<Vec<BitVec<u8, Msb0>>> {
+    pub fn bits(&self, col: &Column) -> Result<Vec<&BitSlice<u8, Msb0>>> {
         if col.tform.kind != TformKind::Bit {
             return Err(FitsError::NotABitColumn {
                 code: col.tform.kind.code(),
@@ -393,7 +395,7 @@ impl ColumnData {
         }
         Ok(bytes
             .chunks(row_bytes)
-            .map(|cell| cell.view_bits::<Msb0>()[..nbits].to_bitvec())
+            .map(|cell| &cell.view_bits::<Msb0>()[..nbits])
             .collect())
     }
 }
@@ -560,10 +562,12 @@ impl BinTable {
         })
     }
 
-    /// Decode a variable-length `X` (bit-array) column (`1PX`/`1QX`), unpacking
-    /// each row's bits MSB-first into one packed [`BitVec`] (§7.3.2/§7.3.5 — the
-    /// descriptor's element count is the bit count). Errors on any non-bit VLA.
-    pub fn read_vla_bit_column(&self, index: usize) -> Result<Vec<BitVec<u8, Msb0>>> {
+    /// View a variable-length `X` (bit-array) column (`1PX`/`1QX`) as one borrowed
+    /// [`BitSlice`] per row, MSB-first (§7.3.2/§7.3.5 — the descriptor's element
+    /// count is the bit count). Each row's heap span is a contiguous slice of the
+    /// data unit, so the views borrow `self` directly with no gather or per-row
+    /// allocation; call `.to_bitvec()` on a row to own it. Errors on any non-bit VLA.
+    pub fn read_vla_bit_column(&self, index: usize) -> Result<Vec<&BitSlice<u8, Msb0>>> {
         let col = self.column(index)?;
         let wide = match (col.tform.kind, col.tform.vla_elem) {
             (TformKind::ArrayDesc32, Some(TformKind::Bit)) => false,
@@ -579,7 +583,7 @@ impl BinTable {
             // The descriptor's element count is the bit count (§7.3.2).
             let d = decode_descriptor(self.cell(col, r), wide);
             let cell = self.bounded_heap(d.offset, d.nelem.div_ceil(8))?;
-            out.push(cell.view_bits::<Msb0>()[..d.nelem].to_bitvec());
+            out.push(&cell.view_bits::<Msb0>()[..d.nelem]);
         }
         Ok(out)
     }
