@@ -131,7 +131,8 @@ fn writes_tscal_tzero_tnull_and_reads_back_physical() {
     assert_eq!(r.hdus[1].header.get_real("TSCAL1"), Some(2.0));
     assert_eq!(r.hdus[1].header.get_real("TZERO1"), Some(10.0));
     assert_eq!(r.hdus[1].header.get_integer("TNULL1"), Some(99));
-    let phys = r.read_table(1).unwrap().read_column_physical(0).unwrap();
+    let t = r.read_table(1).unwrap();
+    let phys = t.read_column(0).unwrap().physical(&t.columns[0]).unwrap();
     assert_eq!(phys[0], 20.0);
     assert!(phys[1].is_nan());
 }

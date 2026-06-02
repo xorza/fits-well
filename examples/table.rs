@@ -38,5 +38,16 @@ fn main() -> fits_well::Result<()> {
     println!("NAME = {:?}", table.read_column(1)?);
     println!("MAG  = {:?}", table.read_column(2)?);
 
+    // `read_column` gives the raw, typed plane. To interpret a column, chain a
+    // combinator onto it: `.physical()` applies `TZEROn + TSCALn ×` and maps
+    // `TNULLn` to NaN, widening any numeric column to `f64` (MAG is unscaled here,
+    // so these are just the stored values). `.unsigned()`, `.complex()`, and
+    // `.bits()` cover the unsigned, complex, and bit-array columns the same way.
+    let mag = &table.columns[2];
+    println!(
+        "MAG (physical) = {:?}",
+        table.read_column(2)?.physical(mag)?
+    );
+
     Ok(())
 }

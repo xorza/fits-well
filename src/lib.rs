@@ -36,6 +36,7 @@ mod ascii;
 mod bitpix;
 mod block;
 mod checksum;
+mod complex;
 #[cfg(feature = "compression")]
 mod compress;
 mod data;
@@ -53,6 +54,7 @@ mod writer;
 
 pub use ascii::{AsciiColumn, AsciiKind, AsciiTable};
 pub use bitpix::Bitpix;
+pub use complex::Complex;
 #[cfg(feature = "compression")]
 pub use compress::CompressOptions;
 pub use data::{Image, ImageData, Scaling, UnsignedView};

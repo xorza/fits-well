@@ -125,7 +125,7 @@ pub enum UnsignedView {
 impl UnsignedView {
     /// Recover unsigned values from sign-bit-offset storage (the §5.2.5 / Table 19
     /// convention) by flipping the sign bit. Shared by [`Image::unsigned`] and
-    /// `BinTable::read_column_unsigned` so the bit math has one definition.
+    /// `ColumnData::unsigned` so the bit math has one definition.
     pub(crate) fn from_signed_byte(stored: &[u8]) -> UnsignedView {
         UnsignedView::I8(stored.iter().map(|&x| (x ^ 0x80) as i8).collect())
     }

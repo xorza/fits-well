@@ -86,15 +86,15 @@ pub enum FitsError {
     NotAVla {
         code: char,
     },
-    /// `read_bit_column` was called on a column that is not an `X` bit array.
+    /// `ColumnData::bits` was called on a column that is not an `X` bit array.
     NotABitColumn {
         code: char,
     },
-    /// `read_column_complex` was called on a column that is not `C`/`M` complex.
+    /// `ColumnData::complex` was called on a column that is not `C`/`M` complex.
     NotAComplexColumn {
         code: char,
     },
-    /// `read_column_physical` was called on a column with no numeric physical
+    /// `ColumnData::physical` was called on a column with no numeric physical
     /// value (`A`/`L`/`X`/`C`/`M`).
     NonNumericColumn {
         code: char,

@@ -14,6 +14,7 @@ use crate::block::CARD_SIZE;
 use crate::block::SPACE_FILL;
 use crate::block::ZERO_FILL;
 use crate::checksum;
+use crate::complex::Complex;
 #[cfg(feature = "compression")]
 use crate::compress::{CompressOptions, compress_table, encode_image};
 use crate::data::Image;
@@ -75,7 +76,7 @@ pub struct WriteColumn {
     /// Bit count for an `X` (bit-array) column; `data` is the packed bytes.
     pub bits: Option<usize>,
     /// `TSCALn`/`TZEROn` to emit: `data` holds the stored values, and a reader's
-    /// `read_column_physical` recovers `TZEROn + TSCALn × stored`.
+    /// `ColumnData::physical` recovers `TZEROn + TSCALn × stored`.
     pub tscale: Option<f64>,
     pub tzero: Option<f64>,
     /// `TNULLn`: the stored integer marking an undefined element.
@@ -626,13 +627,13 @@ fn append_be(out: &mut Vec<u8>, cell: &ColumnData) {
         ColumnData::F32(v) => extend_be(out, v, f32::to_be_bytes),
         ColumnData::F64(v) => extend_be(out, v, f64::to_be_bytes),
         ColumnData::ComplexF32(v) => {
-            for &(re, im) in v {
+            for &Complex { re, im } in v {
                 out.extend_from_slice(&re.to_be_bytes());
                 out.extend_from_slice(&im.to_be_bytes());
             }
         }
         ColumnData::ComplexF64(v) => {
-            for &(re, im) in v {
+            for &Complex { re, im } in v {
                 out.extend_from_slice(&re.to_be_bytes());
                 out.extend_from_slice(&im.to_be_bytes());
             }
@@ -666,13 +667,13 @@ fn pack_cell(out: &mut Vec<u8>, col: &WriteColumn, r: usize) {
         ColumnData::F32(v) => extend_be(out, &v[base..base + rep], f32::to_be_bytes),
         ColumnData::F64(v) => extend_be(out, &v[base..base + rep], f64::to_be_bytes),
         ColumnData::ComplexF32(v) => {
-            for &(re, im) in &v[base..base + rep] {
+            for &Complex { re, im } in &v[base..base + rep] {
                 out.extend_from_slice(&re.to_be_bytes());
                 out.extend_from_slice(&im.to_be_bytes());
             }
         }
         ColumnData::ComplexF64(v) => {
-            for &(re, im) in &v[base..base + rep] {
+            for &Complex { re, im } in &v[base..base + rep] {
                 out.extend_from_slice(&re.to_be_bytes());
                 out.extend_from_slice(&im.to_be_bytes());
             }
