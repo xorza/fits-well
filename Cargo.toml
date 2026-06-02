@@ -69,3 +69,8 @@ harness = false
 [[example]]
 name = "compression"
 required-features = ["compression"]
+
+# The `ndarray` example uses the n-D array API, gated on the `ndarray` feature.
+[[example]]
+name = "ndarray"
+required-features = ["ndarray"]
