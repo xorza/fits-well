@@ -109,6 +109,12 @@ pub mod internals {
         ImageData::decode(bytes, bitpix)
     }
 
+    /// Decode into a reused buffer — the buffer-reusing path
+    /// (`ImageData::decode_into`), which skips the per-call output allocation.
+    pub fn decode_image_into(bytes: &[u8], bitpix: Bitpix, out: &mut ImageData) {
+        ImageData::decode_into(bytes, bitpix, out)
+    }
+
     /// Encode samples back to a big-endian buffer — the inverse swap
     /// (`ImageData::encode_into` into a fresh buffer).
     pub fn encode_image(data: &ImageData) -> Vec<u8> {

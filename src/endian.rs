@@ -13,10 +13,31 @@ pub(crate) fn decode_be<const N: usize, T, F>(bytes: &[u8], conv: F) -> Vec<T>
 where
     F: Fn([u8; N]) -> T,
 {
-    bytes
-        .chunks_exact(N)
-        .map(|c| conv(c.try_into().expect("chunks_exact yields N-byte arrays")))
-        .collect()
+    let mut out = Vec::new();
+    decode_be_into(bytes, conv, &mut out);
+    out
+}
+
+/// Decode a big-endian buffer into `out`, *reusing* its allocation — clear it, then
+/// refill from `bytes`. The buffer-reusing counterpart to [`decode_be`], mirroring
+/// [`extend_be`] on the encode side.
+///
+/// Profiling showed a fresh-`Vec`-per-call decode is dominated not by the byte-swap
+/// but by the kernel faulting in the new output pages (`clear_page` + the
+/// page-fault machinery, ~65% of the time) — so a caller decoding many same-typed
+/// images into one `out` pays that fault traffic once, not per call (~4× on the
+/// repeated path). After `clear()`, `extend` over the `ExactSizeIterator` reserves
+/// once and reuses the capacity on every later call.
+pub(crate) fn decode_be_into<const N: usize, T, F>(bytes: &[u8], conv: F, out: &mut Vec<T>)
+where
+    F: Fn([u8; N]) -> T,
+{
+    out.clear();
+    out.extend(
+        bytes
+            .chunks_exact(N)
+            .map(|c| conv(c.try_into().expect("chunks_exact yields N-byte arrays"))),
+    );
 }
 
 /// Encode fixed-width values into a *fresh* big-endian byte buffer, e.g.

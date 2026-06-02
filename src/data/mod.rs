@@ -13,6 +13,7 @@
 
 use crate::bitpix::Bitpix;
 use crate::endian::decode_be;
+use crate::endian::decode_be_into;
 use crate::endian::extend_be;
 use crate::header::Header;
 
@@ -84,6 +85,82 @@ impl ImageData {
             Bitpix::F32 => ImageData::F32(decode_be(bytes, f32::from_be_bytes)),
             Bitpix::F64 => ImageData::F64(decode_be(bytes, f64::from_be_bytes)),
         }
+    }
+
+    /// Decode the raw, big-endian data unit into `out`, *reusing* its allocation
+    /// when `out` already holds `bitpix`'s variant — the buffer-reusing counterpart
+    /// to [`ImageData::decode`], mirroring [`ImageData::encode_into`] on the write
+    /// side. A caller reading many same-typed images (a multi-HDU file, a re-read
+    /// loop) into one `out` pays the output allocation and its page faults once
+    /// rather than per call; profiling found that fault traffic, not the byte-swap,
+    /// dominates a fresh-`Vec`-per-call decode. On a variant switch the old buffer is
+    /// freed and the right one started fresh — a one-time cost, free thereafter.
+    pub(crate) fn decode_into(bytes: &[u8], bitpix: Bitpix, out: &mut ImageData) {
+        assert_eq!(
+            bytes.len() % bitpix.elem_size(),
+            0,
+            "data length must be a whole number of {bitpix:?} elements"
+        );
+        // Pull the existing buffer out (a no-alloc placeholder takes its place) so a
+        // matching variant's `Vec` is reused; a mismatched one is dropped here.
+        let prev = std::mem::replace(out, ImageData::U8(Vec::new()));
+        *out = match bitpix {
+            Bitpix::U8 => {
+                let mut v = if let ImageData::U8(v) = prev {
+                    v
+                } else {
+                    Vec::new()
+                };
+                v.clear();
+                v.extend_from_slice(bytes);
+                ImageData::U8(v)
+            }
+            Bitpix::I16 => {
+                let mut v = if let ImageData::I16(v) = prev {
+                    v
+                } else {
+                    Vec::new()
+                };
+                decode_be_into(bytes, i16::from_be_bytes, &mut v);
+                ImageData::I16(v)
+            }
+            Bitpix::I32 => {
+                let mut v = if let ImageData::I32(v) = prev {
+                    v
+                } else {
+                    Vec::new()
+                };
+                decode_be_into(bytes, i32::from_be_bytes, &mut v);
+                ImageData::I32(v)
+            }
+            Bitpix::I64 => {
+                let mut v = if let ImageData::I64(v) = prev {
+                    v
+                } else {
+                    Vec::new()
+                };
+                decode_be_into(bytes, i64::from_be_bytes, &mut v);
+                ImageData::I64(v)
+            }
+            Bitpix::F32 => {
+                let mut v = if let ImageData::F32(v) = prev {
+                    v
+                } else {
+                    Vec::new()
+                };
+                decode_be_into(bytes, f32::from_be_bytes, &mut v);
+                ImageData::F32(v)
+            }
+            Bitpix::F64 => {
+                let mut v = if let ImageData::F64(v) = prev {
+                    v
+                } else {
+                    Vec::new()
+                };
+                decode_be_into(bytes, f64::from_be_bytes, &mut v);
+                ImageData::F64(v)
+            }
+        };
     }
 
     /// Append the samples to `out` in big-endian order — the inverse of
@@ -223,6 +300,19 @@ impl<'a> RawImage<'a> {
         match &self.data {
             ImageBytes::Raw(bytes) => ImageData::decode(bytes, self.bitpix),
             ImageBytes::Decoded(samples) => samples.clone(),
+        }
+    }
+
+    /// Decode the host-endian samples into `out`, *reusing* its allocation — the
+    /// buffer-reusing form of [`RawImage::decode`]. Reading many same-shaped images
+    /// in a loop into one `out` decodes each in place and pays the output allocation
+    /// (and its page faults — the dominant cost of a plain typed read) once instead
+    /// of per image. A plain image byte-swaps its on-disk bytes into `out`; a
+    /// compressed one's pixels are already decoded and are cloned in.
+    pub fn decode_into(&self, out: &mut ImageData) {
+        match &self.data {
+            ImageBytes::Raw(bytes) => ImageData::decode_into(bytes, self.bitpix, out),
+            ImageBytes::Decoded(samples) => *out = samples.clone(),
         }
     }
 

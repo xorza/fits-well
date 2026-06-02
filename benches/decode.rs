@@ -20,7 +20,7 @@ use std::io::Cursor;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use fits_well::internals::{decode_image, encode_image};
+use fits_well::internals::{decode_image, decode_image_into, encode_image};
 use fits_well::{Bitpix, FitsReader, FitsWriter, Image, ImageData, Scaling};
 
 /// Bytes moved per typed bench. 64 MiB is comfortably past the last-level cache
@@ -76,6 +76,30 @@ fn decode(c: &mut Criterion) {
         g.throughput(Throughput::Bytes(raw.len() as u64));
         g.bench_function(name, |b| {
             b.iter(|| black_box(decode_image(black_box(&raw), bitpix)))
+        });
+    }
+    g.finish();
+}
+
+/// `decode_into` — the same big-endian swap as [`decode`], but into a *reused*
+/// buffer (`ImageData::decode_into`). Versus `decode` this isolates the per-call
+/// output allocation + its page faults, which profiling found dominate the fresh
+/// path (the swap itself is a small minority of the time). A real read loop over
+/// many same-typed images takes this path; expect ~4× over `decode`.
+fn decode_into(c: &mut Criterion) {
+    let mut g = c.benchmark_group("decode_into");
+    for &(name, bitpix) in TYPES {
+        let raw = raw_be(count(bitpix) * elem_bytes(bitpix));
+        // Seed + prime the reused buffer so the loop measures steady-state reuse, not
+        // the first call's allocation.
+        let mut out = ImageData::U8(Vec::new());
+        decode_image_into(&raw, bitpix, &mut out);
+        g.throughput(Throughput::Bytes(raw.len() as u64));
+        g.bench_function(name, |b| {
+            b.iter(|| {
+                decode_image_into(black_box(&raw), bitpix, &mut out);
+                black_box(&out);
+            })
         });
     }
     g.finish();
@@ -152,5 +176,5 @@ fn read_image(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, decode, encode, physical, read_image);
+criterion_group!(benches, decode, decode_into, encode, physical, read_image);
 criterion_main!(benches);

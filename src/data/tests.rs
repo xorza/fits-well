@@ -76,6 +76,51 @@ fn encode_is_the_inverse_of_decode() {
 }
 
 #[test]
+fn decode_into_matches_decode_and_reuses_the_buffer() {
+    let cases = [
+        ImageData::U8(vec![0, 1, 255]),
+        ImageData::I16(vec![1, -1, -32768, 32767]),
+        ImageData::I32(vec![256, -1, i32::MIN]),
+        ImageData::I64(vec![5, -5, i64::MAX]),
+        ImageData::F32(vec![1.0, -2.5, 0.0]),
+        ImageData::F64(vec![1.0, -2.5, f64::MAX]),
+    ];
+    // decode_into equals decode, exercising both the variant switch (the seed is U8)
+    // and the matching-variant reuse on the second pass.
+    for data in &cases {
+        let bytes = encoded(data);
+        let mut out = ImageData::U8(Vec::new());
+        ImageData::decode_into(&bytes, data.bitpix(), &mut out);
+        assert_eq!(&out, data, "decode_into after a variant switch");
+        ImageData::decode_into(&bytes, data.bitpix(), &mut out);
+        assert_eq!(&out, data, "decode_into reusing the matching variant");
+    }
+
+    // The point of the method: re-decoding an equal-length buffer reuses the heap
+    // allocation (the already-faulted output pages) rather than reallocating. 1024
+    // i32s force a real heap buffer; the data pointer must be identical across calls.
+    let a = ImageData::I32((0..1024).collect());
+    let b = ImageData::I32((0..1024).map(|i| i * 3 - 7).collect());
+    let (ba, bb) = (encoded(&a), encoded(&b));
+    let mut out = ImageData::I32(Vec::new());
+    ImageData::decode_into(&ba, Bitpix::I32, &mut out);
+    let ptr_a = match &out {
+        ImageData::I32(v) => v.as_ptr(),
+        _ => unreachable!(),
+    };
+    ImageData::decode_into(&bb, Bitpix::I32, &mut out);
+    let ptr_b = match &out {
+        ImageData::I32(v) => v.as_ptr(),
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        ptr_a, ptr_b,
+        "an equal-length re-decode must reuse the buffer, not reallocate"
+    );
+    assert_eq!(out, b);
+}
+
+#[test]
 fn float_inf_and_nan_payloads_round_trip_bit_for_bit() {
     // §3.4 / Appendix E mandate preserving ±Inf and signaling/quiet NaN payloads
     // without canonicalizing. PartialEq can't compare NaN, so check raw bits.
