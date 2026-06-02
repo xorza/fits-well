@@ -61,6 +61,8 @@ pub use bitpix::Bitpix;
 pub use bitvec;
 #[cfg(feature = "compression")]
 pub use compress::CompressOptions;
+#[cfg(feature = "ndarray")]
+pub use data::ImageArray;
 pub use data::{Image, ImageData, RawImage, Scaling, UnsignedView};
 pub use error::{FitsError, Result};
 pub use groups::RandomGroups;

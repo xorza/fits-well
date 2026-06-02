@@ -312,3 +312,33 @@ fn unsigned_16_bit_offset_is_not_an_identity_map() {
     assert_eq!(s.bzero, 32768.0);
     assert!(!s.is_identity());
 }
+
+#[cfg(feature = "ndarray")]
+#[test]
+fn ndarray_arrays_are_fortran_ordered() {
+    // 2×3 image (NAXIS1 = 2, the fastest axis). Flat FITS buffer: (x, y) at x + 2·y.
+    let img = Image {
+        shape: vec![2, 3],
+        samples: ImageData::I16(vec![0, 1, 10, 11, 20, 21]),
+        scaling: Scaling {
+            bscale: 2.0,
+            bzero: 100.0,
+            blank: None,
+        },
+    };
+    // Typed, zero-copy array indexed in FITS order `[x, y]`.
+    match img.clone().into_ndarray() {
+        ImageArray::I16(arr) => {
+            assert_eq!(arr.shape(), &[2, 3]);
+            assert_eq!(arr[[1, 2]], 21); // x = 1 (NAXIS1), y = 2 (NAXIS2)
+            assert_eq!(arr[[0, 1]], 10);
+            // NumPy's `[y, x]` is a zero-copy stride swap.
+            assert_eq!(arr.reversed_axes()[[2, 1]], 21);
+        }
+        other => panic!("expected I16 array, got {other:?}"),
+    }
+    // Physical plane: 100 + 2·sample.
+    let phys = img.physical_array();
+    assert_eq!(phys.shape(), &[2, 3]);
+    assert_eq!(phys[[1, 2]], 100.0 + 2.0 * 21.0);
+}
