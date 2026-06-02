@@ -63,7 +63,7 @@ pub use bitvec;
 pub use compress::CompressOptions;
 #[cfg(feature = "ndarray")]
 pub use data::ImageArray;
-pub use data::{Image, ImageData, RawImage, Scaling, UnsignedView};
+pub use data::{Image, ImageData, RawImage, SampleType, Scaling, UnsignedView};
 pub use error::{FitsError, Result};
 pub use groups::RandomGroups;
 pub use hdu::HduKind;

@@ -264,6 +264,113 @@ fn float_physical_scales_and_passes_nan_through() {
 }
 
 #[test]
+fn sample_type_resolves_unsigned_and_signed_byte_conventions() {
+    let s = |bscale: f64, bzero: f64| Scaling {
+        bscale,
+        bzero,
+        blank: None,
+    };
+
+    // Plain signed BITPIX (no offset) keeps the stored signed type.
+    assert_eq!(
+        SampleType::from_scaling(Bitpix::I16, &s(1.0, 0.0)),
+        SampleType::I16
+    );
+    assert_eq!(
+        SampleType::from_scaling(Bitpix::I32, &s(1.0, 0.0)),
+        SampleType::I32
+    );
+    assert_eq!(
+        SampleType::from_scaling(Bitpix::I64, &s(1.0, 0.0)),
+        SampleType::I64
+    );
+
+    // The unsigned convention: BSCALE=1 with BZERO the sign-bit offset 2^(n-1).
+    assert_eq!(
+        SampleType::from_scaling(Bitpix::I16, &s(1.0, 32_768.0)),
+        SampleType::U16
+    );
+    assert_eq!(
+        SampleType::from_scaling(Bitpix::I32, &s(1.0, 2_147_483_648.0)),
+        SampleType::U32
+    );
+    assert_eq!(
+        SampleType::from_scaling(Bitpix::I64, &s(1.0, 9_223_372_036_854_775_808.0)),
+        SampleType::U64
+    );
+
+    // BITPIX=8 is unsigned by default; BZERO=-128 is the signed-byte convention.
+    assert_eq!(
+        SampleType::from_scaling(Bitpix::U8, &s(1.0, 0.0)),
+        SampleType::U8
+    );
+    assert_eq!(
+        SampleType::from_scaling(Bitpix::U8, &s(1.0, -128.0)),
+        SampleType::I8
+    );
+
+    // Floats are unaffected by scaling.
+    assert_eq!(
+        SampleType::from_scaling(Bitpix::F32, &s(10.0, 1.0)),
+        SampleType::F32
+    );
+    assert_eq!(
+        SampleType::from_scaling(Bitpix::F64, &s(1.0, 0.0)),
+        SampleType::F64
+    );
+
+    // A genuine BSCALE (≠ 1) at the offset BZERO is NOT the unsigned convention.
+    assert_eq!(
+        SampleType::from_scaling(Bitpix::I16, &s(2.0, 32_768.0)),
+        SampleType::I16
+    );
+
+    // BLANK marks nulls within a type; it must not change the classification.
+    let with_blank = Scaling {
+        bscale: 1.0,
+        bzero: 32_768.0,
+        blank: Some(-1),
+    };
+    assert_eq!(
+        SampleType::from_scaling(Bitpix::I16, &with_blank),
+        SampleType::U16
+    );
+}
+
+#[test]
+fn sample_type_predicates_and_image_accessor() {
+    assert!(SampleType::U16.is_unsigned());
+    assert!(SampleType::U16.is_integer());
+    assert!(!SampleType::U16.is_float());
+    assert!(SampleType::I32.is_integer());
+    assert!(!SampleType::I32.is_unsigned());
+    assert!(SampleType::I8.is_integer());
+    assert!(!SampleType::I8.is_unsigned());
+    assert!(SampleType::F64.is_float());
+    assert!(!SampleType::F64.is_integer());
+
+    // Image::sample_type resolves the convention from its own scaling.
+    let unsigned = image(
+        ImageData::I16(vec![0, 1, 2]),
+        Scaling {
+            bscale: 1.0,
+            bzero: 32_768.0,
+            blank: None,
+        },
+    );
+    assert_eq!(unsigned.sample_type(), SampleType::U16);
+    let signed = image(
+        ImageData::I16(vec![0, 1]),
+        Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    );
+    assert_eq!(signed.sample_type(), SampleType::I16);
+}
+
+#[test]
 fn image_data_reports_its_bitpix() {
     assert_eq!(ImageData::U8(vec![]).bitpix(), Bitpix::U8);
     assert_eq!(ImageData::I16(vec![]).bitpix(), Bitpix::I16);

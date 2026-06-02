@@ -253,6 +253,12 @@ impl<'a> RawImage<'a> {
             ImageBytes::Decoded(samples) => samples.unsigned(&self.scaling),
         }
     }
+
+    /// The effective element type these samples represent, resolving the unsigned and
+    /// signed-byte conventions from `BITPIX` + [`Scaling`] without decoding the pixels.
+    pub fn sample_type(&self) -> SampleType {
+        SampleType::from_scaling(self.bitpix, &self.scaling)
+    }
 }
 
 /// The `BZERO`/`TZEROn` offsets that realize the FITS unsigned-integer convention:
@@ -261,6 +267,82 @@ impl<'a> RawImage<'a> {
 pub(crate) const U16_OFFSET: f64 = 32_768.0; // 2¹⁵
 pub(crate) const U32_OFFSET: f64 = 2_147_483_648.0; // 2³¹
 pub(crate) const U64_OFFSET: f64 = 9_223_372_036_854_775_808.0; // 2⁶³
+
+/// The effective element type of an image's *physical* samples — the analogue of
+/// cfitsio's image "equivalent type". `BITPIX` records only the stored width and
+/// signedness; the FITS unsigned and signed-byte conventions then layer a `BZERO`
+/// offset on top (`BSCALE == 1` with `BZERO = 2^(n-1)`, or `BZERO = -128` for signed
+/// bytes), so the values actually mean an unsigned (or signed-byte) integer. This
+/// enum is what [`RawImage::physical`] / [`RawImage::unsigned`] yield, resolved up
+/// front from `BITPIX` + [`Scaling`] without touching the pixels — so a caller can
+/// pick a code path (e.g. a per-type normalization range) without re-deriving the
+/// `BZERO` convention itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SampleType {
+    /// `BITPIX = 8`, `BZERO = -128`: a signed byte.
+    I8,
+    /// `BITPIX = 8`: an unsigned byte (the FITS default for `BITPIX = 8`).
+    U8,
+    /// `BITPIX = 16`, no unsigned offset.
+    I16,
+    /// `BITPIX = 16`, `BZERO = 2¹⁵`.
+    U16,
+    /// `BITPIX = 32`, no unsigned offset.
+    I32,
+    /// `BITPIX = 32`, `BZERO = 2³¹`.
+    U32,
+    /// `BITPIX = 64`, no unsigned offset.
+    I64,
+    /// `BITPIX = 64`, `BZERO = 2⁶³`.
+    U64,
+    /// `BITPIX = -32`.
+    F32,
+    /// `BITPIX = -64`.
+    F64,
+}
+
+impl SampleType {
+    /// Resolve the effective type from the stored `BITPIX` and its [`Scaling`].
+    ///
+    /// A signed integer `BITPIX` whose scaling is exactly the unsigned (or signed-byte)
+    /// convention — `BSCALE == 1` and `BZERO` the matching sign-bit offset — resolves
+    /// to the corresponding unsigned (or `I8`) type; any other scaling leaves the
+    /// stored type as-is. `BLANK` does not affect the classification: it marks null
+    /// samples *within* a type, not the type itself.
+    pub fn from_scaling(bitpix: Bitpix, scaling: &Scaling) -> SampleType {
+        let offset = scaling.bscale == 1.0;
+        match bitpix {
+            Bitpix::U8 if offset && scaling.bzero == -128.0 => SampleType::I8,
+            Bitpix::U8 => SampleType::U8,
+            Bitpix::I16 if offset && scaling.bzero == U16_OFFSET => SampleType::U16,
+            Bitpix::I16 => SampleType::I16,
+            Bitpix::I32 if offset && scaling.bzero == U32_OFFSET => SampleType::U32,
+            Bitpix::I32 => SampleType::I32,
+            Bitpix::I64 if offset && scaling.bzero == U64_OFFSET => SampleType::U64,
+            Bitpix::I64 => SampleType::I64,
+            Bitpix::F32 => SampleType::F32,
+            Bitpix::F64 => SampleType::F64,
+        }
+    }
+
+    /// `true` for `U8`/`U16`/`U32`/`U64`.
+    pub fn is_unsigned(self) -> bool {
+        matches!(
+            self,
+            SampleType::U8 | SampleType::U16 | SampleType::U32 | SampleType::U64
+        )
+    }
+
+    /// `true` for `F32`/`F64`.
+    pub fn is_float(self) -> bool {
+        matches!(self, SampleType::F32 | SampleType::F64)
+    }
+
+    /// `true` for every integer variant (signed or unsigned).
+    pub fn is_integer(self) -> bool {
+        !self.is_float()
+    }
+}
 
 /// A typed integer realization of the FITS unsigned (and signed-byte) storage
 /// conventions — `BSCALE == 1` with `BZERO` the sign-bit offset. Values are exact
@@ -380,6 +462,12 @@ impl Image {
     /// free — e.g. a signed-16 buffer with `BZERO = 32768` yields the `u16` value.
     pub fn physical(&self) -> Vec<f64> {
         self.samples.physical(&self.scaling)
+    }
+
+    /// The effective element type these samples represent, resolving the unsigned and
+    /// signed-byte conventions from the stored `BITPIX` + [`Scaling`].
+    pub fn sample_type(&self) -> SampleType {
+        SampleType::from_scaling(self.samples.bitpix(), &self.scaling)
     }
 }
 
