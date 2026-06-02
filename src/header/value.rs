@@ -35,6 +35,10 @@ impl Value {
     pub fn as_integer(&self) -> Option<i64> {
         match self {
             Value::Integer(i) => Some(*i),
+            // A mandatory-integer keyword written in real form (e.g. `NAXIS = 2.0`):
+            // accept an integral value rather than reporting it absent, which would
+            // silently mis-size the data unit. Non-integral reals stay `None`.
+            Value::Real(r) if r.fract() == 0.0 => Some(*r as i64),
             _ => None,
         }
     }

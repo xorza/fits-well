@@ -108,6 +108,14 @@ impl WriteColumn {
             .first()
             .cloned()
             .unwrap_or(ColumnData::Bytes(Vec::new()));
+        // Every cell must share that type — `TFORMn` advertises the row-0 kind, so a
+        // mismatched cell would serialize bytes the reader decodes as the wrong type.
+        // Building columns is caller code, so a mixed-type VLA is a logic error.
+        assert!(
+            rows.iter()
+                .all(|r| std::mem::discriminant(r) == std::mem::discriminant(&tag)),
+            "VLA column cells must all be the same ColumnData variant"
+        );
         WriteColumn {
             data: tag,
             repeat: 0,
@@ -591,7 +599,6 @@ fn check_column(col: &WriteColumn, nrows: usize) -> Result<usize> {
     }
 }
 
-/// Number of elements (or strings) in a column's data.
 /// Append a whole column cell (a VLA row's array) to the heap, big-endian.
 fn append_be(out: &mut Vec<u8>, cell: &ColumnData) {
     match cell {

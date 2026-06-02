@@ -66,11 +66,8 @@ pub(crate) fn encode(sum: u32, complement: bool) -> [u8; 16] {
         }
     }
     // Rotate one character right to align with the value's start at column 12.
-    let mut out = [0u8; 16];
-    for i in 0..16 {
-        out[i] = asc[(i + 15) % 16];
-    }
-    out
+    asc.rotate_right(1);
+    asc
 }
 
 #[cfg(test)]
