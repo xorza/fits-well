@@ -20,6 +20,12 @@ pub enum HduKind {
     AsciiTable,
     /// `XTENSION = 'BINTABLE'` — binary table (with optional heap).
     BinTable,
+    /// A tiled-compressed image (§10.1): structurally a `BINTABLE` with `ZIMAGE = T`.
+    /// `read_image` reads it like any other image.
+    CompressedImage,
+    /// A tiled-compressed table (§10.3): structurally a `BINTABLE` with `ZTABLE = T`.
+    /// `read_compressed_table` uncompresses it.
+    CompressedTable,
     /// Legacy random-groups primary (`GROUPS = T`, `NAXIS1 = 0`). Read-only.
     RandomGroups,
     /// A conforming extension whose `XTENSION` value this crate does not model.
@@ -33,6 +39,15 @@ impl HduKind {
             match xtension {
                 "IMAGE" => HduKind::Image,
                 "TABLE" => HduKind::AsciiTable,
+                // §10: a tiled-compressed image/table rides inside a BINTABLE,
+                // flagged by ZIMAGE/ZTABLE — classify by the payload, not the
+                // container, so callers see what they can actually read.
+                "BINTABLE" if header.get_logical("ZIMAGE") == Some(true) => {
+                    HduKind::CompressedImage
+                }
+                "BINTABLE" if header.get_logical("ZTABLE") == Some(true) => {
+                    HduKind::CompressedTable
+                }
                 "BINTABLE" => HduKind::BinTable,
                 _ => HduKind::Other,
             }

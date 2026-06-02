@@ -291,6 +291,17 @@ fn read_image_rejects_non_image_hdus() {
     assert!(matches!(f.read_image(1), Err(FitsError::NotAnImage)));
 }
 
+#[test]
+fn image_indices_lists_readable_images_including_compressed() {
+    // A single primary array image.
+    assert_eq!(open("UITfuv2582gc.fits").image_indices(), vec![0]);
+    // Empty primary + a tiled-compressed image extension (classified by ZIMAGE),
+    // so only HDU 1 is an image — the `NAXIS = 0` primary is skipped.
+    assert_eq!(open("comp_gzip_i16.fits").image_indices(), vec![1]);
+    // Random-groups primary + plain bintable: no images at all.
+    assert!(open("DDTSUVDATA.fits").image_indices().is_empty());
+}
+
 fn write_to_vec(image: &Image) -> Vec<u8> {
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     w.write_image(image).unwrap();

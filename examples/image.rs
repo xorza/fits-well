@@ -36,11 +36,16 @@ fn main() -> fits_well::Result<()> {
     writer.into_inner().sync_all()?;
     println!("wrote {}", path.display());
 
-    // Read it back from the primary HDU (index 0). `read_image` borrows the data
-    // unit in place (zero-copy) as a `RawImage`: shape and BITPIX are ready at once,
-    // while the samples stay undecoded until you ask.
+    // `image_indices` lists the HDUs that hold images, so you pick an index rather
+    // than hard-coding one — a FITS file may hold several. Here it's just the primary
+    // array, `[0]`.
     let mut reader = FitsReader::open(File::open(&path)?)?;
-    let raw = reader.read_image(0)?;
+    let images = reader.image_indices();
+    println!("image HDUs: {images:?}");
+
+    // `read_image` borrows the data unit in place (zero-copy) as a `RawImage`: shape
+    // and BITPIX are ready at once, while the samples stay undecoded until you ask.
+    let raw = reader.read_image(images[0])?;
     println!("shape {:?}, {:?}", raw.shape, raw.bitpix);
 
     // `decode()` byte-swaps the stored big-endian samples into an owned, host-endian
