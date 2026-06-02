@@ -103,13 +103,16 @@ fn decodes_fixed_width_columns_from_hand_built_data() {
             .collect::<Vec<_>>(),
         vec![0, 4, 12]
     );
-    assert_eq!(table.read_column(0).unwrap(), ColumnData::I32(vec![1, 2]));
     assert_eq!(
-        table.read_column(1).unwrap(),
+        table.column_by_idx(0).unwrap().raw().unwrap(),
+        ColumnData::I32(vec![1, 2])
+    );
+    assert_eq!(
+        table.column_by_idx(1).unwrap().raw().unwrap(),
         ColumnData::F32(vec![1.0, 2.0, 3.0, 4.0])
     );
     assert_eq!(
-        table.read_column(2).unwrap(),
+        table.column_by_idx(2).unwrap().raw().unwrap(),
         ColumnData::Text(vec!["ABC".into(), "DE".into()]) // trailing space trimmed
     );
 }
@@ -119,8 +122,14 @@ fn zero_repeat_column_decodes_to_empty() {
     let header = table_header(4, 1, &["0D", "1J"]);
     let data = 7i32.to_be_bytes().to_vec();
     let table = BinTable::from_data(&header, data).unwrap();
-    assert_eq!(table.read_column(0).unwrap(), ColumnData::F64(vec![]));
-    assert_eq!(table.read_column(1).unwrap(), ColumnData::I32(vec![7]));
+    assert_eq!(
+        table.column_by_idx(0).unwrap().raw().unwrap(),
+        ColumnData::F64(vec![])
+    );
+    assert_eq!(
+        table.column_by_idx(1).unwrap().raw().unwrap(),
+        ColumnData::I32(vec![7])
+    );
 }
 
 #[test]
@@ -135,11 +144,7 @@ fn read_column_physical_applies_tscal_tzero_and_tnull() {
         data.extend_from_slice(&x.to_be_bytes());
     }
     let table = BinTable::from_data(&header, data).unwrap();
-    let phys = table
-        .read_column(0)
-        .unwrap()
-        .physical(&table.columns[0])
-        .unwrap();
+    let phys = table.column_by_idx(0).unwrap().physical().unwrap();
     // 3 → 10 + 2·3 = 16 ; 5 == TNULL → NaN ; 7 → 10 + 2·7 = 24
     assert_eq!(phys[0], 16.0);
     assert!(phys[1].is_nan());
@@ -151,7 +156,7 @@ fn read_column_physical_rejects_non_numeric_columns() {
     let header = table_header(3, 1, &["3A"]);
     let table = BinTable::from_data(&header, b"abc".to_vec()).unwrap();
     assert!(matches!(
-        table.read_column(0).unwrap().physical(&table.columns[0]),
+        table.column_by_idx(0).unwrap().physical(),
         Err(FitsError::NonNumericColumn { code: 'A' })
     ));
 }
@@ -161,7 +166,7 @@ fn read_column_on_a_vla_directs_to_read_vla_column() {
     let header = table_header(8, 1, &["1PE(3)"]);
     let table = BinTable::from_data(&header, vec![0u8; 8]).unwrap();
     assert!(matches!(
-        table.read_column(0),
+        table.column_by_idx(0).unwrap().raw(),
         Err(FitsError::VariableLengthColumn { code: 'P' })
     ));
 }
@@ -186,7 +191,7 @@ fn decodes_variable_length_arrays_from_the_heap() {
 
     let table = BinTable::from_data(&header, data).unwrap();
     assert_eq!(
-        table.read_vla_column(0).unwrap(),
+        table.column_by_idx(0).unwrap().vla().unwrap(),
         vec![ColumnData::F32(vec![1.0, 2.0]), ColumnData::F32(vec![3.0]),]
     );
 }
@@ -231,18 +236,14 @@ fn read_column_complex_widens_and_scales() {
     data.extend_from_slice(&4.0f32.to_be_bytes());
     let table = BinTable::from_data(&header, data).unwrap();
     assert_eq!(
-        table
-            .read_column(0)
-            .unwrap()
-            .complex(&table.columns[0])
-            .unwrap(),
+        table.column_by_idx(0).unwrap().complex().unwrap(),
         vec![Complex { re: 7.0, im: 9.0 }] // 1+2·3, 1+2·4
     );
     // A non-complex column errors.
     let h2 = table_header(4, 1, &["1J"]);
     let t2 = BinTable::from_data(&h2, vec![0u8; 4]).unwrap();
     assert!(matches!(
-        t2.read_column(0).unwrap().complex(&t2.columns[0]),
+        t2.column_by_idx(0).unwrap().complex(),
         Err(FitsError::NotAComplexColumn { code: 'J' })
     ));
 }
@@ -257,11 +258,11 @@ fn read_column_unsigned_recovers_typed_values() {
     data.push(((-10i8) as u8) ^ 0x80);
     let table = BinTable::from_data(&header, data).unwrap();
     assert_eq!(
-        table.read_column(0).unwrap().unsigned(&table.columns[0]),
+        table.column_by_idx(0).unwrap().unsigned().unwrap(),
         Some(UnsignedView::U16(vec![50000]))
     );
     assert_eq!(
-        table.read_column(1).unwrap().unsigned(&table.columns[1]),
+        table.column_by_idx(1).unwrap().unsigned().unwrap(),
         Some(UnsignedView::I8(vec![-10]))
     );
 }
@@ -277,11 +278,11 @@ fn read_column_unsigned_is_exact_for_u64_and_none_otherwise() {
     data.extend_from_slice(&7i32.to_be_bytes());
     let table = BinTable::from_data(&header, data).unwrap();
     assert_eq!(
-        table.read_column(0).unwrap().unsigned(&table.columns[0]),
+        table.column_by_idx(0).unwrap().unsigned().unwrap(),
         Some(UnsignedView::U64(vec![u64::MAX]))
     );
     assert_eq!(
-        table.read_column(1).unwrap().unsigned(&table.columns[1]),
+        table.column_by_idx(1).unwrap().unsigned().unwrap(),
         None // TZERO=0
     );
 }
@@ -304,7 +305,7 @@ fn read_vla_column_physical_scales_heap_arrays_and_nulls() {
         data.extend_from_slice(&x.to_be_bytes());
     }
     let table = BinTable::from_data(&header, data).unwrap();
-    let phys = table.read_vla_column_physical(0).unwrap();
+    let phys = table.column_by_idx(0).unwrap().vla_physical().unwrap();
     assert_eq!(phys[0][0], 20.0); // 10 + 2·5
     assert!(phys[0][1].is_nan()); // 99 == TNULL
     assert_eq!(phys[1], vec![16.0]); // 10 + 2·3
@@ -323,7 +324,7 @@ fn vla_descriptor_overrunning_the_heap_is_rejected() {
     data.resize(2880, 0); // block-padded fill that must NOT be read as heap
     let table = BinTable::from_data(&header, data).unwrap();
     assert!(matches!(
-        table.read_vla_column(0),
+        table.column_by_idx(0).unwrap().vla(),
         Err(FitsError::UnexpectedEof)
     ));
 }
@@ -334,19 +335,50 @@ fn x_bit_column_unpacks_msb_first() {
     // 12 bits MSB-first are 1010_1011_1100.
     let header = table_header(2, 1, &["12X"]);
     let table = BinTable::from_data(&header, vec![0xAB, 0xC0]).unwrap();
-    // The borrowed bit views tie to the ColumnData, so bind it to a local first.
-    let cd = table.read_column(0).unwrap();
-    let bits = cd.bits(&table.columns[0]).unwrap();
+    let bits = table.column_by_idx(0).unwrap().bits().unwrap();
     assert_eq!(bits.len(), 1);
     assert_eq!(
         bits[0],
         bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0].as_bitslice()
     );
-    // read_column still yields the raw packed bytes.
+    // `raw()` still yields the packed bytes.
     assert_eq!(
-        table.read_column(0).unwrap(),
+        table.column_by_idx(0).unwrap().raw().unwrap(),
         ColumnData::Bytes(vec![0xAB, 0xC0])
     );
+}
+
+#[test]
+fn read_column_by_name_and_one_step_physical() {
+    let mut header = table_header(2, 3, &["1I"]); // one i16 column
+    header
+        .set("TTYPE1", "FLUX")
+        .set("TSCAL1", 2.0)
+        .set("TZERO1", 10.0);
+    let mut data = Vec::new();
+    for x in [1i16, 2, 3] {
+        data.extend_from_slice(&x.to_be_bytes());
+    }
+    let table = BinTable::from_data(&header, data).unwrap();
+    // Raw, by name (case-insensitive).
+    assert_eq!(
+        table.column_by_name("flux").unwrap().raw().unwrap(),
+        ColumnData::I16(vec![1, 2, 3])
+    );
+    // Physical in one call: 10 + 2·x — by index and by name.
+    assert_eq!(
+        table.column_by_idx(0).unwrap().physical().unwrap(),
+        vec![12.0, 14.0, 16.0]
+    );
+    assert_eq!(
+        table.column_by_name("FLUX").unwrap().physical().unwrap(),
+        vec![12.0, 14.0, 16.0]
+    );
+    // A missing name is a clean error.
+    assert!(matches!(
+        table.column_by_name("nope"),
+        Err(FitsError::ColumnNotFound { .. })
+    ));
 }
 
 #[test]
@@ -354,7 +386,7 @@ fn read_bit_column_on_a_non_bit_column_errors() {
     let header = table_header(4, 1, &["1J"]);
     let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
     assert!(matches!(
-        table.read_column(0).unwrap().bits(&table.columns[0]),
+        table.column_by_idx(0).unwrap().bits(),
         Err(FitsError::NotABitColumn { code: 'J' })
     ));
 }
@@ -382,7 +414,7 @@ fn read_vla_on_a_fixed_column_is_an_error() {
     let header = table_header(4, 1, &["1J"]);
     let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
     assert!(matches!(
-        table.read_vla_column(0),
+        table.column_by_idx(0).unwrap().vla(),
         Err(FitsError::NotAVla { code: 'J' })
     ));
 }
@@ -405,7 +437,7 @@ fn out_of_bounds_column_is_an_error() {
     let header = table_header(4, 1, &["1J"]);
     let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
     assert!(matches!(
-        table.read_column(9),
+        table.column_by_idx(9),
         Err(FitsError::ColumnIndexOutOfBounds { index: 9, len: 1 })
     ));
 }
@@ -429,15 +461,18 @@ fn reads_the_real_aips_antenna_table() {
     assert_eq!(table.columns[1].unit.as_deref(), Some("METERS"));
 
     // Decoded element counts: one ANNAME string per row, 3 doubles per row, none for 0D.
-    match table.read_column(0).unwrap() {
+    match table.column_by_idx(0).unwrap().raw().unwrap() {
         ColumnData::Text(v) => assert_eq!(v.len(), 28),
         other => panic!("ANNAME should be Text, got {other:?}"),
     }
-    match table.read_column(1).unwrap() {
+    match table.column_by_idx(1).unwrap().raw().unwrap() {
         ColumnData::F64(v) => assert_eq!(v.len(), 28 * 3),
         other => panic!("STABXYZ should be F64, got {other:?}"),
     }
-    assert_eq!(table.read_column(2).unwrap(), ColumnData::F64(vec![]));
+    assert_eq!(
+        table.column_by_idx(2).unwrap().raw().unwrap(),
+        ColumnData::F64(vec![])
+    );
     assert_eq!(table.column_index("NOSTA"), Some(3));
 }
 
@@ -471,7 +506,7 @@ fn vla_bit_column_unpacks_msb_first() {
     data.extend_from_slice(&[0xAB, 0xC0, 0xF0]); // heap
     let table = BinTable::from_data(&header, data).unwrap();
 
-    let rows = table.read_vla_bit_column(0).unwrap();
+    let rows = table.column_by_idx(0).unwrap().vla_bits().unwrap();
     assert_eq!(
         rows[0],
         bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0].as_bitslice()

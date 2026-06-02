@@ -52,12 +52,12 @@ mod time;
 mod wcs;
 mod writer;
 
-pub use ascii::{AsciiColumn, AsciiKind, AsciiTable};
+pub use ascii::{AsciiColumn, AsciiColumnReader, AsciiKind, AsciiTable};
 pub use bitpix::Bitpix;
 pub use complex::Complex;
 
 /// Re-exported so callers can name the borrowed [`bitvec::slice::BitSlice`] views
-/// that [`ColumnData::bits`]/[`BinTable::read_vla_bit_column`] return (and call
+/// that [`ColumnReader::bits`]/[`ColumnReader::vla_bits`] return (and call
 /// `.to_bitvec()` to own a row) without taking their own version-skewed `bitvec`
 /// dependency.
 pub use bitvec;
@@ -73,7 +73,7 @@ pub use header::value::Value;
 pub use reader::source::MmapSource;
 pub use reader::source::{SliceSource, Source, StreamSource};
 pub use reader::{ChecksumReport, DataUnit, FitsReader, Hdu};
-pub use table::{BinTable, Column, ColumnData, TDisp, TDispKind, Tform, TformKind};
+pub use table::{BinTable, Column, ColumnData, ColumnReader, TDisp, TDispKind, Tform, TformKind};
 pub use time::{
     Datetime, Epoch, EpochTime, FitsTime, GtiInterval, PhaseAxis, TimeAxisKind, TimeBounds,
     TimeScale,

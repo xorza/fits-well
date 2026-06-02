@@ -292,6 +292,21 @@ fn read_image_rejects_non_image_hdus() {
 }
 
 #[test]
+fn hdu_index_finds_extensions_by_extname() {
+    let f = open("DDTSUVDATA.fits");
+    // hdu 1 is the AIPS antenna table, EXTNAME = 'AIPS AN' (trailing spaces trimmed).
+    assert_eq!(f.hdu_index("AIPS AN", None), Some(1));
+    assert_eq!(f.hdu_index("aips an", None), Some(1)); // case-insensitive
+    assert_eq!(f.hdu_index("AIPS AN", Some(99)), None); // no such EXTVER
+    assert_eq!(f.hdu_index("MISSING", None), None);
+    // A tiled-compressed image extension is found by its EXTNAME too.
+    assert_eq!(
+        open("comp_gzip_i16.fits").hdu_index("COMPRESSED_IMAGE", None),
+        Some(1)
+    );
+}
+
+#[test]
 fn image_indices_lists_readable_images_including_compressed() {
     // A single primary array image.
     assert_eq!(open("UITfuv2582gc.fits").image_indices(), vec![0]);

@@ -70,7 +70,7 @@ fn writes_and_reads_back_variable_length_arrays() {
     let table = r.read_table(1).unwrap();
     // TFORM2 should be a P descriptor sized to the longest row (5).
     assert_eq!(table.columns[1].tform.kind.code(), 'P');
-    let got = table.read_vla_column(1).unwrap();
+    let got = table.column_by_idx(1).unwrap().vla().unwrap();
     assert_eq!(got.len(), 3);
     for (g, want) in got.iter().zip(&vla_rows) {
         match (g, want) {
@@ -104,14 +104,14 @@ fn writes_tdim_q_vla_and_bit_columns() {
     assert_eq!(t.columns[0].tdim, Some(vec![2, 2]));
     // Q descriptor type, and the VLA reads back.
     assert_eq!(t.columns[1].tform.kind, TformKind::ArrayDesc64);
-    match &t.read_vla_column(1).unwrap()[0] {
+    match &t.column_by_idx(1).unwrap().vla().unwrap()[0] {
         ColumnData::I16(v) => assert_eq!(v, &[7, 8, 9]),
         other => panic!("{other:?}"),
     }
     // X column: TFORM 12X, packed bytes preserved.
     assert_eq!(t.columns[2].tform.kind, TformKind::Bit);
     assert_eq!(t.columns[2].tform.repeat, 12);
-    match t.read_column(2).unwrap() {
+    match t.column_by_idx(2).unwrap().raw().unwrap() {
         ColumnData::Bytes(b) => assert_eq!(b, vec![0xAB, 0xC0, 0x12, 0x30]),
         other => panic!("{other:?}"),
     }
@@ -132,7 +132,7 @@ fn writes_tscal_tzero_tnull_and_reads_back_physical() {
     assert_eq!(r.hdus[1].header.get_real("TZERO1"), Some(10.0));
     assert_eq!(r.hdus[1].header.get_integer("TNULL1"), Some(99));
     let t = r.read_table(1).unwrap();
-    let phys = t.read_column(0).unwrap().physical(&t.columns[0]).unwrap();
+    let phys = t.column_by_idx(0).unwrap().physical().unwrap();
     assert_eq!(phys[0], 20.0);
     assert!(phys[1].is_nan());
 }
@@ -168,13 +168,16 @@ fn writes_and_reads_back_a_binary_table() {
     assert_eq!(t.columns.len(), 3);
     assert_eq!(t.columns[0].name.as_deref(), Some("NOSTA"));
     assert_eq!(t.columns[1].unit.as_deref(), Some("m"));
-    assert_eq!(t.read_column(0).unwrap(), ColumnData::I32(vec![1, 2, 3]));
     assert_eq!(
-        t.read_column(1).unwrap(),
+        t.column_by_idx(0).unwrap().raw().unwrap(),
+        ColumnData::I32(vec![1, 2, 3])
+    );
+    assert_eq!(
+        t.column_by_idx(1).unwrap().raw().unwrap(),
         ColumnData::F32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0])
     );
     assert_eq!(
-        t.read_column(2).unwrap(),
+        t.column_by_idx(2).unwrap().raw().unwrap(),
         ColumnData::Text(vec!["AB".into(), "CDE".into(), "F".into()])
     );
 }
@@ -422,7 +425,12 @@ fn logical_column_round_trips_with_null_state() {
     w.write_table(3, &columns).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     assert_eq!(
-        r.read_table(1).unwrap().read_column(0).unwrap(),
+        r.read_table(1)
+            .unwrap()
+            .column_by_idx(0)
+            .unwrap()
+            .raw()
+            .unwrap(),
         ColumnData::Logical(vec![Some(true), None, Some(false)])
     );
 }

@@ -158,6 +158,21 @@ impl<S: Source> FitsReader<S> {
         })
     }
 
+    /// Index of the extension named `name` by its `EXTNAME` keyword (compared
+    /// case-insensitively, as `EXTNAME` is conventionally matched), or `None`. When
+    /// `version` is `Some`, also require a matching `EXTVER` (which defaults to `1`
+    /// where the card is absent, §4.4.1) — the way duplicate extensions like
+    /// `('SCI', 1)` and `('SCI', 2)` are told apart. The primary array has no
+    /// `EXTNAME`. Pair the returned index with a `read_*` method.
+    pub fn hdu_index(&self, name: &str, version: Option<i64>) -> Option<usize> {
+        self.hdus.iter().position(|h| {
+            h.header
+                .get_text("EXTNAME")
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                && version.is_none_or(|v| h.header.get_integer("EXTVER").unwrap_or(1) == v)
+        })
+    }
+
     /// The indices of every HDU [`FitsReader::read_image`] can read as an image: image
     /// extensions, tiled-compressed images, and a non-empty primary array (an empty
     /// `NAXIS = 0` primary is a container, not an image, and is skipped). A FITS file
@@ -256,7 +271,7 @@ impl<S: Source> FitsReader<S> {
     }
 
     /// Read a `BINTABLE` extension and parse its column structure. Decode
-    /// individual columns lazily with [`BinTable::read_column`]. Errors with
+    /// individual columns lazily with [`BinTable::column_by_idx`]. Errors with
     /// [`FitsError::NotABinTable`] for any other HDU kind.
     pub fn read_table(&mut self, index: usize) -> Result<BinTable> {
         let unit = self.read_data_raw(index)?; // also bounds-checks the index

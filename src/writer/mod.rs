@@ -76,7 +76,7 @@ pub struct WriteColumn {
     /// Bit count for an `X` (bit-array) column; `data` is the packed bytes.
     pub bits: Option<usize>,
     /// `TSCALn`/`TZEROn` to emit: `data` holds the stored values, and a reader's
-    /// `ColumnData::physical` recovers `TZEROn + TSCALn × stored`.
+    /// `ColumnReader::physical` recovers `TZEROn + TSCALn × stored`.
     pub tscale: Option<f64>,
     pub tzero: Option<f64>,
     /// `TNULLn`: the stored integer marking an undefined element.
