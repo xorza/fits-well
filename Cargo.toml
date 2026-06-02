@@ -1,6 +1,6 @@
 [package]
 name = "fits-well"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.85"
 description = "A blazing-fast reader and writer for FITS (Flexible Image Transport System) files, targeting the full FITS 4.0 standard."
