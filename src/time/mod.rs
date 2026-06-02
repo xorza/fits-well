@@ -325,7 +325,13 @@ fn tdb_minus_tt(jd_tt: f64) -> f64 {
 }
 
 /// `TAI − UTC` in seconds for a given UTC MJD: the integer leap-second count from
-/// the IERS table (1972–2017). Clamped to the table ends outside that range.
+/// the IERS table (1972–2017).
+///
+/// Outside that range the value is **frozen at the nearest table end**, which the
+/// caller should be aware of: past the last entry it returns the latest count
+/// (correct until a new leap second is announced), and before 1972 it returns the
+/// first entry (10 s) even though pre-1972 UTC used fractional "rubber seconds", so
+/// UTC↔TAI for pre-1972 dates is approximate, not exact.
 fn leap_seconds(mjd: f64) -> f64 {
     // (year, month, day, TAI−UTC) at each step, 1972 onward.
     const TABLE: &[(i64, i64, i64, f64)] = &[

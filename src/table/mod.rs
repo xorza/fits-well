@@ -779,7 +779,13 @@ fn be_u32(b: &[u8]) -> usize {
 }
 
 fn be_u64(b: &[u8]) -> usize {
-    u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as usize
+    // On a 32-bit target a `Q` count/offset can exceed `usize`; saturate so it fails
+    // the heap bounds check rather than wrapping into a spuriously in-range value.
+    // On 64-bit this is the identity (`usize == u64`).
+    usize::try_from(u64::from_be_bytes([
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+    ]))
+    .unwrap_or(usize::MAX)
 }
 
 #[cfg(test)]
