@@ -151,11 +151,6 @@ impl<S: Source> FitsReader<S> {
         })
     }
 
-    /// The HDU at `index` (panics if out of range — check `self.hdus.len()` first).
-    pub fn hdu(&self, index: usize) -> &Hdu {
-        &self.hdus[index]
-    }
-
     /// The HDU at `index`, or [`FitsError::HduIndexOutOfBounds`] — the checked form
     /// the `read_*` methods bound-check through.
     fn checked_hdu(&self, index: usize) -> Result<&Hdu> {
@@ -195,6 +190,10 @@ impl<S: Source> FitsReader<S> {
     /// a time — own what you need first: [`RawImage::u8`] for the zero-copy `BITPIX =
     /// 8` plane, [`RawImage::decode`] for host-endian samples, [`RawImage::physical`]
     /// for the scaled plane.
+    ///
+    /// For a tiled-compressed image (`ZIMAGE`), use
+    /// [`FitsReader::read_compressed_image`] instead — it returns an owned [`Image`]
+    /// (the pixels are reconstructed, so there is nothing to borrow).
     pub fn read_image(&mut self, index: usize) -> Result<RawImage<'_>> {
         let hdu = self.checked_hdu(index)?;
         if !matches!(hdu.kind, HduKind::Primary | HduKind::Image) {
@@ -278,6 +277,12 @@ impl<S: Source> FitsReader<S> {
     /// Read a tiled-compressed image (§10.1) — a `BINTABLE` with `ZIMAGE = T` —
     /// and decompress it into the full [`Image`]. Supports `GZIP_1` and `RICE_1`.
     /// Requires the `compression` feature.
+    ///
+    /// Returns an **owned** [`Image`] (shape + decoded `samples` + scaling), not the
+    /// borrowed [`RawImage`] that [`FitsReader::read_image`] yields: decompression
+    /// reconstructs the pixels into a fresh buffer, so there is nothing in the source
+    /// to borrow. Use [`Image::physical`]/[`Image::unsigned`] on the result just as
+    /// you would on a `RawImage`.
     #[cfg(feature = "compression")]
     pub fn read_compressed_image(&mut self, index: usize) -> Result<Image> {
         let table = self.read_table(index)?;

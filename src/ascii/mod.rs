@@ -177,6 +177,11 @@ impl AsciiTable {
     /// Decode a numeric column into its physical `f64` plane: `TZEROn + TSCALn ×
     /// field` (§7.2.2). A blank field is 0 before scaling; a field equal to
     /// `TNULLn` is undefined and maps to `NaN`. Errors on a character column.
+    ///
+    /// This stays a dedicated method, rather than a [`ColumnData::physical`]
+    /// combinator like the binary-table path uses, on purpose: recovering `TNULLn`
+    /// nulls as `NaN` needs the original field text, which the raw
+    /// [`AsciiTable::read_column`] plane has already collapsed to `0`.
     pub fn read_column_physical(&self, index: usize) -> Result<Vec<f64>> {
         let col = self.column(index)?;
         if col.kind == AsciiKind::Char {

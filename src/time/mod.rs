@@ -642,7 +642,7 @@ impl FitsTime {
     /// Reads only the header, so it takes no `self`.
     pub(crate) fn phase_axis(header: &Header, axis: usize) -> Option<PhaseAxis> {
         let ctype = header.get_text(key!("CTYPE{axis}").as_str())?;
-        if time_axis_kind(ctype) != Some(TimeAxisKind::Phase) {
+        if TimeAxisKind::from_ctype(ctype) != Some(TimeAxisKind::Phase) {
             return None;
         }
         Some(PhaseAxis {
@@ -665,23 +665,25 @@ pub enum TimeAxisKind {
     Frequency,
 }
 
-/// Classify a `CTYPE` as a time-related axis (§9.6), or `None` if it is not one.
-pub fn time_axis_kind(ctype: &str) -> Option<TimeAxisKind> {
-    let head = ctype.split('-').next().unwrap_or("").trim();
-    match head {
-        "TIME" => Some(TimeAxisKind::Time),
-        "PHASE" => Some(TimeAxisKind::Phase),
-        "TIMELAG" => Some(TimeAxisKind::Timelag),
-        "FREQUENCY" => Some(TimeAxisKind::Frequency),
-        _ if !matches!(TimeScale::parse(head), TimeScale::Local) => Some(TimeAxisKind::Time),
-        _ => None,
+impl TimeAxisKind {
+    /// Classify a `CTYPE` as a time-related axis (§9.6), or `None` if it is not one.
+    pub fn from_ctype(ctype: &str) -> Option<TimeAxisKind> {
+        let head = ctype.split('-').next().unwrap_or("").trim();
+        match head {
+            "TIME" => Some(TimeAxisKind::Time),
+            "PHASE" => Some(TimeAxisKind::Phase),
+            "TIMELAG" => Some(TimeAxisKind::Timelag),
+            "FREQUENCY" => Some(TimeAxisKind::Frequency),
+            _ if !matches!(TimeScale::parse(head), TimeScale::Local) => Some(TimeAxisKind::Time),
+            _ => None,
+        }
     }
 }
 
 /// True if a `CTYPE` denotes an absolute *time* axis (`'TIME'` or a time-scale
 /// name) — the kind [`FitsTime::time_axis_mjd`] resolves to an MJD.
 fn is_time_ctype(ctype: &str) -> bool {
-    time_axis_kind(ctype) == Some(TimeAxisKind::Time)
+    TimeAxisKind::from_ctype(ctype) == Some(TimeAxisKind::Time)
 }
 
 /// The reference epoch as MJD: `MJDREF` (or `MJDREFI`+`MJDREFF`), else `JDREF`

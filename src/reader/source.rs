@@ -14,8 +14,20 @@ use std::io::SeekFrom;
 use crate::error::FitsError;
 use crate::error::Result;
 
+/// Seals [`Source`] so it is a closed set implemented only by the in-tree source
+/// types (`StreamSource`/`SliceSource`/`MmapSource`) — not an extension point, and
+/// its `slice`/`read_owned` plumbing is not a public contract.
+mod sealed {
+    pub trait Sealed {}
+}
+impl<R> sealed::Sealed for StreamSource<R> {}
+impl sealed::Sealed for SliceSource<'_> {}
+#[cfg(feature = "mmap")]
+impl sealed::Sealed for MmapSource {}
+
 /// A seekable byte source the reader fetches HDU header and data units from.
-pub trait Source {
+/// Sealed — implemented only by this crate's source types, never externally.
+pub trait Source: sealed::Sealed {
     /// Total byte length of the source. Fixed for the source's lifetime and used to
     /// reject ranges that run past the end before allocating for them.
     fn size(&self) -> u64;

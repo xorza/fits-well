@@ -76,12 +76,12 @@ pub use reader::{ChecksumReport, DataUnit, FitsReader, Hdu};
 pub use table::{BinTable, Column, ColumnData, TDisp, TDispKind, Tform, TformKind};
 pub use time::{
     Datetime, Epoch, EpochTime, FitsTime, GtiInterval, PhaseAxis, TimeAxisKind, TimeBounds,
-    TimeScale, time_axis_kind,
+    TimeScale,
 };
 pub use wcs::{Projection, Wcs};
 pub use writer::{AsciiWriteColumn, FitsWriter, WriteColumn};
 
-pub use block::{BLOCK_SIZE, CARD_SIZE, CARDS_PER_BLOCK, SPACE_FILL, ZERO_FILL};
+pub use block::{BLOCK_SIZE, CARD_SIZE};
 
 /// Hot internal entry points re-exposed **for benchmarking only** (the `internals`
 /// feature). These wrap crate-private functions so the benches under `benches/`

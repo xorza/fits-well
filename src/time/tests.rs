@@ -150,12 +150,12 @@ fn gti_intervals_convert_to_absolute_mjd() {
 #[test]
 fn classifies_time_related_axes() {
     use TimeAxisKind::*;
-    assert_eq!(time_axis_kind("TIME"), Some(Time));
-    assert_eq!(time_axis_kind("UTC"), Some(Time)); // a scale name is a time axis
-    assert_eq!(time_axis_kind("PHASE"), Some(Phase));
-    assert_eq!(time_axis_kind("TIMELAG"), Some(Timelag));
-    assert_eq!(time_axis_kind("FREQUENCY"), Some(Frequency));
-    assert_eq!(time_axis_kind("RA---TAN"), None);
+    assert_eq!(TimeAxisKind::from_ctype("TIME"), Some(Time));
+    assert_eq!(TimeAxisKind::from_ctype("UTC"), Some(Time)); // a scale name is a time axis
+    assert_eq!(TimeAxisKind::from_ctype("PHASE"), Some(Phase));
+    assert_eq!(TimeAxisKind::from_ctype("TIMELAG"), Some(Timelag));
+    assert_eq!(TimeAxisKind::from_ctype("FREQUENCY"), Some(Frequency));
+    assert_eq!(TimeAxisKind::from_ctype("RA---TAN"), None);
     // is_time_ctype is true only for the absolute-time kind.
     assert!(is_time_ctype("TIME"));
     assert!(!is_time_ctype("PHASE"));

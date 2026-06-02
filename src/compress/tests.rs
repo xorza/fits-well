@@ -617,7 +617,7 @@ fn check_table_roundtrip(algo: &str, rows_per_tile: usize) {
     let bytes = w.into_inner().into_inner();
     let mut r = FitsReader::open(Cursor::new(bytes)).unwrap();
     let orig = r.read_table(1).unwrap();
-    let orig_header = r.hdu(1).header.clone();
+    let orig_header = r.hdus[1].header.clone();
 
     // 2. Compress it, then read + uncompress.
     let mut cw = FitsWriter::new(Cursor::new(Vec::new()));
@@ -664,7 +664,7 @@ fn emit_compressed_table_for_funpack() {
     let src = std::fs::read("tests/data/fits/comp_table_ref.fits").unwrap();
     let mut r = FitsReader::open(std::io::Cursor::new(src)).unwrap();
     let table = r.read_table(1).unwrap();
-    let header = r.hdu(1).header.clone();
+    let header = r.hdus[1].header.clone();
     let mut w = FitsWriter::new(File::create(".tmp/my_ctable.fits").unwrap());
     w.write_compressed_table(&header, &table, 100, "RICE_1")
         .unwrap();

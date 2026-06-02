@@ -5,7 +5,7 @@ use std::fs::File;
 /// Load the WCS from the primary header of a fixture.
 fn open_wcs(name: &str) -> Wcs {
     let r = FitsReader::open(File::open(format!("tests/data/fits/{name}")).unwrap()).unwrap();
-    Wcs::from_header(&r.hdu(0).header, None).unwrap()
+    Wcs::from_header(&r.hdus[0].header, None).unwrap()
 }
 
 /// Golden pixel→world values from `astropy.wcs` (wcslib) for `wcs_tan.fits`

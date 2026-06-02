@@ -29,7 +29,7 @@ fn main() -> fits_well::Result<()> {
 
     // Read the file and pull the time metadata from its header.
     let reader = FitsReader::open(File::open(&path)?)?;
-    let header = &reader.hdu(0).header;
+    let header = &reader.hdus[0].header;
 
     // `header.obs_mjd()` resolves the observation time (MJD-OBS, else DATE-OBS).
     println!("observation MJD = {:?}", header.obs_mjd());
