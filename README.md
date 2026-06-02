@@ -1,5 +1,9 @@
 # fits-well
 
+[![crates.io](https://img.shields.io/crates/v/fits-well.svg)](https://crates.io/crates/fits-well)
+[![docs.rs](https://img.shields.io/docsrs/fits-well)](https://docs.rs/fits-well)
+[![license](https://img.shields.io/crates/l/fits-well.svg)](#license)
+
 A blazing-fast Rust reader and writer for **FITS** (Flexible Image Transport
 System) files — the standard data format of astronomy — targeting the full
 **FITS 4.0** standard.
