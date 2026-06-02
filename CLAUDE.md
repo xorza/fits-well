@@ -44,7 +44,8 @@ fixed-width table compression. All tile (de)compression fans out across the rayo
 pool under the default-on `parallel` feature (a scalar fallback runs without it),
 which the codec benches measure at ~2.5–3× on decompress and ~4–6.5× on compress.
 The remaining WCS frontier (quad-cube/HEALPix
-projections, non-linear spectral axes — both of which error cleanly today) is
+projections, non-linear spectral axes — both of which decode through the linear
+stage and are flagged in `unsupported_axes` today, never failing the read) is
 charted in the module map below, which shows what is built versus planned. The
 design principles in this file remain the spec; follow them when filling the
 scaffolds in.
@@ -149,7 +150,7 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `keyword.rs` | stack-allocated indexed-keyword formatting (`key!` macro / `KeyBuf`): builds `NAXISn`/`PVi_m`/`CTYPEn`-style keys without the per-lookup `format!` heap alloc (one WCS parse does ~90) | done |
 | `header/` | ordered card model (`value.rs`, `card/`, `mod.rs`): parse/render, `CONTINUE` folding, `HIERARCH` compound keys, keyword index, typed getters + builder | done |
 | `hdu/` | HDU classification + data-unit sizing (Eq. 2, incl. random groups) | done |
-| `reader/` | HDU scan over a `Source` (`source.rs`: `StreamSource` copies, `SliceSource`/`MmapSource` borrow zero-copy); `open`/`from_bytes`/`open_mmap`; `read_image`/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_image`/`read_compressed_table`/`verify_checksum`, raw `DataUnit` | done |
+| `reader/` | HDU scan over a `Source` (`source.rs`: `StreamSource` copies, `SliceSource`/`MmapSource` borrow zero-copy); `open`/`from_bytes`/`open_mmap`; `read_image` (transparently decompresses a `ZIMAGE` `CompressedImage`)/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_table`/`verify_checksum`, raw `DataUnit` | done |
 | `writer/` | multi-HDU writer: `write_image`/`write_table` (fixed + `P` VLA columns)/`write_ascii_table`/`write_compressed_image`(`_lossy`)/`write_compressed_table`, `with_checksums` | done |
 | `data/` | typed `Image`/`ImageData`/`RawImage` (zero-copy raw plane), big-endian decode+encode (`encode_into` reuses the writer's buffer), `BSCALE`/`BZERO` physical plane + `SampleType`/`UnsignedView` resolution; `ImageArray` n-D bridge (feature `ndarray`, FITS axis order) | image read+write done; memory-bound, SIMD bulk-swap TODO |
 | `table/` | `BINTABLE` parsing (`Tform`/`Column`); per-column `ColumnReader` handles decode on demand to `ColumnData` (`BitColumn` for `X`, `num-complex` for `C`/`M`), `TSCAL`/`TZERO` physical plane, `P`/`Q` heap VLAs | read done (write in `writer/`) |
@@ -157,7 +158,7 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `groups/` | random-groups (§6) read: params + arrays, `PSCALn`/`PZEROn` physical | read done (no write — deprecated) |
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
 | `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3), reassembly + encode; `map_tiles` fans the per-tile codec work across rayon under `parallel` | all 5 image codecs read+write; float quant all 3 dither methods + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode + lossy `SCALE>0` write; fixed-width table compression read+write; tile-parallel ((de)compress, image + table) |
-| `wcs/` | typed WCS: keyword parse, linear transform (PC/CD/CROTA + `PVi_m` + inverse), 23 projections (zenithal + perspective AZP/SZP + cylindrical + all-sky + conic + BON + PCO) via general pole computation, `pixel_to_world`/`world_to_pixel`; unimplemented codes → `UnsupportedProjection` | v2 done (quad-cube/HEALPix, spectral TODO; inter-frame transforms out of scope) |
+| `wcs/` | typed WCS: keyword parse, linear transform (PC/CD/CROTA + `PVi_m` + inverse), 23 projections (zenithal + perspective AZP/SZP + cylindrical + all-sky + conic + BON + PCO) via general pole computation, `pixel_to_world`/`world_to_pixel`; unimplemented codes decode through the linear stage and are flagged in `unsupported_axes` (never fail) | v2 done (quad-cube/HEALPix, spectral TODO; inter-frame transforms out of scope) |
 | `time/` | typed time (§9): `Datetime` (ISO-8601↔JD/MJD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), `FitsTime` header view + time WCS axis | v2 done |
 | `error.rs` | `FitsError` + `Result` | done |
 
