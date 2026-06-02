@@ -2,7 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/fits-well.svg)](https://crates.io/crates/fits-well)
 [![docs.rs](https://img.shields.io/docsrs/fits-well)](https://docs.rs/fits-well)
-[![license](https://img.shields.io/crates/l/fits-well.svg)](#license)
+[![license](https://img.shields.io/crates/l/fits-well.svg)](https://github.com/xorza/fits#license)
 
 A blazing-fast Rust reader and writer for **FITS** (Flexible Image Transport
 System) files — the standard data format of astronomy — targeting the full
@@ -25,7 +25,7 @@ fits-well = "0.1"
 
 The default build pulls in tiled compression (`flate2`) and tile parallelism
 (`rayon`). For the dependency-light pure-Rust core, use
-`default-features = false` (see [Feature flags](#feature-flags)).
+`default-features = false` (see the Feature flags section below).
 
 ## Usage
 
