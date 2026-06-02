@@ -101,68 +101,85 @@ pub enum Projection {
     Szp,
 }
 
+/// The projection family — it fixes the fiducial point and selects the deprojection
+/// branch. The single source of truth for membership that `from_code`, `is_zenithal`,
+/// `is_conic`, and `reference_point` all derive from (via [`PROJECTIONS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    /// Fiducial point at the native pole (`θ₀ = 90°`), radial deprojection.
+    Zenithal,
+    /// `θ₀ = 90°` too, but a bespoke tilted/slant deprojection — `AZP`/`SZP`.
+    ZenithalPerspective,
+    /// `θ₀ = θ_a = PVi_1` — the conics.
+    Conic,
+    /// `θ₀ = 0°` — cylindrical, pseudo-cylindrical, polyconic, Bonne.
+    Other,
+}
+
+/// The `CTYPE` code, variant, and [`Family`] for every supported projection — the one
+/// membership table the classification methods consult, so adding a projection is a
+/// single row rather than edits to four functions.
+const PROJECTIONS: &[(&str, Projection, Family)] = &[
+    ("TAN", Projection::Tan, Family::Zenithal),
+    ("SIN", Projection::Sin, Family::Zenithal),
+    ("ARC", Projection::Arc, Family::Zenithal),
+    ("STG", Projection::Stg, Family::Zenithal),
+    ("ZEA", Projection::Zea, Family::Zenithal),
+    ("ZPN", Projection::Zpn, Family::Zenithal),
+    ("AIR", Projection::Air, Family::Zenithal),
+    ("AZP", Projection::Azp, Family::ZenithalPerspective),
+    ("SZP", Projection::Szp, Family::ZenithalPerspective),
+    ("COP", Projection::Cop, Family::Conic),
+    ("COE", Projection::Coe, Family::Conic),
+    ("COD", Projection::Cod, Family::Conic),
+    ("COO", Projection::Coo, Family::Conic),
+    ("CAR", Projection::Car, Family::Other),
+    ("CEA", Projection::Cea, Family::Other),
+    ("MER", Projection::Mer, Family::Other),
+    ("SFL", Projection::Sfl, Family::Other),
+    ("AIT", Projection::Ait, Family::Other),
+    ("MOL", Projection::Mol, Family::Other),
+    ("CYP", Projection::Cyp, Family::Other),
+    ("PAR", Projection::Par, Family::Other),
+    ("BON", Projection::Bon, Family::Other),
+    ("PCO", Projection::Pco, Family::Other),
+];
+
 impl Projection {
     fn from_code(code: &str) -> Option<Projection> {
-        Some(match code {
-            "TAN" => Projection::Tan,
-            "SIN" => Projection::Sin,
-            "ARC" => Projection::Arc,
-            "STG" => Projection::Stg,
-            "ZEA" => Projection::Zea,
-            "CAR" => Projection::Car,
-            "CEA" => Projection::Cea,
-            "MER" => Projection::Mer,
-            "SFL" => Projection::Sfl,
-            "AIT" => Projection::Ait,
-            "MOL" => Projection::Mol,
-            "ZPN" => Projection::Zpn,
-            "CYP" => Projection::Cyp,
-            "PAR" => Projection::Par,
-            "COP" => Projection::Cop,
-            "COE" => Projection::Coe,
-            "COD" => Projection::Cod,
-            "COO" => Projection::Coo,
-            "BON" => Projection::Bon,
-            "AIR" => Projection::Air,
-            "AZP" => Projection::Azp,
-            "PCO" => Projection::Pco,
-            "SZP" => Projection::Szp,
-            _ => return None,
-        })
+        PROJECTIONS
+            .iter()
+            .find(|&&(c, ..)| c == code)
+            .map(|&(_, proj, _)| proj)
+    }
+
+    /// This projection's [`Family`] (every variant is listed in [`PROJECTIONS`]).
+    fn family(self) -> Family {
+        PROJECTIONS
+            .iter()
+            .find(|&&(_, proj, _)| proj == self)
+            .map(|&(.., fam)| fam)
+            .expect("every Projection variant is listed in PROJECTIONS")
     }
 
     /// Whether this is a zenithal projection (fiducial point at the native pole,
     /// `θ₀ = 90°`); cylindrical projections have `θ₀ = 0°`.
     fn is_zenithal(self) -> bool {
-        matches!(
-            self,
-            Projection::Tan
-                | Projection::Sin
-                | Projection::Arc
-                | Projection::Stg
-                | Projection::Zea
-                | Projection::Zpn
-                | Projection::Air
-        )
+        self.family() == Family::Zenithal
     }
 
     /// Whether this is a conic projection (`θ₀ = θ_a = PVi_1`).
     fn is_conic(self) -> bool {
-        matches!(
-            self,
-            Projection::Cop | Projection::Coe | Projection::Cod | Projection::Coo
-        )
+        self.family() == Family::Conic
     }
 
     /// The fiducial point `(φ₀, θ₀)` in degrees. Zenithal (incl. the perspective
-    /// `AZP`): `(0, 90)`; conics: `(0, θ_a)` where `θ_a = PVi_1`; else `(0, 0)`.
+    /// `AZP`/`SZP`): `(0, 90)`; conics: `(0, θ_a)` where `θ_a = PVi_1`; else `(0, 0)`.
     fn reference_point(self, pv: &[f64]) -> (f64, f64) {
-        if self.is_zenithal() || matches!(self, Projection::Azp | Projection::Szp) {
-            (0.0, 90.0)
-        } else if self.is_conic() {
-            (0.0, pv.get(1).copied().unwrap_or(0.0))
-        } else {
-            (0.0, 0.0)
+        match self.family() {
+            Family::Zenithal | Family::ZenithalPerspective => (0.0, 90.0),
+            Family::Conic => (0.0, pv.get(1).copied().unwrap_or(0.0)),
+            Family::Other => (0.0, 0.0),
         }
     }
 
