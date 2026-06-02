@@ -167,6 +167,7 @@ pub(super) fn rice_encode(values: &[i64], bytepix: usize, blocksize: usize) -> V
 }
 
 /// MSB-first bit output, mirroring cfitsio's `Buffer`/`output_nbits`.
+#[derive(Debug)]
 struct BitOutput {
     out: Vec<u8>,
     bitbuffer: i64,
@@ -250,6 +251,7 @@ impl BitOutput {
 }
 
 /// A MSB-first bit reader over a compressed byte stream.
+#[derive(Debug)]
 pub(super) struct BitReader<'a> {
     bytes: &'a [u8],
     pos: usize,

@@ -6,7 +6,7 @@
 //! This module orchestrates tile reassembly and (de)quantization; the per-codec
 //! work lives in [`gzip`], [`rice`], [`plio`], and [`hcompress`].
 //!
-//! Decode and encode ([`encode_image`]) cover all five codecs: `GZIP_1`,
+//! Decode and encode ([`compress_image`]) cover all five codecs: `GZIP_1`,
 //! `GZIP_2`, `RICE_1`, `PLIO_1`, and `HCOMPRESS_1` (with `SMOOTH=1` decode). Float
 //! images are quantized per-tile (`ZSCALE`/`ZZERO`) with `NO_DITHER`,
 //! `SUBTRACTIVE_DITHER_1`, or `SUBTRACTIVE_DITHER_2`, with `ZBLANK`/NaN nulls and a
@@ -193,7 +193,7 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
         return Err(FitsError::KeywordOutOfRange { name: "ZNAXIS" });
     }
     let znaxis = znaxis as usize;
-    let dims = read_axes(header, "ZNAXIS", znaxis)?;
+    let dims = read_axes(header, znaxis)?;
     // A `ZNAXIS = 0` ZIMAGE has no data array (as an uncompressed `NAXIS = 0` does).
     // Return empty before building the geometry, which would otherwise size `total`
     // as the empty product (1) and fabricate a phantom one-pixel tile.
@@ -405,6 +405,7 @@ fn scatter_rows<S: Copy, D>(
 /// contract that callers write disjoint index sets — which holds because the image
 /// tiles partition the pixel grid (see [`run_decode_scatter`]).
 #[cfg(feature = "parallel")]
+#[derive(Debug)]
 struct DisjointOut<D> {
     ptr: *mut D,
     len: usize,
@@ -506,7 +507,7 @@ impl ImageCodec {
 /// Encode an integer [`Image`] as a tiled-compressed `BINTABLE`: returns the
 /// `ZIMAGE` header and the data unit (per-tile `P` descriptors + the heap of
 /// compressed tile bytes). Float images and codecs without an encoder are rejected.
-pub(crate) fn encode_image(
+pub(crate) fn compress_image(
     image: &Image,
     cmptype: &str,
     options: &CompressOptions,
@@ -514,7 +515,7 @@ pub(crate) fn encode_image(
 ) -> Result<Header> {
     let bitpix = image.samples.bitpix();
     if bitpix.is_float() {
-        return encode_float_image(image, cmptype, options, out);
+        return compress_float_image(image, cmptype, options, out);
     }
     let codec = ImageCodec::parse(cmptype)?;
     // RICE handles only 1/2/4-byte pixels (cfitsio parity); refuse the 64-bit path
@@ -537,7 +538,11 @@ pub(crate) fn encode_image(
     let tiles = resolve_tile_shape(dims, &options.tile_shape)?;
 
     let geom = TileGeometry::new(dims, &tiles);
-    let ntiles = geom.ntiles();
+    // A `NAXIS = 0` image has no data array; `geom.ntiles()` would otherwise be the
+    // empty product (1) and fabricate a phantom one-pixel tile that indexes the empty
+    // sample buffer. Zero tiles yields an empty `NAXIS2 = 0` table, which the decoder's
+    // matching `ZNAXIS = 0` guard turns back into the empty image.
+    let ntiles = if dims.is_empty() { 0 } else { geom.ntiles() };
     let bytepix = bitpix.elem_size();
     let (gzip_level, scale) = (options.gzip_level, options.hcompress_scale);
 
@@ -653,7 +658,7 @@ struct FloatTile {
 /// a tile that can't be quantized (constant data) is stored as raw gzip'd floats
 /// in `GZIP_COMPRESSED_DATA`. The table has four columns: `COMPRESSED_DATA`,
 /// `GZIP_COMPRESSED_DATA`, `ZSCALE`, `ZZERO`.
-fn encode_float_image(
+fn compress_float_image(
     image: &Image,
     cmptype: &str,
     options: &CompressOptions,
@@ -673,7 +678,9 @@ fn encode_float_image(
     let tiles = resolve_tile_shape(dims, &options.tile_shape)?;
 
     let geom = TileGeometry::new(dims, &tiles);
-    let ntiles = geom.ntiles();
+    // See `compress_image`: zero tiles for a `NAXIS = 0` image, avoiding the phantom
+    // one-pixel tile the empty-product `ntiles` would otherwise produce.
+    let ntiles = if dims.is_empty() { 0 } else { geom.ntiles() };
 
     let zdither0 = 1i64; // deterministic dither seed (any 1..=10000 is valid)
     let int_bitpix = Bitpix::I32; // quantized planes are always int32
@@ -814,6 +821,7 @@ fn dither_name(method: DitherMethod) -> &'static str {
 
 /// One tile's compressed payload: a byte stream (`1PB`) for most codecs, or an
 /// i16 instruction list (`1PI`) for `PLIO_1`.
+#[derive(Debug)]
 enum TileCell {
     Bytes(Vec<u8>),
     I16(Vec<i16>),
@@ -928,6 +936,7 @@ struct TileColumns<'a> {
 }
 
 /// The resolved source for one tile — which non-empty column holds its bytes.
+#[derive(Debug)]
 enum TileSource<'a> {
     Compressed(&'a ColumnData),
     Gzip(&'a ColumnData),
@@ -976,6 +985,7 @@ struct Dequant {
 /// the stored/quantized integer bitpix (and float `ZBITPIX`), and the codec knobs.
 /// Bundled so the per-tile decode helpers take one context rather than a long
 /// parameter list.
+#[derive(Debug)]
 struct DecodeCtx {
     codec: ImageCodec,
     zbitpix: Bitpix,
@@ -1087,10 +1097,10 @@ fn hcompress_smooth(header: &Header) -> bool {
     false
 }
 
-/// Read `PREFIX1..PREFIXn` integer axis lengths.
-fn read_axes(header: &Header, prefix: &str, n: usize) -> Result<Vec<usize>> {
+/// Read the `ZNAXIS1..ZNAXISn` integer axis lengths.
+fn read_axes(header: &Header, n: usize) -> Result<Vec<usize>> {
     (1..=n)
-        .map(|i| match header.get_integer(key!("{prefix}{i}").as_str()) {
+        .map(|i| match header.get_integer(key!("ZNAXIS{i}").as_str()) {
             Some(v) if v >= 0 => Ok(v as usize),
             Some(_) => Err(FitsError::KeywordOutOfRange { name: "ZNAXISn" }),
             None => Err(FitsError::MissingKeyword { name: "ZNAXISn" }),

@@ -898,6 +898,46 @@ fn nocompress_image_round_trips() {
 }
 
 #[test]
+fn empty_naxis0_image_round_trips() {
+    use crate::data::{Image, ImageData, Scaling};
+    use crate::writer::FitsWriter;
+    use std::io::Cursor;
+    // A `NAXIS = 0` image has no data array. The encoder must emit an empty
+    // `NAXIS2 = 0` ZIMAGE table (not panic on a fabricated phantom tile), and the
+    // decoder must restore the empty image. Exercise both the integer and float
+    // encoder paths.
+    let cases = [
+        ImageData::I16(Vec::new()),
+        ImageData::I32(Vec::new()),
+        ImageData::F32(Vec::new()),
+    ];
+    for samples in cases {
+        let image = Image {
+            shape: Vec::new(),
+            samples: samples.clone(),
+            scaling: Scaling {
+                bscale: 1.0,
+                bzero: 0.0,
+                blank: None,
+            },
+        };
+        let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+        w.write_compressed_image(&image, "GZIP_1", &CompressOptions::default())
+            .unwrap();
+        let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+        let back = r.read_image(1).unwrap();
+        assert!(back.shape.is_empty(), "shape for {samples:?}");
+        // Same empty variant back out, no phantom pixel.
+        match (back.decode(), &samples) {
+            (ImageData::I16(v), ImageData::I16(_)) => assert!(v.is_empty()),
+            (ImageData::I32(v), ImageData::I32(_)) => assert!(v.is_empty()),
+            (ImageData::F32(v), ImageData::F32(_)) => assert!(v.is_empty()),
+            (other, _) => panic!("variant mismatch: {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn compressed_image_descriptor_switches_to_q_for_large_offsets() {
     // §10.1.3: a heap offset beyond the 32-bit P range needs a 64-bit Q descriptor.
     let mut q = Vec::new();

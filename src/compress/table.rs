@@ -55,6 +55,7 @@ impl Algo {
 }
 
 /// Resolved per-column layout used by both directions.
+#[derive(Debug)]
 struct ColMeta {
     kind: TformKind,
     /// Element width in bytes (the `t` size, e.g. 2 for `I`).
@@ -283,7 +284,7 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
         .checked_mul(naxis1)
         .ok_or(FitsError::DataUnitOverflow)?;
 
-    let nchunks = nrows.div_ceil(rpt.max(1));
+    let nchunks = nrows.div_ceil(rpt);
     // Each column's per-chunk compressed cells.
     let cells: Vec<Vec<ColumnData>> = (0..ncols)
         .map(|ci| table.column_by_idx(ci)?.vla())
