@@ -59,6 +59,19 @@ fn check_range(offset: u64, len: usize, size: u64) -> Result<()> {
     Ok(())
 }
 
+/// Borrow `[offset, offset+len)` from an already-resident byte slice — the shared
+/// bounds-checked fetch behind the in-memory sources ([`SliceSource`], [`MmapSource`]).
+fn mem_slice(bytes: &[u8], offset: u64, len: usize) -> Result<&[u8]> {
+    check_range(offset, len, bytes.len() as u64)?;
+    let off = offset as usize;
+    Ok(&bytes[off..off + len])
+}
+
+/// Owned copy of [`mem_slice`] — the `read_owned` form for the in-memory sources.
+fn mem_owned(bytes: &[u8], offset: u64, len: usize) -> Result<Vec<u8>> {
+    Ok(mem_slice(bytes, offset, len)?.to_vec())
+}
+
 /// A streaming `Read + Seek` source. Each fetch seeks and copies the range out —
 /// there is no resident image to borrow, so reads cost one extra memory pass.
 #[derive(Debug)]
@@ -130,15 +143,11 @@ impl Source for SliceSource<'_> {
         len: usize,
         _scratch: &'a mut Vec<u8>,
     ) -> Result<&'a [u8]> {
-        check_range(offset, len, self.bytes.len() as u64)?;
-        let off = offset as usize;
-        Ok(&self.bytes[off..off + len])
+        mem_slice(self.bytes, offset, len)
     }
 
     fn read_owned(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
-        check_range(offset, len, self.bytes.len() as u64)?;
-        let off = offset as usize;
-        Ok(self.bytes[off..off + len].to_vec())
+        mem_owned(self.bytes, offset, len)
     }
 }
 
@@ -176,14 +185,10 @@ impl Source for MmapSource {
         len: usize,
         _scratch: &'a mut Vec<u8>,
     ) -> Result<&'a [u8]> {
-        check_range(offset, len, self.map.len() as u64)?;
-        let off = offset as usize;
-        Ok(&self.map[off..off + len])
+        mem_slice(&self.map, offset, len)
     }
 
     fn read_owned(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
-        check_range(offset, len, self.map.len() as u64)?;
-        let off = offset as usize;
-        Ok(self.map[off..off + len].to_vec())
+        mem_owned(&self.map, offset, len)
     }
 }

@@ -26,6 +26,8 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
 use crate::keyword::key;
+#[cfg(feature = "compression")]
+use crate::table::BinTable;
 use crate::table::ColumnData;
 
 /// 16-zero `CHECKSUM` value written before the real checksum is solved and
@@ -49,7 +51,7 @@ pub(crate) fn render_header(header: &Header) -> Vec<u8> {
 }
 
 /// Round `buf` up to a whole number of 2880-byte blocks using `fill`.
-pub(crate) fn pad_to_block(buf: &mut Vec<u8>, fill: u8) {
+fn pad_to_block(buf: &mut Vec<u8>, fill: u8) {
     let rem = buf.len() % BLOCK_SIZE;
     if rem != 0 {
         buf.resize(buf.len() + (BLOCK_SIZE - rem), fill);
@@ -264,12 +266,14 @@ impl<W: Write> FitsWriter<W> {
         for col in columns {
             row_len += check_column(col, nrows)?;
         }
-        // Build the heap (row-major) and per-VLA-column descriptors first, so the
-        // main table can carry the `P` (count, offset) pairs.
+        // Build the heap (row-major) and the VLA descriptors first, so the main table
+        // can carry the `P`/`Q` (count, offset) pairs. Descriptors are recorded in the
+        // same row-major, column order the main-table pass emits them, so a single flat
+        // queue (drained below) stays aligned without per-column bookkeeping.
         let mut heap: Vec<u8> = Vec::new();
-        let mut descs: Vec<Vec<(u64, u64)>> = vec![Vec::new(); columns.len()];
+        let mut descs: Vec<(u64, u64)> = Vec::new();
         for r in 0..nrows {
-            for (ci, col) in columns.iter().enumerate() {
+            for col in columns {
                 if let Some(rows) = &col.vla {
                     let cell = &rows[r];
                     let (n, o) = (cell.element_count() as u64, heap.len() as u64);
@@ -280,22 +284,21 @@ impl<W: Write> FitsWriter<W> {
                     if !col.wide && (n > u32::MAX as u64 || o > u32::MAX as u64) {
                         return Err(FitsError::DataUnitOverflow);
                     }
-                    descs[ci].push((n, o));
+                    descs.push((n, o));
                     append_be(&mut heap, cell);
                 }
             }
         }
-        // Main table: fixed cells inline, VLA columns as `P` descriptors (consumed
-        // per column in the same row order they were built). Built into the reused
-        // scratch, with the heap appended after.
+        // Main table: fixed cells inline, VLA columns as `P`/`Q` descriptors drained
+        // in the same row-major order they were built. Built into the reused scratch,
+        // with the heap appended after.
         self.scratch.clear();
         self.scratch.reserve(nrows * row_len + heap.len());
-        let mut cursor = vec![0usize; columns.len()];
+        let mut descs = descs.into_iter();
         for r in 0..nrows {
-            for (ci, col) in columns.iter().enumerate() {
+            for col in columns {
                 if col.vla.is_some() {
-                    let (n, o) = descs[ci][cursor[ci]];
-                    cursor[ci] += 1;
+                    let (n, o) = descs.next().expect("one descriptor per VLA cell");
                     push_pq_descriptor(&mut self.scratch, col.wide, n, o);
                 } else {
                     pack_cell(&mut self.scratch, col, r);
@@ -365,7 +368,7 @@ impl<W: Write> FitsWriter<W> {
     pub fn write_compressed_table(
         &mut self,
         header: &Header,
-        table: &crate::table::BinTable,
+        table: &BinTable,
         rows_per_tile: usize,
         algo: &str,
     ) -> Result<()> {

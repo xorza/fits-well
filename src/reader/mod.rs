@@ -31,6 +31,8 @@ use source::StreamSource;
 #[cfg(feature = "compression")]
 use crate::compress::{decompress_image, uncompress_table};
 #[cfg(feature = "compression")]
+use crate::data::Image;
+#[cfg(feature = "compression")]
 use crate::data::copy_samples_into_words;
 
 /// One Header/Data Unit located by the reader.
@@ -259,6 +261,15 @@ impl<S: Source> FitsReader<S> {
         })
     }
 
+    /// Decompress a tiled-compressed (`ZIMAGE`) HDU into its owned [`Image`] — the
+    /// shared step behind [`FitsReader::read_image`] and
+    /// [`FitsReader::read_image_view`], which then package the result differently.
+    #[cfg(feature = "compression")]
+    fn decompress_at(&mut self, index: usize) -> Result<Image> {
+        let table = self.read_table(index)?;
+        decompress_image(&self.hdus[index].header, &table)
+    }
+
     /// Read an HDU's image as a [`RawImage`], transparently handling **both** plain
     /// and tiled-compressed (`ZIMAGE`) images — the caller doesn't need to know which.
     /// Errors with [`FitsError::NotAnImage`] for tables, random groups, and unmodelled
@@ -278,8 +289,7 @@ impl<S: Source> FitsReader<S> {
         // image API regardless of storage.
         #[cfg(feature = "compression")]
         if self.checked_hdu(index)?.kind == HduKind::CompressedImage {
-            let table = self.read_table(index)?;
-            let img = decompress_image(&self.hdus[index].header, &table)?;
+            let img = self.decompress_at(index)?;
             return Ok(RawImage::decoded(img.samples, img.shape, img.scaling));
         }
 
@@ -332,8 +342,7 @@ impl<S: Source> FitsReader<S> {
         // and copy the host-endian pixels into the caller's scratch, then view that.
         #[cfg(feature = "compression")]
         if self.checked_hdu(index)?.kind == HduKind::CompressedImage {
-            let table = self.read_table(index)?;
-            let img = decompress_image(&self.hdus[index].header, &table)?;
+            let img = self.decompress_at(index)?;
             let bitpix = img.samples.bitpix();
             let nbytes = copy_samples_into_words(&img.samples, scratch);
             return Ok(view_words(scratch, bitpix, nbytes));
