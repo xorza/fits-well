@@ -16,6 +16,7 @@ num-complex = "0.4"
 flate2 = { version = "1.1", optional = true }
 rayon = { version = "1", optional = true }
 memmap2 = { version = "0.9", optional = true }
+ndarray = { version = "0.17", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
@@ -31,6 +32,9 @@ parallel = ["compression", "dep:rayon"]
 # memory-mapped read sources (via memmap2) for zero-copy access over large files:
 # data units decode straight from the mapped pages, skipping the staging copy.
 mmap = ["dep:memmap2"]
+# n-dimensional image arrays (via ndarray): `Image`/`RawImage` -> typed `ImageArray`
+# or a physical `ArrayD<f64>`, in FITS axis order, zero-copy where possible.
+ndarray = ["dep:ndarray"]
 # tiled image + table (de)compression: all five image codecs (GZIP_1, GZIP_2,
 # RICE_1, PLIO_1, HCOMPRESS_1) plus §10.3 tables. Pulls in flate2 for the gzip
 # codecs. The WCS (§8) and time (§9) layers are dependency-free and always compiled.
