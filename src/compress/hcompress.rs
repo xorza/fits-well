@@ -69,6 +69,7 @@ fn log2_ceil(n: usize) -> i32 {
 
 /// Bit/byte output buffer (replaces cfitsio's file + `buffer2`/`bits_to_go2`
 /// globals). Holds the compressed byte stream.
+#[derive(Debug)]
 struct BitOutput {
     out: Vec<u8>,
     buffer2: i32,
@@ -652,6 +653,7 @@ const HUFFMAN_DECODE: [(u8, i32); 64] = {
     t
 };
 
+#[derive(Debug)]
 struct BitInput<'a> {
     data: &'a [u8],
     pos: usize,

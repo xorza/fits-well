@@ -42,6 +42,7 @@ pub(super) fn random_values() -> &'static [f32] {
 
 /// `(row − 1) mod N_RANDOM` → the starting index into [`random_values`] for a
 /// tile, and the first `nextrand` cursor (cfitsio's `iseed`/`nextrand` setup).
+#[derive(Debug)]
 pub(super) struct Dither {
     rand: &'static [f32],
     iseed: usize,
@@ -116,6 +117,7 @@ fn nint(x: f64) -> i32 {
 }
 
 /// Background-noise estimate of a tile (cfitsio `FnNoise3_float`).
+#[derive(Debug)]
 struct Noise {
     min: f64,
     max: f64,
@@ -213,6 +215,7 @@ fn proper_median(v: &mut [f64]) -> f64 {
 
 /// A quantized tile: the integer plane plus the `BSCALE`/`BZERO` (`ZSCALE`/`ZZERO`)
 /// that invert it, and whether any pixel was a null (mapped to [`NULL_VALUE`]).
+#[derive(Debug)]
 pub(super) struct Quantized {
     pub(super) idata: Vec<i32>,
     pub(super) bscale: f64,

@@ -17,7 +17,7 @@ use crate::block::SPACE_FILL;
 use crate::block::ZERO_FILL;
 use crate::checksum;
 #[cfg(feature = "compression")]
-use crate::compress::{CompressOptions, compress_table, encode_image};
+use crate::compress::{CompressOptions, compress_image, compress_table};
 use crate::data::Image;
 use crate::data::shape_product;
 use crate::endian::extend_be;
@@ -353,7 +353,7 @@ impl<W: Write> FitsWriter<W> {
         self.ensure_primary()?;
         // The codec assembles the compressed data unit directly into the reused
         // scratch and hands back just the header.
-        let header = encode_image(image, cmptype, options, &mut self.scratch)?;
+        let header = compress_image(image, cmptype, options, &mut self.scratch)?;
         self.write_hdu(header, ZERO_FILL)
     }
 
