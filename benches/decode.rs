@@ -20,7 +20,7 @@ use std::io::Cursor;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use fits_well::internals::{decode_image, decode_image_into, encode_image};
+use fits_well::internals::{decode_image, encode_image};
 use fits_well::{Bitpix, FitsReader, FitsWriter, Image, ImageData, Scaling};
 
 /// Bytes moved per typed bench. 64 MiB is comfortably past the last-level cache
@@ -76,30 +76,6 @@ fn decode(c: &mut Criterion) {
         g.throughput(Throughput::Bytes(raw.len() as u64));
         g.bench_function(name, |b| {
             b.iter(|| black_box(decode_image(black_box(&raw), bitpix)))
-        });
-    }
-    g.finish();
-}
-
-/// `decode_into` — the same big-endian swap as [`decode`], but into a *reused*
-/// buffer (`ImageData::decode_into`). Versus `decode` this isolates the per-call
-/// output allocation + its page faults, which profiling found dominate the fresh
-/// path (the swap itself is a small minority of the time). A real read loop over
-/// many same-typed images takes this path; expect ~4× over `decode`.
-fn decode_into(c: &mut Criterion) {
-    let mut g = c.benchmark_group("decode_into");
-    for &(name, bitpix) in TYPES {
-        let raw = raw_be(count(bitpix) * elem_bytes(bitpix));
-        // Seed + prime the reused buffer so the loop measures steady-state reuse, not
-        // the first call's allocation.
-        let mut out = ImageData::U8(Vec::new());
-        decode_image_into(&raw, bitpix, &mut out);
-        g.throughput(Throughput::Bytes(raw.len() as u64));
-        g.bench_function(name, |b| {
-            b.iter(|| {
-                decode_image_into(black_box(&raw), bitpix, &mut out);
-                black_box(&out);
-            })
         });
     }
     g.finish();
@@ -176,5 +152,50 @@ fn read_image(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, decode, decode_into, encode, physical, read_image);
+/// `read_image_view` — the same end-to-end read as [`read_image`], but via the
+/// borrowed view path into a caller-owned reused scratch (no per-call output
+/// allocation). Over this seeking `Cursor` source every type still stages the data
+/// unit into the reader's scratch (one copy), so `u8` is O(n) here too and keeps a
+/// throughput tag — comparing `read_image_view` vs `read_image` isolates the output
+/// allocation the owned `decode()` pays.
+fn read_image_view(c: &mut Criterion) {
+    let mut g = c.benchmark_group("read_image_view");
+    for &(name, bitpix) in TYPES {
+        let n = count(bitpix);
+        let img = Image {
+            shape: vec![n],
+            samples: sample_data(bitpix, n),
+            scaling: Scaling {
+                bscale: 1.0,
+                bzero: 0.0,
+                blank: None,
+            },
+        };
+        let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+        w.write_image(&img).unwrap();
+        let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+        let mut scratch: Vec<u64> = Vec::new();
+        g.throughput(Throughput::Bytes((n * elem_bytes(bitpix)) as u64));
+        // `seek` arm: the Cursor source (vs the `slice` arm the `read` bench adds) —
+        // distinct ids so the two share the `read_image_view` group without colliding.
+        g.bench_function(BenchmarkId::new("seek", name), |b| {
+            // The view borrows reader + scratch, so it can't escape the closure for the
+            // timer; `black_box(&v)` keeps the swap from eliding.
+            b.iter(|| {
+                let v = r.read_image_view(0, &mut scratch).unwrap();
+                black_box(&v);
+            })
+        });
+    }
+    g.finish();
+}
+
+criterion_group!(
+    benches,
+    decode,
+    encode,
+    physical,
+    read_image,
+    read_image_view
+);
 criterion_main!(benches);

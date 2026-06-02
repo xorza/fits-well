@@ -100,5 +100,35 @@ fn read_image(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, read_image);
+/// The borrowed view path: `read_image_view` byte-swaps into a caller-owned reused
+/// scratch and hands back a typed view — no per-call output allocation (the
+/// page-fault cost the owned `decode()` arms pay every call). Over an in-memory
+/// (`slice`) source, directly comparable to `read_image/slice/*`.
+fn read_image_view(c: &mut Criterion) {
+    let mut g = c.benchmark_group("read_image_view");
+    for &(name, bitpix) in TYPES {
+        let n = UNIT_BYTES / elem_bytes(bitpix);
+        let bytes = fits_bytes(bitpix, n);
+        let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+        let mut scratch: Vec<u64> = Vec::new();
+        // Over an in-memory source a `u8` view is O(1) — a zero-copy borrow, no swap —
+        // so a bytes/s throughput is meaningless (it'd divide the unit size by a
+        // constant time). Tag only the swapped types; `u8` (first) reports wall-time.
+        if bitpix != Bitpix::U8 {
+            g.throughput(Throughput::Bytes((n * elem_bytes(bitpix)) as u64));
+        }
+        // `slice` arm: the in-memory source (vs the `seek` arm the `decode` bench adds).
+        g.bench_function(BenchmarkId::new("slice", name), |b| {
+            // The view borrows reader + scratch, so it can't escape the closure for the
+            // timer; `black_box(&v)` is the barrier that keeps the swap from eliding.
+            b.iter(|| {
+                let v = reader.read_image_view(0, &mut scratch).unwrap();
+                black_box(&v);
+            })
+        });
+    }
+    g.finish();
+}
+
+criterion_group!(benches, read_image, read_image_view);
 criterion_main!(benches);

@@ -76,48 +76,60 @@ fn encode_is_the_inverse_of_decode() {
 }
 
 #[test]
-fn decode_into_matches_decode_and_reuses_the_buffer() {
+fn swap_into_words_then_view_matches_decode_and_reuses_one_alloc() {
+    // The reader's view path: swap big-endian bytes into a u64-backed scratch, then
+    // reinterpret as a typed ImageView. Each type's view must equal the owned decode,
+    // and the cross-BITPIX scratch must reuse one allocation across types.
     let cases = [
-        ImageData::U8(vec![0, 1, 255]),
         ImageData::I16(vec![1, -1, -32768, 32767]),
         ImageData::I32(vec![256, -1, i32::MIN]),
         ImageData::I64(vec![5, -5, i64::MAX]),
         ImageData::F32(vec![1.0, -2.5, 0.0]),
         ImageData::F64(vec![1.0, -2.5, f64::MAX]),
     ];
-    // decode_into equals decode, exercising both the variant switch (the seed is U8)
-    // and the matching-variant reuse on the second pass.
+    let mut words: Vec<u64> = Vec::new();
     for data in &cases {
-        let bytes = encoded(data);
-        let mut out = ImageData::U8(Vec::new());
-        ImageData::decode_into(&bytes, data.bitpix(), &mut out);
-        assert_eq!(&out, data, "decode_into after a variant switch");
-        ImageData::decode_into(&bytes, data.bitpix(), &mut out);
-        assert_eq!(&out, data, "decode_into reusing the matching variant");
+        let be = encoded(data);
+        swap_into_words(&be, data.bitpix(), &mut words);
+        let view = view_words(&words, data.bitpix(), be.len());
+        // The view's samples equal the owned decode (compare via a fresh ImageData).
+        let owned = ImageData::decode(&be, data.bitpix());
+        let view_owned = match view {
+            ImageView::I16(v) => ImageData::I16(v.to_vec()),
+            ImageView::I32(v) => ImageData::I32(v.to_vec()),
+            ImageView::I64(v) => ImageData::I64(v.to_vec()),
+            ImageView::F32(v) => ImageData::F32(v.to_vec()),
+            ImageView::F64(v) => ImageData::F64(v.to_vec()),
+            ImageView::U8(v) => ImageData::U8(v.to_vec()),
+        };
+        assert_eq!(
+            view_owned,
+            owned,
+            "view of {:?} must equal decode",
+            data.bitpix()
+        );
     }
 
-    // The point of the method: re-decoding an equal-length buffer reuses the heap
-    // allocation (the already-faulted output pages) rather than reallocating. 1024
-    // i32s force a real heap buffer; the data pointer must be identical across calls.
-    let a = ImageData::I32((0..1024).collect());
-    let b = ImageData::I32((0..1024).map(|i| i * 3 - 7).collect());
-    let (ba, bb) = (encoded(&a), encoded(&b));
-    let mut out = ImageData::I32(Vec::new());
-    ImageData::decode_into(&ba, Bitpix::I32, &mut out);
-    let ptr_a = match &out {
-        ImageData::I32(v) => v.as_ptr(),
-        _ => unreachable!(),
-    };
-    ImageData::decode_into(&bb, Bitpix::I32, &mut out);
-    let ptr_b = match &out {
-        ImageData::I32(v) => v.as_ptr(),
-        _ => unreachable!(),
-    };
+    // Cross-BITPIX reuse: two equal-byte-length decodes of *different* types must
+    // reuse the same u64 backing (no realloc) — the page-fault-free property the
+    // reader's scratch relies on. 4096 bytes = 2048 i16 then 1024 i32.
+    let i16s = ImageData::I16((0..2048).map(|i| i as i16).collect());
+    let i32s = ImageData::I32((0..1024).map(|i| i - 7).collect());
+    let mut w: Vec<u64> = Vec::new();
+    swap_into_words(&encoded(&i16s), Bitpix::I16, &mut w);
+    let ptr1 = w.as_ptr();
+    swap_into_words(&encoded(&i32s), Bitpix::I32, &mut w);
+    let ptr2 = w.as_ptr();
     assert_eq!(
-        ptr_a, ptr_b,
-        "an equal-length re-decode must reuse the buffer, not reallocate"
+        ptr1, ptr2,
+        "equal-length cross-type swap must reuse the scratch"
     );
-    assert_eq!(out, b);
+    // ...and the i32 view is still correct after reusing the i16 scratch.
+    let view = view_words(&w, Bitpix::I32, encoded(&i32s).len());
+    assert_eq!(
+        view,
+        ImageView::I32(&(0..1024).map(|i| i - 7).collect::<Vec<i32>>())
+    );
 }
 
 #[test]

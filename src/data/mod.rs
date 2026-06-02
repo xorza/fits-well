@@ -13,7 +13,7 @@
 
 use crate::bitpix::Bitpix;
 use crate::endian::decode_be;
-use crate::endian::decode_be_into;
+use crate::endian::decode_be_into_slice;
 use crate::endian::extend_be;
 use crate::header::Header;
 
@@ -87,82 +87,6 @@ impl ImageData {
         }
     }
 
-    /// Decode the raw, big-endian data unit into `out`, *reusing* its allocation
-    /// when `out` already holds `bitpix`'s variant — the buffer-reusing counterpart
-    /// to [`ImageData::decode`], mirroring [`ImageData::encode_into`] on the write
-    /// side. A caller reading many same-typed images (a multi-HDU file, a re-read
-    /// loop) into one `out` pays the output allocation and its page faults once
-    /// rather than per call; profiling found that fault traffic, not the byte-swap,
-    /// dominates a fresh-`Vec`-per-call decode. On a variant switch the old buffer is
-    /// freed and the right one started fresh — a one-time cost, free thereafter.
-    pub(crate) fn decode_into(bytes: &[u8], bitpix: Bitpix, out: &mut ImageData) {
-        assert_eq!(
-            bytes.len() % bitpix.elem_size(),
-            0,
-            "data length must be a whole number of {bitpix:?} elements"
-        );
-        // Pull the existing buffer out (a no-alloc placeholder takes its place) so a
-        // matching variant's `Vec` is reused; a mismatched one is dropped here.
-        let prev = std::mem::replace(out, ImageData::U8(Vec::new()));
-        *out = match bitpix {
-            Bitpix::U8 => {
-                let mut v = if let ImageData::U8(v) = prev {
-                    v
-                } else {
-                    Vec::new()
-                };
-                v.clear();
-                v.extend_from_slice(bytes);
-                ImageData::U8(v)
-            }
-            Bitpix::I16 => {
-                let mut v = if let ImageData::I16(v) = prev {
-                    v
-                } else {
-                    Vec::new()
-                };
-                decode_be_into(bytes, i16::from_be_bytes, &mut v);
-                ImageData::I16(v)
-            }
-            Bitpix::I32 => {
-                let mut v = if let ImageData::I32(v) = prev {
-                    v
-                } else {
-                    Vec::new()
-                };
-                decode_be_into(bytes, i32::from_be_bytes, &mut v);
-                ImageData::I32(v)
-            }
-            Bitpix::I64 => {
-                let mut v = if let ImageData::I64(v) = prev {
-                    v
-                } else {
-                    Vec::new()
-                };
-                decode_be_into(bytes, i64::from_be_bytes, &mut v);
-                ImageData::I64(v)
-            }
-            Bitpix::F32 => {
-                let mut v = if let ImageData::F32(v) = prev {
-                    v
-                } else {
-                    Vec::new()
-                };
-                decode_be_into(bytes, f32::from_be_bytes, &mut v);
-                ImageData::F32(v)
-            }
-            Bitpix::F64 => {
-                let mut v = if let ImageData::F64(v) = prev {
-                    v
-                } else {
-                    Vec::new()
-                };
-                decode_be_into(bytes, f64::from_be_bytes, &mut v);
-                ImageData::F64(v)
-            }
-        };
-    }
-
     /// Append the samples to `out` in big-endian order — the inverse of
     /// [`ImageData::decode`]. This is the unpadded data unit; the writer pads it
     /// to the 2880-byte block grid. Appends (never clears), so a writer reusing one
@@ -227,6 +151,155 @@ impl ImageData {
             _ => None,
         }
     }
+}
+
+/// A borrowed, host-endian view of an image's samples, tagged by `BITPIX` — the
+/// zero-/low-copy counterpart to the owned [`ImageData`], returned by
+/// [`crate::FitsReader::read_image_view`]. Match it exactly like [`ImageData`], but
+/// the slices borrow the reader's reused decode scratch (or, for `BITPIX = 8`, the
+/// source bytes directly), so a view is valid only until the next read — ideal for a
+/// hot loop that processes each image and moves on, since reusing one scratch across
+/// reads pays the output allocation (and its page faults) once and even reuses it
+/// across *different* `BITPIX`. For samples you need to keep, use the owned
+/// [`RawImage::decode`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ImageView<'a> {
+    U8(&'a [u8]),
+    I16(&'a [i16]),
+    I32(&'a [i32]),
+    I64(&'a [i64]),
+    F32(&'a [f32]),
+    F64(&'a [f64]),
+}
+
+impl ImageView<'_> {
+    /// The `BITPIX` element kind backing this view.
+    pub fn bitpix(&self) -> Bitpix {
+        match self {
+            ImageView::U8(_) => Bitpix::U8,
+            ImageView::I16(_) => Bitpix::I16,
+            ImageView::I32(_) => Bitpix::I32,
+            ImageView::I64(_) => Bitpix::I64,
+            ImageView::F32(_) => Bitpix::F32,
+            ImageView::F64(_) => Bitpix::F64,
+        }
+    }
+
+    /// Number of samples in the view.
+    pub fn len(&self) -> usize {
+        match self {
+            ImageView::U8(v) => v.len(),
+            ImageView::I16(v) => v.len(),
+            ImageView::I32(v) => v.len(),
+            ImageView::I64(v) => v.len(),
+            ImageView::F32(v) => v.len(),
+            ImageView::F64(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Byte-swap big-endian image bytes `src` into `words` — a `u64`-backed (8-byte-
+/// aligned) reused scratch, resized to fit — so [`view_words`] can hand back typed
+/// `&[T]` slices over the result. `bitpix` must not be `U8` (that needs no swap; the
+/// reader borrows the source bytes directly).
+pub(crate) fn swap_into_words(src: &[u8], bitpix: Bitpix, words: &mut Vec<u64>) {
+    let count = src.len() / bitpix.elem_size();
+    words.resize(src.len().div_ceil(8), 0);
+    let p = words.as_mut_ptr() as *mut u8;
+    // SAFETY: `words` is `u64`-backed (8-aligned, valid for every BITPIX type's
+    // alignment) with room for `src.len()` bytes. Each reinterpretation is write-only,
+    // covers exactly `count` elements (= src.len() bytes, in bounds), and `src` is a
+    // separate buffer so the typed slice never aliases it.
+    unsafe {
+        match bitpix {
+            Bitpix::I16 => decode_be_into_slice(
+                src,
+                std::slice::from_raw_parts_mut(p as *mut i16, count),
+                i16::from_be_bytes,
+            ),
+            Bitpix::I32 => decode_be_into_slice(
+                src,
+                std::slice::from_raw_parts_mut(p as *mut i32, count),
+                i32::from_be_bytes,
+            ),
+            Bitpix::I64 => decode_be_into_slice(
+                src,
+                std::slice::from_raw_parts_mut(p as *mut i64, count),
+                i64::from_be_bytes,
+            ),
+            Bitpix::F32 => decode_be_into_slice(
+                src,
+                std::slice::from_raw_parts_mut(p as *mut f32, count),
+                f32::from_be_bytes,
+            ),
+            Bitpix::F64 => decode_be_into_slice(
+                src,
+                std::slice::from_raw_parts_mut(p as *mut f64, count),
+                f64::from_be_bytes,
+            ),
+            Bitpix::U8 => unreachable!("U8 is handled by the caller, never swapped"),
+        }
+    }
+}
+
+/// Reinterpret the first `nbytes` of a `u64`-backed host-endian scratch (written by
+/// [`swap_into_words`]) as a typed [`ImageView`]. `nbytes` is a whole number of
+/// `bitpix` elements and `<= words.len() * 8`.
+pub(crate) fn view_words(words: &[u64], bitpix: Bitpix, nbytes: usize) -> ImageView<'_> {
+    let count = nbytes / bitpix.elem_size();
+    let p = words.as_ptr() as *const u8;
+    // SAFETY: `words` is `u64`-backed (8-aligned ≥ every type's align); `swap_into_words`
+    // wrote all `nbytes` (= count elements) host-endian bytes; int/float types have no
+    // invalid bit patterns. So each slice is a valid, fully-initialized `&[T]`.
+    unsafe {
+        match bitpix {
+            Bitpix::U8 => ImageView::U8(std::slice::from_raw_parts(p, count)),
+            Bitpix::I16 => ImageView::I16(std::slice::from_raw_parts(p as *const i16, count)),
+            Bitpix::I32 => ImageView::I32(std::slice::from_raw_parts(p as *const i32, count)),
+            Bitpix::I64 => ImageView::I64(std::slice::from_raw_parts(p as *const i64, count)),
+            Bitpix::F32 => ImageView::F32(std::slice::from_raw_parts(p as *const f32, count)),
+            Bitpix::F64 => ImageView::F64(std::slice::from_raw_parts(p as *const f64, count)),
+        }
+    }
+}
+
+/// The already-host-endian samples reinterpreted as their raw bytes — every element
+/// type is `Pod` (no padding, all bit patterns valid), so the byte view is sound.
+#[cfg(feature = "compression")]
+fn samples_as_bytes(data: &ImageData) -> &[u8] {
+    // SAFETY: a typed sample slice viewed as its own bytes (read-only); length is the
+    // element count times the element width.
+    unsafe {
+        let (ptr, len) = match data {
+            ImageData::U8(v) => return v,
+            ImageData::I16(v) => (v.as_ptr() as *const u8, v.len() * 2),
+            ImageData::I32(v) => (v.as_ptr() as *const u8, v.len() * 4),
+            ImageData::I64(v) => (v.as_ptr() as *const u8, v.len() * 8),
+            ImageData::F32(v) => (v.as_ptr() as *const u8, v.len() * 4),
+            ImageData::F64(v) => (v.as_ptr() as *const u8, v.len() * 8),
+        };
+        std::slice::from_raw_parts(ptr, len)
+    }
+}
+
+/// Copy already-host-endian `samples` (a decompressed image) into the `u64`-backed
+/// `words` scratch so [`view_words`] can hand back a view — the compressed-image
+/// path, whose pixels have no on-disk bytes to swap. Returns the byte length written.
+#[cfg(feature = "compression")]
+pub(crate) fn copy_samples_into_words(samples: &ImageData, words: &mut Vec<u64>) -> usize {
+    let bytes = samples_as_bytes(samples);
+    words.resize(bytes.len().div_ceil(8), 0);
+    // SAFETY: `words` is `u64`-backed (8-aligned) with room for `bytes.len()`; the
+    // reinterpreted destination is write-only and does not alias `samples`.
+    unsafe {
+        std::slice::from_raw_parts_mut(words.as_mut_ptr() as *mut u8, bytes.len())
+            .copy_from_slice(bytes);
+    }
+    bytes.len()
 }
 
 /// An image read from an HDU, in whichever form the reader could give cheaply —
@@ -300,19 +373,6 @@ impl<'a> RawImage<'a> {
         match &self.data {
             ImageBytes::Raw(bytes) => ImageData::decode(bytes, self.bitpix),
             ImageBytes::Decoded(samples) => samples.clone(),
-        }
-    }
-
-    /// Decode the host-endian samples into `out`, *reusing* its allocation — the
-    /// buffer-reusing form of [`RawImage::decode`]. Reading many same-shaped images
-    /// in a loop into one `out` decodes each in place and pays the output allocation
-    /// (and its page faults — the dominant cost of a plain typed read) once instead
-    /// of per image. A plain image byte-swaps its on-disk bytes into `out`; a
-    /// compressed one's pixels are already decoded and are cloned in.
-    pub fn decode_into(&self, out: &mut ImageData) {
-        match &self.data {
-            ImageBytes::Raw(bytes) => ImageData::decode_into(bytes, self.bitpix, out),
-            ImageBytes::Decoded(samples) => *out = samples.clone(),
         }
     }
 

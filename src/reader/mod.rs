@@ -3,13 +3,17 @@ use std::io::Seek;
 use std::ops::Range;
 
 use crate::ascii::AsciiTable;
+use crate::bitpix::Bitpix;
 use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
 use crate::block::padded_len;
 use crate::checksum;
+use crate::data::ImageView;
 use crate::data::RawImage;
 use crate::data::Scaling;
 use crate::data::shape_product;
+use crate::data::swap_into_words;
+use crate::data::view_words;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::groups::RandomGroups;
@@ -26,6 +30,8 @@ use source::StreamSource;
 
 #[cfg(feature = "compression")]
 use crate::compress::{decompress_image, uncompress_table};
+#[cfg(feature = "compression")]
+use crate::data::copy_samples_into_words;
 
 /// One Header/Data Unit located by the reader.
 ///
@@ -44,6 +50,26 @@ pub struct Hdu {
     /// Unpadded data length (`Nbits / 8`) — where the meaningful data ends within
     /// the padded unit. The on-disk length is `padded_len(data_bytes)`.
     pub(crate) data_bytes: u64,
+}
+
+impl Hdu {
+    /// Validate that this HDU is a readable plain image array — a `Primary`/`Image`
+    /// kind with no group structure — the shared precondition of
+    /// [`FitsReader::read_image`] and [`FitsReader::read_image_view`].
+    fn ensure_plain_image(&self) -> Result<()> {
+        if !matches!(self.kind, HduKind::Primary | HduKind::Image) {
+            return Err(FitsError::NotAnImage);
+        }
+        // §4.3: a plain image array has no group structure. A non-conforming
+        // `PCOUNT`/`GCOUNT` would make `data_extent` size extra bytes, so reject it
+        // up front (on untrusted input) rather than expose mismatched samples.
+        if self.header.get_integer("PCOUNT").unwrap_or(0) != 0
+            || self.header.get_integer("GCOUNT").unwrap_or(1) != 1
+        {
+            return Err(FitsError::ImageHasGroups);
+        }
+        Ok(())
+    }
 }
 
 /// A data unit read from the source: the full block-padded bytes plus the range
@@ -258,17 +284,7 @@ impl<S: Source> FitsReader<S> {
         }
 
         let hdu = self.checked_hdu(index)?;
-        if !matches!(hdu.kind, HduKind::Primary | HduKind::Image) {
-            return Err(FitsError::NotAnImage);
-        }
-        // §4.3: a plain image array has no group structure. A non-conforming
-        // `PCOUNT`/`GCOUNT` would make `data_extent` size extra bytes, so reject it
-        // up front (on untrusted input) rather than expose mismatched samples.
-        if hdu.header.get_integer("PCOUNT").unwrap_or(0) != 0
-            || hdu.header.get_integer("GCOUNT").unwrap_or(1) != 1
-        {
-            return Err(FitsError::ImageHasGroups);
-        }
+        hdu.ensure_plain_image()?;
         let bitpix = hdu.header.bitpix()?;
         let shape = hdu.header.axes()?;
         let scaling = Scaling::from_header(&hdu.header);
@@ -290,6 +306,56 @@ impl<S: Source> FitsReader<S> {
             "image data length must match the axis product"
         );
         Ok(RawImage::raw(shape, bitpix, scaling, bytes))
+    }
+
+    /// Read an image as a borrowed, host-endian [`ImageView`], byte-swapping into the
+    /// caller-owned `scratch` — the fast, low-copy path for a loop that processes each
+    /// image and moves on. Where [`read_image`](FitsReader::read_image)`.decode()`
+    /// allocates a fresh owned buffer per call (page-fault-bound — profiling found
+    /// that dominates a plain typed read), this reuses `scratch`, so a hot loop pays
+    /// the output allocation once and reuses it across reads — even across differing
+    /// `BITPIX`. The caller owns `scratch`, so the reader retains nothing image-sized;
+    /// pass the same `Vec` each call and drop it when the loop ends.
+    ///
+    /// `scratch` is `Vec<u64>` so the swapped samples stay 8-byte aligned for the
+    /// typed views. A `BITPIX = 8` image needs no swap and the view borrows the source
+    /// bytes directly (zero-copy, `scratch` untouched); a compressed image is
+    /// decompressed and copied into `scratch`. The view borrows the reader and
+    /// `scratch`, so handle one image before reading the next. For samples you need to
+    /// keep, use [`RawImage::decode`].
+    pub fn read_image_view<'a>(
+        &'a mut self,
+        index: usize,
+        scratch: &'a mut Vec<u64>,
+    ) -> Result<ImageView<'a>> {
+        // §10.1: a compressed image has no on-disk byte form to borrow — decompress
+        // and copy the host-endian pixels into the caller's scratch, then view that.
+        #[cfg(feature = "compression")]
+        if self.checked_hdu(index)?.kind == HduKind::CompressedImage {
+            let table = self.read_table(index)?;
+            let img = decompress_image(&self.hdus[index].header, &table)?;
+            let bitpix = img.samples.bitpix();
+            let nbytes = copy_samples_into_words(&img.samples, scratch);
+            return Ok(view_words(scratch, bitpix, nbytes));
+        }
+
+        let hdu = self.checked_hdu(index)?;
+        hdu.ensure_plain_image()?;
+        let bitpix = hdu.header.bitpix()?;
+        let data_bytes = hdu.data_bytes as usize;
+        let padded = padded_len(hdu.data_bytes) as usize;
+        let data_offset = hdu.data_offset;
+        // `hdu` (the self.hdus borrow) is unused past here, so the source/scratch
+        // borrows below don't conflict — same staging as `read_image`.
+        let unit = self.source.slice(data_offset, padded, &mut self.scratch)?;
+        let be = &unit[..data_bytes];
+        if bitpix == Bitpix::U8 {
+            // No byte-swap: the on-disk bytes already are the host-endian samples, so
+            // borrow them straight (zero-copy) — `scratch` stays untouched.
+            return Ok(ImageView::U8(be));
+        }
+        swap_into_words(be, bitpix, scratch);
+        Ok(view_words(scratch, bitpix, data_bytes))
     }
 
     /// Read a `BINTABLE` extension and parse its column structure. Decode

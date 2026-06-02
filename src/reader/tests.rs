@@ -374,3 +374,60 @@ fn read_image_exposes_big_endian_bytes_for_multibyte_types() {
     // `decode()` swaps them into the same host-endian samples it borrowed.
     assert_eq!(raw.decode(), ImageData::I16(vec![1, -2, 300]));
 }
+
+#[test]
+fn read_image_view_matches_decode_for_a_plain_image() {
+    let mut f = open("UITfuv2582gc.fits");
+    // The owned decode is the reference; the borrowed view (into a caller scratch)
+    // must equal it.
+    let owned = f.read_image(0).unwrap().decode();
+    let mut scratch = Vec::new();
+    let view = f.read_image_view(0, &mut scratch).unwrap();
+    match (view, &owned) {
+        (ImageView::I16(v), ImageData::I16(o)) => assert_eq!(v, o.as_slice()),
+        (v, o) => panic!("expected matching I16 view/decode, got {v:?} / {o:?}"),
+    }
+}
+
+#[test]
+fn read_image_view_borrows_u8_samples_with_zero_copy() {
+    let image = Image {
+        shape: vec![4],
+        samples: ImageData::U8(vec![10, 20, 30, 40]),
+        scaling: Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    };
+    let buf = write_to_vec(&image);
+    let mut reader = FitsReader::from_bytes(&buf).unwrap();
+    let mut scratch = Vec::new();
+    let ImageView::U8(v) = reader.read_image_view(0, &mut scratch).unwrap() else {
+        panic!("a U8 image must view as U8");
+    };
+    assert_eq!(v, &[10, 20, 30, 40]);
+    // U8 needs no swap, so the view borrows the source buffer directly — the caller's
+    // scratch stays untouched (empty).
+    let base = buf.as_ptr() as usize;
+    assert!(
+        (base..base + buf.len()).contains(&(v.as_ptr() as usize)),
+        "the u8 view must point inside the source buffer (zero-copy)"
+    );
+    assert!(scratch.is_empty(), "a U8 view must not touch the scratch");
+}
+
+#[test]
+#[cfg(feature = "compression")]
+fn read_image_view_matches_decode_for_a_compressed_image() {
+    // A compressed image has no on-disk bytes to borrow; its pixels are decompressed
+    // and copied into the caller scratch, and the view must still equal the decode.
+    let mut f = open("comp_gzip_i16.fits");
+    let owned = f.read_image(1).unwrap().decode();
+    let mut scratch = Vec::new();
+    let view = f.read_image_view(1, &mut scratch).unwrap();
+    match (view, &owned) {
+        (ImageView::I16(v), ImageData::I16(o)) => assert_eq!(v, o.as_slice()),
+        (v, o) => panic!("expected matching I16 view/decode, got {v:?} / {o:?}"),
+    }
+}
