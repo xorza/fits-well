@@ -627,10 +627,8 @@ impl<'a> ColumnReader<'a> {
             });
         }
         Ok(BitColumn {
-            rows: BitRows::Fixed {
-                table: self.table,
-                index: self.index,
-            },
+            table: self.table,
+            index: self.index,
         })
     }
 
@@ -696,14 +694,15 @@ impl<'a> ColumnReader<'a> {
                 });
             }
         };
-        let mut out = Vec::with_capacity(self.table.nrows);
+        // Validate every row's heap span up front (no allocation) so [`BitColumn::row`]
+        // can resolve a row lazily and infallibly — the only place an overrun surfaces.
         for r in 0..self.table.nrows {
             let d = decode_descriptor(self.table.cell(col, r), wide);
-            let cell = self.table.bounded_heap(d.offset, d.nelem.div_ceil(8))?;
-            out.push(&cell.view_bits::<Msb0>()[..d.nelem]);
+            self.table.bounded_heap(d.offset, d.nelem.div_ceil(8))?;
         }
         Ok(BitColumn {
-            rows: BitRows::Jagged(out),
+            table: self.table,
+            index: self.index,
         })
     }
 }
@@ -725,65 +724,61 @@ impl<'a> ColumnReader<'a> {
 /// let bit = flags.get(row, 3);           // Option<bool> (checked)
 /// let set = flags[row].count_ones();     // bitvec ops on the row
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct BitColumn<'a> {
-    rows: BitRows<'a>,
-}
-
-#[derive(Debug, Clone)]
-enum BitRows<'a> {
-    /// Fixed `rX`: uniform `repeat` bits per row, resolved lazily from the strided
-    /// cells (no per-row storage).
-    Fixed { table: &'a BinTable, index: usize },
-    /// Variable-length `PX`/`QX`: pre-resolved jagged row views into the heap.
-    Jagged(Vec<&'a BitSlice<u8, Msb0>>),
+    table: &'a BinTable,
+    index: usize,
 }
 
 impl<'a> BitColumn<'a> {
     /// The number of rows.
     pub fn nrows(&self) -> usize {
-        match &self.rows {
-            BitRows::Fixed { table, .. } => table.nrows,
-            BitRows::Jagged(rows) => rows.len(),
-        }
+        self.table.nrows
     }
 
     /// Whether the column has no rows.
     pub fn is_empty(&self) -> bool {
-        self.nrows() == 0
+        self.table.nrows == 0
     }
 
-    /// Row `r`'s bits as a borrowed [`BitSlice`], MSB-first. Index it (`row[c]`),
-    /// iterate it, or `.to_bitvec()` to own it. Panics if `r >= nrows()`.
+    /// Row `r`'s bits as a borrowed [`BitSlice`], MSB-first — resolved on demand from
+    /// the data unit (no per-row storage). Index it (`row[c]`), iterate it, or
+    /// `.to_bitvec()` to own it. Panics if `r >= nrows()`.
     pub fn row(&self, r: usize) -> &'a BitSlice<u8, Msb0> {
         assert!(
-            r < self.nrows(),
+            r < self.table.nrows,
             "row {r} out of bounds ({} rows)",
-            self.nrows()
+            self.table.nrows
         );
-        match &self.rows {
-            BitRows::Fixed { table, index } => {
-                // Coerce the `&&BinTable` so the row view carries the source lifetime `'a`.
-                let table: &'a BinTable = table;
-                let col = &table.columns[*index];
-                &table.cell(col, r).view_bits::<Msb0>()[..col.tform.repeat]
-            }
-            BitRows::Jagged(rows) => rows[r],
+        let col = &self.table.columns[self.index];
+        if col.tform.kind == TformKind::Bit {
+            // Fixed `rX`: the row's cell, truncated to `repeat` bits.
+            &self.table.cell(col, r).view_bits::<Msb0>()[..col.tform.repeat]
+        } else {
+            // Variable-length `PX`/`QX`: follow the descriptor into the heap. The span
+            // was bounds-checked by `vla_bits`, so the lookup can't fail here.
+            let wide = col.tform.kind == TformKind::ArrayDesc64;
+            let d = decode_descriptor(self.table.cell(col, r), wide);
+            let cell = self
+                .table
+                .bounded_heap(d.offset, d.nelem.div_ceil(8))
+                .expect("vla_bits validated every heap span");
+            &cell.view_bits::<Msb0>()[..d.nelem]
         }
     }
 
     /// The bit at `(row, col)`, MSB-first — `None` if either index is out of range.
     pub fn get(&self, row: usize, col: usize) -> Option<bool> {
-        if row >= self.nrows() {
+        if row >= self.table.nrows {
             return None;
         }
         let bits = self.row(row);
         (col < bits.len()).then(|| bits[col])
     }
 
-    /// Iterate the rows, each a borrowed [`BitSlice`].
+    /// Iterate the rows, each a borrowed [`BitSlice`], resolved on demand.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &'a BitSlice<u8, Msb0>> + '_ {
-        (0..self.nrows()).map(move |r| self.row(r))
+        (0..self.table.nrows).map(move |r| self.row(r))
     }
 }
 
