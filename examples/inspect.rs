@@ -17,9 +17,9 @@ fn main() -> fits_well::Result<()> {
 
     // `open` scans the HDU boundaries from the headers alone — no pixel data read.
     let reader = FitsReader::open(File::open(&path)?)?;
-    println!("{path}: {} HDU(s)", reader.hdus.len());
+    println!("{path}: {} HDU(s)", reader.hdus().len());
 
-    for (i, hdu) in reader.hdus.iter().enumerate() {
+    for (i, hdu) in reader.hdus().iter().enumerate() {
         println!("\nHDU {i}: {:?}", hdu.kind);
 
         // `axes()` returns the NAXISn dimensions (empty for a header-only HDU).

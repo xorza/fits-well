@@ -70,7 +70,8 @@ impl DataUnit {
 #[derive(Debug)]
 pub struct FitsReader<S> {
     source: S,
-    pub hdus: Vec<Hdu>,
+    /// The scanned HDU records; exposed read-only via [`FitsReader::hdus`].
+    pub(crate) hdus: Vec<Hdu>,
     /// Reused staging buffer for the seeking-source reads: a [`StreamSource`] copies
     /// each data unit here before decoding (an in-memory source borrows instead, so
     /// this stays empty). Grows once to the largest unit touched, then holds.
@@ -156,6 +157,14 @@ impl<S: Source> FitsReader<S> {
             index,
             len: self.hdus.len(),
         })
+    }
+
+    /// The scanned HDU records, read-only and in file order — each carrying its
+    /// parsed [`Header`] and [`HduKind`]. Index, iterate, or `.len()` the slice; pick
+    /// an index for a `read_*` method (or use [`FitsReader::image_indices`] /
+    /// [`FitsReader::hdu_index`] to find one).
+    pub fn hdus(&self) -> &[Hdu] {
+        &self.hdus
     }
 
     /// Index of the extension named `name` by its `EXTNAME` keyword (compared
