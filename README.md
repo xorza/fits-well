@@ -67,7 +67,9 @@ let mut reader = FitsReader::open(File::open("out.fits")?)?;
 // `image_indices` lists the image-bearing HDUs, so you pick one rather than
 // hard-coding it. `read_image` borrows the data unit in place (zero-copy).
 let raw = reader.read_image(reader.image_indices()[0])?;
-println!("shape {:?}, {:?}", raw.shape, raw.bitpix);
+// `bitpix` is the stored width; `sample_type()` is the *effective* type, resolving
+// the unsigned / signed-byte BZERO conventions (cfitsio's "equivalent type").
+println!("shape {:?}, {:?}", raw.shape, raw.sample_type());
 
 // `decode()` byte-swaps into an owned host-endian buffer; `physical()` applies
 // BSCALE/BZERO and maps any BLANK value to NaN.
