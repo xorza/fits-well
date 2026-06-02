@@ -31,6 +31,7 @@
 //! typed image decode/encode ([`Image`]), the multi-HDU writer ([`FitsWriter`]),
 //! ASCII/binary tables, WCS, time coordinates, and tiled image+table compression
 //! are implemented and tested — see each module's docs for its design.
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
 mod ascii;
 mod bitpix;
