@@ -55,6 +55,11 @@ mod writer;
 pub use ascii::{AsciiColumn, AsciiKind, AsciiTable};
 pub use bitpix::Bitpix;
 pub use complex::Complex;
+
+/// Re-exported so callers can name the [`bitvec::vec::BitVec`] that
+/// [`ColumnData::bits`]/[`BinTable::read_vla_bit_column`] return without taking
+/// their own (version-skewed) `bitvec` dependency.
+pub use bitvec;
 #[cfg(feature = "compression")]
 pub use compress::CompressOptions;
 pub use data::{Image, ImageData, Scaling, UnsignedView};
