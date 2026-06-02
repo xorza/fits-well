@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use crate::bitpix::Bitpix;
 use crate::block::CARD_SIZE;
+use crate::data::Scaling;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::card::Card;
@@ -12,6 +13,8 @@ use crate::header::card::CardKind;
 use crate::header::card::validate_keyword;
 use crate::header::value::Value;
 use crate::keyword::key;
+use crate::time::{EpochTime, FitsTime, PhaseAxis, TimeBounds};
+use crate::wcs::Wcs;
 
 /// A parsed header unit: an *ordered* list of content cards plus a side index
 /// for O(1) keyword lookup.
@@ -134,6 +137,55 @@ impl Header {
             );
         }
         Ok(axes)
+    }
+
+    /// The physical-value scaling (`BSCALE`/`BZERO`/`BLANK`) declared by this header.
+    pub fn scaling(&self) -> Scaling {
+        Scaling::from_header(self)
+    }
+
+    /// Parse the World Coordinate System (FITS §8) described by this header: the
+    /// primary description (`alt = None`) or an alternate (`alt = Some('A'..='Z')`).
+    pub fn wcs(&self, alt: Option<char>) -> Result<Wcs> {
+        Wcs::from_header(self, alt)
+    }
+
+    /// WCS for a *pixel-list* table (§8.4.2), where the given `columns` hold the
+    /// coordinate axes; `alt` selects the primary (`None`) or an alternate system.
+    pub fn wcs_pixel_list(&self, columns: &[usize], alt: Option<char>) -> Result<Wcs> {
+        Wcs::from_pixel_list(self, columns, alt)
+    }
+
+    /// WCS attached to a single array-valued table `column` (§8.4.1).
+    pub fn wcs_array_column(&self, column: usize, alt: Option<char>) -> Result<Wcs> {
+        Wcs::from_array_column(self, column, alt)
+    }
+
+    /// The time-coordinate frame (FITS §9) parsed from this header — reference
+    /// epoch/scale, units, and any time WCS axis.
+    pub fn time(&self) -> FitsTime {
+        FitsTime::from_header(self)
+    }
+
+    /// The observation Modified Julian Date — `MJD-OBS`, else `DATE-OBS`, else the
+    /// `JEPOCH`/`BEPOCH` epoch, else `None`.
+    pub fn obs_mjd(&self) -> Option<f64> {
+        FitsTime::obs_mjd(self)
+    }
+
+    /// The Julian (`JEPOCH`) or Besselian (`BEPOCH`) epoch keyword, if present.
+    pub fn epoch(&self) -> Option<EpochTime> {
+        FitsTime::epoch(self)
+    }
+
+    /// The observation time bounds (start/end/duration, §9.2.3) from this header.
+    pub fn time_bounds(&self) -> TimeBounds {
+        FitsTime::bounds(self)
+    }
+
+    /// The §9.6 `'PHASE'` axis parameters for WCS `axis` (1-based), if it is one.
+    pub fn phase_axis(&self, axis: usize) -> Option<PhaseAxis> {
+        FitsTime::phase_axis(self, axis)
     }
 
     /// Create an empty header. Build it up with [`Header::set`] and friends.

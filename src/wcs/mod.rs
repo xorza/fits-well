@@ -23,7 +23,8 @@
 //! one still reads, just with that axis not fully decoded.
 //!
 //! Binary-table WCS (Table 22) is supported for both the pixel-list
-//! ([`Wcs::from_pixel_list`]) and vector-cell ([`Wcs::from_array_column`]) forms.
+//! ([`Header::wcs_pixel_list`](crate::Header::wcs_pixel_list)) and vector-cell
+//! ([`Header::wcs_array_column`](crate::Header::wcs_array_column)) forms.
 //!
 //! Pixel↔world yields celestial coordinates in the frame the file declares
 //! (`RADESYS`/`EQUINOX`); converting *between* reference frames is astrometry
@@ -651,8 +652,9 @@ struct Celestial {
 
 impl Wcs {
     /// Parse the primary WCS (`alt = None`) or an alternate description
-    /// (`alt = Some('A'..='Z')`) from `header`.
-    pub fn from_header(header: &Header, alt: Option<char>) -> Result<Wcs> {
+    /// (`alt = Some('A'..='Z')`) from `header`. The public entry point is
+    /// [`Header::wcs`](crate::Header::wcs), which forwards here.
+    pub(crate) fn from_header(header: &Header, alt: Option<char>) -> Result<Wcs> {
         let a = alt.map(|c| c.to_string()).unwrap_or_default();
         let naxis = header
             .get_integer(key!("WCSAXES{a}").as_str())
@@ -836,7 +838,11 @@ impl Wcs {
     /// `TCRVLn`/`TCDLTn`/`TCROTn`/`TCUNIn`, the `TPCn_ka`/`TCDn_ka` matrices, and
     /// `TPVn_ma` parameters — then evaluates it through the same pipeline as image
     /// WCS (so projections, `CUNIT`, and the pole computation all apply).
-    pub fn from_pixel_list(header: &Header, columns: &[usize], alt: Option<char>) -> Result<Wcs> {
+    pub(crate) fn from_pixel_list(
+        header: &Header,
+        columns: &[usize],
+        alt: Option<char>,
+    ) -> Result<Wcs> {
         let a = alt.map(|c| c.to_string()).unwrap_or_default();
         // Translate the column-indexed keywords into an equivalent image header,
         // mapping column number `cN` → axis index `i+1`.
@@ -894,7 +900,11 @@ impl Wcs {
     /// are the array axis and `n` the column — then evaluates it through the same
     /// pipeline as image WCS. The rank is taken from `WCAXna`, else inferred from
     /// the highest axis index present.
-    pub fn from_array_column(header: &Header, column: usize, alt: Option<char>) -> Result<Wcs> {
+    pub(crate) fn from_array_column(
+        header: &Header,
+        column: usize,
+        alt: Option<char>,
+    ) -> Result<Wcs> {
         let a = alt.map(|c| c.to_string()).unwrap_or_default();
         let naxis = header
             .get_integer(key!("WCAX{column}{a}").as_str())

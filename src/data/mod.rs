@@ -279,7 +279,8 @@ pub struct Scaling {
 }
 
 impl Scaling {
-    pub fn from_header(header: &Header) -> Scaling {
+    /// The public entry point is [`Header::scaling`](crate::Header::scaling).
+    pub(crate) fn from_header(header: &Header) -> Scaling {
         Scaling {
             bscale: header.get_real("BSCALE").unwrap_or(1.0),
             bzero: header.get_real("BZERO").unwrap_or(0.0),

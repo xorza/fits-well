@@ -430,7 +430,8 @@ pub struct EpochTime {
 }
 
 /// The global bound / duration / error time keywords (§9.4, §9.5, §9.7), as read
-/// by [`FitsTime::bounds`]. Start/end are absolute MJD; the rest are in `TIMEUNIT`.
+/// by [`Header::time_bounds`](crate::Header::time_bounds). Start/end are absolute
+/// MJD; the rest are in `TIMEUNIT`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TimeBounds {
     /// Observation start: `MJD-BEG`, else `DATE-BEG` → MJD.
@@ -499,8 +500,9 @@ pub struct FitsTime {
 }
 
 impl FitsTime {
-    /// Parse the time frame from a header.
-    pub fn from_header(header: &Header) -> FitsTime {
+    /// Parse the time frame from a header. The public entry point is
+    /// [`Header::time`](crate::Header::time), which forwards here.
+    pub(crate) fn from_header(header: &Header) -> FitsTime {
         let scale = header
             .get_text("TIMESYS")
             .map(TimeScale::parse)
@@ -541,8 +543,9 @@ impl FitsTime {
     }
 
     /// The observation MJD from `MJD-OBS`, else `DATE-OBS`, else `None`. Reads only
-    /// the header (not the parsed frame), so it is an associated function.
-    pub fn obs_mjd(header: &Header) -> Option<f64> {
+    /// the header (not the parsed frame). The public entry point is
+    /// [`Header::obs_mjd`](crate::Header::obs_mjd), which forwards here.
+    pub(crate) fn obs_mjd(header: &Header) -> Option<f64> {
         if let Some(mjd) = header.get_real("MJD-OBS") {
             return Some(mjd);
         }
@@ -559,7 +562,7 @@ impl FitsTime {
     /// The Julian (`JEPOCH`, implied scale TDB) or Besselian (`BEPOCH`, implied
     /// scale ET ≈ TT) epoch keyword as an [`EpochTime`], if present (§9.1.2, §9.5).
     /// `JEPOCH` wins if both appear. Reads only the header, so it takes no `self`.
-    pub fn epoch(header: &Header) -> Option<EpochTime> {
+    pub(crate) fn epoch(header: &Header) -> Option<EpochTime> {
         if let Some(j) = header.get_real("JEPOCH") {
             return Some(EpochTime {
                 mjd: Epoch::Julian(j).to_mjd(),
@@ -577,7 +580,7 @@ impl FitsTime {
     /// start/end are resolved to absolute MJD (`MJD-BEG`/`-END`, else `DATE-BEG`/
     /// `-END`); durations and errors are returned as stored, in `TIMEUNIT`. Reads
     /// only the header, so it takes no `self`.
-    pub fn bounds(header: &Header) -> TimeBounds {
+    pub(crate) fn bounds(header: &Header) -> TimeBounds {
         let mjd_or_date = |mjd: &str, date: &str| {
             header.get_real(mjd).or_else(|| {
                 header
@@ -631,7 +634,7 @@ impl FitsTime {
     /// The §9.6 `'PHASE'` axis parameters (`CZPHSia` zero-phase time, `CPERIia`
     /// period) for WCS axis `axis` (1-based), or `None` if it is not a phase axis.
     /// Reads only the header, so it takes no `self`.
-    pub fn phase_axis(header: &Header, axis: usize) -> Option<PhaseAxis> {
+    pub(crate) fn phase_axis(header: &Header, axis: usize) -> Option<PhaseAxis> {
         let ctype = header.get_text(key!("CTYPE{axis}").as_str())?;
         if time_axis_kind(ctype) != Some(TimeAxisKind::Phase) {
             return None;
