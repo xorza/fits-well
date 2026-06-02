@@ -158,6 +158,24 @@ impl<S: Source> FitsReader<S> {
         })
     }
 
+    /// The indices of every HDU [`FitsReader::read_image`] can read as an image: image
+    /// extensions, tiled-compressed images, and a non-empty primary array (an empty
+    /// `NAXIS = 0` primary is a container, not an image, and is skipped). A FITS file
+    /// may hold any number of images — pick an `index` from this list to pass to
+    /// [`FitsReader::read_image`] without inspecting [`HduKind`] yourself.
+    pub fn image_indices(&self) -> Vec<usize> {
+        self.hdus
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| match h.kind {
+                HduKind::Image | HduKind::CompressedImage => true,
+                HduKind::Primary => h.header.naxis().is_ok_and(|n| n > 0),
+                _ => false,
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Read the raw, still-encoded (big-endian, unscaled) data unit into a fresh,
     /// caller-owned buffer. The returned [`DataUnit`] carries the full block-padded
     /// bytes plus the range of actual data within them, so a decoder consumes
@@ -192,16 +210,14 @@ impl<S: Source> FitsReader<S> {
     /// or [`RawImage::physical`] (scaled). The result borrows the reader, so handle
     /// one image before reading the next.
     pub fn read_image(&mut self, index: usize) -> Result<RawImage<'_>> {
-        // §10.1: a tiled-compressed image is a `BINTABLE` with `ZIMAGE = T`. Route it
-        // through the decompressor so callers see one image API regardless of storage.
+        // §10.1: a tiled-compressed image is classified [`HduKind::CompressedImage`]
+        // (a `ZIMAGE` BINTABLE). Route it through the decompressor so callers see one
+        // image API regardless of storage.
         #[cfg(feature = "compression")]
-        {
-            let hdu = self.checked_hdu(index)?;
-            if hdu.kind == HduKind::BinTable && hdu.header.get_logical("ZIMAGE") == Some(true) {
-                let table = self.read_table(index)?;
-                let img = decompress_image(&self.hdus[index].header, &table)?;
-                return Ok(RawImage::decoded(img.samples, img.shape, img.scaling));
-            }
+        if self.checked_hdu(index)?.kind == HduKind::CompressedImage {
+            let table = self.read_table(index)?;
+            let img = decompress_image(&self.hdus[index].header, &table)?;
+            return Ok(RawImage::decoded(img.samples, img.shape, img.scaling));
         }
 
         let hdu = self.checked_hdu(index)?;
@@ -245,7 +261,12 @@ impl<S: Source> FitsReader<S> {
     pub fn read_table(&mut self, index: usize) -> Result<BinTable> {
         let unit = self.read_data_raw(index)?; // also bounds-checks the index
         let hdu = &self.hdus[index];
-        if hdu.kind != HduKind::BinTable {
+        // Compressed images/tables are structurally BINTABLEs; the compression layer
+        // reads their raw table form through here, so accept those kinds too.
+        if !matches!(
+            hdu.kind,
+            HduKind::BinTable | HduKind::CompressedImage | HduKind::CompressedTable
+        ) {
             return Err(FitsError::NotABinTable);
         }
         BinTable::from_data(&hdu.header, unit.bytes)

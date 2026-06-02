@@ -19,6 +19,15 @@ fn classifies_by_mandatory_keywords() {
         HduKind::classify(&header(&["XTENSION= 'BINTABLE'"])),
         HduKind::BinTable
     );
+    // A BINTABLE flagged ZIMAGE/ZTABLE is classified by its payload, not its container.
+    assert_eq!(
+        HduKind::classify(&header(&["XTENSION= 'BINTABLE'", "ZIMAGE  = T"])),
+        HduKind::CompressedImage
+    );
+    assert_eq!(
+        HduKind::classify(&header(&["XTENSION= 'BINTABLE'", "ZTABLE  = T"])),
+        HduKind::CompressedTable
+    );
     assert_eq!(
         HduKind::classify(&header(&["SIMPLE  = T", "GROUPS  = T"])),
         HduKind::RandomGroups

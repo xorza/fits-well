@@ -30,10 +30,14 @@ fn main() -> fits_well::Result<()> {
     writer.into_inner().sync_all()?;
     println!("wrote {}", path.display());
 
-    // A compressed image is stored in a BINTABLE extension (HDU 1). `read_image`
-    // detects `ZIMAGE` and transparently decompresses it — same call as a plain image.
+    // A compressed image lives in a BINTABLE extension, but `image_indices` reports
+    // it as an image all the same — so you find and read it without knowing it sits
+    // at HDU 1, or that it's compressed at all. `read_image` detects `ZIMAGE` and
+    // decompresses transparently — the same call as for a plain image.
     let mut reader = FitsReader::open(File::open(&path)?)?;
-    let restored = reader.read_image(1)?;
+    let images = reader.image_indices();
+    println!("image HDUs: {images:?}"); // [1] — the compressed image extension
+    let restored = reader.read_image(images[0])?;
     println!(
         "restored {:?}, lossless = {}",
         restored.shape,
