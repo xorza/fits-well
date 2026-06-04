@@ -2,7 +2,6 @@
 name = "fits-well"
 version = "0.1.4"
 edition = "2024"
-rust-version = "1.85"
 description = "A blazing-fast reader and writer for FITS (Flexible Image Transport System) files, targeting the full FITS 4.0 standard."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/xorza/fits"
@@ -38,7 +37,7 @@ memmap2 = { version = "0.9", optional = true }
 ndarray = { version = "0.17", optional = true }
 
 [dev-dependencies]
-criterion = "0.8"
+criterion = "0.7"
 
 [features]
 default = ["parallel", "compression"]
