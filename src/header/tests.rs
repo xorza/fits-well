@@ -1,3 +1,5 @@
+use crate::writer::render_header;
+
 use super::*;
 
 fn header_bytes(lines: &[&str]) -> Vec<u8> {
@@ -161,7 +163,7 @@ fn built_header_round_trips_through_render_and_parse() {
         .set("BITPIX", 8)
         .set("NAXIS", 0)
         .set("OBJECT", "test");
-    let bytes = crate::writer::render_header(&h);
+    let bytes = render_header(&h);
     let back = Header::parse(&bytes).unwrap();
     assert_eq!(back.cards, h.cards);
 }

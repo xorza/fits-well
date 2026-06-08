@@ -1,3 +1,5 @@
+use crate::header::Header;
+
 use super::*;
 
 /// Build an 80-byte card from a left-justified text snippet.
@@ -225,7 +227,7 @@ fn long_string_splits_into_a_continue_chain() {
     let bytes: Vec<u8> = records.iter().flatten().copied().collect();
     let mut with_end = bytes;
     with_end.extend_from_slice(&raw("END"));
-    let h = crate::header::Header::parse(&with_end).unwrap();
+    let h = Header::parse(&with_end).unwrap();
     assert_eq!(h.get_text("LONGSTR"), Some(value.as_str()));
 }
 
@@ -251,7 +253,7 @@ fn long_hierarch_string_splits_into_a_continue_chain() {
     let bytes: Vec<u8> = records.iter().flatten().copied().collect();
     let mut with_end = bytes;
     with_end.extend_from_slice(&raw("END"));
-    let h = crate::header::Header::parse(&with_end).unwrap();
+    let h = Header::parse(&with_end).unwrap();
     assert_eq!(h.get_text("ESO DET CHIP1 LONGNAME"), Some(value.as_str()));
 }
 
