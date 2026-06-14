@@ -157,6 +157,14 @@ fn builder_appends_commentary_cards() {
 }
 
 #[test]
+#[should_panic(expected = "commentary keyword")]
+fn set_rejects_commentary_keywords() {
+    // `COMMENT`/`HISTORY` must go through push_comment/push_history; a value card for
+    // them would render the malformed `COMMENT = '…'`.
+    Header::new().set("COMMENT", "oops");
+}
+
+#[test]
 fn built_header_round_trips_through_render_and_parse() {
     let mut h = Header::new();
     h.set("SIMPLE", true)

@@ -8,6 +8,7 @@
 //! are the low-level escape hatches for callers driving the layout themselves.
 
 use std::io::Write;
+use std::ops::Range;
 
 use num_complex::Complex;
 
@@ -616,38 +617,49 @@ fn check_column(col: &WriteColumn, nrows: usize) -> Result<usize> {
     }
 }
 
-/// Append a whole column cell (a VLA row's array) to the heap, big-endian.
-fn append_be(out: &mut Vec<u8>, cell: &ColumnData) {
-    match cell {
-        ColumnData::Logical(v) => out.extend(v.iter().map(|&b| match b {
+/// Append `data[range]` to `out` as big-endian bytes, for every fixed numeric /
+/// logical / byte / complex kind. `Text` is handled by the two callers (a heap cell
+/// concatenates the strings, a main-table cell space-pads one row to its field
+/// width), so it is a no-op here.
+fn append_cells(out: &mut Vec<u8>, data: &ColumnData, range: Range<usize>) {
+    match data {
+        ColumnData::Logical(v) => out.extend(v[range].iter().map(|&b| match b {
             Some(true) => b'T',
             Some(false) => b'F',
             None => 0, // §7.3.3 null
         })),
-        ColumnData::Bytes(v) => out.extend_from_slice(v),
-        ColumnData::I16(v) => extend_be(out, v, i16::to_be_bytes),
-        ColumnData::I32(v) => extend_be(out, v, i32::to_be_bytes),
-        ColumnData::I64(v) => extend_be(out, v, i64::to_be_bytes),
-        ColumnData::F32(v) => extend_be(out, v, f32::to_be_bytes),
-        ColumnData::F64(v) => extend_be(out, v, f64::to_be_bytes),
+        ColumnData::Bytes(v) => out.extend_from_slice(&v[range]),
+        ColumnData::I16(v) => extend_be(out, &v[range], i16::to_be_bytes),
+        ColumnData::I32(v) => extend_be(out, &v[range], i32::to_be_bytes),
+        ColumnData::I64(v) => extend_be(out, &v[range], i64::to_be_bytes),
+        ColumnData::F32(v) => extend_be(out, &v[range], f32::to_be_bytes),
+        ColumnData::F64(v) => extend_be(out, &v[range], f64::to_be_bytes),
         ColumnData::ComplexF32(v) => {
-            for &Complex { re, im } in v {
+            for &Complex { re, im } in &v[range] {
                 out.extend_from_slice(&re.to_be_bytes());
                 out.extend_from_slice(&im.to_be_bytes());
             }
         }
         ColumnData::ComplexF64(v) => {
-            for &Complex { re, im } in v {
+            for &Complex { re, im } in &v[range] {
                 out.extend_from_slice(&re.to_be_bytes());
                 out.extend_from_slice(&im.to_be_bytes());
             }
         }
+        ColumnData::Text(_) => {} // strings are caller-specific (see the doc)
+    }
+}
+
+/// Append a whole column cell (a VLA row's array) to the heap, big-endian.
+fn append_be(out: &mut Vec<u8>, cell: &ColumnData) {
+    match cell {
         // Character VLAs (`PA`) concatenate the strings' bytes.
         ColumnData::Text(v) => {
             for s in v {
                 out.extend_from_slice(s.as_bytes());
             }
         }
+        _ => append_cells(out, cell, 0..cell.element_count()),
     }
 }
 
@@ -655,33 +667,6 @@ fn pack_cell(out: &mut Vec<u8>, col: &WriteColumn, r: usize) {
     let rep = col.repeat;
     let base = r * rep;
     match &col.data {
-        ColumnData::Logical(v) => {
-            for k in 0..rep {
-                out.push(match v[base + k] {
-                    Some(true) => b'T',
-                    Some(false) => b'F',
-                    None => 0, // §7.3.3 null
-                });
-            }
-        }
-        ColumnData::Bytes(v) => out.extend_from_slice(&v[base..base + rep]),
-        ColumnData::I16(v) => extend_be(out, &v[base..base + rep], i16::to_be_bytes),
-        ColumnData::I32(v) => extend_be(out, &v[base..base + rep], i32::to_be_bytes),
-        ColumnData::I64(v) => extend_be(out, &v[base..base + rep], i64::to_be_bytes),
-        ColumnData::F32(v) => extend_be(out, &v[base..base + rep], f32::to_be_bytes),
-        ColumnData::F64(v) => extend_be(out, &v[base..base + rep], f64::to_be_bytes),
-        ColumnData::ComplexF32(v) => {
-            for &Complex { re, im } in &v[base..base + rep] {
-                out.extend_from_slice(&re.to_be_bytes());
-                out.extend_from_slice(&im.to_be_bytes());
-            }
-        }
-        ColumnData::ComplexF64(v) => {
-            for &Complex { re, im } in &v[base..base + rep] {
-                out.extend_from_slice(&re.to_be_bytes());
-                out.extend_from_slice(&im.to_be_bytes());
-            }
-        }
         // `A`: the row's string, space-padded or truncated to the field width.
         ColumnData::Text(v) => {
             let bytes = v[r].as_bytes();
@@ -689,6 +674,7 @@ fn pack_cell(out: &mut Vec<u8>, col: &WriteColumn, r: usize) {
             out.extend_from_slice(&bytes[..n]);
             out.extend(std::iter::repeat_n(b' ', rep - n));
         }
+        data => append_cells(out, data, base..base + rep),
     }
 }
 

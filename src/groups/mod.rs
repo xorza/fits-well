@@ -45,16 +45,8 @@ impl RandomGroups {
         let axes = header.axes()?;
         // NAXIS1 is the zero sentinel; the per-group array spans the rest.
         let group_shape: Vec<usize> = axes.iter().skip(1).copied().collect();
-        let pcount = match header.get_integer("PCOUNT") {
-            Some(p) if p < 0 => return Err(FitsError::KeywordOutOfRange { name: "PCOUNT" }),
-            Some(p) => p as usize,
-            None => 0,
-        };
-        let gcount = match header.get_integer("GCOUNT") {
-            Some(g) if g < 1 => return Err(FitsError::KeywordOutOfRange { name: "GCOUNT" }),
-            Some(g) => g as usize,
-            None => 1,
-        };
+        let pcount = header.pcount()? as usize;
+        let gcount = header.gcount()? as usize;
 
         let mut parameter_names = Vec::with_capacity(pcount);
         let mut param_scaling = Vec::with_capacity(pcount);

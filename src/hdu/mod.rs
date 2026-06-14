@@ -77,16 +77,8 @@ pub(crate) fn data_extent(header: &Header) -> Result<DataExtent> {
     // value is malformed and must not be silently clamped (it would yield a
     // plausible-but-wrong extent and a bad seek). Absence keeps the primary/IMAGE
     // defaults of 0 and 1.
-    let pcount = match header.get_integer("PCOUNT") {
-        Some(p) if p < 0 => return Err(FitsError::KeywordOutOfRange { name: "PCOUNT" }),
-        Some(p) => p as u64,
-        None => 0,
-    };
-    let gcount = match header.get_integer("GCOUNT") {
-        Some(g) if g < 1 => return Err(FitsError::KeywordOutOfRange { name: "GCOUNT" }),
-        Some(g) => g as u64,
-        None => 1,
-    };
+    let pcount = header.pcount()?;
+    let gcount = header.gcount()?;
     let random_groups = header.get_logical("GROUPS") == Some(true);
 
     // `NAXIS = 0` means no data array at all (the empty product would be 1, not

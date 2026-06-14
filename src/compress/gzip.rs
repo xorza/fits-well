@@ -7,7 +7,7 @@ use crate::bitpix::Bitpix;
 use crate::error::FitsError;
 use crate::error::Result;
 
-use super::be_to_i64_into;
+use super::convert::be_to_i64_into;
 
 /// Default deflate level — the [`crate::CompressOptions`] default and the fixed
 /// level for table-column gzip. Level 1 favors write speed (gzip was the slowest

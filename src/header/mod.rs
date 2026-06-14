@@ -166,6 +166,26 @@ impl Header {
         Ok(axes)
     }
 
+    /// `PCOUNT` (default 0), rejecting a negative value (§4.4.1) — the strict reading
+    /// shared by the data-unit sizing ([`crate::hdu`]) and random-groups decode, where
+    /// a present-but-out-of-range value must error rather than be silently clamped.
+    pub(crate) fn pcount(&self) -> Result<u64> {
+        match self.get_integer("PCOUNT") {
+            Some(p) if p < 0 => Err(FitsError::KeywordOutOfRange { name: "PCOUNT" }),
+            Some(p) => Ok(p as u64),
+            None => Ok(0),
+        }
+    }
+
+    /// `GCOUNT` (default 1), rejecting a value `< 1` (§4.4.1) — see [`Header::pcount`].
+    pub(crate) fn gcount(&self) -> Result<u64> {
+        match self.get_integer("GCOUNT") {
+            Some(g) if g < 1 => Err(FitsError::KeywordOutOfRange { name: "GCOUNT" }),
+            Some(g) => Ok(g as u64),
+            None => Ok(1),
+        }
+    }
+
     /// The physical-value scaling (`BSCALE`/`BZERO`/`BLANK`) declared by this header.
     pub fn scaling(&self) -> Scaling {
         Scaling::from_header(self)
@@ -227,6 +247,13 @@ impl Header {
         assert!(
             validate_keyword(keyword).is_ok(),
             "Header::set: invalid FITS keyword {keyword:?}"
+        );
+        // `COMMENT`/`HISTORY` are commentary keywords, not valued ones; a value card
+        // for them would render as `COMMENT = '…'`. Route them to push_comment/
+        // push_history instead of silently producing a malformed card.
+        assert!(
+            !matches!(keyword, "COMMENT" | "HISTORY"),
+            "Header::set: {keyword:?} is a commentary keyword; use push_comment/push_history"
         );
         let value = value.into();
         if let Some(&i) = self.index.get(keyword) {

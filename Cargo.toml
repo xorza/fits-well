@@ -43,9 +43,10 @@ criterion = "0.8"
 default = ["parallel", "compression"]
 # rayon-backed tile-parallel (de)compression — the codecs are compute-bound and
 # tiles are independent, so this scales near-linearly. Scalar fallback otherwise.
-# (The raw byte-swap / BSCALE-BZERO paths are memory-bound; SIMD is their lever,
-# not threads, so they are deliberately not parallelized.) Implies `compression`,
-# since the codecs are the only thing parallelized.
+# (The raw byte-swap / BSCALE-BZERO paths are memory-bound; profiling found neither
+# threads nor SIMD their lever — buffer reuse is — so they are deliberately left
+# serial and scalar.) Implies `compression`, since the codecs are the only thing
+# parallelized.
 parallel = ["compression", "dep:rayon"]
 # memory-mapped read sources (via memmap2) for zero-copy access over large files:
 # data units decode straight from the mapped pages, skipping the staging copy.
