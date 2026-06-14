@@ -33,7 +33,7 @@ The default build pulls in tiled compression (`flate2`) and tile parallelism
 
 `open` scans every HDU boundary from the headers alone — no pixel data is read.
 
-```rust
+```rust,no_run
 use std::fs::File;
 use fits_well::FitsReader;
 
@@ -53,7 +53,7 @@ for (i, hdu) in reader.hdus().iter().enumerate() {
 
 `shape` is fastest-axis-first (`NAXIS1` first); `samples` is the flat buffer.
 
-```rust
+```rust,no_run
 use std::fs::File;
 use fits_well::{FitsReader, FitsWriter, Image, ImageData, Scaling};
 
@@ -86,7 +86,7 @@ if let ImageData::I16(pixels) = raw.decode() {
 A **tile-compressed** image (FITS §10) reads back through the *same* `read_image`
 call — it detects `ZIMAGE` and decompresses transparently. To write one:
 
-```rust
+```rust,no_run
 # use std::fs::File;
 # use fits_well::{FitsWriter, CompressOptions, Image, ImageData, Scaling};
 # let image = Image { shape: vec![16, 16], samples: ImageData::I16(vec![0; 256]), scaling: Scaling { bscale: 1.0, bzero: 0.0, blank: None } };
@@ -101,7 +101,7 @@ writer.write_compressed_image(&image, "RICE_1", &options)?;
 
 Address a column by index or by its `TTYPEn` name; the handle decodes on demand.
 
-```rust
+```rust,no_run
 use std::fs::File;
 use fits_well::{ColumnData, FitsReader, FitsWriter, WriteColumn};
 
@@ -131,7 +131,7 @@ println!("MAG = {:?}", table.column_by_name("MAG")?.physical()?);
 `Header::wcs` parses the `CTYPEn`/`CRPIXn`/`CRVALn`/… keywords into a transform
 that converts between pixel and sky coordinates in the file's declared frame.
 
-```rust
+```rust,no_run
 use std::fs::File;
 use fits_well::FitsReader;
 
