@@ -221,6 +221,12 @@ fn signed_exponent_without_letter_parses_as_fortran_real() {
     // Explicit E/D forms keep working.
     approx(parse_ascii_float("1.5E2", 1), 150.0);
     approx(parse_ascii_float("1.5D-2", 1), 0.015);
+    // A point-less mantissa with an *explicit* exponent is read literally (strtod),
+    // NOT implied-decimal-scaled: `1E5` is 100000, `15E2` is 1500 — matching
+    // cfitsio/astropy. The implied decimal applies only to point-less `Fw.d` fields.
+    approx(parse_ascii_float("1E5", 3), 100_000.0);
+    approx(parse_ascii_float("15E2", 3), 1500.0);
+    approx(parse_ascii_float("2E-3", 4), 0.002);
 
     assert_eq!(
         split_mantissa_exponent("3.14159-2"),

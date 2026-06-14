@@ -1,5 +1,11 @@
+use super::convert::{be_to_i64_into, i64_to_be, i64_to_be_into};
+use super::geometry::{TileGeometry, TileScratch};
 use super::*;
+use crate::bitpix::Bitpix;
+use crate::data::ImageData;
+use crate::endian::push_pq_descriptor;
 use crate::reader::{FitsReader, StreamReader};
+use crate::table::ColumnData;
 use std::fs::File;
 
 fn open(name: &str) -> StreamReader<File> {
@@ -941,7 +947,7 @@ fn empty_naxis0_image_round_trips() {
 fn compressed_image_descriptor_switches_to_q_for_large_offsets() {
     // §10.1.3: a heap offset beyond the 32-bit P range needs a 64-bit Q descriptor.
     let mut q = Vec::new();
-    super::push_pq_descriptor(&mut q, true, 3, u32::MAX as u64 + 8);
+    push_pq_descriptor(&mut q, true, 3, u32::MAX as u64 + 8);
     assert_eq!(q.len(), 16);
     assert_eq!(i64::from_be_bytes(q[0..8].try_into().unwrap()), 3);
     assert_eq!(
@@ -949,9 +955,21 @@ fn compressed_image_descriptor_switches_to_q_for_large_offsets() {
         u32::MAX as i64 + 8
     );
     let mut p = Vec::new();
-    super::push_pq_descriptor(&mut p, false, 3, 40);
+    push_pq_descriptor(&mut p, false, 3, 40);
     assert_eq!(p.len(), 8);
     assert_eq!(i32::from_be_bytes(p[4..8].try_into().unwrap()), 40);
+}
+
+#[test]
+fn needs_wide_promotes_past_the_32_bit_descriptor_range() {
+    // §10.1.3: a 32-bit `P` descriptor holds a signed 32-bit offset/count, so a heap
+    // or tile element count past `i32::MAX` needs a 64-bit `Q` (the integer encoder
+    // promotes; the fixed-layout float encoder errors). The threshold is shared.
+    let max = i32::MAX as usize;
+    assert!(!needs_wide(0, 0));
+    assert!(!needs_wide(max, max)); // exactly i32::MAX still fits a 32-bit P
+    assert!(needs_wide(max + 1, 0)); // heap offset past the range
+    assert!(needs_wide(0, max + 1)); // a tile's element count past the range
 }
 
 #[test]

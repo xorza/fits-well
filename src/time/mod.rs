@@ -338,7 +338,14 @@ fn tdb_minus_tt(jd_tt: f64) -> f64 {
 /// first entry (10 s) even though pre-1972 UTC used fractional "rubber seconds", so
 /// UTC↔TAI for pre-1972 dates is approximate, not exact.
 fn leap_seconds(mjd: f64) -> f64 {
-    // (year, month, day, TAI−UTC) at each step, 1972 onward.
+    // (year, month, day, TAI−UTC) at each step, 1972 onward. Append the next IERS
+    // Bulletin-C entry here if a future leap second is announced — the table is
+    // current (none since 2017-01-01), and the 2022 CGPM resolution aims to retire
+    // leap seconds by 2035, so it may never need another row. Embedding the table
+    // (rather than taking a caller-supplied one) is a deliberate "no concrete caller
+    // needs authoritative post-table dates yet" choice; if one appears, add an
+    // injection hook alongside the `convert_dut1` ΔUT1 override rather than shipping
+    // live IERS data here.
     const TABLE: &[(i64, i64, i64, f64)] = &[
         (1972, 1, 1, 10.0),
         (1972, 7, 1, 11.0),

@@ -276,18 +276,23 @@ impl AsciiColumn {
     }
 }
 
-/// Parse a Fortran `Fw.d`/`Ew.d`/`Dw.d` field. When the mantissa carries no
-/// explicit `.`, the decimal point is implied `decimals` digits from the right
+/// Parse a Fortran `Fw.d`/`Ew.d`/`Dw.d` field. When a point-less `Fw.d` field has
+/// no exponent, the decimal point is implied `decimals` digits from the right
 /// (§7.2.1, deprecated): the integer mantissa is scaled by `10⁻ᵈ`.
 fn parse_ascii_float(field: &str, decimals: usize) -> Option<f64> {
     let (mantissa, exponent) = match split_mantissa_exponent(field) {
         Some((m, e)) => (m, Some(e)),
         None => (field, None),
     };
-    let mut value: f64 = if mantissa.contains('.') || decimals == 0 {
-        mantissa.parse().ok()?
-    } else {
+    // The §7.2.1 implied decimal point is an `Fw.d` legacy. cfitsio/astropy apply it
+    // only to a bare mantissa and parse an explicit-exponent field literally (strtod),
+    // so `1E5` is 100000, not `1·10⁻ᵈ·10⁵` — match them, since the whole point is to
+    // read the files those tools write.
+    let implied = exponent.is_none() && decimals != 0 && !mantissa.contains('.');
+    let mut value: f64 = if implied {
         mantissa.parse::<f64>().ok()? / 10f64.powi(decimals as i32)
+    } else {
+        mantissa.parse().ok()?
     };
     if let Some(e) = exponent {
         value *= 10f64.powi(e.trim().parse::<i32>().ok()?);
