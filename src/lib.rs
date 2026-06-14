@@ -33,6 +33,15 @@
 //! are implemented and tested — see each module's docs for its design.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+// The README's `rust` snippets are compiled by `cargo test --doc` so they can't
+// silently drift from the API. They are `no_run` (they name on-disk files), so this
+// checks the API surface, not execution. `#[cfg(doctest)]` pulls the file in only
+// while rustdoc collects doctests, so the README's title and badges never surface in
+// the rendered crate docs and the item never exists in a normal build.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
+
 mod ascii;
 mod bitpix;
 mod block;
