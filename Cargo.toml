@@ -15,6 +15,7 @@ exclude = [
     "docs/",
     "tests/",
     ".claude/",
+    "AGENTS.md",
     "CLAUDE.md",
     "todo.txt",
 ]
