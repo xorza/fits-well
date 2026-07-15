@@ -14,6 +14,15 @@ fn parse(text: &str) -> Card {
     Card::parse(&raw(text)).unwrap()
 }
 
+fn render_records(card: &Card) -> Vec<[u8; CARD_SIZE]> {
+    let mut bytes = Vec::new();
+    card.render_into(&mut bytes);
+    bytes
+        .chunks_exact(CARD_SIZE)
+        .map(|record| record.try_into().unwrap())
+        .collect()
+}
+
 #[test]
 fn parses_a_logical_card_with_comment() {
     let card = parse("SIMPLE  =                    T / file does conform");
@@ -214,7 +223,7 @@ fn long_string_splits_into_a_continue_chain() {
         comment: Some("trailing note".into()),
         kind: CardKind::Value,
     };
-    let records = card.render_records();
+    let records = render_records(&card);
     assert!(records.len() >= 2, "expected a CONTINUE chain");
     assert_eq!(&records[0][..8], b"LONGSTR ");
     assert_eq!(records[0][8], b'='); // first record carries the value indicator
@@ -242,7 +251,7 @@ fn long_hierarch_string_splits_into_a_continue_chain() {
         comment: Some("note".into()),
         kind: CardKind::Hierarch,
     };
-    let records = card.render_records();
+    let records = render_records(&card);
     assert!(records.len() >= 2, "expected a CONTINUE chain");
     // First record carries the HIERARCH prefix and a continued ('&) substring.
     let first = std::str::from_utf8(&records[0]).unwrap();
@@ -260,7 +269,7 @@ fn long_hierarch_string_splits_into_a_continue_chain() {
 #[test]
 fn short_string_renders_to_a_single_record() {
     let card = parse("OBJECT  = 'Cygnus X-1'");
-    assert_eq!(card.render_records().len(), 1);
+    assert_eq!(render_records(&card).len(), 1);
 }
 
 #[test]

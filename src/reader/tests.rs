@@ -218,6 +218,11 @@ fn data_unit_larger_than_the_file_is_rejected_not_allocated() {
     );
     let mut r = FitsReader::open(Cursor::new(bytes)).unwrap();
     assert!(matches!(r.read_image(0), Err(FitsError::UnexpectedEof)));
+    assert!(matches!(r.read_table(0), Err(FitsError::NotABinTable)));
+    assert!(matches!(
+        r.read_ascii_table(0),
+        Err(FitsError::NotAnAsciiTable)
+    ));
 }
 
 #[test]

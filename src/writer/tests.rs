@@ -23,6 +23,12 @@ fn identity() -> Scaling {
     }
 }
 
+fn rendered_header(header: &Header) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    render_header(header, &mut bytes).unwrap();
+    bytes
+}
+
 #[test]
 fn writer_rejects_invalid_or_overflowing_layouts() {
     let image = Image {
@@ -113,7 +119,11 @@ fn writes_a_multi_hdu_image_file() {
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     w.write_image(&primary).unwrap();
+    let header_ptr = w.header_scratch.as_ptr();
+    let header_capacity = w.header_scratch.capacity();
     w.write_image(&ext).unwrap(); // second image ⇒ IMAGE extension
+    assert_eq!(w.header_scratch.as_ptr(), header_ptr);
+    assert_eq!(w.header_scratch.capacity(), header_capacity);
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
 
     assert_eq!(r.hdus.len(), 2);
@@ -299,32 +309,31 @@ fn writes_and_reads_back_a_binary_table() {
 #[test]
 fn pad_to_block_rounds_up_with_the_fill_byte() {
     let mut empty = Vec::new();
-    pad_to_block(&mut empty, ZERO_FILL);
+    pad_to_block(&mut empty, ZERO_FILL).unwrap();
     assert_eq!(empty.len(), 0);
 
     let mut one = vec![1u8];
-    pad_to_block(&mut one, ZERO_FILL);
+    pad_to_block(&mut one, ZERO_FILL).unwrap();
     assert_eq!(one.len(), BLOCK_SIZE);
     assert_eq!(one[0], 1);
     assert!(one[1..].iter().all(|&b| b == ZERO_FILL));
 
     let mut exact = vec![7u8; BLOCK_SIZE];
-    pad_to_block(&mut exact, ZERO_FILL);
+    pad_to_block(&mut exact, ZERO_FILL).unwrap();
     assert_eq!(exact.len(), BLOCK_SIZE);
 
     let mut over = vec![0u8; BLOCK_SIZE + 1];
-    pad_to_block(&mut over, ZERO_FILL);
+    pad_to_block(&mut over, ZERO_FILL).unwrap();
     assert_eq!(over.len(), 2 * BLOCK_SIZE);
 }
 
 #[test]
 fn rendered_header_is_block_aligned_and_ends_in_end_then_spaces() {
-    let unit = render_header(&header(&[
+    let unit = rendered_header(&header(&[
         "SIMPLE  =                    T",
         "BITPIX  =                    8",
         "NAXIS   =                    0",
-    ]))
-    .unwrap();
+    ]));
     assert_eq!(unit.len() % BLOCK_SIZE, 0);
     assert_eq!(unit.len(), BLOCK_SIZE); // 4 cards fit in one block
 
@@ -344,7 +353,7 @@ fn header_round_trips_through_render_and_parse() {
         "OBJECT  = 'O''Brien'",
         "COMMENT  a remark",
     ]);
-    let reparsed = Header::parse(&render_header(&original).unwrap()).unwrap();
+    let reparsed = Header::parse(&rendered_header(&original)).unwrap();
     assert_eq!(reparsed.cards, original.cards);
 
     let mut invalid = Header::new();

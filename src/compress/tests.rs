@@ -5,8 +5,9 @@ use crate::compress::*;
 use crate::compress::{encode, gzip};
 use crate::data::ImageData;
 use crate::endian::write_pq_descriptor;
+use crate::keyword::key;
 use crate::reader::{FitsReader, StreamReader};
-use crate::table::{ColumnData, TformKind};
+use crate::table::{BinTable, ColumnData, TformKind};
 use std::fs::File;
 use std::io::Cursor;
 
@@ -719,7 +720,24 @@ fn check_table_roundtrip(algo: &str, rows_per_tile: usize) {
         .unwrap();
     let cbytes = cw.into_inner().into_inner();
     let mut cr = FitsReader::open(Cursor::new(cbytes)).unwrap();
-    let restored = cr.read_compressed_table(1).unwrap();
+    let compressed = cr.read_table(1).unwrap();
+    let mut compressed_header = cr.hdus[1].header.clone();
+    compressed_header.set("ZFORM01", "preserve");
+    let HduParts {
+        header: restored_header,
+        data: restored_data,
+    } = uncompress_table(&compressed_header, &compressed).unwrap();
+    for n in 1..=columns.len() {
+        assert_eq!(restored_header.get(key!("ZFORM{n}").as_str()), None);
+        assert_eq!(restored_header.get(key!("ZCTYP{n}").as_str()), None);
+    }
+    assert_eq!(restored_header.get_text("ZFORM01"), Some("preserve"));
+    for keyword in [
+        "ZTABLE", "ZTILELEN", "ZNAXIS1", "ZNAXIS2", "ZPCOUNT", "ZHEAPPTR",
+    ] {
+        assert_eq!(restored_header.get(keyword), None);
+    }
+    let restored = BinTable::from_data(&restored_header, restored_data).unwrap();
 
     // 3. The uncompressed table must be byte-identical to the original.
     assert_eq!(restored.nrows, orig.nrows, "{algo}/{rows_per_tile} nrows");

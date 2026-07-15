@@ -160,6 +160,16 @@ fn builder_sets_replaces_and_indexes_keywords() {
     assert_eq!(h.cards.len(), 3);
     // The attached comment survives on its card.
     assert_eq!(h.cards[0].comment.as_deref(), Some("conforms"));
+
+    #[cfg(feature = "compression")]
+    {
+        h.set("ZFORM1", "1J").set("ZCTYP1", "GZIP_1").set("KEEP", 7);
+        h.remove_where(|keyword| matches!(keyword, "ZFORM1" | "ZCTYP1"));
+        assert_eq!(h.get("ZFORM1"), None);
+        assert_eq!(h.get("ZCTYP1"), None);
+        assert_eq!(h.get_integer("KEEP"), Some(7));
+        assert_eq!(h.get_integer("BITPIX"), Some(-32));
+    }
 }
 
 #[test]
@@ -191,7 +201,8 @@ fn built_header_round_trips_through_render_and_parse() {
         .set("BITPIX", 8)
         .set("NAXIS", 0)
         .set("OBJECT", "test");
-    let bytes = render_header(&h).unwrap();
+    let mut bytes = Vec::new();
+    render_header(&h, &mut bytes).unwrap();
     let back = Header::parse(&bytes).unwrap();
     assert_eq!(back.cards, h.cards);
 }

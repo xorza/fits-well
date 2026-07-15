@@ -366,8 +366,7 @@ impl<S: Source> FitsReader<S> {
     /// individual columns lazily with [`BinTable::column_by_idx`]. Errors with
     /// [`FitsError::NotABinTable`] for any other HDU kind.
     pub fn read_table(&mut self, index: usize) -> Result<BinTable> {
-        let unit = self.read_data_raw(index)?; // also bounds-checks the index
-        let hdu = &self.hdus[index];
+        let hdu = self.checked_hdu(index)?;
         // Compressed images/tables are structurally BINTABLEs; the compression layer
         // reads their raw table form through here, so accept those kinds too.
         if !matches!(
@@ -376,18 +375,19 @@ impl<S: Source> FitsReader<S> {
         ) {
             return Err(FitsError::NotABinTable);
         }
-        BinTable::from_data(&hdu.header, unit.bytes)
+        let unit = self.read_data_raw(index)?;
+        BinTable::from_data(&self.hdus[index].header, unit.bytes)
     }
 
     /// Read an `TABLE` (ASCII table) extension and parse its column structure.
     /// Errors with [`FitsError::NotAnAsciiTable`] for any other HDU.
     pub fn read_ascii_table(&mut self, index: usize) -> Result<AsciiTable> {
-        let unit = self.read_data_raw(index)?;
-        let hdu = &self.hdus[index];
+        let hdu = self.checked_hdu(index)?;
         if hdu.kind != HduKind::AsciiTable {
             return Err(FitsError::NotAnAsciiTable);
         }
-        AsciiTable::from_data(&hdu.header, unit.bytes)
+        let unit = self.read_data_raw(index)?;
+        AsciiTable::from_data(&self.hdus[index].header, unit.bytes)
     }
 
     /// Read and decode a random-groups primary array (§6). Errors with
