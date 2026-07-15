@@ -23,10 +23,21 @@ const TAN_GOLDEN: &[(f64, f64, f64, f64)] = &[
 #[test]
 fn parses_tan_header() {
     let w = open_wcs("wcs_tan.fits");
-    assert_eq!(w.naxis, 2);
-    assert_eq!(w.ctype, vec!["RA---TAN", "DEC--TAN"]);
-    assert_eq!(w.crval, vec![150.0, 2.5]);
-    assert_eq!(w.crpix, vec![256.0, 256.0]);
+    assert_eq!(
+        w.view().axes,
+        [
+            WcsAxis {
+                ctype: "RA---TAN".to_string(),
+                crval: 150.0,
+                crpix: 256.0,
+            },
+            WcsAxis {
+                ctype: "DEC--TAN".to_string(),
+                crval: 2.5,
+                crpix: 256.0,
+            },
+        ]
+    );
     // Zenithal pole reduces to (CRVAL, LONPOLE=180).
     let c = w.celestial.expect("celestial");
     assert_eq!(
@@ -377,7 +388,7 @@ fn unimplemented_projection_codes_fall_back_to_intermediate() {
         h.set("CRVAL1", 10.0).set("CRVAL2", 20.0);
         h.set("CDELT1", 2.0).set("CDELT2", 3.0);
         let w = Wcs::from_header(&h, None).unwrap();
-        assert_eq!(w.unsupported_axes, vec![0, 1], "{code} axes flagged");
+        assert_eq!(w.view().unsupported_axes, [0, 1], "{code} axes flagged");
         assert!(w.celestial.is_none(), "{code} not decoded as a projection");
         // Intermediate world at pixel (3,4): CRVAL + CDELT·(pixel − CRPIX).
         assert_eq!(w.pixel_to_world(&[3.0, 4.0]), vec![14.0, 29.0], "{code}");
@@ -434,7 +445,7 @@ fn degenerate_conic_without_pv1_falls_back_to_intermediate() {
         h.set("CDELT1", 2.0).set("CDELT2", 3.0);
         // No PV2_1 ⇒ θ_a = 0.
         let w = Wcs::from_header(&h, None).unwrap();
-        assert_eq!(w.unsupported_axes, vec![0, 1], "{code} axes flagged");
+        assert_eq!(w.view().unsupported_axes, [0, 1], "{code} axes flagged");
         assert!(w.celestial.is_none(), "{code} degenerate, not deprojected");
         let out = w.pixel_to_world(&[3.0, 4.0]);
         assert_eq!(out, vec![14.0, 29.0], "{code} intermediate");
@@ -448,7 +459,7 @@ fn degenerate_conic_without_pv1_falls_back_to_intermediate() {
     ok.set("CRVAL1", 10.0).set("CRVAL2", 45.0);
     ok.set("CDELT1", 0.5).set("CDELT2", 0.5).set("PV2_1", 45.0);
     let w = Wcs::from_header(&ok, None).unwrap();
-    assert!(w.unsupported_axes.is_empty() && w.celestial.is_some());
+    assert!(w.view().unsupported_axes.is_empty() && w.celestial.is_some());
 }
 
 #[test]
@@ -472,7 +483,7 @@ fn bonne_with_zero_theta1_equals_sfl() {
     };
     let bon = build("BON", Some(0.0));
     let sfl = build("SFL", None);
-    assert!(bon.celestial.is_some() && bon.unsupported_axes.is_empty());
+    assert!(bon.celestial.is_some() && bon.view().unsupported_axes.is_empty());
     for &(px, py) in &[(20.0, 70.0), (80.0, 30.0), (55.0, 45.0)] {
         let b = bon.pixel_to_world(&[px, py]);
         let s = sfl.pixel_to_world(&[px, py]);
@@ -521,10 +532,23 @@ fn conflicting_linear_keywords_are_rejected() {
         Wcs::from_header(&crota_pc, None),
         Err(FitsError::ConflictingWcsKeywords { .. })
     ));
+    let mut crota_cd = base();
+    crota_cd.set("CD1_1", 1.0).set("CROTA2", 30.0);
+    assert!(matches!(
+        Wcs::from_header(&crota_cd, None),
+        Err(FitsError::ConflictingWcsKeywords { .. })
+    ));
     // A single convention (CD alone) is accepted.
     let mut cd_only = base();
     cd_only.set("CD1_1", 1.0).set("CD2_2", 1.0);
     assert!(Wcs::from_header(&cd_only, None).is_ok());
+
+    let mut malformed = base();
+    malformed.set("CRVAL1", "not numeric");
+    assert!(matches!(
+        Wcs::from_header(&malformed, None),
+        Err(FitsError::TypeMismatch { name, .. }) if name == "CRVAL1"
+    ));
 }
 
 /// Every projection's deprojection inverts its forward projection.
@@ -568,6 +592,20 @@ fn projections_round_trip() {
                 "{proj:?}: ({phi},{theta}) → ({x},{y}) → ({p2},{t2})"
             );
         }
+    }
+}
+
+#[test]
+fn mollweide_poles_are_finite_and_have_canonical_longitude() {
+    for theta in [-90.0, 90.0] {
+        let (x, y) = Projection::Mol.project(73.0, theta, &[]);
+        assert!(x.abs() < 1e-12, "projected pole x = {x}");
+        assert!((y - theta.signum() * SQRT_2 * R2D).abs() < 1e-12);
+
+        let (phi, recovered_theta) = Projection::Mol.deproject(x, y, &[]);
+        assert_eq!(phi, 0.0);
+        assert!((recovered_theta - theta).abs() < 1e-12);
+        assert!(phi.is_finite() && recovered_theta.is_finite());
     }
 }
 
@@ -703,12 +741,12 @@ fn linear_spectral_resolves_nonlinear_falls_back_to_intermediate() {
     };
     // Bare FREQ: fully linear, nothing flagged. At pixel 3: 1.4e9 + 2·1e6 = 1.402e9.
     let lin = build("FREQ");
-    assert!(lin.unsupported_axes.is_empty());
+    assert!(lin.view().unsupported_axes.is_empty());
     assert!((lin.pixel_to_world(&[1.0, 1.0, 3.0])[2] - 1.402e9).abs() < 1.0);
     // FREQ-LOG: axis index 2 flagged; it returns the intermediate value, and the
     // RA/DEC pair still decodes (reference pixel → CRVAL exactly).
     let log = build("FREQ-LOG");
-    assert_eq!(log.unsupported_axes, vec![2]);
+    assert_eq!(log.view().unsupported_axes, [2]);
     assert!((log.pixel_to_world(&[1.0, 1.0, 3.0])[2] - 1.402e9).abs() < 1.0);
     let r = log.pixel_to_world(&[1.0, 1.0, 1.0]);
     assert!(
@@ -749,6 +787,11 @@ fn pixel_list_wcs_matches_the_equivalent_image_wcs() {
             "pixel-list {a:?} vs image {b:?} at ({px},{py})"
         );
     }
+    tab.set("TCRVL2", "not numeric");
+    assert!(matches!(
+        Wcs::from_pixel_list(&tab, &[2, 3], None),
+        Err(FitsError::TypeMismatch { name, .. }) if name == "TCRVL2"
+    ));
 }
 
 #[test]
@@ -775,7 +818,7 @@ fn vector_cell_wcs_matches_the_equivalent_image_wcs() {
     img.set("PC2_1", 0.05).set("PC2_2", 1.0);
     let wi = Wcs::from_header(&img, None).unwrap();
 
-    assert_eq!(wt.naxis, 2); // rank inferred from the iCTYP5 keywords
+    assert_eq!(wt.view().axes.len(), 2); // rank inferred from the iCTYP5 keywords
     assert!(wt.celestial.is_some(), "vector-cell pair must be celestial");
     for &(px, py) in &[(256.0, 256.0), (1.0, 1.0), (300.0, 100.0), (50.0, 400.0)] {
         let a = wt.pixel_to_world(&[px, py]);
@@ -785,6 +828,11 @@ fn vector_cell_wcs_matches_the_equivalent_image_wcs() {
             "vector-cell {a:?} vs image {b:?} at ({px},{py})"
         );
     }
+    tab.set("1CRVL5", "not numeric");
+    assert!(matches!(
+        Wcs::from_array_column(&tab, 5, None),
+        Err(FitsError::TypeMismatch { name, .. }) if name == "1CRVL5"
+    ));
 }
 
 #[test]

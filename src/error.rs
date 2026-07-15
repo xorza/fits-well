@@ -14,6 +14,12 @@ pub enum FitsError {
     InvalidValue {
         card: String,
     },
+    /// A named metadata value was present but could not be interpreted as the type
+    /// required by its FITS role.
+    TypeMismatch {
+        name: String,
+        expected: &'static str,
+    },
     /// Text being written contains bytes outside FITS restricted ASCII (0x20–0x7e).
     InvalidAscii {
         context: &'static str,
@@ -141,6 +147,9 @@ impl fmt::Display for FitsError {
             FitsError::InvalidKeyword { name } => write!(f, "invalid keyword name {name:?}"),
             FitsError::InvalidValue { card } => {
                 write!(f, "cannot parse value field of card {card:?}")
+            }
+            FitsError::TypeMismatch { name, expected } => {
+                write!(f, "value {name} is not a valid {expected}")
             }
             FitsError::InvalidAscii { context } => {
                 write!(
@@ -270,6 +279,14 @@ mod tests {
         assert_eq!(
             FitsError::MissingKeyword { name: "NAXIS" }.to_string(),
             "missing mandatory keyword NAXIS"
+        );
+        assert_eq!(
+            FitsError::TypeMismatch {
+                name: "ZSCALE".to_string(),
+                expected: "f64 column",
+            }
+            .to_string(),
+            "value ZSCALE is not a valid f64 column"
         );
         assert_eq!(
             FitsError::InvalidAscii {

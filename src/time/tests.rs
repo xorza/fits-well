@@ -55,6 +55,7 @@ fn rejects_malformed_datetimes() {
         "2024-13-01",
         "2024-01-32",
         "2024-01-01T25:00:00",
+        "2024-01-01T06:30",
         "x",
     ] {
         assert!(Datetime::parse(s).is_err(), "{s:?} should be rejected");
@@ -63,7 +64,7 @@ fn rejects_malformed_datetimes() {
 
 #[test]
 fn iso_8601_strictness() {
-    // §9.1.1: omitted leading zeros, a `Z` designator, and a <4-digit year are
+    // §9.1.1: omitted leading zeros, a `Z` designator, and wrong-width years are
     // all rejected.
     for bad in [
         "2024-1-01",            // 1-digit month
@@ -72,16 +73,32 @@ fn iso_8601_strictness() {
         "2024-01-01T06:30:5",   // 1-digit second
         "2024-01-01T06:30:00Z", // forbidden Z designator
         "999-01-01",            // 3-digit year
-        "100000000-01-01",      // year past the ±10⁶ overflow guard (still fits i64)
-        "-100000000-01-01",     // same, negative
+        "100000000-01-01",      // over-width unsigned year
+        "-100000000-01-01",     // over-width signed year
     ] {
         assert!(Datetime::parse(bad).is_err(), "{bad:?} should be rejected");
     }
-    // Signed / extended years (with their leading zeros) are accepted.
+    // Signed years retain the same exact four-digit field width.
     assert_eq!(Datetime::parse("-0044-03-15").unwrap().year, -44);
-    assert_eq!(Datetime::parse("+12024-06-01").unwrap().year, 12024);
-    // A large-but-in-bounds extended year stays accepted (the guard is generous).
-    assert_eq!(Datetime::parse("+999999-06-01").unwrap().year, 999999);
+    assert_eq!(Datetime::parse("+2024-06-01").unwrap().year, 2024);
+    for bad in ["12345-06-01", "+12024-06-01", "-00044-03-15"] {
+        assert!(Datetime::parse(bad).is_err(), "{bad:?} should be rejected");
+    }
+}
+
+#[test]
+fn signed_gregorian_years_use_floor_division() {
+    let cases = [
+        ("0000-01-01T00:00:00", 1_721_059.5),
+        ("-0001-01-01T00:00:00", 1_720_694.5),
+        ("-4800-01-01T00:00:00", -32_104.5),
+    ];
+    for (text, expected_jd) in cases {
+        let date = Datetime::parse(text).unwrap();
+        assert_eq!(date.to_jd(), expected_jd, "{text}");
+        let round_trip = Datetime::from_jd(expected_jd);
+        assert_eq!(round_trip, date, "{text}");
+    }
 }
 
 #[test]
@@ -135,7 +152,7 @@ fn gti_intervals_convert_to_absolute_mjd() {
     h.set("MJDREF", 58000.0);
     h.set("TIMEUNIT", "d");
     let t = FitsTime::from_header(&h);
-    let gtis = t.gti_intervals(&[0.0, 2.0], &[1.0, 3.0]);
+    let gtis = t.gti_intervals(&[0.0, 2.0], &[1.0, 3.0]).unwrap();
     assert_eq!(
         gtis,
         vec![
@@ -149,6 +166,14 @@ fn gti_intervals_convert_to_absolute_mjd() {
             },
         ]
     );
+
+    assert!(matches!(
+        t.gti_intervals(&[0.0, 2.0], &[1.0]),
+        Err(FitsError::DataSizeMismatch {
+            expected: 2,
+            got: 1,
+        })
+    ));
 }
 
 #[test]
@@ -240,6 +265,22 @@ fn scale_conversions_match_astropy() {
             "{scale:?}→UTC round-trip: {back}"
         );
     }
+}
+
+#[test]
+fn tai_to_utc_selects_leap_offset_at_the_utc_instant() {
+    let utc_transition = Datetime::parse("2017-01-01T00:00:00").unwrap().to_jd();
+    // A TAI label ten seconds after UTC midnight still represents 23:59:34 UTC,
+    // where TAI−UTC was 36 s. Looking up the leap count at the TAI label would
+    // switch to 37 s six seconds too early.
+    let tai = utc_transition + 10.0 / SEC_PER_DAY;
+    let expected_utc = utc_transition - 26.0 / SEC_PER_DAY;
+    let utc = TimeScale::Tai.convert(tai, TimeScale::Utc);
+    assert!((utc - expected_utc).abs() * SEC_PER_DAY < 1e-5);
+
+    let dut1 = 0.25;
+    let ut1 = TimeScale::Tai.convert_dut1(tai, TimeScale::Ut1, dut1);
+    assert!((ut1 - expected_utc - dut1 / SEC_PER_DAY).abs() * SEC_PER_DAY < 1e-5);
 }
 
 #[test]

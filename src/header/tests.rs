@@ -52,6 +52,26 @@ fn keyword_lookup_returns_first_occurrence() {
 }
 
 #[test]
+fn strict_optional_getters_distinguish_absent_and_mistyped_values() {
+    let h = sample();
+    assert_eq!(h.try_get_logical("SIMPLE").unwrap(), Some(true));
+    assert_eq!(h.try_get_integer("BITPIX").unwrap(), Some(16));
+    assert_eq!(h.try_get_real("BITPIX").unwrap(), Some(16.0));
+    assert_eq!(h.try_get_text("OBJECT").unwrap(), Some("Cygnus X-1"));
+    assert_eq!(h.try_get_real("MISSING").unwrap(), None);
+    assert!(matches!(
+        h.try_get_real("OBJECT"),
+        Err(FitsError::TypeMismatch { name, expected })
+            if name == "OBJECT" && expected == "real"
+    ));
+    assert!(matches!(
+        h.try_get_logical("BITPIX"),
+        Err(FitsError::TypeMismatch { name, expected })
+            if name == "BITPIX" && expected == "logical"
+    ));
+}
+
+#[test]
 fn iter_yields_every_record_in_order_with_duplicates() {
     let h = sample();
     let entries: Vec<_> = h.iter().collect();

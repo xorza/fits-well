@@ -96,8 +96,12 @@ impl AsciiTable {
                 start,
                 width: fmt.width,
                 decimals: fmt.decimals,
-                tscale: header.get_real(key!("TSCAL{n}").as_str()).unwrap_or(1.0),
-                tzero: header.get_real(key!("TZERO{n}").as_str()).unwrap_or(0.0),
+                tscale: header
+                    .try_get_real(key!("TSCAL{n}").as_str())?
+                    .unwrap_or(1.0),
+                tzero: header
+                    .try_get_real(key!("TZERO{n}").as_str())?
+                    .unwrap_or(0.0),
                 null: header
                     .get_text(key!("TNULL{n}").as_str())
                     .map(|s| s.trim().to_string()),

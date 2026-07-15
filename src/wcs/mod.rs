@@ -19,8 +19,9 @@
 //! (wcslib). The unimplemented non-linear transforms — quad-cube `TSC`/`CSC`/`QSC`,
 //! HEALPix `HPX`/`XPH`, and the non-linear spectral algorithms (§8.4) — are not
 //! evaluated: such an axis passes through the linear stage only (its intermediate
-//! world coordinate) and is listed in [`Wcs::unsupported_axes`], so a file using
-//! one still reads, just with that axis not fully decoded.
+//! world coordinate) and is listed in [`WcsView::unsupported_axes`], so a file using
+//! one still reads, just with that axis not fully decoded. These source values and
+//! flags are available through the immutable [`Wcs::view`] snapshot.
 //!
 //! Binary-table WCS (Table 22) is supported for both the pixel-list
 //! ([`Header::wcs_pixel_list`](crate::Header::wcs_pixel_list)) and vector-cell
@@ -282,7 +283,11 @@ impl Projection {
                     let s2 = SQRT_2;
                     let gamma = (y / (s2 * R2D)).clamp(-1.0, 1.0).asin();
                     let theta = ((2.0 * gamma + (2.0 * gamma).sin()) / PI).asin() * R2D;
-                    let phi = PI * x / (2.0 * s2 * gamma.cos());
+                    let phi = if gamma.cos().abs() < 1e-12 {
+                        0.0
+                    } else {
+                        PI * x / (2.0 * s2 * gamma.cos())
+                    };
                     (phi, theta)
                 }
                 // CYP inverse: φ = x/λ; θ from η = (y/(180/π))/(μ+λ).
@@ -405,14 +410,18 @@ impl Projection {
                     // Solve 2γ + sin2γ = π·sinθ for γ (Newton).
                     let s2 = SQRT_2;
                     let target = PI * t.sin();
-                    let mut g = t; // initial guess
-                    for _ in 0..100 {
-                        let f = 2.0 * g + (2.0 * g).sin() - target;
-                        let d = 2.0 + 2.0 * (2.0 * g).cos();
-                        let step = f / d;
-                        g -= step;
-                        if step.abs() < 1e-14 {
-                            break;
+                    let mut g = t;
+                    if (t.abs() - FRAC_PI_2).abs() < 1e-12 {
+                        g = t.signum() * FRAC_PI_2;
+                    } else {
+                        for _ in 0..100 {
+                            let f = 2.0 * g + (2.0 * g).sin() - target;
+                            let d = 2.0 + 2.0 * (2.0 * g).cos();
+                            let step = f / d;
+                            g -= step;
+                            if step.abs() < 1e-14 {
+                                break;
+                            }
                         }
                     }
                     ((2.0 * s2 / PI) * phi * g.cos(), s2 * R2D * g.sin())
@@ -621,17 +630,29 @@ fn zpn_zeta(u: f64, pv: &[f64]) -> f64 {
     z
 }
 
+/// Immutable source metadata for one WCS axis.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WcsAxis {
+    /// The `CTYPEi` string.
+    pub ctype: String,
+    /// `CRVALi` — world coordinate at the reference pixel.
+    pub crval: f64,
+    /// `CRPIXi` — reference pixel (1-based).
+    pub crpix: f64,
+}
+
+/// A read-only snapshot of a parsed WCS's source metadata and support status.
+#[derive(Debug, Clone, Copy)]
+pub struct WcsView<'a> {
+    pub axes: &'a [WcsAxis],
+    /// Zero-based axes whose non-linear transform is not evaluated.
+    pub unsupported_axes: &'a [usize],
+}
+
 /// A parsed world coordinate system for one (optionally alternate) axis set.
 #[derive(Debug, Clone)]
 pub struct Wcs {
-    /// Number of WCS axes.
-    pub naxis: usize,
-    /// `CTYPEi` strings.
-    pub ctype: Vec<String>,
-    /// `CRVALi` — world coordinate at the reference pixel.
-    pub crval: Vec<f64>,
-    /// `CRPIXi` — reference pixel (1-based).
-    pub crpix: Vec<f64>,
+    axes: Vec<WcsAxis>,
     /// Linear transform `A` mapping `(pixel − CRPIX)` to intermediate world
     /// coordinates: `PCi_j × CDELTi`, or `CDi_j` directly. Row-major `naxis²`.
     matrix: Vec<f64>,
@@ -644,7 +665,7 @@ pub struct Wcs {
     /// projection (quad-cube/HEALPix) or a non-linear spectral algorithm (§8.3/§8.4).
     /// [`Wcs::pixel_to_world`] returns their *intermediate* world coordinate (the
     /// linear stage only), not a fully decoded celestial/spectral value.
-    pub unsupported_axes: Vec<usize>,
+    unsupported_axes: Vec<usize>,
 }
 
 /// The rotation from native to celestial coordinates: the celestial pole
@@ -673,11 +694,12 @@ impl Wcs {
     /// [`Header::wcs`](crate::Header::wcs), which forwards here.
     pub(crate) fn from_header(header: &Header, alt: Option<char>) -> Result<Wcs> {
         let a = alt.map(|c| c.to_string()).unwrap_or_default();
-        let naxis = header
-            .get_integer(key!("WCSAXES{a}").as_str())
-            .or_else(|| header.get_integer("NAXIS"))
-            .ok_or(FitsError::MissingKeyword { name: "WCSAXES" })?
-            .max(0) as usize;
+        let naxis = match header.try_get_integer(key!("WCSAXES{a}").as_str())? {
+            Some(naxis) => Some(naxis),
+            None => header.try_get_integer("NAXIS")?,
+        }
+        .ok_or(FitsError::MissingKeyword { name: "WCSAXES" })?
+        .max(0) as usize;
         if naxis == 0 {
             return Err(FitsError::InvalidValue {
                 card: "WCSAXES = 0".to_string(),
@@ -693,22 +715,20 @@ impl Wcs {
         let ctype: Vec<String> = (1..=naxis)
             .map(|i| {
                 header
-                    .get_text(key!("CTYPE{i}{a}").as_str())
-                    .unwrap_or("")
-                    .to_string()
+                    .try_get_text(key!("CTYPE{i}{a}").as_str())
+                    .map(|value| value.unwrap_or("").to_string())
             })
-            .collect();
-        let mut crval = axis_vec(header, "CRVAL", &a, naxis, 0.0);
-        let crpix = axis_vec(header, "CRPIX", &a, naxis, 0.0);
-        let cdelt = axis_vec(header, "CDELT", &a, naxis, 1.0);
+            .collect::<Result<_>>()?;
+        let mut crval = axis_vec(header, "CRVAL", &a, naxis, 0.0)?;
+        let crpix = axis_vec(header, "CRPIX", &a, naxis, 0.0)?;
+        let cdelt = axis_vec(header, "CDELT", &a, naxis, 1.0)?;
         let cunit: Vec<String> = (1..=naxis)
             .map(|i| {
                 header
-                    .get_text(key!("CUNIT{i}{a}").as_str())
-                    .unwrap_or("")
-                    .to_string()
+                    .try_get_text(key!("CUNIT{i}{a}").as_str())
+                    .map(|value| value.unwrap_or("").to_string())
             })
-            .collect();
+            .collect::<Result<_>>()?;
         let celestial_axes = find_celestial(&ctype)?;
 
         // Axes whose non-linear transform this library doesn't evaluate — an
@@ -723,20 +743,19 @@ impl Wcs {
         // Build the linear transform A. Precedence: CD, then PC×CDELT, then the
         // legacy CROTA rotation, then a bare CDELT diagonal.
         let has_cd = (1..=naxis)
-            .any(|i| (1..=naxis).any(|j| header.get_real(key!("CD{i}_{j}{a}").as_str()).is_some()));
+            .any(|i| (1..=naxis).any(|j| header.get(key!("CD{i}_{j}{a}").as_str()).is_some()));
         let has_pc = (1..=naxis)
-            .any(|i| (1..=naxis).any(|j| header.get_real(key!("PC{i}_{j}{a}").as_str()).is_some()));
-        let has_crota =
-            (1..=naxis).any(|i| header.get_real(key!("CROTA{i}{a}").as_str()).is_some());
+            .any(|i| (1..=naxis).any(|j| header.get(key!("PC{i}_{j}{a}").as_str()).is_some()));
+        let has_crota = (1..=naxis).any(|i| header.get(key!("CROTA{i}{a}").as_str()).is_some());
         // §8: the PC/CDELT, CD, and legacy CROTA conventions are mutually exclusive.
-        if has_cd && has_pc {
+        if [has_cd, has_pc, has_crota]
+            .into_iter()
+            .filter(|&present| present)
+            .count()
+            > 1
+        {
             return Err(FitsError::ConflictingWcsKeywords {
-                detail: "PC and CD both present",
-            });
-        }
-        if has_pc && has_crota {
-            return Err(FitsError::ConflictingWcsKeywords {
-                detail: "CROTA and PC both present",
+                detail: "PC, CD, and CROTA conventions overlap",
             });
         }
         let mut matrix = vec![0.0; naxis * naxis];
@@ -744,7 +763,7 @@ impl Wcs {
             for i in 0..naxis {
                 for j in 0..naxis {
                     matrix[i * naxis + j] = header
-                        .get_real(key!("CD{}_{}{a}", i + 1, j + 1).as_str())
+                        .try_get_real(key!("CD{}_{}{a}", i + 1, j + 1).as_str())?
                         .unwrap_or(0.0);
                 }
             }
@@ -752,7 +771,7 @@ impl Wcs {
             for i in 0..naxis {
                 for j in 0..naxis {
                     let pc = header
-                        .get_real(key!("PC{}_{}{a}", i + 1, j + 1).as_str())
+                        .try_get_real(key!("PC{}_{}{a}", i + 1, j + 1).as_str())?
                         .unwrap_or(if i == j { 1.0 } else { 0.0 });
                     matrix[i * naxis + j] = cdelt[i] * pc;
                 }
@@ -760,10 +779,12 @@ impl Wcs {
             // Legacy CROTA: rotate the celestial 2-axis sub-block (only when no PC
             // was given, per the convention that CROTA and PC are exclusive).
             if !has_pc && let Some((lng, lat, _)) = celestial_axes {
-                let rho = header
-                    .get_real(key!("CROTA{}{a}", lat + 1).as_str())
-                    .or_else(|| header.get_real(key!("CROTA{}{a}", lng + 1).as_str()))
-                    .unwrap_or(0.0);
+                let rho = first_real(
+                    header,
+                    key!("CROTA{}{a}", lat + 1).as_str(),
+                    key!("CROTA{}{a}", lng + 1).as_str(),
+                )?
+                .unwrap_or(0.0);
                 if rho != 0.0 {
                     let (c, s) = ((rho * D2R).cos(), (rho * D2R).sin());
                     matrix[lng * naxis + lng] = cdelt[lng] * c;
@@ -795,10 +816,10 @@ impl Wcs {
                 let pv: Vec<f64> = (0..=20)
                     .map(|m| {
                         header
-                            .get_real(key!("PV{}_{m}{a}", lat + 1).as_str())
-                            .unwrap_or(0.0)
+                            .try_get_real(key!("PV{}_{m}{a}", lat + 1).as_str())
+                            .map(|value| value.unwrap_or(0.0))
                     })
-                    .collect();
+                    .collect::<Result<_>>()?;
                 // A conic's mid-latitude θ_a = PVi_1 is mandatory and must be
                 // non-zero; θ_a = 0 (absent, or explicitly 0) is a degenerate cone
                 // (`1/tan 0`). Treat it like an unimplemented projection — flag the
@@ -813,23 +834,31 @@ impl Wcs {
                     // Fiducial point: projection default, overridable by PVi_1a/
                     // PVi_2a on the longitude axis (§8.3).
                     let (mut phi0, mut theta0) = proj.reference_point(&pv);
-                    if let Some(v) = header.get_real(key!("PV{}_1{a}", lng + 1).as_str()) {
+                    if let Some(v) = header.try_get_real(key!("PV{}_1{a}", lng + 1).as_str())? {
                         phi0 = v;
                     }
-                    if let Some(v) = header.get_real(key!("PV{}_2{a}", lng + 1).as_str()) {
+                    if let Some(v) = header.try_get_real(key!("PV{}_2{a}", lng + 1).as_str())? {
                         theta0 = v;
                     }
                     let (alpha0, delta0) = (crval[lng], crval[lat]);
                     // LONPOLE (= LONPOLEa or PVi_3a): default φ0 if δ0 ≥ θ0, else φ0 + 180°.
-                    let phip = header
-                        .get_real(key!("LONPOLE{a}").as_str())
-                        .or_else(|| header.get_real(key!("PV{}_3{a}", lng + 1).as_str()))
-                        .unwrap_or(if delta0 >= theta0 { phi0 } else { phi0 + 180.0 });
+                    let phip = first_real(
+                        header,
+                        key!("LONPOLE{a}").as_str(),
+                        key!("PV{}_3{a}", lng + 1).as_str(),
+                    )?
+                    .unwrap_or(if delta0 >= theta0 {
+                        phi0
+                    } else {
+                        phi0 + 180.0
+                    });
                     // LATPOLE (= LATPOLEa or PVi_4a): default 90°.
-                    let thetap = header
-                        .get_real(key!("LATPOLE{a}").as_str())
-                        .or_else(|| header.get_real(key!("PV{}_4{a}", lng + 1).as_str()))
-                        .unwrap_or(90.0);
+                    let thetap = first_real(
+                        header,
+                        key!("LATPOLE{a}").as_str(),
+                        key!("PV{}_4{a}", lng + 1).as_str(),
+                    )?
+                    .unwrap_or(90.0);
                     let pole = compute_pole(phi0, theta0, alpha0, delta0, phip, thetap);
                     Some(Celestial {
                         lng,
@@ -843,16 +872,31 @@ impl Wcs {
             None => None,
         };
 
+        let axes = ctype
+            .into_iter()
+            .enumerate()
+            .map(|(i, ctype)| WcsAxis {
+                ctype,
+                crval: crval[i],
+                crpix: crpix[i],
+            })
+            .collect();
         Ok(Wcs {
-            naxis,
-            ctype,
-            crval,
-            crpix,
+            axes,
             matrix,
             inverse,
             celestial,
             unsupported_axes,
         })
+    }
+
+    /// Borrow the parsed axis metadata and unsupported-axis flags without exposing
+    /// the transform's invariant-bearing owned state for mutation.
+    pub fn view(&self) -> WcsView<'_> {
+        WcsView {
+            axes: &self.axes,
+            unsupported_axes: &self.unsupported_axes,
+        }
     }
 
     /// Build a WCS for a binary-table **pixel list** (event list, §8.5, Table 22):
@@ -873,7 +917,7 @@ impl Wcs {
         h.set("WCSAXES", columns.len() as i64);
         for (i, &c) in columns.iter().enumerate() {
             let ax = i + 1;
-            if let Some(t) = header.get_text(key!("TCTYP{c}{a}").as_str()) {
+            if let Some(t) = header.try_get_text(key!("TCTYP{c}{a}").as_str())? {
                 h.set(key!("CTYPE{ax}").as_str(), t);
             }
             for (root, dst) in [
@@ -882,15 +926,15 @@ impl Wcs {
                 ("TCDLT", "CDELT"),
                 ("TCROT", "CROTA"),
             ] {
-                if let Some(v) = header.get_real(key!("{root}{c}{a}").as_str()) {
+                if let Some(v) = header.try_get_real(key!("{root}{c}{a}").as_str())? {
                     h.set(key!("{dst}{ax}").as_str(), v);
                 }
             }
-            if let Some(t) = header.get_text(key!("TCUNI{c}{a}").as_str()) {
+            if let Some(t) = header.try_get_text(key!("TCUNI{c}{a}").as_str())? {
                 h.set(key!("CUNIT{ax}").as_str(), t);
             }
             for m in 0..=20 {
-                if let Some(v) = header.get_real(key!("TPV{c}_{m}{a}").as_str()) {
+                if let Some(v) = header.try_get_real(key!("TPV{c}_{m}{a}").as_str())? {
                     h.set(key!("PV{ax}_{m}").as_str(), v);
                 }
             }
@@ -898,18 +942,18 @@ impl Wcs {
         // Linear-transform matrices: TPCn_ka / TCDn_ka, indexed by column pair.
         for (i, &ci) in columns.iter().enumerate() {
             for (j, &cj) in columns.iter().enumerate() {
-                if let Some(v) = header.get_real(key!("TPC{ci}_{cj}{a}").as_str()) {
+                if let Some(v) = header.try_get_real(key!("TPC{ci}_{cj}{a}").as_str())? {
                     h.set(key!("PC{}_{}", i + 1, j + 1).as_str(), v);
                 }
-                if let Some(v) = header.get_real(key!("TCD{ci}_{cj}{a}").as_str()) {
+                if let Some(v) = header.try_get_real(key!("TCD{ci}_{cj}{a}").as_str())? {
                     h.set(key!("CD{}_{}", i + 1, j + 1).as_str(), v);
                 }
             }
         }
-        if let Some(v) = header.get_real(key!("LONP{a}").as_str()) {
+        if let Some(v) = header.try_get_real(key!("LONP{a}").as_str())? {
             h.set("LONPOLE", v);
         }
-        if let Some(v) = header.get_real(key!("LATP{a}").as_str()) {
+        if let Some(v) = header.try_get_real(key!("LATP{a}").as_str())? {
             h.set("LATPOLE", v);
         }
         Wcs::from_header(&h, None)
@@ -930,21 +974,17 @@ impl Wcs {
     ) -> Result<Wcs> {
         let a = alt.map(|c| c.to_string()).unwrap_or_default();
         let naxis = header
-            .get_integer(key!("WCAX{column}{a}").as_str())
+            .try_get_integer(key!("WCAX{column}{a}").as_str())?
             .map(|v| v.max(0) as usize)
             .filter(|&n| n > 0)
             .unwrap_or_else(|| {
                 (1..=99)
                     .rev()
                     .find(|&i| {
-                        header
-                            .get_text(key!("{i}CTYP{column}{a}").as_str())
-                            .is_some()
-                            || ["CRVL", "CDLT", "CRPX"].iter().any(|r| {
-                                header
-                                    .get_real(key!("{i}{r}{column}{a}").as_str())
-                                    .is_some()
-                            })
+                        header.get(key!("{i}CTYP{column}{a}").as_str()).is_some()
+                            || ["CRVL", "CDLT", "CRPX"]
+                                .iter()
+                                .any(|r| header.get(key!("{i}{r}{column}{a}").as_str()).is_some())
                     })
                     .unwrap_or(0)
             });
@@ -959,10 +999,10 @@ impl Wcs {
         let mut h = Header::new();
         h.set("WCSAXES", naxis as i64);
         for ax in 1..=naxis {
-            if let Some(t) = header.get_text(key!("{ax}CTYP{column}{a}").as_str()) {
+            if let Some(t) = header.try_get_text(key!("{ax}CTYP{column}{a}").as_str())? {
                 h.set(key!("CTYPE{ax}").as_str(), t);
             }
-            if let Some(t) = header.get_text(key!("{ax}CUNI{column}{a}").as_str()) {
+            if let Some(t) = header.try_get_text(key!("{ax}CUNI{column}{a}").as_str())? {
                 h.set(key!("CUNIT{ax}").as_str(), t);
             }
             for (root, dst) in [
@@ -971,16 +1011,17 @@ impl Wcs {
                 ("CDLT", "CDELT"),
                 ("CROT", "CROTA"),
             ] {
-                if let Some(v) = header.get_real(key!("{ax}{root}{column}{a}").as_str()) {
+                if let Some(v) = header.try_get_real(key!("{ax}{root}{column}{a}").as_str())? {
                     h.set(key!("{dst}{ax}").as_str(), v);
                 }
             }
             // PVi_m arrives as `iPVn_ma`, or the abbreviated `iVn_ma`.
             for m in 0..=20 {
-                if let Some(v) = header
-                    .get_real(key!("{ax}PV{column}_{m}{a}").as_str())
-                    .or_else(|| header.get_real(key!("{ax}V{column}_{m}{a}").as_str()))
-                {
+                if let Some(v) = first_real(
+                    header,
+                    key!("{ax}PV{column}_{m}{a}").as_str(),
+                    key!("{ax}V{column}_{m}{a}").as_str(),
+                )? {
                     h.set(key!("PV{ax}_{m}").as_str(), v);
                 }
             }
@@ -988,10 +1029,10 @@ impl Wcs {
         // Linear-transform matrices: `ijPCn` / `ijCDn`, indexed by axis pair.
         for i in 1..=naxis {
             for j in 1..=naxis {
-                if let Some(v) = header.get_real(key!("{i}{j}PC{column}{a}").as_str()) {
+                if let Some(v) = header.try_get_real(key!("{i}{j}PC{column}{a}").as_str())? {
                     h.set(key!("PC{i}_{j}").as_str(), v);
                 }
-                if let Some(v) = header.get_real(key!("{i}{j}CD{column}{a}").as_str()) {
+                if let Some(v) = header.try_get_real(key!("{i}{j}CD{column}{a}").as_str())? {
                     h.set(key!("CD{i}_{j}").as_str(), v);
                 }
             }
@@ -1003,18 +1044,18 @@ impl Wcs {
     /// `(α, δ)` in degrees; other axes return `CRVAL + ` the linear value.
     ///
     /// # Panics
-    /// If `pixel.len() != self.naxis`. The coordinate count is a structural
-    /// precondition (you know the WCS rank from [`Wcs::naxis`]), so a mismatch is a
-    /// caller bug, not runtime data — hence an assert rather than a `Result`.
+    /// If `pixel.len() != self.view().axes.len()`. The coordinate count is a
+    /// structural precondition, so a mismatch is a caller bug, not runtime data.
     pub fn pixel_to_world(&self, pixel: &[f64]) -> Vec<f64> {
-        assert_eq!(pixel.len(), self.naxis, "pixel coordinate count");
+        let naxis = self.axes.len();
+        assert_eq!(pixel.len(), naxis, "pixel coordinate count");
         // Offset, then apply the linear transform → intermediate world coords.
-        let offset: Vec<f64> = (0..self.naxis).map(|i| pixel[i] - self.crpix[i]).collect();
-        let inter = matvec(&self.matrix, &offset, self.naxis);
+        let offset: Vec<f64> = (0..naxis).map(|i| pixel[i] - self.axes[i].crpix).collect();
+        let inter = matvec(&self.matrix, &offset, naxis);
 
-        let mut world = vec![0.0; self.naxis];
-        for i in 0..self.naxis {
-            world[i] = self.crval[i] + inter[i];
+        let mut world = vec![0.0; naxis];
+        for i in 0..naxis {
+            world[i] = self.axes[i].crval + inter[i];
         }
         if let Some(c) = &self.celestial {
             let (phi, theta) = c.proj.deproject(inter[c.lng], inter[c.lat], &c.pv);
@@ -1029,14 +1070,14 @@ impl Wcs {
     /// [`Wcs::pixel_to_world`]).
     ///
     /// # Panics
-    /// If `world.len() != self.naxis` (see [`Wcs::pixel_to_world`] — the count is a
-    /// caller-controlled precondition, not runtime data).
+    /// If `world.len() != self.view().axes.len()` (see [`Wcs::pixel_to_world`]).
     pub fn world_to_pixel(&self, world: &[f64]) -> Vec<f64> {
-        assert_eq!(world.len(), self.naxis, "world coordinate count");
+        let naxis = self.axes.len();
+        assert_eq!(world.len(), naxis, "world coordinate count");
         // Recover the intermediate world coordinates.
-        let mut inter = vec![0.0; self.naxis];
-        for i in 0..self.naxis {
-            inter[i] = world[i] - self.crval[i];
+        let mut inter = vec![0.0; naxis];
+        for i in 0..naxis {
+            inter[i] = world[i] - self.axes[i].crval;
         }
         if let Some(c) = &self.celestial {
             let (phi, theta) = celestial_to_native(c.pole, world[c.lng], world[c.lat]);
@@ -1045,8 +1086,8 @@ impl Wcs {
             inter[c.lat] = y;
         }
         // Invert the linear transform, then add back CRPIX.
-        let offset = matvec(&self.inverse, &inter, self.naxis);
-        (0..self.naxis).map(|i| offset[i] + self.crpix[i]).collect()
+        let offset = matvec(&self.inverse, &inter, naxis);
+        (0..naxis).map(|i| offset[i] + self.axes[i].crpix).collect()
     }
 }
 
@@ -1229,14 +1270,27 @@ fn compute_pole(phi0: f64, theta0: f64, a0: f64, d0: f64, phip: f64, thetap: f64
 
 /// Read `PREFIX1..PREFIXn` (with alternate suffix) into a vector, defaulting
 /// missing entries.
-fn axis_vec(header: &Header, prefix: &str, alt: &str, naxis: usize, default: f64) -> Vec<f64> {
+fn axis_vec(
+    header: &Header,
+    prefix: &str,
+    alt: &str,
+    naxis: usize,
+    default: f64,
+) -> Result<Vec<f64>> {
     (1..=naxis)
         .map(|i| {
             header
-                .get_real(key!("{prefix}{i}{alt}").as_str())
-                .unwrap_or(default)
+                .try_get_real(key!("{prefix}{i}{alt}").as_str())
+                .map(|value| value.unwrap_or(default))
         })
         .collect()
+}
+
+fn first_real(header: &Header, first: &str, second: &str) -> Result<Option<f64>> {
+    match header.try_get_real(first)? {
+        Some(value) => Ok(Some(value)),
+        None => header.try_get_real(second),
+    }
 }
 
 /// Multiply the row-major `n×n` matrix `m` by vector `v`.
