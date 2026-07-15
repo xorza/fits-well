@@ -251,7 +251,11 @@ fn decode_image_into(
         params,
     };
     if is_float {
-        let decode = |t: usize, s: &TileScratch, out: &mut Vec<f64>, ints: &mut Vec<i64>| {
+        let decode = |t: usize,
+                      s: &TileScratch,
+                      out: &mut Vec<f64>,
+                      ints: &mut Vec<i64>,
+                      codecs: &mut CodecScratch| {
             let cols = TileColumns::read(t, primary, gzip_fallback, uncompressed)?;
             let dq = Dequant {
                 scale: column_at(&zscale, t).unwrap_or(1.0),
@@ -260,7 +264,7 @@ fn decode_image_into(
                 irow: t as i64 + zdither0,
                 zblank: column_at(&zblank_column, t).or(zblank_keyword),
             };
-            decode_float_tile_into(&ctx, cols, s.nelem(), dq, out, ints)
+            decode_float_tile_into(&ctx, cols, s.nelem(), dq, out, ints, codecs)
         };
         match output {
             DecodeBuffer::F32(out) => {
@@ -272,9 +276,13 @@ fn decode_image_into(
             _ => unreachable!("a float ZBITPIX yields a float sample buffer"),
         }
     } else {
-        let decode = |t: usize, s: &TileScratch, out: &mut Vec<i64>, _ints: &mut Vec<i64>| {
+        let decode = |t: usize,
+                      s: &TileScratch,
+                      out: &mut Vec<i64>,
+                      _ints: &mut Vec<i64>,
+                      codecs: &mut CodecScratch| {
             let cols = TileColumns::read(t, primary, gzip_fallback, uncompressed)?;
-            decode_one_tile_into(&ctx, cols, s.nelem(), out)
+            decode_one_tile_into(&ctx, cols, s.nelem(), out, codecs)
         };
         match output {
             DecodeBuffer::U8(out) => {
@@ -303,7 +311,9 @@ fn run_decode_scatter<S, D>(
     ntiles: usize,
     geom: &TileGeometry,
     out: &mut [D],
-    decode: impl Fn(usize, &TileScratch, &mut Vec<S>, &mut Vec<i64>) -> Result<()> + Sync + Send,
+    decode: impl Fn(usize, &TileScratch, &mut Vec<S>, &mut Vec<i64>, &mut CodecScratch) -> Result<()>
+    + Sync
+    + Send,
     convert: impl Fn(S) -> D + Sync + Send,
 ) -> Result<()>
 where
@@ -317,18 +327,31 @@ where
     #[cfg(feature = "parallel")]
     {
         let sink = DisjointSlice::new(out);
-        let init = || (TileScratch::default(), Vec::<S>::new(), Vec::<i64>::new());
-        map_tiles(ntiles, init, |(scratch, vals, ints), t| -> Result<()> {
-            geom.tile_into(t, scratch);
-            decode(t, scratch, vals, ints)?;
-            ensure_tile_size(scratch.nelem(), vals.len())?;
-            // SAFETY: the image tiles partition the pixel grid, so this tile's row
-            // ranges are disjoint from every other tile's — concurrent writes through
-            // `sink` never alias. `tile_into` clips rows to the image, which sized
-            // `out`, so each row is in bounds.
-            unsafe { scatter_disjoint(&sink, &scratch.row_bases, scratch.row_len, vals, &convert) };
-            Ok(())
-        })?;
+        let init = || {
+            (
+                TileScratch::default(),
+                Vec::<S>::new(),
+                Vec::<i64>::new(),
+                CodecScratch::default(),
+            )
+        };
+        map_tiles(
+            ntiles,
+            init,
+            |(scratch, vals, ints, codecs), t| -> Result<()> {
+                geom.tile_into(t, scratch);
+                decode(t, scratch, vals, ints, codecs)?;
+                ensure_tile_size(scratch.nelem(), vals.len())?;
+                // SAFETY: the image tiles partition the pixel grid, so this tile's row
+                // ranges are disjoint from every other tile's — concurrent writes through
+                // `sink` never alias. `tile_into` clips rows to the image, which sized
+                // `out`, so each row is in bounds.
+                unsafe {
+                    scatter_disjoint(&sink, &scratch.row_bases, scratch.row_len, vals, &convert)
+                };
+                Ok(())
+            },
+        )?;
         Ok(())
     }
     #[cfg(not(feature = "parallel"))]
@@ -336,9 +359,10 @@ where
         let mut scratch = TileScratch::default();
         let mut vals: Vec<S> = Vec::new();
         let mut ints: Vec<i64> = Vec::new();
+        let mut codecs = CodecScratch::default();
         for t in 0..ntiles {
             geom.tile_into(t, &mut scratch);
-            decode(t, &scratch, &mut vals, &mut ints)?;
+            decode(t, &scratch, &mut vals, &mut ints, &mut codecs)?;
             ensure_tile_size(scratch.nelem(), vals.len())?;
             scatter_rows(out, &scratch.row_bases, scratch.row_len, &vals, &convert);
         }
@@ -488,6 +512,12 @@ struct CodecParams {
     smooth: bool,
 }
 
+#[derive(Debug, Default)]
+struct CodecScratch {
+    gzip: gzip::GzipScratch,
+    hcompress: hcompress::HcompressScratch,
+}
+
 /// Per-tile float dequantization parameters (§10.2): `physical = zero + scale·I`,
 /// the dither method/seed, and the integer null sentinel.
 #[derive(Debug)]
@@ -516,12 +546,17 @@ fn decode_one_tile_into(
     cols: TileColumns,
     tile_elems: usize,
     out: &mut Vec<i64>,
+    scratch: &mut CodecScratch,
 ) -> Result<()> {
     match cols.resolve()? {
-        TileSource::Compressed(cell) => decode_tile_cell_into(ctx, cell, tile_elems, out),
-        TileSource::Gzip(cell) => {
-            gzip::gzip_tile_into(byte_cell(cell)?, ctx.int_bitpix, tile_elems, out)
-        }
+        TileSource::Compressed(cell) => decode_tile_cell_into(ctx, cell, tile_elems, out, scratch),
+        TileSource::Gzip(cell) => gzip::gzip_tile_into(
+            byte_cell(cell)?,
+            ctx.int_bitpix,
+            tile_elems,
+            out,
+            &mut scratch.gzip,
+        ),
         TileSource::Uncompressed(cell) => {
             cell_to_i64_into(cell, out);
             Ok(())
@@ -540,18 +575,20 @@ fn decode_float_tile_into(
     dq: Dequant,
     out: &mut Vec<f64>,
     ints: &mut Vec<i64>,
+    scratch: &mut CodecScratch,
 ) -> Result<()> {
     match cols.resolve()? {
         TileSource::Compressed(cell) => {
             // Quantized integers (float images never use HCOMPRESS).
-            decode_tile_cell_into(ctx, cell, tile_elems, ints)?;
+            decode_tile_cell_into(ctx, cell, tile_elems, ints, scratch)?;
             quantize::dequantize_into(ints, dq.scale, dq.zero, dq.method, dq.irow, dq.zblank, out);
             Ok(())
         }
         TileSource::Gzip(cell) => {
             // Raw floats, bounded at the tile's known byte size (`tile_elems` floats).
             let max = tile_elems.saturating_mul(ctx.zbitpix.elem_size());
-            be_floats_into(&gzip::gunzip(byte_cell(cell)?, max)?, ctx.zbitpix, out);
+            gzip::gunzip_into(byte_cell(cell)?, max, &mut scratch.gzip.bytes)?;
+            be_floats_into(&scratch.gzip.bytes, ctx.zbitpix, out);
             Ok(())
         }
         TileSource::Uncompressed(cell) => {
@@ -568,15 +605,24 @@ fn decode_tile_cell_into(
     cell: VlaCell<'_>,
     tile_elems: usize,
     out: &mut Vec<i64>,
+    scratch: &mut CodecScratch,
 ) -> Result<()> {
     let params = ctx.params;
     match ctx.codec {
-        ImageCodec::Gzip1 => {
-            gzip::gzip_tile_into(byte_cell(cell)?, ctx.int_bitpix, tile_elems, out)
-        }
-        ImageCodec::Gzip2 => {
-            gzip::gzip2_tile_into(byte_cell(cell)?, ctx.int_bitpix, tile_elems, out)
-        }
+        ImageCodec::Gzip1 => gzip::gzip_tile_into(
+            byte_cell(cell)?,
+            ctx.int_bitpix,
+            tile_elems,
+            out,
+            &mut scratch.gzip,
+        ),
+        ImageCodec::Gzip2 => gzip::gzip2_tile_into(
+            byte_cell(cell)?,
+            ctx.int_bitpix,
+            tile_elems,
+            out,
+            &mut scratch.gzip,
+        ),
         ImageCodec::Rice1 => {
             // Only 1/2/4-byte pixels are defined (cfitsio parity). A `BYTEPIX` of
             // 3/5/6/7 from an untrusted header would otherwise decode with mismatched
@@ -595,9 +641,13 @@ fn decode_tile_cell_into(
             )
         }
         ImageCodec::Plio1 => plio::plio_decode_be_into(plio_cell(cell)?, tile_elems, out),
-        ImageCodec::Hcompress1 => {
-            hcompress::hcompress_tile_into(byte_cell(cell)?, params.smooth, tile_elems, out)
-        }
+        ImageCodec::Hcompress1 => hcompress::hcompress_tile_into(
+            byte_cell(cell)?,
+            params.smooth,
+            tile_elems,
+            out,
+            &mut scratch.hcompress,
+        ),
         // §10.4: a tile stored verbatim — the cell is the raw big-endian pixels.
         ImageCodec::NoCompress => {
             let bytes = byte_cell(cell)?;

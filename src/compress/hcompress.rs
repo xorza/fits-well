@@ -15,25 +15,41 @@ use crate::error::Result;
 
 const MAGIC: [u8; 2] = [0xDD, 0x99];
 
+#[derive(Debug, Default)]
+pub(crate) struct HcompressScratch {
+    plane: Vec<i32>,
+    transform: Vec<i32>,
+    rows: Vec<i32>,
+    qtree: Vec<u8>,
+    code_buffer: Vec<u8>,
+    signbits: Vec<u8>,
+}
+
 /// Decode an `HCOMPRESS_1` tile into row-major integer values (`ny` fastest, the
 /// FITS axis-1 order the orchestrator expects), appended to `out` (cleared first; a
-/// reused buffer). The inverse transform still needs its own `i32` working array.
+/// reused buffer). Transform and quadtree storage come from the worker scratch.
 pub(crate) fn hcompress_tile_into(
     bytes: &[u8],
     smooth: bool,
     tile_elems: usize,
     out: &mut Vec<i64>,
+    scratch: &mut HcompressScratch,
 ) -> Result<()> {
-    let a = hdecompress(bytes, smooth, tile_elems)?;
+    hdecompress_into(bytes, smooth, tile_elems, scratch)?;
     out.clear();
-    out.extend(a.iter().map(|&v| v as i64));
+    out.extend(scratch.plane.iter().map(|&v| v as i64));
     Ok(())
 }
 
 /// Encode one tile (`vals` in `ny`-fastest order, `tdims[0]` = ny = FITS axis-1)
 /// as an `HCOMPRESS_1` byte stream. `scale = 0` is lossless. The result decodes
 /// back through [`hcompress_tile_into`] to the original values.
-pub(crate) fn hcompress_tile_encode(vals: &[i64], tdims: &[usize], scale: i32) -> Result<Vec<u8>> {
+pub(crate) fn hcompress_tile_encode(
+    vals: &[i64],
+    tdims: &[usize],
+    scale: i32,
+    scratch: &mut HcompressScratch,
+) -> Result<Vec<u8>> {
     let ny = tdims.first().copied().unwrap_or(vals.len()).max(1);
     let nx = (vals.len() / ny).max(1);
     if nx * ny != vals.len() {
@@ -41,11 +57,26 @@ pub(crate) fn hcompress_tile_encode(vals: &[i64], tdims: &[usize], scale: i32) -
             name: "HCOMPRESS_1: tile is not 2-D".to_string(),
         });
     }
-    let mut a: Vec<i32> = vals.iter().map(|&v| v as i32).collect();
-    htrans(&mut a, nx, ny);
-    digitize(&mut a, nx, ny, scale);
+    scratch.plane.clear();
+    scratch.plane.extend(vals.iter().map(|&v| v as i32));
+    htrans(
+        &mut scratch.plane,
+        nx,
+        ny,
+        &mut scratch.transform,
+        &mut scratch.rows,
+    );
+    digitize(&mut scratch.plane, nx, ny, scale);
     let mut enc = BitOutput::new();
-    enc.encode(&mut a, nx, ny, scale);
+    enc.encode(
+        &mut scratch.plane,
+        nx,
+        ny,
+        scale,
+        &mut scratch.signbits,
+        &mut scratch.qtree,
+        &mut scratch.code_buffer,
+    );
     Ok(enc.out)
 }
 
@@ -165,7 +196,17 @@ impl BitOutput {
 
     /// Write the header, extract sign bits, compute per-quadrant bit-plane counts,
     /// quadtree-encode the planes, then append the sign bytes (cfitsio `encode`).
-    fn encode(&mut self, a: &mut [i32], nx: usize, ny: usize, scale: i32) {
+    #[allow(clippy::too_many_arguments)]
+    fn encode(
+        &mut self,
+        a: &mut [i32],
+        nx: usize,
+        ny: usize,
+        scale: i32,
+        signbits: &mut Vec<u8>,
+        qtree: &mut Vec<u8>,
+        code_buffer: &mut Vec<u8>,
+    ) {
         let nel = nx * ny;
         self.out.extend_from_slice(&MAGIC);
         self.writeint(nx as i32);
@@ -176,7 +217,8 @@ impl BitOutput {
 
         // Sign bits (one per non-zero element, MSB-first within each byte); a[i]
         // is replaced by its absolute value.
-        let mut signbits = vec![0u8; nel.div_ceil(8)];
+        signbits.clear();
+        signbits.resize(nel.div_ceil(8), 0);
         let mut nsign = 0usize;
         let mut bits_to_go = 8i32;
         for v in a.iter_mut().take(nel) {
@@ -225,21 +267,53 @@ impl BitOutput {
         }
         self.out.extend_from_slice(&nbitplanes);
 
-        self.doencode(a, nx, ny, &nbitplanes);
+        self.doencode(a, nx, ny, &nbitplanes, qtree, code_buffer);
         self.out.extend_from_slice(&signbits[..nsign]);
     }
 
     /// Quadtree-encode the four quadrants, then an EOF nybble (cfitsio `doencode`).
-    fn doencode(&mut self, a: &[i32], nx: usize, ny: usize, nbitplanes: &[u8; 3]) {
+    fn doencode(
+        &mut self,
+        a: &[i32],
+        nx: usize,
+        ny: usize,
+        nbitplanes: &[u8; 3],
+        qtree: &mut Vec<u8>,
+        code_buffer: &mut Vec<u8>,
+    ) {
         let nx2 = nx.div_ceil(2);
         let ny2 = ny.div_ceil(2);
         self.start_outputing_bits();
-        self.qtree_encode(&a[0..], ny, nx2, ny2, nbitplanes[0] as i32);
+        self.qtree_encode(
+            &a[0..],
+            ny,
+            nx2,
+            ny2,
+            nbitplanes[0] as i32,
+            qtree,
+            code_buffer,
+        );
         if ny / 2 > 0 {
-            self.qtree_encode(&a[ny2..], ny, nx2, ny / 2, nbitplanes[1] as i32);
+            self.qtree_encode(
+                &a[ny2..],
+                ny,
+                nx2,
+                ny / 2,
+                nbitplanes[1] as i32,
+                qtree,
+                code_buffer,
+            );
         }
         if nx / 2 > 0 {
-            self.qtree_encode(&a[ny * nx2..], ny, nx / 2, ny2, nbitplanes[1] as i32);
+            self.qtree_encode(
+                &a[ny * nx2..],
+                ny,
+                nx / 2,
+                ny2,
+                nbitplanes[1] as i32,
+                qtree,
+                code_buffer,
+            );
         }
         if nx / 2 > 0 && ny / 2 > 0 {
             self.qtree_encode(
@@ -248,6 +322,8 @@ impl BitOutput {
                 nx / 2,
                 ny / 2,
                 nbitplanes[2] as i32,
+                qtree,
+                code_buffer,
             );
         }
         self.output_nybble(0);
@@ -256,26 +332,36 @@ impl BitOutput {
 
     /// Quadtree-code one quadrant's bit planes, top plane first (cfitsio
     /// `qtree_encode`). Falls back to a direct bitmap when the quadtree expands.
-    fn qtree_encode(&mut self, a: &[i32], n: usize, nqx: usize, nqy: usize, nbitplanes: i32) {
+    #[allow(clippy::too_many_arguments)]
+    fn qtree_encode(
+        &mut self,
+        a: &[i32],
+        n: usize,
+        nqx: usize,
+        nqy: usize,
+        nbitplanes: i32,
+        scratch: &mut Vec<u8>,
+        buffer: &mut Vec<u8>,
+    ) {
         let nqmax = nqx.max(nqy);
         let log2n = log2_ceil(nqmax);
         let nqx2 = nqx.div_ceil(2);
         let nqy2 = nqy.div_ceil(2);
         let bmax = (nqx2 * nqy2).div_ceil(2);
-        let mut scratch = vec![0u8; (nqx2 * nqy2).max(1)];
-        let mut buffer = vec![0u8; bmax.max(1)];
+        scratch.resize((nqx2 * nqy2).max(1), 0);
+        buffer.resize(bmax.max(1), 0);
 
         for bit in (0..nbitplanes).rev() {
             let mut b = 0usize;
             let mut bitbuffer = 0i32;
             let mut bits_to_go3 = 0i32;
-            qtree_onebit(a, n, nqx, nqy, &mut scratch, bit);
+            qtree_onebit(a, n, nqx, nqy, scratch, bit);
             let mut nx = (nqx + 1) >> 1;
             let mut ny = (nqy + 1) >> 1;
             let mut overflow = bufcopy(
-                &scratch,
+                scratch,
                 nx * ny,
-                &mut buffer,
+                buffer,
                 &mut b,
                 bmax,
                 &mut bitbuffer,
@@ -285,13 +371,13 @@ impl BitOutput {
                 if overflow {
                     break;
                 }
-                qtree_reduce(&mut scratch, ny, nx, ny);
+                qtree_reduce(scratch, ny, nx, ny);
                 nx = (nx + 1) >> 1;
                 ny = (ny + 1) >> 1;
                 overflow = bufcopy(
-                    &scratch,
+                    scratch,
                     nx * ny,
-                    &mut buffer,
+                    buffer,
                     &mut b,
                     bmax,
                     &mut bitbuffer,
@@ -299,7 +385,7 @@ impl BitOutput {
                 );
             }
             if overflow {
-                self.write_bdirect(a, n, nqx, nqy, &mut scratch, bit);
+                self.write_bdirect(a, n, nqx, nqy, scratch, bit);
                 continue;
             }
             // Quadtree code: a 0xF marker, the leftover Huffman bits, then the
@@ -339,13 +425,13 @@ impl BitOutput {
 }
 
 /// Forward H-transform (in place), the inverse of [`hinv`] (cfitsio `htrans`).
-fn htrans(a: &mut [i32], nx: usize, ny: usize) {
+fn htrans(a: &mut [i32], nx: usize, ny: usize, tmp: &mut Vec<i32>, row_tmp: &mut Vec<i32>) {
     let nmax = nx.max(ny);
     let log2n = log2_ceil(nmax);
-    let mut tmp = vec![0i32; nmax.div_ceil(2).max(1)];
+    tmp.resize(nmax.div_ceil(2).max(1), 0);
     // Holds the odd rows during the column-direction shuffle (done as whole-row moves
     // — see `shuffle_rows`): up to `nx/2` rows of `ny`.
-    let mut row_tmp = vec![0i32; nx.div_ceil(2) * ny.max(1)];
+    row_tmp.resize(nx.div_ceil(2) * ny.max(1), 0);
 
     let mut shift = 0u32;
     let mut mask = -2i32;
@@ -418,9 +504,9 @@ fn htrans(a: &mut [i32], nx: usize, ny: usize) {
             }
         }
         for i in 0..nxtop {
-            shuffle(&mut a[ny * i..], nytop, 1, &mut tmp);
+            shuffle(&mut a[ny * i..], nytop, 1, tmp);
         }
-        shuffle_rows(a, nxtop, nytop, ny, &mut row_tmp);
+        shuffle_rows(a, nxtop, nytop, ny, row_tmp);
         nxtop = (nxtop + 1) >> 1;
         nytop = (nytop + 1) >> 1;
         shift = 1;
@@ -785,7 +871,12 @@ impl<'a> BitInput<'a> {
 }
 
 /// Top-level: header → quadtree decode → undigitize → inverse H-transform.
-fn hdecompress(input: &[u8], smooth: bool, tile_elems: usize) -> Result<Vec<i32>> {
+fn hdecompress_into(
+    input: &[u8],
+    smooth: bool,
+    tile_elems: usize,
+    scratch: &mut HcompressScratch,
+) -> Result<()> {
     let mut bi = BitInput::new(input);
     if bi.read_bytes(2)? != MAGIC {
         return Err(FitsError::UnsupportedCompression {
@@ -816,13 +907,29 @@ fn hdecompress(input: &[u8], smooth: bool, tile_elems: usize) -> Result<Vec<i32>
         });
     }
 
-    let mut a = vec![0i32; tile_elems];
-    dodecode(&mut bi, &mut a, nx, ny, &nbitplanes)?;
-    a[0] = sumall as i32;
+    scratch.plane.clear();
+    scratch.plane.resize(tile_elems, 0);
+    dodecode(
+        &mut bi,
+        &mut scratch.plane,
+        nx,
+        ny,
+        &nbitplanes,
+        &mut scratch.qtree,
+    )?;
+    scratch.plane[0] = sumall as i32;
 
-    undigitize(&mut a, scale);
-    hinv(&mut a, nx, ny, scale, smooth);
-    Ok(a)
+    undigitize(&mut scratch.plane, scale);
+    hinv(
+        &mut scratch.plane,
+        nx,
+        ny,
+        scale,
+        smooth,
+        &mut scratch.transform,
+        &mut scratch.rows,
+    );
+    Ok(())
 }
 
 fn undigitize(a: &mut [i32], scale: i32) {
@@ -841,14 +948,23 @@ fn dodecode(
     nx: usize,
     ny: usize,
     nbitplanes: &[u8],
+    scratch: &mut Vec<u8>,
 ) -> Result<()> {
     let nx2 = nx.div_ceil(2);
     let ny2 = ny.div_ceil(2);
 
     bi.start_inputing_bits();
-    qtree_decode(bi, &mut a[0..], ny, nx2, ny2, nbitplanes[0] as i32)?;
+    qtree_decode(bi, &mut a[0..], ny, nx2, ny2, nbitplanes[0] as i32, scratch)?;
     if ny / 2 > 0 {
-        qtree_decode(bi, &mut a[ny2..], ny, nx2, ny / 2, nbitplanes[1] as i32)?;
+        qtree_decode(
+            bi,
+            &mut a[ny2..],
+            ny,
+            nx2,
+            ny / 2,
+            nbitplanes[1] as i32,
+            scratch,
+        )?;
     }
     if nx / 2 > 0 {
         qtree_decode(
@@ -858,6 +974,7 @@ fn dodecode(
             nx / 2,
             ny2,
             nbitplanes[1] as i32,
+            scratch,
         )?;
     }
     if nx / 2 > 0 && ny / 2 > 0 {
@@ -868,6 +985,7 @@ fn dodecode(
             nx / 2,
             ny / 2,
             nbitplanes[2] as i32,
+            scratch,
         )?;
     }
 
@@ -894,17 +1012,18 @@ fn qtree_decode(
     nqx: usize,
     nqy: usize,
     nbitplanes: i32,
+    scratch: &mut Vec<u8>,
 ) -> Result<()> {
     let nqmax = nqx.max(nqy);
     let log2n = log2_ceil(nqmax);
     let nqx2 = nqx.div_ceil(2);
     let nqy2 = nqy.div_ceil(2);
-    let mut scratch = vec![0u8; nqx2 * nqy2];
+    scratch.resize((nqx2 * nqy2).max(1), 0);
 
     for bit in (0..nbitplanes).rev() {
         let b = bi.input_nybble()?;
         if b == 0 {
-            read_bdirect(bi, a, n, nqx, nqy, &mut scratch, bit)?;
+            read_bdirect(bi, a, n, nqx, nqy, scratch, bit)?;
         } else if b != 0xf {
             return Err(FitsError::UnsupportedCompression {
                 name: "HCOMPRESS_1: bad format code".to_string(),
@@ -930,9 +1049,9 @@ fn qtree_decode(
                 } else {
                     nfy -= c;
                 }
-                qtree_expand(bi, &mut scratch, nx, ny)?;
+                qtree_expand(bi, scratch, nx, ny)?;
             }
-            qtree_bitins(&scratch, nqx, nqy, a, n, bit);
+            qtree_bitins(scratch, nqx, nqy, a, n, bit);
         }
     }
     Ok(())
@@ -1077,16 +1196,24 @@ fn read_bdirect(
 }
 
 /// Inverse H-transform (in place), `SMOOTH = 0`.
-fn hinv(a: &mut [i32], nx: usize, ny: usize, scale: i32, smooth: bool) {
+fn hinv(
+    a: &mut [i32],
+    nx: usize,
+    ny: usize,
+    scale: i32,
+    smooth: bool,
+    tmp: &mut Vec<i32>,
+    row_tmp: &mut Vec<i32>,
+) {
     let nmax = nx.max(ny);
     if nmax <= 1 {
         return;
     }
     let log2n = log2_ceil(nmax);
-    let mut tmp = vec![0i32; nmax.div_ceil(2)];
+    tmp.resize(nmax.div_ceil(2), 0);
     // Holds the 2nd-half rows during the column-direction unshuffle (done as whole-row
     // moves — see `unshuffle_rows`): up to `nx/2` rows of `ny`.
-    let mut row_tmp = vec![0i32; nx.div_ceil(2) * ny];
+    row_tmp.resize(nx.div_ceil(2) * ny, 0);
 
     let mut shift = 1;
     let mut bit0 = 1i32 << (log2n - 1);
@@ -1128,9 +1255,9 @@ fn hinv(a: &mut [i32], nx: usize, ny: usize, scale: i32, smooth: bool) {
             shift = 2;
         }
         for i in 0..nxtop {
-            unshuffle(&mut a[ny * i..], nytop, 1, &mut tmp);
+            unshuffle(&mut a[ny * i..], nytop, 1, tmp);
         }
-        unshuffle_rows(a, nxtop, nytop, ny, &mut row_tmp);
+        unshuffle_rows(a, nxtop, nytop, ny, row_tmp);
         // Smooth by interpolating coefficients (SMOOTH=1, lossy scale>1 only).
         if smooth {
             hsmooth(a, nxtop, nytop, ny, scale);

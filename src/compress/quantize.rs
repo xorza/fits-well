@@ -126,11 +126,24 @@ struct Noise {
     any_good: bool,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct QuantizeScratch {
+    pub(crate) ints: Vec<i32>,
+    diffs: Vec<f64>,
+    row_medians: Vec<f64>,
+}
+
 /// 3rd-order MAD noise: `0.6052697 · median(|2·f(i) − f(i−2) − f(i+2)|)`, taken as
 /// the median of per-row medians. Non-finite pixels (NaN/Inf) are treated as nulls
 /// and skipped, matching cfitsio's `nullcheck`. Returns `noise = 0` for constant
 /// data and `any_good = false` for an all-null tile.
-fn noise3(data: &[f64], nx_in: usize, ny_in: usize) -> Noise {
+fn noise3(
+    data: &[f64],
+    nx_in: usize,
+    ny_in: usize,
+    diffs: &mut Vec<f64>,
+    row_medians: &mut Vec<f64>,
+) -> Noise {
     let (mut nx, mut ny) = (nx_in.max(1), ny_in.max(1));
     if nx < 5 {
         nx *= ny;
@@ -139,44 +152,45 @@ fn noise3(data: &[f64], nx_in: usize, ny_in: usize) -> Noise {
     let mut xmin = f64::MAX;
     let mut xmax = f64::MIN;
     let mut any_good = false;
-    let mut row_meds: Vec<f64> = Vec::with_capacity(ny);
+    row_medians.clear();
+    row_medians.reserve(ny);
 
     for jj in 0..ny {
-        // Compact the row to its finite pixels — cfitsio advances past nulls, so
-        // differences are taken between consecutive *valid* pixels.
-        let good: Vec<f64> = data[jj * nx..jj * nx + nx]
-            .iter()
-            .copied()
-            .filter(|v| v.is_finite())
-            .collect();
-        for &v in &good {
+        diffs.clear();
+        let mut window = [0.0; 4];
+        let mut valid = 0usize;
+        for &v in &data[jj * nx..jj * nx + nx] {
+            if !v.is_finite() {
+                continue;
+            }
             xmin = xmin.min(v);
             xmax = xmax.max(v);
             any_good = true;
-        }
-        if good.len() < 5 || nx < 5 {
-            continue; // need 4 skipped + ≥1 more for a 3rd-order difference
-        }
-        let (mut v1, mut v2, mut v3, mut v4) = (good[0], good[1], good[2], good[3]);
-        let mut diffs: Vec<f64> = Vec::with_capacity(good.len());
-        for &v5 in &good[4..] {
-            if !(v1 == v2 && v2 == v3 && v3 == v4 && v4 == v5) {
-                diffs.push((2.0 * v3 - v1 - v5).abs());
+
+            if valid < window.len() {
+                window[valid] = v;
+                valid += 1;
+                continue;
             }
-            v1 = v2;
-            v2 = v3;
-            v3 = v4;
-            v4 = v5;
+            if !(window[0] == window[1]
+                && window[1] == window[2]
+                && window[2] == window[3]
+                && window[3] == v)
+            {
+                diffs.push((2.0 * window[2] - window[0] - v).abs());
+            }
+            window.copy_within(1.., 0);
+            window[3] = v;
         }
         if !diffs.is_empty() {
-            row_meds.push(lower_median(&mut diffs));
+            row_medians.push(lower_median(diffs));
         }
     }
 
-    let noise = if row_meds.is_empty() {
+    let noise = if row_medians.is_empty() {
         0.0
     } else {
-        0.6052697 * proper_median(&mut row_meds)
+        0.6052697 * proper_median(row_medians)
     };
     Noise {
         min: xmin,
@@ -213,11 +227,10 @@ fn proper_median(v: &mut [f64]) -> f64 {
     }
 }
 
-/// A quantized tile: the integer plane plus the `BSCALE`/`BZERO` (`ZSCALE`/`ZZERO`)
-/// that invert it, and whether any pixel was a null (mapped to [`NULL_VALUE`]).
+/// Metadata for the integer plane written into [`QuantizeScratch`]: the
+/// `BSCALE`/`BZERO` (`ZSCALE`/`ZZERO`) that invert it and whether any pixel was null.
 #[derive(Debug)]
 pub(crate) struct Quantized {
-    pub(crate) idata: Vec<i32>,
     pub(crate) bscale: f64,
     pub(crate) bzero: f64,
     pub(crate) has_null: bool,
@@ -236,12 +249,13 @@ pub(crate) fn quantize_tile(
     qlevel: f64,
     method: DitherMethod,
     irow: i64,
+    scratch: &mut QuantizeScratch,
 ) -> Option<Quantized> {
     let n = nx * ny;
     if n <= 1 {
         return None;
     }
-    let est = noise3(fdata, nx, ny);
+    let est = noise3(fdata, nx, ny, &mut scratch.diffs, &mut scratch.row_medians);
     if !est.any_good {
         return None; // all-null tile → store raw (preserves the NaNs exactly)
     }
@@ -271,12 +285,13 @@ pub(crate) fn quantize_tile(
         (est.min + est.max) / 2.0
     };
 
-    let mut idata = vec![0i32; n];
+    scratch.ints.clear();
+    scratch.ints.resize(n, 0);
     let mut d = method.dithered().then(|| Dither::new(irow));
     for (i, &f) in fdata.iter().enumerate().take(n) {
         // The dither cursor advances per pixel regardless of branch taken.
         let r = d.as_mut().map_or(0.0, Dither::next);
-        idata[i] = if !f.is_finite() {
+        scratch.ints[i] = if !f.is_finite() {
             NULL_VALUE
         } else if dither2 && f == 0.0 {
             ZERO_VALUE
@@ -287,7 +302,6 @@ pub(crate) fn quantize_tile(
         };
     }
     Some(Quantized {
-        idata,
         bscale: delta,
         bzero: zeropt,
         has_null,

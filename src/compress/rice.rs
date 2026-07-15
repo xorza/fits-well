@@ -95,7 +95,12 @@ fn sign_extend(v: u64, nbits: u32) -> i64 {
 /// Encode `values` as a `RICE_1` tile (a port of cfitsio's `fits_rcomp`),
 /// parameterized by `bytepix` (1/2/4). Differences are taken modulo the pixel
 /// width so the stream round-trips through [`rice_decode_into`].
-pub(crate) fn rice_encode(values: &[i64], bytepix: usize, blocksize: usize) -> Vec<u8> {
+pub(crate) fn rice_encode<T: Copy + Into<i64>>(
+    values: &[T],
+    bytepix: usize,
+    blocksize: usize,
+    scratch: &mut RiceScratch,
+) -> Vec<u8> {
     let nbits = (8 * bytepix) as u32;
     let (fsbits, fsmax) = match bytepix {
         1 => (3i32, 6i32),
@@ -113,20 +118,18 @@ pub(crate) fn rice_encode(values: &[i64], bytepix: usize, blocksize: usize) -> V
     // Rice output is at most a few bytes per pixel; reserve a pixel's worth up front
     // so the bitstream rarely reallocates mid-tile.
     bo.out.reserve(values.len());
-    let first = (*values.first().unwrap_or(&0) as u64) & mask;
+    let first = values.first().copied().map(Into::into).unwrap_or(0) as u64 & mask;
     bo.output_nbits(first as i64, nbits as i32);
     let mut lastpix = first;
 
-    // One difference buffer reused across blocks (cleared each block) rather than a
-    // fresh allocation per block — a tile has thousands of blocks.
-    let mut diffs: Vec<u64> = Vec::with_capacity(blocksize);
+    scratch.diffs.reserve(blocksize);
     let mut i = 0;
     while i < values.len() {
         let thisblock = blocksize.min(values.len() - i);
-        diffs.clear();
+        scratch.diffs.clear();
         let mut pixelsum = 0.0f64;
         for j in 0..thisblock {
-            let next = (values[i + j] as u64) & mask;
+            let next = Into::<i64>::into(values[i + j]) as u64 & mask;
             // signed difference reduced to the pixel width, then zigzag-mapped
             let raw = next.wrapping_sub(lastpix) & mask;
             let s = if raw >= half {
@@ -139,7 +142,7 @@ pub(crate) fn rice_encode(values: &[i64], bytepix: usize, blocksize: usize) -> V
             } else {
                 (((-s) as u64) << 1) - 1
             };
-            diffs.push(d);
+            scratch.diffs.push(d);
             pixelsum += d as f64;
             lastpix = next;
         }
@@ -154,7 +157,7 @@ pub(crate) fn rice_encode(values: &[i64], bytepix: usize, blocksize: usize) -> V
 
         if fs >= fsmax {
             bo.output_nbits((fsmax + 1) as i64, fsbits);
-            for &d in &diffs {
+            for &d in &scratch.diffs {
                 bo.output_nbits(d as i64, nbits as i32);
             }
         } else if fs == 0 && pixelsum == 0.0 {
@@ -162,7 +165,7 @@ pub(crate) fn rice_encode(values: &[i64], bytepix: usize, blocksize: usize) -> V
         } else {
             bo.output_nbits((fs + 1) as i64, fsbits);
             let fsmask = (1i64 << fs) - 1;
-            for &d in &diffs {
+            for &d in &scratch.diffs {
                 bo.output_rice_value(d as i64, fs, fsmask);
             }
         }
@@ -170,6 +173,11 @@ pub(crate) fn rice_encode(values: &[i64], bytepix: usize, blocksize: usize) -> V
     }
     bo.done();
     bo.out
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct RiceScratch {
+    diffs: Vec<u64>,
 }
 
 /// MSB-first bit output, mirroring cfitsio's `Buffer`/`output_nbits`.
