@@ -87,6 +87,8 @@ A **tile-compressed** image (FITS §10) reads back through the *same* `read_imag
 call — it detects `ZIMAGE` and decompresses transparently. To write one:
 
 ```rust,no_run
+# #[cfg(feature = "compression")]
+# {
 # use std::fs::File;
 # use fits_well::{FitsWriter, CompressOptions, Image, ImageData, Scaling};
 # let image = Image { shape: vec![16, 16], samples: ImageData::I16(vec![0; 256]), scaling: Scaling { bscale: 1.0, bzero: 0.0, blank: None } };
@@ -94,6 +96,7 @@ let options = CompressOptions::tiled([8, 8]); // 8×8 tiles
 let mut writer = FitsWriter::new(File::create("compressed.fits")?);
 writer.write_compressed_image(&image, "RICE_1", &options)?;
 # writer.into_inner().sync_all()?;
+# }
 # Ok::<(), fits_well::FitsError>(())
 ```
 

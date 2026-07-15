@@ -20,6 +20,10 @@ exclude = [
     "todo.txt",
 ]
 
+[lints.rust]
+missing_debug_implementations = "deny"
+unreachable_pub = "deny"
+
 [lints.clippy]
 items_after_test_module = "deny"
 
