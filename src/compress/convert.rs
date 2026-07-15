@@ -5,7 +5,6 @@
 use crate::allocation;
 use crate::bitpix::Bitpix;
 use crate::data::ImageData;
-use crate::endian::encode_be;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::table::TformKind;
@@ -123,14 +122,31 @@ pub(crate) fn i64_to_be(vals: &[i64], bitpix: Bitpix) -> Vec<u8> {
     out
 }
 
-/// Encode `f64` values as a big-endian buffer of `bitpix`-width floats.
-pub(crate) fn float_to_be(vals: &[f64], bitpix: Bitpix) -> Vec<u8> {
+/// Pack native-width quantized integers directly into reusable big-endian storage.
+pub(crate) fn i32_to_be_into(vals: &[i32], out: &mut Vec<u8>) {
+    out.clear();
+    out.resize(vals.len() * 4, 0);
+    for (slot, value) in out.chunks_exact_mut(4).zip(vals) {
+        slot.copy_from_slice(&value.to_be_bytes());
+    }
+}
+
+/// Encode `f64` values as big-endian `bitpix`-width floats into reusable storage.
+pub(crate) fn float_to_be_into(vals: &[f64], bitpix: Bitpix, out: &mut Vec<u8>) {
+    out.clear();
+    out.resize(vals.len() * bitpix.elem_size(), 0);
     match bitpix {
-        Bitpix::F32 => encode_be(
-            &vals.iter().map(|&v| v as f32).collect::<Vec<_>>(),
-            f32::to_be_bytes,
-        ),
-        _ => encode_be(vals, f64::to_be_bytes),
+        Bitpix::F32 => {
+            for (slot, &value) in out.chunks_exact_mut(4).zip(vals) {
+                slot.copy_from_slice(&(value as f32).to_be_bytes());
+            }
+        }
+        Bitpix::F64 => {
+            for (slot, &value) in out.chunks_exact_mut(8).zip(vals) {
+                slot.copy_from_slice(&value.to_be_bytes());
+            }
+        }
+        _ => unreachable!("float_to_be_into requires a float bitpix"),
     }
 }
 
@@ -159,14 +175,6 @@ pub(crate) fn be_to_i64_into(bytes: &[u8], bitpix: Bitpix, out: &mut Vec<i64>) {
         ),
         Bitpix::F32 | Bitpix::F64 => {} // excluded before this point
     }
-}
-
-/// Owning form of [`be_to_i64_into`], for the table path (which keeps the widened
-/// values to feed the RICE encoder).
-pub(crate) fn be_to_i64(bytes: &[u8], bitpix: Bitpix) -> Vec<i64> {
-    let mut out = Vec::new();
-    be_to_i64_into(bytes, bitpix, &mut out);
-    out
 }
 
 /// Decode a big-endian buffer of `bitpix` floats into `f64` in `out`, widening in one

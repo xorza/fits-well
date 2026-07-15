@@ -181,23 +181,27 @@ pub(crate) fn compress_table(
     // parallel under the `parallel` feature, indexed `chunk * ncols + ci` so the
     // results land in the same flat order the descriptor rows expect. The reused
     // per-worker buffer holds the column's transposed bytes.
-    let comps = map_tiles(tile_count, Vec::<u8>::new, |cm, i| -> Result<Vec<u8>> {
-        let chunk = i / ncols;
-        let m = &metas[i % ncols];
-        let r0 = chunk * rpt;
-        let rows = rpt.min(nrows - r0);
-        // Transpose: gather this column's bytes across the tile's rows.
-        cm.clear();
-        let cell_len = rows
-            .checked_mul(m.width)
-            .ok_or(FitsError::DataUnitOverflow)?;
-        allocation::try_reserve_exact(cm, cell_len)?;
-        for r in 0..rows {
-            let off = (r0 + r) * naxis1 + m.offset;
-            cm.extend_from_slice(&raw[off..off + m.width]);
-        }
-        compress_column(cm, m)
-    })?;
+    let comps = map_tiles(
+        tile_count,
+        TableEncodeScratch::default,
+        |scratch, i| -> Result<Vec<u8>> {
+            let chunk = i / ncols;
+            let m = &metas[i % ncols];
+            let r0 = chunk * rpt;
+            let rows = rpt.min(nrows - r0);
+            // Transpose: gather this column's bytes across the tile's rows.
+            scratch.column.clear();
+            let cell_len = rows
+                .checked_mul(m.width)
+                .ok_or(FitsError::DataUnitOverflow)?;
+            allocation::try_reserve_exact(&mut scratch.column, cell_len)?;
+            for r in 0..rows {
+                let off = (r0 + r) * naxis1 + m.offset;
+                scratch.column.extend_from_slice(&raw[off..off + m.width]);
+            }
+            compress_column(m, scratch)
+        },
+    )?;
 
     let heap_len = comps.iter().try_fold(0usize, |len, comp| {
         len.checked_add(comp.len())
@@ -373,22 +377,30 @@ fn indexed_compression_key(keyword: &str, prefix: &str, ncols: usize) -> bool {
 }
 
 /// Compress one tile's column-major raw bytes per the column's algorithm.
-fn compress_column(cm: &[u8], m: &ColMeta) -> Result<Vec<u8>> {
+#[derive(Debug, Default)]
+struct TableEncodeScratch {
+    column: Vec<u8>,
+    ints: Vec<i64>,
+    gzip: gzip::GzipScratch,
+    rice: rice::RiceScratch,
+}
+
+fn compress_column(m: &ColMeta, scratch: &mut TableEncodeScratch) -> Result<Vec<u8>> {
+    let cm = &scratch.column;
     Ok(match m.algo {
         Algo::Gzip1 => gzip::gzip_encode(cm, gzip::DEFAULT_GZIP_LEVEL),
-        Algo::Gzip2 => gzip::gzip_encode(
-            &gzip::shuffle_bytes(cm, m.shuffle_width()),
+        Algo::Gzip2 => gzip::gzip2_encode(
+            cm,
+            m.shuffle_width(),
             gzip::DEFAULT_GZIP_LEVEL,
+            &mut scratch.gzip,
         ),
         Algo::Rice1 => {
             let bytepix = m.rice_bytepix().ok_or(FitsError::UnsupportedCompression {
                 name: format!("RICE_1 on a {} column", m.kind.code()),
             })?;
-            rice::rice_encode(
-                &convert::be_to_i64(cm, convert::bytepix_to_bitpix(bytepix)),
-                bytepix,
-                32,
-            )
+            convert::be_to_i64_into(cm, convert::bytepix_to_bitpix(bytepix), &mut scratch.ints);
+            rice::rice_encode(&scratch.ints, bytepix, 32, &mut scratch.rice)
         }
     })
 }
@@ -397,6 +409,7 @@ fn compress_column(cm: &[u8], m: &ColMeta) -> Result<Vec<u8>> {
 struct TableDecodeScratch {
     bytes: Vec<u8>,
     ints: Vec<i64>,
+    gzip: gzip::GzipScratch,
 }
 
 fn decompress_column_into(
@@ -412,10 +425,14 @@ fn decompress_column_into(
         .checked_mul(m.width)
         .ok_or(FitsError::DataUnitOverflow)?;
     match m.algo {
-        Algo::Gzip1 => scratch.bytes = gzip::gunzip(bytes, expect)?,
-        Algo::Gzip2 => {
-            scratch.bytes = gzip::unshuffle_bytes(&gzip::gunzip(bytes, expect)?, m.shuffle_width())
-        }
+        Algo::Gzip1 => gzip::gunzip_into(bytes, expect, &mut scratch.bytes)?,
+        Algo::Gzip2 => gzip::gunzip2_into(
+            bytes,
+            expect,
+            m.shuffle_width(),
+            &mut scratch.bytes,
+            &mut scratch.gzip,
+        )?,
         Algo::Rice1 => {
             let bytepix = m.rice_bytepix().ok_or(FitsError::UnsupportedCompression {
                 name: format!("RICE_1 on a {} column", m.kind.code()),

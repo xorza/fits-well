@@ -6,9 +6,10 @@
 //! quantized to int32 with a `ZSCALE`/`ZZERO` first ([`compress_float_image`]). The
 //! per-codec work lives in the sibling codec modules.
 
-use crate::compress::convert::float_to_be;
+use crate::compress::convert::float_to_be_into;
 use crate::compress::convert::gather_f64;
 use crate::compress::convert::gather_i64;
+use crate::compress::convert::i32_to_be_into;
 use crate::compress::convert::i64_to_be;
 use crate::compress::convert::i64_to_be_into;
 use crate::compress::geometry::TileGeometry;
@@ -27,20 +28,23 @@ use crate::header::Header;
 use crate::keyword::key;
 
 /// Per-worker tile-encode scratch, reused across the tiles one rayon worker
-/// handles (via `map_tiles`'s `init`): the tile geometry plus the widened pixel
-/// buffers the codec reads from. Reusing them means steady-state tile compression
-/// allocates only each tile's compressed output, not the gather buffers.
+/// handles (via `map_tiles`'s `init`): the tile geometry plus the gather and codec
+/// workspaces. Reusing them means steady-state tile compression allocates only each
+/// tile's retained compressed output.
 #[derive(Debug, Default)]
 struct EncodeScratch {
     tile: TileScratch,
-    /// The tile's pixels widened to `i64` — the integer codec input (and the
-    /// quantized int32 plane for float images).
+    /// The tile's pixels widened to `i64` for integer codecs.
     ints: Vec<i64>,
     /// The tile's pixels as `f64` (float images only; stays empty otherwise).
     floats: Vec<f64>,
     /// The tile's pixels packed to big-endian bytes — the gzip codecs' input,
     /// reused so each tile allocates only its compressed output.
     be: Vec<u8>,
+    quantize: quantize::QuantizeScratch,
+    gzip: gzip::GzipScratch,
+    rice: rice::RiceScratch,
+    hcompress: hcompress::HcompressScratch,
 }
 
 /// Encode an integer [`Image`] as a tiled-compressed `BINTABLE`: returns the
@@ -107,14 +111,15 @@ pub(crate) fn compress_image(
             }
             ImageCodec::Gzip2 => {
                 i64_to_be_into(vals, bitpix, &mut s.be);
-                TileCell::Bytes(gzip::gzip2_encode(&s.be, bytepix, gzip_level))
+                TileCell::Bytes(gzip::gzip2_encode(&s.be, bytepix, gzip_level, &mut s.gzip))
             }
-            ImageCodec::Rice1 => TileCell::Bytes(rice::rice_encode(vals, bytepix, 32)),
+            ImageCodec::Rice1 => TileCell::Bytes(rice::rice_encode(vals, bytepix, 32, &mut s.rice)),
             ImageCodec::Plio1 => TileCell::I16(plio::plio_encode(vals, vals.len())),
             ImageCodec::Hcompress1 => TileCell::Bytes(hcompress::hcompress_tile_encode(
                 vals,
                 &s.tile.tdims,
                 scale,
+                &mut s.hcompress,
             )?),
             // §10.4: store the tile's raw big-endian pixels, uncompressed.
             ImageCodec::NoCompress => TileCell::Bytes(i64_to_be(vals, bitpix)),
@@ -236,7 +241,6 @@ fn compress_float_image(
     let ntiles = if total == 0 { 0 } else { geom.ntiles() };
 
     let zdither0 = 1i64; // deterministic dither seed (any 1..=10000 is valid)
-    let int_bitpix = Bitpix::I32; // quantized planes are always int32
     let method = options.dither;
     let (gzip_level, qlevel) = (options.gzip_level, options.quantize_level);
 
@@ -259,20 +263,28 @@ fn compress_float_image(
             );
             let irow = t as i64 + zdither0; // = (1-based tile row) + ZDITHER0 - 1
             Ok(
-                match quantize::quantize_tile(&s.floats, nx, ny, qlevel, method, irow) {
+                match quantize::quantize_tile(
+                    &s.floats,
+                    nx,
+                    ny,
+                    qlevel,
+                    method,
+                    irow,
+                    &mut s.quantize,
+                ) {
                     Some(q) => {
-                        s.ints.clear();
-                        s.ints.extend(q.idata.iter().map(|&v| v as i64));
                         let bytes = match codec {
                             ImageCodec::Gzip1 => {
-                                i64_to_be_into(&s.ints, int_bitpix, &mut s.be);
+                                i32_to_be_into(&s.quantize.ints, &mut s.be);
                                 gzip::gzip_encode(&s.be, gzip_level)
                             }
                             ImageCodec::Gzip2 => {
-                                i64_to_be_into(&s.ints, int_bitpix, &mut s.be);
-                                gzip::gzip2_encode(&s.be, 4, gzip_level)
+                                i32_to_be_into(&s.quantize.ints, &mut s.be);
+                                gzip::gzip2_encode(&s.be, 4, gzip_level, &mut s.gzip)
                             }
-                            ImageCodec::Rice1 => rice::rice_encode(&s.ints, 4, 32),
+                            ImageCodec::Rice1 => {
+                                rice::rice_encode(&s.quantize.ints, 4, 32, &mut s.rice)
+                            }
                             _ => unreachable!(),
                         };
                         FloatTile {
@@ -284,13 +296,16 @@ fn compress_float_image(
                         }
                     }
                     // Constant tile: store the raw floats, gzip'd, in the fallback.
-                    None => FloatTile {
-                        bytes: gzip::gzip_encode(&float_to_be(&s.floats, zbitpix), gzip_level),
-                        zscale: 0.0,
-                        zzero: 0.0,
-                        quantized: false,
-                        has_null: false,
-                    },
+                    None => {
+                        float_to_be_into(&s.floats, zbitpix, &mut s.be);
+                        FloatTile {
+                            bytes: gzip::gzip_encode(&s.be, gzip_level),
+                            zscale: 0.0,
+                            zzero: 0.0,
+                            quantized: false,
+                            has_null: false,
+                        }
+                    }
                 },
             )
         },

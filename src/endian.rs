@@ -42,23 +42,6 @@ where
     }
 }
 
-/// Encode fixed-width values into a *fresh* big-endian byte buffer, e.g.
-/// `encode_be(values, i16::to_be_bytes)`. `conv` is a generic `Fn` for the same
-/// inlining/vectorization reason as [`decode_be`].
-///
-/// Only the compression codecs need the owning form (they build many small,
-/// independent per-tile buffers); the image and table writers append in place via
-/// [`extend_be`] into a reused buffer, so this is gated to where it is used.
-#[cfg(feature = "compression")]
-pub(crate) fn encode_be<const N: usize, T: Copy, F>(values: &[T], conv: F) -> Vec<u8>
-where
-    F: Fn(T) -> [u8; N],
-{
-    let mut out = Vec::new();
-    extend_be(&mut out, values, conv);
-    out
-}
-
 /// Append fixed-width values to `out` in big-endian order.
 ///
 /// Grows `out` once and writes each element into its `N`-byte slot, rather than a
@@ -118,8 +101,7 @@ mod tests {
             decode_be(&[0x00, 0x01, 0xFF, 0xFF], i16::from_be_bytes),
             vec![1i16, -1]
         );
-        // Encode direction via the always-compiled in-place primitive (the path the
-        // image/table writers use); `encode_be` is the same write into a fresh Vec.
+        // Encode direction via the in-place primitive the image/table writers use.
         let mut enc = Vec::new();
         extend_be(&mut enc, &[1i16, -1], i16::to_be_bytes);
         assert_eq!(enc, vec![0, 1, 0xFF, 0xFF]);

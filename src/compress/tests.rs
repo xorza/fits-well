@@ -1,5 +1,5 @@
 use crate::bitpix::Bitpix;
-use crate::compress::convert::{be_to_i64_into, i64_to_be, i64_to_be_into};
+use crate::compress::convert::{be_to_i64_into, i32_to_be_into, i64_to_be, i64_to_be_into};
 use crate::compress::geometry::{TileGeometry, TileScratch};
 use crate::compress::*;
 use crate::compress::{encode, gzip};
@@ -394,7 +394,7 @@ fn float_write_preserves_nan_nulls() {
 #[test]
 fn dither2_quantize_round_trips() {
     use crate::compress::DitherMethod;
-    use crate::compress::quantize::{ZERO_VALUE, dequantize_into, quantize_tile};
+    use crate::compress::quantize::{QuantizeScratch, ZERO_VALUE, dequantize_into, quantize_tile};
 
     // 8×8 field with genuine noise and a scattering of exact zeros.
     let mut data: Vec<f64> = (0..64)
@@ -408,12 +408,22 @@ fn dither2_quantize_round_trips() {
         data[k] = 0.0;
     }
     let irow = 7;
-    let q = quantize_tile(&data, 8, 8, 0.0, DitherMethod::Subtractive2, irow).unwrap();
+    let mut scratch = QuantizeScratch::default();
+    let q = quantize_tile(
+        &data,
+        8,
+        8,
+        0.0,
+        DitherMethod::Subtractive2,
+        irow,
+        &mut scratch,
+    )
+    .unwrap();
     // Exact zeros must encode to the reserved ZERO_VALUE.
     for &k in &[0usize, 13, 27, 40, 63] {
-        assert_eq!(q.idata[k], ZERO_VALUE, "zero pixel {k}");
+        assert_eq!(scratch.ints[k], ZERO_VALUE, "zero pixel {k}");
     }
-    let ints: Vec<i64> = q.idata.iter().map(|&v| v as i64).collect();
+    let ints: Vec<i64> = scratch.ints.iter().map(|&v| v as i64).collect();
     let mut back = Vec::new();
     dequantize_into(
         &ints,
@@ -434,6 +444,40 @@ fn dither2_quantize_round_trips() {
             );
         }
     }
+
+    // Nulls are skipped while retaining the finite-value order. The two third-order
+    // differences are |2·4 − 1 − 16| = 9 and |2·8 − 2 − 32| = 18; the lower row
+    // median is therefore 9, giving the exact qlevel=1 scale below.
+    let with_nulls = [
+        1.0,
+        f64::NAN,
+        2.0,
+        f64::INFINITY,
+        4.0,
+        8.0,
+        f64::NEG_INFINITY,
+        16.0,
+        32.0,
+    ];
+    let q = quantize_tile(
+        &with_nulls,
+        with_nulls.len(),
+        1,
+        1.0,
+        DitherMethod::None,
+        1,
+        &mut scratch,
+    )
+    .unwrap();
+    assert_eq!(q.bscale, 0.6052697 * 9.0);
+
+    // Native i32 Rice input must produce the identical bitstream as the former
+    // widened representation.
+    let widened: Vec<i64> = scratch.ints.iter().map(|&value| value as i64).collect();
+    let mut rice_scratch = rice::RiceScratch::default();
+    let native = rice::rice_encode(&scratch.ints, 4, 32, &mut rice_scratch);
+    let widened = rice::rice_encode(&widened, 4, 32, &mut rice_scratch);
+    assert_eq!(native, widened);
 }
 
 #[test]
@@ -1125,23 +1169,24 @@ fn hcompress_tile_rejects_dimension_mismatch() {
     // tile size it was handed — rather than allocate/transform `nx*ny` blindly
     // (a wild-allocation / overflow / empty-buffer-panic guard, R2-4).
     let vals: Vec<i64> = vec![10, 20, 30, 40, 50, 60];
-    let bytes = hcompress::hcompress_tile_encode(&vals, &[2, 3], 0).unwrap();
+    let mut scratch = hcompress::HcompressScratch::default();
+    let bytes = hcompress::hcompress_tile_encode(&vals, &[2, 3], 0, &mut scratch).unwrap();
     // The correct element count round-trips losslessly (scale 0).
     let mut out = Vec::new();
-    hcompress::hcompress_tile_into(&bytes, false, 6, &mut out).unwrap();
+    hcompress::hcompress_tile_into(&bytes, false, 6, &mut out, &mut scratch).unwrap();
     assert_eq!(out, vals);
     // A mismatched element count is rejected, not decoded.
-    assert!(hcompress::hcompress_tile_into(&bytes, false, 7, &mut out).is_err());
-    assert!(hcompress::hcompress_tile_into(&bytes, false, 5, &mut out).is_err());
+    assert!(hcompress::hcompress_tile_into(&bytes, false, 7, &mut out, &mut scratch).is_err());
+    assert!(hcompress::hcompress_tile_into(&bytes, false, 5, &mut out, &mut scratch).is_err());
 
-    let one = hcompress::hcompress_tile_encode(&[-7], &[1, 1], 0).unwrap();
-    hcompress::hcompress_tile_into(&one, false, 1, &mut out).unwrap();
+    let one = hcompress::hcompress_tile_encode(&[-7], &[1, 1], 0, &mut scratch).unwrap();
+    hcompress::hcompress_tile_into(&one, false, 1, &mut out, &mut scratch).unwrap();
     assert_eq!(out, [-7], "a 1x1 tile must skip its empty quadrants");
 
     for end in 0..one.len() {
         assert!(
             matches!(
-                hcompress::hcompress_tile_into(&one[..end], false, 1, &mut out),
+                hcompress::hcompress_tile_into(&one[..end], false, 1, &mut out, &mut scratch),
                 Err(crate::error::FitsError::UnexpectedEof)
                     | Err(crate::error::FitsError::UnsupportedCompression { .. })
             ),
@@ -1152,7 +1197,7 @@ fn hcompress_tile_rejects_dimension_mismatch() {
     let mut invalid_planes = one;
     invalid_planes[22] = 32;
     assert!(matches!(
-        hcompress::hcompress_tile_into(&invalid_planes, false, 1, &mut out),
+        hcompress::hcompress_tile_into(&invalid_planes, false, 1, &mut out, &mut scratch),
         Err(crate::error::FitsError::UnsupportedCompression { .. })
     ));
 }
@@ -1309,24 +1354,35 @@ fn gunzip_rejects_a_stream_larger_than_its_tile() {
     let big = vec![0u8; 100_000];
     let bomb = gzip::gzip_encode(&big, 9);
     assert!(bomb.len() < 1000, "an all-zero buffer compresses tiny");
+    let mut decoded = Vec::new();
     // Bounded at 1 KiB (a small tile): inflating to 100 KB overruns → error.
     assert!(matches!(
-        gzip::gunzip(&bomb, 1024),
+        gzip::gunzip_into(&bomb, 1024, &mut decoded),
         Err(FitsError::UnsupportedCompression { .. })
     ));
     // One byte short of the true size still overruns (the +1 detection boundary).
-    assert!(gzip::gunzip(&bomb, big.len() - 1).is_err());
+    assert!(gzip::gunzip_into(&bomb, big.len() - 1, &mut decoded).is_err());
     // Bounded at the true size: decodes to exactly the original bytes.
-    assert_eq!(gzip::gunzip(&bomb, big.len()).unwrap(), big);
+    gzip::gunzip_into(&bomb, big.len(), &mut decoded).unwrap();
+    assert_eq!(decoded, big);
 
     let short = gzip::gzip_encode(&[1, 2, 3], 1);
     assert!(matches!(
-        gzip::gunzip(&short, 4),
+        gzip::gunzip_into(&short, 4, &mut decoded),
         Err(FitsError::DataSizeMismatch {
             expected: 4,
             got: 3
         })
     ));
+
+    let raw = [1, 2, 3, 4, 5, 6];
+    let mut shuffled = Vec::new();
+    gzip::shuffle_bytes_into(&raw, 2, &mut shuffled);
+    assert_eq!(shuffled, [1, 3, 5, 2, 4, 6]);
+    gzip::unshuffle_bytes_into(&shuffled, 2, &mut decoded);
+    assert_eq!(decoded, raw);
+    gzip::shuffle_bytes_into(&raw, 1, &mut shuffled);
+    assert_eq!(shuffled, raw, "width-one shuffle is an exact no-op");
 }
 
 #[test]
@@ -1347,6 +1403,9 @@ fn i64_be_round_trip_and_buffer_reuse() {
         i64_to_be(&i32_vals, Bitpix::I32),
         [0x00, 0x01, 0x02, 0x03, 0xFF, 0xFF, 0xFF, 0xFF]
     );
+    let mut native_i32 = Vec::new();
+    i32_to_be_into(&[66051, -1], &mut native_i32);
+    assert_eq!(native_i32, [0x00, 0x01, 0x02, 0x03, 0xFF, 0xFF, 0xFF, 0xFF]);
     be_to_i64_into(&[0, 1, 2, 3, 0xFF, 0xFF, 0xFF, 0xFF], Bitpix::I32, &mut d);
     assert_eq!(d, i32_vals);
 
