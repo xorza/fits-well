@@ -7,15 +7,11 @@
 use crate::error::FitsError;
 use crate::error::Result;
 
-/// Encode `values` (one tile, `npix` non-negative mask pixels) as an IRAF PLIO
+/// Encode `values` (one tile of non-negative mask pixels) as an IRAF PLIO
 /// line list — a port of cfitsio's `pl_p2li` with `xs = 1`. The returned i16 list
 /// round-trips through [`plio_decode_be_into`]. Values outside `0..=0xFF_FFFF`
 /// are rejected because the format cannot preserve them.
-pub(crate) fn plio_encode(values: &[i64], npix: usize) -> Result<Vec<i16>> {
-    let values = values.get(..npix).ok_or(FitsError::DataSizeMismatch {
-        expected: npix,
-        got: values.len(),
-    })?;
+pub(crate) fn plio_encode(values: &[i64]) -> Result<Vec<i16>> {
     if let Some((index, &value)) = values
         .iter()
         .enumerate()
@@ -28,6 +24,7 @@ pub(crate) fn plio_encode(values: &[i64], npix: usize) -> Result<Vec<i16>> {
     // 30-bit-length form the decoder reads from words 4/5; index 2 (=7) is the
     // header length, so instructions begin at word 8.
     let mut ll: Vec<i16> = vec![0, 7, -100, 0, 0, 0, 0];
+    let npix = values.len();
     if npix == 0 {
         return Ok(ll);
     }

@@ -730,28 +730,51 @@ fn no_convergence(projection: Projection) -> FitsError {
     }
 }
 
-/// Invert the AIR radius for ζ given `u = R/(180/π)` (Newton).
-fn air_zeta(u: f64, theta_b: f64) -> Result<f64> {
-    let mut z = u.max(1e-6); // start near ζ ≈ u
+#[derive(Debug, Clone, Copy)]
+struct NewtonEvaluation {
+    residual: f64,
+    derivative: f64,
+}
+
+fn solve_newton(
+    projection: Projection,
+    initial: f64,
+    evaluate: impl Fn(f64) -> NewtonEvaluation,
+) -> Result<f64> {
+    let mut value = initial;
     for _ in 0..100 {
-        let f = air_radius_u(z, theta_b) - u;
-        if f.is_finite() && f.abs() <= NEWTON_RESIDUAL_TOLERANCE {
-            return Ok(z);
+        let evaluation = evaluate(value);
+        if evaluation.residual.is_finite() && evaluation.residual.abs() <= NEWTON_RESIDUAL_TOLERANCE
+        {
+            return Ok(value);
         }
-        let d = (air_radius_u(z + 1e-7, theta_b) - air_radius_u(z - 1e-7, theta_b)) / 2e-7;
-        if !d.is_finite() || d == 0.0 {
-            return Err(no_convergence(Projection::Air));
+        if !evaluation.residual.is_finite()
+            || !evaluation.derivative.is_finite()
+            || evaluation.derivative == 0.0
+        {
+            return Err(no_convergence(projection));
         }
-        let step = f / d;
-        z -= step;
-        if !step.is_finite() || !z.is_finite() {
-            return Err(no_convergence(Projection::Air));
-        }
-        if step.abs() < 1e-13 && (air_radius_u(z, theta_b) - u).abs() <= NEWTON_RESIDUAL_TOLERANCE {
-            return Ok(z);
+        let step = evaluation.residual / evaluation.derivative;
+        value -= step;
+        if !step.is_finite() || !value.is_finite() {
+            return Err(no_convergence(projection));
         }
     }
-    Err(no_convergence(Projection::Air))
+    let residual = evaluate(value).residual;
+    if residual.is_finite() && residual.abs() <= NEWTON_RESIDUAL_TOLERANCE {
+        Ok(value)
+    } else {
+        Err(no_convergence(projection))
+    }
+}
+
+/// Invert the AIR radius for ζ given `u = R/(180/π)` (Newton).
+fn air_zeta(u: f64, theta_b: f64) -> Result<f64> {
+    solve_newton(Projection::Air, u.max(1e-6), |zeta| NewtonEvaluation {
+        residual: air_radius_u(zeta, theta_b) - u,
+        derivative: (air_radius_u(zeta + 1e-7, theta_b) - air_radius_u(zeta - 1e-7, theta_b))
+            / 2e-7,
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -773,27 +796,13 @@ fn evaluate_zpn(zeta: f64, pv: &[f64; 21]) -> ZpnEvaluation {
 
 /// Invert the ZPN polynomial for ζ given `u = R/(180/π)` (Newton from ζ = u).
 fn zpn_zeta(u: f64, pv: &[f64; 21]) -> Result<f64> {
-    let mut z = u;
-    for _ in 0..100 {
-        let evaluation = evaluate_zpn(z, pv);
-        let residual = evaluation.value - u;
-        if residual.is_finite() && residual.abs() <= NEWTON_RESIDUAL_TOLERANCE {
-            return Ok(z);
+    solve_newton(Projection::Zpn, u, |zeta| {
+        let evaluation = evaluate_zpn(zeta, pv);
+        NewtonEvaluation {
+            residual: evaluation.value - u,
+            derivative: evaluation.derivative,
         }
-        if !evaluation.derivative.is_finite() || evaluation.derivative == 0.0 {
-            return Err(no_convergence(Projection::Zpn));
-        }
-        let step = residual / evaluation.derivative;
-        z -= step;
-        if !step.is_finite() || !z.is_finite() {
-            return Err(no_convergence(Projection::Zpn));
-        }
-        if step.abs() < 1e-14 && (evaluate_zpn(z, pv).value - u).abs() <= NEWTON_RESIDUAL_TOLERANCE
-        {
-            return Ok(z);
-        }
-    }
-    Err(no_convergence(Projection::Zpn))
+    })
 }
 
 fn mollweide_gamma(theta: f64) -> Result<f64> {
@@ -801,52 +810,21 @@ fn mollweide_gamma(theta: f64) -> Result<f64> {
         return Ok(theta.signum() * FRAC_PI_2);
     }
     let target = PI * theta.sin();
-    let mut gamma = theta;
-    for _ in 0..100 {
-        let residual = 2.0 * gamma + (2.0 * gamma).sin() - target;
-        if residual.is_finite() && residual.abs() <= NEWTON_RESIDUAL_TOLERANCE {
-            return Ok(gamma);
-        }
-        let derivative = 2.0 + 2.0 * (2.0 * gamma).cos();
-        if !derivative.is_finite() || derivative == 0.0 {
-            return Err(no_convergence(Projection::Mol));
-        }
-        let step = residual / derivative;
-        gamma -= step;
-        if !step.is_finite() || !gamma.is_finite() {
-            return Err(no_convergence(Projection::Mol));
-        }
-    }
-    Err(no_convergence(Projection::Mol))
+    solve_newton(Projection::Mol, theta, |gamma| NewtonEvaluation {
+        residual: 2.0 * gamma + (2.0 * gamma).sin() - target,
+        derivative: 2.0 + 2.0 * (2.0 * gamma).cos(),
+    })
 }
 
 fn pco_theta(x: f64, y: f64) -> Result<f64> {
-    let mut theta = y;
-    for _ in 0..100 {
+    solve_newton(Projection::Pco, y, |theta| {
         let delta = y - theta;
         let cotangent = 1.0 / theta.tan();
-        let residual = x * x + delta * delta - 2.0 * delta * cotangent;
-        if residual.is_finite() && residual.abs() <= NEWTON_RESIDUAL_TOLERANCE {
-            return Ok(theta);
+        NewtonEvaluation {
+            residual: x * x + delta * delta - 2.0 * delta * cotangent,
+            derivative: -2.0 * delta + 2.0 * cotangent + 2.0 * delta / theta.sin().powi(2),
         }
-        let derivative = -2.0 * delta + 2.0 * cotangent + 2.0 * delta / theta.sin().powi(2);
-        if !derivative.is_finite() || derivative == 0.0 {
-            return Err(no_convergence(Projection::Pco));
-        }
-        let step = residual / derivative;
-        theta -= step;
-        if !step.is_finite() || !theta.is_finite() {
-            return Err(no_convergence(Projection::Pco));
-        }
-        if step.abs() < 1e-13 {
-            let delta = y - theta;
-            let residual = x * x + delta * delta - 2.0 * delta / theta.tan();
-            if residual.abs() <= NEWTON_RESIDUAL_TOLERANCE {
-                return Ok(theta);
-            }
-        }
-    }
-    Err(no_convergence(Projection::Pco))
+    })
 }
 
 /// Immutable source metadata for one WCS axis.
