@@ -411,8 +411,7 @@ impl<S: Source> FitsReader<S> {
     #[cfg(feature = "compression")]
     pub fn read_compressed_table(&mut self, index: usize) -> Result<BinTable> {
         let table = self.read_table(index)?;
-        let header = self.hdus[index].header.clone();
-        let parts = uncompress_table(&header, &table)?;
+        let parts = uncompress_table(&self.hdus[index].header, &table)?;
         BinTable::from_data(&parts.header, parts.data)
     }
 

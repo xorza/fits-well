@@ -3,7 +3,7 @@ use super::geometry::{TileGeometry, TileScratch};
 use super::*;
 use crate::bitpix::Bitpix;
 use crate::data::ImageData;
-use crate::endian::push_pq_descriptor;
+use crate::endian::write_pq_descriptor;
 use crate::reader::{FitsReader, StreamReader};
 use crate::table::{ColumnData, TformKind};
 use std::fs::File;
@@ -1045,21 +1045,27 @@ fn plio_rejects_truncated_list_and_operand() {
     use crate::error::FitsError;
 
     let mut out = Vec::new();
+    let be = |words: &[i16]| {
+        words
+            .iter()
+            .flat_map(|word| word.to_be_bytes())
+            .collect::<Vec<_>>()
+    };
     let truncated_span = [0, 7, -100, 8, 0, 0, 0];
     assert!(matches!(
-        plio::plio_decode_into(&truncated_span, 1, &mut out),
+        plio::plio_decode_be_into(&be(&truncated_span), 1, &mut out),
         Err(FitsError::UnexpectedEof)
     ));
 
     let missing_absolute_high_word = [0, 0, 4, 0x1001];
     assert!(matches!(
-        plio::plio_decode_into(&missing_absolute_high_word, 1, &mut out),
+        plio::plio_decode_be_into(&be(&missing_absolute_high_word), 1, &mut out),
         Err(FitsError::UnexpectedEof)
     ));
 
     let invalid_opcode = [0, 0, 4, i16::MIN];
     assert!(matches!(
-        plio::plio_decode_into(&invalid_opcode, 1, &mut out),
+        plio::plio_decode_be_into(&be(&invalid_opcode), 1, &mut out),
         Err(FitsError::UnsupportedCompression { .. })
     ));
 }
@@ -1067,16 +1073,16 @@ fn plio_rejects_truncated_list_and_operand() {
 #[test]
 fn compressed_image_descriptor_switches_to_q_for_large_offsets() {
     // §10.1.3: a heap offset beyond the 32-bit P range needs a 64-bit Q descriptor.
-    let mut q = Vec::new();
-    push_pq_descriptor(&mut q, true, 3, u32::MAX as u64 + 8).unwrap();
+    let mut q = vec![0; 16];
+    write_pq_descriptor(&mut q, true, 3, u32::MAX as u64 + 8).unwrap();
     assert_eq!(q.len(), 16);
     assert_eq!(i64::from_be_bytes(q[0..8].try_into().unwrap()), 3);
     assert_eq!(
         i64::from_be_bytes(q[8..16].try_into().unwrap()),
         u32::MAX as i64 + 8
     );
-    let mut p = Vec::new();
-    push_pq_descriptor(&mut p, false, 3, 40).unwrap();
+    let mut p = vec![0; 8];
+    write_pq_descriptor(&mut p, false, 3, 40).unwrap();
     assert_eq!(p.len(), 8);
     assert_eq!(i32::from_be_bytes(p[4..8].try_into().unwrap()), 40);
 }
@@ -1212,6 +1218,15 @@ fn uncompress_table_rejects_overflowing_row_product() {
     assert!(matches!(
         uncompress_table(&h, &table),
         Err(FitsError::DataUnitOverflow)
+    ));
+
+    h.set("ZNAXIS1", 8).set("ZNAXIS2", 2);
+    assert!(matches!(
+        uncompress_table(&h, &table),
+        Err(FitsError::DataSizeMismatch {
+            expected: 2,
+            got: 1
+        })
     ));
 
     for keyword in ["ZNAXIS1", "ZNAXIS2", "ZTILELEN", "TFIELDS"] {
