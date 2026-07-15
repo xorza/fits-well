@@ -14,6 +14,10 @@ pub enum FitsError {
     InvalidValue {
         card: String,
     },
+    /// Text being written contains bytes outside FITS restricted ASCII (0x20–0x7e).
+    InvalidAscii {
+        context: &'static str,
+    },
     /// `BITPIX` held a value outside {8, 16, 32, 64, −32, −64}.
     InvalidBitpix {
         code: i64,
@@ -138,6 +142,12 @@ impl fmt::Display for FitsError {
             FitsError::InvalidValue { card } => {
                 write!(f, "cannot parse value field of card {card:?}")
             }
+            FitsError::InvalidAscii { context } => {
+                write!(
+                    f,
+                    "{context} contains characters outside FITS restricted ASCII"
+                )
+            }
             FitsError::InvalidBitpix { code } => write!(f, "invalid BITPIX value {code}"),
             FitsError::MissingEnd => write!(f, "header unit ended without an END record"),
             FitsError::MissingKeyword { name } => write!(f, "missing mandatory keyword {name}"),
@@ -260,6 +270,13 @@ mod tests {
         assert_eq!(
             FitsError::MissingKeyword { name: "NAXIS" }.to_string(),
             "missing mandatory keyword NAXIS"
+        );
+        assert_eq!(
+            FitsError::InvalidAscii {
+                context: "table cell"
+            }
+            .to_string(),
+            "table cell contains characters outside FITS restricted ASCII"
         );
     }
 

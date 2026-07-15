@@ -7,6 +7,7 @@
 //! reused `scratch`. [`FitsWriter::write_header`] / [`FitsWriter::write_data_unit`]
 //! are the low-level escape hatches for callers driving the layout themselves.
 
+use std::borrow::Cow;
 use std::io::Write;
 use std::ops::Range;
 
@@ -24,9 +25,11 @@ use crate::data::Image;
 use crate::data::shape_product;
 use crate::endian::extend_be;
 use crate::endian::push_pq_descriptor;
+use crate::endian::validate_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use crate::header::value::Value;
 use crate::keyword::key;
 #[cfg(feature = "compression")]
 use crate::table::BinTable;
@@ -38,7 +41,15 @@ const PLACEHOLDER_CHECKSUM: &str = "0000000000000000";
 
 /// Serialize a header unit: every card rendered to 80 bytes, the `END` record,
 /// then space padding to the next 2880-byte boundary.
-pub(crate) fn render_header(header: &Header) -> Vec<u8> {
+pub(crate) fn render_header(header: &Header) -> Result<Vec<u8>> {
+    for entry in header.iter() {
+        if let Some(Value::Text(text)) = entry.value {
+            validate_ascii(text, "header text value")?;
+        }
+        if let Some(comment) = entry.comment {
+            validate_ascii(comment, "header comment")?;
+        }
+    }
     let mut buf = Vec::with_capacity((header.cards.len() + 1) * CARD_SIZE);
     for card in &header.cards {
         for record in card.render_records() {
@@ -49,7 +60,7 @@ pub(crate) fn render_header(header: &Header) -> Vec<u8> {
     end[..3].copy_from_slice(b"END");
     buf.extend_from_slice(&end);
     pad_to_block(&mut buf, SPACE_FILL);
-    buf
+    Ok(buf)
 }
 
 /// Round `buf` up to a whole number of 2880-byte blocks using `fill`.
@@ -60,32 +71,52 @@ fn pad_to_block(buf: &mut Vec<u8>, fill: u8) {
     }
 }
 
-/// One column to write into a binary table: its name, optional unit, data, and
-/// the number of elements per row (`repeat`). For [`ColumnData::Text`], `repeat`
-/// is the fixed character width of the field.
-///
-/// When `vla` is `Some`, the column is written as a variable-length (`P`) array:
-/// each entry is one row's array and `data`/`repeat` are ignored (the element
-/// type comes from the first row, or from `data` if there are no rows).
+/// An element type accepted by a binary-table writer column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnType {
+    Logical,
+    Byte,
+    I16,
+    I32,
+    I64,
+    F32,
+    F64,
+    ComplexF32,
+    ComplexF64,
+    Text,
+}
+
+/// The mutually exclusive payload layouts of a binary-table writer column.
+#[derive(Debug, Clone)]
+enum WriteColumnData {
+    Fixed {
+        data: ColumnData,
+        repeat: usize,
+    },
+    Vla {
+        kind: ColumnType,
+        rows: Vec<ColumnData>,
+        wide: bool,
+    },
+    Bits {
+        bytes: Vec<u8>,
+        bit_count: usize,
+    },
+}
+
+/// One column to write into a binary table.
 #[derive(Debug, Clone)]
 pub struct WriteColumn {
-    pub name: String,
-    pub unit: Option<String>,
-    pub data: ColumnData,
-    pub repeat: usize,
-    pub vla: Option<Vec<ColumnData>>,
-    /// `TDIMn` array shape (fastest axis first) for a multidimensional column.
-    pub tdim: Option<Vec<usize>>,
-    /// Use 64-bit `Q` descriptors instead of 32-bit `P` for a VLA column.
-    pub wide: bool,
-    /// Bit count for an `X` (bit-array) column; `data` is the packed bytes.
-    pub bits: Option<usize>,
+    name: String,
+    unit: Option<String>,
+    values: WriteColumnData,
+    tdim: Option<Vec<usize>>,
     /// `TSCALn`/`TZEROn` to emit: `data` holds the stored values, and a reader's
     /// `ColumnReader::physical` recovers `TZEROn + TSCALn × stored`.
-    pub tscale: Option<f64>,
-    pub tzero: Option<f64>,
+    tscale: Option<f64>,
+    tzero: Option<f64>,
     /// `TNULLn`: the stored integer marking an undefined element.
-    pub tnull: Option<i64>,
+    tnull: Option<i64>,
 }
 
 impl WriteColumn {
@@ -94,49 +125,46 @@ impl WriteColumn {
         WriteColumn {
             name: name.into(),
             unit: None,
-            data,
-            repeat,
-            vla: None,
+            values: WriteColumnData::Fixed { data, repeat },
             tdim: None,
-            wide: false,
-            bits: None,
             tscale: None,
             tzero: None,
             tnull: None,
         }
     }
 
-    /// A variable-length (`P`, or `Q` via [`WriteColumn::wide`]) column: `rows[r]`
-    /// is row `r`'s array.
-    pub fn vla(name: impl Into<String>, rows: Vec<ColumnData>) -> WriteColumn {
-        // The element type tag for `data` is the first row's kind, or empty bytes.
-        let tag = rows
-            .first()
-            .cloned()
-            .unwrap_or(ColumnData::Bytes(Vec::new()));
-        // Every cell must share that type — `TFORMn` advertises the row-0 kind, so a
-        // mismatched cell would serialize bytes the reader decodes as the wrong type.
-        // Building columns is caller code, so a mixed-type VLA is a logic error.
+    /// A variable-length `P` column. `kind` states the heap element type even when
+    /// `rows` is empty; [`WriteColumn::wide`] changes the descriptors to `Q`.
+    pub fn vla(name: impl Into<String>, kind: ColumnType, rows: Vec<ColumnData>) -> WriteColumn {
         assert!(
-            rows.iter()
-                .all(|r| std::mem::discriminant(r) == std::mem::discriminant(&tag)),
-            "VLA column cells must all be the same ColumnData variant"
+            rows.iter().all(|row| kind.matches(row)),
+            "VLA column cells must match the declared ColumnType"
         );
         WriteColumn {
-            data: tag,
-            repeat: 0,
-            vla: Some(rows),
-            ..WriteColumn::fixed(name, ColumnData::Bytes(Vec::new()), 0)
+            name: name.into(),
+            unit: None,
+            values: WriteColumnData::Vla {
+                kind,
+                rows,
+                wide: false,
+            },
+            tdim: None,
+            tscale: None,
+            tzero: None,
+            tnull: None,
         }
     }
 
-    /// An `X` (bit-array) column of `nbits` bits per row, `data` the packed bytes
-    /// (`ceil(nbits/8)` per row). `repeat` is the byte width so the bytes pack
-    /// directly; `TFORMn` is rendered as `<nbits>X`.
-    pub fn bits(name: impl Into<String>, data: ColumnData, nbits: usize) -> WriteColumn {
+    /// An `X` column of `bit_count` bits per row and its row-packed bytes.
+    pub fn bits(name: impl Into<String>, bytes: Vec<u8>, bit_count: usize) -> WriteColumn {
         WriteColumn {
-            bits: Some(nbits),
-            ..WriteColumn::fixed(name, data, nbits.div_ceil(8))
+            name: name.into(),
+            unit: None,
+            values: WriteColumnData::Bits { bytes, bit_count },
+            tdim: None,
+            tscale: None,
+            tzero: None,
+            tnull: None,
         }
     }
 
@@ -154,7 +182,10 @@ impl WriteColumn {
 
     /// Use 64-bit `Q` descriptors for this VLA column.
     pub fn wide(mut self) -> WriteColumn {
-        self.wide = true;
+        let WriteColumnData::Vla { wide, .. } = &mut self.values else {
+            panic!("WriteColumn::wide requires a VLA column");
+        };
+        *wide = true;
         self
     }
 
@@ -225,7 +256,7 @@ impl<W: Write> FitsWriter<W> {
 
     /// Write a header unit (cards + `END` + block padding).
     pub fn write_header(&mut self, header: &Header) -> Result<()> {
-        self.sink.write_all(&render_header(header))?;
+        self.sink.write_all(&render_header(header)?)?;
         Ok(())
     }
 
@@ -268,23 +299,34 @@ impl<W: Write> FitsWriter<W> {
     /// never be the primary HDU). Fixed-width and variable-length (`P`) columns
     /// are both supported — VLA columns write a heap after the main table.
     pub fn write_table(&mut self, nrows: usize, columns: &[WriteColumn]) -> Result<()> {
-        self.ensure_primary()?;
+        let mut layouts = Vec::new();
+        allocation::try_reserve_exact(&mut layouts, columns.len())?;
         let mut row_len = 0usize;
         for col in columns {
+            let layout = validate_column(col, nrows)?;
             row_len = row_len
-                .checked_add(check_column(col, nrows)?)
+                .checked_add(layout.row_width)
                 .ok_or(FitsError::DataUnitOverflow)?;
+            layouts.push(layout);
         }
         // Build the heap (row-major) and the VLA descriptors first, so the main table
         // can carry the `P`/`Q` (count, offset) pairs. Descriptors are recorded in the
         // same row-major, column order the main-table pass emits them, so a single flat
         // queue (drained below) stays aligned without per-column bookkeeping.
         let descriptor_count = nrows
-            .checked_mul(columns.iter().filter(|col| col.vla.is_some()).count())
+            .checked_mul(
+                columns
+                    .iter()
+                    .filter(|col| matches!(&col.values, WriteColumnData::Vla { .. }))
+                    .count(),
+            )
             .ok_or(FitsError::DataUnitOverflow)?;
         let heap_len = columns
             .iter()
-            .filter_map(|col| col.vla.as_ref())
+            .filter_map(|col| match &col.values {
+                WriteColumnData::Vla { rows, .. } => Some(rows.as_slice()),
+                _ => None,
+            })
             .flatten()
             .try_fold(0usize, |len, cell| {
                 len.checked_add(cell_byte_len(cell)?)
@@ -296,21 +338,20 @@ impl<W: Write> FitsWriter<W> {
         allocation::try_reserve_exact(&mut descs, descriptor_count)?;
         for r in 0..nrows {
             for col in columns {
-                if let Some(rows) = &col.vla {
+                if let WriteColumnData::Vla { kind, rows, wide } = &col.values {
                     let cell = &rows[r];
-                    let (n, o) = (cell.element_count() as u64, heap.len() as u64);
-                    // A `P` (32-bit) descriptor can't address a count/offset past
-                    // u32::MAX; refuse rather than silently truncate into an
-                    // unreadable file. `WriteColumn::wide()` (a `Q` descriptor) is the
-                    // 64-bit path for >4 GiB heaps or huge cells.
-                    if !col.wide && (n > u32::MAX as u64 || o > u32::MAX as u64) {
-                        return Err(FitsError::DataUnitOverflow);
-                    }
-                    descs.push((n, o));
+                    let descriptor = Descriptor {
+                        count: encoded_element_count(*kind, cell)? as u64,
+                        offset: heap.len() as u64,
+                        wide: *wide,
+                    };
+                    validate_pq_descriptor(descriptor.wide, descriptor.count, descriptor.offset)?;
+                    descs.push(descriptor);
                     append_be(&mut heap, cell);
                 }
             }
         }
+        self.ensure_primary()?;
         // Main table: fixed cells inline, VLA columns as `P`/`Q` descriptors drained
         // in the same row-major order they were built. Built into the reused scratch,
         // with the heap appended after.
@@ -325,16 +366,22 @@ impl<W: Write> FitsWriter<W> {
         let mut descs = descs.into_iter();
         for r in 0..nrows {
             for col in columns {
-                if col.vla.is_some() {
-                    let (n, o) = descs.next().expect("one descriptor per VLA cell");
-                    push_pq_descriptor(&mut self.scratch, col.wide, n, o);
-                } else {
-                    pack_cell(&mut self.scratch, col, r);
+                match &col.values {
+                    WriteColumnData::Vla { .. } => {
+                        let descriptor = descs.next().expect("one descriptor per VLA cell");
+                        push_pq_descriptor(
+                            &mut self.scratch,
+                            descriptor.wide,
+                            descriptor.count,
+                            descriptor.offset,
+                        )?;
+                    }
+                    _ => pack_cell(&mut self.scratch, col, r),
                 }
             }
         }
         self.scratch.extend_from_slice(&heap);
-        let header = bintable_header(nrows, row_len, columns, heap.len())?;
+        let header = bintable_header(nrows, row_len, columns, &layouts, heap.len())?;
         self.write_hdu(header, ZERO_FILL)
     }
 
@@ -342,10 +389,11 @@ impl<W: Write> FitsWriter<W> {
     /// first if needed). Columns are packed left-to-right with no gaps; data is
     /// space-padded per §7.2.3.
     pub fn write_ascii_table(&mut self, nrows: usize, columns: &[AsciiWriteColumn]) -> Result<()> {
-        self.ensure_primary()?;
-        let mut tbcols = Vec::with_capacity(columns.len());
+        let mut tbcols = Vec::new();
+        allocation::try_reserve_exact(&mut tbcols, columns.len())?;
         let mut row_len = 0usize;
         for col in columns {
+            validate_ascii_column(col)?;
             let count = ascii_count(&col.data)?;
             if count != nrows {
                 return Err(FitsError::RowWidthMismatch {
@@ -363,6 +411,7 @@ impl<W: Write> FitsWriter<W> {
         let total_len = nrows
             .checked_mul(row_len)
             .ok_or(FitsError::DataUnitOverflow)?;
+        self.ensure_primary()?;
         allocation::try_reserve_exact(&mut self.scratch, total_len)?;
         for r in 0..nrows {
             for col in columns {
@@ -444,7 +493,7 @@ impl<W: Write> FitsWriter<W> {
             );
             header.set("CHECKSUM", PLACEHOLDER_CHECKSUM);
         }
-        let mut header_bytes = render_header(&header);
+        let mut header_bytes = render_header(&header)?;
         if self.checksum {
             // Re-sum with the zero placeholder, then encode the value that forces
             // the whole-HDU checksum to negative zero, and patch it in place.
@@ -541,6 +590,7 @@ fn bintable_header(
     nrows: usize,
     row_len: usize,
     columns: &[WriteColumn],
+    layouts: &[ColumnLayout],
     heap_len: usize,
 ) -> Result<Header> {
     let mut header = Header::new();
@@ -558,9 +608,9 @@ fn bintable_header(
     header
         .set("TFIELDS", fits_i64(columns.len())?)
         .comment("TFIELDS", "number of columns");
-    for (i, col) in columns.iter().enumerate() {
+    for (i, (col, layout)) in columns.iter().zip(layouts).enumerate() {
         let n = i + 1;
-        header.set(key!("TFORM{n}").as_str(), tform_of(col));
+        header.set(key!("TFORM{n}").as_str(), layout.tform.as_str());
         header.set(key!("TTYPE{n}").as_str(), col.name.as_str());
         if let Some(unit) = &col.unit {
             header.set(key!("TUNIT{n}").as_str(), unit.as_str());
@@ -582,101 +632,186 @@ fn bintable_header(
     Ok(header)
 }
 
-/// The `TFORMn` letter and element byte size for a column's data kind.
+#[derive(Debug)]
+struct ColumnLayout {
+    row_width: usize,
+    tform: String,
+}
+
 #[derive(Debug, Clone, Copy)]
-struct ColumnCode {
-    letter: char,
-    elem_size: usize,
+struct Descriptor {
+    count: u64,
+    offset: u64,
+    wide: bool,
 }
 
-fn column_code(data: &ColumnData) -> ColumnCode {
-    let (letter, elem_size) = match data {
-        ColumnData::Logical(_) => ('L', 1),
-        ColumnData::Bytes(_) => ('B', 1),
-        ColumnData::I16(_) => ('I', 2),
-        ColumnData::I32(_) => ('J', 4),
-        ColumnData::I64(_) => ('K', 8),
-        ColumnData::F32(_) => ('E', 4),
-        ColumnData::F64(_) => ('D', 8),
-        ColumnData::ComplexF32(_) => ('C', 8),
-        ColumnData::ComplexF64(_) => ('M', 16),
-        ColumnData::Text(_) => ('A', 1),
-    };
-    ColumnCode { letter, elem_size }
-}
-
-fn tform_of(col: &WriteColumn) -> String {
-    let code = column_code(&col.data).letter;
-    if let Some(nbits) = col.bits {
-        return format!("{nbits}X");
-    }
-    match &col.vla {
-        // `1P<code>(maxnelem)`, or `1Q…` for 64-bit descriptors.
-        Some(rows) => {
-            let max = rows
-                .iter()
-                .map(ColumnData::element_count)
-                .max()
-                .unwrap_or(0);
-            let p = if col.wide { 'Q' } else { 'P' };
-            format!("1{p}{code}({max})")
+impl ColumnType {
+    fn from_data(data: &ColumnData) -> ColumnType {
+        match data {
+            ColumnData::Logical(_) => ColumnType::Logical,
+            ColumnData::Bytes(_) => ColumnType::Byte,
+            ColumnData::I16(_) => ColumnType::I16,
+            ColumnData::I32(_) => ColumnType::I32,
+            ColumnData::I64(_) => ColumnType::I64,
+            ColumnData::F32(_) => ColumnType::F32,
+            ColumnData::F64(_) => ColumnType::F64,
+            ColumnData::ComplexF32(_) => ColumnType::ComplexF32,
+            ColumnData::ComplexF64(_) => ColumnType::ComplexF64,
+            ColumnData::Text(_) => ColumnType::Text,
         }
-        None => format!("{}{}", col.repeat, code),
+    }
+
+    fn matches(self, data: &ColumnData) -> bool {
+        self == ColumnType::from_data(data)
+    }
+
+    fn letter(self) -> char {
+        match self {
+            ColumnType::Logical => 'L',
+            ColumnType::Byte => 'B',
+            ColumnType::I16 => 'I',
+            ColumnType::I32 => 'J',
+            ColumnType::I64 => 'K',
+            ColumnType::F32 => 'E',
+            ColumnType::F64 => 'D',
+            ColumnType::ComplexF32 => 'C',
+            ColumnType::ComplexF64 => 'M',
+            ColumnType::Text => 'A',
+        }
+    }
+
+    fn elem_size(self) -> usize {
+        match self {
+            ColumnType::Logical | ColumnType::Byte | ColumnType::Text => 1,
+            ColumnType::I16 => 2,
+            ColumnType::I32 | ColumnType::F32 => 4,
+            ColumnType::I64 | ColumnType::F64 | ColumnType::ComplexF32 => 8,
+            ColumnType::ComplexF64 => 16,
+        }
     }
 }
 
-/// Validate a column against `nrows` and return its per-row byte width.
-fn check_column(col: &WriteColumn, nrows: usize) -> Result<usize> {
-    let elem = column_code(&col.data).elem_size;
-    if let Some(rows) = &col.vla {
-        if rows.len() != nrows {
-            return Err(FitsError::RowWidthMismatch {
-                computed: rows.len(),
-                declared: nrows,
-            });
-        }
-        // `P` descriptor = two 32-bit ints; `Q` = two 64-bit.
-        return Ok(if col.wide { 16 } else { 8 });
+fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
+    validate_ascii(&col.name, "binary column name")?;
+    if let Some(unit) = &col.unit {
+        validate_ascii(unit, "binary column unit")?;
     }
-    let expected = nrows
-        .checked_mul(col.repeat)
-        .ok_or(FitsError::DataUnitOverflow)?;
-    let mismatch = || FitsError::RowWidthMismatch {
-        computed: col.data.element_count(),
-        declared: expected,
-    };
-    match &col.data {
-        ColumnData::Text(v) => {
-            if v.len() != nrows {
+    match &col.values {
+        WriteColumnData::Fixed { data, repeat } => {
+            let kind = ColumnType::from_data(data);
+            let expected = nrows
+                .checked_mul(*repeat)
+                .ok_or(FitsError::DataUnitOverflow)?;
+            match data {
+                ColumnData::Text(values) => {
+                    if values.len() != nrows {
+                        return Err(FitsError::RowWidthMismatch {
+                            computed: values.len(),
+                            declared: nrows,
+                        });
+                    }
+                    for value in values {
+                        validate_ascii(value, "binary text cell")?;
+                    }
+                }
+                _ if data.element_count() != expected => {
+                    return Err(FitsError::RowWidthMismatch {
+                        computed: data.element_count(),
+                        declared: expected,
+                    });
+                }
+                _ => {}
+            }
+            validate_tdim(col.tdim.as_deref(), *repeat)?;
+            Ok(ColumnLayout {
+                row_width: repeat
+                    .checked_mul(kind.elem_size())
+                    .ok_or(FitsError::DataUnitOverflow)?,
+                tform: format!("{repeat}{}", kind.letter()),
+            })
+        }
+        WriteColumnData::Vla { kind, rows, wide } => {
+            if rows.len() != nrows {
                 return Err(FitsError::RowWidthMismatch {
-                    computed: v.len(),
+                    computed: rows.len(),
                     declared: nrows,
                 });
             }
-            Ok(col.repeat) // field width in bytes
-        }
-        _ => {
-            if col.data.element_count() != expected {
-                return Err(mismatch());
+            let mut max_elements = 0usize;
+            for cell in rows {
+                assert!(
+                    kind.matches(cell),
+                    "validated VLA kind must match every cell"
+                );
+                if let ColumnData::Text(values) = cell {
+                    for value in values {
+                        validate_ascii(value, "binary VLA text cell")?;
+                    }
+                }
+                let count = encoded_element_count(*kind, cell)?;
+                max_elements = max_elements.max(count);
+                validate_tdim(col.tdim.as_deref(), count)?;
             }
-            col.repeat
-                .checked_mul(elem)
-                .ok_or(FitsError::DataUnitOverflow)
+            let descriptor = if *wide { 'Q' } else { 'P' };
+            Ok(ColumnLayout {
+                row_width: if *wide { 16 } else { 8 },
+                tform: format!("1{descriptor}{}({max_elements})", kind.letter()),
+            })
+        }
+        WriteColumnData::Bits { bytes, bit_count } => {
+            let row_width = bit_count.div_ceil(8);
+            let expected = nrows
+                .checked_mul(row_width)
+                .ok_or(FitsError::DataUnitOverflow)?;
+            if bytes.len() != expected {
+                return Err(FitsError::RowWidthMismatch {
+                    computed: bytes.len(),
+                    declared: expected,
+                });
+            }
+            validate_tdim(col.tdim.as_deref(), *bit_count)?;
+            Ok(ColumnLayout {
+                row_width,
+                tform: format!("{bit_count}X"),
+            })
         }
     }
 }
 
 fn cell_byte_len(cell: &ColumnData) -> Result<usize> {
-    match cell {
-        ColumnData::Text(values) => values.iter().try_fold(0usize, |len, value| {
+    let kind = ColumnType::from_data(cell);
+    encoded_element_count(kind, cell)?
+        .checked_mul(kind.elem_size())
+        .ok_or(FitsError::DataUnitOverflow)
+}
+
+fn encoded_element_count(kind: ColumnType, cell: &ColumnData) -> Result<usize> {
+    assert!(kind.matches(cell), "column kind must match its data");
+    if let ColumnData::Text(values) = cell {
+        values.iter().try_fold(0usize, |len, value| {
             len.checked_add(value.len())
                 .ok_or(FitsError::DataUnitOverflow)
-        }),
-        _ => cell
-            .element_count()
-            .checked_mul(column_code(cell).elem_size)
-            .ok_or(FitsError::DataUnitOverflow),
+        })
+    } else {
+        Ok(cell.element_count())
     }
+}
+
+fn validate_tdim(shape: Option<&[usize]>, element_count: usize) -> Result<()> {
+    let Some(shape) = shape else {
+        return Ok(());
+    };
+    if shape.is_empty() || shape.contains(&0) {
+        return Err(FitsError::KeywordOutOfRange { name: "TDIMn" });
+    }
+    let product = shape
+        .iter()
+        .try_fold(1usize, |product, &len| product.checked_mul(len))
+        .ok_or(FitsError::DataUnitOverflow)?;
+    if product > element_count {
+        return Err(FitsError::KeywordOutOfRange { name: "TDIMn" });
+    }
+    Ok(())
 }
 
 /// Append `data[range]` to `out` as big-endian bytes, for every fixed numeric /
@@ -726,17 +861,25 @@ fn append_be(out: &mut Vec<u8>, cell: &ColumnData) {
 }
 
 fn pack_cell(out: &mut Vec<u8>, col: &WriteColumn, r: usize) {
-    let rep = col.repeat;
-    let base = r * rep;
-    match &col.data {
-        // `A`: the row's string, space-padded or truncated to the field width.
-        ColumnData::Text(v) => {
-            let bytes = v[r].as_bytes();
-            let n = bytes.len().min(rep);
-            out.extend_from_slice(&bytes[..n]);
-            out.extend(std::iter::repeat_n(b' ', rep - n));
+    match &col.values {
+        WriteColumnData::Fixed { data, repeat } => {
+            let base = r * *repeat;
+            match data {
+                ColumnData::Text(values) => {
+                    let bytes = values[r].as_bytes();
+                    let count = bytes.len().min(*repeat);
+                    out.extend_from_slice(&bytes[..count]);
+                    out.extend(std::iter::repeat_n(b' ', *repeat - count));
+                }
+                data => append_cells(out, data, base..base + *repeat),
+            }
         }
-        data => append_cells(out, data, base..base + rep),
+        WriteColumnData::Bits { bytes, bit_count } => {
+            let width = bit_count.div_ceil(8);
+            let start = r * width;
+            out.extend_from_slice(&bytes[start..start + width]);
+        }
+        WriteColumnData::Vla { .. } => unreachable!("VLA cells are descriptors"),
     }
 }
 
@@ -760,6 +903,41 @@ fn ascii_count(data: &ColumnData) -> Result<usize> {
         _ => Err(FitsError::InvalidValue {
             card: "ASCII table column must be Text, I64, or F64".to_string(),
         }),
+    }
+}
+
+fn validate_ascii_column(col: &AsciiWriteColumn) -> Result<()> {
+    validate_ascii(&col.name, "ASCII column name")?;
+    if let Some(unit) = &col.unit {
+        validate_ascii(unit, "ASCII column unit")?;
+    }
+    if let Some(marker) = &col.tnull {
+        validate_ascii(marker, "ASCII null marker")?;
+        if marker.is_empty() || marker.len() > col.width {
+            return Err(FitsError::KeywordOutOfRange { name: "TNULLn" });
+        }
+    }
+    match &col.data {
+        ColumnData::Text(values) => {
+            for value in values {
+                validate_ascii(value, "ASCII text cell")?;
+            }
+        }
+        ColumnData::F64(values)
+            if values.iter().any(|value| !value.is_finite()) && col.tnull.is_none() =>
+        {
+            return Err(FitsError::KeywordOutOfRange { name: "TNULLn" });
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_ascii(text: &str, context: &'static str) -> Result<()> {
+    if text.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
+        Ok(())
+    } else {
+        Err(FitsError::InvalidAscii { context })
     }
 }
 
@@ -823,13 +1001,18 @@ fn ascii_tform(col: &AsciiWriteColumn) -> String {
 /// overflow becomes `*` fill per §7.2.5).
 fn format_ascii_field(out: &mut Vec<u8>, col: &AsciiWriteColumn, r: usize) {
     let (text, left) = match &col.data {
-        ColumnData::Text(v) => (v[r].clone(), true),
-        ColumnData::I64(v) => (v[r].to_string(), false),
-        // A non-finite cell has no §7.2.5 real representation: write the TNULLn
-        // marker if set, else a blank field (which a reader takes as 0).
-        ColumnData::F64(v) if !v[r].is_finite() => (col.tnull.clone().unwrap_or_default(), false),
-        ColumnData::F64(v) => (format!("{:.*}", col.decimals, v[r]), false),
-        _ => (String::new(), true),
+        ColumnData::Text(values) => (Cow::Borrowed(values[r].as_str()), true),
+        ColumnData::I64(values) => (Cow::Owned(values[r].to_string()), false),
+        ColumnData::F64(values) if !values[r].is_finite() => (
+            Cow::Borrowed(
+                col.tnull
+                    .as_deref()
+                    .expect("non-finite ASCII cells require a validated null marker"),
+            ),
+            false,
+        ),
+        ColumnData::F64(values) => (Cow::Owned(format!("{:.*}", col.decimals, values[r])), false),
+        _ => unreachable!("ASCII column type was validated"),
     };
     let bytes = text.as_bytes();
     if bytes.len() > col.width {

@@ -23,7 +23,7 @@ fn identity() -> Scaling {
 }
 
 #[test]
-fn writer_rejects_overflowing_layouts() {
+fn writer_rejects_invalid_or_overflowing_layouts() {
     let image = Image {
         shape: vec![usize::MAX, 2],
         samples: ImageData::U8(Vec::new()),
@@ -57,6 +57,36 @@ fn writer_rejects_overflowing_layouts() {
         writer.write_ascii_table(0, &[ascii("A", usize::MAX), ascii("B", 1)]),
         Err(FitsError::DataUnitOverflow)
     ));
+
+    let invalid_bits = WriteColumn::bits("FLAGS", vec![0; 3], 12);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_table(2, &[invalid_bits]),
+        Err(FitsError::RowWidthMismatch {
+            computed: 3,
+            declared: 4
+        })
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
+
+    let invalid_tdim =
+        WriteColumn::fixed("VEC", ColumnData::I32(vec![1, 2, 3, 4]), 4).with_tdim(vec![5]);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_table(1, &[invalid_tdim]),
+        Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
+
+    let invalid_text = WriteColumn::fixed("NAME", ColumnData::Text(vec!["Véga".to_string()]), 4);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_table(1, &[invalid_text]),
+        Err(FitsError::InvalidAscii {
+            context: "binary text cell"
+        })
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
 
     #[cfg(target_pointer_width = "64")]
     {
@@ -108,7 +138,7 @@ fn writes_and_reads_back_variable_length_arrays() {
     ];
     let columns = vec![
         WriteColumn::fixed("ID", ColumnData::I32(vec![1, 2, 3]), 1),
-        WriteColumn::vla("DATA", vla_rows.clone()),
+        WriteColumn::vla("DATA", ColumnType::I32, vla_rows.clone()),
     ];
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     w.write_table(3, &columns).unwrap();
@@ -124,6 +154,23 @@ fn writes_and_reads_back_variable_length_arrays() {
             _ => panic!("expected I32 VLA cell, got {g:?}"),
         }
     }
+
+    let empty = [WriteColumn::vla("EMPTY", ColumnType::I64, Vec::new())];
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_table(0, &empty).unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let table = r.read_table(1).unwrap();
+    assert_eq!(
+        table.columns[0].tform.vla_elem,
+        Some(crate::table::TformKind::I64)
+    );
+    assert!(table.column_by_idx(0).unwrap().vla().unwrap().is_empty());
+}
+
+#[test]
+#[should_panic(expected = "VLA column cells must match the declared ColumnType")]
+fn vla_constructor_rejects_mixed_element_types() {
+    WriteColumn::vla("BAD", ColumnType::I16, vec![ColumnData::I32(vec![1])]);
 }
 
 #[test]
@@ -135,11 +182,20 @@ fn writes_tdim_q_vla_and_bit_columns() {
         // 64-bit Q VLA column.
         WriteColumn::vla(
             "QV",
+            ColumnType::I16,
             vec![ColumnData::I16(vec![7, 8, 9]), ColumnData::I16(vec![1])],
         )
         .wide(),
+        WriteColumn::vla(
+            "TXT",
+            ColumnType::Text,
+            vec![
+                ColumnData::Text(vec!["hello".into()]),
+                ColumnData::Text(vec!["a".into(), "bc".into()]),
+            ],
+        ),
         // 12-bit X column: 2 bytes/row.
-        WriteColumn::bits("FLAGS", ColumnData::Bytes(vec![0xAB, 0xC0, 0x12, 0x30]), 12),
+        WriteColumn::bits("FLAGS", vec![0xAB, 0xC0, 0x12, 0x30], 12),
     ];
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     w.write_table(2, &columns).unwrap();
@@ -155,9 +211,20 @@ fn writes_tdim_q_vla_and_bit_columns() {
         other => panic!("{other:?}"),
     }
     // X column: TFORM 12X, packed bytes preserved.
-    assert_eq!(t.columns[2].tform.kind, TformKind::Bit);
-    assert_eq!(t.columns[2].tform.repeat, 12);
-    match t.column_by_idx(2).unwrap().raw().unwrap() {
+    assert_eq!(r.hdus[1].header.get_text("TFORM3"), Some("1PA(5)"));
+    assert_eq!(t.columns[2].tform.repeat, 1);
+    assert_eq!(t.columns[2].tform.kind, TformKind::ArrayDesc32);
+    assert_eq!(t.columns[2].tform.vla_elem, Some(TformKind::Char));
+    assert_eq!(
+        t.column_by_idx(2).unwrap().vla().unwrap(),
+        vec![
+            ColumnData::Text(vec!["hello".into()]),
+            ColumnData::Text(vec!["abc".into()])
+        ]
+    );
+    assert_eq!(t.columns[3].tform.kind, TformKind::Bit);
+    assert_eq!(t.columns[3].tform.repeat, 12);
+    match t.column_by_idx(3).unwrap().raw().unwrap() {
         ColumnData::Bytes(b) => assert_eq!(b, vec![0xAB, 0xC0, 0x12, 0x30]),
         other => panic!("{other:?}"),
     }
@@ -255,7 +322,8 @@ fn rendered_header_is_block_aligned_and_ends_in_end_then_spaces() {
         "SIMPLE  =                    T",
         "BITPIX  =                    8",
         "NAXIS   =                    0",
-    ]));
+    ]))
+    .unwrap();
     assert_eq!(unit.len() % BLOCK_SIZE, 0);
     assert_eq!(unit.len(), BLOCK_SIZE); // 4 cards fit in one block
 
@@ -275,8 +343,19 @@ fn header_round_trips_through_render_and_parse() {
         "OBJECT  = 'O''Brien'",
         "COMMENT  a remark",
     ]);
-    let reparsed = Header::parse(&render_header(&original)).unwrap();
+    let reparsed = Header::parse(&render_header(&original).unwrap()).unwrap();
     assert_eq!(reparsed.cards, original.cards);
+
+    let mut invalid = Header::new();
+    invalid.set("OBJECT", "Véga");
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_header(&invalid),
+        Err(FitsError::InvalidAscii {
+            context: "header text value"
+        })
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
 }
 
 #[test]
@@ -406,11 +485,11 @@ fn written_file_reads_back_with_matching_boundaries() {
 #[test]
 fn vla_descriptor_q_form_carries_full_64_bit_count_and_offset() {
     // A `Q` (wide) descriptor must not truncate count/offset to 32 bits — that is
-    // the whole reason to choose `Q` over `P` (heaps/counts beyond 4 GiB).
+    // the whole reason to choose `Q` over `P` (heaps/counts beyond i32::MAX).
     let count = u32::MAX as u64 + 5; // does not fit in u32
     let offset = 0x3_0000_0002u64;
     let mut q = Vec::new();
-    push_pq_descriptor(&mut q, true, count, offset);
+    push_pq_descriptor(&mut q, true, count, offset).unwrap();
     assert_eq!(q.len(), 16);
     assert_eq!(
         i64::from_be_bytes(q[0..8].try_into().unwrap()),
@@ -423,10 +502,22 @@ fn vla_descriptor_q_form_carries_full_64_bit_count_and_offset() {
 
     // The 32-bit `P` form packs two i32s.
     let mut p = Vec::new();
-    push_pq_descriptor(&mut p, false, 7, 40);
+    push_pq_descriptor(&mut p, false, 7, 40).unwrap();
     assert_eq!(p.len(), 8);
     assert_eq!(i32::from_be_bytes(p[0..4].try_into().unwrap()), 7);
     assert_eq!(i32::from_be_bytes(p[4..8].try_into().unwrap()), 40);
+
+    let mut rejected = Vec::new();
+    assert!(matches!(
+        push_pq_descriptor(&mut rejected, false, i32::MAX as u64 + 1, 0),
+        Err(FitsError::DataUnitOverflow)
+    ));
+    assert!(rejected.is_empty());
+    assert!(matches!(
+        push_pq_descriptor(&mut rejected, true, i64::MAX as u64 + 1, 0),
+        Err(FitsError::DataUnitOverflow)
+    ));
+    assert!(rejected.is_empty());
 }
 
 #[test]

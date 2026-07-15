@@ -100,7 +100,7 @@ pub use time::{
     TimeScale,
 };
 pub use wcs::{Projection, Wcs};
-pub use writer::{AsciiWriteColumn, FitsWriter, WriteColumn};
+pub use writer::{AsciiWriteColumn, ColumnType, FitsWriter, WriteColumn};
 
 pub use block::{BLOCK_SIZE, CARD_SIZE};
 

@@ -152,7 +152,7 @@ fn ascii_column_index_is_case_insensitive() {
 
 #[test]
 fn ascii_table_round_trips_through_write_and_read() {
-    let columns = vec![
+    let mut columns = vec![
         AsciiWriteColumn {
             name: "NAME".into(),
             unit: None,
@@ -203,6 +203,16 @@ fn ascii_table_round_trips_through_write_and_read() {
         t.column_by_idx(2).unwrap().raw().unwrap(),
         ColumnData::F64(vec![1.5, -2.25])
     );
+
+    columns[0].data = ColumnData::Text(vec!["café".into(), "beta".into()]);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_ascii_table(2, &columns),
+        Err(FitsError::InvalidAscii {
+            context: "ASCII text cell"
+        })
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
 }
 
 #[test]
@@ -310,6 +320,25 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     let flux = t.column_by_idx(1).unwrap().physical().unwrap();
     assert_eq!(flux[0], 1.5);
     assert!(flux[1].is_nan());
+
+    for marker in [None, Some(""), Some("TOO-LONG")] {
+        let invalid = [AsciiWriteColumn {
+            name: "BAD".into(),
+            unit: None,
+            data: ColumnData::F64(vec![f64::NAN]),
+            width: 4,
+            decimals: 1,
+            tscale: None,
+            tzero: None,
+            tnull: marker.map(str::to_string),
+        }];
+        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+        assert!(matches!(
+            writer.write_ascii_table(1, &invalid),
+            Err(FitsError::KeywordOutOfRange { name: "TNULLn" })
+        ));
+        assert!(writer.into_inner().into_inner().is_empty());
+    }
 }
 
 #[test]
