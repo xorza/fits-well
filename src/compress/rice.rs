@@ -1,6 +1,8 @@
 //! `RICE_1` tile codec (a port of cfitsio's `fits_rdecomp` bitstream layout).
 
 use crate::bitpix::Bitpix;
+use crate::error::FitsError;
+use crate::error::Result;
 use crate::header::Header;
 use crate::keyword::key;
 
@@ -38,7 +40,11 @@ pub(super) fn rice_decode_into(
     bytepix: usize,
     blocksize: usize,
     out: &mut Vec<i64>,
-) {
+) -> Result<()> {
+    out.clear();
+    if nx == 0 {
+        return Ok(());
+    }
     let nbits_pp = (8 * bytepix) as u32;
     let (fsbits, fsmax) = match bytepix {
         1 => (3u32, 6u32),
@@ -52,20 +58,19 @@ pub(super) fn rice_decode_into(
     };
 
     let mut br = BitReader::new(bytes);
-    let mut lastpix = br.read(nbits_pp); // literal first pixel (big-endian)
-    out.clear();
+    let mut lastpix = br.read(nbits_pp)?; // literal first pixel (big-endian)
     out.reserve(nx);
     let mut i = 0;
     while i < nx {
-        let fs = br.read(fsbits) as i64 - 1;
+        let fs = br.read(fsbits)? as i64 - 1;
         let imax = (i + blocksize).min(nx);
         for _ in i..imax {
             let diff = if fs < 0 {
                 0
             } else if fs as u32 == fsmax {
-                br.read(nbits_pp) // uncompressed block
+                br.read(nbits_pp)? // uncompressed block
             } else {
-                (br.read_zeros() << fs) | br.read(fs as u32)
+                (br.read_zeros()? << fs) | br.read(fs as u32)?
             };
             // Undo the zigzag mapping, then the differencing (modular at pixel width).
             let d = if diff & 1 == 1 {
@@ -78,6 +83,7 @@ pub(super) fn rice_decode_into(
         }
         i = imax;
     }
+    Ok(())
 }
 
 /// Interpret the low `nbits` of `v` as a two's-complement signed value.
@@ -269,57 +275,49 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// Read `n` bits (MSB-first, `n ≤ 32`); past end-of-input reads as zero bits.
-    pub(super) fn read(&mut self, n: u32) -> u64 {
+    /// Read `n` bits (MSB-first, `n ≤ 32`).
+    pub(super) fn read(&mut self, n: u32) -> Result<u64> {
         if self.nbits < n {
-            self.fill();
+            self.fill(n)?;
         }
         self.nbits -= n;
         let mask = if n >= 64 { u64::MAX } else { (1u64 << n) - 1 };
-        (self.acc >> self.nbits) & mask
+        Ok((self.acc >> self.nbits) & mask)
     }
 
-    /// Top up the accumulator so a subsequent `read` of up to 32 bits needs no
-    /// refill, or the input is exhausted (past which bytes read as zero). Loads a
-    /// whole 8-byte word at once when the accumulator is empty and a word remains —
-    /// the common mid-stream case — instead of eight separate bounds-checked loads.
+    /// Top up the accumulator to `needed` bits, loading a whole word in the common
+    /// aligned case.
     #[inline]
-    fn fill(&mut self) {
+    fn fill(&mut self, needed: u32) -> Result<()> {
         if self.nbits == 0 && self.pos + 8 <= self.bytes.len() {
             let word = self.bytes[self.pos..self.pos + 8].try_into().unwrap();
             self.acc = u64::from_be_bytes(word);
             self.pos += 8;
             self.nbits = 64;
-            return;
+            return Ok(());
         }
-        // Load whole bytes until another would overflow the 64-bit accumulator;
-        // that leaves ≥ 57 bits, enough for any single ≤ 32-bit read.
-        while self.nbits <= 56 {
-            let byte = self.bytes.get(self.pos).copied().unwrap_or(0);
+        while self.nbits < needed {
+            let byte = self
+                .bytes
+                .get(self.pos)
+                .copied()
+                .ok_or(FitsError::UnexpectedEof)?;
             self.pos += 1;
             self.acc = (self.acc << 8) | byte as u64;
             self.nbits += 8;
         }
+        Ok(())
     }
 
     /// Count and consume leading zero bits up to (and including) the next 1.
     ///
     /// Scans the zero run a whole word at a time via `leading_zeros` rather than one
     /// `read(1)` per bit — the unary quotient decode is the hot path of Rice decode.
-    /// Stops once the real input is exhausted (a truncated tile with no terminating
-    /// 1 bit would otherwise loop forever — a DoS on untrusted bytes); the exact
-    /// count past EOF is unspecified (the data is corrupt), only termination matters.
-    pub(super) fn read_zeros(&mut self) -> u64 {
+    pub(super) fn read_zeros(&mut self) -> Result<u64> {
         let mut z = 0u64;
         loop {
             if self.nbits == 0 {
-                // Refill one byte; at EOF there is no terminating 1 bit, so stop.
-                if self.pos >= self.bytes.len() {
-                    return z;
-                }
-                self.acc = (self.acc << 8) | self.bytes[self.pos] as u64;
-                self.pos += 1;
-                self.nbits += 8;
+                self.fill(1)?;
             }
             // Left-align the valid low `nbits` bits so the next-to-read bit is the
             // MSB, then count zeros up to the first 1 (capped at the valid bits, since
@@ -330,7 +328,7 @@ impl<'a> BitReader<'a> {
             if run < self.nbits {
                 // Terminating 1 found within the valid bits: consume the zeros + the 1.
                 self.nbits -= run + 1;
-                return z + run as u64;
+                return Ok(z + run as u64);
             }
             // All valid bits were zero: consume them and refill on the next pass.
             z += self.nbits as u64;
@@ -342,49 +340,49 @@ impl<'a> BitReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::BitReader;
+    use crate::error::FitsError;
 
     #[test]
     fn bit_reader_reads_msb_first() {
         let mut br = BitReader::new(&[0b1011_0010, 0b1111_0000]);
-        assert_eq!(br.read(1), 1);
-        assert_eq!(br.read(3), 0b011);
-        assert_eq!(br.read(4), 0b0010);
-        assert_eq!(br.read(4), 0b1111);
+        assert_eq!(br.read(1).unwrap(), 1);
+        assert_eq!(br.read(3).unwrap(), 0b011);
+        assert_eq!(br.read(4).unwrap(), 0b0010);
+        assert_eq!(br.read(4).unwrap(), 0b1111);
     }
 
     #[test]
     fn read_zeros_counts_runs_across_bytes_and_leftover_bits() {
         // MSB-first. 0x00 0x80 = 0000_0000 1000_0000: an 8-bit zero run spanning the
         // first byte, terminated by the leading 1 of the second (exercises the
-        // cross-byte refill mid-run). Consumes 9 bits, leaving 7 trailing zeros which
-        // then hit EOF and stop (count past EOF is unspecified — here the 7 zeros).
+        // cross-byte refill mid-run). Consumes 9 bits, leaving 7 unterminated zeros.
         let mut br = BitReader::new(&[0x00, 0x80]);
-        assert_eq!(br.read_zeros(), 8);
-        assert_eq!(br.read_zeros(), 7);
+        assert_eq!(br.read_zeros().unwrap(), 8);
+        assert!(matches!(br.read_zeros(), Err(FitsError::UnexpectedEof)));
 
         // 0x01 = 0000_0001: 7 zeros then a 1, entirely within one byte.
         let mut br = BitReader::new(&[0x01]);
-        assert_eq!(br.read_zeros(), 7);
+        assert_eq!(br.read_zeros().unwrap(), 7);
 
         // Leftover bits before a run: read(4) leaves 4 valid bits, then read_zeros
         // works from them. 0x08 = 0000_1000 → high nibble 0, then the '1' is next
         // (run 0); 0x40 = 0100_0000 → 3 trailing zeros of byte0 + 1 zero → run 4.
         let mut br = BitReader::new(&[0x08, 0x40]);
-        assert_eq!(br.read(4), 0);
-        assert_eq!(br.read_zeros(), 0);
-        assert_eq!(br.read_zeros(), 4);
+        assert_eq!(br.read(4).unwrap(), 0);
+        assert_eq!(br.read_zeros().unwrap(), 0);
+        assert_eq!(br.read_zeros().unwrap(), 4);
     }
 
     #[test]
-    fn truncated_stream_terminates_instead_of_hanging() {
+    fn truncated_stream_is_rejected() {
         // A stream that enters a Rice zero-run (fs = 0) but ends before the
         // terminating 1-bit. byte0 is the literal first pixel; byte1 = 0b001_00000
         // gives the 3-bit fs field `001` (→ fs = 0), after which only zero bits
-        // remain and `read` zero-fills past EOF. Without the exhaustion guard in
-        // `read_zeros` this would spin forever; the decode must return (here, two
-        // bounded values) — reaching this assert at all is the guarantee.
+        // remain. The unary code has no terminating 1 and must report EOF.
         let mut out = Vec::new();
-        super::rice_decode_into(&[0x00, 0x20], 2, 1, 32, &mut out);
-        assert_eq!(out.len(), 2);
+        assert!(matches!(
+            super::rice_decode_into(&[0x00, 0x20], 2, 1, 32, &mut out),
+            Err(FitsError::UnexpectedEof)
+        ));
     }
 }

@@ -62,21 +62,22 @@ pub(super) fn unshuffle_bytes(shuffled: &[u8], width: usize) -> Vec<u8> {
     out
 }
 
-/// Inflate a gzip stream, capping the output at `max_out` bytes — the tile's known
-/// decompressed size. A stream that expands past that (a decompression bomb in an
-/// untrusted file) is rejected rather than driving an unbounded allocation; a shorter
-/// result is left to the caller's downstream size handling (lenient for image tiles,
-/// exact-checked for table columns).
-pub(super) fn gunzip(bytes: &[u8], max_out: usize) -> Result<Vec<u8>> {
+/// Inflate a gzip stream to its exact declared size. Reading one byte past the
+/// expected size detects expansion bombs without allowing an unbounded allocation.
+pub(super) fn gunzip(bytes: &[u8], expected: usize) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    // Read at most one byte past the limit: getting that extra byte proves the stream
-    // is larger than the tile claims to be, so reject it.
     GzDecoder::new(bytes)
-        .take(max_out.saturating_add(1) as u64)
+        .take(expected.saturating_add(1) as u64)
         .read_to_end(&mut out)?;
-    if out.len() > max_out {
+    if out.len() > expected {
         return Err(FitsError::UnsupportedCompression {
             name: "gzip tile expands beyond its declared tile size".to_string(),
+        });
+    }
+    if out.len() != expected {
+        return Err(FitsError::DataSizeMismatch {
+            expected,
+            got: out.len(),
         });
     }
     Ok(out)

@@ -235,15 +235,21 @@ impl BitOutput {
         let ny2 = ny.div_ceil(2);
         self.start_outputing_bits();
         self.qtree_encode(&a[0..], ny, nx2, ny2, nbitplanes[0] as i32);
-        self.qtree_encode(&a[ny2..], ny, nx2, ny / 2, nbitplanes[1] as i32);
-        self.qtree_encode(&a[ny * nx2..], ny, nx / 2, ny2, nbitplanes[1] as i32);
-        self.qtree_encode(
-            &a[ny * nx2 + ny2..],
-            ny,
-            nx / 2,
-            ny / 2,
-            nbitplanes[2] as i32,
-        );
+        if ny / 2 > 0 {
+            self.qtree_encode(&a[ny2..], ny, nx2, ny / 2, nbitplanes[1] as i32);
+        }
+        if nx / 2 > 0 {
+            self.qtree_encode(&a[ny * nx2..], ny, nx / 2, ny2, nbitplanes[1] as i32);
+        }
+        if nx / 2 > 0 && ny / 2 > 0 {
+            self.qtree_encode(
+                &a[ny * nx2 + ny2..],
+                ny,
+                nx / 2,
+                ny / 2,
+                nbitplanes[2] as i32,
+            );
+        }
         self.output_nybble(0);
         self.done_outputing_bits();
     }
@@ -671,70 +677,67 @@ impl<'a> BitInput<'a> {
         }
     }
 
-    fn byte(&mut self) -> i32 {
-        let b = self.data.get(self.pos).copied().unwrap_or(0) as i32;
+    fn byte(&mut self) -> Result<i32> {
+        let b = i32::from(
+            self.data
+                .get(self.pos)
+                .copied()
+                .ok_or(FitsError::UnexpectedEof)?,
+        );
         self.pos += 1;
-        b
+        Ok(b)
     }
 
-    fn read_bytes(&mut self, n: usize) -> Vec<u8> {
+    fn read_bytes(&mut self, n: usize) -> Result<&'a [u8]> {
+        let end = self.pos.checked_add(n).ok_or(FitsError::UnexpectedEof)?;
         let out = self
             .data
-            .get(self.pos..self.pos + n)
-            .unwrap_or(&[])
-            .to_vec();
-        self.pos += n;
-        out
+            .get(self.pos..end)
+            .ok_or(FitsError::UnexpectedEof)?;
+        self.pos = end;
+        Ok(out)
     }
 
-    fn readint(&mut self) -> i32 {
-        let mut a = self.byte();
-        for _ in 1..4 {
-            a = (a << 8) + self.byte();
-        }
-        a
+    fn readint(&mut self) -> Result<i32> {
+        Ok(i32::from_be_bytes(self.read_bytes(4)?.try_into().unwrap()))
     }
 
-    fn readlonglong(&mut self) -> i64 {
-        let mut a = self.byte() as i64;
-        for _ in 1..8 {
-            a = (a << 8) + self.byte() as i64;
-        }
-        a
+    fn readlonglong(&mut self) -> Result<i64> {
+        Ok(i64::from_be_bytes(self.read_bytes(8)?.try_into().unwrap()))
     }
 
     fn start_inputing_bits(&mut self) {
         self.bits_to_go = 0;
     }
 
-    fn input_bit(&mut self) -> i32 {
+    fn input_bit(&mut self) -> Result<i32> {
         if self.bits_to_go == 0 {
-            self.buffer = self.byte();
+            self.buffer = self.byte()?;
             self.bits_to_go = 8;
         }
         self.bits_to_go -= 1;
-        (self.buffer >> self.bits_to_go) & 1
+        Ok((self.buffer >> self.bits_to_go) & 1)
     }
 
-    fn input_nbits(&mut self, n: i32) -> i32 {
+    fn input_nbits(&mut self, n: i32) -> Result<i32> {
         if self.bits_to_go < n {
-            self.buffer = (self.buffer << 8) | self.byte();
+            self.buffer = (self.buffer << 8) | self.byte()?;
             self.bits_to_go += 8;
         }
         self.bits_to_go -= n;
-        (self.buffer >> self.bits_to_go) & ((1 << n) - 1)
+        Ok((self.buffer >> self.bits_to_go) & ((1 << n) - 1))
     }
 
-    fn input_nybble(&mut self) -> i32 {
+    fn input_nybble(&mut self) -> Result<i32> {
         self.input_nbits(4)
     }
 
     /// Read `n` 4-bit nybbles into `array` (faithful to cfitsio's byte-aligned
     /// fast path, including the one-byte backspace).
-    fn input_nnybble(&mut self, n: usize, array: &mut [u8]) {
+    fn input_nnybble(&mut self, n: usize, array: &mut [u8]) -> Result<()> {
         if n == 1 {
-            array[0] = self.input_nybble() as u8;
-            return;
+            array[0] = self.input_nybble()? as u8;
+            return Ok(());
         }
         if self.bits_to_go == 8 {
             self.pos -= 1;
@@ -746,50 +749,55 @@ impl<'a> BitInput<'a> {
         let pairs = n / 2;
         if self.bits_to_go == 0 {
             for _ in 0..pairs {
-                self.buffer = (self.buffer << 8) | self.byte();
+                self.buffer = (self.buffer << 8) | self.byte()?;
                 array[kk] = ((self.buffer >> 4) & 15) as u8;
                 array[kk + 1] = (self.buffer & 15) as u8;
                 kk += 2;
             }
         } else {
             for _ in 0..pairs {
-                self.buffer = (self.buffer << 8) | self.byte();
+                self.buffer = (self.buffer << 8) | self.byte()?;
                 array[kk] = ((self.buffer >> shift1) & 15) as u8;
                 array[kk + 1] = ((self.buffer >> shift2) & 15) as u8;
                 kk += 2;
             }
         }
         if pairs * 2 != n {
-            array[n - 1] = self.input_nybble() as u8;
+            array[n - 1] = self.input_nybble()? as u8;
         }
+        Ok(())
     }
 
     /// Huffman decode a fixed code into a value 0–15, via a single 6-bit peek and a
     /// [`HUFFMAN_DECODE`] table lookup — no per-bit branch walk. The longest code is
     /// 6 bits, so one refill guarantees enough buffered bits; only the code's actual
     /// length is consumed.
-    fn input_huffman(&mut self) -> u8 {
+    fn input_huffman(&mut self) -> Result<u8> {
         if self.bits_to_go < 6 {
-            self.buffer = (self.buffer << 8) | self.byte();
+            self.buffer = (self.buffer << 8) | self.byte()?;
             self.bits_to_go += 8;
         }
         let peek = ((self.buffer >> (self.bits_to_go - 6)) & 0x3F) as usize;
         let (value, len) = HUFFMAN_DECODE[peek];
         self.bits_to_go -= len;
-        value
+        Ok(value)
     }
 }
 
 /// Top-level: header → quadtree decode → undigitize → inverse H-transform.
 fn hdecompress(input: &[u8], smooth: bool, tile_elems: usize) -> Result<Vec<i32>> {
     let mut bi = BitInput::new(input);
-    if bi.read_bytes(2) != MAGIC {
+    if bi.read_bytes(2)? != MAGIC {
         return Err(FitsError::UnsupportedCompression {
             name: "HCOMPRESS_1: bad magic".to_string(),
         });
     }
-    let nx = bi.readint() as usize;
-    let ny = bi.readint() as usize;
+    let nx = usize::try_from(bi.readint()?).map_err(|_| FitsError::UnsupportedCompression {
+        name: "HCOMPRESS_1: negative tile dimension".to_string(),
+    })?;
+    let ny = usize::try_from(bi.readint()?).map_err(|_| FitsError::UnsupportedCompression {
+        name: "HCOMPRESS_1: negative tile dimension".to_string(),
+    })?;
     // nx/ny come from the untrusted stream; cross-check them against the tile's
     // known element count before allocating/transforming. cfitsio sizes from these
     // blindly — guarding here stops a hostile header from driving a wild `nx*ny`
@@ -799,9 +807,14 @@ fn hdecompress(input: &[u8], smooth: bool, tile_elems: usize) -> Result<Vec<i32>
             name: "HCOMPRESS_1: tile dimensions do not match the tile size".to_string(),
         });
     }
-    let scale = bi.readint();
-    let sumall = bi.readlonglong();
-    let nbitplanes = bi.read_bytes(3);
+    let scale = bi.readint()?;
+    let sumall = bi.readlonglong()?;
+    let nbitplanes: [u8; 3] = bi.read_bytes(3)?.try_into().unwrap();
+    if nbitplanes.iter().any(|&n| n > 31) {
+        return Err(FitsError::UnsupportedCompression {
+            name: "HCOMPRESS_1: invalid bit-plane count".to_string(),
+        });
+    }
 
     let mut a = vec![0i32; tile_elems];
     dodecode(&mut bi, &mut a, nx, ny, &nbitplanes)?;
@@ -834,25 +847,31 @@ fn dodecode(
 
     bi.start_inputing_bits();
     qtree_decode(bi, &mut a[0..], ny, nx2, ny2, nbitplanes[0] as i32)?;
-    qtree_decode(bi, &mut a[ny2..], ny, nx2, ny / 2, nbitplanes[1] as i32)?;
-    qtree_decode(
-        bi,
-        &mut a[ny * nx2..],
-        ny,
-        nx / 2,
-        ny2,
-        nbitplanes[1] as i32,
-    )?;
-    qtree_decode(
-        bi,
-        &mut a[ny * nx2 + ny2..],
-        ny,
-        nx / 2,
-        ny / 2,
-        nbitplanes[2] as i32,
-    )?;
+    if ny / 2 > 0 {
+        qtree_decode(bi, &mut a[ny2..], ny, nx2, ny / 2, nbitplanes[1] as i32)?;
+    }
+    if nx / 2 > 0 {
+        qtree_decode(
+            bi,
+            &mut a[ny * nx2..],
+            ny,
+            nx / 2,
+            ny2,
+            nbitplanes[1] as i32,
+        )?;
+    }
+    if nx / 2 > 0 && ny / 2 > 0 {
+        qtree_decode(
+            bi,
+            &mut a[ny * nx2 + ny2..],
+            ny,
+            nx / 2,
+            ny / 2,
+            nbitplanes[2] as i32,
+        )?;
+    }
 
-    if bi.input_nybble() != 0 {
+    if bi.input_nybble()? != 0 {
         return Err(FitsError::UnsupportedCompression {
             name: "HCOMPRESS_1: bad bit plane values".to_string(),
         });
@@ -860,7 +879,7 @@ fn dodecode(
     // Sign bits.
     bi.start_inputing_bits();
     for v in a.iter_mut() {
-        if *v != 0 && bi.input_bit() != 0 {
+        if *v != 0 && bi.input_bit()? != 0 {
             *v = -*v;
         }
     }
@@ -883,15 +902,15 @@ fn qtree_decode(
     let mut scratch = vec![0u8; nqx2 * nqy2];
 
     for bit in (0..nbitplanes).rev() {
-        let b = bi.input_nybble();
+        let b = bi.input_nybble()?;
         if b == 0 {
-            read_bdirect(bi, a, n, nqx, nqy, &mut scratch, bit);
+            read_bdirect(bi, a, n, nqx, nqy, &mut scratch, bit)?;
         } else if b != 0xf {
             return Err(FitsError::UnsupportedCompression {
                 name: "HCOMPRESS_1: bad format code".to_string(),
             });
         } else {
-            scratch[0] = bi.input_huffman();
+            scratch[0] = bi.input_huffman()?;
             let mut nx = 1usize;
             let mut ny = 1usize;
             let mut nfx = nqx;
@@ -911,7 +930,7 @@ fn qtree_decode(
                 } else {
                     nfy -= c;
                 }
-                qtree_expand(bi, &mut scratch, nx, ny);
+                qtree_expand(bi, &mut scratch, nx, ny)?;
             }
             qtree_bitins(&scratch, nqx, nqy, a, n, bit);
         }
@@ -921,13 +940,14 @@ fn qtree_decode(
 
 /// One quadtree expansion step: expand each 4-bit value to 2×2, then read new
 /// codes for the non-zero cells.
-fn qtree_expand(bi: &mut BitInput, a: &mut [u8], nx: usize, ny: usize) {
+fn qtree_expand(bi: &mut BitInput, a: &mut [u8], nx: usize, ny: usize) -> Result<()> {
     qtree_copy(a, nx, ny, ny);
     for i in (0..nx * ny).rev() {
         if a[i] != 0 {
-            a[i] = bi.input_huffman();
+            a[i] = bi.input_huffman()?;
         }
     }
+    Ok(())
 }
 
 /// Expand 4-bit values from `a[(nx+1)/2,(ny+1)/2]` to 2×2 pixels in `a[nx,ny]`
@@ -1049,15 +1069,19 @@ fn read_bdirect(
     nqy: usize,
     scratch: &mut [u8],
     bit: i32,
-) {
+) -> Result<()> {
     let count = (nqx.div_ceil(2)) * (nqy.div_ceil(2));
-    bi.input_nnybble(count, scratch);
+    bi.input_nnybble(count, scratch)?;
     qtree_bitins(scratch, nqx, nqy, a, n, bit);
+    Ok(())
 }
 
 /// Inverse H-transform (in place), `SMOOTH = 0`.
 fn hinv(a: &mut [i32], nx: usize, ny: usize, scale: i32, smooth: bool) {
     let nmax = nx.max(ny);
+    if nmax <= 1 {
+        return;
+    }
     let log2n = log2_ceil(nmax);
     let mut tmp = vec![0i32; nmax.div_ceil(2)];
     // Holds the 2nd-half rows during the column-direction unshuffle (done as whole-row
