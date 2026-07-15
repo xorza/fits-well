@@ -408,8 +408,8 @@ fn compress_column(m: &ColMeta, scratch: &mut TableEncodeScratch) -> Result<Vec<
 #[derive(Debug, Default)]
 struct TableDecodeScratch {
     bytes: Vec<u8>,
+    inflated: Vec<u8>,
     ints: Vec<i64>,
-    gzip: gzip::GzipScratch,
 }
 
 fn decompress_column_into(
@@ -430,8 +430,8 @@ fn decompress_column_into(
             bytes,
             expect,
             m.shuffle_width(),
+            &mut scratch.inflated,
             &mut scratch.bytes,
-            &mut scratch.gzip,
         )?,
         Algo::Rice1 => {
             let bytepix = m.rice_bytepix().ok_or(FitsError::UnsupportedCompression {

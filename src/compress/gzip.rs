@@ -104,14 +104,14 @@ pub(crate) fn gunzip2_into(
     bytes: &[u8],
     expected: usize,
     width: usize,
+    inflated: &mut Vec<u8>,
     out: &mut Vec<u8>,
-    scratch: &mut GzipScratch,
 ) -> Result<()> {
     if width <= 1 {
         return gunzip_into(bytes, expected, out);
     }
-    gunzip_into(bytes, expected, &mut scratch.reordered)?;
-    unshuffle_bytes_into(&scratch.reordered, width, out);
+    gunzip_into(bytes, expected, inflated)?;
+    unshuffle_bytes_into(inflated, width, out);
     Ok(())
 }
 
@@ -144,12 +144,11 @@ pub(crate) fn gzip2_tile_into(
     scratch: &mut GzipScratch,
 ) -> Result<()> {
     let expected = tile_elems.saturating_mul(bitpix.elem_size());
-    if bitpix.elem_size() <= 1 {
-        gunzip_into(bytes, expected, &mut scratch.bytes)?;
-    } else {
-        gunzip_into(bytes, expected, &mut scratch.reordered)?;
-        unshuffle_bytes_into(&scratch.reordered, bitpix.elem_size(), &mut scratch.bytes);
-    }
-    be_to_i64_into(&scratch.bytes, bitpix, out);
+    let GzipScratch {
+        bytes: raw,
+        reordered,
+    } = scratch;
+    gunzip2_into(bytes, expected, bitpix.elem_size(), reordered, raw)?;
+    be_to_i64_into(raw, bitpix, out);
     Ok(())
 }
