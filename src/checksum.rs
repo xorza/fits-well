@@ -11,15 +11,19 @@ pub(crate) fn accumulate(bytes: &[u8], seed: u32) -> u32 {
     // assert it so a future caller passing an unaligned slice can't silently drop a
     // tail of up to 3 bytes from the sum.
     assert_eq!(bytes.len() % 4, 0, "checksum input must be word-aligned");
-    let mut sum = seed as u64;
+    let mut sum = seed;
     for word in bytes.chunks_exact(4) {
-        sum += u32::from_be_bytes([word[0], word[1], word[2], word[3]]) as u64;
+        sum = add_word(
+            sum,
+            u32::from_be_bytes([word[0], word[1], word[2], word[3]]),
+        );
     }
-    // Fold the end-around carry until it fits in 32 bits.
-    while sum >> 32 != 0 {
-        sum = (sum & 0xFFFF_FFFF) + (sum >> 32);
-    }
-    sum as u32
+    sum
+}
+
+fn add_word(sum: u32, word: u32) -> u32 {
+    let (sum, carry) = sum.overflowing_add(word);
+    sum.wrapping_add(u32::from(carry))
 }
 
 /// Encode a checksum into the 16 ASCII characters of a `CHECKSUM` value
@@ -81,6 +85,14 @@ mod tests {
         // 0xFFFFFFFF + 0x00000002 = 0x100000001 → fold → 0x00000002.
         assert_eq!(accumulate(&bytes, 0), 0x0000_0002);
         assert_eq!(accumulate(&[0, 0, 0, 1], 0), 1);
+
+        // Carry is folded after every word, so repeated maximal words never build
+        // an overflow-prone wider accumulator.
+        let mut sum = 0;
+        for _ in 0..1_000_000 {
+            sum = add_word(sum, u32::MAX);
+        }
+        assert_eq!(sum, u32::MAX);
     }
 
     #[test]

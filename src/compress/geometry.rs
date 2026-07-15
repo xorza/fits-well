@@ -46,9 +46,12 @@ impl TileGeometry {
             .zip(tiles)
             .map(|(&d, &t)| d.div_ceil(t))
             .collect();
-        let mut stride = vec![1usize; n];
-        for i in 1..n {
-            stride[i] = stride[i - 1] * dims[i - 1];
+        let mut stride = vec![0usize; n];
+        if !dims.contains(&0) && n != 0 {
+            stride[0] = 1;
+            for i in 1..n {
+                stride[i] = stride[i - 1] * dims[i - 1];
+            }
         }
         TileGeometry {
             dims: dims.to_vec(),
@@ -59,7 +62,11 @@ impl TileGeometry {
     }
 
     pub(super) fn ntiles(&self) -> usize {
-        self.ntiles_axis.iter().product()
+        if self.ntiles_axis.contains(&0) {
+            0
+        } else {
+            self.ntiles_axis.iter().product()
+        }
     }
 
     /// Fill `s` (reusing its buffers) with tile `t`'s edge-clipped extent and the

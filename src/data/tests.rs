@@ -18,6 +18,16 @@ fn encoded(data: &ImageData) -> Vec<u8> {
 }
 
 #[test]
+fn shape_product_handles_empty_axes_and_rejects_overflow() {
+    assert_eq!(shape_product(&[]).unwrap(), 0);
+    assert_eq!(shape_product(&[usize::MAX, 0, usize::MAX]).unwrap(), 0);
+    assert!(matches!(
+        shape_product(&[usize::MAX, 2]),
+        Err(FitsError::DataUnitOverflow)
+    ));
+}
+
+#[test]
 fn decodes_big_endian_integers_and_floats() {
     // i16: 0x0001=1, 0xFFFF=-1, 0x8000=-32768 (the unsigned-u16 min sentinel).
     assert_eq!(

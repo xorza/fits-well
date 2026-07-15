@@ -16,8 +16,10 @@ use super::geometry::TileScratch;
 use super::{CompressOptions, DitherMethod, ImageCodec, map_tiles, needs_wide};
 use super::{gzip, hcompress, plio, quantize, rice};
 
+use crate::allocation;
 use crate::bitpix::Bitpix;
 use crate::data::Image;
+use crate::data::shape_product;
 use crate::endian::push_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
@@ -50,9 +52,10 @@ pub(crate) fn compress_image(
     options: &CompressOptions,
     out: &mut Vec<u8>,
 ) -> Result<Header> {
+    let total = validate_image(image)?;
     let bitpix = image.samples.bitpix();
     if bitpix.is_float() {
-        return compress_float_image(image, cmptype, options, out);
+        return compress_float_image(image, cmptype, options, total, out);
     }
     let codec = ImageCodec::parse(cmptype)?;
     // RICE handles only 1/2/4-byte pixels (cfitsio parity); refuse the 64-bit path
@@ -79,7 +82,7 @@ pub(crate) fn compress_image(
     // empty product (1) and fabricate a phantom one-pixel tile that indexes the empty
     // sample buffer. Zero tiles yields an empty `NAXIS2 = 0` table, which the decoder's
     // matching `ZNAXIS = 0` guard turns back into the empty image.
-    let ntiles = if dims.is_empty() { 0 } else { geom.ntiles() };
+    let ntiles = if total == 0 { 0 } else { geom.ntiles() };
     let bytepix = bitpix.elem_size();
     let (gzip_level, scale) = (options.gzip_level, options.hcompress_scale);
 
@@ -118,8 +121,14 @@ pub(crate) fn compress_image(
         })
     })?;
 
-    let mut descriptors: Vec<(usize, usize)> = Vec::with_capacity(ntiles);
-    let mut heap: Vec<u8> = Vec::new();
+    let heap_len = cells.iter().try_fold(0usize, |len, cell| {
+        len.checked_add(cell.byte_len()?)
+            .ok_or(FitsError::DataUnitOverflow)
+    })?;
+    let mut descriptors = Vec::new();
+    allocation::try_reserve_exact(&mut descriptors, ntiles)?;
+    let mut heap = Vec::new();
+    allocation::try_reserve_exact(&mut heap, heap_len)?;
     for cell in &cells {
         descriptors.push((cell.nelem(), heap.len()));
         cell.extend_heap(&mut heap);
@@ -133,7 +142,13 @@ pub(crate) fn compress_image(
     // Data unit: an array descriptor (count, heap offset) per tile, then the heap.
     // Built into the caller's reused buffer (the writer's scratch).
     out.clear();
-    out.reserve(ntiles * if wide { 16 } else { 8 } + heap.len());
+    let descriptor_len = ntiles
+        .checked_mul(if wide { 16 } else { 8 })
+        .ok_or(FitsError::DataUnitOverflow)?;
+    let output_len = descriptor_len
+        .checked_add(heap.len())
+        .ok_or(FitsError::DataUnitOverflow)?;
+    allocation::try_reserve_exact(out, output_len)?;
     for &(nelem, offset) in &descriptors {
         push_pq_descriptor(out, wide, nelem as u64, offset as u64);
     }
@@ -146,12 +161,12 @@ pub(crate) fn compress_image(
         .comment("XTENSION", "binary table extension");
     h.set("BITPIX", 8).set("NAXIS", 2);
     h.set("NAXIS1", if wide { 16 } else { 8 })
-        .set("NAXIS2", ntiles as i64);
-    h.set("PCOUNT", heap.len() as i64).set("GCOUNT", 1);
+        .set("NAXIS2", fits_i64(ntiles)?);
+    h.set("PCOUNT", fits_i64(heap.len())?).set("GCOUNT", 1);
     h.set("TFIELDS", 1);
     h.set("TTYPE1", "COMPRESSED_DATA");
     h.set("TFORM1", format!("1{desc}{tform_letter}({maxnelem})"));
-    set_zimage_axes(&mut h, cmptype, bitpix, dims, &tiles);
+    set_zimage_axes(&mut h, cmptype, bitpix, dims, &tiles)?;
     match codec {
         ImageCodec::Rice1 => {
             h.set("ZNAME1", "BLOCKSIZE").set("ZVAL1", 32);
@@ -199,6 +214,7 @@ fn compress_float_image(
     image: &Image,
     cmptype: &str,
     options: &CompressOptions,
+    total: usize,
     out: &mut Vec<u8>,
 ) -> Result<Header> {
     let codec = ImageCodec::parse(cmptype)?;
@@ -217,7 +233,7 @@ fn compress_float_image(
     let geom = TileGeometry::new(dims, &tiles);
     // See `compress_image`: zero tiles for a `NAXIS = 0` image, avoiding the phantom
     // one-pixel tile the empty-product `ntiles` would otherwise produce.
-    let ntiles = if dims.is_empty() { 0 } else { geom.ntiles() };
+    let ntiles = if total == 0 { 0 } else { geom.ntiles() };
 
     let zdither0 = 1i64; // deterministic dither seed (any 1..=10000 is valid)
     let int_bitpix = Bitpix::I32; // quantized planes are always int32
@@ -280,11 +296,18 @@ fn compress_float_image(
         },
     )?;
 
-    let mut cd_desc: Vec<(usize, usize)> = Vec::with_capacity(ntiles);
-    let mut gz_desc: Vec<(usize, usize)> = Vec::with_capacity(ntiles);
-    let mut zscale = vec![0f64; ntiles];
-    let mut zzero = vec![0f64; ntiles];
-    let mut heap: Vec<u8> = Vec::new();
+    let heap_len = tiles_out.iter().try_fold(0usize, |len, tile| {
+        len.checked_add(tile.bytes.len())
+            .ok_or(FitsError::DataUnitOverflow)
+    })?;
+    let mut cd_desc = Vec::new();
+    allocation::try_reserve_exact(&mut cd_desc, ntiles)?;
+    let mut gz_desc = Vec::new();
+    allocation::try_reserve_exact(&mut gz_desc, ntiles)?;
+    let mut zscale = allocation::try_zeroed(0f64, ntiles)?;
+    let mut zzero = allocation::try_zeroed(0f64, ntiles)?;
+    let mut heap = Vec::new();
+    allocation::try_reserve_exact(&mut heap, heap_len)?;
     let mut any_null = false;
     for (t, tile) in tiles_out.iter().enumerate() {
         zscale[t] = tile.zscale;
@@ -317,7 +340,11 @@ fn compress_float_image(
     // Fixed table: per tile, the two `P` descriptors then the `ZSCALE`/`ZZERO`
     // doubles (row width 32), followed by the heap.
     out.clear();
-    out.reserve(ntiles * 32 + heap.len());
+    let rows_len = ntiles.checked_mul(32).ok_or(FitsError::DataUnitOverflow)?;
+    let output_len = rows_len
+        .checked_add(heap.len())
+        .ok_or(FitsError::DataUnitOverflow)?;
+    allocation::try_reserve_exact(out, output_len)?;
     for t in 0..ntiles {
         // Two 32-bit `P` descriptors (COMPRESSED_DATA, GZIP_COMPRESSED_DATA) then
         // the ZSCALE/ZZERO doubles — the §10 quantized-float row layout.
@@ -334,8 +361,8 @@ fn compress_float_image(
     h.set("XTENSION", "BINTABLE")
         .comment("XTENSION", "binary table extension");
     h.set("BITPIX", 8).set("NAXIS", 2);
-    h.set("NAXIS1", 32).set("NAXIS2", ntiles as i64);
-    h.set("PCOUNT", heap.len() as i64).set("GCOUNT", 1);
+    h.set("NAXIS1", 32).set("NAXIS2", fits_i64(ntiles)?);
+    h.set("PCOUNT", fits_i64(heap.len())?).set("GCOUNT", 1);
     h.set("TFIELDS", 4);
     h.set("TTYPE1", "COMPRESSED_DATA")
         .set("TFORM1", format!("1PB({max_cd})"));
@@ -343,7 +370,7 @@ fn compress_float_image(
         .set("TFORM2", format!("1PB({max_gz})"));
     h.set("TTYPE3", "ZSCALE").set("TFORM3", "1D");
     h.set("TTYPE4", "ZZERO").set("TFORM4", "1D");
-    set_zimage_axes(&mut h, cmptype, zbitpix, dims, &tiles);
+    set_zimage_axes(&mut h, cmptype, zbitpix, dims, &tiles)?;
     if codec == ImageCodec::Rice1 {
         h.set("ZNAME1", "BLOCKSIZE").set("ZVAL1", 32);
         h.set("ZNAME2", "BYTEPIX").set("ZVAL2", 4);
@@ -387,6 +414,16 @@ impl TileCell {
         }
     }
 
+    fn byte_len(&self) -> Result<usize> {
+        match self {
+            TileCell::Bytes(bytes) => Ok(bytes.len()),
+            TileCell::I16(values) => values
+                .len()
+                .checked_mul(2)
+                .ok_or(FitsError::DataUnitOverflow),
+        }
+    }
+
     /// Append the cell to the heap as big-endian bytes.
     fn extend_heap(&self, heap: &mut Vec<u8>) {
         match self {
@@ -427,16 +464,34 @@ fn set_zimage_axes(
     zbitpix: Bitpix,
     dims: &[usize],
     tiles: &[usize],
-) {
+) -> Result<()> {
     h.set("ZIMAGE", true)
         .comment("ZIMAGE", "this is a tiled-compressed image");
     h.set("ZCMPTYPE", cmptype);
     h.set("ZBITPIX", zbitpix.code());
-    h.set("ZNAXIS", dims.len() as i64);
+    h.set("ZNAXIS", fits_i64(dims.len())?);
     for (i, &n) in dims.iter().enumerate() {
-        h.set(key!("ZNAXIS{}", i + 1).as_str(), n as i64);
+        h.set(key!("ZNAXIS{}", i + 1).as_str(), fits_i64(n)?);
     }
     for (i, &t) in tiles.iter().enumerate() {
-        h.set(key!("ZTILE{}", i + 1).as_str(), t as i64);
+        h.set(key!("ZTILE{}", i + 1).as_str(), fits_i64(t)?);
     }
+    Ok(())
+}
+
+fn validate_image(image: &Image) -> Result<usize> {
+    if image.shape.len() > 999 {
+        return Err(FitsError::KeywordOutOfRange { name: "NAXIS" });
+    }
+    let expected = shape_product(&image.shape)?;
+    assert_eq!(
+        image.samples.len(),
+        expected,
+        "image sample count must match the shape product"
+    );
+    Ok(expected)
+}
+
+fn fits_i64(value: usize) -> Result<i64> {
+    i64::try_from(value).map_err(|_| FitsError::DataUnitOverflow)
 }

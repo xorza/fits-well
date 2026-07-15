@@ -23,6 +23,52 @@ fn identity() -> Scaling {
 }
 
 #[test]
+fn writer_rejects_overflowing_layouts() {
+    let image = Image {
+        shape: vec![usize::MAX, 2],
+        samples: ImageData::U8(Vec::new()),
+        scaling: identity(),
+    };
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_image(&image),
+        Err(FitsError::DataUnitOverflow)
+    ));
+
+    let fixed = WriteColumn::fixed("X", ColumnData::Bytes(Vec::new()), usize::MAX);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_table(2, &[fixed]),
+        Err(FitsError::DataUnitOverflow)
+    ));
+
+    let ascii = |name: &str, width| AsciiWriteColumn {
+        name: name.to_string(),
+        unit: None,
+        data: ColumnData::Text(Vec::new()),
+        width,
+        decimals: 0,
+        tscale: None,
+        tzero: None,
+        tnull: None,
+    };
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_ascii_table(0, &[ascii("A", usize::MAX), ascii("B", 1)]),
+        Err(FitsError::DataUnitOverflow)
+    ));
+
+    #[cfg(target_pointer_width = "64")]
+    {
+        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+        assert!(matches!(
+            writer.write_table(usize::MAX, &[]),
+            Err(FitsError::DataUnitOverflow)
+        ));
+    }
+}
+
+#[test]
 fn writes_a_multi_hdu_image_file() {
     let primary = Image {
         shape: vec![2, 2],

@@ -41,7 +41,7 @@ pub enum FitsError {
     /// (`try_reserve`), so this surfaces as a recoverable error rather than an
     /// out-of-memory process abort.
     DataUnitTooLarge {
-        bytes: usize,
+        bytes: u64,
     },
     /// A decoded data unit held a different element count than the header's
     /// declared geometry — a corrupt or truncated data unit.

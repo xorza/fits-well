@@ -12,6 +12,7 @@ use std::ops::Range;
 
 use num_complex::Complex;
 
+use crate::allocation;
 use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
 use crate::block::SPACE_FILL;
@@ -234,7 +235,8 @@ impl<W: Write> FitsWriter<W> {
         self.sink.write_all(raw)?;
         let rem = raw.len() % BLOCK_SIZE;
         if rem != 0 {
-            self.sink.write_all(&vec![fill; BLOCK_SIZE - rem])?;
+            let padding = [fill; BLOCK_SIZE];
+            self.sink.write_all(&padding[..BLOCK_SIZE - rem])?;
         }
         Ok(())
     }
@@ -244,15 +246,19 @@ impl<W: Write> FitsWriter<W> {
     /// `BITPIX`, `NAXISn`, plus `BSCALE`/`BZERO`/`BLANK` when scaling is
     /// non-trivial), followed by the big-endian data unit.
     pub fn write_image(&mut self, image: &Image) -> Result<()> {
-        let expected = shape_product(&image.shape);
+        let expected = shape_product(&image.shape)?;
         assert_eq!(
             image.samples.len(),
             expected,
             "image sample count must match the shape product"
         );
-        let header = image_header(image, !self.has_primary);
+        let encoded_len = expected
+            .checked_mul(image.samples.bitpix().elem_size())
+            .ok_or(FitsError::DataUnitOverflow)?;
+        let header = image_header(image, !self.has_primary)?;
         self.has_primary = true;
         self.scratch.clear();
+        allocation::try_reserve_exact(&mut self.scratch, encoded_len)?;
         image.samples.encode_into(&mut self.scratch);
         self.write_hdu(header, ZERO_FILL)
     }
@@ -263,16 +269,31 @@ impl<W: Write> FitsWriter<W> {
     /// are both supported — VLA columns write a heap after the main table.
     pub fn write_table(&mut self, nrows: usize, columns: &[WriteColumn]) -> Result<()> {
         self.ensure_primary()?;
-        let mut row_len = 0;
+        let mut row_len = 0usize;
         for col in columns {
-            row_len += check_column(col, nrows)?;
+            row_len = row_len
+                .checked_add(check_column(col, nrows)?)
+                .ok_or(FitsError::DataUnitOverflow)?;
         }
         // Build the heap (row-major) and the VLA descriptors first, so the main table
         // can carry the `P`/`Q` (count, offset) pairs. Descriptors are recorded in the
         // same row-major, column order the main-table pass emits them, so a single flat
         // queue (drained below) stays aligned without per-column bookkeeping.
-        let mut heap: Vec<u8> = Vec::new();
-        let mut descs: Vec<(u64, u64)> = Vec::new();
+        let descriptor_count = nrows
+            .checked_mul(columns.iter().filter(|col| col.vla.is_some()).count())
+            .ok_or(FitsError::DataUnitOverflow)?;
+        let heap_len = columns
+            .iter()
+            .filter_map(|col| col.vla.as_ref())
+            .flatten()
+            .try_fold(0usize, |len, cell| {
+                len.checked_add(cell_byte_len(cell)?)
+                    .ok_or(FitsError::DataUnitOverflow)
+            })?;
+        let mut heap = Vec::new();
+        allocation::try_reserve_exact(&mut heap, heap_len)?;
+        let mut descs = Vec::new();
+        allocation::try_reserve_exact(&mut descs, descriptor_count)?;
         for r in 0..nrows {
             for col in columns {
                 if let Some(rows) = &col.vla {
@@ -294,7 +315,13 @@ impl<W: Write> FitsWriter<W> {
         // in the same row-major order they were built. Built into the reused scratch,
         // with the heap appended after.
         self.scratch.clear();
-        self.scratch.reserve(nrows * row_len + heap.len());
+        let main_len = nrows
+            .checked_mul(row_len)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        let total_len = main_len
+            .checked_add(heap.len())
+            .ok_or(FitsError::DataUnitOverflow)?;
+        allocation::try_reserve_exact(&mut self.scratch, total_len)?;
         let mut descs = descs.into_iter();
         for r in 0..nrows {
             for col in columns {
@@ -307,7 +334,7 @@ impl<W: Write> FitsWriter<W> {
             }
         }
         self.scratch.extend_from_slice(&heap);
-        let header = bintable_header(nrows, row_len, columns, heap.len());
+        let header = bintable_header(nrows, row_len, columns, heap.len())?;
         self.write_hdu(header, ZERO_FILL)
     }
 
@@ -317,7 +344,7 @@ impl<W: Write> FitsWriter<W> {
     pub fn write_ascii_table(&mut self, nrows: usize, columns: &[AsciiWriteColumn]) -> Result<()> {
         self.ensure_primary()?;
         let mut tbcols = Vec::with_capacity(columns.len());
-        let mut row_len = 0;
+        let mut row_len = 0usize;
         for col in columns {
             let count = ascii_count(&col.data)?;
             if count != nrows {
@@ -326,12 +353,17 @@ impl<W: Write> FitsWriter<W> {
                     declared: nrows,
                 });
             }
-            tbcols.push(row_len + 1); // 1-based start column
-            row_len += col.width;
+            tbcols.push(row_len.checked_add(1).ok_or(FitsError::DataUnitOverflow)?); // 1-based start column
+            row_len = row_len
+                .checked_add(col.width)
+                .ok_or(FitsError::DataUnitOverflow)?;
         }
-        let header = ascii_table_header(nrows, row_len, columns, &tbcols);
+        let header = ascii_table_header(nrows, row_len, columns, &tbcols)?;
         self.scratch.clear();
-        self.scratch.reserve(nrows * row_len);
+        let total_len = nrows
+            .checked_mul(row_len)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        allocation::try_reserve_exact(&mut self.scratch, total_len)?;
         for r in 0..nrows {
             for col in columns {
                 format_ascii_field(&mut self.scratch, col, r);
@@ -396,7 +428,15 @@ impl<W: Write> FitsWriter<W> {
     /// Takes the data via the reused `scratch` field rather than an owned argument,
     /// so the high-level writers build into one buffer that survives across HDUs.
     fn write_hdu(&mut self, mut header: Header, fill: u8) -> Result<()> {
-        pad_to_block(&mut self.scratch, fill);
+        let rem = self.scratch.len() % BLOCK_SIZE;
+        if rem != 0 {
+            let padded = self
+                .scratch
+                .len()
+                .checked_add(BLOCK_SIZE - rem)
+                .ok_or(FitsError::DataUnitOverflow)?;
+            allocation::try_resize(&mut self.scratch, padded, fill)?;
+        }
         if self.checksum {
             header.set(
                 "DATASUM",
@@ -443,13 +483,13 @@ fn empty_primary_header() -> Header {
 /// Image header: the primary array (§4.4.1) when `primary`, else an `IMAGE`
 /// extension (§7.1). The two differ only in the prologue (`SIMPLE`+`EXTEND` vs
 /// `XTENSION`+`PCOUNT`/`GCOUNT`); the axes and scaling keywords are identical.
-fn image_header(image: &Image, primary: bool) -> Header {
+fn image_header(image: &Image, primary: bool) -> Result<Header> {
     let mut header = Header::new();
     if primary {
         header
             .set("SIMPLE", true)
             .comment("SIMPLE", "file conforms to FITS standard");
-        add_image_axes(&mut header, image);
+        add_image_axes(&mut header, image)?;
         header
             .set("EXTEND", true)
             .comment("EXTEND", "extensions may follow");
@@ -457,24 +497,28 @@ fn image_header(image: &Image, primary: bool) -> Header {
         header
             .set("XTENSION", "IMAGE")
             .comment("XTENSION", "image extension");
-        add_image_axes(&mut header, image);
+        add_image_axes(&mut header, image)?;
         header.set("PCOUNT", 0).set("GCOUNT", 1);
     }
     add_scaling(&mut header, image);
-    header
+    Ok(header)
 }
 
 /// `BITPIX`, `NAXIS`, `NAXISn` — the mandatory array-shape keywords, in order.
-fn add_image_axes(header: &mut Header, image: &Image) {
+fn add_image_axes(header: &mut Header, image: &Image) -> Result<()> {
+    if image.shape.len() > 999 {
+        return Err(FitsError::KeywordOutOfRange { name: "NAXIS" });
+    }
     header
         .set("BITPIX", image.samples.bitpix().code())
         .comment("BITPIX", "number of bits per data pixel");
     header
-        .set("NAXIS", image.shape.len() as i64)
+        .set("NAXIS", fits_i64(image.shape.len())?)
         .comment("NAXIS", "number of data axes");
     for (i, &n) in image.shape.iter().enumerate() {
-        header.set(key!("NAXIS{}", i + 1).as_str(), n as i64);
+        header.set(key!("NAXIS{}", i + 1).as_str(), fits_i64(n)?);
     }
+    Ok(())
 }
 
 /// Emit `BZERO`/`BSCALE`/`BLANK` only when scaling carries information beyond the
@@ -498,21 +542,21 @@ fn bintable_header(
     row_len: usize,
     columns: &[WriteColumn],
     heap_len: usize,
-) -> Header {
+) -> Result<Header> {
     let mut header = Header::new();
     header
         .set("XTENSION", "BINTABLE")
         .comment("XTENSION", "binary table extension");
     header.set("BITPIX", 8).set("NAXIS", 2);
     header
-        .set("NAXIS1", row_len as i64)
+        .set("NAXIS1", fits_i64(row_len)?)
         .comment("NAXIS1", "width of table in bytes");
     header
-        .set("NAXIS2", nrows as i64)
+        .set("NAXIS2", fits_i64(nrows)?)
         .comment("NAXIS2", "number of rows");
-    header.set("PCOUNT", heap_len as i64).set("GCOUNT", 1);
+    header.set("PCOUNT", fits_i64(heap_len)?).set("GCOUNT", 1);
     header
-        .set("TFIELDS", columns.len() as i64)
+        .set("TFIELDS", fits_i64(columns.len())?)
         .comment("TFIELDS", "number of columns");
     for (i, col) in columns.iter().enumerate() {
         let n = i + 1;
@@ -535,7 +579,7 @@ fn bintable_header(
             header.set(key!("TNULL{n}").as_str(), tnull);
         }
     }
-    header
+    Ok(header)
 }
 
 /// The `TFORMn` letter and element byte size for a column's data kind.
@@ -594,9 +638,12 @@ fn check_column(col: &WriteColumn, nrows: usize) -> Result<usize> {
         // `P` descriptor = two 32-bit ints; `Q` = two 64-bit.
         return Ok(if col.wide { 16 } else { 8 });
     }
+    let expected = nrows
+        .checked_mul(col.repeat)
+        .ok_or(FitsError::DataUnitOverflow)?;
     let mismatch = || FitsError::RowWidthMismatch {
         computed: col.data.element_count(),
-        declared: nrows * col.repeat,
+        declared: expected,
     };
     match &col.data {
         ColumnData::Text(v) => {
@@ -609,11 +656,26 @@ fn check_column(col: &WriteColumn, nrows: usize) -> Result<usize> {
             Ok(col.repeat) // field width in bytes
         }
         _ => {
-            if col.data.element_count() != nrows * col.repeat {
+            if col.data.element_count() != expected {
                 return Err(mismatch());
             }
-            Ok(col.repeat * elem)
+            col.repeat
+                .checked_mul(elem)
+                .ok_or(FitsError::DataUnitOverflow)
         }
+    }
+}
+
+fn cell_byte_len(cell: &ColumnData) -> Result<usize> {
+    match cell {
+        ColumnData::Text(values) => values.iter().try_fold(0usize, |len, value| {
+            len.checked_add(value.len())
+                .ok_or(FitsError::DataUnitOverflow)
+        }),
+        _ => cell
+            .element_count()
+            .checked_mul(column_code(cell).elem_size)
+            .ok_or(FitsError::DataUnitOverflow),
     }
 }
 
@@ -707,25 +769,25 @@ fn ascii_table_header(
     row_len: usize,
     columns: &[AsciiWriteColumn],
     tbcols: &[usize],
-) -> Header {
+) -> Result<Header> {
     let mut header = Header::new();
     header
         .set("XTENSION", "TABLE")
         .comment("XTENSION", "ASCII table extension");
     header.set("BITPIX", 8).set("NAXIS", 2);
     header
-        .set("NAXIS1", row_len as i64)
+        .set("NAXIS1", fits_i64(row_len)?)
         .comment("NAXIS1", "width of table in characters");
     header
-        .set("NAXIS2", nrows as i64)
+        .set("NAXIS2", fits_i64(nrows)?)
         .comment("NAXIS2", "number of rows");
     header.set("PCOUNT", 0).set("GCOUNT", 1);
     header
-        .set("TFIELDS", columns.len() as i64)
+        .set("TFIELDS", fits_i64(columns.len())?)
         .comment("TFIELDS", "number of columns");
     for (i, col) in columns.iter().enumerate() {
         let n = i + 1;
-        header.set(key!("TBCOL{n}").as_str(), tbcols[i] as i64);
+        header.set(key!("TBCOL{n}").as_str(), fits_i64(tbcols[i])?);
         header.set(key!("TFORM{n}").as_str(), ascii_tform(col));
         header.set(key!("TTYPE{n}").as_str(), col.name.as_str());
         if let Some(unit) = &col.unit {
@@ -741,7 +803,11 @@ fn ascii_table_header(
             header.set(key!("TNULL{n}").as_str(), tnull.as_str());
         }
     }
-    header
+    Ok(header)
+}
+
+fn fits_i64(value: usize) -> Result<i64> {
+    i64::try_from(value).map_err(|_| FitsError::DataUnitOverflow)
 }
 
 fn ascii_tform(col: &AsciiWriteColumn) -> String {

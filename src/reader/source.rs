@@ -13,6 +13,7 @@ use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
 
+use crate::allocation;
 use crate::error::FitsError;
 use crate::error::Result;
 
@@ -80,7 +81,7 @@ fn mem_slice(bytes: &[u8], offset: u64, len: usize) -> Result<&[u8]> {
 
 /// Owned copy of [`mem_slice`] — the `read_owned` form for the in-memory sources.
 fn mem_owned(bytes: &[u8], offset: u64, len: usize) -> Result<Vec<u8>> {
-    Ok(mem_slice(bytes, offset, len)?.to_vec())
+    allocation::try_copy(mem_slice(bytes, offset, len)?)
 }
 
 /// A streaming `Read + Seek` source. Each fetch seeks and copies the range out —
@@ -115,7 +116,7 @@ impl<R: Read + Seek> Source for StreamSource<R> {
         self.inner.seek(SeekFrom::Start(offset))?;
         // Resize keeps `scratch`'s capacity across calls, so a reused buffer
         // reallocates only when a larger unit appears.
-        scratch.resize(len, 0);
+        allocation::try_resize(scratch, len, 0)?;
         self.inner.read_exact(scratch.as_mut_slice())?;
         Ok(&scratch[..len])
     }
@@ -123,7 +124,7 @@ impl<R: Read + Seek> Source for StreamSource<R> {
     fn read_owned(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
         check_range(offset, len, self.len)?;
         self.inner.seek(SeekFrom::Start(offset))?;
-        let mut buf = vec![0u8; len];
+        let mut buf = allocation::try_zeroed(0u8, len)?;
         self.inner.read_exact(&mut buf)?;
         Ok(buf)
     }
