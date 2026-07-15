@@ -425,7 +425,8 @@ impl<W: Write> FitsWriter<W> {
     /// applies to). Requires the `compression` feature. Integer images support
     /// `GZIP_1`/`GZIP_2`/`RICE_1`/`PLIO_1`/`HCOMPRESS_1`; float images are quantized
     /// (`SUBTRACTIVE_DITHER_1`) and compressed with `GZIP_1`/`GZIP_2`/`RICE_1`.
-    /// `HCOMPRESS_1` needs a 2-D tile shape, and `PLIO_1` a non-negative (mask) image.
+    /// `HCOMPRESS_1` needs a 2-D tile shape, and every `PLIO_1` mask sample must be
+    /// in the lossless `0..=0xFF_FFFF` domain.
     #[cfg(feature = "compression")]
     pub fn write_compressed_image(
         &mut self,

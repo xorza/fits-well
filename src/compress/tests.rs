@@ -1115,26 +1115,18 @@ fn plio_validates_encoding_and_rejects_malformed_streams() {
             .collect::<Vec<_>>()
     };
 
-    let encoded = plio::plio_encode(&[0, 0xFF_FFFF], 2).unwrap();
+    let encoded = plio::plio_encode(&[0, 0xFF_FFFF]).unwrap();
     plio::plio_decode_be_into(&be(&encoded), 2, &mut out).unwrap();
     assert_eq!(out, [0, 0xFF_FFFF]);
     for invalid in [-1, 0x100_0000] {
         assert!(matches!(
-            plio::plio_encode(&[0, invalid], 2),
+            plio::plio_encode(&[0, invalid]),
             Err(FitsError::PlioValueOutOfRange {
                 index: 1,
                 value,
             }) if value == invalid
         ));
     }
-    assert!(matches!(
-        plio::plio_encode(&[0], 2),
-        Err(FitsError::DataSizeMismatch {
-            expected: 2,
-            got: 1,
-        })
-    ));
-
     let truncated_span = [0, 7, -100, 8, 0, 0, 0];
     assert!(matches!(
         plio::plio_decode_be_into(&be(&truncated_span), 1, &mut out),

@@ -114,7 +114,7 @@ pub(crate) fn compress_image(
                 TileCell::Bytes(gzip::gzip2_encode(&s.be, bytepix, gzip_level, &mut s.gzip))
             }
             ImageCodec::Rice1 => TileCell::Bytes(rice::rice_encode(vals, bytepix, 32, &mut s.rice)),
-            ImageCodec::Plio1 => TileCell::I16(plio::plio_encode(vals, vals.len())?),
+            ImageCodec::Plio1 => TileCell::I16(plio::plio_encode(vals)?),
             ImageCodec::Hcompress1 => TileCell::Bytes(hcompress::hcompress_tile_encode(
                 vals,
                 &s.tile.tdims,
