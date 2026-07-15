@@ -13,7 +13,7 @@ pub(crate) fn accumulate(bytes: &[u8], seed: u32) -> u32 {
     assert_eq!(bytes.len() % 4, 0, "checksum input must be word-aligned");
     let mut sum = seed;
     for word in bytes.chunks_exact(4) {
-        sum = add_word(
+        sum = combine(
             sum,
             u32::from_be_bytes([word[0], word[1], word[2], word[3]]),
         );
@@ -21,8 +21,8 @@ pub(crate) fn accumulate(bytes: &[u8], seed: u32) -> u32 {
     sum
 }
 
-fn add_word(sum: u32, word: u32) -> u32 {
-    let (sum, carry) = sum.overflowing_add(word);
+pub(crate) fn combine(left: u32, right: u32) -> u32 {
+    let (sum, carry) = left.overflowing_add(right);
     sum.wrapping_add(u32::from(carry))
 }
 
@@ -90,9 +90,18 @@ mod tests {
         // an overflow-prone wider accumulator.
         let mut sum = 0;
         for _ in 0..1_000_000 {
-            sum = add_word(sum, u32::MAX);
+            sum = combine(sum, u32::MAX);
         }
         assert_eq!(sum, u32::MAX);
+
+        let first = [0xFF, 0xFF, 0xFF, 0xFE, 0, 0, 0, 5];
+        let second = [0x80, 0, 0, 0, 0x80, 0, 0, 1];
+        let mut joined = first.to_vec();
+        joined.extend_from_slice(&second);
+        assert_eq!(
+            combine(accumulate(&first, 0), accumulate(&second, 0)),
+            accumulate(&joined, 0)
+        );
     }
 
     #[test]

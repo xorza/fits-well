@@ -4,6 +4,7 @@ use crate::block::padded_len;
 use crate::data::{ImageData, Scaling, UnsignedView};
 use crate::hdu::HduKind;
 use crate::header::from_card_lines as header;
+use crate::reader::ChecksumReport;
 use crate::reader::FitsReader;
 use crate::table::ColumnData;
 use std::io::Cursor;
@@ -396,8 +397,8 @@ fn write_image_emits_scaling_keywords_and_preserves_unsigned_values() {
     assert_eq!(r.hdus[0].header.get_real("BZERO"), Some(32768.0));
     assert_eq!(r.hdus[0].header.get_real("BSCALE"), Some(1.0));
     let back = r.read_image(0).unwrap();
-    assert_eq!(back.decode(), ImageData::I16(vec![-32768, 0, 32767]));
     assert_eq!(back.physical(), vec![0.0, 32768.0, 65535.0]);
+    assert_eq!(back.decode(), ImageData::I16(vec![-32768, 0, 32767]));
 }
 
 #[test]
@@ -422,10 +423,14 @@ fn checksums_round_trip_and_verify() {
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
     w.write_image(&image).unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let bytes = w.into_inner().into_inner();
+    let mut r = FitsReader::open(Cursor::new(bytes.clone())).unwrap();
     let report = r.verify_checksum(0).unwrap();
     assert_eq!(report.datasum_ok, Some(true));
     assert_eq!(report.checksum_ok, Some(true)); // whole-HDU sum is −0
+
+    let mut slice = FitsReader::from_bytes(&bytes).unwrap();
+    assert_eq!(slice.verify_checksum(0).unwrap(), report);
 }
 
 #[test]
@@ -444,6 +449,32 @@ fn corrupted_data_fails_checksum() {
     let report = r.verify_checksum(0).unwrap();
     assert_eq!(report.datasum_ok, Some(false));
     assert_eq!(report.checksum_ok, Some(false));
+}
+
+#[test]
+fn corrupted_header_padding_fails_only_the_whole_hdu_checksum() {
+    let image = Image {
+        shape: vec![2, 2],
+        samples: ImageData::I16(vec![1, 2, 3, 4]),
+        scaling: identity(),
+    };
+    let mut w = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
+    w.write_image(&image).unwrap();
+    let mut bytes = w.into_inner().into_inner();
+    let end = bytes[..BLOCK_SIZE]
+        .chunks_exact(CARD_SIZE)
+        .position(|card| &card[..3] == b"END")
+        .unwrap();
+    bytes[(end + 1) * CARD_SIZE] ^= 1;
+
+    let mut r = FitsReader::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        r.verify_checksum(0).unwrap(),
+        ChecksumReport {
+            datasum_ok: Some(true),
+            checksum_ok: Some(false),
+        }
+    );
 }
 
 #[test]

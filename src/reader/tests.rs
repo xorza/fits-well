@@ -2,6 +2,7 @@ use super::*;
 use crate::bitpix::Bitpix;
 use crate::data::Image;
 use crate::data::ImageData;
+use crate::data::Scaling;
 use crate::writer::FitsWriter;
 use std::fs::File;
 use std::io::Cursor;
@@ -22,6 +23,11 @@ fn reads_a_single_hdu_image_with_exact_boundaries() {
     assert_eq!(p.header.axes().unwrap(), vec![512, 512]);
     assert_eq!(p.data_offset, 11_520);
     assert_eq!(padded_len(p.data_bytes), 527_040);
+    let bytes = std::fs::read("tests/data/fits/UITfuv2582gc.fits").unwrap();
+    assert_eq!(
+        p.header_sum,
+        checksum::accumulate(&bytes[..p.data_offset as usize], 0)
+    );
 }
 
 #[test]
@@ -104,6 +110,17 @@ fn reads_random_groups_primary_plus_bintable_extension() {
     assert_eq!(t.kind, HduKind::BinTable);
     assert_eq!(t.data_offset, 593_280);
     assert_eq!(padded_len(t.data_bytes), 2_880);
+
+    let bytes = std::fs::read("tests/data/fits/DDTSUVDATA.fits").unwrap();
+    assert_eq!(
+        g.header_sum,
+        checksum::accumulate(&bytes[..g.data_offset as usize], 0)
+    );
+    let second_header = g.data_offset + padded_len(g.data_bytes);
+    assert_eq!(
+        t.header_sum,
+        checksum::accumulate(&bytes[second_header as usize..t.data_offset as usize], 0,)
+    );
 }
 
 #[test]
@@ -420,14 +437,16 @@ fn read_image_view_borrows_u8_samples_with_zero_copy() {
 #[test]
 #[cfg(feature = "compression")]
 fn read_image_view_matches_decode_for_a_compressed_image() {
-    // A compressed image has no on-disk bytes to borrow; its pixels are decompressed
-    // and copied into the caller scratch, and the view must still equal the decode.
     let mut f = open("comp_gzip_i16.fits");
     let owned = f.read_image(1).unwrap().decode();
-    let mut scratch = Vec::new();
+    let mut scratch = Vec::with_capacity(owned.len().div_ceil(4));
+    let scratch_ptr = scratch.as_ptr() as *const i16;
     let view = f.read_image_view(1, &mut scratch).unwrap();
     match (view, &owned) {
-        (ImageView::I16(v), ImageData::I16(o)) => assert_eq!(v, o.as_slice()),
+        (ImageView::I16(v), ImageData::I16(o)) => {
+            assert_eq!(v, o.as_slice());
+            assert_eq!(v.as_ptr(), scratch_ptr);
+        }
         (v, o) => panic!("expected matching I16 view/decode, got {v:?} / {o:?}"),
     }
 }

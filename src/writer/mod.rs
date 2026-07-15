@@ -486,19 +486,19 @@ impl<W: Write> FitsWriter<W> {
                 .ok_or(FitsError::DataUnitOverflow)?;
             allocation::try_resize(&mut self.scratch, padded, fill)?;
         }
-        if self.checksum {
-            header.set(
-                "DATASUM",
-                checksum::accumulate(&self.scratch, 0).to_string(),
-            );
+        let data_sum = if self.checksum {
+            let sum = checksum::accumulate(&self.scratch, 0);
+            header.set("DATASUM", sum.to_string());
             header.set("CHECKSUM", PLACEHOLDER_CHECKSUM);
-        }
+            Some(sum)
+        } else {
+            None
+        };
         let mut header_bytes = render_header(&header)?;
-        if self.checksum {
+        if let Some(data_sum) = data_sum {
             // Re-sum with the zero placeholder, then encode the value that forces
             // the whole-HDU checksum to negative zero, and patch it in place.
-            let hdu_sum =
-                checksum::accumulate(&self.scratch, checksum::accumulate(&header_bytes, 0));
+            let hdu_sum = checksum::combine(checksum::accumulate(&header_bytes, 0), data_sum);
             patch_checksum(&mut header_bytes, &checksum::encode(hdu_sum, true));
         }
         self.sink.write_all(&header_bytes)?;

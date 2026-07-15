@@ -11,7 +11,6 @@ use crate::block::padded_len;
 use crate::checksum;
 use crate::data::ImageView;
 use crate::data::RawImage;
-use crate::data::Scaling;
 use crate::data::shape_product;
 use crate::data::swap_into_words;
 use crate::data::view_words;
@@ -30,11 +29,9 @@ use source::Source;
 use source::StreamSource;
 
 #[cfg(feature = "compression")]
-use crate::compress::{decompress_image, uncompress_table};
+use crate::compress::{decompress_image, decompress_image_into_words, uncompress_table};
 #[cfg(feature = "compression")]
 use crate::data::Image;
-#[cfg(feature = "compression")]
-use crate::data::copy_samples_into_words;
 
 /// One Header/Data Unit located by the reader.
 ///
@@ -45,9 +42,8 @@ use crate::data::copy_samples_into_words;
 pub struct Hdu {
     pub header: Header,
     pub kind: HduKind,
-    /// The raw, block-padded header-unit bytes as read — retained for checksum
-    /// verification (the exact bytes matter).
-    pub(crate) header_bytes: Vec<u8>,
+    /// One's-complement sum of the exact block-padded header bytes as read.
+    pub(crate) header_sum: u32,
     /// Byte offset of the data unit from the start of the source.
     pub(crate) data_offset: u64,
     /// Unpadded data length (`Nbits / 8`) — where the meaningful data ends within
@@ -157,8 +153,8 @@ impl<S: Source> FitsReader<S> {
         let mut offset = 0u64;
         loop {
             match scan_header_unit(&mut source, &mut offset, &mut scratch)? {
-                NextHeader::Found(header_bytes) => {
-                    let header = Header::parse(&header_bytes)?;
+                NextHeader::Found { bytes, sum } => {
+                    let header = Header::parse(&bytes)?;
                     let kind = HduKind::classify(&header);
                     let data_offset = offset;
                     let extent = data_extent(&header)?;
@@ -168,7 +164,7 @@ impl<S: Source> FitsReader<S> {
                     hdus.push(Hdu {
                         header,
                         kind,
-                        header_bytes,
+                        header_sum: sum,
                         data_offset,
                         data_bytes: extent.data_bytes,
                     });
@@ -297,7 +293,7 @@ impl<S: Source> FitsReader<S> {
         hdu.ensure_plain_image()?;
         let bitpix = hdu.header.bitpix()?;
         let shape = hdu.header.axes()?;
-        let scaling = Scaling::from_header(&hdu.header)?;
+        let scaling = hdu.header.scaling()?;
         let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
         let lengths = DataLengths::new(data_bytes)?;
         let unit = self
@@ -332,7 +328,7 @@ impl<S: Source> FitsReader<S> {
     /// `scratch` is `Vec<u64>` so the swapped samples stay 8-byte aligned for the
     /// typed views. A `BITPIX = 8` image needs no swap and the view borrows the source
     /// bytes directly (zero-copy, `scratch` untouched); a compressed image is
-    /// decompressed and copied into `scratch`. The view borrows the reader and
+    /// decompressed directly into `scratch`. The view borrows the reader and
     /// `scratch`, so handle one image before reading the next. For samples you need to
     /// keep, use [`RawImage::decode`].
     pub fn read_image_view<'a>(
@@ -340,14 +336,10 @@ impl<S: Source> FitsReader<S> {
         index: usize,
         scratch: &'a mut Vec<u64>,
     ) -> Result<ImageView<'a>> {
-        // §10.1: a compressed image has no on-disk byte form to borrow — decompress
-        // and copy the host-endian pixels into the caller's scratch, then view that.
         #[cfg(feature = "compression")]
         if self.checked_hdu(index)?.kind == HduKind::CompressedImage {
-            let img = self.decompress_at(index)?;
-            let bitpix = img.samples.bitpix();
-            let nbytes = copy_samples_into_words(&img.samples, scratch);
-            return Ok(view_words(scratch, bitpix, nbytes));
+            let table = self.read_table(index)?;
+            return decompress_image_into_words(&self.hdus[index].header, &table, scratch);
         }
 
         let hdu = self.checked_hdu(index)?;
@@ -429,7 +421,19 @@ impl<S: Source> FitsReader<S> {
     /// when it matches the recomputed checksum.
     pub fn verify_checksum(&mut self, index: usize) -> Result<ChecksumReport> {
         let hdu = self.checked_hdu(index)?;
-        let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
+        let stored_datasum = hdu
+            .header
+            .get_text("DATASUM")
+            .map(|value| value.trim().parse::<u32>().ok());
+        let has_checksum = hdu.header.get_text("CHECKSUM").is_some();
+        if stored_datasum.is_none() && !has_checksum {
+            return Ok(ChecksumReport {
+                datasum_ok: None,
+                checksum_ok: None,
+            });
+        }
+        let (data_offset, data_bytes, header_sum) =
+            (hdu.data_offset, hdu.data_bytes, hdu.header_sum);
         let lengths = DataLengths::new(data_bytes)?;
         // The block-padded data unit (length = the padded size — the checksum covers
         // the block fill too).
@@ -437,18 +441,10 @@ impl<S: Source> FitsReader<S> {
             .source
             .slice(data_offset, lengths.padded, &mut self.scratch)?;
         let data_sum = checksum::accumulate(unit, 0);
-        let hdu = &self.hdus[index];
-        // Whole HDU = header (incl. the stored CHECKSUM card) then data.
-        let hdu_sum = checksum::accumulate(unit, checksum::accumulate(&hdu.header_bytes, 0));
         Ok(ChecksumReport {
-            datasum_ok: hdu
-                .header
-                .get_text("DATASUM")
-                .map(|s| s.trim().parse::<u32>().ok() == Some(data_sum)),
-            checksum_ok: hdu
-                .header
-                .get_text("CHECKSUM")
-                .map(|_| hdu_sum == 0xFFFF_FFFF),
+            datasum_ok: stored_datasum.map(|expected| expected == Some(data_sum)),
+            checksum_ok: has_checksum
+                .then(|| checksum::combine(header_sum, data_sum) == 0xFFFF_FFFF),
         })
     }
 }
@@ -482,7 +478,7 @@ impl DataLengths {
 /// Outcome of scanning for the next header unit.
 enum NextHeader {
     /// A complete header unit terminated by an `END` card.
-    Found(Vec<u8>),
+    Found { bytes: Vec<u8>, sum: u32 },
     /// Clean end of stream at a block boundary — no more HDUs.
     End,
     /// Trailing bytes carrying no `END`: special records (§3.5) or a trailing
@@ -502,6 +498,7 @@ fn scan_header_unit<S: Source>(
     // Most headers are a single block; reserve it so the common case parses with one
     // allocation and only multi-block headers grow.
     let mut bytes = Vec::with_capacity(BLOCK_SIZE);
+    let mut sum = 0;
     loop {
         match size - *offset {
             // Clean end at a block boundary, or trailing blocks with no `END`.
@@ -513,10 +510,11 @@ fn scan_header_unit<S: Source>(
         }
         let block = source.slice(*offset, BLOCK_SIZE, scratch)?;
         *offset += BLOCK_SIZE as u64;
+        sum = checksum::accumulate(block, sum);
         allocation::try_reserve_exact(&mut bytes, block.len())?;
         bytes.extend_from_slice(block);
         if block_has_end(block) {
-            return Ok(NextHeader::Found(bytes));
+            return Ok(NextHeader::Found { bytes, sum });
         }
     }
 }

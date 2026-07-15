@@ -850,14 +850,14 @@ fn integer_image_compression_preserves_bscale_bzero_and_blank() {
         .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let back = r.read_image(1).unwrap();
+    assert_eq!(back.scaling.bscale, 2.5);
+    assert_eq!(back.scaling.bzero, 100.0);
+    assert_eq!(back.scaling.blank, Some(-5));
 
     match back.decode() {
         ImageData::I16(v) => assert_eq!(v, samples, "raw samples"),
         other => panic!("expected I16, got {other:?}"),
     }
-    assert_eq!(back.scaling.bscale, 2.5);
-    assert_eq!(back.scaling.bzero, 100.0);
-    assert_eq!(back.scaling.blank, Some(-5));
 }
 
 #[test]

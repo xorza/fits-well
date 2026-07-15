@@ -50,7 +50,7 @@ fn main() -> fits_well::Result<()> {
     println!("numpy [y=1, x=2] = {}", numpy[[1, 2]]); // also 12
 
     // `to_ndarray()` keeps the exact element type instead of widening to f64.
-    if let ImageArray::I16(a) = raw.to_ndarray() {
+    if let ImageArray::I16(a) = raw.into_ndarray() {
         println!("typed i16 [x=0, y=2] = {}", a[[0, 2]]); // 20
     }
 
