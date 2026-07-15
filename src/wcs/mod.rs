@@ -29,9 +29,8 @@
 //!
 //! Pixel↔world yields celestial coordinates in the frame the file declares
 //! (`RADESYS`/`EQUINOX`); converting *between* reference frames is astrometry
-//! beyond the FITS standard and is intentionally out of scope. The `*_into`
-//! transform methods write into caller-owned coordinate storage for allocation-free
-//! scalar loops; the returning convenience methods allocate one output vector.
+//! beyond the FITS standard and is intentionally out of scope. Transform methods
+//! write into caller-owned coordinate storage for allocation-free scalar loops.
 
 use std::f64::consts::FRAC_PI_2;
 use std::f64::consts::FRAC_PI_4;
@@ -1162,20 +1161,12 @@ impl Wcs {
         Wcs::from_header(&h, None)
     }
 
-    /// Map 1-based pixel coordinates to world coordinates. Celestial axes return
-    /// `(α, δ)` in degrees; other axes return `CRVAL + ` the linear value.
-    /// `pixel` must contain exactly one value per axis.
-    pub fn pixel_to_world(&self, pixel: &[f64]) -> Vec<f64> {
-        let mut world = vec![0.0; self.axes.len()];
-        self.pixel_to_world_into(pixel, &mut world);
-        world
-    }
-
     /// Map 1-based pixel coordinates into caller-owned world-coordinate storage.
-    /// This is the allocation-free form of [`Wcs::pixel_to_world`].
+    /// Celestial axes return `(α, δ)` in degrees; other axes return `CRVAL + ` the
+    /// linear value.
     /// Both slices must contain exactly one value per axis; debug builds assert
     /// this hot-path precondition.
-    pub fn pixel_to_world_into(&self, pixel: &[f64], world: &mut [f64]) {
+    pub fn pixel_to_world(&self, pixel: &[f64], world: &mut [f64]) {
         let naxis = self.axes.len();
         debug_assert_eq!(pixel.len(), naxis, "pixel coordinate count");
         debug_assert_eq!(world.len(), naxis, "world coordinate count");
@@ -1202,20 +1193,11 @@ impl Wcs {
         }
     }
 
-    /// Map world coordinates back to 1-based pixel coordinates (the inverse of
-    /// [`Wcs::pixel_to_world`]).
-    /// `world` must contain exactly one value per axis.
-    pub fn world_to_pixel(&self, world: &[f64]) -> Vec<f64> {
-        let mut pixel = vec![0.0; self.axes.len()];
-        self.world_to_pixel_into(world, &mut pixel);
-        pixel
-    }
-
-    /// Map world coordinates into caller-owned 1-based pixel-coordinate storage.
-    /// This is the allocation-free form of [`Wcs::world_to_pixel`].
+    /// Map world coordinates into caller-owned 1-based pixel-coordinate storage,
+    /// the inverse of [`Wcs::pixel_to_world`].
     /// Both slices must contain exactly one value per axis; debug builds assert
     /// this hot-path precondition.
-    pub fn world_to_pixel_into(&self, world: &[f64], pixel: &mut [f64]) {
+    pub fn world_to_pixel(&self, world: &[f64], pixel: &mut [f64]) {
         let naxis = self.axes.len();
         debug_assert_eq!(world.len(), naxis, "world coordinate count");
         debug_assert_eq!(pixel.len(), naxis, "pixel coordinate count");

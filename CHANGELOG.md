@@ -18,6 +18,8 @@
 - Mutable WCS source fields (`naxis`, `ctype`, `crval`, `crpix`, and
   `unsupported_axes`) are now private so they cannot invalidate derived transforms.
   Read them through the immutable metadata returned by `Wcs::view`.
+- `Wcs::pixel_to_world` and `Wcs::world_to_pixel` now write into caller-owned
+  slices instead of returning `Vec<f64>` values.
 - `FitsError::DataUnitTooLarge::bytes` changed from `usize` to `u64`. The
   `TypeMismatch` and `InvalidAscii` variants were added; exhaustive matches on
   `FitsError` must handle them.
@@ -28,8 +30,6 @@
   `try_get_text`, which return `Result<Option<_>>` and distinguish a missing keyword
   from a present value of the wrong type.
 - Added `Wcs::view` with immutable per-axis metadata and unsupported-axis status.
-- Added allocation-free `Wcs::pixel_to_world_into` and `Wcs::world_to_pixel_into`
-  transforms for caller-owned coordinate storage.
 - Added explicit `ColumnType` declarations for variable-length table columns.
 
 ### Changed

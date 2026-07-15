@@ -61,8 +61,7 @@ fn pixel_to_world_matches_astropy() {
     let w = open_wcs("wcs_tan.fits");
     let mut reused = [0.0; 2];
     for &(px, py, ra, dec) in TAN_GOLDEN {
-        w.pixel_to_world_into(&[px, py], &mut reused);
-        assert_eq!(w.pixel_to_world(&[px, py]), reused);
+        w.pixel_to_world(&[px, py], &mut reused);
         assert!(
             (reused[0] - ra).abs() < 1e-9,
             "RA at ({px},{py}): got {}, want {ra}",
@@ -86,9 +85,8 @@ fn world_to_pixel_inverts_pixel_to_world() {
     let mut world = [0.0; 2];
     let mut back = [0.0; 2];
     for &(px, py, _, _) in TAN_GOLDEN {
-        w.pixel_to_world_into(&[px, py], &mut world);
-        w.world_to_pixel_into(&world, &mut back);
-        assert_eq!(w.world_to_pixel(&world), back);
+        w.pixel_to_world(&[px, py], &mut world);
+        w.world_to_pixel(&world, &mut back);
         assert!(
             (back[0] - px).abs() < 1e-5 && (back[1] - py).abs() < 1e-5,
             "pixel→world→pixel at ({px},{py}): got {back:?}"
@@ -99,7 +97,8 @@ fn world_to_pixel_inverts_pixel_to_world() {
 #[test]
 fn reference_pixel_maps_to_crval() {
     let w = open_wcs("wcs_tan.fits");
-    let out = w.pixel_to_world(&[256.0, 256.0]);
+    let mut out = [0.0; 2];
+    w.pixel_to_world(&[256.0, 256.0], &mut out);
     assert!((out[0] - 150.0).abs() < 1e-12);
     assert!((out[1] - 2.5).abs() < 1e-12);
 }
@@ -137,8 +136,9 @@ fn sin_projection_matches_astropy() {
         (1.0, 1.0, 45.114201616520, 29.900950619091),
         (180.0, 20.0, 44.907698264374, 29.919967754584),
     ];
+    let mut out = [0.0; 2];
     for &(px, py, ra, dec) in golden {
-        let out = w.pixel_to_world(&[px, py]);
+        w.pixel_to_world(&[px, py], &mut out);
         assert!(
             (out[0] - ra).abs() < 1e-9 && (out[1] - dec).abs() < 1e-9,
             "SIN at ({px},{py}): got {out:?}, want ({ra},{dec})"
@@ -164,8 +164,9 @@ fn legacy_crota_rotation_matches_astropy() {
         (256.0, 200.0, 83.5210288338, 22.0055606050),
         (64.0, 192.0, 83.6166986376, 22.0425247793),
     ];
+    let mut out = [0.0; 2];
     for &(px, py, ra, dec) in golden {
-        let out = w.pixel_to_world(&[px, py]);
+        w.pixel_to_world(&[px, py], &mut out);
         assert!(
             (out[0] - ra).abs() < 1e-8 && (out[1] - dec).abs() < 1e-8,
             "CROTA at ({px},{py}): got {out:?}, want ({ra},{dec})"
@@ -192,7 +193,8 @@ fn allsky_projections_match_astropy() {
         h.set("CRVAL1", 45.0).set("CRVAL2", 30.0);
         h.set("CDELT1", -0.2).set("CDELT2", 0.2);
         let w = Wcs::from_header(&h, None).unwrap();
-        let out = w.pixel_to_world(&[px, py]);
+        let mut out = [0.0; 2];
+        w.pixel_to_world(&[px, py], &mut out);
         assert!(
             (out[0] - ra).abs() < 1e-7 && (out[1] - dec).abs() < 1e-7,
             "{proj} at ({px},{py}): got {out:?}, want ({ra},{dec})"
@@ -216,8 +218,9 @@ fn cea_lambda_pv_matches_astropy() {
         (20.0, 70.0, 46.7406870828, 30.4886140110),
         (80.0, 30.0, 43.2767613377, 29.4887155113),
     ];
+    let mut out = [0.0; 2];
     for &(px, py, ra, dec) in golden {
-        let out = w.pixel_to_world(&[px, py]);
+        w.pixel_to_world(&[px, py], &mut out);
         assert!(
             (out[0] - ra).abs() < 1e-8 && (out[1] - dec).abs() < 1e-8,
             "CEA λ at ({px},{py}): got {out:?}, want ({ra},{dec})"
@@ -372,8 +375,9 @@ fn parameterized_projections_match_astropy() {
             h.set(&format!("PV2_{m}"), v);
         }
         let w = Wcs::from_header(&h, None).unwrap();
+        let mut out = [0.0; 2];
         for &(px, py, ra, dec) in c.pts {
-            let out = w.pixel_to_world(&[px, py]);
+            w.pixel_to_world(&[px, py], &mut out);
             assert!(
                 (out[0] - ra).abs() < 1e-7 && (out[1] - dec).abs() < 1e-7,
                 "{} at ({px},{py}): got {out:?}, want ({ra},{dec})",
@@ -402,7 +406,9 @@ fn unimplemented_projection_codes_fall_back_to_intermediate() {
         assert_eq!(w.view().unsupported_axes, [0, 1], "{code} axes flagged");
         assert!(w.celestial.is_none(), "{code} not decoded as a projection");
         // Intermediate world at pixel (3,4): CRVAL + CDELT·(pixel − CRPIX).
-        assert_eq!(w.pixel_to_world(&[3.0, 4.0]), vec![14.0, 29.0], "{code}");
+        let mut out = [0.0; 2];
+        w.pixel_to_world(&[3.0, 4.0], &mut out);
+        assert_eq!(out, [14.0, 29.0], "{code}");
     }
 }
 
@@ -458,8 +464,9 @@ fn degenerate_conic_without_pv1_falls_back_to_intermediate() {
         let w = Wcs::from_header(&h, None).unwrap();
         assert_eq!(w.view().unsupported_axes, [0, 1], "{code} axes flagged");
         assert!(w.celestial.is_none(), "{code} degenerate, not deprojected");
-        let out = w.pixel_to_world(&[3.0, 4.0]);
-        assert_eq!(out, vec![14.0, 29.0], "{code} intermediate");
+        let mut out = [0.0; 2];
+        w.pixel_to_world(&[3.0, 4.0], &mut out);
+        assert_eq!(out, [14.0, 29.0], "{code} intermediate");
         assert!(out.iter().all(|v| v.is_finite()), "{code} no NaN");
     }
     // A conic *with* a valid θ_a is still decoded normally (not flagged).
@@ -495,9 +502,11 @@ fn bonne_with_zero_theta1_equals_sfl() {
     let bon = build("BON", Some(0.0));
     let sfl = build("SFL", None);
     assert!(bon.celestial.is_some() && bon.view().unsupported_axes.is_empty());
+    let mut b = [0.0; 2];
+    let mut s = [0.0; 2];
     for &(px, py) in &[(20.0, 70.0), (80.0, 30.0), (55.0, 45.0)] {
-        let b = bon.pixel_to_world(&[px, py]);
-        let s = sfl.pixel_to_world(&[px, py]);
+        bon.pixel_to_world(&[px, py], &mut b);
+        sfl.pixel_to_world(&[px, py], &mut s);
         assert!(
             (b[0] - s[0]).abs() < 1e-10 && (b[1] - s[1]).abs() < 1e-10,
             "BON θ₁=0 vs SFL at ({px},{py}): {b:?} vs {s:?}"
@@ -505,8 +514,10 @@ fn bonne_with_zero_theta1_equals_sfl() {
         assert!(b.iter().all(|v| v.is_finite()));
     }
     // The forward (SFL) path round-trips too.
-    let w = bon.pixel_to_world(&[40.0, 60.0]);
-    let p = bon.world_to_pixel(&w);
+    let mut w = [0.0; 2];
+    let mut p = [0.0; 2];
+    bon.pixel_to_world(&[40.0, 60.0], &mut w);
+    bon.world_to_pixel(&w, &mut p);
     assert!(
         (p[0] - 40.0).abs() < 1e-7 && (p[1] - 60.0).abs() < 1e-7,
         "BON θ₁=0 round-trip: {p:?}"
@@ -669,13 +680,15 @@ fn projections_match_astropy() {
         h.set("CRVAL1", cv1).set("CRVAL2", cv2);
         h.set("CDELT1", -0.05).set("CDELT2", 0.05);
         let w = Wcs::from_header(&h, None).unwrap();
-        let out = w.pixel_to_world(&[px, py]);
+        let mut out = [0.0; 2];
+        w.pixel_to_world(&[px, py], &mut out);
         assert!(
             (out[0] - ra).abs() < 1e-8 && (out[1] - dec).abs() < 1e-8,
             "{proj} at ({px},{py}): got {out:?}, want ({ra},{dec})"
         );
         // Full round-trip.
-        let back = w.world_to_pixel(&out);
+        let mut back = [0.0; 2];
+        w.world_to_pixel(&out, &mut back);
         assert!(
             (back[0] - px).abs() < 1e-6 && (back[1] - py).abs() < 1e-6,
             "{proj} round-trip: {back:?}"
@@ -701,9 +714,11 @@ fn cunit_scales_celestial_axes_to_degrees() {
     };
     let w_deg = build(1.0, None);
     let w_asec = build(3600.0, Some("arcsec"));
+    let mut a = [0.0; 2];
+    let mut b = [0.0; 2];
     for &(px, py) in &[(1.0, 1.0), (50.0, 50.0), (80.0, 20.0), (33.0, 77.0)] {
-        let a = w_deg.pixel_to_world(&[px, py]);
-        let b = w_asec.pixel_to_world(&[px, py]);
+        w_deg.pixel_to_world(&[px, py], &mut a);
+        w_asec.pixel_to_world(&[px, py], &mut b);
         assert!(
             (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
             "deg {a:?} vs arcsec {b:?} at ({px},{py})"
@@ -711,7 +726,8 @@ fn cunit_scales_celestial_axes_to_degrees() {
     }
     // The reference pixel maps exactly to CRVAL = (150°, 30°) — proving the arcsec
     // CRVAL was scaled to degrees, not taken literally.
-    let r = w_asec.pixel_to_world(&[50.0, 50.0]);
+    let mut r = [0.0; 2];
+    w_asec.pixel_to_world(&[50.0, 50.0], &mut r);
     assert!(
         (r[0] - 150.0).abs() < 1e-9 && (r[1] - 30.0).abs() < 1e-9,
         "{r:?}"
@@ -738,9 +754,11 @@ fn planetary_solar_lonlat_axes_are_celestial() {
         helio.celestial.is_some(),
         "HPLN/HPLT must be recognized as a celestial pair"
     );
+    let mut a = [0.0; 2];
+    let mut b = [0.0; 2];
     for &(px, py) in &[(1.0, 1.0), (64.0, 64.0), (100.0, 30.0)] {
-        let a = radec.pixel_to_world(&[px, py]);
-        let b = helio.pixel_to_world(&[px, py]);
+        radec.pixel_to_world(&[px, py], &mut a);
+        helio.pixel_to_world(&[px, py], &mut b);
         assert!(
             (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
             "RA/DEC {a:?} vs HPLN/HPLT {b:?}"
@@ -773,13 +791,17 @@ fn linear_spectral_resolves_nonlinear_falls_back_to_intermediate() {
     // Bare FREQ: fully linear, nothing flagged. At pixel 3: 1.4e9 + 2·1e6 = 1.402e9.
     let lin = build("FREQ");
     assert!(lin.view().unsupported_axes.is_empty());
-    assert!((lin.pixel_to_world(&[1.0, 1.0, 3.0])[2] - 1.402e9).abs() < 1.0);
+    let mut out = [0.0; 3];
+    lin.pixel_to_world(&[1.0, 1.0, 3.0], &mut out);
+    assert!((out[2] - 1.402e9).abs() < 1.0);
     // FREQ-LOG: axis index 2 flagged; it returns the intermediate value, and the
     // RA/DEC pair still decodes (reference pixel → CRVAL exactly).
     let log = build("FREQ-LOG");
     assert_eq!(log.view().unsupported_axes, [2]);
-    assert!((log.pixel_to_world(&[1.0, 1.0, 3.0])[2] - 1.402e9).abs() < 1.0);
-    let r = log.pixel_to_world(&[1.0, 1.0, 1.0]);
+    log.pixel_to_world(&[1.0, 1.0, 3.0], &mut out);
+    assert!((out[2] - 1.402e9).abs() < 1.0);
+    let mut r = [0.0; 3];
+    log.pixel_to_world(&[1.0, 1.0, 1.0], &mut r);
     assert!(
         (r[0] - 45.0).abs() < 1e-9 && (r[1] - 30.0).abs() < 1e-9,
         "{r:?}"
@@ -810,9 +832,11 @@ fn pixel_list_wcs_matches_the_equivalent_image_wcs() {
     let wi = Wcs::from_header(&img, None).unwrap();
 
     assert!(wt.celestial.is_some(), "pixel-list pair must be celestial");
+    let mut a = [0.0; 2];
+    let mut b = [0.0; 2];
     for &(px, py) in &[(256.0, 256.0), (1.0, 1.0), (300.0, 100.0), (50.0, 400.0)] {
-        let a = wt.pixel_to_world(&[px, py]);
-        let b = wi.pixel_to_world(&[px, py]);
+        wt.pixel_to_world(&[px, py], &mut a);
+        wi.pixel_to_world(&[px, py], &mut b);
         assert!(
             (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
             "pixel-list {a:?} vs image {b:?} at ({px},{py})"
@@ -851,9 +875,11 @@ fn vector_cell_wcs_matches_the_equivalent_image_wcs() {
 
     assert_eq!(wt.view().axes.len(), 2); // rank inferred from the iCTYP5 keywords
     assert!(wt.celestial.is_some(), "vector-cell pair must be celestial");
+    let mut a = [0.0; 2];
+    let mut b = [0.0; 2];
     for &(px, py) in &[(256.0, 256.0), (1.0, 1.0), (300.0, 100.0), (50.0, 400.0)] {
-        let a = wt.pixel_to_world(&[px, py]);
-        let b = wi.pixel_to_world(&[px, py]);
+        wt.pixel_to_world(&[px, py], &mut a);
+        wi.pixel_to_world(&[px, py], &mut b);
         assert!(
             (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
             "vector-cell {a:?} vs image {b:?} at ({px},{py})"
