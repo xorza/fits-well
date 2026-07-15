@@ -48,7 +48,7 @@ ndarray = { version = "0.17", optional = true }
 criterion = "0.8"
 
 [features]
-default = ["parallel", "compression"]
+default = ["parallel"]
 # rayon-backed tile-parallel (de)compression — the codecs are compute-bound and
 # tiles are independent, so this scales near-linearly. Scalar fallback otherwise.
 # (The raw byte-swap / BSCALE-BZERO paths are memory-bound; profiling found neither

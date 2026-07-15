@@ -205,10 +205,10 @@ impl Card {
         buf
     }
 
-    /// Serialize to one or more 80-byte records. A string value too long for a
+    /// Append one or more 80-byte records to `out`. A string value too long for a
     /// single record is split into a `CONTINUE` chain (§4.2.1.2) instead of being
     /// silently truncated; every other card renders to exactly one record.
-    pub(crate) fn render_records(&self) -> Vec<[u8; CARD_SIZE]> {
+    pub(crate) fn render_into(&self, out: &mut Vec<u8>) {
         // A string value that overflows one record emits a CONTINUE chain (§4.2.1.2)
         // instead of being truncated — for both plain value cards (value field at
         // byte 11) and HIERARCH cards (whose `HIERARCH key = ` prefix is longer).
@@ -222,10 +222,11 @@ impl Card {
             };
             if prefix_len != usize::MAX && prefix_len + value_len + comment_len > CARD_SIZE {
                 let hierarch = self.kind == CardKind::Hierarch;
-                return render_long_string(&self.keyword, s, self.comment.as_deref(), hierarch);
+                render_long_string(&self.keyword, s, self.comment.as_deref(), hierarch, out);
+                return;
             }
         }
-        vec![self.render()]
+        out.extend_from_slice(&self.render());
     }
 }
 
@@ -409,7 +410,8 @@ fn render_long_string(
     value: &str,
     comment: Option<&str>,
     hierarch: bool,
-) -> Vec<[u8; CARD_SIZE]> {
+    out: &mut Vec<u8>,
+) {
     // Bytes 12–79 hold the quoted substring (68 chars); reserve one for the
     // continuation `&`, leaving 67 escaped characters per continuation record.
     const PER_RECORD: usize = 67;
@@ -422,41 +424,38 @@ fn render_long_string(
         .map_or(PER_RECORD, |p| CARD_SIZE.saturating_sub(p.len() + 3));
     let subs = split_escaped(value, first_budget, PER_RECORD);
     let last = subs.len() - 1;
-    subs.iter()
-        .enumerate()
-        .map(|(i, sub)| {
-            let mut buf = [b' '; CARD_SIZE];
-            let body = if i == last {
-                format!("'{sub}'")
-            } else {
-                format!("'{sub}&'")
-            };
-            let body_start = match (i, &prefix) {
-                (0, Some(p)) => {
-                    write_at(&mut buf, 0, p);
-                    p.len()
-                }
-                (0, None) => {
-                    let kw = keyword.as_bytes();
-                    let n = kw.len().min(8);
-                    buf[..n].copy_from_slice(&kw[..n]);
-                    buf[8] = b'=';
-                    10
-                }
-                _ => {
-                    buf[..8].copy_from_slice(b"CONTINUE");
-                    10
-                }
-            };
-            write_at(&mut buf, body_start, &body);
-            if i == last
-                && let Some(c) = comment
-            {
-                write_at(&mut buf, body_start + body.len(), &format!(" / {c}"));
+    for (i, sub) in subs.iter().enumerate() {
+        let mut buf = [b' '; CARD_SIZE];
+        let body = if i == last {
+            format!("'{sub}'")
+        } else {
+            format!("'{sub}&'")
+        };
+        let body_start = match (i, &prefix) {
+            (0, Some(p)) => {
+                write_at(&mut buf, 0, p);
+                p.len()
             }
-            buf
-        })
-        .collect()
+            (0, None) => {
+                let kw = keyword.as_bytes();
+                let n = kw.len().min(8);
+                buf[..n].copy_from_slice(&kw[..n]);
+                buf[8] = b'=';
+                10
+            }
+            _ => {
+                buf[..8].copy_from_slice(b"CONTINUE");
+                10
+            }
+        };
+        write_at(&mut buf, body_start, &body);
+        if i == last
+            && let Some(c) = comment
+        {
+            write_at(&mut buf, body_start + body.len(), &format!(" / {c}"));
+        }
+        out.extend_from_slice(&buf);
+    }
 }
 
 /// Split `value` into substrings whose *escaped* form (`'` → `''`) is at most

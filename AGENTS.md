@@ -200,10 +200,11 @@ Design principles specific to this crate:
   caller-owned reused scratch; `BITPIX = 8` borrows zero-copy), the writer reuses its
   buffer via `encode_into`, each paying the allocation once (~4–5×). Always keep a
   scalar fallback behind the feature gate.
-- **Reuse buffers across calls.** `FitsReader`/`FitsWriter` each own a `scratch`
-  `Vec<u8>` reused across reads/writes, so steady-state staging allocates nothing;
+- **Reuse buffers across calls.** `FitsReader` owns a data `scratch`; `FitsWriter`
+  owns separate reusable data and header buffers because checksum generation needs
+  both representations alive together. Steady-state staging allocates nothing;
   decode/encode expose `*_into` forms that append into a caller buffer. The codecs
-  build their data unit straight into the writer's scratch.
+  build their data unit straight into the writer's data scratch.
 - **Feature-flag the layers that carry a dependency — but they're on by default.**
   Tiled compression pulls in `flate2` (`compression` feature) and tile parallelism
   pulls in `rayon` (`parallel`, which implies `compression`); both are in the

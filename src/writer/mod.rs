@@ -39,9 +39,9 @@ use crate::table::ColumnData;
 /// patched in (Appendix J.1).
 const PLACEHOLDER_CHECKSUM: &str = "0000000000000000";
 
-/// Serialize a header unit: every card rendered to 80 bytes, the `END` record,
-/// then space padding to the next 2880-byte boundary.
-pub(crate) fn render_header(header: &Header) -> Result<Vec<u8>> {
+/// Serialize a header unit into reusable storage: every card rendered to 80 bytes,
+/// the `END` record, then space padding to the next 2880-byte boundary.
+pub(crate) fn render_header(header: &Header, buf: &mut Vec<u8>) -> Result<()> {
     for entry in header.iter() {
         if let Some(Value::Text(text)) = entry.value {
             validate_ascii(text, "header text value")?;
@@ -50,25 +50,34 @@ pub(crate) fn render_header(header: &Header) -> Result<Vec<u8>> {
             validate_ascii(comment, "header comment")?;
         }
     }
-    let mut buf = Vec::with_capacity((header.cards.len() + 1) * CARD_SIZE);
+    let min_len = header
+        .cards
+        .len()
+        .checked_add(1)
+        .and_then(|records| records.checked_mul(CARD_SIZE))
+        .ok_or(FitsError::DataUnitOverflow)?;
+    buf.clear();
+    allocation::try_reserve_exact(buf, min_len)?;
     for card in &header.cards {
-        for record in card.render_records() {
-            buf.extend_from_slice(&record);
-        }
+        card.render_into(buf);
     }
     let mut end = [SPACE_FILL; CARD_SIZE];
     end[..3].copy_from_slice(b"END");
     buf.extend_from_slice(&end);
-    pad_to_block(&mut buf, SPACE_FILL);
-    Ok(buf)
+    pad_to_block(buf, SPACE_FILL)
 }
 
 /// Round `buf` up to a whole number of 2880-byte blocks using `fill`.
-fn pad_to_block(buf: &mut Vec<u8>, fill: u8) {
+fn pad_to_block(buf: &mut Vec<u8>, fill: u8) -> Result<()> {
     let rem = buf.len() % BLOCK_SIZE;
     if rem != 0 {
-        buf.resize(buf.len() + (BLOCK_SIZE - rem), fill);
+        let padded = buf
+            .len()
+            .checked_add(BLOCK_SIZE - rem)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        allocation::try_resize(buf, padded, fill)?;
     }
+    Ok(())
 }
 
 /// An element type accepted by a binary-table writer column.
@@ -234,6 +243,9 @@ pub struct FitsWriter<W> {
     /// writing many HDUs allocates no per-call staging. Each high-level write
     /// `clear`s it, builds the unit, and hands it to [`FitsWriter::write_hdu`].
     scratch: Vec<u8>,
+    /// Reused block-padded header serialization, kept separate because checksum
+    /// generation needs the header and data bytes alive at the same time.
+    header_scratch: Vec<u8>,
 }
 
 impl<W: Write> FitsWriter<W> {
@@ -243,6 +255,7 @@ impl<W: Write> FitsWriter<W> {
             has_primary: false,
             checksum: false,
             scratch: Vec::new(),
+            header_scratch: Vec::new(),
         }
     }
 
@@ -256,7 +269,8 @@ impl<W: Write> FitsWriter<W> {
 
     /// Write a header unit (cards + `END` + block padding).
     pub fn write_header(&mut self, header: &Header) -> Result<()> {
-        self.sink.write_all(&render_header(header)?)?;
+        render_header(header, &mut self.header_scratch)?;
+        self.sink.write_all(&self.header_scratch)?;
         Ok(())
     }
 
@@ -478,14 +492,15 @@ impl<W: Write> FitsWriter<W> {
         } else {
             None
         };
-        let mut header_bytes = render_header(&header)?;
+        render_header(&header, &mut self.header_scratch)?;
         if let Some(data_sum) = data_sum {
             // Re-sum with the zero placeholder, then encode the value that forces
             // the whole-HDU checksum to negative zero, and patch it in place.
-            let hdu_sum = checksum::combine(checksum::accumulate(&header_bytes, 0), data_sum);
-            patch_checksum(&mut header_bytes, &checksum::encode(hdu_sum, true));
+            let hdu_sum =
+                checksum::combine(checksum::accumulate(&self.header_scratch, 0), data_sum);
+            patch_checksum(&mut self.header_scratch, &checksum::encode(hdu_sum, true));
         }
-        self.sink.write_all(&header_bytes)?;
+        self.sink.write_all(&self.header_scratch)?;
         self.sink.write_all(&self.scratch)?;
         Ok(())
     }

@@ -343,18 +343,33 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
     h.set("PCOUNT", zpcount);
     for (n, zform) in zforms.iter().enumerate() {
         h.set(key!("TFORM{}", n + 1).as_str(), zform.clone());
-        h.remove(key!("ZFORM{}", n + 1).as_str());
-        h.remove(key!("ZCTYP{}", n + 1).as_str());
     }
-    for key in [
-        "ZTABLE", "ZTILELEN", "ZNAXIS1", "ZNAXIS2", "ZPCOUNT", "ZHEAPPTR",
-    ] {
-        h.remove(key);
-    }
+    h.remove_where(|keyword| {
+        matches!(
+            keyword,
+            "ZTABLE" | "ZTILELEN" | "ZNAXIS1" | "ZNAXIS2" | "ZPCOUNT" | "ZHEAPPTR"
+        ) || indexed_compression_key(keyword, "ZFORM", ncols)
+            || indexed_compression_key(keyword, "ZCTYP", ncols)
+    });
     Ok(HduParts {
         header: h,
         data: out,
     })
+}
+
+fn indexed_compression_key(keyword: &str, prefix: &str, ncols: usize) -> bool {
+    let Some(suffix) = keyword.strip_prefix(prefix) else {
+        return false;
+    };
+    if suffix.is_empty()
+        || suffix.starts_with('0')
+        || !suffix.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return false;
+    }
+    suffix
+        .parse::<usize>()
+        .is_ok_and(|column| (1..=ncols).contains(&column))
 }
 
 /// Compress one tile's column-major raw bytes per the column's algorithm.

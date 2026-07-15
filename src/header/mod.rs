@@ -302,13 +302,16 @@ impl Header {
         self
     }
 
-    /// Remove every card with this keyword and rebuild the index. A no-op if the
-    /// keyword is absent. Used when transforming headers (e.g. stripping the `Z*`
-    /// keywords when uncompressing a tiled table).
+    /// Remove all cards matching `should_remove`, then rebuild the keyword index
+    /// once after the bulk structural edit.
     #[cfg(feature = "compression")]
-    pub(crate) fn remove(&mut self, keyword: &str) -> &mut Self {
-        if self.index.contains_key(keyword) {
-            self.cards.retain(|c| c.keyword != keyword);
+    pub(crate) fn remove_where(
+        &mut self,
+        mut should_remove: impl FnMut(&str) -> bool,
+    ) -> &mut Self {
+        let old_len = self.cards.len();
+        self.cards.retain(|card| !should_remove(&card.keyword));
+        if self.cards.len() != old_len {
             self.reindex();
         }
         self
