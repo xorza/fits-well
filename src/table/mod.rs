@@ -145,7 +145,11 @@ impl Tform {
             if repeat > 1 {
                 return Err(invalid());
             }
-            Some(TformKind::from_code(elem).ok_or_else(invalid)?)
+            let elem = TformKind::from_code(elem).ok_or_else(invalid)?;
+            if matches!(elem, TformKind::ArrayDesc32 | TformKind::ArrayDesc64) {
+                return Err(invalid());
+            }
+            Some(elem)
         } else {
             None
         };
@@ -357,16 +361,14 @@ impl BinTable {
             let tform = Tform::parse(tform_value)?;
             let tdim = header
                 .get_text(key!("TDIM{n}").as_str())
-                .and_then(parse_tdim);
-            // §7.3.2: for a fixed-width column a `TDIMn` shape must reshape exactly the
-            // repeat count (checked product so a hostile shape can't overflow past the
-            // equality). Variable-length (`P`/`Q`) columns are exempt — there `TDIMn`
-            // describes the heap array's shape, not the descriptor repeat (1), as in a
-            // §10.3 compressed-table container that carries the original column's TDIM.
+                .map(parse_tdim)
+                .transpose()?;
+            // §7.3.2 permits trailing elements beyond the declared multidimensional
+            // view, so the shape product may be smaller than the fixed repeat.
             let is_vla = matches!(tform.kind, TformKind::ArrayDesc32 | TformKind::ArrayDesc64);
             if let Some(dims) = &tdim
                 && !is_vla
-                && dims.iter().try_fold(1usize, |a, &x| a.checked_mul(x)) != Some(tform.repeat)
+                && tdim_product(dims)? > tform.repeat
             {
                 return Err(FitsError::KeywordOutOfRange { name: "TDIMn" });
             }
@@ -493,6 +495,17 @@ impl BinTable {
     fn cell(&self, col: &Column, r: usize) -> &[u8] {
         let start = r * self.row_len + col.byte_offset;
         &self.bytes[start..start + col.tform.byte_width()]
+    }
+
+    fn array_descriptor(&self, col: &Column, r: usize, wide: bool) -> Descriptor {
+        if col.tform.repeat == 0 {
+            Descriptor {
+                nelem: 0,
+                offset: 0,
+            }
+        } else {
+            decode_descriptor(self.cell(col, r), wide)
+        }
     }
 
     /// Concatenate the raw cell bytes of `col` across every row.
@@ -648,7 +661,8 @@ impl<'a> ColumnReader<'a> {
         };
         let mut out = Vec::with_capacity(self.table.nrows);
         for r in 0..self.table.nrows {
-            let d = decode_descriptor(self.table.cell(col, r), wide);
+            let d = self.table.array_descriptor(col, r, wide);
+            validate_vla_tdim(col, d.nelem)?;
             let nbytes = match elem {
                 TformKind::Bit => d.nelem.div_ceil(8),
                 _ => d
@@ -656,10 +670,12 @@ impl<'a> ColumnReader<'a> {
                     .checked_mul(elem.elem_size())
                     .ok_or(FitsError::UnexpectedEof)?,
             };
-            out.push(decode_array(
-                elem,
-                self.table.bounded_heap(d.offset, nbytes)?,
-            ));
+            let bytes = if d.nelem == 0 {
+                &[]
+            } else {
+                self.table.bounded_heap(d.offset, nbytes)?
+            };
+            out.push(decode_array(elem, bytes));
         }
         Ok(out)
     }
@@ -697,8 +713,11 @@ impl<'a> ColumnReader<'a> {
         // Validate every row's heap span up front (no allocation) so [`BitColumn::row`]
         // can resolve a row lazily and infallibly — the only place an overrun surfaces.
         for r in 0..self.table.nrows {
-            let d = decode_descriptor(self.table.cell(col, r), wide);
-            self.table.bounded_heap(d.offset, d.nelem.div_ceil(8))?;
+            let d = self.table.array_descriptor(col, r, wide);
+            validate_vla_tdim(col, d.nelem)?;
+            if d.nelem != 0 {
+                self.table.bounded_heap(d.offset, d.nelem.div_ceil(8))?;
+            }
         }
         Ok(BitColumn {
             table: self.table,
@@ -758,7 +777,10 @@ impl<'a> BitColumn<'a> {
             // Variable-length `PX`/`QX`: follow the descriptor into the heap. The span
             // was bounds-checked by `vla_bits`, so the lookup can't fail here.
             let wide = col.tform.kind == TformKind::ArrayDesc64;
-            let d = decode_descriptor(self.table.cell(col, r), wide);
+            let d = self.table.array_descriptor(col, r, wide);
+            if d.nelem == 0 {
+                return self.table.bytes[..0].view_bits::<Msb0>();
+            }
             let cell = self
                 .table
                 .bounded_heap(d.offset, d.nelem.div_ceil(8))
@@ -803,12 +825,37 @@ impl Index<(usize, usize)> for BitColumn<'_> {
 }
 
 /// Parse a `TDIMn` value `'(d1,d2,…)'` into axis lengths (fastest-varying first).
-fn parse_tdim(value: &str) -> Option<Vec<usize>> {
-    let inner = value.trim().strip_prefix('(')?.strip_suffix(')')?;
-    inner
+fn parse_tdim(value: &str) -> Result<Vec<usize>> {
+    let invalid = || FitsError::KeywordOutOfRange { name: "TDIMn" };
+    let inner = value
+        .trim()
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(invalid)?;
+    let dims: Vec<usize> = inner
         .split(',')
-        .map(|s| s.trim().parse::<usize>().ok())
-        .collect()
+        .map(|value| value.trim().parse::<usize>().map_err(|_| invalid()))
+        .collect::<Result<_>>()?;
+    if dims.is_empty() || dims.contains(&0) {
+        return Err(invalid());
+    }
+    Ok(dims)
+}
+
+fn tdim_product(dims: &[usize]) -> Result<usize> {
+    dims.iter()
+        .try_fold(1usize, |product, &len| product.checked_mul(len))
+        .ok_or(FitsError::KeywordOutOfRange { name: "TDIMn" })
+}
+
+fn validate_vla_tdim(col: &Column, element_count: usize) -> Result<()> {
+    if let Some(dims) = &col.tdim {
+        let product = tdim_product(dims)?;
+        if product > element_count {
+            return Err(FitsError::KeywordOutOfRange { name: "TDIMn" });
+        }
+    }
+    Ok(())
 }
 
 /// Scale a decoded numeric [`ColumnData`] to its physical `f64` plane:
@@ -858,6 +905,7 @@ fn decode_array(kind: TformKind, bytes: &[u8]) -> ColumnData {
                 .collect(),
         ),
         TformKind::Byte | TformKind::Bit => ColumnData::Bytes(bytes.to_vec()),
+        TformKind::Char if bytes.is_empty() => ColumnData::Text(Vec::new()),
         TformKind::Char => ColumnData::Text(vec![trim_text(bytes)]),
         TformKind::I16 => ColumnData::I16(decode_be(bytes, i16::from_be_bytes)),
         TformKind::I32 => ColumnData::I32(decode_be(bytes, i32::from_be_bytes)),

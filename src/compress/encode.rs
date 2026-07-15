@@ -150,7 +150,7 @@ pub(crate) fn compress_image(
         .ok_or(FitsError::DataUnitOverflow)?;
     allocation::try_reserve_exact(out, output_len)?;
     for &(nelem, offset) in &descriptors {
-        push_pq_descriptor(out, wide, nelem as u64, offset as u64);
+        push_pq_descriptor(out, wide, nelem as u64, offset as u64)?;
     }
     out.extend_from_slice(&heap);
 
@@ -348,8 +348,8 @@ fn compress_float_image(
     for t in 0..ntiles {
         // Two 32-bit `P` descriptors (COMPRESSED_DATA, GZIP_COMPRESSED_DATA) then
         // the ZSCALE/ZZERO doubles — the §10 quantized-float row layout.
-        push_pq_descriptor(out, false, cd_desc[t].0 as u64, cd_desc[t].1 as u64);
-        push_pq_descriptor(out, false, gz_desc[t].0 as u64, gz_desc[t].1 as u64);
+        push_pq_descriptor(out, false, cd_desc[t].0 as u64, cd_desc[t].1 as u64)?;
+        push_pq_descriptor(out, false, gz_desc[t].0 as u64, gz_desc[t].1 as u64)?;
         out.extend_from_slice(&zscale[t].to_be_bytes());
         out.extend_from_slice(&zzero[t].to_be_bytes());
     }

@@ -2,6 +2,9 @@
 //! compression layers. FITS data is always big-endian, so every typed decode or
 //! encode funnels through these three helpers.
 
+use crate::error::FitsError;
+use crate::error::Result;
+
 /// Decode a packed big-endian buffer into host-endian values of a fixed-width
 /// type, e.g. `decode_be(bytes, i16::from_be_bytes)`.
 ///
@@ -73,18 +76,34 @@ where
     }
 }
 
-/// Append a variable-length-array descriptor — element count and heap byte offset
-/// — as a big-endian `Q` (64-bit, `wide`) or `P` (32-bit) pair. The values are
-/// carried as `u64` up to here so a `Q` descriptor can address a heap or count
-/// beyond the 4 GiB a `P` allows (truncating earlier would defeat `Q`'s purpose).
-pub(crate) fn push_pq_descriptor(out: &mut Vec<u8>, wide: bool, count: u64, offset: u64) {
+/// Validate the signed integer range of a FITS `P` or `Q` descriptor.
+pub(crate) fn validate_pq_descriptor(wide: bool, count: u64, offset: u64) -> Result<()> {
     if wide {
-        out.extend_from_slice(&(count as i64).to_be_bytes());
-        out.extend_from_slice(&(offset as i64).to_be_bytes());
+        i64::try_from(count).map_err(|_| FitsError::DataUnitOverflow)?;
+        i64::try_from(offset).map_err(|_| FitsError::DataUnitOverflow)?;
     } else {
-        out.extend_from_slice(&(count as i32).to_be_bytes());
-        out.extend_from_slice(&(offset as i32).to_be_bytes());
+        i32::try_from(count).map_err(|_| FitsError::DataUnitOverflow)?;
+        i32::try_from(offset).map_err(|_| FitsError::DataUnitOverflow)?;
     }
+    Ok(())
+}
+
+/// Append a validated big-endian `P` or `Q` element-count/heap-offset pair.
+pub(crate) fn push_pq_descriptor(
+    out: &mut Vec<u8>,
+    wide: bool,
+    count: u64,
+    offset: u64,
+) -> Result<()> {
+    validate_pq_descriptor(wide, count, offset)?;
+    if wide {
+        out.extend_from_slice(&i64::try_from(count).unwrap().to_be_bytes());
+        out.extend_from_slice(&i64::try_from(offset).unwrap().to_be_bytes());
+    } else {
+        out.extend_from_slice(&i32::try_from(count).unwrap().to_be_bytes());
+        out.extend_from_slice(&i32::try_from(offset).unwrap().to_be_bytes());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

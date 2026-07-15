@@ -49,7 +49,7 @@ fn parses_tform_repeat_and_kind() {
     for (s, expected) in cases {
         assert_eq!(Tform::parse(s).unwrap(), expected, "{s}");
     }
-    for bad in ["9Z", "", "1P", "2PE(5)", "3QD"] {
+    for bad in ["9Z", "", "1P", "2PE(5)", "3QD", "1PP", "1PQ", "1QP", "1QQ"] {
         // "1P" lacks the heap element-type letter; "2PE"/"3QD" violate the §6.3
         // rule that a P/Q descriptor's repeat count is 0 or 1.
         assert!(
@@ -119,7 +119,7 @@ fn decodes_fixed_width_columns_from_hand_built_data() {
 
 #[test]
 fn zero_repeat_column_decodes_to_empty() {
-    let header = table_header(4, 1, &["0D", "1J"]);
+    let header = table_header(4, 1, &["0D", "0PJ", "0QD", "0PX", "1J"]);
     let data = 7i32.to_be_bytes().to_vec();
     let table = BinTable::from_data(&header, data).unwrap();
     assert_eq!(
@@ -127,9 +127,46 @@ fn zero_repeat_column_decodes_to_empty() {
         ColumnData::F64(vec![])
     );
     assert_eq!(
-        table.column_by_idx(1).unwrap().raw().unwrap(),
+        table.column_by_idx(1).unwrap().vla().unwrap(),
+        vec![ColumnData::I32(Vec::new())]
+    );
+    assert_eq!(
+        table.column_by_idx(2).unwrap().vla().unwrap(),
+        vec![ColumnData::F64(Vec::new())]
+    );
+    assert!(table.column_by_idx(3).unwrap().vla_bits().unwrap()[0].is_empty());
+    assert_eq!(
+        table.column_by_idx(4).unwrap().raw().unwrap(),
         ColumnData::I32(vec![7])
     );
+}
+
+#[test]
+fn tdim_accepts_subshapes_and_checks_vla_cells() {
+    let mut fixed = table_header(16, 1, &["4J"]);
+    fixed.set("TDIM1", "(2)");
+    assert!(BinTable::from_data(&fixed, vec![0; 16]).is_ok());
+    for invalid in ["(5)", "(2,broken)", "()", "(0)"] {
+        fixed.set("TDIM1", invalid);
+        assert!(matches!(
+            BinTable::from_data(&fixed, vec![0; 16]),
+            Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
+        ));
+    }
+
+    let mut vla = table_header(8, 1, &["1PJ"]);
+    vla.set("PCOUNT", 12).set("TDIM1", "(2,2)");
+    let mut data = Vec::new();
+    data.extend_from_slice(&3i32.to_be_bytes());
+    data.extend_from_slice(&0i32.to_be_bytes());
+    for value in [1i32, 2, 3] {
+        data.extend_from_slice(&value.to_be_bytes());
+    }
+    let table = BinTable::from_data(&vla, data).unwrap();
+    assert!(matches!(
+        table.column_by_idx(0).unwrap().vla(),
+        Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
+    ));
 }
 
 #[test]

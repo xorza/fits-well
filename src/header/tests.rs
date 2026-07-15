@@ -171,7 +171,7 @@ fn built_header_round_trips_through_render_and_parse() {
         .set("BITPIX", 8)
         .set("NAXIS", 0)
         .set("OBJECT", "test");
-    let bytes = render_header(&h);
+    let bytes = render_header(&h).unwrap();
     let back = Header::parse(&bytes).unwrap();
     assert_eq!(back.cards, h.cards);
 }
