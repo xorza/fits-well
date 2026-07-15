@@ -29,7 +29,9 @@
 //!
 //! Pixel↔world yields celestial coordinates in the frame the file declares
 //! (`RADESYS`/`EQUINOX`); converting *between* reference frames is astrometry
-//! beyond the FITS standard and is intentionally out of scope.
+//! beyond the FITS standard and is intentionally out of scope. The `*_into`
+//! transform methods write into caller-owned coordinate storage for allocation-free
+//! scalar loops; the returning convenience methods allocate one output vector.
 
 use std::f64::consts::FRAC_PI_2;
 use std::f64::consts::FRAC_PI_4;
@@ -162,32 +164,102 @@ impl Projection {
             .map(|&(.., fam)| fam)
             .expect("every Projection variant is listed in PROJECTIONS")
     }
+}
 
-    /// Whether this is a zenithal projection (fiducial point at the native pole,
-    /// `θ₀ = 90°`); cylindrical projections have `θ₀ = 0°`.
-    fn is_zenithal(self) -> bool {
-        self.family() == Family::Zenithal
-    }
+#[derive(Debug, Clone)]
+struct PreparedProjection {
+    projection: Projection,
+    family: Family,
+    pv: [f64; 21],
+    conic: Option<ConicConstants>,
+}
 
-    /// Whether this is a conic projection (`θ₀ = θ_a = PVi_1`).
-    fn is_conic(self) -> bool {
-        self.family() == Family::Conic
+#[derive(Debug, Clone, Copy)]
+struct ConicConstants {
+    c: f64,
+    y0: f64,
+    theta_a: f64,
+    theta_a_degrees: f64,
+    cos_eta: f64,
+    cot_theta_a: f64,
+    sin_theta1: f64,
+    sin_theta2: f64,
+    psi: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeCoordinate {
+    phi: f64,
+    theta: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProjectedCoordinate {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CelestialCoordinate {
+    ra: f64,
+    dec: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SzpVertex {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CelestialCorrection {
+    longitude_axis: usize,
+    latitude_axis: usize,
+    longitude_delta: f64,
+    latitude_delta: f64,
+}
+
+impl PreparedProjection {
+    fn new(projection: Projection, pv: [f64; 21]) -> PreparedProjection {
+        let family = projection.family();
+        assert!(
+            family != Family::Conic || pv[1] != 0.0,
+            "conic projection requires non-zero PVi_1"
+        );
+        let conic = (family == Family::Conic).then(|| ConicConstants::new(projection, &pv));
+        PreparedProjection {
+            projection,
+            family,
+            pv,
+            conic,
+        }
     }
 
     /// The fiducial point `(φ₀, θ₀)` in degrees. Zenithal (incl. the perspective
     /// `AZP`/`SZP`): `(0, 90)`; conics: `(0, θ_a)` where `θ_a = PVi_1`; else `(0, 0)`.
-    fn reference_point(self, pv: &[f64]) -> (f64, f64) {
-        match self.family() {
-            Family::Zenithal | Family::ZenithalPerspective => (0.0, 90.0),
-            Family::Conic => (0.0, pv.get(1).copied().unwrap_or(0.0)),
-            Family::Other => (0.0, 0.0),
+    fn reference_point(&self) -> NativeCoordinate {
+        match self.family {
+            Family::Zenithal | Family::ZenithalPerspective => NativeCoordinate {
+                phi: 0.0,
+                theta: 90.0,
+            },
+            Family::Conic => NativeCoordinate {
+                phi: 0.0,
+                theta: self.pv[1],
+            },
+            Family::Other => NativeCoordinate {
+                phi: 0.0,
+                theta: 0.0,
+            },
         }
     }
 
     /// Deproject intermediate world `(x, y)` (deg) to native `(φ, θ)` (deg).
-    /// `pv` holds the latitude axis's `PVi_0…` projection parameters.
-    fn deproject(self, x: f64, y: f64, pv: &[f64]) -> (f64, f64) {
-        if matches!(self, Projection::Azp) {
+    fn deproject(&self, x: f64, y: f64) -> NativeCoordinate {
+        let projection = self.projection;
+        let pv = &self.pv;
+        if matches!(projection, Projection::Azp) {
             // Tilted zenithal perspective (CG 2002 §5.1.1): undo the γ shear, then
             // solve A·sinθ + B·cosθ = C for θ.
             let (mu, gr) = (pv[1], pv[2] * D2R);
@@ -210,19 +282,22 @@ impl Projection {
                         .unwrap()
                 })
                 .unwrap();
-            return (phi * R2D, theta * R2D);
+            return NativeCoordinate {
+                phi: phi * R2D,
+                theta: theta * R2D,
+            };
         }
-        if matches!(self, Projection::Szp) {
+        if matches!(projection, Projection::Szp) {
             // Slant zenithal perspective (CG 2002 §5.1.2). With the vertex
             // P = (xp, yp, zp), substitute σ = 1 − sinθ and reduce to a quadratic
             // `zp²(2σ − σ²) = A² + B²` with A, B linear in σ.
-            let (xp, yp, zp) = szp_vertex(pv);
+            let vertex = szp_vertex(pv);
             let (cx, cy) = (x / R2D, y / R2D);
             // A = a0 + a1·σ, B = b0 + b1·σ.
-            let (a0, a1) = (cx * zp, -(cx - xp));
-            let (b0, b1) = (-cy * zp, cy - yp);
-            let qa = a1 * a1 + b1 * b1 + zp * zp;
-            let qb = 2.0 * (a0 * a1 + b0 * b1) - 2.0 * zp * zp;
+            let (a0, a1) = (cx * vertex.z, -(cx - vertex.x));
+            let (b0, b1) = (-cy * vertex.z, cy - vertex.y);
+            let qa = a1 * a1 + b1 * b1 + vertex.z * vertex.z;
+            let qb = 2.0 * (a0 * a1 + b0 * b1) - 2.0 * vertex.z * vertex.z;
             let qc = a0 * a0 + b0 * b0;
             let disc = (qb * qb - 4.0 * qa * qc).max(0.0).sqrt();
             let s1 = (-qb - disc) / (2.0 * qa);
@@ -232,21 +307,27 @@ impl Projection {
             let theta = (1.0 - sigma).clamp(-1.0, 1.0).asin();
             let (a, b) = (a0 + a1 * sigma, b0 + b1 * sigma);
             let phi = a.atan2(b);
-            return (phi * R2D, theta * R2D);
+            return NativeCoordinate {
+                phi: phi * R2D,
+                theta: theta * R2D,
+            };
         }
-        if self.is_conic() {
-            let (c, y0) = self.conic_consts(pv);
+        if self.family == Family::Conic {
+            let conic = self.conic.expect("conic projection has prepared constants");
             let s = pv[1].signum();
-            let r = s * x.hypot(y0 - y);
-            let phi = (s * x).atan2(s * (y0 - y)) * R2D / c;
-            return (phi, self.conic_theta(r, pv, c));
+            let r = s * x.hypot(conic.y0 - y);
+            let phi = (s * x).atan2(s * (conic.y0 - y)) * R2D / conic.c;
+            return NativeCoordinate {
+                phi,
+                theta: self.conic_theta(r),
+            };
         }
-        if self.is_zenithal() {
+        if self.family == Family::Zenithal {
             let r = x.hypot(y);
             let phi = if r == 0.0 { 0.0 } else { x.atan2(-y) * R2D };
             // Colatitude ζ (rad) from the radius, per projection.
             let u = r / R2D;
-            let zeta = match self {
+            let zeta = match projection {
                 Projection::Tan => u.atan(),
                 Projection::Sin => u.clamp(-1.0, 1.0).asin(),
                 Projection::Arc => u,
@@ -258,17 +339,20 @@ impl Projection {
                 Projection::Air => air_zeta(u, pv[1]),
                 _ => unreachable!(),
             };
-            (phi, 90.0 - zeta * R2D)
+            NativeCoordinate {
+                phi,
+                theta: 90.0 - zeta * R2D,
+            }
         } else {
-            match self {
-                Projection::Car => (x, y),
+            let [phi, theta] = match projection {
+                Projection::Car => [x, y],
                 // CEA: λ = PVi_1 (default 1); θ = asin(λ·y/(180/π)).
                 Projection::Cea => {
                     let lambda = pv.get(1).filter(|&&v| v != 0.0).copied().unwrap_or(1.0);
-                    (x, (lambda * y / R2D).clamp(-1.0, 1.0).asin() * R2D)
+                    [x, (lambda * y / R2D).clamp(-1.0, 1.0).asin() * R2D]
                 }
-                Projection::Mer => (x, (2.0 * (y / R2D).exp().atan()) * R2D - 90.0),
-                Projection::Sfl => (x / (y * D2R).cos(), y),
+                Projection::Mer => [x, (2.0 * (y / R2D).exp().atan()) * R2D - 90.0],
+                Projection::Sfl => [x / (y * D2R).cos(), y],
                 // Hammer–Aitoff inverse (CG 2002 eq. 51).
                 Projection::Ait => {
                     let (u, v) = (x * D2R, y * D2R);
@@ -276,7 +360,7 @@ impl Projection {
                     let z = z2.sqrt();
                     let phi = 2.0 * (z * u / 2.0).atan2(2.0 * z2 - 1.0) * R2D;
                     let theta = (v * z).clamp(-1.0, 1.0).asin() * R2D;
-                    (phi, theta)
+                    [phi, theta]
                 }
                 // Mollweide inverse (CG 2002 eq. 55).
                 Projection::Mol => {
@@ -288,7 +372,7 @@ impl Projection {
                     } else {
                         PI * x / (2.0 * s2 * gamma.cos())
                     };
-                    (phi, theta)
+                    [phi, theta]
                 }
                 // CYP inverse: φ = x/λ; θ from η = (y/(180/π))/(μ+λ).
                 Projection::Cyp => {
@@ -301,19 +385,19 @@ impl Projection {
                         + (eta * mu / (1.0 + eta * eta).sqrt())
                             .clamp(-1.0, 1.0)
                             .asin();
-                    (x / lambda, theta * R2D)
+                    [x / lambda, theta * R2D]
                 }
                 // PAR inverse (CG 2002 eq. 49).
                 Projection::Par => {
                     let theta = 3.0 * (y / 180.0).clamp(-1.0, 1.0).asin();
-                    (x / (2.0 * (2.0 * theta / 3.0).cos() - 1.0), theta * R2D)
+                    [x / (2.0 * (2.0 * theta / 3.0).cos() - 1.0), theta * R2D]
                 }
                 // Polyconic inverse (CG 2002 §5.6.1): Newton on
                 // f(θ) = X² + (Y−θ)² − 2(Y−θ)cotθ = 0, then recover φ.
                 Projection::Pco => {
                     let (xr, yr) = (x * D2R, y * D2R);
                     if yr.abs() < 1e-12 {
-                        return (x, 0.0);
+                        return NativeCoordinate { phi: x, theta: 0.0 };
                     }
                     let mut th = yr;
                     for _ in 0..100 {
@@ -330,14 +414,17 @@ impl Projection {
                     let d = yr - th;
                     let tanth = th.tan();
                     let omega = (xr * tanth).atan2(1.0 - d * tanth);
-                    (omega / th.sin() * R2D, th * R2D)
+                    [omega / th.sin() * R2D, th * R2D]
                 }
                 // Bonne's pseudoconic inverse (CG 2002 §5.5.1), θ₁ = PVi_1.
                 Projection::Bon => {
                     // §5.5.1: BON degenerates to the sinusoidal SFL at θ₁ = 0
                     // (avoiding the `1/tan 0` singularity below).
                     if pv[1] == 0.0 {
-                        return (x / (y * D2R).cos(), y);
+                        return NativeCoordinate {
+                            phi: x / (y * D2R).cos(),
+                            theta: y,
+                        };
                     }
                     let t1 = pv[1] * D2R;
                     let y0 = t1 + 1.0 / t1.tan();
@@ -346,65 +433,77 @@ impl Projection {
                     let r = s * (x * D2R).hypot(yc);
                     let tr = y0 - r;
                     let aphi = (s * x * D2R).atan2(s * yc);
-                    (aphi * r / tr.cos() * R2D, tr * R2D)
+                    [aphi * r / tr.cos() * R2D, tr * R2D]
                 }
                 _ => unreachable!(),
-            }
+            };
+            NativeCoordinate { phi, theta }
         }
     }
 
     /// Project native `(φ, θ)` (deg) to intermediate world `(x, y)` (deg).
-    fn project(self, phi: f64, theta: f64, pv: &[f64]) -> (f64, f64) {
-        if matches!(self, Projection::Azp) {
+    fn project(&self, phi: f64, theta: f64) -> ProjectedCoordinate {
+        let projection = self.projection;
+        let pv = &self.pv;
+        if matches!(projection, Projection::Azp) {
             let (mu, gr) = (pv[1], pv[2] * D2R);
             let (tr, pr) = (theta * D2R, phi * D2R);
             let denom = (mu + tr.sin()) + tr.cos() * pr.cos() * gr.tan();
             let r = R2D * (mu + 1.0) * tr.cos() / denom;
-            return (r * pr.sin(), -r * pr.cos() / gr.cos());
+            return ProjectedCoordinate {
+                x: r * pr.sin(),
+                y: -r * pr.cos() / gr.cos(),
+            };
         }
-        if matches!(self, Projection::Szp) {
-            let (xp, yp, zp) = szp_vertex(pv);
+        if matches!(projection, Projection::Szp) {
+            let vertex = szp_vertex(pv);
             let (tr, pr) = (theta * D2R, phi * D2R);
             let sigma = 1.0 - tr.sin();
-            let denom = zp - sigma;
-            let x = R2D * (zp * tr.cos() * pr.sin() - xp * sigma) / denom;
-            let y = R2D * (-zp * tr.cos() * pr.cos() - yp * sigma) / denom;
-            return (x, y);
+            let denom = vertex.z - sigma;
+            let x = R2D * (vertex.z * tr.cos() * pr.sin() - vertex.x * sigma) / denom;
+            let y = R2D * (-vertex.z * tr.cos() * pr.cos() - vertex.y * sigma) / denom;
+            return ProjectedCoordinate { x, y };
         }
-        if self.is_conic() {
-            let (c, y0) = self.conic_consts(pv);
-            let r = self.conic_radius(theta, pv);
-            let cp = (c * phi) * D2R;
-            return (r * cp.sin(), y0 - r * cp.cos());
+        if self.family == Family::Conic {
+            let conic = self.conic.expect("conic projection has prepared constants");
+            let r = self.conic_radius(theta);
+            let cp = (conic.c * phi) * D2R;
+            return ProjectedCoordinate {
+                x: r * cp.sin(),
+                y: conic.y0 - r * cp.cos(),
+            };
         }
-        if self.is_zenithal() {
+        if self.family == Family::Zenithal {
             let zeta = (90.0 - theta) * D2R;
-            let r = match self {
+            let r = match projection {
                 Projection::Tan => R2D * zeta.tan(),
                 Projection::Sin => R2D * zeta.sin(),
                 Projection::Arc => R2D * zeta,
                 Projection::Zea => 2.0 * R2D * (zeta / 2.0).sin(),
                 Projection::Stg => 2.0 * R2D * (zeta / 2.0).tan(),
-                Projection::Zpn => R2D * zpn_poly(zeta, pv),
+                Projection::Zpn => R2D * evaluate_zpn(zeta, pv).value,
                 Projection::Air => R2D * air_radius_u(zeta, pv[1]),
                 _ => unreachable!(),
             };
             let p = phi * D2R;
-            (r * p.sin(), -r * p.cos())
+            ProjectedCoordinate {
+                x: r * p.sin(),
+                y: -r * p.cos(),
+            }
         } else {
             let t = theta * D2R;
-            match self {
-                Projection::Car => (phi, theta),
+            let [x, y] = match projection {
+                Projection::Car => [phi, theta],
                 Projection::Cea => {
                     let lambda = pv.get(1).filter(|&&v| v != 0.0).copied().unwrap_or(1.0);
-                    (phi, R2D * t.sin() / lambda)
+                    [phi, R2D * t.sin() / lambda]
                 }
-                Projection::Mer => (phi, R2D * ((45.0 + theta / 2.0) * D2R).tan().ln()),
-                Projection::Sfl => (phi * t.cos(), theta),
+                Projection::Mer => [phi, R2D * ((45.0 + theta / 2.0) * D2R).tan().ln()],
+                Projection::Sfl => [phi * t.cos(), theta],
                 Projection::Ait => {
                     let pr = phi * D2R;
                     let gamma = R2D * (2.0 / (1.0 + t.cos() * (pr / 2.0).cos())).sqrt();
-                    (2.0 * gamma * t.cos() * (pr / 2.0).sin(), gamma * t.sin())
+                    [2.0 * gamma * t.cos() * (pr / 2.0).sin(), gamma * t.sin()]
                 }
                 Projection::Mol => {
                     // Solve 2γ + sin2γ = π·sinθ for γ (Newton).
@@ -424,142 +523,161 @@ impl Projection {
                             }
                         }
                     }
-                    ((2.0 * s2 / PI) * phi * g.cos(), s2 * R2D * g.sin())
+                    [(2.0 * s2 / PI) * phi * g.cos(), s2 * R2D * g.sin()]
                 }
                 Projection::Cyp => {
                     let (mu, lambda) = (
                         pv[1],
                         pv.get(2).filter(|&&v| v != 0.0).copied().unwrap_or(1.0),
                     );
-                    (lambda * phi, R2D * (mu + lambda) * t.sin() / (mu + t.cos()))
+                    [lambda * phi, R2D * (mu + lambda) * t.sin() / (mu + t.cos())]
                 }
-                Projection::Par => (
+                Projection::Par => [
                     phi * (2.0 * (2.0 * t / 3.0).cos() - 1.0),
                     180.0 * (t / 3.0).sin(),
-                ),
+                ],
                 Projection::Bon => {
                     // §5.5.1: BON degenerates to the sinusoidal SFL at θ₁ = 0.
                     if pv[1] == 0.0 {
-                        return (phi * t.cos(), theta);
+                        return ProjectedCoordinate {
+                            x: phi * t.cos(),
+                            y: theta,
+                        };
                     }
                     let t1 = pv[1] * D2R;
                     let y0 = t1 + 1.0 / t1.tan();
                     let r = y0 - t;
                     let aphi = phi * D2R * t.cos() / r;
-                    (R2D * r * aphi.sin(), R2D * (y0 - r * aphi.cos()))
+                    [R2D * r * aphi.sin(), R2D * (y0 - r * aphi.cos())]
                 }
                 Projection::Pco => {
                     if theta.abs() < 1e-12 {
-                        return (phi, 0.0);
+                        return ProjectedCoordinate { x: phi, y: 0.0 };
                     }
                     let omega = phi * D2R * t.sin();
                     let cot = 1.0 / t.tan();
-                    (
+                    [
                         R2D * cot * omega.sin(),
                         theta + R2D * cot * (1.0 - omega.cos()),
-                    )
+                    ]
                 }
                 _ => unreachable!(),
-            }
-        }
-    }
-
-    /// Conic constants `(C, Y0)` (CG 2002 §3.4): `θ_a = PVi_1`, `η = PVi_2` (deg).
-    fn conic_consts(self, pv: &[f64]) -> (f64, f64) {
-        let (ta, eta) = (pv[1] * D2R, pv[2] * D2R);
-        let (t1, t2) = (ta - eta, ta + eta);
-        match self {
-            Projection::Cop => {
-                let c = ta.sin();
-                (c, R2D * eta.cos() / ta.tan())
-            }
-            Projection::Coe => {
-                let (s1, s2) = (t1.sin(), t2.sin());
-                let c = (s1 + s2) / 2.0;
-                let y0 = R2D / c * (1.0 + s1 * s2 - 2.0 * c * ta.sin()).max(0.0).sqrt();
-                (c, y0)
-            }
-            Projection::Cod => {
-                // Equidistant: C = sinθ_a·sinη/η; R = Y0 + (θ_a − θ) deg, with
-                // Y0 = (180/π)·(η/tanη)·cotθ_a (η→0 ⇒ η/tanη→1).
-                let (c, k) = if eta.abs() < 1e-12 {
-                    (ta.sin(), 1.0)
-                } else {
-                    (ta.sin() * eta.sin() / eta, eta / eta.tan())
-                };
-                (c, R2D * k / ta.tan())
-            }
-            Projection::Coo => {
-                let c = if eta.abs() < 1e-12 {
-                    ta.sin()
-                } else {
-                    (t2.cos() / t1.cos()).ln()
-                        / ((FRAC_PI_4 - t2 / 2.0).tan() / (FRAC_PI_4 - t1 / 2.0).tan()).ln()
-                };
-                let psi = R2D * t1.cos() / (c * (FRAC_PI_4 - t1 / 2.0).tan().powf(c));
-                (c, psi * (FRAC_PI_4 - ta / 2.0).tan().powf(c))
-            }
-            _ => unreachable!(),
+            };
+            ProjectedCoordinate { x, y }
         }
     }
 
     /// Conic radius `R_θ` (deg) for a native latitude `θ` (deg).
-    fn conic_radius(self, theta: f64, pv: &[f64]) -> f64 {
-        let (c, y0) = self.conic_consts(pv);
-        let (ta, eta, t) = (pv[1] * D2R, pv[2] * D2R, theta * D2R);
-        let (t1, t2) = (ta - eta, ta + eta);
-        match self {
-            Projection::Cop => R2D * eta.cos() * (1.0 / ta.tan() - (t - ta).tan()),
+    fn conic_radius(&self, theta: f64) -> f64 {
+        let conic = self.conic.expect("conic projection has prepared constants");
+        let theta_radians = theta * D2R;
+        match self.projection {
+            Projection::Cop => {
+                R2D * conic.cos_eta * (conic.cot_theta_a - (theta_radians - conic.theta_a).tan())
+            }
             Projection::Coe => {
-                let (s1, s2) = (t1.sin(), t2.sin());
-                R2D / c * (1.0 + s1 * s2 - 2.0 * c * t.sin()).max(0.0).sqrt()
+                R2D / conic.c
+                    * (1.0 + conic.sin_theta1 * conic.sin_theta2
+                        - 2.0 * conic.c * theta_radians.sin())
+                    .max(0.0)
+                    .sqrt()
             }
-            Projection::Cod => y0 + (pv[1] - theta),
-            Projection::Coo => {
-                let psi = R2D * t1.cos() / (c * (FRAC_PI_4 - t1 / 2.0).tan().powf(c));
-                psi * (FRAC_PI_4 - t / 2.0).tan().powf(c)
-            }
+            Projection::Cod => conic.y0 + (conic.theta_a_degrees - theta),
+            Projection::Coo => conic.psi * (FRAC_PI_4 - theta_radians / 2.0).tan().powf(conic.c),
             _ => unreachable!(),
         }
     }
 
     /// Native latitude `θ` (deg) for a conic radius `R_θ` (deg).
-    fn conic_theta(self, r: f64, pv: &[f64], c: f64) -> f64 {
-        let (ta, eta) = (pv[1] * D2R, pv[2] * D2R);
-        let (t1, t2) = (ta - eta, ta + eta);
-        match self {
+    fn conic_theta(&self, r: f64) -> f64 {
+        let conic = self.conic.expect("conic projection has prepared constants");
+        match self.projection {
             Projection::Cop => {
-                let tan = 1.0 / ta.tan() - r / (R2D * eta.cos());
-                pv[1] + tan.atan() * R2D
+                let tan = conic.cot_theta_a - r / (R2D * conic.cos_eta);
+                conic.theta_a_degrees + tan.atan() * R2D
             }
             Projection::Coe => {
-                let (s1, s2) = (t1.sin(), t2.sin());
-                let sin_t = (1.0 + s1 * s2 - (r * c / R2D).powi(2)) / (2.0 * c);
+                let sin_t = (1.0 + conic.sin_theta1 * conic.sin_theta2
+                    - (r * conic.c / R2D).powi(2))
+                    / (2.0 * conic.c);
                 sin_t.clamp(-1.0, 1.0).asin() * R2D
             }
+            Projection::Cod => conic.theta_a_degrees - (r - conic.y0),
+            Projection::Coo => 90.0 - 2.0 * (r / conic.psi).powf(1.0 / conic.c).atan() * R2D,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl ConicConstants {
+    fn new(projection: Projection, pv: &[f64; 21]) -> ConicConstants {
+        let theta_a = pv[1] * D2R;
+        let eta = pv[2] * D2R;
+        let theta1 = theta_a - eta;
+        let theta2 = theta_a + eta;
+        let sin_theta1 = theta1.sin();
+        let sin_theta2 = theta2.sin();
+        let cos_eta = eta.cos();
+        let cot_theta_a = 1.0 / theta_a.tan();
+        let (c, y0, psi) = match projection {
+            Projection::Cop => {
+                let c = theta_a.sin();
+                (c, R2D * cos_eta * cot_theta_a, 0.0)
+            }
+            Projection::Coe => {
+                let c = (sin_theta1 + sin_theta2) / 2.0;
+                let y0 = R2D / c
+                    * (1.0 + sin_theta1 * sin_theta2 - 2.0 * c * theta_a.sin())
+                        .max(0.0)
+                        .sqrt();
+                (c, y0, 0.0)
+            }
             Projection::Cod => {
-                let y0 = self.conic_consts(pv).1;
-                pv[1] - (r - y0)
+                // Equidistant: C = sinθ_a·sinη/η; Y0 = (180/π)·(η/tanη)·cotθ_a.
+                let (c, k) = if eta.abs() < 1e-12 {
+                    (theta_a.sin(), 1.0)
+                } else {
+                    (theta_a.sin() * eta.sin() / eta, eta / eta.tan())
+                };
+                (c, R2D * k * cot_theta_a, 0.0)
             }
             Projection::Coo => {
-                let psi = R2D * t1.cos() / (c * (FRAC_PI_4 - t1 / 2.0).tan().powf(c));
-                90.0 - 2.0 * (r / psi).powf(1.0 / c).atan() * R2D
+                let c = if eta.abs() < 1e-12 {
+                    theta_a.sin()
+                } else {
+                    (theta2.cos() / theta1.cos()).ln()
+                        / ((FRAC_PI_4 - theta2 / 2.0).tan() / (FRAC_PI_4 - theta1 / 2.0).tan()).ln()
+                };
+                let psi = R2D * theta1.cos() / (c * (FRAC_PI_4 - theta1 / 2.0).tan().powf(c));
+                let y0 = psi * (FRAC_PI_4 - theta_a / 2.0).tan().powf(c);
+                (c, y0, psi)
             }
             _ => unreachable!(),
+        };
+        ConicConstants {
+            c,
+            y0,
+            theta_a,
+            theta_a_degrees: pv[1],
+            cos_eta,
+            cot_theta_a,
+            sin_theta1,
+            sin_theta2,
+            psi,
         }
     }
 }
 
 /// SZP projection vertex `(x_p, y_p, z_p)` from `μ = PVi_1`, `φc = PVi_2`,
 /// `θc = PVi_3` (CG 2002 §5.1.2).
-fn szp_vertex(pv: &[f64]) -> (f64, f64, f64) {
+fn szp_vertex(pv: &[f64]) -> SzpVertex {
     let mu = pv[1];
     let (phic, thetac) = (pv[2] * D2R, pv[3] * D2R);
-    (
-        -mu * thetac.cos() * phic.sin(),
-        mu * thetac.cos() * phic.cos(),
-        mu * thetac.sin() + 1.0,
-    )
+    SzpVertex {
+        x: -mu * thetac.cos() * phic.sin(),
+        y: mu * thetac.cos() * phic.cos(),
+        z: mu * thetac.sin() + 1.0,
+    }
 }
 
 /// AIR `K = ln(cos ξ_b)/tan²ξ_b` constant (`ξ_b = (90°−θ_b)/2`); the `θ_b = 90`
@@ -601,27 +719,32 @@ fn air_zeta(u: f64, theta_b: f64) -> f64 {
     z
 }
 
-/// ZPN forward polynomial `R/(180/π) = Σ Pₘ ζᵐ` (ζ in radians, `pv[m] = PVi_m`).
-fn zpn_poly(zeta: f64, pv: &[f64]) -> f64 {
-    pv.iter().rev().fold(0.0, |acc, &p| acc * zeta + p)
+#[derive(Debug, Clone, Copy)]
+struct ZpnEvaluation {
+    value: f64,
+    derivative: f64,
+}
+
+/// Evaluate `Σ Pₘ ζᵐ` and its derivative together with extended Horner.
+fn evaluate_zpn(zeta: f64, pv: &[f64; 21]) -> ZpnEvaluation {
+    let mut value = pv[20];
+    let mut derivative = 0.0;
+    for &coefficient in pv[..20].iter().rev() {
+        derivative = derivative * zeta + value;
+        value = value * zeta + coefficient;
+    }
+    ZpnEvaluation { value, derivative }
 }
 
 /// Invert the ZPN polynomial for ζ given `u = R/(180/π)` (Newton from ζ = u).
-fn zpn_zeta(u: f64, pv: &[f64]) -> f64 {
+fn zpn_zeta(u: f64, pv: &[f64; 21]) -> f64 {
     let mut z = u;
     for _ in 0..100 {
-        let f = zpn_poly(z, pv) - u;
-        // derivative Σ m·Pₘ ζ^(m-1)
-        let d: f64 = pv
-            .iter()
-            .enumerate()
-            .skip(1)
-            .map(|(m, &p)| m as f64 * p * z.powi(m as i32 - 1))
-            .sum();
-        if d == 0.0 {
+        let evaluation = evaluate_zpn(z, pv);
+        if evaluation.derivative == 0.0 {
             break;
         }
-        let step = f / d;
+        let step = (evaluation.value - u) / evaluation.derivative;
         z -= step;
         if step.abs() < 1e-14 {
             break;
@@ -681,11 +804,9 @@ struct CelestialPole {
 struct Celestial {
     lng: usize,
     lat: usize,
-    proj: Projection,
+    projection: PreparedProjection,
     /// The native→celestial pole, computed from the fiducial point.
     pole: CelestialPole,
-    /// Latitude-axis `PVi_0…` projection parameters.
-    pv: Vec<f64>,
 }
 
 impl Wcs {
@@ -813,27 +934,29 @@ impl Wcs {
         let celestial = match celestial_axes {
             Some((lng, lat, proj)) => {
                 // Latitude-axis PVi_0..PVi_20 — the projection parameters.
-                let pv: Vec<f64> = (0..=20)
-                    .map(|m| {
-                        header
-                            .try_get_real(key!("PV{}_{m}{a}", lat + 1).as_str())
-                            .map(|value| value.unwrap_or(0.0))
-                    })
-                    .collect::<Result<_>>()?;
+                let mut pv = [0.0; 21];
+                for (m, value) in pv.iter_mut().enumerate() {
+                    *value = header
+                        .try_get_real(key!("PV{}_{m}{a}", lat + 1).as_str())?
+                        .unwrap_or(0.0);
+                }
+                let family = proj.family();
                 // A conic's mid-latitude θ_a = PVi_1 is mandatory and must be
                 // non-zero; θ_a = 0 (absent, or explicitly 0) is a degenerate cone
                 // (`1/tan 0`). Treat it like an unimplemented projection — flag the
                 // axes and skip deprojection so they pass through the linear stage
                 // (an intermediate world coordinate) rather than returning NaN.
-                if proj.is_conic() && pv[1] == 0.0 {
+                if family == Family::Conic && pv[1] == 0.0 {
                     unsupported_axes.push(lng);
                     unsupported_axes.push(lat);
                     unsupported_axes.sort_unstable();
                     None
                 } else {
+                    let projection = PreparedProjection::new(proj, pv);
                     // Fiducial point: projection default, overridable by PVi_1a/
                     // PVi_2a on the longitude axis (§8.3).
-                    let (mut phi0, mut theta0) = proj.reference_point(&pv);
+                    let reference = projection.reference_point();
+                    let (mut phi0, mut theta0) = (reference.phi, reference.theta);
                     if let Some(v) = header.try_get_real(key!("PV{}_1{a}", lng + 1).as_str())? {
                         phi0 = v;
                     }
@@ -863,9 +986,8 @@ impl Wcs {
                     Some(Celestial {
                         lng,
                         lat,
-                        proj,
+                        projection,
                         pole,
-                        pv,
                     })
                 }
             }
@@ -1042,52 +1164,83 @@ impl Wcs {
 
     /// Map 1-based pixel coordinates to world coordinates. Celestial axes return
     /// `(α, δ)` in degrees; other axes return `CRVAL + ` the linear value.
-    ///
-    /// # Panics
-    /// If `pixel.len() != self.view().axes.len()`. The coordinate count is a
-    /// structural precondition, so a mismatch is a caller bug, not runtime data.
+    /// `pixel` must contain exactly one value per axis.
     pub fn pixel_to_world(&self, pixel: &[f64]) -> Vec<f64> {
-        let naxis = self.axes.len();
-        assert_eq!(pixel.len(), naxis, "pixel coordinate count");
-        // Offset, then apply the linear transform → intermediate world coords.
-        let offset: Vec<f64> = (0..naxis).map(|i| pixel[i] - self.axes[i].crpix).collect();
-        let inter = matvec(&self.matrix, &offset, naxis);
+        let mut world = vec![0.0; self.axes.len()];
+        self.pixel_to_world_into(pixel, &mut world);
+        world
+    }
 
-        let mut world = vec![0.0; naxis];
-        for i in 0..naxis {
-            world[i] = self.axes[i].crval + inter[i];
+    /// Map 1-based pixel coordinates into caller-owned world-coordinate storage.
+    /// This is the allocation-free form of [`Wcs::pixel_to_world`].
+    /// Both slices must contain exactly one value per axis; debug builds assert
+    /// this hot-path precondition.
+    pub fn pixel_to_world_into(&self, pixel: &[f64], world: &mut [f64]) {
+        let naxis = self.axes.len();
+        debug_assert_eq!(pixel.len(), naxis, "pixel coordinate count");
+        debug_assert_eq!(world.len(), naxis, "world coordinate count");
+        for (i, row) in self.matrix.chunks_exact(naxis).enumerate() {
+            world[i] = row
+                .iter()
+                .enumerate()
+                .map(|(j, &factor)| factor * (pixel[j] - self.axes[j].crpix))
+                .sum();
+        }
+        let celestial_intermediate = self
+            .celestial
+            .as_ref()
+            .map(|c| [world[c.lng], world[c.lat]]);
+        for (value, axis) in world.iter_mut().zip(&self.axes) {
+            *value += axis.crval;
         }
         if let Some(c) = &self.celestial {
-            let (phi, theta) = c.proj.deproject(inter[c.lng], inter[c.lat], &c.pv);
-            let (ra, dec) = native_to_celestial(c.pole, phi, theta);
-            world[c.lng] = ra;
-            world[c.lat] = dec;
+            let [x, y] = celestial_intermediate.unwrap();
+            let native = c.projection.deproject(x, y);
+            let celestial = native_to_celestial(c.pole, native.phi, native.theta);
+            world[c.lng] = celestial.ra;
+            world[c.lat] = celestial.dec;
         }
-        world
     }
 
     /// Map world coordinates back to 1-based pixel coordinates (the inverse of
     /// [`Wcs::pixel_to_world`]).
-    ///
-    /// # Panics
-    /// If `world.len() != self.view().axes.len()` (see [`Wcs::pixel_to_world`]).
+    /// `world` must contain exactly one value per axis.
     pub fn world_to_pixel(&self, world: &[f64]) -> Vec<f64> {
+        let mut pixel = vec![0.0; self.axes.len()];
+        self.world_to_pixel_into(world, &mut pixel);
+        pixel
+    }
+
+    /// Map world coordinates into caller-owned 1-based pixel-coordinate storage.
+    /// This is the allocation-free form of [`Wcs::world_to_pixel`].
+    /// Both slices must contain exactly one value per axis; debug builds assert
+    /// this hot-path precondition.
+    pub fn world_to_pixel_into(&self, world: &[f64], pixel: &mut [f64]) {
         let naxis = self.axes.len();
-        assert_eq!(world.len(), naxis, "world coordinate count");
-        // Recover the intermediate world coordinates.
-        let mut inter = vec![0.0; naxis];
-        for i in 0..naxis {
-            inter[i] = world[i] - self.axes[i].crval;
+        debug_assert_eq!(world.len(), naxis, "world coordinate count");
+        debug_assert_eq!(pixel.len(), naxis, "pixel coordinate count");
+        let celestial_correction = self.celestial.as_ref().map(|c| {
+            let native = celestial_to_native(c.pole, world[c.lng], world[c.lat]);
+            let projected = c.projection.project(native.phi, native.theta);
+            CelestialCorrection {
+                longitude_axis: c.lng,
+                latitude_axis: c.lat,
+                longitude_delta: projected.x - (world[c.lng] - self.axes[c.lng].crval),
+                latitude_delta: projected.y - (world[c.lat] - self.axes[c.lat].crval),
+            }
+        });
+        for (i, row) in self.inverse.chunks_exact(naxis).enumerate() {
+            let mut offset: f64 = row
+                .iter()
+                .enumerate()
+                .map(|(j, &factor)| factor * (world[j] - self.axes[j].crval))
+                .sum();
+            if let Some(correction) = celestial_correction {
+                offset += row[correction.longitude_axis] * correction.longitude_delta
+                    + row[correction.latitude_axis] * correction.latitude_delta;
+            }
+            pixel[i] = offset + self.axes[i].crpix;
         }
-        if let Some(c) = &self.celestial {
-            let (phi, theta) = celestial_to_native(c.pole, world[c.lng], world[c.lat]);
-            let (x, y) = c.proj.project(phi, theta, &c.pv);
-            inter[c.lng] = x;
-            inter[c.lat] = y;
-        }
-        // Invert the linear transform, then add back CRPIX.
-        let offset = matvec(&self.inverse, &inter, naxis);
-        (0..naxis).map(|i| offset[i] + self.axes[i].crpix).collect()
     }
 }
 
@@ -1191,7 +1344,7 @@ fn find_celestial(ctype: &[String]) -> Result<Option<(usize, usize, Projection)>
 
 /// Native spherical (φ, θ) → celestial (α, δ), all degrees, given the celestial
 /// pole `(α_p, δ_p, φ_p)` (CG 2002 eq. 2).
-fn native_to_celestial(pole: CelestialPole, phi: f64, theta: f64) -> (f64, f64) {
+fn native_to_celestial(pole: CelestialPole, phi: f64, theta: f64) -> CelestialCoordinate {
     let CelestialPole {
         ra: ap,
         dec: dp,
@@ -1202,11 +1355,14 @@ fn native_to_celestial(pole: CelestialPole, phi: f64, theta: f64) -> (f64, f64) 
     let dec = sin_d.clamp(-1.0, 1.0).asin() * R2D;
     let y = -tr.cos() * dphi.sin();
     let x = tr.sin() * dpr.cos() - tr.cos() * dpr.sin() * dphi.cos();
-    (norm360(ap + y.atan2(x) * R2D), dec)
+    CelestialCoordinate {
+        ra: norm360(ap + y.atan2(x) * R2D),
+        dec,
+    }
 }
 
 /// Celestial (α, δ) → native spherical (φ, θ), all degrees (CG 2002 eq. 5).
-fn celestial_to_native(pole: CelestialPole, ra: f64, dec: f64) -> (f64, f64) {
+fn celestial_to_native(pole: CelestialPole, ra: f64, dec: f64) -> NativeCoordinate {
     let CelestialPole {
         ra: ap,
         dec: dp,
@@ -1217,7 +1373,10 @@ fn celestial_to_native(pole: CelestialPole, ra: f64, dec: f64) -> (f64, f64) {
     let theta = sin_t.clamp(-1.0, 1.0).asin() * R2D;
     let y = -dr.cos() * dalpha.sin();
     let x = dr.sin() * dpr.cos() - dr.cos() * dpr.sin() * dalpha.cos();
-    (norm180(fp + y.atan2(x) * R2D), theta)
+    NativeCoordinate {
+        phi: norm180(fp + y.atan2(x) * R2D),
+        theta,
+    }
 }
 
 /// Compute the celestial pole `(α_p, δ_p, φ_p)` from the fiducial point
@@ -1291,13 +1450,6 @@ fn first_real(header: &Header, first: &str, second: &str) -> Result<Option<f64>>
         Some(value) => Ok(Some(value)),
         None => header.try_get_real(second),
     }
-}
-
-/// Multiply the row-major `n×n` matrix `m` by vector `v`.
-fn matvec(m: &[f64], v: &[f64], n: usize) -> Vec<f64> {
-    (0..n)
-        .map(|i| (0..n).map(|j| m[i * n + j] * v[j]).sum())
-        .collect()
 }
 
 /// Invert a row-major `n×n` matrix by Gauss–Jordan elimination with partial
