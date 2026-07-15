@@ -40,7 +40,7 @@ pub(crate) fn checked_padded_len(len: u64) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::block::*;
 
     #[test]
     fn block_geometry_constants_are_consistent() {

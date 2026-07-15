@@ -10,7 +10,7 @@ use crate::error::Result;
 /// Encode `values` (one tile, `npix` non-negative mask pixels) as an IRAF PLIO
 /// line list — a port of cfitsio's `pl_p2li` with `xs = 1`. The returned i16 list
 /// round-trips through [`plio_decode_be_into`].
-pub(super) fn plio_encode(values: &[i64], npix: usize) -> Vec<i16> {
+pub(crate) fn plio_encode(values: &[i64], npix: usize) -> Vec<i16> {
     // Header words (1-based lldst[1..=7]): the `-100` at index 3 selects the
     // 30-bit-length form the decoder reads from words 4/5; index 2 (=7) is the
     // header length, so instructions begin at word 8.
@@ -109,7 +109,7 @@ pub(super) fn plio_encode(values: &[i64], npix: usize) -> Vec<i16> {
     ll
 }
 
-pub(super) fn plio_decode_be_into(bytes: &[u8], npix: usize, px: &mut Vec<i64>) -> Result<()> {
+pub(crate) fn plio_decode_be_into(bytes: &[u8], npix: usize, px: &mut Vec<i64>) -> Result<()> {
     if !bytes.len().is_multiple_of(2) {
         return Err(FitsError::UnexpectedEof);
     }

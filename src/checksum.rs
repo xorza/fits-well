@@ -76,7 +76,7 @@ pub(crate) fn encode(sum: u32, complement: bool) -> [u8; 16] {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::checksum::*;
 
     #[test]
     fn accumulate_folds_end_around_carry() {

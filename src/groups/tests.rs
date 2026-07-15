@@ -1,4 +1,4 @@
-use super::*;
+use crate::groups::*;
 use crate::reader::FitsReader;
 use std::fs::File;
 

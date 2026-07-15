@@ -110,7 +110,7 @@ pub(crate) fn write_pq_descriptor(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::endian::*;
 
     #[test]
     fn decode_and_encode_are_inverse_and_big_endian() {

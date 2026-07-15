@@ -1,7 +1,8 @@
-use super::convert::{be_to_i64_into, i64_to_be, i64_to_be_into};
-use super::geometry::{TileGeometry, TileScratch};
-use super::*;
 use crate::bitpix::Bitpix;
+use crate::compress::convert::{be_to_i64_into, i64_to_be, i64_to_be_into};
+use crate::compress::geometry::{TileGeometry, TileScratch};
+use crate::compress::*;
+use crate::compress::{encode, gzip};
 use crate::data::ImageData;
 use crate::endian::write_pq_descriptor;
 use crate::reader::{FitsReader, StreamReader};
@@ -391,8 +392,8 @@ fn float_write_preserves_nan_nulls() {
 
 #[test]
 fn dither2_quantize_round_trips() {
-    use super::DitherMethod;
-    use super::quantize::{dequantize_into, quantize_tile};
+    use crate::compress::DitherMethod;
+    use crate::compress::quantize::{ZERO_VALUE, dequantize_into, quantize_tile};
 
     // 8×8 field with genuine noise and a scattering of exact zeros.
     let mut data: Vec<f64> = (0..64)
@@ -409,7 +410,7 @@ fn dither2_quantize_round_trips() {
     let q = quantize_tile(&data, 8, 8, 0.0, DitherMethod::Subtractive2, irow).unwrap();
     // Exact zeros must encode to the reserved ZERO_VALUE.
     for &k in &[0usize, 13, 27, 40, 63] {
-        assert_eq!(q.idata[k], super::quantize::ZERO_VALUE, "zero pixel {k}");
+        assert_eq!(q.idata[k], ZERO_VALUE, "zero pixel {k}");
     }
     let ints: Vec<i64> = q.idata.iter().map(|&v| v as i64).collect();
     let mut back = Vec::new();
@@ -1183,7 +1184,7 @@ fn decompress_image_rejects_overflowing_znaxis_product() {
     };
     let mut out = Vec::new();
     assert!(matches!(
-        super::encode::compress_image(&image, "GZIP_1", &CompressOptions::default(), &mut out),
+        encode::compress_image(&image, "GZIP_1", &CompressOptions::default(), &mut out),
         Err(FitsError::DataUnitOverflow)
     ));
 }
@@ -1288,21 +1289,21 @@ fn gunzip_rejects_a_stream_larger_than_its_tile() {
     // A decompression bomb: a tiny gzip stream inflating far past the tile's known
     // byte size must be rejected, not allocated unbounded.
     let big = vec![0u8; 100_000];
-    let bomb = super::gzip::gzip_encode(&big, 9);
+    let bomb = gzip::gzip_encode(&big, 9);
     assert!(bomb.len() < 1000, "an all-zero buffer compresses tiny");
     // Bounded at 1 KiB (a small tile): inflating to 100 KB overruns → error.
     assert!(matches!(
-        super::gzip::gunzip(&bomb, 1024),
+        gzip::gunzip(&bomb, 1024),
         Err(FitsError::UnsupportedCompression { .. })
     ));
     // One byte short of the true size still overruns (the +1 detection boundary).
-    assert!(super::gzip::gunzip(&bomb, big.len() - 1).is_err());
+    assert!(gzip::gunzip(&bomb, big.len() - 1).is_err());
     // Bounded at the true size: decodes to exactly the original bytes.
-    assert_eq!(super::gzip::gunzip(&bomb, big.len()).unwrap(), big);
+    assert_eq!(gzip::gunzip(&bomb, big.len()).unwrap(), big);
 
-    let short = super::gzip::gzip_encode(&[1, 2, 3], 1);
+    let short = gzip::gzip_encode(&[1, 2, 3], 1);
     assert!(matches!(
-        super::gzip::gunzip(&short, 4),
+        gzip::gunzip(&short, 4),
         Err(FitsError::DataSizeMismatch {
             expected: 4,
             got: 3

@@ -11,14 +11,14 @@
 //!
 //! Variable-length (`P`/`Q`) source columns are not supported and are rejected.
 
-use super::DisjointSlice;
-use super::HduParts;
-use super::convert;
-use super::gzip;
-use super::map_tiles;
-use super::rice;
-use super::try_for_each_tile;
 use crate::allocation;
+use crate::compress::DisjointSlice;
+use crate::compress::HduParts;
+use crate::compress::convert;
+use crate::compress::gzip;
+use crate::compress::map_tiles;
+use crate::compress::rice;
+use crate::compress::try_for_each_tile;
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;

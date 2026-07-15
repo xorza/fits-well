@@ -1,6 +1,6 @@
 use crate::writer::render_header;
 
-use super::*;
+use crate::header::*;
 
 fn header_bytes(lines: &[&str]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(lines.len() * CARD_SIZE);

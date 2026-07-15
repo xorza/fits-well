@@ -1,4 +1,4 @@
-use super::*;
+use crate::time::*;
 
 /// Golden values throughout are from `astropy.time` (ERFA).
 #[test]

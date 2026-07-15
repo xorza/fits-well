@@ -42,7 +42,7 @@ fn allocation_bytes<T>(len: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::allocation::*;
 
     #[test]
     fn oversized_allocations_return_the_requested_byte_count() {

@@ -10,30 +10,30 @@ use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 
-use super::convert::be_to_i64_into;
+use crate::compress::convert::be_to_i64_into;
 
 /// Default deflate level — the [`crate::CompressOptions`] default and the fixed
 /// level for table-column gzip. Level 1 favors write speed (gzip was the slowest
 /// compress path at the higher default); raise `CompressOptions::gzip_level` for a
 /// tighter ratio.
-pub(super) const DEFAULT_GZIP_LEVEL: u32 = 1;
+pub(crate) const DEFAULT_GZIP_LEVEL: u32 = 1;
 
 /// Gzip a raw big-endian byte buffer at deflate `level` (0–9; the `GZIP_1` tile
 /// encoder). The level is lossless — only the speed↔ratio tradeoff changes.
-pub(super) fn gzip_encode(raw: &[u8], level: u32) -> Vec<u8> {
+pub(crate) fn gzip_encode(raw: &[u8], level: u32) -> Vec<u8> {
     let mut enc = GzEncoder::new(Vec::new(), Compression::new(level));
     enc.write_all(raw).expect("gzip into a Vec cannot fail");
     enc.finish().expect("gzip finish into a Vec cannot fail")
 }
 
 /// `GZIP_2` encoder: shuffle `raw` into significance byte-planes, then gzip at `level`.
-pub(super) fn gzip2_encode(raw: &[u8], width: usize, level: u32) -> Vec<u8> {
+pub(crate) fn gzip2_encode(raw: &[u8], width: usize, level: u32) -> Vec<u8> {
     gzip_encode(&shuffle_bytes(raw, width), level)
 }
 
 /// Shuffle `raw` into `width`-byte significance planes (all byte-0s, then all
 /// byte-1s, …) — the `GZIP_2` pre-pass. `width ≤ 1` is a no-op.
-pub(super) fn shuffle_bytes(raw: &[u8], width: usize) -> Vec<u8> {
+pub(crate) fn shuffle_bytes(raw: &[u8], width: usize) -> Vec<u8> {
     if width <= 1 {
         return raw.to_vec();
     }
@@ -48,7 +48,7 @@ pub(super) fn shuffle_bytes(raw: &[u8], width: usize) -> Vec<u8> {
 }
 
 /// Inverse of [`shuffle_bytes`]: gather significance planes back into elements.
-pub(super) fn unshuffle_bytes(shuffled: &[u8], width: usize) -> Vec<u8> {
+pub(crate) fn unshuffle_bytes(shuffled: &[u8], width: usize) -> Vec<u8> {
     if width <= 1 {
         return shuffled.to_vec();
     }
@@ -64,7 +64,7 @@ pub(super) fn unshuffle_bytes(shuffled: &[u8], width: usize) -> Vec<u8> {
 
 /// Inflate a gzip stream to its exact declared size. Reading one byte past the
 /// expected size detects expansion bombs without allowing an unbounded allocation.
-pub(super) fn gunzip(bytes: &[u8], expected: usize) -> Result<Vec<u8>> {
+pub(crate) fn gunzip(bytes: &[u8], expected: usize) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     GzDecoder::new(bytes)
         .take(expected.saturating_add(1) as u64)
@@ -86,7 +86,7 @@ pub(super) fn gunzip(bytes: &[u8], expected: usize) -> Result<Vec<u8>> {
 /// `GZIP_1`: inflate to the tile's big-endian byte stream, then decode per `bitpix`
 /// into `out` (a reused buffer). The tile holds `tile_elems` values, bounding the
 /// inflated size at `tile_elems × bitpix` bytes.
-pub(super) fn gzip_tile_into(
+pub(crate) fn gzip_tile_into(
     bytes: &[u8],
     bitpix: Bitpix,
     tile_elems: usize,
@@ -99,7 +99,7 @@ pub(super) fn gzip_tile_into(
 
 /// `GZIP_2`: like `GZIP_1` but the bytes are shuffled into significance planes
 /// (all most-significant bytes first, …) before gzip. Inflate, then un-shuffle.
-pub(super) fn gzip2_tile_into(
+pub(crate) fn gzip2_tile_into(
     bytes: &[u8],
     bitpix: Bitpix,
     tile_elems: usize,

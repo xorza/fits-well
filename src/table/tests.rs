@@ -1,5 +1,5 @@
-use super::*;
 use crate::reader::FitsReader;
+use crate::table::*;
 use bitvec::bitvec;
 use std::fs::File;
 

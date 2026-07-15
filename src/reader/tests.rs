@@ -1,8 +1,8 @@
-use super::*;
 use crate::bitpix::Bitpix;
 use crate::data::Image;
 use crate::data::ImageData;
 use crate::data::Scaling;
+use crate::reader::*;
 use crate::writer::FitsWriter;
 use std::fs::File;
 use std::io::Cursor;
