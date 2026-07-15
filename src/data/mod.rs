@@ -713,12 +713,12 @@ pub struct Scaling {
 
 impl Scaling {
     /// The public entry point is [`Header::scaling`](crate::Header::scaling).
-    pub(crate) fn from_header(header: &Header) -> Scaling {
-        Scaling {
-            bscale: header.get_real("BSCALE").unwrap_or(1.0),
-            bzero: header.get_real("BZERO").unwrap_or(0.0),
-            blank: header.get_integer("BLANK"),
-        }
+    pub(crate) fn from_header(header: &Header) -> Result<Scaling> {
+        Ok(Scaling {
+            bscale: header.try_get_real("BSCALE")?.unwrap_or(1.0),
+            bzero: header.try_get_real("BZERO")?.unwrap_or(0.0),
+            blank: header.try_get_integer("BLANK")?,
+        })
     }
 
     /// `true` when decoding needs no arithmetic — just an endian swap or copy.

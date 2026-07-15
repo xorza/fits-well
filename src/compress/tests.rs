@@ -5,7 +5,7 @@ use crate::bitpix::Bitpix;
 use crate::data::ImageData;
 use crate::endian::push_pq_descriptor;
 use crate::reader::{FitsReader, StreamReader};
-use crate::table::ColumnData;
+use crate::table::{ColumnData, TformKind};
 use std::fs::File;
 use std::io::Cursor;
 
@@ -648,6 +648,19 @@ fn zblank_column_overrides_keyword_per_tile() {
     };
     assert_eq!(px[0], 25.0);
     assert!(px[1].is_nan());
+
+    for (column, name, kind) in [
+        (1, "ZSCALE", TformKind::I64),
+        (2, "ZZERO", TformKind::I64),
+        (3, "ZBLANK", TformKind::F32),
+    ] {
+        let mut malformed = table.clone();
+        malformed.columns[column].tform.kind = kind;
+        assert!(matches!(
+            decompress_image(&h, &malformed),
+            Err(FitsError::TypeMismatch { name: actual, .. }) if actual == name
+        ));
+    }
 }
 
 fn check_table_roundtrip(algo: &str, rows_per_tile: usize) {

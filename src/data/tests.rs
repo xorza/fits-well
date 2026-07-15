@@ -480,7 +480,7 @@ fn image_data_reports_its_bitpix() {
 
 #[test]
 fn scaling_defaults_to_the_identity_map() {
-    let s = Scaling::from_header(&header(&["SIMPLE  = T"]));
+    let s = Scaling::from_header(&header(&["SIMPLE  = T"])).unwrap();
     assert_eq!(
         s,
         Scaling {
@@ -498,7 +498,8 @@ fn scaling_reads_explicit_keywords() {
         "BSCALE  = 2.5",
         "BZERO   = -1000.0",
         "BLANK   = -32768",
-    ]));
+    ]))
+    .unwrap();
     assert_eq!(
         s,
         Scaling {
@@ -508,12 +509,21 @@ fn scaling_reads_explicit_keywords() {
         }
     );
     assert!(!s.is_identity());
+
+    for keyword in ["BSCALE", "BZERO", "BLANK"] {
+        let mut malformed = Header::new();
+        malformed.set(keyword, "not numeric");
+        assert!(matches!(
+            Scaling::from_header(&malformed),
+            Err(FitsError::TypeMismatch { name, .. }) if name == keyword
+        ));
+    }
 }
 
 #[test]
 fn unsigned_16_bit_offset_is_not_an_identity_map() {
     // The unsigned-u16 trick: BSCALE=1, BZERO=32768.
-    let s = Scaling::from_header(&header(&["BSCALE  = 1", "BZERO   = 32768"]));
+    let s = Scaling::from_header(&header(&["BSCALE  = 1", "BZERO   = 32768"])).unwrap();
     assert_eq!(s.bzero, 32768.0);
     assert!(!s.is_identity());
 }

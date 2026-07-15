@@ -115,6 +115,43 @@ impl Header {
         self.get(keyword)?.as_text()
     }
 
+    /// Read an optional logical keyword without conflating absence with a wrong type.
+    pub fn try_get_logical(&self, keyword: &str) -> Result<Option<bool>> {
+        self.typed_optional(keyword, "logical", Value::as_logical)
+    }
+
+    /// Read an optional integer keyword without conflating absence with a wrong type.
+    pub fn try_get_integer(&self, keyword: &str) -> Result<Option<i64>> {
+        self.typed_optional(keyword, "integer", Value::as_integer)
+    }
+
+    /// Read an optional real keyword without conflating absence with a wrong type.
+    pub fn try_get_real(&self, keyword: &str) -> Result<Option<f64>> {
+        self.typed_optional(keyword, "real", Value::as_real)
+    }
+
+    /// Read an optional text keyword without conflating absence with a wrong type.
+    pub fn try_get_text(&self, keyword: &str) -> Result<Option<&str>> {
+        self.typed_optional(keyword, "text", Value::as_text)
+    }
+
+    fn typed_optional<'a, T>(
+        &'a self,
+        keyword: &str,
+        expected: &'static str,
+        convert: impl FnOnce(&'a Value) -> Option<T>,
+    ) -> Result<Option<T>> {
+        let Some(value) = self.get(keyword) else {
+            return Ok(None);
+        };
+        convert(value)
+            .map(Some)
+            .ok_or_else(|| FitsError::TypeMismatch {
+                name: keyword.to_string(),
+                expected,
+            })
+    }
+
     /// Every stored record in file order, as [`HeaderEntry`] views — duplicates and
     /// order preserved (the whole point of the ordered model), so `COMMENT`/`HISTORY`
     /// runs and repeated keywords come through intact. The implicit `END` is not a
@@ -187,7 +224,7 @@ impl Header {
     }
 
     /// The physical-value scaling (`BSCALE`/`BZERO`/`BLANK`) declared by this header.
-    pub fn scaling(&self) -> Scaling {
+    pub fn scaling(&self) -> Result<Scaling> {
         Scaling::from_header(self)
     }
 

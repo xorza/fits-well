@@ -58,8 +58,12 @@ impl RandomGroups {
                     .to_string(),
             );
             param_scaling.push(ParamScale {
-                pscal: header.get_real(key!("PSCAL{j}").as_str()).unwrap_or(1.0),
-                pzero: header.get_real(key!("PZERO{j}").as_str()).unwrap_or(0.0),
+                pscal: header
+                    .try_get_real(key!("PSCAL{j}").as_str())?
+                    .unwrap_or(1.0),
+                pzero: header
+                    .try_get_real(key!("PZERO{j}").as_str())?
+                    .unwrap_or(0.0),
             });
         }
 
@@ -70,7 +74,7 @@ impl RandomGroups {
             gcount,
             pcount,
             bitpix,
-            array_scaling: Scaling::from_header(header),
+            array_scaling: Scaling::from_header(header)?,
             param_scaling,
             samples,
         };

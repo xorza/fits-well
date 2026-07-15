@@ -382,9 +382,13 @@ impl BinTable {
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
                 tform,
-                tscale: header.get_real(key!("TSCAL{n}").as_str()).unwrap_or(1.0),
-                tzero: header.get_real(key!("TZERO{n}").as_str()).unwrap_or(0.0),
-                tnull: header.get_integer(key!("TNULL{n}").as_str()),
+                tscale: header
+                    .try_get_real(key!("TSCAL{n}").as_str())?
+                    .unwrap_or(1.0),
+                tzero: header
+                    .try_get_real(key!("TZERO{n}").as_str())?
+                    .unwrap_or(0.0),
+                tnull: header.try_get_integer(key!("TNULL{n}").as_str())?,
                 tdim,
                 tdisp: header
                     .get_text(key!("TDISP{n}").as_str())

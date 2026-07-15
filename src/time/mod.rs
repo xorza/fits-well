@@ -58,8 +58,7 @@ impl Datetime {
             Some((d, t)) => (d, Some(t)),
             None => (s, None),
         };
-        // `[±]CCYY-MM-DD`: the year has ≥4 digits and an optional sign; month/day
-        // are exactly two digits (§9.1.1 — leading zeros may not be omitted).
+        // `[±]CCYY-MM-DD`: year, month, and day have fixed widths (§9.1.1).
         let (sign, rest) = match date.strip_prefix('-') {
             Some(r) => (-1, r),
             None => (1, date.strip_prefix('+').unwrap_or(date)),
@@ -68,15 +67,10 @@ impl Datetime {
         let y_str = dp.next().ok_or_else(invalid)?;
         let m_str = dp.next().ok_or_else(invalid)?;
         let d_str = dp.next().ok_or_else(invalid)?;
-        if dp.next().is_some() || y_str.len() < 4 || !all_digits(y_str) {
+        if dp.next().is_some() || y_str.len() != 4 || !all_digits(y_str) {
             return Err(invalid());
         }
         let year = sign * y_str.parse::<i64>().map_err(|_| invalid())?;
-        // `to_jd` computes `365·(year + 4800)` in `i64`; bound the year so a hostile
-        // DATE can't overflow that. Any real observation/epoch date is far inside ±10⁶.
-        if year.unsigned_abs() > 1_000_000 {
-            return Err(invalid());
-        }
         let month = parse_fixed(m_str, 2).ok_or_else(invalid)?;
         let day = parse_fixed(d_str, 2).ok_or_else(invalid)?;
         if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
@@ -88,9 +82,7 @@ impl Datetime {
             let mut tp = t.split(':');
             hour = parse_fixed(tp.next().ok_or_else(invalid)?, 2).ok_or_else(invalid)?;
             minute = parse_fixed(tp.next().ok_or_else(invalid)?, 2).ok_or_else(invalid)?;
-            if let Some(sec) = tp.next() {
-                second = parse_seconds(sec).ok_or_else(invalid)?;
-            }
+            second = parse_seconds(tp.next().ok_or_else(invalid)?).ok_or_else(invalid)?;
             // Second 60 is the leap second; this type is scale-agnostic, so the
             // "only in UTC" restriction is left to the caller.
             if tp.next().is_some() || hour >= 24 || minute >= 60 || !(0.0..61.0).contains(&second) {
@@ -299,18 +291,9 @@ fn from_tt(tt: f64, target: TimeScale, dut1: f64) -> f64 {
         TimeScale::Tt => tt,
         TimeScale::Tai => tt - TT_TAI / SEC_PER_DAY,
         TimeScale::Gps => tt - (TT_TAI + TAI_GPS) / SEC_PER_DAY,
-        TimeScale::Utc => {
-            let tai = tt - TT_TAI / SEC_PER_DAY;
-            // leap is a function of UTC; one lookup at the TAI date suffices away
-            // from the ≤1 s boundary ambiguity inherent to UTC.
-            tai - leap_seconds(tai - MJD0) / SEC_PER_DAY
-        }
+        TimeScale::Utc => tai_to_utc(tt - TT_TAI / SEC_PER_DAY),
         // TT → UTC → UT1 (add ΔUT1).
-        TimeScale::Ut1 => {
-            let tai = tt - TT_TAI / SEC_PER_DAY;
-            let utc = tai - leap_seconds(tai - MJD0) / SEC_PER_DAY;
-            utc + dut1 / SEC_PER_DAY
-        }
+        TimeScale::Ut1 => tai_to_utc(tt - TT_TAI / SEC_PER_DAY) + dut1 / SEC_PER_DAY,
         TimeScale::Tcg => tt + L_G * (tt - T1977_JD),
         TimeScale::Tdb => tt + tdb_minus_tt(tt) / SEC_PER_DAY,
         TimeScale::Tcb => {
@@ -320,6 +303,13 @@ fn from_tt(tt: f64, target: TimeScale, dut1: f64) -> f64 {
         // convert_dut1 returns early for Local, so it never reaches the pivot.
         TimeScale::Local => unreachable!("convert_dut1 short-circuits Local"),
     }
+}
+
+/// Convert TAI to UTC, selecting `TAI − UTC` at the resulting UTC instant rather
+/// than at the later TAI-labelled date near a leap-second boundary.
+fn tai_to_utc(tai: f64) -> f64 {
+    let initial = tai - leap_seconds(tai - MJD0) / SEC_PER_DAY;
+    tai - leap_seconds(initial - MJD0) / SEC_PER_DAY
 }
 
 /// `TDB − TT` in seconds — the standard periodic approximation (~10 µs accuracy):
@@ -407,10 +397,12 @@ fn days_in_month(year: i64, month: u32) -> u32 {
 }
 
 fn gregorian_to_jdn(year: i64, month: i64, day: i64) -> i64 {
-    let a = (14 - month) / 12;
+    let a = (14 - month).div_euclid(12);
     let y = year + 4800 - a;
     let m = month + 12 * a - 3;
-    day + (153 * m + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32045
+    day + (153 * m + 2).div_euclid(5) + 365 * y + y.div_euclid(4) - y.div_euclid(100)
+        + y.div_euclid(400)
+        - 32045
 }
 
 /// A proleptic-Gregorian calendar date — the result of [`jdn_to_gregorian`].
@@ -424,14 +416,14 @@ struct CalendarDate {
 /// Inverse of [`gregorian_to_jdn`]: JDN → calendar date.
 fn jdn_to_gregorian(jdn: i64) -> CalendarDate {
     let a = jdn + 32044;
-    let b = (4 * a + 3) / 146097;
-    let c = a - (146097 * b) / 4;
-    let d = (4 * c + 3) / 1461;
-    let e = c - (1461 * d) / 4;
-    let m = (5 * e + 2) / 153;
-    let day = e - (153 * m + 2) / 5 + 1;
-    let month = m + 3 - 12 * (m / 10);
-    let year = 100 * b + d - 4800 + m / 10;
+    let b = (4 * a + 3).div_euclid(146097);
+    let c = a - (146097 * b).div_euclid(4);
+    let d = (4 * c + 3).div_euclid(1461);
+    let e = c - (1461 * d).div_euclid(4);
+    let m = (5 * e + 2).div_euclid(153);
+    let day = e - (153 * m + 2).div_euclid(5) + 1;
+    let month = m + 3 - 12 * m.div_euclid(10);
+    let year = 100 * b + d - 4800 + m.div_euclid(10);
     CalendarDate {
         year,
         month: month as u32,
@@ -621,17 +613,22 @@ impl FitsTime {
     }
 
     /// Convert Good Time Interval `START`/`STOP` column values (relative to
-    /// `MJDREF`, in `TIMEUNIT`) to absolute-MJD intervals (§9.7). Pairs are taken
-    /// element-wise up to the shorter slice.
-    pub fn gti_intervals(&self, starts: &[f64], stops: &[f64]) -> Vec<GtiInterval> {
-        starts
+    /// `MJDREF`, in `TIMEUNIT`) to absolute-MJD intervals (§9.7).
+    pub fn gti_intervals(&self, starts: &[f64], stops: &[f64]) -> Result<Vec<GtiInterval>> {
+        if starts.len() != stops.len() {
+            return Err(FitsError::DataSizeMismatch {
+                expected: starts.len(),
+                got: stops.len(),
+            });
+        }
+        Ok(starts
             .iter()
             .zip(stops)
             .map(|(&s, &e)| GtiInterval {
                 start_mjd: self.relative_to_mjd(s),
                 stop_mjd: self.relative_to_mjd(e),
             })
-            .collect()
+            .collect())
     }
 
     /// If WCS axis `axis` (1-based) is a time axis (`CTYPEi = 'TIME'` or a

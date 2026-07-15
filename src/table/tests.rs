@@ -186,6 +186,15 @@ fn read_column_physical_applies_tscal_tzero_and_tnull() {
     assert_eq!(phys[0], 16.0);
     assert!(phys[1].is_nan());
     assert_eq!(phys[2], 24.0);
+
+    for keyword in ["TSCAL1", "TZERO1", "TNULL1"] {
+        let mut malformed = header.clone();
+        malformed.set(keyword, "not numeric");
+        assert!(matches!(
+            BinTable::from_data(&malformed, vec![0; 6]),
+            Err(FitsError::TypeMismatch { name, .. }) if name == keyword
+        ));
+    }
 }
 
 #[test]

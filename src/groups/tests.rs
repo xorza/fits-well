@@ -71,6 +71,15 @@ fn parameter_physical_sums_addends_sharing_a_ptype() {
     // Summed logical DATE = (2445728.5 + 10) + (0.25 + 0.5) = 2445739.25.
     assert_eq!(groups.parameter_physical(0, "DATE"), Some(2_445_739.25));
     assert_eq!(groups.parameter_physical(0, "NONE"), None);
+
+    for keyword in ["PSCAL1", "PZERO1", "BSCALE"] {
+        let mut malformed = header.clone();
+        malformed.set(keyword, "not numeric");
+        assert!(matches!(
+            RandomGroups::from_data(&malformed, &data),
+            Err(FitsError::TypeMismatch { name, .. }) if name == keyword
+        ));
+    }
 }
 
 #[test]

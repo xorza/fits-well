@@ -19,7 +19,7 @@ fn main() -> fits_well::Result<()> {
     // `header.wcs(..)` parses those keywords into a usable transform. `None` selects
     // the primary WCS (an alternate would be `Some('A')`, etc.).
     let wcs = header.wcs(None)?;
-    println!("axes: {:?}", wcs.ctype);
+    println!("axes: {:?}", wcs.view().axes);
 
     // Pixel → world: the reference pixel (CRPIXn) maps to the reference sky
     // coordinate (CRVALn). This file's reference pixel is (256, 256).

@@ -105,6 +105,15 @@ fn applies_tscal_tzero_and_maps_tnull_to_nan() {
     let phys = table.column_by_idx(0).unwrap().physical().unwrap();
     assert_eq!(phys[0], 256.0); // 10 + 2·123
     assert!(phys[1].is_nan());
+
+    for keyword in ["TSCAL1", "TZERO1"] {
+        let mut malformed = header.clone();
+        malformed.set(keyword, "not numeric");
+        assert!(matches!(
+            AsciiTable::from_data(&malformed, b"   123   ***".to_vec()),
+            Err(FitsError::TypeMismatch { name, .. }) if name == keyword
+        ));
+    }
 }
 
 #[test]

@@ -297,7 +297,7 @@ impl<S: Source> FitsReader<S> {
         hdu.ensure_plain_image()?;
         let bitpix = hdu.header.bitpix()?;
         let shape = hdu.header.axes()?;
-        let scaling = Scaling::from_header(&hdu.header);
+        let scaling = Scaling::from_header(&hdu.header)?;
         let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
         let lengths = DataLengths::new(data_bytes)?;
         let unit = self
