@@ -142,12 +142,15 @@ let reader = FitsReader::open(File::open("wcs_tan.fits")?)?;
 let wcs = reader.hdus()[0].header.wcs(None)?; // None = the primary WCS
 
 let mut sky = [0.0; 2];
-wcs.pixel_to_world(&[256.0, 256.0], &mut sky); // RA/Dec at the reference pixel
+wcs.pixel_to_world(&[256.0, 256.0], &mut sky)?; // RA/Dec at the reference pixel
 let mut pixel = [0.0; 2];
-wcs.world_to_pixel(&sky, &mut pixel); // and back again
+wcs.world_to_pixel(&sky, &mut pixel)?; // and back again
 println!("{sky:?} -> {pixel:?}");
 # Ok::<(), fits_well::FitsError>(())
 ```
+
+Both transforms return an error for coordinates outside the projection's domain
+or for an iterative inversion that does not converge.
 
 The typed **time** layer (`Header::time`, `Datetime`, `TimeScale`) handles
 ISO-8601/JD/MJD, epochs, and `UTC`…`TCB`/`GPS`/UT1 scale conversions.
