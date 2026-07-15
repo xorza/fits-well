@@ -1,0 +1,102 @@
+# Changelog
+
+## Unreleased
+
+### Breaking changes
+
+- `WriteColumn` is now an invariant-preserving opaque type instead of a collection
+  of public, independently mutable fields. `WriteColumn::vla` now requires an
+  explicit `ColumnType`, including for empty columns, and `WriteColumn::bits` now
+  accepts packed `Vec<u8>` data directly. `ColumnType` is exported from the crate.
+- `Header::scaling` now returns `Result<Scaling>` so malformed scaling metadata is
+  distinguishable from absent metadata.
+- `RawImage::decode` now consumes `self`, allowing already-owned decompressed samples
+  to move out without cloning. With `ndarray`, `RawImage::to_ndarray(&self)` was
+  replaced by the consuming `RawImage::into_ndarray(self)`.
+- `FitsTime::gti_intervals` now returns `Result<Vec<GtiInterval>>` and rejects
+  mismatched start/stop column lengths instead of silently truncating through `zip`.
+- Mutable WCS source fields (`naxis`, `ctype`, `crval`, `crpix`, and
+  `unsupported_axes`) are now private so they cannot invalidate derived transforms.
+  Read them through the immutable metadata returned by `Wcs::view`.
+- `FitsError::DataUnitTooLarge::bytes` changed from `usize` to `u64`. The
+  `TypeMismatch` and `InvalidAscii` variants were added; exhaustive matches on
+  `FitsError` must handle them.
+
+### Added
+
+- Added `Header::try_get_logical`, `try_get_integer`, `try_get_real`, and
+  `try_get_text`, which return `Result<Option<_>>` and distinguish a missing keyword
+  from a present value of the wrong type.
+- Added `Wcs::view` with immutable per-axis metadata and unsupported-axis status.
+- Added explicit `ColumnType` declarations for variable-length table columns.
+
+### Changed
+
+- Scaling and transformation metadata now fails with `TypeMismatch` when a card is
+  present with the wrong representation. This applies to image, table, ASCII-table,
+  random-groups, compression, WCS, and time metadata instead of silently applying
+  identity defaults.
+- Header text, header comments, binary-table text, ASCII-table text, units, names,
+  and null markers are validated as FITS restricted ASCII before writing.
+- Binary-table writing validates each column state before emitting data. `wide()` is
+  restricted to VLA columns, bit columns require the exact packed byte count, and
+  VLA rows must match their declared element type.
+- `read_table` and `read_ascii_table` validate the HDU kind before reading or
+  allocating its data unit, so wrong-kind calls return their semantic error first.
+- The default feature list now contains only `parallel`; default builds still enable
+  `compression` because `parallel` depends on it.
+
+### Fixed
+
+- GZIP, Rice, PLIO, and HCOMPRESS decoders now reject truncated streams, malformed
+  control data, decompression bombs, and tiles whose decoded size differs from the
+  declared geometry instead of manufacturing zero-valued pixels or reading out of
+  bounds.
+- Zero-sized images and one-pixel HCOMPRESS tiles no longer panic or fabricate
+  pixels during tiled compression round trips.
+- Reader, writer, image, table, VLA, and compressed-table dimensions now use checked
+  narrowing and arithmetic. Oversized allocations return `DataUnitTooLarge` or
+  `DataUnitOverflow` instead of truncating, wrapping, panicking, or relying on an
+  allocation abort.
+- One's-complement checksum accumulation now folds carry while streaming, avoiding
+  accumulator overflow on very large valid HDUs.
+- `P` and `Q` descriptors are constrained to their signed 32-bit and 64-bit FITS
+  ranges. Character VLA descriptors use encoded byte counts, repeat-zero VLAs decode
+  as typed empty cells, and nested `P`/`Q` descriptors are rejected.
+- `TDIMn` accepts legal shapes whose product is less than or equal to the column
+  repeat, validates VLA shapes against each cell, and rejects malformed or
+  overflowing dimensions.
+- Non-finite ASCII numeric cells require a valid, width-fitting null marker instead
+  of writing a blank field that reads back as zero.
+- WCS parsing rejects conflicting CD/PC/CROTA conventions, and Mollweide transforms
+  now return finite canonical coordinates at the poles.
+- TT-to-UTC/UT1 conversion now selects leap seconds at the correct UTC instant.
+  Signed Gregorian years use floor division, ISO-8601 parsing requires the FITS year
+  and `hh:mm:ss` forms, and GTI endpoints must have equal lengths.
+
+### Performance and memory
+
+- Raw-image physical, `f32`, and unsigned conversions decode big-endian samples
+  directly into their final output instead of allocating an intermediate
+  `ImageData` plane.
+- Fixed-width table physical, unsigned, and complex reads decode strided cells
+  directly into their final vectors. VLA physical reads decode bounded heap spans
+  without retaining a second raw representation.
+- Compressed image views decode directly into caller-owned aligned scratch instead
+  of constructing and copying a complete intermediate image.
+- Readers retain a checksum seed rather than every HDU's padded raw header, and
+  checksum verification skips data I/O when neither checksum keyword is present.
+- Compressed cells and regular writer VLAs append directly into their final table
+  buffers with descriptor backpatching. Compressed tables decompress directly into
+  disjoint final row/column ranges, avoiding compressed-cell and decompressed-table
+  staging copies.
+- Header restoration removes compression metadata and rebuilds its keyword index in
+  one pass. Header cards render directly into a reusable writer header buffer,
+  including long-string `CONTINUE` chains.
+- Writer padding no longer allocates per data unit, and fallible reusable buffers are
+  reserved from validated final sizes.
+
+### Documentation
+
+- README Rust examples are compiled as doctests, and compression module docs were
+  refreshed to describe the implemented codecs and tiled-table support.
