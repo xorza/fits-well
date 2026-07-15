@@ -24,8 +24,8 @@ use crate::compress::{CompressOptions, compress_image, compress_table};
 use crate::data::Image;
 use crate::data::shape_product;
 use crate::endian::extend_be;
-use crate::endian::push_pq_descriptor;
 use crate::endian::validate_pq_descriptor;
+use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -299,6 +299,8 @@ impl<W: Write> FitsWriter<W> {
     /// never be the primary HDU). Fixed-width and variable-length (`P`) columns
     /// are both supported — VLA columns write a heap after the main table.
     pub fn write_table(&mut self, nrows: usize, columns: &[WriteColumn]) -> Result<()> {
+        fits_i64(nrows)?;
+        fits_i64(columns.len())?;
         let mut layouts = Vec::new();
         allocation::try_reserve_exact(&mut layouts, columns.len())?;
         let mut row_len = 0usize;
@@ -309,79 +311,61 @@ impl<W: Write> FitsWriter<W> {
                 .ok_or(FitsError::DataUnitOverflow)?;
             layouts.push(layout);
         }
-        // Build the heap (row-major) and the VLA descriptors first, so the main table
-        // can carry the `P`/`Q` (count, offset) pairs. Descriptors are recorded in the
-        // same row-major, column order the main-table pass emits them, so a single flat
-        // queue (drained below) stays aligned without per-column bookkeeping.
-        let descriptor_count = nrows
-            .checked_mul(
-                columns
-                    .iter()
-                    .filter(|col| matches!(&col.values, WriteColumnData::Vla { .. }))
-                    .count(),
-            )
-            .ok_or(FitsError::DataUnitOverflow)?;
-        let heap_len = columns
-            .iter()
-            .filter_map(|col| match &col.values {
-                WriteColumnData::Vla { rows, .. } => Some(rows.as_slice()),
-                _ => None,
-            })
-            .flatten()
-            .try_fold(0usize, |len, cell| {
-                len.checked_add(cell_byte_len(cell)?)
-                    .ok_or(FitsError::DataUnitOverflow)
-            })?;
-        let mut heap = Vec::new();
-        allocation::try_reserve_exact(&mut heap, heap_len)?;
-        let mut descs = Vec::new();
-        allocation::try_reserve_exact(&mut descs, descriptor_count)?;
+        fits_i64(row_len)?;
+        let mut heap_len = 0usize;
         for r in 0..nrows {
             for col in columns {
                 if let WriteColumnData::Vla { kind, rows, wide } = &col.values {
                     let cell = &rows[r];
-                    let descriptor = Descriptor {
-                        count: encoded_element_count(*kind, cell)? as u64,
-                        offset: heap.len() as u64,
-                        wide: *wide,
-                    };
-                    validate_pq_descriptor(descriptor.wide, descriptor.count, descriptor.offset)?;
-                    descs.push(descriptor);
-                    append_be(&mut heap, cell);
+                    let count = encoded_element_count(*kind, cell)? as u64;
+                    validate_pq_descriptor(*wide, count, heap_len as u64)?;
+                    heap_len = heap_len
+                        .checked_add(cell_byte_len(cell)?)
+                        .ok_or(FitsError::DataUnitOverflow)?;
                 }
             }
         }
+        fits_i64(heap_len)?;
         self.ensure_primary()?;
-        // Main table: fixed cells inline, VLA columns as `P`/`Q` descriptors drained
-        // in the same row-major order they were built. Built into the reused scratch,
-        // with the heap appended after.
         self.scratch.clear();
         let main_len = nrows
             .checked_mul(row_len)
             .ok_or(FitsError::DataUnitOverflow)?;
         let total_len = main_len
-            .checked_add(heap.len())
+            .checked_add(heap_len)
             .ok_or(FitsError::DataUnitOverflow)?;
         allocation::try_reserve_exact(&mut self.scratch, total_len)?;
-        let mut descs = descs.into_iter();
         for r in 0..nrows {
             for col in columns {
                 match &col.values {
-                    WriteColumnData::Vla { .. } => {
-                        let descriptor = descs.next().expect("one descriptor per VLA cell");
-                        push_pq_descriptor(
-                            &mut self.scratch,
-                            descriptor.wide,
-                            descriptor.count,
-                            descriptor.offset,
-                        )?;
-                    }
+                    WriteColumnData::Vla { wide, .. } => self
+                        .scratch
+                        .resize(self.scratch.len() + if *wide { 16 } else { 8 }, 0),
                     _ => pack_cell(&mut self.scratch, col, r),
                 }
             }
         }
-        self.scratch.extend_from_slice(&heap);
-        let header = bintable_header(nrows, row_len, columns, &layouts, heap.len())?;
+        assert_eq!(self.scratch.len(), main_len, "main table layout");
+        for r in 0..nrows {
+            let mut column_offset = 0usize;
+            for (col, layout) in columns.iter().zip(&layouts) {
+                if let WriteColumnData::Vla { kind, rows, wide } = &col.values {
+                    let cell = &rows[r];
+                    let descriptor_width = if *wide { 16 } else { 8 };
+                    let descriptor_offset = r * row_len + column_offset;
+                    let heap_offset = self.scratch.len() - main_len;
+                    write_pq_descriptor(
+                        &mut self.scratch[descriptor_offset..descriptor_offset + descriptor_width],
+                        *wide,
+                        encoded_element_count(*kind, cell)? as u64,
+                        heap_offset as u64,
+                    )?;
+                    append_be(&mut self.scratch, cell);
+                }
+                column_offset += layout.row_width;
+            }
+        }
+        let header = bintable_header(nrows, row_len, columns, &layouts, heap_len)?;
         self.write_hdu(header, ZERO_FILL)
     }
 
@@ -636,13 +620,6 @@ fn bintable_header(
 struct ColumnLayout {
     row_width: usize,
     tform: String,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Descriptor {
-    count: u64,
-    offset: u64,
-    wide: bool,
 }
 
 impl ColumnType {

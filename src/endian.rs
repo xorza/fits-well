@@ -88,20 +88,22 @@ pub(crate) fn validate_pq_descriptor(wide: bool, count: u64, offset: u64) -> Res
     Ok(())
 }
 
-/// Append a validated big-endian `P` or `Q` element-count/heap-offset pair.
-pub(crate) fn push_pq_descriptor(
-    out: &mut Vec<u8>,
+/// Write a validated big-endian `P` or `Q` descriptor into an existing row slot.
+pub(crate) fn write_pq_descriptor(
+    out: &mut [u8],
     wide: bool,
     count: u64,
     offset: u64,
 ) -> Result<()> {
     validate_pq_descriptor(wide, count, offset)?;
+    let expected = if wide { 16 } else { 8 };
+    assert_eq!(out.len(), expected, "descriptor slot width");
     if wide {
-        out.extend_from_slice(&i64::try_from(count).unwrap().to_be_bytes());
-        out.extend_from_slice(&i64::try_from(offset).unwrap().to_be_bytes());
+        out[..8].copy_from_slice(&i64::try_from(count).unwrap().to_be_bytes());
+        out[8..].copy_from_slice(&i64::try_from(offset).unwrap().to_be_bytes());
     } else {
-        out.extend_from_slice(&i32::try_from(count).unwrap().to_be_bytes());
-        out.extend_from_slice(&i32::try_from(offset).unwrap().to_be_bytes());
+        out[..4].copy_from_slice(&i32::try_from(count).unwrap().to_be_bytes());
+        out[4..].copy_from_slice(&i32::try_from(offset).unwrap().to_be_bytes());
     }
     Ok(())
 }
@@ -126,5 +128,13 @@ mod tests {
         let mut out = vec![0xAAu8];
         extend_be(&mut out, &[256i32], i32::to_be_bytes);
         assert_eq!(out, vec![0xAA, 0, 0, 1, 0]);
+
+        let mut descriptor = [0u8; 16];
+        write_pq_descriptor(&mut descriptor, true, 3, u32::MAX as u64 + 8).unwrap();
+        assert_eq!(i64::from_be_bytes(descriptor[..8].try_into().unwrap()), 3);
+        assert_eq!(
+            i64::from_be_bytes(descriptor[8..].try_into().unwrap()),
+            u32::MAX as i64 + 8
+        );
     }
 }

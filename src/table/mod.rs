@@ -524,9 +524,17 @@ struct VlaFormat {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct VlaCell<'a> {
-    bytes: &'a [u8],
-    element_count: usize,
+pub(crate) struct VlaCell<'a> {
+    pub(crate) bytes: &'a [u8],
+    pub(crate) element_count: usize,
+    pub(crate) element_type: TformKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct VlaColumn<'a> {
+    table: &'a BinTable,
+    index: usize,
+    format: VlaFormat,
 }
 
 /// A handle to one column of a [`BinTable`], from [`BinTable::column_by_idx`] or
@@ -691,11 +699,11 @@ impl<'a> ColumnReader<'a> {
     /// holding that row's heap array (which may be empty). Errors for fixed-width
     /// columns.
     pub fn vla(&self) -> Result<Vec<ColumnData>> {
-        let format = self.vla_format()?;
+        let column = self.vla_column()?;
         let mut out = Vec::with_capacity(self.table.nrows);
         for r in 0..self.table.nrows {
-            let cell = self.vla_cell(r, format)?;
-            out.push(decode_array(format.element_type, cell.bytes));
+            let cell = column.cell(r)?;
+            out.push(decode_array(cell.element_type, cell.bytes));
         }
         Ok(out)
     }
@@ -705,14 +713,14 @@ impl<'a> ColumnReader<'a> {
     /// the heap values). Errors for fixed-width or non-numeric-heap columns.
     pub fn vla_physical(&self) -> Result<Vec<Vec<f64>>> {
         let col = self.descriptor();
-        let format = self.vla_format()?;
+        let column = self.vla_column()?;
         let mut rows = Vec::with_capacity(self.table.nrows);
         for row in 0..self.table.nrows {
-            let cell = self.vla_cell(row, format)?;
+            let cell = column.cell(row)?;
             rows.push(physical_cells(
                 std::iter::once(cell.bytes),
                 cell.element_count,
-                format.element_type,
+                cell.element_type,
                 col.tscale,
                 col.tzero,
                 col.tnull,
@@ -768,16 +776,28 @@ impl<'a> ColumnReader<'a> {
         }
     }
 
-    fn vla_cell(&self, row: usize, format: VlaFormat) -> Result<VlaCell<'a>> {
-        assert!(row < self.table.nrows, "VLA row index");
-        let col = self.descriptor();
-        let descriptor = self.table.array_descriptor(col, row, format.wide);
+    pub(crate) fn vla_column(&self) -> Result<VlaColumn<'a>> {
+        Ok(VlaColumn {
+            table: self.table,
+            index: self.index,
+            format: self.vla_format()?,
+        })
+    }
+}
+
+impl<'a> VlaColumn<'a> {
+    pub(crate) fn cell(&self, row: usize) -> Result<VlaCell<'a>> {
+        if row >= self.table.nrows {
+            return Err(FitsError::UnexpectedEof);
+        }
+        let col = &self.table.columns[self.index];
+        let descriptor = self.table.array_descriptor(col, row, self.format.wide);
         validate_vla_tdim(col, descriptor.nelem)?;
-        let nbytes = match format.element_type {
+        let nbytes = match self.format.element_type {
             TformKind::Bit => descriptor.nelem.div_ceil(8),
             _ => descriptor
                 .nelem
-                .checked_mul(format.element_type.elem_size())
+                .checked_mul(self.format.element_type.elem_size())
                 .ok_or(FitsError::UnexpectedEof)?,
         };
         let bytes = if descriptor.nelem == 0 {
@@ -788,6 +808,7 @@ impl<'a> ColumnReader<'a> {
         Ok(VlaCell {
             bytes,
             element_count: descriptor.nelem,
+            element_type: self.format.element_type,
         })
     }
 }

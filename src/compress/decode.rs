@@ -7,14 +7,15 @@
 //! [`hcompress`](super::hcompress) modules; this drives the tile geometry, the
 //! fallback-column resolution, and the narrow-and-scatter into the output plane.
 
-use super::convert::as_bytes;
-use super::convert::as_i16;
+#[cfg(feature = "parallel")]
+use super::DisjointSlice;
 use super::convert::be_floats_into;
 use super::convert::be_to_i64_into;
+use super::convert::byte_cell;
 use super::convert::bytepix_to_bitpix;
-use super::convert::cell_len;
 use super::convert::cell_to_f64_into;
 use super::convert::cell_to_i64_into;
+use super::convert::plio_cell;
 use super::convert::zeroed_samples;
 use super::geometry::TileGeometry;
 use super::geometry::TileScratch;
@@ -37,6 +38,8 @@ use crate::header::Header;
 use crate::keyword::key;
 use crate::table::BinTable;
 use crate::table::ColumnData;
+use crate::table::VlaCell;
+use crate::table::VlaColumn;
 
 #[derive(Debug)]
 struct ImageLayout {
@@ -248,11 +251,7 @@ fn decode_image_into(
     };
     if is_float {
         let decode = |t: usize, s: &TileScratch, out: &mut Vec<f64>, ints: &mut Vec<i64>| {
-            let cols = TileColumns {
-                primary: primary.get(t),
-                gzip: gzip_fallback.get(t),
-                uncompressed: uncompressed.get(t),
-            };
+            let cols = TileColumns::read(t, primary, gzip_fallback, uncompressed)?;
             let dq = Dequant {
                 scale: column_at(&zscale, t).unwrap_or(1.0),
                 zero: column_at(&zzero, t).unwrap_or(0.0),
@@ -273,11 +272,7 @@ fn decode_image_into(
         }
     } else {
         let decode = |t: usize, s: &TileScratch, out: &mut Vec<i64>, _ints: &mut Vec<i64>| {
-            let cols = TileColumns {
-                primary: primary.get(t),
-                gzip: gzip_fallback.get(t),
-                uncompressed: uncompressed.get(t),
-            };
+            let cols = TileColumns::read(t, primary, gzip_fallback, uncompressed)?;
             decode_one_tile_into(&ctx, cols, s.nelem(), out)
         };
         match output {
@@ -320,7 +315,7 @@ where
     // buffers stay cache-resident across tiles.
     #[cfg(feature = "parallel")]
     {
-        let sink = DisjointOut::new(out);
+        let sink = DisjointSlice::new(out);
         let init = || (TileScratch::default(), Vec::<S>::new(), Vec::<i64>::new());
         map_tiles(ntiles, init, |(scratch, vals, ints), t| -> Result<()> {
             geom.tile_into(t, scratch);
@@ -330,7 +325,7 @@ where
             // ranges are disjoint from every other tile's — concurrent writes through
             // `sink` never alias. `tile_into` clips rows to the image, which sized
             // `out`, so each row is in bounds.
-            unsafe { sink.scatter_rows(&scratch.row_bases, scratch.row_len, vals, &convert) };
+            unsafe { scatter_disjoint(&sink, &scratch.row_bases, scratch.row_len, vals, &convert) };
             Ok(())
         })?;
         Ok(())
@@ -373,67 +368,27 @@ fn scatter_rows<S: Copy, D>(
     }
 }
 
-/// A raw pointer into the decode output, shared across rayon workers so each tile
-/// scatters its decoded values in place. The `Sync` impl is sound *only* under the
-/// contract that callers write disjoint index sets — which holds because the image
-/// tiles partition the pixel grid (see [`run_decode_scatter`]).
 #[cfg(feature = "parallel")]
-#[derive(Debug)]
-struct DisjointOut<D> {
-    ptr: *mut D,
-    len: usize,
-}
-
-// SAFETY: see the type doc — concurrent use only writes disjoint, in-bounds indices.
-#[cfg(feature = "parallel")]
-unsafe impl<D> Sync for DisjointOut<D> {}
-
-#[cfg(feature = "parallel")]
-impl<D> DisjointOut<D> {
-    fn new(out: &mut [D]) -> DisjointOut<D> {
-        DisjointOut {
-            ptr: out.as_mut_ptr(),
-            len: out.len(),
-        }
-    }
-
-    /// Write `vals` (row-major) into the tile's contiguous rows: `row_len` values at
-    /// each `row_bases` offset, narrowed by `convert`.
-    ///
-    /// # Safety
-    /// Each `[base, base + row_len)` range must be `<= self.len` and disjoint from
-    /// those passed by any concurrent call, so no two writes alias.
-    unsafe fn scatter_rows<S: Copy>(
-        &self,
-        row_bases: &[usize],
-        row_len: usize,
-        vals: &[S],
-        convert: &impl Fn(S) -> D,
-    ) {
-        let mut off = 0;
-        for &base in row_bases {
-            assert!(
-                base + row_len <= self.len,
-                "tile row out of bounds {}",
-                self.len
-            );
-            // SAFETY: `[base, base + row_len)` is in bounds (asserted; guaranteed by
-            // the tile geometry) and disjoint across tiles, so these are non-aliasing
-            // in-bounds writes over one contiguous run.
-            let dst = unsafe { std::slice::from_raw_parts_mut(self.ptr.add(base), row_len) };
-            for (d, &v) in dst.iter_mut().zip(&vals[off..off + row_len]) {
-                *d = convert(v);
-            }
-            off += row_len;
-        }
+unsafe fn scatter_disjoint<S: Copy, D>(
+    sink: &DisjointSlice<D>,
+    row_bases: &[usize],
+    row_len: usize,
+    vals: &[S],
+    convert: &impl Fn(S) -> D,
+) {
+    let mut off = 0;
+    for &base in row_bases {
+        // SAFETY: image tiles partition the pixel grid, so these in-bounds row
+        // ranges do not overlap any concurrently accessed range.
+        unsafe { sink.map_from_slice(base, &vals[off..off + row_len], convert) };
+        off += row_len;
     }
 }
 
-/// Read a compressed-data column's per-tile cells, or empty if the column is absent.
-fn read_tiles(table: &BinTable, name: &str) -> Result<Vec<ColumnData>> {
+fn read_tiles<'a>(table: &'a BinTable, name: &str) -> Result<Option<VlaColumn<'a>>> {
     match table.column_index(name) {
-        Some(c) => table.column_by_idx(c)?.vla(),
-        None => Ok(Vec::new()),
+        Some(c) => Ok(Some(table.column_by_idx(c)?.vla_column()?)),
+        None => Ok(None),
     }
 }
 
@@ -479,28 +434,41 @@ fn column_at<T: Copy>(col: &Option<Vec<T>>, t: usize) -> Option<T> {
 /// the `GZIP_COMPRESSED_DATA` / `UNCOMPRESSED_DATA` fallbacks.
 #[derive(Debug, Clone, Copy)]
 struct TileColumns<'a> {
-    primary: Option<&'a ColumnData>,
-    gzip: Option<&'a ColumnData>,
-    uncompressed: Option<&'a ColumnData>,
+    primary: Option<VlaCell<'a>>,
+    gzip: Option<VlaCell<'a>>,
+    uncompressed: Option<VlaCell<'a>>,
 }
 
 /// The resolved source for one tile — which non-empty column holds its bytes.
 #[derive(Debug)]
 enum TileSource<'a> {
-    Compressed(&'a ColumnData),
-    Gzip(&'a ColumnData),
-    Uncompressed(&'a ColumnData),
+    Compressed(VlaCell<'a>),
+    Gzip(VlaCell<'a>),
+    Uncompressed(VlaCell<'a>),
 }
 
 impl<'a> TileColumns<'a> {
+    fn read(
+        row: usize,
+        primary: Option<VlaColumn<'a>>,
+        gzip: Option<VlaColumn<'a>>,
+        uncompressed: Option<VlaColumn<'a>>,
+    ) -> Result<TileColumns<'a>> {
+        Ok(TileColumns {
+            primary: primary.map(|column| column.cell(row)).transpose()?,
+            gzip: gzip.map(|column| column.cell(row)).transpose()?,
+            uncompressed: uncompressed.map(|column| column.cell(row)).transpose()?,
+        })
+    }
+
     /// Pick the first non-empty source: primary `COMPRESSED_DATA`, then the
     /// gzip and uncompressed fallbacks; error if every column's cell is empty.
-    fn resolve(&self) -> Result<TileSource<'a>> {
-        if let Some(c) = self.primary.filter(|c| cell_len(c) > 0) {
+    fn resolve(self) -> Result<TileSource<'a>> {
+        if let Some(c) = self.primary.filter(|cell| cell.element_count > 0) {
             Ok(TileSource::Compressed(c))
-        } else if let Some(c) = self.gzip.filter(|c| cell_len(c) > 0) {
+        } else if let Some(c) = self.gzip.filter(|cell| cell.element_count > 0) {
             Ok(TileSource::Gzip(c))
-        } else if let Some(c) = self.uncompressed.filter(|c| cell_len(c) > 0) {
+        } else if let Some(c) = self.uncompressed.filter(|cell| cell.element_count > 0) {
             Ok(TileSource::Uncompressed(c))
         } else {
             Err(FitsError::UnsupportedCompression {
@@ -551,7 +519,7 @@ fn decode_one_tile_into(
     match cols.resolve()? {
         TileSource::Compressed(cell) => decode_tile_cell_into(ctx, cell, tile_elems, out),
         TileSource::Gzip(cell) => {
-            gzip::gzip_tile_into(as_bytes(cell)?, ctx.int_bitpix, tile_elems, out)
+            gzip::gzip_tile_into(byte_cell(cell)?, ctx.int_bitpix, tile_elems, out)
         }
         TileSource::Uncompressed(cell) => {
             cell_to_i64_into(cell, out);
@@ -582,7 +550,7 @@ fn decode_float_tile_into(
         TileSource::Gzip(cell) => {
             // Raw floats, bounded at the tile's known byte size (`tile_elems` floats).
             let max = tile_elems.saturating_mul(ctx.zbitpix.elem_size());
-            be_floats_into(&gzip::gunzip(as_bytes(cell)?, max)?, ctx.zbitpix, out);
+            be_floats_into(&gzip::gunzip(byte_cell(cell)?, max)?, ctx.zbitpix, out);
             Ok(())
         }
         TileSource::Uncompressed(cell) => {
@@ -596,15 +564,17 @@ fn decode_float_tile_into(
 /// in `out`, per `ZCMPTYPE`. The cell is a byte array except for `PLIO_1` (i16).
 fn decode_tile_cell_into(
     ctx: &DecodeCtx,
-    cell: &ColumnData,
+    cell: VlaCell<'_>,
     tile_elems: usize,
     out: &mut Vec<i64>,
 ) -> Result<()> {
     let params = ctx.params;
     match ctx.codec {
-        ImageCodec::Gzip1 => gzip::gzip_tile_into(as_bytes(cell)?, ctx.int_bitpix, tile_elems, out),
+        ImageCodec::Gzip1 => {
+            gzip::gzip_tile_into(byte_cell(cell)?, ctx.int_bitpix, tile_elems, out)
+        }
         ImageCodec::Gzip2 => {
-            gzip::gzip2_tile_into(as_bytes(cell)?, ctx.int_bitpix, tile_elems, out)
+            gzip::gzip2_tile_into(byte_cell(cell)?, ctx.int_bitpix, tile_elems, out)
         }
         ImageCodec::Rice1 => {
             // Only 1/2/4-byte pixels are defined (cfitsio parity). A `BYTEPIX` of
@@ -616,20 +586,20 @@ fn decode_tile_cell_into(
                 });
             }
             rice::rice_decode_into(
-                as_bytes(cell)?,
+                byte_cell(cell)?,
                 tile_elems,
                 params.bytepix,
                 params.blocksize,
                 out,
             )
         }
-        ImageCodec::Plio1 => plio::plio_decode_into(as_i16(cell)?, tile_elems, out),
+        ImageCodec::Plio1 => plio::plio_decode_be_into(plio_cell(cell)?, tile_elems, out),
         ImageCodec::Hcompress1 => {
-            hcompress::hcompress_tile_into(as_bytes(cell)?, params.smooth, tile_elems, out)
+            hcompress::hcompress_tile_into(byte_cell(cell)?, params.smooth, tile_elems, out)
         }
         // §10.4: a tile stored verbatim — the cell is the raw big-endian pixels.
         ImageCodec::NoCompress => {
-            let bytes = as_bytes(cell)?;
+            let bytes = byte_cell(cell)?;
             let expected = tile_elems
                 .checked_mul(ctx.int_bitpix.elem_size())
                 .ok_or(FitsError::DataUnitOverflow)?;

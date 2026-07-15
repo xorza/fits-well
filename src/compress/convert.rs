@@ -8,7 +8,8 @@ use crate::data::ImageData;
 use crate::endian::encode_be;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::table::ColumnData;
+use crate::table::TformKind;
+use crate::table::VlaCell;
 
 /// Append `src` widened to `i64` to `out` — the repeated integer-widening arm of the
 /// gather/cell helpers (`T` is one of `u8`/`i16`/`i32`/`i64`, all lossless to `i64`).
@@ -187,55 +188,40 @@ pub(super) fn be_floats_into(bytes: &[u8], bitpix: Bitpix, out: &mut Vec<f64>) {
     }
 }
 
-/// Widen a raw (`UNCOMPRESSED_DATA`) integer tile cell to `i64` values in `out`.
-pub(super) fn cell_to_i64_into(cell: &ColumnData, out: &mut Vec<i64>) {
-    out.clear();
-    match cell {
-        ColumnData::Bytes(v) => widen_i64(v, out),
-        ColumnData::I16(v) => widen_i64(v, out),
-        ColumnData::I32(v) => widen_i64(v, out),
-        ColumnData::I64(v) => out.extend_from_slice(v),
-        _ => {}
+pub(super) fn cell_to_i64_into(cell: VlaCell<'_>, out: &mut Vec<i64>) {
+    match cell.element_type {
+        TformKind::Byte => be_to_i64_into(cell.bytes, Bitpix::U8, out),
+        TformKind::I16 => be_to_i64_into(cell.bytes, Bitpix::I16, out),
+        TformKind::I32 => be_to_i64_into(cell.bytes, Bitpix::I32, out),
+        TformKind::I64 => be_to_i64_into(cell.bytes, Bitpix::I64, out),
+        _ => out.clear(),
     }
 }
 
-/// Widen a raw (`UNCOMPRESSED_DATA`) float tile cell to `f64` in `out`.
-pub(super) fn cell_to_f64_into(cell: &ColumnData, zbitpix: Bitpix, out: &mut Vec<f64>) {
-    out.clear();
-    match cell {
-        ColumnData::F32(v) => out.extend(v.iter().map(|&x| x as f64)),
-        ColumnData::F64(v) => out.extend_from_slice(v),
-        ColumnData::Bytes(b) => be_floats_into(b, zbitpix, out),
-        _ => {}
+pub(super) fn cell_to_f64_into(cell: VlaCell<'_>, zbitpix: Bitpix, out: &mut Vec<f64>) {
+    match cell.element_type {
+        TformKind::F32 => be_floats_into(cell.bytes, Bitpix::F32, out),
+        TformKind::F64 => be_floats_into(cell.bytes, Bitpix::F64, out),
+        TformKind::Byte => be_floats_into(cell.bytes, zbitpix, out),
+        _ => out.clear(),
     }
 }
 
-pub(super) fn cell_len(cell: &ColumnData) -> usize {
-    match cell {
-        ColumnData::Bytes(v) => v.len(),
-        ColumnData::I16(v) => v.len(),
-        ColumnData::I32(v) => v.len(),
-        ColumnData::I64(v) => v.len(),
-        _ => 0,
-    }
-}
-
-pub(super) fn as_bytes(cell: &ColumnData) -> Result<&[u8]> {
-    match cell {
-        ColumnData::Bytes(b) => Ok(b),
+pub(super) fn byte_cell<'a>(cell: VlaCell<'a>) -> Result<&'a [u8]> {
+    match cell.element_type {
+        TformKind::Byte => Ok(cell.bytes),
         _ => Err(FitsError::UnsupportedCompression {
             name: "compressed cell is not a byte array".to_string(),
         }),
     }
 }
 
-pub(super) fn as_i16(cell: &ColumnData) -> Result<&[i16]> {
-    match cell {
-        ColumnData::I16(v) => Ok(v),
-        _ => Err(FitsError::UnsupportedCompression {
+pub(super) fn plio_cell<'a>(cell: VlaCell<'a>) -> Result<&'a [u8]> {
+    (cell.element_type == TformKind::I16)
+        .then_some(cell.bytes)
+        .ok_or_else(|| FitsError::UnsupportedCompression {
             name: "PLIO_1 data is not an i16 list".to_string(),
-        }),
-    }
+        })
 }
 
 pub(super) fn bytepix_to_bitpix(bytepix: usize) -> Bitpix {

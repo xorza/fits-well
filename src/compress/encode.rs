@@ -20,7 +20,7 @@ use crate::allocation;
 use crate::bitpix::Bitpix;
 use crate::data::Image;
 use crate::data::shape_product;
-use crate::endian::push_pq_descriptor;
+use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -125,19 +125,10 @@ pub(crate) fn compress_image(
         len.checked_add(cell.byte_len()?)
             .ok_or(FitsError::DataUnitOverflow)
     })?;
-    let mut descriptors = Vec::new();
-    allocation::try_reserve_exact(&mut descriptors, ntiles)?;
-    let mut heap = Vec::new();
-    allocation::try_reserve_exact(&mut heap, heap_len)?;
-    for cell in &cells {
-        descriptors.push((cell.nelem(), heap.len()));
-        cell.extend_heap(&mut heap);
-    }
-
-    let maxnelem = descriptors.iter().map(|&(n, _)| n).max().unwrap_or(0);
+    let maxnelem = cells.iter().map(TileCell::nelem).max().unwrap_or(0);
     // §10.1.3: use 64-bit `Q` descriptors once the heap or a tile's element count
     // exceeds the 32-bit `P` range; otherwise the compact `P` form.
-    let wide = needs_wide(heap.len(), maxnelem);
+    let wide = needs_wide(heap_len, maxnelem);
 
     // Data unit: an array descriptor (count, heap offset) per tile, then the heap.
     // Built into the caller's reused buffer (the writer's scratch).
@@ -146,13 +137,22 @@ pub(crate) fn compress_image(
         .checked_mul(if wide { 16 } else { 8 })
         .ok_or(FitsError::DataUnitOverflow)?;
     let output_len = descriptor_len
-        .checked_add(heap.len())
+        .checked_add(heap_len)
         .ok_or(FitsError::DataUnitOverflow)?;
     allocation::try_reserve_exact(out, output_len)?;
-    for &(nelem, offset) in &descriptors {
-        push_pq_descriptor(out, wide, nelem as u64, offset as u64)?;
+    out.resize(descriptor_len, 0);
+    let descriptor_width = if wide { 16 } else { 8 };
+    for (tile, cell) in cells.into_iter().enumerate() {
+        let offset = out.len() - descriptor_len;
+        let slot = tile * descriptor_width;
+        write_pq_descriptor(
+            &mut out[slot..slot + descriptor_width],
+            wide,
+            cell.nelem() as u64,
+            offset as u64,
+        )?;
+        cell.append_to(out);
     }
-    out.extend_from_slice(&heap);
 
     let tform_letter = if codec == ImageCodec::Plio1 { 'I' } else { 'B' };
     let desc = if wide { 'Q' } else { 'P' };
@@ -162,7 +162,7 @@ pub(crate) fn compress_image(
     h.set("BITPIX", 8).set("NAXIS", 2);
     h.set("NAXIS1", if wide { 16 } else { 8 })
         .set("NAXIS2", fits_i64(ntiles)?);
-    h.set("PCOUNT", fits_i64(heap.len())?).set("GCOUNT", 1);
+    h.set("PCOUNT", fits_i64(heap_len)?).set("GCOUNT", 1);
     h.set("TFIELDS", 1);
     h.set("TTYPE1", "COMPRESSED_DATA");
     h.set("TFORM1", format!("1{desc}{tform_letter}({maxnelem})"));
@@ -300,40 +300,25 @@ fn compress_float_image(
         len.checked_add(tile.bytes.len())
             .ok_or(FitsError::DataUnitOverflow)
     })?;
-    let mut cd_desc = Vec::new();
-    allocation::try_reserve_exact(&mut cd_desc, ntiles)?;
-    let mut gz_desc = Vec::new();
-    allocation::try_reserve_exact(&mut gz_desc, ntiles)?;
-    let mut zscale = allocation::try_zeroed(0f64, ntiles)?;
-    let mut zzero = allocation::try_zeroed(0f64, ntiles)?;
-    let mut heap = Vec::new();
-    allocation::try_reserve_exact(&mut heap, heap_len)?;
-    let mut any_null = false;
-    for (t, tile) in tiles_out.iter().enumerate() {
-        zscale[t] = tile.zscale;
-        zzero[t] = tile.zzero;
-        any_null |= tile.has_null;
-        let (cd, gz) = if tile.quantized {
-            ((tile.bytes.len(), heap.len()), (0, heap.len()))
-        } else {
-            ((0, heap.len()), (tile.bytes.len(), heap.len()))
-        };
-        cd_desc.push(cd);
-        gz_desc.push(gz);
-        heap.extend_from_slice(&tile.bytes);
-    }
+    let max_cd = tiles_out
+        .iter()
+        .filter(|tile| tile.quantized)
+        .map(|tile| tile.bytes.len())
+        .max()
+        .unwrap_or(0);
+    let max_gz = tiles_out
+        .iter()
+        .filter(|tile| !tile.quantized)
+        .map(|tile| tile.bytes.len())
+        .max()
+        .unwrap_or(0);
+    let any_null = tiles_out.iter().any(|tile| tile.has_null);
 
     // The float container's row layout is a fixed pair of 32-bit `P` descriptors, so
     // unlike the integer encoder it can't promote to `Q`; a heap or tile element count
     // past the 32-bit range can't be addressed, so refuse rather than write a truncated
     // descriptor and an unreadable file. Reachable only for an absurdly large image.
-    let max_nelem = cd_desc
-        .iter()
-        .chain(&gz_desc)
-        .map(|&(n, _)| n)
-        .max()
-        .unwrap_or(0);
-    if needs_wide(heap.len(), max_nelem) {
+    if needs_wide(heap_len, max_cd.max(max_gz)) {
         return Err(FitsError::DataUnitOverflow);
     }
 
@@ -342,27 +327,41 @@ fn compress_float_image(
     out.clear();
     let rows_len = ntiles.checked_mul(32).ok_or(FitsError::DataUnitOverflow)?;
     let output_len = rows_len
-        .checked_add(heap.len())
+        .checked_add(heap_len)
         .ok_or(FitsError::DataUnitOverflow)?;
     allocation::try_reserve_exact(out, output_len)?;
-    for t in 0..ntiles {
-        // Two 32-bit `P` descriptors (COMPRESSED_DATA, GZIP_COMPRESSED_DATA) then
-        // the ZSCALE/ZZERO doubles — the §10 quantized-float row layout.
-        push_pq_descriptor(out, false, cd_desc[t].0 as u64, cd_desc[t].1 as u64)?;
-        push_pq_descriptor(out, false, gz_desc[t].0 as u64, gz_desc[t].1 as u64)?;
-        out.extend_from_slice(&zscale[t].to_be_bytes());
-        out.extend_from_slice(&zzero[t].to_be_bytes());
+    out.resize(rows_len, 0);
+    for (tile_index, mut tile) in tiles_out.into_iter().enumerate() {
+        let row = tile_index * 32;
+        let offset = out.len() - rows_len;
+        let (cd_count, gz_count) = if tile.quantized {
+            (tile.bytes.len(), 0)
+        } else {
+            (0, tile.bytes.len())
+        };
+        write_pq_descriptor(
+            &mut out[row..row + 8],
+            false,
+            cd_count as u64,
+            offset as u64,
+        )?;
+        write_pq_descriptor(
+            &mut out[row + 8..row + 16],
+            false,
+            gz_count as u64,
+            offset as u64,
+        )?;
+        out[row + 16..row + 24].copy_from_slice(&tile.zscale.to_be_bytes());
+        out[row + 24..row + 32].copy_from_slice(&tile.zzero.to_be_bytes());
+        out.append(&mut tile.bytes);
     }
-    out.extend_from_slice(&heap);
 
-    let max_cd = cd_desc.iter().map(|&(n, _)| n).max().unwrap_or(0);
-    let max_gz = gz_desc.iter().map(|&(n, _)| n).max().unwrap_or(0);
     let mut h = Header::new();
     h.set("XTENSION", "BINTABLE")
         .comment("XTENSION", "binary table extension");
     h.set("BITPIX", 8).set("NAXIS", 2);
     h.set("NAXIS1", 32).set("NAXIS2", fits_i64(ntiles)?);
-    h.set("PCOUNT", fits_i64(heap.len())?).set("GCOUNT", 1);
+    h.set("PCOUNT", fits_i64(heap_len)?).set("GCOUNT", 1);
     h.set("TFIELDS", 4);
     h.set("TTYPE1", "COMPRESSED_DATA")
         .set("TFORM1", format!("1PB({max_cd})"));
@@ -424,13 +423,12 @@ impl TileCell {
         }
     }
 
-    /// Append the cell to the heap as big-endian bytes.
-    fn extend_heap(&self, heap: &mut Vec<u8>) {
+    fn append_to(self, out: &mut Vec<u8>) {
         match self {
-            TileCell::Bytes(b) => heap.extend_from_slice(b),
+            TileCell::Bytes(mut bytes) => out.append(&mut bytes),
             TileCell::I16(v) => {
-                for &x in v {
-                    heap.extend_from_slice(&x.to_be_bytes());
+                for x in v {
+                    out.extend_from_slice(&x.to_be_bytes());
                 }
             }
         }

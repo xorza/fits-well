@@ -9,7 +9,7 @@ use crate::error::Result;
 
 /// Encode `values` (one tile, `npix` non-negative mask pixels) as an IRAF PLIO
 /// line list — a port of cfitsio's `pl_p2li` with `xs = 1`. The returned i16 list
-/// round-trips through [`plio_decode_into`].
+/// round-trips through [`plio_decode_be_into`].
 pub(super) fn plio_encode(values: &[i64], npix: usize) -> Vec<i16> {
     // Header words (1-based lldst[1..=7]): the `-100` at index 3 selects the
     // 30-bit-length form the decoder reads from words 4/5; index 2 (=7) is the
@@ -109,9 +109,30 @@ pub(super) fn plio_encode(values: &[i64], npix: usize) -> Vec<i16> {
     ll
 }
 
-/// Decode an IRAF PLIO line list into `npix` mask values, written into `px` (cleared
-/// and zero-filled first; a reused buffer).
-pub(super) fn plio_decode_into(ll: &[i16], npix: usize, px: &mut Vec<i64>) -> Result<()> {
+pub(super) fn plio_decode_be_into(bytes: &[u8], npix: usize, px: &mut Vec<i64>) -> Result<()> {
+    if !bytes.len().is_multiple_of(2) {
+        return Err(FitsError::UnexpectedEof);
+    }
+    decode_words(BeWords(bytes), npix, px)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BeWords<'a>(&'a [u8]);
+
+impl BeWords<'_> {
+    fn len(self) -> usize {
+        self.0.len() / 2
+    }
+
+    fn get(self, index: usize) -> Option<i16> {
+        let start = index.checked_mul(2)?;
+        Some(i16::from_be_bytes(
+            self.0.get(start..start + 2)?.try_into().unwrap(),
+        ))
+    }
+}
+
+fn decode_words(ll: BeWords<'_>, npix: usize, px: &mut Vec<i64>) -> Result<()> {
     px.clear();
     px.resize(npix, 0);
     if npix == 0 {
@@ -119,7 +140,7 @@ pub(super) fn plio_decode_into(ll: &[i16], npix: usize, px: &mut Vec<i64>) -> Re
     }
     // List header: a positive ll[2] gives the length directly (older form); else
     // the length is a 30-bit value in ll[3..5] and instructions start at ll[1]+1.
-    let v3 = i32::from(*ll.get(2).ok_or(FitsError::UnexpectedEof)?);
+    let v3 = i32::from(ll.get(2).ok_or(FitsError::UnexpectedEof)?);
     let (lllen, llfirst) = if v3 > 0 {
         (v3 as usize, 4usize)
     } else {
@@ -147,7 +168,7 @@ pub(super) fn plio_decode_into(ll: &[i16], npix: usize, px: &mut Vec<i64>) -> Re
             ip += 1;
             continue;
         }
-        let word = ll[ip - 1];
+        let word = ll.get(ip - 1).ok_or(FitsError::UnexpectedEof)?;
         let word = word as u16 as i64;
         let opcode = word >> 12;
         let data = word & 4095;
@@ -176,7 +197,7 @@ pub(super) fn plio_decode_into(ll: &[i16], npix: usize, px: &mut Vec<i64>) -> Re
                 if ip >= lllen {
                     return Err(FitsError::UnexpectedEof);
                 }
-                let next = ll[ip] as u16 as i64;
+                let next = ll.get(ip).ok_or(FitsError::UnexpectedEof)? as u16 as i64;
                 pv = (next << 12) + data;
                 skip_word = true;
             }
@@ -209,8 +230,8 @@ pub(super) fn plio_decode_into(ll: &[i16], npix: usize, px: &mut Vec<i64>) -> Re
     Ok(())
 }
 
-fn nonnegative_word(ll: &[i16], index: usize) -> Result<usize> {
-    let value = *ll.get(index).ok_or(FitsError::UnexpectedEof)?;
+fn nonnegative_word(ll: BeWords<'_>, index: usize) -> Result<usize> {
+    let value = ll.get(index).ok_or(FitsError::UnexpectedEof)?;
     usize::try_from(value).map_err(|_| invalid_stream("negative list header value"))
 }
 

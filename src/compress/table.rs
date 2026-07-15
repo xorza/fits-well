@@ -11,18 +11,20 @@
 //!
 //! Variable-length (`P`/`Q`) source columns are not supported and are rejected.
 
+use super::DisjointSlice;
 use super::HduParts;
 use super::convert;
 use super::gzip;
 use super::map_tiles;
 use super::rice;
+use super::try_for_each_tile;
 use crate::allocation;
+use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
 use crate::keyword::key;
 use crate::table::BinTable;
-use crate::table::ColumnData;
 use crate::table::Tform;
 use crate::table::TformKind;
 
@@ -197,33 +199,29 @@ pub(crate) fn compress_table(
         compress_column(cm, m)
     })?;
 
-    // Per (chunk, column) Q descriptor (nelem, heap offset), and the heap.
-    let mut descriptors = allocation::try_zeroed((0i64, 0i64), tile_count)?;
     let heap_len = comps.iter().try_fold(0usize, |len, comp| {
         len.checked_add(comp.len())
             .ok_or(FitsError::DataUnitOverflow)
     })?;
-    let mut heap = Vec::new();
-    allocation::try_reserve_exact(&mut heap, heap_len)?;
-    for (i, comp) in comps.iter().enumerate() {
-        descriptors[i] = (fits_i64(comp.len())?, fits_i64(heap.len())?);
-        heap.extend_from_slice(comp);
-    }
-
-    // Data unit: nchunks rows of ncols 16-byte Q descriptors, then the heap.
     out.clear();
     let descriptor_bytes = tile_count
         .checked_mul(16)
         .ok_or(FitsError::DataUnitOverflow)?;
     let output_len = descriptor_bytes
-        .checked_add(heap.len())
+        .checked_add(heap_len)
         .ok_or(FitsError::DataUnitOverflow)?;
     allocation::try_reserve_exact(out, output_len)?;
-    for &(nelem, off) in &descriptors {
-        out.extend_from_slice(&nelem.to_be_bytes());
-        out.extend_from_slice(&off.to_be_bytes());
+    out.resize(descriptor_bytes, 0);
+    for (tile, mut comp) in comps.into_iter().enumerate() {
+        let offset = out.len() - descriptor_bytes;
+        write_pq_descriptor(
+            &mut out[tile * 16..tile * 16 + 16],
+            true,
+            comp.len() as u64,
+            offset as u64,
+        )?;
+        out.append(&mut comp);
     }
-    out.extend_from_slice(&heap);
 
     // Header: copy the original, then layer on the Z* keywords.
     let mut h = header.clone();
@@ -246,7 +244,7 @@ pub(crate) fn compress_table(
     }
     h.set("NAXIS1", fits_i64(compressed_row_len)?);
     h.set("NAXIS2", fits_i64(nchunks)?);
-    h.set("PCOUNT", fits_i64(heap.len())?);
+    h.set("PCOUNT", fits_i64(heap_len)?);
     h.set("GCOUNT", 1);
     Ok(h)
 }
@@ -308,41 +306,35 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
     let tile_count = nchunks
         .checked_mul(ncols)
         .ok_or(FitsError::DataUnitOverflow)?;
-    // Each column's per-chunk compressed cells.
-    let cells: Vec<Vec<ColumnData>> = (0..ncols)
-        .map(|ci| table.column_by_idx(ci)?.vla())
+    if table.nrows != nchunks {
+        return Err(FitsError::DataSizeMismatch {
+            expected: nchunks,
+            got: table.nrows,
+        });
+    }
+    let cells: Vec<_> = (0..ncols)
+        .map(|ci| table.column_by_idx(ci)?.vla_column())
         .collect::<Result<_>>()?;
 
-    // Decompress each (chunk, column) tile independently (the compute-bound step —
-    // parallel under the `parallel` feature), in flat `chunk * ncols + ci` order.
-    let decompressed = map_tiles(
+    let mut out = allocation::try_zeroed(0u8, total)?;
+    let sink = DisjointSlice::new(&mut out);
+    try_for_each_tile(
         tile_count,
-        || (),
-        |_unit, i| -> Result<Vec<u8>> {
+        TableDecodeScratch::default,
+        |scratch, i| -> Result<()> {
             let chunk = i / ncols;
-            let m = &metas[i % ncols];
-            let rows = rpt.min(nrows - chunk * rpt);
-            let cell = cells[i % ncols]
-                .get(chunk)
-                .ok_or(FitsError::UnexpectedEof)?;
-            decompress_column(convert::as_bytes(cell)?, m, rows)
+            let column = i % ncols;
+            let m = &metas[column];
+            let r0 = chunk * rpt;
+            let rows = rpt.min(nrows - r0);
+            let cell = cells[column].cell(chunk)?;
+            decompress_column_into(convert::byte_cell(cell)?, m, rows, scratch)?;
+            // SAFETY: chunks partition rows and column metadata partitions each row,
+            // so every tile writes a distinct in-bounds byte range.
+            unsafe { scatter_disjoint(&sink, &scratch.bytes, r0, rows, naxis1, m) };
+            Ok(())
         },
     )?;
-
-    // Transpose back: scatter each tile's column-major bytes into the output rows
-    // (disjoint byte ranges per (chunk, column), so the order is free to vary).
-    // `total` comes from untrusted `ZNAXIS2`/`ZNAXIS1`, so allocate it fallibly.
-    let mut out = allocation::try_zeroed(0u8, total)?;
-    for (i, cm) in decompressed.iter().enumerate() {
-        let chunk = i / ncols;
-        let m = &metas[i % ncols];
-        let r0 = chunk * rpt;
-        let rows = rpt.min(nrows - r0);
-        for r in 0..rows {
-            let dst = (r0 + r) * naxis1 + m.offset;
-            out[dst..dst + m.width].copy_from_slice(&cm[r * m.width..(r + 1) * m.width]);
-        }
-    }
 
     // Restore the original header: drop the Z* keywords, reinstate NAXIS/PCOUNT.
     let mut h = header.clone();
@@ -386,17 +378,29 @@ fn compress_column(cm: &[u8], m: &ColMeta) -> Result<Vec<u8>> {
     })
 }
 
-/// Decompress one tile's column cell back to `rows × width` column-major bytes.
-fn decompress_column(bytes: &[u8], m: &ColMeta, rows: usize) -> Result<Vec<u8>> {
+#[derive(Debug, Default)]
+struct TableDecodeScratch {
+    bytes: Vec<u8>,
+    ints: Vec<i64>,
+}
+
+fn decompress_column_into(
+    bytes: &[u8],
+    m: &ColMeta,
+    rows: usize,
+    scratch: &mut TableDecodeScratch,
+) -> Result<()> {
     // The decompressed column is exactly this many bytes; bound the gzip inflate at it
     // so a crafted cell can't expand unbounded (`rows × width ≤ ZNAXIS2 × ZNAXIS1`,
     // already checked non-overflowing by the caller).
     let expect = rows
         .checked_mul(m.width)
         .ok_or(FitsError::DataUnitOverflow)?;
-    let cm = match m.algo {
-        Algo::Gzip1 => gzip::gunzip(bytes, expect)?,
-        Algo::Gzip2 => gzip::unshuffle_bytes(&gzip::gunzip(bytes, expect)?, m.shuffle_width()),
+    match m.algo {
+        Algo::Gzip1 => scratch.bytes = gzip::gunzip(bytes, expect)?,
+        Algo::Gzip2 => {
+            scratch.bytes = gzip::unshuffle_bytes(&gzip::gunzip(bytes, expect)?, m.shuffle_width())
+        }
         Algo::Rice1 => {
             let bytepix = m.rice_bytepix().ok_or(FitsError::UnsupportedCompression {
                 name: format!("RICE_1 on a {} column", m.kind.code()),
@@ -404,17 +408,37 @@ fn decompress_column(bytes: &[u8], m: &ColMeta, rows: usize) -> Result<Vec<u8>> 
             let nelem = rows
                 .checked_mul(m.repeat)
                 .ok_or(FitsError::DataUnitOverflow)?;
-            let mut ints = Vec::new();
-            rice::rice_decode_into(bytes, nelem, bytepix, 32, &mut ints)?;
-            convert::i64_to_be(&ints, convert::bytepix_to_bitpix(bytepix))
+            rice::rice_decode_into(bytes, nelem, bytepix, 32, &mut scratch.ints)?;
+            convert::i64_to_be_into(
+                &scratch.ints,
+                convert::bytepix_to_bitpix(bytepix),
+                &mut scratch.bytes,
+            );
         }
-    };
-    if cm.len() != expect {
+    }
+    if scratch.bytes.len() != expect {
         return Err(FitsError::UnsupportedCompression {
             name: "decompressed column size mismatch".to_string(),
         });
     }
-    Ok(cm)
+    Ok(())
+}
+
+unsafe fn scatter_disjoint(
+    sink: &DisjointSlice<u8>,
+    bytes: &[u8],
+    r0: usize,
+    rows: usize,
+    row_len: usize,
+    m: &ColMeta,
+) {
+    assert_eq!(bytes.len(), rows * m.width, "decompressed column size");
+    for row in 0..rows {
+        let offset = (r0 + row) * row_len + m.offset;
+        // SAFETY: row chunks and column metadata partition the output, so this
+        // in-bounds range does not overlap any concurrently accessed range.
+        unsafe { sink.copy_from_slice(offset, &bytes[row * m.width..(row + 1) * m.width]) };
+    }
 }
 
 fn req_int(header: &Header, key: &'static str) -> Result<i64> {
