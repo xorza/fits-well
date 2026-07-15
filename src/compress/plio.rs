@@ -2,24 +2,36 @@
 //! `pl_l2pi`/`pl_p2li`). The compressed cell is an i16 instruction list (opcode in
 //! the top nibble, 12-bit data) that programs a run-length mask, tracking a
 //! current "high" value `pv`. PLIO is a *mask* codec: values must be non-negative
-//! and fit in 24 bits; the encoder clamps negatives to zero, matching cfitsio.
+//! and fit in 24 bits; the encoder rejects values outside that lossless domain.
 
 use crate::error::FitsError;
 use crate::error::Result;
 
 /// Encode `values` (one tile, `npix` non-negative mask pixels) as an IRAF PLIO
 /// line list — a port of cfitsio's `pl_p2li` with `xs = 1`. The returned i16 list
-/// round-trips through [`plio_decode_be_into`].
-pub(crate) fn plio_encode(values: &[i64], npix: usize) -> Vec<i16> {
+/// round-trips through [`plio_decode_be_into`]. Values outside `0..=0xFF_FFFF`
+/// are rejected because the format cannot preserve them.
+pub(crate) fn plio_encode(values: &[i64], npix: usize) -> Result<Vec<i16>> {
+    let values = values.get(..npix).ok_or(FitsError::DataSizeMismatch {
+        expected: npix,
+        got: values.len(),
+    })?;
+    if let Some((index, &value)) = values
+        .iter()
+        .enumerate()
+        .find(|&(_, value)| !(0..=0xFF_FFFF).contains(value))
+    {
+        return Err(FitsError::PlioValueOutOfRange { index, value });
+    }
+
     // Header words (1-based lldst[1..=7]): the `-100` at index 3 selects the
     // 30-bit-length form the decoder reads from words 4/5; index 2 (=7) is the
     // header length, so instructions begin at word 8.
     let mut ll: Vec<i16> = vec![0, 7, -100, 0, 0, 0, 0];
     if npix == 0 {
-        return ll;
+        return Ok(ll);
     }
-    // 1-based pixel access, clamping negative values to zero (PLIO masks are ≥ 0).
-    let pix = |i1: usize| values.get(i1 - 1).copied().unwrap_or(0).max(0);
+    let pix = |i1: usize| values[i1 - 1];
 
     let xs = 1usize;
     let xe = xs + npix - 1;
@@ -106,7 +118,7 @@ pub(crate) fn plio_encode(values: &[i64], npix: usize) -> Vec<i16> {
     let total = ll.len();
     ll[3] = (total % 32768) as i16;
     ll[4] = (total / 32768) as i16;
-    ll
+    Ok(ll)
 }
 
 pub(crate) fn plio_decode_be_into(bytes: &[u8], npix: usize, px: &mut Vec<i64>) -> Result<()> {

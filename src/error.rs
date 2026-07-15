@@ -88,9 +88,23 @@ pub enum FitsError {
     ConflictingWcsKeywords {
         detail: &'static str,
     },
+    /// A coordinate lies outside the mathematical domain of its WCS projection.
+    WcsProjectionDomain {
+        projection: &'static str,
+    },
+    /// An iterative WCS projection inversion did not reach a valid solution.
+    WcsNoConvergence {
+        projection: &'static str,
+    },
     /// A tiled-image compression algorithm or variant is not yet supported.
     UnsupportedCompression {
         name: String,
+    },
+    /// A PLIO tile sample cannot be represented losslessly in its unsigned 24-bit
+    /// value domain.
+    PlioValueOutOfRange {
+        index: usize,
+        value: i64,
     },
     /// A `TFORMn` value could not be parsed as a binary-table column format.
     InvalidTform {
@@ -197,9 +211,22 @@ impl fmt::Display for FitsError {
             FitsError::ConflictingWcsKeywords { detail } => {
                 write!(f, "conflicting WCS keywords: {detail}")
             }
+            FitsError::WcsProjectionDomain { projection } => {
+                write!(
+                    f,
+                    "coordinate is outside the {projection} projection domain"
+                )
+            }
+            FitsError::WcsNoConvergence { projection } => {
+                write!(f, "{projection} projection iteration did not converge")
+            }
             FitsError::UnsupportedCompression { name } => {
                 write!(f, "unsupported tiled compression: {name}")
             }
+            FitsError::PlioValueOutOfRange { index, value } => write!(
+                f,
+                "PLIO tile sample {index} has value {value}, outside 0..=16777215"
+            ),
             FitsError::InvalidTform { tform } => write!(f, "invalid column format {tform:?}"),
             FitsError::VariableLengthColumn { code } => write!(
                 f,
@@ -294,6 +321,22 @@ mod tests {
             }
             .to_string(),
             "table cell contains characters outside FITS restricted ASCII"
+        );
+        assert_eq!(
+            FitsError::WcsProjectionDomain { projection: "SIN" }.to_string(),
+            "coordinate is outside the SIN projection domain"
+        );
+        assert_eq!(
+            FitsError::WcsNoConvergence { projection: "ZPN" }.to_string(),
+            "ZPN projection iteration did not converge"
+        );
+        assert_eq!(
+            FitsError::PlioValueOutOfRange {
+                index: 3,
+                value: 1 << 24,
+            }
+            .to_string(),
+            "PLIO tile sample 3 has value 16777216, outside 0..=16777215"
         );
     }
 

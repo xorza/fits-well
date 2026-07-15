@@ -24,18 +24,18 @@ fn main() -> fits_well::Result<()> {
     // Pixel → world: the reference pixel (CRPIXn) maps to the reference sky
     // coordinate (CRVALn). This file's reference pixel is (256, 256).
     let mut reference = [0.0; 2];
-    wcs.pixel_to_world(&[256.0, 256.0], &mut reference);
+    wcs.pixel_to_world(&[256.0, 256.0], &mut reference)?;
     println!("pixel (256, 256) -> RA/Dec {reference:?}");
 
     // One pixel over in X moves a small amount across the sky.
     let mut neighbour = [0.0; 2];
-    wcs.pixel_to_world(&[257.0, 256.0], &mut neighbour);
+    wcs.pixel_to_world(&[257.0, 256.0], &mut neighbour)?;
     println!("pixel (257, 256) -> RA/Dec {neighbour:?}");
 
     // World → pixel is the inverse — mapping the reference coordinate back lands on
     // the reference pixel again.
     let mut pixel = [0.0; 2];
-    wcs.world_to_pixel(&reference, &mut pixel);
+    wcs.world_to_pixel(&reference, &mut pixel)?;
     println!("that RA/Dec       -> pixel {pixel:?}");
 
     Ok(())

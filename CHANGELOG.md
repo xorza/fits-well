@@ -19,10 +19,12 @@
   `unsupported_axes`) are now private so they cannot invalidate derived transforms.
   Read them through the immutable metadata returned by `Wcs::view`.
 - `Wcs::pixel_to_world` and `Wcs::world_to_pixel` now write into caller-owned
-  slices instead of returning `Vec<f64>` values.
+  slices instead of returning `Vec<f64>` values, and return `Result<()>` so
+  projection-domain and iterative-convergence failures cannot be ignored.
 - `FitsError::DataUnitTooLarge::bytes` changed from `usize` to `u64`. The
-  `TypeMismatch` and `InvalidAscii` variants were added; exhaustive matches on
-  `FitsError` must handle them.
+  `TypeMismatch`, `InvalidAscii`, `WcsProjectionDomain`, `WcsNoConvergence`, and
+  `PlioValueOutOfRange` variants were added; exhaustive matches on `FitsError`
+  must handle them.
 
 ### Added
 
@@ -71,7 +73,11 @@
 - Non-finite ASCII numeric cells require a valid, width-fitting null marker instead
   of writing a blank field that reads back as zero.
 - WCS parsing rejects conflicting CD/PC/CROTA conventions, and Mollweide transforms
-  now return finite canonical coordinates at the poles.
+  now return finite canonical coordinates at the poles. WCS transforms reject
+  out-of-domain coordinates and failed Newton iterations instead of clamping them
+  or returning an unconverged estimate.
+- PLIO compression rejects values outside its lossless `0..=0xFF_FFFF` mask domain
+  instead of silently clamping negative samples or truncating large ones.
 - TT-to-UTC/UT1 conversion now selects leap seconds at the correct UTC instant.
   Signed Gregorian years use floor division, ISO-8601 parsing requires the FITS year
   and `hh:mm:ss` forms, and GTI endpoints must have equal lengths.
