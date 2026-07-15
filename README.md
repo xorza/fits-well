@@ -141,8 +141,10 @@ use fits_well::FitsReader;
 let reader = FitsReader::open(File::open("wcs_tan.fits")?)?;
 let wcs = reader.hdus()[0].header.wcs(None)?; // None = the primary WCS
 
-let sky = wcs.pixel_to_world(&[256.0, 256.0]); // RA/Dec at the reference pixel
-let pixel = wcs.world_to_pixel(&sky);           // and back again
+let mut sky = [0.0; 2];
+wcs.pixel_to_world(&[256.0, 256.0], &mut sky); // RA/Dec at the reference pixel
+let mut pixel = [0.0; 2];
+wcs.world_to_pixel(&sky, &mut pixel); // and back again
 println!("{sky:?} -> {pixel:?}");
 # Ok::<(), fits_well::FitsError>(())
 ```
