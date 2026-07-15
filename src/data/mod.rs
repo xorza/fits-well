@@ -162,6 +162,67 @@ impl ImageData {
     }
 }
 
+fn map_be<T, O, const N: usize>(
+    bytes: &[u8],
+    decode: impl Fn([u8; N]) -> T,
+    map: impl Fn(T) -> O,
+) -> Vec<O> {
+    assert_eq!(bytes.len() % N, 0, "whole big-endian elements");
+    bytes
+        .chunks_exact(N)
+        .map(|chunk| {
+            map(decode(
+                chunk.try_into().expect("chunk has the element width"),
+            ))
+        })
+        .collect()
+}
+
+fn physical_from_be<O: PhysicalOut>(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Vec<O> {
+    let Scaling {
+        bscale,
+        bzero,
+        blank,
+    } = *scaling;
+    let scale = |x: f64| O::from_f64(bzero + bscale * x);
+    let scale_int = |x: i64| {
+        if blank == Some(x) {
+            O::from_f64(f64::NAN)
+        } else {
+            scale(x as f64)
+        }
+    };
+    match bitpix {
+        Bitpix::U8 => bytes.iter().map(|&x| scale_int(x as i64)).collect(),
+        Bitpix::I16 => map_be(bytes, i16::from_be_bytes, |x| scale_int(x as i64)),
+        Bitpix::I32 => map_be(bytes, i32::from_be_bytes, |x| scale_int(x as i64)),
+        Bitpix::I64 => map_be(bytes, i64::from_be_bytes, scale_int),
+        Bitpix::F32 => map_be(bytes, f32::from_be_bytes, |x| scale(x as f64)),
+        Bitpix::F64 => map_be(bytes, f64::from_be_bytes, scale),
+    }
+}
+
+fn unsigned_from_be(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Option<UnsignedView> {
+    if scaling.blank.is_some() {
+        return None;
+    }
+    match SampleType::from_scaling(bitpix, scaling) {
+        SampleType::I8 => Some(UnsignedView::I8(
+            bytes.iter().map(|&x| (x ^ 0x80) as i8).collect(),
+        )),
+        SampleType::U16 => Some(UnsignedView::U16(map_be(bytes, i16::from_be_bytes, |x| {
+            (x as u16) ^ 0x8000
+        }))),
+        SampleType::U32 => Some(UnsignedView::U32(map_be(bytes, i32::from_be_bytes, |x| {
+            (x as u32) ^ 0x8000_0000
+        }))),
+        SampleType::U64 => Some(UnsignedView::U64(map_be(bytes, i64::from_be_bytes, |x| {
+            (x as u64) ^ 0x8000_0000_0000_0000
+        }))),
+        _ => None,
+    }
+}
+
 /// A borrowed, host-endian view of an image's samples, tagged by `BITPIX` — the
 /// zero-/low-copy counterpart to the owned [`ImageData`], returned by
 /// [`crate::FitsReader::read_image_view`]. Match it exactly like [`ImageData`], but
@@ -256,7 +317,8 @@ pub(crate) fn swap_into_words(src: &[u8], bitpix: Bitpix, words: &mut Vec<u64>) 
 }
 
 /// Reinterpret the first `nbytes` of a `u64`-backed host-endian scratch (written by
-/// [`swap_into_words`]) as a typed [`ImageView`]. `nbytes` is a whole number of
+/// [`swap_into_words`] or the compressed-image decoder) as a typed [`ImageView`].
+/// `nbytes` is a whole number of
 /// `bitpix` elements and `<= words.len() * 8`.
 pub(crate) fn view_words(words: &[u64], bitpix: Bitpix, nbytes: usize) -> ImageView<'_> {
     let count = nbytes / bitpix.elem_size();
@@ -274,41 +336,6 @@ pub(crate) fn view_words(words: &[u64], bitpix: Bitpix, nbytes: usize) -> ImageV
             Bitpix::F64 => ImageView::F64(std::slice::from_raw_parts(p as *const f64, count)),
         }
     }
-}
-
-/// The already-host-endian samples reinterpreted as their raw bytes — every element
-/// type is `Pod` (no padding, all bit patterns valid), so the byte view is sound.
-#[cfg(feature = "compression")]
-fn samples_as_bytes(data: &ImageData) -> &[u8] {
-    // SAFETY: a typed sample slice viewed as its own bytes (read-only); length is the
-    // element count times the element width.
-    unsafe {
-        let (ptr, len) = match data {
-            ImageData::U8(v) => return v,
-            ImageData::I16(v) => (v.as_ptr() as *const u8, v.len() * 2),
-            ImageData::I32(v) => (v.as_ptr() as *const u8, v.len() * 4),
-            ImageData::I64(v) => (v.as_ptr() as *const u8, v.len() * 8),
-            ImageData::F32(v) => (v.as_ptr() as *const u8, v.len() * 4),
-            ImageData::F64(v) => (v.as_ptr() as *const u8, v.len() * 8),
-        };
-        std::slice::from_raw_parts(ptr, len)
-    }
-}
-
-/// Copy already-host-endian `samples` (a decompressed image) into the `u64`-backed
-/// `words` scratch so [`view_words`] can hand back a view — the compressed-image
-/// path, whose pixels have no on-disk bytes to swap. Returns the byte length written.
-#[cfg(feature = "compression")]
-pub(crate) fn copy_samples_into_words(samples: &ImageData, words: &mut Vec<u64>) -> usize {
-    let bytes = samples_as_bytes(samples);
-    words.resize(bytes.len().div_ceil(8), 0);
-    // SAFETY: `words` is `u64`-backed (8-aligned) with room for `bytes.len()`; the
-    // reinterpreted destination is write-only and does not alias `samples`.
-    unsafe {
-        std::slice::from_raw_parts_mut(words.as_mut_ptr() as *mut u8, bytes.len())
-            .copy_from_slice(bytes);
-    }
-    bytes.len()
 }
 
 /// An image read from an HDU, in whichever form the reader could give cheaply —
@@ -375,13 +402,12 @@ impl<'a> RawImage<'a> {
         }
     }
 
-    /// The host-endian samples. For a plain image this byte-swaps the on-disk bytes
-    /// into an owned buffer; a compressed image's pixels are already decoded (cloned
-    /// out here).
-    pub fn decode(&self) -> ImageData {
-        match &self.data {
+    /// Consume the image and return its host-endian samples. Plain-image bytes are
+    /// decoded into an owned buffer; a compressed image moves out its decoded plane.
+    pub fn decode(self) -> ImageData {
+        match self.data {
             ImageBytes::Raw(bytes) => ImageData::decode(bytes, self.bitpix),
-            ImageBytes::Decoded(samples) => samples.clone(),
+            ImageBytes::Decoded(samples) => samples,
         }
     }
 
@@ -410,7 +436,7 @@ impl<'a> RawImage<'a> {
     /// The physical-plane values: `BZERO + BSCALE × sample`, `BLANK` → `NaN` (§3.4).
     pub fn physical(&self) -> Vec<f64> {
         match &self.data {
-            ImageBytes::Raw(bytes) => ImageData::decode(bytes, self.bitpix).physical(&self.scaling),
+            ImageBytes::Raw(bytes) => physical_from_be(bytes, self.bitpix, &self.scaling),
             ImageBytes::Decoded(samples) => samples.physical(&self.scaling),
         }
     }
@@ -424,9 +450,7 @@ impl<'a> RawImage<'a> {
     /// e.g. large `BITPIX = 64` integers or fine `BSCALE`/`BZERO` past `f32`'s range.
     pub fn physical_f32(&self) -> Vec<f32> {
         match &self.data {
-            ImageBytes::Raw(bytes) => {
-                ImageData::decode(bytes, self.bitpix).physical_f32(&self.scaling)
-            }
+            ImageBytes::Raw(bytes) => physical_from_be(bytes, self.bitpix, &self.scaling),
             ImageBytes::Decoded(samples) => samples.physical_f32(&self.scaling),
         }
     }
@@ -435,7 +459,7 @@ impl<'a> RawImage<'a> {
     /// convention; `None` otherwise — same rule as [`Image::unsigned`].
     pub fn unsigned(&self) -> Option<UnsignedView> {
         match &self.data {
-            ImageBytes::Raw(bytes) => ImageData::decode(bytes, self.bitpix).unsigned(&self.scaling),
+            ImageBytes::Raw(bytes) => unsigned_from_be(bytes, self.bitpix, &self.scaling),
             ImageBytes::Decoded(samples) => samples.unsigned(&self.scaling),
         }
     }
@@ -786,8 +810,18 @@ impl RawImage<'_> {
 
     /// The samples as a typed N-d [`ImageArray`], in FITS axis order. Decodes into an
     /// owned buffer first (the array then owns it, no further copy).
-    pub fn to_ndarray(&self) -> ImageArray {
-        self.decode().into_ndarray(&self.shape)
+    pub fn into_ndarray(self) -> ImageArray {
+        let RawImage {
+            shape,
+            bitpix,
+            data,
+            ..
+        } = self;
+        let samples = match data {
+            ImageBytes::Raw(bytes) => ImageData::decode(bytes, bitpix),
+            ImageBytes::Decoded(samples) => samples,
+        };
+        samples.into_ndarray(&shape)
     }
 }
 

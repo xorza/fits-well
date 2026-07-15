@@ -74,7 +74,7 @@ impl RandomGroups {
             gcount,
             pcount,
             bitpix,
-            array_scaling: Scaling::from_header(header)?,
+            array_scaling: header.scaling()?,
             param_scaling,
             samples,
         };

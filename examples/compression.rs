@@ -38,11 +38,9 @@ fn main() -> fits_well::Result<()> {
     let images = reader.image_indices();
     println!("image HDUs: {images:?}"); // [1] — the compressed image extension
     let restored = reader.read_image(images[0])?;
-    println!(
-        "restored {:?}, lossless = {}",
-        restored.shape,
-        restored.decode() == image.samples
-    );
+    let restored_shape = restored.shape.clone();
+    let lossless = restored.decode() == image.samples;
+    println!("restored {:?}, lossless = {}", restored_shape, lossless);
 
     Ok(())
 }

@@ -59,11 +59,11 @@ fn main() -> fits_well::Result<()> {
     // and move (a BITPIX=8 image's bytes come back copy-free via `raw.u8()`).
     let raw = reader.read_image(images[0])?;
     println!("hdu 0: shape {:?}, {:?}", raw.shape, raw.bitpix);
+    // `physical()` applies BSCALE/BZERO and maps any BLANK value to NaN.
+    println!("  physical {:?}", raw.physical());
     if let ImageData::I16(pixels) = raw.decode() {
         println!("  pixels   {pixels:?}");
     }
-    // `physical()` applies BSCALE/BZERO and maps any BLANK value to NaN.
-    println!("  physical {:?}", raw.physical());
 
     // `read_image_view` byte-swaps into a *caller-owned* scratch instead of allocating
     // a fresh buffer per call — so a loop over many images pays the output allocation

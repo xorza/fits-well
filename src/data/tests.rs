@@ -362,6 +362,83 @@ fn float_physical_scales_and_passes_nan_through() {
 }
 
 #[test]
+fn raw_image_fuses_big_endian_physical_conversion() {
+    let scaling = Scaling {
+        bscale: 2.0,
+        bzero: 10.0,
+        blank: Some(-2),
+    };
+    let cases = [
+        (ImageData::U8(vec![1, 2]), vec![12.0, 14.0]),
+        (ImageData::I16(vec![-2, 3]), vec![f64::NAN, 16.0]),
+        (ImageData::I32(vec![-2, 4]), vec![f64::NAN, 18.0]),
+        (ImageData::I64(vec![-2, 5]), vec![f64::NAN, 20.0]),
+        (ImageData::F32(vec![1.5, -2.0]), vec![13.0, 6.0]),
+        (ImageData::F64(vec![2.25, -3.0]), vec![14.5, 4.0]),
+    ];
+    for (samples, expected) in cases {
+        let bytes = encoded(&samples);
+        let raw = RawImage::raw(vec![2], samples.bitpix(), scaling, &bytes);
+        let physical = raw.physical();
+        for (got, want) in physical.iter().zip(&expected) {
+            assert!(
+                got == want || got.is_nan() && want.is_nan(),
+                "{:?}: got {physical:?}, expected {expected:?}",
+                samples.bitpix()
+            );
+        }
+        let physical_f32 = raw.physical_f32();
+        for (got, want) in physical_f32.iter().zip(&expected) {
+            assert!(
+                *got == *want as f32 || got.is_nan() && want.is_nan(),
+                "{:?}: got {physical_f32:?}, expected {expected:?}",
+                samples.bitpix()
+            );
+        }
+    }
+}
+
+#[test]
+fn raw_image_fuses_big_endian_unsigned_conversion() {
+    let cases = [
+        (
+            ImageData::U8(vec![0, 128, 255]),
+            -128.0,
+            UnsignedView::I8(vec![-128, 0, 127]),
+        ),
+        (
+            ImageData::I16(vec![i16::MIN, 0, i16::MAX]),
+            U16_OFFSET,
+            UnsignedView::U16(vec![0, 32_768, u16::MAX]),
+        ),
+        (
+            ImageData::I32(vec![i32::MIN, 0, i32::MAX]),
+            U32_OFFSET,
+            UnsignedView::U32(vec![0, 2_147_483_648, u32::MAX]),
+        ),
+        (
+            ImageData::I64(vec![i64::MIN, 0, i64::MAX]),
+            U64_OFFSET,
+            UnsignedView::U64(vec![0, 9_223_372_036_854_775_808, u64::MAX]),
+        ),
+    ];
+    for (samples, bzero, expected) in cases {
+        let bytes = encoded(&samples);
+        let raw = RawImage::raw(
+            vec![3],
+            samples.bitpix(),
+            Scaling {
+                bscale: 1.0,
+                bzero,
+                blank: None,
+            },
+            &bytes,
+        );
+        assert_eq!(raw.unsigned(), Some(expected));
+    }
+}
+
+#[test]
 fn sample_type_resolves_unsigned_and_signed_byte_conventions() {
     let s = |bscale: f64, bzero: f64| Scaling {
         bscale,

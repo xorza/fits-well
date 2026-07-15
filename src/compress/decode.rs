@@ -23,10 +23,14 @@ use super::map_tiles;
 use super::{DitherMethod, ImageCodec};
 use super::{gzip, hcompress, plio, quantize, rice};
 
+use crate::allocation;
 use crate::bitpix::Bitpix;
 use crate::data::Image;
 use crate::data::ImageData;
+use crate::data::ImageView;
 use crate::data::Scaling;
+use crate::data::shape_product;
+use crate::data::view_words;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -34,73 +38,161 @@ use crate::keyword::key;
 use crate::table::BinTable;
 use crate::table::ColumnData;
 
+#[derive(Debug)]
+struct ImageLayout {
+    bitpix: Bitpix,
+    dims: Vec<usize>,
+    total: usize,
+    codec: ImageCodec,
+    scaling: Scaling,
+}
+
+impl ImageLayout {
+    fn from_header(header: &Header) -> Result<ImageLayout> {
+        if header.get_logical("ZIMAGE") != Some(true) {
+            return Err(FitsError::NotCompressedImage);
+        }
+        let bitpix = Bitpix::from_code(
+            header
+                .get_integer("ZBITPIX")
+                .ok_or(FitsError::MissingKeyword { name: "ZBITPIX" })?,
+        )?;
+        let codec = ImageCodec::parse(
+            header
+                .get_text("ZCMPTYPE")
+                .ok_or(FitsError::MissingKeyword { name: "ZCMPTYPE" })?,
+        )?;
+        let znaxis = header
+            .get_integer("ZNAXIS")
+            .ok_or(FitsError::MissingKeyword { name: "ZNAXIS" })?;
+        if !(0..=999).contains(&znaxis) {
+            return Err(FitsError::KeywordOutOfRange { name: "ZNAXIS" });
+        }
+        let dims = read_axes(header, znaxis as usize)?;
+        let total = shape_product(&dims)?;
+        Ok(ImageLayout {
+            bitpix,
+            dims,
+            total,
+            codec,
+            scaling: header.scaling()?,
+        })
+    }
+}
+
+#[derive(Debug)]
+enum DecodeBuffer<'a> {
+    U8(&'a mut [u8]),
+    I16(&'a mut [i16]),
+    I32(&'a mut [i32]),
+    I64(&'a mut [i64]),
+    F32(&'a mut [f32]),
+    F64(&'a mut [f64]),
+}
+
+impl<'a> DecodeBuffer<'a> {
+    fn from_samples(samples: &'a mut ImageData) -> DecodeBuffer<'a> {
+        match samples {
+            ImageData::U8(values) => DecodeBuffer::U8(values),
+            ImageData::I16(values) => DecodeBuffer::I16(values),
+            ImageData::I32(values) => DecodeBuffer::I32(values),
+            ImageData::I64(values) => DecodeBuffer::I64(values),
+            ImageData::F32(values) => DecodeBuffer::F32(values),
+            ImageData::F64(values) => DecodeBuffer::F64(values),
+        }
+    }
+
+    fn from_words(words: &'a mut [u64], bitpix: Bitpix, count: usize) -> DecodeBuffer<'a> {
+        assert!(
+            count <= words.len().saturating_mul(8) / bitpix.elem_size(),
+            "decode scratch must hold every sample"
+        );
+        let ptr = words.as_mut_ptr() as *mut u8;
+        // SAFETY: the assertion proves the initialized byte capacity; u64 alignment
+        // satisfies every FITS scalar type, whose bit patterns are all valid.
+        unsafe {
+            match bitpix {
+                Bitpix::U8 => DecodeBuffer::U8(std::slice::from_raw_parts_mut(ptr, count)),
+                Bitpix::I16 => {
+                    DecodeBuffer::I16(std::slice::from_raw_parts_mut(ptr as *mut i16, count))
+                }
+                Bitpix::I32 => {
+                    DecodeBuffer::I32(std::slice::from_raw_parts_mut(ptr as *mut i32, count))
+                }
+                Bitpix::I64 => {
+                    DecodeBuffer::I64(std::slice::from_raw_parts_mut(ptr as *mut i64, count))
+                }
+                Bitpix::F32 => {
+                    DecodeBuffer::F32(std::slice::from_raw_parts_mut(ptr as *mut f32, count))
+                }
+                Bitpix::F64 => {
+                    DecodeBuffer::F64(std::slice::from_raw_parts_mut(ptr as *mut f64, count))
+                }
+            }
+        }
+    }
+}
+
 /// Decompress a tiled-image `BINTABLE` into the full [`Image`] it encodes.
 pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Image> {
-    if header.get_logical("ZIMAGE") != Some(true) {
-        return Err(FitsError::NotCompressedImage);
+    let layout = ImageLayout::from_header(header)?;
+    let mut samples = zeroed_samples(layout.bitpix, layout.total)?;
+    if layout.total != 0 {
+        decode_image_into(
+            header,
+            table,
+            &layout,
+            DecodeBuffer::from_samples(&mut samples),
+        )?;
     }
-    let zbitpix = Bitpix::from_code(
-        header
-            .get_integer("ZBITPIX")
-            .ok_or(FitsError::MissingKeyword { name: "ZBITPIX" })?,
-    )?;
-    let is_float = zbitpix.is_float();
-    let cmptype = header
-        .get_text("ZCMPTYPE")
-        .ok_or(FitsError::MissingKeyword { name: "ZCMPTYPE" })?
-        .to_string();
+    Ok(Image {
+        shape: layout.dims,
+        samples,
+        scaling: layout.scaling,
+    })
+}
 
-    let znaxis = header
-        .get_integer("ZNAXIS")
-        .ok_or(FitsError::MissingKeyword { name: "ZNAXIS" })?;
-    // `ZNAXIS` is untrusted; cap it like the uncompressed `NAXIS` path (§4.4.1) so a
-    // negative value can't wrap through `as usize` and a huge one can't drive the
-    // per-axis keyword loops below.
-    if !(0..=999).contains(&znaxis) {
-        return Err(FitsError::KeywordOutOfRange { name: "ZNAXIS" });
-    }
-    let znaxis = znaxis as usize;
-    let dims = read_axes(header, znaxis)?;
-    // A `ZNAXIS = 0` ZIMAGE has no data array (as an uncompressed `NAXIS = 0` does).
-    // Return empty before building the geometry, which would otherwise size `total`
-    // as the empty product (1) and fabricate a phantom one-pixel tile.
-    if dims.is_empty() {
-        return Ok(Image {
-            shape: dims,
-            samples: zeroed_samples(zbitpix, 0)?,
-            scaling: Scaling::from_header(header)?,
-        });
-    }
-    // `ZNAXISn` are untrusted; guard the product up front — before reading any tile
-    // — so a wrapped value can't mis-size the output buffer below (the un-wrapped
-    // strides would then scatter out of bounds). Mirrors `hdu::data_extent`.
-    let total = dims
-        .iter()
-        .try_fold(1usize, |acc, &n| acc.checked_mul(n))
+pub(crate) fn decompress_image_into_words<'a>(
+    header: &Header,
+    table: &BinTable,
+    words: &'a mut Vec<u64>,
+) -> Result<ImageView<'a>> {
+    let layout = ImageLayout::from_header(header)?;
+    let nbytes = layout
+        .total
+        .checked_mul(layout.bitpix.elem_size())
         .ok_or(FitsError::DataUnitOverflow)?;
-    if total == 0 {
-        return Ok(Image {
-            shape: dims,
-            samples: zeroed_samples(zbitpix, 0)?,
-            scaling: Scaling::from_header(header)?,
-        });
+    allocation::try_resize(words, nbytes.div_ceil(8), 0)?;
+    if layout.total != 0 {
+        let output = DecodeBuffer::from_words(words, layout.bitpix, layout.total);
+        decode_image_into(header, table, &layout, output)?;
     }
-    let tiles: Vec<usize> = (1..=znaxis)
+    Ok(view_words(words, layout.bitpix, nbytes))
+}
+
+fn decode_image_into(
+    header: &Header,
+    table: &BinTable,
+    layout: &ImageLayout,
+    output: DecodeBuffer<'_>,
+) -> Result<()> {
+    let is_float = layout.bitpix.is_float();
+    let tiles: Vec<usize> = (1..=layout.dims.len())
         .map(|i| {
             header
                 .get_integer(key!("ZTILE{i}").as_str())
                 .map(|v| v.max(1) as usize)
-                .unwrap_or(if i == 1 { dims[0] } else { 1 })
+                .unwrap_or(if i == 1 { layout.dims[0] } else { 1 })
         })
         .collect();
 
-    let rice = rice::rice_params(header, zbitpix);
+    let rice = rice::rice_params(header, layout.bitpix);
     // Float pixels are quantized to integers of `bytepix` bytes; decode the tile
     // as that integer type, then dequantize. Integer images decode as `zbitpix`.
     let int_bitpix = if is_float {
         bytepix_to_bitpix(rice.bytepix)
     } else {
-        zbitpix
+        layout.bitpix
     };
 
     // Float quantization: NO_DITHER, SUBTRACTIVE_DITHER_1, and SUBTRACTIVE_DITHER_2.
@@ -141,17 +233,16 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
     let zscale = read_f64_column(table, "ZSCALE")?;
     let zzero = read_f64_column(table, "ZZERO")?;
 
-    let geom = TileGeometry::new(&dims, &tiles);
+    let geom = TileGeometry::new(&layout.dims, &tiles);
     let ntiles = geom.ntiles();
-    let mut samples = zeroed_samples(zbitpix, total)?;
 
     // Decode and scatter each tile in one fused pass — parallel under the `parallel`
     // feature, where tiles write disjoint regions of `samples` concurrently (they
     // partition the image). Each value is narrowed to `ZBITPIX` as it lands, so there
     // is no whole-image `i64`/`f64` intermediate and no separate serial scatter tail.
     let ctx = DecodeCtx {
-        codec: ImageCodec::parse(&cmptype)?,
-        zbitpix,
+        codec: layout.codec,
+        zbitpix: layout.bitpix,
         int_bitpix,
         params,
     };
@@ -171,9 +262,13 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
             };
             decode_float_tile_into(&ctx, cols, s.nelem(), dq, out, ints)
         };
-        match &mut samples {
-            ImageData::F32(o) => run_decode_scatter(ntiles, &geom, o, decode, |v| v as f32)?,
-            ImageData::F64(o) => run_decode_scatter(ntiles, &geom, o, decode, |v| v)?,
+        match output {
+            DecodeBuffer::F32(out) => {
+                run_decode_scatter(ntiles, &geom, out, decode, |value| value as f32)?
+            }
+            DecodeBuffer::F64(out) => {
+                run_decode_scatter(ntiles, &geom, out, decode, |value| value)?
+            }
             _ => unreachable!("a float ZBITPIX yields a float sample buffer"),
         }
     } else {
@@ -185,19 +280,23 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
             };
             decode_one_tile_into(&ctx, cols, s.nelem(), out)
         };
-        match &mut samples {
-            ImageData::U8(o) => run_decode_scatter(ntiles, &geom, o, decode, |v| v as u8)?,
-            ImageData::I16(o) => run_decode_scatter(ntiles, &geom, o, decode, |v| v as i16)?,
-            ImageData::I32(o) => run_decode_scatter(ntiles, &geom, o, decode, |v| v as i32)?,
-            ImageData::I64(o) => run_decode_scatter(ntiles, &geom, o, decode, |v| v)?,
+        match output {
+            DecodeBuffer::U8(out) => {
+                run_decode_scatter(ntiles, &geom, out, decode, |value| value as u8)?
+            }
+            DecodeBuffer::I16(out) => {
+                run_decode_scatter(ntiles, &geom, out, decode, |value| value as i16)?
+            }
+            DecodeBuffer::I32(out) => {
+                run_decode_scatter(ntiles, &geom, out, decode, |value| value as i32)?
+            }
+            DecodeBuffer::I64(out) => {
+                run_decode_scatter(ntiles, &geom, out, decode, |value| value)?
+            }
             _ => unreachable!("an integer ZBITPIX yields an integer sample buffer"),
         }
     }
-    Ok(Image {
-        shape: dims,
-        samples,
-        scaling: Scaling::from_header(header)?,
-    })
+    Ok(())
 }
 
 /// Decode every tile and scatter its values into `out` at the tile's positions,
