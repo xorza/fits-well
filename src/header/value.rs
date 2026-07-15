@@ -98,7 +98,7 @@ impl From<String> for Value {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::header::value::*;
 
     #[test]
     fn accessors_only_match_their_own_variant() {

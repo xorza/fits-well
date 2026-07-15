@@ -9,20 +9,20 @@
 
 use std::sync::OnceLock;
 
-use super::DitherMethod;
+use crate::compress::DitherMethod;
 
 const N_RANDOM: usize = 10000;
 const N_RESERVED_VALUES: f64 = 10.0;
 const INT_MAX: f64 = 2147483647.0;
 
 /// Quantized integer reserved to mark an undefined (null/NaN) pixel.
-pub(super) const NULL_VALUE: i32 = -2147483647;
+pub(crate) const NULL_VALUE: i32 = -2147483647;
 /// Quantized integer reserved by `SUBTRACTIVE_DITHER_2` to mark exact zero.
-pub(super) const ZERO_VALUE: i32 = -2147483646;
+pub(crate) const ZERO_VALUE: i32 = -2147483646;
 
 /// The shared dither sequence (cfitsio `fits_init_randoms`): a Park–Miller
 /// minstd generator (`a = 16807`, `m = 2³¹−1`) seeded at 1, scaled to `[0, 1)`.
-pub(super) fn random_values() -> &'static [f32] {
+pub(crate) fn random_values() -> &'static [f32] {
     static VALUES: OnceLock<Vec<f32>> = OnceLock::new();
     VALUES.get_or_init(|| {
         let a = 16807.0f64;
@@ -43,14 +43,14 @@ pub(super) fn random_values() -> &'static [f32] {
 /// `(row − 1) mod N_RANDOM` → the starting index into [`random_values`] for a
 /// tile, and the first `nextrand` cursor (cfitsio's `iseed`/`nextrand` setup).
 #[derive(Debug)]
-pub(super) struct Dither {
+pub(crate) struct Dither {
     rand: &'static [f32],
     iseed: usize,
     nextrand: usize,
 }
 
 impl Dither {
-    pub(super) fn new(irow: i64) -> Self {
+    pub(crate) fn new(irow: i64) -> Self {
         let rand = random_values();
         let iseed = (irow - 1).rem_euclid(N_RANDOM as i64) as usize;
         let nextrand = (rand[iseed] * 500.0) as usize;
@@ -62,7 +62,7 @@ impl Dither {
     }
 
     /// The current dither value, then advance the cursor (cfitsio's wrap logic).
-    pub(super) fn next(&mut self) -> f64 {
+    pub(crate) fn next(&mut self) -> f64 {
         let r = self.rand[self.nextrand] as f64;
         self.nextrand += 1;
         if self.nextrand == N_RANDOM {
@@ -80,7 +80,7 @@ impl Dither {
 /// `f = (i − dither + 0.5)·scale + zero`, with reserved integers handled first:
 /// a value equal to `zblank` becomes `NaN`, and (for `Subtractive2`) [`ZERO_VALUE`]
 /// becomes exactly `0.0`. The dither cursor advances per pixel regardless.
-pub(super) fn dequantize_into(
+pub(crate) fn dequantize_into(
     ints: &[i64],
     scale: f64,
     zero: f64,
@@ -216,11 +216,11 @@ fn proper_median(v: &mut [f64]) -> f64 {
 /// A quantized tile: the integer plane plus the `BSCALE`/`BZERO` (`ZSCALE`/`ZZERO`)
 /// that invert it, and whether any pixel was a null (mapped to [`NULL_VALUE`]).
 #[derive(Debug)]
-pub(super) struct Quantized {
-    pub(super) idata: Vec<i32>,
-    pub(super) bscale: f64,
-    pub(super) bzero: f64,
-    pub(super) has_null: bool,
+pub(crate) struct Quantized {
+    pub(crate) idata: Vec<i32>,
+    pub(crate) bscale: f64,
+    pub(crate) bzero: f64,
+    pub(crate) has_null: bool,
 }
 
 /// Quantize a float tile (cfitsio `fits_quantize_float`). `qlevel` is the noise
@@ -229,7 +229,7 @@ pub(super) struct Quantized {
 /// `Subtractive2`, exact zeros become [`ZERO_VALUE`]. Returns `None` when the tile
 /// can't be quantized (no finite data, constant data, or a range wider than the
 /// int domain) — the caller then stores the raw floats losslessly.
-pub(super) fn quantize_tile(
+pub(crate) fn quantize_tile(
     fdata: &[f64],
     nx: usize,
     ny: usize,

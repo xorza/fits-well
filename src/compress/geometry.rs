@@ -4,7 +4,7 @@
 /// strides and per-axis tile counts. Iterating `0..ntiles()` and calling `tile_into`
 /// yields each tile's clipped dimensions and flat pixel indices.
 #[derive(Debug)]
-pub(super) struct TileGeometry {
+pub(crate) struct TileGeometry {
     dims: Vec<usize>,
     tiles: Vec<usize>,
     stride: Vec<usize>,
@@ -15,17 +15,17 @@ pub(super) struct TileGeometry {
 /// iteration so a tile loop allocates these buffers once instead of per tile
 /// (the `row_bases` buffer is `nrows` long — the dominant per-tile cost).
 #[derive(Debug, Default)]
-pub(super) struct TileScratch {
+pub(crate) struct TileScratch {
     /// Per-axis origin of the current tile (scratch for the index computation).
     origin: Vec<usize>,
     /// Edge-clipped per-axis extent of the tile (`ny` fastest); used by HCOMPRESS.
-    pub(super) tdims: Vec<usize>,
+    pub(crate) tdims: Vec<usize>,
     /// Flat start of each contiguous tile row in the full image (length = the product
     /// of `tdims[1..]`). Axis 0 has stride 1, so a row is `row_len` contiguous
     /// elements — gather/scatter copy it as a slice instead of per-pixel indexing.
-    pub(super) row_bases: Vec<usize>,
+    pub(crate) row_bases: Vec<usize>,
     /// Elements per row (`tdims[0]`): the fastest-axis extent.
-    pub(super) row_len: usize,
+    pub(crate) row_len: usize,
     /// Per-axis local coordinate, the odometer state [`TileGeometry::tile_into`]
     /// walks (over the higher axes) to emit `row_bases` without per-pixel division.
     coord: Vec<usize>,
@@ -33,13 +33,13 @@ pub(super) struct TileScratch {
 
 impl TileScratch {
     /// Total pixels in the current tile (`row_len × nrows`).
-    pub(super) fn nelem(&self) -> usize {
+    pub(crate) fn nelem(&self) -> usize {
         self.row_len * self.row_bases.len()
     }
 }
 
 impl TileGeometry {
-    pub(super) fn new(dims: &[usize], tiles: &[usize]) -> TileGeometry {
+    pub(crate) fn new(dims: &[usize], tiles: &[usize]) -> TileGeometry {
         let n = dims.len();
         let ntiles_axis = dims
             .iter()
@@ -61,7 +61,7 @@ impl TileGeometry {
         }
     }
 
-    pub(super) fn ntiles(&self) -> usize {
+    pub(crate) fn ntiles(&self) -> usize {
         if self.ntiles_axis.contains(&0) {
             0
         } else {
@@ -71,7 +71,7 @@ impl TileGeometry {
 
     /// Fill `s` (reusing its buffers) with tile `t`'s edge-clipped extent and the
     /// flat indices of its pixels in the full image.
-    pub(super) fn tile_into(&self, t: usize, s: &mut TileScratch) {
+    pub(crate) fn tile_into(&self, t: usize, s: &mut TileScratch) {
         let n = self.dims.len();
         s.origin.clear();
         s.tdims.clear();

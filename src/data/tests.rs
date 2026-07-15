@@ -1,4 +1,4 @@
-use super::*;
+use crate::data::*;
 use crate::header::from_card_lines as header;
 
 fn image(samples: ImageData, scaling: Scaling) -> Image {

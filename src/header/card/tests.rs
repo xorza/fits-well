@@ -1,6 +1,6 @@
 use crate::header::Header;
 
-use super::*;
+use crate::header::card::*;
 
 /// Build an 80-byte card from a left-justified text snippet.
 fn raw(text: &str) -> [u8; CARD_SIZE] {

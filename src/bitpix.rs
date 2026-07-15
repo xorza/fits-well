@@ -65,7 +65,7 @@ impl Bitpix {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::bitpix::*;
 
     #[test]
     fn code_round_trips_for_every_variant() {

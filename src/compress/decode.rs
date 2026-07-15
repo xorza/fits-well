@@ -3,26 +3,27 @@
 //! Reassemble the per-tile codec output (`COMPRESSED_DATA`, with the
 //! `GZIP_COMPRESSED_DATA`/`UNCOMPRESSED_DATA` fallbacks) into the full [`Image`],
 //! de-quantizing float tiles (`ZSCALE`/`ZZERO`) on the way. The per-codec work lives
-//! in the sibling [`gzip`](super::gzip)/[`rice`](super::rice)/[`plio`](super::plio)/
-//! [`hcompress`](super::hcompress) modules; this drives the tile geometry, the
+//! in the sibling [`gzip`](crate::compress::gzip)/[`rice`](crate::compress::rice)/
+//! [`plio`](crate::compress::plio)/[`hcompress`](crate::compress::hcompress) modules;
+//! this drives the tile geometry, the
 //! fallback-column resolution, and the narrow-and-scatter into the output plane.
 
 #[cfg(feature = "parallel")]
-use super::DisjointSlice;
-use super::convert::be_floats_into;
-use super::convert::be_to_i64_into;
-use super::convert::byte_cell;
-use super::convert::bytepix_to_bitpix;
-use super::convert::cell_to_f64_into;
-use super::convert::cell_to_i64_into;
-use super::convert::plio_cell;
-use super::convert::zeroed_samples;
-use super::geometry::TileGeometry;
-use super::geometry::TileScratch;
+use crate::compress::DisjointSlice;
+use crate::compress::convert::be_floats_into;
+use crate::compress::convert::be_to_i64_into;
+use crate::compress::convert::byte_cell;
+use crate::compress::convert::bytepix_to_bitpix;
+use crate::compress::convert::cell_to_f64_into;
+use crate::compress::convert::cell_to_i64_into;
+use crate::compress::convert::plio_cell;
+use crate::compress::convert::zeroed_samples;
+use crate::compress::geometry::TileGeometry;
+use crate::compress::geometry::TileScratch;
 #[cfg(feature = "parallel")]
-use super::map_tiles;
-use super::{DitherMethod, ImageCodec};
-use super::{gzip, hcompress, plio, quantize, rice};
+use crate::compress::map_tiles;
+use crate::compress::{DitherMethod, ImageCodec};
+use crate::compress::{gzip, hcompress, plio, quantize, rice};
 
 use crate::allocation;
 use crate::bitpix::Bitpix;

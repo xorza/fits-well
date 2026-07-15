@@ -260,7 +260,7 @@ impl From<io::Error> for FitsError {
 mod tests {
     use std::error::Error;
 
-    use super::*;
+    use crate::error::*;
 
     #[test]
     fn display_messages_are_specific() {

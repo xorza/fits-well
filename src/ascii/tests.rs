@@ -1,4 +1,4 @@
-use super::*;
+use crate::ascii::*;
 use crate::reader::FitsReader;
 use crate::writer::AsciiWriteColumn;
 use crate::writer::FitsWriter;

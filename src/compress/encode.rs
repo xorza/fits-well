@@ -6,15 +6,15 @@
 //! quantized to int32 with a `ZSCALE`/`ZZERO` first ([`compress_float_image`]). The
 //! per-codec work lives in the sibling codec modules.
 
-use super::convert::float_to_be;
-use super::convert::gather_f64;
-use super::convert::gather_i64;
-use super::convert::i64_to_be;
-use super::convert::i64_to_be_into;
-use super::geometry::TileGeometry;
-use super::geometry::TileScratch;
-use super::{CompressOptions, DitherMethod, ImageCodec, map_tiles, needs_wide};
-use super::{gzip, hcompress, plio, quantize, rice};
+use crate::compress::convert::float_to_be;
+use crate::compress::convert::gather_f64;
+use crate::compress::convert::gather_i64;
+use crate::compress::convert::i64_to_be;
+use crate::compress::convert::i64_to_be_into;
+use crate::compress::geometry::TileGeometry;
+use crate::compress::geometry::TileScratch;
+use crate::compress::{CompressOptions, DitherMethod, ImageCodec, map_tiles, needs_wide};
+use crate::compress::{gzip, hcompress, plio, quantize, rice};
 
 use crate::allocation;
 use crate::bitpix::Bitpix;

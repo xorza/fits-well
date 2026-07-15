@@ -18,7 +18,7 @@ const MAGIC: [u8; 2] = [0xDD, 0x99];
 /// Decode an `HCOMPRESS_1` tile into row-major integer values (`ny` fastest, the
 /// FITS axis-1 order the orchestrator expects), appended to `out` (cleared first; a
 /// reused buffer). The inverse transform still needs its own `i32` working array.
-pub(super) fn hcompress_tile_into(
+pub(crate) fn hcompress_tile_into(
     bytes: &[u8],
     smooth: bool,
     tile_elems: usize,
@@ -33,7 +33,7 @@ pub(super) fn hcompress_tile_into(
 /// Encode one tile (`vals` in `ny`-fastest order, `tdims[0]` = ny = FITS axis-1)
 /// as an `HCOMPRESS_1` byte stream. `scale = 0` is lossless. The result decodes
 /// back through [`hcompress_tile_into`] to the original values.
-pub(super) fn hcompress_tile_encode(vals: &[i64], tdims: &[usize], scale: i32) -> Result<Vec<u8>> {
+pub(crate) fn hcompress_tile_encode(vals: &[i64], tdims: &[usize], scale: i32) -> Result<Vec<u8>> {
     let ny = tdims.first().copied().unwrap_or(vals.len()).max(1);
     let nx = (vals.len() / ny).max(1);
     if nx * ny != vals.len() {

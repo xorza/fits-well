@@ -1,4 +1,4 @@
-use super::*;
+use crate::hdu::*;
 use crate::header::from_card_lines as header;
 
 #[test]

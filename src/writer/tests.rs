@@ -1,4 +1,3 @@
-use super::*;
 use crate::block::ZERO_FILL;
 use crate::block::padded_len;
 use crate::data::{ImageData, Scaling, UnsignedView};
@@ -7,6 +6,7 @@ use crate::header::from_card_lines as header;
 use crate::reader::ChecksumReport;
 use crate::reader::FitsReader;
 use crate::table::ColumnData;
+use crate::writer::*;
 use std::io::Cursor;
 
 fn write_to_vec(image: &Image) -> Vec<u8> {

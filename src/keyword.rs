@@ -69,7 +69,7 @@ pub(crate) use key;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::keyword::*;
 
     #[test]
     fn formats_indexed_keywords_without_allocating() {

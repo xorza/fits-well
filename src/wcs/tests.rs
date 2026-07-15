@@ -1,5 +1,5 @@
-use super::*;
 use crate::reader::FitsReader;
+use crate::wcs::*;
 use std::fs::File;
 
 /// Load the WCS from the primary header of a fixture.
