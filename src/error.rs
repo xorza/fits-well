@@ -239,6 +239,8 @@ impl From<io::Error> for FitsError {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
     use super::*;
 
     #[test]
@@ -266,6 +268,6 @@ mod tests {
         let io_err = io::Error::new(io::ErrorKind::UnexpectedEof, "boom");
         let err = FitsError::from(io_err);
         assert!(matches!(err, FitsError::Io(_)));
-        assert!(std::error::Error::source(&err).is_some());
+        assert!(Error::source(&err).is_some());
     }
 }

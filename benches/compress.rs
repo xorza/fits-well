@@ -188,8 +188,6 @@ fn compress(c: &mut Criterion) {
     g.finish();
 }
 
-// --- §10.3 tiled table compression (a separate path from image tiles) ---
-
 const TABLE_ROWS: usize = 200_000;
 /// Rows per §10.3 tile — a chunk, so the table splits into ~49 independent tiles
 /// (each column transposed and compressed per tile).

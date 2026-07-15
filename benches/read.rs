@@ -84,13 +84,11 @@ fn read_image(c: &mut Criterion) {
         // mmap source: same zero-copy decode, but over a real mapped file.
         #[cfg(feature = "mmap")]
         {
+            use std::fs::File;
             use std::io::Write;
             std::fs::create_dir_all(".tmp").unwrap();
             let path = format!(".tmp/read_bench_{name}.fits");
-            std::fs::File::create(&path)
-                .unwrap()
-                .write_all(&bytes)
-                .unwrap();
+            File::create(&path).unwrap().write_all(&bytes).unwrap();
             let mut mmap = FitsReader::open_mmap(&path).unwrap();
             g.bench_function(BenchmarkId::new("mmap", name), |b| {
                 b.iter(|| black_box(mmap.read_image(0).unwrap().decode()))

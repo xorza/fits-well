@@ -7,6 +7,8 @@
 //! the reader's reused scratch first. For in-memory sources that saves a whole
 //! memory pass over the data — the staging copy the seeking path can't avoid.
 
+#[cfg(feature = "mmap")]
+use std::fs::File;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
@@ -172,7 +174,7 @@ pub struct MmapSource {
 #[cfg(feature = "mmap")]
 impl MmapSource {
     pub(crate) fn open(path: &std::path::Path) -> Result<MmapSource> {
-        let file = std::fs::File::open(path)?;
+        let file = File::open(path)?;
         // SAFETY: standard mmap contract — the mapping is read-only and owned here
         // (no mutable view is ever handed out). The one inherent caveat is that an
         // external process truncating or modifying the file underneath can change the
