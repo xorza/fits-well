@@ -85,6 +85,12 @@ cargo clippy --all-targets --features "mmap ndarray" -- -D warnings
 cargo clippy --all-targets --features internals -- -D warnings
 ```
 
+## Changelog
+
+- **Update `CHANGELOG.md` in the same change whenever the public API or externally
+  observable behavior changes.** Purely internal refactors and performance changes
+  that preserve behavior do not require an entry.
+
 ## The FITS format in one screen
 
 Read this before touching parsing/writing code; the full reference lives in
