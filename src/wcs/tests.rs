@@ -8,6 +8,12 @@ fn open_wcs(name: &str) -> Wcs {
     Wcs::from_header(&r.hdus[0].header, None).unwrap()
 }
 
+fn prepared_projection(projection: Projection, parameters: &[f64]) -> PreparedProjection {
+    let mut pv = [0.0; 21];
+    pv[..parameters.len()].copy_from_slice(parameters);
+    PreparedProjection::new(projection, pv)
+}
+
 /// Golden pixel→world values from `astropy.wcs` (wcslib) for `wcs_tan.fits`
 /// (`RA---TAN`/`DEC--TAN`, CRVAL 150/2.5, CRPIX 256/256, 1″ pixels, 15° rotation).
 /// Columns: pixel x, pixel y, RA (deg), Dec (deg).
@@ -53,17 +59,19 @@ fn parses_tan_header() {
 #[test]
 fn pixel_to_world_matches_astropy() {
     let w = open_wcs("wcs_tan.fits");
+    let mut reused = [0.0; 2];
     for &(px, py, ra, dec) in TAN_GOLDEN {
-        let out = w.pixel_to_world(&[px, py]);
+        w.pixel_to_world_into(&[px, py], &mut reused);
+        assert_eq!(w.pixel_to_world(&[px, py]), reused);
         assert!(
-            (out[0] - ra).abs() < 1e-9,
+            (reused[0] - ra).abs() < 1e-9,
             "RA at ({px},{py}): got {}, want {ra}",
-            out[0]
+            reused[0]
         );
         assert!(
-            (out[1] - dec).abs() < 1e-9,
+            (reused[1] - dec).abs() < 1e-9,
             "Dec at ({px},{py}): got {}, want {dec}",
-            out[1]
+            reused[1]
         );
     }
 }
@@ -75,9 +83,12 @@ fn world_to_pixel_inverts_pixel_to_world() {
     // to ~1e-6 px, so test at 1e-5 px (≈ 10 nano-arcsec) — far tighter than any
     // real use needs.
     let w = open_wcs("wcs_tan.fits");
+    let mut world = [0.0; 2];
+    let mut back = [0.0; 2];
     for &(px, py, _, _) in TAN_GOLDEN {
-        let world = w.pixel_to_world(&[px, py]);
-        let back = w.world_to_pixel(&world);
+        w.pixel_to_world_into(&[px, py], &mut world);
+        w.world_to_pixel_into(&world, &mut back);
+        assert_eq!(w.world_to_pixel(&world), back);
         assert!(
             (back[0] - px).abs() < 1e-5 && (back[1] - py).abs() < 1e-5,
             "pixel→world→pixel at ({px},{py}): got {back:?}"
@@ -104,7 +115,7 @@ fn matrix_inverse_is_correct() {
         assert!((a - b).abs() < 1e-12, "{a} vs {b}");
     }
     // m · inv = I
-    let prod = matvec(&m, &matvec(&inv, &[1.0, 0.0], 2), 2);
+    let prod = [m[0] * inv[0] + m[1] * inv[2], m[2] * inv[0] + m[3] * inv[2]];
     assert!((prod[0] - 1.0).abs() < 1e-12 && prod[1].abs() < 1e-12);
 }
 
@@ -582,14 +593,19 @@ fn projections_round_trip() {
         (Szp, &[0.0, 2.0, 180.0, 60.0]),
     ];
     for &(proj, pv) in cases {
+        let projection = prepared_projection(proj, pv);
         // Positive native latitudes, away from the poles: in-domain for every
         // family (zenithal θ > 0, conics near θ_a, perspective non-divergent).
         for &(phi, theta) in &[(30.0_f64, 70.0_f64), (-40.0, 50.0), (20.0, 55.0)] {
-            let (x, y) = proj.project(phi, theta, pv);
-            let (p2, t2) = proj.deproject(x, y, pv);
+            let projected = projection.project(phi, theta);
+            let native = projection.deproject(projected.x, projected.y);
             assert!(
-                norm180(p2 - phi).abs() < 1e-7 && (t2 - theta).abs() < 1e-7,
-                "{proj:?}: ({phi},{theta}) → ({x},{y}) → ({p2},{t2})"
+                norm180(native.phi - phi).abs() < 1e-7 && (native.theta - theta).abs() < 1e-7,
+                "{proj:?}: ({phi},{theta}) → ({},{}) → ({},{})",
+                projected.x,
+                projected.y,
+                native.phi,
+                native.theta
             );
         }
     }
@@ -597,16 +613,31 @@ fn projections_round_trip() {
 
 #[test]
 fn mollweide_poles_are_finite_and_have_canonical_longitude() {
+    let projection = prepared_projection(Projection::Mol, &[]);
     for theta in [-90.0, 90.0] {
-        let (x, y) = Projection::Mol.project(73.0, theta, &[]);
-        assert!(x.abs() < 1e-12, "projected pole x = {x}");
-        assert!((y - theta.signum() * SQRT_2 * R2D).abs() < 1e-12);
+        let projected = projection.project(73.0, theta);
+        assert!(
+            projected.x.abs() < 1e-12,
+            "projected pole x = {}",
+            projected.x
+        );
+        assert!((projected.y - theta.signum() * SQRT_2 * R2D).abs() < 1e-12);
 
-        let (phi, recovered_theta) = Projection::Mol.deproject(x, y, &[]);
-        assert_eq!(phi, 0.0);
-        assert!((recovered_theta - theta).abs() < 1e-12);
-        assert!(phi.is_finite() && recovered_theta.is_finite());
+        let native = projection.deproject(projected.x, projected.y);
+        assert_eq!(native.phi, 0.0);
+        assert!((native.theta - theta).abs() < 1e-12);
+        assert!(native.phi.is_finite() && native.theta.is_finite());
     }
+}
+
+#[test]
+fn zpn_extended_horner_evaluates_value_and_derivative() {
+    let mut pv = [0.0; 21];
+    pv[..4].copy_from_slice(&[2.0, -3.0, 4.0, 5.0]);
+    let evaluation = evaluate_zpn(2.0, &pv);
+    // P(2) = 2 - 3·2 + 4·2² + 5·2³ = 52; P'(2) = -3 + 8·2 + 15·2² = 73.
+    assert_eq!(evaluation.value, 52.0);
+    assert_eq!(evaluation.derivative, 73.0);
 }
 
 /// Golden pixel→world for all v2 projections, from `astropy.wcs`. Each header is

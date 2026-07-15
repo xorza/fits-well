@@ -28,6 +28,8 @@
   `try_get_text`, which return `Result<Option<_>>` and distinguish a missing keyword
   from a present value of the wrong type.
 - Added `Wcs::view` with immutable per-axis metadata and unsupported-axis status.
+- Added allocation-free `Wcs::pixel_to_world_into` and `Wcs::world_to_pixel_into`
+  transforms for caller-owned coordinate storage.
 - Added explicit `ColumnType` declarations for variable-length table columns.
 
 ### Changed
@@ -95,6 +97,9 @@
   including long-string `CONTINUE` chains.
 - Writer padding no longer allocates per data unit, and fallible reusable buffers are
   reserved from validated final sizes.
+- WCS transforms no longer allocate intermediate vectors, prepare projection family
+  and conic constants once, and evaluate ZPN values and derivatives together with
+  extended Horner.
 
 ### Documentation
 
