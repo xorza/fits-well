@@ -5,6 +5,7 @@
 use crate::allocation;
 use crate::bitpix::Bitpix;
 use crate::data::ImageData;
+use crate::endian;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::table::TformKind;
@@ -125,27 +126,15 @@ pub(crate) fn i64_to_be(vals: &[i64], bitpix: Bitpix) -> Vec<u8> {
 /// Pack native-width quantized integers directly into reusable big-endian storage.
 pub(crate) fn i32_to_be_into(vals: &[i32], out: &mut Vec<u8>) {
     out.clear();
-    out.resize(vals.len() * 4, 0);
-    for (slot, value) in out.chunks_exact_mut(4).zip(vals) {
-        slot.copy_from_slice(&value.to_be_bytes());
-    }
+    endian::extend_be(out, vals, i32::to_be_bytes);
 }
 
 /// Encode `f64` values as big-endian `bitpix`-width floats into reusable storage.
 pub(crate) fn float_to_be_into(vals: &[f64], bitpix: Bitpix, out: &mut Vec<u8>) {
     out.clear();
-    out.resize(vals.len() * bitpix.elem_size(), 0);
     match bitpix {
-        Bitpix::F32 => {
-            for (slot, &value) in out.chunks_exact_mut(4).zip(vals) {
-                slot.copy_from_slice(&(value as f32).to_be_bytes());
-            }
-        }
-        Bitpix::F64 => {
-            for (slot, &value) in out.chunks_exact_mut(8).zip(vals) {
-                slot.copy_from_slice(&value.to_be_bytes());
-            }
-        }
+        Bitpix::F32 => endian::extend_be(out, vals, |value| (value as f32).to_be_bytes()),
+        Bitpix::F64 => endian::extend_be(out, vals, f64::to_be_bytes),
         _ => unreachable!("float_to_be_into requires a float bitpix"),
     }
 }
