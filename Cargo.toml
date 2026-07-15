@@ -20,6 +20,9 @@ exclude = [
     "todo.txt",
 ]
 
+[lints.clippy]
+items_after_test_module = "deny"
+
 # Render docs.rs with every user-facing feature so WCS, compression, mmap, and the
 # ndarray bridge all appear. `internals` is intentionally omitted — it re-exposes
 # unstable bench-only entry points that shouldn't surface in the public docs.
