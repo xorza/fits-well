@@ -16,6 +16,7 @@ use super::convert;
 use super::gzip;
 use super::map_tiles;
 use super::rice;
+use crate::allocation;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -169,44 +170,58 @@ pub(crate) fn compress_table(
 
     let rpt = rows_per_tile.clamp(1, nrows.max(1));
     let nchunks = nrows.div_ceil(rpt);
+    let compressed_row_len = ncols.checked_mul(16).ok_or(FitsError::DataUnitOverflow)?;
+    let tile_count = nchunks
+        .checked_mul(ncols)
+        .ok_or(FitsError::DataUnitOverflow)?;
 
     // Compress each (chunk, column) tile independently — the compute-bound step,
     // parallel under the `parallel` feature, indexed `chunk * ncols + ci` so the
     // results land in the same flat order the descriptor rows expect. The reused
     // per-worker buffer holds the column's transposed bytes.
-    let comps = map_tiles(
-        nchunks * ncols,
-        Vec::<u8>::new,
-        |cm, i| -> Result<Vec<u8>> {
-            let chunk = i / ncols;
-            let m = &metas[i % ncols];
-            let r0 = chunk * rpt;
-            let rows = rpt.min(nrows - r0);
-            // Transpose: gather this column's bytes across the tile's rows.
-            cm.clear();
-            cm.reserve(rows * m.width);
-            for r in 0..rows {
-                let off = (r0 + r) * naxis1 + m.offset;
-                cm.extend_from_slice(&raw[off..off + m.width]);
-            }
-            compress_column(cm, m)
-        },
-    )?;
+    let comps = map_tiles(tile_count, Vec::<u8>::new, |cm, i| -> Result<Vec<u8>> {
+        let chunk = i / ncols;
+        let m = &metas[i % ncols];
+        let r0 = chunk * rpt;
+        let rows = rpt.min(nrows - r0);
+        // Transpose: gather this column's bytes across the tile's rows.
+        cm.clear();
+        let cell_len = rows
+            .checked_mul(m.width)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        allocation::try_reserve_exact(cm, cell_len)?;
+        for r in 0..rows {
+            let off = (r0 + r) * naxis1 + m.offset;
+            cm.extend_from_slice(&raw[off..off + m.width]);
+        }
+        compress_column(cm, m)
+    })?;
 
     // Per (chunk, column) Q descriptor (nelem, heap offset), and the heap.
-    let mut descriptors = vec![(0u64, 0u64); nchunks * ncols];
-    let mut heap: Vec<u8> = Vec::new();
+    let mut descriptors = allocation::try_zeroed((0i64, 0i64), tile_count)?;
+    let heap_len = comps.iter().try_fold(0usize, |len, comp| {
+        len.checked_add(comp.len())
+            .ok_or(FitsError::DataUnitOverflow)
+    })?;
+    let mut heap = Vec::new();
+    allocation::try_reserve_exact(&mut heap, heap_len)?;
     for (i, comp) in comps.iter().enumerate() {
-        descriptors[i] = (comp.len() as u64, heap.len() as u64);
+        descriptors[i] = (fits_i64(comp.len())?, fits_i64(heap.len())?);
         heap.extend_from_slice(comp);
     }
 
     // Data unit: nchunks rows of ncols 16-byte Q descriptors, then the heap.
     out.clear();
-    out.reserve(nchunks * ncols * 16 + heap.len());
+    let descriptor_bytes = tile_count
+        .checked_mul(16)
+        .ok_or(FitsError::DataUnitOverflow)?;
+    let output_len = descriptor_bytes
+        .checked_add(heap.len())
+        .ok_or(FitsError::DataUnitOverflow)?;
+    allocation::try_reserve_exact(out, output_len)?;
     for &(nelem, off) in &descriptors {
-        out.extend_from_slice(&(nelem as i64).to_be_bytes());
-        out.extend_from_slice(&(off as i64).to_be_bytes());
+        out.extend_from_slice(&nelem.to_be_bytes());
+        out.extend_from_slice(&off.to_be_bytes());
     }
     out.extend_from_slice(&heap);
 
@@ -215,9 +230,9 @@ pub(crate) fn compress_table(
     let orig_pcount = header.get_integer("PCOUNT").unwrap_or(0);
     h.set("ZTABLE", true)
         .comment("ZTABLE", "this is a compressed table");
-    h.set("ZTILELEN", rpt as i64);
-    h.set("ZNAXIS1", naxis1 as i64);
-    h.set("ZNAXIS2", nrows as i64);
+    h.set("ZTILELEN", fits_i64(rpt)?);
+    h.set("ZNAXIS1", fits_i64(naxis1)?);
+    h.set("ZNAXIS2", fits_i64(nrows)?);
     h.set("ZPCOUNT", orig_pcount);
     for (ci, m) in metas.iter().enumerate() {
         let n = ci + 1;
@@ -229,9 +244,9 @@ pub(crate) fn compress_table(
         h.set(key!("TFORM{n}").as_str(), "1QB");
         h.set(key!("ZCTYP{n}").as_str(), m.algo.name());
     }
-    h.set("NAXIS1", (ncols * 16) as i64);
-    h.set("NAXIS2", nchunks as i64);
-    h.set("PCOUNT", heap.len() as i64);
+    h.set("NAXIS1", fits_i64(compressed_row_len)?);
+    h.set("NAXIS2", fits_i64(nchunks)?);
+    h.set("PCOUNT", fits_i64(heap.len())?);
     h.set("GCOUNT", 1);
     Ok(h)
 }
@@ -242,14 +257,17 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
     if header.get_logical("ZTABLE") != Some(true) {
         return Err(FitsError::NotCompressedTable);
     }
-    let naxis1 = req_int(header, "ZNAXIS1")? as usize;
-    let nrows = req_int(header, "ZNAXIS2")? as usize;
-    let zpcount = header.get_integer("ZPCOUNT").unwrap_or(0);
-    let mut rpt = req_int(header, "ZTILELEN")?.max(1) as usize;
+    let naxis1 = req_usize(header, "ZNAXIS1")?;
+    let nrows = req_usize(header, "ZNAXIS2")?;
+    let zpcount = optional_nonnegative(header, "ZPCOUNT")?;
+    let mut rpt = req_positive_usize(header, "ZTILELEN")?;
     if rpt > nrows {
         rpt = nrows.max(1);
     }
-    let ncols = req_int(header, "TFIELDS")? as usize;
+    let ncols = req_usize(header, "TFIELDS")?;
+    if ncols > 999 {
+        return Err(FitsError::KeywordOutOfRange { name: "TFIELDS" });
+    }
 
     // Resolve each column's original form and codec.
     let mut metas = Vec::with_capacity(ncols);
@@ -266,7 +284,9 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
             None => Algo::Gzip2, // cfitsio's default when ZCTYPn is absent
         };
         let m = col_meta(&tform, offset, algo)?;
-        offset += m.width;
+        offset = offset
+            .checked_add(m.width)
+            .ok_or(FitsError::DataUnitOverflow)?;
         zforms.push(zform);
         metas.push(m);
     }
@@ -285,6 +305,9 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
         .ok_or(FitsError::DataUnitOverflow)?;
 
     let nchunks = nrows.div_ceil(rpt);
+    let tile_count = nchunks
+        .checked_mul(ncols)
+        .ok_or(FitsError::DataUnitOverflow)?;
     // Each column's per-chunk compressed cells.
     let cells: Vec<Vec<ColumnData>> = (0..ncols)
         .map(|ci| table.column_by_idx(ci)?.vla())
@@ -293,7 +316,7 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
     // Decompress each (chunk, column) tile independently (the compute-bound step —
     // parallel under the `parallel` feature), in flat `chunk * ncols + ci` order.
     let decompressed = map_tiles(
-        nchunks * ncols,
+        tile_count,
         || (),
         |_unit, i| -> Result<Vec<u8>> {
             let chunk = i / ncols;
@@ -309,7 +332,7 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
     // Transpose back: scatter each tile's column-major bytes into the output rows
     // (disjoint byte ranges per (chunk, column), so the order is free to vary).
     // `total` comes from untrusted `ZNAXIS2`/`ZNAXIS1`, so allocate it fallibly.
-    let mut out = convert::try_zeroed(0u8, total)?;
+    let mut out = allocation::try_zeroed(0u8, total)?;
     for (i, cm) in decompressed.iter().enumerate() {
         let chunk = i / ncols;
         let m = &metas[i % ncols];
@@ -323,8 +346,8 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
 
     // Restore the original header: drop the Z* keywords, reinstate NAXIS/PCOUNT.
     let mut h = header.clone();
-    h.set("NAXIS1", naxis1 as i64);
-    h.set("NAXIS2", nrows as i64);
+    h.set("NAXIS1", fits_i64(naxis1)?);
+    h.set("NAXIS2", fits_i64(nrows)?);
     h.set("PCOUNT", zpcount);
     for (n, zform) in zforms.iter().enumerate() {
         h.set(key!("TFORM{}", n + 1).as_str(), zform.clone());
@@ -368,7 +391,9 @@ fn decompress_column(bytes: &[u8], m: &ColMeta, rows: usize) -> Result<Vec<u8>> 
     // The decompressed column is exactly this many bytes; bound the gzip inflate at it
     // so a crafted cell can't expand unbounded (`rows × width ≤ ZNAXIS2 × ZNAXIS1`,
     // already checked non-overflowing by the caller).
-    let expect = rows * m.width;
+    let expect = rows
+        .checked_mul(m.width)
+        .ok_or(FitsError::DataUnitOverflow)?;
     let cm = match m.algo {
         Algo::Gzip1 => gzip::gunzip(bytes, expect)?,
         Algo::Gzip2 => gzip::unshuffle_bytes(&gzip::gunzip(bytes, expect)?, m.shuffle_width()),
@@ -376,7 +401,9 @@ fn decompress_column(bytes: &[u8], m: &ColMeta, rows: usize) -> Result<Vec<u8>> 
             let bytepix = m.rice_bytepix().ok_or(FitsError::UnsupportedCompression {
                 name: format!("RICE_1 on a {} column", m.kind.code()),
             })?;
-            let nelem = rows * m.repeat;
+            let nelem = rows
+                .checked_mul(m.repeat)
+                .ok_or(FitsError::DataUnitOverflow)?;
             let mut ints = Vec::new();
             rice::rice_decode_into(bytes, nelem, bytepix, 32, &mut ints)?;
             convert::i64_to_be(&ints, convert::bytepix_to_bitpix(bytepix))
@@ -394,4 +421,28 @@ fn req_int(header: &Header, key: &'static str) -> Result<i64> {
     header
         .get_integer(key)
         .ok_or(FitsError::MissingKeyword { name: key })
+}
+
+fn req_usize(header: &Header, key: &'static str) -> Result<usize> {
+    usize::try_from(req_int(header, key)?).map_err(|_| FitsError::KeywordOutOfRange { name: key })
+}
+
+fn req_positive_usize(header: &Header, key: &'static str) -> Result<usize> {
+    let value = req_usize(header, key)?;
+    if value == 0 {
+        return Err(FitsError::KeywordOutOfRange { name: key });
+    }
+    Ok(value)
+}
+
+fn optional_nonnegative(header: &Header, key: &'static str) -> Result<i64> {
+    match header.get_integer(key) {
+        Some(value) if value < 0 => Err(FitsError::KeywordOutOfRange { name: key }),
+        Some(value) => Ok(value),
+        None => Ok(0),
+    }
+}
+
+fn fits_i64(value: usize) -> Result<i64> {
+    i64::try_from(value).map_err(|_| FitsError::DataUnitOverflow)
 }

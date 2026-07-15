@@ -4,7 +4,7 @@
 //! (PCOUNT + Π NAXISn)`, rounded up to a block — so the reader never touches data
 //! to find the next HDU.
 
-use crate::block::padded_len;
+use crate::block::checked_padded_len;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -90,10 +90,14 @@ pub(crate) fn data_extent(header: &Header) -> Result<DataExtent> {
         0
     } else {
         let array_axes: &[usize] = if random_groups { &axes[1..] } else { &axes };
-        array_axes
-            .iter()
-            .try_fold(1u64, |acc, &n| acc.checked_mul(n as u64))
-            .ok_or(FitsError::DataUnitOverflow)?
+        if array_axes.contains(&0) {
+            0
+        } else {
+            array_axes
+                .iter()
+                .try_fold(1u64, |acc, &n| acc.checked_mul(n as u64))
+                .ok_or(FitsError::DataUnitOverflow)?
+        }
     };
 
     let group_size = pcount
@@ -105,7 +109,7 @@ pub(crate) fn data_extent(header: &Header) -> Result<DataExtent> {
         .ok_or(FitsError::DataUnitOverflow)?;
     Ok(DataExtent {
         data_bytes,
-        padded_bytes: padded_len(data_bytes),
+        padded_bytes: checked_padded_len(data_bytes).ok_or(FitsError::DataUnitOverflow)?,
     })
 }
 

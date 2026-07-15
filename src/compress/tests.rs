@@ -1152,6 +1152,21 @@ fn decompress_image_rejects_overflowing_znaxis_product() {
         decompress_image(&h, &table),
         Err(FitsError::DataUnitOverflow)
     ));
+
+    let image = crate::data::Image {
+        shape: vec![usize::MAX, 2],
+        samples: ImageData::I16(Vec::new()),
+        scaling: crate::data::Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    };
+    let mut out = Vec::new();
+    assert!(matches!(
+        super::encode::compress_image(&image, "GZIP_1", &CompressOptions::default(), &mut out),
+        Err(FitsError::DataUnitOverflow)
+    ));
 }
 
 #[test]
@@ -1181,6 +1196,24 @@ fn uncompress_table_rejects_overflowing_row_product() {
     data.extend_from_slice(&0i64.to_be_bytes()); // Q descriptor: nelem
     data.extend_from_slice(&0i64.to_be_bytes()); // offset
     let table = BinTable::from_data(&h, data).unwrap();
+    assert!(matches!(
+        uncompress_table(&h, &table),
+        Err(FitsError::DataUnitOverflow)
+    ));
+
+    for keyword in ["ZNAXIS1", "ZNAXIS2", "ZTILELEN", "TFIELDS"] {
+        h.set(keyword, -1);
+        assert!(matches!(
+            uncompress_table(&h, &table),
+            Err(FitsError::KeywordOutOfRange { name }) if name == keyword
+        ));
+        h.set(keyword, 1);
+    }
+
+    h.set("TFIELDS", 2)
+        .set("ZNAXIS1", 8)
+        .set("ZFORM1", format!("{}K", usize::MAX))
+        .set("ZFORM2", "1K");
     assert!(matches!(
         uncompress_table(&h, &table),
         Err(FitsError::DataUnitOverflow)
@@ -1324,4 +1357,7 @@ fn tile_into_rows_match_layout() {
     assert_eq!(flat(&s), vec![0, 1, 4, 5, 8, 9, 12, 13]);
     geom3.tile_into(1, &mut s);
     assert_eq!(flat(&s), vec![2, 3, 6, 7, 10, 11, 14, 15]);
+
+    let empty = TileGeometry::new(&[usize::MAX, usize::MAX, 0], &[1, 1, 1]);
+    assert_eq!(empty.ntiles(), 0);
 }

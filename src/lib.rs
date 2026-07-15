@@ -42,6 +42,7 @@
 #[doc = include_str!("../README.md")]
 pub struct ReadmeDoctests;
 
+mod allocation;
 mod ascii;
 mod bitpix;
 mod block;

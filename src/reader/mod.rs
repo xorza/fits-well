@@ -2,6 +2,7 @@ use std::io::Read;
 use std::io::Seek;
 use std::ops::Range;
 
+use crate::allocation;
 use crate::ascii::AsciiTable;
 use crate::bitpix::Bitpix;
 use crate::block::BLOCK_SIZE;
@@ -252,12 +253,11 @@ impl<S: Source> FitsReader<S> {
     pub fn read_data_raw(&mut self, index: usize) -> Result<DataUnit> {
         let hdu = self.checked_hdu(index)?;
         let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
-        let bytes = self
-            .source
-            .read_owned(data_offset, padded_len(data_bytes) as usize)?;
+        let lengths = DataLengths::new(data_bytes)?;
+        let bytes = self.source.read_owned(data_offset, lengths.padded)?;
         Ok(DataUnit {
             bytes,
-            data_range: 0..data_bytes as usize,
+            data_range: 0..lengths.data,
         })
     }
 
@@ -299,20 +299,22 @@ impl<S: Source> FitsReader<S> {
         let shape = hdu.header.axes()?;
         let scaling = Scaling::from_header(&hdu.header);
         let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
-        let unit = self.source.slice(
-            data_offset,
-            padded_len(data_bytes) as usize,
-            &mut self.scratch,
-        )?;
-        let bytes = &unit[..data_bytes as usize];
+        let lengths = DataLengths::new(data_bytes)?;
+        let unit = self
+            .source
+            .slice(data_offset, lengths.padded, &mut self.scratch)?;
+        let bytes = &unit[..lengths.data];
 
         // With PCOUNT=0/GCOUNT=1 (checked above), `data_extent` sized the unit as
         // `elem · Π(axes)`, so the borrowed data is exactly `shape_product` elements
         // wide. This is an invariant between `data_extent` and the shape, not a
         // runtime failure mode — assert it rather than return an error that can't occur.
-        debug_assert_eq!(
+        let expected_bytes = shape_product(&shape)?
+            .checked_mul(bitpix.elem_size())
+            .ok_or(FitsError::DataUnitOverflow)?;
+        assert_eq!(
             bytes.len(),
-            shape_product(&shape) * bitpix.elem_size(),
+            expected_bytes,
             "image data length must match the axis product"
         );
         Ok(RawImage::raw(shape, bitpix, scaling, bytes))
@@ -351,20 +353,21 @@ impl<S: Source> FitsReader<S> {
         let hdu = self.checked_hdu(index)?;
         hdu.ensure_plain_image()?;
         let bitpix = hdu.header.bitpix()?;
-        let data_bytes = hdu.data_bytes as usize;
-        let padded = padded_len(hdu.data_bytes) as usize;
+        let lengths = DataLengths::new(hdu.data_bytes)?;
         let data_offset = hdu.data_offset;
         // `hdu` (the self.hdus borrow) is unused past here, so the source/scratch
         // borrows below don't conflict — same staging as `read_image`.
-        let unit = self.source.slice(data_offset, padded, &mut self.scratch)?;
-        let be = &unit[..data_bytes];
+        let unit = self
+            .source
+            .slice(data_offset, lengths.padded, &mut self.scratch)?;
+        let be = &unit[..lengths.data];
         if bitpix == Bitpix::U8 {
             // No byte-swap: the on-disk bytes already are the host-endian samples, so
             // borrow them straight (zero-copy) — `scratch` stays untouched.
             return Ok(ImageView::U8(be));
         }
         swap_into_words(be, bitpix, scratch);
-        Ok(view_words(scratch, bitpix, data_bytes))
+        Ok(view_words(scratch, bitpix, lengths.data))
     }
 
     /// Read a `BINTABLE` extension and parse its column structure. Decode
@@ -403,12 +406,11 @@ impl<S: Source> FitsReader<S> {
             return Err(FitsError::NotRandomGroups);
         }
         let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
-        let unit = self.source.slice(
-            data_offset,
-            padded_len(data_bytes) as usize,
-            &mut self.scratch,
-        )?;
-        RandomGroups::from_data(&self.hdus[index].header, &unit[..data_bytes as usize])
+        let lengths = DataLengths::new(data_bytes)?;
+        let unit = self
+            .source
+            .slice(data_offset, lengths.padded, &mut self.scratch)?;
+        RandomGroups::from_data(&self.hdus[index].header, &unit[..lengths.data])
     }
 
     /// Read a tiled-compressed table (§10.3) — a `BINTABLE` with `ZTABLE = T` —
@@ -428,13 +430,12 @@ impl<S: Source> FitsReader<S> {
     pub fn verify_checksum(&mut self, index: usize) -> Result<ChecksumReport> {
         let hdu = self.checked_hdu(index)?;
         let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
+        let lengths = DataLengths::new(data_bytes)?;
         // The block-padded data unit (length = the padded size — the checksum covers
         // the block fill too).
-        let unit = self.source.slice(
-            data_offset,
-            padded_len(data_bytes) as usize,
-            &mut self.scratch,
-        )?;
+        let unit = self
+            .source
+            .slice(data_offset, lengths.padded, &mut self.scratch)?;
         let data_sum = checksum::accumulate(unit, 0);
         let hdu = &self.hdus[index];
         // Whole HDU = header (incl. the stored CHECKSUM card) then data.
@@ -458,6 +459,24 @@ impl<S: Source> FitsReader<S> {
 pub struct ChecksumReport {
     pub datasum_ok: Option<bool>,
     pub checksum_ok: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DataLengths {
+    data: usize,
+    padded: usize,
+}
+
+impl DataLengths {
+    fn new(data_bytes: u64) -> Result<DataLengths> {
+        let data = usize::try_from(data_bytes)
+            .map_err(|_| FitsError::DataUnitTooLarge { bytes: data_bytes })?;
+        let padded_bytes = padded_len(data_bytes);
+        let padded = usize::try_from(padded_bytes).map_err(|_| FitsError::DataUnitTooLarge {
+            bytes: padded_bytes,
+        })?;
+        Ok(DataLengths { data, padded })
+    }
 }
 
 /// Outcome of scanning for the next header unit.
@@ -494,6 +513,7 @@ fn scan_header_unit<S: Source>(
         }
         let block = source.slice(*offset, BLOCK_SIZE, scratch)?;
         *offset += BLOCK_SIZE as u64;
+        allocation::try_reserve_exact(&mut bytes, block.len())?;
         bytes.extend_from_slice(block);
         if block_has_end(block) {
             return Ok(NextHeader::Found(bytes));

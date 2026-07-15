@@ -15,6 +15,8 @@ use crate::bitpix::Bitpix;
 use crate::endian::decode_be;
 use crate::endian::decode_be_into_slice;
 use crate::endian::extend_be;
+use crate::error::FitsError;
+use crate::error::Result;
 use crate::header::Header;
 
 /// An owned, host-endian sample buffer, tagged by its `BITPIX` element type.
@@ -30,11 +32,14 @@ pub enum ImageData {
 
 /// Element count for an N-d `shape`: the product of the axis lengths, or `0` for
 /// an empty shape (`NAXIS = 0` ⇒ no data, not the empty-product `1`).
-pub(crate) fn shape_product(shape: &[usize]) -> usize {
-    if shape.is_empty() {
-        0
+pub(crate) fn shape_product(shape: &[usize]) -> Result<usize> {
+    if shape.is_empty() || shape.contains(&0) {
+        Ok(0)
     } else {
-        shape.iter().product()
+        shape
+            .iter()
+            .try_fold(1usize, |acc, &len| acc.checked_mul(len))
+            .ok_or(FitsError::DataUnitOverflow)
     }
 }
 

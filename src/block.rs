@@ -34,6 +34,10 @@ pub(crate) fn padded_len(len: u64) -> u64 {
     blocks_for(len).saturating_mul(BLOCK_SIZE as u64)
 }
 
+pub(crate) fn checked_padded_len(len: u64) -> Option<u64> {
+    blocks_for(len).checked_mul(BLOCK_SIZE as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +94,6 @@ mod tests {
             wrapped < u64::MAX,
             "the unguarded multiply wraps below the input"
         );
+        assert_eq!(checked_padded_len(u64::MAX), None);
     }
 }
