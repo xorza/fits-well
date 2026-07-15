@@ -54,7 +54,6 @@ fn main() -> fits_well::Result<()> {
     let images = reader.image_indices();
     println!("image HDUs: {images:?}");
 
-    // --- Owned path: decode samples you want to keep. ---
     // `read_image` borrows the data unit in place (zero-copy) as a `RawImage`; `decode`
     // byte-swaps the big-endian samples into an *owned* host-endian buffer you can keep
     // and move (a BITPIX=8 image's bytes come back copy-free via `raw.u8()`).
@@ -66,7 +65,6 @@ fn main() -> fits_well::Result<()> {
     // `physical()` applies BSCALE/BZERO and maps any BLANK value to NaN.
     println!("  physical {:?}", raw.physical());
 
-    // --- Borrowed view path: a hot loop that processes each image and moves on. ---
     // `read_image_view` byte-swaps into a *caller-owned* scratch instead of allocating
     // a fresh buffer per call — so a loop over many images pays the output allocation
     // once and reuses it across reads, even across differing BITPIX (i16 then f32

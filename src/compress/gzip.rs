@@ -6,6 +6,9 @@ use std::io::Write;
 use crate::bitpix::Bitpix;
 use crate::error::FitsError;
 use crate::error::Result;
+use flate2::Compression;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 
 use super::convert::be_to_i64_into;
 
@@ -18,7 +21,7 @@ pub(super) const DEFAULT_GZIP_LEVEL: u32 = 1;
 /// Gzip a raw big-endian byte buffer at deflate `level` (0–9; the `GZIP_1` tile
 /// encoder). The level is lossless — only the speed↔ratio tradeoff changes.
 pub(super) fn gzip_encode(raw: &[u8], level: u32) -> Vec<u8> {
-    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(level));
+    let mut enc = GzEncoder::new(Vec::new(), Compression::new(level));
     enc.write_all(raw).expect("gzip into a Vec cannot fail");
     enc.finish().expect("gzip finish into a Vec cannot fail")
 }
@@ -68,7 +71,7 @@ pub(super) fn gunzip(bytes: &[u8], max_out: usize) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     // Read at most one byte past the limit: getting that extra byte proves the stream
     // is larger than the tile claims to be, so reject it.
-    flate2::read::GzDecoder::new(bytes)
+    GzDecoder::new(bytes)
         .take(max_out.saturating_add(1) as u64)
         .read_to_end(&mut out)?;
     if out.len() > max_out {

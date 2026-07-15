@@ -7,6 +7,7 @@ use crate::endian::push_pq_descriptor;
 use crate::reader::{FitsReader, StreamReader};
 use crate::table::ColumnData;
 use std::fs::File;
+use std::io::Cursor;
 
 fn open(name: &str) -> StreamReader<File> {
     FitsReader::open(File::open(format!("tests/data/fits/{name}")).unwrap()).unwrap()
@@ -741,7 +742,7 @@ fn emit_compressed_table_for_funpack() {
     use std::fs::File;
 
     let src = std::fs::read("tests/data/fits/comp_table_ref.fits").unwrap();
-    let mut r = FitsReader::open(std::io::Cursor::new(src)).unwrap();
+    let mut r = FitsReader::open(Cursor::new(src)).unwrap();
     let table = r.read_table(1).unwrap();
     let header = r.hdus[1].header.clone();
     let mut w = FitsWriter::new(File::create(".tmp/my_ctable.fits").unwrap());
