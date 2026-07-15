@@ -378,7 +378,7 @@ fn decompress_column(bytes: &[u8], m: &ColMeta, rows: usize) -> Result<Vec<u8>> 
             })?;
             let nelem = rows * m.repeat;
             let mut ints = Vec::new();
-            rice::rice_decode_into(bytes, nelem, bytepix, 32, &mut ints);
+            rice::rice_decode_into(bytes, nelem, bytepix, 32, &mut ints)?;
             convert::i64_to_be(&ints, convert::bytepix_to_bitpix(bytepix))
         }
     };

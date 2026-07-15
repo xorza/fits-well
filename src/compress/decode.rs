@@ -78,6 +78,13 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
         .iter()
         .try_fold(1usize, |acc, &n| acc.checked_mul(n))
         .ok_or(FitsError::DataUnitOverflow)?;
+    if total == 0 {
+        return Ok(Image {
+            shape: dims,
+            samples: zeroed_samples(zbitpix, 0)?,
+            scaling: Scaling::from_header(header),
+        });
+    }
     let tiles: Vec<usize> = (1..=znaxis)
         .map(|i| {
             header
@@ -219,6 +226,7 @@ where
         map_tiles(ntiles, init, |(scratch, vals, ints), t| -> Result<()> {
             geom.tile_into(t, scratch);
             decode(t, scratch, vals, ints)?;
+            ensure_tile_size(scratch.nelem(), vals.len())?;
             // SAFETY: the image tiles partition the pixel grid, so this tile's row
             // ranges are disjoint from every other tile's — concurrent writes through
             // `sink` never alias. `tile_into` clips rows to the image, which sized
@@ -236,6 +244,7 @@ where
         for t in 0..ntiles {
             geom.tile_into(t, &mut scratch);
             decode(t, &scratch, &mut vals, &mut ints)?;
+            ensure_tile_size(scratch.nelem(), vals.len())?;
             scatter_rows(out, &scratch.row_bases, scratch.row_len, &vals, &convert);
         }
         Ok(())
@@ -244,8 +253,7 @@ where
 
 /// Scatter `vals` (the tile's pixels in row-major order) into `out` one contiguous
 /// row at a time: `row_len` values land at each `row_bases` offset, narrowed by
-/// `convert`. A `vals` shorter than the tile fills only what it covers (matching the
-/// old index-zip), so a malformed tile can't index out of bounds.
+/// `convert`.
 #[cfg(not(feature = "parallel"))]
 fn scatter_rows<S: Copy, D>(
     out: &mut [D],
@@ -256,11 +264,10 @@ fn scatter_rows<S: Copy, D>(
 ) {
     let mut off = 0;
     for &base in row_bases {
-        if off >= vals.len() {
-            break;
-        }
-        let rl = row_len.min(vals.len() - off);
-        for (d, &v) in out[base..base + rl].iter_mut().zip(&vals[off..off + rl]) {
+        for (d, &v) in out[base..base + row_len]
+            .iter_mut()
+            .zip(&vals[off..off + row_len])
+        {
             *d = convert(v);
         }
         off += row_len;
@@ -292,8 +299,7 @@ impl<D> DisjointOut<D> {
     }
 
     /// Write `vals` (row-major) into the tile's contiguous rows: `row_len` values at
-    /// each `row_bases` offset, narrowed by `convert`. A short `vals` fills only what
-    /// it covers (matching the serial [`scatter_rows`]).
+    /// each `row_bases` offset, narrowed by `convert`.
     ///
     /// # Safety
     /// Each `[base, base + row_len)` range must be `<= self.len` and disjoint from
@@ -307,16 +313,16 @@ impl<D> DisjointOut<D> {
     ) {
         let mut off = 0;
         for &base in row_bases {
-            if off >= vals.len() {
-                break;
-            }
-            let rl = row_len.min(vals.len() - off);
-            debug_assert!(base + rl <= self.len, "tile row out of bounds {}", self.len);
-            // SAFETY: `[base, base + rl)` is in bounds (debug-asserted; guaranteed by
+            assert!(
+                base + row_len <= self.len,
+                "tile row out of bounds {}",
+                self.len
+            );
+            // SAFETY: `[base, base + row_len)` is in bounds (asserted; guaranteed by
             // the tile geometry) and disjoint across tiles, so these are non-aliasing
             // in-bounds writes over one contiguous run.
-            let dst = unsafe { std::slice::from_raw_parts_mut(self.ptr.add(base), rl) };
-            for (d, &v) in dst.iter_mut().zip(&vals[off..off + rl]) {
+            let dst = unsafe { std::slice::from_raw_parts_mut(self.ptr.add(base), row_len) };
+            for (d, &v) in dst.iter_mut().zip(&vals[off..off + row_len]) {
                 *d = convert(v);
             }
             off += row_len;
@@ -506,22 +512,35 @@ fn decode_tile_cell_into(
                 params.bytepix,
                 params.blocksize,
                 out,
-            );
-            Ok(())
+            )
         }
-        ImageCodec::Plio1 => {
-            plio::plio_decode_into(as_i16(cell)?, tile_elems, out);
-            Ok(())
-        }
+        ImageCodec::Plio1 => plio::plio_decode_into(as_i16(cell)?, tile_elems, out),
         ImageCodec::Hcompress1 => {
             hcompress::hcompress_tile_into(as_bytes(cell)?, params.smooth, tile_elems, out)
         }
         // §10.4: a tile stored verbatim — the cell is the raw big-endian pixels.
         ImageCodec::NoCompress => {
-            be_to_i64_into(as_bytes(cell)?, ctx.int_bitpix, out);
+            let bytes = as_bytes(cell)?;
+            let expected = tile_elems
+                .checked_mul(ctx.int_bitpix.elem_size())
+                .ok_or(FitsError::DataUnitOverflow)?;
+            if bytes.len() != expected {
+                return Err(FitsError::DataSizeMismatch {
+                    expected,
+                    got: bytes.len(),
+                });
+            }
+            be_to_i64_into(bytes, ctx.int_bitpix, out);
             Ok(())
         }
     }
+}
+
+fn ensure_tile_size(expected: usize, got: usize) -> Result<()> {
+    if got != expected {
+        return Err(FitsError::DataSizeMismatch { expected, got });
+    }
+    Ok(())
 }
 
 /// HCOMPRESS smoothing flag: the `SMOOTH` `ZVALn` is non-zero (cfitsio applies

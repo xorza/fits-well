@@ -945,6 +945,113 @@ fn empty_naxis0_image_round_trips() {
 }
 
 #[test]
+fn empty_first_axis_image_round_trips() {
+    use crate::data::{Image, ImageData, Scaling};
+    use crate::writer::FitsWriter;
+    use std::io::Cursor;
+
+    let image = Image {
+        shape: vec![0],
+        samples: ImageData::I16(Vec::new()),
+        scaling: Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    };
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_compressed_image(&image, "GZIP_1", &CompressOptions::default())
+        .unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let back = r.read_image(1).unwrap();
+    assert_eq!(back.shape, [0]);
+    assert!(matches!(back.decode(), ImageData::I16(v) if v.is_empty()));
+}
+
+#[test]
+fn compressed_image_rejects_short_tiles() {
+    use crate::error::FitsError;
+    use crate::header::Header;
+    use crate::table::BinTable;
+
+    let mut h = Header::new();
+    h.set("XTENSION", "BINTABLE")
+        .set("BITPIX", 8)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 8)
+        .set("NAXIS2", 1)
+        .set("PCOUNT", 1)
+        .set("GCOUNT", 1)
+        .set("TFIELDS", 1)
+        .set("TFORM1", "1PB(1)")
+        .set("TTYPE1", "COMPRESSED_DATA")
+        .set("ZIMAGE", true)
+        .set("ZCMPTYPE", "NOCOMPRESS")
+        .set("ZBITPIX", 16)
+        .set("ZNAXIS", 1)
+        .set("ZNAXIS1", 2)
+        .set("ZTILE1", 2);
+    let mut data = Vec::new();
+    data.extend_from_slice(&1i32.to_be_bytes());
+    data.extend_from_slice(&0i32.to_be_bytes());
+    data.push(0);
+    let table = BinTable::from_data(&h, data).unwrap();
+    assert!(matches!(
+        decompress_image(&h, &table),
+        Err(FitsError::DataSizeMismatch {
+            expected: 4,
+            got: 1
+        })
+    ));
+
+    h.set("NAXIS1", 16)
+        .set("PCOUNT", 2)
+        .set("TFIELDS", 2)
+        .set("TFORM1", "1PB(0)")
+        .set("ZCMPTYPE", "GZIP_1")
+        .set("TFORM2", "1PI(1)")
+        .set("TTYPE2", "UNCOMPRESSED_DATA");
+    let mut data = Vec::new();
+    data.extend_from_slice(&0i32.to_be_bytes());
+    data.extend_from_slice(&0i32.to_be_bytes());
+    data.extend_from_slice(&1i32.to_be_bytes());
+    data.extend_from_slice(&0i32.to_be_bytes());
+    data.extend_from_slice(&1i16.to_be_bytes());
+    let table = BinTable::from_data(&h, data).unwrap();
+    assert!(matches!(
+        decompress_image(&h, &table),
+        Err(FitsError::DataSizeMismatch {
+            expected: 2,
+            got: 1
+        })
+    ));
+}
+
+#[test]
+fn plio_rejects_truncated_list_and_operand() {
+    use crate::error::FitsError;
+
+    let mut out = Vec::new();
+    let truncated_span = [0, 7, -100, 8, 0, 0, 0];
+    assert!(matches!(
+        plio::plio_decode_into(&truncated_span, 1, &mut out),
+        Err(FitsError::UnexpectedEof)
+    ));
+
+    let missing_absolute_high_word = [0, 0, 4, 0x1001];
+    assert!(matches!(
+        plio::plio_decode_into(&missing_absolute_high_word, 1, &mut out),
+        Err(FitsError::UnexpectedEof)
+    ));
+
+    let invalid_opcode = [0, 0, 4, i16::MIN];
+    assert!(matches!(
+        plio::plio_decode_into(&invalid_opcode, 1, &mut out),
+        Err(FitsError::UnsupportedCompression { .. })
+    ));
+}
+
+#[test]
 fn compressed_image_descriptor_switches_to_q_for_large_offsets() {
     // §10.1.3: a heap offset beyond the 32-bit P range needs a 64-bit Q descriptor.
     let mut q = Vec::new();
@@ -988,6 +1095,28 @@ fn hcompress_tile_rejects_dimension_mismatch() {
     // A mismatched element count is rejected, not decoded.
     assert!(hcompress::hcompress_tile_into(&bytes, false, 7, &mut out).is_err());
     assert!(hcompress::hcompress_tile_into(&bytes, false, 5, &mut out).is_err());
+
+    let one = hcompress::hcompress_tile_encode(&[-7], &[1, 1], 0).unwrap();
+    hcompress::hcompress_tile_into(&one, false, 1, &mut out).unwrap();
+    assert_eq!(out, [-7], "a 1x1 tile must skip its empty quadrants");
+
+    for end in 0..one.len() {
+        assert!(
+            matches!(
+                hcompress::hcompress_tile_into(&one[..end], false, 1, &mut out),
+                Err(crate::error::FitsError::UnexpectedEof)
+                    | Err(crate::error::FitsError::UnsupportedCompression { .. })
+            ),
+            "strict HCOMPRESS prefix of length {end} was accepted"
+        );
+    }
+
+    let mut invalid_planes = one;
+    invalid_planes[22] = 32;
+    assert!(matches!(
+        hcompress::hcompress_tile_into(&invalid_planes, false, 1, &mut out),
+        Err(crate::error::FitsError::UnsupportedCompression { .. })
+    ));
 }
 
 #[test]
@@ -1109,6 +1238,15 @@ fn gunzip_rejects_a_stream_larger_than_its_tile() {
     assert!(super::gzip::gunzip(&bomb, big.len() - 1).is_err());
     // Bounded at the true size: decodes to exactly the original bytes.
     assert_eq!(super::gzip::gunzip(&bomb, big.len()).unwrap(), big);
+
+    let short = super::gzip::gzip_encode(&[1, 2, 3], 1);
+    assert!(matches!(
+        super::gzip::gunzip(&short, 4),
+        Err(FitsError::DataSizeMismatch {
+            expected: 4,
+            got: 3
+        })
+    ));
 }
 
 #[test]
