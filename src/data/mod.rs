@@ -107,21 +107,6 @@ impl ImageData {
         }
     }
 
-    /// The physical-plane values for these samples under `scaling`: `BZERO + BSCALE
-    /// × sample` (§3.4), with integer samples equal to the `BLANK` sentinel mapped
-    /// to `NaN` (float `NaN`/`Inf` pass through). Shared by [`Image::physical`] and
-    /// [`RawImage::physical`].
-    fn physical(&self, scaling: &Scaling) -> Vec<f64> {
-        self.physical_as(scaling)
-    }
-
-    /// The physical plane narrowed to `f32` in a single pass — see
-    /// [`RawImage::physical_f32`]. Scaling is still evaluated in `f64`, so each
-    /// element is the correctly-rounded `f32` of the true physical value.
-    fn physical_f32(&self, scaling: &Scaling) -> Vec<f32> {
-        self.physical_as(scaling)
-    }
-
     fn physical_as<O: PhysicalOut>(&self, scaling: &Scaling) -> Vec<O> {
         let Scaling {
             bscale,
@@ -437,7 +422,7 @@ impl<'a> RawImage<'a> {
     pub fn physical(&self) -> Vec<f64> {
         match &self.data {
             ImageBytes::Raw(bytes) => physical_from_be(bytes, self.bitpix, &self.scaling),
-            ImageBytes::Decoded(samples) => samples.physical(&self.scaling),
+            ImageBytes::Decoded(samples) => samples.physical_as::<f64>(&self.scaling),
         }
     }
 
@@ -451,7 +436,7 @@ impl<'a> RawImage<'a> {
     pub fn physical_f32(&self) -> Vec<f32> {
         match &self.data {
             ImageBytes::Raw(bytes) => physical_from_be(bytes, self.bitpix, &self.scaling),
-            ImageBytes::Decoded(samples) => samples.physical_f32(&self.scaling),
+            ImageBytes::Decoded(samples) => samples.physical_as::<f32>(&self.scaling),
         }
     }
 
@@ -671,13 +656,13 @@ impl Image {
     /// `NaN`/`Inf` pass through. The unsigned-integer convention falls out for
     /// free — e.g. a signed-16 buffer with `BZERO = 32768` yields the `u16` value.
     pub fn physical(&self) -> Vec<f64> {
-        self.samples.physical(&self.scaling)
+        self.samples.physical_as::<f64>(&self.scaling)
     }
 
     /// The physical plane narrowed to `f32` in a single pass — the compact, lossy
     /// counterpart to [`physical`](Image::physical); see [`RawImage::physical_f32`].
     pub fn physical_f32(&self) -> Vec<f32> {
-        self.samples.physical_f32(&self.scaling)
+        self.samples.physical_as::<f32>(&self.scaling)
     }
 
     /// The effective element type these samples represent, resolving the unsigned and
@@ -707,9 +692,8 @@ where
 }
 
 /// Output element type of the physical-plane map. Private, hence sealed: the only
-/// implementors are `f64` (the canonical plane, [`ImageData::physical`]) and `f32`
-/// (the compact plane, [`ImageData::physical_f32`]). The scaling arithmetic always
-/// runs in `f64`; `from_f64` is the final per-element narrowing.
+/// implementors are `f64` (the canonical plane) and `f32` (the compact plane). The
+/// scaling arithmetic always runs in `f64`; `from_f64` is the final narrowing.
 trait PhysicalOut: Copy {
     fn from_f64(value: f64) -> Self;
 }

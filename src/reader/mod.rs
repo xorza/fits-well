@@ -30,8 +30,6 @@ use source::StreamSource;
 
 #[cfg(feature = "compression")]
 use crate::compress::{decompress_image, decompress_image_into_words, uncompress_table};
-#[cfg(feature = "compression")]
-use crate::data::Image;
 
 /// One Header/Data Unit located by the reader.
 ///
@@ -257,15 +255,6 @@ impl<S: Source> FitsReader<S> {
         })
     }
 
-    /// Decompress a tiled-compressed (`ZIMAGE`) HDU into its owned [`Image`] — the
-    /// shared step behind [`FitsReader::read_image`] and
-    /// [`FitsReader::read_image_view`], which then package the result differently.
-    #[cfg(feature = "compression")]
-    fn decompress_at(&mut self, index: usize) -> Result<Image> {
-        let table = self.read_table(index)?;
-        decompress_image(&self.hdus[index].header, &table)
-    }
-
     /// Read an HDU's image as a [`RawImage`], transparently handling **both** plain
     /// and tiled-compressed (`ZIMAGE`) images — the caller doesn't need to know which.
     /// Errors with [`FitsError::NotAnImage`] for tables, random groups, and unmodelled
@@ -285,7 +274,8 @@ impl<S: Source> FitsReader<S> {
         // image API regardless of storage.
         #[cfg(feature = "compression")]
         if self.checked_hdu(index)?.kind == HduKind::CompressedImage {
-            let img = self.decompress_at(index)?;
+            let table = self.read_table(index)?;
+            let img = decompress_image(&self.hdus[index].header, &table)?;
             return Ok(RawImage::decoded(img.samples, img.shape, img.scaling));
         }
 

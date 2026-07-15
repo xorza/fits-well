@@ -185,9 +185,6 @@ fn classifies_time_related_axes() {
     assert_eq!(TimeAxisKind::from_ctype("TIMELAG"), Some(Timelag));
     assert_eq!(TimeAxisKind::from_ctype("FREQUENCY"), Some(Frequency));
     assert_eq!(TimeAxisKind::from_ctype("RA---TAN"), None);
-    // is_time_ctype is true only for the absolute-time kind.
-    assert!(is_time_ctype("TIME"));
-    assert!(!is_time_ctype("PHASE"));
 }
 
 #[test]

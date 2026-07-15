@@ -637,7 +637,7 @@ impl FitsTime {
     /// `TIMEUNIT` from `MJDREF`) plus the reference. `None` if not a time axis.
     pub fn time_axis_mjd(&self, header: &Header, axis: usize, pixel: f64) -> Option<f64> {
         let ctype = header.get_text(key!("CTYPE{axis}").as_str())?;
-        if !is_time_ctype(ctype) {
+        if TimeAxisKind::from_ctype(ctype) != Some(TimeAxisKind::Time) {
             return None;
         }
         let crpix = header.get_real(key!("CRPIX{axis}").as_str()).unwrap_or(0.0);
@@ -687,12 +687,6 @@ impl TimeAxisKind {
             _ => None,
         }
     }
-}
-
-/// True if a `CTYPE` denotes an absolute *time* axis (`'TIME'` or a time-scale
-/// name) — the kind [`FitsTime::time_axis_mjd`] resolves to an MJD.
-fn is_time_ctype(ctype: &str) -> bool {
-    TimeAxisKind::from_ctype(ctype) == Some(TimeAxisKind::Time)
 }
 
 /// The reference epoch as MJD: `MJDREF` (or `MJDREFI`+`MJDREFF`), else `JDREF`
