@@ -9,6 +9,13 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
 
+/// An HDU's position-derived header form before its complete role is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HduPosition {
+    Primary,
+    Extension,
+}
+
 /// The structural role already established by file position and mandatory header
 /// signatures. Extent calculation uses this instead of interpreting reserved cards
 /// such as `GROUPS` outside the role where the standard defines them.
@@ -20,22 +27,25 @@ pub(crate) enum HduRole {
 }
 
 impl HduRole {
-    pub(crate) fn from_header(header: &Header, first: bool) -> Result<HduRole> {
-        if first {
-            header
-                .get_logical("SIMPLE")?
-                .ok_or(FitsError::MissingKeyword { name: "SIMPLE" })?;
-            if header.get_logical("GROUPS")? == Some(true) {
-                validate_random_groups_axes(&header.axes()?)?;
-                Ok(HduRole::RandomGroups)
-            } else {
-                Ok(HduRole::Primary)
+    pub(crate) fn from_header(header: &Header, position: HduPosition) -> Result<HduRole> {
+        match position {
+            HduPosition::Primary => {
+                header
+                    .get_logical("SIMPLE")?
+                    .ok_or(FitsError::MissingKeyword { name: "SIMPLE" })?;
+                if header.get_logical("GROUPS")? == Some(true) {
+                    validate_random_groups_axes(&header.axes()?)?;
+                    Ok(HduRole::RandomGroups)
+                } else {
+                    Ok(HduRole::Primary)
+                }
             }
-        } else {
-            header
-                .get_text("XTENSION")?
-                .ok_or(FitsError::MissingKeyword { name: "XTENSION" })?;
-            Ok(HduRole::Extension)
+            HduPosition::Extension => {
+                header
+                    .get_text("XTENSION")?
+                    .ok_or(FitsError::MissingKeyword { name: "XTENSION" })?;
+                Ok(HduRole::Extension)
+            }
         }
     }
 }
