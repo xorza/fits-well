@@ -5,7 +5,7 @@ use crate::hdu::HduKind;
 use crate::header::from_card_lines as header;
 use crate::reader::ChecksumReport;
 use crate::reader::FitsReader;
-use crate::table::ColumnData;
+use crate::table::{CharacterField, ColumnData};
 use crate::writer::*;
 use std::io;
 use std::io::Cursor;
@@ -108,12 +108,16 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
     ));
     assert!(writer.into_inner().into_inner().is_empty());
 
-    let invalid_text = WriteColumn::fixed("NAME", ColumnData::Text(vec!["Véga".to_string()]), 4);
+    let invalid_text = WriteColumn::fixed(
+        "NAME",
+        ColumnData::Character(vec![CharacterField::new("Véga".as_bytes().to_vec())]),
+        4,
+    );
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
         writer.write_table(1, &[invalid_text]),
         Err(FitsError::InvalidAscii {
-            context: "binary text cell"
+            context: "binary character cell"
         })
     ));
     assert!(writer.into_inner().into_inner().is_empty());
@@ -240,10 +244,10 @@ fn writes_tdim_q_vla_and_bit_columns() {
         .wide(),
         WriteColumn::vla(
             "TXT",
-            ColumnType::Text,
+            ColumnType::Character,
             vec![
-                ColumnData::Text(vec!["hello".into()]),
-                ColumnData::Text(vec!["a".into(), "bc".into()]),
+                ColumnData::Character(vec!["hello".into()]),
+                ColumnData::Character(vec!["abc".into()]),
             ],
         ),
         // 12-bit X column: 2 bytes/row.
@@ -270,8 +274,8 @@ fn writes_tdim_q_vla_and_bit_columns() {
     assert_eq!(
         t.column_by_idx(2).unwrap().vla().unwrap(),
         vec![
-            ColumnData::Text(vec!["hello".into()]),
-            ColumnData::Text(vec!["abc".into()])
+            ColumnData::Character(vec!["hello".into()]),
+            ColumnData::Character(vec!["abc".into()])
         ]
     );
     assert_eq!(t.columns[3].tform.kind, TformKind::Bit);
@@ -314,7 +318,7 @@ fn writes_and_reads_back_a_binary_table() {
         .with_unit("m"),
         WriteColumn::fixed(
             "NAME",
-            ColumnData::Text(vec!["AB".into(), "CDE".into(), "F".into()]),
+            ColumnData::Character(vec!["AB".into(), "CDE".into(), "F".into()]),
             3, // 3-char field
         ),
     ];
@@ -343,8 +347,72 @@ fn writes_and_reads_back_a_binary_table() {
     );
     assert_eq!(
         t.column_by_idx(2).unwrap().raw().unwrap(),
-        ColumnData::Text(vec!["AB".into(), "CDE".into(), "F".into()])
+        ColumnData::Character(vec![
+            CharacterField::new(b"AB ".to_vec()),
+            CharacterField::new(b"CDE".to_vec()),
+            CharacterField::new(b"F  ".to_vec())
+        ])
     );
+}
+
+#[test]
+fn binary_character_columns_round_trip_exactly_and_reject_over_width() {
+    let fields = vec![
+        CharacterField::new(b"AB  ".to_vec()),
+        CharacterField::new(b"AB\0x".to_vec()),
+        CharacterField::new(b"\0xyz".to_vec()),
+        CharacterField::new(b"    ".to_vec()),
+    ];
+    let vla_rows: Vec<_> = fields
+        .iter()
+        .cloned()
+        .map(|field| ColumnData::Character(vec![field]))
+        .collect();
+    let columns = [
+        WriteColumn::fixed("FIXED", ColumnData::Character(fields.clone()), 4),
+        WriteColumn::vla("PCHAR", ColumnType::Character, vla_rows.clone()),
+        WriteColumn::vla("QCHAR", ColumnType::Character, vla_rows.clone()).wide(),
+    ];
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_table(4, &columns).unwrap();
+    let bytes = writer.into_inner().into_inner();
+
+    let mut reader = FitsReader::open(Cursor::new(bytes)).unwrap();
+    assert_eq!(
+        reader.hdus[1].header.get_text("TFORM2").unwrap(),
+        Some("1PA(4)")
+    );
+    assert_eq!(
+        reader.hdus[1].header.get_text("TFORM3").unwrap(),
+        Some("1QA(4)")
+    );
+    let table = reader.read_table(1).unwrap();
+    assert_eq!(
+        table.column_by_idx(0).unwrap().raw().unwrap(),
+        ColumnData::Character(fields.clone())
+    );
+    assert_eq!(table.column_by_idx(1).unwrap().vla().unwrap(), vla_rows);
+    assert_eq!(table.column_by_idx(2).unwrap().vla().unwrap(), vla_rows);
+    assert_eq!(fields[0].members(), b"AB  ");
+    assert_eq!(fields[1].members(), b"AB");
+    assert!(fields[2].is_null());
+    assert!(!fields[3].is_null());
+    assert_eq!(fields[3].members(), b"    ");
+
+    let too_wide = WriteColumn::fixed(
+        "BAD",
+        ColumnData::Character(vec![CharacterField::new(b"ABCDE".to_vec())]),
+        4,
+    );
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_table(1, &[too_wide]),
+        Err(FitsError::RowWidthMismatch {
+            computed: 5,
+            declared: 4
+        })
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
 }
 
 #[test]

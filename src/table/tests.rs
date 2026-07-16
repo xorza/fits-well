@@ -113,7 +113,10 @@ fn decodes_fixed_width_columns_from_hand_built_data() {
     );
     assert_eq!(
         table.column_by_idx(2).unwrap().raw().unwrap(),
-        ColumnData::Text(vec!["ABC".into(), "DE".into()]) // trailing space trimmed
+        ColumnData::Character(vec![
+            CharacterField::new(b"ABC".to_vec()),
+            CharacterField::new(b"DE ".to_vec())
+        ])
     );
 }
 
@@ -471,11 +474,31 @@ fn column_index_is_case_insensitive() {
 }
 
 #[test]
-fn a_column_terminates_at_the_first_nul() {
-    // §6.3: an embedded NUL ends the `A` string; bytes after it are dropped.
-    assert_eq!(trim_text(b"AB\0CD\0\0"), "AB");
-    assert_eq!(trim_text(b"hello   "), "hello"); // trailing spaces still trimmed
-    assert_eq!(trim_text(b"\0junk"), ""); // leading NUL → empty
+fn character_columns_preserve_members_terminators_and_null_strings() {
+    let header = table_header(4, 4, &["4A"]);
+    let fields = [b"AB  ", b"AB\0x", b"\0xyz", b"    "];
+    let data = fields
+        .iter()
+        .flat_map(|field| field.iter().copied())
+        .collect();
+    let table = BinTable::from_data(&header, data).unwrap();
+    let ColumnData::Character(values) = table.column_by_idx(0).unwrap().raw().unwrap() else {
+        panic!("expected exact binary character fields");
+    };
+    assert_eq!(
+        values,
+        fields
+            .iter()
+            .map(|field| CharacterField::new(field.to_vec()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(values[0].members(), b"AB  ");
+    assert_eq!(values[1].members(), b"AB");
+    assert!(!values[1].is_null());
+    assert_eq!(values[2].members(), b"");
+    assert!(values[2].is_null());
+    assert_eq!(values[3].members(), b"    ");
+    assert!(!values[3].is_null());
 }
 
 #[test]
@@ -531,8 +554,8 @@ fn reads_the_real_aips_antenna_table() {
 
     // Decoded element counts: one ANNAME string per row, 3 doubles per row, none for 0D.
     match table.column_by_idx(0).unwrap().raw().unwrap() {
-        ColumnData::Text(v) => assert_eq!(v.len(), 28),
-        other => panic!("ANNAME should be Text, got {other:?}"),
+        ColumnData::Character(v) => assert_eq!(v.len(), 28),
+        other => panic!("ANNAME should be Character, got {other:?}"),
     }
     match table.column_by_idx(1).unwrap().raw().unwrap() {
         ColumnData::F64(v) => assert_eq!(v.len(), 28 * 3),

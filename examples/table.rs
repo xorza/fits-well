@@ -17,7 +17,7 @@ fn main() -> fits_well::Result<()> {
         WriteColumn::fixed("ID", ColumnData::I32(vec![1, 2, 3]), 1),
         WriteColumn::fixed(
             "NAME",
-            ColumnData::Text(vec!["Vega".into(), "Sirius".into(), "Rigel".into()]),
+            ColumnData::Character(vec!["Vega".into(), "Sirius".into(), "Rigel".into()]),
             8,
         ),
         WriteColumn::fixed("MAG", ColumnData::F64(vec![0.03, -1.46, 0.13]), 1).with_unit("mag"),
