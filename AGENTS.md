@@ -156,7 +156,7 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `bitpix.rs` | `BITPIX` element type + element sizes | done |
 | `endian.rs` | big-endian scalar (de)serialization shared by image/table/compression decode + encode | done |
 | `keyword.rs` | stack-allocated indexed-keyword formatting (`key!` macro / `KeyBuf`): builds `NAXISn`/`PVi_m`/`CTYPEn`-style keys without the per-lookup `format!` heap alloc (one WCS parse does ~90) | done |
-| `header/` | ordered card model (`value.rs`, `card/`, `mod.rs`): parse/render, `CONTINUE` folding, `HIERARCH` compound keys, keyword index, typed getters + builder | done |
+| `header/` | ordered card model (`value.rs`, `card/`, `mod.rs`): fallible `try_*` authoring, parse/render, lossless logical `CONTINUE` folding, `HIERARCH` compound keys, keyword index, typed getters | done |
 | `hdu/` | role-aware HDU classification + primary/extension/random-groups data-unit sizing (Eqs. 1/2/4) | done |
 | `reader/` | HDU scan over a `Source` (`source.rs`: `StreamSource` copies, `SliceSource`/`MmapSource` borrow zero-copy); `open`/`from_bytes`/`open_mmap`; `read_image` (owned, transparently decompresses a `ZIMAGE` `CompressedImage`)/`read_image_view(idx, &mut Vec<u64>)` (borrowed `ImageView` swapped into a caller-owned `u64` scratch — the page-fault-free read-loop path; the reader retains nothing image-sized)/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_table`/`verify_checksum`, raw `DataUnit` | done |
 | `writer/` | multi-HDU writer: `write_image`/`write_table` (fixed + `P`/`Q` VLAs, including jagged bit arrays)/`write_ascii_table`/`write_compressed_image`(`_lossy`)/`write_compressed_table`, `with_checksums` | done |

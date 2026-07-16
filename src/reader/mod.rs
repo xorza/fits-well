@@ -22,6 +22,7 @@ use crate::hdu::HduPosition;
 use crate::hdu::HduRole;
 use crate::hdu::data_extent;
 use crate::header::Header;
+use crate::header::card::is_end_record;
 use crate::table::BinTable;
 
 pub(crate) mod source;
@@ -546,9 +547,7 @@ fn scan_header_unit<S: Source>(
 }
 
 fn block_has_end(block: &[u8]) -> bool {
-    block
-        .chunks_exact(CARD_SIZE)
-        .any(|card| &card[..3] == b"END" && card[3..].iter().all(|&b| b == b' '))
+    block.chunks_exact(CARD_SIZE).any(is_end_record)
 }
 
 #[cfg(test)]

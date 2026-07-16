@@ -59,8 +59,8 @@ For every batch:
 
 ## Batch 10 — High: make header construction fallible and lossless
 
-- [ ] **Add fallible header mutation.** Reserve `END`/`CONTINUE`, validate keywords, restricted-ASCII strings/comments, and finite numeric values at insertion rather than asserting or panicking during render (`src/header/mod.rs:263-284`, `src/header/card/mod.rs:504-509`). Verify every invalid public input returns an error before bytes are written.
-- [ ] **Preserve complete `CONTINUE` payloads and comments.** Retain orphan quoted content, concatenate continuation comment fragments, and reject unrepresentable final comments instead of clipping (`src/header/mod.rs:74-84`, `src/header/mod.rs:339-356`, `src/header/card/mod.rs:404-456`, `src/header/card/mod.rs:533-538`). Verify the normative multi-card example and exact-fit/+1-byte boundaries.
+- [x] **Add fallible header mutation.** `Header::try_set`, `try_comment`, `try_push_comment`, and `try_push_history` validate standard and reserved keywords, restricted-ASCII text, finite real/complex values, and physical card length before changing the header. The scanner and parser share one canonical blank `END` recognizer. Invalid-keyword, valued-control, Unicode/control, NaN/Inf, and oversized-complex fixtures all leave the header unchanged (`docs/refs/fits_standard40.md:670-807`, `docs/refs/fits_standard40.md:925-1035`).
+- [x] **Preserve complete `CONTINUE` payloads and comments.** Orphan quoted records are retained as commentary, every continued comment fragment is concatenated, and the renderer uses an empty final substring when needed for a fitting comment or returns `HeaderCardTooLong` without appending partial records. The normative multi-record example plus exact-fit/+1-byte commentary and final-comment boundaries cover read and write behavior (`docs/refs/fits_standard40.md:810-874`).
 
 ## Batch 11 — High: seal image and writer state invariants
 

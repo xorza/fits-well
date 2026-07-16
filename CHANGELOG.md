@@ -44,7 +44,8 @@
   cannot be ignored. They no longer return linear-stage values as complete world
   coordinates when a nonlinear algorithm is unavailable.
 - `FitsError::DataUnitTooLarge::bytes` changed from `usize` to `u64`. The
-  `TypeMismatch`, `InvalidAscii`, `AsciiFieldTooWide`, `IntegerOutOfRange`,
+  `TypeMismatch`, `InvalidAscii`, `ReservedKeyword`, `InvalidHeaderValue`,
+  `HeaderCardTooLong`, `AsciiFieldTooWide`, `IntegerOutOfRange`,
   `UnsupportedWcsTransform`, `WcsProjectionDomain`, `WcsNoConvergence`,
   `PlioValueOutOfRange`, `TableMetadataMismatch`, and `GroupIndexOutOfBounds`
   variants were added; exhaustive matches on `FitsError` must handle them.
@@ -79,6 +80,11 @@
 - Header text, header comments, binary-table character members, ASCII-table text,
   units, names, and null markers are validated as FITS restricted ASCII before
   writing.
+- Public header mutation is fallible through `Header::try_set`, `try_comment`,
+  `try_push_comment`, and `try_push_history`. Invalid/reserved keywords,
+  non-ASCII text, nonfinite numeric values, and cards longer than 80 bytes are
+  rejected without changing the header; the former panicking mutation methods
+  are no longer public.
 - Binary-table writing validates each column state before emitting data. `wide()` is
   restricted to VLA columns, bit columns require the exact packed byte count, and
   VLA rows must match their declared element type.
@@ -103,6 +109,10 @@
 - Binary-table fixed and P/Q `A` cells preserve trailing spaces, NUL terminators,
   undefined bytes after the first NUL, and explicit null strings. Writing accepts
   NUL-terminated fields and rejects over-width fixed fields instead of truncating.
+- Orphan `CONTINUE` records retain their quoted payload and comment as commentary,
+  and comments spread across a long-string chain are concatenated instead of
+  replacing earlier fragments. Header rendering returns `HeaderCardTooLong`
+  rather than clipping an over-width card or final long-string comment.
 - Fixed-width binary `X` columns now clear unused low bits in every row's final
   byte, as required for non-byte-aligned bit arrays.
 - Zero-length `P`/`Q` descriptor cells no longer fail their column's `TDIMn`

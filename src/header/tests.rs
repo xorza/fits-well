@@ -151,6 +151,29 @@ fn continue_records_reassemble_a_long_string() {
 }
 
 #[test]
+fn continue_records_concatenate_the_normative_comment_fragments() {
+    let h = Header::parse(&header_bytes(&[
+        "STRKEY  = 'This keyword value is continued &'",
+        "CONTINUE  ' over multiple keyword records.&'",
+        "CONTINUE  '&' / The comment field for this",
+        "CONTINUE  '&' / keyword is also continued",
+        "CONTINUE  '' / over multiple records.",
+        "END",
+    ]))
+    .unwrap();
+    let entry = h.iter().next().unwrap();
+    assert_eq!(
+        entry.value.and_then(Value::as_text),
+        Some("This keyword value is continued  over multiple keyword records.")
+    );
+    assert_eq!(
+        entry.comment,
+        Some("The comment field for this keyword is also continued over multiple records.")
+    );
+    assert_eq!(h.cards.len(), 1);
+}
+
+#[test]
 fn trailing_ampersand_without_a_continue_is_a_literal() {
     let h = Header::parse(&header_bytes(&["NOTE    = 'ends with amp &'", "END"])).unwrap();
     assert_eq!(h.get_text("NOTE").unwrap(), Some("ends with amp &"));
@@ -158,10 +181,23 @@ fn trailing_ampersand_without_a_continue_is_a_literal() {
 
 #[test]
 fn orphan_continue_is_demoted_to_commentary() {
-    let h = Header::parse(&header_bytes(&["CONTINUE  'no predecessor'", "END"])).unwrap();
+    let h = Header::parse(&header_bytes(&[
+        "CONTINUE  'no predecessor' / retained note",
+        "END",
+    ]))
+    .unwrap();
     assert_eq!(h.cards.len(), 1);
     assert_eq!(h.cards[0].kind, CardKind::Commentary);
+    assert_eq!(
+        h.cards[0].comment.as_deref(),
+        Some("  'no predecessor' / retained note")
+    );
     assert_eq!(h.get("CONTINUE"), None);
+
+    let mut rendered = Vec::new();
+    render_header(&h, &mut rendered).unwrap();
+    let expected = b"CONTINUE  'no predecessor' / retained note";
+    assert_eq!(&rendered[..expected.len()], expected);
 }
 
 #[test]
@@ -215,11 +251,94 @@ fn builder_appends_commentary_cards() {
 }
 
 #[test]
-#[should_panic(expected = "commentary keyword")]
-fn set_rejects_commentary_keywords() {
-    // `COMMENT`/`HISTORY` must go through push_comment/push_history; a value card for
-    // them would render the malformed `COMMENT = '…'`.
-    Header::new().set("COMMENT", "oops");
+fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
+    let mut header = Header::new();
+    for keyword in ["bad", "TOO-LONG-KEY"] {
+        assert!(matches!(
+            header.try_set(keyword, 1),
+            Err(FitsError::InvalidKeyword { name }) if name == keyword
+        ));
+    }
+    for keyword in ["END", "CONTINUE", "COMMENT", "HISTORY"] {
+        assert!(matches!(
+            header.try_set(keyword, 1),
+            Err(FitsError::ReservedKeyword { name }) if name == keyword
+        ));
+    }
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(
+            header.try_set("REAL", value),
+            Err(FitsError::InvalidHeaderValue { keyword, reason })
+                if keyword == "REAL" && reason == "real values must be finite"
+        ));
+    }
+    assert!(matches!(
+        header.try_set(
+            "COMPLEX",
+            Value::ComplexReal {
+                re: 1.0,
+                im: f64::NAN,
+            },
+        ),
+        Err(FitsError::InvalidHeaderValue { keyword, reason })
+            if keyword == "COMPLEX" && reason == "complex real components must be finite"
+    ));
+    assert!(matches!(
+        header.try_set("OBJECT", "Véga"),
+        Err(FitsError::InvalidAscii {
+            context: "header text value"
+        })
+    ));
+    assert!(matches!(
+        header.try_set(
+            "COMPLEX",
+            Value::ComplexInteger {
+                re: u128::MAX.into(),
+                im: u128::MAX.into(),
+            },
+        ),
+        Err(FitsError::HeaderCardTooLong {
+            keyword,
+            length: 92,
+        }) if keyword == "COMPLEX"
+    ));
+    assert!(header.cards.is_empty());
+
+    header.try_set("VALUE", 1).unwrap();
+    header.try_comment("VALUE", &"c".repeat(47)).unwrap();
+    assert!(matches!(
+        header.try_comment("VALUE", &"c".repeat(48)),
+        Err(FitsError::HeaderCardTooLong {
+            keyword,
+            length: 81,
+        }) if keyword == "VALUE"
+    ));
+    assert_eq!(
+        header.cards[0].comment.as_deref(),
+        Some("c".repeat(47).as_str())
+    );
+    assert!(matches!(
+        header.try_comment("VALUE", "bad\ncomment"),
+        Err(FitsError::InvalidAscii {
+            context: "header comment"
+        })
+    ));
+
+    header.try_push_comment(&"x".repeat(72)).unwrap();
+    assert!(matches!(
+        header.try_push_comment(&"x".repeat(73)),
+        Err(FitsError::HeaderCardTooLong {
+            keyword,
+            length: 81,
+        }) if keyword == "COMMENT"
+    ));
+    assert!(matches!(
+        header.try_push_history("history\nline"),
+        Err(FitsError::InvalidAscii {
+            context: "header comment"
+        })
+    ));
+    assert_eq!(header.cards.len(), 2);
 }
 
 #[test]

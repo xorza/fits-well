@@ -45,10 +45,10 @@ CONTINUE  ' Low 21C. Winds NNE at 5 to 10 mph.' / forecast text
 
 A string value is continued when it ends (inside the quotes) with `&` **and** the
 next record is a conforming `CONTINUE` record. Reconstruct by stripping each
-trailing `&` and concatenating the substrings; the comment (if any) is taken from
-the last record. A reader that does not implement the convention still parses the
-first record as an ordinary (truncated) string and sees the rest as `CONTINUE`
-commentary keywords — so the file stays readable.
+trailing `&` and concatenating the substrings. Comment fragments on successive
+records form one continued comment field. A reader that does not implement the
+convention still parses the first record as an ordinary (truncated) string and
+sees the rest as `CONTINUE` commentary keywords — so the file stays readable.
 
 ### Restriction
 
@@ -146,9 +146,10 @@ HIERARCH ESO DET CHIP1 NAME = 'CCD-44' / detector chip name
 ## Implementation notes (this library)
 
 - **CONTINUE**: model a logical keyword as possibly spanning multiple physical
-  records. Parsing returns the reassembled value; writing re-splits on the
-  68-char boundary, never breaking an escaped `''` pair across substrings. Keep
-  the physical records so round-trips reproduce the original byte layout.
+  records. Parsing returns the reassembled value and concatenated comment;
+  writing re-splits on the 68-char boundary without breaking an escaped `''`
+  pair. Orphan records remain commentary, and writing preserves the logical
+  model through a canonical chain rather than reproducing the original split.
 - **CHECKSUM/DATASUM**: implement the 32-bit one's-complement accumulator (with
   end-around carry) over big-endian 32-bit words; it is order-independent within
   a record, so it vectorizes. Offer `verify()` (sum HDU → expect `0xFFFFFFFF`)
