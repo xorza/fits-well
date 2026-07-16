@@ -509,7 +509,7 @@ fn scan_header_unit<S: Source>(
         let block = source.slice(*offset, BLOCK_SIZE, scratch)?;
         *offset += BLOCK_SIZE as u64;
         sum = checksum::accumulate(block, sum);
-        allocation::try_reserve_exact(&mut bytes, block.len())?;
+        allocation::try_reserve(&mut bytes, block.len())?;
         bytes.extend_from_slice(block);
         if block_has_end(block) {
             return Ok(NextHeader::Found { bytes, sum });

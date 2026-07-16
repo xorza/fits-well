@@ -7,7 +7,30 @@ use crate::reader::ChecksumReport;
 use crate::reader::FitsReader;
 use crate::table::ColumnData;
 use crate::writer::*;
+use std::io;
 use std::io::Cursor;
+use std::io::Write;
+
+#[derive(Debug, Default)]
+struct FailFirstWrite {
+    bytes: Vec<u8>,
+    failed: bool,
+}
+
+impl Write for FailFirstWrite {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if !self.failed {
+            self.failed = true;
+            return Err(io::Error::other("injected write failure"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 fn write_to_vec(image: &Image) -> Vec<u8> {
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
@@ -103,6 +126,24 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
             Err(FitsError::DataUnitOverflow)
         ));
     }
+}
+
+#[test]
+fn writer_state_is_committed_only_after_an_hdu_write_succeeds() {
+    let image = Image {
+        shape: vec![1],
+        samples: ImageData::U8(vec![7]),
+        scaling: identity(),
+    };
+    let mut writer = FitsWriter::new(FailFirstWrite::default());
+    assert!(matches!(writer.write_image(&image), Err(FitsError::Io(_))));
+    assert!(!writer.has_primary);
+
+    writer.write_image(&image).unwrap();
+    let bytes = writer.into_inner().bytes;
+    let reader = FitsReader::open(Cursor::new(bytes)).unwrap();
+    assert_eq!(reader.hdus.len(), 1);
+    assert_eq!(reader.hdus[0].kind, HduKind::Primary);
 }
 
 #[test]

@@ -40,6 +40,9 @@
   present with the wrong representation. This applies to HDU layout, image, table,
   ASCII-table, random-groups, compression, WCS, and time metadata instead of
   treating the card as absent or silently applying a default.
+- Fallible allocation is limited to reader staging and final decompression outputs
+  whose sizes come directly from untrusted FITS metadata. Writer, encoder, and
+  caller-owned buffers retain checked arithmetic but use ordinary `Vec` allocation.
 - Header text, header comments, binary-table text, ASCII-table text, units, names,
   and null markers are validated as FITS restricted ASCII before writing.
 - Binary-table writing validates each column state before emitting data. `wide()` is
@@ -59,9 +62,10 @@
 - Zero-sized images and one-pixel HCOMPRESS tiles no longer panic or fabricate
   pixels during tiled compression round trips.
 - Reader, writer, image, table, VLA, and compressed-table dimensions now use checked
-  narrowing and arithmetic. Oversized allocations return `DataUnitTooLarge` or
-  `DataUnitOverflow` instead of truncating, wrapping, panicking, or relying on an
-  allocation abort.
+  narrowing and arithmetic. Overflow returns `DataUnitOverflow`; reader staging and
+  decompression output allocation failures return `DataUnitTooLarge`.
+- `FitsWriter` commits primary-HDU state only after the HDU write succeeds, so a
+  retry after a failure that wrote no bytes still emits a primary HDU.
 - One's-complement checksum accumulation now folds carry while streaming, avoiding
   accumulator overflow on very large valid HDUs.
 - `P` and `Q` descriptors are constrained to their signed 32-bit and 64-bit FITS
@@ -101,8 +105,8 @@
 - Header restoration removes compression metadata and rebuilds its keyword index in
   one pass. Header cards render directly into a reusable writer header buffer,
   including long-string `CONTINUE` chains.
-- Writer padding no longer allocates per data unit, and fallible reusable buffers are
-  reserved from validated final sizes.
+- Writer padding no longer allocates per data unit, and reusable buffers reserve from
+  validated final sizes.
 - ZPN projection values and derivatives are evaluated together with extended Horner.
 
 ### Documentation

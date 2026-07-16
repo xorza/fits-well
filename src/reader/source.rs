@@ -81,7 +81,7 @@ fn mem_slice(bytes: &[u8], offset: u64, len: usize) -> Result<&[u8]> {
 
 /// Owned copy of [`mem_slice`] — the `read_owned` form for the in-memory sources.
 fn mem_owned(bytes: &[u8], offset: u64, len: usize) -> Result<Vec<u8>> {
-    allocation::try_copy(mem_slice(bytes, offset, len)?)
+    Ok(mem_slice(bytes, offset, len)?.to_vec())
 }
 
 /// A streaming `Read + Seek` source. Each fetch seeks and copies the range out —

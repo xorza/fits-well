@@ -13,7 +13,6 @@ use std::ops::Range;
 
 use num_complex::Complex;
 
-use crate::allocation;
 use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
 use crate::block::SPACE_FILL;
@@ -57,7 +56,7 @@ pub(crate) fn render_header(header: &Header, buf: &mut Vec<u8>) -> Result<()> {
         .and_then(|records| records.checked_mul(CARD_SIZE))
         .ok_or(FitsError::DataUnitOverflow)?;
     buf.clear();
-    allocation::try_reserve_exact(buf, min_len)?;
+    buf.reserve(min_len);
     for card in &header.cards {
         card.render_into(buf);
     }
@@ -75,7 +74,7 @@ fn pad_to_block(buf: &mut Vec<u8>, fill: u8) -> Result<()> {
             .len()
             .checked_add(BLOCK_SIZE - rem)
             .ok_or(FitsError::DataUnitOverflow)?;
-        allocation::try_resize(buf, padded, fill)?;
+        buf.resize(padded, fill);
     }
     Ok(())
 }
@@ -301,11 +300,12 @@ impl<W: Write> FitsWriter<W> {
             .checked_mul(image.samples.bitpix().elem_size())
             .ok_or(FitsError::DataUnitOverflow)?;
         let header = image_header(image, !self.has_primary)?;
-        self.has_primary = true;
         self.scratch.clear();
-        allocation::try_reserve_exact(&mut self.scratch, encoded_len)?;
+        self.scratch.reserve_exact(encoded_len);
         image.samples.encode_into(&mut self.scratch);
-        self.write_hdu(header, ZERO_FILL)
+        self.write_hdu(header, ZERO_FILL)?;
+        self.has_primary = true;
+        Ok(())
     }
 
     /// Write a binary table as a `BINTABLE` extension. A dataless primary HDU is
@@ -315,8 +315,7 @@ impl<W: Write> FitsWriter<W> {
     pub fn write_table(&mut self, nrows: usize, columns: &[WriteColumn]) -> Result<()> {
         fits_i64(nrows)?;
         fits_i64(columns.len())?;
-        let mut layouts = Vec::new();
-        allocation::try_reserve_exact(&mut layouts, columns.len())?;
+        let mut layouts = Vec::with_capacity(columns.len());
         let mut row_len = 0usize;
         for col in columns {
             let layout = validate_column(col, nrows)?;
@@ -348,7 +347,7 @@ impl<W: Write> FitsWriter<W> {
         let total_len = main_len
             .checked_add(heap_len)
             .ok_or(FitsError::DataUnitOverflow)?;
-        allocation::try_reserve_exact(&mut self.scratch, total_len)?;
+        self.scratch.reserve_exact(total_len);
         for r in 0..nrows {
             for col in columns {
                 match &col.values {
@@ -387,8 +386,7 @@ impl<W: Write> FitsWriter<W> {
     /// first if needed). Columns are packed left-to-right with no gaps; data is
     /// space-padded per §7.2.3.
     pub fn write_ascii_table(&mut self, nrows: usize, columns: &[AsciiWriteColumn]) -> Result<()> {
-        let mut tbcols = Vec::new();
-        allocation::try_reserve_exact(&mut tbcols, columns.len())?;
+        let mut tbcols = Vec::with_capacity(columns.len());
         let mut row_len = 0usize;
         for col in columns {
             validate_ascii_column(col)?;
@@ -410,7 +408,7 @@ impl<W: Write> FitsWriter<W> {
             .checked_mul(row_len)
             .ok_or(FitsError::DataUnitOverflow)?;
         self.ensure_primary()?;
-        allocation::try_reserve_exact(&mut self.scratch, total_len)?;
+        self.scratch.reserve_exact(total_len);
         for r in 0..nrows {
             for col in columns {
                 format_ascii_field(&mut self.scratch, col, r);
@@ -483,7 +481,7 @@ impl<W: Write> FitsWriter<W> {
                 .len()
                 .checked_add(BLOCK_SIZE - rem)
                 .ok_or(FitsError::DataUnitOverflow)?;
-            allocation::try_resize(&mut self.scratch, padded, fill)?;
+            self.scratch.resize(padded, fill);
         }
         let data_sum = if self.checksum {
             let sum = checksum::accumulate(&self.scratch, 0);
