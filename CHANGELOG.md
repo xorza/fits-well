@@ -57,6 +57,8 @@
 
 - Complex binary-table scaling now applies `TZEROn` only to the real component,
   as required by FITS, while `TSCALn` continues to scale both components.
+- Random-groups arrays now map integer samples equal to `BLANK` to `NaN` on the
+  physical plane, matching ordinary primary-array behavior.
 - GZIP, Rice, PLIO, and HCOMPRESS decoders now reject truncated streams, malformed
   control data, decompression bombs, and tiles whose decoded size differs from the
   declared geometry instead of manufacturing zero-valued pixels or reading out of
