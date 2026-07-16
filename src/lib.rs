@@ -93,7 +93,8 @@ pub use reader::source::MmapSource;
 pub use reader::source::{SliceSource, Source, StreamSource};
 pub use reader::{ChecksumReport, DataUnit, FitsReader, Hdu, SliceReader, StreamReader};
 pub use table::{
-    BinTable, BitColumn, Column, ColumnData, ColumnReader, TDisp, TDispKind, Tform, TformKind,
+    BinTable, BitColumn, CharacterField, Column, ColumnData, ColumnReader, TDisp, TDispKind, Tform,
+    TformKind,
 };
 pub use time::{
     Datetime, Epoch, EpochTime, FitsTime, GtiInterval, PhaseAxis, TimeAxisKind, TimeBounds,

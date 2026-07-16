@@ -18,6 +18,9 @@
   values instead of bounded `i64` components. `Value::as_integer` and
   `Value::as_real` now return `Result<Option<_>>` so bounded conversions report
   range failures explicitly. `FitsInteger` is exported from the crate.
+- Binary-table `A` columns now use `ColumnData::Character(Vec<CharacterField>)`
+  instead of `ColumnData::Text(Vec<String>)`; `Text` remains the ASCII-table value.
+  `ColumnType::Text` was renamed to `ColumnType::Character`.
 - `RawImage::decode` now consumes `self`, allowing already-owned decompressed samples
   to move out without cloning. With `ndarray`, `RawImage::to_ndarray(&self)` was
   replaced by the consuming `RawImage::into_ndarray(self)`.
@@ -40,6 +43,8 @@
 
 - Added `FitsInteger`, an exact FITS integer value with an allocation-free `i64`
   representation and a decimal fallback for the standard's unbounded range.
+- Added `CharacterField`, which preserves every stored byte of a binary-table `A`
+  cell and exposes its first-NUL member boundary and null-string state.
 - Added `Wcs::view` with immutable per-axis metadata and unsupported-axis status.
 - Added explicit `ColumnType` declarations for variable-length table columns.
 
@@ -52,8 +57,9 @@
 - Fallible allocation is limited to reader staging and final decompression outputs
   whose sizes come directly from untrusted FITS metadata. Writer, encoder, and
   caller-owned buffers retain checked arithmetic but use ordinary `Vec` allocation.
-- Header text, header comments, binary-table text, ASCII-table text, units, names,
-  and null markers are validated as FITS restricted ASCII before writing.
+- Header text, header comments, binary-table character members, ASCII-table text,
+  units, names, and null markers are validated as FITS restricted ASCII before
+  writing.
 - Binary-table writing validates each column state before emitting data. `wide()` is
   restricted to VLA columns, bit columns require the exact packed byte count, and
   VLA rows must match their declared element type.
@@ -68,6 +74,9 @@
   reparsed through `f64`, and integral reals outside `i64` now return a range error
   instead of saturating. Unsigned-64 image and binary-table writers emit the exact
   normative `BZERO`/`TZERO = 9223372036854775808` decimal.
+- Binary-table fixed and P/Q `A` cells preserve trailing spaces, NUL terminators,
+  undefined bytes after the first NUL, and explicit null strings. Writing accepts
+  NUL-terminated fields and rejects over-width fixed fields instead of truncating.
 - WCS unsupported-axis classification now recognizes the standard `LOG` and `TAB`
   algorithms on any four-character coordinate type, including time and generic axes,
   instead of limiting nonlinear suffix detection to spectral coordinate names.

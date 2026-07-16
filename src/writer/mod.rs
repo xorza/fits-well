@@ -34,6 +34,7 @@ use crate::header::value::Value;
 use crate::keyword::key;
 #[cfg(feature = "compression")]
 use crate::table::BinTable;
+use crate::table::CharacterField;
 use crate::table::ColumnData;
 
 /// 16-zero `CHECKSUM` value written before the real checksum is solved and
@@ -93,7 +94,7 @@ pub enum ColumnType {
     F64,
     ComplexF32,
     ComplexF64,
-    Text,
+    Character,
 }
 
 /// The mutually exclusive payload layouts of a binary-table writer column.
@@ -335,7 +336,7 @@ impl<W: Write> FitsWriter<W> {
                     let count = encoded_element_count(*kind, cell)? as u64;
                     validate_pq_descriptor(*wide, count, heap_len as u64)?;
                     heap_len = heap_len
-                        .checked_add(cell_byte_len(cell)?)
+                        .checked_add(cell_byte_len(*kind, cell)?)
                         .ok_or(FitsError::DataUnitOverflow)?;
                 }
             }
@@ -637,8 +638,8 @@ struct ColumnLayout {
 }
 
 impl ColumnType {
-    fn from_data(data: &ColumnData) -> ColumnType {
-        match data {
+    fn from_data(data: &ColumnData) -> Option<ColumnType> {
+        Some(match data {
             ColumnData::Logical(_) => ColumnType::Logical,
             ColumnData::Bytes(_) => ColumnType::Byte,
             ColumnData::I16(_) => ColumnType::I16,
@@ -648,12 +649,13 @@ impl ColumnType {
             ColumnData::F64(_) => ColumnType::F64,
             ColumnData::ComplexF32(_) => ColumnType::ComplexF32,
             ColumnData::ComplexF64(_) => ColumnType::ComplexF64,
-            ColumnData::Text(_) => ColumnType::Text,
-        }
+            ColumnData::Character(_) => ColumnType::Character,
+            ColumnData::Text(_) => return None,
+        })
     }
 
     fn matches(self, data: &ColumnData) -> bool {
-        self == ColumnType::from_data(data)
+        Some(self) == ColumnType::from_data(data)
     }
 
     fn letter(self) -> char {
@@ -667,13 +669,13 @@ impl ColumnType {
             ColumnType::F64 => 'D',
             ColumnType::ComplexF32 => 'C',
             ColumnType::ComplexF64 => 'M',
-            ColumnType::Text => 'A',
+            ColumnType::Character => 'A',
         }
     }
 
     fn elem_size(self) -> usize {
         match self {
-            ColumnType::Logical | ColumnType::Byte | ColumnType::Text => 1,
+            ColumnType::Logical | ColumnType::Byte | ColumnType::Character => 1,
             ColumnType::I16 => 2,
             ColumnType::I32 | ColumnType::F32 => 4,
             ColumnType::I64 | ColumnType::F64 | ColumnType::ComplexF32 => 8,
@@ -689,12 +691,14 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
     }
     match &col.values {
         WriteColumnData::Fixed { data, repeat } => {
-            let kind = ColumnType::from_data(data);
+            let kind = ColumnType::from_data(data).ok_or_else(|| FitsError::InvalidValue {
+                card: "binary character columns must use ColumnData::Character".to_string(),
+            })?;
             let expected = nrows
                 .checked_mul(*repeat)
                 .ok_or(FitsError::DataUnitOverflow)?;
             match data {
-                ColumnData::Text(values) => {
+                ColumnData::Character(values) => {
                     if values.len() != nrows {
                         return Err(FitsError::RowWidthMismatch {
                             computed: values.len(),
@@ -702,7 +706,13 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                         });
                     }
                     for value in values {
-                        validate_ascii(value, "binary text cell")?;
+                        validate_character(value, "binary character cell")?;
+                        if value.bytes.len() > *repeat {
+                            return Err(FitsError::RowWidthMismatch {
+                                computed: value.bytes.len(),
+                                declared: *repeat,
+                            });
+                        }
                     }
                 }
                 _ if data.element_count() != expected => {
@@ -734,9 +744,15 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                     kind.matches(cell),
                     "validated VLA kind must match every cell"
                 );
-                if let ColumnData::Text(values) = cell {
+                if let ColumnData::Character(values) = cell {
+                    if values.len() > 1 {
+                        return Err(FitsError::RowWidthMismatch {
+                            computed: values.len(),
+                            declared: 1,
+                        });
+                    }
                     for value in values {
-                        validate_ascii(value, "binary VLA text cell")?;
+                        validate_character(value, "binary VLA character cell")?;
                     }
                 }
                 let count = encoded_element_count(*kind, cell)?;
@@ -769,8 +785,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
     }
 }
 
-fn cell_byte_len(cell: &ColumnData) -> Result<usize> {
-    let kind = ColumnType::from_data(cell);
+fn cell_byte_len(kind: ColumnType, cell: &ColumnData) -> Result<usize> {
     encoded_element_count(kind, cell)?
         .checked_mul(kind.elem_size())
         .ok_or(FitsError::DataUnitOverflow)
@@ -778,9 +793,9 @@ fn cell_byte_len(cell: &ColumnData) -> Result<usize> {
 
 fn encoded_element_count(kind: ColumnType, cell: &ColumnData) -> Result<usize> {
     assert!(kind.matches(cell), "column kind must match its data");
-    if let ColumnData::Text(values) = cell {
+    if let ColumnData::Character(values) = cell {
         values.iter().try_fold(0usize, |len, value| {
-            len.checked_add(value.len())
+            len.checked_add(value.bytes.len())
                 .ok_or(FitsError::DataUnitOverflow)
         })
     } else {
@@ -806,9 +821,8 @@ fn validate_tdim(shape: Option<&[usize]>, element_count: usize) -> Result<()> {
 }
 
 /// Append `data[range]` to `out` as big-endian bytes, for every fixed numeric /
-/// logical / byte / complex kind. `Text` is handled by the two callers (a heap cell
-/// concatenates the strings, a main-table cell space-pads one row to its field
-/// width), so it is a no-op here.
+/// logical / byte / complex kind. Character and ASCII text values are handled by
+/// their format-specific callers, so they are no-ops here.
 fn append_cells(out: &mut Vec<u8>, data: &ColumnData, range: Range<usize>) {
     match data {
         ColumnData::Logical(v) => out.extend(v[range].iter().map(|&b| match b {
@@ -834,17 +848,16 @@ fn append_cells(out: &mut Vec<u8>, data: &ColumnData, range: Range<usize>) {
                 out.extend_from_slice(&im.to_be_bytes());
             }
         }
-        ColumnData::Text(_) => {} // strings are caller-specific (see the doc)
+        ColumnData::Character(_) | ColumnData::Text(_) => {}
     }
 }
 
 /// Append a whole column cell (a VLA row's array) to the heap, big-endian.
 fn append_be(out: &mut Vec<u8>, cell: &ColumnData) {
     match cell {
-        // Character VLAs (`PA`) concatenate the strings' bytes.
-        ColumnData::Text(v) => {
-            for s in v {
-                out.extend_from_slice(s.as_bytes());
+        ColumnData::Character(values) => {
+            for value in values {
+                out.extend_from_slice(&value.bytes);
             }
         }
         _ => append_cells(out, cell, 0..cell.element_count()),
@@ -856,11 +869,10 @@ fn pack_cell(out: &mut Vec<u8>, col: &WriteColumn, r: usize) {
         WriteColumnData::Fixed { data, repeat } => {
             let base = r * *repeat;
             match data {
-                ColumnData::Text(values) => {
-                    let bytes = values[r].as_bytes();
-                    let count = bytes.len().min(*repeat);
-                    out.extend_from_slice(&bytes[..count]);
-                    out.extend(std::iter::repeat_n(b' ', *repeat - count));
+                ColumnData::Character(values) => {
+                    let bytes = &values[r].bytes;
+                    out.extend_from_slice(bytes);
+                    out.extend(std::iter::repeat_n(b' ', *repeat - bytes.len()));
                 }
                 data => append_cells(out, data, base..base + *repeat),
             }
@@ -926,6 +938,18 @@ fn validate_ascii_column(col: &AsciiWriteColumn) -> Result<()> {
 
 fn validate_ascii(text: &str, context: &'static str) -> Result<()> {
     if text.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
+        Ok(())
+    } else {
+        Err(FitsError::InvalidAscii { context })
+    }
+}
+
+fn validate_character(value: &CharacterField, context: &'static str) -> Result<()> {
+    if value
+        .members()
+        .iter()
+        .all(|byte| (0x20..=0x7e).contains(byte))
+    {
         Ok(())
     } else {
         Err(FitsError::InvalidAscii { context })

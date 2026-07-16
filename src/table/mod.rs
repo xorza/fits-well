@@ -276,10 +276,66 @@ pub struct Column {
     pub byte_offset: usize,
 }
 
+/// One binary-table `A` field with its stored bytes preserved exactly.
+///
+/// [`CharacterField::members`] stops at the first NUL, while [`CharacterField::bytes`]
+/// retains the terminator, undefined bytes after it, and all trailing spaces. A NUL
+/// in the first byte is therefore distinguishable from an empty or all-space field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharacterField {
+    pub bytes: Vec<u8>,
+}
+
+impl CharacterField {
+    pub fn new(bytes: impl Into<Vec<u8>>) -> CharacterField {
+        CharacterField {
+            bytes: bytes.into(),
+        }
+    }
+
+    /// The defined character members, ending immediately before the first NUL.
+    pub fn members(&self) -> &[u8] {
+        let end = self
+            .bytes
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(self.bytes.len());
+        &self.bytes[..end]
+    }
+
+    /// Whether this is the FITS null string, identified by an initial NUL.
+    pub fn is_null(&self) -> bool {
+        self.bytes.first() == Some(&0)
+    }
+
+    /// Construct the shortest stored representation of a FITS null string.
+    pub fn null() -> CharacterField {
+        CharacterField { bytes: vec![0] }
+    }
+}
+
+impl From<&str> for CharacterField {
+    fn from(value: &str) -> CharacterField {
+        CharacterField::new(value.as_bytes().to_vec())
+    }
+}
+
+impl From<String> for CharacterField {
+    fn from(value: String) -> CharacterField {
+        CharacterField::new(value.into_bytes())
+    }
+}
+
+impl From<Vec<u8>> for CharacterField {
+    fn from(value: Vec<u8>) -> CharacterField {
+        CharacterField::new(value)
+    }
+}
+
 /// A decoded column, flattened across all rows in row order. For array columns
-/// (`repeat > 1`) each row contributes `repeat` consecutive elements; for `A`,
-/// each row contributes one [`String`]. Values are raw (big-endian decoded but
-/// not `TSCALn`/`TZEROn`-scaled).
+/// (`repeat > 1`) each row contributes `repeat` consecutive elements; binary `A`
+/// contributes one exact [`CharacterField`] per row. Values are raw (big-endian
+/// decoded but not `TSCALn`/`TZEROn`-scaled).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColumnData {
     /// `L` — `Some(true)`/`Some(false)`, or `None` for the `0x00` null value (§7.3.3).
@@ -293,7 +349,10 @@ pub enum ColumnData {
     F64(Vec<f64>),
     ComplexF32(Vec<Complex<f32>>),
     ComplexF64(Vec<Complex<f64>>),
-    /// `A` — one string per row, trailing spaces and NULs trimmed.
+    /// Binary-table `A` — one exact field per row for fixed columns; a VLA row uses
+    /// zero fields for an empty descriptor or one field containing its heap bytes.
+    Character(Vec<CharacterField>),
+    /// ASCII-table `A` fields as decoded text.
     Text(Vec<String>),
 }
 
@@ -310,6 +369,7 @@ impl ColumnData {
             ColumnData::F64(v) => v.len(),
             ColumnData::ComplexF32(v) => v.len(),
             ColumnData::ComplexF64(v) => v.len(),
+            ColumnData::Character(v) => v.len(),
             ColumnData::Text(v) => v.len(),
         }
     }
@@ -578,8 +638,8 @@ impl<'a> ColumnReader<'a> {
     }
 
     /// Decode a fixed-width column into a typed, row-flattened [`ColumnData`]: `A` is
-    /// one [`String`] per row, every other fixed kind decodes from the concatenated
-    /// cell bytes. Variable-length (`P`/`Q`) columns error here — use
+    /// one exact [`CharacterField`] per row, every other fixed kind decodes from the
+    /// concatenated cell bytes. Variable-length (`P`/`Q`) columns error here — use
     /// [`ColumnReader::vla`].
     pub fn raw(&self) -> Result<ColumnData> {
         let col = self.descriptor();
@@ -1000,7 +1060,11 @@ fn decode_fixed_column(table: &BinTable, col: &Column) -> ColumnData {
             table.nrows * col.tform.byte_width(),
             |[byte]| byte,
         )),
-        TformKind::Char => ColumnData::Text(cells().map(trim_text).collect()),
+        TformKind::Char => ColumnData::Character(
+            cells()
+                .map(|cell| CharacterField::new(cell.to_vec()))
+                .collect(),
+        ),
         TformKind::I16 => ColumnData::I16(map_cells(cells(), capacity, i16::from_be_bytes)),
         TformKind::I32 => ColumnData::I32(map_cells(cells(), capacity, i32::from_be_bytes)),
         TformKind::I64 => ColumnData::I64(map_cells(cells(), capacity, i64::from_be_bytes)),
@@ -1074,8 +1138,8 @@ fn decode_array(kind: TformKind, bytes: &[u8]) -> ColumnData {
                 .collect(),
         ),
         TformKind::Byte | TformKind::Bit => ColumnData::Bytes(bytes.to_vec()),
-        TformKind::Char if bytes.is_empty() => ColumnData::Text(Vec::new()),
-        TformKind::Char => ColumnData::Text(vec![trim_text(bytes)]),
+        TformKind::Char if bytes.is_empty() => ColumnData::Character(Vec::new()),
+        TformKind::Char => ColumnData::Character(vec![CharacterField::new(bytes.to_vec())]),
         TformKind::I16 => ColumnData::I16(decode_be(bytes, i16::from_be_bytes)),
         TformKind::I32 => ColumnData::I32(decode_be(bytes, i32::from_be_bytes)),
         TformKind::I64 => ColumnData::I64(decode_be(bytes, i64::from_be_bytes)),
@@ -1092,15 +1156,6 @@ fn decode_array(kind: TformKind, bytes: &[u8]) -> ColumnData {
         // A heap element can't itself be a descriptor; keep the raw bytes.
         TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => ColumnData::Bytes(bytes.to_vec()),
     }
-}
-
-/// Decode an `A`-field cell: ASCII text truncated at the first NUL (§6.3 — a NUL
-/// terminates the string early), then with trailing spaces removed.
-fn trim_text(cell: &[u8]) -> String {
-    let nul = cell.iter().position(|&b| b == 0).unwrap_or(cell.len());
-    let head = &cell[..nul];
-    let end = head.iter().rposition(|&b| b != b' ').map_or(0, |i| i + 1);
-    String::from_utf8_lossy(&head[..end]).into_owned()
 }
 
 /// A decoded `P`/`Q` array descriptor: a row's heap array element count and byte
