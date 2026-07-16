@@ -394,6 +394,168 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     assert!(writer.into_inner().into_inner().is_empty());
 }
 
+#[test]
+fn ascii_writer_accepts_exact_width_values() {
+    let columns = [
+        AsciiWriteColumn {
+            name: "TEXT".into(),
+            unit: None,
+            data: AsciiColumnData::Text(vec![Some("abc".into())]),
+            width: 3,
+            decimals: 0,
+            tscale: None,
+            tzero: None,
+            tnull: None,
+        },
+        AsciiWriteColumn {
+            name: "INT".into(),
+            unit: None,
+            data: AsciiColumnData::Integer(vec![Some(-12)]),
+            width: 3,
+            decimals: 0,
+            tscale: None,
+            tzero: None,
+            tnull: None,
+        },
+        AsciiWriteColumn {
+            name: "FLOAT".into(),
+            unit: None,
+            data: AsciiColumnData::Float(vec![Some(1.25)]),
+            width: 4,
+            decimals: 2,
+            tscale: None,
+            tzero: None,
+            tnull: None,
+        },
+        AsciiWriteColumn {
+            name: "NULL".into(),
+            unit: None,
+            data: AsciiColumnData::Float(vec![None]),
+            width: 4,
+            decimals: 1,
+            tscale: None,
+            tzero: None,
+            tnull: Some("NULL".into()),
+        },
+    ];
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_ascii_table(1, &columns).unwrap();
+    let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
+    assert_eq!(
+        &reader.read_data_raw(1).unwrap().data()[..14],
+        b"abc-121.25NULL"
+    );
+}
+
+#[derive(Debug)]
+struct AsciiOverflowCase {
+    column: AsciiWriteColumn,
+    nrows: usize,
+    row: usize,
+    minimum_width: usize,
+}
+
+#[test]
+fn ascii_writer_rejects_one_byte_overflow_before_output() {
+    let cases = [
+        AsciiOverflowCase {
+            column: AsciiWriteColumn {
+                name: "TEXT".into(),
+                unit: None,
+                data: AsciiColumnData::Text(vec![Some("ok".into()), Some("abcd".into())]),
+                width: 3,
+                decimals: 0,
+                tscale: None,
+                tzero: None,
+                tnull: None,
+            },
+            nrows: 2,
+            row: 1,
+            minimum_width: 4,
+        },
+        AsciiOverflowCase {
+            column: AsciiWriteColumn {
+                name: "INT".into(),
+                unit: None,
+                data: AsciiColumnData::Integer(vec![Some(-123)]),
+                width: 3,
+                decimals: 0,
+                tscale: None,
+                tzero: None,
+                tnull: None,
+            },
+            nrows: 1,
+            row: 0,
+            minimum_width: 4,
+        },
+        AsciiOverflowCase {
+            column: AsciiWriteColumn {
+                name: "FLOAT".into(),
+                unit: None,
+                data: AsciiColumnData::Float(vec![Some(-1.25)]),
+                width: 4,
+                decimals: 2,
+                tscale: None,
+                tzero: None,
+                tnull: None,
+            },
+            nrows: 1,
+            row: 0,
+            minimum_width: 5,
+        },
+        AsciiOverflowCase {
+            column: AsciiWriteColumn {
+                name: "PRECISION".into(),
+                unit: None,
+                data: AsciiColumnData::Float(vec![Some(1.0)]),
+                width: 1,
+                decimals: usize::MAX,
+                tscale: None,
+                tzero: None,
+                tnull: None,
+            },
+            nrows: 1,
+            row: 0,
+            minimum_width: usize::MAX,
+        },
+    ];
+    for case in cases {
+        let column_name = case.column.name.clone();
+        let width = case.column.width;
+        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+        assert!(matches!(
+            writer.write_ascii_table(case.nrows, &[case.column]),
+            Err(FitsError::AsciiFieldTooWide {
+                column,
+                row,
+                width: actual_width,
+                minimum_width,
+            }) if column == column_name
+                && row == case.row
+                && actual_width == width
+                && minimum_width == case.minimum_width
+        ));
+        assert!(writer.into_inner().into_inner().is_empty());
+    }
+
+    let columns = [AsciiWriteColumn {
+        name: "NULL".into(),
+        unit: None,
+        data: AsciiColumnData::Float(vec![None]),
+        width: 3,
+        decimals: 1,
+        tscale: None,
+        tzero: None,
+        tnull: Some("NULL".into()),
+    }];
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_ascii_table(1, &columns),
+        Err(FitsError::KeywordOutOfRange { name: "TNULLn" })
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
+}
+
 #[derive(Debug)]
 struct InvalidAsciiScale {
     data: AsciiColumnData,

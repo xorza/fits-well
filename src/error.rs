@@ -24,6 +24,14 @@ pub enum FitsError {
     InvalidAscii {
         context: &'static str,
     },
+    /// An ASCII-table value cannot fit the field width declared by its `TFORMn`.
+    AsciiFieldTooWide {
+        column: String,
+        /// Zero-based table row containing the value.
+        row: usize,
+        width: usize,
+        minimum_width: usize,
+    },
     /// `BITPIX` held a value outside {8, 16, 32, 64, −32, −64}.
     InvalidBitpix {
         code: i64,
@@ -191,6 +199,15 @@ impl fmt::Display for FitsError {
                     "{context} contains characters outside FITS restricted ASCII"
                 )
             }
+            FitsError::AsciiFieldTooWide {
+                column,
+                row,
+                width,
+                minimum_width,
+            } => write!(
+                f,
+                "ASCII column {column:?} row {row} needs at least {minimum_width} characters but its field width is {width}"
+            ),
             FitsError::InvalidBitpix { code } => write!(f, "invalid BITPIX value {code}"),
             FitsError::MissingEnd => write!(f, "header unit ended without an END record"),
             FitsError::MissingKeyword { name } => write!(f, "missing mandatory keyword {name}"),
@@ -371,6 +388,16 @@ mod tests {
             }
             .to_string(),
             "table cell contains characters outside FITS restricted ASCII"
+        );
+        assert_eq!(
+            FitsError::AsciiFieldTooWide {
+                column: "FLUX".to_string(),
+                row: 2,
+                width: 8,
+                minimum_width: 9,
+            }
+            .to_string(),
+            "ASCII column \"FLUX\" row 2 needs at least 9 characters but its field width is 8"
         );
         assert_eq!(
             FitsError::UnsupportedWcsTransform { axes: vec![0, 2] }.to_string(),
