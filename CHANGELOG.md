@@ -76,10 +76,14 @@
   overflowing dimensions.
 - Non-finite ASCII numeric cells require a valid, width-fitting null marker instead
   of writing a blank field that reads back as zero.
-- WCS parsing rejects conflicting CD/PC/CROTA conventions, and Mollweide transforms
-  now return finite canonical coordinates at the poles. WCS transforms reject
-  out-of-domain coordinates and failed Newton iterations instead of clamping them
-  or returning an unconverged estimate.
+- WCS parsing now infers omitted axis counts from every supported indexed keyword,
+  applies projection-specific parameter defaults, accepts legacy CDELT/CROTA beside
+  CD while still rejecting PC conflicts, and flags shortened unknown celestial
+  algorithms. Slant SIN parameters are evaluated instead of silently using the
+  radial projection, and degenerate cylindrical projection scales are rejected.
+  Mollweide transforms now return finite canonical coordinates at the poles. WCS
+  transforms reject out-of-domain coordinates and failed Newton iterations instead
+  of clamping them or returning an unconverged estimate.
 - PLIO compression rejects values outside its lossless `0..=0xFF_FFFF` mask domain
   instead of silently clamping negative samples or truncating large ones.
 - TT-to-UTC/UT1 conversion now selects leap seconds at the correct UTC instant.
