@@ -23,11 +23,13 @@
   `unsupported_axes`) are now private so they cannot invalidate derived transforms.
   Read them through the immutable metadata returned by `Wcs::view`.
 - `Wcs::pixel_to_world` and `Wcs::world_to_pixel` now return `Result<Vec<f64>>` so
-  projection-domain and iterative-convergence failures cannot be ignored.
+  projection-domain, iterative-convergence, and unsupported-transform failures
+  cannot be ignored. They no longer return linear-stage values as complete world
+  coordinates when a nonlinear algorithm is unavailable.
 - `FitsError::DataUnitTooLarge::bytes` changed from `usize` to `u64`. The
-  `TypeMismatch`, `InvalidAscii`, `WcsProjectionDomain`, `WcsNoConvergence`, and
-  `PlioValueOutOfRange`, and `TableMetadataMismatch` variants were added;
-  exhaustive matches on `FitsError` must handle them.
+  `TypeMismatch`, `InvalidAscii`, `UnsupportedWcsTransform`, `WcsProjectionDomain`,
+  `WcsNoConvergence`, `PlioValueOutOfRange`, and `TableMetadataMismatch` variants
+  were added; exhaustive matches on `FitsError` must handle them.
 
 ### Added
 
