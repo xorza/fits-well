@@ -85,6 +85,8 @@
 - Image and table writers reject nonfinite scaling metadata, out-of-range or
   inapplicable `BLANK`/`TNULLn` sentinels, and scaling keywords forbidden for the
   stored column type before writing any bytes.
+- ASCII and binary table writers reject more than 999 fields before allocating
+  per-column state or emitting an automatic primary HDU.
 - `read_table` and `read_ascii_table` validate the HDU kind before reading or
   allocating its data unit, so wrong-kind calls return their semantic error first.
 - The default feature list now contains only `parallel`; default builds still enable

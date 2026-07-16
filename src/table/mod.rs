@@ -23,6 +23,7 @@ use crate::data::UnsignedView;
 use crate::endian::decode_be;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::hdu::validate_table_field_count;
 use crate::header::Header;
 use crate::keyword::key;
 
@@ -427,11 +428,8 @@ impl BinTable {
         let nrows = required_usize(header, "NAXIS2", "NAXIS2")?;
         // §7.3.1: `0 ≤ TFIELDS ≤ 999` — also a guard, since `tfields` sizes the
         // column `Vec` and drives the `TFORMn` loop (an absurd value would abort).
-        let tfields = match header.get_integer("TFIELDS")? {
-            Some(t) if (0..=999).contains(&t) => t as usize,
-            Some(_) => return Err(FitsError::KeywordOutOfRange { name: "TFIELDS" }),
-            None => return Err(FitsError::MissingKeyword { name: "TFIELDS" }),
-        };
+        let tfields = required_usize(header, "TFIELDS", "TFIELDS")?;
+        validate_table_field_count(tfields)?;
 
         let mut columns = Vec::with_capacity(tfields);
         let mut offset = 0;
