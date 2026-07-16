@@ -22,8 +22,7 @@
 - Mutable WCS source fields (`naxis`, `ctype`, `crval`, `crpix`, and
   `unsupported_axes`) are now private so they cannot invalidate derived transforms.
   Read them through the immutable metadata returned by `Wcs::view`.
-- `Wcs::pixel_to_world` and `Wcs::world_to_pixel` now write into caller-owned
-  slices instead of returning `Vec<f64>` values, and return `Result<()>` so
+- `Wcs::pixel_to_world` and `Wcs::world_to_pixel` now return `Result<Vec<f64>>` so
   projection-domain and iterative-convergence failures cannot be ignored.
 - `FitsError::DataUnitTooLarge::bytes` changed from `usize` to `u64`. The
   `TypeMismatch`, `InvalidAscii`, `WcsProjectionDomain`, `WcsNoConvergence`, and
@@ -104,9 +103,7 @@
   including long-string `CONTINUE` chains.
 - Writer padding no longer allocates per data unit, and fallible reusable buffers are
   reserved from validated final sizes.
-- WCS transforms no longer allocate intermediate vectors, prepare projection family
-  and conic constants once, and evaluate ZPN values and derivatives together with
-  extended Horner.
+- ZPN projection values and derivatives are evaluated together with extended Horner.
 
 ### Documentation
 

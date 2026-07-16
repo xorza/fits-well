@@ -30,7 +30,6 @@
 //! Pixel↔world yields celestial coordinates in the frame the file declares
 //! (`RADESYS`/`EQUINOX`); converting *between* reference frames is astrometry
 //! beyond the FITS standard and is intentionally out of scope. Transform methods
-//! write into caller-owned coordinate storage for allocation-free scalar loops and
 //! return explicit errors for invalid projection domains or failed iterations.
 
 use std::f64::consts::FRAC_PI_2;
@@ -176,14 +175,6 @@ impl Projection {
     }
 }
 
-#[derive(Debug, Clone)]
-struct PreparedProjection {
-    projection: Projection,
-    family: Family,
-    pv: [f64; 21],
-    conic: Option<ConicConstants>,
-}
-
 #[derive(Debug, Clone, Copy)]
 struct ConicConstants {
     c: f64,
@@ -222,37 +213,14 @@ struct SzpVertex {
     z: f64,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CelestialCorrection {
-    longitude_axis: usize,
-    latitude_axis: usize,
-    longitude_delta: f64,
-    latitude_delta: f64,
-}
-
-impl PreparedProjection {
-    fn new(projection: Projection, pv: [f64; 21]) -> PreparedProjection {
-        let family = projection.family();
-        assert!(
-            family != Family::Conic || pv[1] != 0.0,
-            "conic projection requires non-zero PVi_1"
-        );
-        let conic = (family == Family::Conic).then(|| ConicConstants::new(projection, &pv));
-        PreparedProjection {
-            projection,
-            family,
-            pv,
-            conic,
-        }
-    }
-
-    fn domain_error(&self) -> FitsError {
+impl Projection {
+    fn domain_error(self) -> FitsError {
         FitsError::WcsProjectionDomain {
-            projection: self.projection.code(),
+            projection: self.code(),
         }
     }
 
-    fn checked_asin(&self, value: f64) -> Result<f64> {
+    fn checked_asin(self, value: f64) -> Result<f64> {
         if !value.is_finite()
             || !(-1.0 - DOMAIN_TOLERANCE..=1.0 + DOMAIN_TOLERANCE).contains(&value)
         {
@@ -261,14 +229,14 @@ impl PreparedProjection {
         Ok(value.clamp(-1.0, 1.0).asin())
     }
 
-    fn checked_sqrt(&self, value: f64, scale: f64) -> Result<f64> {
+    fn checked_sqrt(self, value: f64, scale: f64) -> Result<f64> {
         if !value.is_finite() || value < -DOMAIN_TOLERANCE * scale.abs().max(1.0) {
             return Err(self.domain_error());
         }
         Ok(value.max(0.0).sqrt())
     }
 
-    fn native_coordinate(&self, phi: f64, theta: f64) -> Result<NativeCoordinate> {
+    fn native_coordinate(self, phi: f64, theta: f64) -> Result<NativeCoordinate> {
         if !phi.is_finite()
             || !theta.is_finite()
             || !(-90.0 - DOMAIN_TOLERANCE..=90.0 + DOMAIN_TOLERANCE).contains(&theta)
@@ -281,7 +249,7 @@ impl PreparedProjection {
         })
     }
 
-    fn projected_coordinate(&self, x: f64, y: f64) -> Result<ProjectedCoordinate> {
+    fn projected_coordinate(self, x: f64, y: f64) -> Result<ProjectedCoordinate> {
         if !x.is_finite() || !y.is_finite() {
             return Err(self.domain_error());
         }
@@ -290,15 +258,15 @@ impl PreparedProjection {
 
     /// The fiducial point `(φ₀, θ₀)` in degrees. Zenithal (incl. the perspective
     /// `AZP`/`SZP`): `(0, 90)`; conics: `(0, θ_a)` where `θ_a = PVi_1`; else `(0, 0)`.
-    fn reference_point(&self) -> NativeCoordinate {
-        match self.family {
+    fn reference_point(self, pv: &[f64; 21]) -> NativeCoordinate {
+        match self.family() {
             Family::Zenithal | Family::ZenithalPerspective => NativeCoordinate {
                 phi: 0.0,
                 theta: 90.0,
             },
             Family::Conic => NativeCoordinate {
                 phi: 0.0,
-                theta: self.pv[1],
+                theta: pv[1],
             },
             Family::Other => NativeCoordinate {
                 phi: 0.0,
@@ -308,9 +276,8 @@ impl PreparedProjection {
     }
 
     /// Deproject intermediate world `(x, y)` (deg) to native `(φ, θ)` (deg).
-    fn deproject(&self, x: f64, y: f64) -> Result<NativeCoordinate> {
-        let projection = self.projection;
-        let pv = &self.pv;
+    fn deproject(self, x: f64, y: f64, pv: &[f64; 21]) -> Result<NativeCoordinate> {
+        let projection = self;
         if matches!(projection, Projection::Azp) {
             // Tilted zenithal perspective (CG 2002 §5.1.1): undo the γ shear, then
             // solve A·sinθ + B·cosθ = C for θ.
@@ -368,14 +335,14 @@ impl PreparedProjection {
             let phi = a.atan2(b);
             return self.native_coordinate(phi * R2D, theta * R2D);
         }
-        if self.family == Family::Conic {
-            let conic = self.conic.expect("conic projection has prepared constants");
+        if self.family() == Family::Conic {
+            let conic = ConicConstants::new(self, pv);
             let s = pv[1].signum();
             let r = s * x.hypot(conic.y0 - y);
             let phi = (s * x).atan2(s * (conic.y0 - y)) * R2D / conic.c;
-            return self.native_coordinate(phi, self.conic_theta(r)?);
+            return self.native_coordinate(phi, self.conic_theta(r, conic)?);
         }
-        if self.family == Family::Zenithal {
+        if self.family() == Family::Zenithal {
             let r = x.hypot(y);
             let phi = if r == 0.0 { 0.0 } else { x.atan2(-y) * R2D };
             // Colatitude ζ (rad) from the radius, per projection.
@@ -476,7 +443,7 @@ impl PreparedProjection {
     }
 
     /// Project native `(φ, θ)` (deg) to intermediate world `(x, y)` (deg).
-    fn project(&self, phi: f64, theta: f64) -> Result<ProjectedCoordinate> {
+    fn project(self, phi: f64, theta: f64, pv: &[f64; 21]) -> Result<ProjectedCoordinate> {
         if !phi.is_finite()
             || !theta.is_finite()
             || !(-90.0 - DOMAIN_TOLERANCE..=90.0 + DOMAIN_TOLERANCE).contains(&theta)
@@ -484,8 +451,7 @@ impl PreparedProjection {
             return Err(self.domain_error());
         }
         let theta = theta.clamp(-90.0, 90.0);
-        let projection = self.projection;
-        let pv = &self.pv;
+        let projection = self;
         if matches!(projection, Projection::Azp) {
             let (mu, gr) = (pv[1], pv[2] * D2R);
             let (tr, pr) = (theta * D2R, phi * D2R);
@@ -502,13 +468,13 @@ impl PreparedProjection {
             let y = R2D * (-vertex.z * tr.cos() * pr.cos() - vertex.y * sigma) / denom;
             return self.projected_coordinate(x, y);
         }
-        if self.family == Family::Conic {
-            let conic = self.conic.expect("conic projection has prepared constants");
-            let r = self.conic_radius(theta)?;
+        if self.family() == Family::Conic {
+            let conic = ConicConstants::new(self, pv);
+            let r = self.conic_radius(theta, conic)?;
             let cp = (conic.c * phi) * D2R;
             return self.projected_coordinate(r * cp.sin(), conic.y0 - r * cp.cos());
         }
-        if self.family == Family::Zenithal {
+        if self.family() == Family::Zenithal {
             let zeta = (90.0 - theta) * D2R;
             let r = match projection {
                 Projection::Tan => R2D * zeta.tan(),
@@ -583,10 +549,9 @@ impl PreparedProjection {
     }
 
     /// Conic radius `R_θ` (deg) for a native latitude `θ` (deg).
-    fn conic_radius(&self, theta: f64) -> Result<f64> {
-        let conic = self.conic.expect("conic projection has prepared constants");
+    fn conic_radius(self, theta: f64, conic: ConicConstants) -> Result<f64> {
         let theta_radians = theta * D2R;
-        let radius = match self.projection {
+        let radius = match self {
             Projection::Cop => {
                 R2D * conic.cos_eta * (conic.cot_theta_a - (theta_radians - conic.theta_a).tan())
             }
@@ -607,9 +572,8 @@ impl PreparedProjection {
     }
 
     /// Native latitude `θ` (deg) for a conic radius `R_θ` (deg).
-    fn conic_theta(&self, r: f64) -> Result<f64> {
-        let conic = self.conic.expect("conic projection has prepared constants");
-        let theta = match self.projection {
+    fn conic_theta(self, r: f64, conic: ConicConstants) -> Result<f64> {
+        let theta = match self {
             Projection::Cop => {
                 let tan = conic.cot_theta_a - r / (R2D * conic.cos_eta);
                 conic.theta_a_degrees + tan.atan() * R2D
@@ -878,9 +842,10 @@ struct CelestialPole {
 struct Celestial {
     lng: usize,
     lat: usize,
-    projection: PreparedProjection,
+    projection: Projection,
     /// The native→celestial pole, computed from the fiducial point.
     pole: CelestialPole,
+    pv: [f64; 21],
 }
 
 impl Wcs {
@@ -1015,10 +980,9 @@ impl Wcs {
                     unsupported_axes.sort_unstable();
                     None
                 } else {
-                    let projection = PreparedProjection::new(proj, pv);
                     // Fiducial point: projection default, overridable by PVi_1a/
                     // PVi_2a on the longitude axis (§8.3).
-                    let reference = projection.reference_point();
+                    let reference = proj.reference_point(&pv);
                     let (mut phi0, mut theta0) = (reference.phi, reference.theta);
                     if let Some(v) = header.get_real(key!("PV{}_1{a}", lng + 1).as_str())? {
                         phi0 = v;
@@ -1049,8 +1013,9 @@ impl Wcs {
                     Some(Celestial {
                         lng,
                         lat,
-                        projection,
+                        projection: proj,
                         pole,
+                        pv,
                     })
                 }
             }
@@ -1217,94 +1182,69 @@ impl Wcs {
         Wcs::from_header(&h, None)
     }
 
-    /// Map 1-based pixel coordinates into caller-owned world-coordinate storage.
-    /// Celestial axes return `(α, δ)` in degrees; other axes return `CRVAL + ` the
-    /// linear value.
-    /// Both slices must contain exactly one value per axis; debug builds assert
-    /// this hot-path precondition. On a projection error, the celestial output
-    /// pair is set to NaN and the failure is returned.
-    pub fn pixel_to_world(&self, pixel: &[f64], world: &mut [f64]) -> Result<()> {
+    /// Map 1-based pixel coordinates to world coordinates. Celestial axes return
+    /// `(α, δ)` in degrees; other axes return `CRVAL + ` the linear value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `pixel` does not contain exactly one value per WCS axis.
+    pub fn pixel_to_world(&self, pixel: &[f64]) -> Result<Vec<f64>> {
         let naxis = self.axes.len();
-        debug_assert_eq!(pixel.len(), naxis, "pixel coordinate count");
-        debug_assert_eq!(world.len(), naxis, "world coordinate count");
-        for (i, row) in self.matrix.chunks_exact(naxis).enumerate() {
-            world[i] = row
-                .iter()
-                .enumerate()
-                .map(|(j, &factor)| factor * (pixel[j] - self.axes[j].crpix))
-                .sum();
-        }
-        let celestial_intermediate = self
-            .celestial
-            .as_ref()
-            .map(|c| [world[c.lng], world[c.lat]]);
-        for (value, axis) in world.iter_mut().zip(&self.axes) {
-            *value += axis.crval;
-        }
+        assert_eq!(pixel.len(), naxis, "pixel coordinate count");
+        let offset: Vec<f64> = pixel
+            .iter()
+            .zip(&self.axes)
+            .map(|(&value, axis)| value - axis.crpix)
+            .collect();
+        let intermediate = matvec(&self.matrix, &offset, naxis);
+        let mut world: Vec<f64> = intermediate
+            .iter()
+            .zip(&self.axes)
+            .map(|(&value, axis)| value + axis.crval)
+            .collect();
         if let Some(c) = &self.celestial {
-            let [x, y] = celestial_intermediate.unwrap();
-            let native = match c.projection.deproject(x, y) {
-                Ok(native) => native,
-                Err(error) => {
-                    world[c.lng] = f64::NAN;
-                    world[c.lat] = f64::NAN;
-                    return Err(error);
-                }
-            };
+            let native = c
+                .projection
+                .deproject(intermediate[c.lng], intermediate[c.lat], &c.pv)?;
             let celestial = native_to_celestial(c.pole, native.phi, native.theta);
             world[c.lng] = celestial.ra;
             world[c.lat] = celestial.dec;
         }
-        Ok(())
+        Ok(world)
     }
 
-    /// Map world coordinates into caller-owned 1-based pixel-coordinate storage,
-    /// the inverse of [`Wcs::pixel_to_world`].
-    /// Both slices must contain exactly one value per axis; debug builds assert
-    /// this hot-path precondition. On a projection error, every pixel output is
-    /// set to NaN because every inverse-matrix row may depend on a celestial axis.
-    pub fn world_to_pixel(&self, world: &[f64], pixel: &mut [f64]) -> Result<()> {
+    /// Map world coordinates back to 1-based pixel coordinates, the inverse of
+    /// [`Wcs::pixel_to_world`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `world` does not contain exactly one value per WCS axis.
+    pub fn world_to_pixel(&self, world: &[f64]) -> Result<Vec<f64>> {
         let naxis = self.axes.len();
-        debug_assert_eq!(world.len(), naxis, "world coordinate count");
-        debug_assert_eq!(pixel.len(), naxis, "pixel coordinate count");
-        let celestial_correction = if let Some(c) = self.celestial.as_ref() {
+        assert_eq!(world.len(), naxis, "world coordinate count");
+        let mut intermediate: Vec<f64> = world
+            .iter()
+            .zip(&self.axes)
+            .map(|(&value, axis)| value - axis.crval)
+            .collect();
+        if let Some(c) = self.celestial.as_ref() {
             if !world[c.lng].is_finite()
                 || !world[c.lat].is_finite()
                 || !(-90.0 - DOMAIN_TOLERANCE..=90.0 + DOMAIN_TOLERANCE).contains(&world[c.lat])
             {
-                pixel.fill(f64::NAN);
                 return Err(c.projection.domain_error());
             }
             let native = celestial_to_native(c.pole, world[c.lng], world[c.lat]);
-            let projected = match c.projection.project(native.phi, native.theta) {
-                Ok(projected) => projected,
-                Err(error) => {
-                    pixel.fill(f64::NAN);
-                    return Err(error);
-                }
-            };
-            Some(CelestialCorrection {
-                longitude_axis: c.lng,
-                latitude_axis: c.lat,
-                longitude_delta: projected.x - (world[c.lng] - self.axes[c.lng].crval),
-                latitude_delta: projected.y - (world[c.lat] - self.axes[c.lat].crval),
-            })
-        } else {
-            None
-        };
-        for (i, row) in self.inverse.chunks_exact(naxis).enumerate() {
-            let mut offset: f64 = row
-                .iter()
-                .enumerate()
-                .map(|(j, &factor)| factor * (world[j] - self.axes[j].crval))
-                .sum();
-            if let Some(correction) = celestial_correction {
-                offset += row[correction.longitude_axis] * correction.longitude_delta
-                    + row[correction.latitude_axis] * correction.latitude_delta;
-            }
-            pixel[i] = offset + self.axes[i].crpix;
+            let projected = c.projection.project(native.phi, native.theta, &c.pv)?;
+            intermediate[c.lng] = projected.x;
+            intermediate[c.lat] = projected.y;
         }
-        Ok(())
+        let offset = matvec(&self.inverse, &intermediate, naxis);
+        Ok(offset
+            .into_iter()
+            .zip(&self.axes)
+            .map(|(value, axis)| value + axis.crpix)
+            .collect())
     }
 }
 
@@ -1522,6 +1462,13 @@ fn first_real(header: &Header, first: &str, second: &str) -> Result<Option<f64>>
         Some(value) => Ok(Some(value)),
         None => header.get_real(second),
     }
+}
+
+fn matvec(matrix: &[f64], vector: &[f64], size: usize) -> Vec<f64> {
+    matrix
+        .chunks_exact(size)
+        .map(|row| row.iter().zip(vector).map(|(&a, &b)| a * b).sum())
+        .collect()
 }
 
 /// Invert a row-major `n×n` matrix by Gauss–Jordan elimination with partial
