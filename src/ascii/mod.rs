@@ -49,19 +49,34 @@ pub struct AsciiTable {
     bytes: Vec<u8>,
 }
 
+fn required_integer(header: &Header, keyword: &str, missing_name: &'static str) -> Result<i64> {
+    header
+        .get_integer(keyword)?
+        .ok_or(FitsError::MissingKeyword { name: missing_name })
+}
+
+fn required_usize(header: &Header, keyword: &str, name: &'static str) -> Result<usize> {
+    usize::try_from(required_integer(header, keyword, name)?)
+        .map_err(|_| FitsError::KeywordOutOfRange { name })
+}
+
+fn required_text<'a>(
+    header: &'a Header,
+    keyword: &str,
+    missing_name: &'static str,
+) -> Result<&'a str> {
+    header
+        .get_text(keyword)?
+        .ok_or(FitsError::MissingKeyword { name: missing_name })
+}
+
 impl AsciiTable {
     pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<AsciiTable> {
-        let row_len = header
-            .get_integer("NAXIS1")
-            .ok_or(FitsError::MissingKeyword { name: "NAXIS1" })?
-            .max(0) as usize;
-        let nrows = header
-            .get_integer("NAXIS2")
-            .ok_or(FitsError::MissingKeyword { name: "NAXIS2" })?
-            .max(0) as usize;
+        let row_len = required_usize(header, "NAXIS1", "NAXIS1")?;
+        let nrows = required_usize(header, "NAXIS2", "NAXIS2")?;
         // §7.2.1: `0 ≤ TFIELDS ≤ 999` — also a guard, since `tfields` sizes the
         // column `Vec` and drives the `TFORMn` loop (an absurd value would abort).
-        let tfields = match header.get_integer("TFIELDS") {
+        let tfields = match header.get_integer("TFIELDS")? {
             Some(t) if (0..=999).contains(&t) => t as usize,
             Some(_) => return Err(FitsError::KeywordOutOfRange { name: "TFIELDS" }),
             None => return Err(FitsError::MissingKeyword { name: "TFIELDS" }),
@@ -69,14 +84,12 @@ impl AsciiTable {
 
         let mut columns = Vec::with_capacity(tfields);
         for n in 1..=tfields {
-            let tbcol = header
-                .get_integer(key!("TBCOL{n}").as_str())
-                .ok_or(FitsError::MissingKeyword { name: "TBCOLn" })?;
-            let tform = header
-                .get_text(key!("TFORM{n}").as_str())
-                .ok_or(FitsError::MissingKeyword { name: "TFORMn" })?;
+            let tbcol = required_usize(header, key!("TBCOL{n}").as_str(), "TBCOLn")?;
+            let tform = required_text(header, key!("TFORM{n}").as_str(), "TFORMn")?;
             let fmt = parse_ascii_tform(tform)?;
-            let start = (tbcol.max(1) - 1) as usize;
+            let start = tbcol
+                .checked_sub(1)
+                .ok_or(FitsError::KeywordOutOfRange { name: "TBCOLn" })?;
             // §7.2.3: each field must lie within the row (`NAXIS1`). A column declared
             // past the row width is malformed — reject it rather than let `field()`
             // silently truncate to empty.
@@ -85,25 +98,21 @@ impl AsciiTable {
             }
             columns.push(AsciiColumn {
                 name: header
-                    .get_text(key!("TTYPE{n}").as_str())
+                    .get_text(key!("TTYPE{n}").as_str())?
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
                 unit: header
-                    .get_text(key!("TUNIT{n}").as_str())
+                    .get_text(key!("TUNIT{n}").as_str())?
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
                 kind: fmt.kind,
                 start,
                 width: fmt.width,
                 decimals: fmt.decimals,
-                tscale: header
-                    .try_get_real(key!("TSCAL{n}").as_str())?
-                    .unwrap_or(1.0),
-                tzero: header
-                    .try_get_real(key!("TZERO{n}").as_str())?
-                    .unwrap_or(0.0),
+                tscale: header.get_real(key!("TSCAL{n}").as_str())?.unwrap_or(1.0),
+                tzero: header.get_real(key!("TZERO{n}").as_str())?.unwrap_or(0.0),
                 null: header
-                    .get_text(key!("TNULL{n}").as_str())
+                    .get_text(key!("TNULL{n}").as_str())?
                     .map(|s| s.trim().to_string()),
             });
         }

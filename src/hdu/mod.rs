@@ -33,29 +33,30 @@ pub enum HduKind {
 }
 
 impl HduKind {
-    pub(crate) fn classify(header: &Header) -> HduKind {
+    pub(crate) fn classify(header: &Header) -> Result<HduKind> {
         // `Value::Text` already stripped the trailing spaces of `'IMAGE   '` etc.
-        if let Some(xtension) = header.get_text("XTENSION") {
+        let kind = if let Some(xtension) = header.get_text("XTENSION")? {
             match xtension {
                 "IMAGE" => HduKind::Image,
                 "TABLE" => HduKind::AsciiTable,
                 // §10: a tiled-compressed image/table rides inside a BINTABLE,
                 // flagged by ZIMAGE/ZTABLE — classify by the payload, not the
                 // container, so callers see what they can actually read.
-                "BINTABLE" if header.get_logical("ZIMAGE") == Some(true) => {
+                "BINTABLE" if header.get_logical("ZIMAGE")? == Some(true) => {
                     HduKind::CompressedImage
                 }
-                "BINTABLE" if header.get_logical("ZTABLE") == Some(true) => {
+                "BINTABLE" if header.get_logical("ZTABLE")? == Some(true) => {
                     HduKind::CompressedTable
                 }
                 "BINTABLE" => HduKind::BinTable,
                 _ => HduKind::Other,
             }
-        } else if header.get_logical("GROUPS") == Some(true) {
+        } else if header.get_logical("GROUPS")? == Some(true) {
             HduKind::RandomGroups
         } else {
             HduKind::Primary
-        }
+        };
+        Ok(kind)
     }
 }
 
@@ -79,7 +80,7 @@ pub(crate) fn data_extent(header: &Header) -> Result<DataExtent> {
     // defaults of 0 and 1.
     let pcount = header.pcount()?;
     let gcount = header.gcount()?;
-    let random_groups = header.get_logical("GROUPS") == Some(true);
+    let random_groups = header.get_logical("GROUPS")? == Some(true);
 
     // `NAXIS = 0` means no data array at all (the empty product would be 1, not
     // 0). Otherwise multiply the axis lengths — skipping the leading zero sentinel

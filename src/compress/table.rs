@@ -227,7 +227,7 @@ pub(crate) fn compress_table(
 
     // Header: copy the original, then layer on the Z* keywords.
     let mut h = header.clone();
-    let orig_pcount = header.get_integer("PCOUNT").unwrap_or(0);
+    let orig_pcount = header.get_integer("PCOUNT")?.unwrap_or(0);
     h.set("ZTABLE", true)
         .comment("ZTABLE", "this is a compressed table");
     h.set("ZTILELEN", fits_i64(rpt)?);
@@ -237,7 +237,7 @@ pub(crate) fn compress_table(
     for (ci, m) in metas.iter().enumerate() {
         let n = ci + 1;
         let zform = header
-            .get_text(key!("TFORM{n}").as_str())
+            .get_text(key!("TFORM{n}").as_str())?
             .unwrap_or("")
             .to_string();
         h.set(key!("ZFORM{n}").as_str(), zform);
@@ -254,7 +254,7 @@ pub(crate) fn compress_table(
 /// Uncompress a `ZTABLE` container back into its original fixed-width `BINTABLE`.
 /// Returns the restored header and row-major data unit.
 pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduParts> {
-    if header.get_logical("ZTABLE") != Some(true) {
+    if header.get_logical("ZTABLE")? != Some(true) {
         return Err(FitsError::NotCompressedTable);
     }
     let naxis1 = req_usize(header, "ZNAXIS1")?;
@@ -275,11 +275,11 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
     let mut offset = 0;
     for n in 1..=ncols {
         let zform = header
-            .get_text(key!("ZFORM{n}").as_str())
+            .get_text(key!("ZFORM{n}").as_str())?
             .ok_or(FitsError::MissingKeyword { name: "ZFORMn" })?
             .to_string();
         let tform = Tform::parse(&zform)?;
-        let algo = match header.get_text(key!("ZCTYP{n}").as_str()) {
+        let algo = match header.get_text(key!("ZCTYP{n}").as_str())? {
             Some(s) => Algo::parse(s)?,
             None => Algo::Gzip2, // cfitsio's default when ZCTYPn is absent
         };
@@ -477,7 +477,7 @@ fn scatter_column(out: &mut [u8], bytes: &[u8], rows: usize, row_len: usize, m: 
 
 fn req_int(header: &Header, key: &'static str) -> Result<i64> {
     header
-        .get_integer(key)
+        .get_integer(key)?
         .ok_or(FitsError::MissingKeyword { name: key })
 }
 
@@ -494,7 +494,7 @@ fn req_positive_usize(header: &Header, key: &'static str) -> Result<usize> {
 }
 
 fn optional_nonnegative(header: &Header, key: &'static str) -> Result<i64> {
-    match header.get_integer(key) {
+    match header.get_integer(key)? {
         Some(value) if value < 0 => Err(FitsError::KeywordOutOfRange { name: key }),
         Some(value) => Ok(value),
         None => Ok(0),

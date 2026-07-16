@@ -46,7 +46,7 @@ at [`src/table/mod.rs:338`](src/table/mod.rs#L338), compressed-image layout at
 therefore still treated as absent and can produce a wrong HDU boundary. The
 changelog's crate-wide claim at [`CHANGELOG.md:39`](CHANGELOG.md#L39) is not true.
 
-- [ ] Replace `get_logical`/`get_integer`/`get_real`/`get_text` plus the parallel `try_get_*` family at [`src/header/mod.rs:118`](src/header/mod.rs#L118) with one fallible typed family returning `Result<Option<_>>`; raw callers can continue to inspect `Header::get`. Rewrite every semantic parser to distinguish absence, wrong type, and out-of-range values consistently. Prefer small `required_*`/defaulting helpers at the semantic boundary rather than repeating `.ok_or(...)` chains. Add malformed-type fixtures for structural, table, compression, WCS, and time keywords, asserting exact `TypeMismatch` results, then correct the changelog.
+- [x] Replace `get_logical`/`get_integer`/`get_real`/`get_text` plus the parallel `try_get_*` family at [`src/header/mod.rs:118`](src/header/mod.rs#L118) with one fallible typed family returning `Result<Option<_>>`; raw callers can continue to inspect `Header::get`. Rewrite every semantic parser to distinguish absence, wrong type, and out-of-range values consistently. Prefer small `required_*`/defaulting helpers at the semantic boundary rather than repeating `.ok_or(...)` chains. Add malformed-type fixtures for structural, table, compression, WCS, and time keywords, asserting exact `TypeMismatch` results, then correct the changelog.
 
 ## Batch 3 — Narrow the fallible-allocation policy (medium priority)
 

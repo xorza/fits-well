@@ -889,28 +889,17 @@ impl Wcs {
     /// [`Header::wcs`](crate::Header::wcs), which forwards here.
     pub(crate) fn from_header(header: &Header, alt: Option<char>) -> Result<Wcs> {
         let a = alt.map(|c| c.to_string()).unwrap_or_default();
-        let naxis = match header.try_get_integer(key!("WCSAXES{a}").as_str())? {
+        let naxis_value = match header.get_integer(key!("WCSAXES{a}").as_str())? {
             Some(naxis) => Some(naxis),
-            None => header.try_get_integer("NAXIS")?,
+            None => header.get_integer("NAXIS")?,
         }
-        .ok_or(FitsError::MissingKeyword { name: "WCSAXES" })?
-        .max(0) as usize;
-        if naxis == 0 {
-            return Err(FitsError::InvalidValue {
-                card: "WCSAXES = 0".to_string(),
-            });
-        }
-        // §4.4.1/§8: at most 999 axes. `naxis` is untrusted and sizes the transform
-        // matrix (`naxis²`) and every per-axis keyword loop below, so bound it like
-        // the table's `TFIELDS` and the reader's `ZNAXIS` before looping/allocating.
-        if naxis > 999 {
-            return Err(FitsError::KeywordOutOfRange { name: "WCSAXES" });
-        }
+        .ok_or(FitsError::MissingKeyword { name: "WCSAXES" })?;
+        let naxis = axis_count(naxis_value, "WCSAXES")?;
 
         let ctype: Vec<String> = (1..=naxis)
             .map(|i| {
                 header
-                    .try_get_text(key!("CTYPE{i}{a}").as_str())
+                    .get_text(key!("CTYPE{i}{a}").as_str())
                     .map(|value| value.unwrap_or("").to_string())
             })
             .collect::<Result<_>>()?;
@@ -920,7 +909,7 @@ impl Wcs {
         let cunit: Vec<String> = (1..=naxis)
             .map(|i| {
                 header
-                    .try_get_text(key!("CUNIT{i}{a}").as_str())
+                    .get_text(key!("CUNIT{i}{a}").as_str())
                     .map(|value| value.unwrap_or("").to_string())
             })
             .collect::<Result<_>>()?;
@@ -958,7 +947,7 @@ impl Wcs {
             for i in 0..naxis {
                 for j in 0..naxis {
                     matrix[i * naxis + j] = header
-                        .try_get_real(key!("CD{}_{}{a}", i + 1, j + 1).as_str())?
+                        .get_real(key!("CD{}_{}{a}", i + 1, j + 1).as_str())?
                         .unwrap_or(0.0);
                 }
             }
@@ -966,7 +955,7 @@ impl Wcs {
             for i in 0..naxis {
                 for j in 0..naxis {
                     let pc = header
-                        .try_get_real(key!("PC{}_{}{a}", i + 1, j + 1).as_str())?
+                        .get_real(key!("PC{}_{}{a}", i + 1, j + 1).as_str())?
                         .unwrap_or(if i == j { 1.0 } else { 0.0 });
                     matrix[i * naxis + j] = cdelt[i] * pc;
                 }
@@ -1011,7 +1000,7 @@ impl Wcs {
                 let mut pv = [0.0; 21];
                 for (m, value) in pv.iter_mut().enumerate() {
                     *value = header
-                        .try_get_real(key!("PV{}_{m}{a}", lat + 1).as_str())?
+                        .get_real(key!("PV{}_{m}{a}", lat + 1).as_str())?
                         .unwrap_or(0.0);
                 }
                 let family = proj.family();
@@ -1031,10 +1020,10 @@ impl Wcs {
                     // PVi_2a on the longitude axis (§8.3).
                     let reference = projection.reference_point();
                     let (mut phi0, mut theta0) = (reference.phi, reference.theta);
-                    if let Some(v) = header.try_get_real(key!("PV{}_1{a}", lng + 1).as_str())? {
+                    if let Some(v) = header.get_real(key!("PV{}_1{a}", lng + 1).as_str())? {
                         phi0 = v;
                     }
-                    if let Some(v) = header.try_get_real(key!("PV{}_2{a}", lng + 1).as_str())? {
+                    if let Some(v) = header.get_real(key!("PV{}_2{a}", lng + 1).as_str())? {
                         theta0 = v;
                     }
                     let (alpha0, delta0) = (crval[lng], crval[lat]);
@@ -1113,7 +1102,7 @@ impl Wcs {
         h.set("WCSAXES", columns.len() as i64);
         for (i, &c) in columns.iter().enumerate() {
             let ax = i + 1;
-            if let Some(t) = header.try_get_text(key!("TCTYP{c}{a}").as_str())? {
+            if let Some(t) = header.get_text(key!("TCTYP{c}{a}").as_str())? {
                 h.set(key!("CTYPE{ax}").as_str(), t);
             }
             for (root, dst) in [
@@ -1122,15 +1111,15 @@ impl Wcs {
                 ("TCDLT", "CDELT"),
                 ("TCROT", "CROTA"),
             ] {
-                if let Some(v) = header.try_get_real(key!("{root}{c}{a}").as_str())? {
+                if let Some(v) = header.get_real(key!("{root}{c}{a}").as_str())? {
                     h.set(key!("{dst}{ax}").as_str(), v);
                 }
             }
-            if let Some(t) = header.try_get_text(key!("TCUNI{c}{a}").as_str())? {
+            if let Some(t) = header.get_text(key!("TCUNI{c}{a}").as_str())? {
                 h.set(key!("CUNIT{ax}").as_str(), t);
             }
             for m in 0..=20 {
-                if let Some(v) = header.try_get_real(key!("TPV{c}_{m}{a}").as_str())? {
+                if let Some(v) = header.get_real(key!("TPV{c}_{m}{a}").as_str())? {
                     h.set(key!("PV{ax}_{m}").as_str(), v);
                 }
             }
@@ -1138,18 +1127,18 @@ impl Wcs {
         // Linear-transform matrices: TPCn_ka / TCDn_ka, indexed by column pair.
         for (i, &ci) in columns.iter().enumerate() {
             for (j, &cj) in columns.iter().enumerate() {
-                if let Some(v) = header.try_get_real(key!("TPC{ci}_{cj}{a}").as_str())? {
+                if let Some(v) = header.get_real(key!("TPC{ci}_{cj}{a}").as_str())? {
                     h.set(key!("PC{}_{}", i + 1, j + 1).as_str(), v);
                 }
-                if let Some(v) = header.try_get_real(key!("TCD{ci}_{cj}{a}").as_str())? {
+                if let Some(v) = header.get_real(key!("TCD{ci}_{cj}{a}").as_str())? {
                     h.set(key!("CD{}_{}", i + 1, j + 1).as_str(), v);
                 }
             }
         }
-        if let Some(v) = header.try_get_real(key!("LONP{a}").as_str())? {
+        if let Some(v) = header.get_real(key!("LONP{a}").as_str())? {
             h.set("LONPOLE", v);
         }
-        if let Some(v) = header.try_get_real(key!("LATP{a}").as_str())? {
+        if let Some(v) = header.get_real(key!("LATP{a}").as_str())? {
             h.set("LATPOLE", v);
         }
         Wcs::from_header(&h, None)
@@ -1169,36 +1158,28 @@ impl Wcs {
         alt: Option<char>,
     ) -> Result<Wcs> {
         let a = alt.map(|c| c.to_string()).unwrap_or_default();
-        let naxis = header
-            .try_get_integer(key!("WCAX{column}{a}").as_str())?
-            .map(|v| v.max(0) as usize)
-            .filter(|&n| n > 0)
-            .unwrap_or_else(|| {
-                (1..=99)
-                    .rev()
-                    .find(|&i| {
-                        header.get(key!("{i}CTYP{column}{a}").as_str()).is_some()
-                            || ["CRVL", "CDLT", "CRPX"]
-                                .iter()
-                                .any(|r| header.get(key!("{i}{r}{column}{a}").as_str()).is_some())
-                    })
-                    .unwrap_or(0)
-            });
+        let naxis = match header.get_integer(key!("WCAX{column}{a}").as_str())? {
+            Some(value) => axis_count(value, "WCAXn")?,
+            None => (1..=99)
+                .rev()
+                .find(|&i| {
+                    header.get(key!("{i}CTYP{column}{a}").as_str()).is_some()
+                        || ["CRVL", "CDLT", "CRPX"]
+                            .iter()
+                            .any(|r| header.get(key!("{i}{r}{column}{a}").as_str()).is_some())
+                })
+                .unwrap_or(0),
+        };
         if naxis == 0 {
             return Err(FitsError::MissingKeyword { name: "iCTYPn" });
-        }
-        // Bound the untrusted rank before the per-axis synthesis loop below (a hostile
-        // `WCAXna` would otherwise drive an enormous loop); `from_header` re-checks too.
-        if naxis > 999 {
-            return Err(FitsError::KeywordOutOfRange { name: "WCAXn" });
         }
         let mut h = Header::new();
         h.set("WCSAXES", naxis as i64);
         for ax in 1..=naxis {
-            if let Some(t) = header.try_get_text(key!("{ax}CTYP{column}{a}").as_str())? {
+            if let Some(t) = header.get_text(key!("{ax}CTYP{column}{a}").as_str())? {
                 h.set(key!("CTYPE{ax}").as_str(), t);
             }
-            if let Some(t) = header.try_get_text(key!("{ax}CUNI{column}{a}").as_str())? {
+            if let Some(t) = header.get_text(key!("{ax}CUNI{column}{a}").as_str())? {
                 h.set(key!("CUNIT{ax}").as_str(), t);
             }
             for (root, dst) in [
@@ -1207,7 +1188,7 @@ impl Wcs {
                 ("CDLT", "CDELT"),
                 ("CROT", "CROTA"),
             ] {
-                if let Some(v) = header.try_get_real(key!("{ax}{root}{column}{a}").as_str())? {
+                if let Some(v) = header.get_real(key!("{ax}{root}{column}{a}").as_str())? {
                     h.set(key!("{dst}{ax}").as_str(), v);
                 }
             }
@@ -1225,10 +1206,10 @@ impl Wcs {
         // Linear-transform matrices: `ijPCn` / `ijCDn`, indexed by axis pair.
         for i in 1..=naxis {
             for j in 1..=naxis {
-                if let Some(v) = header.try_get_real(key!("{i}{j}PC{column}{a}").as_str())? {
+                if let Some(v) = header.get_real(key!("{i}{j}PC{column}{a}").as_str())? {
                     h.set(key!("PC{i}_{j}").as_str(), v);
                 }
-                if let Some(v) = header.try_get_real(key!("{i}{j}CD{column}{a}").as_str())? {
+                if let Some(v) = header.get_real(key!("{i}{j}CD{column}{a}").as_str())? {
                     h.set(key!("CD{i}_{j}").as_str(), v);
                 }
             }
@@ -1522,16 +1503,24 @@ fn axis_vec(
     (1..=naxis)
         .map(|i| {
             header
-                .try_get_real(key!("{prefix}{i}{alt}").as_str())
+                .get_real(key!("{prefix}{i}{alt}").as_str())
                 .map(|value| value.unwrap_or(default))
         })
         .collect()
 }
 
+fn axis_count(value: i64, name: &'static str) -> Result<usize> {
+    let count = usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { name })?;
+    if !(1..=999).contains(&count) {
+        return Err(FitsError::KeywordOutOfRange { name });
+    }
+    Ok(count)
+}
+
 fn first_real(header: &Header, first: &str, second: &str) -> Result<Option<f64>> {
-    match header.try_get_real(first)? {
+    match header.get_real(first)? {
         Some(value) => Ok(Some(value)),
-        None => header.try_get_real(second),
+        None => header.get_real(second),
     }
 }
 

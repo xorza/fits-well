@@ -47,25 +47,25 @@ fn end_is_implicit_and_not_stored() {
 #[test]
 fn keyword_lookup_returns_first_occurrence() {
     let h = sample();
-    assert_eq!(h.get_text("OBJECT"), Some("Cygnus X-1"));
+    assert_eq!(h.get_text("OBJECT").unwrap(), Some("Cygnus X-1"));
     assert_eq!(h.get("MISSING"), None);
 }
 
 #[test]
 fn strict_optional_getters_distinguish_absent_and_mistyped_values() {
     let h = sample();
-    assert_eq!(h.try_get_logical("SIMPLE").unwrap(), Some(true));
-    assert_eq!(h.try_get_integer("BITPIX").unwrap(), Some(16));
-    assert_eq!(h.try_get_real("BITPIX").unwrap(), Some(16.0));
-    assert_eq!(h.try_get_text("OBJECT").unwrap(), Some("Cygnus X-1"));
-    assert_eq!(h.try_get_real("MISSING").unwrap(), None);
+    assert_eq!(h.get_logical("SIMPLE").unwrap(), Some(true));
+    assert_eq!(h.get_integer("BITPIX").unwrap(), Some(16));
+    assert_eq!(h.get_real("BITPIX").unwrap(), Some(16.0));
+    assert_eq!(h.get_text("OBJECT").unwrap(), Some("Cygnus X-1"));
+    assert_eq!(h.get_real("MISSING").unwrap(), None);
     assert!(matches!(
-        h.try_get_real("OBJECT"),
+        h.get_real("OBJECT"),
         Err(FitsError::TypeMismatch { name, expected })
             if name == "OBJECT" && expected == "real"
     ));
     assert!(matches!(
-        h.try_get_logical("BITPIX"),
+        h.get_logical("BITPIX"),
         Err(FitsError::TypeMismatch { name, expected })
             if name == "BITPIX" && expected == "logical"
     ));
@@ -99,7 +99,7 @@ fn iter_yields_every_record_in_order_with_duplicates() {
         Some("Cygnus X-1")
     );
     assert_eq!(entries[7].value.and_then(|v| v.as_text()), Some("shadowed"));
-    assert_eq!(h.get_text("OBJECT"), Some("Cygnus X-1"));
+    assert_eq!(h.get_text("OBJECT").unwrap(), Some("Cygnus X-1"));
 }
 
 #[test]
@@ -112,7 +112,7 @@ fn continue_records_reassemble_a_long_string() {
     ]))
     .unwrap();
     assert_eq!(
-        h.get_text("WEATHER"),
+        h.get_text("WEATHER").unwrap(),
         Some(
             "Partly cloudy during the evening followed by cloudy skies overnight. \
              Low 21C. Winds NNE at 5 to 10 mph."
@@ -125,7 +125,7 @@ fn continue_records_reassemble_a_long_string() {
 #[test]
 fn trailing_ampersand_without_a_continue_is_a_literal() {
     let h = Header::parse(&header_bytes(&["NOTE    = 'ends with amp &'", "END"])).unwrap();
-    assert_eq!(h.get_text("NOTE"), Some("ends with amp &"));
+    assert_eq!(h.get_text("NOTE").unwrap(), Some("ends with amp &"));
 }
 
 #[test]
@@ -149,14 +149,14 @@ fn builder_sets_replaces_and_indexes_keywords() {
         .comment("SIMPLE", "conforms")
         .set("BITPIX", 16)
         .set("OBJECT", "NGC4151");
-    assert_eq!(h.get_logical("SIMPLE"), Some(true));
-    assert_eq!(h.get_integer("BITPIX"), Some(16));
-    assert_eq!(h.get_text("OBJECT"), Some("NGC4151"));
+    assert_eq!(h.get_logical("SIMPLE").unwrap(), Some(true));
+    assert_eq!(h.get_integer("BITPIX").unwrap(), Some(16));
+    assert_eq!(h.get_text("OBJECT").unwrap(), Some("NGC4151"));
     assert_eq!(h.cards.len(), 3);
 
     // Re-setting a keyword replaces in place — no duplicate card, index stable.
     h.set("BITPIX", -32);
-    assert_eq!(h.get_integer("BITPIX"), Some(-32));
+    assert_eq!(h.get_integer("BITPIX").unwrap(), Some(-32));
     assert_eq!(h.cards.len(), 3);
     // The attached comment survives on its card.
     assert_eq!(h.cards[0].comment.as_deref(), Some("conforms"));
@@ -167,8 +167,8 @@ fn builder_sets_replaces_and_indexes_keywords() {
         h.remove_where(|keyword| matches!(keyword, "ZFORM1" | "ZCTYP1"));
         assert_eq!(h.get("ZFORM1"), None);
         assert_eq!(h.get("ZCTYP1"), None);
-        assert_eq!(h.get_integer("KEEP"), Some(7));
-        assert_eq!(h.get_integer("BITPIX"), Some(-32));
+        assert_eq!(h.get_integer("KEEP").unwrap(), Some(7));
+        assert_eq!(h.get_integer("BITPIX").unwrap(), Some(-32));
     }
 }
 

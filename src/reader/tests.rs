@@ -316,15 +316,33 @@ fn read_image_rejects_non_image_hdus() {
 fn hdu_index_finds_extensions_by_extname() {
     let f = open("DDTSUVDATA.fits");
     // hdu 1 is the AIPS antenna table, EXTNAME = 'AIPS AN' (trailing spaces trimmed).
-    assert_eq!(f.hdu_index("AIPS AN", None), Some(1));
-    assert_eq!(f.hdu_index("aips an", None), Some(1)); // case-insensitive
-    assert_eq!(f.hdu_index("AIPS AN", Some(99)), None); // no such EXTVER
-    assert_eq!(f.hdu_index("MISSING", None), None);
+    assert_eq!(f.hdu_index("AIPS AN", None).unwrap(), Some(1));
+    assert_eq!(f.hdu_index("aips an", None).unwrap(), Some(1)); // case-insensitive
+    assert_eq!(f.hdu_index("AIPS AN", Some(99)).unwrap(), None); // no such EXTVER
+    assert_eq!(f.hdu_index("MISSING", None).unwrap(), None);
     // A tiled-compressed image extension is found by its EXTNAME too.
     assert_eq!(
-        open("comp_gzip_i16.fits").hdu_index("COMPRESSED_IMAGE", None),
+        open("comp_gzip_i16.fits")
+            .hdu_index("COMPRESSED_IMAGE", None)
+            .unwrap(),
         Some(1)
     );
+
+    let mut header = Header::new();
+    header
+        .set("SIMPLE", true)
+        .set("BITPIX", 8)
+        .set("NAXIS", 0)
+        .set("EXTNAME", 7);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_header(&header).unwrap();
+    let bytes = writer.into_inner().into_inner();
+    let malformed = FitsReader::from_bytes(&bytes).unwrap();
+    assert!(matches!(
+        malformed.hdu_index("SCI", None),
+        Err(FitsError::TypeMismatch { name, expected })
+            if name == "EXTNAME" && expected == "text"
+    ));
 }
 
 #[test]

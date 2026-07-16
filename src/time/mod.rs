@@ -512,20 +512,20 @@ pub struct FitsTime {
 impl FitsTime {
     /// Parse the time frame from a header. The public entry point is
     /// [`Header::time`](crate::Header::time), which forwards here.
-    pub(crate) fn from_header(header: &Header) -> FitsTime {
+    pub(crate) fn from_header(header: &Header) -> Result<FitsTime> {
         let scale = header
-            .get_text("TIMESYS")
+            .get_text("TIMESYS")?
             .map(TimeScale::parse)
             .unwrap_or(TimeScale::Utc);
-        let timeunit = header.get_text("TIMEUNIT").unwrap_or("s").to_string();
-        let trefpos = header.get_text("TREFPOS").map(str::to_string);
-        FitsTime {
+        let timeunit = header.get_text("TIMEUNIT")?.unwrap_or("s").to_string();
+        let trefpos = header.get_text("TREFPOS")?.map(str::to_string);
+        Ok(FitsTime {
             scale,
-            mjdref: reference_mjd(header),
+            mjdref: reference_mjd(header)?,
             timeunit,
-            timeoffs: header.get_real("TIMEOFFS").unwrap_or(0.0),
+            timeoffs: header.get_real("TIMEOFFS")?.unwrap_or(0.0),
             trefpos,
-        }
+        })
     }
 
     /// `TIMEUNIT` expressed in seconds (`s`, `d`/day, `a`/`yr` Julian year).
@@ -555,61 +555,61 @@ impl FitsTime {
     /// The observation MJD from `MJD-OBS`, else `DATE-OBS`, else `None`. Reads only
     /// the header (not the parsed frame). The public entry point is
     /// [`Header::obs_mjd`](crate::Header::obs_mjd), which forwards here.
-    pub(crate) fn obs_mjd(header: &Header) -> Option<f64> {
-        if let Some(mjd) = header.get_real("MJD-OBS") {
-            return Some(mjd);
+    pub(crate) fn obs_mjd(header: &Header) -> Result<Option<f64>> {
+        if let Some(mjd) = header.get_real("MJD-OBS")? {
+            return Ok(Some(mjd));
         }
-        if let Some(d) = header
-            .get_text("DATE-OBS")
-            .and_then(|s| Datetime::parse(s).ok())
-        {
-            return Some(d.to_mjd());
+        if let Some(value) = header.get_text("DATE-OBS")? {
+            return Datetime::parse(value).map(|datetime| Some(datetime.to_mjd()));
         }
         // §9.5: with no DATE-OBS/MJD-OBS, JEPOCH/BEPOCH stand in for the observation time.
-        Self::epoch(header).map(|e| e.mjd)
+        Ok(Self::epoch(header)?.map(|epoch| epoch.mjd))
     }
 
     /// The Julian (`JEPOCH`, implied scale TDB) or Besselian (`BEPOCH`, implied
     /// scale ET ≈ TT) epoch keyword as an [`EpochTime`], if present (§9.1.2, §9.5).
     /// `JEPOCH` wins if both appear. Reads only the header, so it takes no `self`.
-    pub(crate) fn epoch(header: &Header) -> Option<EpochTime> {
-        if let Some(j) = header.get_real("JEPOCH") {
-            return Some(EpochTime {
+    pub(crate) fn epoch(header: &Header) -> Result<Option<EpochTime>> {
+        if let Some(j) = header.get_real("JEPOCH")? {
+            return Ok(Some(EpochTime {
                 mjd: Epoch::Julian(j).to_mjd(),
                 scale: TimeScale::Tdb,
-            });
+            }));
         }
-        let b = header.get_real("BEPOCH")?;
-        Some(EpochTime {
+        let Some(b) = header.get_real("BEPOCH")? else {
+            return Ok(None);
+        };
+        Ok(Some(EpochTime {
             mjd: Epoch::Besselian(b).to_mjd(),
             scale: TimeScale::Tt, // ET ≈ TT
-        })
+        }))
     }
 
     /// The global bound / duration / error time keywords (§9.4, §9.5, §9.7). The
     /// start/end are resolved to absolute MJD (`MJD-BEG`/`-END`, else `DATE-BEG`/
     /// `-END`); durations and errors are returned as stored, in `TIMEUNIT`. Reads
     /// only the header, so it takes no `self`.
-    pub(crate) fn bounds(header: &Header) -> TimeBounds {
-        let mjd_or_date = |mjd: &str, date: &str| {
-            header.get_real(mjd).or_else(|| {
-                header
-                    .get_text(date)
-                    .and_then(|s| Datetime::parse(s).ok())
-                    .map(|d| d.to_mjd())
-            })
+    pub(crate) fn bounds(header: &Header) -> Result<TimeBounds> {
+        let mjd_or_date = |mjd: &str, date: &str| -> Result<Option<f64>> {
+            if let Some(value) = header.get_real(mjd)? {
+                return Ok(Some(value));
+            }
+            let Some(value) = header.get_text(date)? else {
+                return Ok(None);
+            };
+            Datetime::parse(value).map(|datetime| Some(datetime.to_mjd()))
         };
-        TimeBounds {
-            beg_mjd: mjd_or_date("MJD-BEG", "DATE-BEG"),
-            end_mjd: mjd_or_date("MJD-END", "DATE-END"),
-            avg_mjd: mjd_or_date("MJD-AVG", "DATE-AVG"),
-            xposure: header.get_real("XPOSURE"),
-            telapse: header.get_real("TELAPSE"),
-            timedel: header.get_real("TIMEDEL"),
-            timepixr: header.get_real("TIMEPIXR").unwrap_or(0.5), // §9.4.2 default
-            timsyer: header.get_real("TIMSYER"),
-            timrder: header.get_real("TIMRDER"),
-        }
+        Ok(TimeBounds {
+            beg_mjd: mjd_or_date("MJD-BEG", "DATE-BEG")?,
+            end_mjd: mjd_or_date("MJD-END", "DATE-END")?,
+            avg_mjd: mjd_or_date("MJD-AVG", "DATE-AVG")?,
+            xposure: header.get_real("XPOSURE")?,
+            telapse: header.get_real("TELAPSE")?,
+            timedel: header.get_real("TIMEDEL")?,
+            timepixr: header.get_real("TIMEPIXR")?.unwrap_or(0.5), // §9.4.2 default
+            timsyer: header.get_real("TIMSYER")?,
+            timrder: header.get_real("TIMRDER")?,
+        })
     }
 
     /// Convert Good Time Interval `START`/`STOP` column values (relative to
@@ -635,29 +635,43 @@ impl FitsTime {
     /// time-scale name, §9.2.3), convert a 1-based pixel coordinate along it to an
     /// absolute MJD in the frame's scale: the linear axis value (elapsed time in
     /// `TIMEUNIT` from `MJDREF`) plus the reference. `None` if not a time axis.
-    pub fn time_axis_mjd(&self, header: &Header, axis: usize, pixel: f64) -> Option<f64> {
-        let ctype = header.get_text(key!("CTYPE{axis}").as_str())?;
+    pub fn time_axis_mjd(&self, header: &Header, axis: usize, pixel: f64) -> Result<Option<f64>> {
+        let Some(ctype) = header.get_text(key!("CTYPE{axis}").as_str())? else {
+            return Ok(None);
+        };
         if TimeAxisKind::from_ctype(ctype) != Some(TimeAxisKind::Time) {
-            return None;
+            return Ok(None);
         }
-        let crpix = header.get_real(key!("CRPIX{axis}").as_str()).unwrap_or(0.0);
-        let crval = header.get_real(key!("CRVAL{axis}").as_str()).unwrap_or(0.0);
-        let cdelt = header.get_real(key!("CDELT{axis}").as_str()).unwrap_or(1.0);
-        Some(self.relative_to_mjd(crval + cdelt * (pixel - crpix)))
+        let crpix = header
+            .get_real(key!("CRPIX{axis}").as_str())?
+            .unwrap_or(0.0);
+        let crval = header
+            .get_real(key!("CRVAL{axis}").as_str())?
+            .unwrap_or(0.0);
+        let cdelt = header
+            .get_real(key!("CDELT{axis}").as_str())?
+            .unwrap_or(1.0);
+        Ok(Some(self.relative_to_mjd(crval + cdelt * (pixel - crpix))))
     }
 
     /// The §9.6 `'PHASE'` axis parameters (`CZPHSia` zero-phase time, `CPERIia`
     /// period) for WCS axis `axis` (1-based), or `None` if it is not a phase axis.
     /// Reads only the header, so it takes no `self`.
-    pub(crate) fn phase_axis(header: &Header, axis: usize) -> Option<PhaseAxis> {
-        let ctype = header.get_text(key!("CTYPE{axis}").as_str())?;
+    pub(crate) fn phase_axis(header: &Header, axis: usize) -> Result<Option<PhaseAxis>> {
+        let Some(ctype) = header.get_text(key!("CTYPE{axis}").as_str())? else {
+            return Ok(None);
+        };
         if TimeAxisKind::from_ctype(ctype) != Some(TimeAxisKind::Phase) {
-            return None;
+            return Ok(None);
         }
-        Some(PhaseAxis {
-            zero_phase: header.get_real(key!("CZPHS{axis}").as_str()).unwrap_or(0.0),
-            period: header.get_real(key!("CPERI{axis}").as_str()).unwrap_or(0.0),
-        })
+        Ok(Some(PhaseAxis {
+            zero_phase: header
+                .get_real(key!("CZPHS{axis}").as_str())?
+                .unwrap_or(0.0),
+            period: header
+                .get_real(key!("CPERI{axis}").as_str())?
+                .unwrap_or(0.0),
+        }))
     }
 }
 
@@ -691,34 +705,33 @@ impl TimeAxisKind {
 
 /// The reference epoch as MJD: `MJDREF` (or `MJDREFI`+`MJDREFF`), else `JDREF`
 /// (or `JDREFI`+`JDREFF`), else `DATEREF`, else `0.0`.
-fn reference_mjd(header: &Header) -> f64 {
-    if let Some(mjd) = resolve_split_ref(header, "MJDREF", "MJDREFI", "MJDREFF") {
-        return mjd;
+fn reference_mjd(header: &Header) -> Result<f64> {
+    if let Some(mjd) = resolve_split_ref(header, "MJDREF", "MJDREFI", "MJDREFF")? {
+        return Ok(mjd);
     }
-    if let Some(jd) = resolve_split_ref(header, "JDREF", "JDREFI", "JDREFF") {
-        return jd - MJD0;
+    if let Some(jd) = resolve_split_ref(header, "JDREF", "JDREFI", "JDREFF")? {
+        return Ok(jd - MJD0);
     }
-    header
-        .get_text("DATEREF")
-        .and_then(|s| Datetime::parse(s).ok())
-        .map(|d| d.to_mjd())
-        .unwrap_or(0.0)
+    let Some(value) = header.get_text("DATEREF")? else {
+        return Ok(0.0);
+    };
+    Datetime::parse(value).map(|datetime| datetime.to_mjd())
 }
 
 /// Resolve a reference epoch from its single (`MJDREF`) and split-precision
 /// (`MJDREFI`+`MJDREFF`) keywords. Per §9.2.2 a *full* integer+fractional split
 /// takes precedence over the single value; otherwise the single value is used,
 /// falling back to a lone split part.
-fn resolve_split_ref(header: &Header, single: &str, int: &str, frac: &str) -> Option<f64> {
-    let i = header.get_real(int);
-    let f = header.get_real(frac);
-    match (i, f) {
+fn resolve_split_ref(header: &Header, single: &str, int: &str, frac: &str) -> Result<Option<f64>> {
+    let i = header.get_real(int)?;
+    let f = header.get_real(frac)?;
+    Ok(match (i, f) {
         (Some(i), Some(f)) => Some(i + f),
-        _ => header.get_real(single).or_else(|| match (i, f) {
+        _ => header.get_real(single)?.or_else(|| match (i, f) {
             (None, None) => None,
             _ => Some(i.unwrap_or(0.0) + f.unwrap_or(0.0)),
         }),
-    }
+    })
 }
 
 #[cfg(test)]

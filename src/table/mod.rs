@@ -332,21 +332,44 @@ pub struct BinTable {
     bytes: Vec<u8>,
 }
 
+fn required_usize(header: &Header, keyword: &str, name: &'static str) -> Result<usize> {
+    let value = header
+        .get_integer(keyword)?
+        .ok_or(FitsError::MissingKeyword { name })?;
+    usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { name })
+}
+
+fn optional_usize(
+    header: &Header,
+    keyword: &str,
+    name: &'static str,
+    default: usize,
+) -> Result<usize> {
+    match header.get_integer(keyword)? {
+        Some(value) => usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { name }),
+        None => Ok(default),
+    }
+}
+
+fn required_text<'a>(
+    header: &'a Header,
+    keyword: &str,
+    missing_name: &'static str,
+) -> Result<&'a str> {
+    header
+        .get_text(keyword)?
+        .ok_or(FitsError::MissingKeyword { name: missing_name })
+}
+
 impl BinTable {
     /// Build a table from its header and owned data unit (`data` is the main
     /// table followed by the optional heap, as returned by the reader).
     pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<BinTable> {
-        let row_len = header
-            .get_integer("NAXIS1")
-            .ok_or(FitsError::MissingKeyword { name: "NAXIS1" })?
-            .max(0) as usize;
-        let nrows = header
-            .get_integer("NAXIS2")
-            .ok_or(FitsError::MissingKeyword { name: "NAXIS2" })?
-            .max(0) as usize;
+        let row_len = required_usize(header, "NAXIS1", "NAXIS1")?;
+        let nrows = required_usize(header, "NAXIS2", "NAXIS2")?;
         // §7.3.1: `0 ≤ TFIELDS ≤ 999` — also a guard, since `tfields` sizes the
         // column `Vec` and drives the `TFORMn` loop (an absurd value would abort).
-        let tfields = match header.get_integer("TFIELDS") {
+        let tfields = match header.get_integer("TFIELDS")? {
             Some(t) if (0..=999).contains(&t) => t as usize,
             Some(_) => return Err(FitsError::KeywordOutOfRange { name: "TFIELDS" }),
             None => return Err(FitsError::MissingKeyword { name: "TFIELDS" }),
@@ -355,12 +378,10 @@ impl BinTable {
         let mut columns = Vec::with_capacity(tfields);
         let mut offset = 0;
         for n in 1..=tfields {
-            let tform_value = header
-                .get_text(key!("TFORM{n}").as_str())
-                .ok_or(FitsError::MissingKeyword { name: "TFORMn" })?;
+            let tform_value = required_text(header, key!("TFORM{n}").as_str(), "TFORMn")?;
             let tform = Tform::parse(tform_value)?;
             let tdim = header
-                .get_text(key!("TDIM{n}").as_str())
+                .get_text(key!("TDIM{n}").as_str())?
                 .map(parse_tdim)
                 .transpose()?;
             // §7.3.2 permits trailing elements beyond the declared multidimensional
@@ -374,24 +395,20 @@ impl BinTable {
             }
             columns.push(Column {
                 name: header
-                    .get_text(key!("TTYPE{n}").as_str())
+                    .get_text(key!("TTYPE{n}").as_str())?
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
                 unit: header
-                    .get_text(key!("TUNIT{n}").as_str())
+                    .get_text(key!("TUNIT{n}").as_str())?
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
                 tform,
-                tscale: header
-                    .try_get_real(key!("TSCAL{n}").as_str())?
-                    .unwrap_or(1.0),
-                tzero: header
-                    .try_get_real(key!("TZERO{n}").as_str())?
-                    .unwrap_or(0.0),
-                tnull: header.try_get_integer(key!("TNULL{n}").as_str())?,
+                tscale: header.get_real(key!("TSCAL{n}").as_str())?.unwrap_or(1.0),
+                tzero: header.get_real(key!("TZERO{n}").as_str())?.unwrap_or(0.0),
+                tnull: header.get_integer(key!("TNULL{n}").as_str())?,
                 tdim,
                 tdisp: header
-                    .get_text(key!("TDISP{n}").as_str())
+                    .get_text(key!("TDISP{n}").as_str())?
                     .and_then(TDisp::parse),
                 byte_offset: offset,
             });
@@ -410,18 +427,14 @@ impl BinTable {
         if data.len() < main_table {
             return Err(FitsError::UnexpectedEof);
         }
-        let heap_offset = header
-            .get_integer("THEAP")
-            .map_or(main_table, |t| t.max(0) as usize);
+        let heap_offset = optional_usize(header, "THEAP", "THEAP", main_table)?;
         // §6.6: the heap follows the main table, so THEAP must be ≥ its size.
         if heap_offset < main_table {
             return Err(FitsError::KeywordOutOfRange { name: "THEAP" });
         }
         // PCOUNT counts the gap-plus-heap bytes after the main table, so the real
         // heap ends here — anything past it is block fill (§6.6).
-        let pcount = header
-            .get_integer("PCOUNT")
-            .map_or(0, |p| p.max(0) as usize);
+        let pcount = optional_usize(header, "PCOUNT", "PCOUNT", 0)?;
         let heap_end = main_table
             .checked_add(pcount)
             .ok_or(FitsError::UnexpectedEof)?

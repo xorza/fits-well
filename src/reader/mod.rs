@@ -60,9 +60,7 @@ impl Hdu {
         // §4.3: a plain image array has no group structure. A non-conforming
         // `PCOUNT`/`GCOUNT` would make `data_extent` size extra bytes, so reject it
         // up front (on untrusted input) rather than expose mismatched samples.
-        if self.header.get_integer("PCOUNT").unwrap_or(0) != 0
-            || self.header.get_integer("GCOUNT").unwrap_or(1) != 1
-        {
+        if self.header.pcount()? != 0 || self.header.gcount()? != 1 {
             return Err(FitsError::ImageHasGroups);
         }
         Ok(())
@@ -153,7 +151,7 @@ impl<S: Source> FitsReader<S> {
             match scan_header_unit(&mut source, &mut offset, &mut scratch)? {
                 NextHeader::Found { bytes, sum } => {
                     let header = Header::parse(&bytes)?;
-                    let kind = HduKind::classify(&header);
+                    let kind = HduKind::classify(&header)?;
                     let data_offset = offset;
                     let extent = data_extent(&header)?;
                     let next = data_offset
@@ -209,13 +207,24 @@ impl<S: Source> FitsReader<S> {
     /// where the card is absent, §4.4.1) — the way duplicate extensions like
     /// `('SCI', 1)` and `('SCI', 2)` are told apart. The primary array has no
     /// `EXTNAME`. Pair the returned index with a `read_*` method.
-    pub fn hdu_index(&self, name: &str, version: Option<i64>) -> Option<usize> {
-        self.hdus.iter().position(|h| {
-            h.header
-                .get_text("EXTNAME")
-                .is_some_and(|n| n.eq_ignore_ascii_case(name))
-                && version.is_none_or(|v| h.header.get_integer("EXTVER").unwrap_or(1) == v)
-        })
+    pub fn hdu_index(&self, name: &str, version: Option<i64>) -> Result<Option<usize>> {
+        for (index, hdu) in self.hdus.iter().enumerate() {
+            let name_matches = hdu
+                .header
+                .get_text("EXTNAME")?
+                .is_some_and(|value| value.eq_ignore_ascii_case(name));
+            if !name_matches {
+                continue;
+            }
+            let version_matches = match version {
+                Some(value) => hdu.header.get_integer("EXTVER")?.unwrap_or(1) == value,
+                None => true,
+            };
+            if version_matches {
+                return Ok(Some(index));
+            }
+        }
+        Ok(None)
     }
 
     /// The indices of every HDU [`FitsReader::read_image`] can read as an image: image
@@ -412,9 +421,9 @@ impl<S: Source> FitsReader<S> {
         let hdu = self.checked_hdu(index)?;
         let stored_datasum = hdu
             .header
-            .get_text("DATASUM")
+            .get_text("DATASUM")?
             .map(|value| value.trim().parse::<u32>().ok());
-        let has_checksum = hdu.header.get_text("CHECKSUM").is_some();
+        let has_checksum = hdu.header.get_text("CHECKSUM")?.is_some();
         if stored_datasum.is_none() && !has_checksum {
             return Ok(ChecksumReport {
                 datasum_ok: None,

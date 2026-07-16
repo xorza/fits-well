@@ -4,36 +4,36 @@ use crate::header::from_card_lines as header;
 #[test]
 fn classifies_by_mandatory_keywords() {
     assert_eq!(
-        HduKind::classify(&header(&["SIMPLE  = T"])),
+        HduKind::classify(&header(&["SIMPLE  = T"])).unwrap(),
         HduKind::Primary
     );
     assert_eq!(
-        HduKind::classify(&header(&["XTENSION= 'IMAGE   '"])),
+        HduKind::classify(&header(&["XTENSION= 'IMAGE   '"])).unwrap(),
         HduKind::Image
     );
     assert_eq!(
-        HduKind::classify(&header(&["XTENSION= 'TABLE   '"])),
+        HduKind::classify(&header(&["XTENSION= 'TABLE   '"])).unwrap(),
         HduKind::AsciiTable
     );
     assert_eq!(
-        HduKind::classify(&header(&["XTENSION= 'BINTABLE'"])),
+        HduKind::classify(&header(&["XTENSION= 'BINTABLE'"])).unwrap(),
         HduKind::BinTable
     );
     // A BINTABLE flagged ZIMAGE/ZTABLE is classified by its payload, not its container.
     assert_eq!(
-        HduKind::classify(&header(&["XTENSION= 'BINTABLE'", "ZIMAGE  = T"])),
+        HduKind::classify(&header(&["XTENSION= 'BINTABLE'", "ZIMAGE  = T"])).unwrap(),
         HduKind::CompressedImage
     );
     assert_eq!(
-        HduKind::classify(&header(&["XTENSION= 'BINTABLE'", "ZTABLE  = T"])),
+        HduKind::classify(&header(&["XTENSION= 'BINTABLE'", "ZTABLE  = T"])).unwrap(),
         HduKind::CompressedTable
     );
     assert_eq!(
-        HduKind::classify(&header(&["SIMPLE  = T", "GROUPS  = T"])),
+        HduKind::classify(&header(&["SIMPLE  = T", "GROUPS  = T"])).unwrap(),
         HduKind::RandomGroups
     );
     assert_eq!(
-        HduKind::classify(&header(&["XTENSION= 'FOO     '"])),
+        HduKind::classify(&header(&["XTENSION= 'FOO     '"])).unwrap(),
         HduKind::Other
     );
 }
@@ -85,6 +85,14 @@ fn rejects_malformed_pcount_and_gcount_instead_of_clamping() {
     assert!(matches!(
         data_extent(&zero_gcount),
         Err(FitsError::KeywordOutOfRange { name: "GCOUNT" })
+    ));
+
+    let mut mistyped_pcount = neg_pcount;
+    mistyped_pcount.set("PCOUNT", "not an integer");
+    assert!(matches!(
+        data_extent(&mistyped_pcount),
+        Err(FitsError::TypeMismatch { name, expected })
+            if name == "PCOUNT" && expected == "integer"
     ));
 }
 

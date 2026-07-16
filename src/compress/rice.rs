@@ -15,21 +15,32 @@ pub(crate) struct RiceParams {
 
 /// Rice parameters from the `ZNAMEi`/`ZVALi` keywords, defaulting to a block size
 /// of 32 and `bytepix = |ZBITPIX|/8`.
-pub(crate) fn rice_params(header: &Header, zbitpix: Bitpix) -> RiceParams {
+pub(crate) fn rice_params(header: &Header, zbitpix: Bitpix) -> Result<RiceParams> {
     let mut blocksize = 32;
     let mut bytepix = zbitpix.elem_size();
     let mut i = 1;
-    while let Some(name) = header.get_text(key!("ZNAME{i}").as_str()) {
-        if let Some(v) = header.get_integer(key!("ZVAL{i}").as_str()) {
+    while let Some(name) = header.get_text(key!("ZNAME{i}").as_str())? {
+        if let Some(v) = header.get_integer(key!("ZVAL{i}").as_str())? {
             match name {
-                "BLOCKSIZE" => blocksize = v.max(1) as usize,
-                "BYTEPIX" => bytepix = v.max(1) as usize,
+                "BLOCKSIZE" => {
+                    blocksize = positive_parameter(v)?;
+                }
+                "BYTEPIX" => {
+                    bytepix = positive_parameter(v)?;
+                }
                 _ => {}
             }
         }
         i += 1;
     }
-    RiceParams { blocksize, bytepix }
+    Ok(RiceParams { blocksize, bytepix })
+}
+
+fn positive_parameter(value: i64) -> Result<usize> {
+    usize::try_from(value)
+        .ok()
+        .filter(|&value| value > 0)
+        .ok_or(FitsError::KeywordOutOfRange { name: "ZVALn" })
 }
 
 /// Decode a `RICE_1` tile of `nx` integer values into `out` (cleared first; a reused
@@ -347,8 +358,27 @@ impl<'a> BitReader<'a> {
 
 #[cfg(test)]
 mod tests {
+    use crate::bitpix::Bitpix;
     use crate::compress::rice::{self, BitReader};
     use crate::error::FitsError;
+    use crate::header::Header;
+
+    #[test]
+    fn rice_parameters_reject_invalid_header_values() {
+        let mut header = Header::new();
+        header.set("ZNAME1", "BLOCKSIZE").set("ZVAL1", 0);
+        assert!(matches!(
+            rice::rice_params(&header, Bitpix::I16),
+            Err(FitsError::KeywordOutOfRange { name: "ZVALn" })
+        ));
+
+        header.set("ZVAL1", "not an integer");
+        assert!(matches!(
+            rice::rice_params(&header, Bitpix::I16),
+            Err(FitsError::TypeMismatch { name, expected })
+                if name == "ZVAL1" && expected == "integer"
+        ));
+    }
 
     #[test]
     fn bit_reader_reads_msb_first() {

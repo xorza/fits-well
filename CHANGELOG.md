@@ -10,6 +10,10 @@
   accepts packed `Vec<u8>` data directly. `ColumnType` is exported from the crate.
 - `Header::scaling` now returns `Result<Scaling>` so malformed scaling metadata is
   distinguishable from absent metadata.
+- `Header::get_logical`, `get_integer`, `get_real`, and `get_text` now return
+  `Result<Option<_>>`; the parallel `try_get_*` family was removed. Time metadata
+  accessors, `FitsTime::time_axis_mjd`, and `FitsReader::hdu_index` now return
+  `Result` so malformed metadata is preserved as an error.
 - `RawImage::decode` now consumes `self`, allowing already-owned decompressed samples
   to move out without cloning. With `ndarray`, `RawImage::to_ndarray(&self)` was
   replaced by the consuming `RawImage::into_ndarray(self)`.
@@ -28,18 +32,15 @@
 
 ### Added
 
-- Added `Header::try_get_logical`, `try_get_integer`, `try_get_real`, and
-  `try_get_text`, which return `Result<Option<_>>` and distinguish a missing keyword
-  from a present value of the wrong type.
 - Added `Wcs::view` with immutable per-axis metadata and unsupported-axis status.
 - Added explicit `ColumnType` declarations for variable-length table columns.
 
 ### Changed
 
-- Scaling and transformation metadata now fails with `TypeMismatch` when a card is
-  present with the wrong representation. This applies to image, table, ASCII-table,
-  random-groups, compression, WCS, and time metadata instead of silently applying
-  identity defaults.
+- Structural and semantic metadata now fails with `TypeMismatch` when a card is
+  present with the wrong representation. This applies to HDU layout, image, table,
+  ASCII-table, random-groups, compression, WCS, and time metadata instead of
+  treating the card as absent or silently applying a default.
 - Header text, header comments, binary-table text, ASCII-table text, units, names,
   and null markers are validated as FITS restricted ASCII before writing.
 - Binary-table writing validates each column state before emitting data. `wide()` is

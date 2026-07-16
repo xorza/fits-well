@@ -60,6 +60,13 @@ fn rejects_malformed_datetimes() {
     ] {
         assert!(Datetime::parse(s).is_err(), "{s:?} should be rejected");
     }
+
+    let mut header = crate::header::Header::new();
+    header.set("DATE-OBS", "2024-13-01");
+    assert!(matches!(
+        header.obs_mjd(),
+        Err(FitsError::InvalidValue { card }) if card == "DATE '2024-13-01'"
+    ));
 }
 
 #[test]
@@ -107,18 +114,18 @@ fn reads_jepoch_and_bepoch_keywords() {
     // JEPOCH=2000.0 ⇒ J2000.0 = MJD 51544.5, implied scale TDB.
     let mut hj = Header::new();
     hj.set("JEPOCH", 2000.0);
-    let ej = FitsTime::epoch(&hj).unwrap();
+    let ej = FitsTime::epoch(&hj).unwrap().unwrap();
     assert!((ej.mjd - 51544.5).abs() < 1e-6);
     assert_eq!(ej.scale, TimeScale::Tdb);
     // BEPOCH=1950.0 ⇒ B1950.0 = MJD 33281.92345905, implied scale ET ≈ TT.
     let mut hb = Header::new();
     hb.set("BEPOCH", 1950.0);
-    let eb = FitsTime::epoch(&hb).unwrap();
+    let eb = FitsTime::epoch(&hb).unwrap().unwrap();
     assert!((eb.mjd - 33281.92345905).abs() < 1e-4);
     assert_eq!(eb.scale, TimeScale::Tt);
     // Neither keyword ⇒ None.
     let empty = Header::new();
-    assert!(FitsTime::epoch(&empty).is_none());
+    assert!(FitsTime::epoch(&empty).unwrap().is_none());
 }
 
 #[test]
@@ -132,7 +139,7 @@ fn reads_bound_duration_and_error_keywords() {
     h.set("TELAPSE", 1500.0);
     h.set("TIMEDEL", 0.1);
     h.set("TIMSYER", 1e-6);
-    let b = FitsTime::bounds(&h);
+    let b = FitsTime::bounds(&h).unwrap();
     assert_eq!(b.beg_mjd, Some(58000.0));
     let end = Datetime::parse("2017-09-05T00:00:00").unwrap().to_mjd();
     assert!((b.end_mjd.unwrap() - end).abs() < 1e-9); // resolved from DATE-END
@@ -151,7 +158,7 @@ fn gti_intervals_convert_to_absolute_mjd() {
     let mut h = Header::new();
     h.set("MJDREF", 58000.0);
     h.set("TIMEUNIT", "d");
-    let t = FitsTime::from_header(&h);
+    let t = FitsTime::from_header(&h).unwrap();
     let gtis = t.gti_intervals(&[0.0, 2.0], &[1.0, 3.0]).unwrap();
     assert_eq!(
         gtis,
@@ -195,7 +202,7 @@ fn reads_phase_axis_and_folds() {
     h.set("CTYPE2", "PHASE");
     h.set("CZPHS2", 5.0);
     h.set("CPERI2", 2.0);
-    let pa = FitsTime::phase_axis(&h, 2).unwrap();
+    let pa = FitsTime::phase_axis(&h, 2).unwrap().unwrap();
     assert_eq!(pa.zero_phase, 5.0);
     assert_eq!(pa.period, 2.0);
     // Fold: ((8 − 5)/2) mod 1 = 1.5 mod 1 = 0.5; the zero-phase time folds to 0.
@@ -203,7 +210,7 @@ fn reads_phase_axis_and_folds() {
     assert_eq!(pa.fold(5.0), 0.0);
     // A non-phase axis yields nothing.
     h.set("CTYPE1", "RA---TAN");
-    assert_eq!(FitsTime::phase_axis(&h, 1), None);
+    assert_eq!(FitsTime::phase_axis(&h, 1).unwrap(), None);
 }
 
 #[test]
@@ -212,10 +219,10 @@ fn obs_mjd_falls_back_to_jepoch() {
     // §9.5: absent DATE-OBS/MJD-OBS, JEPOCH stands in for the observation time.
     let mut h = Header::new();
     h.set("JEPOCH", 2000.0); // J2000.0 = MJD 51544.5
-    assert!((FitsTime::obs_mjd(&h).unwrap() - 51544.5).abs() < 1e-6);
+    assert!((FitsTime::obs_mjd(&h).unwrap().unwrap() - 51544.5).abs() < 1e-6);
     // An explicit MJD-OBS still wins.
     h.set("MJD-OBS", 58000.0);
-    assert_eq!(FitsTime::obs_mjd(&h), Some(58000.0));
+    assert_eq!(FitsTime::obs_mjd(&h).unwrap(), Some(58000.0));
 }
 
 #[test]
@@ -309,13 +316,16 @@ fn time_axis_resolves_to_mjd() {
     h.set("TIMEUNIT", "s");
     h.set("CTYPE3", "TIME");
     h.set("CRPIX3", 1.0).set("CRVAL3", 0.0).set("CDELT3", 10.0); // 10 s / pixel
-    let t = FitsTime::from_header(&h);
+    let t = FitsTime::from_header(&h).unwrap();
     // Pixel 1 → 0 s → MJDREF; pixel 11 → 100 s later.
-    assert!((t.time_axis_mjd(&h, 3, 1.0).unwrap() - 58000.0).abs() < 1e-12);
-    assert!((t.time_axis_mjd(&h, 3, 11.0).unwrap() - (58000.0 + 100.0 / 86400.0)).abs() < 1e-12);
+    assert!((t.time_axis_mjd(&h, 3, 1.0).unwrap().unwrap() - 58000.0).abs() < 1e-12);
+    assert!(
+        (t.time_axis_mjd(&h, 3, 11.0).unwrap().unwrap() - (58000.0 + 100.0 / 86400.0)).abs()
+            < 1e-12
+    );
     // A non-time axis returns None.
     h.set("CTYPE1", "RA---TAN");
-    assert!(t.time_axis_mjd(&h, 1, 1.0).is_none());
+    assert!(t.time_axis_mjd(&h, 1, 1.0).unwrap().is_none());
 }
 
 #[test]
@@ -348,7 +358,7 @@ fn fits_time_resolves_reference_and_relative_times() {
     h.set("TSTOP", 86400.0); // one day, in seconds
     h.set("DATE-OBS", "2017-09-04T00:00:00");
 
-    let t = FitsTime::from_header(&h);
+    let t = FitsTime::from_header(&h).unwrap();
     assert_eq!(t.scale, TimeScale::Tt);
     assert_eq!(t.mjdref, 58000.0);
     assert_eq!(t.trefpos.as_deref(), Some("TOPOCENTER"));
@@ -357,7 +367,15 @@ fn fits_time_resolves_reference_and_relative_times() {
     assert!((t.relative_to_mjd(0.0) - 58000.0).abs() < 1e-12);
     assert!((t.relative_to_mjd(86400.0) - 58001.0).abs() < 1e-12);
     // DATE-OBS 2017-09-04 = MJD 58000.0.
-    assert!((FitsTime::obs_mjd(&h).unwrap() - 58000.0).abs() < 1e-9);
+    assert!((FitsTime::obs_mjd(&h).unwrap().unwrap() - 58000.0).abs() < 1e-9);
+
+    let mut malformed = h.clone();
+    malformed.set("TIMEOFFS", "not a real");
+    assert!(matches!(
+        malformed.time(),
+        Err(FitsError::TypeMismatch { name, expected })
+            if name == "TIMEOFFS" && expected == "real"
+    ));
 }
 
 #[test]
@@ -367,7 +385,7 @@ fn fits_time_reads_split_and_day_unit_references() {
     h.set("MJDREFI", 58000.0);
     h.set("MJDREFF", 0.25);
     h.set("TIMEUNIT", "d");
-    let t = FitsTime::from_header(&h);
+    let t = FitsTime::from_header(&h).unwrap();
     assert_eq!(t.scale, TimeScale::Utc); // default
     assert!((t.mjdref - 58000.25).abs() < 1e-12);
     assert_eq!(t.unit_seconds(), 86400.0);
@@ -396,7 +414,7 @@ fn timeoffs_shifts_relative_times() {
     h.set("MJDREF", 58000.0);
     h.set("TIMEUNIT", "s");
     h.set("TIMEOFFS", 10.0);
-    let t = FitsTime::from_header(&h);
+    let t = FitsTime::from_header(&h).unwrap();
     assert_eq!(t.timeoffs, 10.0);
     assert!((t.relative_to_mjd(0.0) - (58000.0 + 10.0 / 86400.0)).abs() < 1e-12);
     assert!((t.relative_to_mjd(5.0) - (58000.0 + 15.0 / 86400.0)).abs() < 1e-12);
@@ -408,7 +426,7 @@ fn timeunit_minute_hour_century_scale_correctly() {
     let unit = |u: &str| {
         let mut h = Header::new();
         h.set("TIMEUNIT", u);
-        FitsTime::from_header(&h).unit_seconds()
+        FitsTime::from_header(&h).unwrap().unit_seconds()
     };
     // Previously min/h/cy silently fell through to 1 s; Table 34 fixes that.
     assert_eq!(unit("min"), 60.0);
@@ -431,7 +449,7 @@ fn split_reference_takes_precedence_over_single_mjdref() {
         for &(k, v) in pairs {
             h.set(k, v);
         }
-        FitsTime::from_header(&h).mjdref
+        FitsTime::from_header(&h).unwrap().mjdref
     };
     // §9.2.2: a full integer+fractional split wins over the single value.
     assert!(
