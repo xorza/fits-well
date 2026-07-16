@@ -55,6 +55,9 @@
 
 ### Fixed
 
+- WCS unsupported-axis classification now recognizes the standard `LOG` and `TAB`
+  algorithms on any four-character coordinate type, including time and generic axes,
+  instead of limiting nonlinear suffix detection to spectral coordinate names.
 - Binary-table WCS now resolves the normative Table-22 primary and shortened
   alternate axis keywords, both pixel-list matrix/parameter aliases, column-indexed
   pole keywords, and alternate vector-cell rank inference.

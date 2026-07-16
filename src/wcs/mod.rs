@@ -17,11 +17,12 @@
 //! `MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic `COP`/`COE`/`COD`/`COO`,
 //! pseudoconic `BON`, and polyconic `PCO`. All validated against `astropy.wcs`
 //! (wcslib). The unimplemented non-linear transforms — quad-cube `TSC`/`CSC`/`QSC`,
-//! HEALPix `HPX`/`XPH`, and the non-linear spectral algorithms (§8.4) — are not
-//! evaluated: such an axis passes through the linear stage only (its intermediate
-//! world coordinate) and is listed in [`WcsView::unsupported_axes`], so a file using
-//! one still reads, just with that axis not fully decoded. These source values and
-//! flags are available through the immutable [`Wcs::view`] snapshot.
+//! HEALPix `HPX`/`XPH`, and the non-linear coordinate algorithms (§8.4), including
+//! generic `LOG`/`TAB` axes — are not evaluated: such an axis passes through the
+//! linear stage only (its intermediate world coordinate) and is listed in
+//! [`WcsView::unsupported_axes`], so a file using one still reads, just with that
+//! axis not fully decoded. These source values and flags are available through the
+//! immutable [`Wcs::view`] snapshot.
 //!
 //! Binary-table WCS (Table 22) is supported for both the pixel-list
 //! ([`Header::wcs_pixel_list`](crate::Header::wcs_pixel_list)) and vector-cell
@@ -48,9 +49,9 @@ const D2R: f64 = PI / 180.0;
 const DOMAIN_TOLERANCE: f64 = 1e-12;
 const NEWTON_RESIDUAL_TOLERANCE: f64 = 1e-12;
 
-/// The §8.4 spectral coordinate types (the 4-character `CTYPE` prefix). A bare
-/// type is sampled linearly (handled by the generic linear axis); a `TTTT-AAA`
-/// algorithm suffix means non-linear sampling, which is not yet evaluated.
+/// The §8.4 spectral coordinate types (the 4-character `CTYPE` prefix). Every
+/// standard algorithm suffix on these types is non-linear; `LOG` and `TAB` also
+/// apply to arbitrary four-character coordinate types.
 const SPECTRAL_TYPES: &[&str] = &[
     "FREQ", "ENER", "WAVN", "VRAD", "WAVE", "VOPT", "ZOPT", "AWAV", "VELO", "BETA",
 ];
@@ -1631,10 +1632,10 @@ fn projection_code(ctype: &str) -> Option<&str> {
 
 /// Axis indices (0-based) whose non-linear transform this library does not
 /// evaluate: a celestial axis whose projection code is unimplemented
-/// (quad-cube/HEALPix), or a non-linearly-sampled spectral axis (`TTTT-AAA`,
-/// §8.4). Such an axis is taken through the linear stage only (its intermediate
-/// world coordinate). The supported projections and a bare spectral type (which
-/// is genuinely linear) are not flagged.
+/// (quad-cube/HEALPix), a spectral axis with an algorithm suffix, or any
+/// four-character coordinate type using the generic `LOG`/`TAB` algorithms (§8.4).
+/// Such an axis is taken through the linear stage only (its intermediate world
+/// coordinate). Supported projections and bare coordinate types are not flagged.
 fn nonlinear_unsupported_axes(ctype: &[String]) -> Vec<usize> {
     let mut out = Vec::new();
     for (i, t) in ctype.iter().enumerate() {
@@ -1646,9 +1647,9 @@ fn nonlinear_unsupported_axes(ctype: &[String]) -> Vec<usize> {
             }
         } else {
             let head = t.split('-').next().unwrap_or("").trim_end();
-            if SPECTRAL_TYPES.contains(&head)
-                && t.get(5..).map(str::trim).is_some_and(|s| !s.is_empty())
-            {
+            let code = projection_code(t);
+            let generic_nonlinear = head.len() == 4 && matches!(code, Some("LOG" | "TAB"));
+            if generic_nonlinear || SPECTRAL_TYPES.contains(&head) && code.is_some() {
                 out.push(i);
             }
         }
