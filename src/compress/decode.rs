@@ -105,13 +105,13 @@ impl<'a> DecodeBuffer<'a> {
     }
 
     fn from_words(words: &'a mut [u64], bitpix: Bitpix, count: usize) -> DecodeBuffer<'a> {
-        assert!(
+        debug_assert!(
             count <= words.len().saturating_mul(8) / bitpix.elem_size(),
             "decode scratch must hold every sample"
         );
         let ptr = words.as_mut_ptr() as *mut u8;
-        // SAFETY: the assertion proves the initialized byte capacity; u64 alignment
-        // satisfies every FITS scalar type, whose bit patterns are all valid.
+        // SAFETY: the caller sizes `words` for every sample; u64 alignment satisfies
+        // every FITS scalar type, whose bit patterns are all valid.
         unsafe {
             match bitpix {
                 Bitpix::U8 => DecodeBuffer::U8(std::slice::from_raw_parts_mut(ptr, count)),

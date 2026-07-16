@@ -307,7 +307,7 @@ impl<S: Source> FitsReader<S> {
         let expected_bytes = shape_product(&shape)?
             .checked_mul(bitpix.elem_size())
             .ok_or(FitsError::DataUnitOverflow)?;
-        assert_eq!(
+        debug_assert_eq!(
             bytes.len(),
             expected_bytes,
             "image data length must match the axis product"
