@@ -449,6 +449,102 @@ fn read_vla_column_physical_scales_heap_arrays_and_nulls() {
 }
 
 #[test]
+fn read_vla_complex_scales_p_and_q_heap_values() {
+    let mut header = table_header(24, 2, &["1PC(2)", "1QM(1)"]);
+    header
+        .set("PCOUNT", 32)
+        .set("TSCAL1", 2.0)
+        .set("TZERO1", 10.0)
+        .set("TSCAL2", -0.5)
+        .set("TZERO2", 3.0);
+    let mut data = Vec::new();
+    data.extend_from_slice(&2i32.to_be_bytes());
+    data.extend_from_slice(&0i32.to_be_bytes());
+    data.extend_from_slice(&1i64.to_be_bytes());
+    data.extend_from_slice(&16i64.to_be_bytes());
+    data.extend_from_slice(&0i32.to_be_bytes());
+    data.extend_from_slice(&0i32.to_be_bytes());
+    data.extend_from_slice(&0i64.to_be_bytes());
+    data.extend_from_slice(&0i64.to_be_bytes());
+    for (re, im) in [(1.0f32, 2.0f32), (-3.0, 4.0)] {
+        data.extend_from_slice(&re.to_be_bytes());
+        data.extend_from_slice(&im.to_be_bytes());
+    }
+    data.extend_from_slice(&6.0f64.to_be_bytes());
+    data.extend_from_slice(&(-8.0f64).to_be_bytes());
+
+    let table = BinTable::from_data(&header, data).unwrap();
+    // PC: 10 + 2·(1 + 2i) = 12 + 4i; QM: 3 - 0.5·(6 - 8i) = 0 + 4i.
+    assert_eq!(
+        table.column_by_idx(0).unwrap().vla_complex().unwrap(),
+        vec![
+            vec![Complex { re: 12.0, im: 4.0 }, Complex { re: 4.0, im: 8.0 }],
+            vec![],
+        ]
+    );
+    assert_eq!(
+        table.column_by_idx(1).unwrap().vla_complex().unwrap(),
+        vec![vec![Complex { re: 0.0, im: 4.0 }], vec![]]
+    );
+}
+
+#[test]
+fn read_vla_unsigned_is_exact_past_f64_integer_precision() {
+    let mut header = table_header(24, 1, &["1PK(3)", "1QK(3)"]);
+    header
+        .set("PCOUNT", 48)
+        .set("TZERO1", U64_OFFSET)
+        .set("TZERO2", U64_OFFSET);
+    let mut data = Vec::new();
+    data.extend_from_slice(&3i32.to_be_bytes());
+    data.extend_from_slice(&0i32.to_be_bytes());
+    data.extend_from_slice(&3i64.to_be_bytes());
+    data.extend_from_slice(&24i64.to_be_bytes());
+    let expected = [0, 9_007_199_254_740_993, u64::MAX];
+    // Stored = physical - 2^63, computed independently of the sign-flip decoder.
+    let stored = [i64::MIN, -9_214_364_837_600_034_815, i64::MAX];
+    for _ in 0..2 {
+        for value in stored {
+            data.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+
+    let table = BinTable::from_data(&header, data.clone()).unwrap();
+    let exact = Some(vec![UnsignedView::U64(expected.to_vec())]);
+    assert_eq!(
+        table.column_by_idx(0).unwrap().vla_unsigned().unwrap(),
+        exact
+    );
+    assert_eq!(
+        table.column_by_idx(1).unwrap().vla_unsigned().unwrap(),
+        exact
+    );
+    assert_eq!(
+        table.column_by_idx(0).unwrap().vla_physical().unwrap()[0][1],
+        9_007_199_254_740_992.0
+    );
+
+    header.set("TSCAL1", 2.0).set("TNULL2", i64::MIN);
+    let non_convention = BinTable::from_data(&header, data).unwrap();
+    assert_eq!(
+        non_convention
+            .column_by_idx(0)
+            .unwrap()
+            .vla_unsigned()
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        non_convention
+            .column_by_idx(1)
+            .unwrap()
+            .vla_unsigned()
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn vla_descriptor_overrunning_the_heap_is_rejected() {
     // §6.6: a span must lie within the heap (`PCOUNT` bytes), not the block fill.
     // Heap is 8 bytes (PCOUNT=8) but the descriptor claims 3 f32 = 12 bytes.

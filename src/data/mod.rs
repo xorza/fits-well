@@ -525,8 +525,11 @@ impl SampleType {
 }
 
 /// A typed integer realization of the FITS unsigned (and signed-byte) storage
-/// conventions — `BSCALE == 1` with `BZERO` the sign-bit offset. Values are exact
-/// (no `f64` rounding), recovered by flipping the stored sign bit.
+/// conventions — `BSCALE`/`BZERO` for images or `TSCALn`/`TZEROn` for table
+/// columns, with unit scale and the matching sign-bit offset. Values are exact (no
+/// `f64` rounding), recovered by flipping the stored sign bit. Returned directly
+/// for images and fixed columns, and once per jagged row by
+/// [`crate::ColumnReader::vla_unsigned`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsignedView {
     /// `BITPIX = 8`, `BZERO = -128`: stored `u8` → `i8`.
@@ -540,9 +543,8 @@ pub enum UnsignedView {
 }
 
 impl UnsignedView {
-    /// Recover unsigned values from sign-bit-offset storage (the §5.2.5 / Table 19
-    /// convention) by flipping the sign bit. Shared by [`Image::unsigned`] and
-    /// `ColumnReader::unsigned` so the bit math has one definition.
+    /// Recover already-decoded image values from sign-bit-offset storage (the
+    /// §5.2.5 / Table 19 convention) by flipping the sign bit.
     pub(crate) fn from_signed_byte(stored: &[u8]) -> UnsignedView {
         UnsignedView::I8(stored.iter().map(|&x| (x ^ 0x80) as i8).collect())
     }

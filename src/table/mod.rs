@@ -6,7 +6,8 @@
 //! a [`ColumnReader`] (from [`BinTable::column_by_idx`] / [`BinTable::column_by_name`]),
 //! whose methods yield typed [`ColumnData`] ([`ColumnReader::raw`]), the
 //! `TSCALn`/`TZEROn` physical plane ([`ColumnReader::physical`]), and `P`/`Q`
-//! variable-length arrays out of the heap ([`ColumnReader::vla`]).
+//! variable-length arrays out of the heap ([`ColumnReader::vla`]), including
+//! their numeric, complex, and exact unsigned physical views.
 
 use std::ops::Index;
 
@@ -622,8 +623,9 @@ pub(crate) struct VlaColumn<'a> {
 /// descriptor: [`raw`](Self::raw) for the typed values, [`physical`](Self::physical)
 /// for the scaled `f64` plane, [`unsigned`](Self::unsigned)/[`complex`](Self::complex)/
 /// [`bits`](Self::bits) for the special kinds, and [`vla`](Self::vla) (+
-/// [`vla_physical`](Self::vla_physical)/[`vla_bits`](Self::vla_bits)) for
-/// variable-length `P`/`Q` columns. Borrows the table, so it cannot outlive it.
+/// [`vla_physical`](Self::vla_physical)/[`vla_unsigned`](Self::vla_unsigned)/
+/// [`vla_complex`](Self::vla_complex)/[`vla_bits`](Self::vla_bits)) for variable-length
+/// `P`/`Q` columns. Borrows the table, so it cannot outlive it.
 #[derive(Debug, Clone, Copy)]
 pub struct ColumnReader<'a> {
     table: &'a BinTable,
@@ -692,71 +694,27 @@ impl<'a> ColumnReader<'a> {
                 code: col.tform.kind.code(),
             });
         }
-        if col.tscale != 1.0 || col.tnull.is_some() {
+        let Some(kind) = unsigned_kind(col.tform.kind, col.tscale, col.tzero, col.tnull) else {
             return Ok(None);
-        }
-        let tzero = col.tzero;
-        let cells = || self.table.cells(col);
-        let capacity = self.table.nrows * col.tform.repeat;
-        Ok(match col.tform.kind {
-            TformKind::Byte if tzero == -128.0 => {
-                Some(UnsignedView::I8(map_cells(cells(), capacity, |[x]| {
-                    (x ^ 0x80) as i8
-                })))
-            }
-            TformKind::I16 if tzero == U16_OFFSET => {
-                Some(UnsignedView::U16(map_cells(cells(), capacity, |bytes| {
-                    (i16::from_be_bytes(bytes) as u16) ^ 0x8000
-                })))
-            }
-            TformKind::I32 if tzero == U32_OFFSET => {
-                Some(UnsignedView::U32(map_cells(cells(), capacity, |bytes| {
-                    (i32::from_be_bytes(bytes) as u32) ^ 0x8000_0000
-                })))
-            }
-            TformKind::I64 if tzero == U64_OFFSET => {
-                Some(UnsignedView::U64(map_cells(cells(), capacity, |bytes| {
-                    (i64::from_be_bytes(bytes) as u64) ^ 0x8000_0000_0000_0000
-                })))
-            }
-            _ => None,
-        })
+        };
+        Ok(Some(unsigned_cells(
+            self.table.cells(col),
+            self.table.nrows * col.tform.repeat,
+            kind,
+        )))
     }
 
     /// A `C`/`M` complex column as [`Complex<f64>`] values, applying `TSCALn` to both
     /// components and `TZEROn` to the real component (§7.3.2). Errors on non-complex columns.
     pub fn complex(&self) -> Result<Vec<Complex<f64>>> {
         let col = self.descriptor();
-        let scale = |re: f64, im: f64| Complex {
-            re: col.tzero + col.tscale * re,
-            im: col.tscale * im,
-        };
-        let capacity = self.table.nrows * col.tform.repeat;
-        match col.tform.kind {
-            TformKind::ComplexF32 => Ok(map_cells(
-                self.table.cells(col),
-                capacity,
-                |bytes: [u8; 8]| {
-                    scale(
-                        f32::from_be_bytes(bytes[..4].try_into().unwrap()) as f64,
-                        f32::from_be_bytes(bytes[4..].try_into().unwrap()) as f64,
-                    )
-                },
-            )),
-            TformKind::ComplexF64 => Ok(map_cells(
-                self.table.cells(col),
-                capacity,
-                |bytes: [u8; 16]| {
-                    scale(
-                        f64::from_be_bytes(bytes[..8].try_into().unwrap()),
-                        f64::from_be_bytes(bytes[8..].try_into().unwrap()),
-                    )
-                },
-            )),
-            _ => Err(FitsError::NotAComplexColumn {
-                code: col.tform.kind.code(),
-            }),
-        }
+        complex_cells(
+            self.table.cells(col),
+            self.table.nrows * col.tform.repeat,
+            col.tform.kind,
+            col.tscale,
+            col.tzero,
+        )
     }
 
     /// An `X` (bit-array) column as a borrowed 2-D [`BitColumn`] — `nrows × repeat`
@@ -780,12 +738,9 @@ impl<'a> ColumnReader<'a> {
     /// columns.
     pub fn vla(&self) -> Result<Vec<ColumnData>> {
         let column = self.vla_column()?;
-        let mut out = Vec::with_capacity(self.table.nrows);
-        for r in 0..self.table.nrows {
-            let cell = column.cell(r)?;
-            out.push(decode_array(cell.element_type, cell.bytes));
-        }
-        Ok(out)
+        self.map_vla_rows(column, |cell| {
+            Ok(decode_array(cell.element_type, cell.bytes))
+        })
     }
 
     /// Scale each row of a `P`/`Q` column to its physical plane: `TZEROn + TSCALn ×
@@ -794,19 +749,61 @@ impl<'a> ColumnReader<'a> {
     pub fn vla_physical(&self) -> Result<Vec<Vec<f64>>> {
         let col = self.descriptor();
         let column = self.vla_column()?;
-        let mut rows = Vec::with_capacity(self.table.nrows);
-        for row in 0..self.table.nrows {
-            let cell = column.cell(row)?;
-            rows.push(physical_cells(
+        self.map_vla_rows(column, |cell| {
+            physical_cells(
                 std::iter::once(cell.bytes),
                 cell.element_count,
                 cell.element_type,
                 col.tscale,
                 col.tzero,
                 col.tnull,
-            )?);
+            )
+        })
+    }
+
+    /// Exact typed integers for each row of a `P`/`Q` heap array using the FITS
+    /// unsigned (or signed-byte) convention. The outer vector is table rows; each
+    /// row's [`UnsignedView`] owns its jagged array. Returns `Ok(None)` unless the
+    /// heap type and `TSCALn`/`TZEROn`/`TNULLn` metadata form that convention.
+    /// Errors for fixed-width columns.
+    pub fn vla_unsigned(&self) -> Result<Option<Vec<UnsignedView>>> {
+        let col = self.descriptor();
+        let column = self.vla_column()?;
+        let Some(kind) =
+            unsigned_kind(column.format.element_type, col.tscale, col.tzero, col.tnull)
+        else {
+            return Ok(None);
+        };
+        self.map_vla_rows(column, |cell| {
+            Ok(unsigned_cells(
+                std::iter::once(cell.bytes),
+                cell.element_count,
+                kind,
+            ))
+        })
+        .map(Some)
+    }
+
+    /// Each row of a `PC`/`QC`/`PM`/`QM` heap array as [`Complex<f64>`], applying
+    /// `TSCALn` to both components and `TZEROn` to only the real component (§7.3.2).
+    /// Empty descriptors produce empty rows. Errors for fixed-width or non-complex
+    /// heap columns.
+    pub fn vla_complex(&self) -> Result<Vec<Vec<Complex<f64>>>> {
+        let col = self.descriptor();
+        let column = self.vla_column()?;
+        let kind = column.format.element_type;
+        if !matches!(kind, TformKind::ComplexF32 | TformKind::ComplexF64) {
+            return Err(FitsError::NotAComplexColumn { code: kind.code() });
         }
-        Ok(rows)
+        self.map_vla_rows(column, |cell| {
+            complex_cells(
+                std::iter::once(cell.bytes),
+                cell.element_count,
+                kind,
+                col.tscale,
+                col.tzero,
+            )
+        })
     }
 
     /// A variable-length `X` (`1PX`/`1QX`) column as a borrowed 2-D [`BitColumn`],
@@ -862,6 +859,18 @@ impl<'a> ColumnReader<'a> {
             index: self.index,
             format: self.vla_format()?,
         })
+    }
+
+    fn map_vla_rows<T>(
+        &self,
+        column: VlaColumn<'a>,
+        decode: impl Fn(VlaCell<'a>) -> Result<T>,
+    ) -> Result<Vec<T>> {
+        let mut rows = Vec::with_capacity(self.table.nrows);
+        for row in 0..self.table.nrows {
+            rows.push(decode(column.cell(row)?)?);
+        }
+        Ok(rows)
     }
 }
 
@@ -1087,6 +1096,79 @@ fn decode_fixed_column(table: &BinTable, col: &Column) -> ColumnData {
         TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
             unreachable!("raw rejects VLA columns before fixed decode")
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UnsignedKind {
+    I8,
+    U16,
+    U32,
+    U64,
+}
+
+fn unsigned_kind(
+    kind: TformKind,
+    tscale: f64,
+    tzero: f64,
+    tnull: Option<i64>,
+) -> Option<UnsignedKind> {
+    if tscale != 1.0 || tnull.is_some() {
+        return None;
+    }
+    match kind {
+        TformKind::Byte if tzero == -128.0 => Some(UnsignedKind::I8),
+        TformKind::I16 if tzero == U16_OFFSET => Some(UnsignedKind::U16),
+        TformKind::I32 if tzero == U32_OFFSET => Some(UnsignedKind::U32),
+        TformKind::I64 if tzero == U64_OFFSET => Some(UnsignedKind::U64),
+        _ => None,
+    }
+}
+
+fn unsigned_cells<'a>(
+    cells: impl Iterator<Item = &'a [u8]>,
+    capacity: usize,
+    kind: UnsignedKind,
+) -> UnsignedView {
+    match kind {
+        UnsignedKind::I8 => UnsignedView::I8(map_cells(cells, capacity, |[x]| (x ^ 0x80) as i8)),
+        UnsignedKind::U16 => UnsignedView::U16(map_cells(cells, capacity, |bytes| {
+            (i16::from_be_bytes(bytes) as u16) ^ 0x8000
+        })),
+        UnsignedKind::U32 => UnsignedView::U32(map_cells(cells, capacity, |bytes| {
+            (i32::from_be_bytes(bytes) as u32) ^ 0x8000_0000
+        })),
+        UnsignedKind::U64 => UnsignedView::U64(map_cells(cells, capacity, |bytes| {
+            (i64::from_be_bytes(bytes) as u64) ^ 0x8000_0000_0000_0000
+        })),
+    }
+}
+
+fn complex_cells<'a>(
+    cells: impl Iterator<Item = &'a [u8]>,
+    capacity: usize,
+    kind: TformKind,
+    tscale: f64,
+    tzero: f64,
+) -> Result<Vec<Complex<f64>>> {
+    let scale = |re: f64, im: f64| Complex {
+        re: tzero + tscale * re,
+        im: tscale * im,
+    };
+    match kind {
+        TformKind::ComplexF32 => Ok(map_cells(cells, capacity, |bytes: [u8; 8]| {
+            scale(
+                f32::from_be_bytes(bytes[..4].try_into().unwrap()) as f64,
+                f32::from_be_bytes(bytes[4..].try_into().unwrap()) as f64,
+            )
+        })),
+        TformKind::ComplexF64 => Ok(map_cells(cells, capacity, |bytes: [u8; 16]| {
+            scale(
+                f64::from_be_bytes(bytes[..8].try_into().unwrap()),
+                f64::from_be_bytes(bytes[8..].try_into().unwrap()),
+            )
+        })),
+        _ => Err(FitsError::NotAComplexColumn { code: kind.code() }),
     }
 }
 

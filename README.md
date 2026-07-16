@@ -123,8 +123,9 @@ let table = reader.read_table(1)?; // the table is HDU 1 (HDU 0 is the empty pri
 println!("{} rows, {} columns", table.nrows, table.columns.len());
 
 // `.raw()` is the stored, typed plane; `.physical()` applies TZEROn/TSCALn and
-// maps TNULLn to NaN, widening to f64. `.unsigned()`, `.complex()`, `.bits()`,
-// and `.vla()` cover the other column kinds the same way.
+// maps TNULLn to NaN, widening to f64. `.unsigned()`, `.complex()`, and `.bits()`
+// cover fixed special kinds; `.vla()` plus `.vla_physical()`, `.vla_unsigned()`,
+// `.vla_complex()`, and `.vla_bits()` cover jagged P/Q heap arrays.
 println!("ID  = {:?}", table.column_by_idx(0)?.raw()?);
 println!("MAG = {:?}", table.column_by_name("MAG")?.physical()?);
 # Ok::<(), fits_well::FitsError>(())
