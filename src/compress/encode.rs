@@ -17,7 +17,6 @@ use crate::compress::geometry::TileScratch;
 use crate::compress::{CompressOptions, DitherMethod, ImageCodec, map_tiles, needs_wide};
 use crate::compress::{gzip, hcompress, plio, quantize, rice};
 
-use crate::allocation;
 use crate::bitpix::Bitpix;
 use crate::data::Image;
 use crate::data::shape_product;
@@ -144,7 +143,7 @@ pub(crate) fn compress_image(
     let output_len = descriptor_len
         .checked_add(heap_len)
         .ok_or(FitsError::DataUnitOverflow)?;
-    allocation::try_reserve_exact(out, output_len)?;
+    out.reserve_exact(output_len);
     out.resize(descriptor_len, 0);
     let descriptor_width = if wide { 16 } else { 8 };
     for (tile, cell) in cells.into_iter().enumerate() {
@@ -344,7 +343,7 @@ fn compress_float_image(
     let output_len = rows_len
         .checked_add(heap_len)
         .ok_or(FitsError::DataUnitOverflow)?;
-    allocation::try_reserve_exact(out, output_len)?;
+    out.reserve_exact(output_len);
     out.resize(rows_len, 0);
     for (tile_index, mut tile) in tiles_out.into_iter().enumerate() {
         let row = tile_index * 32;

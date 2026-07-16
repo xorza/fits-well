@@ -181,6 +181,28 @@ fn fits_file(cards: &[&str], data: &[u8]) -> Vec<u8> {
 }
 
 #[test]
+fn multi_block_header_scan_keeps_geometric_spare_capacity() {
+    use crate::block::BLOCK_SIZE;
+    use crate::block::CARD_SIZE;
+
+    let cards = vec!["COMMENT"; 2 * BLOCK_SIZE / CARD_SIZE];
+    let bytes = fits_file(&cards, &[]);
+    let mut source = SliceSource::new(&bytes);
+    let mut offset = 0;
+    let mut scratch = Vec::new();
+    let NextHeader::Found { bytes, .. } =
+        scan_header_unit(&mut source, &mut offset, &mut scratch).unwrap()
+    else {
+        panic!("expected a complete header");
+    };
+    assert_eq!(bytes.len(), 3 * BLOCK_SIZE);
+    assert!(
+        bytes.capacity() > bytes.len(),
+        "multi-block scanning should grow geometrically"
+    );
+}
+
+#[test]
 fn malformed_image_pcount_is_rejected_not_panicked() {
     use std::io::Cursor;
     // A primary array with PCOUNT=5 is non-conforming (§4.3). `data_extent` sizes

@@ -45,11 +45,10 @@ pub enum FitsError {
     /// The data-unit size implied by the header overflows a 64-bit byte count
     /// (a malformed or hostile header with absurd `NAXISn`/`PCOUNT`/`GCOUNT`).
     DataUnitOverflow,
-    /// The data-unit size implied by the header is non-overflowing but too large to
-    /// allocate — a malformed or hostile header declaring an absurd (yet in-range)
-    /// `NAXISn`/`ZNAXISn`/`ZNAXIS2`. The output buffer is allocated fallibly
-    /// (`try_reserve`), so this surfaces as a recoverable error rather than an
-    /// out-of-memory process abort.
+    /// An output or staging buffer sized directly from untrusted FITS metadata is
+    /// too large to allocate. Reader staging and final decompressed image/table
+    /// planes allocate fallibly so hostile dimensions surface as this error rather
+    /// than an out-of-memory process abort.
     DataUnitTooLarge {
         bytes: u64,
     },

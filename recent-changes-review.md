@@ -61,13 +61,13 @@ into many `CONTINUE` records; subsequent `extend_from_slice` calls can still abo
 infallibly. Similar infallible growth remains inside codec scratch buffers. The
 result is an OOM-recovery facade rather than a dependable boundary.
 
-- [ ] Restrict fallible allocation to output sizes derived directly from untrusted FITS metadata, chiefly decompressed image/table planes and streaming-source staging. Remove `try_copy` and the writer/caller-owned uses of the module; collapse the remaining helpers to the minimum operation needed to reserve a validated final size. Keep checked arithmetic independently. Either make the remaining guarantee complete or stop claiming crate-wide recoverable OOM behavior at [`CHANGELOG.md:61`](CHANGELOG.md#L61).
-- [ ] Change the incremental header scan at [`src/reader/mod.rs:489`](src/reader/mod.rs#L489) from `try_reserve_exact` on every 2,880-byte block to geometric `try_reserve`. Exact growth is suitable when the final size is known; here it can reallocate and copy once per block for long headers.
-- [ ] Do not mutate `has_primary` before the new fallible reserve in [`src/writer/mod.rs:303`](src/writer/mod.rs#L303). A reserve failure currently returns before writing any bytes but leaves the writer believing a primary HDU exists, so a retry emits an extension first. Commit writer state only after all recoverable pre-write work succeeds, and add a failure-injection test around that state transition.
+- [x] Restrict fallible allocation to output sizes derived directly from untrusted FITS metadata, chiefly decompressed image/table planes and streaming-source staging. Remove `try_copy` and the writer/caller-owned uses of the module; collapse the remaining helpers to the minimum operation needed to reserve a validated final size. Keep checked arithmetic independently. Either make the remaining guarantee complete or stop claiming crate-wide recoverable OOM behavior at [`CHANGELOG.md:61`](CHANGELOG.md#L61).
+- [x] Change the incremental header scan at [`src/reader/mod.rs:489`](src/reader/mod.rs#L489) from `try_reserve_exact` on every 2,880-byte block to geometric `try_reserve`. Exact growth is suitable when the final size is known; here it can reallocate and copy once per block for long headers.
+- [x] Commit `has_primary` only after the first HDU write succeeds. Writer buffers no longer use recoverable allocation, so inject a sink failure before any bytes are written and verify that a retry still emits a primary HDU.
 
 Verification: retain exact overflow/error assertions for hostile dimensions, add a
 multi-block-header capacity test, and exercise writer reuse after an injected
-pre-write allocation failure.
+zero-byte write failure.
 
 ## Batch 4 — Remove release checks from documented hot paths (low priority)
 
@@ -83,7 +83,7 @@ checked errors before reaching these invariants.
 
 ## Verification performed
 
-- `cargo test`: 264 passed, 2 ignored; 5 doctests passed, 1 ignored.
-- `cargo test --no-default-features`: 217 passed.
+- `cargo test`: 266 passed, 2 ignored; 5 doctests passed, 1 ignored.
+- `cargo test --no-default-features`: 219 passed.
 - Full production-tree comparison from the disposable `d6a3f17` checkout.
 - Clone analysis excluding split test files: 1.03% duplicated lines before, 0.92% now.

@@ -317,10 +317,7 @@ where
                 geom.tile_into(t, scratch);
                 decode(t, scratch, vals, ints, codecs)?;
                 ensure_tile_size(scratch.nelem(), vals.len())?;
-                let mut converted = Vec::new();
-                allocation::try_reserve_exact(&mut converted, vals.len())?;
-                converted.extend(vals.iter().copied().map(&convert));
-                Ok(converted)
+                Ok(vals.iter().copied().map(&convert).collect())
             },
         )?;
         geom.scatter_tiles(&decoded, out);

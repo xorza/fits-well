@@ -1,15 +1,17 @@
+//! Fallible allocation for buffers sized directly from untrusted FITS metadata.
+
 use std::mem::size_of;
 
 use crate::error::FitsError;
 use crate::error::Result;
 
-pub(crate) fn try_reserve_exact<T>(values: &mut Vec<T>, additional: usize) -> Result<()> {
+pub(crate) fn try_reserve<T>(values: &mut Vec<T>, additional: usize) -> Result<()> {
     let requested = values
         .len()
         .checked_add(additional)
         .ok_or(FitsError::DataUnitOverflow)?;
     values
-        .try_reserve_exact(additional)
+        .try_reserve(additional)
         .map_err(|_| FitsError::DataUnitTooLarge {
             bytes: allocation_bytes::<T>(requested),
         })
@@ -17,7 +19,12 @@ pub(crate) fn try_reserve_exact<T>(values: &mut Vec<T>, additional: usize) -> Re
 
 pub(crate) fn try_resize<T: Clone>(values: &mut Vec<T>, len: usize, value: T) -> Result<()> {
     if len > values.len() {
-        try_reserve_exact(values, len - values.len())?;
+        let additional = len - values.len();
+        values
+            .try_reserve_exact(additional)
+            .map_err(|_| FitsError::DataUnitTooLarge {
+                bytes: allocation_bytes::<T>(len),
+            })?;
     }
     values.resize(len, value);
     Ok(())
@@ -27,13 +34,6 @@ pub(crate) fn try_zeroed<T: Clone>(value: T, len: usize) -> Result<Vec<T>> {
     let mut values = Vec::new();
     try_resize(&mut values, len, value)?;
     Ok(values)
-}
-
-pub(crate) fn try_copy<T: Clone>(values: &[T]) -> Result<Vec<T>> {
-    let mut copy = Vec::new();
-    try_reserve_exact(&mut copy, values.len())?;
-    copy.extend_from_slice(values);
-    Ok(copy)
 }
 
 fn allocation_bytes<T>(len: usize) -> u64 {
@@ -49,7 +49,11 @@ mod tests {
         let mut values = Vec::<u64>::new();
         let bytes = (usize::MAX as u64).saturating_mul(8);
         assert!(matches!(
-            try_reserve_exact(&mut values, usize::MAX),
+            try_reserve(&mut values, usize::MAX),
+            Err(FitsError::DataUnitTooLarge { bytes: got }) if got == bytes
+        ));
+        assert!(matches!(
+            try_resize(&mut values, usize::MAX, 0),
             Err(FitsError::DataUnitTooLarge { bytes: got }) if got == bytes
         ));
     }

@@ -192,7 +192,7 @@ pub(crate) fn compress_table(
             let cell_len = rows
                 .checked_mul(m.width)
                 .ok_or(FitsError::DataUnitOverflow)?;
-            allocation::try_reserve_exact(&mut scratch.column, cell_len)?;
+            scratch.column.reserve_exact(cell_len);
             for r in 0..rows {
                 let off = (r0 + r) * naxis1 + m.offset;
                 scratch.column.extend_from_slice(&raw[off..off + m.width]);
@@ -212,7 +212,7 @@ pub(crate) fn compress_table(
     let output_len = descriptor_bytes
         .checked_add(heap_len)
         .ok_or(FitsError::DataUnitOverflow)?;
-    allocation::try_reserve_exact(out, output_len)?;
+    out.reserve_exact(output_len);
     out.resize(descriptor_bytes, 0);
     for (tile, mut comp) in comps.into_iter().enumerate() {
         let offset = out.len() - descriptor_bytes;
