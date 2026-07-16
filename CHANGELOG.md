@@ -18,9 +18,10 @@
   values instead of bounded `i64` components. `Value::as_integer` and
   `Value::as_real` now return `Result<Option<_>>` so bounded conversions report
   range failures explicitly. `FitsInteger` is exported from the crate.
-- Binary-table `A` columns now use `ColumnData::Character(Vec<CharacterField>)`
-  instead of `ColumnData::Text(Vec<String>)`; `Text` remains the ASCII-table value.
-  `ColumnType::Text` was renamed to `ColumnType::Character`.
+- Binary-table `A` columns now use `ColumnData::Character(Vec<CharacterField>)`,
+  and ASCII tables use nullable `AsciiColumnData` cells so `TNULLn` remains distinct
+  from genuine values. `ColumnData::Text` was removed, and `ColumnType::Text` was
+  renamed to `ColumnType::Character`.
 - `RawImage::decode` now consumes `self`, allowing already-owned decompressed samples
   to move out without cloning. With `ndarray`, `RawImage::to_ndarray(&self)` was
   replaced by the consuming `RawImage::into_ndarray(self)`.

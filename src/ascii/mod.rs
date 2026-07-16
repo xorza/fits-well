@@ -2,14 +2,13 @@
 //!
 //! Rows are fixed-length lines of ASCII text; each column occupies a fixed byte
 //! range starting at `TBCOLn` (1-based), formatted per a Fortran `TFORMn` code
-//! (`Aw`, `Iw`, `Fw.d`, `Ew.d`, `Dw.d`). Decoded values reuse [`ColumnData`]
-//! (`Text`/`I64`/`F64`); ASCII columns are always scalar.
+//! (`Aw`, `Iw`, `Fw.d`, `Ew.d`, `Dw.d`). ASCII columns are always scalar, and
+//! [`AsciiColumnData`] retains `TNULLn` cells distinctly from genuine values.
 
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
 use crate::keyword::key;
-use crate::table::ColumnData;
 
 /// The value type of an ASCII-table column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +19,18 @@ pub enum AsciiKind {
     Integer,
     /// `Fw.d` / `Ew.d` / `Dw.d` — floating point.
     Float,
+}
+
+/// A decoded ASCII-table column in row order. `None` is an undefined field
+/// selected by `TNULLn`; blank numeric fields remain genuine zero values (§7.2.5).
+#[derive(Debug, Clone, PartialEq)]
+pub enum AsciiColumnData {
+    /// `Aw` — the complete fixed-width field text, including padding.
+    Text(Vec<Option<String>>),
+    /// `Iw` — stored integers before `TSCALn`/`TZEROn`.
+    Integer(Vec<Option<i64>>),
+    /// `Fw.d` / `Ew.d` / `Dw.d` — stored floating-point values before scaling.
+    Float(Vec<Option<f64>>),
 }
 
 /// One ASCII-table column.
@@ -203,48 +214,54 @@ impl<'a> AsciiColumnReader<'a> {
         &self.table.columns[self.index]
     }
 
-    /// Decode the column into a typed [`ColumnData`] (`Text`/`I64`/`F64`). A blank
-    /// numeric field decodes to 0 (§7.2.5); a field equal to `TNULLn` decodes to a 0
-    /// placeholder in this raw plane — use [`physical`](Self::physical) for `NaN`. A
-    /// non-blank, non-null unparseable field errors.
-    pub fn raw(&self) -> Result<ColumnData> {
+    /// Decode the stored fields into typed [`AsciiColumnData`]. A blank numeric
+    /// field decodes to `Some(0)` (§7.2.5), while a field equal to `TNULLn` decodes
+    /// to `None`. A non-blank, non-null unparseable field errors.
+    pub fn raw(&self) -> Result<AsciiColumnData> {
         let table = self.table;
         let col = self.descriptor();
         match col.kind {
-            AsciiKind::Char => Ok(ColumnData::Text(
+            AsciiKind::Char => Ok(AsciiColumnData::Text(
                 (0..table.nrows)
-                    .map(|r| Ok(table.field(col, r)?.to_string()))
+                    .map(|r| {
+                        let field = table.field(col, r)?;
+                        Ok((!col.is_null(field.trim())).then(|| field.to_string()))
+                    })
                     .collect::<Result<_>>()?,
             )),
             AsciiKind::Integer => {
                 let mut out = Vec::with_capacity(table.nrows);
                 for r in 0..table.nrows {
                     let s = table.field(col, r)?.trim();
-                    out.push(if s.is_empty() || col.is_null(s) {
-                        0
+                    out.push(if col.is_null(s) {
+                        None
+                    } else if s.is_empty() {
+                        Some(0)
                     } else {
-                        s.parse().map_err(|_| FitsError::InvalidValue {
+                        Some(s.parse().map_err(|_| FitsError::InvalidValue {
                             card: s.to_string(),
-                        })?
+                        })?)
                     });
                 }
-                Ok(ColumnData::I64(out))
+                Ok(AsciiColumnData::Integer(out))
             }
             AsciiKind::Float => {
                 let mut out = Vec::with_capacity(table.nrows);
                 for r in 0..table.nrows {
                     let s = table.field(col, r)?.trim();
-                    out.push(if s.is_empty() || col.is_null(s) {
-                        0.0
+                    out.push(if col.is_null(s) {
+                        None
+                    } else if s.is_empty() {
+                        Some(0.0)
                     } else {
-                        parse_ascii_float(s, col.decimals).ok_or_else(|| {
+                        Some(parse_ascii_float(s, col.decimals).ok_or_else(|| {
                             FitsError::InvalidValue {
                                 card: s.to_string(),
                             }
-                        })?
+                        })?)
                     });
                 }
-                Ok(ColumnData::F64(out))
+                Ok(AsciiColumnData::Float(out))
             }
         }
     }
@@ -252,33 +269,23 @@ impl<'a> AsciiColumnReader<'a> {
     /// The numeric column on its physical `f64` plane: `TZEROn + TSCALn × field`
     /// (§7.2.2). A blank field is 0 before scaling; a field equal to `TNULLn` is
     /// undefined and maps to `NaN`. Errors on a character column.
-    ///
-    /// Unlike the binary-table [`ColumnReader::physical`](crate::ColumnReader::physical),
-    /// this re-reads the field text (the raw plane has already collapsed nulls to 0),
-    /// which is how `TNULLn` survives as `NaN`.
     pub fn physical(&self) -> Result<Vec<f64>> {
-        let table = self.table;
         let col = self.descriptor();
         if col.kind == AsciiKind::Char {
             return Err(FitsError::NonNumericColumn { code: 'A' });
         }
-        let mut out = Vec::with_capacity(table.nrows);
-        for r in 0..table.nrows {
-            let s = table.field(col, r)?.trim();
-            if col.is_null(s) {
-                out.push(f64::NAN);
-                continue;
-            }
-            let raw = if s.is_empty() {
-                0.0
-            } else {
-                parse_ascii_float(s, col.decimals).ok_or_else(|| FitsError::InvalidValue {
-                    card: s.to_string(),
-                })?
-            };
-            out.push(col.tzero + col.tscale * raw);
+        let physical = |value| col.tzero + col.tscale * value;
+        match self.raw()? {
+            AsciiColumnData::Integer(values) => Ok(values
+                .into_iter()
+                .map(|value| value.map_or(f64::NAN, |value| physical(value as f64)))
+                .collect()),
+            AsciiColumnData::Float(values) => Ok(values
+                .into_iter()
+                .map(|value| value.map_or(f64::NAN, physical))
+                .collect()),
+            AsciiColumnData::Text(_) => unreachable!("character columns returned above"),
         }
-        Ok(out)
     }
 }
 

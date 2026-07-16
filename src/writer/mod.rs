@@ -16,6 +16,7 @@ use bitvec::slice::BitSlice;
 use bitvec::vec::BitVec;
 use num_complex::Complex;
 
+use crate::ascii::AsciiColumnData;
 use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
 use crate::block::SPACE_FILL;
@@ -239,22 +240,20 @@ impl WriteColumn {
     }
 }
 
-/// One column to write into an ASCII table: data (`Text`/`I64`/`F64` only), the
-/// fixed field width in characters, and the decimal count for floats.
+/// One column to write into an ASCII table: nullable typed data, the fixed field
+/// width in characters, and the decimal count for floats.
 #[derive(Debug, Clone)]
 pub struct AsciiWriteColumn {
     pub name: String,
     pub unit: Option<String>,
-    pub data: ColumnData,
+    pub data: AsciiColumnData,
     pub width: usize,
     pub decimals: usize,
     /// Emit `TSCALn`/`TZEROn` (§7.2.2): `data` holds the stored field values and a
     /// reader recovers `TZEROn + TSCALn × field` physically.
     pub tscale: Option<f64>,
     pub tzero: Option<f64>,
-    /// Emit `TNULLn`, the field text marking an undefined value (§7.2.4). A
-    /// non-finite `F64` cell is written as this marker (or a blank field — which
-    /// reads back as 0 per §7.2.5 — when no marker is set).
+    /// Emit `TNULLn`, the field text used to write `None` cells (§7.2.4).
     pub tnull: Option<String>,
 }
 
@@ -442,7 +441,11 @@ impl<W: Write> FitsWriter<W> {
         let mut row_len = 0usize;
         for col in columns {
             validate_ascii_column(col)?;
-            let count = ascii_count(&col.data)?;
+            let count = match &col.data {
+                AsciiColumnData::Text(values) => values.len(),
+                AsciiColumnData::Integer(values) => values.len(),
+                AsciiColumnData::Float(values) => values.len(),
+            };
             if count != nrows {
                 return Err(FitsError::RowWidthMismatch {
                     computed: count,
@@ -699,7 +702,6 @@ impl ColumnType {
             ColumnData::ComplexF32(_) => ColumnType::ComplexF32,
             ColumnData::ComplexF64(_) => ColumnType::ComplexF64,
             ColumnData::Character(_) => ColumnType::Character,
-            ColumnData::Text(_) => return None,
         })
     }
 
@@ -971,7 +973,7 @@ fn append_cells(out: &mut Vec<u8>, data: &ColumnData, range: Range<usize>) {
                 out.extend_from_slice(&im.to_be_bytes());
             }
         }
-        ColumnData::Character(_) | ColumnData::Text(_) => {}
+        ColumnData::Character(_) => {}
     }
 }
 
@@ -1034,43 +1036,60 @@ fn patch_checksum(header_bytes: &mut [u8], encoded: &[u8; 16]) {
     }
 }
 
-/// Number of rows implied by an ASCII column (`Text`/`I64`/`F64` only).
-fn ascii_count(data: &ColumnData) -> Result<usize> {
-    match data {
-        ColumnData::Text(v) => Ok(v.len()),
-        ColumnData::I64(v) => Ok(v.len()),
-        ColumnData::F64(v) => Ok(v.len()),
-        _ => Err(FitsError::InvalidValue {
-            card: "ASCII table column must be Text, I64, or F64".to_string(),
-        }),
-    }
-}
-
 fn validate_ascii_column(col: &AsciiWriteColumn) -> Result<()> {
     validate_ascii(&col.name, "ASCII column name")?;
     if let Some(unit) = &col.unit {
         validate_ascii(unit, "ASCII column unit")?;
     }
+    let marker = col.tnull.as_deref().map(str::trim);
     if let Some(marker) = &col.tnull {
         validate_ascii(marker, "ASCII null marker")?;
-        if marker.is_empty() || marker.len() > col.width {
+        if marker.trim().is_empty() || marker.len() > col.width {
             return Err(FitsError::KeywordOutOfRange { name: "TNULLn" });
         }
     }
     match &col.data {
-        ColumnData::Text(values) => {
-            for value in values {
+        AsciiColumnData::Text(values) => {
+            for value in values.iter().flatten() {
                 validate_ascii(value, "ASCII text cell")?;
+                validate_ascii_null_collision(value.trim(), marker)?;
             }
         }
-        ColumnData::F64(values)
-            if values.iter().any(|value| !value.is_finite()) && col.tnull.is_none() =>
-        {
-            return Err(FitsError::KeywordOutOfRange { name: "TNULLn" });
+        AsciiColumnData::Integer(values) => {
+            for value in values.iter().flatten() {
+                validate_ascii_null_collision(&value.to_string(), marker)?;
+            }
         }
-        _ => {}
+        AsciiColumnData::Float(values) => {
+            for value in values.iter().flatten() {
+                if !value.is_finite() {
+                    return Err(FitsError::InvalidValue {
+                        card: "ASCII float cells must be finite; use None for null".to_string(),
+                    });
+                }
+                validate_ascii_null_collision(&format!("{:.*}", col.decimals, value), marker)?;
+            }
+        }
+    }
+    let has_null = match &col.data {
+        AsciiColumnData::Text(values) => values.iter().any(Option::is_none),
+        AsciiColumnData::Integer(values) => values.iter().any(Option::is_none),
+        AsciiColumnData::Float(values) => values.iter().any(Option::is_none),
+    };
+    if has_null && marker.is_none() {
+        return Err(FitsError::KeywordOutOfRange { name: "TNULLn" });
     }
     Ok(())
+}
+
+fn validate_ascii_null_collision(value: &str, marker: Option<&str>) -> Result<()> {
+    if marker == Some(value) {
+        Err(FitsError::InvalidValue {
+            card: "ASCII value equals its TNULLn marker".to_string(),
+        })
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_ascii(text: &str, context: &'static str) -> Result<()> {
@@ -1142,10 +1161,9 @@ fn fits_i64(value: usize) -> Result<i64> {
 
 fn ascii_tform(col: &AsciiWriteColumn) -> String {
     match col.data {
-        ColumnData::Text(_) => format!("A{}", col.width),
-        ColumnData::I64(_) => format!("I{}", col.width),
-        ColumnData::F64(_) => format!("F{}.{}", col.width, col.decimals),
-        _ => format!("A{}", col.width), // unreachable: validated in ascii_count
+        AsciiColumnData::Text(_) => format!("A{}", col.width),
+        AsciiColumnData::Integer(_) => format!("I{}", col.width),
+        AsciiColumnData::Float(_) => format!("F{}.{}", col.width, col.decimals),
     }
 }
 
@@ -1153,18 +1171,39 @@ fn ascii_tform(col: &AsciiWriteColumn) -> String {
 /// overflow becomes `*` fill per §7.2.5).
 fn format_ascii_field(out: &mut Vec<u8>, col: &AsciiWriteColumn, r: usize) {
     let (text, left) = match &col.data {
-        ColumnData::Text(values) => (Cow::Borrowed(values[r].as_str()), true),
-        ColumnData::I64(values) => (Cow::Owned(values[r].to_string()), false),
-        ColumnData::F64(values) if !values[r].is_finite() => (
-            Cow::Borrowed(
-                col.tnull
-                    .as_deref()
-                    .expect("non-finite ASCII cells require a validated null marker"),
+        AsciiColumnData::Text(values) => match &values[r] {
+            Some(value) => (Cow::Borrowed(value.as_str()), true),
+            None => (
+                Cow::Borrowed(
+                    col.tnull
+                        .as_deref()
+                        .expect("null ASCII cells require a validated TNULLn marker"),
+                ),
+                true,
             ),
-            false,
-        ),
-        ColumnData::F64(values) => (Cow::Owned(format!("{:.*}", col.decimals, values[r])), false),
-        _ => unreachable!("ASCII column type was validated"),
+        },
+        AsciiColumnData::Integer(values) => match values[r] {
+            Some(value) => (Cow::Owned(value.to_string()), false),
+            None => (
+                Cow::Borrowed(
+                    col.tnull
+                        .as_deref()
+                        .expect("null ASCII cells require a validated TNULLn marker"),
+                ),
+                true,
+            ),
+        },
+        AsciiColumnData::Float(values) => match values[r] {
+            Some(value) => (Cow::Owned(format!("{:.*}", col.decimals, value)), false),
+            None => (
+                Cow::Borrowed(
+                    col.tnull
+                        .as_deref()
+                        .expect("null ASCII cells require a validated TNULLn marker"),
+                ),
+                true,
+            ),
+        },
     };
     let bytes = text.as_bytes();
     if bytes.len() > col.width {

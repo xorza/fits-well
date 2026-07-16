@@ -56,16 +56,16 @@ fn decodes_hand_built_ascii_rows() {
     assert_eq!(table.columns[1].start, 4);
     assert_eq!(
         table.column_by_idx(0).unwrap().raw().unwrap(),
-        ColumnData::Text(vec!["  AB".into(), "def ".into()])
+        AsciiColumnData::Text(vec![Some("  AB".into()), Some("def ".into())])
     );
     assert_eq!(
         table.column_by_idx(1).unwrap().raw().unwrap(),
-        ColumnData::I64(vec![123, -45])
+        AsciiColumnData::Integer(vec![Some(123), Some(-45)])
     );
     // By-name access (case-insensitive) mirrors the by-index reads.
     assert_eq!(
         table.column_by_name("count").unwrap().raw().unwrap(),
-        ColumnData::I64(vec![123, -45])
+        AsciiColumnData::Integer(vec![Some(123), Some(-45)])
     );
     assert_eq!(
         table.column_by_name("COUNT").unwrap().physical().unwrap(),
@@ -79,14 +79,14 @@ fn decodes_hand_built_ascii_rows() {
 
 #[test]
 fn applies_tscal_tzero_and_maps_tnull_to_nan() {
-    // One `I6` column, TSCAL=2, TZERO=10, TNULL='***'. Row 0 = 123, row 1 = null.
+    // One `I6` column, TSCAL=2, TZERO=10, TNULL='***': 123, blank zero, then null.
     let mut header = Header::new();
     header
         .set("XTENSION", "TABLE")
         .set("BITPIX", 8)
         .set("NAXIS", 2)
         .set("NAXIS1", 6)
-        .set("NAXIS2", 2)
+        .set("NAXIS2", 3)
         .set("PCOUNT", 0)
         .set("GCOUNT", 1)
         .set("TFIELDS", 1)
@@ -95,22 +95,23 @@ fn applies_tscal_tzero_and_maps_tnull_to_nan() {
         .set("TSCAL1", 2.0)
         .set("TZERO1", 10.0)
         .set("TNULL1", "***");
-    let data = b"   123   ***".to_vec();
+    let data = b"   123         ***".to_vec();
     let table = AsciiTable::from_data(&header, data).unwrap();
-    // Raw: the null field is a 0 placeholder; physical: TZERO + TSCAL·field, null → NaN.
+    // Raw preserves nullness; physical applies TZERO + TSCAL·field and maps null to NaN.
     assert_eq!(
         table.column_by_idx(0).unwrap().raw().unwrap(),
-        ColumnData::I64(vec![123, 0])
+        AsciiColumnData::Integer(vec![Some(123), Some(0), None])
     );
     let phys = table.column_by_idx(0).unwrap().physical().unwrap();
     assert_eq!(phys[0], 256.0); // 10 + 2·123
-    assert!(phys[1].is_nan());
+    assert_eq!(phys[1], 10.0); // blank field = stored zero
+    assert!(phys[2].is_nan());
 
     for keyword in ["TSCAL1", "TZERO1"] {
         let mut malformed = header.clone();
         malformed.set(keyword, "not numeric");
         assert!(matches!(
-            AsciiTable::from_data(&malformed, b"   123   ***".to_vec()),
+            AsciiTable::from_data(&malformed, b"   123         ***".to_vec()),
             Err(FitsError::TypeMismatch { name, .. }) if name == keyword
         ));
     }
@@ -135,7 +136,7 @@ fn implicit_decimal_point_scales_by_ten_to_the_d() {
     let table = AsciiTable::from_data(&header, data).unwrap();
     assert_eq!(
         table.column_by_idx(0).unwrap().raw().unwrap(),
-        ColumnData::F64(vec![12.345, 12.345])
+        AsciiColumnData::Float(vec![Some(12.345), Some(12.345)])
     );
 }
 
@@ -165,7 +166,7 @@ fn ascii_table_round_trips_through_write_and_read() {
         AsciiWriteColumn {
             name: "NAME".into(),
             unit: None,
-            data: ColumnData::Text(vec!["  AB".into(), "beta".into()]),
+            data: AsciiColumnData::Text(vec![Some("  AB".into()), Some("beta".into())]),
             width: 6,
             decimals: 0,
             tscale: None,
@@ -175,7 +176,7 @@ fn ascii_table_round_trips_through_write_and_read() {
         AsciiWriteColumn {
             name: "N".into(),
             unit: Some("count".into()),
-            data: ColumnData::I64(vec![7, -3]),
+            data: AsciiColumnData::Integer(vec![Some(7), Some(-3)]),
             width: 5,
             decimals: 0,
             tscale: None,
@@ -185,7 +186,7 @@ fn ascii_table_round_trips_through_write_and_read() {
         AsciiWriteColumn {
             name: "X".into(),
             unit: None,
-            data: ColumnData::F64(vec![1.5, -2.25]),
+            data: AsciiColumnData::Float(vec![Some(1.5), Some(-2.25)]),
             width: 8,
             decimals: 2,
             tscale: None,
@@ -203,18 +204,18 @@ fn ascii_table_round_trips_through_write_and_read() {
     let t = r.read_ascii_table(1).unwrap();
     assert_eq!(
         t.column_by_idx(0).unwrap().raw().unwrap(),
-        ColumnData::Text(vec!["  AB  ".into(), "beta  ".into()])
+        AsciiColumnData::Text(vec![Some("  AB  ".into()), Some("beta  ".into())])
     );
     assert_eq!(
         t.column_by_idx(1).unwrap().raw().unwrap(),
-        ColumnData::I64(vec![7, -3])
+        AsciiColumnData::Integer(vec![Some(7), Some(-3)])
     );
     assert_eq!(
         t.column_by_idx(2).unwrap().raw().unwrap(),
-        ColumnData::F64(vec![1.5, -2.25])
+        AsciiColumnData::Float(vec![Some(1.5), Some(-2.25)])
     );
 
-    columns[0].data = ColumnData::Text(vec!["café".into(), "beta".into()]);
+    columns[0].data = AsciiColumnData::Text(vec![Some("café".into()), Some("beta".into())]);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
         writer.write_ascii_table(2, &columns),
@@ -277,8 +278,11 @@ fn reads_a_column_with_a_bare_sign_exponent_field() {
     let data = b"   3.14159-2".to_vec(); // 12 chars; 3.14159-2 = 0.0314159
     let table = AsciiTable::from_data(&header, data).unwrap();
     match table.column_by_idx(0).unwrap().raw().unwrap() {
-        ColumnData::F64(v) => assert!((v[0] - 0.0314159).abs() < 1e-12, "{}", v[0]),
-        other => panic!("expected F64, got {other:?}"),
+        AsciiColumnData::Float(values) => {
+            let value = values[0].unwrap();
+            assert!((value - 0.0314159).abs() < 1e-12, "{value}");
+        }
+        other => panic!("expected Float, got {other:?}"),
     }
 }
 
@@ -290,7 +294,7 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
         AsciiWriteColumn {
             name: "RAW".into(),
             unit: None,
-            data: ColumnData::I64(vec![5, 10]),
+            data: AsciiColumnData::Integer(vec![Some(5), Some(10)]),
             width: 6,
             decimals: 0,
             tscale: Some(2.0),
@@ -300,7 +304,7 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
         AsciiWriteColumn {
             name: "FLUX".into(),
             unit: None,
-            data: ColumnData::F64(vec![1.5, f64::NAN]),
+            data: AsciiColumnData::Float(vec![Some(1.5), None]),
             width: 10,
             decimals: 3,
             tscale: None,
@@ -320,7 +324,7 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     // Raw stored integers, then the scaled physical plane TZERO + TSCAL·field.
     assert_eq!(
         t.column_by_idx(0).unwrap().raw().unwrap(),
-        ColumnData::I64(vec![5, 10])
+        AsciiColumnData::Integer(vec![Some(5), Some(10)])
     );
     assert_eq!(
         t.column_by_idx(0).unwrap().physical().unwrap(),
@@ -330,12 +334,16 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     let flux = t.column_by_idx(1).unwrap().physical().unwrap();
     assert_eq!(flux[0], 1.5);
     assert!(flux[1].is_nan());
+    assert_eq!(
+        t.column_by_idx(1).unwrap().raw().unwrap(),
+        AsciiColumnData::Float(vec![Some(1.5), None])
+    );
 
     for marker in [None, Some(""), Some("TOO-LONG")] {
         let invalid = [AsciiWriteColumn {
             name: "BAD".into(),
             unit: None,
-            data: ColumnData::F64(vec![f64::NAN]),
+            data: AsciiColumnData::Float(vec![None]),
             width: 4,
             decimals: 1,
             tscale: None,
@@ -349,6 +357,88 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
         ));
         assert!(writer.into_inner().into_inner().is_empty());
     }
+
+    let collision = [AsciiWriteColumn {
+        name: "BAD".into(),
+        unit: None,
+        data: AsciiColumnData::Integer(vec![Some(0)]),
+        width: 4,
+        decimals: 0,
+        tscale: None,
+        tzero: None,
+        tnull: Some("0".into()),
+    }];
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_ascii_table(1, &collision),
+        Err(FitsError::InvalidValue { card }) if card == "ASCII value equals its TNULLn marker"
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
+
+    let nonfinite = [AsciiWriteColumn {
+        name: "BAD".into(),
+        unit: None,
+        data: AsciiColumnData::Float(vec![Some(f64::INFINITY)]),
+        width: 8,
+        decimals: 1,
+        tscale: None,
+        tzero: None,
+        tnull: Some("NULL".into()),
+    }];
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_ascii_table(1, &nonfinite),
+        Err(FitsError::InvalidValue { card })
+            if card == "ASCII float cells must be finite; use None for null"
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
+}
+
+#[test]
+fn ascii_nulls_round_trip_distinct_from_zero_and_text() {
+    let columns = [
+        AsciiWriteColumn {
+            name: "LABEL".into(),
+            unit: None,
+            data: AsciiColumnData::Text(vec![Some("zero".into()), None, Some("star".into())]),
+            width: 5,
+            decimals: 0,
+            tscale: None,
+            tzero: None,
+            tnull: Some("NULL".into()),
+        },
+        AsciiWriteColumn {
+            name: "COUNT".into(),
+            unit: None,
+            data: AsciiColumnData::Integer(vec![Some(0), None, Some(-2)]),
+            width: 5,
+            decimals: 0,
+            tscale: None,
+            tzero: None,
+            tnull: Some("NULL".into()),
+        },
+    ];
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_ascii_table(3, &columns).unwrap();
+    let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
+    assert_eq!(
+        reader.read_data_raw(1).unwrap().data()[..30],
+        *b"zero     0NULL NULL star    -2"
+    );
+
+    let table = reader.read_ascii_table(1).unwrap();
+    assert_eq!(
+        table.column_by_idx(0).unwrap().raw().unwrap(),
+        AsciiColumnData::Text(vec![Some("zero ".into()), None, Some("star ".into())])
+    );
+    assert_eq!(
+        table.column_by_idx(1).unwrap().raw().unwrap(),
+        AsciiColumnData::Integer(vec![Some(0), None, Some(-2)])
+    );
+    let physical = table.column_by_idx(1).unwrap().physical().unwrap();
+    assert_eq!(physical[0], 0.0);
+    assert!(physical[1].is_nan());
+    assert_eq!(physical[2], -2.0);
 }
 
 #[test]
