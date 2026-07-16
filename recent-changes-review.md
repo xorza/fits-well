@@ -79,11 +79,11 @@ checked errors before reaching these invariants.
 
 ## Open question
 
-- [ ] Is WCS transformation intended to be a bulk per-pixel workload or occasional metadata conversion? The workspace has no production call to `pixel_to_world`/`world_to_pixel` and no WCS benchmark, while the performance refactor added `PreparedProjection` at [`src/wcs/mod.rs:180`](src/wcs/mod.rs#L180) and made caller-owned output mandatory at [`src/wcs/mod.rs:1239`](src/wcs/mod.rs#L1239). Keep the projection-domain and convergence errors regardless. If bulk WCS is intended, add a Criterion benchmark and retain the pieces it validates; if not, prefer the simpler allocating API and remove unmeasured caches rather than carrying a performance-oriented public surface without a workload.
+- [x] Treat WCS transformation as occasional metadata conversion. Keep projection-domain and convergence errors, but return allocated coordinate vectors and remove the unmeasured prepared-projection caches rather than carrying a performance-oriented public surface without a workload.
 
 ## Verification performed
 
-- `cargo test`: 263 passed, 2 ignored; 5 doctests passed, 1 ignored.
+- `cargo test`: 264 passed, 2 ignored; 5 doctests passed, 1 ignored.
 - `cargo test --no-default-features`: 217 passed.
 - Full production-tree comparison from the disposable `d6a3f17` checkout.
 - Clone analysis excluding split test files: 1.03% duplicated lines before, 0.92% now.
