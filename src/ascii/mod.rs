@@ -168,7 +168,7 @@ impl AsciiTable {
         Ok(AsciiColumnReader { table: self, index })
     }
 
-    /// The trimmed text of column `col` in row `r`. Errors on non-UTF-8 bytes — a
+    /// The complete fixed-width text of column `col` in row `r`. Errors on non-UTF-8 bytes — a
     /// FITS ASCII table is ASCII, so a non-ASCII field is malformed; surfacing it
     /// (rather than the old `unwrap_or("")`) stops a corrupt byte from masquerading
     /// as a blank field and silently decoding to 0 in a numeric column.
@@ -183,7 +183,7 @@ impl AsciiTable {
         let text = std::str::from_utf8(raw).map_err(|_| FitsError::InvalidValue {
             card: "non-UTF-8 bytes in ASCII-table field".to_string(),
         })?;
-        Ok(text.trim())
+        Ok(text)
     }
 }
 
@@ -219,7 +219,7 @@ impl<'a> AsciiColumnReader<'a> {
             AsciiKind::Integer => {
                 let mut out = Vec::with_capacity(table.nrows);
                 for r in 0..table.nrows {
-                    let s = table.field(col, r)?;
+                    let s = table.field(col, r)?.trim();
                     out.push(if s.is_empty() || col.is_null(s) {
                         0
                     } else {
@@ -233,7 +233,7 @@ impl<'a> AsciiColumnReader<'a> {
             AsciiKind::Float => {
                 let mut out = Vec::with_capacity(table.nrows);
                 for r in 0..table.nrows {
-                    let s = table.field(col, r)?;
+                    let s = table.field(col, r)?.trim();
                     out.push(if s.is_empty() || col.is_null(s) {
                         0.0
                     } else {
@@ -264,7 +264,7 @@ impl<'a> AsciiColumnReader<'a> {
         }
         let mut out = Vec::with_capacity(table.nrows);
         for r in 0..table.nrows {
-            let s = table.field(col, r)?;
+            let s = table.field(col, r)?.trim();
             if col.is_null(s) {
                 out.push(f64::NAN);
                 continue;

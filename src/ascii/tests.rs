@@ -50,13 +50,13 @@ fn decodes_hand_built_ascii_rows() {
         .set("TBCOL2", 5)
         .set("TFORM2", "I6")
         .set("TTYPE2", "COUNT");
-    let data = b"abc    123def    -45".to_vec(); // "abc " + "   123" ; "def " + "   -45"
+    let data = b"  AB   123def    -45".to_vec(); // "  AB" + "   123" ; "def " + "   -45"
     let table = AsciiTable::from_data(&header, data).unwrap();
     assert_eq!(table.nrows, 2);
     assert_eq!(table.columns[1].start, 4);
     assert_eq!(
         table.column_by_idx(0).unwrap().raw().unwrap(),
-        ColumnData::Text(vec!["abc".into(), "def".into()])
+        ColumnData::Text(vec!["  AB".into(), "def ".into()])
     );
     assert_eq!(
         table.column_by_idx(1).unwrap().raw().unwrap(),
@@ -165,7 +165,7 @@ fn ascii_table_round_trips_through_write_and_read() {
         AsciiWriteColumn {
             name: "NAME".into(),
             unit: None,
-            data: ColumnData::Text(vec!["alpha".into(), "beta".into()]),
+            data: ColumnData::Text(vec!["  AB".into(), "beta".into()]),
             width: 6,
             decimals: 0,
             tscale: None,
@@ -199,10 +199,11 @@ fn ascii_table_round_trips_through_write_and_read() {
 
     assert_eq!(r.hdus.len(), 2); // auto dataless primary + the TABLE
     assert_eq!(r.hdus[1].kind, crate::HduKind::AsciiTable);
+    assert_eq!(&r.read_data_raw(1).unwrap().data()[..6], b"  AB  ");
     let t = r.read_ascii_table(1).unwrap();
     assert_eq!(
         t.column_by_idx(0).unwrap().raw().unwrap(),
-        ColumnData::Text(vec!["alpha".into(), "beta".into()])
+        ColumnData::Text(vec!["  AB  ".into(), "beta  ".into()])
     );
     assert_eq!(
         t.column_by_idx(1).unwrap().raw().unwrap(),
