@@ -465,6 +465,71 @@ fn from_u16_round_trips_through_write_and_read() {
 }
 
 #[test]
+fn from_u64_writes_the_exact_offset_and_round_trips_extremes() {
+    let built = Image::from_u64(vec![2], &[u64::MIN, u64::MAX]);
+    let bytes = write_to_vec(&built);
+    let bzero = bytes[..BLOCK_SIZE]
+        .chunks_exact(CARD_SIZE)
+        .find(|card| &card[..8] == b"BZERO   ")
+        .unwrap();
+    assert_eq!(&bzero[10..30], b" 9223372036854775808");
+
+    let mut reader = FitsReader::open(Cursor::new(bytes)).unwrap();
+    let Value::Integer(offset) = reader.hdus[0].header.get("BZERO").unwrap() else {
+        panic!("unsigned-64 BZERO was not stored as an exact integer");
+    };
+    assert_eq!(offset.to_string(), "9223372036854775808");
+    assert_eq!(
+        reader.read_image(0).unwrap().unsigned(),
+        Some(UnsignedView::U64(vec![u64::MIN, u64::MAX]))
+    );
+}
+
+#[test]
+fn i64_table_scaling_writes_the_exact_unsigned_offset() {
+    let rows = vec![
+        ColumnData::I64(vec![i64::MIN]),
+        ColumnData::I64(vec![i64::MAX]),
+    ];
+    let columns = [
+        WriteColumn::fixed("U64", ColumnData::I64(vec![i64::MIN, i64::MAX]), 1)
+            .scaled(1.0, 9_223_372_036_854_775_808.0),
+        WriteColumn::vla("PU64", ColumnType::I64, rows.clone())
+            .scaled(1.0, 9_223_372_036_854_775_808.0),
+        WriteColumn::vla("QU64", ColumnType::I64, rows.clone())
+            .wide()
+            .scaled(1.0, 9_223_372_036_854_775_808.0),
+    ];
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_table(2, &columns).unwrap();
+    let bytes = writer.into_inner().into_inner();
+    for keyword in ["TZERO1  ", "TZERO2  ", "TZERO3  "] {
+        let tzero = bytes
+            .chunks_exact(CARD_SIZE)
+            .find(|card| &card[..8] == keyword.as_bytes())
+            .unwrap();
+        assert_eq!(&tzero[10..30], b" 9223372036854775808");
+    }
+
+    let mut reader = FitsReader::open(Cursor::new(bytes)).unwrap();
+    assert_eq!(
+        reader.hdus[1].header.get_text("TFORM2").unwrap(),
+        Some("1PK(1)")
+    );
+    assert_eq!(
+        reader.hdus[1].header.get_text("TFORM3").unwrap(),
+        Some("1QK(1)")
+    );
+    let table = reader.read_table(1).unwrap();
+    assert_eq!(
+        table.column_by_idx(0).unwrap().unsigned().unwrap(),
+        Some(UnsignedView::U64(vec![u64::MIN, u64::MAX]))
+    );
+    assert_eq!(table.column_by_idx(1).unwrap().vla().unwrap(), rows);
+    assert_eq!(table.column_by_idx(2).unwrap().vla().unwrap(), rows);
+}
+
+#[test]
 fn checksums_round_trip_and_verify() {
     let image = Image {
         shape: vec![2, 2],

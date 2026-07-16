@@ -445,7 +445,8 @@ impl<'a> RawImage<'a> {
 /// (`BZERO`) and binary-table (`TZEROn`) unsigned paths.
 pub(crate) const U16_OFFSET: f64 = 32_768.0; // 2¹⁵
 pub(crate) const U32_OFFSET: f64 = 2_147_483_648.0; // 2³¹
-pub(crate) const U64_OFFSET: f64 = 9_223_372_036_854_775_808.0; // 2⁶³
+pub(crate) const U64_OFFSET_INTEGER: u64 = 1_u64 << 63;
+pub(crate) const U64_OFFSET: f64 = U64_OFFSET_INTEGER as f64;
 
 /// The effective element type of an image's *physical* samples — the analogue of
 /// cfitsio's image "equivalent type". `BITPIX` records only the stored width and
@@ -720,7 +721,11 @@ impl Scaling {
 
     pub(crate) fn add_to_header(&self, header: &mut Header, bitpix: Bitpix) {
         if !self.is_identity() {
-            header.set("BZERO", self.bzero);
+            if bitpix == Bitpix::I64 && self.bscale == 1.0 && self.bzero == U64_OFFSET {
+                header.set("BZERO", U64_OFFSET_INTEGER);
+            } else {
+                header.set("BZERO", self.bzero);
+            }
             header.set("BSCALE", self.bscale);
         }
         // FITS permits BLANK only for integer arrays.

@@ -72,6 +72,34 @@ fn strict_optional_getters_distinguish_absent_and_mistyped_values() {
 }
 
 #[test]
+fn bounded_integer_getter_rejects_exact_values_outside_i64() {
+    let h = Header::parse(&header_bytes(&[
+        "MIN     = -9223372036854775808",
+        "MAX     =  9223372036854775807",
+        "BELOW   = -9223372036854775809",
+        "ABOVE   =  9223372036854775808",
+        "END",
+    ]))
+    .unwrap();
+    assert_eq!(h.get_integer("MIN").unwrap(), Some(i64::MIN));
+    assert_eq!(h.get_integer("MAX").unwrap(), Some(i64::MAX));
+    for (keyword, decimal) in [
+        ("BELOW", "-9223372036854775809"),
+        ("ABOVE", "9223372036854775808"),
+    ] {
+        assert!(matches!(
+            h.get_integer(keyword),
+            Err(FitsError::IntegerOutOfRange { value, target })
+                if value == decimal && target == "i64"
+        ));
+    }
+    assert_eq!(
+        h.get_real("ABOVE").unwrap(),
+        Some(9_223_372_036_854_775_808.0)
+    );
+}
+
+#[test]
 fn iter_yields_every_record_in_order_with_duplicates() {
     let h = sample();
     let entries: Vec<_> = h.iter().collect();

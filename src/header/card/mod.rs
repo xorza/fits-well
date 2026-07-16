@@ -1,6 +1,7 @@
 use crate::block::CARD_SIZE;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::header::value::FitsInteger;
 use crate::header::value::Value;
 
 /// What role an 80-byte record plays in a header unit.
@@ -326,8 +327,8 @@ fn parse_complex(token: &str) -> Option<Value> {
     match (parse_scalar(re.trim())?, parse_scalar(im.trim())?) {
         (Value::Integer(re), Value::Integer(im)) => Some(Value::ComplexInteger { re, im }),
         (re, im) => Some(Value::ComplexReal {
-            re: re.as_real()?,
-            im: im.as_real()?,
+            re: re.as_real().ok()??,
+            im: im.as_real().ok()??,
         }),
     }
 }
@@ -336,9 +337,7 @@ fn parse_scalar(token: &str) -> Option<Value> {
     if looks_real(token) {
         parse_real(token).map(Value::Real)
     } else {
-        token
-            .parse::<i64>()
-            .ok()
+        FitsInteger::parse(token)
             .map(Value::Integer)
             .or_else(|| parse_real(token).map(Value::Real))
     }
