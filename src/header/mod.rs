@@ -101,7 +101,7 @@ impl Header {
 
     /// Read an optional logical keyword without conflating absence with a wrong type.
     pub fn get_logical(&self, keyword: &str) -> Result<Option<bool>> {
-        self.typed_optional(keyword, "logical", Value::as_logical)
+        self.typed_optional(keyword, "logical", |value| Ok(value.as_logical()))
     }
 
     /// Read an optional integer keyword without conflating absence with a wrong type.
@@ -116,19 +116,19 @@ impl Header {
 
     /// Read an optional text keyword without conflating absence with a wrong type.
     pub fn get_text(&self, keyword: &str) -> Result<Option<&str>> {
-        self.typed_optional(keyword, "text", Value::as_text)
+        self.typed_optional(keyword, "text", |value| Ok(value.as_text()))
     }
 
     fn typed_optional<'a, T>(
         &'a self,
         keyword: &str,
         expected: &'static str,
-        convert: impl FnOnce(&'a Value) -> Option<T>,
+        convert: impl FnOnce(&'a Value) -> Result<Option<T>>,
     ) -> Result<Option<T>> {
         let Some(value) = self.get(keyword) else {
             return Ok(None);
         };
-        convert(value)
+        convert(value)?
             .map(Some)
             .ok_or_else(|| FitsError::TypeMismatch {
                 name: keyword.to_string(),

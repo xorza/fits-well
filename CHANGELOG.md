@@ -14,6 +14,10 @@
   `Result<Option<_>>`; the parallel `try_get_*` family was removed. Time metadata
   accessors, `FitsTime::time_axis_mjd`, and `FitsReader::hdu_index` now return
   `Result` so malformed metadata is preserved as an error.
+- `Value::Integer` and `Value::ComplexInteger` now carry exact `FitsInteger`
+  values instead of bounded `i64` components. `Value::as_integer` and
+  `Value::as_real` now return `Result<Option<_>>` so bounded conversions report
+  range failures explicitly. `FitsInteger` is exported from the crate.
 - `RawImage::decode` now consumes `self`, allowing already-owned decompressed samples
   to move out without cloning. With `ndarray`, `RawImage::to_ndarray(&self)` was
   replaced by the consuming `RawImage::into_ndarray(self)`.
@@ -27,12 +31,15 @@
   cannot be ignored. They no longer return linear-stage values as complete world
   coordinates when a nonlinear algorithm is unavailable.
 - `FitsError::DataUnitTooLarge::bytes` changed from `usize` to `u64`. The
-  `TypeMismatch`, `InvalidAscii`, `UnsupportedWcsTransform`, `WcsProjectionDomain`,
-  `WcsNoConvergence`, `PlioValueOutOfRange`, and `TableMetadataMismatch` variants
-  were added; exhaustive matches on `FitsError` must handle them.
+  `TypeMismatch`, `InvalidAscii`, `IntegerOutOfRange`, `UnsupportedWcsTransform`,
+  `WcsProjectionDomain`, `WcsNoConvergence`, `PlioValueOutOfRange`, and
+  `TableMetadataMismatch` variants were added; exhaustive matches on `FitsError`
+  must handle them.
 
 ### Added
 
+- Added `FitsInteger`, an exact FITS integer value with an allocation-free `i64`
+  representation and a decimal fallback for the standard's unbounded range.
 - Added `Wcs::view` with immutable per-axis metadata and unsupported-axis status.
 - Added explicit `ColumnType` declarations for variable-length table columns.
 
@@ -57,6 +64,10 @@
 
 ### Fixed
 
+- Integer keyword values outside `i64` are preserved exactly instead of being
+  reparsed through `f64`, and integral reals outside `i64` now return a range error
+  instead of saturating. Unsigned-64 image and binary-table writers emit the exact
+  normative `BZERO`/`TZERO = 9223372036854775808` decimal.
 - WCS unsupported-axis classification now recognizes the standard `LOG` and `TAB`
   algorithms on any four-character coordinate type, including time and generic axes,
   instead of limiting nonlinear suffix detection to spectral coordinate names.

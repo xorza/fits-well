@@ -36,11 +36,11 @@ fn parses_a_logical_card_with_comment() {
 fn parses_integers_reals_and_fortran_double_exponent() {
     assert_eq!(
         parse("BITPIX  =                   16").value,
-        Some(Value::Integer(16))
+        Some(Value::from(16_i64))
     );
     assert_eq!(
         parse("NEG     =                   -5").value,
-        Some(Value::Integer(-5))
+        Some(Value::from(-5_i64))
     );
     assert_eq!(
         parse("EQUINOX =              1950.00").value,
@@ -122,12 +122,23 @@ fn blank_value_field_is_undefined() {
 fn parses_complex_integer_and_real() {
     assert_eq!(
         parse("CPLXI   = (3, 4)").value,
-        Some(Value::ComplexInteger { re: 3, im: 4 })
+        Some(Value::ComplexInteger {
+            re: 3_i64.into(),
+            im: 4_i64.into()
+        })
     );
     assert_eq!(
         parse("CPLXR   = (1.0, -2.5)").value,
         Some(Value::ComplexReal { re: 1.0, im: -2.5 })
     );
+
+    let exact = parse("CPLXBIG = (9223372036854775808, -9223372036854775809)");
+    let Some(Value::ComplexInteger { re, im }) = exact.value.as_ref() else {
+        panic!("large complex integer components lost their exact representation");
+    };
+    assert_eq!(re.to_string(), "9223372036854775808");
+    assert_eq!(im.to_string(), "-9223372036854775809");
+    assert_eq!(Card::parse(&exact.render()).unwrap(), exact);
 }
 
 #[test]
@@ -199,7 +210,29 @@ fn parses_and_round_trips_a_hierarch_record() {
     // A numeric HIERARCH value too.
     let n = parse("HIERARCH ESO DET EXPTIME = 1200");
     assert_eq!(n.keyword, "ESO DET EXPTIME");
-    assert_eq!(n.value, Some(Value::Integer(1200)));
+    assert_eq!(n.value, Some(Value::from(1200_i64)));
+}
+
+#[test]
+fn integer_boundaries_round_trip_without_real_coercion() {
+    for decimal in [
+        "-9223372036854775809",
+        "-9223372036854775808",
+        "9223372036854775807",
+        "9223372036854775808",
+    ] {
+        let card = parse(&format!("EXACT   = {decimal}"));
+        let Value::Integer(value) = card.value.as_ref().unwrap() else {
+            panic!("{decimal} was not parsed as an exact integer");
+        };
+        assert_eq!(value.to_string(), decimal);
+        let rendered = card.render();
+        assert!(
+            std::str::from_utf8(&rendered).unwrap().contains(decimal),
+            "rendered card changed {decimal}"
+        );
+        assert_eq!(Card::parse(&rendered).unwrap(), card);
+    }
 }
 
 #[test]

@@ -21,6 +21,8 @@ use crate::checksum;
 #[cfg(feature = "compression")]
 use crate::compress::{CompressOptions, compress_image, compress_table};
 use crate::data::Image;
+use crate::data::U64_OFFSET;
+use crate::data::U64_OFFSET_INTEGER;
 use crate::data::shape_product;
 use crate::endian::extend_be;
 use crate::endian::validate_pq_descriptor;
@@ -610,7 +612,16 @@ fn bintable_header(
             header.set(key!("TSCAL{n}").as_str(), tscale);
         }
         if let Some(tzero) = col.tzero {
-            header.set(key!("TZERO{n}").as_str(), tzero);
+            let stores_i64 = match &col.values {
+                WriteColumnData::Fixed { data, .. } => matches!(data, ColumnData::I64(_)),
+                WriteColumnData::Vla { kind, .. } => *kind == ColumnType::I64,
+                WriteColumnData::Bits { .. } => false,
+            };
+            if stores_i64 && col.tscale.unwrap_or(1.0) == 1.0 && tzero == U64_OFFSET {
+                header.set(key!("TZERO{n}").as_str(), U64_OFFSET_INTEGER);
+            } else {
+                header.set(key!("TZERO{n}").as_str(), tzero);
+            }
         }
         if let Some(tnull) = col.tnull {
             header.set(key!("TNULL{n}").as_str(), tnull);

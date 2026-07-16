@@ -80,7 +80,7 @@ pub use groups::RandomGroups;
 pub use hdu::HduKind;
 pub use header::Header;
 pub use header::HeaderEntry;
-pub use header::value::Value;
+pub use header::value::{FitsInteger, Value};
 /// The complex element type of `C`/`M` columns — the ecosystem-standard
 /// [`num_complex::Complex`]. Re-exported (crate and type) so callers can name it and
 /// stay on the same version this crate returns.

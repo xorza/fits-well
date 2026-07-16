@@ -595,6 +595,13 @@ fn scaling_reads_explicit_keywords() {
             Err(FitsError::TypeMismatch { name, .. }) if name == keyword
         ));
     }
+
+    let oversized_blank = header(&["BITPIX  = 64", "BLANK   = 9223372036854775808"]);
+    assert!(matches!(
+        Scaling::from_header(&oversized_blank),
+        Err(FitsError::IntegerOutOfRange { value, target })
+            if value == "9223372036854775808" && target == "i64"
+    ));
 }
 
 #[test]

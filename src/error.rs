@@ -40,6 +40,11 @@ pub enum FitsError {
     KeywordOutOfRange {
         name: &'static str,
     },
+    /// An exact FITS integer cannot be represented by the requested bounded type.
+    IntegerOutOfRange {
+        value: String,
+        target: &'static str,
+    },
     /// The byte stream ended in the middle of a header or data unit.
     UnexpectedEof,
     /// The data-unit size implied by the header overflows a 64-bit byte count
@@ -187,6 +192,9 @@ impl fmt::Display for FitsError {
             FitsError::KeywordOutOfRange { name } => {
                 write!(f, "keyword {name} has an out-of-range value")
             }
+            FitsError::IntegerOutOfRange { value, target } => {
+                write!(f, "FITS integer {value} is outside the {target} range")
+            }
             FitsError::UnexpectedEof => write!(f, "unexpected end of stream inside a FITS unit"),
             FitsError::DataUnitOverflow => {
                 write!(f, "header-implied data-unit size overflows 64 bits")
@@ -325,6 +333,14 @@ mod tests {
         assert_eq!(
             FitsError::MissingKeyword { name: "NAXIS" }.to_string(),
             "missing mandatory keyword NAXIS"
+        );
+        assert_eq!(
+            FitsError::IntegerOutOfRange {
+                value: "9223372036854775808".to_string(),
+                target: "i64",
+            }
+            .to_string(),
+            "FITS integer 9223372036854775808 is outside the i64 range"
         );
         assert_eq!(
             FitsError::TypeMismatch {
