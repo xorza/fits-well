@@ -78,7 +78,7 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
     let ascii = |name: &str, width| AsciiWriteColumn {
         name: name.to_string(),
         unit: None,
-        data: ColumnData::Text(Vec::new()),
+        data: AsciiColumnData::Text(Vec::new()),
         width,
         decimals: 0,
         tscale: None,

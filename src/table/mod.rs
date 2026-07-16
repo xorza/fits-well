@@ -353,8 +353,6 @@ pub enum ColumnData {
     /// Binary-table `A` — one exact field per row for fixed columns; a VLA row uses
     /// zero fields for an empty descriptor or one field containing its heap bytes.
     Character(Vec<CharacterField>),
-    /// ASCII-table `A` fields as decoded text.
-    Text(Vec<String>),
 }
 
 impl ColumnData {
@@ -371,7 +369,6 @@ impl ColumnData {
             ColumnData::ComplexF32(v) => v.len(),
             ColumnData::ComplexF64(v) => v.len(),
             ColumnData::Character(v) => v.len(),
-            ColumnData::Text(v) => v.len(),
         }
     }
 }

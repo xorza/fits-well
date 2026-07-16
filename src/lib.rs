@@ -62,7 +62,7 @@ mod time;
 mod wcs;
 mod writer;
 
-pub use ascii::{AsciiColumn, AsciiColumnReader, AsciiKind, AsciiTable};
+pub use ascii::{AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiTable};
 pub use bitpix::Bitpix;
 
 /// Re-exported so callers can name the borrowed [`bitvec::slice::BitSlice`] rows that
