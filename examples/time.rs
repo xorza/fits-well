@@ -16,12 +16,12 @@ fn main() -> fits_well::Result<()> {
     // standard §9 time keywords an instrument writes.
     let mut header = Header::new();
     header
-        .set("SIMPLE", true)
-        .set("BITPIX", 8)
-        .set("NAXIS", 0)
-        .set("DATE-OBS", "2024-03-14T15:09:26")
-        .set("MJD-OBS", 60383.631551)
-        .set("TIMESYS", "UTC");
+        .try_set("SIMPLE", true)?
+        .try_set("BITPIX", 8)?
+        .try_set("NAXIS", 0)?
+        .try_set("DATE-OBS", "2024-03-14T15:09:26")?
+        .try_set("MJD-OBS", 60383.631551)?
+        .try_set("TIMESYS", "UTC")?;
     let mut writer = FitsWriter::new(File::create(&path)?);
     writer.write_header(&header)?; // NAXIS=0 → header only, no data unit
     writer.into_inner().sync_all()?;

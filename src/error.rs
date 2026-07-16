@@ -10,6 +10,20 @@ pub enum FitsError {
     InvalidKeyword {
         name: String,
     },
+    /// A control or commentary keyword was used where a valued card was requested.
+    ReservedKeyword {
+        name: String,
+    },
+    /// A header value has no conforming FITS representation.
+    InvalidHeaderValue {
+        keyword: String,
+        reason: &'static str,
+    },
+    /// A logical header card cannot fit one physical 80-byte record.
+    HeaderCardTooLong {
+        keyword: String,
+        length: usize,
+    },
     /// A card's value field could not be parsed as any FITS value type.
     InvalidValue {
         card: String,
@@ -187,6 +201,22 @@ impl fmt::Display for FitsError {
         match self {
             FitsError::Io(e) => write!(f, "I/O error: {e}"),
             FitsError::InvalidKeyword { name } => write!(f, "invalid keyword name {name:?}"),
+            FitsError::ReservedKeyword { name } => {
+                write!(
+                    f,
+                    "reserved keyword {name:?} cannot be used as a valued card"
+                )
+            }
+            FitsError::InvalidHeaderValue { keyword, reason } => {
+                write!(
+                    f,
+                    "header keyword {keyword:?} has an invalid value: {reason}"
+                )
+            }
+            FitsError::HeaderCardTooLong { keyword, length } => write!(
+                f,
+                "header card {keyword:?} needs {length} bytes but a FITS record holds 80"
+            ),
             FitsError::InvalidValue { card } => {
                 write!(f, "cannot parse value field of card {card:?}")
             }
@@ -388,6 +418,29 @@ mod tests {
             }
             .to_string(),
             "table cell contains characters outside FITS restricted ASCII"
+        );
+        assert_eq!(
+            FitsError::ReservedKeyword {
+                name: "END".to_string(),
+            }
+            .to_string(),
+            "reserved keyword \"END\" cannot be used as a valued card"
+        );
+        assert_eq!(
+            FitsError::InvalidHeaderValue {
+                keyword: "EXPTIME".to_string(),
+                reason: "real values must be finite",
+            }
+            .to_string(),
+            "header keyword \"EXPTIME\" has an invalid value: real values must be finite"
+        );
+        assert_eq!(
+            FitsError::HeaderCardTooLong {
+                keyword: "COMMENT".to_string(),
+                length: 81,
+            }
+            .to_string(),
+            "header card \"COMMENT\" needs 81 bytes but a FITS record holds 80"
         );
         assert_eq!(
             FitsError::AsciiFieldTooWide {

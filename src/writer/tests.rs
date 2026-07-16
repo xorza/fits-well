@@ -5,6 +5,7 @@ use crate::compress::CompressOptions;
 use crate::data::{ImageData, Scaling, UnsignedView};
 use crate::hdu::{HduKind, MAX_TABLE_FIELDS};
 use crate::header::from_card_lines as header;
+use crate::header::value::Value;
 use crate::reader::ChecksumReport;
 use crate::reader::FitsReader;
 use crate::table::{CharacterField, ColumnData};
@@ -908,15 +909,13 @@ fn header_round_trips_through_render_and_parse() {
     assert_eq!(reparsed.cards, original.cards);
 
     let mut invalid = Header::new();
-    invalid.set("OBJECT", "Véga");
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_header(&invalid),
+        invalid.try_set("OBJECT", "Véga"),
         Err(FitsError::InvalidAscii {
             context: "header text value"
         })
     ));
-    assert!(writer.into_inner().into_inner().is_empty());
+    assert!(invalid.cards.is_empty());
 }
 
 #[test]

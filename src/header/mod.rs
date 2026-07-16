@@ -10,7 +10,10 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::card::Card;
 use crate::header::card::CardKind;
+use crate::header::card::validate_ascii;
+#[cfg(feature = "compression")]
 use crate::header::card::validate_keyword;
+use crate::header::card::validate_valued_keyword;
 use crate::header::value::Value;
 use crate::keyword::key;
 use crate::time::{FitsTime, PhaseAxis, TimeBounds, TimeCoordinate};
@@ -79,8 +82,7 @@ impl Header {
                     // A CONTINUE with no value card to extend is malformed; keep it
                     // readable by demoting it to a commentary card.
                     if card.kind == CardKind::Continue {
-                        card.kind = CardKind::Commentary;
-                        card.value = None;
+                        demote_continuation(&mut card);
                     }
                     if matches!(card.kind, CardKind::Value | CardKind::Hierarch) {
                         index.entry(card.keyword.clone()).or_insert(cards.len());
@@ -255,34 +257,37 @@ impl Header {
         FitsTime::phase_axis(self, axis)
     }
 
-    /// Create an empty header. Build it up with [`Header::set`] and friends.
+    /// Create an empty header. Build it with [`Header::try_set`] and friends.
     pub fn new() -> Header {
         Header::default()
     }
 
     /// Insert a valued keyword, or replace the value of an existing one, keeping
-    /// the keyword index in sync. Returns `&mut self` for chaining. The keyword
-    /// must be a valid FITS keyword name (≤ 8 chars of `A–Z`, `0–9`, `-`, `_`).
-    pub fn set(&mut self, keyword: &str, value: impl Into<Value>) -> &mut Self {
-        assert!(
-            validate_keyword(keyword).is_ok(),
-            "Header::set: invalid FITS keyword {keyword:?}"
-        );
-        // `COMMENT`/`HISTORY` are commentary keywords, not valued ones; a value card
-        // for them would render as `COMMENT = '…'`. Route them to push_comment/
-        // push_history instead of silently producing a malformed card.
-        assert!(
-            !matches!(keyword, "COMMENT" | "HISTORY"),
-            "Header::set: {keyword:?} is a commentary keyword; use push_comment/push_history"
-        );
+    /// the keyword index in sync. The keyword must be a valid FITS keyword name
+    /// (≤ 8 chars of `A–Z`, `0–9`, `-`, `_`) and must not be a control or
+    /// commentary keyword. Text must use restricted ASCII and numeric values must
+    /// have a finite FITS representation. An error leaves the header unchanged.
+    pub fn try_set(&mut self, keyword: &str, value: impl Into<Value>) -> Result<&mut Self> {
+        validate_valued_keyword(keyword)?;
         let value = value.into();
         if let Some(&i) = self.index.get(keyword) {
-            self.cards[i].value = Some(value);
+            let mut replacement = self.cards[i].clone();
+            replacement.value = Some(value);
+            replacement.validate()?;
+            self.cards[i] = replacement;
         } else {
+            let card = Card::value(keyword, value);
+            card.validate()?;
             self.index.insert(keyword.to_string(), self.cards.len());
-            self.cards.push(Card::value(keyword, value));
+            self.cards.push(card);
         }
-        self
+        Ok(self)
+    }
+
+    #[track_caller]
+    pub(crate) fn set(&mut self, keyword: &str, value: impl Into<Value>) -> &mut Self {
+        self.try_set(keyword, value)
+            .expect("internal FITS header metadata must be valid")
     }
 
     /// Remove all cards matching `should_remove`, then rebuild the keyword index
@@ -328,26 +333,74 @@ impl Header {
         }
     }
 
-    /// Attach (or replace) the inline comment of an existing valued keyword;
-    /// a no-op if the keyword is absent.
-    pub fn comment(&mut self, keyword: &str, text: &str) -> &mut Self {
-        if let Some(&i) = self.index.get(keyword) {
-            self.cards[i].comment = Some(text.to_string());
-        }
-        self
+    /// Attach (or replace) the inline comment of an existing valued keyword. A
+    /// missing valid keyword remains a no-op. An error leaves the header unchanged.
+    pub fn try_comment(&mut self, keyword: &str, text: &str) -> Result<&mut Self> {
+        validate_ascii(text, "header comment")?;
+        let Some(&i) = self.index.get(keyword) else {
+            validate_valued_keyword(keyword)?;
+            return Ok(self);
+        };
+        let mut replacement = self.cards[i].clone();
+        replacement.comment = Some(text.to_string());
+        replacement.validate()?;
+        self.cards[i] = replacement;
+        Ok(self)
     }
 
-    /// Append a `COMMENT` card.
-    pub fn push_comment(&mut self, text: &str) -> &mut Self {
-        self.cards.push(Card::commentary("COMMENT", text));
-        self
+    #[track_caller]
+    pub(crate) fn comment(&mut self, keyword: &str, text: &str) -> &mut Self {
+        self.try_comment(keyword, text)
+            .expect("internal FITS header comments must be valid")
     }
 
-    /// Append a `HISTORY` card.
-    pub fn push_history(&mut self, text: &str) -> &mut Self {
-        self.cards.push(Card::commentary("HISTORY", text));
-        self
+    /// Append one restricted-ASCII `COMMENT` record. Text that cannot fit the
+    /// record returns an error without changing the header.
+    pub fn try_push_comment(&mut self, text: &str) -> Result<&mut Self> {
+        let card = Card::commentary("COMMENT", text);
+        card.validate()?;
+        self.cards.push(card);
+        Ok(self)
     }
+
+    #[track_caller]
+    #[cfg(test)]
+    pub(crate) fn push_comment(&mut self, text: &str) -> &mut Self {
+        self.try_push_comment(text)
+            .expect("internal FITS COMMENT text must be valid")
+    }
+
+    /// Append one restricted-ASCII `HISTORY` record. Text that cannot fit the
+    /// record returns an error without changing the header.
+    pub fn try_push_history(&mut self, text: &str) -> Result<&mut Self> {
+        let card = Card::commentary("HISTORY", text);
+        card.validate()?;
+        self.cards.push(card);
+        Ok(self)
+    }
+
+    #[track_caller]
+    #[cfg(test)]
+    pub(crate) fn push_history(&mut self, text: &str) -> &mut Self {
+        self.try_push_history(text)
+            .expect("internal FITS HISTORY text must be valid")
+    }
+}
+
+fn demote_continuation(card: &mut Card) {
+    let substring = card
+        .value
+        .as_ref()
+        .and_then(Value::as_text)
+        .expect("parsed CONTINUE card must carry a text substring");
+    let mut commentary = format!("  '{}'", substring.replace('\'', "''"));
+    if let Some(comment) = &card.comment {
+        commentary.push_str(" / ");
+        commentary.push_str(comment);
+    }
+    card.kind = CardKind::Commentary;
+    card.value = None;
+    card.comment = Some(commentary);
 }
 
 /// Fold a `CONTINUE` substring into the preceding long-string value card,
@@ -367,9 +420,15 @@ fn fold_continuation(cards: &mut [Card], cont: &Card) -> bool {
     if let Some(Value::Text(sub)) = &cont.value {
         acc.push_str(sub);
     }
-    // The convention carries any comment on the final CONTINUE record.
-    if cont.comment.is_some() {
-        prev.comment = cont.comment.clone();
+    if let Some(fragment) = &cont.comment {
+        if let Some(comment) = &mut prev.comment {
+            if !comment.is_empty() {
+                comment.push(' ');
+            }
+            comment.push_str(fragment);
+        } else {
+            prev.comment = Some(fragment.clone());
+        }
     }
     true
 }

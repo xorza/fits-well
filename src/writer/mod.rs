@@ -35,7 +35,7 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::validate_table_field_count;
 use crate::header::Header;
-use crate::header::value::Value;
+use crate::header::card::validate_ascii;
 use crate::keyword::key;
 #[cfg(feature = "compression")]
 use crate::table::BinTable;
@@ -49,14 +49,6 @@ const PLACEHOLDER_CHECKSUM: &str = "0000000000000000";
 /// Serialize a header unit into reusable storage: every card rendered to 80 bytes,
 /// the `END` record, then space padding to the next 2880-byte boundary.
 pub(crate) fn render_header(header: &Header, buf: &mut Vec<u8>) -> Result<()> {
-    for entry in header.iter() {
-        if let Some(Value::Text(text)) = entry.value {
-            validate_ascii(text, "header text value")?;
-        }
-        if let Some(comment) = entry.comment {
-            validate_ascii(comment, "header comment")?;
-        }
-    }
     let min_len = header
         .cards
         .len()
@@ -66,7 +58,7 @@ pub(crate) fn render_header(header: &Header, buf: &mut Vec<u8>) -> Result<()> {
     buf.clear();
     buf.reserve(min_len);
     for card in &header.cards {
-        card.render_into(buf);
+        card.render_into(buf)?;
     }
     let mut end = [SPACE_FILL; CARD_SIZE];
     end[..3].copy_from_slice(b"END");
@@ -1225,14 +1217,6 @@ fn validate_ascii_null_collision(value: &str, marker: Option<&str>) -> Result<()
         })
     } else {
         Ok(())
-    }
-}
-
-fn validate_ascii(text: &str, context: &'static str) -> Result<()> {
-    if text.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
-        Ok(())
-    } else {
-        Err(FitsError::InvalidAscii { context })
     }
 }
 

@@ -16,7 +16,7 @@ fn parse(text: &str) -> Card {
 
 fn render_records(card: &Card) -> Vec<[u8; CARD_SIZE]> {
     let mut bytes = Vec::new();
-    card.render_into(&mut bytes);
+    card.render_into(&mut bytes).unwrap();
     bytes
         .chunks_exact(CARD_SIZE)
         .map(|record| record.try_into().unwrap())
@@ -94,7 +94,7 @@ fn large_magnitude_real_renders_with_exponent_and_round_trips() {
             comment: None,
             kind: CardKind::Value,
         };
-        let rendered = card.render();
+        let rendered = card.render().unwrap();
         let text = std::str::from_utf8(&rendered).unwrap();
         assert!(
             text.contains('E') && !text.contains('e'),
@@ -138,7 +138,7 @@ fn parses_complex_integer_and_real() {
     };
     assert_eq!(re.to_string(), "9223372036854775808");
     assert_eq!(im.to_string(), "-9223372036854775809");
-    assert_eq!(Card::parse(&exact.render()).unwrap(), exact);
+    assert_eq!(Card::parse(&exact.render().unwrap()).unwrap(), exact);
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn parses_and_round_trips_a_hierarch_record() {
     assert_eq!(card.value, Some(Value::Text("CCD-44".into())));
     assert_eq!(card.comment.as_deref(), Some("detector"));
     // Render → parse round-trips the compound key and value.
-    let reparsed = Card::parse(&card.render()).unwrap();
+    let reparsed = Card::parse(&card.render().unwrap()).unwrap();
     assert_eq!(reparsed, card);
 
     // A numeric HIERARCH value too.
@@ -226,7 +226,7 @@ fn integer_boundaries_round_trip_without_real_coercion() {
             panic!("{decimal} was not parsed as an exact integer");
         };
         assert_eq!(value.to_string(), decimal);
-        let rendered = card.render();
+        let rendered = card.render().unwrap();
         assert!(
             std::str::from_utf8(&rendered).unwrap().contains(decimal),
             "rendered card changed {decimal}"
@@ -243,6 +243,15 @@ fn parses_a_continue_record() {
         card.value,
         Some(Value::Text("ollowed by more text&".into()))
     );
+}
+
+#[test]
+fn end_requires_the_canonical_blank_record() {
+    assert_eq!(parse("END").kind, CardKind::End);
+    assert!(matches!(
+        Card::parse(&raw("END     =                    T")),
+        Err(FitsError::ReservedKeyword { name }) if name == "END"
+    ));
 }
 
 #[test]
@@ -271,6 +280,40 @@ fn long_string_splits_into_a_continue_chain() {
     with_end.extend_from_slice(&raw("END"));
     let h = Header::parse(&with_end).unwrap();
     assert_eq!(h.get_text("LONGSTR").unwrap(), Some(value.as_str()));
+}
+
+#[test]
+fn long_string_comment_boundary_is_lossless_or_rejected() {
+    let exact_comment = "c".repeat(65);
+    let exact = Card {
+        keyword: "TEXT".into(),
+        value: Some(Value::Text("x".into())),
+        comment: Some(exact_comment.clone()),
+        kind: CardKind::Value,
+    };
+    let records = render_records(&exact);
+    assert_eq!(records.len(), 2);
+    assert_eq!(&records[1][..15], b"CONTINUE  '' / ");
+    let mut bytes: Vec<u8> = records.iter().flatten().copied().collect();
+    bytes.extend_from_slice(&raw("END"));
+    let parsed = Header::parse(&bytes).unwrap();
+    let entry = parsed.iter().next().unwrap();
+    assert_eq!(entry.value.and_then(Value::as_text), Some("x"));
+    assert_eq!(entry.comment, Some(exact_comment.as_str()));
+
+    let overflow = Card {
+        comment: Some("c".repeat(66)),
+        ..exact
+    };
+    let mut output = vec![1, 2, 3];
+    assert!(matches!(
+        overflow.render_into(&mut output),
+        Err(FitsError::HeaderCardTooLong {
+            keyword,
+            length: 81,
+        }) if keyword == "TEXT"
+    ));
+    assert_eq!(output, vec![1, 2, 3]);
 }
 
 #[test]
@@ -323,7 +366,7 @@ fn render_then_parse_round_trips_the_model() {
     ];
     for text in originals {
         let card = parse(text);
-        let reparsed = Card::parse(&card.render()).unwrap();
+        let reparsed = Card::parse(&card.render().unwrap()).unwrap();
         assert_eq!(card, reparsed, "round-trip failed for {text:?}");
     }
 }
@@ -343,14 +386,16 @@ fn non_finite_reals_are_rejected_on_read() {
 }
 
 #[test]
-#[should_panic(expected = "must be finite")]
-fn rendering_a_non_finite_real_panics() {
-    // The writer must never emit a non-conforming inf/NaN value field (logic error).
+fn rendering_a_non_finite_real_returns_an_error() {
     let card = Card {
         keyword: "BAD".into(),
         value: Some(Value::Real(f64::INFINITY)),
         comment: None,
         kind: CardKind::Value,
     };
-    let _ = card.render();
+    assert!(matches!(
+        card.render(),
+        Err(FitsError::InvalidHeaderValue { keyword, reason })
+            if keyword == "BAD" && reason == "real values must be finite"
+    ));
 }
