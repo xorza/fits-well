@@ -40,7 +40,7 @@ Severity used below:
 | §5 | Data representation | Mostly complete: all `BITPIX` encodings, endian paths, and unsigned conventions serialize exactly; image `BLANK` range validation remains incomplete. |
 | §6 / §7.1 | Primary arrays, IMAGE, random groups | Mostly complete on disk; typed random-group raw values and safe image invariants remain incomplete. |
 | §7.2 | ASCII tables | Partial: formats and scaling read correctly, but nulls collapse into ordinary zero in the raw model and over-width writes produce invalid numeric fields. |
-| §7.3 | Binary tables | Partial: all fixed kinds and P/Q reads exist and character/null fields are lossless, but empty VLA+`TDIM` is rejected, some VLA physical views and `PX`/`QX` writing are absent. |
+| §7.3 | Binary tables | Partial: all fixed kinds and P/Q reads exist, character/null fields are lossless, and empty VLA cells obey `TDIM`; some VLA physical views and `PX`/`QX` writing remain absent. |
 | §8 | WCS | Partial: image and table keyword translation and all implemented transforms are covered; unsupported transforms are explicitly rejected. Four standard projections and all Table-26 nonlinear algorithms remain unevaluated. |
 | §9 | Time | Partial: references, scales, FITS units, strict year forms, leap-second-preserving UTC quasi-JD, and complete linear time-axis WCS evaluation work; secondary frame and PHASE metadata remain incomplete. |
 | §10 | Tiled compression | Not assessed here; it is outside the dependency-free core. |
@@ -69,7 +69,7 @@ Severity used below:
 
 - [x] **Parse FITS time units instead of treating every unknown spelling as seconds.** `unit_seconds` is fallible, accepts the standard time bases with one SI prefix, and rejects non-time dimensional spellings. The discouraged `ta` and `Ba` units use the normative epoch-dependent equations at `MJDREF` in TDB/ET rather than constants. Relative-time and GTI fixtures cover `ms`, `ks`, days, invalid units, and the J2000/J1900 equation origins (`docs/refs/fits_standard40.md:1089-1136`, `:4489-4538`).
 
-- [ ] **Treat `TDIMn` as inapplicable to a zero-length VLA cell.** Reader and writer compare `product(TDIM)` with every descriptor count, including zero (`src/table/mod.rs:801-825`, `src/table/mod.rs:951-958`, `src/writer/mod.rs:724-750`, `src/writer/mod.rs:776-805`). FITS explicitly exempts a zero-size descriptor (`docs/refs/fits_standard40.md:2670-2681`). Skip only the per-cell product check for empty descriptors while retaining syntax and nonempty-cell validation. Verify mixed empty/nonempty `P`, `Q`, `PX`, and `QX` rows.
+- [x] **Treat `TDIMn` as inapplicable to a zero-length VLA cell.** Reader and writer skip only the dimension-product comparison for empty descriptors, while malformed shapes and undersized nonempty cells remain errors. Hand-built mixed `P`/`Q`/`PX`/`QX` rows prove empty cells ignore their undefined heap offsets; writer round-trips cover both descriptor widths with the same empty/nonempty shape (`docs/refs/fits_standard40.md:2670-2681`).
 
 - [ ] **Complete typed physical access for variable-length arrays.** `vla_physical` rejects complex heap types and `unsigned` rejects every VLA (`src/table/mod.rs:625-635`, `src/table/mod.rs:731-769`, `src/table/mod.rs:1027-1059`), although `TSCAL`/`TZERO` apply to heap elements, including complex and unsigned-convention integers (`docs/refs/fits_standard40.md:2575-2608`, `:3108-3112`). Add complex VLA scaling with zero offset on the imaginary component and exact VLA unsigned views. Verify scaled `PC`/`QM` and `PK`/`QK` values above `2^53`.
 

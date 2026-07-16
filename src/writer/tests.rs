@@ -108,6 +108,18 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
     ));
     assert!(writer.into_inner().into_inner().is_empty());
 
+    for shape in [vec![], vec![0]] {
+        let invalid_empty_vla =
+            WriteColumn::vla("VEC", ColumnType::I32, vec![ColumnData::I32(vec![])])
+                .with_tdim(shape);
+        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+        assert!(matches!(
+            writer.write_table(1, &[invalid_empty_vla]),
+            Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
+        ));
+        assert!(writer.into_inner().into_inner().is_empty());
+    }
+
     let invalid_text = WriteColumn::fixed(
         "NAME",
         ColumnData::Character(vec![CharacterField::new("Véga".as_bytes().to_vec())]),
@@ -230,7 +242,7 @@ fn vla_constructor_rejects_mixed_element_types() {
 }
 
 #[test]
-fn writes_tdim_q_vla_and_bit_columns() {
+fn writes_tdim_p_q_vla_and_bit_columns() {
     use crate::table::TformKind;
     let columns = vec![
         // 2×2 multidimensional column (TDIM '(2,2)'), 4 elements/row.
@@ -239,9 +251,16 @@ fn writes_tdim_q_vla_and_bit_columns() {
         WriteColumn::vla(
             "QV",
             ColumnType::I16,
-            vec![ColumnData::I16(vec![7, 8, 9]), ColumnData::I16(vec![1])],
+            vec![ColumnData::I16(vec![]), ColumnData::I16(vec![7, 8, 9, 10])],
         )
+        .with_tdim(vec![2, 2])
         .wide(),
+        WriteColumn::vla(
+            "PV",
+            ColumnType::I16,
+            vec![ColumnData::I16(vec![]), ColumnData::I16(vec![1, 2, 3, 4])],
+        )
+        .with_tdim(vec![2, 2]),
         WriteColumn::vla(
             "TXT",
             ColumnType::Character,
@@ -260,27 +279,33 @@ fn writes_tdim_q_vla_and_bit_columns() {
 
     // TDIM parsed back as a shape.
     assert_eq!(t.columns[0].tdim, Some(vec![2, 2]));
-    // Q descriptor type, and the VLA reads back.
+    // P/Q descriptors with TDIM accept an empty row and validate the nonempty row.
     assert_eq!(t.columns[1].tform.kind, TformKind::ArrayDesc64);
-    match &t.column_by_idx(1).unwrap().vla().unwrap()[0] {
-        ColumnData::I16(v) => assert_eq!(v, &[7, 8, 9]),
-        other => panic!("{other:?}"),
-    }
-    // X column: TFORM 12X, packed bytes preserved.
-    assert_eq!(r.hdus[1].header.get_text("TFORM3").unwrap(), Some("1PA(5)"));
-    assert_eq!(t.columns[2].tform.repeat, 1);
+    assert_eq!(t.columns[1].tdim, Some(vec![2, 2]));
+    assert_eq!(
+        t.column_by_idx(1).unwrap().vla().unwrap(),
+        vec![ColumnData::I16(vec![]), ColumnData::I16(vec![7, 8, 9, 10])]
+    );
     assert_eq!(t.columns[2].tform.kind, TformKind::ArrayDesc32);
-    assert_eq!(t.columns[2].tform.vla_elem, Some(TformKind::Char));
+    assert_eq!(t.columns[2].tdim, Some(vec![2, 2]));
     assert_eq!(
         t.column_by_idx(2).unwrap().vla().unwrap(),
+        vec![ColumnData::I16(vec![]), ColumnData::I16(vec![1, 2, 3, 4])]
+    );
+    assert_eq!(r.hdus[1].header.get_text("TFORM4").unwrap(), Some("1PA(5)"));
+    assert_eq!(t.columns[3].tform.repeat, 1);
+    assert_eq!(t.columns[3].tform.kind, TformKind::ArrayDesc32);
+    assert_eq!(t.columns[3].tform.vla_elem, Some(TformKind::Char));
+    assert_eq!(
+        t.column_by_idx(3).unwrap().vla().unwrap(),
         vec![
             ColumnData::Character(vec!["hello".into()]),
             ColumnData::Character(vec!["abc".into()])
         ]
     );
-    assert_eq!(t.columns[3].tform.kind, TformKind::Bit);
-    assert_eq!(t.columns[3].tform.repeat, 12);
-    match t.column_by_idx(3).unwrap().raw().unwrap() {
+    assert_eq!(t.columns[4].tform.kind, TformKind::Bit);
+    assert_eq!(t.columns[4].tform.repeat, 12);
+    match t.column_by_idx(4).unwrap().raw().unwrap() {
         ColumnData::Bytes(b) => assert_eq!(b, vec![0xAB, 0xC0, 0x12, 0x30]),
         other => panic!("{other:?}"),
     }

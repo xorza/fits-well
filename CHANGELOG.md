@@ -88,6 +88,8 @@
 - Binary-table fixed and P/Q `A` cells preserve trailing spaces, NUL terminators,
   undefined bytes after the first NUL, and explicit null strings. Writing accepts
   NUL-terminated fields and rejects over-width fixed fields instead of truncating.
+- Zero-length `P`/`Q` descriptor cells no longer fail their column's `TDIMn`
+  product check. Shape syntax and every nonempty cell remain fully validated.
 - HDU discovery now requires `SIMPLE` on the first card and `XTENSION` on each
   subsequent HDU, so special records containing later `END`-shaped cards are not
   misclassified. Boundary sizing uses the distinct primary, extension, and

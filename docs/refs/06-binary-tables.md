@@ -85,8 +85,9 @@ a single **type code** `T`, and optional trailing chars `a` (undefined by spec).
 A vector cell can be reshaped into an N-D array via `TDIMn = '(d1,d2,…)'`. The
 product `Π di` *must be ≤* `r` (the `TFORMn` repeat count; for `P`/`Q`, ≤ the
 descriptor's stored array length); any trailing unused elements are undefined fill.
-Fortran order (d1 fastest). String arrays use the same notation: `TFORMn = '60A'`
-with `TDIMn = '(5,4,3)'` is a 4×3 array of 5-character strings.
+The shape is not applicable to a `P`/`Q` descriptor whose stored array length is
+zero. Fortran order (d1 fastest). String arrays use the same notation:
+`TFORMn = '60A'` with `TDIMn = '(5,4,3)'` is a 4×3 array of 5-character strings.
 
 ## 6.6 Variable-length arrays (§7.3.5–7.3.6)
 
