@@ -18,6 +18,7 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::groups::RandomGroups;
 use crate::hdu::HduKind;
+use crate::hdu::HduRole;
 use crate::hdu::data_extent;
 use crate::header::Header;
 use crate::table::BinTable;
@@ -57,9 +58,8 @@ impl Hdu {
         if !matches!(self.kind, HduKind::Primary | HduKind::Image) {
             return Err(FitsError::NotAnImage);
         }
-        // §4.3: a plain image array has no group structure. A non-conforming
-        // `PCOUNT`/`GCOUNT` would make `data_extent` size extra bytes, so reject it
-        // up front (on untrusted input) rather than expose mismatched samples.
+        // §4.3: a plain image array has no group structure, so reserved extension /
+        // random-groups counts cannot qualify the samples returned here.
         if self.header.pcount()? != 0 || self.header.gcount()? != 1 {
             return Err(FitsError::ImageHasGroups);
         }
@@ -148,12 +148,18 @@ impl<S: Source> FitsReader<S> {
         let mut hdus = Vec::new();
         let mut offset = 0u64;
         loop {
-            match scan_header_unit(&mut source, &mut offset, &mut scratch)? {
+            let expected = if hdus.is_empty() {
+                ExpectedHeader::Primary
+            } else {
+                ExpectedHeader::Extension
+            };
+            match scan_header_unit(&mut source, &mut offset, &mut scratch, expected)? {
                 NextHeader::Found { bytes, sum } => {
                     let header = Header::parse(&bytes)?;
-                    let kind = HduKind::classify(&header)?;
+                    let role = HduRole::from_header(&header, hdus.is_empty())?;
+                    let kind = HduKind::classify(&header, role)?;
                     let data_offset = offset;
-                    let extent = data_extent(&header)?;
+                    let extent = data_extent(&header, role)?;
                     let next = data_offset
                         .checked_add(extent.padded_bytes)
                         .ok_or(FitsError::DataUnitOverflow)?;
@@ -169,6 +175,7 @@ impl<S: Source> FitsReader<S> {
                     // (the HDU is still recorded; a later read bounds-checks it).
                     offset = next.min(source.size());
                 }
+                NextHeader::End if hdus.is_empty() => return Err(FitsError::UnexpectedEof),
                 NextHeader::End => break,
                 // §3.5/§3.6: special records and a trailing partial / fill block may
                 // follow the last HDU; a reader disregards them. But the same shape
@@ -484,6 +491,12 @@ enum NextHeader {
     Trailing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpectedHeader {
+    Primary,
+    Extension,
+}
+
 /// Read one header unit at `*offset`, advancing `offset` past each consumed block,
 /// until a block carries the `END` record. Blocks come through [`Source::slice`], so
 /// the same scan drives both seeking and in-memory sources.
@@ -491,6 +504,7 @@ fn scan_header_unit<S: Source>(
     source: &mut S,
     offset: &mut u64,
     scratch: &mut Vec<u8>,
+    expected: ExpectedHeader,
 ) -> Result<NextHeader> {
     let size = source.size();
     // Most headers are a single block; reserve it so the common case parses with one
@@ -499,14 +513,33 @@ fn scan_header_unit<S: Source>(
     let mut sum = 0;
     loop {
         match size - *offset {
-            // Clean end at a block boundary, or trailing blocks with no `END`.
+            // Clean end at a block boundary.
             0 if bytes.is_empty() => return Ok(NextHeader::End),
-            0 => return Ok(NextHeader::Trailing),
-            // A sub-block remnant before EOF: trailing content (§3.6).
-            avail if avail < BLOCK_SIZE as u64 => return Ok(NextHeader::Trailing),
+            // Once a valid SIMPLE/XTENSION prefix was seen, EOF before END is a
+            // malformed header rather than ignorable trailing content.
+            0 => return Err(FitsError::UnexpectedEof),
+            // A sub-block remnant before any header is trailing content (§3.6).
+            avail if avail < BLOCK_SIZE as u64 && bytes.is_empty() => {
+                return Ok(NextHeader::Trailing);
+            }
+            avail if avail < BLOCK_SIZE as u64 => return Err(FitsError::UnexpectedEof),
             _ => {}
         }
         let block = source.slice(*offset, BLOCK_SIZE, scratch)?;
+        if bytes.is_empty() {
+            let keyword = &block[..8];
+            match expected {
+                ExpectedHeader::Primary if keyword != b"SIMPLE  " => {
+                    return Err(FitsError::MissingKeyword { name: "SIMPLE" });
+                }
+                // §3.5: a post-HDU block whose first card is not XTENSION begins
+                // special records, regardless of any END-shaped bytes later in it.
+                ExpectedHeader::Extension if keyword != b"XTENSION" => {
+                    return Ok(NextHeader::Trailing);
+                }
+                _ => {}
+            }
+        }
         *offset += BLOCK_SIZE as u64;
         sum = checksum::accumulate(block, sum);
         allocation::try_reserve(&mut bytes, block.len())?;

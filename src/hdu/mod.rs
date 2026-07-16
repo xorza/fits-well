@@ -1,13 +1,44 @@
-//! HDU classification and the data-unit sizing formula.
+//! HDU role validation, classification, and data-unit sizing.
 //!
-//! Boundaries are computable from the header alone — `Nbits = |BITPIX| · GCOUNT ·
-//! (PCOUNT + Π NAXISn)`, rounded up to a block — so the reader never touches data
-//! to find the next HDU.
+//! Boundaries are computable from the header alone using the primary-array,
+//! extension, or random-groups formula, rounded up to a block, so the reader never
+//! touches data to find the next HDU.
 
 use crate::block::checked_padded_len;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+
+/// The structural role already established by file position and mandatory header
+/// signatures. Extent calculation uses this instead of interpreting reserved cards
+/// such as `GROUPS` outside the role where the standard defines them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HduRole {
+    Primary,
+    Extension,
+    RandomGroups,
+}
+
+impl HduRole {
+    pub(crate) fn from_header(header: &Header, first: bool) -> Result<HduRole> {
+        if first {
+            header
+                .get_logical("SIMPLE")?
+                .ok_or(FitsError::MissingKeyword { name: "SIMPLE" })?;
+            if header.get_logical("GROUPS")? == Some(true) {
+                validate_random_groups_axes(&header.axes()?)?;
+                Ok(HduRole::RandomGroups)
+            } else {
+                Ok(HduRole::Primary)
+            }
+        } else {
+            header
+                .get_text("XTENSION")?
+                .ok_or(FitsError::MissingKeyword { name: "XTENSION" })?;
+            Ok(HduRole::Extension)
+        }
+    }
+}
 
 /// The structural kind of an HDU, inferred from its mandatory keywords.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,30 +64,29 @@ pub enum HduKind {
 }
 
 impl HduKind {
-    pub(crate) fn classify(header: &Header) -> Result<HduKind> {
+    pub(crate) fn classify(header: &Header, role: HduRole) -> Result<HduKind> {
+        if role == HduRole::Primary {
+            return Ok(HduKind::Primary);
+        }
+        if role == HduRole::RandomGroups {
+            return Ok(HduKind::RandomGroups);
+        }
+
         // `Value::Text` already stripped the trailing spaces of `'IMAGE   '` etc.
-        let kind = if let Some(xtension) = header.get_text("XTENSION")? {
-            match xtension {
-                "IMAGE" => HduKind::Image,
-                "TABLE" => HduKind::AsciiTable,
-                // §10: a tiled-compressed image/table rides inside a BINTABLE,
-                // flagged by ZIMAGE/ZTABLE — classify by the payload, not the
-                // container, so callers see what they can actually read.
-                "BINTABLE" if header.get_logical("ZIMAGE")? == Some(true) => {
-                    HduKind::CompressedImage
-                }
-                "BINTABLE" if header.get_logical("ZTABLE")? == Some(true) => {
-                    HduKind::CompressedTable
-                }
-                "BINTABLE" => HduKind::BinTable,
-                _ => HduKind::Other,
-            }
-        } else if header.get_logical("GROUPS")? == Some(true) {
-            HduKind::RandomGroups
-        } else {
-            HduKind::Primary
-        };
-        Ok(kind)
+        let xtension = header
+            .get_text("XTENSION")?
+            .ok_or(FitsError::MissingKeyword { name: "XTENSION" })?;
+        Ok(match xtension {
+            "IMAGE" => HduKind::Image,
+            "TABLE" => HduKind::AsciiTable,
+            // §10: a tiled-compressed image/table rides inside a BINTABLE,
+            // flagged by ZIMAGE/ZTABLE — classify by the payload, not the
+            // container, so callers see what they can actually read.
+            "BINTABLE" if header.get_logical("ZIMAGE")? == Some(true) => HduKind::CompressedImage,
+            "BINTABLE" if header.get_logical("ZTABLE")? == Some(true) => HduKind::CompressedTable,
+            "BINTABLE" => HduKind::BinTable,
+            _ => HduKind::Other,
+        })
     }
 }
 
@@ -70,48 +100,79 @@ pub(crate) struct DataExtent {
     pub(crate) padded_bytes: u64,
 }
 
-/// Compute the data-unit extent from a parsed header (Eq. 2).
-pub(crate) fn data_extent(header: &Header) -> Result<DataExtent> {
+/// Compute the data-unit extent from a parsed, role-validated header (Eqs. 1, 2, 4).
+pub(crate) fn data_extent(header: &Header, role: HduRole) -> Result<DataExtent> {
     let elem = header.bitpix()?.elem_size() as u64;
     let axes = header.axes()?;
-    // PCOUNT/GCOUNT are mandatory ≥0 / ≥1 integers; a present-but-out-of-range
-    // value is malformed and must not be silently clamped (it would yield a
-    // plausible-but-wrong extent and a bad seek). Absence keeps the primary/IMAGE
-    // defaults of 0 and 1.
-    let pcount = header.pcount()?;
-    let gcount = header.gcount()?;
-    let random_groups = header.get_logical("GROUPS")? == Some(true);
-
-    // `NAXIS = 0` means no data array at all (the empty product would be 1, not
-    // 0). Otherwise multiply the axis lengths — skipping the leading zero sentinel
-    // for random groups. All arithmetic is checked: the axis lengths come from an
-    // untrusted file and an overflowed product would drive a wild allocation in
-    // the reader.
-    let array_elems = if axes.is_empty() {
-        0
-    } else {
-        let array_axes: &[usize] = if random_groups { &axes[1..] } else { &axes };
-        if array_axes.contains(&0) {
-            0
-        } else {
-            array_axes
-                .iter()
-                .try_fold(1u64, |acc, &n| acc.checked_mul(n as u64))
-                .ok_or(FitsError::DataUnitOverflow)?
+    let data_bytes = match role {
+        HduRole::Primary => elem
+            .checked_mul(array_elements(&axes)?)
+            .ok_or(FitsError::DataUnitOverflow)?,
+        HduRole::Extension => grouped_data_bytes(elem, array_elements(&axes)?, header)?,
+        HduRole::RandomGroups => {
+            validate_random_groups_axes(&axes)?;
+            grouped_data_bytes(elem, array_elements(&axes[1..])?, header)?
         }
     };
-
-    let group_size = pcount
-        .checked_add(array_elems)
-        .ok_or(FitsError::DataUnitOverflow)?;
-    let data_bytes = elem
-        .checked_mul(gcount)
-        .and_then(|n| n.checked_mul(group_size))
-        .ok_or(FitsError::DataUnitOverflow)?;
     Ok(DataExtent {
         data_bytes,
         padded_bytes: checked_padded_len(data_bytes).ok_or(FitsError::DataUnitOverflow)?,
     })
+}
+
+fn array_elements(axes: &[usize]) -> Result<u64> {
+    if axes.is_empty() || axes.contains(&0) {
+        return Ok(0);
+    }
+    axes.iter()
+        .try_fold(1u64, |product, &length| product.checked_mul(length as u64))
+        .ok_or(FitsError::DataUnitOverflow)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GroupCounts {
+    pcount: u64,
+    gcount: u64,
+}
+
+fn required_group_counts(header: &Header) -> Result<GroupCounts> {
+    let pcount = header
+        .get_integer("PCOUNT")?
+        .ok_or(FitsError::MissingKeyword { name: "PCOUNT" })?;
+    if pcount < 0 {
+        return Err(FitsError::KeywordOutOfRange { name: "PCOUNT" });
+    }
+    let gcount = header
+        .get_integer("GCOUNT")?
+        .ok_or(FitsError::MissingKeyword { name: "GCOUNT" })?;
+    if gcount < 1 {
+        return Err(FitsError::KeywordOutOfRange { name: "GCOUNT" });
+    }
+    Ok(GroupCounts {
+        pcount: pcount as u64,
+        gcount: gcount as u64,
+    })
+}
+
+fn grouped_data_bytes(elem: u64, array_elements: u64, header: &Header) -> Result<u64> {
+    let counts = required_group_counts(header)?;
+    let group_size = counts
+        .pcount
+        .checked_add(array_elements)
+        .ok_or(FitsError::DataUnitOverflow)?;
+    elem.checked_mul(counts.gcount)
+        .and_then(|bytes| bytes.checked_mul(group_size))
+        .ok_or(FitsError::DataUnitOverflow)
+}
+
+fn validate_random_groups_axes(axes: &[usize]) -> Result<()> {
+    let Some(&first) = axes.first() else {
+        return Err(FitsError::KeywordOutOfRange { name: "NAXIS" });
+    };
+    if first != 0 {
+        return Err(FitsError::KeywordOutOfRange { name: "NAXIS1" });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -77,6 +77,10 @@
 - Binary-table fixed and P/Q `A` cells preserve trailing spaces, NUL terminators,
   undefined bytes after the first NUL, and explicit null strings. Writing accepts
   NUL-terminated fields and rejects over-width fixed fields instead of truncating.
+- HDU discovery now requires `SIMPLE` on the first card and `XTENSION` on each
+  subsequent HDU, so special records containing later `END`-shaped cards are not
+  misclassified. Boundary sizing uses the distinct primary, extension, and
+  random-groups formulas and requires extension/group `PCOUNT` and `GCOUNT`.
 - WCS unsupported-axis classification now recognizes the standard `LOG` and `TAB`
   algorithms on any four-character coordinate type, including time and generic axes,
   instead of limiting nonlinear suffix detection to spectral coordinate names.
