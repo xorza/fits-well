@@ -142,4 +142,6 @@ the scaled physical value (Eq. 7) is what gets formatted.
 - Physical VLA access is type-specific: `vla_physical` for real numeric arrays,
   `vla_complex` for complex arrays with `TZEROn` applied only to the real
   component, and `vla_bits` for packed jagged bit arrays.
-- `X` (bit) columns: pack/unpack MSB-first within each byte.
+- `X` (bit) columns: pack/unpack MSB-first within each byte. `vla_bits` writing
+  accepts one exact-length `BitVec` per row, stores descriptor counts in bits,
+  advances heap offsets in bytes, and clears unused low bits in the final byte.

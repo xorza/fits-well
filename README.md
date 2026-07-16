@@ -131,6 +131,9 @@ println!("MAG = {:?}", table.column_by_name("MAG")?.physical()?);
 # Ok::<(), fits_well::FitsError>(())
 ```
 
+Jagged bit arrays use `WriteColumn::vla_bits` with one MSB-first
+`BitVec<u8, Msb0>` per row; call `.wide()` when `QX` descriptors are required.
+
 ### World Coordinate System
 
 `Header::wcs` parses the `CTYPEn`/`CRPIXn`/`CRVALn`/… keywords into a transform

@@ -66,9 +66,9 @@ pub use ascii::{AsciiColumn, AsciiColumnReader, AsciiKind, AsciiTable};
 pub use bitpix::Bitpix;
 
 /// Re-exported so callers can name the borrowed [`bitvec::slice::BitSlice`] rows that
-/// a [`BitColumn`] (from [`ColumnReader::bits`]/[`ColumnReader::vla_bits`]) yields —
-/// to index, iterate, or `.to_bitvec()` them — without taking their own
-/// version-skewed `bitvec` dependency.
+/// a [`BitColumn`] (from [`ColumnReader::bits`]/[`ColumnReader::vla_bits`]) yields and
+/// the owned [`bitvec::vec::BitVec`] rows accepted by [`WriteColumn::vla_bits`] —
+/// without taking their own version-skewed `bitvec` dependency.
 pub use bitvec;
 #[cfg(feature = "compression")]
 pub use compress::{CompressOptions, DitherMethod};
