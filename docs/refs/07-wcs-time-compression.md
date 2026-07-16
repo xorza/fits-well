@@ -64,6 +64,10 @@ A full framework for representing time (added in 4.0). Key pieces:
   timezone designator** (`Z` suffix forbidden). Signed 5-digit years are allowed. In
   UTC the seconds field runs `00–60` (leap seconds), `00–59` otherwise. ISO-8601
   carries no time scale of its own — it follows `TIMESYS`.
+  `Datetime::to_jd(scale)`/`to_mjd(scale)` therefore require an explicit scale and
+  return an error for a leap label outside an actual UTC insertion minute. UTC is
+  represented as a quasi-JD whose fraction spans the day's actual 86400 or 86401
+  seconds, keeping `23:59:60` distinct from the following midnight.
 - **Epochs** (§9.1.2): Julian `J2000.0` (implied scale TDB, keyword `JEPOCH`) and
   Besselian `B1950.0` (implied scale ET, keyword `BEPOCH`).
 - **Global keywords** (§9.5, Table 35): `DATE`, `DATE-OBS`, `DATE-BEG`, `DATE-AVG`,
