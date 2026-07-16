@@ -859,12 +859,8 @@ fn planetary_solar_lonlat_axes_are_celestial() {
 }
 
 #[test]
-fn linear_spectral_resolves_nonlinear_falls_back_to_intermediate() {
+fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
     use crate::header::Header;
-    // §8.4: a bare spectral type (`FREQ`) is linearly sampled and fully resolves.
-    // A non-linear algorithm code (`-LOG`) is not evaluated, so that axis is flagged
-    // and returns its intermediate (linear-stage) value — while the celestial pair
-    // on the same cube still decodes fully (the whole WCS is no longer lost).
     let build = |t3: &str| {
         let mut h = Header::new();
         h.set("NAXIS", 3);
@@ -880,22 +876,28 @@ fn linear_spectral_resolves_nonlinear_falls_back_to_intermediate() {
             .set("CDELT3", 1e6);
         Wcs::from_header(&h, None).unwrap()
     };
-    // Bare FREQ: fully linear, nothing flagged. At pixel 3: 1.4e9 + 2·1e6 = 1.402e9.
-    let lin = build("FREQ");
-    assert!(lin.view().unsupported_axes.is_empty());
-    let out = lin.pixel_to_world(&[1.0, 1.0, 3.0]).unwrap();
-    assert!((out[2] - 1.402e9).abs() < 1.0);
-    // FREQ-LOG: axis index 2 flagged; it returns the intermediate value, and the
-    // RA/DEC pair still decodes (reference pixel → CRVAL exactly).
-    let log = build("FREQ-LOG");
-    assert_eq!(log.view().unsupported_axes, [2]);
-    let out = log.pixel_to_world(&[1.0, 1.0, 3.0]).unwrap();
-    assert!((out[2] - 1.402e9).abs() < 1.0);
-    let r = log.pixel_to_world(&[1.0, 1.0, 1.0]).unwrap();
-    assert!(
-        (r[0] - 45.0).abs() < 1e-9 && (r[1] - 30.0).abs() < 1e-9,
-        "{r:?}"
-    );
+    let cases = [
+        ("FREQ", false),
+        ("FREQ-LOG", true),
+        ("FREQ-TAB", true),
+        ("TIME", false),
+        ("TIME-LOG", true),
+        ("TIME-TAB", true),
+        ("ABCD", false),
+        ("ABCD-LOG", true),
+        ("ABCD-TAB", true),
+    ];
+    for (ctype, unsupported) in cases {
+        let wcs = build(ctype);
+        let expected: &[usize] = if unsupported { &[2] } else { &[] };
+        assert_eq!(wcs.view().unsupported_axes, expected, "{ctype}");
+        assert!(wcs.celestial.is_some(), "{ctype} must retain the TAN pair");
+
+        // Axis 3's linear stage is 1.4e9 + (3 − 1)·1e6 = 1.402e9.
+        let out = wcs.pixel_to_world(&[1.0, 1.0, 3.0]).unwrap();
+        assert_eq!(out[2], 1.402e9, "{ctype}");
+        assert!((out[0] - 45.0).abs() < 1e-9 && (out[1] - 30.0).abs() < 1e-9);
+    }
 }
 
 #[test]
