@@ -279,16 +279,26 @@ fn parses_tdisp_display_formats() {
 
 #[test]
 fn read_column_complex_widens_and_scales() {
-    // `1C` (single-precision complex), TSCAL=2, TZERO=1 ⇒ each part scaled.
-    let mut header = table_header(8, 1, &["1C"]);
-    header.set("TSCAL1", 2.0).set("TZERO1", 1.0);
+    let mut header = table_header(24, 1, &["1C", "1M"]);
+    header
+        .set("TSCAL1", 3.0)
+        .set("TZERO1", 4.0)
+        .set("TSCAL2", 3.0)
+        .set("TZERO2", 4.0);
     let mut data = Vec::new();
-    data.extend_from_slice(&3.0f32.to_be_bytes());
-    data.extend_from_slice(&4.0f32.to_be_bytes());
+    data.extend_from_slice(&1.0f32.to_be_bytes());
+    data.extend_from_slice(&2.0f32.to_be_bytes());
+    data.extend_from_slice(&1.0f64.to_be_bytes());
+    data.extend_from_slice(&2.0f64.to_be_bytes());
     let table = BinTable::from_data(&header, data).unwrap();
+    // (4 + 3·1) + (3·2)i = 7 + 6i; TZERO has no imaginary component.
     assert_eq!(
         table.column_by_idx(0).unwrap().complex().unwrap(),
-        vec![Complex { re: 7.0, im: 9.0 }] // 1+2·3, 1+2·4
+        vec![Complex { re: 7.0, im: 6.0 }]
+    );
+    assert_eq!(
+        table.column_by_idx(1).unwrap().complex().unwrap(),
+        vec![Complex { re: 7.0, im: 6.0 }]
     );
     // A non-complex column errors.
     let h2 = table_header(4, 1, &["1J"]);
