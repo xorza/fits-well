@@ -3,7 +3,7 @@ use crate::block::padded_len;
 #[cfg(feature = "compression")]
 use crate::compress::CompressOptions;
 use crate::data::{ImageData, Scaling, UnsignedView};
-use crate::hdu::HduKind;
+use crate::hdu::{HduKind, MAX_TABLE_FIELDS};
 use crate::header::from_card_lines as header;
 use crate::reader::ChecksumReport;
 use crate::reader::FitsReader;
@@ -194,6 +194,27 @@ fn assert_table_column_rejected(column: WriteColumn, keyword: &'static str) {
     assert!(writer.into_inner().into_inner().is_empty());
 }
 
+fn empty_binary_columns(count: usize) -> Vec<WriteColumn> {
+    (1..=count)
+        .map(|n| WriteColumn::fixed(format!("C{n}"), ColumnData::Bytes(Vec::new()), 1))
+        .collect()
+}
+
+fn empty_ascii_columns(count: usize) -> Vec<AsciiWriteColumn> {
+    (1..=count)
+        .map(|n| AsciiWriteColumn {
+            name: format!("C{n}"),
+            unit: None,
+            data: AsciiColumnData::Text(Vec::new()),
+            width: 1,
+            decimals: 0,
+            tscale: None,
+            tzero: None,
+            tnull: None,
+        })
+        .collect()
+}
+
 fn rendered_header(header: &Header) -> Vec<u8> {
     let mut bytes = Vec::new();
     render_header(header, &mut bytes).unwrap();
@@ -310,6 +331,43 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
             Err(FitsError::DataUnitOverflow)
         ));
     }
+}
+
+#[test]
+fn table_writers_enforce_the_exact_tfields_limit_before_output() {
+    let binary = empty_binary_columns(MAX_TABLE_FIELDS);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_table(0, &binary).unwrap();
+    let reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
+    assert_eq!(
+        reader.hdus[1].header.get_integer("TFIELDS").unwrap(),
+        Some(MAX_TABLE_FIELDS as i64)
+    );
+
+    let ascii = empty_ascii_columns(MAX_TABLE_FIELDS);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_ascii_table(0, &ascii).unwrap();
+    let reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
+    assert_eq!(
+        reader.hdus[1].header.get_integer("TFIELDS").unwrap(),
+        Some(MAX_TABLE_FIELDS as i64)
+    );
+
+    let binary = empty_binary_columns(MAX_TABLE_FIELDS + 1);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_table(0, &binary),
+        Err(FitsError::KeywordOutOfRange { name: "TFIELDS" })
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
+
+    let ascii = empty_ascii_columns(MAX_TABLE_FIELDS + 1);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_ascii_table(0, &ascii),
+        Err(FitsError::KeywordOutOfRange { name: "TFIELDS" })
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
 }
 
 #[test]

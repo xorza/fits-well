@@ -21,6 +21,7 @@ use crate::compress::rice;
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::hdu::validate_table_field_count;
 use crate::header::Header;
 use crate::keyword::key;
 use crate::table::BinTable;
@@ -303,9 +304,7 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
         rpt = nrows.max(1);
     }
     let ncols = req_usize(header, "TFIELDS")?;
-    if ncols > 999 {
-        return Err(FitsError::KeywordOutOfRange { name: "TFIELDS" });
-    }
+    validate_table_field_count(ncols)?;
 
     // Resolve each column's original form and codec.
     let mut metas = Vec::with_capacity(ncols);
@@ -456,9 +455,7 @@ fn bind_table<'a>(header: &Header, table: &'a BinTable) -> Result<BoundTable<'a>
             return Err(metadata_mismatch(keyword));
         }
     }
-    if table.columns.len() > 999 {
-        return Err(FitsError::KeywordOutOfRange { name: "TFIELDS" });
-    }
+    validate_table_field_count(table.columns.len())?;
 
     let mut row_width = 0usize;
     for (index, column) in table.columns.iter().enumerate() {

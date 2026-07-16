@@ -33,6 +33,7 @@ use crate::endian::validate_pq_descriptor;
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::hdu::validate_table_field_count;
 use crate::header::Header;
 use crate::header::value::Value;
 use crate::keyword::key;
@@ -340,8 +341,8 @@ impl<W: Write> FitsWriter<W> {
     /// are both supported, including jagged `PX`/`QX` bit arrays — VLA columns
     /// write a heap after the main table.
     pub fn write_table(&mut self, nrows: usize, columns: &[WriteColumn]) -> Result<()> {
+        validate_table_field_count(columns.len())?;
         fits_i64(nrows)?;
-        fits_i64(columns.len())?;
         let mut layouts = Vec::with_capacity(columns.len());
         let mut row_len = 0usize;
         for col in columns {
@@ -437,6 +438,7 @@ impl<W: Write> FitsWriter<W> {
     /// first if needed). Columns are packed left-to-right with no gaps; data is
     /// space-padded per §7.2.3.
     pub fn write_ascii_table(&mut self, nrows: usize, columns: &[AsciiWriteColumn]) -> Result<()> {
+        validate_table_field_count(columns.len())?;
         let mut tbcols = Vec::with_capacity(columns.len());
         let mut row_len = 0usize;
         for col in columns {

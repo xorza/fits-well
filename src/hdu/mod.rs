@@ -9,6 +9,15 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
 
+pub(crate) const MAX_TABLE_FIELDS: usize = 999;
+
+pub(crate) fn validate_table_field_count(count: usize) -> Result<()> {
+    if count > MAX_TABLE_FIELDS {
+        return Err(FitsError::KeywordOutOfRange { name: "TFIELDS" });
+    }
+    Ok(())
+}
+
 /// An HDU's position-derived header form before its complete role is known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HduPosition {
