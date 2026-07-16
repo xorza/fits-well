@@ -1,5 +1,7 @@
 use crate::block::ZERO_FILL;
 use crate::block::padded_len;
+#[cfg(feature = "compression")]
+use crate::compress::CompressOptions;
 use crate::data::{ImageData, Scaling, UnsignedView};
 use crate::hdu::HduKind;
 use crate::header::from_card_lines as header;
@@ -10,6 +12,7 @@ use crate::writer::*;
 use bitvec::bitvec;
 use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
+use num_complex::Complex;
 use std::io;
 use std::io::Cursor;
 use std::io::Write;
@@ -47,6 +50,148 @@ fn identity() -> Scaling {
         bzero: 0.0,
         blank: None,
     }
+}
+
+#[derive(Debug)]
+struct TypedWriteColumn {
+    stored_type: char,
+    column: WriteColumn,
+}
+
+fn fixed_columns_by_stored_type() -> Vec<TypedWriteColumn> {
+    vec![
+        TypedWriteColumn {
+            stored_type: 'L',
+            column: WriteColumn::fixed("L", ColumnData::Logical(vec![Some(true)]), 1),
+        },
+        TypedWriteColumn {
+            stored_type: 'B',
+            column: WriteColumn::fixed("B", ColumnData::Bytes(vec![1]), 1),
+        },
+        TypedWriteColumn {
+            stored_type: 'I',
+            column: WriteColumn::fixed("I", ColumnData::I16(vec![1]), 1),
+        },
+        TypedWriteColumn {
+            stored_type: 'J',
+            column: WriteColumn::fixed("J", ColumnData::I32(vec![1]), 1),
+        },
+        TypedWriteColumn {
+            stored_type: 'K',
+            column: WriteColumn::fixed("K", ColumnData::I64(vec![1]), 1),
+        },
+        TypedWriteColumn {
+            stored_type: 'E',
+            column: WriteColumn::fixed("E", ColumnData::F32(vec![1.0]), 1),
+        },
+        TypedWriteColumn {
+            stored_type: 'D',
+            column: WriteColumn::fixed("D", ColumnData::F64(vec![1.0]), 1),
+        },
+        TypedWriteColumn {
+            stored_type: 'C',
+            column: WriteColumn::fixed(
+                "C",
+                ColumnData::ComplexF32(vec![Complex::new(1.0, 2.0)]),
+                1,
+            ),
+        },
+        TypedWriteColumn {
+            stored_type: 'M',
+            column: WriteColumn::fixed(
+                "M",
+                ColumnData::ComplexF64(vec![Complex::new(1.0, 2.0)]),
+                1,
+            ),
+        },
+        TypedWriteColumn {
+            stored_type: 'A',
+            column: WriteColumn::fixed("A", ColumnData::Character(vec!["a".into()]), 1),
+        },
+        TypedWriteColumn {
+            stored_type: 'X',
+            column: WriteColumn::bits("X", vec![0x80], 1),
+        },
+    ]
+}
+
+fn vla_columns_by_stored_type() -> Vec<TypedWriteColumn> {
+    vec![
+        TypedWriteColumn {
+            stored_type: 'L',
+            column: WriteColumn::vla(
+                "PL",
+                ColumnType::Logical,
+                vec![ColumnData::Logical(vec![Some(true)])],
+            ),
+        },
+        TypedWriteColumn {
+            stored_type: 'B',
+            column: WriteColumn::vla("PB", ColumnType::Byte, vec![ColumnData::Bytes(vec![1])]),
+        },
+        TypedWriteColumn {
+            stored_type: 'I',
+            column: WriteColumn::vla("PI", ColumnType::I16, vec![ColumnData::I16(vec![1])]),
+        },
+        TypedWriteColumn {
+            stored_type: 'J',
+            column: WriteColumn::vla("PJ", ColumnType::I32, vec![ColumnData::I32(vec![1])]),
+        },
+        TypedWriteColumn {
+            stored_type: 'K',
+            column: WriteColumn::vla("PK", ColumnType::I64, vec![ColumnData::I64(vec![1])]),
+        },
+        TypedWriteColumn {
+            stored_type: 'E',
+            column: WriteColumn::vla("PE", ColumnType::F32, vec![ColumnData::F32(vec![1.0])]),
+        },
+        TypedWriteColumn {
+            stored_type: 'D',
+            column: WriteColumn::vla("PD", ColumnType::F64, vec![ColumnData::F64(vec![1.0])]),
+        },
+        TypedWriteColumn {
+            stored_type: 'C',
+            column: WriteColumn::vla(
+                "PC",
+                ColumnType::ComplexF32,
+                vec![ColumnData::ComplexF32(vec![Complex::new(1.0, 2.0)])],
+            ),
+        },
+        TypedWriteColumn {
+            stored_type: 'M',
+            column: WriteColumn::vla(
+                "PM",
+                ColumnType::ComplexF64,
+                vec![ColumnData::ComplexF64(vec![Complex::new(1.0, 2.0)])],
+            ),
+        },
+        TypedWriteColumn {
+            stored_type: 'A',
+            column: WriteColumn::vla(
+                "PA",
+                ColumnType::Character,
+                vec![ColumnData::Character(vec!["a".into()])],
+            ),
+        },
+        TypedWriteColumn {
+            stored_type: 'X',
+            column: WriteColumn::vla_bits("PX", vec![bitvec![u8, Msb0; 1]]),
+        },
+    ]
+}
+
+fn assert_table_column_writes(column: WriteColumn) {
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_table(1, &[column]).unwrap();
+}
+
+fn assert_table_column_rejected(column: WriteColumn, keyword: &'static str) {
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_table(1, &[column]),
+        Err(FitsError::KeywordOutOfRange { name }) if name == keyword
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
 }
 
 fn rendered_header(header: &Header) -> Vec<u8> {
@@ -293,7 +438,7 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
             ],
         ),
         // 12-bit X column: 2 bytes/row.
-        WriteColumn::bits("FLAGS", vec![0xAB, 0xC0, 0x12, 0x30], 12),
+        WriteColumn::bits("FLAGS", vec![0xAB, 0xCF, 0x12, 0x3F], 12),
     ];
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     w.write_table(2, &columns).unwrap();
@@ -417,6 +562,132 @@ fn writes_tscal_tzero_tnull_and_reads_back_physical() {
     let phys = t.column_by_idx(0).unwrap().physical().unwrap();
     assert_eq!(phys[0], 20.0);
     assert!(phys[1].is_nan());
+}
+
+#[test]
+fn binary_metadata_is_validated_for_every_fixed_and_vla_stored_type() {
+    for typed in fixed_columns_by_stored_type()
+        .into_iter()
+        .chain(vla_columns_by_stored_type())
+    {
+        if matches!(typed.stored_type, 'A' | 'L' | 'X') {
+            assert_table_column_rejected(typed.column.clone().scaled(2.0, 3.0), "TSCALn");
+
+            let mut tzero_only = typed.column.clone();
+            tzero_only.tzero = Some(3.0);
+            assert_table_column_rejected(tzero_only, "TZEROn");
+        } else {
+            assert_table_column_writes(typed.column.clone().scaled(2.0, 3.0));
+        }
+
+        if matches!(typed.stored_type, 'B' | 'I' | 'J' | 'K') {
+            assert_table_column_writes(typed.column.with_null(0));
+        } else {
+            assert_table_column_rejected(typed.column.with_null(0), "TNULLn");
+        }
+    }
+}
+
+#[derive(Debug)]
+struct NullBoundary {
+    kind: ColumnType,
+    valid: &'static [i64],
+    invalid: &'static [i64],
+}
+
+fn integer_column(kind: ColumnType, vla: bool) -> WriteColumn {
+    let data = match kind {
+        ColumnType::Byte => ColumnData::Bytes(vec![0]),
+        ColumnType::I16 => ColumnData::I16(vec![0]),
+        ColumnType::I32 => ColumnData::I32(vec![0]),
+        ColumnType::I64 => ColumnData::I64(vec![0]),
+        _ => panic!("integer_column requires an integer stored type"),
+    };
+    if vla {
+        WriteColumn::vla("PINT", kind, vec![data])
+    } else {
+        WriteColumn::fixed("INT", data, 1)
+    }
+}
+
+#[test]
+fn binary_tnull_is_range_checked_for_fixed_and_vla_integer_types() {
+    let boundaries = [
+        NullBoundary {
+            kind: ColumnType::Byte,
+            valid: &[0, u8::MAX as i64],
+            invalid: &[-1, u8::MAX as i64 + 1],
+        },
+        NullBoundary {
+            kind: ColumnType::I16,
+            valid: &[i16::MIN as i64, i16::MAX as i64],
+            invalid: &[i16::MIN as i64 - 1, i16::MAX as i64 + 1],
+        },
+        NullBoundary {
+            kind: ColumnType::I32,
+            valid: &[i32::MIN as i64, i32::MAX as i64],
+            invalid: &[i32::MIN as i64 - 1, i32::MAX as i64 + 1],
+        },
+        NullBoundary {
+            kind: ColumnType::I64,
+            valid: &[i64::MIN, i64::MAX],
+            invalid: &[],
+        },
+    ];
+    for boundary in boundaries {
+        for vla in [false, true] {
+            for &tnull in boundary.valid {
+                assert_table_column_writes(integer_column(boundary.kind, vla).with_null(tnull));
+            }
+            for &tnull in boundary.invalid {
+                assert_table_column_rejected(
+                    integer_column(boundary.kind, vla).with_null(tnull),
+                    "TNULLn",
+                );
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct NonfiniteTableScale {
+    keyword: &'static str,
+    tscale: Option<f64>,
+    tzero: Option<f64>,
+}
+
+#[test]
+fn binary_nonfinite_scaling_is_rejected_before_output() {
+    let cases = [
+        NonfiniteTableScale {
+            keyword: "TSCALn",
+            tscale: Some(f64::NAN),
+            tzero: None,
+        },
+        NonfiniteTableScale {
+            keyword: "TSCALn",
+            tscale: Some(f64::INFINITY),
+            tzero: None,
+        },
+        NonfiniteTableScale {
+            keyword: "TZEROn",
+            tscale: None,
+            tzero: Some(f64::NAN),
+        },
+        NonfiniteTableScale {
+            keyword: "TZEROn",
+            tscale: None,
+            tzero: Some(f64::NEG_INFINITY),
+        },
+    ];
+    for vla in [false, true] {
+        for case in &cases {
+            let mut column = integer_column(ColumnType::I32, vla);
+            column.tscale = case.tscale;
+            column.tzero = case.tzero;
+            assert_table_column_rejected(column, case.keyword);
+        }
+    }
 }
 
 #[test]
@@ -846,38 +1117,150 @@ fn vla_descriptor_q_form_carries_full_64_bit_count_and_offset() {
     ));
 }
 
-#[test]
-fn blank_is_emitted_only_for_integer_images() {
-    // §4.4.2.5: BLANK applies only to integer (positive-BITPIX) images.
-    let int_img = Image {
-        shape: vec![2],
-        samples: ImageData::I16(vec![1, 2]),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: Some(-32768),
-        },
-    };
-    let mut h = Header::new();
-    int_img
-        .scaling
-        .add_to_header(&mut h, int_img.samples.bitpix());
-    assert_eq!(h.get_integer("BLANK").unwrap(), Some(-32768));
+#[derive(Debug)]
+struct ImageBlankBoundary {
+    samples: ImageData,
+    valid: &'static [i64],
+    invalid: &'static [i64],
+}
 
-    let float_img = Image {
-        shape: vec![2],
-        samples: ImageData::F32(vec![1.0, 2.0]),
-        scaling: Scaling {
-            bscale: 1.0,
+#[test]
+fn image_blank_is_type_and_range_checked_before_output() {
+    let boundaries = [
+        ImageBlankBoundary {
+            samples: ImageData::U8(vec![0]),
+            valid: &[0, u8::MAX as i64],
+            invalid: &[-1, u8::MAX as i64 + 1],
+        },
+        ImageBlankBoundary {
+            samples: ImageData::I16(vec![0]),
+            valid: &[i16::MIN as i64, i16::MAX as i64],
+            invalid: &[i16::MIN as i64 - 1, i16::MAX as i64 + 1],
+        },
+        ImageBlankBoundary {
+            samples: ImageData::I32(vec![0]),
+            valid: &[i32::MIN as i64, i32::MAX as i64],
+            invalid: &[i32::MIN as i64 - 1, i32::MAX as i64 + 1],
+        },
+        ImageBlankBoundary {
+            samples: ImageData::I64(vec![0]),
+            valid: &[i64::MIN, i64::MAX],
+            invalid: &[],
+        },
+        ImageBlankBoundary {
+            samples: ImageData::F32(vec![0.0]),
+            valid: &[],
+            invalid: &[0],
+        },
+        ImageBlankBoundary {
+            samples: ImageData::F64(vec![0.0]),
+            valid: &[],
+            invalid: &[0],
+        },
+    ];
+    for boundary in boundaries {
+        for &blank in boundary.valid {
+            let image = Image {
+                shape: vec![1],
+                samples: boundary.samples.clone(),
+                scaling: Scaling {
+                    blank: Some(blank),
+                    ..identity()
+                },
+            };
+            let mut reader = FitsReader::open(Cursor::new(write_to_vec(&image))).unwrap();
+            assert_eq!(
+                reader.hdus[0].header.get_integer("BLANK").unwrap(),
+                Some(blank)
+            );
+            assert_eq!(reader.read_image(0).unwrap().scaling.blank, Some(blank));
+        }
+        for &blank in boundary.invalid {
+            let image = Image {
+                shape: vec![1],
+                samples: boundary.samples.clone(),
+                scaling: Scaling {
+                    blank: Some(blank),
+                    ..identity()
+                },
+            };
+            let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+            assert!(matches!(
+                writer.write_image(&image),
+                Err(FitsError::KeywordOutOfRange { name: "BLANK" })
+            ));
+            assert!(writer.into_inner().into_inner().is_empty());
+        }
+    }
+}
+
+#[derive(Debug)]
+struct NonfiniteImageScale {
+    keyword: &'static str,
+    bscale: f64,
+    bzero: f64,
+}
+
+#[test]
+fn image_nonfinite_scaling_is_rejected_before_output() {
+    let cases = [
+        NonfiniteImageScale {
+            keyword: "BSCALE",
+            bscale: f64::NAN,
             bzero: 0.0,
-            blank: Some(-32768),
+        },
+        NonfiniteImageScale {
+            keyword: "BSCALE",
+            bscale: f64::INFINITY,
+            bzero: 0.0,
+        },
+        NonfiniteImageScale {
+            keyword: "BZERO",
+            bscale: 1.0,
+            bzero: f64::NAN,
+        },
+        NonfiniteImageScale {
+            keyword: "BZERO",
+            bscale: 1.0,
+            bzero: f64::NEG_INFINITY,
+        },
+    ];
+    for case in cases {
+        let image = Image {
+            shape: vec![1],
+            samples: ImageData::U8(vec![0]),
+            scaling: Scaling {
+                bscale: case.bscale,
+                bzero: case.bzero,
+                blank: None,
+            },
+        };
+        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+        assert!(matches!(
+            writer.write_image(&image),
+            Err(FitsError::KeywordOutOfRange { name }) if name == case.keyword
+        ));
+        assert!(writer.into_inner().into_inner().is_empty());
+    }
+}
+
+#[cfg(feature = "compression")]
+#[test]
+fn compressed_image_metadata_is_validated_before_automatic_primary() {
+    let image = Image {
+        shape: vec![1],
+        samples: ImageData::F32(vec![0.0]),
+        scaling: Scaling {
+            blank: Some(0),
+            ..identity()
         },
     };
-    let mut h2 = Header::new();
-    float_img
-        .scaling
-        .add_to_header(&mut h2, float_img.samples.bitpix());
-    assert_eq!(h2.get_integer("BLANK").unwrap(), None);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_compressed_image(&image, "GZIP_1", &CompressOptions::default()),
+        Err(FitsError::KeywordOutOfRange { name: "BLANK" })
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
 }
 
 #[test]

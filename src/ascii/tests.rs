@@ -394,6 +394,62 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     assert!(writer.into_inner().into_inner().is_empty());
 }
 
+#[derive(Debug)]
+struct InvalidAsciiScale {
+    data: AsciiColumnData,
+    tscale: Option<f64>,
+    tzero: Option<f64>,
+    keyword: &'static str,
+}
+
+#[test]
+fn ascii_scaling_metadata_is_validated_by_stored_type_before_output() {
+    let cases = [
+        InvalidAsciiScale {
+            data: AsciiColumnData::Text(vec![Some("A".into())]),
+            tscale: Some(2.0),
+            tzero: None,
+            keyword: "TSCALn",
+        },
+        InvalidAsciiScale {
+            data: AsciiColumnData::Text(vec![Some("A".into())]),
+            tscale: None,
+            tzero: Some(3.0),
+            keyword: "TZEROn",
+        },
+        InvalidAsciiScale {
+            data: AsciiColumnData::Integer(vec![Some(1)]),
+            tscale: Some(f64::NAN),
+            tzero: None,
+            keyword: "TSCALn",
+        },
+        InvalidAsciiScale {
+            data: AsciiColumnData::Float(vec![Some(1.0)]),
+            tscale: None,
+            tzero: Some(f64::INFINITY),
+            keyword: "TZEROn",
+        },
+    ];
+    for case in cases {
+        let columns = [AsciiWriteColumn {
+            name: "BAD".into(),
+            unit: None,
+            data: case.data,
+            width: 8,
+            decimals: 1,
+            tscale: case.tscale,
+            tzero: case.tzero,
+            tnull: None,
+        }];
+        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+        assert!(matches!(
+            writer.write_ascii_table(1, &columns),
+            Err(FitsError::KeywordOutOfRange { name }) if name == case.keyword
+        ));
+        assert!(writer.into_inner().into_inner().is_empty());
+    }
+}
+
 #[test]
 fn ascii_nulls_round_trip_distinct_from_zero_and_text() {
     let columns = [

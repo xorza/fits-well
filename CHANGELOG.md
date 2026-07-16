@@ -82,6 +82,9 @@
 - Binary-table writing validates each column state before emitting data. `wide()` is
   restricted to VLA columns, bit columns require the exact packed byte count, and
   VLA rows must match their declared element type.
+- Image and table writers reject nonfinite scaling metadata, out-of-range or
+  inapplicable `BLANK`/`TNULLn` sentinels, and scaling keywords forbidden for the
+  stored column type before writing any bytes.
 - `read_table` and `read_ascii_table` validate the HDU kind before reading or
   allocating its data unit, so wrong-kind calls return their semantic error first.
 - The default feature list now contains only `parallel`; default builds still enable
@@ -96,6 +99,8 @@
 - Binary-table fixed and P/Q `A` cells preserve trailing spaces, NUL terminators,
   undefined bytes after the first NUL, and explicit null strings. Writing accepts
   NUL-terminated fields and rejects over-width fixed fields instead of truncating.
+- Fixed-width binary `X` columns now clear unused low bits in every row's final
+  byte, as required for non-byte-aligned bit arrays.
 - Zero-length `P`/`Q` descriptor cells no longer fail their column's `TDIMn`
   product check. Shape syntax and every nonempty cell remain fully validated.
 - HDU discovery now requires `SIMPLE` on the first card and `XTENSION` on each
