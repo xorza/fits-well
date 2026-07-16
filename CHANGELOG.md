@@ -61,6 +61,8 @@
   physical plane, matching ordinary primary-array behavior.
 - ASCII-table character columns now preserve every byte of their fixed-width
   fields, including leading and trailing spaces; numeric parsing still trims padding.
+- Tiled compression now preserves float images' original `BSCALE`/`BZERO`
+  metadata across quantized and raw-float fallback tiles.
 - GZIP, Rice, PLIO, and HCOMPRESS decoders now reject truncated streams, malformed
   control data, decompression bombs, and tiles whose decoded size differs from the
   declared geometry instead of manufacturing zero-valued pixels or reading out of

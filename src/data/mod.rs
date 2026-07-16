@@ -718,6 +718,19 @@ impl Scaling {
         }
     }
 
+    pub(crate) fn add_to_header(&self, header: &mut Header, bitpix: Bitpix) {
+        if !self.is_identity() {
+            header.set("BZERO", self.bzero);
+            header.set("BSCALE", self.bscale);
+        }
+        // FITS permits BLANK only for integer arrays.
+        if let Some(blank) = self.blank
+            && bitpix.is_integer()
+        {
+            header.set("BLANK", blank);
+        }
+    }
+
     /// `true` when decoding needs no arithmetic — just an endian swap or copy.
     pub fn is_identity(&self) -> bool {
         self.bscale == 1.0 && self.bzero == 0.0

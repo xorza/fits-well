@@ -182,16 +182,7 @@ pub(crate) fn compress_image(
         }
         _ => {}
     }
-    // §10.2: tiles store the *raw* stored integers, so the original image's
-    // physical scaling and undefined-pixel sentinel must travel in the header to
-    // be reconstructed on decode (`bitpix` is integer here — floats diverted above).
-    if !image.scaling.is_identity() {
-        h.set("BZERO", image.scaling.bzero);
-        h.set("BSCALE", image.scaling.bscale);
-    }
-    if let Some(blank) = image.scaling.blank {
-        h.set("BLANK", blank);
-    }
+    image.scaling.add_to_header(&mut h, bitpix);
     Ok(h)
 }
 
@@ -398,6 +389,7 @@ fn compress_float_image(
         // decoder which value maps back to a blank (NaN) pixel.
         h.set("ZBLANK", quantize::NULL_VALUE as i64);
     }
+    image.scaling.add_to_header(&mut h, zbitpix);
     Ok(h)
 }
 

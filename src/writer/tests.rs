@@ -613,7 +613,9 @@ fn blank_is_emitted_only_for_integer_images() {
         },
     };
     let mut h = Header::new();
-    add_scaling(&mut h, &int_img);
+    int_img
+        .scaling
+        .add_to_header(&mut h, int_img.samples.bitpix());
     assert_eq!(h.get_integer("BLANK").unwrap(), Some(-32768));
 
     let float_img = Image {
@@ -626,7 +628,9 @@ fn blank_is_emitted_only_for_integer_images() {
         },
     };
     let mut h2 = Header::new();
-    add_scaling(&mut h2, &float_img);
+    float_img
+        .scaling
+        .add_to_header(&mut h2, float_img.samples.bitpix());
     assert_eq!(h2.get_integer("BLANK").unwrap(), None);
 }
 
