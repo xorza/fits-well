@@ -61,6 +61,8 @@
 - Added `ColumnReader::vla_complex` and `vla_unsigned` for scaled complex P/Q
   heap arrays and exact unsigned-convention integers, including `u64` values that
   cannot be represented exactly as `f64`.
+- Added `WriteColumn::vla_bits` for writing jagged `PX`/`QX` bit arrays from one
+  exact-length `BitVec` per row.
 
 ### Changed
 

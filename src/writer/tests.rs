@@ -7,6 +7,9 @@ use crate::reader::ChecksumReport;
 use crate::reader::FitsReader;
 use crate::table::{CharacterField, ColumnData};
 use crate::writer::*;
+use bitvec::bitvec;
+use bitvec::order::Msb0;
+use bitvec::vec::BitVec;
 use std::io;
 use std::io::Cursor;
 use std::io::Write;
@@ -96,6 +99,26 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
             computed: 3,
             declared: 4
         })
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
+
+    let invalid_vla_bits = WriteColumn::vla_bits("FLAGS", vec![bitvec![u8, Msb0; 1, 0, 1]]);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_table(2, &[invalid_vla_bits]),
+        Err(FitsError::RowWidthMismatch {
+            computed: 1,
+            declared: 2
+        })
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
+
+    let invalid_vla_bits =
+        WriteColumn::vla_bits("FLAGS", vec![bitvec![u8, Msb0; 1, 0, 1]]).with_tdim(vec![2, 2]);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_table(1, &[invalid_vla_bits]),
+        Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
     ));
     assert!(writer.into_inner().into_inner().is_empty());
 
@@ -308,6 +331,71 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
     match t.column_by_idx(4).unwrap().raw().unwrap() {
         ColumnData::Bytes(b) => assert_eq!(b, vec![0xAB, 0xC0, 0x12, 0x30]),
         other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn writes_p_q_variable_length_bit_arrays_with_exact_counts_and_padding() {
+    use crate::table::TformKind;
+
+    let mut one_bit = bitvec![u8, Msb0; 1; 8];
+    one_bit.truncate(1);
+    let mut p_nine = bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1];
+    p_nine.truncate(9);
+    let mut q_nine = bitvec![u8, Msb0; 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1];
+    q_nine.truncate(9);
+    assert_eq!(one_bit.as_raw_slice(), &[0xFF]);
+    assert_eq!(p_nine.as_raw_slice(), &[0xAA, 0xFF]);
+    assert_eq!(q_nine.as_raw_slice(), &[0x55, 0x7F]);
+    let p_rows = vec![BitVec::<u8, Msb0>::new(), one_bit.clone(), p_nine];
+    let q_rows = vec![BitVec::<u8, Msb0>::new(), one_bit, q_nine];
+    let columns = [
+        WriteColumn::vla_bits("PFLAGS", p_rows.clone()),
+        WriteColumn::vla_bits("QFLAGS", q_rows.clone()).wide(),
+    ];
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_table(3, &columns).unwrap();
+    let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
+
+    assert_eq!(
+        reader.hdus[1].header.get_text("TFORM1").unwrap(),
+        Some("1PX(9)")
+    );
+    assert_eq!(
+        reader.hdus[1].header.get_text("TFORM2").unwrap(),
+        Some("1QX(9)")
+    );
+    assert_eq!(
+        reader.hdus[1].header.get_integer("PCOUNT").unwrap(),
+        Some(6)
+    );
+
+    let data = reader.read_data_raw(1).unwrap();
+    let raw = data.data();
+    assert_eq!(i32::from_be_bytes(raw[0..4].try_into().unwrap()), 0);
+    assert_eq!(i32::from_be_bytes(raw[4..8].try_into().unwrap()), 0);
+    assert_eq!(i64::from_be_bytes(raw[8..16].try_into().unwrap()), 0);
+    assert_eq!(i64::from_be_bytes(raw[16..24].try_into().unwrap()), 0);
+    assert_eq!(i32::from_be_bytes(raw[24..28].try_into().unwrap()), 1);
+    assert_eq!(i32::from_be_bytes(raw[28..32].try_into().unwrap()), 0);
+    assert_eq!(i64::from_be_bytes(raw[32..40].try_into().unwrap()), 1);
+    assert_eq!(i64::from_be_bytes(raw[40..48].try_into().unwrap()), 1);
+    assert_eq!(i32::from_be_bytes(raw[48..52].try_into().unwrap()), 9);
+    assert_eq!(i32::from_be_bytes(raw[52..56].try_into().unwrap()), 2);
+    assert_eq!(i64::from_be_bytes(raw[56..64].try_into().unwrap()), 9);
+    assert_eq!(i64::from_be_bytes(raw[64..72].try_into().unwrap()), 4);
+    assert_eq!(&raw[72..78], &[0x80, 0x80, 0xAA, 0x80, 0x55, 0x00]);
+
+    let table = reader.read_table(1).unwrap();
+    assert_eq!(table.columns[0].tform.kind, TformKind::ArrayDesc32);
+    assert_eq!(table.columns[0].tform.vla_elem, Some(TformKind::Bit));
+    assert_eq!(table.columns[1].tform.kind, TformKind::ArrayDesc64);
+    assert_eq!(table.columns[1].tform.vla_elem, Some(TformKind::Bit));
+    let p = table.column_by_idx(0).unwrap().vla_bits().unwrap();
+    let q = table.column_by_idx(1).unwrap().vla_bits().unwrap();
+    for row in 0..3 {
+        assert_eq!(p.row(row), p_rows[row].as_bitslice());
+        assert_eq!(q.row(row), q_rows[row].as_bitslice());
     }
 }
 

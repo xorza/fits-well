@@ -11,6 +11,9 @@ use std::borrow::Cow;
 use std::io::Write;
 use std::ops::Range;
 
+use bitvec::order::Msb0;
+use bitvec::slice::BitSlice;
+use bitvec::vec::BitVec;
 use num_complex::Complex;
 
 use crate::block::BLOCK_SIZE;
@@ -109,6 +112,10 @@ enum WriteColumnData {
         rows: Vec<ColumnData>,
         wide: bool,
     },
+    VlaBits {
+        rows: Vec<BitVec<u8, Msb0>>,
+        wide: bool,
+    },
     Bits {
         bytes: Vec<u8>,
         bit_count: usize,
@@ -179,6 +186,21 @@ impl WriteColumn {
         }
     }
 
+    /// A variable-length `PX` bit-array column, with one MSB-first [`BitVec`] per
+    /// table row. Each vector's bit length becomes its descriptor element count;
+    /// [`WriteColumn::wide`] changes the descriptors to `QX`.
+    pub fn vla_bits(name: impl Into<String>, rows: Vec<BitVec<u8, Msb0>>) -> WriteColumn {
+        WriteColumn {
+            name: name.into(),
+            unit: None,
+            values: WriteColumnData::VlaBits { rows, wide: false },
+            tdim: None,
+            tscale: None,
+            tzero: None,
+            tnull: None,
+        }
+    }
+
     /// Attach a unit (`TUNITn`).
     pub fn with_unit(mut self, unit: impl Into<String>) -> WriteColumn {
         self.unit = Some(unit.into());
@@ -193,10 +215,12 @@ impl WriteColumn {
 
     /// Use 64-bit `Q` descriptors for this VLA column.
     pub fn wide(mut self) -> WriteColumn {
-        let WriteColumnData::Vla { wide, .. } = &mut self.values else {
-            panic!("WriteColumn::wide requires a VLA column");
+        match &mut self.values {
+            WriteColumnData::Vla { wide, .. } | WriteColumnData::VlaBits { wide, .. } => {
+                *wide = true;
+            }
+            _ => panic!("WriteColumn::wide requires a VLA column"),
         };
-        *wide = true;
         self
     }
 
@@ -313,8 +337,9 @@ impl<W: Write> FitsWriter<W> {
 
     /// Write a binary table as a `BINTABLE` extension. A dataless primary HDU is
     /// written automatically first if nothing has been written yet (a table can
-    /// never be the primary HDU). Fixed-width and variable-length (`P`) columns
-    /// are both supported — VLA columns write a heap after the main table.
+    /// never be the primary HDU). Fixed-width and variable-length (`P`/`Q`) columns
+    /// are both supported, including jagged `PX`/`QX` bit arrays — VLA columns
+    /// write a heap after the main table.
     pub fn write_table(&mut self, nrows: usize, columns: &[WriteColumn]) -> Result<()> {
         fits_i64(nrows)?;
         fits_i64(columns.len())?;
@@ -331,13 +356,22 @@ impl<W: Write> FitsWriter<W> {
         let mut heap_len = 0usize;
         for r in 0..nrows {
             for col in columns {
-                if let WriteColumnData::Vla { kind, rows, wide } = &col.values {
-                    let cell = &rows[r];
-                    let count = encoded_element_count(*kind, cell)? as u64;
-                    validate_pq_descriptor(*wide, count, heap_len as u64)?;
-                    heap_len = heap_len
-                        .checked_add(cell_byte_len(*kind, cell)?)
-                        .ok_or(FitsError::DataUnitOverflow)?;
+                match &col.values {
+                    WriteColumnData::Vla { kind, rows, wide } => {
+                        let cell = &rows[r];
+                        heap_len = next_vla_heap_len(
+                            heap_len,
+                            *wide,
+                            encoded_element_count(*kind, cell)?,
+                            cell_byte_len(*kind, cell)?,
+                        )?;
+                    }
+                    WriteColumnData::VlaBits { rows, wide } => {
+                        let bits = &rows[r];
+                        heap_len =
+                            next_vla_heap_len(heap_len, *wide, bits.len(), bits.len().div_ceil(8))?;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -354,9 +388,10 @@ impl<W: Write> FitsWriter<W> {
         for r in 0..nrows {
             for col in columns {
                 match &col.values {
-                    WriteColumnData::Vla { wide, .. } => self
-                        .scratch
-                        .resize(self.scratch.len() + if *wide { 16 } else { 8 }, 0),
+                    WriteColumnData::Vla { wide, .. } | WriteColumnData::VlaBits { wide, .. } => {
+                        self.scratch
+                            .resize(self.scratch.len() + if *wide { 16 } else { 8 }, 0)
+                    }
                     _ => pack_cell(&mut self.scratch, col, r),
                 }
             }
@@ -365,18 +400,32 @@ impl<W: Write> FitsWriter<W> {
         for r in 0..nrows {
             let mut column_offset = 0usize;
             for (col, layout) in columns.iter().zip(&layouts) {
-                if let WriteColumnData::Vla { kind, rows, wide } = &col.values {
-                    let cell = &rows[r];
-                    let descriptor_width = if *wide { 16 } else { 8 };
-                    let descriptor_offset = r * row_len + column_offset;
-                    let heap_offset = self.scratch.len() - main_len;
-                    write_pq_descriptor(
-                        &mut self.scratch[descriptor_offset..descriptor_offset + descriptor_width],
-                        *wide,
-                        encoded_element_count(*kind, cell)? as u64,
-                        heap_offset as u64,
-                    )?;
-                    append_be(&mut self.scratch, cell);
+                match &col.values {
+                    WriteColumnData::Vla { kind, rows, wide } => {
+                        let cell = &rows[r];
+                        let descriptor_offset = r * row_len + column_offset;
+                        write_vla_descriptor(
+                            &mut self.scratch,
+                            main_len,
+                            descriptor_offset,
+                            *wide,
+                            encoded_element_count(*kind, cell)?,
+                        )?;
+                        append_be(&mut self.scratch, cell);
+                    }
+                    WriteColumnData::VlaBits { rows, wide } => {
+                        let bits = &rows[r];
+                        let descriptor_offset = r * row_len + column_offset;
+                        write_vla_descriptor(
+                            &mut self.scratch,
+                            main_len,
+                            descriptor_offset,
+                            *wide,
+                            bits.len(),
+                        )?;
+                        append_bits(&mut self.scratch, bits);
+                    }
+                    _ => {}
                 }
                 column_offset += layout.row_width;
             }
@@ -616,7 +665,7 @@ fn bintable_header(
             let stores_i64 = match &col.values {
                 WriteColumnData::Fixed { data, .. } => matches!(data, ColumnData::I64(_)),
                 WriteColumnData::Vla { kind, .. } => *kind == ColumnType::I64,
-                WriteColumnData::Bits { .. } => false,
+                WriteColumnData::VlaBits { .. } | WriteColumnData::Bits { .. } => false,
             };
             if stores_i64 && col.tscale.unwrap_or(1.0) == 1.0 && tzero == U64_OFFSET {
                 header.set(key!("TZERO{n}").as_str(), U64_OFFSET_INTEGER);
@@ -682,6 +731,42 @@ impl ColumnType {
             ColumnType::ComplexF64 => 16,
         }
     }
+}
+
+fn next_vla_heap_len(
+    heap_len: usize,
+    wide: bool,
+    element_count: usize,
+    byte_len: usize,
+) -> Result<usize> {
+    let count = u64::try_from(element_count).map_err(|_| FitsError::DataUnitOverflow)?;
+    let offset = u64::try_from(heap_len).map_err(|_| FitsError::DataUnitOverflow)?;
+    validate_pq_descriptor(wide, count, offset)?;
+    heap_len
+        .checked_add(byte_len)
+        .ok_or(FitsError::DataUnitOverflow)
+}
+
+fn write_vla_descriptor(
+    out: &mut [u8],
+    main_len: usize,
+    descriptor_offset: usize,
+    wide: bool,
+    element_count: usize,
+) -> Result<()> {
+    let width = if wide { 16 } else { 8 };
+    let count = u64::try_from(element_count).map_err(|_| FitsError::DataUnitOverflow)?;
+    let heap_offset = out
+        .len()
+        .checked_sub(main_len)
+        .expect("VLA heap follows the complete main table");
+    let heap_offset = u64::try_from(heap_offset).map_err(|_| FitsError::DataUnitOverflow)?;
+    write_pq_descriptor(
+        &mut out[descriptor_offset..descriptor_offset + width],
+        wide,
+        count,
+        heap_offset,
+    )
 }
 
 fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
@@ -763,6 +848,24 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
             Ok(ColumnLayout {
                 row_width: if *wide { 16 } else { 8 },
                 tform: format!("1{descriptor}{}({max_elements})", kind.letter()),
+            })
+        }
+        WriteColumnData::VlaBits { rows, wide } => {
+            if rows.len() != nrows {
+                return Err(FitsError::RowWidthMismatch {
+                    computed: rows.len(),
+                    declared: nrows,
+                });
+            }
+            let mut max_bits = 0usize;
+            for bits in rows {
+                max_bits = max_bits.max(bits.len());
+                validate_vla_tdim(col.tdim.as_deref(), bits.len())?;
+            }
+            let descriptor = if *wide { 'Q' } else { 'P' };
+            Ok(ColumnLayout {
+                row_width: if *wide { 16 } else { 8 },
+                tform: format!("1{descriptor}X({max_bits})"),
             })
         }
         WriteColumnData::Bits { bytes, bit_count } => {
@@ -884,6 +987,18 @@ fn append_be(out: &mut Vec<u8>, cell: &ColumnData) {
     }
 }
 
+fn append_bits(out: &mut Vec<u8>, bits: &BitSlice<u8, Msb0>) {
+    // Repacking semantic bits guarantees that unused low padding is zero.
+    for chunk in bits.chunks(8) {
+        let byte = chunk
+            .iter()
+            .by_vals()
+            .enumerate()
+            .fold(0, |byte, (bit, set)| byte | (u8::from(set) << (7 - bit)));
+        out.push(byte);
+    }
+}
+
 fn pack_cell(out: &mut Vec<u8>, col: &WriteColumn, r: usize) {
     match &col.values {
         WriteColumnData::Fixed { data, repeat } => {
@@ -902,7 +1017,9 @@ fn pack_cell(out: &mut Vec<u8>, col: &WriteColumn, r: usize) {
             let start = r * width;
             out.extend_from_slice(&bytes[start..start + width]);
         }
-        WriteColumnData::Vla { .. } => unreachable!("VLA cells are descriptors"),
+        WriteColumnData::Vla { .. } | WriteColumnData::VlaBits { .. } => {
+            unreachable!("VLA cells are descriptors")
+        }
     }
 }
 
