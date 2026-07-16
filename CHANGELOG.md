@@ -58,6 +58,9 @@
 - Added `TimeCoordinate`, the shared MJD and effective scale value returned for
   epoch keywords and WCS time axes.
 - Added explicit `ColumnType` declarations for variable-length table columns.
+- Added `ColumnReader::vla_complex` and `vla_unsigned` for scaled complex P/Q
+  heap arrays and exact unsigned-convention integers, including `u64` values that
+  cannot be represented exactly as `f64`.
 
 ### Changed
 
