@@ -901,8 +901,8 @@ fn check_table_roundtrip(algo: &str, rows_per_tile: usize) {
         "{algo}/{rows_per_tile} row width"
     );
     assert_eq!(
-        restored.raw_rows(),
-        orig.raw_rows(),
+        restored.raw_rows().unwrap(),
+        orig.raw_rows().unwrap(),
         "{algo}/{rows_per_tile} data mismatch"
     );
 }
@@ -955,8 +955,8 @@ fn decodes_a_cfitsio_compressed_table() {
     assert_eq!(restored.row_len, original.row_len);
     assert_eq!(restored.columns.len(), 6);
     assert_eq!(
-        restored.raw_rows(),
-        original.raw_rows(),
+        restored.raw_rows().unwrap(),
+        original.raw_rows().unwrap(),
         "decoded cfitsio-compressed table must match the original bytes"
     );
     // Spot-check a decoded value against the known formula (INT = i·100000 − 5).
@@ -964,6 +964,151 @@ fn decodes_a_cfitsio_compressed_table() {
         ColumnData::I32(v) => assert_eq!(v[3], 3 * 100_000 - 5),
         other => panic!("expected I32, got {other:?}"),
     }
+}
+
+#[test]
+fn table_compression_rejects_metadata_mismatches_and_source_heap() {
+    use crate::header::Header;
+    use crate::header::value::Value;
+
+    let mut header = Header::new();
+    header
+        .set("XTENSION", "BINTABLE")
+        .set("BITPIX", 8)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 2)
+        .set("NAXIS2", 2)
+        .set("PCOUNT", 0)
+        .set("GCOUNT", 1)
+        .set("TFIELDS", 1)
+        .set("TFORM1", "1I");
+    let rows = [10i16, -20]
+        .into_iter()
+        .flat_map(i16::to_be_bytes)
+        .collect::<Vec<_>>();
+    let table = BinTable::from_data(&header, rows.clone()).unwrap();
+
+    let cases = [
+        ("XTENSION", Value::from("IMAGE")),
+        ("BITPIX", Value::from(16)),
+        ("NAXIS", Value::from(1)),
+        ("NAXIS1", Value::from(4)),
+        ("NAXIS2", Value::from(3)),
+        ("PCOUNT", Value::from(1)),
+        ("GCOUNT", Value::from(2)),
+        ("TFIELDS", Value::from(2)),
+        ("TFORM1", Value::from("1J")),
+        ("THEAP", Value::from(5)),
+    ];
+    for (keyword, value) in cases {
+        let mut mismatched = header.clone();
+        mismatched.set(keyword, value);
+        let mut out = vec![0xA5];
+        assert!(matches!(
+            compress_table(&mismatched, &table, 1, "GZIP_1", &mut out),
+            Err(FitsError::TableMetadataMismatch { name }) if name == keyword
+        ));
+        assert_eq!(out, [0xA5], "{keyword} failure mutated the output");
+    }
+
+    let mut reserved = header.clone();
+    reserved.set("ZTABLE", true);
+    assert!(matches!(
+        compress_table(&reserved, &table, 1, "GZIP_1", &mut Vec::new()),
+        Err(FitsError::TableMetadataMismatch { name }) if name == "ZTABLE"
+    ));
+
+    let mut heap_header = header.clone();
+    heap_header.set("PCOUNT", 4);
+    let mut heap_data = rows;
+    heap_data.extend_from_slice(&[1, 2, 3, 4]);
+    let heap_table = BinTable::from_data(&heap_header, heap_data).unwrap();
+    assert!(matches!(
+        compress_table(&heap_header, &heap_table, 1, "GZIP_1", &mut Vec::new()),
+        Err(FitsError::UnsupportedCompression { name })
+            if name == "binary table with PCOUNT > 0"
+    ));
+
+    let mut compressed_data = Vec::new();
+    let mut compressed_header =
+        compress_table(&header, &table, 1, "GZIP_1", &mut compressed_data).unwrap();
+    let compressed_table = BinTable::from_data(&compressed_header, compressed_data).unwrap();
+    compressed_header.set("ZPCOUNT", 4);
+    assert!(matches!(
+        uncompress_table(&compressed_header, &compressed_table),
+        Err(FitsError::UnsupportedCompression { name })
+            if name == "binary table with PCOUNT > 0"
+    ));
+}
+
+#[test]
+fn table_compression_restores_reserved_metadata_exactly() {
+    use crate::header::Header;
+    use crate::writer::render_header;
+
+    let mut original_header = Header::new();
+    original_header
+        .set("XTENSION", "BINTABLE")
+        .set("BITPIX", 8)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 2)
+        .set("NAXIS2", 2)
+        .set("PCOUNT", 0)
+        .set("GCOUNT", 1)
+        .set("TFIELDS", 1)
+        .set("TFORM1", "1I")
+        .set("THEAP", 4)
+        .comment("THEAP", "original heap start")
+        .set("CHECKSUM", "0123456789ABCDEF")
+        .comment("CHECKSUM", "original HDU checksum")
+        .set("DATASUM", "123456789")
+        .comment("DATASUM", "original data checksum");
+    let original_data = [10i16, -20]
+        .into_iter()
+        .flat_map(i16::to_be_bytes)
+        .collect::<Vec<_>>();
+    let original_table = BinTable::from_data(&original_header, original_data.clone()).unwrap();
+
+    let mut compressed_data = Vec::new();
+    let mut compressed_header = compress_table(
+        &original_header,
+        &original_table,
+        1,
+        "GZIP_1",
+        &mut compressed_data,
+    )
+    .unwrap();
+    assert_eq!(compressed_header.get("THEAP"), None);
+    assert_eq!(compressed_header.get("CHECKSUM"), None);
+    assert_eq!(compressed_header.get("DATASUM"), None);
+    assert_eq!(compressed_header.get_integer("ZTHEAP").unwrap(), Some(4));
+    assert_eq!(
+        compressed_header.get_text("ZHECKSUM").unwrap(),
+        Some("0123456789ABCDEF")
+    );
+    assert_eq!(
+        compressed_header.get_text("ZDATASUM").unwrap(),
+        Some("123456789")
+    );
+
+    let compressed_main = compressed_header.get_integer("NAXIS1").unwrap().unwrap()
+        * compressed_header.get_integer("NAXIS2").unwrap().unwrap();
+    compressed_header
+        .set("THEAP", compressed_main)
+        .comment("THEAP", "compressed heap start")
+        .set("CHECKSUM", "FEDCBA9876543210")
+        .comment("CHECKSUM", "compressed HDU checksum")
+        .set("DATASUM", "987654321")
+        .comment("DATASUM", "compressed data checksum");
+    let compressed_table = BinTable::from_data(&compressed_header, compressed_data).unwrap();
+    let restored = uncompress_table(&compressed_header, &compressed_table).unwrap();
+
+    let mut original_bytes = Vec::new();
+    let mut restored_bytes = Vec::new();
+    render_header(&original_header, &mut original_bytes).unwrap();
+    render_header(&restored.header, &mut restored_bytes).unwrap();
+    assert_eq!(restored_bytes, original_bytes);
+    assert_eq!(restored.data, original_data);
 }
 
 #[test]
@@ -1398,6 +1543,7 @@ fn uncompress_table_rejects_overflowing_row_product() {
         .set("ZTILELEN", 1)
         .set("ZNAXIS1", 8)
         .set("ZNAXIS2", 3_000_000_000_000_000_000i64)
+        .set("ZPCOUNT", 0)
         .set("ZFORM1", "1K");
     let mut data = Vec::new();
     data.extend_from_slice(&0i64.to_be_bytes()); // Q descriptor: nelem
@@ -1427,11 +1573,14 @@ fn uncompress_table_rejects_overflowing_row_product() {
     }
 
     h.set("TFIELDS", 2)
+        .set("NAXIS1", 32)
+        .set("TFORM2", "1QB")
         .set("ZNAXIS1", 8)
         .set("ZFORM1", format!("{}K", usize::MAX))
         .set("ZFORM2", "1K");
+    let two_column_table = BinTable::from_data(&h, vec![0; 32]).unwrap();
     assert!(matches!(
-        uncompress_table(&h, &table),
+        uncompress_table(&h, &two_column_table),
         Err(FitsError::DataUnitOverflow)
     ));
 }

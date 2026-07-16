@@ -443,6 +443,8 @@ impl<W: Write> FitsWriter<W> {
     /// is the original table's header (column metadata is copied from it), `table`
     /// its parsed data, `rows_per_tile` the tile height, and `algo` the per-column
     /// codec (`GZIP_1`/`GZIP_2`/`RICE_1`). Requires the `compression` feature.
+    /// The header must describe `table` exactly; original tables with `PCOUNT > 0`
+    /// are rejected because this fixed-width path does not retain heap bytes.
     #[cfg(feature = "compression")]
     pub fn write_compressed_table(
         &mut self,

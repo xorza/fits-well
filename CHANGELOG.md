@@ -26,8 +26,8 @@
   projection-domain and iterative-convergence failures cannot be ignored.
 - `FitsError::DataUnitTooLarge::bytes` changed from `usize` to `u64`. The
   `TypeMismatch`, `InvalidAscii`, `WcsProjectionDomain`, `WcsNoConvergence`, and
-  `PlioValueOutOfRange` variants were added; exhaustive matches on `FitsError`
-  must handle them.
+  `PlioValueOutOfRange`, and `TableMetadataMismatch` variants were added;
+  exhaustive matches on `FitsError` must handle them.
 
 ### Added
 
@@ -63,6 +63,10 @@
   fields, including leading and trailing spaces; numeric parsing still trims padding.
 - Tiled compression now preserves float images' original `BSCALE`/`BZERO`
   metadata across quantized and raw-float fallback tiles.
+- Compressed-table writing now rejects header/table layout mismatches and original
+  heap data instead of emitting self-contradictory or lossy containers. `THEAP`,
+  `CHECKSUM`, and `DATASUM` metadata is translated through the standard `Z*`
+  keywords and restored without retaining stale container values.
 - GZIP, Rice, PLIO, and HCOMPRESS decoders now reject truncated streams, malformed
   control data, decompression bombs, and tiles whose decoded size differs from the
   declared geometry instead of manufacturing zero-valued pixels or reading out of

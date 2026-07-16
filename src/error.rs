@@ -145,6 +145,11 @@ pub enum FitsError {
         computed: usize,
         declared: usize,
     },
+    /// Metadata supplied alongside a parsed binary table disagrees with the
+    /// table's validated structure.
+    TableMetadataMismatch {
+        name: String,
+    },
     /// A requested compression tile shape has a different rank (axis count) than the
     /// image it tiles. Pass an empty shape for the default row-tiling instead.
     TileShapeRankMismatch {
@@ -256,6 +261,9 @@ impl fmt::Display for FitsError {
                 f,
                 "column widths sum to {computed} bytes but NAXIS1 declares {declared}"
             ),
+            FitsError::TableMetadataMismatch { name } => {
+                write!(f, "header metadata {name} disagrees with the binary table")
+            }
             FitsError::TileShapeRankMismatch {
                 tile_rank,
                 image_rank,
