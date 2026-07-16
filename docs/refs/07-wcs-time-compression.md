@@ -17,7 +17,7 @@ Core keywords (per world axis `i`, pixel axis `j`, optional alternate version `a
 
 | Keyword | Meaning |
 |---------|---------|
-| `WCSAXES` | number of WCS axes (if present, must precede other WCS keywords; default NAXIS) |
+| `WCSAXES` | number of WCS axes (if present, must precede other WCS keywords; default is the larger of `NAXIS` and every WCS axis index) |
 | `CTYPEia` | axis type + projection, e.g. `'RA---TAN'`, `'DEC--TAN'`, `'FREQ'` (default blank = linear) |
 | `CRPIXja` | reference pixel along pixel axis j (1-based; default 0.0) |
 | `CRVALia` | world coordinate at the reference point (default 0.0) |

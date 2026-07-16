@@ -1,3 +1,4 @@
+use crate::header::value::Value;
 use crate::reader::FitsReader;
 use crate::wcs::*;
 use std::fs::File;
@@ -174,6 +175,30 @@ fn sin_projection_matches_astropy() {
             (out[0] - ra).abs() < 1e-9 && (out[1] - dec).abs() < 1e-9,
             "SIN at ({px},{py}): got {out:?}, want ({ra},{dec})"
         );
+    }
+}
+
+#[test]
+fn slant_sin_matches_the_standard_equations() {
+    let pv = projection_parameters(&[0.0, 0.2, -0.1]);
+    let cases = [
+        (30.0, 60.0, 15.859180663294788, -25.577418186492753),
+        (-40.0, 45.0, -22.685738719896246, -32.713_858_525_468_76),
+    ];
+    for (phi, theta, x, y) in cases {
+        // Paper II eqs. 61–62 with σ = 1 − sin θ:
+        // x/r0 = cos θ sin φ + 0.2σ; y/r0 = −cos θ cos φ − 0.1σ.
+        let projected = Projection::Sin.project(phi, theta, &pv).unwrap();
+        assert!((projected.x - x).abs() < 1e-12, "x = {}", projected.x);
+        assert!((projected.y - y).abs() < 1e-12, "y = {}", projected.y);
+        let radial = Projection::Sin
+            .project(phi, theta, &projection_parameters(&[]))
+            .unwrap();
+        assert_ne!([projected.x, projected.y], [radial.x, radial.y]);
+
+        let native = Projection::Sin.deproject(x, y, &pv).unwrap();
+        assert!((norm180(native.phi - phi)).abs() < 1e-12);
+        assert!((native.theta - theta).abs() < 1e-12);
     }
 }
 
@@ -415,13 +440,66 @@ fn parameterized_projections_match_astropy() {
 }
 
 #[test]
-fn unimplemented_projection_codes_fall_back_to_intermediate() {
+fn projection_parameters_use_standard_defaults() {
+    let build = |projection: &str, parameters: &[(usize, f64)]| {
+        let mut h = Header::new();
+        h.set("NAXIS", 2);
+        h.set("CTYPE1", format!("RA---{projection}"));
+        h.set("CTYPE2", format!("DEC--{projection}"));
+        for &(m, value) in parameters {
+            h.set(&format!("PV2_{m}"), value);
+        }
+        Wcs::from_header(&h, None).unwrap()
+    };
+
+    assert_eq!(build("AIR", &[]).celestial.unwrap().pv[1], 90.0);
+
+    let cyp = build("CYP", &[]).celestial.unwrap();
+    assert_eq!([cyp.pv[1], cyp.pv[2]], [1.0, 1.0]);
+
+    assert_eq!(build("CEA", &[]).celestial.unwrap().pv[1], 1.0);
+
+    let szp = build("SZP", &[(1, 2.0)]).celestial.unwrap();
+    assert_eq!([szp.pv[1], szp.pv[2], szp.pv[3]], [2.0, 0.0, 90.0]);
+
+    let explicit_zero = build("CYP", &[(1, 0.0), (2, 1.0)]).celestial.unwrap();
+    assert_eq!([explicit_zero.pv[1], explicit_zero.pv[2]], [0.0, 1.0]);
+}
+
+#[test]
+fn degenerate_cylindrical_projection_parameters_are_rejected() {
+    use crate::error::FitsError;
+
+    let parse = |projection: &str, parameters: &[(usize, f64)]| {
+        let mut h = Header::new();
+        h.set("NAXIS", 2);
+        h.set("CTYPE1", format!("RA---{projection}"));
+        h.set("CTYPE2", format!("DEC--{projection}"));
+        for &(m, value) in parameters {
+            h.set(&format!("PV2_{m}"), value);
+        }
+        Wcs::from_header(&h, None)
+    };
+
+    assert!(matches!(
+        parse("CEA", &[(1, 0.0)]),
+        Err(FitsError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse("CYP", &[(2, 0.0)]),
+        Err(FitsError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse("CYP", &[(1, -1.0), (2, 1.0)]),
+        Err(FitsError::InvalidValue { .. })
+    ));
+}
+
+#[test]
+fn unsupported_projection_codes_fall_back_to_intermediate() {
     use crate::header::Header;
-    // Quad-cube and HEALPix codes are recognized but their projection math is not
-    // implemented. Rather than fail (which would also lose any other axis), the WCS
-    // still builds: the axes are listed in `unsupported_axes` and pixel_to_world
-    // returns their intermediate (linear-stage) world coordinate, never silently.
-    for code in ["TSC", "CSC", "QSC", "HPX", "XPH"] {
+    // Short codes represent space-padded algorithm names after FITS text trimming.
+    for code in ["TSC", "CSC", "QSC", "HPX", "XPH", "UV", "U"] {
         let mut h = Header::new();
         h.set("NAXIS", 2);
         h.set("CTYPE1", format!("RA---{code}"));
@@ -562,7 +640,7 @@ fn conflicting_linear_keywords_are_rejected() {
             .set("CDELT2", 1.0);
         h
     };
-    // §8: PC, CD, and CROTA are mutually exclusive.
+    // PC and CD are mutually exclusive; CROTA must not accompany PC.
     let mut pc_cd = base();
     pc_cd.set("PC1_1", 1.0).set("CD1_1", 1.0);
     assert!(matches!(
@@ -576,11 +654,14 @@ fn conflicting_linear_keywords_are_rejected() {
         Err(FitsError::ConflictingWcsKeywords { .. })
     ));
     let mut crota_cd = base();
-    crota_cd.set("CD1_1", 1.0).set("CROTA2", 30.0);
-    assert!(matches!(
-        Wcs::from_header(&crota_cd, None),
-        Err(FitsError::ConflictingWcsKeywords { .. })
-    ));
+    crota_cd
+        .set("CDELT1", 11.0)
+        .set("CDELT2", 13.0)
+        .set("CD1_1", 2.0)
+        .set("CD2_2", 3.0)
+        .set("CROTA2", 30.0);
+    let w = Wcs::from_header(&crota_cd, None).unwrap();
+    assert_eq!(w.matrix, [2.0, 0.0, 0.0, 3.0]);
     // A single convention (CD alone) is accepted.
     let mut cd_only = base();
     cd_only.set("CD1_1", 1.0).set("CD2_2", 1.0);
@@ -607,7 +688,7 @@ fn projections_round_trip() {
         (Stg, &[]),
         (Zea, &[]),
         (Car, &[]),
-        (Cea, &[]),
+        (Cea, &[0.0, 1.0]),
         (Mer, &[]),
         (Sfl, &[]),
         (Ait, &[]),
@@ -901,6 +982,83 @@ fn vector_cell_wcs_matches_the_equivalent_image_wcs() {
         Wcs::from_array_column(&tab, 5, None),
         Err(FitsError::TypeMismatch { name, .. }) if name == "1CRVL5"
     ));
+}
+
+#[test]
+fn absent_wcsaxes_uses_the_largest_wcs_index() {
+    let build = |keyword: &str, value: Value| {
+        let mut h = Header::new();
+        h.set("NAXIS", 2).set(keyword, value);
+        h
+    };
+    let mut cd = Header::new();
+    cd.set("NAXIS", 2)
+        .set("CD1_1", 1.0)
+        .set("CD2_2", 1.0)
+        .set("CD3_3", 1.0)
+        .set("CD4_4", 1.0);
+    let cases = [
+        build("CTYPE4", Value::Text("LINEAR".to_string())),
+        build("CUNIT4", Value::Text("m".to_string())),
+        build("PV4_0", Value::Real(1.0)),
+        build("PC4_4", Value::Real(1.0)),
+        cd,
+    ];
+    for h in &cases {
+        assert_eq!(Wcs::from_header(h, None).unwrap().view().axes.len(), 4);
+    }
+
+    for alternate in [
+        build("CTYPE4A", Value::Text("LINEAR".to_string())),
+        build("PV4_0A", Value::Real(1.0)),
+        build("PC4_4A", Value::Real(1.0)),
+    ] {
+        assert_eq!(
+            Wcs::from_header(&alternate, None)
+                .unwrap()
+                .view()
+                .axes
+                .len(),
+            2
+        );
+        assert_eq!(
+            Wcs::from_header(&alternate, Some('A'))
+                .unwrap()
+                .view()
+                .axes
+                .len(),
+            4
+        );
+    }
+}
+
+#[test]
+fn vector_cell_rank_uses_every_supported_keyword_family() {
+    let build = |keyword: &str, value: Value| {
+        let mut h = Header::new();
+        h.set(keyword, value);
+        h
+    };
+    let mut cd = Header::new();
+    cd.set("11CD5", 1.0).set("22CD5", 1.0).set("33CD5", 1.0);
+    let cases = [
+        build("3CUNI5", Value::Text("m".to_string())),
+        build("3CROT5", Value::Real(10.0)),
+        build("3PV5_1", Value::Real(2.0)),
+        build("3V5_1", Value::Real(2.0)),
+        build("13PC5", Value::Real(0.25)),
+        cd,
+    ];
+    for h in &cases {
+        assert_eq!(
+            Wcs::from_array_column(h, 5, None)
+                .unwrap()
+                .view()
+                .axes
+                .len(),
+            3
+        );
+    }
 }
 
 #[test]

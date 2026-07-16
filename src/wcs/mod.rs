@@ -173,6 +173,35 @@ impl Projection {
             .map(|&(code, ..)| code)
             .expect("every Projection variant is listed in PROJECTIONS")
     }
+
+    fn parameter_defaults(self) -> [f64; 21] {
+        let mut pv = [0.0; 21];
+        match self {
+            Projection::Air => pv[1] = 90.0,
+            Projection::Cyp => {
+                pv[1] = 1.0;
+                pv[2] = 1.0;
+            }
+            Projection::Cea => pv[1] = 1.0,
+            Projection::Szp => pv[3] = 90.0,
+            _ => {}
+        }
+        pv
+    }
+
+    fn validate_parameters(self, pv: &[f64; 21]) -> Result<()> {
+        let invalid = match self {
+            Projection::Cea => pv[1] == 0.0,
+            Projection::Cyp => pv[2] == 0.0 || pv[1] + pv[2] == 0.0,
+            _ => false,
+        };
+        if invalid {
+            return Err(FitsError::InvalidValue {
+                card: format!("degenerate {} projection parameters", self.code()),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -234,6 +263,22 @@ impl Projection {
             return Err(self.domain_error());
         }
         Ok(value.max(0.0).sqrt())
+    }
+
+    fn visible_sigma(self, qa: f64, qb: f64, qc: f64) -> Result<f64> {
+        let discriminant = qb * qb - 4.0 * qa * qc;
+        let disc = self.checked_sqrt(discriminant, qb * qb + (4.0 * qa * qc).abs())?;
+        let s1 = (-qb - disc) / (2.0 * qa);
+        let s2 = (-qb + disc) / (2.0 * qa);
+        let valid = |sigma: f64| {
+            sigma.is_finite() && (-DOMAIN_TOLERANCE..=2.0 + DOMAIN_TOLERANCE).contains(&sigma)
+        };
+        match (valid(s1), valid(s2)) {
+            (true, true) => Ok(s1.min(s2).clamp(0.0, 2.0)),
+            (true, false) => Ok(s1.clamp(0.0, 2.0)),
+            (false, true) => Ok(s2.clamp(0.0, 2.0)),
+            (false, false) => Err(self.domain_error()),
+        }
     }
 
     fn native_coordinate(self, phi: f64, theta: f64) -> Result<NativeCoordinate> {
@@ -315,25 +360,27 @@ impl Projection {
             let qa = a1 * a1 + b1 * b1 + vertex.z * vertex.z;
             let qb = 2.0 * (a0 * a1 + b0 * b1) - 2.0 * vertex.z * vertex.z;
             let qc = a0 * a0 + b0 * b0;
-            let discriminant = qb * qb - 4.0 * qa * qc;
-            let disc = self.checked_sqrt(discriminant, qb * qb + (4.0 * qa * qc).abs())?;
-            let s1 = (-qb - disc) / (2.0 * qa);
-            let s2 = (-qb + disc) / (2.0 * qa);
-            // σ ∈ [0, 2]; prefer the visible-hemisphere root (smaller σ).
-            let valid_sigma = |sigma: f64| {
-                sigma.is_finite() && (-DOMAIN_TOLERANCE..=2.0 + DOMAIN_TOLERANCE).contains(&sigma)
-            };
-            let sigma = match (valid_sigma(s1), valid_sigma(s2)) {
-                (true, true) => s1.min(s2),
-                (true, false) => s1,
-                (false, true) => s2,
-                (false, false) => return Err(self.domain_error()),
-            }
-            .clamp(0.0, 2.0);
+            let sigma = self.visible_sigma(qa, qb, qc)?;
             let theta = self.checked_asin(1.0 - sigma)?;
             let (a, b) = (a0 + a1 * sigma, b0 + b1 * sigma);
             let phi = a.atan2(b);
             return self.native_coordinate(phi * R2D, theta * R2D);
+        }
+        if matches!(projection, Projection::Sin) {
+            let (xi, eta) = (pv[1], pv[2]);
+            let (cx, cy) = (x / R2D, y / R2D);
+            let qa = xi * xi + eta * eta + 1.0;
+            let qb = -2.0 * (cx * xi + cy * eta + 1.0);
+            let qc = cx * cx + cy * cy;
+            let sigma = self.visible_sigma(qa, qb, qc)?;
+            let theta = self.checked_asin(1.0 - sigma)?;
+            let (a, b) = (cx - xi * sigma, cy - eta * sigma);
+            let phi = if a == 0.0 && b == 0.0 {
+                0.0
+            } else {
+                a.atan2(-b) * R2D
+            };
+            return self.native_coordinate(phi, theta * R2D);
         }
         if self.family() == Family::Conic {
             let conic = ConicConstants::new(self, pv);
@@ -349,7 +396,7 @@ impl Projection {
             let u = r / R2D;
             let zeta = match projection {
                 Projection::Tan => u.atan(),
-                Projection::Sin => self.checked_asin(u)?,
+                Projection::Sin => unreachable!(),
                 Projection::Arc => u,
                 Projection::Zea => 2.0 * self.checked_asin(u / 2.0)?,
                 Projection::Stg => 2.0 * (u / 2.0).atan(),
@@ -365,7 +412,7 @@ impl Projection {
                 Projection::Car => [x, y],
                 // CEA: λ = PVi_1 (default 1); θ = asin(λ·y/(180/π)).
                 Projection::Cea => {
-                    let lambda = pv.get(1).filter(|&&v| v != 0.0).copied().unwrap_or(1.0);
+                    let lambda = pv[1];
                     [x, self.checked_asin(lambda * y / R2D)? * R2D]
                 }
                 Projection::Mer => [x, (2.0 * (y / R2D).exp().atan()) * R2D - 90.0],
@@ -393,10 +440,7 @@ impl Projection {
                 }
                 // CYP inverse: φ = x/λ; θ from η = (y/(180/π))/(μ+λ).
                 Projection::Cyp => {
-                    let (mu, lambda) = (
-                        pv[1],
-                        pv.get(2).filter(|&&v| v != 0.0).copied().unwrap_or(1.0),
-                    );
+                    let (mu, lambda) = (pv[1], pv[2]);
                     let eta = (y / R2D) / (mu + lambda);
                     let theta =
                         eta.atan2(1.0) + self.checked_asin(eta * mu / (1.0 + eta * eta).sqrt())?;
@@ -468,6 +512,13 @@ impl Projection {
             let y = R2D * (-vertex.z * tr.cos() * pr.cos() - vertex.y * sigma) / denom;
             return self.projected_coordinate(x, y);
         }
+        if matches!(projection, Projection::Sin) {
+            let (tr, pr) = (theta * D2R, phi * D2R);
+            let sigma = 1.0 - tr.sin();
+            let x = R2D * (tr.cos() * pr.sin() + pv[1] * sigma);
+            let y = R2D * (-tr.cos() * pr.cos() + pv[2] * sigma);
+            return self.projected_coordinate(x, y);
+        }
         if self.family() == Family::Conic {
             let conic = ConicConstants::new(self, pv);
             let r = self.conic_radius(theta, conic)?;
@@ -478,7 +529,7 @@ impl Projection {
             let zeta = (90.0 - theta) * D2R;
             let r = match projection {
                 Projection::Tan => R2D * zeta.tan(),
-                Projection::Sin => R2D * zeta.sin(),
+                Projection::Sin => unreachable!(),
                 Projection::Arc => R2D * zeta,
                 Projection::Zea => 2.0 * R2D * (zeta / 2.0).sin(),
                 Projection::Stg => 2.0 * R2D * (zeta / 2.0).tan(),
@@ -493,7 +544,7 @@ impl Projection {
             let [x, y] = match projection {
                 Projection::Car => [phi, theta],
                 Projection::Cea => {
-                    let lambda = pv.get(1).filter(|&&v| v != 0.0).copied().unwrap_or(1.0);
+                    let lambda = pv[1];
                     [phi, R2D * t.sin() / lambda]
                 }
                 Projection::Mer => [phi, R2D * ((45.0 + theta / 2.0) * D2R).tan().ln()],
@@ -510,10 +561,7 @@ impl Projection {
                     [(2.0 * s2 / PI) * phi * g.cos(), s2 * R2D * g.sin()]
                 }
                 Projection::Cyp => {
-                    let (mu, lambda) = (
-                        pv[1],
-                        pv.get(2).filter(|&&v| v != 0.0).copied().unwrap_or(1.0),
-                    );
+                    let (mu, lambda) = (pv[1], pv[2]);
                     [lambda * phi, R2D * (mu + lambda) * t.sin() / (mu + t.cos())]
                 }
                 Projection::Par => [
@@ -855,10 +903,17 @@ impl Wcs {
     pub(crate) fn from_header(header: &Header, alt: Option<char>) -> Result<Wcs> {
         let a = alt.map(|c| c.to_string()).unwrap_or_default();
         let naxis_value = match header.get_integer(key!("WCSAXES{a}").as_str())? {
-            Some(naxis) => Some(naxis),
-            None => header.get_integer("NAXIS")?,
-        }
-        .ok_or(FitsError::MissingKeyword { name: "WCSAXES" })?;
+            Some(naxis) => naxis,
+            None => {
+                let inferred = infer_image_axis_count(header, &a);
+                match header.get_integer("NAXIS")? {
+                    Some(naxis) if naxis >= 0 => naxis.max(inferred),
+                    Some(naxis) => naxis,
+                    None if inferred != 0 => inferred,
+                    None => return Err(FitsError::MissingKeyword { name: "WCSAXES" }),
+                }
+            }
+        };
         let naxis = axis_count(naxis_value, "WCSAXES")?;
 
         let ctype: Vec<String> = (1..=naxis)
@@ -896,15 +951,14 @@ impl Wcs {
         let has_pc = (1..=naxis)
             .any(|i| (1..=naxis).any(|j| header.get(key!("PC{i}_{j}{a}").as_str()).is_some()));
         let has_crota = (1..=naxis).any(|i| header.get(key!("CROTA{i}{a}").as_str()).is_some());
-        // §8: the PC/CDELT, CD, and legacy CROTA conventions are mutually exclusive.
-        if [has_cd, has_pc, has_crota]
-            .into_iter()
-            .filter(|&present| present)
-            .count()
-            > 1
-        {
+        if has_cd && has_pc {
             return Err(FitsError::ConflictingWcsKeywords {
-                detail: "PC, CD, and CROTA conventions overlap",
+                detail: "PC and CD conventions overlap",
+            });
+        }
+        if has_pc && has_crota {
+            return Err(FitsError::ConflictingWcsKeywords {
+                detail: "PC and CROTA conventions overlap",
             });
         }
         let mut matrix = vec![0.0; naxis * naxis];
@@ -961,13 +1015,15 @@ impl Wcs {
 
         let celestial = match celestial_axes {
             Some((lng, lat, proj)) => {
-                // Latitude-axis PVi_0..PVi_20 — the projection parameters.
-                let mut pv = [0.0; 21];
+                let mut pv = proj.parameter_defaults();
                 for (m, value) in pv.iter_mut().enumerate() {
-                    *value = header
-                        .get_real(key!("PV{}_{m}{a}", lat + 1).as_str())?
-                        .unwrap_or(0.0);
+                    if let Some(header_value) =
+                        header.get_real(key!("PV{}_{m}{a}", lat + 1).as_str())?
+                    {
+                        *value = header_value;
+                    }
                 }
+                proj.validate_parameters(&pv)?;
                 let family = proj.family();
                 // A conic's mid-latitude θ_a = PVi_1 is mandatory and must be
                 // non-zero; θ_a = 0 (absent, or explicitly 0) is a degenerate cone
@@ -1127,12 +1183,7 @@ impl Wcs {
             Some(value) => axis_count(value, "WCAXn")?,
             None => (1..=99)
                 .rev()
-                .find(|&i| {
-                    header.get(key!("{i}CTYP{column}{a}").as_str()).is_some()
-                        || ["CRVL", "CDLT", "CRPX"]
-                            .iter()
-                            .any(|r| header.get(key!("{i}{r}{column}{a}").as_str()).is_some())
-                })
+                .find(|&i| array_column_axis_present(header, column, &a, i))
                 .unwrap_or(0),
         };
         if naxis == 0 {
@@ -1276,11 +1327,12 @@ fn projection_code(ctype: &str) -> Option<&str> {
     ctype
         .rsplit_once('-')
         .map(|(_, code)| code)
+        .map(str::trim_end)
         .filter(|c| !c.is_empty())
 }
 
 /// Axis indices (0-based) whose non-linear transform this library does not
-/// evaluate: a celestial axis whose 3-letter projection code is unimplemented
+/// evaluate: a celestial axis whose projection code is unimplemented
 /// (quad-cube/HEALPix), or a non-linearly-sampled spectral axis (`TTTT-AAA`,
 /// §8.4). Such an axis is taken through the linear stage only (its intermediate
 /// world coordinate). The supported projections and a bare spectral type (which
@@ -1290,7 +1342,6 @@ fn nonlinear_unsupported_axes(ctype: &[String]) -> Vec<usize> {
     for (i, t) in ctype.iter().enumerate() {
         if celestial_axis(t).is_some() {
             if let Some(code) = projection_code(t)
-                && code.len() == 3
                 && Projection::from_code(code).is_none()
             {
                 out.push(i);
@@ -1447,6 +1498,82 @@ fn axis_vec(
                 .map(|value| value.unwrap_or(default))
         })
         .collect()
+}
+
+fn infer_image_axis_count(header: &Header, alt: &str) -> i64 {
+    header
+        .iter()
+        .filter_map(|entry| image_wcs_axis_index(entry.keyword, alt))
+        .max()
+        .unwrap_or(0)
+}
+
+fn image_wcs_axis_index(keyword: &str, alt: &str) -> Option<i64> {
+    let keyword = if alt.is_empty() {
+        keyword
+    } else {
+        keyword.strip_suffix(alt)?
+    };
+    for prefix in [
+        "CTYPE", "CUNIT", "CRVAL", "CDELT", "CRPIX", "CROTA", "CNAME", "CRDER", "CSYER", "CZPHS",
+        "CPERI",
+    ] {
+        if let Some(index) = keyword.strip_prefix(prefix).and_then(parse_wcs_index) {
+            return Some(index);
+        }
+    }
+    for prefix in ["PC", "CD"] {
+        if let Some(indices) = keyword.strip_prefix(prefix)
+            && let Some((i, j)) = indices.split_once('_')
+        {
+            return Some(parse_wcs_index(i)?.max(parse_wcs_index(j)?));
+        }
+    }
+    for prefix in ["PV", "PS"] {
+        if let Some(indices) = keyword.strip_prefix(prefix)
+            && let Some((i, m)) = indices.split_once('_')
+        {
+            m.parse::<u64>().ok()?;
+            return parse_wcs_index(i);
+        }
+    }
+    None
+}
+
+fn parse_wcs_index(value: &str) -> Option<i64> {
+    value.parse().ok().filter(|&index| index > 0)
+}
+
+fn array_column_axis_present(header: &Header, column: usize, alt: &str, axis: usize) -> bool {
+    if ["CTYP", "CUNI", "CRPX", "CRVL", "CDLT", "CROT"]
+        .iter()
+        .any(|root| {
+            header
+                .get(key!("{axis}{root}{column}{alt}").as_str())
+                .is_some()
+        })
+    {
+        return true;
+    }
+    if (0..=99).any(|m| {
+        ["PV", "V", "PS", "S"].iter().any(|root| {
+            header
+                .get(key!("{axis}{root}{column}_{m}{alt}").as_str())
+                .is_some()
+        })
+    }) {
+        return true;
+    }
+    (1..=99).any(|other| {
+        ["PC", "CD"].iter().any(|root| {
+            header
+                .get(key!("{axis}{other}{root}{column}{alt}").as_str())
+                .is_some()
+                || header
+                    .get(key!("{other}{axis}{root}{column}{alt}").as_str())
+                    .is_some()
+        })
+    })
 }
 
 fn axis_count(value: i64, name: &'static str) -> Result<usize> {
