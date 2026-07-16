@@ -61,6 +61,27 @@ fn decodes_big_endian_integers_and_floats() {
 }
 
 #[test]
+fn image_data_views_preserve_ranges_for_every_sample_type() {
+    let u8_values = ImageData::U8(vec![1, 2, 3, 4]);
+    assert_eq!(u8_values.view(1..3), ImageView::U8(&[2, 3]));
+
+    let i16_values = ImageData::I16(vec![-2, -1, 0, 1]);
+    assert_eq!(i16_values.view(1..3), ImageView::I16(&[-1, 0]));
+
+    let i32_values = ImageData::I32(vec![-20, -10, 0, 10]);
+    assert_eq!(i32_values.view(1..3), ImageView::I32(&[-10, 0]));
+
+    let i64_values = ImageData::I64(vec![i64::MIN, -1, 0, i64::MAX]);
+    assert_eq!(i64_values.view(1..3), ImageView::I64(&[-1, 0]));
+
+    let f32_values = ImageData::F32(vec![-2.5, -0.0, 0.0, 3.5]);
+    assert_eq!(f32_values.view(1..3), ImageView::F32(&[-0.0, 0.0]));
+
+    let f64_values = ImageData::F64(vec![-2.5, -0.0, 0.0, 3.5]);
+    assert_eq!(f64_values.view(1..3), ImageView::F64(&[-0.0, 0.0]));
+}
+
+#[test]
 fn encode_produces_big_endian_bytes() {
     assert_eq!(
         encoded(&ImageData::I16(vec![1, -1])),

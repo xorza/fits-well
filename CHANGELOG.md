@@ -46,8 +46,8 @@
 - `FitsError::DataUnitTooLarge::bytes` changed from `usize` to `u64`. The
   `TypeMismatch`, `InvalidAscii`, `IntegerOutOfRange`, `UnsupportedWcsTransform`,
   `WcsProjectionDomain`, `WcsNoConvergence`, `PlioValueOutOfRange`, and
-  `TableMetadataMismatch` variants were added; exhaustive matches on `FitsError`
-  must handle them.
+  `TableMetadataMismatch`, and `GroupIndexOutOfBounds` variants were added;
+  exhaustive matches on `FitsError` must handle them.
 
 ### Added
 
@@ -64,6 +64,8 @@
   cannot be represented exactly as `f64`.
 - Added `WriteColumn::vla_bits` for writing jagged `PX`/`QX` bit arrays from one
   exact-length `BitVec` per row.
+- Added `RandomGroups::group_by_idx` and `RandomGroupView` for allocation-free,
+  exact typed access to each group's stored parameters and array samples.
 
 ### Changed
 

@@ -1,3 +1,4 @@
+use crate::data::ImageView;
 use crate::groups::*;
 use crate::reader::FitsReader;
 use std::fs::File;
@@ -162,4 +163,106 @@ fn read_groups_rejects_non_random_groups_hdus() {
         reader.read_groups(0),
         Err(FitsError::NotRandomGroups)
     ));
+}
+
+#[test]
+fn raw_group_view_preserves_i64_extremes_and_group_boundaries() {
+    let mut header = Header::new();
+    header
+        .set("BITPIX", 64)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 0)
+        .set("NAXIS2", 2)
+        .set("GROUPS", true)
+        .set("PCOUNT", 2)
+        .set("GCOUNT", 2);
+    let stored = [
+        i64::MIN,
+        i64::MAX,
+        9_007_199_254_740_993,
+        -9_007_199_254_740_993,
+        7,
+        8,
+        9,
+        10,
+    ];
+    let data: Vec<u8> = stored.into_iter().flat_map(i64::to_be_bytes).collect();
+    let groups = RandomGroups::from_data(&header, &data).unwrap();
+
+    let first = groups.group_by_idx(0).unwrap();
+    assert_eq!(first.parameters, ImageView::I64(&[i64::MIN, i64::MAX]));
+    assert_eq!(
+        first.array,
+        ImageView::I64(&[9_007_199_254_740_993, -9_007_199_254_740_993])
+    );
+    let second = groups.group_by_idx(1).unwrap();
+    assert_eq!(second.parameters, ImageView::I64(&[7, 8]));
+    assert_eq!(second.array, ImageView::I64(&[9, 10]));
+    assert!(matches!(
+        groups.group_by_idx(2),
+        Err(FitsError::GroupIndexOutOfBounds { index: 2, len: 2 })
+    ));
+}
+
+#[test]
+fn raw_group_view_preserves_float_bit_patterns() {
+    let mut f32_header = Header::new();
+    f32_header
+        .set("BITPIX", -32)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 0)
+        .set("NAXIS2", 2)
+        .set("GROUPS", true)
+        .set("PCOUNT", 1)
+        .set("GCOUNT", 1);
+    let f32_bits = [0x7fc0_1234, 0x8000_0000, 0x0000_0001];
+    let f32_data: Vec<u8> = f32_bits.into_iter().flat_map(u32::to_be_bytes).collect();
+    let f32_groups = RandomGroups::from_data(&f32_header, &f32_data).unwrap();
+    let f32_group = f32_groups.group_by_idx(0).unwrap();
+    let ImageView::F32(f32_parameters) = f32_group.parameters else {
+        panic!("BITPIX -32 parameters must be f32");
+    };
+    let ImageView::F32(f32_array) = f32_group.array else {
+        panic!("BITPIX -32 array must be f32");
+    };
+    assert_eq!(f32_parameters[0].to_bits(), f32_bits[0]);
+    assert_eq!(
+        f32_array
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        f32_bits[1..]
+    );
+
+    let mut f64_header = Header::new();
+    f64_header
+        .set("BITPIX", -64)
+        .set("NAXIS", 2)
+        .set("NAXIS1", 0)
+        .set("NAXIS2", 2)
+        .set("GROUPS", true)
+        .set("PCOUNT", 1)
+        .set("GCOUNT", 1);
+    let f64_bits = [
+        0x7ff8_0000_0000_1234,
+        0x8000_0000_0000_0000,
+        0x0000_0000_0000_0001,
+    ];
+    let f64_data: Vec<u8> = f64_bits.into_iter().flat_map(u64::to_be_bytes).collect();
+    let f64_groups = RandomGroups::from_data(&f64_header, &f64_data).unwrap();
+    let f64_group = f64_groups.group_by_idx(0).unwrap();
+    let ImageView::F64(f64_parameters) = f64_group.parameters else {
+        panic!("BITPIX -64 parameters must be f64");
+    };
+    let ImageView::F64(f64_array) = f64_group.array else {
+        panic!("BITPIX -64 array must be f64");
+    };
+    assert_eq!(f64_parameters[0].to_bits(), f64_bits[0]);
+    assert_eq!(
+        f64_array
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        f64_bits[1..]
+    );
 }
