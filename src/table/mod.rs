@@ -656,13 +656,13 @@ impl<'a> ColumnReader<'a> {
         })
     }
 
-    /// A `C`/`M` complex column as [`Complex<f64>`] values, applying `TZEROn + TSCALn ×`
-    /// to each component (§6.4). Errors on non-complex columns.
+    /// A `C`/`M` complex column as [`Complex<f64>`] values, applying `TSCALn` to both
+    /// components and `TZEROn` to the real component (§7.3.2). Errors on non-complex columns.
     pub fn complex(&self) -> Result<Vec<Complex<f64>>> {
         let col = self.descriptor();
         let scale = |re: f64, im: f64| Complex {
             re: col.tzero + col.tscale * re,
-            im: col.tzero + col.tscale * im,
+            im: col.tscale * im,
         };
         let capacity = self.table.nrows * col.tform.repeat;
         match col.tform.kind {
