@@ -44,10 +44,10 @@
   cannot be ignored. They no longer return linear-stage values as complete world
   coordinates when a nonlinear algorithm is unavailable.
 - `FitsError::DataUnitTooLarge::bytes` changed from `usize` to `u64`. The
-  `TypeMismatch`, `InvalidAscii`, `IntegerOutOfRange`, `UnsupportedWcsTransform`,
-  `WcsProjectionDomain`, `WcsNoConvergence`, `PlioValueOutOfRange`, and
-  `TableMetadataMismatch`, and `GroupIndexOutOfBounds` variants were added;
-  exhaustive matches on `FitsError` must handle them.
+  `TypeMismatch`, `InvalidAscii`, `AsciiFieldTooWide`, `IntegerOutOfRange`,
+  `UnsupportedWcsTransform`, `WcsProjectionDomain`, `WcsNoConvergence`,
+  `PlioValueOutOfRange`, `TableMetadataMismatch`, and `GroupIndexOutOfBounds`
+  variants were added; exhaustive matches on `FitsError` must handle them.
 
 ### Added
 
@@ -87,6 +87,8 @@
   stored column type before writing any bytes.
 - ASCII and binary table writers reject more than 999 fields before allocating
   per-column state or emitting an automatic primary HDU.
+- ASCII-table writing rejects text and formatted numeric values wider than their
+  declared fields instead of replacing them with non-conforming `*` characters.
 - `read_table` and `read_ascii_table` validate the HDU kind before reading or
   allocating its data unit, so wrong-kind calls return their semantic error first.
 - The default feature list now contains only `parallel`; default builds still enable
