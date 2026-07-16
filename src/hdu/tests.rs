@@ -199,7 +199,7 @@ fn role_specific_extents_require_counts_and_ignore_groups_on_extensions() {
 fn random_groups_role_requires_the_zero_first_axis_signature() {
     let no_axes = header(&["SIMPLE  = T", "BITPIX  = 8", "NAXIS   = 0", "GROUPS  = T"]);
     assert!(matches!(
-        HduRole::from_header(&no_axes, true),
+        HduRole::from_header(&no_axes, HduPosition::Primary),
         Err(FitsError::KeywordOutOfRange { name: "NAXIS" })
     ));
 
@@ -211,7 +211,7 @@ fn random_groups_role_requires_the_zero_first_axis_signature() {
         "GROUPS  = T",
     ]);
     assert!(matches!(
-        HduRole::from_header(&nonzero_first_axis, true),
+        HduRole::from_header(&nonzero_first_axis, HduPosition::Primary),
         Err(FitsError::KeywordOutOfRange { name: "NAXIS1" })
     ));
 }

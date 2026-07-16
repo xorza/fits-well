@@ -202,13 +202,9 @@ fn multi_block_header_scan_keeps_geometric_spare_capacity() {
     let mut source = SliceSource::new(&bytes);
     let mut offset = 0;
     let mut scratch = Vec::new();
-    let NextHeader::Found { bytes, .. } = scan_header_unit(
-        &mut source,
-        &mut offset,
-        &mut scratch,
-        ExpectedHeader::Primary,
-    )
-    .unwrap() else {
+    let NextHeader::Found { bytes, .. } =
+        scan_header_unit(&mut source, &mut offset, &mut scratch, HduPosition::Primary).unwrap()
+    else {
         panic!("expected a complete header");
     };
     assert_eq!(bytes.len(), 3 * BLOCK_SIZE);

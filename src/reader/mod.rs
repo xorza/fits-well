@@ -18,6 +18,7 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::groups::RandomGroups;
 use crate::hdu::HduKind;
+use crate::hdu::HduPosition;
 use crate::hdu::HduRole;
 use crate::hdu::data_extent;
 use crate::header::Header;
@@ -148,15 +149,15 @@ impl<S: Source> FitsReader<S> {
         let mut hdus = Vec::new();
         let mut offset = 0u64;
         loop {
-            let expected = if hdus.is_empty() {
-                ExpectedHeader::Primary
+            let position = if hdus.is_empty() {
+                HduPosition::Primary
             } else {
-                ExpectedHeader::Extension
+                HduPosition::Extension
             };
-            match scan_header_unit(&mut source, &mut offset, &mut scratch, expected)? {
+            match scan_header_unit(&mut source, &mut offset, &mut scratch, position)? {
                 NextHeader::Found { bytes, sum } => {
                     let header = Header::parse(&bytes)?;
-                    let role = HduRole::from_header(&header, hdus.is_empty())?;
+                    let role = HduRole::from_header(&header, position)?;
                     let kind = HduKind::classify(&header, role)?;
                     let data_offset = offset;
                     let extent = data_extent(&header, role)?;
@@ -491,12 +492,6 @@ enum NextHeader {
     Trailing,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExpectedHeader {
-    Primary,
-    Extension,
-}
-
 /// Read one header unit at `*offset`, advancing `offset` past each consumed block,
 /// until a block carries the `END` record. Blocks come through [`Source::slice`], so
 /// the same scan drives both seeking and in-memory sources.
@@ -504,7 +499,7 @@ fn scan_header_unit<S: Source>(
     source: &mut S,
     offset: &mut u64,
     scratch: &mut Vec<u8>,
-    expected: ExpectedHeader,
+    position: HduPosition,
 ) -> Result<NextHeader> {
     let size = source.size();
     // Most headers are a single block; reserve it so the common case parses with one
@@ -528,13 +523,13 @@ fn scan_header_unit<S: Source>(
         let block = source.slice(*offset, BLOCK_SIZE, scratch)?;
         if bytes.is_empty() {
             let keyword = &block[..8];
-            match expected {
-                ExpectedHeader::Primary if keyword != b"SIMPLE  " => {
+            match position {
+                HduPosition::Primary if keyword != b"SIMPLE  " => {
                     return Err(FitsError::MissingKeyword { name: "SIMPLE" });
                 }
                 // §3.5: a post-HDU block whose first card is not XTENSION begins
                 // special records, regardless of any END-shaped bytes later in it.
-                ExpectedHeader::Extension if keyword != b"XTENSION" => {
+                HduPosition::Extension if keyword != b"XTENSION" => {
                     return Ok(NextHeader::Trailing);
                 }
                 _ => {}
