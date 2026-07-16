@@ -40,6 +40,7 @@ use std::f64::consts::SQRT_2;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use crate::keyword::KeyBuf;
 use crate::keyword::key;
 
 const R2D: f64 = 180.0 / PI;
@@ -896,6 +897,281 @@ struct Celestial {
     pv: [f64; 21],
 }
 
+#[derive(Debug, Clone, Copy)]
+enum TableAxisKeyword {
+    Type,
+    Unit,
+    ReferenceValue,
+    Increment,
+    ReferencePoint,
+    Rotation,
+}
+
+impl TableAxisKeyword {
+    const ALL: [TableAxisKeyword; 6] = [
+        TableAxisKeyword::Type,
+        TableAxisKeyword::Unit,
+        TableAxisKeyword::ReferenceValue,
+        TableAxisKeyword::Increment,
+        TableAxisKeyword::ReferencePoint,
+        TableAxisKeyword::Rotation,
+    ];
+
+    fn table_root(self, alternate: bool) -> Option<&'static str> {
+        match (self, alternate) {
+            (TableAxisKeyword::Type, false) => Some("CTYP"),
+            (TableAxisKeyword::Type, true) => Some("CTY"),
+            (TableAxisKeyword::Unit, false) => Some("CUNI"),
+            (TableAxisKeyword::Unit, true) => Some("CUN"),
+            (TableAxisKeyword::ReferenceValue, false) => Some("CRVL"),
+            (TableAxisKeyword::ReferenceValue, true) => Some("CRV"),
+            (TableAxisKeyword::Increment, false) => Some("CDLT"),
+            (TableAxisKeyword::Increment, true) => Some("CDE"),
+            (TableAxisKeyword::ReferencePoint, false) => Some("CRPX"),
+            (TableAxisKeyword::ReferencePoint, true) => Some("CRP"),
+            (TableAxisKeyword::Rotation, false) => Some("CROT"),
+            (TableAxisKeyword::Rotation, true) => None,
+        }
+    }
+
+    fn image_root(self) -> &'static str {
+        match self {
+            TableAxisKeyword::Type => "CTYPE",
+            TableAxisKeyword::Unit => "CUNIT",
+            TableAxisKeyword::ReferenceValue => "CRVAL",
+            TableAxisKeyword::Increment => "CDELT",
+            TableAxisKeyword::ReferencePoint => "CRPIX",
+            TableAxisKeyword::Rotation => "CROTA",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TableMatrixKeyword {
+    Pc,
+    Cd,
+}
+
+impl TableMatrixKeyword {
+    fn root(self) -> &'static str {
+        match self {
+            TableMatrixKeyword::Pc => "PC",
+            TableMatrixKeyword::Cd => "CD",
+        }
+    }
+
+    fn pixel_root(self, abbreviated: bool) -> &'static str {
+        match (self, abbreviated) {
+            (TableMatrixKeyword::Pc, false) => "TPC",
+            (TableMatrixKeyword::Pc, true) => "TP",
+            (TableMatrixKeyword::Cd, false) => "TCD",
+            (TableMatrixKeyword::Cd, true) => "TC",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TablePoleKeyword {
+    Longitude,
+    Latitude,
+}
+
+impl TablePoleKeyword {
+    fn table_root(self) -> &'static str {
+        match self {
+            TablePoleKeyword::Longitude => "LONP",
+            TablePoleKeyword::Latitude => "LATP",
+        }
+    }
+
+    fn image_root(self) -> &'static str {
+        match self {
+            TablePoleKeyword::Longitude => "LONPOLE",
+            TablePoleKeyword::Latitude => "LATPOLE",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TableWcsResolver {
+    alternate: Option<char>,
+}
+
+impl TableWcsResolver {
+    fn new(alternate: Option<char>) -> TableWcsResolver {
+        TableWcsResolver { alternate }
+    }
+
+    fn pixel_axis_key(self, keyword: TableAxisKeyword, column: usize) -> Option<KeyBuf> {
+        let root = keyword.table_root(self.alternate.is_some())?;
+        Some(match self.alternate {
+            Some(alternate) => key!("T{root}{column}{alternate}"),
+            None => key!("T{root}{column}"),
+        })
+    }
+
+    fn vector_axis_key(
+        self,
+        keyword: TableAxisKeyword,
+        axis: usize,
+        column: usize,
+    ) -> Option<KeyBuf> {
+        let root = keyword.table_root(self.alternate.is_some())?;
+        Some(match self.alternate {
+            Some(alternate) => key!("{axis}{root}{column}{alternate}"),
+            None => key!("{axis}{root}{column}"),
+        })
+    }
+
+    fn pixel_matrix_key(
+        self,
+        keyword: TableMatrixKeyword,
+        row_column: usize,
+        input_column: usize,
+        abbreviated: bool,
+    ) -> KeyBuf {
+        let root = keyword.pixel_root(abbreviated);
+        match self.alternate {
+            Some(alternate) => key!("{root}{row_column}_{input_column}{alternate}"),
+            None => key!("{root}{row_column}_{input_column}"),
+        }
+    }
+
+    fn pixel_matrix_real(
+        self,
+        header: &Header,
+        keyword: TableMatrixKeyword,
+        row_column: usize,
+        input_column: usize,
+    ) -> Result<Option<f64>> {
+        let long = self.pixel_matrix_key(keyword, row_column, input_column, false);
+        let short = self.pixel_matrix_key(keyword, row_column, input_column, true);
+        first_real(header, long.as_str(), short.as_str())
+    }
+
+    fn vector_matrix_key(
+        self,
+        keyword: TableMatrixKeyword,
+        row_axis: usize,
+        input_axis: usize,
+        column: usize,
+    ) -> KeyBuf {
+        let root = keyword.root();
+        match self.alternate {
+            Some(alternate) => key!("{row_axis}{input_axis}{root}{column}{alternate}"),
+            None => key!("{row_axis}{input_axis}{root}{column}"),
+        }
+    }
+
+    fn pixel_parameter_key(self, column: usize, parameter: usize, short: bool) -> KeyBuf {
+        let root = if short { "TV" } else { "TPV" };
+        match self.alternate {
+            Some(alternate) => key!("{root}{column}_{parameter}{alternate}"),
+            None => key!("{root}{column}_{parameter}"),
+        }
+    }
+
+    fn pixel_parameter_real(
+        self,
+        header: &Header,
+        column: usize,
+        parameter: usize,
+    ) -> Result<Option<f64>> {
+        let long = self.pixel_parameter_key(column, parameter, false);
+        let short = self.pixel_parameter_key(column, parameter, true);
+        first_real(header, long.as_str(), short.as_str())
+    }
+
+    fn vector_parameter_key(
+        self,
+        axis: usize,
+        column: usize,
+        parameter: usize,
+        short: bool,
+    ) -> KeyBuf {
+        let root = if short { "V" } else { "PV" };
+        match self.alternate {
+            Some(alternate) => key!("{axis}{root}{column}_{parameter}{alternate}"),
+            None => key!("{axis}{root}{column}_{parameter}"),
+        }
+    }
+
+    fn vector_parameter_real(
+        self,
+        header: &Header,
+        axis: usize,
+        column: usize,
+        parameter: usize,
+    ) -> Result<Option<f64>> {
+        let long = self.vector_parameter_key(axis, column, parameter, false);
+        let short = self.vector_parameter_key(axis, column, parameter, true);
+        first_real(header, long.as_str(), short.as_str())
+    }
+
+    fn vector_string_parameter_key(
+        self,
+        axis: usize,
+        column: usize,
+        parameter: usize,
+        short: bool,
+    ) -> KeyBuf {
+        let root = if short { "S" } else { "PS" };
+        match self.alternate {
+            Some(alternate) => key!("{axis}{root}{column}_{parameter}{alternate}"),
+            None => key!("{axis}{root}{column}_{parameter}"),
+        }
+    }
+
+    fn column_key(self, root: &str, column: usize) -> KeyBuf {
+        match self.alternate {
+            Some(alternate) => key!("{root}{column}{alternate}"),
+            None => key!("{root}{column}"),
+        }
+    }
+
+    fn pole_real(
+        self,
+        header: &Header,
+        pole: TablePoleKeyword,
+        column: usize,
+    ) -> Result<Option<f64>> {
+        let key = self.column_key(pole.table_root(), column);
+        header.get_real(key.as_str())
+    }
+
+    fn vector_rank(self, header: &Header, column: usize) -> Result<Option<i64>> {
+        let key = self.column_key("WCAX", column);
+        header.get_integer(key.as_str())
+    }
+
+    fn vector_axis_present(self, header: &Header, column: usize, axis: usize) -> bool {
+        if TableAxisKeyword::ALL.into_iter().any(|keyword| {
+            self.vector_axis_key(keyword, axis, column)
+                .is_some_and(|key| header.get(key.as_str()).is_some())
+        }) {
+            return true;
+        }
+        if (0..=99).any(|parameter| {
+            [false, true].into_iter().any(|short| {
+                let real = self.vector_parameter_key(axis, column, parameter, short);
+                let text = self.vector_string_parameter_key(axis, column, parameter, short);
+                header.get(real.as_str()).is_some() || header.get(text.as_str()).is_some()
+            })
+        }) {
+            return true;
+        }
+        (1..=99).any(|other| {
+            [TableMatrixKeyword::Pc, TableMatrixKeyword::Cd]
+                .into_iter()
+                .any(|keyword| {
+                    let row = self.vector_matrix_key(keyword, axis, other, column);
+                    let input = self.vector_matrix_key(keyword, other, axis, column);
+                    header.get(row.as_str()).is_some() || header.get(input.as_str()).is_some()
+                })
+        })
+    }
+}
+
 impl Wcs {
     /// Parse the primary WCS (`alt = None`) or an alternate description
     /// (`alt = Some('A'..='Z')`) from `header`. The public entry point is
@@ -1107,40 +1383,48 @@ impl Wcs {
 
     /// Build a WCS for a binary-table **pixel list** (event list, §8.5, Table 22):
     /// `columns` lists the 1-based table column numbers forming the coordinate axes
-    /// in order. Reads the column-indexed keyword family — `TCTYPn`/`TCRPXn`/
-    /// `TCRVLn`/`TCDLTn`/`TCROTn`/`TCUNIn`, the `TPCn_ka`/`TCDn_ka` matrices, and
-    /// `TPVn_ma` parameters — then evaluates it through the same pipeline as image
-    /// WCS (so projections, `CUNIT`, and the pole computation all apply).
+    /// in order. Reads both the primary and shortened alternate column-indexed
+    /// families, both matrix/parameter spellings (`TPC`/`TP`, `TCD`/`TC`,
+    /// `TPV`/`TV`), and the longitude column's `LONPna`/`LATPna` pole keywords,
+    /// then evaluates them through the same pipeline as image WCS.
     pub(crate) fn from_pixel_list(
         header: &Header,
         columns: &[usize],
         alt: Option<char>,
     ) -> Result<Wcs> {
-        let a = alt.map(|c| c.to_string()).unwrap_or_default();
+        let resolver = TableWcsResolver::new(alt);
         // Translate the column-indexed keywords into an equivalent image header,
         // mapping column number `cN` → axis index `i+1`.
         let mut h = Header::new();
         h.set("WCSAXES", columns.len() as i64);
         for (i, &c) in columns.iter().enumerate() {
             let ax = i + 1;
-            if let Some(t) = header.get_text(key!("TCTYP{c}{a}").as_str())? {
+            let type_key = resolver
+                .pixel_axis_key(TableAxisKeyword::Type, c)
+                .expect("Table 22 defines primary and alternate axis-type keywords");
+            if let Some(t) = header.get_text(type_key.as_str())? {
                 h.set(key!("CTYPE{ax}").as_str(), t);
             }
-            for (root, dst) in [
-                ("TCRPX", "CRPIX"),
-                ("TCRVL", "CRVAL"),
-                ("TCDLT", "CDELT"),
-                ("TCROT", "CROTA"),
+            for keyword in [
+                TableAxisKeyword::ReferencePoint,
+                TableAxisKeyword::ReferenceValue,
+                TableAxisKeyword::Increment,
+                TableAxisKeyword::Rotation,
             ] {
-                if let Some(v) = header.get_real(key!("{root}{c}{a}").as_str())? {
-                    h.set(key!("{dst}{ax}").as_str(), v);
+                if let Some(source) = resolver.pixel_axis_key(keyword, c)
+                    && let Some(value) = header.get_real(source.as_str())?
+                {
+                    h.set(key!("{}{ax}", keyword.image_root()).as_str(), value);
                 }
             }
-            if let Some(t) = header.get_text(key!("TCUNI{c}{a}").as_str())? {
+            let unit_key = resolver
+                .pixel_axis_key(TableAxisKeyword::Unit, c)
+                .expect("Table 22 defines primary and alternate axis-unit keywords");
+            if let Some(t) = header.get_text(unit_key.as_str())? {
                 h.set(key!("CUNIT{ax}").as_str(), t);
             }
             for m in 0..=20 {
-                if let Some(v) = header.get_real(key!("TPV{c}_{m}{a}").as_str())? {
+                if let Some(v) = resolver.pixel_parameter_real(header, c, m)? {
                     h.set(key!("PV{ax}_{m}").as_str(), v);
                 }
             }
@@ -1148,42 +1432,47 @@ impl Wcs {
         // Linear-transform matrices: TPCn_ka / TCDn_ka, indexed by column pair.
         for (i, &ci) in columns.iter().enumerate() {
             for (j, &cj) in columns.iter().enumerate() {
-                if let Some(v) = header.get_real(key!("TPC{ci}_{cj}{a}").as_str())? {
-                    h.set(key!("PC{}_{}", i + 1, j + 1).as_str(), v);
-                }
-                if let Some(v) = header.get_real(key!("TCD{ci}_{cj}{a}").as_str())? {
-                    h.set(key!("CD{}_{}", i + 1, j + 1).as_str(), v);
+                for keyword in [TableMatrixKeyword::Pc, TableMatrixKeyword::Cd] {
+                    if let Some(v) = resolver.pixel_matrix_real(header, keyword, ci, cj)? {
+                        h.set(key!("{}{}_{}", keyword.root(), i + 1, j + 1).as_str(), v);
+                    }
                 }
             }
         }
-        if let Some(v) = header.get_real(key!("LONP{a}").as_str())? {
-            h.set("LONPOLE", v);
-        }
-        if let Some(v) = header.get_real(key!("LATP{a}").as_str())? {
-            h.set("LATPOLE", v);
+        let ctype = (1..=columns.len())
+            .map(|axis| {
+                h.get_text(key!("CTYPE{axis}").as_str())
+                    .map(|value| value.unwrap_or("").to_string())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if let Some((longitude, ..)) = find_celestial(&ctype)? {
+            let column = columns[longitude];
+            for pole in [TablePoleKeyword::Longitude, TablePoleKeyword::Latitude] {
+                if let Some(value) = resolver.pole_real(header, pole, column)? {
+                    h.set(pole.image_root(), value);
+                }
+            }
         }
         Wcs::from_header(&h, None)
     }
 
     /// Build a WCS for an image stored in a binary-table **vector cell** (§8,
     /// Table 22): `column` is the 1-based table column whose cells hold a
-    /// multidimensional array. Reads the axis-and-column-indexed keyword family —
-    /// `iCTYPn`/`iCRVLn`/`iCDLTn`/`jCRPXn`/`iCROTn`/`iCUNIn`, the `ijPCn`/`ijCDn`
-    /// matrices, and `iPVn_ma` (or abbreviated `iVn_ma`) parameters, where `i`/`j`
-    /// are the array axis and `n` the column — then evaluates it through the same
-    /// pipeline as image WCS. The rank is taken from `WCAXna`, else inferred from
-    /// the highest axis index present.
+    /// multidimensional array. Reads the primary and shortened alternate
+    /// axis-and-column-indexed families, `ijPCna`/`ijCDna`, `iPVn_ma`/`iVn_ma`,
+    /// and `LONPna`/`LATPna`, where `i`/`j` are array axes and `n` is the column.
+    /// The rank is taken from `WCAXna`, else inferred through the same resolver.
     pub(crate) fn from_array_column(
         header: &Header,
         column: usize,
         alt: Option<char>,
     ) -> Result<Wcs> {
-        let a = alt.map(|c| c.to_string()).unwrap_or_default();
-        let naxis = match header.get_integer(key!("WCAX{column}{a}").as_str())? {
+        let resolver = TableWcsResolver::new(alt);
+        let naxis = match resolver.vector_rank(header, column)? {
             Some(value) => axis_count(value, "WCAXn")?,
             None => (1..=99)
                 .rev()
-                .find(|&i| array_column_axis_present(header, column, &a, i))
+                .find(|&i| resolver.vector_axis_present(header, column, i))
                 .unwrap_or(0),
         };
         if naxis == 0 {
@@ -1192,29 +1481,33 @@ impl Wcs {
         let mut h = Header::new();
         h.set("WCSAXES", naxis as i64);
         for ax in 1..=naxis {
-            if let Some(t) = header.get_text(key!("{ax}CTYP{column}{a}").as_str())? {
+            let type_key = resolver
+                .vector_axis_key(TableAxisKeyword::Type, ax, column)
+                .expect("Table 22 defines primary and alternate axis-type keywords");
+            if let Some(t) = header.get_text(type_key.as_str())? {
                 h.set(key!("CTYPE{ax}").as_str(), t);
             }
-            if let Some(t) = header.get_text(key!("{ax}CUNI{column}{a}").as_str())? {
+            let unit_key = resolver
+                .vector_axis_key(TableAxisKeyword::Unit, ax, column)
+                .expect("Table 22 defines primary and alternate axis-unit keywords");
+            if let Some(t) = header.get_text(unit_key.as_str())? {
                 h.set(key!("CUNIT{ax}").as_str(), t);
             }
-            for (root, dst) in [
-                ("CRPX", "CRPIX"),
-                ("CRVL", "CRVAL"),
-                ("CDLT", "CDELT"),
-                ("CROT", "CROTA"),
+            for keyword in [
+                TableAxisKeyword::ReferencePoint,
+                TableAxisKeyword::ReferenceValue,
+                TableAxisKeyword::Increment,
+                TableAxisKeyword::Rotation,
             ] {
-                if let Some(v) = header.get_real(key!("{ax}{root}{column}{a}").as_str())? {
-                    h.set(key!("{dst}{ax}").as_str(), v);
+                if let Some(source) = resolver.vector_axis_key(keyword, ax, column)
+                    && let Some(value) = header.get_real(source.as_str())?
+                {
+                    h.set(key!("{}{ax}", keyword.image_root()).as_str(), value);
                 }
             }
             // PVi_m arrives as `iPVn_ma`, or the abbreviated `iVn_ma`.
             for m in 0..=20 {
-                if let Some(v) = first_real(
-                    header,
-                    key!("{ax}PV{column}_{m}{a}").as_str(),
-                    key!("{ax}V{column}_{m}{a}").as_str(),
-                )? {
+                if let Some(v) = resolver.vector_parameter_real(header, ax, column, m)? {
                     h.set(key!("PV{ax}_{m}").as_str(), v);
                 }
             }
@@ -1222,12 +1515,17 @@ impl Wcs {
         // Linear-transform matrices: `ijPCn` / `ijCDn`, indexed by axis pair.
         for i in 1..=naxis {
             for j in 1..=naxis {
-                if let Some(v) = header.get_real(key!("{i}{j}PC{column}{a}").as_str())? {
-                    h.set(key!("PC{i}_{j}").as_str(), v);
+                for keyword in [TableMatrixKeyword::Pc, TableMatrixKeyword::Cd] {
+                    let source = resolver.vector_matrix_key(keyword, i, j, column);
+                    if let Some(value) = header.get_real(source.as_str())? {
+                        h.set(key!("{}{i}_{j}", keyword.root()).as_str(), value);
+                    }
                 }
-                if let Some(v) = header.get_real(key!("{i}{j}CD{column}{a}").as_str())? {
-                    h.set(key!("CD{i}_{j}").as_str(), v);
-                }
+            }
+        }
+        for pole in [TablePoleKeyword::Longitude, TablePoleKeyword::Latitude] {
+            if let Some(value) = resolver.pole_real(header, pole, column)? {
+                h.set(pole.image_root(), value);
             }
         }
         Wcs::from_header(&h, None)
@@ -1542,38 +1840,6 @@ fn image_wcs_axis_index(keyword: &str, alt: &str) -> Option<i64> {
 
 fn parse_wcs_index(value: &str) -> Option<i64> {
     value.parse().ok().filter(|&index| index > 0)
-}
-
-fn array_column_axis_present(header: &Header, column: usize, alt: &str, axis: usize) -> bool {
-    if ["CTYP", "CUNI", "CRPX", "CRVL", "CDLT", "CROT"]
-        .iter()
-        .any(|root| {
-            header
-                .get(key!("{axis}{root}{column}{alt}").as_str())
-                .is_some()
-        })
-    {
-        return true;
-    }
-    if (0..=99).any(|m| {
-        ["PV", "V", "PS", "S"].iter().any(|root| {
-            header
-                .get(key!("{axis}{root}{column}_{m}{alt}").as_str())
-                .is_some()
-        })
-    }) {
-        return true;
-    }
-    (1..=99).any(|other| {
-        ["PC", "CD"].iter().any(|root| {
-            header
-                .get(key!("{axis}{other}{root}{column}{alt}").as_str())
-                .is_some()
-                || header
-                    .get(key!("{other}{axis}{root}{column}{alt}").as_str())
-                    .is_some()
-        })
-    })
 }
 
 fn axis_count(value: i64, name: &'static str) -> Result<usize> {

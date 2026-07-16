@@ -55,6 +55,9 @@
 
 ### Fixed
 
+- Binary-table WCS now resolves the normative Table-22 primary and shortened
+  alternate axis keywords, both pixel-list matrix/parameter aliases, column-indexed
+  pole keywords, and alternate vector-cell rank inference.
 - Complex binary-table scaling now applies `TZEROn` only to the real component,
   as required by FITS, while `TSCALn` continues to scale both components.
 - Random-groups arrays now map integer samples equal to `BLANK` to `NaN` on the
