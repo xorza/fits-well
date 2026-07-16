@@ -153,8 +153,10 @@ domain, failed iterative inversion, or a nonlinear algorithm this crate does not
 yet implement.
 
 The typed **time** layer (`Header::time`, `Datetime`, `TimeScale`) handles
-ISO-8601/JD/MJD, FITS time units, epochs, `UTC`…`TCB`/`GPS`/UT1 scale conversions,
-and PC/CD-coupled time axes through the parsed WCS model.
+strict FITS ISO-8601/JD/MJD (including signed years and UTC leap seconds), FITS
+time units, epochs, `UTC`…`TCB`/`GPS`/UT1 scale conversions, and PC/CD-coupled
+time axes through the parsed WCS model. Datetime-to-JD conversion takes an
+explicit `TimeScale`; UTC uses a leap-second-preserving quasi-JD.
 
 ## Examples
 

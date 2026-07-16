@@ -1,7 +1,7 @@
 //! Typed time coordinates (§9).
 //!
-//! Covers the computational core: ISO-8601 datetimes ↔ Julian Date / MJD
-//! (proleptic-Gregorian calendar math), `J`/`B` epochs → JD, time-scale
+//! Covers the computational core: FITS ISO-8601 datetimes ↔ Julian Date / MJD
+//! (strict year forms, proleptic-Gregorian math, UTC quasi-JD), `J`/`B` epochs → JD, time-scale
 //! conversions ([`TimeScale`]) among `UTC`/`TAI`/`TT`/`GPS`/`TCG`/`TDB`/`TCB`
 //! (UTC↔TAI via an embedded leap-second table; TDB via the standard periodic
 //! approximation), and a [`FitsTime`] view over a header's time keywords
@@ -29,9 +29,39 @@ const L_B: f64 = 1.550_519_768e-8;
 /// `TDB_0`: the constant term of the `TDB − TT` relation (IAU 2006 Resolution B3).
 const TDB_0: f64 = -6.55e-5;
 const SEC_PER_DAY: f64 = 86_400.0;
+const LEAP_SECONDS: &[(i64, i64, i64, f64)] = &[
+    (1972, 1, 1, 10.0),
+    (1972, 7, 1, 11.0),
+    (1973, 1, 1, 12.0),
+    (1974, 1, 1, 13.0),
+    (1975, 1, 1, 14.0),
+    (1976, 1, 1, 15.0),
+    (1977, 1, 1, 16.0),
+    (1978, 1, 1, 17.0),
+    (1979, 1, 1, 18.0),
+    (1980, 1, 1, 19.0),
+    (1981, 7, 1, 20.0),
+    (1982, 7, 1, 21.0),
+    (1983, 7, 1, 22.0),
+    (1985, 7, 1, 23.0),
+    (1988, 1, 1, 24.0),
+    (1990, 1, 1, 25.0),
+    (1991, 1, 1, 26.0),
+    (1992, 7, 1, 27.0),
+    (1993, 7, 1, 28.0),
+    (1994, 7, 1, 29.0),
+    (1996, 1, 1, 30.0),
+    (1997, 7, 1, 31.0),
+    (1999, 1, 1, 32.0),
+    (2006, 1, 1, 33.0),
+    (2009, 1, 1, 34.0),
+    (2012, 7, 1, 35.0),
+    (2015, 7, 1, 36.0),
+    (2017, 1, 1, 37.0),
+];
 
-/// A calendar datetime (proleptic Gregorian, UTC-agnostic). `second` may reach
-/// 60.x to represent a leap second; the JD arithmetic rolls it over naturally.
+/// A calendar datetime (proleptic Gregorian, time-scale agnostic). `second` may
+/// reach 60.x; [`Datetime::to_jd`] validates that label against its time scale.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Datetime {
     pub year: i64,
@@ -43,9 +73,9 @@ pub struct Datetime {
 }
 
 impl Datetime {
-    /// Parse an ISO-8601 `FITS` datetime: `YYYY-MM-DD` or
-    /// `YYYY-MM-DDThh:mm:ss[.sss…]` (§9.1.1). No component defaulting; the date is
-    /// required, the time part optional (then midnight).
+    /// Parse a FITS ISO-8601 datetime: unsigned `YYYY-MM-DD` or signed
+    /// `±YYYYY-MM-DD`, optionally followed by `Thh:mm:ss[.sss…]` (§9.1.1). No
+    /// component defaulting; the date is required, the time part optional.
     pub fn parse(s: &str) -> Result<Datetime> {
         let invalid = || FitsError::InvalidValue {
             card: format!("DATE '{s}'"),
@@ -59,16 +89,19 @@ impl Datetime {
             Some((d, t)) => (d, Some(t)),
             None => (s, None),
         };
-        // `[±]CCYY-MM-DD`: year, month, and day have fixed widths (§9.1.1).
-        let (sign, rest) = match date.strip_prefix('-') {
-            Some(r) => (-1, r),
-            None => (1, date.strip_prefix('+').unwrap_or(date)),
+        // `[±C]CCYY-MM-DD`: the sign selects the five-digit extended form.
+        let (sign, year_width, rest) = match date.strip_prefix('-') {
+            Some(r) => (-1, 5, r),
+            None => match date.strip_prefix('+') {
+                Some(r) => (1, 5, r),
+                None => (1, 4, date),
+            },
         };
         let mut dp = rest.split('-');
         let y_str = dp.next().ok_or_else(invalid)?;
         let m_str = dp.next().ok_or_else(invalid)?;
         let d_str = dp.next().ok_or_else(invalid)?;
-        if dp.next().is_some() || y_str.len() != 4 || !all_digits(y_str) {
+        if dp.next().is_some() || y_str.len() != year_width || !all_digits(y_str) {
             return Err(invalid());
         }
         let year = sign * y_str.parse::<i64>().map_err(|_| invalid())?;
@@ -84,8 +117,6 @@ impl Datetime {
             hour = parse_fixed(tp.next().ok_or_else(invalid)?, 2).ok_or_else(invalid)?;
             minute = parse_fixed(tp.next().ok_or_else(invalid)?, 2).ok_or_else(invalid)?;
             second = parse_seconds(tp.next().ok_or_else(invalid)?).ok_or_else(invalid)?;
-            // Second 60 is the leap second; this type is scale-agnostic, so the
-            // "only in UTC" restriction is left to the caller.
             if tp.next().is_some() || hour >= 24 || minute >= 60 || !(0.0..61.0).contains(&second) {
                 return Err(invalid());
             }
@@ -100,28 +131,46 @@ impl Datetime {
         })
     }
 
-    /// Julian Date of this datetime, interpreting the fields in their own time
-    /// scale (no scale conversion is applied here).
-    pub fn to_jd(&self) -> f64 {
-        let day_fraction =
-            (self.hour as f64 * 3600.0 + self.minute as f64 * 60.0 + self.second) / SEC_PER_DAY;
-        gregorian_to_jdn(self.year, self.month as i64, self.day as i64) as f64 - 0.5 + day_fraction
+    /// Julian Date of this datetime in `scale`. UTC uses a quasi-JD whose day
+    /// fraction spans the actual 86400- or 86401-second UTC day.
+    pub fn to_jd(&self, scale: TimeScale) -> Result<f64> {
+        self.validate(scale)?;
+        let day_start = calendar_day_start(self.year, self.month, self.day);
+        let day_seconds = if scale == TimeScale::Utc {
+            utc_day_seconds(self.year, self.month, self.day)
+        } else {
+            SEC_PER_DAY
+        };
+        let elapsed = self.hour as f64 * 3600.0 + self.minute as f64 * 60.0 + self.second;
+        Ok(day_start + elapsed / day_seconds)
     }
 
     /// Modified Julian Date (`JD − 2400000.5`).
-    pub fn to_mjd(&self) -> f64 {
-        self.to_jd() - MJD0
+    pub fn to_mjd(&self, scale: TimeScale) -> Result<f64> {
+        Ok(self.to_jd(scale)? - MJD0)
     }
 
-    /// Build a datetime from a JD (inverse of [`Datetime::to_jd`]). A single `f64`
-    /// JD at present epochs (~2.46e6) resolves to ~0.1 ms, so the recovered second
-    /// carries that much rounding — fine for display, not for sub-ms timing.
-    pub fn from_jd(jd: f64) -> Datetime {
-        // Split into integer day (JDN at noon) and the fraction past midnight.
-        let z = (jd + 0.5).floor();
-        let frac = (jd + 0.5) - z;
-        let date = jdn_to_gregorian(z as i64);
-        let mut secs = frac * SEC_PER_DAY;
+    /// Build a datetime from a JD in `scale` (inverse of [`Datetime::to_jd`]). A
+    /// single `f64` JD at present epochs resolves to ~0.1 ms, so the recovered
+    /// second carries that much rounding — fine for display, not sub-ms timing.
+    pub fn from_jd(jd: f64, scale: TimeScale) -> Datetime {
+        let CalendarDateFraction { date, fraction } = calendar_date_and_fraction(jd);
+        let day_seconds = if scale == TimeScale::Utc {
+            utc_day_seconds(date.year, date.month, date.day)
+        } else {
+            SEC_PER_DAY
+        };
+        let mut secs = fraction * day_seconds;
+        if day_seconds > SEC_PER_DAY && secs >= SEC_PER_DAY {
+            return Datetime {
+                year: date.year,
+                month: date.month,
+                day: date.day,
+                hour: 23,
+                minute: 59,
+                second: 60.0 + (secs - SEC_PER_DAY),
+            };
+        }
         let hour = (secs / 3600.0).floor();
         secs -= hour * 3600.0;
         let minute = (secs / 60.0).floor();
@@ -134,6 +183,31 @@ impl Datetime {
             minute: minute as u32,
             second: secs,
         }
+    }
+
+    fn validate(&self, scale: TimeScale) -> Result<()> {
+        let valid_date = (-99999..=99999).contains(&self.year)
+            && (1..=12).contains(&self.month)
+            && self.day >= 1
+            && self.day <= days_in_month(self.year, self.month);
+        let valid_time =
+            self.hour < 24 && self.minute < 60 && self.second.is_finite() && self.second >= 0.0;
+        let valid_second = if self.second < 60.0 {
+            true
+        } else {
+            valid_date
+                && self.second < 61.0
+                && scale == TimeScale::Utc
+                && self.hour == 23
+                && self.minute == 59
+                && utc_day_seconds(self.year, self.month, self.day) > SEC_PER_DAY
+        };
+        if valid_date && valid_time && valid_second {
+            return Ok(());
+        }
+        Err(FitsError::InvalidValue {
+            card: format!("datetime {self:?} in {scale:?}"),
+        })
     }
 }
 
@@ -248,7 +322,8 @@ impl TimeScale {
     }
 
     /// Convert a Julian Date in this scale to a JD in `target`, treating `UT1` as
-    /// `UTC` (ΔUT1 = 0). Use [`TimeScale::convert_dut1`] to supply a real ΔUT1.
+    /// `UTC` (ΔUT1 = 0). UTC inputs and outputs use the quasi-JD representation
+    /// returned by [`Datetime::to_jd`]. Use [`TimeScale::convert_dut1`] for ΔUT1.
     pub fn convert(self, jd: f64, target: TimeScale) -> f64 {
         self.convert_dut1(jd, target, 0.0)
     }
@@ -268,11 +343,11 @@ impl TimeScale {
             TimeScale::Tt => jd,
             TimeScale::Tai => jd + TT_TAI / SEC_PER_DAY,
             TimeScale::Gps => jd + (TT_TAI + TAI_GPS) / SEC_PER_DAY,
-            TimeScale::Utc => jd + (TT_TAI + leap_seconds(jd - MJD0)) / SEC_PER_DAY,
+            TimeScale::Utc => utc_quasi_to_tai(jd) + TT_TAI / SEC_PER_DAY,
             // UT1 → UTC (subtract ΔUT1) → TT.
             TimeScale::Ut1 => {
-                let utc = jd - dut1 / SEC_PER_DAY;
-                utc + (TT_TAI + leap_seconds(utc - MJD0)) / SEC_PER_DAY
+                let utc = utc_linear_to_quasi(jd - dut1 / SEC_PER_DAY);
+                utc_quasi_to_tai(utc) + TT_TAI / SEC_PER_DAY
             }
             TimeScale::Tcg => jd - L_G * (jd - T1977_JD),
             TimeScale::Tdb => jd - tdb_minus_tt(jd) / SEC_PER_DAY,
@@ -292,9 +367,11 @@ fn from_tt(tt: f64, target: TimeScale, dut1: f64) -> f64 {
         TimeScale::Tt => tt,
         TimeScale::Tai => tt - TT_TAI / SEC_PER_DAY,
         TimeScale::Gps => tt - (TT_TAI + TAI_GPS) / SEC_PER_DAY,
-        TimeScale::Utc => tai_to_utc(tt - TT_TAI / SEC_PER_DAY),
+        TimeScale::Utc => tai_to_utc_quasi(tt - TT_TAI / SEC_PER_DAY),
         // TT → UTC → UT1 (add ΔUT1).
-        TimeScale::Ut1 => tai_to_utc(tt - TT_TAI / SEC_PER_DAY) + dut1 / SEC_PER_DAY,
+        TimeScale::Ut1 => {
+            utc_quasi_to_linear(tai_to_utc_quasi(tt - TT_TAI / SEC_PER_DAY)) + dut1 / SEC_PER_DAY
+        }
         TimeScale::Tcg => tt + L_G * (tt - T1977_JD),
         TimeScale::Tdb => tt + tdb_minus_tt(tt) / SEC_PER_DAY,
         TimeScale::Tcb => {
@@ -306,11 +383,41 @@ fn from_tt(tt: f64, target: TimeScale, dut1: f64) -> f64 {
     }
 }
 
-/// Convert TAI to UTC, selecting `TAI − UTC` at the resulting UTC instant rather
-/// than at the later TAI-labelled date near a leap-second boundary.
-fn tai_to_utc(tai: f64) -> f64 {
-    let initial = tai - leap_seconds(tai - MJD0) / SEC_PER_DAY;
-    tai - leap_seconds(initial - MJD0) / SEC_PER_DAY
+fn utc_quasi_to_tai(utc: f64) -> f64 {
+    let CalendarDateFraction { date, fraction } = calendar_date_and_fraction(utc);
+    let day_start = calendar_day_start(date.year, date.month, date.day);
+    let elapsed = fraction * utc_day_seconds(date.year, date.month, date.day);
+    day_start + (elapsed + leap_seconds(day_start - MJD0)) / SEC_PER_DAY
+}
+
+fn tai_to_utc_quasi(tai: f64) -> f64 {
+    let approximate = tai - leap_seconds(tai - MJD0) / SEC_PER_DAY;
+    let candidate_jdn = (approximate + 0.5).floor() as i64;
+    for delta in -2..=2 {
+        let jdn = candidate_jdn + delta;
+        let date = jdn_to_gregorian(jdn);
+        let day_start = jdn as f64 - 0.5;
+        let day_seconds = utc_day_seconds(date.year, date.month, date.day);
+        let start_tai = day_start + leap_seconds(day_start - MJD0) / SEC_PER_DAY;
+        let next_tai = start_tai + day_seconds / SEC_PER_DAY;
+        if tai >= start_tai && tai < next_tai {
+            let elapsed = (tai - start_tai) * SEC_PER_DAY;
+            return day_start + elapsed / day_seconds;
+        }
+    }
+    panic!("TAI instant must map to a UTC calendar day")
+}
+
+fn utc_linear_to_quasi(utc: f64) -> f64 {
+    let CalendarDateFraction { date, fraction } = calendar_date_and_fraction(utc);
+    calendar_day_start(date.year, date.month, date.day)
+        + fraction * SEC_PER_DAY / utc_day_seconds(date.year, date.month, date.day)
+}
+
+fn utc_quasi_to_linear(utc: f64) -> f64 {
+    let CalendarDateFraction { date, fraction } = calendar_date_and_fraction(utc);
+    calendar_day_start(date.year, date.month, date.day)
+        + fraction * utc_day_seconds(date.year, date.month, date.day) / SEC_PER_DAY
 }
 
 /// `TDB − TT` in seconds — the standard periodic approximation (~10 µs accuracy):
@@ -337,38 +444,8 @@ fn leap_seconds(mjd: f64) -> f64 {
     // needs authoritative post-table dates yet" choice; if one appears, add an
     // injection hook alongside the `convert_dut1` ΔUT1 override rather than shipping
     // live IERS data here.
-    const TABLE: &[(i64, i64, i64, f64)] = &[
-        (1972, 1, 1, 10.0),
-        (1972, 7, 1, 11.0),
-        (1973, 1, 1, 12.0),
-        (1974, 1, 1, 13.0),
-        (1975, 1, 1, 14.0),
-        (1976, 1, 1, 15.0),
-        (1977, 1, 1, 16.0),
-        (1978, 1, 1, 17.0),
-        (1979, 1, 1, 18.0),
-        (1980, 1, 1, 19.0),
-        (1981, 7, 1, 20.0),
-        (1982, 7, 1, 21.0),
-        (1983, 7, 1, 22.0),
-        (1985, 7, 1, 23.0),
-        (1988, 1, 1, 24.0),
-        (1990, 1, 1, 25.0),
-        (1991, 1, 1, 26.0),
-        (1992, 7, 1, 27.0),
-        (1993, 7, 1, 28.0),
-        (1994, 7, 1, 29.0),
-        (1996, 1, 1, 30.0),
-        (1997, 7, 1, 31.0),
-        (1999, 1, 1, 32.0),
-        (2006, 1, 1, 33.0),
-        (2009, 1, 1, 34.0),
-        (2012, 7, 1, 35.0),
-        (2015, 7, 1, 36.0),
-        (2017, 1, 1, 37.0),
-    ];
-    let mut leap = TABLE[0].3;
-    for &(y, m, d, l) in TABLE {
+    let mut leap = LEAP_SECONDS[0].3;
+    for &(y, m, d, l) in LEAP_SECONDS {
         let threshold = gregorian_to_jdn(y, m, d) as f64 - 0.5 - MJD0;
         if mjd >= threshold {
             leap = l;
@@ -377,6 +454,29 @@ fn leap_seconds(mjd: f64) -> f64 {
         }
     }
     leap
+}
+
+fn calendar_day_start(year: i64, month: u32, day: u32) -> f64 {
+    gregorian_to_jdn(year, month as i64, day as i64) as f64 - 0.5
+}
+
+fn utc_day_seconds(year: i64, month: u32, day: u32) -> f64 {
+    let day_start = calendar_day_start(year, month, day);
+    leap_seconds(day_start + 1.0 - MJD0) - leap_seconds(day_start - MJD0) + SEC_PER_DAY
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CalendarDateFraction {
+    date: CalendarDate,
+    fraction: f64,
+}
+
+fn calendar_date_and_fraction(jd: f64) -> CalendarDateFraction {
+    let jdn = (jd + 0.5).floor();
+    CalendarDateFraction {
+        date: jdn_to_gregorian(jdn as i64),
+        fraction: jd + 0.5 - jdn,
+    }
 }
 
 /// Julian Day Number at noon of a proleptic-Gregorian calendar date (the standard
@@ -515,15 +615,12 @@ impl FitsTime {
     /// Parse the time frame from a header. The public entry point is
     /// [`Header::time`](crate::Header::time), which forwards here.
     pub(crate) fn from_header(header: &Header) -> Result<FitsTime> {
-        let scale = header
-            .get_text("TIMESYS")?
-            .map(TimeScale::parse)
-            .unwrap_or(TimeScale::Utc);
+        let scale = declared_time_scale(header)?;
         let timeunit = header.get_text("TIMEUNIT")?.unwrap_or("s").to_string();
         let trefpos = header.get_text("TREFPOS")?.map(str::to_string);
         let fits_time = FitsTime {
             scale,
-            mjdref: reference_mjd(header)?,
+            mjdref: reference_mjd(header, scale)?,
             timeunit,
             timeoffs: header.get_real("TIMEOFFS")?.unwrap_or(0.0),
             trefpos,
@@ -558,7 +655,8 @@ impl FitsTime {
             return Ok(Some(mjd));
         }
         if let Some(value) = header.get_text("DATE-OBS")? {
-            return Datetime::parse(value).map(|datetime| Some(datetime.to_mjd()));
+            let scale = declared_time_scale(header)?;
+            return Datetime::parse(value)?.to_mjd(scale).map(Some);
         }
         // §9.5: with no DATE-OBS/MJD-OBS, JEPOCH/BEPOCH stand in for the observation time.
         Ok(Self::epoch(header)?.map(|epoch| epoch.mjd))
@@ -595,7 +693,9 @@ impl FitsTime {
             let Some(value) = header.get_text(date)? else {
                 return Ok(None);
             };
-            Datetime::parse(value).map(|datetime| Some(datetime.to_mjd()))
+            Datetime::parse(value)?
+                .to_mjd(declared_time_scale(header)?)
+                .map(Some)
         };
         Ok(TimeBounds {
             beg_mjd: mjd_or_date("MJD-BEG", "DATE-BEG")?,
@@ -782,7 +882,7 @@ fn besselian_year_days(reference_mjd: f64, scale: TimeScale) -> f64 {
 
 /// The reference epoch as MJD: `MJDREF` (or `MJDREFI`+`MJDREFF`), else `JDREF`
 /// (or `JDREFI`+`JDREFF`), else `DATEREF`, else `0.0`.
-fn reference_mjd(header: &Header) -> Result<f64> {
+fn reference_mjd(header: &Header, scale: TimeScale) -> Result<f64> {
     if let Some(mjd) = resolve_split_ref(header, "MJDREF", "MJDREFI", "MJDREFF")? {
         return Ok(mjd);
     }
@@ -792,7 +892,14 @@ fn reference_mjd(header: &Header) -> Result<f64> {
     let Some(value) = header.get_text("DATEREF")? else {
         return Ok(0.0);
     };
-    Datetime::parse(value).map(|datetime| datetime.to_mjd())
+    Datetime::parse(value)?.to_mjd(scale)
+}
+
+fn declared_time_scale(header: &Header) -> Result<TimeScale> {
+    Ok(header
+        .get_text("TIMESYS")?
+        .map(TimeScale::parse)
+        .unwrap_or(TimeScale::Utc))
 }
 
 /// Resolve a reference epoch from its single (`MJDREF`) and split-precision

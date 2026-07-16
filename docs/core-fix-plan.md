@@ -42,8 +42,8 @@ For every batch:
 
 ## Batch 7 — Critical: correct FITS datetime boundaries
 
-- [ ] **Enforce unsigned-four and signed-five year syntax.** Accept the normative `-04713` form, reject signed four-digit years, and cover the full signed range (`src/time/mod.rs:61-73`; standard `docs/refs/fits_standard40.md:4005-4040`). Verify the standard origin-of-JD example and both signed limits.
-- [ ] **Preserve leap seconds during UTC↔JD conversion.** Stop mapping `23:59:60` to the same value as the following midnight; make conversion scale/date aware and validate actual UTC insertion dates (`src/time/mod.rs:86-107`; standard `docs/refs/fits_standard40.md:4043-4045`). Cross-check the 2016 leap second and adjacent instants against ERFA/astropy.
+- [x] **Enforce unsigned-four and signed-five year syntax.** `Datetime::parse` accepts only unsigned four-digit or signed five-digit years, including the full `-99999`…`+99999` range. Tests reject both wrong-width forms, verify the normative `-04713-11-24T12:00:00` JD origin, and round-trip both signed limits (`docs/refs/fits_standard40.md:4005-4040`).
+- [x] **Preserve leap seconds during UTC↔JD conversion.** Datetime conversion now requires a declared scale, validates `second=60` against the actual UTC insertion date/final minute, and uses an ERFA-compatible UTC quasi-JD through UTC↔TAI/TT/UT1 conversion. All embedded insertion dates plus the 2016 `23:59:59`, `23:59:60`, and following midnight values are covered (`docs/refs/fits_standard40.md:4043-4045`).
 
 ## Batch 8 — High: complete variable-length-array semantics
 

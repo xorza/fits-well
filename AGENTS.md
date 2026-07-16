@@ -35,8 +35,9 @@ cylindrical `CAR`/`CEA`/`MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic
 `COP`/`COE`/`COD`/`COO`, pseudoconic `BON`, polyconic `PCO` — with `PC`/`CD`/`CROTA`
 and full `PVi_m` parameters, yielding coordinates in the frame the file declares
 (`RADESYS`/`EQUINOX`). A typed **time** layer
-handles ISO-8601/JD/MJD, epochs, `UTC`…`TCB`/`GPS`/UT1 scale conversions, and time
-WCS axes — both validated against astropy. Tiled **image and table** compression
+handles strict FITS ISO-8601/JD/MJD (signed years and UTC quasi-JD), epochs,
+`UTC`…`TCB`/`GPS`/UT1 scale conversions, and time WCS axes — validated against
+ERFA/astropy. Tiled **image and table** compression
 work behind
 the `compression` feature: all five image codecs (`GZIP_1`, `GZIP_2`, `RICE_1`,
 `PLIO_1`, `HCOMPRESS_1` with `SMOOTH=1` decode), quantized-float read+write
@@ -166,7 +167,7 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
 | `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3); `decode.rs` reassembles + dequantizes tiles into the image, `encode.rs` the integer + float encoders, `mod.rs` the shared `ImageCodec` dispatch / `CompressOptions` / `P`→`Q` descriptor threshold (`needs_wide`), `geometry` the N-d tiling, `convert` the byte/`i64`/`f64` conversions shared by image + table; `map_tiles` fans independent codec work across rayon and safe row chunks partition decode destinations under `parallel` | all 5 image codecs read+write; float quant all 3 dither methods (write-selectable via `CompressOptions::dither`) + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode + lossy `SCALE>0` write; fixed-width table compression read+write; tile-parallel ((de)compress, image + table) |
 | `wcs/` | typed WCS: keyword parse, linear transform (PC/CD/CROTA + `PVi_m` + inverse), 23 projections (zenithal + perspective AZP/SZP + cylindrical + all-sky + conic + BON + PCO) via general pole computation, complete `pixel_to_world`/`world_to_pixel`; unimplemented codes remain readable, are flagged in `unsupported_axes`, and make complete transforms return `UnsupportedWcsTransform` | v2 done (quad-cube/HEALPix, spectral TODO; inter-frame transforms out of scope) |
-| `time/` | typed time (§9): `Datetime` (ISO-8601↔JD/MJD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), fallible prefixed FITS time units, `FitsTime` header view + PC/CD-coupled time WCS axes with per-axis unit/scale overrides | v2 done |
+| `time/` | typed time (§9): `Datetime` (strict unsigned-four/signed-five ISO-8601↔scale-aware JD/MJD, leap-second-preserving UTC quasi-JD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), fallible prefixed FITS time units, `FitsTime` header view + PC/CD-coupled time WCS axes with per-axis unit/scale overrides | v2 done |
 | `error.rs` | `FitsError` + `Result` | done |
 
 `lib.rs` is the only place that defines the public surface (`pub use`). Card

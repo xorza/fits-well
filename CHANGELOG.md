@@ -32,6 +32,9 @@
   the axis-effective time scale.
 - `EpochTime` was consolidated into `TimeCoordinate`; `Header::epoch` now returns
   the shared coordinate type used by both epoch keywords and WCS time axes.
+- `Datetime::to_jd` and `to_mjd` now require a `TimeScale` and return `Result`;
+  `Datetime::from_jd` also requires a scale. UTC values use a leap-second-preserving
+  quasi-JD, and invalid scale/date combinations are rejected.
 - Mutable WCS source fields (`naxis`, `ctype`, `crval`, `crpix`, and
   `unsupported_axes`) are now private so they cannot invalidate derived transforms.
   Read them through the immutable metadata returned by `Wcs::view`.
@@ -141,9 +144,11 @@
   of clamping them or returning an unconverged estimate.
 - PLIO compression rejects values outside its lossless `0..=0xFF_FFFF` mask domain
   instead of silently clamping negative samples or truncating large ones.
-- TT-to-UTC/UT1 conversion now selects leap seconds at the correct UTC instant.
-  Signed Gregorian years use floor division, ISO-8601 parsing requires the FITS year
-  and `hh:mm:ss` forms, and GTI endpoints must have equal lengths.
+- UTC/JD and UTC↔TAI/TT/UT1 conversion preserve leap-second instants with UTC
+  quasi-JD day fractions and validate `second=60` against the actual insertion
+  minute. FITS ISO-8601 parsing accepts only unsigned four-digit or signed
+  five-digit years, including the standard's full signed range and JD origin.
+  Signed Gregorian years use floor division, and GTI endpoints must have equal lengths.
 
 ### Performance and memory
 
