@@ -97,7 +97,7 @@ pub use table::{
     TformKind,
 };
 pub use time::{
-    Datetime, Epoch, EpochTime, FitsTime, GtiInterval, PhaseAxis, TimeAxisKind, TimeBounds,
+    Datetime, Epoch, FitsTime, GtiInterval, PhaseAxis, TimeAxisKind, TimeBounds, TimeCoordinate,
     TimeScale,
 };
 pub use wcs::{Projection, Wcs};

@@ -13,7 +13,7 @@ use crate::header::card::CardKind;
 use crate::header::card::validate_keyword;
 use crate::header::value::Value;
 use crate::keyword::key;
-use crate::time::{EpochTime, FitsTime, PhaseAxis, TimeBounds};
+use crate::time::{FitsTime, PhaseAxis, TimeBounds, TimeCoordinate};
 use crate::wcs::Wcs;
 
 /// A parsed header unit: an *ordered* list of content cards plus a side index
@@ -241,7 +241,7 @@ impl Header {
     }
 
     /// The Julian (`JEPOCH`) or Besselian (`BEPOCH`) epoch keyword, if present.
-    pub fn epoch(&self) -> Result<Option<EpochTime>> {
+    pub fn epoch(&self) -> Result<Option<TimeCoordinate>> {
         FitsTime::epoch(self)
     }
 

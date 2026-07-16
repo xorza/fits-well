@@ -181,12 +181,20 @@ fn gti_intervals_convert_to_absolute_mjd() {
             got: 1,
         })
     ));
+
+    let mut milliseconds = Header::new();
+    milliseconds.set("MJDREF", 58000.0).set("TIMEUNIT", "ms");
+    let milliseconds = FitsTime::from_header(&milliseconds).unwrap();
+    let gti = milliseconds.gti_intervals(&[0.0], &[1000.0]).unwrap()[0];
+    assert_eq!(gti.start_mjd, 58000.0);
+    assert!((gti.stop_mjd - (58000.0 + 1.0 / SEC_PER_DAY)).abs() < 1e-12);
 }
 
 #[test]
 fn classifies_time_related_axes() {
     use TimeAxisKind::*;
     assert_eq!(TimeAxisKind::from_ctype("TIME"), Some(Time));
+    assert_eq!(TimeAxisKind::from_ctype("time"), Some(Time));
     assert_eq!(TimeAxisKind::from_ctype("UTC"), Some(Time)); // a scale name is a time axis
     assert_eq!(TimeAxisKind::from_ctype("PHASE"), Some(Phase));
     assert_eq!(TimeAxisKind::from_ctype("TIMELAG"), Some(Timelag));
@@ -308,24 +316,78 @@ fn ut1_uses_explicit_dut1() {
 }
 
 #[test]
-fn time_axis_resolves_to_mjd() {
+fn time_axis_uses_complete_wcs_row_unit_and_scale() {
     use crate::header::Header;
     let mut h = Header::new();
-    h.set("MJDREF", 58000.0);
-    h.set("TIMESYS", "TT");
-    h.set("TIMEUNIT", "s");
-    h.set("CTYPE3", "TIME");
-    h.set("CRPIX3", 1.0).set("CRVAL3", 0.0).set("CDELT3", 10.0); // 10 s / pixel
+    h.set("NAXIS", 1).set("MJDREF", 58000.0);
+    h.set("TIMESYS", "UTC").set("TIMEUNIT", "s");
+    h.set("CTYPE1A", "TAI").set("CUNIT1A", "d");
+    h.set("CRPIX1A", 1.0).set("CRVAL1A", 0.0).set("CD1_1A", 2.0);
     let t = FitsTime::from_header(&h).unwrap();
-    // Pixel 1 → 0 s → MJDREF; pixel 11 → 100 s later.
-    assert!((t.time_axis_mjd(&h, 3, 1.0).unwrap().unwrap() - 58000.0).abs() < 1e-12);
-    assert!(
-        (t.time_axis_mjd(&h, 3, 11.0).unwrap().unwrap() - (58000.0 + 100.0 / 86400.0)).abs()
-            < 1e-12
+    let alternate = h.wcs(Some('A')).unwrap();
+    // CD1_1 = 2 d/pixel and pixel offset 0.5 produce exactly one day. CUNIT1A and
+    // CTYPE1A override the global seconds/UTC frame.
+    assert_eq!(
+        t.time_axis_mjd(&alternate, 1, &[1.5]).unwrap(),
+        Some(TimeCoordinate {
+            mjd: 58001.0,
+            scale: TimeScale::Tai,
+        })
     );
-    // A non-time axis returns None.
-    h.set("CTYPE1", "RA---TAN");
-    assert!(t.time_axis_mjd(&h, 1, 1.0).unwrap().is_none());
+
+    h.set("CUNIT1A", "ms");
+    let milliseconds = h.wcs(Some('A')).unwrap();
+    // With the same CD row, an offset of 500 pixels is 1000 ms = 1 s.
+    let coordinate = t
+        .time_axis_mjd(&milliseconds, 1, &[501.0])
+        .unwrap()
+        .unwrap();
+    assert!((coordinate.mjd - (58000.0 + 1.0 / SEC_PER_DAY)).abs() < 1e-12);
+
+    h.set("CUNIT1A", "Hz");
+    let invalid_unit = h.wcs(Some('A')).unwrap();
+    assert!(matches!(
+        t.time_axis_mjd(&invalid_unit, 1, &[1.0]),
+        Err(FitsError::InvalidValue { .. })
+    ));
+
+    let mut coupled = Header::new();
+    coupled
+        .set("NAXIS", 2)
+        .set("MJDREF", 58000.0)
+        .set("TIMEUNIT", "s");
+    coupled.set("CTYPE1", "TIME").set("CTYPE2", "LINEAR");
+    coupled
+        .set("CRPIX1", 1.0)
+        .set("CRPIX2", 1.0)
+        .set("CRVAL1", 10.0);
+    coupled.set("CDELT1", 2.0).set("CDELT2", 1.0);
+    coupled
+        .set("PC1_1", 1.0)
+        .set("PC1_2", 0.5)
+        .set("PC2_1", 0.0)
+        .set("PC2_2", 1.0);
+    let wcs = coupled.wcs(None).unwrap();
+    // Row 1 is CDELT1 × PC1_j = [2, 1]. At pixel [3, 5], offsets [2, 4]
+    // contribute 2×2 + 1×4 = 8 s, then CRVAL1 adds 10 s.
+    let coordinate = t.time_axis_mjd(&wcs, 1, &[3.0, 5.0]).unwrap().unwrap();
+    assert_eq!(coordinate.scale, TimeScale::Utc);
+    assert!((coordinate.mjd - (58000.0 + 18.0 / SEC_PER_DAY)).abs() < 1e-12);
+
+    let mut non_time = Header::new();
+    non_time.set("NAXIS", 1).set("CTYPE1", "LINEAR");
+    assert!(
+        t.time_axis_mjd(&non_time.wcs(None).unwrap(), 1, &[1.0])
+            .unwrap()
+            .is_none()
+    );
+
+    h.set("CTYPE1A", "TIME-TAB").set("CUNIT1A", "d");
+    let unsupported = h.wcs(Some('A')).unwrap();
+    assert!(matches!(
+        t.time_axis_mjd(&unsupported, 1, &[1.0]),
+        Err(FitsError::UnsupportedWcsTransform { axes }) if axes == vec![0]
+    ));
 }
 
 #[test]
@@ -362,10 +424,10 @@ fn fits_time_resolves_reference_and_relative_times() {
     assert_eq!(t.scale, TimeScale::Tt);
     assert_eq!(t.mjdref, 58000.0);
     assert_eq!(t.trefpos.as_deref(), Some("TOPOCENTER"));
-    assert_eq!(t.unit_seconds(), 1.0);
+    assert_eq!(t.unit_seconds().unwrap(), 1.0);
     // TSTART=0 → MJDREF; TSTOP=86400 s → one day later.
-    assert!((t.relative_to_mjd(0.0) - 58000.0).abs() < 1e-12);
-    assert!((t.relative_to_mjd(86400.0) - 58001.0).abs() < 1e-12);
+    assert!((t.relative_to_mjd(0.0).unwrap() - 58000.0).abs() < 1e-12);
+    assert!((t.relative_to_mjd(86400.0).unwrap() - 58001.0).abs() < 1e-12);
     // DATE-OBS 2017-09-04 = MJD 58000.0.
     assert!((FitsTime::obs_mjd(&h).unwrap().unwrap() - 58000.0).abs() < 1e-9);
 
@@ -388,9 +450,9 @@ fn fits_time_reads_split_and_day_unit_references() {
     let t = FitsTime::from_header(&h).unwrap();
     assert_eq!(t.scale, TimeScale::Utc); // default
     assert!((t.mjdref - 58000.25).abs() < 1e-12);
-    assert_eq!(t.unit_seconds(), 86400.0);
+    assert_eq!(t.unit_seconds().unwrap(), 86400.0);
     // 2 days past the reference.
-    assert!((t.relative_to_mjd(2.0) - 58002.25).abs() < 1e-12);
+    assert!((t.relative_to_mjd(2.0).unwrap() - 58002.25).abs() < 1e-12);
 }
 
 #[test]
@@ -416,29 +478,73 @@ fn timeoffs_shifts_relative_times() {
     h.set("TIMEOFFS", 10.0);
     let t = FitsTime::from_header(&h).unwrap();
     assert_eq!(t.timeoffs, 10.0);
-    assert!((t.relative_to_mjd(0.0) - (58000.0 + 10.0 / 86400.0)).abs() < 1e-12);
-    assert!((t.relative_to_mjd(5.0) - (58000.0 + 15.0 / 86400.0)).abs() < 1e-12);
+    assert!((t.relative_to_mjd(0.0).unwrap() - (58000.0 + 10.0 / 86400.0)).abs() < 1e-12);
+    assert!((t.relative_to_mjd(5.0).unwrap() - (58000.0 + 15.0 / 86400.0)).abs() < 1e-12);
 }
 
 #[test]
-fn timeunit_minute_hour_century_scale_correctly() {
+fn time_units_parse_prefixes_and_epoch_dependent_years() {
     use crate::header::Header;
     let unit = |u: &str| {
         let mut h = Header::new();
         h.set("TIMEUNIT", u);
-        FitsTime::from_header(&h).unwrap().unit_seconds()
+        FitsTime::from_header(&h).unwrap().unit_seconds().unwrap()
     };
-    // Previously min/h/cy silently fell through to 1 s; Table 34 fixes that.
     assert_eq!(unit("min"), 60.0);
     assert_eq!(unit("h"), 3600.0);
     assert_eq!(unit("d"), 86400.0);
     assert_eq!(unit("a"), 365.25 * 86400.0); // Julian year
     assert_eq!(unit("cy"), 36525.0 * 86400.0); // Julian century
     assert_eq!(unit("s"), 1.0);
-    assert_eq!(unit("bogus"), 1.0); // unknown ⇒ seconds (lenient default)
-    // Deprecated tropical/Besselian years are ~a year, not seconds.
-    assert!((unit("ta") / 86400.0 - 365.24219).abs() < 1e-6);
-    assert!((unit("Ba") / 86400.0 - 365.2421988).abs() < 1e-6);
+    assert_eq!(unit("ms"), 1e-3);
+    assert_eq!(unit("ks"), 1e3);
+    assert_eq!(unit("Mmin"), 60e6);
+
+    let mut tropical = Header::new();
+    tropical
+        .set("TIMESYS", "TDB")
+        .set("MJDREF", 51544.5)
+        .set("TIMEUNIT", "ta");
+    let tropical = FitsTime::from_header(&tropical).unwrap();
+    assert!((tropical.unit_seconds().unwrap() / SEC_PER_DAY - 365.242_190_402_112_4).abs() < 1e-12);
+
+    let mut besselian = Header::new();
+    besselian
+        .set("TIMESYS", "TT")
+        .set("MJDREF", 15019.5)
+        .set("TIMEUNIT", "Ba");
+    let besselian = FitsTime::from_header(&besselian).unwrap();
+    assert!((besselian.unit_seconds().unwrap() / SEC_PER_DAY - 365.242_198_781_7).abs() < 1e-12);
+
+    let mut invalid = Header::new();
+    for value in ["", "m", "Hz", "day", "bogus"] {
+        invalid.set("TIMEUNIT", value);
+        assert!(
+            matches!(
+                FitsTime::from_header(&invalid),
+                Err(FitsError::InvalidValue { .. })
+            ),
+            "{value:?} should not be accepted as a time unit"
+        );
+    }
+}
+
+#[test]
+fn prefixed_relative_time_uses_the_declared_scale() {
+    use crate::header::Header;
+    let mut milliseconds = Header::new();
+    milliseconds.set("MJDREF", 58000.0).set("TIMEUNIT", "ms");
+    let milliseconds = FitsTime::from_header(&milliseconds).unwrap();
+    assert!(
+        (milliseconds.relative_to_mjd(1000.0).unwrap() - (58000.0 + 1.0 / SEC_PER_DAY)).abs()
+            < 1e-12
+    );
+
+    let mut kiloseconds = Header::new();
+    kiloseconds.set("MJDREF", 58000.0).set("TIMEUNIT", "ks");
+    let kiloseconds = FitsTime::from_header(&kiloseconds).unwrap();
+    // 86.4 ks = 86,400 s = one day.
+    assert!((kiloseconds.relative_to_mjd(86.4).unwrap() - 58001.0).abs() < 1e-12);
 }
 
 #[test]
