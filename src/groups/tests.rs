@@ -83,6 +83,48 @@ fn parameter_physical_sums_addends_sharing_a_ptype() {
 }
 
 #[test]
+fn array_physical_maps_blank_to_nan_for_every_integer_bitpix() {
+    for bitpix in [Bitpix::U8, Bitpix::I16, Bitpix::I32, Bitpix::I64] {
+        let mut header = Header::new();
+        header
+            .set("BITPIX", bitpix.code())
+            .set("NAXIS", 2)
+            .set("NAXIS1", 0)
+            .set("NAXIS2", 3)
+            .set("GROUPS", true)
+            .set("PCOUNT", 1)
+            .set("GCOUNT", 1)
+            .set("PTYPE1", "PARAM")
+            .set("BSCALE", 2.0)
+            .set("BZERO", 5.0)
+            .set("BLANK", 10);
+        let data = match bitpix {
+            Bitpix::U8 => vec![10, 9, 10, 11],
+            Bitpix::I16 => [10i16, 9, 10, 11]
+                .into_iter()
+                .flat_map(i16::to_be_bytes)
+                .collect(),
+            Bitpix::I32 => [10i32, 9, 10, 11]
+                .into_iter()
+                .flat_map(i32::to_be_bytes)
+                .collect(),
+            Bitpix::I64 => [10i64, 9, 10, 11]
+                .into_iter()
+                .flat_map(i64::to_be_bytes)
+                .collect(),
+            Bitpix::F32 | Bitpix::F64 => unreachable!("integer cases only"),
+        };
+        let groups = RandomGroups::from_data(&header, &data).unwrap();
+
+        assert_eq!(groups.parameters_physical(0), vec![10.0], "{bitpix:?}");
+        let physical = groups.array_physical(0);
+        assert_eq!(physical[0], 23.0, "5 + 2·9 for {bitpix:?}");
+        assert!(physical[1].is_nan(), "BLANK for {bitpix:?}");
+        assert_eq!(physical[2], 27.0, "5 + 2·11 for {bitpix:?}");
+    }
+}
+
+#[test]
 fn naxis1_group_has_one_array_element_matching_data_extent() {
     // A `NAXIS = 1` random group (only the `NAXIS1 = 0` sentinel, no array axis) has,
     // per Eq. 2, PCOUNT params + an empty-product array of 1 element per group — the

@@ -123,14 +123,12 @@ impl RandomGroups {
         found.then_some(sum)
     }
 
-    /// The physical array values of group `g`: `BZERO + BSCALE × raw`.
+    /// The physical array values of group `g`: `BZERO + BSCALE × raw`, with integer
+    /// samples equal to `BLANK` mapped to `NaN`.
     pub fn array_physical(&self, group: usize) -> Vec<f64> {
         let base = group * self.group_len() + self.pcount;
         (0..self.array_len())
-            .map(|k| {
-                self.array_scaling.bzero
-                    + self.array_scaling.bscale * elem_f64(&self.samples, base + k)
-            })
+            .map(|k| elem_physical(&self.samples, base + k, &self.array_scaling))
             .collect()
     }
 
@@ -148,6 +146,17 @@ fn elem_f64(samples: &ImageData, i: usize) -> f64 {
         ImageData::I64(v) => v[i] as f64,
         ImageData::F32(v) => v[i] as f64,
         ImageData::F64(v) => v[i],
+    }
+}
+
+fn elem_physical(samples: &ImageData, i: usize, scaling: &Scaling) -> f64 {
+    match samples {
+        ImageData::U8(v) => scaling.scale_integer(v[i] as i64),
+        ImageData::I16(v) => scaling.scale_integer(v[i] as i64),
+        ImageData::I32(v) => scaling.scale_integer(v[i] as i64),
+        ImageData::I64(v) => scaling.scale_integer(v[i]),
+        ImageData::F32(v) => scaling.scale(v[i] as f64),
+        ImageData::F64(v) => scaling.scale(v[i]),
     }
 }
 

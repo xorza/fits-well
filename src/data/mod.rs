@@ -108,17 +108,12 @@ impl ImageData {
     }
 
     fn physical_as<O: PhysicalOut>(&self, scaling: &Scaling) -> Vec<O> {
-        let Scaling {
-            bscale,
-            bzero,
-            blank,
-        } = *scaling;
-        let scale = |x: f64| O::from_f64(bzero + bscale * x);
+        let scale = |x: f64| O::from_f64(scaling.scale(x));
         match self {
-            ImageData::U8(v) => scale_ints(v, blank, scale),
-            ImageData::I16(v) => scale_ints(v, blank, scale),
-            ImageData::I32(v) => scale_ints(v, blank, scale),
-            ImageData::I64(v) => scale_ints(v, blank, scale),
+            ImageData::U8(v) => scale_ints(v, scaling),
+            ImageData::I16(v) => scale_ints(v, scaling),
+            ImageData::I32(v) => scale_ints(v, scaling),
+            ImageData::I64(v) => scale_ints(v, scaling),
             ImageData::F32(v) => v.iter().map(|&x| scale(x as f64)).collect(),
             ImageData::F64(v) => v.iter().map(|&x| scale(x)).collect(),
         }
@@ -164,19 +159,8 @@ fn map_be<T, O, const N: usize>(
 }
 
 fn physical_from_be<O: PhysicalOut>(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Vec<O> {
-    let Scaling {
-        bscale,
-        bzero,
-        blank,
-    } = *scaling;
-    let scale = |x: f64| O::from_f64(bzero + bscale * x);
-    let scale_int = |x: i64| {
-        if blank == Some(x) {
-            O::from_f64(f64::NAN)
-        } else {
-            scale(x as f64)
-        }
-    };
+    let scale = |x: f64| O::from_f64(scaling.scale(x));
+    let scale_int = |x: i64| O::from_f64(scaling.scale_integer(x));
     match bitpix {
         Bitpix::U8 => bytes.iter().map(|&x| scale_int(x as i64)).collect(),
         Bitpix::I16 => map_be(bytes, i16::from_be_bytes, |x| scale_int(x as i64)),
@@ -674,20 +658,13 @@ impl Image {
 
 /// Scale an integer sample buffer to the physical plane, mapping the `BLANK`
 /// sentinel (a stored integer value) to `NaN`.
-fn scale_ints<T, O>(v: &[T], blank: Option<i64>, scale: impl Fn(f64) -> O) -> Vec<O>
+fn scale_ints<T, O>(v: &[T], scaling: &Scaling) -> Vec<O>
 where
     T: Copy + Into<i64>,
     O: PhysicalOut,
 {
     v.iter()
-        .map(|&x| {
-            let xi: i64 = x.into();
-            if blank == Some(xi) {
-                O::from_f64(f64::NAN)
-            } else {
-                scale(xi as f64)
-            }
-        })
+        .map(|&x| O::from_f64(scaling.scale_integer(x.into())))
         .collect()
 }
 
@@ -727,6 +704,18 @@ impl Scaling {
             bzero: header.get_real("BZERO")?.unwrap_or(0.0),
             blank: header.get_integer("BLANK")?,
         })
+    }
+
+    pub(crate) fn scale(&self, raw: f64) -> f64 {
+        self.bzero + self.bscale * raw
+    }
+
+    pub(crate) fn scale_integer(&self, raw: i64) -> f64 {
+        if self.blank == Some(raw) {
+            f64::NAN
+        } else {
+            self.scale(raw as f64)
+        }
     }
 
     /// `true` when decoding needs no arithmetic — just an endian swap or copy.
