@@ -32,8 +32,8 @@ For every batch:
 
 ## Batch 5 — Critical: make HDU scanning role-aware
 
-- [ ] **Determine structure role from the first card before scanning further.** Require `SIMPLE` for HDU 0 and `XTENSION` for subsequent HDUs; otherwise stop at special records (`src/reader/mod.rs:146-179`, `src/reader/mod.rs:490-524`, `src/hdu/mod.rs:35-59`; standard `docs/refs/fits_standard40.md:462-483`, `docs/refs/fits_standard40.md:607-612`). Verify a valid special block containing a later canonical `END` does not become an HDU.
-- [ ] **Calculate extents from the validated role.** Use distinct primary, extension, and random-groups formulas and require role-mandatory `PCOUNT`/`GCOUNT` rather than trusting raw `GROUPS` everywhere (`src/hdu/mod.rs:73-110`; standard `docs/refs/fits_standard40.md:1272-1345`, `docs/refs/fits_standard40.md:1892-1934`). Verify exact next-HDU boundaries, empty/extension-only inputs, and invalid random-group signatures.
+- [x] **Determine structure role from the first card before scanning further.** HDU 0 now requires a first-card `SIMPLE`, later HDUs require first-card `XTENSION`, and any other post-HDU block starts special records without scanning for a later `END`. Empty, extension-only, ordinary trailing, and `END`-shaped special-record fixtures cover the decision.
+- [x] **Calculate extents from the validated role.** `HduRole` selects the primary Eq. 1, extension Eq. 2, or random-groups Eq. 4 path. Extension/random-groups `PCOUNT` and `GCOUNT` are mandatory, `GROUPS` cannot alter extension geometry, and exact handcrafted next-HDU boundaries plus invalid random-group signatures are covered.
 
 ## Batch 6 — Critical: resolve time units and axes through the WCS model
 

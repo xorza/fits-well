@@ -186,9 +186,9 @@ impl Header {
         Ok(axes)
     }
 
-    /// `PCOUNT` (default 0), rejecting a negative value (§4.4.1) — the strict reading
-    /// shared by the data-unit sizing ([`crate::hdu`]) and random-groups decode, where
-    /// a present-but-out-of-range value must error rather than be silently clamped.
+    /// `PCOUNT` (default 0), rejecting a negative value (§4.4.1). Primary-image
+    /// checks and random-groups decode use this defaulted view; role-aware extension
+    /// sizing requires the keyword explicitly.
     pub(crate) fn pcount(&self) -> Result<u64> {
         match self.get_integer("PCOUNT")? {
             Some(p) if p < 0 => Err(FitsError::KeywordOutOfRange { name: "PCOUNT" }),

@@ -141,7 +141,8 @@ even ones a writer should no longer emit.
 
 - Treat the 2880-byte block as the I/O quantum; memory-map or read in block
   multiples to keep parsing branch-free and cache-friendly.
-- A parser is essentially: locate HDU boundaries by scanning headers for `END`,
-  round header length up to a block, compute data length from `BITPIX`/`NAXIS*`/
-  `PCOUNT`/`GCOUNT`, round up to a block, advance. Repeat to EOF.
+- Establish the structure role from the first card (`SIMPLE` for the primary,
+  `XTENSION` for later HDUs) before scanning that header for `END`; otherwise a
+  special record containing an `END`-shaped card can become a false HDU. Compute
+  the data length with the role's equation, round up to a block, and advance.
 - HDU boundaries are computable without reading data — enables lazy/seeking access.

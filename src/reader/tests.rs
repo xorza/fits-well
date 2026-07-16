@@ -154,6 +154,17 @@ fn trailing_special_records_and_partial_blocks_are_ignored() {
     let f = FitsReader::open(Cursor::new(bytes)).unwrap();
     assert_eq!(f.hdus.len(), 1);
     assert_eq!(f.hdus[0].kind, HduKind::Primary);
+
+    // A special block may legally contain a canonical END-shaped card later in
+    // the block. Its first card is not XTENSION, so none of it is an HDU header.
+    let mut bytes = std::fs::read("tests/data/fits/UITfuv2582gc.fits").unwrap();
+    bytes.extend_from_slice(&fits_file(
+        &["COMMENT special records", "BITPIX  = 8", "NAXIS   = 0"],
+        &[],
+    ));
+    let f = FitsReader::open(Cursor::new(bytes)).unwrap();
+    assert_eq!(f.hdus.len(), 1);
+    assert_eq!(f.hdus[0].kind, HduKind::Primary);
 }
 
 /// Assemble an in-memory FITS file from card strings + a raw data unit, both
@@ -185,14 +196,19 @@ fn multi_block_header_scan_keeps_geometric_spare_capacity() {
     use crate::block::BLOCK_SIZE;
     use crate::block::CARD_SIZE;
 
-    let cards = vec!["COMMENT"; 2 * BLOCK_SIZE / CARD_SIZE];
+    let mut cards = vec!["COMMENT"; 2 * BLOCK_SIZE / CARD_SIZE];
+    cards[0] = "SIMPLE  = T";
     let bytes = fits_file(&cards, &[]);
     let mut source = SliceSource::new(&bytes);
     let mut offset = 0;
     let mut scratch = Vec::new();
-    let NextHeader::Found { bytes, .. } =
-        scan_header_unit(&mut source, &mut offset, &mut scratch).unwrap()
-    else {
+    let NextHeader::Found { bytes, .. } = scan_header_unit(
+        &mut source,
+        &mut offset,
+        &mut scratch,
+        ExpectedHeader::Primary,
+    )
+    .unwrap() else {
         panic!("expected a complete header");
     };
     assert_eq!(bytes.len(), 3 * BLOCK_SIZE);
@@ -255,7 +271,95 @@ fn content_before_any_valid_hdu_is_rejected() {
     let bytes = vec![b'x'; BLOCK_SIZE + 17];
     assert!(matches!(
         FitsReader::open(Cursor::new(bytes)),
+        Err(FitsError::MissingKeyword { name: "SIMPLE" })
+    ));
+}
+
+#[test]
+fn role_aware_scanning_rejects_invalid_file_starts_and_group_signatures() {
+    assert!(matches!(
+        FitsReader::open(Cursor::new(Vec::<u8>::new())),
         Err(FitsError::UnexpectedEof)
+    ));
+
+    let extension_only = fits_file(
+        &[
+            "XTENSION= 'IMAGE   '",
+            "BITPIX  = 8",
+            "NAXIS   = 0",
+            "PCOUNT  = 0",
+            "GCOUNT  = 1",
+        ],
+        &[],
+    );
+    assert!(matches!(
+        FitsReader::open(Cursor::new(extension_only)),
+        Err(FitsError::MissingKeyword { name: "SIMPLE" })
+    ));
+
+    let invalid_groups = fits_file(
+        &[
+            "SIMPLE  = T",
+            "BITPIX  = 8",
+            "NAXIS   = 1",
+            "NAXIS1  = 2",
+            "GROUPS  = T",
+            "PCOUNT  = 0",
+            "GCOUNT  = 1",
+        ],
+        &[],
+    );
+    assert!(matches!(
+        FitsReader::open(Cursor::new(invalid_groups)),
+        Err(FitsError::KeywordOutOfRange { name: "NAXIS1" })
+    ));
+}
+
+#[test]
+fn role_aware_extents_find_the_exact_next_hdu_boundary() {
+    let mut bytes = fits_file(
+        &["SIMPLE  = T", "BITPIX  = 8", "NAXIS   = 1", "NAXIS1  = 3"],
+        &[1, 2, 3],
+    );
+    bytes.extend_from_slice(&fits_file(
+        &[
+            "XTENSION= 'IMAGE   '",
+            "BITPIX  = 8",
+            "NAXIS   = 1",
+            "NAXIS1  = 5",
+            "PCOUNT  = 0",
+            "GCOUNT  = 1",
+        ],
+        &[4, 5, 6, 7, 8],
+    ));
+    let reader = FitsReader::open(Cursor::new(bytes)).unwrap();
+    assert_eq!(reader.hdus.len(), 2);
+    assert_eq!(reader.hdus[0].kind, HduKind::Primary);
+    assert_eq!(reader.hdus[0].data_offset, crate::block::BLOCK_SIZE as u64);
+    assert_eq!(reader.hdus[0].data_bytes, 3);
+    assert_eq!(reader.hdus[1].kind, HduKind::Image);
+    assert_eq!(
+        reader.hdus[1].data_offset,
+        (3 * crate::block::BLOCK_SIZE) as u64
+    );
+    assert_eq!(reader.hdus[1].data_bytes, 5);
+}
+
+#[test]
+fn extensions_require_pcount_and_gcount_for_boundary_sizing() {
+    let mut bytes = fits_file(&["SIMPLE  = T", "BITPIX  = 8", "NAXIS   = 0"], &[]);
+    bytes.extend_from_slice(&fits_file(
+        &[
+            "XTENSION= 'IMAGE   '",
+            "BITPIX  = 8",
+            "NAXIS   = 0",
+            "GCOUNT  = 1",
+        ],
+        &[],
+    ));
+    assert!(matches!(
+        FitsReader::open(Cursor::new(bytes)),
+        Err(FitsError::MissingKeyword { name: "PCOUNT" })
     ));
 }
 
