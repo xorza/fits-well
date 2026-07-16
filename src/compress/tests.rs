@@ -196,24 +196,42 @@ fn compression_write_round_trips_through_decode() {
             blank: None,
         },
     };
-    // Row tiling for the byte codecs; HCOMPRESS needs a genuinely 2-D tile.
-    for (cmptype, tiles) in [
-        ("GZIP_1", &[][..]),
-        ("GZIP_2", &[]),
-        ("RICE_1", &[]),
-        ("HCOMPRESS_1", &[24, 16]),
+    for (case, cmptype, tiles) in [
+        ("GZIP_1 row tiles", "GZIP_1", &[][..]),
+        ("GZIP_1 2-D tiles", "GZIP_1", &[7, 5]),
+        ("GZIP_2 row tiles", "GZIP_2", &[]),
+        ("RICE_1 row tiles", "RICE_1", &[]),
+        ("HCOMPRESS_1 whole image", "HCOMPRESS_1", &[24, 16]),
     ] {
         let mut w = FitsWriter::new(Cursor::new(Vec::new()));
         w.write_compressed_image(&image, cmptype, &CompressOptions::tiled(tiles))
             .unwrap();
         let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
         let back = r.read_image(1).unwrap();
-        assert_eq!(back.shape, vec![24, 16], "{cmptype}");
+        assert_eq!(back.shape, vec![24, 16], "{case}");
         match back.decode() {
-            ImageData::I16(v) => assert_eq!(v, samples, "{cmptype} round-trip"),
-            other => panic!("{cmptype}: expected I16, got {other:?}"),
+            ImageData::I16(v) => assert_eq!(v, samples, "{case} round-trip"),
+            other => panic!("{case}: expected I16, got {other:?}"),
         }
     }
+
+    let samples_3d: Vec<i16> = (0..5 * 4 * 3).map(|i| i as i16 * 3 - 50).collect();
+    let image_3d = Image {
+        shape: vec![5, 4, 3],
+        samples: ImageData::I16(samples_3d.clone()),
+        scaling: Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    };
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_compressed_image(&image_3d, "GZIP_1", &CompressOptions::tiled([3, 2, 2]))
+        .unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let back = r.read_image(1).unwrap();
+    assert_eq!(back.shape, vec![5, 4, 3]);
+    assert!(matches!(back.decode(), ImageData::I16(v) if v == samples_3d));
 }
 
 /// A 24×16 float field: a smooth ramp plus genuine high-frequency noise (a

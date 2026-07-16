@@ -230,10 +230,10 @@ pub(crate) fn bytepix_to_bitpix(bytepix: usize) -> Bitpix {
     }
 }
 
-/// A zeroed typed sample buffer of `len` elements — the decompression output the
-/// tiles scatter into (narrowing as they land), so there is no whole-image `i64`
-/// or `f64` intermediate to narrow afterwards. `len` comes from untrusted
-/// dimension keywords, so allocation is fallible.
+/// A zeroed typed sample buffer of `len` elements. Parallel decode narrows into
+/// per-tile buffers before scattering, so there is no whole-image `i64` or `f64`
+/// intermediate. `len` comes from untrusted dimension keywords, so allocation is
+/// fallible.
 pub(crate) fn zeroed_samples(bitpix: Bitpix, len: usize) -> Result<ImageData> {
     Ok(match bitpix {
         Bitpix::U8 => ImageData::U8(allocation::try_zeroed(0u8, len)?),

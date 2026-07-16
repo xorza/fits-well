@@ -12,13 +12,11 @@
 //! Variable-length (`P`/`Q`) source columns are not supported and are rejected.
 
 use crate::allocation;
-use crate::compress::DisjointSlice;
 use crate::compress::HduParts;
 use crate::compress::convert;
 use crate::compress::gzip;
 use crate::compress::map_tiles;
 use crate::compress::rice;
-use crate::compress::try_for_each_tile;
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
@@ -321,24 +319,37 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
         .collect::<Result<_>>()?;
 
     let mut out = allocation::try_zeroed(0u8, total)?;
-    let sink = DisjointSlice::new(&mut out);
-    try_for_each_tile(
-        tile_count,
-        TableDecodeScratch::default,
-        |scratch, i| -> Result<()> {
-            let chunk = i / ncols;
-            let column = i % ncols;
-            let m = &metas[column];
-            let r0 = chunk * rpt;
-            let rows = rpt.min(nrows - r0);
-            let cell = cells[column].cell(chunk)?;
-            decompress_column_into(convert::byte_cell(cell)?, m, rows, scratch)?;
-            // SAFETY: chunks partition rows and column metadata partitions each row,
-            // so every tile writes a distinct in-bounds byte range.
-            unsafe { scatter_disjoint(&sink, &scratch.bytes, r0, rows, naxis1, m) };
+    let decode_chunk =
+        |scratch: &mut TableDecodeScratch, chunk: usize, out: &mut [u8]| -> Result<()> {
+            let rows = rpt.min(nrows - chunk * rpt);
+            for column in 0..ncols {
+                let m = &metas[column];
+                let cell = cells[column].cell(chunk)?;
+                decompress_column_into(convert::byte_cell(cell)?, m, rows, scratch)?;
+                scatter_column(out, &scratch.bytes, rows, naxis1, m);
+            }
             Ok(())
-        },
-    )?;
+        };
+    if tile_count != 0 {
+        let chunk_len = rpt.checked_mul(naxis1).ok_or(FitsError::DataUnitOverflow)?;
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+
+            out.par_chunks_mut(chunk_len)
+                .enumerate()
+                .try_for_each_init(TableDecodeScratch::default, |scratch, (chunk, out)| {
+                    decode_chunk(scratch, chunk, out)
+                })?;
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            let mut scratch = TableDecodeScratch::default();
+            for (chunk, out) in out.chunks_mut(chunk_len).enumerate() {
+                decode_chunk(&mut scratch, chunk, out)?;
+            }
+        }
+    }
 
     // Restore the original header: drop the Z* keywords, reinstate NAXIS/PCOUNT.
     let mut h = header.clone();
@@ -456,20 +467,11 @@ fn decompress_column_into(
     Ok(())
 }
 
-unsafe fn scatter_disjoint(
-    sink: &DisjointSlice<u8>,
-    bytes: &[u8],
-    r0: usize,
-    rows: usize,
-    row_len: usize,
-    m: &ColMeta,
-) {
-    assert_eq!(bytes.len(), rows * m.width, "decompressed column size");
+fn scatter_column(out: &mut [u8], bytes: &[u8], rows: usize, row_len: usize, m: &ColMeta) {
+    debug_assert_eq!(bytes.len(), rows * m.width, "decompressed column size");
     for row in 0..rows {
-        let offset = (r0 + row) * row_len + m.offset;
-        // SAFETY: row chunks and column metadata partition the output, so this
-        // in-bounds range does not overlap any concurrently accessed range.
-        unsafe { sink.copy_from_slice(offset, &bytes[row * m.width..(row + 1) * m.width]) };
+        let offset = row * row_len + m.offset;
+        out[offset..offset + m.width].copy_from_slice(&bytes[row * m.width..(row + 1) * m.width]);
     }
 }
 

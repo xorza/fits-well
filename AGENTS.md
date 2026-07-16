@@ -164,7 +164,7 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `ascii/` | `TABLE` (ASCII) read: `TBCOLn`/Fortran `TFORMn` → `AsciiColumn`/`ColumnData` | read done (write in `writer/`) |
 | `groups/` | random-groups (§6) read: params + arrays, `PSCALn`/`PZEROn` physical | read done (no write — deprecated) |
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
-| `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3); `decode.rs` reassembles + dequantizes tiles into the image, `encode.rs` the integer + float encoders, `mod.rs` the shared `ImageCodec` dispatch / `CompressOptions` / `P`→`Q` descriptor threshold (`needs_wide`), `geometry` the N-d tiling, `convert` the byte/`i64`/`f64` conversions shared by image + table; `map_tiles` fans the per-tile codec work across rayon under `parallel` | all 5 image codecs read+write; float quant all 3 dither methods (write-selectable via `CompressOptions::dither`) + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode + lossy `SCALE>0` write; fixed-width table compression read+write; tile-parallel ((de)compress, image + table) |
+| `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3); `decode.rs` reassembles + dequantizes tiles into the image, `encode.rs` the integer + float encoders, `mod.rs` the shared `ImageCodec` dispatch / `CompressOptions` / `P`→`Q` descriptor threshold (`needs_wide`), `geometry` the N-d tiling, `convert` the byte/`i64`/`f64` conversions shared by image + table; `map_tiles` fans independent codec work across rayon and safe row chunks partition decode destinations under `parallel` | all 5 image codecs read+write; float quant all 3 dither methods (write-selectable via `CompressOptions::dither`) + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode + lossy `SCALE>0` write; fixed-width table compression read+write; tile-parallel ((de)compress, image + table) |
 | `wcs/` | typed WCS: keyword parse, linear transform (PC/CD/CROTA + `PVi_m` + inverse), 23 projections (zenithal + perspective AZP/SZP + cylindrical + all-sky + conic + BON + PCO) via general pole computation, `pixel_to_world`/`world_to_pixel`; unimplemented codes decode through the linear stage and are flagged in `unsupported_axes` (never fail) | v2 done (quad-cube/HEALPix, spectral TODO; inter-frame transforms out of scope) |
 | `time/` | typed time (§9): `Datetime` (ISO-8601↔JD/MJD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), `FitsTime` header view + time WCS axis | v2 done |
 | `error.rs` | `FitsError` + `Result` | done |
@@ -193,9 +193,9 @@ Design principles specific to this crate:
 - **Parallelize the compute-bound layer; reuse buffers on the memory-bound one.** The
   benches settled where threads pay: the tiled codecs are compute-bound (100s of MiB/s,
   ~100× below the memory wall) and tiles are independent, so `compress::map_tiles`
-  fans the per-tile (de)compression across rayon under the `parallel` feature for a
-  near-linear speedup — map the tiles in parallel, then fold serially (scatter into
-  the image / concatenate the heap, where order matters). The raw byte-swap +
+  fans independent codec work across rayon under the `parallel` feature. Ordered
+  heap concatenation stays serial; decode destinations use safe disjoint row chunks
+  when a serial scatter is material. The raw byte-swap +
   `BSCALE/BZERO` / `TSCAL/TZERO` paths are *memory-bound*, but SIMD is **not** their
   lever: a transforming store-loop runs at write-allocate/RFO speed (~8 GiB/s on a
   Zen3 core, ~½ the single-thread `memcpy` wall), and profiling found explicit-AVX2

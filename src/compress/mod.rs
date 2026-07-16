@@ -157,9 +157,9 @@ fn needs_wide(heap_len: usize, max_nelem: usize) -> bool {
 ///
 /// Tiles (de)compress independently and the codecs are compute-bound, so with the
 /// `parallel` feature this fans the per-tile work across the rayon pool for a
-/// near-linear speedup. The caller then folds the results — scatter into the image,
-/// or concatenate into the heap — and *that* step stays serial because tile order
-/// and heap offsets are sequential.
+/// near-linear speedup. The caller then folds the ordered results through safe
+/// slices; heap concatenation stays serial, while image scatter may partition the
+/// destination into disjoint rows.
 #[cfg(feature = "parallel")]
 pub(crate) fn map_tiles<S, T, I, F>(ntiles: usize, init: I, f: F) -> Result<Vec<T>>
 where
@@ -183,84 +183,6 @@ where
 {
     let mut scratch = init();
     (0..ntiles).map(|t| f(&mut scratch, t)).collect()
-}
-
-#[cfg(feature = "parallel")]
-pub(crate) fn try_for_each_tile<S, I, F>(ntiles: usize, init: I, f: F) -> Result<()>
-where
-    S: Send,
-    I: Fn() -> S + Sync + Send,
-    F: Fn(&mut S, usize) -> Result<()> + Sync + Send,
-{
-    use rayon::prelude::*;
-    (0..ntiles)
-        .into_par_iter()
-        .try_for_each_init(init, |scratch, tile| f(scratch, tile))
-}
-
-#[cfg(not(feature = "parallel"))]
-pub(crate) fn try_for_each_tile<S, I, F>(ntiles: usize, init: I, f: F) -> Result<()>
-where
-    I: FnOnce() -> S,
-    F: Fn(&mut S, usize) -> Result<()>,
-{
-    let mut scratch = init();
-    for tile in 0..ntiles {
-        f(&mut scratch, tile)?;
-    }
-    Ok(())
-}
-
-#[derive(Debug)]
-struct DisjointSlice<T> {
-    ptr: *mut T,
-    len: usize,
-}
-
-// SAFETY: callers may share the wrapper only while writing non-overlapping ranges.
-unsafe impl<T> Sync for DisjointSlice<T> {}
-
-impl<T> DisjointSlice<T> {
-    fn new(values: &mut [T]) -> DisjointSlice<T> {
-        DisjointSlice {
-            ptr: values.as_mut_ptr(),
-            len: values.len(),
-        }
-    }
-
-    fn range_ptr(&self, start: usize, len: usize) -> *mut T {
-        let end = start.checked_add(len).expect("disjoint range overflow");
-        assert!(end <= self.len, "disjoint range out of bounds");
-        // SAFETY: the range check proves `start` lies within this allocation.
-        unsafe { self.ptr.add(start) }
-    }
-
-    unsafe fn copy_from_slice(&self, start: usize, source: &[T])
-    where
-        T: Copy,
-    {
-        let ptr = self.range_ptr(start, source.len());
-        // SAFETY: the range is in bounds; the caller guarantees it does not overlap
-        // a range accessed by any other live reference.
-        let destination = unsafe { std::slice::from_raw_parts_mut(ptr, source.len()) };
-        destination.copy_from_slice(source);
-    }
-
-    #[cfg(feature = "parallel")]
-    unsafe fn map_from_slice<S: Copy>(
-        &self,
-        start: usize,
-        source: &[S],
-        convert: &impl Fn(S) -> T,
-    ) {
-        let ptr = self.range_ptr(start, source.len());
-        // SAFETY: the range is in bounds; the caller guarantees it does not overlap
-        // a range accessed by any other live reference.
-        let destination = unsafe { std::slice::from_raw_parts_mut(ptr, source.len()) };
-        for (value, &input) in destination.iter_mut().zip(source) {
-            *value = convert(input);
-        }
-    }
 }
 
 #[cfg(test)]
