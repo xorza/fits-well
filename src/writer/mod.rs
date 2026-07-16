@@ -547,7 +547,9 @@ fn image_header(image: &Image, primary: bool) -> Result<Header> {
         add_image_axes(&mut header, image)?;
         header.set("PCOUNT", 0).set("GCOUNT", 1);
     }
-    add_scaling(&mut header, image);
+    image
+        .scaling
+        .add_to_header(&mut header, image.samples.bitpix());
     Ok(header)
 }
 
@@ -566,21 +568,6 @@ fn add_image_axes(header: &mut Header, image: &Image) -> Result<()> {
         header.set(key!("NAXIS{}", i + 1).as_str(), fits_i64(n)?);
     }
     Ok(())
-}
-
-/// Emit `BZERO`/`BSCALE`/`BLANK` only when scaling carries information beyond the
-/// identity map.
-fn add_scaling(header: &mut Header, image: &Image) {
-    if !image.scaling.is_identity() {
-        header.set("BZERO", image.scaling.bzero);
-        header.set("BSCALE", image.scaling.bscale);
-    }
-    // §4.4.2.5: BLANK applies only to integer images (positive BITPIX).
-    if let Some(blank) = image.scaling.blank
-        && image.samples.bitpix().is_integer()
-    {
-        header.set("BLANK", blank);
-    }
 }
 
 /// `BINTABLE` extension header (§7.3.1) for the given columns.

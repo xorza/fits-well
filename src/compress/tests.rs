@@ -256,44 +256,119 @@ fn float_field() -> Vec<f32> {
 }
 
 #[test]
-fn float_quantize_write_round_trips_within_tolerance() {
+fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
     use crate::data::{Image, ImageData, Scaling};
     use crate::writer::FitsWriter;
     use std::io::Cursor;
 
-    let orig = float_field();
-    let image = Image {
-        shape: vec![24, 16],
-        samples: ImageData::F32(orig.clone()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
-    };
-    for cmptype in ["RICE_1", "GZIP_1", "GZIP_2"] {
-        let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-        // Whole-image tile so the noise estimate sees the full field.
-        w.write_compressed_image(&image, cmptype, &CompressOptions::tiled([24, 16]))
-            .unwrap();
-        let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
-        let back = match r.read_image(1).unwrap().decode() {
-            ImageData::F32(v) => v,
-            other => panic!("{cmptype}: expected F32, got {other:?}"),
+    let mut f32_samples: Vec<f32> = float_field().into_iter().take(24).collect();
+    f32_samples.extend(std::iter::repeat_n(42.25, 24));
+    let f64_samples = f32_samples.iter().map(|&value| value as f64).collect();
+
+    for samples in [ImageData::F32(f32_samples), ImageData::F64(f64_samples)] {
+        let bitpix = samples.bitpix();
+        let expected_raw: Vec<f64> = match &samples {
+            ImageData::F32(values) => values.iter().map(|&value| value as f64).collect(),
+            ImageData::F64(values) => values.clone(),
+            _ => unreachable!("float cases only"),
         };
-        assert_eq!(back.len(), orig.len(), "{cmptype}");
-        // Quantization error is bounded by ~0.5·delta; delta ≈ noise/4 ≈ 0.07 for
-        // this field, so 0.2 is a safe ceiling. Also confirm it actually quantized.
-        let max_err = orig
-            .iter()
-            .zip(&back)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-        assert!(max_err < 0.2, "{cmptype} max error {max_err} too large");
-        assert!(
-            orig.iter().zip(&back).any(|(a, b)| a != b),
-            "{cmptype} stored losslessly — quantized path not exercised"
-        );
+        let image = Image {
+            shape: vec![24, 2],
+            samples,
+            scaling: Scaling {
+                bscale: 2.5,
+                bzero: -10.0,
+                blank: None,
+            },
+        };
+        for cmptype in ["RICE_1", "GZIP_1", "GZIP_2"] {
+            let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+            w.write_compressed_image(&image, cmptype, &CompressOptions::tiled([24, 1]))
+                .unwrap();
+            let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+            let header = &r.hdus()[1].header;
+            assert_eq!(
+                header.get_real("BSCALE").unwrap(),
+                Some(2.5),
+                "{bitpix:?} {cmptype}"
+            );
+            assert_eq!(
+                header.get_real("BZERO").unwrap(),
+                Some(-10.0),
+                "{bitpix:?} {cmptype}"
+            );
+
+            let table = r.read_table(1).unwrap();
+            let compressed = table
+                .column_by_name("COMPRESSED_DATA")
+                .unwrap()
+                .vla()
+                .unwrap();
+            let fallback = table
+                .column_by_name("GZIP_COMPRESSED_DATA")
+                .unwrap()
+                .vla()
+                .unwrap();
+            assert_ne!(
+                compressed[0].element_count(),
+                0,
+                "quantized tile for {bitpix:?} {cmptype}"
+            );
+            assert_eq!(
+                fallback[0].element_count(),
+                0,
+                "quantized tile for {bitpix:?} {cmptype}"
+            );
+            assert_eq!(
+                compressed[1].element_count(),
+                0,
+                "fallback tile for {bitpix:?} {cmptype}"
+            );
+            assert_ne!(
+                fallback[1].element_count(),
+                0,
+                "fallback tile for {bitpix:?} {cmptype}"
+            );
+
+            let back = r.read_image(1).unwrap();
+            assert_eq!(back.scaling, image.scaling, "{bitpix:?} {cmptype}");
+            let physical = back.physical();
+            let actual_raw: Vec<f64> = match back.decode() {
+                ImageData::F32(values) => values.into_iter().map(|value| value as f64).collect(),
+                ImageData::F64(values) => values,
+                other => panic!("{cmptype}: expected {bitpix:?}, got {other:?}"),
+            };
+            let mut quantized_changed = false;
+            for (index, (&expected, &actual)) in expected_raw.iter().zip(&actual_raw).enumerate() {
+                let expected_physical = -10.0 + 2.5 * expected;
+                if index < 24 {
+                    let raw_error = (actual - expected).abs();
+                    assert!(
+                        raw_error < 0.2,
+                        "{bitpix:?} {cmptype} raw pixel {index}: {raw_error}"
+                    );
+                    let physical_error = (physical[index] - expected_physical).abs();
+                    assert!(
+                        physical_error < 0.5,
+                        "{bitpix:?} {cmptype} physical pixel {index}: {physical_error}"
+                    );
+                    quantized_changed |= actual != expected;
+                } else {
+                    assert_eq!(
+                        actual, expected,
+                        "{bitpix:?} {cmptype} fallback raw pixel {index}"
+                    );
+                    assert_eq!(
+                        physical[index], expected_physical,
+                        "{bitpix:?} {cmptype} fallback physical pixel {index}"
+                    );
+                }
+            }
+            assert!(
+                quantized_changed,
+                "{bitpix:?} {cmptype} did not quantize the noisy tile"
+            );
+        }
     }
 }
 
