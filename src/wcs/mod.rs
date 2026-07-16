@@ -18,11 +18,9 @@
 //! pseudoconic `BON`, and polyconic `PCO`. All validated against `astropy.wcs`
 //! (wcslib). The unimplemented non-linear transforms — quad-cube `TSC`/`CSC`/`QSC`,
 //! HEALPix `HPX`/`XPH`, and the non-linear coordinate algorithms (§8.4), including
-//! generic `LOG`/`TAB` axes — are not evaluated: such an axis passes through the
-//! linear stage only (its intermediate world coordinate) and is listed in
-//! [`WcsView::unsupported_axes`], so a file using one still reads, just with that
-//! axis not fully decoded. These source values and flags are available through the
-//! immutable [`Wcs::view`] snapshot.
+//! generic `LOG`/`TAB` axes — are not evaluated. Parsing remains permissive and
+//! records them in [`WcsView::unsupported_axes`]; complete transforms then return
+//! [`FitsError::UnsupportedWcsTransform`](crate::FitsError::UnsupportedWcsTransform).
 //!
 //! Binary-table WCS (Table 22) is supported for both the pixel-list
 //! ([`Header::wcs_pixel_list`](crate::Header::wcs_pixel_list)) and vector-cell
@@ -873,9 +871,8 @@ pub struct Wcs {
     /// celestial pair is present; `None` for an all-linear system.
     celestial: Option<Celestial>,
     /// Axes (0-based) whose non-linear transform is not evaluated — an unsupported
-    /// projection (quad-cube/HEALPix) or a non-linear spectral algorithm (§8.3/§8.4).
-    /// [`Wcs::pixel_to_world`] returns their *intermediate* world coordinate (the
-    /// linear stage only), not a fully decoded celestial/spectral value.
+    /// projection (quad-cube/HEALPix) or another non-linear coordinate algorithm
+    /// (§8.3/§8.4). Complete transforms reject these axes.
     unsupported_axes: Vec<usize>,
 }
 
@@ -1212,13 +1209,8 @@ impl Wcs {
             .collect::<Result<_>>()?;
         let celestial_axes = find_celestial(&ctype)?;
 
-        // Axes whose non-linear transform this library doesn't evaluate — an
-        // unsupported celestial projection (quad-cube `TSC`/`CSC`/`QSC`, HEALPix
-        // `HPX`/`XPH`) or a non-linearly-sampled spectral axis (§8.4). Rather than
-        // fail the whole WCS, these pass through the linear stage only, so
-        // `pixel_to_world` returns their *intermediate* world coordinate;
-        // `unsupported_axes` records them so a caller never mistakes that for a
-        // fully-decoded sky/spectral value.
+        // Preserve unsupported WCS metadata for inspection without allowing an
+        // incomplete transform to masquerade as a world coordinate.
         let mut unsupported_axes = nonlinear_unsupported_axes(&ctype);
 
         // Build the linear transform A. Precedence: CD, then PC×CDELT, then the
@@ -1305,8 +1297,7 @@ impl Wcs {
                 // A conic's mid-latitude θ_a = PVi_1 is mandatory and must be
                 // non-zero; θ_a = 0 (absent, or explicitly 0) is a degenerate cone
                 // (`1/tan 0`). Treat it like an unimplemented projection — flag the
-                // axes and skip deprojection so they pass through the linear stage
-                // (an intermediate world coordinate) rather than returning NaN.
+                // axes so complete transforms fail rather than returning NaN.
                 if family == Family::Conic && pv[1] == 0.0 {
                     unsupported_axes.push(lng);
                     unsupported_axes.push(lat);
@@ -1532,8 +1523,14 @@ impl Wcs {
         Wcs::from_header(&h, None)
     }
 
-    /// Map 1-based pixel coordinates to world coordinates. Celestial axes return
-    /// `(α, δ)` in degrees; other axes return `CRVAL + ` the linear value.
+    /// Map 1-based pixel coordinates to complete world coordinates. Celestial axes
+    /// return `(α, δ)` in degrees; linear axes return `CRVAL +` the intermediate
+    /// coordinate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FitsError::UnsupportedWcsTransform`] if any nonlinear axis is not
+    /// implemented, or a projection error when the coordinate is outside its domain.
     ///
     /// # Panics
     ///
@@ -1541,6 +1538,7 @@ impl Wcs {
     pub fn pixel_to_world(&self, pixel: &[f64]) -> Result<Vec<f64>> {
         let naxis = self.axes.len();
         assert_eq!(pixel.len(), naxis, "pixel coordinate count");
+        self.require_complete_transform()?;
         let offset: Vec<f64> = pixel
             .iter()
             .zip(&self.axes)
@@ -1563,8 +1561,13 @@ impl Wcs {
         Ok(world)
     }
 
-    /// Map world coordinates back to 1-based pixel coordinates, the inverse of
-    /// [`Wcs::pixel_to_world`].
+    /// Map complete world coordinates back to 1-based pixel coordinates, the inverse
+    /// of [`Wcs::pixel_to_world`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FitsError::UnsupportedWcsTransform`] if any nonlinear axis is not
+    /// implemented, or a projection error when the coordinate is outside its domain.
     ///
     /// # Panics
     ///
@@ -1572,6 +1575,7 @@ impl Wcs {
     pub fn world_to_pixel(&self, world: &[f64]) -> Result<Vec<f64>> {
         let naxis = self.axes.len();
         assert_eq!(world.len(), naxis, "world coordinate count");
+        self.require_complete_transform()?;
         let mut intermediate: Vec<f64> = world
             .iter()
             .zip(&self.axes)
@@ -1595,6 +1599,16 @@ impl Wcs {
             .zip(&self.axes)
             .map(|(value, axis)| value + axis.crpix)
             .collect())
+    }
+
+    fn require_complete_transform(&self) -> Result<()> {
+        if self.unsupported_axes.is_empty() {
+            Ok(())
+        } else {
+            Err(FitsError::UnsupportedWcsTransform {
+                axes: self.unsupported_axes.clone(),
+            })
+        }
     }
 }
 

@@ -490,7 +490,8 @@ fn degenerate_cylindrical_projection_parameters_are_rejected() {
 }
 
 #[test]
-fn unsupported_projection_codes_fall_back_to_intermediate() {
+fn unsupported_projection_codes_reject_complete_transforms() {
+    use crate::error::FitsError;
     use crate::header::Header;
     // Short codes represent space-padded algorithm names after FITS text trimming.
     for code in ["TSC", "CSC", "QSC", "HPX", "XPH", "UV", "U"] {
@@ -504,9 +505,14 @@ fn unsupported_projection_codes_fall_back_to_intermediate() {
         let w = Wcs::from_header(&h, None).unwrap();
         assert_eq!(w.view().unsupported_axes, [0, 1], "{code} axes flagged");
         assert!(w.celestial.is_none(), "{code} not decoded as a projection");
-        // Intermediate world at pixel (3,4): CRVAL + CDELT·(pixel − CRPIX).
-        let out = w.pixel_to_world(&[3.0, 4.0]).unwrap();
-        assert_eq!(out, [14.0, 29.0], "{code}");
+        assert!(matches!(
+            w.pixel_to_world(&[3.0, 4.0]),
+            Err(FitsError::UnsupportedWcsTransform { axes }) if axes == [0, 1]
+        ));
+        assert!(matches!(
+            w.world_to_pixel(&[10.0, 20.0]),
+            Err(FitsError::UnsupportedWcsTransform { axes }) if axes == [0, 1]
+        ));
     }
 }
 
@@ -544,12 +550,13 @@ fn mismatched_celestial_projections_are_rejected() {
 }
 
 #[test]
-fn degenerate_conic_without_pv1_falls_back_to_intermediate() {
+fn degenerate_conic_without_pv1_rejects_complete_transforms() {
+    use crate::error::FitsError;
     use crate::header::Header;
     // A conic's mid-latitude θ_a = PVi_1 is mandatory and must be non-zero; absent
     // (→ 0) the cone is degenerate (1/tan 0 → NaN). Rather than return NaN, the WCS
-    // flags the celestial axes and passes them through the linear stage, exactly
-    // like an unimplemented projection — never silently wrong.
+    // flags the celestial axes, so complete transforms fail rather than returning
+    // NaN or silently relabeling linear-stage coordinates as sky coordinates.
     for code in ["COP", "COE", "COD", "COO"] {
         let mut h = Header::new();
         h.set("NAXIS", 2);
@@ -562,9 +569,10 @@ fn degenerate_conic_without_pv1_falls_back_to_intermediate() {
         let w = Wcs::from_header(&h, None).unwrap();
         assert_eq!(w.view().unsupported_axes, [0, 1], "{code} axes flagged");
         assert!(w.celestial.is_none(), "{code} degenerate, not deprojected");
-        let out = w.pixel_to_world(&[3.0, 4.0]).unwrap();
-        assert_eq!(out, [14.0, 29.0], "{code} intermediate");
-        assert!(out.iter().all(|v| v.is_finite()), "{code} no NaN");
+        assert!(matches!(
+            w.pixel_to_world(&[3.0, 4.0]),
+            Err(FitsError::UnsupportedWcsTransform { axes }) if axes == [0, 1]
+        ));
     }
     // A conic *with* a valid θ_a is still decoded normally (not flagged).
     let mut ok = Header::new();
@@ -860,6 +868,7 @@ fn planetary_solar_lonlat_axes_are_celestial() {
 
 #[test]
 fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
+    use crate::error::FitsError;
     use crate::header::Header;
     let build = |t3: &str| {
         let mut h = Header::new();
@@ -893,10 +902,20 @@ fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
         assert_eq!(wcs.view().unsupported_axes, expected, "{ctype}");
         assert!(wcs.celestial.is_some(), "{ctype} must retain the TAN pair");
 
-        // Axis 3's linear stage is 1.4e9 + (3 − 1)·1e6 = 1.402e9.
-        let out = wcs.pixel_to_world(&[1.0, 1.0, 3.0]).unwrap();
-        assert_eq!(out[2], 1.402e9, "{ctype}");
-        assert!((out[0] - 45.0).abs() < 1e-9 && (out[1] - 30.0).abs() < 1e-9);
+        if unsupported {
+            assert!(matches!(
+                wcs.pixel_to_world(&[1.0, 1.0, 3.0]),
+                Err(FitsError::UnsupportedWcsTransform { axes }) if axes == [2]
+            ));
+            assert!(matches!(
+                wcs.world_to_pixel(&[45.0, 30.0, 1.402e9]),
+                Err(FitsError::UnsupportedWcsTransform { axes }) if axes == [2]
+            ));
+        } else {
+            let out = wcs.pixel_to_world(&[1.0, 1.0, 3.0]).unwrap();
+            assert_eq!(out[2], 1.402e9, "{ctype}");
+            assert!((out[0] - 45.0).abs() < 1e-9 && (out[1] - 30.0).abs() < 1e-9);
+        }
     }
 }
 

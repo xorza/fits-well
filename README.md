@@ -148,8 +148,9 @@ println!("{sky:?} -> {pixel:?}");
 # Ok::<(), fits_well::FitsError>(())
 ```
 
-Both transforms return an error for coordinates outside the projection's domain
-or for an iterative inversion that does not converge.
+Both complete transforms return an error for coordinates outside the projection's
+domain, failed iterative inversion, or a nonlinear algorithm this crate does not
+yet implement.
 
 The typed **time** layer (`Header::time`, `Datetime`, `TimeScale`) handles
 ISO-8601/JD/MJD, epochs, and `UTC`…`TCB`/`GPS`/UT1 scale conversions.

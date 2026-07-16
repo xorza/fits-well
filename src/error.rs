@@ -87,6 +87,12 @@ pub enum FitsError {
     ConflictingWcsKeywords {
         detail: &'static str,
     },
+    /// A complete pixel↔world transform was requested for axes whose nonlinear
+    /// algorithm is not implemented. The indices are zero-based, matching
+    /// [`crate::WcsView::unsupported_axes`].
+    UnsupportedWcsTransform {
+        axes: Vec<usize>,
+    },
     /// A coordinate lies outside the mathematical domain of its WCS projection.
     WcsProjectionDomain {
         projection: &'static str,
@@ -215,6 +221,12 @@ impl fmt::Display for FitsError {
             FitsError::ConflictingWcsKeywords { detail } => {
                 write!(f, "conflicting WCS keywords: {detail}")
             }
+            FitsError::UnsupportedWcsTransform { axes } => {
+                write!(
+                    f,
+                    "WCS has unsupported nonlinear transforms on zero-based axes {axes:?}"
+                )
+            }
             FitsError::WcsProjectionDomain { projection } => {
                 write!(
                     f,
@@ -328,6 +340,10 @@ mod tests {
             }
             .to_string(),
             "table cell contains characters outside FITS restricted ASCII"
+        );
+        assert_eq!(
+            FitsError::UnsupportedWcsTransform { axes: vec![0, 2] }.to_string(),
+            "WCS has unsupported nonlinear transforms on zero-based axes [0, 2]"
         );
         assert_eq!(
             FitsError::WcsProjectionDomain { projection: "SIN" }.to_string(),

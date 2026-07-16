@@ -45,8 +45,8 @@ fixed-width table compression. All tile (de)compression fans out across the rayo
 pool under the default-on `parallel` feature (a scalar fallback runs without it),
 which the codec benches measure at ~2.5–3× on decompress and ~4–6.5× on compress.
 The remaining WCS frontier (quad-cube/HEALPix
-projections, non-linear spectral axes — both of which decode through the linear
-stage and are flagged in `unsupported_axes` today, never failing the read) is
+projections, non-linear spectral axes — both of which remain readable and are
+flagged in `unsupported_axes`, while complete transforms reject them) is
 charted in the module map below, which shows what is built versus planned. The
 design principles in this file remain the spec; follow them when filling the
 scaffolds in.
@@ -165,7 +165,7 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `groups/` | random-groups (§6) read: params + arrays, `PSCALn`/`PZEROn` physical | read done (no write — deprecated) |
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
 | `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3); `decode.rs` reassembles + dequantizes tiles into the image, `encode.rs` the integer + float encoders, `mod.rs` the shared `ImageCodec` dispatch / `CompressOptions` / `P`→`Q` descriptor threshold (`needs_wide`), `geometry` the N-d tiling, `convert` the byte/`i64`/`f64` conversions shared by image + table; `map_tiles` fans independent codec work across rayon and safe row chunks partition decode destinations under `parallel` | all 5 image codecs read+write; float quant all 3 dither methods (write-selectable via `CompressOptions::dither`) + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode + lossy `SCALE>0` write; fixed-width table compression read+write; tile-parallel ((de)compress, image + table) |
-| `wcs/` | typed WCS: keyword parse, linear transform (PC/CD/CROTA + `PVi_m` + inverse), 23 projections (zenithal + perspective AZP/SZP + cylindrical + all-sky + conic + BON + PCO) via general pole computation, `pixel_to_world`/`world_to_pixel`; unimplemented codes decode through the linear stage and are flagged in `unsupported_axes` (never fail) | v2 done (quad-cube/HEALPix, spectral TODO; inter-frame transforms out of scope) |
+| `wcs/` | typed WCS: keyword parse, linear transform (PC/CD/CROTA + `PVi_m` + inverse), 23 projections (zenithal + perspective AZP/SZP + cylindrical + all-sky + conic + BON + PCO) via general pole computation, complete `pixel_to_world`/`world_to_pixel`; unimplemented codes remain readable, are flagged in `unsupported_axes`, and make complete transforms return `UnsupportedWcsTransform` | v2 done (quad-cube/HEALPix, spectral TODO; inter-frame transforms out of scope) |
 | `time/` | typed time (§9): `Datetime` (ISO-8601↔JD/MJD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), `FitsTime` header view + time WCS axis | v2 done |
 | `error.rs` | `FitsError` + `Result` | done |
 
