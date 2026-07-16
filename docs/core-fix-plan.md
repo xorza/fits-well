@@ -64,8 +64,8 @@ For every batch:
 
 ## Batch 11 — High: seal image and writer state invariants
 
-- [ ] **Make image geometry and raw type tags invariant-bearing.** Hide/derive `RawImage.bitpix`, construct owned images fallibly, and return `DataSizeMismatch` instead of asserting when shape and sample count disagree (`src/data/mod.rs:327-396`, `src/data/mod.rs:564-605`, `src/writer/mod.rs:288-301`). Verify empty shapes, zero axes, every `BITPIX`, and off-by-one lengths.
-- [ ] **Write one preflighted HDU transaction and poison torn writers.** Replace split raw header/data writes with `write_raw_hdu`, prepare the entire logical HDU before automatic-primary output, and track `Empty`/`Active`/`Failed` state (`src/writer/mod.rs:234-285`, `src/writer/mod.rs:315-421`, `src/writer/mod.rs:478-504`). Verify validation failures leave a fresh sink empty and injected partial I/O failures reject subsequent writes.
+- [x] **Make image geometry and raw type tags invariant-bearing.** `Image::new` validates the axis product, sample count, and scaling before construction; its fields are no longer independently mutable. `RawImage::bitpix` derives the type from its private backing representation, while `ImageMetadata` exposes immutable geometry/type/scaling. Writers, compression, and the caller-shaped ndarray bridge return `DataSizeMismatch` rather than asserting. Empty/zero-axis shapes, all six `BITPIX` kinds, and off-by-one lengths are covered.
+- [x] **Write one preflighted HDU transaction and poison torn writers.** `write_raw_hdu` replaces split raw header/data output, validates the header-implied data size, and derives the block fill. Every extension path completes data/header preparation before an automatic primary is committed. Writer state is `Empty`/`Active`/`Failed`; an injected mid-header failure permanently rejects later writes, while late compression and raw-HDU validation failures leave a fresh sink empty.
 
 ## Batch 12 — High: add standard cube and HEALPix projections
 

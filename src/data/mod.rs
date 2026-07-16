@@ -206,8 +206,8 @@ fn unsigned_from_be(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Option<U
 
 /// A borrowed, host-endian view of FITS array samples, tagged by `BITPIX` — the
 /// zero-/low-copy counterpart to the owned [`ImageData`]. It is returned by
-/// [`crate::FitsReader::read_image_view`] and used by
-/// [`crate::RandomGroupView`] to separate one group's parameters from its array.
+/// [`Image::stored`], [`crate::FitsReader::read_image_view`], and
+/// [`crate::RandomGroupView`] to expose stored samples without copying.
 /// Match it exactly like [`ImageData`]. A reader image view borrows reused decode
 /// scratch (or the source bytes for `BITPIX = 8`) and therefore lasts only until
 /// the next read; a random-group view borrows its owning [`crate::RandomGroups`].
@@ -336,9 +336,8 @@ pub(crate) fn view_words(words: &[u64], bitpix: Bitpix, nbytes: usize) -> ImageV
 /// [`raw_bytes`]: RawImage::raw_bytes
 #[derive(Debug)]
 pub struct RawImage<'a> {
-    pub shape: Vec<usize>,
-    pub bitpix: Bitpix,
-    pub scaling: Scaling,
+    pub(crate) shape: Vec<usize>,
+    pub(crate) scaling: Scaling,
     data: ImageBytes<'a>,
 }
 
@@ -347,7 +346,7 @@ pub struct RawImage<'a> {
 enum ImageBytes<'a> {
     /// Plain image: the data unit's big-endian on-disk bytes, viewed in place over
     /// the source (or the reader's reused scratch for a seeking source).
-    Raw(&'a [u8]),
+    Raw { bytes: &'a [u8], bitpix: Bitpix },
     /// Compressed image (`ZIMAGE`): pixels reconstructed into an owned, host-endian
     /// buffer (only the `compression` feature ever builds this).
     #[cfg_attr(not(feature = "compression"), allow(dead_code))]
@@ -364,9 +363,8 @@ impl<'a> RawImage<'a> {
     ) -> RawImage<'a> {
         RawImage {
             shape,
-            bitpix,
             scaling,
-            data: ImageBytes::Raw(bytes),
+            data: ImageBytes::Raw { bytes, bitpix },
         }
     }
 
@@ -375,9 +373,26 @@ impl<'a> RawImage<'a> {
     pub(crate) fn decoded(samples: ImageData, shape: Vec<usize>, scaling: Scaling) -> RawImage<'a> {
         RawImage {
             shape,
-            bitpix: samples.bitpix(),
             scaling,
             data: ImageBytes::Decoded(samples),
+        }
+    }
+
+    /// The image geometry, stored element type, and physical-value scaling.
+    pub fn metadata(&self) -> ImageMetadata<'_> {
+        ImageMetadata {
+            shape: &self.shape,
+            bitpix: self.bitpix(),
+            scaling: self.scaling,
+        }
+    }
+
+    /// The stored element type. For reconstructed compressed images this is
+    /// derived from the owned sample buffer, so it cannot disagree with the data.
+    pub fn bitpix(&self) -> Bitpix {
+        match &self.data {
+            ImageBytes::Raw { bitpix, .. } => *bitpix,
+            ImageBytes::Decoded(samples) => samples.bitpix(),
         }
     }
 
@@ -385,7 +400,7 @@ impl<'a> RawImage<'a> {
     /// decoded into an owned buffer; a compressed image moves out its decoded plane.
     pub fn decode(self) -> ImageData {
         match self.data {
-            ImageBytes::Raw(bytes) => ImageData::decode(bytes, self.bitpix),
+            ImageBytes::Raw { bytes, bitpix } => ImageData::decode(bytes, bitpix),
             ImageBytes::Decoded(samples) => samples,
         }
     }
@@ -395,7 +410,10 @@ impl<'a> RawImage<'a> {
     /// buffer. `None` for multi-byte element types — use [`RawImage::decode`].
     pub fn u8(&self) -> Option<&[u8]> {
         match &self.data {
-            ImageBytes::Raw(bytes) if self.bitpix == Bitpix::U8 => Some(bytes),
+            ImageBytes::Raw {
+                bytes,
+                bitpix: Bitpix::U8,
+            } => Some(bytes),
             ImageBytes::Decoded(ImageData::U8(v)) => Some(v),
             _ => None,
         }
@@ -407,7 +425,7 @@ impl<'a> RawImage<'a> {
     /// samples regardless of form.
     pub fn raw_bytes(&self) -> Option<&[u8]> {
         match &self.data {
-            ImageBytes::Raw(bytes) => Some(bytes),
+            ImageBytes::Raw { bytes, .. } => Some(bytes),
             ImageBytes::Decoded(_) => None,
         }
     }
@@ -415,7 +433,7 @@ impl<'a> RawImage<'a> {
     /// The physical-plane values: `BZERO + BSCALE × sample`, `BLANK` → `NaN` (§3.4).
     pub fn physical(&self) -> Vec<f64> {
         match &self.data {
-            ImageBytes::Raw(bytes) => physical_from_be(bytes, self.bitpix, &self.scaling),
+            ImageBytes::Raw { bytes, bitpix } => physical_from_be(bytes, *bitpix, &self.scaling),
             ImageBytes::Decoded(samples) => samples.physical_as::<f64>(&self.scaling),
         }
     }
@@ -429,7 +447,7 @@ impl<'a> RawImage<'a> {
     /// e.g. large `BITPIX = 64` integers or fine `BSCALE`/`BZERO` past `f32`'s range.
     pub fn physical_f32(&self) -> Vec<f32> {
         match &self.data {
-            ImageBytes::Raw(bytes) => physical_from_be(bytes, self.bitpix, &self.scaling),
+            ImageBytes::Raw { bytes, bitpix } => physical_from_be(bytes, *bitpix, &self.scaling),
             ImageBytes::Decoded(samples) => samples.physical_as::<f32>(&self.scaling),
         }
     }
@@ -438,7 +456,7 @@ impl<'a> RawImage<'a> {
     /// convention; `None` otherwise — same rule as [`Image::unsigned`].
     pub fn unsigned(&self) -> Option<UnsignedView> {
         match &self.data {
-            ImageBytes::Raw(bytes) => unsigned_from_be(bytes, self.bitpix, &self.scaling),
+            ImageBytes::Raw { bytes, bitpix } => unsigned_from_be(bytes, *bitpix, &self.scaling),
             ImageBytes::Decoded(samples) => samples.unsigned(&self.scaling),
         }
     }
@@ -446,7 +464,7 @@ impl<'a> RawImage<'a> {
     /// The effective element type these samples represent, resolving the unsigned and
     /// signed-byte conventions from `BITPIX` + [`Scaling`] without decoding the pixels.
     pub fn sample_type(&self) -> SampleType {
-        SampleType::from_scaling(self.bitpix, &self.scaling)
+        SampleType::from_scaling(self.bitpix(), &self.scaling)
     }
 }
 
@@ -579,16 +597,61 @@ impl UnsignedView {
 /// stored (raw) samples into physical values.
 #[derive(Debug, Clone)]
 pub struct Image {
-    pub shape: Vec<usize>,
-    pub samples: ImageData,
+    pub(crate) shape: Vec<usize>,
+    pub(crate) samples: ImageData,
+    pub(crate) scaling: Scaling,
+}
+
+/// An immutable view of an image's geometry and stored representation metadata.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImageMetadata<'a> {
+    pub shape: &'a [usize],
+    pub bitpix: Bitpix,
     pub scaling: Scaling,
 }
 
 impl Image {
+    /// Build an image after validating that the axis product equals the sample
+    /// count and that the scaling keywords are valid for the stored element type.
+    pub fn new(shape: Vec<usize>, samples: ImageData, scaling: Scaling) -> Result<Image> {
+        let image = Image {
+            shape,
+            samples,
+            scaling,
+        };
+        image.validate_geometry()?;
+        image.scaling.validate(image.samples.bitpix())?;
+        Ok(image)
+    }
+
+    /// The image geometry, stored element type, and physical-value scaling.
+    pub fn metadata(&self) -> ImageMetadata<'_> {
+        ImageMetadata {
+            shape: &self.shape,
+            bitpix: self.samples.bitpix(),
+            scaling: self.scaling,
+        }
+    }
+
+    /// Borrow the exact host-endian stored sample plane without allowing it to
+    /// become inconsistent with the validated geometry.
+    pub fn stored(&self) -> ImageView<'_> {
+        self.samples.view(0..self.samples.len())
+    }
+
+    pub(crate) fn validate_geometry(&self) -> Result<usize> {
+        let expected = shape_product(&self.shape)?;
+        let got = self.samples.len();
+        if got != expected {
+            return Err(FitsError::DataSizeMismatch { expected, got });
+        }
+        Ok(expected)
+    }
+
     /// Build an image storing a `u16` buffer via the FITS unsigned convention
     /// (`BITPIX = 16`, `BZERO = 2¹⁵`, `BSCALE = 1`) — the inverse of
     /// [`Image::unsigned`]. The writer emits the `BZERO` keyword so it round-trips.
-    pub fn from_u16(shape: Vec<usize>, data: &[u16]) -> Image {
+    pub fn from_u16(shape: Vec<usize>, data: &[u16]) -> Result<Image> {
         Image::offset_image(
             shape,
             ImageData::I16(data.iter().map(|&x| (x ^ 0x8000) as i16).collect()),
@@ -597,7 +660,7 @@ impl Image {
     }
 
     /// Build an image storing a `u32` buffer (`BITPIX = 32`, `BZERO = 2³¹`).
-    pub fn from_u32(shape: Vec<usize>, data: &[u32]) -> Image {
+    pub fn from_u32(shape: Vec<usize>, data: &[u32]) -> Result<Image> {
         Image::offset_image(
             shape,
             ImageData::I32(data.iter().map(|&x| (x ^ 0x8000_0000) as i32).collect()),
@@ -606,7 +669,7 @@ impl Image {
     }
 
     /// Build an image storing a `u64` buffer (`BITPIX = 64`, `BZERO = 2⁶³`).
-    pub fn from_u64(shape: Vec<usize>, data: &[u64]) -> Image {
+    pub fn from_u64(shape: Vec<usize>, data: &[u64]) -> Result<Image> {
         Image::offset_image(
             shape,
             ImageData::I64(
@@ -619,7 +682,7 @@ impl Image {
     }
 
     /// Build an image storing a signed-`i8` buffer (`BITPIX = 8`, `BZERO = -128`).
-    pub fn from_i8(shape: Vec<usize>, data: &[i8]) -> Image {
+    pub fn from_i8(shape: Vec<usize>, data: &[i8]) -> Result<Image> {
         Image::offset_image(
             shape,
             ImageData::U8(data.iter().map(|&x| (x as u8) ^ 0x80).collect()),
@@ -627,16 +690,16 @@ impl Image {
         )
     }
 
-    fn offset_image(shape: Vec<usize>, samples: ImageData, bzero: f64) -> Image {
-        Image {
+    fn offset_image(shape: Vec<usize>, samples: ImageData, bzero: f64) -> Result<Image> {
+        Image::new(
             shape,
             samples,
-            scaling: Scaling {
+            Scaling {
                 bscale: 1.0,
                 bzero,
                 blank: None,
             },
-        }
+        )
     }
 
     /// Reinterpret the stored buffer as exact typed integers when the scaling is
@@ -813,15 +876,20 @@ fn fortran_array<T>(shape: &[usize], data: Vec<T>) -> ndarray::ArrayD<T> {
 impl ImageData {
     /// Move the samples into a typed N-d [`ImageArray`] of `shape` (FITS axis order,
     /// fastest first) — zero-copy: the backing `Vec` is reused, not cloned.
-    pub fn into_ndarray(self, shape: &[usize]) -> ImageArray {
-        match self {
+    pub fn into_ndarray(self, shape: &[usize]) -> Result<ImageArray> {
+        let expected = shape_product(shape)?;
+        let got = self.len();
+        if got != expected {
+            return Err(FitsError::DataSizeMismatch { expected, got });
+        }
+        Ok(match self {
             ImageData::U8(v) => ImageArray::U8(fortran_array(shape, v)),
             ImageData::I16(v) => ImageArray::I16(fortran_array(shape, v)),
             ImageData::I32(v) => ImageArray::I32(fortran_array(shape, v)),
             ImageData::I64(v) => ImageArray::I64(fortran_array(shape, v)),
             ImageData::F32(v) => ImageArray::F32(fortran_array(shape, v)),
             ImageData::F64(v) => ImageArray::F64(fortran_array(shape, v)),
-        }
+        })
     }
 }
 
@@ -836,17 +904,14 @@ impl RawImage<'_> {
     /// The samples as a typed N-d [`ImageArray`], in FITS axis order. Decodes into an
     /// owned buffer first (the array then owns it, no further copy).
     pub fn into_ndarray(self) -> ImageArray {
-        let RawImage {
-            shape,
-            bitpix,
-            data,
-            ..
-        } = self;
+        let RawImage { shape, data, .. } = self;
         let samples = match data {
-            ImageBytes::Raw(bytes) => ImageData::decode(bytes, bitpix),
+            ImageBytes::Raw { bytes, bitpix } => ImageData::decode(bytes, bitpix),
             ImageBytes::Decoded(samples) => samples,
         };
-        samples.into_ndarray(&shape)
+        samples
+            .into_ndarray(&shape)
+            .expect("raw image data matches its validated geometry")
     }
 }
 
@@ -861,7 +926,9 @@ impl Image {
     /// Move the samples into a typed N-d [`ImageArray`], in FITS axis order — zero-copy.
     pub fn into_ndarray(self) -> ImageArray {
         let Image { shape, samples, .. } = self;
-        samples.into_ndarray(&shape)
+        samples
+            .into_ndarray(&shape)
+            .expect("image data matches its validated geometry")
     }
 }
 

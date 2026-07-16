@@ -12,15 +12,16 @@ use fits_well::{CompressOptions, FitsReader, FitsWriter, Image, ImageData, Scali
 fn main() -> fits_well::Result<()> {
     let path = std::env::temp_dir().join("fits_well_compressed.fits");
 
-    let image = Image {
-        shape: vec![16, 16],
-        samples: ImageData::I16((0..256).map(|i| (i % 32) as i16).collect()),
-        scaling: Scaling {
+    let expected = ImageData::I16((0..256).map(|i| (i % 32) as i16).collect());
+    let image = Image::new(
+        vec![16, 16],
+        expected.clone(),
+        Scaling {
             bscale: 1.0,
             bzero: 0.0,
             blank: None,
         },
-    };
+    )?;
 
     // Compress with RICE in 8×8 tiles. `CompressOptions::tiled` sets the tile shape
     // and leaves the gzip level / HCOMPRESS scale at their defaults.
@@ -38,8 +39,8 @@ fn main() -> fits_well::Result<()> {
     let images = reader.image_indices();
     println!("image HDUs: {images:?}"); // [1] — the compressed image extension
     let restored = reader.read_image(images[0])?;
-    let restored_shape = restored.shape.clone();
-    let lossless = restored.decode() == image.samples;
+    let restored_shape = restored.metadata().shape.to_vec();
+    let lossless = restored.decode() == expected;
     println!("restored {:?}, lossless = {}", restored_shape, lossless);
 
     Ok(())

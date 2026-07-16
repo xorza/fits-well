@@ -19,7 +19,6 @@ use crate::compress::{gzip, hcompress, plio, quantize, rice};
 
 use crate::bitpix::Bitpix;
 use crate::data::Image;
-use crate::data::shape_product;
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
@@ -488,13 +487,7 @@ fn validate_image(image: &Image) -> Result<usize> {
     if image.shape.len() > 999 {
         return Err(FitsError::KeywordOutOfRange { name: "NAXIS" });
     }
-    let expected = shape_product(&image.shape)?;
-    assert_eq!(
-        image.samples.len(),
-        expected,
-        "image sample count must match the shape product"
-    );
-    Ok(expected)
+    image.validate_geometry()
 }
 
 fn fits_i64(value: usize) -> Result<i64> {

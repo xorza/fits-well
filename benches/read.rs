@@ -47,15 +47,16 @@ fn sample_data(bitpix: Bitpix, n: usize) -> ImageData {
 
 /// A written single-HDU FITS file (`n` samples of `bitpix`) as bytes.
 fn fits_bytes(bitpix: Bitpix, n: usize) -> Vec<u8> {
-    let img = Image {
-        shape: vec![n],
-        samples: sample_data(bitpix, n),
-        scaling: Scaling {
+    let img = Image::new(
+        vec![n],
+        sample_data(bitpix, n),
+        Scaling {
             bscale: 1.0,
             bzero: 0.0,
             blank: None,
         },
-    };
+    )
+    .unwrap();
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     w.write_image(&img).unwrap();
     w.into_inner().into_inner()

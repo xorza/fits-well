@@ -6,6 +6,9 @@ pub type Result<T> = std::result::Result<T, FitsError>;
 #[derive(Debug)]
 pub enum FitsError {
     Io(io::Error),
+    /// A previous sink error may have left a partial HDU in the output. Further
+    /// writes are rejected because appending cannot repair that FITS stream.
+    WriterFailed,
     /// A keyword name violated the FITS character set or 8-byte length limit.
     InvalidKeyword {
         name: String,
@@ -200,6 +203,9 @@ impl fmt::Display for FitsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FitsError::Io(e) => write!(f, "I/O error: {e}"),
+            FitsError::WriterFailed => {
+                write!(f, "writer is unusable after a previous output failure")
+            }
             FitsError::InvalidKeyword { name } => write!(f, "invalid keyword name {name:?}"),
             FitsError::ReservedKeyword { name } => {
                 write!(
@@ -379,6 +385,10 @@ mod tests {
         assert_eq!(
             FitsError::InvalidBitpix { code: 7 }.to_string(),
             "invalid BITPIX value 7"
+        );
+        assert_eq!(
+            FitsError::WriterFailed.to_string(),
+            "writer is unusable after a previous output failure"
         );
         assert_eq!(
             FitsError::DataUnitOverflow.to_string(),

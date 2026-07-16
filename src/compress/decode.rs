@@ -147,11 +147,7 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
             DecodeBuffer::from_samples(&mut samples),
         )?;
     }
-    Ok(Image {
-        shape: layout.dims,
-        samples,
-        scaling: layout.scaling,
-    })
+    Image::new(layout.dims, samples, layout.scaling)
 }
 
 pub(crate) fn decompress_image_into_words<'a>(
