@@ -731,7 +731,31 @@ impl Scaling {
         }
     }
 
-    pub(crate) fn add_to_header(&self, header: &mut Header, bitpix: Bitpix) {
+    pub(crate) fn validate(&self, bitpix: Bitpix) -> Result<()> {
+        if !self.bscale.is_finite() {
+            return Err(FitsError::KeywordOutOfRange { name: "BSCALE" });
+        }
+        if !self.bzero.is_finite() {
+            return Err(FitsError::KeywordOutOfRange { name: "BZERO" });
+        }
+        let Some(blank) = self.blank else {
+            return Ok(());
+        };
+        let valid = match bitpix {
+            Bitpix::U8 => u8::try_from(blank).is_ok(),
+            Bitpix::I16 => i16::try_from(blank).is_ok(),
+            Bitpix::I32 => i32::try_from(blank).is_ok(),
+            Bitpix::I64 => true,
+            Bitpix::F32 | Bitpix::F64 => false,
+        };
+        if !valid {
+            return Err(FitsError::KeywordOutOfRange { name: "BLANK" });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn add_to_header(&self, header: &mut Header, bitpix: Bitpix) -> Result<()> {
+        self.validate(bitpix)?;
         if !self.is_identity() {
             if bitpix == Bitpix::I64 && self.bscale == 1.0 && self.bzero == U64_OFFSET {
                 header.set("BZERO", U64_OFFSET_INTEGER);
@@ -740,12 +764,10 @@ impl Scaling {
             }
             header.set("BSCALE", self.bscale);
         }
-        // FITS permits BLANK only for integer arrays.
-        if let Some(blank) = self.blank
-            && bitpix.is_integer()
-        {
+        if let Some(blank) = self.blank {
             header.set("BLANK", blank);
         }
+        Ok(())
     }
 
     /// `true` when decoding needs no arithmetic — just an endian swap or copy.

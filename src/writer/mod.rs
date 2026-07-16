@@ -487,9 +487,9 @@ impl<W: Write> FitsWriter<W> {
         cmptype: &str,
         options: &CompressOptions,
     ) -> Result<()> {
+        // This must precede the automatic primary so invalid metadata writes nothing.
+        image.scaling.validate(image.samples.bitpix())?;
         self.ensure_primary()?;
-        // The codec assembles the compressed data unit directly into the reused
-        // scratch and hands back just the header.
         let header = compress_image(image, cmptype, options, &mut self.scratch)?;
         self.write_hdu(header, ZERO_FILL)
     }
@@ -606,7 +606,7 @@ fn image_header(image: &Image, primary: bool) -> Result<Header> {
     }
     image
         .scaling
-        .add_to_header(&mut header, image.samples.bitpix());
+        .add_to_header(&mut header, image.samples.bitpix())?;
     Ok(header)
 }
 
@@ -781,6 +781,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
             let kind = ColumnType::from_data(data).ok_or_else(|| FitsError::InvalidValue {
                 card: "binary character columns must use ColumnData::Character".to_string(),
             })?;
+            validate_binary_metadata(col, kind.letter())?;
             let expected = nrows
                 .checked_mul(*repeat)
                 .ok_or(FitsError::DataUnitOverflow)?;
@@ -819,6 +820,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
             })
         }
         WriteColumnData::Vla { kind, rows, wide } => {
+            validate_binary_metadata(col, kind.letter())?;
             if rows.len() != nrows {
                 return Err(FitsError::RowWidthMismatch {
                     computed: rows.len(),
@@ -853,6 +855,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
             })
         }
         WriteColumnData::VlaBits { rows, wide } => {
+            validate_binary_metadata(col, 'X')?;
             if rows.len() != nrows {
                 return Err(FitsError::RowWidthMismatch {
                     computed: rows.len(),
@@ -871,6 +874,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
             })
         }
         WriteColumnData::Bits { bytes, bit_count } => {
+            validate_binary_metadata(col, 'X')?;
             let row_width = bit_count.div_ceil(8);
             let expected = nrows
                 .checked_mul(row_width)
@@ -888,6 +892,38 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
             })
         }
     }
+}
+
+fn validate_binary_metadata(col: &WriteColumn, stored_type: char) -> Result<()> {
+    validate_scaling(
+        col.tscale,
+        col.tzero,
+        !matches!(stored_type, 'A' | 'L' | 'X'),
+    )?;
+    let Some(tnull) = col.tnull else {
+        return Ok(());
+    };
+    let valid = match stored_type {
+        'B' => u8::try_from(tnull).is_ok(),
+        'I' => i16::try_from(tnull).is_ok(),
+        'J' => i32::try_from(tnull).is_ok(),
+        'K' => true,
+        _ => false,
+    };
+    if !valid {
+        return Err(FitsError::KeywordOutOfRange { name: "TNULLn" });
+    }
+    Ok(())
+}
+
+fn validate_scaling(tscale: Option<f64>, tzero: Option<f64>, allowed: bool) -> Result<()> {
+    if tscale.is_some_and(|value| !allowed || !value.is_finite()) {
+        return Err(FitsError::KeywordOutOfRange { name: "TSCALn" });
+    }
+    if tzero.is_some_and(|value| !allowed || !value.is_finite()) {
+        return Err(FitsError::KeywordOutOfRange { name: "TZEROn" });
+    }
+    Ok(())
 }
 
 fn cell_byte_len(kind: ColumnType, cell: &ColumnData) -> Result<usize> {
@@ -1017,7 +1053,14 @@ fn pack_cell(out: &mut Vec<u8>, col: &WriteColumn, r: usize) {
         WriteColumnData::Bits { bytes, bit_count } => {
             let width = bit_count.div_ceil(8);
             let start = r * width;
-            out.extend_from_slice(&bytes[start..start + width]);
+            let cell = &bytes[start..start + width];
+            let trailing_bits = bit_count % 8;
+            if trailing_bits == 0 {
+                out.extend_from_slice(cell);
+            } else {
+                out.extend_from_slice(&cell[..width - 1]);
+                out.push(cell[width - 1] & (u8::MAX << (8 - trailing_bits)));
+            }
         }
         WriteColumnData::Vla { .. } | WriteColumnData::VlaBits { .. } => {
             unreachable!("VLA cells are descriptors")
@@ -1048,6 +1091,11 @@ fn validate_ascii_column(col: &AsciiWriteColumn) -> Result<()> {
             return Err(FitsError::KeywordOutOfRange { name: "TNULLn" });
         }
     }
+    validate_scaling(
+        col.tscale,
+        col.tzero,
+        !matches!(&col.data, AsciiColumnData::Text(_)),
+    )?;
     match &col.data {
         AsciiColumnData::Text(values) => {
             for value in values.iter().flatten() {

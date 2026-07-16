@@ -182,7 +182,7 @@ pub(crate) fn compress_image(
         }
         _ => {}
     }
-    image.scaling.add_to_header(&mut h, bitpix);
+    image.scaling.add_to_header(&mut h, bitpix)?;
     Ok(h)
 }
 
@@ -389,7 +389,7 @@ fn compress_float_image(
         // decoder which value maps back to a blank (NaN) pixel.
         h.set("ZBLANK", quantize::NULL_VALUE as i64);
     }
-    image.scaling.add_to_header(&mut h, zbitpix);
+    image.scaling.add_to_header(&mut h, zbitpix)?;
     Ok(h)
 }
 
@@ -484,6 +484,7 @@ fn set_zimage_axes(
 }
 
 fn validate_image(image: &Image) -> Result<usize> {
+    image.scaling.validate(image.samples.bitpix())?;
     if image.shape.len() > 999 {
         return Err(FitsError::KeywordOutOfRange { name: "NAXIS" });
     }

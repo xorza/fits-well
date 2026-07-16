@@ -15,12 +15,12 @@ items below are tied to valid FITS structures or deterministic public-API inputs
 they are not speculative performance concerns or demands for strict rejection of
 every malformed real-world file.
 
-Recent fixes were meaningful: fixed-width complex-column scaling now applies
-`TZERO` only to the real component, random-group array `BLANK` handling is correct,
-ASCII character fields retain leading spaces, the WCS matrix/default/projection
-fixes are standards-backed, and the no-default-feature test suite passes. Those
-fixes improve correctness, but the previous all-green status table overstated the
-remaining coverage.
+Recent fixes were meaningful: table/image scaling and null metadata is now checked
+against its stored type, fixed-width bit padding is canonical, random-group array
+`BLANK` handling is correct, ASCII character fields retain leading spaces, and the
+WCS matrix/default/projection fixes are standards-backed. Those fixes improve
+correctness, but the previous all-green status table overstated the remaining
+coverage.
 
 Severity used below:
 
@@ -37,10 +37,10 @@ Severity used below:
 | --- | --- | --- |
 | §3 | File/HDU structure and blocking | Complete for core discovery and sizing: first-card roles, special records, the block grid, and primary/extension/random-groups boundaries are validated independently. |
 | §4 | Headers and integrity keywords | Partial: normal cards/checksums and exact unbounded integers work, but public mutation can create invalid cards, `CONTINUE` commentary is lossy, and unknown checksums are reported as failures. |
-| §5 | Data representation | Mostly complete: all `BITPIX` encodings, endian paths, and unsigned conventions serialize exactly; image `BLANK` range validation remains incomplete. |
+| §5 | Data representation | Complete for core stored types: all `BITPIX` encodings, endian paths, unsigned conventions, and type/range-checked image scaling metadata serialize exactly. |
 | §6 / §7.1 | Primary arrays, IMAGE, random groups | Mostly complete on disk; typed random-group raw values and safe image invariants remain incomplete. |
-| §7.2 | ASCII tables | Partial: formats and scaling read correctly, but nulls collapse into ordinary zero in the raw model and over-width writes produce invalid numeric fields. |
-| §7.3 | Binary tables | Mostly complete: all fixed kinds and P/Q reads and writes exist, including character, physical numeric/complex, exact unsigned, and jagged bit arrays; writer metadata validation remains incomplete. |
+| §7.2 | ASCII tables | Mostly complete: formats, scaling, and distinct nullable raw cells work; over-width writes still produce invalid numeric fields. |
+| §7.3 | Binary tables | Mostly complete: all fixed kinds and P/Q reads and writes exist, including type-checked scaling/null metadata, character, physical numeric/complex, exact unsigned, and jagged bit arrays; the writer still needs the 999-field limit. |
 | §8 | WCS | Partial: image and table keyword translation and all implemented transforms are covered; unsupported transforms are explicitly rejected. Four standard projections and all Table-26 nonlinear algorithms remain unevaluated. |
 | §9 | Time | Partial: references, scales, FITS units, strict year forms, leap-second-preserving UTC quasi-JD, and complete linear time-axis WCS evaluation work; secondary frame and PHASE metadata remain incomplete. |
 | §10 | Tiled compression | Not assessed here; it is outside the dependency-free core. |
@@ -89,7 +89,7 @@ Severity used below:
 
 - [ ] **Preflight ASCII field widths instead of substituting data.** `format_ascii_field` emits `*` for every over-width value (`src/writer/mod.rs:1014-1040`), but `*` is forbidden by the ASCII numeric grammar unless it is the explicit null marker (`docs/refs/fits_standard40.md:2396-2450`). Format and validate all fields before `ensure_primary`, returning a contextual error. Verify over-width integer, float, text, and null-marker inputs write nothing. Binary `A` widths are already rejected during column preflight.
 
-- [ ] **Validate scaling, null sentinels, and packed-bit padding by stored type.** `scaled`/`with_null` accept every binary kind and header generation emits the keywords unconditionally (`src/writer/mod.rs:200-210`, `src/writer/mod.rs:609-618`); fixed `X` bytes retain nonzero unused low bits (`src/writer/mod.rs:852-859`). FITS forbids `TSCAL`/`TZERO` on `A`/`L`/`X`, restricts `TNULL` to integer types, and requires unused bit padding to be zero (`docs/refs/fits_standard40.md:2575-2608`, `:2631-2643`, `:2797-2803`). Apply the same validation to image `BLANK`, which is currently dropped for floats and not range-checked for integer `BITPIX` (`src/data/mod.rs:721-732`). Verify every fixed/VLA type, sentinel boundary, nonfinite scale, and non-byte-aligned bit row.
+- [x] **Validate scaling, null sentinels, and packed-bit padding by stored type.** Binary fixed and P/Q columns reject `TSCAL`/`TZERO` on `A`/`L`/`X`, accept `TNULL` only for stored `B`/`I`/`J`/`K` values within their exact ranges, and reject nonfinite scale/zero metadata before automatic-primary output. ASCII `A` columns reject scaling and numeric columns reject nonfinite scales. Fixed and variable `X` writers clear unused low bits. Image and compressed-image writers reject nonfinite scaling, float `BLANK`, and integer sentinels outside the stored `BITPIX` range. Tests cover every fixed/VLA type, every integer boundary, both float image kinds, and caller-supplied nonzero bit padding (`docs/refs/fits_standard40.md:2256-2275`, `:2575-2643`, `:2797-2803`).
 
 - [ ] **Reject more than 999 table fields before allocation or output.** Both table writers only check that the count fits `i64` (`src/writer/mod.rs:315-327`, `src/writer/mod.rs:388-405`) before indexed-key generation (`src/writer/mod.rs:595-618`, `src/writer/mod.rs:943-965`). FITS limits both table types to 999 fields (`docs/refs/fits_standard40.md:2350-2355`, `:2782-2787`). Share the reader limit and verify 999 succeeds while 1000 returns an error with an untouched sink.
 
@@ -115,7 +115,7 @@ following foundations are substantively correct for conforming inputs:
 - big-endian scalar decoding/encoding, including float bit preservation;
 - ordered logical header storage and keyword indexing;
 - checked `NAXIS`/extent arithmetic once the correct HDU role is known;
-- normal image scaling/`BLANK`, table scaling/null handling outside the cases above;
+- normal image scaling/`BLANK` and stored-type-checked table scaling/null handling;
 - lazy bounded source reads and raw padded-data access;
 - one's-complement checksum arithmetic, Appendix-J encoding, and normal
   checksum generation/verification;
