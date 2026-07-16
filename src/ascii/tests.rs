@@ -311,9 +311,9 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     w.write_ascii_table(2, &columns).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
 
-    assert_eq!(r.hdus[1].header.get_real("TSCAL1"), Some(2.0));
-    assert_eq!(r.hdus[1].header.get_real("TZERO1"), Some(100.0));
-    assert_eq!(r.hdus[1].header.get_text("TNULL2"), Some("NULL"));
+    assert_eq!(r.hdus[1].header.get_real("TSCAL1").unwrap(), Some(2.0));
+    assert_eq!(r.hdus[1].header.get_real("TZERO1").unwrap(), Some(100.0));
+    assert_eq!(r.hdus[1].header.get_text("TNULL2").unwrap(), Some("NULL"));
 
     let t = r.read_ascii_table(1).unwrap();
     // Raw stored integers, then the scaled physical plane TZERO + TSCAL·field.
@@ -366,6 +366,16 @@ fn ascii_tfields_beyond_999_is_rejected() {
     assert!(matches!(
         AsciiTable::from_data(&header, vec![]),
         Err(FitsError::KeywordOutOfRange { name: "TFIELDS" })
+    ));
+
+    header
+        .set("NAXIS1", 1)
+        .set("TFIELDS", 1)
+        .set("TBCOL1", 0)
+        .set("TFORM1", "A1");
+    assert!(matches!(
+        AsciiTable::from_data(&header, vec![]),
+        Err(FitsError::KeywordOutOfRange { name: "TBCOLn" })
     ));
 }
 

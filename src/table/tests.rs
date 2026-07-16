@@ -187,12 +187,17 @@ fn read_column_physical_applies_tscal_tzero_and_tnull() {
     assert!(phys[1].is_nan());
     assert_eq!(phys[2], 24.0);
 
-    for keyword in ["TSCAL1", "TZERO1", "TNULL1"] {
+    for (keyword, expected) in [
+        ("TSCAL1", "real"),
+        ("TZERO1", "real"),
+        ("TNULL1", "integer"),
+    ] {
         let mut malformed = header.clone();
         malformed.set(keyword, "not numeric");
         assert!(matches!(
             BinTable::from_data(&malformed, vec![0; 6]),
-            Err(FitsError::TypeMismatch { name, .. }) if name == keyword
+            Err(FitsError::TypeMismatch { name, expected: actual })
+                if name == keyword && actual == expected
         ));
     }
 }
@@ -579,6 +584,17 @@ fn tfields_beyond_999_is_rejected() {
     assert!(matches!(
         BinTable::from_data(&header, vec![]),
         Err(FitsError::KeywordOutOfRange { name: "TFIELDS" })
+    ));
+
+    header.set("TFIELDS", 0).set("NAXIS1", -1);
+    assert!(matches!(
+        BinTable::from_data(&header, vec![]),
+        Err(FitsError::KeywordOutOfRange { name: "NAXIS1" })
+    ));
+    header.set("NAXIS1", 0).set("PCOUNT", -1);
+    assert!(matches!(
+        BinTable::from_data(&header, vec![]),
+        Err(FitsError::KeywordOutOfRange { name: "PCOUNT" })
     ));
 }
 

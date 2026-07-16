@@ -237,7 +237,7 @@ fn long_string_splits_into_a_continue_chain() {
     let mut with_end = bytes;
     with_end.extend_from_slice(&raw("END"));
     let h = Header::parse(&with_end).unwrap();
-    assert_eq!(h.get_text("LONGSTR"), Some(value.as_str()));
+    assert_eq!(h.get_text("LONGSTR").unwrap(), Some(value.as_str()));
 }
 
 #[test]
@@ -263,7 +263,10 @@ fn long_hierarch_string_splits_into_a_continue_chain() {
     let mut with_end = bytes;
     with_end.extend_from_slice(&raw("END"));
     let h = Header::parse(&with_end).unwrap();
-    assert_eq!(h.get_text("ESO DET CHIP1 LONGNAME"), Some(value.as_str()));
+    assert_eq!(
+        h.get_text("ESO DET CHIP1 LONGNAME").unwrap(),
+        Some(value.as_str())
+    );
 }
 
 #[test]

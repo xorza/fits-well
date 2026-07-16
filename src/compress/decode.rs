@@ -51,21 +51,21 @@ struct ImageLayout {
 
 impl ImageLayout {
     fn from_header(header: &Header) -> Result<ImageLayout> {
-        if header.get_logical("ZIMAGE") != Some(true) {
+        if header.get_logical("ZIMAGE")? != Some(true) {
             return Err(FitsError::NotCompressedImage);
         }
         let bitpix = Bitpix::from_code(
             header
-                .get_integer("ZBITPIX")
+                .get_integer("ZBITPIX")?
                 .ok_or(FitsError::MissingKeyword { name: "ZBITPIX" })?,
         )?;
         let codec = ImageCodec::parse(
             header
-                .get_text("ZCMPTYPE")
+                .get_text("ZCMPTYPE")?
                 .ok_or(FitsError::MissingKeyword { name: "ZCMPTYPE" })?,
         )?;
         let znaxis = header
-            .get_integer("ZNAXIS")
+            .get_integer("ZNAXIS")?
             .ok_or(FitsError::MissingKeyword { name: "ZNAXIS" })?;
         if !(0..=999).contains(&znaxis) {
             return Err(FitsError::KeywordOutOfRange { name: "ZNAXIS" });
@@ -180,15 +180,19 @@ fn decode_image_into(
 ) -> Result<()> {
     let is_float = layout.bitpix.is_float();
     let tiles: Vec<usize> = (1..=layout.dims.len())
-        .map(|i| {
-            header
-                .get_integer(key!("ZTILE{i}").as_str())
-                .map(|v| v.max(1) as usize)
-                .unwrap_or(if i == 1 { layout.dims[0] } else { 1 })
+        .map(|i| -> Result<usize> {
+            let default = if i == 1 { layout.dims[0] } else { 1 };
+            match header.get_integer(key!("ZTILE{i}").as_str())? {
+                Some(value) => usize::try_from(value)
+                    .ok()
+                    .filter(|&value| value > 0)
+                    .ok_or(FitsError::KeywordOutOfRange { name: "ZTILEn" }),
+                None => Ok(default),
+            }
         })
-        .collect();
+        .collect::<Result<_>>()?;
 
-    let rice = rice::rice_params(header, layout.bitpix);
+    let rice = rice::rice_params(header, layout.bitpix)?;
     // Float pixels are quantized to integers of `bytepix` bytes; decode the tile
     // as that integer type, then dequantize. Integer images decode as `zbitpix`.
     let int_bitpix = if is_float {
@@ -199,7 +203,7 @@ fn decode_image_into(
 
     // Float quantization: NO_DITHER, SUBTRACTIVE_DITHER_1, and SUBTRACTIVE_DITHER_2.
     let zquantiz = header
-        .get_text("ZQUANTIZ")
+        .get_text("ZQUANTIZ")?
         .unwrap_or("NO_DITHER")
         .to_string();
     let method = match zquantiz.as_str() {
@@ -215,12 +219,12 @@ fn decode_image_into(
             DitherMethod::None
         }
     };
-    let zdither0 = header.get_integer("ZDITHER0").unwrap_or(1);
+    let zdither0 = header.get_integer("ZDITHER0")?.unwrap_or(1);
     // ZBLANK may be a keyword (constant) or a per-tile column; §10.1.3 says the
     // column value wins where present.
-    let zblank_keyword = header.get_integer("ZBLANK");
+    let zblank_keyword = header.get_integer("ZBLANK")?;
     let zblank_column = read_i64_column(table, "ZBLANK")?;
-    let smooth = hcompress_smooth(header);
+    let smooth = hcompress_smooth(header)?;
     let params = CodecParams {
         blocksize: rice.blocksize,
         bytepix: rice.bytepix,
@@ -623,23 +627,24 @@ fn ensure_tile_size(expected: usize, got: usize) -> Result<()> {
 
 /// HCOMPRESS smoothing flag: the `SMOOTH` `ZVALn` is non-zero (cfitsio applies
 /// inverse-transform smoothing to suppress blocking in lossy images).
-fn hcompress_smooth(header: &Header) -> bool {
+fn hcompress_smooth(header: &Header) -> Result<bool> {
     let mut i = 1;
-    while let Some(name) = header.get_text(key!("ZNAME{i}").as_str()) {
+    while let Some(name) = header.get_text(key!("ZNAME{i}").as_str())? {
         if name == "SMOOTH" {
-            return header.get_integer(key!("ZVAL{i}").as_str()).unwrap_or(0) != 0;
+            return Ok(header.get_integer(key!("ZVAL{i}").as_str())?.unwrap_or(0) != 0);
         }
         i += 1;
     }
-    false
+    Ok(false)
 }
 
 /// Read the `ZNAXIS1..ZNAXISn` integer axis lengths.
 fn read_axes(header: &Header, n: usize) -> Result<Vec<usize>> {
     (1..=n)
-        .map(|i| match header.get_integer(key!("ZNAXIS{i}").as_str()) {
-            Some(v) if v >= 0 => Ok(v as usize),
-            Some(_) => Err(FitsError::KeywordOutOfRange { name: "ZNAXISn" }),
+        .map(|i| match header.get_integer(key!("ZNAXIS{i}").as_str())? {
+            Some(value) => {
+                usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { name: "ZNAXISn" })
+            }
             None => Err(FitsError::MissingKeyword { name: "ZNAXISn" }),
         })
         .collect()

@@ -331,7 +331,7 @@ fn dither_option_sets_zquantiz_and_round_trips() {
         .unwrap();
         let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
         assert_eq!(
-            r.hdus()[1].header.get_text("ZQUANTIZ"),
+            r.hdus()[1].header.get_text("ZQUANTIZ").unwrap(),
             Some(zquantiz),
             "{dither:?} must write {zquantiz}"
         );
@@ -713,6 +713,21 @@ fn zblank_column_overrides_keyword_per_tile() {
     assert_eq!(px[0], 25.0);
     assert!(px[1].is_nan());
 
+    let mut mistyped_header = h.clone();
+    mistyped_header.set("ZBITPIX", "not an integer");
+    assert!(matches!(
+        decompress_image(&mistyped_header, &table),
+        Err(FitsError::TypeMismatch { name, expected })
+            if name == "ZBITPIX" && expected == "integer"
+    ));
+
+    let mut out_of_range_header = h.clone();
+    out_of_range_header.set("ZTILE1", 0);
+    assert!(matches!(
+        decompress_image(&out_of_range_header, &table),
+        Err(FitsError::KeywordOutOfRange { name: "ZTILEn" })
+    ));
+
     for (column, name, kind) in [
         (1, "ZSCALE", TformKind::I64),
         (2, "ZZERO", TformKind::I64),
@@ -793,7 +808,10 @@ fn check_table_roundtrip(algo: &str, rows_per_tile: usize) {
         assert_eq!(restored_header.get(key!("ZFORM{n}").as_str()), None);
         assert_eq!(restored_header.get(key!("ZCTYP{n}").as_str()), None);
     }
-    assert_eq!(restored_header.get_text("ZFORM01"), Some("preserve"));
+    assert_eq!(
+        restored_header.get_text("ZFORM01").unwrap(),
+        Some("preserve")
+    );
     for keyword in [
         "ZTABLE", "ZTILELEN", "ZNAXIS1", "ZNAXIS2", "ZPCOUNT", "ZHEAPPTR",
     ] {

@@ -53,17 +53,13 @@ impl RandomGroups {
         for j in 1..=pcount {
             parameter_names.push(
                 header
-                    .get_text(key!("PTYPE{j}").as_str())
+                    .get_text(key!("PTYPE{j}").as_str())?
                     .unwrap_or("")
                     .to_string(),
             );
             param_scaling.push(ParamScale {
-                pscal: header
-                    .try_get_real(key!("PSCAL{j}").as_str())?
-                    .unwrap_or(1.0),
-                pzero: header
-                    .try_get_real(key!("PZERO{j}").as_str())?
-                    .unwrap_or(0.0),
+                pscal: header.get_real(key!("PSCAL{j}").as_str())?.unwrap_or(1.0),
+                pzero: header.get_real(key!("PZERO{j}").as_str())?.unwrap_or(0.0),
             });
         }
 

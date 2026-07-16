@@ -32,14 +32,22 @@ fn main() -> fits_well::Result<()> {
     let header = &reader.hdus()[0].header;
 
     // `header.obs_mjd()` resolves the observation time (MJD-OBS, else DATE-OBS).
-    println!("observation MJD = {:?}", header.obs_mjd());
+    println!("observation MJD = {:?}", header.obs_mjd()?);
 
     // The DATE-OBS string itself parses to a `Datetime`, then to Julian Date.
-    let t = Datetime::parse(header.get_text("DATE-OBS").unwrap())?;
+    let t = Datetime::parse(
+        header
+            .get_text("DATE-OBS")?
+            .expect("example header sets DATE-OBS"),
+    )?;
     println!("DATE-OBS -> JD {:.5}, MJD {:.5}", t.to_jd(), t.to_mjd());
 
     // Convert that instant from the header's TIMESYS (UTC) to Terrestrial Time.
-    let timesys = TimeScale::parse(header.get_text("TIMESYS").unwrap());
+    let timesys = TimeScale::parse(
+        header
+            .get_text("TIMESYS")?
+            .expect("example header sets TIMESYS"),
+    );
     let jd_tt = timesys.convert(t.to_jd(), TimeScale::parse("TT"));
     println!(
         "UTC -> TT differs by {:.3} s",

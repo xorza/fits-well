@@ -611,7 +611,8 @@ fn conflicting_linear_keywords_are_rejected() {
     malformed.set("CRVAL1", "not numeric");
     assert!(matches!(
         Wcs::from_header(&malformed, None),
-        Err(FitsError::TypeMismatch { name, .. }) if name == "CRVAL1"
+        Err(FitsError::TypeMismatch { name, expected })
+            if name == "CRVAL1" && expected == "real"
     ));
 }
 
@@ -936,12 +937,20 @@ fn vector_cell_wcs_matches_the_equivalent_image_wcs() {
 
 #[test]
 fn rejects_absurd_wcsaxes() {
-    // WCSAXES is untrusted; a value past the §4.4.1/§8 999-axis limit must be
-    // rejected before it sizes the naxis² matrix or drives the per-axis loops.
+    // Axis counts are untrusted; reject both bounds before they size a matrix or
+    // drive the per-axis loops.
     let mut h = Header::new();
-    h.set("WCSAXES", 1000i64);
+    for value in [-1, 0, 1000] {
+        h.set("WCSAXES", value);
+        assert!(matches!(
+            Wcs::from_header(&h, None),
+            Err(FitsError::KeywordOutOfRange { name: "WCSAXES" })
+        ));
+    }
+
+    h.set("WCAX5", -1);
     assert!(matches!(
-        Wcs::from_header(&h, None),
-        Err(FitsError::KeywordOutOfRange { name: "WCSAXES" })
+        Wcs::from_array_column(&h, 5, None),
+        Err(FitsError::KeywordOutOfRange { name: "WCAXn" })
     ));
 }

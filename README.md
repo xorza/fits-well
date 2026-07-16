@@ -42,7 +42,8 @@ println!("{} HDU(s)", reader.hdus().len());
 
 for (i, hdu) in reader.hdus().iter().enumerate() {
     println!("HDU {i}: {:?}", hdu.kind);
-    if let Some(object) = hdu.header.get_text("OBJECT") {
+    // Missing keywords return None; present values of the wrong type return an error.
+    if let Some(object) = hdu.header.get_text("OBJECT")? {
         println!("  OBJECT = {object}");
     }
 }

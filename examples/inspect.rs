@@ -31,7 +31,7 @@ fn main() -> fits_well::Result<()> {
 
         // The typed getters return `None` when a keyword is absent.
         for keyword in ["OBJECT", "TELESCOP", "INSTRUME", "DATE-OBS", "BUNIT"] {
-            if let Some(value) = hdu.header.get_text(keyword) {
+            if let Some(value) = hdu.header.get_text(keyword)? {
                 println!("  {keyword:8} = {value}");
             }
         }

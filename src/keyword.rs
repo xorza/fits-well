@@ -53,7 +53,7 @@ impl Write for KeyBuf {
 
 /// Format an indexed FITS keyword into a stack [`KeyBuf`] — like `format!`, but
 /// with no heap allocation. Call `.as_str()` on the result to feed a `Header`
-/// lookup: `header.get_real(key!("PV{}_{m}{a}", lat + 1).as_str())`.
+/// lookup: `header.get_real(key!("PV{}_{m}{a}", lat + 1).as_str())?`.
 macro_rules! key {
     ($($arg:tt)*) => {{
         let mut k = $crate::keyword::KeyBuf::new();

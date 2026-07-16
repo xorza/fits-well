@@ -222,7 +222,7 @@ fn writes_tdim_q_vla_and_bit_columns() {
         other => panic!("{other:?}"),
     }
     // X column: TFORM 12X, packed bytes preserved.
-    assert_eq!(r.hdus[1].header.get_text("TFORM3"), Some("1PA(5)"));
+    assert_eq!(r.hdus[1].header.get_text("TFORM3").unwrap(), Some("1PA(5)"));
     assert_eq!(t.columns[2].tform.repeat, 1);
     assert_eq!(t.columns[2].tform.kind, TformKind::ArrayDesc32);
     assert_eq!(t.columns[2].tform.vla_elem, Some(TformKind::Char));
@@ -252,9 +252,9 @@ fn writes_tscal_tzero_tnull_and_reads_back_physical() {
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     w.write_table(2, &columns).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
-    assert_eq!(r.hdus[1].header.get_real("TSCAL1"), Some(2.0));
-    assert_eq!(r.hdus[1].header.get_real("TZERO1"), Some(10.0));
-    assert_eq!(r.hdus[1].header.get_integer("TNULL1"), Some(99));
+    assert_eq!(r.hdus[1].header.get_real("TSCAL1").unwrap(), Some(2.0));
+    assert_eq!(r.hdus[1].header.get_real("TZERO1").unwrap(), Some(10.0));
+    assert_eq!(r.hdus[1].header.get_integer("TNULL1").unwrap(), Some(99));
     let t = r.read_table(1).unwrap();
     let phys = t.column_by_idx(0).unwrap().physical().unwrap();
     assert_eq!(phys[0], 20.0);
@@ -403,8 +403,8 @@ fn write_image_emits_scaling_keywords_and_preserves_unsigned_values() {
         },
     };
     let mut r = FitsReader::open(Cursor::new(write_to_vec(&image))).unwrap();
-    assert_eq!(r.hdus[0].header.get_real("BZERO"), Some(32768.0));
-    assert_eq!(r.hdus[0].header.get_real("BSCALE"), Some(1.0));
+    assert_eq!(r.hdus[0].header.get_real("BZERO").unwrap(), Some(32768.0));
+    assert_eq!(r.hdus[0].header.get_real("BSCALE").unwrap(), Some(1.0));
     let back = r.read_image(0).unwrap();
     assert_eq!(back.physical(), vec![0.0, 32768.0, 65535.0]);
     assert_eq!(back.decode(), ImageData::I16(vec![-32768, 0, 32767]));
@@ -416,7 +416,7 @@ fn from_u16_round_trips_through_write_and_read() {
     // come back via the typed `unsigned()` view.
     let built = Image::from_u16(vec![3], &[0, 32768, 65535]);
     let mut r = FitsReader::open(Cursor::new(write_to_vec(&built))).unwrap();
-    assert_eq!(r.hdus[0].header.get_real("BZERO"), Some(32768.0));
+    assert_eq!(r.hdus[0].header.get_real("BZERO").unwrap(), Some(32768.0));
     assert_eq!(
         r.read_image(0).unwrap().unsigned(),
         Some(UnsignedView::U16(vec![0, 32768, 65535]))
@@ -573,7 +573,7 @@ fn blank_is_emitted_only_for_integer_images() {
     };
     let mut h = Header::new();
     add_scaling(&mut h, &int_img);
-    assert_eq!(h.get_integer("BLANK"), Some(-32768));
+    assert_eq!(h.get_integer("BLANK").unwrap(), Some(-32768));
 
     let float_img = Image {
         shape: vec![2],
@@ -586,7 +586,7 @@ fn blank_is_emitted_only_for_integer_images() {
     };
     let mut h2 = Header::new();
     add_scaling(&mut h2, &float_img);
-    assert_eq!(h2.get_integer("BLANK"), None);
+    assert_eq!(h2.get_integer("BLANK").unwrap(), None);
 }
 
 #[test]

@@ -99,39 +99,23 @@ impl Header {
             .and_then(|&i| self.cards[i].value.as_ref())
     }
 
-    pub fn get_logical(&self, keyword: &str) -> Option<bool> {
-        self.get(keyword)?.as_logical()
-    }
-
-    pub fn get_integer(&self, keyword: &str) -> Option<i64> {
-        self.get(keyword)?.as_integer()
-    }
-
-    pub fn get_real(&self, keyword: &str) -> Option<f64> {
-        self.get(keyword)?.as_real()
-    }
-
-    pub fn get_text(&self, keyword: &str) -> Option<&str> {
-        self.get(keyword)?.as_text()
-    }
-
     /// Read an optional logical keyword without conflating absence with a wrong type.
-    pub fn try_get_logical(&self, keyword: &str) -> Result<Option<bool>> {
+    pub fn get_logical(&self, keyword: &str) -> Result<Option<bool>> {
         self.typed_optional(keyword, "logical", Value::as_logical)
     }
 
     /// Read an optional integer keyword without conflating absence with a wrong type.
-    pub fn try_get_integer(&self, keyword: &str) -> Result<Option<i64>> {
+    pub fn get_integer(&self, keyword: &str) -> Result<Option<i64>> {
         self.typed_optional(keyword, "integer", Value::as_integer)
     }
 
     /// Read an optional real keyword without conflating absence with a wrong type.
-    pub fn try_get_real(&self, keyword: &str) -> Result<Option<f64>> {
+    pub fn get_real(&self, keyword: &str) -> Result<Option<f64>> {
         self.typed_optional(keyword, "real", Value::as_real)
     }
 
     /// Read an optional text keyword without conflating absence with a wrong type.
-    pub fn try_get_text(&self, keyword: &str) -> Result<Option<&str>> {
+    pub fn get_text(&self, keyword: &str) -> Result<Option<&str>> {
         self.typed_optional(keyword, "text", Value::as_text)
     }
 
@@ -152,6 +136,11 @@ impl Header {
             })
     }
 
+    fn required_integer(&self, keyword: &str, missing_name: &'static str) -> Result<i64> {
+        self.get_integer(keyword)?
+            .ok_or(FitsError::MissingKeyword { name: missing_name })
+    }
+
     /// Every stored record in file order, as [`HeaderEntry`] views — duplicates and
     /// order preserved (the whole point of the ordered model), so `COMMENT`/`HISTORY`
     /// runs and repeated keywords come through intact. The implicit `END` is not a
@@ -167,17 +156,13 @@ impl Header {
 
     /// `BITPIX`, mapped to the typed element kind.
     pub fn bitpix(&self) -> Result<Bitpix> {
-        let code = self
-            .get_integer("BITPIX")
-            .ok_or(FitsError::MissingKeyword { name: "BITPIX" })?;
+        let code = self.required_integer("BITPIX", "BITPIX")?;
         Bitpix::from_code(code)
     }
 
     /// `NAXIS` — the number of axes (0 means no data array).
     pub fn naxis(&self) -> Result<usize> {
-        let n = self
-            .get_integer("NAXIS")
-            .ok_or(FitsError::MissingKeyword { name: "NAXIS" })?;
+        let n = self.required_integer("NAXIS", "NAXIS")?;
         // §4.4.1: `0 ≤ NAXIS ≤ 999`. Rejecting an out-of-range value is both
         // conformance and a guard — `axes()` reserves `Vec::with_capacity(NAXIS)`,
         // so an absurd `NAXIS` from an untrusted header would otherwise abort.
@@ -192,9 +177,7 @@ impl Header {
         let naxis = self.naxis()?;
         let mut axes = Vec::with_capacity(naxis);
         for n in 1..=naxis {
-            let len = self
-                .get_integer(key!("NAXIS{n}").as_str())
-                .ok_or(FitsError::MissingKeyword { name: "NAXISn" })?;
+            let len = self.required_integer(key!("NAXIS{n}").as_str(), "NAXISn")?;
             axes.push(
                 usize::try_from(len)
                     .map_err(|_| FitsError::KeywordOutOfRange { name: "NAXISn" })?,
@@ -207,7 +190,7 @@ impl Header {
     /// shared by the data-unit sizing ([`crate::hdu`]) and random-groups decode, where
     /// a present-but-out-of-range value must error rather than be silently clamped.
     pub(crate) fn pcount(&self) -> Result<u64> {
-        match self.get_integer("PCOUNT") {
+        match self.get_integer("PCOUNT")? {
             Some(p) if p < 0 => Err(FitsError::KeywordOutOfRange { name: "PCOUNT" }),
             Some(p) => Ok(p as u64),
             None => Ok(0),
@@ -216,7 +199,7 @@ impl Header {
 
     /// `GCOUNT` (default 1), rejecting a value `< 1` (§4.4.1) — see [`Header::pcount`].
     pub(crate) fn gcount(&self) -> Result<u64> {
-        match self.get_integer("GCOUNT") {
+        match self.get_integer("GCOUNT")? {
             Some(g) if g < 1 => Err(FitsError::KeywordOutOfRange { name: "GCOUNT" }),
             Some(g) => Ok(g as u64),
             None => Ok(1),
@@ -247,28 +230,28 @@ impl Header {
 
     /// The time-coordinate frame (FITS §9) parsed from this header — reference
     /// epoch/scale, units, and any time WCS axis.
-    pub fn time(&self) -> FitsTime {
+    pub fn time(&self) -> Result<FitsTime> {
         FitsTime::from_header(self)
     }
 
     /// The observation Modified Julian Date — `MJD-OBS`, else `DATE-OBS`, else the
     /// `JEPOCH`/`BEPOCH` epoch, else `None`.
-    pub fn obs_mjd(&self) -> Option<f64> {
+    pub fn obs_mjd(&self) -> Result<Option<f64>> {
         FitsTime::obs_mjd(self)
     }
 
     /// The Julian (`JEPOCH`) or Besselian (`BEPOCH`) epoch keyword, if present.
-    pub fn epoch(&self) -> Option<EpochTime> {
+    pub fn epoch(&self) -> Result<Option<EpochTime>> {
         FitsTime::epoch(self)
     }
 
     /// The observation time bounds (start/end/duration, §9.2.3) from this header.
-    pub fn time_bounds(&self) -> TimeBounds {
+    pub fn time_bounds(&self) -> Result<TimeBounds> {
         FitsTime::bounds(self)
     }
 
     /// The §9.6 `'PHASE'` axis parameters for WCS `axis` (1-based), if it is one.
-    pub fn phase_axis(&self, axis: usize) -> Option<PhaseAxis> {
+    pub fn phase_axis(&self, axis: usize) -> Result<Option<PhaseAxis>> {
         FitsTime::phase_axis(self, axis)
     }
 
