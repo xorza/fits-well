@@ -19,13 +19,18 @@ use std::io::Cursor;
 use std::io::Write;
 
 #[derive(Debug, Default)]
-struct FailFirstWrite {
+struct FailMidHdu {
     bytes: Vec<u8>,
     failed: bool,
 }
 
-impl Write for FailFirstWrite {
+impl Write for FailMidHdu {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.bytes.is_empty() {
+            let written = buf.len().min(127);
+            self.bytes.extend_from_slice(&buf[..written]);
+            return Ok(written);
+        }
         if !self.failed {
             self.failed = true;
             return Err(io::Error::other("injected write failure"));
@@ -224,6 +229,21 @@ fn rendered_header(header: &Header) -> Vec<u8> {
 
 #[test]
 fn writer_rejects_invalid_or_overflowing_layouts() {
+    let mismatched = Image {
+        shape: vec![2],
+        samples: ImageData::U8(vec![1]),
+        scaling: identity(),
+    };
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_image(&mismatched),
+        Err(FitsError::DataSizeMismatch {
+            expected: 2,
+            got: 1
+        })
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
+
     let image = Image {
         shape: vec![usize::MAX, 2],
         samples: ImageData::U8(Vec::new()),
@@ -372,21 +392,22 @@ fn table_writers_enforce_the_exact_tfields_limit_before_output() {
 }
 
 #[test]
-fn writer_state_is_committed_only_after_an_hdu_write_succeeds() {
+fn partial_hdu_failure_permanently_rejects_subsequent_writes() {
     let image = Image {
         shape: vec![1],
         samples: ImageData::U8(vec![7]),
         scaling: identity(),
     };
-    let mut writer = FitsWriter::new(FailFirstWrite::default());
+    let mut writer = FitsWriter::new(FailMidHdu::default());
     assert!(matches!(writer.write_image(&image), Err(FitsError::Io(_))));
-    assert!(!writer.has_primary);
+    assert_eq!(writer.state, WriterState::Failed);
+    assert_eq!(writer.sink.bytes.len(), 127);
 
-    writer.write_image(&image).unwrap();
-    let bytes = writer.into_inner().bytes;
-    let reader = FitsReader::open(Cursor::new(bytes)).unwrap();
-    assert_eq!(reader.hdus.len(), 1);
-    assert_eq!(reader.hdus[0].kind, HduKind::Primary);
+    assert!(matches!(
+        writer.write_image(&image),
+        Err(FitsError::WriterFailed)
+    ));
+    assert_eq!(writer.into_inner().bytes.len(), 127);
 }
 
 #[test]
@@ -964,7 +985,7 @@ fn write_image_emits_scaling_keywords_and_preserves_unsigned_values() {
 fn from_u16_round_trips_through_write_and_read() {
     // The `from_u16` constructor + writer emit BZERO=32768 so the exact u16 values
     // come back via the typed `unsigned()` view.
-    let built = Image::from_u16(vec![3], &[0, 32768, 65535]);
+    let built = Image::from_u16(vec![3], &[0, 32768, 65535]).unwrap();
     let mut r = FitsReader::open(Cursor::new(write_to_vec(&built))).unwrap();
     assert_eq!(r.hdus[0].header.get_real("BZERO").unwrap(), Some(32768.0));
     assert_eq!(
@@ -975,7 +996,7 @@ fn from_u16_round_trips_through_write_and_read() {
 
 #[test]
 fn from_u64_writes_the_exact_offset_and_round_trips_extremes() {
-    let built = Image::from_u64(vec![2], &[u64::MIN, u64::MAX]);
+    let built = Image::from_u64(vec![2], &[u64::MIN, u64::MAX]).unwrap();
     let bytes = write_to_vec(&built);
     let bzero = bytes[..BLOCK_SIZE]
         .chunks_exact(CARD_SIZE)
@@ -1123,8 +1144,7 @@ fn written_file_reads_back_with_matching_boundaries() {
         "NAXIS1  =                   10",
     ]);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer.write_header(&header).unwrap();
-    writer.write_data_unit(&[0u8; 10], ZERO_FILL).unwrap();
+    writer.write_raw_hdu(&header, &[0u8; 10]).unwrap();
     let bytes = writer.into_inner().into_inner();
 
     // Header block + one padded data block.
@@ -1135,6 +1155,26 @@ fn written_file_reads_back_with_matching_boundaries() {
     assert_eq!(f.hdus[0].data_offset, BLOCK_SIZE as u64);
     assert_eq!(padded_len(f.hdus[0].data_bytes), BLOCK_SIZE as u64);
     assert_eq!(f.hdus[0].header.axes().unwrap(), vec![10]);
+}
+
+#[test]
+fn raw_hdu_validates_the_complete_unit_before_output() {
+    let header = header(&[
+        "SIMPLE  =                    T",
+        "BITPIX  =                   16",
+        "NAXIS   =                    1",
+        "NAXIS1  =                    2",
+    ]);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_raw_hdu(&header, &[0, 1]),
+        Err(FitsError::DataSizeMismatch {
+            expected: 4,
+            got: 2
+        })
+    ));
+    assert_eq!(writer.state, WriterState::Empty);
+    assert!(writer.into_inner().into_inner().is_empty());
 }
 
 #[test]
@@ -1316,6 +1356,18 @@ fn compressed_image_metadata_is_validated_before_automatic_primary() {
     assert!(matches!(
         writer.write_compressed_image(&image, "GZIP_1", &CompressOptions::default()),
         Err(FitsError::KeywordOutOfRange { name: "BLANK" })
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
+
+    let image = Image {
+        shape: vec![1],
+        samples: ImageData::I64(vec![1]),
+        scaling: identity(),
+    };
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_compressed_image(&image, "RICE_1", &CompressOptions::default()),
+        Err(FitsError::UnsupportedCompression { .. })
     ));
     assert!(writer.into_inner().into_inner().is_empty());
 }

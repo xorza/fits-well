@@ -4,6 +4,19 @@
 
 ### Breaking changes
 
+- `Image` is now constructed with fallible `Image::new`; its geometry, samples,
+  and scaling are immutable after construction, with geometry and stored-type
+  metadata exposed through `Image::metadata` and exact immutable samples through
+  `Image::stored`. The unsigned/signed-byte constructors now return `Result`.
+  `RawImage` likewise exposes immutable `ImageMetadata`, and `RawImage::bitpix`
+  derives the stored type from its backing representation instead of exposing a
+  separately mutable tag. `ImageData::into_ndarray` now returns `Result` when a
+  caller-supplied shape has the wrong element count.
+- `FitsWriter::write_header` and `write_data_unit` were replaced by the atomic
+  `write_raw_hdu`, which validates the header-implied data size and derives the
+  correct block fill. A sink error now permanently fails the writer; subsequent
+  writes return `FitsError::WriterFailed` instead of appending after a possibly
+  torn HDU.
 - `WriteColumn` is now an invariant-preserving opaque type instead of a collection
   of public, independently mutable fields. `WriteColumn::vla` now requires an
   explicit `ColumnType`, including for empty columns, and `WriteColumn::bits` now
@@ -47,8 +60,9 @@
   `TypeMismatch`, `InvalidAscii`, `ReservedKeyword`, `InvalidHeaderValue`,
   `HeaderCardTooLong`, `AsciiFieldTooWide`, `IntegerOutOfRange`,
   `UnsupportedWcsTransform`, `WcsProjectionDomain`, `WcsNoConvergence`,
-  `PlioValueOutOfRange`, `TableMetadataMismatch`, and `GroupIndexOutOfBounds`
-  variants were added; exhaustive matches on `FitsError` must handle them.
+  `PlioValueOutOfRange`, `TableMetadataMismatch`, `GroupIndexOutOfBounds`, and
+  `WriterFailed` variants were added; exhaustive matches on `FitsError` must handle
+  them.
 
 ### Added
 
@@ -88,6 +102,9 @@
 - Binary-table writing validates each column state before emitting data. `wide()` is
   restricted to VLA columns, bit columns require the exact packed byte count, and
   VLA rows must match their declared element type.
+- Every writer path now finishes header/data preparation before emitting an
+  automatic primary HDU. Validation and compression failures therefore leave a
+  fresh sink empty, while partial sink failures poison the writer.
 - Image and table writers reject nonfinite scaling metadata, out-of-range or
   inapplicable `BLANK`/`TNULLn` sentinels, and scaling keywords forbidden for the
   stored column type before writing any bytes.

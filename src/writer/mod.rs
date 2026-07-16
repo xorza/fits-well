@@ -2,10 +2,10 @@
 //!
 //! The high-level writers — [`FitsWriter::write_image`], `write_table`,
 //! `write_ascii_table`, and the compressed forms — synthesize the mandatory header
-//! and emit the data unit through `write_hdu` (which pads to the block grid and
+//! and emit the data unit through one preflighted HDU transaction (which pads to the block grid and
 //! embeds `CHECKSUM`/`DATASUM` when enabled), assembling each unit in the writer's
-//! reused `scratch`. [`FitsWriter::write_header`] / [`FitsWriter::write_data_unit`]
-//! are the low-level escape hatches for callers driving the layout themselves.
+//! reused `scratch`. [`FitsWriter::write_raw_hdu`] is the low-level escape hatch for
+//! callers supplying a complete header and already-encoded data unit themselves.
 
 use std::borrow::Cow;
 use std::io::Write;
@@ -27,12 +27,15 @@ use crate::compress::{CompressOptions, compress_image, compress_table};
 use crate::data::Image;
 use crate::data::U64_OFFSET;
 use crate::data::U64_OFFSET_INTEGER;
-use crate::data::shape_product;
 use crate::endian::extend_be;
 use crate::endian::validate_pq_descriptor;
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::hdu::HduKind;
+use crate::hdu::HduPosition;
+use crate::hdu::HduRole;
+use crate::hdu::data_extent;
 use crate::hdu::validate_table_field_count;
 use crate::header::Header;
 use crate::header::card::validate_ascii;
@@ -255,22 +258,29 @@ pub struct AsciiWriteColumn {
 #[derive(Debug)]
 pub struct FitsWriter<W> {
     sink: W,
-    has_primary: bool,
+    state: WriterState,
     checksum: bool,
     /// Reused buffer the data unit is assembled into before padding + writing, so
     /// writing many HDUs allocates no per-call staging. Each high-level write
-    /// `clear`s it, builds the unit, and hands it to [`FitsWriter::write_hdu`].
+    /// `clear`s it, builds the unit, and hands it to the HDU commit path.
     scratch: Vec<u8>,
     /// Reused block-padded header serialization, kept separate because checksum
     /// generation needs the header and data bytes alive at the same time.
     header_scratch: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriterState {
+    Empty,
+    Active,
+    Failed,
+}
+
 impl<W: Write> FitsWriter<W> {
     pub fn new(sink: W) -> Self {
         FitsWriter {
             sink,
-            has_primary: false,
+            state: WriterState::Empty,
             checksum: false,
             scratch: Vec::new(),
             header_scratch: Vec::new(),
@@ -278,30 +288,43 @@ impl<W: Write> FitsWriter<W> {
     }
 
     /// Enable `DATASUM`/`CHECKSUM` integrity keywords on every HDU written through
-    /// the high-level [`FitsWriter::write_image`] / `write_table` / `write_ascii_table`
-    /// methods (§J).
+    /// this writer (§J), including [`FitsWriter::write_raw_hdu`].
     pub fn with_checksums(mut self) -> Self {
         self.checksum = true;
         self
     }
 
-    /// Write a header unit (cards + `END` + block padding).
-    pub fn write_header(&mut self, header: &Header) -> Result<()> {
-        render_header(header, &mut self.header_scratch)?;
-        self.sink.write_all(&self.header_scratch)?;
-        Ok(())
-    }
-
-    /// Write a pre-encoded data unit, padding to a block with `fill` — NUL for
-    /// most data, ASCII space for ASCII-table data (§3.1).
-    pub fn write_data_unit(&mut self, raw: &[u8], fill: u8) -> Result<()> {
-        self.sink.write_all(raw)?;
-        let rem = raw.len() % BLOCK_SIZE;
-        if rem != 0 {
-            let padding = [fill; BLOCK_SIZE];
-            self.sink.write_all(&padding[..BLOCK_SIZE - rem])?;
+    /// Write one complete raw HDU after validating the header's role and exact
+    /// unpadded data length. The block fill is derived from the HDU kind: spaces
+    /// for an ASCII table and NULs for every other data unit.
+    pub fn write_raw_hdu(&mut self, header: &Header, raw: &[u8]) -> Result<()> {
+        self.ensure_writable()?;
+        let position = match self.state {
+            WriterState::Empty => HduPosition::Primary,
+            WriterState::Active => HduPosition::Extension,
+            WriterState::Failed => unreachable!("failed writer rejected above"),
+        };
+        let role = HduRole::from_header(header, position)?;
+        let kind = HduKind::classify(header, role)?;
+        let extent = data_extent(header, role)?;
+        let expected =
+            usize::try_from(extent.data_bytes).map_err(|_| FitsError::DataUnitTooLarge {
+                bytes: extent.data_bytes,
+            })?;
+        if raw.len() != expected {
+            return Err(FitsError::DataSizeMismatch {
+                expected,
+                got: raw.len(),
+            });
         }
-        Ok(())
+        self.scratch.clear();
+        self.scratch.extend_from_slice(raw);
+        let fill = if kind == HduKind::AsciiTable {
+            SPACE_FILL
+        } else {
+            ZERO_FILL
+        };
+        self.finish_hdu(header.clone(), fill, false)
     }
 
     /// Write `image` as the primary HDU (first call) or an `IMAGE` extension
@@ -309,22 +332,16 @@ impl<W: Write> FitsWriter<W> {
     /// `BITPIX`, `NAXISn`, plus `BSCALE`/`BZERO`/`BLANK` when scaling is
     /// non-trivial), followed by the big-endian data unit.
     pub fn write_image(&mut self, image: &Image) -> Result<()> {
-        let expected = shape_product(&image.shape)?;
-        assert_eq!(
-            image.samples.len(),
-            expected,
-            "image sample count must match the shape product"
-        );
+        self.ensure_writable()?;
+        let expected = image.validate_geometry()?;
         let encoded_len = expected
             .checked_mul(image.samples.bitpix().elem_size())
             .ok_or(FitsError::DataUnitOverflow)?;
-        let header = image_header(image, !self.has_primary)?;
+        let header = image_header(image, self.state == WriterState::Empty)?;
         self.scratch.clear();
         self.scratch.reserve_exact(encoded_len);
         image.samples.encode_into(&mut self.scratch);
-        self.write_hdu(header, ZERO_FILL)?;
-        self.has_primary = true;
-        Ok(())
+        self.finish_hdu(header, ZERO_FILL, false)
     }
 
     /// Write a binary table as a `BINTABLE` extension. A dataless primary HDU is
@@ -333,6 +350,7 @@ impl<W: Write> FitsWriter<W> {
     /// are both supported, including jagged `PX`/`QX` bit arrays — VLA columns
     /// write a heap after the main table.
     pub fn write_table(&mut self, nrows: usize, columns: &[WriteColumn]) -> Result<()> {
+        self.ensure_writable()?;
         validate_table_field_count(columns.len())?;
         fits_i64(nrows)?;
         let mut layouts = Vec::with_capacity(columns.len());
@@ -368,7 +386,6 @@ impl<W: Write> FitsWriter<W> {
             }
         }
         fits_i64(heap_len)?;
-        self.ensure_primary()?;
         self.scratch.clear();
         let main_len = nrows
             .checked_mul(row_len)
@@ -423,13 +440,14 @@ impl<W: Write> FitsWriter<W> {
             }
         }
         let header = bintable_header(nrows, row_len, columns, &layouts, heap_len)?;
-        self.write_hdu(header, ZERO_FILL)
+        self.finish_hdu(header, ZERO_FILL, true)
     }
 
     /// Write an ASCII table as a `TABLE` extension (a dataless primary is written
     /// first if needed). Columns are packed left-to-right with no gaps; data is
     /// space-padded per §7.2.3.
     pub fn write_ascii_table(&mut self, nrows: usize, columns: &[AsciiWriteColumn]) -> Result<()> {
+        self.ensure_writable()?;
         validate_table_field_count(columns.len())?;
         let mut tbcols = Vec::with_capacity(columns.len());
         let mut row_len = 0usize;
@@ -456,14 +474,13 @@ impl<W: Write> FitsWriter<W> {
         let total_len = nrows
             .checked_mul(row_len)
             .ok_or(FitsError::DataUnitOverflow)?;
-        self.ensure_primary()?;
         self.scratch.reserve_exact(total_len);
         for r in 0..nrows {
             for col in columns {
                 format_ascii_field(&mut self.scratch, col, r);
             }
         }
-        self.write_hdu(header, SPACE_FILL)
+        self.finish_hdu(header, SPACE_FILL, true)
     }
 
     /// Write `image` as a tiled-compressed `BINTABLE` extension (§10.1), using the
@@ -481,11 +498,9 @@ impl<W: Write> FitsWriter<W> {
         cmptype: &str,
         options: &CompressOptions,
     ) -> Result<()> {
-        // This must precede the automatic primary so invalid metadata writes nothing.
-        image.scaling.validate(image.samples.bitpix())?;
-        self.ensure_primary()?;
+        self.ensure_writable()?;
         let header = compress_image(image, cmptype, options, &mut self.scratch)?;
-        self.write_hdu(header, ZERO_FILL)
+        self.finish_hdu(header, ZERO_FILL, true)
     }
 
     /// Write a fixed-width `BINTABLE` as a tiled-compressed table (§10.3). `header`
@@ -502,29 +517,21 @@ impl<W: Write> FitsWriter<W> {
         rows_per_tile: usize,
         algo: &str,
     ) -> Result<()> {
-        self.ensure_primary()?;
+        self.ensure_writable()?;
         let zheader = compress_table(header, table, rows_per_tile, algo, &mut self.scratch)?;
-        self.write_hdu(zheader, ZERO_FILL)
+        self.finish_hdu(zheader, ZERO_FILL, true)
     }
 
-    /// Write a dataless primary HDU if none has been written yet, so subsequent
-    /// extensions are well-formed.
-    fn ensure_primary(&mut self) -> Result<()> {
-        if !self.has_primary {
-            self.scratch.clear();
-            self.write_hdu(empty_primary_header(), ZERO_FILL)?;
-            self.has_primary = true;
+    fn ensure_writable(&self) -> Result<()> {
+        if self.state == WriterState::Failed {
+            return Err(FitsError::WriterFailed);
         }
         Ok(())
     }
 
-    /// Render and write one HDU: the unpadded data unit the caller has assembled in
-    /// `self.scratch`, padded to a block and framed by the header (with
-    /// `DATASUM`/`CHECKSUM` embedded when checksums are enabled).
-    ///
-    /// Takes the data via the reused `scratch` field rather than an owned argument,
-    /// so the high-level writers build into one buffer that survives across HDUs.
-    fn write_hdu(&mut self, mut header: Header, fill: u8) -> Result<()> {
+    /// Finish preflight for one HDU, then commit it and any required automatic
+    /// primary without another fallible validation or encoding step between them.
+    fn finish_hdu(&mut self, header: Header, fill: u8, automatic_primary: bool) -> Result<()> {
         let rem = self.scratch.len() % BLOCK_SIZE;
         if rem != 0 {
             let padded = self
@@ -534,25 +541,34 @@ impl<W: Write> FitsWriter<W> {
                 .ok_or(FitsError::DataUnitOverflow)?;
             self.scratch.resize(padded, fill);
         }
-        let data_sum = if self.checksum {
-            let sum = checksum::accumulate(&self.scratch, 0);
-            header.set("DATASUM", sum.to_string());
-            header.set("CHECKSUM", PLACEHOLDER_CHECKSUM);
-            Some(sum)
+        prepare_header(
+            header,
+            &self.scratch,
+            self.checksum,
+            &mut self.header_scratch,
+        )?;
+
+        let primary_header = if automatic_primary && self.state == WriterState::Empty {
+            let mut primary_header = Vec::new();
+            prepare_header(
+                empty_primary_header(),
+                &[],
+                self.checksum,
+                &mut primary_header,
+            )?;
+            Some(primary_header)
         } else {
             None
         };
-        render_header(&header, &mut self.header_scratch)?;
-        if let Some(data_sum) = data_sum {
-            // Re-sum with the zero placeholder, then encode the value that forces
-            // the whole-HDU checksum to negative zero, and patch it in place.
-            let hdu_sum =
-                checksum::combine(checksum::accumulate(&self.header_scratch, 0), data_sum);
-            patch_checksum(&mut self.header_scratch, &checksum::encode(hdu_sum, true));
+        if let Some(primary_header) = primary_header {
+            write_prepared(&mut self.sink, &mut self.state, &primary_header, &[])?;
         }
-        self.sink.write_all(&self.header_scratch)?;
-        self.sink.write_all(&self.scratch)?;
-        Ok(())
+        write_prepared(
+            &mut self.sink,
+            &mut self.state,
+            &self.header_scratch,
+            &self.scratch,
+        )
     }
 
     /// Consume the writer and return the underlying sink. HDUs are written eagerly,
@@ -562,6 +578,42 @@ impl<W: Write> FitsWriter<W> {
     pub fn into_inner(self) -> W {
         self.sink
     }
+}
+
+fn prepare_header(
+    mut header: Header,
+    padded_data: &[u8],
+    with_checksum: bool,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    let data_sum = if with_checksum {
+        let sum = checksum::accumulate(padded_data, 0);
+        header.set("DATASUM", sum.to_string());
+        header.set("CHECKSUM", PLACEHOLDER_CHECKSUM);
+        Some(sum)
+    } else {
+        None
+    };
+    render_header(&header, out)?;
+    if let Some(data_sum) = data_sum {
+        let hdu_sum = checksum::combine(checksum::accumulate(out, 0), data_sum);
+        patch_checksum(out, &checksum::encode(hdu_sum, true));
+    }
+    Ok(())
+}
+
+fn write_prepared<W: Write>(
+    sink: &mut W,
+    state: &mut WriterState,
+    header: &[u8],
+    data: &[u8],
+) -> Result<()> {
+    if let Err(error) = sink.write_all(header).and_then(|()| sink.write_all(data)) {
+        *state = WriterState::Failed;
+        return Err(FitsError::Io(error));
+    }
+    *state = WriterState::Active;
+    Ok(())
 }
 
 /// A dataless primary HDU (`NAXIS = 0`), written before extensions when the

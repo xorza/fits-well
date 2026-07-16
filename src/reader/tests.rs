@@ -405,7 +405,7 @@ fn read_image_decodes_the_primary_array_shape_and_type() {
     let mut f = open("UITfuv2582gc.fits");
     let raw = f.read_image(0).unwrap();
     assert_eq!(raw.shape, vec![512, 512]);
-    assert_eq!(raw.bitpix, Bitpix::I16);
+    assert_eq!(raw.bitpix(), Bitpix::I16);
     assert_eq!(raw.physical().len(), 512 * 512);
     assert_eq!(raw.decode().len(), 512 * 512);
 }
@@ -457,7 +457,7 @@ fn hdu_index_finds_extensions_by_extname() {
         .set("NAXIS", 0)
         .set("EXTNAME", 7);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer.write_header(&header).unwrap();
+    writer.write_raw_hdu(&header, &[]).unwrap();
     let bytes = writer.into_inner().into_inner();
     let malformed = FitsReader::from_bytes(&bytes).unwrap();
     assert!(matches!(
@@ -500,7 +500,7 @@ fn read_image_borrows_u8_samples_with_zero_copy() {
     let mut reader = FitsReader::from_bytes(&buf).unwrap();
     let raw = reader.read_image(0).unwrap();
     assert_eq!(raw.shape, vec![4]);
-    assert_eq!(raw.bitpix, Bitpix::U8);
+    assert_eq!(raw.bitpix(), Bitpix::U8);
     // U8 needs no byte-swap, so `.u8()` hands back the stored bytes directly.
     let view = raw.u8().expect("a U8 image has a zero-copy u8 view");
     assert_eq!(view, &[10, 20, 30, 40]);

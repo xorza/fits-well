@@ -28,6 +28,88 @@ fn shape_product_handles_empty_axes_and_rejects_overflow() {
 }
 
 #[test]
+fn image_constructor_enforces_geometry_for_every_bitpix() {
+    let scaling = Scaling {
+        bscale: 1.0,
+        bzero: 0.0,
+        blank: None,
+    };
+    let valid = [
+        ImageData::U8(vec![1, 2]),
+        ImageData::I16(vec![1, 2]),
+        ImageData::I32(vec![1, 2]),
+        ImageData::I64(vec![1, 2]),
+        ImageData::F32(vec![1.0, 2.0]),
+        ImageData::F64(vec![1.0, 2.0]),
+    ];
+    for samples in valid {
+        let bitpix = samples.bitpix();
+        let image = Image::new(vec![2], samples, scaling).unwrap();
+        assert_eq!(image.metadata().shape, [2]);
+        assert_eq!(image.metadata().bitpix, bitpix);
+    }
+
+    let short = [
+        ImageData::U8(vec![1]),
+        ImageData::I16(vec![1]),
+        ImageData::I32(vec![1]),
+        ImageData::I64(vec![1]),
+        ImageData::F32(vec![1.0]),
+        ImageData::F64(vec![1.0]),
+    ];
+    for samples in short {
+        assert!(matches!(
+            Image::new(vec![2], samples, scaling),
+            Err(FitsError::DataSizeMismatch {
+                expected: 2,
+                got: 1
+            })
+        ));
+    }
+}
+
+#[test]
+fn image_constructor_accepts_empty_geometry_and_rejects_nonempty_samples() {
+    let scaling = Scaling {
+        bscale: 1.0,
+        bzero: 0.0,
+        blank: None,
+    };
+    for shape in [Vec::new(), vec![0], vec![4, 0, 3]] {
+        Image::new(shape.clone(), ImageData::F64(Vec::new()), scaling).unwrap();
+        assert!(matches!(
+            Image::new(shape, ImageData::F64(vec![1.0]), scaling),
+            Err(FitsError::DataSizeMismatch {
+                expected: 0,
+                got: 1
+            })
+        ));
+    }
+    assert!(matches!(
+        Image::from_u16(vec![2], &[1]),
+        Err(FitsError::DataSizeMismatch {
+            expected: 2,
+            got: 1
+        })
+    ));
+}
+
+#[test]
+fn image_stored_view_preserves_exact_samples_immutably() {
+    let image = Image::new(
+        vec![3],
+        ImageData::I64(vec![i64::MIN, 0, i64::MAX]),
+        Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(image.stored(), ImageView::I64(&[i64::MIN, 0, i64::MAX]));
+}
+
+#[test]
 fn decodes_big_endian_integers_and_floats() {
     // i16: 0x0001=1, 0xFFFF=-1, 0x8000=-32768 (the unsigned-u16 min sentinel).
     assert_eq!(
@@ -294,19 +376,19 @@ fn unsigned_view_recovers_exact_typed_integers() {
 fn from_unsigned_constructors_invert_the_unsigned_view() {
     // from_uN builds the signed storage + BZERO offset; unsigned() recovers it.
     let u16s = vec![0u16, 1, 32768, 65535];
-    let img = Image::from_u16(vec![4], &u16s);
+    let img = Image::from_u16(vec![4], &u16s).unwrap();
     assert_eq!(img.samples, ImageData::I16(vec![-32768, -32767, 0, 32767]));
     assert_eq!(img.scaling.bzero, 32768.0);
     assert_eq!(img.unsigned(), Some(UnsignedView::U16(u16s)));
 
     let u64s = vec![0u64, 1u64 << 63, u64::MAX];
     assert_eq!(
-        Image::from_u64(vec![3], &u64s).unsigned(),
+        Image::from_u64(vec![3], &u64s).unwrap().unsigned(),
         Some(UnsignedView::U64(u64s))
     );
     let i8s = vec![i8::MIN, 0, i8::MAX];
     assert_eq!(
-        Image::from_i8(vec![3], &i8s).unsigned(),
+        Image::from_i8(vec![3], &i8s).unwrap().unsigned(),
         Some(UnsignedView::I8(i8s))
     );
 }
@@ -400,6 +482,7 @@ fn raw_image_fuses_big_endian_physical_conversion() {
     for (samples, expected) in cases {
         let bytes = encoded(&samples);
         let raw = RawImage::raw(vec![2], samples.bitpix(), scaling, &bytes);
+        assert_eq!(raw.metadata().bitpix, samples.bitpix());
         let physical = raw.physical();
         for (got, want) in physical.iter().zip(&expected) {
             assert!(
@@ -661,4 +744,12 @@ fn ndarray_arrays_are_fortran_ordered() {
     let phys = img.physical_array();
     assert_eq!(phys.shape(), &[2, 3]);
     assert_eq!(phys[[1, 2]], 100.0 + 2.0 * 21.0);
+
+    assert!(matches!(
+        ImageData::I16(vec![1]).into_ndarray(&[2]),
+        Err(FitsError::DataSizeMismatch {
+            expected: 2,
+            got: 1
+        })
+    ));
 }

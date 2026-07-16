@@ -58,11 +58,11 @@ for (i, hdu) in reader.hdus().iter().enumerate() {
 use std::fs::File;
 use fits_well::{FitsReader, FitsWriter, Image, ImageData, Scaling};
 
-let image = Image {
-    shape: vec![4, 3],
-    samples: ImageData::I16(vec![0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23]),
-    scaling: Scaling { bscale: 1.0, bzero: 0.0, blank: None },
-};
+let image = Image::new(
+    vec![4, 3],
+    ImageData::I16(vec![0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23]),
+    Scaling { bscale: 1.0, bzero: 0.0, blank: None },
+)?;
 
 let mut writer = FitsWriter::new(File::create("out.fits")?);
 writer.write_image(&image)?;
@@ -74,7 +74,7 @@ let mut reader = FitsReader::open(File::open("out.fits")?)?;
 let raw = reader.read_image(reader.image_indices()[0])?;
 // `bitpix` is the stored width; `sample_type()` is the *effective* type, resolving
 // the unsigned / signed-byte BZERO conventions (cfitsio's "equivalent type").
-println!("shape {:?}, {:?}", raw.shape, raw.sample_type());
+println!("shape {:?}, {:?}", raw.metadata().shape, raw.sample_type());
 
 // `decode()` byte-swaps into an owned host-endian buffer; `physical()` applies
 // BSCALE/BZERO and maps any BLANK value to NaN.
@@ -92,7 +92,7 @@ call — it detects `ZIMAGE` and decompresses transparently. To write one:
 # {
 # use std::fs::File;
 # use fits_well::{FitsWriter, CompressOptions, Image, ImageData, Scaling};
-# let image = Image { shape: vec![16, 16], samples: ImageData::I16(vec![0; 256]), scaling: Scaling { bscale: 1.0, bzero: 0.0, blank: None } };
+# let image = Image::new(vec![16, 16], ImageData::I16(vec![0; 256]), Scaling { bscale: 1.0, bzero: 0.0, blank: None })?;
 let options = CompressOptions::tiled([8, 8]); // 8×8 tiles
 let mut writer = FitsWriter::new(File::create("compressed.fits")?);
 writer.write_compressed_image(&image, "RICE_1", &options)?;

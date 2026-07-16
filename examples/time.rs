@@ -23,7 +23,7 @@ fn main() -> fits_well::Result<()> {
         .try_set("MJD-OBS", 60383.631551)?
         .try_set("TIMESYS", "UTC")?;
     let mut writer = FitsWriter::new(File::create(&path)?);
-    writer.write_header(&header)?; // NAXIS=0 → header only, no data unit
+    writer.write_raw_hdu(&header, &[])?; // NAXIS=0 → header only, no data unit
     writer.into_inner().sync_all()?;
     println!("wrote {}", path.display());
 
