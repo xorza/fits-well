@@ -27,6 +27,28 @@ const TAN_GOLDEN: &[(f64, f64, f64, f64)] = &[
     (400.0, 123.0, 149.951756061540, 2.474666292235),
 ];
 
+const CEA_GOLDEN: &[(f64, f64, f64, f64)] = &[
+    (20.0, 70.0, 46.7406870828, 30.4886140110),
+    (80.0, 30.0, 43.2767613377, 29.4887155113),
+];
+
+const CROTA_GOLDEN: &[(f64, f64, f64, f64)] = &[
+    (128.0, 128.0, 83.6000000000, 22.0000000000),
+    (1.0, 1.0, 83.6909943156, 21.9692606492),
+    (256.0, 200.0, 83.5210288338, 22.0055606050),
+    (64.0, 192.0, 83.6166986376, 22.0425247793),
+];
+
+fn assert_astropy_golden(wcs: &Wcs, golden: &[(f64, f64, f64, f64)], context: &str) {
+    for &(px, py, ra, dec) in golden {
+        let world = wcs.pixel_to_world(&[px, py]).unwrap();
+        assert!(
+            (world[0] - ra).abs() < 1e-9 && (world[1] - dec).abs() < 1e-9,
+            "{context} at ({px},{py}): got {world:?}, want ({ra},{dec})"
+        );
+    }
+}
+
 #[test]
 fn parses_tan_header() {
     let w = open_wcs("wcs_tan.fits");
@@ -60,19 +82,7 @@ fn parses_tan_header() {
 #[test]
 fn pixel_to_world_matches_astropy() {
     let w = open_wcs("wcs_tan.fits");
-    for &(px, py, ra, dec) in TAN_GOLDEN {
-        let world = w.pixel_to_world(&[px, py]).unwrap();
-        assert!(
-            (world[0] - ra).abs() < 1e-9,
-            "RA at ({px},{py}): got {}, want {ra}",
-            world[0]
-        );
-        assert!(
-            (world[1] - dec).abs() < 1e-9,
-            "Dec at ({px},{py}): got {}, want {dec}",
-            world[1]
-        );
-    }
+    assert_astropy_golden(&w, TAN_GOLDEN, "TAN image");
 }
 
 #[test]
@@ -214,13 +224,7 @@ fn legacy_crota_rotation_matches_astropy() {
     h.set("CDELT1", -0.0005).set("CDELT2", 0.0005);
     h.set("CROTA2", 25.0);
     let w = Wcs::from_header(&h, None).unwrap();
-    let golden: &[(f64, f64, f64, f64)] = &[
-        (128.0, 128.0, 83.6000000000, 22.0000000000),
-        (1.0, 1.0, 83.6909943156, 21.9692606492),
-        (256.0, 200.0, 83.5210288338, 22.0055606050),
-        (64.0, 192.0, 83.6166986376, 22.0425247793),
-    ];
-    for &(px, py, ra, dec) in golden {
+    for &(px, py, ra, dec) in CROTA_GOLDEN {
         let out = w.pixel_to_world(&[px, py]).unwrap();
         assert!(
             (out[0] - ra).abs() < 1e-8 && (out[1] - dec).abs() < 1e-8,
@@ -268,17 +272,7 @@ fn cea_lambda_pv_matches_astropy() {
     h.set("CDELT1", -0.05).set("CDELT2", 0.05);
     h.set("PV2_1", 0.5);
     let w = Wcs::from_header(&h, None).unwrap();
-    let golden: &[(f64, f64, f64, f64)] = &[
-        (20.0, 70.0, 46.7406870828, 30.4886140110),
-        (80.0, 30.0, 43.2767613377, 29.4887155113),
-    ];
-    for &(px, py, ra, dec) in golden {
-        let out = w.pixel_to_world(&[px, py]).unwrap();
-        assert!(
-            (out[0] - ra).abs() < 1e-8 && (out[1] - dec).abs() < 1e-8,
-            "CEA λ at ({px},{py}): got {out:?}, want ({ra},{dec})"
-        );
-    }
+    assert_astropy_golden(&w, CEA_GOLDEN, "CEA λ image");
 }
 
 #[test]
@@ -905,6 +899,138 @@ fn linear_spectral_resolves_nonlinear_falls_back_to_intermediate() {
 }
 
 #[test]
+fn table_wcs_resolver_matches_table_22() {
+    let primary = TableWcsResolver::new(None);
+    let alternate = TableWcsResolver::new(Some('A'));
+    let axis_cases = [
+        (
+            TableAxisKeyword::Type,
+            "TCTYP17",
+            "TCTY17A",
+            "3CTYP17",
+            "3CTY17A",
+        ),
+        (
+            TableAxisKeyword::Unit,
+            "TCUNI17",
+            "TCUN17A",
+            "3CUNI17",
+            "3CUN17A",
+        ),
+        (
+            TableAxisKeyword::ReferenceValue,
+            "TCRVL17",
+            "TCRV17A",
+            "3CRVL17",
+            "3CRV17A",
+        ),
+        (
+            TableAxisKeyword::Increment,
+            "TCDLT17",
+            "TCDE17A",
+            "3CDLT17",
+            "3CDE17A",
+        ),
+        (
+            TableAxisKeyword::ReferencePoint,
+            "TCRPX17",
+            "TCRP17A",
+            "3CRPX17",
+            "3CRP17A",
+        ),
+    ];
+    for (keyword, primary_pixel, alternate_pixel, primary_vector, alternate_vector) in axis_cases {
+        assert_eq!(
+            primary.pixel_axis_key(keyword, 17).unwrap().as_str(),
+            primary_pixel
+        );
+        assert_eq!(
+            alternate.pixel_axis_key(keyword, 17).unwrap().as_str(),
+            alternate_pixel
+        );
+        assert_eq!(
+            primary.vector_axis_key(keyword, 3, 17).unwrap().as_str(),
+            primary_vector
+        );
+        assert_eq!(
+            alternate.vector_axis_key(keyword, 3, 17).unwrap().as_str(),
+            alternate_vector
+        );
+    }
+    assert_eq!(
+        primary
+            .pixel_axis_key(TableAxisKeyword::Rotation, 17)
+            .unwrap()
+            .as_str(),
+        "TCROT17"
+    );
+    assert_eq!(
+        primary
+            .vector_axis_key(TableAxisKeyword::Rotation, 3, 17)
+            .unwrap()
+            .as_str(),
+        "3CROT17"
+    );
+    assert!(
+        alternate
+            .pixel_axis_key(TableAxisKeyword::Rotation, 17)
+            .is_none()
+    );
+    assert!(
+        alternate
+            .vector_axis_key(TableAxisKeyword::Rotation, 3, 17)
+            .is_none()
+    );
+
+    assert_eq!(
+        alternate
+            .pixel_matrix_key(TableMatrixKeyword::Pc, 2, 3, false)
+            .as_str(),
+        "TPC2_3A"
+    );
+    assert_eq!(
+        alternate
+            .pixel_matrix_key(TableMatrixKeyword::Pc, 2, 3, true)
+            .as_str(),
+        "TP2_3A"
+    );
+    assert_eq!(
+        alternate
+            .pixel_matrix_key(TableMatrixKeyword::Cd, 2, 3, false)
+            .as_str(),
+        "TCD2_3A"
+    );
+    assert_eq!(
+        alternate
+            .pixel_matrix_key(TableMatrixKeyword::Cd, 2, 3, true)
+            .as_str(),
+        "TC2_3A"
+    );
+    assert_eq!(
+        alternate
+            .vector_matrix_key(TableMatrixKeyword::Pc, 2, 3, 17)
+            .as_str(),
+        "23PC17A"
+    );
+    assert_eq!(
+        alternate.pixel_parameter_key(2, 1, false).as_str(),
+        "TPV2_1A"
+    );
+    assert_eq!(alternate.pixel_parameter_key(2, 1, true).as_str(), "TV2_1A");
+    assert_eq!(
+        alternate.vector_parameter_key(2, 17, 1, false).as_str(),
+        "2PV17_1A"
+    );
+    assert_eq!(
+        alternate.vector_parameter_key(2, 17, 1, true).as_str(),
+        "2V17_1A"
+    );
+    assert_eq!(alternate.column_key("LONP", 17).as_str(), "LONP17A");
+    assert_eq!(alternate.column_key("LATP", 17).as_str(), "LATP17A");
+    assert_eq!(alternate.column_key("WCAX", 17).as_str(), "WCAX17A");
+}
+
+#[test]
 fn pixel_list_wcs_matches_the_equivalent_image_wcs() {
     // §8.5: a pixel-list (event) WCS on columns 2,3 must transform identically to
     // an image WCS with the same CTYPE/CRPIX/CRVAL/CDELT and PC rotation.
@@ -936,6 +1062,34 @@ fn pixel_list_wcs_matches_the_equivalent_image_wcs() {
             "pixel-list {a:?} vs image {b:?} at ({px},{py})"
         );
     }
+
+    let mut alternate = Header::new();
+    alternate
+        .set("TCTY2A", "RA---TAN")
+        .set("TCTY3A", "DEC--TAN");
+    alternate.set("TCRP2A", 256.0).set("TCRP3A", 256.0);
+    alternate.set("TCRV2A", 150.0).set("TCRV3A", 2.5);
+    alternate
+        .set("TCDE2A", -0.0002777778)
+        .set("TCDE3A", 0.0002777778);
+    alternate.set("TCUN2A", "deg").set("TCUN3A", "deg");
+    alternate
+        .set("TP2_2A", 0.96592582628907)
+        .set("TP2_3A", -0.25881904510252)
+        .set("TP3_2A", 0.25881904510252)
+        .set("TP3_3A", 0.96592582628907);
+    alternate.set("LONP2A", 180.0).set("LATP2A", 2.5);
+    let alternate_wcs = Wcs::from_pixel_list(&alternate, &[2, 3], Some('A')).unwrap();
+    assert_eq!(
+        alternate_wcs.celestial.as_ref().unwrap().pole,
+        CelestialPole {
+            ra: 150.0,
+            dec: 2.5,
+            lonpole: 180.0,
+        }
+    );
+    assert_astropy_golden(&alternate_wcs, TAN_GOLDEN, "alternate pixel-list TAN");
+
     tab.set("TCRVL2", "not numeric");
     assert!(matches!(
         Wcs::from_pixel_list(&tab, &[2, 3], None),
@@ -977,11 +1131,218 @@ fn vector_cell_wcs_matches_the_equivalent_image_wcs() {
             "vector-cell {a:?} vs image {b:?} at ({px},{py})"
         );
     }
+
+    let mut alternate = Header::new();
+    alternate
+        .set("1CTY5A", "RA---TAN")
+        .set("2CTY5A", "DEC--TAN");
+    alternate.set("1CRP5A", 256.0).set("2CRP5A", 256.0);
+    alternate.set("1CRV5A", 150.0).set("2CRV5A", 2.5);
+    alternate
+        .set("1CDE5A", -0.0002777778)
+        .set("2CDE5A", 0.0002777778);
+    alternate.set("1CUN5A", "deg").set("2CUN5A", "deg");
+    alternate
+        .set("11PC5A", 0.96592582628907)
+        .set("12PC5A", -0.25881904510252)
+        .set("21PC5A", 0.25881904510252)
+        .set("22PC5A", 0.96592582628907);
+    alternate.set("LONP5A", 180.0).set("LATP5A", 2.5);
+    let inferred = Wcs::from_array_column(&alternate, 5, Some('A')).unwrap();
+    assert_eq!(inferred.view().axes.len(), 2);
+    assert_eq!(
+        inferred.celestial.as_ref().unwrap().pole,
+        CelestialPole {
+            ra: 150.0,
+            dec: 2.5,
+            lonpole: 180.0,
+        }
+    );
+    assert_astropy_golden(&inferred, TAN_GOLDEN, "alternate vector-cell TAN");
+
+    alternate.set("WCAX5A", 2);
+    let explicit = Wcs::from_array_column(&alternate, 5, Some('A')).unwrap();
+    assert_astropy_golden(&explicit, TAN_GOLDEN, "ranked alternate vector-cell TAN");
+
     tab.set("1CRVL5", "not numeric");
     assert!(matches!(
         Wcs::from_array_column(&tab, 5, None),
         Err(FitsError::TypeMismatch { name, .. }) if name == "1CRVL5"
     ));
+}
+
+#[test]
+fn table_wcs_parameter_aliases_match_astropy() {
+    let pixel = |parameter: &str, alternate: bool| {
+        let mut header = Header::new();
+        if alternate {
+            header.set("TCTY2A", "RA---CEA").set("TCTY3A", "DEC--CEA");
+            header.set("TCRP2A", 50.0).set("TCRP3A", 50.0);
+            header.set("TCRV2A", 45.0).set("TCRV3A", 30.0);
+            header.set("TCDE2A", -0.05).set("TCDE3A", 0.05);
+        } else {
+            header.set("TCTYP2", "RA---CEA").set("TCTYP3", "DEC--CEA");
+            header.set("TCRPX2", 50.0).set("TCRPX3", 50.0);
+            header.set("TCRVL2", 45.0).set("TCRVL3", 30.0);
+            header.set("TCDLT2", -0.05).set("TCDLT3", 0.05);
+        }
+        header.set(parameter, 0.5);
+        Wcs::from_pixel_list(&header, &[2, 3], alternate.then_some('A')).unwrap()
+    };
+    for parameter in ["TPV3_1", "TV3_1"] {
+        let wcs = pixel(parameter, false);
+        assert_astropy_golden(&wcs, CEA_GOLDEN, parameter);
+    }
+    for parameter in ["TPV3_1A", "TV3_1A"] {
+        let wcs = pixel(parameter, true);
+        assert_astropy_golden(&wcs, CEA_GOLDEN, parameter);
+    }
+
+    let vector = |parameter: &str, alternate: bool| {
+        let mut header = Header::new();
+        if alternate {
+            header.set("WCAX5A", 2);
+            header.set("1CTY5A", "RA---CEA").set("2CTY5A", "DEC--CEA");
+            header.set("1CRP5A", 50.0).set("2CRP5A", 50.0);
+            header.set("1CRV5A", 45.0).set("2CRV5A", 30.0);
+            header.set("1CDE5A", -0.05).set("2CDE5A", 0.05);
+        } else {
+            header.set("WCAX5", 2);
+            header.set("1CTYP5", "RA---CEA").set("2CTYP5", "DEC--CEA");
+            header.set("1CRPX5", 50.0).set("2CRPX5", 50.0);
+            header.set("1CRVL5", 45.0).set("2CRVL5", 30.0);
+            header.set("1CDLT5", -0.05).set("2CDLT5", 0.05);
+        }
+        header.set(parameter, 0.5);
+        Wcs::from_array_column(&header, 5, alternate.then_some('A')).unwrap()
+    };
+    for parameter in ["2PV5_1", "2V5_1"] {
+        let wcs = vector(parameter, false);
+        assert_astropy_golden(&wcs, CEA_GOLDEN, parameter);
+    }
+    for parameter in ["2PV5_1A", "2V5_1A"] {
+        let wcs = vector(parameter, true);
+        assert_astropy_golden(&wcs, CEA_GOLDEN, parameter);
+    }
+}
+
+#[test]
+fn table_wcs_matrix_aliases_resolve_exactly() {
+    let expected = [2.0, 0.5, -0.25, 3.0];
+    for (root, alternate) in [
+        ("TPC", false),
+        ("TP", false),
+        ("TCD", false),
+        ("TC", false),
+        ("TPC", true),
+        ("TP", true),
+        ("TCD", true),
+        ("TC", true),
+    ] {
+        let suffix = if alternate { "A" } else { "" };
+        let mut header = Header::new();
+        if alternate {
+            header.set("TCTY2A", "LINEAR").set("TCTY3A", "LINEAR");
+        } else {
+            header.set("TCTYP2", "LINEAR").set("TCTYP3", "LINEAR");
+        }
+        header
+            .set(&format!("{root}2_2{suffix}"), expected[0])
+            .set(&format!("{root}2_3{suffix}"), expected[1])
+            .set(&format!("{root}3_2{suffix}"), expected[2])
+            .set(&format!("{root}3_3{suffix}"), expected[3]);
+        let wcs = Wcs::from_pixel_list(&header, &[2, 3], alternate.then_some('A')).unwrap();
+        assert_eq!(wcs.matrix, expected, "{root}, alternate={alternate}");
+    }
+
+    for (root, alternate) in [("PC", false), ("CD", false), ("PC", true), ("CD", true)] {
+        let suffix = if alternate { "A" } else { "" };
+        let mut header = Header::new();
+        header.set(&format!("WCAX5{suffix}"), 2);
+        header
+            .set(&format!("11{root}5{suffix}"), expected[0])
+            .set(&format!("12{root}5{suffix}"), expected[1])
+            .set(&format!("21{root}5{suffix}"), expected[2])
+            .set(&format!("22{root}5{suffix}"), expected[3]);
+        let wcs = Wcs::from_array_column(&header, 5, alternate.then_some('A')).unwrap();
+        assert_eq!(wcs.matrix, expected, "{root}, alternate={alternate}");
+    }
+}
+
+#[test]
+fn primary_table_wcs_rotation_matches_astropy() {
+    let mut pixel = Header::new();
+    pixel.set("TCTYP2", "RA---TAN").set("TCTYP3", "DEC--TAN");
+    pixel.set("TCUNI2", "deg").set("TCUNI3", "deg");
+    pixel.set("TCRPX2", 128.0).set("TCRPX3", 128.0);
+    pixel.set("TCRVL2", 83.6).set("TCRVL3", 22.0);
+    pixel.set("TCDLT2", -0.0005).set("TCDLT3", 0.0005);
+    pixel.set("TCROT3", 25.0);
+    let pixel_wcs = Wcs::from_pixel_list(&pixel, &[2, 3], None).unwrap();
+    assert_astropy_golden(&pixel_wcs, CROTA_GOLDEN, "primary pixel-list CROTA");
+
+    let mut vector = Header::new();
+    vector.set("WCAX5", 2);
+    vector.set("1CTYP5", "RA---TAN").set("2CTYP5", "DEC--TAN");
+    vector.set("1CUNI5", "deg").set("2CUNI5", "deg");
+    vector.set("1CRPX5", 128.0).set("2CRPX5", 128.0);
+    vector.set("1CRVL5", 83.6).set("2CRVL5", 22.0);
+    vector.set("1CDLT5", -0.0005).set("2CDLT5", 0.0005);
+    vector.set("2CROT5", 25.0);
+    let vector_wcs = Wcs::from_array_column(&vector, 5, None).unwrap();
+    assert_astropy_golden(&vector_wcs, CROTA_GOLDEN, "primary vector-cell CROTA");
+}
+
+#[test]
+fn table_wcs_column_poles_match_the_equivalent_image_wcs() {
+    let mut image = Header::new();
+    image.set("NAXIS", 2);
+    image.set("CTYPE1", "RA---CEA").set("CTYPE2", "DEC--CEA");
+    image.set("CRPIX1", 50.0).set("CRPIX2", 50.0);
+    image.set("CRVAL1", 45.0).set("CRVAL2", 30.0);
+    image.set("CDELT1", -0.05).set("CDELT2", 0.05);
+    image.set("PV2_1", 0.5);
+    image.set("LONPOLE", 0.0).set("LATPOLE", -90.0);
+    let image_wcs = Wcs::from_header(&image, None).unwrap();
+    let image_pole = image_wcs.celestial.as_ref().unwrap().pole;
+    assert_eq!(image_pole.ra, 45.0);
+    assert!((image_pole.dec + 60.0).abs() < 1e-12, "{image_pole:?}");
+    assert_eq!(image_pole.lonpole, 0.0);
+
+    let mut pixel = Header::new();
+    pixel.set("TCTY2A", "RA---CEA").set("TCTY3A", "DEC--CEA");
+    pixel.set("TCRP2A", 50.0).set("TCRP3A", 50.0);
+    pixel.set("TCRV2A", 45.0).set("TCRV3A", 30.0);
+    pixel.set("TCDE2A", -0.05).set("TCDE3A", 0.05);
+    pixel.set("TV3_1A", 0.5);
+    pixel.set("LONP2A", 0.0).set("LATP2A", -90.0);
+    let pixel_wcs = Wcs::from_pixel_list(&pixel, &[2, 3], Some('A')).unwrap();
+
+    let mut vector = Header::new();
+    vector.set("WCAX5A", 2);
+    vector.set("1CTY5A", "RA---CEA").set("2CTY5A", "DEC--CEA");
+    vector.set("1CRP5A", 50.0).set("2CRP5A", 50.0);
+    vector.set("1CRV5A", 45.0).set("2CRV5A", 30.0);
+    vector.set("1CDE5A", -0.05).set("2CDE5A", 0.05);
+    vector.set("2V5_1A", 0.5);
+    vector.set("LONP5A", 0.0).set("LATP5A", -90.0);
+    let vector_wcs = Wcs::from_array_column(&vector, 5, Some('A')).unwrap();
+
+    for table_wcs in [&pixel_wcs, &vector_wcs] {
+        assert_eq!(
+            table_wcs.celestial.as_ref().unwrap().pole,
+            image_wcs.celestial.as_ref().unwrap().pole
+        );
+        for pixel in [[50.0, 50.0], [20.0, 70.0], [80.0, 30.0]] {
+            let table_world = table_wcs.pixel_to_world(&pixel).unwrap();
+            let image_world = image_wcs.pixel_to_world(&pixel).unwrap();
+            assert!(
+                (table_world[0] - image_world[0]).abs() < 1e-12
+                    && (table_world[1] - image_world[1]).abs() < 1e-12,
+                "table {table_world:?} vs image {image_world:?} at {pixel:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1042,10 +1403,16 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
     let mut cd = Header::new();
     cd.set("11CD5", 1.0).set("22CD5", 1.0).set("33CD5", 1.0);
     let cases = [
+        build("3CTYP5", Value::Text("LINEAR".to_string())),
         build("3CUNI5", Value::Text("m".to_string())),
+        build("3CRPX5", Value::Real(10.0)),
+        build("3CRVL5", Value::Real(10.0)),
+        build("3CDLT5", Value::Real(2.0)),
         build("3CROT5", Value::Real(10.0)),
         build("3PV5_1", Value::Real(2.0)),
         build("3V5_1", Value::Real(2.0)),
+        build("3PS5_1", Value::Text("value".to_string())),
+        build("3S5_1", Value::Text("value".to_string())),
         build("13PC5", Value::Real(0.25)),
         cd,
     ];
@@ -1059,6 +1426,41 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
             3
         );
     }
+
+    let mut alternate_cd = Header::new();
+    alternate_cd
+        .set("11CD5A", 1.0)
+        .set("22CD5A", 1.0)
+        .set("33CD5A", 1.0);
+    let alternate_cases = [
+        build("3CTY5A", Value::Text("LINEAR".to_string())),
+        build("3CUN5A", Value::Text("m".to_string())),
+        build("3CRP5A", Value::Real(10.0)),
+        build("3CRV5A", Value::Real(10.0)),
+        build("3CDE5A", Value::Real(2.0)),
+        build("3PV5_1A", Value::Real(2.0)),
+        build("3V5_1A", Value::Real(2.0)),
+        build("3PS5_1A", Value::Text("value".to_string())),
+        build("3S5_1A", Value::Text("value".to_string())),
+        build("13PC5A", Value::Real(0.25)),
+        alternate_cd,
+    ];
+    for header in &alternate_cases {
+        assert_eq!(
+            Wcs::from_array_column(header, 5, Some('A'))
+                .unwrap()
+                .view()
+                .axes
+                .len(),
+            3
+        );
+    }
+
+    let invalid_long_alternate = build("3CTYP5A", Value::Text("LINEAR".to_string()));
+    assert!(matches!(
+        Wcs::from_array_column(&invalid_long_alternate, 5, Some('A')),
+        Err(FitsError::MissingKeyword { name: "iCTYPn" })
+    ));
 }
 
 #[test]
