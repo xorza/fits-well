@@ -147,6 +147,11 @@ pub enum FitsError {
         index: usize,
         len: usize,
     },
+    /// A group index named an entry beyond a random-groups array's group list.
+    GroupIndexOutOfBounds {
+        index: usize,
+        len: usize,
+    },
     /// No column with the requested `TTYPEn` name exists in the table.
     ColumnNotFound {
         name: String,
@@ -274,6 +279,12 @@ impl fmt::Display for FitsError {
                     "column index {index} out of bounds (table has {len} columns)"
                 )
             }
+            FitsError::GroupIndexOutOfBounds { index, len } => {
+                write!(
+                    f,
+                    "group index {index} out of bounds (random-groups array has {len} groups)"
+                )
+            }
             FitsError::ColumnNotFound { name } => {
                 write!(f, "no column named {name:?} in the table")
             }
@@ -333,6 +344,10 @@ mod tests {
         assert_eq!(
             FitsError::MissingKeyword { name: "NAXIS" }.to_string(),
             "missing mandatory keyword NAXIS"
+        );
+        assert_eq!(
+            FitsError::GroupIndexOutOfBounds { index: 3, len: 2 }.to_string(),
+            "group index 3 out of bounds (random-groups array has 2 groups)"
         );
         assert_eq!(
             FitsError::IntegerOutOfRange {

@@ -76,7 +76,7 @@ pub use compress::{CompressOptions, DitherMethod};
 pub use data::ImageArray;
 pub use data::{Image, ImageData, ImageView, RawImage, SampleType, Scaling, UnsignedView};
 pub use error::{FitsError, Result};
-pub use groups::RandomGroups;
+pub use groups::{RandomGroupView, RandomGroups};
 pub use hdu::HduKind;
 pub use header::Header;
 pub use header::HeaderEntry;

@@ -7,6 +7,7 @@
 
 use crate::bitpix::Bitpix;
 use crate::data::ImageData;
+use crate::data::ImageView;
 use crate::data::Scaling;
 use crate::error::FitsError;
 use crate::error::Result;
@@ -37,6 +38,14 @@ pub struct RandomGroups {
 struct ParamScale {
     pscal: f64,
     pzero: f64,
+}
+
+/// Exact stored values for one random group. Parameters and array samples share
+/// the HDU's `BITPIX` representation but occupy distinct borrowed slices (§6.2).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RandomGroupView<'a> {
+    pub parameters: ImageView<'a>,
+    pub array: ImageView<'a>,
 }
 
 impl RandomGroups {
@@ -91,6 +100,26 @@ impl RandomGroups {
     /// used here, or the two disagree and a `NAXIS = 1` group fails the size check.
     pub fn array_len(&self) -> usize {
         self.group_shape.iter().product()
+    }
+
+    /// Borrow the exact host-endian stored values for group `index`, before
+    /// `PSCALn`/`PZEROn` or `BSCALE`/`BZERO` conversion. This preserves all integer
+    /// values and floating-point bit patterns that the physical `f64` APIs cannot.
+    pub fn group_by_idx(&self, index: usize) -> Result<RandomGroupView<'_>> {
+        if index >= self.gcount {
+            return Err(FitsError::GroupIndexOutOfBounds {
+                index,
+                len: self.gcount,
+            });
+        }
+        let group_len = self.group_len();
+        let start = index * group_len;
+        let parameters_end = start + self.pcount;
+        let group_end = start + group_len;
+        Ok(RandomGroupView {
+            parameters: self.samples.view(start..parameters_end),
+            array: self.samples.view(parameters_end..group_end),
+        })
     }
 
     /// The physical parameter values of group `g`: `PZEROn + PSCALn × raw`.

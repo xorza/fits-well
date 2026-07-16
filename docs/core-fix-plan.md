@@ -85,7 +85,7 @@ For every batch:
 ## Batch 15 — Medium: complete exact typed raw surfaces
 
 - [x] **Represent ASCII nulls explicitly.** `AsciiColumnData` carries `Option` cells for text, integer, and float columns, preserving `TNULLn` as `None` without collapsing genuine zero. The writer uses the same model and rejects missing markers, nonfinite stored floats, and values that collide with their marker before output. Round-trip coverage includes a `NULL` character field beside an integer null and genuine zero (`docs/refs/fits_standard40.md:2277-2284`, `docs/refs/fits_standard40.md:2372-2380`).
-- [ ] **Expose exact stored random-group values.** Add a typed raw per-group view separating parameters and arrays so `BITPIX=64` values and floating-point bit patterns are not forced through `f64` physical conversion (`src/groups/mod.rs:16-23`, `src/groups/mod.rs:96-133`; standard `docs/refs/fits_standard40.md:1994-2002`).
+- [x] **Expose exact stored random-group values.** `RandomGroups::group_by_idx` returns a borrowed `RandomGroupView` with separate typed parameter and array slices, preserving `BITPIX=64` values and floating-point payload bits without allocation or `f64` conversion. Coverage verifies group boundaries, integer extremes, NaN payloads, signed zero, subnormals, and out-of-range indices (`docs/refs/fits_standard40.md:1994-2002`).
 
 ## Batch 16 — Medium: expose complete coordinate-frame metadata
 

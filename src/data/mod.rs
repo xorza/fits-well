@@ -18,6 +18,7 @@ use crate::endian::extend_be;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use std::ops::Range;
 
 /// An owned, host-endian sample buffer, tagged by its `BITPIX` element type.
 #[derive(Debug, Clone, PartialEq)]
@@ -70,6 +71,17 @@ impl ImageData {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    pub(crate) fn view(&self, range: Range<usize>) -> ImageView<'_> {
+        match self {
+            ImageData::U8(values) => ImageView::U8(&values[range]),
+            ImageData::I16(values) => ImageView::I16(&values[range]),
+            ImageData::I32(values) => ImageView::I32(&values[range]),
+            ImageData::I64(values) => ImageView::I64(&values[range]),
+            ImageData::F32(values) => ImageView::F32(&values[range]),
+            ImageData::F64(values) => ImageView::F64(&values[range]),
+        }
     }
 
     /// Decode the raw, big-endian data unit into host-endian typed samples.
@@ -192,15 +204,13 @@ fn unsigned_from_be(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Option<U
     }
 }
 
-/// A borrowed, host-endian view of an image's samples, tagged by `BITPIX` — the
-/// zero-/low-copy counterpart to the owned [`ImageData`], returned by
-/// [`crate::FitsReader::read_image_view`]. Match it exactly like [`ImageData`], but
-/// the slices borrow the reader's reused decode scratch (or, for `BITPIX = 8`, the
-/// source bytes directly), so a view is valid only until the next read — ideal for a
-/// hot loop that processes each image and moves on, since reusing one scratch across
-/// reads pays the output allocation (and its page faults) once and even reuses it
-/// across *different* `BITPIX`. For samples you need to keep, use the owned
-/// [`RawImage::decode`].
+/// A borrowed, host-endian view of FITS array samples, tagged by `BITPIX` — the
+/// zero-/low-copy counterpart to the owned [`ImageData`]. It is returned by
+/// [`crate::FitsReader::read_image_view`] and used by
+/// [`crate::RandomGroupView`] to separate one group's parameters from its array.
+/// Match it exactly like [`ImageData`]. A reader image view borrows reused decode
+/// scratch (or the source bytes for `BITPIX = 8`) and therefore lasts only until
+/// the next read; a random-group view borrows its owning [`crate::RandomGroups`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ImageView<'a> {
     U8(&'a [u8]),
