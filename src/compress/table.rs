@@ -9,7 +9,8 @@
 //! original `TFORMn`/`NAXIS1`/`NAXIS2`/`PCOUNT` are preserved as
 //! `ZFORMn`/`ZNAXIS1`/`ZNAXIS2`/`ZPCOUNT`.
 //!
-//! Variable-length (`P`/`Q`) source columns are not supported and are rejected.
+//! Variable-length (`P`/`Q`) source columns and nonzero original `PCOUNT` values
+//! are not supported and are rejected because their heap bytes are not retained.
 
 use crate::allocation;
 use crate::compress::HduParts;
@@ -68,6 +69,12 @@ struct ColMeta {
     /// Byte offset of this column within a row.
     offset: usize,
     algo: Algo,
+}
+
+#[derive(Debug)]
+struct BoundTable<'a> {
+    rows: &'a [u8],
+    pcount: usize,
 }
 
 impl ColMeta {
@@ -157,10 +164,17 @@ pub(crate) fn compress_table(
     out: &mut Vec<u8>,
 ) -> Result<Header> {
     let default_algo = Algo::parse(default_algo)?;
+    let bound = bind_table(header, table)?;
+    reject_compression_metadata(header)?;
+    if bound.pcount != 0 {
+        return Err(FitsError::UnsupportedCompression {
+            name: "binary table with PCOUNT > 0".to_string(),
+        });
+    }
     let ncols = table.columns.len();
     let nrows = table.nrows;
     let naxis1 = table.row_len;
-    let raw = table.raw_rows();
+    let raw = bound.rows;
 
     let metas: Vec<ColMeta> = table
         .columns
@@ -227,13 +241,17 @@ pub(crate) fn compress_table(
 
     // Header: copy the original, then layer on the Z* keywords.
     let mut h = header.clone();
-    let orig_pcount = header.get_integer("PCOUNT")?.unwrap_or(0);
+    h.rename_keywords(&[
+        ("THEAP", "ZTHEAP"),
+        ("CHECKSUM", "ZHECKSUM"),
+        ("DATASUM", "ZDATASUM"),
+    ]);
     h.set("ZTABLE", true)
         .comment("ZTABLE", "this is a compressed table");
     h.set("ZTILELEN", fits_i64(rpt)?);
     h.set("ZNAXIS1", fits_i64(naxis1)?);
     h.set("ZNAXIS2", fits_i64(nrows)?);
-    h.set("ZPCOUNT", orig_pcount);
+    h.set("ZPCOUNT", 0);
     for (ci, m) in metas.iter().enumerate() {
         let n = ci + 1;
         let zform = header
@@ -257,9 +275,29 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
     if header.get_logical("ZTABLE")? != Some(true) {
         return Err(FitsError::NotCompressedTable);
     }
+    bind_table(header, table)?;
     let naxis1 = req_usize(header, "ZNAXIS1")?;
     let nrows = req_usize(header, "ZNAXIS2")?;
-    let zpcount = optional_nonnegative(header, "ZPCOUNT")?;
+    let zpcount = req_usize(header, "ZPCOUNT")?;
+    if zpcount != 0 {
+        return Err(FitsError::UnsupportedCompression {
+            name: "binary table with PCOUNT > 0".to_string(),
+        });
+    }
+    let original_bytes = nrows
+        .checked_mul(naxis1)
+        .ok_or(FitsError::DataUnitOverflow)?;
+    if let Some(ztheap) = header.get_integer("ZTHEAP")? {
+        let ztheap =
+            usize::try_from(ztheap).map_err(|_| FitsError::KeywordOutOfRange { name: "ZTHEAP" })?;
+        if ztheap != original_bytes {
+            return Err(FitsError::TableMetadataMismatch {
+                name: "ZTHEAP".to_string(),
+            });
+        }
+    }
+    header.get_text("ZHECKSUM")?;
+    header.get_text("ZDATASUM")?;
     let mut rpt = req_positive_usize(header, "ZTILELEN")?;
     if rpt > nrows {
         rpt = nrows.max(1);
@@ -355,17 +393,29 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
     let mut h = header.clone();
     h.set("NAXIS1", fits_i64(naxis1)?);
     h.set("NAXIS2", fits_i64(nrows)?);
-    h.set("PCOUNT", zpcount);
+    h.set("PCOUNT", 0);
     for (n, zform) in zforms.iter().enumerate() {
         h.set(key!("TFORM{}", n + 1).as_str(), zform.clone());
     }
     h.remove_where(|keyword| {
         matches!(
             keyword,
-            "ZTABLE" | "ZTILELEN" | "ZNAXIS1" | "ZNAXIS2" | "ZPCOUNT" | "ZHEAPPTR"
+            "ZTABLE"
+                | "ZTILELEN"
+                | "ZNAXIS1"
+                | "ZNAXIS2"
+                | "ZPCOUNT"
+                | "THEAP"
+                | "CHECKSUM"
+                | "DATASUM"
         ) || indexed_compression_key(keyword, "ZFORM", ncols)
             || indexed_compression_key(keyword, "ZCTYP", ncols)
     });
+    h.rename_keywords(&[
+        ("ZTHEAP", "THEAP"),
+        ("ZHECKSUM", "CHECKSUM"),
+        ("ZDATASUM", "DATASUM"),
+    ]);
     Ok(HduParts {
         header: h,
         data: out,
@@ -385,6 +435,101 @@ fn indexed_compression_key(keyword: &str, prefix: &str, ncols: usize) -> bool {
     suffix
         .parse::<usize>()
         .is_ok_and(|column| (1..=ncols).contains(&column))
+}
+
+fn bind_table<'a>(header: &Header, table: &'a BinTable) -> Result<BoundTable<'a>> {
+    let xtension = header
+        .get_text("XTENSION")?
+        .ok_or(FitsError::MissingKeyword { name: "XTENSION" })?;
+    if xtension != "BINTABLE" {
+        return Err(metadata_mismatch("XTENSION"));
+    }
+    for (keyword, expected) in [
+        ("BITPIX", 8usize),
+        ("NAXIS", 2),
+        ("NAXIS1", table.row_len),
+        ("NAXIS2", table.nrows),
+        ("GCOUNT", 1),
+        ("TFIELDS", table.columns.len()),
+    ] {
+        if req_usize(header, keyword)? != expected {
+            return Err(metadata_mismatch(keyword));
+        }
+    }
+    if table.columns.len() > 999 {
+        return Err(FitsError::KeywordOutOfRange { name: "TFIELDS" });
+    }
+
+    let mut row_width = 0usize;
+    for (index, column) in table.columns.iter().enumerate() {
+        let n = index + 1;
+        if column.byte_offset != row_width {
+            return Err(metadata_mismatch(format!("column {n} byte offset")));
+        }
+        row_width = row_width
+            .checked_add(column.tform.byte_width())
+            .ok_or(FitsError::DataUnitOverflow)?;
+        let keyword = key!("TFORM{n}");
+        let tform = header
+            .get_text(keyword.as_str())?
+            .ok_or(FitsError::MissingKeyword { name: "TFORMn" })?;
+        if Tform::parse(tform)? != column.tform {
+            return Err(metadata_mismatch(keyword.as_str()));
+        }
+    }
+    if row_width != table.row_len {
+        return Err(FitsError::RowWidthMismatch {
+            computed: row_width,
+            declared: table.row_len,
+        });
+    }
+
+    let rows = table.raw_rows()?;
+    if table.heap_offset < rows.len()
+        || table.heap_end < table.heap_offset
+        || table.heap_end < rows.len()
+    {
+        return Err(metadata_mismatch("THEAP"));
+    }
+    let pcount = table.heap_end - rows.len();
+    if req_usize(header, "PCOUNT")? != pcount {
+        return Err(metadata_mismatch("PCOUNT"));
+    }
+    let theap = match header.get_integer("THEAP")? {
+        Some(value) => {
+            usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { name: "THEAP" })?
+        }
+        None => rows.len(),
+    };
+    if theap != table.heap_offset {
+        return Err(metadata_mismatch("THEAP"));
+    }
+    Ok(BoundTable { rows, pcount })
+}
+
+fn reject_compression_metadata(header: &Header) -> Result<()> {
+    for entry in header.iter() {
+        if matches!(
+            entry.keyword,
+            "ZTABLE"
+                | "ZTILELEN"
+                | "ZNAXIS1"
+                | "ZNAXIS2"
+                | "ZPCOUNT"
+                | "ZTHEAP"
+                | "ZHECKSUM"
+                | "ZDATASUM"
+        ) || indexed_compression_key(entry.keyword, "ZFORM", 999)
+            || indexed_compression_key(entry.keyword, "ZCTYP", 999)
+        {
+            return Err(metadata_mismatch(entry.keyword));
+        }
+    }
+    Ok(())
+}
+
+fn metadata_mismatch(name: impl Into<String>) -> FitsError {
+    FitsError::TableMetadataMismatch { name: name.into() }
 }
 
 /// Compress one tile's column-major raw bytes per the column's algorithm.
@@ -491,14 +636,6 @@ fn req_positive_usize(header: &Header, key: &'static str) -> Result<usize> {
         return Err(FitsError::KeywordOutOfRange { name: key });
     }
     Ok(value)
-}
-
-fn optional_nonnegative(header: &Header, key: &'static str) -> Result<i64> {
-    match header.get_integer(key)? {
-        Some(value) if value < 0 => Err(FitsError::KeywordOutOfRange { name: key }),
-        Some(value) => Ok(value),
-        None => Ok(0),
-    }
 }
 
 fn fits_i64(value: usize) -> Result<i64> {

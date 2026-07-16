@@ -300,6 +300,23 @@ impl Header {
         self
     }
 
+    /// Rename valued cards in place so their order, values, and comments survive
+    /// a reversible metadata transformation.
+    #[cfg(feature = "compression")]
+    pub(crate) fn rename_keywords(&mut self, renames: &[(&str, &str)]) {
+        let mut changed = false;
+        for card in &mut self.cards {
+            if let Some((_, to)) = renames.iter().find(|(from, _)| card.keyword == *from) {
+                debug_assert!(validate_keyword(to).is_ok());
+                card.keyword = (*to).to_string();
+                changed = true;
+            }
+        }
+        if changed {
+            self.reindex();
+        }
+    }
+
     /// Rebuild the keyword → first-card index after a structural edit.
     #[cfg(feature = "compression")]
     fn reindex(&mut self) {

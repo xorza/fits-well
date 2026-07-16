@@ -322,10 +322,10 @@ pub struct BinTable {
     pub columns: Vec<Column>,
     pub(crate) row_len: usize,
     /// Byte offset of the heap within `bytes` (`THEAP`, default = main-table size).
-    heap_offset: usize,
+    pub(crate) heap_offset: usize,
     /// Byte offset just past the real heap data (`nrows·row_len + PCOUNT`). `P`/`Q`
     /// spans must lie within `[heap_offset, heap_end)`, never the block fill beyond.
-    heap_end: usize,
+    pub(crate) heap_end: usize,
     /// The whole data unit (the `nrows * row_len` main table, then the heap and
     /// block fill). Fixed-width reads index the main-table prefix; `P`/`Q` columns
     /// follow their descriptors into the heap.
@@ -451,8 +451,15 @@ impl BinTable {
 
     /// The fixed-width main table (`nrows × NAXIS1` bytes), excluding the heap.
     #[cfg(feature = "compression")]
-    pub(crate) fn raw_rows(&self) -> &[u8] {
-        &self.bytes[..self.nrows * self.row_len]
+    pub(crate) fn raw_rows(&self) -> Result<&[u8]> {
+        let len = self
+            .nrows
+            .checked_mul(self.row_len)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        self.bytes.get(..len).ok_or(FitsError::DataSizeMismatch {
+            expected: len,
+            got: self.bytes.len(),
+        })
     }
 
     /// The index of the first column whose `TTYPEn` matches `name`, compared
