@@ -57,11 +57,13 @@ fn parses_tan_header() {
         [
             WcsAxis {
                 ctype: "RA---TAN".to_string(),
+                cunit: "deg".to_string(),
                 crval: 150.0,
                 crpix: 256.0,
             },
             WcsAxis {
                 ctype: "DEC--TAN".to_string(),
+                cunit: "deg".to_string(),
                 crval: 2.5,
                 crpix: 256.0,
             },

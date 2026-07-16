@@ -12,6 +12,7 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
 use crate::keyword::key;
+use crate::wcs::Wcs;
 
 /// JD of the MJD zero point (1858-11-17T00:00 UTC).
 const MJD0: f64 = 2_400_000.5;
@@ -431,11 +432,12 @@ fn jdn_to_gregorian(jdn: i64) -> CalendarDate {
     }
 }
 
-/// A time from a `JEPOCH`/`BEPOCH` keyword: its MJD and the scale the keyword
-/// implies (TDB for `JEPOCH`, ET ≈ TT for `BEPOCH`).
+/// An absolute time coordinate represented by MJD and its declared scale.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct EpochTime {
+pub struct TimeCoordinate {
+    /// Modified Julian Date in [`TimeCoordinate::scale`].
     pub mjd: f64,
+    /// Time scale associated with the MJD.
     pub scale: TimeScale,
 }
 
@@ -519,37 +521,33 @@ impl FitsTime {
             .unwrap_or(TimeScale::Utc);
         let timeunit = header.get_text("TIMEUNIT")?.unwrap_or("s").to_string();
         let trefpos = header.get_text("TREFPOS")?.map(str::to_string);
-        Ok(FitsTime {
+        let fits_time = FitsTime {
             scale,
             mjdref: reference_mjd(header)?,
             timeunit,
             timeoffs: header.get_real("TIMEOFFS")?.unwrap_or(0.0),
             trefpos,
-        })
+        };
+        fits_time.unit_seconds()?;
+        Ok(fits_time)
     }
 
-    /// `TIMEUNIT` expressed in seconds (`s`, `d`/day, `a`/`yr` Julian year).
-    pub fn unit_seconds(&self) -> f64 {
-        // Table 34. The deprecated tropical/Besselian years use their conventional
-        // lengths; a truly unknown unit falls back to seconds (the default).
-        match self.timeunit.trim() {
-            "s" => 1.0,
-            "min" => 60.0,
-            "h" => 3600.0,
-            "d" | "day" => SEC_PER_DAY,
-            "a" | "yr" | "y" => 365.25 * SEC_PER_DAY, // Julian year
-            "cy" => 36525.0 * SEC_PER_DAY,            // Julian century = 100 a
-            "ta" => 365.24219 * SEC_PER_DAY,          // tropical year (deprecated)
-            "Ba" => 365.2421988 * SEC_PER_DAY,        // Besselian year (deprecated)
-            _ => 1.0,
-        }
+    /// `TIMEUNIT` expressed in seconds. Standard SI prefixes are accepted and
+    /// tropical/Besselian years are evaluated at `MJDREF`.
+    pub fn unit_seconds(&self) -> Result<f64> {
+        time_unit_seconds(&self.timeunit, self.mjdref, self.scale)
     }
 
     /// Resolve a time value measured *relative* to `MJDREF` (e.g. `TSTART`,
     /// `TSTOP`), in `TIMEUNIT`, to an absolute MJD in the frame's own scale. The
     /// `TIMEOFFS` clock correction (§9.4.1) is added before scaling.
-    pub fn relative_to_mjd(&self, value: f64) -> f64 {
-        self.mjdref + (value + self.timeoffs) * self.unit_seconds() / SEC_PER_DAY
+    pub fn relative_to_mjd(&self, value: f64) -> Result<f64> {
+        self.relative_to_mjd_in(value, &self.timeunit, self.scale)
+    }
+
+    fn relative_to_mjd_in(&self, value: f64, unit: &str, scale: TimeScale) -> Result<f64> {
+        Ok(self.mjdref
+            + (value + self.timeoffs) * time_unit_seconds(unit, self.mjdref, scale)? / SEC_PER_DAY)
     }
 
     /// The observation MJD from `MJD-OBS`, else `DATE-OBS`, else `None`. Reads only
@@ -567,11 +565,11 @@ impl FitsTime {
     }
 
     /// The Julian (`JEPOCH`, implied scale TDB) or Besselian (`BEPOCH`, implied
-    /// scale ET ≈ TT) epoch keyword as an [`EpochTime`], if present (§9.1.2, §9.5).
+    /// scale ET ≈ TT) epoch keyword as a [`TimeCoordinate`], if present (§9.1.2, §9.5).
     /// `JEPOCH` wins if both appear. Reads only the header, so it takes no `self`.
-    pub(crate) fn epoch(header: &Header) -> Result<Option<EpochTime>> {
+    pub(crate) fn epoch(header: &Header) -> Result<Option<TimeCoordinate>> {
         if let Some(j) = header.get_real("JEPOCH")? {
-            return Ok(Some(EpochTime {
+            return Ok(Some(TimeCoordinate {
                 mjd: Epoch::Julian(j).to_mjd(),
                 scale: TimeScale::Tdb,
             }));
@@ -579,7 +577,7 @@ impl FitsTime {
         let Some(b) = header.get_real("BEPOCH")? else {
             return Ok(None);
         };
-        Ok(Some(EpochTime {
+        Ok(Some(TimeCoordinate {
             mjd: Epoch::Besselian(b).to_mjd(),
             scale: TimeScale::Tt, // ET ≈ TT
         }))
@@ -621,37 +619,47 @@ impl FitsTime {
                 got: stops.len(),
             });
         }
-        Ok(starts
+        starts
             .iter()
             .zip(stops)
-            .map(|(&s, &e)| GtiInterval {
-                start_mjd: self.relative_to_mjd(s),
-                stop_mjd: self.relative_to_mjd(e),
+            .map(|(&s, &e)| {
+                Ok(GtiInterval {
+                    start_mjd: self.relative_to_mjd(s)?,
+                    stop_mjd: self.relative_to_mjd(e)?,
+                })
             })
-            .collect())
+            .collect()
     }
 
-    /// If WCS axis `axis` (1-based) is a time axis (`CTYPEi = 'TIME'` or a
-    /// time-scale name, §9.2.3), convert a 1-based pixel coordinate along it to an
-    /// absolute MJD in the frame's scale: the linear axis value (elapsed time in
-    /// `TIMEUNIT` from `MJDREF`) plus the reference. `None` if not a time axis.
-    pub fn time_axis_mjd(&self, header: &Header, axis: usize, pixel: f64) -> Result<Option<f64>> {
-        let Some(ctype) = header.get_text(key!("CTYPE{axis}").as_str())? else {
-            return Ok(None);
-        };
-        if TimeAxisKind::from_ctype(ctype) != Some(TimeAxisKind::Time) {
+    /// Evaluate a 1-based time `axis` through the WCS's complete linear row and
+    /// convert it to MJD. `pixel` must contain one coordinate per WCS axis.
+    pub fn time_axis_mjd(
+        &self,
+        wcs: &Wcs,
+        axis: usize,
+        pixel: &[f64],
+    ) -> Result<Option<TimeCoordinate>> {
+        let axis = axis.checked_sub(1).expect("WCS axes are 1-based");
+        let metadata = wcs.view().axes.get(axis).expect("WCS axis index");
+        if TimeAxisKind::from_ctype(&metadata.ctype) != Some(TimeAxisKind::Time) {
             return Ok(None);
         }
-        let crpix = header
-            .get_real(key!("CRPIX{axis}").as_str())?
-            .unwrap_or(0.0);
-        let crval = header
-            .get_real(key!("CRVAL{axis}").as_str())?
-            .unwrap_or(0.0);
-        let cdelt = header
-            .get_real(key!("CDELT{axis}").as_str())?
-            .unwrap_or(1.0);
-        Ok(Some(self.relative_to_mjd(crval + cdelt * (pixel - crpix))))
+        let head = metadata.ctype.split('-').next().unwrap_or("").trim();
+        let scale = if head.eq_ignore_ascii_case("TIME") {
+            self.scale
+        } else {
+            TimeScale::parse(head)
+        };
+        let world = wcs.linear_axis_world(axis, pixel)?;
+        let unit = if world.cunit.trim().is_empty() {
+            &self.timeunit
+        } else {
+            world.cunit
+        };
+        Ok(Some(TimeCoordinate {
+            mjd: self.relative_to_mjd_in(world.value, unit, scale)?,
+            scale,
+        }))
     }
 
     /// The §9.6 `'PHASE'` axis parameters (`CZPHSia` zero-phase time, `CPERIia`
@@ -692,8 +700,10 @@ impl TimeAxisKind {
     /// Classify a `CTYPE` as a time-related axis (§9.6), or `None` if it is not one.
     pub fn from_ctype(ctype: &str) -> Option<TimeAxisKind> {
         let head = ctype.split('-').next().unwrap_or("").trim();
+        if head.eq_ignore_ascii_case("TIME") {
+            return Some(TimeAxisKind::Time);
+        }
         match head {
-            "TIME" => Some(TimeAxisKind::Time),
             "PHASE" => Some(TimeAxisKind::Phase),
             "TIMELAG" => Some(TimeAxisKind::Timelag),
             "FREQUENCY" => Some(TimeAxisKind::Frequency),
@@ -701,6 +711,73 @@ impl TimeAxisKind {
             _ => None,
         }
     }
+}
+
+fn time_unit_seconds(unit: &str, reference_mjd: f64, scale: TimeScale) -> Result<f64> {
+    let unit = unit.trim();
+    if let Some(seconds) = base_time_unit_seconds(unit, reference_mjd, scale) {
+        return Ok(seconds);
+    }
+    const PREFIXES: [(&str, f64); 20] = [
+        ("da", 1e1),
+        ("d", 1e-1),
+        ("c", 1e-2),
+        ("m", 1e-3),
+        ("u", 1e-6),
+        ("n", 1e-9),
+        ("p", 1e-12),
+        ("f", 1e-15),
+        ("a", 1e-18),
+        ("z", 1e-21),
+        ("y", 1e-24),
+        ("h", 1e2),
+        ("k", 1e3),
+        ("M", 1e6),
+        ("G", 1e9),
+        ("T", 1e12),
+        ("P", 1e15),
+        ("E", 1e18),
+        ("Z", 1e21),
+        ("Y", 1e24),
+    ];
+    for (prefix, factor) in PREFIXES {
+        if let Some(base) = unit.strip_prefix(prefix)
+            && let Some(seconds) = base_time_unit_seconds(base, reference_mjd, scale)
+        {
+            return Ok(factor * seconds);
+        }
+    }
+    Err(FitsError::InvalidValue {
+        card: format!("time unit '{unit}'"),
+    })
+}
+
+fn base_time_unit_seconds(unit: &str, reference_mjd: f64, scale: TimeScale) -> Option<f64> {
+    match unit {
+        "s" => 1.0,
+        "min" => 60.0,
+        "h" => 3600.0,
+        "d" => SEC_PER_DAY,
+        "a" | "yr" => 365.25 * SEC_PER_DAY,
+        "cy" => 36_525.0 * SEC_PER_DAY,
+        "ta" => tropical_year_days(reference_mjd, scale) * SEC_PER_DAY,
+        "Ba" => besselian_year_days(reference_mjd, scale) * SEC_PER_DAY,
+        _ => return None,
+    }
+    .into()
+}
+
+fn tropical_year_days(reference_mjd: f64, scale: TimeScale) -> f64 {
+    let tdb = scale.convert(reference_mjd + MJD0, TimeScale::Tdb);
+    let centuries = (tdb - 2_451_545.0) / 36_525.0;
+    365.242_190_402_112_4 - 0.000_006_152_513_49 * centuries - 6.0921e-10 * centuries.powi(2)
+        + 2.6525e-10 * centuries.powi(3)
+}
+
+fn besselian_year_days(reference_mjd: f64, scale: TimeScale) -> f64 {
+    let et = scale.convert(reference_mjd + MJD0, TimeScale::Tt);
+    let centuries = (et - 2_415_020.0) / 36_525.0;
+    365.242_198_781_7 - 0.000_007_854_23 * centuries
 }
 
 /// The reference epoch as MJD: `MJDREF` (or `MJDREFI`+`MJDREFF`), else `JDREF`

@@ -26,6 +26,12 @@
   replaced by the consuming `RawImage::into_ndarray(self)`.
 - `FitsTime::gti_intervals` now returns `Result<Vec<GtiInterval>>` and rejects
   mismatched start/stop column lengths instead of silently truncating through `zip`.
+- `FitsTime::unit_seconds` and `relative_to_mjd` now return `Result`; malformed or
+  non-time units no longer silently behave as seconds. `time_axis_mjd` now accepts
+  a parsed `Wcs` plus the full pixel vector and returns `TimeCoordinate`, including
+  the axis-effective time scale.
+- `EpochTime` was consolidated into `TimeCoordinate`; `Header::epoch` now returns
+  the shared coordinate type used by both epoch keywords and WCS time axes.
 - Mutable WCS source fields (`naxis`, `ctype`, `crval`, `crpix`, and
   `unsupported_axes`) are now private so they cannot invalidate derived transforms.
   Read them through the immutable metadata returned by `Wcs::view`.
@@ -46,6 +52,8 @@
 - Added `CharacterField`, which preserves every stored byte of a binary-table `A`
   cell and exposes its first-NUL member boundary and null-string state.
 - Added `Wcs::view` with immutable per-axis metadata and unsupported-axis status.
+- Added `TimeCoordinate`, the shared MJD and effective scale value returned for
+  epoch keywords and WCS time axes.
 - Added explicit `ColumnType` declarations for variable-length table columns.
 
 ### Changed
@@ -81,6 +89,9 @@
   subsequent HDU, so special records containing later `END`-shaped cards are not
   misclassified. Boundary sizing uses the distinct primary, extension, and
   random-groups formulas and requires extension/group `PCOUNT` and `GCOUNT`.
+- FITS time units now support standard SI prefixes, reject non-time units, and
+  evaluate the epoch-dependent tropical and Besselian year definitions. Time axes
+  now honor complete PC/CD rows, per-axis units, and per-axis time scales.
 - WCS unsupported-axis classification now recognizes the standard `LOG` and `TAB`
   algorithms on any four-character coordinate type, including time and generic axes,
   instead of limiting nonlinear suffix detection to spectral coordinate names.

@@ -37,8 +37,8 @@ For every batch:
 
 ## Batch 6 — Critical: resolve time units and axes through the WCS model
 
-- [ ] **Replace `unit_seconds` fallback with a fallible FITS unit parser.** Support valid SI-prefixed time units such as `ms`/`ks`, reject non-time units, and implement the standard `ta`/`Ba` definitions deliberately (`src/time/mod.rs:531-545`; standard `docs/refs/fits_standard40.md:1089-1136`, `docs/refs/fits_standard40.md:4489-4538`). Verify relative time, GTI, and axis conversions across prefixed units.
-- [ ] **Evaluate time axes through the complete linear WCS row.** Honor PC/CD coupling, direct `CDi_j`, per-axis `CUNITia`, and the scale named by `CTYPEia`, returning the effective scale with the MJD (`src/time/mod.rs:638-655`; standard `docs/refs/fits_standard40.md:4087-4103`, `docs/refs/fits_standard40.md:4499-4503`, `docs/refs/fits_standard40.md:4824-4832`). Verify coupled axes, day-over-second overrides, and TAI-over-UTC.
+- [x] **Replace `unit_seconds` fallback with a fallible FITS unit parser.** Standard time bases and single SI prefixes are parsed case-sensitively, non-time units fail, and `ta`/`Ba` use their epoch-dependent FITS equations at `MJDREF`. Relative-time and GTI tests cover `ms`/`ks`, day units, invalid units, and both deprecated year definitions.
+- [x] **Evaluate time axes through the complete linear WCS row.** `FitsTime::time_axis_mjd` now accepts a parsed `Wcs` and the full pixel vector, so image, alternate, and translated table descriptions share PC/CD resolution. `CUNITia` and recognized `CTYPEia` scales override the global frame, and `TimeCoordinate` returns both MJD and the effective scale. Tests cover PC coupling, direct CD, day-over-second, TAI-over-UTC, and unsupported `TIME-TAB`.
 
 ## Batch 7 — Critical: correct FITS datetime boundaries
 

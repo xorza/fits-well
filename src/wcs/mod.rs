@@ -844,6 +844,7 @@ fn pco_theta(x: f64, y: f64) -> Result<f64> {
 pub struct WcsAxis {
     /// The `CTYPEi` string.
     pub ctype: String,
+    cunit: String,
     /// `CRVALi` — world coordinate at the reference pixel.
     pub crval: f64,
     /// `CRPIXi` — reference pixel (1-based).
@@ -874,6 +875,12 @@ pub struct Wcs {
     /// projection (quad-cube/HEALPix) or another non-linear coordinate algorithm
     /// (§8.3/§8.4). Complete transforms reject these axes.
     unsupported_axes: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LinearAxisWorld<'a> {
+    pub(crate) cunit: &'a str,
+    pub(crate) value: f64,
 }
 
 /// The rotation from native to celestial coordinates: the celestial pole
@@ -1351,6 +1358,7 @@ impl Wcs {
             .enumerate()
             .map(|(i, ctype)| WcsAxis {
                 ctype,
+                cunit: cunit[i].clone(),
                 crval: crval[i],
                 crpix: crpix[i],
             })
@@ -1371,6 +1379,28 @@ impl Wcs {
             axes: &self.axes,
             unsupported_axes: &self.unsupported_axes,
         }
+    }
+
+    pub(crate) fn linear_axis_world(
+        &self,
+        axis: usize,
+        pixel: &[f64],
+    ) -> Result<LinearAxisWorld<'_>> {
+        let naxis = self.axes.len();
+        assert!(axis < naxis, "WCS axis index");
+        assert_eq!(pixel.len(), naxis, "pixel coordinate count");
+        if self.unsupported_axes.contains(&axis) {
+            return Err(FitsError::UnsupportedWcsTransform { axes: vec![axis] });
+        }
+        let row = &self.matrix[axis * naxis..(axis + 1) * naxis];
+        let offset = pixel
+            .iter()
+            .zip(&self.axes)
+            .map(|(&value, metadata)| value - metadata.crpix);
+        Ok(LinearAxisWorld {
+            cunit: &self.axes[axis].cunit,
+            value: self.axes[axis].crval + row.iter().zip(offset).map(|(&a, b)| a * b).sum::<f64>(),
+        })
     }
 
     /// Build a WCS for a binary-table **pixel list** (event list, §8.5, Table 22):

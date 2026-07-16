@@ -56,7 +56,9 @@ A full framework for representing time (added in 4.0). Key pieces:
   **position** `TREFPOS`/`TRPOSn` (default `TOPOCENTER`; §9.2.3), **direction**
   `TREFDIR`/`TRDIRn` (§9.2.4).
 - **Units**: `TIMEUNIT` (default `s`; Table 34): also `d`, `a` (Julian year), `cy`,
-  `min`, `h`, `yr`, `ta`, `Ba`. Overridable by `CUNITia`.
+  `min`, `h`, `yr`, `ta`, `Ba`. One §4.3 SI prefix is permitted (`ms`, `ks`, …);
+  `ta` and `Ba` have epoch-dependent definitions. `CUNITia` overrides the global
+  unit and must itself be a time unit for a time axis.
 - **ISO-8601 datetimes** (§9.1.1): `[±C]CCYY-MM-DD[Thh:mm:ss[.s…]]`; the time part
   and decimal seconds **may** be omitted, but **leading zeros may not**, and **no
   timezone designator** (`Z` suffix forbidden). Signed 5-digit years are allowed. In
@@ -72,7 +74,9 @@ A full framework for representing time (added in 4.0). Key pieces:
   clock offset.
 - Other time axes (§9.6): `CTYPEi` = `'TIME'`, `'PHASE'`, `'TIMELAG'`, or
   `'FREQUENCY'`. GTI tables (§9.7) carry `START`/`STOP` columns (+ optional `WEIGHT`).
-  Time may also be a WCS axis or a table column.
+  Time may also be a WCS axis or a table column. Image time coordinates use the
+  complete PC/CD row and full pixel vector; a recognized scale in `CTYPEia` and a
+  `CUNITia` value override the corresponding global defaults.
 
 ## 7.3 Compressed data (§10)
 
