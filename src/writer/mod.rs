@@ -757,7 +757,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                 }
                 let count = encoded_element_count(*kind, cell)?;
                 max_elements = max_elements.max(count);
-                validate_tdim(col.tdim.as_deref(), count)?;
+                validate_vla_tdim(col.tdim.as_deref(), count)?;
             }
             let descriptor = if *wide { 'Q' } else { 'P' };
             Ok(ColumnLayout {
@@ -807,9 +807,29 @@ fn validate_tdim(shape: Option<&[usize]>, element_count: usize) -> Result<()> {
     let Some(shape) = shape else {
         return Ok(());
     };
+    validate_tdim_shape(shape)?;
+    validate_tdim_product(shape, element_count)
+}
+
+fn validate_vla_tdim(shape: Option<&[usize]>, element_count: usize) -> Result<()> {
+    let Some(shape) = shape else {
+        return Ok(());
+    };
+    validate_tdim_shape(shape)?;
+    if element_count == 0 {
+        return Ok(());
+    }
+    validate_tdim_product(shape, element_count)
+}
+
+fn validate_tdim_shape(shape: &[usize]) -> Result<()> {
     if shape.is_empty() || shape.contains(&0) {
         return Err(FitsError::KeywordOutOfRange { name: "TDIMn" });
     }
+    Ok(())
+}
+
+fn validate_tdim_product(shape: &[usize], element_count: usize) -> Result<()> {
     let product = shape
         .iter()
         .try_fold(1usize, |product, &len| product.checked_mul(len))

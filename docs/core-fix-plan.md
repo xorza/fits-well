@@ -47,7 +47,7 @@ For every batch:
 
 ## Batch 8 — High: complete variable-length-array semantics
 
-- [ ] **Skip per-cell `TDIMn` product validation for zero-length descriptors.** Keep `TDIM` syntax validation but apply its product only to nonempty P/Q cells (`src/table/mod.rs:801-825`, `src/table/mod.rs:951-958`, `src/writer/mod.rs:724-805`; standard `docs/refs/fits_standard40.md:2670-2681`). Verify mixed empty/nonempty P/Q rows.
+- [x] **Skip per-cell `TDIMn` product validation for zero-length descriptors.** Reader and writer retain `TDIMn` syntax validation but apply its product only to nonempty descriptor cells. Hand-built `P`/`Q`/`PX`/`QX` fixtures and writer round-trips cover mixed empty/nonempty rows, ignored empty-cell heap offsets, exact shapes, and undersized nonempty cells (`docs/refs/fits_standard40.md:2670-2681`).
 - [ ] **Add complex and exact-unsigned VLA physical views.** Apply `TSCAL` to both complex components and `TZERO` only to the real component, and expose exact unsigned P/Q integer values above `2^53` (`src/table/mod.rs:625-635`, `src/table/mod.rs:731-769`, `src/table/mod.rs:1027-1059`; standard `docs/refs/fits_standard40.md:2575-2608`, `docs/refs/fits_standard40.md:3108-3112`).
 - [ ] **Add `PX`/`QX` writing.** Carry a bit count per jagged row, encode descriptor counts in bits, size heap spans in bytes, and clear unused trailing bits (`src/writer/mod.rs:82-102`, `src/writer/mod.rs:166-181`; standard `docs/refs/fits_standard40.md:3013-3030`). Verify empty, one-bit, and non-byte-aligned rows under P and Q.
 

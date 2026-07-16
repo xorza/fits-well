@@ -1016,7 +1016,9 @@ fn tdim_product(dims: &[usize]) -> Result<usize> {
 }
 
 fn validate_vla_tdim(col: &Column, element_count: usize) -> Result<()> {
-    if let Some(dims) = &col.tdim {
+    if element_count != 0
+        && let Some(dims) = &col.tdim
+    {
         let product = tdim_product(dims)?;
         if product > element_count {
             return Err(FitsError::KeywordOutOfRange { name: "TDIMn" });
