@@ -8,8 +8,6 @@
 //! this drives the tile geometry, the
 //! fallback-column resolution, and the narrow-and-scatter into the output plane.
 
-#[cfg(feature = "parallel")]
-use crate::compress::DisjointSlice;
 use crate::compress::convert::be_floats_into;
 use crate::compress::convert::be_to_i64_into;
 use crate::compress::convert::byte_cell;
@@ -238,12 +236,7 @@ fn decode_image_into(
     let zzero = read_f64_column(table, "ZZERO")?;
 
     let geom = TileGeometry::new(&layout.dims, &tiles);
-    let ntiles = geom.ntiles();
 
-    // Decode and scatter each tile in one fused pass — parallel under the `parallel`
-    // feature, where tiles write disjoint regions of `samples` concurrently (they
-    // partition the image). Each value is narrowed to `ZBITPIX` as it lands, so there
-    // is no whole-image `i64`/`f64` intermediate and no separate serial scatter tail.
     let ctx = DecodeCtx {
         codec: layout.codec,
         zbitpix: layout.bitpix,
@@ -267,12 +260,8 @@ fn decode_image_into(
             decode_float_tile_into(&ctx, cols, s.nelem(), dq, out, ints, codecs)
         };
         match output {
-            DecodeBuffer::F32(out) => {
-                run_decode_scatter(ntiles, &geom, out, decode, |value| value as f32)?
-            }
-            DecodeBuffer::F64(out) => {
-                run_decode_scatter(ntiles, &geom, out, decode, |value| value)?
-            }
+            DecodeBuffer::F32(out) => run_decode_scatter(&geom, out, decode, |value| value as f32)?,
+            DecodeBuffer::F64(out) => run_decode_scatter(&geom, out, decode, |value| value)?,
             _ => unreachable!("a float ZBITPIX yields a float sample buffer"),
         }
     } else {
@@ -285,30 +274,17 @@ fn decode_image_into(
             decode_one_tile_into(&ctx, cols, s.nelem(), out, codecs)
         };
         match output {
-            DecodeBuffer::U8(out) => {
-                run_decode_scatter(ntiles, &geom, out, decode, |value| value as u8)?
-            }
-            DecodeBuffer::I16(out) => {
-                run_decode_scatter(ntiles, &geom, out, decode, |value| value as i16)?
-            }
-            DecodeBuffer::I32(out) => {
-                run_decode_scatter(ntiles, &geom, out, decode, |value| value as i32)?
-            }
-            DecodeBuffer::I64(out) => {
-                run_decode_scatter(ntiles, &geom, out, decode, |value| value)?
-            }
+            DecodeBuffer::U8(out) => run_decode_scatter(&geom, out, decode, |value| value as u8)?,
+            DecodeBuffer::I16(out) => run_decode_scatter(&geom, out, decode, |value| value as i16)?,
+            DecodeBuffer::I32(out) => run_decode_scatter(&geom, out, decode, |value| value as i32)?,
+            DecodeBuffer::I64(out) => run_decode_scatter(&geom, out, decode, |value| value)?,
             _ => unreachable!("an integer ZBITPIX yields an integer sample buffer"),
         }
     }
     Ok(())
 }
 
-/// Decode every tile and scatter its values into `out` at the tile's positions,
-/// narrowing each with `convert`. Under `parallel` the tiles run concurrently and
-/// write disjoint regions of `out` directly (no collect, no serial scatter);
-/// otherwise it is a plain fused loop.
 fn run_decode_scatter<S, D>(
-    ntiles: usize,
     geom: &TileGeometry,
     out: &mut [D],
     decode: impl Fn(usize, &TileScratch, &mut Vec<S>, &mut Vec<i64>, &mut CodecScratch) -> Result<()>
@@ -318,15 +294,10 @@ fn run_decode_scatter<S, D>(
 ) -> Result<()>
 where
     S: Copy + Send,
+    D: Copy + Send + Sync,
 {
-    // Per-worker decode buffers, reused across that worker's tiles (one set per rayon
-    // worker via `map_init`, a single set serially): `vals` is the decoded tile (the
-    // scatter source), `ints` the float path's quantized-int temp (unused otherwise).
-    // Reusing them means steady-state decode allocates nothing per tile, and the
-    // buffers stay cache-resident across tiles.
     #[cfg(feature = "parallel")]
     {
-        let sink = DisjointSlice::new(out);
         let init = || {
             (
                 TileScratch::default(),
@@ -335,23 +306,20 @@ where
                 CodecScratch::default(),
             )
         };
-        map_tiles(
-            ntiles,
+        let decoded = map_tiles(
+            geom.ntiles(),
             init,
-            |(scratch, vals, ints, codecs), t| -> Result<()> {
+            |(scratch, vals, ints, codecs), t| -> Result<Vec<D>> {
                 geom.tile_into(t, scratch);
                 decode(t, scratch, vals, ints, codecs)?;
                 ensure_tile_size(scratch.nelem(), vals.len())?;
-                // SAFETY: the image tiles partition the pixel grid, so this tile's row
-                // ranges are disjoint from every other tile's — concurrent writes through
-                // `sink` never alias. `tile_into` clips rows to the image, which sized
-                // `out`, so each row is in bounds.
-                unsafe {
-                    scatter_disjoint(&sink, &scratch.row_bases, scratch.row_len, vals, &convert)
-                };
-                Ok(())
+                let mut converted = Vec::new();
+                allocation::try_reserve_exact(&mut converted, vals.len())?;
+                converted.extend(vals.iter().copied().map(&convert));
+                Ok(converted)
             },
         )?;
+        geom.scatter_tiles(&decoded, out);
         Ok(())
     }
     #[cfg(not(feature = "parallel"))]
@@ -360,7 +328,7 @@ where
         let mut vals: Vec<S> = Vec::new();
         let mut ints: Vec<i64> = Vec::new();
         let mut codecs = CodecScratch::default();
-        for t in 0..ntiles {
+        for t in 0..geom.ntiles() {
             geom.tile_into(t, &mut scratch);
             decode(t, &scratch, &mut vals, &mut ints, &mut codecs)?;
             ensure_tile_size(scratch.nelem(), vals.len())?;
@@ -370,9 +338,6 @@ where
     }
 }
 
-/// Scatter `vals` (the tile's pixels in row-major order) into `out` one contiguous
-/// row at a time: `row_len` values land at each `row_bases` offset, narrowed by
-/// `convert`.
 #[cfg(not(feature = "parallel"))]
 fn scatter_rows<S: Copy, D>(
     out: &mut [D],
@@ -389,23 +354,6 @@ fn scatter_rows<S: Copy, D>(
         {
             *d = convert(v);
         }
-        off += row_len;
-    }
-}
-
-#[cfg(feature = "parallel")]
-unsafe fn scatter_disjoint<S: Copy, D>(
-    sink: &DisjointSlice<D>,
-    row_bases: &[usize],
-    row_len: usize,
-    vals: &[S],
-    convert: &impl Fn(S) -> D,
-) {
-    let mut off = 0;
-    for &base in row_bases {
-        // SAFETY: image tiles partition the pixel grid, so these in-bounds row
-        // ranges do not overlap any concurrently accessed range.
-        unsafe { sink.map_from_slice(base, &vals[off..off + row_len], convert) };
         off += row_len;
     }
 }

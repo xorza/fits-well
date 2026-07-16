@@ -69,6 +69,45 @@ impl TileGeometry {
         }
     }
 
+    #[cfg(feature = "parallel")]
+    pub(crate) fn scatter_tiles<T>(&self, tiles: &[Vec<T>], out: &mut [T])
+    where
+        T: Copy + Send + Sync,
+    {
+        use rayon::prelude::*;
+
+        debug_assert_eq!(tiles.len(), self.ntiles());
+        let row_len = self.dims[0];
+        let x_tiles = self.ntiles_axis[0];
+        out.par_chunks_mut(row_len)
+            .enumerate()
+            .for_each(|(row, out)| {
+                let mut coordinates = row;
+                let mut tile_base = 0;
+                let mut tile_stride = x_tiles;
+                let mut source_row = 0;
+                let mut source_stride = 1;
+                for axis in 1..self.dims.len() {
+                    let coordinate = coordinates % self.dims[axis];
+                    coordinates /= self.dims[axis];
+                    let tile_coordinate = coordinate / self.tiles[axis];
+                    let local_coordinate = coordinate % self.tiles[axis];
+                    tile_base += tile_coordinate * tile_stride;
+                    tile_stride *= self.ntiles_axis[axis];
+                    source_row += local_coordinate * source_stride;
+                    source_stride *=
+                        self.tiles[axis].min(self.dims[axis] - tile_coordinate * self.tiles[axis]);
+                }
+                for x_tile in 0..x_tiles {
+                    let destination = x_tile * self.tiles[0];
+                    let width = self.tiles[0].min(row_len - destination);
+                    let source = source_row * width;
+                    out[destination..destination + width]
+                        .copy_from_slice(&tiles[tile_base + x_tile][source..source + width]);
+                }
+            });
+    }
+
     /// Fill `s` (reusing its buffers) with tile `t`'s edge-clipped extent and the
     /// flat indices of its pixels in the full image.
     pub(crate) fn tile_into(&self, t: usize, s: &mut TileScratch) {
