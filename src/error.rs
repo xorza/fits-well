@@ -10,7 +10,7 @@ pub enum FitsError {
     /// A previous sink error may have left a partial HDU in the output. Further
     /// writes are rejected because appending cannot repair that FITS stream.
     WriterFailed,
-    /// A keyword name violated its FITS or HIERARCH-convention syntax.
+    /// A keyword name violated FITS syntax.
     InvalidKeyword {
         name: String,
     },
@@ -31,6 +31,11 @@ pub enum FitsError {
     /// A card's value field could not be parsed as any FITS value type.
     InvalidValue {
         card: String,
+    },
+    /// Interpreting a valid FITS time value requires leap-second, Earth-orientation,
+    /// or ephemeris data that this format library does not provide.
+    ExternalTimeDataRequired {
+        operation: &'static str,
     },
     /// A named metadata value was present but could not be interpreted as the type
     /// required by its FITS role.
@@ -93,12 +98,6 @@ pub enum FitsError {
     HduIndexOutOfBounds {
         index: usize,
         len: usize,
-    },
-    /// No extension matched a requested case-insensitive `EXTNAME` and optional
-    /// `EXTVER` selector.
-    HduNotFound {
-        name: String,
-        version: Option<i64>,
     },
     /// An ordered header operation named a record position beyond the stored
     /// logical record list.
@@ -179,7 +178,7 @@ pub enum FitsError {
     },
     /// A complete pixel↔world transform was requested for axes whose nonlinear
     /// algorithm is not implemented. The indices are zero-based, matching
-    /// [`crate::WcsView::unsupported_axes`].
+    /// [`crate::wcs::WcsView::unsupported_axes`].
     UnsupportedWcsTransform {
         axes: Vec<usize>,
     },
@@ -211,10 +210,6 @@ pub enum FitsError {
     /// A `TFORMn` value could not be parsed as a binary-table column format.
     InvalidTform {
         tform: String,
-    },
-    /// A `TDISPn` value could not be parsed as a complete binary-table display format.
-    InvalidTdisp {
-        tdisp: String,
     },
     /// `ColumnReader::raw` was called on a variable-length-array (`P`/`Q`) column;
     /// use `ColumnReader::vla` instead.
@@ -297,6 +292,9 @@ impl fmt::Display for FitsError {
             FitsError::InvalidValue { card } => {
                 write!(f, "cannot parse value field of card {card:?}")
             }
+            FitsError::ExternalTimeDataRequired { operation } => {
+                write!(f, "{operation} requires external astronomical time data")
+            }
             FitsError::TypeMismatch { name, expected } => {
                 write!(f, "value {name} is not a valid {expected}")
             }
@@ -343,12 +341,6 @@ impl fmt::Display for FitsError {
             FitsError::HduIndexOutOfBounds { index, len } => {
                 write!(f, "HDU index {index} out of bounds (file has {len} HDUs)")
             }
-            FitsError::HduNotFound { name, version } => match version {
-                Some(version) => {
-                    write!(f, "no HDU named {name:?} with EXTVER {version}")
-                }
-                None => write!(f, "no HDU named {name:?}"),
-            },
             FitsError::HeaderIndexOutOfBounds { index, len } => {
                 write!(
                     f,
@@ -451,9 +443,6 @@ impl fmt::Display for FitsError {
                 "PLIO tile sample {index} has value {value}, outside 0..=16777215"
             ),
             FitsError::InvalidTform { tform } => write!(f, "invalid column format {tform:?}"),
-            FitsError::InvalidTdisp { tdisp } => {
-                write!(f, "invalid column display format {tdisp:?}")
-            }
             FitsError::VariableLengthColumn { code } => write!(
                 f,
                 "column format '{code}' is a variable-length array; use the column reader's vla()"

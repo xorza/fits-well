@@ -211,7 +211,7 @@ fn ascii_table_round_trips_through_write_and_read() {
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
 
     assert_eq!(r.hdus.len(), 2); // auto dataless primary + the TABLE
-    assert_eq!(r.hdus[1].kind, crate::HduKind::AsciiTable);
+    assert_eq!(r.hdus[1].kind, crate::io::HduKind::AsciiTable);
     assert_eq!(&r.read_data_raw(1).unwrap().data()[..6], b"  AB  ");
     let t = r.read_ascii_table(1).unwrap();
     assert_eq!(

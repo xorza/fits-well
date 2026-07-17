@@ -5,7 +5,7 @@ the bundled normative FITS 4.0 text in
 [`refs/fits_standard40.md`](refs/fits_standard40.md). The reviewed core is the
 always-compiled surface: file/HDU structure, headers, checksums, images, ASCII and
 binary tables, random groups, WCS, time coordinates, reader, and writer (§§3–9).
-Tiled compression (§10), `mmap`, and `ndarray` are outside this review.
+Tiled compression (§10) and `mmap` are outside this review.
 
 ## Conclusion
 
@@ -40,7 +40,7 @@ Severity used below:
 | §7.2 | ASCII tables | Complete for core table structures: formats, scaling, distinct nullable raw cells, field-count limits, and fallible width-checked writing are covered. |
 | §7.3 | Binary tables | Complete for core table structures: all fixed kinds and P/Q reads and writes exist, including type-checked scaling/null metadata, character, physical numeric/complex, exact unsigned, jagged bit arrays, and the 999-field ceiling. |
 | §8 | WCS | Complete for standard algorithms: image and table keyword translation, all 27 celestial projections, every Table-26 spectral/detector algorithm, generic `LOG`, and BINTABLE-resolved multidimensional `TAB` coordinates are covered. Convention-only `XPH` remains explicitly unsupported. |
-| §9 | Time | Complete for the core typed model: references, scales, positions, FITS units, strict year forms, leap-second-preserving UTC quasi-JD, linear/`LOG`/resolved-`TAB` time-axis WCS evaluation, and all image/table PHASE metadata forms are covered. |
+| §9 | Time | Complete for FITS metadata interpretation: references, preserved recognized/realized/local scale declarations, positions, FITS units, strict year forms, same-frame JD/MJD, linear/`LOG`/resolved-`TAB` time-axis WCS evaluation, and all image/table PHASE metadata forms are covered. |
 | §10 | Tiled compression | Not assessed here; it is outside the dependency-free core. |
 
 ## Capability boundaries
@@ -49,11 +49,11 @@ Severity used below:
 | --- | --- |
 | Normative FITS 4.0 §§3–9 | Covered by this audit |
 | Normative tiled compression §10 | Implemented behind `compression`; assessed by codec and external-reference tests |
-| Registered conventions | `CONTINUE`, `HIERARCH`, and `CHECKSUM`/`DATASUM` implemented; other conventions are separate product choices |
+| Registered conventions | Normative `CONTINUE` and `CHECKSUM`/`DATASUM` implemented; non-standard `HIERARCH` is retained as opaque commentary |
 | Partial access | N-D image sections and binary-table schema/cell/column/row/range reads |
 | Streaming | Lazy reader plus incremental seekable image output; tables retain transactional whole-HDU output |
 | In-place editing | Deliberately out of scope |
-| Ecosystem bridges | Optional `mmap` and `ndarray`; declared frames are exposed without inter-frame astrometry |
+| Ecosystem bridges | Optional `mmap`; typed image vectors and shape metadata support downstream adapters |
 
 ## Batch 1 — Critical: stop wrong values and valid-file failures
 
@@ -69,7 +69,7 @@ Severity used below:
 
 - [x] **Make HDU discovery role-aware before scanning the rest of a header.** The scanner requires first-card `SIMPLE` for HDU 0 and first-card `XTENSION` thereafter; any other post-HDU block starts special records without searching it for `END` (`docs/refs/fits_standard40.md:607-612`). The validated `HduRole` also selects primary Eq. 1, extension Eq. 2, or random-groups Eq. 4, so `GROUPS` cannot alter extension sizing and role-mandatory `PCOUNT`/`GCOUNT` cannot default silently. Tests cover special records with a later canonical `END`, empty and extension-only input, exact handcrafted next-HDU boundaries, both missing counts, and invalid random-group signatures.
 
-- [x] **Implement the two FITS year forms and a leap-second-preserving UTC conversion.** `Datetime::parse` enforces unsigned-four/signed-five syntax across the full standard range, including the normative `-04713-11-24T12:00:00` JD origin (`docs/refs/fits_standard40.md:4005-4040`). Scale-aware JD/MJD conversion validates leap labels only in the final minute of an actual UTC insertion date and represents UTC with ERFA-compatible quasi-JD day fractions. UTC↔TAI/TT/UT1 preserves the inserted instant; fixtures cover every embedded insertion plus ERFA's 2016 `23:59:59`, `23:59:60`, and 2017 midnight values (`docs/refs/fits_standard40.md:4043-4045`).
+- [x] **Implement the two FITS year forms without embedding external chronometry data.** `Datetime::parse` enforces unsigned-four/signed-five syntax across the full standard range, including the normative `-04713-11-24T12:00:00` JD origin (`docs/refs/fits_standard40.md:4005-4040`). Same-frame JD/MJD conversion handles ordinary labels directly. A syntactically valid UTC leap-second label is preserved, but conversion reports `ExternalTimeDataRequired` because the authoritative insertion history is not part of FITS. Inter-scale conversion likewise remains outside the format core (`docs/refs/fits_standard40.md:4043-4045`).
 
 - [x] **Preserve or reject out-of-range integer keyword values; never saturate them.** `FitsInteger` stores ordinary values without allocation and retains larger signed decimals exactly, matching FITS's unbounded integer syntax (`docs/refs/fits_standard40.md:883-897`). `Value::as_integer` and `Header::get_integer` return `IntegerOutOfRange` when an exact integer or integral real cannot fit `i64`. Tests cover both `i64` boundaries, one-past values, exact complex-integer components, real-to-integer bounds, and a `BITPIX=64` `BLANK` above `i64::MAX`.
 
@@ -77,7 +77,7 @@ Severity used below:
 
 - [x] **Implement the remaining standard WCS nonlinear coordinate algorithms.** All 27 Table-23 celestial projections, every Table-26 `F2*`/`W2*`/`V2*`/`A2*`/`GRI`/`GRA` transform, generic `LOG`, and BINTABLE-backed `TAB` interpolation/inversion are evaluated (`docs/refs/fits_standard40.md:3551-3598`, `:3779-3801`; `src/wcs/axis.rs`, `src/wcs/tabular/mod.rs`). Analytic and detector values are cross-checked with wcslib 8.5; tabular paths use exact one-/multidimensional fixtures. XPH remains a separately reported convention.
 
-- [x] **Parse FITS time units instead of treating every unknown spelling as seconds.** `unit_seconds` is fallible, accepts the standard time bases with one SI prefix, and rejects non-time dimensional spellings. The discouraged `ta` and `Ba` units use the normative epoch-dependent equations at `MJDREF` in TDB/ET rather than constants. Relative-time and GTI fixtures cover `ms`, `ks`, days, invalid units, and the J2000/J1900 equation origins (`docs/refs/fits_standard40.md:1089-1136`, `:4489-4538`).
+- [x] **Parse FITS time units instead of treating every unknown spelling as seconds.** `unit_seconds` is fallible, accepts the standard time bases with one SI prefix, and rejects non-time dimensional spellings. The discouraged `ta` and `Ba` units use the normative epoch-dependent equations only when `MJDREF` is already expressed in their required TDB/TT frame; other declarations report that external scale data is required. Relative-time fixtures cover `ms`, `ks`, days, invalid units, and the J2000/J1900 equation origins (`docs/refs/fits_standard40.md:1089-1136`, `:4489-4538`).
 
 - [x] **Treat `TDIMn` as inapplicable to a zero-length VLA cell.** Reader and writer skip only the dimension-product comparison for empty descriptors, while malformed shapes and undersized nonempty cells remain errors. Hand-built mixed `P`/`Q`/`PX`/`QX` rows prove empty cells ignore their undefined heap offsets; writer round-trips cover both descriptor widths with the same empty/nonempty shape (`docs/refs/fits_standard40.md:2670-2681`).
 
@@ -103,7 +103,7 @@ Severity used below:
 
 - [x] **Reject more than 999 table fields before allocation or output.** ASCII, binary, and compressed-table code share one `MAX_TABLE_FIELDS` structural limit. Both regular writers check it before allocating column layouts or emitting an automatic primary. Exact boundary tests serialize and parse 999-field ASCII and binary tables, while 1000 fields return `KeywordOutOfRange("TFIELDS")` with an untouched sink (`docs/refs/fits_standard40.md:2350-2355`, `:2782-2787`).
 
-- [x] **Seal image geometry/type invariants at safe API boundaries.** `Image::new` validates the axis product, sample count, and scaling before construction, and its fields are no longer independently mutable. `ReadImage::bitpix` derives the tag from private raw/decoded storage; `ImageMetadata` provides the immutable public view. Writer, compression, and caller-shaped ndarray boundaries return `DataSizeMismatch` for disagreement. Tests cover empty and zero-axis shapes, all six `BITPIX` variants, and exact off-by-one failures.
+- [x] **Seal image geometry/type invariants at safe API boundaries.** `Image::new` validates the axis product, sample count, and scaling before construction, and its fields are no longer independently mutable. `ReadImage::bitpix` derives the tag from private raw/decoded storage; `ImageMetadata` provides the immutable public view. Writer and compression boundaries return `DataSizeMismatch` for disagreement. Tests cover empty and zero-axis shapes, all six `BITPIX` variants, and exact off-by-one failures.
 
 - [x] **Preflight a complete HDU and poison torn writers.** Every extension path completes encoding, padding, checksum/header rendering, and any late validation before emitting an automatic primary. `write_raw_hdu` validates and commits a complete logical HDU in one operation, including role, exact data length, and derived block fill. Writer state tracks `Empty`/`Active`/`Failed`; a partial sink error poisons the writer and subsequent writes return `WriterFailed`. Late compression and raw-HDU failures leave a fresh sink untouched.
 
@@ -111,9 +111,9 @@ Severity used below:
 
 - [x] **Represent checksum status as absent, unknown, valid, or invalid.** `ChecksumReport` now carries `ChecksumStatus` for each assertion. Strings containing one or more blanks report `Unknown` without being verified, absent keywords remain distinct, matching values report `Valid`, and null, malformed, or mismatched values report `Invalid`. Independent fixtures cover all four states for both keywords (`src/reader/mod.rs`; `docs/refs/fits_standard40.md:1698-1718`).
 
-- [x] **Support alternate/table PHASE metadata and reject undefined folding.** `Header::phase_axis`, `phase_axis_pixel_list`, and `phase_axis_array_column` resolve the primary and alternate Table-22 `CZPHS`/`CPERI` spellings. Missing/zero periods remain valid nonconstant metadata as `None`, while `PhaseAxis::fold` returns `InvalidValue` instead of fabricating phase zero (`docs/refs/fits_standard40.md:4717-4734`).
+- [x] **Support alternate/table PHASE metadata.** `Header::phase_axis`, `phase_axis_pixel_list`, and `phase_axis_array_column` resolve the primary and alternate Table-22 `CZPHS`/`CPERI` spellings. Missing/zero periods remain valid nonconstant metadata as `None`; application-level phase folding is left to callers (`docs/refs/fits_standard40.md:4717-4734`).
 
-- [x] **Add public HIERARCH authoring.** `Header::set_hierarch` writes and updates compound names without exposing the internal card kind. It shares the indexed logical model with parsed HIERARCH cards, preserves comments on update, and rejects empty, boundary-spaced, delimiter-containing, non-ASCII, or physically unrepresentable input before mutation. Long spaced names round-trip through the canonical renderer/parser (`src/header/mod.rs`; registered convention notes in `docs/refs/08-conventions.md`).
+- [x] **Keep header authoring standard-only.** Public mutation accepts only the standard eight-character keyword grammar. A non-standard `HIERARCH` input record remains available as opaque commentary under its literal keyword, but the core does not interpret or author the convention (`src/header/mod.rs`; registered convention notes in `docs/refs/08-conventions.md`).
 
 ## Confirmed coverage
 
@@ -131,14 +131,17 @@ following foundations are substantively correct for conforming inputs:
   checksum generation/verification;
 - 27 implemented WCS projection formula families already covered by external
   astropy/wcslib goldens;
-- basic ISO date/JD/MJD, reference precedence, scale aliases, observation bounds,
-  and GTI conversion outside the unit/axis/leap cases above.
+- basic ISO date/JD/MJD, reference precedence, scale aliases, and observation
+  bounds outside the unit/axis/leap cases above.
 
 ## Deliberate boundaries and non-findings
 
 - Inter-frame astrometry (FK4/FK5/ICRS/Galactic conversion), ephemeris-based
   light-time correction, and observatory-motion correction are not FITS parsing
   responsibilities. Parsing and exposing the declared frame remains in scope.
+- Inter-time-scale conversion requires current leap-second or ephemeris data and
+  remains outside the format core. Scale declarations and realizations are
+  preserved without conversion.
 - Reader permissiveness for malformed mandatory-keyword order, nonblank fill, or
   other invalid files is not elevated here unless it changes valid-file behavior
   or lets a safe writer create invalid output.
@@ -155,8 +158,9 @@ following foundations are substantively correct for conforming inputs:
 
 ```text
 env CARGO_TARGET_DIR=.tmp/target cargo test --no-default-features
-  270 unit tests passed
-  5 doc-tests passed, 1 ignored
+  294 unit tests passed
+  1 public-API integration test passed
+  6 doc-tests passed, 1 ignored
 env CARGO_TARGET_DIR=.tmp/target cargo clippy --all-targets --no-default-features -- -D warnings
   clean
 ```

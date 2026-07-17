@@ -1233,7 +1233,7 @@ fn grism_axes_match_wcslib_and_invert() {
     ];
     for (ctype, reference, goldens) in cases {
         let wcs = grism_wcs(ctype, reference);
-        assert_eq!(wcs.view().unsupported_axes, [], "{ctype}");
+        assert!(wcs.view().unsupported_axes.is_empty(), "{ctype}");
         for (expected_world, pixel) in goldens {
             let world = wcs.pixel_to_world(&[pixel]).unwrap();
             assert!(
@@ -1384,7 +1384,7 @@ fn table_26_spectral_algorithms_match_wcslib() {
             .set_internal("CDELT1", case.increment)
             .set_internal("RESTFRQ", 1_420_405_751.0);
         let wcs = Wcs::from_header(&header, None).unwrap();
-        assert_eq!(wcs.view().unsupported_axes, [], "{}", case.ctype);
+        assert!(wcs.view().unsupported_axes.is_empty(), "{}", case.ctype);
         let world = wcs.pixel_to_world(&[3.0]).unwrap()[0];
         let tolerance = case.world.abs() * 2e-14;
         assert!(

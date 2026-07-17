@@ -22,11 +22,11 @@
 //! `astropy.wcs`, wcslib, or exact interpolation fixtures. Convention-only `XPH`
 //! transforms remain readable in [`WcsView::unsupported_axes`]; complete transforms
 //! then return
-//! [`FitsError::UnsupportedWcsTransform`](crate::FitsError::UnsupportedWcsTransform).
+//! [`FitsError::UnsupportedWcsTransform`].
 //!
 //! Binary-table WCS (Table 22) is supported for both the pixel-list
-//! ([`Header::wcs_pixel_list`](crate::Header::wcs_pixel_list)) and vector-cell
-//! ([`Header::wcs_array_column`](crate::Header::wcs_array_column)) forms.
+//! ([`Header::wcs_pixel_list`](crate::header::Header::wcs_pixel_list)) and vector-cell
+//! ([`Header::wcs_array_column`](crate::header::Header::wcs_array_column)) forms.
 //!
 //! Pixel↔world yields celestial coordinates in the frame the file declares;
 //! [`WcsView::celestial_frame`] and [`WcsAxis::spectral_frame`] expose that typed
@@ -1330,7 +1330,7 @@ impl TableWcsResolver {
 impl Wcs {
     /// Parse the primary WCS (`alt = None`) or an alternate description
     /// (`alt = Some('A'..='Z')`) from `header`. The public entry point is
-    /// [`Header::wcs`](crate::Header::wcs), which forwards here.
+    /// [`Header::wcs`](crate::header::Header::wcs), which forwards here.
     pub(crate) fn from_header(header: &Header, alt: Option<char>) -> Result<Wcs> {
         Wcs::from_header_with_context(header, alt, Vec::new(), None)
     }

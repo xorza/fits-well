@@ -758,7 +758,7 @@ fn read_image_view_matches_decode_for_a_compressed_image() {
 }
 
 #[test]
-fn hdu_handle_selects_by_index_or_case_insensitive_name_and_version() {
+fn hdu_index_selects_by_case_insensitive_name_and_version() {
     let primary = Image::new(vec![1], vec![0u8]).unwrap();
     let extension = Image::new(vec![3], vec![10i16, 20, 30]).unwrap();
     let mut extension_header = Header::new();
@@ -774,21 +774,19 @@ fn hdu_handle_selects_by_index_or_case_insensitive_name_and_version() {
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
 
-    {
-        let mut hdu = reader.hdu(("sci", 2)).unwrap();
-        assert_eq!(hdu.index, 1);
-        assert_eq!(hdu.kind, HduKind::Image);
-        assert_eq!(hdu.header.get_text("OBJECT").unwrap(), Some("target"));
-        assert_eq!(
-            hdu.read_image().unwrap().decode(),
-            ImageData::I16(vec![10, 20, 30])
-        );
-    }
-    assert_eq!(reader.hdu(0usize).unwrap().kind, HduKind::Primary);
-    assert!(matches!(
-        reader.hdu(("SCI", 3)),
-        Err(FitsError::HduNotFound { name, version: Some(3) }) if name == "SCI"
-    ));
+    let index = reader.hdu_index("sci", Some(2)).unwrap().unwrap();
+    assert_eq!(index, 1);
+    assert_eq!(reader.hdus()[index].kind, HduKind::Image);
+    assert_eq!(
+        reader.hdus()[index].header.get_text("OBJECT").unwrap(),
+        Some("target")
+    );
+    assert_eq!(
+        reader.read_image(index).unwrap().decode(),
+        ImageData::I16(vec![10, 20, 30])
+    );
+    assert_eq!(reader.hdus()[0].kind, HduKind::Primary);
+    assert_eq!(reader.hdu_index("SCI", Some(3)).unwrap(), None);
 }
 
 fn region_indices() -> Vec<usize> {

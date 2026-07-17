@@ -197,20 +197,17 @@ fn rejects_lowercase_keyword_on_a_value_card() {
 }
 
 #[test]
-fn parses_and_round_trips_a_hierarch_record() {
+fn preserves_a_hierarch_record_as_opaque_commentary() {
     let card = parse("HIERARCH ESO DET CHIP1 NAME = 'CCD-44' / detector");
-    assert_eq!(card.kind, CardKind::Hierarch);
-    assert_eq!(card.keyword, "ESO DET CHIP1 NAME");
-    assert_eq!(card.value, Some(Value::Text("CCD-44".into())));
-    assert_eq!(card.comment.as_deref(), Some("detector"));
-    // Render → parse round-trips the compound key and value.
+    assert_eq!(card.kind, CardKind::Commentary);
+    assert_eq!(card.keyword, "HIERARCH");
+    assert_eq!(card.value, None);
+    assert_eq!(
+        card.comment.as_deref(),
+        Some(" ESO DET CHIP1 NAME = 'CCD-44' / detector")
+    );
     let reparsed = Card::parse(&card.render().unwrap()).unwrap();
     assert_eq!(reparsed, card);
-
-    // A numeric HIERARCH value too.
-    let n = parse("HIERARCH ESO DET EXPTIME = 1200");
-    assert_eq!(n.keyword, "ESO DET EXPTIME");
-    assert_eq!(n.value, Some(Value::from(1200_i64)));
 }
 
 #[test]
@@ -314,35 +311,6 @@ fn long_string_comment_boundary_is_lossless_or_rejected() {
         }) if keyword == "TEXT"
     ));
     assert_eq!(output, vec![1, 2, 3]);
-}
-
-#[test]
-fn long_hierarch_string_splits_into_a_continue_chain() {
-    // A HIERARCH card whose key + long string value overflows one record must
-    // continue, not silently truncate at 80 bytes.
-    let value = "x".repeat(120);
-    let card = Card {
-        keyword: "ESO DET CHIP1 LONGNAME".into(),
-        value: Some(Value::Text(value.clone())),
-        comment: Some("note".into()),
-        kind: CardKind::Hierarch,
-    };
-    let records = render_records(&card);
-    assert!(records.len() >= 2, "expected a CONTINUE chain");
-    // First record carries the HIERARCH prefix and a continued ('&) substring.
-    let first = std::str::from_utf8(&records[0]).unwrap();
-    assert!(first.starts_with("HIERARCH ESO DET CHIP1 LONGNAME = '"));
-    assert!(first.trim_end().ends_with("&'"));
-    assert_eq!(&records[1][..8], b"CONTINUE");
-    // Reassembles to the full value — nothing truncated.
-    let bytes: Vec<u8> = records.iter().flatten().copied().collect();
-    let mut with_end = bytes;
-    with_end.extend_from_slice(&raw("END"));
-    let h = Header::parse(&with_end).unwrap();
-    assert_eq!(
-        h.get_text("ESO DET CHIP1 LONGNAME").unwrap(),
-        Some(value.as_str())
-    );
 }
 
 #[test]

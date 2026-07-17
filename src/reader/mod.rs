@@ -1,6 +1,5 @@
 use std::io::Read;
 use std::io::Seek;
-use std::ops::Deref;
 use std::ops::Range;
 
 use crate::allocation;
@@ -85,55 +84,6 @@ impl Hdu {
         }
         Ok(())
     }
-}
-
-/// Unified HDU selection: a zero-based file index or a case-insensitive extension
-/// name with an optional `EXTVER`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HduSelector {
-    Index(usize),
-    Name { name: String, version: Option<i64> },
-}
-
-impl From<usize> for HduSelector {
-    fn from(index: usize) -> HduSelector {
-        HduSelector::Index(index)
-    }
-}
-
-impl From<&str> for HduSelector {
-    fn from(name: &str) -> HduSelector {
-        HduSelector::Name {
-            name: name.to_string(),
-            version: None,
-        }
-    }
-}
-
-impl From<String> for HduSelector {
-    fn from(name: String) -> HduSelector {
-        HduSelector::Name {
-            name,
-            version: None,
-        }
-    }
-}
-
-impl From<(&str, i64)> for HduSelector {
-    fn from((name, version): (&str, i64)) -> HduSelector {
-        HduSelector::Name {
-            name: name.to_string(),
-            version: Some(version),
-        }
-    }
-}
-
-/// Reader-bound operations for one selected HDU. The handle stores the index
-/// explicitly and never mutates a hidden current-HDU cursor.
-#[derive(Debug)]
-pub struct HduHandle<'a, S> {
-    reader: &'a mut FitsReader<S>,
-    pub index: usize,
 }
 
 /// Zero-based or case-insensitive named table-column selection.
@@ -390,27 +340,6 @@ impl<S: Source> FitsReader<S> {
             }
         }
         Ok(None)
-    }
-
-    fn resolve_selector(&self, selector: HduSelector) -> Result<usize> {
-        match selector {
-            HduSelector::Index(index) => {
-                self.checked_hdu(index)?;
-                Ok(index)
-            }
-            HduSelector::Name { name, version } => self
-                .hdu_index(&name, version)?
-                .ok_or(FitsError::HduNotFound { name, version }),
-        }
-    }
-
-    /// Bind one HDU selected by zero-based index, name, or `(name, EXTVER)`.
-    pub fn hdu(&mut self, selector: impl Into<HduSelector>) -> Result<HduHandle<'_, S>> {
-        let index = self.resolve_selector(selector.into())?;
-        Ok(HduHandle {
-            reader: self,
-            index,
-        })
     }
 
     /// The indices of every HDU [`FitsReader::read_image`] can read as an image: image
@@ -1045,93 +974,6 @@ impl<S: Source> FitsReader<S> {
             };
         }
         Ok(report)
-    }
-}
-
-impl<S: Source> HduHandle<'_, S> {
-    pub fn read_raw(&mut self) -> Result<DataUnit> {
-        self.reader.read_data_raw(self.index)
-    }
-
-    pub fn read_image(&mut self) -> Result<ReadImage<'_>> {
-        self.reader.read_image(self.index)
-    }
-
-    pub fn read_image_view<'a>(
-        &'a mut self,
-        scratch: &'a mut Vec<u64>,
-    ) -> Result<BorrowedImage<'a>> {
-        self.reader.read_image_view(self.index, scratch)
-    }
-
-    pub fn read_image_section(&mut self, ranges: &[Range<usize>]) -> Result<Image> {
-        self.reader.read_image_section(self.index, ranges)
-    }
-
-    pub fn read_image_section_view<'a>(
-        &'a mut self,
-        ranges: &[Range<usize>],
-        scratch: &'a mut Vec<u64>,
-    ) -> Result<BorrowedImage<'a>> {
-        self.reader
-            .read_image_section_view(self.index, ranges, scratch)
-    }
-
-    pub fn read_table(&mut self) -> Result<BinTable> {
-        self.reader.read_table(self.index)
-    }
-
-    pub fn table_schema(&self) -> Result<TableSchema> {
-        self.reader.table_schema(self.index)
-    }
-
-    pub fn read_table_rows(&mut self, rows: Range<usize>) -> Result<BinTable> {
-        self.reader.read_table_rows(self.index, rows)
-    }
-
-    pub fn read_table_columns(
-        &mut self,
-        rows: Range<usize>,
-        columns: &[ColumnSelector],
-    ) -> Result<TableSelection> {
-        self.reader.read_table_columns(self.index, rows, columns)
-    }
-
-    pub fn read_table_cell(
-        &mut self,
-        row: usize,
-        column: impl Into<ColumnSelector>,
-    ) -> Result<ColumnData> {
-        self.reader.read_table_cell(self.index, row, column.into())
-    }
-
-    pub fn read_ascii_table(&mut self) -> Result<AsciiTable> {
-        self.reader.read_ascii_table(self.index)
-    }
-
-    pub fn read_groups(&mut self) -> Result<RandomGroups> {
-        self.reader.read_groups(self.index)
-    }
-
-    pub fn read_wcs(&mut self, alt: Option<char>) -> Result<Wcs> {
-        self.reader.read_wcs(self.index, alt)
-    }
-
-    #[cfg(feature = "compression")]
-    pub fn read_compressed_table(&mut self) -> Result<BinTable> {
-        self.reader.read_compressed_table(self.index)
-    }
-
-    pub fn verify_checksum(&mut self) -> Result<ChecksumReport> {
-        self.reader.verify_checksum(self.index)
-    }
-}
-
-impl<S> Deref for HduHandle<'_, S> {
-    type Target = Hdu;
-
-    fn deref(&self) -> &Hdu {
-        &self.reader.hdus[self.index]
     }
 }
 

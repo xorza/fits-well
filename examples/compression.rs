@@ -7,7 +7,8 @@
 
 use std::fs::File;
 
-use fits_well::{Compression, CompressionOptions, FitsReader, FitsWriter, Image, ImageData};
+use fits_well::image::{Compression, CompressionOptions, Image, ImageData};
+use fits_well::{FitsReader, FitsWriter};
 
 fn main() -> fits_well::Result<()> {
     let path = std::env::temp_dir().join("fits_well_compressed.fits");

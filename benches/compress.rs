@@ -19,10 +19,10 @@ use std::io::Cursor;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use fits_well::{
-    BinTable, ColumnData, Compression, CompressionOptions, FitsReader, FitsWriter, Header, Image,
-    ImageData, Scaling, TableBuilder, WriteColumn,
-};
+use fits_well::header::Header;
+use fits_well::image::{Compression, CompressionOptions, Image, ImageData, Scaling};
+use fits_well::table::{BinTable, ColumnData, TableBuilder, WriteColumn};
+use fits_well::{FitsReader, FitsWriter};
 
 /// Image-compression options pinned to the bench tile shape.
 fn opts() -> CompressionOptions {

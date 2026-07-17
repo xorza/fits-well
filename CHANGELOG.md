@@ -7,6 +7,19 @@
 - Public types are organized under `image`, `table`, `header`, `wcs`, `time`, and
   `io`; only common entry points remain re-exported at the crate root. Sealed
   source wrappers moved from the root to `io`.
+- Reader data operations now use HDU indices exclusively. Resolve `EXTNAME` and
+  optional `EXTVER` once with `FitsReader::hdu_index`; `HduSelector`,
+  `HduHandle`, and `FitsReader::hdu` were removed.
+- The `ndarray` feature and its mirrored image model were removed. Core image
+  vectors and shape metadata remain sufficient for downstream adapter crates.
+- The time layer preserves standard aliases, realization suffixes, and arbitrary
+  local `TIMESYS` names without performing inter-scale chronometry.
+  `TimeScale::convert`, `convert_dut1`, the embedded leap table,
+  `Datetime::from_jd`, `FitsTime::gti_intervals`, and `PhaseAxis::fold` were
+  removed. UTC leap-second labels that need external history return
+  `ExternalTimeDataRequired`.
+- `Column::tdisp` now retains the raw optional `TDISPn` string. A malformed
+  display recommendation no longer prevents table decoding.
 - `FitsWriter::write_table` and `write_ascii_table` now accept validated
   `TableBuilder` / `AsciiTableBuilder` values instead of a separate row count and
   column slice. The matching `*_with_header` methods use the same builders.
@@ -18,10 +31,10 @@
   `ImageView` with shape and scaling metadata. `RawImage` was renamed to
   `ReadImage`, and the owned result formerly called `UnsignedView` is now
   `UnsignedData`.
-- Header authoring uses the primary fallible verbs `set`, `set_hierarch`,
-  `comment`, `push_comment`, and `push_history`. Ordered duplicate/insert/remove
-  operations were added, and `set` automatically selects HIERARCH syntax for
-  long or compound names.
+- Header authoring uses the primary fallible verbs `set`, `comment`,
+  `push_comment`, and `push_history`. Ordered duplicate/insert/remove operations
+  were added. Authored keywords must use the standard eight-character grammar;
+  non-standard `HIERARCH` input is preserved only as opaque commentary.
 - `FitsError` and the open-ended `HduKind`/`TableColumnData` metadata enums are
   non-exhaustive.
 - `ChecksumReport` now exposes `datasum` and `checksum` as `ChecksumStatus`
@@ -34,8 +47,7 @@
   `Image::stored`. The unsigned/signed-byte constructors now return `Result`.
   `ReadImage` likewise exposes immutable `ImageMetadata`, and `ReadImage::bitpix`
   derives the stored type from its backing representation instead of exposing a
-  separately mutable tag. `ImageData::into_ndarray` now returns `Result` when a
-  caller-supplied shape has the wrong element count.
+  separately mutable tag.
 - `FitsWriter::write_header` and `write_data_unit` were replaced by the atomic
   `write_raw_hdu`, which validates the header-implied data size and derives the
   correct block fill. A sink error now permanently fails the writer; subsequent
@@ -66,30 +78,22 @@
   and ASCII tables use nullable `AsciiColumnData` cells so `TNULLn` remains distinct
   from genuine values. `ColumnData::Text` was removed, and `ColumnType::Text` was
   renamed to `ColumnType::Character`.
-- `ReadImage::decode` now consumes `self`, allowing already-owned decompressed samples
-  to move out without cloning. With `ndarray`, `ReadImage::to_ndarray(&self)` was
-  replaced by the consuming `ReadImage::into_ndarray(self)`.
-- `FitsTime::gti_intervals` now returns `Result<Vec<GtiInterval>>` and rejects
-  mismatched start/stop column lengths instead of silently truncating through `zip`.
+- `ReadImage::decode` now consumes `self`, allowing already-owned decompressed
+  samples to move out without cloning.
 - `FitsTime::unit_seconds` and `relative_to_mjd` now return `Result`; malformed or
   non-time units no longer silently behave as seconds. `time_axis_mjd` now accepts
   a parsed `Wcs` plus the full pixel vector and returns `TimeCoordinate`, including
   the axis-effective time scale.
 - `FitsTime::trefpos` is now a resolved `TimeReferencePosition` instead of an
   optional string. `Header::phase_axis` accepts an alternate-WCS selector,
-  `PhaseAxis::period` is optional when no constant period exists, and
-  `PhaseAxis::fold` returns `Result` instead of silently returning phase zero.
+  and `PhaseAxis::period` is optional when no constant period exists.
 - `EpochTime` was consolidated into `TimeCoordinate`; `Header::epoch` now returns
   the shared coordinate type used by both epoch keywords and WCS time axes.
-- `Datetime::to_jd`, `to_mjd`, and `from_jd` now require a `TimeScale` and return
-  `Result`; `from_jd` rejects non-finite values and dates outside the representable
-  FITS year range. UTC values use a leap-second-preserving quasi-JD, and invalid
-  scale/date combinations are rejected.
+- `Datetime::to_jd` and `to_mjd` require a declared `TimeScale` and return
+  `Result`; invalid scale/date combinations are rejected.
 - `TimeScale::parse` was replaced by the standard fallible `FromStr`
-  implementation, and `convert`/`convert_dut1` now return `Result`. Unknown labels
-  are rejected, only literal `LOCAL` selects the local scale, and conversions
-  between local and defined scales are errors. Non-finite or
-  calendar-unrepresentable Julian Dates are rejected.
+  implementation. Recognized aliases retain typed scale kinds, parenthesized
+  realizations are preserved, and other nonempty labels remain local scale names.
 - Mutable WCS source fields (`naxis`, `ctype`, `crval`, `crpix`, and
   `unsupported_axes`) are now private so they cannot invalidate derived transforms.
   Read them through the immutable metadata returned by `Wcs::view`.
@@ -106,13 +110,11 @@
   `UnsupportedWcsTransform`, `WcsProjectionDomain`, `WcsCoordinateDomain`, `WcsNoConvergence`,
   `PlioValueOutOfRange`, `TableMetadataMismatch`, `GroupIndexOutOfBounds`,
   `CoordinateCountMismatch`, `WcsAxisIndexOutOfBounds`, `OneBasedIndexRequired`,
-  `WriterFailed`, selector/range, table-builder, and display-format variants were
-  added.
+  `WriterFailed`, selector/range, table-builder, and external-time-data variants
+  were added.
 
 ### Added
 
-- Added `HduSelector` and reader-bound `HduHandle` operations for zero-based or
-  case-insensitive `EXTNAME`/`EXTVER` selection.
 - Added checked N-dimensional image section reads. Plain sections coalesce
   contiguous source reads; compressed sections read and decompress only
   intersecting tiles.
@@ -128,8 +130,6 @@
   configuration.
 - Added public WCS axis units and resolved celestial axis/projection/pole
   metadata.
-- Added fallible `Header::set_hierarch` authoring and update support for ESO
-  HIERARCH compound keywords.
 - Added `FitsInteger`, an exact FITS integer value with an allocation-free `i64`
   representation and a decimal fallback for the standard's unbounded range.
 - Added `CharacterField`, which preserves every stored byte of a binary-table `A`
@@ -284,11 +284,10 @@
   of clamping them or returning an unconverged estimate.
 - PLIO compression rejects values outside its lossless `0..=0xFF_FFFF` mask domain
   instead of silently clamping negative samples or truncating large ones.
-- UTC/JD and UTC↔TAI/TT/UT1 conversion preserve leap-second instants with UTC
-  quasi-JD day fractions and validate `second=60` against the actual insertion
-  minute. FITS ISO-8601 parsing accepts only unsigned four-digit or signed
-  five-digit years, including the standard's full signed range and JD origin.
-  Signed Gregorian years use floor division, and GTI endpoints must have equal lengths.
+- FITS ISO-8601 parsing accepts only unsigned four-digit or signed five-digit
+  years, including the standard's full signed range and JD origin. Signed
+  Gregorian years use floor division. Leap-second labels are accepted only in
+  the final UTC minute and require external time data before JD conversion.
 
 ### Performance and memory
 

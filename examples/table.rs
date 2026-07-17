@@ -6,7 +6,8 @@
 
 use std::fs::File;
 
-use fits_well::{ColumnData, FitsReader, FitsWriter, TableBuilder, WriteColumn};
+use fits_well::table::{ColumnData, TableBuilder, WriteColumn};
+use fits_well::{FitsReader, FitsWriter};
 
 fn main() -> fits_well::Result<()> {
     let path = std::env::temp_dir().join("fits_well_table.fits");

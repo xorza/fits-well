@@ -344,43 +344,17 @@ fn decodes_variable_length_arrays_from_the_heap() {
 }
 
 #[test]
-fn parses_tdisp_display_formats() {
-    use TDispKind::*;
-    let d = |kind, width, decimals, exponent| TDisp {
-        kind,
-        width,
-        decimals,
-        exponent,
-    };
-    let cases = [
-        ("I5", d(Integer, 5, None, None)),
-        ("F8.2", d(Float, 8, Some(2), None)),
-        ("E12.5E3", d(Exponential, 12, Some(5), Some(3))),
-        ("ES15.6", d(Scientific, 15, Some(6), None)),
-        ("EN10.3", d(Engineering, 10, Some(3), None)),
-        ("A20", d(Char, 20, None, None)),
-        ("Z8", d(Hex, 8, None, None)),
-    ];
-    for (s, want) in cases {
-        assert_eq!(TDisp::parse(s).unwrap(), want, "{s}");
-    }
-    for malformed in ["Q5", "F", "I5junk", "E12.5E3junk"] {
-        assert!(matches!(
-            TDisp::parse(malformed),
-            Err(FitsError::InvalidTdisp { tdisp }) if tdisp == malformed
-        ));
-    }
-    // The column reads TDISPn into a parsed TDisp.
+fn preserves_tdisp_without_making_it_part_of_data_decoding() {
     let mut header = table_header(4, 1, &["1J"]);
-    header.set_internal("TDISP1", "I5");
-    let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
-    assert_eq!(table.columns[0].tdisp, Some(d(Integer, 5, None, None)));
-
-    header.set_internal("TDISP1", "Q5");
-    assert!(matches!(
-        BinTable::from_data(&header, vec![0u8; 4]),
-        Err(FitsError::InvalidTdisp { tdisp }) if tdisp == "Q5"
-    ));
+    for display in ["I5", "Q5", "E12.5E3junk"] {
+        header.set_internal("TDISP1", display);
+        let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
+        assert_eq!(table.columns[0].tdisp.as_deref(), Some(display));
+        assert_eq!(
+            table.column_by_idx(0).unwrap().raw().unwrap(),
+            ColumnData::I32(vec![0])
+        );
+    }
 }
 
 #[test]

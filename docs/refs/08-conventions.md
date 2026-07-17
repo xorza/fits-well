@@ -155,9 +155,8 @@ HIERARCH ESO DET CHIP1 NAME = 'CCD-44' / detector chip name
   a record, so it vectorizes. Offer `verify()` (sum HDU → expect `0xFFFFFFFF`)
   and `update()` (DATASUM first, then CHECKSUM, as the final write step). The
   fixed column placement of `CHECKSUM` must be exact.
-- **HIERARCH**: detect `HIERARCH ` in bytes 1–8 and branch to a dedicated parser;
-  expose its space-joined effective key through the ordered header model.
-  `Header::set_hierarch` provides fallible always-on authoring and update
-  support. It remains a registered convention rather than part of the Standard.
+- **HIERARCH**: retain a record as opaque no-value commentary under the literal
+  `HIERARCH` keyword. The core neither interprets its compound namespace nor
+  authors the convention because it is not part of the Standard.
 - See the full **Registry of FITS Conventions** for these and others (Green Bank,
   column-oriented, inheritance): <https://fits.gsfc.nasa.gov/fits_registry.html>.

@@ -239,49 +239,19 @@ fn builder_sets_replaces_and_indexes_keywords() {
 }
 
 #[test]
-fn builder_authors_updates_and_round_trips_hierarch_keywords() {
+fn builder_rejects_nonstandard_keyword_names_without_mutating() {
     let mut header = Header::new();
-    header
-        .set_hierarch("ESO DET CHIP1 NAME", "CCD-44")
-        .unwrap()
-        .comment("ESO DET CHIP1 NAME", "detector chip")
-        .unwrap()
-        .set_hierarch("ESO DET CHIP1 GAIN MODE", 1)
-        .unwrap();
-
-    assert_eq!(
-        header.get_text("ESO DET CHIP1 NAME").unwrap(),
-        Some("CCD-44")
-    );
-    assert_eq!(
-        header.get_integer("ESO DET CHIP1 GAIN MODE").unwrap(),
-        Some(1)
-    );
-    assert_eq!(header.cards.len(), 2);
-    assert!(
-        header
-            .cards
-            .iter()
-            .all(|card| card.kind == CardKind::Hierarch)
-    );
-
-    header.set_hierarch("ESO DET CHIP1 NAME", "CCD-45").unwrap();
-    assert_eq!(
-        header.get_text("ESO DET CHIP1 NAME").unwrap(),
-        Some("CCD-45")
-    );
-    assert_eq!(header.cards[0].comment.as_deref(), Some("detector chip"));
-    assert_eq!(header.cards.len(), 2);
-
-    let mut bytes = Vec::new();
-    render_header(&header, &mut bytes).unwrap();
-    assert!(
-        std::str::from_utf8(&bytes[..CARD_SIZE])
-            .unwrap()
-            .starts_with("HIERARCH ESO DET CHIP1 NAME = 'CCD-45  ' / detector chip")
-    );
-    let reparsed = Header::parse(&bytes).unwrap();
-    assert_eq!(reparsed.cards, header.cards);
+    for keyword in ["TOO-LONG9", "ESO DET"] {
+        assert!(matches!(
+            header.set(keyword, 1),
+            Err(FitsError::InvalidKeyword { name }) if name == keyword
+        ));
+        assert!(matches!(
+            header.insert(0, keyword, 1),
+            Err(FitsError::InvalidKeyword { name }) if name == keyword
+        ));
+    }
+    assert!(header.cards.is_empty());
 }
 
 #[test]
@@ -305,20 +275,17 @@ fn ordered_header_edits_preserve_duplicates_and_rebuild_lookup() {
     header.append("OBJECT", "second").unwrap();
     header.insert(1, "EXPTIME", 30.0).unwrap();
     header
-        .set("ESO DET CHIP1 NAME", "CCD-1")
+        .set("INSTRUME", "CCD-1")
         .unwrap()
         .push_blank("")
         .unwrap();
 
     assert_eq!(header.get_text("OBJECT").unwrap(), Some("first"));
     assert_eq!(header.get_real("EXPTIME").unwrap(), Some(30.0));
-    assert_eq!(
-        header.get_text("ESO DET CHIP1 NAME").unwrap(),
-        Some("CCD-1")
-    );
+    assert_eq!(header.get_text("INSTRUME").unwrap(), Some("CCD-1"));
     assert_eq!(
         header.iter().map(|entry| entry.keyword).collect::<Vec<_>>(),
-        ["OBJECT", "EXPTIME", "OBJECT", "ESO DET CHIP1 NAME", ""]
+        ["OBJECT", "EXPTIME", "OBJECT", "INSTRUME", ""]
     );
 
     let removed = header.remove("OBJECT").unwrap();
@@ -385,17 +352,15 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
     ));
     assert!(header.cards.is_empty());
 
-    for keyword in ["", " ESO DET", "ESO DET ", "ESO=DET"] {
+    for keyword in ["", " ESO DET", "ESO DET ", "ESO=DET", "LONGER123"] {
         assert!(matches!(
-            header.set_hierarch(keyword, 1),
+            header.set(keyword, 1),
             Err(FitsError::InvalidKeyword { name }) if name == keyword
         ));
     }
     assert!(matches!(
-        header.set_hierarch("ESO\nDET", 1),
-        Err(FitsError::InvalidAscii {
-            context: "HIERARCH keyword"
-        })
+        header.set("ESO\nDET", 1),
+        Err(FitsError::InvalidKeyword { name }) if name == "ESO\nDET"
     ));
     assert!(header.cards.is_empty());
 

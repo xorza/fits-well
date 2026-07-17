@@ -32,14 +32,15 @@ The default build pulls in tiled compression (`flate2`) and tile parallelism
 ### Inspect a file
 
 `open` scans every HDU boundary from the headers alone — no pixel data is read.
-Use `hdu(index)`, `hdu("EXTNAME")`, or `hdu(("EXTNAME", extver))` to bind
-subsequent operations to one HDU without mutable-current-HDU state.
+Use `hdus()` to inspect metadata. Data operations take an HDU index directly;
+`hdu_index("EXTNAME", extver)` resolves named extensions without changing reader
+state.
 
 ```rust,no_run
 use std::fs::File;
 use fits_well::FitsReader;
 
-let mut reader = FitsReader::open(File::open("image.fits")?)?;
+let reader = FitsReader::open(File::open("image.fits")?)?;
 println!("{} HDU(s)", reader.hdus().len());
 
 for (i, hdu) in reader.hdus().iter().enumerate() {
@@ -50,7 +51,7 @@ for (i, hdu) in reader.hdus().iter().enumerate() {
     }
 }
 
-let primary = reader.hdu(0usize)?;
+let primary = &reader.hdus()[0];
 println!("primary kind: {:?}", primary.kind);
 # Ok::<(), fits_well::FitsError>(())
 ```
@@ -61,7 +62,8 @@ println!("primary kind: {:?}", primary.kind);
 
 ```rust,no_run
 use std::fs::File;
-use fits_well::{FitsReader, FitsWriter, Image, ImageData};
+use fits_well::image::{Image, ImageData};
+use fits_well::{FitsReader, FitsWriter};
 
 let image = Image::new(
     vec![4, 3],
@@ -76,8 +78,8 @@ let mut reader = FitsReader::open(File::open("out.fits")?)?;
 // `image_indices` lists the image-bearing HDUs, so you pick one rather than
 // hard-coding it. `read_image` borrows a slice/mmap source in place, or a
 // seekable source's reused staging buffer.
-let mut hdu = reader.hdu(reader.image_indices()[0])?;
-let raw = hdu.read_image()?;
+let image_index = reader.image_indices()[0];
+let raw = reader.read_image(image_index)?;
 // `bitpix` is the stored width; `sample_type()` is the *effective* type, resolving
 // the unsigned / signed-byte BZERO conventions (cfitsio's "equivalent type").
 println!("shape {:?}, {:?}", raw.metadata().shape, raw.sample_type());
@@ -101,7 +103,10 @@ only intersecting tiles:
 # use std::fs::File;
 # use fits_well::FitsReader;
 # let mut reader = FitsReader::open(File::open("cube.fits")?)?;
-let cutout = reader.hdu("SCI")?.read_image_section(&[10..110, 20..120, 4..5])?;
+let sci = reader
+    .hdu_index("SCI", None)?
+    .expect("SCI extension");
+let cutout = reader.read_image_section(sci, &[10..110, 20..120, 4..5])?;
 println!("cutout shape: {:?}", cutout.metadata().shape);
 # Ok::<(), fits_well::FitsError>(())
 ```
@@ -120,7 +125,8 @@ call — it detects `ZIMAGE` and decompresses transparently. To write one:
 # #[cfg(feature = "compression")]
 # {
 # use std::fs::File;
-# use fits_well::{Compression, CompressionOptions, FitsWriter, Image};
+# use fits_well::image::{Compression, CompressionOptions, Image};
+# use fits_well::FitsWriter;
 # let image = Image::new(vec![16, 16], vec![0i16; 256])?;
 let options = CompressionOptions::tiled([8, 8]); // 8×8 tiles
 let mut writer = FitsWriter::new(File::create("compressed.fits")?);
@@ -136,7 +142,8 @@ Address a column by index or by its `TTYPEn` name; the handle decodes on demand.
 
 ```rust,no_run
 use std::fs::File;
-use fits_well::{ColumnData, FitsReader, FitsWriter, TableBuilder, WriteColumn};
+use fits_well::table::{ColumnData, TableBuilder, WriteColumn};
+use fits_well::{FitsReader, FitsWriter};
 
 let table = TableBuilder::new()
     .column(WriteColumn::scalar("ID", ColumnData::I32(vec![1, 2, 3])))?
@@ -202,19 +209,19 @@ Both complete transforms return an error for coordinates outside the projection'
 domain, failed iterative inversion, or a nonlinear algorithm this crate does not
 yet implement.
 
-The typed **time** layer (`Header::time`, `time::Datetime`, `time::TimeScale`) handles strict
-FITS ISO-8601/JD/MJD (including signed years and UTC leap seconds), FITS time
-units, epochs, resolved `TREFPOS`/`TRPOSn`, all image/table PHASE keyword forms,
-`UTC`…`TCB`/`GPS`/UT1 scale conversions, and PC/CD-coupled time axes through the
-parsed WCS model. Datetime-to-JD conversion takes an explicit `TimeScale`; UTC
-uses a leap-second-preserving quasi-JD.
+The typed **time** layer (`Header::time`, `time::Datetime`, `time::TimeScale`)
+handles strict FITS ISO-8601/JD/MJD, FITS time units, epochs, resolved
+`TREFPOS`/`TRPOSn`, all image/table PHASE keyword forms, and PC/CD-coupled time
+axes through the parsed WCS model. It preserves recognized scale realizations
+and arbitrary local scale names. Inter-scale chronometry needs external leap
+tables or ephemerides and deliberately remains outside this format library.
 
 ## API organization and large-file behavior
 
-The common entry points remain at the crate root. Detailed types are grouped
-under `image`, `table`, `header`, `wcs`, `time`, and `io`. `bitvec` and
-`num_complex` are re-exported intentionally so callers can name returned bit
-slices and complex values without dependency-version skew.
+`FitsReader`, `FitsWriter`, `FitsError`, and `Result` are at the crate root.
+Detailed types have one canonical home under `image`, `table`, `header`, `wcs`,
+`time`, or `io`. The `table` module exposes the concrete bit-vector and complex
+types used by its public signatures.
 
 Whole-HDU writer methods are transactional: they preflight and stage one data
 unit in the writer scratch before touching the sink, so peak memory is
@@ -234,11 +241,11 @@ editing is deliberately out of scope.
 | --- | --- |
 | Normative FITS 4.0 §§3–9 | Complete typed core: HDUs, images, ASCII/binary tables including P/Q, random groups read, WCS, and time |
 | Normative tiled compression §10 | Image and fixed-width table read/write; five image codecs; default `compression` feature |
-| Registered conventions | `CONTINUE`, `HIERARCH`, `CHECKSUM`/`DATASUM`; convention-only `XPH` is readable but not transformed |
+| Registered conventions | `CONTINUE` and `CHECKSUM`/`DATASUM`; `HIERARCH` is preserved as opaque commentary; convention-only `XPH` is readable but not transformed |
 | Partial I/O | N-D image sections including compressed-tile selection; binary-table schema, cells, columns, rows, and ranges |
 | Streaming I/O | Lazy reader; scratch-reusing image views; incremental seekable image writer |
 | In-place editing | Out of scope |
-| Ecosystem interop | Optional `mmap` and `ndarray`; declared frame metadata is exposed, but inter-frame astrometry is out of scope |
+| Ecosystem interop | Optional `mmap`; typed vectors and shape metadata support downstream array adapters without coupling the core to an array crate |
 
 ## Examples
 
@@ -249,9 +256,8 @@ cargo run --example image            # write + read an image
 cargo run --example table            # binary-table columns
 cargo run --example inspect -- f.fits  # describe a file's HDUs and headers
 cargo run --example wcs              # pixel ↔ sky coordinates
-cargo run --example time             # observation times and scale conversions
+cargo run --example time             # observation time metadata
 cargo run --example compression      # tile-compressed image round-trip
-cargo run --example ndarray --features ndarray   # read an image as an n-D array
 ```
 
 ## Feature flags
@@ -261,8 +267,6 @@ cargo run --example ndarray --features ndarray   # read an image as an n-D array
 | `compression` | ✅ | Tiled image + table (de)compression — `GZIP_1/2`, `RICE_1`, `PLIO_1`, `HCOMPRESS_1` (pulls in `flate2`). |
 | `parallel` | ✅ | Tile-parallel (de)compression across a rayon pool (implies `compression`). |
 | `mmap` | — | `FitsReader::open_mmap` — zero-copy reads straight off memory-mapped pages (`memmap2`). |
-| `ndarray` | — | `ReadImage`/`Image` → typed `ImageArray` or a physical `ArrayD<f64>` in FITS axis order. |
-
 `--no-default-features` gives the pure-Rust core (block / header / HDU / reader /
 writer / WCS / time); its only unconditional dependencies are `bitvec` (packed
 `X` bit-array columns) and `num-complex` (`C`/`M` complex columns). WCS (§8) and
