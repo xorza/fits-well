@@ -18,7 +18,7 @@ For every batch:
 ## Batch 2 — Critical: make partial WCS transforms impossible to mistake for complete results
 
 - [x] **Classify nonlinear suffixes independently of the coordinate prefix.** Detect generic `LOG` and `TAB` axes such as `TIME-TAB`, not only the ten hard-coded spectral type names (`src/wcs/mod.rs:1334-1359`; standard `docs/refs/fits_standard40.md:3779-3801`). Verify celestial, spectral, time, and generic linear axes independently.
-- [x] **Reject incomplete transforms.** `pixel_to_world`/`world_to_pixel` now return `UnsupportedWcsTransform` whenever any nonlinear stage is unavailable. HPX, QSC, `FREQ-LOG`, and `TIME-TAB` cannot return unqualified complete coordinates; the linear stage remains an implementation detail until a concrete production caller needs it.
+- [x] **Reject incomplete transforms.** `pixel_to_world`/`world_to_pixel` now return `UnsupportedWcsTransform` whenever any nonlinear stage is unavailable. XPH, `FREQ-LOG`, and `TIME-TAB` cannot return unqualified complete coordinates; the linear stage remains an implementation detail until a concrete production caller needs it.
 
 ## Batch 3 — Critical: preserve exact FITS integer header values
 
@@ -69,8 +69,8 @@ For every batch:
 
 ## Batch 12 — High: add standard cube and HEALPix projections
 
-- [ ] **Implement `TSC`, `CSC`, and `QSC`.** Add forward/inverse transforms with exact face selection, boundary handling, and projection-domain errors (`src/wcs/mod.rs:126-150`; standard `docs/refs/fits_standard40.md:3551-3593`). Cross-check face centers, edges, corners, and round-trips against wcslib.
-- [ ] **Implement standard `HPX`.** Support the normative HEALPix projection parameters and polar/equatorial facet transitions (`src/wcs/mod.rs:126-150`; standard `docs/refs/fits_standard40.md:3594-3598`). Keep convention-only XPH separate and verify HPX against wcslib/astropy.
+- [x] **Implement `TSC`, `CSC`, and `QSC`.** Shared cube-face selection handles the complete cross layout, negative-face wrapping, exact edges/corners, and projection-domain failures. Forward/inverse face centers, boundaries, interiors, and CSC's documented approximate closure match wcslib 8.5 (`src/wcs/cube.rs`; standard `docs/refs/fits_standard40.md:3551-3593`).
+- [x] **Implement standard `HPX`.** `H = PVi_1` and `K = PVi_2` use the normative 4/3 defaults, equatorial/polar transition, facet-gap validation, and even-`K` southern half-facet offset. Default, transition, pole, non-default 3/4, and round-trip values match wcslib 8.5; convention-only XPH remains separate (`src/wcs/healpix.rs`; standard `docs/refs/fits_standard40.md:3594-3598`).
 
 ## Batch 13 — High: add analytic nonlinear spectral coordinates
 

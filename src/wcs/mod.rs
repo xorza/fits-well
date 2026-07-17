@@ -15,9 +15,10 @@
 //! the general fiducial-point pole computation: zenithal `TAN`/`SIN`/`ARC`/`STG`/
 //! `ZEA`/`ZPN`/`AIR`, zenithal-perspective `AZP`/`SZP`, cylindrical `CAR`/`CEA`/
 //! `MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic `COP`/`COE`/`COD`/`COO`,
-//! pseudoconic `BON`, and polyconic `PCO`. All validated against `astropy.wcs`
-//! (wcslib). The unimplemented non-linear transforms — quad-cube `TSC`/`CSC`/`QSC`,
-//! HEALPix `HPX`/`XPH`, and the non-linear coordinate algorithms (§8.4), including
+//! pseudoconic `BON`, polyconic `PCO`, quad-cube `TSC`/`CSC`/`QSC`, and HEALPix
+//! `HPX`. All validated against `astropy.wcs` (wcslib). The unimplemented
+//! non-linear transforms — convention-only `XPH` and the non-linear coordinate
+//! algorithms (§8.4), including
 //! generic `LOG`/`TAB` axes — are not evaluated. Parsing remains permissive and
 //! records them in [`WcsView::unsupported_axes`]; complete transforms then return
 //! [`FitsError::UnsupportedWcsTransform`](crate::FitsError::UnsupportedWcsTransform).
@@ -41,6 +42,9 @@ use crate::error::Result;
 use crate::header::Header;
 use crate::keyword::KeyBuf;
 use crate::keyword::key;
+
+mod cube;
+mod healpix;
 
 const R2D: f64 = 180.0 / PI;
 const D2R: f64 = PI / 180.0;
@@ -103,6 +107,14 @@ pub enum Projection {
     Pco,
     /// `SZP` — slant zenithal perspective (`μ = PVi_1`, `φc = PVi_2`, `θc = PVi_3`).
     Szp,
+    /// `TSC` — tangential spherical cube.
+    Tsc,
+    /// `CSC` — COBE quadrilateralized spherical cube.
+    Csc,
+    /// `QSC` — quadrilateralized spherical cube.
+    Qsc,
+    /// `HPX` — HEALPix (`H = PVi_1`, `K = PVi_2`).
+    Hpx,
 }
 
 /// The projection family — it fixes the fiducial point and selects the deprojection
@@ -147,6 +159,10 @@ const PROJECTIONS: &[(&str, Projection, Family)] = &[
     ("PAR", Projection::Par, Family::Other),
     ("BON", Projection::Bon, Family::Other),
     ("PCO", Projection::Pco, Family::Other),
+    ("TSC", Projection::Tsc, Family::Other),
+    ("CSC", Projection::Csc, Family::Other),
+    ("QSC", Projection::Qsc, Family::Other),
+    ("HPX", Projection::Hpx, Family::Other),
 ];
 
 impl Projection {
@@ -184,6 +200,10 @@ impl Projection {
             }
             Projection::Cea => pv[1] = 1.0,
             Projection::Szp => pv[3] = 90.0,
+            Projection::Hpx => {
+                pv[1] = 4.0;
+                pv[2] = 3.0;
+            }
             _ => {}
         }
         pv
@@ -193,6 +213,9 @@ impl Projection {
         let invalid = match self {
             Projection::Cea => pv[1] == 0.0,
             Projection::Cyp => pv[2] == 0.0 || pv[1] + pv[2] == 0.0,
+            Projection::Hpx => {
+                !pv[1].is_finite() || pv[1] <= 0.0 || !pv[2].is_finite() || pv[2] <= 0.0
+            }
             _ => false,
         };
         if invalid {
@@ -323,6 +346,15 @@ impl Projection {
     /// Deproject intermediate world `(x, y)` (deg) to native `(φ, θ)` (deg).
     fn deproject(self, x: f64, y: f64, pv: &[f64; 21]) -> Result<NativeCoordinate> {
         let projection = self;
+        if matches!(
+            projection,
+            Projection::Tsc | Projection::Csc | Projection::Qsc
+        ) {
+            return cube::deproject(projection, x, y);
+        }
+        if matches!(projection, Projection::Hpx) {
+            return healpix::deproject(projection, x, y, pv);
+        }
         if matches!(projection, Projection::Azp) {
             // Tilted zenithal perspective (CG 2002 §5.1.1): undo the γ shear, then
             // solve A·sinθ + B·cosθ = C for θ.
@@ -496,6 +528,15 @@ impl Projection {
         }
         let theta = theta.clamp(-90.0, 90.0);
         let projection = self;
+        if matches!(
+            projection,
+            Projection::Tsc | Projection::Csc | Projection::Qsc
+        ) {
+            return cube::project(projection, phi, theta);
+        }
+        if matches!(projection, Projection::Hpx) {
+            return healpix::project(projection, phi, theta, pv);
+        }
         if matches!(projection, Projection::Azp) {
             let (mu, gr) = (pv[1], pv[2] * D2R);
             let (tr, pr) = (theta * D2R, phi * D2R);
@@ -872,8 +913,8 @@ pub struct Wcs {
     /// celestial pair is present; `None` for an all-linear system.
     celestial: Option<Celestial>,
     /// Axes (0-based) whose non-linear transform is not evaluated — an unsupported
-    /// projection (quad-cube/HEALPix) or another non-linear coordinate algorithm
-    /// (§8.3/§8.4). Complete transforms reject these axes.
+    /// celestial projection or convention, or another non-linear coordinate
+    /// algorithm (§8.3/§8.4). Complete transforms reject these axes.
     unsupported_axes: Vec<usize>,
 }
 
@@ -1676,8 +1717,8 @@ fn projection_code(ctype: &str) -> Option<&str> {
 
 /// Axis indices (0-based) whose non-linear transform this library does not
 /// evaluate: a celestial axis whose projection code is unimplemented
-/// (quad-cube/HEALPix), a spectral axis with an algorithm suffix, or any
-/// four-character coordinate type using the generic `LOG`/`TAB` algorithms (§8.4).
+/// (including convention-only codes), a spectral axis with an algorithm suffix,
+/// or any four-character coordinate type using the generic `LOG`/`TAB` algorithms (§8.4).
 /// Such an axis is taken through the linear stage only (its intermediate world
 /// coordinate). Supported projections and bare coordinate types are not flagged.
 fn nonlinear_unsupported_axes(ctype: &[String]) -> Vec<usize> {

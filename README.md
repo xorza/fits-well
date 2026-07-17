@@ -13,7 +13,7 @@ Two goals shape every decision:
 1. **Fast** — zero-copy where the format allows, lazy seeking HDU access, reused
    scratch buffers, and tile-parallel (de)compression across a rayon pool.
 2. **Whole-standard coverage** — images, ASCII tables, binary tables with a heap
-   and variable-length arrays, random groups (read), a typed WCS layer (23
+   and variable-length arrays, random groups (read), a typed WCS layer (27
    projections), time coordinates, and tiled compression.
 
 ## Install
