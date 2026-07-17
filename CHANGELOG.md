@@ -210,7 +210,6 @@
 - Reject `-TAB` table-axis indices and interpolation dimensionality that would
   trigger oversized allocations, overflowing vertex counts, or infeasible
   per-coordinate work.
-
 - Integer keyword values outside `i64` are preserved exactly instead of being
   reparsed through `f64`, and integral reals outside `i64` now return a range error
   instead of saturating. Unsigned-64 image and binary-table writers emit the exact
@@ -311,8 +310,3 @@
 - Writer padding no longer allocates per data unit, and reusable buffers reserve from
   validated final sizes.
 - ZPN projection values and derivatives are evaluated together with extended Horner.
-
-### Documentation
-
-- README Rust examples are compiled as doctests, and compression module docs were
-  refreshed to describe the implemented codecs and tiled-table support.
