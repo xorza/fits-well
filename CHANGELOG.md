@@ -23,7 +23,14 @@
 - `WriteColumn` is now an invariant-preserving opaque type instead of a collection
   of public, independently mutable fields. `WriteColumn::vla` now requires an
   explicit `ColumnType`, including for empty columns, and `WriteColumn::bits` now
-  accepts packed `Vec<u8>` data directly. `ColumnType` is exported from the crate.
+  accepts packed `Vec<u8>` data directly. `WriteColumn::vla` and
+  `WriteColumn::wide` now return `Result` for mismatched cell types and non-VLA
+  columns instead of panicking. `ColumnType` is exported from the crate.
+- Parsed `BinTable`, `AsciiTable`, `RandomGroups`, and `DataUnit` storage is now
+  private so safe callers cannot desynchronize validated geometry from backing
+  bytes. Read their immutable `*Metadata`/`DataUnitView` values instead.
+- Random-groups physical-value methods now return `Result` and report an
+  out-of-range group consistently with `group_by_idx`.
 - `Header::scaling` now returns `Result<Scaling>` so malformed scaling metadata is
   distinguishable from absent metadata.
 - `Header::get_logical`, `get_integer`, `get_real`, and `get_text` now return
@@ -53,9 +60,15 @@
   `PhaseAxis::fold` returns `Result` instead of silently returning phase zero.
 - `EpochTime` was consolidated into `TimeCoordinate`; `Header::epoch` now returns
   the shared coordinate type used by both epoch keywords and WCS time axes.
-- `Datetime::to_jd` and `to_mjd` now require a `TimeScale` and return `Result`;
-  `Datetime::from_jd` also requires a scale. UTC values use a leap-second-preserving
-  quasi-JD, and invalid scale/date combinations are rejected.
+- `Datetime::to_jd`, `to_mjd`, and `from_jd` now require a `TimeScale` and return
+  `Result`; `from_jd` rejects non-finite values and dates outside the representable
+  FITS year range. UTC values use a leap-second-preserving quasi-JD, and invalid
+  scale/date combinations are rejected.
+- `TimeScale::parse` was replaced by the standard fallible `FromStr`
+  implementation, and `convert`/`convert_dut1` now return `Result`. Unknown labels
+  are rejected, only literal `LOCAL` selects the local scale, and conversions
+  between local and defined scales are errors. Non-finite or
+  calendar-unrepresentable Julian Dates are rejected.
 - Mutable WCS source fields (`naxis`, `ctype`, `crval`, `crpix`, and
   `unsupported_axes`) are now private so they cannot invalidate derived transforms.
   Read them through the immutable metadata returned by `Wcs::view`.
@@ -64,14 +77,16 @@
 - `Wcs::pixel_to_world` and `Wcs::world_to_pixel` now return `Result<Vec<f64>>` so
   projection-domain, iterative-convergence, and unsupported-transform failures
   cannot be ignored. They no longer return linear-stage values as complete world
-  coordinates when a nonlinear algorithm is unavailable.
+  coordinates when a nonlinear algorithm is unavailable, and coordinate-count
+  mismatches return errors instead of panicking.
 - `FitsError::DataUnitTooLarge::bytes` changed from `usize` to `u64`. The
   `TypeMismatch`, `InvalidAscii`, `ReservedKeyword`, `InvalidHeaderValue`,
   `HeaderCardTooLong`, `AsciiFieldTooWide`, `IntegerOutOfRange`,
   `UnsupportedWcsTransform`, `WcsProjectionDomain`, `WcsCoordinateDomain`, `WcsNoConvergence`,
-  `PlioValueOutOfRange`, `TableMetadataMismatch`, `GroupIndexOutOfBounds`, and
-  `WriterFailed` variants were added; exhaustive matches on `FitsError` must handle
-  them.
+  `PlioValueOutOfRange`, `TableMetadataMismatch`, `GroupIndexOutOfBounds`,
+  `CoordinateCountMismatch`, `WcsAxisIndexOutOfBounds`, `OneBasedIndexRequired`,
+  and `WriterFailed` variants were added; exhaustive matches on `FitsError` must
+  handle them.
 
 ### Added
 
@@ -106,6 +121,15 @@
   exact-length `BitVec` per row.
 - Added `RandomGroups::group_by_idx` and `RandomGroupView` for allocation-free,
   exact typed access to each group's stored parameters and array samples.
+- Added `FitsWriter::write_image_with_header`, `write_table_with_header`,
+  `write_ascii_table_with_header`, and `write_compressed_image_with_header`.
+  These typed paths preserve ordered informational cards—including WCS/time,
+  `COMMENT`, and `HISTORY`—while regenerating layout, compression, and checksum
+  cards from the typed payload.
+- Added immutable `BinTableMetadata`, `AsciiTableMetadata`,
+  `RandomGroupsMetadata`, and `DataUnitView` values for inspecting sealed parsed
+  objects. `DataUnit::into_data` and `into_padded` recover meaningful or complete
+  owned bytes without exposing mutable internal ranges.
 
 ### Changed
 

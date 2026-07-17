@@ -59,6 +59,89 @@ fn identity() -> Scaling {
     }
 }
 
+fn informational_header_template() -> Header {
+    let mut header = Header::new();
+    header
+        .set("SIMPLE", false)
+        .set("XTENSION", "TABLE")
+        .set("BITPIX", 64)
+        .set("NAXIS", 3)
+        .set("NAXIS1", 999)
+        .set("NAXIS2", 999)
+        .set("NAXIS3", 999)
+        .set("PCOUNT", 999)
+        .set("GCOUNT", 999)
+        .set("TFIELDS", 999)
+        .set("TFORM1", "99D")
+        .set("TTYPE1", "STALE")
+        .set("TUNIT1", "stale")
+        .set("TDIM1", "(99)")
+        .set("TSCAL1", 99.0)
+        .set("TZERO1", 99.0)
+        .set("TNULL1", 99)
+        .set("TBCOL1", 99)
+        .set("NAXIS01", "preserved lookalike")
+        .set("TFORM01", "preserved lookalike")
+        .set("ZFORM01", "preserved lookalike")
+        .set("BSCALE", 99.0)
+        .set("BZERO", 99.0)
+        .set("BLANK", 99)
+        .set("CHECKSUM", "stale")
+        .set("DATASUM", "999")
+        .set("ZIMAGE", false)
+        .set("ZCMPTYPE", "STALE")
+        .set("ZBITPIX", 64)
+        .set("ZNAXIS", 3)
+        .set("ZNAXIS1", 999)
+        .set("ZTILE1", 999)
+        .set("ZSIMPLE", false)
+        .set("OBJECT", "M42")
+        .set("EXTNAME", "SCI")
+        .set("CTYPE1", "RA---TAN")
+        .set("CUNIT1", "deg")
+        .set("CRPIX1", 1.0)
+        .set("CRVAL1", 83.822)
+        .set("CDELT1", 0.1)
+        .set("TIMESYS", "UTC")
+        .set("MJDREF", 60_000.0)
+        .push_comment("first preserved comment")
+        .push_history("preserved history")
+        .push_comment("second preserved comment");
+    header
+}
+
+fn assert_informational_header(header: &Header) {
+    assert_eq!(header.get_text("OBJECT").unwrap(), Some("M42"));
+    assert_eq!(header.get_text("EXTNAME").unwrap(), Some("SCI"));
+    assert_eq!(header.get_text("CTYPE1").unwrap(), Some("RA---TAN"));
+    assert_eq!(header.get_text("CUNIT1").unwrap(), Some("deg"));
+    assert_eq!(header.get_real("CRPIX1").unwrap(), Some(1.0));
+    assert_eq!(header.get_real("CRVAL1").unwrap(), Some(83.822));
+    assert_eq!(header.get_real("CDELT1").unwrap(), Some(0.1));
+    assert_eq!(header.get_text("TIMESYS").unwrap(), Some("UTC"));
+    assert_eq!(header.get_real("MJDREF").unwrap(), Some(60_000.0));
+    for keyword in ["NAXIS01", "TFORM01", "ZFORM01"] {
+        assert_eq!(
+            header.get_text(keyword).unwrap(),
+            Some("preserved lookalike"),
+            "{keyword}"
+        );
+    }
+    let commentary: Vec<_> = header
+        .iter()
+        .filter(|entry| matches!(entry.keyword, "COMMENT" | "HISTORY"))
+        .map(|entry| (entry.keyword, entry.comment.unwrap_or("")))
+        .collect();
+    assert_eq!(
+        commentary,
+        [
+            ("COMMENT", "first preserved comment"),
+            ("HISTORY", "preserved history"),
+            ("COMMENT", "second preserved comment"),
+        ]
+    );
+}
+
 fn checksum_report_for_keywords(datasum: Option<&str>, checksum: Option<&str>) -> ChecksumReport {
     let mut header = Header::new();
     header.set("SIMPLE", true).set("BITPIX", 8).set("NAXIS", 0);
@@ -181,31 +264,38 @@ fn vla_columns_by_stored_type() -> Vec<TypedWriteColumn> {
                 "PL",
                 ColumnType::Logical,
                 vec![ColumnData::Logical(vec![Some(true)])],
-            ),
+            )
+            .unwrap(),
         },
         TypedWriteColumn {
             stored_type: 'B',
-            column: WriteColumn::vla("PB", ColumnType::Byte, vec![ColumnData::Bytes(vec![1])]),
+            column: WriteColumn::vla("PB", ColumnType::Byte, vec![ColumnData::Bytes(vec![1])])
+                .unwrap(),
         },
         TypedWriteColumn {
             stored_type: 'I',
-            column: WriteColumn::vla("PI", ColumnType::I16, vec![ColumnData::I16(vec![1])]),
+            column: WriteColumn::vla("PI", ColumnType::I16, vec![ColumnData::I16(vec![1])])
+                .unwrap(),
         },
         TypedWriteColumn {
             stored_type: 'J',
-            column: WriteColumn::vla("PJ", ColumnType::I32, vec![ColumnData::I32(vec![1])]),
+            column: WriteColumn::vla("PJ", ColumnType::I32, vec![ColumnData::I32(vec![1])])
+                .unwrap(),
         },
         TypedWriteColumn {
             stored_type: 'K',
-            column: WriteColumn::vla("PK", ColumnType::I64, vec![ColumnData::I64(vec![1])]),
+            column: WriteColumn::vla("PK", ColumnType::I64, vec![ColumnData::I64(vec![1])])
+                .unwrap(),
         },
         TypedWriteColumn {
             stored_type: 'E',
-            column: WriteColumn::vla("PE", ColumnType::F32, vec![ColumnData::F32(vec![1.0])]),
+            column: WriteColumn::vla("PE", ColumnType::F32, vec![ColumnData::F32(vec![1.0])])
+                .unwrap(),
         },
         TypedWriteColumn {
             stored_type: 'D',
-            column: WriteColumn::vla("PD", ColumnType::F64, vec![ColumnData::F64(vec![1.0])]),
+            column: WriteColumn::vla("PD", ColumnType::F64, vec![ColumnData::F64(vec![1.0])])
+                .unwrap(),
         },
         TypedWriteColumn {
             stored_type: 'C',
@@ -213,7 +303,8 @@ fn vla_columns_by_stored_type() -> Vec<TypedWriteColumn> {
                 "PC",
                 ColumnType::ComplexF32,
                 vec![ColumnData::ComplexF32(vec![Complex::new(1.0, 2.0)])],
-            ),
+            )
+            .unwrap(),
         },
         TypedWriteColumn {
             stored_type: 'M',
@@ -221,7 +312,8 @@ fn vla_columns_by_stored_type() -> Vec<TypedWriteColumn> {
                 "PM",
                 ColumnType::ComplexF64,
                 vec![ColumnData::ComplexF64(vec![Complex::new(1.0, 2.0)])],
-            ),
+            )
+            .unwrap(),
         },
         TypedWriteColumn {
             stored_type: 'A',
@@ -229,7 +321,8 @@ fn vla_columns_by_stored_type() -> Vec<TypedWriteColumn> {
                 "PA",
                 ColumnType::Character,
                 vec![ColumnData::Character(vec!["a".into()])],
-            ),
+            )
+            .unwrap(),
         },
         TypedWriteColumn {
             stored_type: 'X',
@@ -373,6 +466,7 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
     for shape in [vec![], vec![0]] {
         let invalid_empty_vla =
             WriteColumn::vla("VEC", ColumnType::I32, vec![ColumnData::I32(vec![])])
+                .unwrap()
                 .with_tdim(shape);
         let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
         assert!(matches!(
@@ -497,6 +591,123 @@ fn writes_a_multi_hdu_image_file() {
 }
 
 #[test]
+fn typed_image_header_template_preserves_information_and_regenerates_structure() {
+    let image = Image {
+        shape: vec![2],
+        samples: ImageData::I16(vec![10, 20]),
+        scaling: identity(),
+    };
+    let template = informational_header_template();
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
+    writer.write_image_with_header(&image, &template).unwrap();
+
+    let bytes = writer.into_inner().into_inner();
+    let mut reader = FitsReader::open(Cursor::new(bytes)).unwrap();
+    let header = &reader.hdus[0].header;
+    assert_informational_header(header);
+    assert_eq!(header.get_logical("SIMPLE").unwrap(), Some(true));
+    assert_eq!(header.get_integer("BITPIX").unwrap(), Some(16));
+    assert_eq!(header.axes().unwrap(), [2]);
+    assert_eq!(header.get("XTENSION"), None);
+    assert_eq!(header.get("TFIELDS"), None);
+    assert_eq!(header.get("ZIMAGE"), None);
+    assert_ne!(header.get_text("CHECKSUM").unwrap(), Some("stale"));
+    assert_ne!(header.get_text("DATASUM").unwrap(), Some("999"));
+    assert_eq!(
+        reader.verify_checksum(0).unwrap(),
+        ChecksumReport {
+            datasum: ChecksumStatus::Valid,
+            checksum: ChecksumStatus::Valid,
+        }
+    );
+    assert_eq!(
+        reader.read_image(0).unwrap().decode(),
+        ImageData::I16(vec![10, 20])
+    );
+}
+
+#[test]
+fn typed_table_header_templates_preserve_information_and_regenerate_structure() {
+    let template = informational_header_template();
+    let binary = [WriteColumn::fixed("VALUE", ColumnData::I32(vec![7, 8]), 1)];
+    let ascii = [AsciiWriteColumn {
+        name: "TEXT".to_string(),
+        unit: Some("label".to_string()),
+        data: AsciiColumnData::Text(vec![Some("A".to_string()), Some("B".to_string())]),
+        width: 3,
+        decimals: 0,
+        tscale: None,
+        tzero: None,
+        tnull: None,
+    }];
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer
+        .write_table_with_header(2, &binary, &template)
+        .unwrap();
+    writer
+        .write_ascii_table_with_header(2, &ascii, &template)
+        .unwrap();
+
+    let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
+    for index in [1, 2] {
+        assert_informational_header(&reader.hdus[index].header);
+        assert_eq!(
+            reader.hdus[index].header.get_integer("NAXIS2").unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            reader.hdus[index].header.get_integer("TFIELDS").unwrap(),
+            Some(1)
+        );
+        assert_eq!(reader.hdus[index].header.get("CHECKSUM"), None);
+        assert_eq!(reader.hdus[index].header.get("DATASUM"), None);
+    }
+    assert_eq!(reader.hdus[1].kind, HduKind::BinTable);
+    assert_eq!(
+        reader.hdus[1].header.get_text("TFORM1").unwrap(),
+        Some("1J")
+    );
+    assert_eq!(
+        reader.hdus[1].header.get_text("TTYPE1").unwrap(),
+        Some("VALUE")
+    );
+    assert_eq!(reader.hdus[1].header.get("TBCOL1"), None);
+    assert_eq!(reader.hdus[2].kind, HduKind::AsciiTable);
+    assert_eq!(
+        reader.hdus[2].header.get_text("TFORM1").unwrap(),
+        Some("A3")
+    );
+    assert_eq!(
+        reader.hdus[2].header.get_text("TTYPE1").unwrap(),
+        Some("TEXT")
+    );
+    assert_eq!(
+        reader.hdus[2].header.get_integer("TBCOL1").unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        reader
+            .read_table(1)
+            .unwrap()
+            .column_by_idx(0)
+            .unwrap()
+            .raw()
+            .unwrap(),
+        ColumnData::I32(vec![7, 8])
+    );
+    assert_eq!(
+        reader
+            .read_ascii_table(2)
+            .unwrap()
+            .column_by_idx(0)
+            .unwrap()
+            .raw()
+            .unwrap(),
+        AsciiColumnData::Text(vec![Some("A  ".to_string()), Some("B  ".to_string())])
+    );
+}
+
+#[test]
 fn writes_and_reads_back_variable_length_arrays() {
     // A fixed column plus a `P` VLA column with rows of differing length.
     let vla_rows = vec![
@@ -506,14 +717,14 @@ fn writes_and_reads_back_variable_length_arrays() {
     ];
     let columns = vec![
         WriteColumn::fixed("ID", ColumnData::I32(vec![1, 2, 3]), 1),
-        WriteColumn::vla("DATA", ColumnType::I32, vla_rows.clone()),
+        WriteColumn::vla("DATA", ColumnType::I32, vla_rows.clone()).unwrap(),
     ];
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     w.write_table(3, &columns).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let table = r.read_table(1).unwrap();
     // TFORM2 should be a P descriptor sized to the longest row (5).
-    assert_eq!(table.columns[1].tform.kind.code(), 'P');
+    assert_eq!(table.metadata().columns[1].tform.kind.code(), 'P');
     let got = table.column_by_idx(1).unwrap().vla().unwrap();
     assert_eq!(got.len(), 3);
     for (g, want) in got.iter().zip(&vla_rows) {
@@ -523,22 +734,29 @@ fn writes_and_reads_back_variable_length_arrays() {
         }
     }
 
-    let empty = [WriteColumn::vla("EMPTY", ColumnType::I64, Vec::new())];
+    let empty = [WriteColumn::vla("EMPTY", ColumnType::I64, Vec::new()).unwrap()];
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     w.write_table(0, &empty).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let table = r.read_table(1).unwrap();
     assert_eq!(
-        table.columns[0].tform.vla_elem,
+        table.metadata().columns[0].tform.vla_elem,
         Some(crate::table::TformKind::I64)
     );
     assert!(table.column_by_idx(0).unwrap().vla().unwrap().is_empty());
 }
 
 #[test]
-#[should_panic(expected = "VLA column cells must match the declared ColumnType")]
 fn vla_constructor_rejects_mixed_element_types() {
-    WriteColumn::vla("BAD", ColumnType::I16, vec![ColumnData::I32(vec![1])]);
+    assert!(matches!(
+        WriteColumn::vla("BAD", ColumnType::I16, vec![ColumnData::I32(vec![1])]),
+        Err(FitsError::TypeMismatch { name, expected })
+            if name == "VLA column \"BAD\" row 0" && expected == "i16 column data"
+    ));
+    assert!(matches!(
+        WriteColumn::fixed("FIXED", ColumnData::I16(vec![1]), 1).wide(),
+        Err(FitsError::NotAVla { code: 'I' })
+    ));
 }
 
 #[test]
@@ -553,13 +771,16 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
             ColumnType::I16,
             vec![ColumnData::I16(vec![]), ColumnData::I16(vec![7, 8, 9, 10])],
         )
+        .unwrap()
         .with_tdim(vec![2, 2])
-        .wide(),
+        .wide()
+        .unwrap(),
         WriteColumn::vla(
             "PV",
             ColumnType::I16,
             vec![ColumnData::I16(vec![]), ColumnData::I16(vec![1, 2, 3, 4])],
         )
+        .unwrap()
         .with_tdim(vec![2, 2]),
         WriteColumn::vla(
             "TXT",
@@ -568,7 +789,8 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
                 ColumnData::Character(vec!["hello".into()]),
                 ColumnData::Character(vec!["abc".into()]),
             ],
-        ),
+        )
+        .unwrap(),
         // 12-bit X column: 2 bytes/row.
         WriteColumn::bits("FLAGS", vec![0xAB, 0xCF, 0x12, 0x3F], 12),
     ];
@@ -576,26 +798,27 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
     w.write_table(2, &columns).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let t = r.read_table(1).unwrap();
+    let metadata = t.metadata();
 
     // TDIM parsed back as a shape.
-    assert_eq!(t.columns[0].tdim, Some(vec![2, 2]));
+    assert_eq!(metadata.columns[0].tdim, Some(vec![2, 2]));
     // P/Q descriptors with TDIM accept an empty row and validate the nonempty row.
-    assert_eq!(t.columns[1].tform.kind, TformKind::ArrayDesc64);
-    assert_eq!(t.columns[1].tdim, Some(vec![2, 2]));
+    assert_eq!(metadata.columns[1].tform.kind, TformKind::ArrayDesc64);
+    assert_eq!(metadata.columns[1].tdim, Some(vec![2, 2]));
     assert_eq!(
         t.column_by_idx(1).unwrap().vla().unwrap(),
         vec![ColumnData::I16(vec![]), ColumnData::I16(vec![7, 8, 9, 10])]
     );
-    assert_eq!(t.columns[2].tform.kind, TformKind::ArrayDesc32);
-    assert_eq!(t.columns[2].tdim, Some(vec![2, 2]));
+    assert_eq!(metadata.columns[2].tform.kind, TformKind::ArrayDesc32);
+    assert_eq!(metadata.columns[2].tdim, Some(vec![2, 2]));
     assert_eq!(
         t.column_by_idx(2).unwrap().vla().unwrap(),
         vec![ColumnData::I16(vec![]), ColumnData::I16(vec![1, 2, 3, 4])]
     );
     assert_eq!(r.hdus[1].header.get_text("TFORM4").unwrap(), Some("1PA(5)"));
-    assert_eq!(t.columns[3].tform.repeat, 1);
-    assert_eq!(t.columns[3].tform.kind, TformKind::ArrayDesc32);
-    assert_eq!(t.columns[3].tform.vla_elem, Some(TformKind::Char));
+    assert_eq!(metadata.columns[3].tform.repeat, 1);
+    assert_eq!(metadata.columns[3].tform.kind, TformKind::ArrayDesc32);
+    assert_eq!(metadata.columns[3].tform.vla_elem, Some(TformKind::Char));
     assert_eq!(
         t.column_by_idx(3).unwrap().vla().unwrap(),
         vec![
@@ -603,8 +826,8 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
             ColumnData::Character(vec!["abc".into()])
         ]
     );
-    assert_eq!(t.columns[4].tform.kind, TformKind::Bit);
-    assert_eq!(t.columns[4].tform.repeat, 12);
+    assert_eq!(metadata.columns[4].tform.kind, TformKind::Bit);
+    assert_eq!(metadata.columns[4].tform.repeat, 12);
     match t.column_by_idx(4).unwrap().raw().unwrap() {
         ColumnData::Bytes(b) => assert_eq!(b, vec![0xAB, 0xC0, 0x12, 0x30]),
         other => panic!("{other:?}"),
@@ -628,7 +851,9 @@ fn writes_p_q_variable_length_bit_arrays_with_exact_counts_and_padding() {
     let q_rows = vec![BitVec::<u8, Msb0>::new(), one_bit, q_nine];
     let columns = [
         WriteColumn::vla_bits("PFLAGS", p_rows.clone()),
-        WriteColumn::vla_bits("QFLAGS", q_rows.clone()).wide(),
+        WriteColumn::vla_bits("QFLAGS", q_rows.clone())
+            .wide()
+            .unwrap(),
     ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer.write_table(3, &columns).unwrap();
@@ -664,10 +889,11 @@ fn writes_p_q_variable_length_bit_arrays_with_exact_counts_and_padding() {
     assert_eq!(&raw[72..78], &[0x80, 0x80, 0xAA, 0x80, 0x55, 0x00]);
 
     let table = reader.read_table(1).unwrap();
-    assert_eq!(table.columns[0].tform.kind, TformKind::ArrayDesc32);
-    assert_eq!(table.columns[0].tform.vla_elem, Some(TformKind::Bit));
-    assert_eq!(table.columns[1].tform.kind, TformKind::ArrayDesc64);
-    assert_eq!(table.columns[1].tform.vla_elem, Some(TformKind::Bit));
+    let metadata = table.metadata();
+    assert_eq!(metadata.columns[0].tform.kind, TformKind::ArrayDesc32);
+    assert_eq!(metadata.columns[0].tform.vla_elem, Some(TformKind::Bit));
+    assert_eq!(metadata.columns[1].tform.kind, TformKind::ArrayDesc64);
+    assert_eq!(metadata.columns[1].tform.vla_elem, Some(TformKind::Bit));
     let p = table.column_by_idx(0).unwrap().vla_bits().unwrap();
     let q = table.column_by_idx(1).unwrap().vla_bits().unwrap();
     for row in 0..3 {
@@ -736,7 +962,7 @@ fn integer_column(kind: ColumnType, vla: bool) -> WriteColumn {
         _ => panic!("integer_column requires an integer stored type"),
     };
     if vla {
-        WriteColumn::vla("PINT", kind, vec![data])
+        WriteColumn::vla("PINT", kind, vec![data]).unwrap()
     } else {
         WriteColumn::fixed("INT", data, 1)
     }
@@ -849,10 +1075,11 @@ fn writes_and_reads_back_a_binary_table() {
     assert_eq!(r.hdus[1].kind, HduKind::BinTable);
 
     let t = r.read_table(1).unwrap();
-    assert_eq!(t.nrows, 3);
-    assert_eq!(t.columns.len(), 3);
-    assert_eq!(t.columns[0].name.as_deref(), Some("NOSTA"));
-    assert_eq!(t.columns[1].unit.as_deref(), Some("m"));
+    let metadata = t.metadata();
+    assert_eq!(metadata.nrows, 3);
+    assert_eq!(metadata.columns.len(), 3);
+    assert_eq!(metadata.columns[0].name.as_deref(), Some("NOSTA"));
+    assert_eq!(metadata.columns[1].unit.as_deref(), Some("m"));
     assert_eq!(
         t.column_by_idx(0).unwrap().raw().unwrap(),
         ColumnData::I32(vec![1, 2, 3])
@@ -886,8 +1113,11 @@ fn binary_character_columns_round_trip_exactly_and_reject_over_width() {
         .collect();
     let columns = [
         WriteColumn::fixed("FIXED", ColumnData::Character(fields.clone()), 4),
-        WriteColumn::vla("PCHAR", ColumnType::Character, vla_rows.clone()),
-        WriteColumn::vla("QCHAR", ColumnType::Character, vla_rows.clone()).wide(),
+        WriteColumn::vla("PCHAR", ColumnType::Character, vla_rows.clone()).unwrap(),
+        WriteColumn::vla("QCHAR", ColumnType::Character, vla_rows.clone())
+            .unwrap()
+            .wide()
+            .unwrap(),
     ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer.write_table(4, &columns).unwrap();
@@ -1077,9 +1307,12 @@ fn i64_table_scaling_writes_the_exact_unsigned_offset() {
         WriteColumn::fixed("U64", ColumnData::I64(vec![i64::MIN, i64::MAX]), 1)
             .scaled(1.0, 9_223_372_036_854_775_808.0),
         WriteColumn::vla("PU64", ColumnType::I64, rows.clone())
+            .unwrap()
             .scaled(1.0, 9_223_372_036_854_775_808.0),
         WriteColumn::vla("QU64", ColumnType::I64, rows.clone())
+            .unwrap()
             .wide()
+            .unwrap()
             .scaled(1.0, 9_223_372_036_854_775_808.0),
     ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
@@ -1473,6 +1706,85 @@ fn compressed_image_metadata_is_validated_before_automatic_primary() {
     assert!(matches!(
         writer.write_compressed_image(&image, "RICE_1", &CompressOptions::default()),
         Err(FitsError::UnsupportedCompression { .. })
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
+}
+
+#[cfg(feature = "compression")]
+#[test]
+fn compressed_header_templates_preserve_information_and_regenerate_structure() {
+    let template = informational_header_template();
+    let image = Image {
+        shape: vec![2],
+        samples: ImageData::I16(vec![10, 20]),
+        scaling: identity(),
+    };
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer
+        .write_compressed_image_with_header(
+            &image,
+            "GZIP_1",
+            &CompressOptions::default(),
+            &template,
+        )
+        .unwrap();
+    let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
+    let header = &reader.hdus[1].header;
+    assert_informational_header(header);
+    assert_eq!(header.get_logical("ZIMAGE").unwrap(), Some(true));
+    assert_eq!(header.get_integer("ZBITPIX").unwrap(), Some(16));
+    assert_eq!(header.get_integer("ZNAXIS").unwrap(), Some(1));
+    assert_eq!(header.get_integer("ZNAXIS1").unwrap(), Some(2));
+    assert_ne!(header.get_integer("ZTILE1").unwrap(), Some(999));
+    assert_eq!(header.get("ZSIMPLE"), None);
+    assert_eq!(header.get("CHECKSUM"), None);
+    assert_eq!(
+        reader.read_image(1).unwrap().decode(),
+        ImageData::I16(vec![10, 20])
+    );
+
+    let columns = [WriteColumn::fixed(
+        "VALUE",
+        ColumnData::I32(vec![7, 8, 9]),
+        1,
+    )];
+    let mut source_writer = FitsWriter::new(Cursor::new(Vec::new()));
+    source_writer
+        .write_table_with_header(3, &columns, &template)
+        .unwrap();
+    let mut source =
+        FitsReader::open(Cursor::new(source_writer.into_inner().into_inner())).unwrap();
+    let source_header = source.hdus[1].header.clone();
+    let source_table = source.read_table(1).unwrap();
+
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer
+        .write_compressed_table(&source_header, &source_table, 2, "GZIP_1")
+        .unwrap();
+    let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
+    let header = &reader.hdus[1].header;
+    assert_informational_header(header);
+    assert_eq!(header.get_logical("ZTABLE").unwrap(), Some(true));
+    assert_eq!(header.get_integer("ZNAXIS2").unwrap(), Some(3));
+    assert_eq!(header.get_text("ZFORM1").unwrap(), Some("1J"));
+    assert_eq!(header.get_text("TFORM1").unwrap(), Some("1QB"));
+    assert_eq!(
+        reader
+            .read_compressed_table(1)
+            .unwrap()
+            .column_by_idx(0)
+            .unwrap()
+            .raw()
+            .unwrap(),
+        ColumnData::I32(vec![7, 8, 9])
+    );
+
+    let mut conflicting = source_header.clone();
+    conflicting.set("NAXIS2", 99);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_compressed_table(&conflicting, &source_table, 2, "GZIP_1"),
+        Err(FitsError::TableMetadataMismatch { name }) if name == "NAXIS2"
     ));
     assert!(writer.into_inner().into_inner().is_empty());
 }

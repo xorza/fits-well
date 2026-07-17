@@ -8,21 +8,22 @@ fn reads_the_real_uv_random_groups() {
     let file = File::open("tests/data/fits/DDTSUVDATA.fits").unwrap();
     let mut reader = FitsReader::open(file).unwrap();
     let groups = reader.read_groups(0).unwrap();
+    let metadata = groups.metadata();
 
-    assert_eq!(groups.gcount, 7956);
-    assert_eq!(groups.pcount, 6);
-    assert_eq!(groups.group_shape, vec![3, 4, 1, 1, 1]);
+    assert_eq!(metadata.gcount, 7956);
+    assert_eq!(metadata.pcount, 6);
+    assert_eq!(metadata.group_shape, [3, 4, 1, 1, 1]);
     assert_eq!(groups.array_len(), 12);
-    assert_eq!(groups.bitpix, Bitpix::F32);
+    assert_eq!(metadata.bitpix, Bitpix::F32);
     assert_eq!(
-        groups.parameter_names,
-        vec!["UU--", "VV--", "WW--", "BASELINE", "DATE", "DATE"]
+        metadata.parameter_names,
+        ["UU--", "VV--", "WW--", "BASELINE", "DATE", "DATE"]
     );
 
     // Each group yields PCOUNT params and an array of 12 elements.
-    let params = groups.parameters_physical(0);
+    let params = groups.parameters_physical(0).unwrap();
     assert_eq!(params.len(), 6);
-    assert_eq!(groups.array_physical(0).len(), 12);
+    assert_eq!(groups.array_physical(0).unwrap().len(), 12);
     // The DATE parameter (index 4) has PZERO5 = 2445728.5 (a Julian date), so
     // its physical value lands in that range, not near zero.
     assert!(
@@ -32,12 +33,43 @@ fn reads_the_real_uv_random_groups() {
     );
     // §6.3: the two PTYPE='DATE' addends (indices 4, 5) sum to the logical DATE.
     assert_eq!(
-        groups.parameter_physical(0, "DATE"),
+        groups.parameter_physical(0, "DATE").unwrap(),
         Some(params[4] + params[5])
     );
     // A single-occurrence name returns just that parameter; an absent name → None.
-    assert_eq!(groups.parameter_physical(0, "BASELINE"), Some(params[3]));
-    assert_eq!(groups.parameter_physical(0, "NONE"), None);
+    assert_eq!(
+        groups.parameter_physical(0, "BASELINE").unwrap(),
+        Some(params[3])
+    );
+    assert_eq!(groups.parameter_physical(0, "NONE").unwrap(), None);
+
+    for result in [
+        groups.parameters_physical(metadata.gcount).map(|_| ()),
+        groups.array_physical(metadata.gcount).map(|_| ()),
+        groups
+            .parameter_physical(metadata.gcount, "DATE")
+            .map(|_| ()),
+    ] {
+        assert!(matches!(
+            result,
+            Err(FitsError::GroupIndexOutOfBounds {
+                index: 7956,
+                len: 7956
+            })
+        ));
+    }
+    let mut detached = groups.metadata();
+    detached.gcount = 0;
+    detached.pcount = usize::MAX;
+    detached.group_shape = &[];
+    detached.parameter_names = &[];
+    detached.bitpix = Bitpix::I64;
+    assert_eq!(detached.gcount, 0);
+    assert_eq!(detached.pcount, usize::MAX);
+    assert!(detached.group_shape.is_empty());
+    assert!(detached.parameter_names.is_empty());
+    assert_eq!(detached.bitpix, Bitpix::I64);
+    assert_eq!(groups.parameters_physical(0).unwrap().len(), 6);
 }
 
 #[test]
@@ -68,10 +100,16 @@ fn parameter_physical_sums_addends_sharing_a_ptype() {
     let groups = RandomGroups::from_data(&header, &data).unwrap();
 
     // Raw per-addend values stay available separately.
-    assert_eq!(groups.parameters_physical(0), vec![2_445_738.5, 0.75]);
+    assert_eq!(
+        groups.parameters_physical(0).unwrap(),
+        vec![2_445_738.5, 0.75]
+    );
     // Summed logical DATE = (2445728.5 + 10) + (0.25 + 0.5) = 2445739.25.
-    assert_eq!(groups.parameter_physical(0, "DATE"), Some(2_445_739.25));
-    assert_eq!(groups.parameter_physical(0, "NONE"), None);
+    assert_eq!(
+        groups.parameter_physical(0, "DATE").unwrap(),
+        Some(2_445_739.25)
+    );
+    assert_eq!(groups.parameter_physical(0, "NONE").unwrap(), None);
 
     for keyword in ["PSCAL1", "PZERO1", "BSCALE"] {
         let mut malformed = header.clone();
@@ -117,8 +155,12 @@ fn array_physical_maps_blank_to_nan_for_every_integer_bitpix() {
         };
         let groups = RandomGroups::from_data(&header, &data).unwrap();
 
-        assert_eq!(groups.parameters_physical(0), vec![10.0], "{bitpix:?}");
-        let physical = groups.array_physical(0);
+        assert_eq!(
+            groups.parameters_physical(0).unwrap(),
+            vec![10.0],
+            "{bitpix:?}"
+        );
+        let physical = groups.array_physical(0).unwrap();
         assert_eq!(physical[0], 23.0, "5 + 2·9 for {bitpix:?}");
         assert!(physical[1].is_nan(), "BLANK for {bitpix:?}");
         assert_eq!(physical[2], 27.0, "5 + 2·11 for {bitpix:?}");
@@ -146,13 +188,13 @@ fn naxis1_group_has_one_array_element_matching_data_extent() {
         data.extend_from_slice(&v.to_be_bytes());
     }
     let groups = RandomGroups::from_data(&header, &data).unwrap();
-    assert!(groups.group_shape.is_empty());
+    assert!(groups.metadata().group_shape.is_empty());
     assert_eq!(groups.array_len(), 1); // empty product, not 0
     // group 0: param 1.0, array [10.0]; group 1: param 2.0, array [20.0].
-    assert_eq!(groups.parameters_physical(0), vec![1.0]);
-    assert_eq!(groups.array_physical(0), vec![10.0]);
-    assert_eq!(groups.parameters_physical(1), vec![2.0]);
-    assert_eq!(groups.array_physical(1), vec![20.0]);
+    assert_eq!(groups.parameters_physical(0).unwrap(), vec![1.0]);
+    assert_eq!(groups.array_physical(0).unwrap(), vec![10.0]);
+    assert_eq!(groups.parameters_physical(1).unwrap(), vec![2.0]);
+    assert_eq!(groups.array_physical(1).unwrap(), vec![20.0]);
 }
 
 #[test]

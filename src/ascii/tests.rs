@@ -52,8 +52,13 @@ fn decodes_hand_built_ascii_rows() {
         .set("TTYPE2", "COUNT");
     let data = b"  AB   123def    -45".to_vec(); // "  AB" + "   123" ; "def " + "   -45"
     let table = AsciiTable::from_data(&header, data).unwrap();
-    assert_eq!(table.nrows, 2);
-    assert_eq!(table.columns[1].start, 4);
+    let mut metadata = table.metadata();
+    assert_eq!(metadata.nrows, 2);
+    assert_eq!(metadata.columns[1].start, 4);
+    metadata.nrows = usize::MAX;
+    metadata.columns = &[];
+    assert_eq!(metadata.nrows, usize::MAX);
+    assert!(metadata.columns.is_empty());
     assert_eq!(
         table.column_by_idx(0).unwrap().raw().unwrap(),
         AsciiColumnData::Text(vec![Some("  AB".into()), Some("def ".into())])

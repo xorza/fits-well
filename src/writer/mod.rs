@@ -150,13 +150,20 @@ impl WriteColumn {
 
     /// A variable-length `P` column. `kind` states the heap element type even when
     /// `rows` is empty; [`WriteColumn::wide`] changes the descriptors to `Q`.
-    pub fn vla(name: impl Into<String>, kind: ColumnType, rows: Vec<ColumnData>) -> WriteColumn {
-        assert!(
-            rows.iter().all(|row| kind.matches(row)),
-            "VLA column cells must match the declared ColumnType"
-        );
-        WriteColumn {
-            name: name.into(),
+    pub fn vla(
+        name: impl Into<String>,
+        kind: ColumnType,
+        rows: Vec<ColumnData>,
+    ) -> Result<WriteColumn> {
+        let name = name.into();
+        if let Some(row) = rows.iter().position(|data| !kind.matches(data)) {
+            return Err(FitsError::TypeMismatch {
+                name: format!("VLA column {name:?} row {row}"),
+                expected: kind.name(),
+            });
+        }
+        Ok(WriteColumn {
+            name,
             unit: None,
             values: WriteColumnData::Vla {
                 kind,
@@ -167,7 +174,7 @@ impl WriteColumn {
             tscale: None,
             tzero: None,
             tnull: None,
-        }
+        })
     }
 
     /// An `X` column of `bit_count` bits per row and its row-packed bytes.
@@ -211,14 +218,19 @@ impl WriteColumn {
     }
 
     /// Use 64-bit `Q` descriptors for this VLA column.
-    pub fn wide(mut self) -> WriteColumn {
+    pub fn wide(mut self) -> Result<WriteColumn> {
         match &mut self.values {
             WriteColumnData::Vla { wide, .. } | WriteColumnData::VlaBits { wide, .. } => {
                 *wide = true;
             }
-            _ => panic!("WriteColumn::wide requires a VLA column"),
+            WriteColumnData::Fixed { data, .. } => {
+                return Err(FitsError::NotAVla {
+                    code: ColumnType::from_data(data).letter(),
+                });
+            }
+            WriteColumnData::Bits { .. } => return Err(FitsError::NotAVla { code: 'X' }),
         };
-        self
+        Ok(self)
     }
 
     /// Emit `TSCALn`/`TZEROn` so the stored `data` reads back as
@@ -332,12 +344,22 @@ impl<W: Write> FitsWriter<W> {
     /// `BITPIX`, `NAXISn`, plus `BSCALE`/`BZERO`/`BLANK` when scaling is
     /// non-trivial), followed by the big-endian data unit.
     pub fn write_image(&mut self, image: &Image) -> Result<()> {
+        self.write_image_template(image, None)
+    }
+
+    /// Write an image while preserving the non-structural cards from `header`.
+    /// Mandatory image-layout and checksum cards are regenerated from `image`.
+    pub fn write_image_with_header(&mut self, image: &Image, header: &Header) -> Result<()> {
+        self.write_image_template(image, Some(header))
+    }
+
+    fn write_image_template(&mut self, image: &Image, template: Option<&Header>) -> Result<()> {
         self.ensure_writable()?;
         let expected = image.validate_geometry()?;
         let encoded_len = expected
             .checked_mul(image.samples.bitpix().elem_size())
             .ok_or(FitsError::DataUnitOverflow)?;
-        let header = image_header(image, self.state == WriterState::Empty)?;
+        let header = image_header(image, self.state == WriterState::Empty, template)?;
         self.scratch.clear();
         self.scratch.reserve_exact(encoded_len);
         image.samples.encode_into(&mut self.scratch);
@@ -350,6 +372,26 @@ impl<W: Write> FitsWriter<W> {
     /// are both supported, including jagged `PX`/`QX` bit arrays — VLA columns
     /// write a heap after the main table.
     pub fn write_table(&mut self, nrows: usize, columns: &[WriteColumn]) -> Result<()> {
+        self.write_table_template(nrows, columns, None)
+    }
+
+    /// Write a binary table while preserving the non-structural cards from `header`.
+    /// Mandatory table-layout and checksum cards are regenerated from `columns`.
+    pub fn write_table_with_header(
+        &mut self,
+        nrows: usize,
+        columns: &[WriteColumn],
+        header: &Header,
+    ) -> Result<()> {
+        self.write_table_template(nrows, columns, Some(header))
+    }
+
+    fn write_table_template(
+        &mut self,
+        nrows: usize,
+        columns: &[WriteColumn],
+        template: Option<&Header>,
+    ) -> Result<()> {
         self.ensure_writable()?;
         validate_table_field_count(columns.len())?;
         fits_i64(nrows)?;
@@ -439,7 +481,7 @@ impl<W: Write> FitsWriter<W> {
                 column_offset += layout.row_width;
             }
         }
-        let header = bintable_header(nrows, row_len, columns, &layouts, heap_len)?;
+        let header = bintable_header(nrows, row_len, columns, &layouts, heap_len, template)?;
         self.finish_hdu(header, ZERO_FILL, true)
     }
 
@@ -447,6 +489,26 @@ impl<W: Write> FitsWriter<W> {
     /// first if needed). Columns are packed left-to-right with no gaps; data is
     /// space-padded per §7.2.3.
     pub fn write_ascii_table(&mut self, nrows: usize, columns: &[AsciiWriteColumn]) -> Result<()> {
+        self.write_ascii_table_template(nrows, columns, None)
+    }
+
+    /// Write an ASCII table while preserving the non-structural cards from `header`.
+    /// Mandatory table-layout and checksum cards are regenerated from `columns`.
+    pub fn write_ascii_table_with_header(
+        &mut self,
+        nrows: usize,
+        columns: &[AsciiWriteColumn],
+        header: &Header,
+    ) -> Result<()> {
+        self.write_ascii_table_template(nrows, columns, Some(header))
+    }
+
+    fn write_ascii_table_template(
+        &mut self,
+        nrows: usize,
+        columns: &[AsciiWriteColumn],
+        template: Option<&Header>,
+    ) -> Result<()> {
         self.ensure_writable()?;
         validate_table_field_count(columns.len())?;
         let mut tbcols = Vec::with_capacity(columns.len());
@@ -469,7 +531,7 @@ impl<W: Write> FitsWriter<W> {
                 .checked_add(col.width)
                 .ok_or(FitsError::DataUnitOverflow)?;
         }
-        let header = ascii_table_header(nrows, row_len, columns, &tbcols)?;
+        let header = ascii_table_header(nrows, row_len, columns, &tbcols, template)?;
         self.scratch.clear();
         let total_len = nrows
             .checked_mul(row_len)
@@ -498,8 +560,34 @@ impl<W: Write> FitsWriter<W> {
         cmptype: &str,
         options: &CompressOptions,
     ) -> Result<()> {
+        self.write_compressed_image_template(image, cmptype, options, None)
+    }
+
+    /// Write a tiled-compressed image while preserving the non-structural cards
+    /// from `header`. Container, compression, image-layout, and checksum cards are
+    /// regenerated from `image` and `options`.
+    #[cfg(feature = "compression")]
+    pub fn write_compressed_image_with_header(
+        &mut self,
+        image: &Image,
+        cmptype: &str,
+        options: &CompressOptions,
+        header: &Header,
+    ) -> Result<()> {
+        self.write_compressed_image_template(image, cmptype, options, Some(header))
+    }
+
+    #[cfg(feature = "compression")]
+    fn write_compressed_image_template(
+        &mut self,
+        image: &Image,
+        cmptype: &str,
+        options: &CompressOptions,
+        template: Option<&Header>,
+    ) -> Result<()> {
         self.ensure_writable()?;
-        let header = compress_image(image, cmptype, options, &mut self.scratch)?;
+        let mut header = compress_image(image, cmptype, options, &mut self.scratch)?;
+        merge_header_template(&mut header, template);
         self.finish_hdu(header, ZERO_FILL, true)
     }
 
@@ -633,7 +721,7 @@ fn empty_primary_header() -> Header {
 /// Image header: the primary array (§4.4.1) when `primary`, else an `IMAGE`
 /// extension (§7.1). The two differ only in the prologue (`SIMPLE`+`EXTEND` vs
 /// `XTENSION`+`PCOUNT`/`GCOUNT`); the axes and scaling keywords are identical.
-fn image_header(image: &Image, primary: bool) -> Result<Header> {
+fn image_header(image: &Image, primary: bool, template: Option<&Header>) -> Result<Header> {
     let mut header = Header::new();
     if primary {
         header
@@ -653,6 +741,7 @@ fn image_header(image: &Image, primary: bool) -> Result<Header> {
     image
         .scaling
         .add_to_header(&mut header, image.samples.bitpix())?;
+    merge_header_template(&mut header, template);
     Ok(header)
 }
 
@@ -680,6 +769,7 @@ fn bintable_header(
     columns: &[WriteColumn],
     layouts: &[ColumnLayout],
     heap_len: usize,
+    template: Option<&Header>,
 ) -> Result<Header> {
     let mut header = Header::new();
     header
@@ -726,6 +816,7 @@ fn bintable_header(
             header.set(key!("TNULL{n}").as_str(), tnull);
         }
     }
+    merge_header_template(&mut header, template);
     Ok(header)
 }
 
@@ -736,8 +827,8 @@ struct ColumnLayout {
 }
 
 impl ColumnType {
-    fn from_data(data: &ColumnData) -> Option<ColumnType> {
-        Some(match data {
+    fn from_data(data: &ColumnData) -> ColumnType {
+        match data {
             ColumnData::Logical(_) => ColumnType::Logical,
             ColumnData::Bytes(_) => ColumnType::Byte,
             ColumnData::I16(_) => ColumnType::I16,
@@ -748,11 +839,26 @@ impl ColumnType {
             ColumnData::ComplexF32(_) => ColumnType::ComplexF32,
             ColumnData::ComplexF64(_) => ColumnType::ComplexF64,
             ColumnData::Character(_) => ColumnType::Character,
-        })
+        }
     }
 
     fn matches(self, data: &ColumnData) -> bool {
-        Some(self) == ColumnType::from_data(data)
+        self == ColumnType::from_data(data)
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            ColumnType::Logical => "logical column data",
+            ColumnType::Byte => "byte column data",
+            ColumnType::I16 => "i16 column data",
+            ColumnType::I32 => "i32 column data",
+            ColumnType::I64 => "i64 column data",
+            ColumnType::F32 => "f32 column data",
+            ColumnType::F64 => "f64 column data",
+            ColumnType::ComplexF32 => "complex-f32 column data",
+            ColumnType::ComplexF64 => "complex-f64 column data",
+            ColumnType::Character => "character column data",
+        }
     }
 
     fn letter(self) -> char {
@@ -824,9 +930,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
     }
     match &col.values {
         WriteColumnData::Fixed { data, repeat } => {
-            let kind = ColumnType::from_data(data).ok_or_else(|| FitsError::InvalidValue {
-                card: "binary character columns must use ColumnData::Character".to_string(),
-            })?;
+            let kind = ColumnType::from_data(data);
             validate_binary_metadata(col, kind.letter())?;
             let expected = nrows
                 .checked_mul(*repeat)
@@ -1290,6 +1394,7 @@ fn ascii_table_header(
     row_len: usize,
     columns: &[AsciiWriteColumn],
     tbcols: &[usize],
+    template: Option<&Header>,
 ) -> Result<Header> {
     let mut header = Header::new();
     header
@@ -1324,7 +1429,74 @@ fn ascii_table_header(
             header.set(key!("TNULL{n}").as_str(), tnull.as_str());
         }
     }
+    merge_header_template(&mut header, template);
     Ok(header)
+}
+
+fn merge_header_template(header: &mut Header, template: Option<&Header>) {
+    let Some(template) = template else {
+        return;
+    };
+    header.append_filtered_from(template, |keyword| !is_structural_keyword(keyword));
+}
+
+fn is_structural_keyword(keyword: &str) -> bool {
+    if matches!(
+        keyword,
+        "SIMPLE"
+            | "XTENSION"
+            | "BITPIX"
+            | "NAXIS"
+            | "PCOUNT"
+            | "GCOUNT"
+            | "EXTEND"
+            | "GROUPS"
+            | "BLOCKED"
+            | "BSCALE"
+            | "BZERO"
+            | "BLANK"
+            | "CHECKSUM"
+            | "DATASUM"
+            | "THEAP"
+            | "TFIELDS"
+            | "ZIMAGE"
+            | "ZTABLE"
+            | "ZTILELEN"
+            | "ZNAXIS"
+            | "ZPCOUNT"
+            | "ZGCOUNT"
+            | "ZSIMPLE"
+            | "ZTENSION"
+            | "ZEXTEND"
+            | "ZBLOCKED"
+            | "ZTHEAP"
+            | "ZHEAPPTR"
+            | "ZHECKSUM"
+            | "ZDATASUM"
+            | "ZCMPTYPE"
+            | "ZBITPIX"
+            | "ZQUANTIZ"
+            | "ZDITHER0"
+            | "ZBLANK"
+            | "ZMASKCMP"
+    ) {
+        return true;
+    }
+    [
+        "NAXIS", "TFORM", "TTYPE", "TUNIT", "TDIM", "TSCAL", "TZERO", "TNULL", "TBCOL", "ZFORM",
+        "ZCTYP", "ZNAXIS", "ZTILE", "ZNAME", "ZVAL",
+    ]
+    .iter()
+    .any(|prefix| indexed_keyword(keyword, prefix))
+}
+
+fn indexed_keyword(keyword: &str, prefix: &str) -> bool {
+    keyword.strip_prefix(prefix).is_some_and(|suffix| {
+        keyword.len() <= 8
+            && !suffix.is_empty()
+            && !suffix.starts_with('0')
+            && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 fn fits_i64(value: usize) -> Result<i64> {

@@ -77,16 +77,45 @@ impl Hdu {
 #[derive(Debug, Clone)]
 pub struct DataUnit {
     /// The on-disk data unit, padded to the 2880-byte block grid.
-    pub bytes: Vec<u8>,
+    bytes: Vec<u8>,
     /// The sub-range of `bytes` that is meaningful data (`0..Nbits/8`).
+    data_range: Range<usize>,
+}
+
+/// Immutable view of a padded data unit and its meaningful byte range.
+#[derive(Debug, Clone)]
+pub struct DataUnitView<'a> {
+    /// Complete on-disk unit, including trailing 2880-byte block fill.
+    pub padded: &'a [u8],
+    /// Meaningful data bytes within [`DataUnitView::padded`].
     pub data_range: Range<usize>,
 }
 
 impl DataUnit {
+    /// Borrow the complete padded unit and the meaningful data range within it.
+    pub fn view(&self) -> DataUnitView<'_> {
+        DataUnitView {
+            padded: &self.bytes,
+            data_range: self.data_range.clone(),
+        }
+    }
+
     /// The meaningful data with the trailing block fill sliced off — what a
     /// decoder should consume.
     pub fn data(&self) -> &[u8] {
         &self.bytes[self.data_range.clone()]
+    }
+
+    /// Consume the unit and return only its meaningful data bytes, without block fill.
+    pub fn into_data(mut self) -> Vec<u8> {
+        debug_assert_eq!(self.data_range.start, 0);
+        self.bytes.truncate(self.data_range.end);
+        self.bytes
+    }
+
+    /// Consume the unit and return its complete block-padded bytes.
+    pub fn into_padded(self) -> Vec<u8> {
+        self.bytes
     }
 }
 

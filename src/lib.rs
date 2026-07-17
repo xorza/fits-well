@@ -64,7 +64,9 @@ mod unit;
 mod wcs;
 mod writer;
 
-pub use ascii::{AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiTable};
+pub use ascii::{
+    AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiTable, AsciiTableMetadata,
+};
 pub use bitpix::Bitpix;
 
 /// Re-exported so callers can name the borrowed [`bitvec::slice::BitSlice`] rows that
@@ -80,7 +82,7 @@ pub use data::{
     Image, ImageData, ImageMetadata, ImageView, RawImage, SampleType, Scaling, UnsignedView,
 };
 pub use error::{FitsError, Result};
-pub use groups::{RandomGroupView, RandomGroups};
+pub use groups::{RandomGroupView, RandomGroups, RandomGroupsMetadata};
 pub use hdu::HduKind;
 pub use header::Header;
 pub use header::HeaderEntry;
@@ -96,11 +98,12 @@ pub use reader::MmapReader;
 pub use reader::source::MmapSource;
 pub use reader::source::{SliceSource, Source, StreamSource};
 pub use reader::{
-    ChecksumReport, ChecksumStatus, DataUnit, FitsReader, Hdu, SliceReader, StreamReader,
+    ChecksumReport, ChecksumStatus, DataUnit, DataUnitView, FitsReader, Hdu, SliceReader,
+    StreamReader,
 };
 pub use table::{
-    BinTable, BitColumn, CharacterField, Column, ColumnData, ColumnReader, TDisp, TDispKind, Tform,
-    TformKind,
+    BinTable, BinTableMetadata, BitColumn, CharacterField, Column, ColumnData, ColumnReader, TDisp,
+    TDispKind, Tform, TformKind,
 };
 pub use time::{
     Datetime, Epoch, FitsTime, GtiInterval, PhaseAxis, TimeAxisKind, TimeBounds, TimeCoordinate,

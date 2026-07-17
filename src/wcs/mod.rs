@@ -1604,8 +1604,18 @@ impl Wcs {
 
     pub(crate) fn axis_world(&self, axis: usize, pixel: &[f64]) -> Result<AxisWorld<'_>> {
         let naxis = self.axes.len();
-        assert!(axis < naxis, "WCS axis index");
-        assert_eq!(pixel.len(), naxis, "pixel coordinate count");
+        if axis >= naxis {
+            return Err(FitsError::WcsAxisIndexOutOfBounds {
+                axis: axis.saturating_add(1),
+                len: naxis,
+            });
+        }
+        if pixel.len() != naxis {
+            return Err(FitsError::CoordinateCountMismatch {
+                expected: naxis,
+                got: pixel.len(),
+            });
+        }
         if self.unsupported_axes.contains(&axis) {
             return Err(FitsError::UnsupportedWcsTransform { axes: vec![axis] });
         }
@@ -1825,12 +1835,14 @@ impl Wcs {
     /// Returns [`FitsError::UnsupportedWcsTransform`] if any nonlinear axis is not
     /// implemented, or a projection error when the coordinate is outside its domain.
     ///
-    /// # Panics
-    ///
-    /// Panics if `pixel` does not contain exactly one value per WCS axis.
     pub fn pixel_to_world(&self, pixel: &[f64]) -> Result<Vec<f64>> {
         let naxis = self.axes.len();
-        assert_eq!(pixel.len(), naxis, "pixel coordinate count");
+        if pixel.len() != naxis {
+            return Err(FitsError::CoordinateCountMismatch {
+                expected: naxis,
+                got: pixel.len(),
+            });
+        }
         self.require_complete_transform()?;
         let offset: Vec<f64> = pixel
             .iter()
@@ -1865,12 +1877,14 @@ impl Wcs {
     /// Returns [`FitsError::UnsupportedWcsTransform`] if any nonlinear axis is not
     /// implemented, or a projection error when the coordinate is outside its domain.
     ///
-    /// # Panics
-    ///
-    /// Panics if `world` does not contain exactly one value per WCS axis.
     pub fn world_to_pixel(&self, world: &[f64]) -> Result<Vec<f64>> {
         let naxis = self.axes.len();
-        assert_eq!(world.len(), naxis, "world coordinate count");
+        if world.len() != naxis {
+            return Err(FitsError::CoordinateCountMismatch {
+                expected: naxis,
+                got: world.len(),
+            });
+        }
         self.require_complete_transform()?;
         let mut intermediate = (0..naxis)
             .map(|axis| {

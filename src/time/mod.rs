@@ -9,6 +9,8 @@
 //! `TREFPOS`/`TRPOSn`, all image/table PHASE forms, and the global
 //! `DATE-OBS`/`MJD-OBS`/`TSTART`/… set). Validated against `astropy.time`.
 
+use std::str::FromStr;
+
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -156,7 +158,12 @@ impl Datetime {
     /// Build a datetime from a JD in `scale` (inverse of [`Datetime::to_jd`]). A
     /// single `f64` JD at present epochs resolves to ~0.1 ms, so the recovered
     /// second carries that much rounding — fine for display, not sub-ms timing.
-    pub fn from_jd(jd: f64, scale: TimeScale) -> Datetime {
+    pub fn from_jd(jd: f64, scale: TimeScale) -> Result<Datetime> {
+        if !fits_datetime_jd(jd) {
+            return Err(FitsError::InvalidValue {
+                card: format!("Julian Date {jd}"),
+            });
+        }
         let CalendarDateFraction { date, fraction } = calendar_date_and_fraction(jd);
         let day_seconds = if scale == TimeScale::Utc {
             utc_day_seconds(date.year, date.month, date.day)
@@ -164,28 +171,31 @@ impl Datetime {
             SEC_PER_DAY
         };
         let mut secs = fraction * day_seconds;
-        if day_seconds > SEC_PER_DAY && secs >= SEC_PER_DAY {
-            return Datetime {
+        let datetime = if day_seconds > SEC_PER_DAY && secs >= SEC_PER_DAY {
+            Datetime {
                 year: date.year,
                 month: date.month,
                 day: date.day,
                 hour: 23,
                 minute: 59,
                 second: 60.0 + (secs - SEC_PER_DAY),
-            };
-        }
-        let hour = (secs / 3600.0).floor();
-        secs -= hour * 3600.0;
-        let minute = (secs / 60.0).floor();
-        secs -= minute * 60.0;
-        Datetime {
-            year: date.year,
-            month: date.month,
-            day: date.day,
-            hour: hour as u32,
-            minute: minute as u32,
-            second: secs,
-        }
+            }
+        } else {
+            let hour = (secs / 3600.0).floor();
+            secs -= hour * 3600.0;
+            let minute = (secs / 60.0).floor();
+            secs -= minute * 60.0;
+            Datetime {
+                year: date.year,
+                month: date.month,
+                day: date.day,
+                hour: hour as u32,
+                minute: minute as u32,
+                second: secs,
+            }
+        };
+        datetime.validate(scale)?;
+        Ok(datetime)
     }
 
     fn validate(&self, scale: TimeScale) -> Result<()> {
@@ -282,6 +292,10 @@ impl Epoch {
 }
 
 /// A FITS time scale (`TIMESYS` / `CTYPEi`).
+///
+/// Parse with [`str::parse`]. Matching is case-insensitive and accepts standard
+/// realization suffixes plus the `TDT`/`ET` and `IAT` aliases. Only the literal
+/// `LOCAL` selects an unspecified local clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeScale {
     /// Coordinated Universal Time.
@@ -305,39 +319,31 @@ pub enum TimeScale {
 }
 
 impl TimeScale {
-    /// Parse a `TIMESYS`/`CTYPE` time-scale string (case-insensitive); accepts the
-    /// `TDT`/`ET` → `TT` and `IAT` → `TAI` aliases. Unknown values map to `LOCAL`.
-    pub fn parse(s: &str) -> TimeScale {
-        // A high-precision value appends a realization in parentheses — `TT(TAI)`,
-        // `UTC(NIST)` (§9.2.1); strip it before matching the scale name.
-        let base = s.trim().split('(').next().unwrap_or("").trim();
-        match base.to_ascii_uppercase().as_str() {
-            "UTC" | "GMT" => TimeScale::Utc, // §9.2.1: GMT is continuous with UTC
-            "UT1" | "UT" => TimeScale::Ut1,
-            "TAI" | "IAT" => TimeScale::Tai,
-            "TT" | "TDT" | "ET" => TimeScale::Tt,
-            "TCG" => TimeScale::Tcg,
-            "TDB" => TimeScale::Tdb,
-            "TCB" => TimeScale::Tcb,
-            "GPS" => TimeScale::Gps,
-            _ => TimeScale::Local,
-        }
-    }
-
     /// Convert a Julian Date in this scale to a JD in `target`, treating `UT1` as
     /// `UTC` (ΔUT1 = 0). UTC inputs and outputs use the quasi-JD representation
     /// returned by [`Datetime::to_jd`]. Use [`TimeScale::convert_dut1`] for ΔUT1.
-    pub fn convert(self, jd: f64, target: TimeScale) -> f64 {
+    pub fn convert(self, jd: f64, target: TimeScale) -> Result<f64> {
         self.convert_dut1(jd, target, 0.0)
     }
 
     /// Convert a Julian Date with an explicit `dut1 = UT1 − UTC` (seconds, from
-    /// IERS) so conversions to/from `UT1` are exact. `Local` passes through.
-    pub fn convert_dut1(self, jd: f64, target: TimeScale, dut1: f64) -> f64 {
-        if self == target || self == TimeScale::Local || target == TimeScale::Local {
-            return jd;
+    /// IERS) so conversions to/from `UT1` are exact. Converting between `LOCAL` and
+    /// a defined scale is an error because no relationship is known.
+    pub fn convert_dut1(self, jd: f64, target: TimeScale, dut1: f64) -> Result<f64> {
+        if !fits_datetime_jd(jd) || !dut1.is_finite() {
+            return Err(FitsError::InvalidValue {
+                card: format!("time conversion JD {jd}, DUT1 {dut1}"),
+            });
         }
-        from_tt(self.to_tt(jd, dut1), target, dut1)
+        if self == target {
+            return Ok(jd);
+        }
+        if self == TimeScale::Local || target == TimeScale::Local {
+            return Err(FitsError::InvalidValue {
+                card: format!("cannot convert {self:?} to {target:?}"),
+            });
+        }
+        Ok(from_tt(self.to_tt(jd, dut1), target, dut1))
     }
 
     /// This scale's JD expressed as TT (the common pivot). `dut1 = UT1 − UTC` (s).
@@ -358,8 +364,46 @@ impl TimeScale {
                 let tdb = jd - L_B * (jd - T1977_JD) + TDB_0 / SEC_PER_DAY;
                 tdb - tdb_minus_tt(tdb) / SEC_PER_DAY
             }
-            // convert_dut1 returns early for Local, so it never reaches the pivot.
-            TimeScale::Local => unreachable!("convert_dut1 short-circuits Local"),
+            TimeScale::Local => unreachable!("convert_dut1 rejects Local conversion"),
+        }
+    }
+}
+
+impl FromStr for TimeScale {
+    type Err = FitsError;
+
+    fn from_str(s: &str) -> Result<TimeScale> {
+        let invalid = || FitsError::InvalidValue {
+            card: format!("time scale '{s}'"),
+        };
+        let value = s.trim();
+        if value.eq_ignore_ascii_case("LOCAL") {
+            return Ok(TimeScale::Local);
+        }
+        // A high-precision value appends a realization in parentheses — `TT(TAI)`,
+        // `UTC(NIST)` (§9.2.1); strip it before matching the scale name.
+        let base = match value.split_once('(') {
+            Some((base, realization))
+                if !base.trim().is_empty()
+                    && realization.ends_with(')')
+                    && realization.len() > 1
+                    && !realization[..realization.len() - 1].contains(['(', ')']) =>
+            {
+                base.trim()
+            }
+            Some(_) => return Err(invalid()),
+            None => value,
+        };
+        match base.to_ascii_uppercase().as_str() {
+            "UTC" | "GMT" => Ok(TimeScale::Utc), // §9.2.1: GMT is continuous with UTC
+            "UT1" | "UT" => Ok(TimeScale::Ut1),
+            "TAI" | "IAT" => Ok(TimeScale::Tai),
+            "TT" | "TDT" | "ET" => Ok(TimeScale::Tt),
+            "TCG" => Ok(TimeScale::Tcg),
+            "TDB" => Ok(TimeScale::Tdb),
+            "TCB" => Ok(TimeScale::Tcb),
+            "GPS" => Ok(TimeScale::Gps),
+            _ => Err(invalid()),
         }
     }
 }
@@ -461,6 +505,11 @@ fn leap_seconds(mjd: f64) -> f64 {
 
 fn calendar_day_start(year: i64, month: u32, day: u32) -> f64 {
     gregorian_to_jdn(year, month as i64, day as i64) as f64 - 0.5
+}
+
+fn fits_datetime_jd(jd: f64) -> bool {
+    jd.is_finite()
+        && (calendar_day_start(-99_999, 1, 1)..calendar_day_start(100_000, 1, 1)).contains(&jd)
 }
 
 fn utc_day_seconds(year: i64, month: u32, day: u32) -> f64 {
@@ -733,8 +782,10 @@ impl FitsTime {
         header: &Header,
         column: Option<usize>,
     ) -> Result<FitsTime> {
-        if let Some(column) = column {
-            assert_ne!(column, 0, "table columns are 1-based");
+        if column == Some(0) {
+            return Err(FitsError::OneBasedIndexRequired {
+                kind: "table column",
+            });
         }
         let scale = declared_time_scale(header)?;
         let timeunit = header.get_text("TIMEUNIT")?.unwrap_or("s").to_string();
@@ -870,8 +921,17 @@ impl FitsTime {
         axis: usize,
         pixel: &[f64],
     ) -> Result<Option<TimeCoordinate>> {
-        let axis = axis.checked_sub(1).expect("WCS axes are 1-based");
-        let metadata = wcs.view().axes.get(axis).expect("WCS axis index");
+        let zero_based = axis
+            .checked_sub(1)
+            .ok_or(FitsError::OneBasedIndexRequired { kind: "WCS axis" })?;
+        let metadata =
+            wcs.view()
+                .axes
+                .get(zero_based)
+                .ok_or(FitsError::WcsAxisIndexOutOfBounds {
+                    axis,
+                    len: wcs.view().axes.len(),
+                })?;
         if TimeAxisKind::from_ctype(&metadata.ctype) != Some(TimeAxisKind::Time) {
             return Ok(None);
         }
@@ -879,9 +939,9 @@ impl FitsTime {
         let scale = if head.eq_ignore_ascii_case("TIME") {
             self.scale
         } else {
-            TimeScale::parse(head)
+            head.parse::<TimeScale>()?
         };
-        let world = wcs.axis_world(axis, pixel)?;
+        let world = wcs.axis_world(zero_based, pixel)?;
         let unit = if world.cunit.trim().is_empty() {
             &self.timeunit
         } else {
@@ -898,7 +958,9 @@ impl FitsTime {
         axis: usize,
         alt: Option<char>,
     ) -> Result<Option<PhaseAxis>> {
-        assert_ne!(axis, 0, "WCS axes are 1-based");
+        if axis == 0 {
+            return Err(FitsError::OneBasedIndexRequired { kind: "WCS axis" });
+        }
         FitsTime::phase_axis_from_keywords(header, PhaseAxisKeywords::image(axis, alt))
     }
 
@@ -907,7 +969,11 @@ impl FitsTime {
         column: usize,
         alt: Option<char>,
     ) -> Result<Option<PhaseAxis>> {
-        assert_ne!(column, 0, "table columns are 1-based");
+        if column == 0 {
+            return Err(FitsError::OneBasedIndexRequired {
+                kind: "table column",
+            });
+        }
         FitsTime::phase_axis_from_keywords(header, PhaseAxisKeywords::pixel_list(column, alt))
     }
 
@@ -917,8 +983,14 @@ impl FitsTime {
         column: usize,
         alt: Option<char>,
     ) -> Result<Option<PhaseAxis>> {
-        assert_ne!(axis, 0, "WCS axes are 1-based");
-        assert_ne!(column, 0, "table columns are 1-based");
+        if axis == 0 {
+            return Err(FitsError::OneBasedIndexRequired { kind: "WCS axis" });
+        }
+        if column == 0 {
+            return Err(FitsError::OneBasedIndexRequired {
+                kind: "table column",
+            });
+        }
         FitsTime::phase_axis_from_keywords(
             header,
             PhaseAxisKeywords::array_column(axis, column, alt),
@@ -982,7 +1054,7 @@ impl TimeAxisKind {
             "PHASE" => Some(TimeAxisKind::Phase),
             "TIMELAG" => Some(TimeAxisKind::Timelag),
             "FREQUENCY" => Some(TimeAxisKind::Frequency),
-            _ if !matches!(TimeScale::parse(head), TimeScale::Local) => Some(TimeAxisKind::Time),
+            _ if head.parse::<TimeScale>().is_ok() => Some(TimeAxisKind::Time),
             _ => None,
         }
     }
@@ -993,12 +1065,12 @@ fn time_unit_seconds(unit: &str, reference_mjd: f64, scale: TimeScale) -> Result
         card: format!("time unit '{}'", unit.trim()),
     })?;
     let unit = scaled.base;
-    if let Some(seconds) = base_time_unit_seconds(unit, reference_mjd, scale) {
+    if let Some(seconds) = base_time_unit_seconds(unit, reference_mjd, scale)? {
         return Ok(scaled.factor * seconds);
     }
     for (prefix, factor) in unit::SI_PREFIXES {
         if let Some(base) = unit.strip_prefix(prefix)
-            && let Some(seconds) = base_time_unit_seconds(base, reference_mjd, scale)
+            && let Some(seconds) = base_time_unit_seconds(base, reference_mjd, scale)?
         {
             return Ok(scaled.factor * factor * seconds);
         }
@@ -1008,32 +1080,33 @@ fn time_unit_seconds(unit: &str, reference_mjd: f64, scale: TimeScale) -> Result
     })
 }
 
-fn base_time_unit_seconds(unit: &str, reference_mjd: f64, scale: TimeScale) -> Option<f64> {
-    match unit {
+fn base_time_unit_seconds(unit: &str, reference_mjd: f64, scale: TimeScale) -> Result<Option<f64>> {
+    Ok(Some(match unit {
         "s" => 1.0,
         "min" => 60.0,
         "h" => 3600.0,
         "d" => SEC_PER_DAY,
         "a" | "yr" => 365.25 * SEC_PER_DAY,
         "cy" => 36_525.0 * SEC_PER_DAY,
-        "ta" => tropical_year_days(reference_mjd, scale) * SEC_PER_DAY,
-        "Ba" => besselian_year_days(reference_mjd, scale) * SEC_PER_DAY,
-        _ => return None,
-    }
-    .into()
+        "ta" => tropical_year_days(reference_mjd, scale)? * SEC_PER_DAY,
+        "Ba" => besselian_year_days(reference_mjd, scale)? * SEC_PER_DAY,
+        _ => return Ok(None),
+    }))
 }
 
-fn tropical_year_days(reference_mjd: f64, scale: TimeScale) -> f64 {
-    let tdb = scale.convert(reference_mjd + MJD0, TimeScale::Tdb);
+fn tropical_year_days(reference_mjd: f64, scale: TimeScale) -> Result<f64> {
+    let tdb = scale.convert(reference_mjd + MJD0, TimeScale::Tdb)?;
     let centuries = (tdb - 2_451_545.0) / 36_525.0;
-    365.242_190_402_112_4 - 0.000_006_152_513_49 * centuries - 6.0921e-10 * centuries.powi(2)
-        + 2.6525e-10 * centuries.powi(3)
+    Ok(
+        365.242_190_402_112_4 - 0.000_006_152_513_49 * centuries - 6.0921e-10 * centuries.powi(2)
+            + 2.6525e-10 * centuries.powi(3),
+    )
 }
 
-fn besselian_year_days(reference_mjd: f64, scale: TimeScale) -> f64 {
-    let et = scale.convert(reference_mjd + MJD0, TimeScale::Tt);
+fn besselian_year_days(reference_mjd: f64, scale: TimeScale) -> Result<f64> {
+    let et = scale.convert(reference_mjd + MJD0, TimeScale::Tt)?;
     let centuries = (et - 2_415_020.0) / 36_525.0;
-    365.242_198_781_7 - 0.000_007_854_23 * centuries
+    Ok(365.242_198_781_7 - 0.000_007_854_23 * centuries)
 }
 
 /// The reference epoch as MJD: `MJDREF` (or `MJDREFI`+`MJDREFF`), else `JDREF`
@@ -1052,10 +1125,11 @@ fn reference_mjd(header: &Header, scale: TimeScale) -> Result<f64> {
 }
 
 fn declared_time_scale(header: &Header) -> Result<TimeScale> {
-    Ok(header
+    header
         .get_text("TIMESYS")?
-        .map(TimeScale::parse)
-        .unwrap_or(TimeScale::Utc))
+        .map(str::parse::<TimeScale>)
+        .transpose()
+        .map(|scale| scale.unwrap_or(TimeScale::Utc))
 }
 
 /// Resolve a reference epoch from its single (`MJDREF`) and split-precision

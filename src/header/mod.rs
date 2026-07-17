@@ -331,6 +331,21 @@ impl Header {
             .expect("internal FITS header metadata must be valid")
     }
 
+    pub(crate) fn append_filtered_from(
+        &mut self,
+        source: &Header,
+        mut keep: impl FnMut(&str) -> bool,
+    ) {
+        self.cards.extend(
+            source
+                .cards
+                .iter()
+                .filter(|card| keep(&card.keyword))
+                .cloned(),
+        );
+        self.reindex();
+    }
+
     /// Remove all cards matching `should_remove`, then rebuild the keyword index
     /// once after the bulk structural edit.
     #[cfg(feature = "compression")]
@@ -364,7 +379,6 @@ impl Header {
     }
 
     /// Rebuild the keyword → first-card index after a structural edit.
-    #[cfg(feature = "compression")]
     fn reindex(&mut self) {
         self.index.clear();
         for (i, card) in self.cards.iter().enumerate() {

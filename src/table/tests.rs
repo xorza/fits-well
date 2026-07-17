@@ -94,15 +94,20 @@ fn decodes_fixed_width_columns_from_hand_built_data() {
     }
 
     let table = BinTable::from_data(&header, data).unwrap();
-    assert_eq!(table.nrows, 2);
+    let mut metadata = table.metadata();
+    assert_eq!(metadata.nrows, 2);
     assert_eq!(
-        table
+        metadata
             .columns
             .iter()
             .map(|c| c.byte_offset)
             .collect::<Vec<_>>(),
         vec![0, 4, 12]
     );
+    metadata.nrows = usize::MAX;
+    metadata.columns = &[];
+    assert_eq!(metadata.nrows, usize::MAX);
+    assert!(metadata.columns.is_empty());
     assert_eq!(
         table.column_by_idx(0).unwrap().raw().unwrap(),
         ColumnData::I32(vec![1, 2])

@@ -809,7 +809,7 @@ fn zblank_column_overrides_keyword_per_tile() {
         (3, "ZBLANK", TformKind::F32),
     ] {
         let mut malformed = table.clone();
-        malformed.columns[column].tform.kind = kind;
+        crate::table::test_support::set_column_kind(&mut malformed, column, kind);
         assert!(matches!(
             decompress_image(&h, &malformed),
             Err(FitsError::TypeMismatch { name: actual, .. }) if actual == name
@@ -895,7 +895,11 @@ fn check_table_roundtrip(algo: &str, rows_per_tile: usize) {
     let restored = BinTable::from_data(&restored_header, restored_data).unwrap();
 
     // 3. The uncompressed table must be byte-identical to the original.
-    assert_eq!(restored.nrows, orig.nrows, "{algo}/{rows_per_tile} nrows");
+    assert_eq!(
+        restored.metadata().nrows,
+        orig.metadata().nrows,
+        "{algo}/{rows_per_tile} nrows"
+    );
     assert_eq!(
         restored.row_len, orig.row_len,
         "{algo}/{rows_per_tile} row width"
@@ -950,10 +954,10 @@ fn decodes_a_cfitsio_compressed_table() {
         .unwrap();
     let original = open("comp_table_ref.fits").read_table(1).unwrap();
 
-    assert_eq!(restored.nrows, 500);
-    assert_eq!(restored.nrows, original.nrows);
+    assert_eq!(restored.metadata().nrows, 500);
+    assert_eq!(restored.metadata().nrows, original.metadata().nrows);
     assert_eq!(restored.row_len, original.row_len);
-    assert_eq!(restored.columns.len(), 6);
+    assert_eq!(restored.metadata().columns.len(), 6);
     assert_eq!(
         restored.raw_rows().unwrap(),
         original.raw_rows().unwrap(),

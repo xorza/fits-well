@@ -93,6 +93,20 @@ pub enum FitsError {
         index: usize,
         len: usize,
     },
+    /// A WCS transform received the wrong number of pixel or world coordinates.
+    CoordinateCountMismatch {
+        expected: usize,
+        got: usize,
+    },
+    /// A 1-based FITS axis index named an axis outside the parsed WCS.
+    WcsAxisIndexOutOfBounds {
+        axis: usize,
+        len: usize,
+    },
+    /// A FITS keyword family was addressed with zero even though its indices start at 1.
+    OneBasedIndexRequired {
+        kind: &'static str,
+    },
     /// `read_image` was called on an HDU that is not an image array (a table,
     /// random-groups, or unmodelled extension).
     NotAnImage,
@@ -279,6 +293,22 @@ impl fmt::Display for FitsError {
             FitsError::HduIndexOutOfBounds { index, len } => {
                 write!(f, "HDU index {index} out of bounds (file has {len} HDUs)")
             }
+            FitsError::CoordinateCountMismatch { expected, got } => {
+                write!(
+                    f,
+                    "coordinate has {got} {} but the WCS has {expected} axes",
+                    if *got == 1 { "value" } else { "values" }
+                )
+            }
+            FitsError::WcsAxisIndexOutOfBounds { axis, len } => {
+                write!(
+                    f,
+                    "1-based WCS axis {axis} out of bounds (WCS has {len} axes)"
+                )
+            }
+            FitsError::OneBasedIndexRequired { kind } => {
+                write!(f, "{kind} indices are 1-based and cannot be zero")
+            }
             FitsError::NotAnImage => write!(f, "HDU is not an image array"),
             FitsError::ImageHasGroups => {
                 write!(
@@ -418,6 +448,25 @@ mod tests {
         assert_eq!(
             FitsError::GroupIndexOutOfBounds { index: 3, len: 2 }.to_string(),
             "group index 3 out of bounds (random-groups array has 2 groups)"
+        );
+        assert_eq!(
+            FitsError::CoordinateCountMismatch {
+                expected: 2,
+                got: 1,
+            }
+            .to_string(),
+            "coordinate has 1 value but the WCS has 2 axes"
+        );
+        assert_eq!(
+            FitsError::WcsAxisIndexOutOfBounds { axis: 3, len: 2 }.to_string(),
+            "1-based WCS axis 3 out of bounds (WCS has 2 axes)"
+        );
+        assert_eq!(
+            FitsError::OneBasedIndexRequired {
+                kind: "table column",
+            }
+            .to_string(),
+            "table column indices are 1-based and cannot be zero"
         );
         assert_eq!(
             FitsError::IntegerOutOfRange {
