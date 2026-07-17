@@ -34,8 +34,7 @@ pub struct Header {
     pub(crate) cards: Vec<Card>,
     /// First occurrence of each valued keyword → index into `cards`.
     ///
-    /// Invariant: every entry points at a card that carries a value — a
-    /// [`CardKind::Value`] or [`CardKind::Hierarch`] — in `cards`.
+    /// Invariant: every entry points at a [`CardKind::Value`] card in `cards`.
     /// Parsing builds the index alongside the card list; every mutation method
     /// either maintains or rebuilds it. Raw card mutation stays private so the
     /// two cannot be desynchronized.
@@ -91,7 +90,7 @@ impl Header {
                     if card.kind == CardKind::Continue {
                         demote_continuation(&mut card);
                     }
-                    if matches!(card.kind, CardKind::Value | CardKind::Hierarch) {
+                    if card.kind == CardKind::Value {
                         index.entry(card.keyword.clone()).or_insert(cards.len());
                     }
                     cards.push(card);
@@ -299,25 +298,10 @@ impl Header {
     /// (≤ 8 chars of `A–Z`, `0–9`, `-`, `_`) and must not be a control or
     /// commentary keyword. Text must use restricted ASCII and numeric values must
     /// have a finite FITS representation. An error leaves the header unchanged.
-    /// Names longer than eight characters or containing spaces are authored through
-    /// the registered HIERARCH convention; short names use standard FITS syntax.
     pub fn set(&mut self, keyword: &str, value: impl Into<Value>) -> Result<&mut Self> {
         let value = value.into();
-        if keyword.len() > 8 || keyword.contains(' ') {
-            self.set_card(Card::hierarch(keyword, value))
-        } else {
-            validate_valued_keyword(keyword)?;
-            self.set_card(Card::value(keyword, value))
-        }
-    }
-
-    /// Insert or replace an ESO HIERARCH convention keyword. `keyword` is the
-    /// effective compound name without the `HIERARCH ` prefix. It must be
-    /// nonempty restricted ASCII without leading/trailing spaces or `=`;
-    /// internal spaces separate hierarchy tokens. An error leaves the header
-    /// unchanged.
-    pub fn set_hierarch(&mut self, keyword: &str, value: impl Into<Value>) -> Result<&mut Self> {
-        self.set_card(Card::hierarch(keyword, value.into()))
+        validate_valued_keyword(keyword)?;
+        self.set_card(Card::value(keyword, value))
     }
 
     fn set_card(&mut self, card: Card) -> Result<&mut Self> {
@@ -356,29 +340,8 @@ impl Header {
         keyword: &str,
         value: impl Into<Value>,
     ) -> Result<&mut Self> {
-        let value = value.into();
-        let card = if keyword.len() > 8 || keyword.contains(' ') {
-            Card::hierarch(keyword, value)
-        } else {
-            validate_valued_keyword(keyword)?;
-            Card::value(keyword, value)
-        };
-        self.insert_card(index, card)
-    }
-
-    /// Append a duplicate HIERARCH valued card.
-    pub fn append_hierarch(&mut self, keyword: &str, value: impl Into<Value>) -> Result<&mut Self> {
-        self.insert_hierarch(self.cards.len(), keyword, value)
-    }
-
-    /// Insert a HIERARCH valued card at a logical record position.
-    pub fn insert_hierarch(
-        &mut self,
-        index: usize,
-        keyword: &str,
-        value: impl Into<Value>,
-    ) -> Result<&mut Self> {
-        self.insert_card(index, Card::hierarch(keyword, value.into()))
+        validate_valued_keyword(keyword)?;
+        self.insert_card(index, Card::value(keyword, value.into()))
     }
 
     fn insert_card(&mut self, index: usize, card: Card) -> Result<&mut Self> {
@@ -482,7 +445,7 @@ impl Header {
     fn reindex(&mut self) {
         self.index.clear();
         for (i, card) in self.cards.iter().enumerate() {
-            if matches!(card.kind, CardKind::Value | CardKind::Hierarch) {
+            if card.kind == CardKind::Value {
                 self.index.entry(card.keyword.clone()).or_insert(i);
             }
         }

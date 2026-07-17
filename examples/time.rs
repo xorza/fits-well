@@ -1,5 +1,5 @@
-//! Record an observation time in a FITS header, read it back, and convert between
-//! ISO-8601, Julian Date, and time scales:
+//! Record an observation time in a FITS header, read it back, and resolve its
+//! ISO-8601 and Julian Date representations:
 //!
 //! ```sh
 //! cargo run --example time
@@ -7,8 +7,9 @@
 
 use std::fs::File;
 
+use fits_well::header::Header;
 use fits_well::time::{Datetime, TimeScale};
-use fits_well::{FitsReader, FitsWriter, Header};
+use fits_well::{FitsReader, FitsWriter};
 
 fn main() -> fits_well::Result<()> {
     let path = std::env::temp_dir().join("fits_well_time.fits");
@@ -46,12 +47,12 @@ fn main() -> fits_well::Result<()> {
             .get_text("DATE-OBS")?
             .expect("example header sets DATE-OBS"),
     )?;
-    let jd = t.to_jd(timesys)?;
-    println!("DATE-OBS -> JD {:.5}, MJD {:.5}", jd, t.to_mjd(timesys)?);
-
-    // Convert that instant from the header's TIMESYS (UTC) to Terrestrial Time.
-    let jd_tt = timesys.convert(jd, "TT".parse::<TimeScale>()?)?;
-    println!("UTC -> TT differs by {:.3} s", (jd_tt - jd) * 86400.0);
+    let jd = t.to_jd(&timesys)?;
+    println!(
+        "DATE-OBS -> JD {:.5}, MJD {:.5} in {timesys:?}",
+        jd,
+        t.to_mjd(&timesys)?
+    );
 
     Ok(())
 }

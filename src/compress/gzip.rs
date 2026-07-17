@@ -12,9 +12,9 @@ use flate2::write::GzEncoder;
 
 use crate::compress::convert::be_to_i64_into;
 
-/// Default deflate level used by [`crate::Gzip::default`]. Level 1 favors write
+/// Default deflate level used by [`crate::image::Gzip::default`]. Level 1 favors write
 /// speed (gzip was the slowest compress path at the higher default); construct
-/// [`crate::Gzip::new`] or [`crate::Gzip::shuffled`] with a higher level for a
+/// [`crate::image::Gzip::new`] or [`crate::image::Gzip::shuffled`] with a higher level for a
 /// tighter ratio.
 pub(crate) const DEFAULT_GZIP_LEVEL: u32 = 1;
 

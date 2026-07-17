@@ -17,10 +17,6 @@ pub(crate) enum CardKind {
     /// the preceding value card and never stores it, so a `Continue` card never
     /// reaches the writer.
     Continue,
-    /// An ESO `HIERARCH` record (registered convention): `HIERARCH a b c = value`.
-    /// [`Card::keyword`] holds the space-joined hierarchical key (no `HIERARCH`
-    /// prefix); it is value-indexed like a [`CardKind::Value`] card.
-    Hierarch,
     /// The `END` record that terminates a header unit.
     End,
 }
@@ -33,7 +29,7 @@ pub(crate) enum CardKind {
 pub(crate) struct Card {
     /// Keyword name, trailing spaces stripped. Empty for the blank keyword.
     pub(crate) keyword: String,
-    /// Present only for [`CardKind::Value`] and [`CardKind::Hierarch`] cards.
+    /// Present only for [`CardKind::Value`] and [`CardKind::Continue`] cards.
     pub(crate) value: Option<Value>,
     /// The `/`-comment for value cards, or the whole free text for commentary
     /// cards. Trailing spaces are not significant and are stripped.
@@ -49,16 +45,6 @@ impl Card {
             value: Some(value),
             comment: None,
             kind: CardKind::Value,
-        }
-    }
-
-    /// An ESO HIERARCH convention card (`HIERARCH compound key = value`).
-    pub(crate) fn hierarch(keyword: &str, value: Value) -> Card {
-        Card {
-            keyword: keyword.to_string(),
-            value: Some(value),
-            comment: None,
-            kind: CardKind::Hierarch,
         }
     }
 
@@ -103,24 +89,6 @@ impl Card {
                 keyword,
             });
         }
-        // A HIERARCH record: `HIERARCH key path = value`. The value indicator is
-        // the first `=` (hierarchical keys never contain one). Store the
-        // space-joined key without the prefix.
-        if keyword == "HIERARCH"
-            && let Some(eq) = text.find('=')
-        {
-            let key = text[8..eq].trim();
-            if !key.is_empty() {
-                let split = split_value_comment(&text[eq + 1..]);
-                let value = parse_value(split.value_token, raw)?;
-                return Ok(Card {
-                    keyword: key.to_string(),
-                    value: Some(value),
-                    comment: split.comment,
-                    kind: CardKind::Hierarch,
-                });
-            }
-        }
         // A CONTINUE record (no value indicator; substring quoted from byte 11)
         // carries one piece of a long string. `Header::parse` folds it into the
         // preceding value card. A malformed CONTINUE falls through to commentary.
@@ -155,8 +123,7 @@ impl Card {
                 kind: CardKind::Value,
             });
         }
-        // Unknown no-value card (e.g. a HIERARCH record): treat as commentary so
-        // the file stays readable, matching the "plain reader" fallback.
+        // Unknown no-value cards remain readable as commentary.
         Ok(Card {
             kind: CardKind::Commentary,
             comment: free_text(&text[8..]),
@@ -176,22 +143,6 @@ impl Card {
 
     fn render_one(&self) -> Result<[u8; CARD_SIZE]> {
         let mut buf = [b' '; CARD_SIZE];
-        // HIERARCH lays out the whole card itself ("HIERARCH key = value"); the
-        // key has spaces and is not an 8-byte field, so it bypasses the layout below.
-        if self.kind == CardKind::Hierarch {
-            let value = format_value(self.value.as_ref().expect("HIERARCH card carries a value"));
-            let body = format!("HIERARCH {} = {value}", self.keyword);
-            write_at(&mut buf, 0, &body, &self.keyword)?;
-            if let Some(comment) = &self.comment {
-                write_at(
-                    &mut buf,
-                    body.len(),
-                    &format!(" / {comment}"),
-                    &self.keyword,
-                )?;
-            }
-            return Ok(buf);
-        }
         let kw = self.keyword.as_bytes();
         let n = kw.len().min(8);
         buf[..n].copy_from_slice(&kw[..n]);
@@ -242,7 +193,6 @@ impl Card {
                     &self.keyword,
                 )?;
             }
-            CardKind::Hierarch => unreachable!("HIERARCH is rendered before this match"),
         }
         Ok(buf)
     }
@@ -261,20 +211,16 @@ impl Card {
     }
 
     fn render_validated_into(&self, out: &mut Vec<u8>) -> Result<()> {
-        // A string value that overflows one record emits a CONTINUE chain (§4.2.1.2)
-        // instead of being truncated — for both plain value cards (value field at
-        // byte 11) and HIERARCH cards (whose `HIERARCH key = ` prefix is longer).
+        // A string value that overflows one record emits a CONTINUE chain (§4.2.1.2).
         if let Some(Value::Text(s)) = &self.value {
             let value_len = 2 + s.len() + s.bytes().filter(|&b| b == b'\'').count();
             let comment_len = self.comment.as_ref().map_or(0, |c| 3 + c.len());
             let prefix_len = match self.kind {
                 CardKind::Value => 10,
-                CardKind::Hierarch => "HIERARCH ".len() + self.keyword.len() + " = ".len(),
                 _ => usize::MAX, // other kinds never use the chain
             };
             if prefix_len != usize::MAX && prefix_len + value_len + comment_len > CARD_SIZE {
-                let hierarch = self.kind == CardKind::Hierarch;
-                render_long_string(&self.keyword, s, self.comment.as_deref(), hierarch, out)?;
+                render_long_string(&self.keyword, s, self.comment.as_deref(), out)?;
                 return Ok(());
             }
         }
@@ -289,7 +235,6 @@ impl Card {
     fn validate_contents(&self) -> Result<()> {
         match self.kind {
             CardKind::Value => validate_valued_keyword(&self.keyword)?,
-            CardKind::Hierarch => validate_hierarch_keyword(&self.keyword)?,
             CardKind::Commentary | CardKind::Continue | CardKind::End => {}
         }
         if let Some(comment) = &self.comment {
@@ -473,17 +418,6 @@ pub(crate) fn validate_valued_keyword(name: &str) -> Result<()> {
     }
 }
 
-pub(crate) fn validate_hierarch_keyword(name: &str) -> Result<()> {
-    validate_ascii(name, "HIERARCH keyword")?;
-    if !name.is_empty() && name.trim() == name && !name.contains('=') {
-        Ok(())
-    } else {
-        Err(FitsError::InvalidKeyword {
-            name: name.to_string(),
-        })
-    }
-}
-
 pub(crate) fn validate_ascii(text: &str, context: &'static str) -> Result<()> {
     if text.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
         Ok(())
@@ -526,29 +460,14 @@ fn render_long_string(
     keyword: &str,
     value: &str,
     comment: Option<&str>,
-    hierarch: bool,
     out: &mut Vec<u8>,
 ) -> Result<()> {
     // Bytes 12–79 hold the quoted substring (68 chars); reserve one for the
     // continuation `&`, leaving 67 escaped characters per continuation record.
     const PER_RECORD: usize = 67;
-    // A HIERARCH first record is `HIERARCH key = '…&'`, so its prefix shrinks the
-    // budget for that record's substring; otherwise the first record matches the
-    // 67-char continuation budget.
-    let prefix = hierarch.then(|| format!("HIERARCH {keyword} = "));
-    let first_budget = prefix
-        .as_ref()
-        .map_or(PER_RECORD, |p| CARD_SIZE.saturating_sub(p.len() + 3));
-    let mut subs = split_escaped(value, first_budget, PER_RECORD);
+    let mut subs = split_escaped(value, PER_RECORD);
     if let Some(comment) = comment {
-        let final_start = if subs.len() == 1 && hierarch {
-            prefix
-                .as_ref()
-                .expect("HIERARCH long string has a prefix")
-                .len()
-        } else {
-            10
-        };
+        let final_start = 10;
         let final_len =
             final_start + 2 + subs.last().expect("one substring").len() + 3 + comment.len();
         if final_len > CARD_SIZE {
@@ -570,12 +489,8 @@ fn render_long_string(
         } else {
             format!("'{sub}&'")
         };
-        let body_start = match (i, &prefix) {
-            (0, Some(p)) => {
-                write_at(&mut buf, 0, p, keyword)?;
-                p.len()
-            }
-            (0, None) => {
+        let body_start = match i {
+            0 => {
                 let kw = keyword.as_bytes();
                 let n = kw.len().min(8);
                 buf[..n].copy_from_slice(&kw[..n]);
@@ -606,18 +521,12 @@ fn render_long_string(
 /// Split `value` into substrings whose *escaped* form (`'` → `''`) is at most
 /// `budget` characters. Splitting on source characters keeps an escaped quote
 /// pair atomic, so a `''` never straddles a record boundary.
-fn split_escaped(value: &str, first_budget: usize, rest_budget: usize) -> Vec<String> {
+fn split_escaped(value: &str, budget: usize) -> Vec<String> {
     let mut subs = Vec::new();
     let mut cur = String::new();
     let mut len = 0;
     for ch in value.chars() {
         let w = if ch == '\'' { 2 } else { 1 };
-        // The first record may hold fewer chars (a HIERARCH prefix eats into it).
-        let budget = if subs.is_empty() {
-            first_budget
-        } else {
-            rest_budget
-        };
         if len + w > budget {
             subs.push(std::mem::take(&mut cur));
             len = 0;

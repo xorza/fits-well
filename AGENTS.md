@@ -20,15 +20,16 @@ The structural spine is built and tested: the 2880-byte block layer, an ordered
 header model (with `CONTINUE` long-string read/write), HDU classification and
 boundary sizing, a lazy seeking reader, and a header / raw-data-unit writer. The
 default build enables `compression` + `parallel` (pulling `flate2` + `rayon`), with
-opt-in `mmap` (memmap2, zero-copy memory-mapped reads) and `ndarray` (n-D array
-bridge) features off by default; `--no-default-features` gives the pure-Rust core
+opt-in `mmap` (memmap2, zero-copy memory-mapped reads) off by default;
+`--no-default-features` gives the pure-Rust core
 (block / header / HDU / reader / writer / WCS / time) — whose only unconditional
 dependencies are `bitvec` (packed `X` bit-array columns) and `num-complex`
 (`C`/`M` complex columns). Typed image read/write is done (decode/encode +
 `BSCALE`/`BZERO`). Binary and ASCII tables read and write; multi-HDU files
 (primary + `IMAGE`/`TABLE`/`BINTABLE` extensions) write; binary-table `P`/`Q` heap
-arrays and per-column `TSCAL`/`TZERO` decode; random groups read; `CONTINUE`,
-`HIERARCH`, and `CHECKSUM`/`DATASUM` (verify + write) are supported. A typed
+arrays and per-column `TSCAL`/`TZERO` decode; random groups read; normative
+`CONTINUE` and `CHECKSUM`/`DATASUM` (verify + write) are supported, while
+non-standard `HIERARCH` records remain opaque commentary. A typed
 **WCS** layer does pixel↔world for all 27 FITS 4.0 projections — zenithal
 `TAN`/`SIN`/`ARC`/`STG`/`ZEA`/`ZPN`/`AIR`, zenithal-perspective `AZP`/`SZP`,
 cylindrical `CAR`/`CEA`/`MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic
@@ -39,9 +40,10 @@ and full `PVi_m` parameters, yielding coordinates in the frame the file declares
 every Table-26 spectral/detector algorithm (`F2*`/`W2*`/`V2*`/`A2*`, `GRI`/`GRA`,
 and `LOG`), exposes per-axis spectral frame/rest metadata, and resolves
 multidimensional `-TAB` arrays through `FitsReader::read_wcs`. A typed **time**
-layer handles strict FITS ISO-8601/JD/MJD (signed years and UTC quasi-JD), epochs,
-resolved reference positions, all image/table PHASE forms, `UTC`…`TCB`/`GPS`/UT1
-scale conversions, and time WCS axes — validated against ERFA/astropy. Tiled
+layer handles strict FITS ISO-8601/JD/MJD, epochs, declared scale metadata,
+resolved reference positions, all image/table PHASE forms, and time WCS axes.
+Inter-scale chronometry remains the responsibility of a library with current
+leap-second and ephemeris data. Tiled
 **image and table** compression
 work behind
 the `compression` feature: all five image codecs (`GZIP_1`, `GZIP_2`, `RICE_1`,
@@ -84,7 +86,7 @@ cargo test --no-default-features
 cargo clippy --all-targets --no-default-features -- -D warnings
 cargo test --no-default-features --features compression
 # the opt-in (non-default) feature builds — memory-mapped reads and the n-D bridge:
-cargo clippy --all-targets --features "mmap ndarray" -- -D warnings
+cargo clippy --all-targets --features mmap -- -D warnings
 # microbench entry points (decode/encode/read_image) compile under `internals`:
 cargo clippy --all-targets --features internals -- -D warnings
 ```
@@ -159,18 +161,18 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `bitpix.rs` | `BITPIX` element type + element sizes | done |
 | `endian.rs` | big-endian scalar (de)serialization shared by image/table/compression decode + encode | done |
 | `keyword.rs` | stack-allocated indexed-keyword formatting (`key!` macro / `KeyBuf`): builds `NAXISn`/`PVi_m`/`CTYPEn`-style keys without the per-lookup `format!` heap alloc (one WCS parse does ~90) | done |
-| `header/` | ordered card model (`value.rs`, `card/`, `mod.rs`): fallible `try_*` authoring including `try_set_hierarch`, parse/render, lossless logical `CONTINUE` folding, `HIERARCH` compound keys, keyword index, typed getters | done |
+| `header/` | ordered card model (`value.rs`, `card/`, `mod.rs`): fallible standard-keyword authoring, parse/render, lossless logical `CONTINUE` folding, opaque non-standard commentary, keyword index, typed getters | done |
 | `hdu/` | role-aware HDU classification + primary/extension/random-groups data-unit sizing (Eqs. 1/2/4) | done |
-| `reader/` | HDU scan over a `Source` (`source.rs`: `StreamSource` copies, `SliceSource`/`MmapSource` borrow zero-copy); `open`/`from_bytes`/`open_mmap`; reader-bound `HduHandle` selection by index or `EXTNAME`/`EXTVER`; `read_image` (owned, transparently decompresses a `ZIMAGE` `CompressedImage`)/`read_image_view(idx, &mut Vec<u64>)` (`BorrowedImage` metadata + `ImageView` swapped into caller-owned scratch); N-D image sections with selected compressed tiles; source-bound binary-table schema/cell/column/row/range reads; `read_wcs` (including referenced `-TAB` BINTABLE arrays)/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_table`/`verify_checksum`, raw `DataUnit`; source recovery via `into_inner`/`into_bytes` | done |
+| `reader/` | HDU scan over a `Source` (`source.rs`: `StreamSource` copies, `SliceSource`/`MmapSource` borrow zero-copy); `open`/`from_bytes`/`open_mmap`; indexed operations plus `EXTNAME`/`EXTVER` lookup through `hdu_index`; `read_image` (owned, transparently decompresses a `ZIMAGE` `CompressedImage`)/`read_image_view(idx, &mut Vec<u64>)` (`BorrowedImage` metadata + `ImageView` swapped into caller-owned scratch); N-D image sections with selected compressed tiles; source-bound binary-table schema/cell/column/row/range reads; `read_wcs` (including referenced `-TAB` BINTABLE arrays)/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_table`/`verify_checksum`, raw `DataUnit`; source recovery via `into_inner`/`into_bytes` | done |
 | `writer/` | multi-HDU writer: simple/scaled typed images; inferred `TableBuilder`/`AsciiTableBuilder` writes (fixed + `P`/`Q` VLAs, including jagged bit arrays); typed image/table compression; informational header templates; checksums; separate seekable `ImageStream` for incremental large output | done |
-| `data/` | typed owned `Image`/`ImageData`/`ReadImage` (zero-copy raw plane) + scratch-backed `BorrowedImage` (`ImageMetadata` + `ImageView` over caller-owned aligned storage), big-endian decode+encode (`encode_into` reuses the writer's buffer), `BSCALE`/`BZERO` physical plane + `SampleType`/`UnsignedData` resolution; `ImageArray` n-D bridge (feature `ndarray`, FITS axis order) | image read+write done; the read-loop lever is `read_image_view`→`BorrowedImage` — owned `read_image().decode()` is page-fault-bound (~65% of cycles, profiled), so the view byte-swaps into a reused scratch (no per-call alloc, ~4–5×; `BITPIX = 8` is zero-copy). The swap itself is write-allocate/RFO-bound (~8–9 GiB/s); SIMD does **not** help it (AVX2/blocked variants measured slower) — so no SIMD-swap TODO |
+| `data/` | typed owned `Image`/`ImageData`/`ReadImage` (zero-copy raw plane) + scratch-backed `BorrowedImage` (`ImageMetadata` + `ImageView` over caller-owned aligned storage), big-endian decode+encode (`encode_into` reuses the writer's buffer), `BSCALE`/`BZERO` physical plane + `SampleType`/`UnsignedData` resolution | image read+write done; the read-loop lever is `read_image_view`→`BorrowedImage` — owned `read_image().decode()` is page-fault-bound (~65% of cycles, profiled), so the view byte-swaps into a reused scratch (no per-call alloc, ~4–5×; `BITPIX = 8` is zero-copy). The swap itself is write-allocate/RFO-bound (~8–9 GiB/s); SIMD does **not** help it (AVX2/blocked variants measured slower) — so no SIMD-swap TODO |
 | `table/` | `BINTABLE` parsing (`Tform`/`Column`); per-column `ColumnReader` handles decode on demand to `ColumnData` (`BitColumn` for `X`, `num-complex` for `C`/`M`), `TSCAL`/`TZERO` physical planes including complex and exact unsigned P/Q heap VLAs | read done (write in `writer/`) |
 | `ascii/` | `TABLE` (ASCII) read: `TBCOLn`/Fortran `TFORMn` → `AsciiColumn`/nullable `AsciiColumnData` (preserves `TNULLn`) | read done (write in `writer/`) |
 | `groups/` | random-groups (§6) read: exact typed per-group parameter/array `RandomGroupView` plus `PSCALn`/`PZEROn` physical values | read done (no write — deprecated) |
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode; verification distinguishes absent, unknown, valid, and invalid assertions | done |
 | `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3); `decode.rs` reassembles + dequantizes tiles into the image, `encode.rs` the integer + float encoders, `mod.rs` the typed `Compression`/`CompressionOptions` API, shared `ImageCodec` dispatch, and `P`→`Q` descriptor threshold (`needs_wide`); `geometry` handles N-d tiling; `convert` shares byte/`i64`/`f64` conversions; `map_tiles` fans independent codec work across rayon | all 5 image codecs read+write; float quant all 3 dither methods via validated shared options + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode + typed lossy `SCALE>0` write; fixed-width table compression read+write; tile-parallel ((de)compress, image + table) |
 | `wcs/` | typed WCS: keyword parse, declared celestial/spectral frame metadata, linear transform (PC/CD/CROTA + `PVi_m` + inverse), all 27 FITS 4.0 projections (including cube TSC/CSC/QSC and parameterized HPX) via general pole computation, every Table-26 spectral/detector algorithm, generic `LOG`, and BINTABLE-backed multidimensional `TAB`, with complete `pixel_to_world`/`world_to_pixel`; unsupported conventions remain readable and make complete transforms return `UnsupportedWcsTransform` | standard algorithms done (`XPH` convention and inter-frame transforms out of scope) |
-| `time/` | typed time (§9): `Datetime` (strict unsigned-four/signed-five ISO-8601↔scale-aware JD/MJD, leap-second-preserving UTC quasi-JD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), typed `TREFPOS`/`TRPOSn`, all PHASE keyword forms with fallible folding, fallible prefixed FITS time units, `FitsTime` header view + PC/CD-coupled time WCS axes with per-axis unit/scale overrides | v2 done |
+| `time/` | typed time (§9): `Datetime` (strict unsigned-four/signed-five ISO-8601 and same-frame JD/MJD), private numeric J/B epoch interpretation, preserved recognized/realized/local scale declarations, typed `TREFPOS`/`TRPOSn`, all PHASE keyword forms, fallible prefixed FITS time units, `FitsTime` header view + PC/CD-coupled time WCS axes with per-axis unit/scale overrides | done |
 | `error.rs` | `FitsError` + `Result` | done |
 
 `lib.rs` is the only place that defines the public surface (`pub use`). Card
@@ -220,11 +222,9 @@ Design principles specific to this crate:
 - **Feature-flag the layers that carry a dependency — but they're on by default.**
   Tiled compression pulls in `flate2` (`compression` feature) and tile parallelism
   pulls in `rayon` (`parallel`, which implies `compression`); both are in the
-  default feature set for batteries-included performance. Two further opt-in
-  features carry a dependency but stay *off* by default: `mmap` (memmap2) adds
-  zero-copy memory-mapped read sources (`FitsReader::open_mmap`/`MmapSource`), and
-  `ndarray` (ndarray) adds the n-D array bridge (`ReadImage`/`Image` → `ImageArray` /
-  physical `ArrayD<f64>`). WCS (§8) and time (§9) are
+  default feature set for batteries-included performance. The further opt-in
+  `mmap` feature (memmap2) adds zero-copy memory-mapped read sources
+  (`FitsReader::open_mmap`/`MmapSource`). WCS (§8) and time (§9) are
   dependency-free pure math and always compiled. `--no-default-features` yields the
   pure-Rust core, whose only unconditional dependencies are `bitvec` (packed `X`
   bit-array columns) and `num-complex` (`C`/`M` complex columns) — both back core
@@ -252,10 +252,10 @@ FITS is full of fiddly invariants that silent bugs hide in — test them explici
 
 Real files lean on a few near-ubiquitous conventions — `CONTINUE` long strings
 (now normative, §4.2.1.2), `CHECKSUM`/`DATASUM` integrity keywords (§4.4.2.7 +
-Appendix J), and the registered `HIERARCH` long-keyword convention. These are
+Appendix J), plus the registered `HIERARCH` long-keyword convention. These are
 covered in `docs/refs/08-conventions.md`; the full registry (Green Bank,
 inheritance, ESO, …) is at <https://fits.gsfc.nasa.gov/fits_registry.html>.
-All three are implemented: `CONTINUE` long strings (read + write), `HIERARCH`
-compound keywords (parsed to a space-joined key, read + write), and
-`CHECKSUM`/`DATASUM` (verify on read; solve + write via `with_checksums`).
-Purely-registered conventions beyond these stay optional, feature-flagged layers.
+The standard mechanisms are implemented: `CONTINUE` long strings (read + write)
+and `CHECKSUM`/`DATASUM` (verify on read; solve + write via `with_checksums`).
+`HIERARCH` input is preserved as opaque commentary but is neither interpreted nor
+authored. Registered conventions remain outside the normative core.

@@ -2,7 +2,7 @@
 //!
 //! Indexed keywords (`NAXIS3`, `PV2_15`, `CD1_2`, `CTYPE1`) are looked up
 //! constantly while reading and writing. Building each with `format!` heap-
-//! allocates a throwaway `String` per lookup — a single [`crate::Wcs`] parse does
+//! allocates a throwaway `String` per lookup — a single [`crate::wcs::Wcs`] parse does
 //! ~90 of them. A conforming keyword is at most 8 bytes, so [`KeyBuf`] formats it
 //! into a fixed stack buffer instead; use the [`key!`] macro exactly like
 //! `format!` and call `.as_str()` on the result.

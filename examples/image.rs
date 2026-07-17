@@ -7,8 +7,8 @@
 
 use std::fs::File;
 
-use fits_well::image::ImageView;
-use fits_well::{FitsReader, FitsWriter, Image, ImageData, Scaling};
+use fits_well::image::{Image, ImageData, ImageView, Scaling};
+use fits_well::{FitsReader, FitsWriter};
 
 /// Identity scaling: physical value = stored, no blanks — the common case.
 const IDENTITY: Scaling = Scaling {

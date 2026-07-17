@@ -121,7 +121,7 @@ impl RandomGroups {
 
     /// Elements in one group's array — `Π NAXIS2..NAXISm`, the FITS Eq. 2 product.
     /// With no array axis (`NAXIS = 1`) this is the empty product `1`, not `0`,
-    /// matching how [`crate::hdu`]'s `data_extent` sizes the group (one array element
+    /// matching the HDU data-extent calculation (one array element
     /// per group); `shape_product`'s image-specific "empty ⇒ 0" rule must *not* be
     /// used here, or the two disagree and a `NAXIS = 1` group fails the size check.
     pub fn array_len(&self) -> usize {

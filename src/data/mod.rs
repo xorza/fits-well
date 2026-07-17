@@ -104,7 +104,7 @@ impl ImageData {
     /// Decode the raw, big-endian data unit into host-endian typed samples.
     /// `bytes` is the unpadded data (a whole number of `bitpix` elements); the
     /// fill past the data range must already be sliced off (see
-    /// [`crate::DataUnit::data`]).
+    /// [`crate::io::DataUnit::data`]).
     pub(crate) fn decode(bytes: &[u8], bitpix: Bitpix) -> ImageData {
         assert_eq!(
             bytes.len() % bitpix.elem_size(),
@@ -224,10 +224,10 @@ fn unsigned_from_be(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Option<U
 /// A borrowed, host-endian view of FITS array samples, tagged by `BITPIX` — the
 /// zero-/low-copy counterpart to the owned [`ImageData`]. It is returned by
 /// [`Image::stored`], [`crate::FitsReader::read_image_view`], and
-/// [`crate::RandomGroupView`] to expose stored samples without copying.
+/// [`crate::io::RandomGroupView`] to expose stored samples without copying.
 /// Match it exactly like [`ImageData`]. A reader image view borrows reused decode
 /// scratch (or the source bytes for `BITPIX = 8`) and therefore lasts only until
-/// the next read; a random-group view borrows its owning [`crate::RandomGroups`].
+/// the next read; a random-group view borrows its owning [`crate::io::RandomGroups`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ImageView<'a> {
     U8(&'a [u8]),
@@ -610,7 +610,7 @@ impl SampleType {
 /// columns, with unit scale and the matching sign-bit offset. Values are exact (no
 /// `f64` rounding), recovered by flipping the stored sign bit. Returned directly
 /// for images and fixed columns, and once per jagged row by
-/// [`crate::ColumnReader::vla_unsigned`].
+/// [`crate::table::ColumnReader::vla_unsigned`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsignedData {
     /// `BITPIX = 8`, `BZERO = -128`: stored `u8` → `i8`.
@@ -848,7 +848,7 @@ impl Scaling {
         blank: None,
     };
 
-    /// The public entry point is [`Header::scaling`](crate::Header::scaling).
+    /// The public entry point is [`Header::scaling`](crate::header::Header::scaling).
     pub(crate) fn from_header(header: &Header) -> Result<Scaling> {
         Ok(Scaling {
             bscale: header.get_real("BSCALE")?.unwrap_or(1.0),
@@ -911,99 +911,6 @@ impl Scaling {
     /// `true` when decoding needs no arithmetic — just an endian swap or copy.
     pub fn is_identity(&self) -> bool {
         self.bscale == 1.0 && self.bzero == 0.0
-    }
-}
-
-/// An image as an N-dimensional [`ndarray`] array, tagged by element type — the n-D
-/// analog of [`ImageData`], from [`Image::into_ndarray`] / [`ReadImage::to_ndarray`].
-/// Requires the `ndarray` feature.
-///
-/// Axes are in **FITS order** (axis 0 = `NAXIS1`, the fastest-varying), so a 2-D image
-/// indexes `arr[[x, y]]`. For the NumPy/Astropy `arr[[y, x]]` convention call
-/// `.reversed_axes()` — a zero-copy stride swap.
-#[cfg(feature = "ndarray")]
-#[derive(Debug, Clone, PartialEq)]
-pub enum ImageArray {
-    U8(ndarray::ArrayD<u8>),
-    I16(ndarray::ArrayD<i16>),
-    I32(ndarray::ArrayD<i32>),
-    I64(ndarray::ArrayD<i64>),
-    F32(ndarray::ArrayD<f32>),
-    F64(ndarray::ArrayD<f64>),
-}
-
-/// Wrap a flat, FITS-ordered buffer (axis 1 fastest) in an [`ndarray`] without
-/// copying — a Fortran-order array so `arr[[i1, i2, …]]` maps to the right element.
-/// `NAXIS = 0` (no pixels) becomes an empty 1-D array.
-#[cfg(feature = "ndarray")]
-fn fortran_array<T>(shape: &[usize], data: Vec<T>) -> ndarray::ArrayD<T> {
-    use ndarray::ShapeBuilder as _;
-    let dims: Vec<usize> = if shape.is_empty() {
-        vec![0]
-    } else {
-        shape.to_vec()
-    };
-    ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&dims).f(), data)
-        .expect("decoded buffer length equals the axis product")
-}
-
-#[cfg(feature = "ndarray")]
-impl ImageData {
-    /// Move the samples into a typed N-d [`ImageArray`] of `shape` (FITS axis order,
-    /// fastest first) — zero-copy: the backing `Vec` is reused, not cloned.
-    pub fn into_ndarray(self, shape: &[usize]) -> Result<ImageArray> {
-        let expected = shape_product(shape)?;
-        let got = self.len();
-        if got != expected {
-            return Err(FitsError::DataSizeMismatch { expected, got });
-        }
-        Ok(match self {
-            ImageData::U8(v) => ImageArray::U8(fortran_array(shape, v)),
-            ImageData::I16(v) => ImageArray::I16(fortran_array(shape, v)),
-            ImageData::I32(v) => ImageArray::I32(fortran_array(shape, v)),
-            ImageData::I64(v) => ImageArray::I64(fortran_array(shape, v)),
-            ImageData::F32(v) => ImageArray::F32(fortran_array(shape, v)),
-            ImageData::F64(v) => ImageArray::F64(fortran_array(shape, v)),
-        })
-    }
-}
-
-#[cfg(feature = "ndarray")]
-impl ReadImage<'_> {
-    /// The physical plane as an N-d `f64` array (`BZERO + BSCALE × sample`, `BLANK` →
-    /// `NaN`), in FITS axis order — index `arr[[x, y]]`.
-    pub fn physical_array(&self) -> ndarray::ArrayD<f64> {
-        fortran_array(&self.shape, self.physical())
-    }
-
-    /// The samples as a typed N-d [`ImageArray`], in FITS axis order. Decodes into an
-    /// owned buffer first (the array then owns it, no further copy).
-    pub fn into_ndarray(self) -> ImageArray {
-        let ReadImage { shape, data, .. } = self;
-        let samples = match data {
-            ImageBytes::Raw { bytes, bitpix } => ImageData::decode(bytes, bitpix),
-            ImageBytes::Decoded(samples) => samples,
-        };
-        samples
-            .into_ndarray(&shape)
-            .expect("raw image data matches its validated geometry")
-    }
-}
-
-#[cfg(feature = "ndarray")]
-impl Image {
-    /// The physical plane as an N-d `f64` array (`BZERO + BSCALE × sample`, `BLANK` →
-    /// `NaN`), in FITS axis order — index `arr[[x, y]]`.
-    pub fn physical_array(&self) -> ndarray::ArrayD<f64> {
-        fortran_array(&self.shape, self.physical())
-    }
-
-    /// Move the samples into a typed N-d [`ImageArray`], in FITS axis order — zero-copy.
-    pub fn into_ndarray(self) -> ImageArray {
-        let Image { shape, samples, .. } = self;
-        samples
-            .into_ndarray(&shape)
-            .expect("image data matches its validated geometry")
     }
 }
 

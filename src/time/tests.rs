@@ -12,30 +12,10 @@ fn iso_to_jd_and_mjd_match_astropy() {
     ];
     for &(s, jd, mjd) in cases {
         let d = Datetime::parse(s).unwrap();
-        let got_jd = d.to_jd(TimeScale::Utc).unwrap();
-        let got_mjd = d.to_mjd(TimeScale::Utc).unwrap();
+        let got_jd = d.to_jd(&TimeScale::Utc).unwrap();
+        let got_mjd = d.to_mjd(&TimeScale::Utc).unwrap();
         assert!((got_jd - jd).abs() < 1e-7, "{s}: jd {got_jd} vs {jd}",);
         assert!((got_mjd - mjd).abs() < 1e-7, "{s}: mjd {got_mjd} vs {mjd}",);
-    }
-}
-
-#[test]
-fn datetime_round_trips_through_jd() {
-    for s in [
-        "2024-02-29T06:30:15.5",
-        "1900-01-01T00:00:00",
-        "2000-01-01T12:00:00",
-    ] {
-        let d = Datetime::parse(s).unwrap();
-        let back = Datetime::from_jd(d.to_jd(TimeScale::Utc).unwrap(), TimeScale::Utc).unwrap();
-        assert_eq!(
-            (back.year, back.month, back.day),
-            (d.year, d.month, d.day),
-            "{s}"
-        );
-        assert_eq!((back.hour, back.minute), (d.hour, d.minute), "{s}");
-        // Single-f64 JD at this epoch resolves the second to ~0.1 ms.
-        assert!((back.second - d.second).abs() < 1e-3, "{s} second");
     }
 }
 
@@ -59,19 +39,6 @@ fn rejects_malformed_datetimes() {
         header.obs_mjd(),
         Err(FitsError::InvalidValue { card }) if card == "DATE '2024-13-01'"
     ));
-
-    for jd in [
-        f64::NAN,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        calendar_day_start(-99_999, 1, 1) - 1.0,
-        calendar_day_start(100_000, 1, 1),
-    ] {
-        assert!(matches!(
-            Datetime::from_jd(jd, TimeScale::Tt),
-            Err(FitsError::InvalidValue { .. })
-        ));
-    }
 }
 
 #[test]
@@ -98,16 +65,11 @@ fn iso_8601_strictness() {
     for (text, year) in [("-99999-01-01", -99999), ("+99999-12-31", 99999)] {
         let datetime = Datetime::parse(text).unwrap();
         assert_eq!(datetime.year, year);
-        let round_trip =
-            Datetime::from_jd(datetime.to_jd(TimeScale::Tt).unwrap(), TimeScale::Tt).unwrap();
-        assert_eq!(
-            (round_trip.year, round_trip.month, round_trip.day),
-            (datetime.year, datetime.month, datetime.day)
-        );
+        assert!(datetime.to_jd(&TimeScale::Tt).unwrap().is_finite());
     }
     let mut outside_fits_range = Datetime::parse("+99999-12-31").unwrap();
     outside_fits_range.year = 100000;
-    assert!(outside_fits_range.to_jd(TimeScale::Tt).is_err());
+    assert!(outside_fits_range.to_jd(&TimeScale::Tt).is_err());
 }
 
 #[test]
@@ -120,118 +82,62 @@ fn signed_gregorian_years_use_floor_division() {
     ];
     for (text, expected_jd) in cases {
         let date = Datetime::parse(text).unwrap();
-        assert_eq!(date.to_jd(TimeScale::Tt).unwrap(), expected_jd, "{text}");
-        let round_trip = Datetime::from_jd(expected_jd, TimeScale::Tt).unwrap();
-        assert_eq!(round_trip, date, "{text}");
+        assert_eq!(date.to_jd(&TimeScale::Tt).unwrap(), expected_jd, "{text}");
     }
 }
 
 #[test]
-fn utc_leap_second_matches_erfa_and_remains_distinct() {
-    let cases = [
-        (
-            "2016-12-31T23:59:59",
-            2_457_754.499_976_852,
-            2_457_754.500_405_092_7,
-        ),
-        (
-            "2016-12-31T23:59:60",
-            2_457_754.499_988_426,
-            2_457_754.500_416_666_7,
-        ),
-        ("2017-01-01T00:00:00", 2_457_754.5, 2_457_754.500_428_240_7),
-    ];
-    let mut tai = Vec::new();
-    for (text, erfa_utc, erfa_tai) in cases {
-        let datetime = Datetime::parse(text).unwrap();
-        let utc = datetime.to_jd(TimeScale::Utc).unwrap();
-        assert!((utc - erfa_utc).abs() < 5e-10, "{text}: UTC JD {utc:.12}");
-        let converted = TimeScale::Utc.convert(utc, TimeScale::Tai).unwrap();
-        assert!(
-            (converted - erfa_tai).abs() < 5e-10,
-            "{text}: TAI JD {converted:.12}"
-        );
-        tai.push(converted);
-    }
-    assert!(((tai[1] - tai[0]) * SEC_PER_DAY - 1.0).abs() < 1e-4);
-    assert!(((tai[2] - tai[1]) * SEC_PER_DAY - 1.0).abs() < 1e-4);
-
-    let leap = Datetime::from_jd(cases[1].1, TimeScale::Utc).unwrap();
-    assert_eq!(
-        (leap.year, leap.month, leap.day, leap.hour, leap.minute),
-        (2016, 12, 31, 23, 59)
-    );
-    assert!((leap.second - 60.0).abs() < 1e-4);
-}
-
-#[test]
-fn leap_second_labels_require_the_actual_utc_final_minute() {
+fn leap_second_labels_require_utc_and_external_time_data() {
     for (text, scale) in [
-        ("2016-12-30T23:59:60", TimeScale::Utc),
         ("2016-12-31T12:00:60", TimeScale::Utc),
         ("2016-12-31T23:59:60", TimeScale::Tai),
     ] {
         let datetime = Datetime::parse(text).unwrap();
         assert!(matches!(
-            datetime.to_jd(scale),
+            datetime.to_jd(&scale),
             Err(FitsError::InvalidValue { .. })
         ));
     }
 
-    for transition in LEAP_SECONDS.windows(2) {
-        assert_eq!(transition[1].3 - transition[0].3, 1.0);
-        let (year, month, day, _) = transition[1];
-        let transition_jdn = gregorian_to_jdn(year, month, day);
-        let insertion_date = jdn_to_gregorian(transition_jdn - 1);
-        let leap = Datetime {
-            year: insertion_date.year,
-            month: insertion_date.month,
-            day: insertion_date.day,
-            hour: 23,
-            minute: 59,
-            second: 60.0,
-        };
-        assert!(leap.to_jd(TimeScale::Utc).is_ok(), "{leap:?}");
-
-        let ordinary_day = Datetime {
-            year,
-            month: month as u32,
-            day: day as u32,
-            hour: 23,
-            minute: 59,
-            second: 60.0,
-        };
-        assert!(
-            ordinary_day.to_jd(TimeScale::Utc).is_err(),
-            "{ordinary_day:?}"
-        );
-    }
+    let leap = Datetime::parse("2030-06-30T23:59:60").unwrap();
+    assert!(matches!(
+        leap.to_jd(&TimeScale::Utc),
+        Err(FitsError::ExternalTimeDataRequired { .. })
+    ));
 }
 
 #[test]
 fn header_datetimes_use_the_declared_scale() {
     use crate::header::Header;
 
-    let erfa_mjd = 2_457_754.499_988_426 - MJD0;
     let mut header = Header::new();
+    header
+        .set_internal("TIMESYS", "MET")
+        .set_internal("DATEREF", "2017-01-01T00:00:00")
+        .set_internal("DATE-OBS", "2017-01-01T00:00:00")
+        .set_internal("DATE-END", "2017-01-02T00:00:00");
+    let time = header.time().unwrap();
+    assert_eq!(time.scale, TimeScale::Local("MET".to_string()));
+    assert_eq!(time.mjdref, 57_754.0);
+    assert_eq!(header.obs_mjd().unwrap(), Some(57_754.0));
+    assert_eq!(header.time_bounds().unwrap().end_mjd, Some(57_755.0));
+
     header
         .set_internal("TIMESYS", "UTC")
         .set_internal("DATEREF", "2016-12-31T23:59:60")
         .set_internal("DATE-OBS", "2016-12-31T23:59:60")
         .set_internal("DATE-END", "2016-12-31T23:59:60");
-    assert!((header.time().unwrap().mjdref - erfa_mjd).abs() < 5e-10);
-    assert!((header.obs_mjd().unwrap().unwrap() - erfa_mjd).abs() < 5e-10);
-    assert!((header.time_bounds().unwrap().end_mjd.unwrap() - erfa_mjd).abs() < 5e-10);
-
-    header.set_internal("TIMESYS", "TAI");
-    assert!(matches!(header.time(), Err(FitsError::InvalidValue { .. })));
+    assert!(matches!(
+        header.time(),
+        Err(FitsError::ExternalTimeDataRequired { .. })
+    ));
     assert!(matches!(
         header.obs_mjd(),
-        Err(FitsError::InvalidValue { .. })
+        Err(FitsError::ExternalTimeDataRequired { .. })
     ));
     assert!(matches!(
         header.time_bounds(),
-        Err(FitsError::InvalidValue { .. })
+        Err(FitsError::ExternalTimeDataRequired { .. })
     ));
 }
 
@@ -270,7 +176,7 @@ fn reads_bound_duration_and_error_keywords() {
     assert_eq!(b.beg_mjd, Some(58000.0));
     let end = Datetime::parse("2017-09-05T00:00:00")
         .unwrap()
-        .to_mjd(TimeScale::Utc)
+        .to_mjd(&TimeScale::Utc)
         .unwrap();
     assert!((b.end_mjd.unwrap() - end).abs() < 1e-9); // resolved from DATE-END
     assert_eq!(b.avg_mjd, Some(58000.5)); // §9.5 midpoint
@@ -287,46 +193,6 @@ fn reads_bound_duration_and_error_keywords() {
 }
 
 #[test]
-fn gti_intervals_convert_to_absolute_mjd() {
-    use crate::header::Header;
-    let mut h = Header::new();
-    h.set_internal("MJDREF", 58000.0);
-    h.set_internal("TIMEUNIT", "d");
-    let t = FitsTime::from_header(&h).unwrap();
-    let gtis = t.gti_intervals(&[0.0, 2.0], &[1.0, 3.0]).unwrap();
-    assert_eq!(
-        gtis,
-        vec![
-            GtiInterval {
-                start_mjd: 58000.0,
-                stop_mjd: 58001.0,
-            },
-            GtiInterval {
-                start_mjd: 58002.0,
-                stop_mjd: 58003.0,
-            },
-        ]
-    );
-
-    assert!(matches!(
-        t.gti_intervals(&[0.0, 2.0], &[1.0]),
-        Err(FitsError::DataSizeMismatch {
-            expected: 2,
-            got: 1,
-        })
-    ));
-
-    let mut milliseconds = Header::new();
-    milliseconds
-        .set_internal("MJDREF", 58000.0)
-        .set_internal("TIMEUNIT", "ms");
-    let milliseconds = FitsTime::from_header(&milliseconds).unwrap();
-    let gti = milliseconds.gti_intervals(&[0.0], &[1000.0]).unwrap()[0];
-    assert_eq!(gti.start_mjd, 58000.0);
-    assert!((gti.stop_mjd - (58000.0 + 1.0 / SEC_PER_DAY)).abs() < 1e-12);
-}
-
-#[test]
 fn classifies_time_related_axes() {
     use TimeAxisKind::*;
     assert_eq!(TimeAxisKind::from_ctype("TIME"), Some(Time));
@@ -339,7 +205,7 @@ fn classifies_time_related_axes() {
 }
 
 #[test]
-fn reads_phase_axis_and_folds() {
+fn reads_phase_axis_metadata() {
     use crate::error::FitsError;
     use crate::header::Header;
     let mut h = Header::new();
@@ -365,8 +231,6 @@ fn reads_phase_axis_and_folds() {
     let image = h.phase_axis(2, None).unwrap().unwrap();
     assert_eq!(image.zero_phase, 5.0);
     assert_eq!(image.period, Some(2.0));
-    assert_eq!(image.fold(8.0).unwrap(), 0.5);
-    assert_eq!(image.fold(5.0).unwrap(), 0.0);
 
     let alternate = h.phase_axis(2, Some('A')).unwrap().unwrap();
     assert_eq!(
@@ -412,20 +276,8 @@ fn reads_phase_axis_and_folds() {
         .set_internal("CZPHS4", 23.0);
     let varying = h.phase_axis(4, None).unwrap().unwrap();
     assert_eq!(varying.period, None);
-    assert!(matches!(
-        varying.fold(30.0),
-        Err(FitsError::InvalidValue { card }) if card.contains("no constant CPERI")
-    ));
     h.set_internal("CPERI4", 0.0);
     assert_eq!(h.phase_axis(4, None).unwrap().unwrap().period, None);
-    let overflow = PhaseAxis {
-        zero_phase: 0.0,
-        period: Some(f64::MIN_POSITIVE),
-    };
-    assert!(matches!(
-        overflow.fold(f64::MAX),
-        Err(FitsError::InvalidValue { card }) if card.contains("overflowed")
-    ));
 
     h.set_internal("CTYPE6", "PHASE");
     assert!(matches!(
@@ -447,122 +299,20 @@ fn obs_mjd_falls_back_to_jepoch() {
 }
 
 #[test]
-fn epochs_match_astropy() {
-    let cases: &[(&str, f64)] = &[
-        ("J2000.0", 2451545.0),
-        ("B1950.0", 2433282.42345905),
-        ("J2015.5", 2457206.375),
-        ("B1900.0", 2415020.31352),
+fn numeric_epochs_match_astropy() {
+    let cases: &[(Epoch, f64)] = &[
+        (Epoch::Julian(2000.0), 2451545.0),
+        (Epoch::Besselian(1950.0), 2433282.42345905),
+        (Epoch::Julian(2015.5), 2457206.375),
+        (Epoch::Besselian(1900.0), 2415020.31352),
     ];
-    for &(s, jd) in cases {
-        let e = Epoch::parse(s).unwrap();
-        assert!((e.to_jd() - jd).abs() < 1e-5, "{s}: {} vs {jd}", e.to_jd());
-    }
-}
-
-#[test]
-fn scale_conversions_match_astropy() {
-    // `convert` works in Julian Date; the golden values are astropy MJD in each
-    // scale at UTC MJD 60462.0 (2024-06-01), given as the day-fraction beyond
-    // 60462 (which `f64` represents without excess precision).
-    const MJD0: f64 = 2_400_000.5;
-    const BASE: f64 = 60462.0;
-    let utc_jd = BASE + MJD0;
-    let cases: &[(TimeScale, f64)] = &[
-        (TimeScale::Tai, 0.000428240739),
-        (TimeScale::Tt, 0.000800740738),
-        (TimeScale::Tcg, 0.000812810154),
-        (TimeScale::Tdb, 0.000800751230),
-        (TimeScale::Tcb, 0.001069271013),
-        (TimeScale::Gps, 0.000208333331),
-    ];
-    for &(scale, want_frac) in cases {
-        let got_frac = TimeScale::Utc.convert(utc_jd, scale).unwrap() - MJD0 - BASE;
+    for &(epoch, jd) in cases {
         assert!(
-            (got_frac - want_frac).abs() < 1e-9,
-            "UTC→{scale:?}: {got_frac:.12} vs {want_frac:.12} (Δ={:.2e} s)",
-            (got_frac - want_frac) * 86400.0
-        );
-        // Round-trip back to UTC.
-        let back = scale
-            .convert(BASE + want_frac + MJD0, TimeScale::Utc)
-            .unwrap()
-            - MJD0;
-        assert!(
-            (back - BASE).abs() < 1e-9,
-            "{scale:?}→UTC round-trip: {back}"
+            (epoch.to_jd() - jd).abs() < 1e-5,
+            "{epoch:?}: {} vs {jd}",
+            epoch.to_jd()
         );
     }
-}
-
-#[test]
-fn local_and_non_finite_time_conversions_are_rejected() {
-    let jd = 2_460_462.5;
-    assert_eq!(TimeScale::Local.convert(jd, TimeScale::Local).unwrap(), jd);
-    for result in [
-        TimeScale::Local.convert(jd, TimeScale::Utc),
-        TimeScale::Utc.convert(jd, TimeScale::Local),
-        TimeScale::Utc.convert(f64::NAN, TimeScale::Tai),
-        TimeScale::Utc.convert(f64::INFINITY, TimeScale::Tai),
-        TimeScale::Utc.convert(f64::MAX, TimeScale::Tai),
-        TimeScale::Utc.convert_dut1(jd, TimeScale::Ut1, f64::NAN),
-    ] {
-        assert!(matches!(result, Err(FitsError::InvalidValue { .. })));
-    }
-}
-
-#[test]
-fn tai_to_utc_selects_leap_offset_at_the_utc_instant() {
-    let utc_transition = Datetime::parse("2017-01-01T00:00:00")
-        .unwrap()
-        .to_jd(TimeScale::Utc)
-        .unwrap();
-    // A TAI label ten seconds after UTC midnight still represents 23:59:34 UTC,
-    // where TAI−UTC was 36 s. Looking up the leap count at the TAI label would
-    // switch to 37 s six seconds too early.
-    let tai = utc_transition + 10.0 / SEC_PER_DAY;
-    let expected_utc = Datetime::parse("2016-12-31T23:59:34")
-        .unwrap()
-        .to_jd(TimeScale::Utc)
-        .unwrap();
-    let utc = TimeScale::Tai.convert(tai, TimeScale::Utc).unwrap();
-    assert!((utc - expected_utc).abs() * SEC_PER_DAY < 1e-5);
-
-    let dut1 = 0.25;
-    let ut1 = TimeScale::Tai
-        .convert_dut1(tai, TimeScale::Ut1, dut1)
-        .unwrap();
-    let expected_ut1 = utc_quasi_to_linear(expected_utc) + dut1 / SEC_PER_DAY;
-    assert!((ut1 - expected_ut1).abs() * SEC_PER_DAY < 1e-5);
-}
-
-#[test]
-fn ut1_uses_explicit_dut1() {
-    const MJD0: f64 = 2_400_000.5;
-    let utc_jd = 60462.0 + MJD0;
-    let dut1 = -0.020434661; // astropy ΔUT1 = UT1 − UTC at 2024-06-01
-    let ut1 = TimeScale::Utc
-        .convert_dut1(utc_jd, TimeScale::Ut1, dut1)
-        .unwrap()
-        - MJD0;
-    // astropy UT1 MJD, as the day-fraction beyond 60462 (UT1 − 60462).
-    let want = -0.000000236512;
-    assert!(
-        (ut1 - 60462.0 - want).abs() < 1e-9,
-        "UT1 {ut1:.12} (Δ={:.4e} s)",
-        (ut1 - 60462.0 - want) * 86400.0
-    );
-    // Round-trip back to UTC.
-    let back = TimeScale::Ut1
-        .convert_dut1(ut1 + MJD0, TimeScale::Utc, dut1)
-        .unwrap()
-        - MJD0;
-    assert!((back - 60462.0).abs() < 1e-9);
-    // With ΔUT1 = 0, UT1 collapses to UTC (the `convert` default).
-    assert_eq!(
-        TimeScale::Utc.convert(utc_jd, TimeScale::Ut1).unwrap(),
-        utc_jd
-    );
 }
 
 #[test]
@@ -666,25 +416,6 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
         t.time_axis_mjd(&unsupported, 2, &[1.0]),
         Err(FitsError::WcsAxisIndexOutOfBounds { axis: 2, len: 1 })
     ));
-}
-
-#[test]
-fn leap_seconds_match_iers_table() {
-    let at = |y, m, d| {
-        leap_seconds(
-            Datetime::parse(&format!("{y}-{m:02}-{d:02}"))
-                .unwrap()
-                .to_mjd(TimeScale::Utc)
-                .unwrap(),
-        )
-    };
-    assert_eq!(at(1972, 1, 1), 10.0);
-    assert_eq!(at(1999, 1, 1), 32.0);
-    assert_eq!(at(2017, 1, 1), 37.0);
-    assert_eq!(at(2024, 6, 1), 37.0);
-    assert_eq!(at(1980, 1, 1), 19.0);
-    // Just before the 1999 step is still 31 s.
-    assert_eq!(at(1998, 12, 31), 31.0);
 }
 
 #[test]
@@ -816,11 +547,8 @@ fn fits_time_reads_split_and_day_unit_references() {
 }
 
 #[test]
-fn time_scale_parse_strips_realization_and_aliases() {
-    // §9.2.1: a parenthesised realization suffix is stripped before matching.
+fn time_scale_preserves_realizations_and_local_names() {
     for (text, expected) in [
-        ("TT(TAI)", TimeScale::Tt),
-        ("UTC(NIST)", TimeScale::Utc),
         ("tt", TimeScale::Tt),
         ("TDT", TimeScale::Tt),
         ("IAT", TimeScale::Tai),
@@ -831,15 +559,34 @@ fn time_scale_parse_strips_realization_and_aliases() {
         ("TDB", TimeScale::Tdb),
         ("TCB", TimeScale::Tcb),
         ("GPS", TimeScale::Gps),
-        ("LOCAL", TimeScale::Local),
     ] {
         assert_eq!(text.parse::<TimeScale>().unwrap(), expected, "{text}");
     }
-    assert!(matches!(
-        "BOGUS".parse::<TimeScale>(),
-        Err(FitsError::InvalidValue { card }) if card == "time scale 'BOGUS'"
-    ));
-    for malformed in ["LOCAL(clock)", "UTC(", "UTC()", "UTC(NIST))"] {
+    assert_eq!(
+        "TT(TAI)".parse::<TimeScale>().unwrap(),
+        TimeScale::Realized {
+            kind: TimeScaleKind::Tt,
+            realization: "TAI".to_string(),
+        }
+    );
+    assert_eq!(
+        "UTC(NIST)".parse::<TimeScale>().unwrap(),
+        TimeScale::Realized {
+            kind: TimeScaleKind::Utc,
+            realization: "NIST".to_string(),
+        }
+    );
+    for name in ["LOCAL", "MET", "OET", "BOGUS"] {
+        assert_eq!(
+            name.parse::<TimeScale>().unwrap(),
+            TimeScale::Local(name.to_string())
+        );
+    }
+    assert_eq!(
+        "LOCAL(clock)".parse::<TimeScale>().unwrap(),
+        TimeScale::Local("LOCAL(clock)".to_string())
+    );
+    for malformed in ["UTC(", "UTC()", "UTC(NIST))"] {
         assert!(
             matches!(
                 malformed.parse::<TimeScale>(),
@@ -851,10 +598,10 @@ fn time_scale_parse_strips_realization_and_aliases() {
 
     let mut unknown = crate::header::Header::new();
     unknown.set_internal("TIMESYS", "BOGUS");
-    assert!(matches!(
-        unknown.time(),
-        Err(FitsError::InvalidValue { card }) if card == "time scale 'BOGUS'"
-    ));
+    assert_eq!(
+        unknown.time().unwrap().scale,
+        TimeScale::Local("BOGUS".to_string())
+    );
 }
 
 #[test]
@@ -912,11 +659,23 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
         invalid.set_internal("TIMEUNIT", value);
         assert!(
             matches!(
-                FitsTime::from_header(&invalid),
+                FitsTime::from_header(&invalid).unwrap().unit_seconds(),
                 Err(FitsError::InvalidValue { .. })
             ),
             "{value:?} should not be accepted as a time unit"
         );
+    }
+
+    let mut frame_dependent = Header::new();
+    for (unit, scale) in [("ta", "UTC"), ("Ba", "TDB")] {
+        frame_dependent
+            .set_internal("TIMEUNIT", unit)
+            .set_internal("TIMESYS", scale);
+        let time = FitsTime::from_header(&frame_dependent).unwrap();
+        assert!(matches!(
+            time.unit_seconds(),
+            Err(FitsError::ExternalTimeDataRequired { .. })
+        ));
     }
 }
 

@@ -190,104 +190,6 @@ impl Tform {
     }
 }
 
-/// The format letter of a `TDISPn` display format (§7.3.4, Table 20).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TDispKind {
-    /// `Aw` character.
-    Char,
-    /// `Lw` logical.
-    Logical,
-    /// `Iw[.m]` integer.
-    Integer,
-    /// `Bw[.m]` binary.
-    Binary,
-    /// `Ow[.m]` octal.
-    Octal,
-    /// `Zw[.m]` hexadecimal.
-    Hex,
-    /// `Fw.d` fixed-point float.
-    Float,
-    /// `Ew.d[Ee]` exponential.
-    Exponential,
-    /// `ENw.d` engineering (exponent a multiple of 3).
-    Engineering,
-    /// `ESw.d` scientific (mantissa 1–10).
-    Scientific,
-    /// `Gw.d[Ee]` general.
-    General,
-    /// `Dw.d[Ee]` double-precision exponential.
-    Double,
-}
-
-/// A parsed `TDISPn` display format: the format letter, field width, optional
-/// decimal places (`.d`/`.m`), and optional exponent width (a trailing `Ee`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TDisp {
-    pub kind: TDispKind,
-    pub width: usize,
-    pub decimals: Option<usize>,
-    pub exponent: Option<usize>,
-}
-
-impl TDisp {
-    /// Parse a `TDISPn` value such as `"I5"`, `"F8.2"`, `"E12.5E3"`, `"ES15.6"`, or
-    /// `"A20"`. The complete string must match the grammar.
-    pub fn parse(value: &str) -> Result<TDisp> {
-        let invalid = || FitsError::InvalidTdisp {
-            tdisp: value.to_string(),
-        };
-        let s = value.trim().to_ascii_uppercase();
-        let (kind, rest) = if let Some(r) = s.strip_prefix("EN") {
-            (TDispKind::Engineering, r)
-        } else if let Some(r) = s.strip_prefix("ES") {
-            (TDispKind::Scientific, r)
-        } else {
-            let kind = match s.bytes().next().ok_or_else(invalid)? {
-                b'A' => TDispKind::Char,
-                b'L' => TDispKind::Logical,
-                b'I' => TDispKind::Integer,
-                b'B' => TDispKind::Binary,
-                b'O' => TDispKind::Octal,
-                b'Z' => TDispKind::Hex,
-                b'F' => TDispKind::Float,
-                b'E' => TDispKind::Exponential,
-                b'G' => TDispKind::General,
-                b'D' => TDispKind::Double,
-                _ => return Err(invalid()),
-            };
-            (kind, &s[1..])
-        };
-        if rest.is_empty() || rest.matches('E').count() > 1 || rest.matches('.').count() > 1 {
-            return Err(invalid());
-        }
-        // rest = width[.decimals][E exponent]
-        let (main, exponent) = match rest.split_once('E') {
-            Some((m, e)) if !m.is_empty() && !e.is_empty() => {
-                (m, Some(e.parse().map_err(|_| invalid())?))
-            }
-            Some(_) => return Err(invalid()),
-            None => (rest, None),
-        };
-        let (width, decimals) = match main.split_once('.') {
-            Some((w, d)) if !w.is_empty() && !d.is_empty() => {
-                (w, Some(d.parse().map_err(|_| invalid())?))
-            }
-            Some(_) => return Err(invalid()),
-            None => (main, None),
-        };
-        let width = width.parse().map_err(|_| invalid())?;
-        if width == 0 {
-            return Err(invalid());
-        }
-        Ok(TDisp {
-            kind,
-            width,
-            decimals,
-            exponent,
-        })
-    }
-}
-
 /// One column of a binary table: its `TFORMn` format, optional name/unit, the
 /// `TSCALn`/`TZEROn`/`TNULLn` metadata, and its byte offset within a row.
 #[derive(Debug, Clone)]
@@ -304,8 +206,8 @@ pub struct Column {
     /// `TDIMn` array shape (e.g. `'(4,4)'` → `[4, 4]`), if declared — reshapes the
     /// `repeat` elements of each row into a multidimensional array (§7.3.2).
     pub tdim: Option<Vec<usize>>,
-    /// `TDISPn` display format (§7.3.4), parsed, if declared.
-    pub tdisp: Option<TDisp>,
+    /// Raw `TDISPn` display recommendation (§7.3.4), if declared.
+    pub tdisp: Option<String>,
     /// Byte offset of this column from the start of a row.
     pub byte_offset: usize,
 }
@@ -524,8 +426,7 @@ impl BinTable {
                 tdim,
                 tdisp: header
                     .get_text(key!("TDISP{n}").as_str())?
-                    .map(TDisp::parse)
-                    .transpose()?,
+                    .map(str::to_string),
                 byte_offset: offset,
             });
             offset = offset.saturating_add(tform.byte_width());
@@ -753,7 +654,7 @@ impl<'a> ColumnReader<'a> {
     /// convention — `TSCALn == 1`, no `TNULLn`, `TZEROn` the matching sign-bit offset
     /// on a `B`/`I`/`J`/`K` column — without the `f64` rounding of
     /// [`physical`](Self::physical). `Ok(None)` for any other column; errors only for a
-    /// variable-length column. Mirrors [`crate::Image::unsigned`].
+    /// variable-length column. Mirrors [`crate::image::Image::unsigned`].
     pub fn unsigned(&self) -> Result<Option<UnsignedData>> {
         let col = self.descriptor();
         if matches!(
