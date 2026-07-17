@@ -159,7 +159,7 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `bitpix.rs` | `BITPIX` element type + element sizes | done |
 | `endian.rs` | big-endian scalar (de)serialization shared by image/table/compression decode + encode | done |
 | `keyword.rs` | stack-allocated indexed-keyword formatting (`key!` macro / `KeyBuf`): builds `NAXISn`/`PVi_m`/`CTYPEn`-style keys without the per-lookup `format!` heap alloc (one WCS parse does ~90) | done |
-| `header/` | ordered card model (`value.rs`, `card/`, `mod.rs`): fallible `try_*` authoring, parse/render, lossless logical `CONTINUE` folding, `HIERARCH` compound keys, keyword index, typed getters | done |
+| `header/` | ordered card model (`value.rs`, `card/`, `mod.rs`): fallible `try_*` authoring including `try_set_hierarch`, parse/render, lossless logical `CONTINUE` folding, `HIERARCH` compound keys, keyword index, typed getters | done |
 | `hdu/` | role-aware HDU classification + primary/extension/random-groups data-unit sizing (Eqs. 1/2/4) | done |
 | `reader/` | HDU scan over a `Source` (`source.rs`: `StreamSource` copies, `SliceSource`/`MmapSource` borrow zero-copy); `open`/`from_bytes`/`open_mmap`; `read_image` (owned, transparently decompresses a `ZIMAGE` `CompressedImage`)/`read_image_view(idx, &mut Vec<u64>)` (borrowed `ImageView` swapped into a caller-owned `u64` scratch — the page-fault-free read-loop path; the reader retains nothing image-sized)/`read_wcs` (including referenced `-TAB` BINTABLE arrays)/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_table`/`verify_checksum`, raw `DataUnit` | done |
 | `writer/` | multi-HDU writer: `write_image`/`write_table` (fixed + `P`/`Q` VLAs, including jagged bit arrays)/`write_ascii_table`/`write_compressed_image`(`_lossy`)/`write_compressed_table`, `with_checksums` | done |
@@ -167,7 +167,7 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `table/` | `BINTABLE` parsing (`Tform`/`Column`); per-column `ColumnReader` handles decode on demand to `ColumnData` (`BitColumn` for `X`, `num-complex` for `C`/`M`), `TSCAL`/`TZERO` physical planes including complex and exact unsigned P/Q heap VLAs | read done (write in `writer/`) |
 | `ascii/` | `TABLE` (ASCII) read: `TBCOLn`/Fortran `TFORMn` → `AsciiColumn`/nullable `AsciiColumnData` (preserves `TNULLn`) | read done (write in `writer/`) |
 | `groups/` | random-groups (§6) read: exact typed per-group parameter/array `RandomGroupView` plus `PSCALn`/`PZEROn` physical values | read done (no write — deprecated) |
-| `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
+| `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode; verification distinguishes absent, unknown, valid, and invalid assertions | done |
 | `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3); `decode.rs` reassembles + dequantizes tiles into the image, `encode.rs` the integer + float encoders, `mod.rs` the shared `ImageCodec` dispatch / `CompressOptions` / `P`→`Q` descriptor threshold (`needs_wide`), `geometry` the N-d tiling, `convert` the byte/`i64`/`f64` conversions shared by image + table; `map_tiles` fans independent codec work across rayon and safe row chunks partition decode destinations under `parallel` | all 5 image codecs read+write; float quant all 3 dither methods (write-selectable via `CompressOptions::dither`) + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode + lossy `SCALE>0` write; fixed-width table compression read+write; tile-parallel ((de)compress, image + table) |
 | `wcs/` | typed WCS: keyword parse, declared celestial/spectral frame metadata, linear transform (PC/CD/CROTA + `PVi_m` + inverse), all 27 FITS 4.0 projections (including cube TSC/CSC/QSC and parameterized HPX) via general pole computation, every Table-26 spectral/detector algorithm, generic `LOG`, and BINTABLE-backed multidimensional `TAB`, with complete `pixel_to_world`/`world_to_pixel`; unsupported conventions remain readable and make complete transforms return `UnsupportedWcsTransform` | standard algorithms done (`XPH` convention and inter-frame transforms out of scope) |
 | `time/` | typed time (§9): `Datetime` (strict unsigned-four/signed-five ISO-8601↔scale-aware JD/MJD, leap-second-preserving UTC quasi-JD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), typed `TREFPOS`/`TRPOSn`, all PHASE keyword forms with fallible folding, fallible prefixed FITS time units, `FitsTime` header view + PC/CD-coupled time WCS axes with per-axis unit/scale overrides | v2 done |
@@ -192,9 +192,10 @@ Design principles specific to this crate:
   scratch, while an in-memory `SliceSource` (`from_bytes`) or `MmapSource`
   (`open_mmap`, `mmap` feature) hands back a zero-copy borrow — so the decode reads
   straight from the bytes, skipping the staging copy (≈2× on `read_image`).
-- **Headers round-trip exactly.** Model a header as an *ordered list* of records
+- **Headers round-trip logically.** Model a header as an *ordered list* of records
   with a side index for lookup — not a hash map. Duplicate `COMMENT`/`HISTORY`
-  and record order are significant and must be preserved byte-for-byte.
+  and record order are significant and must survive parse→write→parse. Physical
+  value layout and `CONTINUE` splits are normalized on write, not retained.
 - **Parallelize the compute-bound layer; reuse buffers on the memory-bound one.** The
   benches settled where threads pay: the tiled codecs are compute-bound (100s of MiB/s,
   ~100× below the memory wall) and tiles are independent, so `compress::map_tiles`
@@ -240,8 +241,8 @@ FITS is full of fiddly invariants that silent bugs hide in — test them explici
 
 - Block padding: assert every written unit is a 2880 multiple, padded with the
   correct fill byte (space for headers/ASCII-table data, NUL for other data).
-- Round-trip: parse→write→parse must reproduce headers byte-for-byte and data
-  bit-for-bit (including float NaN/Inf, `BLANK`, unsigned offsets).
+- Round-trip: parse→write→parse must reproduce the ordered logical header model
+  and data bit-for-bit (including float NaN/Inf, `BLANK`, unsigned offsets).
 - Cross-check decoders against known-good files (CFITSIO/astropy outputs) and
   against hand-computed values for small fixtures — never `result < N` assertions.
 - Boundary cases: `NAXIS = 0` (no data), zero-length axes, `TFORM` repeat count 0,

@@ -33,7 +33,7 @@ pub(crate) enum CardKind {
 pub(crate) struct Card {
     /// Keyword name, trailing spaces stripped. Empty for the blank keyword.
     pub(crate) keyword: String,
-    /// Present only for [`CardKind::Value`] cards.
+    /// Present only for [`CardKind::Value`] and [`CardKind::Hierarch`] cards.
     pub(crate) value: Option<Value>,
     /// The `/`-comment for value cards, or the whole free text for commentary
     /// cards. Trailing spaces are not significant and are stripped.
@@ -49,6 +49,16 @@ impl Card {
             value: Some(value),
             comment: None,
             kind: CardKind::Value,
+        }
+    }
+
+    /// An ESO HIERARCH convention card (`HIERARCH compound key = value`).
+    pub(crate) fn hierarch(keyword: &str, value: Value) -> Card {
+        Card {
+            keyword: keyword.to_string(),
+            value: Some(value),
+            comment: None,
+            kind: CardKind::Hierarch,
         }
     }
 
@@ -279,7 +289,7 @@ impl Card {
     fn validate_contents(&self) -> Result<()> {
         match self.kind {
             CardKind::Value => validate_valued_keyword(&self.keyword)?,
-            CardKind::Hierarch => validate_ascii(&self.keyword, "HIERARCH keyword")?,
+            CardKind::Hierarch => validate_hierarch_keyword(&self.keyword)?,
             CardKind::Commentary | CardKind::Continue | CardKind::End => {}
         }
         if let Some(comment) = &self.comment {
@@ -460,6 +470,17 @@ pub(crate) fn validate_valued_keyword(name: &str) -> Result<()> {
         })
     } else {
         Ok(())
+    }
+}
+
+pub(crate) fn validate_hierarch_keyword(name: &str) -> Result<()> {
+    validate_ascii(name, "HIERARCH keyword")?;
+    if !name.is_empty() && name.trim() == name && !name.contains('=') {
+        Ok(())
+    } else {
+        Err(FitsError::InvalidKeyword {
+            name: name.to_string(),
+        })
     }
 }
 

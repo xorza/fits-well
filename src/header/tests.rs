@@ -237,6 +237,54 @@ fn builder_sets_replaces_and_indexes_keywords() {
 }
 
 #[test]
+fn builder_authors_updates_and_round_trips_hierarch_keywords() {
+    let mut header = Header::new();
+    header
+        .try_set_hierarch("ESO DET CHIP1 NAME", "CCD-44")
+        .unwrap()
+        .try_comment("ESO DET CHIP1 NAME", "detector chip")
+        .unwrap()
+        .try_set_hierarch("ESO DET CHIP1 GAIN MODE", 1)
+        .unwrap();
+
+    assert_eq!(
+        header.get_text("ESO DET CHIP1 NAME").unwrap(),
+        Some("CCD-44")
+    );
+    assert_eq!(
+        header.get_integer("ESO DET CHIP1 GAIN MODE").unwrap(),
+        Some(1)
+    );
+    assert_eq!(header.cards.len(), 2);
+    assert!(
+        header
+            .cards
+            .iter()
+            .all(|card| card.kind == CardKind::Hierarch)
+    );
+
+    header
+        .try_set_hierarch("ESO DET CHIP1 NAME", "CCD-45")
+        .unwrap();
+    assert_eq!(
+        header.get_text("ESO DET CHIP1 NAME").unwrap(),
+        Some("CCD-45")
+    );
+    assert_eq!(header.cards[0].comment.as_deref(), Some("detector chip"));
+    assert_eq!(header.cards.len(), 2);
+
+    let mut bytes = Vec::new();
+    render_header(&header, &mut bytes).unwrap();
+    assert!(
+        std::str::from_utf8(&bytes[..CARD_SIZE])
+            .unwrap()
+            .starts_with("HIERARCH ESO DET CHIP1 NAME = 'CCD-45  ' / detector chip")
+    );
+    let reparsed = Header::parse(&bytes).unwrap();
+    assert_eq!(reparsed.cards, header.cards);
+}
+
+#[test]
 fn builder_appends_commentary_cards() {
     let mut h = Header::new();
     h.set("SIMPLE", true)
@@ -301,6 +349,20 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
             keyword,
             length: 92,
         }) if keyword == "COMPLEX"
+    ));
+    assert!(header.cards.is_empty());
+
+    for keyword in ["", " ESO DET", "ESO DET ", "ESO=DET"] {
+        assert!(matches!(
+            header.try_set_hierarch(keyword, 1),
+            Err(FitsError::InvalidKeyword { name }) if name == keyword
+        ));
+    }
+    assert!(matches!(
+        header.try_set_hierarch("ESO\nDET", 1),
+        Err(FitsError::InvalidAscii {
+            context: "HIERARCH keyword"
+        })
     ));
     assert!(header.cards.is_empty());
 

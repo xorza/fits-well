@@ -99,11 +99,11 @@ Severity used below:
 
 ## Batch 4 — Medium: finish semantic status and secondary time APIs
 
-- [ ] **Represent checksum status as absent, unknown, valid, or invalid.** Blank-string `DATASUM` becomes `Some(false)` and blank `CHECKSUM` is verified as if it asserted a checksum (`src/reader/mod.rs:420-449`). FITS defines blank strings as unknown values (`docs/refs/fits_standard40.md:1698-1718`). Replace `Option<bool>` with an explicit status and test all four states independently for both keywords.
+- [x] **Represent checksum status as absent, unknown, valid, or invalid.** `ChecksumReport` now carries `ChecksumStatus` for each assertion. Strings containing one or more blanks report `Unknown` without being verified, absent keywords remain distinct, matching values report `Valid`, and null, malformed, or mismatched values report `Invalid`. Independent fixtures cover all four states for both keywords (`src/reader/mod.rs`; `docs/refs/fits_standard40.md:1698-1718`).
 
 - [x] **Support alternate/table PHASE metadata and reject undefined folding.** `Header::phase_axis`, `phase_axis_pixel_list`, and `phase_axis_array_column` resolve the primary and alternate Table-22 `CZPHS`/`CPERI` spellings. Missing/zero periods remain valid nonconstant metadata as `None`, while `PhaseAxis::fold` returns `InvalidValue` instead of fabricating phase zero (`docs/refs/fits_standard40.md:4717-4734`).
 
-- [ ] **Add authoring support or qualify the HIERARCH “read + write” claim.** Existing HIERARCH cards can be parsed and re-rendered, but `Header::try_set` rejects long/spaced compound names and there is no public HIERARCH constructor (`src/header/mod.rs`). This is a convention rather than normative FITS 4.0 core, so preservation-only support is acceptable if documented accurately.
+- [x] **Add public HIERARCH authoring.** `Header::try_set_hierarch` writes and updates compound names without exposing the internal card kind. It shares the indexed logical model with parsed HIERARCH cards, preserves comments on update, and rejects empty, boundary-spaced, delimiter-containing, non-ASCII, or physically unrepresentable input before mutation. Long spaced names round-trip through the canonical renderer/parser (`src/header/mod.rs`; registered convention notes in `docs/refs/08-conventions.md`).
 
 ## Confirmed coverage
 
@@ -135,9 +135,9 @@ following foundations are substantively correct for conforming inputs:
 - Deferring truncated data errors until a lazy HDU is read is consistent with the
   reader design.
 - Random groups remain read-only because their use for new files is deprecated.
-- Original physical header card bytes are not retained: parsing folds/normalizes
-  strings and rendering canonicalizes them. `src/lib.rs:19-23` should say the
-  ordered **model** round-trips, not claim byte-for-byte physical preservation.
+- Original physical header card bytes are deliberately not retained: parsing
+  folds/normalizes strings and rendering canonicalizes them. Public documentation
+  promises an ordered logical-model round-trip rather than physical preservation.
 - HIERARCH, XPH, and other registered conventions should be reported separately
   from normative FITS 4.0 coverage.
 

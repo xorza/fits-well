@@ -1,13 +1,14 @@
 use crate::block::ZERO_FILL;
 use crate::block::padded_len;
+use crate::checksum;
 #[cfg(feature = "compression")]
 use crate::compress::CompressOptions;
 use crate::data::{ImageData, Scaling, UnsignedView};
 use crate::hdu::{HduKind, MAX_TABLE_FIELDS};
 use crate::header::from_card_lines as header;
 use crate::header::value::Value;
-use crate::reader::ChecksumReport;
 use crate::reader::FitsReader;
+use crate::reader::{ChecksumReport, ChecksumStatus};
 use crate::table::{CharacterField, ColumnData};
 use crate::writer::*;
 use bitvec::bitvec;
@@ -56,6 +57,57 @@ fn identity() -> Scaling {
         bzero: 0.0,
         blank: None,
     }
+}
+
+fn checksum_report_for_keywords(datasum: Option<&str>, checksum: Option<&str>) -> ChecksumReport {
+    let mut header = Header::new();
+    header.set("SIMPLE", true).set("BITPIX", 8).set("NAXIS", 0);
+    if let Some(value) = datasum {
+        header.set("DATASUM", value);
+    }
+    if let Some(value) = checksum {
+        header.set("CHECKSUM", value);
+    }
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_raw_hdu(&header, &[]).unwrap();
+    let mut bytes = writer.into_inner().into_inner();
+    if datasum == Some("") {
+        patch_null_string(&mut bytes, b"DATASUM ");
+    }
+    if checksum == Some("") {
+        patch_null_string(&mut bytes, b"CHECKSUM");
+    }
+    FitsReader::from_bytes(&bytes)
+        .unwrap()
+        .verify_checksum(0)
+        .unwrap()
+}
+
+fn patch_null_string(header_bytes: &mut [u8], keyword: &[u8; 8]) {
+    let card = header_bytes
+        .chunks_exact_mut(CARD_SIZE)
+        .find(|card| &card[..8] == keyword)
+        .unwrap();
+    card[10..].fill(b' ');
+    card[10..12].copy_from_slice(b"''");
+}
+
+fn valid_checksum_only_report() -> ChecksumReport {
+    let mut header = Header::new();
+    header
+        .set("SIMPLE", true)
+        .set("BITPIX", 8)
+        .set("NAXIS", 0)
+        .set("CHECKSUM", PLACEHOLDER_CHECKSUM);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_raw_hdu(&header, &[]).unwrap();
+    let mut bytes = writer.into_inner().into_inner();
+    let hdu_sum = checksum::accumulate(&bytes, 0);
+    patch_checksum(&mut bytes, &checksum::encode(hdu_sum, true));
+    FitsReader::from_bytes(&bytes)
+        .unwrap()
+        .verify_checksum(0)
+        .unwrap()
 }
 
 #[derive(Debug)]
@@ -1071,8 +1123,13 @@ fn checksums_round_trip_and_verify() {
     let bytes = w.into_inner().into_inner();
     let mut r = FitsReader::open(Cursor::new(bytes.clone())).unwrap();
     let report = r.verify_checksum(0).unwrap();
-    assert_eq!(report.datasum_ok, Some(true));
-    assert_eq!(report.checksum_ok, Some(true)); // whole-HDU sum is −0
+    assert_eq!(
+        report,
+        ChecksumReport {
+            datasum: ChecksumStatus::Valid,
+            checksum: ChecksumStatus::Valid,
+        }
+    );
 
     let mut slice = FitsReader::from_bytes(&bytes).unwrap();
     assert_eq!(slice.verify_checksum(0).unwrap(), report);
@@ -1092,8 +1149,13 @@ fn corrupted_data_fails_checksum() {
 
     let mut r = FitsReader::open(Cursor::new(bytes)).unwrap();
     let report = r.verify_checksum(0).unwrap();
-    assert_eq!(report.datasum_ok, Some(false));
-    assert_eq!(report.checksum_ok, Some(false));
+    assert_eq!(
+        report,
+        ChecksumReport {
+            datasum: ChecksumStatus::Invalid,
+            checksum: ChecksumStatus::Invalid,
+        }
+    );
 }
 
 #[test]
@@ -1116,14 +1178,14 @@ fn corrupted_header_padding_fails_only_the_whole_hdu_checksum() {
     assert_eq!(
         r.verify_checksum(0).unwrap(),
         ChecksumReport {
-            datasum_ok: Some(true),
-            checksum_ok: Some(false),
+            datasum: ChecksumStatus::Valid,
+            checksum: ChecksumStatus::Invalid,
         }
     );
 }
 
 #[test]
-fn verify_is_none_when_checksum_keywords_are_absent() {
+fn checksum_status_distinguishes_absent_unknown_valid_and_invalid() {
     let image = Image {
         shape: vec![2, 2],
         samples: ImageData::U8(vec![0, 0, 0, 0]),
@@ -1131,8 +1193,51 @@ fn verify_is_none_when_checksum_keywords_are_absent() {
     };
     let mut r = FitsReader::open(Cursor::new(write_to_vec(&image))).unwrap();
     let report = r.verify_checksum(0).unwrap();
-    assert_eq!(report.datasum_ok, None);
-    assert_eq!(report.checksum_ok, None);
+    assert_eq!(
+        report,
+        ChecksumReport {
+            datasum: ChecksumStatus::Absent,
+            checksum: ChecksumStatus::Absent,
+        }
+    );
+
+    for (value, expected) in [
+        (" ", ChecksumStatus::Unknown),
+        ("", ChecksumStatus::Invalid),
+        ("0", ChecksumStatus::Valid),
+        ("1", ChecksumStatus::Invalid),
+        ("not-a-number", ChecksumStatus::Invalid),
+    ] {
+        assert_eq!(
+            checksum_report_for_keywords(Some(value), None),
+            ChecksumReport {
+                datasum: expected,
+                checksum: ChecksumStatus::Absent,
+            },
+            "DATASUM={value:?}"
+        );
+    }
+    for (value, expected) in [
+        (" ", ChecksumStatus::Unknown),
+        ("", ChecksumStatus::Invalid),
+        ("not-a-checksum", ChecksumStatus::Invalid),
+    ] {
+        assert_eq!(
+            checksum_report_for_keywords(None, Some(value)),
+            ChecksumReport {
+                datasum: ChecksumStatus::Absent,
+                checksum: expected,
+            },
+            "CHECKSUM={value:?}"
+        );
+    }
+    assert_eq!(
+        valid_checksum_only_report(),
+        ChecksumReport {
+            datasum: ChecksumStatus::Absent,
+            checksum: ChecksumStatus::Valid,
+        }
+    );
 }
 
 #[test]

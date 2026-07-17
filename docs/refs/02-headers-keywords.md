@@ -121,9 +121,10 @@ is significant. A header model must preserve duplicates and ordering.
 - Parse a record as: name = bytes[0..8] trimmed; if bytes[8..10] == `= ` it has a
   value, else commentary. Split value/comment on the first `/` that is not inside
   a string literal (track quote state).
-- Keep the header an **ordered** list of records (not a map) to round-trip exactly,
-  with an auxiliary index for O(1) keyword lookup. Duplicate keywords are legal
-  for commentary; for valued keywords first-wins is the usual reader policy.
+- Keep the header an **ordered** list of logical records (not a map), with an
+  auxiliary index for O(1) keyword lookup. Duplicate keywords are legal for
+  commentary; for valued keywords first-wins is the usual reader policy.
+  Rendering may normalize physical value layout and `CONTINUE` splits.
 - Writing: emit fixed-format for mandatory keywords; pad each record to 80 bytes;
   emit `END`; pad header to a 2880 multiple with spaces.
 - A blazing-fast reader can scan for `END` at 80-byte strides and only fully parse
