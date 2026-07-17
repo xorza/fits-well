@@ -52,6 +52,8 @@
 - Mutable WCS source fields (`naxis`, `ctype`, `crval`, `crpix`, and
   `unsupported_axes`) are now private so they cannot invalidate derived transforms.
   Read them through the immutable metadata returned by `Wcs::view`.
+- `Projection` now includes the standard `Tsc`, `Csc`, `Qsc`, and `Hpx` variants;
+  exhaustive matches must handle them.
 - `Wcs::pixel_to_world` and `Wcs::world_to_pixel` now return `Result<Vec<f64>>` so
   projection-domain, iterative-convergence, and unsupported-transform failures
   cannot be ignored. They no longer return linear-stage values as complete world
@@ -71,6 +73,8 @@
 - Added `CharacterField`, which preserves every stored byte of a binary-table `A`
   cell and exposes its first-NUL member boundary and null-string state.
 - Added `Wcs::view` with immutable per-axis metadata and unsupported-axis status.
+- Added forward and inverse `TSC`, `CSC`, `QSC`, and parameterized `HPX`
+  transforms, completing the FITS 4.0 celestial projection set.
 - Added `TimeCoordinate`, the shared MJD and effective scale value returned for
   epoch keywords and WCS time axes.
 - Added explicit `ColumnType` declarations for variable-length table columns.

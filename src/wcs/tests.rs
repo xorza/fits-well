@@ -458,12 +458,15 @@ fn projection_parameters_use_standard_defaults() {
     let szp = build("SZP", &[(1, 2.0)]).celestial.unwrap();
     assert_eq!([szp.pv[1], szp.pv[2], szp.pv[3]], [2.0, 0.0, 90.0]);
 
+    let hpx = build("HPX", &[]).celestial.unwrap();
+    assert_eq!([hpx.pv[1], hpx.pv[2]], [4.0, 3.0]);
+
     let explicit_zero = build("CYP", &[(1, 0.0), (2, 1.0)]).celestial.unwrap();
     assert_eq!([explicit_zero.pv[1], explicit_zero.pv[2]], [0.0, 1.0]);
 }
 
 #[test]
-fn degenerate_cylindrical_projection_parameters_are_rejected() {
+fn degenerate_projection_parameters_are_rejected() {
     use crate::error::FitsError;
 
     let parse = |projection: &str, parameters: &[(usize, f64)]| {
@@ -489,6 +492,12 @@ fn degenerate_cylindrical_projection_parameters_are_rejected() {
         parse("CYP", &[(1, -1.0), (2, 1.0)]),
         Err(FitsError::InvalidValue { .. })
     ));
+    for parameters in [[(1, 0.0)], [(1, -1.0)], [(2, 0.0)], [(2, -1.0)]] {
+        assert!(matches!(
+            parse("HPX", &parameters),
+            Err(FitsError::InvalidValue { .. })
+        ));
+    }
 }
 
 #[test]
@@ -496,7 +505,7 @@ fn unsupported_projection_codes_reject_complete_transforms() {
     use crate::error::FitsError;
     use crate::header::Header;
     // Short codes represent space-padded algorithm names after FITS text trimming.
-    for code in ["TSC", "CSC", "QSC", "HPX", "XPH", "UV", "U"] {
+    for code in ["XPH", "UV", "U"] {
         let mut h = Header::new();
         h.set("NAXIS", 2);
         h.set("CTYPE1", format!("RA---{code}"));
@@ -709,6 +718,10 @@ fn projections_round_trip() {
         (Azp, &[0.0, 2.0, 30.0]),
         (Pco, &[]),
         (Szp, &[0.0, 2.0, 180.0, 60.0]),
+        (Tsc, &[]),
+        (Csc, &[]),
+        (Qsc, &[]),
+        (Hpx, &[0.0, 4.0, 3.0]),
     ];
     for &(proj, pv) in cases {
         let pv = projection_parameters(pv);
@@ -717,8 +730,11 @@ fn projections_round_trip() {
         for &(phi, theta) in &[(30.0_f64, 70.0_f64), (-40.0, 50.0), (20.0, 55.0)] {
             let projected = proj.project(phi, theta, &pv).unwrap();
             let native = proj.deproject(projected.x, projected.y, &pv).unwrap();
+            // CSC's published inverse polynomial is approximate; wcslib's own closure limit is 0.04°.
+            let tolerance = if proj == Csc { 4e-2 } else { 1e-7 };
             assert!(
-                norm180(native.phi - phi).abs() < 1e-7 && (native.theta - theta).abs() < 1e-7,
+                norm180(native.phi - phi).abs() < tolerance
+                    && (native.theta - theta).abs() < tolerance,
                 "{proj:?}: ({phi},{theta}) → ({},{}) → ({},{})",
                 projected.x,
                 projected.y,
@@ -727,6 +743,185 @@ fn projections_round_trip() {
             );
         }
     }
+}
+
+#[test]
+fn cube_projections_match_wcslib_faces_and_interiors() {
+    #[derive(Debug)]
+    struct Golden {
+        projection: Projection,
+        projected: [[f64; 2]; 2],
+        deprojected: [[f64; 2]; 2],
+    }
+
+    let pv = projection_parameters(&[]);
+    let faces = [
+        (0.0, 0.0, 0.0, 0.0),
+        (90.0, 0.0, 90.0, 0.0),
+        (180.0, 0.0, 180.0, 0.0),
+        (-90.0, 0.0, 270.0, 0.0),
+        (0.0, 90.0, 0.0, 90.0),
+        (0.0, -90.0, 0.0, -90.0),
+        (45.0, 0.0, 45.0, 0.0),
+        (0.0, 45.0, 0.0, 45.0),
+        (45.0, 35.264_389_682_754_654, 45.0, 45.0),
+    ];
+    for projection in [Projection::Tsc, Projection::Csc, Projection::Qsc] {
+        for (phi, theta, x, y) in faces {
+            let projected = projection.project(phi, theta, &pv).unwrap();
+            assert!(
+                (projected.x - x).abs() < 1e-12 && (projected.y - y).abs() < 1e-12,
+                "{projection:?} face ({phi},{theta}): {projected:?}"
+            );
+        }
+    }
+
+    let cases = [
+        Golden {
+            projection: Projection::Tsc,
+            projected: [
+                [25.980_762_113_533_153, 18.912_448_145_754_276],
+                [244.019_237_886_466_87, -43.600_895_814_340_646],
+            ],
+            deprojected: [[30.0, 20.0], [-120.0, -40.0]],
+        },
+        Golden {
+            projection: Projection::Csc,
+            projected: [
+                [31.303_854_882_717_133, 23.855_872_750_282_288],
+                [240.086_374_282_836_9, -44.205_473_363_399_506],
+            ],
+            deprojected: [
+                [30.000_112_252_702_29, 19.999_029_202_196_91],
+                [-119.998_951_963_376_24, -39.998_865_884_223_214],
+            ],
+        },
+        Golden {
+            projection: Projection::Qsc,
+            projected: [
+                [31.867_419_121_895_73, 24.348_069_968_897_35],
+                [241.782_551_767_309_14, -44.232_092_201_227_864],
+            ],
+            deprojected: [[30.0, 20.0], [-120.0, -40.0]],
+        },
+    ];
+    let native = [[30.0, 20.0], [-120.0, -40.0]];
+    for case in cases {
+        for (index, point) in native.iter().enumerate() {
+            let projected = case.projection.project(point[0], point[1], &pv).unwrap();
+            assert!(
+                (projected.x - case.projected[index][0]).abs() < 1e-12
+                    && (projected.y - case.projected[index][1]).abs() < 1e-12,
+                "{case:?} forward {index}: {projected:?}"
+            );
+            let deprojected = case
+                .projection
+                .deproject(projected.x, projected.y, &pv)
+                .unwrap();
+            assert!(
+                norm180(deprojected.phi - case.deprojected[index][0]).abs() < 1e-12
+                    && (deprojected.theta - case.deprojected[index][1]).abs() < 1e-12,
+                "{case:?} inverse {index}: {deprojected:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cube_projection_domains_reject_points_outside_the_face_cross() {
+    use crate::error::FitsError;
+
+    let pv = projection_parameters(&[]);
+    for projection in [Projection::Tsc, Projection::Csc, Projection::Qsc] {
+        assert!(matches!(
+            projection.deproject(100.0, 100.0, &pv),
+            Err(FitsError::WcsProjectionDomain { projection: code })
+                if code == projection.code()
+        ));
+        let corner = projection.deproject(315.0, 45.0, &pv).unwrap();
+        assert!(corner.phi.is_finite() && corner.theta.is_finite());
+    }
+}
+
+#[test]
+fn hpx_matches_wcslib_defaults_transitions_and_parameters() {
+    #[derive(Debug)]
+    struct Golden {
+        parameters: [f64; 2],
+        native: [f64; 2],
+        projected: [f64; 2],
+    }
+
+    let cases = [
+        Golden {
+            parameters: [4.0, 3.0],
+            native: [30.0, 30.0],
+            projected: [30.0, 33.749_999_999_999_99],
+        },
+        Golden {
+            parameters: [4.0, 3.0],
+            native: [30.0, 60.0],
+            projected: [35.490_381_056_766_58, 61.471_143_170_299_726],
+        },
+        Golden {
+            parameters: [4.0, 3.0],
+            native: [-120.0, -60.0],
+            projected: [-125.490_381_056_766_58, -61.471_143_170_299_726],
+        },
+        Golden {
+            parameters: [4.0, 3.0],
+            native: [10.0, 41.810_314_895_778_596],
+            projected: [10.0, 45.0],
+        },
+        Golden {
+            parameters: [3.0, 4.0],
+            native: [20.0, 70.0],
+            projected: [9.823_024_317_517_834, 120.530_927_047_446_5],
+        },
+        Golden {
+            parameters: [3.0, 4.0],
+            native: [20.0, -70.0],
+            projected: [40.353_951_364_964_33, -120.530_927_047_446_5],
+        },
+        Golden {
+            parameters: [3.0, 4.0],
+            native: [-100.0, -70.0],
+            projected: [-79.646_048_635_035_67, -120.530_927_047_446_5],
+        },
+    ];
+    for case in cases {
+        let pv = projection_parameters(&[0.0, case.parameters[0], case.parameters[1]]);
+        let projected = Projection::Hpx
+            .project(case.native[0], case.native[1], &pv)
+            .unwrap();
+        assert!(
+            (projected.x - case.projected[0]).abs() < 1e-12
+                && (projected.y - case.projected[1]).abs() < 1e-12,
+            "{case:?}: {projected:?}"
+        );
+        let native = Projection::Hpx
+            .deproject(projected.x, projected.y, &pv)
+            .unwrap();
+        assert!(
+            norm180(native.phi - case.native[0]).abs() < 1e-12
+                && (native.theta - case.native[1]).abs() < 1e-12,
+            "{case:?}: {native:?}"
+        );
+    }
+
+    let default_pv = projection_parameters(&[0.0, 4.0, 3.0]);
+    let north = Projection::Hpx.project(0.0, 90.0, &default_pv).unwrap();
+    let south = Projection::Hpx.project(100.0, -90.0, &default_pv).unwrap();
+    assert_eq!([north.x, north.y], [45.0, 90.0]);
+    assert_eq!([south.x, south.y], [135.0, -90.0]);
+    assert!(Projection::Hpx.deproject(45.0, 90.0, &default_pv).is_ok());
+    assert!(Projection::Hpx.deproject(0.0, 90.0, &default_pv).is_err());
+
+    let standard = Projection::Hpx.project(20.0, -70.0, &default_pv).unwrap();
+    let alternate = Projection::Hpx
+        .project(20.0, -70.0, &projection_parameters(&[0.0, 3.0, 4.0]))
+        .unwrap();
+    assert_ne!([standard.x, standard.y], [alternate.x, alternate.y]);
 }
 
 #[test]
