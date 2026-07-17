@@ -1,4 +1,4 @@
-# FITS 4.0 Core Conformance Review
+# FITS 4.0 Core Conformance
 
 Audit of the dependency-free core (`cargo test --no-default-features`) against
 the bundled normative FITS 4.0 text in
@@ -9,18 +9,16 @@ Tiled compression (§10), `mmap`, and `ndarray` are outside this review.
 
 ## Conclusion
 
-The core is substantial and its main architecture is sound, but it is **not yet
-correct and complete enough to claim full FITS 4.0 conformance**. The remaining
-items below are tied to valid FITS structures or deterministic public-API inputs;
-they are not speculative performance concerns or demands for strict rejection of
-every malformed real-world file.
+The dependency-free core covers the normative FITS 4.0 structures and algorithms
+in §§3–9 within the deliberate boundaries below. Every remediation item found by
+this audit is complete and backed by exact regression fixtures. Tiled compression
+§10 is implemented and tested separately behind the default `compression`
+feature; it was not part of this dependency-free audit.
 
-Recent fixes were meaningful: table/image scaling and null metadata is now checked
-against its stored type, fixed-width bit padding is canonical, random-group array
-`BLANK` handling is correct, ASCII character fields retain leading spaces, and the
-WCS matrix/default/projection fixes are standards-backed. Those fixes improve
-correctness, but the previous all-green status table overstated the remaining
-coverage.
+This conformance statement concerns format interpretation and serialization.
+Operational access features and registered conventions are tracked separately so
+the absence of in-place editing, inter-frame astrometry, or an unrelated
+convention is not misreported as a FITS 4.0 format defect.
 
 Severity used below:
 
@@ -36,14 +34,26 @@ Severity used below:
 | Section | Area | Current status |
 | --- | --- | --- |
 | §3 | File/HDU structure and blocking | Complete for core discovery and sizing: first-card roles, special records, the block grid, and primary/extension/random-groups boundaries are validated independently. |
-| §4 | Headers and integrity keywords | Mostly complete: normal/continued cards, fallible construction, exact unbounded integers, and checksums work; unknown checksum states are still reported as failures. |
+| §4 | Headers and integrity keywords | Complete for the core: normal/continued cards, fallible ordered construction, exact unbounded integers, and four-state checksum reporting. |
 | §5 | Data representation | Complete for core stored types: all `BITPIX` encodings, endian paths, unsigned conventions, and type/range-checked image scaling metadata serialize exactly. |
-| §6 / §7.1 | Primary arrays, IMAGE, random groups | Mostly complete on disk; typed random-group raw values and safe image invariants remain incomplete. |
+| §6 / §7.1 | Primary arrays, IMAGE, random groups | Complete for read/write image arrays and typed random-groups reading; writing deprecated random groups is deliberately omitted. |
 | §7.2 | ASCII tables | Complete for core table structures: formats, scaling, distinct nullable raw cells, field-count limits, and fallible width-checked writing are covered. |
 | §7.3 | Binary tables | Complete for core table structures: all fixed kinds and P/Q reads and writes exist, including type-checked scaling/null metadata, character, physical numeric/complex, exact unsigned, jagged bit arrays, and the 999-field ceiling. |
 | §8 | WCS | Complete for standard algorithms: image and table keyword translation, all 27 celestial projections, every Table-26 spectral/detector algorithm, generic `LOG`, and BINTABLE-resolved multidimensional `TAB` coordinates are covered. Convention-only `XPH` remains explicitly unsupported. |
 | §9 | Time | Complete for the core typed model: references, scales, positions, FITS units, strict year forms, leap-second-preserving UTC quasi-JD, linear/`LOG`/resolved-`TAB` time-axis WCS evaluation, and all image/table PHASE metadata forms are covered. |
 | §10 | Tiled compression | Not assessed here; it is outside the dependency-free core. |
+
+## Capability boundaries
+
+| Capability | Status |
+| --- | --- |
+| Normative FITS 4.0 §§3–9 | Covered by this audit |
+| Normative tiled compression §10 | Implemented behind `compression`; assessed by codec and external-reference tests |
+| Registered conventions | `CONTINUE`, `HIERARCH`, and `CHECKSUM`/`DATASUM` implemented; other conventions are separate product choices |
+| Partial access | N-D image sections and binary-table schema/cell/column/row/range reads |
+| Streaming | Lazy reader plus incremental seekable image output; tables retain transactional whole-HDU output |
+| In-place editing | Deliberately out of scope |
+| Ecosystem bridges | Optional `mmap` and `ndarray`; declared frames are exposed without inter-frame astrometry |
 
 ## Batch 1 — Critical: stop wrong values and valid-file failures
 
@@ -71,7 +81,7 @@ Severity used below:
 
 - [x] **Treat `TDIMn` as inapplicable to a zero-length VLA cell.** Reader and writer skip only the dimension-product comparison for empty descriptors, while malformed shapes and undersized nonempty cells remain errors. Hand-built mixed `P`/`Q`/`PX`/`QX` rows prove empty cells ignore their undefined heap offsets; writer round-trips cover both descriptor widths with the same empty/nonempty shape (`docs/refs/fits_standard40.md:2670-2681`).
 
-- [x] **Complete typed physical access for variable-length arrays.** `vla_complex` applies `TSCALn` to both components and `TZEROn` only to the real component, while `vla_unsigned` returns one exact typed `UnsignedView` per row for the standard integer-offset conventions (`docs/refs/fits_standard40.md:2575-2608`, `:3108-3112`). Fixed and P/Q paths share the same conversion helpers. Hand-built `PC`/`QM` fixtures verify both descriptor widths, scaling, and empty cells; `PK`/`QK` fixtures recover `2^53 + 1` and `u64::MAX` exactly while demonstrating the rounded `f64` physical result.
+- [x] **Complete typed physical access for variable-length arrays.** `vla_complex` applies `TSCALn` to both components and `TZEROn` only to the real component, while `vla_unsigned` returns one exact typed `UnsignedData` per row for the standard integer-offset conventions (`docs/refs/fits_standard40.md:2575-2608`, `:3108-3112`). Fixed and P/Q paths share the same conversion helpers. Hand-built `PC`/`QM` fixtures verify both descriptor widths, scaling, and empty cells; `PK`/`QK` fixtures recover `2^53 + 1` and `u64::MAX` exactly while demonstrating the rounded `f64` physical result.
 
 - [x] **Add `PX`/`QX` writing.** `WriteColumn::vla_bits` accepts one MSB-first, exact-length `BitVec` per row, keeping bit counts distinct from the packed heap byte lengths required by `X` arrays (`docs/refs/fits_standard40.md:3013-3065`). `.wide()` selects `QX`; the same preflight and `TDIMn` rules as other VLAs run before the automatic primary is emitted. A write/read fixture verifies empty, one-bit, and nine-bit P/Q rows, exact descriptor counts and byte offsets, `TFORMn` maxima, and zeroed low padding bits.
 
@@ -83,7 +93,7 @@ Severity used below:
 
 ## Batch 3 — High: make every core writer path conforming and fallible
 
-- [x] **Validate header mutation at insertion instead of panicking or emitting invalid cards.** Public mutation uses the fallible `Header::try_set`, `try_comment`, `try_push_comment`, and `try_push_history` APIs. They preserve the old value/card on failure and reject malformed or reserved/control keywords, restricted-ASCII violations, nonfinite real/complex values, and any scalar/commentary card exceeding 80 bytes. The reader and parser share the same canonical blank `END` recognizer, so a valued `END` cannot terminate a header. Exact invalid-keyword, control-keyword, Unicode/control, NaN/Inf, and oversized-complex fixtures cover the public entry points (`docs/refs/fits_standard40.md:670-807`, `docs/refs/fits_standard40.md:925-1035`).
+- [x] **Validate header mutation at insertion instead of panicking or emitting invalid cards.** Public mutation uses the fallible `Header::set`, `comment`, `push_comment`, and `push_history` APIs. They preserve the old value/card on failure and reject malformed or reserved/control keywords, restricted-ASCII violations, nonfinite real/complex values, and any scalar/commentary card exceeding 80 bytes. The reader and parser share the same canonical blank `END` recognizer, so a valued `END` cannot terminate a header. Exact invalid-keyword, control-keyword, Unicode/control, NaN/Inf, and oversized-complex fixtures cover the public entry points (`docs/refs/fits_standard40.md:670-807`, `docs/refs/fits_standard40.md:925-1035`).
 
 - [x] **Preserve all `CONTINUE` payload/commentary or return an error before writing.** Orphan quoted content and its slash comment are retained as a commentary record, while conforming chains concatenate every comment fragment in order. Long-string writing adds the standard empty final substring when that makes the comment fit; an unrepresentable final comment or any oversized scalar/commentary card returns `HeaderCardTooLong` before partial records are appended. The normative value/comment example, orphan round-trip, and exact-fit/one-byte-over boundaries verify the behavior (`docs/refs/fits_standard40.md:810-874`).
 
@@ -93,7 +103,7 @@ Severity used below:
 
 - [x] **Reject more than 999 table fields before allocation or output.** ASCII, binary, and compressed-table code share one `MAX_TABLE_FIELDS` structural limit. Both regular writers check it before allocating column layouts or emitting an automatic primary. Exact boundary tests serialize and parse 999-field ASCII and binary tables, while 1000 fields return `KeywordOutOfRange("TFIELDS")` with an untouched sink (`docs/refs/fits_standard40.md:2350-2355`, `:2782-2787`).
 
-- [x] **Seal image geometry/type invariants at safe API boundaries.** `Image::new` validates the axis product, sample count, and scaling before construction, and its fields are no longer independently mutable. `RawImage::bitpix` derives the tag from private raw/decoded storage; `ImageMetadata` provides the immutable public view. Writer, compression, and caller-shaped ndarray boundaries return `DataSizeMismatch` for disagreement. Tests cover empty and zero-axis shapes, all six `BITPIX` variants, and exact off-by-one failures.
+- [x] **Seal image geometry/type invariants at safe API boundaries.** `Image::new` validates the axis product, sample count, and scaling before construction, and its fields are no longer independently mutable. `ReadImage::bitpix` derives the tag from private raw/decoded storage; `ImageMetadata` provides the immutable public view. Writer, compression, and caller-shaped ndarray boundaries return `DataSizeMismatch` for disagreement. Tests cover empty and zero-axis shapes, all six `BITPIX` variants, and exact off-by-one failures.
 
 - [x] **Preflight a complete HDU and poison torn writers.** Every extension path completes encoding, padding, checksum/header rendering, and any late validation before emitting an automatic primary. `write_raw_hdu` validates and commits a complete logical HDU in one operation, including role, exact data length, and derived block fill. Writer state tracks `Empty`/`Active`/`Failed`; a partial sink error poisons the writer and subsequent writes return `WriterFailed`. Late compression and raw-HDU failures leave a fresh sink untouched.
 
@@ -103,7 +113,7 @@ Severity used below:
 
 - [x] **Support alternate/table PHASE metadata and reject undefined folding.** `Header::phase_axis`, `phase_axis_pixel_list`, and `phase_axis_array_column` resolve the primary and alternate Table-22 `CZPHS`/`CPERI` spellings. Missing/zero periods remain valid nonconstant metadata as `None`, while `PhaseAxis::fold` returns `InvalidValue` instead of fabricating phase zero (`docs/refs/fits_standard40.md:4717-4734`).
 
-- [x] **Add public HIERARCH authoring.** `Header::try_set_hierarch` writes and updates compound names without exposing the internal card kind. It shares the indexed logical model with parsed HIERARCH cards, preserves comments on update, and rejects empty, boundary-spaced, delimiter-containing, non-ASCII, or physically unrepresentable input before mutation. Long spaced names round-trip through the canonical renderer/parser (`src/header/mod.rs`; registered convention notes in `docs/refs/08-conventions.md`).
+- [x] **Add public HIERARCH authoring.** `Header::set_hierarch` writes and updates compound names without exposing the internal card kind. It shares the indexed logical model with parsed HIERARCH cards, preserves comments on update, and rejects empty, boundary-spaced, delimiter-containing, non-ASCII, or physically unrepresentable input before mutation. Long spaced names round-trip through the canonical renderer/parser (`src/header/mod.rs`; registered convention notes in `docs/refs/08-conventions.md`).
 
 ## Confirmed coverage
 

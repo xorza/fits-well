@@ -8,8 +8,8 @@ use crate::data::ImageData;
 use crate::endian;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::table::TformKind;
-use crate::table::VlaCell;
+use crate::table_impl::TformKind;
+use crate::table_impl::VlaCell;
 
 /// Append `src` widened to `i64` to `out` — the repeated integer-widening arm of the
 /// gather/cell helpers (`T` is one of `u8`/`i16`/`i32`/`i64`, all lossless to `i64`).

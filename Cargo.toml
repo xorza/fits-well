@@ -59,7 +59,7 @@ parallel = ["compression", "dep:rayon"]
 # memory-mapped read sources (via memmap2) for zero-copy access over large files:
 # data units decode straight from the mapped pages, skipping the staging copy.
 mmap = ["dep:memmap2"]
-# n-dimensional image arrays (via ndarray): `Image`/`RawImage` -> typed `ImageArray`
+# n-dimensional image arrays (via ndarray): `Image`/`ReadImage` -> typed `ImageArray`
 # or a physical `ArrayD<f64>`, in FITS axis order, zero-copy where possible.
 ndarray = ["dep:ndarray"]
 # tiled image + table (de)compression: all five image codecs (GZIP_1, GZIP_2,

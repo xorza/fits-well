@@ -4,14 +4,35 @@
 
 ### Breaking changes
 
+- Public types are organized under `image`, `table`, `header`, `wcs`, `time`, and
+  `io`; only common entry points remain re-exported at the crate root. Sealed
+  source wrappers moved from the root to `io`.
+- `FitsWriter::write_table` and `write_ascii_table` now accept validated
+  `TableBuilder` / `AsciiTableBuilder` values instead of a separate row count and
+  column slice. The matching `*_with_header` methods use the same builders.
+- `write_compressed_image` and `write_compressed_table` now accept the typed
+  `Compression` enum. Codec-specific settings live in validated `Gzip` and
+  `Hcompress` values, while tiling and float quantization remain in
+  `CompressionOptions`.
+- `read_image_view` now returns `BorrowedImage`, pairing its scratch-backed
+  `ImageView` with shape and scaling metadata. `RawImage` was renamed to
+  `ReadImage`, and the owned result formerly called `UnsignedView` is now
+  `UnsignedData`.
+- Header authoring uses the primary fallible verbs `set`, `set_hierarch`,
+  `comment`, `push_comment`, and `push_history`. Ordered duplicate/insert/remove
+  operations were added, and `set` automatically selects HIERARCH syntax for
+  long or compound names.
+- `FitsError` and the open-ended `HduKind`/`TableColumnData` metadata enums are
+  non-exhaustive.
 - `ChecksumReport` now exposes `datasum` and `checksum` as `ChecksumStatus`
   values (`Absent`, `Unknown`, `Valid`, or `Invalid`) instead of lossy
   `Option<bool>` fields.
-- `Image` is now constructed with fallible `Image::new`; its geometry, samples,
-  and scaling are immutable after construction, with geometry and stored-type
+- `Image::new(shape, samples)` now means identity scaling and accepts typed
+  vectors through `Into<ImageData>`; custom scaling moved to `Image::new_scaled`.
+  Geometry, samples, and scaling are immutable after construction, with geometry and stored-type
   metadata exposed through `Image::metadata` and exact immutable samples through
   `Image::stored`. The unsigned/signed-byte constructors now return `Result`.
-  `RawImage` likewise exposes immutable `ImageMetadata`, and `RawImage::bitpix`
+  `ReadImage` likewise exposes immutable `ImageMetadata`, and `ReadImage::bitpix`
   derives the stored type from its backing representation instead of exposing a
   separately mutable tag. `ImageData::into_ndarray` now returns `Result` when a
   caller-supplied shape has the wrong element count.
@@ -21,11 +42,11 @@
   writes return `FitsError::WriterFailed` instead of appending after a possibly
   torn HDU.
 - `WriteColumn` is now an invariant-preserving opaque type instead of a collection
-  of public, independently mutable fields. `WriteColumn::vla` now requires an
-  explicit `ColumnType`, including for empty columns, and `WriteColumn::bits` now
-  accepts packed `Vec<u8>` data directly. `WriteColumn::vla` and
-  `WriteColumn::wide` now return `Result` for mismatched cell types and non-VLA
-  columns instead of panicking. `ColumnType` is exported from the crate.
+  of public, independently mutable fields. `WriteColumn::vla` infers its type
+  from nonempty rows; `vla_typed` is the explicit-schema path required for an
+  empty VLA. `WriteColumn::bits` accepts packed `Vec<u8>` data directly.
+  `WriteColumn::vla`, `vla_typed`, and `wide` return `Result` for invalid states
+  instead of panicking.
 - Parsed `BinTable`, `AsciiTable`, `RandomGroups`, and `DataUnit` storage is now
   private so safe callers cannot desynchronize validated geometry from backing
   bytes. Read their immutable `*Metadata`/`DataUnitView` values instead.
@@ -45,9 +66,9 @@
   and ASCII tables use nullable `AsciiColumnData` cells so `TNULLn` remains distinct
   from genuine values. `ColumnData::Text` was removed, and `ColumnType::Text` was
   renamed to `ColumnType::Character`.
-- `RawImage::decode` now consumes `self`, allowing already-owned decompressed samples
-  to move out without cloning. With `ndarray`, `RawImage::to_ndarray(&self)` was
-  replaced by the consuming `RawImage::into_ndarray(self)`.
+- `ReadImage::decode` now consumes `self`, allowing already-owned decompressed samples
+  to move out without cloning. With `ndarray`, `ReadImage::to_ndarray(&self)` was
+  replaced by the consuming `ReadImage::into_ndarray(self)`.
 - `FitsTime::gti_intervals` now returns `Result<Vec<GtiInterval>>` and rejects
   mismatched start/stop column lengths instead of silently truncating through `zip`.
 - `FitsTime::unit_seconds` and `relative_to_mjd` now return `Result`; malformed or
@@ -85,12 +106,29 @@
   `UnsupportedWcsTransform`, `WcsProjectionDomain`, `WcsCoordinateDomain`, `WcsNoConvergence`,
   `PlioValueOutOfRange`, `TableMetadataMismatch`, `GroupIndexOutOfBounds`,
   `CoordinateCountMismatch`, `WcsAxisIndexOutOfBounds`, `OneBasedIndexRequired`,
-  and `WriterFailed` variants were added; exhaustive matches on `FitsError` must
-  handle them.
+  `WriterFailed`, selector/range, table-builder, and display-format variants were
+  added.
 
 ### Added
 
-- Added fallible `Header::try_set_hierarch` authoring and update support for ESO
+- Added `HduSelector` and reader-bound `HduHandle` operations for zero-based or
+  case-insensitive `EXTNAME`/`EXTVER` selection.
+- Added checked N-dimensional image section reads. Plain sections coalesce
+  contiguous source reads; compressed sections read and decompress only
+  intersecting tiles.
+- Added header-only `TableSchema` discovery plus source-bound table cell,
+  selected-column, row, and range reads, including compact reads of referenced
+  P/Q heap cells.
+- Added `FitsWriter::stream_image`, `stream_image_scaled`, and
+  `stream_image_with_header` for incremental image output to seekable sinks,
+  including final count validation, padding, and checksum patching. Readers now
+  recover their source through `into_inner` or `into_bytes`.
+- Added inferred `TableBuilder` and `AsciiTableBuilder` construction,
+  `WriteColumn::scalar`, consistent ASCII-column builders, and typed compression
+  configuration.
+- Added public WCS axis units and resolved celestial axis/projection/pole
+  metadata.
+- Added fallible `Header::set_hierarch` authoring and update support for ESO
   HIERARCH compound keywords.
 - Added `FitsInteger`, an exact FITS integer value with an allocation-free `i64`
   representation and a decimal fallback for the standard's unbounded range.
@@ -113,7 +151,8 @@
   epoch keywords and WCS time axes.
 - Added typed time reference positions, `Header::time_for_column` for `TRPOSn`
   overrides, and pixel-list/vector-cell PHASE metadata accessors.
-- Added explicit `ColumnType` declarations for variable-length table columns.
+- Added explicit `ColumnType` declarations for empty or predeclared
+  variable-length table columns.
 - Added `ColumnReader::vla_complex` and `vla_unsigned` for scaled complex P/Q
   heap arrays and exact unsigned-convention integers, including `u64` values that
   cannot be represented exactly as `f64`.
@@ -143,8 +182,8 @@
 - Header text, header comments, binary-table character members, ASCII-table text,
   units, names, and null markers are validated as FITS restricted ASCII before
   writing.
-- Public header mutation is fallible through `Header::try_set`, `try_comment`,
-  `try_push_comment`, and `try_push_history`. Invalid/reserved keywords,
+- Public header mutation is fallible through `Header::set`, `comment`,
+  `push_comment`, and `push_history`. Invalid/reserved keywords,
   non-ASCII text, nonfinite numeric values, and cards longer than 80 bytes are
   rejected without changing the header; the former panicking mutation methods
   are no longer public.

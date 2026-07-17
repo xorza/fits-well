@@ -7,14 +7,15 @@
 
 use std::fs::File;
 
-use fits_well::{FitsReader, FitsWriter, Image, ImageArray, ImageData, Scaling};
+use fits_well::image::ImageArray;
+use fits_well::{FitsReader, FitsWriter, Image, ImageData, Scaling};
 
 fn main() -> fits_well::Result<()> {
     let path = std::env::temp_dir().join("fits_well_ndarray.fits");
 
     // A 4×3 image: NAXIS1 = 4 (columns, the fastest-varying axis), NAXIS2 = 3 (rows).
     // `samples` is the flat buffer in FITS order — each row's 4 pixels, row by row.
-    let image = Image::new(
+    let image = Image::new_scaled(
         vec![4, 3],
         ImageData::I16(vec![
             0, 1, 2, 3, // y = 0

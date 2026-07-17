@@ -4,6 +4,7 @@ use std::io;
 pub type Result<T> = std::result::Result<T, FitsError>;
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum FitsError {
     Io(io::Error),
     /// A previous sink error may have left a partial HDU in the output. Further
@@ -93,6 +94,51 @@ pub enum FitsError {
         index: usize,
         len: usize,
     },
+    /// No extension matched a requested case-insensitive `EXTNAME` and optional
+    /// `EXTVER` selector.
+    HduNotFound {
+        name: String,
+        version: Option<i64>,
+    },
+    /// An ordered header operation named a record position beyond the stored
+    /// logical record list.
+    HeaderIndexOutOfBounds {
+        index: usize,
+        len: usize,
+    },
+    /// An N-dimensional image region has a different rank from the image.
+    ImageRegionRankMismatch {
+        region_rank: usize,
+        image_rank: usize,
+    },
+    /// One zero-based half-open image-axis range is reversed or exceeds its axis.
+    ImageRegionOutOfBounds {
+        axis: usize,
+        start: usize,
+        end: usize,
+        len: usize,
+    },
+    /// A zero-based half-open table row range is reversed or exceeds the table.
+    RowRangeOutOfBounds {
+        start: usize,
+        end: usize,
+        len: usize,
+    },
+    /// A table column contains a different number of rows from the table being built.
+    TableRowCountMismatch {
+        column: String,
+        expected: usize,
+        got: usize,
+    },
+    /// Empty or zero-width column data did not carry enough information to infer
+    /// the intended table row count.
+    TableRowCountUndetermined {
+        column: String,
+    },
+    /// An empty VLA column needs an explicit heap element type.
+    EmptyVlaNeedsType {
+        column: String,
+    },
     /// A WCS transform received the wrong number of pixel or world coordinates.
     CoordinateCountMismatch {
         expected: usize,
@@ -165,6 +211,10 @@ pub enum FitsError {
     /// A `TFORMn` value could not be parsed as a binary-table column format.
     InvalidTform {
         tform: String,
+    },
+    /// A `TDISPn` value could not be parsed as a complete binary-table display format.
+    InvalidTdisp {
+        tdisp: String,
     },
     /// `ColumnReader::raw` was called on a variable-length-array (`P`/`Q`) column;
     /// use `ColumnReader::vla` instead.
@@ -293,6 +343,54 @@ impl fmt::Display for FitsError {
             FitsError::HduIndexOutOfBounds { index, len } => {
                 write!(f, "HDU index {index} out of bounds (file has {len} HDUs)")
             }
+            FitsError::HduNotFound { name, version } => match version {
+                Some(version) => {
+                    write!(f, "no HDU named {name:?} with EXTVER {version}")
+                }
+                None => write!(f, "no HDU named {name:?}"),
+            },
+            FitsError::HeaderIndexOutOfBounds { index, len } => {
+                write!(
+                    f,
+                    "header record index {index} out of bounds (header has {len} records)"
+                )
+            }
+            FitsError::ImageRegionRankMismatch {
+                region_rank,
+                image_rank,
+            } => write!(
+                f,
+                "image region has {region_rank} axes but the image has {image_rank}"
+            ),
+            FitsError::ImageRegionOutOfBounds {
+                axis,
+                start,
+                end,
+                len,
+            } => write!(
+                f,
+                "image region axis {axis} range {start}..{end} exceeds axis length {len}"
+            ),
+            FitsError::RowRangeOutOfBounds { start, end, len } => write!(
+                f,
+                "table row range {start}..{end} exceeds the table's {len} rows"
+            ),
+            FitsError::TableRowCountMismatch {
+                column,
+                expected,
+                got,
+            } => write!(
+                f,
+                "table column {column:?} has {got} rows but the table requires {expected}"
+            ),
+            FitsError::TableRowCountUndetermined { column } => write!(
+                f,
+                "table column {column:?} does not determine a row count; declare the table row count explicitly"
+            ),
+            FitsError::EmptyVlaNeedsType { column } => write!(
+                f,
+                "empty VLA column {column:?} needs an explicit heap element type"
+            ),
             FitsError::CoordinateCountMismatch { expected, got } => {
                 write!(
                     f,
@@ -353,6 +451,9 @@ impl fmt::Display for FitsError {
                 "PLIO tile sample {index} has value {value}, outside 0..=16777215"
             ),
             FitsError::InvalidTform { tform } => write!(f, "invalid column format {tform:?}"),
+            FitsError::InvalidTdisp { tdisp } => {
+                write!(f, "invalid column display format {tdisp:?}")
+            }
             FitsError::VariableLengthColumn { code } => write!(
                 f,
                 "column format '{code}' is a variable-length array; use the column reader's vla()"

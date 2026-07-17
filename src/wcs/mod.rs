@@ -968,7 +968,9 @@ pub struct SpectralFrame {
 pub struct WcsAxis {
     /// The `CTYPEi` string.
     pub ctype: String,
-    cunit: String,
+    /// Declared `CUNITi`, normalized only where the transform requires standard
+    /// projection units.
+    pub cunit: String,
     /// `CRVALi` — world coordinate at the reference pixel.
     pub crval: f64,
     /// `CRPIXi` — reference pixel (1-based).
@@ -977,12 +979,27 @@ pub struct WcsAxis {
     pub spectral_frame: Option<SpectralFrame>,
 }
 
+/// Public celestial-pair metadata for a parsed WCS.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CelestialProjection {
+    /// Zero-based longitude axis.
+    pub longitude_axis: usize,
+    /// Zero-based latitude axis.
+    pub latitude_axis: usize,
+    pub projection: Projection,
+    /// Native-to-celestial pole `(right ascension/longitude, declination/latitude,
+    /// LONPOLE)`, in degrees.
+    pub pole: [f64; 3],
+}
+
 /// A read-only snapshot of a parsed WCS's source metadata and support status.
 #[derive(Debug, Clone, Copy)]
 pub struct WcsView<'a> {
     pub axes: &'a [WcsAxis],
     /// The resolved `RADESYSa`/`EQUINOXa` metadata when applicable.
     pub celestial_frame: Option<CelestialFrame>,
+    /// Resolved celestial axes, projection, and native pole.
+    pub celestial_projection: Option<CelestialProjection>,
     /// Zero-based axes whose non-linear transform is not evaluated.
     pub unsupported_axes: &'a [usize],
 }
@@ -1598,6 +1615,19 @@ impl Wcs {
         WcsView {
             axes: &self.axes,
             celestial_frame: self.celestial_frame,
+            celestial_projection: self
+                .celestial
+                .as_ref()
+                .map(|celestial| CelestialProjection {
+                    longitude_axis: celestial.lng,
+                    latitude_axis: celestial.lat,
+                    projection: celestial.projection,
+                    pole: [
+                        celestial.pole.ra,
+                        celestial.pole.dec,
+                        celestial.pole.lonpole,
+                    ],
+                }),
             unsupported_axes: &self.unsupported_axes,
         }
     }
@@ -1668,7 +1698,7 @@ impl Wcs {
         // Translate the column-indexed keywords into an equivalent image header,
         // mapping column number `cN` → axis index `i+1`.
         let mut h = Header::new();
-        h.set("WCSAXES", columns.len() as i64);
+        h.set_internal("WCSAXES", columns.len() as i64);
         let mut spectral_frames = vec![None; columns.len()];
         for (i, &c) in columns.iter().enumerate() {
             let ax = i + 1;
@@ -1676,7 +1706,7 @@ impl Wcs {
                 .pixel_axis_key(TableAxisKeyword::Type, c)
                 .expect("Table 22 defines primary and alternate axis-type keywords");
             if let Some(t) = header.get_text(type_key.as_str())? {
-                h.set(key!("CTYPE{ax}").as_str(), t);
+                h.set_internal(key!("CTYPE{ax}").as_str(), t);
                 if axis::is_spectral_type(t) {
                     spectral_frames[i] = Some(table_spectral_frame(header, resolver, c)?);
                 }
@@ -1690,18 +1720,18 @@ impl Wcs {
                 if let Some(source) = resolver.pixel_axis_key(keyword, c)
                     && let Some(value) = header.get_real(source.as_str())?
                 {
-                    h.set(key!("{}{ax}", keyword.image_root()).as_str(), value);
+                    h.set_internal(key!("{}{ax}", keyword.image_root()).as_str(), value);
                 }
             }
             let unit_key = resolver
                 .pixel_axis_key(TableAxisKeyword::Unit, c)
                 .expect("Table 22 defines primary and alternate axis-unit keywords");
             if let Some(t) = header.get_text(unit_key.as_str())? {
-                h.set(key!("CUNIT{ax}").as_str(), t);
+                h.set_internal(key!("CUNIT{ax}").as_str(), t);
             }
             for m in 0..=20 {
                 if let Some(v) = resolver.pixel_parameter_real(header, c, m)? {
-                    h.set(key!("PV{ax}_{m}").as_str(), v);
+                    h.set_internal(key!("PV{ax}_{m}").as_str(), v);
                 }
             }
         }
@@ -1710,7 +1740,7 @@ impl Wcs {
             for (j, &cj) in columns.iter().enumerate() {
                 for keyword in [TableMatrixKeyword::Pc, TableMatrixKeyword::Cd] {
                     if let Some(v) = resolver.pixel_matrix_real(header, keyword, ci, cj)? {
-                        h.set(key!("{}{}_{}", keyword.root(), i + 1, j + 1).as_str(), v);
+                        h.set_internal(key!("{}{}_{}", keyword.root(), i + 1, j + 1).as_str(), v);
                     }
                 }
             }
@@ -1727,7 +1757,7 @@ impl Wcs {
             let column = columns[longitude];
             for pole in [TablePoleKeyword::Longitude, TablePoleKeyword::Latitude] {
                 if let Some(value) = resolver.pole_real(header, pole, column)? {
-                    h.set(pole.image_root(), value);
+                    h.set_internal(pole.image_root(), value);
                 }
             }
             copy_table_celestial_frame(
@@ -1763,21 +1793,21 @@ impl Wcs {
             return Err(FitsError::MissingKeyword { name: "iCTYPn" });
         }
         let mut h = Header::new();
-        h.set("WCSAXES", naxis as i64);
+        h.set_internal("WCSAXES", naxis as i64);
         let mut spectral_axes = vec![false; naxis];
         for ax in 1..=naxis {
             let type_key = resolver
                 .vector_axis_key(TableAxisKeyword::Type, ax, column)
                 .expect("Table 22 defines primary and alternate axis-type keywords");
             if let Some(t) = header.get_text(type_key.as_str())? {
-                h.set(key!("CTYPE{ax}").as_str(), t);
+                h.set_internal(key!("CTYPE{ax}").as_str(), t);
                 spectral_axes[ax - 1] = axis::is_spectral_type(t);
             }
             let unit_key = resolver
                 .vector_axis_key(TableAxisKeyword::Unit, ax, column)
                 .expect("Table 22 defines primary and alternate axis-unit keywords");
             if let Some(t) = header.get_text(unit_key.as_str())? {
-                h.set(key!("CUNIT{ax}").as_str(), t);
+                h.set_internal(key!("CUNIT{ax}").as_str(), t);
             }
             for keyword in [
                 TableAxisKeyword::ReferencePoint,
@@ -1788,13 +1818,13 @@ impl Wcs {
                 if let Some(source) = resolver.vector_axis_key(keyword, ax, column)
                     && let Some(value) = header.get_real(source.as_str())?
                 {
-                    h.set(key!("{}{ax}", keyword.image_root()).as_str(), value);
+                    h.set_internal(key!("{}{ax}", keyword.image_root()).as_str(), value);
                 }
             }
             // PVi_m arrives as `iPVn_ma`, or the abbreviated `iVn_ma`.
             for m in 0..=20 {
                 if let Some(v) = resolver.vector_parameter_real(header, ax, column, m)? {
-                    h.set(key!("PV{ax}_{m}").as_str(), v);
+                    h.set_internal(key!("PV{ax}_{m}").as_str(), v);
                 }
             }
         }
@@ -1812,14 +1842,14 @@ impl Wcs {
                 for keyword in [TableMatrixKeyword::Pc, TableMatrixKeyword::Cd] {
                     let source = resolver.vector_matrix_key(keyword, i, j, column);
                     if let Some(value) = header.get_real(source.as_str())? {
-                        h.set(key!("{}{i}_{j}", keyword.root()).as_str(), value);
+                        h.set_internal(key!("{}{i}_{j}", keyword.root()).as_str(), value);
                     }
                 }
             }
         }
         for pole in [TablePoleKeyword::Longitude, TablePoleKeyword::Latitude] {
             if let Some(value) = resolver.pole_real(header, pole, column)? {
-                h.set(pole.image_root(), value);
+                h.set_internal(pole.image_root(), value);
             }
         }
         copy_table_celestial_frame(header, &mut h, resolver, &[column])?;
@@ -2046,13 +2076,13 @@ fn table_spectral_frame(
     for (table_root, image_root) in [("RFRQ", "RESTFRQ"), ("RWAV", "RESTWAV")] {
         let source = resolver.column_key(table_root, column);
         if let Some(value) = header.get_real(source.as_str())? {
-            translated.set(image_root, value);
+            translated.set_internal(image_root, value);
         }
     }
     for (table_root, image_root) in [("SPEC", "SPECSYS"), ("SOBS", "SSYSOBS")] {
         let source = resolver.column_key(table_root, column);
         if let Some(value) = header.get_text(source.as_str())? {
-            translated.set(image_root, value);
+            translated.set_internal(image_root, value);
         }
     }
     spectral_frame(&translated, None, "")
@@ -2074,7 +2104,7 @@ fn copy_table_celestial_frame(
                     detail: "table celestial axes declare different RADESYS values",
                 });
             }
-            destination.set("RADESYS", value);
+            destination.set_internal("RADESYS", value);
         }
         let equinox = resolver.column_key("EQUI", column);
         if let Some(value) = source.get_real(equinox.as_str())? {
@@ -2085,7 +2115,7 @@ fn copy_table_celestial_frame(
                     detail: "table celestial axes declare different EQUINOX values",
                 });
             }
-            destination.set("EQUINOX", value);
+            destination.set_internal("EQUINOX", value);
         }
     }
     Ok(())

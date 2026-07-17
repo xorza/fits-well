@@ -1,5 +1,5 @@
 pub(crate) mod card;
-pub(crate) mod value;
+pub mod value;
 
 use std::collections::HashMap;
 
@@ -54,6 +54,14 @@ pub struct HeaderEntry<'a> {
     pub keyword: &'a str,
     pub value: Option<&'a Value>,
     pub comment: Option<&'a str>,
+}
+
+/// One owned logical header record, returned by ordered removal operations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeaderRecord {
+    pub keyword: String,
+    pub value: Option<Value>,
+    pub comment: Option<String>,
 }
 
 impl Header {
@@ -281,7 +289,7 @@ impl Header {
         FitsTime::phase_axis_array_column(self, axis, column, alt)
     }
 
-    /// Create an empty header. Build it with [`Header::try_set`] and friends.
+    /// Create an empty header. Build it with [`Header::set`] and friends.
     pub fn new() -> Header {
         Header::default()
     }
@@ -291,9 +299,16 @@ impl Header {
     /// (≤ 8 chars of `A–Z`, `0–9`, `-`, `_`) and must not be a control or
     /// commentary keyword. Text must use restricted ASCII and numeric values must
     /// have a finite FITS representation. An error leaves the header unchanged.
-    pub fn try_set(&mut self, keyword: &str, value: impl Into<Value>) -> Result<&mut Self> {
-        validate_valued_keyword(keyword)?;
-        self.try_set_card(Card::value(keyword, value.into()))
+    /// Names longer than eight characters or containing spaces are authored through
+    /// the registered HIERARCH convention; short names use standard FITS syntax.
+    pub fn set(&mut self, keyword: &str, value: impl Into<Value>) -> Result<&mut Self> {
+        let value = value.into();
+        if keyword.len() > 8 || keyword.contains(' ') {
+            self.set_card(Card::hierarch(keyword, value))
+        } else {
+            validate_valued_keyword(keyword)?;
+            self.set_card(Card::value(keyword, value))
+        }
     }
 
     /// Insert or replace an ESO HIERARCH convention keyword. `keyword` is the
@@ -301,15 +316,11 @@ impl Header {
     /// nonempty restricted ASCII without leading/trailing spaces or `=`;
     /// internal spaces separate hierarchy tokens. An error leaves the header
     /// unchanged.
-    pub fn try_set_hierarch(
-        &mut self,
-        keyword: &str,
-        value: impl Into<Value>,
-    ) -> Result<&mut Self> {
-        self.try_set_card(Card::hierarch(keyword, value.into()))
+    pub fn set_hierarch(&mut self, keyword: &str, value: impl Into<Value>) -> Result<&mut Self> {
+        self.set_card(Card::hierarch(keyword, value.into()))
     }
 
-    fn try_set_card(&mut self, card: Card) -> Result<&mut Self> {
+    fn set_card(&mut self, card: Card) -> Result<&mut Self> {
         let keyword = card.keyword.clone();
         if let Some(&i) = self.index.get(&keyword) {
             let mut replacement = self.cards[i].clone();
@@ -326,9 +337,98 @@ impl Header {
     }
 
     #[track_caller]
-    pub(crate) fn set(&mut self, keyword: &str, value: impl Into<Value>) -> &mut Self {
-        self.try_set(keyword, value)
+    pub(crate) fn set_internal(&mut self, keyword: &str, value: impl Into<Value>) -> &mut Self {
+        self.set(keyword, value)
             .expect("internal FITS header metadata must be valid")
+    }
+
+    /// Append a duplicate valued card without replacing an earlier occurrence.
+    /// Lookup continues to return the first occurrence, matching parsed headers.
+    pub fn append(&mut self, keyword: &str, value: impl Into<Value>) -> Result<&mut Self> {
+        self.insert(self.cards.len(), keyword, value)
+    }
+
+    /// Insert a valued card at a logical record position. Unlike [`Header::set`],
+    /// this never replaces an existing card and can deliberately create duplicates.
+    pub fn insert(
+        &mut self,
+        index: usize,
+        keyword: &str,
+        value: impl Into<Value>,
+    ) -> Result<&mut Self> {
+        let value = value.into();
+        let card = if keyword.len() > 8 || keyword.contains(' ') {
+            Card::hierarch(keyword, value)
+        } else {
+            validate_valued_keyword(keyword)?;
+            Card::value(keyword, value)
+        };
+        self.insert_card(index, card)
+    }
+
+    /// Append a duplicate HIERARCH valued card.
+    pub fn append_hierarch(&mut self, keyword: &str, value: impl Into<Value>) -> Result<&mut Self> {
+        self.insert_hierarch(self.cards.len(), keyword, value)
+    }
+
+    /// Insert a HIERARCH valued card at a logical record position.
+    pub fn insert_hierarch(
+        &mut self,
+        index: usize,
+        keyword: &str,
+        value: impl Into<Value>,
+    ) -> Result<&mut Self> {
+        self.insert_card(index, Card::hierarch(keyword, value.into()))
+    }
+
+    fn insert_card(&mut self, index: usize, card: Card) -> Result<&mut Self> {
+        if index > self.cards.len() {
+            return Err(FitsError::HeaderIndexOutOfBounds {
+                index,
+                len: self.cards.len(),
+            });
+        }
+        card.validate()?;
+        self.cards.insert(index, card);
+        self.reindex();
+        Ok(self)
+    }
+
+    /// Remove the first logical record with `keyword`.
+    pub fn remove(&mut self, keyword: &str) -> Option<HeaderRecord> {
+        let index = self.cards.iter().position(|card| card.keyword == keyword)?;
+        Some(
+            self.remove_at(index)
+                .expect("position came from the header record list"),
+        )
+    }
+
+    /// Remove one logical record by zero-based position.
+    pub fn remove_at(&mut self, index: usize) -> Result<HeaderRecord> {
+        if index >= self.cards.len() {
+            return Err(FitsError::HeaderIndexOutOfBounds {
+                index,
+                len: self.cards.len(),
+            });
+        }
+        let card = self.cards.remove(index);
+        self.reindex();
+        Ok(HeaderRecord {
+            keyword: card.keyword,
+            value: card.value,
+            comment: card.comment,
+        })
+    }
+
+    /// Remove every logical record with `keyword`, returning the count removed.
+    pub fn remove_all(&mut self, keyword: &str) -> usize {
+        let old_len = self.cards.len();
+        self.cards.retain(|card| card.keyword != keyword);
+        let removed = old_len - self.cards.len();
+        if removed != 0 {
+            self.reindex();
+        }
+        removed
     }
 
     pub(crate) fn append_filtered_from(
@@ -390,7 +490,7 @@ impl Header {
 
     /// Attach (or replace) the inline comment of an existing valued keyword. A
     /// missing valid keyword remains a no-op. An error leaves the header unchanged.
-    pub fn try_comment(&mut self, keyword: &str, text: &str) -> Result<&mut Self> {
+    pub fn comment(&mut self, keyword: &str, text: &str) -> Result<&mut Self> {
         validate_ascii(text, "header comment")?;
         let Some(&i) = self.index.get(keyword) else {
             validate_valued_keyword(keyword)?;
@@ -404,41 +504,36 @@ impl Header {
     }
 
     #[track_caller]
-    pub(crate) fn comment(&mut self, keyword: &str, text: &str) -> &mut Self {
-        self.try_comment(keyword, text)
+    pub(crate) fn comment_internal(&mut self, keyword: &str, text: &str) -> &mut Self {
+        self.comment(keyword, text)
             .expect("internal FITS header comments must be valid")
     }
 
     /// Append one restricted-ASCII `COMMENT` record. Text that cannot fit the
     /// record returns an error without changing the header.
-    pub fn try_push_comment(&mut self, text: &str) -> Result<&mut Self> {
+    pub fn push_comment(&mut self, text: &str) -> Result<&mut Self> {
         let card = Card::commentary("COMMENT", text);
         card.validate()?;
         self.cards.push(card);
         Ok(self)
     }
 
-    #[track_caller]
-    #[cfg(test)]
-    pub(crate) fn push_comment(&mut self, text: &str) -> &mut Self {
-        self.try_push_comment(text)
-            .expect("internal FITS COMMENT text must be valid")
-    }
-
     /// Append one restricted-ASCII `HISTORY` record. Text that cannot fit the
     /// record returns an error without changing the header.
-    pub fn try_push_history(&mut self, text: &str) -> Result<&mut Self> {
+    pub fn push_history(&mut self, text: &str) -> Result<&mut Self> {
         let card = Card::commentary("HISTORY", text);
         card.validate()?;
         self.cards.push(card);
         Ok(self)
     }
 
-    #[track_caller]
-    #[cfg(test)]
-    pub(crate) fn push_history(&mut self, text: &str) -> &mut Self {
-        self.try_push_history(text)
-            .expect("internal FITS HISTORY text must be valid")
+    /// Append a blank-keyword commentary record. `text = ""` produces a physically
+    /// blank card; nonempty text uses the same restricted-ASCII rules.
+    pub fn push_blank(&mut self, text: &str) -> Result<&mut Self> {
+        let card = Card::commentary("", text);
+        card.validate()?;
+        self.cards.push(card);
+        Ok(self)
     }
 }
 

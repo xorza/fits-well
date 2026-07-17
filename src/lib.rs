@@ -55,18 +55,16 @@ mod endian;
 mod error;
 mod groups;
 mod hdu;
-mod header;
+pub mod header;
 mod keyword;
 mod reader;
-mod table;
-mod time;
+#[path = "table/mod.rs"]
+mod table_impl;
+pub mod time;
 mod unit;
-mod wcs;
+pub mod wcs;
 mod writer;
 
-pub use ascii::{
-    AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiTable, AsciiTableMetadata,
-};
 pub use bitpix::Bitpix;
 
 /// Re-exported so callers can name the borrowed [`bitvec::slice::BitSlice`] rows that
@@ -75,17 +73,12 @@ pub use bitpix::Bitpix;
 /// without taking their own version-skewed `bitvec` dependency.
 pub use bitvec;
 #[cfg(feature = "compression")]
-pub use compress::{CompressOptions, DitherMethod};
-#[cfg(feature = "ndarray")]
-pub use data::ImageArray;
-pub use data::{
-    Image, ImageData, ImageMetadata, ImageView, RawImage, SampleType, Scaling, UnsignedView,
-};
+pub use compress::{Compression, CompressionOptions, DitherMethod, Gzip, Hcompress};
+pub use data::{BorrowedImage, Image, ImageData, ReadImage, Scaling};
 pub use error::{FitsError, Result};
-pub use groups::{RandomGroupView, RandomGroups, RandomGroupsMetadata};
+pub use groups::RandomGroups;
 pub use hdu::HduKind;
 pub use header::Header;
-pub use header::HeaderEntry;
 pub use header::value::{FitsInteger, Value};
 /// The complex element type of `C`/`M` columns — the ecosystem-standard
 /// [`num_complex::Complex`]. Re-exported (crate and type) so callers can name it and
@@ -94,28 +87,56 @@ pub use num_complex;
 pub use num_complex::Complex;
 #[cfg(feature = "mmap")]
 pub use reader::MmapReader;
-#[cfg(feature = "mmap")]
-pub use reader::source::MmapSource;
-pub use reader::source::{SliceSource, Source, StreamSource};
-pub use reader::{
-    ChecksumReport, ChecksumStatus, DataUnit, DataUnitView, FitsReader, Hdu, SliceReader,
-    StreamReader,
-};
-pub use table::{
-    BinTable, BinTableMetadata, BitColumn, CharacterField, Column, ColumnData, ColumnReader, TDisp,
-    TDispKind, Tform, TformKind,
-};
-pub use time::{
-    Datetime, Epoch, FitsTime, GtiInterval, PhaseAxis, TimeAxisKind, TimeBounds, TimeCoordinate,
-    TimeReferencePosition, TimeScale,
-};
-pub use wcs::{
-    CelestialFrame, CelestialReferenceFrame, Projection, SpectralFrame, SpectralReferenceFrame,
-    Wcs, WcsAxis, WcsView,
-};
-pub use writer::{AsciiWriteColumn, ColumnType, FitsWriter, WriteColumn};
+pub use reader::{FitsReader, HduSelector, SliceReader, StreamReader};
+pub use table_impl::{BinTable, ColumnData};
+pub use writer::{FitsWriter, TableBuilder, WriteColumn};
 
 pub use block::{BLOCK_SIZE, CARD_SIZE};
+
+/// Typed image values, scratch-backed views, optional array bridges, and
+/// incremental image output.
+pub mod image {
+    #[cfg(feature = "compression")]
+    pub use crate::compress::{Compression, CompressionOptions, DitherMethod, Gzip, Hcompress};
+    #[cfg(feature = "ndarray")]
+    pub use crate::data::ImageArray;
+    pub use crate::data::{
+        BorrowedImage, Image, ImageData, ImageMetadata, ImageView, ReadImage, SampleType, Scaling,
+        UnsignedData,
+    };
+    pub use crate::writer::ImageStream;
+}
+
+/// Binary and ASCII table values, schema and selection metadata, and write
+/// builders.
+pub mod table {
+    pub use crate::ascii::{
+        AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiTable, AsciiTableMetadata,
+    };
+    pub use crate::reader::{ColumnSelector, SelectedColumn, TableColumnData, TableSelection};
+    pub use crate::table_impl::{
+        BinTable, BinTableMetadata, BitColumn, CharacterField, Column, ColumnData, ColumnReader,
+        TDisp, TDispKind, TableSchema, Tform, TformKind,
+    };
+    pub use crate::writer::{
+        AsciiTableBuilder, AsciiWriteColumn, ColumnType, TableBuilder, WriteColumn,
+    };
+}
+
+/// Lazy FITS source access and HDU-bound operations. Concrete source wrappers
+/// live here because they appear in reader type aliases; the source abstraction
+/// is sealed and is not an extension point.
+pub mod io {
+    #[cfg(feature = "mmap")]
+    pub use crate::reader::MmapReader;
+    #[cfg(feature = "mmap")]
+    pub use crate::reader::source::MmapSource;
+    pub use crate::reader::source::{SliceSource, StreamSource};
+    pub use crate::reader::{
+        ChecksumReport, ChecksumStatus, DataUnit, DataUnitView, FitsReader, Hdu, HduHandle,
+        HduSelector, SliceReader, StreamReader,
+    };
+}
 
 /// Hot internal entry points re-exposed **for benchmarking only** (the `internals`
 /// feature). These wrap crate-private functions so the benches under `benches/`

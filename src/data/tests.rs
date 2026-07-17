@@ -44,7 +44,7 @@ fn image_constructor_enforces_geometry_for_every_bitpix() {
     ];
     for samples in valid {
         let bitpix = samples.bitpix();
-        let image = Image::new(vec![2], samples, scaling).unwrap();
+        let image = Image::new_scaled(vec![2], samples, scaling).unwrap();
         assert_eq!(image.metadata().shape, [2]);
         assert_eq!(image.metadata().bitpix, bitpix);
     }
@@ -59,13 +59,23 @@ fn image_constructor_enforces_geometry_for_every_bitpix() {
     ];
     for samples in short {
         assert!(matches!(
-            Image::new(vec![2], samples, scaling),
+            Image::new_scaled(vec![2], samples, scaling),
             Err(FitsError::DataSizeMismatch {
                 expected: 2,
                 got: 1
             })
         ));
     }
+}
+
+#[test]
+fn simple_image_constructor_accepts_typed_vectors_with_identity_scaling() {
+    let image = Image::new(vec![2, 2], vec![1i16, 2, 3, 4]).unwrap();
+    assert_eq!(image.metadata().shape, [2, 2]);
+    assert_eq!(image.metadata().bitpix, Bitpix::I16);
+    assert_eq!(image.metadata().scaling, Scaling::IDENTITY);
+    assert_eq!(Scaling::default(), Scaling::IDENTITY);
+    assert_eq!(image.stored(), ImageView::I16(&[1, 2, 3, 4]));
 }
 
 #[test]
@@ -76,9 +86,9 @@ fn image_constructor_accepts_empty_geometry_and_rejects_nonempty_samples() {
         blank: None,
     };
     for shape in [Vec::new(), vec![0], vec![4, 0, 3]] {
-        Image::new(shape.clone(), ImageData::F64(Vec::new()), scaling).unwrap();
+        Image::new_scaled(shape.clone(), ImageData::F64(Vec::new()), scaling).unwrap();
         assert!(matches!(
-            Image::new(shape, ImageData::F64(vec![1.0]), scaling),
+            Image::new_scaled(shape, ImageData::F64(vec![1.0]), scaling),
             Err(FitsError::DataSizeMismatch {
                 expected: 0,
                 got: 1
@@ -96,7 +106,7 @@ fn image_constructor_accepts_empty_geometry_and_rejects_nonempty_samples() {
 
 #[test]
 fn image_stored_view_preserves_exact_samples_immutably() {
-    let image = Image::new(
+    let image = Image::new_scaled(
         vec![3],
         ImageData::I64(vec![i64::MIN, 0, i64::MAX]),
         Scaling {
@@ -344,7 +354,7 @@ fn unsigned_view_recovers_exact_typed_integers() {
     );
     assert_eq!(
         u16_img.unsigned(),
-        Some(UnsignedView::U16(vec![0, 32768, 65535]))
+        Some(UnsignedData::U16(vec![0, 32768, 65535]))
     );
     let u32_img = image(
         ImageData::I32(vec![i32::MIN, 0, i32::MAX]),
@@ -356,7 +366,7 @@ fn unsigned_view_recovers_exact_typed_integers() {
     );
     assert_eq!(
         u32_img.unsigned(),
-        Some(UnsignedView::U32(vec![0, 2_147_483_648, u32::MAX]))
+        Some(UnsignedData::U32(vec![0, 2_147_483_648, u32::MAX]))
     );
     let i8_img = image(
         ImageData::U8(vec![0, 128, 255]),
@@ -368,7 +378,7 @@ fn unsigned_view_recovers_exact_typed_integers() {
     );
     assert_eq!(
         i8_img.unsigned(),
-        Some(UnsignedView::I8(vec![-128, 0, 127]))
+        Some(UnsignedData::I8(vec![-128, 0, 127]))
     );
 }
 
@@ -379,17 +389,17 @@ fn from_unsigned_constructors_invert_the_unsigned_view() {
     let img = Image::from_u16(vec![4], &u16s).unwrap();
     assert_eq!(img.samples, ImageData::I16(vec![-32768, -32767, 0, 32767]));
     assert_eq!(img.scaling.bzero, 32768.0);
-    assert_eq!(img.unsigned(), Some(UnsignedView::U16(u16s)));
+    assert_eq!(img.unsigned(), Some(UnsignedData::U16(u16s)));
 
     let u64s = vec![0u64, 1u64 << 63, u64::MAX];
     assert_eq!(
         Image::from_u64(vec![3], &u64s).unwrap().unsigned(),
-        Some(UnsignedView::U64(u64s))
+        Some(UnsignedData::U64(u64s))
     );
     let i8s = vec![i8::MIN, 0, i8::MAX];
     assert_eq!(
         Image::from_i8(vec![3], &i8s).unwrap().unsigned(),
-        Some(UnsignedView::I8(i8s))
+        Some(UnsignedData::I8(i8s))
     );
 }
 
@@ -407,7 +417,7 @@ fn unsigned_u64_view_is_exact_where_physical_rounds() {
             blank: None,
         },
     );
-    assert_eq!(img.unsigned(), Some(UnsignedView::U64(vec![exact])));
+    assert_eq!(img.unsigned(), Some(UnsignedData::U64(vec![exact])));
     assert_eq!(img.physical()[0] as u64, exact - 1); // rounded to 2⁵³
 }
 
@@ -481,7 +491,7 @@ fn raw_image_fuses_big_endian_physical_conversion() {
     ];
     for (samples, expected) in cases {
         let bytes = encoded(&samples);
-        let raw = RawImage::raw(vec![2], samples.bitpix(), scaling, &bytes);
+        let raw = ReadImage::raw(vec![2], samples.bitpix(), scaling, &bytes);
         assert_eq!(raw.metadata().bitpix, samples.bitpix());
         let physical = raw.physical();
         for (got, want) in physical.iter().zip(&expected) {
@@ -508,27 +518,27 @@ fn raw_image_fuses_big_endian_unsigned_conversion() {
         (
             ImageData::U8(vec![0, 128, 255]),
             -128.0,
-            UnsignedView::I8(vec![-128, 0, 127]),
+            UnsignedData::I8(vec![-128, 0, 127]),
         ),
         (
             ImageData::I16(vec![i16::MIN, 0, i16::MAX]),
             U16_OFFSET,
-            UnsignedView::U16(vec![0, 32_768, u16::MAX]),
+            UnsignedData::U16(vec![0, 32_768, u16::MAX]),
         ),
         (
             ImageData::I32(vec![i32::MIN, 0, i32::MAX]),
             U32_OFFSET,
-            UnsignedView::U32(vec![0, 2_147_483_648, u32::MAX]),
+            UnsignedData::U32(vec![0, 2_147_483_648, u32::MAX]),
         ),
         (
             ImageData::I64(vec![i64::MIN, 0, i64::MAX]),
             U64_OFFSET,
-            UnsignedView::U64(vec![0, 9_223_372_036_854_775_808, u64::MAX]),
+            UnsignedData::U64(vec![0, 9_223_372_036_854_775_808, u64::MAX]),
         ),
     ];
     for (samples, bzero, expected) in cases {
         let bytes = encoded(&samples);
-        let raw = RawImage::raw(
+        let raw = ReadImage::raw(
             vec![3],
             samples.bitpix(),
             Scaling {
@@ -693,7 +703,7 @@ fn scaling_reads_explicit_keywords() {
 
     for keyword in ["BSCALE", "BZERO", "BLANK"] {
         let mut malformed = Header::new();
-        malformed.set(keyword, "not numeric");
+        malformed.set_internal(keyword, "not numeric");
         assert!(matches!(
             Scaling::from_header(&malformed),
             Err(FitsError::TypeMismatch { name, .. }) if name == keyword

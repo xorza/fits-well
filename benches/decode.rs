@@ -104,7 +104,7 @@ fn physical(c: &mut Criterion) {
     let mut g = c.benchmark_group("physical");
     for &(name, bitpix) in TYPES {
         for (label, blank) in [("plain", None), ("blank", Some(7i64))] {
-            let img = Image::new(
+            let img = Image::new_scaled(
                 vec![n],
                 sample_data(bitpix, n),
                 Scaling {
@@ -129,7 +129,7 @@ fn read_image(c: &mut Criterion) {
     let mut g = c.benchmark_group("read_image");
     for &(name, bitpix) in TYPES {
         let n = count(bitpix);
-        let img = Image::new(
+        let img = Image::new_scaled(
             vec![n],
             sample_data(bitpix, n),
             Scaling {
@@ -164,7 +164,7 @@ fn read_image_view(c: &mut Criterion) {
     let mut g = c.benchmark_group("read_image_view");
     for &(name, bitpix) in TYPES {
         let n = count(bitpix);
-        let img = Image::new(
+        let img = Image::new_scaled(
             vec![n],
             sample_data(bitpix, n),
             Scaling {

@@ -5,7 +5,9 @@ use crate::data::Scaling;
 use crate::error::FitsError;
 use crate::header::Header;
 use crate::reader::*;
-use crate::writer::FitsWriter;
+use crate::table_impl::{CharacterField, ColumnData};
+use crate::writer::{FitsWriter, TableBuilder, WriteColumn};
+use num_complex::Complex;
 use std::fs::File;
 use std::io::Cursor;
 
@@ -23,20 +25,20 @@ fn write_tab_lookup(
 ) {
     let mut header = Header::new();
     header
-        .set("XTENSION", "BINTABLE")
-        .set("BITPIX", 8)
-        .set("NAXIS", 2)
-        .set("NAXIS1", (coordinates.len() * 8) as i64)
-        .set("NAXIS2", 1)
-        .set("PCOUNT", 0)
-        .set("GCOUNT", 1)
-        .set("TFIELDS", 1)
-        .set("TTYPE1", "COORD")
-        .set("TFORM1", format!("{}D", coordinates.len()))
-        .set("TDIM1", format!("(1,{})", coordinates.len()))
-        .set("EXTNAME", "WCS-TABLE")
-        .set("EXTVER", version)
-        .set("EXTLEVEL", level);
+        .set_internal("XTENSION", "BINTABLE")
+        .set_internal("BITPIX", 8)
+        .set_internal("NAXIS", 2)
+        .set_internal("NAXIS1", (coordinates.len() * 8) as i64)
+        .set_internal("NAXIS2", 1)
+        .set_internal("PCOUNT", 0)
+        .set_internal("GCOUNT", 1)
+        .set_internal("TFIELDS", 1)
+        .set_internal("TTYPE1", "COORD")
+        .set_internal("TFORM1", format!("{}D", coordinates.len()))
+        .set_internal("TDIM1", format!("(1,{})", coordinates.len()))
+        .set_internal("EXTNAME", "WCS-TABLE")
+        .set_internal("EXTVER", version)
+        .set_internal("EXTLEVEL", level);
     let bytes: Vec<u8> = coordinates
         .iter()
         .flat_map(|value| value.to_be_bytes())
@@ -48,20 +50,20 @@ fn write_tab_lookup(
 fn read_wcs_resolves_the_exact_tabular_extension() {
     let mut primary = Header::new();
     primary
-        .set("SIMPLE", true)
-        .set("BITPIX", 8)
-        .set("NAXIS", 1)
-        .set("NAXIS1", 1)
-        .set("CTYPE1", "WAVE-TAB")
-        .set("CUNIT1", "m")
-        .set("CRPIX1", 1.0)
-        .set("CRVAL1", 1.0)
-        .set("CDELT1", 1.0)
-        .set("PS1_0", "WCS-TABLE")
-        .set("PV1_1", 2)
-        .set("PV1_2", 3)
-        .set("PS1_1", "COORD")
-        .set("PV1_3", 1);
+        .set_internal("SIMPLE", true)
+        .set_internal("BITPIX", 8)
+        .set_internal("NAXIS", 1)
+        .set_internal("NAXIS1", 1)
+        .set_internal("CTYPE1", "WAVE-TAB")
+        .set_internal("CUNIT1", "m")
+        .set_internal("CRPIX1", 1.0)
+        .set_internal("CRVAL1", 1.0)
+        .set_internal("CDELT1", 1.0)
+        .set_internal("PS1_0", "WCS-TABLE")
+        .set_internal("PV1_1", 2)
+        .set_internal("PV1_2", 3)
+        .set_internal("PS1_1", "COORD")
+        .set_internal("PV1_3", 1);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer.write_raw_hdu(&primary, &[0]).unwrap();
     write_tab_lookup(&mut writer, 2, 1, &[100.0, 200.0, 400.0]);
@@ -527,10 +529,10 @@ fn hdu_index_finds_extensions_by_extname() {
 
     let mut header = Header::new();
     header
-        .set("SIMPLE", true)
-        .set("BITPIX", 8)
-        .set("NAXIS", 0)
-        .set("EXTNAME", 7);
+        .set_internal("SIMPLE", true)
+        .set_internal("BITPIX", 8)
+        .set_internal("NAXIS", 0)
+        .set_internal("EXTNAME", 7);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer.write_raw_hdu(&header, &[]).unwrap();
     let bytes = writer.into_inner().into_inner();
@@ -617,10 +619,13 @@ fn read_image_view_matches_decode_for_a_plain_image() {
     let mut f = open("UITfuv2582gc.fits");
     // The owned decode is the reference; the borrowed view (into a caller scratch)
     // must equal it.
+    let expected_scaling = f.hdus()[0].header.scaling().unwrap();
     let owned = f.read_image(0).unwrap().decode();
     let mut scratch = Vec::new();
-    let view = f.read_image_view(0, &mut scratch).unwrap();
-    match (view, &owned) {
+    let image = f.read_image_view(0, &mut scratch).unwrap();
+    assert_eq!(image.metadata().shape, &[512, 512]);
+    assert_eq!(image.metadata().scaling, expected_scaling);
+    match (image.samples, &owned) {
         (ImageView::I16(v), ImageData::I16(o)) => assert_eq!(v, o.as_slice()),
         (v, o) => panic!("expected matching I16 view/decode, got {v:?} / {o:?}"),
     }
@@ -640,7 +645,9 @@ fn read_image_view_borrows_u8_samples_with_zero_copy() {
     let buf = write_to_vec(&image);
     let mut reader = FitsReader::from_bytes(&buf).unwrap();
     let mut scratch = Vec::new();
-    let ImageView::U8(v) = reader.read_image_view(0, &mut scratch).unwrap() else {
+    let image = reader.read_image_view(0, &mut scratch).unwrap();
+    assert_eq!(image.metadata().shape, &[4]);
+    let ImageView::U8(v) = image.samples else {
         panic!("a U8 image must view as U8");
     };
     assert_eq!(v, &[10, 20, 30, 40]);
@@ -661,12 +668,352 @@ fn read_image_view_matches_decode_for_a_compressed_image() {
     let owned = f.read_image(1).unwrap().decode();
     let mut scratch = Vec::with_capacity(owned.len().div_ceil(4));
     let scratch_ptr = scratch.as_ptr() as *const i16;
-    let view = f.read_image_view(1, &mut scratch).unwrap();
-    match (view, &owned) {
+    let image = f.read_image_view(1, &mut scratch).unwrap();
+    assert_eq!(image.metadata().shape, &[24, 16]);
+    match (image.samples, &owned) {
         (ImageView::I16(v), ImageData::I16(o)) => {
             assert_eq!(v, o.as_slice());
             assert_eq!(v.as_ptr(), scratch_ptr);
         }
         (v, o) => panic!("expected matching I16 view/decode, got {v:?} / {o:?}"),
     }
+}
+
+#[test]
+fn hdu_handle_selects_by_index_or_case_insensitive_name_and_version() {
+    let primary = Image::new(vec![1], vec![0u8]).unwrap();
+    let extension = Image::new(vec![3], vec![10i16, 20, 30]).unwrap();
+    let mut extension_header = Header::new();
+    extension_header.set("EXTNAME", "SCI").unwrap();
+    extension_header.set("EXTVER", 2).unwrap();
+    extension_header.set("OBJECT", "target").unwrap();
+
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_image(&primary).unwrap();
+    writer
+        .write_image_with_header(&extension, &extension_header)
+        .unwrap();
+    let bytes = writer.into_inner().into_inner();
+    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+
+    {
+        let mut hdu = reader.hdu(("sci", 2)).unwrap();
+        assert_eq!(hdu.index, 1);
+        assert_eq!(hdu.kind, HduKind::Image);
+        assert_eq!(hdu.header.get_text("OBJECT").unwrap(), Some("target"));
+        assert_eq!(
+            hdu.read_image().unwrap().decode(),
+            ImageData::I16(vec![10, 20, 30])
+        );
+    }
+    assert_eq!(reader.hdu(0usize).unwrap().kind, HduKind::Primary);
+    assert!(matches!(
+        reader.hdu(("SCI", 3)),
+        Err(FitsError::HduNotFound { name, version: Some(3) }) if name == "SCI"
+    ));
+}
+
+fn region_indices() -> Vec<usize> {
+    let mut indices = Vec::new();
+    for z in 1..3 {
+        for y in 1..3 {
+            for x in 1..4 {
+                indices.push(x + 5 * y + 20 * z);
+            }
+        }
+    }
+    indices
+}
+
+#[test]
+fn image_sections_match_hand_computed_values_for_every_bitpix() {
+    let all: Vec<usize> = (0..60).collect();
+    let selected = region_indices();
+    let cases = [
+        (
+            ImageData::U8(all.iter().map(|&value| value as u8).collect()),
+            ImageData::U8(selected.iter().map(|&value| value as u8).collect()),
+        ),
+        (
+            ImageData::I16(all.iter().map(|&value| value as i16 - 30).collect()),
+            ImageData::I16(selected.iter().map(|&value| value as i16 - 30).collect()),
+        ),
+        (
+            ImageData::I32(all.iter().map(|&value| value as i32 * 1000 - 7).collect()),
+            ImageData::I32(
+                selected
+                    .iter()
+                    .map(|&value| value as i32 * 1000 - 7)
+                    .collect(),
+            ),
+        ),
+        (
+            ImageData::I64(all.iter().map(|&value| value as i64 * -50).collect()),
+            ImageData::I64(selected.iter().map(|&value| value as i64 * -50).collect()),
+        ),
+        (
+            ImageData::F32(all.iter().map(|&value| value as f32 * 0.5).collect()),
+            ImageData::F32(selected.iter().map(|&value| value as f32 * 0.5).collect()),
+        ),
+        (
+            ImageData::F64(all.iter().map(|&value| value as f64 * -0.25).collect()),
+            ImageData::F64(selected.iter().map(|&value| value as f64 * -0.25).collect()),
+        ),
+    ];
+
+    for (samples, expected) in cases {
+        let bitpix = samples.bitpix();
+        let image = Image::new(vec![5, 4, 3], samples).unwrap();
+        let bytes = write_to_vec(&image);
+        let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+        let mut scratch = Vec::new();
+        let section = reader
+            .read_image_section_view(0, &[1..4, 1..3, 1..3], &mut scratch)
+            .unwrap();
+        assert_eq!(section.shape, [3, 2, 2], "{bitpix:?}");
+        assert_eq!(section.scaling, Scaling::IDENTITY, "{bitpix:?}");
+        assert_eq!(section.samples.to_owned_data(), expected, "{bitpix:?}");
+    }
+}
+
+#[test]
+fn image_sections_preserve_scaling_and_validate_empty_and_invalid_regions() {
+    let image = Image::new_scaled(
+        vec![4, 3],
+        vec![1i16, 2, -99, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        Scaling {
+            bscale: 2.0,
+            bzero: 10.0,
+            blank: Some(-99),
+        },
+    )
+    .unwrap();
+    let bytes = write_to_vec(&image);
+    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+    let section = reader.read_image_section(0, &[1..4, 0..2]).unwrap();
+    assert_eq!(section.metadata().shape, [3, 2]);
+    assert_eq!(section.metadata().scaling, image.metadata().scaling);
+    let physical = section.physical();
+    assert_eq!(physical[0], 14.0);
+    assert!(physical[1].is_nan());
+    assert_eq!(physical[2..], [18.0, 22.0, 24.0, 26.0]);
+
+    let empty = reader.read_image_section(0, &[2..2, 1..3]).unwrap();
+    assert_eq!(empty.metadata().shape, [0, 2]);
+    assert!(empty.stored().is_empty());
+    let wrong_rank = 0..1;
+    assert!(matches!(
+        reader.read_image_section(0, std::slice::from_ref(&wrong_rank)),
+        Err(FitsError::ImageRegionRankMismatch {
+            region_rank: 1,
+            image_rank: 2,
+        })
+    ));
+    assert!(matches!(
+        reader.read_image_section(0, &[0..5, 0..1]),
+        Err(FitsError::ImageRegionOutOfBounds {
+            axis: 0,
+            start: 0,
+            end: 5,
+            len: 4,
+        })
+    ));
+}
+
+#[cfg(feature = "compression")]
+#[test]
+fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
+    use crate::compress::{Compression, CompressionOptions};
+
+    let samples: Vec<i16> = (0..9 * 7).map(|index| index as i16 * 3 - 50).collect();
+    let image = Image::new(vec![9, 7], samples.clone()).unwrap();
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer
+        .write_compressed_image(
+            &image,
+            Compression::Rice,
+            &CompressionOptions::tiled([4, 3]),
+        )
+        .unwrap();
+    let bytes = writer.into_inner().into_inner();
+    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+    let section = reader.read_image_section(1, &[2..8, 1..6]).unwrap();
+    let mut expected = Vec::new();
+    for y in 1..6 {
+        for x in 2..8 {
+            expected.push(samples[x + 9 * y]);
+        }
+    }
+    assert_eq!(section.metadata().shape, [6, 5]);
+    assert_eq!(section.stored(), ImageView::I16(&expected));
+}
+
+#[test]
+fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
+    let rows = 4;
+    let columns = vec![
+        WriteColumn::scalar("ID", ColumnData::I32(vec![10, 20, 30, 40])),
+        WriteColumn::bits(
+            "FLAGS",
+            vec![0b1010_0000, 0b0101_0000, 0b1110_0000, 0b0001_0000],
+            5,
+        ),
+        WriteColumn::fixed(
+            "NAME",
+            ColumnData::Character(
+                [b"one ", b"two ", b"tri ", b"four"]
+                    .into_iter()
+                    .map(|value| CharacterField::new(value.to_vec()))
+                    .collect(),
+            ),
+            4,
+        ),
+        WriteColumn::scalar(
+            "COMPLEX",
+            ColumnData::ComplexF32(vec![
+                Complex::new(1.0, -1.0),
+                Complex::new(2.0, -2.0),
+                Complex::new(3.0, -3.0),
+                Complex::new(4.0, -4.0),
+            ]),
+        ),
+        WriteColumn::scalar("SCALED", ColumnData::I16(vec![1, -99, 2, 3]))
+            .scaled(2.0, 10.0)
+            .with_null(-99),
+        WriteColumn::vla(
+            "VLA",
+            vec![
+                ColumnData::I32(vec![1]),
+                ColumnData::I32(vec![2, 3]),
+                ColumnData::I32(Vec::new()),
+                ColumnData::I32(vec![4, 5, 6]),
+            ],
+        )
+        .unwrap(),
+        WriteColumn::vla(
+            "QVLA",
+            vec![
+                ColumnData::F64(vec![0.5]),
+                ColumnData::F64(Vec::new()),
+                ColumnData::F64(vec![2.5, 3.5]),
+                ColumnData::F64(vec![4.5]),
+            ],
+        )
+        .unwrap()
+        .wide()
+        .unwrap(),
+    ];
+    let table = TableBuilder::explicit(rows, columns).unwrap();
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_table(&table).unwrap();
+    let bytes = writer.into_inner().into_inner();
+    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+
+    let schema = reader.table_schema(1).unwrap();
+    assert_eq!(schema.nrows, 4);
+    assert_eq!(schema.columns.len(), 7);
+    let ranged = reader.read_table_rows(1, 1..3).unwrap();
+    assert_eq!(
+        ranged.column_by_name("ID").unwrap().raw().unwrap(),
+        ColumnData::I32(vec![20, 30])
+    );
+    let flags = ranged.column_by_name("FLAGS").unwrap().bits().unwrap();
+    assert_eq!(
+        (0..5)
+            .map(|column| flags.get(0, column).unwrap())
+            .collect::<Vec<_>>(),
+        [false, true, false, true, false]
+    );
+    assert_eq!(
+        ranged.column_by_name("NAME").unwrap().raw().unwrap(),
+        ColumnData::Character(vec![
+            CharacterField::new(b"two ".to_vec()),
+            CharacterField::new(b"tri ".to_vec()),
+        ])
+    );
+    assert_eq!(
+        ranged.column_by_name("COMPLEX").unwrap().complex().unwrap(),
+        [Complex::new(2.0, -2.0), Complex::new(3.0, -3.0)]
+    );
+    let physical = ranged.column_by_name("SCALED").unwrap().physical().unwrap();
+    assert!(physical[0].is_nan());
+    assert_eq!(physical[1], 14.0);
+    assert_eq!(
+        ranged.column_by_name("VLA").unwrap().vla().unwrap(),
+        [ColumnData::I32(vec![2, 3]), ColumnData::I32(Vec::new())]
+    );
+    assert_eq!(
+        ranged.column_by_name("QVLA").unwrap().vla().unwrap(),
+        [ColumnData::F64(Vec::new()), ColumnData::F64(vec![2.5, 3.5])]
+    );
+
+    let selection = reader
+        .read_table_columns(1, 1..3, &[ColumnSelector::from("ID"), "VLA".into()])
+        .unwrap();
+    assert_eq!(selection.rows, 1..3);
+    assert!(matches!(
+        &selection.columns[0].data,
+        TableColumnData::Fixed(ColumnData::I32(values)) if values == &[20, 30]
+    ));
+    assert!(matches!(
+        &selection.columns[1].data,
+        TableColumnData::Variable(values)
+            if values == &[ColumnData::I32(vec![2, 3]), ColumnData::I32(Vec::new())]
+    ));
+    assert_eq!(
+        reader
+            .read_table_cell(1, 3, ColumnSelector::from("QVLA"))
+            .unwrap(),
+        ColumnData::F64(vec![4.5])
+    );
+    assert!(matches!(
+        reader.read_table_rows(1, 3..5),
+        Err(FitsError::RowRangeOutOfBounds {
+            start: 3,
+            end: 5,
+            len: 4,
+        })
+    ));
+
+    let mut corrupted = bytes.clone();
+    let qvla = &schema.columns[6];
+    let qvla_slot =
+        usize::try_from(reader.hdus[1].data_offset).unwrap() + schema.row_len + qvla.byte_offset;
+    corrupted[qvla_slot..qvla_slot + qvla.tform.byte_width()].fill(0xff);
+    let mut selective = FitsReader::from_bytes(&corrupted).unwrap();
+    let selection = selective
+        .read_table_columns(1, 1..2, &[ColumnSelector::from("ID"), "VLA".into()])
+        .unwrap();
+    assert!(matches!(
+        &selection.columns[0].data,
+        TableColumnData::Fixed(ColumnData::I32(values)) if values == &[20]
+    ));
+    assert!(matches!(
+        &selection.columns[1].data,
+        TableColumnData::Variable(values) if values == &[ColumnData::I32(vec![2, 3])]
+    ));
+    assert_eq!(
+        selective
+            .read_table_cell(1, 1, ColumnSelector::from("ID"))
+            .unwrap(),
+        ColumnData::I32(vec![20])
+    );
+    assert!(matches!(
+        selective.read_table_rows(1, 1..2),
+        Err(FitsError::DataUnitOverflow)
+    ));
+}
+
+#[test]
+fn readers_recover_their_original_sources() {
+    let image = Image::new(vec![2], vec![1u8, 2]).unwrap();
+    let bytes = write_to_vec(&image);
+    let slice = FitsReader::from_bytes(&bytes).unwrap().into_bytes();
+    assert!(std::ptr::eq(slice.as_ptr(), bytes.as_ptr()));
+    assert_eq!(slice.len(), bytes.len());
+
+    let cursor = FitsReader::open(Cursor::new(bytes.clone()))
+        .unwrap()
+        .into_inner();
+    assert_eq!(cursor.into_inner(), bytes);
 }

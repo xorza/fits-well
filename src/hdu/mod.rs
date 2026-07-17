@@ -61,6 +61,7 @@ impl HduRole {
 
 /// The structural kind of an HDU, inferred from its mandatory keywords.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HduKind {
     /// Primary array (`SIMPLE = T`), possibly empty (`NAXIS = 0`).
     Primary,

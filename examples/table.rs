@@ -6,25 +6,26 @@
 
 use std::fs::File;
 
-use fits_well::{ColumnData, FitsReader, FitsWriter, WriteColumn};
+use fits_well::{ColumnData, FitsReader, FitsWriter, TableBuilder, WriteColumn};
 
 fn main() -> fits_well::Result<()> {
     let path = std::env::temp_dir().join("fits_well_table.fits");
 
     // Each column holds typed data; the last argument is the per-row element count
     // (the character width for a text column, 1 for a plain scalar column).
-    let columns = [
-        WriteColumn::fixed("ID", ColumnData::I32(vec![1, 2, 3]), 1),
-        WriteColumn::fixed(
+    let table = TableBuilder::new()
+        .column(WriteColumn::scalar("ID", ColumnData::I32(vec![1, 2, 3])))?
+        .column(WriteColumn::fixed(
             "NAME",
             ColumnData::Character(vec!["Vega".into(), "Sirius".into(), "Rigel".into()]),
             8,
-        ),
-        WriteColumn::fixed("MAG", ColumnData::F64(vec![0.03, -1.46, 0.13]), 1).with_unit("mag"),
-    ];
+        ))?
+        .column(
+            WriteColumn::scalar("MAG", ColumnData::F64(vec![0.03, -1.46, 0.13])).with_unit("mag"),
+        )?;
 
     let mut writer = FitsWriter::new(File::create(&path)?);
-    writer.write_table(3, &columns)?; // 3 rows
+    writer.write_table(&table)?;
     writer.into_inner().sync_all()?;
     println!("wrote {}", path.display());
 

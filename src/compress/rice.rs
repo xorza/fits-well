@@ -366,13 +366,15 @@ mod tests {
     #[test]
     fn rice_parameters_reject_invalid_header_values() {
         let mut header = Header::new();
-        header.set("ZNAME1", "BLOCKSIZE").set("ZVAL1", 0);
+        header
+            .set_internal("ZNAME1", "BLOCKSIZE")
+            .set_internal("ZVAL1", 0);
         assert!(matches!(
             rice::rice_params(&header, Bitpix::I16),
             Err(FitsError::KeywordOutOfRange { name: "ZVALn" })
         ));
 
-        header.set("ZVAL1", "not an integer");
+        header.set_internal("ZVAL1", "not an integer");
         assert!(matches!(
             rice::rice_params(&header, Bitpix::I16),
             Err(FitsError::TypeMismatch { name, expected })

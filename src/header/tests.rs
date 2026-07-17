@@ -209,17 +209,17 @@ fn missing_end_record_is_an_error() {
 #[test]
 fn builder_sets_replaces_and_indexes_keywords() {
     let mut h = Header::new();
-    h.set("SIMPLE", true)
-        .comment("SIMPLE", "conforms")
-        .set("BITPIX", 16)
-        .set("OBJECT", "NGC4151");
+    h.set_internal("SIMPLE", true)
+        .comment_internal("SIMPLE", "conforms")
+        .set_internal("BITPIX", 16)
+        .set_internal("OBJECT", "NGC4151");
     assert_eq!(h.get_logical("SIMPLE").unwrap(), Some(true));
     assert_eq!(h.get_integer("BITPIX").unwrap(), Some(16));
     assert_eq!(h.get_text("OBJECT").unwrap(), Some("NGC4151"));
     assert_eq!(h.cards.len(), 3);
 
     // Re-setting a keyword replaces in place — no duplicate card, index stable.
-    h.set("BITPIX", -32);
+    h.set_internal("BITPIX", -32);
     assert_eq!(h.get_integer("BITPIX").unwrap(), Some(-32));
     assert_eq!(h.cards.len(), 3);
     // The attached comment survives on its card.
@@ -227,7 +227,9 @@ fn builder_sets_replaces_and_indexes_keywords() {
 
     #[cfg(feature = "compression")]
     {
-        h.set("ZFORM1", "1J").set("ZCTYP1", "GZIP_1").set("KEEP", 7);
+        h.set_internal("ZFORM1", "1J")
+            .set_internal("ZCTYP1", "GZIP_1")
+            .set_internal("KEEP", 7);
         h.remove_where(|keyword| matches!(keyword, "ZFORM1" | "ZCTYP1"));
         assert_eq!(h.get("ZFORM1"), None);
         assert_eq!(h.get("ZCTYP1"), None);
@@ -240,11 +242,11 @@ fn builder_sets_replaces_and_indexes_keywords() {
 fn builder_authors_updates_and_round_trips_hierarch_keywords() {
     let mut header = Header::new();
     header
-        .try_set_hierarch("ESO DET CHIP1 NAME", "CCD-44")
+        .set_hierarch("ESO DET CHIP1 NAME", "CCD-44")
         .unwrap()
-        .try_comment("ESO DET CHIP1 NAME", "detector chip")
+        .comment("ESO DET CHIP1 NAME", "detector chip")
         .unwrap()
-        .try_set_hierarch("ESO DET CHIP1 GAIN MODE", 1)
+        .set_hierarch("ESO DET CHIP1 GAIN MODE", 1)
         .unwrap();
 
     assert_eq!(
@@ -263,9 +265,7 @@ fn builder_authors_updates_and_round_trips_hierarch_keywords() {
             .all(|card| card.kind == CardKind::Hierarch)
     );
 
-    header
-        .try_set_hierarch("ESO DET CHIP1 NAME", "CCD-45")
-        .unwrap();
+    header.set_hierarch("ESO DET CHIP1 NAME", "CCD-45").unwrap();
     assert_eq!(
         header.get_text("ESO DET CHIP1 NAME").unwrap(),
         Some("CCD-45")
@@ -287,9 +287,9 @@ fn builder_authors_updates_and_round_trips_hierarch_keywords() {
 #[test]
 fn builder_appends_commentary_cards() {
     let mut h = Header::new();
-    h.set("SIMPLE", true)
-        .push_comment("made by fits")
-        .push_history("step 1");
+    h.set_internal("SIMPLE", true);
+    h.push_comment("made by fits").unwrap();
+    h.push_history("step 1").unwrap();
     assert_eq!(h.cards.len(), 3);
     assert_eq!(h.cards[1].kind, CardKind::Commentary);
     assert_eq!(h.cards[1].keyword, "COMMENT");
@@ -299,29 +299,62 @@ fn builder_appends_commentary_cards() {
 }
 
 #[test]
+fn ordered_header_edits_preserve_duplicates_and_rebuild_lookup() {
+    let mut header = Header::new();
+    header.set("OBJECT", "first").unwrap();
+    header.append("OBJECT", "second").unwrap();
+    header.insert(1, "EXPTIME", 30.0).unwrap();
+    header
+        .set("ESO DET CHIP1 NAME", "CCD-1")
+        .unwrap()
+        .push_blank("")
+        .unwrap();
+
+    assert_eq!(header.get_text("OBJECT").unwrap(), Some("first"));
+    assert_eq!(header.get_real("EXPTIME").unwrap(), Some(30.0));
+    assert_eq!(
+        header.get_text("ESO DET CHIP1 NAME").unwrap(),
+        Some("CCD-1")
+    );
+    assert_eq!(
+        header.iter().map(|entry| entry.keyword).collect::<Vec<_>>(),
+        ["OBJECT", "EXPTIME", "OBJECT", "ESO DET CHIP1 NAME", ""]
+    );
+
+    let removed = header.remove("OBJECT").unwrap();
+    assert_eq!(removed.keyword, "OBJECT");
+    assert_eq!(removed.value.unwrap().as_text(), Some("first"));
+    assert_eq!(header.get_text("OBJECT").unwrap(), Some("second"));
+    assert_eq!(header.remove_all("OBJECT"), 1);
+    assert_eq!(header.get("OBJECT"), None);
+    assert!(matches!(
+        header.remove_at(99),
+        Err(FitsError::HeaderIndexOutOfBounds { index: 99, len: 3 })
+    ));
+}
+
+#[test]
 fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
     let mut header = Header::new();
-    for keyword in ["bad", "TOO-LONG-KEY"] {
-        assert!(matches!(
-            header.try_set(keyword, 1),
-            Err(FitsError::InvalidKeyword { name }) if name == keyword
-        ));
-    }
+    assert!(matches!(
+        header.set("bad", 1),
+        Err(FitsError::InvalidKeyword { name }) if name == "bad"
+    ));
     for keyword in ["END", "CONTINUE", "COMMENT", "HISTORY"] {
         assert!(matches!(
-            header.try_set(keyword, 1),
+            header.set(keyword, 1),
             Err(FitsError::ReservedKeyword { name }) if name == keyword
         ));
     }
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         assert!(matches!(
-            header.try_set("REAL", value),
+            header.set("REAL", value),
             Err(FitsError::InvalidHeaderValue { keyword, reason })
                 if keyword == "REAL" && reason == "real values must be finite"
         ));
     }
     assert!(matches!(
-        header.try_set(
+        header.set(
             "COMPLEX",
             Value::ComplexReal {
                 re: 1.0,
@@ -332,13 +365,13 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
             if keyword == "COMPLEX" && reason == "complex real components must be finite"
     ));
     assert!(matches!(
-        header.try_set("OBJECT", "Véga"),
+        header.set("OBJECT", "Véga"),
         Err(FitsError::InvalidAscii {
             context: "header text value"
         })
     ));
     assert!(matches!(
-        header.try_set(
+        header.set(
             "COMPLEX",
             Value::ComplexInteger {
                 re: u128::MAX.into(),
@@ -354,22 +387,22 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
 
     for keyword in ["", " ESO DET", "ESO DET ", "ESO=DET"] {
         assert!(matches!(
-            header.try_set_hierarch(keyword, 1),
+            header.set_hierarch(keyword, 1),
             Err(FitsError::InvalidKeyword { name }) if name == keyword
         ));
     }
     assert!(matches!(
-        header.try_set_hierarch("ESO\nDET", 1),
+        header.set_hierarch("ESO\nDET", 1),
         Err(FitsError::InvalidAscii {
             context: "HIERARCH keyword"
         })
     ));
     assert!(header.cards.is_empty());
 
-    header.try_set("VALUE", 1).unwrap();
-    header.try_comment("VALUE", &"c".repeat(47)).unwrap();
+    header.set("VALUE", 1).unwrap();
+    header.comment("VALUE", &"c".repeat(47)).unwrap();
     assert!(matches!(
-        header.try_comment("VALUE", &"c".repeat(48)),
+        header.comment("VALUE", &"c".repeat(48)),
         Err(FitsError::HeaderCardTooLong {
             keyword,
             length: 81,
@@ -380,22 +413,22 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
         Some("c".repeat(47).as_str())
     );
     assert!(matches!(
-        header.try_comment("VALUE", "bad\ncomment"),
+        header.comment("VALUE", "bad\ncomment"),
         Err(FitsError::InvalidAscii {
             context: "header comment"
         })
     ));
 
-    header.try_push_comment(&"x".repeat(72)).unwrap();
+    header.push_comment(&"x".repeat(72)).unwrap();
     assert!(matches!(
-        header.try_push_comment(&"x".repeat(73)),
+        header.push_comment(&"x".repeat(73)),
         Err(FitsError::HeaderCardTooLong {
             keyword,
             length: 81,
         }) if keyword == "COMMENT"
     ));
     assert!(matches!(
-        header.try_push_history("history\nline"),
+        header.push_history("history\nline"),
         Err(FitsError::InvalidAscii {
             context: "header comment"
         })
@@ -406,10 +439,10 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
 #[test]
 fn built_header_round_trips_through_render_and_parse() {
     let mut h = Header::new();
-    h.set("SIMPLE", true)
-        .set("BITPIX", 8)
-        .set("NAXIS", 0)
-        .set("OBJECT", "test");
+    h.set_internal("SIMPLE", true)
+        .set_internal("BITPIX", 8)
+        .set_internal("NAXIS", 0)
+        .set_internal("OBJECT", "test");
     let mut bytes = Vec::new();
     render_header(&h, &mut bytes).unwrap();
     let back = Header::parse(&bytes).unwrap();
@@ -434,11 +467,11 @@ fn naxis_beyond_999_is_rejected() {
     // §4.4.1 caps NAXIS at 999; an absurd value must error rather than drive
     // `Vec::with_capacity(NAXIS)` in `axes()` (an allocation DoS from a tiny header).
     let mut h = Header::new();
-    h.set("NAXIS", 1000);
+    h.set_internal("NAXIS", 1000);
     assert!(matches!(
         h.naxis(),
         Err(FitsError::KeywordOutOfRange { name: "NAXIS" })
     ));
-    h.set("NAXIS", 3);
+    h.set_internal("NAXIS", 3);
     assert_eq!(h.naxis().unwrap(), 3);
 }
