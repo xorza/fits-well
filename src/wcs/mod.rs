@@ -15,11 +15,13 @@
 //! `ZEA`/`ZPN`/`AIR`, zenithal-perspective `AZP`/`SZP`, cylindrical `CAR`/`CEA`/
 //! `MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic `COP`/`COE`/`COD`/`COO`,
 //! pseudoconic `BON`, polyconic `PCO`, quad-cube `TSC`/`CSC`/`QSC`, and HEALPix
-//! `HPX`. The Table-26 `F2*`/`W2*`/`V2*`/`A2*` spectral algorithms and generic
-//! `LOG` are also evaluated in both directions. All are validated against
-//! `astropy.wcs` or wcslib. Unimplemented `GRI`, `GRA`, `TAB`, and convention-only
-//! `XPH` transforms remain readable in [`WcsView::unsupported_axes`]; complete
-//! transforms then return
+//! `HPX`. Every Table-26 spectral algorithm (`F2*`/`W2*`/`V2*`/`A2*`, detector
+//! `GRI`/`GRA`, and generic `LOG`) is evaluated in both directions. `-TAB`
+//! coordinate arrays are resolved from their BINTABLE through
+//! [`FitsReader::read_wcs`](crate::FitsReader::read_wcs). All are validated against
+//! `astropy.wcs`, wcslib, or exact interpolation fixtures. Convention-only `XPH`
+//! transforms remain readable in [`WcsView::unsupported_axes`]; complete transforms
+//! then return
 //! [`FitsError::UnsupportedWcsTransform`](crate::FitsError::UnsupportedWcsTransform).
 //!
 //! Binary-table WCS (Table 22) is supported for both the pixel-list
@@ -42,11 +44,13 @@ use crate::header::Header;
 use crate::keyword::KeyBuf;
 use crate::keyword::key;
 use crate::wcs::axis::AxisTransform;
+use crate::wcs::axis::SpectralParameters;
 use crate::wcs::axis::SpectralRest;
 
 mod axis;
 mod cube;
 mod healpix;
+pub(crate) mod tabular;
 
 const R2D: f64 = 180.0 / PI;
 const D2R: f64 = PI / 180.0;
@@ -908,6 +912,7 @@ pub struct Wcs {
     /// The (longitude axis, latitude axis, projection, celestial pole) when a
     /// celestial pair is present; `None` for an all-linear system.
     celestial: Option<Celestial>,
+    tabular: Vec<tabular::TabularTransform>,
     /// Axes (0-based) whose non-linear transform is not evaluated — an unsupported
     /// celestial projection or convention, or another non-linear coordinate
     /// algorithm (§8.3/§8.4). Complete transforms reject these axes.
@@ -1219,6 +1224,14 @@ impl Wcs {
     /// (`alt = Some('A'..='Z')`) from `header`. The public entry point is
     /// [`Header::wcs`](crate::Header::wcs), which forwards here.
     pub(crate) fn from_header(header: &Header, alt: Option<char>) -> Result<Wcs> {
+        Wcs::from_header_with_tabular(header, alt, Vec::new())
+    }
+
+    pub(crate) fn from_header_with_tabular(
+        header: &Header,
+        alt: Option<char>,
+        tabular: Vec<tabular::TabularTransform>,
+    ) -> Result<Wcs> {
         let a = alt.map(|c| c.to_string()).unwrap_or_default();
         let naxis_value = match header.get_integer(key!("WCSAXES{a}").as_str())? {
             Some(naxis) => naxis,
@@ -1328,25 +1341,46 @@ impl Wcs {
         };
         let mut axis_transforms = Vec::with_capacity(naxis);
         let mut unsupported_axes = Vec::new();
+        let mut resolved_tabular_axes = vec![false; naxis];
+        for transform in &tabular {
+            for &axis in &transform.axes {
+                resolved_tabular_axes[axis] = true;
+            }
+        }
         for axis in 0..naxis {
             if celestial_axis(&ctype[axis]).is_some() {
                 axis_transforms.push(AxisTransform::Linear);
-                if projection_code(&ctype[axis])
-                    .is_some_and(|code| Projection::from_code(code).is_none())
+                let resolved_tabular =
+                    projection_code(&ctype[axis]) == Some("TAB") && resolved_tabular_axes[axis];
+                if !resolved_tabular
+                    && projection_code(&ctype[axis])
+                        .is_some_and(|code| Projection::from_code(code).is_none())
                 {
                     unsupported_axes.push(axis);
                 }
                 continue;
             }
-            let parsed = AxisTransform::parse(&ctype[axis], &cunit[axis], crval[axis], rest)?;
+            let mut spectral_parameters = [None; 7];
+            for (parameter, value) in spectral_parameters.iter_mut().enumerate() {
+                *value = header.get_real(key!("PV{}_{parameter}{a}", axis + 1).as_str())?;
+            }
+            let parameters = SpectralParameters::new(spectral_parameters);
+            let parsed =
+                AxisTransform::parse(&ctype[axis], &cunit[axis], crval[axis], rest, parameters)?;
             crval[axis] *= parsed.unit_scale;
             for column in 0..naxis {
                 matrix[axis * naxis + column] *= parsed.unit_scale;
             }
-            if matches!(&parsed.transform, AxisTransform::Unsupported) {
+            let resolved_tabular =
+                projection_code(&ctype[axis]) == Some("TAB") && resolved_tabular_axes[axis];
+            if matches!(&parsed.transform, AxisTransform::Unsupported) && !resolved_tabular {
                 unsupported_axes.push(axis);
             }
-            axis_transforms.push(parsed.transform);
+            axis_transforms.push(if resolved_tabular {
+                AxisTransform::Linear
+            } else {
+                parsed.transform
+            });
         }
         let inverse = invert(&matrix, naxis).ok_or(FitsError::InvalidValue {
             card: "singular WCS transform matrix".to_string(),
@@ -1432,6 +1466,7 @@ impl Wcs {
             matrix,
             inverse,
             celestial,
+            tabular,
             unsupported_axes,
         })
     }
@@ -1451,6 +1486,24 @@ impl Wcs {
         assert_eq!(pixel.len(), naxis, "pixel coordinate count");
         if self.unsupported_axes.contains(&axis) {
             return Err(FitsError::UnsupportedWcsTransform { axes: vec![axis] });
+        }
+        if let Some(transform) = self
+            .tabular
+            .iter()
+            .find(|transform| transform.axes.contains(&axis))
+        {
+            let offset: Vec<f64> = pixel
+                .iter()
+                .zip(&self.axes)
+                .map(|(&value, metadata)| value - metadata.crpix)
+                .collect();
+            let intermediate = matvec(&self.matrix, &offset, naxis);
+            let mut world = vec![0.0; naxis];
+            transform.to_world(&intermediate, &mut world)?;
+            return Ok(AxisWorld {
+                cunit: &self.axes[axis].cunit,
+                value: world[axis],
+            });
         }
         let row = &self.matrix[axis * naxis..(axis + 1) * naxis];
         let offset = pixel
@@ -1653,6 +1706,9 @@ impl Wcs {
                 self.axis_transforms[axis].to_world(intermediate[axis], self.axes[axis].crval, axis)
             })
             .collect::<Result<Vec<_>>>()?;
+        for transform in &self.tabular {
+            transform.to_world(&intermediate, &mut world)?;
+        }
         if let Some(c) = &self.celestial {
             let native = c
                 .projection
@@ -1684,6 +1740,9 @@ impl Wcs {
                 self.axis_transforms[axis].to_intermediate(world[axis], self.axes[axis].crval, axis)
             })
             .collect::<Result<Vec<_>>>()?;
+        for transform in &self.tabular {
+            transform.to_intermediate(world, &mut intermediate)?;
+        }
         if let Some(c) = self.celestial.as_ref() {
             if !world[c.lng].is_finite()
                 || !world[c.lat].is_finite()

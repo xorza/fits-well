@@ -2,6 +2,8 @@ use crate::bitpix::Bitpix;
 use crate::data::Image;
 use crate::data::ImageData;
 use crate::data::Scaling;
+use crate::error::FitsError;
+use crate::header::Header;
 use crate::reader::*;
 use crate::writer::FitsWriter;
 use std::fs::File;
@@ -11,6 +13,69 @@ fn open(name: &str) -> StreamReader<File> {
     let path = format!("tests/data/fits/{name}");
     FitsReader::open(File::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}")))
         .unwrap_or_else(|e| panic!("parse {name}: {e}"))
+}
+
+fn write_tab_lookup(
+    writer: &mut FitsWriter<Cursor<Vec<u8>>>,
+    version: i64,
+    level: i64,
+    coordinates: &[f64],
+) {
+    let mut header = Header::new();
+    header
+        .set("XTENSION", "BINTABLE")
+        .set("BITPIX", 8)
+        .set("NAXIS", 2)
+        .set("NAXIS1", (coordinates.len() * 8) as i64)
+        .set("NAXIS2", 1)
+        .set("PCOUNT", 0)
+        .set("GCOUNT", 1)
+        .set("TFIELDS", 1)
+        .set("TTYPE1", "COORD")
+        .set("TFORM1", format!("{}D", coordinates.len()))
+        .set("TDIM1", format!("(1,{})", coordinates.len()))
+        .set("EXTNAME", "WCS-TABLE")
+        .set("EXTVER", version)
+        .set("EXTLEVEL", level);
+    let bytes: Vec<u8> = coordinates
+        .iter()
+        .flat_map(|value| value.to_be_bytes())
+        .collect();
+    writer.write_raw_hdu(&header, &bytes).unwrap();
+}
+
+#[test]
+fn read_wcs_resolves_the_exact_tabular_extension() {
+    let mut primary = Header::new();
+    primary
+        .set("SIMPLE", true)
+        .set("BITPIX", 8)
+        .set("NAXIS", 1)
+        .set("NAXIS1", 1)
+        .set("CTYPE1", "WAVE-TAB")
+        .set("CUNIT1", "m")
+        .set("CRPIX1", 1.0)
+        .set("CRVAL1", 1.0)
+        .set("CDELT1", 1.0)
+        .set("PS1_0", "WCS-TABLE")
+        .set("PV1_1", 2)
+        .set("PV1_2", 3)
+        .set("PS1_1", "COORD")
+        .set("PV1_3", 1);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_raw_hdu(&primary, &[0]).unwrap();
+    write_tab_lookup(&mut writer, 2, 1, &[100.0, 200.0, 400.0]);
+    write_tab_lookup(&mut writer, 2, 3, &[10.0, 20.0, 40.0]);
+
+    let bytes = writer.into_inner().into_inner();
+    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+    assert!(matches!(
+        reader.hdus[0].header.wcs(None).unwrap().pixel_to_world(&[2.0]),
+        Err(FitsError::UnsupportedWcsTransform { axes }) if axes == [0]
+    ));
+    let wcs = reader.read_wcs(0, None).unwrap();
+    assert_eq!(wcs.pixel_to_world(&[2.0]).unwrap(), [20.0]);
+    assert_eq!(wcs.world_to_pixel(&[30.0]).unwrap(), [2.5]);
 }
 
 #[test]

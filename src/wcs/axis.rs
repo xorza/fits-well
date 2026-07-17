@@ -21,6 +21,17 @@ pub(crate) struct AxisTransformSpec {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub(crate) struct SpectralParameters {
+    values: [Option<f64>; 7],
+}
+
+impl SpectralParameters {
+    pub(crate) fn new(values: [Option<f64>; 7]) -> SpectralParameters {
+        SpectralParameters { values }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct SpectralRest {
     frequency: Option<f64>,
     wavelength: Option<f64>,
@@ -84,9 +95,23 @@ pub(crate) struct SpectralTransform {
     kind: SpectralKind,
     sampled: Characteristic,
     rest: ResolvedRest,
-    reference: f64,
-    derivative: f64,
+    sampling: SpectralSampling,
     algorithm: &'static str,
+}
+
+#[derive(Debug, Clone)]
+enum SpectralSampling {
+    Linear { reference: f64, derivative: f64 },
+    Grism(Grism),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Grism {
+    offset: f64,
+    scale: f64,
+    beta_reference: f64,
+    refractive_term: f64,
+    wavelength_scale: f64,
 }
 
 impl SpectralTransform {
@@ -96,6 +121,7 @@ impl SpectralTransform {
         reference_world: f64,
         rest: ResolvedRest,
         algorithm: &'static str,
+        parameters: SpectralParameters,
     ) -> Result<SpectralTransform> {
         let physical = kind
             .to_characteristic(reference_world, rest)
@@ -108,18 +134,28 @@ impl SpectralTransform {
         if !reference.is_finite() || !derivative.is_finite() || derivative == 0.0 {
             return Err(invalid_reference(kind));
         }
+        let sampling = if matches!(algorithm, "GRI" | "GRA") {
+            SpectralSampling::Grism(Grism::new(reference, derivative, parameters, algorithm)?)
+        } else {
+            SpectralSampling::Linear {
+                reference,
+                derivative,
+            }
+        };
         Ok(SpectralTransform {
             kind,
             sampled,
             rest,
-            reference,
-            derivative,
+            sampling,
             algorithm,
         })
     }
 
     fn to_world(&self, intermediate: f64, axis: usize) -> Result<f64> {
-        let sampled = self.reference + intermediate * self.derivative;
+        let sampled = self
+            .sampling
+            .to_sampled(intermediate)
+            .map_err(|()| domain_error(axis, self.algorithm))?;
         let physical = convert(self.sampled, self.kind.characteristic(), sampled, self.rest)
             .map_err(|()| domain_error(axis, self.algorithm))?;
         self.kind
@@ -140,8 +176,117 @@ impl SpectralTransform {
             self.rest,
         )
         .map_err(|()| domain_error(axis, self.algorithm))?;
-        finite((sampled - self.reference) / self.derivative)
+        self.sampling
+            .to_intermediate(sampled)
             .map_err(|()| domain_error(axis, self.algorithm))
+    }
+}
+
+impl SpectralSampling {
+    fn to_sampled(&self, intermediate: f64) -> DomainResult {
+        match self {
+            SpectralSampling::Linear {
+                reference,
+                derivative,
+            } => finite(reference + intermediate * derivative),
+            SpectralSampling::Grism(grism) => grism.to_sampled(intermediate),
+        }
+    }
+
+    fn to_intermediate(&self, sampled: f64) -> DomainResult {
+        match self {
+            SpectralSampling::Linear {
+                reference,
+                derivative,
+            } => finite((sampled - reference) / derivative),
+            SpectralSampling::Grism(grism) => grism.to_intermediate(sampled),
+        }
+    }
+}
+
+impl Grism {
+    fn new(
+        reference: f64,
+        derivative: f64,
+        parameters: SpectralParameters,
+        algorithm: &'static str,
+    ) -> Result<Grism> {
+        let [
+            density,
+            order,
+            incidence,
+            refractive_index,
+            refractive_derivative,
+            grating_tilt,
+            detector_tilt,
+        ] = parameters.values;
+        let density = required_grism_parameter(density, algorithm, 0)?;
+        let order = required_grism_parameter(order, algorithm, 1)?;
+        let incidence = incidence.unwrap_or(0.0);
+        let refractive_index = refractive_index.unwrap_or(1.0);
+        let refractive_derivative = refractive_derivative.unwrap_or(0.0);
+        let grating_tilt = grating_tilt.unwrap_or(0.0);
+        let detector_tilt = detector_tilt.unwrap_or(0.0);
+        let values = [
+            incidence,
+            refractive_index,
+            refractive_derivative,
+            grating_tilt,
+            detector_tilt,
+        ];
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(invalid_grism(algorithm, "parameters must be finite"));
+        }
+
+        let incidence_sine = incidence.to_radians().sin();
+        let grating_cosine = grating_tilt.to_radians().cos();
+        let detector_cosine = detector_tilt.to_radians().cos();
+        if grating_cosine == 0.0 || detector_cosine == 0.0 {
+            return Err(invalid_grism(
+                algorithm,
+                "grating and detector tilts must have non-zero cosine",
+            ));
+        }
+        let ruling = density * order / grating_cosine;
+        let beta_sine = ruling * reference - refractive_index * incidence_sine;
+        if !(-1.0..=1.0).contains(&beta_sine) {
+            return Err(invalid_grism(
+                algorithm,
+                "reference wavelength is outside the grism domain",
+            ));
+        }
+        let beta = beta_sine.asin();
+        let dispersion = ruling - refractive_derivative * incidence_sine;
+        let scale = derivative * dispersion / (beta.cos() * detector_cosine * detector_cosine);
+        if !dispersion.is_finite() || dispersion == 0.0 || !scale.is_finite() || scale == 0.0 {
+            return Err(invalid_grism(
+                algorithm,
+                "detector parameters produce zero dispersion",
+            ));
+        }
+        Ok(Grism {
+            offset: -detector_tilt.to_radians().tan(),
+            scale,
+            beta_reference: beta + detector_tilt.to_radians(),
+            refractive_term: (refractive_index - refractive_derivative * reference)
+                * incidence_sine,
+            wavelength_scale: 1.0 / dispersion,
+        })
+    }
+
+    fn to_sampled(self, intermediate: f64) -> DomainResult {
+        let grism_parameter = finite(self.offset + intermediate * self.scale)?;
+        let beta = grism_parameter.atan() + self.beta_reference;
+        finite((beta.sin() + self.refractive_term) * self.wavelength_scale)
+    }
+
+    fn to_intermediate(self, sampled: f64) -> DomainResult {
+        let sine = sampled / self.wavelength_scale - self.refractive_term;
+        if !sine.is_finite() || !(-1.0..=1.0).contains(&sine) {
+            return Err(());
+        }
+        let grism_parameter = (sine.asin() - self.beta_reference).tan();
+        finite((grism_parameter - self.offset) / self.scale)
     }
 }
 
@@ -151,6 +296,7 @@ impl AxisTransform {
         cunit: &str,
         reference: f64,
         rest: SpectralRest,
+        parameters: SpectralParameters,
     ) -> Result<AxisTransformSpec> {
         let parts = CTypeParts::parse(ctype);
         let Some(code) = parts.code else {
@@ -181,7 +327,12 @@ impl AxisTransform {
         let Some(kind) = kind else {
             return Ok(unsupported());
         };
-        let Some(sampled) = Characteristic::from_algorithm(code, kind.characteristic()) else {
+        let sampled = match code {
+            "GRI" => Some(Characteristic::Wavelength),
+            "GRA" => Some(Characteristic::AirWavelength),
+            _ => Characteristic::from_algorithm(code, kind.characteristic()),
+        };
+        let Some(sampled) = sampled else {
             if is_spectral_pair_syntax(code) {
                 return Err(FitsError::InvalidValue {
                     card: format!("spectral CTYPE {ctype:?} has inconsistent variables"),
@@ -192,9 +343,19 @@ impl AxisTransform {
         let unit_scale = kind.unit_scale(cunit)?;
         let requirement = rest_requirement(kind.characteristic(), sampled, kind);
         let rest = rest.resolve(requirement)?;
-        let algorithm = algorithm_name(sampled, kind.characteristic());
-        let transform =
-            SpectralTransform::new(kind, sampled, reference * unit_scale, rest, algorithm)?;
+        let algorithm = match code {
+            "GRI" => "GRI",
+            "GRA" => "GRA",
+            _ => algorithm_name(sampled, kind.characteristic()),
+        };
+        let transform = SpectralTransform::new(
+            kind,
+            sampled,
+            reference * unit_scale,
+            rest,
+            algorithm,
+            parameters,
+        )?;
         Ok(AxisTransformSpec {
             transform: AxisTransform::Spectral(transform),
             unit_scale,
@@ -233,13 +394,20 @@ pub(crate) fn has_analytic_spectral_algorithm(ctype: &str) -> bool {
     let Some(kind) = SpectralKind::from_code(parts.head) else {
         return false;
     };
-    parts
-        .code
-        .is_some_and(|code| Characteristic::from_algorithm(code, kind.characteristic()).is_some())
+    parts.code.is_some_and(|code| {
+        matches!(code, "GRI" | "GRA")
+            || Characteristic::from_algorithm(code, kind.characteristic()).is_some()
+    })
 }
 
 pub(crate) fn is_spectral_type(ctype: &str) -> bool {
     SpectralKind::from_code(CTypeParts::parse(ctype).head).is_some()
+}
+
+pub(crate) fn spectral_unit_scale(ctype: &str, cunit: &str) -> Result<Option<f64>> {
+    SpectralKind::from_code(CTypeParts::parse(ctype).head)
+        .map(|kind| kind.unit_scale(cunit))
+        .transpose()
 }
 
 fn unsupported() -> AxisTransformSpec {
@@ -756,6 +924,26 @@ fn finite(value: f64) -> DomainResult {
 fn invalid_reference(kind: SpectralKind) -> FitsError {
     FitsError::InvalidValue {
         card: format!("{} has an invalid spectral reference value", kind.code()),
+    }
+}
+
+fn required_grism_parameter(
+    value: Option<f64>,
+    algorithm: &'static str,
+    parameter: usize,
+) -> Result<f64> {
+    match value {
+        Some(value) if value.is_finite() && value != 0.0 => Ok(value),
+        _ => Err(invalid_grism(
+            algorithm,
+            &format!("PV_i_{parameter} must be specified, finite, and non-zero"),
+        )),
+    }
+}
+
+fn invalid_grism(algorithm: &'static str, detail: &str) -> FitsError {
+    FitsError::InvalidValue {
+        card: format!("{algorithm} {detail}"),
     }
 }
 

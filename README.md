@@ -136,15 +136,17 @@ Jagged bit arrays use `WriteColumn::vla_bits` with one MSB-first
 
 ### World Coordinate System
 
-`Header::wcs` parses the `CTYPEn`/`CRPIXn`/`CRVALn`/… keywords into a transform
-that converts between pixel and sky coordinates in the file's declared frame.
+`FitsReader::read_wcs` parses the `CTYPEn`/`CRPIXn`/`CRVALn`/… keywords into a
+transform and resolves any `-TAB` coordinate arrays from their referenced
+`BINTABLE`. `Header::wcs` is the header-only form for descriptions that do not
+need external table data.
 
 ```rust,no_run
 use std::fs::File;
 use fits_well::FitsReader;
 
-let reader = FitsReader::open(File::open("wcs_tan.fits")?)?;
-let wcs = reader.hdus()[0].header.wcs(None)?; // None = the primary WCS
+let mut reader = FitsReader::open(File::open("wcs_tan.fits")?)?;
+let wcs = reader.read_wcs(0, None)?; // None = the primary WCS
 
 let sky = wcs.pixel_to_world(&[256.0, 256.0])?; // RA/Dec at the reference pixel
 let pixel = wcs.world_to_pixel(&sky)?; // and back again

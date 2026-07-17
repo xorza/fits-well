@@ -78,6 +78,10 @@
 - Added forward and inverse Table-26 `F2*`, `W2*`, `V2*`, and `A2*` spectral
   transforms plus generic `LOG`. Spectral transforms resolve image and table rest
   metadata and normalize declared units to their Table-25 defaults.
+- Added detector-coordinate `GRI`/`GRA` spectral transforms and
+  `FitsReader::read_wcs`, which resolves one- and multidimensional `-TAB`
+  coordinate arrays and optional indexing vectors from their referenced
+  `BINTABLE`.
 - Added `TimeCoordinate`, the shared MJD and effective scale value returned for
   epoch keywords and WCS time axes.
 - Added explicit `ColumnType` declarations for variable-length table columns.
@@ -149,9 +153,10 @@
   numeric multipliers, and evaluate the epoch-dependent tropical and Besselian
   year definitions. Non-time units are rejected. Time axes now honor complete
   PC/CD rows, per-axis units, and per-axis time scales.
-- WCS coordinate algorithms now recognize generic `LOG` and `TAB` independently
-  of the coordinate type. `LOG` is evaluated for spectral, time, and generic
-  axes; `TAB` remains explicitly unsupported rather than returning a partial value.
+- WCS coordinate algorithms recognize generic `LOG` and `TAB` independently of
+  the coordinate type. `LOG` is evaluated for spectral, time, and generic axes;
+  header-only `TAB` remains explicitly unsupported, while `FitsReader::read_wcs`
+  supplies the required table-data context.
 - Binary-table WCS now resolves the normative Table-22 primary and shortened
   alternate axis keywords, both pixel-list matrix/parameter aliases, column-indexed
   pole keywords, and alternate vector-cell rank inference.
