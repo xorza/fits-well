@@ -50,6 +50,8 @@ use crate::wcs::axis::SpectralParameters;
 use crate::wcs::axis::SpectralRest;
 
 mod axis;
+#[cfg(feature = "internals")]
+pub(crate) mod bench;
 mod cube;
 mod healpix;
 pub(crate) mod tabular;
@@ -1348,19 +1350,7 @@ impl Wcs {
         spectral_frames: Option<Vec<Option<SpectralFrame>>>,
     ) -> Result<Wcs> {
         let a = alt.map(|c| c.to_string()).unwrap_or_default();
-        let naxis_value = match header.get_integer(key!("WCSAXES{a}").as_str())? {
-            Some(naxis) => naxis,
-            None => {
-                let inferred = infer_image_axis_count(header, &a);
-                match header.get_integer("NAXIS")? {
-                    Some(naxis) if naxis >= 0 => naxis.max(inferred),
-                    Some(naxis) => naxis,
-                    None if inferred != 0 => inferred,
-                    None => return Err(FitsError::MissingKeyword { name: "WCSAXES" }),
-                }
-            }
-        };
-        let naxis = axis_count(naxis_value, "WCSAXES")?;
+        let naxis = image_axis_count(header, alt)?;
 
         let ctype: Vec<String> = (1..=naxis)
             .map(|i| {
@@ -2281,6 +2271,23 @@ fn infer_image_axis_count(header: &Header, alt: &str) -> i64 {
         .filter_map(|entry| image_wcs_axis_index(entry.keyword, alt))
         .max()
         .unwrap_or(0)
+}
+
+pub(crate) fn image_axis_count(header: &Header, alt: Option<char>) -> Result<usize> {
+    let suffix = alt.map(|value| value.to_string()).unwrap_or_default();
+    let value = match header.get_integer(key!("WCSAXES{suffix}").as_str())? {
+        Some(axis_count) => axis_count,
+        None => {
+            let inferred = infer_image_axis_count(header, &suffix);
+            match header.get_integer("NAXIS")? {
+                Some(axis_count) if axis_count >= 0 => axis_count.max(inferred),
+                Some(axis_count) => axis_count,
+                None if inferred != 0 => inferred,
+                None => return Err(FitsError::MissingKeyword { name: "WCSAXES" }),
+            }
+        }
+    };
+    axis_count(value, "WCSAXES")
 }
 
 fn image_wcs_axis_index(keyword: &str, alt: &str) -> Option<i64> {

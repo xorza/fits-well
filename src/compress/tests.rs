@@ -848,6 +848,17 @@ fn zblank_column_overrides_keyword_per_tile() {
         decompress_image(&out_of_range_header, &table),
         Err(FitsError::KeywordOutOfRange { name: "ZTILEn" })
     ));
+    let mut words = Vec::new();
+    assert!(matches!(
+        decompress_image_section_into_words(
+            &out_of_range_header,
+            &table,
+            &[0],
+            &[0..2, 0..1],
+            &mut words,
+        ),
+        Err(FitsError::KeywordOutOfRange { name: "ZTILEn" })
+    ));
 
     for (column, name, kind) in [
         (1, "ZSCALE", TformKind::I64),
@@ -1286,6 +1297,42 @@ fn nocompress_image_round_trips() {
         ImageData::I16(v) => assert_eq!(v, samples),
         other => panic!("expected I16, got {other:?}"),
     }
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn parallel_decode_wave_budget_counts_per_tile_vectors() {
+    use crate::compress::decode::decode_wave_tile_count;
+    use crate::compress::geometry::TileGeometry;
+
+    let geometry = TileGeometry::new(&[1, 4_194_304], &[1, 1]);
+    let retained_bytes = std::mem::size_of::<Vec<u8>>() + 1;
+    assert_eq!(
+        decode_wave_tile_count::<u8>(&geometry),
+        4 * 1024 * 1024 / retained_bytes
+    );
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn parallel_full_decode_crosses_the_bounded_wave_boundary() {
+    use crate::data::Image;
+    use crate::writer::FitsWriter;
+
+    let samples: Vec<u8> = (0usize..1024 * 4097)
+        .map(|index| (index.wrapping_mul(37) & 0xff) as u8)
+        .collect();
+    let image = Image::new(vec![1024, 4097], samples.clone()).unwrap();
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer
+        .write_compressed_image(&image, Compression::None, &CompressionOptions::default())
+        .unwrap();
+    let bytes = writer.into_inner().into_inner();
+    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        reader.read_image(1).unwrap().decode(),
+        ImageData::U8(samples)
+    );
 }
 
 #[test]
@@ -1769,6 +1816,7 @@ fn tile_into_rows_match_layout() {
     // is edge-clipped to height 1. Same scratch reused across tiles (no stale rows).
     let geom = TileGeometry::new(&[4, 3], &[2, 2]);
     assert_eq!(geom.ntiles(), 4);
+    assert_eq!(geom.max_tile_elements(), 4);
     let mut s = TileScratch::default();
     let expect = [
         (vec![0, 4], 2, vec![0, 1, 4, 5]), // origin (0,0), full 2×2: two rows of 2

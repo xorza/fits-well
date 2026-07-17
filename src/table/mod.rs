@@ -1113,7 +1113,7 @@ fn map_cells<'a, T, const N: usize>(
 ) -> Vec<T> {
     let mut out = Vec::with_capacity(capacity);
     for cell in cells {
-        assert_eq!(cell.len() % N, 0, "whole column elements");
+        debug_assert_eq!(cell.len() % N, 0, "whole column elements");
         out.extend(cell.chunks_exact(N).map(|chunk| {
             decode(
                 chunk
@@ -1125,40 +1125,43 @@ fn map_cells<'a, T, const N: usize>(
     out
 }
 
-fn decode_fixed_column(table: &BinTable, col: &Column) -> ColumnData {
-    let cells = || table.cells(col);
-    let capacity = table.nrows * col.tform.repeat;
+fn decode_fixed_cells<'a>(
+    cells: impl ExactSizeIterator<Item = &'a [u8]>,
+    row_count: usize,
+    col: &Column,
+) -> ColumnData {
+    let capacity = row_count * col.tform.repeat;
     match col.tform.kind {
         TformKind::Logical => {
-            ColumnData::Logical(map_cells(cells(), capacity, |[byte]| match byte {
+            ColumnData::Logical(map_cells(cells, capacity, |[byte]| match byte {
                 b'T' => Some(true),
                 b'F' => Some(false),
                 _ => None,
             }))
         }
         TformKind::Byte | TformKind::Bit => ColumnData::Bytes(map_cells(
-            cells(),
-            table.nrows * col.tform.byte_width(),
+            cells,
+            row_count * col.tform.byte_width(),
             |[byte]| byte,
         )),
         TformKind::Char => ColumnData::Character(
-            cells()
+            cells
                 .map(|cell| CharacterField::new(cell.to_vec()))
                 .collect(),
         ),
-        TformKind::I16 => ColumnData::I16(map_cells(cells(), capacity, i16::from_be_bytes)),
-        TformKind::I32 => ColumnData::I32(map_cells(cells(), capacity, i32::from_be_bytes)),
-        TformKind::I64 => ColumnData::I64(map_cells(cells(), capacity, i64::from_be_bytes)),
-        TformKind::F32 => ColumnData::F32(map_cells(cells(), capacity, f32::from_be_bytes)),
-        TformKind::F64 => ColumnData::F64(map_cells(cells(), capacity, f64::from_be_bytes)),
+        TformKind::I16 => ColumnData::I16(map_cells(cells, capacity, i16::from_be_bytes)),
+        TformKind::I32 => ColumnData::I32(map_cells(cells, capacity, i32::from_be_bytes)),
+        TformKind::I64 => ColumnData::I64(map_cells(cells, capacity, i64::from_be_bytes)),
+        TformKind::F32 => ColumnData::F32(map_cells(cells, capacity, f32::from_be_bytes)),
+        TformKind::F64 => ColumnData::F64(map_cells(cells, capacity, f64::from_be_bytes)),
         TformKind::ComplexF32 => {
-            ColumnData::ComplexF32(map_cells(cells(), capacity, |bytes: [u8; 8]| Complex {
+            ColumnData::ComplexF32(map_cells(cells, capacity, |bytes: [u8; 8]| Complex {
                 re: f32::from_be_bytes(bytes[..4].try_into().unwrap()),
                 im: f32::from_be_bytes(bytes[4..].try_into().unwrap()),
             }))
         }
         TformKind::ComplexF64 => {
-            ColumnData::ComplexF64(map_cells(cells(), capacity, |bytes: [u8; 16]| Complex {
+            ColumnData::ComplexF64(map_cells(cells, capacity, |bytes: [u8; 16]| Complex {
                 re: f64::from_be_bytes(bytes[..8].try_into().unwrap()),
                 im: f64::from_be_bytes(bytes[8..].try_into().unwrap()),
             }))
@@ -1167,6 +1170,15 @@ fn decode_fixed_column(table: &BinTable, col: &Column) -> ColumnData {
             unreachable!("raw rejects VLA columns before fixed decode")
         }
     }
+}
+
+fn decode_fixed_column(table: &BinTable, col: &Column) -> ColumnData {
+    decode_fixed_cells(table.cells(col), table.nrows, col)
+}
+
+pub(crate) fn decode_fixed_cell(col: &Column, bytes: &[u8]) -> ColumnData {
+    debug_assert_eq!(bytes.len(), col.tform.byte_width());
+    decode_fixed_cells(std::iter::once(bytes), 1, col)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1310,6 +1322,27 @@ fn decode_array(kind: TformKind, bytes: &[u8]) -> ColumnData {
         // A heap element can't itself be a descriptor; keep the raw bytes.
         TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => ColumnData::Bytes(bytes.to_vec()),
     }
+}
+
+pub(crate) fn decode_vla_cell(
+    col: &Column,
+    bytes: &[u8],
+    element_count: usize,
+) -> Result<ColumnData> {
+    validate_vla_tdim(col, element_count)?;
+    let element_type = col
+        .tform
+        .vla_elem
+        .expect("validated VLA format carries an element type");
+    let expected_len = if element_type == TformKind::Bit {
+        element_count.div_ceil(8)
+    } else {
+        element_count
+            .checked_mul(element_type.elem_size())
+            .ok_or(FitsError::DataUnitOverflow)?
+    };
+    debug_assert_eq!(bytes.len(), expected_len);
+    Ok(decode_array(element_type, bytes))
 }
 
 /// A decoded `P`/`Q` array descriptor: a row's heap array element count and byte

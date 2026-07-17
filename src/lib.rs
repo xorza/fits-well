@@ -146,6 +146,7 @@ pub mod io {
 pub mod internals {
     use crate::bitpix::Bitpix;
     use crate::data::ImageData;
+    use crate::wcs::bench;
 
     /// Decode a big-endian data unit into host-endian samples — the per-element
     /// byte-swap (`ImageData::decode`).
@@ -159,5 +160,20 @@ pub mod internals {
         let mut out = Vec::new();
         data.encode_into(&mut out);
         out
+    }
+
+    /// Build and cache the WCS benchmark fixtures outside timed iterations.
+    pub fn prepare_wcs_benchmarks() {
+        bench::prepare();
+    }
+
+    /// Transform one fixed batch through a Table-26 spectral axis.
+    pub fn spectral_wcs_batch() -> f64 {
+        bench::spectral_batch()
+    }
+
+    /// Transform one fixed batch through a large monotonic `-TAB` index vector.
+    pub fn tabular_wcs_batch() -> f64 {
+        bench::tabular_index_batch()
     }
 }
