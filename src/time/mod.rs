@@ -12,6 +12,7 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
 use crate::keyword::key;
+use crate::unit;
 use crate::wcs::Wcs;
 
 /// JD of the MJD zero point (1858-11-17T00:00 UTC).
@@ -731,8 +732,9 @@ impl FitsTime {
             .collect()
     }
 
-    /// Evaluate a 1-based time `axis` through the WCS's complete linear row and
-    /// convert it to MJD. `pixel` must contain one coordinate per WCS axis.
+    /// Evaluate a 1-based time `axis` through its complete WCS row and coordinate
+    /// algorithm, then convert it to MJD. `pixel` must contain one coordinate per
+    /// WCS axis.
     pub fn time_axis_mjd(
         &self,
         wcs: &Wcs,
@@ -750,7 +752,7 @@ impl FitsTime {
         } else {
             TimeScale::parse(head)
         };
-        let world = wcs.linear_axis_world(axis, pixel)?;
+        let world = wcs.axis_world(axis, pixel)?;
         let unit = if world.cunit.trim().is_empty() {
             &self.timeunit
         } else {
@@ -814,37 +816,18 @@ impl TimeAxisKind {
 }
 
 fn time_unit_seconds(unit: &str, reference_mjd: f64, scale: TimeScale) -> Result<f64> {
-    let unit = unit.trim();
+    let scaled = unit::split_numeric_multiplier(unit).ok_or_else(|| FitsError::InvalidValue {
+        card: format!("time unit '{}'", unit.trim()),
+    })?;
+    let unit = scaled.base;
     if let Some(seconds) = base_time_unit_seconds(unit, reference_mjd, scale) {
-        return Ok(seconds);
+        return Ok(scaled.factor * seconds);
     }
-    const PREFIXES: [(&str, f64); 20] = [
-        ("da", 1e1),
-        ("d", 1e-1),
-        ("c", 1e-2),
-        ("m", 1e-3),
-        ("u", 1e-6),
-        ("n", 1e-9),
-        ("p", 1e-12),
-        ("f", 1e-15),
-        ("a", 1e-18),
-        ("z", 1e-21),
-        ("y", 1e-24),
-        ("h", 1e2),
-        ("k", 1e3),
-        ("M", 1e6),
-        ("G", 1e9),
-        ("T", 1e12),
-        ("P", 1e15),
-        ("E", 1e18),
-        ("Z", 1e21),
-        ("Y", 1e24),
-    ];
-    for (prefix, factor) in PREFIXES {
+    for (prefix, factor) in unit::SI_PREFIXES {
         if let Some(base) = unit.strip_prefix(prefix)
             && let Some(seconds) = base_time_unit_seconds(base, reference_mjd, scale)
         {
-            return Ok(factor * seconds);
+            return Ok(scaled.factor * factor * seconds);
         }
     }
     Err(FitsError::InvalidValue {

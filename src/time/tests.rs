@@ -500,6 +500,15 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
     assert_eq!(coordinate.scale, TimeScale::Utc);
     assert!((coordinate.mjd - (58000.0 + 18.0 / SEC_PER_DAY)).abs() < 1e-12);
 
+    h.set("CTYPE1A", "TIME-LOG")
+        .set("CUNIT1A", "d")
+        .set("CRVAL1A", 10.0)
+        .set("CD1_1A", 2.0);
+    let logarithmic = h.wcs(Some('A')).unwrap();
+    let coordinate = t.time_axis_mjd(&logarithmic, 1, &[2.0]).unwrap().unwrap();
+    let expected_days = 10.0 * 0.2_f64.exp();
+    assert!((coordinate.mjd - (58000.0 + expected_days)).abs() < 1e-12);
+
     let mut non_time = Header::new();
     non_time.set("NAXIS", 1).set("CTYPE1", "LINEAR");
     assert!(
@@ -626,6 +635,7 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
     assert_eq!(unit("ms"), 1e-3);
     assert_eq!(unit("ks"), 1e3);
     assert_eq!(unit("Mmin"), 60e6);
+    assert_eq!(unit("10**3 s"), 1e3);
 
     let mut tropical = Header::new();
     tropical

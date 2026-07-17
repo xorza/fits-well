@@ -18,7 +18,7 @@ For every batch:
 ## Batch 2 — Critical: make partial WCS transforms impossible to mistake for complete results
 
 - [x] **Classify nonlinear suffixes independently of the coordinate prefix.** Detect generic `LOG` and `TAB` axes such as `TIME-TAB`, not only the ten hard-coded spectral type names (`src/wcs/mod.rs:1334-1359`; standard `docs/refs/fits_standard40.md:3779-3801`). Verify celestial, spectral, time, and generic linear axes independently.
-- [x] **Reject incomplete transforms.** `pixel_to_world`/`world_to_pixel` now return `UnsupportedWcsTransform` whenever any nonlinear stage is unavailable. XPH, `FREQ-LOG`, and `TIME-TAB` cannot return unqualified complete coordinates; the linear stage remains an implementation detail until a concrete production caller needs it.
+- [x] **Reject incomplete transforms.** `pixel_to_world`/`world_to_pixel` now return `UnsupportedWcsTransform` whenever any nonlinear stage is unavailable. XPH, `FREQ-TAB`, and `TIME-TAB` cannot return unqualified complete coordinates; the linear stage remains an implementation detail until a concrete production caller needs it.
 
 ## Batch 3 — Critical: preserve exact FITS integer header values
 
@@ -38,7 +38,7 @@ For every batch:
 ## Batch 6 — Critical: resolve time units and axes through the WCS model
 
 - [x] **Replace `unit_seconds` fallback with a fallible FITS unit parser.** Standard time bases and single SI prefixes are parsed case-sensitively, non-time units fail, and `ta`/`Ba` use their epoch-dependent FITS equations at `MJDREF`. Relative-time and GTI tests cover `ms`/`ks`, day units, invalid units, and both deprecated year definitions.
-- [x] **Evaluate time axes through the complete linear WCS row.** `FitsTime::time_axis_mjd` now accepts a parsed `Wcs` and the full pixel vector, so image, alternate, and translated table descriptions share PC/CD resolution. `CUNITia` and recognized `CTYPEia` scales override the global frame, and `TimeCoordinate` returns both MJD and the effective scale. Tests cover PC coupling, direct CD, day-over-second, TAI-over-UTC, and unsupported `TIME-TAB`.
+- [x] **Evaluate time axes through the complete WCS row.** `FitsTime::time_axis_mjd` now accepts a parsed `Wcs` and the full pixel vector, so image, alternate, and translated table descriptions share PC/CD resolution and generic `LOG`. `CUNITia` and recognized `CTYPEia` scales override the global frame, and `TimeCoordinate` returns both MJD and the effective scale. Tests cover PC coupling, direct CD, logarithmic sampling, day-over-second, TAI-over-UTC, and unsupported `TIME-TAB`.
 
 ## Batch 7 — Critical: correct FITS datetime boundaries
 
@@ -74,8 +74,8 @@ For every batch:
 
 ## Batch 13 — High: add analytic nonlinear spectral coordinates
 
-- [ ] **Implement the `F2*`, `W2*`, `V2*`, and `A2*` transforms.** Centralize frequency/wavelength/air-wavelength/apparent-velocity conversions, enforce required rest frequency/wavelength metadata, and support both directions (`src/wcs/mod.rs:1334-1359`; standard `docs/refs/fits_standard40.md:3720-3801`). Cross-check every Table-26 pair against wcslib.
-- [ ] **Implement generic `LOG`.** Apply the standard logarithmic sampling transform to any valid four-character coordinate type and preserve unit metadata (`src/wcs/mod.rs:1334-1359`; standard `docs/refs/fits_standard40.md:3779-3801`). Verify reference points, domains, and inverse round-trips.
+- [x] **Implement the `F2*`, `W2*`, `V2*`, and `A2*` transforms.** Shared frequency, wavelength, air-wavelength, and relativistic-velocity conversions cover every Table-25 output type in both directions. The parser resolves `RESTFRQ`/`RESTWAV`, deprecated primary `RESTFREQ`, and table `RFRQn`/`RWAVn`, enforces the transformations that require rest metadata, and normalizes FITS prefixes and numeric unit multipliers to Table-25 defaults (`src/wcs/axis.rs`; standard `docs/refs/fits_standard40.md:3720-3801`). Every Table-26 pair and all derived output types match wcslib 8.5 goldens.
+- [x] **Implement generic `LOG`.** Any valid four-character coordinate type now applies the standard exponential/logarithmic pair while retaining its unit metadata; spectral `LOG` axes first normalize to their Table-25 default unit (`src/wcs/axis.rs`; standard `docs/refs/fits_standard40.md:3779-3801`). Reference points, non-positive inverse domains, time-axis integration, prefixed spectral units, and inverse round-trips are covered.
 
 ## Batch 14 — High: add detector and tabular WCS algorithms
 
