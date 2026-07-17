@@ -377,8 +377,8 @@ impl ColumnData {
 /// A binary table's structure plus its data unit.
 #[derive(Debug, Clone)]
 pub struct BinTable {
-    pub nrows: usize,
-    pub columns: Vec<Column>,
+    nrows: usize,
+    columns: Vec<Column>,
     pub(crate) row_len: usize,
     /// Byte offset of the heap within `bytes` (`THEAP`, default = main-table size).
     pub(crate) heap_offset: usize,
@@ -389,6 +389,15 @@ pub struct BinTable {
     /// block fill). Fixed-width reads index the main-table prefix; `P`/`Q` columns
     /// follow their descriptors into the heap.
     bytes: Vec<u8>,
+}
+
+/// Immutable row and column metadata for a parsed binary table.
+#[derive(Debug, Clone, Copy)]
+pub struct BinTableMetadata<'a> {
+    /// Number of rows in the table.
+    pub nrows: usize,
+    /// Validated column descriptors in `TFIELDS` order.
+    pub columns: &'a [Column],
 }
 
 fn required_usize(header: &Header, keyword: &str, name: &'static str) -> Result<usize> {
@@ -421,6 +430,14 @@ fn required_text<'a>(
 }
 
 impl BinTable {
+    /// Borrow the table's validated row count and column descriptors.
+    pub fn metadata(&self) -> BinTableMetadata<'_> {
+        BinTableMetadata {
+            nrows: self.nrows,
+            columns: &self.columns,
+        }
+    }
+
     /// Build a table from its header and owned data unit (`data` is the main
     /// table followed by the optional heap, as returned by the reader).
     pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<BinTable> {
@@ -1276,6 +1293,15 @@ fn be_u64(b: &[u8]) -> usize {
         b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
     ]))
     .unwrap_or(usize::MAX)
+}
+
+#[cfg(all(test, feature = "compression"))]
+pub(crate) mod test_support {
+    use crate::table::{BinTable, TformKind};
+
+    pub(crate) fn set_column_kind(table: &mut BinTable, column: usize, kind: TformKind) {
+        table.columns[column].tform.kind = kind;
+    }
 }
 
 #[cfg(test)]

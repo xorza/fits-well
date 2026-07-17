@@ -449,11 +449,21 @@ fn read_data_raw_returns_padded_bytes_and_the_data_range() {
     let mut f = open("UITfuv2582gc.fits");
     let unit = f.read_data_raw(0).unwrap();
     // 512×512 i16: 524_288 bytes of data, padded up to 527_040 on disk.
-    assert_eq!(unit.bytes.len(), 527_040);
-    assert_eq!(unit.data_range, 0..524_288);
+    let view = unit.view();
+    assert_eq!(view.padded.len(), 527_040);
+    assert_eq!(view.data_range, 0..524_288);
     assert_eq!(unit.data().len(), 524_288);
     // The padding past the data range is block fill, not samples.
-    assert!(unit.bytes[524_288..].iter().all(|&b| b == 0));
+    assert!(view.padded[524_288..].iter().all(|&b| b == 0));
+
+    let mut detached = unit.view();
+    detached.data_range = usize::MAX..usize::MAX;
+    detached.padded = &[];
+    assert_eq!(detached.data_range, usize::MAX..usize::MAX);
+    assert!(detached.padded.is_empty());
+    assert_eq!(unit.data().len(), 524_288);
+    assert_eq!(unit.clone().into_data().len(), 524_288);
+    assert_eq!(unit.into_padded().len(), 527_040);
 }
 
 #[test]

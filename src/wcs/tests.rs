@@ -148,6 +148,21 @@ fn transform_failures_return_errors() {
         tan.world_to_pixel(&[150.0, 100.0]),
         Err(FitsError::WcsProjectionDomain { projection: "TAN" })
     ));
+    for result in [
+        tan.pixel_to_world(&[1.0]),
+        tan.pixel_to_world(&[1.0, 2.0, 3.0]),
+        tan.world_to_pixel(&[150.0]),
+        tan.world_to_pixel(&[150.0, 2.5, 1.0]),
+    ] {
+        assert!(matches!(
+            result,
+            Err(FitsError::CoordinateCountMismatch { expected: 2, .. })
+        ));
+    }
+    assert!(matches!(
+        tan.axis_world(2, &[1.0, 1.0]),
+        Err(FitsError::WcsAxisIndexOutOfBounds { axis: 3, len: 2 })
+    ));
 }
 
 /// A matrix inversion sanity check independent of any fixture.

@@ -84,6 +84,13 @@ if let ImageData::I16(pixels) = raw.decode() {
 # Ok::<(), fits_well::FitsError>(())
 ```
 
+When science metadata belongs with typed data, use
+`write_image_with_header`, `write_table_with_header`,
+`write_ascii_table_with_header`, or `write_compressed_image_with_header`.
+The writer preserves ordered informational cards such as `OBJECT`, `EXTNAME`,
+WCS/time keywords, `COMMENT`, and `HISTORY`, while regenerating structural and
+checksum cards from the typed payload.
+
 A **tile-compressed** image (FITS §10) reads back through the *same* `read_image`
 call — it detects `ZIMAGE` and decompresses transparently. To write one:
 
@@ -120,7 +127,8 @@ writer.into_inner().sync_all()?;
 
 let mut reader = FitsReader::open(File::open("table.fits")?)?;
 let table = reader.read_table(1)?; // the table is HDU 1 (HDU 0 is the empty primary)
-println!("{} rows, {} columns", table.nrows, table.columns.len());
+let metadata = table.metadata();
+println!("{} rows, {} columns", metadata.nrows, metadata.columns.len());
 
 // `.raw()` is the stored, typed plane; `.physical()` applies TZEROn/TSCALn and
 // maps TNULLn to NaN, widening to f64. `.unsigned()`, `.complex()`, and `.bits()`
@@ -132,7 +140,7 @@ println!("MAG = {:?}", table.column_by_name("MAG")?.physical()?);
 ```
 
 Jagged bit arrays use `WriteColumn::vla_bits` with one MSB-first
-`BitVec<u8, Msb0>` per row; call `.wide()` when `QX` descriptors are required.
+`BitVec<u8, Msb0>` per row; call `.wide()?` when `QX` descriptors are required.
 
 ### World Coordinate System
 

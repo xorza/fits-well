@@ -32,8 +32,13 @@ fn main() -> fits_well::Result<()> {
     // FITS file begins with.
     let mut reader = FitsReader::open(File::open(&path)?)?;
     let table = reader.read_table(1)?;
+    let metadata = table.metadata();
 
-    println!("{} rows, {} columns", table.nrows, table.columns.len());
+    println!(
+        "{} rows, {} columns",
+        metadata.nrows,
+        metadata.columns.len()
+    );
     // Address a column by index or by `TTYPEn` name; the handle decodes on demand.
     println!("ID   = {:?}", table.column_by_idx(0)?.raw()?);
     println!("NAME = {:?}", table.column_by_name("NAME")?.raw()?);

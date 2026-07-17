@@ -18,18 +18,33 @@ use crate::keyword::key;
 #[derive(Debug, Clone)]
 pub struct RandomGroups {
     /// `PTYPEn` parameter names, in order (length `pcount`).
-    pub parameter_names: Vec<String>,
+    parameter_names: Vec<String>,
     /// The per-group array shape (`NAXIS2..NAXISm`; the `NAXIS1` zero sentinel is
     /// dropped).
-    pub group_shape: Vec<usize>,
-    pub gcount: usize,
-    pub pcount: usize,
-    pub bitpix: Bitpix,
+    group_shape: Vec<usize>,
+    gcount: usize,
+    pcount: usize,
+    bitpix: Bitpix,
     array_scaling: Scaling,
     /// `PSCALn`/`PZEROn` per parameter.
     param_scaling: Vec<ParamScale>,
     /// Flat host-endian samples: `gcount` groups of `pcount + array_len` elements.
     samples: ImageData,
+}
+
+/// Immutable geometry and representation metadata for a random-groups array.
+#[derive(Debug, Clone, Copy)]
+pub struct RandomGroupsMetadata<'a> {
+    /// `PTYPEn` parameter names in parameter order.
+    pub parameter_names: &'a [String],
+    /// Per-group array shape, with the `NAXIS1 = 0` sentinel omitted.
+    pub group_shape: &'a [usize],
+    /// Number of stored groups.
+    pub gcount: usize,
+    /// Number of parameters preceding each group's array.
+    pub pcount: usize,
+    /// Stored sample representation shared by parameters and arrays.
+    pub bitpix: Bitpix,
 }
 
 /// `PSCALn`/`PZEROn` linear scaling for one group parameter
@@ -49,6 +64,17 @@ pub struct RandomGroupView<'a> {
 }
 
 impl RandomGroups {
+    /// Borrow the random-groups geometry, parameter names, and stored type.
+    pub fn metadata(&self) -> RandomGroupsMetadata<'_> {
+        RandomGroupsMetadata {
+            parameter_names: &self.parameter_names,
+            group_shape: &self.group_shape,
+            gcount: self.gcount,
+            pcount: self.pcount,
+            bitpix: self.bitpix,
+        }
+    }
+
     pub(crate) fn from_data(header: &Header, data: &[u8]) -> Result<RandomGroups> {
         let bitpix = header.bitpix()?;
         let axes = header.axes()?;
@@ -106,14 +132,8 @@ impl RandomGroups {
     /// `PSCALn`/`PZEROn` or `BSCALE`/`BZERO` conversion. This preserves all integer
     /// values and floating-point bit patterns that the physical `f64` APIs cannot.
     pub fn group_by_idx(&self, index: usize) -> Result<RandomGroupView<'_>> {
-        if index >= self.gcount {
-            return Err(FitsError::GroupIndexOutOfBounds {
-                index,
-                len: self.gcount,
-            });
-        }
+        let start = self.checked_group_base(index)?;
         let group_len = self.group_len();
-        let start = index * group_len;
         let parameters_end = start + self.pcount;
         let group_end = start + group_len;
         Ok(RandomGroupView {
@@ -123,14 +143,14 @@ impl RandomGroups {
     }
 
     /// The physical parameter values of group `g`: `PZEROn + PSCALn × raw`.
-    pub fn parameters_physical(&self, group: usize) -> Vec<f64> {
-        let base = group * self.group_len();
-        (0..self.pcount)
+    pub fn parameters_physical(&self, group: usize) -> Result<Vec<f64>> {
+        let base = self.checked_group_base(group)?;
+        Ok((0..self.pcount)
             .map(|j| {
                 let ParamScale { pscal, pzero } = self.param_scaling[j];
                 pzero + pscal * elem_f64(&self.samples, base + j)
             })
-            .collect()
+            .collect())
     }
 
     /// The physical value of the named group parameter (§6.3): when extra
@@ -138,8 +158,8 @@ impl RandomGroups {
     /// sharing a `PTYPEn` name, the value is the **sum** of those addends'
     /// physical values. `None` if no parameter has the name. (For the raw
     /// per-addend values, use [`RandomGroups::parameters_physical`].)
-    pub fn parameter_physical(&self, group: usize, name: &str) -> Option<f64> {
-        let base = group * self.group_len();
+    pub fn parameter_physical(&self, group: usize, name: &str) -> Result<Option<f64>> {
+        let base = self.checked_group_base(group)?;
         let mut sum = 0.0;
         let mut found = false;
         for j in 0..self.pcount {
@@ -149,20 +169,30 @@ impl RandomGroups {
                 sum += pzero + pscal * elem_f64(&self.samples, base + j);
             }
         }
-        found.then_some(sum)
+        Ok(found.then_some(sum))
     }
 
     /// The physical array values of group `g`: `BZERO + BSCALE × raw`, with integer
     /// samples equal to `BLANK` mapped to `NaN`.
-    pub fn array_physical(&self, group: usize) -> Vec<f64> {
-        let base = group * self.group_len() + self.pcount;
-        (0..self.array_len())
+    pub fn array_physical(&self, group: usize) -> Result<Vec<f64>> {
+        let base = self.checked_group_base(group)? + self.pcount;
+        Ok((0..self.array_len())
             .map(|k| elem_physical(&self.samples, base + k, &self.array_scaling))
-            .collect()
+            .collect())
     }
 
     fn group_len(&self) -> usize {
         self.pcount + self.array_len()
+    }
+
+    fn checked_group_base(&self, index: usize) -> Result<usize> {
+        if index >= self.gcount {
+            return Err(FitsError::GroupIndexOutOfBounds {
+                index,
+                len: self.gcount,
+            });
+        }
+        Ok(index * self.group_len())
     }
 }
 

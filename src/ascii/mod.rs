@@ -55,10 +55,19 @@ pub struct AsciiColumn {
 /// A parsed ASCII table plus its row bytes.
 #[derive(Debug, Clone)]
 pub struct AsciiTable {
-    pub nrows: usize,
-    pub columns: Vec<AsciiColumn>,
+    nrows: usize,
+    columns: Vec<AsciiColumn>,
     row_len: usize,
     bytes: Vec<u8>,
+}
+
+/// Immutable row and column metadata for a parsed ASCII table.
+#[derive(Debug, Clone, Copy)]
+pub struct AsciiTableMetadata<'a> {
+    /// Number of rows in the table.
+    pub nrows: usize,
+    /// Validated column descriptors in `TFIELDS` order.
+    pub columns: &'a [AsciiColumn],
 }
 
 fn required_integer(header: &Header, keyword: &str, missing_name: &'static str) -> Result<i64> {
@@ -83,6 +92,14 @@ fn required_text<'a>(
 }
 
 impl AsciiTable {
+    /// Borrow the table's validated row count and column descriptors.
+    pub fn metadata(&self) -> AsciiTableMetadata<'_> {
+        AsciiTableMetadata {
+            nrows: self.nrows,
+            columns: &self.columns,
+        }
+    }
+
     pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<AsciiTable> {
         let row_len = required_usize(header, "NAXIS1", "NAXIS1")?;
         let nrows = required_usize(header, "NAXIS2", "NAXIS2")?;
