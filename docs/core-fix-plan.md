@@ -79,8 +79,8 @@ For every batch:
 
 ## Batch 14 — High: add detector and tabular WCS algorithms
 
-- [ ] **Implement `GRI` and `GRA`.** Parse their required detector-coordinate parameters, return explicit errors for incomplete metadata, and cross-check forward/inverse values against wcslib (`src/wcs/mod.rs:1334-1359`; standard `docs/refs/fits_standard40.md:3796-3801`).
-- [ ] **Implement `TAB` with table-data context.** Introduce a resolver that can obtain coordinate arrays and indexing vectors from the referenced BINTABLE instead of trying to evaluate `TAB` from a header alone (`src/wcs/mod.rs:863-1096`, `src/wcs/mod.rs:1334-1359`; standard `docs/refs/fits_standard40.md:3796-3801`). Verify monotonic and non-monotonic arrays, multidimensional indices, boundaries, and malformed references.
+- [x] **Implement `GRI` and `GRA`.** The spectral axis parser applies the seven detector parameters with their standard defaults, requires explicit non-zero grating density and interference order, rejects degenerate geometry, and evaluates vacuum/air grisms in both directions. KPNO MARS values match wcslib 8.5 at the reference point and offsets on both sides (`src/wcs/axis.rs`; standard `docs/refs/fits_standard40.md:3796-3801`).
+- [x] **Implement `TAB` with table-data context.** `FitsReader::read_wcs` resolves the exact `EXTNAME`/`EXTVER`/`EXTLEVEL` BINTABLE, coordinate column, `TDIM`, and optional monotonic index-vector columns. The coupled transform performs N-dimensional multilinear interpolation and inverse voxel location while header-only `Header::wcs` remains explicitly incomplete. Exact fixtures cover increasing/decreasing indices, non-monotonic coordinate arrays, half-bin boundaries, multidimensional coupling, spectral-unit normalization, typed time integration, malformed metadata, and exact extension selection (`src/wcs/tabular/mod.rs`, `src/reader/mod.rs`; standard `docs/refs/fits_standard40.md:3796-3801`).
 
 ## Batch 15 — Medium: complete exact typed raw surfaces
 

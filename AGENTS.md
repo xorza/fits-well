@@ -35,7 +35,9 @@ cylindrical `CAR`/`CEA`/`MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic
 `COP`/`COE`/`COD`/`COO`, pseudoconic `BON`, polyconic `PCO`, cube
 `TSC`/`CSC`/`QSC`, and HEALPix `HPX` — with `PC`/`CD`/`CROTA`
 and full `PVi_m` parameters, yielding coordinates in the frame the file declares
-(`RADESYS`/`EQUINOX`). A typed **time** layer
+(`RADESYS`/`EQUINOX`). It also evaluates every Table-26 spectral/detector
+algorithm (`F2*`/`W2*`/`V2*`/`A2*`, `GRI`/`GRA`, and `LOG`) and resolves
+multidimensional `-TAB` arrays through `FitsReader::read_wcs`. A typed **time** layer
 handles strict FITS ISO-8601/JD/MJD (signed years and UTC quasi-JD), epochs,
 `UTC`…`TCB`/`GPS`/UT1 scale conversions, and time WCS axes — validated against
 ERFA/astropy. Tiled **image and table** compression
@@ -46,11 +48,10 @@ the `compression` feature: all five image codecs (`GZIP_1`, `GZIP_2`, `RICE_1`,
 fixed-width table compression. All tile (de)compression fans out across the rayon
 pool under the default-on `parallel` feature (a scalar fallback runs without it),
 which the codec benches measure at ~2.5–3× on decompress and ~4–6.5× on compress.
-The remaining WCS frontier is detector/grism and tabular axes (`GRI`, `GRA`,
-`TAB`), which remain readable and are flagged in `unsupported_axes` while
-complete transforms reject them. The module map below shows what is built versus
-planned. The design principles in this file remain the spec; follow them when
-filling the scaffolds in.
+The standard WCS algorithms are complete; convention-only `XPH` remains readable,
+is flagged in `unsupported_axes`, and makes complete transforms reject it. The
+module map below shows what is built versus planned. The design principles in
+this file remain the spec; follow them when filling the scaffolds in.
 
 **Out of scope (deliberately):** converting *between* celestial reference frames
 (FK4↔FK5↔Galactic↔ICRS — precession, E-terms, frame bias) is astrometry, not part
@@ -158,7 +159,7 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `keyword.rs` | stack-allocated indexed-keyword formatting (`key!` macro / `KeyBuf`): builds `NAXISn`/`PVi_m`/`CTYPEn`-style keys without the per-lookup `format!` heap alloc (one WCS parse does ~90) | done |
 | `header/` | ordered card model (`value.rs`, `card/`, `mod.rs`): fallible `try_*` authoring, parse/render, lossless logical `CONTINUE` folding, `HIERARCH` compound keys, keyword index, typed getters | done |
 | `hdu/` | role-aware HDU classification + primary/extension/random-groups data-unit sizing (Eqs. 1/2/4) | done |
-| `reader/` | HDU scan over a `Source` (`source.rs`: `StreamSource` copies, `SliceSource`/`MmapSource` borrow zero-copy); `open`/`from_bytes`/`open_mmap`; `read_image` (owned, transparently decompresses a `ZIMAGE` `CompressedImage`)/`read_image_view(idx, &mut Vec<u64>)` (borrowed `ImageView` swapped into a caller-owned `u64` scratch — the page-fault-free read-loop path; the reader retains nothing image-sized)/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_table`/`verify_checksum`, raw `DataUnit` | done |
+| `reader/` | HDU scan over a `Source` (`source.rs`: `StreamSource` copies, `SliceSource`/`MmapSource` borrow zero-copy); `open`/`from_bytes`/`open_mmap`; `read_image` (owned, transparently decompresses a `ZIMAGE` `CompressedImage`)/`read_image_view(idx, &mut Vec<u64>)` (borrowed `ImageView` swapped into a caller-owned `u64` scratch — the page-fault-free read-loop path; the reader retains nothing image-sized)/`read_wcs` (including referenced `-TAB` BINTABLE arrays)/`read_table`/`read_ascii_table`/`read_groups`/`read_compressed_table`/`verify_checksum`, raw `DataUnit` | done |
 | `writer/` | multi-HDU writer: `write_image`/`write_table` (fixed + `P`/`Q` VLAs, including jagged bit arrays)/`write_ascii_table`/`write_compressed_image`(`_lossy`)/`write_compressed_table`, `with_checksums` | done |
 | `data/` | typed owned `Image`/`ImageData`/`RawImage` (zero-copy raw plane) + borrowed `ImageView` (the read-loop view, slices over a caller-owned `u64`-aligned scratch), big-endian decode+encode (`encode_into` reuses the writer's buffer), `BSCALE`/`BZERO` physical plane + `SampleType`/`UnsignedView` resolution; `ImageArray` n-D bridge (feature `ndarray`, FITS axis order) | image read+write done; the read-loop lever is `read_image_view`→`ImageView` — owned `read_image().decode()` is page-fault-bound (~65% of cycles, profiled), so the view byte-swaps into a reused scratch (no per-call alloc, ~4–5×; `BITPIX = 8` is zero-copy). The swap itself is write-allocate/RFO-bound (~8–9 GiB/s); SIMD does **not** help it (AVX2/blocked variants measured slower) — so no SIMD-swap TODO |
 | `table/` | `BINTABLE` parsing (`Tform`/`Column`); per-column `ColumnReader` handles decode on demand to `ColumnData` (`BitColumn` for `X`, `num-complex` for `C`/`M`), `TSCAL`/`TZERO` physical planes including complex and exact unsigned P/Q heap VLAs | read done (write in `writer/`) |
@@ -166,7 +167,7 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `groups/` | random-groups (§6) read: exact typed per-group parameter/array `RandomGroupView` plus `PSCALn`/`PZEROn` physical values | read done (no write — deprecated) |
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
 | `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3); `decode.rs` reassembles + dequantizes tiles into the image, `encode.rs` the integer + float encoders, `mod.rs` the shared `ImageCodec` dispatch / `CompressOptions` / `P`→`Q` descriptor threshold (`needs_wide`), `geometry` the N-d tiling, `convert` the byte/`i64`/`f64` conversions shared by image + table; `map_tiles` fans independent codec work across rayon and safe row chunks partition decode destinations under `parallel` | all 5 image codecs read+write; float quant all 3 dither methods (write-selectable via `CompressOptions::dither`) + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode + lossy `SCALE>0` write; fixed-width table compression read+write; tile-parallel ((de)compress, image + table) |
-| `wcs/` | typed WCS: keyword parse, linear transform (PC/CD/CROTA + `PVi_m` + inverse), all 27 FITS 4.0 projections (including cube TSC/CSC/QSC and parameterized HPX) via general pole computation, all analytic Table-26 spectral transforms and generic `LOG`, complete `pixel_to_world`/`world_to_pixel`; unimplemented coordinate algorithms remain readable, are flagged in `unsupported_axes`, and make complete transforms return `UnsupportedWcsTransform` | celestial, analytic spectral, and `LOG` done (`GRI`/`GRA`/`TAB` TODO; inter-frame transforms out of scope) |
+| `wcs/` | typed WCS: keyword parse, linear transform (PC/CD/CROTA + `PVi_m` + inverse), all 27 FITS 4.0 projections (including cube TSC/CSC/QSC and parameterized HPX) via general pole computation, every Table-26 spectral/detector algorithm, generic `LOG`, and BINTABLE-backed multidimensional `TAB`, with complete `pixel_to_world`/`world_to_pixel`; unsupported conventions remain readable and make complete transforms return `UnsupportedWcsTransform` | standard algorithms done (`XPH` convention and inter-frame transforms out of scope) |
 | `time/` | typed time (§9): `Datetime` (strict unsigned-four/signed-five ISO-8601↔scale-aware JD/MJD, leap-second-preserving UTC quasi-JD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), fallible prefixed FITS time units, `FitsTime` header view + PC/CD-coupled time WCS axes with per-axis unit/scale overrides | v2 done |
 | `error.rs` | `FitsError` + `Result` | done |
 

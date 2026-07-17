@@ -24,6 +24,8 @@ use crate::hdu::data_extent;
 use crate::header::Header;
 use crate::header::card::is_end_record;
 use crate::table::BinTable;
+use crate::wcs::Wcs;
+use crate::wcs::tabular;
 
 pub(crate) mod source;
 
@@ -385,6 +387,52 @@ impl<S: Source> FitsReader<S> {
         }
         let unit = self.read_data_raw(index)?;
         BinTable::from_data(&self.hdus[index].header, unit.bytes)
+    }
+
+    /// Parse an HDU's WCS and resolve any standard `-TAB` coordinate arrays from
+    /// their referenced `BINTABLE` extensions. Header-only WCS descriptions use the
+    /// same path as [`Header::wcs`]; this method is required for `-TAB` because its
+    /// coordinate values and optional index vectors live outside the source header.
+    pub fn read_wcs(&mut self, index: usize, alt: Option<char>) -> Result<Wcs> {
+        let header = self.checked_hdu(index)?.header.clone();
+        let header_wcs = Wcs::from_header(&header, alt)?;
+        let descriptors = tabular::descriptors(&header, header_wcs.view().axes.len(), alt)?;
+        if descriptors.is_empty() {
+            return Ok(header_wcs);
+        }
+        let mut transforms = Vec::with_capacity(descriptors.len());
+        for descriptor in descriptors {
+            let reference = &descriptor.reference;
+            let mut table_index = None;
+            for (index, hdu) in self.hdus.iter().enumerate() {
+                if hdu.kind != HduKind::BinTable {
+                    continue;
+                }
+                let Some(name) = hdu.header.get_text("EXTNAME")? else {
+                    continue;
+                };
+                let version = hdu.header.get_integer("EXTVER")?.unwrap_or(1);
+                let level = hdu.header.get_integer("EXTLEVEL")?.unwrap_or(1);
+                if name.eq_ignore_ascii_case(&reference.extension_name)
+                    && version == reference.extension_version
+                    && level == reference.extension_level
+                {
+                    table_index = Some(index);
+                    break;
+                }
+            }
+            let table_index = table_index.ok_or_else(|| FitsError::InvalidValue {
+                card: format!(
+                    "TAB BINTABLE {:?}, EXTVER {}, EXTLEVEL {} was not found",
+                    reference.extension_name,
+                    reference.extension_version,
+                    reference.extension_level
+                ),
+            })?;
+            let table = self.read_table(table_index)?;
+            transforms.push(tabular::TabularTransform::from_table(descriptor, &table)?);
+        }
+        Wcs::from_header_with_tabular(&header, alt, transforms)
     }
 
     /// Read an `TABLE` (ASCII table) extension and parse its column structure.

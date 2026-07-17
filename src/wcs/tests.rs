@@ -1121,6 +1121,92 @@ fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
     }
 }
 
+fn grism_wcs(ctype: &str, reference: f64) -> Wcs {
+    let mut header = Header::new();
+    header
+        .set("NAXIS", 1)
+        .set("CTYPE1", ctype)
+        .set("CUNIT1", "m")
+        .set("CRPIX1", 1.0)
+        .set("CRVAL1", reference)
+        .set("CDELT1", 1.0e-7)
+        .set("PV1_0", 4.5e5)
+        .set("PV1_1", 1.0)
+        .set("PV1_2", 27.0)
+        .set("PV1_3", 1.765)
+        .set("PV1_4", -1.077e6)
+        .set("PV1_5", 3.0)
+        .set("PV1_6", 5.0);
+    Wcs::from_header(&header, None).unwrap()
+}
+
+#[test]
+fn grism_axes_match_wcslib_and_invert() {
+    let cases = [
+        (
+            "WAVE-GRI",
+            650.0e-9,
+            [
+                (4.700_910_602_533_127_5e-7, -1.0),
+                (6.499_999_999_999_996e-7, 1.0),
+                (9.710_044_628_145_035e-7, 4.0),
+            ],
+        ),
+        (
+            "AWAV-GRA",
+            724.52e-9,
+            [
+                (5.431_109_985_443_893e-7, -1.0),
+                (7.245_199_999_999_999e-7, 1.0),
+                (1.043_049_342_688_692_3e-6, 4.0),
+            ],
+        ),
+    ];
+    for (ctype, reference, goldens) in cases {
+        let wcs = grism_wcs(ctype, reference);
+        assert_eq!(wcs.view().unsupported_axes, [], "{ctype}");
+        for (expected_world, pixel) in goldens {
+            let world = wcs.pixel_to_world(&[pixel]).unwrap();
+            assert!(
+                (world[0] - expected_world).abs() < 1e-18,
+                "{ctype} pixel {pixel}: {world:?}"
+            );
+            let round_trip = wcs.world_to_pixel(&world).unwrap();
+            assert!(
+                (round_trip[0] - pixel).abs() < 1e-12,
+                "{ctype} pixel {pixel}: {round_trip:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn grism_axes_reject_incomplete_or_degenerate_detector_metadata() {
+    for (parameter, value) in [("PV1_0", None), ("PV1_1", None), ("PV1_0", Some(0.0))] {
+        let mut header = Header::new();
+        header
+            .set("NAXIS", 1)
+            .set("CTYPE1", "WAVE-GRI")
+            .set("CRVAL1", 650.0e-9);
+        if parameter != "PV1_0" {
+            header.set("PV1_0", 4.5e5);
+        }
+        if parameter != "PV1_1" {
+            header.set("PV1_1", 1.0);
+        }
+        if let Some(value) = value {
+            header.set(parameter, value);
+        }
+        assert!(
+            matches!(
+                Wcs::from_header(&header, None),
+                Err(FitsError::InvalidValue { .. })
+            ),
+            "{parameter}={value:?}"
+        );
+    }
+}
+
 #[derive(Debug)]
 struct SpectralGolden {
     ctype: &'static str,
