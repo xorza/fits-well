@@ -17,7 +17,7 @@ pub(crate) struct TileGeometry {
 #[derive(Debug, Default)]
 pub(crate) struct TileScratch {
     /// Per-axis origin of the current tile (scratch for the index computation).
-    origin: Vec<usize>,
+    pub(crate) origin: Vec<usize>,
     /// Edge-clipped per-axis extent of the tile (`ny` fastest); used by HCOMPRESS.
     pub(crate) tdims: Vec<usize>,
     /// Flat start of each contiguous tile row in the full image (length = the product

@@ -1,6 +1,6 @@
 use crate::error::FitsError;
 use crate::header::Header;
-use crate::table::BinTable;
+use crate::table_impl::BinTable;
 use crate::wcs::Wcs;
 use crate::wcs::tabular;
 use crate::wcs::tabular::TabularTransform;
@@ -19,23 +19,25 @@ fn lookup_table(columns: &[(&str, &[f64], Option<&str>)]) -> BinTable {
         .map(|(_, values, _)| values.len() * 8)
         .sum::<usize>();
     header
-        .set("XTENSION", "BINTABLE")
-        .set("BITPIX", 8)
-        .set("NAXIS", 2)
-        .set("NAXIS1", row_len as i64)
-        .set("NAXIS2", 1)
-        .set("PCOUNT", 0)
-        .set("GCOUNT", 1)
-        .set("TFIELDS", columns.len() as i64);
+        .set_internal("XTENSION", "BINTABLE")
+        .set_internal("BITPIX", 8)
+        .set_internal("NAXIS", 2)
+        .set_internal("NAXIS1", row_len as i64)
+        .set_internal("NAXIS2", 1)
+        .set_internal("PCOUNT", 0)
+        .set_internal("GCOUNT", 1)
+        .set_internal("TFIELDS", columns.len() as i64);
     let mut bytes = Vec::with_capacity(row_len);
     for (index, (name, values, shape)) in columns.iter().enumerate() {
         let column = index + 1;
-        header.set(format!("TTYPE{column}").as_str(), *name).set(
-            format!("TFORM{column}").as_str(),
-            format!("{}D", values.len()),
-        );
+        header
+            .set_internal(format!("TTYPE{column}").as_str(), *name)
+            .set_internal(
+                format!("TFORM{column}").as_str(),
+                format!("{}D", values.len()),
+            );
         if let Some(shape) = shape {
-            header.set(format!("TDIM{column}").as_str(), *shape);
+            header.set_internal(format!("TDIM{column}").as_str(), *shape);
         }
         bytes.extend(encoded_f64(values));
     }
@@ -44,16 +46,16 @@ fn lookup_table(columns: &[(&str, &[f64], Option<&str>)]) -> BinTable {
 
 fn tab_header(axis_count: usize, coordinate: &str) -> Header {
     let mut header = Header::new();
-    header.set("NAXIS", axis_count as i64);
+    header.set_internal("NAXIS", axis_count as i64);
     for axis in 1..=axis_count {
         header
-            .set(format!("CTYPE{axis}").as_str(), format!("AX{axis:02}-TAB"))
-            .set(format!("CRPIX{axis}").as_str(), 0.0)
-            .set(format!("CRVAL{axis}").as_str(), 0.0)
-            .set(format!("CDELT{axis}").as_str(), 1.0)
-            .set(format!("PS{axis}_0").as_str(), "WCS-TABLE")
-            .set(format!("PS{axis}_1").as_str(), coordinate)
-            .set(format!("PV{axis}_3").as_str(), axis as i64);
+            .set_internal(format!("CTYPE{axis}").as_str(), format!("AX{axis:02}-TAB"))
+            .set_internal(format!("CRPIX{axis}").as_str(), 0.0)
+            .set_internal(format!("CRVAL{axis}").as_str(), 0.0)
+            .set_internal(format!("CDELT{axis}").as_str(), 1.0)
+            .set_internal(format!("PS{axis}_0").as_str(), "WCS-TABLE")
+            .set_internal(format!("PS{axis}_1").as_str(), coordinate)
+            .set_internal(format!("PV{axis}_3").as_str(), axis as i64);
     }
     header
 }
@@ -106,7 +108,9 @@ fn tab_index_vectors_may_decrease_and_change_sampling() {
         ("INDEX", &[40.0, 30.0, 10.0, 0.0], None),
     ]);
     let mut header = tab_header(1, "COORD");
-    header.set("PS1_2", "INDEX").set("CRVAL1", 30.0);
+    header
+        .set_internal("PS1_2", "INDEX")
+        .set_internal("CRVAL1", 30.0);
     let wcs = resolved_wcs(&header, &table);
 
     assert_eq!(wcs.pixel_to_world(&[0.0]).unwrap(), [200.0]);
@@ -130,7 +134,9 @@ fn multidimensional_tab_interpolates_and_inverts_coupled_axes() {
         Some("(2,2,2)"),
     )]);
     let mut header = tab_header(2, "COORD");
-    header.set("PS1_0", "wcs-table").set("PS1_1", "coord");
+    header
+        .set_internal("PS1_0", "wcs-table")
+        .set_internal("PS1_1", "coord");
     let wcs = resolved_wcs(&header, &table);
 
     let world = wcs.pixel_to_world(&[1.25, 1.5]).unwrap();
@@ -154,10 +160,10 @@ fn tabular_time_axes_feed_the_typed_time_layer() {
     let table = lookup_table(&[("COORD", &[0.0, 2.0], Some("(1,2)"))]);
     let mut header = tab_header(1, "COORD");
     header
-        .set("CTYPE1", "TIME-TAB")
-        .set("CUNIT1", "d")
-        .set("MJDREF", 50_000.0)
-        .set("TIMESYS", "UTC");
+        .set_internal("CTYPE1", "TIME-TAB")
+        .set_internal("CUNIT1", "d")
+        .set_internal("MJDREF", 50_000.0)
+        .set_internal("TIMESYS", "UTC");
     let wcs = resolved_wcs(&header, &table);
     let coordinate = header
         .time()
@@ -172,7 +178,9 @@ fn tabular_time_axes_feed_the_typed_time_layer() {
 fn tabular_spectral_coordinates_normalize_declared_units() {
     let table = lookup_table(&[("COORD", &[500.0, 600.0], Some("(1,2)"))]);
     let mut header = tab_header(1, "COORD");
-    header.set("CTYPE1", "WAVE-TAB").set("CUNIT1", "nm");
+    header
+        .set_internal("CTYPE1", "WAVE-TAB")
+        .set_internal("CUNIT1", "nm");
     let wcs = resolved_wcs(&header, &table);
     let world = wcs.pixel_to_world(&[1.5]).unwrap();
     assert!((world[0] - 5.5e-7).abs() < 1e-20, "{world:?}");
@@ -184,9 +192,9 @@ fn tabular_spectral_coordinates_normalize_declared_units() {
 fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
     let mut missing = Header::new();
     missing
-        .set("NAXIS", 1)
-        .set("CTYPE1", "AX01-TAB")
-        .set("PS1_1", "COORD");
+        .set_internal("NAXIS", 1)
+        .set_internal("CTYPE1", "AX01-TAB")
+        .set_internal("PS1_1", "COORD");
     assert!(matches!(
         tabular::descriptors(&missing, 1, None),
         Err(FitsError::InvalidValue { .. })
@@ -205,7 +213,7 @@ fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
         ("INDEX", &[1.0, 3.0, 2.0], None),
     ]);
     let mut header = tab_header(1, "COORD");
-    header.set("PS1_2", "INDEX");
+    header.set_internal("PS1_2", "INDEX");
     let descriptor = tabular::descriptors(&header, 1, None).unwrap().remove(0);
     assert!(matches!(
         TabularTransform::from_table(descriptor, &bad_index),

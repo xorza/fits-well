@@ -7,27 +7,19 @@
 
 use std::fs::File;
 
-use fits_well::{CompressOptions, FitsReader, FitsWriter, Image, ImageData, Scaling};
+use fits_well::{Compression, CompressionOptions, FitsReader, FitsWriter, Image, ImageData};
 
 fn main() -> fits_well::Result<()> {
     let path = std::env::temp_dir().join("fits_well_compressed.fits");
 
     let expected = ImageData::I16((0..256).map(|i| (i % 32) as i16).collect());
-    let image = Image::new(
-        vec![16, 16],
-        expected.clone(),
-        Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
-    )?;
+    let image = Image::new(vec![16, 16], expected.clone())?;
 
-    // Compress with RICE in 8×8 tiles. `CompressOptions::tiled` sets the tile shape
-    // and leaves the gzip level / HCOMPRESS scale at their defaults.
-    let options = CompressOptions::tiled([8, 8]);
+    // Compress with RICE in 8×8 tiles. `CompressionOptions::tiled` sets the tile shape
+    // while the typed codec prevents invalid or misspelled choices.
+    let options = CompressionOptions::tiled([8, 8]);
     let mut writer = FitsWriter::new(File::create(&path)?);
-    writer.write_compressed_image(&image, "RICE_1", &options)?;
+    writer.write_compressed_image(&image, Compression::Rice, &options)?;
     writer.into_inner().sync_all()?;
     println!("wrote {}", path.display());
 

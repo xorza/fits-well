@@ -135,7 +135,7 @@ the scaled physical value (Eq. 7) is what gets formatted.
   `TSCALn==1 && TZEROn==0` and types match host (raw slice).
 - Unsigned detection mirrors images: integer `TFORM` + `TZEROn == 2^(n-1)` +
   `TSCALn == 1` ⇒ expose exact `uN` values through `unsigned` or, for P/Q heap
-  arrays, one jagged `UnsignedView` per row through `vla_unsigned`.
+  arrays, one jagged `UnsignedData` per row through `vla_unsigned`.
 - Heap/VLA: parse descriptors lazily; expose per-row array slices into the heap.
   Validate `byte_offset + nelem×bytes ≤ heap length` (= `PCOUNT − gap`, where
   `gap = THEAP − NAXIS1×NAXIS2`), not against `PCOUNT` directly.

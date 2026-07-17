@@ -1,5 +1,6 @@
 use std::io::Read;
 use std::io::Seek;
+use std::ops::Deref;
 use std::ops::Range;
 
 use crate::allocation;
@@ -9,11 +10,16 @@ use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
 use crate::block::padded_len;
 use crate::checksum;
+use crate::data::BorrowedImage;
+use crate::data::Image;
+use crate::data::ImageData;
 use crate::data::ImageView;
-use crate::data::RawImage;
+use crate::data::ReadImage;
+use crate::data::Scaling;
 use crate::data::shape_product;
 use crate::data::swap_into_words;
 use crate::data::view_words;
+use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::groups::RandomGroups;
@@ -23,7 +29,11 @@ use crate::hdu::HduRole;
 use crate::hdu::data_extent;
 use crate::header::Header;
 use crate::header::card::is_end_record;
-use crate::table::BinTable;
+use crate::table_impl::BinTable;
+use crate::table_impl::Column;
+use crate::table_impl::ColumnData;
+use crate::table_impl::TableSchema;
+use crate::table_impl::TformKind;
 use crate::wcs::Wcs;
 use crate::wcs::tabular;
 
@@ -34,7 +44,10 @@ use source::Source;
 use source::StreamSource;
 
 #[cfg(feature = "compression")]
-use crate::compress::{decompress_image, decompress_image_into_words, uncompress_table};
+use crate::compress::{
+    compressed_image_tile_rows, decompress_image, decompress_image_into_words,
+    decompress_image_section_into_words, uncompress_table,
+};
 
 /// One Header/Data Unit located by the reader.
 ///
@@ -69,6 +82,102 @@ impl Hdu {
         }
         Ok(())
     }
+}
+
+/// Unified HDU selection: a zero-based file index or a case-insensitive extension
+/// name with an optional `EXTVER`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HduSelector {
+    Index(usize),
+    Name { name: String, version: Option<i64> },
+}
+
+impl From<usize> for HduSelector {
+    fn from(index: usize) -> HduSelector {
+        HduSelector::Index(index)
+    }
+}
+
+impl From<&str> for HduSelector {
+    fn from(name: &str) -> HduSelector {
+        HduSelector::Name {
+            name: name.to_string(),
+            version: None,
+        }
+    }
+}
+
+impl From<String> for HduSelector {
+    fn from(name: String) -> HduSelector {
+        HduSelector::Name {
+            name,
+            version: None,
+        }
+    }
+}
+
+impl From<(&str, i64)> for HduSelector {
+    fn from((name, version): (&str, i64)) -> HduSelector {
+        HduSelector::Name {
+            name: name.to_string(),
+            version: Some(version),
+        }
+    }
+}
+
+/// Reader-bound operations for one selected HDU. The handle stores the index
+/// explicitly and never mutates a hidden current-HDU cursor.
+#[derive(Debug)]
+pub struct HduHandle<'a, S> {
+    reader: &'a mut FitsReader<S>,
+    pub index: usize,
+}
+
+/// Zero-based or case-insensitive named table-column selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColumnSelector {
+    Index(usize),
+    Name(String),
+}
+
+impl From<usize> for ColumnSelector {
+    fn from(index: usize) -> ColumnSelector {
+        ColumnSelector::Index(index)
+    }
+}
+
+impl From<&str> for ColumnSelector {
+    fn from(name: &str) -> ColumnSelector {
+        ColumnSelector::Name(name.to_string())
+    }
+}
+
+impl From<String> for ColumnSelector {
+    fn from(name: String) -> ColumnSelector {
+        ColumnSelector::Name(name)
+    }
+}
+
+/// Raw data for one selected table column over a row range.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum TableColumnData {
+    Fixed(ColumnData),
+    Variable(Vec<ColumnData>),
+}
+
+/// One decoded column in a ranged table selection.
+#[derive(Debug, Clone)]
+pub struct SelectedColumn {
+    pub descriptor: Column,
+    pub data: TableColumnData,
+}
+
+/// Selected columns decoded over a zero-based half-open row range.
+#[derive(Debug, Clone)]
+pub struct TableSelection {
+    pub rows: Range<usize>,
+    pub columns: Vec<SelectedColumn>,
 }
 
 /// A data unit read from the source: the full block-padded bytes plus the range
@@ -130,6 +239,8 @@ pub struct FitsReader<S> {
     /// each data unit here before decoding (an in-memory source borrows instead, so
     /// this stays empty). Grows once to the largest unit touched, then holds.
     scratch: Vec<u8>,
+    /// Reused assembly buffer for disjoint image-section runs.
+    section_scratch: Vec<u8>,
 }
 
 /// A [`FitsReader`] over a seeking byte source (`Read + Seek`, e.g. a `File`) — the
@@ -152,6 +263,11 @@ impl<R: Read + Seek> FitsReader<StreamSource<R>> {
     pub fn open(source: R) -> Result<StreamReader<R>> {
         FitsReader::from_source(StreamSource::new(source)?)
     }
+
+    /// Consume the reader and recover the underlying seekable input.
+    pub fn into_inner(self) -> R {
+        self.source.into_inner()
+    }
 }
 
 impl<'a> FitsReader<SliceSource<'a>> {
@@ -160,6 +276,11 @@ impl<'a> FitsReader<SliceSource<'a>> {
     /// with no staging copy, and no scratch allocation.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<SliceReader<'a>> {
         FitsReader::from_source(SliceSource::new(bytes))
+    }
+
+    /// Consume the reader and recover the original borrowed byte slice.
+    pub fn into_bytes(self) -> &'a [u8] {
+        self.source.into_bytes()
     }
 }
 
@@ -221,6 +342,7 @@ impl<S: Source> FitsReader<S> {
             source,
             hdus,
             scratch,
+            section_scratch: Vec::new(),
         })
     }
 
@@ -267,6 +389,27 @@ impl<S: Source> FitsReader<S> {
         Ok(None)
     }
 
+    fn resolve_selector(&self, selector: HduSelector) -> Result<usize> {
+        match selector {
+            HduSelector::Index(index) => {
+                self.checked_hdu(index)?;
+                Ok(index)
+            }
+            HduSelector::Name { name, version } => self
+                .hdu_index(&name, version)?
+                .ok_or(FitsError::HduNotFound { name, version }),
+        }
+    }
+
+    /// Bind one HDU selected by zero-based index, name, or `(name, EXTVER)`.
+    pub fn hdu(&mut self, selector: impl Into<HduSelector>) -> Result<HduHandle<'_, S>> {
+        let index = self.resolve_selector(selector.into())?;
+        Ok(HduHandle {
+            reader: self,
+            index,
+        })
+    }
+
     /// The indices of every HDU [`FitsReader::read_image`] can read as an image: image
     /// extensions, tiled-compressed images, and a non-empty primary array (an empty
     /// `NAXIS = 0` primary is a container, not an image, and is skipped). A FITS file
@@ -304,7 +447,7 @@ impl<S: Source> FitsReader<S> {
         })
     }
 
-    /// Read an HDU's image as a [`RawImage`], transparently handling **both** plain
+    /// Read an HDU's image as a [`ReadImage`], transparently handling **both** plain
     /// and tiled-compressed (`ZIMAGE`) images — the caller doesn't need to know which.
     /// Errors with [`FitsError::NotAnImage`] for tables, random groups, and unmodelled
     /// extensions.
@@ -314,10 +457,10 @@ impl<S: Source> FitsReader<S> {
     /// when you ask. A compressed image is decompressed into an owned buffer (with the
     /// `compression` feature; without it a `ZIMAGE` HDU reads as a plain `BINTABLE`, so
     /// this returns [`FitsError::NotAnImage`]). Either way, reach for the samples via
-    /// [`RawImage::u8`] (zero-copy `BITPIX = 8`), [`RawImage::decode`] (host-endian),
-    /// or [`RawImage::physical`] (scaled). The result borrows the reader, so handle
+    /// [`ReadImage::u8`] (zero-copy `BITPIX = 8`), [`ReadImage::decode`] (host-endian),
+    /// or [`ReadImage::physical`] (scaled). The result borrows the reader, so handle
     /// one image before reading the next.
-    pub fn read_image(&mut self, index: usize) -> Result<RawImage<'_>> {
+    pub fn read_image(&mut self, index: usize) -> Result<ReadImage<'_>> {
         // §10.1: a tiled-compressed image is classified [`HduKind::CompressedImage`]
         // (a `ZIMAGE` BINTABLE). Route it through the decompressor so callers see one
         // image API regardless of storage.
@@ -325,7 +468,7 @@ impl<S: Source> FitsReader<S> {
         if self.checked_hdu(index)?.kind == HduKind::CompressedImage {
             let table = self.read_table(index)?;
             let img = decompress_image(&self.hdus[index].header, &table)?;
-            return Ok(RawImage::decoded(img.samples, img.shape, img.scaling));
+            return Ok(ReadImage::decoded(img.samples, img.shape, img.scaling));
         }
 
         let hdu = self.checked_hdu(index)?;
@@ -352,7 +495,7 @@ impl<S: Source> FitsReader<S> {
             expected_bytes,
             "image data length must match the axis product"
         );
-        Ok(RawImage::raw(shape, bitpix, scaling, bytes))
+        Ok(ReadImage::raw(shape, bitpix, scaling, bytes))
     }
 
     /// Read an image as a borrowed, host-endian [`ImageView`], byte-swapping into the
@@ -369,12 +512,12 @@ impl<S: Source> FitsReader<S> {
     /// bytes directly (zero-copy, `scratch` untouched); a compressed image is
     /// decompressed directly into `scratch`. The view borrows the reader and
     /// `scratch`, so handle one image before reading the next. For samples you need to
-    /// keep, use [`RawImage::decode`].
+    /// keep, use [`ReadImage::decode`].
     pub fn read_image_view<'a>(
         &'a mut self,
         index: usize,
         scratch: &'a mut Vec<u64>,
-    ) -> Result<ImageView<'a>> {
+    ) -> Result<BorrowedImage<'a>> {
         #[cfg(feature = "compression")]
         if self.checked_hdu(index)?.kind == HduKind::CompressedImage {
             let table = self.read_table(index)?;
@@ -384,6 +527,8 @@ impl<S: Source> FitsReader<S> {
         let hdu = self.checked_hdu(index)?;
         hdu.ensure_plain_image()?;
         let bitpix = hdu.header.bitpix()?;
+        let shape = hdu.header.axes()?;
+        let scaling = hdu.header.scaling()?;
         let lengths = DataLengths::new(hdu.data_bytes)?;
         let data_offset = hdu.data_offset;
         // `hdu` (the self.hdus borrow) is unused past here, so the source/scratch
@@ -395,10 +540,107 @@ impl<S: Source> FitsReader<S> {
         if bitpix == Bitpix::U8 {
             // No byte-swap: the on-disk bytes already are the host-endian samples, so
             // borrow them straight (zero-copy) — `scratch` stays untouched.
-            return Ok(ImageView::U8(be));
+            return Ok(BorrowedImage {
+                shape,
+                scaling,
+                samples: ImageView::U8(be),
+            });
         }
         swap_into_words(be, bitpix, scratch);
-        Ok(view_words(scratch, bitpix, lengths.data))
+        Ok(BorrowedImage {
+            shape,
+            scaling,
+            samples: view_words(scratch, bitpix, lengths.data),
+        })
+    }
+
+    /// Read a checked N-dimensional rectangular image section. Axis ranges are
+    /// zero-based, half-open, and ordered fastest-axis first.
+    pub fn read_image_section(&mut self, index: usize, ranges: &[Range<usize>]) -> Result<Image> {
+        #[cfg(feature = "compression")]
+        if self.checked_hdu(index)?.kind == HduKind::CompressedImage {
+            let mut words = Vec::new();
+            let section = self.read_image_section_view(index, ranges, &mut words)?;
+            return Image::new_scaled(
+                section.shape,
+                section.samples.to_owned_data(),
+                section.scaling,
+            );
+        }
+
+        let layout = self.read_plain_image_section(index, ranges)?;
+        Image::new_scaled(
+            layout.shape,
+            ImageData::decode(&self.section_scratch, layout.bitpix),
+            layout.scaling,
+        )
+    }
+
+    /// Scratch-reusing counterpart to [`FitsReader::read_image_section`].
+    pub fn read_image_section_view<'a>(
+        &'a mut self,
+        index: usize,
+        ranges: &[Range<usize>],
+        words: &'a mut Vec<u64>,
+    ) -> Result<BorrowedImage<'a>> {
+        #[cfg(feature = "compression")]
+        if self.checked_hdu(index)?.kind == HduKind::CompressedImage {
+            let header = self.hdus[index].header.clone();
+            let tile_rows = compressed_image_tile_rows(&header, ranges)?;
+            let schema = self.table_schema(index)?;
+            let table = self.read_table_row_indices(index, &schema, &tile_rows, None)?;
+            return decompress_image_section_into_words(&header, &table, &tile_rows, ranges, words);
+        }
+
+        let layout = self.read_plain_image_section(index, ranges)?;
+        let nbytes = self.section_scratch.len();
+        let samples = if layout.bitpix == Bitpix::U8 {
+            ImageView::U8(&self.section_scratch)
+        } else {
+            swap_into_words(&self.section_scratch, layout.bitpix, words);
+            view_words(words, layout.bitpix, nbytes)
+        };
+        Ok(BorrowedImage {
+            shape: layout.shape,
+            scaling: layout.scaling,
+            samples,
+        })
+    }
+
+    fn read_plain_image_section(
+        &mut self,
+        index: usize,
+        ranges: &[Range<usize>],
+    ) -> Result<ImageSectionLayout> {
+        let hdu = self.checked_hdu(index)?;
+        hdu.ensure_plain_image()?;
+        let shape = hdu.header.axes()?;
+        let selected_shape = validate_image_region(ranges, &shape)?;
+        let scaling = hdu.header.scaling()?;
+        let bitpix = hdu.header.bitpix()?;
+        let data_offset = hdu.data_offset;
+        let runs = image_region_runs(&shape, ranges, bitpix.elem_size())?;
+        let nbytes = shape_product(&selected_shape)?
+            .checked_mul(bitpix.elem_size())
+            .ok_or(FitsError::DataUnitOverflow)?;
+        self.section_scratch.clear();
+        self.section_scratch.reserve(nbytes);
+        for run in runs {
+            let bytes = self.source.slice(
+                data_offset
+                    .checked_add(run.offset as u64)
+                    .ok_or(FitsError::DataUnitOverflow)?,
+                run.len,
+                &mut self.scratch,
+            )?;
+            self.section_scratch.extend_from_slice(bytes);
+        }
+        debug_assert_eq!(self.section_scratch.len(), nbytes);
+        Ok(ImageSectionLayout {
+            shape: selected_shape,
+            scaling,
+            bitpix,
+        })
     }
 
     /// Read a `BINTABLE` extension and parse its column structure. Decode
@@ -416,6 +658,218 @@ impl<S: Source> FitsReader<S> {
         }
         let unit = self.read_data_raw(index)?;
         BinTable::from_data(&self.hdus[index].header, unit.bytes)
+    }
+
+    /// Parse a binary-table schema from its header without reading table bytes.
+    pub fn table_schema(&self, index: usize) -> Result<TableSchema> {
+        let hdu = self.checked_hdu(index)?;
+        if !matches!(
+            hdu.kind,
+            HduKind::BinTable | HduKind::CompressedImage | HduKind::CompressedTable
+        ) {
+            return Err(FitsError::NotABinTable);
+        }
+        BinTable::schema(&hdu.header)
+    }
+
+    /// Materialize only the requested contiguous row range, including only the VLA
+    /// heap cells referenced by those rows.
+    pub fn read_table_rows(&mut self, index: usize, rows: Range<usize>) -> Result<BinTable> {
+        let schema = self.table_schema(index)?;
+        validate_row_range(&rows, schema.nrows)?;
+        let selected: Vec<usize> = rows.collect();
+        self.read_table_row_indices(index, &schema, &selected, None)
+    }
+
+    fn read_table_row_indices(
+        &mut self,
+        index: usize,
+        schema: &TableSchema,
+        rows: &[usize],
+        selected_columns: Option<&[usize]>,
+    ) -> Result<BinTable> {
+        let hdu = self.checked_hdu(index)?;
+        let data_offset = hdu.data_offset;
+        let main_len = rows
+            .len()
+            .checked_mul(schema.row_len)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        for &source_row in rows {
+            if source_row >= schema.nrows {
+                return Err(FitsError::RowRangeOutOfBounds {
+                    start: source_row,
+                    end: source_row.saturating_add(1),
+                    len: schema.nrows,
+                });
+            }
+        }
+        let contiguous = rows
+            .windows(2)
+            .all(|pair| pair[1] == pair[0].saturating_add(1));
+        let mut data = if contiguous && !rows.is_empty() {
+            let offset = data_offset
+                .checked_add(
+                    u64::try_from(rows[0])
+                        .ok()
+                        .and_then(|row| row.checked_mul(schema.row_len as u64))
+                        .ok_or(FitsError::DataUnitOverflow)?,
+                )
+                .ok_or(FitsError::DataUnitOverflow)?;
+            self.source.read_owned(offset, main_len)?
+        } else {
+            let mut data = allocation::try_zeroed(0u8, main_len)?;
+            for (destination, &source_row) in rows.iter().enumerate() {
+                let offset = data_offset
+                    .checked_add(
+                        u64::try_from(source_row)
+                            .ok()
+                            .and_then(|row| row.checked_mul(schema.row_len as u64))
+                            .ok_or(FitsError::DataUnitOverflow)?,
+                    )
+                    .ok_or(FitsError::DataUnitOverflow)?;
+                let row = self.source.read_owned(offset, schema.row_len)?;
+                let start = destination * schema.row_len;
+                data[start..start + schema.row_len].copy_from_slice(&row);
+            }
+            data
+        };
+
+        let selected_columns = selected_columns.map(|indices| {
+            let mut selected = vec![false; schema.columns.len()];
+            for &index in indices {
+                selected[index] = true;
+            }
+            selected
+        });
+        let mut heap = Vec::new();
+        for compact_row in 0..rows.len() {
+            for (column_index, column) in schema.columns.iter().enumerate() {
+                let wide = match column.tform.kind {
+                    TformKind::ArrayDesc32 => false,
+                    TformKind::ArrayDesc64 => true,
+                    _ => continue,
+                };
+                let slot_start = compact_row * schema.row_len + column.byte_offset;
+                let slot_end = slot_start + column.tform.byte_width();
+                if selected_columns
+                    .as_ref()
+                    .is_some_and(|selected| !selected[column_index])
+                {
+                    write_pq_descriptor(&mut data[slot_start..slot_end], wide, 0, 0)?;
+                    continue;
+                }
+                let slot = &data[slot_start..slot_end];
+                let descriptor = decode_descriptor(slot, wide);
+                let element_type = column
+                    .tform
+                    .vla_elem
+                    .expect("validated VLA format carries an element type");
+                let nbytes = if element_type == TformKind::Bit {
+                    descriptor.count.div_ceil(8)
+                } else {
+                    descriptor
+                        .count
+                        .checked_mul(element_type.elem_size())
+                        .ok_or(FitsError::DataUnitOverflow)?
+                };
+                let heap_start = schema
+                    .heap_offset
+                    .checked_add(descriptor.offset)
+                    .ok_or(FitsError::UnexpectedEof)?;
+                let heap_end = heap_start
+                    .checked_add(nbytes)
+                    .ok_or(FitsError::UnexpectedEof)?;
+                if heap_end > schema.heap_end {
+                    return Err(FitsError::UnexpectedEof);
+                }
+                let bytes = self.source.read_owned(
+                    data_offset
+                        .checked_add(heap_start as u64)
+                        .ok_or(FitsError::DataUnitOverflow)?,
+                    nbytes,
+                )?;
+                let new_offset = heap.len();
+                write_pq_descriptor(
+                    &mut data[slot_start..slot_end],
+                    wide,
+                    descriptor.count as u64,
+                    new_offset as u64,
+                )?;
+                heap.extend_from_slice(&bytes);
+            }
+        }
+        data.extend_from_slice(&heap);
+        let mut header = self.hdus[index].header.clone();
+        header.set_internal("NAXIS2", rows.len() as i64);
+        header.set_internal("PCOUNT", heap.len() as i64);
+        header.remove_all("THEAP");
+        header.remove_all("CHECKSUM");
+        header.remove_all("DATASUM");
+        BinTable::from_data(&header, data)
+    }
+
+    /// Decode selected columns over a row range without reading unrelated rows.
+    pub fn read_table_columns(
+        &mut self,
+        index: usize,
+        rows: Range<usize>,
+        columns: &[ColumnSelector],
+    ) -> Result<TableSelection> {
+        let schema = self.table_schema(index)?;
+        validate_row_range(&rows, schema.nrows)?;
+        let selected_indices = columns
+            .iter()
+            .map(|selector| resolve_column_selector(&schema, selector))
+            .collect::<Result<Vec<_>>>()?;
+        let row_indices = rows.clone().collect::<Vec<_>>();
+        let table =
+            self.read_table_row_indices(index, &schema, &row_indices, Some(&selected_indices))?;
+        let selected_rows = rows.clone();
+        let mut decoded = Vec::with_capacity(columns.len());
+        for &index in &selected_indices {
+            let column = table.column_by_idx(index)?;
+            let descriptor = column.descriptor().clone();
+            let data = if matches!(
+                descriptor.tform.kind,
+                TformKind::ArrayDesc32 | TformKind::ArrayDesc64
+            ) {
+                TableColumnData::Variable(column.vla()?)
+            } else {
+                TableColumnData::Fixed(column.raw()?)
+            };
+            decoded.push(SelectedColumn { descriptor, data });
+        }
+        Ok(TableSelection {
+            rows: selected_rows,
+            columns: decoded,
+        })
+    }
+
+    /// Decode one fixed or variable-length table cell without materializing other rows.
+    pub fn read_table_cell(
+        &mut self,
+        index: usize,
+        row: usize,
+        column: ColumnSelector,
+    ) -> Result<ColumnData> {
+        let schema = self.table_schema(index)?;
+        let end = row.checked_add(1).ok_or(FitsError::RowRangeOutOfBounds {
+            start: row,
+            end: usize::MAX,
+            len: schema.nrows,
+        })?;
+        validate_row_range(&(row..end), schema.nrows)?;
+        let column_index = resolve_column_selector(&schema, &column)?;
+        let table = self.read_table_row_indices(index, &schema, &[row], Some(&[column_index]))?;
+        let column = table.column_by_idx(column_index)?;
+        if matches!(
+            column.descriptor().tform.kind,
+            TformKind::ArrayDesc32 | TformKind::ArrayDesc64
+        ) {
+            column.vla()?.pop().ok_or(FitsError::UnexpectedEof)
+        } else {
+            column.raw()
+        }
     }
 
     /// Parse an HDU's WCS and resolve any standard `-TAB` coordinate arrays from
@@ -553,6 +1007,242 @@ impl<S: Source> FitsReader<S> {
         }
         Ok(report)
     }
+}
+
+impl<S: Source> HduHandle<'_, S> {
+    pub fn read_raw(&mut self) -> Result<DataUnit> {
+        self.reader.read_data_raw(self.index)
+    }
+
+    pub fn read_image(&mut self) -> Result<ReadImage<'_>> {
+        self.reader.read_image(self.index)
+    }
+
+    pub fn read_image_view<'a>(
+        &'a mut self,
+        scratch: &'a mut Vec<u64>,
+    ) -> Result<BorrowedImage<'a>> {
+        self.reader.read_image_view(self.index, scratch)
+    }
+
+    pub fn read_image_section(&mut self, ranges: &[Range<usize>]) -> Result<Image> {
+        self.reader.read_image_section(self.index, ranges)
+    }
+
+    pub fn read_image_section_view<'a>(
+        &'a mut self,
+        ranges: &[Range<usize>],
+        scratch: &'a mut Vec<u64>,
+    ) -> Result<BorrowedImage<'a>> {
+        self.reader
+            .read_image_section_view(self.index, ranges, scratch)
+    }
+
+    pub fn read_table(&mut self) -> Result<BinTable> {
+        self.reader.read_table(self.index)
+    }
+
+    pub fn table_schema(&self) -> Result<TableSchema> {
+        self.reader.table_schema(self.index)
+    }
+
+    pub fn read_table_rows(&mut self, rows: Range<usize>) -> Result<BinTable> {
+        self.reader.read_table_rows(self.index, rows)
+    }
+
+    pub fn read_table_columns(
+        &mut self,
+        rows: Range<usize>,
+        columns: &[ColumnSelector],
+    ) -> Result<TableSelection> {
+        self.reader.read_table_columns(self.index, rows, columns)
+    }
+
+    pub fn read_table_cell(
+        &mut self,
+        row: usize,
+        column: impl Into<ColumnSelector>,
+    ) -> Result<ColumnData> {
+        self.reader.read_table_cell(self.index, row, column.into())
+    }
+
+    pub fn read_ascii_table(&mut self) -> Result<AsciiTable> {
+        self.reader.read_ascii_table(self.index)
+    }
+
+    pub fn read_groups(&mut self) -> Result<RandomGroups> {
+        self.reader.read_groups(self.index)
+    }
+
+    pub fn read_wcs(&mut self, alt: Option<char>) -> Result<Wcs> {
+        self.reader.read_wcs(self.index, alt)
+    }
+
+    #[cfg(feature = "compression")]
+    pub fn read_compressed_table(&mut self) -> Result<BinTable> {
+        self.reader.read_compressed_table(self.index)
+    }
+
+    pub fn verify_checksum(&mut self) -> Result<ChecksumReport> {
+        self.reader.verify_checksum(self.index)
+    }
+}
+
+impl<S> Deref for HduHandle<'_, S> {
+    type Target = Hdu;
+
+    fn deref(&self) -> &Hdu {
+        &self.reader.hdus[self.index]
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ArrayDescriptor {
+    count: usize,
+    offset: usize,
+}
+
+fn decode_descriptor(bytes: &[u8], wide: bool) -> ArrayDescriptor {
+    if wide {
+        ArrayDescriptor {
+            count: usize::try_from(u64::from_be_bytes(bytes[..8].try_into().unwrap()))
+                .unwrap_or(usize::MAX),
+            offset: usize::try_from(u64::from_be_bytes(bytes[8..16].try_into().unwrap()))
+                .unwrap_or(usize::MAX),
+        }
+    } else {
+        ArrayDescriptor {
+            count: u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize,
+            offset: u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize,
+        }
+    }
+}
+
+fn validate_row_range(rows: &Range<usize>, len: usize) -> Result<()> {
+    if rows.start > rows.end || rows.end > len {
+        return Err(FitsError::RowRangeOutOfBounds {
+            start: rows.start,
+            end: rows.end,
+            len,
+        });
+    }
+    Ok(())
+}
+
+fn resolve_column_selector(schema: &TableSchema, selector: &ColumnSelector) -> Result<usize> {
+    match selector {
+        ColumnSelector::Index(index) if *index < schema.columns.len() => Ok(*index),
+        ColumnSelector::Index(index) => Err(FitsError::ColumnIndexOutOfBounds {
+            index: *index,
+            len: schema.columns.len(),
+        }),
+        ColumnSelector::Name(name) => schema
+            .columns
+            .iter()
+            .position(|column| {
+                column
+                    .name
+                    .as_deref()
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+            })
+            .ok_or_else(|| FitsError::ColumnNotFound { name: name.clone() }),
+    }
+}
+
+#[derive(Debug)]
+struct ImageSectionLayout {
+    shape: Vec<usize>,
+    scaling: Scaling,
+    bitpix: Bitpix,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ByteRun {
+    offset: usize,
+    len: usize,
+}
+
+fn validate_image_region(ranges: &[Range<usize>], shape: &[usize]) -> Result<Vec<usize>> {
+    if ranges.len() != shape.len() {
+        return Err(FitsError::ImageRegionRankMismatch {
+            region_rank: ranges.len(),
+            image_rank: shape.len(),
+        });
+    }
+    let mut selected = Vec::with_capacity(shape.len());
+    for (axis, (range, &len)) in ranges.iter().zip(shape).enumerate() {
+        if range.start > range.end || range.end > len {
+            return Err(FitsError::ImageRegionOutOfBounds {
+                axis,
+                start: range.start,
+                end: range.end,
+                len,
+            });
+        }
+        selected.push(range.end - range.start);
+    }
+    Ok(selected)
+}
+
+fn image_region_runs(
+    shape: &[usize],
+    ranges: &[Range<usize>],
+    element_size: usize,
+) -> Result<Vec<ByteRun>> {
+    let selected = validate_image_region(ranges, shape)?;
+    if selected.is_empty() || selected.contains(&0) {
+        return Ok(Vec::new());
+    }
+    let mut strides = vec![1usize; shape.len()];
+    for axis in 1..shape.len() {
+        strides[axis] = strides[axis - 1]
+            .checked_mul(shape[axis - 1])
+            .ok_or(FitsError::DataUnitOverflow)?;
+    }
+    let mut coordinates: Vec<usize> = ranges.iter().map(|range| range.start).collect();
+    let higher_rows = selected[1..]
+        .iter()
+        .try_fold(1usize, |count, &len| count.checked_mul(len))
+        .ok_or(FitsError::DataUnitOverflow)?;
+    let row_bytes = selected[0]
+        .checked_mul(element_size)
+        .ok_or(FitsError::DataUnitOverflow)?;
+    let mut runs: Vec<ByteRun> = Vec::with_capacity(higher_rows);
+    for _ in 0..higher_rows {
+        let element_offset = coordinates
+            .iter()
+            .zip(&strides)
+            .try_fold(0usize, |offset, (&coordinate, &stride)| {
+                coordinate
+                    .checked_mul(stride)
+                    .and_then(|value| offset.checked_add(value))
+            })
+            .ok_or(FitsError::DataUnitOverflow)?;
+        let offset = element_offset
+            .checked_mul(element_size)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        if let Some(previous) = runs.last_mut()
+            && previous.offset + previous.len == offset
+        {
+            previous.len = previous
+                .len
+                .checked_add(row_bytes)
+                .ok_or(FitsError::DataUnitOverflow)?;
+        } else {
+            runs.push(ByteRun {
+                offset,
+                len: row_bytes,
+            });
+        }
+        for axis in 1..shape.len() {
+            coordinates[axis] += 1;
+            if coordinates[axis] < ranges[axis].end {
+                break;
+            }
+            coordinates[axis] = ranges[axis].start;
+        }
+    }
+    Ok(runs)
 }
 
 fn is_unknown_checksum(value: &str) -> bool {

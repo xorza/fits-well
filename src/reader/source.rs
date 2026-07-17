@@ -99,6 +99,10 @@ impl<R: Read + Seek> StreamSource<R> {
         let len = inner.seek(SeekFrom::End(0))?;
         Ok(StreamSource { inner, len })
     }
+
+    pub(crate) fn into_inner(self) -> R {
+        self.inner
+    }
 }
 
 impl<R: Read + Seek> Source for StreamSource<R> {
@@ -141,6 +145,10 @@ pub struct SliceSource<'a> {
 impl<'a> SliceSource<'a> {
     pub(crate) fn new(bytes: &'a [u8]) -> SliceSource<'a> {
         SliceSource { bytes }
+    }
+
+    pub(crate) fn into_bytes(self) -> &'a [u8] {
+        self.bytes
     }
 }
 

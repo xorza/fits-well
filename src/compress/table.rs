@@ -13,6 +13,7 @@
 //! are not supported and are rejected because their heap bytes are not retained.
 
 use crate::allocation;
+use crate::compress::Compression;
 use crate::compress::HduParts;
 use crate::compress::convert;
 use crate::compress::gzip;
@@ -24,9 +25,9 @@ use crate::error::Result;
 use crate::hdu::validate_table_field_count;
 use crate::header::Header;
 use crate::keyword::key;
-use crate::table::BinTable;
-use crate::table::Tform;
-use crate::table::TformKind;
+use crate::table_impl::BinTable;
+use crate::table_impl::Tform;
+use crate::table_impl::TformKind;
 
 /// Per-column compression algorithm (`ZCTYPn`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +71,7 @@ struct ColMeta {
     /// Byte offset of this column within a row.
     offset: usize,
     algo: Algo,
+    gzip_level: u32,
 }
 
 #[derive(Debug)]
@@ -134,7 +136,7 @@ fn pick_algo(kind: TformKind, requested: Algo) -> Algo {
 
 /// Build per-column metadata from a column's `Tform`, its byte offset, and the
 /// chosen algorithm. Rejects variable-length columns.
-fn col_meta(tform: &Tform, offset: usize, algo: Algo) -> Result<ColMeta> {
+fn col_meta(tform: &Tform, offset: usize, algo: Algo, gzip_level: u32) -> Result<ColMeta> {
     if matches!(tform.kind, TformKind::ArrayDesc32 | TformKind::ArrayDesc64) {
         return Err(FitsError::UnsupportedCompression {
             name: "variable-length column in a compressed table".to_string(),
@@ -151,6 +153,7 @@ fn col_meta(tform: &Tform, offset: usize, algo: Algo) -> Result<ColMeta> {
         width,
         offset,
         algo: pick_algo(tform.kind, algo),
+        gzip_level,
     })
 }
 
@@ -161,10 +164,19 @@ pub(crate) fn compress_table(
     header: &Header,
     table: &BinTable,
     rows_per_tile: usize,
-    default_algo: &str,
+    compression: Compression,
     out: &mut Vec<u8>,
 ) -> Result<Header> {
-    let default_algo = Algo::parse(default_algo)?;
+    let (default_algo, gzip_level) = match compression {
+        Compression::Gzip(config) if config.shuffle => (Algo::Gzip2, config.level),
+        Compression::Gzip(config) => (Algo::Gzip1, config.level),
+        Compression::Rice => (Algo::Rice1, gzip::DEFAULT_GZIP_LEVEL),
+        other => {
+            return Err(FitsError::UnsupportedCompression {
+                name: format!("{} for compressed tables", other.name()),
+            });
+        }
+    };
     let bound = bind_table(header, table)?;
     reject_compression_metadata(header)?;
     if bound.pcount != 0 {
@@ -181,7 +193,7 @@ pub(crate) fn compress_table(
     let metas: Vec<ColMeta> = metadata
         .columns
         .iter()
-        .map(|c| col_meta(&c.tform, c.byte_offset, default_algo))
+        .map(|c| col_meta(&c.tform, c.byte_offset, default_algo, gzip_level))
         .collect::<Result<_>>()?;
 
     let rpt = rows_per_tile.clamp(1, nrows.max(1));
@@ -248,26 +260,26 @@ pub(crate) fn compress_table(
         ("CHECKSUM", "ZHECKSUM"),
         ("DATASUM", "ZDATASUM"),
     ]);
-    h.set("ZTABLE", true)
-        .comment("ZTABLE", "this is a compressed table");
-    h.set("ZTILELEN", fits_i64(rpt)?);
-    h.set("ZNAXIS1", fits_i64(naxis1)?);
-    h.set("ZNAXIS2", fits_i64(nrows)?);
-    h.set("ZPCOUNT", 0);
+    h.set_internal("ZTABLE", true)
+        .comment_internal("ZTABLE", "this is a compressed table");
+    h.set_internal("ZTILELEN", fits_i64(rpt)?);
+    h.set_internal("ZNAXIS1", fits_i64(naxis1)?);
+    h.set_internal("ZNAXIS2", fits_i64(nrows)?);
+    h.set_internal("ZPCOUNT", 0);
     for (ci, m) in metas.iter().enumerate() {
         let n = ci + 1;
         let zform = header
             .get_text(key!("TFORM{n}").as_str())?
             .unwrap_or("")
             .to_string();
-        h.set(key!("ZFORM{n}").as_str(), zform);
-        h.set(key!("TFORM{n}").as_str(), "1QB");
-        h.set(key!("ZCTYP{n}").as_str(), m.algo.name());
+        h.set_internal(key!("ZFORM{n}").as_str(), zform);
+        h.set_internal(key!("TFORM{n}").as_str(), "1QB");
+        h.set_internal(key!("ZCTYP{n}").as_str(), m.algo.name());
     }
-    h.set("NAXIS1", fits_i64(compressed_row_len)?);
-    h.set("NAXIS2", fits_i64(nchunks)?);
-    h.set("PCOUNT", fits_i64(heap_len)?);
-    h.set("GCOUNT", 1);
+    h.set_internal("NAXIS1", fits_i64(compressed_row_len)?);
+    h.set_internal("NAXIS2", fits_i64(nchunks)?);
+    h.set_internal("PCOUNT", fits_i64(heap_len)?);
+    h.set_internal("GCOUNT", 1);
     Ok(h)
 }
 
@@ -321,7 +333,7 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
             Some(s) => Algo::parse(s)?,
             None => Algo::Gzip2, // cfitsio's default when ZCTYPn is absent
         };
-        let m = col_meta(&tform, offset, algo)?;
+        let m = col_meta(&tform, offset, algo, gzip::DEFAULT_GZIP_LEVEL)?;
         offset = offset
             .checked_add(m.width)
             .ok_or(FitsError::DataUnitOverflow)?;
@@ -392,11 +404,11 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
 
     // Restore the original header: drop the Z* keywords, reinstate NAXIS/PCOUNT.
     let mut h = header.clone();
-    h.set("NAXIS1", fits_i64(naxis1)?);
-    h.set("NAXIS2", fits_i64(nrows)?);
-    h.set("PCOUNT", 0);
+    h.set_internal("NAXIS1", fits_i64(naxis1)?);
+    h.set_internal("NAXIS2", fits_i64(nrows)?);
+    h.set_internal("PCOUNT", 0);
     for (n, zform) in zforms.iter().enumerate() {
-        h.set(key!("TFORM{}", n + 1).as_str(), zform.clone());
+        h.set_internal(key!("TFORM{}", n + 1).as_str(), zform.clone());
     }
     h.remove_where(|keyword| {
         matches!(
@@ -544,13 +556,8 @@ struct TableEncodeScratch {
 fn compress_column(m: &ColMeta, scratch: &mut TableEncodeScratch) -> Result<Vec<u8>> {
     let cm = &scratch.column;
     Ok(match m.algo {
-        Algo::Gzip1 => gzip::gzip_encode(cm, gzip::DEFAULT_GZIP_LEVEL),
-        Algo::Gzip2 => gzip::gzip2_encode(
-            cm,
-            m.shuffle_width(),
-            gzip::DEFAULT_GZIP_LEVEL,
-            &mut scratch.gzip,
-        ),
+        Algo::Gzip1 => gzip::gzip_encode(cm, m.gzip_level),
+        Algo::Gzip2 => gzip::gzip2_encode(cm, m.shuffle_width(), m.gzip_level, &mut scratch.gzip),
         Algo::Rice1 => {
             let bytepix = m.rice_bytepix().ok_or(FitsError::UnsupportedCompression {
                 name: format!("RICE_1 on a {} column", m.kind.code()),

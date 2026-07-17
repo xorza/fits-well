@@ -79,19 +79,19 @@ fn parameter_physical_sums_addends_sharing_a_ptype() {
     // non-zero, so a "return the first addend" bug would be caught.
     let mut header = Header::new();
     header
-        .set("BITPIX", -32)
-        .set("NAXIS", 2)
-        .set("NAXIS1", 0)
-        .set("NAXIS2", 1)
-        .set("GROUPS", true)
-        .set("PCOUNT", 2)
-        .set("GCOUNT", 1)
-        .set("PTYPE1", "DATE")
-        .set("PSCAL1", 1.0)
-        .set("PZERO1", 2_445_728.5)
-        .set("PTYPE2", "DATE")
-        .set("PSCAL2", 1.0)
-        .set("PZERO2", 0.25);
+        .set_internal("BITPIX", -32)
+        .set_internal("NAXIS", 2)
+        .set_internal("NAXIS1", 0)
+        .set_internal("NAXIS2", 1)
+        .set_internal("GROUPS", true)
+        .set_internal("PCOUNT", 2)
+        .set_internal("GCOUNT", 1)
+        .set_internal("PTYPE1", "DATE")
+        .set_internal("PSCAL1", 1.0)
+        .set_internal("PZERO1", 2_445_728.5)
+        .set_internal("PTYPE2", "DATE")
+        .set_internal("PSCAL2", 1.0)
+        .set_internal("PZERO2", 0.25);
     // One group: param1 raw 10.0, param2 raw 0.5, then one array element 99.0.
     let mut data = Vec::new();
     for v in [10.0f32, 0.5, 99.0] {
@@ -113,7 +113,7 @@ fn parameter_physical_sums_addends_sharing_a_ptype() {
 
     for keyword in ["PSCAL1", "PZERO1", "BSCALE"] {
         let mut malformed = header.clone();
-        malformed.set(keyword, "not numeric");
+        malformed.set_internal(keyword, "not numeric");
         assert!(matches!(
             RandomGroups::from_data(&malformed, &data),
             Err(FitsError::TypeMismatch { name, .. }) if name == keyword
@@ -126,17 +126,17 @@ fn array_physical_maps_blank_to_nan_for_every_integer_bitpix() {
     for bitpix in [Bitpix::U8, Bitpix::I16, Bitpix::I32, Bitpix::I64] {
         let mut header = Header::new();
         header
-            .set("BITPIX", bitpix.code())
-            .set("NAXIS", 2)
-            .set("NAXIS1", 0)
-            .set("NAXIS2", 3)
-            .set("GROUPS", true)
-            .set("PCOUNT", 1)
-            .set("GCOUNT", 1)
-            .set("PTYPE1", "PARAM")
-            .set("BSCALE", 2.0)
-            .set("BZERO", 5.0)
-            .set("BLANK", 10);
+            .set_internal("BITPIX", bitpix.code())
+            .set_internal("NAXIS", 2)
+            .set_internal("NAXIS1", 0)
+            .set_internal("NAXIS2", 3)
+            .set_internal("GROUPS", true)
+            .set_internal("PCOUNT", 1)
+            .set_internal("GCOUNT", 1)
+            .set_internal("PTYPE1", "PARAM")
+            .set_internal("BSCALE", 2.0)
+            .set_internal("BZERO", 5.0)
+            .set_internal("BLANK", 10);
         let data = match bitpix {
             Bitpix::U8 => vec![10, 9, 10, 11],
             Bitpix::I16 => [10i16, 9, 10, 11]
@@ -175,13 +175,13 @@ fn naxis1_group_has_one_array_element_matching_data_extent() {
     // `from_data` rejects a unit the reader already sized as readable.
     let mut header = Header::new();
     header
-        .set("BITPIX", -32)
-        .set("NAXIS", 1)
-        .set("NAXIS1", 0)
-        .set("GROUPS", true)
-        .set("PCOUNT", 1)
-        .set("GCOUNT", 2)
-        .set("PTYPE1", "P");
+        .set_internal("BITPIX", -32)
+        .set_internal("NAXIS", 1)
+        .set_internal("NAXIS1", 0)
+        .set_internal("GROUPS", true)
+        .set_internal("PCOUNT", 1)
+        .set_internal("GCOUNT", 2)
+        .set_internal("PTYPE1", "P");
     // 2 groups × (1 param + 1 array element) = 4 floats.
     let mut data = Vec::new();
     for v in [1.0f32, 10.0, 2.0, 20.0] {
@@ -211,13 +211,13 @@ fn read_groups_rejects_non_random_groups_hdus() {
 fn raw_group_view_preserves_i64_extremes_and_group_boundaries() {
     let mut header = Header::new();
     header
-        .set("BITPIX", 64)
-        .set("NAXIS", 2)
-        .set("NAXIS1", 0)
-        .set("NAXIS2", 2)
-        .set("GROUPS", true)
-        .set("PCOUNT", 2)
-        .set("GCOUNT", 2);
+        .set_internal("BITPIX", 64)
+        .set_internal("NAXIS", 2)
+        .set_internal("NAXIS1", 0)
+        .set_internal("NAXIS2", 2)
+        .set_internal("GROUPS", true)
+        .set_internal("PCOUNT", 2)
+        .set_internal("GCOUNT", 2);
     let stored = [
         i64::MIN,
         i64::MAX,
@@ -250,13 +250,13 @@ fn raw_group_view_preserves_i64_extremes_and_group_boundaries() {
 fn raw_group_view_preserves_float_bit_patterns() {
     let mut f32_header = Header::new();
     f32_header
-        .set("BITPIX", -32)
-        .set("NAXIS", 2)
-        .set("NAXIS1", 0)
-        .set("NAXIS2", 2)
-        .set("GROUPS", true)
-        .set("PCOUNT", 1)
-        .set("GCOUNT", 1);
+        .set_internal("BITPIX", -32)
+        .set_internal("NAXIS", 2)
+        .set_internal("NAXIS1", 0)
+        .set_internal("NAXIS2", 2)
+        .set_internal("GROUPS", true)
+        .set_internal("PCOUNT", 1)
+        .set_internal("GCOUNT", 1);
     let f32_bits = [0x7fc0_1234, 0x8000_0000, 0x0000_0001];
     let f32_data: Vec<u8> = f32_bits.into_iter().flat_map(u32::to_be_bytes).collect();
     let f32_groups = RandomGroups::from_data(&f32_header, &f32_data).unwrap();
@@ -278,13 +278,13 @@ fn raw_group_view_preserves_float_bit_patterns() {
 
     let mut f64_header = Header::new();
     f64_header
-        .set("BITPIX", -64)
-        .set("NAXIS", 2)
-        .set("NAXIS1", 0)
-        .set("NAXIS2", 2)
-        .set("GROUPS", true)
-        .set("PCOUNT", 1)
-        .set("GCOUNT", 1);
+        .set_internal("BITPIX", -64)
+        .set_internal("NAXIS", 2)
+        .set_internal("NAXIS1", 0)
+        .set_internal("NAXIS2", 2)
+        .set_internal("GROUPS", true)
+        .set_internal("PCOUNT", 1)
+        .set_internal("GCOUNT", 1);
     let f64_bits = [
         0x7ff8_0000_0000_1234,
         0x8000_0000_0000_0000,

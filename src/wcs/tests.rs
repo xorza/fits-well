@@ -121,13 +121,19 @@ fn transform_failures_return_errors() {
 
     let build = |projection: &str| {
         let mut header = Header::new();
-        header.set("NAXIS", 2);
+        header.set_internal("NAXIS", 2);
         header
-            .set("CTYPE1", format!("RA---{projection}"))
-            .set("CTYPE2", format!("DEC--{projection}"));
-        header.set("CRPIX1", 1.0).set("CRPIX2", 1.0);
-        header.set("CRVAL1", 0.0).set("CRVAL2", 0.0);
-        header.set("CDELT1", 100.0).set("CDELT2", 100.0);
+            .set_internal("CTYPE1", format!("RA---{projection}"))
+            .set_internal("CTYPE2", format!("DEC--{projection}"));
+        header
+            .set_internal("CRPIX1", 1.0)
+            .set_internal("CRPIX2", 1.0);
+        header
+            .set_internal("CRVAL1", 0.0)
+            .set_internal("CRVAL2", 0.0);
+        header
+            .set_internal("CDELT1", 100.0)
+            .set_internal("CDELT2", 100.0);
         Wcs::from_header(&header, None).unwrap()
     };
 
@@ -186,11 +192,13 @@ fn sin_projection_matches_astropy() {
     // Golden values from astropy.wcs — validates the SIN formula, not just that
     // our forward and inverse agree.
     let mut h = Header::new();
-    h.set("NAXIS", 2);
-    h.set("CTYPE1", "RA---SIN").set("CTYPE2", "DEC--SIN");
-    h.set("CRPIX1", 100.0).set("CRPIX2", 100.0);
-    h.set("CRVAL1", 45.0).set("CRVAL2", 30.0);
-    h.set("CDELT1", -1e-3).set("CDELT2", 1e-3);
+    h.set_internal("NAXIS", 2);
+    h.set_internal("CTYPE1", "RA---SIN")
+        .set_internal("CTYPE2", "DEC--SIN");
+    h.set_internal("CRPIX1", 100.0)
+        .set_internal("CRPIX2", 100.0);
+    h.set_internal("CRVAL1", 45.0).set_internal("CRVAL2", 30.0);
+    h.set_internal("CDELT1", -1e-3).set_internal("CDELT2", 1e-3);
     let w = Wcs::from_header(&h, None).unwrap();
     let golden: &[(f64, f64, f64, f64)] = &[
         (100.0, 100.0, 45.000000000000, 30.000000000000),
@@ -205,6 +213,32 @@ fn sin_projection_matches_astropy() {
             "SIN at ({px},{py}): got {out:?}, want ({ra},{dec})"
         );
     }
+}
+
+#[test]
+fn public_wcs_metadata_exposes_units_and_celestial_projection_pair() {
+    let mut header = Header::new();
+    header
+        .set_internal("NAXIS", 2)
+        .set_internal("CTYPE1", "RA---TAN")
+        .set_internal("CTYPE2", "DEC--TAN")
+        .set_internal("CUNIT1", "deg")
+        .set_internal("CUNIT2", "deg")
+        .set_internal("CRPIX1", 1.0)
+        .set_internal("CRPIX2", 1.0)
+        .set_internal("CRVAL1", 45.0)
+        .set_internal("CRVAL2", 30.0)
+        .set_internal("CDELT1", -0.1)
+        .set_internal("CDELT2", 0.1);
+    let wcs = Wcs::from_header(&header, None).unwrap();
+    let view = wcs.view();
+    assert_eq!(view.axes[0].cunit, "deg");
+    assert_eq!(view.axes[1].cunit, "deg");
+    let celestial = view.celestial_projection.unwrap();
+    assert_eq!(celestial.longitude_axis, 0);
+    assert_eq!(celestial.latitude_axis, 1);
+    assert_eq!(celestial.projection, Projection::Tan);
+    assert_eq!(celestial.pole, [45.0, 30.0, 180.0]);
 }
 
 #[test]
@@ -236,12 +270,15 @@ fn legacy_crota_rotation_matches_astropy() {
     use crate::header::Header;
     // CDELT + CROTA2 (no PC/CD) — the legacy rotation convention.
     let mut h = Header::new();
-    h.set("NAXIS", 2);
-    h.set("CTYPE1", "RA---TAN").set("CTYPE2", "DEC--TAN");
-    h.set("CRPIX1", 128.0).set("CRPIX2", 128.0);
-    h.set("CRVAL1", 83.6).set("CRVAL2", 22.0);
-    h.set("CDELT1", -0.0005).set("CDELT2", 0.0005);
-    h.set("CROTA2", 25.0);
+    h.set_internal("NAXIS", 2);
+    h.set_internal("CTYPE1", "RA---TAN")
+        .set_internal("CTYPE2", "DEC--TAN");
+    h.set_internal("CRPIX1", 128.0)
+        .set_internal("CRPIX2", 128.0);
+    h.set_internal("CRVAL1", 83.6).set_internal("CRVAL2", 22.0);
+    h.set_internal("CDELT1", -0.0005)
+        .set_internal("CDELT2", 0.0005);
+    h.set_internal("CROTA2", 25.0);
     let w = Wcs::from_header(&h, None).unwrap();
     for &(px, py, ra, dec) in CROTA_GOLDEN {
         let out = w.pixel_to_world(&[px, py]).unwrap();
@@ -264,12 +301,12 @@ fn allsky_projections_match_astropy() {
     ];
     for &(proj, px, py, ra, dec) in golden {
         let mut h = Header::new();
-        h.set("NAXIS", 2);
-        h.set("CTYPE1", format!("RA---{proj}"));
-        h.set("CTYPE2", format!("DEC--{proj}"));
-        h.set("CRPIX1", 50.0).set("CRPIX2", 50.0);
-        h.set("CRVAL1", 45.0).set("CRVAL2", 30.0);
-        h.set("CDELT1", -0.2).set("CDELT2", 0.2);
+        h.set_internal("NAXIS", 2);
+        h.set_internal("CTYPE1", format!("RA---{proj}"));
+        h.set_internal("CTYPE2", format!("DEC--{proj}"));
+        h.set_internal("CRPIX1", 50.0).set_internal("CRPIX2", 50.0);
+        h.set_internal("CRVAL1", 45.0).set_internal("CRVAL2", 30.0);
+        h.set_internal("CDELT1", -0.2).set_internal("CDELT2", 0.2);
         let w = Wcs::from_header(&h, None).unwrap();
         let out = w.pixel_to_world(&[px, py]).unwrap();
         assert!(
@@ -284,12 +321,13 @@ fn cea_lambda_pv_matches_astropy() {
     use crate::header::Header;
     // CEA with λ = PV2_1 = 0.5. astropy golden.
     let mut h = Header::new();
-    h.set("NAXIS", 2);
-    h.set("CTYPE1", "RA---CEA").set("CTYPE2", "DEC--CEA");
-    h.set("CRPIX1", 50.0).set("CRPIX2", 50.0);
-    h.set("CRVAL1", 45.0).set("CRVAL2", 30.0);
-    h.set("CDELT1", -0.05).set("CDELT2", 0.05);
-    h.set("PV2_1", 0.5);
+    h.set_internal("NAXIS", 2);
+    h.set_internal("CTYPE1", "RA---CEA")
+        .set_internal("CTYPE2", "DEC--CEA");
+    h.set_internal("CRPIX1", 50.0).set_internal("CRPIX2", 50.0);
+    h.set_internal("CRVAL1", 45.0).set_internal("CRVAL2", 30.0);
+    h.set_internal("CDELT1", -0.05).set_internal("CDELT2", 0.05);
+    h.set_internal("PV2_1", 0.5);
     let w = Wcs::from_header(&h, None).unwrap();
     assert_astropy_golden(&w, CEA_GOLDEN, "CEA λ image");
 }
@@ -431,14 +469,14 @@ fn parameterized_projections_match_astropy() {
     ];
     for c in &cases {
         let mut h = Header::new();
-        h.set("NAXIS", 2);
-        h.set("CTYPE1", format!("RA---{}", c.proj));
-        h.set("CTYPE2", format!("DEC--{}", c.proj));
-        h.set("CRPIX1", 50.0).set("CRPIX2", 50.0);
-        h.set("CRVAL1", 45.0).set("CRVAL2", c.cv2);
-        h.set("CDELT1", -c.cd).set("CDELT2", c.cd);
+        h.set_internal("NAXIS", 2);
+        h.set_internal("CTYPE1", format!("RA---{}", c.proj));
+        h.set_internal("CTYPE2", format!("DEC--{}", c.proj));
+        h.set_internal("CRPIX1", 50.0).set_internal("CRPIX2", 50.0);
+        h.set_internal("CRVAL1", 45.0).set_internal("CRVAL2", c.cv2);
+        h.set_internal("CDELT1", -c.cd).set_internal("CDELT2", c.cd);
         for &(m, v) in c.pv {
-            h.set(&format!("PV2_{m}"), v);
+            h.set_internal(&format!("PV2_{m}"), v);
         }
         let w = Wcs::from_header(&h, None).unwrap();
         for &(px, py, ra, dec) in c.pts {
@@ -456,11 +494,11 @@ fn parameterized_projections_match_astropy() {
 fn projection_parameters_use_standard_defaults() {
     let build = |projection: &str, parameters: &[(usize, f64)]| {
         let mut h = Header::new();
-        h.set("NAXIS", 2);
-        h.set("CTYPE1", format!("RA---{projection}"));
-        h.set("CTYPE2", format!("DEC--{projection}"));
+        h.set_internal("NAXIS", 2);
+        h.set_internal("CTYPE1", format!("RA---{projection}"));
+        h.set_internal("CTYPE2", format!("DEC--{projection}"));
         for &(m, value) in parameters {
-            h.set(&format!("PV2_{m}"), value);
+            h.set_internal(&format!("PV2_{m}"), value);
         }
         Wcs::from_header(&h, None).unwrap()
     };
@@ -488,11 +526,11 @@ fn degenerate_projection_parameters_are_rejected() {
 
     let parse = |projection: &str, parameters: &[(usize, f64)]| {
         let mut h = Header::new();
-        h.set("NAXIS", 2);
-        h.set("CTYPE1", format!("RA---{projection}"));
-        h.set("CTYPE2", format!("DEC--{projection}"));
+        h.set_internal("NAXIS", 2);
+        h.set_internal("CTYPE1", format!("RA---{projection}"));
+        h.set_internal("CTYPE2", format!("DEC--{projection}"));
         for &(m, value) in parameters {
-            h.set(&format!("PV2_{m}"), value);
+            h.set_internal(&format!("PV2_{m}"), value);
         }
         Wcs::from_header(&h, None)
     };
@@ -524,12 +562,12 @@ fn unsupported_projection_codes_reject_complete_transforms() {
     // Short codes represent space-padded algorithm names after FITS text trimming.
     for code in ["XPH", "UV", "U"] {
         let mut h = Header::new();
-        h.set("NAXIS", 2);
-        h.set("CTYPE1", format!("RA---{code}"));
-        h.set("CTYPE2", format!("DEC--{code}"));
-        h.set("CRPIX1", 1.0).set("CRPIX2", 1.0);
-        h.set("CRVAL1", 10.0).set("CRVAL2", 20.0);
-        h.set("CDELT1", 2.0).set("CDELT2", 3.0);
+        h.set_internal("NAXIS", 2);
+        h.set_internal("CTYPE1", format!("RA---{code}"));
+        h.set_internal("CTYPE2", format!("DEC--{code}"));
+        h.set_internal("CRPIX1", 1.0).set_internal("CRPIX2", 1.0);
+        h.set_internal("CRVAL1", 10.0).set_internal("CRVAL2", 20.0);
+        h.set_internal("CDELT1", 2.0).set_internal("CDELT2", 3.0);
         let w = Wcs::from_header(&h, None).unwrap();
         assert_eq!(w.view().unsupported_axes, [0, 1], "{code} axes flagged");
         assert!(w.celestial.is_none(), "{code} not decoded as a projection");
@@ -552,11 +590,12 @@ fn mismatched_celestial_projections_are_rejected() {
     // RA---TAN with DEC--SIN is malformed — reject it rather than silently adopt
     // whichever axis is seen first.
     let mut h = Header::new();
-    h.set("NAXIS", 2);
-    h.set("CTYPE1", "RA---TAN").set("CTYPE2", "DEC--SIN");
-    h.set("CRPIX1", 1.0).set("CRPIX2", 1.0);
-    h.set("CRVAL1", 10.0).set("CRVAL2", 20.0);
-    h.set("CDELT1", 1.0).set("CDELT2", 1.0);
+    h.set_internal("NAXIS", 2);
+    h.set_internal("CTYPE1", "RA---TAN")
+        .set_internal("CTYPE2", "DEC--SIN");
+    h.set_internal("CRPIX1", 1.0).set_internal("CRPIX2", 1.0);
+    h.set_internal("CRVAL1", 10.0).set_internal("CRVAL2", 20.0);
+    h.set_internal("CDELT1", 1.0).set_internal("CDELT2", 1.0);
     assert!(matches!(
         Wcs::from_header(&h, None),
         Err(FitsError::ConflictingWcsKeywords { .. })
@@ -565,11 +604,12 @@ fn mismatched_celestial_projections_are_rejected() {
     // A galactic-frame pair sharing TAN builds fine — exercises the one shared
     // classifier on the non-RA/DEC longitude/latitude forms (`GLON`/`GLAT`).
     let mut g = Header::new();
-    g.set("NAXIS", 2);
-    g.set("CTYPE1", "GLON-TAN").set("CTYPE2", "GLAT-TAN");
-    g.set("CRPIX1", 1.0).set("CRPIX2", 1.0);
-    g.set("CRVAL1", 30.0).set("CRVAL2", 10.0);
-    g.set("CDELT1", -1.0).set("CDELT2", 1.0);
+    g.set_internal("NAXIS", 2);
+    g.set_internal("CTYPE1", "GLON-TAN")
+        .set_internal("CTYPE2", "GLAT-TAN");
+    g.set_internal("CRPIX1", 1.0).set_internal("CRPIX2", 1.0);
+    g.set_internal("CRVAL1", 30.0).set_internal("CRVAL2", 10.0);
+    g.set_internal("CDELT1", -1.0).set_internal("CDELT2", 1.0);
     let w = Wcs::from_header(&g, None).unwrap();
     assert!(
         w.celestial.is_some(),
@@ -587,12 +627,12 @@ fn degenerate_conic_without_pv1_rejects_complete_transforms() {
     // NaN or silently relabeling linear-stage coordinates as sky coordinates.
     for code in ["COP", "COE", "COD", "COO"] {
         let mut h = Header::new();
-        h.set("NAXIS", 2);
-        h.set("CTYPE1", format!("RA---{code}"));
-        h.set("CTYPE2", format!("DEC--{code}"));
-        h.set("CRPIX1", 1.0).set("CRPIX2", 1.0);
-        h.set("CRVAL1", 10.0).set("CRVAL2", 20.0);
-        h.set("CDELT1", 2.0).set("CDELT2", 3.0);
+        h.set_internal("NAXIS", 2);
+        h.set_internal("CTYPE1", format!("RA---{code}"));
+        h.set_internal("CTYPE2", format!("DEC--{code}"));
+        h.set_internal("CRPIX1", 1.0).set_internal("CRPIX2", 1.0);
+        h.set_internal("CRVAL1", 10.0).set_internal("CRVAL2", 20.0);
+        h.set_internal("CDELT1", 2.0).set_internal("CDELT2", 3.0);
         // No PV2_1 ⇒ θ_a = 0.
         let w = Wcs::from_header(&h, None).unwrap();
         assert_eq!(w.view().unsupported_axes, [0, 1], "{code} axes flagged");
@@ -604,11 +644,14 @@ fn degenerate_conic_without_pv1_rejects_complete_transforms() {
     }
     // A conic *with* a valid θ_a is still decoded normally (not flagged).
     let mut ok = Header::new();
-    ok.set("NAXIS", 2);
-    ok.set("CTYPE1", "RA---COP").set("CTYPE2", "DEC--COP");
-    ok.set("CRPIX1", 1.0).set("CRPIX2", 1.0);
-    ok.set("CRVAL1", 10.0).set("CRVAL2", 45.0);
-    ok.set("CDELT1", 0.5).set("CDELT2", 0.5).set("PV2_1", 45.0);
+    ok.set_internal("NAXIS", 2);
+    ok.set_internal("CTYPE1", "RA---COP")
+        .set_internal("CTYPE2", "DEC--COP");
+    ok.set_internal("CRPIX1", 1.0).set_internal("CRPIX2", 1.0);
+    ok.set_internal("CRVAL1", 10.0).set_internal("CRVAL2", 45.0);
+    ok.set_internal("CDELT1", 0.5)
+        .set_internal("CDELT2", 0.5)
+        .set_internal("PV2_1", 45.0);
     let w = Wcs::from_header(&ok, None).unwrap();
     assert!(w.view().unsupported_axes.is_empty() && w.celestial.is_some());
 }
@@ -621,14 +664,14 @@ fn bonne_with_zero_theta1_equals_sfl() {
     // the 1/tan 0 singularity), so it is *decoded* — not flagged unsupported.
     let build = |proj: &str, pv1: Option<f64>| {
         let mut h = Header::new();
-        h.set("NAXIS", 2);
-        h.set("CTYPE1", format!("RA---{proj}"));
-        h.set("CTYPE2", format!("DEC--{proj}"));
-        h.set("CRPIX1", 50.0).set("CRPIX2", 50.0);
-        h.set("CRVAL1", 45.0).set("CRVAL2", 0.0);
-        h.set("CDELT1", -0.5).set("CDELT2", 0.5);
+        h.set_internal("NAXIS", 2);
+        h.set_internal("CTYPE1", format!("RA---{proj}"));
+        h.set_internal("CTYPE2", format!("DEC--{proj}"));
+        h.set_internal("CRPIX1", 50.0).set_internal("CRPIX2", 50.0);
+        h.set_internal("CRVAL1", 45.0).set_internal("CRVAL2", 0.0);
+        h.set_internal("CDELT1", -0.5).set_internal("CDELT2", 0.5);
         if let Some(v) = pv1 {
-            h.set("PV2_1", v);
+            h.set_internal("PV2_1", v);
         }
         Wcs::from_header(&h, None).unwrap()
     };
@@ -659,46 +702,50 @@ fn conflicting_linear_keywords_are_rejected() {
     use crate::header::Header;
     let base = || {
         let mut h = Header::new();
-        h.set("NAXIS", 2)
-            .set("CTYPE1", "RA---TAN")
-            .set("CTYPE2", "DEC--TAN")
-            .set("CRPIX1", 1.0)
-            .set("CRPIX2", 1.0)
-            .set("CRVAL1", 0.0)
-            .set("CRVAL2", 0.0)
-            .set("CDELT1", 1.0)
-            .set("CDELT2", 1.0);
+        h.set_internal("NAXIS", 2)
+            .set_internal("CTYPE1", "RA---TAN")
+            .set_internal("CTYPE2", "DEC--TAN")
+            .set_internal("CRPIX1", 1.0)
+            .set_internal("CRPIX2", 1.0)
+            .set_internal("CRVAL1", 0.0)
+            .set_internal("CRVAL2", 0.0)
+            .set_internal("CDELT1", 1.0)
+            .set_internal("CDELT2", 1.0);
         h
     };
     // PC and CD are mutually exclusive; CROTA must not accompany PC.
     let mut pc_cd = base();
-    pc_cd.set("PC1_1", 1.0).set("CD1_1", 1.0);
+    pc_cd.set_internal("PC1_1", 1.0).set_internal("CD1_1", 1.0);
     assert!(matches!(
         Wcs::from_header(&pc_cd, None),
         Err(FitsError::ConflictingWcsKeywords { .. })
     ));
     let mut crota_pc = base();
-    crota_pc.set("PC1_1", 1.0).set("CROTA2", 30.0);
+    crota_pc
+        .set_internal("PC1_1", 1.0)
+        .set_internal("CROTA2", 30.0);
     assert!(matches!(
         Wcs::from_header(&crota_pc, None),
         Err(FitsError::ConflictingWcsKeywords { .. })
     ));
     let mut crota_cd = base();
     crota_cd
-        .set("CDELT1", 11.0)
-        .set("CDELT2", 13.0)
-        .set("CD1_1", 2.0)
-        .set("CD2_2", 3.0)
-        .set("CROTA2", 30.0);
+        .set_internal("CDELT1", 11.0)
+        .set_internal("CDELT2", 13.0)
+        .set_internal("CD1_1", 2.0)
+        .set_internal("CD2_2", 3.0)
+        .set_internal("CROTA2", 30.0);
     let w = Wcs::from_header(&crota_cd, None).unwrap();
     assert_eq!(w.matrix, [2.0, 0.0, 0.0, 3.0]);
     // A single convention (CD alone) is accepted.
     let mut cd_only = base();
-    cd_only.set("CD1_1", 1.0).set("CD2_2", 1.0);
+    cd_only
+        .set_internal("CD1_1", 1.0)
+        .set_internal("CD2_2", 1.0);
     assert!(Wcs::from_header(&cd_only, None).is_ok());
 
     let mut malformed = base();
-    malformed.set("CRVAL1", "not numeric");
+    malformed.set_internal("CRVAL1", "not numeric");
     assert!(matches!(
         Wcs::from_header(&malformed, None),
         Err(FitsError::TypeMismatch { name, expected })
@@ -994,12 +1041,12 @@ fn projections_match_astropy() {
     ];
     for &(proj, cv1, cv2, px, py, ra, dec) in golden {
         let mut h = Header::new();
-        h.set("NAXIS", 2);
-        h.set("CTYPE1", format!("RA---{proj}"));
-        h.set("CTYPE2", format!("DEC--{proj}"));
-        h.set("CRPIX1", 50.0).set("CRPIX2", 50.0);
-        h.set("CRVAL1", cv1).set("CRVAL2", cv2);
-        h.set("CDELT1", -0.05).set("CDELT2", 0.05);
+        h.set_internal("NAXIS", 2);
+        h.set_internal("CTYPE1", format!("RA---{proj}"));
+        h.set_internal("CTYPE2", format!("DEC--{proj}"));
+        h.set_internal("CRPIX1", 50.0).set_internal("CRPIX2", 50.0);
+        h.set_internal("CRVAL1", cv1).set_internal("CRVAL2", cv2);
+        h.set_internal("CDELT1", -0.05).set_internal("CDELT2", 0.05);
         let w = Wcs::from_header(&h, None).unwrap();
         let out = w.pixel_to_world(&[px, py]).unwrap();
         assert!(
@@ -1021,13 +1068,16 @@ fn cunit_scales_celestial_axes_to_degrees() {
     // in degrees and in arcseconds must yield identical world coordinates.
     let build = |scale: f64, unit: Option<&str>| {
         let mut h = Header::new();
-        h.set("NAXIS", 2);
-        h.set("CTYPE1", "RA---TAN").set("CTYPE2", "DEC--TAN");
-        h.set("CRPIX1", 50.0).set("CRPIX2", 50.0);
-        h.set("CRVAL1", 150.0 * scale).set("CRVAL2", 30.0 * scale);
-        h.set("CDELT1", -5e-4 * scale).set("CDELT2", 5e-4 * scale);
+        h.set_internal("NAXIS", 2);
+        h.set_internal("CTYPE1", "RA---TAN")
+            .set_internal("CTYPE2", "DEC--TAN");
+        h.set_internal("CRPIX1", 50.0).set_internal("CRPIX2", 50.0);
+        h.set_internal("CRVAL1", 150.0 * scale)
+            .set_internal("CRVAL2", 30.0 * scale);
+        h.set_internal("CDELT1", -5e-4 * scale)
+            .set_internal("CDELT2", 5e-4 * scale);
         if let Some(u) = unit {
-            h.set("CUNIT1", u).set("CUNIT2", u);
+            h.set_internal("CUNIT1", u).set_internal("CUNIT2", u);
         }
         Wcs::from_header(&h, None).unwrap()
     };
@@ -1057,11 +1107,11 @@ fn planetary_solar_lonlat_axes_are_celestial() {
     // (the frame label is preserved, never converted — that is out of scope).
     let build = |t1: &str, t2: &str| {
         let mut h = Header::new();
-        h.set("NAXIS", 2);
-        h.set("CTYPE1", t1).set("CTYPE2", t2);
-        h.set("CRPIX1", 64.0).set("CRPIX2", 64.0);
-        h.set("CRVAL1", 10.0).set("CRVAL2", -20.0);
-        h.set("CDELT1", -1e-3).set("CDELT2", 1e-3);
+        h.set_internal("NAXIS", 2);
+        h.set_internal("CTYPE1", t1).set_internal("CTYPE2", t2);
+        h.set_internal("CRPIX1", 64.0).set_internal("CRPIX2", 64.0);
+        h.set_internal("CRVAL1", 10.0).set_internal("CRVAL2", -20.0);
+        h.set_internal("CDELT1", -1e-3).set_internal("CDELT2", 1e-3);
         Wcs::from_header(&h, None).unwrap()
     };
     let radec = build("RA---TAN", "DEC--TAN");
@@ -1086,17 +1136,19 @@ fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
     use crate::header::Header;
     let build = |t3: &str| {
         let mut h = Header::new();
-        h.set("NAXIS", 3);
-        h.set("CTYPE1", "RA---TAN")
-            .set("CTYPE2", "DEC--TAN")
-            .set("CTYPE3", t3);
-        h.set("CRPIX1", 1.0).set("CRPIX2", 1.0).set("CRPIX3", 1.0);
-        h.set("CRVAL1", 45.0)
-            .set("CRVAL2", 30.0)
-            .set("CRVAL3", 1.4e9);
-        h.set("CDELT1", -1e-3)
-            .set("CDELT2", 1e-3)
-            .set("CDELT3", 1e6);
+        h.set_internal("NAXIS", 3);
+        h.set_internal("CTYPE1", "RA---TAN")
+            .set_internal("CTYPE2", "DEC--TAN")
+            .set_internal("CTYPE3", t3);
+        h.set_internal("CRPIX1", 1.0)
+            .set_internal("CRPIX2", 1.0)
+            .set_internal("CRPIX3", 1.0);
+        h.set_internal("CRVAL1", 45.0)
+            .set_internal("CRVAL2", 30.0)
+            .set_internal("CRVAL3", 1.4e9);
+        h.set_internal("CDELT1", -1e-3)
+            .set_internal("CDELT2", 1e-3)
+            .set_internal("CDELT3", 1e6);
         Wcs::from_header(&h, None).unwrap()
     };
     let cases = [
@@ -1141,19 +1193,19 @@ fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
 fn grism_wcs(ctype: &str, reference: f64) -> Wcs {
     let mut header = Header::new();
     header
-        .set("NAXIS", 1)
-        .set("CTYPE1", ctype)
-        .set("CUNIT1", "m")
-        .set("CRPIX1", 1.0)
-        .set("CRVAL1", reference)
-        .set("CDELT1", 1.0e-7)
-        .set("PV1_0", 4.5e5)
-        .set("PV1_1", 1.0)
-        .set("PV1_2", 27.0)
-        .set("PV1_3", 1.765)
-        .set("PV1_4", -1.077e6)
-        .set("PV1_5", 3.0)
-        .set("PV1_6", 5.0);
+        .set_internal("NAXIS", 1)
+        .set_internal("CTYPE1", ctype)
+        .set_internal("CUNIT1", "m")
+        .set_internal("CRPIX1", 1.0)
+        .set_internal("CRVAL1", reference)
+        .set_internal("CDELT1", 1.0e-7)
+        .set_internal("PV1_0", 4.5e5)
+        .set_internal("PV1_1", 1.0)
+        .set_internal("PV1_2", 27.0)
+        .set_internal("PV1_3", 1.765)
+        .set_internal("PV1_4", -1.077e6)
+        .set_internal("PV1_5", 3.0)
+        .set_internal("PV1_6", 5.0);
     Wcs::from_header(&header, None).unwrap()
 }
 
@@ -1202,17 +1254,17 @@ fn grism_axes_reject_incomplete_or_degenerate_detector_metadata() {
     for (parameter, value) in [("PV1_0", None), ("PV1_1", None), ("PV1_0", Some(0.0))] {
         let mut header = Header::new();
         header
-            .set("NAXIS", 1)
-            .set("CTYPE1", "WAVE-GRI")
-            .set("CRVAL1", 650.0e-9);
+            .set_internal("NAXIS", 1)
+            .set_internal("CTYPE1", "WAVE-GRI")
+            .set_internal("CRVAL1", 650.0e-9);
         if parameter != "PV1_0" {
-            header.set("PV1_0", 4.5e5);
+            header.set_internal("PV1_0", 4.5e5);
         }
         if parameter != "PV1_1" {
-            header.set("PV1_1", 1.0);
+            header.set_internal("PV1_1", 1.0);
         }
         if let Some(value) = value {
-            header.set(parameter, value);
+            header.set_internal(parameter, value);
         }
         assert!(
             matches!(
@@ -1324,13 +1376,13 @@ fn table_26_spectral_algorithms_match_wcslib() {
     for case in cases {
         let mut header = Header::new();
         header
-            .set("NAXIS", 1)
-            .set("CTYPE1", case.ctype)
-            .set("CUNIT1", case.unit)
-            .set("CRPIX1", 1.0)
-            .set("CRVAL1", case.reference)
-            .set("CDELT1", case.increment)
-            .set("RESTFRQ", 1_420_405_751.0);
+            .set_internal("NAXIS", 1)
+            .set_internal("CTYPE1", case.ctype)
+            .set_internal("CUNIT1", case.unit)
+            .set_internal("CRPIX1", 1.0)
+            .set_internal("CRVAL1", case.reference)
+            .set_internal("CDELT1", case.increment)
+            .set_internal("RESTFRQ", 1_420_405_751.0);
         let wcs = Wcs::from_header(&header, None).unwrap();
         assert_eq!(wcs.view().unsupported_axes, [], "{}", case.ctype);
         let world = wcs.pixel_to_world(&[3.0]).unwrap()[0];
@@ -1399,13 +1451,13 @@ fn derived_spectral_types_match_wcslib() {
     for case in cases {
         let mut header = Header::new();
         header
-            .set("NAXIS", 1)
-            .set("CTYPE1", case.ctype)
-            .set("CUNIT1", case.unit)
-            .set("CRPIX1", 1.0)
-            .set("CRVAL1", case.reference)
-            .set("CDELT1", case.increment)
-            .set("RESTFRQ", 1_420_405_751.0);
+            .set_internal("NAXIS", 1)
+            .set_internal("CTYPE1", case.ctype)
+            .set_internal("CUNIT1", case.unit)
+            .set_internal("CRPIX1", 1.0)
+            .set_internal("CRVAL1", case.reference)
+            .set_internal("CDELT1", case.increment)
+            .set_internal("RESTFRQ", 1_420_405_751.0);
         let wcs = Wcs::from_header(&header, None).unwrap();
         let world = wcs.pixel_to_world(&[3.0]).unwrap()[0];
         assert!(
@@ -1482,13 +1534,13 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
     for case in cases {
         let mut header = Header::new();
         header
-            .set("NAXIS", 1)
-            .set("CTYPE1", case.ctype)
-            .set("CUNIT1", case.unit)
-            .set("CRPIX1", 1.0)
-            .set("CRVAL1", case.reference)
-            .set("CDELT1", case.reference / 100.0)
-            .set("RESTFRQ", 1_420_405_751.0);
+            .set_internal("NAXIS", 1)
+            .set_internal("CTYPE1", case.ctype)
+            .set_internal("CUNIT1", case.unit)
+            .set_internal("CRPIX1", 1.0)
+            .set_internal("CRVAL1", case.reference)
+            .set_internal("CDELT1", case.reference / 100.0)
+            .set_internal("RESTFRQ", 1_420_405_751.0);
         let wcs = header.wcs(None).unwrap();
         assert_eq!(wcs.view().axes[0].cunit, case.unit);
         assert!(
@@ -1508,15 +1560,15 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
 
     let mut invalid = Header::new();
     invalid
-        .set("NAXIS", 1)
-        .set("CTYPE1", "WAVE-F2W")
-        .set("CUNIT1", "Hz")
-        .set("CRVAL1", 1.0);
+        .set_internal("NAXIS", 1)
+        .set_internal("CTYPE1", "WAVE-F2W")
+        .set_internal("CUNIT1", "Hz")
+        .set_internal("CRVAL1", 1.0);
     assert!(matches!(
         invalid.wcs(None),
         Err(crate::error::FitsError::InvalidValue { card }) if card.contains("CUNIT")
     ));
-    invalid.set("CUNIT1", "qHz");
+    invalid.set_internal("CUNIT1", "qHz");
     assert!(matches!(
         invalid.wcs(None),
         Err(crate::error::FitsError::InvalidValue { card }) if card.contains("CUNIT")
@@ -1530,12 +1582,12 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
 
     let mut generic = Header::new();
     generic
-        .set("NAXIS", 1)
-        .set("CTYPE1", "TIME-LOG")
-        .set("CUNIT1", "d")
-        .set("CRPIX1", 1.0)
-        .set("CRVAL1", 100.0)
-        .set("CDELT1", 10.0);
+        .set_internal("NAXIS", 1)
+        .set_internal("CTYPE1", "TIME-LOG")
+        .set_internal("CUNIT1", "d")
+        .set_internal("CRPIX1", 1.0)
+        .set_internal("CRVAL1", 100.0)
+        .set_internal("CDELT1", 10.0);
     let generic = generic.wcs(None).unwrap();
     let expected = 100.0 * 0.2_f64.exp();
     assert_eq!(generic.view().axes[0].cunit, "d");
@@ -1551,12 +1603,12 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
 
     let mut frequency = Header::new();
     frequency
-        .set("NAXIS", 1)
-        .set("CTYPE1", "FREQ-LOG")
-        .set("CUNIT1", "GHz")
-        .set("CRPIX1", 1.0)
-        .set("CRVAL1", 1.4)
-        .set("CDELT1", 0.001);
+        .set_internal("NAXIS", 1)
+        .set_internal("CTYPE1", "FREQ-LOG")
+        .set_internal("CUNIT1", "GHz")
+        .set_internal("CRPIX1", 1.0)
+        .set_internal("CRVAL1", 1.4)
+        .set_internal("CDELT1", 0.001);
     let frequency = frequency.wcs(None).unwrap();
     let expected = 1.4e9 * (2.0e6_f64 / 1.4e9).exp();
     assert_eq!(frequency.view().axes[0].cunit, "GHz");
@@ -1566,9 +1618,9 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
 
     let mut invalid = Header::new();
     invalid
-        .set("NAXIS", 1)
-        .set("CTYPE1", "ABCD-LOG")
-        .set("CRVAL1", 0.0);
+        .set_internal("NAXIS", 1)
+        .set_internal("CTYPE1", "ABCD-LOG")
+        .set_internal("CRVAL1", 0.0);
     assert!(matches!(
         invalid.wcs(None),
         Err(FitsError::InvalidValue { .. })
@@ -1583,12 +1635,12 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     let velocity_axis = |ctype: &str| {
         let mut header = Header::new();
         header
-            .set("NAXIS", 1)
-            .set("CTYPE1", ctype)
-            .set("CUNIT1", "m/s")
-            .set("CRPIX1", 1.0)
-            .set("CRVAL1", 0.0)
-            .set("CDELT1", 1_000.0);
+            .set_internal("NAXIS", 1)
+            .set_internal("CTYPE1", ctype)
+            .set_internal("CUNIT1", "m/s")
+            .set_internal("CRPIX1", 1.0)
+            .set_internal("CRVAL1", 0.0)
+            .set_internal("CDELT1", 1_000.0);
         header
     };
     assert!(matches!(
@@ -1611,8 +1663,8 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
 
     let mut by_frequency = velocity_axis("VELO-F2V");
     by_frequency
-        .set("RESTFRQ", 1_420_405_751.0)
-        .set("SPECSYS", "BARYCENT");
+        .set_internal("RESTFRQ", 1_420_405_751.0)
+        .set_internal("SPECSYS", "BARYCENT");
     let by_frequency = by_frequency.wcs(None).unwrap();
     assert_eq!(
         by_frequency.view().axes[0].spectral_frame,
@@ -1624,7 +1676,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         })
     );
     let mut by_wavelength = velocity_axis("VELO-F2V");
-    by_wavelength.set("RESTWAV", 2.997_924_58e8 / 1_420_405_751.0);
+    by_wavelength.set_internal("RESTWAV", 2.997_924_58e8 / 1_420_405_751.0);
     let by_wavelength = by_wavelength.wcs(None).unwrap();
     assert!(
         (by_frequency.pixel_to_world(&[3.0]).unwrap()[0]
@@ -1641,7 +1693,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     ));
 
     let mut deprecated = velocity_axis("VELO-F2V");
-    deprecated.set("RESTFREQ", 1_420_405_751.0);
+    deprecated.set_internal("RESTFREQ", 1_420_405_751.0);
     assert!(
         (deprecated
             .wcs(None)
@@ -1654,7 +1706,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     );
 
     let mut invalid = velocity_axis("VELO-F2V");
-    invalid.set("RESTFRQ", 0.0);
+    invalid.set_internal("RESTFRQ", 0.0);
     assert!(matches!(
         invalid.wcs(None),
         Err(FitsError::InvalidValue { card }) if card.contains("RESTFRQ")
@@ -1662,22 +1714,22 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
 
     let mut pixel_list = Header::new();
     pixel_list
-        .set("TCTYP2", "VELO-F2V")
-        .set("TCUNI2", "m/s")
-        .set("TCRPX2", 1.0)
-        .set("TCRVL2", 0.0)
-        .set("TCDLT2", 1_000.0)
-        .set("RFRQ2", 1_420_405_751.0)
-        .set("SPEC2", "BARYCENT")
-        .set("SOBS2", "GEOCENTR")
-        .set("TCTYP4", "WAVE")
-        .set("TCUNI4", "m")
-        .set("TCRPX4", 1.0)
-        .set("TCRVL4", 5.0e-7)
-        .set("TCDLT4", 1.0e-9)
-        .set("RWAV4", 5.0e-7)
-        .set("SPEC4", "SOURCE")
-        .set("SOBS4", "HELIOCEN");
+        .set_internal("TCTYP2", "VELO-F2V")
+        .set_internal("TCUNI2", "m/s")
+        .set_internal("TCRPX2", 1.0)
+        .set_internal("TCRVL2", 0.0)
+        .set_internal("TCDLT2", 1_000.0)
+        .set_internal("RFRQ2", 1_420_405_751.0)
+        .set_internal("SPEC2", "BARYCENT")
+        .set_internal("SOBS2", "GEOCENTR")
+        .set_internal("TCTYP4", "WAVE")
+        .set_internal("TCUNI4", "m")
+        .set_internal("TCRPX4", 1.0)
+        .set_internal("TCRVL4", 5.0e-7)
+        .set_internal("TCDLT4", 1.0e-9)
+        .set_internal("RWAV4", 5.0e-7)
+        .set_internal("SPEC4", "SOURCE")
+        .set_internal("SOBS4", "HELIOCEN");
     let pixel_list = pixel_list.wcs_pixel_list(&[2, 4], None).unwrap();
     assert!(
         (pixel_list.pixel_to_world(&[3.0, 1.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9
@@ -1703,15 +1755,15 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
 
     let mut vector = Header::new();
     vector
-        .set("WCAX5A", 1)
-        .set("1CTY5A", "VELO-F2V")
-        .set("1CUN5A", "m/s")
-        .set("1CRP5A", 1.0)
-        .set("1CRV5A", 0.0)
-        .set("1CDE5A", 1_000.0)
-        .set("RWAV5A", 2.997_924_58e8 / 1_420_405_751.0)
-        .set("SPEC5A", "LSRK")
-        .set("SOBS5A", "TOPOCENT");
+        .set_internal("WCAX5A", 1)
+        .set_internal("1CTY5A", "VELO-F2V")
+        .set_internal("1CUN5A", "m/s")
+        .set_internal("1CRP5A", 1.0)
+        .set_internal("1CRV5A", 0.0)
+        .set_internal("1CDE5A", 1_000.0)
+        .set_internal("RWAV5A", 2.997_924_58e8 / 1_420_405_751.0)
+        .set_internal("SPEC5A", "LSRK")
+        .set_internal("SOBS5A", "TOPOCENT");
     let vector = vector.wcs_array_column(5, Some('A')).unwrap();
     assert!((vector.pixel_to_world(&[3.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9);
     assert_eq!(
@@ -1726,13 +1778,13 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
 
     let mut alternate = Header::new();
     alternate
-        .set("NAXIS", 1)
-        .set("CTYPE1", "WAVE")
-        .set("CTYPE1A", "FREQ")
-        .set("SPECSYS", "GEOCENTR")
-        .set("SPECSYSA", "CMBDIPOL")
-        .set("SSYSOBSA", "BARYCENT")
-        .set("RESTFRQA", 1_420_405_751.0);
+        .set_internal("NAXIS", 1)
+        .set_internal("CTYPE1", "WAVE")
+        .set_internal("CTYPE1A", "FREQ")
+        .set_internal("SPECSYS", "GEOCENTR")
+        .set_internal("SPECSYSA", "CMBDIPOL")
+        .set_internal("SSYSOBSA", "BARYCENT")
+        .set_internal("RESTFRQA", 1_420_405_751.0);
     assert_eq!(
         alternate.wcs(Some('A')).unwrap().view().axes[0].spectral_frame,
         Some(SpectralFrame {
@@ -1743,7 +1795,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         })
     );
 
-    alternate.set("SPECSYSA", "UNKNOWN");
+    alternate.set_internal("SPECSYSA", "UNKNOWN");
     assert!(matches!(
         alternate.wcs(Some('A')),
         Err(FitsError::InvalidValue { card }) if card.contains("SPECSYS")
@@ -1763,9 +1815,9 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     ] {
         let mut header = Header::new();
         header
-            .set("NAXIS", 1)
-            .set("CTYPE1", "WAVE")
-            .set("SPECSYS", value);
+            .set_internal("NAXIS", 1)
+            .set_internal("CTYPE1", "WAVE")
+            .set_internal("SPECSYS", value);
         assert_eq!(
             header.wcs(None).unwrap().view().axes[0]
                 .spectral_frame
@@ -1785,14 +1837,14 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
     let image = |equinox: Option<f64>, radesys: Option<&str>| {
         let mut header = Header::new();
         header
-            .set("NAXIS", 2)
-            .set("CTYPE1", "RA---TAN")
-            .set("CTYPE2", "DEC--TAN");
+            .set_internal("NAXIS", 2)
+            .set_internal("CTYPE1", "RA---TAN")
+            .set_internal("CTYPE2", "DEC--TAN");
         if let Some(equinox) = equinox {
-            header.set("EQUINOX", equinox);
+            header.set_internal("EQUINOX", equinox);
         }
         if let Some(radesys) = radesys {
-            header.set("RADESYS", radesys);
+            header.set_internal("RADESYS", radesys);
         }
         header
     };
@@ -1839,9 +1891,9 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
 
     let mut alternate = image(None, Some("GAPPT"));
     alternate
-        .set("CTYPE1A", "RA---TAN")
-        .set("CTYPE2A", "DEC--TAN")
-        .set("EQUINOXA", 1970.0);
+        .set_internal("CTYPE1A", "RA---TAN")
+        .set_internal("CTYPE2A", "DEC--TAN")
+        .set_internal("EQUINOXA", 1970.0);
     assert_eq!(
         alternate.wcs(None).unwrap().view().celestial_frame,
         Some(CelestialFrame {
@@ -1859,12 +1911,12 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
 
     let mut pixel_list = Header::new();
     pixel_list
-        .set("TCTY2A", "RA---TAN")
-        .set("TCTY3A", "DEC--TAN")
-        .set("RADE2A", "FK5")
-        .set("RADE3A", "FK5")
-        .set("EQUI2A", 2000.0)
-        .set("EQUI3A", 2000.0);
+        .set_internal("TCTY2A", "RA---TAN")
+        .set_internal("TCTY3A", "DEC--TAN")
+        .set_internal("RADE2A", "FK5")
+        .set_internal("RADE3A", "FK5")
+        .set_internal("EQUI2A", 2000.0)
+        .set_internal("EQUI3A", 2000.0);
     assert_eq!(
         pixel_list
             .wcs_pixel_list(&[2, 3], Some('A'))
@@ -1879,9 +1931,9 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
 
     let mut vector = Header::new();
     vector
-        .set("1CTY5A", "RA---TAN")
-        .set("2CTY5A", "DEC--TAN")
-        .set("RADE5A", "ICRS");
+        .set_internal("1CTY5A", "RA---TAN")
+        .set_internal("2CTY5A", "DEC--TAN")
+        .set_internal("RADE5A", "ICRS");
     assert_eq!(
         vector
             .wcs_array_column(5, Some('A'))
@@ -1896,12 +1948,12 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
 
     let mut unsupported = Header::new();
     unsupported
-        .set("TCTYP2", "RA---XPH")
-        .set("TCTYP3", "DEC--XPH")
-        .set("RADE2", "FK5")
-        .set("RADE3", "FK5")
-        .set("EQUI2", 2000.0)
-        .set("EQUI3", 2000.0);
+        .set_internal("TCTYP2", "RA---XPH")
+        .set_internal("TCTYP3", "DEC--XPH")
+        .set_internal("RADE2", "FK5")
+        .set_internal("RADE3", "FK5")
+        .set_internal("EQUI2", 2000.0)
+        .set_internal("EQUI3", 2000.0);
     let unsupported = unsupported.wcs_pixel_list(&[2, 3], None).unwrap();
     assert_eq!(
         unsupported.view().celestial_frame,
@@ -1920,7 +1972,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
         image(Some(-1.0), None).wcs(None),
         Err(FitsError::InvalidValue { card }) if card.contains("EQUINOX")
     ));
-    pixel_list.set("RADE3A", "FK4");
+    pixel_list.set_internal("RADE3A", "FK4");
     assert!(matches!(
         pixel_list.wcs_pixel_list(&[2, 3], Some('A')),
         Err(FitsError::ConflictingWcsKeywords { .. })
@@ -2064,22 +2116,31 @@ fn pixel_list_wcs_matches_the_equivalent_image_wcs() {
     // §8.5: a pixel-list (event) WCS on columns 2,3 must transform identically to
     // an image WCS with the same CTYPE/CRPIX/CRVAL/CDELT and PC rotation.
     let mut tab = Header::new();
-    tab.set("TCTYP2", "RA---TAN").set("TCTYP3", "DEC--TAN");
-    tab.set("TCRPX2", 256.0).set("TCRPX3", 256.0);
-    tab.set("TCRVL2", 150.0).set("TCRVL3", 30.0);
-    tab.set("TCDLT2", -1e-3).set("TCDLT3", 1e-3);
-    tab.set("TPC2_2", 1.0).set("TPC2_3", -0.05);
-    tab.set("TPC3_2", 0.05).set("TPC3_3", 1.0);
+    tab.set_internal("TCTYP2", "RA---TAN")
+        .set_internal("TCTYP3", "DEC--TAN");
+    tab.set_internal("TCRPX2", 256.0)
+        .set_internal("TCRPX3", 256.0);
+    tab.set_internal("TCRVL2", 150.0)
+        .set_internal("TCRVL3", 30.0);
+    tab.set_internal("TCDLT2", -1e-3)
+        .set_internal("TCDLT3", 1e-3);
+    tab.set_internal("TPC2_2", 1.0)
+        .set_internal("TPC2_3", -0.05);
+    tab.set_internal("TPC3_2", 0.05).set_internal("TPC3_3", 1.0);
     let wt = Wcs::from_pixel_list(&tab, &[2, 3], None).unwrap();
 
     let mut img = Header::new();
-    img.set("NAXIS", 2);
-    img.set("CTYPE1", "RA---TAN").set("CTYPE2", "DEC--TAN");
-    img.set("CRPIX1", 256.0).set("CRPIX2", 256.0);
-    img.set("CRVAL1", 150.0).set("CRVAL2", 30.0);
-    img.set("CDELT1", -1e-3).set("CDELT2", 1e-3);
-    img.set("PC1_1", 1.0).set("PC1_2", -0.05);
-    img.set("PC2_1", 0.05).set("PC2_2", 1.0);
+    img.set_internal("NAXIS", 2);
+    img.set_internal("CTYPE1", "RA---TAN")
+        .set_internal("CTYPE2", "DEC--TAN");
+    img.set_internal("CRPIX1", 256.0)
+        .set_internal("CRPIX2", 256.0);
+    img.set_internal("CRVAL1", 150.0)
+        .set_internal("CRVAL2", 30.0);
+    img.set_internal("CDELT1", -1e-3)
+        .set_internal("CDELT2", 1e-3);
+    img.set_internal("PC1_1", 1.0).set_internal("PC1_2", -0.05);
+    img.set_internal("PC2_1", 0.05).set_internal("PC2_2", 1.0);
     let wi = Wcs::from_header(&img, None).unwrap();
 
     assert!(wt.celestial.is_some(), "pixel-list pair must be celestial");
@@ -2094,20 +2155,28 @@ fn pixel_list_wcs_matches_the_equivalent_image_wcs() {
 
     let mut alternate = Header::new();
     alternate
-        .set("TCTY2A", "RA---TAN")
-        .set("TCTY3A", "DEC--TAN");
-    alternate.set("TCRP2A", 256.0).set("TCRP3A", 256.0);
-    alternate.set("TCRV2A", 150.0).set("TCRV3A", 2.5);
+        .set_internal("TCTY2A", "RA---TAN")
+        .set_internal("TCTY3A", "DEC--TAN");
     alternate
-        .set("TCDE2A", -0.0002777778)
-        .set("TCDE3A", 0.0002777778);
-    alternate.set("TCUN2A", "deg").set("TCUN3A", "deg");
+        .set_internal("TCRP2A", 256.0)
+        .set_internal("TCRP3A", 256.0);
     alternate
-        .set("TP2_2A", 0.96592582628907)
-        .set("TP2_3A", -0.25881904510252)
-        .set("TP3_2A", 0.25881904510252)
-        .set("TP3_3A", 0.96592582628907);
-    alternate.set("LONP2A", 180.0).set("LATP2A", 2.5);
+        .set_internal("TCRV2A", 150.0)
+        .set_internal("TCRV3A", 2.5);
+    alternate
+        .set_internal("TCDE2A", -0.0002777778)
+        .set_internal("TCDE3A", 0.0002777778);
+    alternate
+        .set_internal("TCUN2A", "deg")
+        .set_internal("TCUN3A", "deg");
+    alternate
+        .set_internal("TP2_2A", 0.96592582628907)
+        .set_internal("TP2_3A", -0.25881904510252)
+        .set_internal("TP3_2A", 0.25881904510252)
+        .set_internal("TP3_3A", 0.96592582628907);
+    alternate
+        .set_internal("LONP2A", 180.0)
+        .set_internal("LATP2A", 2.5);
     let alternate_wcs = Wcs::from_pixel_list(&alternate, &[2, 3], Some('A')).unwrap();
     assert_eq!(
         alternate_wcs.celestial.as_ref().unwrap().pole,
@@ -2119,7 +2188,7 @@ fn pixel_list_wcs_matches_the_equivalent_image_wcs() {
     );
     assert_astropy_golden(&alternate_wcs, TAN_GOLDEN, "alternate pixel-list TAN");
 
-    tab.set("TCRVL2", "not numeric");
+    tab.set_internal("TCRVL2", "not numeric");
     assert!(matches!(
         Wcs::from_pixel_list(&tab, &[2, 3], None),
         Err(FitsError::TypeMismatch { name, .. }) if name == "TCRVL2"
@@ -2132,22 +2201,30 @@ fn vector_cell_wcs_matches_the_equivalent_image_wcs() {
     // axis+column-indexed keyword family (`iCTYPn`, `ijPCn`, …, with leading-digit
     // keyword names); it must transform exactly like the equivalent image WCS.
     let mut tab = Header::new();
-    tab.set("1CTYP5", "RA---TAN").set("2CTYP5", "DEC--TAN");
-    tab.set("1CRPX5", 256.0).set("2CRPX5", 256.0);
-    tab.set("1CRVL5", 150.0).set("2CRVL5", 30.0);
-    tab.set("1CDLT5", -1e-3).set("2CDLT5", 1e-3);
-    tab.set("11PC5", 1.0).set("12PC5", -0.05);
-    tab.set("21PC5", 0.05).set("22PC5", 1.0);
+    tab.set_internal("1CTYP5", "RA---TAN")
+        .set_internal("2CTYP5", "DEC--TAN");
+    tab.set_internal("1CRPX5", 256.0)
+        .set_internal("2CRPX5", 256.0);
+    tab.set_internal("1CRVL5", 150.0)
+        .set_internal("2CRVL5", 30.0);
+    tab.set_internal("1CDLT5", -1e-3)
+        .set_internal("2CDLT5", 1e-3);
+    tab.set_internal("11PC5", 1.0).set_internal("12PC5", -0.05);
+    tab.set_internal("21PC5", 0.05).set_internal("22PC5", 1.0);
     let wt = Wcs::from_array_column(&tab, 5, None).unwrap();
 
     let mut img = Header::new();
-    img.set("NAXIS", 2);
-    img.set("CTYPE1", "RA---TAN").set("CTYPE2", "DEC--TAN");
-    img.set("CRPIX1", 256.0).set("CRPIX2", 256.0);
-    img.set("CRVAL1", 150.0).set("CRVAL2", 30.0);
-    img.set("CDELT1", -1e-3).set("CDELT2", 1e-3);
-    img.set("PC1_1", 1.0).set("PC1_2", -0.05);
-    img.set("PC2_1", 0.05).set("PC2_2", 1.0);
+    img.set_internal("NAXIS", 2);
+    img.set_internal("CTYPE1", "RA---TAN")
+        .set_internal("CTYPE2", "DEC--TAN");
+    img.set_internal("CRPIX1", 256.0)
+        .set_internal("CRPIX2", 256.0);
+    img.set_internal("CRVAL1", 150.0)
+        .set_internal("CRVAL2", 30.0);
+    img.set_internal("CDELT1", -1e-3)
+        .set_internal("CDELT2", 1e-3);
+    img.set_internal("PC1_1", 1.0).set_internal("PC1_2", -0.05);
+    img.set_internal("PC2_1", 0.05).set_internal("PC2_2", 1.0);
     let wi = Wcs::from_header(&img, None).unwrap();
 
     assert_eq!(wt.view().axes.len(), 2); // rank inferred from the iCTYP5 keywords
@@ -2163,20 +2240,28 @@ fn vector_cell_wcs_matches_the_equivalent_image_wcs() {
 
     let mut alternate = Header::new();
     alternate
-        .set("1CTY5A", "RA---TAN")
-        .set("2CTY5A", "DEC--TAN");
-    alternate.set("1CRP5A", 256.0).set("2CRP5A", 256.0);
-    alternate.set("1CRV5A", 150.0).set("2CRV5A", 2.5);
+        .set_internal("1CTY5A", "RA---TAN")
+        .set_internal("2CTY5A", "DEC--TAN");
     alternate
-        .set("1CDE5A", -0.0002777778)
-        .set("2CDE5A", 0.0002777778);
-    alternate.set("1CUN5A", "deg").set("2CUN5A", "deg");
+        .set_internal("1CRP5A", 256.0)
+        .set_internal("2CRP5A", 256.0);
     alternate
-        .set("11PC5A", 0.96592582628907)
-        .set("12PC5A", -0.25881904510252)
-        .set("21PC5A", 0.25881904510252)
-        .set("22PC5A", 0.96592582628907);
-    alternate.set("LONP5A", 180.0).set("LATP5A", 2.5);
+        .set_internal("1CRV5A", 150.0)
+        .set_internal("2CRV5A", 2.5);
+    alternate
+        .set_internal("1CDE5A", -0.0002777778)
+        .set_internal("2CDE5A", 0.0002777778);
+    alternate
+        .set_internal("1CUN5A", "deg")
+        .set_internal("2CUN5A", "deg");
+    alternate
+        .set_internal("11PC5A", 0.96592582628907)
+        .set_internal("12PC5A", -0.25881904510252)
+        .set_internal("21PC5A", 0.25881904510252)
+        .set_internal("22PC5A", 0.96592582628907);
+    alternate
+        .set_internal("LONP5A", 180.0)
+        .set_internal("LATP5A", 2.5);
     let inferred = Wcs::from_array_column(&alternate, 5, Some('A')).unwrap();
     assert_eq!(inferred.view().axes.len(), 2);
     assert_eq!(
@@ -2189,11 +2274,11 @@ fn vector_cell_wcs_matches_the_equivalent_image_wcs() {
     );
     assert_astropy_golden(&inferred, TAN_GOLDEN, "alternate vector-cell TAN");
 
-    alternate.set("WCAX5A", 2);
+    alternate.set_internal("WCAX5A", 2);
     let explicit = Wcs::from_array_column(&alternate, 5, Some('A')).unwrap();
     assert_astropy_golden(&explicit, TAN_GOLDEN, "ranked alternate vector-cell TAN");
 
-    tab.set("1CRVL5", "not numeric");
+    tab.set_internal("1CRVL5", "not numeric");
     assert!(matches!(
         Wcs::from_array_column(&tab, 5, None),
         Err(FitsError::TypeMismatch { name, .. }) if name == "1CRVL5"
@@ -2205,17 +2290,33 @@ fn table_wcs_parameter_aliases_match_astropy() {
     let pixel = |parameter: &str, alternate: bool| {
         let mut header = Header::new();
         if alternate {
-            header.set("TCTY2A", "RA---CEA").set("TCTY3A", "DEC--CEA");
-            header.set("TCRP2A", 50.0).set("TCRP3A", 50.0);
-            header.set("TCRV2A", 45.0).set("TCRV3A", 30.0);
-            header.set("TCDE2A", -0.05).set("TCDE3A", 0.05);
+            header
+                .set_internal("TCTY2A", "RA---CEA")
+                .set_internal("TCTY3A", "DEC--CEA");
+            header
+                .set_internal("TCRP2A", 50.0)
+                .set_internal("TCRP3A", 50.0);
+            header
+                .set_internal("TCRV2A", 45.0)
+                .set_internal("TCRV3A", 30.0);
+            header
+                .set_internal("TCDE2A", -0.05)
+                .set_internal("TCDE3A", 0.05);
         } else {
-            header.set("TCTYP2", "RA---CEA").set("TCTYP3", "DEC--CEA");
-            header.set("TCRPX2", 50.0).set("TCRPX3", 50.0);
-            header.set("TCRVL2", 45.0).set("TCRVL3", 30.0);
-            header.set("TCDLT2", -0.05).set("TCDLT3", 0.05);
+            header
+                .set_internal("TCTYP2", "RA---CEA")
+                .set_internal("TCTYP3", "DEC--CEA");
+            header
+                .set_internal("TCRPX2", 50.0)
+                .set_internal("TCRPX3", 50.0);
+            header
+                .set_internal("TCRVL2", 45.0)
+                .set_internal("TCRVL3", 30.0);
+            header
+                .set_internal("TCDLT2", -0.05)
+                .set_internal("TCDLT3", 0.05);
         }
-        header.set(parameter, 0.5);
+        header.set_internal(parameter, 0.5);
         Wcs::from_pixel_list(&header, &[2, 3], alternate.then_some('A')).unwrap()
     };
     for parameter in ["TPV3_1", "TV3_1"] {
@@ -2230,19 +2331,35 @@ fn table_wcs_parameter_aliases_match_astropy() {
     let vector = |parameter: &str, alternate: bool| {
         let mut header = Header::new();
         if alternate {
-            header.set("WCAX5A", 2);
-            header.set("1CTY5A", "RA---CEA").set("2CTY5A", "DEC--CEA");
-            header.set("1CRP5A", 50.0).set("2CRP5A", 50.0);
-            header.set("1CRV5A", 45.0).set("2CRV5A", 30.0);
-            header.set("1CDE5A", -0.05).set("2CDE5A", 0.05);
+            header.set_internal("WCAX5A", 2);
+            header
+                .set_internal("1CTY5A", "RA---CEA")
+                .set_internal("2CTY5A", "DEC--CEA");
+            header
+                .set_internal("1CRP5A", 50.0)
+                .set_internal("2CRP5A", 50.0);
+            header
+                .set_internal("1CRV5A", 45.0)
+                .set_internal("2CRV5A", 30.0);
+            header
+                .set_internal("1CDE5A", -0.05)
+                .set_internal("2CDE5A", 0.05);
         } else {
-            header.set("WCAX5", 2);
-            header.set("1CTYP5", "RA---CEA").set("2CTYP5", "DEC--CEA");
-            header.set("1CRPX5", 50.0).set("2CRPX5", 50.0);
-            header.set("1CRVL5", 45.0).set("2CRVL5", 30.0);
-            header.set("1CDLT5", -0.05).set("2CDLT5", 0.05);
+            header.set_internal("WCAX5", 2);
+            header
+                .set_internal("1CTYP5", "RA---CEA")
+                .set_internal("2CTYP5", "DEC--CEA");
+            header
+                .set_internal("1CRPX5", 50.0)
+                .set_internal("2CRPX5", 50.0);
+            header
+                .set_internal("1CRVL5", 45.0)
+                .set_internal("2CRVL5", 30.0);
+            header
+                .set_internal("1CDLT5", -0.05)
+                .set_internal("2CDLT5", 0.05);
         }
-        header.set(parameter, 0.5);
+        header.set_internal(parameter, 0.5);
         Wcs::from_array_column(&header, 5, alternate.then_some('A')).unwrap()
     };
     for parameter in ["2PV5_1", "2V5_1"] {
@@ -2271,15 +2388,19 @@ fn table_wcs_matrix_aliases_resolve_exactly() {
         let suffix = if alternate { "A" } else { "" };
         let mut header = Header::new();
         if alternate {
-            header.set("TCTY2A", "LINEAR").set("TCTY3A", "LINEAR");
+            header
+                .set_internal("TCTY2A", "LINEAR")
+                .set_internal("TCTY3A", "LINEAR");
         } else {
-            header.set("TCTYP2", "LINEAR").set("TCTYP3", "LINEAR");
+            header
+                .set_internal("TCTYP2", "LINEAR")
+                .set_internal("TCTYP3", "LINEAR");
         }
         header
-            .set(&format!("{root}2_2{suffix}"), expected[0])
-            .set(&format!("{root}2_3{suffix}"), expected[1])
-            .set(&format!("{root}3_2{suffix}"), expected[2])
-            .set(&format!("{root}3_3{suffix}"), expected[3]);
+            .set_internal(&format!("{root}2_2{suffix}"), expected[0])
+            .set_internal(&format!("{root}2_3{suffix}"), expected[1])
+            .set_internal(&format!("{root}3_2{suffix}"), expected[2])
+            .set_internal(&format!("{root}3_3{suffix}"), expected[3]);
         let wcs = Wcs::from_pixel_list(&header, &[2, 3], alternate.then_some('A')).unwrap();
         assert_eq!(wcs.matrix, expected, "{root}, alternate={alternate}");
     }
@@ -2287,12 +2408,12 @@ fn table_wcs_matrix_aliases_resolve_exactly() {
     for (root, alternate) in [("PC", false), ("CD", false), ("PC", true), ("CD", true)] {
         let suffix = if alternate { "A" } else { "" };
         let mut header = Header::new();
-        header.set(&format!("WCAX5{suffix}"), 2);
+        header.set_internal(&format!("WCAX5{suffix}"), 2);
         header
-            .set(&format!("11{root}5{suffix}"), expected[0])
-            .set(&format!("12{root}5{suffix}"), expected[1])
-            .set(&format!("21{root}5{suffix}"), expected[2])
-            .set(&format!("22{root}5{suffix}"), expected[3]);
+            .set_internal(&format!("11{root}5{suffix}"), expected[0])
+            .set_internal(&format!("12{root}5{suffix}"), expected[1])
+            .set_internal(&format!("21{root}5{suffix}"), expected[2])
+            .set_internal(&format!("22{root}5{suffix}"), expected[3]);
         let wcs = Wcs::from_array_column(&header, 5, alternate.then_some('A')).unwrap();
         assert_eq!(wcs.matrix, expected, "{root}, alternate={alternate}");
     }
@@ -2301,23 +2422,43 @@ fn table_wcs_matrix_aliases_resolve_exactly() {
 #[test]
 fn primary_table_wcs_rotation_matches_astropy() {
     let mut pixel = Header::new();
-    pixel.set("TCTYP2", "RA---TAN").set("TCTYP3", "DEC--TAN");
-    pixel.set("TCUNI2", "deg").set("TCUNI3", "deg");
-    pixel.set("TCRPX2", 128.0).set("TCRPX3", 128.0);
-    pixel.set("TCRVL2", 83.6).set("TCRVL3", 22.0);
-    pixel.set("TCDLT2", -0.0005).set("TCDLT3", 0.0005);
-    pixel.set("TCROT3", 25.0);
+    pixel
+        .set_internal("TCTYP2", "RA---TAN")
+        .set_internal("TCTYP3", "DEC--TAN");
+    pixel
+        .set_internal("TCUNI2", "deg")
+        .set_internal("TCUNI3", "deg");
+    pixel
+        .set_internal("TCRPX2", 128.0)
+        .set_internal("TCRPX3", 128.0);
+    pixel
+        .set_internal("TCRVL2", 83.6)
+        .set_internal("TCRVL3", 22.0);
+    pixel
+        .set_internal("TCDLT2", -0.0005)
+        .set_internal("TCDLT3", 0.0005);
+    pixel.set_internal("TCROT3", 25.0);
     let pixel_wcs = Wcs::from_pixel_list(&pixel, &[2, 3], None).unwrap();
     assert_astropy_golden(&pixel_wcs, CROTA_GOLDEN, "primary pixel-list CROTA");
 
     let mut vector = Header::new();
-    vector.set("WCAX5", 2);
-    vector.set("1CTYP5", "RA---TAN").set("2CTYP5", "DEC--TAN");
-    vector.set("1CUNI5", "deg").set("2CUNI5", "deg");
-    vector.set("1CRPX5", 128.0).set("2CRPX5", 128.0);
-    vector.set("1CRVL5", 83.6).set("2CRVL5", 22.0);
-    vector.set("1CDLT5", -0.0005).set("2CDLT5", 0.0005);
-    vector.set("2CROT5", 25.0);
+    vector.set_internal("WCAX5", 2);
+    vector
+        .set_internal("1CTYP5", "RA---TAN")
+        .set_internal("2CTYP5", "DEC--TAN");
+    vector
+        .set_internal("1CUNI5", "deg")
+        .set_internal("2CUNI5", "deg");
+    vector
+        .set_internal("1CRPX5", 128.0)
+        .set_internal("2CRPX5", 128.0);
+    vector
+        .set_internal("1CRVL5", 83.6)
+        .set_internal("2CRVL5", 22.0);
+    vector
+        .set_internal("1CDLT5", -0.0005)
+        .set_internal("2CDLT5", 0.0005);
+    vector.set_internal("2CROT5", 25.0);
     let vector_wcs = Wcs::from_array_column(&vector, 5, None).unwrap();
     assert_astropy_golden(&vector_wcs, CROTA_GOLDEN, "primary vector-cell CROTA");
 }
@@ -2325,13 +2466,23 @@ fn primary_table_wcs_rotation_matches_astropy() {
 #[test]
 fn table_wcs_column_poles_match_the_equivalent_image_wcs() {
     let mut image = Header::new();
-    image.set("NAXIS", 2);
-    image.set("CTYPE1", "RA---CEA").set("CTYPE2", "DEC--CEA");
-    image.set("CRPIX1", 50.0).set("CRPIX2", 50.0);
-    image.set("CRVAL1", 45.0).set("CRVAL2", 30.0);
-    image.set("CDELT1", -0.05).set("CDELT2", 0.05);
-    image.set("PV2_1", 0.5);
-    image.set("LONPOLE", 0.0).set("LATPOLE", -90.0);
+    image.set_internal("NAXIS", 2);
+    image
+        .set_internal("CTYPE1", "RA---CEA")
+        .set_internal("CTYPE2", "DEC--CEA");
+    image
+        .set_internal("CRPIX1", 50.0)
+        .set_internal("CRPIX2", 50.0);
+    image
+        .set_internal("CRVAL1", 45.0)
+        .set_internal("CRVAL2", 30.0);
+    image
+        .set_internal("CDELT1", -0.05)
+        .set_internal("CDELT2", 0.05);
+    image.set_internal("PV2_1", 0.5);
+    image
+        .set_internal("LONPOLE", 0.0)
+        .set_internal("LATPOLE", -90.0);
     let image_wcs = Wcs::from_header(&image, None).unwrap();
     let image_pole = image_wcs.celestial.as_ref().unwrap().pole;
     assert_eq!(image_pole.ra, 45.0);
@@ -2339,22 +2490,42 @@ fn table_wcs_column_poles_match_the_equivalent_image_wcs() {
     assert_eq!(image_pole.lonpole, 0.0);
 
     let mut pixel = Header::new();
-    pixel.set("TCTY2A", "RA---CEA").set("TCTY3A", "DEC--CEA");
-    pixel.set("TCRP2A", 50.0).set("TCRP3A", 50.0);
-    pixel.set("TCRV2A", 45.0).set("TCRV3A", 30.0);
-    pixel.set("TCDE2A", -0.05).set("TCDE3A", 0.05);
-    pixel.set("TV3_1A", 0.5);
-    pixel.set("LONP2A", 0.0).set("LATP2A", -90.0);
+    pixel
+        .set_internal("TCTY2A", "RA---CEA")
+        .set_internal("TCTY3A", "DEC--CEA");
+    pixel
+        .set_internal("TCRP2A", 50.0)
+        .set_internal("TCRP3A", 50.0);
+    pixel
+        .set_internal("TCRV2A", 45.0)
+        .set_internal("TCRV3A", 30.0);
+    pixel
+        .set_internal("TCDE2A", -0.05)
+        .set_internal("TCDE3A", 0.05);
+    pixel.set_internal("TV3_1A", 0.5);
+    pixel
+        .set_internal("LONP2A", 0.0)
+        .set_internal("LATP2A", -90.0);
     let pixel_wcs = Wcs::from_pixel_list(&pixel, &[2, 3], Some('A')).unwrap();
 
     let mut vector = Header::new();
-    vector.set("WCAX5A", 2);
-    vector.set("1CTY5A", "RA---CEA").set("2CTY5A", "DEC--CEA");
-    vector.set("1CRP5A", 50.0).set("2CRP5A", 50.0);
-    vector.set("1CRV5A", 45.0).set("2CRV5A", 30.0);
-    vector.set("1CDE5A", -0.05).set("2CDE5A", 0.05);
-    vector.set("2V5_1A", 0.5);
-    vector.set("LONP5A", 0.0).set("LATP5A", -90.0);
+    vector.set_internal("WCAX5A", 2);
+    vector
+        .set_internal("1CTY5A", "RA---CEA")
+        .set_internal("2CTY5A", "DEC--CEA");
+    vector
+        .set_internal("1CRP5A", 50.0)
+        .set_internal("2CRP5A", 50.0);
+    vector
+        .set_internal("1CRV5A", 45.0)
+        .set_internal("2CRV5A", 30.0);
+    vector
+        .set_internal("1CDE5A", -0.05)
+        .set_internal("2CDE5A", 0.05);
+    vector.set_internal("2V5_1A", 0.5);
+    vector
+        .set_internal("LONP5A", 0.0)
+        .set_internal("LATP5A", -90.0);
     let vector_wcs = Wcs::from_array_column(&vector, 5, Some('A')).unwrap();
 
     for table_wcs in [&pixel_wcs, &vector_wcs] {
@@ -2378,15 +2549,15 @@ fn table_wcs_column_poles_match_the_equivalent_image_wcs() {
 fn absent_wcsaxes_uses_the_largest_wcs_index() {
     let build = |keyword: &str, value: Value| {
         let mut h = Header::new();
-        h.set("NAXIS", 2).set(keyword, value);
+        h.set_internal("NAXIS", 2).set_internal(keyword, value);
         h
     };
     let mut cd = Header::new();
-    cd.set("NAXIS", 2)
-        .set("CD1_1", 1.0)
-        .set("CD2_2", 1.0)
-        .set("CD3_3", 1.0)
-        .set("CD4_4", 1.0);
+    cd.set_internal("NAXIS", 2)
+        .set_internal("CD1_1", 1.0)
+        .set_internal("CD2_2", 1.0)
+        .set_internal("CD3_3", 1.0)
+        .set_internal("CD4_4", 1.0);
     let cases = [
         build("CTYPE4", Value::Text("LINEAR".to_string())),
         build("CUNIT4", Value::Text("m".to_string())),
@@ -2426,11 +2597,13 @@ fn absent_wcsaxes_uses_the_largest_wcs_index() {
 fn vector_cell_rank_uses_every_supported_keyword_family() {
     let build = |keyword: &str, value: Value| {
         let mut h = Header::new();
-        h.set(keyword, value);
+        h.set_internal(keyword, value);
         h
     };
     let mut cd = Header::new();
-    cd.set("11CD5", 1.0).set("22CD5", 1.0).set("33CD5", 1.0);
+    cd.set_internal("11CD5", 1.0)
+        .set_internal("22CD5", 1.0)
+        .set_internal("33CD5", 1.0);
     let cases = [
         build("3CTYP5", Value::Text("LINEAR".to_string())),
         build("3CUNI5", Value::Text("m".to_string())),
@@ -2458,9 +2631,9 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
 
     let mut alternate_cd = Header::new();
     alternate_cd
-        .set("11CD5A", 1.0)
-        .set("22CD5A", 1.0)
-        .set("33CD5A", 1.0);
+        .set_internal("11CD5A", 1.0)
+        .set_internal("22CD5A", 1.0)
+        .set_internal("33CD5A", 1.0);
     let alternate_cases = [
         build("3CTY5A", Value::Text("LINEAR".to_string())),
         build("3CUN5A", Value::Text("m".to_string())),
@@ -2498,14 +2671,14 @@ fn rejects_absurd_wcsaxes() {
     // drive the per-axis loops.
     let mut h = Header::new();
     for value in [-1, 0, 1000] {
-        h.set("WCSAXES", value);
+        h.set_internal("WCSAXES", value);
         assert!(matches!(
             Wcs::from_header(&h, None),
             Err(FitsError::KeywordOutOfRange { name: "WCSAXES" })
         ));
     }
 
-    h.set("WCAX5", -1);
+    h.set_internal("WCAX5", -1);
     assert!(matches!(
         Wcs::from_array_column(&h, 5, None),
         Err(FitsError::KeywordOutOfRange { name: "WCAXn" })

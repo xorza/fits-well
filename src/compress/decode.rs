@@ -25,9 +25,9 @@ use crate::compress::{gzip, hcompress, plio, quantize, rice};
 
 use crate::allocation;
 use crate::bitpix::Bitpix;
+use crate::data::BorrowedImage;
 use crate::data::Image;
 use crate::data::ImageData;
-use crate::data::ImageView;
 use crate::data::Scaling;
 use crate::data::shape_product;
 use crate::data::view_words;
@@ -35,10 +35,11 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
 use crate::keyword::key;
-use crate::table::BinTable;
-use crate::table::ColumnData;
-use crate::table::VlaCell;
-use crate::table::VlaColumn;
+use crate::table_impl::BinTable;
+use crate::table_impl::ColumnData;
+use crate::table_impl::VlaCell;
+use crate::table_impl::VlaColumn;
+use std::ops::Range;
 
 #[derive(Debug)]
 struct ImageLayout {
@@ -147,14 +148,14 @@ pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Imag
             DecodeBuffer::from_samples(&mut samples),
         )?;
     }
-    Image::new(layout.dims, samples, layout.scaling)
+    Image::new_scaled(layout.dims, samples, layout.scaling)
 }
 
 pub(crate) fn decompress_image_into_words<'a>(
     header: &Header,
     table: &BinTable,
     words: &'a mut Vec<u64>,
-) -> Result<ImageView<'a>> {
+) -> Result<BorrowedImage<'a>> {
     let layout = ImageLayout::from_header(header)?;
     let nbytes = layout
         .total
@@ -165,7 +166,238 @@ pub(crate) fn decompress_image_into_words<'a>(
         let output = DecodeBuffer::from_words(words, layout.bitpix, layout.total);
         decode_image_into(header, table, &layout, output)?;
     }
-    Ok(view_words(words, layout.bitpix, nbytes))
+    Ok(BorrowedImage {
+        shape: layout.dims,
+        scaling: layout.scaling,
+        samples: view_words(words, layout.bitpix, nbytes),
+    })
+}
+
+/// Original compressed-table row indices for tiles intersecting `ranges`.
+pub(crate) fn compressed_image_tile_rows(
+    header: &Header,
+    ranges: &[Range<usize>],
+) -> Result<Vec<usize>> {
+    let layout = ImageLayout::from_header(header)?;
+    validate_region(ranges, &layout.dims)?;
+    if ranges.iter().any(Range::is_empty) || layout.dims.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tiles = read_tile_shape(header, &layout.dims)?;
+    let counts: Vec<usize> = layout
+        .dims
+        .iter()
+        .zip(&tiles)
+        .map(|(&dim, &tile)| dim.div_ceil(tile))
+        .collect();
+    let starts: Vec<usize> = ranges
+        .iter()
+        .zip(&tiles)
+        .map(|(range, &tile)| range.start / tile)
+        .collect();
+    let ends: Vec<usize> = ranges
+        .iter()
+        .zip(&tiles)
+        .map(|(range, &tile)| (range.end - 1) / tile + 1)
+        .collect();
+    let tile_count = starts
+        .iter()
+        .zip(&ends)
+        .try_fold(1usize, |count, (&start, &end)| {
+            count.checked_mul(end - start)
+        })
+        .ok_or(FitsError::DataUnitOverflow)?;
+    let mut coordinates = starts.clone();
+    let mut selected = Vec::with_capacity(tile_count);
+    for _ in 0..tile_count {
+        let mut stride = 1usize;
+        let mut index = 0usize;
+        for axis in 0..coordinates.len() {
+            index = index
+                .checked_add(
+                    coordinates[axis]
+                        .checked_mul(stride)
+                        .ok_or(FitsError::DataUnitOverflow)?,
+                )
+                .ok_or(FitsError::DataUnitOverflow)?;
+            stride = stride
+                .checked_mul(counts[axis])
+                .ok_or(FitsError::DataUnitOverflow)?;
+        }
+        selected.push(index);
+        for axis in 0..coordinates.len() {
+            coordinates[axis] += 1;
+            if coordinates[axis] < ends[axis] {
+                break;
+            }
+            coordinates[axis] = starts[axis];
+        }
+    }
+    Ok(selected)
+}
+
+/// Decompress only the compact table rows in `tile_rows`, scattering their
+/// intersections into one scratch-backed image section.
+pub(crate) fn decompress_image_section_into_words<'a>(
+    header: &Header,
+    table: &BinTable,
+    tile_rows: &[usize],
+    ranges: &[Range<usize>],
+    words: &'a mut Vec<u64>,
+) -> Result<BorrowedImage<'a>> {
+    let layout = ImageLayout::from_header(header)?;
+    let selected_shape = validate_region(ranges, &layout.dims)?;
+    if table.metadata().nrows != tile_rows.len() {
+        return Err(FitsError::DataSizeMismatch {
+            expected: tile_rows.len(),
+            got: table.metadata().nrows,
+        });
+    }
+    let total = shape_product(&selected_shape)?;
+    let nbytes = total
+        .checked_mul(layout.bitpix.elem_size())
+        .ok_or(FitsError::DataUnitOverflow)?;
+    allocation::try_resize(words, nbytes.div_ceil(8), 0)?;
+    if total == 0 {
+        return Ok(BorrowedImage {
+            shape: selected_shape,
+            scaling: layout.scaling,
+            samples: view_words(words, layout.bitpix, nbytes),
+        });
+    }
+
+    let tiles = read_tile_shape(header, &layout.dims)?;
+    let rice = rice::rice_params(header, layout.bitpix)?;
+    let is_float = layout.bitpix.is_float();
+    let int_bitpix = if is_float {
+        bytepix_to_bitpix(rice.bytepix)
+    } else {
+        layout.bitpix
+    };
+    let method = match header.get_text("ZQUANTIZ")?.unwrap_or("NO_DITHER") {
+        "NO_DITHER" => DitherMethod::None,
+        "SUBTRACTIVE_DITHER_1" => DitherMethod::Subtractive1,
+        "SUBTRACTIVE_DITHER_2" => DitherMethod::Subtractive2,
+        other if is_float => {
+            return Err(FitsError::UnsupportedCompression {
+                name: format!("float quantization {other}"),
+            });
+        }
+        _ => DitherMethod::None,
+    };
+    let zdither0 = header.get_integer("ZDITHER0")?.unwrap_or(1);
+    let zblank_keyword = header.get_integer("ZBLANK")?;
+    let zblank_column = read_i64_column(table, "ZBLANK")?;
+    let zscale = read_f64_column(table, "ZSCALE")?;
+    let zzero = read_f64_column(table, "ZZERO")?;
+    let primary = read_tiles(table, "COMPRESSED_DATA")?;
+    let gzip_fallback = read_tiles(table, "GZIP_COMPRESSED_DATA")?;
+    let uncompressed = read_tiles(table, "UNCOMPRESSED_DATA")?;
+    let ctx = DecodeCtx {
+        codec: layout.codec,
+        zbitpix: layout.bitpix,
+        int_bitpix,
+        params: CodecParams {
+            blocksize: rice.blocksize,
+            bytepix: rice.bytepix,
+            smooth: hcompress_smooth(header)?,
+        },
+    };
+    let geom = TileGeometry::new(&layout.dims, &tiles);
+    let output = DecodeBuffer::from_words(words, layout.bitpix, total);
+    if is_float {
+        let decode = |table_row: usize,
+                      tile_row: usize,
+                      scratch: &TileScratch,
+                      out: &mut Vec<f64>,
+                      ints: &mut Vec<i64>,
+                      codecs: &mut CodecScratch| {
+            let cols = TileColumns::read(table_row, primary, gzip_fallback, uncompressed)?;
+            let dq = Dequant {
+                scale: column_at(&zscale, table_row).unwrap_or(1.0),
+                zero: column_at(&zzero, table_row).unwrap_or(0.0),
+                method,
+                irow: tile_row as i64 + zdither0,
+                zblank: column_at(&zblank_column, table_row).or(zblank_keyword),
+            };
+            decode_float_tile_into(&ctx, cols, scratch.nelem(), dq, out, ints, codecs)
+        };
+        match output {
+            DecodeBuffer::F32(out) => run_decode_region(
+                &geom,
+                ranges,
+                &selected_shape,
+                tile_rows,
+                out,
+                decode,
+                |value| value as f32,
+            )?,
+            DecodeBuffer::F64(out) => run_decode_region(
+                &geom,
+                ranges,
+                &selected_shape,
+                tile_rows,
+                out,
+                decode,
+                |value| value,
+            )?,
+            _ => unreachable!("a float ZBITPIX yields a float sample buffer"),
+        }
+    } else {
+        let decode = |table_row: usize,
+                      _tile_row: usize,
+                      scratch: &TileScratch,
+                      out: &mut Vec<i64>,
+                      _ints: &mut Vec<i64>,
+                      codecs: &mut CodecScratch| {
+            let cols = TileColumns::read(table_row, primary, gzip_fallback, uncompressed)?;
+            decode_one_tile_into(&ctx, cols, scratch.nelem(), out, codecs)
+        };
+        match output {
+            DecodeBuffer::U8(out) => run_decode_region(
+                &geom,
+                ranges,
+                &selected_shape,
+                tile_rows,
+                out,
+                decode,
+                |value| value as u8,
+            )?,
+            DecodeBuffer::I16(out) => run_decode_region(
+                &geom,
+                ranges,
+                &selected_shape,
+                tile_rows,
+                out,
+                decode,
+                |value| value as i16,
+            )?,
+            DecodeBuffer::I32(out) => run_decode_region(
+                &geom,
+                ranges,
+                &selected_shape,
+                tile_rows,
+                out,
+                decode,
+                |value| value as i32,
+            )?,
+            DecodeBuffer::I64(out) => run_decode_region(
+                &geom,
+                ranges,
+                &selected_shape,
+                tile_rows,
+                out,
+                decode,
+                |value| value,
+            )?,
+            _ => unreachable!("an integer ZBITPIX yields an integer sample buffer"),
+        }
+    }
+    Ok(BorrowedImage {
+        shape: selected_shape,
+        scaling: layout.scaling,
+        samples: view_words(words, layout.bitpix, nbytes),
+    })
 }
 
 fn decode_image_into(
@@ -175,18 +407,7 @@ fn decode_image_into(
     output: DecodeBuffer<'_>,
 ) -> Result<()> {
     let is_float = layout.bitpix.is_float();
-    let tiles: Vec<usize> = (1..=layout.dims.len())
-        .map(|i| -> Result<usize> {
-            let default = if i == 1 { layout.dims[0] } else { 1 };
-            match header.get_integer(key!("ZTILE{i}").as_str())? {
-                Some(value) => usize::try_from(value)
-                    .ok()
-                    .filter(|&value| value > 0)
-                    .ok_or(FitsError::KeywordOutOfRange { name: "ZTILEn" }),
-                None => Ok(default),
-            }
-        })
-        .collect::<Result<_>>()?;
+    let tiles = read_tile_shape(header, &layout.dims)?;
 
     let rice = rice::rice_params(header, layout.bitpix)?;
     // Float pixels are quantized to integers of `bytepix` bytes; decode the tile
@@ -335,6 +556,90 @@ where
     }
 }
 
+fn run_decode_region<S, D>(
+    geom: &TileGeometry,
+    ranges: &[Range<usize>],
+    selected_shape: &[usize],
+    tile_rows: &[usize],
+    out: &mut [D],
+    decode: impl Fn(
+        usize,
+        usize,
+        &TileScratch,
+        &mut Vec<S>,
+        &mut Vec<i64>,
+        &mut CodecScratch,
+    ) -> Result<()>,
+    convert: impl Fn(S) -> D,
+) -> Result<()>
+where
+    S: Copy,
+    D: Copy,
+{
+    let mut scratch = TileScratch::default();
+    let mut values = Vec::new();
+    let mut ints = Vec::new();
+    let mut codecs = CodecScratch::default();
+    for (table_row, &tile_row) in tile_rows.iter().enumerate() {
+        geom.tile_into(tile_row, &mut scratch);
+        decode(
+            table_row,
+            tile_row,
+            &scratch,
+            &mut values,
+            &mut ints,
+            &mut codecs,
+        )?;
+        ensure_tile_size(scratch.nelem(), values.len())?;
+        scatter_region_tile(&scratch, ranges, selected_shape, &values, out, &convert);
+    }
+    Ok(())
+}
+
+fn scatter_region_tile<S: Copy, D: Copy>(
+    tile: &TileScratch,
+    ranges: &[Range<usize>],
+    selected_shape: &[usize],
+    values: &[S],
+    out: &mut [D],
+    convert: &impl Fn(S) -> D,
+) {
+    let x_start = tile.origin[0].max(ranges[0].start);
+    let x_end = (tile.origin[0] + tile.tdims[0]).min(ranges[0].end);
+    if x_start >= x_end {
+        return;
+    }
+    let width = x_end - x_start;
+    for row in 0..tile.row_bases.len() {
+        let mut remainder = row;
+        let mut output_base = 0usize;
+        let mut output_stride = selected_shape[0];
+        let mut selected = true;
+        for axis in 1..tile.tdims.len() {
+            let local = remainder % tile.tdims[axis];
+            remainder /= tile.tdims[axis];
+            let coordinate = tile.origin[axis] + local;
+            if !ranges[axis].contains(&coordinate) {
+                selected = false;
+                break;
+            }
+            output_base += (coordinate - ranges[axis].start) * output_stride;
+            output_stride *= selected_shape[axis];
+        }
+        if !selected {
+            continue;
+        }
+        let source = row * tile.row_len + (x_start - tile.origin[0]);
+        let destination = output_base + (x_start - ranges[0].start);
+        for (slot, &value) in out[destination..destination + width]
+            .iter_mut()
+            .zip(&values[source..source + width])
+        {
+            *slot = convert(value);
+        }
+    }
+}
+
 #[cfg(not(feature = "parallel"))]
 fn scatter_rows<S: Copy, D>(
     out: &mut [D],
@@ -353,6 +658,43 @@ fn scatter_rows<S: Copy, D>(
         }
         off += row_len;
     }
+}
+
+fn read_tile_shape(header: &Header, dims: &[usize]) -> Result<Vec<usize>> {
+    (1..=dims.len())
+        .map(|i| -> Result<usize> {
+            let default = if i == 1 { dims[0].max(1) } else { 1 };
+            match header.get_integer(key!("ZTILE{i}").as_str())? {
+                Some(value) => usize::try_from(value)
+                    .ok()
+                    .filter(|&value| value > 0)
+                    .ok_or(FitsError::KeywordOutOfRange { name: "ZTILEn" }),
+                None => Ok(default),
+            }
+        })
+        .collect()
+}
+
+fn validate_region(ranges: &[Range<usize>], dims: &[usize]) -> Result<Vec<usize>> {
+    if ranges.len() != dims.len() {
+        return Err(FitsError::ImageRegionRankMismatch {
+            region_rank: ranges.len(),
+            image_rank: dims.len(),
+        });
+    }
+    let mut shape = Vec::with_capacity(dims.len());
+    for (axis, (range, &len)) in ranges.iter().zip(dims).enumerate() {
+        if range.start > range.end || range.end > len {
+            return Err(FitsError::ImageRegionOutOfBounds {
+                axis,
+                start: range.start,
+                end: range.end,
+                len,
+            });
+        }
+        shape.push(range.end - range.start);
+    }
+    Ok(shape)
 }
 
 fn read_tiles<'a>(table: &'a BinTable, name: &str) -> Result<Option<VlaColumn<'a>>> {

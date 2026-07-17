@@ -47,7 +47,7 @@ fn sample_data(bitpix: Bitpix, n: usize) -> ImageData {
 
 /// A written single-HDU FITS file (`n` samples of `bitpix`) as bytes.
 fn fits_bytes(bitpix: Bitpix, n: usize) -> Vec<u8> {
-    let img = Image::new(
+    let img = Image::new_scaled(
         vec![n],
         sample_data(bitpix, n),
         Scaling {

@@ -5,7 +5,7 @@
 //! [`ImageData::decode`] swaps a data unit into an owned, host-endian [`ImageData`]
 //! and [`ImageData::encode_into`] writes them back. When no swap is needed
 //! (`BITPIX = 8`, or a big-endian host) an in-memory reader can skip even that copy
-//! and borrow the data unit in place — see [`RawImage`] /
+//! and borrow the data unit in place — see [`ReadImage`] /
 //! [`crate::FitsReader::read_image`]. The per-element swap loops are
 //! memory-bandwidth-bound, so they lean on autovectorization rather than threads
 //! (the thread-parallel layer is the compute-bound tiled codecs in the `compress`
@@ -30,6 +30,23 @@ pub enum ImageData {
     F32(Vec<f32>),
     F64(Vec<f64>),
 }
+
+macro_rules! impl_image_data_from_vec {
+    ($variant:ident, $type:ty) => {
+        impl From<Vec<$type>> for ImageData {
+            fn from(values: Vec<$type>) -> ImageData {
+                ImageData::$variant(values)
+            }
+        }
+    };
+}
+
+impl_image_data_from_vec!(U8, u8);
+impl_image_data_from_vec!(I16, i16);
+impl_image_data_from_vec!(I32, i32);
+impl_image_data_from_vec!(I64, i64);
+impl_image_data_from_vec!(F32, f32);
+impl_image_data_from_vec!(F64, f64);
 
 /// Element count for an N-d `shape`: the product of the axis lengths, or `0` for
 /// an empty shape (`NAXIS = 0` ⇒ no data, not the empty-product `1`).
@@ -134,8 +151,8 @@ impl ImageData {
     /// Exact typed unsigned (or signed-byte) reinterpretation when `scaling` is
     /// precisely the FITS unsigned convention (`BSCALE == 1`, no `BLANK`, and
     /// `BZERO` the matching sign-bit offset); `None` otherwise. Exact for all 64-bit
-    /// values (no `f64` rounding). Shared by [`Image::unsigned`]/[`RawImage::unsigned`].
-    pub(crate) fn unsigned(&self, scaling: &Scaling) -> Option<UnsignedView> {
+    /// values (no `f64` rounding). Shared by [`Image::unsigned`]/[`ReadImage::unsigned`].
+    pub(crate) fn unsigned(&self, scaling: &Scaling) -> Option<UnsignedData> {
         // `BLANK` marks null samples that have no exact integer value, so an unsigned
         // view can't represent them; `SampleType` deliberately ignores `BLANK`, so
         // guard it here. The `BSCALE`/`BZERO`-offset convention itself is resolved
@@ -145,10 +162,10 @@ impl ImageData {
             return None;
         }
         match (self, SampleType::from_scaling(self.bitpix(), scaling)) {
-            (ImageData::U8(v), SampleType::I8) => Some(UnsignedView::from_signed_byte(v)),
-            (ImageData::I16(v), SampleType::U16) => Some(UnsignedView::from_offset_i16(v)),
-            (ImageData::I32(v), SampleType::U32) => Some(UnsignedView::from_offset_i32(v)),
-            (ImageData::I64(v), SampleType::U64) => Some(UnsignedView::from_offset_i64(v)),
+            (ImageData::U8(v), SampleType::I8) => Some(UnsignedData::from_signed_byte(v)),
+            (ImageData::I16(v), SampleType::U16) => Some(UnsignedData::from_offset_i16(v)),
+            (ImageData::I32(v), SampleType::U32) => Some(UnsignedData::from_offset_i32(v)),
+            (ImageData::I64(v), SampleType::U64) => Some(UnsignedData::from_offset_i64(v)),
             _ => None,
         }
     }
@@ -183,21 +200,21 @@ fn physical_from_be<O: PhysicalOut>(bytes: &[u8], bitpix: Bitpix, scaling: &Scal
     }
 }
 
-fn unsigned_from_be(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Option<UnsignedView> {
+fn unsigned_from_be(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Option<UnsignedData> {
     if scaling.blank.is_some() {
         return None;
     }
     match SampleType::from_scaling(bitpix, scaling) {
-        SampleType::I8 => Some(UnsignedView::I8(
+        SampleType::I8 => Some(UnsignedData::I8(
             bytes.iter().map(|&x| (x ^ 0x80) as i8).collect(),
         )),
-        SampleType::U16 => Some(UnsignedView::U16(map_be(bytes, i16::from_be_bytes, |x| {
+        SampleType::U16 => Some(UnsignedData::U16(map_be(bytes, i16::from_be_bytes, |x| {
             (x as u16) ^ 0x8000
         }))),
-        SampleType::U32 => Some(UnsignedView::U32(map_be(bytes, i32::from_be_bytes, |x| {
+        SampleType::U32 => Some(UnsignedData::U32(map_be(bytes, i32::from_be_bytes, |x| {
             (x as u32) ^ 0x8000_0000
         }))),
-        SampleType::U64 => Some(UnsignedView::U64(map_be(bytes, i64::from_be_bytes, |x| {
+        SampleType::U64 => Some(UnsignedData::U64(map_be(bytes, i64::from_be_bytes, |x| {
             (x as u64) ^ 0x8000_0000_0000_0000
         }))),
         _ => None,
@@ -219,6 +236,26 @@ pub enum ImageView<'a> {
     I64(&'a [i64]),
     F32(&'a [f32]),
     F64(&'a [f64]),
+}
+
+/// A scratch-backed image read: owned geometry and scaling paired with a borrowed,
+/// host-endian sample view.
+#[derive(Debug)]
+pub struct BorrowedImage<'a> {
+    pub shape: Vec<usize>,
+    pub scaling: Scaling,
+    pub samples: ImageView<'a>,
+}
+
+impl BorrowedImage<'_> {
+    /// The image geometry, stored element type, and physical-value scaling.
+    pub fn metadata(&self) -> ImageMetadata<'_> {
+        ImageMetadata {
+            shape: &self.shape,
+            bitpix: self.samples.bitpix(),
+            scaling: self.scaling,
+        }
+    }
 }
 
 impl ImageView<'_> {
@@ -248,6 +285,18 @@ impl ImageView<'_> {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Copy this borrowed view into the matching owned [`ImageData`] variant.
+    pub fn to_owned_data(&self) -> ImageData {
+        match self {
+            ImageView::U8(values) => ImageData::U8(values.to_vec()),
+            ImageView::I16(values) => ImageData::I16(values.to_vec()),
+            ImageView::I32(values) => ImageData::I32(values.to_vec()),
+            ImageView::I64(values) => ImageData::I64(values.to_vec()),
+            ImageView::F32(values) => ImageData::F32(values.to_vec()),
+            ImageView::F64(values) => ImageData::F64(values.to_vec()),
+        }
     }
 }
 
@@ -329,19 +378,19 @@ pub(crate) fn view_words(words: &[u64], bitpix: Bitpix, nbytes: usize) -> ImageV
 /// zero-copy `BITPIX = 8` plane either way — so you only reach for [`raw_bytes`] when
 /// you specifically want the undecoded on-disk bytes (plain images only).
 ///
-/// [`decode`]: RawImage::decode
-/// [`u8`]: RawImage::u8
-/// [`physical`]: RawImage::physical
-/// [`unsigned`]: RawImage::unsigned
-/// [`raw_bytes`]: RawImage::raw_bytes
+/// [`decode`]: ReadImage::decode
+/// [`u8`]: ReadImage::u8
+/// [`physical`]: ReadImage::physical
+/// [`unsigned`]: ReadImage::unsigned
+/// [`raw_bytes`]: ReadImage::raw_bytes
 #[derive(Debug)]
-pub struct RawImage<'a> {
+pub struct ReadImage<'a> {
     pub(crate) shape: Vec<usize>,
     pub(crate) scaling: Scaling,
     data: ImageBytes<'a>,
 }
 
-/// The two forms a [`RawImage`]'s pixels can take, by how it was read.
+/// The two forms a [`ReadImage`]'s pixels can take, by how it was read.
 #[derive(Debug)]
 enum ImageBytes<'a> {
     /// Plain image: the data unit's big-endian on-disk bytes, viewed in place over
@@ -353,15 +402,15 @@ enum ImageBytes<'a> {
     Decoded(ImageData),
 }
 
-impl<'a> RawImage<'a> {
+impl<'a> ReadImage<'a> {
     /// A plain image over borrowed big-endian bytes.
     pub(crate) fn raw(
         shape: Vec<usize>,
         bitpix: Bitpix,
         scaling: Scaling,
         bytes: &'a [u8],
-    ) -> RawImage<'a> {
-        RawImage {
+    ) -> ReadImage<'a> {
+        ReadImage {
             shape,
             scaling,
             data: ImageBytes::Raw { bytes, bitpix },
@@ -370,8 +419,12 @@ impl<'a> RawImage<'a> {
 
     /// A compressed image over its reconstructed, host-endian samples.
     #[cfg(feature = "compression")]
-    pub(crate) fn decoded(samples: ImageData, shape: Vec<usize>, scaling: Scaling) -> RawImage<'a> {
-        RawImage {
+    pub(crate) fn decoded(
+        samples: ImageData,
+        shape: Vec<usize>,
+        scaling: Scaling,
+    ) -> ReadImage<'a> {
+        ReadImage {
             shape,
             scaling,
             data: ImageBytes::Decoded(samples),
@@ -407,7 +460,7 @@ impl<'a> RawImage<'a> {
 
     /// The samples as a borrowed `&[u8]` when no byte-swap is needed (`BITPIX = 8`):
     /// a plain image's borrowed on-disk bytes, or a compressed image's decoded `u8`
-    /// buffer. `None` for multi-byte element types — use [`RawImage::decode`].
+    /// buffer. `None` for multi-byte element types — use [`ReadImage::decode`].
     pub fn u8(&self) -> Option<&[u8]> {
         match &self.data {
             ImageBytes::Raw {
@@ -421,7 +474,7 @@ impl<'a> RawImage<'a> {
 
     /// The undecoded big-endian on-disk bytes — `Some` only for a **plain** image
     /// (zero-copy borrow); `None` for a compressed one, whose pixels were
-    /// reconstructed and have no on-disk byte form. Use [`RawImage::decode`] for the
+    /// reconstructed and have no on-disk byte form. Use [`ReadImage::decode`] for the
     /// samples regardless of form.
     pub fn raw_bytes(&self) -> Option<&[u8]> {
         match &self.data {
@@ -439,11 +492,11 @@ impl<'a> RawImage<'a> {
     }
 
     /// The physical plane narrowed to `f32` in a single pass — the compact, lossy
-    /// counterpart to [`physical`](RawImage::physical). The scaling is still evaluated
+    /// counterpart to [`physical`](ReadImage::physical). The scaling is still evaluated
     /// in `f64` (so each value is the correctly-rounded `f32`), but only one `Vec<f32>`
     /// is allocated rather than a `Vec<f64>` the caller then re-walks to narrow. Prefer
     /// it when the consumer wants `f32` regardless (display, GPU upload, `f32`
-    /// pipelines); use [`physical`](RawImage::physical) when you need double precision —
+    /// pipelines); use [`physical`](ReadImage::physical) when you need double precision —
     /// e.g. large `BITPIX = 64` integers or fine `BSCALE`/`BZERO` past `f32`'s range.
     pub fn physical_f32(&self) -> Vec<f32> {
         match &self.data {
@@ -454,7 +507,7 @@ impl<'a> RawImage<'a> {
 
     /// Exact typed integers when the scaling is the FITS unsigned (or signed-byte)
     /// convention; `None` otherwise — same rule as [`Image::unsigned`].
-    pub fn unsigned(&self) -> Option<UnsignedView> {
+    pub fn unsigned(&self) -> Option<UnsignedData> {
         match &self.data {
             ImageBytes::Raw { bytes, bitpix } => unsigned_from_be(bytes, *bitpix, &self.scaling),
             ImageBytes::Decoded(samples) => samples.unsigned(&self.scaling),
@@ -481,7 +534,7 @@ pub(crate) const U64_OFFSET: f64 = U64_OFFSET_INTEGER as f64;
 /// signedness; the FITS unsigned and signed-byte conventions then layer a `BZERO`
 /// offset on top (`BSCALE == 1` with `BZERO = 2^(n-1)`, or `BZERO = -128` for signed
 /// bytes), so the values actually mean an unsigned (or signed-byte) integer. This
-/// enum is what [`RawImage::physical`] / [`RawImage::unsigned`] yield, resolved up
+/// enum is what [`ReadImage::physical`] / [`ReadImage::unsigned`] yield, resolved up
 /// front from `BITPIX` + [`Scaling`] without touching the pixels — so a caller can
 /// pick a code path (e.g. a per-type normalization range) without re-deriving the
 /// `BZERO` convention itself.
@@ -559,7 +612,7 @@ impl SampleType {
 /// for images and fixed columns, and once per jagged row by
 /// [`crate::ColumnReader::vla_unsigned`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UnsignedView {
+pub enum UnsignedData {
     /// `BITPIX = 8`, `BZERO = -128`: stored `u8` → `i8`.
     I8(Vec<i8>),
     /// `BITPIX = 16`, `BZERO = 2¹⁵`: stored `i16` → `u16`.
@@ -570,20 +623,20 @@ pub enum UnsignedView {
     U64(Vec<u64>),
 }
 
-impl UnsignedView {
+impl UnsignedData {
     /// Recover already-decoded image values from sign-bit-offset storage (the
     /// §5.2.5 / Table 19 convention) by flipping the sign bit.
-    pub(crate) fn from_signed_byte(stored: &[u8]) -> UnsignedView {
-        UnsignedView::I8(stored.iter().map(|&x| (x ^ 0x80) as i8).collect())
+    pub(crate) fn from_signed_byte(stored: &[u8]) -> UnsignedData {
+        UnsignedData::I8(stored.iter().map(|&x| (x ^ 0x80) as i8).collect())
     }
-    pub(crate) fn from_offset_i16(stored: &[i16]) -> UnsignedView {
-        UnsignedView::U16(stored.iter().map(|&x| (x as u16) ^ 0x8000).collect())
+    pub(crate) fn from_offset_i16(stored: &[i16]) -> UnsignedData {
+        UnsignedData::U16(stored.iter().map(|&x| (x as u16) ^ 0x8000).collect())
     }
-    pub(crate) fn from_offset_i32(stored: &[i32]) -> UnsignedView {
-        UnsignedView::U32(stored.iter().map(|&x| (x as u32) ^ 0x8000_0000).collect())
+    pub(crate) fn from_offset_i32(stored: &[i32]) -> UnsignedData {
+        UnsignedData::U32(stored.iter().map(|&x| (x as u32) ^ 0x8000_0000).collect())
     }
-    pub(crate) fn from_offset_i64(stored: &[i64]) -> UnsignedView {
-        UnsignedView::U64(
+    pub(crate) fn from_offset_i64(stored: &[i64]) -> UnsignedData {
+        UnsignedData::U64(
             stored
                 .iter()
                 .map(|&x| (x as u64) ^ 0x8000_0000_0000_0000)
@@ -611,12 +664,21 @@ pub struct ImageMetadata<'a> {
 }
 
 impl Image {
-    /// Build an image after validating that the axis product equals the sample
-    /// count and that the scaling keywords are valid for the stored element type.
-    pub fn new(shape: Vec<usize>, samples: ImageData, scaling: Scaling) -> Result<Image> {
+    /// Build an identity-scaled image from any typed vector accepted by
+    /// [`ImageData`].
+    pub fn new(shape: impl Into<Vec<usize>>, samples: impl Into<ImageData>) -> Result<Image> {
+        Image::new_scaled(shape, samples, Scaling::IDENTITY)
+    }
+
+    /// Build an image with explicit physical-value scaling.
+    pub fn new_scaled(
+        shape: impl Into<Vec<usize>>,
+        samples: impl Into<ImageData>,
+        scaling: Scaling,
+    ) -> Result<Image> {
         let image = Image {
-            shape,
-            samples,
+            shape: shape.into(),
+            samples: samples.into(),
             scaling,
         };
         image.validate_geometry()?;
@@ -691,7 +753,7 @@ impl Image {
     }
 
     fn offset_image(shape: Vec<usize>, samples: ImageData, bzero: f64) -> Result<Image> {
-        Image::new(
+        Image::new_scaled(
             shape,
             samples,
             Scaling {
@@ -707,7 +769,7 @@ impl Image {
     /// no `BLANK`, and `BZERO` the matching sign-bit offset. Unlike
     /// [`Image::physical`], this is exact for all 64-bit values (no `f64` rounding
     /// past 2⁵³). Returns `None` for any other scaling or element type.
-    pub fn unsigned(&self) -> Option<UnsignedView> {
+    pub fn unsigned(&self) -> Option<UnsignedData> {
         self.samples.unsigned(&self.scaling)
     }
 
@@ -720,7 +782,7 @@ impl Image {
     }
 
     /// The physical plane narrowed to `f32` in a single pass — the compact, lossy
-    /// counterpart to [`physical`](Image::physical); see [`RawImage::physical_f32`].
+    /// counterpart to [`physical`](Image::physical); see [`ReadImage::physical_f32`].
     pub fn physical_f32(&self) -> Vec<f32> {
         self.samples.physical_as::<f32>(&self.scaling)
     }
@@ -772,7 +834,20 @@ pub struct Scaling {
     pub blank: Option<i64>,
 }
 
+impl Default for Scaling {
+    fn default() -> Scaling {
+        Scaling::IDENTITY
+    }
+}
+
 impl Scaling {
+    /// Identity physical mapping: `physical = stored`, with no integer null sentinel.
+    pub const IDENTITY: Scaling = Scaling {
+        bscale: 1.0,
+        bzero: 0.0,
+        blank: None,
+    };
+
     /// The public entry point is [`Header::scaling`](crate::Header::scaling).
     pub(crate) fn from_header(header: &Header) -> Result<Scaling> {
         Ok(Scaling {
@@ -821,14 +896,14 @@ impl Scaling {
         self.validate(bitpix)?;
         if !self.is_identity() {
             if bitpix == Bitpix::I64 && self.bscale == 1.0 && self.bzero == U64_OFFSET {
-                header.set("BZERO", U64_OFFSET_INTEGER);
+                header.set_internal("BZERO", U64_OFFSET_INTEGER);
             } else {
-                header.set("BZERO", self.bzero);
+                header.set_internal("BZERO", self.bzero);
             }
-            header.set("BSCALE", self.bscale);
+            header.set_internal("BSCALE", self.bscale);
         }
         if let Some(blank) = self.blank {
-            header.set("BLANK", blank);
+            header.set_internal("BLANK", blank);
         }
         Ok(())
     }
@@ -840,7 +915,7 @@ impl Scaling {
 }
 
 /// An image as an N-dimensional [`ndarray`] array, tagged by element type — the n-D
-/// analog of [`ImageData`], from [`Image::into_ndarray`] / [`RawImage::to_ndarray`].
+/// analog of [`ImageData`], from [`Image::into_ndarray`] / [`ReadImage::to_ndarray`].
 /// Requires the `ndarray` feature.
 ///
 /// Axes are in **FITS order** (axis 0 = `NAXIS1`, the fastest-varying), so a 2-D image
@@ -894,7 +969,7 @@ impl ImageData {
 }
 
 #[cfg(feature = "ndarray")]
-impl RawImage<'_> {
+impl ReadImage<'_> {
     /// The physical plane as an N-d `f64` array (`BZERO + BSCALE × sample`, `BLANK` →
     /// `NaN`), in FITS axis order — index `arr[[x, y]]`.
     pub fn physical_array(&self) -> ndarray::ArrayD<f64> {
@@ -904,7 +979,7 @@ impl RawImage<'_> {
     /// The samples as a typed N-d [`ImageArray`], in FITS axis order. Decodes into an
     /// owned buffer first (the array then owns it, no further copy).
     pub fn into_ndarray(self) -> ImageArray {
-        let RawImage { shape, data, .. } = self;
+        let ReadImage { shape, data, .. } = self;
         let samples = match data {
             ImageBytes::Raw { bytes, bitpix } => ImageData::decode(bytes, bitpix),
             ImageBytes::Decoded(samples) => samples,

@@ -3,7 +3,8 @@
 //! A compressed image is a `BINTABLE` with `ZIMAGE = T`: the original image
 //! (`ZBITPIX`, `ZNAXISn`) is split into `ZTILEn` tiles, each compressed and stored
 //! in `COMPRESSED_DATA` (with `GZIP_COMPRESSED_DATA`/`UNCOMPRESSED_DATA` fallbacks).
-//! This module holds the shared pieces — the write-time [`CompressOptions`], the
+//! This module holds the shared pieces — the write-time [`Compression`] and
+//! [`CompressionOptions`], the
 //! [`ImageCodec`] dispatch, the per-tile [`map_tiles`] fan-out, and the `P`-vs-`Q`
 //! descriptor threshold — while the directions live in [`decode`]
 //! ([`decompress_image`]) and [`encode`] ([`compress_image`], all five codecs:
@@ -24,8 +25,10 @@ mod quantize;
 mod rice;
 mod table;
 
+pub(crate) use decode::compressed_image_tile_rows;
 pub(crate) use decode::decompress_image;
 pub(crate) use decode::decompress_image_into_words;
+pub(crate) use decode::decompress_image_section_into_words;
 pub(crate) use encode::compress_image;
 pub(crate) use table::compress_table;
 pub(crate) use table::uncompress_table;
@@ -57,50 +60,126 @@ impl DitherMethod {
     }
 }
 
-/// Write-time tuning for [`crate::FitsWriter::write_compressed_image`]. Each field
-/// applies only to the codecs that use it; the rest ignore it. Every field defaults
-/// to conventional behavior, so `CompressOptions::default()` (row tiling) or
-/// `CompressOptions::tiled(shape)` is the common case.
-#[derive(Debug, Clone)]
-pub struct CompressOptions {
-    /// Tile shape, fastest axis first. Empty ⇒ one tile per row (the default).
-    /// `HCOMPRESS_1` requires a 2-D shape.
-    pub tile_shape: Vec<usize>,
-    /// `flate2` deflate level (0–9) for `GZIP_1`/`GZIP_2`. Lossless — only the
-    /// speed↔ratio tradeoff changes.
-    pub gzip_level: u32,
-    /// `HCOMPRESS_1` quantization scale: `0` = lossless, larger = more lossy / smaller.
-    pub hcompress_scale: i32,
-    /// Float quantization noise divisor (`qlevel`): `0` ⇒ cfitsio's default of
-    /// noise/4; larger keeps more precision (and grows the output). Ignored by the
-    /// integer codecs.
-    pub quantize_level: f64,
-    /// Dithering for float quantization (`ZQUANTIZ`). Defaults to
-    /// `SUBTRACTIVE_DITHER_1`. Ignored by the integer codecs.
-    pub dither: DitherMethod,
+/// Validated GZIP configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gzip {
+    pub(crate) shuffle: bool,
+    pub(crate) level: u32,
 }
 
-impl Default for CompressOptions {
-    fn default() -> CompressOptions {
-        CompressOptions {
-            tile_shape: Vec::new(),
-            gzip_level: gzip::DEFAULT_GZIP_LEVEL,
-            hcompress_scale: 0,
-            quantize_level: 0.0,
+impl Gzip {
+    /// Standard `GZIP_1` at a validated deflate level.
+    pub fn new(level: u32) -> Result<Gzip> {
+        Gzip::configured(false, level)
+    }
+
+    /// Byte-shuffled `GZIP_2` at a validated deflate level.
+    pub fn shuffled(level: u32) -> Result<Gzip> {
+        Gzip::configured(true, level)
+    }
+
+    fn configured(shuffle: bool, level: u32) -> Result<Gzip> {
+        if level > 9 {
+            return Err(FitsError::InvalidValue {
+                card: format!("gzip compression level {level} is outside 0..=9"),
+            });
+        }
+        Ok(Gzip { shuffle, level })
+    }
+}
+
+impl Default for Gzip {
+    fn default() -> Gzip {
+        Gzip {
+            shuffle: false,
+            level: gzip::DEFAULT_GZIP_LEVEL,
+        }
+    }
+}
+
+/// Validated HCOMPRESS configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Hcompress {
+    pub(crate) scale: i32,
+}
+
+impl Hcompress {
+    pub fn lossy(scale: i32) -> Result<Hcompress> {
+        if scale <= 0 {
+            return Err(FitsError::InvalidValue {
+                card: format!("lossy HCOMPRESS scale {scale} must be positive"),
+            });
+        }
+        Ok(Hcompress { scale })
+    }
+}
+
+/// Typed tiled-compression choice. Codec-specific configuration lives only on the
+/// variant that consumes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compression {
+    Gzip(Gzip),
+    Rice,
+    Plio,
+    Hcompress(Hcompress),
+    None,
+}
+
+impl Compression {
+    pub const GZIP: Compression = Compression::Gzip(Gzip {
+        shuffle: false,
+        level: gzip::DEFAULT_GZIP_LEVEL,
+    });
+    pub const GZIP_SHUFFLED: Compression = Compression::Gzip(Gzip {
+        shuffle: true,
+        level: gzip::DEFAULT_GZIP_LEVEL,
+    });
+}
+
+/// Float quantization shared by the lossless integer codecs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Quantization {
+    pub(crate) level: f64,
+    pub(crate) dither: DitherMethod,
+}
+
+impl Default for Quantization {
+    fn default() -> Quantization {
+        Quantization {
+            level: 0.0,
             dither: DitherMethod::Subtractive1,
         }
     }
 }
 
-impl CompressOptions {
-    /// Default options with an explicit tile shape (fastest axis first; empty ⇒ row
-    /// tiling). Tune further with struct-update syntax:
-    /// `CompressOptions { gzip_level: 9, ..CompressOptions::tiled([256, 256]) }`.
-    pub fn tiled(tile_shape: impl Into<Vec<usize>>) -> CompressOptions {
-        CompressOptions {
+/// Shared tiled-image options. Codec-specific knobs are part of [`Compression`].
+#[derive(Debug, Clone, Default)]
+pub struct CompressionOptions {
+    /// Tile shape, fastest axis first. Empty means one tile per row.
+    pub(crate) tile_shape: Vec<usize>,
+    pub(crate) quantization: Quantization,
+}
+
+impl CompressionOptions {
+    pub fn tiled(tile_shape: impl Into<Vec<usize>>) -> CompressionOptions {
+        CompressionOptions {
             tile_shape: tile_shape.into(),
-            ..CompressOptions::default()
+            ..CompressionOptions::default()
         }
+    }
+
+    pub fn with_quantization(
+        mut self,
+        level: f64,
+        dither: DitherMethod,
+    ) -> Result<CompressionOptions> {
+        if !level.is_finite() || level < 0.0 {
+            return Err(FitsError::InvalidValue {
+                card: format!("float quantization level {level} must be finite and nonnegative"),
+            });
+        }
+        self.quantization = Quantization { level, dither };
+        Ok(self)
     }
 }
 
@@ -115,7 +194,7 @@ pub(crate) struct HduParts {
 /// The tiled-image codec selected by `ZCMPTYPE`, parsed once from the keyword string
 /// then matched exhaustively — the image-path counterpart to the table path's `Algo`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ImageCodec {
+pub(crate) enum ImageCodec {
     Gzip1,
     Gzip2,
     Rice1,
@@ -139,6 +218,45 @@ impl ImageCodec {
                 });
             }
         })
+    }
+}
+
+impl Compression {
+    pub(crate) fn image_codec(self) -> ImageCodec {
+        match self {
+            Compression::Gzip(config) if config.shuffle => ImageCodec::Gzip2,
+            Compression::Gzip(_) => ImageCodec::Gzip1,
+            Compression::Rice => ImageCodec::Rice1,
+            Compression::Plio => ImageCodec::Plio1,
+            Compression::Hcompress(_) => ImageCodec::Hcompress1,
+            Compression::None => ImageCodec::NoCompress,
+        }
+    }
+
+    /// FITS `ZCMPTYPE` name written for this choice.
+    pub fn name(self) -> &'static str {
+        match self.image_codec() {
+            ImageCodec::Gzip1 => "GZIP_1",
+            ImageCodec::Gzip2 => "GZIP_2",
+            ImageCodec::Rice1 => "RICE_1",
+            ImageCodec::Plio1 => "PLIO_1",
+            ImageCodec::Hcompress1 => "HCOMPRESS_1",
+            ImageCodec::NoCompress => "NOCOMPRESS",
+        }
+    }
+
+    pub(crate) fn gzip_level(self) -> u32 {
+        match self {
+            Compression::Gzip(config) => config.level,
+            _ => gzip::DEFAULT_GZIP_LEVEL,
+        }
+    }
+
+    pub(crate) fn hcompress_scale(self) -> i32 {
+        match self {
+            Compression::Hcompress(config) => config.scale,
+            _ => 0,
+        }
     }
 }
 

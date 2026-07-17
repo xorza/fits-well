@@ -1,20 +1,20 @@
 use crate::reader::FitsReader;
-use crate::table::*;
+use crate::table_impl::*;
 use bitvec::bitvec;
 use std::fs::File;
 
 fn table_header(naxis1: usize, naxis2: usize, tforms: &[&str]) -> Header {
     let mut h = Header::new();
-    h.set("XTENSION", "BINTABLE")
-        .set("BITPIX", 8)
-        .set("NAXIS", 2)
-        .set("NAXIS1", naxis1 as i64)
-        .set("NAXIS2", naxis2 as i64)
-        .set("PCOUNT", 0)
-        .set("GCOUNT", 1)
-        .set("TFIELDS", tforms.len() as i64);
+    h.set_internal("XTENSION", "BINTABLE")
+        .set_internal("BITPIX", 8)
+        .set_internal("NAXIS", 2)
+        .set_internal("NAXIS1", naxis1 as i64)
+        .set_internal("NAXIS2", naxis2 as i64)
+        .set_internal("PCOUNT", 0)
+        .set_internal("GCOUNT", 1)
+        .set_internal("TFIELDS", tforms.len() as i64);
     for (i, tform) in tforms.iter().enumerate() {
-        h.set(&format!("TFORM{}", i + 1), *tform);
+        h.set_internal(&format!("TFORM{}", i + 1), *tform);
     }
     h
 }
@@ -49,7 +49,21 @@ fn parses_tform_repeat_and_kind() {
     for (s, expected) in cases {
         assert_eq!(Tform::parse(s).unwrap(), expected, "{s}");
     }
-    for bad in ["9Z", "", "1P", "2PE(5)", "3QD", "1PP", "1PQ", "1QP", "1QQ"] {
+    for bad in [
+        "9Z",
+        "",
+        "1P",
+        "2PE(5)",
+        "3QD",
+        "1PP",
+        "1PQ",
+        "1QP",
+        "1QQ",
+        "1Jjunk",
+        "1PE(5)junk",
+        "1PE(5",
+        "1PE()",
+    ] {
         // "1P" lacks the heap element-type letter; "2PE"/"3QD" violate the §6.3
         // rule that a P/Q descriptor's repeat count is 0 or 1.
         assert!(
@@ -63,7 +77,7 @@ fn parses_tform_repeat_and_kind() {
 fn theap_below_the_main_table_is_rejected() {
     // §6.6: the heap follows the main table, so THEAP < NAXIS1·NAXIS2 is invalid.
     let mut header = table_header(4, 2, &["1J"]); // main table = 8 bytes
-    header.set("PCOUNT", 4).set("THEAP", 4); // THEAP 4 < 8
+    header.set_internal("PCOUNT", 4).set_internal("THEAP", 4); // THEAP 4 < 8
     assert!(matches!(
         BinTable::from_data(&header, vec![0u8; 12]),
         Err(FitsError::KeywordOutOfRange { name: "THEAP" })
@@ -152,10 +166,10 @@ fn zero_repeat_column_decodes_to_empty() {
 #[test]
 fn tdim_accepts_subshapes_and_checks_vla_cells() {
     let mut fixed = table_header(16, 1, &["4J"]);
-    fixed.set("TDIM1", "(2)");
+    fixed.set_internal("TDIM1", "(2)");
     assert!(BinTable::from_data(&fixed, vec![0; 16]).is_ok());
     for invalid in ["(5)", "(2,broken)", "()", "(0)"] {
-        fixed.set("TDIM1", invalid);
+        fixed.set_internal("TDIM1", invalid);
         assert!(matches!(
             BinTable::from_data(&fixed, vec![0; 16]),
             Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
@@ -163,7 +177,8 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
     }
 
     let mut vla = table_header(8, 1, &["1PJ"]);
-    vla.set("PCOUNT", 12).set("TDIM1", "(2,2)");
+    vla.set_internal("PCOUNT", 12)
+        .set_internal("TDIM1", "(2,2)");
     let mut data = Vec::new();
     data.extend_from_slice(&3i32.to_be_bytes());
     data.extend_from_slice(&0i32.to_be_bytes());
@@ -178,9 +193,9 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
 
     let mut mixed = table_header(24, 2, &["1PJ", "1QI"]);
     mixed
-        .set("PCOUNT", 24)
-        .set("TDIM1", "(2,2)")
-        .set("TDIM2", "(2,2)");
+        .set_internal("PCOUNT", 24)
+        .set_internal("TDIM1", "(2,2)")
+        .set_internal("TDIM2", "(2,2)");
     let mut data = Vec::new();
     // The out-of-heap offsets prove empty descriptors do not consult the heap.
     data.extend_from_slice(&0i32.to_be_bytes());
@@ -215,9 +230,9 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
 
     let mut mixed_bits = table_header(24, 2, &["1PX", "1QX"]);
     mixed_bits
-        .set("PCOUNT", 4)
-        .set("TDIM1", "(3,3)")
-        .set("TDIM2", "(3,3)");
+        .set_internal("PCOUNT", 4)
+        .set_internal("TDIM1", "(3,3)")
+        .set_internal("TDIM2", "(3,3)");
     let mut data = Vec::new();
     data.extend_from_slice(&0i32.to_be_bytes());
     data.extend_from_slice(&9999i32.to_be_bytes());
@@ -243,7 +258,7 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
     );
 
     let mut malformed_empty = table_header(8, 1, &["1PJ"]);
-    malformed_empty.set("TDIM1", "(2,broken)");
+    malformed_empty.set_internal("TDIM1", "(2,broken)");
     assert!(matches!(
         BinTable::from_data(&malformed_empty, vec![0; 8]),
         Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
@@ -254,9 +269,9 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
 fn read_column_physical_applies_tscal_tzero_and_tnull() {
     let mut header = table_header(2, 3, &["1I"]); // i16 column
     header
-        .set("TSCAL1", 2.0)
-        .set("TZERO1", 10.0)
-        .set("TNULL1", 5);
+        .set_internal("TSCAL1", 2.0)
+        .set_internal("TZERO1", 10.0)
+        .set_internal("TNULL1", 5);
     let mut data = Vec::new();
     for x in [3i16, 5, 7] {
         data.extend_from_slice(&x.to_be_bytes());
@@ -274,7 +289,7 @@ fn read_column_physical_applies_tscal_tzero_and_tnull() {
         ("TNULL1", "integer"),
     ] {
         let mut malformed = header.clone();
-        malformed.set(keyword, "not numeric");
+        malformed.set_internal(keyword, "not numeric");
         assert!(matches!(
             BinTable::from_data(&malformed, vec![0; 6]),
             Err(FitsError::TypeMismatch { name, expected: actual })
@@ -309,7 +324,7 @@ fn decodes_variable_length_arrays_from_the_heap() {
     // Main table = two 8-byte `P` descriptors; the heap follows at THEAP
     // (default = main size = 16).
     let mut header = table_header(8, 2, &["1PE(3)"]);
-    header.set("PCOUNT", 12); // heap = 3 × f32
+    header.set_internal("PCOUNT", 12); // heap = 3 × f32
     let mut data = Vec::new();
     // descriptors: row 0 → (nelem 2, offset 0), row 1 → (nelem 1, offset 8)
     for (nelem, offset) in [(2i32, 0i32), (1, 8)] {
@@ -347,25 +362,35 @@ fn parses_tdisp_display_formats() {
         ("Z8", d(Hex, 8, None, None)),
     ];
     for (s, want) in cases {
-        assert_eq!(TDisp::parse(s), Some(want), "{s}");
+        assert_eq!(TDisp::parse(s).unwrap(), want, "{s}");
     }
-    assert_eq!(TDisp::parse("Q5"), None); // unknown letter
-    assert_eq!(TDisp::parse("F"), None); // missing width
+    for malformed in ["Q5", "F", "I5junk", "E12.5E3junk"] {
+        assert!(matches!(
+            TDisp::parse(malformed),
+            Err(FitsError::InvalidTdisp { tdisp }) if tdisp == malformed
+        ));
+    }
     // The column reads TDISPn into a parsed TDisp.
     let mut header = table_header(4, 1, &["1J"]);
-    header.set("TDISP1", "I5");
+    header.set_internal("TDISP1", "I5");
     let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
     assert_eq!(table.columns[0].tdisp, Some(d(Integer, 5, None, None)));
+
+    header.set_internal("TDISP1", "Q5");
+    assert!(matches!(
+        BinTable::from_data(&header, vec![0u8; 4]),
+        Err(FitsError::InvalidTdisp { tdisp }) if tdisp == "Q5"
+    ));
 }
 
 #[test]
 fn read_column_complex_widens_and_scales() {
     let mut header = table_header(24, 1, &["1C", "1M"]);
     header
-        .set("TSCAL1", 3.0)
-        .set("TZERO1", 4.0)
-        .set("TSCAL2", 3.0)
-        .set("TZERO2", 4.0);
+        .set_internal("TSCAL1", 3.0)
+        .set_internal("TZERO1", 4.0)
+        .set_internal("TSCAL2", 3.0)
+        .set_internal("TZERO2", 4.0);
     let mut data = Vec::new();
     data.extend_from_slice(&1.0f32.to_be_bytes());
     data.extend_from_slice(&2.0f32.to_be_bytes());
@@ -394,18 +419,20 @@ fn read_column_complex_widens_and_scales() {
 fn read_column_unsigned_recovers_typed_values() {
     // `1I` with TZERO=2¹⁵ → u16; `1B` with TZERO=-128 → i8.
     let mut header = table_header(3, 1, &["1I", "1B"]);
-    header.set("TZERO1", 32768.0).set("TZERO2", -128.0);
+    header
+        .set_internal("TZERO1", 32768.0)
+        .set_internal("TZERO2", -128.0);
     let mut data = Vec::new();
     data.extend_from_slice(&((50000u16 ^ 0x8000) as i16).to_be_bytes());
     data.push(((-10i8) as u8) ^ 0x80);
     let table = BinTable::from_data(&header, data).unwrap();
     assert_eq!(
         table.column_by_idx(0).unwrap().unsigned().unwrap(),
-        Some(UnsignedView::U16(vec![50000]))
+        Some(UnsignedData::U16(vec![50000]))
     );
     assert_eq!(
         table.column_by_idx(1).unwrap().unsigned().unwrap(),
-        Some(UnsignedView::I8(vec![-10]))
+        Some(UnsignedData::I8(vec![-10]))
     );
 }
 
@@ -414,14 +441,14 @@ fn read_column_unsigned_is_exact_for_u64_and_none_otherwise() {
     // `1K` with TZERO=2⁶³ → u64, exact past 2⁵³; a plain `1J` (TZERO=0) is not
     // an unsigned column.
     let mut header = table_header(12, 1, &["1K", "1J"]);
-    header.set("TZERO1", 9_223_372_036_854_775_808.0); // 2⁶³
+    header.set_internal("TZERO1", 9_223_372_036_854_775_808.0); // 2⁶³
     let mut data = Vec::new();
     data.extend_from_slice(&((u64::MAX ^ 0x8000_0000_0000_0000) as i64).to_be_bytes());
     data.extend_from_slice(&7i32.to_be_bytes());
     let table = BinTable::from_data(&header, data).unwrap();
     assert_eq!(
         table.column_by_idx(0).unwrap().unsigned().unwrap(),
-        Some(UnsignedView::U64(vec![u64::MAX]))
+        Some(UnsignedData::U64(vec![u64::MAX]))
     );
     assert_eq!(
         table.column_by_idx(1).unwrap().unsigned().unwrap(),
@@ -434,10 +461,10 @@ fn read_vla_column_physical_scales_heap_arrays_and_nulls() {
     // 1PJ column, TSCAL=2, TZERO=10, TNULL=99. Row 0 = [5, 99(null)], row 1 = [3].
     let mut header = table_header(8, 2, &["1PJ(2)"]);
     header
-        .set("PCOUNT", 12)
-        .set("TSCAL1", 2.0)
-        .set("TZERO1", 10.0)
-        .set("TNULL1", 99);
+        .set_internal("PCOUNT", 12)
+        .set_internal("TSCAL1", 2.0)
+        .set_internal("TZERO1", 10.0)
+        .set_internal("TNULL1", 99);
     let mut data = Vec::new();
     for (nelem, offset) in [(2i32, 0i32), (1, 8)] {
         data.extend_from_slice(&nelem.to_be_bytes());
@@ -457,11 +484,11 @@ fn read_vla_column_physical_scales_heap_arrays_and_nulls() {
 fn read_vla_complex_scales_p_and_q_heap_values() {
     let mut header = table_header(24, 2, &["1PC(2)", "1QM(1)"]);
     header
-        .set("PCOUNT", 32)
-        .set("TSCAL1", 2.0)
-        .set("TZERO1", 10.0)
-        .set("TSCAL2", -0.5)
-        .set("TZERO2", 3.0);
+        .set_internal("PCOUNT", 32)
+        .set_internal("TSCAL1", 2.0)
+        .set_internal("TZERO1", 10.0)
+        .set_internal("TSCAL2", -0.5)
+        .set_internal("TZERO2", 3.0);
     let mut data = Vec::new();
     data.extend_from_slice(&2i32.to_be_bytes());
     data.extend_from_slice(&0i32.to_be_bytes());
@@ -497,9 +524,9 @@ fn read_vla_complex_scales_p_and_q_heap_values() {
 fn read_vla_unsigned_is_exact_past_f64_integer_precision() {
     let mut header = table_header(24, 1, &["1PK(3)", "1QK(3)"]);
     header
-        .set("PCOUNT", 48)
-        .set("TZERO1", U64_OFFSET)
-        .set("TZERO2", U64_OFFSET);
+        .set_internal("PCOUNT", 48)
+        .set_internal("TZERO1", U64_OFFSET)
+        .set_internal("TZERO2", U64_OFFSET);
     let mut data = Vec::new();
     data.extend_from_slice(&3i32.to_be_bytes());
     data.extend_from_slice(&0i32.to_be_bytes());
@@ -515,7 +542,7 @@ fn read_vla_unsigned_is_exact_past_f64_integer_precision() {
     }
 
     let table = BinTable::from_data(&header, data.clone()).unwrap();
-    let exact = Some(vec![UnsignedView::U64(expected.to_vec())]);
+    let exact = Some(vec![UnsignedData::U64(expected.to_vec())]);
     assert_eq!(
         table.column_by_idx(0).unwrap().vla_unsigned().unwrap(),
         exact
@@ -529,7 +556,9 @@ fn read_vla_unsigned_is_exact_past_f64_integer_precision() {
         9_007_199_254_740_992.0
     );
 
-    header.set("TSCAL1", 2.0).set("TNULL2", i64::MIN);
+    header
+        .set_internal("TSCAL1", 2.0)
+        .set_internal("TNULL2", i64::MIN);
     let non_convention = BinTable::from_data(&header, data).unwrap();
     assert_eq!(
         non_convention
@@ -554,7 +583,7 @@ fn vla_descriptor_overrunning_the_heap_is_rejected() {
     // §6.6: a span must lie within the heap (`PCOUNT` bytes), not the block fill.
     // Heap is 8 bytes (PCOUNT=8) but the descriptor claims 3 f32 = 12 bytes.
     let mut header = table_header(8, 1, &["1PE(3)"]);
-    header.set("PCOUNT", 8);
+    header.set_internal("PCOUNT", 8);
     let mut data = Vec::new();
     data.extend_from_slice(&3i32.to_be_bytes()); // nelem = 3
     data.extend_from_slice(&0i32.to_be_bytes()); // offset = 0
@@ -598,9 +627,9 @@ fn x_bit_column_unpacks_msb_first() {
 fn read_column_by_name_and_one_step_physical() {
     let mut header = table_header(2, 3, &["1I"]); // one i16 column
     header
-        .set("TTYPE1", "FLUX")
-        .set("TSCAL1", 2.0)
-        .set("TZERO1", 10.0);
+        .set_internal("TTYPE1", "FLUX")
+        .set_internal("TSCAL1", 2.0)
+        .set_internal("TZERO1", 10.0);
     let mut data = Vec::new();
     for x in [1i16, 2, 3] {
         data.extend_from_slice(&x.to_be_bytes());
@@ -640,7 +669,7 @@ fn read_bit_column_on_a_non_bit_column_errors() {
 #[test]
 fn column_index_is_case_insensitive() {
     let mut header = table_header(4, 1, &["1J"]);
-    header.set("TTYPE1", "Flux");
+    header.set_internal("TTYPE1", "Flux");
     let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
     assert_eq!(table.column_index("FLUX"), Some(0));
     assert_eq!(table.column_index("flux"), Some(0));
@@ -755,15 +784,15 @@ fn vla_bit_column_unpacks_msb_first() {
     // A `1PX` column: row 0 = 12 bits (0xAB 0xC0), row 1 = 4 bits (0xF0), MSB-first.
     let mut header = Header::new();
     header
-        .set("XTENSION", "BINTABLE")
-        .set("BITPIX", 8)
-        .set("NAXIS", 2)
-        .set("NAXIS1", 8) // one P descriptor (2 × i32) per row
-        .set("NAXIS2", 2)
-        .set("PCOUNT", 3) // heap bytes
-        .set("GCOUNT", 1)
-        .set("TFIELDS", 1)
-        .set("TFORM1", "1PX");
+        .set_internal("XTENSION", "BINTABLE")
+        .set_internal("BITPIX", 8)
+        .set_internal("NAXIS", 2)
+        .set_internal("NAXIS1", 8) // one P descriptor (2 × i32) per row
+        .set_internal("NAXIS2", 2)
+        .set_internal("PCOUNT", 3) // heap bytes
+        .set_internal("GCOUNT", 1)
+        .set_internal("TFIELDS", 1)
+        .set_internal("TFORM1", "1PX");
     let mut data = Vec::new();
     data.extend_from_slice(&12i32.to_be_bytes()); // row 0: 12 bits …
     data.extend_from_slice(&0i32.to_be_bytes()); //        … at heap offset 0
@@ -787,18 +816,18 @@ fn vla_bit_column_unpacks_msb_first() {
 fn tfields_beyond_999_is_rejected() {
     // §7.3.1 caps TFIELDS at 999; an absurd value must error, not size a huge Vec.
     let mut header = table_header(0, 0, &[]);
-    header.set("TFIELDS", 1000);
+    header.set_internal("TFIELDS", 1000);
     assert!(matches!(
         BinTable::from_data(&header, vec![]),
         Err(FitsError::KeywordOutOfRange { name: "TFIELDS" })
     ));
 
-    header.set("TFIELDS", 0).set("NAXIS1", -1);
+    header.set_internal("TFIELDS", 0).set_internal("NAXIS1", -1);
     assert!(matches!(
         BinTable::from_data(&header, vec![]),
         Err(FitsError::KeywordOutOfRange { name: "NAXIS1" })
     ));
-    header.set("NAXIS1", 0).set("PCOUNT", -1);
+    header.set_internal("NAXIS1", 0).set_internal("PCOUNT", -1);
     assert!(matches!(
         BinTable::from_data(&header, vec![]),
         Err(FitsError::KeywordOutOfRange { name: "PCOUNT" })

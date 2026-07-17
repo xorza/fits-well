@@ -2,14 +2,14 @@ use crate::block::ZERO_FILL;
 use crate::block::padded_len;
 use crate::checksum;
 #[cfg(feature = "compression")]
-use crate::compress::CompressOptions;
-use crate::data::{ImageData, Scaling, UnsignedView};
+use crate::compress::{Compression, CompressionOptions};
+use crate::data::{ImageData, Scaling, UnsignedData};
 use crate::hdu::{HduKind, MAX_TABLE_FIELDS};
 use crate::header::from_card_lines as header;
 use crate::header::value::Value;
 use crate::reader::FitsReader;
 use crate::reader::{ChecksumReport, ChecksumStatus};
-use crate::table::{CharacterField, ColumnData};
+use crate::table_impl::{CharacterField, ColumnData};
 use crate::writer::*;
 use bitvec::bitvec;
 use bitvec::order::Msb0;
@@ -59,54 +59,68 @@ fn identity() -> Scaling {
     }
 }
 
+fn binary_table(nrows: usize, columns: &[WriteColumn]) -> TableBuilder {
+    TableBuilder {
+        nrows: Some(nrows),
+        columns: columns.to_vec(),
+    }
+}
+
+fn ascii_table(nrows: usize, columns: &[AsciiWriteColumn]) -> AsciiTableBuilder {
+    AsciiTableBuilder {
+        nrows: Some(nrows),
+        columns: columns.to_vec(),
+    }
+}
+
 fn informational_header_template() -> Header {
     let mut header = Header::new();
     header
-        .set("SIMPLE", false)
-        .set("XTENSION", "TABLE")
-        .set("BITPIX", 64)
-        .set("NAXIS", 3)
-        .set("NAXIS1", 999)
-        .set("NAXIS2", 999)
-        .set("NAXIS3", 999)
-        .set("PCOUNT", 999)
-        .set("GCOUNT", 999)
-        .set("TFIELDS", 999)
-        .set("TFORM1", "99D")
-        .set("TTYPE1", "STALE")
-        .set("TUNIT1", "stale")
-        .set("TDIM1", "(99)")
-        .set("TSCAL1", 99.0)
-        .set("TZERO1", 99.0)
-        .set("TNULL1", 99)
-        .set("TBCOL1", 99)
-        .set("NAXIS01", "preserved lookalike")
-        .set("TFORM01", "preserved lookalike")
-        .set("ZFORM01", "preserved lookalike")
-        .set("BSCALE", 99.0)
-        .set("BZERO", 99.0)
-        .set("BLANK", 99)
-        .set("CHECKSUM", "stale")
-        .set("DATASUM", "999")
-        .set("ZIMAGE", false)
-        .set("ZCMPTYPE", "STALE")
-        .set("ZBITPIX", 64)
-        .set("ZNAXIS", 3)
-        .set("ZNAXIS1", 999)
-        .set("ZTILE1", 999)
-        .set("ZSIMPLE", false)
-        .set("OBJECT", "M42")
-        .set("EXTNAME", "SCI")
-        .set("CTYPE1", "RA---TAN")
-        .set("CUNIT1", "deg")
-        .set("CRPIX1", 1.0)
-        .set("CRVAL1", 83.822)
-        .set("CDELT1", 0.1)
-        .set("TIMESYS", "UTC")
-        .set("MJDREF", 60_000.0)
-        .push_comment("first preserved comment")
-        .push_history("preserved history")
-        .push_comment("second preserved comment");
+        .set_internal("SIMPLE", false)
+        .set_internal("XTENSION", "TABLE")
+        .set_internal("BITPIX", 64)
+        .set_internal("NAXIS", 3)
+        .set_internal("NAXIS1", 999)
+        .set_internal("NAXIS2", 999)
+        .set_internal("NAXIS3", 999)
+        .set_internal("PCOUNT", 999)
+        .set_internal("GCOUNT", 999)
+        .set_internal("TFIELDS", 999)
+        .set_internal("TFORM1", "99D")
+        .set_internal("TTYPE1", "STALE")
+        .set_internal("TUNIT1", "stale")
+        .set_internal("TDIM1", "(99)")
+        .set_internal("TSCAL1", 99.0)
+        .set_internal("TZERO1", 99.0)
+        .set_internal("TNULL1", 99)
+        .set_internal("TBCOL1", 99)
+        .set_internal("NAXIS01", "preserved lookalike")
+        .set_internal("TFORM01", "preserved lookalike")
+        .set_internal("ZFORM01", "preserved lookalike")
+        .set_internal("BSCALE", 99.0)
+        .set_internal("BZERO", 99.0)
+        .set_internal("BLANK", 99)
+        .set_internal("CHECKSUM", "stale")
+        .set_internal("DATASUM", "999")
+        .set_internal("ZIMAGE", false)
+        .set_internal("ZCMPTYPE", "STALE")
+        .set_internal("ZBITPIX", 64)
+        .set_internal("ZNAXIS", 3)
+        .set_internal("ZNAXIS1", 999)
+        .set_internal("ZTILE1", 999)
+        .set_internal("ZSIMPLE", false)
+        .set_internal("OBJECT", "M42")
+        .set_internal("EXTNAME", "SCI")
+        .set_internal("CTYPE1", "RA---TAN")
+        .set_internal("CUNIT1", "deg")
+        .set_internal("CRPIX1", 1.0)
+        .set_internal("CRVAL1", 83.822)
+        .set_internal("CDELT1", 0.1)
+        .set_internal("TIMESYS", "UTC")
+        .set_internal("MJDREF", 60_000.0);
+    header.push_comment("first preserved comment").unwrap();
+    header.push_history("preserved history").unwrap();
+    header.push_comment("second preserved comment").unwrap();
     header
 }
 
@@ -144,12 +158,15 @@ fn assert_informational_header(header: &Header) {
 
 fn checksum_report_for_keywords(datasum: Option<&str>, checksum: Option<&str>) -> ChecksumReport {
     let mut header = Header::new();
-    header.set("SIMPLE", true).set("BITPIX", 8).set("NAXIS", 0);
+    header
+        .set_internal("SIMPLE", true)
+        .set_internal("BITPIX", 8)
+        .set_internal("NAXIS", 0);
     if let Some(value) = datasum {
-        header.set("DATASUM", value);
+        header.set_internal("DATASUM", value);
     }
     if let Some(value) = checksum {
-        header.set("CHECKSUM", value);
+        header.set_internal("CHECKSUM", value);
     }
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer.write_raw_hdu(&header, &[]).unwrap();
@@ -178,10 +195,10 @@ fn patch_null_string(header_bytes: &mut [u8], keyword: &[u8; 8]) {
 fn valid_checksum_only_report() -> ChecksumReport {
     let mut header = Header::new();
     header
-        .set("SIMPLE", true)
-        .set("BITPIX", 8)
-        .set("NAXIS", 0)
-        .set("CHECKSUM", PLACEHOLDER_CHECKSUM);
+        .set_internal("SIMPLE", true)
+        .set_internal("BITPIX", 8)
+        .set_internal("NAXIS", 0)
+        .set_internal("CHECKSUM", PLACEHOLDER_CHECKSUM);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer.write_raw_hdu(&header, &[]).unwrap();
     let mut bytes = writer.into_inner().into_inner();
@@ -260,7 +277,7 @@ fn vla_columns_by_stored_type() -> Vec<TypedWriteColumn> {
     vec![
         TypedWriteColumn {
             stored_type: 'L',
-            column: WriteColumn::vla(
+            column: WriteColumn::vla_typed(
                 "PL",
                 ColumnType::Logical,
                 vec![ColumnData::Logical(vec![Some(true)])],
@@ -269,37 +286,41 @@ fn vla_columns_by_stored_type() -> Vec<TypedWriteColumn> {
         },
         TypedWriteColumn {
             stored_type: 'B',
-            column: WriteColumn::vla("PB", ColumnType::Byte, vec![ColumnData::Bytes(vec![1])])
-                .unwrap(),
+            column: WriteColumn::vla_typed(
+                "PB",
+                ColumnType::Byte,
+                vec![ColumnData::Bytes(vec![1])],
+            )
+            .unwrap(),
         },
         TypedWriteColumn {
             stored_type: 'I',
-            column: WriteColumn::vla("PI", ColumnType::I16, vec![ColumnData::I16(vec![1])])
+            column: WriteColumn::vla_typed("PI", ColumnType::I16, vec![ColumnData::I16(vec![1])])
                 .unwrap(),
         },
         TypedWriteColumn {
             stored_type: 'J',
-            column: WriteColumn::vla("PJ", ColumnType::I32, vec![ColumnData::I32(vec![1])])
+            column: WriteColumn::vla_typed("PJ", ColumnType::I32, vec![ColumnData::I32(vec![1])])
                 .unwrap(),
         },
         TypedWriteColumn {
             stored_type: 'K',
-            column: WriteColumn::vla("PK", ColumnType::I64, vec![ColumnData::I64(vec![1])])
+            column: WriteColumn::vla_typed("PK", ColumnType::I64, vec![ColumnData::I64(vec![1])])
                 .unwrap(),
         },
         TypedWriteColumn {
             stored_type: 'E',
-            column: WriteColumn::vla("PE", ColumnType::F32, vec![ColumnData::F32(vec![1.0])])
+            column: WriteColumn::vla_typed("PE", ColumnType::F32, vec![ColumnData::F32(vec![1.0])])
                 .unwrap(),
         },
         TypedWriteColumn {
             stored_type: 'D',
-            column: WriteColumn::vla("PD", ColumnType::F64, vec![ColumnData::F64(vec![1.0])])
+            column: WriteColumn::vla_typed("PD", ColumnType::F64, vec![ColumnData::F64(vec![1.0])])
                 .unwrap(),
         },
         TypedWriteColumn {
             stored_type: 'C',
-            column: WriteColumn::vla(
+            column: WriteColumn::vla_typed(
                 "PC",
                 ColumnType::ComplexF32,
                 vec![ColumnData::ComplexF32(vec![Complex::new(1.0, 2.0)])],
@@ -308,7 +329,7 @@ fn vla_columns_by_stored_type() -> Vec<TypedWriteColumn> {
         },
         TypedWriteColumn {
             stored_type: 'M',
-            column: WriteColumn::vla(
+            column: WriteColumn::vla_typed(
                 "PM",
                 ColumnType::ComplexF64,
                 vec![ColumnData::ComplexF64(vec![Complex::new(1.0, 2.0)])],
@@ -317,7 +338,7 @@ fn vla_columns_by_stored_type() -> Vec<TypedWriteColumn> {
         },
         TypedWriteColumn {
             stored_type: 'A',
-            column: WriteColumn::vla(
+            column: WriteColumn::vla_typed(
                 "PA",
                 ColumnType::Character,
                 vec![ColumnData::Character(vec!["a".into()])],
@@ -333,13 +354,13 @@ fn vla_columns_by_stored_type() -> Vec<TypedWriteColumn> {
 
 fn assert_table_column_writes(column: WriteColumn) {
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer.write_table(1, &[column]).unwrap();
+    writer.write_table(&binary_table(1, &[column])).unwrap();
 }
 
 fn assert_table_column_rejected(column: WriteColumn, keyword: &'static str) {
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(1, &[column]),
+        writer.write_table(&binary_table(1, &[column])),
         Err(FitsError::KeywordOutOfRange { name }) if name == keyword
     ));
     assert!(writer.into_inner().into_inner().is_empty());
@@ -403,7 +424,7 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
     let fixed = WriteColumn::fixed("X", ColumnData::Bytes(Vec::new()), usize::MAX);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(2, &[fixed]),
+        writer.write_table(&binary_table(2, &[fixed])),
         Err(FitsError::DataUnitOverflow)
     ));
 
@@ -419,14 +440,14 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
     };
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_ascii_table(0, &[ascii("A", usize::MAX), ascii("B", 1)]),
+        writer.write_ascii_table(&ascii_table(0, &[ascii("A", usize::MAX), ascii("B", 1)],)),
         Err(FitsError::DataUnitOverflow)
     ));
 
     let invalid_bits = WriteColumn::bits("FLAGS", vec![0; 3], 12);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(2, &[invalid_bits]),
+        writer.write_table(&binary_table(2, &[invalid_bits])),
         Err(FitsError::RowWidthMismatch {
             computed: 3,
             declared: 4
@@ -437,7 +458,7 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
     let invalid_vla_bits = WriteColumn::vla_bits("FLAGS", vec![bitvec![u8, Msb0; 1, 0, 1]]);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(2, &[invalid_vla_bits]),
+        writer.write_table(&binary_table(2, &[invalid_vla_bits])),
         Err(FitsError::RowWidthMismatch {
             computed: 1,
             declared: 2
@@ -449,7 +470,7 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
         WriteColumn::vla_bits("FLAGS", vec![bitvec![u8, Msb0; 1, 0, 1]]).with_tdim(vec![2, 2]);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(1, &[invalid_vla_bits]),
+        writer.write_table(&binary_table(1, &[invalid_vla_bits])),
         Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
     ));
     assert!(writer.into_inner().into_inner().is_empty());
@@ -458,19 +479,19 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
         WriteColumn::fixed("VEC", ColumnData::I32(vec![1, 2, 3, 4]), 4).with_tdim(vec![5]);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(1, &[invalid_tdim]),
+        writer.write_table(&binary_table(1, &[invalid_tdim])),
         Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
     ));
     assert!(writer.into_inner().into_inner().is_empty());
 
     for shape in [vec![], vec![0]] {
         let invalid_empty_vla =
-            WriteColumn::vla("VEC", ColumnType::I32, vec![ColumnData::I32(vec![])])
+            WriteColumn::vla_typed("VEC", ColumnType::I32, vec![ColumnData::I32(vec![])])
                 .unwrap()
                 .with_tdim(shape);
         let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
         assert!(matches!(
-            writer.write_table(1, &[invalid_empty_vla]),
+            writer.write_table(&binary_table(1, &[invalid_empty_vla])),
             Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
         ));
         assert!(writer.into_inner().into_inner().is_empty());
@@ -483,7 +504,7 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
     );
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(1, &[invalid_text]),
+        writer.write_table(&binary_table(1, &[invalid_text])),
         Err(FitsError::InvalidAscii {
             context: "binary character cell"
         })
@@ -494,7 +515,7 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
     {
         let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
         assert!(matches!(
-            writer.write_table(usize::MAX, &[]),
+            writer.write_table(&binary_table(usize::MAX, &[])),
             Err(FitsError::DataUnitOverflow)
         ));
     }
@@ -504,7 +525,7 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
 fn table_writers_enforce_the_exact_tfields_limit_before_output() {
     let binary = empty_binary_columns(MAX_TABLE_FIELDS);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer.write_table(0, &binary).unwrap();
+    writer.write_table(&binary_table(0, &binary)).unwrap();
     let reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
     assert_eq!(
         reader.hdus[1].header.get_integer("TFIELDS").unwrap(),
@@ -513,7 +534,7 @@ fn table_writers_enforce_the_exact_tfields_limit_before_output() {
 
     let ascii = empty_ascii_columns(MAX_TABLE_FIELDS);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer.write_ascii_table(0, &ascii).unwrap();
+    writer.write_ascii_table(&ascii_table(0, &ascii)).unwrap();
     let reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
     assert_eq!(
         reader.hdus[1].header.get_integer("TFIELDS").unwrap(),
@@ -523,7 +544,7 @@ fn table_writers_enforce_the_exact_tfields_limit_before_output() {
     let binary = empty_binary_columns(MAX_TABLE_FIELDS + 1);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(0, &binary),
+        writer.write_table(&binary_table(0, &binary)),
         Err(FitsError::KeywordOutOfRange { name: "TFIELDS" })
     ));
     assert!(writer.into_inner().into_inner().is_empty());
@@ -531,7 +552,7 @@ fn table_writers_enforce_the_exact_tfields_limit_before_output() {
     let ascii = empty_ascii_columns(MAX_TABLE_FIELDS + 1);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_ascii_table(0, &ascii),
+        writer.write_ascii_table(&ascii_table(0, &ascii)),
         Err(FitsError::KeywordOutOfRange { name: "TFIELDS" })
     ));
     assert!(writer.into_inner().into_inner().is_empty());
@@ -642,10 +663,10 @@ fn typed_table_header_templates_preserve_information_and_regenerate_structure() 
     }];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
-        .write_table_with_header(2, &binary, &template)
+        .write_table_with_header(&binary_table(2, &binary), &template)
         .unwrap();
     writer
-        .write_ascii_table_with_header(2, &ascii, &template)
+        .write_ascii_table_with_header(&ascii_table(2, &ascii), &template)
         .unwrap();
 
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
@@ -717,10 +738,10 @@ fn writes_and_reads_back_variable_length_arrays() {
     ];
     let columns = vec![
         WriteColumn::fixed("ID", ColumnData::I32(vec![1, 2, 3]), 1),
-        WriteColumn::vla("DATA", ColumnType::I32, vla_rows.clone()).unwrap(),
+        WriteColumn::vla_typed("DATA", ColumnType::I32, vla_rows.clone()).unwrap(),
     ];
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(3, &columns).unwrap();
+    w.write_table(&binary_table(3, &columns)).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let table = r.read_table(1).unwrap();
     // TFORM2 should be a P descriptor sized to the longest row (5).
@@ -734,14 +755,14 @@ fn writes_and_reads_back_variable_length_arrays() {
         }
     }
 
-    let empty = [WriteColumn::vla("EMPTY", ColumnType::I64, Vec::new()).unwrap()];
+    let empty = [WriteColumn::vla_typed("EMPTY", ColumnType::I64, Vec::new()).unwrap()];
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(0, &empty).unwrap();
+    w.write_table(&binary_table(0, &empty)).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let table = r.read_table(1).unwrap();
     assert_eq!(
         table.metadata().columns[0].tform.vla_elem,
-        Some(crate::table::TformKind::I64)
+        Some(crate::table_impl::TformKind::I64)
     );
     assert!(table.column_by_idx(0).unwrap().vla().unwrap().is_empty());
 }
@@ -749,7 +770,7 @@ fn writes_and_reads_back_variable_length_arrays() {
 #[test]
 fn vla_constructor_rejects_mixed_element_types() {
     assert!(matches!(
-        WriteColumn::vla("BAD", ColumnType::I16, vec![ColumnData::I32(vec![1])]),
+        WriteColumn::vla_typed("BAD", ColumnType::I16, vec![ColumnData::I32(vec![1])]),
         Err(FitsError::TypeMismatch { name, expected })
             if name == "VLA column \"BAD\" row 0" && expected == "i16 column data"
     ));
@@ -761,12 +782,12 @@ fn vla_constructor_rejects_mixed_element_types() {
 
 #[test]
 fn writes_tdim_p_q_vla_and_bit_columns() {
-    use crate::table::TformKind;
+    use crate::table_impl::TformKind;
     let columns = vec![
         // 2×2 multidimensional column (TDIM '(2,2)'), 4 elements/row.
         WriteColumn::fixed("MAT", ColumnData::I32((1..=8).collect()), 4).with_tdim(vec![2, 2]),
         // 64-bit Q VLA column.
-        WriteColumn::vla(
+        WriteColumn::vla_typed(
             "QV",
             ColumnType::I16,
             vec![ColumnData::I16(vec![]), ColumnData::I16(vec![7, 8, 9, 10])],
@@ -775,14 +796,14 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
         .with_tdim(vec![2, 2])
         .wide()
         .unwrap(),
-        WriteColumn::vla(
+        WriteColumn::vla_typed(
             "PV",
             ColumnType::I16,
             vec![ColumnData::I16(vec![]), ColumnData::I16(vec![1, 2, 3, 4])],
         )
         .unwrap()
         .with_tdim(vec![2, 2]),
-        WriteColumn::vla(
+        WriteColumn::vla_typed(
             "TXT",
             ColumnType::Character,
             vec![
@@ -795,7 +816,7 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
         WriteColumn::bits("FLAGS", vec![0xAB, 0xCF, 0x12, 0x3F], 12),
     ];
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(2, &columns).unwrap();
+    w.write_table(&binary_table(2, &columns)).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let t = r.read_table(1).unwrap();
     let metadata = t.metadata();
@@ -836,7 +857,7 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
 
 #[test]
 fn writes_p_q_variable_length_bit_arrays_with_exact_counts_and_padding() {
-    use crate::table::TformKind;
+    use crate::table_impl::TformKind;
 
     let mut one_bit = bitvec![u8, Msb0; 1; 8];
     one_bit.truncate(1);
@@ -856,7 +877,7 @@ fn writes_p_q_variable_length_bit_arrays_with_exact_counts_and_padding() {
             .unwrap(),
     ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer.write_table(3, &columns).unwrap();
+    writer.write_table(&binary_table(3, &columns)).unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
 
     assert_eq!(
@@ -911,7 +932,7 @@ fn writes_tscal_tzero_tnull_and_reads_back_physical() {
             .with_null(99),
     ];
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(2, &columns).unwrap();
+    w.write_table(&binary_table(2, &columns)).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     assert_eq!(r.hdus[1].header.get_real("TSCAL1").unwrap(), Some(2.0));
     assert_eq!(r.hdus[1].header.get_real("TZERO1").unwrap(), Some(10.0));
@@ -962,7 +983,7 @@ fn integer_column(kind: ColumnType, vla: bool) -> WriteColumn {
         _ => panic!("integer_column requires an integer stored type"),
     };
     if vla {
-        WriteColumn::vla("PINT", kind, vec![data]).unwrap()
+        WriteColumn::vla_typed("PINT", kind, vec![data]).unwrap()
     } else {
         WriteColumn::fixed("INT", data, 1)
     }
@@ -1065,7 +1086,7 @@ fn writes_and_reads_back_a_binary_table() {
         ),
     ];
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(3, &columns).unwrap();
+    w.write_table(&binary_table(3, &columns)).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
 
     // A dataless primary is auto-written before the table extension.
@@ -1113,14 +1134,14 @@ fn binary_character_columns_round_trip_exactly_and_reject_over_width() {
         .collect();
     let columns = [
         WriteColumn::fixed("FIXED", ColumnData::Character(fields.clone()), 4),
-        WriteColumn::vla("PCHAR", ColumnType::Character, vla_rows.clone()).unwrap(),
-        WriteColumn::vla("QCHAR", ColumnType::Character, vla_rows.clone())
+        WriteColumn::vla_typed("PCHAR", ColumnType::Character, vla_rows.clone()).unwrap(),
+        WriteColumn::vla_typed("QCHAR", ColumnType::Character, vla_rows.clone())
             .unwrap()
             .wide()
             .unwrap(),
     ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer.write_table(4, &columns).unwrap();
+    writer.write_table(&binary_table(4, &columns)).unwrap();
     let bytes = writer.into_inner().into_inner();
 
     let mut reader = FitsReader::open(Cursor::new(bytes)).unwrap();
@@ -1152,7 +1173,7 @@ fn binary_character_columns_round_trip_exactly_and_reject_over_width() {
     );
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(1, &[too_wide]),
+        writer.write_table(&binary_table(1, &[too_wide])),
         Err(FitsError::RowWidthMismatch {
             computed: 5,
             declared: 4
@@ -1213,7 +1234,7 @@ fn header_round_trips_through_render_and_parse() {
 
     let mut invalid = Header::new();
     assert!(matches!(
-        invalid.try_set("OBJECT", "Véga"),
+        invalid.set("OBJECT", "Véga"),
         Err(FitsError::InvalidAscii {
             context: "header text value"
         })
@@ -1272,7 +1293,7 @@ fn from_u16_round_trips_through_write_and_read() {
     assert_eq!(r.hdus[0].header.get_real("BZERO").unwrap(), Some(32768.0));
     assert_eq!(
         r.read_image(0).unwrap().unsigned(),
-        Some(UnsignedView::U16(vec![0, 32768, 65535]))
+        Some(UnsignedData::U16(vec![0, 32768, 65535]))
     );
 }
 
@@ -1293,7 +1314,7 @@ fn from_u64_writes_the_exact_offset_and_round_trips_extremes() {
     assert_eq!(offset.to_string(), "9223372036854775808");
     assert_eq!(
         reader.read_image(0).unwrap().unsigned(),
-        Some(UnsignedView::U64(vec![u64::MIN, u64::MAX]))
+        Some(UnsignedData::U64(vec![u64::MIN, u64::MAX]))
     );
 }
 
@@ -1306,17 +1327,17 @@ fn i64_table_scaling_writes_the_exact_unsigned_offset() {
     let columns = [
         WriteColumn::fixed("U64", ColumnData::I64(vec![i64::MIN, i64::MAX]), 1)
             .scaled(1.0, 9_223_372_036_854_775_808.0),
-        WriteColumn::vla("PU64", ColumnType::I64, rows.clone())
+        WriteColumn::vla_typed("PU64", ColumnType::I64, rows.clone())
             .unwrap()
             .scaled(1.0, 9_223_372_036_854_775_808.0),
-        WriteColumn::vla("QU64", ColumnType::I64, rows.clone())
+        WriteColumn::vla_typed("QU64", ColumnType::I64, rows.clone())
             .unwrap()
             .wide()
             .unwrap()
             .scaled(1.0, 9_223_372_036_854_775_808.0),
     ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer.write_table(2, &columns).unwrap();
+    writer.write_table(&binary_table(2, &columns)).unwrap();
     let bytes = writer.into_inner().into_inner();
     for keyword in ["TZERO1  ", "TZERO2  ", "TZERO3  "] {
         let tzero = bytes
@@ -1338,7 +1359,7 @@ fn i64_table_scaling_writes_the_exact_unsigned_offset() {
     let table = reader.read_table(1).unwrap();
     assert_eq!(
         table.column_by_idx(0).unwrap().unsigned().unwrap(),
-        Some(UnsignedView::U64(vec![u64::MIN, u64::MAX]))
+        Some(UnsignedData::U64(vec![u64::MIN, u64::MAX]))
     );
     assert_eq!(table.column_by_idx(1).unwrap().vla().unwrap(), rows);
     assert_eq!(table.column_by_idx(2).unwrap().vla().unwrap(), rows);
@@ -1692,7 +1713,7 @@ fn compressed_image_metadata_is_validated_before_automatic_primary() {
     };
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_compressed_image(&image, "GZIP_1", &CompressOptions::default()),
+        writer.write_compressed_image(&image, Compression::GZIP, &CompressionOptions::default()),
         Err(FitsError::KeywordOutOfRange { name: "BLANK" })
     ));
     assert!(writer.into_inner().into_inner().is_empty());
@@ -1704,7 +1725,7 @@ fn compressed_image_metadata_is_validated_before_automatic_primary() {
     };
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_compressed_image(&image, "RICE_1", &CompressOptions::default()),
+        writer.write_compressed_image(&image, Compression::Rice, &CompressionOptions::default()),
         Err(FitsError::UnsupportedCompression { .. })
     ));
     assert!(writer.into_inner().into_inner().is_empty());
@@ -1723,8 +1744,8 @@ fn compressed_header_templates_preserve_information_and_regenerate_structure() {
     writer
         .write_compressed_image_with_header(
             &image,
-            "GZIP_1",
-            &CompressOptions::default(),
+            Compression::GZIP,
+            &CompressionOptions::default(),
             &template,
         )
         .unwrap();
@@ -1750,7 +1771,7 @@ fn compressed_header_templates_preserve_information_and_regenerate_structure() {
     )];
     let mut source_writer = FitsWriter::new(Cursor::new(Vec::new()));
     source_writer
-        .write_table_with_header(3, &columns, &template)
+        .write_table_with_header(&binary_table(3, &columns), &template)
         .unwrap();
     let mut source =
         FitsReader::open(Cursor::new(source_writer.into_inner().into_inner())).unwrap();
@@ -1759,7 +1780,7 @@ fn compressed_header_templates_preserve_information_and_regenerate_structure() {
 
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
-        .write_compressed_table(&source_header, &source_table, 2, "GZIP_1")
+        .write_compressed_table(&source_header, &source_table, 2, Compression::GZIP)
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
     let header = &reader.hdus[1].header;
@@ -1780,10 +1801,10 @@ fn compressed_header_templates_preserve_information_and_regenerate_structure() {
     );
 
     let mut conflicting = source_header.clone();
-    conflicting.set("NAXIS2", 99);
+    conflicting.set_internal("NAXIS2", 99);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_compressed_table(&conflicting, &source_table, 2, "GZIP_1"),
+        writer.write_compressed_table(&conflicting, &source_table, 2, Compression::GZIP),
         Err(FitsError::TableMetadataMismatch { name }) if name == "NAXIS2"
     ));
     assert!(writer.into_inner().into_inner().is_empty());
@@ -1798,7 +1819,7 @@ fn logical_column_round_trips_with_null_state() {
         1,
     )];
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(3, &columns).unwrap();
+    w.write_table(&binary_table(3, &columns)).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     assert_eq!(
         r.read_table(1)
@@ -1809,4 +1830,163 @@ fn logical_column_round_trips_with_null_state() {
             .unwrap(),
         ColumnData::Logical(vec![Some(true), None, Some(false)])
     );
+}
+
+#[test]
+fn table_builders_infer_rows_and_reject_cross_column_mismatches() {
+    let mut binary = TableBuilder::new();
+    binary
+        .push(WriteColumn::scalar("ID", ColumnData::I32(vec![1, 2, 3])))
+        .unwrap();
+    binary
+        .push(WriteColumn::fixed(
+            "PAIR",
+            ColumnData::I16(vec![10, 11, 20, 21, 30, 31]),
+            2,
+        ))
+        .unwrap();
+    assert_eq!(binary.nrows, Some(3));
+    assert!(matches!(
+        binary.push(WriteColumn::scalar(
+            "SHORT",
+            ColumnData::F64(vec![1.0, 2.0]),
+        )),
+        Err(FitsError::TableRowCountMismatch {
+            column,
+            expected: 3,
+            got: 2,
+        }) if column == "SHORT"
+    ));
+
+    let inferred_vla = WriteColumn::vla(
+        "SAMPLES",
+        vec![
+            ColumnData::I16(vec![1, 2]),
+            ColumnData::I16(Vec::new()),
+            ColumnData::I16(vec![3]),
+        ],
+    )
+    .unwrap();
+    binary.push(inferred_vla).unwrap();
+    assert!(matches!(
+        WriteColumn::vla("EMPTY", Vec::new()),
+        Err(FitsError::EmptyVlaNeedsType { column }) if column == "EMPTY"
+    ));
+    TableBuilder::with_rows(0)
+        .column(WriteColumn::vla_typed("EMPTY", ColumnType::I64, Vec::new()).unwrap())
+        .unwrap();
+
+    let ascii = AsciiTableBuilder::new()
+        .column(AsciiWriteColumn::new(
+            "NAME",
+            AsciiColumnData::Text(vec![Some("A".into()), Some("B".into())]),
+            2,
+        ))
+        .unwrap()
+        .column(
+            AsciiWriteColumn::new("VALUE", AsciiColumnData::Float(vec![Some(1.25), None]), 8)
+                .with_decimals(2)
+                .with_null("NULL"),
+        )
+        .unwrap();
+    assert_eq!(ascii.nrows, Some(2));
+}
+
+#[test]
+fn streaming_image_matches_transactional_output_and_checksums() {
+    let samples = vec![1i16, -2, 300, i16::MIN, i16::MAX, 42];
+    let scaling = Scaling {
+        bscale: 2.5,
+        bzero: -10.0,
+        blank: Some(i16::MIN as i64),
+    };
+    let image = Image::new_scaled(vec![3, 2], samples.clone(), scaling).unwrap();
+    let mut template = Header::new();
+    template.set("OBJECT", "streamed").unwrap();
+
+    let mut regular = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
+    regular.write_image_with_header(&image, &template).unwrap();
+    let expected = regular.into_inner().into_inner();
+
+    let mut streamed = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
+    {
+        let mut image_stream = streamed
+            .stream_image_with_header(vec![3, 2], Bitpix::I16, scaling, &template)
+            .unwrap();
+        image_stream
+            .write_chunk(&ImageData::I16(samples[..2].to_vec()))
+            .unwrap();
+        image_stream
+            .write_chunk(&ImageData::I16(samples[2..5].to_vec()))
+            .unwrap();
+        image_stream
+            .write_chunk(&ImageData::I16(samples[5..].to_vec()))
+            .unwrap();
+        image_stream.finish().unwrap();
+    }
+    let actual = streamed.into_inner().into_inner();
+    assert_eq!(actual, expected);
+
+    let mut regular_scaled = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
+    regular_scaled.write_image(&image).unwrap();
+    let expected_scaled = regular_scaled.into_inner().into_inner();
+    let mut streamed_scaled = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
+    {
+        let mut image_stream = streamed_scaled
+            .stream_image_scaled(vec![3, 2], Bitpix::I16, scaling)
+            .unwrap();
+        image_stream
+            .write_chunk(&ImageData::I16(samples[..3].to_vec()))
+            .unwrap();
+        image_stream
+            .write_chunk(&ImageData::I16(samples[3..].to_vec()))
+            .unwrap();
+        image_stream.finish().unwrap();
+    }
+    assert_eq!(streamed_scaled.into_inner().into_inner(), expected_scaled);
+
+    let mut reader = FitsReader::from_bytes(&actual).unwrap();
+    assert_eq!(
+        reader.verify_checksum(0).unwrap(),
+        ChecksumReport {
+            datasum: ChecksumStatus::Valid,
+            checksum: ChecksumStatus::Valid,
+        }
+    );
+    assert_eq!(
+        reader.read_image(0).unwrap().decode(),
+        ImageData::I16(samples)
+    );
+}
+
+#[test]
+fn unfinished_or_invalid_image_stream_poisons_the_writer() {
+    let fallback = Image::new(vec![1], vec![7u8]).unwrap();
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    {
+        let mut stream = writer.stream_image(vec![2], Bitpix::I16).unwrap();
+        assert!(matches!(
+            stream.write_chunk(&ImageData::U8(vec![1])),
+            Err(FitsError::TypeMismatch { name, expected })
+                if name == "streaming image chunk" && expected == "i16 image data"
+        ));
+    }
+    assert!(matches!(
+        writer.write_image(&fallback),
+        Err(FitsError::WriterFailed)
+    ));
+
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    let stream = writer.stream_image(vec![2], Bitpix::I32).unwrap();
+    assert!(matches!(
+        stream.finish(),
+        Err(FitsError::DataSizeMismatch {
+            expected: 2,
+            got: 0,
+        })
+    ));
+    assert!(matches!(
+        writer.write_image(&fallback),
+        Err(FitsError::WriterFailed)
+    ));
 }

@@ -19,7 +19,7 @@ use num_complex::Complex;
 use crate::data::U16_OFFSET;
 use crate::data::U32_OFFSET;
 use crate::data::U64_OFFSET;
-use crate::data::UnsignedView;
+use crate::data::UnsignedData;
 use crate::endian::decode_be;
 use crate::error::FitsError;
 use crate::error::Result;
@@ -139,10 +139,12 @@ impl Tform {
         } else {
             s[..pos].parse().map_err(|_| invalid())?
         };
-        let kind = TformKind::from_code(s.as_bytes()[pos]).ok_or_else(invalid)?;
-        // A P/Q descriptor is followed by its heap element-type letter (`rPt`).
+        let bytes = s.as_bytes();
+        let kind = TformKind::from_code(bytes[pos]).ok_or_else(invalid)?;
+        // A P/Q descriptor is followed by its heap element-type letter (`rPt`) and
+        // may carry one complete `(emax)` hint. Fixed formats end after their code.
         let vla_elem = if matches!(kind, TformKind::ArrayDesc32 | TformKind::ArrayDesc64) {
-            let elem = s.as_bytes().get(pos + 1).copied().ok_or_else(invalid)?;
+            let elem = bytes.get(pos + 1).copied().ok_or_else(invalid)?;
             // §6.3: a `P`/`Q` descriptor's repeat count is restricted to 0 or 1.
             if repeat > 1 {
                 return Err(invalid());
@@ -151,8 +153,22 @@ impl Tform {
             if matches!(elem, TformKind::ArrayDesc32 | TformKind::ArrayDesc64) {
                 return Err(invalid());
             }
+            let suffix = &s[pos + 2..];
+            if !suffix.is_empty() {
+                let hint = suffix
+                    .strip_prefix('(')
+                    .and_then(|value| value.strip_suffix(')'))
+                    .filter(|value| {
+                        !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+                    .ok_or_else(invalid)?;
+                hint.parse::<usize>().map_err(|_| invalid())?;
+            }
             Some(elem)
         } else {
+            if pos + 1 != s.len() {
+                return Err(invalid());
+            }
             None
         };
         Ok(Tform {
@@ -215,15 +231,18 @@ pub struct TDisp {
 
 impl TDisp {
     /// Parse a `TDISPn` value such as `"I5"`, `"F8.2"`, `"E12.5E3"`, `"ES15.6"`, or
-    /// `"A20"`. Returns `None` if the format letter or width is missing/invalid.
-    pub fn parse(s: &str) -> Option<TDisp> {
-        let s = s.trim().to_ascii_uppercase();
+    /// `"A20"`. The complete string must match the grammar.
+    pub fn parse(value: &str) -> Result<TDisp> {
+        let invalid = || FitsError::InvalidTdisp {
+            tdisp: value.to_string(),
+        };
+        let s = value.trim().to_ascii_uppercase();
         let (kind, rest) = if let Some(r) = s.strip_prefix("EN") {
             (TDispKind::Engineering, r)
         } else if let Some(r) = s.strip_prefix("ES") {
             (TDispKind::Scientific, r)
         } else {
-            let kind = match s.bytes().next()? {
+            let kind = match s.bytes().next().ok_or_else(invalid)? {
                 b'A' => TDispKind::Char,
                 b'L' => TDispKind::Logical,
                 b'I' => TDispKind::Integer,
@@ -234,22 +253,35 @@ impl TDisp {
                 b'E' => TDispKind::Exponential,
                 b'G' => TDispKind::General,
                 b'D' => TDispKind::Double,
-                _ => return None,
+                _ => return Err(invalid()),
             };
             (kind, &s[1..])
         };
+        if rest.is_empty() || rest.matches('E').count() > 1 || rest.matches('.').count() > 1 {
+            return Err(invalid());
+        }
         // rest = width[.decimals][E exponent]
         let (main, exponent) = match rest.split_once('E') {
-            Some((m, e)) => (m, Some(e.parse().ok()?)),
+            Some((m, e)) if !m.is_empty() && !e.is_empty() => {
+                (m, Some(e.parse().map_err(|_| invalid())?))
+            }
+            Some(_) => return Err(invalid()),
             None => (rest, None),
         };
         let (width, decimals) = match main.split_once('.') {
-            Some((w, d)) => (w, Some(d.parse().ok()?)),
+            Some((w, d)) if !w.is_empty() && !d.is_empty() => {
+                (w, Some(d.parse().map_err(|_| invalid())?))
+            }
+            Some(_) => return Err(invalid()),
             None => (main, None),
         };
-        Some(TDisp {
+        let width = width.parse().map_err(|_| invalid())?;
+        if width == 0 {
+            return Err(invalid());
+        }
+        Ok(TDisp {
             kind,
-            width: width.parse().ok()?,
+            width,
             decimals,
             exponent,
         })
@@ -400,6 +432,17 @@ pub struct BinTableMetadata<'a> {
     pub columns: &'a [Column],
 }
 
+/// Binary-table schema parsed entirely from the header, without reading the data
+/// unit. Byte offsets are relative to the start of the data unit.
+#[derive(Debug, Clone)]
+pub struct TableSchema {
+    pub nrows: usize,
+    pub row_len: usize,
+    pub heap_offset: usize,
+    pub heap_end: usize,
+    pub columns: Vec<Column>,
+}
+
 fn required_usize(header: &Header, keyword: &str, name: &'static str) -> Result<usize> {
     let value = header
         .get_integer(keyword)?
@@ -438,9 +481,8 @@ impl BinTable {
         }
     }
 
-    /// Build a table from its header and owned data unit (`data` is the main
-    /// table followed by the optional heap, as returned by the reader).
-    pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<BinTable> {
+    /// Parse the complete binary-table schema without touching its data unit.
+    pub fn schema(header: &Header) -> Result<TableSchema> {
         let row_len = required_usize(header, "NAXIS1", "NAXIS1")?;
         let nrows = required_usize(header, "NAXIS2", "NAXIS2")?;
         // §7.3.1: `0 ≤ TFIELDS ≤ 999` — also a guard, since `tfields` sizes the
@@ -482,7 +524,8 @@ impl BinTable {
                 tdim,
                 tdisp: header
                     .get_text(key!("TDISP{n}").as_str())?
-                    .and_then(TDisp::parse),
+                    .map(TDisp::parse)
+                    .transpose()?,
                 byte_offset: offset,
             });
             offset = offset.saturating_add(tform.byte_width());
@@ -497,9 +540,6 @@ impl BinTable {
         // `nrows · row_len` from untrusted axes: check once (guards a 32-bit-usize
         // overflow that `data_extent`'s u64 math wouldn't catch) and reuse.
         let main_table = nrows.checked_mul(row_len).ok_or(FitsError::UnexpectedEof)?;
-        if data.len() < main_table {
-            return Err(FitsError::UnexpectedEof);
-        }
         let heap_offset = optional_usize(header, "THEAP", "THEAP", main_table)?;
         // §6.6: the heap follows the main table, so THEAP must be ≥ its size.
         if heap_offset < main_table {
@@ -510,14 +550,32 @@ impl BinTable {
         let pcount = optional_usize(header, "PCOUNT", "PCOUNT", 0)?;
         let heap_end = main_table
             .checked_add(pcount)
-            .ok_or(FitsError::UnexpectedEof)?
-            .min(data.len());
-        Ok(BinTable {
+            .ok_or(FitsError::UnexpectedEof)?;
+        if heap_offset > heap_end {
+            return Err(FitsError::KeywordOutOfRange { name: "THEAP" });
+        }
+        Ok(TableSchema {
             nrows,
-            columns,
             row_len,
             heap_offset,
             heap_end,
+            columns,
+        })
+    }
+
+    /// Build a table from its header and owned data unit (`data` is the main
+    /// table followed by the optional heap, as returned by the reader).
+    pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<BinTable> {
+        let schema = BinTable::schema(header)?;
+        if data.len() < schema.heap_end {
+            return Err(FitsError::UnexpectedEof);
+        }
+        Ok(BinTable {
+            nrows: schema.nrows,
+            columns: schema.columns,
+            row_len: schema.row_len,
+            heap_offset: schema.heap_offset,
+            heap_end: schema.heap_end,
             bytes: data,
         })
     }
@@ -696,7 +754,7 @@ impl<'a> ColumnReader<'a> {
     /// on a `B`/`I`/`J`/`K` column — without the `f64` rounding of
     /// [`physical`](Self::physical). `Ok(None)` for any other column; errors only for a
     /// variable-length column. Mirrors [`crate::Image::unsigned`].
-    pub fn unsigned(&self) -> Result<Option<UnsignedView>> {
+    pub fn unsigned(&self) -> Result<Option<UnsignedData>> {
         let col = self.descriptor();
         if matches!(
             col.tform.kind,
@@ -775,10 +833,10 @@ impl<'a> ColumnReader<'a> {
 
     /// Exact typed integers for each row of a `P`/`Q` heap array using the FITS
     /// unsigned (or signed-byte) convention. The outer vector is table rows; each
-    /// row's [`UnsignedView`] owns its jagged array. Returns `Ok(None)` unless the
+    /// row's [`UnsignedData`] owns its jagged array. Returns `Ok(None)` unless the
     /// heap type and `TSCALn`/`TZEROn`/`TNULLn` metadata form that convention.
     /// Errors for fixed-width columns.
-    pub fn vla_unsigned(&self) -> Result<Option<Vec<UnsignedView>>> {
+    pub fn vla_unsigned(&self) -> Result<Option<Vec<UnsignedData>>> {
         let col = self.descriptor();
         let column = self.vla_column()?;
         let Some(kind) =
@@ -1141,16 +1199,16 @@ fn unsigned_cells<'a>(
     cells: impl Iterator<Item = &'a [u8]>,
     capacity: usize,
     kind: UnsignedKind,
-) -> UnsignedView {
+) -> UnsignedData {
     match kind {
-        UnsignedKind::I8 => UnsignedView::I8(map_cells(cells, capacity, |[x]| (x ^ 0x80) as i8)),
-        UnsignedKind::U16 => UnsignedView::U16(map_cells(cells, capacity, |bytes| {
+        UnsignedKind::I8 => UnsignedData::I8(map_cells(cells, capacity, |[x]| (x ^ 0x80) as i8)),
+        UnsignedKind::U16 => UnsignedData::U16(map_cells(cells, capacity, |bytes| {
             (i16::from_be_bytes(bytes) as u16) ^ 0x8000
         })),
-        UnsignedKind::U32 => UnsignedView::U32(map_cells(cells, capacity, |bytes| {
+        UnsignedKind::U32 => UnsignedData::U32(map_cells(cells, capacity, |bytes| {
             (i32::from_be_bytes(bytes) as u32) ^ 0x8000_0000
         })),
-        UnsignedKind::U64 => UnsignedView::U64(map_cells(cells, capacity, |bytes| {
+        UnsignedKind::U64 => UnsignedData::U64(map_cells(cells, capacity, |bytes| {
             (i64::from_be_bytes(bytes) as u64) ^ 0x8000_0000_0000_0000
         })),
     }
@@ -1297,7 +1355,7 @@ fn be_u64(b: &[u8]) -> usize {
 
 #[cfg(all(test, feature = "compression"))]
 pub(crate) mod test_support {
-    use crate::table::{BinTable, TformKind};
+    use crate::table_impl::{BinTable, TformKind};
 
     pub(crate) fn set_column_kind(table: &mut BinTable, column: usize, kind: TformKind) {
         table.columns[column].tform.kind = kind;

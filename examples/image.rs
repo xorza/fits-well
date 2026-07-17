@@ -7,7 +7,8 @@
 
 use std::fs::File;
 
-use fits_well::{FitsReader, FitsWriter, Image, ImageData, ImageView, Scaling};
+use fits_well::image::ImageView;
+use fits_well::{FitsReader, FitsWriter, Image, ImageData, Scaling};
 
 /// Identity scaling: physical value = stored, no blanks — the common case.
 const IDENTITY: Scaling = Scaling {
@@ -21,14 +22,14 @@ fn main() -> fits_well::Result<()> {
 
     // A 4×3 image of signed 16-bit pixels. `shape` is fastest-axis-first
     // (NAXIS1 = 4), and `samples` is the flat row-major buffer.
-    let i16_image = Image::new(
+    let i16_image = Image::new_scaled(
         vec![4, 3],
         ImageData::I16(vec![0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23]),
         IDENTITY,
     )?;
     // A second image of a *different* type (32-bit float) — so the file holds two
     // image HDUs of differing BITPIX, which the view loop below reads into one buffer.
-    let f32_image = Image::new(
+    let f32_image = Image::new_scaled(
         vec![2, 2],
         ImageData::F32(vec![1.5, -2.5, 3.5, -4.5]),
         IDENTITY,
@@ -49,7 +50,7 @@ fn main() -> fits_well::Result<()> {
     let images = reader.image_indices();
     println!("image HDUs: {images:?}");
 
-    // `read_image` borrows the data unit in place (zero-copy) as a `RawImage`; `decode`
+    // `read_image` borrows the data unit in place (zero-copy) as a `ReadImage`; `decode`
     // byte-swaps the big-endian samples into an *owned* host-endian buffer you can keep
     // and move (a BITPIX=8 image's bytes come back copy-free via `raw.u8()`).
     let raw = reader.read_image(images[0])?;
@@ -69,7 +70,8 @@ fn main() -> fits_well::Result<()> {
     for &idx in &images {
         // The view borrows the reader + scratch, so use it before the next read. For
         // samples you need past the loop, use the owned `read_image().decode()` above.
-        match reader.read_image_view(idx, &mut scratch)? {
+        let image = reader.read_image_view(idx, &mut scratch)?;
+        match image.samples {
             ImageView::I16(v) => println!("hdu {idx}: i16 view {v:?}"),
             ImageView::F32(v) => println!("hdu {idx}: f32 view {v:?}"),
             other => println!(

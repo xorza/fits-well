@@ -97,7 +97,7 @@ fn rejects_malformed_pcount_and_gcount_instead_of_clamping() {
     ));
 
     let mut mistyped_pcount = neg_pcount;
-    mistyped_pcount.set("PCOUNT", "not an integer");
+    mistyped_pcount.set_internal("PCOUNT", "not an integer");
     assert!(matches!(
         data_extent(&mistyped_pcount, HduRole::Extension),
         Err(FitsError::TypeMismatch { name, expected })
