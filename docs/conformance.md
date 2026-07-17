@@ -42,7 +42,7 @@ Severity used below:
 | §7.2 | ASCII tables | Complete for core table structures: formats, scaling, distinct nullable raw cells, field-count limits, and fallible width-checked writing are covered. |
 | §7.3 | Binary tables | Complete for core table structures: all fixed kinds and P/Q reads and writes exist, including type-checked scaling/null metadata, character, physical numeric/complex, exact unsigned, jagged bit arrays, and the 999-field ceiling. |
 | §8 | WCS | Complete for standard algorithms: image and table keyword translation, all 27 celestial projections, every Table-26 spectral/detector algorithm, generic `LOG`, and BINTABLE-resolved multidimensional `TAB` coordinates are covered. Convention-only `XPH` remains explicitly unsupported. |
-| §9 | Time | Partial: references, scales, FITS units, strict year forms, leap-second-preserving UTC quasi-JD, and complete linear/`LOG` time-axis WCS evaluation work; secondary frame and PHASE metadata remain incomplete. |
+| §9 | Time | Complete for the core typed model: references, scales, positions, FITS units, strict year forms, leap-second-preserving UTC quasi-JD, linear/`LOG`/resolved-`TAB` time-axis WCS evaluation, and all image/table PHASE metadata forms are covered. |
 | §10 | Tiled compression | Not assessed here; it is outside the dependency-free core. |
 
 ## Batch 1 — Critical: stop wrong values and valid-file failures
@@ -79,7 +79,7 @@ Severity used below:
 
 - [x] **Expose exact stored random-group samples.** `RandomGroups::group_by_idx` returns an allocation-free `RandomGroupView` whose separate parameter and array `ImageView`s borrow the decoded host-endian buffer before any parameter or image scaling. Tests verify group boundaries, `i64` extremes and values beyond `2^53`, exact `f32`/`f64` NaN payloads, signed zero, subnormals, and an explicit out-of-range error (`docs/refs/fits_standard40.md:1994-2002`).
 
-- [ ] **Expose declared WCS/time frames without performing astrometry.** `WcsView` exposes only axes and unsupported flags and never parses `RADESYS`/`EQUINOX` (`src/wcs/mod.rs:842-878`), despite the frame defaults in FITS (`docs/refs/fits_standard40.md:3649-3658`). `FitsTime` likewise leaves an omitted `TREFPOS` unresolved instead of exposing the `TOPOCENTER` default (`src/time/mod.rs:515-528`, `docs/refs/fits_standard40.md:4256-4269`). Add typed declared-frame metadata, including spectral/time reference metadata where applicable. FK4/FK5/ICRS conversion and light-time correction remain out of scope.
+- [x] **Expose declared WCS/time frames without performing astrometry.** `WcsView` exposes a typed celestial frame with the normative `RADESYS` default selected from `EQUINOX`; spectral axes retain typed coordinate/observer frames and validated rest values through image and Table-22 forms. `FitsTime` resolves typed global `TREFPOS` and column `TRPOSn` to the `TOPOCENTER` default. Exact tests cover every default branch, alternates, per-axis table metadata, conflicting declarations, truncated time-position names, and invalid values. FK4/FK5/ICRS conversion and light-time correction remain out of scope (`docs/refs/fits_standard40.md:3649-3658`, `docs/refs/fits_standard40.md:4256-4269`).
 
 ## Batch 3 — High: make every core writer path conforming and fallible
 
@@ -101,7 +101,7 @@ Severity used below:
 
 - [ ] **Represent checksum status as absent, unknown, valid, or invalid.** Blank-string `DATASUM` becomes `Some(false)` and blank `CHECKSUM` is verified as if it asserted a checksum (`src/reader/mod.rs:420-449`). FITS defines blank strings as unknown values (`docs/refs/fits_standard40.md:1698-1718`). Replace `Option<bool>` with an explicit status and test all four states independently for both keywords.
 
-- [ ] **Support alternate/table PHASE metadata and reject undefined folding.** `Header::phase_axis` reads only unsuffixed image `CZPHS`/`CPERI` (`src/time/mod.rs:657-674`), though FITS defines alternate and binary-table forms (`docs/refs/fits_standard40.md:4717-4734`). `PhaseAxis::fold` returns `0.0` when `CPERI` is absent/zero (`src/time/mod.rs:483-490`), even though that means the period is nonconstant/undefined. Accept the same selectors as WCS and make folding return `Option`/`Result` when no constant period exists.
+- [x] **Support alternate/table PHASE metadata and reject undefined folding.** `Header::phase_axis`, `phase_axis_pixel_list`, and `phase_axis_array_column` resolve the primary and alternate Table-22 `CZPHS`/`CPERI` spellings. Missing/zero periods remain valid nonconstant metadata as `None`, while `PhaseAxis::fold` returns `InvalidValue` instead of fabricating phase zero (`docs/refs/fits_standard40.md:4717-4734`).
 
 - [ ] **Add authoring support or qualify the HIERARCH “read + write” claim.** Existing HIERARCH cards can be parsed and re-rendered, but `Header::try_set` rejects long/spaced compound names and there is no public HIERARCH constructor (`src/header/mod.rs`). This is a convention rather than normative FITS 4.0 core, so preservation-only support is acceptable if documented accurately.
 

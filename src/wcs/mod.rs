@@ -28,10 +28,12 @@
 //! ([`Header::wcs_pixel_list`](crate::Header::wcs_pixel_list)) and vector-cell
 //! ([`Header::wcs_array_column`](crate::Header::wcs_array_column)) forms.
 //!
-//! Pixel↔world yields celestial coordinates in the frame the file declares
-//! (`RADESYS`/`EQUINOX`); converting *between* reference frames is astrometry
-//! beyond the FITS standard and is intentionally out of scope. Transform methods
-//! return explicit errors for invalid projection domains or failed iterations.
+//! Pixel↔world yields celestial coordinates in the frame the file declares;
+//! [`WcsView::celestial_frame`] and [`WcsAxis::spectral_frame`] expose that typed
+//! `RADESYS`/`EQUINOX` and spectral frame/rest metadata. Converting *between*
+//! reference frames is astrometry beyond the FITS standard and is intentionally
+//! out of scope. Transform methods return explicit errors for invalid projection
+//! domains or failed iterations.
 
 use std::f64::consts::FRAC_PI_2;
 use std::f64::consts::FRAC_PI_4;
@@ -879,6 +881,88 @@ fn pco_theta(x: f64, y: f64) -> Result<f64> {
     })
 }
 
+/// The reference frame named by `RADESYSa`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CelestialReferenceFrame {
+    Icrs,
+    Fk5,
+    Fk4,
+    Fk4NoE,
+    Gappt,
+}
+
+impl CelestialReferenceFrame {
+    fn parse(value: &str) -> Result<CelestialReferenceFrame> {
+        match value.trim() {
+            "ICRS" => Ok(CelestialReferenceFrame::Icrs),
+            "FK5" => Ok(CelestialReferenceFrame::Fk5),
+            "FK4" => Ok(CelestialReferenceFrame::Fk4),
+            "FK4-NO-E" => Ok(CelestialReferenceFrame::Fk4NoE),
+            "GAPPT" => Ok(CelestialReferenceFrame::Gappt),
+            value => Err(FitsError::InvalidValue {
+                card: format!("RADESYS {value:?} is not a standard reference frame"),
+            }),
+        }
+    }
+}
+
+/// Resolved celestial-frame metadata for an equatorial/ecliptic WCS.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CelestialFrame {
+    /// `RADESYSa`, including the standard default selected from `EQUINOXa`.
+    pub reference_frame: CelestialReferenceFrame,
+    /// The declared non-negative `EQUINOXa`, or `None` when omitted.
+    pub equinox: Option<f64>,
+}
+
+/// A standard spectral reference system from FITS Table 27.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpectralReferenceFrame {
+    Topocentric,
+    Geocentric,
+    Barycentric,
+    Heliocentric,
+    LsrKinematic,
+    LsrDynamic,
+    Galactocentric,
+    LocalGroup,
+    CmbDipole,
+    Source,
+}
+
+impl SpectralReferenceFrame {
+    fn parse(keyword: &str, value: &str) -> Result<SpectralReferenceFrame> {
+        match value.trim() {
+            "TOPOCENT" => Ok(SpectralReferenceFrame::Topocentric),
+            "GEOCENTR" => Ok(SpectralReferenceFrame::Geocentric),
+            "BARYCENT" => Ok(SpectralReferenceFrame::Barycentric),
+            "HELIOCEN" => Ok(SpectralReferenceFrame::Heliocentric),
+            "LSRK" => Ok(SpectralReferenceFrame::LsrKinematic),
+            "LSRD" => Ok(SpectralReferenceFrame::LsrDynamic),
+            "GALACTOC" => Ok(SpectralReferenceFrame::Galactocentric),
+            "LOCALGRP" => Ok(SpectralReferenceFrame::LocalGroup),
+            "CMBDIPOL" => Ok(SpectralReferenceFrame::CmbDipole),
+            "SOURCE" => Ok(SpectralReferenceFrame::Source),
+            value => Err(FitsError::InvalidValue {
+                card: format!("{keyword} {value:?} is not a standard spectral reference frame"),
+            }),
+        }
+    }
+}
+
+/// Resolved reference-frame and rest-value metadata for a spectral WCS axis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpectralFrame {
+    /// `SPECSYSa`; `None` when the coordinate frame was not declared.
+    pub coordinate: Option<SpectralReferenceFrame>,
+    /// `SSYSOBSa`, including its `TOPOCENT` default.
+    pub observer: SpectralReferenceFrame,
+    /// `RESTFRQa` in Hz.
+    pub rest_frequency_hz: Option<f64>,
+    /// `RESTWAVa` in metres.
+    pub rest_wavelength_m: Option<f64>,
+}
+
 /// Immutable source metadata for one WCS axis.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WcsAxis {
@@ -889,12 +973,16 @@ pub struct WcsAxis {
     pub crval: f64,
     /// `CRPIXi` — reference pixel (1-based).
     pub crpix: f64,
+    /// Spectral reference metadata for a spectral axis.
+    pub spectral_frame: Option<SpectralFrame>,
 }
 
 /// A read-only snapshot of a parsed WCS's source metadata and support status.
 #[derive(Debug, Clone, Copy)]
 pub struct WcsView<'a> {
     pub axes: &'a [WcsAxis],
+    /// The resolved `RADESYSa`/`EQUINOXa` metadata when applicable.
+    pub celestial_frame: Option<CelestialFrame>,
     /// Zero-based axes whose non-linear transform is not evaluated.
     pub unsupported_axes: &'a [usize],
 }
@@ -912,6 +1000,7 @@ pub struct Wcs {
     /// The (longitude axis, latitude axis, projection, celestial pole) when a
     /// celestial pair is present; `None` for an all-linear system.
     celestial: Option<Celestial>,
+    celestial_frame: Option<CelestialFrame>,
     tabular: Vec<tabular::TabularTransform>,
     /// Axes (0-based) whose non-linear transform is not evaluated — an unsupported
     /// celestial projection or convention, or another non-linear coordinate
@@ -1224,13 +1313,22 @@ impl Wcs {
     /// (`alt = Some('A'..='Z')`) from `header`. The public entry point is
     /// [`Header::wcs`](crate::Header::wcs), which forwards here.
     pub(crate) fn from_header(header: &Header, alt: Option<char>) -> Result<Wcs> {
-        Wcs::from_header_with_tabular(header, alt, Vec::new())
+        Wcs::from_header_with_context(header, alt, Vec::new(), None)
     }
 
     pub(crate) fn from_header_with_tabular(
         header: &Header,
         alt: Option<char>,
         tabular: Vec<tabular::TabularTransform>,
+    ) -> Result<Wcs> {
+        Wcs::from_header_with_context(header, alt, tabular, None)
+    }
+
+    fn from_header_with_context(
+        header: &Header,
+        alt: Option<char>,
+        tabular: Vec<tabular::TabularTransform>,
+        spectral_frames: Option<Vec<Option<SpectralFrame>>>,
     ) -> Result<Wcs> {
         let a = alt.map(|c| c.to_string()).unwrap_or_default();
         let naxis_value = match header.get_integer(key!("WCSAXES{a}").as_str())? {
@@ -1265,6 +1363,24 @@ impl Wcs {
             })
             .collect::<Result<_>>()?;
         let celestial_axes = find_celestial(&ctype)?;
+        let celestial_frame = celestial_frame(header, alt, &a, &ctype)?;
+        let spectral_frames = match spectral_frames {
+            Some(frames) => {
+                assert_eq!(frames.len(), naxis, "spectral frame count");
+                frames
+            }
+            None => {
+                let frame = ctype
+                    .iter()
+                    .any(|ctype| axis::is_spectral_type(ctype))
+                    .then(|| spectral_frame(header, alt, &a))
+                    .transpose()?;
+                ctype
+                    .iter()
+                    .map(|ctype| axis::is_spectral_type(ctype).then_some(frame).flatten())
+                    .collect()
+            }
+        };
 
         // Build the linear transform A. Precedence: CD, then PC×CDELT, then the
         // legacy CROTA rotation, then a bare CDELT diagonal.
@@ -1303,7 +1419,9 @@ impl Wcs {
             }
             // Legacy CROTA: rotate the celestial 2-axis sub-block (only when no PC
             // was given, per the convention that CROTA and PC are exclusive).
-            if !has_pc && let Some((lng, lat, _)) = celestial_axes {
+            if !has_pc && let Some(axes) = celestial_axes {
+                let lng = axes.longitude;
+                let lat = axes.latitude;
                 let rho = first_real(
                     header,
                     key!("CROTA{}{a}", lat + 1).as_str(),
@@ -1322,7 +1440,9 @@ impl Wcs {
         // §8.2: CRVAL/CDELT are in CUNITia units, but the projection math runs in
         // degrees — scale each celestial axis's reference value and its matrix row
         // (the inverse is computed after, so both directions stay consistent).
-        if let Some((lng, lat, _)) = celestial_axes {
+        if let Some(axes) = celestial_axes {
+            let lng = axes.longitude;
+            let lat = axes.latitude;
             for ax in [lng, lat] {
                 let f = unit_to_degrees(&cunit[ax]);
                 crval[ax] *= f;
@@ -1331,14 +1451,6 @@ impl Wcs {
                 }
             }
         }
-        let rest = if ctype
-            .iter()
-            .any(|ctype| axis::has_analytic_spectral_algorithm(ctype))
-        {
-            spectral_rest(header, alt, &a)?
-        } else {
-            SpectralRest::NONE
-        };
         let mut axis_transforms = Vec::with_capacity(naxis);
         let mut unsupported_axes = Vec::new();
         let mut resolved_tabular_axes = vec![false; naxis];
@@ -1365,6 +1477,10 @@ impl Wcs {
                 *value = header.get_real(key!("PV{}_{parameter}{a}", axis + 1).as_str())?;
             }
             let parameters = SpectralParameters::new(spectral_parameters);
+            let rest = match spectral_frames[axis] {
+                Some(frame) => SpectralRest::new(frame.rest_frequency_hz, frame.rest_wavelength_m)?,
+                None => SpectralRest::NONE,
+            };
             let parsed =
                 AxisTransform::parse(&ctype[axis], &cunit[axis], crval[axis], rest, parameters)?;
             crval[axis] *= parsed.unit_scale;
@@ -1387,7 +1503,10 @@ impl Wcs {
         })?;
 
         let celestial = match celestial_axes {
-            Some((lng, lat, proj)) => {
+            Some(axes) => {
+                let lng = axes.longitude;
+                let lat = axes.latitude;
+                let proj = axes.projection;
                 let mut pv = proj.parameter_defaults();
                 for (m, value) in pv.iter_mut().enumerate() {
                     if let Some(header_value) =
@@ -1458,6 +1577,7 @@ impl Wcs {
                 cunit: cunit[i].clone(),
                 crval: crval[i],
                 crpix: crpix[i],
+                spectral_frame: spectral_frames[i],
             })
             .collect();
         Ok(Wcs {
@@ -1466,6 +1586,7 @@ impl Wcs {
             matrix,
             inverse,
             celestial,
+            celestial_frame,
             tabular,
             unsupported_axes,
         })
@@ -1476,6 +1597,7 @@ impl Wcs {
     pub fn view(&self) -> WcsView<'_> {
         WcsView {
             axes: &self.axes,
+            celestial_frame: self.celestial_frame,
             unsupported_axes: &self.unsupported_axes,
         }
     }
@@ -1537,6 +1659,7 @@ impl Wcs {
         // mapping column number `cN` → axis index `i+1`.
         let mut h = Header::new();
         h.set("WCSAXES", columns.len() as i64);
+        let mut spectral_frames = vec![None; columns.len()];
         for (i, &c) in columns.iter().enumerate() {
             let ax = i + 1;
             let type_key = resolver
@@ -1545,7 +1668,7 @@ impl Wcs {
             if let Some(t) = header.get_text(type_key.as_str())? {
                 h.set(key!("CTYPE{ax}").as_str(), t);
                 if axis::is_spectral_type(t) {
-                    copy_table_spectral_rest(header, &mut h, resolver, c)?;
+                    spectral_frames[i] = Some(table_spectral_frame(header, resolver, c)?);
                 }
             }
             for keyword in [
@@ -1588,15 +1711,23 @@ impl Wcs {
                     .map(|value| value.unwrap_or("").to_string())
             })
             .collect::<Result<Vec<_>>>()?;
-        if let Some((longitude, ..)) = find_celestial(&ctype)? {
+        if let Some(pair) = find_celestial_pair(&ctype) {
+            let longitude = pair.longitude;
+            let latitude = pair.latitude;
             let column = columns[longitude];
             for pole in [TablePoleKeyword::Longitude, TablePoleKeyword::Latitude] {
                 if let Some(value) = resolver.pole_real(header, pole, column)? {
                     h.set(pole.image_root(), value);
                 }
             }
+            copy_table_celestial_frame(
+                header,
+                &mut h,
+                resolver,
+                &[columns[longitude], columns[latitude]],
+            )?;
         }
-        Wcs::from_header(&h, None)
+        Wcs::from_header_with_context(&h, None, Vec::new(), Some(spectral_frames))
     }
 
     /// Build a WCS for an image stored in a binary-table **vector cell** (§8,
@@ -1623,14 +1754,14 @@ impl Wcs {
         }
         let mut h = Header::new();
         h.set("WCSAXES", naxis as i64);
-        let mut has_spectral_axis = false;
+        let mut spectral_axes = vec![false; naxis];
         for ax in 1..=naxis {
             let type_key = resolver
                 .vector_axis_key(TableAxisKeyword::Type, ax, column)
                 .expect("Table 22 defines primary and alternate axis-type keywords");
             if let Some(t) = header.get_text(type_key.as_str())? {
                 h.set(key!("CTYPE{ax}").as_str(), t);
-                has_spectral_axis |= axis::is_spectral_type(t);
+                spectral_axes[ax - 1] = axis::is_spectral_type(t);
             }
             let unit_key = resolver
                 .vector_axis_key(TableAxisKeyword::Unit, ax, column)
@@ -1657,9 +1788,14 @@ impl Wcs {
                 }
             }
         }
-        if has_spectral_axis {
-            copy_table_spectral_rest(header, &mut h, resolver, column)?;
-        }
+        let spectral_frame = spectral_axes
+            .contains(&true)
+            .then(|| table_spectral_frame(header, resolver, column))
+            .transpose()?;
+        let spectral_frames = spectral_axes
+            .into_iter()
+            .map(|spectral| spectral.then_some(spectral_frame).flatten())
+            .collect();
         // Linear-transform matrices: `ijPCn` / `ijCDn`, indexed by axis pair.
         for i in 1..=naxis {
             for j in 1..=naxis {
@@ -1676,7 +1812,8 @@ impl Wcs {
                 h.set(pole.image_root(), value);
             }
         }
-        Wcs::from_header(&h, None)
+        copy_table_celestial_frame(header, &mut h, resolver, &[column])?;
+        Wcs::from_header_with_context(&h, None, Vec::new(), Some(spectral_frames))
     }
 
     /// Map 1-based pixel coordinates to complete world coordinates. Celestial axes
@@ -1781,6 +1918,19 @@ enum CelestialAxis {
     Latitude,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CelestialAxisPair {
+    longitude: usize,
+    latitude: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProjectedCelestialAxes {
+    longitude: usize,
+    latitude: usize,
+    projection: Projection,
+}
+
 /// The celestial coordinate an axis carries, from its `CTYPE` head (§8.2): `RA` and
 /// the `xLON`/`yzLN` forms are longitudes; `DEC` and `xLAT`/`yzLT` are latitudes;
 /// `None` for any non-celestial axis.
@@ -1805,6 +1955,65 @@ fn projection_code(ctype: &str) -> Option<&str> {
         .filter(|c| !c.is_empty())
 }
 
+fn celestial_frame(
+    header: &Header,
+    alt: Option<char>,
+    suffix: &str,
+    ctype: &[String],
+) -> Result<Option<CelestialFrame>> {
+    let key = key!("RADESYS{suffix}");
+    let mut declared = header.get_text(key.as_str())?;
+    if declared.is_none() && alt.is_none() {
+        declared = header.get_text("RADECSYS")?;
+    }
+    let equinox = header.get_real(key!("EQUINOX{suffix}").as_str())?;
+    if equinox.is_some_and(|value| !value.is_finite() || value < 0.0) {
+        return Err(FitsError::InvalidValue {
+            card: "EQUINOX must be finite and non-negative".to_string(),
+        });
+    }
+    let applies = ctype.iter().any(|ctype| {
+        matches!(
+            ctype.split('-').next().unwrap_or("").trim(),
+            "RA" | "DEC" | "ELON" | "ELAT"
+        )
+    });
+    if !applies && declared.is_none() && equinox.is_none() {
+        return Ok(None);
+    }
+    let reference_frame = match declared {
+        Some(value) => CelestialReferenceFrame::parse(value)?,
+        None => match equinox {
+            Some(value) if value < 1984.0 => CelestialReferenceFrame::Fk4,
+            Some(_) => CelestialReferenceFrame::Fk5,
+            None => CelestialReferenceFrame::Icrs,
+        },
+    };
+    Ok(Some(CelestialFrame {
+        reference_frame,
+        equinox,
+    }))
+}
+
+fn spectral_frame(header: &Header, alt: Option<char>, suffix: &str) -> Result<SpectralFrame> {
+    let rest = spectral_rest(header, alt, suffix)?;
+    let coordinate = header
+        .get_text(key!("SPECSYS{suffix}").as_str())?
+        .map(|value| SpectralReferenceFrame::parse("SPECSYS", value))
+        .transpose()?;
+    let observer = header
+        .get_text(key!("SSYSOBS{suffix}").as_str())?
+        .map(|value| SpectralReferenceFrame::parse("SSYSOBS", value))
+        .transpose()?
+        .unwrap_or(SpectralReferenceFrame::Topocentric);
+    Ok(SpectralFrame {
+        coordinate,
+        observer,
+        rest_frequency_hz: rest.frequency,
+        rest_wavelength_m: rest.wavelength,
+    })
+}
+
 fn spectral_rest(header: &Header, alt: Option<char>, suffix: &str) -> Result<SpectralRest> {
     let mut frequency = header.get_real(key!("RESTFRQ{suffix}").as_str())?;
     if frequency.is_none() && alt.is_none() {
@@ -1814,16 +2023,55 @@ fn spectral_rest(header: &Header, alt: Option<char>, suffix: &str) -> Result<Spe
     SpectralRest::new(frequency, wavelength)
 }
 
-fn copy_table_spectral_rest(
+fn table_spectral_frame(
+    header: &Header,
+    resolver: TableWcsResolver,
+    column: usize,
+) -> Result<SpectralFrame> {
+    let mut translated = Header::new();
+    for (table_root, image_root) in [("RFRQ", "RESTFRQ"), ("RWAV", "RESTWAV")] {
+        let source = resolver.column_key(table_root, column);
+        if let Some(value) = header.get_real(source.as_str())? {
+            translated.set(image_root, value);
+        }
+    }
+    for (table_root, image_root) in [("SPEC", "SPECSYS"), ("SOBS", "SSYSOBS")] {
+        let source = resolver.column_key(table_root, column);
+        if let Some(value) = header.get_text(source.as_str())? {
+            translated.set(image_root, value);
+        }
+    }
+    spectral_frame(&translated, None, "")
+}
+
+fn copy_table_celestial_frame(
     source: &Header,
     destination: &mut Header,
     resolver: TableWcsResolver,
-    column: usize,
+    columns: &[usize],
 ) -> Result<()> {
-    for (table_root, image_root) in [("RFRQ", "RESTFRQ"), ("RWAV", "RESTWAV")] {
-        let key = resolver.column_key(table_root, column);
-        if let Some(value) = source.get_real(key.as_str())? {
-            destination.set(image_root, value);
+    for &column in columns {
+        let radesys = resolver.column_key("RADE", column);
+        if let Some(value) = source.get_text(radesys.as_str())? {
+            if let Some(existing) = destination.get_text("RADESYS")?
+                && existing != value
+            {
+                return Err(FitsError::ConflictingWcsKeywords {
+                    detail: "table celestial axes declare different RADESYS values",
+                });
+            }
+            destination.set("RADESYS", value);
+        }
+        let equinox = resolver.column_key("EQUI", column);
+        if let Some(value) = source.get_real(equinox.as_str())? {
+            if let Some(existing) = destination.get_real("EQUINOX")?
+                && existing != value
+            {
+                return Err(FitsError::ConflictingWcsKeywords {
+                    detail: "table celestial axes declare different EQUINOX values",
+                });
+            }
+            destination.set("EQUINOX", value);
         }
     }
     Ok(())
@@ -1840,12 +2088,7 @@ fn unit_to_degrees(unit: &str) -> f64 {
     }
 }
 
-/// Locate the celestial longitude/latitude axis pair and their shared projection,
-/// or `None` if the header has no complete celestial pair. Errors if the two axes
-/// declare *different* projection codes — §8.2 requires them to match, so a
-/// mismatch (or one axis projected and the other not) is a malformed header rather
-/// than grounds to silently pick one.
-fn find_celestial(ctype: &[String]) -> Result<Option<(usize, usize, Projection)>> {
+fn find_celestial_pair(ctype: &[String]) -> Option<CelestialAxisPair> {
     let mut lng = None;
     let mut lat = None;
     for (i, t) in ctype.iter().enumerate() {
@@ -1856,16 +2099,33 @@ fn find_celestial(ctype: &[String]) -> Result<Option<(usize, usize, Projection)>
         }
     }
     let (Some(lng), Some(lat)) = (lng, lat) else {
+        return None;
+    };
+    Some(CelestialAxisPair {
+        longitude: lng,
+        latitude: lat,
+    })
+}
+
+/// Locate the celestial longitude/latitude axis pair and their shared projection,
+/// or `None` if the header has no complete supported pair. Errors if the two axes
+/// declare different projection codes.
+fn find_celestial(ctype: &[String]) -> Result<Option<ProjectedCelestialAxes>> {
+    let Some(pair) = find_celestial_pair(ctype) else {
         return Ok(None);
     };
-    if projection_code(&ctype[lng]) != projection_code(&ctype[lat]) {
+    if projection_code(&ctype[pair.longitude]) != projection_code(&ctype[pair.latitude]) {
         return Err(FitsError::ConflictingWcsKeywords {
             detail: "celestial longitude and latitude axes declare different projections",
         });
     }
-    Ok(projection_code(&ctype[lng])
+    Ok(projection_code(&ctype[pair.longitude])
         .and_then(Projection::from_code)
-        .map(|proj| (lng, lat, proj)))
+        .map(|projection| ProjectedCelestialAxes {
+            longitude: pair.longitude,
+            latitude: pair.latitude,
+            projection,
+        }))
 }
 
 /// Native spherical (φ, θ) → celestial (α, δ), all degrees, given the celestial

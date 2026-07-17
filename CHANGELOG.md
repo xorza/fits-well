@@ -44,6 +44,10 @@
   non-time units no longer silently behave as seconds. `time_axis_mjd` now accepts
   a parsed `Wcs` plus the full pixel vector and returns `TimeCoordinate`, including
   the axis-effective time scale.
+- `FitsTime::trefpos` is now a resolved `TimeReferencePosition` instead of an
+  optional string. `Header::phase_axis` accepts an alternate-WCS selector,
+  `PhaseAxis::period` is optional when no constant period exists, and
+  `PhaseAxis::fold` returns `Result` instead of silently returning phase zero.
 - `EpochTime` was consolidated into `TimeCoordinate`; `Header::epoch` now returns
   the shared coordinate type used by both epoch keywords and WCS time axes.
 - `Datetime::to_jd` and `to_mjd` now require a `TimeScale` and return `Result`;
@@ -73,6 +77,9 @@
 - Added `CharacterField`, which preserves every stored byte of a binary-table `A`
   cell and exposes its first-NUL member boundary and null-string state.
 - Added `Wcs::view` with immutable per-axis metadata and unsupported-axis status.
+- Added typed `CelestialFrame`/`CelestialReferenceFrame` and per-axis
+  `SpectralFrame`/`SpectralReferenceFrame` metadata, including standard defaults
+  and the image, alternate, pixel-list, and vector-cell keyword forms.
 - Added forward and inverse `TSC`, `CSC`, `QSC`, and parameterized `HPX`
   transforms, completing the FITS 4.0 celestial projection set.
 - Added forward and inverse Table-26 `F2*`, `W2*`, `V2*`, and `A2*` spectral
@@ -84,6 +91,8 @@
   `BINTABLE`.
 - Added `TimeCoordinate`, the shared MJD and effective scale value returned for
   epoch keywords and WCS time axes.
+- Added typed time reference positions, `Header::time_for_column` for `TRPOSn`
+  overrides, and pixel-list/vector-cell PHASE metadata accessors.
 - Added explicit `ColumnType` declarations for variable-length table columns.
 - Added `ColumnReader::vla_complex` and `vla_unsigned` for scaled complex P/Q
   heap arrays and exact unsigned-convention integers, including `u64` values that

@@ -101,9 +101,12 @@ pub use table::{
 };
 pub use time::{
     Datetime, Epoch, FitsTime, GtiInterval, PhaseAxis, TimeAxisKind, TimeBounds, TimeCoordinate,
-    TimeScale,
+    TimeReferencePosition, TimeScale,
 };
-pub use wcs::{Projection, Wcs};
+pub use wcs::{
+    CelestialFrame, CelestialReferenceFrame, Projection, SpectralFrame, SpectralReferenceFrame,
+    Wcs, WcsAxis, WcsView,
+};
 pub use writer::{AsciiWriteColumn, ColumnType, FitsWriter, WriteColumn};
 
 pub use block::{BLOCK_SIZE, CARD_SIZE};
