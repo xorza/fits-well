@@ -156,8 +156,8 @@ HIERARCH ESO DET CHIP1 NAME = 'CCD-44' / detector chip name
   and `update()` (DATASUM first, then CHECKSUM, as the final write step). The
   fixed column placement of `CHECKSUM` must be exact.
 - **HIERARCH**: detect `HIERARCH ` in bytes 1–8 and branch to a dedicated parser;
-  expose the compound key both as the raw token list and a normalized string.
-  Treat it as an optional, feature-flagged reader/writer — it is not part of the
-  Standard.
+  expose its space-joined effective key through the ordered header model.
+  `Header::try_set_hierarch` provides fallible always-on authoring and update
+  support. It remains a registered convention rather than part of the Standard.
 - See the full **Registry of FITS Conventions** for these and others (Green Bank,
   column-oriented, inheritance): <https://fits.gsfc.nasa.gov/fits_registry.html>.

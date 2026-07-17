@@ -4,6 +4,9 @@
 
 ### Breaking changes
 
+- `ChecksumReport` now exposes `datasum` and `checksum` as `ChecksumStatus`
+  values (`Absent`, `Unknown`, `Valid`, or `Invalid`) instead of lossy
+  `Option<bool>` fields.
 - `Image` is now constructed with fallible `Image::new`; its geometry, samples,
   and scaling are immutable after construction, with geometry and stored-type
   metadata exposed through `Image::metadata` and exact immutable samples through
@@ -72,6 +75,8 @@
 
 ### Added
 
+- Added fallible `Header::try_set_hierarch` authoring and update support for ESO
+  HIERARCH compound keywords.
 - Added `FitsInteger`, an exact FITS integer value with an allocation-free `i64`
   representation and a decimal fallback for the standard's unbounded range.
 - Added `CharacterField`, which preserves every stored byte of a binary-table `A`

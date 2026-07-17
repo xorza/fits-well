@@ -36,10 +36,9 @@ pub struct Header {
     ///
     /// Invariant: every entry points at a card that carries a value — a
     /// [`CardKind::Value`] or [`CardKind::Hierarch`] — in `cards`.
-    /// `cards` is only ever appended/extended in place during `parse`, never
-    /// reordered, so the index stays valid. Any future card-mutation API must
-    /// rebuild this (or it must be made a method that maintains it) — do not
-    /// expose raw mutation that can desynchronize the two.
+    /// Parsing builds the index alongside the card list; every mutation method
+    /// either maintains or rebuilds it. Raw card mutation stays private so the
+    /// two cannot be desynchronized.
     index: HashMap<String, usize>,
 }
 
@@ -294,16 +293,33 @@ impl Header {
     /// have a finite FITS representation. An error leaves the header unchanged.
     pub fn try_set(&mut self, keyword: &str, value: impl Into<Value>) -> Result<&mut Self> {
         validate_valued_keyword(keyword)?;
-        let value = value.into();
-        if let Some(&i) = self.index.get(keyword) {
+        self.try_set_card(Card::value(keyword, value.into()))
+    }
+
+    /// Insert or replace an ESO HIERARCH convention keyword. `keyword` is the
+    /// effective compound name without the `HIERARCH ` prefix. It must be
+    /// nonempty restricted ASCII without leading/trailing spaces or `=`;
+    /// internal spaces separate hierarchy tokens. An error leaves the header
+    /// unchanged.
+    pub fn try_set_hierarch(
+        &mut self,
+        keyword: &str,
+        value: impl Into<Value>,
+    ) -> Result<&mut Self> {
+        self.try_set_card(Card::hierarch(keyword, value.into()))
+    }
+
+    fn try_set_card(&mut self, card: Card) -> Result<&mut Self> {
+        let keyword = card.keyword.clone();
+        if let Some(&i) = self.index.get(&keyword) {
             let mut replacement = self.cards[i].clone();
-            replacement.value = Some(value);
+            replacement.value = card.value;
+            replacement.kind = card.kind;
             replacement.validate()?;
             self.cards[i] = replacement;
         } else {
-            let card = Card::value(keyword, value);
             card.validate()?;
-            self.index.insert(keyword.to_string(), self.cards.len());
+            self.index.insert(keyword, self.cards.len());
             self.cards.push(card);
         }
         Ok(self)

@@ -9,7 +9,7 @@ pub enum FitsError {
     /// A previous sink error may have left a partial HDU in the output. Further
     /// writes are rejected because appending cannot repair that FITS stream.
     WriterFailed,
-    /// A keyword name violated the FITS character set or 8-byte length limit.
+    /// A keyword name violated its FITS or HIERARCH-convention syntax.
     InvalidKeyword {
         name: String,
     },

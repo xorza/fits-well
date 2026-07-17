@@ -471,21 +471,33 @@ impl<S: Source> FitsReader<S> {
         BinTable::from_data(&parts.header, parts.data)
     }
 
-    /// Verify the `DATASUM`/`CHECKSUM` integrity keywords of an HDU (§J). Each
-    /// field of the report is `None` if that keyword is absent, else `Some(true)`
-    /// when it matches the recomputed checksum.
+    /// Verify the `DATASUM`/`CHECKSUM` integrity keywords of an HDU (§J).
+    /// Strings containing one or more blanks are reported as
+    /// [`ChecksumStatus::Unknown`] because the standard reserves them for
+    /// undefined or unknown checksum values.
     pub fn verify_checksum(&mut self, index: usize) -> Result<ChecksumReport> {
         let hdu = self.checked_hdu(index)?;
-        let stored_datasum = hdu
-            .header
-            .get_text("DATASUM")?
-            .map(|value| value.trim().parse::<u32>().ok());
-        let has_checksum = hdu.header.get_text("CHECKSUM")?.is_some();
-        if stored_datasum.is_none() && !has_checksum {
-            return Ok(ChecksumReport {
-                datasum_ok: None,
-                checksum_ok: None,
-            });
+        let stored_datasum = hdu.header.get_text("DATASUM")?;
+        let stored_checksum = hdu.header.get_text("CHECKSUM")?;
+        let expected_datasum = stored_datasum
+            .filter(|value| !value.is_empty() && !is_unknown_checksum(value))
+            .and_then(|value| value.trim().parse::<u32>().ok());
+        let verify_whole_hdu =
+            stored_checksum.is_some_and(|value| !value.is_empty() && !is_unknown_checksum(value));
+        let mut report = ChecksumReport {
+            datasum: match stored_datasum {
+                None => ChecksumStatus::Absent,
+                Some(value) if is_unknown_checksum(value) => ChecksumStatus::Unknown,
+                Some(_) => ChecksumStatus::Invalid,
+            },
+            checksum: match stored_checksum {
+                None => ChecksumStatus::Absent,
+                Some(value) if is_unknown_checksum(value) => ChecksumStatus::Unknown,
+                Some(_) => ChecksumStatus::Invalid,
+            },
+        };
+        if expected_datasum.is_none() && !verify_whole_hdu {
+            return Ok(report);
         }
         let (data_offset, data_bytes, header_sum) =
             (hdu.data_offset, hdu.data_bytes, hdu.header_sum);
@@ -496,20 +508,46 @@ impl<S: Source> FitsReader<S> {
             .source
             .slice(data_offset, lengths.padded, &mut self.scratch)?;
         let data_sum = checksum::accumulate(unit, 0);
-        Ok(ChecksumReport {
-            datasum_ok: stored_datasum.map(|expected| expected == Some(data_sum)),
-            checksum_ok: has_checksum
-                .then(|| checksum::combine(header_sum, data_sum) == 0xFFFF_FFFF),
-        })
+        if let Some(expected) = expected_datasum {
+            report.datasum = if expected == data_sum {
+                ChecksumStatus::Valid
+            } else {
+                ChecksumStatus::Invalid
+            };
+        }
+        if verify_whole_hdu {
+            report.checksum = if checksum::combine(header_sum, data_sum) == 0xFFFF_FFFF {
+                ChecksumStatus::Valid
+            } else {
+                ChecksumStatus::Invalid
+            };
+        }
+        Ok(report)
     }
 }
 
-/// Result of [`FitsReader::verify_checksum`]. A field is `None` when its keyword
-/// is absent.
+fn is_unknown_checksum(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte == b' ')
+}
+
+/// The state of one FITS checksum keyword.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChecksumStatus {
+    /// The keyword is not present, so the HDU asserts no checksum knowledge.
+    Absent,
+    /// The keyword contains one or more blanks and nothing else.
+    Unknown,
+    /// The asserted checksum matches the recomputed value.
+    Valid,
+    /// The value is malformed or does not match the recomputed checksum.
+    Invalid,
+}
+
+/// Result of [`FitsReader::verify_checksum`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChecksumReport {
-    pub datasum_ok: Option<bool>,
-    pub checksum_ok: Option<bool>,
+    pub datasum: ChecksumStatus,
+    pub checksum: ChecksumStatus,
 }
 
 #[derive(Debug, Clone, Copy)]

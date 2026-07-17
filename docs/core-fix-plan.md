@@ -94,9 +94,9 @@ For every batch:
 
 ## Batch 17 — Medium: correct secondary status and support claims
 
-- [ ] **Represent checksum state explicitly.** Distinguish absent, blank/unknown, valid, and invalid `DATASUM`/`CHECKSUM` values instead of mapping blank strings to failure (`src/reader/mod.rs:420-449`; standard `docs/refs/fits_standard40.md:1698-1718`).
-- [ ] **Add public HIERARCH authoring.** Provide a fallible compound-key constructor/update path so “read + write” means more than preserving already-parsed HIERARCH cards (`src/header/mod.rs:263-284`). Verify long/spaced compound names and invalid convention syntax.
-- [ ] **Correct byte-round-trip documentation.** Change `src/lib.rs:19-23` and matching project documentation to say the ordered logical header model round-trips; original physical card bytes are normalized and not retained.
+- [x] **Represent checksum state explicitly.** `ChecksumStatus` distinguishes absent, blank/unknown, valid, and invalid `DATASUM`/`CHECKSUM` assertions; null or malformed values are invalid, while one-or-more-blank assertions avoid unnecessary data reads (`src/reader/mod.rs`; standard `docs/refs/fits_standard40.md:1698-1718`).
+- [x] **Add public HIERARCH authoring.** `Header::try_set_hierarch` inserts or updates a compound keyword through the same indexed logical model as parsed cards, preserves an existing comment, and validates restricted ASCII, delimiters, boundaries, values, and card length before mutation. Long spaced names render and parse back exactly; invalid convention syntax leaves the header unchanged (`src/header/mod.rs`).
+- [x] **Correct byte-round-trip documentation.** Crate and project documentation now promise ordered logical-header round-trips while stating that physical value layout and `CONTINUE` splits are normalized rather than retained.
 
 ## Execution order
 

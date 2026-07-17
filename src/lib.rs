@@ -19,8 +19,9 @@
 //! - [`BLOCK_SIZE`] — the 2880-byte block grid, padding rules, and rounding math.
 //! - [`Bitpix`] — the array element type selector (`BITPIX`).
 //! - [`Header`], [`Value`] — an *ordered* header model (an internal `Card` list)
-//!   that round-trips byte-for-byte, with a side index for O(1) keyword lookup; it
-//!   also parses the WCS and time layers on request ([`Header::wcs`]/[`Header::time`]).
+//!   whose logical records round-trip with a side index for O(1) keyword lookup;
+//!   physical card layout is normalized on write rather than retained. It also
+//!   parses the WCS and time layers on request ([`Header::wcs`]/[`Header::time`]).
 //! - [`HduKind`] — HDU classification and the data-unit sizing formula that makes
 //!   boundaries computable from headers alone (no data read required).
 //! - [`FitsReader`] — lazy, seeking access to the HDU sequence of a file.
@@ -94,7 +95,9 @@ pub use reader::MmapReader;
 #[cfg(feature = "mmap")]
 pub use reader::source::MmapSource;
 pub use reader::source::{SliceSource, Source, StreamSource};
-pub use reader::{ChecksumReport, DataUnit, FitsReader, Hdu, SliceReader, StreamReader};
+pub use reader::{
+    ChecksumReport, ChecksumStatus, DataUnit, FitsReader, Hdu, SliceReader, StreamReader,
+};
 pub use table::{
     BinTable, BitColumn, CharacterField, Column, ColumnData, ColumnReader, TDisp, TDispKind, Tform,
     TformKind,
