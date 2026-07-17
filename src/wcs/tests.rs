@@ -1084,13 +1084,13 @@ fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
     };
     let cases = [
         ("FREQ", false),
-        ("FREQ-LOG", true),
+        ("FREQ-LOG", false),
         ("FREQ-TAB", true),
         ("TIME", false),
-        ("TIME-LOG", true),
+        ("TIME-LOG", false),
         ("TIME-TAB", true),
         ("ABCD", false),
-        ("ABCD-LOG", true),
+        ("ABCD-LOG", false),
         ("ABCD-TAB", true),
     ];
     for (ctype, unsupported) in cases {
@@ -1110,10 +1110,464 @@ fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
             ));
         } else {
             let out = wcs.pixel_to_world(&[1.0, 1.0, 3.0]).unwrap();
-            assert_eq!(out[2], 1.402e9, "{ctype}");
+            let expected = if ctype.ends_with("-LOG") {
+                1.4e9 * (2.0e6_f64 / 1.4e9).exp()
+            } else {
+                1.402e9
+            };
+            assert!((out[2] - expected).abs() < 1e-6, "{ctype}: {out:?}");
             assert!((out[0] - 45.0).abs() < 1e-9 && (out[1] - 30.0).abs() < 1e-9);
         }
     }
+}
+
+#[derive(Debug)]
+struct SpectralGolden {
+    ctype: &'static str,
+    unit: &'static str,
+    reference: f64,
+    increment: f64,
+    world: f64,
+}
+
+#[test]
+fn table_26_spectral_algorithms_match_wcslib() {
+    let cases = [
+        SpectralGolden {
+            ctype: "WAVE-F2W",
+            unit: "m",
+            reference: 0.211_061_140_655_716_77,
+            increment: 1e-4,
+            world: 0.211_261_330_354_017_17,
+        },
+        SpectralGolden {
+            ctype: "VELO-F2V",
+            unit: "m/s",
+            reference: 0.0,
+            increment: 1e3,
+            world: 2_000.006_671_265_423_6,
+        },
+        SpectralGolden {
+            ctype: "AWAV-F2A",
+            unit: "m",
+            reference: 0.211_003_621_269_199_05,
+            increment: 1e-4,
+            world: 0.211_203_811_019_260_08,
+        },
+        SpectralGolden {
+            ctype: "FREQ-W2F",
+            unit: "Hz",
+            reference: 1_420_405_751.0,
+            increment: 1e6,
+            world: 1_422_408_571.067_528,
+        },
+        SpectralGolden {
+            ctype: "VELO-W2V",
+            unit: "m/s",
+            reference: 0.0,
+            increment: 1e3,
+            world: 1_999.993_328_738_271_7,
+        },
+        SpectralGolden {
+            ctype: "AWAV-W2A",
+            unit: "m",
+            reference: 0.211_003_621_269_199_05,
+            increment: 1e-4,
+            world: 0.211_203_621_269_199_03,
+        },
+        SpectralGolden {
+            ctype: "FREQ-V2F",
+            unit: "Hz",
+            reference: 1_420_405_751.0,
+            increment: 1e6,
+            world: 1_422_407_161.033_065_3,
+        },
+        SpectralGolden {
+            ctype: "WAVE-V2W",
+            unit: "m",
+            reference: 0.211_061_140_655_716_77,
+            increment: 1e-4,
+            world: 0.211_261_235_504_845_66,
+        },
+        SpectralGolden {
+            ctype: "AWAV-V2A",
+            unit: "m",
+            reference: 0.211_003_621_269_199_05,
+            increment: 1e-4,
+            world: 0.211_203_716_144_208_21,
+        },
+        SpectralGolden {
+            ctype: "FREQ-A2F",
+            unit: "Hz",
+            reference: 1_420_405_751.0,
+            increment: 1e6,
+            world: 1_422_408_571.067_528,
+        },
+        SpectralGolden {
+            ctype: "WAVE-A2W",
+            unit: "m",
+            reference: 0.211_061_140_655_716_77,
+            increment: 1e-4,
+            world: 0.211_261_140_655_716_77,
+        },
+        SpectralGolden {
+            ctype: "VELO-A2V",
+            unit: "m/s",
+            reference: 0.0,
+            increment: 1e3,
+            world: 1_999.993_328_738_271_7,
+        },
+    ];
+    for case in cases {
+        let mut header = Header::new();
+        header
+            .set("NAXIS", 1)
+            .set("CTYPE1", case.ctype)
+            .set("CUNIT1", case.unit)
+            .set("CRPIX1", 1.0)
+            .set("CRVAL1", case.reference)
+            .set("CDELT1", case.increment)
+            .set("RESTFRQ", 1_420_405_751.0);
+        let wcs = Wcs::from_header(&header, None).unwrap();
+        assert_eq!(wcs.view().unsupported_axes, [], "{}", case.ctype);
+        let world = wcs.pixel_to_world(&[3.0]).unwrap()[0];
+        let tolerance = case.world.abs() * 2e-14;
+        assert!(
+            (world - case.world).abs() <= tolerance,
+            "{}: got {world:.17e}, wcslib {:.17e}",
+            case.ctype,
+            case.world
+        );
+        let pixel = wcs.world_to_pixel(&[case.world]).unwrap()[0];
+        assert!(
+            (pixel - 3.0).abs() < 2e-10,
+            "{} inverse: {pixel:.17e}",
+            case.ctype
+        );
+    }
+}
+
+#[test]
+fn derived_spectral_types_match_wcslib() {
+    let cases = [
+        SpectralGolden {
+            ctype: "ENER-W2F",
+            unit: "J",
+            reference: 9.411_715_746_760_2e-25,
+            increment: 6.626_075_5e-28,
+            world: 9.424_986_583_740_556e-25,
+        },
+        SpectralGolden {
+            ctype: "WAVN-W2F",
+            unit: "/m",
+            reference: 4.737_963_591_465_666,
+            increment: 0.003_335_640_951_981_520_5,
+            world: 4.744_644_280_102_364,
+        },
+        SpectralGolden {
+            ctype: "VRAD-W2F",
+            unit: "m/s",
+            reference: 0.0,
+            increment: 1e3,
+            world: 1_999.986_657_561_148_6,
+        },
+        SpectralGolden {
+            ctype: "VOPT-F2W",
+            unit: "m/s",
+            reference: 0.0,
+            increment: 1e3,
+            world: 2_000.013_342_678_547,
+        },
+        SpectralGolden {
+            ctype: "ZOPT-F2W",
+            unit: "",
+            reference: 0.0,
+            increment: 1e-5,
+            world: 2.000_040_000_793_568e-5,
+        },
+        SpectralGolden {
+            ctype: "BETA-F2V",
+            unit: "",
+            reference: 0.0,
+            increment: 3.335_640_951_981_520_5e-6,
+            world: 6.671_304_156_909_189e-6,
+        },
+    ];
+    for case in cases {
+        let mut header = Header::new();
+        header
+            .set("NAXIS", 1)
+            .set("CTYPE1", case.ctype)
+            .set("CUNIT1", case.unit)
+            .set("CRPIX1", 1.0)
+            .set("CRVAL1", case.reference)
+            .set("CDELT1", case.increment)
+            .set("RESTFRQ", 1_420_405_751.0);
+        let wcs = Wcs::from_header(&header, None).unwrap();
+        let world = wcs.pixel_to_world(&[3.0]).unwrap()[0];
+        assert!(
+            (world - case.world).abs() <= case.world.abs() * 5e-11,
+            "{}: got {world:.17e}, wcslib {:.17e}",
+            case.ctype,
+            case.world
+        );
+        let pixel = wcs.world_to_pixel(&[case.world]).unwrap()[0];
+        assert!((pixel - 3.0).abs() < 2e-10, "{}", case.ctype);
+    }
+}
+
+#[derive(Debug)]
+struct SpectralUnitCase {
+    ctype: &'static str,
+    unit: &'static str,
+    reference: f64,
+    canonical_reference: f64,
+}
+
+#[test]
+fn spectral_units_are_normalized_to_table_25_defaults() {
+    let cases = [
+        SpectralUnitCase {
+            ctype: "FREQ-W2F",
+            unit: "GHz",
+            reference: 1.42,
+            canonical_reference: 1.42e9,
+        },
+        SpectralUnitCase {
+            ctype: "FREQ-W2F",
+            unit: "10**9 Hz",
+            reference: 1.42,
+            canonical_reference: 1.42e9,
+        },
+        SpectralUnitCase {
+            ctype: "ENER-W2F",
+            unit: "keV",
+            reference: 1.0,
+            canonical_reference: 1.602_176_634e-16,
+        },
+        SpectralUnitCase {
+            ctype: "WAVN-W2F",
+            unit: "cm**-1",
+            reference: 1.0,
+            canonical_reference: 100.0,
+        },
+        SpectralUnitCase {
+            ctype: "VRAD-W2F",
+            unit: "km s-1",
+            reference: 1.0,
+            canonical_reference: 1_000.0,
+        },
+        SpectralUnitCase {
+            ctype: "WAVE-F2W",
+            unit: "nm",
+            reference: 500.0,
+            canonical_reference: 5e-7,
+        },
+        SpectralUnitCase {
+            ctype: "ZOPT-F2W",
+            unit: "1",
+            reference: 0.1,
+            canonical_reference: 0.1,
+        },
+        SpectralUnitCase {
+            ctype: "AWAV-F2A",
+            unit: "Angstrom",
+            reference: 5_000.0,
+            canonical_reference: 5e-7,
+        },
+    ];
+    for case in cases {
+        let mut header = Header::new();
+        header
+            .set("NAXIS", 1)
+            .set("CTYPE1", case.ctype)
+            .set("CUNIT1", case.unit)
+            .set("CRPIX1", 1.0)
+            .set("CRVAL1", case.reference)
+            .set("CDELT1", case.reference / 100.0)
+            .set("RESTFRQ", 1_420_405_751.0);
+        let wcs = header.wcs(None).unwrap();
+        assert_eq!(wcs.view().axes[0].cunit, case.unit);
+        assert!(
+            (wcs.view().axes[0].crval - case.canonical_reference).abs()
+                <= case.canonical_reference.abs() * f64::EPSILON,
+            "{} canonical reference: {:.17e}",
+            case.ctype,
+            wcs.view().axes[0].crval
+        );
+        let world = wcs.pixel_to_world(&[1.0]).unwrap()[0];
+        assert!(
+            (world - case.canonical_reference).abs() <= case.canonical_reference.abs() * 1e-10,
+            "{} reference: {world:.17e}",
+            case.ctype
+        );
+    }
+
+    let mut invalid = Header::new();
+    invalid
+        .set("NAXIS", 1)
+        .set("CTYPE1", "WAVE-F2W")
+        .set("CUNIT1", "Hz")
+        .set("CRVAL1", 1.0);
+    assert!(matches!(
+        invalid.wcs(None),
+        Err(crate::error::FitsError::InvalidValue { card }) if card.contains("CUNIT")
+    ));
+    invalid.set("CUNIT1", "qHz");
+    assert!(matches!(
+        invalid.wcs(None),
+        Err(crate::error::FitsError::InvalidValue { card }) if card.contains("CUNIT")
+    ));
+}
+
+#[test]
+fn logarithmic_axes_apply_domains_units_and_inverse() {
+    use crate::error::FitsError;
+    use crate::header::Header;
+
+    let mut generic = Header::new();
+    generic
+        .set("NAXIS", 1)
+        .set("CTYPE1", "TIME-LOG")
+        .set("CUNIT1", "d")
+        .set("CRPIX1", 1.0)
+        .set("CRVAL1", 100.0)
+        .set("CDELT1", 10.0);
+    let generic = generic.wcs(None).unwrap();
+    let expected = 100.0 * 0.2_f64.exp();
+    assert_eq!(generic.view().axes[0].cunit, "d");
+    assert!((generic.pixel_to_world(&[3.0]).unwrap()[0] - expected).abs() < 1e-13);
+    assert!((generic.world_to_pixel(&[expected]).unwrap()[0] - 3.0).abs() < 1e-13);
+    assert!(matches!(
+        generic.world_to_pixel(&[0.0]),
+        Err(FitsError::WcsCoordinateDomain {
+            axis: 0,
+            algorithm: "LOG"
+        })
+    ));
+
+    let mut frequency = Header::new();
+    frequency
+        .set("NAXIS", 1)
+        .set("CTYPE1", "FREQ-LOG")
+        .set("CUNIT1", "GHz")
+        .set("CRPIX1", 1.0)
+        .set("CRVAL1", 1.4)
+        .set("CDELT1", 0.001);
+    let frequency = frequency.wcs(None).unwrap();
+    let expected = 1.4e9 * (2.0e6_f64 / 1.4e9).exp();
+    assert_eq!(frequency.view().axes[0].cunit, "GHz");
+    assert_eq!(frequency.view().axes[0].crval, 1.4e9);
+    assert!((frequency.pixel_to_world(&[3.0]).unwrap()[0] - expected).abs() < 1e-6);
+    assert!((frequency.world_to_pixel(&[expected]).unwrap()[0] - 3.0).abs() < 1e-12);
+
+    let mut invalid = Header::new();
+    invalid
+        .set("NAXIS", 1)
+        .set("CTYPE1", "ABCD-LOG")
+        .set("CRVAL1", 0.0);
+    assert!(matches!(
+        invalid.wcs(None),
+        Err(FitsError::InvalidValue { .. })
+    ));
+}
+
+#[test]
+fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
+    use crate::error::FitsError;
+    use crate::header::Header;
+
+    let velocity_axis = |ctype: &str| {
+        let mut header = Header::new();
+        header
+            .set("NAXIS", 1)
+            .set("CTYPE1", ctype)
+            .set("CUNIT1", "m/s")
+            .set("CRPIX1", 1.0)
+            .set("CRVAL1", 0.0)
+            .set("CDELT1", 1_000.0);
+        header
+    };
+    assert!(matches!(
+        velocity_axis("VELO-F2V").wcs(None),
+        Err(FitsError::InvalidValue { card }) if card.contains("RESTFRQ or RESTWAV")
+    ));
+    assert!(matches!(
+        velocity_axis("VRAD-W2F").wcs(None),
+        Err(FitsError::InvalidValue { card }) if card.contains("RESTFRQ or RESTWAV")
+    ));
+
+    let no_rest = velocity_axis("VRAD-V2F").wcs(None).unwrap();
+    let world = no_rest.pixel_to_world(&[3.0]).unwrap()[0];
+    let speed_of_light: f64 = 2.997_924_58e8;
+    let frequency =
+        speed_of_light * ((speed_of_light - 2_000.0) / (speed_of_light + 2_000.0)).sqrt();
+    let expected = speed_of_light * (1.0 - frequency / speed_of_light);
+    assert!((world - expected).abs() < 1e-8);
+    assert!((no_rest.world_to_pixel(&[world]).unwrap()[0] - 3.0).abs() < 1e-10);
+
+    let mut by_frequency = velocity_axis("VELO-F2V");
+    by_frequency.set("RESTFRQ", 1_420_405_751.0);
+    let by_frequency = by_frequency.wcs(None).unwrap();
+    let mut by_wavelength = velocity_axis("VELO-F2V");
+    by_wavelength.set("RESTWAV", 2.997_924_58e8 / 1_420_405_751.0);
+    let by_wavelength = by_wavelength.wcs(None).unwrap();
+    assert!(
+        (by_frequency.pixel_to_world(&[3.0]).unwrap()[0]
+            - by_wavelength.pixel_to_world(&[3.0]).unwrap()[0])
+            .abs()
+            < 1e-12
+    );
+    assert!(matches!(
+        by_frequency.world_to_pixel(&[2.997_924_58e8]),
+        Err(FitsError::WcsCoordinateDomain {
+            axis: 0,
+            algorithm: "F2V"
+        })
+    ));
+
+    let mut deprecated = velocity_axis("VELO-F2V");
+    deprecated.set("RESTFREQ", 1_420_405_751.0);
+    assert!(
+        (deprecated
+            .wcs(None)
+            .unwrap()
+            .pixel_to_world(&[3.0])
+            .unwrap()[0]
+            - 2_000.006_671_265_423_6)
+            .abs()
+            < 1e-9
+    );
+
+    let mut invalid = velocity_axis("VELO-F2V");
+    invalid.set("RESTFRQ", 0.0);
+    assert!(matches!(
+        invalid.wcs(None),
+        Err(FitsError::InvalidValue { card }) if card.contains("RESTFRQ")
+    ));
+
+    let mut pixel_list = Header::new();
+    pixel_list
+        .set("TCTYP2", "VELO-F2V")
+        .set("TCUNI2", "m/s")
+        .set("TCRPX2", 1.0)
+        .set("TCRVL2", 0.0)
+        .set("TCDLT2", 1_000.0)
+        .set("RFRQ2", 1_420_405_751.0);
+    let pixel_list = pixel_list.wcs_pixel_list(&[2], None).unwrap();
+    assert!((pixel_list.pixel_to_world(&[3.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9);
+
+    let mut vector = Header::new();
+    vector
+        .set("WCAX5A", 1)
+        .set("1CTY5A", "VELO-F2V")
+        .set("1CUN5A", "m/s")
+        .set("1CRP5A", 1.0)
+        .set("1CRV5A", 0.0)
+        .set("1CDE5A", 1_000.0)
+        .set("RWAV5A", 2.997_924_58e8 / 1_420_405_751.0);
+    let vector = vector.wcs_array_column(5, Some('A')).unwrap();
+    assert!((vector.pixel_to_world(&[3.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9);
 }
 
 #[test]

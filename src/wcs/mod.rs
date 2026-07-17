@@ -4,9 +4,8 @@
 //! pixel↔world pipeline (Greisen & Calabretta, FITS WCS papers I & II):
 //!
 //! ```text
-//! pixel ─ CRPIX ─►  ·(PC|CD, ×CDELT)  ─►  intermediate world (deg)
-//!        ─► deproject (CTYPE algorithm) ─► native sphere
-//!        ─► rotate (CRVAL, LONPOLE) ─► celestial (α, δ)
+//! pixel ─ CRPIX ─►  ·(PC|CD, ×CDELT)  ─► intermediate coordinate
+//!        ─► CTYPE algorithm ─► world coordinate
 //! ```
 //!
 //! The linear layer is `PC`+`CDELT`, `CD`, or legacy `CDELT`+`CROTA`, with general
@@ -16,11 +15,11 @@
 //! `ZEA`/`ZPN`/`AIR`, zenithal-perspective `AZP`/`SZP`, cylindrical `CAR`/`CEA`/
 //! `MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic `COP`/`COE`/`COD`/`COO`,
 //! pseudoconic `BON`, polyconic `PCO`, quad-cube `TSC`/`CSC`/`QSC`, and HEALPix
-//! `HPX`. All validated against `astropy.wcs` (wcslib). The unimplemented
-//! non-linear transforms — convention-only `XPH` and the non-linear coordinate
-//! algorithms (§8.4), including
-//! generic `LOG`/`TAB` axes — are not evaluated. Parsing remains permissive and
-//! records them in [`WcsView::unsupported_axes`]; complete transforms then return
+//! `HPX`. The Table-26 `F2*`/`W2*`/`V2*`/`A2*` spectral algorithms and generic
+//! `LOG` are also evaluated in both directions. All are validated against
+//! `astropy.wcs` or wcslib. Unimplemented `GRI`, `GRA`, `TAB`, and convention-only
+//! `XPH` transforms remain readable in [`WcsView::unsupported_axes`]; complete
+//! transforms then return
 //! [`FitsError::UnsupportedWcsTransform`](crate::FitsError::UnsupportedWcsTransform).
 //!
 //! Binary-table WCS (Table 22) is supported for both the pixel-list
@@ -42,7 +41,10 @@ use crate::error::Result;
 use crate::header::Header;
 use crate::keyword::KeyBuf;
 use crate::keyword::key;
+use crate::wcs::axis::AxisTransform;
+use crate::wcs::axis::SpectralRest;
 
+mod axis;
 mod cube;
 mod healpix;
 
@@ -50,13 +52,6 @@ const R2D: f64 = 180.0 / PI;
 const D2R: f64 = PI / 180.0;
 const DOMAIN_TOLERANCE: f64 = 1e-12;
 const NEWTON_RESIDUAL_TOLERANCE: f64 = 1e-12;
-
-/// The §8.4 spectral coordinate types (the 4-character `CTYPE` prefix). Every
-/// standard algorithm suffix on these types is non-linear; `LOG` and `TAB` also
-/// apply to arbitrary four-character coordinate types.
-const SPECTRAL_TYPES: &[&str] = &[
-    "FREQ", "ENER", "WAVN", "VRAD", "WAVE", "VOPT", "ZOPT", "AWAV", "VELO", "BETA",
-];
 
 /// A celestial projection algorithm — the 3-letter `CTYPE` code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -904,6 +899,7 @@ pub struct WcsView<'a> {
 #[derive(Debug, Clone)]
 pub struct Wcs {
     axes: Vec<WcsAxis>,
+    axis_transforms: Vec<AxisTransform>,
     /// Linear transform `A` mapping `(pixel − CRPIX)` to intermediate world
     /// coordinates: `PCi_j × CDELTi`, or `CDi_j` directly. Row-major `naxis²`.
     matrix: Vec<f64>,
@@ -919,7 +915,7 @@ pub struct Wcs {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct LinearAxisWorld<'a> {
+pub(crate) struct AxisWorld<'a> {
     pub(crate) cunit: &'a str,
     pub(crate) value: f64,
 }
@@ -1257,10 +1253,6 @@ impl Wcs {
             .collect::<Result<_>>()?;
         let celestial_axes = find_celestial(&ctype)?;
 
-        // Preserve unsupported WCS metadata for inspection without allowing an
-        // incomplete transform to masquerade as a world coordinate.
-        let mut unsupported_axes = nonlinear_unsupported_axes(&ctype);
-
         // Build the linear transform A. Precedence: CD, then PC×CDELT, then the
         // legacy CROTA rotation, then a bare CDELT diagonal.
         let has_cd = (1..=naxis)
@@ -1325,6 +1317,36 @@ impl Wcs {
                     matrix[ax * naxis + j] *= f;
                 }
             }
+        }
+        let rest = if ctype
+            .iter()
+            .any(|ctype| axis::has_analytic_spectral_algorithm(ctype))
+        {
+            spectral_rest(header, alt, &a)?
+        } else {
+            SpectralRest::NONE
+        };
+        let mut axis_transforms = Vec::with_capacity(naxis);
+        let mut unsupported_axes = Vec::new();
+        for axis in 0..naxis {
+            if celestial_axis(&ctype[axis]).is_some() {
+                axis_transforms.push(AxisTransform::Linear);
+                if projection_code(&ctype[axis])
+                    .is_some_and(|code| Projection::from_code(code).is_none())
+                {
+                    unsupported_axes.push(axis);
+                }
+                continue;
+            }
+            let parsed = AxisTransform::parse(&ctype[axis], &cunit[axis], crval[axis], rest)?;
+            crval[axis] *= parsed.unit_scale;
+            for column in 0..naxis {
+                matrix[axis * naxis + column] *= parsed.unit_scale;
+            }
+            if matches!(&parsed.transform, AxisTransform::Unsupported) {
+                unsupported_axes.push(axis);
+            }
+            axis_transforms.push(parsed.transform);
         }
         let inverse = invert(&matrix, naxis).ok_or(FitsError::InvalidValue {
             card: "singular WCS transform matrix".to_string(),
@@ -1406,6 +1428,7 @@ impl Wcs {
             .collect();
         Ok(Wcs {
             axes,
+            axis_transforms,
             matrix,
             inverse,
             celestial,
@@ -1422,11 +1445,7 @@ impl Wcs {
         }
     }
 
-    pub(crate) fn linear_axis_world(
-        &self,
-        axis: usize,
-        pixel: &[f64],
-    ) -> Result<LinearAxisWorld<'_>> {
+    pub(crate) fn axis_world(&self, axis: usize, pixel: &[f64]) -> Result<AxisWorld<'_>> {
         let naxis = self.axes.len();
         assert!(axis < naxis, "WCS axis index");
         assert_eq!(pixel.len(), naxis, "pixel coordinate count");
@@ -1438,9 +1457,14 @@ impl Wcs {
             .iter()
             .zip(&self.axes)
             .map(|(&value, metadata)| value - metadata.crpix);
-        Ok(LinearAxisWorld {
+        let intermediate = row.iter().zip(offset).map(|(&a, b)| a * b).sum::<f64>();
+        Ok(AxisWorld {
             cunit: &self.axes[axis].cunit,
-            value: self.axes[axis].crval + row.iter().zip(offset).map(|(&a, b)| a * b).sum::<f64>(),
+            value: self.axis_transforms[axis].to_world(
+                intermediate,
+                self.axes[axis].crval,
+                axis,
+            )?,
         })
     }
 
@@ -1467,6 +1491,9 @@ impl Wcs {
                 .expect("Table 22 defines primary and alternate axis-type keywords");
             if let Some(t) = header.get_text(type_key.as_str())? {
                 h.set(key!("CTYPE{ax}").as_str(), t);
+                if axis::is_spectral_type(t) {
+                    copy_table_spectral_rest(header, &mut h, resolver, c)?;
+                }
             }
             for keyword in [
                 TableAxisKeyword::ReferencePoint,
@@ -1543,12 +1570,14 @@ impl Wcs {
         }
         let mut h = Header::new();
         h.set("WCSAXES", naxis as i64);
+        let mut has_spectral_axis = false;
         for ax in 1..=naxis {
             let type_key = resolver
                 .vector_axis_key(TableAxisKeyword::Type, ax, column)
                 .expect("Table 22 defines primary and alternate axis-type keywords");
             if let Some(t) = header.get_text(type_key.as_str())? {
                 h.set(key!("CTYPE{ax}").as_str(), t);
+                has_spectral_axis |= axis::is_spectral_type(t);
             }
             let unit_key = resolver
                 .vector_axis_key(TableAxisKeyword::Unit, ax, column)
@@ -1575,6 +1604,9 @@ impl Wcs {
                 }
             }
         }
+        if has_spectral_axis {
+            copy_table_spectral_rest(header, &mut h, resolver, column)?;
+        }
         // Linear-transform matrices: `ijPCn` / `ijCDn`, indexed by axis pair.
         for i in 1..=naxis {
             for j in 1..=naxis {
@@ -1595,8 +1627,8 @@ impl Wcs {
     }
 
     /// Map 1-based pixel coordinates to complete world coordinates. Celestial axes
-    /// return `(α, δ)` in degrees; linear axes return `CRVAL +` the intermediate
-    /// coordinate.
+    /// return `(α, δ)` in degrees, nonlinear spectral axes use their Table-25
+    /// default units, and other axes retain their declared units.
     ///
     /// # Errors
     ///
@@ -1616,11 +1648,11 @@ impl Wcs {
             .map(|(&value, axis)| value - axis.crpix)
             .collect();
         let intermediate = matvec(&self.matrix, &offset, naxis);
-        let mut world: Vec<f64> = intermediate
-            .iter()
-            .zip(&self.axes)
-            .map(|(&value, axis)| value + axis.crval)
-            .collect();
+        let mut world = (0..naxis)
+            .map(|axis| {
+                self.axis_transforms[axis].to_world(intermediate[axis], self.axes[axis].crval, axis)
+            })
+            .collect::<Result<Vec<_>>>()?;
         if let Some(c) = &self.celestial {
             let native = c
                 .projection
@@ -1647,11 +1679,11 @@ impl Wcs {
         let naxis = self.axes.len();
         assert_eq!(world.len(), naxis, "world coordinate count");
         self.require_complete_transform()?;
-        let mut intermediate: Vec<f64> = world
-            .iter()
-            .zip(&self.axes)
-            .map(|(&value, axis)| value - axis.crval)
-            .collect();
+        let mut intermediate = (0..naxis)
+            .map(|axis| {
+                self.axis_transforms[axis].to_intermediate(world[axis], self.axes[axis].crval, axis)
+            })
+            .collect::<Result<Vec<_>>>()?;
         if let Some(c) = self.celestial.as_ref() {
             if !world[c.lng].is_finite()
                 || !world[c.lat].is_finite()
@@ -1692,8 +1724,7 @@ enum CelestialAxis {
 
 /// The celestial coordinate an axis carries, from its `CTYPE` head (§8.2): `RA` and
 /// the `xLON`/`yzLN` forms are longitudes; `DEC` and `xLAT`/`yzLT` are latitudes;
-/// `None` for any non-celestial axis. One classifier shared by [`find_celestial`]
-/// and [`nonlinear_unsupported_axes`] so the two cannot drift.
+/// `None` for any non-celestial axis.
 fn celestial_axis(ctype: &str) -> Option<CelestialAxis> {
     let head = ctype.split('-').next().unwrap_or("").trim();
     if head == "RA" || head.ends_with("LON") || (head.len() == 4 && head.ends_with("LN")) {
@@ -1715,31 +1746,28 @@ fn projection_code(ctype: &str) -> Option<&str> {
         .filter(|c| !c.is_empty())
 }
 
-/// Axis indices (0-based) whose non-linear transform this library does not
-/// evaluate: a celestial axis whose projection code is unimplemented
-/// (including convention-only codes), a spectral axis with an algorithm suffix,
-/// or any four-character coordinate type using the generic `LOG`/`TAB` algorithms (§8.4).
-/// Such an axis is taken through the linear stage only (its intermediate world
-/// coordinate). Supported projections and bare coordinate types are not flagged.
-fn nonlinear_unsupported_axes(ctype: &[String]) -> Vec<usize> {
-    let mut out = Vec::new();
-    for (i, t) in ctype.iter().enumerate() {
-        if celestial_axis(t).is_some() {
-            if let Some(code) = projection_code(t)
-                && Projection::from_code(code).is_none()
-            {
-                out.push(i);
-            }
-        } else {
-            let head = t.split('-').next().unwrap_or("").trim_end();
-            let code = projection_code(t);
-            let generic_nonlinear = head.len() == 4 && matches!(code, Some("LOG" | "TAB"));
-            if generic_nonlinear || SPECTRAL_TYPES.contains(&head) && code.is_some() {
-                out.push(i);
-            }
+fn spectral_rest(header: &Header, alt: Option<char>, suffix: &str) -> Result<SpectralRest> {
+    let mut frequency = header.get_real(key!("RESTFRQ{suffix}").as_str())?;
+    if frequency.is_none() && alt.is_none() {
+        frequency = header.get_real("RESTFREQ")?;
+    }
+    let wavelength = header.get_real(key!("RESTWAV{suffix}").as_str())?;
+    SpectralRest::new(frequency, wavelength)
+}
+
+fn copy_table_spectral_rest(
+    source: &Header,
+    destination: &mut Header,
+    resolver: TableWcsResolver,
+    column: usize,
+) -> Result<()> {
+    for (table_root, image_root) in [("RFRQ", "RESTFRQ"), ("RWAV", "RESTWAV")] {
+        let key = resolver.column_key(table_root, column);
+        if let Some(value) = source.get_real(key.as_str())? {
+            destination.set(image_root, value);
         }
     }
-    out
+    Ok(())
 }
 
 /// Degrees per `CUNITia` angle unit; `1.0` for an absent, unknown, or `deg` unit.

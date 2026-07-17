@@ -59,6 +59,7 @@ mod keyword;
 mod reader;
 mod table;
 mod time;
+mod unit;
 mod wcs;
 mod writer;
 

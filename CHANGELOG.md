@@ -61,7 +61,7 @@
 - `FitsError::DataUnitTooLarge::bytes` changed from `usize` to `u64`. The
   `TypeMismatch`, `InvalidAscii`, `ReservedKeyword`, `InvalidHeaderValue`,
   `HeaderCardTooLong`, `AsciiFieldTooWide`, `IntegerOutOfRange`,
-  `UnsupportedWcsTransform`, `WcsProjectionDomain`, `WcsNoConvergence`,
+  `UnsupportedWcsTransform`, `WcsProjectionDomain`, `WcsCoordinateDomain`, `WcsNoConvergence`,
   `PlioValueOutOfRange`, `TableMetadataMismatch`, `GroupIndexOutOfBounds`, and
   `WriterFailed` variants were added; exhaustive matches on `FitsError` must handle
   them.
@@ -75,6 +75,9 @@
 - Added `Wcs::view` with immutable per-axis metadata and unsupported-axis status.
 - Added forward and inverse `TSC`, `CSC`, `QSC`, and parameterized `HPX`
   transforms, completing the FITS 4.0 celestial projection set.
+- Added forward and inverse Table-26 `F2*`, `W2*`, `V2*`, and `A2*` spectral
+  transforms plus generic `LOG`. Spectral transforms resolve image and table rest
+  metadata and normalize declared units to their Table-25 defaults.
 - Added `TimeCoordinate`, the shared MJD and effective scale value returned for
   epoch keywords and WCS time axes.
 - Added explicit `ColumnType` declarations for variable-length table columns.
@@ -143,11 +146,12 @@
   misclassified. Boundary sizing uses the distinct primary, extension, and
   random-groups formulas and requires extension/group `PCOUNT` and `GCOUNT`.
 - FITS time units now support standard SI prefixes, reject non-time units, and
-  evaluate the epoch-dependent tropical and Besselian year definitions. Time axes
-  now honor complete PC/CD rows, per-axis units, and per-axis time scales.
-- WCS unsupported-axis classification now recognizes the standard `LOG` and `TAB`
-  algorithms on any four-character coordinate type, including time and generic axes,
-  instead of limiting nonlinear suffix detection to spectral coordinate names.
+  numeric multipliers, and evaluate the epoch-dependent tropical and Besselian
+  year definitions. Non-time units are rejected. Time axes now honor complete
+  PC/CD rows, per-axis units, and per-axis time scales.
+- WCS coordinate algorithms now recognize generic `LOG` and `TAB` independently
+  of the coordinate type. `LOG` is evaluated for spectral, time, and generic
+  axes; `TAB` remains explicitly unsupported rather than returning a partial value.
 - Binary-table WCS now resolves the normative Table-22 primary and shortened
   alternate axis keywords, both pixel-list matrix/parameter aliases, column-indexed
   pole keywords, and alternate vector-cell rank inference.

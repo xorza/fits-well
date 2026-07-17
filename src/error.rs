@@ -127,6 +127,13 @@ pub enum FitsError {
     WcsProjectionDomain {
         projection: &'static str,
     },
+    /// A world or intermediate coordinate lies outside a non-celestial WCS
+    /// algorithm's mathematical domain.
+    WcsCoordinateDomain {
+        /// Zero-based WCS axis containing the invalid coordinate.
+        axis: usize,
+        algorithm: &'static str,
+    },
     /// An iterative WCS projection inversion did not reach a valid solution.
     WcsNoConvergence {
         projection: &'static str,
@@ -299,6 +306,12 @@ impl fmt::Display for FitsError {
                     "coordinate is outside the {projection} projection domain"
                 )
             }
+            FitsError::WcsCoordinateDomain { axis, algorithm } => {
+                write!(
+                    f,
+                    "coordinate on zero-based axis {axis} is outside the {algorithm} WCS domain"
+                )
+            }
             FitsError::WcsNoConvergence { projection } => {
                 write!(f, "{projection} projection iteration did not converge")
             }
@@ -469,6 +482,14 @@ mod tests {
         assert_eq!(
             FitsError::WcsProjectionDomain { projection: "SIN" }.to_string(),
             "coordinate is outside the SIN projection domain"
+        );
+        assert_eq!(
+            FitsError::WcsCoordinateDomain {
+                axis: 2,
+                algorithm: "LOG",
+            }
+            .to_string(),
+            "coordinate on zero-based axis 2 is outside the LOG WCS domain"
         );
         assert_eq!(
             FitsError::WcsNoConvergence { projection: "ZPN" }.to_string(),
