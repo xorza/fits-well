@@ -23,26 +23,50 @@ fn write_tab_lookup(
     level: i64,
     coordinates: &[f64],
 ) {
+    let shape = format!("(1,{})", coordinates.len());
+    write_tab_lookup_columns(
+        writer,
+        version,
+        level,
+        &[("COORD", coordinates, shape.as_str())],
+    );
+}
+
+fn write_tab_lookup_columns(
+    writer: &mut FitsWriter<Cursor<Vec<u8>>>,
+    version: i64,
+    level: i64,
+    columns: &[(&str, &[f64], &str)],
+) {
     let mut header = Header::new();
+    let row_len = columns
+        .iter()
+        .map(|(_, values, _)| values.len() * 8)
+        .sum::<usize>();
     header
         .set_internal("XTENSION", "BINTABLE")
         .set_internal("BITPIX", 8)
         .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", (coordinates.len() * 8) as i64)
+        .set_internal("NAXIS1", row_len as i64)
         .set_internal("NAXIS2", 1)
         .set_internal("PCOUNT", 0)
         .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1)
-        .set_internal("TTYPE1", "COORD")
-        .set_internal("TFORM1", format!("{}D", coordinates.len()))
-        .set_internal("TDIM1", format!("(1,{})", coordinates.len()))
+        .set_internal("TFIELDS", columns.len() as i64)
         .set_internal("EXTNAME", "WCS-TABLE")
         .set_internal("EXTVER", version)
         .set_internal("EXTLEVEL", level);
-    let bytes: Vec<u8> = coordinates
-        .iter()
-        .flat_map(|value| value.to_be_bytes())
-        .collect();
+    let mut bytes = Vec::with_capacity(row_len);
+    for (index, (name, values, shape)) in columns.iter().enumerate() {
+        let column = index + 1;
+        header
+            .set_internal(format!("TTYPE{column}").as_str(), *name)
+            .set_internal(
+                format!("TFORM{column}").as_str(),
+                format!("{}D", values.len()),
+            )
+            .set_internal(format!("TDIM{column}").as_str(), *shape);
+        bytes.extend(values.iter().flat_map(|value| value.to_be_bytes()));
+    }
     writer.write_raw_hdu(&header, &bytes).unwrap();
 }
 
@@ -78,6 +102,60 @@ fn read_wcs_resolves_the_exact_tabular_extension() {
     let wcs = reader.read_wcs(0, None).unwrap();
     assert_eq!(wcs.pixel_to_world(&[2.0]).unwrap(), [20.0]);
     assert_eq!(wcs.world_to_pixel(&[30.0]).unwrap(), [2.5]);
+}
+
+#[test]
+fn read_wcs_resolves_shared_arrays_and_extensions_once_per_reference_group() {
+    let mut primary = Header::new();
+    primary
+        .set_internal("SIMPLE", true)
+        .set_internal("BITPIX", 8)
+        .set_internal("NAXIS", 0)
+        .set_internal("WCSAXES", 5);
+    for (axis, column, version, table_axis) in [
+        (1, "FIRST", 1, 1),
+        (2, "SECOND", 1, 1),
+        (3, "COUPLED", 1, 1),
+        (4, "COUPLED", 1, 2),
+        (5, "DISTINCT", 2, 1),
+    ] {
+        primary
+            .set_internal(format!("CTYPE{axis}").as_str(), format!("AX{axis:02}-TAB"))
+            .set_internal(format!("CRPIX{axis}").as_str(), 0.0)
+            .set_internal(format!("CRVAL{axis}").as_str(), 0.0)
+            .set_internal(format!("CDELT{axis}").as_str(), 1.0)
+            .set_internal(format!("PS{axis}_0").as_str(), "WCS-TABLE")
+            .set_internal(format!("PV{axis}_1").as_str(), version)
+            .set_internal(format!("PS{axis}_1").as_str(), column)
+            .set_internal(format!("PV{axis}_3").as_str(), table_axis);
+    }
+    let coupled = [30.0, 40.0, 31.0, 40.0, 30.0, 42.0, 31.0, 42.0];
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_raw_hdu(&primary, &[]).unwrap();
+    write_tab_lookup_columns(
+        &mut writer,
+        1,
+        1,
+        &[
+            ("FIRST", &[10.0, 20.0], "(1,2)"),
+            ("SECOND", &[100.0, 200.0], "(1,2)"),
+            ("COUPLED", &coupled, "(2,2,2)"),
+        ],
+    );
+    write_tab_lookup_columns(
+        &mut writer,
+        2,
+        1,
+        &[("DISTINCT", &[1000.0, 2000.0], "(1,2)")],
+    );
+
+    let bytes = writer.into_inner().into_inner();
+    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+    let wcs = reader.read_wcs(0, None).unwrap();
+    assert_eq!(
+        wcs.pixel_to_world(&[1.0, 1.0, 1.0, 1.0, 1.0]).unwrap(),
+        [10.0, 100.0, 30.0, 40.0, 1000.0]
+    );
 }
 
 #[test]
@@ -853,6 +931,11 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     let rows = 4;
     let columns = vec![
         WriteColumn::scalar("ID", ColumnData::I32(vec![10, 20, 30, 40])),
+        WriteColumn::scalar(
+            "LOGICAL",
+            ColumnData::Logical(vec![Some(true), Some(false), None, Some(true)]),
+        ),
+        WriteColumn::scalar("BYTE", ColumnData::Bytes(vec![1, 2, 3, 4])),
         WriteColumn::bits(
             "FLAGS",
             vec![0b1010_0000, 0b0101_0000, 0b1110_0000, 0b0001_0000],
@@ -877,9 +960,22 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
                 Complex::new(4.0, -4.0),
             ]),
         ),
+        WriteColumn::scalar(
+            "COMPLEX64",
+            ColumnData::ComplexF64(vec![
+                Complex::new(10.0, -10.0),
+                Complex::new(20.0, -20.0),
+                Complex::new(30.0, -30.0),
+                Complex::new(40.0, -40.0),
+            ]),
+        ),
         WriteColumn::scalar("SCALED", ColumnData::I16(vec![1, -99, 2, 3]))
             .scaled(2.0, 10.0)
             .with_null(-99),
+        WriteColumn::scalar("LONG", ColumnData::I64(vec![100, 200, 300, 400])),
+        WriteColumn::scalar("FLOAT", ColumnData::F32(vec![1.5, 2.5, 3.5, 4.5])),
+        WriteColumn::scalar("DOUBLE", ColumnData::F64(vec![5.5, 6.5, 7.5, 8.5])),
+        WriteColumn::fixed("ZERO", ColumnData::I16(Vec::new()), 0),
         WriteColumn::vla(
             "VLA",
             vec![
@@ -911,7 +1007,23 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
 
     let schema = reader.table_schema(1).unwrap();
     assert_eq!(schema.nrows, 4);
-    assert_eq!(schema.columns.len(), 7);
+    assert_eq!(schema.columns.len(), 14);
+    let empty = reader.read_table_rows(1, 2..2).unwrap();
+    assert_eq!(empty.metadata().nrows, 0);
+    assert_eq!(
+        empty.column_by_name("VLA").unwrap().vla().unwrap(),
+        Vec::<ColumnData>::new()
+    );
+    let full = reader.read_table_rows(1, 0..4).unwrap();
+    assert_eq!(
+        full.column_by_name("QVLA").unwrap().vla().unwrap(),
+        [
+            ColumnData::F64(vec![0.5]),
+            ColumnData::F64(Vec::new()),
+            ColumnData::F64(vec![2.5, 3.5]),
+            ColumnData::F64(vec![4.5]),
+        ]
+    );
     let ranged = reader.read_table_rows(1, 1..3).unwrap();
     assert_eq!(
         ranged.column_by_name("ID").unwrap().raw().unwrap(),
@@ -966,6 +1078,39 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
             .unwrap(),
         ColumnData::F64(vec![4.5])
     );
+    for (column, expected) in [
+        ("ID", ColumnData::I32(vec![30])),
+        ("LOGICAL", ColumnData::Logical(vec![None])),
+        ("BYTE", ColumnData::Bytes(vec![3])),
+        ("FLAGS", ColumnData::Bytes(vec![0b1110_0000])),
+        (
+            "NAME",
+            ColumnData::Character(vec![CharacterField::new(b"tri ".to_vec())]),
+        ),
+        (
+            "COMPLEX",
+            ColumnData::ComplexF32(vec![Complex::new(3.0, -3.0)]),
+        ),
+        (
+            "COMPLEX64",
+            ColumnData::ComplexF64(vec![Complex::new(30.0, -30.0)]),
+        ),
+        ("SCALED", ColumnData::I16(vec![2])),
+        ("LONG", ColumnData::I64(vec![300])),
+        ("FLOAT", ColumnData::F32(vec![3.5])),
+        ("DOUBLE", ColumnData::F64(vec![7.5])),
+        ("ZERO", ColumnData::I16(Vec::new())),
+        ("VLA", ColumnData::I32(Vec::new())),
+        ("QVLA", ColumnData::F64(vec![2.5, 3.5])),
+    ] {
+        assert_eq!(
+            reader
+                .read_table_cell(1, 2, ColumnSelector::from(column))
+                .unwrap(),
+            expected,
+            "{column}"
+        );
+    }
     assert!(matches!(
         reader.read_table_rows(1, 3..5),
         Err(FitsError::RowRangeOutOfBounds {
@@ -976,7 +1121,11 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     ));
 
     let mut corrupted = bytes.clone();
-    let qvla = &schema.columns[6];
+    let qvla = &schema.columns[schema
+        .columns
+        .iter()
+        .position(|column| column.name.as_deref() == Some("QVLA"))
+        .unwrap()];
     let qvla_slot =
         usize::try_from(reader.hdus[1].data_offset).unwrap() + schema.row_len + qvla.byte_offset;
     corrupted[qvla_slot..qvla_slot + qvla.tform.byte_width()].fill(0xff);
@@ -1002,6 +1151,26 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
         selective.read_table_rows(1, 1..2),
         Err(FitsError::DataUnitOverflow)
     ));
+
+    let mut stream = FitsReader::open(Cursor::new(bytes)).unwrap();
+    let one = stream.read_table_rows(1, 3..4).unwrap();
+    assert_eq!(
+        one.column_by_name("VLA").unwrap().vla().unwrap(),
+        [ColumnData::I32(vec![4, 5, 6])]
+    );
+    assert_eq!(
+        stream
+            .read_table_columns(1, 0..4, &[ColumnSelector::from("QVLA")])
+            .unwrap()
+            .columns[0]
+            .data,
+        TableColumnData::Variable(vec![
+            ColumnData::F64(vec![0.5]),
+            ColumnData::F64(Vec::new()),
+            ColumnData::F64(vec![2.5, 3.5]),
+            ColumnData::F64(vec![4.5]),
+        ])
+    );
 }
 
 #[test]

@@ -783,7 +783,7 @@ impl<W: Write> FitsWriter<W> {
         self.scratch.reserve_exact(total_len);
         for r in 0..nrows {
             for col in columns {
-                format_ascii_field(&mut self.scratch, col, r);
+                append_ascii_field(&mut self.scratch, col, r)?;
             }
         }
         self.finish_hdu(header, SPACE_FILL, true)
@@ -1432,7 +1432,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
             }
             let mut max_elements = 0usize;
             for cell in rows {
-                assert!(
+                debug_assert!(
                     kind.matches(cell),
                     "validated VLA kind must match every cell"
                 );
@@ -1536,7 +1536,7 @@ fn cell_byte_len(kind: ColumnType, cell: &ColumnData) -> Result<usize> {
 }
 
 fn encoded_element_count(kind: ColumnType, cell: &ColumnData) -> Result<usize> {
-    assert!(kind.matches(cell), "column kind must match its data");
+    debug_assert!(kind.matches(cell), "column kind must match its data");
     if let ColumnData::Character(values) = cell {
         values.iter().try_fold(0usize, |len, value| {
             len.checked_add(value.bytes.len())
@@ -1706,34 +1706,6 @@ fn validate_ascii_column(col: &AsciiWriteColumn) -> Result<()> {
     };
     if has_null && marker.is_none() {
         return Err(FitsError::KeywordOutOfRange { name: "TNULLn" });
-    }
-    match &col.data {
-        AsciiColumnData::Text(values) => {
-            for (row, value) in values.iter().enumerate() {
-                let field = ascii_field(col, row)?;
-                if let Some(value) = value {
-                    validate_ascii(value, "ASCII text cell")?;
-                    validate_ascii_null_collision(value.trim(), marker)?;
-                }
-                debug_assert!(field.left_aligned);
-            }
-        }
-        AsciiColumnData::Integer(values) => {
-            for (row, value) in values.iter().enumerate() {
-                let field = ascii_field(col, row)?;
-                if value.is_some() {
-                    validate_ascii_null_collision(&field.text, marker)?;
-                }
-            }
-        }
-        AsciiColumnData::Float(values) => {
-            for (row, value) in values.iter().enumerate() {
-                let field = ascii_field(col, row)?;
-                if value.is_some() {
-                    validate_ascii_null_collision(&field.text, marker)?;
-                }
-            }
-        }
     }
     Ok(())
 }
@@ -1964,9 +1936,28 @@ fn ascii_tform(col: &AsciiWriteColumn) -> String {
     }
 }
 
-/// Format row `r` of a validated ASCII column into exactly `width` bytes.
-fn format_ascii_field(out: &mut Vec<u8>, col: &AsciiWriteColumn, r: usize) {
-    let field = ascii_field(col, r).expect("validated ASCII field must remain valid");
+fn append_ascii_field(out: &mut Vec<u8>, col: &AsciiWriteColumn, r: usize) -> Result<()> {
+    let field = ascii_field(col, r)?;
+    let marker = col.tnull.as_deref().map(str::trim);
+    match &col.data {
+        AsciiColumnData::Text(values) => {
+            if let Some(value) = &values[r] {
+                validate_ascii(value, "ASCII text cell")?;
+                validate_ascii_null_collision(value.trim(), marker)?;
+            }
+            debug_assert!(field.left_aligned);
+        }
+        AsciiColumnData::Integer(values) => {
+            if values[r].is_some() {
+                validate_ascii_null_collision(&field.text, marker)?;
+            }
+        }
+        AsciiColumnData::Float(values) => {
+            if values[r].is_some() {
+                validate_ascii_null_collision(&field.text, marker)?;
+            }
+        }
+    }
     let bytes = field.text.as_bytes();
     let pad = col.width - bytes.len();
     if field.left_aligned {
@@ -1976,6 +1967,7 @@ fn format_ascii_field(out: &mut Vec<u8>, col: &AsciiWriteColumn, r: usize) {
         out.extend(std::iter::repeat_n(b' ', pad));
         out.extend_from_slice(bytes);
     }
+    Ok(())
 }
 
 #[cfg(test)]

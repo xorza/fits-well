@@ -10,6 +10,7 @@ use crate::wcs::celestial_axis;
 use crate::wcs::unit_to_degrees;
 
 const TABULAR_TOLERANCE: f64 = 1e-10;
+const MAX_INTERPOLATION_VERTICES: usize = 1 << 20;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TabularReference {
@@ -20,11 +21,15 @@ pub(crate) struct TabularReference {
 }
 
 impl TabularReference {
-    fn identifies_same_array(&self, other: &TabularReference) -> bool {
+    pub(crate) fn identifies_same_extension(&self, other: &TabularReference) -> bool {
         self.extension_name
             .eq_ignore_ascii_case(&other.extension_name)
             && self.extension_version == other.extension_version
             && self.extension_level == other.extension_level
+    }
+
+    fn identifies_same_array(&self, other: &TabularReference) -> bool {
+        self.identifies_same_extension(other)
             && self
                 .coordinate_column
                 .eq_ignore_ascii_case(&other.coordinate_column)
@@ -46,8 +51,21 @@ pub(crate) struct TabularTransform {
     reference_indices: Vec<f64>,
     lengths: Vec<usize>,
     variable_axes: Vec<usize>,
-    indices: Vec<Option<Vec<f64>>>,
+    vertex_count: usize,
+    indices: Vec<Option<IndexVector>>,
     coordinates: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum IndexDirection {
+    Increasing,
+    Decreasing,
+}
+
+#[derive(Debug, Clone)]
+struct IndexVector {
+    values: Vec<f64>,
+    direction: IndexDirection,
 }
 
 pub(crate) fn descriptors(
@@ -85,6 +103,9 @@ pub(crate) fn descriptors(
             .ok()
             .and_then(|value| value.checked_sub(1))
             .ok_or_else(|| invalid("PVi_3 must be a positive table-axis number"))?;
+        if table_axis >= axis_count {
+            return Err(invalid("PVi_3 exceeds the WCS axis count"));
+        }
         let reference_index = header
             .get_real(key!("CRVAL{}{suffix}", axis + 1).as_str())?
             .unwrap_or(0.0);
@@ -164,6 +185,12 @@ impl TabularTransform {
         if lengths.contains(&0) {
             return Err(invalid("TAB coordinate axes must be non-empty"));
         }
+        let variable_axes: Vec<usize> = lengths
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, &length)| (length > 1).then_some(axis))
+            .collect();
+        let vertex_count = interpolation_vertex_count(variable_axes.len())?;
         let coordinate_count = lengths
             .iter()
             .try_fold(dimensions, |count, &length| count.checked_mul(length))
@@ -200,19 +227,18 @@ impl TabularTransform {
                     "TAB index-vector length must match its coordinate axis",
                 ));
             }
-            validate_index(&index.values)?;
-            indices.push(Some(index.values));
+            let direction = validate_index(&index.values)?;
+            indices.push(Some(IndexVector {
+                values: index.values,
+                direction,
+            }));
         }
-        let variable_axes = lengths
-            .iter()
-            .enumerate()
-            .filter_map(|(axis, &length)| (length > 1).then_some(axis))
-            .collect();
         Ok(TabularTransform {
             axes: descriptor.axes,
             reference_indices: descriptor.reference_indices,
             lengths,
             variable_axes,
+            vertex_count,
             indices,
             coordinates,
         })
@@ -274,69 +300,84 @@ impl TabularTransform {
         let Some(index) = &self.indices[table_axis] else {
             return Ok(psi);
         };
-        if index.len() == 1 {
-            if (index[0] - 0.5..=index[0] + 0.5).contains(&psi) {
+        let values = &index.values;
+        if values.len() == 1 {
+            if (values[0] - 0.5..=values[0] + 0.5).contains(&psi) {
                 return Ok(psi);
             }
             return Err(domain(self.axes[table_axis]));
         }
-        let increasing = index[0] < *index.last().unwrap();
-        let first_step = (index[1] - index[0]).abs();
-        let last = index.len() - 1;
-        let last_step = (index[last] - index[last - 1]).abs();
-        if increasing {
-            if psi < index[0] && psi < index[0] - 0.5 * first_step {
-                return Err(domain(self.axes[table_axis]));
+        let first_step = (values[1] - values[0]).abs();
+        let last = values.len() - 1;
+        let last_step = (values[last] - values[last - 1]).abs();
+        match index.direction {
+            IndexDirection::Increasing => {
+                if psi < values[0] && psi < values[0] - 0.5 * first_step {
+                    return Err(domain(self.axes[table_axis]));
+                }
+                if psi > values[last] && psi > values[last] + 0.5 * last_step {
+                    return Err(domain(self.axes[table_axis]));
+                }
             }
-            if psi > index[last] && psi > index[last] + 0.5 * last_step {
-                return Err(domain(self.axes[table_axis]));
-            }
-        } else {
-            if psi > index[0] && psi > index[0] + 0.5 * first_step {
-                return Err(domain(self.axes[table_axis]));
-            }
-            if psi < index[last] && psi < index[last] - 0.5 * last_step {
-                return Err(domain(self.axes[table_axis]));
+            IndexDirection::Decreasing => {
+                if psi > values[0] && psi > values[0] + 0.5 * first_step {
+                    return Err(domain(self.axes[table_axis]));
+                }
+                if psi < values[last] && psi < values[last] - 0.5 * last_step {
+                    return Err(domain(self.axes[table_axis]));
+                }
             }
         }
-        let segment = if (increasing && psi < index[0]) || (!increasing && psi > index[0]) {
-            0
-        } else if (increasing && psi > index[last]) || (!increasing && psi < index[last]) {
-            last - 1
-        } else {
-            (0..last)
-                .find(|&position| {
-                    if increasing {
-                        (index[position] == psi && psi < index[position + 1])
-                            || (index[position] < psi && psi <= index[position + 1])
-                    } else {
-                        (index[position] == psi && psi > index[position + 1])
-                            || (index[position] > psi && psi >= index[position + 1])
-                    }
-                })
-                .ok_or_else(|| domain(self.axes[table_axis]))?
+        let segment = match index.direction {
+            IndexDirection::Increasing if psi < values[0] => 0,
+            IndexDirection::Increasing if psi > values[last] => last - 1,
+            IndexDirection::Decreasing if psi > values[0] => 0,
+            IndexDirection::Decreasing if psi < values[last] => last - 1,
+            IndexDirection::Increasing => {
+                let lower = values.partition_point(|&value| value < psi);
+                if lower != 0 {
+                    lower - 1
+                } else {
+                    values.partition_point(|&value| value <= psi) - 1
+                }
+            }
+            IndexDirection::Decreasing => {
+                let lower = values.partition_point(|&value| value > psi);
+                if lower != 0 {
+                    lower - 1
+                } else {
+                    values.partition_point(|&value| value >= psi) - 1
+                }
+            }
         };
-        Ok(segment as f64 + 1.0 + (psi - index[segment]) / (index[segment + 1] - index[segment]))
+        if values[segment] == values[segment + 1] {
+            return Err(domain(self.axes[table_axis]));
+        }
+        Ok(
+            segment as f64
+                + 1.0
+                + (psi - values[segment]) / (values[segment + 1] - values[segment]),
+        )
     }
 
     fn array_to_index(&self, table_axis: usize, upsilon: f64) -> f64 {
         let Some(index) = &self.indices[table_axis] else {
             return upsilon;
         };
-        if index.len() == 1 {
-            return index[0];
+        let values = &index.values;
+        if values.len() == 1 {
+            return values[0];
         }
         let position = upsilon.floor() as usize;
-        let lower = position.saturating_sub(1).min(index.len() - 2);
-        index[lower] + (upsilon - lower as f64 - 1.0) * (index[lower + 1] - index[lower])
+        let lower = position.saturating_sub(1).min(values.len() - 2);
+        values[lower] + (upsilon - lower as f64 - 1.0) * (values[lower + 1] - values[lower])
     }
 
     fn interpolate(&self, base: &[usize], delta: &[f64]) -> Vec<f64> {
         let dimensions = self.axes.len();
-        let vertex_count = 1usize << self.variable_axes.len();
         let mut result = vec![0.0; dimensions];
         let mut indices = base.to_vec();
-        for vertex in 0..vertex_count {
+        for vertex in 0..self.vertex_count {
             indices.copy_from_slice(base);
             let mut weight = 1.0;
             for (bit, &table_axis) in self.variable_axes.iter().enumerate() {
@@ -384,7 +425,7 @@ impl TabularTransform {
             let second = self.coordinates[position + 1];
             let usable_index = self.indices[0]
                 .as_ref()
-                .is_none_or(|index| index[position] != index[position + 1]);
+                .is_none_or(|index| index.values[position] != index.values[position + 1]);
             if usable_index
                 && first != second
                 && (first.min(second)..=first.max(second)).contains(&target)
@@ -467,12 +508,11 @@ impl TabularTransform {
         solution: &mut [f64],
     ) -> bool {
         let dimensions = self.axes.len();
-        let vertex_count = 1usize << self.variable_axes.len();
         let size = 2.0f64.powi(-(level as i32));
         let mut lower = vec![false; dimensions];
         let mut upper = vec![false; dimensions];
         let mut equal = vec![false; dimensions];
-        for vertex in 0..vertex_count {
+        for vertex in 0..self.vertex_count {
             let mut delta = vec![0.0; dimensions];
             for table_axis in 0..dimensions {
                 delta[table_axis] = if level == 0 {
@@ -520,7 +560,7 @@ impl TabularTransform {
             }
             return true;
         }
-        for subdivision in 0..vertex_count {
+        for subdivision in 0..self.vertex_count {
             let mut next = vec![0; dimensions];
             for (bit, &table_axis) in self.variable_axes.iter().enumerate() {
                 let parent = if level == 0 { 0 } else { 2 * voxel[table_axis] };
@@ -532,6 +572,15 @@ impl TabularTransform {
         }
         false
     }
+}
+
+fn interpolation_vertex_count(variable_axes: usize) -> Result<usize> {
+    let shift = u32::try_from(variable_axes)
+        .map_err(|_| invalid("TAB interpolation dimensionality is too large"))?;
+    1usize
+        .checked_shl(shift)
+        .filter(|&count| count <= MAX_INTERPOLATION_VERTICES)
+        .ok_or_else(|| invalid("TAB interpolation dimensionality is too large"))
 }
 
 #[derive(Debug)]
@@ -578,12 +627,12 @@ fn first_row_shape_and_values(row_count: usize, reader: ColumnReader<'_>) -> Res
     Ok(FirstRow { shape, values })
 }
 
-fn validate_index(index: &[f64]) -> Result<()> {
+fn validate_index(index: &[f64]) -> Result<IndexDirection> {
     if index.iter().any(|value| !value.is_finite()) {
         return Err(invalid("TAB index vectors must contain finite values"));
     }
     if index.len() < 2 {
-        return Ok(());
+        return Ok(IndexDirection::Increasing);
     }
     let mut direction = 0i8;
     for pair in index.windows(2) {
@@ -604,7 +653,11 @@ fn validate_index(index: &[f64]) -> Result<()> {
     if direction == 0 {
         return Err(invalid("TAB index vectors must not be constant"));
     }
-    Ok(())
+    Ok(if direction > 0 {
+        IndexDirection::Increasing
+    } else {
+        IndexDirection::Decreasing
+    })
 }
 
 fn integer_parameter(

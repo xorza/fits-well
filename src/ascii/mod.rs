@@ -247,15 +247,12 @@ impl<'a> AsciiColumnReader<'a> {
             AsciiKind::Integer => {
                 let mut out = Vec::with_capacity(table.nrows);
                 for r in 0..table.nrows {
-                    let s = table.field(col, r)?.trim();
-                    out.push(if col.is_null(s) {
-                        None
-                    } else if s.is_empty() {
-                        Some(0)
-                    } else {
-                        Some(s.parse().map_err(|_| FitsError::InvalidValue {
-                            card: s.to_string(),
-                        })?)
+                    out.push(match parse_numeric_field(table, col, r)? {
+                        None => None,
+                        Some(ParsedNumeric::Integer(value)) => Some(value),
+                        Some(ParsedNumeric::Float(_)) => {
+                            unreachable!("integer columns parse integer fields")
+                        }
                     });
                 }
                 Ok(AsciiColumnData::Integer(out))
@@ -263,17 +260,12 @@ impl<'a> AsciiColumnReader<'a> {
             AsciiKind::Float => {
                 let mut out = Vec::with_capacity(table.nrows);
                 for r in 0..table.nrows {
-                    let s = table.field(col, r)?.trim();
-                    out.push(if col.is_null(s) {
-                        None
-                    } else if s.is_empty() {
-                        Some(0.0)
-                    } else {
-                        Some(parse_ascii_float(s, col.decimals).ok_or_else(|| {
-                            FitsError::InvalidValue {
-                                card: s.to_string(),
-                            }
-                        })?)
+                    out.push(match parse_numeric_field(table, col, r)? {
+                        None => None,
+                        Some(ParsedNumeric::Float(value)) => Some(value),
+                        Some(ParsedNumeric::Integer(_)) => {
+                            unreachable!("float columns parse float fields")
+                        }
                     });
                 }
                 Ok(AsciiColumnData::Float(out))
@@ -290,18 +282,51 @@ impl<'a> AsciiColumnReader<'a> {
             return Err(FitsError::NonNumericColumn { code: 'A' });
         }
         let physical = |value| col.tzero + col.tscale * value;
-        match self.raw()? {
-            AsciiColumnData::Integer(values) => Ok(values
-                .into_iter()
-                .map(|value| value.map_or(f64::NAN, |value| physical(value as f64)))
-                .collect()),
-            AsciiColumnData::Float(values) => Ok(values
-                .into_iter()
-                .map(|value| value.map_or(f64::NAN, physical))
-                .collect()),
-            AsciiColumnData::Text(_) => unreachable!("character columns returned above"),
+        let mut out = Vec::with_capacity(self.table.nrows);
+        for row in 0..self.table.nrows {
+            let value = match parse_numeric_field(self.table, col, row)? {
+                None => f64::NAN,
+                Some(ParsedNumeric::Integer(value)) => physical(value as f64),
+                Some(ParsedNumeric::Float(value)) => physical(value),
+            };
+            out.push(value);
         }
+        Ok(out)
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ParsedNumeric {
+    Integer(i64),
+    Float(f64),
+}
+
+fn parse_numeric_field(
+    table: &AsciiTable,
+    col: &AsciiColumn,
+    row: usize,
+) -> Result<Option<ParsedNumeric>> {
+    let field = table.field(col, row)?.trim();
+    if col.is_null(field) {
+        return Ok(None);
+    }
+    Ok(Some(match col.kind {
+        AsciiKind::Integer if field.is_empty() => ParsedNumeric::Integer(0),
+        AsciiKind::Integer => {
+            ParsedNumeric::Integer(field.parse().map_err(|_| FitsError::InvalidValue {
+                card: field.to_string(),
+            })?)
+        }
+        AsciiKind::Float if field.is_empty() => ParsedNumeric::Float(0.0),
+        AsciiKind::Float => {
+            ParsedNumeric::Float(parse_ascii_float(field, col.decimals).ok_or_else(|| {
+                FitsError::InvalidValue {
+                    card: field.to_string(),
+                }
+            })?)
+        }
+        AsciiKind::Char => unreachable!("numeric field parser rejects character columns"),
+    }))
 }
 
 impl AsciiColumn {

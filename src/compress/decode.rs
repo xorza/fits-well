@@ -84,6 +84,90 @@ impl ImageLayout {
 }
 
 #[derive(Debug)]
+struct ImageDecodePlan<'a> {
+    geometry: TileGeometry,
+    context: DecodeCtx,
+    method: DitherMethod,
+    zdither0: i64,
+    zblank_keyword: Option<i64>,
+    zblank_column: Option<Vec<i64>>,
+    zscale: Option<Vec<f64>>,
+    zzero: Option<Vec<f64>>,
+    primary: Option<VlaColumn<'a>>,
+    gzip_fallback: Option<VlaColumn<'a>>,
+    uncompressed: Option<VlaColumn<'a>>,
+}
+
+impl<'a> ImageDecodePlan<'a> {
+    fn new(
+        header: &Header,
+        table: &'a BinTable,
+        layout: &ImageLayout,
+    ) -> Result<ImageDecodePlan<'a>> {
+        let tiles = read_tile_shape(header, &layout.dims)?;
+        let rice = rice::rice_params(header, layout.bitpix)?;
+        let is_float = layout.bitpix.is_float();
+        let int_bitpix = if is_float {
+            bytepix_to_bitpix(rice.bytepix)
+        } else {
+            layout.bitpix
+        };
+        let method = match header.get_text("ZQUANTIZ")?.unwrap_or("NO_DITHER") {
+            "NO_DITHER" => DitherMethod::None,
+            "SUBTRACTIVE_DITHER_1" => DitherMethod::Subtractive1,
+            "SUBTRACTIVE_DITHER_2" => DitherMethod::Subtractive2,
+            other if is_float => {
+                return Err(FitsError::UnsupportedCompression {
+                    name: format!("float quantization {other}"),
+                });
+            }
+            _ => DitherMethod::None,
+        };
+        Ok(ImageDecodePlan {
+            geometry: TileGeometry::new(&layout.dims, &tiles),
+            context: DecodeCtx {
+                codec: layout.codec,
+                zbitpix: layout.bitpix,
+                int_bitpix,
+                params: CodecParams {
+                    blocksize: rice.blocksize,
+                    bytepix: rice.bytepix,
+                    smooth: hcompress_smooth(header)?,
+                },
+            },
+            method,
+            zdither0: header.get_integer("ZDITHER0")?.unwrap_or(1),
+            zblank_keyword: header.get_integer("ZBLANK")?,
+            zblank_column: read_i64_column(table, "ZBLANK")?,
+            zscale: read_f64_column(table, "ZSCALE")?,
+            zzero: read_f64_column(table, "ZZERO")?,
+            primary: read_tiles(table, "COMPRESSED_DATA")?,
+            gzip_fallback: read_tiles(table, "GZIP_COMPRESSED_DATA")?,
+            uncompressed: read_tiles(table, "UNCOMPRESSED_DATA")?,
+        })
+    }
+
+    fn tile_columns(&self, table_row: usize) -> Result<TileColumns<'a>> {
+        TileColumns::read(
+            table_row,
+            self.primary,
+            self.gzip_fallback,
+            self.uncompressed,
+        )
+    }
+
+    fn dequant(&self, table_row: usize, tile_row: usize) -> Dequant {
+        Dequant {
+            scale: column_at(&self.zscale, table_row).unwrap_or(1.0),
+            zero: column_at(&self.zzero, table_row).unwrap_or(0.0),
+            method: self.method,
+            irow: tile_row as i64 + self.zdither0,
+            zblank: column_at(&self.zblank_column, table_row).or(self.zblank_keyword),
+        }
+    }
+}
+
+#[derive(Debug)]
 enum DecodeBuffer<'a> {
     U8(&'a mut [u8]),
     I16(&'a mut [i16]),
@@ -266,65 +350,28 @@ pub(crate) fn decompress_image_section_into_words<'a>(
         });
     }
 
-    let tiles = read_tile_shape(header, &layout.dims)?;
-    let rice = rice::rice_params(header, layout.bitpix)?;
-    let is_float = layout.bitpix.is_float();
-    let int_bitpix = if is_float {
-        bytepix_to_bitpix(rice.bytepix)
-    } else {
-        layout.bitpix
-    };
-    let method = match header.get_text("ZQUANTIZ")?.unwrap_or("NO_DITHER") {
-        "NO_DITHER" => DitherMethod::None,
-        "SUBTRACTIVE_DITHER_1" => DitherMethod::Subtractive1,
-        "SUBTRACTIVE_DITHER_2" => DitherMethod::Subtractive2,
-        other if is_float => {
-            return Err(FitsError::UnsupportedCompression {
-                name: format!("float quantization {other}"),
-            });
-        }
-        _ => DitherMethod::None,
-    };
-    let zdither0 = header.get_integer("ZDITHER0")?.unwrap_or(1);
-    let zblank_keyword = header.get_integer("ZBLANK")?;
-    let zblank_column = read_i64_column(table, "ZBLANK")?;
-    let zscale = read_f64_column(table, "ZSCALE")?;
-    let zzero = read_f64_column(table, "ZZERO")?;
-    let primary = read_tiles(table, "COMPRESSED_DATA")?;
-    let gzip_fallback = read_tiles(table, "GZIP_COMPRESSED_DATA")?;
-    let uncompressed = read_tiles(table, "UNCOMPRESSED_DATA")?;
-    let ctx = DecodeCtx {
-        codec: layout.codec,
-        zbitpix: layout.bitpix,
-        int_bitpix,
-        params: CodecParams {
-            blocksize: rice.blocksize,
-            bytepix: rice.bytepix,
-            smooth: hcompress_smooth(header)?,
-        },
-    };
-    let geom = TileGeometry::new(&layout.dims, &tiles);
+    let plan = ImageDecodePlan::new(header, table, &layout)?;
     let output = DecodeBuffer::from_words(words, layout.bitpix, total);
-    if is_float {
+    if plan.context.zbitpix.is_float() {
         let decode = |table_row: usize,
                       tile_row: usize,
                       scratch: &TileScratch,
                       out: &mut Vec<f64>,
                       ints: &mut Vec<i64>,
                       codecs: &mut CodecScratch| {
-            let cols = TileColumns::read(table_row, primary, gzip_fallback, uncompressed)?;
-            let dq = Dequant {
-                scale: column_at(&zscale, table_row).unwrap_or(1.0),
-                zero: column_at(&zzero, table_row).unwrap_or(0.0),
-                method,
-                irow: tile_row as i64 + zdither0,
-                zblank: column_at(&zblank_column, table_row).or(zblank_keyword),
-            };
-            decode_float_tile_into(&ctx, cols, scratch.nelem(), dq, out, ints, codecs)
+            decode_float_tile_into(
+                &plan.context,
+                plan.tile_columns(table_row)?,
+                scratch.nelem(),
+                plan.dequant(table_row, tile_row),
+                out,
+                ints,
+                codecs,
+            )
         };
         match output {
             DecodeBuffer::F32(out) => run_decode_region(
-                &geom,
+                &plan.geometry,
                 ranges,
                 &selected_shape,
                 tile_rows,
@@ -333,7 +380,7 @@ pub(crate) fn decompress_image_section_into_words<'a>(
                 |value| value as f32,
             )?,
             DecodeBuffer::F64(out) => run_decode_region(
-                &geom,
+                &plan.geometry,
                 ranges,
                 &selected_shape,
                 tile_rows,
@@ -350,12 +397,17 @@ pub(crate) fn decompress_image_section_into_words<'a>(
                       out: &mut Vec<i64>,
                       _ints: &mut Vec<i64>,
                       codecs: &mut CodecScratch| {
-            let cols = TileColumns::read(table_row, primary, gzip_fallback, uncompressed)?;
-            decode_one_tile_into(&ctx, cols, scratch.nelem(), out, codecs)
+            decode_one_tile_into(
+                &plan.context,
+                plan.tile_columns(table_row)?,
+                scratch.nelem(),
+                out,
+                codecs,
+            )
         };
         match output {
             DecodeBuffer::U8(out) => run_decode_region(
-                &geom,
+                &plan.geometry,
                 ranges,
                 &selected_shape,
                 tile_rows,
@@ -364,7 +416,7 @@ pub(crate) fn decompress_image_section_into_words<'a>(
                 |value| value as u8,
             )?,
             DecodeBuffer::I16(out) => run_decode_region(
-                &geom,
+                &plan.geometry,
                 ranges,
                 &selected_shape,
                 tile_rows,
@@ -373,7 +425,7 @@ pub(crate) fn decompress_image_section_into_words<'a>(
                 |value| value as i16,
             )?,
             DecodeBuffer::I32(out) => run_decode_region(
-                &geom,
+                &plan.geometry,
                 ranges,
                 &selected_shape,
                 tile_rows,
@@ -382,7 +434,7 @@ pub(crate) fn decompress_image_section_into_words<'a>(
                 |value| value as i32,
             )?,
             DecodeBuffer::I64(out) => run_decode_region(
-                &geom,
+                &plan.geometry,
                 ranges,
                 &selected_shape,
                 tile_rows,
@@ -406,83 +458,30 @@ fn decode_image_into(
     layout: &ImageLayout,
     output: DecodeBuffer<'_>,
 ) -> Result<()> {
-    let is_float = layout.bitpix.is_float();
-    let tiles = read_tile_shape(header, &layout.dims)?;
-
-    let rice = rice::rice_params(header, layout.bitpix)?;
-    // Float pixels are quantized to integers of `bytepix` bytes; decode the tile
-    // as that integer type, then dequantize. Integer images decode as `zbitpix`.
-    let int_bitpix = if is_float {
-        bytepix_to_bitpix(rice.bytepix)
-    } else {
-        layout.bitpix
-    };
-
-    // Float quantization: NO_DITHER, SUBTRACTIVE_DITHER_1, and SUBTRACTIVE_DITHER_2.
-    let zquantiz = header
-        .get_text("ZQUANTIZ")?
-        .unwrap_or("NO_DITHER")
-        .to_string();
-    let method = match zquantiz.as_str() {
-        "NO_DITHER" => DitherMethod::None,
-        "SUBTRACTIVE_DITHER_1" => DitherMethod::Subtractive1,
-        "SUBTRACTIVE_DITHER_2" => DitherMethod::Subtractive2,
-        other => {
-            if is_float {
-                return Err(FitsError::UnsupportedCompression {
-                    name: format!("float quantization {other}"),
-                });
-            }
-            DitherMethod::None
-        }
-    };
-    let zdither0 = header.get_integer("ZDITHER0")?.unwrap_or(1);
-    // ZBLANK may be a keyword (constant) or a per-tile column; §10.1.3 says the
-    // column value wins where present.
-    let zblank_keyword = header.get_integer("ZBLANK")?;
-    let zblank_column = read_i64_column(table, "ZBLANK")?;
-    let smooth = hcompress_smooth(header)?;
-    let params = CodecParams {
-        blocksize: rice.blocksize,
-        bytepix: rice.bytepix,
-        smooth,
-    };
-
-    // Per-tile compressed data, with the conventional fallback columns.
-    let primary = read_tiles(table, "COMPRESSED_DATA")?;
-    let gzip_fallback = read_tiles(table, "GZIP_COMPRESSED_DATA")?;
-    let uncompressed = read_tiles(table, "UNCOMPRESSED_DATA")?;
-    // Per-tile linear dequantization parameters (float only).
-    let zscale = read_f64_column(table, "ZSCALE")?;
-    let zzero = read_f64_column(table, "ZZERO")?;
-
-    let geom = TileGeometry::new(&layout.dims, &tiles);
-
-    let ctx = DecodeCtx {
-        codec: layout.codec,
-        zbitpix: layout.bitpix,
-        int_bitpix,
-        params,
-    };
-    if is_float {
+    let plan = ImageDecodePlan::new(header, table, layout)?;
+    if plan.context.zbitpix.is_float() {
         let decode = |t: usize,
                       s: &TileScratch,
                       out: &mut Vec<f64>,
                       ints: &mut Vec<i64>,
                       codecs: &mut CodecScratch| {
-            let cols = TileColumns::read(t, primary, gzip_fallback, uncompressed)?;
-            let dq = Dequant {
-                scale: column_at(&zscale, t).unwrap_or(1.0),
-                zero: column_at(&zzero, t).unwrap_or(0.0),
-                method,
-                irow: t as i64 + zdither0,
-                zblank: column_at(&zblank_column, t).or(zblank_keyword),
-            };
-            decode_float_tile_into(&ctx, cols, s.nelem(), dq, out, ints, codecs)
+            decode_float_tile_into(
+                &plan.context,
+                plan.tile_columns(t)?,
+                s.nelem(),
+                plan.dequant(t, t),
+                out,
+                ints,
+                codecs,
+            )
         };
         match output {
-            DecodeBuffer::F32(out) => run_decode_scatter(&geom, out, decode, |value| value as f32)?,
-            DecodeBuffer::F64(out) => run_decode_scatter(&geom, out, decode, |value| value)?,
+            DecodeBuffer::F32(out) => {
+                run_decode_scatter(&plan.geometry, out, decode, |value| value as f32)?
+            }
+            DecodeBuffer::F64(out) => {
+                run_decode_scatter(&plan.geometry, out, decode, |value| value)?
+            }
             _ => unreachable!("a float ZBITPIX yields a float sample buffer"),
         }
     } else {
@@ -491,14 +490,21 @@ fn decode_image_into(
                       out: &mut Vec<i64>,
                       _ints: &mut Vec<i64>,
                       codecs: &mut CodecScratch| {
-            let cols = TileColumns::read(t, primary, gzip_fallback, uncompressed)?;
-            decode_one_tile_into(&ctx, cols, s.nelem(), out, codecs)
+            decode_one_tile_into(&plan.context, plan.tile_columns(t)?, s.nelem(), out, codecs)
         };
         match output {
-            DecodeBuffer::U8(out) => run_decode_scatter(&geom, out, decode, |value| value as u8)?,
-            DecodeBuffer::I16(out) => run_decode_scatter(&geom, out, decode, |value| value as i16)?,
-            DecodeBuffer::I32(out) => run_decode_scatter(&geom, out, decode, |value| value as i32)?,
-            DecodeBuffer::I64(out) => run_decode_scatter(&geom, out, decode, |value| value)?,
+            DecodeBuffer::U8(out) => {
+                run_decode_scatter(&plan.geometry, out, decode, |value| value as u8)?
+            }
+            DecodeBuffer::I16(out) => {
+                run_decode_scatter(&plan.geometry, out, decode, |value| value as i16)?
+            }
+            DecodeBuffer::I32(out) => {
+                run_decode_scatter(&plan.geometry, out, decode, |value| value as i32)?
+            }
+            DecodeBuffer::I64(out) => {
+                run_decode_scatter(&plan.geometry, out, decode, |value| value)?
+            }
             _ => unreachable!("an integer ZBITPIX yields an integer sample buffer"),
         }
     }
@@ -527,17 +533,32 @@ where
                 CodecScratch::default(),
             )
         };
-        let decoded = map_tiles(
-            geom.ntiles(),
-            init,
-            |(scratch, vals, ints, codecs), t| -> Result<Vec<D>> {
-                geom.tile_into(t, scratch);
-                decode(t, scratch, vals, ints, codecs)?;
-                ensure_tile_size(scratch.nelem(), vals.len())?;
-                Ok(vals.iter().copied().map(&convert).collect())
-            },
-        )?;
-        geom.scatter_tiles(&decoded, out);
+        let wave_len = decode_wave_tile_count::<D>(geom);
+        let mut scatter = TileScratch::default();
+        for wave_start in (0..geom.ntiles()).step_by(wave_len) {
+            let count = wave_len.min(geom.ntiles() - wave_start);
+            let decoded = map_tiles(
+                count,
+                init,
+                |(scratch, vals, ints, codecs), offset| -> Result<Vec<D>> {
+                    let tile = wave_start + offset;
+                    geom.tile_into(tile, scratch);
+                    decode(tile, scratch, vals, ints, codecs)?;
+                    ensure_tile_size(scratch.nelem(), vals.len())?;
+                    Ok(vals.iter().copied().map(&convert).collect())
+                },
+            )?;
+            for (offset, values) in decoded.iter().enumerate() {
+                geom.tile_into(wave_start + offset, &mut scatter);
+                scatter_rows(
+                    out,
+                    &scatter.row_bases,
+                    scatter.row_len,
+                    values,
+                    &std::convert::identity,
+                );
+            }
+        }
         Ok(())
     }
     #[cfg(not(feature = "parallel"))]
@@ -554,6 +575,19 @@ where
         }
         Ok(())
     }
+}
+
+#[cfg(feature = "parallel")]
+pub(crate) fn decode_wave_tile_count<D>(geom: &TileGeometry) -> usize {
+    const DECODE_WAVE_BYTES: usize = 4 * 1024 * 1024;
+
+    let payload_bytes = geom
+        .max_tile_elements()
+        .saturating_mul(std::mem::size_of::<D>());
+    let retained_bytes = payload_bytes
+        .saturating_add(std::mem::size_of::<Vec<D>>())
+        .max(1);
+    (DECODE_WAVE_BYTES / retained_bytes).max(1)
 }
 
 fn run_decode_region<S, D>(
@@ -640,7 +674,6 @@ fn scatter_region_tile<S: Copy, D: Copy>(
     }
 }
 
-#[cfg(not(feature = "parallel"))]
 fn scatter_rows<S: Copy, D>(
     out: &mut [D],
     row_bases: &[usize],

@@ -127,6 +127,28 @@ fn tab_index_vectors_may_decrease_and_change_sampling() {
 }
 
 #[test]
+fn tab_index_binary_search_preserves_duplicate_and_exact_hit_rules() {
+    for (index, reference, expected) in [
+        (&[0.0, 0.0, 10.0, 20.0][..], 0.0, 200.0),
+        (&[0.0, 10.0, 10.0, 20.0], 10.0, 200.0),
+        (&[20.0, 20.0, 10.0, 0.0], 20.0, 200.0),
+        (&[20.0, 10.0, 10.0, 0.0], 10.0, 200.0),
+    ] {
+        let table = lookup_table(&[
+            ("COORD", &[100.0, 200.0, 400.0, 800.0], Some("(1,4)")),
+            ("INDEX", index, None),
+        ]);
+        let mut header = tab_header(1, "COORD");
+        header
+            .set_internal("PS1_2", "INDEX")
+            .set_internal("CRVAL1", reference);
+        let wcs = resolved_wcs(&header, &table);
+        assert_eq!(wcs.pixel_to_world(&[0.0]).unwrap(), [expected]);
+        assert_eq!(wcs.world_to_pixel(&[expected]).unwrap(), [0.0]);
+    }
+}
+
+#[test]
 fn multidimensional_tab_interpolates_and_inverts_coupled_axes() {
     let table = lookup_table(&[(
         "COORD",
@@ -217,6 +239,17 @@ fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
     let descriptor = tabular::descriptors(&header, 1, None).unwrap().remove(0);
     assert!(matches!(
         TabularTransform::from_table(descriptor, &bad_index),
+        Err(FitsError::InvalidValue { .. })
+    ));
+
+    let mut oversized_axis = tab_header(1, "COORD");
+    oversized_axis.set_internal("PV1_3", i64::MAX);
+    let oversized = std::panic::catch_unwind(|| tabular::descriptors(&oversized_axis, 1, None));
+    assert!(matches!(oversized, Ok(Err(FitsError::InvalidValue { .. }))));
+
+    assert_eq!(tabular::interpolation_vertex_count(20).unwrap(), 1 << 20);
+    assert!(matches!(
+        tabular::interpolation_vertex_count(21),
         Err(FitsError::InvalidValue { .. })
     ));
 }

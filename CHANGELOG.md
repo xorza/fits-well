@@ -207,6 +207,10 @@
 
 ### Fixed
 
+- Reject `-TAB` table-axis indices and interpolation dimensionality that would
+  trigger oversized allocations, overflowing vertex counts, or infeasible
+  per-coordinate work.
+
 - Integer keyword values outside `i64` are preserved exactly instead of being
   reparsed through `f64`, and integral reals outside `i64` now return a range error
   instead of saturating. Unsigned-64 image and binary-table writers emit the exact

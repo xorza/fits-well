@@ -492,16 +492,16 @@ impl SpectralKind {
             SpectralKind::Energy => nonzero(value)? / PLANCK_CONSTANT,
             SpectralKind::Wavenumber => nonzero(value)? * SPEED_OF_LIGHT,
             SpectralKind::RadioVelocity => {
-                assert!(rest.frequency != 0.0, "resolved rest frequency");
+                debug_assert!(rest.frequency != 0.0, "resolved rest frequency");
                 rest.frequency * (1.0 - value / SPEED_OF_LIGHT)
             }
             SpectralKind::Wavelength => nonzero(value)?,
             SpectralKind::OpticalVelocity => {
-                assert!(rest.wavelength != 0.0, "resolved rest wavelength");
+                debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
                 nonzero(rest.wavelength * (1.0 + value / SPEED_OF_LIGHT))?
             }
             SpectralKind::Redshift => {
-                assert!(rest.wavelength != 0.0, "resolved rest wavelength");
+                debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
                 nonzero(rest.wavelength * (1.0 + value))?
             }
             SpectralKind::AirWavelength => nonzero(value)?,
@@ -518,16 +518,16 @@ impl SpectralKind {
             SpectralKind::Energy => value * PLANCK_CONSTANT,
             SpectralKind::Wavenumber => value / SPEED_OF_LIGHT,
             SpectralKind::RadioVelocity => {
-                assert!(rest.frequency != 0.0, "resolved rest frequency");
+                debug_assert!(rest.frequency != 0.0, "resolved rest frequency");
                 SPEED_OF_LIGHT * (1.0 - value / rest.frequency)
             }
             SpectralKind::Wavelength => value,
             SpectralKind::OpticalVelocity => {
-                assert!(rest.wavelength != 0.0, "resolved rest wavelength");
+                debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
                 SPEED_OF_LIGHT * (value / rest.wavelength - 1.0)
             }
             SpectralKind::Redshift => {
-                assert!(rest.wavelength != 0.0, "resolved rest wavelength");
+                debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
                 value / rest.wavelength - 1.0
             }
             SpectralKind::AirWavelength => value,
@@ -546,15 +546,15 @@ impl SpectralKind {
             SpectralKind::Energy => 1.0 / PLANCK_CONSTANT,
             SpectralKind::Wavenumber => SPEED_OF_LIGHT,
             SpectralKind::RadioVelocity => {
-                assert!(rest.frequency != 0.0, "resolved rest frequency");
+                debug_assert!(rest.frequency != 0.0, "resolved rest frequency");
                 -rest.frequency / SPEED_OF_LIGHT
             }
             SpectralKind::OpticalVelocity => {
-                assert!(rest.wavelength != 0.0, "resolved rest wavelength");
+                debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
                 rest.wavelength / SPEED_OF_LIGHT
             }
             SpectralKind::Redshift => {
-                assert!(rest.wavelength != 0.0, "resolved rest wavelength");
+                debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
                 rest.wavelength
             }
             SpectralKind::Beta => SPEED_OF_LIGHT,
@@ -666,25 +666,25 @@ fn convert(
             Ok(SPEED_OF_LIGHT / nonzero(air_to_wave(value)?)?)
         }
         (Characteristic::Frequency, Characteristic::Velocity) => {
-            assert!(rest.frequency != 0.0, "resolved rest frequency");
+            debug_assert!(rest.frequency != 0.0, "resolved rest frequency");
             let squared_rest = rest.frequency.powi(2);
             let squared_value = value.powi(2);
             finite(SPEED_OF_LIGHT * (squared_rest - squared_value) / (squared_rest + squared_value))
         }
         (Characteristic::Velocity, Characteristic::Frequency) => {
             let value = subluminal(value)?;
-            assert!(rest.frequency != 0.0, "resolved rest frequency");
+            debug_assert!(rest.frequency != 0.0, "resolved rest frequency");
             finite(rest.frequency * ((SPEED_OF_LIGHT - value) / (SPEED_OF_LIGHT + value)).sqrt())
         }
         (Characteristic::Wavelength, Characteristic::Velocity) => {
-            assert!(rest.wavelength != 0.0, "resolved rest wavelength");
+            debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
             let squared_rest = rest.wavelength.powi(2);
             let squared_value = value.powi(2);
             finite(SPEED_OF_LIGHT * (squared_value - squared_rest) / (squared_value + squared_rest))
         }
         (Characteristic::Velocity, Characteristic::Wavelength) => {
             let value = subluminal(value)?;
-            assert!(rest.wavelength != 0.0, "resolved rest wavelength");
+            debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
             finite(rest.wavelength * ((SPEED_OF_LIGHT + value) / (SPEED_OF_LIGHT - value)).sqrt())
         }
         (Characteristic::AirWavelength, Characteristic::Velocity) => convert(
@@ -757,13 +757,13 @@ fn conversion_derivative(
 
 fn frequency_derivative_from_velocity(value: f64, rest: ResolvedRest) -> DomainResult {
     let gamma = lorentz_factor(value)?;
-    assert!(rest.frequency != 0.0, "resolved rest frequency");
+    debug_assert!(rest.frequency != 0.0, "resolved rest frequency");
     finite(-gamma * rest.frequency / (SPEED_OF_LIGHT + value))
 }
 
 fn wavelength_derivative_from_velocity(value: f64, rest: ResolvedRest) -> DomainResult {
     let gamma = lorentz_factor(value)?;
-    assert!(rest.wavelength != 0.0, "resolved rest wavelength");
+    debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
     finite(gamma * rest.wavelength / (SPEED_OF_LIGHT - value))
 }
 

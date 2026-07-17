@@ -34,7 +34,10 @@ use crate::table_impl::Column;
 use crate::table_impl::ColumnData;
 use crate::table_impl::TableSchema;
 use crate::table_impl::TformKind;
+use crate::table_impl::decode_fixed_cell;
+use crate::table_impl::decode_vla_cell;
 use crate::wcs::Wcs;
+use crate::wcs::image_axis_count;
 use crate::wcs::tabular;
 
 pub(crate) mod source;
@@ -588,7 +591,7 @@ impl<S: Source> FitsReader<S> {
             let header = self.hdus[index].header.clone();
             let tile_rows = compressed_image_tile_rows(&header, ranges)?;
             let schema = self.table_schema(index)?;
-            let table = self.read_table_row_indices(index, &schema, &tile_rows, None)?;
+            let table = self.read_table_sparse_rows(index, &schema, &tile_rows)?;
             return decompress_image_section_into_words(&header, &table, &tile_rows, ranges, words);
         }
 
@@ -677,15 +680,14 @@ impl<S: Source> FitsReader<S> {
     pub fn read_table_rows(&mut self, index: usize, rows: Range<usize>) -> Result<BinTable> {
         let schema = self.table_schema(index)?;
         validate_row_range(&rows, schema.nrows)?;
-        let selected: Vec<usize> = rows.collect();
-        self.read_table_row_indices(index, &schema, &selected, None)
+        self.read_table_range(index, &schema, rows, None)
     }
 
-    fn read_table_row_indices(
+    fn read_table_range(
         &mut self,
         index: usize,
         schema: &TableSchema,
-        rows: &[usize],
+        rows: Range<usize>,
         selected_columns: Option<&[usize]>,
     ) -> Result<BinTable> {
         let hdu = self.checked_hdu(index)?;
@@ -694,7 +696,36 @@ impl<S: Source> FitsReader<S> {
             .len()
             .checked_mul(schema.row_len)
             .ok_or(FitsError::DataUnitOverflow)?;
-        for &source_row in rows {
+        let data = if rows.is_empty() {
+            Vec::new()
+        } else {
+            let offset = data_offset
+                .checked_add(
+                    u64::try_from(rows.start)
+                        .ok()
+                        .and_then(|row| row.checked_mul(schema.row_len as u64))
+                        .ok_or(FitsError::DataUnitOverflow)?,
+                )
+                .ok_or(FitsError::DataUnitOverflow)?;
+            self.source.read_owned(offset, main_len)?
+        };
+        self.finish_table_selection(index, schema, rows.len(), data, selected_columns)
+    }
+
+    #[cfg(feature = "compression")]
+    fn read_table_sparse_rows(
+        &mut self,
+        index: usize,
+        schema: &TableSchema,
+        rows: &[usize],
+    ) -> Result<BinTable> {
+        let data_offset = self.checked_hdu(index)?.data_offset;
+        let main_len = rows
+            .len()
+            .checked_mul(schema.row_len)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        let mut data = allocation::try_zeroed(0u8, main_len)?;
+        for (destination, &source_row) in rows.iter().enumerate() {
             if source_row >= schema.nrows {
                 return Err(FitsError::RowRangeOutOfBounds {
                     start: source_row,
@@ -702,38 +733,30 @@ impl<S: Source> FitsReader<S> {
                     len: schema.nrows,
                 });
             }
-        }
-        let contiguous = rows
-            .windows(2)
-            .all(|pair| pair[1] == pair[0].saturating_add(1));
-        let mut data = if contiguous && !rows.is_empty() {
             let offset = data_offset
                 .checked_add(
-                    u64::try_from(rows[0])
+                    u64::try_from(source_row)
                         .ok()
                         .and_then(|row| row.checked_mul(schema.row_len as u64))
                         .ok_or(FitsError::DataUnitOverflow)?,
                 )
                 .ok_or(FitsError::DataUnitOverflow)?;
-            self.source.read_owned(offset, main_len)?
-        } else {
-            let mut data = allocation::try_zeroed(0u8, main_len)?;
-            for (destination, &source_row) in rows.iter().enumerate() {
-                let offset = data_offset
-                    .checked_add(
-                        u64::try_from(source_row)
-                            .ok()
-                            .and_then(|row| row.checked_mul(schema.row_len as u64))
-                            .ok_or(FitsError::DataUnitOverflow)?,
-                    )
-                    .ok_or(FitsError::DataUnitOverflow)?;
-                let row = self.source.read_owned(offset, schema.row_len)?;
-                let start = destination * schema.row_len;
-                data[start..start + schema.row_len].copy_from_slice(&row);
-            }
-            data
-        };
+            let row = self.source.read_owned(offset, schema.row_len)?;
+            let start = destination * schema.row_len;
+            data[start..start + schema.row_len].copy_from_slice(&row);
+        }
+        self.finish_table_selection(index, schema, rows.len(), data, None)
+    }
 
+    fn finish_table_selection(
+        &mut self,
+        index: usize,
+        schema: &TableSchema,
+        row_count: usize,
+        mut data: Vec<u8>,
+        selected_columns: Option<&[usize]>,
+    ) -> Result<BinTable> {
+        let data_offset = self.checked_hdu(index)?.data_offset;
         let selected_columns = selected_columns.map(|indices| {
             let mut selected = vec![false; schema.columns.len()];
             for &index in indices {
@@ -742,7 +765,7 @@ impl<S: Source> FitsReader<S> {
             selected
         });
         let mut heap = Vec::new();
-        for compact_row in 0..rows.len() {
+        for compact_row in 0..row_count {
             for (column_index, column) in schema.columns.iter().enumerate() {
                 let wide = match column.tform.kind {
                     TformKind::ArrayDesc32 => false,
@@ -751,6 +774,9 @@ impl<S: Source> FitsReader<S> {
                 };
                 let slot_start = compact_row * schema.row_len + column.byte_offset;
                 let slot_end = slot_start + column.tform.byte_width();
+                if column.tform.repeat == 0 {
+                    continue;
+                }
                 if selected_columns
                     .as_ref()
                     .is_some_and(|selected| !selected[column_index])
@@ -759,48 +785,27 @@ impl<S: Source> FitsReader<S> {
                     continue;
                 }
                 let slot = &data[slot_start..slot_end];
-                let descriptor = decode_descriptor(slot, wide);
-                let element_type = column
-                    .tform
-                    .vla_elem
-                    .expect("validated VLA format carries an element type");
-                let nbytes = if element_type == TformKind::Bit {
-                    descriptor.count.div_ceil(8)
-                } else {
-                    descriptor
-                        .count
-                        .checked_mul(element_type.elem_size())
-                        .ok_or(FitsError::DataUnitOverflow)?
-                };
-                let heap_start = schema
-                    .heap_offset
-                    .checked_add(descriptor.offset)
-                    .ok_or(FitsError::UnexpectedEof)?;
-                let heap_end = heap_start
-                    .checked_add(nbytes)
-                    .ok_or(FitsError::UnexpectedEof)?;
-                if heap_end > schema.heap_end {
-                    return Err(FitsError::UnexpectedEof);
-                }
-                let bytes = self.source.read_owned(
+                let span = vla_cell_span(schema, column, slot, wide)?;
+                let bytes = self.source.slice(
                     data_offset
-                        .checked_add(heap_start as u64)
+                        .checked_add(span.heap_range.start as u64)
                         .ok_or(FitsError::DataUnitOverflow)?,
-                    nbytes,
+                    span.heap_range.len(),
+                    &mut self.scratch,
                 )?;
                 let new_offset = heap.len();
                 write_pq_descriptor(
                     &mut data[slot_start..slot_end],
                     wide,
-                    descriptor.count as u64,
+                    span.count as u64,
                     new_offset as u64,
                 )?;
-                heap.extend_from_slice(&bytes);
+                heap.extend_from_slice(bytes);
             }
         }
         data.extend_from_slice(&heap);
         let mut header = self.hdus[index].header.clone();
-        header.set_internal("NAXIS2", rows.len() as i64);
+        header.set_internal("NAXIS2", row_count as i64);
         header.set_internal("PCOUNT", heap.len() as i64);
         header.remove_all("THEAP");
         header.remove_all("CHECKSUM");
@@ -821,9 +826,7 @@ impl<S: Source> FitsReader<S> {
             .iter()
             .map(|selector| resolve_column_selector(&schema, selector))
             .collect::<Result<Vec<_>>>()?;
-        let row_indices = rows.clone().collect::<Vec<_>>();
-        let table =
-            self.read_table_row_indices(index, &schema, &row_indices, Some(&selected_indices))?;
+        let table = self.read_table_range(index, &schema, rows.clone(), Some(&selected_indices))?;
         let selected_rows = rows.clone();
         let mut decoded = Vec::with_capacity(columns.len());
         for &index in &selected_indices {
@@ -860,16 +863,39 @@ impl<S: Source> FitsReader<S> {
         })?;
         validate_row_range(&(row..end), schema.nrows)?;
         let column_index = resolve_column_selector(&schema, &column)?;
-        let table = self.read_table_row_indices(index, &schema, &[row], Some(&[column_index]))?;
-        let column = table.column_by_idx(column_index)?;
-        if matches!(
-            column.descriptor().tform.kind,
-            TformKind::ArrayDesc32 | TformKind::ArrayDesc64
-        ) {
-            column.vla()?.pop().ok_or(FitsError::UnexpectedEof)
-        } else {
-            column.raw()
+        let column = &schema.columns[column_index];
+        let data_offset = self.checked_hdu(index)?.data_offset;
+        let cell_offset = data_offset
+            .checked_add(
+                u64::try_from(row)
+                    .ok()
+                    .and_then(|row| row.checked_mul(schema.row_len as u64))
+                    .and_then(|offset| offset.checked_add(column.byte_offset as u64))
+                    .ok_or(FitsError::DataUnitOverflow)?,
+            )
+            .ok_or(FitsError::DataUnitOverflow)?;
+        let width = column.tform.byte_width();
+        let wide = match column.tform.kind {
+            TformKind::ArrayDesc32 => false,
+            TformKind::ArrayDesc64 => true,
+            _ => {
+                let bytes = self.source.slice(cell_offset, width, &mut self.scratch)?;
+                return Ok(decode_fixed_cell(column, bytes));
+            }
+        };
+        if column.tform.repeat == 0 {
+            return decode_vla_cell(column, &[], 0);
         }
+        let descriptor_bytes = self.source.slice(cell_offset, width, &mut self.scratch)?;
+        let span = vla_cell_span(&schema, column, descriptor_bytes, wide)?;
+        let bytes = self.source.slice(
+            data_offset
+                .checked_add(span.heap_range.start as u64)
+                .ok_or(FitsError::DataUnitOverflow)?,
+            span.heap_range.len(),
+            &mut self.scratch,
+        )?;
+        decode_vla_cell(column, bytes, span.count)
     }
 
     /// Parse an HDU's WCS and resolve any standard `-TAB` coordinate arrays from
@@ -878,14 +904,25 @@ impl<S: Source> FitsReader<S> {
     /// coordinate values and optional index vectors live outside the source header.
     pub fn read_wcs(&mut self, index: usize, alt: Option<char>) -> Result<Wcs> {
         let header = self.checked_hdu(index)?.header.clone();
-        let header_wcs = Wcs::from_header(&header, alt)?;
-        let descriptors = tabular::descriptors(&header, header_wcs.view().axes.len(), alt)?;
+        let descriptors = tabular::descriptors(&header, image_axis_count(&header, alt)?, alt)?;
         if descriptors.is_empty() {
-            return Ok(header_wcs);
+            return Wcs::from_header(&header, alt);
         }
-        let mut transforms = Vec::with_capacity(descriptors.len());
+        let transform_count = descriptors.len();
+        let mut groups = Vec::<Vec<tabular::TabularDescriptor>>::new();
         for descriptor in descriptors {
-            let reference = &descriptor.reference;
+            match groups.iter_mut().find(|group| {
+                group[0]
+                    .reference
+                    .identifies_same_extension(&descriptor.reference)
+            }) {
+                Some(group) => group.push(descriptor),
+                None => groups.push(vec![descriptor]),
+            }
+        }
+        let mut transforms = Vec::with_capacity(transform_count);
+        for group in groups {
+            let reference = &group[0].reference;
             let mut table_index = None;
             for (index, hdu) in self.hdus.iter().enumerate() {
                 if hdu.kind != HduKind::BinTable {
@@ -913,7 +950,9 @@ impl<S: Source> FitsReader<S> {
                 ),
             })?;
             let table = self.read_table(table_index)?;
-            transforms.push(tabular::TabularTransform::from_table(descriptor, &table)?);
+            for descriptor in group {
+                transforms.push(tabular::TabularTransform::from_table(descriptor, &table)?);
+            }
         }
         Wcs::from_header_with_tabular(&header, alt, transforms)
     }
@@ -1100,6 +1139,47 @@ impl<S> Deref for HduHandle<'_, S> {
 struct ArrayDescriptor {
     count: usize,
     offset: usize,
+}
+
+#[derive(Debug)]
+struct VlaCellSpan {
+    count: usize,
+    heap_range: Range<usize>,
+}
+
+fn vla_cell_span(
+    schema: &TableSchema,
+    column: &Column,
+    descriptor_bytes: &[u8],
+    wide: bool,
+) -> Result<VlaCellSpan> {
+    let descriptor = decode_descriptor(descriptor_bytes, wide);
+    let element_type = column
+        .tform
+        .vla_elem
+        .expect("validated VLA format carries an element type");
+    let byte_len = if element_type == TformKind::Bit {
+        descriptor.count.div_ceil(8)
+    } else {
+        descriptor
+            .count
+            .checked_mul(element_type.elem_size())
+            .ok_or(FitsError::DataUnitOverflow)?
+    };
+    let heap_start = schema
+        .heap_offset
+        .checked_add(descriptor.offset)
+        .ok_or(FitsError::UnexpectedEof)?;
+    let heap_end = heap_start
+        .checked_add(byte_len)
+        .ok_or(FitsError::UnexpectedEof)?;
+    if heap_end > schema.heap_end {
+        return Err(FitsError::UnexpectedEof);
+    }
+    Ok(VlaCellSpan {
+        count: descriptor.count,
+        heap_range: heap_start..heap_end,
+    })
 }
 
 fn decode_descriptor(bytes: &[u8], wide: bool) -> ArrayDescriptor {
