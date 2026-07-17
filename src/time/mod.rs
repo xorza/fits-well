@@ -5,12 +5,14 @@
 //! conversions ([`TimeScale`]) among `UTC`/`TAI`/`TT`/`GPS`/`TCG`/`TDB`/`TCB`
 //! (UTC↔TAI via an embedded leap-second table; TDB via the standard periodic
 //! approximation), and a [`FitsTime`] view over a header's time keywords
-//! (`TIMESYS`, `MJDREF*`/`JDREF*`/`DATEREF`, `TIMEUNIT`, `TREFPOS`, and the global
+//! (`TIMESYS`, `MJDREF*`/`JDREF*`/`DATEREF`, `TIMEUNIT`, resolved
+//! `TREFPOS`/`TRPOSn`, all image/table PHASE forms, and the global
 //! `DATE-OBS`/`MJD-OBS`/`TSTART`/… set). Validated against `astropy.time`.
 
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use crate::keyword::KeyBuf;
 use crate::keyword::key;
 use crate::unit;
 use crate::wcs::Wcs;
@@ -580,17 +582,125 @@ pub struct GtiInterval {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PhaseAxis {
     pub zero_phase: f64,
-    pub period: f64,
+    /// A constant non-zero `CPERI` value; `None` means the period is undefined or
+    /// varies with time.
+    pub period: Option<f64>,
 }
 
 impl PhaseAxis {
-    /// Fold a relative time (in `TIMEUNIT`) to a phase in `[0, 1)`; `0.0` if the
-    /// period is zero.
-    pub fn fold(&self, time: f64) -> f64 {
-        if self.period == 0.0 {
-            return 0.0;
+    /// Fold a relative time (in `TIMEUNIT`) to a phase in `[0, 1)`.
+    pub fn fold(&self, time: f64) -> Result<f64> {
+        let Some(period) = self.period else {
+            return Err(FitsError::InvalidValue {
+                card: "PHASE axis has no constant CPERI period".to_string(),
+            });
+        };
+        if !time.is_finite() || !self.zero_phase.is_finite() || !period.is_finite() || period == 0.0
+        {
+            return Err(FitsError::InvalidValue {
+                card: "PHASE folding requires finite coordinates and a non-zero period".to_string(),
+            });
         }
-        ((time - self.zero_phase) / self.period).rem_euclid(1.0)
+        let turns = (time - self.zero_phase) / period;
+        if !turns.is_finite() {
+            return Err(FitsError::InvalidValue {
+                card: "PHASE folding overflowed its finite coordinate domain".to_string(),
+            });
+        }
+        Ok(turns.rem_euclid(1.0))
+    }
+}
+
+#[derive(Debug)]
+struct PhaseAxisKeywords {
+    ctype: KeyBuf,
+    zero_phase: KeyBuf,
+    period: KeyBuf,
+}
+
+impl PhaseAxisKeywords {
+    fn image(axis: usize, alt: Option<char>) -> PhaseAxisKeywords {
+        let suffix = alt.map(|value| value.to_string()).unwrap_or_default();
+        PhaseAxisKeywords {
+            ctype: key!("CTYPE{axis}{suffix}"),
+            zero_phase: key!("CZPHS{axis}{suffix}"),
+            period: key!("CPERI{axis}{suffix}"),
+        }
+    }
+
+    fn pixel_list(column: usize, alt: Option<char>) -> PhaseAxisKeywords {
+        match alt {
+            Some(alt) => PhaseAxisKeywords {
+                ctype: key!("TCTY{column}{alt}"),
+                zero_phase: key!("TCZP{column}{alt}"),
+                period: key!("TCPR{column}{alt}"),
+            },
+            None => PhaseAxisKeywords {
+                ctype: key!("TCTYP{column}"),
+                zero_phase: key!("TCZPH{column}"),
+                period: key!("TCPER{column}"),
+            },
+        }
+    }
+
+    fn array_column(axis: usize, column: usize, alt: Option<char>) -> PhaseAxisKeywords {
+        match alt {
+            Some(alt) => PhaseAxisKeywords {
+                ctype: key!("{axis}CTY{column}{alt}"),
+                zero_phase: key!("{axis}CZP{column}{alt}"),
+                period: key!("{axis}CPR{column}{alt}"),
+            },
+            None => PhaseAxisKeywords {
+                ctype: key!("{axis}CTYP{column}"),
+                zero_phase: key!("{axis}CZPH{column}"),
+                period: key!("{axis}CPER{column}"),
+            },
+        }
+    }
+}
+
+/// The spatial location at which a FITS time coordinate is valid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimeReferencePosition {
+    Topocenter,
+    Geocenter,
+    Barycenter,
+    Relocatable,
+    Custom,
+    Heliocenter,
+    GalacticCenter,
+    EarthMoonBarycenter,
+    Mercury,
+    Venus,
+    Mars,
+    Jupiter,
+    Saturn,
+    Uranus,
+    Neptune,
+    /// A non-standard value retained exactly as declared.
+    Other(String),
+}
+
+impl TimeReferencePosition {
+    fn parse(value: &str) -> TimeReferencePosition {
+        match value {
+            value if value.starts_with("TOP") => TimeReferencePosition::Topocenter,
+            value if value.starts_with("GEO") => TimeReferencePosition::Geocenter,
+            value if value.starts_with("BAR") => TimeReferencePosition::Barycenter,
+            value if value.starts_with("REL") => TimeReferencePosition::Relocatable,
+            value if value.starts_with("CUS") => TimeReferencePosition::Custom,
+            value if value.starts_with("HEL") => TimeReferencePosition::Heliocenter,
+            value if value.starts_with("GAL") => TimeReferencePosition::GalacticCenter,
+            value if value.starts_with("EMB") => TimeReferencePosition::EarthMoonBarycenter,
+            value if value.starts_with("MER") => TimeReferencePosition::Mercury,
+            value if value.starts_with("VEN") => TimeReferencePosition::Venus,
+            value if value.starts_with("MAR") => TimeReferencePosition::Mars,
+            value if value.starts_with("JUP") => TimeReferencePosition::Jupiter,
+            value if value.starts_with("SAT") => TimeReferencePosition::Saturn,
+            value if value.starts_with("URA") => TimeReferencePosition::Uranus,
+            value if value.starts_with("NEP") => TimeReferencePosition::Neptune,
+            value => TimeReferencePosition::Other(value.to_string()),
+        }
     }
 }
 
@@ -608,17 +718,36 @@ pub struct FitsTime {
     /// `TIMEOFFS` (§9.4.1): a uniform additive clock correction in `TIMEUNIT`,
     /// equivalent to shifting the reference time. Default `0.0`.
     pub timeoffs: f64,
-    /// `TREFPOS` (reference position, e.g. `'TOPOCENTER'`), if present.
-    pub trefpos: Option<String>,
+    /// `TREFPOS`/`TRPOSn`, including the standard `TOPOCENTER` default.
+    pub trefpos: TimeReferencePosition,
 }
 
 impl FitsTime {
     /// Parse the time frame from a header. The public entry point is
     /// [`Header::time`](crate::Header::time), which forwards here.
     pub(crate) fn from_header(header: &Header) -> Result<FitsTime> {
+        FitsTime::from_header_for_column(header, None)
+    }
+
+    pub(crate) fn from_header_for_column(
+        header: &Header,
+        column: Option<usize>,
+    ) -> Result<FitsTime> {
+        if let Some(column) = column {
+            assert_ne!(column, 0, "table columns are 1-based");
+        }
         let scale = declared_time_scale(header)?;
         let timeunit = header.get_text("TIMEUNIT")?.unwrap_or("s").to_string();
-        let trefpos = header.get_text("TREFPOS")?.map(str::to_string);
+        let column_trefpos = match column {
+            Some(column) => header.get_text(key!("TRPOS{column}").as_str())?,
+            None => None,
+        };
+        let trefpos = match column_trefpos {
+            Some(value) => TimeReferencePosition::parse(value),
+            None => {
+                TimeReferencePosition::parse(header.get_text("TREFPOS")?.unwrap_or("TOPOCENTER"))
+            }
+        };
         let fits_time = FitsTime {
             scale,
             mjdref: reference_mjd(header, scale)?,
@@ -764,23 +893,67 @@ impl FitsTime {
         }))
     }
 
-    /// The §9.6 `'PHASE'` axis parameters (`CZPHSia` zero-phase time, `CPERIia`
-    /// period) for WCS axis `axis` (1-based), or `None` if it is not a phase axis.
-    /// Reads only the header, so it takes no `self`.
-    pub(crate) fn phase_axis(header: &Header, axis: usize) -> Result<Option<PhaseAxis>> {
-        let Some(ctype) = header.get_text(key!("CTYPE{axis}").as_str())? else {
+    pub(crate) fn phase_axis(
+        header: &Header,
+        axis: usize,
+        alt: Option<char>,
+    ) -> Result<Option<PhaseAxis>> {
+        assert_ne!(axis, 0, "WCS axes are 1-based");
+        FitsTime::phase_axis_from_keywords(header, PhaseAxisKeywords::image(axis, alt))
+    }
+
+    pub(crate) fn phase_axis_pixel_list(
+        header: &Header,
+        column: usize,
+        alt: Option<char>,
+    ) -> Result<Option<PhaseAxis>> {
+        assert_ne!(column, 0, "table columns are 1-based");
+        FitsTime::phase_axis_from_keywords(header, PhaseAxisKeywords::pixel_list(column, alt))
+    }
+
+    pub(crate) fn phase_axis_array_column(
+        header: &Header,
+        axis: usize,
+        column: usize,
+        alt: Option<char>,
+    ) -> Result<Option<PhaseAxis>> {
+        assert_ne!(axis, 0, "WCS axes are 1-based");
+        assert_ne!(column, 0, "table columns are 1-based");
+        FitsTime::phase_axis_from_keywords(
+            header,
+            PhaseAxisKeywords::array_column(axis, column, alt),
+        )
+    }
+
+    fn phase_axis_from_keywords(
+        header: &Header,
+        keywords: PhaseAxisKeywords,
+    ) -> Result<Option<PhaseAxis>> {
+        let Some(ctype) = header.get_text(keywords.ctype.as_str())? else {
             return Ok(None);
         };
         if TimeAxisKind::from_ctype(ctype) != Some(TimeAxisKind::Phase) {
             return Ok(None);
         }
+        let zero_phase = header
+            .get_real(keywords.zero_phase.as_str())?
+            .ok_or_else(|| FitsError::InvalidValue {
+                card: format!("PHASE axis requires {}", keywords.zero_phase.as_str()),
+            })?;
+        if !zero_phase.is_finite() {
+            return Err(FitsError::InvalidValue {
+                card: format!("{} must be finite", keywords.zero_phase.as_str()),
+            });
+        }
+        let period = header.get_real(keywords.period.as_str())?;
+        if period.is_some_and(|value| !value.is_finite()) {
+            return Err(FitsError::InvalidValue {
+                card: format!("{} must be finite", keywords.period.as_str()),
+            });
+        }
         Ok(Some(PhaseAxis {
-            zero_phase: header
-                .get_real(key!("CZPHS{axis}").as_str())?
-                .unwrap_or(0.0),
-            period: header
-                .get_real(key!("CPERI{axis}").as_str())?
-                .unwrap_or(0.0),
+            zero_phase,
+            period: period.filter(|value| *value != 0.0),
         }))
     }
 }

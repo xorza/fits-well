@@ -35,12 +35,14 @@ cylindrical `CAR`/`CEA`/`MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic
 `COP`/`COE`/`COD`/`COO`, pseudoconic `BON`, polyconic `PCO`, cube
 `TSC`/`CSC`/`QSC`, and HEALPix `HPX` — with `PC`/`CD`/`CROTA`
 and full `PVi_m` parameters, yielding coordinates in the frame the file declares
-(`RADESYS`/`EQUINOX`). It also evaluates every Table-26 spectral/detector
-algorithm (`F2*`/`W2*`/`V2*`/`A2*`, `GRI`/`GRA`, and `LOG`) and resolves
-multidimensional `-TAB` arrays through `FitsReader::read_wcs`. A typed **time** layer
-handles strict FITS ISO-8601/JD/MJD (signed years and UTC quasi-JD), epochs,
-`UTC`…`TCB`/`GPS`/UT1 scale conversions, and time WCS axes — validated against
-ERFA/astropy. Tiled **image and table** compression
+(`RADESYS`/`EQUINOX`), exposed as typed declared-frame metadata. It also evaluates
+every Table-26 spectral/detector algorithm (`F2*`/`W2*`/`V2*`/`A2*`, `GRI`/`GRA`,
+and `LOG`), exposes per-axis spectral frame/rest metadata, and resolves
+multidimensional `-TAB` arrays through `FitsReader::read_wcs`. A typed **time**
+layer handles strict FITS ISO-8601/JD/MJD (signed years and UTC quasi-JD), epochs,
+resolved reference positions, all image/table PHASE forms, `UTC`…`TCB`/`GPS`/UT1
+scale conversions, and time WCS axes — validated against ERFA/astropy. Tiled
+**image and table** compression
 work behind
 the `compression` feature: all five image codecs (`GZIP_1`, `GZIP_2`, `RICE_1`,
 `PLIO_1`, `HCOMPRESS_1` with `SMOOTH=1` decode), quantized-float read+write
@@ -167,8 +169,8 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `groups/` | random-groups (§6) read: exact typed per-group parameter/array `RandomGroupView` plus `PSCALn`/`PZEROn` physical values | read done (no write — deprecated) |
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode | done |
 | `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3); `decode.rs` reassembles + dequantizes tiles into the image, `encode.rs` the integer + float encoders, `mod.rs` the shared `ImageCodec` dispatch / `CompressOptions` / `P`→`Q` descriptor threshold (`needs_wide`), `geometry` the N-d tiling, `convert` the byte/`i64`/`f64` conversions shared by image + table; `map_tiles` fans independent codec work across rayon and safe row chunks partition decode destinations under `parallel` | all 5 image codecs read+write; float quant all 3 dither methods (write-selectable via `CompressOptions::dither`) + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode + lossy `SCALE>0` write; fixed-width table compression read+write; tile-parallel ((de)compress, image + table) |
-| `wcs/` | typed WCS: keyword parse, linear transform (PC/CD/CROTA + `PVi_m` + inverse), all 27 FITS 4.0 projections (including cube TSC/CSC/QSC and parameterized HPX) via general pole computation, every Table-26 spectral/detector algorithm, generic `LOG`, and BINTABLE-backed multidimensional `TAB`, with complete `pixel_to_world`/`world_to_pixel`; unsupported conventions remain readable and make complete transforms return `UnsupportedWcsTransform` | standard algorithms done (`XPH` convention and inter-frame transforms out of scope) |
-| `time/` | typed time (§9): `Datetime` (strict unsigned-four/signed-five ISO-8601↔scale-aware JD/MJD, leap-second-preserving UTC quasi-JD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), fallible prefixed FITS time units, `FitsTime` header view + PC/CD-coupled time WCS axes with per-axis unit/scale overrides | v2 done |
+| `wcs/` | typed WCS: keyword parse, declared celestial/spectral frame metadata, linear transform (PC/CD/CROTA + `PVi_m` + inverse), all 27 FITS 4.0 projections (including cube TSC/CSC/QSC and parameterized HPX) via general pole computation, every Table-26 spectral/detector algorithm, generic `LOG`, and BINTABLE-backed multidimensional `TAB`, with complete `pixel_to_world`/`world_to_pixel`; unsupported conventions remain readable and make complete transforms return `UnsupportedWcsTransform` | standard algorithms done (`XPH` convention and inter-frame transforms out of scope) |
+| `time/` | typed time (§9): `Datetime` (strict unsigned-four/signed-five ISO-8601↔scale-aware JD/MJD, leap-second-preserving UTC quasi-JD), `Epoch` (J/B), `TimeScale` conversions (UTC↔TAI leap table, TT/TCG/TDB/TCB/GPS/UT1), typed `TREFPOS`/`TRPOSn`, all PHASE keyword forms with fallible folding, fallible prefixed FITS time units, `FitsTime` header view + PC/CD-coupled time WCS axes with per-axis unit/scale overrides | v2 done |
 | `error.rs` | `FitsError` + `Result` | done |
 
 `lib.rs` is the only place that defines the public surface (`pub use`). Card

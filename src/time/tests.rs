@@ -323,21 +323,97 @@ fn classifies_time_related_axes() {
 
 #[test]
 fn reads_phase_axis_and_folds() {
+    use crate::error::FitsError;
     use crate::header::Header;
-    // §9.6: a PHASE axis carries CZPHSia (zero-phase time) and CPERIia (period).
     let mut h = Header::new();
-    h.set("CTYPE2", "PHASE");
-    h.set("CZPHS2", 5.0);
-    h.set("CPERI2", 2.0);
-    let pa = FitsTime::phase_axis(&h, 2).unwrap().unwrap();
-    assert_eq!(pa.zero_phase, 5.0);
-    assert_eq!(pa.period, 2.0);
-    // Fold: ((8 − 5)/2) mod 1 = 1.5 mod 1 = 0.5; the zero-phase time folds to 0.
-    assert_eq!(pa.fold(8.0), 0.5);
-    assert_eq!(pa.fold(5.0), 0.0);
-    // A non-phase axis yields nothing.
+    h.set("CTYPE2", "PHASE")
+        .set("CZPHS2", 5.0)
+        .set("CPERI2", 2.0)
+        .set("CTYPE2A", "PHASE")
+        .set("CZPHS2A", 7.0)
+        .set("CPERI2A", 4.0)
+        .set("TCTYP3", "PHASE")
+        .set("TCZPH3", 11.0)
+        .set("TCPER3", 5.0)
+        .set("TCTY3A", "PHASE")
+        .set("TCZP3A", 13.0)
+        .set("TCPR3A", 6.0)
+        .set("1CTYP5", "PHASE")
+        .set("1CZPH5", 17.0)
+        .set("1CPER5", 8.0)
+        .set("1CTY5A", "PHASE")
+        .set("1CZP5A", 19.0)
+        .set("1CPR5A", 10.0);
+
+    let image = h.phase_axis(2, None).unwrap().unwrap();
+    assert_eq!(image.zero_phase, 5.0);
+    assert_eq!(image.period, Some(2.0));
+    assert_eq!(image.fold(8.0).unwrap(), 0.5);
+    assert_eq!(image.fold(5.0).unwrap(), 0.0);
+
+    let alternate = h.phase_axis(2, Some('A')).unwrap().unwrap();
+    assert_eq!(
+        alternate,
+        PhaseAxis {
+            zero_phase: 7.0,
+            period: Some(4.0),
+        }
+    );
+    assert_eq!(
+        h.phase_axis_pixel_list(3, None).unwrap().unwrap(),
+        PhaseAxis {
+            zero_phase: 11.0,
+            period: Some(5.0),
+        }
+    );
+    assert_eq!(
+        h.phase_axis_pixel_list(3, Some('A')).unwrap().unwrap(),
+        PhaseAxis {
+            zero_phase: 13.0,
+            period: Some(6.0),
+        }
+    );
+    assert_eq!(
+        h.phase_axis_array_column(1, 5, None).unwrap().unwrap(),
+        PhaseAxis {
+            zero_phase: 17.0,
+            period: Some(8.0),
+        }
+    );
+    assert_eq!(
+        h.phase_axis_array_column(1, 5, Some('A')).unwrap().unwrap(),
+        PhaseAxis {
+            zero_phase: 19.0,
+            period: Some(10.0),
+        }
+    );
+
     h.set("CTYPE1", "RA---TAN");
-    assert_eq!(FitsTime::phase_axis(&h, 1).unwrap(), None);
+    assert_eq!(h.phase_axis(1, None).unwrap(), None);
+
+    h.set("CTYPE4", "PHASE").set("CZPHS4", 23.0);
+    let varying = h.phase_axis(4, None).unwrap().unwrap();
+    assert_eq!(varying.period, None);
+    assert!(matches!(
+        varying.fold(30.0),
+        Err(FitsError::InvalidValue { card }) if card.contains("no constant CPERI")
+    ));
+    h.set("CPERI4", 0.0);
+    assert_eq!(h.phase_axis(4, None).unwrap().unwrap().period, None);
+    let overflow = PhaseAxis {
+        zero_phase: 0.0,
+        period: Some(f64::MIN_POSITIVE),
+    };
+    assert!(matches!(
+        overflow.fold(f64::MAX),
+        Err(FitsError::InvalidValue { card }) if card.contains("overflowed")
+    ));
+
+    h.set("CTYPE6", "PHASE");
+    assert!(matches!(
+        h.phase_axis(6, None),
+        Err(FitsError::InvalidValue { card }) if card.contains("CZPHS6")
+    ));
 }
 
 #[test]
@@ -559,7 +635,7 @@ fn fits_time_resolves_reference_and_relative_times() {
     let t = FitsTime::from_header(&h).unwrap();
     assert_eq!(t.scale, TimeScale::Tt);
     assert_eq!(t.mjdref, 58000.0);
-    assert_eq!(t.trefpos.as_deref(), Some("TOPOCENTER"));
+    assert_eq!(t.trefpos, TimeReferencePosition::Topocenter);
     assert_eq!(t.unit_seconds().unwrap(), 1.0);
     // TSTART=0 → MJDREF; TSTOP=86400 s → one day later.
     assert!((t.relative_to_mjd(0.0).unwrap() - 58000.0).abs() < 1e-12);
@@ -573,6 +649,59 @@ fn fits_time_resolves_reference_and_relative_times() {
         malformed.time(),
         Err(FitsError::TypeMismatch { name, expected })
             if name == "TIMEOFFS" && expected == "real"
+    ));
+
+    let mut positions = Header::new();
+    assert_eq!(
+        positions.time().unwrap().trefpos,
+        TimeReferencePosition::Topocenter
+    );
+    positions
+        .set("TREFPOS", "BARYCENT")
+        .set("TRPOS4", "GEOCENTR");
+    assert_eq!(
+        positions.time().unwrap().trefpos,
+        TimeReferencePosition::Barycenter
+    );
+    assert_eq!(
+        positions.time_for_column(4).unwrap().trefpos,
+        TimeReferencePosition::Geocenter
+    );
+    for (value, expected) in [
+        ("TOP", TimeReferencePosition::Topocenter),
+        ("GEOCENTER", TimeReferencePosition::Geocenter),
+        ("BARYCENTER", TimeReferencePosition::Barycenter),
+        ("RELOCATABLE", TimeReferencePosition::Relocatable),
+        ("CUSTOM", TimeReferencePosition::Custom),
+        ("HELIOCENTER", TimeReferencePosition::Heliocenter),
+        ("GALACTIC", TimeReferencePosition::GalacticCenter),
+        ("EMBARYCENTER", TimeReferencePosition::EarthMoonBarycenter),
+        ("MERCURY", TimeReferencePosition::Mercury),
+        ("VENUS", TimeReferencePosition::Venus),
+        ("MARS", TimeReferencePosition::Mars),
+        ("JUPITER", TimeReferencePosition::Jupiter),
+        ("SATURN", TimeReferencePosition::Saturn),
+        ("URANUS", TimeReferencePosition::Uranus),
+        ("NEPTUNE", TimeReferencePosition::Neptune),
+    ] {
+        positions.set("TREFPOS", value);
+        assert_eq!(positions.time().unwrap().trefpos, expected, "{value}");
+    }
+    positions.set("TREFPOS", "topocenter");
+    assert_eq!(
+        positions.time().unwrap().trefpos,
+        TimeReferencePosition::Other("topocenter".to_string())
+    );
+
+    positions.set("TREFPOS", 42).set("TRPOS4", "GEOCENTR");
+    assert_eq!(
+        positions.time_for_column(4).unwrap().trefpos,
+        TimeReferencePosition::Geocenter
+    );
+    assert!(matches!(
+        positions.time(),
+        Err(FitsError::TypeMismatch { name, expected })
+            if name == "TREFPOS" && expected == "text"
     ));
 }
 

@@ -89,8 +89,8 @@ For every batch:
 
 ## Batch 16 — Medium: expose complete coordinate-frame metadata
 
-- [ ] **Add typed declared WCS/time frame metadata.** Parse and expose `RADESYS`/`EQUINOX`, spectral frame/rest metadata, and the resolved `TREFPOS=TOPOCENTER` default without performing inter-frame astrometry or light-time corrections (`src/wcs/mod.rs:842-878`, `src/time/mod.rs:515-528`; standard `docs/refs/fits_standard40.md:3649-3658`, `docs/refs/fits_standard40.md:4256-4269`).
-- [ ] **Support alternate/table PHASE metadata and undefined periods.** Resolve all Table-22 `CZPHS`/`CPERI` forms and make folding fail explicitly when the period is absent or zero instead of returning phase zero (`src/time/mod.rs:483-490`, `src/time/mod.rs:657-674`; standard `docs/refs/fits_standard40.md:4717-4734`).
+- [x] **Add typed declared WCS/time frame metadata.** `WcsView` exposes resolved celestial `RADESYS`/`EQUINOX`, while each spectral axis carries typed `SPECSYS`/defaulted `SSYSOBS` and validated `RESTFRQ`/`RESTWAV`; image, alternate, pixel-list, and vector-cell forms remain distinct per axis. `FitsTime` exposes typed `TREFPOS`, including its `TOPOCENTER` default and `TRPOSn` override through `Header::time_for_column`. These types report the declared frame without performing astrometry or light-time corrections (`src/wcs/mod.rs`, `src/time/mod.rs`; standard `docs/refs/fits_standard40.md:3649-3658`, `docs/refs/fits_standard40.md:4256-4269`).
+- [x] **Support alternate/table PHASE metadata and undefined periods.** `Header` resolves primary and alternate image, pixel-list, and vector-cell `CZPHS`/`CPERI` families. A missing/zero constant period is represented as `None`, and `PhaseAxis::fold` returns an explicit error rather than a false phase zero (`src/time/mod.rs`; standard `docs/refs/fits_standard40.md:4717-4734`).
 
 ## Batch 17 — Medium: correct secondary status and support claims
 

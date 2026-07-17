@@ -60,12 +60,14 @@ fn parses_tan_header() {
                 cunit: "deg".to_string(),
                 crval: 150.0,
                 crpix: 256.0,
+                spectral_frame: None,
             },
             WcsAxis {
                 ctype: "DEC--TAN".to_string(),
                 cunit: "deg".to_string(),
                 crval: 2.5,
                 crpix: 256.0,
+                spectral_frame: None,
             },
         ]
     );
@@ -1593,8 +1595,19 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     assert!((no_rest.world_to_pixel(&[world]).unwrap()[0] - 3.0).abs() < 1e-10);
 
     let mut by_frequency = velocity_axis("VELO-F2V");
-    by_frequency.set("RESTFRQ", 1_420_405_751.0);
+    by_frequency
+        .set("RESTFRQ", 1_420_405_751.0)
+        .set("SPECSYS", "BARYCENT");
     let by_frequency = by_frequency.wcs(None).unwrap();
+    assert_eq!(
+        by_frequency.view().axes[0].spectral_frame,
+        Some(SpectralFrame {
+            coordinate: Some(SpectralReferenceFrame::Barycentric),
+            observer: SpectralReferenceFrame::Topocentric,
+            rest_frequency_hz: Some(1_420_405_751.0),
+            rest_wavelength_m: None,
+        })
+    );
     let mut by_wavelength = velocity_axis("VELO-F2V");
     by_wavelength.set("RESTWAV", 2.997_924_58e8 / 1_420_405_751.0);
     let by_wavelength = by_wavelength.wcs(None).unwrap();
@@ -1639,9 +1652,39 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         .set("TCRPX2", 1.0)
         .set("TCRVL2", 0.0)
         .set("TCDLT2", 1_000.0)
-        .set("RFRQ2", 1_420_405_751.0);
-    let pixel_list = pixel_list.wcs_pixel_list(&[2], None).unwrap();
-    assert!((pixel_list.pixel_to_world(&[3.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9);
+        .set("RFRQ2", 1_420_405_751.0)
+        .set("SPEC2", "BARYCENT")
+        .set("SOBS2", "GEOCENTR")
+        .set("TCTYP4", "WAVE")
+        .set("TCUNI4", "m")
+        .set("TCRPX4", 1.0)
+        .set("TCRVL4", 5.0e-7)
+        .set("TCDLT4", 1.0e-9)
+        .set("RWAV4", 5.0e-7)
+        .set("SPEC4", "SOURCE")
+        .set("SOBS4", "HELIOCEN");
+    let pixel_list = pixel_list.wcs_pixel_list(&[2, 4], None).unwrap();
+    assert!(
+        (pixel_list.pixel_to_world(&[3.0, 1.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9
+    );
+    assert_eq!(
+        pixel_list.view().axes[0].spectral_frame,
+        Some(SpectralFrame {
+            coordinate: Some(SpectralReferenceFrame::Barycentric),
+            observer: SpectralReferenceFrame::Geocentric,
+            rest_frequency_hz: Some(1_420_405_751.0),
+            rest_wavelength_m: None,
+        })
+    );
+    assert_eq!(
+        pixel_list.view().axes[1].spectral_frame,
+        Some(SpectralFrame {
+            coordinate: Some(SpectralReferenceFrame::Source),
+            observer: SpectralReferenceFrame::Heliocentric,
+            rest_frequency_hz: None,
+            rest_wavelength_m: Some(5.0e-7),
+        })
+    );
 
     let mut vector = Header::new();
     vector
@@ -1651,9 +1694,222 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         .set("1CRP5A", 1.0)
         .set("1CRV5A", 0.0)
         .set("1CDE5A", 1_000.0)
-        .set("RWAV5A", 2.997_924_58e8 / 1_420_405_751.0);
+        .set("RWAV5A", 2.997_924_58e8 / 1_420_405_751.0)
+        .set("SPEC5A", "LSRK")
+        .set("SOBS5A", "TOPOCENT");
     let vector = vector.wcs_array_column(5, Some('A')).unwrap();
     assert!((vector.pixel_to_world(&[3.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9);
+    assert_eq!(
+        vector.view().axes[0].spectral_frame,
+        Some(SpectralFrame {
+            coordinate: Some(SpectralReferenceFrame::LsrKinematic),
+            observer: SpectralReferenceFrame::Topocentric,
+            rest_frequency_hz: None,
+            rest_wavelength_m: Some(2.997_924_58e8 / 1_420_405_751.0),
+        })
+    );
+
+    let mut alternate = Header::new();
+    alternate
+        .set("NAXIS", 1)
+        .set("CTYPE1", "WAVE")
+        .set("CTYPE1A", "FREQ")
+        .set("SPECSYS", "GEOCENTR")
+        .set("SPECSYSA", "CMBDIPOL")
+        .set("SSYSOBSA", "BARYCENT")
+        .set("RESTFRQA", 1_420_405_751.0);
+    assert_eq!(
+        alternate.wcs(Some('A')).unwrap().view().axes[0].spectral_frame,
+        Some(SpectralFrame {
+            coordinate: Some(SpectralReferenceFrame::CmbDipole),
+            observer: SpectralReferenceFrame::Barycentric,
+            rest_frequency_hz: Some(1_420_405_751.0),
+            rest_wavelength_m: None,
+        })
+    );
+
+    alternate.set("SPECSYSA", "UNKNOWN");
+    assert!(matches!(
+        alternate.wcs(Some('A')),
+        Err(FitsError::InvalidValue { card }) if card.contains("SPECSYS")
+    ));
+
+    for (value, expected) in [
+        ("TOPOCENT", SpectralReferenceFrame::Topocentric),
+        ("GEOCENTR", SpectralReferenceFrame::Geocentric),
+        ("BARYCENT", SpectralReferenceFrame::Barycentric),
+        ("HELIOCEN", SpectralReferenceFrame::Heliocentric),
+        ("LSRK", SpectralReferenceFrame::LsrKinematic),
+        ("LSRD", SpectralReferenceFrame::LsrDynamic),
+        ("GALACTOC", SpectralReferenceFrame::Galactocentric),
+        ("LOCALGRP", SpectralReferenceFrame::LocalGroup),
+        ("CMBDIPOL", SpectralReferenceFrame::CmbDipole),
+        ("SOURCE", SpectralReferenceFrame::Source),
+    ] {
+        let mut header = Header::new();
+        header
+            .set("NAXIS", 1)
+            .set("CTYPE1", "WAVE")
+            .set("SPECSYS", value);
+        assert_eq!(
+            header.wcs(None).unwrap().view().axes[0]
+                .spectral_frame
+                .unwrap()
+                .coordinate,
+            Some(expected),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
+    use crate::error::FitsError;
+    use crate::header::Header;
+
+    let image = |equinox: Option<f64>, radesys: Option<&str>| {
+        let mut header = Header::new();
+        header
+            .set("NAXIS", 2)
+            .set("CTYPE1", "RA---TAN")
+            .set("CTYPE2", "DEC--TAN");
+        if let Some(equinox) = equinox {
+            header.set("EQUINOX", equinox);
+        }
+        if let Some(radesys) = radesys {
+            header.set("RADESYS", radesys);
+        }
+        header
+    };
+    assert_eq!(
+        image(None, None).wcs(None).unwrap().view().celestial_frame,
+        Some(CelestialFrame {
+            reference_frame: CelestialReferenceFrame::Icrs,
+            equinox: None,
+        })
+    );
+    assert_eq!(
+        image(Some(1950.0), None)
+            .wcs(None)
+            .unwrap()
+            .view()
+            .celestial_frame,
+        Some(CelestialFrame {
+            reference_frame: CelestialReferenceFrame::Fk4,
+            equinox: Some(1950.0),
+        })
+    );
+    assert_eq!(
+        image(Some(2000.0), None)
+            .wcs(None)
+            .unwrap()
+            .view()
+            .celestial_frame,
+        Some(CelestialFrame {
+            reference_frame: CelestialReferenceFrame::Fk5,
+            equinox: Some(2000.0),
+        })
+    );
+    assert_eq!(
+        image(Some(1975.0), Some("FK4-NO-E"))
+            .wcs(None)
+            .unwrap()
+            .view()
+            .celestial_frame,
+        Some(CelestialFrame {
+            reference_frame: CelestialReferenceFrame::Fk4NoE,
+            equinox: Some(1975.0),
+        })
+    );
+
+    let mut alternate = image(None, Some("GAPPT"));
+    alternate
+        .set("CTYPE1A", "RA---TAN")
+        .set("CTYPE2A", "DEC--TAN")
+        .set("EQUINOXA", 1970.0);
+    assert_eq!(
+        alternate.wcs(None).unwrap().view().celestial_frame,
+        Some(CelestialFrame {
+            reference_frame: CelestialReferenceFrame::Gappt,
+            equinox: None,
+        })
+    );
+    assert_eq!(
+        alternate.wcs(Some('A')).unwrap().view().celestial_frame,
+        Some(CelestialFrame {
+            reference_frame: CelestialReferenceFrame::Fk4,
+            equinox: Some(1970.0),
+        })
+    );
+
+    let mut pixel_list = Header::new();
+    pixel_list
+        .set("TCTY2A", "RA---TAN")
+        .set("TCTY3A", "DEC--TAN")
+        .set("RADE2A", "FK5")
+        .set("RADE3A", "FK5")
+        .set("EQUI2A", 2000.0)
+        .set("EQUI3A", 2000.0);
+    assert_eq!(
+        pixel_list
+            .wcs_pixel_list(&[2, 3], Some('A'))
+            .unwrap()
+            .view()
+            .celestial_frame,
+        Some(CelestialFrame {
+            reference_frame: CelestialReferenceFrame::Fk5,
+            equinox: Some(2000.0),
+        })
+    );
+
+    let mut vector = Header::new();
+    vector
+        .set("1CTY5A", "RA---TAN")
+        .set("2CTY5A", "DEC--TAN")
+        .set("RADE5A", "ICRS");
+    assert_eq!(
+        vector
+            .wcs_array_column(5, Some('A'))
+            .unwrap()
+            .view()
+            .celestial_frame,
+        Some(CelestialFrame {
+            reference_frame: CelestialReferenceFrame::Icrs,
+            equinox: None,
+        })
+    );
+
+    let mut unsupported = Header::new();
+    unsupported
+        .set("TCTYP2", "RA---XPH")
+        .set("TCTYP3", "DEC--XPH")
+        .set("RADE2", "FK5")
+        .set("RADE3", "FK5")
+        .set("EQUI2", 2000.0)
+        .set("EQUI3", 2000.0);
+    let unsupported = unsupported.wcs_pixel_list(&[2, 3], None).unwrap();
+    assert_eq!(
+        unsupported.view().celestial_frame,
+        Some(CelestialFrame {
+            reference_frame: CelestialReferenceFrame::Fk5,
+            equinox: Some(2000.0),
+        })
+    );
+    assert_eq!(unsupported.view().unsupported_axes, [0, 1]);
+
+    assert!(matches!(
+        image(None, Some("J2000")).wcs(None),
+        Err(FitsError::InvalidValue { card }) if card.contains("RADESYS")
+    ));
+    assert!(matches!(
+        image(Some(-1.0), None).wcs(None),
+        Err(FitsError::InvalidValue { card }) if card.contains("EQUINOX")
+    ));
+    pixel_list.set("RADE3A", "FK4");
+    assert!(matches!(
+        pixel_list.wcs_pixel_list(&[2, 3], Some('A')),
+        Err(FitsError::ConflictingWcsKeywords { .. })
+    ));
 }
 
 #[test]

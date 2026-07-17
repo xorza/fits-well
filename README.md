@@ -150,6 +150,7 @@ let wcs = reader.read_wcs(0, None)?; // None = the primary WCS
 
 let sky = wcs.pixel_to_world(&[256.0, 256.0])?; // RA/Dec at the reference pixel
 let pixel = wcs.world_to_pixel(&sky)?; // and back again
+let declared_frame = wcs.view().celestial_frame; // RADESYS/EQUINOX metadata
 println!("{sky:?} -> {pixel:?}");
 # Ok::<(), fits_well::FitsError>(())
 ```
@@ -158,11 +159,12 @@ Both complete transforms return an error for coordinates outside the projection'
 domain, failed iterative inversion, or a nonlinear algorithm this crate does not
 yet implement.
 
-The typed **time** layer (`Header::time`, `Datetime`, `TimeScale`) handles
-strict FITS ISO-8601/JD/MJD (including signed years and UTC leap seconds), FITS
-time units, epochs, `UTC`…`TCB`/`GPS`/UT1 scale conversions, and PC/CD-coupled
-time axes through the parsed WCS model. Datetime-to-JD conversion takes an
-explicit `TimeScale`; UTC uses a leap-second-preserving quasi-JD.
+The typed **time** layer (`Header::time`, `Datetime`, `TimeScale`) handles strict
+FITS ISO-8601/JD/MJD (including signed years and UTC leap seconds), FITS time
+units, epochs, resolved `TREFPOS`/`TRPOSn`, all image/table PHASE keyword forms,
+`UTC`…`TCB`/`GPS`/UT1 scale conversions, and PC/CD-coupled time axes through the
+parsed WCS model. Datetime-to-JD conversion takes an explicit `TimeScale`; UTC
+uses a leap-second-preserving quasi-JD.
 
 ## Examples
 

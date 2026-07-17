@@ -33,8 +33,8 @@ impl SpectralParameters {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SpectralRest {
-    frequency: Option<f64>,
-    wavelength: Option<f64>,
+    pub(crate) frequency: Option<f64>,
+    pub(crate) wavelength: Option<f64>,
 }
 
 impl SpectralRest {
@@ -387,17 +387,6 @@ impl AxisTransform {
             }
         }
     }
-}
-
-pub(crate) fn has_analytic_spectral_algorithm(ctype: &str) -> bool {
-    let parts = CTypeParts::parse(ctype);
-    let Some(kind) = SpectralKind::from_code(parts.head) else {
-        return false;
-    };
-    parts.code.is_some_and(|code| {
-        matches!(code, "GRI" | "GRA")
-            || Characteristic::from_algorithm(code, kind.characteristic()).is_some()
-    })
 }
 
 pub(crate) fn is_spectral_type(ctype: &str) -> bool {
