@@ -574,6 +574,10 @@ impl FitsTime {
             let scale = declared_time_scale(header)?;
             Datetime::parse(value)?.to_mjd(&scale).map(Some)
         };
+        let timepixr = header.get_real("TIMEPIXR")?.unwrap_or(0.5);
+        if !(0.0..=1.0).contains(&timepixr) {
+            return Err(FitsError::KeywordOutOfRange { name: "TIMEPIXR" });
+        }
         Ok(TimeBounds {
             beg_mjd: mjd_or_date("MJD-BEG", "DATE-BEG")?,
             end_mjd: mjd_or_date("MJD-END", "DATE-END")?,
@@ -581,7 +585,7 @@ impl FitsTime {
             xposure: header.get_real("XPOSURE")?,
             telapse: header.get_real("TELAPSE")?,
             timedel: header.get_real("TIMEDEL")?,
-            timepixr: header.get_real("TIMEPIXR")?.unwrap_or(0.5), // §9.4.2 default
+            timepixr,
             timsyer: header.get_real("TIMSYER")?,
             timrder: header.get_real("TIMRDER")?,
         })

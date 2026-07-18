@@ -240,7 +240,7 @@ editing is deliberately out of scope.
 | Area | Support |
 | --- | --- |
 | Normative FITS 4.0 §§3–9 | Complete typed core: HDUs, images, ASCII/binary tables including P/Q, random groups read, WCS, and time |
-| Normative tiled compression §10 | Image and fixed-width table read/write; five image codecs; default `compression` feature |
+| Normative tiled compression §10 | Image and fixed/P/Q table read/write; five image codecs plus `NOCOMPRESS`; default `compression` feature |
 | Registered conventions | `CONTINUE` and `CHECKSUM`/`DATASUM`; `HIERARCH` is preserved as opaque commentary; convention-only `XPH` is readable but not transformed |
 | Partial I/O | N-D image sections including compressed-tile selection; binary-table schema, cells, columns, rows, and ranges |
 | Streaming I/O | Lazy reader; scratch-reusing image views; incremental seekable image writer |
@@ -264,7 +264,7 @@ cargo run --example compression      # tile-compressed image round-trip
 
 | Feature | Default | What it adds |
 |---------|:-------:|--------------|
-| `compression` | ✅ | Tiled image + table (de)compression — `GZIP_1/2`, `RICE_1`, `PLIO_1`, `HCOMPRESS_1` (pulls in `flate2`). |
+| `compression` | ✅ | Tiled image + table (de)compression — `GZIP_1/2`, `RICE_1`, `PLIO_1`, signed-64-bit `HCOMPRESS_1`, `NOCOMPRESS`, float quantization, null masks, and P/Q table VLAs (pulls in `flate2`). |
 | `parallel` | ✅ | Tile-parallel (de)compression across a rayon pool (implies `compression`). |
 | `mmap` | — | `FitsReader::open_mmap` — zero-copy reads straight off memory-mapped pages (`memmap2`). |
 `--no-default-features` gives the pure-Rust core (block / header / HDU / reader /

@@ -1,6 +1,6 @@
 //! `RICE_1` tile codec (a port of cfitsio's `fits_rdecomp` bitstream layout).
 
-use crate::bitpix::Bitpix;
+use crate::compress;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -13,33 +13,39 @@ pub(crate) struct RiceParams {
     pub bytepix: usize,
 }
 
-/// Rice parameters from the `ZNAMEi`/`ZVALi` keywords, defaulting to a block size
-/// of 32 and `bytepix = |ZBITPIX|/8`.
-pub(crate) fn rice_params(header: &Header, zbitpix: Bitpix) -> Result<RiceParams> {
+/// Rice parameters from the `ZNAMEi`/`ZVALi` keywords, with the Table 37 defaults
+/// of 32 pixels per block and four bytes per encoded integer.
+pub(crate) fn rice_params(header: &Header) -> Result<RiceParams> {
     let mut blocksize = 32;
-    let mut bytepix = zbitpix.elem_size();
-    let mut i = 1;
-    while let Some(name) = header.get_text(key!("ZNAME{i}").as_str())? {
-        if let Some(v) = header.get_integer(key!("ZVAL{i}").as_str())? {
-            match name {
-                "BLOCKSIZE" => {
-                    blocksize = positive_parameter(v)?;
+    let mut bytepix = 4;
+    for entry in header.iter() {
+        let Some(i) = compress::parameter_index(entry.keyword) else {
+            continue;
+        };
+        let Some(name) = header.get_text(entry.keyword)? else {
+            continue;
+        };
+        match name {
+            "BLOCKSIZE" => {
+                if let Some(v) = header.get_integer(key!("ZVAL{i}").as_str())? {
+                    blocksize = permitted_parameter(v, &[16, 32])?;
                 }
-                "BYTEPIX" => {
-                    bytepix = positive_parameter(v)?;
-                }
-                _ => {}
             }
+            "BYTEPIX" => {
+                if let Some(v) = header.get_integer(key!("ZVAL{i}").as_str())? {
+                    bytepix = permitted_parameter(v, &[1, 2, 4, 8])?;
+                }
+            }
+            _ => {}
         }
-        i += 1;
     }
     Ok(RiceParams { blocksize, bytepix })
 }
 
-fn positive_parameter(value: i64) -> Result<usize> {
+fn permitted_parameter(value: i64, permitted: &[usize]) -> Result<usize> {
     usize::try_from(value)
         .ok()
-        .filter(|&value| value > 0)
+        .filter(|value| permitted.contains(value))
         .ok_or(FitsError::KeywordOutOfRange { name: "ZVALn" })
 }
 
@@ -60,7 +66,13 @@ pub(crate) fn rice_decode_into(
     let (fsbits, fsmax) = match bytepix {
         1 => (3u32, 6u32),
         2 => (4, 14),
-        _ => (5, 25), // 4-byte (and wider) pixels
+        4 => (5, 25),
+        8 => (6, 57),
+        _ => {
+            return Err(FitsError::UnsupportedCompression {
+                name: format!("RICE_1 with BYTEPIX = {bytepix}"),
+            });
+        }
     };
     let mask = if nbits_pp >= 64 {
         u64::MAX
@@ -104,7 +116,7 @@ fn sign_extend(v: u64, nbits: u32) -> i64 {
 }
 
 /// Encode `values` as a `RICE_1` tile (a port of cfitsio's `fits_rcomp`),
-/// parameterized by `bytepix` (1/2/4). Differences are taken modulo the pixel
+/// parameterized by `bytepix` (1/2/4/8). Differences are taken modulo the pixel
 /// width so the stream round-trips through [`rice_decode_into`].
 pub(crate) fn rice_encode<T: Copy + Into<i64>>(
     values: &[T],
@@ -116,21 +128,21 @@ pub(crate) fn rice_encode<T: Copy + Into<i64>>(
     let (fsbits, fsmax) = match bytepix {
         1 => (3i32, 6i32),
         2 => (4, 14),
-        _ => (5, 25),
+        4 => (5, 25),
+        8 => (6, 57),
+        _ => unreachable!("Rice BYTEPIX is validated by the codec dispatcher"),
     };
     let mask: u64 = if nbits >= 64 {
         u64::MAX
     } else {
         (1u64 << nbits) - 1
     };
-    let half: u64 = 1u64 << (nbits - 1);
-
     let mut bo = BitOutput::new();
     // Rice output is at most a few bytes per pixel; reserve a pixel's worth up front
     // so the bitstream rarely reallocates mid-tile.
     bo.out.reserve(values.len());
     let first = values.first().copied().map(Into::into).unwrap_or(0) as u64 & mask;
-    bo.output_nbits(first as i64, nbits as i32);
+    bo.output_nbits(first, nbits);
     let mut lastpix = first;
 
     scratch.diffs.reserve(blocksize);
@@ -138,28 +150,31 @@ pub(crate) fn rice_encode<T: Copy + Into<i64>>(
     while i < values.len() {
         let thisblock = blocksize.min(values.len() - i);
         scratch.diffs.clear();
-        let mut pixelsum = 0.0f64;
+        let mut pixelsum = 0u128;
         for j in 0..thisblock {
             let next = Into::<i64>::into(values[i + j]) as u64 & mask;
             // signed difference reduced to the pixel width, then zigzag-mapped
             let raw = next.wrapping_sub(lastpix) & mask;
-            let s = if raw >= half {
-                raw as i64 - (mask as i64) - 1
-            } else {
-                raw as i64
-            };
+            let s = sign_extend(raw, nbits);
             let d = if s >= 0 {
                 (s as u64) << 1
             } else {
-                (((-s) as u64) << 1) - 1
+                (s.unsigned_abs() << 1).wrapping_sub(1)
             };
             scratch.diffs.push(d);
-            pixelsum += d as f64;
+            pixelsum += d as u128;
             lastpix = next;
         }
 
-        let dpsum = ((pixelsum - thisblock as f64 / 2.0 - 1.0) / thisblock as f64).max(0.0);
-        let mut psum = (dpsum as u64) >> 1;
+        let block = thisblock as u128;
+        let quotient = pixelsum / block;
+        let remainder = pixelsum % block;
+        let dpsum = if quotient > 0 && remainder < block / 2 + 1 {
+            quotient - 1
+        } else {
+            quotient
+        };
+        let mut psum = dpsum >> 1;
         let mut fs = 0i32;
         while psum > 0 {
             fs += 1;
@@ -167,22 +182,21 @@ pub(crate) fn rice_encode<T: Copy + Into<i64>>(
         }
 
         if fs >= fsmax {
-            bo.output_nbits((fsmax + 1) as i64, fsbits);
+            bo.output_nbits((fsmax + 1) as u64, fsbits as u32);
             for &d in &scratch.diffs {
-                bo.output_nbits(d as i64, nbits as i32);
+                bo.output_nbits(d, nbits);
             }
-        } else if fs == 0 && pixelsum == 0.0 {
-            bo.output_nbits(0, fsbits);
+        } else if fs == 0 && pixelsum == 0 {
+            bo.output_nbits(0, fsbits as u32);
         } else {
-            bo.output_nbits((fs + 1) as i64, fsbits);
-            let fsmask = (1i64 << fs) - 1;
+            bo.output_nbits((fs + 1) as u64, fsbits as u32);
+            let fsmask = (1u64 << fs) - 1;
             for &d in &scratch.diffs {
-                bo.output_rice_value(d as i64, fs, fsmask);
+                bo.output_rice_value(d, fs as u32, fsmask);
             }
         }
         i += thisblock;
     }
-    bo.done();
     bo.out
 }
 
@@ -195,82 +209,42 @@ pub(crate) struct RiceScratch {
 #[derive(Debug)]
 struct BitOutput {
     out: Vec<u8>,
-    bitbuffer: i64,
-    bits_to_go: i32,
+    bits_in_last: u8,
 }
 
 impl BitOutput {
     fn new() -> Self {
         BitOutput {
             out: Vec::new(),
-            bitbuffer: 0,
-            bits_to_go: 8,
+            bits_in_last: 0,
         }
     }
 
-    fn output_nbits(&mut self, bits: i64, mut n: i32) {
-        let mask = |k: i32| {
-            if k >= 32 {
-                0xFFFF_FFFFi64
-            } else {
-                (1i64 << k) - 1
-            }
-        };
-        let mut lb = self.bitbuffer;
-        let mut ltg = self.bits_to_go;
-        if ltg + n > 32 {
-            lb <<= ltg;
-            lb |= (bits >> (n - ltg)) & mask(ltg);
-            self.out.push((lb & 0xff) as u8);
-            n -= ltg;
-            ltg = 8;
+    fn output_nbits(&mut self, bits: u64, n: u32) {
+        for shift in (0..n).rev() {
+            self.output_bit(((bits >> shift) & 1) as u8);
         }
-        lb <<= n;
-        lb |= bits & mask(n);
-        ltg -= n;
-        while ltg <= 0 {
-            self.out.push(((lb >> (-ltg)) & 0xff) as u8);
-            ltg += 8;
+    }
+
+    fn output_bit(&mut self, bit: u8) {
+        if self.bits_in_last == 0 {
+            self.out.push(0);
         }
-        self.bitbuffer = lb;
-        self.bits_to_go = ltg;
+        let last = self.out.last_mut().unwrap();
+        *last |= bit << (7 - self.bits_in_last);
+        self.bits_in_last = (self.bits_in_last + 1) % 8;
     }
 
     /// Output one Rice-coded value: `top = v >> fs` zero bits, a 1, then the low
     /// `fs` bits of `v`.
-    fn output_rice_value(&mut self, v: i64, fs: i32, fsmask: i64) {
+    fn output_rice_value(&mut self, v: u64, fs: u32, fsmask: u64) {
         let top = v >> fs;
-        if (self.bits_to_go as i64) > top {
-            self.bitbuffer <<= top + 1;
-            self.bitbuffer |= 1;
-            self.bits_to_go -= (top + 1) as i32;
-        } else {
-            self.bitbuffer <<= self.bits_to_go;
-            self.out.push((self.bitbuffer & 0xff) as u8);
-            let mut t = top - self.bits_to_go as i64;
-            while t >= 8 {
-                self.out.push(0);
-                t -= 8;
-            }
-            self.bitbuffer = 1;
-            self.bits_to_go = 7 - t as i32;
+        for _ in 0..top {
+            self.output_bit(0);
         }
+        self.output_bit(1);
         if fs > 0 {
-            self.bitbuffer <<= fs;
-            self.bitbuffer |= v & fsmask;
-            self.bits_to_go -= fs;
-            while self.bits_to_go <= 0 {
-                self.out
-                    .push(((self.bitbuffer >> (-self.bits_to_go)) & 0xff) as u8);
-                self.bits_to_go += 8;
-            }
-        }
-    }
-
-    fn done(&mut self) {
-        if self.bits_to_go < 8 {
-            self.out
-                .push(((self.bitbuffer << self.bits_to_go) & 0xff) as u8);
+            self.output_nbits(v & fsmask, fs);
         }
     }
 }
@@ -294,14 +268,35 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// Read `n` bits (MSB-first, `n ≤ 32`).
+    /// Read `n` bits (MSB-first, `n ≤ 64`).
     pub(crate) fn read(&mut self, n: u32) -> Result<u64> {
-        if self.nbits < n {
-            self.fill(n)?;
+        if n > 64 {
+            return Err(FitsError::UnsupportedCompression {
+                name: format!("Rice bit field is {n} bits"),
+            });
         }
-        self.nbits -= n;
-        let mask = if n >= 64 { u64::MAX } else { (1u64 << n) - 1 };
-        Ok((self.acc >> self.nbits) & mask)
+        let mut remaining = n;
+        let mut value = 0u64;
+        while remaining != 0 {
+            if self.nbits == 0 {
+                self.fill(1)?;
+            }
+            let take = remaining.min(self.nbits);
+            self.nbits -= take;
+            let mask = if take == 64 {
+                u64::MAX
+            } else {
+                (1u64 << take) - 1
+            };
+            let part = (self.acc >> self.nbits) & mask;
+            value = if take == 64 {
+                part
+            } else {
+                (value << take) | part
+            };
+            remaining -= take;
+        }
+        Ok(value)
     }
 
     /// Top up the accumulator to `needed` bits, loading a whole word in the common
@@ -358,7 +353,6 @@ impl<'a> BitReader<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::bitpix::Bitpix;
     use crate::compress::rice::{self, BitReader};
     use crate::error::FitsError;
     use crate::header::Header;
@@ -366,19 +360,38 @@ mod tests {
     #[test]
     fn rice_parameters_reject_invalid_header_values() {
         let mut header = Header::new();
+        let defaults = rice::rice_params(&header).unwrap();
+        assert_eq!(defaults.blocksize, 32);
+        assert_eq!(defaults.bytepix, 4);
         header
             .set_internal("ZNAME1", "BLOCKSIZE")
             .set_internal("ZVAL1", 0);
         assert!(matches!(
-            rice::rice_params(&header, Bitpix::I16),
+            rice::rice_params(&header),
             Err(FitsError::KeywordOutOfRange { name: "ZVALn" })
         ));
 
         header.set_internal("ZVAL1", "not an integer");
         assert!(matches!(
-            rice::rice_params(&header, Bitpix::I16),
+            rice::rice_params(&header),
             Err(FitsError::TypeMismatch { name, expected })
                 if name == "ZVAL1" && expected == "integer"
+        ));
+
+        let mut gapped = Header::new();
+        gapped
+            .set_internal("ZNAME2", "BYTEPIX")
+            .set_internal("ZVAL2", 8)
+            .set_internal("ZNAME3", "BLOCKSIZE")
+            .set_internal("ZVAL3", 16);
+        let params = rice::rice_params(&gapped).unwrap();
+        assert_eq!(params.bytepix, 8);
+        assert_eq!(params.blocksize, 16);
+
+        gapped.set_internal("ZVAL3", 17);
+        assert!(matches!(
+            rice::rice_params(&gapped),
+            Err(FitsError::KeywordOutOfRange { name: "ZVALn" })
         ));
     }
 
@@ -411,6 +424,36 @@ mod tests {
         assert_eq!(br.read(4).unwrap(), 0);
         assert_eq!(br.read_zeros().unwrap(), 0);
         assert_eq!(br.read_zeros().unwrap(), 4);
+    }
+
+    #[test]
+    fn bytepix_8_round_trips_unaligned_multiblock_extremes() {
+        let values: Vec<i64> = (0..70)
+            .map(|index| match index % 7 {
+                0 => i64::MIN,
+                1 => i64::MAX,
+                2 => 9_007_199_254_740_993 + index,
+                3 => -9_007_199_254_740_993 - index,
+                4 => index,
+                5 => -index,
+                _ => 0,
+            })
+            .collect();
+        let encoded = rice::rice_encode(&values, 8, 32, &mut rice::RiceScratch::default());
+        let mut decoded = Vec::new();
+        rice::rice_decode_into(&encoded, values.len(), 8, 32, &mut decoded).unwrap();
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn odd_final_block_uses_the_canonical_integer_statistic() {
+        let encoded = rice::rice_encode(&[0i64, 0, 4], 4, 32, &mut rice::RiceScratch::default());
+        // CFITSIO's reference encoder selects split 1 and emits these exact bytes.
+        assert_eq!(encoded, [0, 0, 0, 0, 0x15, 0x04]);
+
+        let mut decoded = Vec::new();
+        rice::rice_decode_into(&encoded, 3, 4, 32, &mut decoded).unwrap();
+        assert_eq!(decoded, [0, 0, 4]);
     }
 
     #[test]

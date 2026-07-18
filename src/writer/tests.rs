@@ -1719,16 +1719,35 @@ fn compressed_image_metadata_is_validated_before_automatic_primary() {
     assert!(writer.into_inner().into_inner().is_empty());
 
     let image = Image {
-        shape: vec![1],
-        samples: ImageData::I64(vec![1]),
+        shape: vec![1, 1],
+        samples: ImageData::I64(vec![i64::MIN]),
         scaling: identity(),
     };
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    assert!(matches!(
-        writer.write_compressed_image(&image, Compression::Rice, &CompressionOptions::default()),
-        Err(FitsError::UnsupportedCompression { .. })
-    ));
-    assert!(writer.into_inner().into_inner().is_empty());
+    writer
+        .write_compressed_image(&image, Compression::Rice, &CompressionOptions::default())
+        .unwrap();
+    let bytes = writer.into_inner().into_inner();
+    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        reader.read_image(1).unwrap().decode(),
+        ImageData::I64(vec![i64::MIN])
+    );
+
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer
+        .write_compressed_image(
+            &image,
+            Compression::Hcompress(Default::default()),
+            &CompressionOptions::tiled([1, 1]),
+        )
+        .unwrap();
+    let bytes = writer.into_inner().into_inner();
+    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        reader.read_image(1).unwrap().decode(),
+        ImageData::I64(vec![i64::MIN])
+    );
 }
 
 #[cfg(feature = "compression")]

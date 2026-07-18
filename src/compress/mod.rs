@@ -98,14 +98,16 @@ impl Default for Gzip {
 }
 
 /// Validated HCOMPRESS configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Hcompress {
-    pub(crate) scale: i32,
+    pub(crate) scale: f64,
 }
 
 impl Hcompress {
-    pub fn lossy(scale: i32) -> Result<Hcompress> {
-        if scale <= 0 {
+    /// Configure lossy HCOMPRESS with a positive finite multiplier of the
+    /// per-tile background-noise estimate (§10.4.4).
+    pub fn lossy(scale: f64) -> Result<Hcompress> {
+        if !scale.is_finite() || scale <= 0.0 {
             return Err(FitsError::InvalidValue {
                 card: format!("lossy HCOMPRESS scale {scale} must be positive"),
             });
@@ -116,7 +118,7 @@ impl Hcompress {
 
 /// Typed tiled-compression choice. Codec-specific configuration lives only on the
 /// variant that consumes it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Compression {
     Gzip(Gzip),
     Rice,
@@ -203,6 +205,20 @@ pub(crate) enum ImageCodec {
     NoCompress,
 }
 
+pub(crate) fn parameter_index(keyword: &str) -> Option<usize> {
+    let suffix = keyword.strip_prefix("ZNAME")?;
+    if suffix.is_empty()
+        || suffix.starts_with('0')
+        || !suffix.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    suffix
+        .parse::<usize>()
+        .ok()
+        .filter(|index| (1..=999).contains(index))
+}
+
 impl ImageCodec {
     fn parse(s: &str) -> Result<ImageCodec> {
         Ok(match s {
@@ -252,10 +268,10 @@ impl Compression {
         }
     }
 
-    pub(crate) fn hcompress_scale(self) -> i32 {
+    pub(crate) fn hcompress_scale(self) -> f64 {
         match self {
             Compression::Hcompress(config) => config.scale,
-            _ => 0,
+            _ => 0.0,
         }
     }
 }

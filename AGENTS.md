@@ -47,9 +47,11 @@ leap-second and ephemeris data. Tiled
 **image and table** compression
 work behind
 the `compression` feature: all five image codecs (`GZIP_1`, `GZIP_2`, `RICE_1`,
-`PLIO_1`, `HCOMPRESS_1` with `SMOOTH=1` decode), quantized-float read+write
-(`NO_DITHER`/`SUBTRACTIVE_DITHER_1`/`SUBTRACTIVE_DITHER_2`, `ZBLANK`/NaN), and §10.3
-fixed-width table compression. All tile (de)compression fans out across the rayon
+`PLIO_1`, `HCOMPRESS_1` with a signed 64-bit transform and `SMOOTH=1` decode),
+quantized-float read+write
+(`NO_DITHER`/`SUBTRACTIVE_DITHER_1`/`SUBTRACTIVE_DITHER_2`, `ZBLANK`/NaN),
+`NULL_PIXEL_MASK` restoration, and §10.3 fixed-width plus P/Q heap-array table
+compression. All tile (de)compression fans out across the rayon
 pool under the default-on `parallel` feature (a scalar fallback runs without it),
 which the codec benches measure at ~2.5–3× on decompress and ~4–6.5× on compress.
 The standard WCS algorithms are complete; convention-only `XPH` remains readable,
@@ -170,7 +172,7 @@ split out per the global rule; single-file modules keep the `.rs` suffix below.
 | `ascii/` | `TABLE` (ASCII) read: `TBCOLn`/Fortran `TFORMn` → `AsciiColumn`/nullable `AsciiColumnData` (preserves `TNULLn`) | read done (write in `writer/`) |
 | `groups/` | random-groups (§6) read: exact typed per-group parameter/array `RandomGroupView` plus `PSCALn`/`PZEROn` physical values | read done (no write — deprecated) |
 | `checksum.rs` | `DATASUM`/`CHECKSUM` ones'-complement accumulate + Appendix-J encode; verification distinguishes absent, unknown, valid, and invalid assertions | done |
-| `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3); `decode.rs` reassembles + dequantizes tiles into the image, `encode.rs` the integer + float encoders, `mod.rs` the typed `Compression`/`CompressionOptions` API, shared `ImageCodec` dispatch, and `P`→`Q` descriptor threshold (`needs_wide`); `geometry` handles N-d tiling; `convert` shares byte/`i64`/`f64` conversions; `map_tiles` fans independent codec work across rayon | all 5 image codecs read+write; float quant all 3 dither methods via validated shared options + `ZBLANK`; HCOMPRESS `SMOOTH=1` decode + typed lossy `SCALE>0` write; fixed-width table compression read+write; tile-parallel ((de)compress, image + table) |
+| `compress/` (feature `compression`) | tiled image+table (de)compress: `gzip`/`rice`/`plio`/`hcompress` codecs, `quantize` (float), `table` (§10.3); `decode.rs` reassembles + dequantizes tiles into the image, `encode.rs` the integer + float encoders, `mod.rs` the typed `Compression`/`CompressionOptions` API, shared `ImageCodec` dispatch, and `P`→`Q` descriptor threshold (`needs_wide`); `geometry` handles N-d tiling; `convert` shares byte/`i64`/`f64` conversions; `map_tiles` fans independent codec work across rayon | all 5 integer-image codecs read+write plus `NOCOMPRESS`; float quantization with all 3 dither methods, `ZBLANK`, and `NULL_PIXEL_MASK` restoration; signed-64-bit HCOMPRESS with `SMOOTH=1` decode + noise-scaled lossy write; fixed-width and P/Q VLA table compression read+write; tile-parallel ((de)compress, image + table) |
 | `wcs/` | typed WCS: keyword parse, declared celestial/spectral frame metadata, linear transform (PC/CD/CROTA + `PVi_m` + inverse), all 27 FITS 4.0 projections (including cube TSC/CSC/QSC and parameterized HPX) via general pole computation, every Table-26 spectral/detector algorithm, generic `LOG`, and BINTABLE-backed multidimensional `TAB`, with complete `pixel_to_world`/`world_to_pixel`; unsupported conventions remain readable and make complete transforms return `UnsupportedWcsTransform` | standard algorithms done (`XPH` convention and inter-frame transforms out of scope) |
 | `time/` | typed time (§9): `Datetime` (strict unsigned-four/signed-five ISO-8601 and same-frame JD/MJD), private numeric J/B epoch interpretation, preserved recognized/realized/local scale declarations, typed `TREFPOS`/`TRPOSn`, all PHASE keyword forms, fallible prefixed FITS time units, `FitsTime` header view + PC/CD-coupled time WCS axes with per-axis unit/scale overrides | done |
 | `error.rs` | `FitsError` + `Result` | done |

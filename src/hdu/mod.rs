@@ -131,13 +131,22 @@ pub(crate) fn data_extent(header: &Header, role: HduRole) -> Result<DataExtent> 
         HduRole::Extension => grouped_data_bytes(elem, array_elements(&axes)?, header)?,
         HduRole::RandomGroups => {
             validate_random_groups_axes(&axes)?;
-            grouped_data_bytes(elem, array_elements(&axes[1..])?, header)?
+            grouped_data_bytes(elem, random_groups_array_elements(&axes[1..])?, header)?
         }
     };
     Ok(DataExtent {
         data_bytes,
         padded_bytes: checked_padded_len(data_bytes).ok_or(FitsError::DataUnitOverflow)?,
     })
+}
+
+fn random_groups_array_elements(axes: &[usize]) -> Result<u64> {
+    if axes.contains(&0) {
+        return Ok(0);
+    }
+    axes.iter()
+        .try_fold(1u64, |product, &length| product.checked_mul(length as u64))
+        .ok_or(FitsError::DataUnitOverflow)
 }
 
 fn array_elements(axes: &[usize]) -> Result<u64> {
@@ -165,7 +174,7 @@ fn required_group_counts(header: &Header) -> Result<GroupCounts> {
     let gcount = header
         .get_integer("GCOUNT")?
         .ok_or(FitsError::MissingKeyword { name: "GCOUNT" })?;
-    if gcount < 1 {
+    if gcount < 0 {
         return Err(FitsError::KeywordOutOfRange { name: "GCOUNT" });
     }
     Ok(GroupCounts {

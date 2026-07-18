@@ -163,6 +163,7 @@ fn reads_jepoch_and_bepoch_keywords() {
 
 #[test]
 fn reads_bound_duration_and_error_keywords() {
+    use crate::error::FitsError;
     use crate::header::Header;
     let mut h = Header::new();
     h.set_internal("MJD-BEG", 58000.0);
@@ -190,6 +191,14 @@ fn reads_bound_duration_and_error_keywords() {
     h.set_internal("TIMESYS", 1)
         .set_internal("MJD-END", 58001.0);
     assert_eq!(FitsTime::bounds(&h).unwrap().end_mjd, Some(58001.0));
+
+    for invalid in [-f64::EPSILON, 1.0 + f64::EPSILON] {
+        h.set_internal("TIMEPIXR", invalid);
+        assert!(matches!(
+            FitsTime::bounds(&h),
+            Err(FitsError::KeywordOutOfRange { name: "TIMEPIXR" })
+        ));
+    }
 }
 
 #[test]

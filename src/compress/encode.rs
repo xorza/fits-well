@@ -57,26 +57,15 @@ pub(crate) fn compress_image(
     out: &mut Vec<u8>,
 ) -> Result<Header> {
     let total = validate_image(image)?;
+    let codec = compression.image_codec();
+    if codec == ImageCodec::Hcompress1 && image.shape.len() != 2 {
+        return Err(FitsError::UnsupportedCompression {
+            name: "HCOMPRESS_1 requires a two-dimensional image".to_string(),
+        });
+    }
     let bitpix = image.samples.bitpix();
     if bitpix.is_float() {
         return compress_float_image(image, compression, options, total, out);
-    }
-    let codec = compression.image_codec();
-    // RICE handles only 1/2/4-byte pixels (cfitsio parity); refuse the 64-bit path
-    // rather than silently corrupting. Table 37 lists BYTEPIX 8 as permitted, but
-    // neither this encoder nor the decoder implements the 64-bit bitstream.
-    if codec == ImageCodec::Rice1 && bitpix.elem_size() > 4 {
-        return Err(FitsError::UnsupportedCompression {
-            name: "RICE_1 with BYTEPIX > 4 (64-bit pixels)".to_string(),
-        });
-    }
-    // HCOMPRESS is a 32-bit transform; an I64 image would be silently truncated to
-    // i32 by the encoder. Refuse it rather than corrupt (I32 stays supported, with
-    // the documented "moderate values" caveat against H-transform overflow).
-    if codec == ImageCodec::Hcompress1 && bitpix.elem_size() > 4 {
-        return Err(FitsError::UnsupportedCompression {
-            name: "HCOMPRESS_1 with 64-bit pixels".to_string(),
-        });
     }
     let dims = &image.shape;
     let tiles = resolve_tile_shape(dims, &options.tile_shape)?;
@@ -115,12 +104,32 @@ pub(crate) fn compress_image(
             }
             ImageCodec::Rice1 => TileCell::Bytes(rice::rice_encode(vals, bytepix, 32, &mut s.rice)),
             ImageCodec::Plio1 => TileCell::I16(plio::plio_encode(vals)?),
-            ImageCodec::Hcompress1 => TileCell::Bytes(hcompress::hcompress_tile_encode(
-                vals,
-                &s.tile.tdims,
-                scale,
-                &mut s.hcompress,
-            )?),
+            ImageCodec::Hcompress1 => {
+                let tile_scale = hcompress_tile_scale(
+                    vals,
+                    &s.tile.tdims,
+                    scale,
+                    &mut s.floats,
+                    &mut s.quantize,
+                )?;
+                if tile_scale > 1
+                    && image
+                        .scaling
+                        .blank
+                        .is_some_and(|blank| vals.contains(&blank))
+                {
+                    return Err(FitsError::UnsupportedCompression {
+                        name: "lossy HCOMPRESS_1 with undefined pixels requires a null mask"
+                            .to_string(),
+                    });
+                }
+                TileCell::Bytes(hcompress::hcompress_tile_encode(
+                    vals,
+                    &s.tile.tdims,
+                    tile_scale,
+                    &mut s.hcompress,
+                )?)
+            }
             // §10.4: store the tile's raw big-endian pixels, uncompressed.
             ImageCodec::NoCompress => TileCell::Bytes(i64_to_be(vals, bitpix)),
         })
@@ -182,13 +191,35 @@ pub(crate) fn compress_image(
         }
         ImageCodec::Hcompress1 => {
             h.set_internal("ZNAME1", "SCALE")
-                .set_internal("ZVAL1", scale as i64);
-            h.set_internal("ZNAME2", "SMOOTH").set_internal("ZVAL2", 0);
+                .set_internal("ZVAL1", scale);
         }
         _ => {}
     }
     image.scaling.add_to_header(&mut h, bitpix)?;
     Ok(h)
+}
+
+fn hcompress_tile_scale(
+    values: &[i64],
+    dimensions: &[usize],
+    factor: f64,
+    floats: &mut Vec<f64>,
+    scratch: &mut quantize::QuantizeScratch,
+) -> Result<i32> {
+    if factor == 0.0 {
+        return Ok(0);
+    }
+    floats.clear();
+    floats.extend(values.iter().map(|&value| value as f64));
+    let nx = dimensions[0];
+    let ny = dimensions[1];
+    let absolute = (factor * quantize::noise3_estimate(floats, nx, ny, scratch)).round();
+    if absolute > i32::MAX as f64 {
+        return Err(FitsError::UnsupportedCompression {
+            name: "HCOMPRESS_1 tile scale exceeds the 32-bit stream range".to_string(),
+        });
+    }
+    Ok(absolute as i32)
 }
 
 /// One encoded float tile: its compressed bytes plus the per-tile dequantization
@@ -206,7 +237,7 @@ struct FloatTile {
 
 /// Encode a float [`Image`] as a quantized, tiled-compressed `BINTABLE`
 /// (`SUBTRACTIVE_DITHER_1`). Each tile is quantized to int32 with a per-tile
-/// `ZSCALE`/`ZZERO`, then compressed with `cmptype` (`GZIP_1`/`GZIP_2`/`RICE_1`);
+/// `ZSCALE`/`ZZERO`, then compressed with the selected lossless integer codec;
 /// a tile that can't be quantized (constant data) is stored as raw gzip'd floats
 /// in `GZIP_COMPRESSED_DATA`. The table has four columns: `COMPRESSED_DATA`,
 /// `GZIP_COMPRESSED_DATA`, `ZSCALE`, `ZZERO`.
@@ -220,7 +251,7 @@ fn compress_float_image(
     let codec = compression.image_codec();
     if !matches!(
         codec,
-        ImageCodec::Gzip1 | ImageCodec::Gzip2 | ImageCodec::Rice1
+        ImageCodec::Gzip1 | ImageCodec::Gzip2 | ImageCodec::Rice1 | ImageCodec::NoCompress
     ) {
         return Err(FitsError::UnsupportedCompression {
             name: format!("{} for float images (write)", compression.name()),
@@ -279,6 +310,10 @@ fn compress_float_image(
                             }
                             ImageCodec::Rice1 => {
                                 rice::rice_encode(&s.quantize.ints, 4, 32, &mut s.rice)
+                            }
+                            ImageCodec::NoCompress => {
+                                i32_to_be_into(&s.quantize.ints, &mut s.be);
+                                s.be.clone()
                             }
                             _ => unreachable!(),
                         };
@@ -388,9 +423,6 @@ fn compress_float_image(
         h.set_internal("ZNAME1", "BLOCKSIZE")
             .set_internal("ZVAL1", 32);
         h.set_internal("ZNAME2", "BYTEPIX").set_internal("ZVAL2", 4);
-    } else {
-        // Tell the decoder the quantized integers are 4 bytes wide.
-        h.set_internal("ZNAME1", "BYTEPIX").set_internal("ZVAL1", 4);
     }
     h.set_internal("ZQUANTIZ", dither_name(method));
     h.set_internal("ZDITHER0", zdither0);

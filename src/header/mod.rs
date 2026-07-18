@@ -205,10 +205,10 @@ impl Header {
         }
     }
 
-    /// `GCOUNT` (default 1), rejecting a value `< 1` (§4.4.1) — see [`Header::pcount`].
+    /// `GCOUNT` (default 1), rejecting a negative value (§4.4.1) — see [`Header::pcount`].
     pub(crate) fn gcount(&self) -> Result<u64> {
         match self.get_integer("GCOUNT")? {
-            Some(g) if g < 1 => Err(FitsError::KeywordOutOfRange { name: "GCOUNT" }),
+            Some(g) if g < 0 => Err(FitsError::KeywordOutOfRange { name: "GCOUNT" }),
             Some(g) => Ok(g as u64),
             None => Ok(1),
         }

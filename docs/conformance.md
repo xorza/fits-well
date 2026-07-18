@@ -1,19 +1,18 @@
-# FITS 4.0 Core Conformance
+# FITS 4.0 Conformance Audit
 
-Audit of the dependency-free core (`cargo test --no-default-features`) against
-the bundled normative FITS 4.0 text in
-[`refs/fits_standard40.md`](refs/fits_standard40.md). The reviewed core is the
-always-compiled surface: file/HDU structure, headers, checksums, images, ASCII and
-binary tables, random groups, WCS, time coordinates, reader, and writer (§§3–9).
-Tiled compression (§10) and `mmap` are outside this review.
+Audit of the implementation against the bundled normative FITS 4.0 text in
+[`refs/fits_standard40.md`](refs/fits_standard40.md). The dependency-free pass
+covers file/HDU structure, headers, checksums, images, ASCII and binary tables,
+random groups, WCS, time coordinates, reader, and writer (§§3–9). The default
+feature pass additionally covers tiled image and binary-table compression (§10).
+`mmap` changes the byte source, not the format interpretation.
 
 ## Conclusion
 
-The dependency-free core covers the normative FITS 4.0 structures and algorithms
-in §§3–9 within the deliberate boundaries below. Every remediation item found by
-this audit is complete and backed by exact regression fixtures. Tiled compression
-§10 is implemented and tested separately behind the default `compression`
-feature; it was not part of this dependency-free audit.
+The implementation covers the normative FITS 4.0 structures and algorithms in
+§§3–10 within the operational boundaries below. Every incorrect result or
+non-conforming writer path found by this audit has been remediated and backed by
+an exact regression.
 
 This conformance statement concerns format interpretation and serialization.
 Operational access features and registered conventions are tracked separately so
@@ -36,19 +35,20 @@ Severity used below:
 | §3 | File/HDU structure and blocking | Complete for core discovery and sizing: first-card roles, special records, the block grid, and primary/extension/random-groups boundaries are validated independently. |
 | §4 | Headers and integrity keywords | Complete for the core: normal/continued cards, fallible ordered construction, exact unbounded integers, and four-state checksum reporting. |
 | §5 | Data representation | Complete for core stored types: all `BITPIX` encodings, endian paths, unsigned conventions, and type/range-checked image scaling metadata serialize exactly. |
-| §6 / §7.1 | Primary arrays, IMAGE, random groups | Complete for read/write image arrays and typed random-groups reading; writing deprecated random groups is deliberately omitted. |
+| §6 / §7.1 | Primary arrays, IMAGE, random groups | Complete for read/write image arrays and typed random-groups reading, including the Eq. 4 empty product and nonnegative group counts; writing deprecated random groups is deliberately omitted. |
 | §7.2 | ASCII tables | Complete for core table structures: formats, scaling, distinct nullable raw cells, field-count limits, and fallible width-checked writing are covered. |
 | §7.3 | Binary tables | Complete for core table structures: all fixed kinds and P/Q reads and writes exist, including type-checked scaling/null metadata, character, physical numeric/complex, exact unsigned, jagged bit arrays, and the 999-field ceiling. |
 | §8 | WCS | Complete for standard algorithms: image and table keyword translation, all 27 celestial projections, every Table-26 spectral/detector algorithm, generic `LOG`, and BINTABLE-resolved multidimensional `TAB` coordinates are covered. Convention-only `XPH` remains explicitly unsupported. |
-| §9 | Time | Complete for FITS metadata interpretation: references, preserved recognized/realized/local scale declarations, positions, FITS units, strict year forms, same-frame JD/MJD, linear/`LOG`/resolved-`TAB` time-axis WCS evaluation, and all image/table PHASE metadata forms are covered. |
-| §10 | Tiled compression | Not assessed here; it is outside the dependency-free core. |
+| §9 | Time | Complete for FITS metadata interpretation: references, preserved recognized/realized/local scale declarations, positions, FITS units, strict year forms, same-frame JD/MJD, bounded `TIMEPIXR`, linear/`LOG`/resolved-`TAB` time-axis WCS evaluation, and all image/table PHASE metadata forms are covered. |
+| §10 | Tiled compression | Image and table compression are assessed: all standard codec names plus `NOCOMPRESS`, float quantization/dithering, null-mask restoration, P/Q descriptors, table VLAs, algorithm parameters, metadata restoration, and the signed 64-bit HCOMPRESS transform are covered. |
 
 ## Capability boundaries
 
 | Capability | Status |
 | --- | --- |
 | Normative FITS 4.0 §§3–9 | Covered by this audit |
-| Normative tiled compression §10 | Implemented behind `compression`; assessed by codec and external-reference tests |
+| Normative tiled compression §10 | Implemented behind `compression`; assessed by codec, handcrafted, CFITSIO, and exact round-trip fixtures |
+| HCOMPRESS numeric range | Signed 64-bit transform, `sumall`, and 63 coefficient bit planes; input whose transform cannot fit the stream's signed 64-bit field is rejected |
 | Registered conventions | Normative `CONTINUE` and `CHECKSUM`/`DATASUM` implemented; non-standard `HIERARCH` is retained as opaque commentary |
 | Partial access | N-D image sections and binary-table schema/cell/column/row/range reads |
 | Streaming | Lazy reader plus incremental seekable image output; tables retain transactional whole-HDU output |
@@ -115,6 +115,20 @@ Severity used below:
 
 - [x] **Keep header authoring standard-only.** Public mutation accepts only the standard eight-character keyword grammar. A non-standard `HIERARCH` input record remains available as opaque commentary under its literal keyword, but the core does not interpret or author the convention (`src/header/mod.rs`; registered convention notes in `docs/refs/08-conventions.md`).
 
+## Batch 5 — Compression and structural follow-up
+
+- [x] **Use the random-groups empty product and the standard nonnegative group-count domain.** Eq. 4 now treats `NAXIS = 1` as one array element per group before `PCOUNT`, while a present zero-length later axis still makes the array empty. Generic grouped HDUs accept `GCOUNT = 0`; negative counts remain errors, and the three standard extension types still enforce their mandated value of one (`docs/refs/fits_standard40.md:1930-1952`).
+
+- [x] **Implement every FITS 4.0 tiled-table payload form.** `NOCOMPRESS` works for fixed and variable columns. P/Q columns compress each heap vector separately, preserve `ZPCOUNT`/`ZTHEAP`, Gzip the combined descriptor block in the normative compressed-Q-then-original order, and restore the exact main table and heap locations. Reading also recognizes CFITSIO/fpack's historical reversed descriptor order. An external CFITSIO VLA fixture and all four table codecs are checked exactly, including an empty descriptor whose offset is intentionally undefined (`docs/refs/fits_standard40.md:5280-5470`).
+
+- [x] **Cover the standard compression parameters without emitting cross-codec metadata.** Rice accepts `BYTEPIX = 8` with exact 64-bit statistics and bit I/O; its odd final-block statistic has a bit-exact CFITSIO golden. Indexed parameter scans continue after omitted/defaulted indices, enforce Rice's permitted `BLOCKSIZE` and `BYTEPIX` domains, and apply Table 37's four-byte `BYTEPIX` default. Gzip and `NOCOMPRESS` float writers no longer emit Rice-only `BYTEPIX` cards. `ZDITHER0` is restricted to 1–10000. HCOMPRESS is restricted to two-dimensional images, writes real-valued `SCALE`, converts that multiplier to a per-tile absolute scale through the measured noise, and omits the obsolete zero-valued `SMOOTH` authoring parameter (`docs/refs/fits_standard40.md:4890-5240`, `:5480-5650`).
+
+- [x] **Implement the full signed 64-bit HCOMPRESS stream.** Forward and inverse transforms retain signed 64-bit coefficients, accept the stream's 64-bit `sumall` and up to 63 magnitude bit planes, and use wider checked intermediates so malformed or unrepresentable arithmetic cannot wrap. A 100×100 external golden that requires a `sumall` above `i32::MAX` and 35 bit planes matches byte-for-byte in both directions. The same regression exposed and fixed the odd-width/odd-height forward-transform corner index. Representable `BITPIX = 64` images now round-trip, while input whose transform cannot fit the stream field is rejected before output.
+
+- [x] **Restore compressed-image null pixels from the standard mask column.** `NULL_PIXEL_MASK` tiles decode through Gzip, Rice, PLIO, or `NOCOMPRESS`; exact binary mask values restore the image's integer `BLANK` sentinel or floating NaNs. Missing integer `BLANK`, invalid mask values, and lossy HCOMPRESS writes containing the declared sentinel are rejected instead of silently changing undefined pixels (`docs/refs/fits_standard40.md:5140-5205`).
+
+- [x] **Enforce bounded standard time fractions.** `TIMEPIXR` defaults to 0.5 and rejects values outside the required inclusive 0–1 interval (`docs/refs/fits_standard40.md:4430-4450`).
+
 ## Confirmed coverage
 
 The audit found no missing core on-disk image `BITPIX` kind, ASCII format,
@@ -157,14 +171,28 @@ following foundations are substantively correct for conforming inputs:
 ## Verification baseline
 
 ```text
-env CARGO_TARGET_DIR=.tmp/target cargo test --no-default-features
-  294 unit tests passed
+env CARGO_TARGET_DIR=.tmp/target cargo test -p fits-well
+  360 unit tests passed, 2 fixture emitters ignored
   1 public-API integration test passed
   6 doc-tests passed, 1 ignored
-env CARGO_TARGET_DIR=.tmp/target cargo clippy --all-targets --no-default-features -- -D warnings
-  clean
+env CARGO_TARGET_DIR=.tmp/target cargo test -p fits-well --no-default-features
+  296 unit tests passed
+  1 public-API integration test passed
+  6 doc-tests passed, 1 ignored
+env CARGO_TARGET_DIR=.tmp/target cargo test -p fits-well --no-default-features --features compression
+  358 unit tests passed, 2 fixture emitters ignored
+  1 public-API integration test passed
+  6 doc-tests passed, 1 ignored
+cargo fmt --all -- --check
+env CARGO_TARGET_DIR=.tmp/target cargo check -p fits-well
+env CARGO_TARGET_DIR=.tmp/target cargo clippy -p fits-well --all-targets -- -D warnings
+env CARGO_TARGET_DIR=.tmp/target cargo clippy -p fits-well --all-targets --no-default-features -- -D warnings
+env CARGO_TARGET_DIR=.tmp/target cargo clippy -p fits-well --all-targets --no-default-features --features compression -- -D warnings
+env CARGO_TARGET_DIR=.tmp/target cargo clippy -p fits-well --all-targets --features mmap -- -D warnings
+env CARGO_TARGET_DIR=.tmp/target cargo clippy -p fits-well --all-targets --features internals -- -D warnings
+  all clean
 ```
 
-This baseline is healthy and fast, but it does not cover the concrete standard
-cases listed above; each checklist item includes the regression boundary needed
-before it can be marked complete.
+The default, dependency-free core, serial compression fallback, memory-mapped
+source, and internal benchmark surfaces therefore compile against the same
+audited behavior.
