@@ -8,9 +8,9 @@ type — unsigned values are encoded via a `BZERO` offset (see §3.5 below). The
 
 ## 3.1 BITPIX — array element type (Table 8)
 
-`BITPIX` selects the physical type of every element of an array (primary array,
-IMAGE extension, or the data of a binary-table cell after `TFORM` decoding maps
-to one of these encodings).
+`BITPIX` selects the stored representation of every element of a primary array,
+IMAGE extension, or random-groups record. Binary-table column types are selected
+independently by `TFORMn`; a BINTABLE itself always has `BITPIX = 8`.
 
 | `BITPIX` | Data represented |
 |---------:|------------------|
@@ -43,9 +43,10 @@ ASCII-table fields, and the `A`-format character columns of binary tables.
 - `-32` ⇒ binary32, `-64` ⇒ binary64, big-endian byte order.
 - **NaN** represents an undefined/blank float pixel (there is no `BLANK` for
   floats — `BLANK` applies only to integer arrays).
-- The full IEEE set of number forms is allowed, including all special values.
-  ±Inf and signaling/quiet NaNs are permitted and must be preserved on
-  round-trip — do not canonicalize NaN payloads or the quiet/signaling bit.
+- The full IEEE set of number forms is recognized, including denormalized values,
+  signed zero, infinities, and signaling/quiet NaNs. The Standard does not assign
+  meaning to a NaN payload or require a decoded-and-reencoded NaN to retain its
+  payload. A byte-preserving raw round-trip naturally retains every bit.
 - Use of `BSCALE`/`BZERO` with float arrays is *not recommended* (§5.3); they
   exist for integer storage. Decoders must still honor them if present.
 - Canonical special-value byte patterns are tabulated in the standard's
@@ -88,13 +89,16 @@ strings or numeric offsets in a stated time scale (`TIMESYS`, e.g. `UTC`, `TT`,
 
 ## Implementation notes (this library)
 
-- Decode is: read big-endian raw element → (optionally subtract `BLANK` sentinel)
+- Decode is: read big-endian raw element → compare with the optional `BLANK` sentinel
   → apply `BZERO + BSCALE×x`. Keep raw and physical paths separate so callers can
   opt out of scaling (zero-copy raw access for the common `BSCALE=1, BZERO=0`).
 - Fast path: when `BSCALE == 1.0 && BZERO == 0.0` and host is little-endian, the
-  whole decode is a byte-swap (`u16::swap_bytes` / SIMD `bswap`) with no FP math.
+  whole decode is a byte-swap with no floating-point math. Reuse caller-owned
+  aligned output storage: allocation and page faults dominate repeated reads.
 - Unsigned detection: `BITPIX` integer + `BZERO == 2^(n-1)` + `BSCALE == 1` ⇒
   expose as `uN`. Encode is the inverse (subtract `BZERO`, store signed).
 - Represent blanks: integer `BLANK` → `Option`/mask; float NaN → propagate NaN.
-- Big-endian I/O on x86/ARM is a `bswap`; provide a SIMD bulk-swap and let
-  big-endian hosts (rare) skip it via `cfg(target_endian)`.
+- Big-endian I/O on a little-endian host needs a swap; matching-endian hosts can
+  borrow directly. Measured explicit-SIMD, cache-blocked, and threaded swap loops
+  are slower here because transformed stores are write-allocate bound, so keep
+  this path serial and optimize buffer reuse.

@@ -1,4 +1,4 @@
-# 8. Common Conventions: CONTINUE, CHECKSUM/DATASUM, HIERARCH
+# 8. Standardized and Common Conventions
 
 Beyond the mandatory format, real-world FITS files lean on a handful of widely
 deployed conventions. They differ in normative status — know which is which:
@@ -7,10 +7,13 @@ deployed conventions. They differ in normative status — know which is which:
 |------------|--------|-------|
 | `CONTINUE` long strings | **Normative** — part of the Standard | §4.2.1.2 |
 | `CHECKSUM` / `DATASUM` | Reserved **keywords** are normative; the *algorithm* is informational | §4.4.2.7 + Appendix J |
+| `INHERIT` | Reserved **keyword** is normative; merge procedure is informational | §4.4.2.6 + Appendix K |
+| Green Bank keyword/column mapping | Informational, not part of the Standard | Appendix L |
 | `HIERARCH` | **Not** in the Standard — a registered (ESO) convention | Conventions Registry |
 
-A library that "supports the whole standard" must read all three (they appear
-constantly in archive data) and should write `CONTINUE` and `CHECKSUM`/`DATASUM`.
+A whole-standard implementation must honor `CONTINUE` and the defined integrity
+and `INHERIT` keyword semantics. Green Bank and `HIERARCH` support improves
+archive interoperability but is not required for FITS 4.0 conformance.
 
 ---
 
@@ -50,6 +53,10 @@ records form one continued comment field. A reader that does not implement the
 convention still parses the first record as an ordinary (truncated) string and
 sees the rest as `CONTINUE` commentary keywords — so the file stays readable.
 
+If the following record is not a conforming `CONTINUE`, the terminal `&` is a
+literal character. An orphaned `CONTINUE` does not invalidate the FITS file and
+should be interpreted as commentary in bytes 9–80.
+
 ### Restriction
 
 `CONTINUE` must **not** be applied to any mandatory or reserved keyword unless
@@ -73,18 +80,24 @@ sum with end-around carry.
 - Value: a **character string** holding the unsigned-integer (decimal) value of
   the 32-bit one's-complement checksum of the **data records only** (header
   excluded).
-- `'0'` when the HDU has no data unit; may be omitted in that case.
+- Prefer `'0'` when the HDU has no data records; the keyword may be omitted in
+  that case.
+- A string of one or more spaces represents an unknown/undefined checksum.
+  Leading/trailing spaces and leading zeros around a decimal value are
+  non-significant.
 - Must be updated **before** `CHECKSUM`.
 
 ### `CHECKSUM`
 
-- Value: a **16-character ASCII string**, written in **fixed format** — opening
-  quote in **column 11**, closing quote in **column 28** (placement affects the
-  result, so it is fixed).
-- It is constructed so that the one's-complement checksum accumulated over the
+- Normatively, the value is an ASCII string constructed so that the
+  one's-complement checksum accumulated over the
   **entire HDU** (header *and* data, including the `CHECKSUM` record itself)
   equals **negative zero** (all 32 bits set). Verification is therefore: sum the
   whole HDU; a valid HDU yields `0xFFFFFFFF`.
+- The recommended Appendix-J encoding is a **16-character ASCII string** with the
+  opening quote in **column 11** and closing quote in **column 28**. Fixed format
+  is mandatory when that algorithm is used and recommended otherwise.
+- A string of one or more spaces represents an unknown/undefined value.
 
 ### Procedure (Appendix J.1)
 
@@ -97,16 +110,58 @@ sum with end-around carry.
 5. ASCII-encode the complement into 16 characters (Appendix J.2): the four bytes
    of the complement are spread over 16 bytes offset from ASCII `'0'` (0x30), with
    a punctuation-avoiding fix-up so every output character is alphanumeric
-   (`0–9`, `A–Z`, `a–z`).
+   (`0–9`, `A–Z`, `a–z`), then cyclically shift the string one character to the
+   right to align it with the four-byte words in the keyword record.
 6. Replace the placeholder with the encoded string. The HDU checksum is now −0.
 
 If every HDU carries valid keywords, the checksum over the **whole file** is also
 −0. Both keywords apply only to their own HDU. Incremental update is possible
 (Appendix J.4) without rescanning unchanged records.
+The two keywords normally appear together but are independently optional. A
+mismatch strongly indicates that content changed after calculation; it does not
+by itself distinguish corruption from a later intentional edit.
 
 ---
 
-## 8.3 HIERARCH — hierarchical / long keyword names (registered, non-standard)
+## 8.3 INHERIT — primary-header inheritance (§4.4.2.6, Appendix K)
+
+`INHERIT` is an optional reserved logical keyword in an **extension** header. If
+present, it must immediately follow that extension's mandatory keyword sequence.
+It must not occur in the primary header. The detailed merge convention in
+Appendix K is explicitly informational.
+
+- `INHERIT = T`: an aware reader should merge applicable primary-header metadata
+  into the current extension; an extension occurrence of the same keyword wins.
+- `INHERIT = F`: primary keywords should not be inherited.
+- Use inheritance only with a null primary array (`NAXIS = 0`) to avoid ambiguity
+  from array-specific metadata.
+- Primary mandatory array records (`BITPIX`, `NAXIS`, `NAXISn`), `COMMENT`,
+  `HISTORY`, and blank records are never inherited. Table-specific and
+  table-WCS keywords cannot be inherited because they do not belong in a primary
+  header.
+- The exact merge is application-defined. A writer that changes an inherited
+  value while processing one extension should add the changed value to that
+  extension and leave the primary value alone.
+
+## 8.4 Green Bank keyword/column mapping (Appendix L)
+
+Appendix L is informational, not part of the Standard. The convention expands a
+header keyword into a BINTABLE column of the same name when its value varies by
+row, or collapses a constant column into one header keyword.
+
+- A keyword should not coexist with a same-named column; if it does, the column
+  takes precedence.
+- A column may collapse only when `TTYPEn` is a valid FITS keyword name and its
+  constant value is representable as a valid keyword value.
+- Structural/identity and column-definition records are excluded, including
+  `XTENSION`, `BITPIX`, `NAXIS*`, `PCOUNT`, `GCOUNT`, `TFIELDS`, `EXTNAME`,
+  `EXTVER`, `EXTLEVEL`, `TTYPEn`, `TFORMn`, `TUNITn`, `TSCALn`, `TZEROn`,
+  `TNULLn`, `TDISPn`, `THEAP`, `TDIMn`, `DATE`, `ORIGIN`, commentary,
+  `CONTINUE`, and `END`.
+- A reader must look for a requested keyword among `TTYPEn` values and treat a
+  collapsed header keyword as a constant value for every requested row.
+
+## 8.5 HIERARCH — hierarchical / long keyword names (registered, non-standard)
 
 The Standard limits keyword names to **8 characters** drawn from
 `[A-Z0-9_-]`. The **ESO HIERARCH** convention (in the FITS Conventions Registry,
@@ -124,10 +179,10 @@ HIERARCH ESO DET CHIP1 NAME = 'CCD-44' / detector chip name
 
 - Bytes 1–8 hold the literal keyword name `HIERARCH` (itself a valid 8-char FITS
   keyword), followed by a space.
-- The effective keyword is the run of space-separated **tokens** between
-  `HIERARCH ` and the `=` value indicator. This admits names longer than 8 chars,
-  a namespace hierarchy, and a wider character set (printable ASCII except `=`;
-  tokens are conventionally upper-case but mixed case occurs).
+- The effective keyword is the convention-defined text between `HIERARCH ` and
+  the `=` value indicator. This admits names longer than eight characters and a
+  namespace hierarchy. Exact permitted spelling and normalization belong to the
+  registered ESO convention, not FITS 4.0.
 - Everything after `=` follows normal FITS value/comment syntax (§4.2).
 
 ### Reading / interoperability
@@ -158,5 +213,8 @@ HIERARCH ESO DET CHIP1 NAME = 'CCD-44' / detector chip name
 - **HIERARCH**: retain a record as opaque no-value commentary under the literal
   `HIERARCH` keyword. The core neither interprets its compound namespace nor
   authors the convention because it is not part of the Standard.
-- See the full **Registry of FITS Conventions** for these and others (Green Bank,
-  column-oriented, inheritance): <https://fits.gsfc.nasa.gov/fits_registry.html>.
+- **INHERIT / Green Bank**: preserve the records. Do not silently merge metadata
+  in the structural parser; expose convention-aware resolution as an explicit
+  semantic operation so callers can distinguish physical from inherited values.
+- See the full **Registry of FITS Conventions** for `HIERARCH` and other
+  non-standard conventions: <https://fits.gsfc.nasa.gov/fits_registry.html>.

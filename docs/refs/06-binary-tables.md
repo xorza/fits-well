@@ -9,11 +9,14 @@ lives.
 
 - Main data table: `NAXIS2` rows, each `NAXIS1` bytes (`BITPIX = 8`, `NAXIS = 2`).
 - Row width `NAXIS1 = Σ_n (r_n × b_n)` over the `TFIELDS` columns, where `r_n` is
-  the repeat count and `b_n` the element size of column n's `TFORMn`.
+  the repeat count and `b_n` the element size of column n's `TFORMn` (`X` uses
+  `ceil(r/8)`). Fields occur contiguously in increasing column order with no
+  gaps, padding, or word-alignment requirement.
 - After the main table comes the **heap** (variable-length array storage),
   optionally offset by `THEAP` from the start of the data unit.
 - `PCOUNT` = size of the supplemental data area (gap + heap), in bytes. `GCOUNT = 1`.
 - All numeric data big-endian; same encodings as [§5](03-data-representation.md).
+- The last block after the supplemental area's last byte is filled with zero bits.
 
 ## 6.2 Mandatory keywords (Table 17, in order)
 
@@ -30,6 +33,11 @@ lives.
 | `TFORMn` | n = 1…TFIELDS, format of column n |
 | `END` | — |
 
+The first eight records, from `XTENSION` through `TFIELDS`, must be consecutive
+and in exactly that order. `TFORMn` is then required for every column but is not
+part of that fixed prefix; `TTYPEn` is optional but strongly recommended.
+`NAXIS1`, `NAXIS2`, and `PCOUNT` are non-negative; `TFIELDS` is 0–999.
+
 ## 6.3 `TFORMn` data types (Table 18)
 
 Format is `rTa`: optional **repeat count** `r` (non-negative integer, default 1),
@@ -37,7 +45,7 @@ a single **type code** `T`, and optional trailing chars `a` (undefined by spec).
 
 | Code | Description | Bytes/elem |
 |:----:|-------------|:----------:|
-| `L` | Logical (`T`/`F`/`0`) | 1 |
+| `L` | Logical (ASCII `T`, ASCII `F`, or NUL byte `0x00`) | 1 |
 | `X` | Bit | ⌈bits/8⌉ † |
 | `B` | Unsigned byte | 1 |
 | `I` | 16-bit integer | 2 |
@@ -58,11 +66,18 @@ a single **type code** `T`, and optional trailing chars `a` (undefined by spec).
 - `r = 0` is allowed (empty cell). Repeat `r` applies element-wise for numerics.
 - `P`/`Q` (array-descriptor) columns permit **only** repeat count 0 or 1 — a cell
   holds at most one descriptor.
+- In an `X` cell, bits are MSB-first. Unused low-order bits in its final byte
+  must be zero; bit arrays have no null representation.
+- In `C`/`M`, each real component precedes its imaginary component. If either is
+  NaN, the complete complex element is null.
 
 ## 6.4 Scaling & nulls
 
 - Physical value: `physical = TZEROn + TSCALn × stored` (Eq. 7).
   Must **not** be applied to `A`, `L`, `X` columns.
+- For complex `C`/`M`, `TSCALn` has zero imaginary part and scales both stored
+  components, while `TZEROn` has zero imaginary part and offsets only the real
+  component: `(TZERO + TSCAL×re) + i(TSCAL×im)`.
 - For `P`/`Q`, scaling applies to heap array values, not the descriptor.
 - **Unsigned integers** (Table 19): `TSCALn = 1` plus `TZEROn` =
 
@@ -74,11 +89,11 @@ a single **type code** `T`, and optional trailing chars `a` (undefined by spec).
   | `K` | signed | unsigned 64-bit | `9223372036854775808` (2⁶³) |
 
 - `TNULLn` = the **raw stored** integer denoting undefined, for `B`/`I`/`J`/`K`
-  columns (and `P`/`Q` descriptors pointing to integer arrays); forbidden on other
-  types. It is matched against the stored value **before** Eq. 7, not the physical
-  value — e.g. an unsigned-16 column (`TZEROn = 32768`) whose physical-0 means
-  undefined needs `TNULLn = -32768`. Float/complex columns use IEEE NaN instead (no
-  `TNULLn`).
+  columns and for integer array elements pointed to by `P`/`Q`; it does not null
+  the descriptor itself and is forbidden on other types. It is matched before
+  Eq. 7, not against the physical value — e.g. an unsigned-16 column
+  (`TZEROn = 32768`) whose physical zero means undefined needs
+  `TNULLn = -32768`. Float/complex columns use IEEE NaN instead.
 
 ## 6.5 Multidimensional cells — `TDIMn`
 
@@ -98,14 +113,17 @@ actual data in the heap.
   two 64-bit **signed** ints for `Q`. `byte_offset` is zero-indexed from the start
   of the heap. (Repeat count on the column itself is 0 or 1 only — see §6.3.)
 - `TFORMn = 'rPt(emax)'` / `'rQt(emax)'`: `t` is the element type code (any type but
-  `P`/`Q`), `emax` is the maximum element count across rows (guideline, aids
-  preallocation); extra trailing chars after `(emax)` are allowed.
+  `P`/`Q`). The parenthesized `emax` may be omitted; when present it is guaranteed
+  to be at least the maximum element count actually stored in any row (it aids
+  preallocation but imposes no additional storage limit). Extra trailing chars
+  after `(emax)` are allowed.
 - Heap begins `THEAP` bytes from the start of the data unit (default *and minimum* =
   end of the main table, `NAXIS1 × NAXIS2`); a larger `THEAP` leaves a gap before
   the heap. `PCOUNT` counts gap + heap. `THEAP` must not appear when `PCOUNT = 0`.
-- Zero-length array (`nelem = 0`): no heap data, `byte_offset` is undefined (write
-  0). The referenced span `byte_offset + nelem×bytes` must lie entirely within the
-  heap; negative descriptor values are undefined.
+- Zero-length array (`nelem = 0`): no heap data, `byte_offset` is undefined and
+  should be written as 0. Negative values have undefined meaning; negative
+  offsets are expressly forbidden. Storage is contiguous and every non-empty
+  referenced span must lie entirely within the heap.
 - Guidelines (§7.3.6): heap data may be stored in any row order, with gaps, and with
   pointer aliasing (two descriptors → one span); readers must assume none of these,
   and no element alignment is guaranteed.
@@ -118,11 +136,16 @@ actual data in the heap.
 `TLMINn`/`TLMAXn` (legal value range, e.g. histogram bounds), plus
 `EXTNAME`/`EXTVER`/`EXTLEVEL`, `AUTHOR`, `REFERENC`. All §4.4.2 reserved keywords
 apply here **except** `EXTEND` and `BLOCKED`.
+Undefined entries and IEEE special values are excluded from actual
+`TDMINn`/`TDMAXn` extrema.
 
 `TDISPn` display formats (Table 20) are Fortran-style: `Aw` `Lw` `Iw.m` `Bw.m`
 `Ow.m` `Zw.m` `Fw.d` `Ew.dEe` `ENw.d` `ESw.d` `Gw.dEe` `Dw.dEe` — the ASCII-table
 codes plus binary/octal/hex (`B`/`O`/`Z`) and logical (`L`). Display-only metadata;
-the scaled physical value (Eq. 7) is what gets formatted.
+the scaled physical value (Eq. 7) is what gets formatted. Every byte of an `X`
+or `B` array is treated as unsigned for display; `P`/`Q` formats describe the
+pointed-to data, not the descriptor. Complex real and imaginary parts use the
+same real format and should be comma-separated in parentheses.
 
 ## Implementation notes (this library)
 
@@ -131,8 +154,10 @@ the scaled physical value (Eq. 7) is what gets formatted.
 - **Column-oriented reads**: striding by `NAXIS1` to gather one column is
   cache-unfriendly; for analytic workloads provide a transpose/columnar
   materialization, and SIMD-gather where strides allow. Row reads are contiguous.
-- Endian swap + `TSCAL/TZERO` is vectorizable per column; fast path when
-  `TSCALn==1 && TZEROn==0` and types match host (raw slice).
+- Endian swap + `TSCAL/TZERO` has a raw fast path when
+  `TSCALn==1 && TZEROn==0` and types match host. Scaling and swapping are
+  memory-bound; reuse destination buffers instead of assuming SIMD or threading
+  will improve them.
 - Unsigned detection mirrors images: integer `TFORM` + `TZEROn == 2^(n-1)` +
   `TSCALn == 1` ⇒ expose exact `uN` values through `unsigned` or, for P/Q heap
   arrays, one jagged `UnsignedData` per row through `vla_unsigned`.

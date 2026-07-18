@@ -33,6 +33,12 @@ prefer BINTABLE for new data. Data unit is padded with **spaces** (0x20), not NU
 | `TFORMn` | n = 1…TFIELDS, Fortran format of column n |
 | `END` | — |
 
+The first eight records, from `XTENSION` through `TFIELDS`, must be consecutive
+and in exactly that order. `TBCOLn` and `TFORMn` are required for every field,
+but occur later among the remaining header records rather than extending that
+fixed positional prefix. `TTYPEn` is optional but strongly recommended.
+`NAXIS1` and `NAXIS2` are non-negative and `TFIELDS` is 0–999.
+
 ## 5.3 `TFORMn` formats (Table 15)
 
 Fortran-style format codes:
@@ -52,9 +58,20 @@ Fortran-style format codes:
   octal, and hexadecimal are not permitted (§7.2.1).
 - `F`, `E`, and `D` parse **identically**; the string content alone determines the
   value. `D` only hints the column needs more than 32-bit precision (Appendix E).
-- Numbers may carry sign and exponent. Real fields *should* contain an explicit
-  decimal point — implicit decimal points (the `d` is assumed) are permitted but
-  deprecated. An undefined entry is the field matching `TNULLn`.
+- Character entries may contain only printable ASCII 32–126. Integer entries
+  contain optional leading/trailing spaces, one optional sign, and contiguous
+  decimal digits; embedded spaces are forbidden.
+- A real entry is right-justified after trailing spaces are discarded. It
+  contains one optional sign and a decimal digit string with at most one decimal
+  point. An exponent may start directly with `+`/`-`, or with upper-case `E`/`D`
+  followed by an optional sign. Embedded spaces and all other characters are
+  forbidden.
+- Real fields *should* contain an explicit decimal point. If absent, the point is
+  implicitly placed before the rightmost `d` digits; this form is deprecated.
+  A blank numeric field reads as zero. An undefined entry is instead the field
+  matching `TNULLn`.
+- The Standard sets no precision or numeric-range limit, though an implementation
+  may necessarily support a finite range.
 
 ## 5.4 Reserved keywords (§7.2.2)
 
@@ -68,12 +85,15 @@ In addition to the §4.4.2 reserved keywords (except `EXTEND` and `BLOCKED`):
 - `TNULLn` — character string marking an undefined value in column n (a string,
   not an integer as in BINTABLE); implicitly space-filled to the field width.
 - `TDISPn` — suggested display format (Table 16; e.g. `Iw.m`, `Bw.m`, `Ew.dEe`,
-  `ENw.d`, `Gw.dEe`), overriding the default implied by `TFORMn`.
+  `ENw.d`, `ESw.d`, `Gw.dEe`, `Dw.dEe`), overriding the default implied by
+  `TFORMn`. The format code is upper-case.
 - `TDMINn`/`TDMAXn` — actual minimum/maximum physical value present in column n.
 - `TLMINn`/`TLMAXn` — minimum/maximum *legal* (meaningful) physical value for
   column n (common when constructing histograms).
 
 Plus `EXTNAME`/`EXTVER`/`EXTLEVEL`, `AUTHOR`, `REFERENC` from §4.4.2.
+Undefined entries are excluded from actual `TDMINn`/`TDMAXn` extrema; the ASCII
+field grammar has no NaN or infinity token.
 
 ## Implementation notes (this library)
 

@@ -1,8 +1,8 @@
 # 1. File Organization (Standard §3)
 
 A FITS file is a sequence of one or more **Header/Data Units (HDUs)**, each
-laid out on a strict 2880-byte grid. Everything is big-endian and built from
-ASCII-text headers followed by optional binary data. In order (§3.1): the
+laid out on a strict 2880-byte grid. Headers use restricted ASCII; multibyte
+binary values in data units are most-significant-byte first. In order (§3.1): the
 **primary HDU**, then zero or more **conforming extensions**, then optional
 **special records**. A primary-only file is a *Single Image FITS* (SIF); one
 with extensions, a *Multi-Extension FITS* (MEF).
@@ -42,7 +42,9 @@ The fundamental unit of layout is the **logical record / block = 2880 bytes**
 - The **first** HDU is the **Primary HDU** (a.k.a. primary array). Its header
   begins with `SIMPLE = T`.
 - Subsequent HDUs are **extensions**; their headers begin with `XTENSION = '...'`.
-- A data unit may be empty (`NAXIS = 0`, or all axes present but size 0).
+- A data unit may be empty (`NAXIS = 0`, or any declared axis has length 0).
+  The exception is random groups, where `NAXIS1 = 0` is a signature and later
+  non-zero axes may still describe data.
 
 ## 1.3 Primary HDU (§3.3)
 
@@ -52,7 +54,9 @@ The fundamental unit of layout is the **logical record / block = 2880 bytes**
   permitted but means the file departs from the Standard in unspecified ways.
 - The primary data array, if present, is a single contiguous array of **1 to 999
   axes** (`NAXIS`), stored in Fortran order — Axis 1 varies fastest (§3.3.2).
-- `EXTEND = T` is a (reserved, advisory) flag that extensions *may* follow.
+- `EXTEND = T` is a reserved advisory flag that extensions may follow. Its
+  absence does **not** imply that extensions are absent, and FITS 4.0 no longer
+  requires it even when extensions are present.
 
 ## 1.4 Extensions (§3.4)
 
@@ -82,9 +86,10 @@ fully specified in §7; other conforming types exist but are outside this Standa
 | … | (other keywords) |
 | last | `END` |
 
-- `PCOUNT`: 0 for IMAGE/TABLE; = heap byte count for BINTABLE; = parameter count
-  for random groups.
-- `GCOUNT`: 1 for IMAGE/TABLE/BINTABLE; = number of groups for random groups.
+- `PCOUNT`: 0 for IMAGE/TABLE; supplemental-data byte count (gap plus heap) for
+  BINTABLE. In the separate primary-HDU random-groups format it is the parameter
+  count per group.
+- `GCOUNT`: 1 for IMAGE/TABLE/BINTABLE. In random groups it is the group count.
 - The keywords above are **ordered and mandatory**; no other keyword may
   intervene between `XTENSION` and `GCOUNT` (§4.4.1.2).
 
@@ -128,7 +133,8 @@ and `GCOUNT = 1`, so it reduces to Eq. 1. **Random groups skip `NAXIS1`** (the
 zero sentinel) and need Eq. 4 — applying Eq. 2 verbatim would wrongly zero the
 array term.
 
-Data-unit byte length = `ceil(Nbits / 8 / 2880) × 2880`.
+Data-unit byte length = `ceil(Nbits / (8 × 2880)) × 2880`. When the unpadded
+size is zero, no data block follows.
 
 ## 1.7 Restrictions on changes (§3.7)
 
