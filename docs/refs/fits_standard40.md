@@ -1,6 +1,20 @@
-# **Definition of the Flexible Image Transport System** **( FITS )**
+# **Definition of the Flexible Image Transport System (FITS)**
 
-> Verbatim conversion of the **FITS 4.0 Standard** (`fits_standard40.pdf`, IAU FITS Working Group, 13 Aug 2018) from PDF to markdown via PyMuPDF. Headings, the table of contents below, and blank-line tidying were reconstructed mechanically; body text, tables, and equations are as extracted. For curated, implementation-oriented notes see [`README.md`](README.md). The PDF remains the normative source.
+> Text conversion of the **FITS 4.0 Standard** (`fits_standard40.pdf`, IAU FITS Working Group, 13 Aug 2018), audited against the PDF text layer. Headings, navigation, tables, equations, and vector figures are represented in Markdown rather than preserving the PDF's typeset layout. Page furniture, the typeset contents pages, the list of tables, and vector rules are not duplicated. For curated, implementation-oriented notes see [`README.md`](README.md). The PDF remains the normative source.
+
+**The FITS Standard**
+
+Version 4.0: updated 2016 July 22 by the IAUFWG<br>
+Original document publication date: 2016 July 22<br>
+Language-edited document publication date: 2018 August 13
+
+FITS Working Group [1]<br>
+Commission 5: Documentation and Astronomical Data [2]<br>
+International Astronomical Union<br>
+[http://fits.gsfc.nasa.gov/iaufwg/](http://fits.gsfc.nasa.gov/iaufwg/)
+
+[1] To be absorbed in Data Representation Working Group under new Commission B2.<br>
+[2] Now Commission B2 Data and Documentation.
 
 ## Contents
 
@@ -100,7 +114,7 @@ Astronomical Union (IAU) for the interchange of astronomical
 data (IAU 1983). It is fully consistent with all actions and endorsements of the IAU _FITS_ Working Group (IAUFWG), which
 was appointed by Commission 5 of the IAU to oversee further
 development of the _FITS_ format. In particular, this standard defines the organization and content of the header and data units for
-all standard _FITS_ data structures: the primary array, the randomgroups structure, the image extension, the ASCII-table extension, and the binary-table extension. It also specifies minimum
+all standard _FITS_ data structures: the primary array, the random-groups structure, the image extension, the ASCII-table extension, and the binary-table extension. It also specifies minimum
 structural requirements and general principles governing the creation of new extensions. For headers, it specifies the proper syntax for keyword records and defines required and reserved keywords. For data, it specifies character- and numeric-value representations and the ordering of contents within the byte stream.
 One important feature of the _FITS_ format is that its structure, down to the bit level, is completely specified in documents
 (such as this standard), many of which have been published in
@@ -173,7 +187,6 @@ Registry was intended as a repository of documentation of usages, which, althoug
 are otherwise perfectly legal usages of _FITS_ . In 2014 a small
 team was formed to evaluate the possible incorporation of some
 
-1
 
 Table 1: Significant milestones in the development of _FITS_ .
 
@@ -241,7 +254,6 @@ The latest version of the Standard, as well as other information about the _FITS
 [Support Office website at http://fits.gsfc.nasa.gov. This](http://fits.gsfc.nasa.gov)
 website also contains the contact information for the Chairman
 
-2
 
 of the IAUFWG, to whom any questions or comments regarding
 this Standard should be addressed.
@@ -319,8 +331,7 @@ the elements in a rectilinear, _n_ -dimensional matrix (1 ≤ _n_ ≤
 without the application of the associated linear transformation to derive the physical value.
 **ASCII** American National Standard Code for Information
 Interchange.
-**ASCII character** Any member of the seven-bit ASCII charac
-ter set.
+**ASCII character** Any member of the seven-bit ASCII character set.
 **ASCII digit** One of the ten ASCII characters ‘0’ through ‘9’,
 which are represented by decimal character codes 48 through
 57 (hexadecimal 30 through 39).
@@ -333,7 +344,7 @@ zero.
 through 126 (hexadecimal 20 through 7E).
 **Basic** _**FITS**_ The _FITS_ structure consisting of the primary
 header followed by a single primary data array. This is also
-known as Single Image _FITS_ (SIF), as opposed to MultiExtension _FITS_ (MEF) files that contain one or more extensions following the primary HDU.
+known as Single Image _FITS_ (SIF), as opposed to Multi-Extension _FITS_ (MEF) files that contain one or more extensions following the primary HDU.
 **Big endian** The numerical data format used in _FITS_ files in
 which the most-significant byte of the value is stored first
 followed by the remaining bytes in order of significance.
@@ -361,7 +372,7 @@ used to identify the type of the extension.
 or a row of an ASCII-table or binary-table standard extension. A field in a table-extension row consists of a set of
 zero-or-more table entries collectively described by a single
 format.
-**File** A sequence of one or more records terminated by an endof-file indicator appropriate to the medium.
+**File** A sequence of one or more records terminated by an end-of-file indicator appropriate to the medium.
 _**FITS**_ Flexible Image Transport System.
 _**FITS**_ **block** A sequence of 2880 eight-bit bytes aligned on
 2880-byte boundaries in the _FITS_ file, most commonly either
@@ -374,16 +385,15 @@ _**FITS**_ **file** A file with a format that conforms to the specifications
 in this document.
 _**FITS**_ **structure** One of the components of a _FITS_ file: the primary HDU, the random-groups records, an extension, or,
 collectively, the special records following the last extension.
-_**FITS**_ **Support O** ffi **ce** The _FITS_ information website that is
+_**FITS**_ **Support Office** The _FITS_ information website that is
 maintained by the IAUFWG and is currently hosted at
 [http://fits.gsfc.nasa.gov.](http://fits.gsfc.nasa.gov)
 **Floating point** A computer representation of a real number.
-**Fraction** The field of the mantissa (or significand) of a floatingpoint number that lies to the right of its implied binary point.
+**Fraction** The field of the mantissa (or significand) of a floating-point number that lies to the right of its implied binary point.
 **Group parameter value** The value of one of the parameters
 preceding a group in the random-groups structure, without
 the application of the associated linear transformation.
 
-3
 
 **HDU** Header and Data Unit. A data structure consisting of a
 header and the data the header describes. Note that an HDU
@@ -440,7 +450,6 @@ binary-table standard extension.
 **Reserved keyword** An _optional_ keyword that _must_ be used
 only in the manner defined in this Standard.
 
-4
 
 **SIF** Single Image _FITS_, i.e., a _FITS_ file containing only a primary HDU, without any extension HDUs. Also known as
 Basic _FITS_ .
@@ -506,20 +515,26 @@ The first component of a _FITS_ file _shall_ be the primary HDU,
 which always contains the primary header and _may_ be followed
 by the primary data array. If the primary data array has zero
 length, as determined by the values of the NAXIS and NAXIS _n_
+keywords in the primary header (Sect. 4.4.1), then the primary
+HDU _shall_ contain no data blocks.
 
-...,
-
-...,
-
-...,
-
-...,
+```text
+A(1, 1, ..., 1),
+A(2, 1, ..., 1),
+...
+A(NAXIS1, 1, ..., 1),
+A(1, 2, ..., 1),
+A(2, 2, ..., 1),
+...
+A(NAXIS1, 2, ..., 1),
+...
+A(1, NAXIS2, ..., NAXISm),
+...
+A(NAXIS1, NAXIS2, ..., NAXISm)
+```
 
 Fig. 1: Arrays of more than one dimension _shall_ consist of a sequence such that the index along Axis 1 varies most rapidly and
 those along subsequent axes progressively less rapidly.
-
-keywords in the primary header (Sect. 4.4.1), then the primary
-HDU _shall_ contain no data blocks.
 
 <a id="331-primary-header"></a>
 #### 3.3.1. Primary header
@@ -616,7 +631,6 @@ implemented. Following the development of conforming extensions, which provide a
 types of data structures in _FITS_ format in a well defined manner,
 the need for other new types of _FITS_ data structures has been
 
-5
 
 greatly reduced. Consequently, further use of special records is
 restricted and requires the approval of the IAU _FITS_ Working
@@ -633,7 +647,7 @@ systems, _FITS_ files _shall_ be interpreted as a sequence of one or
 more 2880-byte _FITS_ blocks, regardless of the physical blocking structure of the underlying recording media. When writing
 a _FITS_ file on media with a physical block size unequal to the
 2880-byte _FITS_ block length, any bytes remaining in the last
-physical block following the end of the _F_ ITS file _should_ be set
+physical block following the end of the _FITS_ file _should_ be set
 to zero. Similarly, when reading _FITS_ files on such media, any
 bytes remaining in the last physical block following the end of
 the _FITS_ file _shall_ be disregarded.
@@ -657,8 +671,7 @@ not considered part of the _FITS_ files and _should_ be disregarded.
 ### 3.7. Restrictions on changes
 
 Any structure that is a valid _FITS_ structure _shall_ remain a valid
-_FITS_ structure at all future times. Use of certain valid _FITS_ structures _may_ be deprecated by this or future _FITS_ Standard docu
-ments.
+_FITS_ structure at all future times. Use of certain valid _FITS_ structures _may_ be deprecated by this or future _FITS_ Standard documents.
 
 <a id="4-headers"></a>
 ## 4. Headers
@@ -679,7 +692,6 @@ this Standard. It is _recommended_ that the order of the keywords
 in _FITS_ files be preserved during data processing operations
 because the designers of the _FITS_ file may have used conventions that attach particular significance to the order of certain
 
-6
 
 keywords (e.g., by grouping sequences of COMMENT keywords
 at specific locations in the header, or appending HISTORY keywords in chronological order of the data processing steps or using CONTINUE keywords to generate long-string keyword values).
@@ -766,7 +778,8 @@ keywords and is _recommended_ for values of all other keywords.
 <a id="421-character-string"></a>
 #### 4.2.1. Character string
 
-4.2.1.1 Single-record string keywords
+<a id="4211-single-record-string-keywords"></a>
+##### 4.2.1.1 Single-record string keywords
 
 A character-string value _shall_ be composed only of the set of
 restricted ASCII-text characters, decimal 32 through 126 (hexadecimal 20 through 7E) enclosed by single-quote characters
@@ -780,11 +793,11 @@ single-quote character _must_ be in Byte 11 of the keyword record
 and the closing single quote _must_ occur in or before Byte 80.
 Earlier versions of this Standard also _required_ that fixed-format
 characters strings _must_ be padded with space characters to at
-least a length of eight characters so that the closing quote character does not occur before Byte 20. This minimum characterstring length is no longer _required_, except for the value of the
+least a length of eight characters so that the closing quote character does not occur before Byte 20. This minimum character-string length is no longer _required_, except for the value of the
 XTENSION keyword (e.g., 'IMAGE␣␣␣' and 'TABLE␣␣␣'; see
 Sect. 7), which _must_ be padded to a length of eight characters
 for backward compatibility with previous usage.
-Free-format character strings follow the same rules as fixedformat character strings except that the starting single-quote
+Free-format character strings follow the same rules as fixed-format character strings except that the starting single-quote
 character _may_ occur after Byte 11. Any bytes preceding the starting quote character and after Byte 10 _must_ contain the space
 character.
 Note that there is a subtle distinction between the following
@@ -805,9 +818,10 @@ The maximum length of a string value that can be represented on a single keyword
 opening and closing quote characters in Bytes 11 and 80, respectively. In general, no length limit fewer than 68 is implied
 for character-valued keywords.
 Whenever a keyword value is declared ‘string’ or said to
-‘contain a character string’, the length limits in this section apply. The next section applies when the value is declared ‘longstring’.
+‘contain a character string’, the length limits in this section apply. The next section applies when the value is declared ‘long-string’.
 
-4.2.1.2 Continued string (long-string) keywords
+<a id="4212-continued-string-long-string-keywords"></a>
+##### 4.2.1.2 Continued string (long-string) keywords
 
 Earlier versions of this Standard only defined single-record
 string keywords as described in the previous section. The
@@ -817,7 +831,7 @@ continuing arbitrarily long string values over a potentially unlimited sequence 
 following procedure.
 
 1. Divide the long-string value into a sequence of smaller substrings, each of which contains fewer than 68 characters.
-(Note that if the string contains any literal single-quote characters, then these _must_ be represented as a pair of singlequote characters in the _FITS_ -keyword value, and these two
+(Note that if the string contains any literal single-quote characters, then these _must_ be represented as a pair of single-quote characters in the _FITS_ -keyword value, and these two
 characters _must_ both be contained within a single substring).
 2. Append an ampersand character (’&’) to the end of each
 substring, except for the last substring. This character serves
@@ -842,7 +856,6 @@ the substrings have been reduced to fit within the page layout.)
 
 WEATHER = 'Partly cloudy during the evening f&'
 
-7
 
 CONTINUE 'ollowed by cloudy skies overnight.&'
 CONTINUE ' Low 21C. Winds NNE at 5 to 10 mph.'
@@ -893,7 +906,7 @@ This Standard does not limit the range of an integer keyword
 value, however, software packages that read or write data according to this Standard could be limited in the range of values
 that are supported (e.g., to the range that can be represented by
 a 32-bit or 64-bit signed binary integer).
-A free-format integer value follows the same rules as fixedformat integers except that the ASCII representation _may_ occur
+A free-format integer value follows the same rules as fixed-format integers except that the ASCII representation _may_ occur
 anywhere within Bytes 11 through 80.
 
 <a id="424-real-floating-point-number"></a>
@@ -903,7 +916,6 @@ If the value is a fixed-format real floating-point number, the
 ASCII representation _shall_ be right-justified in Bytes 11 through
 30.
 
-8
 
 Table 3: IAU-recommended basic units.
 
@@ -958,7 +970,7 @@ on the number of digits of precision, nor any limit on the range
 of floating-point keyword values. Software packages that read or
 write data according to this Standard could be limited, however,
 in the range of values and exponents that are supported (e.g., to
-the range that can be represented by a 32-bit or 64-bit floatingpoint number).
+the range that can be represented by a 32-bit or 64-bit floating-point number).
 
 A free-format floating-point value follows the same rules as
 a fixed-format floating-point value except that the ASCII representation _may_ occur anywhere within Bytes 11 through 80.
@@ -1014,7 +1026,7 @@ pix (image/detector) pixel
 
 _Miscellaneous units_
 
-D debye 31 [×][ 10] [−][29] [ C.m]
+D debye ⅓ × 10⁻²⁹ C.m
 Sun relative to Sun e.g., abundances
 chan (detector) channel
 bin numerous applications (including the one-dimensional analog of pixel)
@@ -1058,7 +1070,6 @@ and imaginary parts. The real and imaginary parts are represented in the same wa
 Such a representation is regarded as a single value for the complex floating-point number. This representation _may_ be located
 anywhere within Bytes 11 through 80.
 
-9
 
 <a id="427-date"></a>
 #### 4.2.7. Date
@@ -1118,7 +1129,6 @@ when the available standard scale factors of Table 5 will not suffice. Parenthes
 6 These tables are reproduced from the first in a series of papers
 on world-coordinate systems (Greisen & Calabretta 2002), which provides examples and expanded discussion.
 
-10
 
 Table 5: Prefixes for multiples and submultiples.
 
@@ -1205,6 +1215,8 @@ Position Keyword
 2 BITPIX
 
 3 NAXIS
+
+4 NAXIS _n_, _n_ = 1, ..., NAXIS
 
 ...
 (other keywords)
@@ -1301,7 +1313,6 @@ primary header. [7] To preclude conflict, extension type names
 _must_ be registered with the IAUFWG. The current list of registered extensions is given in Appendix F. An up-to-date list is
 also maintained on the _FITS_ Support Office website.
 
-11
 
 Table 9: Example of a primary array header.
 
@@ -1363,7 +1374,6 @@ the form YYYY-MM-DDThh:mm:ss[.sss...], where YYYY _shall_
 be the four-digit calendar year number, MM the two-digit month
 number with January given by 01 and December by 12, and DD
 
-12
 
 Table 10: Mandatory keywords in conforming extensions.
 
@@ -1374,6 +1384,8 @@ Position Keyword
 2 BITPIX
 
 3 NAXIS
+
+4 NAXIS _n_, _n_ = 1, ..., NAXIS
 
 5 PCOUNT
 
@@ -1522,7 +1534,6 @@ comments regarding the _FITS_ file.
 developed for use within NED (NASA/IPAC Extragalactic Database)
 and SIMBAD (operated at CDS, Strasbourg, France).
 
-13
 
 HISTORY keyword. This keyword _should_ be used to describe
 the history of steps and procedures associated with the processing of the associated data.
@@ -1561,7 +1572,7 @@ physical value = BZERO + BSCALE × array value. (3)
 
 The value field _shall_ contain a floating-point number representing the coefficient of the linear term in the scaling equation, the
 ratio of physical value to array value at zero offset. The default
-value for this keyword is 1.0. Before support for IEEE floatingpoint data types was added to _FITS_ (Wells & Grosbøl 1990), this
+value for this keyword is 1.0. Before support for IEEE floating-point data types was added to _FITS_ (Wells & Grosbøl 1990), this
 technique of linearly scaling integer values was the only way to
 represent the full range of floating-point values in a _FITS_ array.
 This linear scaling technique is still commonly used to reduce
@@ -1579,7 +1590,6 @@ integers (see the description of the BSCALE keyword), the BZERO
 keyword is also used when storing unsigned-integer values in the
 _FITS_ array. In this special case the BSCALE keyword _shall_ have
 
-14
 
 the default value of 1.0, and the BZERO keyword _shall_ have one
 of the integer values shown in Table 11.
@@ -1679,7 +1689,8 @@ INHERIT keyword. The value field _shall_ contain a logical value
 of T or F to indicate whether or not the current extension should
 inherit the keywords in the primary header of the _FITS_ file.
 
-4.4.2.7 Data-integrity keywords
+<a id="4427-data-integrity-keywords"></a>
+##### 4.4.2.7 Data-integrity keywords
 
 The two keywords described here provide an integrity check
 on the information contained in _FITS_ HDUs.
@@ -1698,7 +1709,7 @@ least-significant bit of the sum.
 The DATASUM value is expressed as a character string (i.e.,
 enclosed in single-quote characters) because support for the full
 range of 32-bit unsigned-integer keyword values is problematic
-in some software systems. This string _may_ be padded with nonsignificant leading or trailing blank characters or leading zeros.
+in some software systems. This string _may_ be padded with non-significant leading or trailing blank characters or leading zeros.
 A string containing only one or more consecutive ASCII blanks
 _may_ be used to represent an undefined or unknown value for
 the DATASUM keyword. The DATASUM keyword _may_ be omitted in HDUs that have no data records, but it is preferable to
@@ -1732,7 +1743,6 @@ copy or transfer operation, or a corruption of the physical media
 on which the file was stored. It may alternatively reflect an intentional change to the data file by subsequent data processing if
 the CHECKSUM value was not also updated.
 
-15
 
 Normally both keywords will be present in the header if either
 is present, but this is not _required_ . These keywords apply _only_
@@ -1796,7 +1806,6 @@ Thirty-two-bit integers _shall_ be two’s complement signed binary
 integers, contained in four bytes with decimal values ranging
 from −2147483648 to +2147483647.
 
-16
 
 <a id="524-sixty-four-bit"></a>
 #### 5.2.4. Sixty-four-bit
@@ -1857,7 +1866,7 @@ where a group consists of a subarray of data and a set of associated parameter v
 data array. Random groups have been used almost exclusively
 for applications in radio interferometry; outside this field, there
 is little support for reading or writing data in this format. Other
-than the existing use for radio interferometry data, the randomgroups structure is deprecated and _should not_ be further used.
+than the existing use for radio interferometry data, the random-groups structure is deprecated and _should not_ be further used.
 For other applications, the binary-table extension (Sect. 7.3) provides a more extensible and better documented way of associating groups of data within a single data structure.
 
 Table 12: Mandatory keywords in primary header preceding random groups.
@@ -1872,7 +1881,11 @@ Position Keyword
 
 4 NAXIS1 = 0
 
+5 NAXIS _n_, _n_ = 2, ..., value of NAXIS
+
 ...
+(other keywords, which _must_ include ...)
+
 GROUPS = T
 
 PCOUNT
@@ -1890,7 +1903,7 @@ last END
 #### 6.1.1. Mandatory keywords
 
 The SIMPLE keyword is _required_ to be the first keyword in the
-primary header of all _FITS_ files, including those with randomgroups records. If the random-groups format records follow the
+primary header of all _FITS_ files, including those with random-groups records. If the random-groups format records follow the
 primary header, the keyword records of the primary header _must_
 use the keywords defined in Table 12 in the order specified. No
 other keywords _may_ intervene between the SIMPLE keyword and
@@ -1910,6 +1923,7 @@ NAXIS1 keyword. The value field _shall_ contain the integer 0,
 a signature of random-groups format indicating that there is no
 primary data array.
 
+NAXIS _n_ keywords (_n_ = 2, ..., value of NAXIS). The NAXIS _n_
 keywords _must_ be present for all values _n_ = 2, ..., NAXIS, in
 increasing order of _n_, and for no larger values of _n_ . The value
 field _shall_ contain an integer, representing the number of positions along Axis _n_ − 1 of the data array in each group.
@@ -1973,7 +1987,6 @@ Random-groups data _shall_ consist of a set of groups. The number of groups _sha
 associated header. Each group _shall_ consist of the number of parameters specified by the PCOUNT keyword followed by an array
 with the number of elements _N_ elem given by the following expression:
 
-17
 
 _N_ elem = (NAXIS2 × NAXIS3 × · · · × NAXIS _m_ ), (6)
 
@@ -2037,7 +2050,6 @@ the XTENSION and GCOUNT keywords.
 XTENSION keyword. The value field _shall_ contain the character
 string 'IMAGE␣␣␣'.
 
-18
 
 Table 13: Mandatory keywords in IMAGE extensions.
 
@@ -2049,11 +2061,14 @@ Position Keyword
 
 3 NAXIS
 
+4 NAXIS _n_, _n_ = 1, ..., NAXIS
+
 5 PCOUNT = 0
 
 6 GCOUNT = 1
 
 ...
+(other keywords ...)
 
 ...
 
@@ -2122,6 +2137,13 @@ Position Keyword
 8 TFIELDS
 
 ...
+(other keywords, including (if TFIELDS is not zero) ...)
+
+TTYPE _n_, _n_ = 1, 2, ..., _k_, where _k_ is the value of TFIELDS (_recommended_)
+
+TBCOL _n_, _n_ = 1, 2, ..., _k_, where _k_ is the value of TFIELDS (_required_)
+
+TFORM _n_, _n_ = 1, 2, ..., _k_, where _k_ is the value of TFIELDS (_required_)
 
 ...
 
@@ -2205,7 +2227,6 @@ in Sect. 7.2.2, _may_ be used to _recommend_ that a decimal integer
 value in an ASCII table be displayed as the equivalent binary,
 octal, or hexadecimal value.
 
-19
 
 Table 16: Valid TDISP _n_ format values in TABLE extensions.
 
@@ -2233,7 +2254,7 @@ through 80 _shall_ contain ASCII spaces (decimal 32 or hexadecimal 20).
 #### 7.2.2. Other reserved keywords
 
 In addition to the reserved keywords defined in Sect. 4.4.2 (except for EXTEND and BLOCKED), the following other reserved
-keywords _may_ be used to describe the structure of an ASCIItable data array. They are _optional_, but if they appear within an
+keywords _may_ be used to describe the structure of an ASCII-table data array. They are _optional_, but if they appear within an
 ASCII-table extension header, they _must_ be used as defined in
 this section of this Standard.
 
@@ -2255,7 +2276,7 @@ Field _n_, after any application of TSCAL _n_ and TZERO _n_, is expressed. Units
 
 TSCAL n keywords. This indexed keyword _shall_ be used, along
 with the TZERO _n_ keyword, to linearly scale the values in the table Field _n_ to transform them into the physical values that they
-represent using Eq. 7. The value field _shall_ contain a floatingpoint number representing the coefficient of the linear term in
+represent using Eq. 7. The value field _shall_ contain a floating-point number representing the coefficient of the linear term in
 the scaling equation. The default value for this keyword is 1.0.
 This keyword _must not_ be used for A-format fields.
 The transformation equation used to compute a true physical
@@ -2263,7 +2284,6 @@ value from the quantity in Field _n_ is
 
 physical value = TZERO _n_ + TSCAL _n_ × field value (7)
 
-20
 
 where field value is the value that is actually stored in that
 table field in the _FITS_ file.
@@ -2410,7 +2430,6 @@ consisting of a single _optional_ sign (’+’ or ’-’) followed
 by one or more decimal digits (’0’ through ’9’) _optionally_
 containing a single decimal point (’.’). The numeric string
 
-21
 
 is terminated by the end of the right-justified field or by the
 occurrence of any character other than a decimal point (’.’)
@@ -2459,7 +2478,6 @@ string 'BINTABLE'.
 BITPIX keyword. The value field _shall_ contain the integer 8,
 denoting that the array is an array of eight-bit bytes.
 
-22
 
 NAXIS keyword. The value field _shall_ contain the integer 2, denoting that the included data array is two-dimensional: rows and
 columns.
@@ -2531,6 +2549,11 @@ Position Keyword
 8 TFIELDS
 
 ...
+(other keywords, including (if TFIELDS is not zero) ...)
+
+TTYPE _n_, _n_ = 1, 2, ..., _k_, where _k_ is the value of TFIELDS (_recommended_)
+
+TFORM _n_, _n_ = 1, 2, ..., _k_, where _k_ is the value of TFIELDS (_required_)
 
 ...
 
@@ -2612,7 +2635,6 @@ by the TZERO _n_ keyword value shown in the table. For the byte
 column type, the converse technique can be used to store signed
 byte values as native unsigned values with the negative TZERO _n_
 
-23
 
 Table 19: Usage of TZERO _n_ to represent non-default integer data types.
 
@@ -2668,7 +2690,6 @@ of the main data table and the start of a supplemental data area
 called the heap. The default value, which is also the minimum
 allowed value, _shall_ be the product of the values of NAXIS1 and
 
-24
 
 NAXIS2. This keyword _shall not_ be used if the value of PCOUNT
 is 0. The use of this keyword is described in in Sect. 7.3.5.
@@ -2681,7 +2702,7 @@ last dimension given is the least rapidly varying. The total number of elements 
 specified in the TDIM _n_ keyword. The size _must_ be less than or
 equal to the repeat count in the TFORM _n_ keyword, or, in the case
 of columns that have a ’P’ or ’Q’ TFORM _n_ data type, less than or
-equal to the array length specified in the variable-length array descriptor (see Sect. 7.3.5). In the special case where the variablelength array descriptor has a size of zero, then the TDIM _n_ keyword is not applicable. If the number of elements in the array
+equal to the array length specified in the variable-length array descriptor (see Sect. 7.3.5). In the special case where the variable-length array descriptor has a size of zero, then the TDIM _n_ keyword is not applicable. If the number of elements in the array
 implied by the TDIM _n_ is fewer than the allocated size of the array in the _FITS_ file, then the unused trailing elements _should_ be
 interpreted as containing undefined fill values.
 
@@ -2807,7 +2828,6 @@ characters. This character string _may_ be terminated before the
 length specified by the repeat count by an ASCII NULL (hexadecimal code 00). Characters after the first ASCII NULL are
 not defined. A string with the number of characters specified by
 
-25
 
 the repeat count is not NULL terminated. Null strings are defined
 by the presence of an ASCII NULL as the first character.
@@ -2856,7 +2876,6 @@ floating-point numbers, in big-endian byte order, as described in
 Appendix E. All IEEE special values are recognized. The IEEE
 NaN is used to represent null values.
 
-26
 
 Single precision complex. If the value of the TFORM _n_ keyword
 specifies Data Type ’C’, the data in Field _n shall_ consist of a
@@ -2977,7 +2996,8 @@ and is equivalent to an E format when the number (in absolute
 value) is either very small or very large. Specifically, for real
 values outside the range 0.1 − 0.5 × 10 [−] [d] [−][1] ≤ value < 10 [d] −
 0.5, it is equivalent to Ew.dEe. For real values within the above
-range, it is equivalent to Fw [′] .d [′] followed by 2 + e spaces, where
+range, it is equivalent to Fw′.d′ followed by 2 + e spaces, where
+w′ = w − e − 2 and d′ = d − k for k = 0, 1, ..., d if the real
 datum value lies in the range 10 _[k]_ [−][1] (1 − 0.5×10 [−] [d] ) ≤ value ≤
 
 10 _[k]_ (1 − 0.5×10 [−] [d] ) .
@@ -3004,7 +3024,7 @@ too large excessive wasted space can result and the binary-table
 mechanism becomes seriously inefficient. If the limit is set too
 low then storing certain types of data in the table could become
 impossible.
-The variable-length array construct presented here was devised to deal with this problem. Variable-length arrays are implemented in such a way that, even if a table contains such arrays, a simple reader program that does not understand variablelength arrays will still be able to read the main data table (in
+The variable-length array construct presented here was devised to deal with this problem. Variable-length arrays are implemented in such a way that, even if a table contains such arrays, a simple reader program that does not understand variable-length arrays will still be able to read the main data table (in
 other words a table containing variable-length arrays conforms
 to the basic binary-table standard). The implementation chosen
 is such that the rows in the main data table remain fixed in size
@@ -3015,7 +3035,7 @@ static arrays, the only differences being 1) the length of the stored
 array can differ for different rows, and 2) the array data are not
 stored directly in the main data table. Since a field of any data
 type can be a static array, a field of any data type can also be
-a variable-length array (excluding the Type P and Q variablelength array descriptors themselves, which are not a data type so
+a variable-length array (excluding the Type P and Q variable-length array descriptors themselves, which are not a data type so
 much as a storage-class specifier). Other established _FITS_ conventions that apply to static arrays will generally apply as well
 to variable-length arrays.
 A variable-length array is declared in the table header with
@@ -3023,7 +3043,6 @@ one of the following two special field data-type specifiers
 
 _r_ P _t_ ( _e_ max )
 
-27
 
 _r_ Q _t_ ( _e_ max )
 
@@ -3058,6 +3077,10 @@ not defined by this Standard. Storage for the array is contiguous.
 The array descriptor for Field _N_ as it would appear embedded in
 a table row is illustrated symbolically below.
 
+```text
+... [Field N−1] [(nelem, offset)] [Field N+1] ...
+```
+
 If the stored array length is zero, there is no array data, and
 the offset value is undefined (it _should_ be set to zero). The storage referenced by an array descriptor _must_ lie entirely within the
 heap area; negative offsets are not permitted.
@@ -3080,7 +3103,6 @@ keyword has a value larger than this default value, then there is
 a gap between the end of the main data table and the start of
 the heap. The total length in bytes of the supplemental data area
 
-28
 
 following the main data table (gap plus heap) is given by the
 PCOUNT keyword in the table header.
@@ -3107,7 +3129,7 @@ THEAP = 2880 / Byte offset of heap area
 
 The values of TSCAL _n_ and TZERO _n_ for variable-length array
 column entries are to be applied to the values in the data array in
-the heap area, not the values of the array descriptor. These keywords can be used to scale data values in either static or variablelength arrays.
+the heap area, not the values of the array descriptor. These keywords can be used to scale data values in either static or variable-length arrays.
 
 <a id="736-variable-length-array-guidelines"></a>
 #### 7.3.6. Variable-length-array guidelines
@@ -3177,7 +3199,7 @@ Representations of the mapping between image coordinates and
 physical (i.e., world) coordinate systems (WCSs) _may_ be represented within _FITS_ HDUs. The keywords that are used to express
 these mappings are now rigorously defined in a series of papers on world-coordinate systems (Greisen & Calabretta 2002),
 celestial-coordinate systems (Calabretta & Greisen 2002),
-spectral-coordinate systems (Greisen et al. 2006), and timecoordinate systems (Rots et al. 2015). An additional spherical projection, called HEALPix, is defined in reference
+spectral-coordinate systems (Greisen et al. 2006), and time-coordinate systems (Rots et al. 2015). An additional spherical projection, called HEALPix, is defined in reference
 (Calabretta & Roukema 2007). These WCS papers have been
 formally approved by the IAUFWG and therefore are _incor-_
 _porated by reference_ as an official part of this Standard. The
@@ -3198,44 +3220,38 @@ value from 1 to NAXIS _j_ on Axis _j_ . Recognizing that image data
 values may have an extent, for example an angular separation,
 spectral channel width or time span, and thus that it may make
 sense to interpolate between them, these integral array indices
-
-|Pixel<br>Coordinates|Col2|
-|---|---|
-|||
-
-|Intermediate Pixel<br>Coordinates|Col2|
-|---|---|
-|||
-
-|Intermediate World<br>Coordinates|Col2|
-|---|---|
-|||
-
-where _r_ _j_ are the pixel-coordinateelements of the reference point,
-_j_ indexes the pixel axis, and _i_ the world axis. The _m_ _i j_ matrix
-
-29
-
-**`CRPIX`** _**j**_,
-**`PC`** _**i_j**_ or
-**`CD`** _**i_j**_
-
-**`CDELT`** _**i**_
-
-**`CTYPE`** _**i**_,
-**`CRVAL`** _**i**_
-
-**`PV`** _**i_m**_
-
-Fig. 2: A schematic view of converting pixel coordinates to
-world coordinates.
-
 _may_ be generalized to floating-point _pixel coordinates_ . Integral
 pixel-coordinate values coincide with the corresponding array
 indices, while fractional pixel-coordinate values lie between array indices and thus imply interpolation. Pixel-coordinate values are defined at all points within the image lattice and outside
 it (except along _conventional_ axes, see Sect. 8.5). They form
 the basis of the world-coordinate formalism in _FITS_ depicted
 schematically in Fig. 2.
+
+```text
+Pixel Coordinates
+        │
+        ▼
+Linear transformation: translation, rotation, skew, scale  ◀── CRPIX_j,
+        │                                                      PC_i_j or CD_i_j
+        ▼
+Intermediate Pixel Coordinates
+        │
+        ▼
+Rescale to physical units                                  ◀── CDELT_i
+        │
+        ▼
+Intermediate World Coordinates
+        │
+        ▼
+Coordinate projection, offset                              ◀── CTYPE_i,
+        │                                                      CRVAL_i, PV_i_m
+        ▼
+World Coordinates
+```
+
+Fig. 2: A schematic view of converting pixel coordinates to
+world coordinates.
+
 The essence of representing world-coordinate systems in
 _FITS_ is the association of various reserved keywords with elements of a transformation (or a series of transformations), or
 with parameters of a projection function. The conversion from
@@ -3249,9 +3265,12 @@ choice of notation. Key elements of the notation are summarized
 in Table 21, and are used throughout this section. The formal
 definitions of the keywords appear in the following subsections.
 The conversion of image pixel coordinates to world coordinates is a multi-step process, as illustrated in Fig. 2.
-For all coordinate types, the first step is a linear transformation applied via matrix multiplication of the vector of pixelcoordinate elements, _p_ _j_ :
+For all coordinate types, the first step is a linear transformation applied via matrix multiplication of the vector of pixel-coordinate elements, _p_ _j_ :
 
 _q_ _i_ = Σ_{j=1}^{N} _m_ _i j_ ( _p_ _j_ − _r_ _j_ ) (9)
+
+where _r_ _j_ are the pixel-coordinate elements of the reference point,
+_j_ indexes the pixel axis, and _i_ the world axis. The _m_ _i j_ matrix
 
 Table 21: WCS and celestial coordinates notation.
 
@@ -3278,7 +3297,7 @@ LATPOLE _a_ (=PV i 4 _a_ [†] )
 is a non-singular, square matrix of dimension _N_ × _N_, where _N_
 is the number of world-coordinate axes. The elements _q_ _i_ of the
 resulting _intermediate pixel coordinate_ vector are offsets, in dimensionless pixel units, from the reference point along axes coincident with those of the _intermediate world coordinates_ . Thus,
-the conversion of _q_ _i_ to the corresponding Intermediate-worldcoordinate Element _x_ _i_ is a simple scale:
+the conversion of _q_ _i_ to the corresponding Intermediate-world-coordinate Element _x_ _i_ is a simple scale:
 
 _x_ _i_ = _s_ _i_ _q_ _i_ . (10)
 
@@ -3297,7 +3316,7 @@ and character-valued parameters will be specified via PS _i m_ keywords, where _
 The application of these formalisms to coordinate systems of
 interest is discussed in the following sub-sections: Sect. 8.2 describes general WCS representations (see Greisen & Calabretta
 2002), Sect. 8.3 describes celestial-coordinate systems (see
-Calabretta & Greisen 2002)), Sect. 8.4 describes spectralcoordinate systems (see Greisen et al. 2006), and Sect. 9 describes the representation of time coordinates (see Rots et al.
+Calabretta & Greisen 2002)), Sect. 8.4 describes spectral-coordinate systems (see Greisen et al. 2006), and Sect. 9 describes the representation of time coordinates (see Rots et al.
 2015).
 
 <a id="82-world-coordinate-system-representations"></a>
@@ -3341,9 +3360,8 @@ indicated with the value of the CTYPE _i_ keyword. For some simple, linear cases
 scale factors allows the world coordinates to be taken directly (or
 by applying a constant offset) from the _x_ _i_ (e.g., some spectra).
 
-30
 
-monly known as the “Green Bank Convention [10] ”), which utilizes additional columns in the table to record the coordinatetransformation values that apply to the corresponding image
+monly known as the “Green Bank Convention [10] ”), which utilizes additional columns in the table to record the coordinate-transformation values that apply to the corresponding image
 in each row of the table. More information is provided in
 Appendix L.
 The keywords given below constitute a complete set of fundamental attributes for a WCS description. Although their inclusion in an HDU is optional, _FITS_ writers _should_ include a complete set of keywords when describing a WCS. In the event that
@@ -3356,9 +3374,9 @@ if present, _must_ precede all WCS keywords except NAXIS in
 the HDU. The value of WCSAXES _may_ exceed the number of
 pixel axes for the HDU.
 CTYPE _i_ – [string; indexed; default: '␣' (i.e. a linear, undefined
-axis)]. Type for the Intermediate-coordinate Axis _i_ . Any co
-                                      ordinate type that is not covered by this Standard or an offi
-cially recognized _FITS_ convention _shall_ be taken to be linear.
+axis)]. Type for the Intermediate-coordinate Axis _i_ . Any coordinate
+type that is not covered by this Standard or an officially recognized
+_FITS_ convention _shall_ be taken to be linear.
 All non-linear coordinate system names _must_ be expressed
 in ‘4–3’ form: the first four characters specify the coordinate
 
@@ -3374,6 +3392,9 @@ coordinate systems defined in this Standard _must_ be degrees.
 CRPIX _j_ – [floating point; indexed; default: 0.0]. Location of
 the reference point in the image for Axis _j_ corresponding to
 _r_ _j_ in Eq. (9). Note that the reference point _may_ lie outside the
+image and that the first pixel in the image has pixel coordinates
+(1.0, 1.0, ...).
+
 CRVAL _i_ – [floating point; indexed; default: 0.0]. Worldcoordinate value at the reference point of Axis _i_ .
 CDELT _i_ – [floating point; indexed; default: 1.0]. Increment of
 the world coordinate at the reference point for Axis _i_ . The
@@ -3449,12 +3470,13 @@ spectral axis (only one of which, of course, could be linear), or the position a
 13 There are a number of keywords (e.g. _ij_ PC _na_ ) where the _a_ could be
 pushed off the eight-character keyword name for plausible values of _i_,
 
-31
 
 Table 22: Reserved WCS keywords (continues on next page)
 
 BINTABLE vector Pixel list
 Keyword Description Global Image Primary Alternative Primary Alternative
+
+Coordinate dimensionality WCSAXES _a_ WCAX _na_ ...
 
 Axis type CTYPE _ia_ _i_ CTYP _n_ _i_ CTY _na_ TCTYP _n_ TCTY _na_
 Axis units CUNIT _ia_ _i_ CUNI _n_ _i_ CUN _na_ TCUNI _n_ TCUN _na_
@@ -3467,6 +3489,7 @@ Coordinate rotation [1] CROTA _i_ _i_ CROT _n_ TCROT _n_
 Transformation matrix [2] PC _i ja_ _ij_ PC _na_ TPC _n ka_ or TP _n ka_
 Transformation matrix [2] CD _i ja_ _ij_ CD _na_ TCD _n ka_ or TC _n ka_
 Coordinate parameter PV _i ma_ _i_ PV _n ma_ or _i_ V _n ma_ TPV _n ma_ or TV _n ma_
+Coordinate parameter array ... _i_ V _n_ X _a_ ...
 Coordinate parameter PS _i ma_ _i_ PS _n ma_ or _i_ S _n ma_ TPS _n ma_ or TS _n ma_
 Coordinate name WCSNAME _a_ WCSN _na_ WCS _na_ or TWCS _na_
 
@@ -3474,6 +3497,9 @@ Coordinate axis name CNAME _ia_ _i_ CNA _na_ TCNA _na_
 
 Random error CRDER _ia_ _i_ CRD _na_ TCRD _na_
 Systematic error CSYER _ia_ _i_ CSY _na_ TCSY _na_
+
+WCS cross-reference target ... WCST _na_ ...
+WCS cross reference ... WCSX _na_ ...
 
 Coordinate rotation LONPOLE _a_ LONP _na_ LONP _na_
 
@@ -3532,7 +3558,6 @@ Time resolution TIMEDEL
 Time location in pixel TIMEPIXR
 Phase-axis zero point CZPHS _ia_ _i_ CZPH _n_ _i_ CZP _na_ TCZPH _n_ TCZP _na_
 Phase-axis period CPERI _ia_ _i_ CPER _n_ _i_ CPR _na_ TCPER _n_ TCPR _na_
-32
 
 Table 22 (continued)
 
@@ -3612,7 +3637,6 @@ of CTYPE _ia_, and may be linear in one of the alternative descriptions and non-
 The alternative version codes are selected by the _FITS_ writer;
 there is no requirement that the codes be used in alphabetic se
 
-33
 
 quence, nor that one coordinate version differ in its parameter
 values from another. An optional keyword WCSNAME _a_ is also defined to name, and otherwise document, the various versions of
@@ -3632,7 +3656,7 @@ spherical projection to native longitude and latitude (φ, θ), defined in terms
 _spherical coordinates_ ), followed by a spherical rotation of these
 native coordinates to the required celestial coordinate system
 (α, δ). The algorithm to be used to define the spherical projection _must_ be encoded in the CTYPE _i_ keyword as the threeletter algorithm code, the allowed values for which are specified in Table 23 and defined in references Calabretta & Greisen
-(2002) and Calabretta & Roukema (2007). The target celestialcoordinate system is also encoded into the left-most portion of
+(2002) and Calabretta & Roukema (2007). The target celestial-coordinate system is also encoded into the left-most portion of
 the CTYPE _i_ keyword as the coordinate type.
 For the final step, the parameter LONPOLE _a must_ be specified,
 which is the native longitude of the celestial pole, φ _p_ . For certain
@@ -3642,7 +3666,7 @@ See Calabretta & Greisen (2002) for the transformation equations and other detai
 The accepted celestial-coordinate systems are: the standard
 equatorial (RA-- and DEC-), and others of the form _x_ LON and
 _x_ LAT for longitude-latitude pairs, where _x_ is G for Galactic, E
-for ecliptic, H for helioecliptic and S for supergalactic coordinates. Since the representation of planetary-, lunar-, and solarcoordinate systems could exceed the 26 possibilities afforded by
+for ecliptic, H for helioecliptic and S for supergalactic coordinates. Since the representation of planetary-, lunar-, and solar-coordinate systems could exceed the 26 possibilities afforded by
 the single character _x_, pairs of the form _yz_ LN and _yz_ LT _may_ be
 used as well.
 
@@ -3662,7 +3686,6 @@ to prevent its use with other meanings. The EQUINOX keyword _shall_ be used inst
 was previously defined to contain a floating-point number
 giving the equinox in years for the celestial-coordinate system in which positions are expressed.
 
-34
 
 DATE-OBS – [floating point]. This reserved keyword is defined
 in Sect. 4.4.2.
@@ -3706,7 +3729,7 @@ be one of those specified in Table 26. The relationships between
 the basic physical quantities ν, λ, and _v_, as well as the relationships between various derived quantities are given in reference
 Greisen et al. (2006).
 
-The generality of the algorithm for specifying the spectralcoordinate system and its representation suggests that some additional description of the coordinate may be helpful beyond
+The generality of the algorithm for specifying the spectral-coordinate system and its representation suggests that some additional description of the coordinate may be helpful beyond
 what can be encoded in the first four characters of the CTYPE _ia_
 keyword; CNAME _ia_ is reserved for this purpose. Note that this
 keyword provides a name for an axis in a particular WCS, while
@@ -3836,7 +3859,6 @@ systemic velocity of the observed source. Value _must_ be one
 of those given in Table 27 _except_ for ’SOURCE’.
 VELOSYS _a_ – [floating point; default: none]. Relative radial velocity between the observer and the selected standard of rest
 
-35
 
 Table 25: Reserved spectral-coordinate type codes.
 
@@ -3902,7 +3924,6 @@ of real and imaginary components) are stored in the data array
 (along with an optional weight factor). Thus, the complex axis
 of the data array will contain two values (or three if the weight is
 
-36
 
 Table 28: Example keyword records for a 100-element array of
 complex values.
@@ -4043,7 +4064,7 @@ The origin of JD can be written as:
 In the UTC time scale the integer part of the seconds field
 runs from 00 to 60 (in order to accommodate leap seconds);
 in all other time scales the range is 00 to 59.
-**–** The ISO-8601 _datetime_ data type is _not allowed_ in imageaxis descriptions since CRVAL is _required_ to be a floatingpoint value.
+**–** The ISO-8601 _datetime_ data type is _not allowed_ in image-axis descriptions since CRVAL is _required_ to be a floating-point value.
 **–** ISO-8601 _datetime_ does not imply the use of any particular
 time scale (see Sect. 9.2.1).
 
@@ -4087,7 +4108,6 @@ _must_ be assumed.
 In relevant contexts (e.g., time axes in image arrays, table
 columns, or random groups) TIMESYS _may_ be overridden by a
 
-37
 
 time scale recorded in CTYPE _ia_, its binary-table equivalents, or
 PTYPE _i_ (see Table 22).
@@ -4149,7 +4169,6 @@ It is useful to note that while UT1 is, in essence, an angle (of
 the Earth’s rotation – _i.e.,_ a _clock_ ), the others are SI-second counters ( _chronometers_ ); UTC, by employing leap seconds, serves as
 a bridge between the two types of time scales.
 
-38
 
 Table 30: Recognized Time Scale Values
 
@@ -4327,7 +4346,6 @@ linear) scaling in certain combinations; highly eccentric spacecraft orbits are 
 a reference position on another Solar System body (including
 ’HELIOCENTER’). Therefore, it is _recommended_ to synchronize
 
-39
 
 Table 32: Compatibility of Time Scales and Reference Positions
 
@@ -4390,7 +4408,6 @@ as having a semi-major axis of 6 378 140 m and an inverse flattening of 298.2577
 A non-standard location indicated by ’CUSTOM’ _must_ be
 specified in a manner similar to the specification of the observatory location (indicated by ’TOPOCENTER’). One should be
 
-40
 
 careful with the use of the ’CUSTOM’ value and not confuse it
 with ’TOPOCENTER’, as use of the latter imparts additional information on the provenance of the data.
@@ -4563,7 +4580,6 @@ this keyword affects the values of TSTART, and TSTOP, as well as
 any time pixel values in a binary table. However, this construct
 _may_ only be used in tables and _must not_ be used in images.
 
-41
 
 <a id="942-time-resolution-and-binning"></a>
 #### 9.4.2. Time resolution and binning
@@ -4626,7 +4642,6 @@ HDU. As noted before, they may also be implemented as table
 columns. Keywords not previously described are defined below;
 all are included in the summary Table 22.
 
-42
 
 Table 35: Keywords for global time values
 
@@ -4795,7 +4810,6 @@ CTYPE or TTYPE keywords are set to the value ’TIME’. Any alternate coordinat
 modified by applicable scaling and/or reference value keywords;
 see also Sect. 9.2.1.
 
-43
 
 <a id="982-restrictions-on-alternate-descriptions"></a>
 #### 9.8.2. Restrictions on alternate descriptions
@@ -4847,7 +4861,6 @@ store or distribute large quantities of data; the present section
 provides a standard framework that addresses such needs. As implementation of compression/decompression codes can be quite
 complex, not all software for reading and writing _FITS_ is nec
 
-44
 
 essarily expected to support these capabilities. External utilities
 are available to compress and decompress _FITS_ files [15] .
@@ -4933,7 +4946,7 @@ if it is not, then the last tile along that dimension of the image will contain 
 ZTILE _n_ keywords are not present then the default “row-byrow” tiling will be assumed, i.e., ZTILE1 = ZNAXIS1, and
 the value of all the other ZTILE _n_ keywords _must_ equal 1.
 ZNAME _i_ – [string; indexed; default: none] The value field of
-these keywords (where _i_ is a positive integer index starting with 1) _shall_ supply the names of up to 999 algorithmspecific parameters that are needed to compress or decompress the image. The order of the compression parameters
+these keywords (where _i_ is a positive integer index starting with 1) _shall_ supply the names of up to 999 algorithm-specific parameters that are needed to compress or decompress the image. The order of the compression parameters
 _may_ be significant, and _may_ be defined as part of the description of the specific decompression algorithm.
 ZVAL _i_ – [string; indexed; default: none] The value field of these
 keywords (where _i_ is a positive integer index starting with
@@ -4951,7 +4964,7 @@ the default is to assume that no dithering was applied during
 quantization.
 ZDITHER0 – [integer; default: none] The value field of this keyword _shall_ contain a positive integer (that may range from 1
 to 10000 inclusive) that gives the seed value for the random
-dithering pattern that was used when quantizing the floatingpoint pixel values. This keyword _may_ be absent if no dithering was applied. See Sect. 10.2 for further discussion.
+dithering pattern that was used when quantizing the floating-point pixel values. This keyword _may_ be absent if no dithering was applied. See Sect. 10.2 for further discussion.
 
 The following keywords are reserved to preserve a verbatim
 copy of the _value and comment fields_ for keywords in the original uncompressed _FITS_ image that were used to describe its
@@ -4998,7 +5011,6 @@ Two columns in the _FITS_ binary table are defined below to contain the compress
 table is not significant. One of the table columns describes optional content; but when this column appears it _must_ be used as
 defined in this section. The column names (given by the TTYPE _n_
 
-45
 
 keyword) are reserved; they are shown here in upper-case letters,
 but case is not significant.
@@ -5011,7 +5023,7 @@ _must_ be one of ’1PB’, ’1PI’, or ’1PJ’ (or the equivalent
 ’1QB’, ’1QI’, or ’1QJ’), depending on whether the compression algorithm generates an output stream of 8-bit bytes,
 or integers of 16, or 32 bits respectively.
 
-When using the quantization method to compress floatingpoint images that is described in Sect. 10.2, it sometimes may
+When using the quantization method to compress floating-point images that is described in Sect. 10.2, it sometimes may
 not be possible to quantize some of the tiles (e.g., if the range of
 pixels values is too large or if most of the pixels have the same
 value and hence the calculated RMS noise level in the tile is
@@ -5096,7 +5108,7 @@ is given by _log_ 2 ( _Q_ ) + 1.792. The _Q_ value directly affects the
 where _I_ _i_ and _F_ _i_ are the integer and (original) floating-point
 values of the image pixels, respectively, and the round function rounds the result to the nearest integer value.
 ZZERO – [floating-point; optional] This column _shall_ be used to
-contain zero-point offsets that are used to scale the floatingpoint pixel values in each tile to integers via Eq. 12.
+contain zero-point offsets that are used to scale the floating-point pixel values in each tile to integers via Eq. 12.
 
 Do not confuse the ZSCALE and ZZERO columns with the
 BSCALE and BZERO keywords (defined in Sect. 4.4.2) that may be
@@ -5106,7 +5118,6 @@ BSCALE and BZERO keywords _should_ be copied verbatim into
 the header of the binary table containing the compressed image.
 Some images contain undefined pixel values; in uncompressed floating-point images these pixels have an IEEE NaN
 
-46
 
 compressed file size: decreasing _Q_ by a factor of two will decrease the file size by about one bit per pixel. In order to achieve
 the greatest amount of compression, one should use the smallest
@@ -5174,7 +5185,7 @@ the zero-valued pixels have special significance to the data
 analysis software, so that the value of these pixels _must not_
 be dithered.
 
-The process for generating a subtractive dither for a floatingpoint image is the following.
+The process for generating a subtractive dither for a floating-point image is the following.
 
 1. Generate a sequence of 10000 single-precision floating-point
 random numbers, RN, with a value between 0.0 and 1.0.
@@ -5201,8 +5212,9 @@ _I_ 1 = INT(RN( _I_ 0 ) ∗ 500.) (16)
 
 where _N_ tile is the row number in the binary table that is used
 to store the compressed bytes for that tile, ZDITHER0 is that
-value of that keyword, and RN(dom number in the sequence that was computed in the first _I_ 0 ) is the value of the _I_ 0 [th] [ran-]
-step. Note that _I_ 0 has a value in the range 0 to 9999 and _I_ 1
+value of that keyword, and RN( _I_ 0 ) is the value of the _I_<sub>0</sub><sup>th</sup> random
+number in the sequence that was computed in the first step. Note
+that _I_ 0 has a value in the range 0 to 9999 and _I_ 1
 has a value in the range 0 to 499. This method for computing
 _I_ 0 and _I_ 1 was chosen so that a different sequence of random
 numbers is used to compress successive tiles in the image,
@@ -5222,7 +5234,6 @@ even though it is not used.
 algorithm that is specified by the ZCMPTYPE keyword (use
 ’RICE 1’ by default).
 
-47
 
 7. Write the compressed byte stream into the
 COMPRESSED DATA column in the appropriate row of
@@ -5236,7 +5247,7 @@ respectively, in the same row of the binary table.
 #### 10.2.2. Preserving undefined pixels with lossy compression
 
 The undefined pixels in integer images are flagged by a reserved
-BLANK value and will be preserved if a lossless compression algorithm is used. (ZBLANK is used for undefined pixels in floatingpoint images.) If the image is compressed with a lossy algorithm,
+BLANK value and will be preserved if a lossless compression algorithm is used. (ZBLANK is used for undefined pixels in floating-point images.) If the image is compressed with a lossy algorithm,
 then some other technique _must_ be used to identify the undefined
 pixels in the image. In this case it is _recommended_ that the undefined pixels be recorded with the following procedure.
 
@@ -5280,7 +5291,6 @@ With only a few exceptions noted below, all the keywords and
 corresponding comment fields from the uncompressed table
 _must_ be copied verbatim, in order, into the header of the com
 
-48
 
 pressed table. Note in particular that the values of the reserved
 column descriptor keywords TTYPEn, TUNIT _n_, TSCAL _n_, TZERO _n_,
@@ -5437,7 +5447,6 @@ When decompressing, these descriptor values will be needed to
 write the decompressed VLAs back into the same location in the
 heap as in the original uncompressed table. Thus, the following
 
-49
 
 process _must_ be followed, in order, when compressing a VLA
 column within a tile. Refer to Pence et al. (2013) for additional
@@ -5505,7 +5514,6 @@ algorithm in the subsections below. If alternative compression
 algorithms require keywords beyond those defined below, they
 _must_ also be registered with the IAUFWG to reserve the associated keyword names.
 
-50
 
 <a id="1041-rice-compression"></a>
 #### 10.4.1. Rice compression
@@ -5684,7 +5692,6 @@ case that yields lossless compression, i.e. the decompressed
 image has exactly the same pixel values as the original image. SCALE > 0.0 leads to lossy compression, where SCALE
 determines how much of the noise is discarded.
 
-51
 
 <a id="appendix-a-syntax-of-keyword-records"></a>
 ## Appendix A. Syntax of keyword records
@@ -5753,7 +5760,6 @@ last continuation record
 initial kwd record and of any continuation kwd records in
 the order they occur, and the character string value of the
 
-52
 
 last continuation record.}
 
@@ -5922,7 +5928,6 @@ floating value
 _The content of this appendix has been superseded by Sect. 9 of_
 _the formal Standard, which derives from Rots et al. (2015)._
 
-53
 
 <a id="appendix-c-summary-of-keywords"></a>
 ## Appendix C. Summary of keywords
@@ -5991,7 +5996,6 @@ DATASUM ZDATASUM ZDATASUM
 (1) These keywords are further categorized in Table C.3. (2) Primary HDU, IMAGE extension, user-defined HDUs with same array structure.
 (3) Deprecated. (4) Only permitted in the primary HDU. (5) Only permitted in extension HDUs, immediately following the mandatory keywords.
 
-54
 
 Table C.3: General reserved _FITS_ keywords described in this document.
 
@@ -6011,7 +6015,6 @@ EPOCH [1]
 
 (1) Deprecated.
 
-55
 
 Table D.1: ASCII character set.
 
@@ -6084,7 +6087,8 @@ provided for informational purposes. It is not intended to be a comprehensive de
 to the IEEE standard.)
 _FITS_ recognizes all IEEE basic formats, including the special values.
 
-E.1. Basic formats
+<a id="e1-basic-formats"></a>
+### E.1. Basic formats
 
 Numbers in the single and double formats are composed of the following three fields:
 
@@ -6096,7 +6100,6 @@ The range of the unbiased exponent _E shall_ include every integer between two v
 reserved values _E_ _min_ − 1 to encode ±0 and denormalized numbers, and _E_ _max_ +1 to encode ±∞ and NaNs. The foregoing parameters
 are given in Table E.1. Each nonzero numerical value has just one encoding. The fields are interpreted as follows.
 
-56
 
 Table E.1: Summary of format parameters.
 
@@ -6127,7 +6130,8 @@ _s_ _e_ _f_
 
 msb lsb msb lsb ....order
 
-E.1.1. Single
+<a id="e11-single"></a>
+#### E.1.1. Single
 
 A 32-bit single-format number _X_ is divided as shown in Fig. E.1. The value _v_ of _X_ is inferred from its constituent fields.
 
@@ -6137,7 +6141,8 @@ A 32-bit single-format number _X_ is divided as shown in Fig. E.1. The value _v_
 4. If _e_ = 0 and _f_ ≠ 0, then _v_ = (−1) _[s]_ 2 _[e]_ [−][126] (0 • _f_ ) (denormalized numbers).
 5. If _e_ = 0 and _f_ = 0, then _v_ = (−1) _[s]_ 0 (zero).
 
-E.1.2. Double
+<a id="e12-double"></a>
+#### E.1.2. Double
 
 A 64-bit double-format number _X_ is divided as shown in Fig. E.2. The value _v_ of _X_ is inferred from its constituent fields.
 
@@ -6147,12 +6152,12 @@ A 64-bit double-format number _X_ is divided as shown in Fig. E.2. The value _v_
 4. If _e_ = 0 and _f_ ≠ 0, then _v_ = (−1) _[s]_ 2 _[e]_ [−][1022] (0 • _f_ ) (denormalized numbers).
 5. If _e_ = 0 and _f_ = 0, then _v_ = (−1) _[s]_ 0 (zero).
 
-E.2. Byte patterns
+<a id="e2-byte-patterns"></a>
+### E.2. Byte patterns
 
 Table E.2 shows the types of IEEE floating-point value, whether regular or special, corresponding to all double- and single-precision
 hexadecimal byte patterns.
 
-57
 
 Table E.2: IEEE floating-point formats.
 
@@ -6200,7 +6205,6 @@ FFFFFFFFFFFFFFFF FFFFFFFF
 
 1 Certain values _may_ be designated as _quiet_ NaN (no diagnostic when used) or _signaling_ (produces diagnostic when used) by particular implementations.
 
-58
 
 <a id="appendix-f-reserved-extension-type-names"></a>
 ## Appendix F. Reserved extension type names
@@ -6211,7 +6215,8 @@ type names registered as of the date this Standard was issued.) A
 current list is available from the _FITS_ Support Office website at
 [http://fits.gsfc.nasa.gov.](http://fits.gsfc.nasa.gov)
 
-F.1. Standard extensions
+<a id="f1-standard-extensions"></a>
+### F.1. Standard extensions
 
 These three extension types have been approved by the
 IAUFWG and are defined in Sect. 7 of this Standard document
@@ -6230,7 +6235,8 @@ rows can contain a mixture of numerical, logical, and character data entries. In
 a single-dimensioned array. Numeric data are kept in binary formats. Approved as a standard extension in 1994
 (Cotton et al. 1995).
 
-F.2. Conforming extensions
+<a id="f2-conforming-extensions"></a>
+### F.2. Conforming extensions
 
 These conventions meet the requirements for a conforming extension as defined in in Sect. 3.4.1 of this Standard, however they
 have not been formally approved or endorsed by the IAUFWG.
@@ -6246,7 +6252,7 @@ the AIPS data processing system developed at NRAO from
 about 1987 until it was replaced by BINTABLE in the early
 1990s. The format is defined in the ‘Going AIPS’ manual
 (Cotton et al. 1990), Chapter 14. It is very similar to the
-BINTABLE type except that it does not support the variablelength-array convention.
+BINTABLE type except that it does not support the variable-length-array convention.
 **–** 'FOREIGN␣' – This extension type is used to put a _FITS_
 wrapper about an arbitrary file, allowing a file or tree of files
 to be wrapped up in _FITS_ and later restored to disk. A full
@@ -6256,7 +6262,8 @@ _FITS_ conventions on the _FITS_ Support Office website.
 stream of binary-data values. The only known use of this extension type is to record telemetry header packets for data
 from the Hinode mission. The more-general FOREIGN extension type could also be used to store this type of data.
 
-F.3. Other suggested extension names
+<a id="f3-other-suggested-extension-names"></a>
+### F.3. Other suggested extension names
 
 There have been occasional suggestions for other extension
 names that might be used for other specific purposes. These include a COMPRESS extension for storing compressed images, a
@@ -6292,7 +6299,8 @@ MIME type ‘image/fits’ _may_ be used to describe _FITS_ primary HDUs that ha
 expected that most files described as ‘image/fits’ will have
 two-dimensional (NAXIS = 2) primary HDUs.
 
-G.1. MIME type ‘ application/fits ’
+<a id="g1-mime-type-applicationfits"></a>
+### G.1. MIME type ‘application/fits’
 
 A _FITS_ file described with the media type
 ‘application/fits’ _should_ conform to the published
@@ -6310,14 +6318,14 @@ type that satisfies the ‘Requirements for conforming extensions’
 contain zero to 999 dimensions with zero-or-more pixels along
 each dimension.
 
-59
 
 The primary HDU _may_ use the random-groups convention,
 in which the dimension of the first axis is zero and the keywords
 GROUPS. PCOUNT and GCOUNT appear in the header. NAXIS1 = 0
 and GROUPS = T is the signature of random groups; see Sect. 6.
 
-G.1.1. Recommendations for application writers
+<a id="g11-recommendations-for-application-writers"></a>
+#### G.1.1. Recommendations for application writers
 
 An application intended to handle ‘application/fits’ _should_
 be able to provide a user with a manifest of all of the HDUs that
@@ -6353,7 +6361,8 @@ A primary HDU containing a single image along with keyword/value pairs of metada
 **–** A primary HDU with NAXIS1 = 0 and GROUPS = T followed
 by random-groups data records of complex fringe visibilities.
 
-G.2. MIME type ‘ image/fits ’
+<a id="g2-mime-type-imagefits"></a>
+### G.2. MIME type ‘image/fits’
 
 A _FITS_ file described with the media type ‘image/fits’ _should_
 have a primary HDU with positive integer values for the NAXIS
@@ -6370,7 +6379,6 @@ or more conforming extension HDUs following their primary
 HDUs. These extension HDUs _may_ contain standard, non-linear,
 world-coordinate system (WCS) information in the form of tables or images. The extension HDUs _may_ also contain other,
 
-60
 
 non-standard metadata pertaining to the image in the primary
 HDU in the forms of keywords and tables.
@@ -6383,7 +6391,8 @@ is also valid as a file of media type ‘application/fits’. The
 choice of classification depends on the context and intended us
 age.
 
-G.2.1. Recommendations for application writers
+<a id="g21-recommendations-for-application-writers"></a>
+#### G.2.1. Recommendations for application writers
 
 An application that is intended to handle ‘image/fits’ _should_
 be able to provide a user with a manifest of all of the HDUs that
@@ -6437,7 +6446,8 @@ keyword (Greisen et al. 2006) to declare the dimensionality of
 such degenerate axes, so that NAXIS can be used to convey the
 number of non-degenerate axes.
 
-G.3. File extensions
+<a id="g3-file-extensions"></a>
+### G.3. File extensions
 
 The _FITS_ Standard originated in the era when files were stored
 and exchanged via magnetic tape; it does not prescribe any
@@ -6455,7 +6465,8 @@ listing in a media type registration.
 _This appendix is not part of the FITS Standard, but is included_
 _for informational purposes_ .
 
-H.1. Differences between the requirements in this Standard
+<a id="h1-differences-between-the-requirements"></a>
+### H.1. Differences between the requirements in this Standard
 and the requirements in the original FITS papers.
 
 1. Sect. 4.1.2: The original _FITS_ definition paper (Wells et al.
@@ -6483,7 +6494,8 @@ comma and enclosed in parentheses.
 the appearance of the SIMPLE keyword in extensions nor the
 XTENSION keyword in the primary header.
 
-H.2. List of modification to the FITS Standard, Version 3.0
+<a id="h2-list-of-modification-to-version-30"></a>
+### H.2. List of modification to the FITS Standard, Version 3.0
 
 After the IAUFWG officially approved Version 3.0 of the _FITS_
 Standard in 2008, the following additional corrections, clarifications, or format modifications have been made to the document.
@@ -6539,14 +6551,14 @@ for the LOG, GRI, GRA, and TAB spectral algorithm codes
 was clarified.
 **–** In Table C.2 the EXTNAME, EXTVER, and EXTLEVEL keywords were moved under the ‘All HDUs’ column because they are now allowed in the primary array header.
 
-61
 
 **–**
 The last paragraph of Sect. 4.1.2.3 was corrected to state
 that the ASCII-text characters have hexadecimal values
 20 through 7E, not 41 through 7E.
 
-H.3. List of modifications to the latest FITS Standard
+<a id="h3-list-of-modifications-to-the-latest-standard"></a>
+### H.3. List of modifications to the latest FITS Standard
 
 1. The representation of time coordinates has been incorporated by reference from Rots et al. (2015) and is summarized in Sect. 9. Cross-references have been inserted in preexisting sections of the Standard (namely in Sects. 4.2.7,
 4.3, 4.4.2.1, 4.4.2.2 and 5.4, as well as in various places of
@@ -6569,7 +6581,7 @@ to signal the possible presence of long strings in the
 HDU. The use of this keyword is no longer _required_ or
 _recommended_ .
 **–** Usage of the convention was _not recommended_ for reserved or mandatory keywords. Now it is _explicitly for-_
-_bidden_ unless keywords are explicitly declared longstring.
+_bidden_ unless keywords are explicitly declared long-string.
 
 **–**
 To avoid ambiguities in the application of the previous
@@ -6605,7 +6617,6 @@ and registered in 2007. The text of the original convention
 
 cern:
 
-62
 
 **–**
 the omission of some additional implementation guidelines, and
@@ -6668,7 +6679,8 @@ dropped.
 while it was originally integer.
 **–** In Table 36 (and Sect. 10.3.5) the ’NOCOMPRESS’ algorithm is explicitly mentioned.
 
-H.4. List of modifications for language editing
+<a id="h4-list-of-modifications-for-language-editing"></a>
+### H.4. List of modifications for language editing
 
 1. Apply systematically L [A] TEX macros for keyword names and
 values, and for RFC 2119 expressions, according to instructions reported in the L [A] TEX source preamble (for future editors of the Standard).
@@ -6686,7 +6698,7 @@ commas in several places, adding a few non-breaking spaces,
 and better handling of references to sections, etc.
 7. Several cases of minor rewording.
 8. Express small numbers in letter form (one to nine), not in numerals (1 to 9), wherever sensible. However, there is the customary exception for normalization in sentences and headings that also contain numbers greater than nine.
-9. Compound nouns are systematically hyphenated to highlight the correct grouping (and hence meaning) of the components. This includes the attributive references to ASCIItable, binary-table, and random-groups.
+9. Compound nouns are systematically hyphenated to highlight the correct grouping (and hence meaning) of the components. This includes the attributive references to ASCII-table, binary-table, and random-groups.
 10. Improve the aesthetics of some tables.
 
 <a id="appendix-i-random-number-generator"></a>
@@ -6730,7 +6742,8 @@ equal 1 043 618 065.
 _This appendix is not part of the FITS Standard, but is included_
 _for informational purposes_ .
 
-J.1. Recommended CHECKSUM keyword implementation
+<a id="j1-recommended-checksum-keyword-implementation"></a>
+### J.1. Recommended CHECKSUM keyword implementation
 
 The _recommended_ CHECKSUM keyword algorithm described here
 generates a 16-character ASCII string that forces the 32-bit ones’
@@ -6763,12 +6776,13 @@ keyword value).
 4. Compute the bit-wise complement of the 32-bit total HDU
 checksum value by replacing all 0 bits with 1 and all 1 bits
 with 0.
-5. Encode the complement of the HDU checksum into a 16character ASCII string using the algorithm described in
+5. Encode the complement of the HDU checksum into a 16-character ASCII string using the algorithm described in
 Sect. J.2
-6. Replace the initial CHECKSUM keyword value with this 16character encoded string. The checksum for the entire HDU
+6. Replace the initial CHECKSUM keyword value with this 16-character encoded string. The checksum for the entire HDU
 will now be equal to negative 0.
 
-J.2. Recommended ASCII encoding algorithm
+<a id="j2-recommended-ascii-encoding-algorithm"></a>
+### J.2. Recommended ASCII encoding algorithm
 
 The algorithm described here is used to generate an ASCII
 string, which, when substituted for the value of the CHECKSUM
@@ -6784,7 +6798,6 @@ also ensures that the 16 bytes that make up the four integers all
 have values that correspond to ASCII alpha-numeric characters
 in the range 0–9, A–Z, and a–z.
 
-63
 
 Fig. J.1: Only ASCII alpha-numeric characters are used to encode the checksum – punctuation is excluded
 
@@ -6804,7 +6817,7 @@ b _62_ c _63_ d _64_ e _65_ f _66_ g _67_ h _68_ i _69_ j _6a_ k _6b_
 
 l _6c_ m _6d_ n _6e_ o _6f_ p _70_ q _71_ r _72_
 
-
+_Figure 1. Only ASCII alpha-numerics are used to encode the checksum — punctuation is excluded._
 
 1. Begin with the ones’ complement (replace 0s with 1s and
 1s with 0s) of the 32-bit checksum accumulated over all the
@@ -6846,11 +6859,10 @@ in this checksum application.
 5. Cyclically shift all 16 characters in the string one place to the
 right, rotating the last character ( _D_ 4) to the beginning of the
 string. This rotation compensates for the fact that the fixed
-format _FITS_ character-string values are not aligned on fourbyte word boundaries in the _FITS_ file. (The first character
+format _FITS_ character-string values are not aligned on four-byte word boundaries in the _FITS_ file. (The first character
 of the string starts in Column 12 of the header card image,
 rather than Column 13).
 
-64
 
 6. Write this string of 16 characters to the value of the
 CHECKSUM keyword, replacing the initial string of 16 ASCII
@@ -6863,7 +6875,8 @@ by interpreting the string as four 32-bit unsigned integers. This
 can be used, for instance, to read the value of CHECKSUM into the
 software when verifying or updating a HDU.
 
-J.3. Encoding example
+<a id="j3-encoding-example"></a>
+### J.3. Encoding example
 
 This example illustrates the encoding algorithm given in
 Sect. J.2 Consider a _FITS_ HDU whose ones’ complement checksum is 868229149, which is equivalent to hex 33C0201D. This
@@ -6917,7 +6930,8 @@ the comment field).
 DATASUM = '2503531142' / 2015-06-28T18:30:45
 CHECKSUM= 'hcHjjc9ghcEghc9g' / 2015-06-28T18:30:45
 
-J.4. Incremental updating of the checksum
+<a id="j4-incremental-updating-of-the-checksum"></a>
+### J.4. Incremental updating of the checksum
 
 The symmetry of ones’ complement arithmetic also means that
 after modifying a _FITS_ HDU, the checksum _may_ be incrementally updated using simple arithmetic without accumulating the
@@ -6939,7 +6953,8 @@ side of the equation cannot be distributed over the contents of the
 parentheses due to the dual nature of zero in ones’ complement
 arithmetic (Rijsinghani 1994).
 
-J.5. Example C code for accumulating the checksum
+<a id="j5-example-c-code-for-accumulating-the-checksum"></a>
+### J.5. Example C code for accumulating the checksum
 
 The ones’ complement checksum is simple and fast to compute. This routine assumes that the input records are a multiple of four bytes long (as is the case for _FITS_ logical records ),
 but it is not difficult to allow for odd length records if necessary. To use this routine, first initialize the CHECKSUM keyword
@@ -6984,7 +6999,8 @@ locarry = lo >> 16;
 *sum32 = (hi << 16) + lo;
 }
 
-J.6. Example C code for ASCII encoding
+<a id="j6-example-c-code-for-ascii-encoding"></a>
+### J.6. Example C code for ASCII encoding
 
 This routine encodes the complement of the 32-bit HDU checksum value into a 16-character string. The byte alignment of the
 string is permuted one place to the right for _FITS_ to left justify
@@ -7055,7 +7071,6 @@ COMMENT, HISTORY, and blank keywords in the primary header
 _must not_ be inherited. It is assumed also that the table-specific
 keywords described in Sect. 7.2 and 7.3, and the table-specific
 
-65
 
 WCS keywords described in Sect. 8, cannot be inherited since
 they will never appear in the primary header. If the same keyword is present in both the primary header and the extension
@@ -7113,7 +7128,6 @@ column (given by TTYPE _n_ ) _must_ be a valid keyword name, and
 
 16 [http://fits.gsfc.nasa.gov/registry/sdfits.html](http://fits.gsfc.nasa.gov/registry/sdfits.html)
 
-66
 
 the column’s constant value _must_ be amenable to representation
 as a valid keyvalue.
@@ -7232,7 +7246,6 @@ _FITS_ [Support Office; available online: http://fits.gsfc.nasa.gov/](http://fit
 Ziv, J., & Lempel, A. 1977, IEEE Transactions on Information Theory, 23 (3),
 337
 
-67
 
 <a id="index"></a>
 ## Index
@@ -7357,7 +7370,6 @@ keyword, valid characters, 6
 
 logical value, 8, 25, 26
 
-68
 
 magnetic tape, 6
 min and max in columns, keywords, 20, 24, 62
@@ -7448,5 +7460,3 @@ WCS, spectral, 34
 WCS, timing, 36, 62
 
 XTENSION, 3, 5, 11, 15, 18, 19, 22
-
-69
