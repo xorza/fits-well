@@ -27,6 +27,9 @@
   `Compression` enum. Codec-specific settings live in validated `Gzip` and
   `Hcompress` values, while tiling and float quantization remain in
   `CompressionOptions`.
+- `Hcompress::lossy` now accepts a floating-point FITS `SCALE` noise multiplier
+  instead of an absolute integer tile scale. `Hcompress` and `Compression` no
+  longer implement `Eq`.
 - `read_image_view` now returns `BorrowedImage`, pairing its scratch-backed
   `ImageView` with shape and scaling metadata. `RawImage` was renamed to
   `ReadImage`, and the owned result formerly called `UnsignedView` is now
@@ -248,10 +251,32 @@
   fields, including leading and trailing spaces; numeric parsing still trims padding.
 - Tiled compression now preserves float images' original `BSCALE`/`BZERO`
   metadata across quantized and raw-float fallback tiles.
-- Compressed-table writing now rejects header/table layout mismatches and original
-  heap data instead of emitting self-contradictory or lossy containers. `THEAP`,
+- Compressed-table writing now supports fixed columns, P/Q heap arrays, and
+  `NOCOMPRESS`. VLA streams are compressed separately, their Gzip-compressed
+  descriptor block uses the FITS 4.0 ordering, and reading also accepts existing
+  CFITSIO files that reverse the two descriptor arrays. `THEAP`, `PCOUNT`,
   `CHECKSUM`, and `DATASUM` metadata is translated through the standard `Z*`
   keywords and restored without retaining stale container values.
+- `RICE_1` handles the standard `BYTEPIX = 8` form without lossy floating-point
+  statistics or 32-bit bit-buffer truncation. Odd final blocks use the canonical
+  integer half-block statistic, with a bit-exact CFITSIO regression. Compression
+  parameter scans honor canonical `ZNAMEi` records after omitted/defaulted indices
+  and reject nonstandard Rice parameter values; an omitted `BYTEPIX` uses Table
+  37's four-byte default rather than inferring the logical image type.
+- HCOMPRESS writing enforces two-dimensional images, records `SCALE` as a real
+  noise multiplier, derives each tile's absolute stream scale from its measured
+  noise, and omits the obsolete `SMOOTH=0` parameter. Its signed 64-bit transform
+  now reads and writes wide `sumall` values and up to 63 bit planes, matches an
+  external 35-plane golden byte-for-byte, fixes the odd-dimension corner
+  coefficient, and safely rejects only transforms that cannot fit the stream.
+  Float Gzip/NOCOMPRESS output no longer emits Rice-only `BYTEPIX` parameters.
+- Compressed-image reading applies `NULL_PIXEL_MASK` tiles and restores integer
+  `BLANK` values or floating NaNs for Gzip, Rice, PLIO, and `NOCOMPRESS` mask
+  codecs. Lossy HCOMPRESS writing rejects tiles containing the declared `BLANK`
+  until null-mask authoring is available.
+- Random-groups `NAXIS = 1` sizing uses the empty product required by Eq. 4, and
+  generic grouped HDUs accept the standard nonnegative `GCOUNT` domain.
+- `TIMEPIXR` and `ZDITHER0` now enforce their normative ranges.
 - GZIP, Rice, PLIO, and HCOMPRESS decoders now reject truncated streams, malformed
   control data, decompression bombs, and tiles whose decoded size differs from the
   declared geometry instead of manufacturing zero-valued pixels or reading out of

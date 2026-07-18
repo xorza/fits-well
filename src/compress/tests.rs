@@ -1,4 +1,5 @@
 use crate::bitpix::Bitpix;
+use crate::compress;
 use crate::compress::convert::{be_to_i64_into, i32_to_be_into, i64_to_be, i64_to_be_into};
 use crate::compress::geometry::{TileGeometry, TileScratch};
 use crate::compress::*;
@@ -50,8 +51,12 @@ fn typed_compression_configuration_rejects_impossible_values() {
         Err(FitsError::InvalidValue { card }) if card == "gzip compression level 10 is outside 0..=9"
     ));
     assert!(matches!(
-        Hcompress::lossy(0),
+        Hcompress::lossy(0.0),
         Err(FitsError::InvalidValue { card }) if card == "lossy HCOMPRESS scale 0 must be positive"
+    ));
+    assert!(matches!(
+        Hcompress::lossy(f64::NAN),
+        Err(FitsError::InvalidValue { .. })
     ));
     assert!(matches!(
         CompressionOptions::default().with_quantization(f64::NAN, DitherMethod::None),
@@ -59,6 +64,15 @@ fn typed_compression_configuration_rejects_impossible_values() {
     ));
     assert_eq!(Compression::GZIP.name(), "GZIP_1");
     assert_eq!(Compression::GZIP_SHUFFLED.name(), "GZIP_2");
+}
+
+#[test]
+fn compression_parameter_indices_use_the_standard_canonical_form() {
+    assert_eq!(compress::parameter_index("ZNAME1"), Some(1));
+    assert_eq!(compress::parameter_index("ZNAME999"), Some(999));
+    for keyword in ["ZNAME", "ZNAME0", "ZNAME01", "ZNAME1000", "ZNAMEA"] {
+        assert_eq!(compress::parameter_index(keyword), None, "{keyword}");
+    }
 }
 
 #[test]
@@ -243,6 +257,12 @@ fn compression_write_round_trips_through_decode() {
         w.write_compressed_image(&image, compression, &CompressionOptions::tiled(tiles))
             .unwrap();
         let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+        if matches!(compression, Compression::Hcompress(_)) {
+            use crate::header::value::Value;
+            let header = &r.hdus()[1].header;
+            assert!(matches!(header.get("ZVAL1"), Some(Value::Real(0.0))));
+            assert_eq!(header.get_text("ZNAME2").unwrap(), None);
+        }
         let back = r.read_image(1).unwrap();
         assert_eq!(back.shape, vec![24, 16], "{case}");
         match back.decode() {
@@ -325,6 +345,7 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
             Compression::Rice,
             Compression::GZIP,
             Compression::GZIP_SHUFFLED,
+            Compression::None,
         ] {
             let cmptype = compression.name();
             let mut w = FitsWriter::new(Cursor::new(Vec::new()));
@@ -332,6 +353,15 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
                 .unwrap();
             let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
             let header = &r.hdus()[1].header;
+            match compression {
+                Compression::Rice => {
+                    assert_eq!(header.get_text("ZNAME1").unwrap(), Some("BLOCKSIZE"));
+                    assert_eq!(header.get_text("ZNAME2").unwrap(), Some("BYTEPIX"));
+                }
+                _ => {
+                    assert_eq!(header.get_text("ZNAME1").unwrap(), None);
+                }
+            }
             assert_eq!(
                 header.get_real("BSCALE").unwrap(),
                 Some(2.5),
@@ -415,6 +445,71 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
             );
         }
     }
+}
+
+#[test]
+fn hcompress_writer_enforces_standard_image_constraints() {
+    use crate::data::{Image, Scaling};
+    use crate::writer::FitsWriter;
+
+    let line = Image::new(vec![4], vec![1i16, 2, 3, 4]).unwrap();
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_compressed_image(
+            &line,
+            Compression::Hcompress(Hcompress::default()),
+            &CompressionOptions::default(),
+        ),
+        Err(FitsError::UnsupportedCompression { name })
+            if name == "HCOMPRESS_1 requires a two-dimensional image"
+    ));
+
+    let float = Image::new(vec![4, 1], vec![1.0f32, 2.0, 3.0, 4.0]).unwrap();
+    assert!(matches!(
+        writer.write_compressed_image(
+            &float,
+            Compression::Hcompress(Hcompress::lossy(2.0).unwrap()),
+            &CompressionOptions::default(),
+        ),
+        Err(FitsError::UnsupportedCompression { name })
+            if name == "HCOMPRESS_1 for float images (write)"
+    ));
+
+    let extreme = Image::new(vec![2, 2], vec![i64::MAX; 4]).unwrap();
+    assert!(matches!(
+        writer.write_compressed_image(
+            &extreme,
+            Compression::Hcompress(Hcompress::default()),
+            &CompressionOptions::tiled([2, 2]),
+        ),
+        Err(FitsError::UnsupportedCompression { name })
+            if name == "HCOMPRESS_1 tile exceeds the signed 64-bit stream range"
+    ));
+
+    let undefined = Image::new_scaled(
+        vec![8, 8],
+        (0..64)
+            .map(|index| {
+                let x = index % 8;
+                x * x
+            })
+            .collect::<Vec<i32>>(),
+        Scaling {
+            bscale: 1.0,
+            bzero: 0.0,
+            blank: Some(0),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        writer.write_compressed_image(
+            &undefined,
+            Compression::Hcompress(Hcompress::lossy(2.0).unwrap()),
+            &CompressionOptions::tiled([8, 8]),
+        ),
+        Err(FitsError::UnsupportedCompression { name })
+            if name == "lossy HCOMPRESS_1 with undefined pixels requires a null mask"
+    ));
 }
 
 #[test]
@@ -623,47 +718,133 @@ fn dither2_quantize_round_trips() {
 }
 
 #[test]
-fn hcompress_lossy_write_round_trips_within_scale() {
-    use crate::data::{Image, ImageData, Scaling};
+fn hcompress_writer_converts_noise_multiplier_to_tile_scale() {
+    use crate::data::Image;
+    use crate::header::value::Value;
     use crate::writer::FitsWriter;
-    use std::io::Cursor;
 
-    // A smooth-ish 32×32 i32 image; lossy HCOMPRESS with SCALE=4.
-    let samples: Vec<i32> = (0..32 * 32)
-        .map(|i| 100 + 5 * (i % 32) + 3 * (i / 32))
+    // For f(x,y)=x²+3y, every third-order row difference is exactly 8, so the
+    // noise estimate is 0.6052697×8. A SCALE multiplier of 2 therefore produces
+    // the absolute HCOMPRESS stream scale round(9.6843152)=10.
+    let samples: Vec<i32> = (0..8 * 8)
+        .map(|index| {
+            let x = index % 8;
+            let y = index / 8;
+            x * x + 3 * y
+        })
         .collect();
-    let image = Image {
-        shape: vec![32, 32],
-        samples: ImageData::I32(samples.clone()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
-    };
+    let image = Image::new(vec![8, 8], samples).unwrap();
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     w.write_compressed_image(
         &image,
-        Compression::Hcompress(Hcompress::lossy(4).unwrap()),
-        &CompressionOptions::tiled([32, 32]),
+        Compression::Hcompress(Hcompress::lossy(2.0).unwrap()),
+        &CompressionOptions::tiled([8, 8]),
     )
     .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
-    let back = match r.read_image(1).unwrap().decode() {
-        ImageData::I32(v) => v,
+    assert!(matches!(
+        r.hdus()[1].header.get("ZVAL1"),
+        Some(Value::Real(2.0))
+    ));
+    let table = r.read_table(1).unwrap();
+    let stream = table
+        .column_by_name("COMPRESSED_DATA")
+        .unwrap()
+        .vla_column()
+        .unwrap()
+        .cell(0)
+        .unwrap()
+        .bytes;
+    assert_eq!(&stream[..2], &[0xDD, 0x99]);
+    assert_eq!(i32::from_be_bytes(stream[10..14].try_into().unwrap()), 10);
+}
+
+#[test]
+fn hcompress_lossless_write_round_trips_exactly() {
+    use crate::data::{Image, ImageData};
+    use crate::writer::FitsWriter;
+
+    let samples: Vec<i32> = (0..16 * 16)
+        .map(|index| {
+            let x = index % 16;
+            let y = index / 16;
+            x * x - 3 * y
+        })
+        .collect();
+    let image = Image::new(vec![16, 16], samples.clone()).unwrap();
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer
+        .write_compressed_image(
+            &image,
+            Compression::Hcompress(Hcompress::default()),
+            &CompressionOptions::tiled([16, 16]),
+        )
+        .unwrap();
+    let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
+    match reader.read_image(1).unwrap().decode() {
+        ImageData::I32(actual) => assert_eq!(actual, samples),
         other => panic!("expected I32, got {other:?}"),
     };
-    // Lossy: each pixel within the quantization scale (±scale), and not identical.
-    let max_err = samples
-        .iter()
-        .zip(&back)
-        .map(|(a, b)| (a - b).abs())
-        .max()
+
+    let wide = vec![i32::MAX, i32::MAX, i32::MAX, i32::MAX];
+    let image = Image::new(vec![2, 2], wide.clone()).unwrap();
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer
+        .write_compressed_image(
+            &image,
+            Compression::Hcompress(Hcompress::default()),
+            &CompressionOptions::tiled([2, 2]),
+        )
         .unwrap();
+    let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
+    assert_eq!(reader.read_image(1).unwrap().decode(), ImageData::I32(wide));
+
+    let wide = vec![
+        1i64 << 40,
+        -(1i64 << 40),
+        (1i64 << 40) + 1,
+        -(1i64 << 40) + 2,
+    ];
+    let image = Image::new(vec![2, 2], wide.clone()).unwrap();
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer
+        .write_compressed_image(
+            &image,
+            Compression::Hcompress(Hcompress::default()),
+            &CompressionOptions::tiled([2, 2]),
+        )
+        .unwrap();
+    let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
+    assert_eq!(reader.read_image(1).unwrap().decode(), ImageData::I64(wide));
+}
+
+#[test]
+fn hcompress_64_bit_transform_matches_external_golden() {
+    const RAW: &[u8] = include_bytes!("../../tests/data/fits/hcomp_wide_i32.raw");
+    const COMPRESSED: &[u8] = include_bytes!("../../tests/data/fits/hcomp_wide_i32.huf");
+
+    let values: Vec<i64> = RAW
+        .chunks_exact(4)
+        .map(|bytes| i32::from_be_bytes(bytes.try_into().unwrap()) as i64)
+        .collect();
+    assert_eq!(values.len(), 100 * 100);
     assert!(
-        max_err <= 4,
-        "HCOMPRESS lossy error {max_err} exceeds scale"
+        i64::from_be_bytes(COMPRESSED[14..22].try_into().unwrap()) > i32::MAX as i64,
+        "the golden must require a wide H-transform accumulator"
     );
+    assert!(
+        COMPRESSED[22..25].iter().any(|&planes| planes > 31),
+        "the golden must require more than 31 coefficient bit planes"
+    );
+
+    let mut scratch = hcompress::HcompressScratch::default();
+    let encoded = hcompress::hcompress_tile_encode(&values, &[100, 100], 0, &mut scratch).unwrap();
+    assert_eq!(encoded, COMPRESSED);
+
+    let mut decoded = Vec::new();
+    hcompress::hcompress_tile_into(COMPRESSED, false, values.len(), &mut decoded, &mut scratch)
+        .unwrap();
+    assert_eq!(decoded, values);
 }
 
 #[test]
@@ -783,6 +964,142 @@ fn decompresses_nocompress_tile_verbatim() {
     let img = decompress_image(&h, &table).unwrap();
     assert_eq!(img.shape, vec![2, 2]);
     assert_eq!(img.samples, ImageData::I16(vec![1, 2, 3, 4]));
+
+    let mut invalid_hcompress = h.clone();
+    invalid_hcompress
+        .set_internal("ZCMPTYPE", "HCOMPRESS_1")
+        .set_internal("ZNAXIS", 1)
+        .set_internal("ZNAXIS1", 4);
+    assert!(matches!(
+        decompress_image(&invalid_hcompress, &table),
+        Err(FitsError::UnsupportedCompression { name })
+            if name == "HCOMPRESS_1 requires a two-dimensional image"
+    ));
+}
+
+#[test]
+fn compressed_integer_null_mask_restores_blank_pixels() {
+    use crate::data::ImageData;
+    use crate::header::Header;
+    use crate::table_impl::BinTable;
+
+    let gzip2 = gzip::gzip2_encode(
+        &[0, 1],
+        1,
+        gzip::DEFAULT_GZIP_LEVEL,
+        &mut gzip::GzipScratch::default(),
+    );
+    let rice = rice::rice_encode(&[0i64, 1], 1, 32, &mut rice::RiceScratch::default());
+    let plio = plio::plio_encode(&[0i64, 1])
+        .unwrap()
+        .into_iter()
+        .flat_map(i16::to_be_bytes)
+        .collect();
+    for (codec, mask) in [
+        (
+            "GZIP_1",
+            gzip::gzip_encode(&[0, 1], gzip::DEFAULT_GZIP_LEVEL),
+        ),
+        ("GZIP_2", gzip2),
+        ("RICE_1", rice),
+        ("PLIO_1", plio),
+        ("NOCOMPRESS", vec![0, 1]),
+    ] {
+        let mut h = Header::new();
+        h.set_internal("XTENSION", "BINTABLE")
+            .set_internal("BITPIX", 8)
+            .set_internal("NAXIS", 2)
+            .set_internal("NAXIS1", 16)
+            .set_internal("NAXIS2", 1)
+            .set_internal("PCOUNT", 4 + mask.len() as i64)
+            .set_internal("GCOUNT", 1)
+            .set_internal("TFIELDS", 2)
+            .set_internal("TFORM1", "1PB(4)")
+            .set_internal("TTYPE1", "COMPRESSED_DATA")
+            .set_internal("TFORM2", format!("1PB({})", mask.len()))
+            .set_internal("TTYPE2", "NULL PIXEL MASK")
+            .set_internal("ZIMAGE", true)
+            .set_internal("ZCMPTYPE", "NOCOMPRESS")
+            .set_internal("ZMASKCMP", codec)
+            .set_internal("ZBITPIX", 16)
+            .set_internal("ZNAXIS", 2)
+            .set_internal("ZNAXIS1", 2)
+            .set_internal("ZNAXIS2", 1)
+            .set_internal("ZTILE1", 2)
+            .set_internal("ZTILE2", 1)
+            .set_internal("BLANK", -999);
+        let mut data = Vec::new();
+        data.extend_from_slice(&4i32.to_be_bytes());
+        data.extend_from_slice(&0i32.to_be_bytes());
+        data.extend_from_slice(&(mask.len() as i32).to_be_bytes());
+        data.extend_from_slice(&4i32.to_be_bytes());
+        data.extend_from_slice(&10i16.to_be_bytes());
+        data.extend_from_slice(&20i16.to_be_bytes());
+        data.extend_from_slice(&mask);
+        let table = BinTable::from_data(&h, data).unwrap();
+        assert_eq!(
+            decompress_image(&h, &table).unwrap().samples,
+            ImageData::I16(vec![10, -999]),
+            "{codec}"
+        );
+
+        let mut missing_blank = h.clone();
+        missing_blank.remove_all("BLANK");
+        assert!(matches!(
+            decompress_image(&missing_blank, &table),
+            Err(FitsError::MissingKeyword { name: "BLANK" })
+        ));
+    }
+}
+
+#[test]
+fn compressed_float_null_mask_restores_nan_pixels() {
+    use crate::data::ImageData;
+    use crate::header::Header;
+    use crate::table_impl::BinTable;
+
+    let mut h = Header::new();
+    h.set_internal("XTENSION", "BINTABLE")
+        .set_internal("BITPIX", 8)
+        .set_internal("NAXIS", 2)
+        .set_internal("NAXIS1", 32)
+        .set_internal("NAXIS2", 1)
+        .set_internal("PCOUNT", 10)
+        .set_internal("GCOUNT", 1)
+        .set_internal("TFIELDS", 4)
+        .set_internal("TFORM1", "1PB(8)")
+        .set_internal("TTYPE1", "COMPRESSED_DATA")
+        .set_internal("TFORM2", "1PB(2)")
+        .set_internal("TTYPE2", "NULL_PIXEL_MASK")
+        .set_internal("TFORM3", "1D")
+        .set_internal("TTYPE3", "ZSCALE")
+        .set_internal("TFORM4", "1D")
+        .set_internal("TTYPE4", "ZZERO")
+        .set_internal("ZIMAGE", true)
+        .set_internal("ZCMPTYPE", "NOCOMPRESS")
+        .set_internal("ZMASKCMP", "NOCOMPRESS")
+        .set_internal("ZBITPIX", -32)
+        .set_internal("ZNAXIS", 2)
+        .set_internal("ZNAXIS1", 2)
+        .set_internal("ZNAXIS2", 1)
+        .set_internal("ZTILE1", 2)
+        .set_internal("ZTILE2", 1);
+    let mut data = Vec::new();
+    data.extend_from_slice(&8i32.to_be_bytes());
+    data.extend_from_slice(&0i32.to_be_bytes());
+    data.extend_from_slice(&2i32.to_be_bytes());
+    data.extend_from_slice(&8i32.to_be_bytes());
+    data.extend_from_slice(&1.0f64.to_be_bytes());
+    data.extend_from_slice(&0.0f64.to_be_bytes());
+    data.extend_from_slice(&10i32.to_be_bytes());
+    data.extend_from_slice(&20i32.to_be_bytes());
+    data.extend_from_slice(&[1, 0]);
+    let table = BinTable::from_data(&h, data).unwrap();
+    let ImageData::F32(values) = decompress_image(&h, &table).unwrap().samples else {
+        panic!("expected F32")
+    };
+    assert!(values[0].is_nan());
+    assert_eq!(values[1], 20.0);
 }
 
 #[test]
@@ -833,6 +1150,15 @@ fn zblank_column_overrides_keyword_per_tile() {
     };
     assert_eq!(px[0], 25.0);
     assert!(px[1].is_nan());
+
+    for invalid in [0, 10_001] {
+        let mut invalid_dither = h.clone();
+        invalid_dither.set_internal("ZDITHER0", invalid);
+        assert!(matches!(
+            decompress_image(&invalid_dither, &table),
+            Err(FitsError::KeywordOutOfRange { name: "ZDITHER0" })
+        ));
+    }
 
     let mut mistyped_header = h.clone();
     mistyped_header.set_internal("ZBITPIX", "not an integer");
@@ -977,6 +1303,7 @@ fn table_compression_round_trips() {
         check_table_roundtrip(Compression::GZIP, rpt);
         check_table_roundtrip(Compression::GZIP_SHUFFLED, rpt);
         check_table_roundtrip(Compression::Rice, rpt);
+        check_table_roundtrip(Compression::None, rpt);
     }
 }
 
@@ -1030,7 +1357,7 @@ fn decodes_a_cfitsio_compressed_table() {
 }
 
 #[test]
-fn table_compression_rejects_metadata_mismatches_and_source_heap() {
+fn table_compression_rejects_metadata_mismatches() {
     use crate::header::Header;
     use crate::header::value::Value;
 
@@ -1079,28 +1406,6 @@ fn table_compression_rejects_metadata_mismatches_and_source_heap() {
     assert!(matches!(
         compress_table(&reserved, &table, 1, Compression::GZIP, &mut Vec::new()),
         Err(FitsError::TableMetadataMismatch { name }) if name == "ZTABLE"
-    ));
-
-    let mut heap_header = header.clone();
-    heap_header.set_internal("PCOUNT", 4);
-    let mut heap_data = rows;
-    heap_data.extend_from_slice(&[1, 2, 3, 4]);
-    let heap_table = BinTable::from_data(&heap_header, heap_data).unwrap();
-    assert!(matches!(
-        compress_table(&heap_header, &heap_table, 1, Compression::GZIP, &mut Vec::new()),
-        Err(FitsError::UnsupportedCompression { name })
-            if name == "binary table with PCOUNT > 0"
-    ));
-
-    let mut compressed_data = Vec::new();
-    let mut compressed_header =
-        compress_table(&header, &table, 1, Compression::GZIP, &mut compressed_data).unwrap();
-    let compressed_table = BinTable::from_data(&compressed_header, compressed_data).unwrap();
-    compressed_header.set_internal("ZPCOUNT", 4);
-    assert!(matches!(
-        uncompress_table(&compressed_header, &compressed_table),
-        Err(FitsError::UnsupportedCompression { name })
-            if name == "binary table with PCOUNT > 0"
     ));
 }
 
@@ -1175,15 +1480,62 @@ fn table_compression_restores_reserved_metadata_exactly() {
 }
 
 #[test]
-fn compressed_table_with_vla_column_is_rejected_cleanly() {
-    // `comp_table_vla.fits` (from `fpack -tableonly` of a table with a `PJ` VLA
-    // column) — decoding VLA columns inside a compressed table is not yet
-    // implemented, so it must error rather than misread or panic.
+fn decodes_a_cfitsio_compressed_table_with_a_vla_column() {
     let mut f = open("comp_table_vla.fits");
-    assert!(matches!(
-        f.read_compressed_table(1),
-        Err(FitsError::UnsupportedCompression { .. })
-    ));
+    let table = f.read_compressed_table(1).unwrap();
+    assert_eq!(
+        table.column_by_idx(0).unwrap().raw().unwrap(),
+        ColumnData::I32((0..600).collect())
+    );
+    let arrays = table.column_by_idx(1).unwrap().vla().unwrap();
+    assert_eq!(arrays.len(), 600);
+    for (row, array) in arrays.into_iter().enumerate() {
+        assert_eq!(
+            array,
+            ColumnData::I32((0..(row % 7) as i32).collect()),
+            "row {row}"
+        );
+    }
+}
+
+#[test]
+fn compressed_table_vla_round_trips_all_table_codecs() {
+    let mut source = open("comp_table_vla.fits");
+    let compressed = source.read_table(1).unwrap();
+    let mut original_parts = uncompress_table(&source.hdus[1].header, &compressed).unwrap();
+    assert_eq!(
+        u32::from_be_bytes(original_parts.data[4..8].try_into().unwrap()),
+        0
+    );
+    original_parts.data[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
+    let original =
+        BinTable::from_data(&original_parts.header, original_parts.data.clone()).unwrap();
+
+    for compression in [
+        Compression::GZIP,
+        Compression::GZIP_SHUFFLED,
+        Compression::Rice,
+        Compression::None,
+    ] {
+        let mut encoded = Vec::new();
+        let encoded_header = compress_table(
+            &original_parts.header,
+            &original,
+            127,
+            compression,
+            &mut encoded,
+        )
+        .unwrap();
+        assert_eq!(
+            encoded_header.get_integer("ZPCOUNT").unwrap(),
+            original_parts.header.get_integer("PCOUNT").unwrap(),
+            "{}",
+            compression.name()
+        );
+        let encoded_table = BinTable::from_data(&encoded_header, encoded).unwrap();
+        let restored = uncompress_table(&encoded_header, &encoded_table).unwrap();
+        assert_eq!(restored.data, original_parts.data, "{}", compression.name());
+    }
 }
 
 #[test]
@@ -1243,15 +1595,24 @@ fn integer_image_compression_preserves_bscale_bzero_and_blank() {
 }
 
 #[test]
-fn rice_rejects_64_bit_pixels() {
+fn rice_64_bit_pixels_round_trip_extreme_differences() {
     use crate::data::{Image, ImageData, Scaling};
     use crate::writer::FitsWriter;
     use std::io::Cursor;
-    // Table 37 permits BYTEPIX 8, but the 64-bit RICE bitstream is unsupported; it
-    // must error cleanly rather than panic / silently corrupt.
+    let samples = vec![
+        i64::MIN,
+        i64::MAX,
+        0,
+        -1,
+        1,
+        9_007_199_254_740_993,
+        -9_007_199_254_740_993,
+        i64::MIN + 1,
+        i64::MAX - 1,
+    ];
     let image = Image {
-        shape: vec![4],
-        samples: ImageData::I64(vec![1, 2, 3, 4]),
+        shape: vec![samples.len()],
+        samples: ImageData::I64(samples.clone()),
         scaling: Scaling {
             bscale: 1.0,
             bzero: 0.0,
@@ -1259,16 +1620,11 @@ fn rice_rejects_64_bit_pixels() {
         },
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    assert!(matches!(
-        w.write_compressed_image(&image, Compression::Rice, &CompressionOptions::default()),
-        Err(FitsError::UnsupportedCompression { .. })
-    ));
-    // GZIP handles 64-bit fine — the rejection is RICE-specific.
-    let mut w2 = FitsWriter::new(Cursor::new(Vec::new()));
-    assert!(
-        w2.write_compressed_image(&image, Compression::GZIP, &CompressionOptions::default())
-            .is_ok()
-    );
+    w.write_compressed_image(&image, Compression::Rice, &CompressionOptions::default())
+        .unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let decoded = r.read_image(1).unwrap().decode();
+    assert_eq!(decoded, ImageData::I64(samples));
 }
 
 #[test]
@@ -1563,7 +1919,7 @@ fn hcompress_tile_rejects_dimension_mismatch() {
     }
 
     let mut invalid_planes = one;
-    invalid_planes[22] = 32;
+    invalid_planes[22] = 64;
     assert!(matches!(
         hcompress::hcompress_tile_into(&invalid_planes, false, 1, &mut out, &mut scratch),
         Err(crate::error::FitsError::UnsupportedCompression { .. })

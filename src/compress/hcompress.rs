@@ -1,5 +1,5 @@
-//! `HCOMPRESS_1` tile codec — a port of cfitsio's `fits_hdecompress`/
-//! `fits_hcompress` (32-bit).
+//! `HCOMPRESS_1` tile codec — a port of cfitsio's 64-bit
+//! `fits_hdecompress64`/`fits_hcompress64`.
 //!
 //! Decoding is: read the header + quadtree-coded bit planes (`decode`/`dodecode`/
 //! `qtree_decode`), undigitize (multiply by the scale), then invert the
@@ -7,8 +7,8 @@
 //! digitize, then quadtree bit-plane coding (`encode`/`doencode`/`qtree_encode`).
 //! Decode supports `SMOOTH = 1` (inverse-transform smoothing) and lossy
 //! `scale > 0`; encode supports lossless and lossy (`scale`) but always
-//! `SMOOTH = 0`. Like the decoder this is the 32-bit codec, so tile values must
-//! fit the int H-transform without overflow (i16 and moderate i32).
+//! `SMOOTH = 0`. Encoding rejects a tile when an H-transform intermediate
+//! cannot be represented exactly in the standard stream's signed 64-bit field.
 
 use crate::error::FitsError;
 use crate::error::Result;
@@ -17,9 +17,9 @@ const MAGIC: [u8; 2] = [0xDD, 0x99];
 
 #[derive(Debug, Default)]
 pub(crate) struct HcompressScratch {
-    plane: Vec<i32>,
-    transform: Vec<i32>,
-    rows: Vec<i32>,
+    plane: Vec<i64>,
+    transform: Vec<i64>,
+    rows: Vec<i64>,
     qtree: Vec<u8>,
     code_buffer: Vec<u8>,
     signbits: Vec<u8>,
@@ -37,7 +37,7 @@ pub(crate) fn hcompress_tile_into(
 ) -> Result<()> {
     hdecompress_into(bytes, smooth, tile_elems, scratch)?;
     out.clear();
-    out.extend(scratch.plane.iter().map(|&v| v as i64));
+    out.extend_from_slice(&scratch.plane);
     Ok(())
 }
 
@@ -58,15 +58,15 @@ pub(crate) fn hcompress_tile_encode(
         });
     }
     scratch.plane.clear();
-    scratch.plane.extend(vals.iter().map(|&v| v as i32));
+    scratch.plane.extend_from_slice(vals);
     htrans(
         &mut scratch.plane,
         nx,
         ny,
         &mut scratch.transform,
         &mut scratch.rows,
-    );
-    digitize(&mut scratch.plane, nx, ny, scale);
+    )?;
+    digitize(&mut scratch.plane, nx, ny, scale)?;
     let mut enc = BitOutput::new();
     enc.encode(
         &mut scratch.plane,
@@ -76,7 +76,7 @@ pub(crate) fn hcompress_tile_encode(
         &mut scratch.signbits,
         &mut scratch.qtree,
         &mut scratch.code_buffer,
-    );
+    )?;
     Ok(enc.out)
 }
 
@@ -199,20 +199,20 @@ impl BitOutput {
     #[allow(clippy::too_many_arguments)]
     fn encode(
         &mut self,
-        a: &mut [i32],
+        a: &mut [i64],
         nx: usize,
         ny: usize,
         scale: i32,
         signbits: &mut Vec<u8>,
         qtree: &mut Vec<u8>,
         code_buffer: &mut Vec<u8>,
-    ) {
+    ) -> Result<()> {
         let nel = nx * ny;
         self.out.extend_from_slice(&MAGIC);
         self.writeint(nx as i32);
         self.writeint(ny as i32);
         self.writeint(scale);
-        self.writelonglong(a[0] as i64);
+        self.writelonglong(a[0]);
         a[0] = 0;
 
         // Sign bits (one per non-zero element, MSB-first within each byte); a[i]
@@ -228,7 +228,7 @@ impl BitOutput {
             } else if *v < 0 {
                 signbits[nsign] = (signbits[nsign] << 1) | 1;
                 bits_to_go -= 1;
-                *v = -*v;
+                *v = v.checked_neg().ok_or_else(transform_overflow)?;
             }
             if bits_to_go == 0 {
                 bits_to_go = 8;
@@ -243,7 +243,7 @@ impl BitOutput {
         // Per-quadrant maximum, then bit-plane count = bits needed for that max.
         let nx2 = nx.div_ceil(2);
         let ny2 = ny.div_ceil(2);
-        let mut vmax = [0i32; 3];
+        let mut vmax = [0i64; 3];
         let mut j = 0usize;
         let mut k = 0usize;
         for &v in a.iter().take(nel) {
@@ -269,12 +269,13 @@ impl BitOutput {
 
         self.doencode(a, nx, ny, &nbitplanes, qtree, code_buffer);
         self.out.extend_from_slice(&signbits[..nsign]);
+        Ok(())
     }
 
     /// Quadtree-encode the four quadrants, then an EOF nybble (cfitsio `doencode`).
     fn doencode(
         &mut self,
-        a: &[i32],
+        a: &[i64],
         nx: usize,
         ny: usize,
         nbitplanes: &[u8; 3],
@@ -335,7 +336,7 @@ impl BitOutput {
     #[allow(clippy::too_many_arguments)]
     fn qtree_encode(
         &mut self,
-        a: &[i32],
+        a: &[i64],
         n: usize,
         nqx: usize,
         nqy: usize,
@@ -411,7 +412,7 @@ impl BitOutput {
     /// Direct (un-quadtree) bitmap fallback: a 0x0 marker, then the packed nybbles.
     fn write_bdirect(
         &mut self,
-        a: &[i32],
+        a: &[i64],
         n: usize,
         nqx: usize,
         nqy: usize,
@@ -425,18 +426,24 @@ impl BitOutput {
 }
 
 /// Forward H-transform (in place), the inverse of [`hinv`] (cfitsio `htrans`).
-fn htrans(a: &mut [i32], nx: usize, ny: usize, tmp: &mut Vec<i32>, row_tmp: &mut Vec<i32>) {
+fn htrans(
+    a: &mut [i64],
+    nx: usize,
+    ny: usize,
+    tmp: &mut Vec<i64>,
+    row_tmp: &mut Vec<i64>,
+) -> Result<()> {
     let nmax = nx.max(ny);
     let log2n = log2_ceil(nmax);
+    if log2n > 62 {
+        return Err(transform_overflow());
+    }
     tmp.resize(nmax.div_ceil(2).max(1), 0);
-    // Holds the odd rows during the column-direction shuffle (done as whole-row moves
-    // — see `shuffle_rows`): up to `nx/2` rows of `ny`.
     row_tmp.resize(nx.div_ceil(2) * ny.max(1), 0);
-
     let mut shift = 0u32;
-    let mut mask = -2i32;
+    let mut mask = -2i64;
     let mut mask2 = mask << 1;
-    let mut prnd = 1i32;
+    let mut prnd = 1i64;
     let mut prnd2 = prnd << 1;
     let mut nrnd2 = prnd2 - 1;
 
@@ -451,39 +458,27 @@ fn htrans(a: &mut [i32], nx: usize, ny: usize, tmp: &mut Vec<i32>, row_tmp: &mut
             let mut s10 = s00 + ny;
             let mut j = 0usize;
             while j < nytop - oddy {
-                let h0 = (a[s10 + 1]
-                    .wrapping_add(a[s10])
-                    .wrapping_add(a[s00 + 1])
-                    .wrapping_add(a[s00]))
-                    >> shift;
-                let hx = (a[s10 + 1]
-                    .wrapping_add(a[s10])
-                    .wrapping_sub(a[s00 + 1])
-                    .wrapping_sub(a[s00]))
-                    >> shift;
-                let hy = (a[s10 + 1]
-                    .wrapping_sub(a[s10])
-                    .wrapping_add(a[s00 + 1])
-                    .wrapping_sub(a[s00]))
-                    >> shift;
-                let hc = (a[s10 + 1]
-                    .wrapping_sub(a[s10])
-                    .wrapping_sub(a[s00 + 1])
-                    .wrapping_add(a[s00]))
-                    >> shift;
+                let a00 = a[s00] as i128;
+                let a01 = a[s00 + 1] as i128;
+                let a10 = a[s10] as i128;
+                let a11 = a[s10 + 1] as i128;
+                let h0 = checked_transform_value((a11 + a10 + a01 + a00) >> shift)?;
+                let hx = checked_transform_value((a11 + a10 - a01 - a00) >> shift)?;
+                let hy = checked_transform_value((a11 - a10 + a01 - a00) >> shift)?;
+                let hc = checked_transform_value((a11 - a10 - a01 + a00) >> shift)?;
                 a[s10 + 1] = hc;
-                a[s10] = (if hx >= 0 { hx + prnd } else { hx }) & mask;
-                a[s00 + 1] = (if hy >= 0 { hy + prnd } else { hy }) & mask;
-                a[s00] = (if h0 >= 0 { h0 + prnd2 } else { h0 + nrnd2 }) & mask2;
+                a[s10] = rounded_transform_value(hx, if hx >= 0 { prnd } else { 0 }, mask)?;
+                a[s00 + 1] = rounded_transform_value(hy, if hy >= 0 { prnd } else { 0 }, mask)?;
+                a[s00] = rounded_transform_value(h0, if h0 >= 0 { prnd2 } else { nrnd2 }, mask2)?;
                 s00 += 2;
                 s10 += 2;
                 j += 2;
             }
             if oddy != 0 {
-                let h0 = a[s10].wrapping_add(a[s00]).wrapping_shl(1 - shift);
-                let hx = a[s10].wrapping_sub(a[s00]).wrapping_shl(1 - shift);
-                a[s10] = (if hx >= 0 { hx + prnd } else { hx }) & mask;
-                a[s00] = (if h0 >= 0 { h0 + prnd2 } else { h0 + nrnd2 }) & mask2;
+                let h0 = checked_transform_value((a[s10] as i128 + a[s00] as i128) << (1 - shift))?;
+                let hx = checked_transform_value((a[s10] as i128 - a[s00] as i128) << (1 - shift))?;
+                a[s10] = rounded_transform_value(hx, if hx >= 0 { prnd } else { 0 }, mask)?;
+                a[s00] = rounded_transform_value(h0, if h0 >= 0 { prnd2 } else { nrnd2 }, mask2)?;
             }
             i += 2;
         }
@@ -491,16 +486,18 @@ fn htrans(a: &mut [i32], nx: usize, ny: usize, tmp: &mut Vec<i32>, row_tmp: &mut
             let mut s00 = i * ny;
             let mut j = 0usize;
             while j < nytop - oddy {
-                let h0 = a[s00 + 1].wrapping_add(a[s00]).wrapping_shl(1 - shift);
-                let hy = a[s00 + 1].wrapping_sub(a[s00]).wrapping_shl(1 - shift);
-                a[s00 + 1] = (if hy >= 0 { hy + prnd } else { hy }) & mask;
-                a[s00] = (if h0 >= 0 { h0 + prnd2 } else { h0 + nrnd2 }) & mask2;
+                let h0 =
+                    checked_transform_value((a[s00 + 1] as i128 + a[s00] as i128) << (1 - shift))?;
+                let hy =
+                    checked_transform_value((a[s00 + 1] as i128 - a[s00] as i128) << (1 - shift))?;
+                a[s00 + 1] = rounded_transform_value(hy, if hy >= 0 { prnd } else { 0 }, mask)?;
+                a[s00] = rounded_transform_value(h0, if h0 >= 0 { prnd2 } else { nrnd2 }, mask2)?;
                 s00 += 2;
                 j += 2;
             }
             if oddy != 0 {
-                let h0 = a[i * ny].wrapping_shl(2 - shift);
-                a[i * ny] = (if h0 >= 0 { h0 + prnd2 } else { h0 + nrnd2 }) & mask2;
+                let h0 = checked_transform_value((a[s00] as i128) << (2 - shift))?;
+                a[s00] = rounded_transform_value(h0, if h0 >= 0 { prnd2 } else { nrnd2 }, mask2)?;
             }
         }
         for i in 0..nxtop {
@@ -516,11 +513,26 @@ fn htrans(a: &mut [i32], nx: usize, ny: usize, tmp: &mut Vec<i32>, row_tmp: &mut
         prnd2 <<= 1;
         nrnd2 = prnd2 - 1;
     }
+    Ok(())
+}
+
+fn checked_transform_value(value: i128) -> Result<i64> {
+    i64::try_from(value).map_err(|_| transform_overflow())
+}
+
+fn rounded_transform_value(value: i64, rounding: i64, mask: i64) -> Result<i64> {
+    Ok(checked_transform_value(value as i128 + rounding as i128)? & mask)
+}
+
+fn transform_overflow() -> FitsError {
+    FitsError::UnsupportedCompression {
+        name: "HCOMPRESS_1 tile exceeds the signed 64-bit stream range".to_string(),
+    }
 }
 
 /// Group coefficients by order: de-interleave even/odd elements (the inverse of
 /// the decoder's `unshuffle`; cfitsio `shuffle`).
-fn shuffle(a: &mut [i32], n: usize, n2: usize, tmp: &mut [i32]) {
+fn shuffle(a: &mut [i64], n: usize, n2: usize, tmp: &mut [i64]) {
     let mut pt = 0usize;
     let mut i = 1usize;
     while i < n {
@@ -547,15 +559,9 @@ fn shuffle(a: &mut [i32], n: usize, n2: usize, tmp: &mut [i32]) {
     }
 }
 
-/// Column-direction [`shuffle`] for the whole `nxtop × nytop` block (row stride `ny`),
-/// as whole-row moves. The per-column `shuffle` de-interleaves the row index
-/// identically for every column, so applying it to contiguous `nytop`-element row
-/// segments replaces the strided column access with sequential row copies (mirror of
-/// [`unshuffle_rows`]). `row_tmp` holds the odd rows during compaction (`⌊nxtop/2⌋ ×
-/// nytop`).
-fn shuffle_rows(a: &mut [i32], nxtop: usize, nytop: usize, ny: usize, row_tmp: &mut [i32]) {
-    let ne = nxtop.div_ceil(2); // even rows land in [0, ne); odds follow
-    // Save odd rows (1, 3, 5, …) so compacting the evens can't clobber them.
+/// Moving whole rows avoids the cache-line miss per coefficient of strided shuffling.
+fn shuffle_rows(a: &mut [i64], nxtop: usize, nytop: usize, ny: usize, row_tmp: &mut [i64]) {
+    let ne = nxtop.div_ceil(2);
     let mut pt = 0;
     let mut i = 1;
     while i < nxtop {
@@ -564,12 +570,9 @@ fn shuffle_rows(a: &mut [i32], nxtop: usize, nytop: usize, ny: usize, row_tmp: &
         pt += 1;
         i += 2;
     }
-    // Compact even rows to the front (row 2k → row k); forward order is safe since
-    // row 2k is read before iteration 2k would overwrite it.
     for k in 1..ne {
         a.copy_within(ny * 2 * k..ny * 2 * k + nytop, ny * k);
     }
-    // Append the saved odd rows after the evens.
     for m in 0..pt {
         let dst = ny * (ne + m);
         a[dst..dst + nytop].copy_from_slice(&row_tmp[m * nytop..m * nytop + nytop]);
@@ -578,20 +581,26 @@ fn shuffle_rows(a: &mut [i32], nxtop: usize, nytop: usize, ny: usize, row_tmp: &
 
 /// Digitize: round each coefficient to a multiple of `scale` (no-op for lossless
 /// `scale ≤ 1`; cfitsio `digitize`).
-fn digitize(a: &mut [i32], nx: usize, ny: usize, scale: i32) {
+fn digitize(a: &mut [i64], nx: usize, ny: usize, scale: i32) -> Result<()> {
     if scale <= 1 {
-        return;
+        return Ok(());
     }
-    let d = (scale + 1) / 2 - 1;
+    let d = (scale as i128 + 1) / 2 - 1;
     for v in a.iter_mut().take(nx * ny) {
-        *v = if *v > 0 { *v + d } else { *v - d } / scale;
+        let rounded = if *v > 0 {
+            *v as i128 + d
+        } else {
+            *v as i128 - d
+        };
+        *v = checked_transform_value(rounded / scale as i128)?;
     }
+    Ok(())
 }
 
 /// First quadtree reduction step on bit `bit` of `a` → 4-bit codes in `b`
 /// (cfitsio `qtree_onebit`). `a` is non-negative here, so shifts can't sign-fill.
-fn qtree_onebit(a: &[i32], n: usize, nx: usize, ny: usize, b: &mut [u8], bit: i32) {
-    let b0 = 1i32 << bit;
+fn qtree_onebit(a: &[i64], n: usize, nx: usize, ny: usize, b: &mut [u8], bit: i32) {
+    let b0 = 1i64 << bit;
     let b1 = b0 << 1;
     let b2 = b0 << 2;
     let b3 = b0 << 3;
@@ -901,7 +910,7 @@ fn hdecompress_into(
     let scale = bi.readint()?;
     let sumall = bi.readlonglong()?;
     let nbitplanes: [u8; 3] = bi.read_bytes(3)?.try_into().unwrap();
-    if nbitplanes.iter().any(|&n| n > 31) {
+    if nbitplanes.iter().any(|&n| n > 63) {
         return Err(FitsError::UnsupportedCompression {
             name: "HCOMPRESS_1: invalid bit-plane count".to_string(),
         });
@@ -917,9 +926,9 @@ fn hdecompress_into(
         &nbitplanes,
         &mut scratch.qtree,
     )?;
-    scratch.plane[0] = sumall as i32;
+    scratch.plane[0] = sumall;
 
-    undigitize(&mut scratch.plane, scale);
+    undigitize(&mut scratch.plane, scale)?;
     hinv(
         &mut scratch.plane,
         nx,
@@ -928,23 +937,24 @@ fn hdecompress_into(
         smooth,
         &mut scratch.transform,
         &mut scratch.rows,
-    );
+    )?;
     Ok(())
 }
 
-fn undigitize(a: &mut [i32], scale: i32) {
+fn undigitize(a: &mut [i64], scale: i32) -> Result<()> {
     if scale <= 1 {
-        return;
+        return Ok(());
     }
     for v in a.iter_mut() {
-        *v *= scale;
+        *v = checked_transform_value(*v as i128 * scale as i128)?;
     }
+    Ok(())
 }
 
 /// Decode the four quadrant bit planes, then the sign bits.
 fn dodecode(
     bi: &mut BitInput,
-    a: &mut [i32],
+    a: &mut [i64],
     nx: usize,
     ny: usize,
     nbitplanes: &[u8],
@@ -1007,7 +1017,7 @@ fn dodecode(
 /// Read one quadrant's bit planes from the stream into `a` (row stride `n`).
 fn qtree_decode(
     bi: &mut BitInput,
-    a: &mut [i32],
+    a: &mut [i64],
     n: usize,
     nqx: usize,
     nqy: usize,
@@ -1131,7 +1141,7 @@ fn expand_blocks(a: &mut [u8], nx: usize, ny: usize, n: usize) {
 
 /// Insert the 4-bit codes of `a[(nqx+1)/2,(nqy+1)/2]` into bit plane `bit` of
 /// `b[nqx,nqy]` (declared row stride `n`), expanding each to 2×2.
-fn qtree_bitins(a: &[u8], nqx: usize, nqy: usize, b: &mut [i32], n: usize, bit: i32) {
+fn qtree_bitins(a: &[u8], nqx: usize, nqy: usize, b: &mut [i64], n: usize, bit: i32) {
     // Each 4-bit code maps to a 2×2 block; the four codes are *data-dependent* and
     // unpredictable, so branching on them (`if v & 1`) mispredicts heavily. Instead
     // OR the extracted bit unconditionally — `|= 0` is a no-op for clear bits — which
@@ -1142,7 +1152,7 @@ fn qtree_bitins(a: &[u8], nqx: usize, nqy: usize, b: &mut [i32], n: usize, bit: 
         let mut s00 = n * i;
         let mut j = 0;
         while j + 1 < nqy {
-            let v = a[k] as i32;
+            let v = a[k] as i64;
             b[s00 + n + 1] |= (v & 1) << bit;
             b[s00 + n] |= ((v >> 1) & 1) << bit;
             b[s00 + 1] |= ((v >> 2) & 1) << bit;
@@ -1152,7 +1162,7 @@ fn qtree_bitins(a: &[u8], nqx: usize, nqy: usize, b: &mut [i32], n: usize, bit: 
             j += 2;
         }
         if j < nqy {
-            let v = a[k] as i32;
+            let v = a[k] as i64;
             b[s00 + n] |= ((v >> 1) & 1) << bit;
             b[s00] |= ((v >> 3) & 1) << bit;
             k += 1;
@@ -1163,7 +1173,7 @@ fn qtree_bitins(a: &[u8], nqx: usize, nqy: usize, b: &mut [i32], n: usize, bit: 
         let mut s00 = n * i;
         let mut j = 0;
         while j + 1 < nqy {
-            let v = a[k] as i32;
+            let v = a[k] as i64;
             b[s00 + 1] |= ((v >> 2) & 1) << bit;
             b[s00] |= ((v >> 3) & 1) << bit;
             s00 += 2;
@@ -1171,7 +1181,7 @@ fn qtree_bitins(a: &[u8], nqx: usize, nqy: usize, b: &mut [i32], n: usize, bit: 
             j += 2;
         }
         if j < nqy {
-            let v = a[k] as i32;
+            let v = a[k] as i64;
             b[s00] |= ((v >> 3) & 1) << bit;
             k += 1;
         }
@@ -1182,7 +1192,7 @@ fn qtree_bitins(a: &[u8], nqx: usize, nqy: usize, b: &mut [i32], n: usize, bit: 
 /// A directly-stored (un-quadtree-coded) bit plane: read nybbles, then insert.
 fn read_bdirect(
     bi: &mut BitInput,
-    a: &mut [i32],
+    a: &mut [i64],
     n: usize,
     nqx: usize,
     nqy: usize,
@@ -1197,26 +1207,23 @@ fn read_bdirect(
 
 /// Inverse H-transform (in place), `SMOOTH = 0`.
 fn hinv(
-    a: &mut [i32],
+    a: &mut [i64],
     nx: usize,
     ny: usize,
     scale: i32,
     smooth: bool,
-    tmp: &mut Vec<i32>,
-    row_tmp: &mut Vec<i32>,
-) {
+    tmp: &mut Vec<i64>,
+    row_tmp: &mut Vec<i64>,
+) -> Result<()> {
     let nmax = nx.max(ny);
     if nmax <= 1 {
-        return;
+        return Ok(());
     }
     let log2n = log2_ceil(nmax);
     tmp.resize(nmax.div_ceil(2), 0);
-    // Holds the 2nd-half rows during the column-direction unshuffle (done as whole-row
-    // moves — see `unshuffle_rows`): up to `nx/2` rows of `ny`.
     row_tmp.resize(nx.div_ceil(2) * ny, 0);
-
     let mut shift = 1;
-    let mut bit0 = 1i32 << (log2n - 1);
+    let mut bit0 = 1i64 << (log2n - 1);
     let mut bit1 = bit0 << 1;
     let bit2 = bit0 << 2;
     let mut mask0 = -bit0;
@@ -1229,7 +1236,7 @@ fn hinv(
     let mut nrnd1 = prnd1 - 1;
 
     // Round h0 to a multiple of bit2 (nrnd2 = prnd2 - 1).
-    a[0] = round_signed(a[0], prnd2, prnd2 - 1, mask2);
+    a[0] = round_signed(a[0], prnd2, prnd2 - 1, mask2)?;
 
     let mut nxtop = 1usize;
     let mut nytop = 1usize;
@@ -1260,7 +1267,7 @@ fn hinv(
         unshuffle_rows(a, nxtop, nytop, ny, row_tmp);
         // Smooth by interpolating coefficients (SMOOTH=1, lossy scale>1 only).
         if smooth {
-            hsmooth(a, nxtop, nytop, ny, scale);
+            hsmooth(a, nxtop, nytop, ny, scale)?;
         }
         let oddx = nxtop % 2;
         let oddy = nytop % 2;
@@ -1272,37 +1279,47 @@ fn hinv(
             while j < nytop - oddy {
                 let h0 = a[s00];
                 // Round hx,hy to a multiple of bit1, hc to bit0 (h0 is already bit2).
-                let mut hx = round_signed(a[s10], prnd1, nrnd1, mask1);
-                let mut hy = round_signed(a[s00 + 1], prnd1, nrnd1, mask1);
-                let hc = round_signed(a[s10 + 1], prnd0, nrnd0, mask0);
+                let mut hx = round_signed(a[s10], prnd1, nrnd1, mask1)?;
+                let mut hy = round_signed(a[s00 + 1], prnd1, nrnd1, mask1)?;
+                let hc = round_signed(a[s10 + 1], prnd0, nrnd0, mask0)?;
                 let lowbit0 = hc & bit0;
                 hx = if hx >= 0 { hx - lowbit0 } else { hx + lowbit0 };
                 hy = if hy >= 0 { hy - lowbit0 } else { hy + lowbit0 };
                 let lowbit1 = (hc ^ hx ^ hy) & bit1;
                 let h0 = if h0 >= 0 {
-                    h0 + lowbit0 - lowbit1
+                    checked_transform_value(h0 as i128 + lowbit0 as i128 - lowbit1 as i128)?
                 } else {
-                    h0 + if lowbit0 == 0 {
-                        lowbit1
-                    } else {
-                        lowbit0 - lowbit1
-                    }
+                    checked_transform_value(
+                        h0 as i128
+                            + if lowbit0 == 0 {
+                                lowbit1 as i128
+                            } else {
+                                lowbit0 as i128 - lowbit1 as i128
+                            },
+                    )?
                 };
-                a[s10 + 1] = (h0 + hx + hy + hc) >> shift;
-                a[s10] = (h0 + hx - hy - hc) >> shift;
-                a[s00 + 1] = (h0 - hx + hy - hc) >> shift;
-                a[s00] = (h0 - hx - hy + hc) >> shift;
+                a[s10 + 1] = inverse_coefficient(h0, hx, hy, hc, shift, [1, 1, 1])?;
+                a[s10] = inverse_coefficient(h0, hx, hy, hc, shift, [1, -1, -1])?;
+                a[s00 + 1] = inverse_coefficient(h0, hx, hy, hc, shift, [-1, 1, -1])?;
+                a[s00] = inverse_coefficient(h0, hx, hy, hc, shift, [-1, -1, 1])?;
                 s00 += 2;
                 s10 += 2;
                 j += 2;
             }
             if oddy != 0 {
                 let h0 = a[s00];
-                let hx = round_signed(a[s10], prnd1, nrnd1, mask1);
+                let hx = round_signed(a[s10], prnd1, nrnd1, mask1)?;
                 let lowbit1 = hx & bit1;
-                let h0 = if h0 >= 0 { h0 - lowbit1 } else { h0 + lowbit1 };
-                a[s10] = (h0 + hx) >> shift;
-                a[s00] = (h0 - hx) >> shift;
+                let h0 = checked_transform_value(
+                    h0 as i128
+                        + if h0 >= 0 {
+                            -(lowbit1 as i128)
+                        } else {
+                            lowbit1 as i128
+                        },
+                )?;
+                a[s10] = checked_transform_value((h0 as i128 + hx as i128) >> shift)?;
+                a[s00] = checked_transform_value((h0 as i128 - hx as i128) >> shift)?;
             }
             i += 2;
         }
@@ -1311,11 +1328,18 @@ fn hinv(
             let mut j = 0;
             while j < nytop - oddy {
                 let h0 = a[s00];
-                let hy = round_signed(a[s00 + 1], prnd1, nrnd1, mask1);
+                let hy = round_signed(a[s00 + 1], prnd1, nrnd1, mask1)?;
                 let lowbit1 = hy & bit1;
-                let h0 = if h0 >= 0 { h0 - lowbit1 } else { h0 + lowbit1 };
-                a[s00 + 1] = (h0 + hy) >> shift;
-                a[s00] = (h0 - hy) >> shift;
+                let h0 = checked_transform_value(
+                    h0 as i128
+                        + if h0 >= 0 {
+                            -(lowbit1 as i128)
+                        } else {
+                            lowbit1 as i128
+                        },
+                )?;
+                a[s00 + 1] = checked_transform_value((h0 as i128 + hy as i128) >> shift)?;
+                a[s00] = checked_transform_value((h0 as i128 - hy as i128) >> shift)?;
                 s00 += 2;
                 j += 2;
             }
@@ -1332,26 +1356,44 @@ fn hinv(
         nrnd1 = nrnd0;
         nrnd0 = prnd0 - 1;
     }
+    Ok(())
+}
+
+fn inverse_coefficient(
+    h0: i64,
+    hx: i64,
+    hy: i64,
+    hc: i64,
+    shift: u32,
+    signs: [i8; 3],
+) -> Result<i64> {
+    let value = h0 as i128
+        + hx as i128 * signs[0] as i128
+        + hy as i128 * signs[1] as i128
+        + hc as i128 * signs[2] as i128;
+    checked_transform_value(value >> shift)
 }
 
 /// Round `v` to a multiple of `-mask`, using the positive or negative rounding
 /// constant per the sign of `v`.
-fn round_signed(v: i32, prnd: i32, nrnd: i32, mask: i32) -> i32 {
-    (v + if v >= 0 { prnd } else { nrnd }) & mask
+fn round_signed(v: i64, prnd: i64, nrnd: i64, mask: i64) -> Result<i64> {
+    Ok(
+        checked_transform_value(v as i128 + if v >= 0 { prnd as i128 } else { nrnd as i128 })?
+            & mask,
+    )
 }
 
 /// Smooth H-transform coefficients by interpolation (cfitsio `hsmooth`): adjust
 /// the x, y, and curvature differences toward what the neighbouring zones imply,
 /// each change clamped to ±scale/2 (the rounding slack from digitization).
-/// Only meaningful for lossy decoding (`scale > 1`, `SMOOTH = 1`). Intermediates
-/// use `i64` so the difference/shift arithmetic can't overflow.
-fn hsmooth(a: &mut [i32], nxtop: usize, nytop: usize, ny: usize, scale: i32) {
-    let smax = (scale >> 1) as i64;
+/// Only meaningful for lossy decoding (`scale > 1`, `SMOOTH = 1`).
+fn hsmooth(a: &mut [i64], nxtop: usize, nytop: usize, ny: usize, scale: i32) -> Result<()> {
+    let smax = (scale >> 1) as i128;
     if smax <= 0 {
-        return;
+        return Ok(());
     }
     // Integer divide-by-2^k matching C's rounding-toward-zero on negatives.
-    let shr = |s: i64, k: u32| {
+    let shr = |s: i128, k: u32| {
         if s >= 0 {
             s >> k
         } else {
@@ -1366,16 +1408,16 @@ fn hsmooth(a: &mut [i32], nxtop: usize, nytop: usize, ny: usize, scale: i32) {
         let (mut s00, mut s10) = (ny * i, ny * i + ny);
         let mut j = 0;
         while j < nytop {
-            let hm = a[s00 - ny2] as i64;
-            let h0 = a[s00] as i64;
-            let hp = a[s00 + ny2] as i64;
+            let hm = a[s00 - ny2] as i128;
+            let h0 = a[s00] as i128;
+            let hp = a[s00 + ny2] as i128;
             let mut diff = hp - hm;
             let dmax = ((hp - h0).min(h0 - hm)).max(0) << 2;
             let dmin = ((hp - h0).max(h0 - hm)).min(0) << 2;
             if dmin < dmax {
                 diff = diff.clamp(dmin, dmax);
-                let s = shr(diff - ((a[s10] as i64) << 3), 3).clamp(-smax, smax);
-                a[s10] = (a[s10] as i64 + s) as i32;
+                let s = shr(diff - ((a[s10] as i128) << 3), 3).clamp(-smax, smax);
+                a[s10] = checked_transform_value(a[s10] as i128 + s)?;
             }
             s00 += 2;
             s10 += 2;
@@ -1390,16 +1432,16 @@ fn hsmooth(a: &mut [i32], nxtop: usize, nytop: usize, ny: usize, scale: i32) {
         let mut s00 = ny * i + 2;
         let mut j = 2;
         while j + 2 < nytop {
-            let hm = a[s00 - 2] as i64;
-            let h0 = a[s00] as i64;
-            let hp = a[s00 + 2] as i64;
+            let hm = a[s00 - 2] as i128;
+            let h0 = a[s00] as i128;
+            let hp = a[s00 + 2] as i128;
             let mut diff = hp - hm;
             let dmax = ((hp - h0).min(h0 - hm)).max(0) << 2;
             let dmin = ((hp - h0).max(h0 - hm)).min(0) << 2;
             if dmin < dmax {
                 diff = diff.clamp(dmin, dmax);
-                let s = shr(diff - ((a[s00 + 1] as i64) << 3), 3).clamp(-smax, smax);
-                a[s00 + 1] = (a[s00 + 1] as i64 + s) as i32;
+                let s = shr(diff - ((a[s00 + 1] as i128) << 3), 3).clamp(-smax, smax);
+                a[s00 + 1] = checked_transform_value(a[s00 + 1] as i128 + s)?;
             }
             s00 += 2;
             j += 2;
@@ -1413,14 +1455,14 @@ fn hsmooth(a: &mut [i32], nxtop: usize, nytop: usize, ny: usize, scale: i32) {
         let (mut s00, mut s10) = (ny * i + 2, ny * i + 2 + ny);
         let mut j = 2;
         while j + 2 < nytop {
-            let hmm = a[s00 - ny2 - 2] as i64;
-            let hpm = a[s00 + ny2 - 2] as i64;
-            let hmp = a[s00 - ny2 + 2] as i64;
-            let hpp = a[s00 + ny2 + 2] as i64;
-            let h0 = a[s00] as i64;
+            let hmm = a[s00 - ny2 - 2] as i128;
+            let hpm = a[s00 + ny2 - 2] as i128;
+            let hmp = a[s00 - ny2 + 2] as i128;
+            let hpp = a[s00 + ny2 + 2] as i128;
+            let h0 = a[s00] as i128;
             let mut diff = hpp + hmm - hmp - hpm;
-            let hx2 = (a[s10] as i64) << 1;
-            let hy2 = (a[s00 + 1] as i64) << 1;
+            let hx2 = (a[s10] as i128) << 1;
+            let hy2 = (a[s00 + 1] as i128) << 1;
             let m1 = ((hpp - h0).max(0) - hx2 - hy2).min((h0 - hpm).max(0) + hx2 - hy2);
             let m2 = ((h0 - hmp).max(0) - hx2 + hy2).min((hmm - h0).max(0) + hx2 + hy2);
             let dmax = m1.min(m2) << 4;
@@ -1429,8 +1471,8 @@ fn hsmooth(a: &mut [i32], nxtop: usize, nytop: usize, ny: usize, scale: i32) {
             let dmin = m1.max(m2) << 4;
             if dmin < dmax {
                 diff = diff.clamp(dmin, dmax);
-                let s = shr(diff - ((a[s10 + 1] as i64) << 6), 6).clamp(-smax, smax);
-                a[s10 + 1] = (a[s10 + 1] as i64 + s) as i32;
+                let s = shr(diff - ((a[s10 + 1] as i128) << 6), 6).clamp(-smax, smax);
+                a[s10 + 1] = checked_transform_value(a[s10 + 1] as i128 + s)?;
             }
             s00 += 2;
             s10 += 2;
@@ -1438,10 +1480,11 @@ fn hsmooth(a: &mut [i32], nxtop: usize, nytop: usize, ny: usize, scale: i32) {
         }
         i += 2;
     }
+    Ok(())
 }
 
 /// Interleave coefficients: inverse of the shuffle done during compression.
-fn unshuffle(a: &mut [i32], n: usize, n2: usize, tmp: &mut [i32]) {
+fn unshuffle(a: &mut [i64], n: usize, n2: usize, tmp: &mut [i64]) {
     let nhalf = n.div_ceil(2);
     // Copy 2nd half to tmp.
     for i in nhalf..n {
@@ -1461,26 +1504,17 @@ fn unshuffle(a: &mut [i32], n: usize, n2: usize, tmp: &mut [i32]) {
     }
 }
 
-/// Column-direction inverse shuffle for the whole `nxtop × nytop` block (row stride
-/// `ny`). The per-column [`unshuffle`] permutes the row index *identically* for every
-/// column, so it's a whole-row permutation: applying it to contiguous `nytop`-element
-/// row segments replaces the cache-thrashing strided column access (one cache line
-/// per element) with sequential `copy_from_slice`/`copy_within` row moves. `row_tmp`
-/// holds the 2nd-half rows during redistribution (`⌈nxtop/2⌉ × nytop`).
-fn unshuffle_rows(a: &mut [i32], nxtop: usize, nytop: usize, ny: usize, row_tmp: &mut [i32]) {
+/// Moving whole rows avoids the cache-line miss per coefficient of strided unshuffling.
+fn unshuffle_rows(a: &mut [i64], nxtop: usize, nytop: usize, ny: usize, row_tmp: &mut [i64]) {
     let nhalf = nxtop.div_ceil(2);
-    // Save 2nd-half rows so distributing the 1st half can't clobber them.
     for i in nhalf..nxtop {
         let src = ny * i;
         let dst = (i - nhalf) * nytop;
         row_tmp[dst..dst + nytop].copy_from_slice(&a[src..src + nytop]);
     }
-    // 1st-half rows go to even output rows; reverse order so a row isn't overwritten
-    // before it's moved (dst = 2·src·… ≥ src, and the ranges don't overlap for i ≥ 1).
     for i in (0..nhalf).rev() {
         a.copy_within(ny * i..ny * i + nytop, ny * 2 * i);
     }
-    // Saved 2nd-half rows go to odd output rows.
     let mut pt = 0;
     let mut i = 1;
     while i < nxtop {

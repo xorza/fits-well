@@ -200,6 +200,15 @@ fn noise3(
     }
 }
 
+pub(crate) fn noise3_estimate(
+    data: &[f64],
+    nx: usize,
+    ny: usize,
+    scratch: &mut QuantizeScratch,
+) -> f64 {
+    noise3(data, nx, ny, &mut scratch.diffs, &mut scratch.row_medians).noise
+}
+
 /// Lower median (element at index `(n−1)/2` of the sorted values), matching
 /// cfitsio's per-row `quick_select_float`.
 fn lower_median(v: &mut [f64]) -> f64 {

@@ -8,6 +8,7 @@
 //! this drives the tile geometry, the
 //! fallback-column resolution, and the narrow-and-scatter into the output plane.
 
+use crate::compress;
 use crate::compress::convert::be_floats_into;
 use crate::compress::convert::be_to_i64_into;
 use crate::compress::convert::byte_cell;
@@ -72,6 +73,11 @@ impl ImageLayout {
             return Err(FitsError::KeywordOutOfRange { name: "ZNAXIS" });
         }
         let dims = read_axes(header, znaxis as usize)?;
+        if codec == ImageCodec::Hcompress1 && dims.len() != 2 {
+            return Err(FitsError::UnsupportedCompression {
+                name: "HCOMPRESS_1 requires a two-dimensional image".to_string(),
+            });
+        }
         let total = shape_product(&dims)?;
         Ok(ImageLayout {
             bitpix,
@@ -96,6 +102,8 @@ struct ImageDecodePlan<'a> {
     primary: Option<VlaColumn<'a>>,
     gzip_fallback: Option<VlaColumn<'a>>,
     uncompressed: Option<VlaColumn<'a>>,
+    null_mask: Option<VlaColumn<'a>>,
+    mask_codec: Option<ImageCodec>,
 }
 
 impl<'a> ImageDecodePlan<'a> {
@@ -105,10 +113,12 @@ impl<'a> ImageDecodePlan<'a> {
         layout: &ImageLayout,
     ) -> Result<ImageDecodePlan<'a>> {
         let tiles = read_tile_shape(header, &layout.dims)?;
-        let rice = rice::rice_params(header, layout.bitpix)?;
+        let rice = rice::rice_params(header)?;
         let is_float = layout.bitpix.is_float();
-        let int_bitpix = if is_float {
+        let int_bitpix = if is_float && layout.codec == ImageCodec::Rice1 {
             bytepix_to_bitpix(rice.bytepix)
+        } else if is_float {
+            Bitpix::I32
         } else {
             layout.bitpix
         };
@@ -123,6 +133,27 @@ impl<'a> ImageDecodePlan<'a> {
             }
             _ => DitherMethod::None,
         };
+        let zdither0 = header.get_integer("ZDITHER0")?.unwrap_or(1);
+        if !(1..=10_000).contains(&zdither0) {
+            return Err(FitsError::KeywordOutOfRange { name: "ZDITHER0" });
+        }
+        let null_mask = read_first_tiles(
+            table,
+            &[
+                "NULL_PIXEL_MASK",
+                "NULL_PIXEL_MASK_COLUMN",
+                "NULL PIXEL MASK",
+            ],
+        )?;
+        let mask_codec = header
+            .get_text("ZMASKCMP")?
+            .map(ImageCodec::parse)
+            .transpose()?;
+        if null_mask.is_some() && mask_codec == Some(ImageCodec::Hcompress1) {
+            return Err(FitsError::UnsupportedCompression {
+                name: "lossy HCOMPRESS_1 cannot encode a null-pixel mask".to_string(),
+            });
+        }
         Ok(ImageDecodePlan {
             geometry: TileGeometry::new(&layout.dims, &tiles),
             context: DecodeCtx {
@@ -136,7 +167,7 @@ impl<'a> ImageDecodePlan<'a> {
                 },
             },
             method,
-            zdither0: header.get_integer("ZDITHER0")?.unwrap_or(1),
+            zdither0,
             zblank_keyword: header.get_integer("ZBLANK")?,
             zblank_column: read_i64_column(table, "ZBLANK")?,
             zscale: read_f64_column(table, "ZSCALE")?,
@@ -144,6 +175,8 @@ impl<'a> ImageDecodePlan<'a> {
             primary: read_tiles(table, "COMPRESSED_DATA")?,
             gzip_fallback: read_tiles(table, "GZIP_COMPRESSED_DATA")?,
             uncompressed: read_tiles(table, "UNCOMPRESSED_DATA")?,
+            null_mask,
+            mask_codec,
         })
     }
 
@@ -367,7 +400,8 @@ pub(crate) fn decompress_image_section_into_words<'a>(
                 out,
                 ints,
                 codecs,
-            )
+            )?;
+            apply_float_null_mask(&plan, table_row, scratch.nelem(), out, ints, codecs)
         };
         match output {
             DecodeBuffer::F32(out) => run_decode_region(
@@ -395,13 +429,22 @@ pub(crate) fn decompress_image_section_into_words<'a>(
                       _tile_row: usize,
                       scratch: &TileScratch,
                       out: &mut Vec<i64>,
-                      _ints: &mut Vec<i64>,
+                      mask: &mut Vec<i64>,
                       codecs: &mut CodecScratch| {
             decode_one_tile_into(
                 &plan.context,
                 plan.tile_columns(table_row)?,
                 scratch.nelem(),
                 out,
+                codecs,
+            )?;
+            apply_integer_null_mask(
+                &plan,
+                table_row,
+                scratch.nelem(),
+                layout.scaling.blank,
+                out,
+                mask,
                 codecs,
             )
         };
@@ -473,7 +516,8 @@ fn decode_image_into(
                 out,
                 ints,
                 codecs,
-            )
+            )?;
+            apply_float_null_mask(&plan, t, s.nelem(), out, ints, codecs)
         };
         match output {
             DecodeBuffer::F32(out) => {
@@ -488,9 +532,10 @@ fn decode_image_into(
         let decode = |t: usize,
                       s: &TileScratch,
                       out: &mut Vec<i64>,
-                      _ints: &mut Vec<i64>,
+                      mask: &mut Vec<i64>,
                       codecs: &mut CodecScratch| {
-            decode_one_tile_into(&plan.context, plan.tile_columns(t)?, s.nelem(), out, codecs)
+            decode_one_tile_into(&plan.context, plan.tile_columns(t)?, s.nelem(), out, codecs)?;
+            apply_integer_null_mask(&plan, t, s.nelem(), layout.scaling.blank, out, mask, codecs)
         };
         match output {
             DecodeBuffer::U8(out) => {
@@ -737,6 +782,15 @@ fn read_tiles<'a>(table: &'a BinTable, name: &str) -> Result<Option<VlaColumn<'a
     }
 }
 
+fn read_first_tiles<'a>(table: &'a BinTable, names: &[&str]) -> Result<Option<VlaColumn<'a>>> {
+    for &name in names {
+        if let Some(column) = read_tiles(table, name)? {
+            return Ok(Some(column));
+        }
+    }
+    Ok(None)
+}
+
 /// Read a per-tile `f64` column (e.g. `ZSCALE`/`ZZERO`), or `None` if absent.
 fn read_f64_column(table: &BinTable, name: &str) -> Result<Option<Vec<f64>>> {
     let Some(c) = table.column_index(name) else {
@@ -861,6 +915,93 @@ struct DecodeCtx {
     params: CodecParams,
 }
 
+fn decode_null_mask_into(
+    plan: &ImageDecodePlan<'_>,
+    table_row: usize,
+    tile_elems: usize,
+    out: &mut Vec<i64>,
+    scratch: &mut CodecScratch,
+) -> Result<bool> {
+    let Some(column) = plan.null_mask else {
+        return Ok(false);
+    };
+    let cell = column.cell(table_row)?;
+    if cell.element_count == 0 {
+        return Ok(false);
+    }
+    let codec = plan
+        .mask_codec
+        .ok_or(FitsError::MissingKeyword { name: "ZMASKCMP" })?;
+    match codec {
+        ImageCodec::Gzip1 => {
+            gzip::gzip_tile_into(cell.bytes, Bitpix::U8, tile_elems, out, &mut scratch.gzip)?
+        }
+        ImageCodec::Gzip2 => {
+            gzip::gzip2_tile_into(cell.bytes, Bitpix::U8, tile_elems, out, &mut scratch.gzip)?
+        }
+        ImageCodec::Rice1 => rice::rice_decode_into(cell.bytes, tile_elems, 1, 32, out)?,
+        ImageCodec::Plio1 => plio::plio_decode_be_into(cell.bytes, tile_elems, out)?,
+        ImageCodec::NoCompress => {
+            if cell.bytes.len() != tile_elems {
+                return Err(FitsError::DataSizeMismatch {
+                    expected: tile_elems,
+                    got: cell.bytes.len(),
+                });
+            }
+            out.clear();
+            out.extend(cell.bytes.iter().map(|&value| value as i64));
+        }
+        ImageCodec::Hcompress1 => unreachable!("rejected while building the decode plan"),
+    }
+    ensure_tile_size(tile_elems, out.len())?;
+    if out.iter().any(|&value| !matches!(value, 0 | 1)) {
+        return Err(FitsError::UnsupportedCompression {
+            name: "null-pixel mask contains a value other than zero or one".to_string(),
+        });
+    }
+    Ok(true)
+}
+
+fn apply_integer_null_mask(
+    plan: &ImageDecodePlan<'_>,
+    table_row: usize,
+    tile_elems: usize,
+    blank: Option<i64>,
+    values: &mut [i64],
+    mask: &mut Vec<i64>,
+    scratch: &mut CodecScratch,
+) -> Result<()> {
+    if !decode_null_mask_into(plan, table_row, tile_elems, mask, scratch)? {
+        return Ok(());
+    }
+    let blank = blank.ok_or(FitsError::MissingKeyword { name: "BLANK" })?;
+    for (value, &masked) in values.iter_mut().zip(mask.iter()) {
+        if masked == 1 {
+            *value = blank;
+        }
+    }
+    Ok(())
+}
+
+fn apply_float_null_mask(
+    plan: &ImageDecodePlan<'_>,
+    table_row: usize,
+    tile_elems: usize,
+    values: &mut [f64],
+    mask: &mut Vec<i64>,
+    scratch: &mut CodecScratch,
+) -> Result<()> {
+    if !decode_null_mask_into(plan, table_row, tile_elems, mask, scratch)? {
+        return Ok(());
+    }
+    for (value, &masked) in values.iter_mut().zip(mask.iter()) {
+        if masked == 1 {
+            *value = f64::NAN;
+        }
+    }
+    Ok(())
+}
+
 fn decode_one_tile_into(
     ctx: &DecodeCtx,
     cols: TileColumns,
@@ -899,7 +1040,7 @@ fn decode_float_tile_into(
 ) -> Result<()> {
     match cols.resolve()? {
         TileSource::Compressed(cell) => {
-            // Quantized integers (float images never use HCOMPRESS).
+            // The primary stream holds quantized integers for every float-image codec.
             decode_tile_cell_into(ctx, cell, tile_elems, ints, scratch)?;
             quantize::dequantize_into(ints, dq.scale, dq.zero, dq.method, dq.irow, dq.zblank, out);
             Ok(())
@@ -944,12 +1085,9 @@ fn decode_tile_cell_into(
             &mut scratch.gzip,
         ),
         ImageCodec::Rice1 => {
-            // Only 1/2/4-byte pixels are defined (cfitsio parity). A `BYTEPIX` of
-            // 3/5/6/7 from an untrusted header would otherwise decode with mismatched
-            // `fsbits`/mask and emit garbage instead of erroring.
-            if !matches!(params.bytepix, 1 | 2 | 4) {
+            if !matches!(params.bytepix, 1 | 2 | 4 | 8) {
                 return Err(FitsError::UnsupportedCompression {
-                    name: format!("RICE_1 with BYTEPIX = {} (only 1/2/4)", params.bytepix),
+                    name: format!("RICE_1 with BYTEPIX = {}", params.bytepix),
                 });
             }
             rice::rice_decode_into(
@@ -996,12 +1134,16 @@ fn ensure_tile_size(expected: usize, got: usize) -> Result<()> {
 /// HCOMPRESS smoothing flag: the `SMOOTH` `ZVALn` is non-zero (cfitsio applies
 /// inverse-transform smoothing to suppress blocking in lossy images).
 fn hcompress_smooth(header: &Header) -> Result<bool> {
-    let mut i = 1;
-    while let Some(name) = header.get_text(key!("ZNAME{i}").as_str())? {
+    for entry in header.iter() {
+        let Some(i) = compress::parameter_index(entry.keyword) else {
+            continue;
+        };
+        let Some(name) = header.get_text(entry.keyword)? else {
+            continue;
+        };
         if name == "SMOOTH" {
             return Ok(header.get_integer(key!("ZVAL{i}").as_str())?.unwrap_or(0) != 0);
         }
-        i += 1;
     }
     Ok(false)
 }

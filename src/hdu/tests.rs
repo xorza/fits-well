@@ -69,7 +69,7 @@ fn dataless_primary_has_no_data_unit() {
 }
 
 #[test]
-fn rejects_malformed_pcount_and_gcount_instead_of_clamping() {
+fn rejects_negative_pcount_and_gcount_instead_of_clamping() {
     let neg_pcount = header(&[
         "XTENSION= 'BINTABLE'",
         "BITPIX  = 8",
@@ -83,16 +83,16 @@ fn rejects_malformed_pcount_and_gcount_instead_of_clamping() {
         Err(FitsError::KeywordOutOfRange { name: "PCOUNT" })
     ));
 
-    let zero_gcount = header(&[
+    let negative_gcount = header(&[
         "XTENSION= 'IMAGE   '",
         "BITPIX  = 8",
         "NAXIS   = 1",
         "NAXIS1  = 4",
         "PCOUNT  = 0",
-        "GCOUNT  = 0",
+        "GCOUNT  = -1",
     ]);
     assert!(matches!(
-        data_extent(&zero_gcount, HduRole::Extension),
+        data_extent(&negative_gcount, HduRole::Extension),
         Err(FitsError::KeywordOutOfRange { name: "GCOUNT" })
     ));
 
@@ -103,6 +103,25 @@ fn rejects_malformed_pcount_and_gcount_instead_of_clamping() {
         Err(FitsError::TypeMismatch { name, expected })
             if name == "PCOUNT" && expected == "integer"
     ));
+}
+
+#[test]
+fn zero_gcount_describes_an_empty_grouped_data_unit() {
+    let extension = header(&[
+        "XTENSION= 'OTHER   '",
+        "BITPIX  = 32",
+        "NAXIS   = 1",
+        "NAXIS1  = 4",
+        "PCOUNT  = 3",
+        "GCOUNT  = 0",
+    ]);
+    assert_eq!(
+        data_extent(&extension, HduRole::Extension).unwrap(),
+        DataExtent {
+            data_bytes: 0,
+            padded_bytes: 0,
+        }
+    );
 }
 
 #[test]
@@ -143,6 +162,21 @@ fn random_groups_extent_skips_the_zero_first_axis() {
     let e = data_extent(&h, HduRole::RandomGroups).unwrap();
     assert_eq!(e.data_bytes, 572_832);
     assert_eq!(e.padded_bytes, 573_120);
+}
+
+#[test]
+fn naxis1_random_groups_extent_uses_the_empty_product() {
+    let h = header(&[
+        "BITPIX  = -32",
+        "NAXIS   = 1",
+        "NAXIS1  = 0",
+        "GROUPS  = T",
+        "PCOUNT  = 1",
+        "GCOUNT  = 2",
+    ]);
+    let extent = data_extent(&h, HduRole::RandomGroups).unwrap();
+    assert_eq!(extent.data_bytes, 2 * (1 + 1) * 4);
+    assert_eq!(extent.padded_bytes, 2880);
 }
 
 #[test]

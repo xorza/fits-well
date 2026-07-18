@@ -67,7 +67,7 @@ pub enum FitsError {
     },
     /// A keyword was present and well-typed but its value lies outside the range
     /// the standard permits for its role (e.g. `NAXIS > 999`, `PCOUNT < 0`,
-    /// `GCOUNT < 1`, a negative axis length, or a `THEAP` that precedes the heap).
+    /// a negative `GCOUNT` or axis length, or a `THEAP` that precedes the heap).
     KeywordOutOfRange {
         name: &'static str,
     },

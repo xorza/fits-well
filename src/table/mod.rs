@@ -494,6 +494,11 @@ impl BinTable {
         })
     }
 
+    #[cfg(feature = "compression")]
+    pub(crate) fn heap_slice(&self, offset: usize, nbytes: usize) -> Result<&[u8]> {
+        self.bounded_heap(offset, nbytes)
+    }
+
     /// The index of the first column whose `TTYPEn` matches `name`, compared
     /// case-insensitively per §6.7.
     pub fn column_index(&self, name: &str) -> Option<usize> {
