@@ -3308,6 +3308,26 @@ factors _s_ _i_ are encoded in the CDELT _i_ keywords, which _must_ have
 non-zero values. In the second formalism Eqs. (9) and (10) are
 combined as
 
+_x_ _i_ = Σ_{j=1}^{N} ( _s_ _i_ _m_ _i j_ )( _p_ _j_ − _r_ _j_ ) (11)
+
+and the CD _i j_ keywords encode the product _s_ _i_ _m_ _i j_ . The third convention was widely used before the development of the two previously described conventions and uses the CDELT _i_ keywords
+to define the image scale and the CROTA2 keyword to specify
+a bulk rotation of the image plane. Use of the CROTA2 keyword
+is now deprecated, and instead the newer PC _i j_ or CD _i j_ keywords
+are _recommended_ because they allow for skewed axes and fully
+general rotation of multi-dimensional arrays. The CDELT _i_ and
+CROTA2 keywords _may_ co-exist with the CD _i j_ keywords (but
+the CROTA2 _must not_ occur with the PC _i j_ keywords) as an aid
+to old _FITS_ interpreters, but these keywords _must_ be ignored
+by software that supports the CD _i j_ keyword convention. In all
+these formalisms the reference pixel coordinates _r_ _j_ are encoded
+in the CRPIX _i_ keywords, and the world coordinates at the reference point are encoded in the CRVAL _i_ keywords. For additional
+details, see Greisen & Calabretta (2002).
+The third step of the process, computing the final world coordinates, depends on the type of coordinate system, which is
+indicated with the value of the CTYPE _i_ keyword. For some simple, linear cases an appropriate choice of normalization for the
+scale factors allows the world coordinates to be taken directly (or
+by applying a constant offset) from the _x_ _i_ (e.g., some spectra).
+
 In other cases it is more complicated, and may require the application of some non-linear algorithm (e.g., a projection, as for
 celestial coordinates), which may require the specification of additional parameters. Where necessary, numeric parameter values
 for non-linear algorithms _must_ be specified via PV _i m_ keywords
@@ -3338,30 +3358,7 @@ used only as specified in this Standard.
 In the case of the binary-table vector representation, it is
 possible that the images contained in a given column of the
 table have different coordinate transformation values. Table 9
-of Calabretta & Greisen (2002) illustrates a technique (com
-
-_x_ _i_ = Σ_{j=1}^{N} ( _s_ _i_ _m_ _i j_ )( _p_ _j_ − _r_ _j_ ) (11)
-
-and the CD _i j_ keywords encode the product _s_ _i_ _m_ _i j_ . The third convention was widely used before the development of the two previously described conventions and uses the CDELT _i_ keywords
-to define the image scale and the CROTA2 keyword to specify
-a bulk rotation of the image plane. Use of the CROTA2 keyword
-is now deprecated, and instead the newer PC _i j_ or CD _i j_ keywords
-are _recommended_ because they allow for skewed axes and fully
-general rotation of multi-dimensional arrays. The CDELT _i_ and
-CROTA2 keywords _may_ co-exist with the CD _i j_ keywords (but
-the CROTA2 _must not_ occur with the PC _i j_ keywords) as an aid
-to old _FITS_ interpreters, but these keywords _must_ be ignored
-by software that supports the CD _i j_ keyword convention. In all
-these formalisms the reference pixel coordinates _r_ _j_ are encoded
-in the CRPIX _i_ keywords, and the world coordinates at the reference point are encoded in the CRVAL _i_ keywords. For additional
-details, see Greisen & Calabretta (2002).
-The third step of the process, computing the final world coordinates, depends on the type of coordinate system, which is
-indicated with the value of the CTYPE _i_ keyword. For some simple, linear cases an appropriate choice of normalization for the
-scale factors allows the world coordinates to be taken directly (or
-by applying a constant offset) from the _x_ _i_ (e.g., some spectra).
-
-
-monly known as the “Green Bank Convention [10] ”), which utilizes additional columns in the table to record the coordinate-transformation values that apply to the corresponding image
+of Calabretta & Greisen (2002) illustrates a technique (commonly known as the “Green Bank Convention [10] ”), which utilizes additional columns in the table to record the coordinate-transformation values that apply to the corresponding image
 in each row of the table. More information is provided in
 Appendix L.
 The keywords given below constitute a complete set of fundamental attributes for a WCS description. Although their inclusion in an HDU is optional, _FITS_ writers _should_ include a complete set of keywords when describing a WCS. In the event that
@@ -3464,11 +3461,29 @@ range 1 through 99, and the coordinate parameter _m must_ lie in
 the range 0 through 99, both with no leading zeros.
 The _primary_ version of the WCS description is that specified
 with _a_ as the blank character [13] . Alternative axis descriptions are
+optional, but _must not_ be specified unless the primary WCS description is also specified. If an alternative WCS description is
+specified, all coordinate keywords for that version _must_ be given
+even if the values do not differ from those of the primary version.
+Rules for the default values of alternative coordinate descriptions
+are the same as those for the primary description. The alternative descriptions are computed in the same fashion as the primary coordinates. The type of coordinate depends on the value
+of CTYPE _ia_, and may be linear in one of the alternative descriptions and non-linear in another.
+
+The alternative version codes are selected by the _FITS_ writer;
+there is no requirement that the codes be used in alphabetic sequence, nor that one coordinate version differ in its parameter
+values from another. An optional keyword WCSNAME _a_ is also defined to name, and otherwise document, the various versions of
+WCS descriptions.
+
+WCSNAME _a_ – [string; default for _a_ : '␣' (i.e., blank, for the primary WCS, else a character A through Z that specifies the
+coordinate version]. Name of the world-coordinate system
+represented by the WCS keywords with the suffix _a_ . Its primary function is to provide a means by which to specify a
+particular WCS if multiple versions are defined in the HDU.
 
 12 Examples include the frequency, velocity, and wavelength along a
 spectral axis (only one of which, of course, could be linear), or the position along an imaging detector in both meters and degrees on the sky.
 13 There are a number of keywords (e.g. _ij_ PC _na_ ) where the _a_ could be
 pushed off the eight-character keyword name for plausible values of _i_,
+_j_, _k_, _n_, and _m_ . In such cases _a_ is still said to be ‘blank’ although it is not
+the blank character.
 
 
 Table 22: Reserved WCS keywords (continues on next page)
@@ -3622,30 +3637,6 @@ HPX 0 [◦] 0 [◦] Sect. 6 [2] HEALPix grid
 
 (1) Refer to the indicated section in Calabretta & Greisen (2002) for a detailed description. (2) This projection is defined in Calabretta & Roukema
 (2007).
-
-optional, but _must not_ be specified unless the primary WCS description is also specified. If an alternative WCS description is
-specified, all coordinate keywords for that version _must_ be given
-even if the values do not differ from those of the primary version.
-Rules for the default values of alternative coordinate descriptions
-
-_j_, _k_, _n_, and _m_ . In such cases _a_ is still said to be ‘blank’ although it is not
-the blank character.
-
-are the same as those for the primary description. The alternative descriptions are computed in the same fashion as the primary coordinates. The type of coordinate depends on the value
-of CTYPE _ia_, and may be linear in one of the alternative descriptions and non-linear in another.
-
-The alternative version codes are selected by the _FITS_ writer;
-there is no requirement that the codes be used in alphabetic se
-
-
-quence, nor that one coordinate version differ in its parameter
-values from another. An optional keyword WCSNAME _a_ is also defined to name, and otherwise document, the various versions of
-WCS descriptions.
-
-WCSNAME _a_ – [string; default for _a_ : '␣' (i.e., blank, for the primary WCS, else a character A through Z that specifies the
-coordinate version]. Name of the world-coordinate system
-represented by the WCS keywords with the suffix _a_ . Its primary function is to provide a means by which to specify a
-particular WCS if multiple versions are defined in the HDU.
 
 <a id="83-celestial-coordinate-system-representations"></a>
 ### 8.3. Celestial-coordinate-system representations
@@ -5052,6 +5043,18 @@ via,
 
 _I_ _i_ = round( ( _F_ _i_ − ZZERO) / ZSCALE ) (12)
 
+where _I_ _i_ and _F_ _i_ are the integer and (original) floating-point
+values of the image pixels, respectively, and the round function rounds the result to the nearest integer value.
+ZZERO – [floating-point; optional] This column _shall_ be used to
+contain zero-point offsets that are used to scale the floating-point pixel values in each tile to integers via Eq. 12.
+
+Do not confuse the ZSCALE and ZZERO columns with the
+BSCALE and BZERO keywords (defined in Sect. 4.4.2) that may be
+present in integer _FITS_ images. Any such integer images _should_
+normally be compressed without any further scaling, and the
+BSCALE and BZERO keywords _should_ be copied verbatim into
+the header of the binary table containing the compressed image.
+Some images contain undefined pixel values; in uncompressed floating-point images these pixels have an IEEE NaN
 value. However, these pixel values will be altered when using
 the quantization method described in Sect. 10.2 to compress
 floating-point images. The value of the undefined pixels _may_ be
@@ -5104,21 +5107,6 @@ spacing between adjacent quantization levels) is calculated to be
 some fraction, _Q_, of the RMS noise as measured in background
 regions of the image. Pence et al. (2009) shows that the number of binary bits of noise that are preserved in each pixel value
 is given by _log_ 2 ( _Q_ ) + 1.792. The _Q_ value directly affects the
-
-where _I_ _i_ and _F_ _i_ are the integer and (original) floating-point
-values of the image pixels, respectively, and the round function rounds the result to the nearest integer value.
-ZZERO – [floating-point; optional] This column _shall_ be used to
-contain zero-point offsets that are used to scale the floating-point pixel values in each tile to integers via Eq. 12.
-
-Do not confuse the ZSCALE and ZZERO columns with the
-BSCALE and BZERO keywords (defined in Sect. 4.4.2) that may be
-present in integer _FITS_ images. Any such integer images _should_
-normally be compressed without any further scaling, and the
-BSCALE and BZERO keywords _should_ be copied verbatim into
-the header of the binary table containing the compressed image.
-Some images contain undefined pixel values; in uncompressed floating-point images these pixels have an IEEE NaN
-
-
 compressed file size: decreasing _Q_ by a factor of two will decrease the file size by about one bit per pixel. In order to achieve
 the greatest amount of compression, one should use the smallest
 value of _Q_ that still preserves the required amount of photometric and astrometric precision in the image.
