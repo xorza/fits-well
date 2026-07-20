@@ -1507,7 +1507,7 @@ fn compressed_table_vla_round_trips_all_table_codecs() {
         u32::from_be_bytes(original_parts.data[4..8].try_into().unwrap()),
         0
     );
-    original_parts.data[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
+    original_parts.data[8..12].copy_from_slice(&i32::MAX.to_be_bytes());
     let original =
         BinTable::from_data(&original_parts.header, original_parts.data.clone()).unwrap();
 
@@ -1535,6 +1535,79 @@ fn compressed_table_vla_round_trips_all_table_codecs() {
         let encoded_table = BinTable::from_data(&encoded_header, encoded).unwrap();
         let restored = uncompress_table(&encoded_header, &encoded_table).unwrap();
         assert_eq!(restored.data, original_parts.data, "{}", compression.name());
+    }
+}
+
+#[test]
+fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
+    use crate::header::Header;
+    use crate::table_impl::descriptor;
+    use crate::writer::{FitsWriter, TableBuilder, WriteColumn};
+
+    for wide in [false, true] {
+        let mut column = WriteColumn::vla("VLA", vec![ColumnData::Bytes(vec![7])]).unwrap();
+        if wide {
+            column = column.wide().unwrap();
+        }
+        let prefix = WriteColumn::scalar("PREFIX", ColumnData::Bytes(vec![3]));
+        let builder = TableBuilder::explicit(1, vec![prefix, column]).unwrap();
+        let mut source_writer = FitsWriter::new(Cursor::new(Vec::new()));
+        source_writer.write_table(&builder).unwrap();
+        let source_bytes = source_writer.into_inner().into_inner();
+        let mut source = FitsReader::from_bytes(&source_bytes).unwrap();
+        let original_header = source.hdus[1].header.clone();
+        let original = source.read_table(1).unwrap();
+        let mut encoded = Vec::new();
+        let compressed_header = compress_table(
+            &original_header,
+            &original,
+            1,
+            Compression::GZIP,
+            &mut encoded,
+        )
+        .unwrap();
+        let outer = descriptor::PqDescriptor::decode(&encoded[16..32], true).unwrap();
+        let stream_range = outer
+            .heap_range(TformKind::Byte, 32, encoded.len())
+            .unwrap();
+        let heap_prefix = encoded[32..stream_range.start].to_vec();
+        let combined_len = 16 + if wide { 16 } else { 8 };
+        let mut combined = Vec::new();
+        gzip::gunzip_into(&encoded[stream_range], combined_len, &mut combined).unwrap();
+
+        for case in descriptor::test_support::malformed_descriptor_cases()
+            .into_iter()
+            .filter(|case| case.wide == wide)
+        {
+            let mut malformed = combined.clone();
+            malformed[16..16 + case.bytes.len()].copy_from_slice(&case.bytes);
+            let cell = gzip::gzip_encode(&malformed, gzip::DEFAULT_GZIP_LEVEL);
+            let mut data = encoded[..32].to_vec();
+            data.extend_from_slice(&heap_prefix);
+            write_pq_descriptor(
+                &mut data[16..32],
+                true,
+                cell.len() as u64,
+                heap_prefix.len() as u64,
+            )
+            .unwrap();
+            data.extend_from_slice(&cell);
+            let mut header = compressed_header.clone();
+            header.set_internal("PCOUNT", (heap_prefix.len() + cell.len()) as i64);
+
+            let mut primary = Header::new();
+            primary
+                .set_internal("SIMPLE", true)
+                .set_internal("BITPIX", 8)
+                .set_internal("NAXIS", 0);
+            let mut file = FitsWriter::new(Cursor::new(Vec::new()));
+            file.write_raw_hdu(&primary, &[]).unwrap();
+            file.write_raw_hdu(&header, &data).unwrap();
+            let bytes = file.into_inner().into_inner();
+            let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+            let error = reader.read_compressed_table(1).unwrap_err();
+            case.assert_error(error);
+        }
     }
 }
 

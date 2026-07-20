@@ -25,6 +25,7 @@ use crate::keyword::key;
 use crate::table_impl::BinTable;
 use crate::table_impl::Tform;
 use crate::table_impl::TformKind;
+use crate::table_impl::descriptor::PqDescriptor;
 
 /// Per-column compression algorithm (`ZCTYPn`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -707,50 +708,18 @@ struct TableDecodeScratch {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct VlaDescriptor {
-    count: usize,
-    offset: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
 struct VlaLayout {
     original_start: usize,
     compressed_start: usize,
 }
 
-fn read_vla_descriptor(bytes: &[u8], wide: bool) -> Result<VlaDescriptor> {
-    let expected = if wide { 16 } else { 8 };
-    if bytes.len() != expected {
-        return Err(FitsError::UnexpectedEof);
-    }
-    let (count, offset) = if wide {
-        (
-            u64::from_be_bytes(bytes[..8].try_into().unwrap()),
-            u64::from_be_bytes(bytes[8..].try_into().unwrap()),
-        )
-    } else {
-        (
-            u32::from_be_bytes(bytes[..4].try_into().unwrap()) as u64,
-            u32::from_be_bytes(bytes[4..].try_into().unwrap()) as u64,
-        )
-    };
-    Ok(VlaDescriptor {
-        count: usize::try_from(count).map_err(|_| FitsError::DataUnitOverflow)?,
-        offset: usize::try_from(offset).map_err(|_| FitsError::DataUnitOverflow)?,
-    })
+#[derive(Debug)]
+enum VlaLayoutError {
+    OriginalDescriptor(FitsError),
+    Rejected,
 }
 
-fn vla_nbytes(kind: TformKind, count: usize) -> Result<usize> {
-    if kind == TformKind::Bit {
-        Ok(count.div_ceil(8))
-    } else {
-        count
-            .checked_mul(kind.elem_size())
-            .ok_or(FitsError::DataUnitOverflow)
-    }
-}
-
-fn vla_layout_is_valid(
+fn validate_vla_layout(
     table: &BinTable,
     descriptors: &[u8],
     layout: VlaLayout,
@@ -758,47 +727,38 @@ fn vla_layout_is_valid(
     rows: usize,
     heap_gap: usize,
     heap_len: usize,
-) -> bool {
+) -> std::result::Result<(), VlaLayoutError> {
     let wide = m.kind == TformKind::ArrayDesc64;
     let element_kind = m
         .vla_elem
         .expect("VLA column metadata carries its element kind");
-    (0..rows).all(|row| {
+    for row in 0..rows {
         let original_start = layout.original_start + row * m.width;
         let compressed_start = layout.compressed_start + row * 16;
-        let Ok(original) = read_vla_descriptor(
-            descriptors
-                .get(original_start..original_start + m.width)
-                .unwrap_or(&[]),
-            wide,
-        ) else {
-            return false;
-        };
-        let Ok(compressed) = read_vla_descriptor(
-            descriptors
-                .get(compressed_start..compressed_start + 16)
-                .unwrap_or(&[]),
-            true,
-        ) else {
-            return false;
-        };
-        let Ok(expected) = vla_nbytes(element_kind, original.count) else {
-            return false;
-        };
-        if expected == 0 {
-            return compressed.count == 0;
+        let original =
+            PqDescriptor::decode(&descriptors[original_start..original_start + m.width], wide)
+                .map_err(VlaLayoutError::OriginalDescriptor)?;
+        let compressed =
+            PqDescriptor::decode(&descriptors[compressed_start..compressed_start + 16], true)
+                .map_err(|_| VlaLayoutError::Rejected)?;
+        let original_range = original
+            .heap_range(element_kind, heap_gap, heap_len)
+            .map_err(|_| VlaLayoutError::Rejected)?;
+        if original_range.is_empty() {
+            if compressed.count != 0 {
+                return Err(VlaLayoutError::Rejected);
+            }
+            continue;
         }
-        let original_end = heap_gap
-            .checked_add(original.offset)
-            .and_then(|start| start.checked_add(expected));
-        if original_end.is_none_or(|end| end > heap_len) {
-            return false;
+        if compressed.count == 0
+            || compressed
+                .heap_range(TformKind::Byte, table.heap_offset, table.heap_end)
+                .is_err()
+        {
+            return Err(VlaLayoutError::Rejected);
         }
-        compressed.count != 0
-            && table
-                .heap_slice(compressed.offset, compressed.count)
-                .is_ok()
-    })
+    }
+    Ok(())
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -836,7 +796,7 @@ fn decompress_vla_column(
         original_start: 0,
         compressed_start: original_len,
     };
-    let layout = if vla_layout_is_valid(
+    let standard_result = validate_vla_layout(
         table,
         &scratch.descriptors,
         standard,
@@ -844,20 +804,35 @@ fn decompress_vla_column(
         rows,
         heap_gap,
         heap.len(),
-    ) {
-        standard
-    } else if vla_layout_is_valid(
-        table,
-        &scratch.descriptors,
-        cfitsio,
-        m,
-        rows,
-        heap_gap,
-        heap.len(),
-    ) {
-        cfitsio
-    } else {
-        return Err(FitsError::UnexpectedEof);
+    );
+    let layout = match standard_result {
+        Ok(()) => standard,
+        Err(standard_error) => match validate_vla_layout(
+            table,
+            &scratch.descriptors,
+            cfitsio,
+            m,
+            rows,
+            heap_gap,
+            heap.len(),
+        ) {
+            Ok(()) => cfitsio,
+            Err(cfitsio_error) => match (standard_error, cfitsio_error) {
+                (
+                    VlaLayoutError::OriginalDescriptor(
+                        error @ FitsError::InvalidPqDescriptor { .. },
+                    ),
+                    _,
+                )
+                | (
+                    _,
+                    VlaLayoutError::OriginalDescriptor(
+                        error @ FitsError::InvalidPqDescriptor { .. },
+                    ),
+                ) => return Err(error),
+                _ => return Err(FitsError::UnexpectedEof),
+            },
+        },
     };
 
     for row in 0..rows {
@@ -873,16 +848,17 @@ fn decompress_vla_column(
         .expect("VLA column metadata carries its element kind");
     for row in 0..rows {
         let original_start = layout.original_start + row * m.width;
-        let original = read_vla_descriptor(
+        let original = PqDescriptor::decode(
             &scratch.descriptors[original_start..original_start + m.width],
             wide,
         )?;
         let compressed_start = layout.compressed_start + row * 16;
-        let compressed = read_vla_descriptor(
+        let compressed = PqDescriptor::decode(
             &scratch.descriptors[compressed_start..compressed_start + 16],
             true,
         )?;
-        let expected = vla_nbytes(element_kind, original.count)?;
+        let original_range = original.heap_range(element_kind, heap_gap, heap.len())?;
+        let expected = original_range.len();
         if expected == 0 {
             if compressed.count != 0 {
                 return Err(FitsError::DataSizeMismatch {
@@ -892,15 +868,9 @@ fn decompress_vla_column(
             }
             continue;
         }
-        let stream = table.heap_slice(compressed.offset, compressed.count)?;
+        let stream = table.pq_payload(compressed, TformKind::Byte)?;
         decompress_vla_payload(stream, m, original.count, expected, scratch)?;
-        let start = heap_gap
-            .checked_add(original.offset)
-            .ok_or(FitsError::DataUnitOverflow)?;
-        let end = start
-            .checked_add(expected)
-            .ok_or(FitsError::DataUnitOverflow)?;
-        let target = heap.get_mut(start..end).ok_or(FitsError::UnexpectedEof)?;
+        let target = &mut heap[original_range];
         target.copy_from_slice(&scratch.vla);
     }
     Ok(())

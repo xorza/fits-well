@@ -9,6 +9,8 @@
 //! variable-length arrays out of the heap ([`ColumnReader::vla`]), including
 //! their numeric, complex, and exact unsigned physical views.
 
+pub(crate) mod descriptor;
+
 use std::ops::Index;
 
 use bitvec::order::Msb0;
@@ -26,6 +28,7 @@ use crate::error::Result;
 use crate::hdu::validate_table_field_count;
 use crate::header::Header;
 use crate::keyword::key;
+use crate::table_impl::descriptor::PqDescriptor;
 
 /// The element type of a binary-table column, from the letter of its `TFORMn`
 /// code (Table 18).
@@ -494,9 +497,13 @@ impl BinTable {
         })
     }
 
-    #[cfg(feature = "compression")]
-    pub(crate) fn heap_slice(&self, offset: usize, nbytes: usize) -> Result<&[u8]> {
-        self.bounded_heap(offset, nbytes)
+    pub(crate) fn pq_payload(
+        &self,
+        descriptor: PqDescriptor,
+        element_kind: TformKind,
+    ) -> Result<&[u8]> {
+        let range = descriptor.heap_range(element_kind, self.heap_offset, self.heap_end)?;
+        Ok(&self.bytes[range])
     }
 
     /// The index of the first column whose `TTYPEn` matches `name`, compared
@@ -537,47 +544,26 @@ impl BinTable {
         Ok(ColumnReader { table: self, index })
     }
 
-    /// The `nbytes` of heap at descriptor `offset`, bounds-checked against the heap.
-    /// All arithmetic is checked so a crafted `P`/`Q` descriptor (huge offset/count)
-    /// cannot wrap past the guard or read outside the heap proper.
-    fn bounded_heap(&self, offset: usize, nbytes: usize) -> Result<&[u8]> {
-        let start = self
-            .heap_offset
-            .checked_add(offset)
-            .ok_or(FitsError::UnexpectedEof)?;
-        let end = start.checked_add(nbytes).ok_or(FitsError::UnexpectedEof)?;
-        if end > self.heap_end {
-            return Err(FitsError::UnexpectedEof);
-        }
-        self.bytes.get(start..end).ok_or(FitsError::UnexpectedEof)
-    }
-
     /// The raw bytes of column `col` in row `r`.
     fn cell(&self, col: &Column, r: usize) -> &[u8] {
         let start = r * self.row_len + col.byte_offset;
         &self.bytes[start..start + col.tform.byte_width()]
     }
 
-    fn array_descriptor(&self, col: &Column, r: usize, wide: bool) -> Descriptor {
+    fn pq_descriptor(&self, col: &Column, row: usize) -> Result<PqDescriptor> {
         if col.tform.repeat == 0 {
-            Descriptor {
-                nelem: 0,
-                offset: 0,
-            }
+            Ok(PqDescriptor::EMPTY)
         } else {
-            decode_descriptor(self.cell(col, r), wide)
+            PqDescriptor::decode(
+                self.cell(col, row),
+                col.tform.kind == TformKind::ArrayDesc64,
+            )
         }
     }
 
     fn cells<'a>(&'a self, col: &'a Column) -> impl ExactSizeIterator<Item = &'a [u8]> + 'a {
         (0..self.nrows).map(move |row| self.cell(col, row))
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct VlaFormat {
-    element_type: TformKind,
-    wide: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -591,7 +577,7 @@ pub(crate) struct VlaCell<'a> {
 pub(crate) struct VlaColumn<'a> {
     table: &'a BinTable,
     index: usize,
-    format: VlaFormat,
+    element_type: TformKind,
 }
 
 /// A handle to one column of a [`BinTable`], from [`BinTable::column_by_idx`] or
@@ -745,8 +731,7 @@ impl<'a> ColumnReader<'a> {
     pub fn vla_unsigned(&self) -> Result<Option<Vec<UnsignedData>>> {
         let col = self.descriptor();
         let column = self.vla_column()?;
-        let Some(kind) =
-            unsigned_kind(column.format.element_type, col.tscale, col.tzero, col.tnull)
+        let Some(kind) = unsigned_kind(column.element_type, col.tscale, col.tzero, col.tnull)
         else {
             return Ok(None);
         };
@@ -767,7 +752,7 @@ impl<'a> ColumnReader<'a> {
     pub fn vla_complex(&self) -> Result<Vec<Vec<Complex<f64>>>> {
         let col = self.descriptor();
         let column = self.vla_column()?;
-        let kind = column.format.element_type;
+        let kind = column.element_type;
         if !matches!(kind, TformKind::ComplexF32 | TformKind::ComplexF64) {
             return Err(FitsError::NotAComplexColumn { code: kind.code() });
         }
@@ -788,9 +773,9 @@ impl<'a> ColumnReader<'a> {
     /// row's width. Errors on any non-bit VLA.
     pub fn vla_bits(&self) -> Result<BitColumn<'a>> {
         let col = self.descriptor();
-        let wide = match (col.tform.kind, col.tform.vla_elem) {
-            (TformKind::ArrayDesc32, Some(TformKind::Bit)) => false,
-            (TformKind::ArrayDesc64, Some(TformKind::Bit)) => true,
+        match (col.tform.kind, col.tform.vla_elem) {
+            (TformKind::ArrayDesc32, Some(TformKind::Bit))
+            | (TformKind::ArrayDesc64, Some(TformKind::Bit)) => {}
             _ => {
                 return Err(FitsError::NotABitColumn {
                     code: col.tform.kind.code(),
@@ -800,11 +785,9 @@ impl<'a> ColumnReader<'a> {
         // Validate every row's heap span up front (no allocation) so [`BitColumn::row`]
         // can resolve a row lazily and infallibly — the only place an overrun surfaces.
         for r in 0..self.table.nrows {
-            let d = self.table.array_descriptor(col, r, wide);
-            validate_vla_tdim(col, d.nelem)?;
-            if d.nelem != 0 {
-                self.table.bounded_heap(d.offset, d.nelem.div_ceil(8))?;
-            }
+            let descriptor = self.table.pq_descriptor(col, r)?;
+            validate_vla_tdim(col, descriptor.count)?;
+            self.table.pq_payload(descriptor, TformKind::Bit)?;
         }
         Ok(BitColumn {
             table: self.table,
@@ -812,17 +795,12 @@ impl<'a> ColumnReader<'a> {
         })
     }
 
-    fn vla_format(&self) -> Result<VlaFormat> {
+    fn vla_element_type(&self) -> Result<TformKind> {
         let col = self.descriptor();
         match (col.tform.kind, col.tform.vla_elem) {
-            (TformKind::ArrayDesc32, Some(element_type)) => Ok(VlaFormat {
-                element_type,
-                wide: false,
-            }),
-            (TformKind::ArrayDesc64, Some(element_type)) => Ok(VlaFormat {
-                element_type,
-                wide: true,
-            }),
+            (TformKind::ArrayDesc32 | TformKind::ArrayDesc64, Some(element_type)) => {
+                Ok(element_type)
+            }
             _ => Err(FitsError::NotAVla {
                 code: col.tform.kind.code(),
             }),
@@ -833,7 +811,7 @@ impl<'a> ColumnReader<'a> {
         Ok(VlaColumn {
             table: self.table,
             index: self.index,
-            format: self.vla_format()?,
+            element_type: self.vla_element_type()?,
         })
     }
 
@@ -856,24 +834,13 @@ impl<'a> VlaColumn<'a> {
             return Err(FitsError::UnexpectedEof);
         }
         let col = &self.table.columns[self.index];
-        let descriptor = self.table.array_descriptor(col, row, self.format.wide);
-        validate_vla_tdim(col, descriptor.nelem)?;
-        let nbytes = match self.format.element_type {
-            TformKind::Bit => descriptor.nelem.div_ceil(8),
-            _ => descriptor
-                .nelem
-                .checked_mul(self.format.element_type.elem_size())
-                .ok_or(FitsError::UnexpectedEof)?,
-        };
-        let bytes = if descriptor.nelem == 0 {
-            &[]
-        } else {
-            self.table.bounded_heap(descriptor.offset, nbytes)?
-        };
+        let descriptor = self.table.pq_descriptor(col, row)?;
+        validate_vla_tdim(col, descriptor.count)?;
+        let bytes = self.table.pq_payload(descriptor, self.element_type)?;
         Ok(VlaCell {
             bytes,
-            element_count: descriptor.nelem,
-            element_type: self.format.element_type,
+            element_count: descriptor.count,
+            element_type: self.element_type,
         })
     }
 }
@@ -928,16 +895,18 @@ impl<'a> BitColumn<'a> {
         } else {
             // Variable-length `PX`/`QX`: follow the descriptor into the heap. The span
             // was bounds-checked by `vla_bits`, so the lookup can't fail here.
-            let wide = col.tform.kind == TformKind::ArrayDesc64;
-            let d = self.table.array_descriptor(col, r, wide);
-            if d.nelem == 0 {
+            let descriptor = self
+                .table
+                .pq_descriptor(col, r)
+                .expect("vla_bits validated every descriptor");
+            if descriptor.count == 0 {
                 return self.table.bytes[..0].view_bits::<Msb0>();
             }
             let cell = self
                 .table
-                .bounded_heap(d.offset, d.nelem.div_ceil(8))
+                .pq_payload(descriptor, TformKind::Bit)
                 .expect("vla_bits validated every heap span");
-            &cell.view_bits::<Msb0>()[..d.nelem]
+            &cell.view_bits::<Msb0>()[..descriptor.count]
         }
     }
 
@@ -1240,56 +1209,9 @@ pub(crate) fn decode_vla_cell(
         .tform
         .vla_elem
         .expect("validated VLA format carries an element type");
-    let expected_len = if element_type == TformKind::Bit {
-        element_count.div_ceil(8)
-    } else {
-        element_count
-            .checked_mul(element_type.elem_size())
-            .ok_or(FitsError::DataUnitOverflow)?
-    };
+    let expected_len = descriptor::payload_len(element_type, element_count)?;
     debug_assert_eq!(bytes.len(), expected_len);
     Ok(decode_array(element_type, bytes))
-}
-
-/// A decoded `P`/`Q` array descriptor: a row's heap array element count and byte
-/// offset into the heap.
-#[derive(Debug, Clone, Copy)]
-struct Descriptor {
-    nelem: usize,
-    offset: usize,
-}
-
-/// Decode an array descriptor — a pair of 32-bit (`P`) or 64-bit (`Q`) big-endian
-/// integers — from a variable-length column cell.
-fn decode_descriptor(desc: &[u8], wide: bool) -> Descriptor {
-    if wide {
-        Descriptor {
-            nelem: be_u64(&desc[0..8]),
-            offset: be_u64(&desc[8..16]),
-        }
-    } else {
-        Descriptor {
-            nelem: be_u32(&desc[0..4]),
-            offset: be_u32(&desc[4..8]),
-        }
-    }
-}
-
-/// Decode a big-endian `P`/`Q` array-descriptor field (element count or heap
-/// offset). The standard treats these as unsigned; an out-of-range value is left
-/// to the heap-bounds check to reject (rather than silently clamping it to 0).
-fn be_u32(b: &[u8]) -> usize {
-    u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize
-}
-
-fn be_u64(b: &[u8]) -> usize {
-    // On a 32-bit target a `Q` count/offset can exceed `usize`; saturate so it fails
-    // the heap bounds check rather than wrapping into a spuriously in-range value.
-    // On 64-bit this is the identity (`usize == u64`).
-    usize::try_from(u64::from_be_bytes([
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-    ]))
-    .unwrap_or(usize::MAX)
 }
 
 #[cfg(all(test, feature = "compression"))]
