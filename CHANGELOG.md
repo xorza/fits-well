@@ -107,6 +107,8 @@
   cannot be ignored. They no longer return linear-stage values as complete world
   coordinates when a nonlinear algorithm is unavailable, and coordinate-count
   mismatches return errors instead of panicking.
+- `WcsNoConvergence` now names its payload `algorithm` instead of `projection`,
+  covering iterative non-projection transforms such as `-TAB`.
 - `FitsError::DataUnitTooLarge::bytes` changed from `usize` to `u64`. The
   `TypeMismatch`, `InvalidAscii`, `ReservedKeyword`, `InvalidHeaderValue`,
   `HeaderCardTooLong`, `AsciiFieldTooWide`, `IntegerOutOfRange`,
@@ -205,6 +207,9 @@
   declared fields instead of replacing them with non-conforming `*` characters.
 - `read_table` and `read_ascii_table` validate the HDU kind before reading or
   allocating its data unit, so wrong-kind calls return their semantic error first.
+- Multidimensional `-TAB` inversion now returns `WcsNoConvergence` after a
+  deterministic work budget instead of allowing exponential subdivision to run
+  without a practical bound.
 - The default feature list now contains only `parallel`; default builds still enable
   `compression` because `parallel` depends on it.
 
@@ -335,3 +340,6 @@
 - Writer padding no longer allocates per data unit, and reusable buffers reserve from
   validated final sizes.
 - ZPN projection values and derivatives are evaluated together with extended Horner.
+- `read_wcs` materializes only the first lookup-table row and the referenced
+  coordinate/index VLA cells. Multidimensional `-TAB` inversion reuses one search
+  workspace and evaluates subvoxel corners with separable interpolation.

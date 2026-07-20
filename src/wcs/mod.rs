@@ -782,7 +782,7 @@ fn air_radius_u(zeta: f64, theta_b: f64) -> f64 {
 
 fn no_convergence(projection: Projection) -> FitsError {
     FitsError::WcsNoConvergence {
-        projection: projection.code(),
+        algorithm: projection.code(),
     }
 }
 

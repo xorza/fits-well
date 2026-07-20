@@ -1,3 +1,4 @@
+use crate::allocation;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -11,6 +12,7 @@ use crate::wcs::unit_to_degrees;
 
 const TABULAR_TOLERANCE: f64 = 1e-10;
 const MAX_INTERPOLATION_VERTICES: usize = 1 << 20;
+const MAX_INVERSE_WORK: usize = 1 << 22;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TabularReference {
@@ -163,6 +165,16 @@ pub(crate) fn descriptors(
         }
     }
     Ok(descriptors)
+}
+
+impl TabularDescriptor {
+    pub(crate) fn referenced_columns(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.reference.coordinate_column.as_str()).chain(
+            self.index_columns
+                .iter()
+                .filter_map(|column| column.as_deref()),
+        )
+    }
 }
 
 impl TabularTransform {
@@ -469,15 +481,18 @@ impl TabularTransform {
             .iter()
             .try_fold(1usize, |count, &length| count.checked_mul(length))
             .ok_or_else(|| invalid("TAB coordinate array is too large"))?;
+        let dimensions = self.axes.len();
+        let mut base = vec![0; dimensions];
+        let mut start = vec![0.0; dimensions];
+        let mut extent = vec![0.0; dimensions];
+        let mut solution = vec![0.0; dimensions];
+        let mut scratch = TabularSearchScratch::new(dimensions, self.vertex_count)?;
         for cell in 0..cell_count {
             let mut remainder = cell;
-            let mut base = Vec::with_capacity(self.axes.len());
-            for &length in &cell_lengths {
-                base.push(remainder % length);
+            for (position, &length) in base.iter_mut().zip(&cell_lengths) {
+                *position = remainder % length;
                 remainder /= length;
             }
-            let mut start = Vec::with_capacity(self.axes.len());
-            let mut extent = Vec::with_capacity(self.axes.len());
             for (table_axis, &position) in base.iter().enumerate() {
                 let length = self.lengths[table_axis];
                 let first = if position == 0 { -0.5 } else { 0.0 };
@@ -486,91 +501,27 @@ impl TabularTransform {
                 } else {
                     1.0
                 };
-                start.push(first);
-                extent.push(if length == 1 { 1.0 } else { last - first });
+                start[table_axis] = first;
+                extent[table_axis] = if length == 1 { 1.0 } else { last - first };
             }
-            let bounds = SubvoxelBounds { start, extent };
-            let mut delta = vec![0.0; self.axes.len()];
-            if self.locate_subvoxel(target, &base, &bounds, 0, &[], &mut delta) {
-                return Ok(TabularLocation { base, delta });
+            scratch.voxel.fill(0);
+            let mut search = SubvoxelSearch {
+                transform: self,
+                target,
+                base: &base,
+                start: &start,
+                extent: &extent,
+                solution: &mut solution,
+                scratch: &mut scratch,
+            };
+            if search.locate(0)? {
+                return Ok(TabularLocation {
+                    base,
+                    delta: solution,
+                });
             }
         }
         Err(domain(self.axes[0]))
-    }
-
-    fn locate_subvoxel(
-        &self,
-        target: &[f64],
-        base: &[usize],
-        bounds: &SubvoxelBounds,
-        level: usize,
-        voxel: &[usize],
-        solution: &mut [f64],
-    ) -> bool {
-        let dimensions = self.axes.len();
-        let size = 2.0f64.powi(-(level as i32));
-        let mut lower = vec![false; dimensions];
-        let mut upper = vec![false; dimensions];
-        let mut equal = vec![false; dimensions];
-        for vertex in 0..self.vertex_count {
-            let mut delta = vec![0.0; dimensions];
-            for table_axis in 0..dimensions {
-                delta[table_axis] = if level == 0 {
-                    bounds.start[table_axis]
-                } else {
-                    bounds.start[table_axis]
-                        + size * bounds.extent[table_axis] * voxel[table_axis] as f64
-                };
-            }
-            for (bit, &table_axis) in self.variable_axes.iter().enumerate() {
-                if vertex & (1 << bit) != 0 {
-                    delta[table_axis] += size * bounds.extent[table_axis];
-                }
-            }
-            let coordinate = self.interpolate(base, &delta);
-            let mut exact = true;
-            for table_axis in 0..dimensions {
-                let difference = coordinate[table_axis] - target[table_axis];
-                if difference.abs() < TABULAR_TOLERANCE {
-                    equal[table_axis] = true;
-                } else {
-                    exact = false;
-                    if difference < 0.0 {
-                        lower[table_axis] = true;
-                    } else {
-                        upper[table_axis] = true;
-                    }
-                }
-            }
-            if exact {
-                solution.copy_from_slice(&delta);
-                return true;
-            }
-        }
-        let possible = (0..dimensions)
-            .all(|axis| (lower[axis] || equal[axis]) && (upper[axis] || equal[axis]));
-        if !possible {
-            return false;
-        }
-        if level == 31 {
-            let half = size / 2.0;
-            for table_axis in 0..dimensions {
-                solution[table_axis] = bounds.start[table_axis]
-                    + half * bounds.extent[table_axis] * (2 * voxel[table_axis] + 1) as f64;
-            }
-            return true;
-        }
-        for subdivision in 0..self.vertex_count {
-            let mut next = vec![0; dimensions];
-            for (bit, &table_axis) in self.variable_axes.iter().enumerate() {
-                let parent = if level == 0 { 0 } else { 2 * voxel[table_axis] };
-                next[table_axis] = parent + usize::from(subdivision & (1 << bit) != 0);
-            }
-            if self.locate_subvoxel(target, base, bounds, level + 1, &next, solution) {
-                return true;
-            }
-        }
-        false
     }
 }
 
@@ -596,9 +547,184 @@ struct TabularLocation {
 }
 
 #[derive(Debug)]
-struct SubvoxelBounds {
-    start: Vec<f64>,
-    extent: Vec<f64>,
+struct TabularSearchScratch {
+    lower: Vec<bool>,
+    upper: Vec<bool>,
+    equal: Vec<bool>,
+    delta: Vec<f64>,
+    indices: Vec<usize>,
+    corners: Vec<f64>,
+    voxel: Vec<usize>,
+    node_work: usize,
+    remaining_work: usize,
+}
+
+impl TabularSearchScratch {
+    fn new(dimensions: usize, vertex_count: usize) -> Result<TabularSearchScratch> {
+        let node_work = inverse_node_work(dimensions, vertex_count)?;
+        let corner_count = dimensions
+            .checked_mul(vertex_count)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        Ok(TabularSearchScratch {
+            lower: allocation::try_zeroed(false, dimensions)?,
+            upper: allocation::try_zeroed(false, dimensions)?,
+            equal: allocation::try_zeroed(false, dimensions)?,
+            delta: allocation::try_zeroed(0.0, dimensions)?,
+            indices: allocation::try_zeroed(0, dimensions)?,
+            corners: allocation::try_zeroed(0.0, corner_count)?,
+            voxel: allocation::try_zeroed(0, dimensions)?,
+            node_work,
+            remaining_work: MAX_INVERSE_WORK,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct SubvoxelSearch<'a> {
+    transform: &'a TabularTransform,
+    target: &'a [f64],
+    base: &'a [usize],
+    start: &'a [f64],
+    extent: &'a [f64],
+    solution: &'a mut [f64],
+    scratch: &'a mut TabularSearchScratch,
+}
+
+impl SubvoxelSearch<'_> {
+    fn locate(&mut self, level: usize) -> Result<bool> {
+        let dimensions = self.transform.axes.len();
+        let size = 2.0f64.powi(-(level as i32));
+        self.evaluate_corners(level, size)?;
+        self.scratch.lower.fill(false);
+        self.scratch.upper.fill(false);
+        self.scratch.equal.fill(false);
+        for vertex in 0..self.transform.vertex_count {
+            let mut exact = true;
+            for table_axis in 0..dimensions {
+                let difference = self.scratch.corners[vertex * dimensions + table_axis]
+                    - self.target[table_axis];
+                if difference.abs() < TABULAR_TOLERANCE {
+                    self.scratch.equal[table_axis] = true;
+                } else {
+                    exact = false;
+                    if difference < 0.0 {
+                        self.scratch.lower[table_axis] = true;
+                    } else {
+                        self.scratch.upper[table_axis] = true;
+                    }
+                }
+            }
+            if exact {
+                self.solution.copy_from_slice(&self.scratch.delta);
+                for (bit, &table_axis) in self.transform.variable_axes.iter().enumerate() {
+                    if vertex & (1 << bit) != 0 {
+                        self.solution[table_axis] += size * self.extent[table_axis];
+                    }
+                }
+                return Ok(true);
+            }
+        }
+        let possible = (0..dimensions).all(|axis| {
+            (self.scratch.lower[axis] || self.scratch.equal[axis])
+                && (self.scratch.upper[axis] || self.scratch.equal[axis])
+        });
+        if !possible {
+            return Ok(false);
+        }
+        if level == 31 {
+            let half = size / 2.0;
+            for table_axis in 0..dimensions {
+                self.solution[table_axis] = self.start[table_axis]
+                    + half
+                        * self.extent[table_axis]
+                        * (2 * self.scratch.voxel[table_axis] + 1) as f64;
+            }
+            return Ok(true);
+        }
+        for subdivision in 0..self.transform.vertex_count {
+            for (bit, &table_axis) in self.transform.variable_axes.iter().enumerate() {
+                let parent = if level == 0 {
+                    0
+                } else {
+                    2 * self.scratch.voxel[table_axis]
+                };
+                self.scratch.voxel[table_axis] =
+                    parent + usize::from(subdivision & (1 << bit) != 0);
+            }
+            if self.locate(level + 1)? {
+                return Ok(true);
+            }
+            for &table_axis in &self.transform.variable_axes {
+                self.scratch.voxel[table_axis] = if level == 0 {
+                    0
+                } else {
+                    self.scratch.voxel[table_axis] / 2
+                };
+            }
+        }
+        Ok(false)
+    }
+
+    fn evaluate_corners(&mut self, level: usize, size: f64) -> Result<()> {
+        let dimensions = self.transform.axes.len();
+        if self.scratch.node_work > self.scratch.remaining_work {
+            return Err(FitsError::WcsNoConvergence { algorithm: "TAB" });
+        }
+        self.scratch.remaining_work -= self.scratch.node_work;
+
+        for table_axis in 0..dimensions {
+            self.scratch.delta[table_axis] = if level == 0 {
+                self.start[table_axis]
+            } else {
+                self.start[table_axis]
+                    + size * self.extent[table_axis] * self.scratch.voxel[table_axis] as f64
+            };
+        }
+        for vertex in 0..self.transform.vertex_count {
+            self.scratch.indices.copy_from_slice(self.base);
+            for (bit, &table_axis) in self.transform.variable_axes.iter().enumerate() {
+                if vertex & (1 << bit) != 0 {
+                    self.scratch.indices[table_axis] += 1;
+                }
+            }
+            let source = self.transform.coordinate_offset(&self.scratch.indices);
+            let destination = vertex * dimensions;
+            self.scratch.corners[destination..destination + dimensions]
+                .copy_from_slice(&self.transform.coordinates[source..source + dimensions]);
+        }
+        for (bit, &table_axis) in self.transform.variable_axes.iter().enumerate() {
+            let lower = self.scratch.delta[table_axis];
+            let upper = lower + size * self.extent[table_axis];
+            let stride = 1usize << bit;
+            let block = 2 * stride;
+            for block_start in (0..self.transform.vertex_count).step_by(block) {
+                for offset in 0..stride {
+                    let lower_vertex = block_start + offset;
+                    let upper_vertex = lower_vertex + stride;
+                    for coordinate_axis in 0..dimensions {
+                        let lower_index = lower_vertex * dimensions + coordinate_axis;
+                        let upper_index = upper_vertex * dimensions + coordinate_axis;
+                        let first = self.scratch.corners[lower_index];
+                        let second = self.scratch.corners[upper_index];
+                        self.scratch.corners[lower_index] = first * (1.0 - lower) + second * lower;
+                        self.scratch.corners[upper_index] = first * (1.0 - upper) + second * upper;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn inverse_node_work(dimensions: usize, vertex_count: usize) -> Result<usize> {
+    let work = dimensions
+        .checked_mul(dimensions)
+        .and_then(|work| work.checked_mul(vertex_count))
+        .unwrap_or(usize::MAX);
+    if work > MAX_INVERSE_WORK {
+        return Err(FitsError::WcsNoConvergence { algorithm: "TAB" });
+    }
+    Ok(work)
 }
 
 fn first_row_shape_and_values(row_count: usize, reader: ColumnReader<'_>) -> Result<FirstRow> {
