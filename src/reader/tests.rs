@@ -5,6 +5,7 @@ use crate::data::Scaling;
 use crate::error::FitsError;
 use crate::header::Header;
 use crate::reader::*;
+use crate::table_impl::descriptor;
 use crate::table_impl::{CharacterField, ColumnData};
 use crate::writer::{FitsWriter, TableBuilder, WriteColumn};
 use num_complex::Complex;
@@ -1227,7 +1228,10 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     );
     assert!(matches!(
         selective.read_table_rows(1, 1..2),
-        Err(FitsError::DataUnitOverflow)
+        Err(FitsError::InvalidPqDescriptor {
+            field: "count",
+            value: -1
+        })
     ));
 
     let mut stream = FitsReader::open(Cursor::new(bytes)).unwrap();
@@ -1249,6 +1253,47 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
             ColumnData::F64(vec![4.5]),
         ])
     );
+}
+
+#[test]
+fn malformed_pq_descriptors_match_across_table_read_paths() {
+    for wide in [false, true] {
+        let mut column = WriteColumn::vla("VLA", vec![ColumnData::Bytes(vec![7])]).unwrap();
+        if wide {
+            column = column.wide().unwrap();
+        }
+        let table = TableBuilder::explicit(1, vec![column]).unwrap();
+        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+        writer.write_table(&table).unwrap();
+        let bytes = writer.into_inner().into_inner();
+        let base_reader = FitsReader::from_bytes(&bytes).unwrap();
+        let schema = base_reader.table_schema(1).unwrap();
+        let slot = usize::try_from(base_reader.hdus[1].data_offset).unwrap()
+            + schema.columns[0].byte_offset;
+
+        for case in descriptor::test_support::malformed_descriptor_cases()
+            .into_iter()
+            .filter(|case| case.wide == wide)
+        {
+            let mut corrupted = bytes.clone();
+            corrupted[slot..slot + case.bytes.len()].copy_from_slice(&case.bytes);
+            let mut reader = FitsReader::from_bytes(&corrupted).unwrap();
+
+            let whole = reader.read_table(1).unwrap();
+            case.assert_error(whole.column_by_name("VLA").unwrap().vla().unwrap_err());
+            case.assert_error(
+                reader
+                    .read_table_cell(1, 0, ColumnSelector::from("VLA"))
+                    .unwrap_err(),
+            );
+            case.assert_error(reader.read_table_rows(1, 0..1).unwrap_err());
+            case.assert_error(
+                reader
+                    .read_table_columns(1, 0..1, &[ColumnSelector::from("VLA")])
+                    .unwrap_err(),
+            );
+        }
+    }
 }
 
 #[test]

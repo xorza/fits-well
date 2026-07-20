@@ -94,6 +94,12 @@ pub enum FitsError {
         expected: usize,
         got: usize,
     },
+    /// A signed `P`/`Q` heap-array descriptor contains a negative element count
+    /// or byte offset.
+    InvalidPqDescriptor {
+        field: &'static str,
+        value: i64,
+    },
     /// A data-unit read named an HDU index beyond the parsed sequence.
     HduIndexOutOfBounds {
         index: usize,
@@ -338,6 +344,9 @@ impl fmt::Display for FitsError {
                     "decoded data unit has {got} elements, header implies {expected}"
                 )
             }
+            FitsError::InvalidPqDescriptor { field, value } => {
+                write!(f, "invalid P/Q descriptor {field}: {value}")
+            }
             FitsError::HduIndexOutOfBounds { index, len } => {
                 write!(f, "HDU index {index} out of bounds (file has {len} HDUs)")
             }
@@ -530,6 +539,14 @@ mod tests {
         assert_eq!(
             FitsError::DataUnitTooLarge { bytes: 1 << 60 }.to_string(),
             "header-implied data-unit size (1152921504606846976 bytes) is too large to allocate"
+        );
+        assert_eq!(
+            FitsError::InvalidPqDescriptor {
+                field: "offset",
+                value: -1,
+            }
+            .to_string(),
+            "invalid P/Q descriptor offset: -1"
         );
         assert_eq!(
             FitsError::MissingKeyword { name: "NAXIS" }.to_string(),

@@ -35,6 +35,7 @@ use crate::table_impl::TableSchema;
 use crate::table_impl::TformKind;
 use crate::table_impl::decode_fixed_cell;
 use crate::table_impl::decode_vla_cell;
+use crate::table_impl::descriptor::PqDescriptor;
 use crate::wcs::Wcs;
 use crate::wcs::image_axis_count;
 use crate::wcs::tabular;
@@ -994,12 +995,6 @@ impl<S: Source> FitsReader<S> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ArrayDescriptor {
-    count: usize,
-    offset: usize,
-}
-
 #[derive(Debug)]
 struct VlaCellSpan {
     count: usize,
@@ -1012,49 +1007,15 @@ fn vla_cell_span(
     descriptor_bytes: &[u8],
     wide: bool,
 ) -> Result<VlaCellSpan> {
-    let descriptor = decode_descriptor(descriptor_bytes, wide);
+    let descriptor = PqDescriptor::decode(descriptor_bytes, wide)?;
     let element_type = column
         .tform
         .vla_elem
         .expect("validated VLA format carries an element type");
-    let byte_len = if element_type == TformKind::Bit {
-        descriptor.count.div_ceil(8)
-    } else {
-        descriptor
-            .count
-            .checked_mul(element_type.elem_size())
-            .ok_or(FitsError::DataUnitOverflow)?
-    };
-    let heap_start = schema
-        .heap_offset
-        .checked_add(descriptor.offset)
-        .ok_or(FitsError::UnexpectedEof)?;
-    let heap_end = heap_start
-        .checked_add(byte_len)
-        .ok_or(FitsError::UnexpectedEof)?;
-    if heap_end > schema.heap_end {
-        return Err(FitsError::UnexpectedEof);
-    }
     Ok(VlaCellSpan {
         count: descriptor.count,
-        heap_range: heap_start..heap_end,
+        heap_range: descriptor.heap_range(element_type, schema.heap_offset, schema.heap_end)?,
     })
-}
-
-fn decode_descriptor(bytes: &[u8], wide: bool) -> ArrayDescriptor {
-    if wide {
-        ArrayDescriptor {
-            count: usize::try_from(u64::from_be_bytes(bytes[..8].try_into().unwrap()))
-                .unwrap_or(usize::MAX),
-            offset: usize::try_from(u64::from_be_bytes(bytes[8..16].try_into().unwrap()))
-                .unwrap_or(usize::MAX),
-        }
-    } else {
-        ArrayDescriptor {
-            count: u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize,
-            offset: u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize,
-        }
-    }
 }
 
 fn validate_row_range(rows: &Range<usize>, len: usize) -> Result<()> {

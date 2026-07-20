@@ -113,6 +113,7 @@
   `TypeMismatch`, `InvalidAscii`, `ReservedKeyword`, `InvalidHeaderValue`,
   `HeaderCardTooLong`, `AsciiFieldTooWide`, `IntegerOutOfRange`,
   `UnsupportedWcsTransform`, `WcsProjectionDomain`, `WcsCoordinateDomain`, `WcsNoConvergence`,
+  `InvalidPqDescriptor`,
   `PlioValueOutOfRange`, `TableMetadataMismatch`, `GroupIndexOutOfBounds`,
   `CoordinateCountMismatch`, `WcsAxisIndexOutOfBounds`, `OneBasedIndexRequired`,
   `WriterFailed`, selector/range, table-builder, and external-time-data variants
@@ -207,6 +208,9 @@
   declared fields instead of replacing them with non-conforming `*` characters.
 - `read_table` and `read_ascii_table` validate the HDU kind before reading or
   allocating its data unit, so wrong-kind calls return their semantic error first.
+- All ordinary, ranged, and compressed-table `P`/`Q` reads now share signed
+  descriptor decoding and checked payload-span construction. Negative counts or
+  offsets return `InvalidPqDescriptor` before heap-size arithmetic.
 - Multidimensional `-TAB` inversion now returns `WcsNoConvergence` after a
   deterministic work budget instead of allowing exponential subdivision to run
   without a practical bound.
