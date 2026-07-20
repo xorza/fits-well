@@ -146,7 +146,7 @@ fn transform_failures_return_errors() {
     let zpn = build("ZPN");
     assert!(matches!(
         zpn.pixel_to_world(&[2.0, 1.0]),
-        Err(FitsError::WcsNoConvergence { projection: "ZPN" })
+        Err(FitsError::WcsNoConvergence { algorithm: "ZPN" })
     ));
 
     let tan = open_wcs("wcs_tan.fits");

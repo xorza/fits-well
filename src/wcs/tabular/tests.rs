@@ -60,6 +60,27 @@ fn tab_header(axis_count: usize, coordinate: &str) -> Header {
     header
 }
 
+fn affine_coordinates(dimensions: usize) -> Vec<f64> {
+    let mut coordinates = Vec::with_capacity(dimensions * (1 << dimensions));
+    for vertex in 0..1 << dimensions {
+        for axis in 0..dimensions {
+            let endpoint = usize::from(vertex & (1 << axis) != 0) as f64;
+            coordinates.push(100.0 * axis as f64 + endpoint * (axis + 1) as f64);
+        }
+    }
+    coordinates
+}
+
+fn coordinate_shape(dimensions: usize) -> String {
+    format!(
+        "({},{})",
+        dimensions,
+        std::iter::repeat_n("2", dimensions)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
 fn resolved_wcs(header: &Header, table: &BinTable) -> Wcs {
     let descriptors = tabular::descriptors(
         header,
@@ -175,6 +196,43 @@ fn multidimensional_tab_interpolates_and_inverts_coupled_axes() {
             "{boundary:?}: {world:?} -> {pixel:?}"
         );
     }
+
+    for dimensions in 3..=6 {
+        let coordinates = affine_coordinates(dimensions);
+        let shape = coordinate_shape(dimensions);
+        let table = lookup_table(&[("COORD", &coordinates, Some(&shape))]);
+        let header = tab_header(dimensions, "COORD");
+        let wcs = resolved_wcs(&header, &table);
+        let pixel = vec![1.25; dimensions];
+        let world = wcs.pixel_to_world(&pixel).unwrap();
+        for (axis, &value) in world.iter().enumerate() {
+            let expected = 100.0 * axis as f64 + 0.25 * (axis + 1) as f64;
+            assert!((value - expected).abs() < 1e-12, "{dimensions}: {world:?}");
+        }
+        let round_trip = wcs.world_to_pixel(&world).unwrap();
+        assert!(
+            round_trip
+                .iter()
+                .zip(&pixel)
+                .all(|(actual, expected)| (actual - expected).abs() < 1e-9),
+            "{dimensions}: {round_trip:?}"
+        );
+    }
+}
+
+#[test]
+fn multidimensional_tab_inverse_has_a_bounded_work_budget() {
+    let dimensions = 14;
+    let coordinates = affine_coordinates(dimensions);
+    let shape = coordinate_shape(dimensions);
+    let table = lookup_table(&[("COORD", &coordinates, Some(&shape))]);
+    let header = tab_header(dimensions, "COORD");
+    let wcs = resolved_wcs(&header, &table);
+    let world = wcs.pixel_to_world(&vec![1.25; dimensions]).unwrap();
+    assert!(matches!(
+        wcs.world_to_pixel(&world),
+        Err(FitsError::WcsNoConvergence { algorithm: "TAB" })
+    ));
 }
 
 #[test]

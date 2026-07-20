@@ -193,9 +193,9 @@ pub enum FitsError {
         axis: usize,
         algorithm: &'static str,
     },
-    /// An iterative WCS projection inversion did not reach a valid solution.
+    /// An iterative WCS algorithm did not reach a valid solution.
     WcsNoConvergence {
-        projection: &'static str,
+        algorithm: &'static str,
     },
     /// A tiled-image compression algorithm or variant is not yet supported.
     UnsupportedCompression {
@@ -432,8 +432,8 @@ impl fmt::Display for FitsError {
                     "coordinate on zero-based axis {axis} is outside the {algorithm} WCS domain"
                 )
             }
-            FitsError::WcsNoConvergence { projection } => {
-                write!(f, "{projection} projection iteration did not converge")
+            FitsError::WcsNoConvergence { algorithm } => {
+                write!(f, "{algorithm} WCS iteration did not converge")
             }
             FitsError::UnsupportedCompression { name } => {
                 write!(f, "unsupported tiled compression: {name}")
@@ -631,8 +631,8 @@ mod tests {
             "coordinate on zero-based axis 2 is outside the LOG WCS domain"
         );
         assert_eq!(
-            FitsError::WcsNoConvergence { projection: "ZPN" }.to_string(),
-            "ZPN projection iteration did not converge"
+            FitsError::WcsNoConvergence { algorithm: "ZPN" }.to_string(),
+            "ZPN WCS iteration did not converge"
         );
         assert_eq!(
             FitsError::PlioValueOutOfRange {

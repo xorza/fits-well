@@ -8,8 +8,30 @@ use crate::reader::*;
 use crate::table_impl::{CharacterField, ColumnData};
 use crate::writer::{FitsWriter, TableBuilder, WriteColumn};
 use num_complex::Complex;
+use std::cell::Cell;
 use std::fs::File;
-use std::io::Cursor;
+use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::rc::Rc;
+
+#[derive(Debug)]
+struct CountingCursor {
+    inner: Cursor<Vec<u8>>,
+    bytes_read: Rc<Cell<usize>>,
+}
+
+impl Read for CountingCursor {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let count = self.inner.read(buffer)?;
+        self.bytes_read.set(self.bytes_read.get() + count);
+        Ok(count)
+    }
+}
+
+impl Seek for CountingCursor {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.inner.seek(position)
+    }
+}
 
 fn open(name: &str) -> StreamReader<File> {
     let path = format!("tests/data/fits/{name}");
@@ -156,6 +178,64 @@ fn read_wcs_resolves_shared_arrays_and_extensions_once_per_reference_group() {
         wcs.pixel_to_world(&[1.0, 1.0, 1.0, 1.0, 1.0]).unwrap(),
         [10.0, 100.0, 30.0, 40.0, 1000.0]
     );
+}
+
+#[test]
+fn read_wcs_fetches_only_the_referenced_first_row_heap_cells() {
+    let mut primary = Header::new();
+    primary
+        .set_internal("SIMPLE", true)
+        .set_internal("BITPIX", 8)
+        .set_internal("NAXIS", 1)
+        .set_internal("NAXIS1", 1)
+        .set_internal("CTYPE1", "WAVE-TAB")
+        .set_internal("CUNIT1", "m")
+        .set_internal("CRPIX1", 1.0)
+        .set_internal("CRVAL1", 10.0)
+        .set_internal("CDELT1", 10.0)
+        .set_internal("PS1_0", "WCS-TABLE")
+        .set_internal("PS1_1", "COORD")
+        .set_internal("PS1_2", "INDEX")
+        .set_internal("PV1_3", 1);
+    let row_count = 64;
+    let coordinates = (0..row_count)
+        .map(|_| ColumnData::F64(vec![10.0, 20.0, 40.0]))
+        .collect();
+    let indices = (0..row_count)
+        .map(|_| ColumnData::F64(vec![10.0, 20.0, 40.0]))
+        .collect();
+    let unused = (0..row_count)
+        .map(|_| ColumnData::Bytes(vec![7; 1024]))
+        .collect();
+    let table = TableBuilder::explicit(
+        row_count,
+        vec![
+            WriteColumn::vla("COORD", coordinates)
+                .unwrap()
+                .with_tdim(vec![1, 3]),
+            WriteColumn::vla("INDEX", indices).unwrap(),
+            WriteColumn::vla("UNUSED", unused).unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut lookup_header = Header::new();
+    lookup_header.set_internal("EXTNAME", "WCS-TABLE");
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_raw_hdu(&primary, &[0]).unwrap();
+    writer
+        .write_table_with_header(&table, &lookup_header)
+        .unwrap();
+
+    let bytes_read = Rc::new(Cell::new(0));
+    let source = CountingCursor {
+        inner: Cursor::new(writer.into_inner().into_inner()),
+        bytes_read: Rc::clone(&bytes_read),
+    };
+    let mut reader = FitsReader::open(source).unwrap();
+    let before = bytes_read.get();
+    let wcs = reader.read_wcs(0, None).unwrap();
+    assert_eq!(bytes_read.get() - before, 24 + 6 * size_of::<f64>());
+    assert_eq!(wcs.pixel_to_world(&[2.0]).unwrap(), [20.0]);
 }
 
 #[test]

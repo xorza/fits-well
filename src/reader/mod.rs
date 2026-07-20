@@ -878,7 +878,24 @@ impl<S: Source> FitsReader<S> {
                     reference.extension_level
                 ),
             })?;
-            let table = self.read_table(table_index)?;
+            let schema = self.table_schema(table_index)?;
+            let mut selected = vec![false; schema.columns.len()];
+            for descriptor in &group {
+                for name in descriptor.referenced_columns() {
+                    selected[resolve_column_name(&schema, name)?] = true;
+                }
+            }
+            let selected_indices = selected
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, selected)| selected.then_some(index))
+                .collect::<Vec<_>>();
+            let table = self.read_table_range(
+                table_index,
+                &schema,
+                0..usize::from(schema.nrows != 0),
+                Some(&selected_indices),
+            )?;
             for descriptor in group {
                 transforms.push(tabular::TabularTransform::from_table(descriptor, &table)?);
             }
@@ -1058,17 +1075,23 @@ fn resolve_column_selector(schema: &TableSchema, selector: &ColumnSelector) -> R
             index: *index,
             len: schema.columns.len(),
         }),
-        ColumnSelector::Name(name) => schema
-            .columns
-            .iter()
-            .position(|column| {
-                column
-                    .name
-                    .as_deref()
-                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
-            })
-            .ok_or_else(|| FitsError::ColumnNotFound { name: name.clone() }),
+        ColumnSelector::Name(name) => resolve_column_name(schema, name),
     }
+}
+
+fn resolve_column_name(schema: &TableSchema, name: &str) -> Result<usize> {
+    schema
+        .columns
+        .iter()
+        .position(|column| {
+            column
+                .name
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        })
+        .ok_or_else(|| FitsError::ColumnNotFound {
+            name: name.to_string(),
+        })
 }
 
 #[derive(Debug)]
