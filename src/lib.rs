@@ -165,6 +165,16 @@ pub mod internals {
         bench::tabular_index_batch()
     }
 
+    /// Transform one pixel through the large monotonic `-TAB` fixture.
+    pub fn tabular_forward_at_pixel(pixel: f64) -> f64 {
+        bench::tabular_forward_at_pixel(pixel)
+    }
+
+    /// Invert one world coordinate through the large monotonic `-TAB` fixture.
+    pub fn tabular_inverse_at_world(world: f64) -> f64 {
+        bench::tabular_inverse_at_world(world)
+    }
+
     /// Invert one two-dimensional affine `-TAB` coordinate at a chosen dyadic
     /// fraction, used to guard the inverse search's allocation count by depth.
     pub fn tabular_inverse_at_fraction(fraction: f64) -> f64 {

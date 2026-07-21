@@ -66,6 +66,22 @@ denied.
 
 - [x] Correct the stale compressed-table reader documentation while touching these boundaries. `src/reader/mod.rs:915` still says only fixed-width columns are supported, whereas the decoder handles VLA layouts in `src/compress/table.rs:804` and the writer documents `P`/`Q` support at `src/writer/mod.rs:840`. Update the public docs and add a doctest or existing-test assertion that reads a compressed VLA table through `read_compressed_table`.
 
+## Batch 6 — Remove the remaining avoidable `-TAB` transform allocations (medium priority)
+
+- [x] Avoid allocating a target vector for one-dimensional `-TAB` inverses. `TabularTransform::to_intermediate` collects every requested world axis at `src/wcs/tabular/mod.rs:284` before branching to the scalar `locate_one_dimensional` path at `src/wcs/tabular/mod.rs:285`; branch first and read the single world coordinate directly, leaving the vector only for multidimensional inversion. Verify exact one-dimensional round trips and require one fewer allocation in the WCS benchmark harness.
+
+- [x] Reuse `TabularLocation::base` as the forward interpolation index workspace. `for_each_interpolation_vertex` clones `base` at `src/wcs/tabular/mod.rs:417` and copies the original indices back for every vertex at `src/wcs/tabular/mod.rs:419`, even though both callers discard the location immediately after interpolation. Let the vertex walk mutate the owned base indices in place and advance them between vertex bit patterns, removing one allocation and the repeated full-rank copy while preserving all multidimensional interpolation results.
+
+- [x] Extend the existing allocation guard to cover one-dimensional forward and inverse `-TAB` transforms. `benches/wcs.rs:39` currently checks only that multidimensional inverse allocations are independent of recursion depth; expose one-call forms of the existing 100k-entry fixture from `src/wcs/bench.rs:45` and assert the optimized forward and inverse paths retain their reduced allocation counts.
+
+## Batch 7 — Give compression internals one canonical module path (low priority)
+
+- [ ] Remove the internal compression re-export facade. `src/compress/mod.rs:21` declares `decode`, `encode`, and `table` privately and then re-exports seven implementation functions at `src/compress/mod.rs:28`, creating both implementation and facade paths for the same items. Make those three modules `pub(crate)`, delete the re-exports, and update `reader`/`writer` callers to import from the owning modules directly.
+
+- [ ] Move `HduParts` beside the table decompressor that owns it. The result type lives in the shared compression coordinator at `src/compress/mod.rs:191`, but only `uncompress_table` constructs it at `src/compress/table.rs:361` and `FitsReader::read_compressed_table` consumes it at `src/reader/mod.rs:941`. Relocate it to `compress/table.rs` so the parent module contains only genuinely shared image/table policy.
+
+- [ ] Namespace compression conversion helpers at their call sites. `src/compress/decode.rs:12` and `src/compress/encode.rs:9` import individual free functions from `convert`, obscuring their shared ownership and producing long parallel import lists; import the `convert` module once and keep calls qualified, matching the existing table-compression path.
+
 ## Open questions
 
 - [x] Benchmark the header side index before attempting to simplify it. `Header` duplicates every valued keyword into a `HashMap<String, usize>` and must rebuild it after structural edits at `src/header/mod.rs:32` and `src/header/mod.rs:444`; a linear scan would remove state and mutation bookkeeping, but may regress 999-column table parsing and WCS's many indexed lookups. Compare parse/get/mutation workloads for typical headers and standard maxima; retain the index unless linear lookup wins or is acceptably close across both.

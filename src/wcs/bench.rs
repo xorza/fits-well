@@ -55,6 +55,20 @@ pub(crate) fn tabular_index_batch() -> f64 {
         .sum()
 }
 
+pub(crate) fn tabular_forward_at_pixel(pixel: f64) -> f64 {
+    TABULAR
+        .get_or_init(tabular_wcs)
+        .pixel_to_world(&[pixel])
+        .unwrap()[0]
+}
+
+pub(crate) fn tabular_inverse_at_world(world: f64) -> f64 {
+    TABULAR
+        .get_or_init(tabular_wcs)
+        .world_to_pixel(&[world])
+        .unwrap()[0]
+}
+
 pub(crate) fn tabular_inverse_at_fraction(fraction: f64) -> f64 {
     let wcs = TABULAR_INVERSE.get_or_init(tabular_inverse_wcs);
     let world = [100.0 + 10.0 * fraction, 200.0 + 20.0 * fraction];
