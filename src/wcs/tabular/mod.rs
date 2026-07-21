@@ -257,15 +257,19 @@ impl TabularTransform {
     }
 
     pub(crate) fn to_world(&self, intermediate: &[f64], world: &mut [f64]) -> Result<()> {
-        let location = self.interpolation_location(|_, image_axis| intermediate[image_axis])?;
+        let mut location = self.interpolation_location(|_, image_axis| intermediate[image_axis])?;
         for &image_axis in &self.axes {
             world[image_axis] = 0.0;
         }
-        self.for_each_interpolation_vertex(&location.base, &location.delta, |offset, weight| {
-            for (table_axis, &image_axis) in self.axes.iter().enumerate() {
-                world[image_axis] += self.coordinates[offset + table_axis] * weight;
-            }
-        });
+        self.for_each_interpolation_vertex(
+            &mut location.base,
+            &location.delta,
+            |offset, weight| {
+                for (table_axis, &image_axis) in self.axes.iter().enumerate() {
+                    world[image_axis] += self.coordinates[offset + table_axis] * weight;
+                }
+            },
+        );
         Ok(())
     }
 
@@ -276,15 +280,15 @@ impl TabularTransform {
             .iter()
             .position(|&axis| axis == image_axis)
             .expect("requested TAB axis belongs to the transform");
-        let location = self.interpolation_location(|table_axis, _| intermediate[table_axis])?;
-        Ok(self.interpolate_axis(&location.base, &location.delta, table_axis))
+        let mut location = self.interpolation_location(|table_axis, _| intermediate[table_axis])?;
+        Ok(self.interpolate_axis(&mut location.base, &location.delta, table_axis))
     }
 
     pub(crate) fn to_intermediate(&self, world: &[f64], intermediate: &mut [f64]) -> Result<()> {
-        let target: Vec<f64> = self.axes.iter().map(|&axis| world[axis]).collect();
         let location = if self.axes.len() == 1 {
-            self.locate_one_dimensional(target[0])?
+            self.locate_one_dimensional(world[self.axes[0]])?
         } else {
+            let target: Vec<f64> = self.axes.iter().map(|&axis| world[axis]).collect();
             self.locate_multidimensional(&target)?
         };
         for table_axis in 0..self.axes.len() {
@@ -410,26 +414,35 @@ impl TabularTransform {
 
     fn for_each_interpolation_vertex(
         &self,
-        base: &[usize],
+        indices: &mut [usize],
         delta: &[f64],
         mut visit: impl FnMut(usize, f64),
     ) {
-        let mut indices = base.to_vec();
         for vertex in 0..self.vertex_count {
-            indices.copy_from_slice(base);
+            if vertex != 0 {
+                let changed = vertex ^ (vertex - 1);
+                for (bit, &table_axis) in self.variable_axes.iter().enumerate() {
+                    if changed & (1 << bit) != 0 {
+                        if vertex & (1 << bit) == 0 {
+                            indices[table_axis] -= 1;
+                        } else {
+                            indices[table_axis] += 1;
+                        }
+                    }
+                }
+            }
             let mut weight = 1.0;
             for (bit, &table_axis) in self.variable_axes.iter().enumerate() {
                 if vertex & (1 << bit) == 0 {
                     weight *= 1.0 - delta[table_axis];
                 } else {
-                    indices[table_axis] += 1;
                     weight *= delta[table_axis];
                 }
             }
             if weight == 0.0 {
                 continue;
             }
-            let offset = self.coordinate_offset(&indices);
+            let offset = self.coordinate_offset(indices);
             visit(offset, weight);
             if weight == 1.0 {
                 break;
@@ -437,9 +450,9 @@ impl TabularTransform {
         }
     }
 
-    fn interpolate_axis(&self, base: &[usize], delta: &[f64], table_axis: usize) -> f64 {
+    fn interpolate_axis(&self, indices: &mut [usize], delta: &[f64], table_axis: usize) -> f64 {
         let mut result = 0.0;
-        self.for_each_interpolation_vertex(base, delta, |offset, weight| {
+        self.for_each_interpolation_vertex(indices, delta, |offset, weight| {
             result += self.coordinates[offset + table_axis] * weight;
         });
         result
