@@ -12,11 +12,13 @@ const TAB_INDEX_LENGTH: usize = 100_000;
 
 static SPECTRAL: OnceLock<Wcs> = OnceLock::new();
 static TABULAR: OnceLock<Wcs> = OnceLock::new();
+static TABULAR_INVERSE: OnceLock<Wcs> = OnceLock::new();
 static LINEAR: OnceLock<Wcs> = OnceLock::new();
 
 pub(crate) fn prepare() {
     SPECTRAL.get_or_init(spectral_wcs);
     TABULAR.get_or_init(tabular_wcs);
+    TABULAR_INVERSE.get_or_init(tabular_inverse_wcs);
     LINEAR.get_or_init(linear_wcs);
 }
 
@@ -51,6 +53,12 @@ pub(crate) fn tabular_index_batch() -> f64 {
             wcs.pixel_to_world(&[pixel]).unwrap()[0]
         })
         .sum()
+}
+
+pub(crate) fn tabular_inverse_at_fraction(fraction: f64) -> f64 {
+    let wcs = TABULAR_INVERSE.get_or_init(tabular_inverse_wcs);
+    let world = [100.0 + 10.0 * fraction, 200.0 + 20.0 * fraction];
+    wcs.world_to_pixel(&world).unwrap().into_iter().sum()
 }
 
 fn spectral_wcs() -> Wcs {
@@ -128,6 +136,44 @@ fn tabular_wcs() -> Wcs {
         .set_internal("PS1_2", "INDEX")
         .set_internal("PV1_3", 1);
     let transforms = tabular::descriptors(&header, 1, None)
+        .unwrap()
+        .into_iter()
+        .map(|descriptor| tabular::TabularTransform::from_table(descriptor, &table).unwrap())
+        .collect();
+    Wcs::from_header_with_tabular(&header, None, transforms).unwrap()
+}
+
+fn tabular_inverse_wcs() -> Wcs {
+    let coordinates = [100.0, 200.0, 110.0, 200.0, 100.0, 220.0, 110.0, 220.0];
+    let mut table_header = Header::new();
+    table_header
+        .set_internal("XTENSION", "BINTABLE")
+        .set_internal("BITPIX", 8)
+        .set_internal("NAXIS", 2)
+        .set_internal("NAXIS1", (coordinates.len() * size_of::<f64>()) as i64)
+        .set_internal("NAXIS2", 1)
+        .set_internal("PCOUNT", 0)
+        .set_internal("GCOUNT", 1)
+        .set_internal("TFIELDS", 1)
+        .set_internal("TTYPE1", "COORD")
+        .set_internal("TFORM1", format!("{}D", coordinates.len()))
+        .set_internal("TDIM1", "(2,2,2)");
+    let bytes = coordinates.into_iter().flat_map(f64::to_be_bytes).collect();
+    let table = BinTable::from_data(&table_header, bytes).unwrap();
+
+    let mut header = Header::new();
+    header.set_internal("NAXIS", 2);
+    for axis in 1..=2 {
+        header
+            .set_internal(format!("CTYPE{axis}").as_str(), format!("AX{axis:02}-TAB"))
+            .set_internal(format!("CRPIX{axis}").as_str(), 0.0)
+            .set_internal(format!("CRVAL{axis}").as_str(), 0.0)
+            .set_internal(format!("CDELT{axis}").as_str(), 1.0)
+            .set_internal(format!("PS{axis}_0").as_str(), "WCS-TABLE")
+            .set_internal(format!("PS{axis}_1").as_str(), "COORD")
+            .set_internal(format!("PV{axis}_3").as_str(), axis as i64);
+    }
+    let transforms = tabular::descriptors(&header, 2, None)
         .unwrap()
         .into_iter()
         .map(|descriptor| tabular::TabularTransform::from_table(descriptor, &table).unwrap())

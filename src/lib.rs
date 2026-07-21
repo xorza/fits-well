@@ -164,4 +164,10 @@ pub mod internals {
     pub fn tabular_wcs_batch() -> f64 {
         bench::tabular_index_batch()
     }
+
+    /// Invert one two-dimensional affine `-TAB` coordinate at a chosen dyadic
+    /// fraction, used to guard the inverse search's allocation count by depth.
+    pub fn tabular_inverse_at_fraction(fraction: f64) -> f64 {
+        bench::tabular_inverse_at_fraction(fraction)
+    }
 }
