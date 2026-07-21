@@ -1,16 +1,25 @@
-use crate::block::ZERO_FILL;
+use crate::ascii::AsciiColumnData;
+use crate::bitpix::Bitpix;
 use crate::block::padded_len;
+use crate::block::{BLOCK_SIZE, CARD_SIZE, SPACE_FILL, ZERO_FILL};
 use crate::checksum;
 #[cfg(feature = "compression")]
 use crate::compress::{Compression, CompressionOptions};
-use crate::data::{ImageData, Scaling, UnsignedData};
+use crate::data::{Image, ImageData, Scaling, UnsignedData};
+use crate::endian::write_pq_descriptor;
+use crate::error::FitsError;
 use crate::hdu::{HduKind, MAX_TABLE_FIELDS};
-use crate::header::from_card_lines as header;
 use crate::header::value::Value;
+use crate::header::{Header, from_card_lines as header};
 use crate::reader::FitsReader;
 use crate::reader::{ChecksumReport, ChecksumStatus};
 use crate::table_impl::{CharacterField, ColumnData};
-use crate::writer::*;
+use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
+use crate::writer::table::test_support;
+use crate::writer::table::{ColumnType, TableBuilder, WriteColumn};
+use crate::writer::{
+    FitsWriter, PLACEHOLDER_CHECKSUM, WriterState, pad_to_block, patch_checksum, render_header,
+};
 use bitvec::bitvec;
 use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
@@ -953,7 +962,7 @@ fn binary_metadata_is_validated_for_every_fixed_and_vla_stored_type() {
             assert_table_column_rejected(typed.column.clone().scaled(2.0, 3.0), "TSCALn");
 
             let mut tzero_only = typed.column.clone();
-            tzero_only.tzero = Some(3.0);
+            test_support::set_scaling(&mut tzero_only, None, Some(3.0));
             assert_table_column_rejected(tzero_only, "TZEROn");
         } else {
             assert_table_column_writes(typed.column.clone().scaled(2.0, 3.0));
@@ -1062,8 +1071,7 @@ fn binary_nonfinite_scaling_is_rejected_before_output() {
     for vla in [false, true] {
         for case in &cases {
             let mut column = integer_column(ColumnType::I32, vla);
-            column.tscale = case.tscale;
-            column.tzero = case.tzero;
+            test_support::set_scaling(&mut column, case.tscale, case.tzero);
             assert_table_column_rejected(column, case.keyword);
         }
     }

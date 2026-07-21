@@ -1,7 +1,7 @@
 use crate::ascii::*;
 use crate::reader::FitsReader;
 use crate::writer::FitsWriter;
-use crate::writer::{AsciiTableBuilder, AsciiWriteColumn};
+use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
 use std::io::Cursor;
 
 fn write_table(nrows: usize, columns: &[AsciiWriteColumn]) -> AsciiTableBuilder {

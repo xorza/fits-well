@@ -934,8 +934,9 @@ impl<S: Source> FitsReader<S> {
     }
 
     /// Read a tiled-compressed table (§10.3) — a `BINTABLE` with `ZTABLE = T` —
-    /// and uncompress it into the original [`BinTable`]. Fixed-width columns only
-    /// (`GZIP_1`/`GZIP_2`/`RICE_1`). Requires the `compression` feature.
+    /// and uncompress it into the original [`BinTable`]. Fixed-width and `P`/`Q`
+    /// variable-length columns are supported (`GZIP_1`/`GZIP_2`/`RICE_1`/
+    /// `NOCOMPRESS`). Requires the `compression` feature.
     #[cfg(feature = "compression")]
     pub fn read_compressed_table(&mut self, index: usize) -> Result<BinTable> {
         let table = self.read_table(index)?;
