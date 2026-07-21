@@ -1202,7 +1202,8 @@ fn zblank_column_overrides_keyword_per_tile() {
 
 fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
     use crate::table_impl::ColumnData;
-    use crate::writer::{FitsWriter, TableBuilder, WriteColumn};
+    use crate::writer::FitsWriter;
+    use crate::writer::table::{TableBuilder, WriteColumn};
     use std::io::Cursor;
 
     let nrows = 10;
@@ -1484,6 +1485,14 @@ fn decodes_a_cfitsio_compressed_table_with_a_vla_column() {
     let mut f = open("comp_table_vla.fits");
     let table = f.read_compressed_table(1).unwrap();
     assert_eq!(
+        table.metadata().columns[1].tform.kind,
+        TformKind::ArrayDesc32
+    );
+    assert_eq!(
+        table.metadata().columns[1].tform.vla_elem,
+        Some(TformKind::I32)
+    );
+    assert_eq!(
         table.column_by_idx(0).unwrap().raw().unwrap(),
         ColumnData::I32((0..600).collect())
     );
@@ -1542,7 +1551,8 @@ fn compressed_table_vla_round_trips_all_table_codecs() {
 fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
     use crate::header::Header;
     use crate::table_impl::descriptor;
-    use crate::writer::{FitsWriter, TableBuilder, WriteColumn};
+    use crate::writer::FitsWriter;
+    use crate::writer::table::{TableBuilder, WriteColumn};
 
     for wide in [false, true] {
         let mut column = WriteColumn::vla("VLA", vec![ColumnData::Bytes(vec![7])]).unwrap();

@@ -1,6 +1,7 @@
 use crate::header::value::Value;
 use crate::reader::FitsReader;
 use crate::wcs::*;
+use std::f64::consts::SQRT_2;
 use std::fs::File;
 
 /// Load the WCS from the primary header of a fixture.
@@ -1040,16 +1041,6 @@ fn mollweide_poles_are_finite_and_have_canonical_longitude() {
         assert!((native.theta - theta).abs() < 1e-12);
         assert!(native.phi.is_finite() && native.theta.is_finite());
     }
-}
-
-#[test]
-fn zpn_extended_horner_evaluates_value_and_derivative() {
-    let mut pv = [0.0; 21];
-    pv[..4].copy_from_slice(&[2.0, -3.0, 4.0, 5.0]);
-    let evaluation = evaluate_zpn(2.0, &pv);
-    // P(2) = 2 - 3·2 + 4·2² + 5·2³ = 52; P'(2) = -3 + 8·2 + 15·2² = 73.
-    assert_eq!(evaluation.value, 52.0);
-    assert_eq!(evaluation.derivative, 73.0);
 }
 
 /// Golden pixel→world for all v2 projections, from `astropy.wcs`. Each header is

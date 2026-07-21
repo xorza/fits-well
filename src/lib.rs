@@ -81,7 +81,7 @@ pub mod image {
         BorrowedImage, Image, ImageData, ImageMetadata, ImageView, ReadImage, SampleType, Scaling,
         UnsignedData,
     };
-    pub use crate::writer::ImageStream;
+    pub use crate::writer::image::ImageStream;
 }
 
 /// Binary and ASCII table values, schema and selection metadata, and write
@@ -100,9 +100,8 @@ pub mod table {
         BinTable, BinTableMetadata, BitColumn, CharacterField, Column, ColumnData, ColumnReader,
         TableSchema, Tform, TformKind,
     };
-    pub use crate::writer::{
-        AsciiTableBuilder, AsciiWriteColumn, ColumnType, TableBuilder, WriteColumn,
-    };
+    pub use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
+    pub use crate::writer::table::{ColumnType, TableBuilder, WriteColumn};
 }
 
 /// Lazy FITS source access and HDU-bound operations. Concrete source wrappers
