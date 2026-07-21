@@ -12,10 +12,24 @@ const TAB_INDEX_LENGTH: usize = 100_000;
 
 static SPECTRAL: OnceLock<Wcs> = OnceLock::new();
 static TABULAR: OnceLock<Wcs> = OnceLock::new();
+static LINEAR: OnceLock<Wcs> = OnceLock::new();
 
 pub(crate) fn prepare() {
     SPECTRAL.get_or_init(spectral_wcs);
     TABULAR.get_or_init(tabular_wcs);
+    LINEAR.get_or_init(linear_wcs);
+}
+
+pub(crate) fn linear_round_trip_batch() -> f64 {
+    let wcs = LINEAR.get_or_init(linear_wcs);
+    (0..BATCH_SIZE)
+        .map(|index| {
+            let step = index as f64 * 0.001;
+            let pixel = [11.0 + step, -4.0 - step, 8.0 + step, 23.0 - step];
+            let world = wcs.pixel_to_world(&pixel).unwrap();
+            wcs.world_to_pixel(&world).unwrap().into_iter().sum::<f64>()
+        })
+        .sum()
 }
 
 pub(crate) fn spectral_batch() -> f64 {
@@ -49,6 +63,33 @@ fn spectral_wcs() -> Wcs {
         .set_internal("CRVAL1", 1_420_405_751.0)
         .set_internal("CDELT1", 1e6)
         .set_internal("RESTFRQ", 1_420_405_751.0);
+    Wcs::from_header(&header, None).unwrap()
+}
+
+fn linear_wcs() -> Wcs {
+    let mut header = Header::new();
+    header
+        .set_internal("NAXIS", 4)
+        .set_internal("CTYPE1", "LINEAR")
+        .set_internal("CTYPE2", "LINEAR")
+        .set_internal("CTYPE3", "LINEAR")
+        .set_internal("CTYPE4", "LINEAR")
+        .set_internal("CRPIX1", 10.0)
+        .set_internal("CRPIX2", -3.0)
+        .set_internal("CRPIX3", 5.0)
+        .set_internal("CRPIX4", 20.0)
+        .set_internal("CRVAL1", 100.0)
+        .set_internal("CRVAL2", -20.0)
+        .set_internal("CRVAL3", 0.5)
+        .set_internal("CRVAL4", 1_000.0)
+        .set_internal("CDELT1", 0.25)
+        .set_internal("CDELT2", 2.0)
+        .set_internal("CDELT3", -0.5)
+        .set_internal("CDELT4", 4.0)
+        .set_internal("PC1_2", 0.1)
+        .set_internal("PC2_3", -0.2)
+        .set_internal("PC3_4", 0.3)
+        .set_internal("PC4_1", -0.4);
     Wcs::from_header(&header, None).unwrap()
 }
 

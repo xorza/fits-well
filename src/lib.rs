@@ -151,6 +151,11 @@ pub mod internals {
         bench::prepare();
     }
 
+    /// Transform one fixed batch forward and backward through a four-axis linear WCS.
+    pub fn linear_wcs_round_trip_batch() -> f64 {
+        bench::linear_round_trip_batch()
+    }
+
     /// Transform one fixed batch through a Table-26 spectral axis.
     pub fn spectral_wcs_batch() -> f64 {
         bench::spectral_batch()

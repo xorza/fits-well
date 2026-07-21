@@ -1644,25 +1644,21 @@ impl Wcs {
             .iter()
             .find(|transform| transform.axes.contains(&axis))
         {
-            let offset: Vec<f64> = pixel
+            let intermediate: Vec<f64> = transform
+                .axes
                 .iter()
-                .zip(&self.axes)
-                .map(|(&value, metadata)| value - metadata.crpix)
+                .map(|&image_axis| {
+                    let row = &self.matrix[image_axis * naxis..(image_axis + 1) * naxis];
+                    matvec_pixel_offset_row(row, pixel, &self.axes)
+                })
                 .collect();
-            let intermediate = matvec(&self.matrix, &offset, naxis);
-            let mut world = vec![0.0; naxis];
-            transform.to_world(&intermediate, &mut world)?;
             return Ok(AxisWorld {
                 cunit: &self.axes[axis].cunit,
-                value: world[axis],
+                value: transform.to_world_axis(axis, &intermediate)?,
             });
         }
         let row = &self.matrix[axis * naxis..(axis + 1) * naxis];
-        let offset = pixel
-            .iter()
-            .zip(&self.axes)
-            .map(|(&value, metadata)| value - metadata.crpix);
-        let intermediate = row.iter().zip(offset).map(|(&a, b)| a * b).sum::<f64>();
+        let intermediate = matvec_pixel_offset_row(row, pixel, &self.axes);
         Ok(AxisWorld {
             cunit: &self.axes[axis].cunit,
             value: self.axis_transforms[axis].to_world(
@@ -1864,12 +1860,7 @@ impl Wcs {
             });
         }
         self.require_complete_transform()?;
-        let offset: Vec<f64> = pixel
-            .iter()
-            .zip(&self.axes)
-            .map(|(&value, axis)| value - axis.crpix)
-            .collect();
-        let intermediate = matvec(&self.matrix, &offset, naxis);
+        let intermediate = matvec_pixel_offset(&self.matrix, pixel, &self.axes);
         let mut world = (0..naxis)
             .map(|axis| {
                 self.axis_transforms[axis].to_world(intermediate[axis], self.axes[axis].crval, axis)
@@ -1926,12 +1917,11 @@ impl Wcs {
             intermediate[c.lng] = projected.x;
             intermediate[c.lat] = projected.y;
         }
-        let offset = matvec(&self.inverse, &intermediate, naxis);
-        Ok(offset
-            .into_iter()
-            .zip(&self.axes)
-            .map(|(value, axis)| value + axis.crpix)
-            .collect())
+        let mut pixel = matvec(&self.inverse, &intermediate, naxis);
+        for (value, axis) in pixel.iter_mut().zip(&self.axes) {
+            *value += axis.crpix;
+        }
+        Ok(pixel)
     }
 
     fn require_complete_transform(&self) -> Result<()> {
@@ -2346,6 +2336,21 @@ fn matvec(matrix: &[f64], vector: &[f64], size: usize) -> Vec<f64> {
         .chunks_exact(size)
         .map(|row| row.iter().zip(vector).map(|(&a, &b)| a * b).sum())
         .collect()
+}
+
+fn matvec_pixel_offset(matrix: &[f64], pixel: &[f64], axes: &[WcsAxis]) -> Vec<f64> {
+    matrix
+        .chunks_exact(axes.len())
+        .map(|row| matvec_pixel_offset_row(row, pixel, axes))
+        .collect()
+}
+
+fn matvec_pixel_offset_row(row: &[f64], pixel: &[f64], axes: &[WcsAxis]) -> f64 {
+    row.iter()
+        .zip(pixel)
+        .zip(axes)
+        .map(|((&coefficient, &value), axis)| coefficient * (value - axis.crpix))
+        .sum()
 }
 
 /// Invert a row-major `n×n` matrix by Gauss–Jordan elimination with partial

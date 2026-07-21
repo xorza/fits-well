@@ -257,34 +257,27 @@ impl TabularTransform {
     }
 
     pub(crate) fn to_world(&self, intermediate: &[f64], world: &mut [f64]) -> Result<()> {
-        let mut base = Vec::with_capacity(self.axes.len());
-        let mut delta = Vec::with_capacity(self.axes.len());
-        for table_axis in 0..self.axes.len() {
-            let image_axis = self.axes[table_axis];
-            let psi = intermediate[image_axis] + self.reference_indices[table_axis];
-            let upsilon = self.index_to_array(table_axis, psi)?;
-            let length = self.lengths[table_axis];
-            if !(0.5..=length as f64 + 0.5).contains(&upsilon) {
-                return Err(domain(image_axis));
-            }
-            let one_relative = upsilon.floor() as isize;
-            let mut zero_relative = one_relative - 1;
-            let mut fraction = upsilon - one_relative as f64;
-            if one_relative == 0 {
-                zero_relative += 1;
-                fraction -= 1.0;
-            } else if one_relative == length as isize && length > 1 {
-                zero_relative -= 1;
-                fraction += 1.0;
-            }
-            base.push(usize::try_from(zero_relative).expect("TAB base index"));
-            delta.push(fraction);
+        let location = self.interpolation_location(|_, image_axis| intermediate[image_axis])?;
+        for &image_axis in &self.axes {
+            world[image_axis] = 0.0;
         }
-        let values = self.interpolate(&base, &delta);
-        for (table_axis, value) in values.into_iter().enumerate() {
-            world[self.axes[table_axis]] = value;
-        }
+        self.for_each_interpolation_vertex(&location.base, &location.delta, |offset, weight| {
+            for (table_axis, &image_axis) in self.axes.iter().enumerate() {
+                world[image_axis] += self.coordinates[offset + table_axis] * weight;
+            }
+        });
         Ok(())
+    }
+
+    pub(crate) fn to_world_axis(&self, image_axis: usize, intermediate: &[f64]) -> Result<f64> {
+        debug_assert_eq!(intermediate.len(), self.axes.len());
+        let table_axis = self
+            .axes
+            .iter()
+            .position(|&axis| axis == image_axis)
+            .expect("requested TAB axis belongs to the transform");
+        let location = self.interpolation_location(|table_axis, _| intermediate[table_axis])?;
+        Ok(self.interpolate_axis(&location.base, &location.delta, table_axis))
     }
 
     pub(crate) fn to_intermediate(&self, world: &[f64], intermediate: &mut [f64]) -> Result<()> {
@@ -303,6 +296,36 @@ impl TabularTransform {
             intermediate[self.axes[table_axis]] = psi - self.reference_indices[table_axis];
         }
         Ok(())
+    }
+
+    fn interpolation_location(
+        &self,
+        mut intermediate: impl FnMut(usize, usize) -> f64,
+    ) -> Result<TabularLocation> {
+        let mut base = Vec::with_capacity(self.axes.len());
+        let mut delta = Vec::with_capacity(self.axes.len());
+        for table_axis in 0..self.axes.len() {
+            let image_axis = self.axes[table_axis];
+            let psi = intermediate(table_axis, image_axis) + self.reference_indices[table_axis];
+            let upsilon = self.index_to_array(table_axis, psi)?;
+            let length = self.lengths[table_axis];
+            if !(0.5..=length as f64 + 0.5).contains(&upsilon) {
+                return Err(domain(image_axis));
+            }
+            let one_relative = upsilon.floor() as isize;
+            let mut zero_relative = one_relative - 1;
+            let mut fraction = upsilon - one_relative as f64;
+            if one_relative == 0 {
+                zero_relative += 1;
+                fraction -= 1.0;
+            } else if one_relative == length as isize && length > 1 {
+                zero_relative -= 1;
+                fraction += 1.0;
+            }
+            base.push(usize::try_from(zero_relative).expect("TAB base index"));
+            delta.push(fraction);
+        }
+        Ok(TabularLocation { base, delta })
     }
 
     fn index_to_array(&self, table_axis: usize, psi: f64) -> Result<f64> {
@@ -385,9 +408,12 @@ impl TabularTransform {
         values[lower] + (upsilon - lower as f64 - 1.0) * (values[lower + 1] - values[lower])
     }
 
-    fn interpolate(&self, base: &[usize], delta: &[f64]) -> Vec<f64> {
-        let dimensions = self.axes.len();
-        let mut result = vec![0.0; dimensions];
+    fn for_each_interpolation_vertex(
+        &self,
+        base: &[usize],
+        delta: &[f64],
+        mut visit: impl FnMut(usize, f64),
+    ) {
         let mut indices = base.to_vec();
         for vertex in 0..self.vertex_count {
             indices.copy_from_slice(base);
@@ -404,13 +430,18 @@ impl TabularTransform {
                 continue;
             }
             let offset = self.coordinate_offset(&indices);
-            for (table_axis, value) in result.iter_mut().enumerate() {
-                *value += self.coordinates[offset + table_axis] * weight;
-            }
+            visit(offset, weight);
             if weight == 1.0 {
                 break;
             }
         }
+    }
+
+    fn interpolate_axis(&self, base: &[usize], delta: &[f64], table_axis: usize) -> f64 {
+        let mut result = 0.0;
+        self.for_each_interpolation_vertex(base, delta, |offset, weight| {
+            result += self.coordinates[offset + table_axis] * weight;
+        });
         result
     }
 

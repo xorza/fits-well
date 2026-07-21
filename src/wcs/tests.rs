@@ -187,6 +187,39 @@ fn matrix_inverse_is_correct() {
 }
 
 #[test]
+fn matrix_product_applies_reference_pixel_offsets_while_accumulating() {
+    let axes = [
+        WcsAxis {
+            ctype: String::new(),
+            cunit: String::new(),
+            crval: 0.0,
+            crpix: 10.0,
+            spectral_frame: None,
+        },
+        WcsAxis {
+            ctype: String::new(),
+            cunit: String::new(),
+            crval: 0.0,
+            crpix: -2.0,
+            spectral_frame: None,
+        },
+        WcsAxis {
+            ctype: String::new(),
+            cunit: String::new(),
+            crval: 0.0,
+            crpix: 4.0,
+            spectral_frame: None,
+        },
+    ];
+    let matrix = [2.0, -1.0, 0.5, 0.0, 3.0, 4.0, -2.0, 1.0, 1.5];
+    let pixel = [13.0, 3.0, 2.0];
+    assert_eq!(
+        matvec_pixel_offset(&matrix, &pixel, &axes),
+        [0.0, 7.0, -4.0]
+    );
+}
+
+#[test]
 fn sin_projection_matches_astropy() {
     // RA---SIN/DEC--SIN, CRPIX 100/100, CRVAL 45/30, 3.6″ pixels, no rotation.
     // Golden values from astropy.wcs — validates the SIN formula, not just that
