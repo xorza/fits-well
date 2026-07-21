@@ -121,6 +121,8 @@
 
 ### Added
 
+- `Hdu::data_bytes` exposes the checked, unpadded data-unit length derived during
+  header scanning so callers can enforce resource limits before reading an HDU.
 - Added checked N-dimensional image section reads. Plain sections coalesce
   contiguous source reads; compressed sections read and decompress only
   intersecting tiles.
