@@ -3,7 +3,6 @@ use crate::compress;
 use crate::compress::convert::{be_to_i64_into, i32_to_be_into, i64_to_be, i64_to_be_into};
 use crate::compress::geometry::{TileGeometry, TileScratch};
 use crate::compress::*;
-use crate::compress::{encode, gzip};
 use crate::data::ImageData;
 use crate::endian::write_pq_descriptor;
 use crate::keyword::key;
@@ -961,7 +960,7 @@ fn decompresses_nocompress_tile_verbatim() {
         data.extend_from_slice(&x.to_be_bytes());
     }
     let table = BinTable::from_data(&h, data).unwrap();
-    let img = decompress_image(&h, &table).unwrap();
+    let img = decode::decompress_image(&h, &table).unwrap();
     assert_eq!(img.shape, vec![2, 2]);
     assert_eq!(img.samples, ImageData::I16(vec![1, 2, 3, 4]));
 
@@ -971,7 +970,7 @@ fn decompresses_nocompress_tile_verbatim() {
         .set_internal("ZNAXIS", 1)
         .set_internal("ZNAXIS1", 4);
     assert!(matches!(
-        decompress_image(&invalid_hcompress, &table),
+        decode::decompress_image(&invalid_hcompress, &table),
         Err(FitsError::UnsupportedCompression { name })
             if name == "HCOMPRESS_1 requires a two-dimensional image"
     ));
@@ -1038,7 +1037,7 @@ fn compressed_integer_null_mask_restores_blank_pixels() {
         data.extend_from_slice(&mask);
         let table = BinTable::from_data(&h, data).unwrap();
         assert_eq!(
-            decompress_image(&h, &table).unwrap().samples,
+            decode::decompress_image(&h, &table).unwrap().samples,
             ImageData::I16(vec![10, -999]),
             "{codec}"
         );
@@ -1046,7 +1045,7 @@ fn compressed_integer_null_mask_restores_blank_pixels() {
         let mut missing_blank = h.clone();
         missing_blank.remove_all("BLANK");
         assert!(matches!(
-            decompress_image(&missing_blank, &table),
+            decode::decompress_image(&missing_blank, &table),
             Err(FitsError::MissingKeyword { name: "BLANK" })
         ));
     }
@@ -1095,7 +1094,7 @@ fn compressed_float_null_mask_restores_nan_pixels() {
     data.extend_from_slice(&20i32.to_be_bytes());
     data.extend_from_slice(&[1, 0]);
     let table = BinTable::from_data(&h, data).unwrap();
-    let ImageData::F32(values) = decompress_image(&h, &table).unwrap().samples else {
+    let ImageData::F32(values) = decode::decompress_image(&h, &table).unwrap().samples else {
         panic!("expected F32")
     };
     assert!(values[0].is_nan());
@@ -1144,7 +1143,7 @@ fn zblank_column_overrides_keyword_per_tile() {
     data.extend_from_slice(&10i32.to_be_bytes()); // heap: quantized int 0
     data.extend_from_slice(&99i32.to_be_bytes()); // heap: quantized int 1 (== ZBLANK)
     let table = BinTable::from_data(&h, data).unwrap();
-    let img = decompress_image(&h, &table).unwrap();
+    let img = decode::decompress_image(&h, &table).unwrap();
     let ImageData::F32(px) = img.samples else {
         panic!("expected F32")
     };
@@ -1155,7 +1154,7 @@ fn zblank_column_overrides_keyword_per_tile() {
         let mut invalid_dither = h.clone();
         invalid_dither.set_internal("ZDITHER0", invalid);
         assert!(matches!(
-            decompress_image(&invalid_dither, &table),
+            decode::decompress_image(&invalid_dither, &table),
             Err(FitsError::KeywordOutOfRange { name: "ZDITHER0" })
         ));
     }
@@ -1163,7 +1162,7 @@ fn zblank_column_overrides_keyword_per_tile() {
     let mut mistyped_header = h.clone();
     mistyped_header.set_internal("ZBITPIX", "not an integer");
     assert!(matches!(
-        decompress_image(&mistyped_header, &table),
+        decode::decompress_image(&mistyped_header, &table),
         Err(FitsError::TypeMismatch { name, expected })
             if name == "ZBITPIX" && expected == "integer"
     ));
@@ -1171,12 +1170,12 @@ fn zblank_column_overrides_keyword_per_tile() {
     let mut out_of_range_header = h.clone();
     out_of_range_header.set_internal("ZTILE1", 0);
     assert!(matches!(
-        decompress_image(&out_of_range_header, &table),
+        decode::decompress_image(&out_of_range_header, &table),
         Err(FitsError::KeywordOutOfRange { name: "ZTILEn" })
     ));
     let mut words = Vec::new();
     assert!(matches!(
-        decompress_image_section_into_words(
+        decode::decompress_image_section_into_words(
             &out_of_range_header,
             &table,
             &[0],
@@ -1194,7 +1193,7 @@ fn zblank_column_overrides_keyword_per_tile() {
         let mut malformed = table.clone();
         crate::table_impl::test_support::set_column_kind(&mut malformed, column, kind);
         assert!(matches!(
-            decompress_image(&h, &malformed),
+            decode::decompress_image(&h, &malformed),
             Err(FitsError::TypeMismatch { name: actual, .. }) if actual == name
         ));
     }
@@ -1261,10 +1260,10 @@ fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
     let compressed = cr.read_table(1).unwrap();
     let mut compressed_header = cr.hdus[1].header.clone();
     compressed_header.set_internal("ZFORM01", "preserve");
-    let HduParts {
+    let table::HduParts {
         header: restored_header,
         data: restored_data,
-    } = uncompress_table(&compressed_header, &compressed).unwrap();
+    } = table::uncompress_table(&compressed_header, &compressed).unwrap();
     for n in 1..=columns.len() {
         assert_eq!(restored_header.get(key!("ZFORM{n}").as_str()), None);
         assert_eq!(restored_header.get(key!("ZCTYP{n}").as_str()), None);
@@ -1396,7 +1395,7 @@ fn table_compression_rejects_metadata_mismatches() {
         mismatched.set_internal(keyword, value);
         let mut out = vec![0xA5];
         assert!(matches!(
-            compress_table(&mismatched, &table, 1, Compression::GZIP, &mut out),
+            table::compress_table(&mismatched, &table, 1, Compression::GZIP, &mut out),
             Err(FitsError::TableMetadataMismatch { name }) if name == keyword
         ));
         assert_eq!(out, [0xA5], "{keyword} failure mutated the output");
@@ -1405,7 +1404,7 @@ fn table_compression_rejects_metadata_mismatches() {
     let mut reserved = header.clone();
     reserved.set_internal("ZTABLE", true);
     assert!(matches!(
-        compress_table(&reserved, &table, 1, Compression::GZIP, &mut Vec::new()),
+        table::compress_table(&reserved, &table, 1, Compression::GZIP, &mut Vec::new()),
         Err(FitsError::TableMetadataMismatch { name }) if name == "ZTABLE"
     ));
 }
@@ -1439,7 +1438,7 @@ fn table_compression_restores_reserved_metadata_exactly() {
     let original_table = BinTable::from_data(&original_header, original_data.clone()).unwrap();
 
     let mut compressed_data = Vec::new();
-    let mut compressed_header = compress_table(
+    let mut compressed_header = table::compress_table(
         &original_header,
         &original_table,
         1,
@@ -1470,7 +1469,7 @@ fn table_compression_restores_reserved_metadata_exactly() {
         .set_internal("DATASUM", "987654321")
         .comment_internal("DATASUM", "compressed data checksum");
     let compressed_table = BinTable::from_data(&compressed_header, compressed_data).unwrap();
-    let restored = uncompress_table(&compressed_header, &compressed_table).unwrap();
+    let restored = table::uncompress_table(&compressed_header, &compressed_table).unwrap();
 
     let mut original_bytes = Vec::new();
     let mut restored_bytes = Vec::new();
@@ -1511,7 +1510,7 @@ fn decodes_a_cfitsio_compressed_table_with_a_vla_column() {
 fn compressed_table_vla_round_trips_all_table_codecs() {
     let mut source = open("comp_table_vla.fits");
     let compressed = source.read_table(1).unwrap();
-    let mut original_parts = uncompress_table(&source.hdus[1].header, &compressed).unwrap();
+    let mut original_parts = table::uncompress_table(&source.hdus[1].header, &compressed).unwrap();
     assert_eq!(
         u32::from_be_bytes(original_parts.data[4..8].try_into().unwrap()),
         0
@@ -1527,7 +1526,7 @@ fn compressed_table_vla_round_trips_all_table_codecs() {
         Compression::None,
     ] {
         let mut encoded = Vec::new();
-        let encoded_header = compress_table(
+        let encoded_header = table::compress_table(
             &original_parts.header,
             &original,
             127,
@@ -1542,7 +1541,7 @@ fn compressed_table_vla_round_trips_all_table_codecs() {
             compression.name()
         );
         let encoded_table = BinTable::from_data(&encoded_header, encoded).unwrap();
-        let restored = uncompress_table(&encoded_header, &encoded_table).unwrap();
+        let restored = table::uncompress_table(&encoded_header, &encoded_table).unwrap();
         assert_eq!(restored.data, original_parts.data, "{}", compression.name());
     }
 }
@@ -1568,7 +1567,7 @@ fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
         let original_header = source.hdus[1].header.clone();
         let original = source.read_table(1).unwrap();
         let mut encoded = Vec::new();
-        let compressed_header = compress_table(
+        let compressed_header = table::compress_table(
             &original_header,
             &original,
             1,
@@ -1640,7 +1639,7 @@ fn reading_a_plain_bintable_as_an_image_is_rejected() {
     // The decompressor itself still guards its `ZIMAGE` precondition.
     let table = f.read_table(1).unwrap();
     assert!(matches!(
-        decompress_image(&f.hdus[1].header, &table),
+        decode::decompress_image(&f.hdus[1].header, &table),
         Err(FitsError::NotCompressedImage)
     ));
 }
@@ -1867,7 +1866,7 @@ fn compressed_image_rejects_short_tiles() {
     data.push(0);
     let table = BinTable::from_data(&h, data).unwrap();
     assert!(matches!(
-        decompress_image(&h, &table),
+        decode::decompress_image(&h, &table),
         Err(FitsError::DataSizeMismatch {
             expected: 4,
             got: 1
@@ -1889,7 +1888,7 @@ fn compressed_image_rejects_short_tiles() {
     data.extend_from_slice(&1i16.to_be_bytes());
     let table = BinTable::from_data(&h, data).unwrap();
     assert!(matches!(
-        decompress_image(&h, &table),
+        decode::decompress_image(&h, &table),
         Err(FitsError::DataSizeMismatch {
             expected: 2,
             got: 1
@@ -2039,7 +2038,7 @@ fn decompress_image_rejects_overflowing_znaxis_product() {
     data.extend_from_slice(&0i32.to_be_bytes()); // offset
     let table = BinTable::from_data(&h, data).unwrap();
     assert!(matches!(
-        decompress_image(&h, &table),
+        decode::decompress_image(&h, &table),
         Err(FitsError::DataUnitOverflow)
     ));
 
@@ -2093,13 +2092,13 @@ fn uncompress_table_rejects_overflowing_row_product() {
     data.extend_from_slice(&0i64.to_be_bytes()); // offset
     let table = BinTable::from_data(&h, data).unwrap();
     assert!(matches!(
-        uncompress_table(&h, &table),
+        table::uncompress_table(&h, &table),
         Err(FitsError::DataUnitOverflow)
     ));
 
     h.set_internal("ZNAXIS1", 8).set_internal("ZNAXIS2", 2);
     assert!(matches!(
-        uncompress_table(&h, &table),
+        table::uncompress_table(&h, &table),
         Err(FitsError::DataSizeMismatch {
             expected: 2,
             got: 1
@@ -2109,7 +2108,7 @@ fn uncompress_table_rejects_overflowing_row_product() {
     for keyword in ["ZNAXIS1", "ZNAXIS2", "ZTILELEN", "TFIELDS"] {
         h.set_internal(keyword, -1);
         assert!(matches!(
-            uncompress_table(&h, &table),
+            table::uncompress_table(&h, &table),
             Err(FitsError::KeywordOutOfRange { name }) if name == keyword
         ));
         h.set_internal(keyword, 1);
@@ -2123,7 +2122,7 @@ fn uncompress_table_rejects_overflowing_row_product() {
         .set_internal("ZFORM2", "1K");
     let two_column_table = BinTable::from_data(&h, vec![0; 32]).unwrap();
     assert!(matches!(
-        uncompress_table(&h, &two_column_table),
+        table::uncompress_table(&h, &two_column_table),
         Err(FitsError::DataUnitOverflow)
     ));
 }
@@ -2157,7 +2156,7 @@ fn decompress_image_rejects_oversized_znaxis_product() {
     data.extend_from_slice(&0i32.to_be_bytes()); // offset
     let table = BinTable::from_data(&h, data).unwrap();
     assert!(matches!(
-        decompress_image(&h, &table),
+        decode::decompress_image(&h, &table),
         Err(FitsError::DataUnitTooLarge { .. })
     ));
 }

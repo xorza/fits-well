@@ -6,7 +6,7 @@ use crate::bitpix::Bitpix;
 use crate::block::{BLOCK_SIZE, ZERO_FILL};
 use crate::checksum;
 #[cfg(feature = "compression")]
-use crate::compress::{Compression, CompressionOptions, compress_image};
+use crate::compress::{Compression, CompressionOptions, encode};
 use crate::data::{Image, ImageData, Scaling, shape_product};
 use crate::error::{FitsError, Result};
 use crate::header::Header;
@@ -106,7 +106,7 @@ impl<W: Write> FitsWriter<W> {
         template: Option<&Header>,
     ) -> Result<()> {
         self.ensure_writable()?;
-        let mut header = compress_image(image, compression, options, &mut self.scratch)?;
+        let mut header = encode::compress_image(image, compression, options, &mut self.scratch)?;
         merge_header_template(&mut header, template);
         self.finish_hdu(header, ZERO_FILL, true)
     }
