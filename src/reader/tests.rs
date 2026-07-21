@@ -9,21 +9,27 @@ use crate::table_impl::descriptor;
 use crate::table_impl::{CharacterField, ColumnData};
 use crate::writer::{FitsWriter, TableBuilder, WriteColumn};
 use num_complex::Complex;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::ops::Range;
 use std::rc::Rc;
 
 #[derive(Debug)]
 struct CountingCursor {
     inner: Cursor<Vec<u8>>,
     bytes_read: Rc<Cell<usize>>,
+    read_ranges: Rc<RefCell<Vec<Range<usize>>>>,
 }
 
 impl Read for CountingCursor {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let start = self.inner.position() as usize;
         let count = self.inner.read(buffer)?;
         self.bytes_read.set(self.bytes_read.get() + count);
+        if count != 0 {
+            self.read_ranges.borrow_mut().push(start..start + count);
+        }
         Ok(count)
     }
 }
@@ -231,6 +237,7 @@ fn read_wcs_fetches_only_the_referenced_first_row_heap_cells() {
     let source = CountingCursor {
         inner: Cursor::new(writer.into_inner().into_inner()),
         bytes_read: Rc::clone(&bytes_read),
+        read_ranges: Rc::new(RefCell::new(Vec::new())),
     };
     let mut reader = FitsReader::open(source).unwrap();
     let before = bytes_read.get();
@@ -882,6 +889,69 @@ fn region_indices() -> Vec<usize> {
     indices
 }
 
+#[cfg(feature = "compression")]
+fn select_2d_section(
+    samples: &ImageData,
+    width: usize,
+    x: Range<usize>,
+    y: Range<usize>,
+) -> ImageData {
+    let indices: Vec<usize> = y
+        .flat_map(|row| x.clone().map(move |column| column + width * row))
+        .collect();
+    match samples {
+        ImageData::U8(values) => ImageData::U8(indices.iter().map(|&i| values[i]).collect()),
+        ImageData::I16(values) => ImageData::I16(indices.iter().map(|&i| values[i]).collect()),
+        ImageData::I32(values) => ImageData::I32(indices.iter().map(|&i| values[i]).collect()),
+        ImageData::I64(values) => ImageData::I64(indices.iter().map(|&i| values[i]).collect()),
+        ImageData::F32(values) => ImageData::F32(indices.iter().map(|&i| values[i]).collect()),
+        ImageData::F64(values) => ImageData::F64(indices.iter().map(|&i| values[i]).collect()),
+    }
+}
+
+#[cfg(feature = "compression")]
+fn assert_image_data_exact(actual: &ImageData, expected: &ImageData, label: &str) {
+    match (actual, expected) {
+        (ImageData::U8(actual), ImageData::U8(expected)) => {
+            assert_eq!(actual, expected, "{label}")
+        }
+        (ImageData::I16(actual), ImageData::I16(expected)) => {
+            assert_eq!(actual, expected, "{label}")
+        }
+        (ImageData::I32(actual), ImageData::I32(expected)) => {
+            assert_eq!(actual, expected, "{label}")
+        }
+        (ImageData::I64(actual), ImageData::I64(expected)) => {
+            assert_eq!(actual, expected, "{label}")
+        }
+        (ImageData::F32(actual), ImageData::F32(expected)) => {
+            assert_eq!(actual.len(), expected.len(), "{label}");
+            for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "{label} pixel {index}"
+                );
+            }
+        }
+        (ImageData::F64(actual), ImageData::F64(expected)) => {
+            assert_eq!(actual.len(), expected.len(), "{label}");
+            for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "{label} pixel {index}"
+                );
+            }
+        }
+        _ => panic!(
+            "{label}: sample types differ (actual {:?}, expected {:?})",
+            actual.bitpix(),
+            expected.bitpix()
+        ),
+    }
+}
+
 #[test]
 fn image_sections_match_hand_computed_values_for_every_bitpix() {
     let all: Vec<usize> = (0..60).collect();
@@ -977,32 +1047,145 @@ fn image_sections_preserve_scaling_and_validate_empty_and_invalid_regions() {
     ));
 }
 
+#[test]
+fn plain_image_section_streams_exact_strided_runs() {
+    let shape = [6, 5, 4, 3];
+    let samples: Vec<i16> = (0..shape.iter().product::<usize>())
+        .map(|index| index as i16 - 100)
+        .collect();
+    let image = Image::new(shape.to_vec(), samples.clone()).unwrap();
+    let bytes = write_to_vec(&image);
+    let bytes_read = Rc::new(Cell::new(0));
+    let read_ranges = Rc::new(RefCell::new(Vec::new()));
+    let source = CountingCursor {
+        inner: Cursor::new(bytes.clone()),
+        bytes_read,
+        read_ranges: Rc::clone(&read_ranges),
+    };
+    let mut stream = FitsReader::open(source).unwrap();
+    let data_offset = stream.hdus[0].data_offset as usize;
+    read_ranges.borrow_mut().clear();
+    let ranges = [1..3, 1..4, 0..4, 1..3];
+    let section = stream.read_image_section(0, &ranges).unwrap();
+
+    let mut expected_values = Vec::new();
+    let mut expected_reads = Vec::new();
+    for axis3 in 1..3 {
+        for axis2 in 0..4 {
+            for axis1 in 1..4 {
+                let element = 1 + 6 * axis1 + 30 * axis2 + 120 * axis3;
+                expected_values.extend_from_slice(&samples[element..element + 2]);
+                let start = data_offset + element * size_of::<i16>();
+                expected_reads.push(start..start + 2 * size_of::<i16>());
+            }
+        }
+    }
+    assert_eq!(section.metadata().shape, [2, 3, 4, 2]);
+    assert_eq!(section.stored(), ImageView::I16(&expected_values));
+    assert_eq!(&*read_ranges.borrow(), &expected_reads);
+
+    let mut slice = FitsReader::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        slice.read_image_section(0, &ranges).unwrap().stored(),
+        ImageView::I16(&expected_values)
+    );
+}
+
 #[cfg(feature = "compression")]
 #[test]
 fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
     use crate::compress::{Compression, CompressionOptions};
+    use crate::reader::source::SliceSource;
+    use crate::reader::source::test_support::CountingSource;
 
-    let samples: Vec<i16> = (0..9 * 7).map(|index| index as i16 * 3 - 50).collect();
-    let image = Image::new(vec![9, 7], samples.clone()).unwrap();
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer
-        .write_compressed_image(
-            &image,
-            Compression::Rice,
-            &CompressionOptions::tiled([4, 3]),
-        )
-        .unwrap();
-    let bytes = writer.into_inner().into_inner();
-    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
-    let section = reader.read_image_section(1, &[2..8, 1..6]).unwrap();
-    let mut expected = Vec::new();
-    for y in 1..6 {
-        for x in 2..8 {
-            expected.push(samples[x + 9 * y]);
+    let count = 9usize * 7;
+    let mut f32_values: Vec<f32> = (0..count).map(|index| index as f32 * 0.5).collect();
+    f32_values[13] = f32::from_bits(0x7FC0_1234);
+    let mut f64_values: Vec<f64> = (0..count).map(|index| index as f64 * -0.25).collect();
+    f64_values[13] = f64::from_bits(0x7FF8_0000_0000_1234);
+    let cases = [
+        (
+            ImageData::U8((0..count).map(|index| index as u8).collect()),
+            Some(13),
+        ),
+        (
+            ImageData::I16((0..count).map(|index| index as i16 - 30).collect()),
+            Some(-17),
+        ),
+        (
+            ImageData::I32((0..count).map(|index| index as i32 * 1000 - 7).collect()),
+            Some(12_993),
+        ),
+        (
+            ImageData::I64((0..count).map(|index| index as i64 * -50).collect()),
+            Some(-650),
+        ),
+        (ImageData::F32(f32_values), None),
+        (ImageData::F64(f64_values), None),
+    ];
+
+    for (samples, blank) in cases {
+        let bitpix = samples.bitpix();
+        let scaling = Scaling {
+            bscale: 2.0,
+            bzero: 10.0,
+            blank,
+        };
+        let image = Image::new_scaled(vec![9, 7], samples, scaling).unwrap();
+        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+        writer
+            .write_compressed_image(
+                &image,
+                Compression::GZIP,
+                &CompressionOptions::tiled([4, 3]),
+            )
+            .unwrap();
+        let bytes = writer.into_inner().into_inner();
+        let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+        let whole = reader.read_image(1).unwrap().decode();
+        let expected = select_2d_section(&whole, 9, 2..9, 1..7);
+        let owned = reader.read_image_section(1, &[2..9, 1..7]).unwrap();
+        assert_eq!(owned.metadata().shape, [7, 6], "{bitpix:?}");
+        assert_eq!(owned.metadata().scaling, scaling, "{bitpix:?}");
+        assert_image_data_exact(
+            &owned.stored().to_owned_data(),
+            &expected,
+            &format!("{bitpix:?} owned"),
+        );
+        assert!(owned.physical().iter().any(|value| value.is_nan()));
+
+        let mut words = Vec::new();
+        let view = reader
+            .read_image_section_view(1, &[2..9, 1..7], &mut words)
+            .unwrap();
+        assert_eq!(view.shape, [7, 6], "{bitpix:?}");
+        assert_eq!(view.scaling, scaling, "{bitpix:?}");
+        assert_image_data_exact(
+            &view.samples.to_owned_data(),
+            &expected,
+            &format!("{bitpix:?} view"),
+        );
+
+        let empty = reader.read_image_section(1, &[2..2, 1..7]).unwrap();
+        assert_eq!(empty.metadata().shape, [0, 6], "{bitpix:?}");
+        assert!(empty.stored().is_empty(), "{bitpix:?}");
+
+        if bitpix == Bitpix::U8 {
+            for ranges in [[0..2, 0..2], [0..9, 0..7]] {
+                let owned_reads = Rc::new(Cell::new(0));
+                let source = CountingSource {
+                    inner: SliceSource::new(&bytes),
+                    owned_reads: Rc::clone(&owned_reads),
+                };
+                let mut counted = FitsReader::from_source(source).unwrap();
+                let mut scratch = Vec::new();
+                counted
+                    .read_image_section_view(1, &ranges, &mut scratch)
+                    .unwrap();
+                assert_eq!(owned_reads.get(), 0, "{ranges:?}");
+            }
         }
     }
-    assert_eq!(section.metadata().shape, [6, 5]);
-    assert_eq!(section.stored(), ImageView::I16(&expected));
 }
 
 #[test]

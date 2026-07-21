@@ -212,3 +212,42 @@ impl Source for MmapSource {
         mem_owned(&self.map, offset, len)
     }
 }
+
+#[cfg(all(test, feature = "compression"))]
+pub(crate) mod test_support {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use crate::error::Result;
+    use crate::reader::source::SliceSource;
+    use crate::reader::source::Source;
+    use crate::reader::source::sealed;
+
+    #[derive(Debug)]
+    pub(crate) struct CountingSource<'a> {
+        pub(crate) inner: SliceSource<'a>,
+        pub(crate) owned_reads: Rc<Cell<usize>>,
+    }
+
+    impl sealed::Sealed for CountingSource<'_> {}
+
+    impl Source for CountingSource<'_> {
+        fn size(&self) -> u64 {
+            self.inner.size()
+        }
+
+        fn slice<'a>(
+            &'a mut self,
+            offset: u64,
+            len: usize,
+            scratch: &'a mut Vec<u8>,
+        ) -> Result<&'a [u8]> {
+            self.inner.slice(offset, len, scratch)
+        }
+
+        fn read_owned(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
+            self.owned_reads.set(self.owned_reads.get() + 1);
+            self.inner.read_owned(offset, len)
+        }
+    }
+}

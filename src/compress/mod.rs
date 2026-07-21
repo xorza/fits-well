@@ -28,7 +28,7 @@ mod table;
 pub(crate) use decode::compressed_image_tile_rows;
 pub(crate) use decode::decompress_image;
 pub(crate) use decode::decompress_image_into_words;
-pub(crate) use decode::decompress_image_section_into_words;
+pub(crate) use decode::{decompress_image_section, decompress_image_section_into_words};
 pub(crate) use encode::compress_image;
 pub(crate) use table::compress_table;
 pub(crate) use table::uncompress_table;

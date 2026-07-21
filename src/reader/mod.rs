@@ -49,7 +49,7 @@ use source::StreamSource;
 #[cfg(feature = "compression")]
 use crate::compress::{
     compressed_image_tile_rows, decompress_image, decompress_image_into_words,
-    decompress_image_section_into_words, uncompress_table,
+    decompress_image_section, decompress_image_section_into_words, uncompress_table,
 };
 
 /// One Header/Data Unit located by the reader.
@@ -492,13 +492,11 @@ impl<S: Source> FitsReader<S> {
     pub fn read_image_section(&mut self, index: usize, ranges: &[Range<usize>]) -> Result<Image> {
         #[cfg(feature = "compression")]
         if self.checked_hdu(index)?.kind == HduKind::CompressedImage {
-            let mut words = Vec::new();
-            let section = self.read_image_section_view(index, ranges, &mut words)?;
-            return Image::new_scaled(
-                section.shape,
-                section.samples.to_owned_data(),
-                section.scaling,
-            );
+            let header = self.hdus[index].header.clone();
+            let tile_rows = compressed_image_tile_rows(&header, ranges)?;
+            let schema = self.table_schema(index)?;
+            let table = self.read_table_sparse_rows(index, &schema, &tile_rows)?;
+            return decompress_image_section(&header, &table, &tile_rows, ranges);
         }
 
         let layout = self.read_plain_image_section(index, ranges)?;
@@ -552,22 +550,25 @@ impl<S: Source> FitsReader<S> {
         let scaling = hdu.header.scaling()?;
         let bitpix = hdu.header.bitpix()?;
         let data_offset = hdu.data_offset;
-        let runs = image_region_runs(&shape, ranges, bitpix.elem_size())?;
         let nbytes = shape_product(&selected_shape)?
             .checked_mul(bitpix.elem_size())
             .ok_or(FitsError::DataUnitOverflow)?;
         self.section_scratch.clear();
-        self.section_scratch.reserve(nbytes);
-        for run in runs {
-            let bytes = self.source.slice(
+        allocation::try_reserve(&mut self.section_scratch, nbytes)?;
+        let source = &mut self.source;
+        let scratch = &mut self.scratch;
+        let section = &mut self.section_scratch;
+        visit_image_region_runs(&shape, ranges, &selected_shape, bitpix.elem_size(), |run| {
+            let bytes = source.slice(
                 data_offset
                     .checked_add(run.offset as u64)
                     .ok_or(FitsError::DataUnitOverflow)?,
                 run.len,
-                &mut self.scratch,
+                scratch,
             )?;
-            self.section_scratch.extend_from_slice(bytes);
-        }
+            section.extend_from_slice(bytes);
+            Ok(())
+        })?;
         debug_assert_eq!(self.section_scratch.len(), nbytes);
         Ok(ImageSectionLayout {
             shape: selected_shape,
@@ -671,9 +672,11 @@ impl<S: Source> FitsReader<S> {
                         .ok_or(FitsError::DataUnitOverflow)?,
                 )
                 .ok_or(FitsError::DataUnitOverflow)?;
-            let row = self.source.read_owned(offset, schema.row_len)?;
+            let row = self
+                .source
+                .slice(offset, schema.row_len, &mut self.scratch)?;
             let start = destination * schema.row_len;
-            data[start..start + schema.row_len].copy_from_slice(&row);
+            data[start..start + schema.row_len].copy_from_slice(row);
         }
         self.finish_table_selection(index, schema, rows.len(), data, None)
     }
@@ -1090,65 +1093,70 @@ fn validate_image_region(ranges: &[Range<usize>], shape: &[usize]) -> Result<Vec
     Ok(selected)
 }
 
-fn image_region_runs(
+fn visit_image_region_runs(
     shape: &[usize],
     ranges: &[Range<usize>],
+    selected_shape: &[usize],
     element_size: usize,
-) -> Result<Vec<ByteRun>> {
-    let selected = validate_image_region(ranges, shape)?;
-    if selected.is_empty() || selected.contains(&0) {
-        return Ok(Vec::new());
+    mut visit: impl FnMut(ByteRun) -> Result<()>,
+) -> Result<()> {
+    debug_assert_eq!(shape.len(), ranges.len());
+    debug_assert_eq!(shape.len(), selected_shape.len());
+    if selected_shape.is_empty() || selected_shape.contains(&0) {
+        return Ok(());
     }
-    let mut strides = vec![1usize; shape.len()];
-    for axis in 1..shape.len() {
-        strides[axis] = strides[axis - 1]
-            .checked_mul(shape[axis - 1])
-            .ok_or(FitsError::DataUnitOverflow)?;
-    }
-    let mut coordinates: Vec<usize> = ranges.iter().map(|range| range.start).collect();
-    let higher_rows = selected[1..]
+    let row_count = selected_shape[1..]
         .iter()
         .try_fold(1usize, |count, &len| count.checked_mul(len))
         .ok_or(FitsError::DataUnitOverflow)?;
-    let row_bytes = selected[0]
+    let row_bytes = selected_shape[0]
         .checked_mul(element_size)
         .ok_or(FitsError::DataUnitOverflow)?;
-    let mut runs: Vec<ByteRun> = Vec::with_capacity(higher_rows);
-    for _ in 0..higher_rows {
-        let element_offset = coordinates
-            .iter()
-            .zip(&strides)
-            .try_fold(0usize, |offset, (&coordinate, &stride)| {
-                coordinate
-                    .checked_mul(stride)
-                    .and_then(|value| offset.checked_add(value))
-            })
-            .ok_or(FitsError::DataUnitOverflow)?;
-        let offset = element_offset
-            .checked_mul(element_size)
-            .ok_or(FitsError::DataUnitOverflow)?;
-        if let Some(previous) = runs.last_mut()
-            && previous.offset + previous.len == offset
-        {
-            previous.len = previous
-                .len
-                .checked_add(row_bytes)
-                .ok_or(FitsError::DataUnitOverflow)?;
-        } else {
-            runs.push(ByteRun {
-                offset,
-                len: row_bytes,
-            });
-        }
+    let mut pending: Option<ByteRun> = None;
+    for row_index in 0..row_count {
+        let mut remainder = row_index;
+        let mut element_offset = ranges[0].start;
+        let mut stride = shape[0];
         for axis in 1..shape.len() {
-            coordinates[axis] += 1;
-            if coordinates[axis] < ranges[axis].end {
-                break;
+            let coordinate = ranges[axis].start + remainder % selected_shape[axis];
+            remainder /= selected_shape[axis];
+            element_offset = coordinate
+                .checked_mul(stride)
+                .and_then(|value| element_offset.checked_add(value))
+                .ok_or(FitsError::DataUnitOverflow)?;
+            if axis + 1 < shape.len() {
+                stride = stride
+                    .checked_mul(shape[axis])
+                    .ok_or(FitsError::DataUnitOverflow)?;
             }
-            coordinates[axis] = ranges[axis].start;
+        }
+        let next = ByteRun {
+            offset: element_offset
+                .checked_mul(element_size)
+                .ok_or(FitsError::DataUnitOverflow)?,
+            len: row_bytes,
+        };
+        if let Some(previous) = pending.as_mut() {
+            let end = previous
+                .offset
+                .checked_add(previous.len)
+                .ok_or(FitsError::DataUnitOverflow)?;
+            if end == next.offset {
+                previous.len = previous
+                    .len
+                    .checked_add(next.len)
+                    .ok_or(FitsError::DataUnitOverflow)?;
+                continue;
+            }
+        }
+        if let Some(previous) = pending.replace(next) {
+            visit(previous)?;
         }
     }
-    Ok(runs)
+    if let Some(run) = pending {
+        visit(run)?;
+    }
+    Ok(())
 }
 
 fn is_unknown_checksum(value: &str) -> bool {
