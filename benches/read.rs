@@ -19,6 +19,8 @@ use std::io::Cursor;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use fits_well::image::{Bitpix, Image, ImageData, Scaling};
+#[cfg(feature = "compression")]
+use fits_well::image::{Compression, CompressionOptions};
 use fits_well::{FitsReader, FitsWriter};
 
 /// Data-unit size per type — 64 MiB clears the last-level cache, so the staging
@@ -130,5 +132,67 @@ fn read_image_view(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, read_image, read_image_view);
+#[cfg(feature = "compression")]
+fn read_compressed_image_section(c: &mut Criterion) {
+    const WIDTH: usize = 1024;
+    const HEIGHT: usize = 1024;
+
+    let image = Image::new(
+        vec![WIDTH, HEIGHT],
+        (0..WIDTH * HEIGHT)
+            .map(|index| index as i16)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer
+        .write_compressed_image(
+            &image,
+            Compression::Rice,
+            &CompressionOptions::tiled([64, 64]),
+        )
+        .unwrap();
+    let bytes = writer.into_inner().into_inner();
+    let mut group = c.benchmark_group("read_compressed_image_section_view");
+    for (name, ranges) in [
+        ("one_tile", [8..56, 8..56]),
+        ("sixty_four_tiles", [8..504, 8..504]),
+    ] {
+        let section_bytes = ranges.iter().map(|range| range.len()).product::<usize>() * 2;
+        group.throughput(Throughput::Bytes(section_bytes as u64));
+
+        let mut seek = FitsReader::open(Cursor::new(bytes.clone())).unwrap();
+        let mut seek_scratch = Vec::new();
+        group.bench_function(BenchmarkId::new("seek", name), |bench| {
+            bench.iter(|| {
+                let view = seek
+                    .read_image_section_view(1, &ranges, &mut seek_scratch)
+                    .unwrap();
+                black_box(&view);
+            })
+        });
+
+        let mut slice = FitsReader::from_bytes(&bytes).unwrap();
+        let mut slice_scratch = Vec::new();
+        group.bench_function(BenchmarkId::new("slice", name), |bench| {
+            bench.iter(|| {
+                let view = slice
+                    .read_image_section_view(1, &ranges, &mut slice_scratch)
+                    .unwrap();
+                black_box(&view);
+            })
+        });
+    }
+    group.finish();
+}
+
+#[cfg(not(feature = "compression"))]
+fn read_compressed_image_section(_c: &mut Criterion) {}
+
+criterion_group!(
+    benches,
+    read_image,
+    read_image_view,
+    read_compressed_image_section
+);
 criterion_main!(benches);

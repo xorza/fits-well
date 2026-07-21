@@ -362,29 +362,81 @@ pub(crate) fn decompress_image_section_into_words<'a>(
     ranges: &[Range<usize>],
     words: &'a mut Vec<u64>,
 ) -> Result<BorrowedImage<'a>> {
-    let layout = ImageLayout::from_header(header)?;
-    let selected_shape = validate_region(ranges, &layout.dims)?;
-    if table.metadata().nrows != tile_rows.len() {
-        return Err(FitsError::DataSizeMismatch {
-            expected: tile_rows.len(),
-            got: table.metadata().nrows,
-        });
+    let region = ImageRegionLayout::new(header, table, tile_rows, ranges)?;
+    allocation::try_resize(words, region.nbytes.div_ceil(8), 0)?;
+    if region.total != 0 {
+        let output = DecodeBuffer::from_words(words, region.image.bitpix, region.total);
+        decode_image_section_into(header, table, tile_rows, ranges, &region, output)?;
     }
-    let total = shape_product(&selected_shape)?;
-    let nbytes = total
-        .checked_mul(layout.bitpix.elem_size())
-        .ok_or(FitsError::DataUnitOverflow)?;
-    allocation::try_resize(words, nbytes.div_ceil(8), 0)?;
-    if total == 0 {
-        return Ok(BorrowedImage {
-            shape: selected_shape,
-            scaling: layout.scaling,
-            samples: view_words(words, layout.bitpix, nbytes),
-        });
-    }
+    Ok(BorrowedImage {
+        shape: region.shape,
+        scaling: region.image.scaling,
+        samples: view_words(words, region.image.bitpix, region.nbytes),
+    })
+}
 
-    let plan = ImageDecodePlan::new(header, table, &layout)?;
-    let output = DecodeBuffer::from_words(words, layout.bitpix, total);
+pub(crate) fn decompress_image_section(
+    header: &Header,
+    table: &BinTable,
+    tile_rows: &[usize],
+    ranges: &[Range<usize>],
+) -> Result<Image> {
+    let region = ImageRegionLayout::new(header, table, tile_rows, ranges)?;
+    let mut samples = zeroed_samples(region.image.bitpix, region.total)?;
+    if region.total != 0 {
+        let output = DecodeBuffer::from_samples(&mut samples);
+        decode_image_section_into(header, table, tile_rows, ranges, &region, output)?;
+    }
+    Image::new_scaled(region.shape, samples, region.image.scaling)
+}
+
+#[derive(Debug)]
+struct ImageRegionLayout {
+    image: ImageLayout,
+    shape: Vec<usize>,
+    total: usize,
+    nbytes: usize,
+}
+
+impl ImageRegionLayout {
+    fn new(
+        header: &Header,
+        table: &BinTable,
+        tile_rows: &[usize],
+        ranges: &[Range<usize>],
+    ) -> Result<ImageRegionLayout> {
+        let image = ImageLayout::from_header(header)?;
+        let shape = validate_region(ranges, &image.dims)?;
+        if table.metadata().nrows != tile_rows.len() {
+            return Err(FitsError::DataSizeMismatch {
+                expected: tile_rows.len(),
+                got: table.metadata().nrows,
+            });
+        }
+        let total = shape_product(&shape)?;
+        let nbytes = total
+            .checked_mul(image.bitpix.elem_size())
+            .ok_or(FitsError::DataUnitOverflow)?;
+        Ok(ImageRegionLayout {
+            image,
+            shape,
+            total,
+            nbytes,
+        })
+    }
+}
+
+fn decode_image_section_into(
+    header: &Header,
+    table: &BinTable,
+    tile_rows: &[usize],
+    ranges: &[Range<usize>],
+    region: &ImageRegionLayout,
+    output: DecodeBuffer<'_>,
+) -> Result<()> {
+    debug_assert_ne!(region.total, 0);
+    let layout = &region.image;
+    let plan = ImageDecodePlan::new(header, table, layout)?;
     if plan.context.zbitpix.is_float() {
         let decode = |table_row: usize,
                       tile_row: usize,
@@ -407,7 +459,7 @@ pub(crate) fn decompress_image_section_into_words<'a>(
             DecodeBuffer::F32(out) => run_decode_region(
                 &plan.geometry,
                 ranges,
-                &selected_shape,
+                &region.shape,
                 tile_rows,
                 out,
                 decode,
@@ -416,7 +468,7 @@ pub(crate) fn decompress_image_section_into_words<'a>(
             DecodeBuffer::F64(out) => run_decode_region(
                 &plan.geometry,
                 ranges,
-                &selected_shape,
+                &region.shape,
                 tile_rows,
                 out,
                 decode,
@@ -452,7 +504,7 @@ pub(crate) fn decompress_image_section_into_words<'a>(
             DecodeBuffer::U8(out) => run_decode_region(
                 &plan.geometry,
                 ranges,
-                &selected_shape,
+                &region.shape,
                 tile_rows,
                 out,
                 decode,
@@ -461,7 +513,7 @@ pub(crate) fn decompress_image_section_into_words<'a>(
             DecodeBuffer::I16(out) => run_decode_region(
                 &plan.geometry,
                 ranges,
-                &selected_shape,
+                &region.shape,
                 tile_rows,
                 out,
                 decode,
@@ -470,7 +522,7 @@ pub(crate) fn decompress_image_section_into_words<'a>(
             DecodeBuffer::I32(out) => run_decode_region(
                 &plan.geometry,
                 ranges,
-                &selected_shape,
+                &region.shape,
                 tile_rows,
                 out,
                 decode,
@@ -479,7 +531,7 @@ pub(crate) fn decompress_image_section_into_words<'a>(
             DecodeBuffer::I64(out) => run_decode_region(
                 &plan.geometry,
                 ranges,
-                &selected_shape,
+                &region.shape,
                 tile_rows,
                 out,
                 decode,
@@ -488,11 +540,7 @@ pub(crate) fn decompress_image_section_into_words<'a>(
             _ => unreachable!("an integer ZBITPIX yields an integer sample buffer"),
         }
     }
-    Ok(BorrowedImage {
-        shape: selected_shape,
-        scaling: layout.scaling,
-        samples: view_words(words, layout.bitpix, nbytes),
-    })
+    Ok(())
 }
 
 fn decode_image_into(
