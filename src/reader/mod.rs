@@ -64,7 +64,7 @@ pub struct Hdu {
     pub(crate) data_offset: u64,
     /// Unpadded data length (`Nbits / 8`) — where the meaningful data ends within
     /// the padded unit. The on-disk length is `padded_len(data_bytes)`.
-    pub(crate) data_bytes: u64,
+    pub data_bytes: u64,
 }
 
 impl Hdu {
