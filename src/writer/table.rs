@@ -10,7 +10,7 @@ use num_complex::Complex;
 
 use crate::block::ZERO_FILL;
 #[cfg(feature = "compression")]
-use crate::compress::{Compression, compress_table};
+use crate::compress::{Compression, table};
 use crate::data::{U64_OFFSET, U64_OFFSET_INTEGER};
 use crate::endian::{extend_be, validate_pq_descriptor, write_pq_descriptor};
 use crate::error::{FitsError, Result};
@@ -440,7 +440,8 @@ impl<W: Write> FitsWriter<W> {
         compression: Compression,
     ) -> Result<()> {
         self.ensure_writable()?;
-        let zheader = compress_table(header, table, rows_per_tile, compression, &mut self.scratch)?;
+        let zheader =
+            table::compress_table(header, table, rows_per_tile, compression, &mut self.scratch)?;
         self.finish_hdu(zheader, ZERO_FILL, true)
     }
 }

@@ -9,14 +9,7 @@
 //! fallback-column resolution, and the narrow-and-scatter into the output plane.
 
 use crate::compress;
-use crate::compress::convert::be_floats_into;
-use crate::compress::convert::be_to_i64_into;
-use crate::compress::convert::byte_cell;
-use crate::compress::convert::bytepix_to_bitpix;
-use crate::compress::convert::cell_to_f64_into;
-use crate::compress::convert::cell_to_i64_into;
-use crate::compress::convert::plio_cell;
-use crate::compress::convert::zeroed_samples;
+use crate::compress::convert;
 use crate::compress::geometry::TileGeometry;
 use crate::compress::geometry::TileScratch;
 #[cfg(feature = "parallel")]
@@ -116,7 +109,7 @@ impl<'a> ImageDecodePlan<'a> {
         let rice = rice::rice_params(header)?;
         let is_float = layout.bitpix.is_float();
         let int_bitpix = if is_float && layout.codec == ImageCodec::Rice1 {
-            bytepix_to_bitpix(rice.bytepix)
+            convert::bytepix_to_bitpix(rice.bytepix)
         } else if is_float {
             Bitpix::I32
         } else {
@@ -256,7 +249,7 @@ impl<'a> DecodeBuffer<'a> {
 /// Decompress a tiled-image `BINTABLE` into the full [`Image`] it encodes.
 pub(crate) fn decompress_image(header: &Header, table: &BinTable) -> Result<Image> {
     let layout = ImageLayout::from_header(header)?;
-    let mut samples = zeroed_samples(layout.bitpix, layout.total)?;
+    let mut samples = convert::zeroed_samples(layout.bitpix, layout.total)?;
     if layout.total != 0 {
         decode_image_into(
             header,
@@ -382,7 +375,7 @@ pub(crate) fn decompress_image_section(
     ranges: &[Range<usize>],
 ) -> Result<Image> {
     let region = ImageRegionLayout::new(header, table, tile_rows, ranges)?;
-    let mut samples = zeroed_samples(region.image.bitpix, region.total)?;
+    let mut samples = convert::zeroed_samples(region.image.bitpix, region.total)?;
     if region.total != 0 {
         let output = DecodeBuffer::from_samples(&mut samples);
         decode_image_section_into(header, table, tile_rows, ranges, &region, output)?;
@@ -1060,14 +1053,14 @@ fn decode_one_tile_into(
     match cols.resolve()? {
         TileSource::Compressed(cell) => decode_tile_cell_into(ctx, cell, tile_elems, out, scratch),
         TileSource::Gzip(cell) => gzip::gzip_tile_into(
-            byte_cell(cell)?,
+            convert::byte_cell(cell)?,
             ctx.int_bitpix,
             tile_elems,
             out,
             &mut scratch.gzip,
         ),
         TileSource::Uncompressed(cell) => {
-            cell_to_i64_into(cell, out);
+            convert::cell_to_i64_into(cell, out);
             Ok(())
         }
     }
@@ -1096,12 +1089,12 @@ fn decode_float_tile_into(
         TileSource::Gzip(cell) => {
             // Raw floats, bounded at the tile's known byte size (`tile_elems` floats).
             let max = tile_elems.saturating_mul(ctx.zbitpix.elem_size());
-            gzip::gunzip_into(byte_cell(cell)?, max, &mut scratch.gzip.bytes)?;
-            be_floats_into(&scratch.gzip.bytes, ctx.zbitpix, out);
+            gzip::gunzip_into(convert::byte_cell(cell)?, max, &mut scratch.gzip.bytes)?;
+            convert::be_floats_into(&scratch.gzip.bytes, ctx.zbitpix, out);
             Ok(())
         }
         TileSource::Uncompressed(cell) => {
-            cell_to_f64_into(cell, ctx.zbitpix, out);
+            convert::cell_to_f64_into(cell, ctx.zbitpix, out);
             Ok(())
         }
     }
@@ -1119,14 +1112,14 @@ fn decode_tile_cell_into(
     let params = ctx.params;
     match ctx.codec {
         ImageCodec::Gzip1 => gzip::gzip_tile_into(
-            byte_cell(cell)?,
+            convert::byte_cell(cell)?,
             ctx.int_bitpix,
             tile_elems,
             out,
             &mut scratch.gzip,
         ),
         ImageCodec::Gzip2 => gzip::gzip2_tile_into(
-            byte_cell(cell)?,
+            convert::byte_cell(cell)?,
             ctx.int_bitpix,
             tile_elems,
             out,
@@ -1139,16 +1132,16 @@ fn decode_tile_cell_into(
                 });
             }
             rice::rice_decode_into(
-                byte_cell(cell)?,
+                convert::byte_cell(cell)?,
                 tile_elems,
                 params.bytepix,
                 params.blocksize,
                 out,
             )
         }
-        ImageCodec::Plio1 => plio::plio_decode_be_into(plio_cell(cell)?, tile_elems, out),
+        ImageCodec::Plio1 => plio::plio_decode_be_into(convert::plio_cell(cell)?, tile_elems, out),
         ImageCodec::Hcompress1 => hcompress::hcompress_tile_into(
-            byte_cell(cell)?,
+            convert::byte_cell(cell)?,
             params.smooth,
             tile_elems,
             out,
@@ -1156,7 +1149,7 @@ fn decode_tile_cell_into(
         ),
         // §10.4: a tile stored verbatim — the cell is the raw big-endian pixels.
         ImageCodec::NoCompress => {
-            let bytes = byte_cell(cell)?;
+            let bytes = convert::byte_cell(cell)?;
             let expected = tile_elems
                 .checked_mul(ctx.int_bitpix.elem_size())
                 .ok_or(FitsError::DataUnitOverflow)?;
@@ -1166,7 +1159,7 @@ fn decode_tile_cell_into(
                     got: bytes.len(),
                 });
             }
-            be_to_i64_into(bytes, ctx.int_bitpix, out);
+            convert::be_to_i64_into(bytes, ctx.int_bitpix, out);
             Ok(())
         }
     }

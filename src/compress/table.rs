@@ -11,7 +11,6 @@
 
 use crate::allocation;
 use crate::compress::Compression;
-use crate::compress::HduParts;
 use crate::compress::convert;
 use crate::compress::gzip;
 use crate::compress::map_tiles;
@@ -354,6 +353,13 @@ pub(crate) fn compress_table(
     h.set_internal("PCOUNT", fits_i64(heap_len)?);
     h.set_internal("GCOUNT", 1);
     Ok(h)
+}
+
+/// A restored header and its decompressed data unit.
+#[derive(Debug)]
+pub(crate) struct HduParts {
+    pub(crate) header: Header,
+    pub(crate) data: Vec<u8>,
 }
 
 /// Uncompress a `ZTABLE` container back into its original `BINTABLE`.

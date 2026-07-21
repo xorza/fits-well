@@ -7,35 +7,26 @@
 //! [`CompressionOptions`], the
 //! [`ImageCodec`] dispatch, the per-tile [`map_tiles`] fan-out, and the `P`-vs-`Q`
 //! descriptor threshold — while the directions live in [`decode`]
-//! ([`decompress_image`]) and [`encode`] ([`compress_image`], all five codecs:
+//! ([`decode::decompress_image`]) and [`encode`] ([`encode::compress_image`], all five codecs:
 //! `GZIP_1`, `GZIP_2`, `RICE_1`, `PLIO_1`, `HCOMPRESS_1` with `SMOOTH=1` decode).
 //! Float images are quantized per-tile (`ZSCALE`/`ZZERO`) with `NO_DITHER`,
 //! `SUBTRACTIVE_DITHER_1`, or `SUBTRACTIVE_DITHER_2`. The per-codec work lives in
 //! [`gzip`], [`rice`], [`plio`], and [`hcompress`]; tiled *table* compression
-//! (§10.3) lives in [`table`] ([`compress_table`]/[`uncompress_table`]).
+//! (§10.3) lives in [`table`] ([`table::compress_table`]/[`table::uncompress_table`]).
 
 mod convert;
-mod decode;
-mod encode;
+pub(crate) mod decode;
+pub(crate) mod encode;
 mod geometry;
 mod gzip;
 mod hcompress;
 mod plio;
 mod quantize;
 mod rice;
-mod table;
-
-pub(crate) use decode::compressed_image_tile_rows;
-pub(crate) use decode::decompress_image;
-pub(crate) use decode::decompress_image_into_words;
-pub(crate) use decode::{decompress_image_section, decompress_image_section_into_words};
-pub(crate) use encode::compress_image;
-pub(crate) use table::compress_table;
-pub(crate) use table::uncompress_table;
+pub(crate) mod table;
 
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header::Header;
 
 /// Float-quantization dithering for [`crate::FitsWriter::write_compressed_image`]
 /// (`ZQUANTIZ`, §10.2). Applies only when compressing a float image; the integer
@@ -183,14 +174,6 @@ impl CompressionOptions {
         self.quantization = Quantization { level, dither };
         Ok(self)
     }
-}
-
-/// A restored header and its decompressed data unit — the result of
-/// [`uncompress_table`] (a named pair rather than a bare `(Header, Vec<u8>)`).
-#[derive(Debug)]
-pub(crate) struct HduParts {
-    pub header: Header,
-    pub data: Vec<u8>,
 }
 
 /// The tiled-image codec selected by `ZCMPTYPE`, parsed once from the keyword string

@@ -47,10 +47,7 @@ use source::Source;
 use source::StreamSource;
 
 #[cfg(feature = "compression")]
-use crate::compress::{
-    compressed_image_tile_rows, decompress_image, decompress_image_into_words,
-    decompress_image_section, decompress_image_section_into_words, uncompress_table,
-};
+use crate::compress::{decode, table};
 
 /// One Header/Data Unit located by the reader.
 ///
@@ -400,7 +397,7 @@ impl<S: Source> FitsReader<S> {
         #[cfg(feature = "compression")]
         if self.checked_hdu(index)?.kind == HduKind::CompressedImage {
             let table = self.read_table(index)?;
-            let img = decompress_image(&self.hdus[index].header, &table)?;
+            let img = decode::decompress_image(&self.hdus[index].header, &table)?;
             return Ok(ReadImage::decoded(img.samples, img.shape, img.scaling));
         }
 
@@ -454,7 +451,7 @@ impl<S: Source> FitsReader<S> {
         #[cfg(feature = "compression")]
         if self.checked_hdu(index)?.kind == HduKind::CompressedImage {
             let table = self.read_table(index)?;
-            return decompress_image_into_words(&self.hdus[index].header, &table, scratch);
+            return decode::decompress_image_into_words(&self.hdus[index].header, &table, scratch);
         }
 
         let hdu = self.checked_hdu(index)?;
@@ -493,10 +490,10 @@ impl<S: Source> FitsReader<S> {
         #[cfg(feature = "compression")]
         if self.checked_hdu(index)?.kind == HduKind::CompressedImage {
             let header = self.hdus[index].header.clone();
-            let tile_rows = compressed_image_tile_rows(&header, ranges)?;
+            let tile_rows = decode::compressed_image_tile_rows(&header, ranges)?;
             let schema = self.table_schema(index)?;
             let table = self.read_table_sparse_rows(index, &schema, &tile_rows)?;
-            return decompress_image_section(&header, &table, &tile_rows, ranges);
+            return decode::decompress_image_section(&header, &table, &tile_rows, ranges);
         }
 
         let layout = self.read_plain_image_section(index, ranges)?;
@@ -517,10 +514,12 @@ impl<S: Source> FitsReader<S> {
         #[cfg(feature = "compression")]
         if self.checked_hdu(index)?.kind == HduKind::CompressedImage {
             let header = self.hdus[index].header.clone();
-            let tile_rows = compressed_image_tile_rows(&header, ranges)?;
+            let tile_rows = decode::compressed_image_tile_rows(&header, ranges)?;
             let schema = self.table_schema(index)?;
             let table = self.read_table_sparse_rows(index, &schema, &tile_rows)?;
-            return decompress_image_section_into_words(&header, &table, &tile_rows, ranges, words);
+            return decode::decompress_image_section_into_words(
+                &header, &table, &tile_rows, ranges, words,
+            );
         }
 
         let layout = self.read_plain_image_section(index, ranges)?;
@@ -940,7 +939,7 @@ impl<S: Source> FitsReader<S> {
     #[cfg(feature = "compression")]
     pub fn read_compressed_table(&mut self, index: usize) -> Result<BinTable> {
         let table = self.read_table(index)?;
-        let parts = uncompress_table(&self.hdus[index].header, &table)?;
+        let parts = table::uncompress_table(&self.hdus[index].header, &table)?;
         BinTable::from_data(&parts.header, parts.data)
     }
 

@@ -6,12 +6,7 @@
 //! quantized to int32 with a `ZSCALE`/`ZZERO` first ([`compress_float_image`]). The
 //! per-codec work lives in the sibling codec modules.
 
-use crate::compress::convert::float_to_be_into;
-use crate::compress::convert::gather_f64;
-use crate::compress::convert::gather_i64;
-use crate::compress::convert::i32_to_be_into;
-use crate::compress::convert::i64_to_be;
-use crate::compress::convert::i64_to_be_into;
+use crate::compress::convert;
 use crate::compress::geometry::TileGeometry;
 use crate::compress::geometry::TileScratch;
 use crate::compress::{
@@ -86,7 +81,7 @@ pub(crate) fn compress_image(
         geom.tile_into(t, &mut s.tile);
         // Gather + widen this tile's pixels straight from the typed source — no
         // whole-image `i64` buffer.
-        gather_i64(
+        convert::gather_i64(
             &image.samples,
             &s.tile.row_bases,
             s.tile.row_len,
@@ -95,11 +90,11 @@ pub(crate) fn compress_image(
         let vals = &s.ints;
         Ok(match codec {
             ImageCodec::Gzip1 => {
-                i64_to_be_into(vals, bitpix, &mut s.be);
+                convert::i64_to_be_into(vals, bitpix, &mut s.be);
                 TileCell::Bytes(gzip::gzip_encode(&s.be, gzip_level))
             }
             ImageCodec::Gzip2 => {
-                i64_to_be_into(vals, bitpix, &mut s.be);
+                convert::i64_to_be_into(vals, bitpix, &mut s.be);
                 TileCell::Bytes(gzip::gzip2_encode(&s.be, bytepix, gzip_level, &mut s.gzip))
             }
             ImageCodec::Rice1 => TileCell::Bytes(rice::rice_encode(vals, bytepix, 32, &mut s.rice)),
@@ -131,7 +126,7 @@ pub(crate) fn compress_image(
                 )?)
             }
             // §10.4: store the tile's raw big-endian pixels, uncompressed.
-            ImageCodec::NoCompress => TileCell::Bytes(i64_to_be(vals, bitpix)),
+            ImageCodec::NoCompress => TileCell::Bytes(convert::i64_to_be(vals, bitpix)),
         })
     })?;
 
@@ -281,7 +276,7 @@ fn compress_float_image(
             let nx = s.tile.tdims[0];
             let ny = s.tile.row_bases.len();
             // Gather + widen this tile's pixels straight from the typed source.
-            gather_f64(
+            convert::gather_f64(
                 &image.samples,
                 &s.tile.row_bases,
                 s.tile.row_len,
@@ -301,18 +296,18 @@ fn compress_float_image(
                     Some(q) => {
                         let bytes = match codec {
                             ImageCodec::Gzip1 => {
-                                i32_to_be_into(&s.quantize.ints, &mut s.be);
+                                convert::i32_to_be_into(&s.quantize.ints, &mut s.be);
                                 gzip::gzip_encode(&s.be, gzip_level)
                             }
                             ImageCodec::Gzip2 => {
-                                i32_to_be_into(&s.quantize.ints, &mut s.be);
+                                convert::i32_to_be_into(&s.quantize.ints, &mut s.be);
                                 gzip::gzip2_encode(&s.be, 4, gzip_level, &mut s.gzip)
                             }
                             ImageCodec::Rice1 => {
                                 rice::rice_encode(&s.quantize.ints, 4, 32, &mut s.rice)
                             }
                             ImageCodec::NoCompress => {
-                                i32_to_be_into(&s.quantize.ints, &mut s.be);
+                                convert::i32_to_be_into(&s.quantize.ints, &mut s.be);
                                 s.be.clone()
                             }
                             _ => unreachable!(),
@@ -327,7 +322,7 @@ fn compress_float_image(
                     }
                     // Constant tile: store the raw floats, gzip'd, in the fallback.
                     None => {
-                        float_to_be_into(&s.floats, zbitpix, &mut s.be);
+                        convert::float_to_be_into(&s.floats, zbitpix, &mut s.be);
                         FloatTile {
                             bytes: gzip::gzip_encode(&s.be, gzip_level),
                             zscale: 0.0,
