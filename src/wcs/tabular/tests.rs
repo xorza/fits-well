@@ -252,6 +252,39 @@ fn tabular_time_axes_feed_the_typed_time_layer() {
         .unwrap()
         .unwrap();
     assert_eq!(coordinate.mjd, 50_001.0);
+
+    let table = lookup_table(&[("COORD", &[100.0, 200.0, 300.0, 400.0], Some("(1,4)"))]);
+    let mut header = Header::new();
+    header
+        .set_internal("NAXIS", 3)
+        .set_internal("CTYPE1", "LINEAR")
+        .set_internal("CTYPE2", "TIME-TAB")
+        .set_internal("CTYPE3", "LINEAR")
+        .set_internal("CUNIT2", "s")
+        .set_internal("CRPIX1", 10.0)
+        .set_internal("CRPIX2", 20.0)
+        .set_internal("CRPIX3", 30.0)
+        .set_internal("CRVAL1", 0.0)
+        .set_internal("CRVAL2", 0.0)
+        .set_internal("CRVAL3", 0.0)
+        .set_internal("CDELT1", 1.0)
+        .set_internal("CDELT2", 1.0)
+        .set_internal("CDELT3", 1.0)
+        .set_internal("PC2_1", 0.5)
+        .set_internal("PC2_3", 0.25)
+        .set_internal("PS2_0", "WCS-TABLE")
+        .set_internal("PS2_1", "COORD")
+        .set_internal("PV2_3", 1)
+        .set_internal("MJDREF", 50_000.0)
+        .set_internal("TIMESYS", "UTC");
+    let wcs = resolved_wcs(&header, &table);
+    let coordinate = header
+        .time()
+        .unwrap()
+        .time_axis_mjd(&wcs, 2, &[12.0, 20.5, 34.0])
+        .unwrap()
+        .unwrap();
+    assert_eq!(coordinate.mjd, 50_000.0 + 250.0 / 86_400.0);
 }
 
 #[test]
