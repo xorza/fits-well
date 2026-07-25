@@ -910,11 +910,7 @@ fn validate_character(value: &CharacterField, context: &'static str) -> Result<(
 pub(super) mod internals {
     use crate::writer::table::WriteColumn;
 
-    pub(in crate::writer) fn set_scaling(
-        column: &mut WriteColumn,
-        tscale: Option<f64>,
-        tzero: Option<f64>,
-    ) {
+    pub(crate) fn set_scaling(column: &mut WriteColumn, tscale: Option<f64>, tzero: Option<f64>) {
         column.tscale = tscale;
         column.tzero = tzero;
     }
