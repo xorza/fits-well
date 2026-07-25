@@ -664,7 +664,7 @@ where
 }
 
 #[cfg(feature = "parallel")]
-pub(crate) fn decode_wave_tile_count<D>(geom: &TileGeometry) -> usize {
+pub(super) fn decode_wave_tile_count<D>(geom: &TileGeometry) -> usize {
     const DECODE_WAVE_BYTES: usize = 4 * 1024 * 1024;
 
     let payload_bytes = geom

@@ -20,7 +20,7 @@ enum IntegerRepr {
 }
 
 impl FitsInteger {
-    pub(crate) fn parse(token: &str) -> Option<FitsInteger> {
+    pub(super) fn parse(token: &str) -> Option<FitsInteger> {
         if let Ok(value) = token.parse::<i64>() {
             return Some(FitsInteger::from(value));
         }

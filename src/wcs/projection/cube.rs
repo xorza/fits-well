@@ -53,7 +53,7 @@ struct FaceRatios {
     psi: f32,
 }
 
-pub(crate) fn deproject(projection: Projection, x: f64, y: f64) -> Result<NativeCoordinate> {
+pub(super) fn deproject(projection: Projection, x: f64, y: f64) -> Result<NativeCoordinate> {
     let face = face_coordinate(projection, x, y)?;
     let direction = match projection {
         Projection::Tsc => direction_from_ratios(face.face, face.x, face.y),
@@ -67,7 +67,7 @@ pub(crate) fn deproject(projection: Projection, x: f64, y: f64) -> Result<Native
     native_coordinate(projection, direction)
 }
 
-pub(crate) fn project(projection: Projection, phi: f64, theta: f64) -> Result<ProjectedCoordinate> {
+pub(super) fn project(projection: Projection, phi: f64, theta: f64) -> Result<ProjectedCoordinate> {
     if matches!(projection, Projection::Qsc) && theta.abs() == 90.0 {
         return projection.projected_coordinate(0.0, theta.signum() * 90.0);
     }

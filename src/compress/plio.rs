@@ -11,7 +11,7 @@ use crate::error::Result;
 /// line list — a port of cfitsio's `pl_p2li` with `xs = 1`. The returned i16 list
 /// round-trips through [`plio_decode_be_into`]. Values outside `0..=0xFF_FFFF`
 /// are rejected because the format cannot preserve them.
-pub(crate) fn plio_encode(values: &[i64]) -> Result<Vec<i16>> {
+pub(super) fn plio_encode(values: &[i64]) -> Result<Vec<i16>> {
     if let Some((index, &value)) = values
         .iter()
         .enumerate()
@@ -118,7 +118,7 @@ pub(crate) fn plio_encode(values: &[i64]) -> Result<Vec<i16>> {
     Ok(ll)
 }
 
-pub(crate) fn plio_decode_be_into(bytes: &[u8], npix: usize, px: &mut Vec<i64>) -> Result<()> {
+pub(super) fn plio_decode_be_into(bytes: &[u8], npix: usize, px: &mut Vec<i64>) -> Result<()> {
     if !bytes.len().is_multiple_of(2) {
         return Err(FitsError::UnexpectedEof);
     }

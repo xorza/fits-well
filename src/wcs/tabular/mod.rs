@@ -49,7 +49,7 @@ pub(crate) struct TabularDescriptor {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TabularTransform {
-    pub(crate) axes: Vec<usize>,
+    pub(super) axes: Vec<usize>,
     reference_indices: Vec<f64>,
     lengths: Vec<usize>,
     variable_axes: Vec<usize>,
@@ -256,7 +256,7 @@ impl TabularTransform {
         })
     }
 
-    pub(crate) fn to_world(&self, intermediate: &[f64], world: &mut [f64]) -> Result<()> {
+    pub(super) fn to_world(&self, intermediate: &[f64], world: &mut [f64]) -> Result<()> {
         let mut location = self.interpolation_location(|_, image_axis| intermediate[image_axis])?;
         for &image_axis in &self.axes {
             world[image_axis] = 0.0;
@@ -273,7 +273,7 @@ impl TabularTransform {
         Ok(())
     }
 
-    pub(crate) fn to_world_axis(&self, image_axis: usize, intermediate: &[f64]) -> Result<f64> {
+    pub(super) fn to_world_axis(&self, image_axis: usize, intermediate: &[f64]) -> Result<f64> {
         debug_assert_eq!(intermediate.len(), self.axes.len());
         let table_axis = self
             .axes
@@ -284,7 +284,7 @@ impl TabularTransform {
         Ok(self.interpolate_axis(&mut location.base, &location.delta, table_axis))
     }
 
-    pub(crate) fn to_intermediate(&self, world: &[f64], intermediate: &mut [f64]) -> Result<()> {
+    pub(super) fn to_intermediate(&self, world: &[f64], intermediate: &mut [f64]) -> Result<()> {
         let location = if self.axes.len() == 1 {
             self.locate_one_dimensional(world[self.axes[0]])?
         } else {

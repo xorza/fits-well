@@ -15,7 +15,7 @@ use crate::reader::FitsReader;
 use crate::reader::{ChecksumReport, ChecksumStatus};
 use crate::table_impl::{CharacterField, ColumnData};
 use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
-use crate::writer::table::test_support;
+use crate::writer::table::internals;
 use crate::writer::table::{ColumnType, TableBuilder, WriteColumn};
 use crate::writer::{
     FitsWriter, PLACEHOLDER_CHECKSUM, WriterState, pad_to_block, patch_checksum, render_header,
@@ -962,7 +962,7 @@ fn binary_metadata_is_validated_for_every_fixed_and_vla_stored_type() {
             assert_table_column_rejected(typed.column.clone().scaled(2.0, 3.0), "TSCALn");
 
             let mut tzero_only = typed.column.clone();
-            test_support::set_scaling(&mut tzero_only, None, Some(3.0));
+            internals::set_scaling(&mut tzero_only, None, Some(3.0));
             assert_table_column_rejected(tzero_only, "TZEROn");
         } else {
             assert_table_column_writes(typed.column.clone().scaled(2.0, 3.0));
@@ -1071,7 +1071,7 @@ fn binary_nonfinite_scaling_is_rejected_before_output() {
     for vla in [false, true] {
         for case in &cases {
             let mut column = integer_column(ColumnType::I32, vla);
-            test_support::set_scaling(&mut column, case.tscale, case.tzero);
+            internals::set_scaling(&mut column, case.tscale, case.tzero);
             assert_table_column_rejected(column, case.keyword);
         }
     }

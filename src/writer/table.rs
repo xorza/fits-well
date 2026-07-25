@@ -251,8 +251,8 @@ impl WriteColumn {
 /// unless an explicit count is supplied for an empty or zero-width schema.
 #[derive(Debug, Clone, Default)]
 pub struct TableBuilder {
-    pub(crate) nrows: Option<usize>,
-    pub(crate) columns: Vec<WriteColumn>,
+    pub(super) nrows: Option<usize>,
+    pub(super) columns: Vec<WriteColumn>,
 }
 
 impl TableBuilder {
@@ -907,10 +907,14 @@ fn validate_character(value: &CharacterField, context: &'static str) -> Result<(
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
+pub(super) mod internals {
     use crate::writer::table::WriteColumn;
 
-    pub(crate) fn set_scaling(column: &mut WriteColumn, tscale: Option<f64>, tzero: Option<f64>) {
+    pub(in crate::writer) fn set_scaling(
+        column: &mut WriteColumn,
+        tscale: Option<f64>,
+        tzero: Option<f64>,
+    ) {
         column.tscale = tscale;
         column.tzero = tzero;
     }

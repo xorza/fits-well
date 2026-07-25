@@ -6,7 +6,7 @@ use crate::header::value::Value;
 
 /// What role an 80-byte record plays in a header unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CardKind {
+pub(super) enum CardKind {
     /// `KEYWORD = value [/ comment]` — a value indicator sits in bytes 9–10.
     Value,
     /// `COMMENT`, `HISTORY`, or the blank keyword — free text in bytes 9–80,
@@ -28,18 +28,18 @@ pub(crate) enum CardKind {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Card {
     /// Keyword name, trailing spaces stripped. Empty for the blank keyword.
-    pub(crate) keyword: String,
+    pub(super) keyword: String,
     /// Present only for [`CardKind::Value`] and [`CardKind::Continue`] cards.
-    pub(crate) value: Option<Value>,
+    pub(super) value: Option<Value>,
     /// The `/`-comment for value cards, or the whole free text for commentary
     /// cards. Trailing spaces are not significant and are stripped.
-    pub(crate) comment: Option<String>,
-    pub(crate) kind: CardKind,
+    pub(super) comment: Option<String>,
+    pub(super) kind: CardKind,
 }
 
 impl Card {
     /// A valued keyword card (`KEYWORD = value`), comment optional.
-    pub(crate) fn value(keyword: &str, value: Value) -> Card {
+    pub(super) fn value(keyword: &str, value: Value) -> Card {
         Card {
             keyword: keyword.to_string(),
             value: Some(value),
@@ -49,7 +49,7 @@ impl Card {
     }
 
     /// A commentary card (`COMMENT`/`HISTORY`/blank keyword) carrying free text.
-    pub(crate) fn commentary(keyword: &str, text: &str) -> Card {
+    pub(super) fn commentary(keyword: &str, text: &str) -> Card {
         Card {
             keyword: keyword.to_string(),
             value: None,
@@ -59,7 +59,7 @@ impl Card {
     }
 
     /// Parse a single 80-byte record.
-    pub(crate) fn parse(raw: &[u8; CARD_SIZE]) -> Result<Card> {
+    pub(super) fn parse(raw: &[u8; CARD_SIZE]) -> Result<Card> {
         // FITS header records are restricted ASCII (§4.1). Rejecting non-ASCII up
         // front both enforces that and guarantees every fixed-column slice below
         // lands on a char boundary — a valid UTF-8 *multibyte* card would
@@ -136,7 +136,7 @@ impl Card {
     /// integer, real, and complex values are right-justified ending at column 30;
     /// character strings keep their opening quote at column 11.
     #[cfg(test)]
-    pub(crate) fn render(&self) -> Result<[u8; CARD_SIZE]> {
+    fn render(&self) -> Result<[u8; CARD_SIZE]> {
         self.validate_contents()?;
         self.render_one()
     }
@@ -228,7 +228,7 @@ impl Card {
         Ok(())
     }
 
-    pub(crate) fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         self.render_into(&mut Vec::new())
     }
 
@@ -392,7 +392,7 @@ fn parse_real(token: &str) -> Option<f64> {
     parsed.ok().filter(|v| v.is_finite())
 }
 
-pub(crate) fn validate_keyword(name: &str) -> Result<()> {
+pub(super) fn validate_keyword(name: &str) -> Result<()> {
     let ok = name.len() <= 8
         && !name.is_empty()
         && name
@@ -407,7 +407,7 @@ pub(crate) fn validate_keyword(name: &str) -> Result<()> {
     }
 }
 
-pub(crate) fn validate_valued_keyword(name: &str) -> Result<()> {
+pub(super) fn validate_valued_keyword(name: &str) -> Result<()> {
     validate_keyword(name)?;
     if matches!(name, "END" | "CONTINUE" | "COMMENT" | "HISTORY") {
         Err(FitsError::ReservedKeyword {

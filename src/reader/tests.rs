@@ -1097,7 +1097,7 @@ fn plain_image_section_streams_exact_strided_runs() {
 fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
     use crate::compress::{Compression, CompressionOptions};
     use crate::reader::source::SliceSource;
-    use crate::reader::source::test_support::CountingSource;
+    use crate::reader::source::internals::CountingSource;
 
     let count = 9usize * 7;
     let mut f32_values: Vec<f32> = (0..count).map(|index| index as f32 * 0.5).collect();
@@ -1455,7 +1455,7 @@ fn malformed_pq_descriptors_match_across_table_read_paths() {
         let slot = usize::try_from(base_reader.hdus[1].data_offset).unwrap()
             + schema.columns[0].byte_offset;
 
-        for case in descriptor::test_support::malformed_descriptor_cases()
+        for case in descriptor::internals::malformed_descriptor_cases()
             .into_iter()
             .filter(|case| case.wide == wide)
         {

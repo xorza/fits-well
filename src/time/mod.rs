@@ -711,7 +711,7 @@ impl FitsTime {
 
 /// A time-related WCS axis type (§9.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimeAxisKind {
+enum TimeAxisKind {
     /// `'TIME'` or a time-scale name — an absolute time axis (→ MJD).
     Time,
     /// `'PHASE'` — phase folded on a period (`CPERIia`, zero `CZPHSia`).
@@ -724,7 +724,7 @@ pub enum TimeAxisKind {
 
 impl TimeAxisKind {
     /// Classify a `CTYPE` as a time-related axis (§9.6), or `None` if it is not one.
-    pub fn from_ctype(ctype: &str) -> Option<TimeAxisKind> {
+    fn from_ctype(ctype: &str) -> Option<TimeAxisKind> {
         let head = ctype.split('-').next().unwrap_or("").trim();
         if head.eq_ignore_ascii_case("TIME") {
             return Some(TimeAxisKind::Time);

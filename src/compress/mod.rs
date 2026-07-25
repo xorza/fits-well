@@ -46,7 +46,7 @@ pub enum DitherMethod {
 
 impl DitherMethod {
     /// Whether this method applies a per-pixel dither (everything but `None`).
-    pub(crate) fn dithered(self) -> bool {
+    fn dithered(self) -> bool {
         !matches!(self, DitherMethod::None)
     }
 }
@@ -54,8 +54,8 @@ impl DitherMethod {
 /// Validated GZIP configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Gzip {
-    pub(crate) shuffle: bool,
-    pub(crate) level: u32,
+    shuffle: bool,
+    level: u32,
 }
 
 impl Gzip {
@@ -91,7 +91,7 @@ impl Default for Gzip {
 /// Validated HCOMPRESS configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Hcompress {
-    pub(crate) scale: f64,
+    scale: f64,
 }
 
 impl Hcompress {
@@ -131,9 +131,9 @@ impl Compression {
 
 /// Float quantization shared by the lossless integer codecs.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Quantization {
-    pub(crate) level: f64,
-    pub(crate) dither: DitherMethod,
+struct Quantization {
+    level: f64,
+    dither: DitherMethod,
 }
 
 impl Default for Quantization {
@@ -149,8 +149,8 @@ impl Default for Quantization {
 #[derive(Debug, Clone, Default)]
 pub struct CompressionOptions {
     /// Tile shape, fastest axis first. Empty means one tile per row.
-    pub(crate) tile_shape: Vec<usize>,
-    pub(crate) quantization: Quantization,
+    tile_shape: Vec<usize>,
+    quantization: Quantization,
 }
 
 impl CompressionOptions {
@@ -179,7 +179,7 @@ impl CompressionOptions {
 /// The tiled-image codec selected by `ZCMPTYPE`, parsed once from the keyword string
 /// then matched exhaustively — the image-path counterpart to the table path's `Algo`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ImageCodec {
+enum ImageCodec {
     Gzip1,
     Gzip2,
     Rice1,
@@ -188,7 +188,7 @@ pub(crate) enum ImageCodec {
     NoCompress,
 }
 
-pub(crate) fn parameter_index(keyword: &str) -> Option<usize> {
+fn parameter_index(keyword: &str) -> Option<usize> {
     let suffix = keyword.strip_prefix("ZNAME")?;
     if suffix.is_empty()
         || suffix.starts_with('0')
@@ -221,7 +221,7 @@ impl ImageCodec {
 }
 
 impl Compression {
-    pub(crate) fn image_codec(self) -> ImageCodec {
+    fn image_codec(self) -> ImageCodec {
         match self {
             Compression::Gzip(config) if config.shuffle => ImageCodec::Gzip2,
             Compression::Gzip(_) => ImageCodec::Gzip1,
@@ -244,14 +244,14 @@ impl Compression {
         }
     }
 
-    pub(crate) fn gzip_level(self) -> u32 {
+    fn gzip_level(self) -> u32 {
         match self {
             Compression::Gzip(config) => config.level,
             _ => gzip::DEFAULT_GZIP_LEVEL,
         }
     }
 
-    pub(crate) fn hcompress_scale(self) -> f64 {
+    fn hcompress_scale(self) -> f64 {
         match self {
             Compression::Hcompress(config) => config.scale,
             _ => 0.0,
@@ -278,7 +278,7 @@ fn needs_wide(heap_len: usize, max_nelem: usize) -> bool {
 /// slices; heap concatenation stays serial, while image scatter may partition the
 /// destination into disjoint rows.
 #[cfg(feature = "parallel")]
-pub(crate) fn map_tiles<S, T, I, F>(ntiles: usize, init: I, f: F) -> Result<Vec<T>>
+fn map_tiles<S, T, I, F>(ntiles: usize, init: I, f: F) -> Result<Vec<T>>
 where
     S: Send,
     T: Send,
@@ -293,7 +293,7 @@ where
 }
 
 #[cfg(not(feature = "parallel"))]
-pub(crate) fn map_tiles<S, T, I, F>(ntiles: usize, init: I, f: F) -> Result<Vec<T>>
+fn map_tiles<S, T, I, F>(ntiles: usize, init: I, f: F) -> Result<Vec<T>>
 where
     I: FnOnce() -> S,
     F: Fn(&mut S, usize) -> Result<T>,

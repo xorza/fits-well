@@ -40,7 +40,7 @@ fn decodes_signed_boundaries_and_rejects_malformed_widths() {
         PqDescriptor::EMPTY
     );
 
-    for case in descriptor::test_support::malformed_descriptor_cases() {
+    for case in descriptor::internals::malformed_descriptor_cases() {
         case.assert_error(PqDescriptor::decode(&case.bytes, case.wide).unwrap_err());
     }
     for (bytes, wide, expected) in [(&[0u8; 7][..], false, 8), (&[0u8; 15], true, 16)] {

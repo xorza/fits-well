@@ -152,7 +152,7 @@ impl ImageData {
     /// precisely the FITS unsigned convention (`BSCALE == 1`, no `BLANK`, and
     /// `BZERO` the matching sign-bit offset); `None` otherwise. Exact for all 64-bit
     /// values (no `f64` rounding). Shared by [`Image::unsigned`]/[`ReadImage::unsigned`].
-    pub(crate) fn unsigned(&self, scaling: &Scaling) -> Option<UnsignedData> {
+    fn unsigned(&self, scaling: &Scaling) -> Option<UnsignedData> {
         // `BLANK` marks null samples that have no exact integer value, so an unsigned
         // view can't represent them; `SampleType` deliberately ignores `BLANK`, so
         // guard it here. The `BSCALE`/`BZERO`-offset convention itself is resolved
@@ -626,16 +626,16 @@ pub enum UnsignedData {
 impl UnsignedData {
     /// Recover already-decoded image values from sign-bit-offset storage (the
     /// §5.2.5 / Table 19 convention) by flipping the sign bit.
-    pub(crate) fn from_signed_byte(stored: &[u8]) -> UnsignedData {
+    fn from_signed_byte(stored: &[u8]) -> UnsignedData {
         UnsignedData::I8(stored.iter().map(|&x| (x ^ 0x80) as i8).collect())
     }
-    pub(crate) fn from_offset_i16(stored: &[i16]) -> UnsignedData {
+    fn from_offset_i16(stored: &[i16]) -> UnsignedData {
         UnsignedData::U16(stored.iter().map(|&x| (x as u16) ^ 0x8000).collect())
     }
-    pub(crate) fn from_offset_i32(stored: &[i32]) -> UnsignedData {
+    fn from_offset_i32(stored: &[i32]) -> UnsignedData {
         UnsignedData::U32(stored.iter().map(|&x| (x as u32) ^ 0x8000_0000).collect())
     }
-    pub(crate) fn from_offset_i64(stored: &[i64]) -> UnsignedData {
+    fn from_offset_i64(stored: &[i64]) -> UnsignedData {
         UnsignedData::U64(
             stored
                 .iter()
