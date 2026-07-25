@@ -53,7 +53,7 @@ impl Parameters {
     }
 }
 
-pub(crate) fn deproject(
+pub(super) fn deproject(
     projection: Projection,
     x: f64,
     y: f64,
@@ -97,7 +97,7 @@ pub(crate) fn deproject(
     projection.native_coordinate(phi, theta)
 }
 
-pub(crate) fn project(
+pub(super) fn project(
     projection: Projection,
     phi: f64,
     theta: f64,

@@ -59,7 +59,7 @@ pub struct Hdu {
     pub header: Header,
     pub kind: HduKind,
     /// One's-complement sum of the exact block-padded header bytes as read.
-    pub(crate) header_sum: u32,
+    header_sum: u32,
     /// Byte offset of the data unit from the start of the source.
     pub(crate) data_offset: u64,
     /// Unpadded data length (`Nbits / 8`) — where the meaningful data ends within

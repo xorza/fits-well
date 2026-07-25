@@ -11,7 +11,7 @@ pub(crate) struct PqDescriptor {
 }
 
 impl PqDescriptor {
-    pub(crate) const EMPTY: PqDescriptor = PqDescriptor {
+    pub(super) const EMPTY: PqDescriptor = PqDescriptor {
         count: 0,
         offset: 0,
     };
@@ -64,7 +64,7 @@ impl PqDescriptor {
     }
 }
 
-pub(crate) fn payload_len(element_kind: TformKind, count: usize) -> Result<usize> {
+pub(super) fn payload_len(element_kind: TformKind, count: usize) -> Result<usize> {
     if element_kind == TformKind::Bit {
         Ok(count.div_ceil(8))
     } else {
@@ -82,7 +82,7 @@ fn nonnegative_field(field: &'static str, value: i64) -> Result<usize> {
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
+pub(crate) mod internals {
     use crate::error::FitsError;
 
     #[derive(Debug)]

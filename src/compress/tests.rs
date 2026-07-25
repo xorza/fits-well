@@ -1191,7 +1191,7 @@ fn zblank_column_overrides_keyword_per_tile() {
         (3, "ZBLANK", TformKind::F32),
     ] {
         let mut malformed = table.clone();
-        crate::table_impl::test_support::set_column_kind(&mut malformed, column, kind);
+        crate::table_impl::internals::set_column_kind(&mut malformed, column, kind);
         assert!(matches!(
             decode::decompress_image(&h, &malformed),
             Err(FitsError::TypeMismatch { name: actual, .. }) if actual == name
@@ -1584,7 +1584,7 @@ fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
         let mut combined = Vec::new();
         gzip::gunzip_into(&encoded[stream_range], combined_len, &mut combined).unwrap();
 
-        for case in descriptor::test_support::malformed_descriptor_cases()
+        for case in descriptor::internals::malformed_descriptor_cases()
             .into_iter()
             .filter(|case| case.wide == wide)
         {

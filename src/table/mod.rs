@@ -1215,7 +1215,7 @@ pub(crate) fn decode_vla_cell(
 }
 
 #[cfg(all(test, feature = "compression"))]
-pub(crate) mod test_support {
+pub(crate) mod internals {
     use crate::table_impl::{BinTable, TformKind};
 
     pub(crate) fn set_column_kind(table: &mut BinTable, column: usize, kind: TformKind) {

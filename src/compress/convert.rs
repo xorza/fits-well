@@ -13,14 +13,14 @@ use crate::table_impl::VlaCell;
 
 /// Append `src` widened to `i64` to `out` — the repeated integer-widening arm of the
 /// gather/cell helpers (`T` is one of `u8`/`i16`/`i32`/`i64`, all lossless to `i64`).
-pub(crate) fn widen_i64<T: Copy + Into<i64>>(src: &[T], out: &mut Vec<i64>) {
+fn widen_i64<T: Copy + Into<i64>>(src: &[T], out: &mut Vec<i64>) {
     out.extend(src.iter().map(|&x| x.into()));
 }
 
 /// Gather a tile's integer pixels straight from the typed source into `out`,
 /// widening to `i64` — so integer encoding never materializes a whole-image `i64`
 /// buffer. Float sources yield nothing (they take the quantized float path).
-pub(crate) fn gather_i64(
+pub(super) fn gather_i64(
     samples: &ImageData,
     row_bases: &[usize],
     row_len: usize,
@@ -56,7 +56,7 @@ pub(crate) fn gather_i64(
 /// Gather a tile's float pixels straight from the typed source into `out`,
 /// widening to `f64` — so float encoding never materializes a whole-image `f64`
 /// buffer. Integer sources yield nothing (they take the integer path).
-pub(crate) fn gather_f64(
+pub(super) fn gather_f64(
     samples: &ImageData,
     row_bases: &[usize],
     row_len: usize,
@@ -86,7 +86,7 @@ pub(crate) fn gather_f64(
 /// single pass (no intermediate narrowed `Vec`). `out` is cleared first, so it can
 /// be a reused scratch buffer. Grows once then writes each `N`-byte slot, the
 /// vectorizable shape `extend_be` uses.
-pub(crate) fn i64_to_be_into(vals: &[i64], bitpix: Bitpix, out: &mut Vec<u8>) {
+pub(super) fn i64_to_be_into(vals: &[i64], bitpix: Bitpix, out: &mut Vec<u8>) {
     debug_assert!(!bitpix.is_float(), "i64_to_be_into on a float bitpix");
     out.clear();
     out.resize(vals.len() * bitpix.elem_size(), 0);
@@ -117,20 +117,20 @@ pub(crate) fn i64_to_be_into(vals: &[i64], bitpix: Bitpix, out: &mut Vec<u8>) {
 
 /// Owning form of [`i64_to_be_into`], for the few sites that keep the bytes (the
 /// `NOCOMPRESS` cell is stored verbatim, so it can't share the reused scratch).
-pub(crate) fn i64_to_be(vals: &[i64], bitpix: Bitpix) -> Vec<u8> {
+pub(super) fn i64_to_be(vals: &[i64], bitpix: Bitpix) -> Vec<u8> {
     let mut out = Vec::new();
     i64_to_be_into(vals, bitpix, &mut out);
     out
 }
 
 /// Pack native-width quantized integers directly into reusable big-endian storage.
-pub(crate) fn i32_to_be_into(vals: &[i32], out: &mut Vec<u8>) {
+pub(super) fn i32_to_be_into(vals: &[i32], out: &mut Vec<u8>) {
     out.clear();
     endian::extend_be(out, vals, i32::to_be_bytes);
 }
 
 /// Encode `f64` values as big-endian `bitpix`-width floats into reusable storage.
-pub(crate) fn float_to_be_into(vals: &[f64], bitpix: Bitpix, out: &mut Vec<u8>) {
+pub(super) fn float_to_be_into(vals: &[f64], bitpix: Bitpix, out: &mut Vec<u8>) {
     out.clear();
     match bitpix {
         Bitpix::F32 => endian::extend_be(out, vals, |value| (value as f32).to_be_bytes()),
@@ -142,7 +142,7 @@ pub(crate) fn float_to_be_into(vals: &[f64], bitpix: Bitpix, out: &mut Vec<u8>) 
 /// Decode a big-endian buffer of `bitpix` integers into widened `i64` values in `out`
 /// (cleared first). Single pass — no intermediate narrowed `Vec`; the
 /// `from_be_bytes` + `as i64` closure inlines and vectorizes like `decode_be`.
-pub(crate) fn be_to_i64_into(bytes: &[u8], bitpix: Bitpix, out: &mut Vec<i64>) {
+pub(super) fn be_to_i64_into(bytes: &[u8], bitpix: Bitpix, out: &mut Vec<i64>) {
     debug_assert!(!bitpix.is_float(), "be_to_i64_into on a float bitpix");
     out.clear();
     match bitpix {
@@ -168,7 +168,7 @@ pub(crate) fn be_to_i64_into(bytes: &[u8], bitpix: Bitpix, out: &mut Vec<i64>) {
 
 /// Decode a big-endian buffer of `bitpix` floats into `f64` in `out`, widening in one
 /// pass.
-pub(crate) fn be_floats_into(bytes: &[u8], bitpix: Bitpix, out: &mut Vec<f64>) {
+pub(super) fn be_floats_into(bytes: &[u8], bitpix: Bitpix, out: &mut Vec<f64>) {
     out.clear();
     match bitpix {
         Bitpix::F32 => out.extend(
@@ -185,7 +185,7 @@ pub(crate) fn be_floats_into(bytes: &[u8], bitpix: Bitpix, out: &mut Vec<f64>) {
     }
 }
 
-pub(crate) fn cell_to_i64_into(cell: VlaCell<'_>, out: &mut Vec<i64>) {
+pub(super) fn cell_to_i64_into(cell: VlaCell<'_>, out: &mut Vec<i64>) {
     match cell.element_type {
         TformKind::Byte => be_to_i64_into(cell.bytes, Bitpix::U8, out),
         TformKind::I16 => be_to_i64_into(cell.bytes, Bitpix::I16, out),
@@ -195,7 +195,7 @@ pub(crate) fn cell_to_i64_into(cell: VlaCell<'_>, out: &mut Vec<i64>) {
     }
 }
 
-pub(crate) fn cell_to_f64_into(cell: VlaCell<'_>, zbitpix: Bitpix, out: &mut Vec<f64>) {
+pub(super) fn cell_to_f64_into(cell: VlaCell<'_>, zbitpix: Bitpix, out: &mut Vec<f64>) {
     match cell.element_type {
         TformKind::F32 => be_floats_into(cell.bytes, Bitpix::F32, out),
         TformKind::F64 => be_floats_into(cell.bytes, Bitpix::F64, out),
@@ -204,7 +204,7 @@ pub(crate) fn cell_to_f64_into(cell: VlaCell<'_>, zbitpix: Bitpix, out: &mut Vec
     }
 }
 
-pub(crate) fn byte_cell<'a>(cell: VlaCell<'a>) -> Result<&'a [u8]> {
+pub(super) fn byte_cell<'a>(cell: VlaCell<'a>) -> Result<&'a [u8]> {
     match cell.element_type {
         TformKind::Byte => Ok(cell.bytes),
         _ => Err(FitsError::UnsupportedCompression {
@@ -213,7 +213,7 @@ pub(crate) fn byte_cell<'a>(cell: VlaCell<'a>) -> Result<&'a [u8]> {
     }
 }
 
-pub(crate) fn plio_cell<'a>(cell: VlaCell<'a>) -> Result<&'a [u8]> {
+pub(super) fn plio_cell<'a>(cell: VlaCell<'a>) -> Result<&'a [u8]> {
     (cell.element_type == TformKind::I16)
         .then_some(cell.bytes)
         .ok_or_else(|| FitsError::UnsupportedCompression {
@@ -221,7 +221,7 @@ pub(crate) fn plio_cell<'a>(cell: VlaCell<'a>) -> Result<&'a [u8]> {
         })
 }
 
-pub(crate) fn bytepix_to_bitpix(bytepix: usize) -> Bitpix {
+pub(super) fn bytepix_to_bitpix(bytepix: usize) -> Bitpix {
     match bytepix {
         1 => Bitpix::U8,
         2 => Bitpix::I16,
@@ -234,7 +234,7 @@ pub(crate) fn bytepix_to_bitpix(bytepix: usize) -> Bitpix {
 /// per-tile buffers before scattering, so there is no whole-image `i64` or `f64`
 /// intermediate. `len` comes from untrusted dimension keywords, so allocation is
 /// fallible.
-pub(crate) fn zeroed_samples(bitpix: Bitpix, len: usize) -> Result<ImageData> {
+pub(super) fn zeroed_samples(bitpix: Bitpix, len: usize) -> Result<ImageData> {
     Ok(match bitpix {
         Bitpix::U8 => ImageData::U8(allocation::try_zeroed(0u8, len)?),
         Bitpix::I16 => ImageData::I16(allocation::try_zeroed(0i16, len)?),

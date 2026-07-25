@@ -8,14 +8,14 @@ use crate::keyword::key;
 
 /// Rice block size and pixel width, from the `ZNAMEi`/`ZVALi` parameters.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RiceParams {
-    pub blocksize: usize,
-    pub bytepix: usize,
+pub(super) struct RiceParams {
+    pub(super) blocksize: usize,
+    pub(super) bytepix: usize,
 }
 
 /// Rice parameters from the `ZNAMEi`/`ZVALi` keywords, with the Table 37 defaults
 /// of 32 pixels per block and four bytes per encoded integer.
-pub(crate) fn rice_params(header: &Header) -> Result<RiceParams> {
+pub(super) fn rice_params(header: &Header) -> Result<RiceParams> {
     let mut blocksize = 32;
     let mut bytepix = 4;
     for entry in header.iter() {
@@ -51,7 +51,7 @@ fn permitted_parameter(value: i64, permitted: &[usize]) -> Result<usize> {
 
 /// Decode a `RICE_1` tile of `nx` integer values into `out` (cleared first; a reused
 /// buffer, so steady-state decode allocates nothing).
-pub(crate) fn rice_decode_into(
+pub(super) fn rice_decode_into(
     bytes: &[u8],
     nx: usize,
     bytepix: usize,
@@ -118,7 +118,7 @@ fn sign_extend(v: u64, nbits: u32) -> i64 {
 /// Encode `values` as a `RICE_1` tile (a port of cfitsio's `fits_rcomp`),
 /// parameterized by `bytepix` (1/2/4/8). Differences are taken modulo the pixel
 /// width so the stream round-trips through [`rice_decode_into`].
-pub(crate) fn rice_encode<T: Copy + Into<i64>>(
+pub(super) fn rice_encode<T: Copy + Into<i64>>(
     values: &[T],
     bytepix: usize,
     blocksize: usize,
@@ -201,7 +201,7 @@ pub(crate) fn rice_encode<T: Copy + Into<i64>>(
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct RiceScratch {
+pub(super) struct RiceScratch {
     diffs: Vec<u64>,
 }
 
@@ -251,7 +251,7 @@ impl BitOutput {
 
 /// A MSB-first bit reader over a compressed byte stream.
 #[derive(Debug)]
-pub(crate) struct BitReader<'a> {
+struct BitReader<'a> {
     bytes: &'a [u8],
     pos: usize,
     acc: u64,
@@ -259,7 +259,7 @@ pub(crate) struct BitReader<'a> {
 }
 
 impl<'a> BitReader<'a> {
-    pub(crate) fn new(bytes: &'a [u8]) -> Self {
+    fn new(bytes: &'a [u8]) -> Self {
         BitReader {
             bytes,
             pos: 0,
@@ -269,7 +269,7 @@ impl<'a> BitReader<'a> {
     }
 
     /// Read `n` bits (MSB-first, `n ≤ 64`).
-    pub(crate) fn read(&mut self, n: u32) -> Result<u64> {
+    fn read(&mut self, n: u32) -> Result<u64> {
         if n > 64 {
             return Err(FitsError::UnsupportedCompression {
                 name: format!("Rice bit field is {n} bits"),
@@ -327,7 +327,7 @@ impl<'a> BitReader<'a> {
     ///
     /// Scans the zero run a whole word at a time via `leading_zeros` rather than one
     /// `read(1)` per bit — the unary quotient decode is the hot path of Rice decode.
-    pub(crate) fn read_zeros(&mut self) -> Result<u64> {
+    fn read_zeros(&mut self) -> Result<u64> {
         let mut z = 0u64;
         loop {
             if self.nbits == 0 {

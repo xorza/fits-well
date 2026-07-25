@@ -16,24 +16,24 @@ use crate::compress::convert::be_to_i64_into;
 /// speed (gzip was the slowest compress path at the higher default); construct
 /// [`crate::image::Gzip::new`] or [`crate::image::Gzip::shuffled`] with a higher level for a
 /// tighter ratio.
-pub(crate) const DEFAULT_GZIP_LEVEL: u32 = 1;
+pub(super) const DEFAULT_GZIP_LEVEL: u32 = 1;
 
 #[derive(Debug, Default)]
-pub(crate) struct GzipScratch {
-    pub(crate) bytes: Vec<u8>,
+pub(super) struct GzipScratch {
+    pub(super) bytes: Vec<u8>,
     reordered: Vec<u8>,
 }
 
 /// Gzip a raw big-endian byte buffer at deflate `level` (0–9; the `GZIP_1` tile
 /// encoder). The level is lossless — only the speed↔ratio tradeoff changes.
-pub(crate) fn gzip_encode(raw: &[u8], level: u32) -> Vec<u8> {
+pub(super) fn gzip_encode(raw: &[u8], level: u32) -> Vec<u8> {
     let mut enc = GzEncoder::new(Vec::new(), Compression::new(level));
     enc.write_all(raw).expect("gzip into a Vec cannot fail");
     enc.finish().expect("gzip finish into a Vec cannot fail")
 }
 
 /// `GZIP_2` encoder: shuffle `raw` into significance byte-planes, then gzip at `level`.
-pub(crate) fn gzip2_encode(
+pub(super) fn gzip2_encode(
     raw: &[u8],
     width: usize,
     level: u32,
@@ -48,7 +48,7 @@ pub(crate) fn gzip2_encode(
 
 /// Shuffle `raw` into `width`-byte significance planes (all byte-0s, then all
 /// byte-1s, …) — the `GZIP_2` pre-pass. `width ≤ 1` is a no-op.
-pub(crate) fn shuffle_bytes_into(raw: &[u8], width: usize, out: &mut Vec<u8>) {
+pub(super) fn shuffle_bytes_into(raw: &[u8], width: usize, out: &mut Vec<u8>) {
     out.clear();
     out.resize(raw.len(), 0);
     if width <= 1 {
@@ -64,7 +64,7 @@ pub(crate) fn shuffle_bytes_into(raw: &[u8], width: usize, out: &mut Vec<u8>) {
 }
 
 /// Inverse of [`shuffle_bytes_into`]: gather significance planes back into elements.
-pub(crate) fn unshuffle_bytes_into(shuffled: &[u8], width: usize, out: &mut Vec<u8>) {
+pub(super) fn unshuffle_bytes_into(shuffled: &[u8], width: usize, out: &mut Vec<u8>) {
     out.clear();
     out.resize(shuffled.len(), 0);
     if width <= 1 {
@@ -81,7 +81,7 @@ pub(crate) fn unshuffle_bytes_into(shuffled: &[u8], width: usize, out: &mut Vec<
 
 /// Inflate a gzip stream to its exact declared size. Reading one byte past the
 /// expected size detects expansion bombs without allowing an unbounded allocation.
-pub(crate) fn gunzip_into(bytes: &[u8], expected: usize, out: &mut Vec<u8>) -> Result<()> {
+pub(super) fn gunzip_into(bytes: &[u8], expected: usize, out: &mut Vec<u8>) -> Result<()> {
     out.clear();
     GzDecoder::new(bytes)
         .take(expected.saturating_add(1) as u64)
@@ -100,7 +100,7 @@ pub(crate) fn gunzip_into(bytes: &[u8], expected: usize, out: &mut Vec<u8>) -> R
     Ok(())
 }
 
-pub(crate) fn gunzip2_into(
+pub(super) fn gunzip2_into(
     bytes: &[u8],
     expected: usize,
     width: usize,
@@ -118,7 +118,7 @@ pub(crate) fn gunzip2_into(
 /// `GZIP_1`: inflate to the tile's big-endian byte stream, then decode per `bitpix`
 /// into `out` (a reused buffer). The tile holds `tile_elems` values, bounding the
 /// inflated size at `tile_elems × bitpix` bytes.
-pub(crate) fn gzip_tile_into(
+pub(super) fn gzip_tile_into(
     bytes: &[u8],
     bitpix: Bitpix,
     tile_elems: usize,
@@ -136,7 +136,7 @@ pub(crate) fn gzip_tile_into(
 
 /// `GZIP_2`: like `GZIP_1` but the bytes are shuffled into significance planes
 /// (all most-significant bytes first, …) before gzip. Inflate, then un-shuffle.
-pub(crate) fn gzip2_tile_into(
+pub(super) fn gzip2_tile_into(
     bytes: &[u8],
     bitpix: Bitpix,
     tile_elems: usize,

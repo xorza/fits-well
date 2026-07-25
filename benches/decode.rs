@@ -97,14 +97,22 @@ fn encode(c: &mut Criterion) {
 }
 
 /// `physical` — the `BZERO + BSCALE·x` scaling plane, with and without a `BLANK`
-/// sentinel (the data-dependent branch). Output is always `f64`, so size by the
-/// f64 output (≈ [`UNIT_BYTES`], past cache) and report per element — the work is
-/// one scaled value per pixel regardless of the stored width.
+/// sentinel for integer storage (the data-dependent branch). Output is always
+/// `f64`, so size by the f64 output (≈ [`UNIT_BYTES`], past cache) and report per
+/// element — the work is one scaled value per pixel regardless of the stored width.
 fn physical(c: &mut Criterion) {
+    const FLOAT_CASES: &[(&str, Option<i64>)] = &[("plain", None)];
+    const INTEGER_CASES: &[(&str, Option<i64>)] = &[("plain", None), ("blank", Some(7i64))];
+
     let n = UNIT_BYTES / 8;
     let mut g = c.benchmark_group("physical");
     for &(name, bitpix) in TYPES {
-        for (label, blank) in [("plain", None), ("blank", Some(7i64))] {
+        let cases = if bitpix.is_integer() {
+            INTEGER_CASES
+        } else {
+            FLOAT_CASES
+        };
+        for &(label, blank) in cases {
             let img = Image::new_scaled(
                 vec![n],
                 sample_data(bitpix, n),

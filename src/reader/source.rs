@@ -95,12 +95,12 @@ pub struct StreamSource<R> {
 impl<R: Read + Seek> StreamSource<R> {
     /// Capture the source length once (a single seek to the end), so later reads
     /// bounds-check without re-seeking.
-    pub(crate) fn new(mut inner: R) -> Result<StreamSource<R>> {
+    pub(super) fn new(mut inner: R) -> Result<StreamSource<R>> {
         let len = inner.seek(SeekFrom::End(0))?;
         Ok(StreamSource { inner, len })
     }
 
-    pub(crate) fn into_inner(self) -> R {
+    pub(super) fn into_inner(self) -> R {
         self.inner
     }
 }
@@ -143,11 +143,11 @@ pub struct SliceSource<'a> {
 }
 
 impl<'a> SliceSource<'a> {
-    pub(crate) fn new(bytes: &'a [u8]) -> SliceSource<'a> {
+    pub(super) fn new(bytes: &'a [u8]) -> SliceSource<'a> {
         SliceSource { bytes }
     }
 
-    pub(crate) fn into_bytes(self) -> &'a [u8] {
+    pub(super) fn into_bytes(self) -> &'a [u8] {
         self.bytes
     }
 }
@@ -182,7 +182,7 @@ pub struct MmapSource {
 
 #[cfg(feature = "mmap")]
 impl MmapSource {
-    pub(crate) fn open(path: &std::path::Path) -> Result<MmapSource> {
+    pub(super) fn open(path: &std::path::Path) -> Result<MmapSource> {
         let file = File::open(path)?;
         // SAFETY: standard mmap contract — the mapping is read-only and owned here
         // (no mutable view is ever handed out). The one inherent caveat is that an
@@ -214,7 +214,7 @@ impl Source for MmapSource {
 }
 
 #[cfg(all(test, feature = "compression"))]
-pub(crate) mod test_support {
+pub(crate) mod internals {
     use std::cell::Cell;
     use std::rc::Rc;
 

@@ -16,7 +16,7 @@ use crate::error::Result;
 const MAGIC: [u8; 2] = [0xDD, 0x99];
 
 #[derive(Debug, Default)]
-pub(crate) struct HcompressScratch {
+pub(super) struct HcompressScratch {
     plane: Vec<i64>,
     transform: Vec<i64>,
     rows: Vec<i64>,
@@ -28,7 +28,7 @@ pub(crate) struct HcompressScratch {
 /// Decode an `HCOMPRESS_1` tile into row-major integer values (`ny` fastest, the
 /// FITS axis-1 order the orchestrator expects), appended to `out` (cleared first; a
 /// reused buffer). Transform and quadtree storage come from the worker scratch.
-pub(crate) fn hcompress_tile_into(
+pub(super) fn hcompress_tile_into(
     bytes: &[u8],
     smooth: bool,
     tile_elems: usize,
@@ -44,7 +44,7 @@ pub(crate) fn hcompress_tile_into(
 /// Encode one tile (`vals` in `ny`-fastest order, `tdims[0]` = ny = FITS axis-1)
 /// as an `HCOMPRESS_1` byte stream. `scale = 0` is lossless. The result decodes
 /// back through [`hcompress_tile_into`] to the original values.
-pub(crate) fn hcompress_tile_encode(
+pub(super) fn hcompress_tile_encode(
     vals: &[i64],
     tdims: &[usize],
     scale: i32,

@@ -7,7 +7,7 @@ const SPEED_OF_LIGHT: f64 = 2.997_924_58e8;
 const PLANCK_CONSTANT: f64 = 6.626_075_5e-34;
 
 #[derive(Debug, Clone)]
-pub(crate) enum AxisTransform {
+pub(super) enum AxisTransform {
     Linear,
     Logarithmic,
     Spectral(SpectralTransform),
@@ -15,35 +15,35 @@ pub(crate) enum AxisTransform {
 }
 
 #[derive(Debug)]
-pub(crate) struct AxisTransformSpec {
-    pub(crate) transform: AxisTransform,
-    pub(crate) unit_scale: f64,
+pub(super) struct AxisTransformSpec {
+    pub(super) transform: AxisTransform,
+    pub(super) unit_scale: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SpectralParameters {
+pub(super) struct SpectralParameters {
     values: [Option<f64>; 7],
 }
 
 impl SpectralParameters {
-    pub(crate) fn new(values: [Option<f64>; 7]) -> SpectralParameters {
+    pub(super) fn new(values: [Option<f64>; 7]) -> SpectralParameters {
         SpectralParameters { values }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SpectralRest {
-    pub(crate) frequency: Option<f64>,
-    pub(crate) wavelength: Option<f64>,
+pub(super) struct SpectralRest {
+    pub(super) frequency: Option<f64>,
+    pub(super) wavelength: Option<f64>,
 }
 
 impl SpectralRest {
-    pub(crate) const NONE: SpectralRest = SpectralRest {
+    pub(super) const NONE: SpectralRest = SpectralRest {
         frequency: None,
         wavelength: None,
     };
 
-    pub(crate) fn new(frequency: Option<f64>, wavelength: Option<f64>) -> Result<SpectralRest> {
+    pub(super) fn new(frequency: Option<f64>, wavelength: Option<f64>) -> Result<SpectralRest> {
         for (name, value) in [("RESTFRQ", frequency), ("RESTWAV", wavelength)] {
             if value.is_some_and(|value| !value.is_finite() || value <= 0.0) {
                 return Err(FitsError::InvalidValue {
@@ -91,7 +91,7 @@ impl SpectralRest {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SpectralTransform {
+pub(super) struct SpectralTransform {
     kind: SpectralKind,
     sampled: Characteristic,
     rest: ResolvedRest,
@@ -291,7 +291,7 @@ impl Grism {
 }
 
 impl AxisTransform {
-    pub(crate) fn parse(
+    pub(super) fn parse(
         ctype: &str,
         cunit: &str,
         reference: f64,
@@ -362,7 +362,7 @@ impl AxisTransform {
         })
     }
 
-    pub(crate) fn to_world(&self, intermediate: f64, reference: f64, axis: usize) -> Result<f64> {
+    pub(super) fn to_world(&self, intermediate: f64, reference: f64, axis: usize) -> Result<f64> {
         match self {
             AxisTransform::Linear => Ok(reference + intermediate),
             AxisTransform::Logarithmic => finite(reference * (intermediate / reference).exp())
@@ -374,7 +374,7 @@ impl AxisTransform {
         }
     }
 
-    pub(crate) fn to_intermediate(&self, world: f64, reference: f64, axis: usize) -> Result<f64> {
+    pub(super) fn to_intermediate(&self, world: f64, reference: f64, axis: usize) -> Result<f64> {
         match self {
             AxisTransform::Linear => Ok(world - reference),
             AxisTransform::Logarithmic if world.is_finite() && world > 0.0 => {
@@ -389,11 +389,11 @@ impl AxisTransform {
     }
 }
 
-pub(crate) fn is_spectral_type(ctype: &str) -> bool {
+pub(super) fn is_spectral_type(ctype: &str) -> bool {
     SpectralKind::from_code(CTypeParts::parse(ctype).head).is_some()
 }
 
-pub(crate) fn spectral_unit_scale(ctype: &str, cunit: &str) -> Result<Option<f64>> {
+pub(super) fn spectral_unit_scale(ctype: &str, cunit: &str) -> Result<Option<f64>> {
     SpectralKind::from_code(CTypeParts::parse(ctype).head)
         .map(|kind| kind.unit_scale(cunit))
         .transpose()

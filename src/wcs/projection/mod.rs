@@ -59,7 +59,7 @@ const PROJECTIONS: &[(&str, Projection, Family)] = &[
 ];
 
 impl Projection {
-    pub(crate) fn from_code(code: &str) -> Option<Projection> {
+    pub(super) fn from_code(code: &str) -> Option<Projection> {
         PROJECTIONS
             .iter()
             .find(|&&(c, ..)| c == code)
@@ -75,11 +75,11 @@ impl Projection {
             .expect("every Projection variant is listed in PROJECTIONS")
     }
 
-    pub(crate) fn is_conic(self) -> bool {
+    pub(super) fn is_conic(self) -> bool {
         self.family() == Family::Conic
     }
 
-    pub(crate) fn code(self) -> &'static str {
+    pub(super) fn code(self) -> &'static str {
         PROJECTIONS
             .iter()
             .find(|&&(_, projection, _)| projection == self)
@@ -87,7 +87,7 @@ impl Projection {
             .expect("every Projection variant is listed in PROJECTIONS")
     }
 
-    pub(crate) fn parameter_defaults(self) -> [f64; 21] {
+    pub(super) fn parameter_defaults(self) -> [f64; 21] {
         let mut pv = [0.0; 21];
         match self {
             Projection::Air => pv[1] = 90.0,
@@ -106,7 +106,7 @@ impl Projection {
         pv
     }
 
-    pub(crate) fn validate_parameters(self, pv: &[f64; 21]) -> Result<()> {
+    pub(super) fn validate_parameters(self, pv: &[f64; 21]) -> Result<()> {
         let invalid = match self {
             Projection::Cea => pv[1] == 0.0,
             Projection::Cyp => pv[2] == 0.0 || pv[1] + pv[2] == 0.0,
@@ -138,15 +138,15 @@ struct ConicConstants {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct NativeCoordinate {
-    pub(crate) phi: f64,
-    pub(crate) theta: f64,
+pub(super) struct NativeCoordinate {
+    pub(super) phi: f64,
+    pub(super) theta: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ProjectedCoordinate {
-    pub(crate) x: f64,
-    pub(crate) y: f64,
+pub(super) struct ProjectedCoordinate {
+    pub(super) x: f64,
+    pub(super) y: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -157,7 +157,7 @@ struct SzpVertex {
 }
 
 impl Projection {
-    pub(crate) fn domain_error(self) -> FitsError {
+    pub(super) fn domain_error(self) -> FitsError {
         FitsError::WcsProjectionDomain {
             projection: self.code(),
         }
@@ -217,7 +217,7 @@ impl Projection {
 
     /// The fiducial point `(φ₀, θ₀)` in degrees. Zenithal (incl. the perspective
     /// `AZP`/`SZP`): `(0, 90)`; conics: `(0, θ_a)` where `θ_a = PVi_1`; else `(0, 0)`.
-    pub(crate) fn reference_point(self, pv: &[f64; 21]) -> NativeCoordinate {
+    pub(super) fn reference_point(self, pv: &[f64; 21]) -> NativeCoordinate {
         match self.family() {
             Family::Zenithal | Family::ZenithalPerspective => NativeCoordinate {
                 phi: 0.0,
@@ -235,7 +235,7 @@ impl Projection {
     }
 
     /// Deproject intermediate world `(x, y)` (deg) to native `(φ, θ)` (deg).
-    pub(crate) fn deproject(self, x: f64, y: f64, pv: &[f64; 21]) -> Result<NativeCoordinate> {
+    pub(super) fn deproject(self, x: f64, y: f64, pv: &[f64; 21]) -> Result<NativeCoordinate> {
         let projection = self;
         if matches!(
             projection,
@@ -410,7 +410,7 @@ impl Projection {
     }
 
     /// Project native `(φ, θ)` (deg) to intermediate world `(x, y)` (deg).
-    pub(crate) fn project(
+    pub(super) fn project(
         self,
         phi: f64,
         theta: f64,
