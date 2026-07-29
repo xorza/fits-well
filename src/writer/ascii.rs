@@ -76,7 +76,7 @@ impl AsciiWriteColumn {
 }
 
 /// Validated ASCII-table write value with the same inferred-row workflow as
-/// [`TableBuilder`].
+/// [`TableBuilder`](crate::writer::table::TableBuilder).
 #[derive(Debug, Clone, Default)]
 pub struct AsciiTableBuilder {
     pub(crate) nrows: Option<usize>,

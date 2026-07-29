@@ -3,8 +3,8 @@
 //! Reassemble the per-tile codec output (`COMPRESSED_DATA`, with the
 //! `GZIP_COMPRESSED_DATA`/`UNCOMPRESSED_DATA` fallbacks) into the full [`Image`],
 //! de-quantizing float tiles (`ZSCALE`/`ZZERO`) on the way. The per-codec work lives
-//! in the sibling [`gzip`](crate::compress::gzip)/[`rice`](crate::compress::rice)/
-//! [`plio`](crate::compress::plio)/[`hcompress`](crate::compress::hcompress) modules;
+//! in the sibling [`gzip`]/[`rice`]/
+//! [`plio`]/[`hcompress`] modules;
 //! this drives the tile geometry, the
 //! fallback-column resolution, and the narrow-and-scatter into the output plane.
 

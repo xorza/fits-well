@@ -13,7 +13,7 @@ pub(super) enum CardKind {
     /// no value indicator. The text is carried in [`Card::comment`].
     Commentary,
     /// A `CONTINUE` record carrying a long-string substring (§4.2.1.2). Produced
-    /// only transiently by [`Card::parse`]; [`Header::parse`] folds each one into
+    /// only transiently by [`Card::parse`]; [`Header::parse`](crate::header::Header::parse) folds each one into
     /// the preceding value card and never stores it, so a `Continue` card never
     /// reaches the writer.
     Continue,
