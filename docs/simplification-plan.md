@@ -33,30 +33,6 @@ valid built standalone. No batch here requires a `Cargo.toml` change.
 
 ---
 
-## Batch 4 — Unsigned & physical-scaling consolidation
-
-**Priority: 4** · Size: medium · Risk: medium · No public impact (keep `SampleType`)
-
-The single most-repeated logic in the crate: the FITS sign-bit-offset convention.
-
-- [ ] Collapse `UnsignedKind` (`table/mod.rs:1060`) into `SampleType`
-      (`data/mod.rs:542`). `unsigned_kind` and `SampleType::from_scaling` are the same
-      decision written twice against different type tags.
-      **Keep `SampleType` as the public name — `lumos` imports it.**
-- [ ] Collapse the 12 hand-written sign flips into `UnsignedData::from_be(bytes, kind)` /
-      `from_host(slice, kind)`: `data/mod.rs:209,212,215,218,630,633,636,642,719,728,739,750`
-      and `table/mod.rs:1091,1093,1096,1099`.
-- [ ] Deduplicate the two scaling tables: `physical_from_be` (`data/mod.rs:190`) vs
-      `ImageData::physical_as` (`:139`), and `unsigned_from_be` (`:203`) vs
-      `ImageData::unsigned` (`:155`). The borrowed-bytes and decoded paths both need to
-      exist; the per-type table does not need to.
-- [ ] `groups/mod.rs:200,211` — `elem_f64`/`elem_physical` match `ImageData` **per
-      element** inside `.map()` loops (callers at `:151,169,180`) and duplicate
-      `physical_as`'s table. Hoisting the match out of the loop is a simplification
-      *and* a real speedup.
-
----
-
 ## Batch 5 — Error-variant families
 
 **Priority: 5** · Size: medium · Risk: low · Public API change (mechanical)

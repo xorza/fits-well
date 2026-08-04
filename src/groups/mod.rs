@@ -9,6 +9,7 @@ use crate::bitpix::Bitpix;
 use crate::data::ImageData;
 use crate::data::ImageView;
 use crate::data::Scaling;
+use crate::data::physical_view;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
@@ -145,11 +146,16 @@ impl RandomGroups {
     /// The physical parameter values of group `g`: `PZEROn + PSCALn × raw`.
     pub fn parameters_physical(&self, group: usize) -> Result<Vec<f64>> {
         let base = self.checked_group_base(group)?;
-        Ok((0..self.pcount)
-            .map(|j| {
-                let ParamScale { pscal, pzero } = self.param_scaling[j];
-                pzero + pscal * elem_f64(&self.samples, base + j)
-            })
+        // Widen the whole parameter run once (identity scaling is a plain widening),
+        // then apply each parameter's own `PSCALn`/`PZEROn`.
+        let raw: Vec<f64> = physical_view(
+            self.samples.view(base..base + self.pcount),
+            &Scaling::IDENTITY,
+        );
+        Ok(raw
+            .into_iter()
+            .zip(&self.param_scaling)
+            .map(|(value, &ParamScale { pscal, pzero })| pzero + pscal * value)
             .collect())
     }
 
@@ -159,14 +165,13 @@ impl RandomGroups {
     /// physical values. `None` if no parameter has the name. (For the raw
     /// per-addend values, use [`RandomGroups::parameters_physical`].)
     pub fn parameter_physical(&self, group: usize, name: &str) -> Result<Option<f64>> {
-        let base = self.checked_group_base(group)?;
+        let values = self.parameters_physical(group)?;
         let mut sum = 0.0;
         let mut found = false;
-        for j in 0..self.pcount {
-            if self.parameter_names[j] == name {
+        for (value, parameter) in values.iter().zip(&self.parameter_names) {
+            if parameter == name {
                 found = true;
-                let ParamScale { pscal, pzero } = self.param_scaling[j];
-                sum += pzero + pscal * elem_f64(&self.samples, base + j);
+                sum += value;
             }
         }
         Ok(found.then_some(sum))
@@ -176,9 +181,10 @@ impl RandomGroups {
     /// samples equal to `BLANK` mapped to `NaN`.
     pub fn array_physical(&self, group: usize) -> Result<Vec<f64>> {
         let base = self.checked_group_base(group)? + self.pcount;
-        Ok((0..self.array_len())
-            .map(|k| elem_physical(&self.samples, base + k, &self.array_scaling))
-            .collect())
+        Ok(physical_view(
+            self.samples.view(base..base + self.array_len()),
+            &self.array_scaling,
+        ))
     }
 
     fn group_len(&self) -> usize {
@@ -193,29 +199,6 @@ impl RandomGroups {
             });
         }
         Ok(index * self.group_len())
-    }
-}
-
-/// Read sample `i` of a typed buffer as `f64` (widening).
-fn elem_f64(samples: &ImageData, i: usize) -> f64 {
-    match samples {
-        ImageData::U8(v) => v[i] as f64,
-        ImageData::I16(v) => v[i] as f64,
-        ImageData::I32(v) => v[i] as f64,
-        ImageData::I64(v) => v[i] as f64,
-        ImageData::F32(v) => v[i] as f64,
-        ImageData::F64(v) => v[i],
-    }
-}
-
-fn elem_physical(samples: &ImageData, i: usize, scaling: &Scaling) -> f64 {
-    match samples {
-        ImageData::U8(v) => scaling.scale_integer(v[i] as i64),
-        ImageData::I16(v) => scaling.scale_integer(v[i] as i64),
-        ImageData::I32(v) => scaling.scale_integer(v[i] as i64),
-        ImageData::I64(v) => scaling.scale_integer(v[i]),
-        ImageData::F32(v) => scaling.scale(v[i] as f64),
-        ImageData::F64(v) => scaling.scale(v[i]),
     }
 }
 
