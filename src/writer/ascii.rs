@@ -9,8 +9,9 @@ use crate::error::{FitsError, Result};
 use crate::hdu::validate_table_field_count;
 use crate::header::Header;
 use crate::header::card::validate_ascii;
+use crate::header::value;
 use crate::keyword::key;
-use crate::writer::{FitsWriter, fits_i64, merge_header_template, validate_scaling};
+use crate::writer::{FitsWriter, merge_header_template, validate_scaling};
 
 /// One column to write into an ASCII table: nullable typed data, the fixed field
 /// width in characters, and the decimal count for floats.
@@ -324,18 +325,18 @@ fn ascii_table_header(
         .comment_internal("XTENSION", "ASCII table extension");
     header.set_internal("BITPIX", 8).set_internal("NAXIS", 2);
     header
-        .set_internal("NAXIS1", fits_i64(row_len)?)
+        .set_internal("NAXIS1", value::fits_i64(row_len)?)
         .comment_internal("NAXIS1", "width of table in characters");
     header
-        .set_internal("NAXIS2", fits_i64(nrows)?)
+        .set_internal("NAXIS2", value::fits_i64(nrows)?)
         .comment_internal("NAXIS2", "number of rows");
     header.set_internal("PCOUNT", 0).set_internal("GCOUNT", 1);
     header
-        .set_internal("TFIELDS", fits_i64(columns.len())?)
+        .set_internal("TFIELDS", value::fits_i64(columns.len())?)
         .comment_internal("TFIELDS", "number of columns");
     for (i, col) in columns.iter().enumerate() {
         let n = i + 1;
-        header.set_internal(key!("TBCOL{n}").as_str(), fits_i64(tbcols[i])?);
+        header.set_internal(key!("TBCOL{n}").as_str(), value::fits_i64(tbcols[i])?);
         header.set_internal(key!("TFORM{n}").as_str(), ascii_tform(col));
         header.set_internal(key!("TTYPE{n}").as_str(), col.name.as_str());
         if let Some(unit) = &col.unit {

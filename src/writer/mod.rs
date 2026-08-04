@@ -14,6 +14,7 @@ use crate::checksum;
 use crate::error::{FitsError, Result};
 use crate::hdu::{HduKind, HduPosition, HduRole, data_extent};
 use crate::header::Header;
+use crate::keyword;
 
 pub(crate) mod ascii;
 pub(crate) mod image;
@@ -319,16 +320,9 @@ fn is_structural_keyword(keyword: &str) -> bool {
 }
 
 fn indexed_keyword(keyword: &str, prefix: &str) -> bool {
-    keyword.strip_prefix(prefix).is_some_and(|suffix| {
-        keyword.len() <= 8
-            && !suffix.is_empty()
-            && !suffix.starts_with('0')
-            && suffix.bytes().all(|byte| byte.is_ascii_digit())
-    })
-}
-
-fn fits_i64(value: usize) -> Result<i64> {
-    i64::try_from(value).map_err(|_| FitsError::DataUnitOverflow)
+    // A conforming card is at most 8 bytes; anything longer is not the indexed
+    // structural keyword it superficially resembles.
+    keyword.len() <= 8 && keyword::index(keyword, prefix).is_some()
 }
 
 #[cfg(test)]

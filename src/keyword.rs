@@ -1,4 +1,4 @@
-//! Stack-allocated FITS keyword formatting.
+//! Stack-allocated FITS keyword formatting, and the inverse index parse.
 //!
 //! Indexed keywords (`NAXIS3`, `PV2_15`, `CD1_2`, `CTYPE1`) are looked up
 //! constantly while reading and writing. Building each with `format!` heap-
@@ -8,6 +8,22 @@
 //! `format!` and call `.as_str()` on the result.
 
 use core::fmt::Write;
+
+/// The 1-based index of an indexed FITS keyword: `index("NAXIS3", "NAXIS")` is
+/// `Some(3)`. The suffix must be a non-empty digit run with no leading zero, so a
+/// card parses as at most one index (`NAXIS03` is not `NAXIS3`) — the same rule the
+/// structural-keyword, compressed-column, and `ZNAMEi` scans each need. Callers
+/// apply their own bound on the result.
+pub(crate) fn index(keyword: &str, prefix: &str) -> Option<usize> {
+    let suffix = keyword.strip_prefix(prefix)?;
+    if suffix.is_empty()
+        || suffix.starts_with('0')
+        || !suffix.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    suffix.parse().ok()
+}
 
 /// Capacity of a [`KeyBuf`] — generously above the 8-byte FITS keyword limit (and
 /// the longer binary-table-WCS compound forms like `TPC12_34`), so a conforming

@@ -10,9 +10,10 @@ use crate::compress::{Compression, CompressionOptions, encode};
 use crate::data::{Image, ImageData, Scaling, shape_product};
 use crate::error::{FitsError, Result};
 use crate::header::Header;
+use crate::header::value;
 use crate::keyword::key;
 use crate::writer::{
-    FitsWriter, PLACEHOLDER_CHECKSUM, WriterState, fits_i64, merge_header_template,
+    FitsWriter, PLACEHOLDER_CHECKSUM, WriterState, merge_header_template,
     prepare_header_with_data_sum, render_header,
 };
 
@@ -352,10 +353,10 @@ fn add_image_axes(header: &mut Header, shape: &[usize], bitpix: Bitpix) -> Resul
         .set_internal("BITPIX", bitpix.code())
         .comment_internal("BITPIX", "number of bits per data pixel");
     header
-        .set_internal("NAXIS", fits_i64(shape.len())?)
+        .set_internal("NAXIS", value::fits_i64(shape.len())?)
         .comment_internal("NAXIS", "number of data axes");
     for (i, &n) in shape.iter().enumerate() {
-        header.set_internal(key!("NAXIS{}", i + 1).as_str(), fits_i64(n)?);
+        header.set_internal(key!("NAXIS{}", i + 1).as_str(), value::fits_i64(n)?);
     }
     Ok(())
 }

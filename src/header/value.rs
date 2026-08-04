@@ -130,6 +130,14 @@ impl From<u32> for FitsInteger {
 
 impl_integer_from!(i128, u64, u128);
 
+/// Narrow a `usize` count to the `i64` a FITS integer card holds. Counts derived
+/// from geometry (row widths, heap lengths, axis lengths) are `usize` internally but
+/// must fit a header value; an absurd one becomes [`FitsError::DataUnitOverflow`]
+/// rather than wrapping into a plausible-looking card.
+pub(crate) fn fits_i64(value: usize) -> Result<i64> {
+    i64::try_from(value).map_err(|_| FitsError::DataUnitOverflow)
+}
+
 /// The typed value of a valued keyword record (§4.2).
 ///
 /// The three string-ish "no real value" cases of §4.2.1 are kept distinct: a
