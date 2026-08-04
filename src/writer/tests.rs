@@ -493,6 +493,18 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
     ));
     assert!(writer.into_inner().into_inner().is_empty());
 
+    // A shape whose product overflows `usize` is out-of-range for the same reason a
+    // merely-too-large one is: it cannot describe the cell's element count. The
+    // reader reports the overflow identically.
+    let overflowing_tdim = WriteColumn::fixed("VEC", ColumnData::I32(vec![1, 2, 3, 4]), 4)
+        .with_tdim(vec![usize::MAX, 2]);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_table(&binary_table(1, &[overflowing_tdim])),
+        Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
+
     for shape in [vec![], vec![0]] {
         let invalid_empty_vla =
             WriteColumn::vla_typed("VEC", ColumnType::I32, vec![ColumnData::I32(vec![])])

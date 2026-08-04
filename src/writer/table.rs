@@ -21,7 +21,9 @@ use crate::header::value;
 use crate::keyword::key;
 #[cfg(feature = "compression")]
 use crate::table_impl::BinTable;
-use crate::table_impl::{CharacterField, ColumnData};
+use crate::table_impl::{
+    CharacterField, ColumnData, TformKind, validate_tdim_extent, validate_tdim_shape,
+};
 use crate::writer::{FitsWriter, merge_header_template, validate_scaling};
 
 /// An element type accepted by a binary-table writer column.
@@ -548,29 +550,33 @@ impl ColumnType {
         }
     }
 
-    fn letter(self) -> char {
+    /// The `TFORMn` element kind this writer type stores as. `ColumnType` is exactly
+    /// the subset of [`TformKind`] a caller may name as a *stored element* — it omits
+    /// `X` (bit arrays have their own constructors, which carry a bit count rather
+    /// than an element count) and the `P`/`Q` descriptors (a heap array cannot itself
+    /// be a descriptor). Widths and letters come from `TformKind` so the two cannot
+    /// drift.
+    fn tform_kind(self) -> TformKind {
         match self {
-            ColumnType::Logical => 'L',
-            ColumnType::Byte => 'B',
-            ColumnType::I16 => 'I',
-            ColumnType::I32 => 'J',
-            ColumnType::I64 => 'K',
-            ColumnType::F32 => 'E',
-            ColumnType::F64 => 'D',
-            ColumnType::ComplexF32 => 'C',
-            ColumnType::ComplexF64 => 'M',
-            ColumnType::Character => 'A',
+            ColumnType::Logical => TformKind::Logical,
+            ColumnType::Byte => TformKind::Byte,
+            ColumnType::I16 => TformKind::I16,
+            ColumnType::I32 => TformKind::I32,
+            ColumnType::I64 => TformKind::I64,
+            ColumnType::F32 => TformKind::F32,
+            ColumnType::F64 => TformKind::F64,
+            ColumnType::ComplexF32 => TformKind::ComplexF32,
+            ColumnType::ComplexF64 => TformKind::ComplexF64,
+            ColumnType::Character => TformKind::Char,
         }
     }
 
+    fn letter(self) -> char {
+        self.tform_kind().code()
+    }
+
     fn elem_size(self) -> usize {
-        match self {
-            ColumnType::Logical | ColumnType::Byte | ColumnType::Character => 1,
-            ColumnType::I16 => 2,
-            ColumnType::I32 | ColumnType::F32 => 4,
-            ColumnType::I64 | ColumnType::F64 | ColumnType::ComplexF32 => 8,
-            ColumnType::ComplexF64 => 16,
-        }
+        self.tform_kind().elem_size()
     }
 }
 
@@ -776,9 +782,11 @@ fn validate_tdim(shape: Option<&[usize]>, element_count: usize) -> Result<()> {
         return Ok(());
     };
     validate_tdim_shape(shape)?;
-    validate_tdim_product(shape, element_count)
+    validate_tdim_extent(shape, element_count)
 }
 
+/// As [`validate_tdim`], but for a `P`/`Q` row: an empty heap array has no elements
+/// to reshape, so the declared shape is not applied to it.
 fn validate_vla_tdim(shape: Option<&[usize]>, element_count: usize) -> Result<()> {
     let Some(shape) = shape else {
         return Ok(());
@@ -787,25 +795,7 @@ fn validate_vla_tdim(shape: Option<&[usize]>, element_count: usize) -> Result<()
     if element_count == 0 {
         return Ok(());
     }
-    validate_tdim_product(shape, element_count)
-}
-
-fn validate_tdim_shape(shape: &[usize]) -> Result<()> {
-    if shape.is_empty() || shape.contains(&0) {
-        return Err(FitsError::KeywordOutOfRange { name: "TDIMn" });
-    }
-    Ok(())
-}
-
-fn validate_tdim_product(shape: &[usize], element_count: usize) -> Result<()> {
-    let product = shape
-        .iter()
-        .try_fold(1usize, |product, &len| product.checked_mul(len))
-        .ok_or(FitsError::DataUnitOverflow)?;
-    if product > element_count {
-        return Err(FitsError::KeywordOutOfRange { name: "TDIMn" });
-    }
-    Ok(())
+    validate_tdim_extent(shape, element_count)
 }
 
 /// Append `data[range]` to `out` as big-endian bytes, for every fixed numeric /

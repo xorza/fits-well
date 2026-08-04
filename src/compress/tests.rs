@@ -1286,7 +1286,7 @@ fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
         "{algo}/{rows_per_tile} nrows"
     );
     assert_eq!(
-        restored.row_len, orig.row_len,
+        restored.schema.row_len, orig.schema.row_len,
         "{algo}/{rows_per_tile} row width"
     );
     assert_eq!(
@@ -1342,7 +1342,7 @@ fn decodes_a_cfitsio_compressed_table() {
 
     assert_eq!(restored.metadata().nrows, 500);
     assert_eq!(restored.metadata().nrows, original.metadata().nrows);
-    assert_eq!(restored.row_len, original.row_len);
+    assert_eq!(restored.schema.row_len, original.schema.row_len);
     assert_eq!(restored.metadata().columns.len(), 6);
     assert_eq!(
         restored.raw_rows().unwrap(),
