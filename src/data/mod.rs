@@ -19,6 +19,7 @@ use crate::endian::extend_be;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use crate::words;
 use std::ops::Range;
 
 /// An owned, host-endian sample buffer, tagged by its `BITPIX` element type.
@@ -171,15 +172,7 @@ impl ImageData {
     /// `BZERO` the matching sign-bit offset); `None` otherwise. Exact for all 64-bit
     /// values (no `f64` rounding). Shared by [`Image::unsigned`]/[`ReadImage::unsigned`].
     fn unsigned(&self, scaling: &Scaling) -> Option<UnsignedData> {
-        // `BLANK` marks null samples that have no exact integer value, so an unsigned
-        // view can't represent them; `SampleType` deliberately ignores `BLANK`, so
-        // guard it here. The `BSCALE`/`BZERO`-offset convention itself is resolved
-        // once, by `SampleType::from_scaling`, rather than re-checked against the
-        // offset constants a second time.
-        if scaling.blank.is_some() {
-            return None;
-        }
-        let kind = SampleType::from_scaling(self.bitpix(), scaling).unsigned_kind()?;
+        let kind = scaling.unsigned_kind(self.bitpix())?;
         // The kind is derived from this buffer's own `BITPIX`, so the pairings below
         // are the only reachable ones.
         Some(match (self, kind) {
@@ -205,14 +198,13 @@ impl ImageData {
 /// once for the whole view rather than once per element, so a caller wanting a
 /// sub-range (a random group's parameters or array) slices the view, not the loop.
 pub(crate) fn physical_view<O: PhysicalOut>(view: ImageView<'_>, scaling: &Scaling) -> Vec<O> {
-    let scale = |x: f64| O::from_f64(scaling.scale(x));
     match view {
         ImageView::U8(v) => scale_ints(v, scaling),
         ImageView::I16(v) => scale_ints(v, scaling),
         ImageView::I32(v) => scale_ints(v, scaling),
         ImageView::I64(v) => scale_ints(v, scaling),
-        ImageView::F32(v) => v.iter().map(|&x| scale(x as f64)).collect(),
-        ImageView::F64(v) => v.iter().map(|&x| scale(x)).collect(),
+        ImageView::F32(v) => v.iter().map(|&x| O::scaled(x as f64, scaling)).collect(),
+        ImageView::F64(v) => v.iter().map(|&x| O::scaled(x, scaling)).collect(),
     }
 }
 
@@ -228,24 +220,26 @@ fn assert_whole_elements(bytes: &[u8], bitpix: Bitpix) {
 
 fn physical_from_be<O: PhysicalOut>(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Vec<O> {
     assert_whole_elements(bytes, bitpix);
-    let scale = |x: f64| O::from_f64(scaling.scale(x));
-    let scale_int = |x: i64| O::from_f64(scaling.scale_integer(x));
     match bitpix {
-        Bitpix::U8 => bytes.iter().map(|&x| scale_int(x as i64)).collect(),
-        Bitpix::I16 => decode_be(bytes, |b| scale_int(i16::from_be_bytes(b) as i64)),
-        Bitpix::I32 => decode_be(bytes, |b| scale_int(i32::from_be_bytes(b) as i64)),
-        Bitpix::I64 => decode_be(bytes, |b| scale_int(i64::from_be_bytes(b))),
-        Bitpix::F32 => decode_be(bytes, |b| scale(f32::from_be_bytes(b) as f64)),
-        Bitpix::F64 => decode_be(bytes, |b| scale(f64::from_be_bytes(b))),
+        Bitpix::U8 => bytes
+            .iter()
+            .map(|&x| O::scaled_integer(x as i64, scaling))
+            .collect(),
+        Bitpix::I16 => decode_be(bytes, |b| {
+            O::scaled_integer(i16::from_be_bytes(b) as i64, scaling)
+        }),
+        Bitpix::I32 => decode_be(bytes, |b| {
+            O::scaled_integer(i32::from_be_bytes(b) as i64, scaling)
+        }),
+        Bitpix::I64 => decode_be(bytes, |b| O::scaled_integer(i64::from_be_bytes(b), scaling)),
+        Bitpix::F32 => decode_be(bytes, |b| O::scaled(f32::from_be_bytes(b) as f64, scaling)),
+        Bitpix::F64 => decode_be(bytes, |b| O::scaled(f64::from_be_bytes(b), scaling)),
     }
 }
 
 fn unsigned_from_be(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Option<UnsignedData> {
-    if scaling.blank.is_some() {
-        return None;
-    }
     assert_whole_elements(bytes, bitpix);
-    let kind = SampleType::from_scaling(bitpix, scaling).unsigned_kind()?;
+    let kind = scaling.unsigned_kind(bitpix)?;
     Some(UnsignedData::from_be_cells(
         std::iter::once(bytes),
         bytes.len() / bitpix.elem_size(),
@@ -339,38 +333,27 @@ impl ImageView<'_> {
 pub(crate) fn swap_into_words(src: &[u8], bitpix: Bitpix, words: &mut Vec<u64>) {
     let count = src.len() / bitpix.elem_size();
     words.resize(src.len().div_ceil(8), 0);
-    let p = words.as_mut_ptr() as *mut u8;
-    // SAFETY: `words` is `u64`-backed (8-aligned, valid for every BITPIX type's
-    // alignment) with room for `src.len()` bytes. Each reinterpretation is write-only,
-    // covers exactly `count` elements (= src.len() bytes, in bounds), and `src` is a
-    // separate buffer so the typed slice never aliases it.
+    // SAFETY: `words` was just sized to hold `src.len()` bytes and filled with zeros,
+    // which is a valid value for every sample type, so each `samples_mut` view covers
+    // initialized storage. `src` is a separate buffer, so the typed slice never
+    // aliases it.
     unsafe {
         match bitpix {
-            Bitpix::I16 => decode_be_into_slice(
-                src,
-                std::slice::from_raw_parts_mut(p as *mut i16, count),
-                i16::from_be_bytes,
-            ),
-            Bitpix::I32 => decode_be_into_slice(
-                src,
-                std::slice::from_raw_parts_mut(p as *mut i32, count),
-                i32::from_be_bytes,
-            ),
-            Bitpix::I64 => decode_be_into_slice(
-                src,
-                std::slice::from_raw_parts_mut(p as *mut i64, count),
-                i64::from_be_bytes,
-            ),
-            Bitpix::F32 => decode_be_into_slice(
-                src,
-                std::slice::from_raw_parts_mut(p as *mut f32, count),
-                f32::from_be_bytes,
-            ),
-            Bitpix::F64 => decode_be_into_slice(
-                src,
-                std::slice::from_raw_parts_mut(p as *mut f64, count),
-                f64::from_be_bytes,
-            ),
+            Bitpix::I16 => {
+                decode_be_into_slice(src, words::samples_mut(words, count), i16::from_be_bytes)
+            }
+            Bitpix::I32 => {
+                decode_be_into_slice(src, words::samples_mut(words, count), i32::from_be_bytes)
+            }
+            Bitpix::I64 => {
+                decode_be_into_slice(src, words::samples_mut(words, count), i64::from_be_bytes)
+            }
+            Bitpix::F32 => {
+                decode_be_into_slice(src, words::samples_mut(words, count), f32::from_be_bytes)
+            }
+            Bitpix::F64 => {
+                decode_be_into_slice(src, words::samples_mut(words, count), f64::from_be_bytes)
+            }
             Bitpix::U8 => unreachable!("U8 is handled by the caller, never swapped"),
         }
     }
@@ -382,18 +365,18 @@ pub(crate) fn swap_into_words(src: &[u8], bitpix: Bitpix, words: &mut Vec<u64>) 
 /// `bitpix` elements and `<= words.len() * 8`.
 pub(crate) fn view_words(words: &[u64], bitpix: Bitpix, nbytes: usize) -> ImageView<'_> {
     let count = nbytes / bitpix.elem_size();
-    let p = words.as_ptr() as *const u8;
-    // SAFETY: `words` is `u64`-backed (8-aligned ≥ every type's align); `swap_into_words`
-    // wrote all `nbytes` (= count elements) host-endian bytes; int/float types have no
-    // invalid bit patterns. So each slice is a valid, fully-initialized `&[T]`.
+    // SAFETY: `swap_into_words` (or the compressed-image decoder) wrote all `nbytes`
+    // = `count` elements of host-endian samples, so every viewed element is
+    // initialized. Alignment and bit-pattern validity are `words::samples`'s to
+    // uphold, not this caller's.
     unsafe {
         match bitpix {
-            Bitpix::U8 => ImageView::U8(std::slice::from_raw_parts(p, count)),
-            Bitpix::I16 => ImageView::I16(std::slice::from_raw_parts(p as *const i16, count)),
-            Bitpix::I32 => ImageView::I32(std::slice::from_raw_parts(p as *const i32, count)),
-            Bitpix::I64 => ImageView::I64(std::slice::from_raw_parts(p as *const i64, count)),
-            Bitpix::F32 => ImageView::F32(std::slice::from_raw_parts(p as *const f32, count)),
-            Bitpix::F64 => ImageView::F64(std::slice::from_raw_parts(p as *const f64, count)),
+            Bitpix::U8 => ImageView::U8(words::samples(words, count)),
+            Bitpix::I16 => ImageView::I16(words::samples(words, count)),
+            Bitpix::I32 => ImageView::I32(words::samples(words, count)),
+            Bitpix::I64 => ImageView::I64(words::samples(words, count)),
+            Bitpix::F32 => ImageView::F32(words::samples(words, count)),
+            Bitpix::F64 => ImageView::F64(words::samples(words, count)),
         }
     }
 }
@@ -897,15 +880,30 @@ where
     O: PhysicalOut,
 {
     v.iter()
-        .map(|&x| O::from_f64(scaling.scale_integer(x.into())))
+        .map(|&x| O::scaled_integer(x.into(), scaling))
         .collect()
 }
 
 /// Output element type of the physical-plane map. Crate-private, hence sealed: the
 /// only implementors are `f64` (the canonical plane) and `f32` (the compact plane).
 /// The scaling arithmetic always runs in `f64`; `from_f64` is the final narrowing.
+///
+/// [`scaled`](Self::scaled) and [`scaled_integer`](Self::scaled_integer) pair that
+/// narrowing with the [`Scaling`] map, so the decoded-sample and the big-endian
+/// physical loops apply one definition of "physical value" rather than each
+/// spelling the composition itself.
 pub(crate) trait PhysicalOut: Copy {
     fn from_f64(value: f64) -> Self;
+
+    /// The physical value of a real sample, narrowed to the output plane.
+    fn scaled(raw: f64, scaling: &Scaling) -> Self {
+        Self::from_f64(scaling.scale(raw))
+    }
+
+    /// The physical value of an integer sample, mapping the `BLANK` sentinel to `NaN`.
+    fn scaled_integer(raw: i64, scaling: &Scaling) -> Self {
+        Self::from_f64(scaling.scale_integer(raw))
+    }
 }
 
 impl PhysicalOut for f64 {
@@ -950,6 +948,21 @@ impl Scaling {
             bzero: header.get_real("BZERO")?.unwrap_or(0.0),
             blank: header.get_integer("BLANK")?,
         })
+    }
+
+    /// The exact-integer realization this scaling denotes for samples stored as
+    /// `bitpix`, or `None` when it is not a sign-bit-offset convention.
+    ///
+    /// The single place the FITS unsigned convention is resolved. The offset test
+    /// itself lives in [`SampleType::from_scaling`]; what this adds is the null
+    /// guard — `BLANK` (or a table column's `TZEROn`-paired `TNULLn`, which maps
+    /// onto the same field) marks samples with no exact integer value, so an
+    /// unsigned view cannot represent them, and `SampleType` deliberately ignores it.
+    pub(crate) fn unsigned_kind(&self, bitpix: Bitpix) -> Option<UnsignedKind> {
+        if self.blank.is_some() {
+            return None;
+        }
+        SampleType::from_scaling(bitpix, self).unsigned_kind()
     }
 
     pub(crate) fn scale(&self, raw: f64) -> f64 {

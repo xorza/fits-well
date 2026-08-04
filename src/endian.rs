@@ -1,6 +1,8 @@
 //! Big-endian scalar (de)serialization shared by the image, table, and
 //! compression layers. FITS data is always big-endian, so every typed decode or
-//! encode funnels through these three helpers.
+//! encode funnels through these helpers — one per output shape (a fresh `Vec`, a
+//! reused `Vec`, an existing slice, appended bytes), all built on the same
+//! monomorphized per-element conversion.
 
 use crate::error::FitsError;
 use crate::error::Result;
@@ -40,6 +42,28 @@ where
         );
     }
     out
+}
+
+/// [`decode_be`] into a reused buffer rather than a fresh `Vec`: clears `out`, then
+/// decodes every `N`-byte chunk of `bytes` into it. The per-element loop is the same
+/// one [`decode_be`] uses and vectorizes identically.
+///
+/// Gated because the tiled codecs are its only callers — they widen each tile into a
+/// scratch buffer held across tiles, so they need the reused-buffer shape rather than
+/// [`decode_be`]'s fresh allocation.
+#[cfg(feature = "compression")]
+pub(crate) fn decode_be_into<const N: usize, T, F>(bytes: &[u8], out: &mut Vec<T>, conv: F)
+where
+    F: Fn([u8; N]) -> T,
+{
+    out.clear();
+    // The final length is exactly one element per chunk, so ask for that and no more.
+    out.reserve_exact(bytes.len() / N);
+    out.extend(
+        bytes
+            .chunks_exact(N)
+            .map(|c| conv(c.try_into().expect("chunks_exact yields N-byte arrays"))),
+    );
 }
 
 /// Decode a big-endian buffer into the host-endian slice `dst` (one element per
@@ -138,5 +162,27 @@ mod tests {
             i64::from_be_bytes(descriptor[8..].try_into().unwrap()),
             u32::MAX as i64 + 8
         );
+    }
+
+    /// Gated with the primitive itself: `decode_be_into` exists only for the tiled
+    /// codecs, so a build without `compression` has nothing to exercise.
+    #[cfg(feature = "compression")]
+    #[test]
+    fn decode_be_into_replaces_the_reused_buffer_contents() {
+        // Unlike `extend_be`, this *replaces* rather than appends — a long fill
+        // followed by a short one must leave no stale tail. It also widens through
+        // `conv`, which is how the codecs decode straight into their `i64` scratch.
+        let widen = |b| i16::from_be_bytes(b) as i64;
+        let mut reused = vec![99i64; 8];
+        decode_be_into(&[0x00, 0x01, 0xFF, 0xFF], &mut reused, widen);
+        assert_eq!(reused, vec![1i64, -1]);
+        decode_be_into(&[0x00, 0x02], &mut reused, widen);
+        assert_eq!(reused, vec![2i64]);
+        // A trailing partial element is not an element: `chunks_exact` drops it.
+        decode_be_into(&[0x00, 0x03, 0x7F], &mut reused, widen);
+        assert_eq!(reused, vec![3i64]);
+        // Nothing to decode empties the buffer rather than leaving it untouched.
+        decode_be_into(&[], &mut reused, widen);
+        assert_eq!(reused, Vec::<i64>::new());
     }
 }

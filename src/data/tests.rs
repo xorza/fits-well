@@ -624,6 +624,26 @@ fn sample_type_resolves_unsigned_and_signed_byte_conventions() {
         SampleType::from_scaling(Bitpix::I16, &with_blank),
         SampleType::U16
     );
+
+    // ...but it does disqualify the *exact* view: a BLANK sample has no integer
+    // value to recover. `Scaling::unsigned_kind` is where that guard lives, and it
+    // is the one resolution both the image (`BZERO`/`BLANK`) and binary-table
+    // (`TZEROn`/`TNULLn`) paths go through — so the two cannot disagree.
+    assert_eq!(with_blank.unsigned_kind(Bitpix::I16), None);
+    assert_eq!(
+        s(1.0, 32_768.0).unsigned_kind(Bitpix::I16),
+        Some(UnsignedKind::U16)
+    );
+    assert_eq!(
+        s(1.0, -128.0).unsigned_kind(Bitpix::U8),
+        Some(UnsignedKind::I8)
+    );
+    // No offset to undo: a native unsigned byte, a plain signed integer, a float.
+    assert_eq!(s(1.0, 0.0).unsigned_kind(Bitpix::U8), None);
+    assert_eq!(s(1.0, 0.0).unsigned_kind(Bitpix::I16), None);
+    assert_eq!(s(1.0, 0.0).unsigned_kind(Bitpix::F32), None);
+    // The offset is only the convention at unit BSCALE.
+    assert_eq!(s(2.0, 32_768.0).unsigned_kind(Bitpix::I16), None);
 }
 
 #[test]

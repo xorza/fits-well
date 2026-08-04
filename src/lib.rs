@@ -66,6 +66,7 @@ mod table_impl;
 pub mod time;
 mod unit;
 pub mod wcs;
+mod words;
 mod writer;
 
 pub use error::{FitsError, Result};
