@@ -82,7 +82,7 @@ pub(super) fn rice_decode_into(
 
     let mut br = BitReader::new(bytes);
     let mut lastpix = br.read(nbits_pp)?; // literal first pixel (big-endian)
-    out.reserve(nx);
+    out.reserve_exact(nx);
     let mut i = 0;
     while i < nx {
         let fs = br.read(fsbits)? as i64 - 1;

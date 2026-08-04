@@ -92,7 +92,7 @@ pub(super) fn dequantize_into(
     let dither2 = method == DitherMethod::Subtractive2;
     let mut d = method.dithered().then(|| Dither::new(irow));
     out.clear();
-    out.reserve(ints.len());
+    out.reserve_exact(ints.len());
     out.extend(ints.iter().map(|&v| {
         let r = d.as_mut().map_or(0.0, Dither::next);
         if zblank == Some(v) {
@@ -153,7 +153,7 @@ fn noise3(
     let mut xmax = f64::MIN;
     let mut any_good = false;
     row_medians.clear();
-    row_medians.reserve(ny);
+    row_medians.reserve_exact(ny);
 
     for jj in 0..ny {
         diffs.clear();
