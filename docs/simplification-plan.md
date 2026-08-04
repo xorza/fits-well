@@ -33,34 +33,6 @@ valid built standalone. No batch here requires a `Cargo.toml` change.
 
 ---
 
-## Batch 2 — Cross-cutting small duplicates
-
-**Priority: 2** · Size: small · Risk: low · No public impact
-
-Independent one-liners, all the same character. Fast, and it clears noise before the
-structural batches.
-
-- [ ] `fits_i64` ×3 → one shared helper: `writer/mod.rs:330`, `compress/encode.rs:531`,
-      `compress/table.rs:1009`.
-- [ ] Image-region validator ×2, **identical bodies**: `reader/mod.rs:1074`
-      (`validate_image_region`) and `compress/decode.rs:797` (`validate_region`).
-- [ ] "`PREFIX` + non-zero-leading digits" predicate ×3: `writer/mod.rs:321`
-      (`indexed_keyword`), `compress/table.rs:548` (`indexed_compression_key`),
-      `compress/mod.rs:191` (`parameter_index`).
-- [ ] Delete `data/mod.rs:174` (`map_be`) — it is exactly
-      `decode_be(bytes, |x| map(decode(x)))`. Consider whether `table/mod.rs:984`
-      (`map_cells`) can also route through `endian::decode_be`.
-- [ ] Merge `hdu/mod.rs:143` (`random_groups_array_elements`) and `hdu/mod.rs:152`
-      (`array_elements`) — they differ only in the `is_empty()` clause. Check against
-      `data::shape_product`, a third copy of the same product.
-- [ ] Share the ~15-line preamble between `reader/mod.rs:393` (`read_image`) and
-      `reader/mod.rs:446` (`read_image_view`): kind check, bitpix, axes, scaling,
-      `DataLengths`, `source.slice`.
-- [ ] `reader/mod.rs:857` (`read_wcs`) inlines an EXTNAME/EXTVER/EXTLEVEL scan that
-      partly re-implements `hdu_index`; reuse it (extending for EXTLEVEL).
-
----
-
 ## Batch 3 — Binary-table type consolidation
 
 **Priority: 3** · Size: large · Risk: medium · Public API change (`table::ColumnType`)
