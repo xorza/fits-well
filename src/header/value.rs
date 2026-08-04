@@ -88,6 +88,10 @@ impl TryFrom<&FitsInteger> for i64 {
     }
 }
 
+/// Widths that may not fit `i64` and so fall back to the decimal representation.
+/// `i32`/`u32`/`i64` are written out separately below: their `i64::try_from` can
+/// never fail, and spelling an infallible conversion fallibly is both misleading and
+/// a clippy lint.
 macro_rules! impl_integer_from {
     ($($type:ty),+ $(,)?) => {
         $(
@@ -238,18 +242,6 @@ impl From<FitsInteger> for Value {
     }
 }
 
-impl From<i64> for Value {
-    fn from(i: i64) -> Self {
-        Value::Integer(i.into())
-    }
-}
-
-impl From<i32> for Value {
-    fn from(i: i32) -> Self {
-        Value::Integer(i.into())
-    }
-}
-
 macro_rules! impl_value_from_integer {
     ($($type:ty),+ $(,)?) => {
         $(
@@ -262,7 +254,9 @@ macro_rules! impl_value_from_integer {
     };
 }
 
-impl_value_from_integer!(i128, u32, u64, u128);
+// Every integer width `FitsInteger` accepts, wrapped identically — unlike the
+// `FitsInteger` conversions above, none of these needs a fallible narrowing.
+impl_value_from_integer!(i32, i64, i128, u32, u64, u128);
 
 impl From<f64> for Value {
     fn from(r: f64) -> Self {
