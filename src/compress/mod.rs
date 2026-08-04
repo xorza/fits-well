@@ -50,6 +50,26 @@ impl DitherMethod {
     fn dithered(self) -> bool {
         !matches!(self, DitherMethod::None)
     }
+
+    /// The `ZQUANTIZ` keyword spelling; `None` for a value this crate does not model.
+    /// A float image must be able to reproduce its dither exactly, so the decoder
+    /// rejects an unrecognized value there — an integer image ignores `ZQUANTIZ`.
+    fn parse(s: &str) -> Option<DitherMethod> {
+        match s {
+            "NO_DITHER" => Some(DitherMethod::None),
+            "SUBTRACTIVE_DITHER_1" => Some(DitherMethod::Subtractive1),
+            "SUBTRACTIVE_DITHER_2" => Some(DitherMethod::Subtractive2),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            DitherMethod::None => "NO_DITHER",
+            DitherMethod::Subtractive1 => "SUBTRACTIVE_DITHER_1",
+            DitherMethod::Subtractive2 => "SUBTRACTIVE_DITHER_2",
+        }
+    }
 }
 
 /// Validated GZIP configuration.
@@ -209,6 +229,21 @@ impl ImageCodec {
             }
         })
     }
+
+    /// The `ZCMPTYPE` (image) / `ZCTYPn` (table column) keyword spelling — the
+    /// inverse of [`ImageCodec::parse`], and the only place these names are written.
+    /// The table path's narrower `Algo` and the public [`Compression`] both read
+    /// them from here.
+    fn name(self) -> &'static str {
+        match self {
+            ImageCodec::Gzip1 => "GZIP_1",
+            ImageCodec::Gzip2 => "GZIP_2",
+            ImageCodec::Rice1 => "RICE_1",
+            ImageCodec::Plio1 => "PLIO_1",
+            ImageCodec::Hcompress1 => "HCOMPRESS_1",
+            ImageCodec::NoCompress => "NOCOMPRESS",
+        }
+    }
 }
 
 impl Compression {
@@ -225,14 +260,7 @@ impl Compression {
 
     /// FITS `ZCMPTYPE` name written for this choice.
     pub fn name(self) -> &'static str {
-        match self.image_codec() {
-            ImageCodec::Gzip1 => "GZIP_1",
-            ImageCodec::Gzip2 => "GZIP_2",
-            ImageCodec::Rice1 => "RICE_1",
-            ImageCodec::Plio1 => "PLIO_1",
-            ImageCodec::Hcompress1 => "HCOMPRESS_1",
-            ImageCodec::NoCompress => "NOCOMPRESS",
-        }
+        self.image_codec().name()
     }
 
     fn gzip_level(self) -> u32 {
