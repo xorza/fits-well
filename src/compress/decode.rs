@@ -89,6 +89,8 @@ struct ImageDecodePlan<'a> {
     context: DecodeCtx,
     method: DitherMethod,
     zdither0: i64,
+    /// `BLANK` — the stored integer a masked null pixel takes in an integer image.
+    blank: Option<i64>,
     zblank_keyword: Option<i64>,
     zblank_column: Option<Vec<i64>>,
     zscale: Option<Vec<f64>>,
@@ -163,6 +165,7 @@ impl<'a> ImageDecodePlan<'a> {
             },
             method,
             zdither0,
+            blank: layout.scaling.blank,
             zblank_keyword: header.get_integer("ZBLANK")?,
             zblank_column: read_i64_column(table, "ZBLANK")?,
             zscale: read_f64_column(table, "ZSCALE")?,
@@ -195,6 +198,147 @@ impl<'a> ImageDecodePlan<'a> {
     }
 }
 
+/// Reusable per-worker buffers for one tile: its geometry, the decoded values in
+/// their widened plane, the codecs' auxiliary integer buffer (quantized samples for a
+/// float plane, the null mask for an integer one), and the codec workspaces.
+#[derive(Debug)]
+struct TileScratchSet<W> {
+    tile: TileScratch,
+    values: Vec<W>,
+    aux: Vec<i64>,
+    codecs: CodecScratch,
+}
+
+// Hand-written rather than derived: `Vec<W>` is `Default` for every `W`, so the
+// derive's `W: Default` bound would be a fiction.
+impl<W> Default for TileScratchSet<W> {
+    fn default() -> TileScratchSet<W> {
+        TileScratchSet {
+            tile: TileScratch::default(),
+            values: Vec::new(),
+            aux: Vec::new(),
+            codecs: CodecScratch::default(),
+        }
+    }
+}
+
+/// The widened plane a tile decodes into before narrowing to the stored type: `i64`
+/// for an integer image, `f64` for a quantized float one. The two differ in how a
+/// tile is reconstructed and how its nulls are applied, so selecting the plane by
+/// type makes that split once — where the old code re-tested `ZBITPIX.is_float()` at
+/// every dispatch site and then asserted the buffer agreed.
+trait WidePlane: Copy + Send {
+    fn decode_tile(
+        plan: &ImageDecodePlan<'_>,
+        table_row: usize,
+        tile_row: usize,
+        scratch: &mut TileScratchSet<Self>,
+    ) -> Result<()>;
+}
+
+impl WidePlane for i64 {
+    fn decode_tile(
+        plan: &ImageDecodePlan<'_>,
+        table_row: usize,
+        _tile_row: usize,
+        scratch: &mut TileScratchSet<i64>,
+    ) -> Result<()> {
+        let nelem = scratch.tile.nelem();
+        decode_one_tile_into(
+            &plan.context,
+            plan.tile_columns(table_row)?,
+            nelem,
+            &mut scratch.values,
+            &mut scratch.codecs,
+        )?;
+        apply_integer_null_mask(
+            plan,
+            table_row,
+            nelem,
+            &mut scratch.values,
+            &mut scratch.aux,
+            &mut scratch.codecs,
+        )
+    }
+}
+
+impl WidePlane for f64 {
+    fn decode_tile(
+        plan: &ImageDecodePlan<'_>,
+        table_row: usize,
+        tile_row: usize,
+        scratch: &mut TileScratchSet<f64>,
+    ) -> Result<()> {
+        let nelem = scratch.tile.nelem();
+        decode_float_tile_into(
+            &plan.context,
+            plan.tile_columns(table_row)?,
+            nelem,
+            plan.dequant(table_row, tile_row),
+            &mut scratch.values,
+            &mut scratch.aux,
+            &mut scratch.codecs,
+        )?;
+        apply_float_null_mask(
+            plan,
+            table_row,
+            nelem,
+            &mut scratch.values,
+            &mut scratch.aux,
+            &mut scratch.codecs,
+        )
+    }
+}
+
+/// A stored sample type the decoder scatters into, paired with the plane its tiles
+/// decode in. Narrowing happens only as values land in the output plane.
+trait DecodeSample: Copy + Send + Sync {
+    type Wide: WidePlane;
+    fn narrow(wide: Self::Wide) -> Self;
+}
+
+impl DecodeSample for u8 {
+    type Wide = i64;
+    fn narrow(wide: i64) -> u8 {
+        wide as u8
+    }
+}
+
+impl DecodeSample for i16 {
+    type Wide = i64;
+    fn narrow(wide: i64) -> i16 {
+        wide as i16
+    }
+}
+
+impl DecodeSample for i32 {
+    type Wide = i64;
+    fn narrow(wide: i64) -> i32 {
+        wide as i32
+    }
+}
+
+impl DecodeSample for i64 {
+    type Wide = i64;
+    fn narrow(wide: i64) -> i64 {
+        wide
+    }
+}
+
+impl DecodeSample for f32 {
+    type Wide = f64;
+    fn narrow(wide: f64) -> f32 {
+        wide as f32
+    }
+}
+
+impl DecodeSample for f64 {
+    type Wide = f64;
+    fn narrow(wide: f64) -> f64 {
+        wide
+    }
+}
+
 #[derive(Debug)]
 enum DecodeBuffer<'a> {
     U8(&'a mut [u8]),
@@ -206,6 +350,12 @@ enum DecodeBuffer<'a> {
 }
 
 impl<'a> DecodeBuffer<'a> {
+    /// Whether this buffer holds the float plane. Every constructor sizes the buffer
+    /// from `ZBITPIX`, so this must agree with the layout the plan was built from.
+    fn is_float(&self) -> bool {
+        matches!(self, DecodeBuffer::F32(_) | DecodeBuffer::F64(_))
+    }
+
     fn from_samples(samples: &'a mut ImageData) -> DecodeBuffer<'a> {
         match samples {
             ImageData::U8(values) => DecodeBuffer::U8(values),
@@ -430,112 +580,21 @@ fn decode_image_section_into(
     output: DecodeBuffer<'_>,
 ) -> Result<()> {
     debug_assert_ne!(region.total, 0);
-    let layout = &region.image;
-    let plan = ImageDecodePlan::new(header, table, layout)?;
-    if plan.context.zbitpix.is_float() {
-        let decode = |table_row: usize,
-                      tile_row: usize,
-                      scratch: &TileScratch,
-                      out: &mut Vec<f64>,
-                      ints: &mut Vec<i64>,
-                      codecs: &mut CodecScratch| {
-            decode_float_tile_into(
-                &plan.context,
-                plan.tile_columns(table_row)?,
-                scratch.nelem(),
-                plan.dequant(table_row, tile_row),
-                out,
-                ints,
-                codecs,
-            )?;
-            apply_float_null_mask(&plan, table_row, scratch.nelem(), out, ints, codecs)
-        };
-        match output {
-            DecodeBuffer::F32(out) => run_decode_region(
-                &plan.geometry,
-                ranges,
-                &region.shape,
-                tile_rows,
-                out,
-                decode,
-                |value| value as f32,
-            )?,
-            DecodeBuffer::F64(out) => run_decode_region(
-                &plan.geometry,
-                ranges,
-                &region.shape,
-                tile_rows,
-                out,
-                decode,
-                |value| value,
-            )?,
-            _ => unreachable!("a float ZBITPIX yields a float sample buffer"),
-        }
-    } else {
-        let decode = |table_row: usize,
-                      _tile_row: usize,
-                      scratch: &TileScratch,
-                      out: &mut Vec<i64>,
-                      mask: &mut Vec<i64>,
-                      codecs: &mut CodecScratch| {
-            decode_one_tile_into(
-                &plan.context,
-                plan.tile_columns(table_row)?,
-                scratch.nelem(),
-                out,
-                codecs,
-            )?;
-            apply_integer_null_mask(
-                &plan,
-                table_row,
-                scratch.nelem(),
-                layout.scaling.blank,
-                out,
-                mask,
-                codecs,
-            )
-        };
-        match output {
-            DecodeBuffer::U8(out) => run_decode_region(
-                &plan.geometry,
-                ranges,
-                &region.shape,
-                tile_rows,
-                out,
-                decode,
-                |value| value as u8,
-            )?,
-            DecodeBuffer::I16(out) => run_decode_region(
-                &plan.geometry,
-                ranges,
-                &region.shape,
-                tile_rows,
-                out,
-                decode,
-                |value| value as i16,
-            )?,
-            DecodeBuffer::I32(out) => run_decode_region(
-                &plan.geometry,
-                ranges,
-                &region.shape,
-                tile_rows,
-                out,
-                decode,
-                |value| value as i32,
-            )?,
-            DecodeBuffer::I64(out) => run_decode_region(
-                &plan.geometry,
-                ranges,
-                &region.shape,
-                tile_rows,
-                out,
-                decode,
-                |value| value,
-            )?,
-            _ => unreachable!("an integer ZBITPIX yields an integer sample buffer"),
-        }
+    let plan = ImageDecodePlan::new(header, table, &region.image)?;
+    debug_assert_eq!(
+        plan.context.zbitpix.is_float(),
+        output.is_float(),
+        "the sample buffer is sized from ZBITPIX, so its plane must match"
+    );
+    let shape = &region.shape;
+    match output {
+        DecodeBuffer::U8(out) => run_decode_region(&plan, ranges, shape, tile_rows, out),
+        DecodeBuffer::I16(out) => run_decode_region(&plan, ranges, shape, tile_rows, out),
+        DecodeBuffer::I32(out) => run_decode_region(&plan, ranges, shape, tile_rows, out),
+        DecodeBuffer::I64(out) => run_decode_region(&plan, ranges, shape, tile_rows, out),
+        DecodeBuffer::F32(out) => run_decode_region(&plan, ranges, shape, tile_rows, out),
+        DecodeBuffer::F64(out) => run_decode_region(&plan, ranges, shape, tile_rows, out),
     }
-    Ok(())
 }
 
 fn decode_image_into(
@@ -545,95 +604,41 @@ fn decode_image_into(
     output: DecodeBuffer<'_>,
 ) -> Result<()> {
     let plan = ImageDecodePlan::new(header, table, layout)?;
-    if plan.context.zbitpix.is_float() {
-        let decode = |t: usize,
-                      s: &TileScratch,
-                      out: &mut Vec<f64>,
-                      ints: &mut Vec<i64>,
-                      codecs: &mut CodecScratch| {
-            decode_float_tile_into(
-                &plan.context,
-                plan.tile_columns(t)?,
-                s.nelem(),
-                plan.dequant(t, t),
-                out,
-                ints,
-                codecs,
-            )?;
-            apply_float_null_mask(&plan, t, s.nelem(), out, ints, codecs)
-        };
-        match output {
-            DecodeBuffer::F32(out) => {
-                run_decode_scatter(&plan.geometry, out, decode, |value| value as f32)?
-            }
-            DecodeBuffer::F64(out) => {
-                run_decode_scatter(&plan.geometry, out, decode, |value| value)?
-            }
-            _ => unreachable!("a float ZBITPIX yields a float sample buffer"),
-        }
-    } else {
-        let decode = |t: usize,
-                      s: &TileScratch,
-                      out: &mut Vec<i64>,
-                      mask: &mut Vec<i64>,
-                      codecs: &mut CodecScratch| {
-            decode_one_tile_into(&plan.context, plan.tile_columns(t)?, s.nelem(), out, codecs)?;
-            apply_integer_null_mask(&plan, t, s.nelem(), layout.scaling.blank, out, mask, codecs)
-        };
-        match output {
-            DecodeBuffer::U8(out) => {
-                run_decode_scatter(&plan.geometry, out, decode, |value| value as u8)?
-            }
-            DecodeBuffer::I16(out) => {
-                run_decode_scatter(&plan.geometry, out, decode, |value| value as i16)?
-            }
-            DecodeBuffer::I32(out) => {
-                run_decode_scatter(&plan.geometry, out, decode, |value| value as i32)?
-            }
-            DecodeBuffer::I64(out) => {
-                run_decode_scatter(&plan.geometry, out, decode, |value| value)?
-            }
-            _ => unreachable!("an integer ZBITPIX yields an integer sample buffer"),
-        }
+    debug_assert_eq!(
+        plan.context.zbitpix.is_float(),
+        output.is_float(),
+        "the sample buffer is sized from ZBITPIX, so its plane must match"
+    );
+    match output {
+        DecodeBuffer::U8(out) => run_decode_scatter(&plan, out),
+        DecodeBuffer::I16(out) => run_decode_scatter(&plan, out),
+        DecodeBuffer::I32(out) => run_decode_scatter(&plan, out),
+        DecodeBuffer::I64(out) => run_decode_scatter(&plan, out),
+        DecodeBuffer::F32(out) => run_decode_scatter(&plan, out),
+        DecodeBuffer::F64(out) => run_decode_scatter(&plan, out),
     }
-    Ok(())
 }
 
-fn run_decode_scatter<S, D>(
-    geom: &TileGeometry,
-    out: &mut [D],
-    decode: impl Fn(usize, &TileScratch, &mut Vec<S>, &mut Vec<i64>, &mut CodecScratch) -> Result<()>
-    + Sync
-    + Send,
-    convert: impl Fn(S) -> D + Sync + Send,
-) -> Result<()>
-where
-    S: Copy + Send,
-    D: Copy + Send + Sync,
-{
+/// Decode every tile and scatter it into the full image plane.
+fn run_decode_scatter<D: DecodeSample>(plan: &ImageDecodePlan<'_>, out: &mut [D]) -> Result<()> {
+    let geom = &plan.geometry;
     #[cfg(feature = "parallel")]
     {
-        let init = || {
-            (
-                TileScratch::default(),
-                Vec::<S>::new(),
-                Vec::<i64>::new(),
-                CodecScratch::default(),
-            )
-        };
+        // Tiles decode in parallel but land serially, so only one wave's worth of
+        // narrowed output is retained at a time.
         let wave_len = decode_wave_tile_count::<D>(geom);
         let mut scatter = TileScratch::default();
         for wave_start in (0..geom.ntiles()).step_by(wave_len) {
             let count = wave_len.min(geom.ntiles() - wave_start);
             let decoded = map_tiles(
                 count,
-                init,
-                |(scratch, vals, ints, codecs), offset| -> Result<Vec<D>> {
+                TileScratchSet::<D::Wide>::default,
+                |scratch, offset| -> Result<Vec<D>> {
                     let tile = wave_start + offset;
-                    geom.tile_into(tile, scratch);
-                    decode(tile, scratch, vals, ints, codecs)?;
-                    ensure_tile_size(scratch.nelem(), vals.len())?;
-                    Ok(vals.iter().copied().map(&convert).collect())
+                    geom.tile_into(tile, &mut scratch.tile);
+                    D::Wide::decode_tile(plan, tile, tile, scratch)?;
+                    ensure_tile_size(scratch.tile.nelem(), scratch.values.len())?;
+                    Ok(scratch.values.iter().copied().map(D::narrow).collect())
                 },
             )?;
             for (offset, values) in decoded.iter().enumerate() {
@@ -651,15 +656,18 @@ where
     }
     #[cfg(not(feature = "parallel"))]
     {
-        let mut scratch = TileScratch::default();
-        let mut vals: Vec<S> = Vec::new();
-        let mut ints: Vec<i64> = Vec::new();
-        let mut codecs = CodecScratch::default();
-        for t in 0..geom.ntiles() {
-            geom.tile_into(t, &mut scratch);
-            decode(t, &scratch, &mut vals, &mut ints, &mut codecs)?;
-            ensure_tile_size(scratch.nelem(), vals.len())?;
-            scatter_rows(out, &scratch.row_bases, scratch.row_len, &vals, &convert);
+        let mut scratch = TileScratchSet::<D::Wide>::default();
+        for tile in 0..geom.ntiles() {
+            geom.tile_into(tile, &mut scratch.tile);
+            D::Wide::decode_tile(plan, tile, tile, &mut scratch)?;
+            ensure_tile_size(scratch.tile.nelem(), scratch.values.len())?;
+            scatter_rows(
+                out,
+                &scratch.tile.row_bases,
+                scratch.tile.row_len,
+                &scratch.values,
+                &D::narrow,
+            );
         }
         Ok(())
     }
@@ -678,42 +686,28 @@ pub(super) fn decode_wave_tile_count<D>(geom: &TileGeometry) -> usize {
     (DECODE_WAVE_BYTES / retained_bytes).max(1)
 }
 
-fn run_decode_region<S, D>(
-    geom: &TileGeometry,
+/// Decode only the tiles intersecting a requested region, scattering each tile's
+/// intersection into the section plane. Serial: the tiles are already a sparse subset.
+fn run_decode_region<D: DecodeSample>(
+    plan: &ImageDecodePlan<'_>,
     ranges: &[Range<usize>],
     selected_shape: &[usize],
     tile_rows: &[usize],
     out: &mut [D],
-    decode: impl Fn(
-        usize,
-        usize,
-        &TileScratch,
-        &mut Vec<S>,
-        &mut Vec<i64>,
-        &mut CodecScratch,
-    ) -> Result<()>,
-    convert: impl Fn(S) -> D,
-) -> Result<()>
-where
-    S: Copy,
-    D: Copy,
-{
-    let mut scratch = TileScratch::default();
-    let mut values = Vec::new();
-    let mut ints = Vec::new();
-    let mut codecs = CodecScratch::default();
+) -> Result<()> {
+    let mut scratch = TileScratchSet::<D::Wide>::default();
     for (table_row, &tile_row) in tile_rows.iter().enumerate() {
-        geom.tile_into(tile_row, &mut scratch);
-        decode(
-            table_row,
-            tile_row,
-            &scratch,
-            &mut values,
-            &mut ints,
-            &mut codecs,
-        )?;
-        ensure_tile_size(scratch.nelem(), values.len())?;
-        scatter_region_tile(&scratch, ranges, selected_shape, &values, out, &convert);
+        plan.geometry.tile_into(tile_row, &mut scratch.tile);
+        D::Wide::decode_tile(plan, table_row, tile_row, &mut scratch)?;
+        ensure_tile_size(scratch.tile.nelem(), scratch.values.len())?;
+        scatter_region_tile(
+            &scratch.tile,
+            ranges,
+            selected_shape,
+            &scratch.values,
+            out,
+            &D::narrow,
+        );
     }
     Ok(())
 }
@@ -987,7 +981,6 @@ fn apply_integer_null_mask(
     plan: &ImageDecodePlan<'_>,
     table_row: usize,
     tile_elems: usize,
-    blank: Option<i64>,
     values: &mut [i64],
     mask: &mut Vec<i64>,
     scratch: &mut CodecScratch,
@@ -995,7 +988,9 @@ fn apply_integer_null_mask(
     if !decode_null_mask_into(plan, table_row, tile_elems, mask, scratch)? {
         return Ok(());
     }
-    let blank = blank.ok_or(FitsError::MissingKeyword { name: "BLANK" })?;
+    let blank = plan
+        .blank
+        .ok_or(FitsError::MissingKeyword { name: "BLANK" })?;
     for (value, &masked) in values.iter_mut().zip(mask.iter()) {
         if masked == 1 {
             *value = blank;

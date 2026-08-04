@@ -33,30 +33,6 @@ valid built standalone. No batch here requires a `Cargo.toml` change.
 
 ---
 
-## Batch 9 — Tiled-decode dispatch
-
-**Priority: 9** · Size: large · Risk: high · No public impact
-
-Best readability win in the crate, and the one that needs real care. Do it when the
-rest is stable.
-
-- [ ] `decode_image_into` (`compress/decode.rs:539`) and `decode_image_section_into`
-      (`:422`) are ~175 lines of nested dispatch: float/integer branch × 4–6
-      `DecodeBuffer` arms × a closure differing only in arity (`t` vs
-      `table_row, tile_row`) and `run_decode_scatter` vs `run_decode_region`. Every arm
-      body is three tokens apart, and there are 10 `unreachable!` arms asserting what
-      the type already implies.
-- [ ] Collapse `DecodeBuffer` (`compress/decode.rs:197`) into the `ImageView` family as
-      a mutable counterpart. It is the fourth BITPIX-parallel enum (`ImageData` owned,
-      `ImageView` shared, `DecodeBuffer` mutable, plus `zeroed_samples`), and it brings
-      the third `unsafe` reinterpretation match — after `swap_into_words`
-      (`data/mod.rs:307`) and `view_words` (`:351`).
-
-Make the scatter target a small trait, or pass a narrowing function keyed off `Bitpix`,
-so both outer matches become one path.
-
----
-
 ## Batch 10 — Compressed-table VLA layout probe
 
 **Priority: 10** · Size: small · Risk: medium · No public impact
