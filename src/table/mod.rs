@@ -22,7 +22,6 @@ use crate::data::U16_OFFSET;
 use crate::data::U32_OFFSET;
 use crate::data::U64_OFFSET;
 use crate::data::UnsignedData;
-use crate::endian::decode_be;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::validate_table_field_count;
@@ -314,14 +313,9 @@ impl ColumnData {
 /// A binary table's structure plus its data unit.
 #[derive(Debug, Clone)]
 pub struct BinTable {
-    nrows: usize,
-    columns: Vec<Column>,
-    pub(crate) row_len: usize,
-    /// Byte offset of the heap within `bytes` (`THEAP`, default = main-table size).
-    pub(crate) heap_offset: usize,
-    /// Byte offset just past the real heap data (`nrows·row_len + PCOUNT`). `P`/`Q`
-    /// spans must lie within `[heap_offset, heap_end)`, never the block fill beyond.
-    pub(crate) heap_end: usize,
+    /// Everything the header alone determines — the same [`TableSchema`] that
+    /// [`BinTable::schema`] parses, held rather than re-derived.
+    pub(crate) schema: TableSchema,
     /// The whole data unit (the `nrows * row_len` main table, then the heap and
     /// block fill). Fixed-width reads index the main-table prefix; `P`/`Q` columns
     /// follow their descriptors into the heap.
@@ -342,6 +336,7 @@ pub struct BinTableMetadata<'a> {
 #[derive(Debug, Clone)]
 pub struct TableSchema {
     pub nrows: usize,
+    /// Byte width of one row (`NAXIS1`).
     pub row_len: usize,
     pub heap_offset: usize,
     pub heap_end: usize,
@@ -352,8 +347,8 @@ impl BinTable {
     /// Borrow the table's validated row count and column descriptors.
     pub fn metadata(&self) -> BinTableMetadata<'_> {
         BinTableMetadata {
-            nrows: self.nrows,
-            columns: &self.columns,
+            nrows: self.schema.nrows,
+            columns: &self.schema.columns,
         }
     }
 
@@ -375,14 +370,13 @@ impl BinTable {
                 .get_text(key!("TDIM{n}").as_str())?
                 .map(parse_tdim)
                 .transpose()?;
-            // §7.3.2 permits trailing elements beyond the declared multidimensional
-            // view, so the shape product may be smaller than the fixed repeat.
+            // A fixed column's cell holds exactly `repeat` elements; a `P`/`Q` cell's
+            // count is per-row and is checked as each row's descriptor is read.
             let is_vla = matches!(tform.kind, TformKind::ArrayDesc32 | TformKind::ArrayDesc64);
             if let Some(dims) = &tdim
                 && !is_vla
-                && tdim_product(dims)? > tform.repeat
             {
-                return Err(FitsError::KeywordOutOfRange { name: "TDIMn" });
+                validate_tdim_extent(dims, tform.repeat)?;
             }
             columns.push(Column {
                 name: header
@@ -446,11 +440,7 @@ impl BinTable {
             return Err(FitsError::UnexpectedEof);
         }
         Ok(BinTable {
-            nrows: schema.nrows,
-            columns: schema.columns,
-            row_len: schema.row_len,
-            heap_offset: schema.heap_offset,
-            heap_end: schema.heap_end,
+            schema,
             bytes: data,
         })
     }
@@ -459,8 +449,9 @@ impl BinTable {
     #[cfg(feature = "compression")]
     pub(crate) fn raw_rows(&self) -> Result<&[u8]> {
         let len = self
+            .schema
             .nrows
-            .checked_mul(self.row_len)
+            .checked_mul(self.schema.row_len)
             .ok_or(FitsError::DataUnitOverflow)?;
         self.bytes.get(..len).ok_or(FitsError::DataSizeMismatch {
             expected: len,
@@ -473,14 +464,15 @@ impl BinTable {
         descriptor: PqDescriptor,
         element_kind: TformKind,
     ) -> Result<&[u8]> {
-        let range = descriptor.heap_range(element_kind, self.heap_offset, self.heap_end)?;
+        let range =
+            descriptor.heap_range(element_kind, self.schema.heap_offset, self.schema.heap_end)?;
         Ok(&self.bytes[range])
     }
 
     /// The index of the first column whose `TTYPEn` matches `name`, compared
     /// case-insensitively per §6.7.
     pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.columns.iter().position(|c| {
+        self.schema.columns.iter().position(|c| {
             c.name
                 .as_deref()
                 .is_some_and(|n| n.eq_ignore_ascii_case(name))
@@ -499,10 +491,10 @@ impl BinTable {
     /// without re-passing the column descriptor. Errors with
     /// [`FitsError::ColumnIndexOutOfBounds`] for a bad index.
     pub fn column_by_idx(&self, index: usize) -> Result<ColumnReader<'_>> {
-        if index >= self.columns.len() {
+        if index >= self.schema.columns.len() {
             return Err(FitsError::ColumnIndexOutOfBounds {
                 index,
-                len: self.columns.len(),
+                len: self.schema.columns.len(),
             });
         }
         Ok(ColumnReader { table: self, index })
@@ -517,7 +509,7 @@ impl BinTable {
 
     /// The raw bytes of column `col` in row `r`.
     fn cell(&self, col: &Column, r: usize) -> &[u8] {
-        let start = r * self.row_len + col.byte_offset;
+        let start = r * self.schema.row_len + col.byte_offset;
         &self.bytes[start..start + col.tform.byte_width()]
     }
 
@@ -533,7 +525,7 @@ impl BinTable {
     }
 
     fn cells<'a>(&'a self, col: &'a Column) -> impl ExactSizeIterator<Item = &'a [u8]> + 'a {
-        (0..self.nrows).map(move |row| self.cell(col, row))
+        (0..self.schema.nrows).map(move |row| self.cell(col, row))
     }
 }
 
@@ -569,7 +561,23 @@ impl<'a> ColumnReader<'a> {
     /// The column's [`Column`] descriptor — name, `TFORMn`, `TSCALn`/`TZEROn`/`TNULLn`,
     /// `TDIMn`, `TDISPn`.
     pub fn descriptor(&self) -> &'a Column {
-        &self.table.columns[self.index]
+        &self.table.schema.columns[self.index]
+    }
+
+    /// The column descriptor, rejecting a variable-length (`P`/`Q`) column — the
+    /// shared precondition of every fixed-width decode. Those columns carry heap
+    /// descriptors rather than values, so they go through [`ColumnReader::vla`].
+    fn fixed_descriptor(&self) -> Result<&'a Column> {
+        let col = self.descriptor();
+        if matches!(
+            col.tform.kind,
+            TformKind::ArrayDesc32 | TformKind::ArrayDesc64
+        ) {
+            return Err(FitsError::VariableLengthColumn {
+                code: col.tform.kind.code(),
+            });
+        }
+        Ok(col)
     }
 
     /// Decode a fixed-width column into a typed, row-flattened [`ColumnData`]: `A` is
@@ -577,15 +585,7 @@ impl<'a> ColumnReader<'a> {
     /// concatenated cell bytes. Variable-length (`P`/`Q`) columns error here — use
     /// [`ColumnReader::vla`].
     pub fn raw(&self) -> Result<ColumnData> {
-        let col = self.descriptor();
-        if matches!(
-            col.tform.kind,
-            TformKind::ArrayDesc32 | TformKind::ArrayDesc64
-        ) {
-            return Err(FitsError::VariableLengthColumn {
-                code: col.tform.kind.code(),
-            });
-        }
+        let col = self.fixed_descriptor()?;
         Ok(decode_fixed_column(self.table, col))
     }
 
@@ -593,18 +593,10 @@ impl<'a> ColumnReader<'a> {
     /// mapping integers equal to `TNULLn` to `NaN`. Errors for the non-numeric kinds
     /// (`A`/`L`/`X`/`C`/`M`) and variable-length columns.
     pub fn physical(&self) -> Result<Vec<f64>> {
-        let col = self.descriptor();
-        if matches!(
-            col.tform.kind,
-            TformKind::ArrayDesc32 | TformKind::ArrayDesc64
-        ) {
-            return Err(FitsError::VariableLengthColumn {
-                code: col.tform.kind.code(),
-            });
-        }
+        let col = self.fixed_descriptor()?;
         physical_cells(
             self.table.cells(col),
-            self.table.nrows * col.tform.repeat,
+            self.table.schema.nrows * col.tform.repeat,
             col.tform.kind,
             col.tscale,
             col.tzero,
@@ -618,21 +610,13 @@ impl<'a> ColumnReader<'a> {
     /// [`physical`](Self::physical). `Ok(None)` for any other column; errors only for a
     /// variable-length column. Mirrors [`crate::image::Image::unsigned`].
     pub fn unsigned(&self) -> Result<Option<UnsignedData>> {
-        let col = self.descriptor();
-        if matches!(
-            col.tform.kind,
-            TformKind::ArrayDesc32 | TformKind::ArrayDesc64
-        ) {
-            return Err(FitsError::VariableLengthColumn {
-                code: col.tform.kind.code(),
-            });
-        }
+        let col = self.fixed_descriptor()?;
         let Some(kind) = unsigned_kind(col.tform.kind, col.tscale, col.tzero, col.tnull) else {
             return Ok(None);
         };
         Ok(Some(unsigned_cells(
             self.table.cells(col),
-            self.table.nrows * col.tform.repeat,
+            self.table.schema.nrows * col.tform.repeat,
             kind,
         )))
     }
@@ -643,7 +627,7 @@ impl<'a> ColumnReader<'a> {
         let col = self.descriptor();
         complex_cells(
             self.table.cells(col),
-            self.table.nrows * col.tform.repeat,
+            self.table.schema.nrows * col.tform.repeat,
             col.tform.kind,
             col.tscale,
             col.tzero,
@@ -755,7 +739,7 @@ impl<'a> ColumnReader<'a> {
         };
         // Validate every row's heap span up front (no allocation) so [`BitColumn::row`]
         // can resolve a row lazily and infallibly — the only place an overrun surfaces.
-        for r in 0..self.table.nrows {
+        for r in 0..self.table.schema.nrows {
             let descriptor = self.table.pq_descriptor(col, r)?;
             validate_vla_tdim(col, descriptor.count)?;
             self.table.pq_payload(descriptor, TformKind::Bit)?;
@@ -791,8 +775,8 @@ impl<'a> ColumnReader<'a> {
         column: VlaColumn<'a>,
         decode: impl Fn(VlaCell<'a>) -> Result<T>,
     ) -> Result<Vec<T>> {
-        let mut rows = Vec::with_capacity(self.table.nrows);
-        for row in 0..self.table.nrows {
+        let mut rows = Vec::with_capacity(self.table.schema.nrows);
+        for row in 0..self.table.schema.nrows {
             rows.push(decode(column.cell(row)?)?);
         }
         Ok(rows)
@@ -801,10 +785,10 @@ impl<'a> ColumnReader<'a> {
 
 impl<'a> VlaColumn<'a> {
     pub(crate) fn cell(&self, row: usize) -> Result<VlaCell<'a>> {
-        if row >= self.table.nrows {
+        if row >= self.table.schema.nrows {
             return Err(FitsError::UnexpectedEof);
         }
-        let col = &self.table.columns[self.index];
+        let col = &self.table.schema.columns[self.index];
         let descriptor = self.table.pq_descriptor(col, row)?;
         validate_vla_tdim(col, descriptor.count)?;
         let bytes = self.table.pq_payload(descriptor, self.element_type)?;
@@ -842,12 +826,12 @@ pub struct BitColumn<'a> {
 impl<'a> BitColumn<'a> {
     /// The number of rows.
     pub fn nrows(&self) -> usize {
-        self.table.nrows
+        self.table.schema.nrows
     }
 
     /// Whether the column has no rows.
     pub fn is_empty(&self) -> bool {
-        self.table.nrows == 0
+        self.table.schema.nrows == 0
     }
 
     /// Row `r`'s bits as a borrowed [`BitSlice`], MSB-first — resolved on demand from
@@ -855,11 +839,11 @@ impl<'a> BitColumn<'a> {
     /// `.to_bitvec()` to own it. Panics if `r >= nrows()`.
     pub fn row(&self, r: usize) -> &'a BitSlice<u8, Msb0> {
         assert!(
-            r < self.table.nrows,
+            r < self.table.schema.nrows,
             "row {r} out of bounds ({} rows)",
-            self.table.nrows
+            self.table.schema.nrows
         );
-        let col = &self.table.columns[self.index];
+        let col = &self.table.schema.columns[self.index];
         if col.tform.kind == TformKind::Bit {
             // Fixed `rX`: the row's cell, truncated to `repeat` bits.
             &self.table.cell(col, r).view_bits::<Msb0>()[..col.tform.repeat]
@@ -883,7 +867,7 @@ impl<'a> BitColumn<'a> {
 
     /// The bit at `(row, col)`, MSB-first — `None` if either index is out of range.
     pub fn get(&self, row: usize, col: usize) -> Option<bool> {
-        if row >= self.table.nrows {
+        if row >= self.table.schema.nrows {
             return None;
         }
         let bits = self.row(row);
@@ -892,7 +876,7 @@ impl<'a> BitColumn<'a> {
 
     /// Iterate the rows, each a borrowed [`BitSlice`], resolved on demand.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &'a BitSlice<u8, Msb0>> + '_ {
-        (0..self.table.nrows).map(move |r| self.row(r))
+        (0..self.table.schema.nrows).map(move |r| self.row(r))
     }
 }
 
@@ -928,26 +912,39 @@ fn parse_tdim(value: &str) -> Result<Vec<usize>> {
         .split(',')
         .map(|value| value.trim().parse::<usize>().map_err(|_| invalid()))
         .collect::<Result<_>>()?;
-    if dims.is_empty() || dims.contains(&0) {
-        return Err(invalid());
-    }
+    validate_tdim_shape(&dims)?;
     Ok(dims)
 }
 
-fn tdim_product(dims: &[usize]) -> Result<usize> {
-    dims.iter()
-        .try_fold(1usize, |product, &len| product.checked_mul(len))
-        .ok_or(FitsError::KeywordOutOfRange { name: "TDIMn" })
+/// A `TDIMn` shape must name at least one axis and no zero-length one — the rule
+/// both the parsed (`TDIMn` card) and supplied (writer) shapes obey.
+pub(crate) fn validate_tdim_shape(dims: &[usize]) -> Result<()> {
+    if dims.is_empty() || dims.contains(&0) {
+        return Err(FitsError::KeywordOutOfRange { name: "TDIMn" });
+    }
+    Ok(())
 }
 
+/// §7.3.2: a `TDIMn` shape may describe fewer elements than the cell holds (trailing
+/// elements beyond the declared view are permitted) but never more.
+pub(crate) fn validate_tdim_extent(dims: &[usize], element_count: usize) -> Result<()> {
+    let product = dims
+        .iter()
+        .try_fold(1usize, |product, &len| product.checked_mul(len))
+        .ok_or(FitsError::KeywordOutOfRange { name: "TDIMn" })?;
+    if product > element_count {
+        return Err(FitsError::KeywordOutOfRange { name: "TDIMn" });
+    }
+    Ok(())
+}
+
+/// The `TDIMn` extent check for a `P`/`Q` heap array. An empty descriptor carries no
+/// elements to reshape, so the declared shape is simply not applied to that row.
 fn validate_vla_tdim(col: &Column, element_count: usize) -> Result<()> {
     if element_count != 0
         && let Some(dims) = &col.tdim
     {
-        let product = tdim_product(dims)?;
-        if product > element_count {
-            return Err(FitsError::KeywordOutOfRange { name: "TDIMn" });
-        }
+        validate_tdim_extent(dims, element_count)?;
     }
     Ok(())
 }
@@ -971,30 +968,31 @@ fn map_cells<'a, T, const N: usize>(
     out
 }
 
-fn decode_fixed_cells<'a>(
-    cells: impl ExactSizeIterator<Item = &'a [u8]>,
-    row_count: usize,
-    col: &Column,
+/// Decode a run of `kind` scalar elements from `cells`, concatenated in order — the
+/// arms shared by a fixed-width column read (one cell per row) and a heap array (one
+/// contiguous run). `capacity` is only a `Vec::with_capacity` hint.
+///
+/// `A` and the `P`/`Q` descriptors are deliberately absent: a character cell means
+/// one field *per row* when read as a column but one field for the *whole run* when
+/// read from the heap, and a descriptor is only ever a raw byte blob. Each caller
+/// resolves those two before delegating here.
+fn decode_scalar_cells<'a>(
+    cells: impl Iterator<Item = &'a [u8]>,
+    capacity: usize,
+    kind: TformKind,
 ) -> ColumnData {
-    let capacity = row_count * col.tform.repeat;
-    match col.tform.kind {
+    match kind {
         TformKind::Logical => {
             ColumnData::Logical(map_cells(cells, capacity, |[byte]| match byte {
                 b'T' => Some(true),
                 b'F' => Some(false),
+                // 0x00 (or any non-T/F byte) is the §7.3.3 undefined value.
                 _ => None,
             }))
         }
-        TformKind::Byte | TformKind::Bit => ColumnData::Bytes(map_cells(
-            cells,
-            row_count * col.tform.byte_width(),
-            |[byte]| byte,
-        )),
-        TformKind::Char => ColumnData::Character(
-            cells
-                .map(|cell| CharacterField::new(cell.to_vec()))
-                .collect(),
-        ),
+        TformKind::Byte | TformKind::Bit => {
+            ColumnData::Bytes(map_cells(cells, capacity, |[byte]| byte))
+        }
         TformKind::I16 => ColumnData::I16(map_cells(cells, capacity, i16::from_be_bytes)),
         TformKind::I32 => ColumnData::I32(map_cells(cells, capacity, i32::from_be_bytes)),
         TformKind::I64 => ColumnData::I64(map_cells(cells, capacity, i64::from_be_bytes)),
@@ -1012,14 +1010,38 @@ fn decode_fixed_cells<'a>(
                 im: f64::from_be_bytes(bytes[8..].try_into().unwrap()),
             }))
         }
-        TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
-            unreachable!("raw rejects VLA columns before fixed decode")
+        TformKind::Char | TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
+            unreachable!("character and descriptor cells are resolved by the caller")
         }
     }
 }
 
+fn decode_fixed_cells<'a>(
+    cells: impl ExactSizeIterator<Item = &'a [u8]>,
+    row_count: usize,
+    col: &Column,
+) -> ColumnData {
+    match col.tform.kind {
+        // One exact field per row, padding and all — the row *is* the field.
+        TformKind::Char => ColumnData::Character(
+            cells
+                .map(|cell| CharacterField::new(cell.to_vec()))
+                .collect(),
+        ),
+        TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
+            unreachable!("raw rejects VLA columns before fixed decode")
+        }
+        // `X` packs `repeat` bits into `byte_width` bytes, so its element count is the
+        // byte width rather than the repeat.
+        kind @ (TformKind::Byte | TformKind::Bit) => {
+            decode_scalar_cells(cells, row_count * col.tform.byte_width(), kind)
+        }
+        kind => decode_scalar_cells(cells, row_count * col.tform.repeat, kind),
+    }
+}
+
 fn decode_fixed_column(table: &BinTable, col: &Column) -> ColumnData {
-    decode_fixed_cells(table.cells(col), table.nrows, col)
+    decode_fixed_cells(table.cells(col), table.schema.nrows, col)
 }
 
 pub(crate) fn decode_fixed_cell(col: &Column, bytes: &[u8]) -> ColumnData {
@@ -1135,38 +1157,17 @@ fn physical_cells<'a>(
     })
 }
 
-/// Decode `bytes` as a contiguous run of `kind` elements. Shared by fixed-width
-/// reads (concatenated cells) and heap arrays.
+/// Decode `bytes` as one contiguous run of `kind` elements — a `P`/`Q` row's heap
+/// array. The scalar kinds share [`decode_scalar_cells`] with the fixed-width read;
+/// only the two run-specific kinds are resolved here.
 fn decode_array(kind: TformKind, bytes: &[u8]) -> ColumnData {
     match kind {
-        TformKind::Logical => ColumnData::Logical(
-            bytes
-                .iter()
-                .map(|&b| match b {
-                    b'T' => Some(true),
-                    b'F' => Some(false),
-                    _ => None, // 0x00 (or any non-T/F byte) is the undefined value
-                })
-                .collect(),
-        ),
-        TformKind::Byte | TformKind::Bit => ColumnData::Bytes(bytes.to_vec()),
+        // The whole run is one field: an empty descriptor yields no field at all.
         TformKind::Char if bytes.is_empty() => ColumnData::Character(Vec::new()),
         TformKind::Char => ColumnData::Character(vec![CharacterField::new(bytes.to_vec())]),
-        TformKind::I16 => ColumnData::I16(decode_be(bytes, i16::from_be_bytes)),
-        TformKind::I32 => ColumnData::I32(decode_be(bytes, i32::from_be_bytes)),
-        TformKind::I64 => ColumnData::I64(decode_be(bytes, i64::from_be_bytes)),
-        TformKind::F32 => ColumnData::F32(decode_be(bytes, f32::from_be_bytes)),
-        TformKind::F64 => ColumnData::F64(decode_be(bytes, f64::from_be_bytes)),
-        TformKind::ComplexF32 => ColumnData::ComplexF32(decode_be(bytes, |b: [u8; 8]| Complex {
-            re: f32::from_be_bytes([b[0], b[1], b[2], b[3]]),
-            im: f32::from_be_bytes([b[4], b[5], b[6], b[7]]),
-        })),
-        TformKind::ComplexF64 => ColumnData::ComplexF64(decode_be(bytes, |b: [u8; 16]| Complex {
-            re: f64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
-            im: f64::from_be_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]),
-        })),
         // A heap element can't itself be a descriptor; keep the raw bytes.
         TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => ColumnData::Bytes(bytes.to_vec()),
+        kind => decode_scalar_cells(std::iter::once(bytes), bytes.len() / kind.elem_size(), kind),
     }
 }
 
@@ -1190,7 +1191,7 @@ pub(crate) mod internals {
     use crate::table_impl::{BinTable, TformKind};
 
     pub(crate) fn set_column_kind(table: &mut BinTable, column: usize, kind: TformKind) {
-        table.columns[column].tform.kind = kind;
+        table.schema.columns[column].tform.kind = kind;
     }
 }
 

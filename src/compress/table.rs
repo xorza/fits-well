@@ -198,7 +198,7 @@ pub(crate) fn compress_table(
     let metadata = table.metadata();
     let ncols = metadata.columns.len();
     let nrows = metadata.nrows;
-    let naxis1 = table.row_len;
+    let naxis1 = table.schema.row_len;
     let raw = bound.rows;
 
     let metas: Vec<ColMeta> = metadata
@@ -566,7 +566,7 @@ fn bind_table<'a>(header: &Header, table: &'a BinTable) -> Result<BoundTable<'a>
     for (keyword, expected) in [
         ("BITPIX", 8usize),
         ("NAXIS", 2),
-        ("NAXIS1", table.row_len),
+        ("NAXIS1", table.schema.row_len),
         ("NAXIS2", metadata.nrows),
         ("GCOUNT", 1),
         ("TFIELDS", metadata.columns.len()),
@@ -594,21 +594,21 @@ fn bind_table<'a>(header: &Header, table: &'a BinTable) -> Result<BoundTable<'a>
             return Err(metadata_mismatch(keyword.as_str()));
         }
     }
-    if row_width != table.row_len {
+    if row_width != table.schema.row_len {
         return Err(FitsError::RowWidthMismatch {
             computed: row_width,
-            declared: table.row_len,
+            declared: table.schema.row_len,
         });
     }
 
     let rows = table.raw_rows()?;
-    if table.heap_offset < rows.len()
-        || table.heap_end < table.heap_offset
-        || table.heap_end < rows.len()
+    if table.schema.heap_offset < rows.len()
+        || table.schema.heap_end < table.schema.heap_offset
+        || table.schema.heap_end < rows.len()
     {
         return Err(metadata_mismatch("THEAP"));
     }
-    let pcount = table.heap_end - rows.len();
+    let pcount = table.schema.heap_end - rows.len();
     if header.required_usize("PCOUNT", "PCOUNT")? != pcount {
         return Err(metadata_mismatch("PCOUNT"));
     }
@@ -618,7 +618,7 @@ fn bind_table<'a>(header: &Header, table: &'a BinTable) -> Result<BoundTable<'a>
         }
         None => rows.len(),
     };
-    if theap != table.heap_offset {
+    if theap != table.schema.heap_offset {
         return Err(metadata_mismatch("THEAP"));
     }
     Ok(BoundTable { rows, pcount })
@@ -753,7 +753,11 @@ fn validate_vla_layout(
         }
         if compressed.count == 0
             || compressed
-                .heap_range(TformKind::Byte, table.heap_offset, table.heap_end)
+                .heap_range(
+                    TformKind::Byte,
+                    table.schema.heap_offset,
+                    table.schema.heap_end,
+                )
                 .is_err()
         {
             return Err(VlaLayoutError::Rejected);

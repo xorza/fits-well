@@ -33,36 +33,6 @@ valid built standalone. No batch here requires a `Cargo.toml` change.
 
 ---
 
-## Batch 3 — Binary-table type consolidation
-
-**Priority: 3** · Size: large · Risk: medium · Public API change (`table::ColumnType`)
-
-The largest structural win, and contained to `table/` + `writer/table.rs`.
-
-- [ ] **Delete `ColumnType`** (`writer/table.rs:28`) in favour of `TformKind`
-      (`table/mod.rs:36`). `ColumnType`'s 10 variants are `TformKind` less `Bit`,
-      `ArrayDesc32`, `ArrayDesc64`; `ColumnType::letter()` duplicates `TformKind::code()`
-      and `ColumnType::elem_size()` duplicates `TformKind::elem_size()` — two identical
-      10-arm tables. `WriteColumnData`'s variants already exclude bit and descriptor
-      kinds structurally. **~90 lines and one enum.**
-- [ ] **`BinTable { schema: TableSchema, bytes: Vec<u8> }`** (`table/mod.rs:316`). The
-      struct's first five fields *are* `TableSchema` (`:343`), and `from_data`
-      destructures a schema field-by-field to rebuild them.
-- [ ] Unify `TDIM` validation across read and write: `table/mod.rs:966,972` vs
-      `writer/table.rs:773–807` (`validate_tdim`, `validate_vla_tdim`,
-      `validate_tdim_shape`, `validate_tdim_product`).
-- [ ] Merge `decode_array` (`table/mod.rs:1169`) and `decode_fixed_cells` (`:1003`) —
-      two complete 10-arm `TformKind` decode tables. `decode_fixed_cell` is already
-      `decode_fixed_cells(once(bytes), 1, col)`.
-- [ ] Extract the VLA-rejection guard copy-pasted 3× in `ColumnReader`
-      (`table/mod.rs:614,630,655`).
-
-`lumos` imports `ColumnData`, `TableBuilder`, `WriteColumn` but **not** `ColumnType`,
-so the rename surfaces only if it calls `WriteColumn::vla_typed`. Verify with
-`-p fits-well -p lumos`.
-
----
-
 ## Batch 4 — Unsigned & physical-scaling consolidation
 
 **Priority: 4** · Size: medium · Risk: medium · No public impact (keep `SampleType`)
