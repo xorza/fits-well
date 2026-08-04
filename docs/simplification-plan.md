@@ -33,20 +33,6 @@ valid built standalone. No batch here requires a `Cargo.toml` change.
 
 ---
 
-## Batch 10 — Compressed-table VLA layout probe
-
-**Priority: 10** · Size: small · Risk: medium · No public impact
-
-- [ ] `decompress_vla_column` (`compress/table.rs:770`) takes 8 arguments with an
-      `#[expect(clippy::too_many_arguments)]`. Bundle the heap/main/row-layout
-      parameters into a struct.
-- [ ] The layout probe runs `validate_vla_layout` twice and pattern-matches a nested
-      `(Result, Result)` tuple (`:826–841`) to pick which error to surface — a lot of
-      machinery for two outcomes. The standard-vs-cfitsio descriptor-order ambiguity is
-      real; the error selection can be flattened.
-
----
-
 ## Backlog — opportunistic, not a sitting
 
 Small enough to fold into whichever batch is already touching the file.
