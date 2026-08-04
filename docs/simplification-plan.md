@@ -33,22 +33,6 @@ valid built standalone. No batch here requires a `Cargo.toml` change.
 
 ---
 
-## Batch 8 — ASCII column & field path
-
-**Priority: 8** · Size: small · Risk: low · No public impact
-
-- [ ] Merge `ascii_field` (`writer/ascii.rs:244`) and `append_ascii_field` (`:366`).
-      They match `col.data` twice for one field: once to build text + alignment, again
-      to re-check `values[r].is_some()` for null collision — and the `left_aligned` flag
-      is then `debug_assert!`ed back. One pass returning text + alignment + was-null.
-- [ ] Give `AsciiColumnData` a `len()` (mirroring `ColumnData::element_count`). The
-      3-arm row-count match is written three times: `writer/ascii.rs:69` (`row_count`),
-      `:163` (inlines what `row_count` already does), `:211` (`has_null`).
-- [ ] `AsciiTable::field` (`ascii/mod.rs:201`) re-runs a UTF-8 check per field per row
-      on every access; validate once at parse.
-
----
-
 ## Batch 9 — Tiled-decode dispatch
 
 **Priority: 9** · Size: large · Risk: high · No public impact

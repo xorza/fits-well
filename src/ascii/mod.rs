@@ -34,6 +34,31 @@ pub enum AsciiColumnData {
     Float(Vec<Option<f64>>),
 }
 
+impl AsciiColumnData {
+    /// Number of rows. An ASCII column is always scalar (§7.2), so this is both the
+    /// value count and the row count.
+    pub fn len(&self) -> usize {
+        match self {
+            AsciiColumnData::Text(values) => values.len(),
+            AsciiColumnData::Integer(values) => values.len(),
+            AsciiColumnData::Float(values) => values.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Whether any row is undefined, and so needs a `TNULLn` marker to be writable.
+    pub(crate) fn has_null(&self) -> bool {
+        match self {
+            AsciiColumnData::Text(values) => values.iter().any(Option::is_none),
+            AsciiColumnData::Integer(values) => values.iter().any(Option::is_none),
+            AsciiColumnData::Float(values) => values.iter().any(Option::is_none),
+        }
+    }
+}
+
 /// One ASCII-table column.
 #[derive(Debug, Clone)]
 pub struct AsciiColumn {
@@ -52,13 +77,15 @@ pub struct AsciiColumn {
     pub null: Option<String>,
 }
 
-/// A parsed ASCII table plus its row bytes.
+/// A parsed ASCII table plus its row text.
 #[derive(Debug, Clone)]
 pub struct AsciiTable {
     nrows: usize,
     columns: Vec<AsciiColumn>,
     row_len: usize,
-    bytes: Vec<u8>,
+    /// The `nrows × row_len` field region, validated as ASCII on parse. Holding it as
+    /// a `str` makes a field read an infallible slice at a known char boundary.
+    rows: String,
 }
 
 /// Immutable row and column metadata for a parsed ASCII table.
@@ -128,11 +155,23 @@ impl AsciiTable {
         if data.len() < total {
             return Err(FitsError::UnexpectedEof);
         }
+        // §7.2: the data unit is ASCII text. Checking the whole field region once —
+        // as `Card::parse` does for a header record — means every later field read is
+        // a plain slice: no per-cell UTF-8 validation, and `TBCOLn` byte offsets are
+        // guaranteed to land on character boundaries. It also stops a corrupt byte in
+        // one column from being discovered only when that column happens to be read.
+        let mut data = data;
+        data.truncate(total);
+        if !data.is_ascii() {
+            return Err(FitsError::InvalidValue {
+                card: "non-ASCII bytes in ASCII-table data".to_string(),
+            });
+        }
         Ok(AsciiTable {
             nrows,
             columns,
             row_len,
-            bytes: data,
+            rows: String::from_utf8(data).expect("ASCII bytes are valid UTF-8"),
         })
     }
 
@@ -173,22 +212,18 @@ impl AsciiTable {
         Ok(AsciiColumnReader { table: self, index })
     }
 
-    /// The complete fixed-width text of column `col` in row `r`. Errors on non-UTF-8 bytes — a
-    /// FITS ASCII table is ASCII, so a non-ASCII field is malformed; surfacing it
-    /// (rather than the old `unwrap_or("")`) stops a corrupt byte from masquerading
-    /// as a blank field and silently decoding to 0 in a numeric column.
-    fn field(&self, col: &AsciiColumn, r: usize) -> Result<&str> {
-        let row = &self.bytes[r * self.row_len..(r + 1) * self.row_len];
+    /// The complete fixed-width text of column `col` in row `r`. Infallible: the field
+    /// region was validated as ASCII on parse, so every `TBCOLn` offset is a character
+    /// boundary. `from_data` rejected the non-ASCII bytes that could otherwise
+    /// masquerade as a blank field and silently decode to 0 in a numeric column.
+    fn field(&self, col: &AsciiColumn, r: usize) -> &str {
+        let row = &self.rows[r * self.row_len..(r + 1) * self.row_len];
         let end = (col.start + col.width).min(row.len());
-        let raw = if col.start < end {
+        if col.start < end {
             &row[col.start..end]
         } else {
-            &[]
-        };
-        let text = std::str::from_utf8(raw).map_err(|_| FitsError::InvalidValue {
-            card: "non-UTF-8 bytes in ASCII-table field".to_string(),
-        })?;
-        Ok(text)
+            ""
+        }
     }
 }
 
@@ -218,10 +253,10 @@ impl<'a> AsciiColumnReader<'a> {
             AsciiKind::Char => Ok(AsciiColumnData::Text(
                 (0..table.nrows)
                     .map(|r| {
-                        let field = table.field(col, r)?;
-                        Ok((!col.is_null(field.trim())).then(|| field.to_string()))
+                        let field = table.field(col, r);
+                        (!col.is_null(field.trim())).then(|| field.to_string())
                     })
-                    .collect::<Result<_>>()?,
+                    .collect(),
             )),
             AsciiKind::Integer => {
                 let mut out = Vec::with_capacity(table.nrows);
@@ -285,7 +320,7 @@ fn parse_numeric_field(
     col: &AsciiColumn,
     row: usize,
 ) -> Result<Option<ParsedNumeric>> {
-    let field = table.field(col, row)?.trim();
+    let field = table.field(col, row).trim();
     if col.is_null(field) {
         return Ok(None);
     }

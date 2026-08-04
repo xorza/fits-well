@@ -87,6 +87,16 @@ fn decodes_hand_built_ascii_rows() {
         table.column_by_name("missing"),
         Err(FitsError::ColumnNotFound { .. })
     ));
+
+    // §7.2: the data unit is ASCII text, so a non-ASCII byte is rejected when the
+    // table is parsed rather than deferred until whichever column happens to hold it
+    // is read — here the corrupt byte sits in NAME while COUNT is well formed.
+    let mut corrupt = b"  AB   123def    -45".to_vec();
+    corrupt[2] = 0xFF;
+    assert!(matches!(
+        AsciiTable::from_data(&header, corrupt),
+        Err(FitsError::InvalidValue { .. })
+    ));
 }
 
 #[test]
