@@ -18,10 +18,12 @@ use bitvec::slice::BitSlice;
 use bitvec::view::BitView;
 use num_complex::Complex;
 
-use crate::data::U16_OFFSET;
-use crate::data::U32_OFFSET;
-use crate::data::U64_OFFSET;
+use crate::bitpix::Bitpix;
+use crate::data::SampleType;
+use crate::data::Scaling;
 use crate::data::UnsignedData;
+use crate::data::UnsignedKind;
+use crate::endian::decode_be_cells;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::validate_table_field_count;
@@ -614,7 +616,7 @@ impl<'a> ColumnReader<'a> {
         let Some(kind) = unsigned_kind(col.tform.kind, col.tscale, col.tzero, col.tnull) else {
             return Ok(None);
         };
-        Ok(Some(unsigned_cells(
+        Ok(Some(UnsignedData::from_be_cells(
             self.table.cells(col),
             self.table.schema.nrows * col.tform.repeat,
             kind,
@@ -691,7 +693,7 @@ impl<'a> ColumnReader<'a> {
             return Ok(None);
         };
         self.map_vla_rows(column, |cell| {
-            Ok(unsigned_cells(
+            Ok(UnsignedData::from_be_cells(
                 std::iter::once(cell.bytes),
                 cell.element_count,
                 kind,
@@ -949,33 +951,6 @@ fn validate_vla_tdim(col: &Column, element_count: usize) -> Result<()> {
     Ok(())
 }
 
-fn map_cells<'a, T, const N: usize>(
-    cells: impl Iterator<Item = &'a [u8]>,
-    capacity: usize,
-    decode: impl Fn([u8; N]) -> T,
-) -> Vec<T> {
-    let mut out = Vec::with_capacity(capacity);
-    for cell in cells {
-        debug_assert_eq!(cell.len() % N, 0, "whole column elements");
-        out.extend(cell.chunks_exact(N).map(|chunk| {
-            decode(
-                chunk
-                    .try_into()
-                    .expect("chunk has the column element width"),
-            )
-        }));
-    }
-    out
-}
-
-/// Decode a run of `kind` scalar elements from `cells`, concatenated in order — the
-/// arms shared by a fixed-width column read (one cell per row) and a heap array (one
-/// contiguous run). `capacity` is only a `Vec::with_capacity` hint.
-///
-/// `A` and the `P`/`Q` descriptors are deliberately absent: a character cell means
-/// one field *per row* when read as a column but one field for the *whole run* when
-/// read from the heap, and a descriptor is only ever a raw byte blob. Each caller
-/// resolves those two before delegating here.
 fn decode_scalar_cells<'a>(
     cells: impl Iterator<Item = &'a [u8]>,
     capacity: usize,
@@ -983,7 +958,7 @@ fn decode_scalar_cells<'a>(
 ) -> ColumnData {
     match kind {
         TformKind::Logical => {
-            ColumnData::Logical(map_cells(cells, capacity, |[byte]| match byte {
+            ColumnData::Logical(decode_be_cells(cells, capacity, |[byte]| match byte {
                 b'T' => Some(true),
                 b'F' => Some(false),
                 // 0x00 (or any non-T/F byte) is the §7.3.3 undefined value.
@@ -991,23 +966,25 @@ fn decode_scalar_cells<'a>(
             }))
         }
         TformKind::Byte | TformKind::Bit => {
-            ColumnData::Bytes(map_cells(cells, capacity, |[byte]| byte))
+            ColumnData::Bytes(decode_be_cells(cells, capacity, |[byte]| byte))
         }
-        TformKind::I16 => ColumnData::I16(map_cells(cells, capacity, i16::from_be_bytes)),
-        TformKind::I32 => ColumnData::I32(map_cells(cells, capacity, i32::from_be_bytes)),
-        TformKind::I64 => ColumnData::I64(map_cells(cells, capacity, i64::from_be_bytes)),
-        TformKind::F32 => ColumnData::F32(map_cells(cells, capacity, f32::from_be_bytes)),
-        TformKind::F64 => ColumnData::F64(map_cells(cells, capacity, f64::from_be_bytes)),
+        TformKind::I16 => ColumnData::I16(decode_be_cells(cells, capacity, i16::from_be_bytes)),
+        TformKind::I32 => ColumnData::I32(decode_be_cells(cells, capacity, i32::from_be_bytes)),
+        TformKind::I64 => ColumnData::I64(decode_be_cells(cells, capacity, i64::from_be_bytes)),
+        TformKind::F32 => ColumnData::F32(decode_be_cells(cells, capacity, f32::from_be_bytes)),
+        TformKind::F64 => ColumnData::F64(decode_be_cells(cells, capacity, f64::from_be_bytes)),
         TformKind::ComplexF32 => {
-            ColumnData::ComplexF32(map_cells(cells, capacity, |bytes: [u8; 8]| Complex {
+            ColumnData::ComplexF32(decode_be_cells(cells, capacity, |bytes: [u8; 8]| Complex {
                 re: f32::from_be_bytes(bytes[..4].try_into().unwrap()),
                 im: f32::from_be_bytes(bytes[4..].try_into().unwrap()),
             }))
         }
         TformKind::ComplexF64 => {
-            ColumnData::ComplexF64(map_cells(cells, capacity, |bytes: [u8; 16]| Complex {
-                re: f64::from_be_bytes(bytes[..8].try_into().unwrap()),
-                im: f64::from_be_bytes(bytes[8..].try_into().unwrap()),
+            ColumnData::ComplexF64(decode_be_cells(cells, capacity, |bytes: [u8; 16]| {
+                Complex {
+                    re: f64::from_be_bytes(bytes[..8].try_into().unwrap()),
+                    im: f64::from_be_bytes(bytes[8..].try_into().unwrap()),
+                }
             }))
         }
         TformKind::Char | TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
@@ -1049,49 +1026,35 @@ pub(crate) fn decode_fixed_cell(col: &Column, bytes: &[u8]) -> ColumnData {
     decode_fixed_cells(std::iter::once(bytes), 1, col)
 }
 
-#[derive(Debug, Clone, Copy)]
-enum UnsignedKind {
-    I8,
-    U16,
-    U32,
-    U64,
-}
-
+/// Whether a column's `TSCALn`/`TZEROn`/`TNULLn` realize a FITS unsigned (or
+/// signed-byte) convention, and which one. `TZEROn` on a table column means exactly
+/// what `BZERO` means on an image, so the offset test itself lives once, in
+/// [`SampleType::from_scaling`] — this only maps the column's stored type onto the
+/// matching `BITPIX` and forwards the linear scaling.
 fn unsigned_kind(
     kind: TformKind,
     tscale: f64,
     tzero: f64,
     tnull: Option<i64>,
 ) -> Option<UnsignedKind> {
-    if tscale != 1.0 || tnull.is_some() {
+    // A null sentinel marks elements with no exact integer value, so an unsigned view
+    // cannot represent them; `SampleType` deliberately ignores it, so guard here.
+    if tnull.is_some() {
         return None;
     }
-    match kind {
-        TformKind::Byte if tzero == -128.0 => Some(UnsignedKind::I8),
-        TformKind::I16 if tzero == U16_OFFSET => Some(UnsignedKind::U16),
-        TformKind::I32 if tzero == U32_OFFSET => Some(UnsignedKind::U32),
-        TformKind::I64 if tzero == U64_OFFSET => Some(UnsignedKind::U64),
-        _ => None,
-    }
-}
-
-fn unsigned_cells<'a>(
-    cells: impl Iterator<Item = &'a [u8]>,
-    capacity: usize,
-    kind: UnsignedKind,
-) -> UnsignedData {
-    match kind {
-        UnsignedKind::I8 => UnsignedData::I8(map_cells(cells, capacity, |[x]| (x ^ 0x80) as i8)),
-        UnsignedKind::U16 => UnsignedData::U16(map_cells(cells, capacity, |bytes| {
-            (i16::from_be_bytes(bytes) as u16) ^ 0x8000
-        })),
-        UnsignedKind::U32 => UnsignedData::U32(map_cells(cells, capacity, |bytes| {
-            (i32::from_be_bytes(bytes) as u32) ^ 0x8000_0000
-        })),
-        UnsignedKind::U64 => UnsignedData::U64(map_cells(cells, capacity, |bytes| {
-            (i64::from_be_bytes(bytes) as u64) ^ 0x8000_0000_0000_0000
-        })),
-    }
+    let bitpix = match kind {
+        TformKind::Byte => Bitpix::U8,
+        TformKind::I16 => Bitpix::I16,
+        TformKind::I32 => Bitpix::I32,
+        TformKind::I64 => Bitpix::I64,
+        _ => return None,
+    };
+    let scaling = Scaling {
+        bscale: tscale,
+        bzero: tzero,
+        blank: None,
+    };
+    SampleType::from_scaling(bitpix, &scaling).unsigned_kind()
 }
 
 fn complex_cells<'a>(
@@ -1106,13 +1069,13 @@ fn complex_cells<'a>(
         im: tscale * im,
     };
     match kind {
-        TformKind::ComplexF32 => Ok(map_cells(cells, capacity, |bytes: [u8; 8]| {
+        TformKind::ComplexF32 => Ok(decode_be_cells(cells, capacity, |bytes: [u8; 8]| {
             scale(
                 f32::from_be_bytes(bytes[..4].try_into().unwrap()) as f64,
                 f32::from_be_bytes(bytes[4..].try_into().unwrap()) as f64,
             )
         })),
-        TformKind::ComplexF64 => Ok(map_cells(cells, capacity, |bytes: [u8; 16]| {
+        TformKind::ComplexF64 => Ok(decode_be_cells(cells, capacity, |bytes: [u8; 16]| {
             scale(
                 f64::from_be_bytes(bytes[..8].try_into().unwrap()),
                 f64::from_be_bytes(bytes[8..].try_into().unwrap()),
@@ -1139,20 +1102,22 @@ fn physical_cells<'a>(
         }
     };
     Ok(match kind {
-        TformKind::Byte => map_cells(cells, capacity, |[x]| scaled_int(x as i64)),
-        TformKind::I16 => map_cells(cells, capacity, |bytes| {
+        TformKind::Byte => decode_be_cells(cells, capacity, |[x]| scaled_int(x as i64)),
+        TformKind::I16 => decode_be_cells(cells, capacity, |bytes| {
             scaled_int(i16::from_be_bytes(bytes) as i64)
         }),
-        TformKind::I32 => map_cells(cells, capacity, |bytes| {
+        TformKind::I32 => decode_be_cells(cells, capacity, |bytes| {
             scaled_int(i32::from_be_bytes(bytes) as i64)
         }),
-        TformKind::I64 => map_cells(cells, capacity, |bytes| {
+        TformKind::I64 => decode_be_cells(cells, capacity, |bytes| {
             scaled_int(i64::from_be_bytes(bytes))
         }),
-        TformKind::F32 => map_cells(cells, capacity, |bytes| {
+        TformKind::F32 => decode_be_cells(cells, capacity, |bytes| {
             scale(f32::from_be_bytes(bytes) as f64)
         }),
-        TformKind::F64 => map_cells(cells, capacity, |bytes| scale(f64::from_be_bytes(bytes))),
+        TformKind::F64 => {
+            decode_be_cells(cells, capacity, |bytes| scale(f64::from_be_bytes(bytes)))
+        }
         _ => return Err(FitsError::NonNumericColumn { code: kind.code() }),
     })
 }

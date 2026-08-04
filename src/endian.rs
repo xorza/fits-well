@@ -16,10 +16,30 @@ pub(crate) fn decode_be<const N: usize, T, F>(bytes: &[u8], conv: F) -> Vec<T>
 where
     F: Fn([u8; N]) -> T,
 {
-    bytes
-        .chunks_exact(N)
-        .map(|c| conv(c.try_into().expect("chunks_exact yields N-byte arrays")))
-        .collect()
+    decode_be_cells(std::iter::once(bytes), bytes.len() / N, conv)
+}
+
+/// [`decode_be`] over a *sequence* of buffers, decoded in order into one `Vec`. An
+/// image or heap array is a single contiguous run, but a binary-table column read
+/// visits one strided cell per row, so the elements it decodes are not adjacent.
+/// `capacity` is a `Vec::with_capacity` hint only.
+pub(crate) fn decode_be_cells<'a, const N: usize, T, F>(
+    cells: impl Iterator<Item = &'a [u8]>,
+    capacity: usize,
+    conv: F,
+) -> Vec<T>
+where
+    F: Fn([u8; N]) -> T,
+{
+    let mut out = Vec::with_capacity(capacity);
+    for cell in cells {
+        debug_assert_eq!(cell.len() % N, 0, "whole big-endian elements");
+        out.extend(
+            cell.chunks_exact(N)
+                .map(|c| conv(c.try_into().expect("chunks_exact yields N-byte arrays"))),
+        );
+    }
+    out
 }
 
 /// Decode a big-endian buffer into the host-endian slice `dst` (one element per

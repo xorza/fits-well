@@ -13,6 +13,7 @@
 
 use crate::bitpix::Bitpix;
 use crate::endian::decode_be;
+use crate::endian::decode_be_cells;
 use crate::endian::decode_be_into_slice;
 use crate::endian::extend_be;
 use crate::error::FitsError;
@@ -162,15 +163,7 @@ impl ImageData {
     }
 
     fn physical_as<O: PhysicalOut>(&self, scaling: &Scaling) -> Vec<O> {
-        let scale = |x: f64| O::from_f64(scaling.scale(x));
-        match self {
-            ImageData::U8(v) => scale_ints(v, scaling),
-            ImageData::I16(v) => scale_ints(v, scaling),
-            ImageData::I32(v) => scale_ints(v, scaling),
-            ImageData::I64(v) => scale_ints(v, scaling),
-            ImageData::F32(v) => v.iter().map(|&x| scale(x as f64)).collect(),
-            ImageData::F64(v) => v.iter().map(|&x| scale(x)).collect(),
-        }
+        physical_view(self.view(0..self.len()), scaling)
     }
 
     /// Exact typed unsigned (or signed-byte) reinterpretation when `scaling` is
@@ -186,13 +179,40 @@ impl ImageData {
         if scaling.blank.is_some() {
             return None;
         }
-        match (self, SampleType::from_scaling(self.bitpix(), scaling)) {
-            (ImageData::U8(v), SampleType::I8) => Some(UnsignedData::from_signed_byte(v)),
-            (ImageData::I16(v), SampleType::U16) => Some(UnsignedData::from_offset_i16(v)),
-            (ImageData::I32(v), SampleType::U32) => Some(UnsignedData::from_offset_i32(v)),
-            (ImageData::I64(v), SampleType::U64) => Some(UnsignedData::from_offset_i64(v)),
-            _ => None,
-        }
+        let kind = SampleType::from_scaling(self.bitpix(), scaling).unsigned_kind()?;
+        // The kind is derived from this buffer's own `BITPIX`, so the pairings below
+        // are the only reachable ones.
+        Some(match (self, kind) {
+            (ImageData::U8(v), UnsignedKind::I8) => {
+                UnsignedData::I8(v.iter().map(|&x| flip_i8(x)).collect())
+            }
+            (ImageData::I16(v), UnsignedKind::U16) => {
+                UnsignedData::U16(v.iter().map(|&x| flip_u16(x)).collect())
+            }
+            (ImageData::I32(v), UnsignedKind::U32) => {
+                UnsignedData::U32(v.iter().map(|&x| flip_u32(x)).collect())
+            }
+            (ImageData::I64(v), UnsignedKind::U64) => {
+                UnsignedData::U64(v.iter().map(|&x| flip_u64(x)).collect())
+            }
+            _ => return None,
+        })
+    }
+}
+
+/// The physical plane of a borrowed sample range: `BZERO + BSCALE × sample`, with
+/// integer samples equal to `BLANK` mapping to `NaN` (§3.4). The `BITPIX` match runs
+/// once for the whole view rather than once per element, so a caller wanting a
+/// sub-range (a random group's parameters or array) slices the view, not the loop.
+pub(crate) fn physical_view<O: PhysicalOut>(view: ImageView<'_>, scaling: &Scaling) -> Vec<O> {
+    let scale = |x: f64| O::from_f64(scaling.scale(x));
+    match view {
+        ImageView::U8(v) => scale_ints(v, scaling),
+        ImageView::I16(v) => scale_ints(v, scaling),
+        ImageView::I32(v) => scale_ints(v, scaling),
+        ImageView::I64(v) => scale_ints(v, scaling),
+        ImageView::F32(v) => v.iter().map(|&x| scale(x as f64)).collect(),
+        ImageView::F64(v) => v.iter().map(|&x| scale(x)).collect(),
     }
 }
 
@@ -225,21 +245,12 @@ fn unsigned_from_be(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Option<U
         return None;
     }
     assert_whole_elements(bytes, bitpix);
-    match SampleType::from_scaling(bitpix, scaling) {
-        SampleType::I8 => Some(UnsignedData::I8(
-            bytes.iter().map(|&x| (x ^ 0x80) as i8).collect(),
-        )),
-        SampleType::U16 => Some(UnsignedData::U16(decode_be(bytes, |b| {
-            (i16::from_be_bytes(b) as u16) ^ 0x8000
-        }))),
-        SampleType::U32 => Some(UnsignedData::U32(decode_be(bytes, |b| {
-            (i32::from_be_bytes(b) as u32) ^ 0x8000_0000
-        }))),
-        SampleType::U64 => Some(UnsignedData::U64(decode_be(bytes, |b| {
-            (i64::from_be_bytes(b) as u64) ^ 0x8000_0000_0000_0000
-        }))),
-        _ => None,
-    }
+    let kind = SampleType::from_scaling(bitpix, scaling).unsigned_kind()?;
+    Some(UnsignedData::from_be_cells(
+        std::iter::once(bytes),
+        bytes.len() / bitpix.elem_size(),
+        kind,
+    ))
 }
 
 /// A borrowed, host-endian view of FITS array samples, tagged by `BITPIX` — the
@@ -550,6 +561,52 @@ pub(crate) const U32_OFFSET: f64 = 2_147_483_648.0; // 2³¹
 pub(crate) const U64_OFFSET_INTEGER: u64 = 1_u64 << 63;
 pub(crate) const U64_OFFSET: f64 = U64_OFFSET_INTEGER as f64;
 
+/// The same offsets in the integer domain. Stored and physical differ by exactly the
+/// sign bit, so the conversion is a XOR — and, being its own inverse, the identical
+/// mask serves both reading a stored value and storing a physical one. Each mask is
+/// written once here rather than inline at every conversion.
+const I8_SIGN: u8 = 0x80;
+const U16_SIGN: u16 = 0x8000;
+const U32_SIGN: u32 = 0x8000_0000;
+const U64_SIGN: u64 = U64_OFFSET_INTEGER;
+
+const fn flip_i8(stored: u8) -> i8 {
+    (stored ^ I8_SIGN) as i8
+}
+const fn flip_u16(stored: i16) -> u16 {
+    (stored as u16) ^ U16_SIGN
+}
+const fn flip_u32(stored: i32) -> u32 {
+    (stored as u32) ^ U32_SIGN
+}
+const fn flip_u64(stored: i64) -> u64 {
+    (stored as u64) ^ U64_SIGN
+}
+
+const fn store_i8(value: i8) -> u8 {
+    (value as u8) ^ I8_SIGN
+}
+const fn store_u16(value: u16) -> i16 {
+    (value ^ U16_SIGN) as i16
+}
+const fn store_u32(value: u32) -> i32 {
+    (value ^ U32_SIGN) as i32
+}
+const fn store_u64(value: u64) -> i64 {
+    (value ^ U64_SIGN) as i64
+}
+
+/// Which exact-integer realization of the FITS sign-bit-offset conventions a stored
+/// type carries — effectively the tag of [`UnsignedData`], and the single thing both
+/// the image (`BZERO`) and binary-table (`TZEROn`) paths must resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnsignedKind {
+    I8,
+    U16,
+    U32,
+    U64,
+}
+
 /// The effective element type of an image's *physical* samples — the analogue of
 /// cfitsio's image "equivalent type". `BITPIX` records only the stored width and
 /// signedness; the FITS unsigned and signed-byte conventions then layer a `BZERO`
@@ -624,6 +681,19 @@ impl SampleType {
     pub fn is_integer(self) -> bool {
         !self.is_float()
     }
+
+    /// The exact-integer realization this type denotes, or `None` when no sign-bit
+    /// offset is in play. `U8` is deliberately absent: a `BITPIX = 8` sample is
+    /// natively unsigned, so there is nothing to recover.
+    pub(crate) fn unsigned_kind(self) -> Option<UnsignedKind> {
+        match self {
+            SampleType::I8 => Some(UnsignedKind::I8),
+            SampleType::U16 => Some(UnsignedKind::U16),
+            SampleType::U32 => Some(UnsignedKind::U32),
+            SampleType::U64 => Some(UnsignedKind::U64),
+            _ => None,
+        }
+    }
 }
 
 /// A typed integer realization of the FITS unsigned (and signed-byte) storage
@@ -645,24 +715,32 @@ pub enum UnsignedData {
 }
 
 impl UnsignedData {
-    /// Recover already-decoded image values from sign-bit-offset storage (the
-    /// §5.2.5 / Table 19 convention) by flipping the sign bit.
-    fn from_signed_byte(stored: &[u8]) -> UnsignedData {
-        UnsignedData::I8(stored.iter().map(|&x| (x ^ 0x80) as i8).collect())
-    }
-    fn from_offset_i16(stored: &[i16]) -> UnsignedData {
-        UnsignedData::U16(stored.iter().map(|&x| (x as u16) ^ 0x8000).collect())
-    }
-    fn from_offset_i32(stored: &[i32]) -> UnsignedData {
-        UnsignedData::U32(stored.iter().map(|&x| (x as u32) ^ 0x8000_0000).collect())
-    }
-    fn from_offset_i64(stored: &[i64]) -> UnsignedData {
-        UnsignedData::U64(
-            stored
-                .iter()
-                .map(|&x| (x as u64) ^ 0x8000_0000_0000_0000)
-                .collect(),
-        )
+    /// Recover exact values from big-endian sign-bit-offset storage (the §5.2.5 /
+    /// Table 19 convention) by flipping the stored sign bit. `cells` is one contiguous
+    /// run for an image or heap array, or one strided cell per row for a table column;
+    /// `capacity` is a `Vec::with_capacity` hint.
+    ///
+    /// This is exact across the whole 64-bit range, unlike routing the same values
+    /// through the `f64` physical plane.
+    pub(crate) fn from_be_cells<'a>(
+        cells: impl Iterator<Item = &'a [u8]>,
+        capacity: usize,
+        kind: UnsignedKind,
+    ) -> UnsignedData {
+        match kind {
+            UnsignedKind::I8 => {
+                UnsignedData::I8(decode_be_cells(cells, capacity, |[x]| flip_i8(x)))
+            }
+            UnsignedKind::U16 => UnsignedData::U16(decode_be_cells(cells, capacity, |b| {
+                flip_u16(i16::from_be_bytes(b))
+            })),
+            UnsignedKind::U32 => UnsignedData::U32(decode_be_cells(cells, capacity, |b| {
+                flip_u32(i32::from_be_bytes(b))
+            })),
+            UnsignedKind::U64 => UnsignedData::U64(decode_be_cells(cells, capacity, |b| {
+                flip_u64(i64::from_be_bytes(b))
+            })),
+        }
     }
 }
 
@@ -737,7 +815,7 @@ impl Image {
     pub fn from_u16(shape: Vec<usize>, data: &[u16]) -> Result<Image> {
         Image::offset_image(
             shape,
-            ImageData::I16(data.iter().map(|&x| (x ^ 0x8000) as i16).collect()),
+            ImageData::I16(data.iter().copied().map(store_u16).collect()),
             U16_OFFSET,
         )
     }
@@ -746,7 +824,7 @@ impl Image {
     pub fn from_u32(shape: Vec<usize>, data: &[u32]) -> Result<Image> {
         Image::offset_image(
             shape,
-            ImageData::I32(data.iter().map(|&x| (x ^ 0x8000_0000) as i32).collect()),
+            ImageData::I32(data.iter().copied().map(store_u32).collect()),
             U32_OFFSET,
         )
     }
@@ -755,11 +833,7 @@ impl Image {
     pub fn from_u64(shape: Vec<usize>, data: &[u64]) -> Result<Image> {
         Image::offset_image(
             shape,
-            ImageData::I64(
-                data.iter()
-                    .map(|&x| (x ^ 0x8000_0000_0000_0000) as i64)
-                    .collect(),
-            ),
+            ImageData::I64(data.iter().copied().map(store_u64).collect()),
             U64_OFFSET,
         )
     }
@@ -768,7 +842,7 @@ impl Image {
     pub fn from_i8(shape: Vec<usize>, data: &[i8]) -> Result<Image> {
         Image::offset_image(
             shape,
-            ImageData::U8(data.iter().map(|&x| (x as u8) ^ 0x80).collect()),
+            ImageData::U8(data.iter().copied().map(store_i8).collect()),
             -128.0,
         )
     }
@@ -827,10 +901,10 @@ where
         .collect()
 }
 
-/// Output element type of the physical-plane map. Private, hence sealed: the only
-/// implementors are `f64` (the canonical plane) and `f32` (the compact plane). The
-/// scaling arithmetic always runs in `f64`; `from_f64` is the final narrowing.
-trait PhysicalOut: Copy {
+/// Output element type of the physical-plane map. Crate-private, hence sealed: the
+/// only implementors are `f64` (the canonical plane) and `f32` (the compact plane).
+/// The scaling arithmetic always runs in `f64`; `from_f64` is the final narrowing.
+pub(crate) trait PhysicalOut: Copy {
     fn from_f64(value: f64) -> Self;
 }
 

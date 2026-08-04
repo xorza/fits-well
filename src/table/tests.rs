@@ -1,3 +1,4 @@
+use crate::data::U64_OFFSET;
 use crate::reader::FitsReader;
 use crate::table_impl::*;
 use bitvec::bitvec;
