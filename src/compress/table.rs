@@ -369,9 +369,9 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
         return Err(FitsError::NotCompressedTable);
     }
     bind_table(header, table)?;
-    let naxis1 = req_usize(header, "ZNAXIS1")?;
-    let nrows = req_usize(header, "ZNAXIS2")?;
-    let zpcount = req_usize(header, "ZPCOUNT")?;
+    let naxis1 = header.required_usize("ZNAXIS1", "ZNAXIS1")?;
+    let nrows = header.required_usize("ZNAXIS2", "ZNAXIS2")?;
+    let zpcount = header.required_usize("ZPCOUNT", "ZPCOUNT")?;
     let original_bytes = nrows
         .checked_mul(naxis1)
         .ok_or(FitsError::DataUnitOverflow)?;
@@ -391,11 +391,15 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
     }
     header.get_text("ZHECKSUM")?;
     header.get_text("ZDATASUM")?;
-    let mut rpt = req_positive_usize(header, "ZTILELEN")?;
+    let mut rpt = header.required_usize("ZTILELEN", "ZTILELEN")?;
+    // A zero tile height would make the row-tile count diverge; §10.3 requires ≥ 1.
+    if rpt == 0 {
+        return Err(FitsError::KeywordOutOfRange { name: "ZTILELEN" });
+    }
     if rpt > nrows {
         rpt = nrows.max(1);
     }
-    let ncols = req_usize(header, "TFIELDS")?;
+    let ncols = header.required_usize("TFIELDS", "TFIELDS")?;
     validate_table_field_count(ncols)?;
 
     // Resolve each column's original form and codec.
@@ -576,7 +580,7 @@ fn bind_table<'a>(header: &Header, table: &'a BinTable) -> Result<BoundTable<'a>
         ("GCOUNT", 1),
         ("TFIELDS", metadata.columns.len()),
     ] {
-        if req_usize(header, keyword)? != expected {
+        if header.required_usize(keyword, keyword)? != expected {
             return Err(metadata_mismatch(keyword));
         }
     }
@@ -614,7 +618,7 @@ fn bind_table<'a>(header: &Header, table: &'a BinTable) -> Result<BoundTable<'a>
         return Err(metadata_mismatch("THEAP"));
     }
     let pcount = table.heap_end - rows.len();
-    if req_usize(header, "PCOUNT")? != pcount {
+    if header.required_usize("PCOUNT", "PCOUNT")? != pcount {
         return Err(metadata_mismatch("PCOUNT"));
     }
     let theap = match header.get_integer("THEAP")? {
@@ -986,24 +990,6 @@ fn scatter_column(out: &mut [u8], bytes: &[u8], rows: usize, row_len: usize, m: 
         let offset = row * row_len + m.offset;
         out[offset..offset + m.width].copy_from_slice(&bytes[row * m.width..(row + 1) * m.width]);
     }
-}
-
-fn req_int(header: &Header, key: &'static str) -> Result<i64> {
-    header
-        .get_integer(key)?
-        .ok_or(FitsError::MissingKeyword { name: key })
-}
-
-fn req_usize(header: &Header, key: &'static str) -> Result<usize> {
-    usize::try_from(req_int(header, key)?).map_err(|_| FitsError::KeywordOutOfRange { name: key })
-}
-
-fn req_positive_usize(header: &Header, key: &'static str) -> Result<usize> {
-    let value = req_usize(header, key)?;
-    if value == 0 {
-        return Err(FitsError::KeywordOutOfRange { name: key });
-    }
-    Ok(value)
 }
 
 fn fits_i64(value: usize) -> Result<i64> {
