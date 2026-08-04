@@ -210,26 +210,48 @@ impl Card {
         result
     }
 
-    fn render_validated_into(&self, out: &mut Vec<u8>) -> Result<()> {
-        // A string value that overflows one record emits a CONTINUE chain (§4.2.1.2).
-        if let Some(Value::Text(s)) = &self.value {
-            let value_len = 2 + s.len() + s.bytes().filter(|&b| b == b'\'').count();
-            let comment_len = self.comment.as_ref().map_or(0, |c| 3 + c.len());
-            let prefix_len = match self.kind {
-                CardKind::Value => 10,
-                _ => usize::MAX, // other kinds never use the chain
-            };
-            if prefix_len != usize::MAX && prefix_len + value_len + comment_len > CARD_SIZE {
-                render_long_string(&self.keyword, s, self.comment.as_deref(), out)?;
-                return Ok(());
-            }
+    /// The text value that cannot fit one 80-byte record and so must be emitted as a
+    /// `CONTINUE` chain (§4.2.1.2). Only a valued card ever uses the chain — a
+    /// commentary or `CONTINUE` record carries its text in the comment field.
+    fn continuation_chain(&self) -> Option<&str> {
+        let Some(Value::Text(text)) = &self.value else {
+            return None;
+        };
+        if self.kind != CardKind::Value {
+            return None;
         }
-        out.extend_from_slice(&self.render_one()?);
-        Ok(())
+        // The rendered value is the quoted text with each embedded quote doubled; the
+        // comment adds its ` / ` separator. Byte 11 is where the value starts.
+        let value_len = 2 + text.len() + text.bytes().filter(|&b| b == b'\'').count();
+        let comment_len = self.comment.as_ref().map_or(0, |c| 3 + c.len());
+        (10 + value_len + comment_len > CARD_SIZE).then_some(text.as_str())
     }
 
+    fn render_validated_into(&self, out: &mut Vec<u8>) -> Result<()> {
+        match self.continuation_chain() {
+            Some(text) => render_long_string(&self.keyword, text, self.comment.as_deref(), out),
+            None => {
+                out.extend_from_slice(&self.render_one()?);
+                Ok(())
+            }
+        }
+    }
+
+    /// A card is valid exactly when it renders, so this runs the same path and
+    /// discards the output. Only a `CONTINUE` chain needs a growable buffer; every
+    /// other card renders into a fixed 80-byte record, so the common `Header::set`
+    /// pays no staging allocation.
     pub(super) fn validate(&self) -> Result<()> {
-        self.render_into(&mut Vec::new())
+        self.validate_contents()?;
+        match self.continuation_chain() {
+            Some(text) => render_long_string(
+                &self.keyword,
+                text,
+                self.comment.as_deref(),
+                &mut Vec::new(),
+            ),
+            None => self.render_one().map(|_| ()),
+        }
     }
 
     fn validate_contents(&self) -> Result<()> {
