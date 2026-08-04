@@ -471,26 +471,22 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
             let chunk_len = rows
                 .checked_mul(naxis1)
                 .ok_or(FitsError::DataUnitOverflow)?;
-            let chunk_main = &mut main[chunk_start..chunk_start + chunk_len];
+            let mut restore = RestoreChunk {
+                main: &mut main[chunk_start..chunk_start + chunk_len],
+                heap: &mut *heap,
+                rows,
+                row_len: naxis1,
+                heap_gap,
+            };
             for column in 0..ncols {
                 let m = &metas[column];
                 let cell = cells[column].cell(chunk)?;
                 let bytes = convert::byte_cell(cell)?;
                 if m.is_stored_vla() {
-                    decompress_vla_column(
-                        table,
-                        bytes,
-                        m,
-                        rows,
-                        naxis1,
-                        heap_gap,
-                        chunk_main,
-                        heap,
-                        &mut scratch,
-                    )?;
+                    restore.decompress_vla_column(table, bytes, m, &mut scratch)?;
                 } else {
                     decompress_column_into(bytes, m, rows, &mut scratch)?;
-                    scatter_column(chunk_main, &scratch.bytes, rows, naxis1, m);
+                    scatter_column(restore.main, &scratch.bytes, rows, naxis1, m);
                 }
             }
         }
@@ -717,6 +713,9 @@ struct TableDecodeScratch {
     vla: Vec<u8>,
 }
 
+/// Which end of a tile's descriptor block holds which set. FITS 4.0 stores the
+/// compressed descriptors first; cfitsio-written files reverse them, so a reader has
+/// to work out which order it is looking at.
 #[derive(Debug, Clone, Copy)]
 struct VlaLayout {
     original_start: usize,
@@ -729,165 +728,171 @@ enum VlaLayoutError {
     Rejected,
 }
 
-fn validate_vla_layout(
-    table: &BinTable,
-    descriptors: &[u8],
-    layout: VlaLayout,
-    m: &ColMeta,
-    rows: usize,
-    heap_gap: usize,
-    heap_len: usize,
-) -> std::result::Result<(), VlaLayoutError> {
-    let wide = m.kind == TformKind::ArrayDesc64;
-    let element_kind = m
-        .vla_elem
-        .expect("VLA column metadata carries its element kind");
-    for row in 0..rows {
-        let original_start = layout.original_start + row * m.width;
-        let compressed_start = layout.compressed_start + row * 16;
-        let original =
-            PqDescriptor::decode(&descriptors[original_start..original_start + m.width], wide)
-                .map_err(VlaLayoutError::OriginalDescriptor)?;
-        let compressed =
-            PqDescriptor::decode(&descriptors[compressed_start..compressed_start + 16], true)
-                .map_err(|_| VlaLayoutError::Rejected)?;
-        let original_range = original
-            .heap_range(element_kind, heap_gap, heap_len)
-            .map_err(|_| VlaLayoutError::Rejected)?;
-        if original_range.is_empty() {
-            if compressed.count != 0 {
-                return Err(VlaLayoutError::Rejected);
-            }
-            continue;
-        }
-        if compressed.count == 0
-            || compressed
-                .heap_range(
-                    TformKind::Byte,
-                    table.schema.heap_offset,
-                    table.schema.heap_end,
-                )
-                .is_err()
-        {
-            return Err(VlaLayoutError::Rejected);
-        }
-    }
-    Ok(())
-}
-
-#[expect(clippy::too_many_arguments)]
-fn decompress_vla_column(
-    table: &BinTable,
-    bytes: &[u8],
-    m: &ColMeta,
+/// One row-tile of the table being restored: the slice of the main table its rows
+/// occupy, the shared heap they point into, and the geometry both need.
+#[derive(Debug)]
+struct RestoreChunk<'a> {
+    main: &'a mut [u8],
+    heap: &'a mut [u8],
     rows: usize,
     row_len: usize,
+    /// Bytes `THEAP` leaves between the end of the main table and the heap.
     heap_gap: usize,
-    main: &mut [u8],
-    heap: &mut [u8],
-    scratch: &mut TableDecodeScratch,
-) -> Result<()> {
-    let original_len = rows
-        .checked_mul(m.width)
-        .ok_or(FitsError::DataUnitOverflow)?;
-    let combined_len = original_len
-        .checked_add(rows.checked_mul(16).ok_or(FitsError::DataUnitOverflow)?)
-        .ok_or(FitsError::DataUnitOverflow)?;
-    gzip::gunzip_into(bytes, combined_len, &mut scratch.descriptors)?;
-    if scratch.descriptors.len() != combined_len {
-        return Err(FitsError::DataSizeMismatch {
-            expected: combined_len,
-            got: scratch.descriptors.len(),
-        });
-    }
+}
 
-    // FITS 4.0 stores compressed descriptors first; CFITSIO reverses them in existing files.
-    let standard = VlaLayout {
-        original_start: rows.checked_mul(16).ok_or(FitsError::DataUnitOverflow)?,
-        compressed_start: 0,
-    };
-    let cfitsio = VlaLayout {
-        original_start: 0,
-        compressed_start: original_len,
-    };
-    let standard_result = validate_vla_layout(
-        table,
-        &scratch.descriptors,
-        standard,
-        m,
-        rows,
-        heap_gap,
-        heap.len(),
-    );
-    let layout = match standard_result {
-        Ok(()) => standard,
-        Err(standard_error) => match validate_vla_layout(
-            table,
-            &scratch.descriptors,
-            cfitsio,
-            m,
-            rows,
-            heap_gap,
-            heap.len(),
-        ) {
-            Ok(()) => cfitsio,
-            Err(cfitsio_error) => match (standard_error, cfitsio_error) {
-                (
-                    VlaLayoutError::OriginalDescriptor(
-                        error @ FitsError::InvalidPqDescriptor { .. },
-                    ),
-                    _,
-                )
-                | (
-                    _,
-                    VlaLayoutError::OriginalDescriptor(
-                        error @ FitsError::InvalidPqDescriptor { .. },
-                    ),
-                ) => return Err(error),
-                _ => return Err(FitsError::UnexpectedEof),
-            },
-        },
-    };
-
-    for row in 0..rows {
-        let start = layout.original_start + row * m.width;
-        let descriptor = &scratch.descriptors[start..start + m.width];
-        let offset = row * row_len + m.offset;
-        main[offset..offset + m.width].copy_from_slice(descriptor);
-    }
-
-    let wide = m.kind == TformKind::ArrayDesc64;
-    let element_kind = m
-        .vla_elem
-        .expect("VLA column metadata carries its element kind");
-    for row in 0..rows {
-        let original_start = layout.original_start + row * m.width;
-        let original = PqDescriptor::decode(
-            &scratch.descriptors[original_start..original_start + m.width],
-            wide,
-        )?;
-        let compressed_start = layout.compressed_start + row * 16;
-        let compressed = PqDescriptor::decode(
-            &scratch.descriptors[compressed_start..compressed_start + 16],
-            true,
-        )?;
-        let original_range = original.heap_range(element_kind, heap_gap, heap.len())?;
-        let expected = original_range.len();
-        if expected == 0 {
-            if compressed.count != 0 {
-                return Err(FitsError::DataSizeMismatch {
-                    expected: 0,
-                    got: compressed.count,
-                });
+impl RestoreChunk<'_> {
+    /// Whether `layout` reads this tile's descriptor block consistently: every
+    /// original descriptor must address the restored heap, and must have a compressed
+    /// counterpart exactly when it is non-empty.
+    fn validate_vla_layout(
+        &self,
+        table: &BinTable,
+        descriptors: &[u8],
+        layout: VlaLayout,
+        m: &ColMeta,
+    ) -> std::result::Result<(), VlaLayoutError> {
+        let wide = m.kind == TformKind::ArrayDesc64;
+        let element_kind = m
+            .vla_elem
+            .expect("VLA column metadata carries its element kind");
+        for row in 0..self.rows {
+            let original_start = layout.original_start + row * m.width;
+            let compressed_start = layout.compressed_start + row * 16;
+            let original =
+                PqDescriptor::decode(&descriptors[original_start..original_start + m.width], wide)
+                    .map_err(VlaLayoutError::OriginalDescriptor)?;
+            let compressed =
+                PqDescriptor::decode(&descriptors[compressed_start..compressed_start + 16], true)
+                    .map_err(|_| VlaLayoutError::Rejected)?;
+            let original_range = original
+                .heap_range(element_kind, self.heap_gap, self.heap.len())
+                .map_err(|_| VlaLayoutError::Rejected)?;
+            if original_range.is_empty() {
+                if compressed.count != 0 {
+                    return Err(VlaLayoutError::Rejected);
+                }
+                continue;
             }
-            continue;
+            if compressed.count == 0
+                || compressed
+                    .heap_range(
+                        TformKind::Byte,
+                        table.schema.heap_offset,
+                        table.schema.heap_end,
+                    )
+                    .is_err()
+            {
+                return Err(VlaLayoutError::Rejected);
+            }
         }
-        let stream = table.pq_payload(compressed, TformKind::Byte)?;
-        decompress_vla_payload(stream, m, original.count, expected, scratch)?;
-        let target = &mut heap[original_range];
-        target.copy_from_slice(&scratch.vla);
+        Ok(())
     }
-    Ok(())
+
+    /// Resolve which descriptor order this tile uses. A malformed *original*
+    /// descriptor is a property of the data rather than of the order being guessed,
+    /// so it is the more informative failure to surface when neither order fits.
+    fn resolve_vla_layout(
+        &self,
+        table: &BinTable,
+        descriptors: &[u8],
+        candidates: [VlaLayout; 2],
+        m: &ColMeta,
+    ) -> Result<VlaLayout> {
+        let mut malformed = None;
+        for candidate in candidates {
+            match self.validate_vla_layout(table, descriptors, candidate, m) {
+                Ok(()) => return Ok(candidate),
+                Err(VlaLayoutError::OriginalDescriptor(
+                    error @ FitsError::InvalidPqDescriptor { .. },
+                )) => {
+                    malformed.get_or_insert(error);
+                }
+                Err(_) => {}
+            }
+        }
+        Err(malformed.unwrap_or(FitsError::UnexpectedEof))
+    }
+
+    fn decompress_vla_column(
+        &mut self,
+        table: &BinTable,
+        bytes: &[u8],
+        m: &ColMeta,
+        scratch: &mut TableDecodeScratch,
+    ) -> Result<()> {
+        let original_len = self
+            .rows
+            .checked_mul(m.width)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        let combined_len = original_len
+            .checked_add(
+                self.rows
+                    .checked_mul(16)
+                    .ok_or(FitsError::DataUnitOverflow)?,
+            )
+            .ok_or(FitsError::DataUnitOverflow)?;
+        gzip::gunzip_into(bytes, combined_len, &mut scratch.descriptors)?;
+        if scratch.descriptors.len() != combined_len {
+            return Err(FitsError::DataSizeMismatch {
+                expected: combined_len,
+                got: scratch.descriptors.len(),
+            });
+        }
+
+        let standard = VlaLayout {
+            original_start: self
+                .rows
+                .checked_mul(16)
+                .ok_or(FitsError::DataUnitOverflow)?,
+            compressed_start: 0,
+        };
+        let cfitsio = VlaLayout {
+            original_start: 0,
+            compressed_start: original_len,
+        };
+        let layout =
+            self.resolve_vla_layout(table, &scratch.descriptors, [standard, cfitsio], m)?;
+
+        for row in 0..self.rows {
+            let start = layout.original_start + row * m.width;
+            let descriptor = &scratch.descriptors[start..start + m.width];
+            let offset = row * self.row_len + m.offset;
+            self.main[offset..offset + m.width].copy_from_slice(descriptor);
+        }
+
+        let wide = m.kind == TformKind::ArrayDesc64;
+        let element_kind = m
+            .vla_elem
+            .expect("VLA column metadata carries its element kind");
+        for row in 0..self.rows {
+            let original_start = layout.original_start + row * m.width;
+            let original = PqDescriptor::decode(
+                &scratch.descriptors[original_start..original_start + m.width],
+                wide,
+            )?;
+            let compressed_start = layout.compressed_start + row * 16;
+            let compressed = PqDescriptor::decode(
+                &scratch.descriptors[compressed_start..compressed_start + 16],
+                true,
+            )?;
+            let original_range =
+                original.heap_range(element_kind, self.heap_gap, self.heap.len())?;
+            let expected = original_range.len();
+            if expected == 0 {
+                if compressed.count != 0 {
+                    return Err(FitsError::DataSizeMismatch {
+                        expected: 0,
+                        got: compressed.count,
+                    });
+                }
+                continue;
+            }
+            let stream = table.pq_payload(compressed, TformKind::Byte)?;
+            decompress_vla_payload(stream, m, original.count, expected, scratch)?;
+            self.heap[original_range].copy_from_slice(&scratch.vla);
+        }
+        Ok(())
+    }
 }
 
 fn decompress_vla_payload(

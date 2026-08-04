@@ -27,6 +27,9 @@ unreachable_pub = "deny"
 [lints.clippy]
 items_after_test_module = "deny"
 
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+
 # Render docs.rs with every user-facing feature so compression and mmap appear.
 # `internals` is intentionally omitted — it re-exposes
 # unstable bench-only entry points that shouldn't surface in the public docs.
