@@ -7,7 +7,47 @@
 //! into a fixed stack buffer instead; use the [`key!`] macro exactly like
 //! `format!` and call `.as_str()` on the result.
 
-use core::fmt::Write;
+use core::fmt::{self, Write};
+
+/// The alternate-description suffix — the `a` of the §8 and Table 22 keyword
+/// families. Empty for the primary description, the single letter for an alternate.
+///
+/// Held in a fixed stack buffer so it can be interpolated into a [`key!`] *and*
+/// borrowed as a `&str` (the keyword scans strip it) without the throwaway `String`
+/// a `char::to_string` would allocate on every WCS or time parse. Formatting it
+/// directly also means each keyword has one spelling rather than a present/absent
+/// pair.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AltSuffix {
+    buf: [u8; 4],
+    len: usize,
+}
+
+impl AltSuffix {
+    pub(crate) fn new(alternate: Option<char>) -> AltSuffix {
+        let mut suffix = AltSuffix::default();
+        if let Some(alternate) = alternate {
+            suffix.len = alternate.encode_utf8(&mut suffix.buf).len();
+        }
+        suffix
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.buf[..self.len]).expect("encode_utf8 writes valid UTF-8")
+    }
+
+    /// Whether an alternate description is selected. Several Table 22 families spell
+    /// their root differently for the primary description, which has no suffix.
+    pub(crate) fn is_alternate(&self) -> bool {
+        self.len != 0
+    }
+}
+
+impl fmt::Display for AltSuffix {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// The 1-based index of an indexed FITS keyword: `index("NAXIS3", "NAXIS")` is
 /// `Some(3)`. The suffix must be a non-empty digit run with no leading zero, so a

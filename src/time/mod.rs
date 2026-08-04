@@ -14,6 +14,7 @@ use std::str::FromStr;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use crate::keyword::AltSuffix;
 use crate::keyword::KeyBuf;
 use crate::keyword::key;
 use crate::unit;
@@ -366,7 +367,7 @@ struct PhaseAxisKeywords {
 
 impl PhaseAxisKeywords {
     fn image(axis: usize, alt: Option<char>) -> PhaseAxisKeywords {
-        let suffix = alt.map(|value| value.to_string()).unwrap_or_default();
+        let suffix = AltSuffix::new(alt);
         PhaseAxisKeywords {
             ctype: key!("CTYPE{axis}{suffix}"),
             zero_phase: key!("CZPHS{axis}{suffix}"),
