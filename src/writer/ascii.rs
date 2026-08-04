@@ -66,14 +66,6 @@ impl AsciiWriteColumn {
         self.tnull = Some(tnull.into());
         self
     }
-
-    fn row_count(&self) -> usize {
-        match &self.data {
-            AsciiColumnData::Text(values) => values.len(),
-            AsciiColumnData::Integer(values) => values.len(),
-            AsciiColumnData::Float(values) => values.len(),
-        }
-    }
 }
 
 /// Validated ASCII-table write value with the same inferred-row workflow as
@@ -97,7 +89,7 @@ impl AsciiTableBuilder {
     }
 
     pub fn push(&mut self, column: AsciiWriteColumn) -> Result<&mut Self> {
-        let got = column.row_count();
+        let got = column.data.len();
         if let Some(expected) = self.nrows {
             if expected != got {
                 return Err(FitsError::TableRowCountMismatch {
@@ -161,11 +153,7 @@ impl<W: Write> FitsWriter<W> {
         let mut row_len = 0usize;
         for col in columns {
             validate_ascii_column(col)?;
-            let count = match &col.data {
-                AsciiColumnData::Text(values) => values.len(),
-                AsciiColumnData::Integer(values) => values.len(),
-                AsciiColumnData::Float(values) => values.len(),
-            };
+            let count = col.data.len();
             if count != nrows {
                 return Err(FitsError::RowWidthMismatch {
                     computed: count,
@@ -209,12 +197,7 @@ fn validate_ascii_column(col: &AsciiWriteColumn) -> Result<()> {
         col.tzero,
         !matches!(&col.data, AsciiColumnData::Text(_)),
     )?;
-    let has_null = match &col.data {
-        AsciiColumnData::Text(values) => values.iter().any(Option::is_none),
-        AsciiColumnData::Integer(values) => values.iter().any(Option::is_none),
-        AsciiColumnData::Float(values) => values.iter().any(Option::is_none),
-    };
-    if has_null && marker.is_none() {
+    if col.data.has_null() && marker.is_none() {
         return Err(FitsError::KeywordOutOfRange { name: "TNULLn" });
     }
     Ok(())
@@ -236,69 +219,91 @@ fn validate_ascii_field_width(
     Ok(())
 }
 
+/// One rendered ASCII-table field: the text to write, whether it pads on the right,
+/// and whether it is the `TNULLn` marker rather than a value.
 #[derive(Debug)]
 struct AsciiField<'a> {
     text: Cow<'a, str>,
     left_aligned: bool,
+    is_null: bool,
 }
 
+impl<'a> AsciiField<'a> {
+    /// A null cell renders its validated `TNULLn` marker, left-aligned whatever the
+    /// column's type.
+    fn null(col: &'a AsciiWriteColumn) -> AsciiField<'a> {
+        AsciiField {
+            text: Cow::Borrowed(
+                col.tnull
+                    .as_deref()
+                    .expect("null ASCII cells require a validated TNULLn marker"),
+            ),
+            left_aligned: true,
+            is_null: true,
+        }
+    }
+
+    fn value(text: Cow<'a, str>, left_aligned: bool) -> AsciiField<'a> {
+        AsciiField {
+            text,
+            left_aligned,
+            is_null: false,
+        }
+    }
+}
+
+/// Render row `row` of `col` and validate it: width, restricted ASCII, and that a
+/// genuine value does not collide with the column's null marker.
 fn ascii_field<'a>(col: &'a AsciiWriteColumn, row: usize) -> Result<AsciiField<'a>> {
     let field = match &col.data {
-        AsciiColumnData::Text(values) => AsciiField {
-            text: match &values[row] {
-                Some(value) => Cow::Borrowed(value),
-                None => Cow::Borrowed(
-                    col.tnull
-                        .as_deref()
-                        .expect("null ASCII cells require a validated TNULLn marker"),
-                ),
-            },
-            left_aligned: true,
+        AsciiColumnData::Text(values) => match &values[row] {
+            Some(value) => AsciiField::value(Cow::Borrowed(value.as_str()), true),
+            None => AsciiField::null(col),
         },
-        AsciiColumnData::Integer(values) => AsciiField {
-            text: match values[row] {
-                Some(value) => Cow::Owned(value.to_string()),
-                None => Cow::Borrowed(
-                    col.tnull
-                        .as_deref()
-                        .expect("null ASCII cells require a validated TNULLn marker"),
-                ),
-            },
-            left_aligned: values[row].is_none(),
+        AsciiColumnData::Integer(values) => match values[row] {
+            Some(value) => AsciiField::value(Cow::Owned(value.to_string()), false),
+            None => AsciiField::null(col),
         },
-        AsciiColumnData::Float(values) => AsciiField {
-            text: match values[row] {
-                Some(value) => {
-                    if !value.is_finite() {
-                        return Err(FitsError::InvalidValue {
-                            card: "ASCII float cells must be finite; use None for null".to_string(),
-                        });
-                    }
-                    let sign_width = usize::from(value.is_sign_negative());
-                    let minimum_width = if col.decimals == 0 {
-                        1 + sign_width
-                    } else {
-                        if col.decimals > col.width {
-                            validate_ascii_field_width(col, row, col.decimals)?;
-                        }
-                        col.decimals
-                            .checked_add(2 + sign_width)
-                            .ok_or(FitsError::DataUnitOverflow)?
-                    };
-                    validate_ascii_field_width(col, row, minimum_width)?;
-                    Cow::Owned(format!("{:.*}", col.decimals, value))
-                }
-                None => Cow::Borrowed(
-                    col.tnull
-                        .as_deref()
-                        .expect("null ASCII cells require a validated TNULLn marker"),
-                ),
-            },
-            left_aligned: values[row].is_none(),
+        AsciiColumnData::Float(values) => match values[row] {
+            Some(value) => AsciiField::value(Cow::Owned(ascii_float_text(col, row, value)?), false),
+            None => AsciiField::null(col),
         },
     };
     validate_ascii_field_width(col, row, field.text.len())?;
+    if let AsciiColumnData::Text(values) = &col.data
+        && let Some(value) = &values[row]
+    {
+        validate_ascii(value, "ASCII text cell")?;
+    }
+    if !field.is_null {
+        // Integer and float text never carries surrounding spaces, so trimming is a
+        // no-op there and applies the §7.2.4 comparison to a text cell's own value.
+        validate_ascii_null_collision(field.text.trim(), col.tnull.as_deref().map(str::trim))?;
+    }
     Ok(field)
+}
+
+/// Format a finite float to the column's declared decimals, checking up front that
+/// its sign and precision can fit the field at all.
+fn ascii_float_text(col: &AsciiWriteColumn, row: usize, value: f64) -> Result<String> {
+    if !value.is_finite() {
+        return Err(FitsError::InvalidValue {
+            card: "ASCII float cells must be finite; use None for null".to_string(),
+        });
+    }
+    let sign_width = usize::from(value.is_sign_negative());
+    let minimum_width = if col.decimals == 0 {
+        1 + sign_width
+    } else {
+        if col.decimals > col.width {
+            validate_ascii_field_width(col, row, col.decimals)?;
+        }
+        col.decimals
+            .checked_add(2 + sign_width)
+            .ok_or(FitsError::DataUnitOverflow)?
+    };
+    validate_ascii_field_width(col, row, minimum_width)?;
+    Ok(format!("{:.*}", col.decimals, value))
 }
 
 fn validate_ascii_null_collision(value: &str, marker: Option<&str>) -> Result<()> {
@@ -366,26 +371,6 @@ fn ascii_tform(col: &AsciiWriteColumn) -> String {
 
 fn append_ascii_field(out: &mut Vec<u8>, col: &AsciiWriteColumn, r: usize) -> Result<()> {
     let field = ascii_field(col, r)?;
-    let marker = col.tnull.as_deref().map(str::trim);
-    match &col.data {
-        AsciiColumnData::Text(values) => {
-            if let Some(value) = &values[r] {
-                validate_ascii(value, "ASCII text cell")?;
-                validate_ascii_null_collision(value.trim(), marker)?;
-            }
-            debug_assert!(field.left_aligned);
-        }
-        AsciiColumnData::Integer(values) => {
-            if values[r].is_some() {
-                validate_ascii_null_collision(&field.text, marker)?;
-            }
-        }
-        AsciiColumnData::Float(values) => {
-            if values[r].is_some() {
-                validate_ascii_null_collision(&field.text, marker)?;
-            }
-        }
-    }
     let bytes = field.text.as_bytes();
     let pad = col.width - bytes.len();
     if field.left_aligned {
