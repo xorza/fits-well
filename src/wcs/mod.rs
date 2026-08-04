@@ -41,6 +41,7 @@ use std::f64::consts::PI;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use crate::keyword::AltSuffix;
 use crate::keyword::KeyBuf;
 use crate::keyword::key;
 use crate::wcs::axis::AxisTransform;
@@ -389,20 +390,20 @@ impl TablePoleKeyword {
 
 #[derive(Debug, Clone, Copy)]
 struct TableWcsResolver {
-    alternate: Option<char>,
+    suffix: AltSuffix,
 }
 
 impl TableWcsResolver {
     fn new(alternate: Option<char>) -> TableWcsResolver {
-        TableWcsResolver { alternate }
+        TableWcsResolver {
+            suffix: AltSuffix::new(alternate),
+        }
     }
 
     fn pixel_axis_key(self, keyword: TableAxisKeyword, column: usize) -> Option<KeyBuf> {
-        let root = keyword.table_root(self.alternate.is_some())?;
-        Some(match self.alternate {
-            Some(alternate) => key!("T{root}{column}{alternate}"),
-            None => key!("T{root}{column}"),
-        })
+        let root = keyword.table_root(self.suffix.is_alternate())?;
+        let suffix = self.suffix;
+        Some(key!("T{root}{column}{suffix}"))
     }
 
     fn vector_axis_key(
@@ -411,11 +412,9 @@ impl TableWcsResolver {
         axis: usize,
         column: usize,
     ) -> Option<KeyBuf> {
-        let root = keyword.table_root(self.alternate.is_some())?;
-        Some(match self.alternate {
-            Some(alternate) => key!("{axis}{root}{column}{alternate}"),
-            None => key!("{axis}{root}{column}"),
-        })
+        let root = keyword.table_root(self.suffix.is_alternate())?;
+        let suffix = self.suffix;
+        Some(key!("{axis}{root}{column}{suffix}"))
     }
 
     fn pixel_matrix_key(
@@ -426,10 +425,8 @@ impl TableWcsResolver {
         abbreviated: bool,
     ) -> KeyBuf {
         let root = keyword.pixel_root(abbreviated);
-        match self.alternate {
-            Some(alternate) => key!("{root}{row_column}_{input_column}{alternate}"),
-            None => key!("{root}{row_column}_{input_column}"),
-        }
+        let suffix = self.suffix;
+        key!("{root}{row_column}_{input_column}{suffix}")
     }
 
     fn pixel_matrix_real(
@@ -452,18 +449,14 @@ impl TableWcsResolver {
         column: usize,
     ) -> KeyBuf {
         let root = keyword.root();
-        match self.alternate {
-            Some(alternate) => key!("{row_axis}{input_axis}{root}{column}{alternate}"),
-            None => key!("{row_axis}{input_axis}{root}{column}"),
-        }
+        let suffix = self.suffix;
+        key!("{row_axis}{input_axis}{root}{column}{suffix}")
     }
 
     fn pixel_parameter_key(self, column: usize, parameter: usize, short: bool) -> KeyBuf {
         let root = if short { "TV" } else { "TPV" };
-        match self.alternate {
-            Some(alternate) => key!("{root}{column}_{parameter}{alternate}"),
-            None => key!("{root}{column}_{parameter}"),
-        }
+        let suffix = self.suffix;
+        key!("{root}{column}_{parameter}{suffix}")
     }
 
     fn pixel_parameter_real(
@@ -485,10 +478,8 @@ impl TableWcsResolver {
         short: bool,
     ) -> KeyBuf {
         let root = if short { "V" } else { "PV" };
-        match self.alternate {
-            Some(alternate) => key!("{axis}{root}{column}_{parameter}{alternate}"),
-            None => key!("{axis}{root}{column}_{parameter}"),
-        }
+        let suffix = self.suffix;
+        key!("{axis}{root}{column}_{parameter}{suffix}")
     }
 
     fn vector_parameter_real(
@@ -511,17 +502,13 @@ impl TableWcsResolver {
         short: bool,
     ) -> KeyBuf {
         let root = if short { "S" } else { "PS" };
-        match self.alternate {
-            Some(alternate) => key!("{axis}{root}{column}_{parameter}{alternate}"),
-            None => key!("{axis}{root}{column}_{parameter}"),
-        }
+        let suffix = self.suffix;
+        key!("{axis}{root}{column}_{parameter}{suffix}")
     }
 
     fn column_key(self, root: &str, column: usize) -> KeyBuf {
-        match self.alternate {
-            Some(alternate) => key!("{root}{column}{alternate}"),
-            None => key!("{root}{column}"),
-        }
+        let suffix = self.suffix;
+        key!("{root}{column}{suffix}")
     }
 
     fn pole_real(
@@ -567,6 +554,170 @@ impl TableWcsResolver {
     }
 }
 
+/// How a binary-table header addresses the axes of one WCS (Table 22): a pixel list
+/// gives each coordinate axis its own column (`TCTYPn`), while an array cell holds
+/// every axis inside one column, indexed by array axis (`iCTYPn`).
+#[derive(Debug, Clone, Copy)]
+enum TableWcsForm<'a> {
+    PixelList(&'a [usize]),
+    ArrayColumn { naxis: usize, column: usize },
+}
+
+/// A Table 22 WCS description: how its axes are addressed, plus the resolver that
+/// spells each keyword family for the selected alternate.
+#[derive(Debug, Clone, Copy)]
+struct TableWcs<'a> {
+    resolver: TableWcsResolver,
+    form: TableWcsForm<'a>,
+}
+
+/// A Table 22 description rewritten as the equivalent image header. The spectral
+/// frames travel alongside rather than inside it: they are column-indexed, so they
+/// have no image-keyword spelling.
+#[derive(Debug)]
+struct TranslatedTableWcs {
+    header: Header,
+    spectral_frames: Vec<Option<SpectralFrame>>,
+}
+
+impl TableWcs<'_> {
+    fn naxis(&self) -> usize {
+        match self.form {
+            TableWcsForm::PixelList(columns) => columns.len(),
+            TableWcsForm::ArrayColumn { naxis, .. } => naxis,
+        }
+    }
+
+    /// The table column carrying zero-based axis `index` — the pole, spectral, and
+    /// celestial-frame keywords are column-indexed in both forms.
+    fn column(&self, index: usize) -> usize {
+        match self.form {
+            TableWcsForm::PixelList(columns) => columns[index],
+            TableWcsForm::ArrayColumn { column, .. } => column,
+        }
+    }
+
+    fn axis_key(&self, keyword: TableAxisKeyword, index: usize) -> Option<KeyBuf> {
+        match self.form {
+            TableWcsForm::PixelList(columns) => {
+                self.resolver.pixel_axis_key(keyword, columns[index])
+            }
+            TableWcsForm::ArrayColumn { column, .. } => {
+                self.resolver.vector_axis_key(keyword, index + 1, column)
+            }
+        }
+    }
+
+    fn parameter_real(
+        &self,
+        header: &Header,
+        index: usize,
+        parameter: usize,
+    ) -> Result<Option<f64>> {
+        match self.form {
+            TableWcsForm::PixelList(columns) => {
+                self.resolver
+                    .pixel_parameter_real(header, columns[index], parameter)
+            }
+            TableWcsForm::ArrayColumn { column, .. } => {
+                self.resolver
+                    .vector_parameter_real(header, index + 1, column, parameter)
+            }
+        }
+    }
+
+    fn matrix_real(
+        &self,
+        header: &Header,
+        keyword: TableMatrixKeyword,
+        row: usize,
+        input: usize,
+    ) -> Result<Option<f64>> {
+        match self.form {
+            TableWcsForm::PixelList(columns) => {
+                self.resolver
+                    .pixel_matrix_real(header, keyword, columns[row], columns[input])
+            }
+            TableWcsForm::ArrayColumn { column, .. } => {
+                let source = self
+                    .resolver
+                    .vector_matrix_key(keyword, row + 1, input + 1, column);
+                header.get_real(source.as_str())
+            }
+        }
+    }
+
+    /// Rewrite the Table 22 keywords as the equivalent image header — axis type and
+    /// unit, reference point/value/increment/rotation, `PVi_m`, and the linear
+    /// transform — so both table forms evaluate through the same pipeline as an image
+    /// WCS. The celestial pole and frame keywords are left to the caller: the two
+    /// forms choose their source column differently.
+    fn translate(&self, header: &Header) -> Result<TranslatedTableWcs> {
+        let naxis = self.naxis();
+        let mut h = Header::new();
+        h.set_internal("WCSAXES", naxis as i64);
+        let mut spectral_frames = vec![None; naxis];
+        for (index, spectral) in spectral_frames.iter_mut().enumerate() {
+            let ax = index + 1;
+            let type_key = self
+                .axis_key(TableAxisKeyword::Type, index)
+                .expect("Table 22 defines primary and alternate axis-type keywords");
+            if let Some(t) = header.get_text(type_key.as_str())? {
+                h.set_internal(key!("CTYPE{ax}").as_str(), t);
+                if axis::is_spectral_type(t) {
+                    *spectral = Some(table_spectral_frame(
+                        header,
+                        self.resolver,
+                        self.column(index),
+                    )?);
+                }
+            }
+            let unit_key = self
+                .axis_key(TableAxisKeyword::Unit, index)
+                .expect("Table 22 defines primary and alternate axis-unit keywords");
+            if let Some(t) = header.get_text(unit_key.as_str())? {
+                h.set_internal(key!("CUNIT{ax}").as_str(), t);
+            }
+            for keyword in [
+                TableAxisKeyword::ReferencePoint,
+                TableAxisKeyword::ReferenceValue,
+                TableAxisKeyword::Increment,
+                TableAxisKeyword::Rotation,
+            ] {
+                if let Some(source) = self.axis_key(keyword, index)
+                    && let Some(value) = header.get_real(source.as_str())?
+                {
+                    h.set_internal(key!("{}{ax}", keyword.image_root()).as_str(), value);
+                }
+            }
+            // `PVi_m` arrives as `TPVn_ma`/`TVn_ma`, or `iPVn_ma`/`iVn_ma`.
+            for m in 0..=20 {
+                if let Some(v) = self.parameter_real(header, index, m)? {
+                    h.set_internal(key!("PV{ax}_{m}").as_str(), v);
+                }
+            }
+        }
+        // Linear transform: `TPCn_ka`/`TCDn_ka` by column pair, or `ijPCna`/`ijCDna`
+        // by axis pair.
+        for row in 0..naxis {
+            for input in 0..naxis {
+                for keyword in [TableMatrixKeyword::Pc, TableMatrixKeyword::Cd] {
+                    if let Some(value) = self.matrix_real(header, keyword, row, input)? {
+                        h.set_internal(
+                            key!("{}{}_{}", keyword.root(), row + 1, input + 1).as_str(),
+                            value,
+                        );
+                    }
+                }
+            }
+        }
+        Ok(TranslatedTableWcs {
+            header: h,
+            spectral_frames,
+        })
+    }
+}
+
 impl Wcs {
     /// Parse the primary WCS (`alt = None`) or an alternate description
     /// (`alt = Some('A'..='Z')`) from `header`. The public entry point is
@@ -589,7 +740,7 @@ impl Wcs {
         tabular: Vec<tabular::TabularTransform>,
         spectral_frames: Option<Vec<Option<SpectralFrame>>>,
     ) -> Result<Wcs> {
-        let a = alt.map(|c| c.to_string()).unwrap_or_default();
+        let a = AltSuffix::new(alt);
         let naxis = image_axis_count(header, alt)?;
 
         let ctype: Vec<String> = (1..=naxis)
@@ -599,9 +750,9 @@ impl Wcs {
                     .map(|value| value.unwrap_or("").to_string())
             })
             .collect::<Result<_>>()?;
-        let mut crval = axis_vec(header, "CRVAL", &a, naxis, 0.0)?;
-        let crpix = axis_vec(header, "CRPIX", &a, naxis, 0.0)?;
-        let cdelt = axis_vec(header, "CDELT", &a, naxis, 1.0)?;
+        let mut crval = axis_vec(header, "CRVAL", a.as_str(), naxis, 0.0)?;
+        let crpix = axis_vec(header, "CRPIX", a.as_str(), naxis, 0.0)?;
+        let cdelt = axis_vec(header, "CDELT", a.as_str(), naxis, 1.0)?;
         let cunit: Vec<String> = (1..=naxis)
             .map(|i| {
                 header
@@ -610,7 +761,7 @@ impl Wcs {
             })
             .collect::<Result<_>>()?;
         let celestial_axes = find_celestial(&ctype)?;
-        let celestial_frame = celestial_frame(header, alt, &a, &ctype)?;
+        let celestial_frame = celestial_frame(header, alt, a.as_str(), &ctype)?;
         let spectral_frames = match spectral_frames {
             Some(frames) => {
                 assert_eq!(frames.len(), naxis, "spectral frame count");
@@ -620,7 +771,7 @@ impl Wcs {
                 let frame = ctype
                     .iter()
                     .any(|ctype| axis::is_spectral_type(ctype))
-                    .then(|| spectral_frame(header, alt, &a))
+                    .then(|| spectral_frame(header, alt, a.as_str()))
                     .transpose()?;
                 ctype
                     .iter()
@@ -919,80 +1070,31 @@ impl Wcs {
         columns: &[usize],
         alt: Option<char>,
     ) -> Result<Wcs> {
-        let resolver = TableWcsResolver::new(alt);
-        // Translate the column-indexed keywords into an equivalent image header,
-        // mapping column number `cN` → axis index `i+1`.
-        let mut h = Header::new();
-        h.set_internal("WCSAXES", columns.len() as i64);
-        let mut spectral_frames = vec![None; columns.len()];
-        for (i, &c) in columns.iter().enumerate() {
-            let ax = i + 1;
-            let type_key = resolver
-                .pixel_axis_key(TableAxisKeyword::Type, c)
-                .expect("Table 22 defines primary and alternate axis-type keywords");
-            if let Some(t) = header.get_text(type_key.as_str())? {
-                h.set_internal(key!("CTYPE{ax}").as_str(), t);
-                if axis::is_spectral_type(t) {
-                    spectral_frames[i] = Some(table_spectral_frame(header, resolver, c)?);
-                }
-            }
-            for keyword in [
-                TableAxisKeyword::ReferencePoint,
-                TableAxisKeyword::ReferenceValue,
-                TableAxisKeyword::Increment,
-                TableAxisKeyword::Rotation,
-            ] {
-                if let Some(source) = resolver.pixel_axis_key(keyword, c)
-                    && let Some(value) = header.get_real(source.as_str())?
-                {
-                    h.set_internal(key!("{}{ax}", keyword.image_root()).as_str(), value);
-                }
-            }
-            let unit_key = resolver
-                .pixel_axis_key(TableAxisKeyword::Unit, c)
-                .expect("Table 22 defines primary and alternate axis-unit keywords");
-            if let Some(t) = header.get_text(unit_key.as_str())? {
-                h.set_internal(key!("CUNIT{ax}").as_str(), t);
-            }
-            for m in 0..=20 {
-                if let Some(v) = resolver.pixel_parameter_real(header, c, m)? {
-                    h.set_internal(key!("PV{ax}_{m}").as_str(), v);
-                }
-            }
-        }
-        // Linear-transform matrices: TPCn_ka / TCDn_ka, indexed by column pair.
-        for (i, &ci) in columns.iter().enumerate() {
-            for (j, &cj) in columns.iter().enumerate() {
-                for keyword in [TableMatrixKeyword::Pc, TableMatrixKeyword::Cd] {
-                    if let Some(v) = resolver.pixel_matrix_real(header, keyword, ci, cj)? {
-                        h.set_internal(key!("{}{}_{}", keyword.root(), i + 1, j + 1).as_str(), v);
-                    }
-                }
-            }
-        }
+        let table = TableWcs {
+            resolver: TableWcsResolver::new(alt),
+            form: TableWcsForm::PixelList(columns),
+        };
+        let translated = table.translate(header)?;
+        let mut h = translated.header;
         let ctype = (1..=columns.len())
             .map(|axis| {
                 h.get_text(key!("CTYPE{axis}").as_str())
                     .map(|value| value.unwrap_or("").to_string())
             })
             .collect::<Result<Vec<_>>>()?;
+        // Each axis is its own column, so the pole and frame keywords are those of the
+        // celestial columns — and mean nothing until a longitude/latitude pair exists.
         if let Some(pair) = find_celestial_pair(&ctype) {
-            let longitude = pair.longitude;
-            let latitude = pair.latitude;
-            let column = columns[longitude];
+            let longitude = columns[pair.longitude];
+            let latitude = columns[pair.latitude];
             for pole in [TablePoleKeyword::Longitude, TablePoleKeyword::Latitude] {
-                if let Some(value) = resolver.pole_real(header, pole, column)? {
+                if let Some(value) = table.resolver.pole_real(header, pole, longitude)? {
                     h.set_internal(pole.image_root(), value);
                 }
             }
-            copy_table_celestial_frame(
-                header,
-                &mut h,
-                resolver,
-                &[columns[longitude], columns[latitude]],
-            )?;
+            copy_table_celestial_frame(header, &mut h, table.resolver, &[longitude, latitude])?;
         }
-        Wcs::from_header_with_context(&h, None, Vec::new(), Some(spectral_frames))
+        Wcs::from_header_with_context(&h, None, Vec::new(), Some(translated.spectral_frames))
     }
 
     /// Build a WCS for an image stored in a binary-table **vector cell** (§8,
@@ -1017,68 +1119,21 @@ impl Wcs {
         if naxis == 0 {
             return Err(FitsError::MissingKeyword { name: "iCTYPn" });
         }
-        let mut h = Header::new();
-        h.set_internal("WCSAXES", naxis as i64);
-        let mut spectral_axes = vec![false; naxis];
-        for ax in 1..=naxis {
-            let type_key = resolver
-                .vector_axis_key(TableAxisKeyword::Type, ax, column)
-                .expect("Table 22 defines primary and alternate axis-type keywords");
-            if let Some(t) = header.get_text(type_key.as_str())? {
-                h.set_internal(key!("CTYPE{ax}").as_str(), t);
-                spectral_axes[ax - 1] = axis::is_spectral_type(t);
-            }
-            let unit_key = resolver
-                .vector_axis_key(TableAxisKeyword::Unit, ax, column)
-                .expect("Table 22 defines primary and alternate axis-unit keywords");
-            if let Some(t) = header.get_text(unit_key.as_str())? {
-                h.set_internal(key!("CUNIT{ax}").as_str(), t);
-            }
-            for keyword in [
-                TableAxisKeyword::ReferencePoint,
-                TableAxisKeyword::ReferenceValue,
-                TableAxisKeyword::Increment,
-                TableAxisKeyword::Rotation,
-            ] {
-                if let Some(source) = resolver.vector_axis_key(keyword, ax, column)
-                    && let Some(value) = header.get_real(source.as_str())?
-                {
-                    h.set_internal(key!("{}{ax}", keyword.image_root()).as_str(), value);
-                }
-            }
-            // PVi_m arrives as `iPVn_ma`, or the abbreviated `iVn_ma`.
-            for m in 0..=20 {
-                if let Some(v) = resolver.vector_parameter_real(header, ax, column, m)? {
-                    h.set_internal(key!("PV{ax}_{m}").as_str(), v);
-                }
-            }
-        }
-        let spectral_frame = spectral_axes
-            .contains(&true)
-            .then(|| table_spectral_frame(header, resolver, column))
-            .transpose()?;
-        let spectral_frames = spectral_axes
-            .into_iter()
-            .map(|spectral| spectral.then_some(spectral_frame).flatten())
-            .collect();
-        // Linear-transform matrices: `ijPCn` / `ijCDn`, indexed by axis pair.
-        for i in 1..=naxis {
-            for j in 1..=naxis {
-                for keyword in [TableMatrixKeyword::Pc, TableMatrixKeyword::Cd] {
-                    let source = resolver.vector_matrix_key(keyword, i, j, column);
-                    if let Some(value) = header.get_real(source.as_str())? {
-                        h.set_internal(key!("{}{i}_{j}", keyword.root()).as_str(), value);
-                    }
-                }
-            }
-        }
+        let table = TableWcs {
+            resolver,
+            form: TableWcsForm::ArrayColumn { naxis, column },
+        };
+        let translated = table.translate(header)?;
+        let mut h = translated.header;
+        // Every axis lives in one column, so that column's pole and frame keywords
+        // apply whichever axes turn out to be celestial.
         for pole in [TablePoleKeyword::Longitude, TablePoleKeyword::Latitude] {
             if let Some(value) = resolver.pole_real(header, pole, column)? {
                 h.set_internal(pole.image_root(), value);
             }
         }
         copy_table_celestial_frame(header, &mut h, resolver, &[column])?;
-        Wcs::from_header_with_context(&h, None, Vec::new(), Some(spectral_frames))
+        Wcs::from_header_with_context(&h, None, Vec::new(), Some(translated.spectral_frames))
     }
 
     /// Map 1-based pixel coordinates to complete world coordinates. Celestial axes
@@ -1503,11 +1558,11 @@ fn infer_image_axis_count(header: &Header, alt: &str) -> i64 {
 }
 
 pub(crate) fn image_axis_count(header: &Header, alt: Option<char>) -> Result<usize> {
-    let suffix = alt.map(|value| value.to_string()).unwrap_or_default();
+    let suffix = AltSuffix::new(alt);
     let value = match header.get_integer(key!("WCSAXES{suffix}").as_str())? {
         Some(axis_count) => axis_count,
         None => {
-            let inferred = infer_image_axis_count(header, &suffix);
+            let inferred = infer_image_axis_count(header, suffix.as_str());
             match header.get_integer("NAXIS")? {
                 Some(axis_count) if axis_count >= 0 => axis_count.max(inferred),
                 Some(axis_count) => axis_count,

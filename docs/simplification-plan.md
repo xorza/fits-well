@@ -33,21 +33,6 @@ valid built standalone. No batch here requires a `Cargo.toml` change.
 
 ---
 
-## Batch 7 — WCS table-keyword resolver
-
-**Priority: 7** · Size: medium · Risk: low · No public impact
-
-- [ ] `TableWcsResolver` (`wcs/mod.rs:391`) stores `Option<char>` and then writes
-      `match self.alternate { Some(a) => key!("…{a}"), None => key!("…") }` **8 times**.
-      `Wcs::from_header_with_context` already solved this 300 lines earlier
-      (`:592`) by materializing the suffix once and interpolating unconditionally.
-      Store the suffix; delete all 8 two-arm matches.
-- [ ] `from_pixel_list` (`:917`) and `from_array_column` (`:1004`) are ~80 lines each of
-      near-identical "translate table keywords into a synthetic image header": same axis
-      loop, same matrix loop, same pole and celestial-frame copy. Share the body.
-
----
-
 ## Batch 8 — ASCII column & field path
 
 **Priority: 8** · Size: small · Risk: low · No public impact

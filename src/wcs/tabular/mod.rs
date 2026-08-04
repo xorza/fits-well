@@ -2,6 +2,7 @@ use crate::allocation;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use crate::keyword::AltSuffix;
 use crate::keyword::key;
 use crate::table_impl::BinTable;
 use crate::table_impl::ColumnReader;
@@ -75,7 +76,7 @@ pub(crate) fn descriptors(
     axis_count: usize,
     alt: Option<char>,
 ) -> Result<Vec<TabularDescriptor>> {
-    let suffix = alt.map(|value| value.to_string()).unwrap_or_default();
+    let suffix = AltSuffix::new(alt);
     let mut descriptors = Vec::<TabularDescriptor>::new();
     for axis in 0..axis_count {
         let ctype = header
@@ -96,11 +97,11 @@ pub(crate) fn descriptors(
         )?;
         let reference = TabularReference {
             extension_name,
-            extension_version: integer_parameter(header, axis, 1, &suffix, 1)?,
-            extension_level: integer_parameter(header, axis, 2, &suffix, 1)?,
+            extension_version: integer_parameter(header, axis, 1, suffix, 1)?,
+            extension_level: integer_parameter(header, axis, 2, suffix, 1)?,
             coordinate_column,
         };
-        let table_axis = integer_parameter(header, axis, 3, &suffix, 1)?;
+        let table_axis = integer_parameter(header, axis, 3, suffix, 1)?;
         let table_axis = usize::try_from(table_axis)
             .ok()
             .and_then(|value| value.checked_sub(1))
@@ -834,7 +835,7 @@ fn integer_parameter(
     header: &Header,
     axis: usize,
     parameter: usize,
-    suffix: &str,
+    suffix: AltSuffix,
     default: i64,
 ) -> Result<i64> {
     let key = key!("PV{}_{parameter}{suffix}", axis + 1);
