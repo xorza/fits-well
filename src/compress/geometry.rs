@@ -109,7 +109,7 @@ impl TileGeometry {
         };
         let mut flat: usize = (0..n).map(|i| s.origin[i] * self.stride[i]).sum();
         s.row_bases.clear();
-        s.row_bases.reserve(nrows);
+        s.row_bases.reserve_exact(nrows);
         s.coord.clear();
         s.coord.resize(n, 0);
         for _ in 0..nrows {
