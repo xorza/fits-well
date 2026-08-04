@@ -70,27 +70,6 @@ pub struct AsciiTableMetadata<'a> {
     pub columns: &'a [AsciiColumn],
 }
 
-fn required_integer(header: &Header, keyword: &str, missing_name: &'static str) -> Result<i64> {
-    header
-        .get_integer(keyword)?
-        .ok_or(FitsError::MissingKeyword { name: missing_name })
-}
-
-fn required_usize(header: &Header, keyword: &str, name: &'static str) -> Result<usize> {
-    usize::try_from(required_integer(header, keyword, name)?)
-        .map_err(|_| FitsError::KeywordOutOfRange { name })
-}
-
-fn required_text<'a>(
-    header: &'a Header,
-    keyword: &str,
-    missing_name: &'static str,
-) -> Result<&'a str> {
-    header
-        .get_text(keyword)?
-        .ok_or(FitsError::MissingKeyword { name: missing_name })
-}
-
 impl AsciiTable {
     /// Borrow the table's validated row count and column descriptors.
     pub fn metadata(&self) -> AsciiTableMetadata<'_> {
@@ -101,17 +80,17 @@ impl AsciiTable {
     }
 
     pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<AsciiTable> {
-        let row_len = required_usize(header, "NAXIS1", "NAXIS1")?;
-        let nrows = required_usize(header, "NAXIS2", "NAXIS2")?;
+        let row_len = header.required_usize("NAXIS1", "NAXIS1")?;
+        let nrows = header.required_usize("NAXIS2", "NAXIS2")?;
         // §7.2.1: `0 ≤ TFIELDS ≤ 999` — also a guard, since `tfields` sizes the
         // column `Vec` and drives the `TFORMn` loop (an absurd value would abort).
-        let tfields = required_usize(header, "TFIELDS", "TFIELDS")?;
+        let tfields = header.required_usize("TFIELDS", "TFIELDS")?;
         validate_table_field_count(tfields)?;
 
         let mut columns = Vec::with_capacity(tfields);
         for n in 1..=tfields {
-            let tbcol = required_usize(header, key!("TBCOL{n}").as_str(), "TBCOLn")?;
-            let tform = required_text(header, key!("TFORM{n}").as_str(), "TFORMn")?;
+            let tbcol = header.required_usize(key!("TBCOL{n}").as_str(), "TBCOLn")?;
+            let tform = header.required_text(key!("TFORM{n}").as_str(), "TFORMn")?;
             let fmt = parse_ascii_tform(tform)?;
             let start = tbcol
                 .checked_sub(1)

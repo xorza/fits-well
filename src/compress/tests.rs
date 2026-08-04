@@ -2114,6 +2114,16 @@ fn uncompress_table_rejects_overflowing_row_product() {
         h.set_internal(keyword, 1);
     }
 
+    // ZTILELEN alone also rejects zero: unlike the other three (where zero is a
+    // legitimate empty count), a zero tile height would make the row-tile count
+    // diverge rather than merely being out of range.
+    h.set_internal("ZTILELEN", 0);
+    assert!(matches!(
+        table::uncompress_table(&h, &table),
+        Err(FitsError::KeywordOutOfRange { name: "ZTILELEN" })
+    ));
+    h.set_internal("ZTILELEN", 1);
+
     h.set_internal("TFIELDS", 2)
         .set_internal("NAXIS1", 32)
         .set_internal("TFORM2", "1QB")

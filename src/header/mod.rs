@@ -144,9 +144,43 @@ impl Header {
             })
     }
 
-    fn required_integer(&self, keyword: &str, missing_name: &'static str) -> Result<i64> {
+    /// A mandatory integer keyword. `keyword` is the card to look up — possibly an
+    /// indexed form built with [`key!`](crate::keyword::key) — while `name` is the
+    /// generic name errors report (`NAXIS3` is reported as `NAXISn`). For a
+    /// non-indexed keyword the two are the same literal.
+    pub(crate) fn required_integer(&self, keyword: &str, name: &'static str) -> Result<i64> {
         self.get_integer(keyword)?
-            .ok_or(FitsError::MissingKeyword { name: missing_name })
+            .ok_or(FitsError::MissingKeyword { name })
+    }
+
+    /// A mandatory integer keyword narrowed to `usize`. A negative or oversized
+    /// value is [`FitsError::KeywordOutOfRange`], keeping untrusted sizes from
+    /// wrapping into a plausible-looking length.
+    pub(crate) fn required_usize(&self, keyword: &str, name: &'static str) -> Result<usize> {
+        usize::try_from(self.required_integer(keyword, name)?)
+            .map_err(|_| FitsError::KeywordOutOfRange { name })
+    }
+
+    /// An optional integer keyword narrowed to `usize`, or `default` when the card is
+    /// absent. A present but out-of-range value still errors.
+    pub(crate) fn optional_usize(
+        &self,
+        keyword: &str,
+        name: &'static str,
+        default: usize,
+    ) -> Result<usize> {
+        match self.get_integer(keyword)? {
+            Some(value) => {
+                usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { name })
+            }
+            None => Ok(default),
+        }
+    }
+
+    /// A mandatory text keyword, named as in [`Header::required_integer`].
+    pub(crate) fn required_text(&self, keyword: &str, name: &'static str) -> Result<&str> {
+        self.get_text(keyword)?
+            .ok_or(FitsError::MissingKeyword { name })
     }
 
     /// Every stored record in file order, as [`HeaderEntry`] views — duplicates and
@@ -170,14 +204,14 @@ impl Header {
 
     /// `NAXIS` — the number of axes (0 means no data array).
     pub fn naxis(&self) -> Result<usize> {
-        let n = self.required_integer("NAXIS", "NAXIS")?;
+        let n = self.required_usize("NAXIS", "NAXIS")?;
         // §4.4.1: `0 ≤ NAXIS ≤ 999`. Rejecting an out-of-range value is both
         // conformance and a guard — `axes()` reserves `Vec::with_capacity(NAXIS)`,
         // so an absurd `NAXIS` from an untrusted header would otherwise abort.
-        match usize::try_from(n) {
-            Ok(n) if n <= 999 => Ok(n),
-            _ => Err(FitsError::KeywordOutOfRange { name: "NAXIS" }),
+        if n > 999 {
+            return Err(FitsError::KeywordOutOfRange { name: "NAXIS" });
         }
+        Ok(n)
     }
 
     /// The axis lengths `NAXIS1..NAXIS{NAXIS}`, in order.
@@ -185,11 +219,7 @@ impl Header {
         let naxis = self.naxis()?;
         let mut axes = Vec::with_capacity(naxis);
         for n in 1..=naxis {
-            let len = self.required_integer(key!("NAXIS{n}").as_str(), "NAXISn")?;
-            axes.push(
-                usize::try_from(len)
-                    .map_err(|_| FitsError::KeywordOutOfRange { name: "NAXISn" })?,
-            );
+            axes.push(self.required_usize(key!("NAXIS{n}").as_str(), "NAXISn")?);
         }
         Ok(axes)
     }

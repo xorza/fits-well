@@ -348,35 +348,6 @@ pub struct TableSchema {
     pub columns: Vec<Column>,
 }
 
-fn required_usize(header: &Header, keyword: &str, name: &'static str) -> Result<usize> {
-    let value = header
-        .get_integer(keyword)?
-        .ok_or(FitsError::MissingKeyword { name })?;
-    usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { name })
-}
-
-fn optional_usize(
-    header: &Header,
-    keyword: &str,
-    name: &'static str,
-    default: usize,
-) -> Result<usize> {
-    match header.get_integer(keyword)? {
-        Some(value) => usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { name }),
-        None => Ok(default),
-    }
-}
-
-fn required_text<'a>(
-    header: &'a Header,
-    keyword: &str,
-    missing_name: &'static str,
-) -> Result<&'a str> {
-    header
-        .get_text(keyword)?
-        .ok_or(FitsError::MissingKeyword { name: missing_name })
-}
-
 impl BinTable {
     /// Borrow the table's validated row count and column descriptors.
     pub fn metadata(&self) -> BinTableMetadata<'_> {
@@ -388,17 +359,17 @@ impl BinTable {
 
     /// Parse the complete binary-table schema without touching its data unit.
     pub fn schema(header: &Header) -> Result<TableSchema> {
-        let row_len = required_usize(header, "NAXIS1", "NAXIS1")?;
-        let nrows = required_usize(header, "NAXIS2", "NAXIS2")?;
+        let row_len = header.required_usize("NAXIS1", "NAXIS1")?;
+        let nrows = header.required_usize("NAXIS2", "NAXIS2")?;
         // §7.3.1: `0 ≤ TFIELDS ≤ 999` — also a guard, since `tfields` sizes the
         // column `Vec` and drives the `TFORMn` loop (an absurd value would abort).
-        let tfields = required_usize(header, "TFIELDS", "TFIELDS")?;
+        let tfields = header.required_usize("TFIELDS", "TFIELDS")?;
         validate_table_field_count(tfields)?;
 
         let mut columns = Vec::with_capacity(tfields);
         let mut offset = 0;
         for n in 1..=tfields {
-            let tform_value = required_text(header, key!("TFORM{n}").as_str(), "TFORMn")?;
+            let tform_value = header.required_text(key!("TFORM{n}").as_str(), "TFORMn")?;
             let tform = Tform::parse(tform_value)?;
             let tdim = header
                 .get_text(key!("TDIM{n}").as_str())?
@@ -444,14 +415,14 @@ impl BinTable {
         // `nrows · row_len` from untrusted axes: check once (guards a 32-bit-usize
         // overflow that `data_extent`'s u64 math wouldn't catch) and reuse.
         let main_table = nrows.checked_mul(row_len).ok_or(FitsError::UnexpectedEof)?;
-        let heap_offset = optional_usize(header, "THEAP", "THEAP", main_table)?;
+        let heap_offset = header.optional_usize("THEAP", "THEAP", main_table)?;
         // §6.6: the heap follows the main table, so THEAP must be ≥ its size.
         if heap_offset < main_table {
             return Err(FitsError::KeywordOutOfRange { name: "THEAP" });
         }
         // PCOUNT counts the gap-plus-heap bytes after the main table, so the real
         // heap ends here — anything past it is block fill (§6.6).
-        let pcount = optional_usize(header, "PCOUNT", "PCOUNT", 0)?;
+        let pcount = header.optional_usize("PCOUNT", "PCOUNT", 0)?;
         let heap_end = main_table
             .checked_add(pcount)
             .ok_or(FitsError::UnexpectedEof)?;

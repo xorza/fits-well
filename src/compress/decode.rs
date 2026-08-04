@@ -1192,11 +1192,6 @@ fn hcompress_smooth(header: &Header) -> Result<bool> {
 /// Read the `ZNAXIS1..ZNAXISn` integer axis lengths.
 fn read_axes(header: &Header, n: usize) -> Result<Vec<usize>> {
     (1..=n)
-        .map(|i| match header.get_integer(key!("ZNAXIS{i}").as_str())? {
-            Some(value) => {
-                usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { name: "ZNAXISn" })
-            }
-            None => Err(FitsError::MissingKeyword { name: "ZNAXISn" }),
-        })
+        .map(|i| header.required_usize(key!("ZNAXIS{i}").as_str(), "ZNAXISn"))
         .collect()
 }
