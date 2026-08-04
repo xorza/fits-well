@@ -126,12 +126,14 @@ pub(crate) fn data_extent(header: &Header, role: HduRole) -> Result<DataExtent> 
     let axes = header.axes()?;
     let data_bytes = match role {
         HduRole::Primary => elem
-            .checked_mul(array_elements(&axes)?)
+            .checked_mul(axis_product(&axes, 0)?)
             .ok_or(FitsError::DataUnitOverflow)?,
-        HduRole::Extension => grouped_data_bytes(elem, array_elements(&axes)?, header)?,
+        HduRole::Extension => grouped_data_bytes(elem, axis_product(&axes, 0)?, header)?,
         HduRole::RandomGroups => {
             validate_random_groups_axes(&axes)?;
-            grouped_data_bytes(elem, random_groups_array_elements(&axes[1..])?, header)?
+            // NAXIS1 is the zero sentinel, so the array spans axes[1..] — and with no
+            // array axis at all each group still holds one element, not zero.
+            grouped_data_bytes(elem, axis_product(&axes[1..], 1)?, header)?
         }
     };
     Ok(DataExtent {
@@ -140,18 +142,20 @@ pub(crate) fn data_extent(header: &Header, role: HduRole) -> Result<DataExtent> 
     })
 }
 
-fn random_groups_array_elements(axes: &[usize]) -> Result<u64> {
+/// Product of the axis lengths as the on-disk element count. Deliberately `u64`
+/// rather than the `usize` of [`crate::data::shape_product`]: this sizes a data unit
+/// on disk, which a 32-bit `usize` must not cap.
+///
+/// A zero-length axis always gives 0 (no data). `empty` is the count for an axis list
+/// with *no entries*, which differs by role — `NAXIS = 0` means an image has no data
+/// array at all (0), while a random group with no array axis still carries one array
+/// element per group (the empty product, 1).
+fn axis_product(axes: &[usize], empty: u64) -> Result<u64> {
     if axes.contains(&0) {
         return Ok(0);
     }
-    axes.iter()
-        .try_fold(1u64, |product, &length| product.checked_mul(length as u64))
-        .ok_or(FitsError::DataUnitOverflow)
-}
-
-fn array_elements(axes: &[usize]) -> Result<u64> {
-    if axes.is_empty() || axes.contains(&0) {
-        return Ok(0);
+    if axes.is_empty() {
+        return Ok(empty);
     }
     axes.iter()
         .try_fold(1u64, |product, &length| product.checked_mul(length as u64))

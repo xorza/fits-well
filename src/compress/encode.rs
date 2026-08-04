@@ -20,6 +20,7 @@ use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
+use crate::header::value;
 use crate::keyword::key;
 
 /// Per-worker tile-encode scratch, reused across the tiles one rayon worker
@@ -170,8 +171,8 @@ pub(crate) fn compress_image(
         .comment_internal("XTENSION", "binary table extension");
     h.set_internal("BITPIX", 8).set_internal("NAXIS", 2);
     h.set_internal("NAXIS1", if wide { 16 } else { 8 })
-        .set_internal("NAXIS2", fits_i64(ntiles)?);
-    h.set_internal("PCOUNT", fits_i64(heap_len)?)
+        .set_internal("NAXIS2", value::fits_i64(ntiles)?);
+    h.set_internal("PCOUNT", value::fits_i64(heap_len)?)
         .set_internal("GCOUNT", 1);
     h.set_internal("TFIELDS", 1);
     h.set_internal("TTYPE1", "COMPRESSED_DATA");
@@ -401,8 +402,8 @@ fn compress_float_image(
         .comment_internal("XTENSION", "binary table extension");
     h.set_internal("BITPIX", 8).set_internal("NAXIS", 2);
     h.set_internal("NAXIS1", 32)
-        .set_internal("NAXIS2", fits_i64(ntiles)?);
-    h.set_internal("PCOUNT", fits_i64(heap_len)?)
+        .set_internal("NAXIS2", value::fits_i64(ntiles)?);
+    h.set_internal("PCOUNT", value::fits_i64(heap_len)?)
         .set_internal("GCOUNT", 1);
     h.set_internal("TFIELDS", 4);
     h.set_internal("TTYPE1", "COMPRESSED_DATA")
@@ -510,12 +511,12 @@ fn set_zimage_axes(
         .comment_internal("ZIMAGE", "this is a tiled-compressed image");
     h.set_internal("ZCMPTYPE", cmptype);
     h.set_internal("ZBITPIX", zbitpix.code());
-    h.set_internal("ZNAXIS", fits_i64(dims.len())?);
+    h.set_internal("ZNAXIS", value::fits_i64(dims.len())?);
     for (i, &n) in dims.iter().enumerate() {
-        h.set_internal(key!("ZNAXIS{}", i + 1).as_str(), fits_i64(n)?);
+        h.set_internal(key!("ZNAXIS{}", i + 1).as_str(), value::fits_i64(n)?);
     }
     for (i, &t) in tiles.iter().enumerate() {
-        h.set_internal(key!("ZTILE{}", i + 1).as_str(), fits_i64(t)?);
+        h.set_internal(key!("ZTILE{}", i + 1).as_str(), value::fits_i64(t)?);
     }
     Ok(())
 }
@@ -526,8 +527,4 @@ fn validate_image(image: &Image) -> Result<usize> {
         return Err(FitsError::KeywordOutOfRange { name: "NAXIS" });
     }
     image.validate_geometry()
-}
-
-fn fits_i64(value: usize) -> Result<i64> {
-    i64::try_from(value).map_err(|_| FitsError::DataUnitOverflow)
 }

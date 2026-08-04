@@ -17,11 +17,12 @@ use crate::error::{FitsError, Result};
 use crate::hdu::validate_table_field_count;
 use crate::header::Header;
 use crate::header::card::validate_ascii;
+use crate::header::value;
 use crate::keyword::key;
 #[cfg(feature = "compression")]
 use crate::table_impl::BinTable;
 use crate::table_impl::{CharacterField, ColumnData};
-use crate::writer::{FitsWriter, fits_i64, merge_header_template, validate_scaling};
+use crate::writer::{FitsWriter, merge_header_template, validate_scaling};
 
 /// An element type accepted by a binary-table writer column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,7 +335,7 @@ impl<W: Write> FitsWriter<W> {
         let nrows = table.nrows.unwrap_or(0);
         let columns = &table.columns;
         validate_table_field_count(columns.len())?;
-        fits_i64(nrows)?;
+        value::fits_i64(nrows)?;
         let mut layouts = Vec::with_capacity(columns.len());
         let mut row_len = 0usize;
         for col in columns {
@@ -344,7 +345,7 @@ impl<W: Write> FitsWriter<W> {
                 .ok_or(FitsError::DataUnitOverflow)?;
             layouts.push(layout);
         }
-        fits_i64(row_len)?;
+        value::fits_i64(row_len)?;
         let mut heap_len = 0usize;
         for r in 0..nrows {
             for col in columns {
@@ -367,7 +368,7 @@ impl<W: Write> FitsWriter<W> {
                 }
             }
         }
-        fits_i64(heap_len)?;
+        value::fits_i64(heap_len)?;
         self.scratch.clear();
         let main_len = nrows
             .checked_mul(row_len)
@@ -461,16 +462,16 @@ fn bintable_header(
         .comment_internal("XTENSION", "binary table extension");
     header.set_internal("BITPIX", 8).set_internal("NAXIS", 2);
     header
-        .set_internal("NAXIS1", fits_i64(row_len)?)
+        .set_internal("NAXIS1", value::fits_i64(row_len)?)
         .comment_internal("NAXIS1", "width of table in bytes");
     header
-        .set_internal("NAXIS2", fits_i64(nrows)?)
+        .set_internal("NAXIS2", value::fits_i64(nrows)?)
         .comment_internal("NAXIS2", "number of rows");
     header
-        .set_internal("PCOUNT", fits_i64(heap_len)?)
+        .set_internal("PCOUNT", value::fits_i64(heap_len)?)
         .set_internal("GCOUNT", 1);
     header
-        .set_internal("TFIELDS", fits_i64(columns.len())?)
+        .set_internal("TFIELDS", value::fits_i64(columns.len())?)
         .comment_internal("TFIELDS", "number of columns");
     for (i, (col, layout)) in columns.iter().zip(layouts).enumerate() {
         let n = i + 1;

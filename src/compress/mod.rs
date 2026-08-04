@@ -27,6 +27,7 @@ pub(crate) mod table;
 
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::keyword;
 
 /// Float-quantization dithering for [`crate::FitsWriter::write_compressed_image`]
 /// (`ZQUANTIZ`, §10.2). Applies only when compressing a float image; the integer
@@ -189,17 +190,7 @@ enum ImageCodec {
 }
 
 fn parameter_index(keyword: &str) -> Option<usize> {
-    let suffix = keyword.strip_prefix("ZNAME")?;
-    if suffix.is_empty()
-        || suffix.starts_with('0')
-        || !suffix.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-    suffix
-        .parse::<usize>()
-        .ok()
-        .filter(|index| (1..=999).contains(index))
+    keyword::index(keyword, "ZNAME").filter(|index| (1..=999).contains(index))
 }
 
 impl ImageCodec {

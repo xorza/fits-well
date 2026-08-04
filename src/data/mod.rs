@@ -61,6 +61,35 @@ pub(crate) fn shape_product(shape: &[usize]) -> Result<usize> {
     }
 }
 
+/// Validate a zero-based, half-open N-d region against `shape` and return the
+/// selected extent per axis. The region must have the image's rank, and each range
+/// must be ordered and within its axis. Shared by the plain-image section reader and
+/// the tiled-compressed one, which apply the identical rule to the same geometry.
+pub(crate) fn validate_image_region(
+    ranges: &[Range<usize>],
+    shape: &[usize],
+) -> Result<Vec<usize>> {
+    if ranges.len() != shape.len() {
+        return Err(FitsError::ImageRegionRankMismatch {
+            region_rank: ranges.len(),
+            image_rank: shape.len(),
+        });
+    }
+    let mut selected = Vec::with_capacity(shape.len());
+    for (axis, (range, &len)) in ranges.iter().zip(shape).enumerate() {
+        if range.start > range.end || range.end > len {
+            return Err(FitsError::ImageRegionOutOfBounds {
+                axis,
+                start: range.start,
+                end: range.end,
+                len,
+            });
+        }
+        selected.push(range.end - range.start);
+    }
+    Ok(selected)
+}
+
 impl ImageData {
     /// The `BITPIX` element kind backing this buffer.
     pub fn bitpix(&self) -> Bitpix {
@@ -106,11 +135,7 @@ impl ImageData {
     /// fill past the data range must already be sliced off (see
     /// [`crate::io::DataUnit::data`]).
     pub(crate) fn decode(bytes: &[u8], bitpix: Bitpix) -> ImageData {
-        assert_eq!(
-            bytes.len() % bitpix.elem_size(),
-            0,
-            "data length must be a whole number of {bitpix:?} elements"
-        );
+        assert_whole_elements(bytes, bitpix);
         match bitpix {
             Bitpix::U8 => ImageData::U8(bytes.to_vec()),
             Bitpix::I16 => ImageData::I16(decode_be(bytes, i16::from_be_bytes)),
@@ -171,32 +196,27 @@ impl ImageData {
     }
 }
 
-fn map_be<T, O, const N: usize>(
-    bytes: &[u8],
-    decode: impl Fn([u8; N]) -> T,
-    map: impl Fn(T) -> O,
-) -> Vec<O> {
-    assert_eq!(bytes.len() % N, 0, "whole big-endian elements");
-    bytes
-        .chunks_exact(N)
-        .map(|chunk| {
-            map(decode(
-                chunk.try_into().expect("chunk has the element width"),
-            ))
-        })
-        .collect()
+/// Assert the buffer holds a whole number of `bitpix` elements — an invariant
+/// between `data_extent`'s sizing and the declared axes, not a data-driven failure.
+fn assert_whole_elements(bytes: &[u8], bitpix: Bitpix) {
+    assert_eq!(
+        bytes.len() % bitpix.elem_size(),
+        0,
+        "data length must be a whole number of {bitpix:?} elements"
+    );
 }
 
 fn physical_from_be<O: PhysicalOut>(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Vec<O> {
+    assert_whole_elements(bytes, bitpix);
     let scale = |x: f64| O::from_f64(scaling.scale(x));
     let scale_int = |x: i64| O::from_f64(scaling.scale_integer(x));
     match bitpix {
         Bitpix::U8 => bytes.iter().map(|&x| scale_int(x as i64)).collect(),
-        Bitpix::I16 => map_be(bytes, i16::from_be_bytes, |x| scale_int(x as i64)),
-        Bitpix::I32 => map_be(bytes, i32::from_be_bytes, |x| scale_int(x as i64)),
-        Bitpix::I64 => map_be(bytes, i64::from_be_bytes, scale_int),
-        Bitpix::F32 => map_be(bytes, f32::from_be_bytes, |x| scale(x as f64)),
-        Bitpix::F64 => map_be(bytes, f64::from_be_bytes, scale),
+        Bitpix::I16 => decode_be(bytes, |b| scale_int(i16::from_be_bytes(b) as i64)),
+        Bitpix::I32 => decode_be(bytes, |b| scale_int(i32::from_be_bytes(b) as i64)),
+        Bitpix::I64 => decode_be(bytes, |b| scale_int(i64::from_be_bytes(b))),
+        Bitpix::F32 => decode_be(bytes, |b| scale(f32::from_be_bytes(b) as f64)),
+        Bitpix::F64 => decode_be(bytes, |b| scale(f64::from_be_bytes(b))),
     }
 }
 
@@ -204,18 +224,19 @@ fn unsigned_from_be(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Option<U
     if scaling.blank.is_some() {
         return None;
     }
+    assert_whole_elements(bytes, bitpix);
     match SampleType::from_scaling(bitpix, scaling) {
         SampleType::I8 => Some(UnsignedData::I8(
             bytes.iter().map(|&x| (x ^ 0x80) as i8).collect(),
         )),
-        SampleType::U16 => Some(UnsignedData::U16(map_be(bytes, i16::from_be_bytes, |x| {
-            (x as u16) ^ 0x8000
+        SampleType::U16 => Some(UnsignedData::U16(decode_be(bytes, |b| {
+            (i16::from_be_bytes(b) as u16) ^ 0x8000
         }))),
-        SampleType::U32 => Some(UnsignedData::U32(map_be(bytes, i32::from_be_bytes, |x| {
-            (x as u32) ^ 0x8000_0000
+        SampleType::U32 => Some(UnsignedData::U32(decode_be(bytes, |b| {
+            (i32::from_be_bytes(b) as u32) ^ 0x8000_0000
         }))),
-        SampleType::U64 => Some(UnsignedData::U64(map_be(bytes, i64::from_be_bytes, |x| {
-            (x as u64) ^ 0x8000_0000_0000_0000
+        SampleType::U64 => Some(UnsignedData::U64(decode_be(bytes, |b| {
+            (i64::from_be_bytes(b) as u64) ^ 0x8000_0000_0000_0000
         }))),
         _ => None,
     }

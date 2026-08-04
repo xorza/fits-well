@@ -120,6 +120,22 @@ fn read_wcs_resolves_the_exact_tabular_extension() {
         .set_internal("PV1_3", 1);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer.write_raw_hdu(&primary, &[0]).unwrap();
+    // A decoy BINTABLE whose EXTNAME does not match. Its EXTVER is not an integer, so
+    // resolving the reference must never interpret it — an unrelated corrupt version
+    // card cannot fail a lookup that does not concern it.
+    let mut decoy = Header::new();
+    decoy
+        .set_internal("XTENSION", "BINTABLE")
+        .set_internal("BITPIX", 8)
+        .set_internal("NAXIS", 2)
+        .set_internal("NAXIS1", 0)
+        .set_internal("NAXIS2", 0)
+        .set_internal("PCOUNT", 0)
+        .set_internal("GCOUNT", 1)
+        .set_internal("TFIELDS", 0)
+        .set_internal("EXTNAME", "OTHER")
+        .set_internal("EXTVER", "not-an-integer");
+    writer.write_raw_hdu(&decoy, &[]).unwrap();
     write_tab_lookup(&mut writer, 2, 1, &[100.0, 200.0, 400.0]);
     write_tab_lookup(&mut writer, 2, 3, &[10.0, 20.0, 40.0]);
 

@@ -20,6 +20,8 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::validate_table_field_count;
 use crate::header::Header;
+use crate::header::value;
+use crate::keyword;
 use crate::keyword::key;
 use crate::table_impl::BinTable;
 use crate::table_impl::Tform;
@@ -334,10 +336,10 @@ pub(crate) fn compress_table(
     ]);
     h.set_internal("ZTABLE", true)
         .comment_internal("ZTABLE", "this is a compressed table");
-    h.set_internal("ZTILELEN", fits_i64(rpt)?);
-    h.set_internal("ZNAXIS1", fits_i64(naxis1)?);
-    h.set_internal("ZNAXIS2", fits_i64(nrows)?);
-    h.set_internal("ZPCOUNT", fits_i64(bound.pcount)?);
+    h.set_internal("ZTILELEN", value::fits_i64(rpt)?);
+    h.set_internal("ZNAXIS1", value::fits_i64(naxis1)?);
+    h.set_internal("ZNAXIS2", value::fits_i64(nrows)?);
+    h.set_internal("ZPCOUNT", value::fits_i64(bound.pcount)?);
     for (ci, m) in metas.iter().enumerate() {
         let n = ci + 1;
         let zform = header
@@ -348,9 +350,9 @@ pub(crate) fn compress_table(
         h.set_internal(key!("TFORM{n}").as_str(), "1QB");
         h.set_internal(key!("ZCTYP{n}").as_str(), m.algo.name());
     }
-    h.set_internal("NAXIS1", fits_i64(compressed_row_len)?);
-    h.set_internal("NAXIS2", fits_i64(nchunks)?);
-    h.set_internal("PCOUNT", fits_i64(heap_len)?);
+    h.set_internal("NAXIS1", value::fits_i64(compressed_row_len)?);
+    h.set_internal("NAXIS2", value::fits_i64(nchunks)?);
+    h.set_internal("PCOUNT", value::fits_i64(heap_len)?);
     h.set_internal("GCOUNT", 1);
     Ok(h)
 }
@@ -518,9 +520,9 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
 
     // Restore the original header: drop the Z* keywords, reinstate NAXIS/PCOUNT.
     let mut h = header.clone();
-    h.set_internal("NAXIS1", fits_i64(naxis1)?);
-    h.set_internal("NAXIS2", fits_i64(nrows)?);
-    h.set_internal("PCOUNT", fits_i64(zpcount)?);
+    h.set_internal("NAXIS1", value::fits_i64(naxis1)?);
+    h.set_internal("NAXIS2", value::fits_i64(nrows)?);
+    h.set_internal("PCOUNT", value::fits_i64(zpcount)?);
     for (n, zform) in zforms.iter().enumerate() {
         h.set_internal(key!("TFORM{}", n + 1).as_str(), zform.clone());
     }
@@ -550,18 +552,7 @@ pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduP
 }
 
 fn indexed_compression_key(keyword: &str, prefix: &str, ncols: usize) -> bool {
-    let Some(suffix) = keyword.strip_prefix(prefix) else {
-        return false;
-    };
-    if suffix.is_empty()
-        || suffix.starts_with('0')
-        || !suffix.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return false;
-    }
-    suffix
-        .parse::<usize>()
-        .is_ok_and(|column| (1..=ncols).contains(&column))
+    keyword::index(keyword, prefix).is_some_and(|column| (1..=ncols).contains(&column))
 }
 
 fn bind_table<'a>(header: &Header, table: &'a BinTable) -> Result<BoundTable<'a>> {
@@ -990,8 +981,4 @@ fn scatter_column(out: &mut [u8], bytes: &[u8], rows: usize, row_len: usize, m: 
         let offset = row * row_len + m.offset;
         out[offset..offset + m.width].copy_from_slice(&bytes[row * m.width..(row + 1) * m.width]);
     }
-}
-
-fn fits_i64(value: usize) -> Result<i64> {
-    i64::try_from(value).map_err(|_| FitsError::DataUnitOverflow)
 }

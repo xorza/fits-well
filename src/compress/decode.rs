@@ -24,6 +24,7 @@ use crate::data::Image;
 use crate::data::ImageData;
 use crate::data::Scaling;
 use crate::data::shape_product;
+use crate::data::validate_image_region;
 use crate::data::view_words;
 use crate::error::FitsError;
 use crate::error::Result;
@@ -289,7 +290,7 @@ pub(crate) fn compressed_image_tile_rows(
     ranges: &[Range<usize>],
 ) -> Result<Vec<usize>> {
     let layout = ImageLayout::from_header(header)?;
-    validate_region(ranges, &layout.dims)?;
+    validate_image_region(ranges, &layout.dims)?;
     if ranges.iter().any(Range::is_empty) || layout.dims.is_empty() {
         return Ok(Vec::new());
     }
@@ -399,7 +400,7 @@ impl ImageRegionLayout {
         ranges: &[Range<usize>],
     ) -> Result<ImageRegionLayout> {
         let image = ImageLayout::from_header(header)?;
-        let shape = validate_region(ranges, &image.dims)?;
+        let shape = validate_image_region(ranges, &image.dims)?;
         if table.metadata().nrows != tile_rows.len() {
             return Err(FitsError::DataSizeMismatch {
                 expected: tile_rows.len(),
@@ -792,28 +793,6 @@ fn read_tile_shape(header: &Header, dims: &[usize]) -> Result<Vec<usize>> {
             }
         })
         .collect()
-}
-
-fn validate_region(ranges: &[Range<usize>], dims: &[usize]) -> Result<Vec<usize>> {
-    if ranges.len() != dims.len() {
-        return Err(FitsError::ImageRegionRankMismatch {
-            region_rank: ranges.len(),
-            image_rank: dims.len(),
-        });
-    }
-    let mut shape = Vec::with_capacity(dims.len());
-    for (axis, (range, &len)) in ranges.iter().zip(dims).enumerate() {
-        if range.start > range.end || range.end > len {
-            return Err(FitsError::ImageRegionOutOfBounds {
-                axis,
-                start: range.start,
-                end: range.end,
-                len,
-            });
-        }
-        shape.push(range.end - range.start);
-    }
-    Ok(shape)
 }
 
 fn read_tiles<'a>(table: &'a BinTable, name: &str) -> Result<Option<VlaColumn<'a>>> {

@@ -17,6 +17,7 @@ use crate::data::ReadImage;
 use crate::data::Scaling;
 use crate::data::shape_product;
 use crate::data::swap_into_words;
+use crate::data::validate_image_region;
 use crate::data::view_words;
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
@@ -306,6 +307,21 @@ impl<S: Source> FitsReader<S> {
         })
     }
 
+    /// Validate `index` as a plain image array and resolve everything the whole-image
+    /// reads need before touching the data unit. Taking it in one step also ends the
+    /// `self.hdus` borrow, so the caller is free to borrow the source and scratch.
+    fn plain_image(&self, index: usize) -> Result<PlainImage> {
+        let hdu = self.checked_hdu(index)?;
+        hdu.ensure_plain_image()?;
+        Ok(PlainImage {
+            shape: hdu.header.axes()?,
+            scaling: hdu.header.scaling()?,
+            bitpix: hdu.header.bitpix()?,
+            data_offset: hdu.data_offset,
+            lengths: DataLengths::new(hdu.data_bytes)?,
+        })
+    }
+
     /// The scanned HDU records, read-only and in file order — each carrying its
     /// parsed [`Header`] and [`HduKind`]. Index, iterate, or `.len()` the slice; pick
     /// an index for a `read_*` method (or use [`FitsReader::image_indices`] /
@@ -321,7 +337,25 @@ impl<S: Source> FitsReader<S> {
     /// `('SCI', 1)` and `('SCI', 2)` are told apart. The primary array has no
     /// `EXTNAME`. Pair the returned index with a `read_*` method.
     pub fn hdu_index(&self, name: &str, version: Option<i64>) -> Result<Option<usize>> {
+        self.find_extension(name, version, None, None)
+    }
+
+    /// Index of the first HDU whose `EXTNAME` matches `name` case-insensitively, with
+    /// `version`/`level` (`EXTVER`/`EXTLEVEL`, each defaulting to 1 where the card is
+    /// absent, §4.4.1) and `kind` narrowing the search when given. `EXTVER`/`EXTLEVEL`
+    /// are only read once the name matches, so a malformed version card on an
+    /// unrelated HDU cannot fail an otherwise-resolvable lookup.
+    fn find_extension(
+        &self,
+        name: &str,
+        version: Option<i64>,
+        level: Option<i64>,
+        kind: Option<HduKind>,
+    ) -> Result<Option<usize>> {
         for (index, hdu) in self.hdus.iter().enumerate() {
+            if kind.is_some_and(|kind| hdu.kind != kind) {
+                continue;
+            }
             let name_matches = hdu
                 .header
                 .get_text("EXTNAME")?
@@ -329,13 +363,17 @@ impl<S: Source> FitsReader<S> {
             if !name_matches {
                 continue;
             }
-            let version_matches = match version {
-                Some(value) => hdu.header.get_integer("EXTVER")?.unwrap_or(1) == value,
-                None => true,
-            };
-            if version_matches {
-                return Ok(Some(index));
+            if let Some(version) = version
+                && hdu.header.get_integer("EXTVER")?.unwrap_or(1) != version
+            {
+                continue;
             }
+            if let Some(level) = level
+                && hdu.header.get_integer("EXTLEVEL")?.unwrap_or(1) != level
+            {
+                continue;
+            }
+            return Ok(Some(index));
         }
         Ok(None)
     }
@@ -401,31 +439,30 @@ impl<S: Source> FitsReader<S> {
             return Ok(ReadImage::decoded(img.samples, img.shape, img.scaling));
         }
 
-        let hdu = self.checked_hdu(index)?;
-        hdu.ensure_plain_image()?;
-        let bitpix = hdu.header.bitpix()?;
-        let shape = hdu.header.axes()?;
-        let scaling = hdu.header.scaling()?;
-        let (data_offset, data_bytes) = (hdu.data_offset, hdu.data_bytes);
-        let lengths = DataLengths::new(data_bytes)?;
+        let image = self.plain_image(index)?;
         let unit = self
             .source
-            .slice(data_offset, lengths.padded, &mut self.scratch)?;
-        let bytes = &unit[..lengths.data];
+            .slice(image.data_offset, image.lengths.padded, &mut self.scratch)?;
+        let bytes = &unit[..image.lengths.data];
 
-        // With PCOUNT=0/GCOUNT=1 (checked above), `data_extent` sized the unit as
-        // `elem · Π(axes)`, so the borrowed data is exactly `shape_product` elements
-        // wide. This is an invariant between `data_extent` and the shape, not a
+        // With PCOUNT=0/GCOUNT=1 (checked by `plain_image`), `data_extent` sized the
+        // unit as `elem · Π(axes)`, so the borrowed data is exactly `shape_product`
+        // elements wide. This is an invariant between `data_extent` and the shape, not a
         // runtime failure mode — assert it rather than return an error that can't occur.
-        let expected_bytes = shape_product(&shape)?
-            .checked_mul(bitpix.elem_size())
+        let expected_bytes = shape_product(&image.shape)?
+            .checked_mul(image.bitpix.elem_size())
             .ok_or(FitsError::DataUnitOverflow)?;
         debug_assert_eq!(
             bytes.len(),
             expected_bytes,
             "image data length must match the axis product"
         );
-        Ok(ReadImage::raw(shape, bitpix, scaling, bytes))
+        Ok(ReadImage::raw(
+            image.shape,
+            image.bitpix,
+            image.scaling,
+            bytes,
+        ))
     }
 
     /// Read an image as a borrowed, host-endian [`ImageView`], byte-swapping into the
@@ -454,33 +491,25 @@ impl<S: Source> FitsReader<S> {
             return decode::decompress_image_into_words(&self.hdus[index].header, &table, scratch);
         }
 
-        let hdu = self.checked_hdu(index)?;
-        hdu.ensure_plain_image()?;
-        let bitpix = hdu.header.bitpix()?;
-        let shape = hdu.header.axes()?;
-        let scaling = hdu.header.scaling()?;
-        let lengths = DataLengths::new(hdu.data_bytes)?;
-        let data_offset = hdu.data_offset;
-        // `hdu` (the self.hdus borrow) is unused past here, so the source/scratch
-        // borrows below don't conflict — same staging as `read_image`.
+        let image = self.plain_image(index)?;
         let unit = self
             .source
-            .slice(data_offset, lengths.padded, &mut self.scratch)?;
-        let be = &unit[..lengths.data];
-        if bitpix == Bitpix::U8 {
+            .slice(image.data_offset, image.lengths.padded, &mut self.scratch)?;
+        let be = &unit[..image.lengths.data];
+        if image.bitpix == Bitpix::U8 {
             // No byte-swap: the on-disk bytes already are the host-endian samples, so
             // borrow them straight (zero-copy) — `scratch` stays untouched.
             return Ok(BorrowedImage {
-                shape,
-                scaling,
+                shape: image.shape,
+                scaling: image.scaling,
                 samples: ImageView::U8(be),
             });
         }
-        swap_into_words(be, bitpix, scratch);
+        swap_into_words(be, image.bitpix, scratch);
         Ok(BorrowedImage {
-            shape,
-            scaling,
-            samples: view_words(scratch, bitpix, lengths.data),
+            shape: image.shape,
+            scaling: image.scaling,
+            samples: view_words(scratch, image.bitpix, image.lengths.data),
         })
     }
 
@@ -855,32 +884,21 @@ impl<S: Source> FitsReader<S> {
         let mut transforms = Vec::with_capacity(transform_count);
         for group in groups {
             let reference = &group[0].reference;
-            let mut table_index = None;
-            for (index, hdu) in self.hdus.iter().enumerate() {
-                if hdu.kind != HduKind::BinTable {
-                    continue;
-                }
-                let Some(name) = hdu.header.get_text("EXTNAME")? else {
-                    continue;
-                };
-                let version = hdu.header.get_integer("EXTVER")?.unwrap_or(1);
-                let level = hdu.header.get_integer("EXTLEVEL")?.unwrap_or(1);
-                if name.eq_ignore_ascii_case(&reference.extension_name)
-                    && version == reference.extension_version
-                    && level == reference.extension_level
-                {
-                    table_index = Some(index);
-                    break;
-                }
-            }
-            let table_index = table_index.ok_or_else(|| FitsError::InvalidValue {
-                card: format!(
-                    "TAB BINTABLE {:?}, EXTVER {}, EXTLEVEL {} was not found",
-                    reference.extension_name,
-                    reference.extension_version,
-                    reference.extension_level
-                ),
-            })?;
+            let table_index = self
+                .find_extension(
+                    &reference.extension_name,
+                    Some(reference.extension_version),
+                    Some(reference.extension_level),
+                    Some(HduKind::BinTable),
+                )?
+                .ok_or_else(|| FitsError::InvalidValue {
+                    card: format!(
+                        "TAB BINTABLE {:?}, EXTVER {}, EXTLEVEL {} was not found",
+                        reference.extension_name,
+                        reference.extension_version,
+                        reference.extension_level
+                    ),
+                })?;
             let schema = self.table_schema(table_index)?;
             let mut selected = vec![false; schema.columns.len()];
             for descriptor in &group {
@@ -1058,6 +1076,18 @@ fn resolve_column_name(schema: &TableSchema, name: &str) -> Result<usize> {
         })
 }
 
+/// A validated plain-image HDU: its geometry and scaling, plus where its data unit
+/// sits in the source. Shared preamble of [`FitsReader::read_image`] and
+/// [`FitsReader::read_image_view`].
+#[derive(Debug)]
+struct PlainImage {
+    shape: Vec<usize>,
+    scaling: Scaling,
+    bitpix: Bitpix,
+    data_offset: u64,
+    lengths: DataLengths,
+}
+
 #[derive(Debug)]
 struct ImageSectionLayout {
     shape: Vec<usize>,
@@ -1069,28 +1099,6 @@ struct ImageSectionLayout {
 struct ByteRun {
     offset: usize,
     len: usize,
-}
-
-fn validate_image_region(ranges: &[Range<usize>], shape: &[usize]) -> Result<Vec<usize>> {
-    if ranges.len() != shape.len() {
-        return Err(FitsError::ImageRegionRankMismatch {
-            region_rank: ranges.len(),
-            image_rank: shape.len(),
-        });
-    }
-    let mut selected = Vec::with_capacity(shape.len());
-    for (axis, (range, &len)) in ranges.iter().zip(shape).enumerate() {
-        if range.start > range.end || range.end > len {
-            return Err(FitsError::ImageRegionOutOfBounds {
-                axis,
-                start: range.start,
-                end: range.end,
-                len,
-            });
-        }
-        selected.push(range.end - range.start);
-    }
-    Ok(selected)
 }
 
 fn visit_image_region_runs(
