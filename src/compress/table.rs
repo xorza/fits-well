@@ -11,6 +11,7 @@
 
 use crate::allocation;
 use crate::compress::Compression;
+use crate::compress::ImageCodec;
 use crate::compress::convert;
 use crate::compress::gzip;
 use crate::compress::map_tiles;
@@ -38,24 +39,32 @@ enum Algo {
 }
 
 impl Algo {
-    fn name(self) -> &'static str {
+    /// `Algo` is exactly the subset of [`ImageCodec`] §10.3 permits for a table
+    /// column — the wavelet and mask codecs have no column meaning. Keeping it a
+    /// distinct type means the per-column match sites cannot be handed one.
+    fn image_codec(self) -> ImageCodec {
         match self {
-            Algo::Gzip1 => "GZIP_1",
-            Algo::Gzip2 => "GZIP_2",
-            Algo::Rice1 => "RICE_1",
-            Algo::NoCompress => "NOCOMPRESS",
+            Algo::Gzip1 => ImageCodec::Gzip1,
+            Algo::Gzip2 => ImageCodec::Gzip2,
+            Algo::Rice1 => ImageCodec::Rice1,
+            Algo::NoCompress => ImageCodec::NoCompress,
         }
     }
 
+    fn name(self) -> &'static str {
+        self.image_codec().name()
+    }
+
     fn parse(s: &str) -> Result<Algo> {
-        match s {
-            "GZIP_1" => Ok(Algo::Gzip1),
-            "GZIP_2" => Ok(Algo::Gzip2),
-            "RICE_1" => Ok(Algo::Rice1),
-            "NOCOMPRESS" => Ok(Algo::NoCompress),
-            other => Err(FitsError::UnsupportedCompression {
-                name: format!("table column codec {other}"),
-            }),
+        let invalid = || FitsError::UnsupportedCompression {
+            name: format!("table column codec {s}"),
+        };
+        match ImageCodec::parse(s).map_err(|_| invalid())? {
+            ImageCodec::Gzip1 => Ok(Algo::Gzip1),
+            ImageCodec::Gzip2 => Ok(Algo::Gzip2),
+            ImageCodec::Rice1 => Ok(Algo::Rice1),
+            ImageCodec::NoCompress => Ok(Algo::NoCompress),
+            ImageCodec::Plio1 | ImageCodec::Hcompress1 => Err(invalid()),
         }
     }
 }

@@ -33,42 +33,6 @@ valid built standalone. No batch here requires a `Cargo.toml` change.
 
 ---
 
-## Batch 5 — Error-variant families
-
-**Priority: 5** · Size: medium · Risk: low · Public API change (mechanical)
-
-16 variants across three shapes collapse to 3, with **no loss of `Display`
-specificity** (carry a `&'static str` discriminator). The crate's stated
-no-backward-compatibility policy makes this free. Sequenced after batches 3–4 so the
-table/data error sites settle before the sweep.
-
-- [ ] Six "wrong HDU kind" → one: `NotAnImage`, `NotABinTable`, `NotRandomGroups`,
-      `NotAnAsciiTable`, `NotCompressedImage`, `NotCompressedTable` (`error.rs:163–179`).
-- [ ] Five `{index, len}` out-of-bounds → one: `HduIndexOutOfBounds`,
-      `HeaderIndexOutOfBounds`, `ColumnIndexOutOfBounds`, `GroupIndexOutOfBounds`,
-      `WcsAxisIndexOutOfBounds`.
-- [ ] Five `{code: char}` wrong-column-kind → one: `VariableLengthColumn`, `NotAVla`,
-      `NotABitColumn`, `NotAComplexColumn`, `NonNumericColumn`.
-
-~13 variants and ~60 lines of `Display` arms. **`lumos` names none of these** (only
-`Io`, `KeywordOutOfRange`, `MissingKeyword`, `TypeMismatch`), and `FitsError` is
-`#[non_exhaustive]` so no downstream match can be exhaustive. Most of the churn is in
-this crate's own tests.
-
----
-
-## Batch 6 — Compression codec enums
-
-**Priority: 6** · Size: small · Risk: low · No public impact
-
-- [ ] `Algo` (`compress/table.rs:31`) is `ImageCodec` (`compress/mod.rs:182`) minus
-      `Plio1`/`Hcompress1`, with a duplicate `parse` and a duplicate name-string table.
-      One enum, with a table-path validity check at parse time.
-- [ ] `Compression::name` (`compress/mod.rs:236`) routes through `image_codec()` for the
-      same strings `Algo::name` (`table.rs:39`) repeats.
-
----
-
 ## Batch 7 — WCS table-keyword resolver
 
 **Priority: 7** · Size: medium · Risk: low · No public impact

@@ -9,9 +9,7 @@
 use crate::compress::convert;
 use crate::compress::geometry::TileGeometry;
 use crate::compress::geometry::TileScratch;
-use crate::compress::{
-    Compression, CompressionOptions, DitherMethod, ImageCodec, map_tiles, needs_wide,
-};
+use crate::compress::{Compression, CompressionOptions, ImageCodec, map_tiles, needs_wide};
 use crate::compress::{gzip, hcompress, plio, quantize, rice};
 
 use crate::bitpix::Bitpix;
@@ -420,7 +418,7 @@ fn compress_float_image(
             .set_internal("ZVAL1", 32);
         h.set_internal("ZNAME2", "BYTEPIX").set_internal("ZVAL2", 4);
     }
-    h.set_internal("ZQUANTIZ", dither_name(method));
+    h.set_internal("ZQUANTIZ", method.name());
     h.set_internal("ZDITHER0", zdither0);
     if any_null {
         // Quantized nulls are stored as this reserved integer; ZBLANK tells the
@@ -429,15 +427,6 @@ fn compress_float_image(
     }
     image.scaling.add_to_header(&mut h, zbitpix)?;
     Ok(h)
-}
-
-/// The `ZQUANTIZ` keyword string for a dither method.
-fn dither_name(method: DitherMethod) -> &'static str {
-    match method {
-        DitherMethod::None => "NO_DITHER",
-        DitherMethod::Subtractive1 => "SUBTRACTIVE_DITHER_1",
-        DitherMethod::Subtractive2 => "SUBTRACTIVE_DITHER_2",
-    }
 }
 
 /// One tile's compressed payload: a byte stream (`1PB`) for most codecs, or an

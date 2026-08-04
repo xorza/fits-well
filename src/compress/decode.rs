@@ -116,16 +116,17 @@ impl<'a> ImageDecodePlan<'a> {
         } else {
             layout.bitpix
         };
-        let method = match header.get_text("ZQUANTIZ")?.unwrap_or("NO_DITHER") {
-            "NO_DITHER" => DitherMethod::None,
-            "SUBTRACTIVE_DITHER_1" => DitherMethod::Subtractive1,
-            "SUBTRACTIVE_DITHER_2" => DitherMethod::Subtractive2,
-            other if is_float => {
+        let quantiz = header.get_text("ZQUANTIZ")?.unwrap_or("NO_DITHER");
+        let method = match DitherMethod::parse(quantiz) {
+            Some(method) => method,
+            // A float image's samples cannot be reconstructed without reproducing its
+            // dither exactly; an integer image ignores `ZQUANTIZ` altogether.
+            None if is_float => {
                 return Err(FitsError::UnsupportedCompression {
-                    name: format!("float quantization {other}"),
+                    name: format!("float quantization {quantiz}"),
                 });
             }
-            _ => DitherMethod::None,
+            None => DitherMethod::None,
         };
         let zdither0 = header.get_integer("ZDITHER0")?.unwrap_or(1);
         if !(1..=10_000).contains(&zdither0) {
