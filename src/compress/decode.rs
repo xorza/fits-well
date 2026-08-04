@@ -34,6 +34,7 @@ use crate::table_impl::BinTable;
 use crate::table_impl::ColumnData;
 use crate::table_impl::VlaCell;
 use crate::table_impl::VlaColumn;
+use crate::words;
 use std::ops::Range;
 
 #[derive(Debug)]
@@ -368,31 +369,18 @@ impl<'a> DecodeBuffer<'a> {
     }
 
     fn from_words(words: &'a mut [u64], bitpix: Bitpix, count: usize) -> DecodeBuffer<'a> {
-        debug_assert!(
-            count <= words.len().saturating_mul(8) / bitpix.elem_size(),
-            "decode scratch must hold every sample"
-        );
-        let ptr = words.as_mut_ptr() as *mut u8;
-        // SAFETY: the caller sizes `words` for every sample; u64 alignment satisfies
-        // every FITS scalar type, whose bit patterns are all valid.
+        // SAFETY: the callers resize `words` to `count` zeroed samples before this, and
+        // zero is a valid value for every sample type, so the view covers initialized
+        // storage. Alignment and bit-pattern validity are `words::samples_mut`'s to
+        // uphold, not this caller's.
         unsafe {
             match bitpix {
-                Bitpix::U8 => DecodeBuffer::U8(std::slice::from_raw_parts_mut(ptr, count)),
-                Bitpix::I16 => {
-                    DecodeBuffer::I16(std::slice::from_raw_parts_mut(ptr as *mut i16, count))
-                }
-                Bitpix::I32 => {
-                    DecodeBuffer::I32(std::slice::from_raw_parts_mut(ptr as *mut i32, count))
-                }
-                Bitpix::I64 => {
-                    DecodeBuffer::I64(std::slice::from_raw_parts_mut(ptr as *mut i64, count))
-                }
-                Bitpix::F32 => {
-                    DecodeBuffer::F32(std::slice::from_raw_parts_mut(ptr as *mut f32, count))
-                }
-                Bitpix::F64 => {
-                    DecodeBuffer::F64(std::slice::from_raw_parts_mut(ptr as *mut f64, count))
-                }
+                Bitpix::U8 => DecodeBuffer::U8(words::samples_mut(words, count)),
+                Bitpix::I16 => DecodeBuffer::I16(words::samples_mut(words, count)),
+                Bitpix::I32 => DecodeBuffer::I32(words::samples_mut(words, count)),
+                Bitpix::I64 => DecodeBuffer::I64(words::samples_mut(words, count)),
+                Bitpix::F32 => DecodeBuffer::F32(words::samples_mut(words, count)),
+                Bitpix::F64 => DecodeBuffer::F64(words::samples_mut(words, count)),
             }
         }
     }

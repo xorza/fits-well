@@ -19,7 +19,6 @@ use bitvec::view::BitView;
 use num_complex::Complex;
 
 use crate::bitpix::Bitpix;
-use crate::data::SampleType;
 use crate::data::Scaling;
 use crate::data::UnsignedData;
 use crate::data::UnsignedKind;
@@ -1027,21 +1026,16 @@ pub(crate) fn decode_fixed_cell(col: &Column, bytes: &[u8]) -> ColumnData {
 }
 
 /// Whether a column's `TSCALn`/`TZEROn`/`TNULLn` realize a FITS unsigned (or
-/// signed-byte) convention, and which one. `TZEROn` on a table column means exactly
-/// what `BZERO` means on an image, so the offset test itself lives once, in
-/// [`SampleType::from_scaling`] — this only maps the column's stored type onto the
-/// matching `BITPIX` and forwards the linear scaling.
+/// signed-byte) convention, and which one. A table column's three keywords mean
+/// exactly what an image's `BSCALE`/`BZERO`/`BLANK` do, so this only maps the
+/// column's stored type onto the matching `BITPIX` and hands the trio to
+/// [`Scaling::unsigned_kind`], which resolves the convention for both paths.
 fn unsigned_kind(
     kind: TformKind,
     tscale: f64,
     tzero: f64,
     tnull: Option<i64>,
 ) -> Option<UnsignedKind> {
-    // A null sentinel marks elements with no exact integer value, so an unsigned view
-    // cannot represent them; `SampleType` deliberately ignores it, so guard here.
-    if tnull.is_some() {
-        return None;
-    }
     let bitpix = match kind {
         TformKind::Byte => Bitpix::U8,
         TformKind::I16 => Bitpix::I16,
@@ -1049,12 +1043,12 @@ fn unsigned_kind(
         TformKind::I64 => Bitpix::I64,
         _ => return None,
     };
-    let scaling = Scaling {
+    Scaling {
         bscale: tscale,
         bzero: tzero,
-        blank: None,
-    };
-    SampleType::from_scaling(bitpix, &scaling).unsigned_kind()
+        blank: tnull,
+    }
+    .unsigned_kind(bitpix)
 }
 
 fn complex_cells<'a>(
