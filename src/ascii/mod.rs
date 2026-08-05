@@ -247,26 +247,21 @@ impl<'a> AsciiColumnReader<'a> {
             AsciiKind::Integer => {
                 let mut out = Vec::with_capacity(table.nrows);
                 for r in 0..table.nrows {
-                    out.push(match parse_numeric_field(table, col, r)? {
-                        None => None,
-                        Some(ParsedNumeric::Integer(value)) => Some(value),
-                        Some(ParsedNumeric::Float(_)) => {
-                            unreachable!("integer columns parse integer fields")
-                        }
-                    });
+                    out.push(
+                        defined_field(table, col, r)
+                            .map(parse_integer)
+                            .transpose()?,
+                    );
                 }
                 Ok(AsciiColumnData::Integer(out))
             }
             AsciiKind::Float => {
                 let mut out = Vec::with_capacity(table.nrows);
                 for r in 0..table.nrows {
-                    out.push(match parse_numeric_field(table, col, r)? {
-                        None => None,
-                        Some(ParsedNumeric::Float(value)) => Some(value),
-                        Some(ParsedNumeric::Integer(_)) => {
-                            unreachable!("float columns parse float fields")
-                        }
-                    });
+                    let value = defined_field(table, col, r)
+                        .map(|field| parse_float(field, col.decimals))
+                        .transpose()?;
+                    out.push(value);
                 }
                 Ok(AsciiColumnData::Float(out))
             }
@@ -281,13 +276,15 @@ impl<'a> AsciiColumnReader<'a> {
         if col.kind == AsciiKind::Char {
             return Err(FitsError::NonNumericColumn { code: 'A' });
         }
-        let physical = |value| col.tzero + col.tscale * value;
         let mut out = Vec::with_capacity(self.table.nrows);
         for row in 0..self.table.nrows {
-            let value = match parse_numeric_field(self.table, col, row)? {
+            let value = match defined_field(self.table, col, row) {
+                // §7.2.5: an undefined field has no value to scale.
                 None => f64::NAN,
-                Some(ParsedNumeric::Integer(value)) => physical(value as f64),
-                Some(ParsedNumeric::Float(value)) => physical(value),
+                Some(field) if col.kind == AsciiKind::Integer => {
+                    col.tzero + col.tscale * parse_integer(field)? as f64
+                }
+                Some(field) => col.tzero + col.tscale * parse_float(field, col.decimals)?,
             };
             out.push(value);
         }
@@ -295,38 +292,32 @@ impl<'a> AsciiColumnReader<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ParsedNumeric {
-    Integer(i64),
-    Float(f64),
+/// The trimmed text of one field, or `None` when it is the column's `TNULLn` marker
+/// and so carries no value at all (§7.2.5).
+fn defined_field<'a>(table: &'a AsciiTable, col: &AsciiColumn, row: usize) -> Option<&'a str> {
+    let field = table.field(col, row).trim();
+    (!col.is_null(field)).then_some(field)
 }
 
-fn parse_numeric_field(
-    table: &AsciiTable,
-    col: &AsciiColumn,
-    row: usize,
-) -> Result<Option<ParsedNumeric>> {
-    let field = table.field(col, row).trim();
-    if col.is_null(field) {
-        return Ok(None);
+/// Parse an `Iw` field. A blank one is a genuine zero, not an undefined value
+/// (§7.2.5) — only `TNULLn` marks undefined, and [`defined_field`] filtered it.
+fn parse_integer(field: &str) -> Result<i64> {
+    if field.is_empty() {
+        return Ok(0);
     }
-    Ok(Some(match col.kind {
-        AsciiKind::Integer if field.is_empty() => ParsedNumeric::Integer(0),
-        AsciiKind::Integer => {
-            ParsedNumeric::Integer(field.parse().map_err(|_| FitsError::InvalidValue {
-                card: field.to_string(),
-            })?)
-        }
-        AsciiKind::Float if field.is_empty() => ParsedNumeric::Float(0.0),
-        AsciiKind::Float => {
-            ParsedNumeric::Float(parse_ascii_float(field, col.decimals).ok_or_else(|| {
-                FitsError::InvalidValue {
-                    card: field.to_string(),
-                }
-            })?)
-        }
-        AsciiKind::Char => unreachable!("numeric field parser rejects character columns"),
-    }))
+    field.parse().map_err(|_| FitsError::InvalidValue {
+        card: field.to_string(),
+    })
+}
+
+/// Parse an `Fw.d`/`Ew.d`/`Dw.d` field, with the same blank rule as [`parse_integer`].
+fn parse_float(field: &str, decimals: usize) -> Result<f64> {
+    if field.is_empty() {
+        return Ok(0.0);
+    }
+    parse_ascii_float(field, decimals).ok_or_else(|| FitsError::InvalidValue {
+        card: field.to_string(),
+    })
 }
 
 impl AsciiColumn {
