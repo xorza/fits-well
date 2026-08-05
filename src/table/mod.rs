@@ -19,6 +19,8 @@ use bitvec::view::BitView;
 use num_complex::Complex;
 
 use crate::bitpix::Bitpix;
+use crate::column;
+use crate::column::Named;
 use crate::data::Scaling;
 use crate::data::UnsignedData;
 use crate::data::UnsignedKind;
@@ -344,6 +346,28 @@ pub struct TableSchema {
     pub columns: Vec<Column>,
 }
 
+impl TableSchema {
+    /// The index of the first column whose `TTYPEn` matches `name`, compared
+    /// case-insensitively per §6.7. Resolvable from the header alone, so a caller
+    /// holding only a [`crate::FitsReader::table_schema`] can locate a column
+    /// without reading the data unit.
+    pub fn column_index(&self, name: &str) -> Option<usize> {
+        column::index_of(&self.columns, name)
+    }
+
+    /// [`TableSchema::column_index`], reporting an absent column as
+    /// [`FitsError::ColumnNotFound`].
+    pub(crate) fn column_index_checked(&self, name: &str) -> Result<usize> {
+        column::checked_index_of(&self.columns, name)
+    }
+}
+
+impl Named for Column {
+    fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+}
+
 impl BinTable {
     /// Borrow the table's validated row count and column descriptors.
     pub fn metadata(&self) -> BinTableMetadata<'_> {
@@ -473,18 +497,7 @@ impl BinTable {
     /// The index of the first column whose `TTYPEn` matches `name`, compared
     /// case-insensitively per §6.7.
     pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.schema.columns.iter().position(|c| {
-            c.name
-                .as_deref()
-                .is_some_and(|n| n.eq_ignore_ascii_case(name))
-        })
-    }
-
-    fn column_index_checked(&self, name: &str) -> Result<usize> {
-        self.column_index(name)
-            .ok_or_else(|| FitsError::ColumnNotFound {
-                name: name.to_string(),
-            })
+        self.schema.column_index(name)
     }
 
     /// A reader handle for the column at `index`. Decode through it — [`ColumnReader`]
@@ -492,19 +505,14 @@ impl BinTable {
     /// without re-passing the column descriptor. Errors with
     /// [`FitsError::ColumnIndexOutOfBounds`] for a bad index.
     pub fn column_by_idx(&self, index: usize) -> Result<ColumnReader<'_>> {
-        if index >= self.schema.columns.len() {
-            return Err(FitsError::ColumnIndexOutOfBounds {
-                index,
-                len: self.schema.columns.len(),
-            });
-        }
+        column::validate_index(index, self.schema.columns.len())?;
         Ok(ColumnReader { table: self, index })
     }
 
     /// A reader handle for the column named `name` (`TTYPEn`, case-insensitive, §6.7).
     /// Errors with [`FitsError::ColumnNotFound`] if no such column exists.
     pub fn column_by_name(&self, name: &str) -> Result<ColumnReader<'_>> {
-        let index = self.column_index_checked(name)?;
+        let index = self.schema.column_index_checked(name)?;
         Ok(ColumnReader { table: self, index })
     }
 
@@ -919,7 +927,7 @@ fn parse_tdim(value: &str) -> Result<Vec<usize>> {
 
 /// A `TDIMn` shape must name at least one axis and no zero-length one — the rule
 /// both the parsed (`TDIMn` card) and supplied (writer) shapes obey.
-pub(crate) fn validate_tdim_shape(dims: &[usize]) -> Result<()> {
+fn validate_tdim_shape(dims: &[usize]) -> Result<()> {
     if dims.is_empty() || dims.contains(&0) {
         return Err(FitsError::KeywordOutOfRange { name: "TDIMn" });
     }
@@ -928,7 +936,7 @@ pub(crate) fn validate_tdim_shape(dims: &[usize]) -> Result<()> {
 
 /// §7.3.2: a `TDIMn` shape may describe fewer elements than the cell holds (trailing
 /// elements beyond the declared view are permitted) but never more.
-pub(crate) fn validate_tdim_extent(dims: &[usize], element_count: usize) -> Result<()> {
+fn validate_tdim_extent(dims: &[usize], element_count: usize) -> Result<()> {
     let product = dims
         .iter()
         .try_fold(1usize, |product, &len| product.checked_mul(len))
@@ -939,15 +947,49 @@ pub(crate) fn validate_tdim_extent(dims: &[usize], element_count: usize) -> Resu
     Ok(())
 }
 
-/// The `TDIMn` extent check for a `P`/`Q` heap array. An empty descriptor carries no
-/// elements to reshape, so the declared shape is simply not applied to that row.
-fn validate_vla_tdim(col: &Column, element_count: usize) -> Result<()> {
-    if element_count != 0
-        && let Some(dims) = &col.tdim
-    {
-        validate_tdim_extent(dims, element_count)?;
+/// The extent rule as it applies to a `P`/`Q` heap array: an empty descriptor
+/// carries no elements to reshape, so the declared shape is simply not applied to
+/// that row.
+fn validate_vla_tdim_extent(dims: &[usize], element_count: usize) -> Result<()> {
+    if element_count == 0 {
+        return Ok(());
     }
-    Ok(())
+    validate_tdim_extent(dims, element_count)
+}
+
+/// Both rules for a *caller-supplied* fixed-width `TDIMn`: the shape is well-formed
+/// and describes no more elements than the cell holds.
+///
+/// The read path applies only the extent rule, because a shape that came off a
+/// `TDIMn` card was already checked for well-formedness by [`parse_tdim`]; the
+/// writer's shape arrives straight from the caller and so needs both.
+pub(crate) fn validate_declared_tdim(shape: Option<&[usize]>, element_count: usize) -> Result<()> {
+    let Some(shape) = shape else {
+        return Ok(());
+    };
+    validate_tdim_shape(shape)?;
+    validate_tdim_extent(shape, element_count)
+}
+
+/// [`validate_declared_tdim`] for a `P`/`Q` row, which skips the extent rule on an
+/// empty heap array.
+pub(crate) fn validate_declared_vla_tdim(
+    shape: Option<&[usize]>,
+    element_count: usize,
+) -> Result<()> {
+    let Some(shape) = shape else {
+        return Ok(());
+    };
+    validate_tdim_shape(shape)?;
+    validate_vla_tdim_extent(shape, element_count)
+}
+
+/// The `TDIMn` extent check for a parsed column's `P`/`Q` heap array.
+fn validate_vla_tdim(col: &Column, element_count: usize) -> Result<()> {
+    match &col.tdim {
+        Some(dims) => validate_vla_tdim_extent(dims, element_count),
+        None => Ok(()),
+    }
 }
 
 fn decode_scalar_cells<'a>(

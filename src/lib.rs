@@ -51,6 +51,7 @@ mod ascii;
 mod bitpix;
 mod block;
 mod checksum;
+mod column;
 #[cfg(feature = "compression")]
 mod compress;
 mod data;
