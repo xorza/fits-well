@@ -22,9 +22,9 @@ use crate::keyword::key;
 #[cfg(feature = "compression")]
 use crate::table_impl::BinTable;
 use crate::table_impl::{
-    CharacterField, ColumnData, TformKind, validate_tdim_extent, validate_tdim_shape,
+    CharacterField, ColumnData, TformKind, validate_declared_tdim, validate_declared_vla_tdim,
 };
-use crate::writer::{FitsWriter, merge_header_template, validate_scaling};
+use crate::writer::{FitsWriter, accept_row_count, merge_header_template, validate_scaling};
 
 /// An element type accepted by a binary-table writer column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,22 +274,8 @@ impl TableBuilder {
     /// Add a column and immediately validate its inferred row count against the
     /// columns already present.
     pub fn push(&mut self, column: WriteColumn) -> Result<&mut Self> {
-        match (self.nrows, column.inferred_rows()?) {
-            (Some(expected), Some(got)) if expected != got => {
-                return Err(FitsError::TableRowCountMismatch {
-                    column: column.name.clone(),
-                    expected,
-                    got,
-                });
-            }
-            (None, Some(rows)) => self.nrows = Some(rows),
-            (None, None) => {
-                return Err(FitsError::TableRowCountUndetermined {
-                    column: column.name.clone(),
-                });
-            }
-            _ => {}
-        }
+        let inferred = column.inferred_rows()?;
+        accept_row_count(&mut self.nrows, &column.name, inferred)?;
         self.columns.push(column);
         Ok(self)
     }
@@ -654,7 +640,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                 }
                 _ => {}
             }
-            validate_tdim(col.tdim.as_deref(), *repeat)?;
+            validate_declared_tdim(col.tdim.as_deref(), *repeat)?;
             Ok(ColumnLayout {
                 row_width: repeat
                     .checked_mul(kind.elem_size())
@@ -689,7 +675,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                 }
                 let count = encoded_element_count(*kind, cell)?;
                 max_elements = max_elements.max(count);
-                validate_vla_tdim(col.tdim.as_deref(), count)?;
+                validate_declared_vla_tdim(col.tdim.as_deref(), count)?;
             }
             let descriptor = if *wide { 'Q' } else { 'P' };
             Ok(ColumnLayout {
@@ -708,7 +694,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
             let mut max_bits = 0usize;
             for bits in rows {
                 max_bits = max_bits.max(bits.len());
-                validate_vla_tdim(col.tdim.as_deref(), bits.len())?;
+                validate_declared_vla_tdim(col.tdim.as_deref(), bits.len())?;
             }
             let descriptor = if *wide { 'Q' } else { 'P' };
             Ok(ColumnLayout {
@@ -728,7 +714,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                     declared: expected,
                 });
             }
-            validate_tdim(col.tdim.as_deref(), *bit_count)?;
+            validate_declared_tdim(col.tdim.as_deref(), *bit_count)?;
             Ok(ColumnLayout {
                 row_width,
                 tform: format!("{bit_count}X"),
@@ -775,27 +761,6 @@ fn encoded_element_count(kind: ColumnType, cell: &ColumnData) -> Result<usize> {
     } else {
         Ok(cell.element_count())
     }
-}
-
-fn validate_tdim(shape: Option<&[usize]>, element_count: usize) -> Result<()> {
-    let Some(shape) = shape else {
-        return Ok(());
-    };
-    validate_tdim_shape(shape)?;
-    validate_tdim_extent(shape, element_count)
-}
-
-/// As [`validate_tdim`], but for a `P`/`Q` row: an empty heap array has no elements
-/// to reshape, so the declared shape is not applied to it.
-fn validate_vla_tdim(shape: Option<&[usize]>, element_count: usize) -> Result<()> {
-    let Some(shape) = shape else {
-        return Ok(());
-    };
-    validate_tdim_shape(shape)?;
-    if element_count == 0 {
-        return Ok(());
-    }
-    validate_tdim_extent(shape, element_count)
 }
 
 /// Append `data[range]` to `out` as big-endian bytes, for every fixed numeric /

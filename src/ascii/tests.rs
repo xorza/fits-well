@@ -180,6 +180,11 @@ fn ascii_column_index_is_case_insensitive() {
     let table = AsciiTable::from_data(&header, b"   7".to_vec()).unwrap();
     assert_eq!(table.column_index("COUNT"), Some(0));
     assert_eq!(table.column_index("count"), Some(0));
+    // §7.2.2 and §6.7 are the same rule, and both table forms now resolve names
+    // through one implementation — so the ASCII form rejects the same non-matches
+    // the binary one does.
+    assert_eq!(table.column_index("missing"), None);
+    assert_eq!(table.column_index(""), None);
 }
 
 #[test]

@@ -11,7 +11,7 @@ use crate::header::Header;
 use crate::header::card::validate_ascii;
 use crate::header::value;
 use crate::keyword::key;
-use crate::writer::{FitsWriter, merge_header_template, validate_scaling};
+use crate::writer::{FitsWriter, accept_row_count, merge_header_template, validate_scaling};
 
 /// One column to write into an ASCII table: nullable typed data, the fixed field
 /// width in characters, and the decimal count for floats.
@@ -89,18 +89,9 @@ impl AsciiTableBuilder {
     }
 
     pub fn push(&mut self, column: AsciiWriteColumn) -> Result<&mut Self> {
-        let got = column.data.len();
-        if let Some(expected) = self.nrows {
-            if expected != got {
-                return Err(FitsError::TableRowCountMismatch {
-                    column: column.name.clone(),
-                    expected,
-                    got,
-                });
-            }
-        } else {
-            self.nrows = Some(got);
-        }
+        // An ASCII column is always scalar (§7.2), so its value count *is* its row
+        // count and it always determines one.
+        accept_row_count(&mut self.nrows, &column.name, Some(column.data.len()))?;
         self.columns.push(column);
         Ok(self)
     }

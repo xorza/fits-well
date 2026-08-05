@@ -5,6 +5,8 @@
 //! (`Aw`, `Iw`, `Fw.d`, `Ew.d`, `Dw.d`). ASCII columns are always scalar, and
 //! [`AsciiColumnData`] retains `TNULLn` cells distinctly from genuine values.
 
+use crate::column;
+use crate::column::Named;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::validate_table_field_count;
@@ -178,37 +180,21 @@ impl AsciiTable {
     /// The index of the first column whose `TTYPEn` matches `name`, compared
     /// case-insensitively per §7.2.2.
     pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.columns.iter().position(|c| {
-            c.name
-                .as_deref()
-                .is_some_and(|n| n.eq_ignore_ascii_case(name))
-        })
-    }
-
-    fn column_index_checked(&self, name: &str) -> Result<usize> {
-        self.column_index(name)
-            .ok_or_else(|| FitsError::ColumnNotFound {
-                name: name.to_string(),
-            })
+        column::index_of(&self.columns, name)
     }
 
     /// A reader handle for the column at `index`. Decode through it —
     /// [`AsciiColumnReader::raw`]/[`physical`](AsciiColumnReader::physical) — without
     /// re-passing the descriptor. Errors with [`FitsError::ColumnIndexOutOfBounds`].
     pub fn column_by_idx(&self, index: usize) -> Result<AsciiColumnReader<'_>> {
-        if index >= self.columns.len() {
-            return Err(FitsError::ColumnIndexOutOfBounds {
-                index,
-                len: self.columns.len(),
-            });
-        }
+        column::validate_index(index, self.columns.len())?;
         Ok(AsciiColumnReader { table: self, index })
     }
 
     /// A reader handle for the column named `name` (`TTYPEn`, case-insensitive, §7.2.2).
     /// Errors with [`FitsError::ColumnNotFound`] if no such column exists.
     pub fn column_by_name(&self, name: &str) -> Result<AsciiColumnReader<'_>> {
-        let index = self.column_index_checked(name)?;
+        let index = column::checked_index_of(&self.columns, name)?;
         Ok(AsciiColumnReader { table: self, index })
     }
 
@@ -347,6 +333,12 @@ impl AsciiColumn {
     /// Whether the trimmed field text marks an undefined value (`TNULLn`).
     fn is_null(&self, field: &str) -> bool {
         self.null.as_deref() == Some(field)
+    }
+}
+
+impl Named for AsciiColumn {
+    fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 }
 

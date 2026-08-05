@@ -9,6 +9,7 @@ use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
 use crate::block::padded_len;
 use crate::checksum;
+use crate::column;
 use crate::data::BorrowedImage;
 use crate::data::Image;
 use crate::data::ImageData;
@@ -82,6 +83,20 @@ impl Hdu {
             return Err(FitsError::ImageHasGroups);
         }
         Ok(())
+    }
+
+    /// Validate that this HDU can be read through the binary-table path. Tiled
+    /// compressed images and tables are structurally `BINTABLE`s and the compression
+    /// layer reads their raw table form through it, so those kinds qualify too.
+    fn ensure_bintable(&self) -> Result<()> {
+        if matches!(
+            self.kind,
+            HduKind::BinTable | HduKind::CompressedImage | HduKind::CompressedTable
+        ) {
+            Ok(())
+        } else {
+            Err(FitsError::NotABinTable)
+        }
     }
 }
 
@@ -609,15 +624,7 @@ impl<S: Source> FitsReader<S> {
     /// individual columns lazily with [`BinTable::column_by_idx`]. Errors with
     /// [`FitsError::NotABinTable`] for any other HDU kind.
     pub fn read_table(&mut self, index: usize) -> Result<BinTable> {
-        let hdu = self.checked_hdu(index)?;
-        // Compressed images/tables are structurally BINTABLEs; the compression layer
-        // reads their raw table form through here, so accept those kinds too.
-        if !matches!(
-            hdu.kind,
-            HduKind::BinTable | HduKind::CompressedImage | HduKind::CompressedTable
-        ) {
-            return Err(FitsError::NotABinTable);
-        }
+        self.checked_hdu(index)?.ensure_bintable()?;
         let unit = self.read_data_raw(index)?;
         BinTable::from_data(&self.hdus[index].header, unit.bytes)
     }
@@ -625,12 +632,7 @@ impl<S: Source> FitsReader<S> {
     /// Parse a binary-table schema from its header without reading table bytes.
     pub fn table_schema(&self, index: usize) -> Result<TableSchema> {
         let hdu = self.checked_hdu(index)?;
-        if !matches!(
-            hdu.kind,
-            HduKind::BinTable | HduKind::CompressedImage | HduKind::CompressedTable
-        ) {
-            return Err(FitsError::NotABinTable);
-        }
+        hdu.ensure_bintable()?;
         BinTable::schema(&hdu.header)
     }
 
@@ -903,7 +905,7 @@ impl<S: Source> FitsReader<S> {
             let mut selected = vec![false; schema.columns.len()];
             for descriptor in &group {
                 for name in descriptor.referenced_columns() {
-                    selected[resolve_column_name(&schema, name)?] = true;
+                    selected[schema.column_index_checked(name)?] = true;
                 }
             }
             let selected_indices = selected
@@ -1052,28 +1054,12 @@ fn validate_row_range(rows: &Range<usize>, len: usize) -> Result<()> {
 
 fn resolve_column_selector(schema: &TableSchema, selector: &ColumnSelector) -> Result<usize> {
     match selector {
-        ColumnSelector::Index(index) if *index < schema.columns.len() => Ok(*index),
-        ColumnSelector::Index(index) => Err(FitsError::ColumnIndexOutOfBounds {
-            index: *index,
-            len: schema.columns.len(),
-        }),
-        ColumnSelector::Name(name) => resolve_column_name(schema, name),
+        ColumnSelector::Index(index) => {
+            column::validate_index(*index, schema.columns.len())?;
+            Ok(*index)
+        }
+        ColumnSelector::Name(name) => schema.column_index_checked(name),
     }
-}
-
-fn resolve_column_name(schema: &TableSchema, name: &str) -> Result<usize> {
-    schema
-        .columns
-        .iter()
-        .position(|column| {
-            column
-                .name
-                .as_deref()
-                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
-        })
-        .ok_or_else(|| FitsError::ColumnNotFound {
-            name: name.to_string(),
-        })
 }
 
 /// A validated plain-image HDU: its geometry and scaling, plus where its data unit

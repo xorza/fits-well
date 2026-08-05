@@ -37,69 +37,59 @@ The numbering below is unchanged.
 
 ## Batch 2 — Unify the binary-table and ASCII-table structures
 
-`table/` and `ascii/` grew independently and now carry near-identical
-scaffolding.
+Landed. `src/column.rs` now states the §6.7/§7.2.2 name-matching rule once;
+`TableSchema` owns the binary lookup (so `BinTable` and the reader's column
+selectors share it and `reader::resolve_column_name` is gone); all five `TDIMn`
+rules live in `table/mod.rs`; `Hdu::ensure_bintable` replaces the duplicated
+three-kind guard; and `writer::accept_row_count` is the builders' one row-count
+inference rule.
 
-### 2.1 Column lookup — four copies
+Two items were done smaller than written, deliberately:
 
-| | |
-| --- | --- |
-| `BinTable::{column_index, column_index_checked, column_by_idx, column_by_name}` | `table/mod.rs:476–510` |
-| `AsciiTable::{same four}` | `ascii/mod.rs:180–213` |
-| `reader::resolve_column_name` | `reader/mod.rs:1064` (over `TableSchema`) |
-| `reader::resolve_column_selector` | `reader/mod.rs:1053` |
+- **2.2** — the two reader handles were left as separate structs, as the item
+  itself allowed. What they actually shared was the index bounds-check, which is
+  now `column::validate_index` (a third copy of it lived in the reader).
+- **2.3** — a generic `RowBuilder<C>` would have put a generic type and a
+  `BuilderColumn` trait into the *published* API to save two trivial constructor
+  pairs. The only part that could realistically drift is the row-count decision
+  in `push`, and that is now shared outright. The two builders stay concrete and
+  separately documented, and the public API is unchanged.
 
-All are `position(|c| c.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(name)))`
-plus the same `ColumnNotFound` / `ColumnIndexOutOfBounds` wrapping. Extract one
-helper taking an iterator of `Option<&str>`; `BinTable` should delegate to
-`TableSchema` so `reader.rs`'s copy disappears entirely.
-
-### 2.2 Reader handles — two identical structs
-
-`ColumnReader<'a> { table, index }` (`table/mod.rs:557`) and
-`AsciiColumnReader<'a> { table, index }` (`ascii/mod.rs:235`) are the same
-handle with the same `descriptor()`. Not worth a shared generic type on its own,
-but they should at least be generated from one place or documented as a
-deliberate pair.
-
-### 2.3 Write builders — two identical builders
-
-`TableBuilder` (`writer/table.rs:255–313`) and `AsciiTableBuilder`
-(`writer/ascii.rs:73–123`) have identical `new` / `with_rows` / `push` /
-`column` / `explicit`. The only real difference is how `push` infers a row
-count: `WriteColumn::inferred_rows() -> Result<Option<usize>>` vs
-`column.data.len()`.
-
-Make one generic `RowBuilder<C>` over a trait:
-
-```rust
-trait BuilderColumn { fn name(&self) -> &str; fn inferred_rows(&self) -> Result<Option<usize>>; }
-```
-
-ASCII's impl returns `Ok(Some(self.data.len()))`. Removes ~50 lines and one
-class of "fixed in one builder, not the other" bug.
-
-### 2.4 `TDIM` validation — three functions for two rules
-
-- `table_impl::validate_tdim_shape` / `validate_tdim_extent` (`table/mod.rs:923,932`) — the rules.
-- `table_impl::validate_vla_tdim(col, count)` (`table/mod.rs:945`) — Column-based.
-- `writer::table::validate_tdim(shape, n)` / `validate_vla_tdim(shape, n)` (`writer/table.rs:780,790`) — shape-based, and `validate_vla_tdim` is `validate_tdim` plus a zero-count early return.
-
-Keep the two shape-based rules in `table_impl` and have all callers pass a
-shape. Removes two functions.
-
-### 2.5 HDU-kind guards
-
-`FitsReader::read_table` (`reader/mod.rs:611`) and `FitsReader::table_schema`
-(`reader/mod.rs:626`) contain the identical three-kind `matches!` guard. Add
-`Hdu::ensure_bintable()` beside the existing `Hdu::ensure_plain_image()`
-(`reader/mod.rs:75`).
-
-**Estimated net: −120 to −180 lines.**
+The numbering below is unchanged.
 
 ---
 
 ## Batch 3 — Consolidate `FitsError`
+
+**Demoted after a closer look — read this note before starting.**
+
+The line-count case I made below does not survive contact with the code. It
+assumed a `&'static str` discriminant, which would make callers and tests match
+on *display wording* (`matches!(e, WrongHduKind { expected: "a binary table" })`)
+— fragile, and out of step with a crate that models `HduKind`, `SampleType`, and
+`ChecksumStatus` as typed enums. The version that keeps typed matching replaces
+each family with a nested enum plus a phrase mapping, which is close to
+line-neutral: `error.rs` would land nearer 620 than the 460 estimated.
+
+What survives:
+
+- **3.1 and 3.2 are not duplication.** Six precise "wrong HDU kind" variants and
+  five precise "wrong column accessor" variants are a *design*, and the one that
+  fits a library whose selling point is whole-standard coverage. A caller invokes
+  one accessor and handles its one error; nobody enumerates all six. `Display`
+  is exhaustively matched, so the compiler already prevents the arms from
+  drifting out of sync with the variants.
+- **3.3 is real duplication** — five variants with identical `(index, len)`
+  fields and identical semantics, differing only in two nouns. `IndexOutOfBounds
+  { indexed: Indexed, index, len }` with a 5-variant `Indexed` collapses 5
+  variants and ~25 `Display` lines into 1 and 5, keeps typed matching, and gives
+  callers one place to handle "some index was out of range". **3.4** is the same
+  shape for `(expected, got)` rank mismatches.
+
+Recommendation: do 3.3 and 3.4 if the 58-variant enum bothers you; skip 3.1/3.2.
+Blast radius measured: 34 sites for 3.1, 26 for 3.2, 31 for 3.3, 16 for 3.4.
+
+The original write-up follows.
 
 58 variants (`src/error.rs`), with a 230-line `Display`. Three families are
 structurally identical and could collapse with no loss of information. The
@@ -433,15 +423,16 @@ Recorded so a later pass doesn't re-litigate them:
 
 ## Suggested order
 
-1. **Batch 3** (errors) — purely mechanical, touches everything, best done next
-   so the remaining batches don't churn error sites twice.
-2. **Batch 6** (writer) — small and self-contained; 6.1 is a five-minute fix.
-3. **Batch 2** (table/ASCII) — independent of the above.
-4. **Batch 4** (decode path).
-5. **Batch 5** (odometer), **Batch 7** (keywords) — independent.
-6. **Batch 8** (WCS) — largest but most isolated; 8.3 is a standalone
+1. **Batch 6** (writer) — small and self-contained; 6.1 is a five-minute fix.
+2. **Batch 4** (decode path) — the largest remaining structural win.
+3. **Batch 5** (odometer), **Batch 7** (keywords) — independent.
+4. **Batch 8** (WCS) — largest but most isolated; 8.3 is a standalone
    performance fix worth doing regardless.
-7. **Batch 9** — filler.
+5. **Batch 9** — filler.
+6. **Batch 3** (errors) — **demoted.** See the note in that section: on a closer
+   look its line-count case is much weaker than estimated, and the typed-enum
+   version that preserves pattern-matching is close to line-neutral. Worth doing
+   only for 3.3/3.4, and only if the top-level enum's size is bothering you.
 
 ## Note on this file
 

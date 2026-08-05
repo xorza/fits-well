@@ -643,12 +643,23 @@ fn read_bit_column_on_a_non_bit_column_errors() {
 
 #[test]
 fn column_index_is_case_insensitive() {
-    let mut header = table_header(4, 1, &["1J"]);
+    // Two columns, only the first named — so the unnamed one exercises the rule that
+    // a column with no `TTYPEn` never matches, whatever is asked for.
+    let mut header = table_header(8, 1, &["1J", "1J"]);
     header.set_internal("TTYPE1", "Flux");
-    let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
+    let table = BinTable::from_data(&header, vec![0u8; 8]).unwrap();
     assert_eq!(table.column_index("FLUX"), Some(0));
     assert_eq!(table.column_index("flux"), Some(0));
     assert_eq!(table.column_index("missing"), None);
+    // An unnamed column is not the empty-named column: `""` matches nothing.
+    assert_eq!(table.column_index(""), None);
+
+    // The schema resolves names the same way, without the data unit — it is the one
+    // implementation, which `BinTable` and the reader's column selectors both use.
+    let schema = BinTable::schema(&header).unwrap();
+    assert_eq!(schema.column_index("FLUX"), Some(0));
+    assert_eq!(schema.column_index("missing"), None);
+    assert_eq!(schema.column_index(""), None);
 }
 
 #[test]

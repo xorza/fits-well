@@ -241,6 +241,37 @@ fn empty_primary_header() -> Header {
     header
 }
 
+/// Reconcile one column's implied row count with the table's — the inference rule
+/// [`TableBuilder`](table::TableBuilder) and
+/// [`AsciiTableBuilder`](ascii::AsciiTableBuilder) share: the first column to imply
+/// a count fixes it, every later column must agree, and a column that implies
+/// nothing at all is acceptable only once the count is already known.
+///
+/// `inferred` is `None` only for a binary column whose payload determines no count
+/// (an empty or zero-width one). An ASCII column is always scalar, so its row count
+/// is its value count and it never reaches the undetermined case.
+fn accept_row_count(
+    nrows: &mut Option<usize>,
+    column: &str,
+    inferred: Option<usize>,
+) -> Result<()> {
+    match (*nrows, inferred) {
+        (Some(expected), Some(got)) if expected != got => Err(FitsError::TableRowCountMismatch {
+            column: column.to_string(),
+            expected,
+            got,
+        }),
+        (None, Some(rows)) => {
+            *nrows = Some(rows);
+            Ok(())
+        }
+        (None, None) => Err(FitsError::TableRowCountUndetermined {
+            column: column.to_string(),
+        }),
+        _ => Ok(()),
+    }
+}
+
 fn validate_scaling(tscale: Option<f64>, tzero: Option<f64>, allowed: bool) -> Result<()> {
     if tscale.is_some_and(|value| !allowed || !value.is_finite()) {
         return Err(FitsError::KeywordOutOfRange { name: "TSCALn" });
