@@ -17,58 +17,30 @@ Line-count estimates are rough. Line anchors are current as of this revision.
 
 ---
 
-## Batch 1 — WCS: split the long functions, collapse the Table-22 double dispatch
+## Batch 1 — WCS: collapse the Table-22 double dispatch
 
-### 1.1 `Wcs::from_header_with_context` is 254 lines
-
-`wcs/mod.rs:737–990`. It does six separable jobs: read the axis vectors; resolve
-the spectral frames; establish the CD / PC×CDELT / CROTA precedence; apply
-`CUNIT` scaling to `CRVAL` and the matrix rows; parse the per-axis transforms and
-collect unsupported axes; compute the celestial pole. Each is a natural private
-function; the celestial-pole block alone (`:903–967`) is 65 lines nested inside a
-`match`.
-
-### 1.2 The Table-22 keyword layer has two dispatch levels for one decision
-
-`TableWcsResolver` (`wcs/mod.rs:392–555`) exposes 14 methods that are pure
-keyword spellings (`pixel_axis_key`/`vector_axis_key`,
+`TableWcsResolver` (`wcs/mod.rs:392–555`) exposes 14 methods that are pure keyword
+spellings, in `pixel_*`/`vector_*` pairs (`pixel_axis_key`/`vector_axis_key`,
 `pixel_matrix_key`/`vector_matrix_key`, `pixel_parameter_key`/
-`vector_parameter_key`, …). `TableWcs` (`:569–719`) then re-dispatches each of
-them on `PixelList` vs `ArrayColumn`. Three supporting enums
-(`TableAxisKeyword`, `TableMatrixKeyword`, `TablePoleKeyword`, `:297–389`) exist
-only to return static string pairs.
+`vector_parameter_key`, …). `TableWcs` (`:569–719`) then re-dispatches each pair on
+`PixelList` vs `ArrayColumn` — so the same one decision is made twice, at two
+layers.
 
-Collapse to one const table plus a single `TableWcs::key(family, index)`. That
-~330-line block should roughly halve, and adding a keyword family becomes one
-table row.
+What is reducible is that second layer: fold each resolver method pair into the
+`TableWcs` arm that already chooses between them, and the resolver disappears.
+Three supporting enums (`TableAxisKeyword`, `TableMatrixKeyword`,
+`TablePoleKeyword`, `:297–389`) exist only to return static string pairs and can
+become one const table.
 
-### 1.3 `vector_axis_present` is a performance and complexity outlier
+What is **not** reducible is the key shapes themselves — an earlier draft of this
+item proposed "one const table plus a single `TableWcs::key(family, index)`", which
+does not work. The families are genuinely different templates:
+`T{root}{column}{a}` vs `{axis}{root}{column}{a}`, `{root}{row}_{input}{a}` vs
+`{row}{input}{root}{column}{a}`, and the string-parameter family exists only in the
+vector form. Any single entry point still matches on family to pick a template.
 
-**Worth doing on its own merits even if the rest of this batch is skipped.**
-
-`wcs/mod.rs:529–554` probes, per candidate axis: 6 axis keywords, 100 × 2 × 2
-parameter keywords, and 99 × 2 × 2 matrix keywords — ~800 header lookups. It is
-called for axes 99 down to 1 until one hits, so inferring the rank of a one-axis
-array column costs on the order of 80k hash lookups.
-
-`infer_image_axis_count` (`:1552`) already solves the identical problem the right
-way: one pass over `header.iter()`, taking the max parsed index. Rewrite
-`vector_axis_present` the same way and the helper disappears along with the
-`(1..=99)` / `(0..=99)` scans.
-
-### 1.4 Smaller WCS items
-
-- `first_real(header, a, b)` (`:1621`) exists for two-keyword fallbacks, but the
-  text equivalent is open-coded twice: `RADESYS`/`RADECSYS` in `celestial_frame`
-  (`:1285`) and `RESTFRQ`/`RESTFREQ` in `spectral_rest` (`:1338`). Add
-  `first_text`.
-- `wcs/axis.rs`: `convert` (`:645`) and `conversion_derivative` (`:706`) are
-  parallel 12-arm `(from, to)` matches, both ending in
-  `unreachable!("all … covered")`. Returning both from one match (or pairing
-  them in a table) removes one `unreachable!` and guarantees they stay in step —
-  a value/derivative pair drifting apart is a silent numerical bug.
-
----
+Expect the ~330-line block to shrink by roughly a third, not a half, and treat it
+as a careful mechanical edit of the most keyword-dense code in the crate.
 
 ## Batch 2 — Mechanical cleanups
 
@@ -214,6 +186,21 @@ Recorded so a later pass doesn't re-litigate them:
   restored `THEAP`/`CHECKSUM`/`DATASUM`, while `reject_compression_metadata`
   rejects the `ZTHEAP`/`ZHECKSUM`/`ZDATASUM` forms whose presence means the table
   is already compressed. Sharing the five common names would hide that.
+- **`first_real` has no `first_text` twin.** The two text fallbacks it looks like it
+  should serve (`RADESYS`/`RADECSYS` in `celestial_frame`, `RESTFRQ`/`RESTFREQ` in
+  `spectral_rest`) are conditional on `alt.is_none()` — the superseded spellings are
+  already eight characters, so they have no room for an alternate suffix and apply
+  only to the primary description. That is a different shape from `first_real`'s
+  unconditional fallback, and a generic helper taking a lazy closure reads worse
+  than the explicit `if`.
+- **`convert` / `conversion_derivative`** (`wcs/axis.rs`) — two parallel 12-arm
+  matches over the same characteristic pairs. Merging them into one match returning
+  both would make the hot transform path compute a derivative it does not need
+  (`SpectralTransform::to_world` calls `convert` alone). The real risk the pairing
+  poses — a formula edited in one and not the other, silently — is now covered by
+  `conversion_derivatives_match_the_conversions_they_describe`, which differentiates
+  `convert` numerically and holds `conversion_derivative` to it across all twelve
+  pairs. A test, not a refactor, was the right tool.
 - **`ColumnType`** (`writer/table.rs:31`) — `TformKind` minus `X`/`P`/`Q`, whose
   remaining job is making "not a bit array, not a descriptor" unrepresentable in
   a writer column. A runtime guard would save ~60 lines and lose that.
