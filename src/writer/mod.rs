@@ -9,7 +9,8 @@
 
 use std::io::Write;
 
-use crate::block::{BLOCK_SIZE, CARD_SIZE, SPACE_FILL, ZERO_FILL};
+use crate::block;
+use crate::block::{CARD_SIZE, SPACE_FILL, ZERO_FILL};
 use crate::checksum;
 use crate::error::{FitsError, Result};
 use crate::hdu::{HduKind, HduPosition, HduRole, data_extent};
@@ -46,11 +47,11 @@ pub(crate) fn render_header(header: &Header, buf: &mut Vec<u8>) -> Result<()> {
 
 /// Round `buf` up to a whole number of 2880-byte blocks using `fill`.
 fn pad_to_block(buf: &mut Vec<u8>, fill: u8) -> Result<()> {
-    let rem = buf.len() % BLOCK_SIZE;
-    if rem != 0 {
+    let padding = block::padding(buf.len());
+    if padding != 0 {
         let padded = buf
             .len()
-            .checked_add(BLOCK_SIZE - rem)
+            .checked_add(padding)
             .ok_or(FitsError::DataUnitOverflow)?;
         buf.resize(padded, fill);
     }
@@ -128,7 +129,9 @@ impl<W: Write> FitsWriter<W> {
         } else {
             ZERO_FILL
         };
-        self.finish_hdu(header.clone(), fill, false)
+        // No template: this is the escape hatch for a caller supplying a complete
+        // header, so there is nothing to merge into it.
+        self.finish_hdu(header.clone(), None, fill, false)
     }
     fn ensure_writable(&self) -> Result<()> {
         if self.state == WriterState::Failed {
@@ -137,18 +140,24 @@ impl<W: Write> FitsWriter<W> {
         Ok(())
     }
 
-    /// Finish preflight for one HDU, then commit it and any required automatic
+    /// Merge the caller's informational `template` into the synthesized `header`,
+    /// finish preflight for one HDU, then commit it and any required automatic
     /// primary without another fallible validation or encoding step between them.
-    fn finish_hdu(&mut self, header: Header, fill: u8, automatic_primary: bool) -> Result<()> {
-        let rem = self.scratch.len() % BLOCK_SIZE;
-        if rem != 0 {
-            let padded = self
-                .scratch
-                .len()
-                .checked_add(BLOCK_SIZE - rem)
-                .ok_or(FitsError::DataUnitOverflow)?;
-            self.scratch.resize(padded, fill);
-        }
+    ///
+    /// The template merge lives here rather than in each header builder, so every
+    /// write that commits an HDU applies it and none of the four builders has to
+    /// remember to. The one write that does not commit through here is
+    /// [`ImageStream`](image::ImageStream), which writes its header up front and
+    /// rewrites it at `finish`; it merges its own.
+    fn finish_hdu(
+        &mut self,
+        mut header: Header,
+        template: Option<&Header>,
+        fill: u8,
+        automatic_primary: bool,
+    ) -> Result<()> {
+        merge_header_template(&mut header, template);
+        pad_to_block(&mut self.scratch, fill)?;
         prepare_header(
             header,
             &self.scratch,

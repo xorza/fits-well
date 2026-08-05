@@ -11,7 +11,7 @@ use crate::header::Header;
 use crate::header::card::validate_ascii;
 use crate::header::value;
 use crate::keyword::key;
-use crate::writer::{FitsWriter, accept_row_count, merge_header_template, validate_scaling};
+use crate::writer::{FitsWriter, accept_row_count, validate_scaling};
 
 /// One column to write into an ASCII table: nullable typed data, the fixed field
 /// width in characters, and the decimal count for floats.
@@ -156,7 +156,7 @@ impl<W: Write> FitsWriter<W> {
                 .checked_add(col.width)
                 .ok_or(FitsError::DataUnitOverflow)?;
         }
-        let header = ascii_table_header(nrows, row_len, columns, &tbcols, template)?;
+        let header = ascii_table_header(nrows, row_len, columns, &tbcols)?;
         self.scratch.clear();
         let total_len = nrows
             .checked_mul(row_len)
@@ -167,7 +167,7 @@ impl<W: Write> FitsWriter<W> {
                 append_ascii_field(&mut self.scratch, col, r)?;
             }
         }
-        self.finish_hdu(header, SPACE_FILL, true)
+        self.finish_hdu(header, template, SPACE_FILL, true)
     }
 }
 
@@ -313,7 +313,6 @@ fn ascii_table_header(
     row_len: usize,
     columns: &[AsciiWriteColumn],
     tbcols: &[usize],
-    template: Option<&Header>,
 ) -> Result<Header> {
     let mut header = Header::new();
     header
@@ -348,7 +347,6 @@ fn ascii_table_header(
             header.set_internal(key!("TNULL{n}").as_str(), tnull.as_str());
         }
     }
-    merge_header_template(&mut header, template);
     Ok(header)
 }
 

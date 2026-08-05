@@ -24,7 +24,7 @@ use crate::table_impl::BinTable;
 use crate::table_impl::{
     CharacterField, ColumnData, TformKind, validate_declared_tdim, validate_declared_vla_tdim,
 };
-use crate::writer::{FitsWriter, accept_row_count, merge_header_template, validate_scaling};
+use crate::writer::{FitsWriter, accept_row_count, validate_scaling};
 
 /// An element type accepted by a binary-table writer column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -410,8 +410,8 @@ impl<W: Write> FitsWriter<W> {
                 column_offset += layout.row_width;
             }
         }
-        let header = bintable_header(nrows, row_len, columns, &layouts, heap_len, template)?;
-        self.finish_hdu(header, ZERO_FILL, true)
+        let header = bintable_header(nrows, row_len, columns, &layouts, heap_len)?;
+        self.finish_hdu(header, template, ZERO_FILL, true)
     }
 
     /// Write a `BINTABLE` as a tiled-compressed table (§10.3). `header` is the
@@ -431,7 +431,7 @@ impl<W: Write> FitsWriter<W> {
         self.ensure_writable()?;
         let zheader =
             table::compress_table(header, table, rows_per_tile, compression, &mut self.scratch)?;
-        self.finish_hdu(zheader, ZERO_FILL, true)
+        self.finish_hdu(zheader, None, ZERO_FILL, true)
     }
 }
 
@@ -442,7 +442,6 @@ fn bintable_header(
     columns: &[WriteColumn],
     layouts: &[ColumnLayout],
     heap_len: usize,
-    template: Option<&Header>,
 ) -> Result<Header> {
     let mut header = Header::new();
     header
@@ -491,7 +490,6 @@ fn bintable_header(
             header.set_internal(key!("TNULL{n}").as_str(), tnull);
         }
     }
-    merge_header_template(&mut header, template);
     Ok(header)
 }
 

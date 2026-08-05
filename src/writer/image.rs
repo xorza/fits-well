@@ -3,6 +3,7 @@
 use std::io::{Seek, SeekFrom, Write};
 
 use crate::bitpix::Bitpix;
+use crate::block;
 use crate::block::{BLOCK_SIZE, ZERO_FILL};
 use crate::checksum;
 #[cfg(feature = "compression")]
@@ -60,11 +61,11 @@ impl<W: Write> FitsWriter<W> {
         let encoded_len = expected
             .checked_mul(image.samples.bitpix().elem_size())
             .ok_or(FitsError::DataUnitOverflow)?;
-        let header = image_header(image, self.state == WriterState::Empty, template)?;
+        let header = image_header(image, self.state == WriterState::Empty)?;
         self.scratch.clear();
         self.scratch.reserve_exact(encoded_len);
         image.samples.encode_into(&mut self.scratch);
-        self.finish_hdu(header, ZERO_FILL, false)
+        self.finish_hdu(header, template, ZERO_FILL, false)
     }
 
     /// Write `image` as a tiled-compressed `BINTABLE` extension (§10.1), using the
@@ -107,9 +108,8 @@ impl<W: Write> FitsWriter<W> {
         template: Option<&Header>,
     ) -> Result<()> {
         self.ensure_writable()?;
-        let mut header = encode::compress_image(image, compression, options, &mut self.scratch)?;
-        merge_header_template(&mut header, template);
-        self.finish_hdu(header, ZERO_FILL, true)
+        let header = encode::compress_image(image, compression, options, &mut self.scratch)?;
+        self.finish_hdu(header, template, ZERO_FILL, true)
     }
 }
 
@@ -157,13 +157,11 @@ impl<W: Write + Seek> FitsWriter<W> {
         self.ensure_writable()?;
         scaling.validate(bitpix)?;
         let expected_samples = shape_product(&shape)?;
-        let header = image_header_parts(
-            &shape,
-            bitpix,
-            scaling,
-            self.state == WriterState::Empty,
-            template,
-        )?;
+        // A stream writes its header up front and rewrites it at `finish`, so it
+        // never reaches `finish_hdu` — it applies the template merge itself.
+        let mut header =
+            image_header_parts(&shape, bitpix, scaling, self.state == WriterState::Empty)?;
+        merge_header_template(&mut header, template);
         let header_offset = self.sink.stream_position()?;
         let mut initial = header.clone();
         if self.checksum {
@@ -232,7 +230,9 @@ impl<W: Write + Seek> ImageStream<'_, W> {
             .expected_samples
             .checked_mul(self.bitpix.elem_size())
             .ok_or(FitsError::DataUnitOverflow)?;
-        let padding = (BLOCK_SIZE - data_bytes % BLOCK_SIZE) % BLOCK_SIZE;
+        // The unit is never materialized here, so this streams the same fill
+        // `pad_to_block` would have written into a buffer.
+        let padding = block::padding(data_bytes);
         let zeros = [0u8; BLOCK_SIZE];
         if let Err(error) = self.writer.sink.write_all(&zeros[..padding]) {
             self.writer.state = WriterState::Failed;
@@ -306,14 +306,8 @@ fn bitpix_name(bitpix: Bitpix) -> &'static str {
 /// Image header: the primary array (§4.4.1) when `primary`, else an `IMAGE`
 /// extension (§7.1). The two differ only in the prologue (`SIMPLE`+`EXTEND` vs
 /// `XTENSION`+`PCOUNT`/`GCOUNT`); the axes and scaling keywords are identical.
-fn image_header(image: &Image, primary: bool, template: Option<&Header>) -> Result<Header> {
-    image_header_parts(
-        &image.shape,
-        image.samples.bitpix(),
-        image.scaling,
-        primary,
-        template,
-    )
+fn image_header(image: &Image, primary: bool) -> Result<Header> {
+    image_header_parts(&image.shape, image.samples.bitpix(), image.scaling, primary)
 }
 
 fn image_header_parts(
@@ -321,7 +315,6 @@ fn image_header_parts(
     bitpix: Bitpix,
     scaling: Scaling,
     primary: bool,
-    template: Option<&Header>,
 ) -> Result<Header> {
     let mut header = Header::new();
     if primary {
@@ -340,7 +333,6 @@ fn image_header_parts(
         header.set_internal("PCOUNT", 0).set_internal("GCOUNT", 1);
     }
     scaling.add_to_header(&mut header, bitpix)?;
-    merge_header_template(&mut header, template);
     Ok(header)
 }
 
