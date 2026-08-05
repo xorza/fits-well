@@ -17,48 +17,7 @@ Line-count estimates are rough. Line anchors are current as of this revision.
 
 ---
 
-## Batch 1 — Writer: real duplicates and inconsistent template handling
-
-### 1.1 Block padding, three implementations
-
-- `pad_to_block(buf, fill)` — the helper, `writer/mod.rs:48`.
-- `finish_hdu` — **inlines the identical rem/`checked_add`/`resize` body**
-  instead of calling it, `writer/mod.rs:143–151`.
-- `ImageStream::finish` — a third formula,
-  `(BLOCK_SIZE - data_bytes % BLOCK_SIZE) % BLOCK_SIZE`, `writer/image.rs:235`.
-
-`finish_hdu` should just call `pad_to_block(&mut self.scratch, fill)?`. This one
-is a plain copy-paste.
-
-### 1.2 `merge_header_template` is applied in three different places
-
-- inside `image_header_parts` (`writer/image.rs:343`)
-- at the end of `bintable_header` (`writer/table.rs:494`) and
-  `ascii_table_header` (`writer/ascii.rs:351`)
-- separately, *after* the header builder, in
-  `write_compressed_image_template` (`writer/image.rs:111`)
-
-Four builders, three placements. Pick one — applying it once in `finish_hdu`
-would be simplest — so a future header builder can't forget it.
-
-### 1.3 `WriteColumnData`'s bit variants double every match
-
-`enum WriteColumnData { Fixed, Vla, VlaBits, Bits }` (`writer/table.rs:46`) is
-matched in six places (`inferred_rows`, `wide`, `validate_column`, `pack_cell`,
-`bintable_header`'s `stores_i64`, and twice in `write_table_template`). The
-`Bits`/`VlaBits` variants exist only to carry a bit count that `ColumnData`
-can't express.
-
-Folding them into `Fixed`/`Vla` plus a `bit_count: Option<usize>` field on
-`WriteColumn` (which already carries four optional fields) halves the arm count.
-`validate_column` (`writer/table.rs:605–724`) drops from 120 lines to roughly 70.
-
-*Risk: medium — the widest-reaching change in the batch, and the only one here
-that isn't a pure mechanical win. Do 1.1/1.2 first and treat this as separable.*
-
----
-
-## Batch 2 — De-over-engineer the compressed-image decode path
+## Batch 1 — De-over-engineer the compressed-image decode path
 
 `src/compress/decode.rs` (1160 lines) is the most abstraction-heavy file in the
 crate. It carries seven cooperating types for one decode: `ImageLayout`,
@@ -66,7 +25,7 @@ crate. It carries seven cooperating types for one decode: `ImageLayout`,
 `TileScratchSet`, `CodecScratch` — plus two traits and an enum whose only job is
 type erasure.
 
-### 2.1 `WidePlane` + `DecodeSample` + `DecodeBuffer` is one idea spelled three times
+### 1.1 `WidePlane` + `DecodeSample` + `DecodeBuffer` is one idea spelled three times
 
 - `trait WidePlane` (`:231`) — 2 impls, selects "decode in `i64` or `f64`".
 - `trait DecodeSample` (`:296`) — 6 impls, every one a single `as` cast.
@@ -85,7 +44,7 @@ selected by the buffer variant, and drop `WidePlane` in favour of two explicit
 `decode_int_tile` / `decode_float_tile` calls chosen once from
 `layout.bitpix.is_float()`.
 
-### 2.2 `run_decode_scatter` has two divergent bodies
+### 1.2 `run_decode_scatter` has two divergent bodies
 
 `:611–662` is `#[cfg(feature = "parallel")] { … } #[cfg(not(…))] { … }` — two
 complete implementations, and they are **not** equivalent: the parallel arm
@@ -97,7 +56,7 @@ difference.
 Make the serial path a one-tile wave through the same code. `scatter_rows`'s
 `convert` parameter then disappears.
 
-### 2.3 `ImageDecodePlan` has 15 fields
+### 1.3 `ImageDecodePlan` has 15 fields
 
 `:88–104`, built by a 70-line constructor (`:107–180`). It bundles four
 unrelated concerns. Split into:
@@ -108,7 +67,7 @@ unrelated concerns. Split into:
 - `FloatQuantization { method, zdither0, zscale, zzero, zblank_keyword, zblank_column }`
 - the existing `DecodeCtx` + `geometry`
 
-### 2.4 Small duplicates in the same file
+### 1.4 Small duplicates in the same file
 
 - `apply_integer_null_mask` (`:968`) and `apply_float_null_mask` (`:990`) are
   identical apart from the fill value → one generic `apply_null_mask<T>(…, masked: T)`.
@@ -119,7 +78,7 @@ unrelated concerns. Split into:
 
 ---
 
-## Batch 3 — One N-dimensional odometer instead of five
+## Batch 2 — One N-dimensional odometer instead of five
 
 The "decompose a flat index into mixed-radix per-axis coordinates, then walk"
 loop is written five times, each subtly different:
@@ -151,9 +110,9 @@ written twice with different variable names.
 
 ---
 
-## Batch 4 — Keyword-set and index-parse consolidation
+## Batch 3 — Keyword-set and index-parse consolidation
 
-### 4.1 Three wrappers around `keyword::index`
+### 3.1 Three wrappers around `keyword::index`
 
 - `writer::indexed_keyword(keyword, prefix)` (`writer/mod.rs:353`) — adds a `len ≤ 8` bound.
 - `compress::parameter_index(keyword)` (`compress/mod.rs:212`) — adds `1..=999`.
@@ -162,7 +121,7 @@ written twice with different variable names.
 Give `keyword::index` an optional bound parameter (or add
 `keyword::indexed_in(keyword, prefix, range)`) and delete all three.
 
-### 4.2 The Z-table keyword set is spelled three times
+### 3.2 The Z-table keyword set is spelled three times
 
 - `writer::is_structural_keyword` (`writer/mod.rs:303`) — 34 exact keywords + 15 prefixes.
 - `compress::table::reject_compression_metadata` (`compress/table.rs:632`) — 8 Z-keywords + 2 prefixes.
@@ -172,7 +131,7 @@ Extract `const ZTABLE_KEYWORDS: [&str; 8]` and `const ZTABLE_PREFIXES: [&str; 2]
 and have all three consult them. The two lists in `table.rs` being identical
 literals 100 lines apart is the clearest instance.
 
-### 4.3 `Header`'s removal APIs and their O(n) reindex
+### 3.3 `Header`'s removal APIs and their O(n) reindex
 
 `remove`, `remove_at`, `remove_all`, `remove_where`, plus `rename_keywords` and
 `append_filtered_from` each end in a full `reindex()` (`header/mod.rs:475`, six
@@ -185,9 +144,9 @@ call sites). `reader::finish_table_selection` (`reader/mod.rs:773–775`) calls
 
 ---
 
-## Batch 5 — WCS: split the long functions, collapse the Table-22 double dispatch
+## Batch 4 — WCS: split the long functions, collapse the Table-22 double dispatch
 
-### 5.1 `Wcs::from_header_with_context` is 254 lines
+### 4.1 `Wcs::from_header_with_context` is 254 lines
 
 `wcs/mod.rs:737–990`. It does six separable jobs: read the axis vectors; resolve
 the spectral frames; establish the CD / PC×CDELT / CROTA precedence; apply
@@ -196,7 +155,7 @@ collect unsupported axes; compute the celestial pole. Each is a natural private
 function; the celestial-pole block alone (`:903–967`) is 65 lines nested inside a
 `match`.
 
-### 5.2 The Table-22 keyword layer has two dispatch levels for one decision
+### 4.2 The Table-22 keyword layer has two dispatch levels for one decision
 
 `TableWcsResolver` (`wcs/mod.rs:392–555`) exposes 14 methods that are pure
 keyword spellings (`pixel_axis_key`/`vector_axis_key`,
@@ -210,7 +169,7 @@ Collapse to one const table plus a single `TableWcs::key(family, index)`. That
 ~330-line block should roughly halve, and adding a keyword family becomes one
 table row.
 
-### 5.3 `vector_axis_present` is a performance and complexity outlier
+### 4.3 `vector_axis_present` is a performance and complexity outlier
 
 **Worth doing on its own merits even if the rest of this batch is skipped.**
 
@@ -224,7 +183,7 @@ way: one pass over `header.iter()`, taking the max parsed index. Rewrite
 `vector_axis_present` the same way and the helper disappears along with the
 `(1..=99)` / `(0..=99)` scans.
 
-### 5.4 Smaller WCS items
+### 4.4 Smaller WCS items
 
 - `first_real(header, a, b)` (`:1621`) exists for two-keyword fallbacks, but the
   text equivalent is open-coded twice: `RADESYS`/`RADECSYS` in `celestial_frame`
@@ -238,7 +197,7 @@ way: one pass over `header.iter()`, taking the max parsed index. Rewrite
 
 ---
 
-## Batch 6 — Mechanical cleanups
+## Batch 5 — Mechanical cleanups
 
 Small, independent, low risk. Good filler for the end of a session.
 
@@ -278,7 +237,7 @@ Small, independent, low risk. Good filler for the end of a session.
 
 ---
 
-## Batch 7 — `FitsError`: fold the two structurally identical families
+## Batch 6 — `FitsError`: fold the two structurally identical families
 
 Last, and optional. `error.rs` is 671 lines with 58 variants and a 230-line
 `Display`. Most of that is *precision*, not duplication, and should stay: six
@@ -290,7 +249,7 @@ out of sync with the variants.
 Two families are genuine duplication — the same variant written five and three
 times over with a different noun:
 
-### 7.1 Five index-out-of-bounds variants → one
+### 6.1 Five index-out-of-bounds variants → one
 
 `HduIndexOutOfBounds`, `HeaderIndexOutOfBounds`, `ColumnIndexOutOfBounds`,
 `GroupIndexOutOfBounds`, `WcsAxisIndexOutOfBounds` all carry `(index, len)` and
@@ -301,7 +260,7 @@ and 5, keeps typed pattern-matching, and gives callers one place to handle "some
 index was out of range". `WcsAxisIndexOutOfBounds` is 1-based — carry that in the
 `Indexed` variant's message, as it already does today.
 
-### 7.2 Three rank/count-mismatch variants → one
+### 6.2 Three rank/count-mismatch variants → one
 
 `ImageRegionRankMismatch`, `TileShapeRankMismatch`, `CoordinateCountMismatch` are
 all `(expected, got)` with a noun → `RankMismatch { kind, expected, got }`, same
@@ -314,7 +273,7 @@ step with a crate that models `HduKind`, `SampleType`, and `ChecksumStatus` as
 typed enums. The typed version is close to line-neutral; the win is the smaller
 top-level enum and the explicit grouping, not the line count.
 
-Blast radius measured: 31 sites for 7.1, 16 for 7.2.
+Blast radius measured: 31 sites for 6.1, 16 for 6.2.
 
 ---
 
@@ -344,7 +303,15 @@ Recorded so a later pass doesn't re-litigate them:
   — a match over a tagged union is the clear spelling, and macro-generating them
   would cost the per-variant rustdoc on two public enums. The duplicated *logic*
   around them has already been hoisted out; shrinking `DecodeBuffer` itself is
-  Batch 2.1's job, not a macro's.
+  Batch 1.1's job, not a macro's.
+- **`WriteColumnData`'s `Bits` / `VlaBits` variants** (`writer/table.rs:46`) —
+  they look like they should fold into `Fixed` / `Vla`, but they carry what those
+  cannot. A `VlaBits` row's bit count is *per row* (`BitVec::len()`, read at
+  `:353`, `:404`, `:694`), so no single `bit_count` field on `WriteColumn`
+  expresses it; and an `X` column's row width is `bit_count.div_ceil(8)`, not
+  `repeat × elem_size`, so `Fixed`'s meaning would become conditionally false.
+  Folding moves the branch from a match arm into an `if let Some(bit_count)`
+  inside the surviving arms — same branch count, worse locality.
 - **`ColumnType`** (`writer/table.rs:31`) — `TformKind` minus `X`/`P`/`Q`, whose
   remaining job is making "not a bit array, not a descriptor" unrepresentable in
   a writer column. A runtime guard would save ~60 lines and lose that.

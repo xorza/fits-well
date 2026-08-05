@@ -38,6 +38,17 @@ pub(crate) fn checked_padded_len(len: u64) -> Option<u64> {
     blocks_for(len).checked_mul(BLOCK_SIZE as u64)
 }
 
+/// Fill bytes needed to round `len` up to the next 2880-byte boundary; `0` when it
+/// already sits on one.
+///
+/// The in-memory counterpart to [`padded_len`], for the writer: one call site pads a
+/// buffer it holds, the other streams the fill straight to the sink and never
+/// materializes the padded unit at all, so they share the length rather than the
+/// rounding.
+pub(crate) fn padding(len: usize) -> usize {
+    (BLOCK_SIZE - len % BLOCK_SIZE) % BLOCK_SIZE
+}
+
 #[cfg(test)]
 mod tests {
     use crate::block::*;
@@ -69,6 +80,14 @@ mod tests {
                 padded_len(len),
                 blocks * BLOCK_SIZE as u64,
                 "padded_len({len})"
+            );
+            // The writer's in-memory helper must agree with the rounding exactly:
+            // the fill it emits is the difference the rounding implies, and a unit
+            // already on a boundary takes none.
+            assert_eq!(
+                padding(len as usize),
+                (padded_len(len) - len) as usize,
+                "padding({len})"
             );
         }
     }
