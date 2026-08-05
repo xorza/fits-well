@@ -2687,6 +2687,27 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
         Wcs::from_array_column(&invalid_long_alternate, 5, Some('A')),
         Err(FitsError::MissingKeyword { name: "iCTYPn" })
     ));
+
+    // A two-digit array axis: the whole leading digit run is the axis, where in
+    // `13PC5` above the run is a *pair* of single-digit axes and the rank comes from
+    // the second. Rank inference has to admit both readings of a leading run.
+    let two_digit = build("12CTYP5", Value::Text("LINEAR".to_string()));
+    assert_eq!(
+        Wcs::from_array_column(&two_digit, 5, None)
+            .unwrap()
+            .view()
+            .axes
+            .len(),
+        12
+    );
+
+    // A leading zero is not an index (§4.1.2 indices are unpadded), so `03CTYP5`
+    // names no axis and the column has no vector WCS at all.
+    let padded_index = build("03CTYP5", Value::Text("LINEAR".to_string()));
+    assert!(matches!(
+        Wcs::from_array_column(&padded_index, 5, None),
+        Err(FitsError::MissingKeyword { name: "iCTYPn" })
+    ));
 }
 
 #[test]

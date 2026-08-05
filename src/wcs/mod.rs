@@ -780,61 +780,7 @@ impl Wcs {
             }
         };
 
-        // Build the linear transform A. Precedence: CD, then PC×CDELT, then the
-        // legacy CROTA rotation, then a bare CDELT diagonal.
-        let has_cd = (1..=naxis)
-            .any(|i| (1..=naxis).any(|j| header.get(key!("CD{i}_{j}{a}").as_str()).is_some()));
-        let has_pc = (1..=naxis)
-            .any(|i| (1..=naxis).any(|j| header.get(key!("PC{i}_{j}{a}").as_str()).is_some()));
-        let has_crota = (1..=naxis).any(|i| header.get(key!("CROTA{i}{a}").as_str()).is_some());
-        if has_cd && has_pc {
-            return Err(FitsError::ConflictingWcsKeywords {
-                detail: "PC and CD conventions overlap",
-            });
-        }
-        if has_pc && has_crota {
-            return Err(FitsError::ConflictingWcsKeywords {
-                detail: "PC and CROTA conventions overlap",
-            });
-        }
-        let mut matrix = vec![0.0; naxis * naxis];
-        if has_cd {
-            for i in 0..naxis {
-                for j in 0..naxis {
-                    matrix[i * naxis + j] = header
-                        .get_real(key!("CD{}_{}{a}", i + 1, j + 1).as_str())?
-                        .unwrap_or(0.0);
-                }
-            }
-        } else {
-            for i in 0..naxis {
-                for j in 0..naxis {
-                    let pc = header
-                        .get_real(key!("PC{}_{}{a}", i + 1, j + 1).as_str())?
-                        .unwrap_or(if i == j { 1.0 } else { 0.0 });
-                    matrix[i * naxis + j] = cdelt[i] * pc;
-                }
-            }
-            // Legacy CROTA: rotate the celestial 2-axis sub-block (only when no PC
-            // was given, per the convention that CROTA and PC are exclusive).
-            if !has_pc && let Some(axes) = celestial_axes {
-                let lng = axes.longitude;
-                let lat = axes.latitude;
-                let rho = first_real(
-                    header,
-                    key!("CROTA{}{a}", lat + 1).as_str(),
-                    key!("CROTA{}{a}", lng + 1).as_str(),
-                )?
-                .unwrap_or(0.0);
-                if rho != 0.0 {
-                    let (c, s) = ((rho * D2R).cos(), (rho * D2R).sin());
-                    matrix[lng * naxis + lng] = cdelt[lng] * c;
-                    matrix[lng * naxis + lat] = -cdelt[lat] * s;
-                    matrix[lat * naxis + lng] = cdelt[lng] * s;
-                    matrix[lat * naxis + lat] = cdelt[lat] * c;
-                }
-            }
-        }
+        let mut matrix = linear_transform(header, a, naxis, &cdelt, celestial_axes)?;
         // §8.2: CRVAL/CDELT are in CUNITia units, but the projection math runs in
         // degrees — scale each celestial axis's reference value and its matrix row
         // (the inverse is computed after, so both directions stay consistent).
@@ -900,71 +846,8 @@ impl Wcs {
             card: "singular WCS transform matrix".to_string(),
         })?;
 
-        let celestial = match celestial_axes {
-            Some(axes) => {
-                let lng = axes.longitude;
-                let lat = axes.latitude;
-                let proj = axes.projection;
-                let mut pv = proj.parameter_defaults();
-                for (m, value) in pv.iter_mut().enumerate() {
-                    if let Some(header_value) =
-                        header.get_real(key!("PV{}_{m}{a}", lat + 1).as_str())?
-                    {
-                        *value = header_value;
-                    }
-                }
-                proj.validate_parameters(&pv)?;
-                // A conic's mid-latitude θ_a = PVi_1 is mandatory and must be
-                // non-zero; θ_a = 0 (absent, or explicitly 0) is a degenerate cone
-                // (`1/tan 0`). Treat it like an unimplemented projection — flag the
-                // axes so complete transforms fail rather than returning NaN.
-                if proj.is_conic() && pv[1] == 0.0 {
-                    unsupported_axes.push(lng);
-                    unsupported_axes.push(lat);
-                    unsupported_axes.sort_unstable();
-                    None
-                } else {
-                    // Fiducial point: projection default, overridable by PVi_1a/
-                    // PVi_2a on the longitude axis (§8.3).
-                    let reference = proj.reference_point(&pv);
-                    let (mut phi0, mut theta0) = (reference.phi, reference.theta);
-                    if let Some(v) = header.get_real(key!("PV{}_1{a}", lng + 1).as_str())? {
-                        phi0 = v;
-                    }
-                    if let Some(v) = header.get_real(key!("PV{}_2{a}", lng + 1).as_str())? {
-                        theta0 = v;
-                    }
-                    let (alpha0, delta0) = (crval[lng], crval[lat]);
-                    // LONPOLE (= LONPOLEa or PVi_3a): default φ0 if δ0 ≥ θ0, else φ0 + 180°.
-                    let phip = first_real(
-                        header,
-                        key!("LONPOLE{a}").as_str(),
-                        key!("PV{}_3{a}", lng + 1).as_str(),
-                    )?
-                    .unwrap_or(if delta0 >= theta0 {
-                        phi0
-                    } else {
-                        phi0 + 180.0
-                    });
-                    // LATPOLE (= LATPOLEa or PVi_4a): default 90°.
-                    let thetap = first_real(
-                        header,
-                        key!("LATPOLE{a}").as_str(),
-                        key!("PV{}_4{a}", lng + 1).as_str(),
-                    )?
-                    .unwrap_or(90.0);
-                    let pole = compute_pole(phi0, theta0, alpha0, delta0, phip, thetap);
-                    Some(Celestial {
-                        lng,
-                        lat,
-                        projection: proj,
-                        pole,
-                        pv,
-                    })
-                }
-            }
-            None => None,
-        };
+        let celestial =
+            celestial_transform(header, a, celestial_axes, &crval, &mut unsupported_axes)?;
 
         let axes = ctype
             .into_iter()
@@ -1111,9 +994,12 @@ impl Wcs {
         let resolver = TableWcsResolver::new(alt);
         let naxis = match resolver.vector_rank(header, column)? {
             Some(value) => axis_count(value, "WCAXn")?,
-            None => (1..=99)
-                .rev()
-                .find(|&i| resolver.vector_axis_present(header, column, i))
+            // Highest-first over the axes the cards could name, so the first hit is
+            // the rank. Probing a blind `(1..=99).rev()` instead costs ~800 header
+            // lookups per axis that turns out to be absent.
+            None => candidate_vector_axes(header)
+                .into_iter()
+                .find(|&axis| resolver.vector_axis_present(header, column, axis))
                 .unwrap_or(0),
         };
         if naxis == 0 {
@@ -1406,6 +1292,145 @@ fn unit_to_degrees(unit: &str) -> f64 {
     }
 }
 
+/// Resolve the celestial pair's projection parameters and its native→celestial pole
+/// (CG 2002 §2.4), or `None` when the header declares no complete celestial pair.
+///
+/// `unsupported_axes` gains the pair when the projection is present but cannot be
+/// evaluated, so a complete transform refuses rather than returning `NaN`.
+fn celestial_transform(
+    header: &Header,
+    a: AltSuffix,
+    celestial_axes: Option<ProjectedCelestialAxes>,
+    crval: &[f64],
+    unsupported_axes: &mut Vec<usize>,
+) -> Result<Option<Celestial>> {
+    let Some(axes) = celestial_axes else {
+        return Ok(None);
+    };
+    let lng = axes.longitude;
+    let lat = axes.latitude;
+    let proj = axes.projection;
+    let mut pv = proj.parameter_defaults();
+    for (m, value) in pv.iter_mut().enumerate() {
+        if let Some(header_value) = header.get_real(key!("PV{}_{m}{a}", lat + 1).as_str())? {
+            *value = header_value;
+        }
+    }
+    proj.validate_parameters(&pv)?;
+    // A conic's mid-latitude θ_a = PVi_1 is mandatory and must be non-zero; θ_a = 0
+    // (absent, or explicitly 0) is a degenerate cone (`1/tan 0`). Treat it like an
+    // unimplemented projection — flag the axes so complete transforms fail rather
+    // than returning NaN.
+    if proj.is_conic() && pv[1] == 0.0 {
+        unsupported_axes.push(lng);
+        unsupported_axes.push(lat);
+        unsupported_axes.sort_unstable();
+        return Ok(None);
+    }
+    // Fiducial point: projection default, overridable by PVi_1a/PVi_2a on the
+    // longitude axis (§8.3).
+    let reference = proj.reference_point(&pv);
+    let (mut phi0, mut theta0) = (reference.phi, reference.theta);
+    if let Some(v) = header.get_real(key!("PV{}_1{a}", lng + 1).as_str())? {
+        phi0 = v;
+    }
+    if let Some(v) = header.get_real(key!("PV{}_2{a}", lng + 1).as_str())? {
+        theta0 = v;
+    }
+    let (alpha0, delta0) = (crval[lng], crval[lat]);
+    // LONPOLE (= LONPOLEa or PVi_3a): default φ0 if δ0 ≥ θ0, else φ0 + 180°.
+    let phip = first_real(
+        header,
+        key!("LONPOLE{a}").as_str(),
+        key!("PV{}_3{a}", lng + 1).as_str(),
+    )?
+    .unwrap_or(if delta0 >= theta0 { phi0 } else { phi0 + 180.0 });
+    // LATPOLE (= LATPOLEa or PVi_4a): default 90°.
+    let thetap = first_real(
+        header,
+        key!("LATPOLE{a}").as_str(),
+        key!("PV{}_4{a}", lng + 1).as_str(),
+    )?
+    .unwrap_or(90.0);
+    Ok(Some(Celestial {
+        lng,
+        lat,
+        projection: proj,
+        pole: compute_pole(phi0, theta0, alpha0, delta0, phip, thetap),
+        pv,
+    }))
+}
+
+/// Build the linear transform `A` mapping `(pixel − CRPIX)` to intermediate world
+/// coordinates, row-major `naxis²`.
+///
+/// Precedence (§8.1): `CDi_j` if present, else `PCi_j × CDELTi`, else the legacy
+/// `CROTAi` rotation of the celestial pair, else a bare `CDELT` diagonal. The
+/// conventions are mutually exclusive, so a header mixing them is rejected rather
+/// than silently resolved.
+fn linear_transform(
+    header: &Header,
+    a: AltSuffix,
+    naxis: usize,
+    cdelt: &[f64],
+    celestial_axes: Option<ProjectedCelestialAxes>,
+) -> Result<Vec<f64>> {
+    let has_cd = (1..=naxis)
+        .any(|i| (1..=naxis).any(|j| header.get(key!("CD{i}_{j}{a}").as_str()).is_some()));
+    let has_pc = (1..=naxis)
+        .any(|i| (1..=naxis).any(|j| header.get(key!("PC{i}_{j}{a}").as_str()).is_some()));
+    let has_crota = (1..=naxis).any(|i| header.get(key!("CROTA{i}{a}").as_str()).is_some());
+    if has_cd && has_pc {
+        return Err(FitsError::ConflictingWcsKeywords {
+            detail: "PC and CD conventions overlap",
+        });
+    }
+    if has_pc && has_crota {
+        return Err(FitsError::ConflictingWcsKeywords {
+            detail: "PC and CROTA conventions overlap",
+        });
+    }
+    let mut matrix = vec![0.0; naxis * naxis];
+    if has_cd {
+        for i in 0..naxis {
+            for j in 0..naxis {
+                matrix[i * naxis + j] = header
+                    .get_real(key!("CD{}_{}{a}", i + 1, j + 1).as_str())?
+                    .unwrap_or(0.0);
+            }
+        }
+        return Ok(matrix);
+    }
+    for i in 0..naxis {
+        for j in 0..naxis {
+            let pc = header
+                .get_real(key!("PC{}_{}{a}", i + 1, j + 1).as_str())?
+                .unwrap_or(if i == j { 1.0 } else { 0.0 });
+            matrix[i * naxis + j] = cdelt[i] * pc;
+        }
+    }
+    // Legacy CROTA: rotate the celestial 2-axis sub-block (only when no PC was
+    // given, per the convention that CROTA and PC are exclusive).
+    if !has_pc && let Some(axes) = celestial_axes {
+        let lng = axes.longitude;
+        let lat = axes.latitude;
+        let rho = first_real(
+            header,
+            key!("CROTA{}{a}", lat + 1).as_str(),
+            key!("CROTA{}{a}", lng + 1).as_str(),
+        )?
+        .unwrap_or(0.0);
+        if rho != 0.0 {
+            let (c, s) = ((rho * D2R).cos(), (rho * D2R).sin());
+            matrix[lng * naxis + lng] = cdelt[lng] * c;
+            matrix[lng * naxis + lat] = -cdelt[lat] * s;
+            matrix[lat * naxis + lng] = cdelt[lng] * s;
+            matrix[lat * naxis + lat] = cdelt[lat] * c;
+        }
+    }
+    Ok(matrix)
+}
+
 fn find_celestial_pair(ctype: &[String]) -> Option<CelestialAxisPair> {
     let mut lng = None;
     let mut lat = None;
@@ -1547,6 +1572,48 @@ fn axis_vec(
                 .map(|value| value.unwrap_or(default))
         })
         .collect()
+}
+
+/// Every array axis a Table-22 vector keyword could name, gathered in one pass over
+/// the header and returned highest-first.
+///
+/// Each vector family spells its array axis in the keyword's *leading digits* —
+/// `iCTYPn`, `iPVn_ma`, and for the matrix forms `ijPCna`/`ijCDna` a pair of them —
+/// so an axis that is genuinely present always appears as a contiguous digit
+/// substring of some card's leading run. Taking every such substring deliberately
+/// over-approximates: [`TableWcsResolver::vector_axis_present`] stays the exact
+/// test, and this only spares it the axes no card could possibly mention.
+///
+/// The alternative — parsing each family's grammar in reverse — has to disentangle
+/// `ijPCna` from `iCTYPn` and the abbreviated alternate roots from the primary ones
+/// they prefix, and a mistake there silently changes an image's rank. Over-
+/// approximating cannot: a spurious candidate is rejected, and a missed one is
+/// impossible by the substring argument above.
+fn candidate_vector_axes(header: &Header) -> Vec<usize> {
+    let mut axes: Vec<usize> = Vec::new();
+    for entry in header.iter() {
+        let digits = entry
+            .keyword
+            .find(|c: char| !c.is_ascii_digit())
+            .map_or(entry.keyword, |end| &entry.keyword[..end]);
+        for start in 0..digits.len() {
+            for end in start + 1..=digits.len() {
+                let text = &digits[start..end];
+                // A FITS index never carries a leading zero, so `03` is not axis 3.
+                if text.starts_with('0') {
+                    continue;
+                }
+                match text.parse::<usize>() {
+                    Ok(axis) if (1..=99).contains(&axis) && !axes.contains(&axis) => {
+                        axes.push(axis);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    axes.sort_unstable_by(|a, b| b.cmp(a));
+    axes
 }
 
 fn infer_image_axis_count(header: &Header, alt: &str) -> i64 {
