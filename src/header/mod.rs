@@ -414,14 +414,13 @@ impl Header {
     }
 
     /// Remove every logical record with `keyword`, returning the count removed.
+    ///
+    /// To drop several keywords, prefer one [`Header::remove_where`] over a call
+    /// each: every removal that changes the card list rebuilds the keyword index.
     pub fn remove_all(&mut self, keyword: &str) -> usize {
         let old_len = self.cards.len();
-        self.cards.retain(|card| card.keyword != keyword);
-        let removed = old_len - self.cards.len();
-        if removed != 0 {
-            self.reindex();
-        }
-        removed
+        self.remove_where(|card| card == keyword);
+        old_len - self.cards.len()
     }
 
     pub(crate) fn append_filtered_from(
@@ -441,7 +440,6 @@ impl Header {
 
     /// Remove all cards matching `should_remove`, then rebuild the keyword index
     /// once after the bulk structural edit.
-    #[cfg(feature = "compression")]
     pub(crate) fn remove_where(
         &mut self,
         mut should_remove: impl FnMut(&str) -> bool,
