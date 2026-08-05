@@ -11,68 +11,29 @@ table paths, `endian`'s big-endian primitives, `words`'s single reinterpretation
 `column`'s single name-matching rule, `TileGeometry`, the `PROJECTIONS`
 membership table). What follows is what is left.
 
-Batches are sized to be done in one sitting and listed in recommended order.
-Within a batch, items are ordered by how much they depend on each other.
-Line-count estimates are rough. Line anchors are current as of this revision.
+**This pass is essentially complete.** What is left is one optional error-type
+consolidation and one micro; everything else either landed or was examined and
+deliberately left alone.
+
+The "deliberate designs left alone" section below is now the larger half of this
+document, and the more useful one. Several items in the original review turned out
+to describe code whose similar *shape* was load-bearing — a factorization, a
+performance property, or a distinction the types were carrying. Each is recorded
+with the reason, so a later pass does not re-propose it. Read that section before
+adding anything new here.
 
 ---
 
-## Batch 1 — WCS: collapse the Table-22 double dispatch
+## Remaining — one micro
 
-`TableWcsResolver` (`wcs/mod.rs:392–555`) exposes 14 methods that are pure keyword
-spellings, in `pixel_*`/`vector_*` pairs (`pixel_axis_key`/`vector_axis_key`,
-`pixel_matrix_key`/`vector_matrix_key`, `pixel_parameter_key`/
-`vector_parameter_key`, …). `TableWcs` (`:569–719`) then re-dispatches each pair on
-`PixelList` vs `ArrayColumn` — so the same one decision is made twice, at two
-layers.
-
-What is reducible is that second layer: fold each resolver method pair into the
-`TableWcs` arm that already chooses between them, and the resolver disappears.
-Three supporting enums (`TableAxisKeyword`, `TableMatrixKeyword`,
-`TablePoleKeyword`, `:297–389`) exist only to return static string pairs and can
-become one const table.
-
-What is **not** reducible is the key shapes themselves — an earlier draft of this
-item proposed "one const table plus a single `TableWcs::key(family, index)`", which
-does not work. The families are genuinely different templates:
-`T{root}{column}{a}` vs `{axis}{root}{column}{a}`, `{root}{row}_{input}{a}` vs
-`{row}{input}{root}{column}{a}`, and the string-parameter family exists only in the
-vector form. Any single entry point still matches on family to pick a template.
-
-Expect the ~330-line block to shrink by roughly a third, not a half, and treat it
-as a careful mechanical edit of the most keyword-dense code in the crate.
-
-## Batch 2 — Mechanical cleanups
-
-Small, independent, low risk. Good filler for the end of a session.
-
-1. **`AsciiColumnReader::raw`'s two `unreachable!` loops.** `ascii/mod.rs:247–273`
-   — two near-identical loops each with an `unreachable!` arm, because
-   `parse_numeric_field` (`:304`) returns an untyped `ParsedNumeric`. Split it
-   into `parse_integer_field` / `parse_float_field`, or have `physical` be the
-   only `ParsedNumeric` consumer. Removes both `unreachable!`s.
-
-2. **`TimeReferencePosition::parse`.** `time/mod.rs:432–451` — 15 `match` guard
-   arms of `value.starts_with("XXX")`. A `const` `[(&str, TimeReferencePosition)]`
-   table plus a `find` is half the length and self-evidently exhaustive.
-
-3. **Sign-flip constants and helpers.** `data/mod.rs:542–580` — four `f64`
-   offsets, four integer sign masks, four `flip_*` and four `store_*` const fns.
-   A three-line macro cuts ~35 lines. Low value — the current spelling is at
-   least explicit — so only worth it if you are in the file anyway.
-
-4. **Naming consistency.** `ColumnData::element_count` vs `AsciiColumnData::len`
-   vs `ImageData::len` for the same question. Pick one.
-
-5. **`Header::set_card` clones to validate.** `header/mod.rs:337–351` clones the
-   existing card, mutates the clone, validates, then assigns. Validating the
-   proposed `(keyword, value, comment)` directly avoids a `String` clone per
-   `set` on an existing keyword — and `set_internal` is called dozens of times
-   per written HDU.
+**Sign-flip constants and helpers.** `data/mod.rs:542–580` — four `f64` offsets,
+four integer sign masks, four `flip_*` and four `store_*` const fns. A three-line
+macro cuts ~35 lines. Low value: the current spelling is at least explicit. Only
+worth doing if you are in that file anyway.
 
 ---
 
-## Batch 3 — `FitsError`: fold the two structurally identical families
+## Remaining — `FitsError`: fold the two structurally identical families
 
 Last, and optional. `error.rs` is 671 lines with 58 variants and a 230-line
 `Display`. Most of that is *precision*, not duplication, and should stay: six
@@ -84,7 +45,7 @@ out of sync with the variants.
 Two families are genuine duplication — the same variant written five and three
 times over with a different noun:
 
-### 3.1 Five index-out-of-bounds variants → one
+### 1. Five index-out-of-bounds variants → one
 
 `HduIndexOutOfBounds`, `HeaderIndexOutOfBounds`, `ColumnIndexOutOfBounds`,
 `GroupIndexOutOfBounds`, `WcsAxisIndexOutOfBounds` all carry `(index, len)` and
@@ -95,7 +56,7 @@ and 5, keeps typed pattern-matching, and gives callers one place to handle "some
 index was out of range". `WcsAxisIndexOutOfBounds` is 1-based — carry that in the
 `Indexed` variant's message, as it already does today.
 
-### 3.2 Three rank/count-mismatch variants → one
+### 2. Three rank/count-mismatch variants → one
 
 `ImageRegionRankMismatch`, `TileShapeRankMismatch`, `CoordinateCountMismatch` are
 all `(expected, got)` with a noun → `RankMismatch { kind, expected, got }`, same
@@ -108,7 +69,7 @@ step with a crate that models `HduKind`, `SampleType`, and `ChecksumStatus` as
 typed enums. The typed version is close to line-neutral; the win is the smaller
 top-level enum and the explicit grouping, not the line count.
 
-Blast radius measured: 31 sites for 3.1, 16 for 3.2.
+Blast radius measured: 31 sites for the first, 16 for the second.
 
 ---
 
@@ -201,6 +162,29 @@ Recorded so a later pass doesn't re-litigate them:
   `conversion_derivatives_match_the_conversions_they_describe`, which differentiates
   `convert` numerically and holds `conversion_derivative` to it across all twelve
   pairs. A test, not a refactor, was the right tool.
+- **The Table-22 keyword layer** (`wcs/mod.rs`) — an earlier revision of this
+  document called it a "double dispatch". It is not: no `TableWcsResolver` method
+  matches on `TableWcsForm` (`TableWcs` decides the form exactly once), and the
+  resolver's `pixel_*`/`vector_*` methods are form-specific *spellings* named
+  accordingly, not a second decision. The resolver is also used directly outside
+  `TableWcs` — `pole_real`, `column_key`, `vector_rank`, `vector_axis_present` —
+  so it cannot fold away. Inlining the five `pixel_*` methods into the `TableWcs`
+  arms that call them just moves the same lines.
+- **`TimeReferencePosition::parse`** (`time/mod.rs`) — 15 `value.starts_with(..)`
+  guard arms. A const table plus a `find` is not shorter once the table is
+  written, and the enum's `Other(String)` variant makes it non-`Copy`, so the
+  lookup would have to clone. The guard arms read fine.
+- **`ColumnData::element_count` vs `AsciiColumnData::len`** — not an inconsistency.
+  They count different things: `element_count` is the flattened element total
+  across all rows (an array column has `repeat` per row), while an ASCII column is
+  always scalar (§7.2) so its length *is* its row count. Both doc comments say so.
+  Renaming either would lose the distinction.
+- **`Header::set_card`'s validate-then-assign clone** — the clone is what makes
+  "an error leaves the header unchanged" obviously true. Replacing it with
+  `mem::replace` plus a manual restore-on-error saves one `String` clone on a path
+  that is not hot (repeated `set` of an already-present keyword), and trades an
+  obviously-correct implementation for one where a forgotten restore is a silent
+  bug.
 - **`ColumnType`** (`writer/table.rs:31`) — `TformKind` minus `X`/`P`/`Q`, whose
   remaining job is making "not a bit array, not a descriptor" unrepresentable in
   a writer column. A runtime guard would save ~60 lines and lose that.
