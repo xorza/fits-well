@@ -17,136 +17,9 @@ Line-count estimates are rough. Line anchors are current as of this revision.
 
 ---
 
-## Batch 1 — De-over-engineer the compressed-image decode path
+## Batch 1 — WCS: split the long functions, collapse the Table-22 double dispatch
 
-`src/compress/decode.rs` (1160 lines) is the most abstraction-heavy file in the
-crate. It carries seven cooperating types for one decode: `ImageLayout`,
-`ImageDecodePlan`, `DecodeCtx`, `CodecParams`, `Dequant`, `TileColumns`,
-`TileScratchSet`, `CodecScratch` — plus two traits and an enum whose only job is
-type erasure.
-
-### 1.1 `WidePlane` + `DecodeSample` + `DecodeBuffer` is one idea spelled three times
-
-- `trait WidePlane` (`:231`) — 2 impls, selects "decode in `i64` or `f64`".
-- `trait DecodeSample` (`:296`) — 6 impls, every one a single `as` cast.
-- `enum DecodeBuffer` (`:344`) — 6 variants, exists only to erase the type so
-  `decode_image_section_into` (`:562`) and `decode_image_into` (`:588`) can
-  re-dispatch with six identical arms each.
-
-The two `debug_assert_eq!(plan.context.zbitpix.is_float(), output.is_float(), "…must match")`
-are the tell: the same fact is encoded twice and kept in sync by assertion rather
-than by construction. Deriving the buffer from `ImageLayout` once would make the
-assertion unnecessary.
-
-Simplest reduction that keeps the "narrow only at scatter time" property: keep
-`DecodeBuffer`, drop `DecodeSample` in favour of a `narrow` free function
-selected by the buffer variant, and drop `WidePlane` in favour of two explicit
-`decode_int_tile` / `decode_float_tile` calls chosen once from
-`layout.bitpix.is_float()`.
-
-### 1.2 `run_decode_scatter` has two divergent bodies
-
-`:611–662` is `#[cfg(feature = "parallel")] { … } #[cfg(not(…))] { … }` — two
-complete implementations, and they are **not** equivalent: the parallel arm
-narrows inside the worker and scatters with `std::convert::identity`; the serial
-arm scatters with `D::narrow`. Two paths, two behaviours to test, and the
-`convert:` parameter on `scatter_rows` (`:747`) exists only to paper over the
-difference.
-
-Make the serial path a one-tile wave through the same code. `scatter_rows`'s
-`convert` parameter then disappears.
-
-### 1.3 `ImageDecodePlan` has 15 fields
-
-`:88–104`, built by a 70-line constructor (`:107–180`). It bundles four
-unrelated concerns. Split into:
-
-- `TileSources { primary, gzip_fallback, uncompressed }` — `TileColumns::read`
-  (`:853`) already takes exactly these three as separate arguments.
-- `NullMask { column, codec }`
-- `FloatQuantization { method, zdither0, zscale, zzero, zblank_keyword, zblank_column }`
-- the existing `DecodeCtx` + `geometry`
-
-### 1.4 Small duplicates in the same file
-
-- `apply_integer_null_mask` (`:968`) and `apply_float_null_mask` (`:990`) are
-  identical apart from the fill value → one generic `apply_null_mask<T>(…, masked: T)`.
-- `read_f64_column` (`:798`) and `read_i64_column` (`:813`) share the
-  `column_index → column_by_idx → raw → match` shape.
-
-**Estimated net: −150 to −200 lines, and one fewer code path under `parallel`.**
-
----
-
-## Batch 2 — One N-dimensional odometer instead of five
-
-The "decompose a flat index into mixed-radix per-axis coordinates, then walk"
-loop is written five times, each subtly different:
-
-| site | file |
-| --- | --- |
-| image-section run coalescing | `reader/mod.rs:1090–1154` |
-| tile row-base emission | `compress/geometry.rs:86–127` |
-| tile selection for a region | `compress/decode.rs:427–487` |
-| per-row region scatter | `compress/decode.rs:703–745` |
-| inverse-search cell walk | `wcs/tabular/mod.rs:516–570` |
-
-They differ in what they do with the coordinates (strides, clipping, range
-membership) but the decomposition core is identical, and four of the five repeat
-the same `checked_mul`/`checked_add` overflow chain around it.
-
-Extract a small `nd` module:
-
-```rust
-pub(crate) fn mixed_radix(flat: usize, extents: &[usize], out: &mut [usize]);
-pub(crate) struct Odometer { … }   // incremental `next()` for the walking sites
-```
-
-`TileGeometry::tile_into` and `visit_image_region_runs` in particular are the
-same algorithm (contiguous fastest-axis run + odometer over the higher axes)
-written twice with different variable names.
-
-**Estimated net: −60 to −100 lines, and the overflow handling gets audited once.**
-
----
-
-## Batch 3 — Keyword-set and index-parse consolidation
-
-### 3.1 Three wrappers around `keyword::index`
-
-- `writer::indexed_keyword(keyword, prefix)` (`writer/mod.rs:353`) — adds a `len ≤ 8` bound.
-- `compress::parameter_index(keyword)` (`compress/mod.rs:212`) — adds `1..=999`.
-- `compress::table::indexed_compression_key(keyword, prefix, ncols)` (`compress/table.rs:559`) — adds `1..=ncols`.
-
-Give `keyword::index` an optional bound parameter (or add
-`keyword::indexed_in(keyword, prefix, range)`) and delete all three.
-
-### 3.2 The Z-table keyword set is spelled three times
-
-- `writer::is_structural_keyword` (`writer/mod.rs:303`) — 34 exact keywords + 15 prefixes.
-- `compress::table::reject_compression_metadata` (`compress/table.rs:632`) — 8 Z-keywords + 2 prefixes.
-- `compress::table::uncompress_table`'s `remove_where` (`compress/table.rs:534`) — the same 8 + 2, again, in the same file.
-
-Extract `const ZTABLE_KEYWORDS: [&str; 8]` and `const ZTABLE_PREFIXES: [&str; 2]`
-and have all three consult them. The two lists in `table.rs` being identical
-literals 100 lines apart is the clearest instance.
-
-### 3.3 `Header`'s removal APIs and their O(n) reindex
-
-`remove`, `remove_at`, `remove_all`, `remove_where`, plus `rename_keywords` and
-`append_filtered_from` each end in a full `reindex()` (`header/mod.rs:475`, six
-call sites). `reader::finish_table_selection` (`reader/mod.rs:773–775`) calls
-`remove_all` three times in a row — three full index rebuilds where
-`remove_where(|k| matches!(k, "THEAP" | "CHECKSUM" | "DATASUM"))` would do one.
-
-`remove_where` is currently `#[cfg(feature = "compression")]`; ungate it, make
-`remove_all` a thin wrapper over it, and use it at the reader call site.
-
----
-
-## Batch 4 — WCS: split the long functions, collapse the Table-22 double dispatch
-
-### 4.1 `Wcs::from_header_with_context` is 254 lines
+### 1.1 `Wcs::from_header_with_context` is 254 lines
 
 `wcs/mod.rs:737–990`. It does six separable jobs: read the axis vectors; resolve
 the spectral frames; establish the CD / PC×CDELT / CROTA precedence; apply
@@ -155,7 +28,7 @@ collect unsupported axes; compute the celestial pole. Each is a natural private
 function; the celestial-pole block alone (`:903–967`) is 65 lines nested inside a
 `match`.
 
-### 4.2 The Table-22 keyword layer has two dispatch levels for one decision
+### 1.2 The Table-22 keyword layer has two dispatch levels for one decision
 
 `TableWcsResolver` (`wcs/mod.rs:392–555`) exposes 14 methods that are pure
 keyword spellings (`pixel_axis_key`/`vector_axis_key`,
@@ -169,7 +42,7 @@ Collapse to one const table plus a single `TableWcs::key(family, index)`. That
 ~330-line block should roughly halve, and adding a keyword family becomes one
 table row.
 
-### 4.3 `vector_axis_present` is a performance and complexity outlier
+### 1.3 `vector_axis_present` is a performance and complexity outlier
 
 **Worth doing on its own merits even if the rest of this batch is skipped.**
 
@@ -183,7 +56,7 @@ way: one pass over `header.iter()`, taking the max parsed index. Rewrite
 `vector_axis_present` the same way and the helper disappears along with the
 `(1..=99)` / `(0..=99)` scans.
 
-### 4.4 Smaller WCS items
+### 1.4 Smaller WCS items
 
 - `first_real(header, a, b)` (`:1621`) exists for two-keyword fallbacks, but the
   text equivalent is open-coded twice: `RADESYS`/`RADECSYS` in `celestial_frame`
@@ -197,39 +70,29 @@ way: one pass over `header.iter()`, taking the max parsed index. Rewrite
 
 ---
 
-## Batch 5 — Mechanical cleanups
+## Batch 2 — Mechanical cleanups
 
 Small, independent, low risk. Good filler for the end of a session.
 
-1. **Row-offset arithmetic, three copies.** The
-   `data_offset + row × row_len` double-`checked_*` chain appears at
-   `reader/mod.rs:663–670`, `:697–704`, `:831–839`. Extract
-   `fn row_offset(base: u64, row: usize, row_len: usize) -> Result<u64>`.
-   The `data_offset + heap_range.start` chain appears twice (`:754`, `:856`).
-
-2. **`verify_checksum`'s duplicated status match.** `reader/mod.rs:979–989` — the
-   `datasum` and `checksum` initial-status blocks are identical; one helper
-   `fn initial_status(stored: Option<&str>) -> ChecksumStatus`.
-
-3. **`AsciiColumnReader::raw`'s two `unreachable!` loops.** `ascii/mod.rs:247–273`
+1. **`AsciiColumnReader::raw`'s two `unreachable!` loops.** `ascii/mod.rs:247–273`
    — two near-identical loops each with an `unreachable!` arm, because
    `parse_numeric_field` (`:304`) returns an untyped `ParsedNumeric`. Split it
    into `parse_integer_field` / `parse_float_field`, or have `physical` be the
    only `ParsedNumeric` consumer. Removes both `unreachable!`s.
 
-4. **`TimeReferencePosition::parse`.** `time/mod.rs:432–451` — 15 `match` guard
+2. **`TimeReferencePosition::parse`.** `time/mod.rs:432–451` — 15 `match` guard
    arms of `value.starts_with("XXX")`. A `const` `[(&str, TimeReferencePosition)]`
    table plus a `find` is half the length and self-evidently exhaustive.
 
-5. **Sign-flip constants and helpers.** `data/mod.rs:542–580` — four `f64`
+3. **Sign-flip constants and helpers.** `data/mod.rs:542–580` — four `f64`
    offsets, four integer sign masks, four `flip_*` and four `store_*` const fns.
    A three-line macro cuts ~35 lines. Low value — the current spelling is at
    least explicit — so only worth it if you are in the file anyway.
 
-6. **Naming consistency.** `ColumnData::element_count` vs `AsciiColumnData::len`
+4. **Naming consistency.** `ColumnData::element_count` vs `AsciiColumnData::len`
    vs `ImageData::len` for the same question. Pick one.
 
-7. **`Header::set_card` clones to validate.** `header/mod.rs:337–351` clones the
+5. **`Header::set_card` clones to validate.** `header/mod.rs:337–351` clones the
    existing card, mutates the clone, validates, then assigns. Validating the
    proposed `(keyword, value, comment)` directly avoids a `String` clone per
    `set` on an existing keyword — and `set_internal` is called dozens of times
@@ -237,7 +100,7 @@ Small, independent, low risk. Good filler for the end of a session.
 
 ---
 
-## Batch 6 — `FitsError`: fold the two structurally identical families
+## Batch 3 — `FitsError`: fold the two structurally identical families
 
 Last, and optional. `error.rs` is 671 lines with 58 variants and a 230-line
 `Display`. Most of that is *precision*, not duplication, and should stay: six
@@ -249,7 +112,7 @@ out of sync with the variants.
 Two families are genuine duplication — the same variant written five and three
 times over with a different noun:
 
-### 6.1 Five index-out-of-bounds variants → one
+### 3.1 Five index-out-of-bounds variants → one
 
 `HduIndexOutOfBounds`, `HeaderIndexOutOfBounds`, `ColumnIndexOutOfBounds`,
 `GroupIndexOutOfBounds`, `WcsAxisIndexOutOfBounds` all carry `(index, len)` and
@@ -260,7 +123,7 @@ and 5, keeps typed pattern-matching, and gives callers one place to handle "some
 index was out of range". `WcsAxisIndexOutOfBounds` is 1-based — carry that in the
 `Indexed` variant's message, as it already does today.
 
-### 6.2 Three rank/count-mismatch variants → one
+### 3.2 Three rank/count-mismatch variants → one
 
 `ImageRegionRankMismatch`, `TileShapeRankMismatch`, `CoordinateCountMismatch` are
 all `(expected, got)` with a noun → `RankMismatch { kind, expected, got }`, same
@@ -273,7 +136,7 @@ step with a crate that models `HduKind`, `SampleType`, and `ChecksumStatus` as
 typed enums. The typed version is close to line-neutral; the win is the smaller
 top-level enum and the explicit grouping, not the line count.
 
-Blast radius measured: 31 sites for 6.1, 16 for 6.2.
+Blast radius measured: 31 sites for 3.1, 16 for 3.2.
 
 ---
 
@@ -302,8 +165,7 @@ Recorded so a later pass doesn't re-litigate them:
 - **The six-arm `BITPIX` matches** on `ImageData` / `ImageView` / `DecodeBuffer`
   — a match over a tagged union is the clear spelling, and macro-generating them
   would cost the per-variant rustdoc on two public enums. The duplicated *logic*
-  around them has already been hoisted out; shrinking `DecodeBuffer` itself is
-  Batch 1.1's job, not a macro's.
+  around them has already been hoisted out.
 - **`WriteColumnData`'s `Bits` / `VlaBits` variants** (`writer/table.rs:46`) —
   they look like they should fold into `Fixed` / `Vla`, but they carry what those
   cannot. A `VlaBits` row's bit count is *per row* (`BitVec::len()`, read at
@@ -312,6 +174,46 @@ Recorded so a later pass doesn't re-litigate them:
   `repeat × elem_size`, so `Fixed`'s meaning would become conditionally false.
   Folding moves the branch from a match arm into an `if let Some(bit_count)`
   inside the surviving arms — same branch count, worse locality.
+- **`DecodeBuffer` / `DecodeSample` / `WidePlane`** (`compress/decode.rs`) — they
+  look like one idea spelled three times, but each carries something the others
+  cannot. `DecodeBuffer` factors 2 backing stores (owned `ImageData`, `u64`
+  scratch) against 2 traversals (whole image, section): dropping it turns 2+2
+  six-arm matches into 4. `DecodeSample` maps a stored type to its wide plane and
+  narrowing; `WidePlane` picks the integer or float tile reconstruction. Both
+  relations are real and are what let narrowing be deferred to scatter time, so no
+  whole-image `i64`/`f64` buffer is ever materialized.
+- **`run_decode_scatter`'s two `#[cfg]` bodies** — not accidental duplication. A
+  parallel worker cannot scatter into the caller's slice, so it must hand back an
+  owned per-tile buffer, and narrowing before that hand-off is what bounds a wave's
+  retained memory (`decode_wave_tile_count` sizes the wave from `size_of::<D>()`).
+  The serial build has no hand-off and narrows straight into the output, allocating
+  nothing per tile. Collapsing them onto the parallel shape would add an allocation
+  and a copy per tile to every non-`parallel` build. The per-tile decode they *do*
+  share is now `TileScratchSet::decode`; the divergence is documented in place.
+- **The five N-dimensional index walks** (`reader/mod.rs`, `compress/geometry.rs`,
+  `compress/decode.rs` ×2, `wcs/tabular/mod.rs`) — they share a *concept*, not
+  extractable code. Only two are plain flat→coords decompositions; one of those
+  (`tile_into`) fuses it with `origin`/`tdims` construction, so hoisting it would
+  add a scratch buffer and a second pass to a per-tile path.
+  `compressed_image_tile_rows` performs the *inverse* (coords→flat) plus a box
+  odometer over `[starts, ends)`. `visit_image_region_runs` and
+  `scatter_region_tile` fuse decomposition with strided accumulation and a range
+  filter, in near-inverse directions, and both skip axis 0 because it is the
+  contiguous run. An iterator form fits four of them but forces an axis-numbering
+  re-offset at two, which is a lateral move. (The plan claimed "four of the five
+  repeat the same overflow chain"; it is two of five — the other three walk
+  pre-validated geometry unchecked, deliberately.)
+- **The three `keyword::index` wrappers** (`writer::indexed_keyword`,
+  `compress::parameter_index`, `compress::table::indexed_compression_key`) — each
+  adds a *different* constraint (card length ≤ 8, `1..=999`, `1..=ncols`), so they
+  compose with `index` rather than duplicating it. Inlining a range-taking variant
+  would spread the `"ZNAME"`/`999` constants across the two `parameter_index` call
+  sites that currently share one name for them.
+- **The two Z-table keyword lists** (`compress/table.rs`) — they look identical but
+  differ in exactly the entries that matter: `uncompress_table` removes the
+  restored `THEAP`/`CHECKSUM`/`DATASUM`, while `reject_compression_metadata`
+  rejects the `ZTHEAP`/`ZHECKSUM`/`ZDATASUM` forms whose presence means the table
+  is already compressed. Sharing the five common names would hide that.
 - **`ColumnType`** (`writer/table.rs:31`) — `TformKind` minus `X`/`P`/`Q`, whose
   remaining job is making "not a bit array, not a descriptor" unrepresentable in
   a writer column. A runtime guard would save ~60 lines and lose that.

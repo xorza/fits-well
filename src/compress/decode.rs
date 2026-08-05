@@ -84,23 +84,16 @@ impl ImageLayout {
     }
 }
 
+/// Everything a tiled image's decode needs that the header and the table's metadata
+/// columns determine once, up front — grouped by the concern each part serves rather
+/// than held as one flat bag.
 #[derive(Debug)]
 struct ImageDecodePlan<'a> {
     geometry: TileGeometry,
     context: DecodeCtx,
-    method: DitherMethod,
-    zdither0: i64,
-    /// `BLANK` — the stored integer a masked null pixel takes in an integer image.
-    blank: Option<i64>,
-    zblank_keyword: Option<i64>,
-    zblank_column: Option<Vec<i64>>,
-    zscale: Option<Vec<f64>>,
-    zzero: Option<Vec<f64>>,
-    primary: Option<VlaColumn<'a>>,
-    gzip_fallback: Option<VlaColumn<'a>>,
-    uncompressed: Option<VlaColumn<'a>>,
-    null_mask: Option<VlaColumn<'a>>,
-    mask_codec: Option<ImageCodec>,
+    sources: TileSources<'a>,
+    null_mask: NullMask<'a>,
+    quantization: FloatQuantization,
 }
 
 impl<'a> ImageDecodePlan<'a> {
@@ -119,6 +112,112 @@ impl<'a> ImageDecodePlan<'a> {
         } else {
             layout.bitpix
         };
+        Ok(ImageDecodePlan {
+            geometry: TileGeometry::new(&layout.dims, &tiles),
+            context: DecodeCtx {
+                codec: layout.codec,
+                zbitpix: layout.bitpix,
+                int_bitpix,
+                params: CodecParams {
+                    blocksize: rice.blocksize,
+                    bytepix: rice.bytepix,
+                    smooth: hcompress_smooth(header)?,
+                },
+            },
+            sources: TileSources::read(table)?,
+            null_mask: NullMask::read(header, table, layout)?,
+            quantization: FloatQuantization::read(header, table, is_float)?,
+        })
+    }
+}
+
+/// The three per-tile source columns (§10.1.3): the primary `COMPRESSED_DATA` and
+/// the `GZIP_COMPRESSED_DATA` / `UNCOMPRESSED_DATA` fallbacks. Any of them may be
+/// absent, and each tile picks the first with a non-empty cell.
+#[derive(Debug, Clone, Copy)]
+struct TileSources<'a> {
+    primary: Option<VlaColumn<'a>>,
+    gzip_fallback: Option<VlaColumn<'a>>,
+    uncompressed: Option<VlaColumn<'a>>,
+}
+
+impl<'a> TileSources<'a> {
+    fn read(table: &'a BinTable) -> Result<TileSources<'a>> {
+        Ok(TileSources {
+            primary: read_tiles(table, "COMPRESSED_DATA")?,
+            gzip_fallback: read_tiles(table, "GZIP_COMPRESSED_DATA")?,
+            uncompressed: read_tiles(table, "UNCOMPRESSED_DATA")?,
+        })
+    }
+
+    /// The three candidate cells for one table row.
+    fn cells(&self, row: usize) -> Result<TileCells<'a>> {
+        Ok(TileCells {
+            primary: self.primary.map(|column| column.cell(row)).transpose()?,
+            gzip: self
+                .gzip_fallback
+                .map(|column| column.cell(row))
+                .transpose()?,
+            uncompressed: self
+                .uncompressed
+                .map(|column| column.cell(row))
+                .transpose()?,
+        })
+    }
+}
+
+/// The optional null-pixel mask and everything applying it needs: the per-tile mask
+/// column, the `ZMASKCMP` codec that encodes it, and the `BLANK` value an integer
+/// image's masked pixels take (a float image's take `NaN`).
+#[derive(Debug, Clone, Copy)]
+struct NullMask<'a> {
+    column: Option<VlaColumn<'a>>,
+    codec: Option<ImageCodec>,
+    blank: Option<i64>,
+}
+
+impl<'a> NullMask<'a> {
+    fn read(header: &Header, table: &'a BinTable, layout: &ImageLayout) -> Result<NullMask<'a>> {
+        let column = read_first_tiles(
+            table,
+            &[
+                "NULL_PIXEL_MASK",
+                "NULL_PIXEL_MASK_COLUMN",
+                "NULL PIXEL MASK",
+            ],
+        )?;
+        let codec = header
+            .get_text("ZMASKCMP")?
+            .map(ImageCodec::parse)
+            .transpose()?;
+        if column.is_some() && codec == Some(ImageCodec::Hcompress1) {
+            return Err(FitsError::UnsupportedCompression {
+                name: "lossy HCOMPRESS_1 cannot encode a null-pixel mask".to_string(),
+            });
+        }
+        Ok(NullMask {
+            column,
+            codec,
+            blank: layout.scaling.blank,
+        })
+    }
+}
+
+/// The float-quantization inputs (§10.2): the dither method and seed, and the
+/// per-tile `ZSCALE`/`ZZERO`/`ZBLANK` metadata columns. An integer image parses
+/// these too but never consults them.
+#[derive(Debug)]
+struct FloatQuantization {
+    method: DitherMethod,
+    zdither0: i64,
+    zblank_keyword: Option<i64>,
+    zblank_column: Option<Vec<i64>>,
+    zscale: Option<Vec<f64>>,
+    zzero: Option<Vec<f64>>,
+}
+
+impl FloatQuantization {
+    fn read(header: &Header, table: &BinTable, is_float: bool) -> Result<FloatQuantization> {
         let quantiz = header.get_text("ZQUANTIZ")?.unwrap_or("NO_DITHER");
         let method = match DitherMethod::parse(quantiz) {
             Some(method) => method,
@@ -135,59 +234,17 @@ impl<'a> ImageDecodePlan<'a> {
         if !(1..=10_000).contains(&zdither0) {
             return Err(FitsError::KeywordOutOfRange { name: "ZDITHER0" });
         }
-        let null_mask = read_first_tiles(
-            table,
-            &[
-                "NULL_PIXEL_MASK",
-                "NULL_PIXEL_MASK_COLUMN",
-                "NULL PIXEL MASK",
-            ],
-        )?;
-        let mask_codec = header
-            .get_text("ZMASKCMP")?
-            .map(ImageCodec::parse)
-            .transpose()?;
-        if null_mask.is_some() && mask_codec == Some(ImageCodec::Hcompress1) {
-            return Err(FitsError::UnsupportedCompression {
-                name: "lossy HCOMPRESS_1 cannot encode a null-pixel mask".to_string(),
-            });
-        }
-        Ok(ImageDecodePlan {
-            geometry: TileGeometry::new(&layout.dims, &tiles),
-            context: DecodeCtx {
-                codec: layout.codec,
-                zbitpix: layout.bitpix,
-                int_bitpix,
-                params: CodecParams {
-                    blocksize: rice.blocksize,
-                    bytepix: rice.bytepix,
-                    smooth: hcompress_smooth(header)?,
-                },
-            },
+        Ok(FloatQuantization {
             method,
             zdither0,
-            blank: layout.scaling.blank,
             zblank_keyword: header.get_integer("ZBLANK")?,
             zblank_column: read_i64_column(table, "ZBLANK")?,
             zscale: read_f64_column(table, "ZSCALE")?,
             zzero: read_f64_column(table, "ZZERO")?,
-            primary: read_tiles(table, "COMPRESSED_DATA")?,
-            gzip_fallback: read_tiles(table, "GZIP_COMPRESSED_DATA")?,
-            uncompressed: read_tiles(table, "UNCOMPRESSED_DATA")?,
-            null_mask,
-            mask_codec,
         })
     }
 
-    fn tile_columns(&self, table_row: usize) -> Result<TileColumns<'a>> {
-        TileColumns::read(
-            table_row,
-            self.primary,
-            self.gzip_fallback,
-            self.uncompressed,
-        )
-    }
-
+    /// The dequantization parameters for one tile.
     fn dequant(&self, table_row: usize, tile_row: usize) -> Dequant {
         Dequant {
             scale: column_at(&self.zscale, table_row).unwrap_or(1.0),
@@ -223,6 +280,26 @@ impl<W> Default for TileScratchSet<W> {
     }
 }
 
+impl<W: WidePlane> TileScratchSet<W> {
+    /// Reconstruct one tile into this scratch: resolve its geometry, decode its
+    /// samples in the wide plane, and check the count against the header's tiling.
+    ///
+    /// `tile_row` indexes the image's tile grid (it drives the dither sequence and
+    /// the scatter); `table_row` indexes the compressed table. They coincide for a
+    /// whole-image decode and diverge for a section, which reads only the rows its
+    /// region intersects.
+    fn decode(
+        &mut self,
+        plan: &ImageDecodePlan<'_>,
+        table_row: usize,
+        tile_row: usize,
+    ) -> Result<()> {
+        plan.geometry.tile_into(tile_row, &mut self.tile);
+        W::decode_tile(plan, table_row, tile_row, self)?;
+        ensure_tile_size(self.tile.nelem(), self.values.len())
+    }
+}
+
 /// The widened plane a tile decodes into before narrowing to the stored type: `i64`
 /// for an integer image, `f64` for a quantized float one. The two differ in how a
 /// tile is reconstructed and how its nulls are applied, so selecting the plane by
@@ -247,7 +324,7 @@ impl WidePlane for i64 {
         let nelem = scratch.tile.nelem();
         decode_one_tile_into(
             &plan.context,
-            plan.tile_columns(table_row)?,
+            plan.sources.cells(table_row)?,
             nelem,
             &mut scratch.values,
             &mut scratch.codecs,
@@ -273,9 +350,9 @@ impl WidePlane for f64 {
         let nelem = scratch.tile.nelem();
         decode_float_tile_into(
             &plan.context,
-            plan.tile_columns(table_row)?,
+            plan.sources.cells(table_row)?,
             nelem,
-            plan.dequant(table_row, tile_row),
+            plan.quantization.dequant(table_row, tile_row),
             &mut scratch.values,
             &mut scratch.aux,
             &mut scratch.codecs,
@@ -559,6 +636,28 @@ impl ImageRegionLayout {
     }
 }
 
+/// Build the decode plan for `layout` and check it against the buffer the caller
+/// sized from the same layout.
+///
+/// The buffer's plane and `ZBITPIX` cannot disagree — every caller derives both from
+/// one [`ImageLayout`] — but the two dispatch paths below select their tile decoder
+/// from the plane and their scatter from the buffer, so the pairing is worth stating
+/// once rather than at each of them.
+fn plan_for<'a>(
+    header: &Header,
+    table: &'a BinTable,
+    layout: &ImageLayout,
+    output: &DecodeBuffer<'_>,
+) -> Result<ImageDecodePlan<'a>> {
+    let plan = ImageDecodePlan::new(header, table, layout)?;
+    debug_assert_eq!(
+        plan.context.zbitpix.is_float(),
+        output.is_float(),
+        "the sample buffer is sized from ZBITPIX, so its plane must match"
+    );
+    Ok(plan)
+}
+
 fn decode_image_section_into(
     header: &Header,
     table: &BinTable,
@@ -568,12 +667,7 @@ fn decode_image_section_into(
     output: DecodeBuffer<'_>,
 ) -> Result<()> {
     debug_assert_ne!(region.total, 0);
-    let plan = ImageDecodePlan::new(header, table, &region.image)?;
-    debug_assert_eq!(
-        plan.context.zbitpix.is_float(),
-        output.is_float(),
-        "the sample buffer is sized from ZBITPIX, so its plane must match"
-    );
+    let plan = plan_for(header, table, &region.image, &output)?;
     let shape = &region.shape;
     match output {
         DecodeBuffer::U8(out) => run_decode_region(&plan, ranges, shape, tile_rows, out),
@@ -591,12 +685,7 @@ fn decode_image_into(
     layout: &ImageLayout,
     output: DecodeBuffer<'_>,
 ) -> Result<()> {
-    let plan = ImageDecodePlan::new(header, table, layout)?;
-    debug_assert_eq!(
-        plan.context.zbitpix.is_float(),
-        output.is_float(),
-        "the sample buffer is sized from ZBITPIX, so its plane must match"
-    );
+    let plan = plan_for(header, table, layout, &output)?;
     match output {
         DecodeBuffer::U8(out) => run_decode_scatter(&plan, out),
         DecodeBuffer::I16(out) => run_decode_scatter(&plan, out),
@@ -608,12 +697,18 @@ fn decode_image_into(
 }
 
 /// Decode every tile and scatter it into the full image plane.
+///
+/// The two builds share the per-tile decode ([`TileScratchSet::decode`]) but not the
+/// hand-off, and deliberately so: a parallel worker cannot scatter into `out`
+/// directly, so it must hand back an owned buffer, and narrowing *before* that
+/// hand-off is what bounds the memory a wave retains — [`decode_wave_tile_count`]
+/// sizes the wave from `size_of::<D>()`, not from the wide plane. The serial build
+/// has no hand-off to pay for, so it narrows straight into `out` and allocates
+/// nothing per tile.
 fn run_decode_scatter<D: DecodeSample>(plan: &ImageDecodePlan<'_>, out: &mut [D]) -> Result<()> {
     let geom = &plan.geometry;
     #[cfg(feature = "parallel")]
     {
-        // Tiles decode in parallel but land serially, so only one wave's worth of
-        // narrowed output is retained at a time.
         let wave_len = decode_wave_tile_count::<D>(geom);
         let mut scatter = TileScratch::default();
         for wave_start in (0..geom.ntiles()).step_by(wave_len) {
@@ -623,14 +718,13 @@ fn run_decode_scatter<D: DecodeSample>(plan: &ImageDecodePlan<'_>, out: &mut [D]
                 TileScratchSet::<D::Wide>::default,
                 |scratch, offset| -> Result<Vec<D>> {
                     let tile = wave_start + offset;
-                    geom.tile_into(tile, &mut scratch.tile);
-                    D::Wide::decode_tile(plan, tile, tile, scratch)?;
-                    ensure_tile_size(scratch.tile.nelem(), scratch.values.len())?;
+                    scratch.decode(plan, tile, tile)?;
                     Ok(scratch.values.iter().copied().map(D::narrow).collect())
                 },
             )?;
             for (offset, values) in decoded.iter().enumerate() {
                 geom.tile_into(wave_start + offset, &mut scatter);
+                // Already narrowed, in the worker.
                 scatter_rows(
                     out,
                     &scatter.row_bases,
@@ -646,9 +740,7 @@ fn run_decode_scatter<D: DecodeSample>(plan: &ImageDecodePlan<'_>, out: &mut [D]
     {
         let mut scratch = TileScratchSet::<D::Wide>::default();
         for tile in 0..geom.ntiles() {
-            geom.tile_into(tile, &mut scratch.tile);
-            D::Wide::decode_tile(plan, tile, tile, &mut scratch)?;
-            ensure_tile_size(scratch.tile.nelem(), scratch.values.len())?;
+            scratch.decode(plan, tile, tile)?;
             scatter_rows(
                 out,
                 &scratch.tile.row_bases,
@@ -685,9 +777,7 @@ fn run_decode_region<D: DecodeSample>(
 ) -> Result<()> {
     let mut scratch = TileScratchSet::<D::Wide>::default();
     for (table_row, &tile_row) in tile_rows.iter().enumerate() {
-        plan.geometry.tile_into(tile_row, &mut scratch.tile);
-        D::Wide::decode_tile(plan, table_row, tile_row, &mut scratch)?;
-        ensure_tile_size(scratch.tile.nelem(), scratch.values.len())?;
+        scratch.decode(plan, table_row, tile_row)?;
         scatter_region_tile(
             &scratch.tile,
             ranges,
@@ -794,12 +884,21 @@ fn read_first_tiles<'a>(table: &'a BinTable, names: &[&str]) -> Result<Option<Vl
     Ok(None)
 }
 
+/// Decode a named per-tile metadata column, or `None` when the table does not carry
+/// it — every such column is optional, so absence is not an error.
+fn read_tile_metadata(table: &BinTable, name: &str) -> Result<Option<ColumnData>> {
+    match table.column_index(name) {
+        Some(index) => Ok(Some(table.column_by_idx(index)?.raw()?)),
+        None => Ok(None),
+    }
+}
+
 /// Read a per-tile `f64` column (e.g. `ZSCALE`/`ZZERO`), or `None` if absent.
 fn read_f64_column(table: &BinTable, name: &str) -> Result<Option<Vec<f64>>> {
-    let Some(c) = table.column_index(name) else {
+    let Some(data) = read_tile_metadata(table, name)? else {
         return Ok(None);
     };
-    match table.column_by_idx(c)?.raw()? {
+    match data {
         ColumnData::F64(v) => Ok(Some(v)),
         _ => Err(FitsError::TypeMismatch {
             name: name.to_string(),
@@ -811,10 +910,10 @@ fn read_f64_column(table: &BinTable, name: &str) -> Result<Option<Vec<f64>>> {
 /// Read a per-tile integer column (e.g. a `ZBLANK` column), widening any integer
 /// `TFORM` to `i64`, or `None` if absent.
 fn read_i64_column(table: &BinTable, name: &str) -> Result<Option<Vec<i64>>> {
-    let Some(c) = table.column_index(name) else {
+    let Some(data) = read_tile_metadata(table, name)? else {
         return Ok(None);
     };
-    match table.column_by_idx(c)?.raw()? {
+    match data {
         ColumnData::Bytes(v) => Ok(Some(v.iter().map(|&x| x as i64).collect())),
         ColumnData::I16(v) => Ok(Some(v.iter().map(|&x| x as i64).collect())),
         ColumnData::I32(v) => Ok(Some(v.iter().map(|&x| x as i64).collect())),
@@ -830,12 +929,11 @@ fn column_at<T: Copy>(col: &Option<Vec<T>>, t: usize) -> Option<T> {
     col.as_ref().and_then(|v| v.get(t).copied())
 }
 
-/// Decode one tile, honoring the fallback columns: the primary `COMPRESSED_DATA`
-/// (via `ZCMPTYPE`), else gzip'd `GZIP_COMPRESSED_DATA`, else raw `UNCOMPRESSED_DATA`.
-/// The three per-tile source columns (§10.1.3): the primary `COMPRESSED_DATA` and
-/// the `GZIP_COMPRESSED_DATA` / `UNCOMPRESSED_DATA` fallbacks.
+/// One tile's three candidate source cells, read from [`TileSources`]. The tile is
+/// decoded from the first non-empty one: the primary `COMPRESSED_DATA` (via
+/// `ZCMPTYPE`), else gzip'd `GZIP_COMPRESSED_DATA`, else raw `UNCOMPRESSED_DATA`.
 #[derive(Debug, Clone, Copy)]
-struct TileColumns<'a> {
+struct TileCells<'a> {
     primary: Option<VlaCell<'a>>,
     gzip: Option<VlaCell<'a>>,
     uncompressed: Option<VlaCell<'a>>,
@@ -849,20 +947,7 @@ enum TileSource<'a> {
     Uncompressed(VlaCell<'a>),
 }
 
-impl<'a> TileColumns<'a> {
-    fn read(
-        row: usize,
-        primary: Option<VlaColumn<'a>>,
-        gzip: Option<VlaColumn<'a>>,
-        uncompressed: Option<VlaColumn<'a>>,
-    ) -> Result<TileColumns<'a>> {
-        Ok(TileColumns {
-            primary: primary.map(|column| column.cell(row)).transpose()?,
-            gzip: gzip.map(|column| column.cell(row)).transpose()?,
-            uncompressed: uncompressed.map(|column| column.cell(row)).transpose()?,
-        })
-    }
-
+impl<'a> TileCells<'a> {
     /// Pick the first non-empty source: primary `COMPRESSED_DATA`, then the
     /// gzip and uncompressed fallbacks; error if every column's cell is empty.
     fn resolve(self) -> Result<TileSource<'a>> {
@@ -925,7 +1010,7 @@ fn decode_null_mask_into(
     out: &mut Vec<i64>,
     scratch: &mut CodecScratch,
 ) -> Result<bool> {
-    let Some(column) = plan.null_mask else {
+    let Some(column) = plan.null_mask.column else {
         return Ok(false);
     };
     let cell = column.cell(table_row)?;
@@ -933,7 +1018,8 @@ fn decode_null_mask_into(
         return Ok(false);
     }
     let codec = plan
-        .mask_codec
+        .null_mask
+        .codec
         .ok_or(FitsError::MissingKeyword { name: "ZMASKCMP" })?;
     match codec {
         ImageCodec::Gzip1 => {
@@ -977,13 +1063,10 @@ fn apply_integer_null_mask(
         return Ok(());
     }
     let blank = plan
+        .null_mask
         .blank
         .ok_or(FitsError::MissingKeyword { name: "BLANK" })?;
-    for (value, &masked) in values.iter_mut().zip(mask.iter()) {
-        if masked == 1 {
-            *value = blank;
-        }
-    }
+    fill_masked(values, mask, blank);
     Ok(())
 }
 
@@ -998,17 +1081,23 @@ fn apply_float_null_mask(
     if !decode_null_mask_into(plan, table_row, tile_elems, mask, scratch)? {
         return Ok(());
     }
-    for (value, &masked) in values.iter_mut().zip(mask.iter()) {
+    fill_masked(values, mask, f64::NAN);
+    Ok(())
+}
+
+/// Overwrite every element the mask marks (§10.1.2: a mask value of 1 is a null)
+/// with `fill` — `BLANK` for an integer plane, `NaN` for a float one.
+fn fill_masked<T: Copy>(values: &mut [T], mask: &[i64], fill: T) {
+    for (value, &masked) in values.iter_mut().zip(mask) {
         if masked == 1 {
-            *value = f64::NAN;
+            *value = fill;
         }
     }
-    Ok(())
 }
 
 fn decode_one_tile_into(
     ctx: &DecodeCtx,
-    cols: TileColumns,
+    cols: TileCells,
     tile_elems: usize,
     out: &mut Vec<i64>,
     scratch: &mut CodecScratch,
@@ -1035,7 +1124,7 @@ fn decode_one_tile_into(
 /// fallbacks hold the raw float values.
 fn decode_float_tile_into(
     ctx: &DecodeCtx,
-    cols: TileColumns,
+    cols: TileCells,
     tile_elems: usize,
     dq: Dequant,
     out: &mut Vec<f64>,

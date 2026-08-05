@@ -660,14 +660,7 @@ impl<S: Source> FitsReader<S> {
         let data = if rows.is_empty() {
             Vec::new()
         } else {
-            let offset = data_offset
-                .checked_add(
-                    u64::try_from(rows.start)
-                        .ok()
-                        .and_then(|row| row.checked_mul(schema.row_len as u64))
-                        .ok_or(FitsError::DataUnitOverflow)?,
-                )
-                .ok_or(FitsError::DataUnitOverflow)?;
+            let offset = row_offset(data_offset, rows.start, schema.row_len)?;
             self.source.read_owned(offset, main_len)?
         };
         self.finish_table_selection(index, schema, rows.len(), data, selected_columns)
@@ -694,14 +687,7 @@ impl<S: Source> FitsReader<S> {
                     len: schema.nrows,
                 });
             }
-            let offset = data_offset
-                .checked_add(
-                    u64::try_from(source_row)
-                        .ok()
-                        .and_then(|row| row.checked_mul(schema.row_len as u64))
-                        .ok_or(FitsError::DataUnitOverflow)?,
-                )
-                .ok_or(FitsError::DataUnitOverflow)?;
+            let offset = row_offset(data_offset, source_row, schema.row_len)?;
             let row = self
                 .source
                 .slice(offset, schema.row_len, &mut self.scratch)?;
@@ -750,9 +736,7 @@ impl<S: Source> FitsReader<S> {
                 let slot = &data[slot_start..slot_end];
                 let span = vla_cell_span(schema, column, slot, wide)?;
                 let bytes = self.source.slice(
-                    data_offset
-                        .checked_add(span.heap_range.start as u64)
-                        .ok_or(FitsError::DataUnitOverflow)?,
+                    offset_at(data_offset, span.heap_range.start)?,
                     span.heap_range.len(),
                     &mut self.scratch,
                 )?;
@@ -770,9 +754,9 @@ impl<S: Source> FitsReader<S> {
         let mut header = self.hdus[index].header.clone();
         header.set_internal("NAXIS2", row_count as i64);
         header.set_internal("PCOUNT", heap.len() as i64);
-        header.remove_all("THEAP");
-        header.remove_all("CHECKSUM");
-        header.remove_all("DATASUM");
+        // One pass, one index rebuild — the compacted selection invalidates the heap
+        // pointer and both integrity keywords together.
+        header.remove_where(|keyword| matches!(keyword, "THEAP" | "CHECKSUM" | "DATASUM"));
         BinTable::from_data(&header, data)
     }
 
@@ -828,15 +812,10 @@ impl<S: Source> FitsReader<S> {
         let column_index = resolve_column_selector(&schema, &column)?;
         let column = &schema.columns[column_index];
         let data_offset = self.checked_hdu(index)?.data_offset;
-        let cell_offset = data_offset
-            .checked_add(
-                u64::try_from(row)
-                    .ok()
-                    .and_then(|row| row.checked_mul(schema.row_len as u64))
-                    .and_then(|offset| offset.checked_add(column.byte_offset as u64))
-                    .ok_or(FitsError::DataUnitOverflow)?,
-            )
-            .ok_or(FitsError::DataUnitOverflow)?;
+        let cell_offset = offset_at(
+            row_offset(data_offset, row, schema.row_len)?,
+            column.byte_offset,
+        )?;
         let width = column.tform.byte_width();
         let wide = match column.tform.kind {
             TformKind::ArrayDesc32 => false,
@@ -852,9 +831,7 @@ impl<S: Source> FitsReader<S> {
         let descriptor_bytes = self.source.slice(cell_offset, width, &mut self.scratch)?;
         let span = vla_cell_span(&schema, column, descriptor_bytes, wide)?;
         let bytes = self.source.slice(
-            data_offset
-                .checked_add(span.heap_range.start as u64)
-                .ok_or(FitsError::DataUnitOverflow)?,
+            offset_at(data_offset, span.heap_range.start)?,
             span.heap_range.len(),
             &mut self.scratch,
         )?;
@@ -977,16 +954,8 @@ impl<S: Source> FitsReader<S> {
         let verify_whole_hdu =
             stored_checksum.is_some_and(|value| !value.is_empty() && !is_unknown_checksum(value));
         let mut report = ChecksumReport {
-            datasum: match stored_datasum {
-                None => ChecksumStatus::Absent,
-                Some(value) if is_unknown_checksum(value) => ChecksumStatus::Unknown,
-                Some(_) => ChecksumStatus::Invalid,
-            },
-            checksum: match stored_checksum {
-                None => ChecksumStatus::Absent,
-                Some(value) if is_unknown_checksum(value) => ChecksumStatus::Unknown,
-                Some(_) => ChecksumStatus::Invalid,
-            },
+            datasum: initial_status(stored_datasum),
+            checksum: initial_status(stored_checksum),
         };
         if expected_datasum.is_none() && !verify_whole_hdu {
             return Ok(report);
@@ -1039,6 +1008,26 @@ fn vla_cell_span(
         count: descriptor.count,
         heap_range: descriptor.heap_range(element_type, schema.heap_offset, schema.heap_end)?,
     })
+}
+
+/// `base + delta`, rejecting a sum that cannot address a source byte.
+fn offset_at(base: u64, delta: usize) -> Result<u64> {
+    u64::try_from(delta)
+        .ok()
+        .and_then(|delta| base.checked_add(delta))
+        .ok_or(FitsError::DataUnitOverflow)
+}
+
+/// Byte offset of table `row`'s first byte, in a data unit starting at `base`.
+///
+/// The row product is taken in `u64` rather than `usize` so a 32-bit host rejects
+/// an out-of-range row instead of wrapping into a plausible-looking offset.
+fn row_offset(base: u64, row: usize, row_len: usize) -> Result<u64> {
+    u64::try_from(row)
+        .ok()
+        .and_then(|row| row.checked_mul(row_len as u64))
+        .and_then(|within| base.checked_add(within))
+        .ok_or(FitsError::DataUnitOverflow)
 }
 
 fn validate_row_range(rows: &Range<usize>, len: usize) -> Result<()> {
@@ -1151,6 +1140,16 @@ fn visit_image_region_runs(
         visit(run)?;
     }
     Ok(())
+}
+
+/// Where a stored integrity keyword starts before anything is recomputed: absent,
+/// the standard all-blank "unknown", or provisionally invalid until it verifies.
+fn initial_status(stored: Option<&str>) -> ChecksumStatus {
+    match stored {
+        None => ChecksumStatus::Absent,
+        Some(value) if is_unknown_checksum(value) => ChecksumStatus::Unknown,
+        Some(_) => ChecksumStatus::Invalid,
+    }
 }
 
 fn is_unknown_checksum(value: &str) -> bool {
