@@ -17,6 +17,7 @@ use crate::endian::decode_be_cells;
 use crate::endian::decode_be_into_slice;
 use crate::endian::extend_be;
 use crate::error::FitsError;
+use crate::error::Ranked;
 use crate::error::Result;
 use crate::header::Header;
 use crate::words;
@@ -72,9 +73,10 @@ pub(crate) fn validate_image_region(
     shape: &[usize],
 ) -> Result<Vec<usize>> {
     if ranges.len() != shape.len() {
-        return Err(FitsError::ImageRegionRankMismatch {
-            region_rank: ranges.len(),
-            image_rank: shape.len(),
+        return Err(FitsError::RankMismatch {
+            ranked: Ranked::ImageRegion,
+            expected: shape.len(),
+            got: ranges.len(),
         });
     }
     let mut selected = Vec::with_capacity(shape.len());

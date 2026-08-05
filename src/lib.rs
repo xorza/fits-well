@@ -70,7 +70,7 @@ pub mod wcs;
 mod words;
 mod writer;
 
-pub use error::{FitsError, Result};
+pub use error::{FitsError, Indexed, Ranked, Result};
 pub use reader::FitsReader;
 pub use writer::FitsWriter;
 

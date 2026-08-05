@@ -16,6 +16,7 @@ use crate::bitpix::Bitpix;
 use crate::data::Image;
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
+use crate::error::Ranked;
 use crate::error::Result;
 use crate::header::Header;
 use crate::header::value;
@@ -470,7 +471,7 @@ impl TileCell {
 
 /// Resolve the tile shape for an image: an empty `tile_shape` defaults to row-tiling
 /// (the first axis whole, the rest 1); a non-empty one is used as given (each axis
-/// clamped to ≥1) and must match the image rank, else [`FitsError::TileShapeRankMismatch`].
+/// clamped to ≥1) and must match the image rank, else [`FitsError::RankMismatch`].
 fn resolve_tile_shape(dims: &[usize], tile_shape: &[usize]) -> Result<Vec<usize>> {
     if tile_shape.is_empty() {
         Ok((0..dims.len())
@@ -479,9 +480,10 @@ fn resolve_tile_shape(dims: &[usize], tile_shape: &[usize]) -> Result<Vec<usize>
     } else if tile_shape.len() == dims.len() {
         Ok(tile_shape.iter().map(|&t| t.max(1)).collect())
     } else {
-        Err(FitsError::TileShapeRankMismatch {
-            tile_rank: tile_shape.len(),
-            image_rank: dims.len(),
+        Err(FitsError::RankMismatch {
+            ranked: Ranked::TileShape,
+            expected: dims.len(),
+            got: tile_shape.len(),
         })
     }
 }

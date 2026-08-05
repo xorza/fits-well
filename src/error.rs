@@ -3,6 +3,35 @@ use std::io;
 
 pub type Result<T> = std::result::Result<T, FitsError>;
 
+/// What an out-of-range index was addressing, naming the bound it exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Indexed {
+    /// An HDU within the file's scanned sequence.
+    Hdu,
+    /// A logical record within a header unit.
+    HeaderRecord,
+    /// A column within a table.
+    Column,
+    /// A group within a random-groups array.
+    Group,
+    /// A **1-based** axis within a WCS description.
+    WcsAxis,
+}
+
+/// Which of two axis counts disagreed — the thing the caller supplied, against the
+/// structure it had to match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Ranked {
+    /// An N-dimensional image region, against its image.
+    ImageRegion,
+    /// A compression tile shape, against the image it tiles.
+    TileShape,
+    /// A pixel or world coordinate, against its WCS.
+    WcsCoordinate,
+}
+
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum FitsError {
@@ -100,21 +129,20 @@ pub enum FitsError {
         field: &'static str,
         value: i64,
     },
-    /// A data-unit read named an HDU index beyond the parsed sequence.
-    HduIndexOutOfBounds {
+    /// An index named something beyond the bound of whatever it addressed —
+    /// [`Indexed`] says which.
+    IndexOutOfBounds {
+        indexed: Indexed,
         index: usize,
         len: usize,
     },
-    /// An ordered header operation named a record position beyond the stored
-    /// logical record list.
-    HeaderIndexOutOfBounds {
-        index: usize,
-        len: usize,
-    },
-    /// An N-dimensional image region has a different rank from the image.
-    ImageRegionRankMismatch {
-        region_rank: usize,
-        image_rank: usize,
+    /// Two axis counts that had to agree did not — [`Ranked`] says which pair.
+    RankMismatch {
+        ranked: Ranked,
+        /// Axis count the structure requires.
+        expected: usize,
+        /// Axis count the caller supplied.
+        got: usize,
     },
     /// One zero-based half-open image-axis range is reversed or exceeds its axis.
     ImageRegionOutOfBounds {
@@ -143,16 +171,6 @@ pub enum FitsError {
     /// An empty VLA column needs an explicit heap element type.
     EmptyVlaNeedsType {
         column: String,
-    },
-    /// A WCS transform received the wrong number of pixel or world coordinates.
-    CoordinateCountMismatch {
-        expected: usize,
-        got: usize,
-    },
-    /// A 1-based FITS axis index named an axis outside the parsed WCS.
-    WcsAxisIndexOutOfBounds {
-        axis: usize,
-        len: usize,
     },
     /// A FITS keyword family was addressed with zero even though its indices start at 1.
     OneBasedIndexRequired {
@@ -239,16 +257,6 @@ pub enum FitsError {
     NonNumericColumn {
         code: char,
     },
-    /// A column index named a field beyond the table's column list.
-    ColumnIndexOutOfBounds {
-        index: usize,
-        len: usize,
-    },
-    /// A group index named an entry beyond a random-groups array's group list.
-    GroupIndexOutOfBounds {
-        index: usize,
-        len: usize,
-    },
     /// No column with the requested `TTYPEn` name exists in the table.
     ColumnNotFound {
         name: String,
@@ -262,12 +270,6 @@ pub enum FitsError {
     /// table's validated structure.
     TableMetadataMismatch {
         name: String,
-    },
-    /// A requested compression tile shape has a different rank (axis count) than the
-    /// image it tiles. Pass an empty shape for the default row-tiling instead.
-    TileShapeRankMismatch {
-        tile_rank: usize,
-        image_rank: usize,
     },
 }
 
@@ -347,22 +349,47 @@ impl fmt::Display for FitsError {
             FitsError::InvalidPqDescriptor { field, value } => {
                 write!(f, "invalid P/Q descriptor {field}: {value}")
             }
-            FitsError::HduIndexOutOfBounds { index, len } => {
-                write!(f, "HDU index {index} out of bounds (file has {len} HDUs)")
-            }
-            FitsError::HeaderIndexOutOfBounds { index, len } => {
-                write!(
+            FitsError::IndexOutOfBounds {
+                indexed,
+                index,
+                len,
+            } => match indexed {
+                Indexed::Hdu => write!(f, "HDU index {index} out of bounds (file has {len} HDUs)"),
+                Indexed::HeaderRecord => write!(
                     f,
                     "header record index {index} out of bounds (header has {len} records)"
-                )
-            }
-            FitsError::ImageRegionRankMismatch {
-                region_rank,
-                image_rank,
-            } => write!(
-                f,
-                "image region has {region_rank} axes but the image has {image_rank}"
-            ),
+                ),
+                Indexed::Column => write!(
+                    f,
+                    "column index {index} out of bounds (table has {len} columns)"
+                ),
+                Indexed::Group => write!(
+                    f,
+                    "group index {index} out of bounds (random-groups array has {len} groups)"
+                ),
+                Indexed::WcsAxis => write!(
+                    f,
+                    "1-based WCS axis {index} out of bounds (WCS has {len} axes)"
+                ),
+            },
+            FitsError::RankMismatch {
+                ranked,
+                expected,
+                got,
+            } => match ranked {
+                Ranked::ImageRegion => write!(
+                    f,
+                    "image region has {got} axes but the image has {expected}"
+                ),
+                Ranked::TileShape => {
+                    write!(f, "tile shape has {got} axes but the image has {expected}")
+                }
+                Ranked::WcsCoordinate => write!(
+                    f,
+                    "coordinate has {got} {} but the WCS has {expected} axes",
+                    if *got == 1 { "value" } else { "values" }
+                ),
+            },
             FitsError::ImageRegionOutOfBounds {
                 axis,
                 start,
@@ -392,19 +419,6 @@ impl fmt::Display for FitsError {
                 f,
                 "empty VLA column {column:?} needs an explicit heap element type"
             ),
-            FitsError::CoordinateCountMismatch { expected, got } => {
-                write!(
-                    f,
-                    "coordinate has {got} {} but the WCS has {expected} axes",
-                    if *got == 1 { "value" } else { "values" }
-                )
-            }
-            FitsError::WcsAxisIndexOutOfBounds { axis, len } => {
-                write!(
-                    f,
-                    "1-based WCS axis {axis} out of bounds (WCS has {len} axes)"
-                )
-            }
             FitsError::OneBasedIndexRequired { kind } => {
                 write!(f, "{kind} indices are 1-based and cannot be zero")
             }
@@ -468,18 +482,6 @@ impl fmt::Display for FitsError {
             FitsError::NonNumericColumn { code } => {
                 write!(f, "column format '{code}' has no numeric physical value")
             }
-            FitsError::ColumnIndexOutOfBounds { index, len } => {
-                write!(
-                    f,
-                    "column index {index} out of bounds (table has {len} columns)"
-                )
-            }
-            FitsError::GroupIndexOutOfBounds { index, len } => {
-                write!(
-                    f,
-                    "group index {index} out of bounds (random-groups array has {len} groups)"
-                )
-            }
             FitsError::ColumnNotFound { name } => {
                 write!(f, "no column named {name:?} in the table")
             }
@@ -490,13 +492,6 @@ impl fmt::Display for FitsError {
             FitsError::TableMetadataMismatch { name } => {
                 write!(f, "header metadata {name} disagrees with the binary table")
             }
-            FitsError::TileShapeRankMismatch {
-                tile_rank,
-                image_rank,
-            } => write!(
-                f,
-                "tile shape has {tile_rank} axes but the image has {image_rank}"
-            ),
         }
     }
 }
@@ -553,11 +548,17 @@ mod tests {
             "missing mandatory keyword NAXIS"
         );
         assert_eq!(
-            FitsError::GroupIndexOutOfBounds { index: 3, len: 2 }.to_string(),
+            FitsError::IndexOutOfBounds {
+                indexed: Indexed::Group,
+                index: 3,
+                len: 2
+            }
+            .to_string(),
             "group index 3 out of bounds (random-groups array has 2 groups)"
         );
         assert_eq!(
-            FitsError::CoordinateCountMismatch {
+            FitsError::RankMismatch {
+                ranked: Ranked::WcsCoordinate,
                 expected: 2,
                 got: 1,
             }
@@ -565,7 +566,12 @@ mod tests {
             "coordinate has 1 value but the WCS has 2 axes"
         );
         assert_eq!(
-            FitsError::WcsAxisIndexOutOfBounds { axis: 3, len: 2 }.to_string(),
+            FitsError::IndexOutOfBounds {
+                indexed: Indexed::WcsAxis,
+                index: 3,
+                len: 2
+            }
+            .to_string(),
             "1-based WCS axis 3 out of bounds (WCS has 2 axes)"
         );
         assert_eq!(

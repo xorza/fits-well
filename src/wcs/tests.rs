@@ -1,3 +1,5 @@
+use crate::error::Indexed;
+use crate::error::Ranked;
 use crate::header::value::Value;
 use crate::reader::FitsReader;
 use crate::wcs::*;
@@ -163,12 +165,20 @@ fn transform_failures_return_errors() {
     ] {
         assert!(matches!(
             result,
-            Err(FitsError::CoordinateCountMismatch { expected: 2, .. })
+            Err(FitsError::RankMismatch {
+                ranked: Ranked::WcsCoordinate,
+                expected: 2,
+                ..
+            })
         ));
     }
     assert!(matches!(
         tan.axis_world(2, &[1.0, 1.0]),
-        Err(FitsError::WcsAxisIndexOutOfBounds { axis: 3, len: 2 })
+        Err(FitsError::IndexOutOfBounds {
+            indexed: Indexed::WcsAxis,
+            index: 3,
+            len: 2
+        })
     ));
 }
 

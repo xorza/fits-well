@@ -185,7 +185,7 @@ impl AsciiTable {
 
     /// A reader handle for the column at `index`. Decode through it —
     /// [`AsciiColumnReader::raw`]/[`physical`](AsciiColumnReader::physical) — without
-    /// re-passing the descriptor. Errors with [`FitsError::ColumnIndexOutOfBounds`].
+    /// re-passing the descriptor. Errors with [`FitsError::IndexOutOfBounds`].
     pub fn column_by_idx(&self, index: usize) -> Result<AsciiColumnReader<'_>> {
         column::validate_index(index, self.columns.len())?;
         Ok(AsciiColumnReader { table: self, index })

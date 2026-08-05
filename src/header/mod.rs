@@ -7,6 +7,7 @@ use crate::bitpix::Bitpix;
 use crate::block::CARD_SIZE;
 use crate::data::Scaling;
 use crate::error::FitsError;
+use crate::error::Indexed;
 use crate::error::Result;
 use crate::header::card::Card;
 use crate::header::card::CardKind;
@@ -376,7 +377,8 @@ impl Header {
 
     fn insert_card(&mut self, index: usize, card: Card) -> Result<&mut Self> {
         if index > self.cards.len() {
-            return Err(FitsError::HeaderIndexOutOfBounds {
+            return Err(FitsError::IndexOutOfBounds {
+                indexed: Indexed::HeaderRecord,
                 index,
                 len: self.cards.len(),
             });
@@ -399,7 +401,8 @@ impl Header {
     /// Remove one logical record by zero-based position.
     pub fn remove_at(&mut self, index: usize) -> Result<HeaderRecord> {
         if index >= self.cards.len() {
-            return Err(FitsError::HeaderIndexOutOfBounds {
+            return Err(FitsError::IndexOutOfBounds {
+                indexed: Indexed::HeaderRecord,
                 index,
                 len: self.cards.len(),
             });
@@ -415,8 +418,8 @@ impl Header {
 
     /// Remove every logical record with `keyword`, returning the count removed.
     ///
-    /// To drop several keywords, prefer one [`Header::remove_where`] over a call
-    /// each: every removal that changes the card list rebuilds the keyword index.
+    /// Each call that removes anything rebuilds the keyword index, so dropping
+    /// several keywords is one pass' worth of work per call.
     pub fn remove_all(&mut self, keyword: &str) -> usize {
         let old_len = self.cards.len();
         self.remove_where(|card| card == keyword);
