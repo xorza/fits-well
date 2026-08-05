@@ -12,6 +12,7 @@
 use std::str::FromStr;
 
 use crate::error::FitsError;
+use crate::error::Indexed;
 use crate::error::Result;
 use crate::header::Header;
 use crate::keyword::AltSuffix;
@@ -604,14 +605,15 @@ impl FitsTime {
         let zero_based = axis
             .checked_sub(1)
             .ok_or(FitsError::OneBasedIndexRequired { kind: "WCS axis" })?;
-        let metadata =
-            wcs.view()
-                .axes
-                .get(zero_based)
-                .ok_or(FitsError::WcsAxisIndexOutOfBounds {
-                    axis,
-                    len: wcs.view().axes.len(),
-                })?;
+        let metadata = wcs
+            .view()
+            .axes
+            .get(zero_based)
+            .ok_or(FitsError::IndexOutOfBounds {
+                indexed: Indexed::WcsAxis,
+                index: axis,
+                len: wcs.view().axes.len(),
+            })?;
         if TimeAxisKind::from_ctype(&metadata.ctype) != Some(TimeAxisKind::Time) {
             return Ok(None);
         }

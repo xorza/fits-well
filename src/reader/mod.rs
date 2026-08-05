@@ -22,6 +22,7 @@ use crate::data::validate_image_region;
 use crate::data::view_words;
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
+use crate::error::Indexed;
 use crate::error::Result;
 use crate::groups::RandomGroups;
 use crate::hdu::HduKind;
@@ -313,10 +314,11 @@ impl<S: Source> FitsReader<S> {
         })
     }
 
-    /// The HDU at `index`, or [`FitsError::HduIndexOutOfBounds`] — the checked form
+    /// The HDU at `index`, or [`FitsError::IndexOutOfBounds`] — the checked form
     /// the `read_*` methods bound-check through.
     fn checked_hdu(&self, index: usize) -> Result<&Hdu> {
-        self.hdus.get(index).ok_or(FitsError::HduIndexOutOfBounds {
+        self.hdus.get(index).ok_or(FitsError::IndexOutOfBounds {
+            indexed: Indexed::Hdu,
             index,
             len: self.hdus.len(),
         })

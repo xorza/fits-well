@@ -1,4 +1,5 @@
 use crate::data::U64_OFFSET;
+use crate::error::Indexed;
 use crate::reader::FitsReader;
 use crate::table_impl::*;
 use bitvec::bitvec;
@@ -719,7 +720,11 @@ fn out_of_bounds_column_is_an_error() {
     let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
     assert!(matches!(
         table.column_by_idx(9),
-        Err(FitsError::ColumnIndexOutOfBounds { index: 9, len: 1 })
+        Err(FitsError::IndexOutOfBounds {
+            indexed: Indexed::Column,
+            index: 9,
+            len: 1
+        })
     ));
 }
 

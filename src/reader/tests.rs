@@ -3,6 +3,8 @@ use crate::data::Image;
 use crate::data::ImageData;
 use crate::data::Scaling;
 use crate::error::FitsError;
+use crate::error::Indexed;
+use crate::error::Ranked;
 use crate::header::Header;
 use crate::reader::*;
 use crate::table_impl::descriptor;
@@ -656,7 +658,11 @@ fn read_data_raw_rejects_out_of_bounds_index() {
     let mut f = open("UITfuv2582gc.fits"); // a single-HDU file
     assert!(matches!(
         f.read_data_raw(5),
-        Err(FitsError::HduIndexOutOfBounds { index: 5, len: 1 })
+        Err(FitsError::IndexOutOfBounds {
+            indexed: Indexed::Hdu,
+            index: 5,
+            len: 1
+        })
     ));
 }
 
@@ -1048,9 +1054,10 @@ fn image_sections_preserve_scaling_and_validate_empty_and_invalid_regions() {
     let wrong_rank = 0..1;
     assert!(matches!(
         reader.read_image_section(0, std::slice::from_ref(&wrong_rank)),
-        Err(FitsError::ImageRegionRankMismatch {
-            region_rank: 1,
-            image_rank: 2,
+        Err(FitsError::RankMismatch {
+            ranked: Ranked::ImageRegion,
+            expected: 2,
+            got: 1,
         })
     ));
     assert!(matches!(

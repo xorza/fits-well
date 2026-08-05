@@ -39,6 +39,8 @@ use std::f64::consts::FRAC_PI_2;
 use std::f64::consts::PI;
 
 use crate::error::FitsError;
+use crate::error::Indexed;
+use crate::error::Ranked;
 use crate::error::Result;
 use crate::header::Header;
 use crate::keyword::AltSuffix;
@@ -898,13 +900,15 @@ impl Wcs {
     pub(crate) fn axis_world(&self, axis: usize, pixel: &[f64]) -> Result<AxisWorld<'_>> {
         let naxis = self.axes.len();
         if axis >= naxis {
-            return Err(FitsError::WcsAxisIndexOutOfBounds {
-                axis: axis.saturating_add(1),
+            return Err(FitsError::IndexOutOfBounds {
+                indexed: Indexed::WcsAxis,
+                index: axis.saturating_add(1),
                 len: naxis,
             });
         }
         if pixel.len() != naxis {
-            return Err(FitsError::CoordinateCountMismatch {
+            return Err(FitsError::RankMismatch {
+                ranked: Ranked::WcsCoordinate,
                 expected: naxis,
                 got: pixel.len(),
             });
@@ -1034,7 +1038,8 @@ impl Wcs {
     pub fn pixel_to_world(&self, pixel: &[f64]) -> Result<Vec<f64>> {
         let naxis = self.axes.len();
         if pixel.len() != naxis {
-            return Err(FitsError::CoordinateCountMismatch {
+            return Err(FitsError::RankMismatch {
+                ranked: Ranked::WcsCoordinate,
                 expected: naxis,
                 got: pixel.len(),
             });
@@ -1071,7 +1076,8 @@ impl Wcs {
     pub fn world_to_pixel(&self, world: &[f64]) -> Result<Vec<f64>> {
         let naxis = self.axes.len();
         if world.len() != naxis {
-            return Err(FitsError::CoordinateCountMismatch {
+            return Err(FitsError::RankMismatch {
+                ranked: Ranked::WcsCoordinate,
                 expected: naxis,
                 got: world.len(),
             });

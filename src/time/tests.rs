@@ -1,3 +1,4 @@
+use crate::error::Indexed;
 use crate::time::*;
 
 /// Golden values throughout are from `astropy.time` (ERFA).
@@ -423,7 +424,11 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
     ));
     assert!(matches!(
         t.time_axis_mjd(&unsupported, 2, &[1.0]),
-        Err(FitsError::WcsAxisIndexOutOfBounds { axis: 2, len: 1 })
+        Err(FitsError::IndexOutOfBounds {
+            indexed: Indexed::WcsAxis,
+            index: 2,
+            len: 1
+        })
     ));
 }
 

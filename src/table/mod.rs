@@ -503,7 +503,7 @@ impl BinTable {
     /// A reader handle for the column at `index`. Decode through it — [`ColumnReader`]
     /// exposes `raw`/`physical`/`unsigned`/`complex`/`bits` and the `vla*` variants —
     /// without re-passing the column descriptor. Errors with
-    /// [`FitsError::ColumnIndexOutOfBounds`] for a bad index.
+    /// [`FitsError::IndexOutOfBounds`] for a bad index.
     pub fn column_by_idx(&self, index: usize) -> Result<ColumnReader<'_>> {
         column::validate_index(index, self.schema.columns.len())?;
         Ok(ColumnReader { table: self, index })

@@ -7,6 +7,7 @@
 //! schema parsed without ever reading a table.
 
 use crate::error::FitsError;
+use crate::error::Indexed;
 use crate::error::Result;
 
 /// A table column that may carry a `TTYPEn` name.
@@ -35,7 +36,11 @@ pub(crate) fn checked_index_of<C: Named>(columns: &[C], name: &str) -> Result<us
 /// Bounds-check a zero-based column index against a table's column count.
 pub(crate) fn validate_index(index: usize, len: usize) -> Result<()> {
     if index >= len {
-        return Err(FitsError::ColumnIndexOutOfBounds { index, len });
+        return Err(FitsError::IndexOutOfBounds {
+            indexed: Indexed::Column,
+            index,
+            len,
+        });
     }
     Ok(())
 }

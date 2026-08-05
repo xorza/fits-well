@@ -5,6 +5,7 @@ use crate::compress::geometry::{TileGeometry, TileScratch};
 use crate::compress::*;
 use crate::data::ImageData;
 use crate::endian::write_pq_descriptor;
+use crate::error::Ranked;
 use crate::keyword::key;
 use crate::reader::{FitsReader, StreamReader};
 use crate::table_impl::{BinTable, ColumnData, TformKind};
@@ -579,9 +580,10 @@ fn tile_shape_with_wrong_rank_is_rejected() {
     assert!(
         matches!(
             err,
-            Err(FitsError::TileShapeRankMismatch {
-                tile_rank: 3,
-                image_rank: 2,
+            Err(FitsError::RankMismatch {
+                ranked: Ranked::TileShape,
+                expected: 2,
+                got: 3,
             })
         ),
         "got {err:?}"

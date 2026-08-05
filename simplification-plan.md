@@ -11,9 +11,9 @@ table paths, `endian`'s big-endian primitives, `words`'s single reinterpretation
 `column`'s single name-matching rule, `TileGeometry`, the `PROJECTIONS`
 membership table). What follows is what is left.
 
-**This pass is essentially complete.** What is left is one optional error-type
-consolidation and one micro; everything else either landed or was examined and
-deliberately left alone.
+**This pass is complete.** One micro is left, and it is explicitly not worth
+doing on its own; everything else either landed or was examined and deliberately
+left alone.
 
 The "deliberate designs left alone" section below is now the larger half of this
 document, and the more useful one. Several items in the original review turned out
@@ -30,46 +30,6 @@ adding anything new here.
 four integer sign masks, four `flip_*` and four `store_*` const fns. A three-line
 macro cuts ~35 lines. Low value: the current spelling is at least explicit. Only
 worth doing if you are in that file anyway.
-
----
-
-## Remaining — `FitsError`: fold the two structurally identical families
-
-Last, and optional. `error.rs` is 671 lines with 58 variants and a 230-line
-`Display`. Most of that is *precision*, not duplication, and should stay: six
-distinct "wrong HDU kind" variants and five distinct "wrong column accessor"
-variants each carry a specific message, a caller handles exactly the one its call
-site can produce, and `Display`'s exhaustive match already stops the arms drifting
-out of sync with the variants.
-
-Two families are genuine duplication — the same variant written five and three
-times over with a different noun:
-
-### 1. Five index-out-of-bounds variants → one
-
-`HduIndexOutOfBounds`, `HeaderIndexOutOfBounds`, `ColumnIndexOutOfBounds`,
-`GroupIndexOutOfBounds`, `WcsAxisIndexOutOfBounds` all carry `(index, len)` and
-identical semantics, differing only in two nouns per message. Fold to
-`IndexOutOfBounds { indexed: Indexed, index: usize, len: usize }` with a
-five-variant `Indexed`. That collapses 5 variants and ~25 `Display` lines into 1
-and 5, keeps typed pattern-matching, and gives callers one place to handle "some
-index was out of range". `WcsAxisIndexOutOfBounds` is 1-based — carry that in the
-`Indexed` variant's message, as it already does today.
-
-### 2. Three rank/count-mismatch variants → one
-
-`ImageRegionRankMismatch`, `TileShapeRankMismatch`, `CoordinateCountMismatch` are
-all `(expected, got)` with a noun → `RankMismatch { kind, expected, got }`, same
-shape as 7.1.
-
-**Use a typed nested enum, not a `&'static str` discriminant.** A string would
-make callers and tests match on display wording
-(`matches!(e, IndexOutOfBounds { indexed: "column", .. })`) — fragile, and out of
-step with a crate that models `HduKind`, `SampleType`, and `ChecksumStatus` as
-typed enums. The typed version is close to line-neutral; the win is the smaller
-top-level enum and the explicit grouping, not the line count.
-
-Blast radius measured: 31 sites for the first, 16 for the second.
 
 ---
 
@@ -198,7 +158,11 @@ Recorded so a later pass doesn't re-litigate them:
 
 ## Note on this file
 
-`Cargo.toml`'s `exclude` list keeps `docs/`, `tests/`, `AGENTS.md`, `CLAUDE.md`,
-and `todo.txt` out of the published tarball, but not this file. Either add
-`simplification-plan.md` to `exclude` or delete it once the work lands (as the
-previous plan was).
+The work this file planned is done. What is worth keeping is the "deliberate
+designs left alone" record — consider moving it into `AGENTS.md`/`CLAUDE.md` (both
+already excluded from the published tarball) and deleting this file, as the
+previous plan was.
+
+Until then, note that `Cargo.toml`'s `exclude` list keeps `docs/`, `tests/`,
+`AGENTS.md`, `CLAUDE.md`, and `todo.txt` out of the published tarball, but not
+this file.

@@ -11,6 +11,7 @@ use crate::data::ImageView;
 use crate::data::Scaling;
 use crate::data::physical_view;
 use crate::error::FitsError;
+use crate::error::Indexed;
 use crate::error::Result;
 use crate::header::Header;
 use crate::keyword::key;
@@ -193,7 +194,8 @@ impl RandomGroups {
 
     fn checked_group_base(&self, index: usize) -> Result<usize> {
         if index >= self.gcount {
-            return Err(FitsError::GroupIndexOutOfBounds {
+            return Err(FitsError::IndexOutOfBounds {
+                indexed: Indexed::Group,
                 index,
                 len: self.gcount,
             });

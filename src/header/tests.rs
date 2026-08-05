@@ -1,5 +1,6 @@
 use crate::writer::render_header;
 
+use crate::error::Indexed;
 use crate::header::*;
 
 fn header_bytes(lines: &[&str]) -> Vec<u8> {
@@ -296,7 +297,11 @@ fn ordered_header_edits_preserve_duplicates_and_rebuild_lookup() {
     assert_eq!(header.get("OBJECT"), None);
     assert!(matches!(
         header.remove_at(99),
-        Err(FitsError::HeaderIndexOutOfBounds { index: 99, len: 3 })
+        Err(FitsError::IndexOutOfBounds {
+            indexed: Indexed::HeaderRecord,
+            index: 99,
+            len: 3
+        })
     ));
 }
 

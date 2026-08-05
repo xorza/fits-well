@@ -1,4 +1,5 @@
 use crate::data::ImageView;
+use crate::error::Indexed;
 use crate::groups::*;
 use crate::reader::FitsReader;
 use std::fs::File;
@@ -52,7 +53,8 @@ fn reads_the_real_uv_random_groups() {
     ] {
         assert!(matches!(
             result,
-            Err(FitsError::GroupIndexOutOfBounds {
+            Err(FitsError::IndexOutOfBounds {
+                indexed: Indexed::Group,
                 index: 7956,
                 len: 7956
             })
@@ -242,7 +244,11 @@ fn raw_group_view_preserves_i64_extremes_and_group_boundaries() {
     assert_eq!(second.array, ImageView::I64(&[9, 10]));
     assert!(matches!(
         groups.group_by_idx(2),
-        Err(FitsError::GroupIndexOutOfBounds { index: 2, len: 2 })
+        Err(FitsError::IndexOutOfBounds {
+            indexed: Indexed::Group,
+            index: 2,
+            len: 2
+        })
     ));
 }
 
