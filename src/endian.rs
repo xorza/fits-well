@@ -185,4 +185,21 @@ mod tests {
         decode_be_into(&[], &mut reused, widen);
         assert_eq!(reused, Vec::<i64>::new());
     }
+
+    #[test]
+    fn pq_descriptor_writes_promote_to_q_past_the_32_bit_range() {
+        // §10.1.3: a heap offset beyond the 32-bit `P` range needs a 64-bit `Q`.
+        let mut q = vec![0; 16];
+        write_pq_descriptor(&mut q, true, 3, u32::MAX as u64 + 8).unwrap();
+        assert_eq!(q.len(), 16);
+        assert_eq!(i64::from_be_bytes(q[0..8].try_into().unwrap()), 3);
+        assert_eq!(
+            i64::from_be_bytes(q[8..16].try_into().unwrap()),
+            u32::MAX as i64 + 8
+        );
+        let mut p = vec![0; 8];
+        write_pq_descriptor(&mut p, false, 3, 40).unwrap();
+        assert_eq!(p.len(), 8);
+        assert_eq!(i32::from_be_bytes(p[4..8].try_into().unwrap()), 40);
+    }
 }

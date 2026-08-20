@@ -613,5 +613,47 @@ fn norm180(a: f64) -> f64 {
     (a + 180.0).rem_euclid(360.0) - 180.0
 }
 
+/// Golden pixel/world sets from `astropy.wcs` for the shared fixtures, and the
+/// two-direction assertion over them — used by the test modules of the layers a
+/// transform is assembled from, not just by [`Wcs`]'s own.
+#[cfg(test)]
+pub(crate) mod internals {
+    use crate::wcs::Wcs;
+
+    /// Golden pixel→world values from `astropy.wcs` (wcslib) for `wcs_tan.fits`
+    /// (`RA---TAN`/`DEC--TAN`, CRVAL 150/2.5, CRPIX 256/256, 1″ pixels, 15° rotation).
+    /// Columns: pixel x, pixel y, RA (deg), Dec (deg).
+    pub(crate) const TAN_GOLDEN: &[(f64, f64, f64, f64)] = &[
+        (1.0, 1.0, 150.050131124369, 2.413246375001),
+        (256.0, 256.0, 150.000000000000, 2.500000000000),
+        (512.0, 512.0, 149.949665615474, 2.587091911566),
+        (100.0, 400.0, 150.052260368590, 2.527420491210),
+        (256.5, 256.5, 149.999901697142, 2.500170103464),
+        (400.0, 123.0, 149.951756061540, 2.474666292235),
+    ];
+
+    pub(crate) const CEA_GOLDEN: &[(f64, f64, f64, f64)] = &[
+        (20.0, 70.0, 46.7406870828, 30.4886140110),
+        (80.0, 30.0, 43.2767613377, 29.4887155113),
+    ];
+
+    pub(crate) const CROTA_GOLDEN: &[(f64, f64, f64, f64)] = &[
+        (128.0, 128.0, 83.6000000000, 22.0000000000),
+        (1.0, 1.0, 83.6909943156, 21.9692606492),
+        (256.0, 200.0, 83.5210288338, 22.0055606050),
+        (64.0, 192.0, 83.6166986376, 22.0425247793),
+    ];
+
+    pub(crate) fn assert_astropy_golden(wcs: &Wcs, golden: &[(f64, f64, f64, f64)], context: &str) {
+        for &(px, py, ra, dec) in golden {
+            let world = wcs.pixel_to_world(&[px, py]).unwrap();
+            assert!(
+                (world[0] - ra).abs() < 1e-9 && (world[1] - dec).abs() < 1e-9,
+                "{context} at ({px},{py}): got {world:?}, want ({ra},{dec})"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

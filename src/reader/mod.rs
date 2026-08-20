@@ -1262,4 +1262,19 @@ fn block_has_end(block: &[u8]) -> bool {
 }
 
 #[cfg(test)]
+pub(crate) mod internals {
+    use crate::reader::FitsReader;
+    use crate::reader::StreamReader;
+    use std::fs::File;
+
+    /// Open a fixture from `tests/data/fits` as a streaming reader, reporting which
+    /// file failed rather than a bare unwrap — every read-path test starts here.
+    pub(crate) fn open_fixture(name: &str) -> StreamReader<File> {
+        let path = format!("tests/data/fits/{name}");
+        FitsReader::open(File::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}")))
+            .unwrap_or_else(|e| panic!("parse {name}: {e}"))
+    }
+}
+
+#[cfg(test)]
 mod tests;

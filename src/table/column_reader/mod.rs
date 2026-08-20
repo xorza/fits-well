@@ -247,3 +247,6 @@ impl<'a> ColumnReader<'a> {
         Ok(rows)
     }
 }
+
+#[cfg(test)]
+mod tests;

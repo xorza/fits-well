@@ -121,3 +121,6 @@ impl TableSchema {
         column::validate_index(index, self.columns.len())
     }
 }
+
+#[cfg(test)]
+mod tests;

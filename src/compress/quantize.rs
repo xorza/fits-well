@@ -316,3 +316,96 @@ pub(super) fn quantize_tile(
         has_null,
     })
 }
+
+#[cfg(test)]
+mod tests {
+
+    use crate::compress::quantize::*;
+    use crate::compress::rice;
+
+    #[test]
+    fn dither2_quantize_round_trips() {
+        // 8×8 field with genuine noise and a scattering of exact zeros.
+        let mut data: Vec<f64> = (0..64)
+            .map(|i| {
+                let mut z = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                z ^= z >> 31;
+                10.0 + (z % 1000) as f64 / 100.0
+            })
+            .collect();
+        for &k in &[0usize, 13, 27, 40, 63] {
+            data[k] = 0.0;
+        }
+        let irow = 7;
+        let mut scratch = QuantizeScratch::default();
+        let q = quantize_tile(
+            &data,
+            8,
+            8,
+            0.0,
+            DitherMethod::Subtractive2,
+            irow,
+            &mut scratch,
+        )
+        .unwrap();
+        // Exact zeros must encode to the reserved ZERO_VALUE.
+        for &k in &[0usize, 13, 27, 40, 63] {
+            assert_eq!(scratch.ints[k], ZERO_VALUE, "zero pixel {k}");
+        }
+        let ints: Vec<i64> = scratch.ints.iter().map(|&v| v as i64).collect();
+        let mut back = Vec::new();
+        dequantize_into(
+            &ints,
+            q.bscale,
+            q.bzero,
+            DitherMethod::Subtractive2,
+            irow,
+            None,
+            &mut back,
+        );
+        for (i, (&o, &b)) in data.iter().zip(&back).enumerate() {
+            if o == 0.0 {
+                assert_eq!(b, 0.0, "zero pixel {i} must decode to exactly 0.0");
+            } else {
+                assert!(
+                    (o - b).abs() <= 0.5 * q.bscale + 1e-9,
+                    "pixel {i}: {o} vs {b}"
+                );
+            }
+        }
+
+        // Nulls are skipped while retaining the finite-value order. The two third-order
+        // differences are |2·4 − 1 − 16| = 9 and |2·8 − 2 − 32| = 18; the lower row
+        // median is therefore 9, giving the exact qlevel=1 scale below.
+        let with_nulls = [
+            1.0,
+            f64::NAN,
+            2.0,
+            f64::INFINITY,
+            4.0,
+            8.0,
+            f64::NEG_INFINITY,
+            16.0,
+            32.0,
+        ];
+        let q = quantize_tile(
+            &with_nulls,
+            with_nulls.len(),
+            1,
+            1.0,
+            DitherMethod::None,
+            1,
+            &mut scratch,
+        )
+        .unwrap();
+        assert_eq!(q.bscale, 0.6052697 * 9.0);
+
+        // Native i32 Rice input must produce the identical bitstream as the former
+        // widened representation.
+        let widened: Vec<i64> = scratch.ints.iter().map(|&value| value as i64).collect();
+        let mut rice_scratch = rice::RiceScratch::default();
+        let native = rice::rice_encode(&scratch.ints, 4, 32, &mut rice_scratch);
+        let widened = rice::rice_encode(&widened, 4, 32, &mut rice_scratch);
+        assert_eq!(native, widened);
+    }
+}

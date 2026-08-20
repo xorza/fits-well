@@ -1000,3 +1000,6 @@ fn scatter_column(out: &mut [u8], bytes: &[u8], rows: usize, row_len: usize, m: 
         out[offset..offset + m.width].copy_from_slice(&bytes[row * m.width..(row + 1) * m.width]);
     }
 }
+
+#[cfg(test)]
+mod tests;

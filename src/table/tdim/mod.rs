@@ -74,3 +74,6 @@ pub(crate) fn validate_declared_vla(shape: Option<&[usize]>, element_count: usiz
     validate_shape(shape)?;
     validate_vla_extent(shape, element_count)
 }
+
+#[cfg(test)]
+mod tests;

@@ -82,3 +82,22 @@ impl Tform {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) mod internals {
+    use crate::table_impl::tform::Tform;
+    use crate::table_impl::tform_kind::TformKind;
+
+    /// A `TFORMn` value spelled out field by field, for tests asserting what a
+    /// parsed or schema-derived format resolved to.
+    pub(crate) fn tform(repeat: usize, kind: TformKind, vla_elem: Option<TformKind>) -> Tform {
+        Tform {
+            repeat,
+            kind,
+            vla_elem,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

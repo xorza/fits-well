@@ -519,3 +519,6 @@ fn validate_image(image: &Image) -> Result<usize> {
     }
     image.validate_geometry()
 }
+
+#[cfg(test)]
+mod tests;

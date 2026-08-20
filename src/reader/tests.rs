@@ -6,6 +6,7 @@ use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Ranked;
 use crate::header::Header;
+use crate::reader::internals::open_fixture;
 use crate::reader::*;
 use crate::table_impl::character_field::CharacterField;
 use crate::table_impl::column_data::ColumnData;
@@ -14,7 +15,6 @@ use crate::writer::FitsWriter;
 use crate::writer::table::{TableBuilder, WriteColumn};
 use num_complex::Complex;
 use std::cell::{Cell, RefCell};
-use std::fs::File;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::rc::Rc;
@@ -42,12 +42,6 @@ impl Seek for CountingCursor {
     fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
         self.inner.seek(position)
     }
-}
-
-fn open(name: &str) -> StreamReader<File> {
-    let path = format!("tests/data/fits/{name}");
-    FitsReader::open(File::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}")))
-        .unwrap_or_else(|e| panic!("parse {name}: {e}"))
 }
 
 fn write_tab_lookup(
@@ -268,7 +262,7 @@ fn read_wcs_fetches_only_the_referenced_first_row_heap_cells() {
 
 #[test]
 fn reads_a_single_hdu_image_with_exact_boundaries() {
-    let f = open("UITfuv2582gc.fits");
+    let f = open_fixture("UITfuv2582gc.fits");
     assert_eq!(f.hdus.len(), 1);
     let p = &f.hdus[0];
     assert_eq!(p.kind, HduKind::Primary);
@@ -285,7 +279,7 @@ fn reads_a_single_hdu_image_with_exact_boundaries() {
 
 #[test]
 fn read_data_raw_is_stable_across_reads() {
-    let mut f = open("UITfuv2582gc.fits");
+    let mut f = open_fixture("UITfuv2582gc.fits");
     let a = f.read_data_raw(0).unwrap();
     let b = f.read_data_raw(0).unwrap();
     assert_eq!(
@@ -304,7 +298,7 @@ fn read_data_raw_is_stable_across_reads() {
 #[test]
 fn mmap_read_matches_seeking_read() {
     let path = "tests/data/fits/UITfuv2582gc.fits";
-    let mut seek = open("UITfuv2582gc.fits");
+    let mut seek = open_fixture("UITfuv2582gc.fits");
     let want = seek.read_image(0).unwrap();
     let want_shape = want.shape.clone();
     let want_samples = want.decode(); // own, releasing the borrow on `seek`
@@ -322,7 +316,7 @@ fn mmap_read_matches_seeking_read() {
 
 #[test]
 fn read_image_reuses_internal_scratch_across_reads() {
-    let mut f = open("UITfuv2582gc.fits");
+    let mut f = open_fixture("UITfuv2582gc.fits");
     let raw1 = f.read_image(0).unwrap();
     let shape1 = raw1.shape.clone();
     let data1 = raw1.decode(); // own the samples, releasing the borrow on `f`
@@ -349,7 +343,7 @@ fn read_image_reuses_internal_scratch_across_reads() {
 
 #[test]
 fn reads_random_groups_primary_plus_bintable_extension() {
-    let f = open("DDTSUVDATA.fits");
+    let f = open_fixture("DDTSUVDATA.fits");
     assert_eq!(f.hdus.len(), 2);
 
     let g = &f.hdus[0];
@@ -378,7 +372,7 @@ fn reads_random_groups_primary_plus_bintable_extension() {
 
 #[test]
 fn reads_dataless_primary_then_bintable() {
-    let f = open("IUElwp25637mxlo.fits");
+    let f = open_fixture("IUElwp25637mxlo.fits");
     assert_eq!(f.hdus.len(), 2);
 
     let p = &f.hdus[0];
@@ -619,7 +613,7 @@ fn last_data_unit_ends_exactly_at_end_of_file() {
         "DDTSUVDATA.fits",
         "IUElwp25637mxlo.fits",
     ] {
-        let f = open(name);
+        let f = open_fixture(name);
         let last = f.hdus.last().unwrap();
         let file_len = std::fs::metadata(format!("tests/data/fits/{name}"))
             .unwrap()
@@ -634,7 +628,7 @@ fn last_data_unit_ends_exactly_at_end_of_file() {
 
 #[test]
 fn read_data_raw_returns_padded_bytes_and_the_data_range() {
-    let mut f = open("UITfuv2582gc.fits");
+    let mut f = open_fixture("UITfuv2582gc.fits");
     let unit = f.read_data_raw(0).unwrap();
     // 512×512 i16: 524_288 bytes of data, padded up to 527_040 on disk.
     let view = unit.view();
@@ -656,7 +650,7 @@ fn read_data_raw_returns_padded_bytes_and_the_data_range() {
 
 #[test]
 fn read_data_raw_rejects_out_of_bounds_index() {
-    let mut f = open("UITfuv2582gc.fits"); // a single-HDU file
+    let mut f = open_fixture("UITfuv2582gc.fits"); // a single-HDU file
     assert!(matches!(
         f.read_data_raw(5),
         Err(FitsError::IndexOutOfBounds {
@@ -669,7 +663,7 @@ fn read_data_raw_rejects_out_of_bounds_index() {
 
 #[test]
 fn read_image_decodes_the_primary_array_shape_and_type() {
-    let mut f = open("UITfuv2582gc.fits");
+    let mut f = open_fixture("UITfuv2582gc.fits");
     let raw = f.read_image(0).unwrap();
     assert_eq!(raw.shape, vec![512, 512]);
     assert_eq!(raw.bitpix(), Bitpix::I16);
@@ -679,7 +673,7 @@ fn read_image_decodes_the_primary_array_shape_and_type() {
 
 #[test]
 fn read_image_raw_samples_match_a_manual_big_endian_decode() {
-    let mut f = open("UITfuv2582gc.fits");
+    let mut f = open_fixture("UITfuv2582gc.fits");
     // Independently decode the first few pixels straight from the data bytes.
     let unit = f.read_data_raw(0).unwrap();
     let manual: Vec<i16> = unit.data()[..8]
@@ -696,14 +690,14 @@ fn read_image_raw_samples_match_a_manual_big_endian_decode() {
 #[test]
 fn read_image_rejects_non_image_hdus() {
     // hdu[0] is random groups, hdu[1] is a binary table — neither is an image.
-    let mut f = open("DDTSUVDATA.fits");
+    let mut f = open_fixture("DDTSUVDATA.fits");
     assert!(matches!(f.read_image(0), Err(FitsError::NotAnImage)));
     assert!(matches!(f.read_image(1), Err(FitsError::NotAnImage)));
 }
 
 #[test]
 fn hdu_index_finds_extensions_by_extname() {
-    let f = open("DDTSUVDATA.fits");
+    let f = open_fixture("DDTSUVDATA.fits");
     // hdu 1 is the AIPS antenna table, EXTNAME = 'AIPS AN' (trailing spaces trimmed).
     assert_eq!(f.hdu_index("AIPS AN", None).unwrap(), Some(1));
     assert_eq!(f.hdu_index("aips an", None).unwrap(), Some(1)); // case-insensitive
@@ -711,7 +705,7 @@ fn hdu_index_finds_extensions_by_extname() {
     assert_eq!(f.hdu_index("MISSING", None).unwrap(), None);
     // A tiled-compressed image extension is found by its EXTNAME too.
     assert_eq!(
-        open("comp_gzip_i16.fits")
+        open_fixture("comp_gzip_i16.fits")
             .hdu_index("COMPRESSED_IMAGE", None)
             .unwrap(),
         Some(1)
@@ -737,12 +731,12 @@ fn hdu_index_finds_extensions_by_extname() {
 #[test]
 fn image_indices_lists_readable_images_including_compressed() {
     // A single primary array image.
-    assert_eq!(open("UITfuv2582gc.fits").image_indices(), vec![0]);
+    assert_eq!(open_fixture("UITfuv2582gc.fits").image_indices(), vec![0]);
     // Empty primary + a tiled-compressed image extension (classified by ZIMAGE),
     // so only HDU 1 is an image — the `NAXIS = 0` primary is skipped.
-    assert_eq!(open("comp_gzip_i16.fits").image_indices(), vec![1]);
+    assert_eq!(open_fixture("comp_gzip_i16.fits").image_indices(), vec![1]);
     // Random-groups primary + plain bintable: no images at all.
-    assert!(open("DDTSUVDATA.fits").image_indices().is_empty());
+    assert!(open_fixture("DDTSUVDATA.fits").image_indices().is_empty());
 }
 
 fn write_to_vec(image: &Image) -> Vec<u8> {
@@ -806,7 +800,7 @@ fn read_image_exposes_big_endian_bytes_for_multibyte_types() {
 
 #[test]
 fn read_image_view_matches_decode_for_a_plain_image() {
-    let mut f = open("UITfuv2582gc.fits");
+    let mut f = open_fixture("UITfuv2582gc.fits");
     // The owned decode is the reference; the borrowed view (into a caller scratch)
     // must equal it.
     let expected_scaling = f.hdus()[0].header.scaling().unwrap();
@@ -854,7 +848,7 @@ fn read_image_view_borrows_u8_samples_with_zero_copy() {
 #[test]
 #[cfg(feature = "compression")]
 fn read_image_view_matches_decode_for_a_compressed_image() {
-    let mut f = open("comp_gzip_i16.fits");
+    let mut f = open_fixture("comp_gzip_i16.fits");
     let owned = f.read_image(1).unwrap().decode();
     let mut scratch = Vec::with_capacity(owned.len().div_ceil(4));
     let scratch_ptr = scratch.as_ptr() as *const i16;

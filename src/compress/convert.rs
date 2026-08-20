@@ -192,3 +192,47 @@ pub(super) fn zeroed_samples(bitpix: Bitpix, len: usize) -> Result<ImageData> {
         Bitpix::F64 => ImageData::F64(allocation::try_zeroed(0.0f64, len)?),
     })
 }
+
+#[cfg(test)]
+mod tests {
+
+    use crate::compress::convert::*;
+
+    #[test]
+    fn i64_be_round_trip_and_buffer_reuse() {
+        // I16: narrowing (`as i16`) then big-endian packing, hand-computed. -1 → 0xFFFF,
+        // 258 → 0x0102, -2 → 0xFFFE.
+        let vals = [0i64, 1, -1, 258, -2];
+        let want = [0, 0, 0, 1, 0xFF, 0xFF, 0x01, 0x02, 0xFF, 0xFE];
+        assert_eq!(i64_to_be(&vals, Bitpix::I16), want);
+        // Decode is the exact inverse (sign-extending back to i64), into a reused buffer.
+        let mut d = Vec::new();
+        be_to_i64_into(&want, Bitpix::I16, &mut d);
+        assert_eq!(d, vals);
+
+        // I32 packs four bytes/elem; 0x00010203 = 66051, -1 → all-ones.
+        let i32_vals = [66051i64, -1];
+        assert_eq!(
+            i64_to_be(&i32_vals, Bitpix::I32),
+            [0x00, 0x01, 0x02, 0x03, 0xFF, 0xFF, 0xFF, 0xFF]
+        );
+        let mut native_i32 = Vec::new();
+        i32_to_be_into(&[66051, -1], &mut native_i32);
+        assert_eq!(native_i32, [0x00, 0x01, 0x02, 0x03, 0xFF, 0xFF, 0xFF, 0xFF]);
+        be_to_i64_into(&[0, 1, 2, 3, 0xFF, 0xFF, 0xFF, 0xFF], Bitpix::I32, &mut d);
+        assert_eq!(d, i32_vals);
+
+        // U8 and I64 ends of the range.
+        assert_eq!(i64_to_be(&[255, 0], Bitpix::U8), [0xFF, 0x00]);
+        be_to_i64_into(&[0xFF, 0x00], Bitpix::U8, &mut d);
+        assert_eq!(d, [255, 0]);
+        assert_eq!(i64_to_be(&[-1], Bitpix::I64), [0xFF; 8]);
+
+        // `i64_to_be_into` clears + resizes its scratch: a long fill followed by a short
+        // one must leave exactly the short result (no stale tail), matching the owning form.
+        let mut buf = Vec::new();
+        i64_to_be_into(&[7, 8, 9, 10], Bitpix::I16, &mut buf);
+        i64_to_be_into(&vals, Bitpix::I16, &mut buf);
+        assert_eq!(buf, want);
+    }
+}

@@ -55,3 +55,40 @@ impl From<Vec<u8>> for CharacterField {
         CharacterField::new(value)
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use crate::table_impl::BinTable;
+    use crate::table_impl::character_field::CharacterField;
+    use crate::table_impl::column_data::ColumnData;
+    use crate::table_impl::internals::table_header;
+
+    #[test]
+    fn character_columns_preserve_members_terminators_and_null_strings() {
+        let header = table_header(4, 4, &["4A"]);
+        let fields = [b"AB  ", b"AB\0x", b"\0xyz", b"    "];
+        let data = fields
+            .iter()
+            .flat_map(|field| field.iter().copied())
+            .collect();
+        let table = BinTable::from_data(&header, data).unwrap();
+        let ColumnData::Character(values) = table.column_by_idx(0).unwrap().raw().unwrap() else {
+            panic!("expected exact binary character fields");
+        };
+        assert_eq!(
+            values,
+            fields
+                .iter()
+                .map(|field| CharacterField::new(field.to_vec()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(values[0].members(), b"AB  ");
+        assert_eq!(values[1].members(), b"AB");
+        assert!(!values[1].is_null());
+        assert_eq!(values[2].members(), b"");
+        assert!(values[2].is_null());
+        assert_eq!(values[3].members(), b"    ");
+        assert!(!values[3].is_null());
+    }
+}

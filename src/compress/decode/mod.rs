@@ -197,3 +197,6 @@ fn ensure_tile_size(expected: usize, got: usize) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
