@@ -1258,7 +1258,11 @@ fn scan_header_unit<S: Source>(
 }
 
 fn block_has_end(block: &[u8]) -> bool {
-    block.chunks_exact(CARD_SIZE).any(is_end_record)
+    block
+        .as_chunks::<CARD_SIZE>()
+        .0
+        .iter()
+        .any(|card| is_end_record(card))
 }
 
 #[cfg(test)]

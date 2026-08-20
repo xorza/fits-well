@@ -36,10 +36,7 @@ where
     let mut out = Vec::with_capacity(capacity);
     for cell in cells {
         debug_assert_eq!(cell.len() % N, 0, "whole big-endian elements");
-        out.extend(
-            cell.chunks_exact(N)
-                .map(|c| conv(c.try_into().expect("chunks_exact yields N-byte arrays"))),
-        );
+        out.extend(cell.as_chunks::<N>().0.iter().map(|c| conv(*c)));
     }
     out
 }
@@ -59,11 +56,7 @@ where
     out.clear();
     // The final length is exactly one element per chunk, so ask for that and no more.
     out.reserve_exact(bytes.len() / N);
-    out.extend(
-        bytes
-            .chunks_exact(N)
-            .map(|c| conv(c.try_into().expect("chunks_exact yields N-byte arrays"))),
-    );
+    out.extend(bytes.as_chunks::<N>().0.iter().map(|c| conv(*c)));
 }
 
 /// Decode a big-endian buffer into the host-endian slice `dst` (one element per
@@ -81,8 +74,8 @@ where
         bytes.len() / N,
         "dst must hold one element per chunk"
     );
-    for (d, c) in dst.iter_mut().zip(bytes.chunks_exact(N)) {
-        *d = conv(c.try_into().expect("chunks_exact yields N-byte arrays"));
+    for (d, c) in dst.iter_mut().zip(bytes.as_chunks::<N>().0) {
+        *d = conv(*c);
     }
 }
 
@@ -98,8 +91,8 @@ where
 {
     let start = out.len();
     out.resize(start + values.len() * N, 0);
-    for (slot, &v) in out[start..].chunks_exact_mut(N).zip(values) {
-        slot.copy_from_slice(&conv(v));
+    for (slot, &v) in out[start..].as_chunks_mut::<N>().0.iter_mut().zip(values) {
+        *slot = conv(v);
     }
 }
 

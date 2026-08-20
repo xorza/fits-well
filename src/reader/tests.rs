@@ -677,8 +677,10 @@ fn read_image_raw_samples_match_a_manual_big_endian_decode() {
     // Independently decode the first few pixels straight from the data bytes.
     let unit = f.read_data_raw(0).unwrap();
     let manual: Vec<i16> = unit.data()[..8]
-        .chunks_exact(2)
-        .map(|c| i16::from_be_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| i16::from_be_bytes(*c))
         .collect();
     let img = f.read_image(0).unwrap();
     match img.decode() {
