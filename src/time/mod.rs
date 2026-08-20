@@ -27,6 +27,7 @@ use crate::time_impl::time_reference_position::TimeReferencePosition;
 use crate::time_impl::time_scale::{TimeScale, TimeScaleKind};
 use crate::unit;
 use crate::wcs::Wcs;
+use crate::wcs::ctype::Ctype;
 
 /// JD of the MJD zero point (1858-11-17T00:00 UTC).
 const MJD0: f64 = 2_400_000.5;
@@ -251,7 +252,7 @@ impl FitsTime {
         if TimeAxisKind::from_ctype(&metadata.ctype) != Some(TimeAxisKind::Time) {
             return Ok(None);
         }
-        let head = metadata.ctype.split('-').next().unwrap_or("").trim();
+        let head = Ctype::parse(&metadata.ctype).head;
         let scale = if head.eq_ignore_ascii_case("TIME") {
             self.scale.clone()
         } else {
@@ -362,7 +363,7 @@ enum TimeAxisKind {
 impl TimeAxisKind {
     /// Classify a `CTYPE` as a time-related axis (§9.6), or `None` if it is not one.
     fn from_ctype(ctype: &str) -> Option<TimeAxisKind> {
-        let head = ctype.split('-').next().unwrap_or("").trim();
+        let head = Ctype::parse(ctype).head;
         if head.eq_ignore_ascii_case("TIME") {
             return Some(TimeAxisKind::Time);
         }

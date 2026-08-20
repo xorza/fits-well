@@ -1,7 +1,7 @@
 use crate::error::FitsError;
-use crate::table_impl::TformKind;
 use crate::table_impl::descriptor;
 use crate::table_impl::descriptor::PqDescriptor;
+use crate::table_impl::tform_kind::TformKind;
 
 #[test]
 fn decodes_signed_boundaries_and_rejects_malformed_widths() {

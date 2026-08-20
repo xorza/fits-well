@@ -3,8 +3,8 @@
 use crate::error::Result;
 use crate::wcs::D2R;
 use crate::wcs::DOMAIN_TOLERANCE;
-use crate::wcs::Projection;
 use crate::wcs::R2D;
+use crate::wcs::projection::Projection;
 use crate::wcs::projection::{NativeCoordinate, ProjectedCoordinate};
 
 #[derive(Debug, Clone, Copy)]

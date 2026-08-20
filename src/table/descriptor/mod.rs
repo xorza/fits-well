@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::table_impl::TformKind;
+use crate::table_impl::tform_kind::TformKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PqDescriptor {

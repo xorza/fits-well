@@ -21,9 +21,10 @@ use crate::header::value;
 use crate::keyword::key;
 #[cfg(feature = "compression")]
 use crate::table_impl::BinTable;
-use crate::table_impl::{
-    CharacterField, ColumnData, TformKind, validate_declared_tdim, validate_declared_vla_tdim,
-};
+use crate::table_impl::character_field::CharacterField;
+use crate::table_impl::column_data::ColumnData;
+use crate::table_impl::tdim;
+use crate::table_impl::tform_kind::TformKind;
 use crate::writer::{FitsWriter, accept_row_count, validate_scaling};
 
 /// An element type accepted by a binary-table writer column.
@@ -638,7 +639,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                 }
                 _ => {}
             }
-            validate_declared_tdim(col.tdim.as_deref(), *repeat)?;
+            tdim::validate_declared(col.tdim.as_deref(), *repeat)?;
             Ok(ColumnLayout {
                 row_width: repeat
                     .checked_mul(kind.elem_size())
@@ -673,7 +674,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                 }
                 let count = encoded_element_count(*kind, cell)?;
                 max_elements = max_elements.max(count);
-                validate_declared_vla_tdim(col.tdim.as_deref(), count)?;
+                tdim::validate_declared_vla(col.tdim.as_deref(), count)?;
             }
             let descriptor = if *wide { 'Q' } else { 'P' };
             Ok(ColumnLayout {
@@ -692,7 +693,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
             let mut max_bits = 0usize;
             for bits in rows {
                 max_bits = max_bits.max(bits.len());
-                validate_declared_vla_tdim(col.tdim.as_deref(), bits.len())?;
+                tdim::validate_declared_vla(col.tdim.as_deref(), bits.len())?;
             }
             let descriptor = if *wide { 'Q' } else { 'P' };
             Ok(ColumnLayout {
@@ -712,7 +713,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                     declared: expected,
                 });
             }
-            validate_declared_tdim(col.tdim.as_deref(), *bit_count)?;
+            tdim::validate_declared(col.tdim.as_deref(), *bit_count)?;
             Ok(ColumnLayout {
                 row_width,
                 tform: format!("{bit_count}X"),

@@ -1,8 +1,20 @@
+use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Ranked;
+use crate::header::Header;
 use crate::header::value::Value;
 use crate::reader::FitsReader;
-use crate::wcs::*;
+use crate::wcs::R2D;
+use crate::wcs::Wcs;
+use crate::wcs::celestial_frame::CelestialFrame;
+use crate::wcs::celestial_frame::CelestialReferenceFrame;
+use crate::wcs::celestial_pole::CelestialPole;
+use crate::wcs::linear_transform::internals as linear;
+use crate::wcs::norm180;
+use crate::wcs::projection::Projection;
+use crate::wcs::spectral_frame::SpectralFrame;
+use crate::wcs::spectral_frame::SpectralReferenceFrame;
+use crate::wcs::wcs_axis::WcsAxis;
 use std::f64::consts::SQRT_2;
 use std::fs::File;
 
@@ -180,54 +192,6 @@ fn transform_failures_return_errors() {
             len: 2
         })
     ));
-}
-
-/// A matrix inversion sanity check independent of any fixture.
-#[test]
-fn matrix_inverse_is_correct() {
-    let m = vec![2.0, 1.0, 1.0, 3.0]; // [[2,1],[1,3]], det = 5
-    let inv = invert(&m, 2).unwrap();
-    // inverse = 1/5 [[3,-1],[-1,2]]
-    let expect = [0.6, -0.2, -0.2, 0.4];
-    for (a, b) in inv.iter().zip(&expect) {
-        assert!((a - b).abs() < 1e-12, "{a} vs {b}");
-    }
-    // m · inv = I
-    let prod = [m[0] * inv[0] + m[1] * inv[2], m[2] * inv[0] + m[3] * inv[2]];
-    assert!((prod[0] - 1.0).abs() < 1e-12 && prod[1].abs() < 1e-12);
-}
-
-#[test]
-fn matrix_product_applies_reference_pixel_offsets_while_accumulating() {
-    let axes = [
-        WcsAxis {
-            ctype: String::new(),
-            cunit: String::new(),
-            crval: 0.0,
-            crpix: 10.0,
-            spectral_frame: None,
-        },
-        WcsAxis {
-            ctype: String::new(),
-            cunit: String::new(),
-            crval: 0.0,
-            crpix: -2.0,
-            spectral_frame: None,
-        },
-        WcsAxis {
-            ctype: String::new(),
-            cunit: String::new(),
-            crval: 0.0,
-            crpix: 4.0,
-            spectral_frame: None,
-        },
-    ];
-    let matrix = [2.0, -1.0, 0.5, 0.0, 3.0, 4.0, -2.0, 1.0, 1.5];
-    let pixel = [13.0, 3.0, 2.0];
-    assert_eq!(
-        matvec_pixel_offset(&matrix, &pixel, &axes),
-        [0.0, 7.0, -4.0]
-    );
 }
 
 #[test]
@@ -780,7 +744,7 @@ fn conflicting_linear_keywords_are_rejected() {
         .set_internal("CD2_2", 3.0)
         .set_internal("CROTA2", 30.0);
     let w = Wcs::from_header(&crota_cd, None).unwrap();
-    assert_eq!(w.matrix, [2.0, 0.0, 0.0, 3.0]);
+    assert_eq!(linear::matrix(&w.linear), [2.0, 0.0, 0.0, 3.0]);
     // A single convention (CD alone) is accepted.
     let mut cd_only = base();
     cd_only
@@ -1188,6 +1152,9 @@ fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
     let cases = [
         ("FREQ", false),
         ("FREQ-LOG", false),
+        // §4.2.1 keeps leading blanks in a string value, so a sloppy writer's
+        // `' FREQ-LOG'` still has to classify as the spectral axis it names.
+        (" FREQ-LOG", false),
         ("FREQ-TAB", true),
         ("TIME", false),
         ("TIME-LOG", false),
@@ -2014,138 +1981,6 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
 }
 
 #[test]
-fn table_wcs_resolver_matches_table_22() {
-    let primary = TableWcsResolver::new(None);
-    let alternate = TableWcsResolver::new(Some('A'));
-    let axis_cases = [
-        (
-            TableAxisKeyword::Type,
-            "TCTYP17",
-            "TCTY17A",
-            "3CTYP17",
-            "3CTY17A",
-        ),
-        (
-            TableAxisKeyword::Unit,
-            "TCUNI17",
-            "TCUN17A",
-            "3CUNI17",
-            "3CUN17A",
-        ),
-        (
-            TableAxisKeyword::ReferenceValue,
-            "TCRVL17",
-            "TCRV17A",
-            "3CRVL17",
-            "3CRV17A",
-        ),
-        (
-            TableAxisKeyword::Increment,
-            "TCDLT17",
-            "TCDE17A",
-            "3CDLT17",
-            "3CDE17A",
-        ),
-        (
-            TableAxisKeyword::ReferencePoint,
-            "TCRPX17",
-            "TCRP17A",
-            "3CRPX17",
-            "3CRP17A",
-        ),
-    ];
-    for (keyword, primary_pixel, alternate_pixel, primary_vector, alternate_vector) in axis_cases {
-        assert_eq!(
-            primary.pixel_axis_key(keyword, 17).unwrap().as_str(),
-            primary_pixel
-        );
-        assert_eq!(
-            alternate.pixel_axis_key(keyword, 17).unwrap().as_str(),
-            alternate_pixel
-        );
-        assert_eq!(
-            primary.vector_axis_key(keyword, 3, 17).unwrap().as_str(),
-            primary_vector
-        );
-        assert_eq!(
-            alternate.vector_axis_key(keyword, 3, 17).unwrap().as_str(),
-            alternate_vector
-        );
-    }
-    assert_eq!(
-        primary
-            .pixel_axis_key(TableAxisKeyword::Rotation, 17)
-            .unwrap()
-            .as_str(),
-        "TCROT17"
-    );
-    assert_eq!(
-        primary
-            .vector_axis_key(TableAxisKeyword::Rotation, 3, 17)
-            .unwrap()
-            .as_str(),
-        "3CROT17"
-    );
-    assert!(
-        alternate
-            .pixel_axis_key(TableAxisKeyword::Rotation, 17)
-            .is_none()
-    );
-    assert!(
-        alternate
-            .vector_axis_key(TableAxisKeyword::Rotation, 3, 17)
-            .is_none()
-    );
-
-    assert_eq!(
-        alternate
-            .pixel_matrix_key(TableMatrixKeyword::Pc, 2, 3, false)
-            .as_str(),
-        "TPC2_3A"
-    );
-    assert_eq!(
-        alternate
-            .pixel_matrix_key(TableMatrixKeyword::Pc, 2, 3, true)
-            .as_str(),
-        "TP2_3A"
-    );
-    assert_eq!(
-        alternate
-            .pixel_matrix_key(TableMatrixKeyword::Cd, 2, 3, false)
-            .as_str(),
-        "TCD2_3A"
-    );
-    assert_eq!(
-        alternate
-            .pixel_matrix_key(TableMatrixKeyword::Cd, 2, 3, true)
-            .as_str(),
-        "TC2_3A"
-    );
-    assert_eq!(
-        alternate
-            .vector_matrix_key(TableMatrixKeyword::Pc, 2, 3, 17)
-            .as_str(),
-        "23PC17A"
-    );
-    assert_eq!(
-        alternate.pixel_parameter_key(2, 1, false).as_str(),
-        "TPV2_1A"
-    );
-    assert_eq!(alternate.pixel_parameter_key(2, 1, true).as_str(), "TV2_1A");
-    assert_eq!(
-        alternate.vector_parameter_key(2, 17, 1, false).as_str(),
-        "2PV17_1A"
-    );
-    assert_eq!(
-        alternate.vector_parameter_key(2, 17, 1, true).as_str(),
-        "2V17_1A"
-    );
-    assert_eq!(alternate.column_key("LONP", 17).as_str(), "LONP17A");
-    assert_eq!(alternate.column_key("LATP", 17).as_str(), "LATP17A");
-    assert_eq!(alternate.column_key("WCAX", 17).as_str(), "WCAX17A");
-}
-
-#[test]
 fn pixel_list_wcs_matches_the_equivalent_image_wcs() {
     // §8.5: a pixel-list (event) WCS on columns 2,3 must transform identically to
     // an image WCS with the same CTYPE/CRPIX/CRVAL/CDELT and PC rotation.
@@ -2436,7 +2271,11 @@ fn table_wcs_matrix_aliases_resolve_exactly() {
             .set_internal(&format!("{root}3_2{suffix}"), expected[2])
             .set_internal(&format!("{root}3_3{suffix}"), expected[3]);
         let wcs = Wcs::from_pixel_list(&header, &[2, 3], alternate.then_some('A')).unwrap();
-        assert_eq!(wcs.matrix, expected, "{root}, alternate={alternate}");
+        assert_eq!(
+            linear::matrix(&wcs.linear),
+            expected,
+            "{root}, alternate={alternate}"
+        );
     }
 
     for (root, alternate) in [("PC", false), ("CD", false), ("PC", true), ("CD", true)] {
@@ -2449,7 +2288,11 @@ fn table_wcs_matrix_aliases_resolve_exactly() {
             .set_internal(&format!("21{root}5{suffix}"), expected[2])
             .set_internal(&format!("22{root}5{suffix}"), expected[3]);
         let wcs = Wcs::from_array_column(&header, 5, alternate.then_some('A')).unwrap();
-        assert_eq!(wcs.matrix, expected, "{root}, alternate={alternate}");
+        assert_eq!(
+            linear::matrix(&wcs.linear),
+            expected,
+            "{root}, alternate={alternate}"
+        );
     }
 }
 

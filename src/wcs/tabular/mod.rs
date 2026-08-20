@@ -5,10 +5,10 @@ use crate::header::Header;
 use crate::keyword::AltSuffix;
 use crate::keyword::key;
 use crate::table_impl::BinTable;
-use crate::table_impl::ColumnReader;
-use crate::table_impl::TformKind;
+use crate::table_impl::column_reader::ColumnReader;
+use crate::table_impl::tform_kind::TformKind;
 use crate::wcs::axis;
-use crate::wcs::celestial_axis;
+use crate::wcs::ctype::Ctype;
 use crate::wcs::unit_to_degrees;
 
 const TABULAR_TOLERANCE: f64 = 1e-10;
@@ -154,7 +154,7 @@ pub(crate) fn descriptors(
         descriptor.world_scales[table_axis] =
             if let Some(scale) = axis::spectral_unit_scale(ctype, cunit)? {
                 scale
-            } else if celestial_axis(ctype).is_some() {
+            } else if Ctype::parse(ctype).celestial_axis().is_some() {
                 unit_to_degrees(cunit)
             } else {
                 1.0

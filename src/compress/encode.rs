@@ -7,8 +7,8 @@
 //! per-codec work lives in the sibling codec modules.
 
 use crate::compress::convert;
-use crate::compress::geometry::TileGeometry;
-use crate::compress::geometry::TileScratch;
+use crate::compress::tile_geometry::TileGeometry;
+use crate::compress::tile_geometry::TileScratch;
 use crate::compress::{Compression, CompressionOptions, ImageCodec, map_tiles, needs_wide};
 use crate::compress::{gzip, hcompress, plio, quantize, rice};
 

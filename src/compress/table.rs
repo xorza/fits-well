@@ -25,9 +25,9 @@ use crate::header::value;
 use crate::keyword;
 use crate::keyword::key;
 use crate::table_impl::BinTable;
-use crate::table_impl::Tform;
-use crate::table_impl::TformKind;
 use crate::table_impl::descriptor::PqDescriptor;
+use crate::table_impl::tform::Tform;
+use crate::table_impl::tform_kind::TformKind;
 
 /// Per-column compression algorithm (`ZCTYPn`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

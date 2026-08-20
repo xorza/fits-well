@@ -1,14 +1,17 @@
 use crate::bitpix::Bitpix;
 use crate::compress;
 use crate::compress::convert::{be_to_i64_into, i32_to_be_into, i64_to_be, i64_to_be_into};
-use crate::compress::geometry::{TileGeometry, TileScratch};
+use crate::compress::tile_geometry::TileGeometry;
+use crate::compress::tile_geometry::TileScratch;
 use crate::compress::*;
 use crate::data::image_data::ImageData;
 use crate::endian::write_pq_descriptor;
 use crate::error::Ranked;
 use crate::keyword::key;
 use crate::reader::{FitsReader, StreamReader};
-use crate::table_impl::{BinTable, ColumnData, TformKind};
+use crate::table_impl::BinTable;
+use crate::table_impl::column_data::ColumnData;
+use crate::table_impl::tform_kind::TformKind;
 use std::fs::File;
 use std::io::Cursor;
 
@@ -1218,7 +1221,7 @@ fn zblank_column_overrides_keyword_per_tile() {
 }
 
 fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
-    use crate::table_impl::ColumnData;
+    use crate::table_impl::column_data::ColumnData;
     use crate::writer::FitsWriter;
     use crate::writer::table::{TableBuilder, WriteColumn};
     use std::io::Cursor;
@@ -1765,7 +1768,7 @@ fn nocompress_image_round_trips() {
 #[test]
 fn parallel_decode_wave_budget_counts_per_tile_vectors() {
     use crate::compress::decode::decode_wave_tile_count;
-    use crate::compress::geometry::TileGeometry;
+    use crate::compress::tile_geometry::TileGeometry;
 
     let geometry = TileGeometry::new(&[1, 4_194_304], &[1, 1]);
     let retained_bytes = std::mem::size_of::<Vec<u8>>() + 1;
