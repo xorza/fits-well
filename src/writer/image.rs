@@ -42,151 +42,73 @@ struct StreamingChecksum {
     pending_len: usize,
 }
 
-impl<W: Write> FitsWriter<W> {
-    /// Write `image` as the primary HDU (first call) or an `IMAGE` extension
-    /// (later calls). The mandatory header is synthesized (`SIMPLE`/`XTENSION`,
-    /// `BITPIX`, `NAXISn`, plus `BSCALE`/`BZERO`/`BLANK` when scaling is
-    /// non-trivial), followed by the big-endian data unit.
-    pub fn write_image(&mut self, image: &Image) -> Result<()> {
-        self.write_image_template(image, None)
-    }
-
-    /// Write an image while preserving the non-structural cards from `header`.
-    /// Mandatory image-layout and checksum cards are regenerated from `image`.
-    pub fn write_image_with_header(&mut self, image: &Image, header: &Header) -> Result<()> {
-        self.write_image_template(image, Some(header))
-    }
-
-    fn write_image_template(&mut self, image: &Image, template: Option<&Header>) -> Result<()> {
-        self.ensure_writable()?;
-        let expected = image.validate_geometry()?;
-        let encoded_len = expected
-            .checked_mul(image.samples.bitpix().elem_size())
-            .ok_or(FitsError::DataUnitOverflow)?;
-        let header = image_header(image, self.state == WriterState::Empty)?;
-        self.scratch.clear();
-        self.scratch.reserve_exact(encoded_len);
-        image.samples.encode_into(&mut self.scratch);
-        self.finish_hdu(header, template, ZERO_FILL, false)
-    }
-
-    /// Write `image` as a tiled-compressed `BINTABLE` extension (§10.1), using the
-    /// typed codec and shared [`CompressionOptions`]. Requires the `compression`
-    /// feature. Integer images support
-    /// `GZIP_1`/`GZIP_2`/`RICE_1`/`PLIO_1`/`HCOMPRESS_1`; float images are quantized
-    /// (`SUBTRACTIVE_DITHER_1`) and compressed with `GZIP_1`/`GZIP_2`/`RICE_1`.
-    /// `HCOMPRESS_1` needs a 2-D tile shape, and every `PLIO_1` mask sample must be
-    /// in the lossless `0..=0xFF_FFFF` domain.
-    #[cfg(feature = "compression")]
-    pub fn write_compressed_image(
-        &mut self,
-        image: &Image,
-        compression: Compression,
-        options: &CompressionOptions,
-    ) -> Result<()> {
-        self.write_compressed_image_template(image, compression, options, None)
-    }
-
-    /// Write a tiled-compressed image while preserving the non-structural cards
-    /// from `header`. Container, compression, image-layout, and checksum cards are
-    /// regenerated from `image` and `options`.
-    #[cfg(feature = "compression")]
-    pub fn write_compressed_image_with_header(
-        &mut self,
-        image: &Image,
-        compression: Compression,
-        options: &CompressionOptions,
-        header: &Header,
-    ) -> Result<()> {
-        self.write_compressed_image_template(image, compression, options, Some(header))
-    }
-
-    #[cfg(feature = "compression")]
-    fn write_compressed_image_template(
-        &mut self,
-        image: &Image,
-        compression: Compression,
-        options: &CompressionOptions,
-        template: Option<&Header>,
-    ) -> Result<()> {
-        self.ensure_writable()?;
-        let header = encode::compress_image(image, compression, options, &mut self.scratch)?;
-        self.finish_hdu(header, template, ZERO_FILL, true)
-    }
+pub(super) fn write_template<W: Write>(
+    writer: &mut FitsWriter<W>,
+    image: &Image,
+    template: Option<&Header>,
+) -> Result<()> {
+    writer.ensure_writable()?;
+    let expected = image.validate_geometry()?;
+    let encoded_len = expected
+        .checked_mul(image.samples.bitpix().elem_size())
+        .ok_or(FitsError::DataUnitOverflow)?;
+    let header = image_header(image, writer.state == WriterState::Empty)?;
+    writer.scratch.clear();
+    writer.scratch.reserve_exact(encoded_len);
+    image.samples.encode_into(&mut writer.scratch);
+    writer.finish_hdu(header, template, ZERO_FILL, false)
 }
 
-impl<W: Write + Seek> FitsWriter<W> {
-    /// Begin a large identity-scaled image write. The returned stream must receive
-    /// exactly the axis-product sample count and be finished successfully.
-    pub fn stream_image(
-        &mut self,
-        shape: impl Into<Vec<usize>>,
-        bitpix: Bitpix,
-    ) -> Result<ImageStream<'_, W>> {
-        self.stream_image_template(shape.into(), bitpix, Scaling::IDENTITY, None)
-    }
+#[cfg(feature = "compression")]
+pub(super) fn write_compressed_template<W: Write>(
+    writer: &mut FitsWriter<W>,
+    image: &Image,
+    compression: Compression,
+    options: &CompressionOptions,
+    template: Option<&Header>,
+) -> Result<()> {
+    writer.ensure_writable()?;
+    let header = encode::compress_image(image, compression, options, &mut writer.scratch)?;
+    writer.finish_hdu(header, template, ZERO_FILL, true)
+}
 
-    /// Begin a large image write with explicit scaling. Structural and checksum
-    /// cards are generated from the supplied geometry, sample type, and scaling.
-    pub fn stream_image_scaled(
-        &mut self,
-        shape: impl Into<Vec<usize>>,
-        bitpix: Bitpix,
-        scaling: Scaling,
-    ) -> Result<ImageStream<'_, W>> {
-        self.stream_image_template(shape.into(), bitpix, scaling, None)
+pub(super) fn stream_template<'a, W: Write + Seek>(
+    writer: &'a mut FitsWriter<W>,
+    shape: Vec<usize>,
+    bitpix: Bitpix,
+    scaling: Scaling,
+    template: Option<&Header>,
+) -> Result<ImageStream<'a, W>> {
+    writer.ensure_writable()?;
+    scaling.validate(bitpix)?;
+    let expected_samples = shape_product(&shape)?;
+    // A stream writes its header up front and rewrites it at `finish`, so it
+    // never reaches `finish_hdu` — it applies the template merge itself.
+    let mut header =
+        image_header_parts(&shape, bitpix, scaling, writer.state == WriterState::Empty)?;
+    merge_header_template(&mut header, template);
+    let header_offset = writer.sink.stream_position()?;
+    let mut initial = header.clone();
+    if writer.checksum {
+        initial.set_internal("DATASUM", "0");
+        initial.set_internal("CHECKSUM", PLACEHOLDER_CHECKSUM);
     }
-
-    /// Begin a large image write with explicit scaling and an informational header
-    /// template. Structural and checksum cards are regenerated.
-    pub fn stream_image_with_header(
-        &mut self,
-        shape: impl Into<Vec<usize>>,
-        bitpix: Bitpix,
-        scaling: Scaling,
-        header: &Header,
-    ) -> Result<ImageStream<'_, W>> {
-        self.stream_image_template(shape.into(), bitpix, scaling, Some(header))
+    render_header(&initial, &mut writer.header_scratch)?;
+    if let Err(error) = writer.sink.write_all(&writer.header_scratch) {
+        writer.state = WriterState::Failed;
+        return Err(FitsError::Io(error));
     }
-
-    fn stream_image_template(
-        &mut self,
-        shape: Vec<usize>,
-        bitpix: Bitpix,
-        scaling: Scaling,
-        template: Option<&Header>,
-    ) -> Result<ImageStream<'_, W>> {
-        self.ensure_writable()?;
-        scaling.validate(bitpix)?;
-        let expected_samples = shape_product(&shape)?;
-        // A stream writes its header up front and rewrites it at `finish`, so it
-        // never reaches `finish_hdu` — it applies the template merge itself.
-        let mut header =
-            image_header_parts(&shape, bitpix, scaling, self.state == WriterState::Empty)?;
-        merge_header_template(&mut header, template);
-        let header_offset = self.sink.stream_position()?;
-        let mut initial = header.clone();
-        if self.checksum {
-            initial.set_internal("DATASUM", "0");
-            initial.set_internal("CHECKSUM", PLACEHOLDER_CHECKSUM);
-        }
-        render_header(&initial, &mut self.header_scratch)?;
-        if let Err(error) = self.sink.write_all(&self.header_scratch) {
-            self.state = WriterState::Failed;
-            return Err(FitsError::Io(error));
-        }
-        self.state = WriterState::Active;
-        Ok(ImageStream {
-            writer: self,
-            header,
-            header_offset,
-            expected_samples,
-            written_samples: 0,
-            bitpix,
-            checksum: StreamingChecksum::default(),
-            finished: false,
-        })
-    }
+    writer.state = WriterState::Active;
+    Ok(ImageStream {
+        writer,
+        header,
+        header_offset,
+        expected_samples,
+        written_samples: 0,
+        bitpix,
+        checksum: StreamingChecksum::default(),
+        finished: false,
+    })
 }
 
 impl<W: Write + Seek> ImageStream<'_, W> {
