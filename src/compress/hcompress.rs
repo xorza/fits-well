@@ -1535,8 +1535,10 @@ mod tests {
         const COMPRESSED: &[u8] = include_bytes!("../../tests/data/fits/hcomp_wide_i32.huf");
 
         let values: Vec<i64> = RAW
-            .chunks_exact(4)
-            .map(|bytes| i32::from_be_bytes(bytes.try_into().unwrap()) as i64)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| i32::from_be_bytes(*bytes) as i64)
             .collect();
         assert_eq!(values.len(), 100 * 100);
         assert!(

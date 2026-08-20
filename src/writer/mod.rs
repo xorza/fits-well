@@ -436,7 +436,7 @@ fn validate_scaling(tscale: Option<f64>, tzero: Option<f64>, allowed: bool) -> R
 /// Replace the 16 placeholder bytes of the rendered `CHECKSUM` card's value with
 /// the solved value. The value occupies bytes 12–27 (0-based 11–26) of its card.
 fn patch_checksum(header_bytes: &mut [u8], encoded: &[u8; 16]) {
-    for card in header_bytes.chunks_exact_mut(CARD_SIZE) {
+    for card in header_bytes.as_chunks_mut::<CARD_SIZE>().0 {
         if &card[..8] == b"CHECKSUM" {
             card[11..27].copy_from_slice(encoded);
             return;

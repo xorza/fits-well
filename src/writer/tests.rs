@@ -198,7 +198,9 @@ fn checksum_report_for_keywords(datasum: Option<&str>, checksum: Option<&str>) -
 
 fn patch_null_string(header_bytes: &mut [u8], keyword: &[u8; 8]) {
     let card = header_bytes
-        .chunks_exact_mut(CARD_SIZE)
+        .as_chunks_mut::<CARD_SIZE>()
+        .0
+        .iter_mut()
         .find(|card| &card[..8] == keyword)
         .unwrap();
     card[10..].fill(b' ');
@@ -1326,7 +1328,9 @@ fn from_u64_writes_the_exact_offset_and_round_trips_extremes() {
     let built = Image::from_u64(vec![2], &[u64::MIN, u64::MAX]).unwrap();
     let bytes = write_to_vec(&built);
     let bzero = bytes[..BLOCK_SIZE]
-        .chunks_exact(CARD_SIZE)
+        .as_chunks::<CARD_SIZE>()
+        .0
+        .iter()
         .find(|card| &card[..8] == b"BZERO   ")
         .unwrap();
     assert_eq!(&bzero[10..30], b" 9223372036854775808");
@@ -1365,7 +1369,9 @@ fn i64_table_scaling_writes_the_exact_unsigned_offset() {
     let bytes = writer.into_inner().into_inner();
     for keyword in ["TZERO1  ", "TZERO2  ", "TZERO3  "] {
         let tzero = bytes
-            .chunks_exact(CARD_SIZE)
+            .as_chunks::<CARD_SIZE>()
+            .0
+            .iter()
             .find(|card| &card[..8] == keyword.as_bytes())
             .unwrap();
         assert_eq!(&tzero[10..30], b" 9223372036854775808");
@@ -1447,7 +1453,9 @@ fn corrupted_header_padding_fails_only_the_whole_hdu_checksum() {
     w.write_image(&image).unwrap();
     let mut bytes = w.into_inner().into_inner();
     let end = bytes[..BLOCK_SIZE]
-        .chunks_exact(CARD_SIZE)
+        .as_chunks::<CARD_SIZE>()
+        .0
+        .iter()
         .position(|card| &card[..3] == b"END")
         .unwrap();
     bytes[(end + 1) * CARD_SIZE] ^= 1;

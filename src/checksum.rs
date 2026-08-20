@@ -12,11 +12,8 @@ pub(crate) fn accumulate(bytes: &[u8], seed: u32) -> u32 {
     // tail of up to 3 bytes from the sum.
     assert_eq!(bytes.len() % 4, 0, "checksum input must be word-aligned");
     let mut sum = seed;
-    for word in bytes.chunks_exact(4) {
-        sum = combine(
-            sum,
-            u32::from_be_bytes([word[0], word[1], word[2], word[3]]),
-        );
+    for word in bytes.as_chunks::<4>().0 {
+        sum = combine(sum, u32::from_be_bytes(*word));
     }
     sum
 }

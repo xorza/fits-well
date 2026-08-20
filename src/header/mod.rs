@@ -76,12 +76,8 @@ impl Header {
         let ncards = bytes.len() / CARD_SIZE;
         let mut cards: Vec<Card> = Vec::with_capacity(ncards);
         let mut index = HashMap::with_capacity(ncards);
-        for chunk in bytes.chunks_exact(CARD_SIZE) {
-            let card = Card::parse(
-                chunk
-                    .try_into()
-                    .expect("chunks_exact yields CARD_SIZE slices"),
-            )?;
+        for chunk in bytes.as_chunks::<CARD_SIZE>().0 {
+            let card = Card::parse(chunk)?;
             match card.kind {
                 CardKind::End => return Ok(Header { cards, index }),
                 CardKind::Continue if fold_continuation(&mut cards, &card) => {}

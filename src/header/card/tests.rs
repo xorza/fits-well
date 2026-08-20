@@ -17,10 +17,7 @@ fn parse(text: &str) -> Card {
 fn render_records(card: &Card) -> Vec<[u8; CARD_SIZE]> {
     let mut bytes = Vec::new();
     card.render_into(&mut bytes).unwrap();
-    bytes
-        .chunks_exact(CARD_SIZE)
-        .map(|record| record.try_into().unwrap())
-        .collect()
+    bytes.as_chunks::<CARD_SIZE>().0.to_vec()
 }
 
 #[test]
