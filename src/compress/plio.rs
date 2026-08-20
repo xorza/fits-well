@@ -249,3 +249,51 @@ fn invalid_stream(detail: &str) -> FitsError {
         name: format!("PLIO_1: {detail}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::compress::plio;
+
+    use crate::error::FitsError;
+
+    #[test]
+    fn validates_encoding_and_rejects_malformed_streams() {
+        let mut out = Vec::new();
+        let be = |words: &[i16]| {
+            words
+                .iter()
+                .flat_map(|word| word.to_be_bytes())
+                .collect::<Vec<_>>()
+        };
+
+        let encoded = plio::plio_encode(&[0, 0xFF_FFFF]).unwrap();
+        plio::plio_decode_be_into(&be(&encoded), 2, &mut out).unwrap();
+        assert_eq!(out, [0, 0xFF_FFFF]);
+        for invalid in [-1, 0x100_0000] {
+            assert!(matches!(
+                plio::plio_encode(&[0, invalid]),
+                Err(FitsError::PlioValueOutOfRange {
+                    index: 1,
+                    value,
+                }) if value == invalid
+            ));
+        }
+        let truncated_span = [0, 7, -100, 8, 0, 0, 0];
+        assert!(matches!(
+            plio::plio_decode_be_into(&be(&truncated_span), 1, &mut out),
+            Err(FitsError::UnexpectedEof)
+        ));
+
+        let missing_absolute_high_word = [0, 0, 4, 0x1001];
+        assert!(matches!(
+            plio::plio_decode_be_into(&be(&missing_absolute_high_word), 1, &mut out),
+            Err(FitsError::UnexpectedEof)
+        ));
+
+        let invalid_opcode = [0, 0, 4, i16::MIN];
+        assert!(matches!(
+            plio::plio_decode_be_into(&be(&invalid_opcode), 1, &mut out),
+            Err(FitsError::UnsupportedCompression { .. })
+        ));
+    }
+}

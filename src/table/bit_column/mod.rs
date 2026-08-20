@@ -114,3 +114,6 @@ impl Index<(usize, usize)> for BitColumn<'_> {
         &self.row(row)[col]
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -286,3 +286,6 @@ fn candidate_vector_axes(header: &Header) -> Vec<usize> {
     axes.sort_unstable_by(|a, b| b.cmp(a));
     axes
 }
+
+#[cfg(test)]
+mod tests;

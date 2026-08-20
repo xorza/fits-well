@@ -1524,3 +1524,78 @@ fn unshuffle_rows(a: &mut [i64], nxtop: usize, nytop: usize, ny: usize, row_tmp:
         i += 2;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::compress::hcompress;
+
+    #[test]
+    fn hcompress_64_bit_transform_matches_external_golden() {
+        const RAW: &[u8] = include_bytes!("../../tests/data/fits/hcomp_wide_i32.raw");
+        const COMPRESSED: &[u8] = include_bytes!("../../tests/data/fits/hcomp_wide_i32.huf");
+
+        let values: Vec<i64> = RAW
+            .chunks_exact(4)
+            .map(|bytes| i32::from_be_bytes(bytes.try_into().unwrap()) as i64)
+            .collect();
+        assert_eq!(values.len(), 100 * 100);
+        assert!(
+            i64::from_be_bytes(COMPRESSED[14..22].try_into().unwrap()) > i32::MAX as i64,
+            "the golden must require a wide H-transform accumulator"
+        );
+        assert!(
+            COMPRESSED[22..25].iter().any(|&planes| planes > 31),
+            "the golden must require more than 31 coefficient bit planes"
+        );
+
+        let mut scratch = hcompress::HcompressScratch::default();
+        let encoded =
+            hcompress::hcompress_tile_encode(&values, &[100, 100], 0, &mut scratch).unwrap();
+        assert_eq!(encoded, COMPRESSED);
+
+        let mut decoded = Vec::new();
+        hcompress::hcompress_tile_into(COMPRESSED, false, values.len(), &mut decoded, &mut scratch)
+            .unwrap();
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn tile_decode_rejects_dimension_mismatch() {
+        // Encode a valid 2×3 tile, then decode it claiming a different element count.
+        // The decoder reads nx/ny from the stream and must cross-check them against the
+        // tile size it was handed — rather than allocate/transform `nx*ny` blindly
+        // (a wild-allocation / overflow / empty-buffer-panic guard, R2-4).
+        let vals: Vec<i64> = vec![10, 20, 30, 40, 50, 60];
+        let mut scratch = hcompress::HcompressScratch::default();
+        let bytes = hcompress::hcompress_tile_encode(&vals, &[2, 3], 0, &mut scratch).unwrap();
+        // The correct element count round-trips losslessly (scale 0).
+        let mut out = Vec::new();
+        hcompress::hcompress_tile_into(&bytes, false, 6, &mut out, &mut scratch).unwrap();
+        assert_eq!(out, vals);
+        // A mismatched element count is rejected, not decoded.
+        assert!(hcompress::hcompress_tile_into(&bytes, false, 7, &mut out, &mut scratch).is_err());
+        assert!(hcompress::hcompress_tile_into(&bytes, false, 5, &mut out, &mut scratch).is_err());
+
+        let one = hcompress::hcompress_tile_encode(&[-7], &[1, 1], 0, &mut scratch).unwrap();
+        hcompress::hcompress_tile_into(&one, false, 1, &mut out, &mut scratch).unwrap();
+        assert_eq!(out, [-7], "a 1x1 tile must skip its empty quadrants");
+
+        for end in 0..one.len() {
+            assert!(
+                matches!(
+                    hcompress::hcompress_tile_into(&one[..end], false, 1, &mut out, &mut scratch),
+                    Err(crate::error::FitsError::UnexpectedEof)
+                        | Err(crate::error::FitsError::UnsupportedCompression { .. })
+                ),
+                "strict HCOMPRESS prefix of length {end} was accepted"
+            );
+        }
+
+        let mut invalid_planes = one;
+        invalid_planes[22] = 64;
+        assert!(matches!(
+            hcompress::hcompress_tile_into(&invalid_planes, false, 1, &mut out, &mut scratch),
+            Err(crate::error::FitsError::UnsupportedCompression { .. })
+        ));
+    }
+}

@@ -152,3 +152,48 @@ pub(super) fn gzip2_tile_into(
     be_to_i64_into(raw, bitpix, out);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::compress::gzip;
+
+    use crate::error::FitsError;
+
+    #[test]
+    fn gunzip_rejects_a_stream_larger_than_its_tile() {
+        // A decompression bomb: a tiny gzip stream inflating far past the tile's known
+        // byte size must be rejected, not allocated unbounded.
+        let big = vec![0u8; 100_000];
+        let bomb = gzip::gzip_encode(&big, 9);
+        assert!(bomb.len() < 1000, "an all-zero buffer compresses tiny");
+        let mut decoded = Vec::new();
+        // Bounded at 1 KiB (a small tile): inflating to 100 KB overruns → error.
+        assert!(matches!(
+            gzip::gunzip_into(&bomb, 1024, &mut decoded),
+            Err(FitsError::UnsupportedCompression { .. })
+        ));
+        // One byte short of the true size still overruns (the +1 detection boundary).
+        assert!(gzip::gunzip_into(&bomb, big.len() - 1, &mut decoded).is_err());
+        // Bounded at the true size: decodes to exactly the original bytes.
+        gzip::gunzip_into(&bomb, big.len(), &mut decoded).unwrap();
+        assert_eq!(decoded, big);
+
+        let short = gzip::gzip_encode(&[1, 2, 3], 1);
+        assert!(matches!(
+            gzip::gunzip_into(&short, 4, &mut decoded),
+            Err(FitsError::DataSizeMismatch {
+                expected: 4,
+                got: 3
+            })
+        ));
+
+        let raw = [1, 2, 3, 4, 5, 6];
+        let mut shuffled = Vec::new();
+        gzip::shuffle_bytes_into(&raw, 2, &mut shuffled);
+        assert_eq!(shuffled, [1, 3, 5, 2, 4, 6]);
+        gzip::unshuffle_bytes_into(&shuffled, 2, &mut decoded);
+        assert_eq!(decoded, raw);
+        gzip::shuffle_bytes_into(&raw, 1, &mut shuffled);
+        assert_eq!(shuffled, raw, "width-one shuffle is an exact no-op");
+    }
+}

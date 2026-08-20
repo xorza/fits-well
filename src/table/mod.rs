@@ -155,11 +155,33 @@ impl BinTable {
     }
 }
 
-#[cfg(all(test, feature = "compression"))]
+#[cfg(test)]
 pub(crate) mod internals {
+    use crate::header::Header;
+    #[cfg(feature = "compression")]
     use crate::table_impl::BinTable;
+    #[cfg(feature = "compression")]
     use crate::table_impl::tform_kind::TformKind;
 
+    /// A minimal `BINTABLE` header for `tforms`, sized by the caller — the fixture
+    /// every read-path test builds its table from.
+    pub(crate) fn table_header(naxis1: usize, naxis2: usize, tforms: &[&str]) -> Header {
+        let mut h = Header::new();
+        h.set_internal("XTENSION", "BINTABLE")
+            .set_internal("BITPIX", 8)
+            .set_internal("NAXIS", 2)
+            .set_internal("NAXIS1", naxis1 as i64)
+            .set_internal("NAXIS2", naxis2 as i64)
+            .set_internal("PCOUNT", 0)
+            .set_internal("GCOUNT", 1)
+            .set_internal("TFIELDS", tforms.len() as i64);
+        for (i, tform) in tforms.iter().enumerate() {
+            h.set_internal(&format!("TFORM{}", i + 1), *tform);
+        }
+        h
+    }
+
+    #[cfg(feature = "compression")]
     pub(crate) fn set_column_kind(table: &mut BinTable, column: usize, kind: TformKind) {
         table.schema.columns[column].tform.kind = kind;
     }

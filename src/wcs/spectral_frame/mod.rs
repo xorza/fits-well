@@ -89,3 +89,6 @@ impl SpectralFrame {
         SpectralRest::new(frequency, wavelength)
     }
 }
+
+#[cfg(test)]
+mod tests;

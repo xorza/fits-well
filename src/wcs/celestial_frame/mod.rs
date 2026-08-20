@@ -80,3 +80,6 @@ impl CelestialFrame {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests;
