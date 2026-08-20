@@ -3,7 +3,7 @@ use crate::compress;
 use crate::compress::convert::{be_to_i64_into, i32_to_be_into, i64_to_be, i64_to_be_into};
 use crate::compress::geometry::{TileGeometry, TileScratch};
 use crate::compress::*;
-use crate::data::ImageData;
+use crate::data::image_data::ImageData;
 use crate::endian::write_pq_descriptor;
 use crate::error::Ranked;
 use crate::keyword::key;
@@ -152,7 +152,9 @@ fn decompresses_float_with_nan_nulls() {
 #[test]
 #[ignore]
 fn emit_compressed_files_for_astropy() {
-    use crate::data::{Image, ImageData, Scaling};
+    use crate::data::Image;
+    use crate::data::image_data::ImageData;
+    use crate::data::scaling::Scaling;
     use crate::writer::FitsWriter;
     use std::fs::File;
 
@@ -226,7 +228,9 @@ fn emit_compressed_files_for_astropy() {
 
 #[test]
 fn compression_write_round_trips_through_decode() {
-    use crate::data::{Image, ImageData, Scaling};
+    use crate::data::Image;
+    use crate::data::image_data::ImageData;
+    use crate::data::scaling::Scaling;
     use crate::writer::FitsWriter;
     use std::io::Cursor;
 
@@ -317,7 +321,9 @@ fn float_field() -> Vec<f32> {
 
 #[test]
 fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
-    use crate::data::{Image, ImageData, Scaling};
+    use crate::data::Image;
+    use crate::data::image_data::ImageData;
+    use crate::data::scaling::Scaling;
     use crate::writer::FitsWriter;
     use std::io::Cursor;
 
@@ -449,7 +455,8 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
 
 #[test]
 fn hcompress_writer_enforces_standard_image_constraints() {
-    use crate::data::{Image, Scaling};
+    use crate::data::Image;
+    use crate::data::scaling::Scaling;
     use crate::writer::FitsWriter;
 
     let line = Image::new(vec![4], vec![1i16, 2, 3, 4]).unwrap();
@@ -514,7 +521,9 @@ fn hcompress_writer_enforces_standard_image_constraints() {
 
 #[test]
 fn dither_option_sets_zquantiz_and_round_trips() {
-    use crate::data::{Image, ImageData, Scaling};
+    use crate::data::Image;
+    use crate::data::image_data::ImageData;
+    use crate::data::scaling::Scaling;
     use crate::writer::FitsWriter;
     use std::io::Cursor;
 
@@ -555,7 +564,9 @@ fn dither_option_sets_zquantiz_and_round_trips() {
 
 #[test]
 fn tile_shape_with_wrong_rank_is_rejected() {
-    use crate::data::{Image, ImageData, Scaling};
+    use crate::data::Image;
+    use crate::data::image_data::ImageData;
+    use crate::data::scaling::Scaling;
     use crate::error::FitsError;
     use crate::writer::FitsWriter;
     use std::io::Cursor;
@@ -592,7 +603,9 @@ fn tile_shape_with_wrong_rank_is_rejected() {
 
 #[test]
 fn float_write_preserves_nan_nulls() {
-    use crate::data::{Image, ImageData, Scaling};
+    use crate::data::Image;
+    use crate::data::image_data::ImageData;
+    use crate::data::scaling::Scaling;
     use crate::writer::FitsWriter;
     use std::io::Cursor;
 
@@ -762,7 +775,8 @@ fn hcompress_writer_converts_noise_multiplier_to_tile_scale() {
 
 #[test]
 fn hcompress_lossless_write_round_trips_exactly() {
-    use crate::data::{Image, ImageData};
+    use crate::data::Image;
+    use crate::data::image_data::ImageData;
     use crate::writer::FitsWriter;
 
     let samples: Vec<i32> = (0..16 * 16)
@@ -850,7 +864,9 @@ fn hcompress_64_bit_transform_matches_external_golden() {
 
 #[test]
 fn plio_write_round_trips_through_decode() {
-    use crate::data::{Image, ImageData, Scaling};
+    use crate::data::Image;
+    use crate::data::image_data::ImageData;
+    use crate::data::scaling::Scaling;
     use crate::writer::FitsWriter;
     use std::io::Cursor;
 
@@ -931,7 +947,7 @@ fn decompresses_quantized_float_no_dither() {
 /// compression with `algo`/`rows_per_tile` and assert the data is byte-identical.
 #[test]
 fn decompresses_nocompress_tile_verbatim() {
-    use crate::data::ImageData;
+    use crate::data::image_data::ImageData;
     use crate::header::Header;
     use crate::table_impl::BinTable;
     // A 2×2 i16 image as a single NOCOMPRESS tile: the COMPRESSED_DATA cell holds
@@ -980,7 +996,7 @@ fn decompresses_nocompress_tile_verbatim() {
 
 #[test]
 fn compressed_integer_null_mask_restores_blank_pixels() {
-    use crate::data::ImageData;
+    use crate::data::image_data::ImageData;
     use crate::header::Header;
     use crate::table_impl::BinTable;
 
@@ -1055,7 +1071,7 @@ fn compressed_integer_null_mask_restores_blank_pixels() {
 
 #[test]
 fn compressed_float_null_mask_restores_nan_pixels() {
-    use crate::data::ImageData;
+    use crate::data::image_data::ImageData;
     use crate::header::Header;
     use crate::table_impl::BinTable;
 
@@ -1105,7 +1121,7 @@ fn compressed_float_null_mask_restores_nan_pixels() {
 
 #[test]
 fn zblank_column_overrides_keyword_per_tile() {
-    use crate::data::ImageData;
+    use crate::data::image_data::ImageData;
     use crate::header::Header;
     use crate::table_impl::BinTable;
     // A 2×1 float image, one NOCOMPRESS tile of quantized i32 [10, 99]. ZSCALE=2,
@@ -1648,7 +1664,9 @@ fn reading_a_plain_bintable_as_an_image_is_rejected() {
 
 #[test]
 fn integer_image_compression_preserves_bscale_bzero_and_blank() {
-    use crate::data::{Image, ImageData, Scaling};
+    use crate::data::Image;
+    use crate::data::image_data::ImageData;
+    use crate::data::scaling::Scaling;
     use crate::writer::FitsWriter;
     use std::io::Cursor;
     // §10.2: the compressed tiles store *raw* stored integers, so BSCALE/BZERO and
@@ -1680,7 +1698,9 @@ fn integer_image_compression_preserves_bscale_bzero_and_blank() {
 
 #[test]
 fn rice_64_bit_pixels_round_trip_extreme_differences() {
-    use crate::data::{Image, ImageData, Scaling};
+    use crate::data::Image;
+    use crate::data::image_data::ImageData;
+    use crate::data::scaling::Scaling;
     use crate::writer::FitsWriter;
     use std::io::Cursor;
     let samples = vec![
@@ -1713,7 +1733,9 @@ fn rice_64_bit_pixels_round_trip_extreme_differences() {
 
 #[test]
 fn nocompress_image_round_trips() {
-    use crate::data::{Image, ImageData, Scaling};
+    use crate::data::Image;
+    use crate::data::image_data::ImageData;
+    use crate::data::scaling::Scaling;
     use crate::writer::FitsWriter;
     use std::io::Cursor;
     // §10.4: tiles stored verbatim (uncompressed big-endian pixels) round-trip.
@@ -1777,7 +1799,9 @@ fn parallel_full_decode_crosses_the_bounded_wave_boundary() {
 
 #[test]
 fn empty_naxis0_image_round_trips() {
-    use crate::data::{Image, ImageData, Scaling};
+    use crate::data::Image;
+    use crate::data::image_data::ImageData;
+    use crate::data::scaling::Scaling;
     use crate::writer::FitsWriter;
     use std::io::Cursor;
     // A `NAXIS = 0` image has no data array. The encoder must emit an empty
@@ -1817,7 +1841,9 @@ fn empty_naxis0_image_round_trips() {
 
 #[test]
 fn empty_first_axis_image_round_trips() {
-    use crate::data::{Image, ImageData, Scaling};
+    use crate::data::Image;
+    use crate::data::image_data::ImageData;
+    use crate::data::scaling::Scaling;
     use crate::writer::FitsWriter;
     use std::io::Cursor;
 
@@ -2047,7 +2073,7 @@ fn decompress_image_rejects_overflowing_znaxis_product() {
     let image = crate::data::Image {
         shape: vec![usize::MAX, 2],
         samples: ImageData::I16(Vec::new()),
-        scaling: crate::data::Scaling {
+        scaling: crate::data::scaling::Scaling {
             bscale: 1.0,
             bzero: 0.0,
             blank: None,

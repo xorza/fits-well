@@ -1,7 +1,7 @@
 use crate::bitpix::Bitpix;
 use crate::data::Image;
-use crate::data::ImageData;
-use crate::data::Scaling;
+use crate::data::image_data::ImageData;
+use crate::data::scaling::Scaling;
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Ranked;

@@ -1,5 +1,5 @@
 use crate::error::Indexed;
-use crate::time::*;
+use crate::time_impl::*;
 
 /// Golden values throughout are from `astropy.time` (ERFA).
 #[test]

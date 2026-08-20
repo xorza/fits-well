@@ -4,7 +4,7 @@
 
 use crate::allocation;
 use crate::bitpix::Bitpix;
-use crate::data::ImageData;
+use crate::data::image_data::ImageData;
 use crate::endian;
 use crate::error::FitsError;
 use crate::error::Result;

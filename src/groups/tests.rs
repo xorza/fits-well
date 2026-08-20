@@ -1,4 +1,4 @@
-use crate::data::ImageView;
+use crate::data::image_view::ImageView;
 use crate::error::Indexed;
 use crate::groups::*;
 use crate::reader::FitsReader;

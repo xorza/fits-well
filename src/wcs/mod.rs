@@ -47,8 +47,8 @@ use crate::keyword::AltSuffix;
 use crate::keyword::KeyBuf;
 use crate::keyword::key;
 use crate::wcs::axis::AxisTransform;
-use crate::wcs::axis::SpectralParameters;
-use crate::wcs::axis::SpectralRest;
+use crate::wcs::axis::spectral_rest::SpectralParameters;
+use crate::wcs::axis::spectral_rest::SpectralRest;
 use crate::wcs::projection::NativeCoordinate;
 
 mod axis;
