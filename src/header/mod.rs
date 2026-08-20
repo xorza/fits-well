@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crate::bitpix::Bitpix;
 use crate::block::CARD_SIZE;
-use crate::data::Scaling;
+use crate::data::scaling::Scaling;
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Result;
@@ -17,7 +17,8 @@ use crate::header::card::validate_keyword;
 use crate::header::card::validate_valued_keyword;
 use crate::header::value::Value;
 use crate::keyword::key;
-use crate::time::{FitsTime, PhaseAxis, TimeBounds, TimeCoordinate};
+use crate::time_impl::phase_axis::PhaseAxis;
+use crate::time_impl::{FitsTime, TimeBounds, TimeCoordinate};
 use crate::wcs::Wcs;
 
 /// A parsed header unit: an *ordered* list of content cards plus a side index

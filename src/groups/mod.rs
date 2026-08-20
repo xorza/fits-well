@@ -6,10 +6,10 @@
 //! decoded but never written.
 
 use crate::bitpix::Bitpix;
-use crate::data::ImageData;
-use crate::data::ImageView;
-use crate::data::Scaling;
+use crate::data::image_data::ImageData;
+use crate::data::image_view::ImageView;
 use crate::data::physical_view;
+use crate::data::scaling::Scaling;
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Result;

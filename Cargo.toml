@@ -29,6 +29,8 @@ items_after_test_module = "deny"
 
 [lints.rustdoc]
 broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+redundant_explicit_links = "deny"
 
 # Render docs.rs with every user-facing feature so compression and mmap appear.
 # `internals` is intentionally omitted — it re-exposes

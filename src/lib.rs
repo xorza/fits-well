@@ -64,7 +64,8 @@ mod keyword;
 mod reader;
 #[path = "table/mod.rs"]
 mod table_impl;
-pub mod time;
+#[path = "time/mod.rs"]
+mod time_impl;
 mod unit;
 pub mod wcs;
 mod words;
@@ -79,11 +80,24 @@ pub mod image {
     pub use crate::bitpix::Bitpix;
     #[cfg(feature = "compression")]
     pub use crate::compress::{Compression, CompressionOptions, DitherMethod, Gzip, Hcompress};
-    pub use crate::data::{
-        BorrowedImage, Image, ImageData, ImageMetadata, ImageView, ReadImage, SampleType, Scaling,
-        UnsignedData,
-    };
+    pub use crate::data::image_data::ImageData;
+    pub use crate::data::image_view::{BorrowedImage, ImageView};
+    pub use crate::data::read_image::ReadImage;
+    pub use crate::data::sample_type::SampleType;
+    pub use crate::data::scaling::Scaling;
+    pub use crate::data::unsigned_data::UnsignedData;
+    pub use crate::data::{Image, ImageMetadata};
     pub use crate::writer::image::ImageStream;
+}
+
+/// Typed time coordinates (§9): calendar datetimes, time scales, and a
+/// header's time frame.
+pub mod time {
+    pub use crate::time_impl::datetime::Datetime;
+    pub use crate::time_impl::phase_axis::PhaseAxis;
+    pub use crate::time_impl::time_reference_position::TimeReferencePosition;
+    pub use crate::time_impl::time_scale::{TimeScale, TimeScaleKind};
+    pub use crate::time_impl::{FitsTime, TimeBounds, TimeCoordinate};
 }
 
 /// Binary and ASCII table values, schema and selection metadata, and write
@@ -130,7 +144,7 @@ pub mod io {
 #[cfg(feature = "internals")]
 pub mod internals {
     use crate::bitpix::Bitpix;
-    use crate::data::ImageData;
+    use crate::data::image_data::ImageData;
     use crate::wcs::bench;
 
     /// Decode a big-endian data unit into host-endian samples — the per-element

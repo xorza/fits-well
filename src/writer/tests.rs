@@ -5,7 +5,10 @@ use crate::block::{BLOCK_SIZE, CARD_SIZE, SPACE_FILL, ZERO_FILL};
 use crate::checksum;
 #[cfg(feature = "compression")]
 use crate::compress::{Compression, CompressionOptions};
-use crate::data::{Image, ImageData, Scaling, UnsignedData};
+use crate::data::Image;
+use crate::data::image_data::ImageData;
+use crate::data::scaling::Scaling;
+use crate::data::unsigned_data::UnsignedData;
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::hdu::{HduKind, MAX_TABLE_FIELDS};

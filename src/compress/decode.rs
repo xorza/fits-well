@@ -19,10 +19,10 @@ use crate::compress::{gzip, hcompress, plio, quantize, rice};
 
 use crate::allocation;
 use crate::bitpix::Bitpix;
-use crate::data::BorrowedImage;
 use crate::data::Image;
-use crate::data::ImageData;
-use crate::data::Scaling;
+use crate::data::image_data::ImageData;
+use crate::data::image_view::BorrowedImage;
+use crate::data::scaling::Scaling;
 use crate::data::shape_product;
 use crate::data::validate_image_region;
 use crate::data::view_words;

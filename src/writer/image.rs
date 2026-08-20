@@ -8,7 +8,9 @@ use crate::block::{BLOCK_SIZE, ZERO_FILL};
 use crate::checksum;
 #[cfg(feature = "compression")]
 use crate::compress::{Compression, CompressionOptions, encode};
-use crate::data::{Image, ImageData, Scaling, shape_product};
+use crate::data::image_data::ImageData;
+use crate::data::scaling::Scaling;
+use crate::data::{Image, shape_product};
 use crate::error::{FitsError, Result};
 use crate::header::Header;
 use crate::header::value;
