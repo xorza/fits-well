@@ -299,141 +299,103 @@ impl TableBuilder {
     }
 }
 
-impl<W: Write> FitsWriter<W> {
-    /// Write a binary table as a `BINTABLE` extension. A dataless primary HDU is
-    /// written automatically first if nothing has been written yet (a table can
-    /// never be the primary HDU). Fixed-width and variable-length (`P`/`Q`) columns
-    /// are both supported, including jagged `PX`/`QX` bit arrays — VLA columns
-    /// write a heap after the main table.
-    pub fn write_table(&mut self, table: &TableBuilder) -> Result<()> {
-        self.write_table_template(table, None)
+pub(super) fn write_template<W: Write>(
+    writer: &mut FitsWriter<W>,
+    table: &TableBuilder,
+    template: Option<&Header>,
+) -> Result<()> {
+    writer.ensure_writable()?;
+    let nrows = table.nrows.unwrap_or(0);
+    let columns = &table.columns;
+    validate_table_field_count(columns.len())?;
+    value::fits_i64(nrows)?;
+    let mut layouts = Vec::with_capacity(columns.len());
+    let mut row_len = 0usize;
+    for col in columns {
+        let layout = validate_column(col, nrows)?;
+        row_len = row_len
+            .checked_add(layout.row_width)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        layouts.push(layout);
     }
-
-    /// Write a binary table while preserving the non-structural cards from `header`.
-    /// Mandatory table-layout and checksum cards are regenerated from `columns`.
-    pub fn write_table_with_header(&mut self, table: &TableBuilder, header: &Header) -> Result<()> {
-        self.write_table_template(table, Some(header))
-    }
-
-    fn write_table_template(
-        &mut self,
-        table: &TableBuilder,
-        template: Option<&Header>,
-    ) -> Result<()> {
-        self.ensure_writable()?;
-        let nrows = table.nrows.unwrap_or(0);
-        let columns = &table.columns;
-        validate_table_field_count(columns.len())?;
-        value::fits_i64(nrows)?;
-        let mut layouts = Vec::with_capacity(columns.len());
-        let mut row_len = 0usize;
+    value::fits_i64(row_len)?;
+    let mut heap_len = 0usize;
+    for r in 0..nrows {
         for col in columns {
-            let layout = validate_column(col, nrows)?;
-            row_len = row_len
-                .checked_add(layout.row_width)
-                .ok_or(FitsError::DataUnitOverflow)?;
-            layouts.push(layout);
-        }
-        value::fits_i64(row_len)?;
-        let mut heap_len = 0usize;
-        for r in 0..nrows {
-            for col in columns {
-                match &col.values {
-                    WriteColumnData::Vla { kind, rows, wide } => {
-                        let cell = &rows[r];
-                        heap_len = next_vla_heap_len(
-                            heap_len,
-                            *wide,
-                            encoded_element_count(*kind, cell)?,
-                            cell_byte_len(*kind, cell)?,
-                        )?;
-                    }
-                    WriteColumnData::VlaBits { rows, wide } => {
-                        let bits = &rows[r];
-                        heap_len =
-                            next_vla_heap_len(heap_len, *wide, bits.len(), bits.len().div_ceil(8))?;
-                    }
-                    _ => {}
+            match &col.values {
+                WriteColumnData::Vla { kind, rows, wide } => {
+                    let cell = &rows[r];
+                    heap_len = next_vla_heap_len(
+                        heap_len,
+                        *wide,
+                        encoded_element_count(*kind, cell)?,
+                        cell_byte_len(*kind, cell)?,
+                    )?;
                 }
+                WriteColumnData::VlaBits { rows, wide } => {
+                    let bits = &rows[r];
+                    heap_len =
+                        next_vla_heap_len(heap_len, *wide, bits.len(), bits.len().div_ceil(8))?;
+                }
+                _ => {}
             }
         }
-        value::fits_i64(heap_len)?;
-        self.scratch.clear();
-        let main_len = nrows
-            .checked_mul(row_len)
-            .ok_or(FitsError::DataUnitOverflow)?;
-        let total_len = main_len
-            .checked_add(heap_len)
-            .ok_or(FitsError::DataUnitOverflow)?;
-        self.scratch.reserve_exact(total_len);
-        for r in 0..nrows {
-            for col in columns {
-                match &col.values {
-                    WriteColumnData::Vla { wide, .. } | WriteColumnData::VlaBits { wide, .. } => {
-                        self.scratch
-                            .resize(self.scratch.len() + if *wide { 16 } else { 8 }, 0)
-                    }
-                    _ => pack_cell(&mut self.scratch, col, r),
-                }
-            }
-        }
-        assert_eq!(self.scratch.len(), main_len, "main table layout");
-        for r in 0..nrows {
-            let mut column_offset = 0usize;
-            for (col, layout) in columns.iter().zip(&layouts) {
-                match &col.values {
-                    WriteColumnData::Vla { kind, rows, wide } => {
-                        let cell = &rows[r];
-                        let descriptor_offset = r * row_len + column_offset;
-                        write_vla_descriptor(
-                            &mut self.scratch,
-                            main_len,
-                            descriptor_offset,
-                            *wide,
-                            encoded_element_count(*kind, cell)?,
-                        )?;
-                        append_be(&mut self.scratch, cell);
-                    }
-                    WriteColumnData::VlaBits { rows, wide } => {
-                        let bits = &rows[r];
-                        let descriptor_offset = r * row_len + column_offset;
-                        write_vla_descriptor(
-                            &mut self.scratch,
-                            main_len,
-                            descriptor_offset,
-                            *wide,
-                            bits.len(),
-                        )?;
-                        append_bits(&mut self.scratch, bits);
-                    }
-                    _ => {}
-                }
-                column_offset += layout.row_width;
-            }
-        }
-        let header = bintable_header(nrows, row_len, columns, &layouts, heap_len)?;
-        self.finish_hdu(header, template, ZERO_FILL, true)
     }
-
-    /// Write a `BINTABLE` as a tiled-compressed table (§10.3). `header` is the
-    /// original table's header (column metadata is copied from it), `table` its
-    /// parsed data, `rows_per_tile` the tile height, and `compression` the default
-    /// per-column codec (`GZIP_1`/`GZIP_2`/`RICE_1`/`NOCOMPRESS`). Fixed-width and
-    /// P/Q variable-length columns are supported. Requires the `compression`
-    /// feature.
-    #[cfg(feature = "compression")]
-    pub fn write_compressed_table(
-        &mut self,
-        header: &Header,
-        table: &BinTable,
-        rows_per_tile: usize,
-        compression: Compression,
-    ) -> Result<()> {
-        self.ensure_writable()?;
-        let zheader =
-            table::compress_table(header, table, rows_per_tile, compression, &mut self.scratch)?;
-        self.finish_hdu(zheader, None, ZERO_FILL, true)
+    value::fits_i64(heap_len)?;
+    writer.scratch.clear();
+    let main_len = nrows
+        .checked_mul(row_len)
+        .ok_or(FitsError::DataUnitOverflow)?;
+    let total_len = main_len
+        .checked_add(heap_len)
+        .ok_or(FitsError::DataUnitOverflow)?;
+    writer.scratch.reserve_exact(total_len);
+    for r in 0..nrows {
+        for col in columns {
+            match &col.values {
+                WriteColumnData::Vla { wide, .. } | WriteColumnData::VlaBits { wide, .. } => writer
+                    .scratch
+                    .resize(writer.scratch.len() + if *wide { 16 } else { 8 }, 0),
+                _ => pack_cell(&mut writer.scratch, col, r),
+            }
+        }
     }
+    assert_eq!(writer.scratch.len(), main_len, "main table layout");
+    for r in 0..nrows {
+        let mut column_offset = 0usize;
+        for (col, layout) in columns.iter().zip(&layouts) {
+            match &col.values {
+                WriteColumnData::Vla { kind, rows, wide } => {
+                    let cell = &rows[r];
+                    let descriptor_offset = r * row_len + column_offset;
+                    write_vla_descriptor(
+                        &mut writer.scratch,
+                        main_len,
+                        descriptor_offset,
+                        *wide,
+                        encoded_element_count(*kind, cell)?,
+                    )?;
+                    append_be(&mut writer.scratch, cell);
+                }
+                WriteColumnData::VlaBits { rows, wide } => {
+                    let bits = &rows[r];
+                    let descriptor_offset = r * row_len + column_offset;
+                    write_vla_descriptor(
+                        &mut writer.scratch,
+                        main_len,
+                        descriptor_offset,
+                        *wide,
+                        bits.len(),
+                    )?;
+                    append_bits(&mut writer.scratch, bits);
+                }
+                _ => {}
+            }
+            column_offset += layout.row_width;
+        }
+    }
+    let header = bintable_header(nrows, row_len, columns, &layouts, heap_len)?;
+    writer.finish_hdu(header, template, ZERO_FILL, true)
 }
 
 /// `BINTABLE` extension header (§7.3.1) for the given columns.
@@ -859,6 +821,25 @@ fn validate_character(value: &CharacterField, context: &'static str) -> Result<(
     } else {
         Err(FitsError::InvalidAscii { context })
     }
+}
+
+#[cfg(feature = "compression")]
+pub(super) fn write_compressed<W: Write>(
+    writer: &mut FitsWriter<W>,
+    header: &Header,
+    table: &BinTable,
+    rows_per_tile: usize,
+    compression: Compression,
+) -> Result<()> {
+    writer.ensure_writable()?;
+    let zheader = table::compress_table(
+        header,
+        table,
+        rows_per_tile,
+        compression,
+        &mut writer.scratch,
+    )?;
+    writer.finish_hdu(zheader, None, ZERO_FILL, true)
 }
 
 #[cfg(test)]

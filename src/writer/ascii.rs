@@ -113,62 +113,43 @@ impl AsciiTableBuilder {
     }
 }
 
-impl<W: Write> FitsWriter<W> {
-    /// Write an ASCII table as a `TABLE` extension (a dataless primary is written
-    /// first if needed). Columns are packed left-to-right with no gaps; data is
-    /// space-padded per §7.2.3.
-    pub fn write_ascii_table(&mut self, table: &AsciiTableBuilder) -> Result<()> {
-        self.write_ascii_table_template(table, None)
-    }
-
-    /// Write an ASCII table while preserving the non-structural cards from `header`.
-    /// Mandatory table-layout and checksum cards are regenerated from `columns`.
-    pub fn write_ascii_table_with_header(
-        &mut self,
-        table: &AsciiTableBuilder,
-        header: &Header,
-    ) -> Result<()> {
-        self.write_ascii_table_template(table, Some(header))
-    }
-
-    fn write_ascii_table_template(
-        &mut self,
-        table: &AsciiTableBuilder,
-        template: Option<&Header>,
-    ) -> Result<()> {
-        self.ensure_writable()?;
-        let nrows = table.nrows.unwrap_or(0);
-        let columns = &table.columns;
-        validate_table_field_count(columns.len())?;
-        let mut tbcols = Vec::with_capacity(columns.len());
-        let mut row_len = 0usize;
-        for col in columns {
-            validate_ascii_column(col)?;
-            let count = col.data.len();
-            if count != nrows {
-                return Err(FitsError::RowWidthMismatch {
-                    computed: count,
-                    declared: nrows,
-                });
-            }
-            tbcols.push(row_len.checked_add(1).ok_or(FitsError::DataUnitOverflow)?); // 1-based start column
-            row_len = row_len
-                .checked_add(col.width)
-                .ok_or(FitsError::DataUnitOverflow)?;
+pub(super) fn write_template<W: Write>(
+    writer: &mut FitsWriter<W>,
+    table: &AsciiTableBuilder,
+    template: Option<&Header>,
+) -> Result<()> {
+    writer.ensure_writable()?;
+    let nrows = table.nrows.unwrap_or(0);
+    let columns = &table.columns;
+    validate_table_field_count(columns.len())?;
+    let mut tbcols = Vec::with_capacity(columns.len());
+    let mut row_len = 0usize;
+    for col in columns {
+        validate_ascii_column(col)?;
+        let count = col.data.len();
+        if count != nrows {
+            return Err(FitsError::RowWidthMismatch {
+                computed: count,
+                declared: nrows,
+            });
         }
-        let header = ascii_table_header(nrows, row_len, columns, &tbcols)?;
-        self.scratch.clear();
-        let total_len = nrows
-            .checked_mul(row_len)
+        tbcols.push(row_len.checked_add(1).ok_or(FitsError::DataUnitOverflow)?); // 1-based start column
+        row_len = row_len
+            .checked_add(col.width)
             .ok_or(FitsError::DataUnitOverflow)?;
-        self.scratch.reserve_exact(total_len);
-        for r in 0..nrows {
-            for col in columns {
-                append_ascii_field(&mut self.scratch, col, r)?;
-            }
-        }
-        self.finish_hdu(header, template, SPACE_FILL, true)
     }
+    let header = ascii_table_header(nrows, row_len, columns, &tbcols)?;
+    writer.scratch.clear();
+    let total_len = nrows
+        .checked_mul(row_len)
+        .ok_or(FitsError::DataUnitOverflow)?;
+    writer.scratch.reserve_exact(total_len);
+    for r in 0..nrows {
+        for col in columns {
+            append_ascii_field(&mut writer.scratch, col, r)?;
+        }
+    }
+    writer.finish_hdu(header, template, SPACE_FILL, true)
 }
 
 fn validate_ascii_column(col: &AsciiWriteColumn) -> Result<()> {
