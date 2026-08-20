@@ -16,7 +16,8 @@ use crate::header::value::Value;
 use crate::header::{Header, from_card_lines as header};
 use crate::reader::FitsReader;
 use crate::reader::{ChecksumReport, ChecksumStatus};
-use crate::table_impl::{CharacterField, ColumnData};
+use crate::table_impl::character_field::CharacterField;
+use crate::table_impl::column_data::ColumnData;
 use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
 use crate::writer::table::internals;
 use crate::writer::table::{ColumnType, TableBuilder, WriteColumn};
@@ -786,7 +787,7 @@ fn writes_and_reads_back_variable_length_arrays() {
     let table = r.read_table(1).unwrap();
     assert_eq!(
         table.metadata().columns[0].tform.vla_elem,
-        Some(crate::table_impl::TformKind::I64)
+        Some(crate::table_impl::tform_kind::TformKind::I64)
     );
     assert!(table.column_by_idx(0).unwrap().vla().unwrap().is_empty());
 }
@@ -806,7 +807,7 @@ fn vla_constructor_rejects_mixed_element_types() {
 
 #[test]
 fn writes_tdim_p_q_vla_and_bit_columns() {
-    use crate::table_impl::TformKind;
+    use crate::table_impl::tform_kind::TformKind;
     let columns = vec![
         // 2×2 multidimensional column (TDIM '(2,2)'), 4 elements/row.
         WriteColumn::fixed("MAT", ColumnData::I32((1..=8).collect()), 4).with_tdim(vec![2, 2]),
@@ -881,7 +882,7 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
 
 #[test]
 fn writes_p_q_variable_length_bit_arrays_with_exact_counts_and_padding() {
-    use crate::table_impl::TformKind;
+    use crate::table_impl::tform_kind::TformKind;
 
     let mut one_bit = bitvec![u8, Msb0; 1; 8];
     one_bit.truncate(1);

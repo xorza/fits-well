@@ -14,6 +14,7 @@ use crate::wcs::axis::spectral_kind::{
 };
 use crate::wcs::axis::spectral_rest::{SpectralParameters, SpectralRest};
 use crate::wcs::axis::spectral_transform::SpectralTransform;
+use crate::wcs::ctype::Ctype;
 
 const SPEED_OF_LIGHT: f64 = 2.997_924_58e8;
 // wcslib uses the historical WCS-paper value rather than the modern exact SI value.
@@ -41,16 +42,16 @@ impl AxisTransform {
         rest: SpectralRest,
         parameters: SpectralParameters,
     ) -> Result<AxisTransformSpec> {
-        let parts = CTypeParts::parse(ctype);
-        let Some(code) = parts.code else {
+        let parsed = Ctype::parse(ctype);
+        let Some(code) = parsed.algorithm else {
             return Ok(AxisTransformSpec {
                 transform: AxisTransform::Linear,
                 unit_scale: 1.0,
             });
         };
-        let kind = SpectralKind::from_code(parts.head);
+        let kind = SpectralKind::from_code(parsed.head);
         if code == "LOG" {
-            if parts.head.len() != 4 {
+            if parsed.head.len() != 4 {
                 return Ok(unsupported());
             }
             let unit_scale = kind
@@ -133,11 +134,11 @@ impl AxisTransform {
 }
 
 pub(super) fn is_spectral_type(ctype: &str) -> bool {
-    SpectralKind::from_code(CTypeParts::parse(ctype).head).is_some()
+    SpectralKind::from_code(Ctype::parse(ctype).head).is_some()
 }
 
 pub(super) fn spectral_unit_scale(ctype: &str, cunit: &str) -> Result<Option<f64>> {
-    SpectralKind::from_code(CTypeParts::parse(ctype).head)
+    SpectralKind::from_code(Ctype::parse(ctype).head)
         .map(|kind| kind.unit_scale(cunit))
         .transpose()
 }
@@ -146,23 +147,6 @@ fn unsupported() -> AxisTransformSpec {
     AxisTransformSpec {
         transform: AxisTransform::Unsupported,
         unit_scale: 1.0,
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CTypeParts<'a> {
-    head: &'a str,
-    code: Option<&'a str>,
-}
-
-impl<'a> CTypeParts<'a> {
-    fn parse(ctype: &'a str) -> CTypeParts<'a> {
-        let head = ctype.split('-').next().unwrap_or("").trim_end();
-        let code = ctype
-            .rsplit_once('-')
-            .map(|parts| parts.1.trim_end())
-            .filter(|code| !code.is_empty());
-        CTypeParts { head, code }
     }
 }
 

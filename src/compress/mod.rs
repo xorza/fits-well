@@ -17,13 +17,13 @@
 mod convert;
 pub(crate) mod decode;
 pub(crate) mod encode;
-mod geometry;
 mod gzip;
 mod hcompress;
 mod plio;
 mod quantize;
 mod rice;
 pub(crate) mod table;
+mod tile_geometry;
 
 use crate::error::FitsError;
 use crate::error::Result;

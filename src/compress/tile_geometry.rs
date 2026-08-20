@@ -1,5 +1,7 @@
 //! N-dimensional tile geometry shared by image decompress and both encoders.
 
+use std::ops::Range;
+
 /// The tiling of an N-d image: axis lengths, per-axis tile sizes, and the derived
 /// strides and per-axis tile counts. Iterating `0..ntiles()` and calling `tile_into`
 /// yields each tile's clipped dimensions and flat pixel indices.
@@ -35,6 +37,73 @@ impl TileScratch {
     /// Total pixels in the current tile (`row_len × nrows`).
     pub(super) fn nelem(&self) -> usize {
         self.row_len * self.row_bases.len()
+    }
+
+    /// Write this tile's `values` into the full image plane `out`, converting each as
+    /// it lands. Axis 0 has stride 1, so every row copies as a contiguous slice.
+    pub(super) fn scatter_rows_into<S: Copy, D>(
+        &self,
+        out: &mut [D],
+        values: &[S],
+        convert: &impl Fn(S) -> D,
+    ) {
+        let mut offset = 0;
+        for &base in &self.row_bases {
+            for (slot, &value) in out[base..base + self.row_len]
+                .iter_mut()
+                .zip(&values[offset..offset + self.row_len])
+            {
+                *slot = convert(value);
+            }
+            offset += self.row_len;
+        }
+    }
+
+    /// Write only this tile's intersection with `ranges` into a section plane of
+    /// `selected_shape`. Rows outside the region are skipped whole; the surviving row
+    /// is clipped on axis 0 and copied as one contiguous run.
+    pub(super) fn scatter_region_into<S: Copy, D: Copy>(
+        &self,
+        ranges: &[Range<usize>],
+        selected_shape: &[usize],
+        values: &[S],
+        out: &mut [D],
+        convert: &impl Fn(S) -> D,
+    ) {
+        let x_start = self.origin[0].max(ranges[0].start);
+        let x_end = (self.origin[0] + self.tdims[0]).min(ranges[0].end);
+        if x_start >= x_end {
+            return;
+        }
+        let width = x_end - x_start;
+        for row in 0..self.row_bases.len() {
+            let mut remainder = row;
+            let mut output_base = 0usize;
+            let mut output_stride = selected_shape[0];
+            let mut selected = true;
+            for axis in 1..self.tdims.len() {
+                let local = remainder % self.tdims[axis];
+                remainder /= self.tdims[axis];
+                let coordinate = self.origin[axis] + local;
+                if !ranges[axis].contains(&coordinate) {
+                    selected = false;
+                    break;
+                }
+                output_base += (coordinate - ranges[axis].start) * output_stride;
+                output_stride *= selected_shape[axis];
+            }
+            if !selected {
+                continue;
+            }
+            let source = row * self.row_len + (x_start - self.origin[0]);
+            let destination = output_base + (x_start - ranges[0].start);
+            for (slot, &value) in out[destination..destination + width]
+                .iter_mut()
+                .zip(&values[source..source + width])
+            {
+                *slot = convert(value);
+            }
+        }
     }
 }
 

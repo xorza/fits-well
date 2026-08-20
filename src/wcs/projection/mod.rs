@@ -3,12 +3,71 @@
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI, SQRT_2};
 
 use crate::error::{FitsError, Result};
-use crate::wcs::{D2R, DOMAIN_TOLERANCE, Projection, R2D};
+use crate::wcs::{D2R, DOMAIN_TOLERANCE, R2D};
 
 mod cube;
 mod healpix;
 
 const NEWTON_RESIDUAL_TOLERANCE: f64 = 1e-12;
+
+/// A celestial projection algorithm — the 3-letter `CTYPE` code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Projection {
+    /// `TAN` — gnomonic (zenithal).
+    Tan,
+    /// `SIN` — orthographic/slant (zenithal).
+    Sin,
+    /// `ARC` — zenithal equidistant.
+    Arc,
+    /// `STG` — stereographic (zenithal).
+    Stg,
+    /// `ZEA` — zenithal equal-area.
+    Zea,
+    /// `CAR` — plate carrée (cylindrical).
+    Car,
+    /// `CEA` — cylindrical equal-area.
+    Cea,
+    /// `MER` — Mercator (cylindrical).
+    Mer,
+    /// `SFL` — Sanson–Flamsteed (pseudo-cylindrical).
+    Sfl,
+    /// `AIT` — Hammer–Aitoff (all-sky, pseudo-cylindrical).
+    Ait,
+    /// `MOL` — Mollweide (all-sky, pseudo-cylindrical).
+    Mol,
+    /// `ZPN` — zenithal polynomial (`PVi_m` coefficients).
+    Zpn,
+    /// `CYP` — cylindrical perspective (`μ = PVi_1`, `λ = PVi_2`).
+    Cyp,
+    /// `PAR` — parabolic (pseudo-cylindrical).
+    Par,
+    /// `COP` — conic perspective (`θ_a = PVi_1`, `η = PVi_2`).
+    Cop,
+    /// `COE` — conic equal-area.
+    Coe,
+    /// `COD` — conic equidistant.
+    Cod,
+    /// `COO` — conic orthomorphic.
+    Coo,
+    /// `BON` — Bonne's equal-area (pseudo-conic, `θ₁ = PVi_1`).
+    Bon,
+    /// `AIR` — Airy (zenithal, minimum-error; `θ_b = PVi_1`).
+    Air,
+    /// `AZP` — zenithal perspective (`μ = PVi_1`, tilt `γ = PVi_2`).
+    Azp,
+    /// `PCO` — polyconic.
+    Pco,
+    /// `SZP` — slant zenithal perspective (`μ = PVi_1`, `φc = PVi_2`, `θc = PVi_3`).
+    Szp,
+    /// `TSC` — tangential spherical cube.
+    Tsc,
+    /// `CSC` — COBE quadrilateralized spherical cube.
+    Csc,
+    /// `QSC` — quadrilateralized spherical cube.
+    Qsc,
+    /// `HPX` — HEALPix (`H = PVi_1`, `K = PVi_2`).
+    Hpx,
+}
 
 /// The projection family — it fixes the fiducial point and selects the deprojection
 /// branch. The single source of truth for membership that `from_code`, `is_zenithal`,

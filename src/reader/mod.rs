@@ -32,15 +32,12 @@ use crate::hdu::data_extent;
 use crate::header::Header;
 use crate::header::card::is_end_record;
 use crate::table_impl::BinTable;
-use crate::table_impl::Column;
-use crate::table_impl::ColumnData;
-use crate::table_impl::TableSchema;
-use crate::table_impl::TformKind;
-use crate::table_impl::decode_fixed_cell;
-use crate::table_impl::decode_vla_cell;
+use crate::table_impl::column::Column;
+use crate::table_impl::column_data::ColumnData;
 use crate::table_impl::descriptor::PqDescriptor;
+use crate::table_impl::table_schema::TableSchema;
+use crate::table_impl::tform_kind::TformKind;
 use crate::wcs::Wcs;
-use crate::wcs::image_axis_count;
 use crate::wcs::tabular;
 
 pub(crate) mod source;
@@ -635,7 +632,7 @@ impl<S: Source> FitsReader<S> {
     pub fn table_schema(&self, index: usize) -> Result<TableSchema> {
         let hdu = self.checked_hdu(index)?;
         hdu.ensure_bintable()?;
-        BinTable::schema(&hdu.header)
+        TableSchema::parse(&hdu.header)
     }
 
     /// Materialize only the requested contiguous row range, including only the VLA
@@ -824,11 +821,11 @@ impl<S: Source> FitsReader<S> {
             TformKind::ArrayDesc64 => true,
             _ => {
                 let bytes = self.source.slice(cell_offset, width, &mut self.scratch)?;
-                return Ok(decode_fixed_cell(column, bytes));
+                return Ok(column.decode_cell(bytes));
             }
         };
         if column.tform.repeat == 0 {
-            return decode_vla_cell(column, &[], 0);
+            return column.decode_vla_cell(&[], 0);
         }
         let descriptor_bytes = self.source.slice(cell_offset, width, &mut self.scratch)?;
         let span = vla_cell_span(&schema, column, descriptor_bytes, wide)?;
@@ -837,7 +834,7 @@ impl<S: Source> FitsReader<S> {
             span.heap_range.len(),
             &mut self.scratch,
         )?;
-        decode_vla_cell(column, bytes, span.count)
+        column.decode_vla_cell(bytes, span.count)
     }
 
     /// Parse an HDU's WCS and resolve any standard `-TAB` coordinate arrays from
@@ -846,7 +843,7 @@ impl<S: Source> FitsReader<S> {
     /// coordinate values and optional index vectors live outside the source header.
     pub fn read_wcs(&mut self, index: usize, alt: Option<char>) -> Result<Wcs> {
         let header = self.checked_hdu(index)?.header.clone();
-        let descriptors = tabular::descriptors(&header, image_axis_count(&header, alt)?, alt)?;
+        let descriptors = tabular::descriptors(&header, Wcs::image_axis_count(&header, alt)?, alt)?;
         if descriptors.is_empty() {
             return Wcs::from_header(&header, alt);
         }

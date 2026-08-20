@@ -112,10 +112,15 @@ pub mod table {
         AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiTable, AsciiTableMetadata,
     };
     pub use crate::reader::{ColumnSelector, SelectedColumn, TableColumnData, TableSelection};
-    pub use crate::table_impl::{
-        BinTable, BinTableMetadata, BitColumn, CharacterField, Column, ColumnData, ColumnReader,
-        TableSchema, Tform, TformKind,
-    };
+    pub use crate::table_impl::bit_column::BitColumn;
+    pub use crate::table_impl::character_field::CharacterField;
+    pub use crate::table_impl::column::Column;
+    pub use crate::table_impl::column_data::ColumnData;
+    pub use crate::table_impl::column_reader::ColumnReader;
+    pub use crate::table_impl::table_schema::TableSchema;
+    pub use crate::table_impl::tform::Tform;
+    pub use crate::table_impl::tform_kind::TformKind;
+    pub use crate::table_impl::{BinTable, BinTableMetadata};
     pub use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
     pub use crate::writer::table::{ColumnType, TableBuilder, WriteColumn};
 }

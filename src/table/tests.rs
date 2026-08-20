@@ -1,7 +1,18 @@
 use crate::data::U64_OFFSET;
 use crate::error::Indexed;
 use crate::reader::FitsReader;
-use crate::table_impl::*;
+use bitvec::order::Msb0;
+use num_complex::Complex;
+
+use crate::data::unsigned_data::UnsignedData;
+use crate::error::FitsError;
+use crate::header::Header;
+use crate::table_impl::BinTable;
+use crate::table_impl::character_field::CharacterField;
+use crate::table_impl::column_data::ColumnData;
+use crate::table_impl::table_schema::TableSchema;
+use crate::table_impl::tform::Tform;
+use crate::table_impl::tform_kind::TformKind;
 use bitvec::bitvec;
 use std::fs::File;
 
@@ -657,7 +668,7 @@ fn column_index_is_case_insensitive() {
 
     // The schema resolves names the same way, without the data unit — it is the one
     // implementation, which `BinTable` and the reader's column selectors both use.
-    let schema = BinTable::schema(&header).unwrap();
+    let schema = TableSchema::parse(&header).unwrap();
     assert_eq!(schema.column_index("FLUX"), Some(0));
     assert_eq!(schema.column_index("missing"), None);
     assert_eq!(schema.column_index(""), None);
