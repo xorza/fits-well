@@ -20,9 +20,18 @@ pub(super) struct HcompressScratch {
     plane: Vec<i64>,
     transform: Vec<i64>,
     rows: Vec<i64>,
+    coding: CodingBuffers,
+}
+
+/// The byte buffers the quadtree coder reuses across tiles: the extracted sign
+/// bits, the quadtree cells one bit plane reduces through, and the Huffman code
+/// bytes packed before they flush in reverse. They are sized per tile and only
+/// ever grow, so they travel together as one reuse pool.
+#[derive(Debug, Default)]
+struct CodingBuffers {
+    signbits: Vec<u8>,
     qtree: Vec<u8>,
     code_buffer: Vec<u8>,
-    signbits: Vec<u8>,
 }
 
 /// Decode an `HCOMPRESS_1` tile into row-major integer values (`ny` fastest, the
@@ -68,15 +77,7 @@ pub(super) fn hcompress_tile_encode(
     )?;
     digitize(&mut scratch.plane, nx, ny, scale)?;
     let mut enc = BitOutput::new();
-    enc.encode(
-        &mut scratch.plane,
-        nx,
-        ny,
-        scale,
-        &mut scratch.signbits,
-        &mut scratch.qtree,
-        &mut scratch.code_buffer,
-    )?;
+    enc.encode(&mut scratch.plane, nx, ny, scale, &mut scratch.coding)?;
     Ok(enc.out)
 }
 
@@ -105,6 +106,18 @@ struct BitOutput {
     out: Vec<u8>,
     buffer2: i32,
     bits_to_go2: i32,
+}
+
+/// One quadrant of the digitized plane as the quadtree coder reads it: the slice
+/// its first row starts at, the *whole* plane's row stride `n`, and the quadrant's
+/// own extent. `qtree_encode`, `write_bdirect` and `qtree_onebit` each walk a
+/// quadrant and take nothing else of the geometry.
+#[derive(Debug, Clone, Copy)]
+struct Quadrant<'a> {
+    a: &'a [i64],
+    n: usize,
+    nqx: usize,
+    nqy: usize,
 }
 
 impl BitOutput {
@@ -196,17 +209,19 @@ impl BitOutput {
 
     /// Write the header, extract sign bits, compute per-quadrant bit-plane counts,
     /// quadtree-encode the planes, then append the sign bytes (cfitsio `encode`).
-    #[allow(clippy::too_many_arguments)]
     fn encode(
         &mut self,
         a: &mut [i64],
         nx: usize,
         ny: usize,
         scale: i32,
-        signbits: &mut Vec<u8>,
-        qtree: &mut Vec<u8>,
-        code_buffer: &mut Vec<u8>,
+        bufs: &mut CodingBuffers,
     ) -> Result<()> {
+        let CodingBuffers {
+            signbits,
+            qtree,
+            code_buffer,
+        } = bufs;
         let nel = nx * ny;
         self.out.extend_from_slice(&MAGIC);
         self.writeint(nx as i32);
@@ -286,20 +301,24 @@ impl BitOutput {
         let ny2 = ny.div_ceil(2);
         self.start_outputing_bits();
         self.qtree_encode(
-            &a[0..],
-            ny,
-            nx2,
-            ny2,
+            Quadrant {
+                a: &a[0..],
+                n: ny,
+                nqx: nx2,
+                nqy: ny2,
+            },
             nbitplanes[0] as i32,
             qtree,
             code_buffer,
         );
         if ny / 2 > 0 {
             self.qtree_encode(
-                &a[ny2..],
-                ny,
-                nx2,
-                ny / 2,
+                Quadrant {
+                    a: &a[ny2..],
+                    n: ny,
+                    nqx: nx2,
+                    nqy: ny / 2,
+                },
                 nbitplanes[1] as i32,
                 qtree,
                 code_buffer,
@@ -307,10 +326,12 @@ impl BitOutput {
         }
         if nx / 2 > 0 {
             self.qtree_encode(
-                &a[ny * nx2..],
-                ny,
-                nx / 2,
-                ny2,
+                Quadrant {
+                    a: &a[ny * nx2..],
+                    n: ny,
+                    nqx: nx / 2,
+                    nqy: ny2,
+                },
                 nbitplanes[1] as i32,
                 qtree,
                 code_buffer,
@@ -318,10 +339,12 @@ impl BitOutput {
         }
         if nx / 2 > 0 && ny / 2 > 0 {
             self.qtree_encode(
-                &a[ny * nx2 + ny2..],
-                ny,
-                nx / 2,
-                ny / 2,
+                Quadrant {
+                    a: &a[ny * nx2 + ny2..],
+                    n: ny,
+                    nqx: nx / 2,
+                    nqy: ny / 2,
+                },
                 nbitplanes[2] as i32,
                 qtree,
                 code_buffer,
@@ -333,17 +356,14 @@ impl BitOutput {
 
     /// Quadtree-code one quadrant's bit planes, top plane first (cfitsio
     /// `qtree_encode`). Falls back to a direct bitmap when the quadtree expands.
-    #[allow(clippy::too_many_arguments)]
     fn qtree_encode(
         &mut self,
-        a: &[i64],
-        n: usize,
-        nqx: usize,
-        nqy: usize,
+        quadrant: Quadrant<'_>,
         nbitplanes: i32,
         scratch: &mut Vec<u8>,
         buffer: &mut Vec<u8>,
     ) {
+        let Quadrant { nqx, nqy, .. } = quadrant;
         let nqmax = nqx.max(nqy);
         let log2n = log2_ceil(nqmax);
         let nqx2 = nqx.div_ceil(2);
@@ -356,7 +376,7 @@ impl BitOutput {
             let mut b = 0usize;
             let mut bitbuffer = 0i32;
             let mut bits_to_go3 = 0i32;
-            qtree_onebit(a, n, nqx, nqy, scratch, bit);
+            qtree_onebit(quadrant, scratch, bit);
             let mut nx = (nqx + 1) >> 1;
             let mut ny = (nqy + 1) >> 1;
             let mut overflow = bufcopy(
@@ -386,7 +406,7 @@ impl BitOutput {
                 );
             }
             if overflow {
-                self.write_bdirect(a, n, nqx, nqy, scratch, bit);
+                self.write_bdirect(quadrant, scratch, bit);
                 continue;
             }
             // Quadtree code: a 0xF marker, the leftover Huffman bits, then the
@@ -410,17 +430,10 @@ impl BitOutput {
     }
 
     /// Direct (un-quadtree) bitmap fallback: a 0x0 marker, then the packed nybbles.
-    fn write_bdirect(
-        &mut self,
-        a: &[i64],
-        n: usize,
-        nqx: usize,
-        nqy: usize,
-        scratch: &mut [u8],
-        bit: i32,
-    ) {
+    fn write_bdirect(&mut self, quadrant: Quadrant<'_>, scratch: &mut [u8], bit: i32) {
+        let Quadrant { nqx, nqy, .. } = quadrant;
         self.output_nybble(0x0);
-        qtree_onebit(a, n, nqx, nqy, scratch, bit);
+        qtree_onebit(quadrant, scratch, bit);
         self.output_nnybble(nqx.div_ceil(2) * nqy.div_ceil(2), scratch);
     }
 }
@@ -599,7 +612,13 @@ fn digitize(a: &mut [i64], nx: usize, ny: usize, scale: i32) -> Result<()> {
 
 /// First quadtree reduction step on bit `bit` of `a` → 4-bit codes in `b`
 /// (cfitsio `qtree_onebit`). `a` is non-negative here, so shifts can't sign-fill.
-fn qtree_onebit(a: &[i64], n: usize, nx: usize, ny: usize, b: &mut [u8], bit: i32) {
+fn qtree_onebit(quadrant: Quadrant<'_>, b: &mut [u8], bit: i32) {
+    let Quadrant {
+        a,
+        n,
+        nqx: nx,
+        nqy: ny,
+    } = quadrant;
     let b0 = 1i64 << bit;
     let b1 = b0 << 1;
     let b2 = b0 << 2;
@@ -686,7 +705,6 @@ fn qtree_reduce(a: &mut [u8], n: usize, nx: usize, ny: usize) {
 /// Append Huffman codes for the non-zero cells of `a[0..n]` to `buffer`, packing
 /// 8 bits at a time. Returns `true` if the buffer fills (the quadtree is
 /// expanding the data, so the caller falls back to a direct bitmap).
-#[allow(clippy::too_many_arguments)]
 fn bufcopy(
     a: &[u8],
     n: usize,
@@ -924,7 +942,7 @@ fn hdecompress_into(
         nx,
         ny,
         &nbitplanes,
-        &mut scratch.qtree,
+        &mut scratch.coding.qtree,
     )?;
     scratch.plane[0] = sumall;
 
