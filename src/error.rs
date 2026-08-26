@@ -1,6 +1,8 @@
 use std::fmt;
 use std::io;
 
+use thiserror::Error;
+
 pub type Result<T> = std::result::Result<T, FitsError>;
 
 /// What an out-of-range index was addressing, naming the bound it exceeded.
@@ -19,6 +21,35 @@ pub enum Indexed {
     WcsAxis,
 }
 
+impl Indexed {
+    fn fmt_out_of_bounds(
+        &self,
+        index: &usize,
+        len: &usize,
+        f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
+        match self {
+            Indexed::Hdu => write!(f, "HDU index {index} out of bounds (file has {len} HDUs)"),
+            Indexed::HeaderRecord => write!(
+                f,
+                "header record index {index} out of bounds (header has {len} records)"
+            ),
+            Indexed::Column => write!(
+                f,
+                "column index {index} out of bounds (table has {len} columns)"
+            ),
+            Indexed::Group => write!(
+                f,
+                "group index {index} out of bounds (random-groups array has {len} groups)"
+            ),
+            Indexed::WcsAxis => write!(
+                f,
+                "1-based WCS axis {index} out of bounds (WCS has {len} axes)"
+            ),
+        }
+    }
+}
+
 /// Which of two axis counts disagreed — the thing the caller supplied, against the
 /// structure it had to match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,51 +63,75 @@ pub enum Ranked {
     WcsCoordinate,
 }
 
-#[derive(Debug)]
+impl Ranked {
+    fn fmt_mismatch(
+        &self,
+        expected: &usize,
+        got: &usize,
+        f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
+        match self {
+            Ranked::ImageRegion => write!(
+                f,
+                "image region has {got} axes but the image has {expected}"
+            ),
+            Ranked::TileShape => {
+                write!(f, "tile shape has {got} axes but the image has {expected}")
+            }
+            Ranked::WcsCoordinate => write!(
+                f,
+                "coordinate has {got} {} but the WCS has {expected} axes",
+                if *got == 1 { "value" } else { "values" }
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum FitsError {
-    Io(io::Error),
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
     /// A previous sink error may have left a partial HDU in the output. Further
     /// writes are rejected because appending cannot repair that FITS stream.
+    #[error("writer is unusable after a previous output failure")]
     WriterFailed,
     /// A keyword name violated FITS syntax.
-    InvalidKeyword {
-        name: String,
-    },
+    #[error("invalid keyword name {name:?}")]
+    InvalidKeyword { name: String },
     /// A control or commentary keyword was used where a valued card was requested.
-    ReservedKeyword {
-        name: String,
-    },
+    #[error("reserved keyword {name:?} cannot be used as a valued card")]
+    ReservedKeyword { name: String },
     /// A header value has no conforming FITS representation.
+    #[error("header keyword {keyword:?} has an invalid value: {reason}")]
     InvalidHeaderValue {
         keyword: String,
         reason: &'static str,
     },
     /// A logical header card cannot fit one physical 80-byte record.
-    HeaderCardTooLong {
-        keyword: String,
-        length: usize,
-    },
+    #[error("header card {keyword:?} needs {length} bytes but a FITS record holds 80")]
+    HeaderCardTooLong { keyword: String, length: usize },
     /// A card's value field could not be parsed as any FITS value type.
-    InvalidValue {
-        card: String,
-    },
+    #[error("cannot parse value field of card {card:?}")]
+    InvalidValue { card: String },
     /// Interpreting a valid FITS time value requires leap-second, Earth-orientation,
     /// or ephemeris data that this format library does not provide.
-    ExternalTimeDataRequired {
-        operation: &'static str,
-    },
+    #[error("{operation} requires external astronomical time data")]
+    ExternalTimeDataRequired { operation: &'static str },
     /// A named metadata value was present but could not be interpreted as the type
     /// required by its FITS role.
+    #[error("value {name} is not a valid {expected}")]
     TypeMismatch {
         name: String,
         expected: &'static str,
     },
     /// Text being written contains bytes outside FITS restricted ASCII (0x20–0x7e).
-    InvalidAscii {
-        context: &'static str,
-    },
+    #[error("{context} contains characters outside FITS restricted ASCII")]
+    InvalidAscii { context: &'static str },
     /// An ASCII-table value cannot fit the field width declared by its `TFORMn`.
+    #[error(
+        "ASCII column {column:?} row {row} needs at least {minimum_width} characters but its field width is {width}"
+    )]
     AsciiFieldTooWide {
         column: String,
         /// Zero-based table row containing the value.
@@ -85,58 +140,53 @@ pub enum FitsError {
         minimum_width: usize,
     },
     /// `BITPIX` held a value outside {8, 16, 32, 64, −32, −64}.
-    InvalidBitpix {
-        code: i64,
-    },
+    #[error("invalid BITPIX value {code}")]
+    InvalidBitpix { code: i64 },
     /// A header unit ended (ran out of cards) without an `END` record.
+    #[error("header unit ended without an END record")]
     MissingEnd,
     /// A mandatory keyword was absent where the structure requires it.
-    MissingKeyword {
-        name: &'static str,
-    },
+    #[error("missing mandatory keyword {name}")]
+    MissingKeyword { name: &'static str },
     /// A keyword was present and well-typed but its value lies outside the range
     /// the standard permits for its role (e.g. `NAXIS > 999`, `PCOUNT < 0`,
     /// a negative `GCOUNT` or axis length, or a `THEAP` that precedes the heap).
-    KeywordOutOfRange {
-        name: &'static str,
-    },
+    #[error("keyword {name} has an out-of-range value")]
+    KeywordOutOfRange { name: &'static str },
     /// An exact FITS integer cannot be represented by the requested bounded type.
-    IntegerOutOfRange {
-        value: String,
-        target: &'static str,
-    },
+    #[error("FITS integer {value} is outside the {target} range")]
+    IntegerOutOfRange { value: String, target: &'static str },
     /// The byte stream ended in the middle of a header or data unit.
+    #[error("unexpected end of stream inside a FITS unit")]
     UnexpectedEof,
     /// The data-unit size implied by the header overflows a 64-bit byte count
     /// (a malformed or hostile header with absurd `NAXISn`/`PCOUNT`/`GCOUNT`).
+    #[error("header-implied data-unit size overflows 64 bits")]
     DataUnitOverflow,
     /// An output or staging buffer sized directly from untrusted FITS metadata is
     /// too large to allocate. Reader staging and final decompressed image/table
     /// planes allocate fallibly so hostile dimensions surface as this error rather
     /// than an out-of-memory process abort.
-    DataUnitTooLarge {
-        bytes: u64,
-    },
+    #[error("header-implied data-unit size ({bytes} bytes) is too large to allocate")]
+    DataUnitTooLarge { bytes: u64 },
     /// A decoded data unit held a different element count than the header's
     /// declared geometry — a corrupt or truncated data unit.
-    DataSizeMismatch {
-        expected: usize,
-        got: usize,
-    },
+    #[error("decoded data unit has {got} elements, header implies {expected}")]
+    DataSizeMismatch { expected: usize, got: usize },
     /// A signed `P`/`Q` heap-array descriptor contains a negative element count
     /// or byte offset.
-    InvalidPqDescriptor {
-        field: &'static str,
-        value: i64,
-    },
+    #[error("invalid P/Q descriptor {field}: {value}")]
+    InvalidPqDescriptor { field: &'static str, value: i64 },
     /// An index named something beyond the bound of whatever it addressed —
     /// [`Indexed`] says which.
+    #[error(fmt = Indexed::fmt_out_of_bounds)]
     IndexOutOfBounds {
         indexed: Indexed,
         index: usize,
         len: usize,
     },
     /// Two axis counts that had to agree did not — [`Ranked`] says which pair.
+    #[error(fmt = Ranked::fmt_mismatch)]
     RankMismatch {
         ranked: Ranked,
         /// Axis count the structure requires.
@@ -145,6 +195,7 @@ pub enum FitsError {
         got: usize,
     },
     /// One zero-based half-open image-axis range is reversed or exceeds its axis.
+    #[error("image region axis {axis} range {start}..{end} exceeds axis length {len}")]
     ImageRegionOutOfBounds {
         axis: usize,
         start: usize,
@@ -152,12 +203,14 @@ pub enum FitsError {
         len: usize,
     },
     /// A zero-based half-open table row range is reversed or exceeds the table.
+    #[error("table row range {start}..{end} exceeds the table's {len} rows")]
     RowRangeOutOfBounds {
         start: usize,
         end: usize,
         len: usize,
     },
     /// A table column contains a different number of rows from the table being built.
+    #[error("table column {column:?} has {got} rows but the table requires {expected}")]
     TableRowCountMismatch {
         column: String,
         expected: usize,
@@ -165,350 +218,102 @@ pub enum FitsError {
     },
     /// Empty or zero-width column data did not carry enough information to infer
     /// the intended table row count.
-    TableRowCountUndetermined {
-        column: String,
-    },
+    #[error(
+        "table column {column:?} does not determine a row count; declare the table row count explicitly"
+    )]
+    TableRowCountUndetermined { column: String },
     /// An empty VLA column needs an explicit heap element type.
-    EmptyVlaNeedsType {
-        column: String,
-    },
+    #[error("empty VLA column {column:?} needs an explicit heap element type")]
+    EmptyVlaNeedsType { column: String },
     /// A FITS keyword family was addressed with zero even though its indices start at 1.
-    OneBasedIndexRequired {
-        kind: &'static str,
-    },
+    #[error("{kind} indices are 1-based and cannot be zero")]
+    OneBasedIndexRequired { kind: &'static str },
     /// `read_image` was called on an HDU that is not an image array (a table,
     /// random-groups, or unmodelled extension).
+    #[error("HDU is not an image array")]
     NotAnImage,
     /// An IMAGE/primary HDU carries group structure (`PCOUNT ≠ 0` or `GCOUNT ≠ 1`),
     /// which a plain image array must not have (§4.3).
+    #[error("image HDU has group structure (PCOUNT ≠ 0 or GCOUNT ≠ 1)")]
     ImageHasGroups,
     /// `read_table` was called on an HDU that is not a binary table.
+    #[error("HDU is not a binary table")]
     NotABinTable,
     /// `read_groups` was called on an HDU that is not a random-groups primary.
+    #[error("HDU is not a random-groups primary")]
     NotRandomGroups,
     /// `read_ascii_table` was called on an HDU that is not an ASCII table.
+    #[error("HDU is not an ASCII table")]
     NotAnAsciiTable,
     /// The decompressor was handed an HDU that is not a tiled-compressed image (no
     /// `ZIMAGE = T`). `read_image` guards this and returns [`FitsError::NotAnImage`]
     /// for a plain `BINTABLE`, so this surfaces only via the internal decode path.
+    #[error("HDU is not a tiled-compressed image")]
     NotCompressedImage,
     /// `read_compressed_table` was called on an HDU that is not a tiled-compressed
     /// table (no `ZTABLE = T`).
+    #[error("HDU is not a tiled-compressed table")]
     NotCompressedTable,
     /// Two mutually-exclusive WCS keyword conventions are both present (e.g. `PC`
     /// and `CD`, or `CROTA` and `PC`); a conforming header uses only one (§8).
-    ConflictingWcsKeywords {
-        detail: &'static str,
-    },
+    #[error("conflicting WCS keywords: {detail}")]
+    ConflictingWcsKeywords { detail: &'static str },
     /// A complete pixel↔world transform was requested for axes whose nonlinear
     /// algorithm is not implemented. The indices are zero-based, matching
     /// [`crate::wcs::WcsView::unsupported_axes`].
-    UnsupportedWcsTransform {
-        axes: Vec<usize>,
-    },
+    #[error("WCS has unsupported nonlinear transforms on zero-based axes {axes:?}")]
+    UnsupportedWcsTransform { axes: Vec<usize> },
     /// A coordinate lies outside the mathematical domain of its WCS projection.
-    WcsProjectionDomain {
-        projection: &'static str,
-    },
+    #[error("coordinate is outside the {projection} projection domain")]
+    WcsProjectionDomain { projection: &'static str },
     /// A world or intermediate coordinate lies outside a non-celestial WCS
     /// algorithm's mathematical domain.
+    #[error("coordinate on zero-based axis {axis} is outside the {algorithm} WCS domain")]
     WcsCoordinateDomain {
         /// Zero-based WCS axis containing the invalid coordinate.
         axis: usize,
         algorithm: &'static str,
     },
     /// An iterative WCS algorithm did not reach a valid solution.
-    WcsNoConvergence {
-        algorithm: &'static str,
-    },
+    #[error("{algorithm} WCS iteration did not converge")]
+    WcsNoConvergence { algorithm: &'static str },
     /// A tiled-image compression algorithm or variant is not yet supported.
-    UnsupportedCompression {
-        name: String,
-    },
+    #[error("unsupported tiled compression: {name}")]
+    UnsupportedCompression { name: String },
     /// A PLIO tile sample cannot be represented losslessly in its unsigned 24-bit
     /// value domain.
-    PlioValueOutOfRange {
-        index: usize,
-        value: i64,
-    },
+    #[error("PLIO tile sample {index} has value {value}, outside 0..=16777215")]
+    PlioValueOutOfRange { index: usize, value: i64 },
     /// A `TFORMn` value could not be parsed as a binary-table column format.
-    InvalidTform {
-        tform: String,
-    },
+    #[error("invalid column format {tform:?}")]
+    InvalidTform { tform: String },
     /// `ColumnReader::raw` was called on a variable-length-array (`P`/`Q`) column;
     /// use `ColumnReader::vla` instead.
-    VariableLengthColumn {
-        code: char,
-    },
+    #[error("column format '{code}' is a variable-length array; use the column reader's vla()")]
+    VariableLengthColumn { code: char },
     /// `ColumnReader::vla` was called on a fixed-width column.
-    NotAVla {
-        code: char,
-    },
+    #[error("column format '{code}' is not a variable-length array")]
+    NotAVla { code: char },
     /// `ColumnReader::bits` was called on a column that is not an `X` bit array.
-    NotABitColumn {
-        code: char,
-    },
+    #[error("column format '{code}' is not an X bit array")]
+    NotABitColumn { code: char },
     /// `ColumnReader::complex` was called on a column that is not `C`/`M` complex.
-    NotAComplexColumn {
-        code: char,
-    },
+    #[error("column format '{code}' is not a C/M complex column")]
+    NotAComplexColumn { code: char },
     /// `ColumnReader::physical` was called on a column with no numeric physical
     /// value (`A`/`L`/`X`/`C`/`M`).
-    NonNumericColumn {
-        code: char,
-    },
+    #[error("column format '{code}' has no numeric physical value")]
+    NonNumericColumn { code: char },
     /// No column with the requested `TTYPEn` name exists in the table.
-    ColumnNotFound {
-        name: String,
-    },
+    #[error("no column named {name:?} in the table")]
+    ColumnNotFound { name: String },
     /// The summed column widths disagree with the declared row width (`NAXIS1`).
-    RowWidthMismatch {
-        computed: usize,
-        declared: usize,
-    },
+    #[error("column widths sum to {computed} bytes but NAXIS1 declares {declared}")]
+    RowWidthMismatch { computed: usize, declared: usize },
     /// Metadata supplied alongside a parsed binary table disagrees with the
     /// table's validated structure.
-    TableMetadataMismatch {
-        name: String,
-    },
-}
-
-impl fmt::Display for FitsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FitsError::Io(e) => write!(f, "I/O error: {e}"),
-            FitsError::WriterFailed => {
-                write!(f, "writer is unusable after a previous output failure")
-            }
-            FitsError::InvalidKeyword { name } => write!(f, "invalid keyword name {name:?}"),
-            FitsError::ReservedKeyword { name } => {
-                write!(
-                    f,
-                    "reserved keyword {name:?} cannot be used as a valued card"
-                )
-            }
-            FitsError::InvalidHeaderValue { keyword, reason } => {
-                write!(
-                    f,
-                    "header keyword {keyword:?} has an invalid value: {reason}"
-                )
-            }
-            FitsError::HeaderCardTooLong { keyword, length } => write!(
-                f,
-                "header card {keyword:?} needs {length} bytes but a FITS record holds 80"
-            ),
-            FitsError::InvalidValue { card } => {
-                write!(f, "cannot parse value field of card {card:?}")
-            }
-            FitsError::ExternalTimeDataRequired { operation } => {
-                write!(f, "{operation} requires external astronomical time data")
-            }
-            FitsError::TypeMismatch { name, expected } => {
-                write!(f, "value {name} is not a valid {expected}")
-            }
-            FitsError::InvalidAscii { context } => {
-                write!(
-                    f,
-                    "{context} contains characters outside FITS restricted ASCII"
-                )
-            }
-            FitsError::AsciiFieldTooWide {
-                column,
-                row,
-                width,
-                minimum_width,
-            } => write!(
-                f,
-                "ASCII column {column:?} row {row} needs at least {minimum_width} characters but its field width is {width}"
-            ),
-            FitsError::InvalidBitpix { code } => write!(f, "invalid BITPIX value {code}"),
-            FitsError::MissingEnd => write!(f, "header unit ended without an END record"),
-            FitsError::MissingKeyword { name } => write!(f, "missing mandatory keyword {name}"),
-            FitsError::KeywordOutOfRange { name } => {
-                write!(f, "keyword {name} has an out-of-range value")
-            }
-            FitsError::IntegerOutOfRange { value, target } => {
-                write!(f, "FITS integer {value} is outside the {target} range")
-            }
-            FitsError::UnexpectedEof => write!(f, "unexpected end of stream inside a FITS unit"),
-            FitsError::DataUnitOverflow => {
-                write!(f, "header-implied data-unit size overflows 64 bits")
-            }
-            FitsError::DataUnitTooLarge { bytes } => {
-                write!(
-                    f,
-                    "header-implied data-unit size ({bytes} bytes) is too large to allocate"
-                )
-            }
-            FitsError::DataSizeMismatch { expected, got } => {
-                write!(
-                    f,
-                    "decoded data unit has {got} elements, header implies {expected}"
-                )
-            }
-            FitsError::InvalidPqDescriptor { field, value } => {
-                write!(f, "invalid P/Q descriptor {field}: {value}")
-            }
-            FitsError::IndexOutOfBounds {
-                indexed,
-                index,
-                len,
-            } => match indexed {
-                Indexed::Hdu => write!(f, "HDU index {index} out of bounds (file has {len} HDUs)"),
-                Indexed::HeaderRecord => write!(
-                    f,
-                    "header record index {index} out of bounds (header has {len} records)"
-                ),
-                Indexed::Column => write!(
-                    f,
-                    "column index {index} out of bounds (table has {len} columns)"
-                ),
-                Indexed::Group => write!(
-                    f,
-                    "group index {index} out of bounds (random-groups array has {len} groups)"
-                ),
-                Indexed::WcsAxis => write!(
-                    f,
-                    "1-based WCS axis {index} out of bounds (WCS has {len} axes)"
-                ),
-            },
-            FitsError::RankMismatch {
-                ranked,
-                expected,
-                got,
-            } => match ranked {
-                Ranked::ImageRegion => write!(
-                    f,
-                    "image region has {got} axes but the image has {expected}"
-                ),
-                Ranked::TileShape => {
-                    write!(f, "tile shape has {got} axes but the image has {expected}")
-                }
-                Ranked::WcsCoordinate => write!(
-                    f,
-                    "coordinate has {got} {} but the WCS has {expected} axes",
-                    if *got == 1 { "value" } else { "values" }
-                ),
-            },
-            FitsError::ImageRegionOutOfBounds {
-                axis,
-                start,
-                end,
-                len,
-            } => write!(
-                f,
-                "image region axis {axis} range {start}..{end} exceeds axis length {len}"
-            ),
-            FitsError::RowRangeOutOfBounds { start, end, len } => write!(
-                f,
-                "table row range {start}..{end} exceeds the table's {len} rows"
-            ),
-            FitsError::TableRowCountMismatch {
-                column,
-                expected,
-                got,
-            } => write!(
-                f,
-                "table column {column:?} has {got} rows but the table requires {expected}"
-            ),
-            FitsError::TableRowCountUndetermined { column } => write!(
-                f,
-                "table column {column:?} does not determine a row count; declare the table row count explicitly"
-            ),
-            FitsError::EmptyVlaNeedsType { column } => write!(
-                f,
-                "empty VLA column {column:?} needs an explicit heap element type"
-            ),
-            FitsError::OneBasedIndexRequired { kind } => {
-                write!(f, "{kind} indices are 1-based and cannot be zero")
-            }
-            FitsError::NotAnImage => write!(f, "HDU is not an image array"),
-            FitsError::ImageHasGroups => {
-                write!(
-                    f,
-                    "image HDU has group structure (PCOUNT ≠ 0 or GCOUNT ≠ 1)"
-                )
-            }
-            FitsError::NotABinTable => write!(f, "HDU is not a binary table"),
-            FitsError::NotRandomGroups => write!(f, "HDU is not a random-groups primary"),
-            FitsError::NotAnAsciiTable => write!(f, "HDU is not an ASCII table"),
-            FitsError::NotCompressedImage => write!(f, "HDU is not a tiled-compressed image"),
-            FitsError::NotCompressedTable => write!(f, "HDU is not a tiled-compressed table"),
-            FitsError::ConflictingWcsKeywords { detail } => {
-                write!(f, "conflicting WCS keywords: {detail}")
-            }
-            FitsError::UnsupportedWcsTransform { axes } => {
-                write!(
-                    f,
-                    "WCS has unsupported nonlinear transforms on zero-based axes {axes:?}"
-                )
-            }
-            FitsError::WcsProjectionDomain { projection } => {
-                write!(
-                    f,
-                    "coordinate is outside the {projection} projection domain"
-                )
-            }
-            FitsError::WcsCoordinateDomain { axis, algorithm } => {
-                write!(
-                    f,
-                    "coordinate on zero-based axis {axis} is outside the {algorithm} WCS domain"
-                )
-            }
-            FitsError::WcsNoConvergence { algorithm } => {
-                write!(f, "{algorithm} WCS iteration did not converge")
-            }
-            FitsError::UnsupportedCompression { name } => {
-                write!(f, "unsupported tiled compression: {name}")
-            }
-            FitsError::PlioValueOutOfRange { index, value } => write!(
-                f,
-                "PLIO tile sample {index} has value {value}, outside 0..=16777215"
-            ),
-            FitsError::InvalidTform { tform } => write!(f, "invalid column format {tform:?}"),
-            FitsError::VariableLengthColumn { code } => write!(
-                f,
-                "column format '{code}' is a variable-length array; use the column reader's vla()"
-            ),
-            FitsError::NotAVla { code } => {
-                write!(f, "column format '{code}' is not a variable-length array")
-            }
-            FitsError::NotABitColumn { code } => {
-                write!(f, "column format '{code}' is not an X bit array")
-            }
-            FitsError::NotAComplexColumn { code } => {
-                write!(f, "column format '{code}' is not a C/M complex column")
-            }
-            FitsError::NonNumericColumn { code } => {
-                write!(f, "column format '{code}' has no numeric physical value")
-            }
-            FitsError::ColumnNotFound { name } => {
-                write!(f, "no column named {name:?} in the table")
-            }
-            FitsError::RowWidthMismatch { computed, declared } => write!(
-                f,
-                "column widths sum to {computed} bytes but NAXIS1 declares {declared}"
-            ),
-            FitsError::TableMetadataMismatch { name } => {
-                write!(f, "header metadata {name} disagrees with the binary table")
-            }
-        }
-    }
-}
-
-impl std::error::Error for FitsError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            FitsError::Io(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<io::Error> for FitsError {
-    fn from(e: io::Error) -> Self {
-        FitsError::Io(e)
-    }
+    #[error("header metadata {name} disagrees with the binary table")]
+    TableMetadataMismatch { name: String },
 }
 
 #[cfg(test)]
@@ -546,33 +351,6 @@ mod tests {
         assert_eq!(
             FitsError::MissingKeyword { name: "NAXIS" }.to_string(),
             "missing mandatory keyword NAXIS"
-        );
-        assert_eq!(
-            FitsError::IndexOutOfBounds {
-                indexed: Indexed::Group,
-                index: 3,
-                len: 2
-            }
-            .to_string(),
-            "group index 3 out of bounds (random-groups array has 2 groups)"
-        );
-        assert_eq!(
-            FitsError::RankMismatch {
-                ranked: Ranked::WcsCoordinate,
-                expected: 2,
-                got: 1,
-            }
-            .to_string(),
-            "coordinate has 1 value but the WCS has 2 axes"
-        );
-        assert_eq!(
-            FitsError::IndexOutOfBounds {
-                indexed: Indexed::WcsAxis,
-                index: 3,
-                len: 2
-            }
-            .to_string(),
-            "1-based WCS axis 3 out of bounds (WCS has 2 axes)"
         );
         assert_eq!(
             FitsError::OneBasedIndexRequired {
@@ -665,6 +443,77 @@ mod tests {
             .to_string(),
             "PLIO tile sample 3 has value 16777216, outside 0..=16777215"
         );
+    }
+
+    #[test]
+    fn every_index_and_rank_arm_names_its_own_structure() {
+        for (indexed, message) in [
+            (Indexed::Hdu, "HDU index 3 out of bounds (file has 2 HDUs)"),
+            (
+                Indexed::HeaderRecord,
+                "header record index 3 out of bounds (header has 2 records)",
+            ),
+            (
+                Indexed::Column,
+                "column index 3 out of bounds (table has 2 columns)",
+            ),
+            (
+                Indexed::Group,
+                "group index 3 out of bounds (random-groups array has 2 groups)",
+            ),
+            (
+                Indexed::WcsAxis,
+                "1-based WCS axis 3 out of bounds (WCS has 2 axes)",
+            ),
+        ] {
+            assert_eq!(
+                FitsError::IndexOutOfBounds {
+                    indexed,
+                    index: 3,
+                    len: 2,
+                }
+                .to_string(),
+                message
+            );
+        }
+
+        // The last two rows differ only in `got`, so they pin the value/values branch.
+        for (ranked, expected, got, message) in [
+            (
+                Ranked::ImageRegion,
+                2,
+                3,
+                "image region has 3 axes but the image has 2",
+            ),
+            (
+                Ranked::TileShape,
+                2,
+                3,
+                "tile shape has 3 axes but the image has 2",
+            ),
+            (
+                Ranked::WcsCoordinate,
+                2,
+                1,
+                "coordinate has 1 value but the WCS has 2 axes",
+            ),
+            (
+                Ranked::WcsCoordinate,
+                3,
+                2,
+                "coordinate has 2 values but the WCS has 3 axes",
+            ),
+        ] {
+            assert_eq!(
+                FitsError::RankMismatch {
+                    ranked,
+                    expected,
+                    got,
+                }
+                .to_string(),
+                message
+            );
+        }
     }
 
     #[test]
