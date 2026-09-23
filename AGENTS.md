@@ -1,8 +1,6 @@
 # fits-well
 
-A Rust library to **read and write FITS** (Flexible Image Transport System)
-files — the standard data format of astronomy. Two non-negotiable goals shape
-every decision:
+A **FITS** reader and writer. Two non-negotiable goals shape every decision:
 
 1. **Blazing fast** — zero-copy where the format allows, borrowed read views
    into caller-owned reusable scratch, single-pass byte-swap / scaling,
@@ -21,15 +19,8 @@ cargo clippy --all-targets --no-default-features --features compression,mmap,int
 cargo test --tests --no-default-features --features compression,mmap,internals
 ```
 
-The last two lines are the sequential leg: every feature but `parallel`, whose
-`cfg(not(feature = "parallel"))` codec paths `--all-features` never builds.
+The last two lines build the `cfg(not(feature = "parallel"))` codec paths,
+which `--all-features` never does.
 
-## Benchmarks
-
-`decode` and `wcs` require `--features internals`, which re-exposes the hot
-decode/encode entry points; `compress` and `read` build with the default
-features.
-
-```
-cargo bench --features internals --bench decode
-```
+The `decode` and `wcs` benches need `--features internals`:
+`cargo bench --features internals --bench decode`.
