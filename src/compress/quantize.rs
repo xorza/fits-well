@@ -320,9 +320,7 @@ pub(super) fn quantize_tile(
 #[cfg(test)]
 mod tests {
 
-    use crate::compress::plane::IntBitpix;
     use crate::compress::quantize::*;
-    use crate::compress::rice;
 
     #[test]
     fn dither2_quantize_round_trips() {
@@ -403,13 +401,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(q.bscale, 0.6052697 * 9.0);
-
-        // Native i32 Rice input must produce the identical bitstream as the former
-        // widened representation.
-        let widened: Vec<i64> = scratch.ints.iter().map(|&value| value as i64).collect();
-        let mut rice_scratch = rice::RiceScratch::default();
-        let native = rice::rice_encode(&scratch.ints, IntBitpix::I32, 32, &mut rice_scratch);
-        let widened = rice::rice_encode(&widened, IntBitpix::I32, 32, &mut rice_scratch);
-        assert_eq!(native, widened);
     }
 }

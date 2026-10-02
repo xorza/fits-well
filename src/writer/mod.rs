@@ -414,7 +414,7 @@ fn merge_header_template(header: &mut Header, template: Option<&Header>) {
 pub(crate) mod internals {
     use std::io::Cursor;
 
-    use crate::error::Result;
+    use crate::error::{FitsError, Result};
     use crate::reader::{FitsReader, StreamReader};
     use crate::writer::FitsWriter;
     use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
@@ -441,6 +441,19 @@ pub(crate) mod internals {
         let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
         write(&mut writer).unwrap();
         writer.into_inner().into_inner()
+    }
+
+    /// The error `write` fails with, after asserting that it wrote nothing.
+    pub(crate) fn rejected_before_output(
+        write: impl FnOnce(&mut MemoryWriter) -> Result<()>,
+    ) -> FitsError {
+        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+        let error = write(&mut writer).expect_err("the write must be refused");
+        assert!(
+            writer.into_inner().into_inner().is_empty(),
+            "a refused write must leave no output"
+        );
+        error
     }
 
     /// A reader over the file `write` produces.

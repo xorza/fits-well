@@ -73,6 +73,7 @@ fn zero_repeat_column_decodes_to_empty() {
 fn read_column_physical_applies_tscal_tzero_and_tnull() {
     let mut header = table_header(2, 3, &["1I"]); // i16 column
     header
+        .set_internal("TTYPE1", "FLUX")
         .set_internal("TSCAL1", 2.0)
         .set_internal("TZERO1", 10.0)
         .set_internal("TNULL1", 5);
@@ -81,11 +82,22 @@ fn read_column_physical_applies_tscal_tzero_and_tnull() {
         data.extend_from_slice(&x.to_be_bytes());
     }
     let table = BinTable::from_data(&header, data).unwrap();
-    let phys = table.column_by_idx(0).unwrap().physical().unwrap();
-    // 3 → 10 + 2·3 = 16 ; 5 == TNULL → NaN ; 7 → 10 + 2·7 = 24
-    assert_eq!(phys[0], 16.0);
-    assert!(phys[1].is_nan());
-    assert_eq!(phys[2], 24.0);
+    // 3 → 10 + 2·3 = 16 ; 5 == TNULL → NaN ; 7 → 10 + 2·7 = 24, by index and by a
+    // name in any case.
+    for column in [table.column_by_idx(0), table.column_by_name("flux")] {
+        let phys = column.unwrap().physical().unwrap();
+        assert_eq!(phys[0], 16.0);
+        assert!(phys[1].is_nan());
+        assert_eq!(phys[2], 24.0);
+    }
+    assert_eq!(
+        table.column_by_name("FLUX").unwrap().raw().unwrap(),
+        ColumnData::I16(vec![3, 5, 7])
+    );
+    assert!(matches!(
+        table.column_by_name("nope"),
+        Err(FitsError::ColumnNotFound { .. })
+    ));
 
     for (keyword, expected) in [
         ("TSCAL1", "real"),
@@ -380,39 +392,6 @@ fn vla_descriptor_overrunning_the_heap_is_rejected() {
     assert!(matches!(
         table.column_by_idx(0).unwrap().vla(),
         Err(FitsError::UnexpectedEof)
-    ));
-}
-
-#[test]
-fn read_column_by_name_and_one_step_physical() {
-    let mut header = table_header(2, 3, &["1I"]); // one i16 column
-    header
-        .set_internal("TTYPE1", "FLUX")
-        .set_internal("TSCAL1", 2.0)
-        .set_internal("TZERO1", 10.0);
-    let mut data = Vec::new();
-    for x in [1i16, 2, 3] {
-        data.extend_from_slice(&x.to_be_bytes());
-    }
-    let table = BinTable::from_data(&header, data).unwrap();
-    // Raw, by name (case-insensitive).
-    assert_eq!(
-        table.column_by_name("flux").unwrap().raw().unwrap(),
-        ColumnData::I16(vec![1, 2, 3])
-    );
-    // Physical in one call: 10 + 2·x — by index and by name.
-    assert_eq!(
-        table.column_by_idx(0).unwrap().physical().unwrap(),
-        vec![12.0, 14.0, 16.0]
-    );
-    assert_eq!(
-        table.column_by_name("FLUX").unwrap().physical().unwrap(),
-        vec![12.0, 14.0, 16.0]
-    );
-    // A missing name is a clean error.
-    assert!(matches!(
-        table.column_by_name("nope"),
-        Err(FitsError::ColumnNotFound { .. })
     ));
 }
 

@@ -464,6 +464,27 @@ mod tests {
         assert_eq!(decoded, values);
     }
 
+    /// The encoder reads its input through `Into<i64>`, so an i32 plane and the
+    /// same values widened to i64 must give the same stream.
+    #[test]
+    fn input_width_does_not_change_the_stream() {
+        let values: Vec<i32> = (0..70)
+            .map(|index| match index % 5 {
+                0 => i32::MIN,
+                1 => i32::MAX,
+                2 => -index,
+                3 => index * 1000,
+                _ => 0,
+            })
+            .collect();
+        let widened: Vec<i64> = values.iter().map(|&value| value as i64).collect();
+        let mut scratch = rice::RiceScratch::default();
+        assert_eq!(
+            rice::rice_encode(&values, IntBitpix::I32, 32, &mut scratch),
+            rice::rice_encode(&widened, IntBitpix::I32, 32, &mut scratch)
+        );
+    }
+
     #[test]
     fn odd_final_block_uses_the_canonical_integer_statistic() {
         let encoded = rice::rice_encode(

@@ -189,19 +189,26 @@ fn header_datetimes_use_the_declared_scale() {
 
 #[test]
 fn reads_jepoch_and_bepoch_keywords() {
-    // JEPOCH=2000.0 ⇒ J2000.0 = MJD 51544.5, implied scale TDB.
+    // JEPOCH is in its implied TDB, BEPOCH in ET ≈ TT; `numeric_epochs_match_astropy`
+    // pins the dates themselves.
     let mut hj = Header::new();
     hj.set_internal("JEPOCH", 2000.0);
-    let ej = TimeCoordinate::epoch(&hj).unwrap().unwrap();
-    assert_eq!(ej.mjd, 51544.5);
-    assert_eq!(ej.scale, TimeScale::known(TimeScaleKind::Tdb));
-    // BEPOCH=1950.0 ⇒ B1950.0 = MJD 33281.92345905, implied scale ET ≈ TT; the
-    // nearest f64 to that decimal is what 15019.81352 + 50 × 365.242198781 rounds to.
+    assert_eq!(
+        TimeCoordinate::epoch(&hj).unwrap(),
+        Some(TimeCoordinate {
+            mjd: Epoch::Julian(2000.0).to_mjd(),
+            scale: TimeScale::known(TimeScaleKind::Tdb),
+        })
+    );
     let mut hb = Header::new();
     hb.set_internal("BEPOCH", 1950.0);
-    let eb = TimeCoordinate::epoch(&hb).unwrap().unwrap();
-    assert_eq!(eb.mjd, 33281.92345905);
-    assert_eq!(eb.scale, TimeScale::known(TimeScaleKind::Tt));
+    assert_eq!(
+        TimeCoordinate::epoch(&hb).unwrap(),
+        Some(TimeCoordinate {
+            mjd: Epoch::Besselian(1950.0).to_mjd(),
+            scale: TimeScale::known(TimeScaleKind::Tt),
+        })
+    );
     // Neither keyword ⇒ None.
     let empty = Header::new();
     assert!(TimeCoordinate::epoch(&empty).unwrap().is_none());
@@ -348,14 +355,13 @@ fn reads_phase_axis_metadata() {
 #[test]
 fn observation_falls_back_to_jepoch_in_its_own_scale() {
     // §9.5: absent DATE-OBS/MJD-OBS, JEPOCH stands in for the observation time, in
-    // its implied TDB. J2000.0 is JD 2451545.0, so MJD 2451545.0 − 2400000.5, exact
-    // in f64.
+    // its implied TDB.
     let mut h = Header::new();
     h.set_internal("JEPOCH", 2000.0);
     assert_eq!(
         TimeCoordinate::observation(&h).unwrap(),
         Some(TimeCoordinate {
-            mjd: 51544.5,
+            mjd: Epoch::Julian(2000.0).to_mjd(),
             scale: TimeScale::known(TimeScaleKind::Tdb)
         })
     );
