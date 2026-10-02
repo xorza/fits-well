@@ -8,8 +8,7 @@ use crate::error::Result;
 use crate::header_model::Header;
 
 /// The float-quantization inputs (§10.2): the dither method and seed, and the
-/// per-tile `ZSCALE`/`ZZERO`/`ZBLANK` metadata columns. An integer image parses
-/// these too but never consults them.
+/// per-tile `ZSCALE`/`ZZERO`/`ZBLANK` metadata columns. An integer image has none.
 #[derive(Debug)]
 pub(super) struct FloatQuantization {
     method: DitherMethod,
@@ -37,18 +36,25 @@ impl FloatQuantization {
         table: TableView<'_>,
         is_float: bool,
     ) -> Result<FloatQuantization> {
+        // An integer image is stored without quantization and ignores these keywords
+        // and columns altogether.
+        if !is_float {
+            return Ok(FloatQuantization {
+                method: DitherMethod::None,
+                zdither0: 1,
+                zblank_keyword: None,
+                zblank_column: None,
+                zscale: None,
+                zzero: None,
+            });
+        }
         let quantiz = header.get_text("ZQUANTIZ")?.unwrap_or("NO_DITHER");
-        let method = match DitherMethod::parse(quantiz) {
-            Some(method) => method,
-            // A float image's samples cannot be reconstructed without reproducing its
-            // dither exactly; an integer image ignores `ZQUANTIZ` altogether.
-            None if is_float => {
-                return Err(FitsError::UnsupportedCompression {
-                    name: format!("float quantization {quantiz}"),
-                });
-            }
-            None => DitherMethod::None,
-        };
+        // A float image's samples cannot be reconstructed without reproducing its
+        // dither exactly.
+        let method =
+            DitherMethod::parse(quantiz).ok_or_else(|| FitsError::UnsupportedCompression {
+                name: format!("float quantization {quantiz}"),
+            })?;
         let zdither0 = header.get_integer("ZDITHER0")?.unwrap_or(1);
         if !(1..=10_000).contains(&zdither0) {
             return Err(FitsError::KeywordOutOfRange { name: "ZDITHER0" });

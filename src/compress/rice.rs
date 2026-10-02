@@ -175,6 +175,7 @@ pub(super) fn rice_encode_into<T: Copy + Into<i64>>(
         }
         i += thisblock;
     }
+    bo.finish();
 }
 
 #[derive(Debug, Default)]
@@ -183,46 +184,72 @@ pub(super) struct RiceScratch {
 }
 
 /// MSB-first bit output appended to a buffer, mirroring cfitsio's
-/// `Buffer`/`output_nbits`.
+/// `Buffer`/`output_nbits`: bits gather in a word and leave a byte at a time, and
+/// [`BitOutput::finish`] pads the last byte with zero bits.
 #[derive(Debug)]
 struct BitOutput<'a> {
     out: &'a mut Vec<u8>,
-    bits_in_last: u8,
+    /// Pending bits, right-aligned: the low `pending` bits of `word`.
+    word: u64,
+    /// Fewer than 8 between calls, so a call may add up to 56 bits.
+    pending: u32,
 }
 
 impl<'a> BitOutput<'a> {
+    /// The most bits one [`BitOutput::push`] takes: the word holds at most 7 pending.
+    const CHUNK: u32 = 56;
+
     fn new(out: &'a mut Vec<u8>) -> BitOutput<'a> {
         BitOutput {
             out,
-            bits_in_last: 0,
+            word: 0,
+            pending: 0,
         }
     }
 
+    /// Append the low `n` bits of `bits` (`n ≤ 64`), most significant first.
     fn output_nbits(&mut self, bits: u64, n: u32) {
-        for shift in (0..n).rev() {
-            self.output_bit(((bits >> shift) & 1) as u8);
+        if n > Self::CHUNK {
+            self.push(bits >> Self::CHUNK, n - Self::CHUNK);
+            self.push(bits, Self::CHUNK);
+        } else {
+            self.push(bits, n);
         }
     }
 
-    fn output_bit(&mut self, bit: u8) {
-        if self.bits_in_last == 0 {
-            self.out.push(0);
+    fn output_zeros(&mut self, mut n: u64) {
+        while n > 0 {
+            let chunk = n.min(u64::from(Self::CHUNK));
+            self.push(0, chunk as u32);
+            n -= chunk;
         }
-        let last = self.out.last_mut().unwrap();
-        *last |= bit << (7 - self.bits_in_last);
-        self.bits_in_last = (self.bits_in_last + 1) % 8;
+    }
+
+    fn push(&mut self, bits: u64, n: u32) {
+        debug_assert!(n <= Self::CHUNK && self.pending < 8);
+        if n == 0 {
+            return;
+        }
+        self.word = (self.word << n) | (bits & (u64::MAX >> (64 - n)));
+        self.pending += n;
+        while self.pending >= 8 {
+            self.pending -= 8;
+            self.out.push((self.word >> self.pending) as u8);
+        }
     }
 
     /// Output one Rice-coded value: `top = v >> fs` zero bits, a 1, then the low
     /// `fs` bits of `v`.
     fn output_rice_value(&mut self, v: u64, fs: u32, fsmask: u64) {
-        let top = v >> fs;
-        for _ in 0..top {
-            self.output_bit(0);
-        }
-        self.output_bit(1);
-        if fs > 0 {
-            self.output_nbits(v & fsmask, fs);
+        self.output_zeros(v >> fs);
+        self.push(1, 1);
+        self.output_nbits(v & fsmask, fs);
+    }
+
+    /// Flush the last partial byte, its unused low bits zero.
+    fn finish(self) {
+        if self.pending > 0 {
+            self.out.push((self.word << (8 - self.pending)) as u8);
         }
     }
 }
@@ -334,6 +361,53 @@ mod tests {
     use crate::compress::plane::IntBitpix;
     use crate::compress::rice::{self, BitReader};
     use crate::error::FitsError;
+
+    /// The word-wide writer emits exactly the stream of a writer that sets one bit
+    /// at a time, over field widths from 0 to 64, zero runs past a word, and a
+    /// stream that ends mid-byte.
+    #[test]
+    fn bit_output_matches_a_bit_at_a_time_writer() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut fields = Vec::new();
+        for n in 0..=64 {
+            fields.push((next(), n, 0));
+        }
+        fields.push((0, 0, 200));
+        fields.push((next(), 3, 57));
+        fields.push((next(), 5, 1));
+
+        let mut expected = Vec::new();
+        let mut used = 0usize;
+        let mut set = |bit: bool| {
+            if used.is_multiple_of(8) {
+                expected.push(0u8);
+            }
+            if bit {
+                *expected.last_mut().unwrap() |= 0x80 >> (used % 8);
+            }
+            used += 1;
+        };
+        let mut out = Vec::new();
+        let mut bo = rice::BitOutput::new(&mut out);
+        for &(bits, n, zeros) in &fields {
+            for _ in 0..zeros {
+                set(false);
+            }
+            for shift in (0..n).rev() {
+                set((bits >> shift) & 1 == 1);
+            }
+            bo.output_zeros(zeros);
+            bo.output_nbits(bits, n);
+        }
+        bo.finish();
+        assert_eq!(out, expected);
+    }
 
     #[test]
     fn bit_reader_reads_msb_first() {
