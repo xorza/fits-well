@@ -273,7 +273,7 @@ pub enum FitsError {
     ConflictingWcsKeywords { detail: &'static str },
     /// A complete pixel↔world transform was requested for axes whose nonlinear
     /// algorithm is not implemented. The indices are zero-based, matching
-    /// [`crate::wcs::WcsView::unsupported_axes`].
+    /// [`crate::world_coordinates::WcsView::unsupported_axes`].
     #[error("WCS has unsupported nonlinear transforms on zero-based axes {axes:?}")]
     UnsupportedWcsTransform { axes: Vec<usize> },
     /// An intermediate (projection-plane) coordinate lies outside the region its WCS

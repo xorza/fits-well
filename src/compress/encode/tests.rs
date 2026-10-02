@@ -4,7 +4,7 @@ use crate::data::image_data::ImageData;
 use crate::data::scaling::Scaling;
 use crate::error::FitsError;
 use crate::error::Ranked;
-use crate::header::value::Value;
+use crate::header_model::value::Value;
 use crate::reader::FitsReader;
 use crate::writer::FitsWriter;
 use std::fs::File;

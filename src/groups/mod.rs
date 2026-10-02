@@ -13,7 +13,7 @@ use crate::data::scaling::Scaling;
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Result;
-use crate::header::Header;
+use crate::header_model::Header;
 use crate::keyword::key;
 
 /// A decoded random-groups primary array.
@@ -26,7 +26,6 @@ pub struct RandomGroups {
     group_shape: Vec<usize>,
     gcount: usize,
     pcount: usize,
-    bitpix: Bitpix,
     array_scaling: Scaling,
     /// `PSCALn`/`PZEROn` per parameter.
     param_scaling: Vec<ParamScale>,
@@ -73,7 +72,7 @@ impl RandomGroups {
             group_shape: &self.group_shape,
             gcount: self.gcount,
             pcount: self.pcount,
-            bitpix: self.bitpix,
+            bitpix: self.samples.bitpix(),
         }
     }
 
@@ -106,7 +105,6 @@ impl RandomGroups {
             group_shape,
             gcount,
             pcount,
-            bitpix,
             array_scaling: header.scaling()?,
             param_scaling,
             samples,

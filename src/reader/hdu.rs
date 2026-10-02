@@ -1,12 +1,12 @@
 //! One header and data unit as the reader's scan found it.
 
+use crate::bintable::table_schema::TableSchema;
 use crate::data::ImageMetadata;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::HduKind;
 use crate::hdu::image_geometry::ImageGeometry;
-use crate::header::Header;
-use crate::table_impl::table_schema::TableSchema;
+use crate::header_model::Header;
 
 /// One Header/Data Unit located by the reader.
 ///

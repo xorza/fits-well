@@ -9,13 +9,13 @@
 
 use std::io::{Seek, Write};
 
+#[cfg(feature = "compression")]
+use crate::bintable::BinTable;
 use crate::bitpix::Bitpix;
 #[cfg(feature = "compression")]
 use crate::compress::{Compression, CompressionOptions};
 use crate::data::Image;
 use crate::data::scaling::Scaling;
-#[cfg(feature = "compression")]
-use crate::table_impl::BinTable;
 use crate::writer::ascii::AsciiTableBuilder;
 use crate::writer::image::ImageStream;
 use crate::writer::table::TableBuilder;
@@ -25,7 +25,7 @@ use crate::block::{CARD_SIZE, SPACE_FILL, ZERO_FILL};
 use crate::checksum;
 use crate::error::{FitsError, Result};
 use crate::hdu::{HduKind, HduPosition, HduRole, data_extent};
-use crate::header::Header;
+use crate::header_model::Header;
 use crate::keyword;
 
 pub(crate) mod ascii;

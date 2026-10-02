@@ -19,7 +19,7 @@
 //!
 //! - [`io::BLOCK_SIZE`] — the 2880-byte block grid, padding rules, and rounding math.
 //! - [`image::Bitpix`] — the array element type selector (`BITPIX`).
-//! - [`header::Header`], [`header::value::Value`] — an *ordered* header model
+//! - [`header::Header`], [`header::Value`] — an *ordered* header model
 //!   (an internal `Card` list)
 //!   whose logical records round-trip with a side index for O(1) keyword lookup;
 //!   physical card layout is normalized on write rather than retained. It also
@@ -48,6 +48,7 @@ pub struct ReadmeDoctests;
 
 mod allocation;
 mod ascii;
+mod bintable;
 mod bitpix;
 mod block;
 mod checksum;
@@ -59,16 +60,13 @@ mod endian;
 mod error;
 mod groups;
 mod hdu;
-pub mod header;
+mod header_model;
 mod keyword;
 mod reader;
-#[path = "table/mod.rs"]
-mod table_impl;
-#[path = "time/mod.rs"]
-mod time_impl;
+mod time_coordinates;
 mod unit;
-pub mod wcs;
 mod words;
+mod world_coordinates;
 mod writer;
 
 pub use error::{FitsError, Indexed, Ranked, Result};
@@ -90,14 +88,67 @@ pub mod image {
     pub use crate::writer::image::ImageStream;
 }
 
+/// The ordered header model: keyword records and their typed values.
+pub mod header {
+    pub use crate::header_model::value::{FitsInteger, Value};
+    pub use crate::header_model::{Header, HeaderEntry, HeaderRecord};
+}
+
+pub mod wcs {
+    //! Typed World Coordinate System (§8).
+    //!
+    //! Parses the per-axis WCS keywords from a [`Header`](crate::header::Header) and
+    //! evaluates the standard pixel↔world pipeline (Greisen & Calabretta, FITS WCS
+    //! papers I & II):
+    //!
+    //! ```text
+    //! pixel ─ CRPIX ─►  ·(PC|CD, ×CDELT)  ─► intermediate coordinate
+    //!        ─► CTYPE algorithm ─► world coordinate
+    //! ```
+    //!
+    //! The linear layer is `PC`+`CDELT`, `CD`, or legacy `CDELT`+`CROTA`, with general
+    //! matrix inversion for the reverse direction, and full `PVi_m` parameters
+    //! (φ₀/θ₀/LONPOLE/LATPOLE overrides plus per-projection params). Projections, via
+    //! the general fiducial-point pole computation: zenithal `TAN`/`SIN`/`ARC`/`STG`/
+    //! `ZEA`/`ZPN`/`AIR`, zenithal-perspective `AZP`/`SZP`, cylindrical `CAR`/`CEA`/
+    //! `MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic `COP`/`COE`/`COD`/`COO`,
+    //! pseudoconic `BON`, polyconic `PCO`, quad-cube `TSC`/`CSC`/`QSC`, and HEALPix
+    //! `HPX`. Every Table-26 spectral algorithm (`F2*`/`W2*`/`V2*`/`A2*`, detector
+    //! `GRI`/`GRA`, and generic `LOG`) is evaluated in both directions. `-TAB`
+    //! coordinate arrays are resolved from their BINTABLE through
+    //! [`FitsReader::read_wcs`](crate::FitsReader::read_wcs). All are validated against
+    //! `astropy.wcs`, wcslib, or exact interpolation fixtures. Convention-only `XPH`
+    //! transforms remain readable in [`WcsView::unsupported_axes`]; complete transforms
+    //! then return
+    //! [`FitsError::UnsupportedWcsTransform`](crate::FitsError::UnsupportedWcsTransform).
+    //!
+    //! Binary-table WCS (Table 22) is supported for both the pixel-list
+    //! ([`Header::wcs_pixel_list`](crate::header_model::Header::wcs_pixel_list)) and vector-cell
+    //! ([`Header::wcs_array_column`](crate::header_model::Header::wcs_array_column)) forms.
+    //!
+    //! Pixel↔world yields celestial coordinates in the frame the file declares;
+    //! [`WcsView::celestial_frame`] and [`WcsAxis::spectral_frame`] expose that typed
+    //! `RADESYS`/`EQUINOX` and spectral frame/rest metadata. Converting *between*
+    //! reference frames is astrometry beyond the FITS standard and is intentionally
+    //! out of scope. Transform methods return explicit errors for invalid projection
+    //! domains or failed iterations.
+
+    pub use crate::world_coordinates::celestial_frame::{CelestialFrame, CelestialReferenceFrame};
+    pub use crate::world_coordinates::celestial_pole::CelestialPole;
+    pub use crate::world_coordinates::projection::Projection;
+    pub use crate::world_coordinates::spectral_frame::{SpectralFrame, SpectralReferenceFrame};
+    pub use crate::world_coordinates::wcs_axis::WcsAxis;
+    pub use crate::world_coordinates::{CelestialProjection, Wcs, WcsView};
+}
+
 /// Typed time coordinates (§9): calendar datetimes, time scales, and a
 /// header's time frame.
 pub mod time {
-    pub use crate::time_impl::datetime::Datetime;
-    pub use crate::time_impl::phase_axis::PhaseAxis;
-    pub use crate::time_impl::time_reference_position::TimeReferencePosition;
-    pub use crate::time_impl::time_scale::{TimeScale, TimeScaleKind};
-    pub use crate::time_impl::{FitsTime, TimeBounds, TimeCoordinate};
+    pub use crate::time_coordinates::datetime::Datetime;
+    pub use crate::time_coordinates::phase_axis::PhaseAxis;
+    pub use crate::time_coordinates::time_reference_position::TimeReferencePosition;
+    pub use crate::time_coordinates::time_scale::{TimeScale, TimeScaleKind};
+    pub use crate::time_coordinates::{FitsTime, TimeBounds, TimeCoordinate};
 }
 
 /// Binary and ASCII table values, schema and selection metadata, and write
@@ -111,16 +162,16 @@ pub mod table {
     pub use crate::ascii::{
         AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiTable, AsciiTableMetadata,
     };
+    pub use crate::bintable::bit_column::BitColumn;
+    pub use crate::bintable::character_field::CharacterField;
+    pub use crate::bintable::column::Column;
+    pub use crate::bintable::column_data::ColumnData;
+    pub use crate::bintable::column_reader::ColumnReader;
+    pub use crate::bintable::table_schema::TableSchema;
+    pub use crate::bintable::tform::Tform;
+    pub use crate::bintable::tform_kind::TformKind;
+    pub use crate::bintable::{BinTable, BinTableMetadata};
     pub use crate::reader::{ColumnSelector, SelectedColumn, TableColumnData, TableSelection};
-    pub use crate::table_impl::bit_column::BitColumn;
-    pub use crate::table_impl::character_field::CharacterField;
-    pub use crate::table_impl::column::Column;
-    pub use crate::table_impl::column_data::ColumnData;
-    pub use crate::table_impl::column_reader::ColumnReader;
-    pub use crate::table_impl::table_schema::TableSchema;
-    pub use crate::table_impl::tform::Tform;
-    pub use crate::table_impl::tform_kind::TformKind;
-    pub use crate::table_impl::{BinTable, BinTableMetadata};
     pub use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
     pub use crate::writer::table::{ColumnType, TableBuilder, WriteColumn};
 }
@@ -151,7 +202,7 @@ pub mod io {
 pub mod internals {
     use crate::bitpix::Bitpix;
     use crate::data::image_data::ImageData;
-    use crate::wcs::bench;
+    use crate::world_coordinates::bench;
 
     /// Decode a big-endian data unit into host-endian samples — the per-element
     /// byte-swap (`ImageData::decode`).

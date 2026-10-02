@@ -4,6 +4,13 @@
 use std::ops::Range;
 
 use crate::allocation;
+use crate::bintable::column::Column;
+use crate::bintable::column_data::ColumnData;
+use crate::bintable::descriptor::PqDescriptor;
+use crate::bintable::table_schema::TableSchema;
+#[cfg(feature = "compression")]
+use crate::bintable::table_view::TableView;
+use crate::bintable::tform_kind::TformKind;
 use crate::data::shape_product;
 use crate::data::validate_image_region;
 use crate::endian::write_pq_descriptor;
@@ -12,13 +19,6 @@ use crate::error::Result;
 use crate::hdu::image_geometry::ImageGeometry;
 use crate::reader::hdu::Hdu;
 use crate::reader::source::Source;
-use crate::table_impl::column::Column;
-use crate::table_impl::column_data::ColumnData;
-use crate::table_impl::descriptor::PqDescriptor;
-use crate::table_impl::table_schema::TableSchema;
-#[cfg(feature = "compression")]
-use crate::table_impl::table_view::TableView;
-use crate::table_impl::tform_kind::TformKind;
 
 /// A [`Source`] and its staging buffer. Kept apart from the HDU records so a read can
 /// borrow a header or schema while it fetches bytes.

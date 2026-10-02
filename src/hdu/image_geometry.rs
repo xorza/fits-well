@@ -7,7 +7,7 @@ use crate::data::shape_product;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::HduKind;
-use crate::header::Header;
+use crate::header_model::Header;
 use crate::keyword::key;
 
 /// The array an image HDU holds, as its header declares it: the axis lengths, the

@@ -10,6 +10,10 @@
 //! as `ZFORMn`/`ZNAXIS1`/`ZNAXIS2`/`ZPCOUNT`.
 
 use crate::allocation;
+use crate::bintable::descriptor::PqDescriptor;
+use crate::bintable::table_view::TableView;
+use crate::bintable::tform::Tform;
+use crate::bintable::tform_kind::TformKind;
 use crate::compress::Compression;
 use crate::compress::ImageCodec;
 use crate::compress::convert;
@@ -20,14 +24,10 @@ use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::validate_table_field_count;
-use crate::header::Header;
-use crate::header::value;
+use crate::header_model::Header;
+use crate::header_model::value;
 use crate::keyword;
 use crate::keyword::key;
-use crate::table_impl::descriptor::PqDescriptor;
-use crate::table_impl::table_view::TableView;
-use crate::table_impl::tform::Tform;
-use crate::table_impl::tform_kind::TformKind;
 
 /// Per-column compression algorithm (`ZCTYPn`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,9 +1,9 @@
 //! The per-tile source columns a compressed image stores its tiles in.
 
+use crate::bintable::table_view::TableView;
+use crate::bintable::vla_column::VlaColumn;
 use crate::compress::decode::tile_cells::TileCells;
 use crate::error::Result;
-use crate::table_impl::table_view::TableView;
-use crate::table_impl::vla_column::VlaColumn;
 
 /// The three per-tile source columns (§10.1.3): the primary `COMPRESSED_DATA` and
 /// the `GZIP_COMPRESSED_DATA` / `UNCOMPRESSED_DATA` fallbacks. Any of them may be

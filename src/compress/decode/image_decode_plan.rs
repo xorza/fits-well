@@ -1,5 +1,6 @@
 //! Everything a tiled image's decode resolves once, before the first tile.
 
+use crate::bintable::table_view::TableView;
 #[cfg(feature = "parallel")]
 use crate::compress::decode;
 use crate::compress::decode::decode_sample::DecodeSample;
@@ -16,8 +17,7 @@ use crate::compress::tile_geometry::TileGeometry;
 #[cfg(feature = "parallel")]
 use crate::compress::tile_geometry::TileScratch;
 use crate::error::Result;
-use crate::header::Header;
-use crate::table_impl::table_view::TableView;
+use crate::header_model::Header;
 
 /// Everything a tiled image's decode needs that the header and the table's metadata
 /// columns determine once, up front — grouped by the concern each part serves rather

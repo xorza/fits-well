@@ -3,6 +3,7 @@
 use std::ops::Range;
 
 use crate::allocation;
+use crate::bintable::table_view::TableView;
 use crate::compress::ImageCodec;
 use crate::compress::convert;
 use crate::compress::decode::decode_buffer::DecodeBuffer;
@@ -14,9 +15,8 @@ use crate::data::view_words;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::image_geometry::ImageGeometry;
-use crate::header::Header;
+use crate::header_model::Header;
 use crate::keyword::key;
-use crate::table_impl::table_view::TableView;
 
 /// The image a tiled-compression `BINTABLE` encodes, with the codec and tile shape
 /// its header names — everything a decode needs from the header before the first

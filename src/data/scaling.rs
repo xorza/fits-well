@@ -6,7 +6,7 @@ use crate::data::sample_type::{SampleType, UnsignedKind};
 use crate::data::{U64_OFFSET, U64_OFFSET_INTEGER};
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header::Header;
+use crate::header_model::Header;
 
 /// The linear `BSCALE`/`BZERO` map from a stored value to its physical value,
 /// plus the integer `BLANK` sentinel marking undefined pixels.
@@ -31,7 +31,7 @@ impl Scaling {
         blank: None,
     };
 
-    /// The public entry point is [`Header::scaling`](crate::header::Header::scaling).
+    /// The public entry point is [`Header::scaling`](crate::header_model::Header::scaling).
     pub(crate) fn from_header(header: &Header) -> Result<Scaling> {
         Ok(Scaling {
             bscale: header.get_real("BSCALE")?.unwrap_or(1.0),

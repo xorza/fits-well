@@ -1,3 +1,5 @@
+use crate::bintable::BinTable;
+use crate::bintable::tform_kind::TformKind;
 #[cfg(feature = "parallel")]
 use crate::compress::decode::decode_wave_tile_count;
 use crate::compress::decode::tiled_image::TiledImage;
@@ -11,10 +13,8 @@ use crate::error::Result;
 use crate::hdu::HduKind;
 use crate::hdu::HduRole;
 use crate::hdu::image_geometry::ImageGeometry;
-use crate::header::Header;
+use crate::header_model::Header;
 use crate::reader::internals::open_fixture;
-use crate::table_impl::BinTable;
-use crate::table_impl::tform_kind::TformKind;
 
 /// Decode the tiled image `header` describes from its container `table`, resolving
 /// the kind and geometry the way the reader's scan does.
@@ -419,7 +419,7 @@ fn zblank_column_overrides_keyword_per_tile() {
         (3, "ZBLANK", TformKind::F32),
     ] {
         let mut malformed = table.clone();
-        crate::table_impl::internals::set_column_kind(&mut malformed, column, kind);
+        crate::bintable::internals::set_column_kind(&mut malformed, column, kind);
         assert!(matches!(
             decompress_image(&h, &malformed),
             Err(FitsError::TypeMismatch { name: actual, .. }) if actual == name

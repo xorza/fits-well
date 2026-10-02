@@ -13,7 +13,7 @@ use crate::column::Named;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::validate_table_field_count;
-use crate::header::Header;
+use crate::header_model::Header;
 use crate::keyword::key;
 
 /// The value type of an ASCII-table column.
