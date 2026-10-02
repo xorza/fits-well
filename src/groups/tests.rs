@@ -3,6 +3,23 @@ use crate::error::Indexed;
 use crate::groups::*;
 use crate::reader::internals::open_fixture;
 
+/// A random-groups header: `NAXIS1 = 0`, then `axes` for each group's array.
+fn groups_header(bitpix: i64, axes: &[i64], pcount: i64, gcount: i64) -> Header {
+    let mut header = Header::new();
+    header
+        .set_internal("BITPIX", bitpix)
+        .set_internal("NAXIS", axes.len() as i64 + 1)
+        .set_internal("NAXIS1", 0);
+    for (index, &length) in axes.iter().enumerate() {
+        header.set_internal(&format!("NAXIS{}", index + 2), length);
+    }
+    header
+        .set_internal("GROUPS", true)
+        .set_internal("PCOUNT", pcount)
+        .set_internal("GCOUNT", gcount);
+    header
+}
+
 #[test]
 fn reads_the_real_uv_random_groups() {
     let mut reader = open_fixture("DDTSUVDATA.fits");
@@ -88,15 +105,8 @@ fn parameter_physical_sums_addends_sharing_a_ptype() {
     // §6.3: two group parameters share PTYPEn='DATE' (a high-precision split); the
     // logical value is the SUM of the two addends' physical values — here both
     // non-zero, so a "return the first addend" bug would be caught.
-    let mut header = Header::new();
+    let mut header = groups_header(-32, &[1], 2, 1);
     header
-        .set_internal("BITPIX", -32)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 0)
-        .set_internal("NAXIS2", 1)
-        .set_internal("GROUPS", true)
-        .set_internal("PCOUNT", 2)
-        .set_internal("GCOUNT", 1)
         .set_internal("PTYPE1", "DATE")
         .set_internal("PSCAL1", 1.0)
         .set_internal("PZERO1", 2_445_728.5)
@@ -135,15 +145,8 @@ fn parameter_physical_sums_addends_sharing_a_ptype() {
 #[test]
 fn array_physical_maps_blank_to_nan_for_every_integer_bitpix() {
     for bitpix in [Bitpix::U8, Bitpix::I16, Bitpix::I32, Bitpix::I64] {
-        let mut header = Header::new();
+        let mut header = groups_header(bitpix.code(), &[3], 1, 1);
         header
-            .set_internal("BITPIX", bitpix.code())
-            .set_internal("NAXIS", 2)
-            .set_internal("NAXIS1", 0)
-            .set_internal("NAXIS2", 3)
-            .set_internal("GROUPS", true)
-            .set_internal("PCOUNT", 1)
-            .set_internal("GCOUNT", 1)
             .set_internal("PTYPE1", "PARAM")
             .set_internal("BSCALE", 2.0)
             .set_internal("BZERO", 5.0)
@@ -184,15 +187,8 @@ fn naxis1_group_has_one_array_element_matching_data_extent() {
     // per Eq. 2, PCOUNT params + an empty-product array of 1 element per group — the
     // way `data_extent` sizes the unit. `array_len` must agree (1, not 0), or
     // `from_data` rejects a unit the reader already sized as readable.
-    let mut header = Header::new();
-    header
-        .set_internal("BITPIX", -32)
-        .set_internal("NAXIS", 1)
-        .set_internal("NAXIS1", 0)
-        .set_internal("GROUPS", true)
-        .set_internal("PCOUNT", 1)
-        .set_internal("GCOUNT", 2)
-        .set_internal("PTYPE1", "P");
+    let mut header = groups_header(-32, &[], 1, 2);
+    header.set_internal("PTYPE1", "P");
     // 2 groups × (1 param + 1 array element) = 4 floats.
     let mut data = Vec::new();
     for v in [1.0f32, 10.0, 2.0, 20.0] {
@@ -219,15 +215,7 @@ fn read_groups_rejects_non_random_groups_hdus() {
 
 #[test]
 fn raw_group_view_preserves_i64_extremes_and_group_boundaries() {
-    let mut header = Header::new();
-    header
-        .set_internal("BITPIX", 64)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 0)
-        .set_internal("NAXIS2", 2)
-        .set_internal("GROUPS", true)
-        .set_internal("PCOUNT", 2)
-        .set_internal("GCOUNT", 2);
+    let header = groups_header(64, &[2], 2, 2);
     let stored = [
         i64::MIN,
         i64::MAX,
@@ -262,15 +250,7 @@ fn raw_group_view_preserves_i64_extremes_and_group_boundaries() {
 
 #[test]
 fn raw_group_view_preserves_float_bit_patterns() {
-    let mut f32_header = Header::new();
-    f32_header
-        .set_internal("BITPIX", -32)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 0)
-        .set_internal("NAXIS2", 2)
-        .set_internal("GROUPS", true)
-        .set_internal("PCOUNT", 1)
-        .set_internal("GCOUNT", 1);
+    let f32_header = groups_header(-32, &[2], 1, 1);
     let f32_bits = [0x7fc0_1234, 0x8000_0000, 0x0000_0001];
     let f32_data: Vec<u8> = f32_bits.into_iter().flat_map(u32::to_be_bytes).collect();
     let f32_groups = RandomGroups::from_data(&f32_header, &f32_data).unwrap();
@@ -290,15 +270,7 @@ fn raw_group_view_preserves_float_bit_patterns() {
         f32_bits[1..]
     );
 
-    let mut f64_header = Header::new();
-    f64_header
-        .set_internal("BITPIX", -64)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 0)
-        .set_internal("NAXIS2", 2)
-        .set_internal("GROUPS", true)
-        .set_internal("PCOUNT", 1)
-        .set_internal("GCOUNT", 1);
+    let f64_header = groups_header(-64, &[2], 1, 1);
     let f64_bits = [
         0x7ff8_0000_0000_1234,
         0x8000_0000_0000_0000,
