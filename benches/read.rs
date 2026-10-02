@@ -61,7 +61,7 @@ fn fits_bytes(bitpix: Bitpix, n: usize) -> Vec<u8> {
     )
     .unwrap();
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_image(&img).unwrap();
+    w.write_image(&img, None).unwrap();
     w.into_inner().into_inner()
 }
 
@@ -150,6 +150,7 @@ fn read_compressed_image_section(c: &mut Criterion) {
             &image,
             Compression::Rice,
             &CompressionOptions::tiled([64, 64]),
+            None,
         )
         .unwrap();
     let bytes = writer.into_inner().into_inner();

@@ -210,48 +210,34 @@ impl<W: Write> FitsWriter<W> {
 
     /// Write an ASCII table as a `TABLE` extension (a dataless primary is written
     /// first if needed). Columns are packed left-to-right with no gaps; data is
-    /// space-padded per §7.2.3.
-    pub fn write_ascii_table(&mut self, table: &AsciiTableBuilder) -> Result<()> {
-        ascii::write_template(self, table, None)
-    }
-
-    /// Write an ASCII table while preserving the non-structural cards from `header`.
-    /// Mandatory table-layout and checksum cards are regenerated from `columns`.
-    pub fn write_ascii_table_with_header(
+    /// space-padded per §7.2.3. The non-structural cards of `header` are kept; the
+    /// table-layout and checksum cards are generated from `table`.
+    pub fn write_ascii_table(
         &mut self,
         table: &AsciiTableBuilder,
-        header: &Header,
+        header: Option<&Header>,
     ) -> Result<()> {
-        ascii::write_template(self, table, Some(header))
+        ascii::write_template(self, table, header)
     }
 
     /// Write a binary table as a `BINTABLE` extension. A dataless primary HDU is
     /// written automatically first if nothing has been written yet (a table can
     /// never be the primary HDU). Fixed-width and variable-length (`P`/`Q`) columns
     /// are both supported, including jagged `PX`/`QX` bit arrays — VLA columns
-    /// write a heap after the main table.
-    pub fn write_table(&mut self, table: &TableBuilder) -> Result<()> {
-        table::write_template(self, table, None)
-    }
-
-    /// Write a binary table while preserving the non-structural cards from `header`.
-    /// Mandatory table-layout and checksum cards are regenerated from `columns`.
-    pub fn write_table_with_header(&mut self, table: &TableBuilder, header: &Header) -> Result<()> {
-        table::write_template(self, table, Some(header))
+    /// write a heap after the main table. The non-structural cards of `header` are
+    /// kept; the table-layout and checksum cards are generated from `table`.
+    pub fn write_table(&mut self, table: &TableBuilder, header: Option<&Header>) -> Result<()> {
+        table::write_template(self, table, header)
     }
 
     /// Write `image` as the primary HDU (first call) or an `IMAGE` extension
     /// (later calls). The mandatory header is synthesized (`SIMPLE`/`XTENSION`,
     /// `BITPIX`, `NAXISn`, plus `BSCALE`/`BZERO`/`BLANK` when scaling is
-    /// non-trivial), followed by the big-endian data unit.
-    pub fn write_image(&mut self, image: &Image) -> Result<()> {
-        image::write_template(self, image, None)
-    }
-
-    /// Write an image while preserving the non-structural cards from `header`.
-    /// Mandatory image-layout and checksum cards are regenerated from `image`.
-    pub fn write_image_with_header(&mut self, image: &Image, header: &Header) -> Result<()> {
-        image::write_template(self, image, Some(header))
+    /// non-trivial), followed by the big-endian data unit. The non-structural cards
+    /// of `header` are kept; the image-layout and checksum cards are generated from
+    /// `image`.
+    pub fn write_image(&mut self, image: &Image, header: Option<&Header>) -> Result<()> {
+        image::write_template(self, image, header)
     }
 
     /// Write `image` as a tiled-compressed `BINTABLE` extension (§10.1), using the
@@ -260,29 +246,18 @@ impl<W: Write> FitsWriter<W> {
     /// `GZIP_1`/`GZIP_2`/`RICE_1`/`PLIO_1`/`HCOMPRESS_1`; float images are quantized
     /// (`SUBTRACTIVE_DITHER_1`) and compressed with `GZIP_1`/`GZIP_2`/`RICE_1`.
     /// `HCOMPRESS_1` needs a 2-D tile shape, and every `PLIO_1` mask sample must be
-    /// in the lossless `0..=0xFF_FFFF` domain.
+    /// in the lossless `0..=0xFF_FFFF` domain. The non-structural cards of `header`
+    /// are kept; the container, compression, image-layout and checksum cards are
+    /// generated from `image` and `options`.
     #[cfg(feature = "compression")]
     pub fn write_compressed_image(
         &mut self,
         image: &Image,
         compression: Compression,
         options: &CompressionOptions,
+        header: Option<&Header>,
     ) -> Result<()> {
-        image::write_compressed_template(self, image, compression, options, None)
-    }
-
-    /// Write a tiled-compressed image while preserving the non-structural cards
-    /// from `header`. Container, compression, image-layout, and checksum cards are
-    /// regenerated from `image` and `options`.
-    #[cfg(feature = "compression")]
-    pub fn write_compressed_image_with_header(
-        &mut self,
-        image: &Image,
-        compression: Compression,
-        options: &CompressionOptions,
-        header: &Header,
-    ) -> Result<()> {
-        image::write_compressed_template(self, image, compression, options, Some(header))
+        image::write_compressed_template(self, image, compression, options, header)
     }
 
     /// Write a `BINTABLE` as a tiled-compressed table (§10.3). `header` is the
@@ -304,37 +279,18 @@ impl<W: Write> FitsWriter<W> {
 }
 
 impl<W: Write + Seek> FitsWriter<W> {
-    /// Begin a large identity-scaled image write. The returned stream must receive
-    /// exactly the axis-product sample count and be finished successfully.
+    /// Begin a large image write of `shape` samples of `bitpix`, scaled by
+    /// `scaling`. The returned stream must receive exactly the axis-product sample
+    /// count and be finished successfully. The non-structural cards of `header` are
+    /// kept; the structural and checksum cards are generated.
     pub fn stream_image(
         &mut self,
         shape: impl Into<Vec<usize>>,
         bitpix: Bitpix,
-    ) -> Result<ImageStream<'_, W>> {
-        image::stream_template(self, shape.into(), bitpix, Scaling::IDENTITY, None)
-    }
-
-    /// Begin a large image write with explicit scaling. Structural and checksum
-    /// cards are generated from the supplied geometry, sample type, and scaling.
-    pub fn stream_image_scaled(
-        &mut self,
-        shape: impl Into<Vec<usize>>,
-        bitpix: Bitpix,
         scaling: Scaling,
+        header: Option<&Header>,
     ) -> Result<ImageStream<'_, W>> {
-        image::stream_template(self, shape.into(), bitpix, scaling, None)
-    }
-
-    /// Begin a large image write with explicit scaling and an informational header
-    /// template. Structural and checksum cards are regenerated.
-    pub fn stream_image_with_header(
-        &mut self,
-        shape: impl Into<Vec<usize>>,
-        bitpix: Bitpix,
-        scaling: Scaling,
-        header: &Header,
-    ) -> Result<ImageStream<'_, W>> {
-        image::stream_template(self, shape.into(), bitpix, scaling, Some(header))
+        image::stream_template(self, shape.into(), bitpix, scaling, header)
     }
 }
 

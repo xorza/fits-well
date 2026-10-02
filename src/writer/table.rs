@@ -183,19 +183,20 @@ impl WriteColumn {
     }
 
     /// Use 64-bit `Q` descriptors for this VLA column.
-    pub fn wide(mut self) -> Result<WriteColumn> {
+    ///
+    /// # Panics
+    /// Unless the column is variable-length — from [`WriteColumn::vla`],
+    /// [`WriteColumn::vla_typed`] or [`WriteColumn::vla_bits`].
+    pub fn wide(mut self) -> WriteColumn {
         match &mut self.values {
             WriteColumnData::Vla { wide, .. } | WriteColumnData::VlaBits { wide, .. } => {
                 *wide = true;
             }
-            WriteColumnData::Fixed { data, .. } => {
-                return Err(FitsError::NotAVla {
-                    code: ColumnType::from_data(data).letter(),
-                });
+            WriteColumnData::Fixed { .. } | WriteColumnData::Bits { .. } => {
+                panic!("only a variable-length column takes `Q` descriptors")
             }
-            WriteColumnData::Bits { .. } => return Err(FitsError::NotAVla { code: 'X' }),
         };
-        Ok(self)
+        self
     }
 
     /// Emit `TSCALn`/`TZEROn` so the stored `data` reads back as

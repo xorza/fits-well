@@ -39,8 +39,8 @@ fn main() -> fits_well::Result<()> {
     // the big-endian data unit. The first `write_image` is the primary array; the
     // second becomes an `IMAGE` extension.
     let mut writer = FitsWriter::new(File::create(&path)?);
-    writer.write_image(&i16_image)?;
-    writer.write_image(&f32_image)?;
+    writer.write_image(&i16_image, None)?;
+    writer.write_image(&f32_image, None)?;
     writer.into_inner().sync_all()?;
     println!("wrote {}", path.display());
 

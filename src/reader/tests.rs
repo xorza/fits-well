@@ -244,9 +244,7 @@ fn read_wcs_fetches_only_the_referenced_first_row_heap_cells() {
     lookup_header.set_internal("EXTNAME", "WCS-TABLE");
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer.write_raw_hdu(&primary, &[0]).unwrap();
-    writer
-        .write_table_with_header(&table, &lookup_header)
-        .unwrap();
+    writer.write_table(&table, Some(&lookup_header)).unwrap();
 
     let bytes_read = Rc::new(Cell::new(0));
     let source = CountingCursor {
@@ -753,7 +751,7 @@ fn image_indices_lists_readable_images_including_compressed() {
 
 fn write_to_vec(image: &Image) -> Vec<u8> {
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_image(image).unwrap();
+    w.write_image(image, None).unwrap();
     w.into_inner().into_inner()
 }
 
@@ -885,9 +883,9 @@ fn hdu_index_selects_by_case_insensitive_name_and_version() {
     extension_header.set("OBJECT", "target").unwrap();
 
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer.write_image(&primary).unwrap();
+    writer.write_image(&primary, None).unwrap();
     writer
-        .write_image_with_header(&extension, &extension_header)
+        .write_image(&extension, Some(&extension_header))
         .unwrap();
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
@@ -1169,6 +1167,7 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
                 &image,
                 Compression::GZIP,
                 &CompressionOptions::tiled([4, 3]),
+                None,
             )
             .unwrap();
         let bytes = writer.into_inner().into_inner();
@@ -1304,12 +1303,11 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
             ],
         )
         .unwrap()
-        .wide()
-        .unwrap(),
+        .wide(),
     ];
     let table = TableBuilder::explicit(rows, columns).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer.write_table(&table).unwrap();
+    writer.write_table(&table, None).unwrap();
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
 
@@ -1489,11 +1487,11 @@ fn malformed_pq_descriptors_match_across_table_read_paths() {
     for wide in [false, true] {
         let mut column = WriteColumn::vla("VLA", vec![ColumnData::Bytes(vec![7])]).unwrap();
         if wide {
-            column = column.wide().unwrap();
+            column = column.wide();
         }
         let table = TableBuilder::explicit(1, vec![column]).unwrap();
         let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-        writer.write_table(&table).unwrap();
+        writer.write_table(&table, None).unwrap();
         let bytes = writer.into_inner().into_inner();
         let base_reader = FitsReader::from_bytes(&bytes).unwrap();
         let schema = base_reader.table_schema(1).unwrap();

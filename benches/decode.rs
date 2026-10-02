@@ -149,7 +149,7 @@ fn read_image(c: &mut Criterion) {
         )
         .unwrap();
         let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-        w.write_image(&img).unwrap();
+        w.write_image(&img, None).unwrap();
         // Open once and reuse the reader, whose internal scratch is reused across
         // calls — so we measure the per-call read (seek + staging memcpy + decode),
         // not repeated header parsing or staging allocation. The decoded `Image` is
@@ -184,7 +184,7 @@ fn read_image_view(c: &mut Criterion) {
         )
         .unwrap();
         let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-        w.write_image(&img).unwrap();
+        w.write_image(&img, None).unwrap();
         let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
         let mut scratch: Vec<u64> = Vec::new();
         g.throughput(Throughput::Bytes((n * elem_bytes(bitpix)) as u64));

@@ -71,7 +71,7 @@ let image = Image::new(
 )?;
 
 let mut writer = FitsWriter::new(File::create("out.fits")?);
-writer.write_image(&image)?;
+writer.write_image(&image, None)?;
 writer.into_inner().sync_all()?;
 
 let mut reader = FitsReader::open(File::open("out.fits")?)?;
@@ -130,7 +130,7 @@ call — it detects `ZIMAGE` and decompresses transparently. To write one:
 # let image = Image::new(vec![16, 16], vec![0i16; 256])?;
 let options = CompressionOptions::tiled([8, 8]); // 8×8 tiles
 let mut writer = FitsWriter::new(File::create("compressed.fits")?);
-writer.write_compressed_image(&image, Compression::Rice, &options)?;
+writer.write_compressed_image(&image, Compression::Rice, &options, None)?;
 # writer.into_inner().sync_all()?;
 # }
 # Ok::<(), fits_well::FitsError>(())
@@ -153,7 +153,7 @@ let table = TableBuilder::new()
     )?;
 
 let mut writer = FitsWriter::new(File::create("table.fits")?);
-writer.write_table(&table)?; // row count inferred and cross-checked
+writer.write_table(&table, None)?; // row count inferred and cross-checked
 writer.into_inner().sync_all()?;
 
 let mut reader = FitsReader::open(File::open("table.fits")?)?;
@@ -182,7 +182,7 @@ only selected rows and referenced P/Q heap cells; `read_table()` remains the
 explicit whole-table materialization path.
 
 Jagged bit arrays use `WriteColumn::vla_bits` with one MSB-first
-`BitVec<u8, Msb0>` per row; call `.wide()?` when `QX` descriptors are required.
+`BitVec<u8, Msb0>` per row; call `.wide()` when `QX` descriptors are required.
 
 ### World Coordinate System
 
