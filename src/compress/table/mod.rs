@@ -988,8 +988,9 @@ fn decompress_column_into(
         }
     }
     if scratch.bytes.len() != expect {
-        return Err(FitsError::UnsupportedCompression {
-            name: "decompressed column size mismatch".to_string(),
+        return Err(FitsError::DataSizeMismatch {
+            expected: expect,
+            got: scratch.bytes.len(),
         });
     }
     Ok(())

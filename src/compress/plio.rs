@@ -245,8 +245,8 @@ fn nonnegative_word(ll: BeWords<'_>, index: usize) -> Result<usize> {
 }
 
 fn invalid_stream(detail: &str) -> FitsError {
-    FitsError::UnsupportedCompression {
-        name: format!("PLIO_1: {detail}"),
+    FitsError::CorruptCompressedData {
+        detail: format!("PLIO_1: {detail}"),
     }
 }
 
@@ -293,7 +293,7 @@ mod tests {
         let invalid_opcode = [0, 0, 4, i16::MIN];
         assert!(matches!(
             plio::plio_decode_be_into(&be(&invalid_opcode), 1, &mut out),
-            Err(FitsError::UnsupportedCompression { .. })
+            Err(FitsError::CorruptCompressedData { detail }) if detail == "PLIO_1: invalid opcode"
         ));
     }
 }

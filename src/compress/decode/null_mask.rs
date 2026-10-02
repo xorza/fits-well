@@ -130,8 +130,8 @@ impl<'a> NullMask<'a> {
         }
         ensure_tile_size(tile_elems, out.len())?;
         if out.iter().any(|&value| !matches!(value, 0 | 1)) {
-            return Err(FitsError::UnsupportedCompression {
-                name: "null-pixel mask contains a value other than zero or one".to_string(),
+            return Err(FitsError::CorruptCompressedData {
+                detail: "null-pixel mask contains a value other than zero or one".to_string(),
             });
         }
         Ok(true)

@@ -34,8 +34,8 @@ impl<'a> TileCells<'a> {
         } else if let Some(c) = self.uncompressed.filter(|cell| cell.element_count > 0) {
             Ok(TileSource::Uncompressed(c))
         } else {
-            Err(FitsError::UnsupportedCompression {
-                name: "empty tile (no compressed or uncompressed data)".to_string(),
+            Err(FitsError::CorruptCompressedData {
+                detail: "empty tile (no compressed or uncompressed data)".to_string(),
             })
         }
     }

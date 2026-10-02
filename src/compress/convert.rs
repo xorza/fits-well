@@ -155,8 +155,8 @@ pub(super) fn cell_to_f64_into(cell: VlaCell<'_>, zbitpix: Bitpix, out: &mut Vec
 pub(super) fn byte_cell<'a>(cell: VlaCell<'a>) -> Result<&'a [u8]> {
     match cell.element_type {
         TformKind::Byte => Ok(cell.bytes),
-        _ => Err(FitsError::UnsupportedCompression {
-            name: "compressed cell is not a byte array".to_string(),
+        _ => Err(FitsError::CorruptCompressedData {
+            detail: "compressed cell is not a byte array".to_string(),
         }),
     }
 }
@@ -164,8 +164,8 @@ pub(super) fn byte_cell<'a>(cell: VlaCell<'a>) -> Result<&'a [u8]> {
 pub(super) fn plio_cell<'a>(cell: VlaCell<'a>) -> Result<&'a [u8]> {
     (cell.element_type == TformKind::I16)
         .then_some(cell.bytes)
-        .ok_or_else(|| FitsError::UnsupportedCompression {
-            name: "PLIO_1 data is not an i16 list".to_string(),
+        .ok_or_else(|| FitsError::CorruptCompressedData {
+            detail: "PLIO_1 data is not an i16 list".to_string(),
         })
 }
 
