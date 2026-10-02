@@ -511,7 +511,7 @@ fn table_writers_enforce_the_exact_tfields_limit_before_output() {
     let reader = round_trip(|w| w.write_table(&binary_table(0, &binary), None));
     assert_eq!(
         reader.hdus[1].header.get_integer("TFIELDS").unwrap(),
-        Some(MAX_TABLE_FIELDS as i64)
+        Some(i64::try_from(MAX_TABLE_FIELDS).unwrap())
     );
 
     let ascii = empty_ascii_columns(MAX_TABLE_FIELDS);
@@ -522,7 +522,7 @@ fn table_writers_enforce_the_exact_tfields_limit_before_output() {
     let reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
     assert_eq!(
         reader.hdus[1].header.get_integer("TFIELDS").unwrap(),
-        Some(MAX_TABLE_FIELDS as i64)
+        Some(i64::try_from(MAX_TABLE_FIELDS).unwrap())
     );
 
     let binary = empty_binary_columns(MAX_TABLE_FIELDS + 1);

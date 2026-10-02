@@ -12,7 +12,7 @@ pub(super) trait DecodeSample: Copy + Send + Sync {
 impl DecodeSample for u8 {
     type Wide = i64;
     fn narrow(wide: i64) -> u8 {
-        wide as u8
+        wide.cast_unsigned() as u8
     }
 }
 

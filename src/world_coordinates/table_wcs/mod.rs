@@ -15,6 +15,7 @@ pub(super) mod table_wcs_resolver;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::Header;
+use crate::header_model::value;
 use crate::keyword::KeyBuf;
 use crate::keyword::key;
 use crate::world_coordinates::axis;
@@ -167,7 +168,7 @@ impl<'a> TableWcs<'a> {
     pub(super) fn translate(&self, header: &Header) -> Result<TranslatedTableWcs> {
         let naxis = self.naxis();
         let mut h = Header::new();
-        h.set_internal("WCSAXES", naxis as i64);
+        h.set_internal("WCSAXES", value::fits_i64(naxis)?);
         let mut spectral_frames = vec![None; naxis];
         for (index, spectral) in spectral_frames.iter_mut().enumerate() {
             let ax = index + 1;

@@ -40,7 +40,7 @@ fn fill<T>(f: impl Fn(usize, usize, i64) -> T) -> Vec<T> {
             s ^= s << 13;
             s ^= s >> 7;
             s ^= s << 17;
-            f(i % NX, i / NX, (s >> 56) as i64)
+            f(i % NX, i / NX, (s >> 56).cast_signed())
         })
         .collect()
 }
@@ -54,14 +54,14 @@ fn image(samples: ImageData) -> Image {
 /// for the 32-bit HCOMPRESS transform.
 fn science_i16() -> Image {
     image(ImageData::I16(fill(|x, y, n| {
-        ((((x + y) % 4096) as i64 + (n % 17) - 8).max(0)) as i16
+        (i64::try_from((x + y) % 4096).unwrap() + (n % 17) - 8).max(0) as i16
     })))
 }
 
 /// A blocky 16-bit label field — long constant runs, the workload PLIO targets.
 fn mask_i16() -> Image {
     image(ImageData::I16(fill(|x, y, _| {
-        (((x / 64) + (y / 64)) % 4) as i16
+        i16::try_from(((x / 64) + (y / 64)) % 4).unwrap()
     })))
 }
 
@@ -217,7 +217,8 @@ fn table_fixture() -> TableFixture {
 /// Uncompressed data-unit size = `NAXIS1` (row width, from the public header) ×
 /// `NAXIS2` rows.
 fn table_bytes(header: &Header, table: &BinTable) -> u64 {
-    header.get_integer("NAXIS1").unwrap().unwrap() as u64 * table.schema().nrows as u64
+    u64::try_from(header.get_integer("NAXIS1").unwrap().unwrap()).unwrap()
+        * table.schema().nrows as u64
 }
 
 fn compressed_table(header: &Header, table: &BinTable, compression: Compression) -> Vec<u8> {

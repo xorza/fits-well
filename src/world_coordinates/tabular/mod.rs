@@ -313,7 +313,9 @@ impl TabularTransform {
             if one_relative == 0 {
                 zero_relative += 1;
                 fraction -= 1.0;
-            } else if one_relative == length as isize && length > 1 {
+            } else if one_relative == isize::try_from(length).expect("a table axis fits isize")
+                && length > 1
+            {
                 zero_relative -= 1;
                 fraction += 1.0;
             }
@@ -393,6 +395,10 @@ impl TabularTransform {
         )
     }
 
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "the caller's domain check keeps upsilon at 0.5 or more"
+    )]
     fn array_to_index(&self, table_axis: usize, upsilon: f64) -> f64 {
         let Some(index) = &self.indices[table_axis] else {
             return upsilon;
@@ -639,7 +645,7 @@ struct SubvoxelSearch<'a> {
 impl SubvoxelSearch<'_> {
     fn locate(&mut self, level: usize) -> Result<bool> {
         let dimensions = self.transform.axes.len();
-        let size = 2.0f64.powi(-(level as i32));
+        let size = 2.0f64.powi(-i32::try_from(level).expect("the search depth fits i32"));
         self.evaluate_corners(level, size)?;
         self.scratch.lower.fill(false);
         self.scratch.upper.fill(false);
@@ -940,7 +946,7 @@ pub(crate) mod internals {
     /// the `coordinate` column in `WCS-TABLE`, with unit pixels and no offsets.
     pub(crate) fn tab_header(axis_count: usize, coordinate: &str) -> Header {
         let mut header = Header::new();
-        header.set_internal("NAXIS", axis_count as i64);
+        header.set_internal("NAXIS", i64::try_from(axis_count).unwrap());
         for axis in 1..=axis_count {
             header
                 .set_internal(format!("CTYPE{axis}").as_str(), format!("AX{axis:02}-TAB"))
@@ -949,7 +955,7 @@ pub(crate) mod internals {
                 .set_internal(format!("CDELT{axis}").as_str(), 1.0)
                 .set_internal(format!("PS{axis}_0").as_str(), "WCS-TABLE")
                 .set_internal(format!("PS{axis}_1").as_str(), coordinate)
-                .set_internal(format!("PV{axis}_3").as_str(), axis as i64);
+                .set_internal(format!("PV{axis}_3").as_str(), i64::try_from(axis).unwrap());
         }
         header
     }

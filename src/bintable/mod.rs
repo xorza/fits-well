@@ -107,11 +107,11 @@ pub(crate) mod internals {
         h.set_internal("XTENSION", "BINTABLE")
             .set_internal("BITPIX", 8)
             .set_internal("NAXIS", 2)
-            .set_internal("NAXIS1", naxis1 as i64)
-            .set_internal("NAXIS2", naxis2 as i64)
+            .set_internal("NAXIS1", i64::try_from(naxis1).unwrap())
+            .set_internal("NAXIS2", i64::try_from(naxis2).unwrap())
             .set_internal("PCOUNT", 0)
             .set_internal("GCOUNT", 1)
-            .set_internal("TFIELDS", tforms.len() as i64);
+            .set_internal("TFIELDS", i64::try_from(tforms.len()).unwrap());
         for (i, tform) in tforms.iter().enumerate() {
             h.set_internal(&format!("TFORM{}", i + 1), *tform);
         }

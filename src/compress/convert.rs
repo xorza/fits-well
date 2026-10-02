@@ -70,7 +70,7 @@ pub(super) fn gather_f64(
 pub(super) fn i64_to_be_into(vals: &[i64], bitpix: IntBitpix, out: &mut Vec<u8>) {
     out.clear();
     match bitpix {
-        IntBitpix::U8 => endian::extend_be(out, vals, |v| [v as u8]),
+        IntBitpix::U8 => endian::extend_be(out, vals, |v| [v.cast_unsigned() as u8]),
         IntBitpix::I16 => endian::extend_be(out, vals, |v| (v as i16).to_be_bytes()),
         IntBitpix::I32 => endian::extend_be(out, vals, |v| (v as i32).to_be_bytes()),
         IntBitpix::I64 => endian::extend_be(out, vals, i64::to_be_bytes),

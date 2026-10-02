@@ -49,10 +49,15 @@ struct Dither {
     nextrand: usize,
 }
 
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "the random values lie in (0, 1), so an index scaled by 500 is in 0..500"
+)]
 impl Dither {
     fn new(irow: i64) -> Self {
         let rand = random_values();
-        let iseed = (irow - 1).rem_euclid(N_RANDOM as i64) as usize;
+        let period = i64::try_from(N_RANDOM).unwrap();
+        let iseed = usize::try_from((irow - 1).rem_euclid(period)).unwrap();
         let nextrand = (rand[iseed] * 500.0) as usize;
         Dither {
             rand,
@@ -325,9 +330,9 @@ mod tests {
     #[test]
     fn dither2_quantize_round_trips() {
         // 8×8 field with genuine noise and a scattering of exact zeros.
-        let mut data: Vec<f64> = (0..64)
+        let mut data: Vec<f64> = (0u64..64)
             .map(|i| {
-                let mut z = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                let mut z = i.wrapping_mul(0x9E37_79B9_7F4A_7C15);
                 z ^= z >> 31;
                 10.0 + (z % 1000) as f64 / 100.0
             })

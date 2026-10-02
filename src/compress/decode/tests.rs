@@ -48,7 +48,7 @@ fn compressed_image_header(
     h.set_internal("ZIMAGE", true)
         .set_internal("ZCMPTYPE", cmptype)
         .set_internal("ZBITPIX", zbitpix)
-        .set_internal("ZNAXIS", shape.len() as i64);
+        .set_internal("ZNAXIS", i64::try_from(shape.len()).unwrap());
     for (index, &length) in shape.iter().enumerate() {
         h.set_internal(&format!("ZNAXIS{}", index + 1), length);
     }
@@ -82,7 +82,10 @@ fn decompresses_the_integer_codec_fixtures() {
 fn decompresses_to_the_astropy_reconstructions() {
     fn samples(data: ImageData) -> Vec<Option<u32>> {
         match data {
-            ImageData::I32(values) => values.into_iter().map(|v| Some(v as u32)).collect(),
+            ImageData::I32(values) => values
+                .into_iter()
+                .map(|v| Some(v.cast_unsigned()))
+                .collect(),
             ImageData::F32(values) => values
                 .into_iter()
                 .map(|v| (!v.is_nan()).then(|| v.to_bits()))
@@ -190,14 +193,14 @@ fn compressed_integer_null_mask_restores_blank_pixels() {
                 ("NULL PIXEL MASK", format!("1PB({})", mask.len()).as_str()),
             ],
             16,
-            4 + mask.len() as i64,
+            4 + i64::try_from(mask.len()).unwrap(),
         );
         h.set_internal("ZMASKCMP", codec)
             .set_internal("BLANK", -999);
         let mut data = Vec::new();
         data.extend_from_slice(&4i32.to_be_bytes());
         data.extend_from_slice(&0i32.to_be_bytes());
-        data.extend_from_slice(&(mask.len() as i32).to_be_bytes());
+        data.extend_from_slice(&i32::try_from(mask.len()).unwrap().to_be_bytes());
         data.extend_from_slice(&4i32.to_be_bytes());
         data.extend_from_slice(&10i16.to_be_bytes());
         data.extend_from_slice(&20i16.to_be_bytes());

@@ -39,9 +39,10 @@ pub(crate) const fn unit_count(bitpix: Bitpix) -> usize {
 pub(crate) fn sample_data(bitpix: Bitpix, n: usize) -> ImageData {
     match bitpix {
         Bitpix::U8 => ImageData::U8((0..n).map(|i| i as u8).collect()),
-        Bitpix::I16 => ImageData::I16((0..n).map(|i| i as i16).collect()),
-        Bitpix::I32 => ImageData::I32((0..n).map(|i| i as i32).collect()),
-        Bitpix::I64 => ImageData::I64((0..n).map(|i| i as i64).collect()),
+        // The i16 ramp wraps every 2¹⁶ samples; the swap does not care.
+        Bitpix::I16 => ImageData::I16((0..n).map(|i| (i as u16).cast_signed()).collect()),
+        Bitpix::I32 => ImageData::I32((0..n).map(|i| i32::try_from(i).unwrap()).collect()),
+        Bitpix::I64 => ImageData::I64((0..n).map(|i| i64::try_from(i).unwrap()).collect()),
         Bitpix::F32 => ImageData::F32((0..n).map(|i| i as f32).collect()),
         Bitpix::F64 => ImageData::F64((0..n).map(|i| i as f64).collect()),
     }

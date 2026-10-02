@@ -237,7 +237,7 @@ fn decodes_a_cfitsio_compressed_table_with_a_vla_column() {
     for row in 0..arrays.len() {
         assert_eq!(
             values[arrays.range(row)],
-            (0..(row % 7) as i32).collect::<Vec<_>>(),
+            (0..i32::try_from(row % 7).unwrap()).collect::<Vec<_>>(),
             "row {row}"
         );
     }
@@ -338,7 +338,10 @@ fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
             .unwrap();
             data.extend_from_slice(&cell);
             let mut header = compressed_header.clone();
-            header.set_internal("PCOUNT", (heap_prefix.len() + cell.len()) as i64);
+            header.set_internal(
+                "PCOUNT",
+                i64::try_from(heap_prefix.len() + cell.len()).unwrap(),
+            );
 
             let mut primary = Header::new();
             primary

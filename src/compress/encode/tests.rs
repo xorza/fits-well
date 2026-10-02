@@ -84,7 +84,7 @@ fn float_field() -> Vec<f32> {
         .map(|i| {
             let (x, y) = (i % 24, i / 24);
             let smooth = 100.0 + 3.0 * x as f32 - 2.0 * y as f32;
-            let noise = (mix(i as u64) % 2000) as f32 / 1000.0 - 1.0; // ±1.0
+            let noise = (mix(u64::try_from(i).unwrap()) % 2000) as f32 / 1000.0 - 1.0; // ±1.0
             smooth + noise
         })
         .collect()

@@ -614,6 +614,10 @@ fn first_real(header: &Header, first: &str, second: &str) -> Result<Option<f64>>
 }
 
 /// The quarter turn a multiple of 90° lands on (0 to 3), or `None` for any other angle.
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "a multiple of 90° divided by 90 and reduced mod 4 is a whole number in 0..4"
+)]
 fn quarter_turn(degrees: f64) -> Option<u8> {
     (degrees.rem_euclid(90.0) == 0.0).then(|| (degrees / 90.0).rem_euclid(4.0) as u8)
 }

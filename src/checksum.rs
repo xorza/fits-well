@@ -63,7 +63,7 @@ pub(crate) fn encode(sum: u32, complement: bool) -> [u8; 16] {
             }
         }
         for j in 0..4 {
-            asc[4 * j + i] = ch[j] as u8;
+            asc[4 * j + i] = u8::try_from(ch[j]).expect("an encoded character is ASCII");
         }
     }
     // Rotate one character right to align with the value's start at column 12.

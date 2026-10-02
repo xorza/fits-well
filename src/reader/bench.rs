@@ -113,7 +113,7 @@ pub fn read_compressed_image_section(c: &mut Criterion) {
     let image = Image::new(
         vec![WIDTH, HEIGHT],
         (0..WIDTH * HEIGHT)
-            .map(|index| index as i16)
+            .map(|index| (index as u16).cast_signed())
             .collect::<Vec<_>>(),
     )
     .unwrap();

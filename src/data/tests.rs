@@ -393,7 +393,7 @@ fn unsigned_u64_view_is_exact_where_physical_rounds() {
     // 2⁵³+1 is the smallest integer f64 cannot represent. The typed view recovers
     // it exactly; physical() (f64) rounds it to 2⁵³.
     let exact = 9_007_199_254_740_993u64; // 2⁵³ + 1
-    let stored = (exact ^ 0x8000_0000_0000_0000) as i64;
+    let stored = (exact ^ 0x8000_0000_0000_0000).cast_signed();
     let img = image(
         ImageData::I64(vec![stored]),
         Scaling {
@@ -403,7 +403,7 @@ fn unsigned_u64_view_is_exact_where_physical_rounds() {
         },
     );
     assert_eq!(img.unsigned(), Some(UnsignedData::U64(vec![exact])));
-    assert_eq!(img.physical()[0] as u64, exact - 1); // rounded to 2⁵³
+    assert_eq!(img.physical()[0], (exact - 1) as f64); // rounded to 2⁵³
 }
 
 #[test]

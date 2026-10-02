@@ -184,8 +184,8 @@ fn required_group_counts(header: &Header) -> Result<GroupCounts> {
         return Err(FitsError::KeywordOutOfRange { name: "GCOUNT" });
     }
     Ok(GroupCounts {
-        pcount: pcount as u64,
-        gcount: gcount as u64,
+        pcount: pcount.cast_unsigned(),
+        gcount: gcount.cast_unsigned(),
     })
 }
 
