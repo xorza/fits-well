@@ -62,8 +62,8 @@ pub(super) fn hcompress_tile_encode(
     let ny = tdims.first().copied().unwrap_or(vals.len()).max(1);
     let nx = (vals.len() / ny).max(1);
     if nx * ny != vals.len() {
-        return Err(FitsError::UnsupportedCompression {
-            name: "HCOMPRESS_1: tile is not 2-D".to_string(),
+        return Err(FitsError::CorruptCompressedData {
+            detail: "HCOMPRESS_1: tile is not 2-D".to_string(),
         });
     }
     scratch.plane.clear();
@@ -906,12 +906,12 @@ fn hdecompress_into(
 ) -> Result<()> {
     let mut bi = BitInput::new(input);
     if bi.read_bytes(2)? != MAGIC {
-        return Err(FitsError::UnsupportedCompression {
-            name: "HCOMPRESS_1: bad magic".to_string(),
+        return Err(FitsError::CorruptCompressedData {
+            detail: "HCOMPRESS_1: bad magic".to_string(),
         });
     }
-    let nx = usize::try_from(bi.readint()?).map_err(|_| FitsError::UnsupportedCompression {
-        name: "HCOMPRESS_1: negative tile dimension".to_string(),
+    let nx = usize::try_from(bi.readint()?).map_err(|_| FitsError::CorruptCompressedData {
+        detail: "HCOMPRESS_1: negative tile dimension".to_string(),
     })?;
     let ny = usize::try_from(bi.readint()?).map_err(|_| FitsError::UnsupportedCompression {
         name: "HCOMPRESS_1: negative tile dimension".to_string(),
@@ -921,16 +921,16 @@ fn hdecompress_into(
     // blindly — guarding here stops a hostile header from driving a wild `nx*ny`
     // allocation (or an overflow, or an empty-buffer panic at `a[0]` below).
     if tile_elems == 0 || nx.checked_mul(ny) != Some(tile_elems) {
-        return Err(FitsError::UnsupportedCompression {
-            name: "HCOMPRESS_1: tile dimensions do not match the tile size".to_string(),
+        return Err(FitsError::CorruptCompressedData {
+            detail: "HCOMPRESS_1: tile dimensions do not match the tile size".to_string(),
         });
     }
     let scale = bi.readint()?;
     let sumall = bi.readlonglong()?;
     let nbitplanes: [u8; 3] = bi.read_bytes(3)?.try_into().unwrap();
     if nbitplanes.iter().any(|&n| n > 63) {
-        return Err(FitsError::UnsupportedCompression {
-            name: "HCOMPRESS_1: invalid bit-plane count".to_string(),
+        return Err(FitsError::CorruptCompressedData {
+            detail: "HCOMPRESS_1: invalid bit-plane count".to_string(),
         });
     }
 
@@ -1018,8 +1018,8 @@ fn dodecode(
     }
 
     if bi.input_nybble()? != 0 {
-        return Err(FitsError::UnsupportedCompression {
-            name: "HCOMPRESS_1: bad bit plane values".to_string(),
+        return Err(FitsError::CorruptCompressedData {
+            detail: "HCOMPRESS_1: bad bit plane values".to_string(),
         });
     }
     // Sign bits.
@@ -1053,8 +1053,8 @@ fn qtree_decode(
         if b == 0 {
             read_bdirect(bi, a, n, nqx, nqy, scratch, bit)?;
         } else if b != 0xf {
-            return Err(FitsError::UnsupportedCompression {
-                name: "HCOMPRESS_1: bad format code".to_string(),
+            return Err(FitsError::CorruptCompressedData {
+                detail: "HCOMPRESS_1: bad format code".to_string(),
             });
         } else {
             scratch[0] = bi.input_huffman()?;
@@ -1605,7 +1605,7 @@ mod tests {
                 matches!(
                     hcompress::hcompress_tile_into(&one[..end], false, 1, &mut out, &mut scratch),
                     Err(crate::error::FitsError::UnexpectedEof)
-                        | Err(crate::error::FitsError::UnsupportedCompression { .. })
+                        | Err(crate::error::FitsError::CorruptCompressedData { .. })
                 ),
                 "strict HCOMPRESS prefix of length {end} was accepted"
             );
@@ -1615,7 +1615,8 @@ mod tests {
         invalid_planes[22] = 64;
         assert!(matches!(
             hcompress::hcompress_tile_into(&invalid_planes, false, 1, &mut out, &mut scratch),
-            Err(crate::error::FitsError::UnsupportedCompression { .. })
+            Err(crate::error::FitsError::CorruptCompressedData { detail })
+                if detail == "HCOMPRESS_1: invalid bit-plane count"
         ));
     }
 }

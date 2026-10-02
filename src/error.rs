@@ -310,6 +310,10 @@ pub enum FitsError {
     /// A tiled-image compression algorithm or variant is not yet supported.
     #[error("unsupported tiled compression: {name}")]
     UnsupportedCompression { name: String },
+    /// A compressed stream or tile does not decode: a bad magic number, an invalid
+    /// code, a tile larger than declared, or a null mask outside 0 and 1.
+    #[error("corrupt compressed data: {detail}")]
+    CorruptCompressedData { detail: String },
     /// A PLIO tile sample cannot be represented losslessly in its unsigned 24-bit
     /// value domain.
     #[error("PLIO tile sample {index} has value {value}, outside 0..=16777215")]
@@ -404,6 +408,13 @@ mod tests {
             }
             .to_string(),
             "value ZSCALE is not a valid f64 column"
+        );
+        assert_eq!(
+            FitsError::CorruptCompressedData {
+                detail: "HCOMPRESS_1: bad magic".to_string(),
+            }
+            .to_string(),
+            "corrupt compressed data: HCOMPRESS_1: bad magic"
         );
         assert_eq!(
             FitsError::InvalidAscii {

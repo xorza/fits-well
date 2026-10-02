@@ -87,8 +87,8 @@ pub(super) fn gunzip_into(bytes: &[u8], expected: usize, out: &mut Vec<u8>) -> R
         .take(expected.saturating_add(1) as u64)
         .read_to_end(out)?;
     if out.len() > expected {
-        return Err(FitsError::UnsupportedCompression {
-            name: "gzip tile expands beyond its declared tile size".to_string(),
+        return Err(FitsError::CorruptCompressedData {
+            detail: "gzip tile expands beyond its declared tile size".to_string(),
         });
     }
     if out.len() != expected {
@@ -170,7 +170,8 @@ mod tests {
         // Bounded at 1 KiB (a small tile): inflating to 100 KB overruns → error.
         assert!(matches!(
             gzip::gunzip_into(&bomb, 1024, &mut decoded),
-            Err(FitsError::UnsupportedCompression { .. })
+            Err(FitsError::CorruptCompressedData { detail })
+                if detail == "gzip tile expands beyond its declared tile size"
         ));
         // One byte short of the true size still overruns (the +1 detection boundary).
         assert!(gzip::gunzip_into(&bomb, big.len() - 1, &mut decoded).is_err());

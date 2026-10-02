@@ -271,8 +271,8 @@ impl<'a> BitReader<'a> {
     /// Read `n` bits (MSB-first, `n ≤ 64`).
     fn read(&mut self, n: u32) -> Result<u64> {
         if n > 64 {
-            return Err(FitsError::UnsupportedCompression {
-                name: format!("Rice bit field is {n} bits"),
+            return Err(FitsError::CorruptCompressedData {
+                detail: format!("Rice bit field is {n} bits"),
             });
         }
         let mut remaining = n;
