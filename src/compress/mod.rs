@@ -19,6 +19,7 @@ pub(crate) mod decode;
 pub(crate) mod encode;
 mod gzip;
 mod hcompress;
+mod plane;
 mod plio;
 mod quantize;
 mod rice;

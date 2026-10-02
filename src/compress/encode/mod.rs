@@ -6,13 +6,14 @@
 //! quantized to int32 with a `ZSCALE`/`ZZERO` first ([`compress_float_image`]). The
 //! per-codec work lives in the sibling codec modules.
 
+use crate::bitpix::Bitpix;
 use crate::compress::convert;
+use crate::compress::plane::{FloatSamples, IntBitpix, Samples};
 use crate::compress::tile_geometry::TileGeometry;
 use crate::compress::tile_geometry::TileScratch;
 use crate::compress::{Compression, CompressionOptions, ImageCodec, map_tiles, needs_wide};
 use crate::compress::{gzip, hcompress, plio, quantize, rice};
 
-use crate::bitpix::Bitpix;
 use crate::data::Image;
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
@@ -58,10 +59,13 @@ pub(crate) fn compress_image(
             name: "HCOMPRESS_1 requires a two-dimensional image".to_string(),
         });
     }
-    let bitpix = image.samples.bitpix();
-    if bitpix.is_float() {
-        return compress_float_image(image, compression, options, total, out);
-    }
+    let samples = match Samples::of(&image.samples) {
+        Samples::Float(samples) => {
+            return compress_float_image(image, samples, compression, options, total, out);
+        }
+        Samples::Int(samples) => samples,
+    };
+    let bitpix = samples.bitpix();
     let dims = &image.shape;
     let tiles = resolve_tile_shape(dims, &options.tile_shape)?;
 
@@ -71,7 +75,6 @@ pub(crate) fn compress_image(
     // sample buffer. Zero tiles yields an empty `NAXIS2 = 0` table, which the decoder's
     // matching `ZNAXIS = 0` guard turns back into the empty image.
     let ntiles = if total == 0 { 0 } else { geom.ntiles() };
-    let bytepix = bitpix.elem_size();
     let (gzip_level, scale) = (compression.gzip_level(), compression.hcompress_scale());
 
     // Compress every tile independently (the compute-bound step — parallel under
@@ -81,12 +84,7 @@ pub(crate) fn compress_image(
         geom.tile_into(t, &mut s.tile);
         // Gather + widen this tile's pixels straight from the typed source — no
         // whole-image `i64` buffer.
-        convert::gather_i64(
-            &image.samples,
-            &s.tile.row_bases,
-            s.tile.row_len,
-            &mut s.ints,
-        );
+        convert::gather_i64(samples, &s.tile.row_bases, s.tile.row_len, &mut s.ints);
         let vals = &s.ints;
         Ok(match codec {
             ImageCodec::Gzip1 => {
@@ -95,9 +93,19 @@ pub(crate) fn compress_image(
             }
             ImageCodec::Gzip2 => {
                 convert::i64_to_be_into(vals, bitpix, &mut s.be);
-                TileCell::Bytes(gzip::gzip2_encode(&s.be, bytepix, gzip_level, &mut s.gzip))
+                TileCell::Bytes(gzip::gzip2_encode(
+                    &s.be,
+                    bitpix.elem_size(),
+                    gzip_level,
+                    &mut s.gzip,
+                ))
             }
-            ImageCodec::Rice1 => TileCell::Bytes(rice::rice_encode(vals, bytepix, 32, &mut s.rice)),
+            ImageCodec::Rice1 => TileCell::Bytes(rice::rice_encode(
+                vals,
+                bitpix,
+                rice::BLOCKSIZE,
+                &mut s.rice,
+            )),
             ImageCodec::Plio1 => TileCell::I16(plio::plio_encode(vals)?),
             ImageCodec::Hcompress1 => {
                 let tile_scale = hcompress_tile_scale(
@@ -165,33 +173,43 @@ pub(crate) fn compress_image(
 
     let tform_letter = if codec == ImageCodec::Plio1 { 'I' } else { 'B' };
     let desc = if wide { 'Q' } else { 'P' };
-    let mut h = Header::new();
-    h.set_internal("XTENSION", "BINTABLE")
-        .comment_internal("XTENSION", "binary table extension");
-    h.set_internal("BITPIX", 8).set_internal("NAXIS", 2);
-    h.set_internal("NAXIS1", if wide { 16 } else { 8 })
-        .set_internal("NAXIS2", value::fits_i64(ntiles)?);
-    h.set_internal("PCOUNT", value::fits_i64(heap_len)?)
-        .set_internal("GCOUNT", 1);
-    h.set_internal("TFIELDS", 1);
+    let mut h = container_header(descriptor_width, ntiles, heap_len, 1)?;
     h.set_internal("TTYPE1", "COMPRESSED_DATA");
     h.set_internal("TFORM1", format!("1{desc}{tform_letter}({maxnelem})"));
-    set_zimage_axes(&mut h, compression.name(), bitpix, dims, &tiles)?;
+    set_zimage_axes(&mut h, compression.name(), bitpix.bitpix(), dims, &tiles)?;
     match codec {
-        ImageCodec::Rice1 => {
-            h.set_internal("ZNAME1", "BLOCKSIZE")
-                .set_internal("ZVAL1", 32);
-            h.set_internal("ZNAME2", "BYTEPIX")
-                .set_internal("ZVAL2", bytepix as i64);
-        }
+        ImageCodec::Rice1 => set_rice_parameters(&mut h, bitpix),
         ImageCodec::Hcompress1 => {
             h.set_internal("ZNAME1", "SCALE")
                 .set_internal("ZVAL1", scale);
         }
         _ => {}
     }
-    image.scaling.add_to_header(&mut h, bitpix)?;
+    image.scaling.add_to_header(&mut h, bitpix.bitpix())?;
     Ok(h)
+}
+
+/// The `BINTABLE` header of a compressed image's container, up to its columns:
+/// `ntiles` rows of `row_len` bytes, a heap of `heap_len` bytes, `fields` columns.
+fn container_header(row_len: usize, ntiles: usize, heap_len: usize, fields: i64) -> Result<Header> {
+    let mut h = Header::new();
+    h.set_internal("XTENSION", "BINTABLE")
+        .comment_internal("XTENSION", "binary table extension");
+    h.set_internal("BITPIX", 8).set_internal("NAXIS", 2);
+    h.set_internal("NAXIS1", value::fits_i64(row_len)?)
+        .set_internal("NAXIS2", value::fits_i64(ntiles)?);
+    h.set_internal("PCOUNT", value::fits_i64(heap_len)?)
+        .set_internal("GCOUNT", 1);
+    h.set_internal("TFIELDS", fields);
+    Ok(h)
+}
+
+/// The `RICE_1` parameters every stream fits-well writes uses (§10.4.1 Table 37).
+fn set_rice_parameters(h: &mut Header, bytepix: IntBitpix) {
+    h.set_internal("ZNAME1", "BLOCKSIZE")
+        .set_internal("ZVAL1", rice::BLOCKSIZE as i64);
+    h.set_internal("ZNAME2", "BYTEPIX")
+        .set_internal("ZVAL2", bytepix.elem_size() as i64);
 }
 
 fn hcompress_tile_scale(
@@ -238,6 +256,7 @@ struct FloatTile {
 /// `GZIP_COMPRESSED_DATA`, `ZSCALE`, `ZZERO`.
 fn compress_float_image(
     image: &Image,
+    samples: FloatSamples<'_>,
     compression: Compression,
     options: &CompressionOptions,
     total: usize,
@@ -252,7 +271,7 @@ fn compress_float_image(
             name: format!("{} for float images (write)", compression.name()),
         });
     }
-    let zbitpix = image.samples.bitpix();
+    let zbitpix = samples.bitpix();
     let dims = &image.shape;
     let tiles = resolve_tile_shape(dims, &options.tile_shape)?;
 
@@ -276,12 +295,7 @@ fn compress_float_image(
             let nx = s.tile.tdims[0];
             let ny = s.tile.row_bases.len();
             // Gather + widen this tile's pixels straight from the typed source.
-            convert::gather_f64(
-                &image.samples,
-                &s.tile.row_bases,
-                s.tile.row_len,
-                &mut s.floats,
-            );
+            convert::gather_f64(samples, &s.tile.row_bases, s.tile.row_len, &mut s.floats);
             let irow = t as i64 + zdither0; // = (1-based tile row) + ZDITHER0 - 1
             Ok(
                 match quantize::quantize_tile(
@@ -303,9 +317,12 @@ fn compress_float_image(
                                 convert::i32_to_be_into(&s.quantize.ints, &mut s.be);
                                 gzip::gzip2_encode(&s.be, 4, gzip_level, &mut s.gzip)
                             }
-                            ImageCodec::Rice1 => {
-                                rice::rice_encode(&s.quantize.ints, 4, 32, &mut s.rice)
-                            }
+                            ImageCodec::Rice1 => rice::rice_encode(
+                                &s.quantize.ints,
+                                IntBitpix::I32,
+                                rice::BLOCKSIZE,
+                                &mut s.rice,
+                            ),
                             ImageCodec::NoCompress => {
                                 convert::i32_to_be_into(&s.quantize.ints, &mut s.be);
                                 s.be.clone()
@@ -396,15 +413,7 @@ fn compress_float_image(
         out.append(&mut tile.bytes);
     }
 
-    let mut h = Header::new();
-    h.set_internal("XTENSION", "BINTABLE")
-        .comment_internal("XTENSION", "binary table extension");
-    h.set_internal("BITPIX", 8).set_internal("NAXIS", 2);
-    h.set_internal("NAXIS1", 32)
-        .set_internal("NAXIS2", value::fits_i64(ntiles)?);
-    h.set_internal("PCOUNT", value::fits_i64(heap_len)?)
-        .set_internal("GCOUNT", 1);
-    h.set_internal("TFIELDS", 4);
+    let mut h = container_header(32, ntiles, heap_len, 4)?;
     h.set_internal("TTYPE1", "COMPRESSED_DATA")
         .set_internal("TFORM1", format!("1PB({max_cd})"));
     h.set_internal("TTYPE2", "GZIP_COMPRESSED_DATA")
@@ -413,11 +422,9 @@ fn compress_float_image(
         .set_internal("TFORM3", "1D");
     h.set_internal("TTYPE4", "ZZERO")
         .set_internal("TFORM4", "1D");
-    set_zimage_axes(&mut h, compression.name(), zbitpix, dims, &tiles)?;
+    set_zimage_axes(&mut h, compression.name(), zbitpix.bitpix(), dims, &tiles)?;
     if codec == ImageCodec::Rice1 {
-        h.set_internal("ZNAME1", "BLOCKSIZE")
-            .set_internal("ZVAL1", 32);
-        h.set_internal("ZNAME2", "BYTEPIX").set_internal("ZVAL2", 4);
+        set_rice_parameters(&mut h, IntBitpix::I32);
     }
     h.set_internal("ZQUANTIZ", method.name());
     h.set_internal("ZDITHER0", zdither0);
@@ -426,7 +433,7 @@ fn compress_float_image(
         // decoder which value maps back to a blank (NaN) pixel.
         h.set_internal("ZBLANK", quantize::NULL_VALUE as i64);
     }
-    image.scaling.add_to_header(&mut h, zbitpix)?;
+    image.scaling.add_to_header(&mut h, zbitpix.bitpix())?;
     Ok(h)
 }
 

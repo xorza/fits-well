@@ -19,6 +19,7 @@ use crate::compress::ImageCodec;
 use crate::compress::convert;
 use crate::compress::gzip;
 use crate::compress::map_tiles;
+use crate::compress::plane::IntBitpix;
 use crate::compress::rice;
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
@@ -149,18 +150,18 @@ impl ColMeta {
         }
     }
 
-    /// `RICE_1` pixel width (`B`=1, `I`=2, `J`=4); other types can't use Rice.
-    fn rice_width(&self) -> Option<usize> {
+    /// `RICE_1` pixel width (`B`, `I` and `J`); other types can't use Rice.
+    fn rice_width(&self) -> Option<IntBitpix> {
         match self.compression_kind() {
-            TformKind::Byte => Some(1),
-            TformKind::I16 => Some(2),
-            TformKind::I32 => Some(4),
+            TformKind::Byte => Some(IntBitpix::U8),
+            TformKind::I16 => Some(IntBitpix::I16),
+            TformKind::I32 => Some(IntBitpix::I32),
             _ => None,
         }
     }
 
     /// The `RICE_1` pixel width of a column whose codec is `RICE_1`.
-    fn rice_bytepix(&self) -> usize {
+    fn rice_bytepix(&self) -> IntBitpix {
         self.rice_width()
             .expect("both constructors keep RICE_1 to B, I and J columns")
     }
@@ -681,13 +682,18 @@ fn compress_payload_into(
         }
         Algo::Rice1 => {
             let bytepix = m.rice_bytepix();
-            debug_assert!(bytes.len().is_multiple_of(bytepix), "whole Rice pixels");
-            convert::be_to_i64_into(
-                bytes,
-                convert::bytepix_to_bitpix(bytepix),
-                &mut scratch.ints,
+            debug_assert!(
+                bytes.len().is_multiple_of(bytepix.elem_size()),
+                "whole Rice pixels"
             );
-            rice::rice_encode_into(&scratch.ints, bytepix, 32, &mut scratch.rice, out);
+            convert::be_to_i64_into(bytes, bytepix, &mut scratch.ints);
+            rice::rice_encode_into(
+                &scratch.ints,
+                bytepix,
+                rice::BLOCKSIZE,
+                &mut scratch.rice,
+                out,
+            );
         }
         Algo::NoCompress => out.extend_from_slice(bytes),
     }
@@ -913,12 +919,14 @@ fn decompress_vla_payload(
         )?,
         Algo::Rice1 => {
             let bytepix = m.rice_bytepix();
-            rice::rice_decode_into(bytes, element_count, bytepix, 32, &mut scratch.ints)?;
-            convert::i64_to_be_into(
-                &scratch.ints,
-                convert::bytepix_to_bitpix(bytepix),
-                &mut scratch.vla,
-            );
+            rice::rice_decode_into(
+                bytes,
+                element_count,
+                bytepix,
+                rice::BLOCKSIZE,
+                &mut scratch.ints,
+            )?;
+            convert::i64_to_be_into(&scratch.ints, bytepix, &mut scratch.vla);
         }
         Algo::NoCompress => unreachable!("handled before decompression"),
     }
@@ -954,12 +962,9 @@ fn decompress_column_into(
         )?,
         Algo::Rice1 => {
             let bytepix = m.rice_bytepix();
-            rice::rice_decode_into(bytes, expect / bytepix, bytepix, 32, &mut scratch.ints)?;
-            convert::i64_to_be_into(
-                &scratch.ints,
-                convert::bytepix_to_bitpix(bytepix),
-                &mut scratch.bytes,
-            );
+            let count = expect / bytepix.elem_size();
+            rice::rice_decode_into(bytes, count, bytepix, rice::BLOCKSIZE, &mut scratch.ints)?;
+            convert::i64_to_be_into(&scratch.ints, bytepix, &mut scratch.bytes);
         }
         Algo::NoCompress => {
             scratch.bytes.clear();
