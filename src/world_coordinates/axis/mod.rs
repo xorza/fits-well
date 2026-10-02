@@ -15,8 +15,9 @@ use crate::world_coordinates::axis::spectral_rest::{RestNeed, SpectralParameters
 use crate::world_coordinates::axis::spectral_transform::SpectralTransform;
 use crate::world_coordinates::ctype::Ctype;
 
-const SPEED_OF_LIGHT: f64 = 2.997_924_58e8;
-// wcslib uses the historical WCS-paper value rather than the modern exact SI value.
+pub(super) const SPEED_OF_LIGHT: f64 = 2.997_924_58e8;
+/// wcslib's value (CODATA 1986), not the exact SI 6.626 070 15e-34, so energies
+/// match wcslib's.
 const PLANCK_CONSTANT: f64 = 6.626_075_5e-34;
 
 #[derive(Debug, Clone)]

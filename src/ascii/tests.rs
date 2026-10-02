@@ -1,15 +1,9 @@
 use crate::ascii::*;
 use crate::reader::FitsReader;
 use crate::writer::FitsWriter;
-use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
+use crate::writer::ascii::AsciiWriteColumn;
+use crate::writer::internals::{ascii_table, round_trip};
 use std::io::Cursor;
-
-fn write_table(nrows: usize, columns: &[AsciiWriteColumn]) -> AsciiTableBuilder {
-    AsciiTableBuilder {
-        nrows: Some(nrows),
-        columns: columns.to_vec(),
-    }
-}
 
 #[test]
 fn parses_ascii_tform_codes() {
@@ -219,10 +213,7 @@ fn ascii_table_round_trips_through_write_and_read() {
             tnull: None,
         },
     ];
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_ascii_table(&write_table(2, &columns), None)
-        .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| w.write_ascii_table(&ascii_table(2, &columns), None));
 
     assert_eq!(r.hdus.len(), 2); // auto dataless primary + the TABLE
     assert_eq!(r.hdus[1].kind, crate::io::HduKind::AsciiTable);
@@ -244,7 +235,7 @@ fn ascii_table_round_trips_through_write_and_read() {
     columns[0].data = AsciiColumnData::Text([Some("café"), Some("beta")].into_iter().collect());
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_ascii_table(&write_table(2, &columns), None),
+        writer.write_ascii_table(&ascii_table(2, &columns), None),
         Err(FitsError::InvalidAscii {
             context: "ASCII text cell"
         })
@@ -344,10 +335,7 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
             tnull: Some("NULL".into()),
         },
     ];
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_ascii_table(&write_table(2, &columns), None)
-        .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| w.write_ascii_table(&ascii_table(2, &columns), None));
 
     assert_eq!(r.hdus[1].header.get_real("TSCAL1").unwrap(), Some(2.0));
     assert_eq!(r.hdus[1].header.get_real("TZERO1").unwrap(), Some(100.0));
@@ -385,7 +373,7 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
         }];
         let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
         assert!(matches!(
-            writer.write_ascii_table(&write_table(1, &invalid), None),
+            writer.write_ascii_table(&ascii_table(1, &invalid), None),
             Err(FitsError::KeywordOutOfRange { name: "TNULLn" })
         ));
         assert!(writer.into_inner().into_inner().is_empty());
@@ -403,7 +391,7 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     }];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_ascii_table(&write_table(1, &collision), None),
+        writer.write_ascii_table(&ascii_table(1, &collision), None),
         Err(FitsError::InvalidAsciiValue {
             reason: "the value equals its column's TNULLn marker"
         })
@@ -422,7 +410,7 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     }];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_ascii_table(&write_table(1, &nonfinite), None),
+        writer.write_ascii_table(&ascii_table(1, &nonfinite), None),
         Err(FitsError::InvalidAsciiValue {
             reason: "float cells must be finite; use None for null"
         })
@@ -476,7 +464,7 @@ fn ascii_writer_accepts_exact_width_values() {
     ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
-        .write_ascii_table(&write_table(1, &columns), None)
+        .write_ascii_table(&ascii_table(1, &columns), None)
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
     assert_eq!(
@@ -562,7 +550,7 @@ fn ascii_writer_rejects_one_byte_overflow_before_output() {
         let width = case.column.width;
         let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
         assert!(matches!(
-            writer.write_ascii_table(&write_table(case.nrows, &[case.column]), None),
+            writer.write_ascii_table(&ascii_table(case.nrows, &[case.column]), None),
             Err(FitsError::AsciiFieldTooWide {
                 column,
                 row,
@@ -588,7 +576,7 @@ fn ascii_writer_rejects_one_byte_overflow_before_output() {
     }];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_ascii_table(&write_table(1, &columns), None),
+        writer.write_ascii_table(&ascii_table(1, &columns), None),
         Err(FitsError::KeywordOutOfRange { name: "TNULLn" })
     ));
     assert!(writer.into_inner().into_inner().is_empty());
@@ -643,7 +631,7 @@ fn ascii_scaling_metadata_is_validated_by_stored_type_before_output() {
         }];
         let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
         assert!(matches!(
-            writer.write_ascii_table(&write_table(1, &columns), None),
+            writer.write_ascii_table(&ascii_table(1, &columns), None),
             Err(FitsError::KeywordOutOfRange { name }) if name == case.keyword
         ));
         assert!(writer.into_inner().into_inner().is_empty());
@@ -676,7 +664,7 @@ fn ascii_nulls_round_trip_distinct_from_zero_and_text() {
     ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
-        .write_ascii_table(&write_table(3, &columns), None)
+        .write_ascii_table(&ascii_table(3, &columns), None)
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
     assert_eq!(

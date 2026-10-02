@@ -1,6 +1,7 @@
 use crate::error::FitsError;
 use crate::header_model::Header;
 use crate::world_coordinates::Wcs;
+use crate::world_coordinates::axis::SPEED_OF_LIGHT;
 use crate::world_coordinates::axis::spectral_rest::SpectralRest;
 use crate::world_coordinates::spectral_frame::SpectralFrame;
 use crate::world_coordinates::spectral_frame::SpectralReferenceFrame;
@@ -29,10 +30,9 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
 
     let no_rest = Wcs::from_header(&velocity_axis("VRAD-V2F"), None).unwrap();
     let world = no_rest.pixel_to_world(&[3.0]).unwrap()[0];
-    let speed_of_light: f64 = 2.997_924_58e8;
     let frequency =
-        speed_of_light * ((speed_of_light - 2_000.0) / (speed_of_light + 2_000.0)).sqrt();
-    let expected = speed_of_light * (1.0 - frequency / speed_of_light);
+        SPEED_OF_LIGHT * ((SPEED_OF_LIGHT - 2_000.0) / (SPEED_OF_LIGHT + 2_000.0)).sqrt();
+    let expected = SPEED_OF_LIGHT * (1.0 - frequency / SPEED_OF_LIGHT);
     assert!((world - expected).abs() < 1e-8);
     assert!((no_rest.world_to_pixel(&[world]).unwrap()[0] - 3.0).abs() < 1e-10);
 
@@ -53,7 +53,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         })
     );
     let mut by_wavelength = velocity_axis("VELO-F2V");
-    by_wavelength.set_internal("RESTWAV", 2.997_924_58e8 / 1_420_405_751.0);
+    by_wavelength.set_internal("RESTWAV", SPEED_OF_LIGHT / 1_420_405_751.0);
     let by_wavelength = Wcs::from_header(&by_wavelength, None).unwrap();
     assert!(
         (by_frequency.pixel_to_world(&[3.0]).unwrap()[0]
@@ -62,7 +62,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
             < 1e-12
     );
     assert!(matches!(
-        by_frequency.world_to_pixel(&[2.997_924_58e8]),
+        by_frequency.world_to_pixel(&[SPEED_OF_LIGHT]),
         Err(FitsError::WcsCoordinateDomain {
             axis: 0,
             algorithm: "F2V"
@@ -141,7 +141,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         .set_internal("1CRP5A", 1.0)
         .set_internal("1CRV5A", 0.0)
         .set_internal("1CDE5A", 1_000.0)
-        .set_internal("RWAV5A", 2.997_924_58e8 / 1_420_405_751.0)
+        .set_internal("RWAV5A", SPEED_OF_LIGHT / 1_420_405_751.0)
         .set_internal("SPEC5A", "LSRK")
         .set_internal("SOBS5A", "TOPOCENT");
     let vector = Wcs::from_array_column(&vector, 5, Some('A')).unwrap();
@@ -153,7 +153,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
             observer: SpectralReferenceFrame::Topocentric,
             rest: SpectralRest {
                 frequency: None,
-                wavelength: Some(2.997_924_58e8 / 1_420_405_751.0),
+                wavelength: Some(SPEED_OF_LIGHT / 1_420_405_751.0),
             },
         })
     );

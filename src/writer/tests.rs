@@ -11,6 +11,7 @@ use crate::data::Image;
 use crate::data::image_data::ImageData;
 use crate::data::scaling::Scaling;
 use crate::data::unsigned_data::UnsignedData;
+use crate::data::{U16_OFFSET, U64_OFFSET};
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::hdu::{HduKind, MAX_TABLE_FIELDS};
@@ -21,6 +22,7 @@ use crate::ragged::Ragged;
 use crate::reader::FitsReader;
 use crate::reader::{ChecksumReport, ChecksumStatus};
 use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
+use crate::writer::internals::{ascii_table, binary_table, round_trip, written};
 use crate::writer::table::internals;
 use crate::writer::table::{TableBuilder, WriteColumn};
 use crate::writer::{
@@ -57,34 +59,6 @@ impl Write for FailMidHdu {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
-    }
-}
-
-fn write_to_vec(image: &Image) -> Vec<u8> {
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_image(image, None).unwrap();
-    w.into_inner().into_inner()
-}
-
-fn identity() -> Scaling {
-    Scaling {
-        bscale: 1.0,
-        bzero: 0.0,
-        blank: None,
-    }
-}
-
-fn binary_table(nrows: usize, columns: &[WriteColumn]) -> TableBuilder {
-    TableBuilder {
-        nrows: Some(nrows),
-        columns: columns.to_vec(),
-    }
-}
-
-fn ascii_table(nrows: usize, columns: &[AsciiWriteColumn]) -> AsciiTableBuilder {
-    AsciiTableBuilder {
-        nrows: Some(nrows),
-        columns: columns.to_vec(),
     }
 }
 
@@ -422,7 +396,7 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
     let mismatched = Image {
         shape: vec![2],
         samples: ImageData::U8(vec![1]),
-        scaling: identity(),
+        scaling: Scaling::IDENTITY,
     };
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
@@ -437,7 +411,7 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
     let image = Image {
         shape: vec![usize::MAX, 2],
         samples: ImageData::U8(Vec::new()),
-        scaling: identity(),
+        scaling: Scaling::IDENTITY,
     };
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
@@ -564,9 +538,7 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
 #[test]
 fn table_writers_enforce_the_exact_tfields_limit_before_output() {
     let binary = empty_binary_columns(MAX_TABLE_FIELDS);
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer.write_table(&binary_table(0, &binary), None).unwrap();
-    let reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
+    let reader = round_trip(|w| w.write_table(&binary_table(0, &binary), None));
     assert_eq!(
         reader.hdus[1].header.get_integer("TFIELDS").unwrap(),
         Some(MAX_TABLE_FIELDS as i64)
@@ -605,7 +577,7 @@ fn partial_hdu_failure_permanently_rejects_subsequent_writes() {
     let image = Image {
         shape: vec![1],
         samples: ImageData::U8(vec![7]),
-        scaling: identity(),
+        scaling: Scaling::IDENTITY,
     };
     let mut writer = FitsWriter::new(FailMidHdu::default());
     assert!(matches!(
@@ -627,12 +599,12 @@ fn writes_a_multi_hdu_image_file() {
     let primary = Image {
         shape: vec![2, 2],
         samples: ImageData::U8(vec![1, 2, 3, 4]),
-        scaling: identity(),
+        scaling: Scaling::IDENTITY,
     };
     let ext = Image {
         shape: vec![3],
         samples: ImageData::I16(vec![10, 20, 30]),
-        scaling: identity(),
+        scaling: Scaling::IDENTITY,
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     w.write_image(&primary, None).unwrap();
@@ -661,7 +633,7 @@ fn typed_image_header_template_preserves_information_and_regenerates_structure()
     let image = Image {
         shape: vec![2],
         samples: ImageData::I16(vec![10, 20]),
-        scaling: identity(),
+        scaling: Scaling::IDENTITY,
     };
     let template = informational_header_template();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
@@ -785,9 +757,7 @@ fn writes_and_reads_back_variable_length_arrays() {
         WriteColumn::fixed("ID", ColumnData::I32(vec![1, 2, 3]), 1),
         WriteColumn::vla("DATA", Ragged::from_rows(vla_rows.clone()).unwrap()),
     ];
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(&binary_table(3, &columns), None).unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| w.write_table(&binary_table(3, &columns), None));
     let table = r.read_table(1).unwrap();
     // A P descriptor sized to the longest row, 5.
     assert_eq!(r.hdus[1].header.get_text("TFORM2").unwrap(), Some("1PJ(5)"));
@@ -798,9 +768,7 @@ fn writes_and_reads_back_variable_length_arrays() {
         "EMPTY",
         Ragged::<ColumnData>::new(ColumnData::I64(Vec::new()), Vec::new()),
     )];
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(&binary_table(0, &empty), None).unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| w.write_table(&binary_table(0, &empty), None));
     let table = r.read_table(1).unwrap();
     assert_eq!(
         table.schema().columns[0].tform.vla_elem,
@@ -865,9 +833,7 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
         // 12-bit X column: 2 bytes/row.
         WriteColumn::bits("FLAGS", vec![0xAB, 0xCF, 0x12, 0x3F], 12),
     ];
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(&binary_table(2, &columns), None).unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| w.write_table(&binary_table(2, &columns), None));
     let t = r.read_table(1).unwrap();
     let metadata = t.schema();
 
@@ -982,9 +948,7 @@ fn writes_tscal_tzero_tnull_and_reads_back_physical() {
             .scaled(2.0, 10.0)
             .with_null(99),
     ];
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(&binary_table(2, &columns), None).unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| w.write_table(&binary_table(2, &columns), None));
     assert_eq!(r.hdus[1].header.get_real("TSCAL1").unwrap(), Some(2.0));
     assert_eq!(r.hdus[1].header.get_real("TZERO1").unwrap(), Some(10.0));
     assert_eq!(r.hdus[1].header.get_integer("TNULL1").unwrap(), Some(99));
@@ -1134,9 +1098,7 @@ fn writes_and_reads_back_a_binary_table() {
             3, // 3-char field
         ),
     ];
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(&binary_table(3, &columns), None).unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| w.write_table(&binary_table(3, &columns), None));
 
     // A dataless primary is auto-written before the table extension.
     assert_eq!(r.hdus.len(), 2);
@@ -1286,13 +1248,9 @@ fn image_round_trips_through_write_image_and_read_image() {
     let image = Image {
         shape: vec![2, 3],
         samples: ImageData::I16(vec![1, -2, 3, -4, 5, -6]),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
-    let bytes = write_to_vec(&image);
+    let bytes = written(|w| w.write_image(&image, None));
     assert_eq!(bytes.len(), 2 * BLOCK_SIZE); // one header block + one data block
 
     let mut r = FitsReader::open(Cursor::new(bytes)).unwrap();
@@ -1311,11 +1269,11 @@ fn write_image_emits_scaling_keywords_and_preserves_unsigned_values() {
         samples: ImageData::I16(vec![-32768, 0, 32767]),
         scaling: Scaling {
             bscale: 1.0,
-            bzero: 32768.0,
+            bzero: U16_OFFSET,
             blank: None,
         },
     };
-    let mut r = FitsReader::open(Cursor::new(write_to_vec(&image))).unwrap();
+    let mut r = FitsReader::open(Cursor::new(written(|w| w.write_image(&image, None)))).unwrap();
     assert_eq!(r.hdus[0].header.get_real("BZERO").unwrap(), Some(32768.0));
     assert_eq!(r.hdus[0].header.get_real("BSCALE").unwrap(), Some(1.0));
     let back = r.read_image(0).unwrap();
@@ -1328,7 +1286,7 @@ fn from_u16_round_trips_through_write_and_read() {
     // The `from_u16` constructor + writer emit BZERO=32768 so the exact u16 values
     // come back via the typed `unsigned()` view.
     let built = Image::from_u16(vec![3], &[0, 32768, 65535]).unwrap();
-    let mut r = FitsReader::open(Cursor::new(write_to_vec(&built))).unwrap();
+    let mut r = FitsReader::open(Cursor::new(written(|w| w.write_image(&built, None)))).unwrap();
     assert_eq!(r.hdus[0].header.get_real("BZERO").unwrap(), Some(32768.0));
     assert_eq!(
         r.read_image(0).unwrap().unsigned(),
@@ -1339,7 +1297,7 @@ fn from_u16_round_trips_through_write_and_read() {
 #[test]
 fn from_u64_writes_the_exact_offset_and_round_trips_extremes() {
     let built = Image::from_u64(vec![2], &[u64::MIN, u64::MAX]).unwrap();
-    let bytes = write_to_vec(&built);
+    let bytes = written(|w| w.write_image(&built, None));
     let bzero = bytes[..BLOCK_SIZE]
         .as_chunks::<CARD_SIZE>()
         .0
@@ -1367,12 +1325,11 @@ fn i64_table_scaling_writes_the_exact_unsigned_offset() {
     ];
     let columns = [
         WriteColumn::fixed("U64", ColumnData::I64(vec![i64::MIN, i64::MAX]), 1)
-            .scaled(1.0, 9_223_372_036_854_775_808.0),
-        WriteColumn::vla("PU64", Ragged::from_rows(rows.clone()).unwrap())
-            .scaled(1.0, 9_223_372_036_854_775_808.0),
+            .scaled(1.0, U64_OFFSET),
+        WriteColumn::vla("PU64", Ragged::from_rows(rows.clone()).unwrap()).scaled(1.0, U64_OFFSET),
         WriteColumn::vla("QU64", Ragged::from_rows(rows.clone()).unwrap())
             .wide()
-            .scaled(1.0, 9_223_372_036_854_775_808.0),
+            .scaled(1.0, U64_OFFSET),
     ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
@@ -1418,7 +1375,7 @@ fn checksums_round_trip_and_verify() {
     let image = Image {
         shape: vec![2, 2],
         samples: ImageData::I16(vec![1, 2, 3, 4]),
-        scaling: identity(),
+        scaling: Scaling::IDENTITY,
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
     w.write_image(&image, None).unwrap();
@@ -1442,7 +1399,7 @@ fn corrupted_data_fails_checksum() {
     let image = Image {
         shape: vec![2, 2],
         samples: ImageData::I16(vec![1, 2, 3, 4]),
-        scaling: identity(),
+        scaling: Scaling::IDENTITY,
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
     w.write_image(&image, None).unwrap();
@@ -1465,7 +1422,7 @@ fn corrupted_header_padding_fails_only_the_whole_hdu_checksum() {
     let image = Image {
         shape: vec![2, 2],
         samples: ImageData::I16(vec![1, 2, 3, 4]),
-        scaling: identity(),
+        scaling: Scaling::IDENTITY,
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
     w.write_image(&image, None).unwrap();
@@ -1493,9 +1450,9 @@ fn checksum_status_distinguishes_absent_unknown_valid_and_invalid() {
     let image = Image {
         shape: vec![2, 2],
         samples: ImageData::U8(vec![0, 0, 0, 0]),
-        scaling: identity(),
+        scaling: Scaling::IDENTITY,
     };
-    let mut r = FitsReader::open(Cursor::new(write_to_vec(&image))).unwrap();
+    let mut r = FitsReader::open(Cursor::new(written(|w| w.write_image(&image, None)))).unwrap();
     let report = r.verify_checksum(0).unwrap();
     assert_eq!(
         report,
@@ -1671,10 +1628,11 @@ fn image_blank_is_type_and_range_checked_before_output() {
                 samples: boundary.samples.clone(),
                 scaling: Scaling {
                     blank: Some(blank),
-                    ..identity()
+                    ..Scaling::IDENTITY
                 },
             };
-            let mut reader = FitsReader::open(Cursor::new(write_to_vec(&image))).unwrap();
+            let mut reader =
+                FitsReader::open(Cursor::new(written(|w| w.write_image(&image, None)))).unwrap();
             assert_eq!(
                 reader.hdus[0].header.get_integer("BLANK").unwrap(),
                 Some(blank)
@@ -1687,7 +1645,7 @@ fn image_blank_is_type_and_range_checked_before_output() {
                 samples: boundary.samples.clone(),
                 scaling: Scaling {
                     blank: Some(blank),
-                    ..identity()
+                    ..Scaling::IDENTITY
                 },
             };
             let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
@@ -1758,7 +1716,7 @@ fn compressed_image_metadata_is_validated_before_automatic_primary() {
         samples: ImageData::F32(vec![0.0]),
         scaling: Scaling {
             blank: Some(0),
-            ..identity()
+            ..Scaling::IDENTITY
         },
     };
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
@@ -1776,7 +1734,7 @@ fn compressed_image_metadata_is_validated_before_automatic_primary() {
     let image = Image {
         shape: vec![1, 1],
         samples: ImageData::I64(vec![i64::MIN]),
-        scaling: identity(),
+        scaling: Scaling::IDENTITY,
     };
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
@@ -1818,7 +1776,7 @@ fn compressed_header_templates_preserve_information_and_regenerate_structure() {
     let image = Image {
         shape: vec![2],
         samples: ImageData::I16(vec![10, 20]),
-        scaling: identity(),
+        scaling: Scaling::IDENTITY,
     };
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
@@ -1899,9 +1857,7 @@ fn logical_column_round_trips_with_null_state() {
         ColumnData::Logical(vec![Some(true), None, Some(false)]),
         1,
     )];
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(&binary_table(3, &columns), None).unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| w.write_table(&binary_table(3, &columns), None));
     assert_eq!(
         r.read_table(1)
             .unwrap()
