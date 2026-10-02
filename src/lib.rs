@@ -203,8 +203,12 @@ pub mod io {
 #[cfg(feature = "internals")]
 pub mod internals {
     use crate::bitpix::Bitpix;
+    #[cfg(feature = "compression")]
+    use crate::compress::table;
     use crate::data::image_data::ImageData;
     use crate::world_coordinates::bench;
+    #[cfg(feature = "compression")]
+    use crate::writer::table::WriteColumn;
 
     /// Decode a big-endian data unit into host-endian samples — the per-element
     /// byte-swap (`ImageData::decode`).
@@ -218,6 +222,12 @@ pub mod internals {
         let mut out = Vec::new();
         data.encode_into(&mut out);
         out
+    }
+
+    /// The mixed-column table the table-compression bench compresses.
+    #[cfg(feature = "compression")]
+    pub fn mixed_table_columns(nrows: usize) -> Vec<WriteColumn> {
+        table::internals::mixed_columns(nrows)
     }
 
     /// Build and cache the WCS benchmark fixtures outside timed iterations.

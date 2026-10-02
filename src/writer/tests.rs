@@ -372,15 +372,12 @@ fn empty_binary_columns(count: usize) -> Vec<WriteColumn> {
 
 fn empty_ascii_columns(count: usize) -> Vec<AsciiWriteColumn> {
     (1..=count)
-        .map(|n| AsciiWriteColumn {
-            name: format!("C{n}"),
-            unit: None,
-            data: AsciiColumnData::Text(AsciiText::default()),
-            width: 1,
-            decimals: 0,
-            tscale: None,
-            tzero: None,
-            tnull: None,
+        .map(|n| {
+            AsciiWriteColumn::new(
+                format!("C{n}"),
+                AsciiColumnData::Text(AsciiText::default()),
+                1,
+            )
         })
         .collect()
 }
@@ -426,15 +423,8 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
         Err(FitsError::DataUnitOverflow)
     ));
 
-    let ascii = |name: &str, width| AsciiWriteColumn {
-        name: name.to_string(),
-        unit: None,
-        data: AsciiColumnData::Text(AsciiText::default()),
-        width,
-        decimals: 0,
-        tscale: None,
-        tzero: None,
-        tnull: None,
+    let ascii = |name: &str, width| {
+        AsciiWriteColumn::new(name, AsciiColumnData::Text(AsciiText::default()), width)
     };
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
@@ -668,16 +658,12 @@ fn typed_image_header_template_preserves_information_and_regenerates_structure()
 fn typed_table_header_templates_preserve_information_and_regenerate_structure() {
     let template = informational_header_template();
     let binary = [WriteColumn::fixed("VALUE", ColumnData::I32(vec![7, 8]), 1)];
-    let ascii = [AsciiWriteColumn {
-        name: "TEXT".to_string(),
-        unit: Some("label".to_string()),
-        data: AsciiColumnData::Text([Some("A"), Some("B")].into_iter().collect()),
-        width: 3,
-        decimals: 0,
-        tscale: None,
-        tzero: None,
-        tnull: None,
-    }];
+    let ascii = [AsciiWriteColumn::new(
+        "TEXT",
+        AsciiColumnData::Text([Some("A"), Some("B")].into_iter().collect()),
+        3,
+    )
+    .with_unit("label")];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
         .write_table(&binary_table(2, &binary), Some(&template))

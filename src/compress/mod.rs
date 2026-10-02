@@ -322,5 +322,21 @@ where
     (0..ntiles).map(|t| f(&mut scratch, t)).collect()
 }
 
+/// The synthetic planes the codec fixtures in `tests/data/fits/comp_*` encode.
+#[cfg(test)]
+pub(crate) mod internals {
+    /// value(x, y) = 7x − 5y over 24×16, row-major: the integer codec fixtures.
+    pub(crate) fn ramp() -> Vec<i16> {
+        (0..24 * 16)
+            .map(|i| (i % 24) as i16 * 7 - (i / 24) as i16 * 5)
+            .collect()
+    }
+
+    /// value(x, y) = (x + y) mod 7 over 24×16: the PLIO fixture, a non-negative mask.
+    pub(crate) fn mask() -> Vec<i32> {
+        (0..24 * 16).map(|i| (i % 24 + i / 24) % 7).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests;

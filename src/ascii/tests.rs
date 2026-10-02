@@ -1,3 +1,4 @@
+use crate::ascii::internals::ascii_table_header;
 use crate::ascii::*;
 use crate::reader::FitsReader;
 use crate::writer::FitsWriter;
@@ -35,21 +36,9 @@ fn parses_ascii_tform_codes() {
 #[test]
 fn decodes_hand_built_ascii_rows() {
     // Two columns: name `A4` at col 1, value `I6` at col 5 → row width 10.
-    let mut header = Header::new();
+    let mut header = ascii_table_header(10, 2, &[(1, "A4"), (5, "I6")]);
     header
-        .set_internal("XTENSION", "TABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 10)
-        .set_internal("NAXIS2", 2)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 2)
-        .set_internal("TBCOL1", 1)
-        .set_internal("TFORM1", "A4")
         .set_internal("TTYPE1", "NAME")
-        .set_internal("TBCOL2", 5)
-        .set_internal("TFORM2", "I6")
         .set_internal("TTYPE2", "COUNT");
     let data = b"  AB   123def    -45".to_vec(); // "  AB" + "   123" ; "def " + "   -45"
     let table = AsciiTable::from_data(&header, data).unwrap();
@@ -94,18 +83,8 @@ fn decodes_hand_built_ascii_rows() {
 #[test]
 fn applies_tscal_tzero_and_maps_tnull_to_nan() {
     // One `I6` column, TSCAL=2, TZERO=10, TNULL='***': 123, blank zero, then null.
-    let mut header = Header::new();
+    let mut header = ascii_table_header(6, 3, &[(1, "I6")]);
     header
-        .set_internal("XTENSION", "TABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 6)
-        .set_internal("NAXIS2", 3)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1)
-        .set_internal("TBCOL1", 1)
-        .set_internal("TFORM1", "I6")
         .set_internal("TSCAL1", 2.0)
         .set_internal("TZERO1", 10.0)
         .set_internal("TNULL1", "***");
@@ -134,18 +113,7 @@ fn applies_tscal_tzero_and_maps_tnull_to_nan() {
 #[test]
 fn implicit_decimal_point_scales_by_ten_to_the_d() {
     // `F8.3`: a field with no explicit point has the point implied 3 from the right.
-    let mut header = Header::new();
-    header
-        .set_internal("XTENSION", "TABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 8)
-        .set_internal("NAXIS2", 2)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1)
-        .set_internal("TBCOL1", 1)
-        .set_internal("TFORM1", "F8.3");
+    let header = ascii_table_header(8, 2, &[(1, "F8.3")]);
     let data = b"   12345  12.345".to_vec(); // implicit "12345" → 12.345 ; explicit 12.345
     let table = AsciiTable::from_data(&header, data).unwrap();
     assert_eq!(
@@ -156,19 +124,8 @@ fn implicit_decimal_point_scales_by_ten_to_the_d() {
 
 #[test]
 fn ascii_column_index_is_case_insensitive() {
-    let mut header = Header::new();
-    header
-        .set_internal("XTENSION", "TABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 4)
-        .set_internal("NAXIS2", 1)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1)
-        .set_internal("TBCOL1", 1)
-        .set_internal("TFORM1", "I4")
-        .set_internal("TTYPE1", "Count");
+    let mut header = ascii_table_header(4, 1, &[(1, "I4")]);
+    header.set_internal("TTYPE1", "Count");
     let table = AsciiTable::from_data(&header, b"   7".to_vec()).unwrap();
     assert_eq!(table.column_index("COUNT"), Some(0));
     assert_eq!(table.column_index("count"), Some(0));
@@ -182,36 +139,15 @@ fn ascii_column_index_is_case_insensitive() {
 #[test]
 fn ascii_table_round_trips_through_write_and_read() {
     let mut columns = vec![
-        AsciiWriteColumn {
-            name: "NAME".into(),
-            unit: None,
-            data: AsciiColumnData::Text([Some("  AB"), Some("beta")].into_iter().collect()),
-            width: 6,
-            decimals: 0,
-            tscale: None,
-            tzero: None,
-            tnull: None,
-        },
-        AsciiWriteColumn {
-            name: "N".into(),
-            unit: Some("count".into()),
-            data: AsciiColumnData::Integer(vec![Some(7), Some(-3)]),
-            width: 5,
-            decimals: 0,
-            tscale: None,
-            tzero: None,
-            tnull: None,
-        },
-        AsciiWriteColumn {
-            name: "X".into(),
-            unit: None,
-            data: AsciiColumnData::Float(vec![Some(1.5), Some(-2.25)]),
-            width: 8,
-            decimals: 2,
-            tscale: None,
-            tzero: None,
-            tnull: None,
-        },
+        AsciiWriteColumn::new(
+            "NAME",
+            AsciiColumnData::Text([Some("  AB"), Some("beta")].into_iter().collect()),
+            6,
+        ),
+        AsciiWriteColumn::new("N", AsciiColumnData::Integer(vec![Some(7), Some(-3)]), 5)
+            .with_unit("count"),
+        AsciiWriteColumn::new("X", AsciiColumnData::Float(vec![Some(1.5), Some(-2.25)]), 8)
+            .with_decimals(2),
     ];
     let mut r = round_trip(|w| w.write_ascii_table(&ascii_table(2, &columns), None));
 
@@ -287,18 +223,7 @@ fn signed_exponent_without_letter_parses_as_fortran_real() {
 #[test]
 fn reads_a_column_with_a_bare_sign_exponent_field() {
     // The letter-less exponent form (CFITSIO emits it) must read, not error.
-    let mut header = Header::new();
-    header
-        .set_internal("XTENSION", "TABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 12)
-        .set_internal("NAXIS2", 1)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1)
-        .set_internal("TBCOL1", 1)
-        .set_internal("TFORM1", "E12.5");
+    let header = ascii_table_header(12, 1, &[(1, "E12.5")]);
     let data = b"   3.14159-2".to_vec(); // 12 chars; 3.14159-2 = 0.0314159
     let table = AsciiTable::from_data(&header, data).unwrap();
     match table.column_by_idx(0).unwrap().raw().unwrap() {
@@ -314,26 +239,11 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     // A scaled integer column (raw values + TSCAL/TZERO) and a float column whose
     // undefined cell is written via TNULL and reads back as NaN (§7.2.2/§7.2.4).
     let columns = vec![
-        AsciiWriteColumn {
-            name: "RAW".into(),
-            unit: None,
-            data: AsciiColumnData::Integer(vec![Some(5), Some(10)]),
-            width: 6,
-            decimals: 0,
-            tscale: Some(2.0),
-            tzero: Some(100.0),
-            tnull: None,
-        },
-        AsciiWriteColumn {
-            name: "FLUX".into(),
-            unit: None,
-            data: AsciiColumnData::Float(vec![Some(1.5), None]),
-            width: 10,
-            decimals: 3,
-            tscale: None,
-            tzero: None,
-            tnull: Some("NULL".into()),
-        },
+        AsciiWriteColumn::new("RAW", AsciiColumnData::Integer(vec![Some(5), Some(10)]), 6)
+            .scaled(2.0, 100.0),
+        AsciiWriteColumn::new("FLUX", AsciiColumnData::Float(vec![Some(1.5), None]), 10)
+            .with_decimals(3)
+            .with_null("NULL"),
     ];
     let mut r = round_trip(|w| w.write_ascii_table(&ascii_table(2, &columns), None));
 
@@ -379,16 +289,8 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
         assert!(writer.into_inner().into_inner().is_empty());
     }
 
-    let collision = [AsciiWriteColumn {
-        name: "BAD".into(),
-        unit: None,
-        data: AsciiColumnData::Integer(vec![Some(0)]),
-        width: 4,
-        decimals: 0,
-        tscale: None,
-        tzero: None,
-        tnull: Some("0".into()),
-    }];
+    let collision =
+        [AsciiWriteColumn::new("BAD", AsciiColumnData::Integer(vec![Some(0)]), 4).with_null("0")];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
         writer.write_ascii_table(&ascii_table(1, &collision), None),
@@ -398,16 +300,12 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     ));
     assert!(writer.into_inner().into_inner().is_empty());
 
-    let nonfinite = [AsciiWriteColumn {
-        name: "BAD".into(),
-        unit: None,
-        data: AsciiColumnData::Float(vec![Some(f64::INFINITY)]),
-        width: 8,
-        decimals: 1,
-        tscale: None,
-        tzero: None,
-        tnull: Some("NULL".into()),
-    }];
+    let nonfinite =
+        [
+            AsciiWriteColumn::new("BAD", AsciiColumnData::Float(vec![Some(f64::INFINITY)]), 8)
+                .with_decimals(1)
+                .with_null("NULL"),
+        ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
         writer.write_ascii_table(&ascii_table(1, &nonfinite), None),
@@ -421,46 +319,17 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
 #[test]
 fn ascii_writer_accepts_exact_width_values() {
     let columns = [
-        AsciiWriteColumn {
-            name: "TEXT".into(),
-            unit: None,
-            data: AsciiColumnData::Text([Some("abc")].into_iter().collect()),
-            width: 3,
-            decimals: 0,
-            tscale: None,
-            tzero: None,
-            tnull: None,
-        },
-        AsciiWriteColumn {
-            name: "INT".into(),
-            unit: None,
-            data: AsciiColumnData::Integer(vec![Some(-12)]),
-            width: 3,
-            decimals: 0,
-            tscale: None,
-            tzero: None,
-            tnull: None,
-        },
-        AsciiWriteColumn {
-            name: "FLOAT".into(),
-            unit: None,
-            data: AsciiColumnData::Float(vec![Some(1.25)]),
-            width: 4,
-            decimals: 2,
-            tscale: None,
-            tzero: None,
-            tnull: None,
-        },
-        AsciiWriteColumn {
-            name: "NULL".into(),
-            unit: None,
-            data: AsciiColumnData::Float(vec![None]),
-            width: 4,
-            decimals: 1,
-            tscale: None,
-            tzero: None,
-            tnull: Some("NULL".into()),
-        },
+        AsciiWriteColumn::new(
+            "TEXT",
+            AsciiColumnData::Text([Some("abc")].into_iter().collect()),
+            3,
+        ),
+        AsciiWriteColumn::new("INT", AsciiColumnData::Integer(vec![Some(-12)]), 3),
+        AsciiWriteColumn::new("FLOAT", AsciiColumnData::Float(vec![Some(1.25)]), 4)
+            .with_decimals(2),
+        AsciiWriteColumn::new("NULL", AsciiColumnData::Float(vec![None]), 4)
+            .with_decimals(1)
+            .with_null("NULL"),
     ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
@@ -485,61 +354,31 @@ struct AsciiOverflowCase {
 fn ascii_writer_rejects_one_byte_overflow_before_output() {
     let cases = [
         AsciiOverflowCase {
-            column: AsciiWriteColumn {
-                name: "TEXT".into(),
-                unit: None,
-                data: AsciiColumnData::Text([Some("ok"), Some("abcd")].into_iter().collect()),
-                width: 3,
-                decimals: 0,
-                tscale: None,
-                tzero: None,
-                tnull: None,
-            },
+            column: AsciiWriteColumn::new(
+                "TEXT",
+                AsciiColumnData::Text([Some("ok"), Some("abcd")].into_iter().collect()),
+                3,
+            ),
             nrows: 2,
             row: 1,
             minimum_width: 4,
         },
         AsciiOverflowCase {
-            column: AsciiWriteColumn {
-                name: "INT".into(),
-                unit: None,
-                data: AsciiColumnData::Integer(vec![Some(-123)]),
-                width: 3,
-                decimals: 0,
-                tscale: None,
-                tzero: None,
-                tnull: None,
-            },
+            column: AsciiWriteColumn::new("INT", AsciiColumnData::Integer(vec![Some(-123)]), 3),
             nrows: 1,
             row: 0,
             minimum_width: 4,
         },
         AsciiOverflowCase {
-            column: AsciiWriteColumn {
-                name: "FLOAT".into(),
-                unit: None,
-                data: AsciiColumnData::Float(vec![Some(-1.25)]),
-                width: 4,
-                decimals: 2,
-                tscale: None,
-                tzero: None,
-                tnull: None,
-            },
+            column: AsciiWriteColumn::new("FLOAT", AsciiColumnData::Float(vec![Some(-1.25)]), 4)
+                .with_decimals(2),
             nrows: 1,
             row: 0,
             minimum_width: 5,
         },
         AsciiOverflowCase {
-            column: AsciiWriteColumn {
-                name: "PRECISION".into(),
-                unit: None,
-                data: AsciiColumnData::Float(vec![Some(1.0)]),
-                width: 1,
-                decimals: usize::MAX,
-                tscale: None,
-                tzero: None,
-                tnull: None,
-            },
+            column: AsciiWriteColumn::new("PRECISION", AsciiColumnData::Float(vec![Some(1.0)]), 1)
+                .with_decimals(usize::MAX),
             nrows: 1,
             row: 0,
             minimum_width: usize::MAX,
@@ -564,16 +403,11 @@ fn ascii_writer_rejects_one_byte_overflow_before_output() {
         assert!(writer.into_inner().into_inner().is_empty());
     }
 
-    let columns = [AsciiWriteColumn {
-        name: "NULL".into(),
-        unit: None,
-        data: AsciiColumnData::Float(vec![None]),
-        width: 3,
-        decimals: 1,
-        tscale: None,
-        tzero: None,
-        tnull: Some("NULL".into()),
-    }];
+    let columns = [
+        AsciiWriteColumn::new("NULL", AsciiColumnData::Float(vec![None]), 3)
+            .with_decimals(1)
+            .with_null("NULL"),
+    ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
         writer.write_ascii_table(&ascii_table(1, &columns), None),
@@ -641,26 +475,18 @@ fn ascii_scaling_metadata_is_validated_by_stored_type_before_output() {
 #[test]
 fn ascii_nulls_round_trip_distinct_from_zero_and_text() {
     let columns = [
-        AsciiWriteColumn {
-            name: "LABEL".into(),
-            unit: None,
-            data: AsciiColumnData::Text([Some("zero"), None, Some("star")].into_iter().collect()),
-            width: 5,
-            decimals: 0,
-            tscale: None,
-            tzero: None,
-            tnull: Some("NULL".into()),
-        },
-        AsciiWriteColumn {
-            name: "COUNT".into(),
-            unit: None,
-            data: AsciiColumnData::Integer(vec![Some(0), None, Some(-2)]),
-            width: 5,
-            decimals: 0,
-            tscale: None,
-            tzero: None,
-            tnull: Some("NULL".into()),
-        },
+        AsciiWriteColumn::new(
+            "LABEL",
+            AsciiColumnData::Text([Some("zero"), None, Some("star")].into_iter().collect()),
+            5,
+        )
+        .with_null("NULL"),
+        AsciiWriteColumn::new(
+            "COUNT",
+            AsciiColumnData::Integer(vec![Some(0), None, Some(-2)]),
+            5,
+        )
+        .with_null("NULL"),
     ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
@@ -720,18 +546,7 @@ fn ascii_tfields_beyond_999_is_rejected() {
 fn ascii_row_count_times_width_overflow_is_rejected() {
     // NAXIS2·NAXIS1 from untrusted axes must not wrap a usize to a small product.
     // 3e18 rows × 8 chars = 2.4e19 > usize::MAX, so `from_data` must error.
-    let mut header = Header::new();
-    header
-        .set_internal("XTENSION", "TABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 8)
-        .set_internal("NAXIS2", 3_000_000_000_000_000_000i64)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1)
-        .set_internal("TBCOL1", 1)
-        .set_internal("TFORM1", "I8");
+    let header = ascii_table_header(8, 3_000_000_000_000_000_000, &[(1, "I8")]);
     assert!(matches!(
         AsciiTable::from_data(&header, vec![0u8; 8]),
         Err(FitsError::UnexpectedEof)

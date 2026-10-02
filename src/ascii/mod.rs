@@ -415,4 +415,34 @@ fn parse_ascii_tform(value: &str) -> Result<AsciiFormat> {
 }
 
 #[cfg(test)]
+pub(crate) mod internals {
+    use crate::header_model::Header;
+
+    /// A minimal ASCII `TABLE` header: rows of `naxis1` characters, and each column
+    /// at its 1-based `TBCOLn` with its `TFORMn`.
+    pub(crate) fn ascii_table_header(
+        naxis1: usize,
+        naxis2: usize,
+        columns: &[(usize, &str)],
+    ) -> Header {
+        let mut header = Header::new();
+        header
+            .set_internal("XTENSION", "TABLE")
+            .set_internal("BITPIX", 8)
+            .set_internal("NAXIS", 2)
+            .set_internal("NAXIS1", naxis1 as i64)
+            .set_internal("NAXIS2", naxis2 as i64)
+            .set_internal("PCOUNT", 0)
+            .set_internal("GCOUNT", 1)
+            .set_internal("TFIELDS", columns.len() as i64);
+        for (index, &(tbcol, tform)) in columns.iter().enumerate() {
+            header
+                .set_internal(&format!("TBCOL{}", index + 1), tbcol as i64)
+                .set_internal(&format!("TFORM{}", index + 1), tform);
+        }
+        header
+    }
+}
+
+#[cfg(test)]
 mod tests;
