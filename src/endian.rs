@@ -147,14 +147,6 @@ mod tests {
         let mut out = vec![0xAAu8];
         extend_be(&mut out, &[256i32], i32::to_be_bytes);
         assert_eq!(out, vec![0xAA, 0, 0, 1, 0]);
-
-        let mut descriptor = [0u8; 16];
-        write_pq_descriptor(&mut descriptor, true, 3, u32::MAX as u64 + 8).unwrap();
-        assert_eq!(i64::from_be_bytes(descriptor[..8].try_into().unwrap()), 3);
-        assert_eq!(
-            i64::from_be_bytes(descriptor[8..].try_into().unwrap()),
-            u32::MAX as i64 + 8
-        );
     }
 
     /// Gated with the primitive itself: `decode_be_into` exists only for the tiled
@@ -179,20 +171,44 @@ mod tests {
         assert_eq!(reused, Vec::<i64>::new());
     }
 
+    /// §7.3.5: `P` is two big-endian i32s and `Q` two i64s, count then offset; a
+    /// value past the form's signed range is refused, not truncated.
     #[test]
-    fn pq_descriptor_writes_promote_to_q_past_the_32_bit_range() {
-        // §10.1.3: a heap offset beyond the 32-bit `P` range needs a 64-bit `Q`.
-        let mut q = vec![0; 16];
-        write_pq_descriptor(&mut q, true, 3, u32::MAX as u64 + 8).unwrap();
-        assert_eq!(q.len(), 16);
-        assert_eq!(i64::from_be_bytes(q[0..8].try_into().unwrap()), 3);
-        assert_eq!(
-            i64::from_be_bytes(q[8..16].try_into().unwrap()),
-            u32::MAX as i64 + 8
-        );
-        let mut p = vec![0; 8];
-        write_pq_descriptor(&mut p, false, 3, 40).unwrap();
-        assert_eq!(p.len(), 8);
-        assert_eq!(i32::from_be_bytes(p[4..8].try_into().unwrap()), 40);
+    fn pq_descriptors_are_big_endian_count_then_offset() {
+        let p_max = i32::MAX as u64;
+        let q_max = i64::MAX as u64;
+        for (wide, count, offset, expected) in [
+            (false, 7, 40, Some(&[0, 0, 0, 7, 0, 0, 0, 40][..])),
+            (
+                false,
+                p_max,
+                p_max,
+                Some(&[0x7F, 0xFF, 0xFF, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF][..]),
+            ),
+            (false, p_max + 1, 0, None),
+            (false, 0, p_max + 1, None),
+            // A count past u32 and an offset past 2^33: no 32-bit truncation.
+            (
+                true,
+                0x1_0000_0004,
+                0x3_0000_0002,
+                Some(&[0, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0, 3, 0, 0, 0, 2][..]),
+            ),
+            (true, q_max + 1, 0, None),
+            (true, 0, q_max + 1, None),
+        ] {
+            let mut slot = vec![0xA5; if wide { 16 } else { 8 }];
+            let written = write_pq_descriptor(&mut slot, wide, count, offset);
+            match expected {
+                Some(bytes) => {
+                    written.unwrap();
+                    assert_eq!(slot, bytes, "{wide} {count} {offset}");
+                }
+                None => assert!(
+                    matches!(written, Err(FitsError::DataUnitOverflow)),
+                    "{wide} {count} {offset}"
+                ),
+            }
+        }
     }
 }

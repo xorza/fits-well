@@ -12,7 +12,6 @@ use crate::data::image_data::ImageData;
 use crate::data::scaling::Scaling;
 use crate::data::unsigned_data::UnsignedData;
 use crate::data::{U16_OFFSET, U64_OFFSET};
-use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::hdu::{HduKind, MAX_TABLE_FIELDS};
 use crate::header_model::Header;
@@ -1527,43 +1526,6 @@ fn raw_hdu_validates_the_complete_unit_before_output() {
     ));
     assert_eq!(writer.state, WriterState::Empty);
     assert!(writer.into_inner().into_inner().is_empty());
-}
-
-#[test]
-fn vla_descriptor_q_form_carries_full_64_bit_count_and_offset() {
-    // A `Q` (wide) descriptor must not truncate count/offset to 32 bits — that is
-    // the whole reason to choose `Q` over `P` (heaps/counts beyond i32::MAX).
-    let count = u32::MAX as u64 + 5; // does not fit in u32
-    let offset = 0x3_0000_0002u64;
-    let mut q = vec![0; 16];
-    write_pq_descriptor(&mut q, true, count, offset).unwrap();
-    assert_eq!(q.len(), 16);
-    assert_eq!(
-        i64::from_be_bytes(q[0..8].try_into().unwrap()),
-        count as i64
-    );
-    assert_eq!(
-        i64::from_be_bytes(q[8..16].try_into().unwrap()),
-        offset as i64
-    );
-
-    // The 32-bit `P` form packs two i32s.
-    let mut p = vec![0; 8];
-    write_pq_descriptor(&mut p, false, 7, 40).unwrap();
-    assert_eq!(p.len(), 8);
-    assert_eq!(i32::from_be_bytes(p[0..4].try_into().unwrap()), 7);
-    assert_eq!(i32::from_be_bytes(p[4..8].try_into().unwrap()), 40);
-
-    let mut rejected = [0; 8];
-    assert!(matches!(
-        write_pq_descriptor(&mut rejected, false, i32::MAX as u64 + 1, 0),
-        Err(FitsError::DataUnitOverflow)
-    ));
-    let mut rejected = [0; 16];
-    assert!(matches!(
-        write_pq_descriptor(&mut rejected, true, i64::MAX as u64 + 1, 0),
-        Err(FitsError::DataUnitOverflow)
-    ));
 }
 
 #[derive(Debug)]

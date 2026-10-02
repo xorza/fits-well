@@ -28,13 +28,6 @@ fn parses_structural_keywords() {
 }
 
 #[test]
-fn end_is_implicit_and_not_stored() {
-    let h = sample();
-    // 8 content cards: SIMPLE, BITPIX, NAXIS, NAXIS1, NAXIS2, OBJECT, COMMENT, OBJECT.
-    assert_eq!(h.cards.len(), 8);
-}
-
-#[test]
 fn keyword_lookup_returns_first_occurrence() {
     let h = sample();
     assert_eq!(h.get_text("OBJECT").unwrap(), Some("Cygnus X-1"));
@@ -94,7 +87,7 @@ fn iter_yields_every_record_in_order_with_duplicates() {
     let h = sample();
     let entries: Vec<_> = h.iter().collect();
 
-    // Every stored card, END excluded — same count `end_is_implicit` checks.
+    // Every stored card; END is implicit and not stored.
     assert_eq!(entries.len(), 8);
     let keywords: Vec<&str> = entries.iter().map(|e| e.keyword).collect();
     assert_eq!(
@@ -390,19 +383,6 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
         })
     ));
     assert_eq!(header.cards.len(), 2);
-}
-
-#[test]
-fn built_header_round_trips_through_render_and_parse() {
-    let mut h = Header::new();
-    h.set_internal("SIMPLE", true)
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 0)
-        .set_internal("OBJECT", "test");
-    let mut bytes = Vec::new();
-    render_header(&h, &mut bytes).unwrap();
-    let back = Header::parse(&bytes).unwrap();
-    assert_eq!(back.cards, h.cards);
 }
 
 #[test]

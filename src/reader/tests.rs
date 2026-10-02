@@ -24,10 +24,10 @@ use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::rc::Rc;
 
+/// A cursor that records the byte range of every read it serves.
 #[derive(Debug)]
 struct CountingCursor {
     inner: Cursor<Vec<u8>>,
-    bytes_read: Rc<Cell<usize>>,
     read_ranges: Rc<RefCell<Vec<Range<usize>>>>,
 }
 
@@ -35,7 +35,6 @@ impl Read for CountingCursor {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         let start = self.inner.position() as usize;
         let count = self.inner.read(buffer)?;
-        self.bytes_read.set(self.bytes_read.get() + count);
         if count != 0 {
             self.read_ranges.borrow_mut().push(start..start + count);
         }
@@ -213,16 +212,16 @@ fn read_wcs_fetches_only_the_referenced_first_row_heap_cells() {
     writer.write_raw_hdu(&primary, &[0]).unwrap();
     writer.write_table(&table, Some(&lookup_header)).unwrap();
 
-    let bytes_read = Rc::new(Cell::new(0));
+    let read_ranges = Rc::new(RefCell::new(Vec::new()));
     let source = CountingCursor {
         inner: Cursor::new(writer.into_inner().into_inner()),
-        bytes_read: Rc::clone(&bytes_read),
-        read_ranges: Rc::new(RefCell::new(Vec::new())),
+        read_ranges: Rc::clone(&read_ranges),
     };
     let mut reader = FitsReader::open(source).unwrap();
-    let before = bytes_read.get();
+    read_ranges.borrow_mut().clear();
     let wcs = reader.read_wcs(0, None).unwrap();
-    assert_eq!(bytes_read.get() - before, 24 + 6 * size_of::<f64>());
+    let bytes_read: usize = read_ranges.borrow().iter().map(Range::len).sum();
+    assert_eq!(bytes_read, 24 + 6 * size_of::<f64>());
     assert_eq!(wcs.pixel_to_world(&[2.0]).unwrap(), [20.0]);
 }
 
@@ -1022,11 +1021,9 @@ fn plain_image_section_streams_exact_strided_runs() {
         .collect();
     let image = Image::new(shape.to_vec(), samples.clone()).unwrap();
     let bytes = written(|w| w.write_image(&image, None));
-    let bytes_read = Rc::new(Cell::new(0));
     let read_ranges = Rc::new(RefCell::new(Vec::new()));
     let source = CountingCursor {
         inner: Cursor::new(bytes.clone()),
-        bytes_read,
         read_ranges: Rc::clone(&read_ranges),
     };
     let mut stream = FitsReader::open(source).unwrap();
