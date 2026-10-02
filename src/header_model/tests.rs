@@ -42,7 +42,6 @@ fn end_is_implicit_and_not_stored() {
     let h = sample();
     // 8 content cards: SIMPLE, BITPIX, NAXIS, NAXIS1, NAXIS2, OBJECT, COMMENT, OBJECT.
     assert_eq!(h.cards.len(), 8);
-    assert!(h.cards.iter().all(|c| c.kind != CardKind::End));
 }
 
 #[test]
@@ -188,9 +187,9 @@ fn orphan_continue_is_demoted_to_commentary() {
     ]))
     .unwrap();
     assert_eq!(h.cards.len(), 1);
-    assert_eq!(h.cards[0].kind, CardKind::Commentary);
+    assert!(matches!(h.cards[0], Card::Commentary { .. }));
     assert_eq!(
-        h.cards[0].comment.as_deref(),
+        h.cards[0].comment(),
         Some("  'no predecessor' / retained note")
     );
     assert_eq!(h.get("CONTINUE"), None);
@@ -224,7 +223,7 @@ fn builder_sets_replaces_and_indexes_keywords() {
     assert_eq!(h.get_integer("BITPIX").unwrap(), Some(-32));
     assert_eq!(h.cards.len(), 3);
     // The attached comment survives on its card.
-    assert_eq!(h.cards[0].comment.as_deref(), Some("conforms"));
+    assert_eq!(h.cards[0].comment(), Some("conforms"));
 
     #[cfg(feature = "compression")]
     {
@@ -262,9 +261,9 @@ fn builder_appends_commentary_cards() {
     h.push_comment("made by fits").unwrap();
     h.push_history("step 1").unwrap();
     assert_eq!(h.cards.len(), 3);
-    assert_eq!(h.cards[1].kind, CardKind::Commentary);
-    assert_eq!(h.cards[1].keyword, "COMMENT");
-    assert_eq!(h.cards[2].keyword, "HISTORY");
+    assert!(matches!(h.cards[1], Card::Commentary { .. }));
+    assert_eq!(h.cards[1].keyword(), "COMMENT");
+    assert_eq!(h.cards[2].keyword(), "HISTORY");
     // Commentary cards are not keyword-indexed.
     assert_eq!(h.get("COMMENT"), None);
 }
@@ -378,10 +377,7 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
             length: 81,
         }) if keyword == "VALUE"
     ));
-    assert_eq!(
-        header.cards[0].comment.as_deref(),
-        Some("c".repeat(47).as_str())
-    );
+    assert_eq!(header.cards[0].comment(), Some("c".repeat(47).as_str()));
     assert!(matches!(
         header.comment("VALUE", "bad\ncomment"),
         Err(FitsError::InvalidAscii {

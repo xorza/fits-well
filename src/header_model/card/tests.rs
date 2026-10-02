@@ -11,7 +11,20 @@ fn raw(text: &str) -> [u8; CARD_SIZE] {
 }
 
 fn parse(text: &str) -> Card {
-    Card::parse(&raw(text)).unwrap()
+    reparse(&raw(text))
+}
+
+fn reparse(bytes: &[u8; CARD_SIZE]) -> Card {
+    match Record::parse(bytes).unwrap() {
+        Record::Card(card) => card,
+        other => panic!("expected a stored card, got {other:?}"),
+    }
+}
+
+/// One record: the card's checks, then its single-record rendering.
+fn render(card: &Card) -> Result<[u8; CARD_SIZE]> {
+    card.validate_contents()?;
+    card.render_one()
 }
 
 fn render_records(card: &Card) -> Vec<[u8; CARD_SIZE]> {
@@ -23,59 +36,59 @@ fn render_records(card: &Card) -> Vec<[u8; CARD_SIZE]> {
 #[test]
 fn parses_a_logical_card_with_comment() {
     let card = parse("SIMPLE  =                    T / file does conform");
-    assert_eq!(card.keyword, "SIMPLE");
-    assert_eq!(card.kind, CardKind::Value);
-    assert_eq!(card.value, Some(Value::Logical(true)));
-    assert_eq!(card.comment.as_deref(), Some("file does conform"));
+    assert_eq!(card.keyword(), "SIMPLE");
+    assert!(matches!(card, Card::Value { .. }));
+    assert_eq!(card.value(), Some(&Value::Logical(true)));
+    assert_eq!(card.comment(), Some("file does conform"));
 }
 
 #[test]
 fn parses_integers_reals_and_fortran_double_exponent() {
     assert_eq!(
-        parse("BITPIX  =                   16").value,
-        Some(Value::from(16_i64))
+        parse("BITPIX  =                   16").value(),
+        Some(&Value::from(16_i64))
     );
     assert_eq!(
-        parse("NEG     =                   -5").value,
-        Some(Value::from(-5_i64))
+        parse("NEG     =                   -5").value(),
+        Some(&Value::from(-5_i64))
     );
     assert_eq!(
-        parse("EQUINOX =              1950.00").value,
-        Some(Value::Real(1950.0))
+        parse("EQUINOX =              1950.00").value(),
+        Some(&Value::Real(1950.0))
     );
     assert_eq!(
-        parse("UVCVOLT =                 -5.0").value,
-        Some(Value::Real(-5.0))
+        parse("UVCVOLT =                 -5.0").value(),
+        Some(&Value::Real(-5.0))
     );
     assert_eq!(
-        parse("SCALED  =                2.0D3").value,
-        Some(Value::Real(2000.0))
+        parse("SCALED  =                2.0D3").value(),
+        Some(&Value::Real(2000.0))
     );
     assert_eq!(
-        parse("EXP     =               3.14E2").value,
-        Some(Value::Real(314.0))
+        parse("EXP     =               3.14E2").value(),
+        Some(&Value::Real(314.0))
     );
 }
 
 #[test]
 fn string_unescapes_quotes_and_trims_only_trailing_spaces() {
     assert_eq!(
-        parse("OBJECT  = 'Cygnus X-1'").value,
-        Some(Value::Text("Cygnus X-1".into()))
+        parse("OBJECT  = 'Cygnus X-1'").value(),
+        Some(&Value::Text("Cygnus X-1".into()))
     );
     assert_eq!(
-        parse("NAME    = 'O''Brien  '").value,
-        Some(Value::Text("O'Brien".into()))
+        parse("NAME    = 'O''Brien  '").value(),
+        Some(&Value::Text("O'Brien".into()))
     );
     assert_eq!(
-        parse("LEAD    = '   keep'").value,
-        Some(Value::Text("   keep".into()))
+        parse("LEAD    = '   keep'").value(),
+        Some(&Value::Text("   keep".into()))
     );
     // §4.2.1.1: `''` is the null string (length 0); an all-blank string keeps one
     // significant space (length 1), and the two must compare unequal.
-    let null = parse("EMPTY   = ''").value;
+    let null = parse("EMPTY   = ''").value().cloned();
     assert_eq!(null, Some(Value::Text(String::new())));
-    let blank = parse("BLANKS  = '      '").value;
+    let blank = parse("BLANKS  = '      '").value().cloned();
     assert_eq!(blank, Some(Value::Text(" ".into())));
     assert_ne!(null, blank);
 }
@@ -85,83 +98,82 @@ fn large_magnitude_real_renders_with_exponent_and_round_trips() {
     // Display would expand 1e300 to 301 digits and overflow the 80-byte card;
     // format_real must use the §4.2.4 uppercase-`E` form instead (no truncation).
     for &r in &[1e300_f64, -1e300, 1e-300, 2.5e123] {
-        let card = Card {
+        let card = Card::Value {
             keyword: "BIG".into(),
-            value: Some(Value::Real(r)),
+            value: Value::Real(r),
             comment: None,
-            kind: CardKind::Value,
         };
-        let rendered = card.render().unwrap();
+        let rendered = render(&card).unwrap();
         let text = std::str::from_utf8(&rendered).unwrap();
         assert!(
             text.contains('E') && !text.contains('e'),
             "expected uppercase exponent, got {text:?}"
         );
-        let reparsed = Card::parse(&rendered).unwrap();
-        assert_eq!(reparsed.value, Some(Value::Real(r)), "round-trip {r}");
+        let reparsed = reparse(&rendered);
+        assert_eq!(reparsed.value(), Some(&Value::Real(r)), "round-trip {r}");
     }
 }
 
 #[test]
 fn slash_inside_a_string_is_not_a_comment_boundary() {
     let card = parse("PATH    = 'a/b/c' / the real comment");
-    assert_eq!(card.value, Some(Value::Text("a/b/c".into())));
-    assert_eq!(card.comment.as_deref(), Some("the real comment"));
+    assert_eq!(card.value(), Some(&Value::Text("a/b/c".into())));
+    assert_eq!(card.comment(), Some("the real comment"));
 }
 
 #[test]
 fn blank_value_field_is_undefined() {
     let card = parse("DARKCORR= ");
-    assert_eq!(card.value, Some(Value::Undefined));
+    assert_eq!(card.value(), Some(&Value::Undefined));
 }
 
 #[test]
 fn parses_complex_integer_and_real() {
     assert_eq!(
-        parse("CPLXI   = (3, 4)").value,
-        Some(Value::ComplexInteger {
+        parse("CPLXI   = (3, 4)").value(),
+        Some(&Value::ComplexInteger {
             re: 3_i64.into(),
             im: 4_i64.into()
         })
     );
     assert_eq!(
-        parse("CPLXR   = (1.0, -2.5)").value,
-        Some(Value::ComplexReal { re: 1.0, im: -2.5 })
+        parse("CPLXR   = (1.0, -2.5)").value(),
+        Some(&Value::ComplexReal { re: 1.0, im: -2.5 })
     );
 
     let exact = parse("CPLXBIG = (9223372036854775808, -9223372036854775809)");
-    let Some(Value::ComplexInteger { re, im }) = exact.value.as_ref() else {
+    let Some(Value::ComplexInteger { re, im }) = exact.value() else {
         panic!("large complex integer components lost their exact representation");
     };
     assert_eq!(re.to_string(), "9223372036854775808");
     assert_eq!(im.to_string(), "-9223372036854775809");
-    assert_eq!(Card::parse(&exact.render().unwrap()).unwrap(), exact);
+    assert_eq!(reparse(&render(&exact).unwrap()), exact);
 }
 
 #[test]
 fn classifies_end_and_commentary_cards() {
-    assert_eq!(parse("END").kind, CardKind::End);
+    assert_eq!(Record::parse(&raw("END")).unwrap(), Record::End);
 
     let comment = parse("COMMENT  this file is great");
-    assert_eq!(comment.kind, CardKind::Commentary);
-    assert_eq!(comment.keyword, "COMMENT");
-    assert_eq!(comment.comment.as_deref(), Some(" this file is great"));
+    assert!(matches!(comment, Card::Commentary { .. }));
+    assert_eq!(comment.keyword(), "COMMENT");
+    assert_eq!(comment.comment(), Some(" this file is great"));
 
     let history = parse("HISTORY processed 2026-05-31");
-    assert_eq!(history.kind, CardKind::Commentary);
-    assert_eq!(history.keyword, "HISTORY");
+    assert!(matches!(history, Card::Commentary { .. }));
+    assert_eq!(history.keyword(), "HISTORY");
 
     // Blank-keyword commentary card.
     let blank = parse("         free annotation");
-    assert_eq!(blank.kind, CardKind::Commentary);
-    assert_eq!(blank.keyword, "");
+    assert!(matches!(blank, Card::Commentary { .. }));
+    assert_eq!(blank.keyword(), "");
 }
 
 #[test]
 fn commentary_text_starting_with_equals_is_not_misread_as_a_value() {
     let card = parse("COMMENT = not a value indicator");
-    assert_eq!(card.kind, CardKind::Commentary);
-    assert!(card.value.is_none());
+    assert!(matches!(card, Card::Commentary { .. }));
+    assert!(card.value().is_none());
 }
 
 #[test]
@@ -173,14 +185,14 @@ fn rejects_non_ascii_card_without_panicking() {
     bytes[7] = 0xC3;
     bytes[8] = 0xA9;
     assert!(matches!(
-        Card::parse(&bytes),
+        Record::parse(&bytes),
         Err(FitsError::InvalidValue { .. })
     ));
     // A high byte elsewhere in the record is likewise rejected, not decoded.
     let mut in_value = raw("OBJECT  = 'x'");
     in_value[11] = 0xFF;
     assert!(matches!(
-        Card::parse(&in_value),
+        Record::parse(&in_value),
         Err(FitsError::InvalidValue { .. })
     ));
 }
@@ -188,7 +200,7 @@ fn rejects_non_ascii_card_without_panicking() {
 #[test]
 fn rejects_lowercase_keyword_on_a_value_card() {
     assert!(matches!(
-        Card::parse(&raw("object  = 'x'")),
+        Record::parse(&raw("object  = 'x'")),
         Err(FitsError::InvalidKeyword { .. })
     ));
 }
@@ -196,14 +208,14 @@ fn rejects_lowercase_keyword_on_a_value_card() {
 #[test]
 fn preserves_a_hierarch_record_as_opaque_commentary() {
     let card = parse("HIERARCH ESO DET CHIP1 NAME = 'CCD-44' / detector");
-    assert_eq!(card.kind, CardKind::Commentary);
-    assert_eq!(card.keyword, "HIERARCH");
-    assert_eq!(card.value, None);
+    assert!(matches!(card, Card::Commentary { .. }));
+    assert_eq!(card.keyword(), "HIERARCH");
+    assert_eq!(card.value(), None);
     assert_eq!(
-        card.comment.as_deref(),
+        card.comment(),
         Some(" ESO DET CHIP1 NAME = 'CCD-44' / detector")
     );
-    let reparsed = Card::parse(&card.render().unwrap()).unwrap();
+    let reparsed = reparse(&render(&card).unwrap());
     assert_eq!(reparsed, card);
 }
 
@@ -216,34 +228,35 @@ fn integer_boundaries_round_trip_without_real_coercion() {
         "9223372036854775808",
     ] {
         let card = parse(&format!("EXACT   = {decimal}"));
-        let Value::Integer(value) = card.value.as_ref().unwrap() else {
+        let Value::Integer(value) = card.value().unwrap() else {
             panic!("{decimal} was not parsed as an exact integer");
         };
         assert_eq!(value.to_string(), decimal);
-        let rendered = card.render().unwrap();
+        let rendered = render(&card).unwrap();
         assert!(
             std::str::from_utf8(&rendered).unwrap().contains(decimal),
             "rendered card changed {decimal}"
         );
-        assert_eq!(Card::parse(&rendered).unwrap(), card);
+        assert_eq!(reparse(&rendered), card);
     }
 }
 
 #[test]
 fn parses_a_continue_record() {
-    let card = parse("CONTINUE  'ollowed by more text&'");
-    assert_eq!(card.kind, CardKind::Continue);
     assert_eq!(
-        card.value,
-        Some(Value::Text("ollowed by more text&".into()))
+        Record::parse(&raw("CONTINUE  'ollowed by more text&'")).unwrap(),
+        Record::Continue {
+            substring: "ollowed by more text&".into(),
+            comment: None
+        }
     );
 }
 
 #[test]
 fn end_requires_the_canonical_blank_record() {
-    assert_eq!(parse("END").kind, CardKind::End);
+    assert_eq!(Record::parse(&raw("END")).unwrap(), Record::End);
     assert!(matches!(
-        Card::parse(&raw("END     =                    T")),
+        Record::parse(&raw("END     =                    T")),
         Err(FitsError::ReservedKeyword { name }) if name == "END"
     ));
 }
@@ -253,11 +266,10 @@ fn long_string_splits_into_a_continue_chain() {
     // A value too long for one record (with an embedded quote that must not be
     // split across a record boundary) renders to multiple records.
     let value = format!("{}'q'{}", "a".repeat(60), "b".repeat(60));
-    let card = Card {
+    let card = Card::Value {
         keyword: "LONGSTR".into(),
-        value: Some(Value::Text(value.clone())),
+        value: Value::Text(value.clone()),
         comment: Some("trailing note".into()),
-        kind: CardKind::Value,
     };
     let records = render_records(&card);
     assert!(records.len() >= 2, "expected a CONTINUE chain");
@@ -279,11 +291,10 @@ fn long_string_splits_into_a_continue_chain() {
 #[test]
 fn long_string_comment_boundary_is_lossless_or_rejected() {
     let exact_comment = "c".repeat(65);
-    let exact = Card {
+    let exact = Card::Value {
         keyword: "TEXT".into(),
-        value: Some(Value::Text("x".into())),
+        value: Value::Text("x".into()),
         comment: Some(exact_comment.clone()),
-        kind: CardKind::Value,
     };
     let records = render_records(&exact);
     assert_eq!(records.len(), 2);
@@ -295,9 +306,10 @@ fn long_string_comment_boundary_is_lossless_or_rejected() {
     assert_eq!(entry.value.and_then(Value::as_text), Some("x"));
     assert_eq!(entry.comment, Some(exact_comment.as_str()));
 
-    let overflow = Card {
+    let overflow = Card::Value {
+        keyword: "TEXT".into(),
+        value: Value::Text("x".into()),
         comment: Some("c".repeat(66)),
-        ..exact
     };
     let mut output = vec![1, 2, 3];
     assert!(matches!(
@@ -326,12 +338,11 @@ fn render_then_parse_round_trips_the_model() {
         "OBJECT  = 'O''Brien' / observer",
         "DARKCORR= ",
         "CPLXR   = (1.0, -2.5)",
-        "END",
         "COMMENT  some words here",
     ];
     for text in originals {
         let card = parse(text);
-        let reparsed = Card::parse(&card.render().unwrap()).unwrap();
+        let reparsed = reparse(&render(&card).unwrap());
         assert_eq!(card, reparsed, "round-trip failed for {text:?}");
     }
 }
@@ -343,24 +354,82 @@ fn non_finite_reals_are_rejected_on_read() {
     for token in ["inf", "Infinity", "nan", "-inf", "1E400"] {
         let card = format!("BADREAL = {token}");
         assert!(
-            Card::parse(&raw(&card)).is_err(),
+            Record::parse(&raw(&card)).is_err(),
             "expected {token:?} to be rejected, not parsed as a real"
         );
     }
-    assert_eq!(parse("OK      = 1.5").value, Some(Value::Real(1.5)));
+    assert_eq!(parse("OK      = 1.5").value(), Some(&Value::Real(1.5)));
 }
 
 #[test]
 fn rendering_a_non_finite_real_returns_an_error() {
-    let card = Card {
+    let card = Card::Value {
         keyword: "BAD".into(),
-        value: Some(Value::Real(f64::INFINITY)),
+        value: Value::Real(f64::INFINITY),
         comment: None,
-        kind: CardKind::Value,
     };
     assert!(matches!(
-        card.render(),
+        render(&card),
         Err(FitsError::InvalidHeaderValue { keyword, reason })
             if keyword == "BAD" && reason == "real values must be finite"
     ));
+}
+
+/// The value field of each kind, exactly: right-justified to column 30 except
+/// strings, an integral real gains `.0`, an extreme real takes the `E` form, and a
+/// string pads to 8 characters once its quotes are doubled.
+#[test]
+fn every_value_kind_renders_its_fixed_format_field() {
+    let right = |text: &str| format!("{text:>20}");
+    let cases = [
+        (Value::Logical(true), right("T")),
+        (Value::Integer((-5_i64).into()), right("-5")),
+        (Value::Real(5.0), right("5.0")),
+        (Value::Real(-0.0), right("-0.0")),
+        (Value::Real(0.1), right("0.1")),
+        (Value::Real(1e300), right("1E300")),
+        (
+            Value::ComplexReal { re: 1.0, im: -2.5 },
+            right("(1.0, -2.5)"),
+        ),
+        (Value::Text("ab".into()), "'ab      '".to_string()),
+        (Value::Text("O'Brien".into()), "'O''Brien'".to_string()),
+        (Value::Undefined, String::new()),
+    ];
+    for (value, field) in cases {
+        let card = Card::Value {
+            keyword: "KEY".into(),
+            value: value.clone(),
+            comment: None,
+        };
+        let record = render(&card).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&record).unwrap(),
+            format!("KEY     = {field:<70}"),
+            "{value:?}"
+        );
+        assert_eq!(reparse(&record), card, "{value:?}");
+    }
+}
+
+/// Each substring holds at most 67 characters once quotes are doubled, and a
+/// doubled quote never straddles two: 66 letters and a quote need 68, so the quote
+/// opens the next substring.
+#[test]
+fn a_long_string_splits_at_67_escaped_characters() {
+    let pieces = |text: &str| -> Vec<String> {
+        LongString {
+            text,
+            comment: None,
+        }
+        .pieces()
+        .map(str::to_string)
+        .collect()
+    };
+    let a = |n| "a".repeat(n);
+    assert_eq!(pieces(""), [""]);
+    assert_eq!(pieces(&a(67)), [a(67)]);
+    assert_eq!(pieces(&a(68)), [a(67), a(1)]);
+    assert_eq!(pieces(&(a(66) + "'")), [a(66), "'".to_string()]);
+    assert_eq!(pieces(&(a(65) + "'")), [a(65) + "'"]);
 }

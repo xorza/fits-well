@@ -12,7 +12,7 @@ use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Result;
 use crate::header_model::card::Card;
-use crate::header_model::card::CardKind;
+use crate::header_model::card::Record;
 use crate::header_model::card::validate_ascii;
 #[cfg(feature = "compression")]
 use crate::header_model::card::validate_keyword;
@@ -35,7 +35,7 @@ pub struct Header {
     pub(crate) cards: Vec<Card>,
     /// First occurrence of each valued keyword → index into `cards`.
     ///
-    /// Invariant: every entry points at a [`CardKind::Value`] card in `cards`.
+    /// Invariant: every entry points at a [`Card::Value`] in `cards`.
     /// Parsing builds the index alongside the card list; every mutation method
     /// either maintains or rebuilds it. Raw card mutation stays private so the
     /// two cannot be desynchronized.
@@ -45,8 +45,7 @@ pub struct Header {
 /// A read-only view of one stored header record, yielded by [`Header::iter`].
 ///
 /// `value` is `None` for commentary (`COMMENT`/`HISTORY`/blank-keyword) cards and
-/// `Some` for valued ones — that distinction is all a caller needs, so the internal
-/// `CardKind` (which also tags transient parse states) stays private. `comment`
+/// `Some` for valued ones — that distinction is all a caller needs. `comment`
 /// carries the inline `/`-comment of a valued card, or the whole free text of a
 /// commentary card.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -76,32 +75,29 @@ impl Header {
         let mut cards: Vec<Card> = Vec::with_capacity(ncards);
         let mut index = HashMap::with_capacity(ncards);
         for chunk in bytes.as_chunks::<CARD_SIZE>().0 {
-            let card = Card::parse(chunk)?;
-            match card.kind {
-                CardKind::End => return Ok(Header { cards, index }),
-                CardKind::Continue if fold_continuation(&mut cards, &card) => {}
-                _ => {
-                    let mut card = card;
-                    // A CONTINUE with no value card to extend is malformed; keep it
-                    // readable by demoting it to a commentary card.
-                    if card.kind == CardKind::Continue {
-                        demote_continuation(&mut card);
+            let card = match Record::parse(chunk)? {
+                Record::End => return Ok(Header { cards, index }),
+                Record::Continue { substring, comment } => {
+                    match fold_continuation(&mut cards, &substring, comment.as_deref()) {
+                        true => continue,
+                        // A CONTINUE with no value card to extend is malformed; keep
+                        // it readable as commentary.
+                        false => demoted_continuation(&substring, comment.as_deref()),
                     }
-                    if card.kind == CardKind::Value {
-                        index.entry(card.keyword.clone()).or_insert(cards.len());
-                    }
-                    cards.push(card);
                 }
+                Record::Card(card) => card,
+            };
+            if let Card::Value { keyword, .. } = &card {
+                index.entry(keyword.clone()).or_insert(cards.len());
             }
+            cards.push(card);
         }
         Err(FitsError::MissingEnd)
     }
 
     /// The value of the first card with this keyword, if it is a valued card.
     pub fn get(&self, keyword: &str) -> Option<&Value> {
-        self.index
-            .get(keyword)
-            .and_then(|&i| self.cards[i].value.as_ref())
+        self.index.get(keyword).and_then(|&i| self.cards[i].value())
     }
 
     /// Read an optional logical keyword without conflating absence with a wrong type.
@@ -186,10 +182,10 @@ impl Header {
     /// record and is never yielded. For valued keywords only, filter on
     /// `e.value`: `header.iter().filter_map(|e| Some((e.keyword, e.value?)))`.
     pub fn iter(&self) -> impl Iterator<Item = HeaderEntry<'_>> {
-        self.cards.iter().map(|c| HeaderEntry {
-            keyword: c.keyword.as_str(),
-            value: c.value.as_ref(),
-            comment: c.comment.as_deref(),
+        self.cards.iter().map(|card| HeaderEntry {
+            keyword: card.keyword(),
+            value: card.value(),
+            comment: card.comment(),
         })
     }
 
@@ -259,21 +255,30 @@ impl Header {
     pub fn set(&mut self, keyword: &str, value: impl Into<Value>) -> Result<&mut Self> {
         let value = value.into();
         validate_valued_keyword(keyword)?;
-        self.set_card(Card::value(keyword, value))
-    }
-
-    fn set_card(&mut self, card: Card) -> Result<&mut Self> {
-        let keyword = card.keyword.clone();
-        if let Some(&i) = self.index.get(&keyword) {
-            let mut replacement = self.cards[i].clone();
-            replacement.value = card.value;
-            replacement.kind = card.kind;
-            replacement.validate()?;
-            self.cards[i] = replacement;
-        } else {
-            card.validate()?;
-            self.index.insert(keyword, self.cards.len());
-            self.cards.push(card);
+        match self.index.get(keyword) {
+            Some(&i) => {
+                let Card::Value { value: slot, .. } = &mut self.cards[i] else {
+                    unreachable!("the keyword index holds value cards only");
+                };
+                let previous = std::mem::replace(slot, value);
+                if let Err(error) = self.cards[i].validate() {
+                    let Card::Value { value: slot, .. } = &mut self.cards[i] else {
+                        unreachable!("the card was a value card a moment ago");
+                    };
+                    *slot = previous;
+                    return Err(error);
+                }
+            }
+            None => {
+                let card = Card::Value {
+                    keyword: keyword.to_string(),
+                    value,
+                    comment: None,
+                };
+                card.validate()?;
+                self.index.insert(keyword.to_string(), self.cards.len());
+                self.cards.push(card);
+            }
         }
         Ok(self)
     }
@@ -299,7 +304,14 @@ impl Header {
         value: impl Into<Value>,
     ) -> Result<&mut Self> {
         validate_valued_keyword(keyword)?;
-        self.insert_card(index, Card::value(keyword, value.into()))
+        self.insert_card(
+            index,
+            Card::Value {
+                keyword: keyword.to_string(),
+                value: value.into(),
+                comment: None,
+            },
+        )
     }
 
     fn insert_card(&mut self, index: usize, card: Card) -> Result<&mut Self> {
@@ -318,7 +330,10 @@ impl Header {
 
     /// Remove the first logical record with `keyword`.
     pub fn remove(&mut self, keyword: &str) -> Option<HeaderRecord> {
-        let index = self.cards.iter().position(|card| card.keyword == keyword)?;
+        let index = self
+            .cards
+            .iter()
+            .position(|card| card.keyword() == keyword)?;
         Some(
             self.remove_at(index)
                 .expect("position came from the header record list"),
@@ -336,10 +351,21 @@ impl Header {
         }
         let card = self.cards.remove(index);
         self.reindex();
-        Ok(HeaderRecord {
-            keyword: card.keyword,
-            value: card.value,
-            comment: card.comment,
+        Ok(match card {
+            Card::Value {
+                keyword,
+                value,
+                comment,
+            } => HeaderRecord {
+                keyword,
+                value: Some(value),
+                comment,
+            },
+            Card::Commentary { keyword, text } => HeaderRecord {
+                keyword,
+                value: None,
+                comment: text,
+            },
         })
     }
 
@@ -362,7 +388,7 @@ impl Header {
             source
                 .cards
                 .iter()
-                .filter(|card| keep(&card.keyword))
+                .filter(|card| keep(card.keyword()))
                 .cloned(),
         );
         self.reindex();
@@ -375,7 +401,7 @@ impl Header {
         mut should_remove: impl FnMut(&str) -> bool,
     ) -> &mut Self {
         let old_len = self.cards.len();
-        self.cards.retain(|card| !should_remove(&card.keyword));
+        self.cards.retain(|card| !should_remove(card.keyword()));
         if self.cards.len() != old_len {
             self.reindex();
         }
@@ -388,9 +414,9 @@ impl Header {
     pub(crate) fn rename_keywords(&mut self, renames: &[(&str, &str)]) {
         let mut changed = false;
         for card in &mut self.cards {
-            if let Some((_, to)) = renames.iter().find(|(from, _)| card.keyword == *from) {
+            if let Some((_, to)) = renames.iter().find(|(from, _)| card.keyword() == *from) {
                 debug_assert!(validate_keyword(to).is_ok());
-                card.keyword = (*to).to_string();
+                *card.keyword_mut() = (*to).to_string();
                 changed = true;
             }
         }
@@ -403,8 +429,8 @@ impl Header {
     fn reindex(&mut self) {
         self.index.clear();
         for (i, card) in self.cards.iter().enumerate() {
-            if card.kind == CardKind::Value {
-                self.index.entry(card.keyword.clone()).or_insert(i);
+            if let Card::Value { keyword, .. } = card {
+                self.index.entry(keyword.clone()).or_insert(i);
             }
         }
     }
@@ -417,10 +443,17 @@ impl Header {
             validate_valued_keyword(keyword)?;
             return Ok(self);
         };
-        let mut replacement = self.cards[i].clone();
-        replacement.comment = Some(text.to_string());
-        replacement.validate()?;
-        self.cards[i] = replacement;
+        let Card::Value { comment, .. } = &mut self.cards[i] else {
+            unreachable!("the keyword index holds value cards only");
+        };
+        let previous = comment.replace(text.to_string());
+        if let Err(error) = self.cards[i].validate() {
+            let Card::Value { comment, .. } = &mut self.cards[i] else {
+                unreachable!("the card was a value card a moment ago");
+            };
+            *comment = previous;
+            return Err(error);
+        }
         Ok(self)
     }
 
@@ -458,47 +491,46 @@ impl Header {
     }
 }
 
-fn demote_continuation(card: &mut Card) {
-    let substring = card
-        .value
-        .as_ref()
-        .and_then(Value::as_text)
-        .expect("parsed CONTINUE card must carry a text substring");
-    let mut commentary = format!("  '{}'", substring.replace('\'', "''"));
-    if let Some(comment) = &card.comment {
-        commentary.push_str(" / ");
-        commentary.push_str(comment);
+/// A `CONTINUE` record with no value card to extend, as the commentary record its
+/// bytes 9–80 spell.
+fn demoted_continuation(substring: &str, comment: Option<&str>) -> Card {
+    let mut text = format!("  '{}'", substring.replace('\'', "''"));
+    if let Some(comment) = comment {
+        text.push_str(" / ");
+        text.push_str(comment);
     }
-    card.kind = CardKind::Commentary;
-    card.value = None;
-    card.comment = Some(commentary);
+    Card::Commentary {
+        keyword: "CONTINUE".to_string(),
+        text: Some(text),
+    }
 }
 
 /// Fold a `CONTINUE` substring into the preceding long-string value card,
 /// returning `false` when the previous card is not a value awaiting continuation
 /// (i.e. a [`Value::Text`] whose text ends with the `&` continuation flag).
-fn fold_continuation(cards: &mut [Card], cont: &Card) -> bool {
-    let Some(prev) = cards.last_mut() else {
-        return false;
-    };
-    let Some(Value::Text(acc)) = prev.value.as_mut() else {
+fn fold_continuation(cards: &mut [Card], substring: &str, fragment: Option<&str>) -> bool {
+    let Some(Card::Value {
+        value: Value::Text(acc),
+        comment,
+        ..
+    }) = cards.last_mut()
+    else {
         return false;
     };
     if !acc.ends_with('&') {
         return false;
     }
     acc.pop(); // drop the continuation flag
-    if let Some(Value::Text(sub)) = &cont.value {
-        acc.push_str(sub);
-    }
-    if let Some(fragment) = &cont.comment {
-        if let Some(comment) = &mut prev.comment {
-            if !comment.is_empty() {
-                comment.push(' ');
+    acc.push_str(substring);
+    if let Some(fragment) = fragment {
+        match comment {
+            Some(comment) => {
+                if !comment.is_empty() {
+                    comment.push(' ');
+                }
+                comment.push_str(fragment);
             }
-            comment.push_str(fragment);
-        } else {
-            prev.comment = Some(fragment.clone());
+            None => *comment = Some(fragment.to_string()),
         }
     }
     true
