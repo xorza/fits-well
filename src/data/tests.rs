@@ -494,7 +494,7 @@ fn raw_image_fuses_big_endian_physical_conversion() {
     ];
     for (samples, expected) in cases {
         let bytes = encoded(&samples);
-        let raw = ReadImage::raw(vec![2], samples.bitpix(), scaling, &bytes);
+        let raw = ReadImage::raw(&[2], samples.bitpix(), scaling, &bytes);
         assert_eq!(raw.metadata().bitpix, samples.bitpix());
         let physical = raw.physical();
         for (got, want) in physical.iter().zip(&expected) {
@@ -542,7 +542,7 @@ fn raw_image_fuses_big_endian_unsigned_conversion() {
     for (samples, bzero, expected) in cases {
         let bytes = encoded(&samples);
         let raw = ReadImage::raw(
-            vec![3],
+            &[3],
             samples.bitpix(),
             Scaling {
                 bscale: 1.0,

@@ -4,8 +4,8 @@ use crate::compress::DitherMethod;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
-use crate::table_impl::BinTable;
 use crate::table_impl::column_data::ColumnData;
+use crate::table_impl::table_view::TableView;
 
 /// The float-quantization inputs (§10.2): the dither method and seed, and the
 /// per-tile `ZSCALE`/`ZZERO`/`ZBLANK` metadata columns. An integer image parses
@@ -34,7 +34,7 @@ pub(super) struct Dequant {
 impl FloatQuantization {
     pub(super) fn read(
         header: &Header,
-        table: &BinTable,
+        table: TableView<'_>,
         is_float: bool,
     ) -> Result<FloatQuantization> {
         let quantiz = header.get_text("ZQUANTIZ")?.unwrap_or("NO_DITHER");
@@ -77,7 +77,7 @@ impl FloatQuantization {
 
 /// Decode a named per-tile metadata column, or `None` when the table does not carry
 /// it — every such column is optional, so absence is not an error.
-fn read_tile_metadata(table: &BinTable, name: &str) -> Result<Option<ColumnData>> {
+fn read_tile_metadata(table: TableView<'_>, name: &str) -> Result<Option<ColumnData>> {
     match table.column_index(name) {
         Some(index) => Ok(Some(table.column_by_idx(index)?.raw()?)),
         None => Ok(None),
@@ -85,7 +85,7 @@ fn read_tile_metadata(table: &BinTable, name: &str) -> Result<Option<ColumnData>
 }
 
 /// Read a per-tile `f64` column (e.g. `ZSCALE`/`ZZERO`), or `None` if absent.
-fn read_f64_column(table: &BinTable, name: &str) -> Result<Option<Vec<f64>>> {
+fn read_f64_column(table: TableView<'_>, name: &str) -> Result<Option<Vec<f64>>> {
     let Some(data) = read_tile_metadata(table, name)? else {
         return Ok(None);
     };
@@ -100,7 +100,7 @@ fn read_f64_column(table: &BinTable, name: &str) -> Result<Option<Vec<f64>>> {
 
 /// Read a per-tile integer column (e.g. a `ZBLANK` column), widening any integer
 /// `TFORM` to `i64`, or `None` if absent.
-fn read_i64_column(table: &BinTable, name: &str) -> Result<Option<Vec<i64>>> {
+fn read_i64_column(table: TableView<'_>, name: &str) -> Result<Option<Vec<i64>>> {
     let Some(data) = read_tile_metadata(table, name)? else {
         return Ok(None);
     };

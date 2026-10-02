@@ -152,7 +152,7 @@ fn tabular_wcs() -> Wcs {
     let transforms = tabular::descriptors(&header, 1, None)
         .unwrap()
         .into_iter()
-        .map(|descriptor| tabular::TabularTransform::from_table(descriptor, &table).unwrap())
+        .map(|descriptor| tabular::TabularTransform::from_table(descriptor, table.view()).unwrap())
         .collect();
     Wcs::from_header_with_tabular(&header, None, transforms).unwrap()
 }
@@ -190,7 +190,7 @@ fn tabular_inverse_wcs() -> Wcs {
     let transforms = tabular::descriptors(&header, 2, None)
         .unwrap()
         .into_iter()
-        .map(|descriptor| tabular::TabularTransform::from_table(descriptor, &table).unwrap())
+        .map(|descriptor| tabular::TabularTransform::from_table(descriptor, table.view()).unwrap())
         .collect();
     Wcs::from_header_with_tabular(&header, None, transforms).unwrap()
 }

@@ -5,10 +5,10 @@ use crate::compress;
 use crate::compress::ImageCodec;
 use crate::compress::convert;
 use crate::compress::decode::float_quantization::Dequant;
-use crate::compress::decode::image_layout::ImageLayout;
 use crate::compress::decode::tile_cells::TileCells;
 use crate::compress::decode::tile_cells::TileSource;
 use crate::compress::decode::tile_scratch_set::CodecScratch;
+use crate::compress::decode::tiled_image::TiledImage;
 use crate::compress::gzip;
 use crate::compress::hcompress;
 use crate::compress::plio;
@@ -42,21 +42,21 @@ struct CodecParams {
 }
 
 impl TileDecoder {
-    pub(super) fn new(header: &Header, layout: &ImageLayout) -> Result<TileDecoder> {
+    pub(super) fn new(header: &Header, tiled: &TiledImage<'_>) -> Result<TileDecoder> {
         let rice = rice::rice_params(header)?;
         // A float image's tiles arrive quantized, so they decode in whichever integer
         // width the codec stored them at — RICE_1 says so in `BYTEPIX`, the rest use
         // 32-bit — and only then dequantize to `ZBITPIX`.
-        let int_bitpix = if !layout.bitpix.is_float() {
-            layout.bitpix
-        } else if layout.codec == ImageCodec::Rice1 {
+        let int_bitpix = if !tiled.image.bitpix.is_float() {
+            tiled.image.bitpix
+        } else if tiled.codec == ImageCodec::Rice1 {
             convert::bytepix_to_bitpix(rice.bytepix)
         } else {
             Bitpix::I32
         };
         Ok(TileDecoder {
-            codec: layout.codec,
-            zbitpix: layout.bitpix,
+            codec: tiled.codec,
+            zbitpix: tiled.image.bitpix,
             int_bitpix,
             params: CodecParams {
                 blocksize: rice.blocksize,
@@ -64,11 +64,6 @@ impl TileDecoder {
                 smooth: hcompress_smooth(header)?,
             },
         })
-    }
-
-    /// Whether the image decodes in the float plane (`ZBITPIX` is a float type).
-    pub(super) fn is_float(&self) -> bool {
-        self.zbitpix.is_float()
     }
 
     /// Decode one tile of an *integer* image into `out`.

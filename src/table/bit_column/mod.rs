@@ -6,7 +6,7 @@ use bitvec::order::Msb0;
 use bitvec::slice::BitSlice;
 use bitvec::view::BitView;
 
-use crate::table_impl::BinTable;
+use crate::table_impl::table_view::TableView;
 use crate::table_impl::tform_kind::TformKind;
 
 /// A binary table's `X` (bit-array) column as a borrowed, 2-D bit view — from
@@ -30,23 +30,23 @@ use crate::table_impl::tform_kind::TformKind;
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct BitColumn<'a> {
-    table: &'a BinTable,
+    table: TableView<'a>,
     index: usize,
 }
 
 impl<'a> BitColumn<'a> {
-    pub(super) fn new(table: &'a BinTable, index: usize) -> BitColumn<'a> {
+    pub(crate) fn new(table: TableView<'a>, index: usize) -> BitColumn<'a> {
         BitColumn { table, index }
     }
 
     /// The number of rows.
     pub fn nrows(&self) -> usize {
-        self.table.schema.nrows
+        self.table.nrows
     }
 
     /// Whether the column has no rows.
     pub fn is_empty(&self) -> bool {
-        self.table.schema.nrows == 0
+        self.table.nrows == 0
     }
 
     /// Row `r`'s bits as a borrowed [`BitSlice`], MSB-first — resolved on demand from
@@ -54,11 +54,11 @@ impl<'a> BitColumn<'a> {
     /// `.to_bitvec()` to own it. Panics if `r >= nrows()`.
     pub fn row(&self, r: usize) -> &'a BitSlice<u8, Msb0> {
         assert!(
-            r < self.table.schema.nrows,
+            r < self.table.nrows,
             "row {r} out of bounds ({} rows)",
-            self.table.schema.nrows
+            self.table.nrows
         );
-        let col = &self.table.schema.columns[self.index];
+        let col = &self.table.columns[self.index];
         if col.tform.kind == TformKind::Bit {
             // Fixed `rX`: the row's cell, truncated to `repeat` bits.
             &self.table.cell(col, r).view_bits::<Msb0>()[..col.tform.repeat]
@@ -82,7 +82,7 @@ impl<'a> BitColumn<'a> {
 
     /// The bit at `(row, col)`, MSB-first — `None` if either index is out of range.
     pub fn get(&self, row: usize, col: usize) -> Option<bool> {
-        if row >= self.table.schema.nrows {
+        if row >= self.table.nrows {
             return None;
         }
         let bits = self.row(row);
@@ -91,7 +91,7 @@ impl<'a> BitColumn<'a> {
 
     /// Iterate the rows, each a borrowed [`BitSlice`], resolved on demand.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &'a BitSlice<u8, Msb0>> + '_ {
-        (0..self.table.schema.nrows).map(move |r| self.row(r))
+        (0..self.table.nrows).map(move |r| self.row(r))
     }
 }
 

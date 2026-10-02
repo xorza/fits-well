@@ -5,10 +5,10 @@ use num_complex::Complex;
 use crate::data::unsigned_data::UnsignedData;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::table_impl::BinTable;
 use crate::table_impl::bit_column::BitColumn;
 use crate::table_impl::column::Column;
 use crate::table_impl::column_data::ColumnData;
+use crate::table_impl::table_view::TableView;
 use crate::table_impl::tform_kind::TformKind;
 use crate::table_impl::vla_column::VlaCell;
 use crate::table_impl::vla_column::VlaColumn;
@@ -21,21 +21,25 @@ use crate::table_impl::vla_column::VlaColumn;
 /// [`vla_physical`](Self::vla_physical)/[`vla_unsigned`](Self::vla_unsigned)/
 /// [`vla_complex`](Self::vla_complex)/[`vla_bits`](Self::vla_bits)) for variable-length
 /// `P`/`Q` columns. Borrows the table, so it cannot outlive it.
+///
+/// [`BinTable`]: crate::table::BinTable
+/// [`BinTable::column_by_idx`]: crate::table::BinTable::column_by_idx
+/// [`BinTable::column_by_name`]: crate::table::BinTable::column_by_name
 #[derive(Debug, Clone, Copy)]
 pub struct ColumnReader<'a> {
-    table: &'a BinTable,
+    table: TableView<'a>,
     index: usize,
 }
 
 impl<'a> ColumnReader<'a> {
-    pub(super) fn new(table: &'a BinTable, index: usize) -> ColumnReader<'a> {
+    pub(crate) fn new(table: TableView<'a>, index: usize) -> ColumnReader<'a> {
         ColumnReader { table, index }
     }
 
     /// The column's [`Column`] descriptor — name, `TFORMn`, `TSCALn`/`TZEROn`/`TNULLn`,
     /// `TDIMn`, `TDISPn`.
     pub fn descriptor(&self) -> &'a Column {
-        &self.table.schema.columns[self.index]
+        &self.table.columns[self.index]
     }
 
     /// The column descriptor, rejecting a variable-length (`P`/`Q`) column — the
@@ -57,7 +61,7 @@ impl<'a> ColumnReader<'a> {
     /// Variable-length (`P`/`Q`) columns error here — use [`ColumnReader::vla`].
     pub fn raw(&self) -> Result<ColumnData> {
         let col = self.fixed_descriptor()?;
-        Ok(col.decode_cells(self.table.cells(col), self.table.schema.nrows))
+        Ok(col.decode_cells(self.table.cells(col), self.table.nrows))
     }
 
     /// The numeric column scaled to its physical `f64` plane: `TZEROn + TSCALn × raw`,
@@ -67,7 +71,7 @@ impl<'a> ColumnReader<'a> {
         let col = self.fixed_descriptor()?;
         col.tform.kind.decode_physical(
             self.table.cells(col),
-            self.table.schema.nrows * col.tform.repeat,
+            self.table.nrows * col.tform.repeat,
             col.tscale,
             col.tzero,
             col.tnull,
@@ -90,7 +94,7 @@ impl<'a> ColumnReader<'a> {
         };
         Ok(Some(UnsignedData::from_be_cells(
             self.table.cells(col),
-            self.table.schema.nrows * col.tform.repeat,
+            self.table.nrows * col.tform.repeat,
             kind,
         )))
     }
@@ -101,7 +105,7 @@ impl<'a> ColumnReader<'a> {
         let col = self.descriptor();
         col.tform.kind.decode_complex(
             self.table.cells(col),
-            self.table.schema.nrows * col.tform.repeat,
+            self.table.nrows * col.tform.repeat,
             col.tscale,
             col.tzero,
         )
@@ -207,7 +211,7 @@ impl<'a> ColumnReader<'a> {
         };
         // Validate every row's heap span up front (no allocation) so [`BitColumn::row`]
         // can resolve a row lazily and infallibly — the only place an overrun surfaces.
-        for r in 0..self.table.schema.nrows {
+        for r in 0..self.table.nrows {
             let descriptor = self.table.pq_descriptor(col, r)?;
             col.validate_vla_tdim(descriptor.count)?;
             self.table.pq_payload(descriptor, TformKind::Bit)?;
@@ -240,8 +244,8 @@ impl<'a> ColumnReader<'a> {
         column: VlaColumn<'a>,
         decode: impl Fn(VlaCell<'a>) -> Result<T>,
     ) -> Result<Vec<T>> {
-        let mut rows = Vec::with_capacity(self.table.schema.nrows);
-        for row in 0..self.table.schema.nrows {
+        let mut rows = Vec::with_capacity(self.table.nrows);
+        for row in 0..self.table.nrows {
             rows.push(decode(column.cell(row)?)?);
         }
         Ok(rows)

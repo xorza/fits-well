@@ -2,14 +2,14 @@
 
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::table_impl::BinTable;
+use crate::table_impl::table_view::TableView;
 use crate::table_impl::tform_kind::TformKind;
 
-/// A handle to one `P`/`Q` column of a [`BinTable`], resolving a row's heap array on
+/// A handle to one `P`/`Q` column of a binary table, resolving a row's heap array on
 /// demand. Borrows the table, so it cannot outlive it.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct VlaColumn<'a> {
-    table: &'a BinTable,
+    table: TableView<'a>,
     index: usize,
     element_type: TformKind,
 }
@@ -24,7 +24,11 @@ pub(crate) struct VlaCell<'a> {
 }
 
 impl<'a> VlaColumn<'a> {
-    pub(super) fn new(table: &'a BinTable, index: usize, element_type: TformKind) -> VlaColumn<'a> {
+    pub(crate) fn new(
+        table: TableView<'a>,
+        index: usize,
+        element_type: TformKind,
+    ) -> VlaColumn<'a> {
         VlaColumn {
             table,
             index,
@@ -37,10 +41,10 @@ impl<'a> VlaColumn<'a> {
     }
 
     pub(crate) fn cell(&self, row: usize) -> Result<VlaCell<'a>> {
-        if row >= self.table.schema.nrows {
+        if row >= self.table.nrows {
             return Err(FitsError::UnexpectedEof);
         }
-        let col = &self.table.schema.columns[self.index];
+        let col = &self.table.columns[self.index];
         let descriptor = self.table.pq_descriptor(col, row)?;
         col.validate_vla_tdim(descriptor.count)?;
         let bytes = self.table.pq_payload(descriptor, self.element_type)?;

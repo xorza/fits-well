@@ -98,7 +98,7 @@ impl TformKind {
     /// Whether this is a `P`/`Q` variable-length-array descriptor rather than a
     /// stored value: those cells address the heap, so every fixed-width decode
     /// rejects them.
-    pub(super) fn is_descriptor(self) -> bool {
+    pub(crate) fn is_descriptor(self) -> bool {
         matches!(self, TformKind::ArrayDesc32 | TformKind::ArrayDesc64)
     }
 

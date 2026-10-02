@@ -6,6 +6,7 @@ use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Ranked;
 use crate::header::Header;
+use crate::reader::data_source;
 use crate::reader::internals::open_fixture;
 use crate::reader::*;
 use crate::table_impl::character_field::CharacterField;
@@ -300,7 +301,7 @@ fn mmap_read_matches_seeking_read() {
     let path = "tests/data/fits/UITfuv2582gc.fits";
     let mut seek = open_fixture("UITfuv2582gc.fits");
     let want = seek.read_image(0).unwrap();
-    let want_shape = want.shape.clone();
+    let want_shape = want.shape.to_vec();
     let want_samples = want.decode(); // own, releasing the borrow on `seek`
 
     let mut m = FitsReader::open_mmap(path).unwrap();
@@ -318,24 +319,24 @@ fn mmap_read_matches_seeking_read() {
 fn read_image_reuses_internal_scratch_across_reads() {
     let mut f = open_fixture("UITfuv2582gc.fits");
     let raw1 = f.read_image(0).unwrap();
-    let shape1 = raw1.shape.clone();
+    let shape1 = raw1.shape.to_vec();
     let data1 = raw1.decode(); // own the samples, releasing the borrow on `f`
     // The reader staged the raw unit through its internal scratch, which now holds
     // the full block-padded data unit and is reused (not reallocated) on the next
     // read — only each `decode()` freshly allocates.
     assert_eq!(
-        f.scratch.len(),
+        data_source::internals::scratch(&f.data).len(),
         padded_len(f.hdus[0].data_bytes) as usize,
         "scratch holds the padded data unit after a read"
     );
-    let cap = f.scratch.capacity();
+    let cap = data_source::internals::scratch(&f.data).capacity();
     let raw2 = f.read_image(0).unwrap();
-    let shape2 = raw2.shape.clone();
+    let shape2 = raw2.shape.to_vec();
     let data2 = raw2.decode();
     assert_eq!(shape1, shape2);
     assert_eq!(data1, data2);
     assert_eq!(
-        f.scratch.capacity(),
+        data_source::internals::scratch(&f.data).capacity(),
         cap,
         "internal scratch reused across image reads, not reallocated"
     );
@@ -479,6 +480,15 @@ fn malformed_image_pcount_is_rejected_not_panicked() {
     );
     let mut r = FitsReader::open(Cursor::new(bytes)).unwrap();
     assert!(matches!(r.read_image(0), Err(FitsError::ImageHasGroups)));
+    // The scan could not resolve the image, and reports why on request.
+    assert!(matches!(
+        r.hdus()[0].image(),
+        Err(FitsError::ImageHasGroups)
+    ));
+    assert!(matches!(
+        r.hdus()[0].table_schema(),
+        Err(FitsError::NotABinTable)
+    ));
 }
 
 #[test]
@@ -1163,6 +1173,13 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
             .unwrap();
         let bytes = writer.into_inner().into_inner();
         let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+        // The encoded image's geometry, not the container's two-axis BINTABLE.
+        let metadata = reader.hdus()[1].image().unwrap();
+        assert_eq!(
+            (metadata.shape, metadata.bitpix, metadata.scaling),
+            (&[9, 7][..], bitpix, scaling)
+        );
+        assert_eq!(reader.table_schema(1).unwrap().nrows, 3 * 3);
         let whole = reader.read_image(1).unwrap().decode();
         let expected = select_2d_section(&whole, 9, 2..9, 1..7);
         let owned = reader.read_image_section(1, &[2..9, 1..7]).unwrap();
@@ -1192,19 +1209,27 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
         assert!(empty.stored().is_empty(), "{bitpix:?}");
 
         if bitpix == Bitpix::U8 {
-            for ranges in [[0..2, 0..2], [0..9, 0..7]] {
-                let owned_reads = Rc::new(Cell::new(0));
+            // A one-tile corner fetches its tile's row and the heap bytes that row
+            // addresses — exactly what a one-row table selection holds. The whole image
+            // fetches every row and the whole heap, which the writer packs without gaps:
+            // the data unit, once.
+            let fetched = [[0..2, 0..2], [0..9, 0..7]].map(|ranges| {
+                let fetched = Rc::new(Cell::new(0));
                 let source = CountingSource {
                     inner: SliceSource::new(&bytes),
-                    owned_reads: Rc::clone(&owned_reads),
+                    fetched: Rc::clone(&fetched),
                 };
                 let mut counted = FitsReader::from_source(source).unwrap();
+                let scanned = fetched.get();
                 let mut scratch = Vec::new();
                 counted
                     .read_image_section_view(1, &ranges, &mut scratch)
                     .unwrap();
-                assert_eq!(owned_reads.get(), 0, "{ranges:?}");
-            }
+                fetched.get() - scanned
+            });
+            let first_tile = reader.read_table_rows(1, 0..1).unwrap().schema.heap_end;
+            let data_bytes = reader.hdus()[1].data_bytes as usize;
+            assert_eq!(fetched, [first_tile, data_bytes]);
         }
     }
 }
@@ -1288,7 +1313,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
 
-    let schema = reader.table_schema(1).unwrap();
+    let schema = reader.table_schema(1).unwrap().clone();
     assert_eq!(schema.nrows, 4);
     assert_eq!(schema.columns.len(), 14);
     let empty = reader.read_table_rows(1, 2..2).unwrap();

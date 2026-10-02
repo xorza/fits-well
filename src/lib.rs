@@ -134,11 +134,12 @@ pub mod io {
     pub use crate::hdu::HduKind;
     #[cfg(feature = "mmap")]
     pub use crate::reader::MmapReader;
+    pub use crate::reader::hdu::Hdu;
     #[cfg(feature = "mmap")]
     pub use crate::reader::source::MmapSource;
     pub use crate::reader::source::{SliceSource, StreamSource};
     pub use crate::reader::{
-        ChecksumReport, ChecksumStatus, DataUnit, DataUnitView, Hdu, SliceReader, StreamReader,
+        ChecksumReport, ChecksumStatus, DataUnit, DataUnitView, SliceReader, StreamReader,
     };
 }
 

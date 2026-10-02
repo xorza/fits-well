@@ -27,7 +27,7 @@ use crate::data::{ImageMetadata, physical_from_be, unsigned_from_be};
 /// [`raw_bytes`]: ReadImage::raw_bytes
 #[derive(Debug)]
 pub struct ReadImage<'a> {
-    pub(crate) shape: Vec<usize>,
+    pub(crate) shape: &'a [usize],
     pub(crate) scaling: Scaling,
     data: ImageBytes<'a>,
 }
@@ -47,7 +47,7 @@ enum ImageBytes<'a> {
 impl<'a> ReadImage<'a> {
     /// A plain image over borrowed big-endian bytes.
     pub(crate) fn raw(
-        shape: Vec<usize>,
+        shape: &'a [usize],
         bitpix: Bitpix,
         scaling: Scaling,
         bytes: &'a [u8],
@@ -63,7 +63,7 @@ impl<'a> ReadImage<'a> {
     #[cfg(feature = "compression")]
     pub(crate) fn decoded(
         samples: ImageData,
-        shape: Vec<usize>,
+        shape: &'a [usize],
         scaling: Scaling,
     ) -> ReadImage<'a> {
         ReadImage {
@@ -76,7 +76,7 @@ impl<'a> ReadImage<'a> {
     /// The image geometry, stored element type, and physical-value scaling.
     pub fn metadata(&self) -> ImageMetadata<'_> {
         ImageMetadata {
-            shape: &self.shape,
+            shape: self.shape,
             bitpix: self.bitpix(),
             scaling: self.scaling,
         }

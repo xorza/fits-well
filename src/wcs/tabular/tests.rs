@@ -90,7 +90,7 @@ fn resolved_wcs(header: &Header, table: &BinTable) -> Wcs {
     .unwrap();
     let transforms = descriptors
         .into_iter()
-        .map(|descriptor| TabularTransform::from_table(descriptor, table).unwrap())
+        .map(|descriptor| TabularTransform::from_table(descriptor, table.view()).unwrap())
         .collect();
     Wcs::from_header_with_tabular(header, None, transforms).unwrap()
 }
@@ -317,7 +317,7 @@ fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
     let header = tab_header(1, "COORD");
     let descriptor = tabular::descriptors(&header, 1, None).unwrap().remove(0);
     assert!(matches!(
-        TabularTransform::from_table(descriptor, &bad_shape),
+        TabularTransform::from_table(descriptor, bad_shape.view()),
         Err(FitsError::InvalidWcs { .. })
     ));
 
@@ -329,7 +329,7 @@ fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
     header.set_internal("PS1_2", "INDEX");
     let descriptor = tabular::descriptors(&header, 1, None).unwrap().remove(0);
     assert!(matches!(
-        TabularTransform::from_table(descriptor, &bad_index),
+        TabularTransform::from_table(descriptor, bad_index.view()),
         Err(FitsError::InvalidWcs { .. })
     ));
 

@@ -10,6 +10,13 @@ use crate::table_impl::column::Column;
 use crate::table_impl::tdim;
 use crate::table_impl::tform::Tform;
 
+/// Whether a schema reads the keywords that describe a column's values.
+#[derive(Debug, Clone, Copy)]
+enum ValueKeywords {
+    Read,
+    Skip,
+}
+
 /// Binary-table schema parsed entirely from the header, without reading the data
 /// unit. Byte offsets are relative to the start of the data unit.
 #[derive(Debug, Clone)]
@@ -25,6 +32,17 @@ pub struct TableSchema {
 impl TableSchema {
     /// Parse the complete binary-table schema without touching its data unit.
     pub fn parse(header: &Header) -> Result<TableSchema> {
+        TableSchema::parse_columns(header, ValueKeywords::Read)
+    }
+
+    /// The schema of a tiled-compressed table's `BINTABLE` container. Its `TDIMn`,
+    /// `TSCALn`, `TZEROn` and `TNULLn` describe the uncompressed columns (§10.3.1), not
+    /// the `1QB` cells that hold their compressed bytes, so they are not read.
+    pub(crate) fn parse_container(header: &Header) -> Result<TableSchema> {
+        TableSchema::parse_columns(header, ValueKeywords::Skip)
+    }
+
+    fn parse_columns(header: &Header, values: ValueKeywords) -> Result<TableSchema> {
         let row_len = header.required_usize("NAXIS1", "NAXIS1")?;
         let nrows = header.required_usize("NAXIS2", "NAXIS2")?;
         // §7.3.1: `0 ≤ TFIELDS ≤ 999` — also a guard, since `tfields` sizes the
@@ -37,10 +55,21 @@ impl TableSchema {
         for n in 1..=tfields {
             let tform_value = header.required_text(key!("TFORM{n}").as_str(), "TFORMn")?;
             let tform = Tform::parse(tform_value)?;
-            let shape = header
-                .get_text(key!("TDIM{n}").as_str())?
-                .map(tdim::parse)
-                .transpose()?;
+            let shape = match values {
+                ValueKeywords::Read => header
+                    .get_text(key!("TDIM{n}").as_str())?
+                    .map(tdim::parse)
+                    .transpose()?,
+                ValueKeywords::Skip => None,
+            };
+            let (tscale, tzero, tnull) = match values {
+                ValueKeywords::Read => (
+                    header.get_real(key!("TSCAL{n}").as_str())?.unwrap_or(1.0),
+                    header.get_real(key!("TZERO{n}").as_str())?.unwrap_or(0.0),
+                    header.get_integer(key!("TNULL{n}").as_str())?,
+                ),
+                ValueKeywords::Skip => (1.0, 0.0, None),
+            };
             // A fixed column's cell holds exactly `repeat` elements; a `P`/`Q` cell's
             // count is per-row and is checked as each row's descriptor is read.
             if let Some(dims) = &shape
@@ -58,9 +87,9 @@ impl TableSchema {
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
                 tform,
-                tscale: header.get_real(key!("TSCAL{n}").as_str())?.unwrap_or(1.0),
-                tzero: header.get_real(key!("TZERO{n}").as_str())?.unwrap_or(0.0),
-                tnull: header.get_integer(key!("TNULL{n}").as_str())?,
+                tscale,
+                tzero,
+                tnull,
                 tdim: shape,
                 tdisp: header
                     .get_text(key!("TDISP{n}").as_str())?
@@ -116,9 +145,21 @@ impl TableSchema {
         column::checked_index_of(&self.columns, name)
     }
 
-    /// Bounds-check a zero-based column index against this schema's column count.
-    pub(super) fn validate_column_index(&self, index: usize) -> Result<()> {
-        column::validate_index(index, self.columns.len())
+    /// This schema for a compacted selection of `nrows` rows, whose heap follows the
+    /// rows directly and ends at `data_len`.
+    pub(crate) fn compacted(&self, nrows: usize, data_len: usize) -> TableSchema {
+        let heap_offset = nrows * self.row_len;
+        assert!(
+            heap_offset <= data_len,
+            "a compacted selection holds its rows"
+        );
+        TableSchema {
+            nrows,
+            row_len: self.row_len,
+            heap_offset,
+            heap_end: data_len,
+            columns: self.columns.clone(),
+        }
     }
 }
 

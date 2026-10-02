@@ -2,7 +2,7 @@
 
 use crate::compress::decode::tile_cells::TileCells;
 use crate::error::Result;
-use crate::table_impl::BinTable;
+use crate::table_impl::table_view::TableView;
 use crate::table_impl::vla_column::VlaColumn;
 
 /// The three per-tile source columns (§10.1.3): the primary `COMPRESSED_DATA` and
@@ -16,7 +16,7 @@ pub(super) struct TileSources<'a> {
 }
 
 impl<'a> TileSources<'a> {
-    pub(super) fn read(table: &'a BinTable) -> Result<TileSources<'a>> {
+    pub(super) fn read(table: TableView<'a>) -> Result<TileSources<'a>> {
         Ok(TileSources {
             primary: table.optional_vla_column("COMPRESSED_DATA")?,
             gzip_fallback: table.optional_vla_column("GZIP_COMPRESSED_DATA")?,

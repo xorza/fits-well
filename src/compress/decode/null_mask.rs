@@ -3,15 +3,15 @@
 use crate::bitpix::Bitpix;
 use crate::compress::ImageCodec;
 use crate::compress::decode::ensure_tile_size;
-use crate::compress::decode::image_layout::ImageLayout;
 use crate::compress::decode::tile_scratch_set::CodecScratch;
+use crate::compress::decode::tiled_image::TiledImage;
 use crate::compress::gzip;
 use crate::compress::plio;
 use crate::compress::rice;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header::Header;
-use crate::table_impl::BinTable;
+use crate::table_impl::table_view::TableView;
 use crate::table_impl::vla_column::VlaColumn;
 
 /// The optional null-pixel mask and everything applying it needs: the per-tile mask
@@ -27,8 +27,8 @@ pub(super) struct NullMask<'a> {
 impl<'a> NullMask<'a> {
     pub(super) fn read(
         header: &Header,
-        table: &'a BinTable,
-        layout: &ImageLayout,
+        table: TableView<'a>,
+        tiled: &TiledImage<'_>,
     ) -> Result<NullMask<'a>> {
         let column = first_column(
             table,
@@ -50,7 +50,7 @@ impl<'a> NullMask<'a> {
         Ok(NullMask {
             column,
             codec,
-            blank: layout.scaling.blank,
+            blank: tiled.image.scaling.blank,
         })
     }
 
@@ -140,7 +140,7 @@ impl<'a> NullMask<'a> {
 
 /// The first of `names` the table carries as a variable-length column — writers
 /// disagree on the mask column's spelling, so all three are accepted.
-fn first_column<'a>(table: &'a BinTable, names: &[&str]) -> Result<Option<VlaColumn<'a>>> {
+fn first_column<'a>(table: TableView<'a>, names: &[&str]) -> Result<Option<VlaColumn<'a>>> {
     for &name in names {
         if let Some(column) = table.optional_vla_column(name)? {
             return Ok(Some(column));
