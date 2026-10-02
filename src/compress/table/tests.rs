@@ -4,6 +4,7 @@ use crate::bintable::descriptor;
 use crate::bintable::descriptor::PqDescriptor;
 use crate::bintable::internals::table_header;
 use crate::bintable::tform_kind::TformKind;
+use crate::compress::table::internals::mixed_columns;
 use crate::compress::*;
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
@@ -21,40 +22,7 @@ use std::io::Cursor;
 
 fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
     let nrows = 10;
-    let col = |name: &str, data, repeat| WriteColumn::fixed(name, data, repeat);
-    let columns = vec![
-        col(
-            "SHORT",
-            ColumnData::I16((0..nrows).map(|i| i as i16 * 7 - 30).collect()),
-            1,
-        ),
-        col(
-            "INT",
-            ColumnData::I32((0..nrows).map(|i| (i as i32) * 100_000 - 5).collect()),
-            1,
-        ),
-        col(
-            "FLT",
-            ColumnData::F32((0..nrows).map(|i| i as f32 * 1.5 - 3.25).collect()),
-            1,
-        ),
-        col(
-            "DBL",
-            ColumnData::F64((0..nrows).map(|i| i as f64 * 0.1).collect()),
-            1,
-        ),
-        col(
-            "BYTE",
-            ColumnData::Bytes((0..nrows).map(|i| (i * 3) as u8).collect()),
-            1,
-        ),
-        // A multi-element (repeat=3) short column.
-        col(
-            "VEC",
-            ColumnData::I16((0..nrows * 3).map(|i| (i * 2) as i16).collect()),
-            3,
-        ),
-    ];
+    let columns = mixed_columns(nrows);
     let algo = compression.name();
 
     // 1. Write an uncompressed table and read it back.

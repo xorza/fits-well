@@ -2,7 +2,7 @@
 //!
 //! Run with:
 //! ```text
-//! cargo bench --features compression --bench compress
+//! cargo bench --features compression,internals --bench compress
 //! ```
 //!
 //! Throughput is tagged with the **uncompressed** data-unit size, so the numbers
@@ -21,7 +21,8 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 
 use fits_well::header::Header;
 use fits_well::image::{Compression, CompressionOptions, Image, ImageData, Scaling};
-use fits_well::table::{BinTable, ColumnData, TableBuilder, WriteColumn};
+use fits_well::internals::mixed_table_columns;
+use fits_well::table::{BinTable, TableBuilder};
 use fits_well::{FitsReader, FitsWriter};
 
 /// Image-compression options pinned to the bench tile shape.
@@ -200,49 +201,22 @@ const TABLE_ROWS: usize = 200_000;
 /// (each column transposed and compressed per tile).
 const ROWS_PER_TILE: usize = 4096;
 
-/// A mixed-column binary table (i16/i32/f32/f64/byte + a repeat-3 vector), written
-/// then read back as a `BinTable` + its header — the input to table compression.
-fn table_fixture() -> (Header, BinTable) {
-    let n = TABLE_ROWS;
-    let columns = vec![
-        WriteColumn::fixed(
-            "SHORT",
-            ColumnData::I16((0..n).map(|i| i as i16).collect()),
-            1,
-        ),
-        WriteColumn::fixed(
-            "INT",
-            ColumnData::I32((0..n).map(|i| i as i32 * 7).collect()),
-            1,
-        ),
-        WriteColumn::fixed(
-            "FLT",
-            ColumnData::F32((0..n).map(|i| i as f32 * 1.5).collect()),
-            1,
-        ),
-        WriteColumn::fixed(
-            "DBL",
-            ColumnData::F64((0..n).map(|i| i as f64 * 0.1).collect()),
-            1,
-        ),
-        WriteColumn::fixed(
-            "BYTE",
-            ColumnData::Bytes((0..n).map(|i| i as u8).collect()),
-            1,
-        ),
-        WriteColumn::fixed(
-            "VEC",
-            ColumnData::I16((0..n * 3).map(|i| i as i16).collect()),
-            3,
-        ),
-    ];
+/// The mixed-column table, written then read back — the input to table compression.
+#[derive(Debug)]
+struct TableFixture {
+    header: Header,
+    table: BinTable,
+}
+
+fn table_fixture() -> TableFixture {
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    let table = TableBuilder::explicit(n, columns).unwrap();
+    let table = TableBuilder::explicit(TABLE_ROWS, mixed_table_columns(TABLE_ROWS)).unwrap();
     w.write_table(&table, None).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
-    let table = r.read_table(1).unwrap();
-    let header = r.hdus()[1].header.clone();
-    (header, table)
+    TableFixture {
+        table: r.read_table(1).unwrap(),
+        header: r.hdus()[1].header.clone(),
+    }
 }
 
 /// Uncompressed data-unit size = `NAXIS1` (row width, from the public header) ×
@@ -261,7 +235,7 @@ fn compressed_table(header: &Header, table: &BinTable, compression: Compression)
 /// `decompress_table` — `read_compressed_table` per column codec (uncompressed
 /// bytes/s); the compressed table is HDU 1.
 fn decompress_table(c: &mut Criterion) {
-    let (header, table) = table_fixture();
+    let TableFixture { header, table } = table_fixture();
     let bytes = table_bytes(&header, &table);
     let mut g = c.benchmark_group("decompress_table");
     for compression in [
@@ -282,7 +256,7 @@ fn decompress_table(c: &mut Criterion) {
 
 /// `compress_table` — `write_compressed_table` per column codec (reused sink).
 fn compress_table(c: &mut Criterion) {
-    let (header, table) = table_fixture();
+    let TableFixture { header, table } = table_fixture();
     let bytes = table_bytes(&header, &table);
     let mut g = c.benchmark_group("compress_table");
     for compression in [

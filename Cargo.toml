@@ -90,12 +90,12 @@ required-features = ["internals"]
 name = "wcs_allocations"
 required-features = ["internals"]
 
-# Compression-codec throughput (`cargo bench --features compression --bench compress`),
+# Compression-codec throughput (`cargo bench --features compression,internals --bench compress`),
 # reported in uncompressed bytes/s so it's comparable to the raw `decode` numbers.
 [[bench]]
 name = "compress"
 harness = false
-required-features = ["compression"]
+required-features = ["compression", "internals"]
 
 # Read-path throughput: seeking (copy-into-scratch) vs in-memory borrow. Uses only
 # the public API; the mmap arm is `#[cfg]`-gated on the `mmap` feature.

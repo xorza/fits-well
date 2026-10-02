@@ -1,4 +1,5 @@
 use crate::bitpix::Bitpix;
+use crate::compress::internals::{mask, ramp};
 use crate::compress::*;
 use crate::data::Image;
 use crate::data::image_data::ImageData;
@@ -13,9 +14,7 @@ use std::io::Cursor;
 
 #[test]
 fn compression_write_round_trips_through_decode() {
-    let samples: Vec<i16> = (0..24 * 16)
-        .map(|i| (i % 24) as i16 * 7 - (i / 24) as i16 * 5)
-        .collect();
+    let samples = ramp();
     let image = Image {
         shape: vec![24, 16],
         samples: ImageData::I16(samples.clone()),
@@ -522,9 +521,8 @@ fn hcompress_lossless_write_round_trips_exactly() {
 
 #[test]
 fn plio_write_round_trips_through_decode() {
-    // PLIO is a mask codec: non-negative i32 values. value(x, y) = (x + y) % 7,
-    // with a few longer runs to exercise multi-word counts.
-    let samples: Vec<i32> = (0..24 * 16).map(|i| (i % 24 + i / 24) % 7).collect();
+    // PLIO is a mask codec: non-negative i32 values.
+    let samples = mask();
     let image = Image {
         shape: vec![24, 16],
         samples: ImageData::I32(samples.clone()),
@@ -610,9 +608,7 @@ fn rice_64_bit_pixels_round_trip_extreme_differences() {
 #[test]
 fn nocompress_image_round_trips() {
     // §10.4: tiles stored verbatim (uncompressed big-endian pixels) round-trip.
-    let samples: Vec<i16> = (0..24 * 16)
-        .map(|i| (i % 24) as i16 * 7 - (i / 24) as i16 * 5)
-        .collect();
+    let samples = ramp();
     let image = Image {
         shape: vec![24, 16],
         samples: ImageData::I16(samples.clone()),

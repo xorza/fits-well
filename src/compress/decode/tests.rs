@@ -4,6 +4,7 @@ use crate::bintable::tform_kind::TformKind;
 #[cfg(feature = "parallel")]
 use crate::compress::decode::decode_wave_tile_count;
 use crate::compress::decode::tiled_image::TiledImage;
+use crate::compress::internals::{mask, ramp};
 use crate::compress::plane::IntBitpix;
 #[cfg(feature = "parallel")]
 use crate::compress::tile_geometry::TileGeometry;
@@ -25,27 +26,6 @@ fn decompress_image(header: &Header, table: &BinTable) -> Result<Image> {
     let image = ImageGeometry::from_header(header, kind)?;
     let samples = TiledImage::new(header, &image)?.decode(header, table.view())?;
     Image::new_scaled(image.shape.clone(), samples, image.scaling)
-}
-
-/// The fixtures encode value(x, y) = x*7 − y*5 over a 24×16 i16 image.
-fn expect_pixel(flat: usize) -> i16 {
-    let (x, y) = (flat % 24, flat / 24);
-    (x as i16) * 7 - (y as i16) * 5
-}
-
-fn check_decoded(name: &str) {
-    let mut f = open_fixture(name);
-    let img = f.read_image(1).unwrap();
-    assert_eq!(img.shape, vec![24, 16]);
-    match img.decode() {
-        ImageData::I16(v) => {
-            assert_eq!(v.len(), 24 * 16);
-            for (i, &got) in v.iter().enumerate() {
-                assert_eq!(got, expect_pixel(i), "pixel {i} of {name}");
-            }
-        }
-        other => panic!("expected I16, got {other:?}"),
-    }
 }
 
 /// A one-tile compressed image's container: `columns` as (`TTYPEn`, `TFORMn`) over a
@@ -79,136 +59,61 @@ fn compressed_image_header(
     h
 }
 
+/// Each integer fixture decodes to the plane it was written from.
 #[test]
-fn decompresses_gzip_1_tiled_image() {
-    check_decoded("comp_gzip_i16.fits");
-}
-
-#[test]
-fn decompresses_rice_1_tiled_image() {
-    check_decoded("comp_rice_i16.fits");
-}
-
-#[test]
-fn decompresses_hcompress_1_tiled_image() {
-    // Lossless HCOMPRESS (SCALE=0), single 24×16 tile.
-    check_decoded("comp_hcomp_i16.fits");
-}
-
-/// Decode an i32 image and compare pixel-exact against astropy's reconstruction
-/// stored as a plain-image reference.
-fn check_i32_against_ref(compressed: &str, reference: &str) {
-    let got = match open_fixture(compressed).read_image(1).unwrap().decode() {
-        ImageData::I32(v) => v,
-        other => panic!("expected I32, got {other:?}"),
-    };
-    let want = match open_fixture(reference).read_image(0).unwrap().decode() {
-        ImageData::I32(v) => v,
-        other => panic!("expected I32 reference, got {other:?}"),
-    };
-    assert_eq!(got, want, "{compressed} must match astropy {reference}");
-}
-
-#[test]
-fn decompresses_hcompress_lossy() {
-    // Lossy HCOMPRESS (SCALE=4, SMOOTH=0): exercises undigitize (×scale).
-    check_i32_against_ref("comp_hcomp_lossy.fits", "comp_ref_hcomp_lossy.fits");
-}
-
-#[test]
-fn decompresses_hcompress_smoothed() {
-    // SMOOTH=1: the SMOOTH ZVAL triggers inverse-transform smoothing, which must
-    // reproduce astropy's smoothed reconstruction bit-for-bit.
-    check_i32_against_ref("comp_hcomp_smooth.fits", "comp_ref_hcomp_smooth.fits");
-}
-
-#[test]
-fn decompresses_subtractive_dither_2() {
-    // SUBTRACTIVE_DITHER_2 float: must match astropy's dithered reconstruction.
-    check_float("comp_dither2_f32.fits", "comp_ref_dither2_f32.fits");
-}
-
-#[test]
-fn decompresses_float_with_nan_nulls() {
-    // SUBTRACTIVE_DITHER_1 with ZBLANK: null pixels decode to NaN, the rest match.
-    let got = match open_fixture("comp_nan_f32.fits")
-        .read_image(1)
-        .unwrap()
-        .decode()
-    {
-        ImageData::F32(v) => v,
-        other => panic!("expected F32, got {other:?}"),
-    };
-    let want = match open_fixture("comp_ref_nan_f32.fits")
-        .read_image(0)
-        .unwrap()
-        .decode()
-    {
-        ImageData::F32(v) => v,
-        other => panic!("expected F32 reference, got {other:?}"),
-    };
-    assert_eq!(got.len(), want.len());
-    let mut nan_count = 0;
-    for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
-        if w.is_nan() {
-            assert!(g.is_nan(), "pixel {i} should be NaN");
-            nan_count += 1;
-        } else {
-            assert_eq!(g, w, "pixel {i}");
-        }
-    }
-    assert_eq!(nan_count, 2, "expected 2 null pixels");
-}
-
-#[test]
-fn decompresses_gzip_2_tiled_image() {
-    check_decoded("comp_gzip2_i16.fits");
-}
-
-#[test]
-fn decompresses_plio_1_mask() {
-    // PLIO fixture encodes value(x, y) = (x + y) % 7 as an i32 mask.
-    let mut f = open_fixture("comp_plio_i32.fits");
-    let img = f.read_image(1).unwrap();
-    assert_eq!(img.shape, vec![24, 16]);
-    match img.decode() {
-        ImageData::I32(v) => {
-            assert_eq!(v.len(), 24 * 16);
-            for (i, &got) in v.iter().enumerate() {
-                let (x, y) = (i % 24, i / 24);
-                assert_eq!(got, ((x + y) % 7) as i32, "pixel {i}");
-            }
-        }
-        other => panic!("expected I32, got {other:?}"),
+fn decompresses_the_integer_codec_fixtures() {
+    for (name, want) in [
+        ("comp_gzip_i16.fits", ImageData::I16(ramp())),
+        ("comp_gzip2_i16.fits", ImageData::I16(ramp())),
+        ("comp_rice_i16.fits", ImageData::I16(ramp())),
+        // Lossless HCOMPRESS (SCALE=0), one 24×16 tile.
+        ("comp_hcomp_i16.fits", ImageData::I16(ramp())),
+        ("comp_plio_i32.fits", ImageData::I32(mask())),
+    ] {
+        let mut reader = open_fixture(name);
+        let image = reader.read_image(1).unwrap();
+        assert_eq!(image.shape, [24, 16], "{name}");
+        assert_eq!(image.decode(), want, "{name}");
     }
 }
 
-/// Compare a compressed-float decode against astropy's reconstructed reference.
-fn check_float(compressed: &str, reference: &str) {
-    let got = match open_fixture(compressed).read_image(1).unwrap().decode() {
-        ImageData::F32(v) => v,
-        other => panic!("expected F32, got {other:?}"),
-    };
-    let want = match open_fixture(reference).read_image(0).unwrap().decode() {
-        ImageData::F32(v) => v,
-        other => panic!("expected F32 reference, got {other:?}"),
-    };
-    assert_eq!(got.len(), 24 * 16);
-    assert_eq!(got, want, "{compressed} must match astropy");
-}
-
+/// Each lossy or float fixture decodes bit for bit to astropy's reconstruction,
+/// stored as a plain image beside it; a NaN matches any NaN.
 #[test]
-fn decompresses_unquantized_float_via_gzip_fallback() {
-    // Smooth data stored losslessly: ZSCALE=0, raw floats gzip'd in
-    // GZIP_COMPRESSED_DATA (COMPRESSED_DATA empty).
-    check_float("comp_ricef_nodither.fits", "comp_ref_f32.fits");
-}
-
-#[test]
-fn decompresses_quantized_float_no_dither() {
-    // Noisy data genuinely quantized: per-tile ZSCALE≠0, integers RICE-packed in
-    // COMPRESSED_DATA, dequantized as ZSCALE·int + ZZERO.
-    check_float("comp_ricef_quant.fits", "comp_ref_quant_f32.fits");
+fn decompresses_to_the_astropy_reconstructions() {
+    fn samples(data: ImageData) -> Vec<Option<u32>> {
+        match data {
+            ImageData::I32(values) => values.into_iter().map(|v| Some(v as u32)).collect(),
+            ImageData::F32(values) => values
+                .into_iter()
+                .map(|v| (!v.is_nan()).then(|| v.to_bits()))
+                .collect(),
+            other => panic!("expected I32 or F32, got {other:?}"),
+        }
+    }
+    for (compressed, reference, nulls) in [
+        // Lossy HCOMPRESS, SCALE=4: undigitize multiplies by the scale.
+        ("comp_hcomp_lossy.fits", "comp_ref_hcomp_lossy.fits", 0),
+        // SMOOTH=1 smooths during the inverse transform.
+        ("comp_hcomp_smooth.fits", "comp_ref_hcomp_smooth.fits", 0),
+        // Smooth data stored losslessly: ZSCALE=0, the floats gzip'd in
+        // GZIP_COMPRESSED_DATA.
+        ("comp_ricef_nodither.fits", "comp_ref_f32.fits", 0),
+        // Noisy data quantized per tile, RICE-packed, read as ZSCALE·int + ZZERO.
+        ("comp_ricef_quant.fits", "comp_ref_quant_f32.fits", 0),
+        ("comp_dither2_f32.fits", "comp_ref_dither2_f32.fits", 0),
+        // SUBTRACTIVE_DITHER_1 with ZBLANK: two pixels are null.
+        ("comp_nan_f32.fits", "comp_ref_nan_f32.fits", 2),
+    ] {
+        let got = samples(open_fixture(compressed).read_image(1).unwrap().decode());
+        let want = samples(open_fixture(reference).read_image(0).unwrap().decode());
+        assert_eq!(got, want, "{compressed}");
+        assert_eq!(
+            got.iter().filter(|v| v.is_none()).count(),
+            nulls,
+            "{compressed}"
+        );
+    }
 }
 
 #[test]
