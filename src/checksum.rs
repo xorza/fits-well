@@ -73,7 +73,10 @@ pub(crate) fn encode(sum: u32, complement: bool) -> [u8; 16] {
 
 #[cfg(test)]
 mod tests {
+    use crate::block::padded_len;
     use crate::checksum::*;
+    use crate::reader::internals::open_fixture;
+    use crate::reader::{ChecksumReport, ChecksumStatus};
 
     #[test]
     fn accumulate_folds_end_around_carry() {
@@ -123,6 +126,55 @@ mod tests {
             );
             hdu[field..field + 16].copy_from_slice(&encoded);
             assert_eq!(accumulate(&hdu, 0), 0xFFFF_FFFF, "{rest:?}");
+        }
+    }
+
+    /// cfitsio wrote both HDUs' `CHECKSUM` and `DATASUM` in these files, so they
+    /// are answers from an independent implementation: each verifies, the data's
+    /// sum is the `DATASUM`, and encoding the HDU's sum with the `CHECKSUM` field
+    /// zeroed reproduces cfitsio's string.
+    #[test]
+    fn encoding_reproduces_cfitsio_checksums() {
+        for name in ["comp_table_cfitsio.fits", "comp_table_vla.fits"] {
+            let bytes = std::fs::read(format!("tests/data/fits/{name}")).unwrap();
+            let mut reader = open_fixture(name);
+            let mut header_start = 0;
+            for index in 0..reader.hdus().len() {
+                assert_eq!(
+                    reader.verify_checksum(index).unwrap(),
+                    ChecksumReport {
+                        datasum: ChecksumStatus::Valid,
+                        checksum: ChecksumStatus::Valid,
+                    },
+                    "{name} HDU {index}"
+                );
+                let hdu = &reader.hdus()[index];
+                let data_start = hdu.data_offset as usize;
+                let data_end = data_start + padded_len(hdu.data_bytes) as usize;
+                let data_sum = accumulate(&bytes[data_start..data_end], 0);
+                // cfitsio right-justifies the number in ten characters.
+                let datasum = hdu.header.get_text("DATASUM").unwrap().unwrap();
+                assert_eq!(datasum.trim_start().parse::<u32>(), Ok(data_sum));
+
+                let mut header = bytes[header_start..data_start].to_vec();
+                let card = header
+                    .as_chunks::<80>()
+                    .0
+                    .iter()
+                    .position(|card| card.starts_with(b"CHECKSUM= '"))
+                    .unwrap();
+                let field = card * 80 + 11..card * 80 + 27;
+                let written: [u8; 16] = header[field.clone()].try_into().unwrap();
+                header[field].copy_from_slice(b"0000000000000000");
+                let sum = combine(accumulate(&header, 0), data_sum);
+                assert_eq!(
+                    encode(sum, true),
+                    written,
+                    "{name} HDU {index}: cfitsio wrote {}",
+                    String::from_utf8_lossy(&written)
+                );
+                header_start = data_end;
+            }
         }
     }
 }

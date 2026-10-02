@@ -509,7 +509,6 @@ impl Wcs {
     }
 }
 
-/// Degrees per `CUNITia` of a celestial axis, whose absent unit is the degree (§8.2).
 /// The factor from an axis's declared `CUNITi` to the unit its world coordinates
 /// come out in: degrees for a celestial axis (§8.2), the Table-25 default for a
 /// spectral one (§8.4), and the declared unit for any other.

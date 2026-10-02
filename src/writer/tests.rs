@@ -370,11 +370,14 @@ fn vla_columns_by_stored_type() -> Vec<TypedWriteColumn> {
     ]
 }
 
-fn assert_table_column_writes(column: WriteColumn) {
+/// The header a one-column table writes, read back.
+fn written_table_header(column: WriteColumn) -> Header {
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
         .write_table(&binary_table(1, &[column]), None)
         .unwrap();
+    let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
+    reader.hdus.swap_remove(1).header
 }
 
 fn assert_table_column_rejected(column: WriteColumn, keyword: &'static str) {
@@ -1003,11 +1006,14 @@ fn binary_metadata_is_validated_for_every_fixed_and_vla_stored_type() {
             internals::set_scaling(&mut tzero_only, None, Some(3.0));
             assert_table_column_rejected(tzero_only, "TZEROn");
         } else {
-            assert_table_column_writes(typed.column.clone().scaled(2.0, 3.0));
+            let header = written_table_header(typed.column.clone().scaled(2.0, 3.0));
+            assert_eq!(header.get_real("TSCAL1").unwrap(), Some(2.0), "{typed:?}");
+            assert_eq!(header.get_real("TZERO1").unwrap(), Some(3.0), "{typed:?}");
         }
 
         if matches!(typed.stored_type, 'B' | 'I' | 'J' | 'K') {
-            assert_table_column_writes(typed.column.with_null(0));
+            let header = written_table_header(typed.column.clone().with_null(0));
+            assert_eq!(header.get_integer("TNULL1").unwrap(), Some(0), "{typed:?}");
         } else {
             assert_table_column_rejected(typed.column.with_null(0), "TNULLn");
         }
@@ -1057,7 +1063,9 @@ fn binary_tnull_is_range_checked_for_fixed_and_vla_integer_types() {
     for boundary in boundaries {
         for vla in [false, true] {
             for &tnull in boundary.valid {
-                assert_table_column_writes(integer_column(&boundary.zero, vla).with_null(tnull));
+                let header =
+                    written_table_header(integer_column(&boundary.zero, vla).with_null(tnull));
+                assert_eq!(header.get_integer("TNULL1").unwrap(), Some(tnull));
             }
             for &tnull in boundary.invalid {
                 assert_table_column_rejected(

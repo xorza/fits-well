@@ -30,26 +30,24 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
             equinox: None,
         })
     );
-    assert_eq!(
-        Wcs::from_header(&image(Some(1950.0), None), None)
-            .unwrap()
-            .view()
-            .celestial_frame,
-        Some(CelestialFrame {
-            reference_frame: CelestialReferenceFrame::Fk4,
-            equinox: Some(1950.0),
-        })
-    );
-    assert_eq!(
-        Wcs::from_header(&image(Some(2000.0), None), None)
-            .unwrap()
-            .view()
-            .celestial_frame,
-        Some(CelestialFrame {
-            reference_frame: CelestialReferenceFrame::Fk5,
-            equinox: Some(2000.0),
-        })
-    );
+    // §8.1: without RADESYS, an equinox before 1984.0 is FK4, and from it on FK5.
+    for (equinox, reference_frame) in [
+        (1950.0, CelestialReferenceFrame::Fk4),
+        (1983.999, CelestialReferenceFrame::Fk4),
+        (1984.0, CelestialReferenceFrame::Fk5),
+        (2000.0, CelestialReferenceFrame::Fk5),
+    ] {
+        assert_eq!(
+            Wcs::from_header(&image(Some(equinox), None), None)
+                .unwrap()
+                .view()
+                .celestial_frame,
+            Some(CelestialFrame {
+                reference_frame,
+                equinox: Some(equinox),
+            })
+        );
+    }
     assert_eq!(
         Wcs::from_header(&image(Some(1975.0), Some("FK4-NO-E")), None)
             .unwrap()
