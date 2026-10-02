@@ -158,8 +158,8 @@ writer.into_inner().sync_all()?;
 
 let mut reader = FitsReader::open(File::open("table.fits")?)?;
 let table = reader.read_table(1)?; // the table is HDU 1 (HDU 0 is the empty primary)
-let metadata = table.metadata();
-println!("{} rows, {} columns", metadata.nrows, metadata.columns.len());
+let schema = table.schema();
+println!("{} rows, {} columns", schema.nrows, schema.columns.len());
 
 // `.raw()` is the stored, typed plane; `.physical()` applies TZEROn/TSCALn and
 // maps TNULLn to NaN, widening to f64. `.unsigned()`, `.complex()`, and `.bits()`

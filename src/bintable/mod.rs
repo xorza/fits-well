@@ -23,7 +23,6 @@ pub(crate) mod tform;
 pub(crate) mod tform_kind;
 pub(crate) mod vla_column;
 
-use crate::bintable::column::Column;
 use crate::bintable::column_reader::ColumnReader;
 use crate::bintable::table_schema::TableSchema;
 use crate::bintable::table_view::TableView;
@@ -41,15 +40,6 @@ pub struct BinTable {
     /// block fill). Fixed-width reads index the main-table prefix; `P`/`Q` columns
     /// follow their descriptors into the heap.
     bytes: Vec<u8>,
-}
-
-/// Immutable row and column metadata for a parsed binary table.
-#[derive(Debug, Clone, Copy)]
-pub struct BinTableMetadata<'a> {
-    /// Number of rows in the table.
-    pub nrows: usize,
-    /// Validated column descriptors in `TFIELDS` order.
-    pub columns: &'a [Column],
 }
 
 impl BinTable {
@@ -75,9 +65,9 @@ impl BinTable {
         TableView::new(&self.schema, &self.bytes).expect("`new` checked the heap extent")
     }
 
-    /// Borrow the table's validated row count and column descriptors.
-    pub fn metadata(&self) -> BinTableMetadata<'_> {
-        self.view().metadata()
+    /// The table's structure: its row count, row width and validated columns.
+    pub fn schema(&self) -> &TableSchema {
+        &self.schema
     }
 
     /// The index of the first column whose `TTYPEn` matches `name`, compared

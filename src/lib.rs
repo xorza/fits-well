@@ -164,6 +164,7 @@ pub mod table {
     pub use crate::ascii::{
         AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiTable, AsciiTableMetadata,
     };
+    pub use crate::bintable::BinTable;
     pub use crate::bintable::bit_column::BitColumn;
     pub use crate::bintable::character_field::CharacterField;
     pub use crate::bintable::column::Column;
@@ -172,7 +173,6 @@ pub mod table {
     pub use crate::bintable::table_schema::TableSchema;
     pub use crate::bintable::tform::Tform;
     pub use crate::bintable::tform_kind::TformKind;
-    pub use crate::bintable::{BinTable, BinTableMetadata};
     pub use crate::ragged::Ragged;
     pub use crate::reader::{ColumnSelector, SelectedColumn, TableColumnData, TableSelection};
     pub use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};

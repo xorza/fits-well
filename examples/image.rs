@@ -71,7 +71,7 @@ fn main() -> fits_well::Result<()> {
         // The view borrows the reader + scratch, so use it before the next read. For
         // samples you need past the loop, use the owned `read_image().decode()` above.
         let image = reader.read_image_view(idx, &mut scratch)?;
-        match image.samples {
+        match image.samples() {
             ImageView::I16(v) => println!("hdu {idx}: i16 view {v:?}"),
             ImageView::F32(v) => println!("hdu {idx}: f32 view {v:?}"),
             other => println!(

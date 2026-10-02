@@ -1,6 +1,5 @@
 //! A binary table over borrowed bytes.
 
-use crate::bintable::BinTableMetadata;
 use crate::bintable::column::Column;
 use crate::bintable::column_reader::ColumnReader;
 use crate::bintable::descriptor::PqDescriptor;
@@ -68,13 +67,6 @@ impl<'a> TableView<'a> {
             heap_offset,
             heap_end: bytes.len(),
             bytes,
-        }
-    }
-
-    pub(crate) const fn metadata(&self) -> BinTableMetadata<'a> {
-        BinTableMetadata {
-            nrows: self.nrows,
-            columns: self.columns,
         }
     }
 

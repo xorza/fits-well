@@ -1303,7 +1303,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     assert_eq!(schema.nrows, 4);
     assert_eq!(schema.columns.len(), 14);
     let empty = reader.read_table_rows(1, 2..2).unwrap();
-    assert_eq!(empty.metadata().nrows, 0);
+    assert_eq!(empty.schema().nrows, 0);
     assert_eq!(
         empty.column_by_name("VLA").unwrap().vla().unwrap(),
         Ragged::<ColumnData>::new(ColumnData::I32(Vec::new()), Vec::new())

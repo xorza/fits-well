@@ -25,8 +25,10 @@ pub struct TableSchema {
     pub nrows: usize,
     /// Byte width of one row (`NAXIS1`).
     pub row_len: usize,
-    pub heap_offset: usize,
-    pub heap_end: usize,
+    /// Where the heap starts (`THEAP`, else the end of the main table) and ends
+    /// (the main table plus `PCOUNT`) — derived and validated, so not public.
+    pub(crate) heap_offset: usize,
+    pub(crate) heap_end: usize,
     pub columns: Vec<Column>,
 }
 

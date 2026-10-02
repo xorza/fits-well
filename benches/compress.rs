@@ -257,7 +257,7 @@ fn table_fixture() -> (Header, BinTable) {
 /// Uncompressed data-unit size = `NAXIS1` (row width, from the public header) ×
 /// `NAXIS2` rows.
 fn table_bytes(header: &Header, table: &BinTable) -> u64 {
-    header.get_integer("NAXIS1").unwrap().unwrap() as u64 * table.metadata().nrows as u64
+    header.get_integer("NAXIS1").unwrap().unwrap() as u64 * table.schema().nrows as u64
 }
 
 fn compressed_table(header: &Header, table: &BinTable, compression: Compression) -> Vec<u8> {
