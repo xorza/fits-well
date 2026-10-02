@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::header_model::Header;
 
 /// A recognized FITS time-scale meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,43 +22,40 @@ pub enum TimeScaleKind {
 
 /// A FITS time-scale declaration (`TIMESYS` / `CTYPEi`).
 ///
-/// Standard scales are normalized to their meaning while retaining an optional
-/// realization suffix. Any other nonempty code is preserved as a local scale.
+/// A standard scale is normalized to its meaning, keeping the realization suffix
+/// when one is given (`TT(TAI)`). Any other nonempty code is kept verbatim as a
+/// local scale.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimeScale {
-    Utc,
-    Ut1,
-    Tai,
-    Tt,
-    Tcg,
-    Tdb,
-    Tcb,
-    Gps,
-    Realized {
+    Known {
         kind: TimeScaleKind,
-        realization: String,
+        realization: Option<String>,
     },
     Local(String),
 }
 
 impl TimeScale {
-    pub(super) fn kind(&self) -> Option<TimeScaleKind> {
-        match self {
-            TimeScale::Utc => Some(TimeScaleKind::Utc),
-            TimeScale::Ut1 => Some(TimeScaleKind::Ut1),
-            TimeScale::Tai => Some(TimeScaleKind::Tai),
-            TimeScale::Tt => Some(TimeScaleKind::Tt),
-            TimeScale::Tcg => Some(TimeScaleKind::Tcg),
-            TimeScale::Tdb => Some(TimeScaleKind::Tdb),
-            TimeScale::Tcb => Some(TimeScaleKind::Tcb),
-            TimeScale::Gps => Some(TimeScaleKind::Gps),
-            TimeScale::Realized { kind, .. } => Some(*kind),
-            TimeScale::Local(_) => None,
+    /// The standard scale `kind`, with no realization.
+    pub const fn known(kind: TimeScaleKind) -> TimeScale {
+        TimeScale::Known {
+            kind,
+            realization: None,
         }
     }
 
-    pub(super) fn is_utc(&self) -> bool {
-        self.kind() == Some(TimeScaleKind::Utc)
+    /// The `TIMESYS` scale `header` declares, `UTC` by default.
+    pub(crate) fn declared(header: &Header) -> Result<TimeScale> {
+        Ok(match header.get_text("TIMESYS")? {
+            Some(value) => value.parse()?,
+            None => TimeScale::known(TimeScaleKind::Utc),
+        })
+    }
+
+    pub(crate) fn kind(&self) -> Option<TimeScaleKind> {
+        match self {
+            TimeScale::Known { kind, .. } => Some(*kind),
+            TimeScale::Local(_) => None,
+        }
     }
 }
 
@@ -85,22 +83,18 @@ impl FromStr for TimeScale {
             None if !value.is_empty() && !value.contains(')') => (value, None),
             None => return Err(invalid()),
         };
-        let standard = match base.to_ascii_uppercase().as_str() {
-            "UTC" | "GMT" => Some((TimeScale::Utc, TimeScaleKind::Utc)),
-            "UT1" | "UT" => Some((TimeScale::Ut1, TimeScaleKind::Ut1)),
-            "TAI" | "IAT" => Some((TimeScale::Tai, TimeScaleKind::Tai)),
-            "TT" | "TDT" | "ET" => Some((TimeScale::Tt, TimeScaleKind::Tt)),
-            "TCG" => Some((TimeScale::Tcg, TimeScaleKind::Tcg)),
-            "TDB" => Some((TimeScale::Tdb, TimeScaleKind::Tdb)),
-            "TCB" => Some((TimeScale::Tcb, TimeScaleKind::Tcb)),
-            "GPS" => Some((TimeScale::Gps, TimeScaleKind::Gps)),
-            _ => None,
+        let kind = match base.to_ascii_uppercase().as_str() {
+            "UTC" | "GMT" => TimeScaleKind::Utc,
+            "UT1" | "UT" => TimeScaleKind::Ut1,
+            "TAI" | "IAT" => TimeScaleKind::Tai,
+            "TT" | "TDT" | "ET" => TimeScaleKind::Tt,
+            "TCG" => TimeScaleKind::Tcg,
+            "TDB" => TimeScaleKind::Tdb,
+            "TCB" => TimeScaleKind::Tcb,
+            "GPS" => TimeScaleKind::Gps,
+            _ if realization.is_some() => return Ok(TimeScale::Local(value.to_string())),
+            _ => return Ok(TimeScale::Local(base.to_string())),
         };
-        match (standard, realization) {
-            (Some((scale, _)), None) => Ok(scale),
-            (Some((_, kind)), Some(realization)) => Ok(TimeScale::Realized { kind, realization }),
-            (None, None) => Ok(TimeScale::Local(base.to_string())),
-            (None, Some(_)) => Ok(TimeScale::Local(value.to_string())),
-        }
+        Ok(TimeScale::Known { kind, realization })
     }
 }

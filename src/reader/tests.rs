@@ -140,7 +140,7 @@ fn read_wcs_resolves_the_exact_tabular_extension() {
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
     assert!(matches!(
-        reader.hdus[0].header.wcs(None).unwrap().pixel_to_world(&[2.0]),
+        Wcs::from_header(&reader.hdus[0].header, None).unwrap().pixel_to_world(&[2.0]),
         Err(FitsError::UnsupportedWcsTransform { axes }) if axes == [0]
     ));
     let wcs = reader.read_wcs(0, None).unwrap();

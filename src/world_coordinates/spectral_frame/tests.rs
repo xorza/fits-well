@@ -1,5 +1,6 @@
 use crate::error::FitsError;
 use crate::header_model::Header;
+use crate::world_coordinates::Wcs;
 use crate::world_coordinates::spectral_frame::SpectralFrame;
 use crate::world_coordinates::spectral_frame::SpectralReferenceFrame;
 
@@ -17,15 +18,15 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         header
     };
     assert!(matches!(
-        velocity_axis("VELO-F2V").wcs(None),
+        Wcs::from_header(&velocity_axis("VELO-F2V"), None),
         Err(FitsError::InvalidWcs { detail }) if detail.contains("RESTFRQ or RESTWAV")
     ));
     assert!(matches!(
-        velocity_axis("VRAD-W2F").wcs(None),
+        Wcs::from_header(&velocity_axis("VRAD-W2F"), None),
         Err(FitsError::InvalidWcs { detail }) if detail.contains("RESTFRQ or RESTWAV")
     ));
 
-    let no_rest = velocity_axis("VRAD-V2F").wcs(None).unwrap();
+    let no_rest = Wcs::from_header(&velocity_axis("VRAD-V2F"), None).unwrap();
     let world = no_rest.pixel_to_world(&[3.0]).unwrap()[0];
     let speed_of_light: f64 = 2.997_924_58e8;
     let frequency =
@@ -38,7 +39,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     by_frequency
         .set_internal("RESTFRQ", 1_420_405_751.0)
         .set_internal("SPECSYS", "BARYCENT");
-    let by_frequency = by_frequency.wcs(None).unwrap();
+    let by_frequency = Wcs::from_header(&by_frequency, None).unwrap();
     assert_eq!(
         by_frequency.view().axes[0].spectral_frame,
         Some(SpectralFrame {
@@ -50,7 +51,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     );
     let mut by_wavelength = velocity_axis("VELO-F2V");
     by_wavelength.set_internal("RESTWAV", 2.997_924_58e8 / 1_420_405_751.0);
-    let by_wavelength = by_wavelength.wcs(None).unwrap();
+    let by_wavelength = Wcs::from_header(&by_wavelength, None).unwrap();
     assert!(
         (by_frequency.pixel_to_world(&[3.0]).unwrap()[0]
             - by_wavelength.pixel_to_world(&[3.0]).unwrap()[0])
@@ -68,8 +69,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     let mut deprecated = velocity_axis("VELO-F2V");
     deprecated.set_internal("RESTFREQ", 1_420_405_751.0);
     assert!(
-        (deprecated
-            .wcs(None)
+        (Wcs::from_header(&deprecated, None)
             .unwrap()
             .pixel_to_world(&[3.0])
             .unwrap()[0]
@@ -81,7 +81,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     let mut invalid = velocity_axis("VELO-F2V");
     invalid.set_internal("RESTFRQ", 0.0);
     assert!(matches!(
-        invalid.wcs(None),
+        Wcs::from_header(&invalid, None),
         Err(FitsError::InvalidWcs { detail }) if detail.contains("RESTFRQ")
     ));
 
@@ -103,7 +103,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         .set_internal("RWAV4", 5.0e-7)
         .set_internal("SPEC4", "SOURCE")
         .set_internal("SOBS4", "HELIOCEN");
-    let pixel_list = pixel_list.wcs_pixel_list(&[2, 4], None).unwrap();
+    let pixel_list = Wcs::from_pixel_list(&pixel_list, &[2, 4], None).unwrap();
     assert!(
         (pixel_list.pixel_to_world(&[3.0, 1.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9
     );
@@ -137,7 +137,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         .set_internal("RWAV5A", 2.997_924_58e8 / 1_420_405_751.0)
         .set_internal("SPEC5A", "LSRK")
         .set_internal("SOBS5A", "TOPOCENT");
-    let vector = vector.wcs_array_column(5, Some('A')).unwrap();
+    let vector = Wcs::from_array_column(&vector, 5, Some('A')).unwrap();
     assert!((vector.pixel_to_world(&[3.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9);
     assert_eq!(
         vector.view().axes[0].spectral_frame,
@@ -159,7 +159,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         .set_internal("SSYSOBSA", "BARYCENT")
         .set_internal("RESTFRQA", 1_420_405_751.0);
     assert_eq!(
-        alternate.wcs(Some('A')).unwrap().view().axes[0].spectral_frame,
+        Wcs::from_header(&alternate, Some('A')).unwrap().view().axes[0].spectral_frame,
         Some(SpectralFrame {
             coordinate: Some(SpectralReferenceFrame::CmbDipole),
             observer: SpectralReferenceFrame::Barycentric,
@@ -170,7 +170,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
 
     alternate.set_internal("SPECSYSA", "UNKNOWN");
     assert!(matches!(
-        alternate.wcs(Some('A')),
+        Wcs::from_header(&alternate, Some('A')),
         Err(FitsError::InvalidWcs { detail }) if detail.contains("SPECSYS")
     ));
 
@@ -192,7 +192,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
             .set_internal("CTYPE1", "WAVE")
             .set_internal("SPECSYS", value);
         assert_eq!(
-            header.wcs(None).unwrap().view().axes[0]
+            Wcs::from_header(&header, None).unwrap().view().axes[0]
                 .spectral_frame
                 .unwrap()
                 .coordinate,

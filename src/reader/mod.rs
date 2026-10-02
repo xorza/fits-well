@@ -591,7 +591,7 @@ impl<S: Source> FitsReader<S> {
 
     /// Parse an HDU's WCS and resolve any standard `-TAB` coordinate arrays from
     /// their referenced `BINTABLE` extensions. Header-only WCS descriptions use the
-    /// same path as [`Header::wcs`]; this method is required for `-TAB` because its
+    /// same path as [`Wcs::from_header`]; this method is required for `-TAB` because its
     /// coordinate values and optional index vectors live outside the source header.
     pub fn read_wcs(&mut self, index: usize, alt: Option<char>) -> Result<Wcs> {
         let header = &checked_hdu(&self.hdus, index)?.header;

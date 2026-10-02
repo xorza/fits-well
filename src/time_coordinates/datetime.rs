@@ -3,7 +3,7 @@
 
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::time_coordinates::time_scale::TimeScale;
+use crate::time_coordinates::time_scale::{TimeScale, TimeScaleKind};
 use crate::time_coordinates::{MJD0, SEC_PER_DAY};
 
 /// A calendar datetime (proleptic Gregorian, time-scale agnostic). `second` may
@@ -110,7 +110,7 @@ impl Datetime {
         } else {
             valid_date
                 && self.second < 61.0
-                && scale.is_utc()
+                && scale.kind() == Some(TimeScaleKind::Utc)
                 && self.hour == 23
                 && self.minute == 59
         };

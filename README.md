@@ -188,8 +188,8 @@ Jagged bit arrays use `WriteColumn::vla_bits` with one MSB-first
 
 `FitsReader::read_wcs` parses the `CTYPEn`/`CRPIXn`/`CRVALn`/… keywords into a
 transform and resolves any `-TAB` coordinate arrays from their referenced
-`BINTABLE`. `Header::wcs` is the header-only form for descriptions that do not
-need external table data.
+`BINTABLE`. `wcs::Wcs::from_header` is the header-only form for descriptions that
+do not need external table data.
 
 ```rust,no_run
 use std::fs::File;
@@ -209,7 +209,8 @@ Both complete transforms return an error for coordinates outside the projection'
 domain, failed iterative inversion, or a nonlinear algorithm this crate does not
 yet implement.
 
-The typed **time** layer (`Header::time`, `time::Datetime`, `time::TimeScale`)
+The typed **time** layer (`time::FitsTime::from_header`, `time::Datetime`,
+`time::TimeScale`)
 handles strict FITS ISO-8601/JD/MJD, FITS time units, epochs, resolved
 `TREFPOS`/`TRPOSn`, all image/table PHASE keyword forms, and PC/CD-coupled time
 axes through the parsed WCS model. It preserves recognized scale realizations

@@ -50,7 +50,7 @@ fn canonical_api_paths_support_a_zero_copy_array_adapter() -> Result<()> {
     let _: WriteColumn = WriteColumn::scalar("VALUE", ColumnData::I32(Vec::new()));
     let _: BitVec<u8, Msb0> = BitVec::new();
     let _: Complex<f32> = Complex::new(0.0, 0.0);
-    let _: TimeScale = TimeScale::Utc;
+    let _: TimeScale = TimeScale::known(TimeScaleKind::Utc);
     let _: TimeScaleKind = TimeScaleKind::Utc;
 
     Ok(())

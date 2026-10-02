@@ -11,6 +11,7 @@ use std::fs::File;
 use std::process;
 
 use fits_well::FitsReader;
+use fits_well::wcs::Wcs;
 
 fn main() -> fits_well::Result<()> {
     let Some(path) = env::args().nth(1) else {
@@ -22,9 +23,9 @@ fn main() -> fits_well::Result<()> {
     let reader = FitsReader::open(File::open(&path)?)?;
     let header = &reader.hdus()[0].header;
 
-    // `header.wcs(..)` parses those keywords into a usable transform. `None` selects
+    // `Wcs::from_header` parses those keywords into a usable transform. `None` selects
     // the primary WCS (an alternate would be `Some('A')`, etc.).
-    let wcs = header.wcs(None)?;
+    let wcs = Wcs::from_header(header, None)?;
     println!("axes: {:?}", wcs.view().axes);
 
     // Pixel → world: the reference pixel (CRPIXn) maps to the reference sky

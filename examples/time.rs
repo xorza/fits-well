@@ -8,7 +8,7 @@
 use std::fs::File;
 
 use fits_well::header::Header;
-use fits_well::time::{Datetime, TimeScale};
+use fits_well::time::{Datetime, TimeCoordinate, TimeScale};
 use fits_well::{FitsReader, FitsWriter};
 
 fn main() -> fits_well::Result<()> {
@@ -33,8 +33,9 @@ fn main() -> fits_well::Result<()> {
     let reader = FitsReader::open(File::open(&path)?)?;
     let header = &reader.hdus()[0].header;
 
-    // `header.obs_mjd()` resolves the observation time (MJD-OBS, else DATE-OBS).
-    println!("observation MJD = {:?}", header.obs_mjd()?);
+    // `TimeCoordinate::observation` resolves the observation time (MJD-OBS, else
+    // DATE-OBS) with its scale.
+    println!("observation = {:?}", TimeCoordinate::observation(header)?);
 
     let timesys = header
         .get_text("TIMESYS")?
