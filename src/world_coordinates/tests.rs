@@ -414,3 +414,14 @@ fn the_view_keeps_crval_in_its_declared_unit() {
         "{world:?}"
     );
 }
+
+/// `[0, 360)`: a tiny negative angle's remainder rounds to 360 itself, which is 0.
+#[test]
+fn norm360_stays_below_a_full_turn() {
+    use crate::world_coordinates::norm360;
+
+    assert_eq!(norm360(-1e-20), 0.0);
+    assert_eq!(norm360(-90.0), 270.0);
+    assert_eq!(norm360(720.0), 0.0);
+    assert_eq!(norm360(359.5), 359.5);
+}

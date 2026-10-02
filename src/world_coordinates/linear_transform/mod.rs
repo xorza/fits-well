@@ -164,8 +164,12 @@ fn offset_row(row: &[f64], pixel: &[f64], axes: &[WcsAxis]) -> f64 {
 }
 
 /// Invert a row-major `n×n` matrix by Gauss–Jordan elimination with partial
-/// pivoting. Returns `None` if singular.
+/// pivoting. Returns `None` if singular: when a pivot is no larger than the rounding
+/// elimination leaves in an entry, about `n·ε` of the largest one (Higham, *Accuracy
+/// and Stability of Numerical Algorithms*, §9.3, for the typical growth of partial
+/// pivoting). The test is relative, so a matrix in tiny units is not singular.
 fn invert(m: &[f64], n: usize) -> Option<Vec<f64>> {
+    let singular = n as f64 * f64::EPSILON * m.iter().fold(0.0f64, |max, &x| max.max(x.abs()));
     let mut a = m.to_vec();
     let mut inv = vec![0.0; n * n];
     for i in 0..n {
@@ -179,7 +183,7 @@ fn invert(m: &[f64], n: usize) -> Option<Vec<f64>> {
                 pivot = r;
             }
         }
-        if a[pivot * n + col].abs() < 1e-300 {
+        if a[pivot * n + col].abs() <= singular {
             return None;
         }
         if pivot != col {

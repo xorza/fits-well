@@ -44,7 +44,18 @@ pub(crate) mod wcs_axis;
 
 const R2D: f64 = 180.0 / PI;
 const D2R: f64 = PI / 180.0;
-const DOMAIN_TOLERANCE: f64 = 1e-12;
+/// How far past a bound a value in degrees may land through rounding and still
+/// read as the bound — a latitude past ±90°, a projection-plane coordinate past its
+/// edge. 1e-12° is about 70 ulp of a right angle's radian measure: more than the few
+/// chained trigonometric operations behind such a value lose, and within the band
+/// of 1e-13° to 1e-11° wcslib's `prjbchk` allows for the same test.
+const DEGREE_TOLERANCE: f64 = 1e-12;
+
+/// The same allowance for a dimensionless value of order one — a sine or cosine
+/// past ±1, a cube-face coordinate past its edge, the perspective σ past [0, 2] —
+/// and, scaled by the operands, for a difference that should not be negative. About
+/// 4500 ulp of 1, the order of wcslib's 1e-13 `tol` for its zenithal and cube tests.
+const UNIT_TOLERANCE: f64 = 1e-12;
 
 /// Public celestial-pair metadata for a parsed WCS.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -454,7 +465,7 @@ impl Wcs {
         if let Some(c) = self.celestial.as_ref() {
             if !world[c.lng].is_finite()
                 || !world[c.lat].is_finite()
-                || !(-90.0 - DOMAIN_TOLERANCE..=90.0 + DOMAIN_TOLERANCE).contains(&world[c.lat])
+                || !(-90.0 - DEGREE_TOLERANCE..=90.0 + DEGREE_TOLERANCE).contains(&world[c.lat])
             {
                 return Err(c.projection.world_domain_error());
             }
@@ -631,7 +642,9 @@ fn cosd(degrees: f64) -> f64 {
 
 /// Normalize an angle to `[0, 360)` degrees.
 fn norm360(a: f64) -> f64 {
-    a.rem_euclid(360.0)
+    // A tiny negative angle's remainder, 360 − |a|, rounds to 360 itself.
+    let normalized = a.rem_euclid(360.0);
+    if normalized == 360.0 { 0.0 } else { normalized }
 }
 
 /// Normalize an angle to `[−180, 180)` degrees.
