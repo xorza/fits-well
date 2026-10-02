@@ -223,13 +223,12 @@ pub(crate) fn compress_table(
     };
     let bound = bind_table(header, table)?;
     reject_compression_metadata(header)?;
-    let metadata = table.metadata();
-    let ncols = metadata.columns.len();
-    let nrows = metadata.nrows;
+    let ncols = table.columns.len();
+    let nrows = table.nrows;
     let naxis1 = table.row_len;
     let raw = bound.rows;
 
-    let metas: Vec<ColMeta> = metadata
+    let metas: Vec<ColMeta> = table
         .columns
         .iter()
         .map(|c| ColMeta::chosen(&c.tform, c.byte_offset, default_algo))
@@ -460,11 +459,10 @@ pub(crate) fn uncompress_table(header: &Header, table: TableView<'_>) -> Result<
     let tile_count = nchunks
         .checked_mul(ncols)
         .ok_or(FitsError::DataUnitOverflow)?;
-    let metadata = table.metadata();
-    if metadata.nrows != nchunks {
+    if table.nrows != nchunks {
         return Err(FitsError::DataSizeMismatch {
             expected: nchunks,
-            got: metadata.nrows,
+            got: table.nrows,
         });
     }
     let cells: Vec<_> = (0..ncols)
@@ -563,7 +561,6 @@ pub(crate) fn uncompress_table(header: &Header, table: TableView<'_>) -> Result<
 }
 
 fn bind_table<'a>(header: &Header, table: TableView<'a>) -> Result<BoundTable<'a>> {
-    let metadata = table.metadata();
     let xtension = header
         .get_text("XTENSION")?
         .ok_or(FitsError::MissingKeyword { name: "XTENSION" })?;
@@ -574,18 +571,18 @@ fn bind_table<'a>(header: &Header, table: TableView<'a>) -> Result<BoundTable<'a
         ("BITPIX", 8usize),
         ("NAXIS", 2),
         ("NAXIS1", table.row_len),
-        ("NAXIS2", metadata.nrows),
+        ("NAXIS2", table.nrows),
         ("GCOUNT", 1),
-        ("TFIELDS", metadata.columns.len()),
+        ("TFIELDS", table.columns.len()),
     ] {
         if header.required_usize(keyword, keyword)? != expected {
             return Err(metadata_mismatch(keyword));
         }
     }
-    validate_table_field_count(metadata.columns.len())?;
+    validate_table_field_count(table.columns.len())?;
 
     let mut row_width = 0usize;
-    for (index, column) in metadata.columns.iter().enumerate() {
+    for (index, column) in table.columns.iter().enumerate() {
         let n = index + 1;
         if column.byte_offset != row_width {
             return Err(metadata_mismatch(format!("column {n} byte offset")));

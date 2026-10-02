@@ -286,7 +286,7 @@ impl Image {
     /// Borrow the exact host-endian stored sample plane without allowing it to
     /// become inconsistent with the validated geometry.
     pub fn stored(&self) -> ImageView<'_> {
-        self.samples.view(0..self.samples.len())
+        self.samples.as_view()
     }
 
     pub(crate) fn validate_geometry(&self) -> Result<usize> {

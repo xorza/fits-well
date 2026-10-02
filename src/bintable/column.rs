@@ -28,8 +28,9 @@ pub struct Column {
     pub tdim: Option<Vec<usize>>,
     /// Raw `TDISPn` display recommendation (§7.3.4), if declared.
     pub tdisp: Option<String>,
-    /// Byte offset of this column from the start of a row.
-    pub byte_offset: usize,
+    /// Byte offset of this column from the start of a row: the sum of the widths
+    /// before it, so derived and not public.
+    pub(crate) byte_offset: usize,
 }
 
 impl Named for Column {
@@ -39,6 +40,11 @@ impl Named for Column {
 }
 
 impl Column {
+    /// Byte offset of this column from the start of a row.
+    pub fn byte_offset(&self) -> usize {
+        self.byte_offset
+    }
+
     /// Decode `row_count` fixed-width cells of this column into a typed,
     /// row-flattened [`ColumnData`].
     pub(super) fn decode_cells<'a>(

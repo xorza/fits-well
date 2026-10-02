@@ -24,17 +24,31 @@ pub enum ImageView<'a> {
 }
 
 /// A scratch-backed image read: the shape and scaling paired with a borrowed,
-/// host-endian sample view.
+/// host-endian sample view whose length the shape fixes.
 #[derive(Debug)]
 pub struct BorrowedImage<'a> {
-    pub shape: &'a [usize],
-    pub scaling: Scaling,
-    pub samples: ImageView<'a>,
+    pub(crate) shape: &'a [usize],
+    pub(crate) scaling: Scaling,
+    pub(crate) samples: ImageView<'a>,
 }
 
-impl BorrowedImage<'_> {
+impl<'a> BorrowedImage<'a> {
+    /// The axis lengths, fastest first.
+    pub fn shape(&self) -> &'a [usize] {
+        self.shape
+    }
+
+    pub fn scaling(&self) -> Scaling {
+        self.scaling
+    }
+
+    /// The host-endian samples, as many as the shape's product.
+    pub fn samples(&self) -> ImageView<'a> {
+        self.samples
+    }
+
     /// The image geometry, stored element type, and physical-value scaling.
-    pub fn metadata(&self) -> ImageMetadata<'_> {
+    pub fn metadata(&self) -> ImageMetadata<'a> {
         ImageMetadata {
             shape: self.shape,
             bitpix: self.samples.bitpix(),
@@ -43,7 +57,7 @@ impl BorrowedImage<'_> {
     }
 }
 
-impl ImageView<'_> {
+impl<'a> ImageView<'a> {
     /// The `BITPIX` element kind backing this view.
     pub fn bitpix(&self) -> Bitpix {
         match self {
@@ -70,6 +84,21 @@ impl ImageView<'_> {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// The samples at `range`.
+    ///
+    /// # Panics
+    /// When `range` runs past the view.
+    pub(crate) fn slice(self, range: std::ops::Range<usize>) -> ImageView<'a> {
+        match self {
+            ImageView::U8(values) => ImageView::U8(&values[range]),
+            ImageView::I16(values) => ImageView::I16(&values[range]),
+            ImageView::I32(values) => ImageView::I32(&values[range]),
+            ImageView::I64(values) => ImageView::I64(&values[range]),
+            ImageView::F32(values) => ImageView::F32(&values[range]),
+            ImageView::F64(values) => ImageView::F64(&values[range]),
+        }
     }
 
     /// Copy this borrowed view into the matching owned [`ImageData`] variant.

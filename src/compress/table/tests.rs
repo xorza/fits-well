@@ -95,8 +95,8 @@ fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
 
     // 3. The uncompressed table must be byte-identical to the original.
     assert_eq!(
-        restored.metadata().nrows,
-        orig.metadata().nrows,
+        restored.schema().nrows,
+        orig.schema().nrows,
         "{algo}/{rows_per_tile} nrows"
     );
     assert_eq!(
@@ -151,10 +151,10 @@ fn decodes_a_cfitsio_compressed_table() {
         .unwrap();
     let original = open_fixture("comp_table_ref.fits").read_table(1).unwrap();
 
-    assert_eq!(restored.metadata().nrows, 500);
-    assert_eq!(restored.metadata().nrows, original.metadata().nrows);
+    assert_eq!(restored.schema().nrows, 500);
+    assert_eq!(restored.schema().nrows, original.schema().nrows);
     assert_eq!(restored.schema.row_len, original.schema.row_len);
-    assert_eq!(restored.metadata().columns.len(), 6);
+    assert_eq!(restored.schema().columns.len(), 6);
     assert_eq!(
         restored.view().raw_rows(),
         original.view().raw_rows(),
@@ -288,12 +288,9 @@ fn table_compression_restores_reserved_metadata_exactly() {
 fn decodes_a_cfitsio_compressed_table_with_a_vla_column() {
     let mut f = open_fixture("comp_table_vla.fits");
     let table = f.read_compressed_table(1).unwrap();
+    assert_eq!(table.schema().columns[1].tform.kind, TformKind::ArrayDesc32);
     assert_eq!(
-        table.metadata().columns[1].tform.kind,
-        TformKind::ArrayDesc32
-    );
-    assert_eq!(
-        table.metadata().columns[1].tform.vla_elem,
+        table.schema().columns[1].tform.vla_elem,
         Some(TformKind::I32)
     );
     assert_eq!(
@@ -553,7 +550,7 @@ fn a_shaped_column_reads_back_from_a_compressed_table() {
             "{}",
             compression.name()
         );
-        assert_eq!(restored.metadata().columns[0].tdim, Some(vec![10, 10]));
+        assert_eq!(restored.schema().columns[0].tdim, Some(vec![10, 10]));
     }
 }
 

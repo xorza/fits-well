@@ -787,7 +787,7 @@ fn writes_and_reads_back_variable_length_arrays() {
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let table = r.read_table(1).unwrap();
     // TFORM2 should be a P descriptor sized to the longest row (5).
-    assert_eq!(table.metadata().columns[1].tform.kind.code(), 'P');
+    assert_eq!(table.schema().columns[1].tform.kind.code(), 'P');
     let got = table.column_by_idx(1).unwrap().vla().unwrap();
     assert_eq!(got.len(), 3);
     assert_eq!(got, Ragged::from_rows(vla_rows.clone()).unwrap());
@@ -801,7 +801,7 @@ fn writes_and_reads_back_variable_length_arrays() {
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let table = r.read_table(1).unwrap();
     assert_eq!(
-        table.metadata().columns[0].tform.vla_elem,
+        table.schema().columns[0].tform.vla_elem,
         Some(crate::bintable::tform_kind::TformKind::I64)
     );
     assert!(table.column_by_idx(0).unwrap().vla().unwrap().is_empty());
@@ -867,7 +867,7 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
     w.write_table(&binary_table(2, &columns), None).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let t = r.read_table(1).unwrap();
-    let metadata = t.metadata();
+    let metadata = t.schema();
 
     // TDIM parsed back as a shape.
     assert_eq!(metadata.columns[0].tdim, Some(vec![2, 2]));
@@ -959,7 +959,7 @@ fn writes_p_q_variable_length_bit_arrays_with_exact_counts_and_padding() {
     assert_eq!(&raw[72..78], &[0x80, 0x80, 0xAA, 0x80, 0x55, 0x00]);
 
     let table = reader.read_table(1).unwrap();
-    let metadata = table.metadata();
+    let metadata = table.schema();
     assert_eq!(metadata.columns[0].tform.kind, TformKind::ArrayDesc32);
     assert_eq!(metadata.columns[0].tform.vla_elem, Some(TformKind::Bit));
     assert_eq!(metadata.columns[1].tform.kind, TformKind::ArrayDesc64);
@@ -1138,7 +1138,7 @@ fn writes_and_reads_back_a_binary_table() {
     assert_eq!(r.hdus[1].kind, HduKind::BinTable);
 
     let t = r.read_table(1).unwrap();
-    let metadata = t.metadata();
+    let metadata = t.schema();
     assert_eq!(metadata.nrows, 3);
     assert_eq!(metadata.columns.len(), 3);
     assert_eq!(metadata.columns[0].name.as_deref(), Some("NOSTA"));
