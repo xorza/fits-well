@@ -12,7 +12,7 @@ use crate::header_model::Header;
 use crate::header_model::internals::{card_bytes, records};
 use crate::ragged::Ragged;
 use crate::reader::data_source;
-use crate::reader::internals::open_fixture;
+use crate::reader::internals::{fixture_bytes, fixture_path, open_fixture};
 use crate::reader::*;
 use crate::world_coordinates::tabular::internals::{lookup_bytes, lookup_header};
 use crate::writer::FitsWriter;
@@ -236,7 +236,7 @@ fn reads_a_single_hdu_image_with_exact_boundaries() {
     assert_eq!(p.header.axes().unwrap(), vec![512, 512]);
     assert_eq!(p.data_offset, 11_520);
     assert_eq!(padded_len(p.data_bytes), 527_040);
-    let bytes = std::fs::read("tests/data/fits/UITfuv2582gc.fits").unwrap();
+    let bytes = fixture_bytes("UITfuv2582gc.fits");
     assert_eq!(
         p.header_sum,
         checksum::accumulate(&bytes[..p.data_offset as usize], 0)
@@ -263,7 +263,7 @@ fn read_data_raw_is_stable_across_reads() {
 #[cfg(feature = "mmap")]
 #[test]
 fn mmap_read_matches_seeking_read() {
-    let path = "tests/data/fits/UITfuv2582gc.fits";
+    let path = fixture_path("UITfuv2582gc.fits");
     let mut seek = open_fixture("UITfuv2582gc.fits");
     let want = seek.read_image(0).unwrap();
     let want_shape = want.shape.to_vec();
@@ -324,7 +324,7 @@ fn reads_random_groups_primary_plus_bintable_extension() {
     assert_eq!(t.data_offset, 593_280);
     assert_eq!(padded_len(t.data_bytes), 2_880);
 
-    let bytes = std::fs::read("tests/data/fits/DDTSUVDATA.fits").unwrap();
+    let bytes = fixture_bytes("DDTSUVDATA.fits");
     assert_eq!(
         g.header_sum,
         checksum::accumulate(&bytes[..g.data_offset as usize], 0)
@@ -360,7 +360,7 @@ fn trailing_special_records_and_partial_blocks_are_ignored() {
     // A valid single-HDU file, then §3.5 special records / §3.6 trailing fill and
     // partial blocks appended — none carrying an `END`. The reader must still find
     // exactly the one real HDU and not error on the trailing bytes.
-    let mut bytes = std::fs::read("tests/data/fits/UITfuv2582gc.fits").unwrap();
+    let mut bytes = fixture_bytes("UITfuv2582gc.fits");
     bytes.extend(std::iter::repeat_n(0u8, BLOCK_SIZE)); // trailing all-zero fill block
     bytes.extend(std::iter::repeat_n(b'x', BLOCK_SIZE)); // a special record (no END)
     bytes.extend_from_slice(b"a truncated tail"); // sub-block partial remnant
@@ -370,7 +370,7 @@ fn trailing_special_records_and_partial_blocks_are_ignored() {
 
     // A special block may legally contain a canonical END-shaped card later in
     // the block. Its first card is not XTENSION, so none of it is an HDU header.
-    let mut bytes = std::fs::read("tests/data/fits/UITfuv2582gc.fits").unwrap();
+    let mut bytes = fixture_bytes("UITfuv2582gc.fits");
     bytes.extend_from_slice(&fits_file(
         &["COMMENT special records", "BITPIX  = 8", "NAXIS   = 0"],
         &[],
@@ -578,9 +578,7 @@ fn last_data_unit_ends_exactly_at_end_of_file() {
     ] {
         let f = open_fixture(name);
         let last = f.hdus.last().unwrap();
-        let file_len = std::fs::metadata(format!("tests/data/fits/{name}"))
-            .unwrap()
-            .len();
+        let file_len = std::fs::metadata(fixture_path(name)).unwrap().len();
         assert_eq!(
             last.data_offset + padded_len(last.data_bytes),
             file_len,

@@ -1,13 +1,11 @@
 use crate::data::image_view::ImageView;
 use crate::error::Indexed;
 use crate::groups::*;
-use crate::reader::FitsReader;
-use std::fs::File;
+use crate::reader::internals::open_fixture;
 
 #[test]
 fn reads_the_real_uv_random_groups() {
-    let file = File::open("tests/data/fits/DDTSUVDATA.fits").unwrap();
-    let mut reader = FitsReader::open(file).unwrap();
+    let mut reader = open_fixture("DDTSUVDATA.fits");
     let groups = reader.read_groups(0).unwrap();
     let metadata = groups.metadata();
 
@@ -212,8 +210,7 @@ fn naxis1_group_has_one_array_element_matching_data_extent() {
 
 #[test]
 fn read_groups_rejects_non_random_groups_hdus() {
-    let file = File::open("tests/data/fits/UITfuv2582gc.fits").unwrap();
-    let mut reader = FitsReader::open(file).unwrap();
+    let mut reader = open_fixture("UITfuv2582gc.fits");
     assert!(matches!(
         reader.read_groups(0),
         Err(FitsError::NotRandomGroups)

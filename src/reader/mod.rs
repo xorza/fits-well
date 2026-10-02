@@ -906,10 +906,20 @@ pub(crate) mod internals {
     use crate::reader::StreamReader;
     use std::fs::File;
 
-    /// Open a fixture from `tests/data/fits` as a streaming reader, reporting which
-    /// file failed rather than a bare unwrap — every read-path test starts here.
+    /// Where the fixture `name` lies, relative to the crate root tests run in.
+    pub(crate) fn fixture_path(name: &str) -> String {
+        format!("tests/data/fits/{name}")
+    }
+
+    pub(crate) fn fixture_bytes(name: &str) -> Vec<u8> {
+        let path = fixture_path(name);
+        std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+    }
+
+    /// Open a fixture as a streaming reader, reporting which file failed rather
+    /// than a bare unwrap — every read-path test starts here.
     pub(crate) fn open_fixture(name: &str) -> StreamReader<File> {
-        let path = format!("tests/data/fits/{name}");
+        let path = fixture_path(name);
         FitsReader::open(File::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}")))
             .unwrap_or_else(|e| panic!("parse {name}: {e}"))
     }

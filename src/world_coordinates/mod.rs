@@ -656,8 +656,49 @@ fn norm180(a: f64) -> f64 {
 /// assembled from, not just by [`Wcs`]'s own.
 #[cfg(test)]
 pub(crate) mod internals {
+    use crate::header_model::Header;
     use crate::world_coordinates::DEGREE_TOLERANCE;
     use crate::world_coordinates::Wcs;
+
+    /// A one-axis image header.
+    pub(crate) fn axis_header(
+        ctype: &str,
+        cunit: &str,
+        crpix: f64,
+        crval: f64,
+        cdelt: f64,
+    ) -> Header {
+        let mut header = Header::new();
+        header
+            .set_internal("NAXIS", 1)
+            .set_internal("CTYPE1", ctype)
+            .set_internal("CUNIT1", cunit)
+            .set_internal("CRPIX1", crpix)
+            .set_internal("CRVAL1", crval)
+            .set_internal("CDELT1", cdelt);
+        header
+    }
+
+    /// A two-axis `RA---{projection}`/`DEC--{projection}` image header.
+    pub(crate) fn celestial_header(
+        projection: &str,
+        crpix: [f64; 2],
+        crval: [f64; 2],
+        cdelt: [f64; 2],
+    ) -> Header {
+        let mut header = Header::new();
+        header
+            .set_internal("NAXIS", 2)
+            .set_internal("CTYPE1", format!("RA---{projection}"))
+            .set_internal("CTYPE2", format!("DEC--{projection}"))
+            .set_internal("CRPIX1", crpix[0])
+            .set_internal("CRPIX2", crpix[1])
+            .set_internal("CRVAL1", crval[0])
+            .set_internal("CRVAL2", crval[1])
+            .set_internal("CDELT1", cdelt[0])
+            .set_internal("CDELT2", cdelt[1]);
+        header
+    }
 
     /// Pixel→world values from `astropy.wcs` (wcslib), printed to `decimals` places.
     #[derive(Debug)]

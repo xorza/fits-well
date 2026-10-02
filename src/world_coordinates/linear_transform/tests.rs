@@ -3,6 +3,7 @@ use crate::header_model::Header;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::internals::CROTA_GOLDEN;
 use crate::world_coordinates::internals::assert_astropy_golden;
+use crate::world_coordinates::internals::celestial_header;
 use crate::world_coordinates::linear_transform::internals as linear;
 use crate::world_coordinates::linear_transform::*;
 use crate::world_coordinates::wcs_axis::WcsAxis;
@@ -67,15 +68,7 @@ fn matrix_product_applies_reference_pixel_offsets_while_accumulating() {
 #[test]
 fn legacy_crota_rotation_matches_astropy() {
     // CDELT + CROTA2 (no PC/CD) — the legacy rotation convention.
-    let mut h = Header::new();
-    h.set_internal("NAXIS", 2);
-    h.set_internal("CTYPE1", "RA---TAN")
-        .set_internal("CTYPE2", "DEC--TAN");
-    h.set_internal("CRPIX1", 128.0)
-        .set_internal("CRPIX2", 128.0);
-    h.set_internal("CRVAL1", 83.6).set_internal("CRVAL2", 22.0);
-    h.set_internal("CDELT1", -0.0005)
-        .set_internal("CDELT2", 0.0005);
+    let mut h = celestial_header("TAN", [128.0, 128.0], [83.6, 22.0], [-0.0005, 0.0005]);
     h.set_internal("CROTA2", 25.0);
     let w = Wcs::from_header(&h, None).unwrap();
     assert_astropy_golden(&w, &CROTA_GOLDEN, "CROTA");
@@ -141,15 +134,12 @@ fn cunit_scales_celestial_axes_to_degrees() {
     // §8.2: CRVAL/CDELT are in CUNITia units. The same physical TAN WCS expressed
     // in degrees and in arcseconds must yield identical world coordinates.
     let build = |scale: f64, unit: Option<&str>| {
-        let mut h = Header::new();
-        h.set_internal("NAXIS", 2);
-        h.set_internal("CTYPE1", "RA---TAN")
-            .set_internal("CTYPE2", "DEC--TAN");
-        h.set_internal("CRPIX1", 50.0).set_internal("CRPIX2", 50.0);
-        h.set_internal("CRVAL1", 150.0 * scale)
-            .set_internal("CRVAL2", 30.0 * scale);
-        h.set_internal("CDELT1", -5e-4 * scale)
-            .set_internal("CDELT2", 5e-4 * scale);
+        let mut h = celestial_header(
+            "TAN",
+            [50.0, 50.0],
+            [150.0 * scale, 30.0 * scale],
+            [-5e-4 * scale, 5e-4 * scale],
+        );
         if let Some(u) = unit {
             h.set_internal("CUNIT1", u).set_internal("CUNIT2", u);
         }

@@ -9,263 +9,261 @@ use crate::world_coordinates::internals::TAN_GOLDEN;
 use crate::world_coordinates::internals::assert_astropy_golden;
 use crate::world_coordinates::linear_transform::internals as linear;
 
-#[test]
-fn pixel_list_wcs_matches_the_equivalent_image_wcs() {
-    // §8.5: a pixel-list (event) WCS on columns 2,3 must transform identically to
-    // an image WCS with the same CTYPE/CRPIX/CRVAL/CDELT and PC rotation.
-    let mut tab = Header::new();
-    tab.set_internal("TCTYP2", "RA---TAN")
-        .set_internal("TCTYP3", "DEC--TAN");
-    tab.set_internal("TCRPX2", 256.0)
-        .set_internal("TCRPX3", 256.0);
-    tab.set_internal("TCRVL2", 150.0)
-        .set_internal("TCRVL3", 30.0);
-    tab.set_internal("TCDLT2", -1e-3)
-        .set_internal("TCDLT3", 1e-3);
-    tab.set_internal("TPC2_2", 1.0)
-        .set_internal("TPC2_3", -0.05);
-    tab.set_internal("TPC3_2", 0.05).set_internal("TPC3_3", 1.0);
-    let wt = Wcs::from_pixel_list(&tab, &[2, 3], None).unwrap();
-
-    let mut img = Header::new();
-    img.set_internal("NAXIS", 2);
-    img.set_internal("CTYPE1", "RA---TAN")
-        .set_internal("CTYPE2", "DEC--TAN");
-    img.set_internal("CRPIX1", 256.0)
-        .set_internal("CRPIX2", 256.0);
-    img.set_internal("CRVAL1", 150.0)
-        .set_internal("CRVAL2", 30.0);
-    img.set_internal("CDELT1", -1e-3)
-        .set_internal("CDELT2", 1e-3);
-    img.set_internal("PC1_1", 1.0).set_internal("PC1_2", -0.05);
-    img.set_internal("PC2_1", 0.05).set_internal("PC2_2", 1.0);
-    let wi = Wcs::from_header(&img, None).unwrap();
-
-    assert!(wt.celestial.is_some(), "pixel-list pair must be celestial");
-    for &(px, py) in &[(256.0, 256.0), (1.0, 1.0), (300.0, 100.0), (50.0, 400.0)] {
-        let a = wt.pixel_to_world(&[px, py]).unwrap();
-        let b = wi.pixel_to_world(&[px, py]).unwrap();
-        assert!(
-            (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
-            "pixel-list {a:?} vs image {b:?} at ({px},{py})"
-        );
-    }
-
-    let mut alternate = Header::new();
-    alternate
-        .set_internal("TCTY2A", "RA---TAN")
-        .set_internal("TCTY3A", "DEC--TAN");
-    alternate
-        .set_internal("TCRP2A", 256.0)
-        .set_internal("TCRP3A", 256.0);
-    alternate
-        .set_internal("TCRV2A", 150.0)
-        .set_internal("TCRV3A", 2.5);
-    alternate
-        .set_internal("TCDE2A", -0.0002777778)
-        .set_internal("TCDE3A", 0.0002777778);
-    alternate
-        .set_internal("TCUN2A", "deg")
-        .set_internal("TCUN3A", "deg");
-    alternate
-        .set_internal("TP2_2A", 0.96592582628907)
-        .set_internal("TP2_3A", -0.25881904510252)
-        .set_internal("TP3_2A", 0.25881904510252)
-        .set_internal("TP3_3A", 0.96592582628907);
-    alternate
-        .set_internal("LONP2A", 180.0)
-        .set_internal("LATP2A", 2.5);
-    let alternate_wcs = Wcs::from_pixel_list(&alternate, &[2, 3], Some('A')).unwrap();
-    assert_eq!(
-        alternate_wcs.celestial.as_ref().unwrap().pole,
-        CelestialPole {
-            ra: 150.0,
-            dec: 2.5,
-            lonpole: 180.0,
-        }
-    );
-    assert_astropy_golden(&alternate_wcs, &TAN_GOLDEN, "alternate pixel-list TAN");
-
-    tab.set_internal("TCRVL2", "not numeric");
-    assert!(matches!(
-        Wcs::from_pixel_list(&tab, &[2, 3], None),
-        Err(FitsError::TypeMismatch { name, .. }) if name == "TCRVL2"
-    ));
+/// The keyword family a WCS is written in (§8, Table 22): image axes 1 and 2,
+/// pixel-list columns 2 and 3, or the axes of vector column 5.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Family {
+    Image,
+    PixelList,
+    VectorCell,
 }
 
-#[test]
-fn vector_cell_wcs_matches_the_equivalent_image_wcs() {
-    // §8 Table 22: an image in a binary-table vector cell (here column 5) uses the
-    // axis+column-indexed keyword family (`iCTYPn`, `ijPCn`, …, with leading-digit
-    // keyword names); it must transform exactly like the equivalent image WCS.
-    let mut tab = Header::new();
-    tab.set_internal("1CTYP5", "RA---TAN")
-        .set_internal("2CTYP5", "DEC--TAN");
-    tab.set_internal("1CRPX5", 256.0)
-        .set_internal("2CRPX5", 256.0);
-    tab.set_internal("1CRVL5", 150.0)
-        .set_internal("2CRVL5", 30.0);
-    tab.set_internal("1CDLT5", -1e-3)
-        .set_internal("2CDLT5", 1e-3);
-    tab.set_internal("11PC5", 1.0).set_internal("12PC5", -0.05);
-    tab.set_internal("21PC5", 0.05).set_internal("22PC5", 1.0);
-    let wt = Wcs::from_array_column(&tab, 5, None).unwrap();
+/// A two-axis celestial WCS, written into any [`Family`] by [`Celestial::header`].
+#[derive(Debug, Clone, Copy)]
+struct Celestial {
+    projection: &'static str,
+    crpix: [f64; 2],
+    crval: [f64; 2],
+    cdelt: [f64; 2],
+    degrees: bool,
+    /// Row-major.
+    pc: Option<[f64; 4]>,
+    /// On the latitude axis; there is no alternate form.
+    crota: Option<f64>,
+    /// `PV2_1`, on the latitude axis.
+    pv: Option<f64>,
+    /// `LONPOLE` and `LATPOLE`.
+    poles: Option<[f64; 2]>,
+}
 
-    let mut img = Header::new();
-    img.set_internal("NAXIS", 2);
-    img.set_internal("CTYPE1", "RA---TAN")
-        .set_internal("CTYPE2", "DEC--TAN");
-    img.set_internal("CRPIX1", 256.0)
-        .set_internal("CRPIX2", 256.0);
-    img.set_internal("CRVAL1", 150.0)
-        .set_internal("CRVAL2", 30.0);
-    img.set_internal("CDELT1", -1e-3)
-        .set_internal("CDELT2", 1e-3);
-    img.set_internal("PC1_1", 1.0).set_internal("PC1_2", -0.05);
-    img.set_internal("PC2_1", 0.05).set_internal("PC2_2", 1.0);
-    let wi = Wcs::from_header(&img, None).unwrap();
-
-    assert_eq!(wt.view().axes.len(), 2); // rank inferred from the iCTYP5 keywords
-    assert!(wt.celestial.is_some(), "vector-cell pair must be celestial");
-    for &(px, py) in &[(256.0, 256.0), (1.0, 1.0), (300.0, 100.0), (50.0, 400.0)] {
-        let a = wt.pixel_to_world(&[px, py]).unwrap();
-        let b = wi.pixel_to_world(&[px, py]).unwrap();
-        assert!(
-            (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
-            "vector-cell {a:?} vs image {b:?} at ({px},{py})"
-        );
+impl Celestial {
+    const fn new(
+        projection: &'static str,
+        crpix: [f64; 2],
+        crval: [f64; 2],
+        cdelt: [f64; 2],
+    ) -> Celestial {
+        Celestial {
+            projection,
+            crpix,
+            crval,
+            cdelt,
+            degrees: false,
+            pc: None,
+            crota: None,
+            pv: None,
+            poles: None,
+        }
     }
 
-    let mut alternate = Header::new();
-    alternate
-        .set_internal("1CTY5A", "RA---TAN")
-        .set_internal("2CTY5A", "DEC--TAN");
-    alternate
-        .set_internal("1CRP5A", 256.0)
-        .set_internal("2CRP5A", 256.0);
-    alternate
-        .set_internal("1CRV5A", 150.0)
-        .set_internal("2CRV5A", 2.5);
-    alternate
-        .set_internal("1CDE5A", -0.0002777778)
-        .set_internal("2CDE5A", 0.0002777778);
-    alternate
-        .set_internal("1CUN5A", "deg")
-        .set_internal("2CUN5A", "deg");
-    alternate
-        .set_internal("11PC5A", 0.96592582628907)
-        .set_internal("12PC5A", -0.25881904510252)
-        .set_internal("21PC5A", 0.25881904510252)
-        .set_internal("22PC5A", 0.96592582628907);
-    alternate
-        .set_internal("LONP5A", 180.0)
-        .set_internal("LATP5A", 2.5);
-    let inferred = Wcs::from_array_column(&alternate, 5, Some('A')).unwrap();
-    assert_eq!(inferred.view().axes.len(), 2);
-    assert_eq!(
-        inferred.celestial.as_ref().unwrap().pole,
-        CelestialPole {
-            ra: 150.0,
-            dec: 2.5,
-            lonpole: 180.0,
-        }
-    );
-    assert_astropy_golden(&inferred, &TAN_GOLDEN, "alternate vector-cell TAN");
+    fn header(&self, family: Family, alt: Option<char>) -> Header {
+        let a = alt.map(String::from).unwrap_or_default();
+        let primary = alt.is_none();
+        // Both axes' keyword for an image root, a long table root, and the short
+        // table root an alternate description takes (Table 22).
+        let names = |image_root: &str, long: &str, short: &str| {
+            [1, 2].map(|i| match family {
+                Family::Image => format!("{image_root}{i}{a}"),
+                Family::PixelList if primary => format!("T{long}{}", i + 1),
+                Family::PixelList => format!("T{short}{}{a}", i + 1),
+                Family::VectorCell if primary => format!("{i}{long}5"),
+                Family::VectorCell => format!("{i}{short}5{a}"),
+            })
+        };
+        let matrix = |i: usize, j: usize| match family {
+            Family::Image => format!("PC{i}_{j}{a}"),
+            Family::PixelList if primary => format!("TPC{}_{}", i + 1, j + 1),
+            Family::PixelList => format!("TP{}_{}{a}", i + 1, j + 1),
+            Family::VectorCell => format!("{i}{j}PC5{a}"),
+        };
+        let pole = |name: &str| match family {
+            Family::Image => format!("{name}{a}"),
+            Family::PixelList => format!("{}P2{a}", &name[..3]),
+            Family::VectorCell => format!("{}P5{a}", &name[..3]),
+        };
 
-    alternate.set_internal("WCAX5A", 2);
-    let explicit = Wcs::from_array_column(&alternate, 5, Some('A')).unwrap();
+        let mut header = Header::new();
+        if family == Family::Image {
+            header.set_internal("NAXIS", 2);
+        }
+        let ctype = names("CTYPE", "CTYP", "CTY");
+        header
+            .set_internal(&ctype[0], format!("RA---{}", self.projection))
+            .set_internal(&ctype[1], format!("DEC--{}", self.projection));
+        for (keys, values) in [
+            (names("CRPIX", "CRPX", "CRP"), self.crpix),
+            (names("CRVAL", "CRVL", "CRV"), self.crval),
+            (names("CDELT", "CDLT", "CDE"), self.cdelt),
+        ] {
+            header
+                .set_internal(&keys[0], values[0])
+                .set_internal(&keys[1], values[1]);
+        }
+        if self.degrees {
+            let cunit = names("CUNIT", "CUNI", "CUN");
+            header
+                .set_internal(&cunit[0], "deg")
+                .set_internal(&cunit[1], "deg");
+        }
+        if let Some(pc) = self.pc {
+            for (index, value) in pc.into_iter().enumerate() {
+                header.set_internal(&matrix(index / 2 + 1, index % 2 + 1), value);
+            }
+        }
+        if let Some(crota) = self.crota {
+            assert!(primary, "CROTAi has no alternate form");
+            header.set_internal(&names("CROTA", "CROT", "CROT")[1], crota);
+        }
+        if let Some(pv) = self.pv {
+            let key = match family {
+                Family::Image => format!("PV2_1{a}"),
+                Family::PixelList if primary => "TPV3_1".to_string(),
+                Family::PixelList => format!("TV3_1{a}"),
+                Family::VectorCell if primary => "2PV5_1".to_string(),
+                Family::VectorCell => format!("2V5_1{a}"),
+            };
+            header.set_internal(&key, pv);
+        }
+        if let Some([lonpole, latpole]) = self.poles {
+            header
+                .set_internal(&pole("LONPOLE"), lonpole)
+                .set_internal(&pole("LATPOLE"), latpole);
+        }
+        header
+    }
+
+    fn wcs(&self, family: Family, alt: Option<char>) -> Wcs {
+        let header = self.header(family, alt);
+        match family {
+            Family::Image => Wcs::from_header(&header, alt),
+            Family::PixelList => Wcs::from_pixel_list(&header, &[2, 3], alt),
+            Family::VectorCell => Wcs::from_array_column(&header, 5, alt),
+        }
+        .unwrap()
+    }
+}
+
+/// `wcs_tan.fits`: 1″ pixels rotated by 15°, the WCS [`TAN_GOLDEN`] samples.
+const TAN_FIXTURE: Celestial = Celestial {
+    degrees: true,
+    pc: Some([
+        0.96592582628907,
+        -0.25881904510252,
+        0.25881904510252,
+        0.96592582628907,
+    ]),
+    poles: Some([180.0, 2.5]),
+    ..Celestial::new(
+        "TAN",
+        [256.0, 256.0],
+        [150.0, 2.5],
+        [-0.0002777778, 0.0002777778],
+    )
+};
+
+/// A slightly rotated TAN WCS each table family must transform like its image.
+const ROTATED_TAN: Celestial = Celestial {
+    pc: Some([1.0, -0.05, 0.05, 1.0]),
+    ..Celestial::new("TAN", [256.0, 256.0], [150.0, 30.0], [-1e-3, 1e-3])
+};
+
+/// The CEA WCS [`CEA_GOLDEN`] samples, without its λ = 0.5.
+const CEA: Celestial = Celestial::new("CEA", [50.0, 50.0], [45.0, 30.0], [-0.05, 0.05]);
+
+/// The legacy-rotation WCS [`CROTA_GOLDEN`] samples.
+const CROTA: Celestial = Celestial {
+    degrees: true,
+    crota: Some(25.0),
+    ..Celestial::new("TAN", [128.0, 128.0], [83.6, 22.0], [-0.0005, 0.0005])
+};
+
+fn assert_same_transform(table: &Wcs, image: &Wcs, pixels: &[[f64; 2]], context: &str) {
+    for pixel in pixels {
+        let a = table.pixel_to_world(pixel).unwrap();
+        let b = image.pixel_to_world(pixel).unwrap();
+        // One evaluation path after parsing: the same operations on the same values.
+        assert!(
+            (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
+            "{context} {a:?} vs image {b:?} at {pixel:?}"
+        );
+    }
+}
+
+/// §8.5 and Table 22: a pixel-list WCS on columns 2, 3 and a vector-cell WCS in
+/// column 5 transform exactly like the image WCS with the same keywords, in the
+/// primary description and an alternate one.
+#[test]
+fn table_wcs_matches_the_equivalent_image_wcs() {
+    let image = ROTATED_TAN.wcs(Family::Image, None);
+    for family in [Family::PixelList, Family::VectorCell] {
+        let context = format!("{family:?}");
+        let table = ROTATED_TAN.wcs(family, None);
+        assert_eq!(
+            table.view().axes.len(),
+            2,
+            "{context}: rank from the keywords"
+        );
+        assert!(
+            table.celestial.is_some(),
+            "{context} pair must be celestial"
+        );
+        assert_same_transform(
+            &table,
+            &image,
+            &[[256.0, 256.0], [1.0, 1.0], [300.0, 100.0], [50.0, 400.0]],
+            &context,
+        );
+
+        let alternate = TAN_FIXTURE.wcs(family, Some('A'));
+        assert_eq!(
+            alternate.celestial.as_ref().unwrap().pole,
+            CelestialPole {
+                ra: 150.0,
+                dec: 2.5,
+                lonpole: 180.0,
+            }
+        );
+        assert_astropy_golden(&alternate, &TAN_GOLDEN, &format!("alternate {context}"));
+    }
+
+    let mut ranked = TAN_FIXTURE.header(Family::VectorCell, Some('A'));
+    ranked.set_internal("WCAX5A", 2);
+    let explicit = Wcs::from_array_column(&ranked, 5, Some('A')).unwrap();
     assert_astropy_golden(&explicit, &TAN_GOLDEN, "ranked alternate vector-cell TAN");
 
-    tab.set_internal("1CRVL5", "not numeric");
+    let mut pixel_list = ROTATED_TAN.header(Family::PixelList, None);
+    pixel_list.set_internal("TCRVL2", "not numeric");
     assert!(matches!(
-        Wcs::from_array_column(&tab, 5, None),
+        Wcs::from_pixel_list(&pixel_list, &[2, 3], None),
+        Err(FitsError::TypeMismatch { name, .. }) if name == "TCRVL2"
+    ));
+    let mut vector = ROTATED_TAN.header(Family::VectorCell, None);
+    vector.set_internal("1CRVL5", "not numeric");
+    assert!(matches!(
+        Wcs::from_array_column(&vector, 5, None),
         Err(FitsError::TypeMismatch { name, .. }) if name == "1CRVL5"
     ));
 }
 
 #[test]
 fn table_wcs_parameter_aliases_match_astropy() {
-    let pixel = |parameter: &str, alternate: bool| {
-        let mut header = Header::new();
-        if alternate {
-            header
-                .set_internal("TCTY2A", "RA---CEA")
-                .set_internal("TCTY3A", "DEC--CEA");
-            header
-                .set_internal("TCRP2A", 50.0)
-                .set_internal("TCRP3A", 50.0);
-            header
-                .set_internal("TCRV2A", 45.0)
-                .set_internal("TCRV3A", 30.0);
-            header
-                .set_internal("TCDE2A", -0.05)
-                .set_internal("TCDE3A", 0.05);
-        } else {
-            header
-                .set_internal("TCTYP2", "RA---CEA")
-                .set_internal("TCTYP3", "DEC--CEA");
-            header
-                .set_internal("TCRPX2", 50.0)
-                .set_internal("TCRPX3", 50.0);
-            header
-                .set_internal("TCRVL2", 45.0)
-                .set_internal("TCRVL3", 30.0);
-            header
-                .set_internal("TCDLT2", -0.05)
-                .set_internal("TCDLT3", 0.05);
-        }
+    for (parameter, family, alt) in [
+        ("TPV3_1", Family::PixelList, None),
+        ("TV3_1", Family::PixelList, None),
+        ("TPV3_1A", Family::PixelList, Some('A')),
+        ("TV3_1A", Family::PixelList, Some('A')),
+        ("2PV5_1", Family::VectorCell, None),
+        ("2V5_1", Family::VectorCell, None),
+        ("2PV5_1A", Family::VectorCell, Some('A')),
+        ("2V5_1A", Family::VectorCell, Some('A')),
+    ] {
+        let mut header = CEA.header(family, alt);
         header.set_internal(parameter, 0.5);
-        Wcs::from_pixel_list(&header, &[2, 3], alternate.then_some('A')).unwrap()
-    };
-    for parameter in ["TPV3_1", "TV3_1"] {
-        let wcs = pixel(parameter, false);
-        assert_astropy_golden(&wcs, &CEA_GOLDEN, parameter);
-    }
-    for parameter in ["TPV3_1A", "TV3_1A"] {
-        let wcs = pixel(parameter, true);
-        assert_astropy_golden(&wcs, &CEA_GOLDEN, parameter);
-    }
-
-    let vector = |parameter: &str, alternate: bool| {
-        let mut header = Header::new();
-        if alternate {
-            header.set_internal("WCAX5A", 2);
-            header
-                .set_internal("1CTY5A", "RA---CEA")
-                .set_internal("2CTY5A", "DEC--CEA");
-            header
-                .set_internal("1CRP5A", 50.0)
-                .set_internal("2CRP5A", 50.0);
-            header
-                .set_internal("1CRV5A", 45.0)
-                .set_internal("2CRV5A", 30.0);
-            header
-                .set_internal("1CDE5A", -0.05)
-                .set_internal("2CDE5A", 0.05);
-        } else {
-            header.set_internal("WCAX5", 2);
-            header
-                .set_internal("1CTYP5", "RA---CEA")
-                .set_internal("2CTYP5", "DEC--CEA");
-            header
-                .set_internal("1CRPX5", 50.0)
-                .set_internal("2CRPX5", 50.0);
-            header
-                .set_internal("1CRVL5", 45.0)
-                .set_internal("2CRVL5", 30.0);
-            header
-                .set_internal("1CDLT5", -0.05)
-                .set_internal("2CDLT5", 0.05);
+        let wcs = match family {
+            Family::PixelList => Wcs::from_pixel_list(&header, &[2, 3], alt),
+            _ => Wcs::from_array_column(&header, 5, alt),
         }
-        header.set_internal(parameter, 0.5);
-        Wcs::from_array_column(&header, 5, alternate.then_some('A')).unwrap()
-    };
-    for parameter in ["2PV5_1", "2V5_1"] {
-        let wcs = vector(parameter, false);
-        assert_astropy_golden(&wcs, &CEA_GOLDEN, parameter);
-    }
-    for parameter in ["2PV5_1A", "2V5_1A"] {
-        let wcs = vector(parameter, true);
+        .unwrap();
         assert_astropy_golden(&wcs, &CEA_GOLDEN, parameter);
     }
 }
@@ -327,127 +325,34 @@ fn table_wcs_matrix_aliases_resolve_exactly() {
 
 #[test]
 fn primary_table_wcs_rotation_matches_astropy() {
-    let mut pixel = Header::new();
-    pixel
-        .set_internal("TCTYP2", "RA---TAN")
-        .set_internal("TCTYP3", "DEC--TAN");
-    pixel
-        .set_internal("TCUNI2", "deg")
-        .set_internal("TCUNI3", "deg");
-    pixel
-        .set_internal("TCRPX2", 128.0)
-        .set_internal("TCRPX3", 128.0);
-    pixel
-        .set_internal("TCRVL2", 83.6)
-        .set_internal("TCRVL3", 22.0);
-    pixel
-        .set_internal("TCDLT2", -0.0005)
-        .set_internal("TCDLT3", 0.0005);
-    pixel.set_internal("TCROT3", 25.0);
-    let pixel_wcs = Wcs::from_pixel_list(&pixel, &[2, 3], None).unwrap();
-    assert_astropy_golden(&pixel_wcs, &CROTA_GOLDEN, "primary pixel-list CROTA");
-
-    let mut vector = Header::new();
-    vector.set_internal("WCAX5", 2);
-    vector
-        .set_internal("1CTYP5", "RA---TAN")
-        .set_internal("2CTYP5", "DEC--TAN");
-    vector
-        .set_internal("1CUNI5", "deg")
-        .set_internal("2CUNI5", "deg");
-    vector
-        .set_internal("1CRPX5", 128.0)
-        .set_internal("2CRPX5", 128.0);
-    vector
-        .set_internal("1CRVL5", 83.6)
-        .set_internal("2CRVL5", 22.0);
-    vector
-        .set_internal("1CDLT5", -0.0005)
-        .set_internal("2CDLT5", 0.0005);
-    vector.set_internal("2CROT5", 25.0);
-    let vector_wcs = Wcs::from_array_column(&vector, 5, None).unwrap();
-    assert_astropy_golden(&vector_wcs, &CROTA_GOLDEN, "primary vector-cell CROTA");
+    for family in [Family::PixelList, Family::VectorCell] {
+        let wcs = CROTA.wcs(family, None);
+        assert_astropy_golden(&wcs, &CROTA_GOLDEN, &format!("primary {family:?} CROTA"));
+    }
 }
 
 #[test]
 fn table_wcs_column_poles_match_the_equivalent_image_wcs() {
-    let mut image = Header::new();
-    image.set_internal("NAXIS", 2);
-    image
-        .set_internal("CTYPE1", "RA---CEA")
-        .set_internal("CTYPE2", "DEC--CEA");
-    image
-        .set_internal("CRPIX1", 50.0)
-        .set_internal("CRPIX2", 50.0);
-    image
-        .set_internal("CRVAL1", 45.0)
-        .set_internal("CRVAL2", 30.0);
-    image
-        .set_internal("CDELT1", -0.05)
-        .set_internal("CDELT2", 0.05);
-    image.set_internal("PV2_1", 0.5);
-    image
-        .set_internal("LONPOLE", 0.0)
-        .set_internal("LATPOLE", -90.0);
-    let image_wcs = Wcs::from_header(&image, None).unwrap();
-    let image_pole = image_wcs.celestial.as_ref().unwrap().pole;
+    let description = Celestial {
+        pv: Some(0.5),
+        poles: Some([0.0, -90.0]),
+        ..CEA
+    };
+    let image = description.wcs(Family::Image, None);
+    let image_pole = image.celestial.as_ref().unwrap().pole;
     assert_eq!(image_pole.ra, 45.0);
     assert!((image_pole.dec + 60.0).abs() < 1e-12, "{image_pole:?}");
     assert_eq!(image_pole.lonpole, 0.0);
 
-    let mut pixel = Header::new();
-    pixel
-        .set_internal("TCTY2A", "RA---CEA")
-        .set_internal("TCTY3A", "DEC--CEA");
-    pixel
-        .set_internal("TCRP2A", 50.0)
-        .set_internal("TCRP3A", 50.0);
-    pixel
-        .set_internal("TCRV2A", 45.0)
-        .set_internal("TCRV3A", 30.0);
-    pixel
-        .set_internal("TCDE2A", -0.05)
-        .set_internal("TCDE3A", 0.05);
-    pixel.set_internal("TV3_1A", 0.5);
-    pixel
-        .set_internal("LONP2A", 0.0)
-        .set_internal("LATP2A", -90.0);
-    let pixel_wcs = Wcs::from_pixel_list(&pixel, &[2, 3], Some('A')).unwrap();
-
-    let mut vector = Header::new();
-    vector.set_internal("WCAX5A", 2);
-    vector
-        .set_internal("1CTY5A", "RA---CEA")
-        .set_internal("2CTY5A", "DEC--CEA");
-    vector
-        .set_internal("1CRP5A", 50.0)
-        .set_internal("2CRP5A", 50.0);
-    vector
-        .set_internal("1CRV5A", 45.0)
-        .set_internal("2CRV5A", 30.0);
-    vector
-        .set_internal("1CDE5A", -0.05)
-        .set_internal("2CDE5A", 0.05);
-    vector.set_internal("2V5_1A", 0.5);
-    vector
-        .set_internal("LONP5A", 0.0)
-        .set_internal("LATP5A", -90.0);
-    let vector_wcs = Wcs::from_array_column(&vector, 5, Some('A')).unwrap();
-
-    for table_wcs in [&pixel_wcs, &vector_wcs] {
-        assert_eq!(
-            table_wcs.celestial.as_ref().unwrap().pole,
-            image_wcs.celestial.as_ref().unwrap().pole
+    for family in [Family::PixelList, Family::VectorCell] {
+        let table = description.wcs(family, Some('A'));
+        assert_eq!(table.celestial.as_ref().unwrap().pole, image_pole);
+        assert_same_transform(
+            &table,
+            &image,
+            &[[50.0, 50.0], [20.0, 70.0], [80.0, 30.0]],
+            &format!("{family:?}"),
         );
-        for pixel in [[50.0, 50.0], [20.0, 70.0], [80.0, 30.0]] {
-            let table_world = table_wcs.pixel_to_world(&pixel).unwrap();
-            let image_world = image_wcs.pixel_to_world(&pixel).unwrap();
-            assert!(
-                (table_world[0] - image_world[0]).abs() < 1e-12
-                    && (table_world[1] - image_world[1]).abs() < 1e-12,
-                "table {table_world:?} vs image {image_world:?} at {pixel:?}"
-            );
-        }
     }
 }
 

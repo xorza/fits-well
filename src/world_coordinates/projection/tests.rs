@@ -5,6 +5,7 @@ use crate::world_coordinates::Wcs;
 use crate::world_coordinates::internals::AstropyGolden;
 use crate::world_coordinates::internals::CEA_GOLDEN;
 use crate::world_coordinates::internals::assert_astropy_golden;
+use crate::world_coordinates::internals::celestial_header;
 use crate::world_coordinates::norm180;
 use crate::world_coordinates::projection::evaluate_zpn;
 use crate::world_coordinates::projection::{Projection, ProjectionParameters};
@@ -25,14 +26,7 @@ fn sin_projection_matches_astropy() {
     // RA---SIN/DEC--SIN, CRPIX 100/100, CRVAL 45/30, 3.6″ pixels, no rotation.
     // Golden values from astropy.wcs — validates the SIN formula, not just that
     // our forward and inverse agree.
-    let mut h = Header::new();
-    h.set_internal("NAXIS", 2);
-    h.set_internal("CTYPE1", "RA---SIN")
-        .set_internal("CTYPE2", "DEC--SIN");
-    h.set_internal("CRPIX1", 100.0)
-        .set_internal("CRPIX2", 100.0);
-    h.set_internal("CRVAL1", 45.0).set_internal("CRVAL2", 30.0);
-    h.set_internal("CDELT1", -1e-3).set_internal("CDELT2", 1e-3);
+    let h = celestial_header("SIN", [100.0, 100.0], [45.0, 30.0], [-1e-3, 1e-3]);
     let w = Wcs::from_header(&h, None).unwrap();
     let golden = AstropyGolden {
         decimals: 12,
@@ -96,13 +90,7 @@ fn allsky_projections_match_astropy() {
         ),
     ];
     for (proj, golden) in golden {
-        let mut h = Header::new();
-        h.set_internal("NAXIS", 2);
-        h.set_internal("CTYPE1", format!("RA---{proj}"));
-        h.set_internal("CTYPE2", format!("DEC--{proj}"));
-        h.set_internal("CRPIX1", 50.0).set_internal("CRPIX2", 50.0);
-        h.set_internal("CRVAL1", 45.0).set_internal("CRVAL2", 30.0);
-        h.set_internal("CDELT1", -0.2).set_internal("CDELT2", 0.2);
+        let h = celestial_header(proj, [50.0, 50.0], [45.0, 30.0], [-0.2, 0.2]);
         let w = Wcs::from_header(&h, None).unwrap();
         assert_astropy_golden(&w, golden, proj);
     }
@@ -111,13 +99,7 @@ fn allsky_projections_match_astropy() {
 #[test]
 fn cea_lambda_pv_matches_astropy() {
     // CEA with λ = PV2_1 = 0.5. astropy golden.
-    let mut h = Header::new();
-    h.set_internal("NAXIS", 2);
-    h.set_internal("CTYPE1", "RA---CEA")
-        .set_internal("CTYPE2", "DEC--CEA");
-    h.set_internal("CRPIX1", 50.0).set_internal("CRPIX2", 50.0);
-    h.set_internal("CRVAL1", 45.0).set_internal("CRVAL2", 30.0);
-    h.set_internal("CDELT1", -0.05).set_internal("CDELT2", 0.05);
+    let mut h = celestial_header("CEA", [50.0, 50.0], [45.0, 30.0], [-0.05, 0.05]);
     h.set_internal("PV2_1", 0.5);
     let w = Wcs::from_header(&h, None).unwrap();
     assert_astropy_golden(&w, &CEA_GOLDEN, "CEA λ image");
@@ -258,13 +240,7 @@ fn parameterized_projections_match_astropy() {
         },
     ];
     for c in &cases {
-        let mut h = Header::new();
-        h.set_internal("NAXIS", 2);
-        h.set_internal("CTYPE1", format!("RA---{}", c.proj));
-        h.set_internal("CTYPE2", format!("DEC--{}", c.proj));
-        h.set_internal("CRPIX1", 50.0).set_internal("CRPIX2", 50.0);
-        h.set_internal("CRVAL1", 45.0).set_internal("CRVAL2", c.cv2);
-        h.set_internal("CDELT1", -c.cd).set_internal("CDELT2", c.cd);
+        let mut h = celestial_header(c.proj, [50.0, 50.0], [45.0, c.cv2], [-c.cd, c.cd]);
         for &(m, v) in c.pv {
             h.set_internal(&format!("PV2_{m}"), v);
         }
@@ -357,13 +333,7 @@ fn degenerate_projection_parameters_are_rejected() {
 fn unsupported_projection_codes_reject_complete_transforms() {
     // Short codes represent space-padded algorithm names after FITS text trimming.
     for code in ["XPH", "UV", "U"] {
-        let mut h = Header::new();
-        h.set_internal("NAXIS", 2);
-        h.set_internal("CTYPE1", format!("RA---{code}"));
-        h.set_internal("CTYPE2", format!("DEC--{code}"));
-        h.set_internal("CRPIX1", 1.0).set_internal("CRPIX2", 1.0);
-        h.set_internal("CRVAL1", 10.0).set_internal("CRVAL2", 20.0);
-        h.set_internal("CDELT1", 2.0).set_internal("CDELT2", 3.0);
+        let h = celestial_header(code, [1.0, 1.0], [10.0, 20.0], [2.0, 3.0]);
         let w = Wcs::from_header(&h, None).unwrap();
         assert_eq!(w.view().unsupported_axes, [0, 1], "{code} axes flagged");
         assert!(w.celestial.is_none(), "{code} not decoded as a projection");
@@ -418,13 +388,7 @@ fn degenerate_conic_without_pv1_rejects_complete_transforms() {
     // flags the celestial axes, so complete transforms fail rather than returning
     // NaN or silently relabeling linear-stage coordinates as sky coordinates.
     for code in ["COP", "COE", "COD", "COO"] {
-        let mut h = Header::new();
-        h.set_internal("NAXIS", 2);
-        h.set_internal("CTYPE1", format!("RA---{code}"));
-        h.set_internal("CTYPE2", format!("DEC--{code}"));
-        h.set_internal("CRPIX1", 1.0).set_internal("CRPIX2", 1.0);
-        h.set_internal("CRVAL1", 10.0).set_internal("CRVAL2", 20.0);
-        h.set_internal("CDELT1", 2.0).set_internal("CDELT2", 3.0);
+        let h = celestial_header(code, [1.0, 1.0], [10.0, 20.0], [2.0, 3.0]);
         // No PV2_1 ⇒ θ_a = 0.
         let w = Wcs::from_header(&h, None).unwrap();
         assert_eq!(w.view().unsupported_axes, [0, 1], "{code} axes flagged");
@@ -435,15 +399,8 @@ fn degenerate_conic_without_pv1_rejects_complete_transforms() {
         ));
     }
     // A conic *with* a valid θ_a is still decoded normally (not flagged).
-    let mut ok = Header::new();
-    ok.set_internal("NAXIS", 2);
-    ok.set_internal("CTYPE1", "RA---COP")
-        .set_internal("CTYPE2", "DEC--COP");
-    ok.set_internal("CRPIX1", 1.0).set_internal("CRPIX2", 1.0);
-    ok.set_internal("CRVAL1", 10.0).set_internal("CRVAL2", 45.0);
-    ok.set_internal("CDELT1", 0.5)
-        .set_internal("CDELT2", 0.5)
-        .set_internal("PV2_1", 45.0);
+    let mut ok = celestial_header("COP", [1.0, 1.0], [10.0, 45.0], [0.5, 0.5]);
+    ok.set_internal("PV2_1", 45.0);
     let w = Wcs::from_header(&ok, None).unwrap();
     assert!(w.view().unsupported_axes.is_empty() && w.celestial.is_some());
 }
@@ -454,13 +411,7 @@ fn bonne_with_zero_theta1_equals_sfl() {
     // header with PV2_1 = 0 must decode identically to an SFL header (and never hit
     // the 1/tan 0 singularity), so it is *decoded* — not flagged unsupported.
     let build = |proj: &str, pv1: Option<f64>| {
-        let mut h = Header::new();
-        h.set_internal("NAXIS", 2);
-        h.set_internal("CTYPE1", format!("RA---{proj}"));
-        h.set_internal("CTYPE2", format!("DEC--{proj}"));
-        h.set_internal("CRPIX1", 50.0).set_internal("CRPIX2", 50.0);
-        h.set_internal("CRVAL1", 45.0).set_internal("CRVAL2", 0.0);
-        h.set_internal("CDELT1", -0.5).set_internal("CDELT2", 0.5);
+        let mut h = celestial_header(proj, [50.0, 50.0], [45.0, 0.0], [-0.5, 0.5]);
         if let Some(v) = pv1 {
             h.set_internal("PV2_1", v);
         }
@@ -766,13 +717,7 @@ fn projections_match_astropy() {
         ("SFL", 45.0, 30.0, 30.0, 60.0, 46.1605521236, 30.4949360292),
     ];
     for &(proj, cv1, cv2, px, py, ra, dec) in golden {
-        let mut h = Header::new();
-        h.set_internal("NAXIS", 2);
-        h.set_internal("CTYPE1", format!("RA---{proj}"));
-        h.set_internal("CTYPE2", format!("DEC--{proj}"));
-        h.set_internal("CRPIX1", 50.0).set_internal("CRPIX2", 50.0);
-        h.set_internal("CRVAL1", cv1).set_internal("CRVAL2", cv2);
-        h.set_internal("CDELT1", -0.05).set_internal("CDELT2", 0.05);
+        let h = celestial_header(proj, [50.0, 50.0], [cv1, cv2], [-0.05, 0.05]);
         let w = Wcs::from_header(&h, None).unwrap();
         let golden = AstropyGolden {
             decimals: 10,
