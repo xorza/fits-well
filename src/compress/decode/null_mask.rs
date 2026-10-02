@@ -2,12 +2,12 @@
 
 use crate::bintable::table_view::TableView;
 use crate::bintable::vla_column::VlaColumn;
-use crate::bitpix::Bitpix;
 use crate::compress::ImageCodec;
 use crate::compress::decode::ensure_tile_size;
 use crate::compress::decode::tile_scratch_set::CodecScratch;
 use crate::compress::decode::tiled_image::TiledImage;
 use crate::compress::gzip;
+use crate::compress::plane::IntBitpix;
 use crate::compress::plio;
 use crate::compress::rice;
 use crate::error::FitsError;
@@ -108,13 +108,23 @@ impl<'a> NullMask<'a> {
             .codec
             .ok_or(FitsError::MissingKeyword { name: "ZMASKCMP" })?;
         match codec {
-            ImageCodec::Gzip1 => {
-                gzip::gzip_tile_into(cell.bytes, Bitpix::U8, tile_elems, out, &mut scratch.gzip)?
+            ImageCodec::Gzip1 => gzip::gzip_tile_into(
+                cell.bytes,
+                IntBitpix::U8,
+                tile_elems,
+                out,
+                &mut scratch.gzip,
+            )?,
+            ImageCodec::Gzip2 => gzip::gzip2_tile_into(
+                cell.bytes,
+                IntBitpix::U8,
+                tile_elems,
+                out,
+                &mut scratch.gzip,
+            )?,
+            ImageCodec::Rice1 => {
+                rice::rice_decode_into(cell.bytes, tile_elems, IntBitpix::U8, rice::BLOCKSIZE, out)?
             }
-            ImageCodec::Gzip2 => {
-                gzip::gzip2_tile_into(cell.bytes, Bitpix::U8, tile_elems, out, &mut scratch.gzip)?
-            }
-            ImageCodec::Rice1 => rice::rice_decode_into(cell.bytes, tile_elems, 1, 32, out)?,
             ImageCodec::Plio1 => plio::plio_decode_be_into(cell.bytes, tile_elems, out)?,
             ImageCodec::NoCompress => {
                 if cell.bytes.len() != tile_elems {

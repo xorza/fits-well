@@ -3,6 +3,7 @@ use crate::bintable::tform_kind::TformKind;
 #[cfg(feature = "parallel")]
 use crate::compress::decode::decode_wave_tile_count;
 use crate::compress::decode::tiled_image::TiledImage;
+use crate::compress::plane::IntBitpix;
 #[cfg(feature = "parallel")]
 use crate::compress::tile_geometry::TileGeometry;
 use crate::compress::*;
@@ -234,7 +235,12 @@ fn compressed_integer_null_mask_restores_blank_pixels() {
         gzip::DEFAULT_GZIP_LEVEL,
         &mut gzip::GzipScratch::default(),
     );
-    let rice = rice::rice_encode(&[0i64, 1], 1, 32, &mut rice::RiceScratch::default());
+    let rice = rice::rice_encode(
+        &[0i64, 1],
+        IntBitpix::U8,
+        32,
+        &mut rice::RiceScratch::default(),
+    );
     let plio = plio::plio_encode(&[0i64, 1])
         .unwrap()
         .into_iter()

@@ -1,52 +1,29 @@
 //! `RICE_1` tile codec (a port of cfitsio's `fits_rdecomp` bitstream layout).
 
-use crate::compress;
+use crate::compress::plane::IntBitpix;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header_model::Header;
-use crate::keyword::key;
 
-/// Rice block size and pixel width, from the `ZNAMEi`/`ZVALi` parameters.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct RiceParams {
-    pub(super) blocksize: usize,
-    pub(super) bytepix: usize,
-}
+/// The block size fits-well writes (§10.4.1 Table 37's default), in `ZVAL1` and in
+/// every stream.
+pub(super) const BLOCKSIZE: usize = 32;
 
-/// Rice parameters from the `ZNAMEi`/`ZVALi` keywords, with the Table 37 defaults
-/// of 32 pixels per block and four bytes per encoded integer.
-pub(super) fn rice_params(header: &Header) -> Result<RiceParams> {
-    let mut blocksize = 32;
-    let mut bytepix = 4;
-    for entry in header.iter() {
-        let Some(i) = compress::parameter_index(entry.keyword) else {
-            continue;
-        };
-        let Some(name) = header.get_text(entry.keyword)? else {
-            continue;
-        };
-        match name {
-            "BLOCKSIZE" => {
-                if let Some(v) = header.get_integer(key!("ZVAL{i}").as_str())? {
-                    blocksize = permitted_parameter(v, &[16, 32])?;
-                }
-            }
-            "BYTEPIX" => {
-                if let Some(v) = header.get_integer(key!("ZVAL{i}").as_str())? {
-                    bytepix = permitted_parameter(v, &[1, 2, 4, 8])?;
-                }
-            }
-            _ => {}
-        }
+/// The split-field width and the escape value of a pixel width (cfitsio
+/// `fits_rcomp`): `fsbits` bits hold `fs + 1`, and `fs = fsmax` marks a block of
+/// uncompressed differences.
+const fn split_field(bytepix: IntBitpix) -> SplitField {
+    match bytepix {
+        IntBitpix::U8 => SplitField { bits: 3, max: 6 },
+        IntBitpix::I16 => SplitField { bits: 4, max: 14 },
+        IntBitpix::I32 => SplitField { bits: 5, max: 25 },
+        IntBitpix::I64 => SplitField { bits: 6, max: 57 },
     }
-    Ok(RiceParams { blocksize, bytepix })
 }
 
-fn permitted_parameter(value: i64, permitted: &[usize]) -> Result<usize> {
-    usize::try_from(value)
-        .ok()
-        .filter(|value| permitted.contains(value))
-        .ok_or(FitsError::KeywordOutOfRange { name: "ZVALn" })
+#[derive(Debug, Clone, Copy)]
+struct SplitField {
+    bits: u32,
+    max: u32,
 }
 
 /// Decode a `RICE_1` tile of `nx` integer values into `out` (cleared first; a reused
@@ -54,7 +31,7 @@ fn permitted_parameter(value: i64, permitted: &[usize]) -> Result<usize> {
 pub(super) fn rice_decode_into(
     bytes: &[u8],
     nx: usize,
-    bytepix: usize,
+    bytepix: IntBitpix,
     blocksize: usize,
     out: &mut Vec<i64>,
 ) -> Result<()> {
@@ -62,18 +39,11 @@ pub(super) fn rice_decode_into(
     if nx == 0 {
         return Ok(());
     }
-    let nbits_pp = (8 * bytepix) as u32;
-    let (fsbits, fsmax) = match bytepix {
-        1 => (3u32, 6u32),
-        2 => (4, 14),
-        4 => (5, 25),
-        8 => (6, 57),
-        _ => {
-            return Err(FitsError::UnsupportedCompression {
-                name: format!("RICE_1 with BYTEPIX = {bytepix}"),
-            });
-        }
-    };
+    let nbits_pp = (8 * bytepix.elem_size()) as u32;
+    let SplitField {
+        bits: fsbits,
+        max: fsmax,
+    } = split_field(bytepix);
     let mask = if nbits_pp >= 64 {
         u64::MAX
     } else {
@@ -116,11 +86,11 @@ fn sign_extend(v: u64, nbits: u32) -> i64 {
 }
 
 /// Encode `values` as a `RICE_1` tile (a port of cfitsio's `fits_rcomp`),
-/// parameterized by `bytepix` (1/2/4/8). Differences are taken modulo the pixel
-/// width so the stream round-trips through [`rice_decode_into`].
+/// at pixel width `bytepix`. Differences are taken modulo the pixel width so the
+/// stream round-trips through [`rice_decode_into`].
 pub(super) fn rice_encode<T: Copy + Into<i64>>(
     values: &[T],
-    bytepix: usize,
+    bytepix: IntBitpix,
     blocksize: usize,
     scratch: &mut RiceScratch,
 ) -> Vec<u8> {
@@ -132,19 +102,14 @@ pub(super) fn rice_encode<T: Copy + Into<i64>>(
 /// [`rice_encode`], appending the stream to `out`.
 pub(super) fn rice_encode_into<T: Copy + Into<i64>>(
     values: &[T],
-    bytepix: usize,
+    bytepix: IntBitpix,
     blocksize: usize,
     scratch: &mut RiceScratch,
     out: &mut Vec<u8>,
 ) {
-    let nbits = (8 * bytepix) as u32;
-    let (fsbits, fsmax) = match bytepix {
-        1 => (3i32, 6i32),
-        2 => (4, 14),
-        4 => (5, 25),
-        8 => (6, 57),
-        _ => unreachable!("Rice BYTEPIX is validated by the codec dispatcher"),
-    };
+    let nbits = (8 * bytepix.elem_size()) as u32;
+    let field = split_field(bytepix);
+    let (fsbits, fsmax) = (field.bits as i32, field.max as i32);
     let mask: u64 = if nbits >= 64 {
         u64::MAX
     } else {
@@ -366,47 +331,9 @@ impl<'a> BitReader<'a> {
 
 #[cfg(test)]
 mod tests {
+    use crate::compress::plane::IntBitpix;
     use crate::compress::rice::{self, BitReader};
     use crate::error::FitsError;
-    use crate::header_model::Header;
-
-    #[test]
-    fn rice_parameters_reject_invalid_header_values() {
-        let mut header = Header::new();
-        let defaults = rice::rice_params(&header).unwrap();
-        assert_eq!(defaults.blocksize, 32);
-        assert_eq!(defaults.bytepix, 4);
-        header
-            .set_internal("ZNAME1", "BLOCKSIZE")
-            .set_internal("ZVAL1", 0);
-        assert!(matches!(
-            rice::rice_params(&header),
-            Err(FitsError::KeywordOutOfRange { name: "ZVALn" })
-        ));
-
-        header.set_internal("ZVAL1", "not an integer");
-        assert!(matches!(
-            rice::rice_params(&header),
-            Err(FitsError::TypeMismatch { name, expected })
-                if name == "ZVAL1" && expected == "integer"
-        ));
-
-        let mut gapped = Header::new();
-        gapped
-            .set_internal("ZNAME2", "BYTEPIX")
-            .set_internal("ZVAL2", 8)
-            .set_internal("ZNAME3", "BLOCKSIZE")
-            .set_internal("ZVAL3", 16);
-        let params = rice::rice_params(&gapped).unwrap();
-        assert_eq!(params.bytepix, 8);
-        assert_eq!(params.blocksize, 16);
-
-        gapped.set_internal("ZVAL3", 17);
-        assert!(matches!(
-            rice::rice_params(&gapped),
-            Err(FitsError::KeywordOutOfRange { name: "ZVALn" })
-        ));
-    }
 
     #[test]
     fn bit_reader_reads_msb_first() {
@@ -452,20 +379,30 @@ mod tests {
                 _ => 0,
             })
             .collect();
-        let encoded = rice::rice_encode(&values, 8, 32, &mut rice::RiceScratch::default());
+        let encoded = rice::rice_encode(
+            &values,
+            IntBitpix::I64,
+            32,
+            &mut rice::RiceScratch::default(),
+        );
         let mut decoded = Vec::new();
-        rice::rice_decode_into(&encoded, values.len(), 8, 32, &mut decoded).unwrap();
+        rice::rice_decode_into(&encoded, values.len(), IntBitpix::I64, 32, &mut decoded).unwrap();
         assert_eq!(decoded, values);
     }
 
     #[test]
     fn odd_final_block_uses_the_canonical_integer_statistic() {
-        let encoded = rice::rice_encode(&[0i64, 0, 4], 4, 32, &mut rice::RiceScratch::default());
+        let encoded = rice::rice_encode(
+            &[0i64, 0, 4],
+            IntBitpix::I32,
+            32,
+            &mut rice::RiceScratch::default(),
+        );
         // CFITSIO's reference encoder selects split 1 and emits these exact bytes.
         assert_eq!(encoded, [0, 0, 0, 0, 0x15, 0x04]);
 
         let mut decoded = Vec::new();
-        rice::rice_decode_into(&encoded, 3, 4, 32, &mut decoded).unwrap();
+        rice::rice_decode_into(&encoded, 3, IntBitpix::I32, 32, &mut decoded).unwrap();
         assert_eq!(decoded, [0, 0, 4]);
     }
 
@@ -477,7 +414,7 @@ mod tests {
         // remain. The unary code has no terminating 1 and must report EOF.
         let mut out = Vec::new();
         assert!(matches!(
-            rice::rice_decode_into(&[0x00, 0x20], 2, 1, 32, &mut out),
+            rice::rice_decode_into(&[0x00, 0x20], 2, IntBitpix::U8, 32, &mut out),
             Err(FitsError::UnexpectedEof)
         ));
     }

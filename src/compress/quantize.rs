@@ -320,6 +320,7 @@ pub(super) fn quantize_tile(
 #[cfg(test)]
 mod tests {
 
+    use crate::compress::plane::IntBitpix;
     use crate::compress::quantize::*;
     use crate::compress::rice;
 
@@ -404,8 +405,8 @@ mod tests {
         // widened representation.
         let widened: Vec<i64> = scratch.ints.iter().map(|&value| value as i64).collect();
         let mut rice_scratch = rice::RiceScratch::default();
-        let native = rice::rice_encode(&scratch.ints, 4, 32, &mut rice_scratch);
-        let widened = rice::rice_encode(&widened, 4, 32, &mut rice_scratch);
+        let native = rice::rice_encode(&scratch.ints, IntBitpix::I32, 32, &mut rice_scratch);
+        let widened = rice::rice_encode(&widened, IntBitpix::I32, 32, &mut rice_scratch);
         assert_eq!(native, widened);
     }
 }

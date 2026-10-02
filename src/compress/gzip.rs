@@ -3,7 +3,6 @@
 use std::io::Read;
 use std::io::Write;
 
-use crate::bitpix::Bitpix;
 use crate::error::FitsError;
 use crate::error::Result;
 use flate2::Compression;
@@ -11,6 +10,7 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 
 use crate::compress::convert::be_to_i64_into;
+use crate::compress::plane::IntBitpix;
 
 /// Default deflate level used by [`crate::image::Gzip::default`]. Level 1 favors write
 /// speed (gzip was the slowest compress path at the higher default); construct
@@ -140,7 +140,7 @@ pub(super) fn gunzip2_into(
 /// inflated size at `tile_elems × bitpix` bytes.
 pub(super) fn gzip_tile_into(
     bytes: &[u8],
-    bitpix: Bitpix,
+    bitpix: IntBitpix,
     tile_elems: usize,
     out: &mut Vec<i64>,
     scratch: &mut GzipScratch,
@@ -158,7 +158,7 @@ pub(super) fn gzip_tile_into(
 /// (all most-significant bytes first, …) before gzip. Inflate, then un-shuffle.
 pub(super) fn gzip2_tile_into(
     bytes: &[u8],
-    bitpix: Bitpix,
+    bitpix: IntBitpix,
     tile_elems: usize,
     out: &mut Vec<i64>,
     scratch: &mut GzipScratch,
