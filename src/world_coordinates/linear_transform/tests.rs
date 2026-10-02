@@ -178,3 +178,19 @@ fn cunit_scales_celestial_axes_to_degrees() {
         "{r:?}"
     );
 }
+
+/// The singular test is relative: a matrix in tiny units inverts, and a rank-one
+/// matrix does not — also when rounding leaves its second pivot at −1.1e-16 rather
+/// than 0, which an absolute threshold took for a value and inverted to 1e16s.
+#[test]
+fn matrix_inversion_detects_singularity_relative_to_the_entries() {
+    use crate::world_coordinates::linear_transform::invert;
+
+    assert_eq!(
+        invert(&[1e-20, 0.0, 0.0, 4e-20], 2),
+        Some(vec![1e20, 0.0, 0.0, 2.5e19])
+    );
+    assert_eq!(invert(&[1.0, 2.0, 2.0, 4.0], 2), None);
+    assert_eq!(invert(&[1e-300, 2e-300, 2e-300, 4e-300], 2), None);
+    assert_eq!(invert(&[0.1, 0.7, 0.3, 2.1], 2), None);
+}

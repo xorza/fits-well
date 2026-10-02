@@ -4,11 +4,14 @@ use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI, SQRT_2};
 
 use crate::error::{FitsError, Result};
 use crate::world_coordinates::projection::cube::Cube;
-use crate::world_coordinates::{D2R, DOMAIN_TOLERANCE, R2D, cosd};
+use crate::world_coordinates::{D2R, DEGREE_TOLERANCE, R2D, UNIT_TOLERANCE, cosd};
 
 mod cube;
 mod healpix;
 
+/// The residual at which the Newton inversions stop, in the units of each
+/// projection's equation: wcslib's iteration tolerance for the same inversions
+/// (`airx2s` on the radius, `pcox2s` on its equation).
 const NEWTON_RESIDUAL_TOLERANCE: f64 = 1e-12;
 
 /// A celestial projection algorithm — the 3-letter `CTYPE` code.
@@ -390,16 +393,16 @@ impl Projection {
     }
 
     fn checked_asin(self, value: f64) -> Result<f64> {
-        if !value.is_finite()
-            || !(-1.0 - DOMAIN_TOLERANCE..=1.0 + DOMAIN_TOLERANCE).contains(&value)
-        {
+        if !value.is_finite() || !(-1.0 - UNIT_TOLERANCE..=1.0 + UNIT_TOLERANCE).contains(&value) {
             return Err(self.domain_error());
         }
         Ok(value.clamp(-1.0, 1.0).asin())
     }
 
+    /// The root of `value`, a difference of terms of size `scale`: a value that
+    /// rounding alone pushed below zero reads as zero.
     fn checked_sqrt(self, value: f64, scale: f64) -> Result<f64> {
-        if !value.is_finite() || value < -DOMAIN_TOLERANCE * scale.abs().max(1.0) {
+        if !value.is_finite() || value < -UNIT_TOLERANCE * scale.abs().max(1.0) {
             return Err(self.domain_error());
         }
         Ok(value.max(0.0).sqrt())
@@ -411,7 +414,7 @@ impl Projection {
         let s1 = (-qb - disc) / (2.0 * qa);
         let s2 = (-qb + disc) / (2.0 * qa);
         let valid = |sigma: f64| {
-            sigma.is_finite() && (-DOMAIN_TOLERANCE..=2.0 + DOMAIN_TOLERANCE).contains(&sigma)
+            sigma.is_finite() && (-UNIT_TOLERANCE..=2.0 + UNIT_TOLERANCE).contains(&sigma)
         };
         match (valid(s1), valid(s2)) {
             (true, true) => Ok(s1.min(s2).clamp(0.0, 2.0)),
@@ -424,7 +427,7 @@ impl Projection {
     fn native_coordinate(self, phi: f64, theta: f64) -> Result<NativeCoordinate> {
         if !phi.is_finite()
             || !theta.is_finite()
-            || !(-90.0 - DOMAIN_TOLERANCE..=90.0 + DOMAIN_TOLERANCE).contains(&theta)
+            || !(-90.0 - DEGREE_TOLERANCE..=90.0 + DEGREE_TOLERANCE).contains(&theta)
         {
             return Err(self.domain_error());
         }
@@ -570,6 +573,7 @@ impl Projection {
                         let gamma = self.checked_asin(y / (s2 * R2D))?;
                         let theta =
                             self.checked_asin((2.0 * gamma + (2.0 * gamma).sin()) / PI)? * R2D;
+                        // wcslib's `molx2s` pole cutoff: x must vanish there.
                         let phi = if gamma.cos().abs() < 1e-12 {
                             0.0
                         } else {
@@ -594,6 +598,7 @@ impl Projection {
                     // f(θ) = X² + (Y−θ)² − 2(Y−θ)cotθ = 0, then recover φ.
                     Equatorial::Pco => {
                         let (xr, yr) = (x * D2R, y * D2R);
+                        // wcslib's `pcox2s` equator cutoff on y/r₀ (radians).
                         if yr.abs() < 1e-12 {
                             return self.native_coordinate(x, 0.0);
                         }
@@ -639,7 +644,7 @@ impl Projection {
     ) -> Result<ProjectedCoordinate> {
         if !phi.is_finite()
             || !theta.is_finite()
-            || !(-90.0 - DOMAIN_TOLERANCE..=90.0 + DOMAIN_TOLERANCE).contains(&theta)
+            || !(-90.0 - DEGREE_TOLERANCE..=90.0 + DEGREE_TOLERANCE).contains(&theta)
         {
             return Err(self.world_domain_error());
         }
@@ -811,14 +816,16 @@ impl Projection {
                         [R2D * r * aphi.sin(), R2D * (y0 - r * aphi.cos())]
                     }
                     Equatorial::Pco => {
-                        if theta.abs() < 1e-12 {
+                        if theta == 0.0 {
                             return self.projected_coordinate(phi, 0.0);
                         }
+                        // 1 − cos ω as 2·sin²(ω/2), which keeps its precision as θ → 0,
+                        // where cot θ grows and the difference would cancel.
                         let omega = phi * D2R * t.sin();
                         let cot = 1.0 / t.tan();
                         [
                             R2D * cot * omega.sin(),
-                            theta + R2D * cot * (1.0 - omega.cos()),
+                            theta + R2D * cot * 2.0 * (omega / 2.0).sin().powi(2),
                         ]
                     }
                 };
@@ -988,8 +995,9 @@ impl ConicConstants {
                 (c, y0, 0.0)
             }
             Conic::Cod => {
-                // Equidistant: C = sinθ_a·sinη/η; Y0 = (180/π)·(η/tanη)·cotθ_a.
-                let (c, k) = if eta.abs() < 1e-12 {
+                // Equidistant: C = sinθ_a·sinη/η; Y0 = (180/π)·(η/tanη)·cotθ_a. Both
+                // quotients are accurate for any η ≠ 0; η = 0 takes their limits.
+                let (c, k) = if eta == 0.0 {
                     (theta_a.sin(), 1.0)
                 } else {
                     (theta_a.sin() * eta.sin() / eta, eta / eta.tan())
@@ -997,11 +1005,16 @@ impl ConicConstants {
                 (c, R2D * k * cot_theta_a, 0.0)
             }
             Conic::Coo => {
-                let c = if eta.abs() < 1e-12 {
+                // C = ln(cosθ₂/cosθ₁) / ln(tan b₂/tan b₁), bᵢ = π/4 − θᵢ/2. Both ratios
+                // tend to 1 as η → 0, so each logarithm is taken as `ln_1p` of the
+                // ratio's exact excess over 1: cosθ₂ − cosθ₁ = −2·sinθ_a·sinη and
+                // tan b₂/tan b₁ − 1 = sin(b₂ − b₁)/(cos b₂·sin b₁) with b₂ − b₁ = −η.
+                let c = if eta == 0.0 {
                     theta_a.sin()
                 } else {
-                    (theta2.cos() / theta1.cos()).ln()
-                        / ((FRAC_PI_4 - theta2 / 2.0).tan() / (FRAC_PI_4 - theta1 / 2.0).tan()).ln()
+                    let (b1, b2) = (FRAC_PI_4 - theta1 / 2.0, FRAC_PI_4 - theta2 / 2.0);
+                    (-2.0 * theta_a.sin() * eta.sin() / theta1.cos()).ln_1p()
+                        / ((-eta).sin() / (b2.cos() * b1.sin())).ln_1p()
                 };
                 let psi = R2D * theta1.cos() / (c * (FRAC_PI_4 - theta1 / 2.0).tan().powf(c));
                 let y0 = psi * (FRAC_PI_4 - theta_a / 2.0).tan().powf(c);
@@ -1034,25 +1047,40 @@ fn szp_vertex(pv: &[f64]) -> SzpVertex {
     }
 }
 
-/// AIR `K = ln(cos ξ_b)/tan²ξ_b` constant (`ξ_b = (90°−θ_b)/2`); the `θ_b = 90`
-/// limit is `−1/2`.
+/// AIR `K = ln(cos ξ_b)/tan²ξ_b` constant (`ξ_b = (90°−θ_b)/2`). With
+/// `t_b = tan ξ_b`, `ln cos ξ_b = −ln(1 + t_b²)/2`, so `K = −ln_1p(t_b²)/(2t_b²)`,
+/// which keeps its precision as `t_b → 0` and has the limit `−1/2` there.
 fn air_k(theta_b: f64) -> f64 {
-    let xi_b = (90.0 - theta_b) * D2R / 2.0;
-    if xi_b.abs() < 1e-12 {
+    let t_squared = ((90.0 - theta_b) * D2R / 2.0).tan().powi(2);
+    if t_squared == 0.0 {
         -0.5
     } else {
-        xi_b.cos().ln() / xi_b.tan().powi(2)
+        -t_squared.ln_1p() / (2.0 * t_squared)
     }
 }
 
 /// AIR radius `R/(180/π)` for colatitude `ζ` (rad): `−2[ln(cos ξ)/tan ξ + K tan ξ]`,
-/// `ξ = ζ/2`.
+/// `ξ = ζ/2` — see [`air_radius_t`].
 fn air_radius_u(zeta: f64, theta_b: f64) -> f64 {
-    let xi = zeta / 2.0;
-    if xi.abs() < 1e-12 {
+    air_radius_t((zeta / 2.0).tan(), air_k(theta_b))
+}
+
+/// The AIR radius in `t = tan ξ`: `ln(1 + t²)/t − 2Kt`, with `ln cos ξ = −ln(1 + t²)/2`.
+/// Defined and increasing for every `t ≥ 0`, with slope `1 − 2K` at 0.
+fn air_radius_t(t: f64, k: f64) -> f64 {
+    if t == 0.0 {
         return 0.0;
     }
-    -2.0 * (xi.cos().ln() / xi.tan() + air_k(theta_b) * xi.tan())
+    (t * t).ln_1p() / t - 2.0 * k * t
+}
+
+/// `d/dt` of [`air_radius_t`]: `(2t²/(1 + t²) − ln(1 + t²))/t² − 2K`.
+fn air_radius_t_derivative(t: f64, k: f64) -> f64 {
+    if t == 0.0 {
+        return 1.0 - 2.0 * k;
+    }
+    let t_squared = t * t;
+    (2.0 * t_squared / (1.0 + t_squared) - t_squared.ln_1p()) / t_squared - 2.0 * k
 }
 
 fn no_convergence(projection: Projection) -> FitsError {
@@ -1099,13 +1127,16 @@ fn solve_newton(
     }
 }
 
-/// Invert the AIR radius for ζ given `u = R/(180/π)` (Newton).
+/// Invert the AIR radius for ζ given `u = R/(180/π)`: Newton in `t = tan(ζ/2)`, where
+/// the radius is close to linear over the whole domain, from the small-angle inverse
+/// `u/(1 − 2K)`.
 fn air_zeta(u: f64, theta_b: f64) -> Result<f64> {
-    solve_newton(Projection::Air, u.max(1e-6), |zeta| NewtonEvaluation {
-        residual: air_radius_u(zeta, theta_b) - u,
-        derivative: (air_radius_u(zeta + 1e-7, theta_b) - air_radius_u(zeta - 1e-7, theta_b))
-            / 2e-7,
-    })
+    let k = air_k(theta_b);
+    let t = solve_newton(Projection::Air, u / (1.0 - 2.0 * k), |t| NewtonEvaluation {
+        residual: air_radius_t(t, k) - u,
+        derivative: air_radius_t_derivative(t, k),
+    })?;
+    Ok(2.0 * t.atan())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1125,10 +1156,10 @@ fn evaluate_zpn(zeta: f64, pv: &[f64; 21]) -> ZpnEvaluation {
     ZpnEvaluation { value, derivative }
 }
 
+/// Solve `2γ + sin 2γ = π sin θ` for the Mollweide auxiliary angle. At the poles
+/// the derivative vanishes with the residual, so Newton accepts γ = θ there before
+/// it divides.
 fn mollweide_gamma(theta: f64) -> Result<f64> {
-    if (theta.abs() - FRAC_PI_2).abs() < DOMAIN_TOLERANCE {
-        return Ok(theta.signum() * FRAC_PI_2);
-    }
     let target = PI * theta.sin();
     solve_newton(Projection::Mol, theta, |gamma| NewtonEvaluation {
         residual: 2.0 * gamma + (2.0 * gamma).sin() - target,

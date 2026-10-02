@@ -5,8 +5,8 @@ use std::f64::consts::PI;
 
 use crate::error::Result;
 use crate::world_coordinates::D2R;
-use crate::world_coordinates::DOMAIN_TOLERANCE;
 use crate::world_coordinates::R2D;
+use crate::world_coordinates::UNIT_TOLERANCE;
 use crate::world_coordinates::projection::Projection;
 use crate::world_coordinates::projection::{NativeCoordinate, ProjectedCoordinate};
 
@@ -109,10 +109,12 @@ pub(super) fn project(cube: Cube, phi: f64, theta: f64) -> Result<ProjectedCoord
         }
         Cube::Qsc => qsc_forward(face, theta),
     };
+    // CSC evaluates its polynomial in f32, as wcslib does, so its face coordinates
+    // carry f32 rounding: 2⁻²³ ≈ 1.2e-7 of a face.
     let tolerance = if matches!(cube, Cube::Csc) {
         1e-7
     } else {
-        DOMAIN_TOLERANCE
+        UNIT_TOLERANCE
     };
     projected_coordinate(cube, coordinate, face.x0, face.y0, tolerance)
 }
@@ -124,10 +126,10 @@ fn face_coordinate(projection: Projection, x: f64, y: f64) -> Result<FaceCoordin
 
     let mut xf = x / FACE_SCALE;
     let mut yf = y / FACE_SCALE;
-    let in_cross = if xf.abs() <= 1.0 + DOMAIN_TOLERANCE {
-        yf.abs() <= 3.0 + DOMAIN_TOLERANCE
+    let in_cross = if xf.abs() <= 1.0 + UNIT_TOLERANCE {
+        yf.abs() <= 3.0 + UNIT_TOLERANCE
     } else {
-        xf.abs() <= 7.0 + DOMAIN_TOLERANCE && yf.abs() <= 1.0 + DOMAIN_TOLERANCE
+        xf.abs() <= 7.0 + UNIT_TOLERANCE && yf.abs() <= 1.0 + UNIT_TOLERANCE
     };
     if !in_cross {
         return Err(projection.domain_error());
@@ -154,7 +156,7 @@ fn face_coordinate(projection: Projection, x: f64, y: f64) -> Result<FaceCoordin
     } else {
         CubeFace::Front
     };
-    if xf.abs() > 1.0 + DOMAIN_TOLERANCE || yf.abs() > 1.0 + DOMAIN_TOLERANCE {
+    if xf.abs() > 1.0 + UNIT_TOLERANCE || yf.abs() > 1.0 + UNIT_TOLERANCE {
         return Err(projection.domain_error());
     }
     Ok(FaceCoordinate {
@@ -396,7 +398,7 @@ fn qsc_inverse(projection: Projection, face: FaceCoordinate) -> Result<Direction
     };
     let mut zeta = 1.0 - zeco;
     let w = if zeta < -1.0 {
-        if zeta < -1.0 - DOMAIN_TOLERANCE {
+        if zeta < -1.0 - UNIT_TOLERANCE {
             return Err(projection.domain_error());
         }
         zeta = -1.0;
@@ -474,6 +476,8 @@ fn qsc_inverse(projection: Projection, face: FaceCoordinate) -> Result<Direction
 
 fn qsc_forward(face: FaceDirection, theta: f64) -> FaceCoordinate {
     let mut zeco = 1.0 - face.zeta;
+    // wcslib's `qscs2x` cutoff: below it 1 − ζ has lost most of its digits, so the
+    // small-angle form takes over.
     if zeco < 1e-8 {
         zeco = qsc_small_angle_zeco(face, theta);
     }

@@ -875,3 +875,46 @@ fn zpn_inverts_only_inside_its_inflection() {
     falling[..3].copy_from_slice(&[0.0, -1.0, 0.5]);
     assert!(Projection::Zpn.parameters(falling).is_err());
 }
+
+/// Near their limits the conic, Airy and polyconic formulas once cancelled to
+/// nothing: at η = 1e-7° a COO cone constant lost half its digits, at ξ = 1e-8 rad
+/// cos ξ rounded to 1 and the Airy constant came out 0 rather than −1/2, and near the
+/// equator 1 − cos ω rounded away the polyconic's y offset.
+#[test]
+fn near_limit_projection_formulas_keep_their_precision() {
+    use crate::world_coordinates::projection::{ConicConstants, air_k, air_radius_u, air_zeta};
+    use std::f64::consts::FRAC_PI_2;
+
+    // COO: C = sin θ_a + O(η²), and η² is far below an ulp of sin 45°.
+    let mut pv = [0.0; 21];
+    pv[1] = 45.0;
+    pv[2] = 1e-7;
+    let coo = ConicConstants::new(crate::world_coordinates::projection::Conic::Coo, &pv);
+    assert!(
+        (coo.c - 45f64.to_radians().sin()).abs() <= 2.0 * f64::EPSILON,
+        "{}",
+        coo.c
+    );
+
+    // AIR: K = −1/2 + ξ²/4 + …, so −1/2 to the last bit at ξ = 1e-8.
+    assert_eq!(air_k(90.0 - 2.0 * 1e-8 * R2D), -0.5);
+    // The inverse at a tiny colatitude, which a fixed 1e-6 start and an absolute
+    // residual stop once returned with a relative error of 1e-3.
+    for zeta in [1e-9, 1e-3, 1.0, 2.5] {
+        let back = air_zeta(air_radius_u(zeta, 45.0), 45.0).unwrap();
+        assert!(((back - zeta) / zeta).abs() < 1e-12, "ζ = {zeta}: {back}");
+    }
+
+    // PCO: y = θ + (180/π)·cot t·2 sin²(ω/2) with ω = φ·sin t; for t = 1e-9 rad and
+    // φ = 90°, y = θ + (180/π)·(π/2)²·t/2 to within O(t³).
+    let t = 1e-9;
+    let projected = Projection::Pco
+        .project(90.0, t * R2D, &ProjectionParameters::raw([0.0; 21]))
+        .unwrap();
+    let expected = t * R2D + R2D * FRAC_PI_2.powi(2) * t / 2.0;
+    assert!(
+        ((projected.y - expected) / expected).abs() < 1e-9,
+        "{}",
+        projected.y
+    );
+}

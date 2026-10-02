@@ -2,7 +2,7 @@
 
 use crate::error::Result;
 use crate::world_coordinates::D2R;
-use crate::world_coordinates::DOMAIN_TOLERANCE;
+use crate::world_coordinates::DEGREE_TOLERANCE;
 use crate::world_coordinates::R2D;
 use crate::world_coordinates::projection::Projection;
 use crate::world_coordinates::projection::{NativeCoordinate, ProjectedCoordinate};
@@ -64,13 +64,13 @@ pub(super) fn deproject(
     }
     let parameters = Parameters::new(pv);
     let abs_y = y.abs();
-    if abs_y <= parameters.transition_y + DOMAIN_TOLERANCE {
+    if abs_y <= parameters.transition_y + DEGREE_TOLERANCE {
         let theta = projection.checked_asin(y / parameters.y_per_sine)? * R2D;
         return projection.native_coordinate(x, theta);
     }
 
     let maximum_y = parameters.facet_half_width * parameters.polar_y0;
-    if abs_y > maximum_y + DOMAIN_TOLERANCE {
+    if abs_y > maximum_y + DEGREE_TOLERANCE {
         return Err(projection.domain_error());
     }
 
@@ -81,13 +81,13 @@ pub(super) fn deproject(
     }
 
     let phi = if sigma == 0.0 {
-        if delta.abs() > DOMAIN_TOLERANCE {
+        if delta.abs() > DEGREE_TOLERANCE {
             return Err(projection.domain_error());
         }
         x
     } else {
         let facet_position = delta / sigma;
-        if facet_position.abs() > parameters.facet_half_width + DOMAIN_TOLERANCE {
+        if facet_position.abs() > parameters.facet_half_width + DEGREE_TOLERANCE {
             return Err(projection.domain_error());
         }
         x + facet_position - delta
