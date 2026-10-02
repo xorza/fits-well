@@ -3,20 +3,19 @@ use crate::error::Indexed;
 use crate::error::Ranked;
 use crate::header_model::Header;
 use crate::header_model::value::Value;
-use crate::reader::FitsReader;
+use crate::reader::internals::open_fixture;
 use crate::world_coordinates::R2D;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::celestial_pole::CelestialPole;
 use crate::world_coordinates::internals::TAN_GOLDEN;
 use crate::world_coordinates::internals::assert_astropy_golden;
+use crate::world_coordinates::internals::celestial_header;
 use crate::world_coordinates::projection::Projection;
 use crate::world_coordinates::wcs_axis::WcsAxis;
-use std::fs::File;
 
 /// Load the WCS from the primary header of a fixture.
 fn open_wcs(name: &str) -> Wcs {
-    let r = FitsReader::open(File::open(format!("tests/data/fits/{name}")).unwrap()).unwrap();
-    Wcs::from_header(&r.hdus[0].header, None).unwrap()
+    Wcs::from_header(&open_fixture(name).hdus[0].header, None).unwrap()
 }
 
 #[test]
@@ -87,20 +86,7 @@ fn reference_pixel_maps_to_crval() {
 #[test]
 fn transform_failures_return_errors() {
     let build = |projection: &str| {
-        let mut header = Header::new();
-        header.set_internal("NAXIS", 2);
-        header
-            .set_internal("CTYPE1", format!("RA---{projection}"))
-            .set_internal("CTYPE2", format!("DEC--{projection}"));
-        header
-            .set_internal("CRPIX1", 1.0)
-            .set_internal("CRPIX2", 1.0);
-        header
-            .set_internal("CRVAL1", 0.0)
-            .set_internal("CRVAL2", 0.0);
-        header
-            .set_internal("CDELT1", 100.0)
-            .set_internal("CDELT2", 100.0);
+        let header = celestial_header(projection, [1.0, 1.0], [0.0, 0.0], [100.0, 100.0]);
         Wcs::from_header(&header, None)
     };
 
@@ -145,19 +131,10 @@ fn transform_failures_return_errors() {
 
 #[test]
 fn public_wcs_metadata_exposes_units_and_celestial_projection_pair() {
-    let mut header = Header::new();
+    let mut header = celestial_header("TAN", [1.0, 1.0], [45.0, 30.0], [-0.1, 0.1]);
     header
-        .set_internal("NAXIS", 2)
-        .set_internal("CTYPE1", "RA---TAN")
-        .set_internal("CTYPE2", "DEC--TAN")
         .set_internal("CUNIT1", "deg")
-        .set_internal("CUNIT2", "deg")
-        .set_internal("CRPIX1", 1.0)
-        .set_internal("CRPIX2", 1.0)
-        .set_internal("CRVAL1", 45.0)
-        .set_internal("CRVAL2", 30.0)
-        .set_internal("CDELT1", -0.1)
-        .set_internal("CDELT2", 0.1);
+        .set_internal("CUNIT2", "deg");
     let wcs = Wcs::from_header(&header, None).unwrap();
     let view = wcs.view();
     assert_eq!(view.axes[0].cunit, "deg");
@@ -278,12 +255,10 @@ fn rejects_absurd_wcsaxes() {
     ));
 }
 
-fn celestial_header(projection: &str, keywords: &[(&str, f64)]) -> Header {
-    let mut header = Header::new();
-    header
-        .set_internal("NAXIS", 2)
-        .set_internal("CTYPE1", format!("RA---{projection}"))
-        .set_internal("CTYPE2", format!("DEC--{projection}"));
+/// A celestial header at the default reference pixel, value and increment, then
+/// `keywords`.
+fn celestial_with(projection: &str, keywords: &[(&str, f64)]) -> Header {
+    let mut header = celestial_header(projection, [0.0; 2], [0.0; 2], [1.0; 2]);
     for &(keyword, value) in keywords {
         header.set_internal(keyword, value);
     }
@@ -296,7 +271,7 @@ fn celestial_header(projection: &str, keywords: &[(&str, f64)]) -> Header {
 #[test]
 fn latpole_chooses_between_both_valid_poles() {
     for (latpole, pole) in [(90.0, 60.0), (-90.0, -60.0)] {
-        let header = celestial_header("CAR", &[("CRVAL2", -30.0), ("LATPOLE", latpole)]);
+        let header = celestial_with("CAR", &[("CRVAL2", -30.0), ("LATPOLE", latpole)]);
         let wcs = Wcs::from_header(&header, None).unwrap();
         let dec = wcs.view().celestial_projection.unwrap().pole.dec;
         assert!((dec - pole).abs() < 1e-12, "LATPOLE {latpole}: {dec}");
@@ -307,7 +282,7 @@ fn latpole_chooses_between_both_valid_poles() {
 /// δ₀ = 60° admits no pole at all.
 #[test]
 fn an_impossible_pole_is_refused() {
-    let header = celestial_header("CAR", &[("CRVAL2", 60.0), ("LONPOLE", 120.0)]);
+    let header = celestial_with("CAR", &[("CRVAL2", 60.0), ("LONPOLE", 120.0)]);
     assert!(matches!(
         Wcs::from_header(&header, None),
         Err(FitsError::WcsInvalidPole { .. })
@@ -345,7 +320,7 @@ fn unmatched_celestial_axes_are_unsupported() {
 /// One axis of a celestial pair evaluates the projection, as the complete transform does.
 #[test]
 fn axis_world_of_a_celestial_axis_is_the_projected_value() {
-    let header = celestial_header("TAN", &[("CRVAL1", 150.0), ("CRVAL2", 60.0)]);
+    let header = celestial_with("TAN", &[("CRVAL1", 150.0), ("CRVAL2", 60.0)]);
     let wcs = Wcs::from_header(&header, None).unwrap();
     let pixel = [30.0, 20.0];
     let complete = wcs.pixel_to_world(&pixel).unwrap();
@@ -372,7 +347,7 @@ fn celestial_units_resolve_or_are_refused() {
         ("urad", 1e-6 * R2D),
         ("10**-3 deg", 1e-3),
     ] {
-        let header = celestial_header("CAR", &[("CRPIX1", 1.0), ("CRPIX2", 1.0)]);
+        let header = celestial_with("CAR", &[("CRPIX1", 1.0), ("CRPIX2", 1.0)]);
         let mut header = header;
         header
             .set_internal("CUNIT1", unit)
@@ -387,7 +362,7 @@ fn celestial_units_resolve_or_are_refused() {
         );
     }
     for unit in ["furlong", "mdeg", "karcsec", "Hz"] {
-        let mut header = celestial_header("CAR", &[]);
+        let mut header = celestial_with("CAR", &[]);
         header
             .set_internal("CUNIT1", unit)
             .set_internal("CUNIT2", "deg");
@@ -402,7 +377,7 @@ fn celestial_units_resolve_or_are_refused() {
 /// what `axis_world` and the world coordinates use.
 #[test]
 fn the_view_keeps_crval_in_its_declared_unit() {
-    let mut header = celestial_header("TAN", &[("CRVAL1", 3600.0), ("CRVAL2", 7200.0)]);
+    let mut header = celestial_with("TAN", &[("CRVAL1", 3600.0), ("CRVAL2", 7200.0)]);
     header
         .set_internal("CUNIT1", "arcsec")
         .set_internal("CUNIT2", "arcsec");

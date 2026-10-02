@@ -3,22 +3,13 @@ use crate::header_model::Header;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::axis::SPEED_OF_LIGHT;
 use crate::world_coordinates::axis::spectral_rest::SpectralRest;
+use crate::world_coordinates::internals::axis_header;
 use crate::world_coordinates::spectral_frame::SpectralFrame;
 use crate::world_coordinates::spectral_frame::SpectralReferenceFrame;
 
 #[test]
 fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
-    let velocity_axis = |ctype: &str| {
-        let mut header = Header::new();
-        header
-            .set_internal("NAXIS", 1)
-            .set_internal("CTYPE1", ctype)
-            .set_internal("CUNIT1", "m/s")
-            .set_internal("CRPIX1", 1.0)
-            .set_internal("CRVAL1", 0.0)
-            .set_internal("CDELT1", 1_000.0);
-        header
-    };
+    let velocity_axis = |ctype: &str| axis_header(ctype, "m/s", 1.0, 0.0, 1_000.0);
     assert!(matches!(
         Wcs::from_header(&velocity_axis("VELO-F2V"), None),
         Err(FitsError::InvalidWcs { detail }) if detail.contains("RESTFRQ or RESTWAV")

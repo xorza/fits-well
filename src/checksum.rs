@@ -75,7 +75,7 @@ pub(crate) fn encode(sum: u32, complement: bool) -> [u8; 16] {
 mod tests {
     use crate::block::padded_len;
     use crate::checksum::*;
-    use crate::reader::internals::open_fixture;
+    use crate::reader::internals::{fixture_bytes, open_fixture};
     use crate::reader::{ChecksumReport, ChecksumStatus};
 
     #[test]
@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn encoding_reproduces_cfitsio_checksums() {
         for name in ["comp_table_cfitsio.fits", "comp_table_vla.fits"] {
-            let bytes = std::fs::read(format!("tests/data/fits/{name}")).unwrap();
+            let bytes = fixture_bytes(name);
             let mut reader = open_fixture(name);
             let mut header_start = 0;
             for index in 0..reader.hdus().len() {

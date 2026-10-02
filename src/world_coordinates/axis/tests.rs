@@ -6,6 +6,7 @@ use crate::world_coordinates::axis::spectral_kind::{
 };
 use crate::world_coordinates::axis::spectral_rest::ResolvedRest;
 use crate::world_coordinates::axis::*;
+use crate::world_coordinates::internals::axis_header;
 
 /// An in-domain value for each characteristic, all describing roughly the same
 /// 1 µm photon, so every conversion below stays well inside its domain.
@@ -128,14 +129,8 @@ fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
 }
 
 fn grism_wcs(ctype: &str, reference: f64) -> Wcs {
-    let mut header = Header::new();
+    let mut header = axis_header(ctype, "m", 1.0, reference, 1.0e-7);
     header
-        .set_internal("NAXIS", 1)
-        .set_internal("CTYPE1", ctype)
-        .set_internal("CUNIT1", "m")
-        .set_internal("CRPIX1", 1.0)
-        .set_internal("CRVAL1", reference)
-        .set_internal("CDELT1", 1.0e-7)
         .set_internal("PV1_0", 4.5e5)
         .set_internal("PV1_1", 1.0)
         .set_internal("PV1_2", 27.0)
@@ -381,15 +376,8 @@ fn spectral_algorithms_match_wcslib() {
         },
     ];
     for case in cases {
-        let mut header = Header::new();
-        header
-            .set_internal("NAXIS", 1)
-            .set_internal("CTYPE1", case.ctype)
-            .set_internal("CUNIT1", case.unit)
-            .set_internal("CRPIX1", 1.0)
-            .set_internal("CRVAL1", case.reference)
-            .set_internal("CDELT1", case.increment)
-            .set_internal("RESTFRQ", 1_420_405_751.0);
+        let mut header = axis_header(case.ctype, case.unit, 1.0, case.reference, case.increment);
+        header.set_internal("RESTFRQ", 1_420_405_751.0);
         let wcs = Wcs::from_header(&header, None).unwrap();
         assert!(wcs.view().unsupported_axes.is_empty(), "{}", case.ctype);
         let world = wcs.pixel_to_world(&[3.0]).unwrap()[0];
@@ -469,15 +457,14 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
         },
     ];
     for case in cases {
-        let mut header = Header::new();
-        header
-            .set_internal("NAXIS", 1)
-            .set_internal("CTYPE1", case.ctype)
-            .set_internal("CUNIT1", case.unit)
-            .set_internal("CRPIX1", 1.0)
-            .set_internal("CRVAL1", case.reference)
-            .set_internal("CDELT1", case.reference / 100.0)
-            .set_internal("RESTFRQ", 1_420_405_751.0);
+        let mut header = axis_header(
+            case.ctype,
+            case.unit,
+            1.0,
+            case.reference,
+            case.reference / 100.0,
+        );
+        header.set_internal("RESTFRQ", 1_420_405_751.0);
         let wcs = Wcs::from_header(&header, None).unwrap();
         // The view reports the axis as declared; the world coordinate is in the default unit.
         assert_eq!(wcs.view().axes[0].cunit, case.unit);
@@ -509,14 +496,7 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
 
 #[test]
 fn logarithmic_axes_apply_domains_units_and_inverse() {
-    let mut generic = Header::new();
-    generic
-        .set_internal("NAXIS", 1)
-        .set_internal("CTYPE1", "TIME-LOG")
-        .set_internal("CUNIT1", "d")
-        .set_internal("CRPIX1", 1.0)
-        .set_internal("CRVAL1", 100.0)
-        .set_internal("CDELT1", 10.0);
+    let generic = axis_header("TIME-LOG", "d", 1.0, 100.0, 10.0);
     let generic = Wcs::from_header(&generic, None).unwrap();
     let expected = 100.0 * 0.2_f64.exp();
     assert_eq!(generic.view().axes[0].cunit, "d");
@@ -530,14 +510,7 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
         })
     ));
 
-    let mut frequency = Header::new();
-    frequency
-        .set_internal("NAXIS", 1)
-        .set_internal("CTYPE1", "FREQ-LOG")
-        .set_internal("CUNIT1", "GHz")
-        .set_internal("CRPIX1", 1.0)
-        .set_internal("CRVAL1", 1.4)
-        .set_internal("CDELT1", 0.001);
+    let frequency = axis_header("FREQ-LOG", "GHz", 1.0, 1.4, 0.001);
     let frequency = Wcs::from_header(&frequency, None).unwrap();
     let expected = 1.4e9 * (2.0e6_f64 / 1.4e9).exp();
     assert_eq!(frequency.view().axes[0].cunit, "GHz");
