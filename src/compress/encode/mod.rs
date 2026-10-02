@@ -207,9 +207,9 @@ fn container_header(row_len: usize, ntiles: usize, heap_len: usize, fields: i64)
 /// The `RICE_1` parameters every stream fits-well writes uses (§10.4.1 Table 37).
 fn set_rice_parameters(h: &mut Header, bytepix: IntBitpix) {
     h.set_internal("ZNAME1", "BLOCKSIZE")
-        .set_internal("ZVAL1", rice::BLOCKSIZE as i64);
+        .set_internal("ZVAL1", i64::try_from(rice::BLOCKSIZE).unwrap());
     h.set_internal("ZNAME2", "BYTEPIX")
-        .set_internal("ZVAL2", bytepix.elem_size() as i64);
+        .set_internal("ZVAL2", i64::try_from(bytepix.elem_size()).unwrap());
 }
 
 fn hcompress_tile_scale(
@@ -296,7 +296,7 @@ fn compress_float_image(
             let ny = s.tile.row_bases.len();
             // Gather + widen this tile's pixels straight from the typed source.
             convert::gather_f64(samples, &s.tile.row_bases, s.tile.row_len, &mut s.floats);
-            let irow = t as i64 + zdither0; // = (1-based tile row) + ZDITHER0 - 1
+            let irow = i64::try_from(t).expect("a tile row fits i64") + zdither0; // = (1-based tile row) + ZDITHER0 - 1
             let Some(q) =
                 quantize::quantize_tile(&s.floats, nx, ny, qlevel, method, irow, &mut s.quantize)
             else {

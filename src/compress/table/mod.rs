@@ -1010,17 +1010,26 @@ pub(crate) mod internals {
     use crate::writer::table::WriteColumn;
 
     /// i16, i32, f32, f64 and byte columns, and a repeat-3 i16 vector, over `nrows`
-    /// rows of simple formulas with negative values among them.
+    /// rows of simple formulas with negative values among them; the integer formulas
+    /// repeat every 1000 or 10 000 rows, so they stay in range for any row count.
     pub(crate) fn mixed_columns(nrows: usize) -> Vec<WriteColumn> {
         vec![
             WriteColumn::fixed(
                 "SHORT",
-                ColumnData::I16((0..nrows).map(|i| i as i16 * 7 - 30).collect()),
+                ColumnData::I16(
+                    (0..nrows)
+                        .map(|i| i16::try_from(i % 1000).unwrap() * 7 - 30)
+                        .collect(),
+                ),
                 1,
             ),
             WriteColumn::fixed(
                 "INT",
-                ColumnData::I32((0..nrows).map(|i| i as i32 * 100_000 - 5).collect()),
+                ColumnData::I32(
+                    (0..nrows)
+                        .map(|i| i32::try_from(i % 10_000).unwrap() * 100_000 - 5)
+                        .collect(),
+                ),
                 1,
             ),
             WriteColumn::fixed(
@@ -1040,7 +1049,11 @@ pub(crate) mod internals {
             ),
             WriteColumn::fixed(
                 "VEC",
-                ColumnData::I16((0..nrows * 3).map(|i| (i * 2) as i16).collect()),
+                ColumnData::I16(
+                    (0..nrows * 3)
+                        .map(|i| i16::try_from(i % 10_000).unwrap() * 2)
+                        .collect(),
+                ),
                 3,
             ),
         ]

@@ -233,7 +233,11 @@ fn read_column_unsigned_is_exact_for_u64_and_none_otherwise() {
     let mut header = table_header(12, 1, &["1K", "1J"]);
     header.set_internal("TZERO1", U64_OFFSET);
     let mut data = Vec::new();
-    data.extend_from_slice(&((u64::MAX ^ 0x8000_0000_0000_0000) as i64).to_be_bytes());
+    data.extend_from_slice(
+        &(u64::MAX ^ 0x8000_0000_0000_0000)
+            .cast_signed()
+            .to_be_bytes(),
+    );
     data.extend_from_slice(&7i32.to_be_bytes());
     let table = BinTable::from_data(&header, data).unwrap();
     assert_eq!(

@@ -438,14 +438,17 @@ pub(crate) mod internals {
             .set_internal("XTENSION", "TABLE")
             .set_internal("BITPIX", 8)
             .set_internal("NAXIS", 2)
-            .set_internal("NAXIS1", naxis1 as i64)
-            .set_internal("NAXIS2", naxis2 as i64)
+            .set_internal("NAXIS1", i64::try_from(naxis1).unwrap())
+            .set_internal("NAXIS2", i64::try_from(naxis2).unwrap())
             .set_internal("PCOUNT", 0)
             .set_internal("GCOUNT", 1)
-            .set_internal("TFIELDS", columns.len() as i64);
+            .set_internal("TFIELDS", i64::try_from(columns.len()).unwrap());
         for (index, &(tbcol, tform)) in columns.iter().enumerate() {
             header
-                .set_internal(&format!("TBCOL{}", index + 1), tbcol as i64)
+                .set_internal(
+                    &format!("TBCOL{}", index + 1),
+                    i64::try_from(tbcol).unwrap(),
+                )
                 .set_internal(&format!("TFORM{}", index + 1), tform);
         }
         header

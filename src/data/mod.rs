@@ -216,29 +216,29 @@ const U32_SIGN: u32 = 0x8000_0000;
 const U64_SIGN: u64 = U64_OFFSET_INTEGER;
 
 const fn flip_i8(stored: u8) -> i8 {
-    (stored ^ I8_SIGN) as i8
+    (stored ^ I8_SIGN).cast_signed()
 }
 const fn flip_u16(stored: i16) -> u16 {
-    (stored as u16) ^ U16_SIGN
+    stored.cast_unsigned() ^ U16_SIGN
 }
 const fn flip_u32(stored: i32) -> u32 {
-    (stored as u32) ^ U32_SIGN
+    stored.cast_unsigned() ^ U32_SIGN
 }
 const fn flip_u64(stored: i64) -> u64 {
-    (stored as u64) ^ U64_SIGN
+    stored.cast_unsigned() ^ U64_SIGN
 }
 
 const fn store_i8(value: i8) -> u8 {
-    (value as u8) ^ I8_SIGN
+    value.cast_unsigned() ^ I8_SIGN
 }
 const fn store_u16(value: u16) -> i16 {
-    (value ^ U16_SIGN) as i16
+    (value ^ U16_SIGN).cast_signed()
 }
 const fn store_u32(value: u32) -> i32 {
-    (value ^ U32_SIGN) as i32
+    (value ^ U32_SIGN).cast_signed()
 }
 const fn store_u64(value: u64) -> i64 {
-    (value ^ U64_SIGN) as i64
+    (value ^ U64_SIGN).cast_signed()
 }
 
 /// An N-dimensional image: a flat, Fortran-ordered buffer (axis 0 varies

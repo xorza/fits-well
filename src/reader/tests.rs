@@ -904,21 +904,43 @@ fn image_sections_match_hand_computed_values_for_every_bitpix() {
             ImageData::U8(selected.iter().map(|&value| value as u8).collect()),
         ),
         (
-            ImageData::I16(all.iter().map(|&value| value as i16 - 30).collect()),
-            ImageData::I16(selected.iter().map(|&value| value as i16 - 30).collect()),
-        ),
-        (
-            ImageData::I32(all.iter().map(|&value| value as i32 * 1000 - 7).collect()),
-            ImageData::I32(
+            ImageData::I16(
+                all.iter()
+                    .map(|&value| i16::try_from(value).unwrap() - 30)
+                    .collect(),
+            ),
+            ImageData::I16(
                 selected
                     .iter()
-                    .map(|&value| value as i32 * 1000 - 7)
+                    .map(|&value| i16::try_from(value).unwrap() - 30)
                     .collect(),
             ),
         ),
         (
-            ImageData::I64(all.iter().map(|&value| value as i64 * -50).collect()),
-            ImageData::I64(selected.iter().map(|&value| value as i64 * -50).collect()),
+            ImageData::I32(
+                all.iter()
+                    .map(|&value| i32::try_from(value).unwrap() * 1000 - 7)
+                    .collect(),
+            ),
+            ImageData::I32(
+                selected
+                    .iter()
+                    .map(|&value| i32::try_from(value).unwrap() * 1000 - 7)
+                    .collect(),
+            ),
+        ),
+        (
+            ImageData::I64(
+                all.iter()
+                    .map(|&value| i64::try_from(value).unwrap() * -50)
+                    .collect(),
+            ),
+            ImageData::I64(
+                selected
+                    .iter()
+                    .map(|&value| i64::try_from(value).unwrap() * -50)
+                    .collect(),
+            ),
         ),
         (
             ImageData::F32(all.iter().map(|&value| value as f32 * 0.5).collect()),
@@ -994,7 +1016,7 @@ fn image_sections_preserve_scaling_and_validate_empty_and_invalid_regions() {
 fn plain_image_section_streams_exact_strided_runs() {
     let shape = [6, 5, 4, 3];
     let samples: Vec<i16> = (0..shape.iter().product::<usize>())
-        .map(|index| index as i16 - 100)
+        .map(|index| i16::try_from(index).unwrap() - 100)
         .collect();
     let image = Image::new(shape.to_vec(), samples.clone()).unwrap();
     let bytes = written(|w| w.write_image(&image, None));
@@ -1051,15 +1073,27 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
             Some(13),
         ),
         (
-            ImageData::I16((0..count).map(|index| index as i16 - 30).collect()),
+            ImageData::I16(
+                (0..count)
+                    .map(|index| i16::try_from(index).unwrap() - 30)
+                    .collect(),
+            ),
             Some(-17),
         ),
         (
-            ImageData::I32((0..count).map(|index| index as i32 * 1000 - 7).collect()),
+            ImageData::I32(
+                (0..count)
+                    .map(|index| i32::try_from(index).unwrap() * 1000 - 7)
+                    .collect(),
+            ),
             Some(12_993),
         ),
         (
-            ImageData::I64((0..count).map(|index| index as i64 * -50).collect()),
+            ImageData::I64(
+                (0..count)
+                    .map(|index| i64::try_from(index).unwrap() * -50)
+                    .collect(),
+            ),
             Some(-650),
         ),
         (ImageData::F32(f32_values), None),

@@ -75,7 +75,7 @@ impl FloatQuantization {
             scale: column_at(self.zscale.as_deref(), table_row).unwrap_or(1.0),
             zero: column_at(self.zzero.as_deref(), table_row).unwrap_or(0.0),
             method: self.method,
-            irow: tile_row as i64 + self.zdither0,
+            irow: i64::try_from(tile_row).expect("a tile row fits i64") + self.zdither0,
             zblank: column_at(self.zblank_column.as_deref(), table_row).or(self.zblank_keyword),
         }
     }

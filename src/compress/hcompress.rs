@@ -145,11 +145,11 @@ impl BitOutput {
     /// Output the low `n` bits of `bits` (`n` ≤ 8), MSB-first.
     fn output_nbits(&mut self, bits: i32, n: i32) {
         const MASK: [i32; 9] = [0, 1, 3, 7, 15, 31, 63, 127, 255];
-        self.buffer2 = self.buffer2.wrapping_shl(n as u32) | (bits & MASK[n as usize]);
+        let count = n.cast_unsigned();
+        self.buffer2 = self.buffer2.wrapping_shl(count) | (bits & MASK[count as usize]);
         self.bits_to_go2 -= n;
         if self.bits_to_go2 <= 0 {
-            self.out
-                .push(((self.buffer2 >> (-self.bits_to_go2)) & 0xff) as u8);
+            self.out.push(low_byte(self.buffer2 >> (-self.bits_to_go2)));
             self.bits_to_go2 += 8;
         }
     }
@@ -158,8 +158,7 @@ impl BitOutput {
         self.buffer2 = self.buffer2.wrapping_shl(4) | (bits & 15);
         self.bits_to_go2 -= 4;
         if self.bits_to_go2 <= 0 {
-            self.out
-                .push(((self.buffer2 >> (-self.bits_to_go2)) & 0xff) as u8);
+            self.out.push(low_byte(self.buffer2 >> (-self.bits_to_go2)));
             self.bits_to_go2 += 8;
         }
     }
@@ -193,7 +192,7 @@ impl BitOutput {
                 self.buffer2 = self.buffer2.wrapping_shl(8)
                     | (((i32::from(array[kk]) & 15) << 4) | (i32::from(array[kk + 1]) & 15));
                 kk += 2;
-                self.out.push(((self.buffer2 >> shift) & 0xff) as u8);
+                self.out.push(low_byte(self.buffer2 >> shift));
             }
         }
         if kk != n {
@@ -203,7 +202,7 @@ impl BitOutput {
 
     fn done_outputing_bits(&mut self) {
         if self.bits_to_go2 < 8 {
-            self.out.push((self.buffer2 << self.bits_to_go2) as u8);
+            self.out.push(low_byte(self.buffer2 << self.bits_to_go2));
         }
     }
 
@@ -224,8 +223,8 @@ impl BitOutput {
         } = bufs;
         let nel = nx * ny;
         self.out.extend_from_slice(&MAGIC);
-        self.writeint(nx as i32);
-        self.writeint(ny as i32);
+        self.writeint(tile_dimension(nx)?);
+        self.writeint(tile_dimension(ny)?);
         self.writeint(scale);
         self.writelonglong(a[0]);
         a[0] = 0;
@@ -535,6 +534,20 @@ fn htrans(
     Ok(())
 }
 
+/// The low eight bits of a bit buffer, as the byte the stream holds.
+const fn low_byte(value: i32) -> u8 {
+    value.to_le_bytes()[0]
+}
+
+/// A tile dimension as the stream's 32-bit header field.
+fn tile_dimension(length: usize) -> Result<i32> {
+    i32::try_from(length)
+        .ok()
+        .ok_or_else(|| FitsError::UnsupportedCompression {
+            name: format!("HCOMPRESS_1 tile dimension {length}, past 2^31 - 1"),
+        })
+}
+
 #[expect(
     clippy::map_err_ignore,
     reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
@@ -622,6 +635,10 @@ fn digitize(a: &mut [i64], nx: usize, ny: usize, scale: i32) -> Result<()> {
 
 /// First quadtree reduction step on bit `bit` of `a` → 4-bit codes in `b`
 /// (cfitsio `qtree_onebit`). `a` is non-negative here, so shifts can't sign-fill.
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "each code is four bits of a non-negative magnitude, so it is in 0..16"
+)]
 fn qtree_onebit(quadrant: Quadrant<'_>, b: &mut [u8], bit: i32) {
     let Quadrant {
         a,
@@ -729,7 +746,7 @@ fn bufcopy(
             *bitbuffer |= CODE[cell as usize] << *bits_to_go3;
             *bits_to_go3 += NCODE[cell as usize];
             if *bits_to_go3 >= 8 {
-                buffer[*b] = (*bitbuffer & 0xFF) as u8;
+                buffer[*b] = low_byte(*bitbuffer);
                 *b += 1;
                 if *b >= bmax {
                     return true;
@@ -859,7 +876,7 @@ impl<'a> BitInput<'a> {
     /// fast path, including the one-byte backspace).
     fn input_nnybble(&mut self, n: usize, array: &mut [u8]) -> Result<()> {
         if n == 1 {
-            array[0] = self.input_nybble()? as u8;
+            array[0] = low_byte(self.input_nybble()?);
             return Ok(());
         }
         if self.bits_to_go == 8 {
@@ -873,20 +890,20 @@ impl<'a> BitInput<'a> {
         if self.bits_to_go == 0 {
             for _ in 0..pairs {
                 self.buffer = (self.buffer << 8) | self.byte()?;
-                array[kk] = ((self.buffer >> 4) & 15) as u8;
-                array[kk + 1] = (self.buffer & 15) as u8;
+                array[kk] = low_byte(self.buffer >> 4) & 15;
+                array[kk + 1] = low_byte(self.buffer) & 15;
                 kk += 2;
             }
         } else {
             for _ in 0..pairs {
                 self.buffer = (self.buffer << 8) | self.byte()?;
-                array[kk] = ((self.buffer >> shift1) & 15) as u8;
-                array[kk + 1] = ((self.buffer >> shift2) & 15) as u8;
+                array[kk] = low_byte(self.buffer >> shift1) & 15;
+                array[kk + 1] = low_byte(self.buffer >> shift2) & 15;
                 kk += 2;
             }
         }
         if pairs * 2 != n {
-            array[n - 1] = self.input_nybble()? as u8;
+            array[n - 1] = low_byte(self.input_nybble()?);
         }
         Ok(())
     }
@@ -900,7 +917,7 @@ impl<'a> BitInput<'a> {
             self.buffer = (self.buffer << 8) | self.byte()?;
             self.bits_to_go += 8;
         }
-        let peek = ((self.buffer >> (self.bits_to_go - 6)) & 0x3F) as usize;
+        let peek = usize::from(low_byte(self.buffer >> (self.bits_to_go - 6)) & 0x3F);
         let (value, len) = HUFFMAN_DECODE[peek];
         self.bits_to_go -= len;
         Ok(value)

@@ -6,7 +6,7 @@ fn groups_header(bitpix: i64, axes: &[i64], pcount: i64, gcount: i64) -> Header 
     let mut header = Header::new();
     header
         .set_internal("BITPIX", bitpix)
-        .set_internal("NAXIS", axes.len() as i64 + 1)
+        .set_internal("NAXIS", i64::try_from(axes.len()).unwrap() + 1)
         .set_internal("NAXIS1", 0);
     for (index, &length) in axes.iter().enumerate() {
         header.set_internal(&format!("NAXIS{}", index + 2), length);

@@ -230,7 +230,7 @@ impl Header {
     pub(crate) fn pcount(&self) -> Result<u64> {
         match self.get_integer("PCOUNT")? {
             Some(p) if p < 0 => Err(FitsError::KeywordOutOfRange { name: "PCOUNT" }),
-            Some(p) => Ok(p as u64),
+            Some(p) => Ok(p.cast_unsigned()),
             None => Ok(0),
         }
     }
@@ -239,7 +239,7 @@ impl Header {
     pub(crate) fn gcount(&self) -> Result<u64> {
         match self.get_integer("GCOUNT")? {
             Some(g) if g < 0 => Err(FitsError::KeywordOutOfRange { name: "GCOUNT" }),
-            Some(g) => Ok(g as u64),
+            Some(g) => Ok(g.cast_unsigned()),
             None => Ok(1),
         }
     }

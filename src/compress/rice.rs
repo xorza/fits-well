@@ -55,15 +55,15 @@ pub(super) fn rice_decode_into(
     out.reserve_exact(nx);
     let mut i = 0;
     while i < nx {
-        let fs = br.read(fsbits)? as i64 - 1;
+        // The block's code is its split + 1, so 0 marks an all-zero block; a field
+        // of `fsbits` bits keeps the split below 64.
+        let split = br.read(fsbits)?.checked_sub(1);
         let imax = (i + blocksize).min(nx);
         for _ in i..imax {
-            let diff = if fs < 0 {
-                0
-            } else if fs as u32 == fsmax {
-                br.read(nbits_pp)? // uncompressed block
-            } else {
-                (br.read_zeros()? << fs) | br.read(fs as u32)?
+            let diff = match split {
+                None => 0,
+                Some(fs) if fs == u64::from(fsmax) => br.read(nbits_pp)?, // uncompressed block
+                Some(fs) => (br.read_zeros()? << fs) | br.read(fs as u32)?,
             };
             // Undo the zigzag mapping, then the differencing (modular at pixel width).
             let d = if diff & 1 == 1 {
@@ -82,7 +82,7 @@ pub(super) fn rice_decode_into(
 /// Interpret the low `nbits` of `v` as a two's-complement signed value.
 fn sign_extend(v: u64, nbits: u32) -> i64 {
     let shift = 64 - nbits;
-    ((v << shift) as i64) >> shift
+    (v << shift).cast_signed() >> shift
 }
 
 /// Encode `values` as a `RICE_1` tile (a port of cfitsio's `fits_rcomp`),
@@ -108,8 +108,10 @@ pub(super) fn rice_encode_into<T: Copy + Into<i64>>(
     out: &mut Vec<u8>,
 ) {
     let nbits = (8 * bytepix.elem_size()) as u32;
-    let field = split_field(bytepix);
-    let (fsbits, fsmax) = (field.bits as i32, field.max as i32);
+    let SplitField {
+        bits: fsbits,
+        max: fsmax,
+    } = split_field(bytepix);
     let mask: u64 = if nbits >= 64 {
         u64::MAX
     } else {
@@ -119,7 +121,12 @@ pub(super) fn rice_encode_into<T: Copy + Into<i64>>(
     // Rice output is at most a few bytes per pixel; reserve a pixel's worth up front
     // so the bitstream rarely reallocates mid-tile.
     bo.out.reserve(values.len());
-    let first = values.first().copied().map_or(0, Into::into) as u64 & mask;
+    let first = values
+        .first()
+        .copied()
+        .map_or(0, Into::into)
+        .cast_unsigned()
+        & mask;
     bo.output_nbits(first, nbits);
     let mut lastpix = first;
 
@@ -130,12 +137,12 @@ pub(super) fn rice_encode_into<T: Copy + Into<i64>>(
         scratch.diffs.clear();
         let mut pixelsum = 0u128;
         for j in 0..thisblock {
-            let next = Into::<i64>::into(values[i + j]) as u64 & mask;
+            let next = Into::<i64>::into(values[i + j]).cast_unsigned() & mask;
             // signed difference reduced to the pixel width, then zigzag-mapped
             let raw = next.wrapping_sub(lastpix) & mask;
             let s = sign_extend(raw, nbits);
             let d = if s >= 0 {
-                (s as u64) << 1
+                s.unsigned_abs() << 1
             } else {
                 (s.unsigned_abs() << 1).wrapping_sub(1)
             };
@@ -153,24 +160,24 @@ pub(super) fn rice_encode_into<T: Copy + Into<i64>>(
             quotient
         };
         let mut psum = dpsum >> 1;
-        let mut fs = 0i32;
+        let mut fs = 0u32;
         while psum > 0 {
             fs += 1;
             psum >>= 1;
         }
 
         if fs >= fsmax {
-            bo.output_nbits((fsmax + 1) as u64, fsbits as u32);
+            bo.output_nbits(u64::from(fsmax + 1), fsbits);
             for &d in &scratch.diffs {
                 bo.output_nbits(d, nbits);
             }
         } else if fs == 0 && pixelsum == 0 {
-            bo.output_nbits(0, fsbits as u32);
+            bo.output_nbits(0, fsbits);
         } else {
-            bo.output_nbits((fs + 1) as u64, fsbits as u32);
+            bo.output_nbits(u64::from(fs + 1), fsbits);
             let fsmask = (1u64 << fs) - 1;
             for &d in &scratch.diffs {
-                bo.output_rice_value(d, fs as u32, fsmask);
+                bo.output_rice_value(d, fs, fsmask);
             }
         }
         i += thisblock;
