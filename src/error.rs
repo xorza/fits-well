@@ -263,11 +263,6 @@ pub enum FitsError {
     /// `read_ascii_table` was called on an HDU that is not an ASCII table.
     #[error("HDU is not an ASCII table")]
     NotAnAsciiTable,
-    /// The decompressor was handed an HDU that is not a tiled-compressed image (no
-    /// `ZIMAGE = T`). `read_image` guards this and returns [`FitsError::NotAnImage`]
-    /// for a plain `BINTABLE`, so this surfaces only via the internal decode path.
-    #[error("HDU is not a tiled-compressed image")]
-    NotCompressedImage,
     /// `read_compressed_table` was called on an HDU that is not a tiled-compressed
     /// table (no `ZTABLE = T`).
     #[error("HDU is not a tiled-compressed table")]

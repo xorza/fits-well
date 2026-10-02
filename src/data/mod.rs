@@ -47,14 +47,16 @@ pub(crate) fn shape_product(shape: &[usize]) -> Result<usize> {
     }
 }
 
-/// Validate a zero-based, half-open N-d region against `shape` and return the
-/// selected extent per axis. The region must have the image's rank, and each range
-/// must be ordered and within its axis. Shared by the plain-image section reader and
-/// the tiled-compressed one, which apply the identical rule to the same geometry.
+/// Validate a zero-based, half-open N-d region against `shape` and write the
+/// selected extent per axis to `selected`. The region must have the image's rank, and
+/// each range must be ordered and within its axis. Shared by the plain-image section
+/// reader and the tiled-compressed one, which apply the identical rule to the same
+/// geometry.
 pub(crate) fn validate_image_region(
     ranges: &[Range<usize>],
     shape: &[usize],
-) -> Result<Vec<usize>> {
+    selected: &mut Vec<usize>,
+) -> Result<()> {
     if ranges.len() != shape.len() {
         return Err(FitsError::RankMismatch {
             ranked: Ranked::ImageRegion,
@@ -62,7 +64,8 @@ pub(crate) fn validate_image_region(
             got: ranges.len(),
         });
     }
-    let mut selected = Vec::with_capacity(shape.len());
+    selected.clear();
+    selected.reserve_exact(shape.len());
     for (axis, (range, &len)) in ranges.iter().zip(shape).enumerate() {
         if range.start > range.end || range.end > len {
             return Err(FitsError::ImageRegionOutOfBounds {
@@ -74,7 +77,7 @@ pub(crate) fn validate_image_region(
         }
         selected.push(range.end - range.start);
     }
-    Ok(selected)
+    Ok(())
 }
 
 /// The physical plane of a borrowed sample range: `BZERO + BSCALE × sample`, with

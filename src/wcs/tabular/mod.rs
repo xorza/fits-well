@@ -4,8 +4,8 @@ use crate::error::Result;
 use crate::header::Header;
 use crate::keyword::AltSuffix;
 use crate::keyword::key;
-use crate::table_impl::BinTable;
 use crate::table_impl::column_reader::ColumnReader;
+use crate::table_impl::table_view::TableView;
 use crate::table_impl::tform_kind::TformKind;
 use crate::wcs::angle_scale;
 use crate::wcs::axis;
@@ -181,7 +181,7 @@ impl TabularDescriptor {
 impl TabularTransform {
     pub(crate) fn from_table(
         descriptor: TabularDescriptor,
-        table: &BinTable,
+        table: TableView<'_>,
     ) -> Result<TabularTransform> {
         let metadata = table.metadata();
         let dimensions = descriptor.axes.len();

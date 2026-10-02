@@ -24,8 +24,8 @@ use crate::header::Header;
 use crate::header::value;
 use crate::keyword;
 use crate::keyword::key;
-use crate::table_impl::BinTable;
 use crate::table_impl::descriptor::PqDescriptor;
+use crate::table_impl::table_view::TableView;
 use crate::table_impl::tform::Tform;
 use crate::table_impl::tform_kind::TformKind;
 
@@ -186,7 +186,7 @@ fn col_meta(tform: &Tform, offset: usize, algo: Algo, gzip_level: u32) -> Result
 /// column. Returns the compressed header and its data unit (Q descriptors + heap).
 pub(crate) fn compress_table(
     header: &Header,
-    table: &BinTable,
+    table: TableView<'_>,
     rows_per_tile: usize,
     compression: Compression,
     out: &mut Vec<u8>,
@@ -207,7 +207,7 @@ pub(crate) fn compress_table(
     let metadata = table.metadata();
     let ncols = metadata.columns.len();
     let nrows = metadata.nrows;
-    let naxis1 = table.schema.row_len;
+    let naxis1 = table.row_len;
     let raw = bound.rows;
 
     let metas: Vec<ColMeta> = metadata
@@ -376,23 +376,9 @@ pub(crate) struct HduParts {
     pub(crate) data: Vec<u8>,
 }
 
-/// The header the `ZTABLE` container itself parses with: the copied `TDIMn`, `TSCALn`,
-/// `TZEROn` and `TNULLn` describe the uncompressed columns (§10.3.1), not the `1QB` cells
-/// that hold their compressed bytes.
-pub(crate) fn container_header(header: &Header) -> Result<Header> {
-    let ncols = header.required_usize("TFIELDS", "TFIELDS")?;
-    let mut container = header.clone();
-    container.remove_where(|keyword| {
-        ["TDIM", "TSCAL", "TZERO", "TNULL"]
-            .into_iter()
-            .any(|prefix| indexed_compression_key(keyword, prefix, ncols))
-    });
-    Ok(container)
-}
-
 /// Uncompress a `ZTABLE` container back into its original `BINTABLE`.
 /// Returns the restored header and row-major data unit.
-pub(crate) fn uncompress_table(header: &Header, table: &BinTable) -> Result<HduParts> {
+pub(crate) fn uncompress_table(header: &Header, table: TableView<'_>) -> Result<HduParts> {
     if header.get_logical("ZTABLE")? != Some(true) {
         return Err(FitsError::NotCompressedTable);
     }
@@ -577,7 +563,7 @@ fn indexed_compression_key(keyword: &str, prefix: &str, ncols: usize) -> bool {
     keyword::index(keyword, prefix).is_some_and(|column| (1..=ncols).contains(&column))
 }
 
-fn bind_table<'a>(header: &Header, table: &'a BinTable) -> Result<BoundTable<'a>> {
+fn bind_table<'a>(header: &Header, table: TableView<'a>) -> Result<BoundTable<'a>> {
     let metadata = table.metadata();
     let xtension = header
         .get_text("XTENSION")?
@@ -588,7 +574,7 @@ fn bind_table<'a>(header: &Header, table: &'a BinTable) -> Result<BoundTable<'a>
     for (keyword, expected) in [
         ("BITPIX", 8usize),
         ("NAXIS", 2),
-        ("NAXIS1", table.schema.row_len),
+        ("NAXIS1", table.row_len),
         ("NAXIS2", metadata.nrows),
         ("GCOUNT", 1),
         ("TFIELDS", metadata.columns.len()),
@@ -616,21 +602,21 @@ fn bind_table<'a>(header: &Header, table: &'a BinTable) -> Result<BoundTable<'a>
             return Err(metadata_mismatch(keyword.as_str()));
         }
     }
-    if row_width != table.schema.row_len {
+    if row_width != table.row_len {
         return Err(FitsError::RowWidthMismatch {
             computed: row_width,
-            declared: table.schema.row_len,
+            declared: table.row_len,
         });
     }
 
-    let rows = table.raw_rows()?;
-    if table.schema.heap_offset < rows.len()
-        || table.schema.heap_end < table.schema.heap_offset
-        || table.schema.heap_end < rows.len()
+    let rows = table.raw_rows();
+    if table.heap_offset < rows.len()
+        || table.heap_end < table.heap_offset
+        || table.heap_end < rows.len()
     {
         return Err(metadata_mismatch("THEAP"));
     }
-    let pcount = table.schema.heap_end - rows.len();
+    let pcount = table.heap_end - rows.len();
     if header.required_usize("PCOUNT", "PCOUNT")? != pcount {
         return Err(metadata_mismatch("PCOUNT"));
     }
@@ -640,7 +626,7 @@ fn bind_table<'a>(header: &Header, table: &'a BinTable) -> Result<BoundTable<'a>
         }
         None => rows.len(),
     };
-    if theap != table.schema.heap_offset {
+    if theap != table.heap_offset {
         return Err(metadata_mismatch("THEAP"));
     }
     Ok(BoundTable { rows, pcount })
@@ -763,7 +749,7 @@ impl RestoreChunk<'_> {
     /// counterpart exactly when it is non-empty.
     fn validate_vla_layout(
         &self,
-        table: &BinTable,
+        table: TableView<'_>,
         descriptors: &[u8],
         layout: VlaLayout,
         m: &ColMeta,
@@ -792,11 +778,7 @@ impl RestoreChunk<'_> {
             }
             if compressed.count == 0
                 || compressed
-                    .heap_range(
-                        TformKind::Byte,
-                        table.schema.heap_offset,
-                        table.schema.heap_end,
-                    )
+                    .heap_range(TformKind::Byte, table.heap_offset, table.heap_end)
                     .is_err()
             {
                 return Err(VlaLayoutError::Rejected);
@@ -810,7 +792,7 @@ impl RestoreChunk<'_> {
     /// so it is the more informative failure to surface when neither order fits.
     fn resolve_vla_layout(
         &self,
-        table: &BinTable,
+        table: TableView<'_>,
         descriptors: &[u8],
         candidates: [VlaLayout; 2],
         m: &ColMeta,
@@ -832,7 +814,7 @@ impl RestoreChunk<'_> {
 
     fn decompress_vla_column(
         &mut self,
-        table: &BinTable,
+        table: TableView<'_>,
         bytes: &[u8],
         m: &ColMeta,
         scratch: &mut TableDecodeScratch,

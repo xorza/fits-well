@@ -23,11 +23,11 @@ pub enum ImageView<'a> {
     F64(&'a [f64]),
 }
 
-/// A scratch-backed image read: owned geometry and scaling paired with a borrowed,
+/// A scratch-backed image read: the shape and scaling paired with a borrowed,
 /// host-endian sample view.
 #[derive(Debug)]
 pub struct BorrowedImage<'a> {
-    pub shape: Vec<usize>,
+    pub shape: &'a [usize],
     pub scaling: Scaling,
     pub samples: ImageView<'a>,
 }
@@ -36,7 +36,7 @@ impl BorrowedImage<'_> {
     /// The image geometry, stored element type, and physical-value scaling.
     pub fn metadata(&self) -> ImageMetadata<'_> {
         ImageMetadata {
-            shape: &self.shape,
+            shape: self.shape,
             bitpix: self.samples.bitpix(),
             scaling: self.scaling,
         }

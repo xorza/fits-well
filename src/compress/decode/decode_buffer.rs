@@ -1,15 +1,13 @@
 //! The caller's output plane, which selects the stored sample type tiles narrow into.
 
-use std::ops::Range;
-
 use crate::bitpix::Bitpix;
 use crate::compress::decode::image_decode_plan::ImageDecodePlan;
-use crate::compress::decode::image_layout::ImageLayout;
-use crate::compress::decode::image_region_layout::ImageRegionLayout;
+use crate::compress::decode::tiled_image::TileSection;
+use crate::compress::decode::tiled_image::TiledImage;
 use crate::data::image_data::ImageData;
 use crate::error::Result;
 use crate::header::Header;
-use crate::table_impl::BinTable;
+use crate::table_impl::table_view::TableView;
 use crate::words;
 
 /// A typed mutable view of the samples a decode writes into — owned [`ImageData`] or
@@ -62,10 +60,11 @@ impl<'a> DecodeBuffer<'a> {
     pub(super) fn decode_image(
         self,
         header: &Header,
-        table: &BinTable,
-        layout: &ImageLayout,
+        table: TableView<'_>,
+        tiled: &TiledImage<'_>,
     ) -> Result<()> {
-        let plan = ImageDecodePlan::for_buffer(header, table, layout, self.is_float())?;
+        debug_assert_eq!(self.bitpix(), tiled.image.bitpix);
+        let plan = ImageDecodePlan::new(header, table, tiled)?;
         match self {
             DecodeBuffer::U8(out) => plan.decode_all_into(out),
             DecodeBuffer::I16(out) => plan.decode_all_into(out),
@@ -76,31 +75,37 @@ impl<'a> DecodeBuffer<'a> {
         }
     }
 
-    /// Decode the tiles intersecting `ranges` into this section-sized buffer.
+    /// Decode the tiles `section` intersects into this section-sized buffer.
     pub(super) fn decode_section(
         self,
         header: &Header,
-        table: &BinTable,
-        tile_rows: &[usize],
-        ranges: &[Range<usize>],
-        region: &ImageRegionLayout,
+        table: TableView<'_>,
+        tiled: &TiledImage<'_>,
+        section: TileSection<'_>,
     ) -> Result<()> {
-        debug_assert_ne!(region.total, 0);
-        let plan = ImageDecodePlan::for_buffer(header, table, &region.image, self.is_float())?;
-        let shape = &region.shape;
+        debug_assert_eq!(self.bitpix(), tiled.image.bitpix);
+        debug_assert_eq!(table.nrows, section.rows.len());
+        let plan = ImageDecodePlan::new(header, table, tiled)?;
         match self {
-            DecodeBuffer::U8(out) => plan.decode_region_into(ranges, shape, tile_rows, out),
-            DecodeBuffer::I16(out) => plan.decode_region_into(ranges, shape, tile_rows, out),
-            DecodeBuffer::I32(out) => plan.decode_region_into(ranges, shape, tile_rows, out),
-            DecodeBuffer::I64(out) => plan.decode_region_into(ranges, shape, tile_rows, out),
-            DecodeBuffer::F32(out) => plan.decode_region_into(ranges, shape, tile_rows, out),
-            DecodeBuffer::F64(out) => plan.decode_region_into(ranges, shape, tile_rows, out),
+            DecodeBuffer::U8(out) => plan.decode_region_into(section, out),
+            DecodeBuffer::I16(out) => plan.decode_region_into(section, out),
+            DecodeBuffer::I32(out) => plan.decode_region_into(section, out),
+            DecodeBuffer::I64(out) => plan.decode_region_into(section, out),
+            DecodeBuffer::F32(out) => plan.decode_region_into(section, out),
+            DecodeBuffer::F64(out) => plan.decode_region_into(section, out),
         }
     }
 
-    /// Whether this buffer holds the float plane. Every constructor sizes the buffer
-    /// from `ZBITPIX`, so this must agree with the layout the plan was built from.
-    fn is_float(&self) -> bool {
-        matches!(self, DecodeBuffer::F32(_) | DecodeBuffer::F64(_))
+    /// The sample type this buffer holds. Every constructor sizes it from `ZBITPIX`,
+    /// and the tile decoder picks its plane from the same value.
+    const fn bitpix(&self) -> Bitpix {
+        match self {
+            DecodeBuffer::U8(_) => Bitpix::U8,
+            DecodeBuffer::I16(_) => Bitpix::I16,
+            DecodeBuffer::I32(_) => Bitpix::I32,
+            DecodeBuffer::I64(_) => Bitpix::I64,
+            DecodeBuffer::F32(_) => Bitpix::F32,
+            DecodeBuffer::F64(_) => Bitpix::F64,
+        }
     }
 }

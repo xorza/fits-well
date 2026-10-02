@@ -54,11 +54,11 @@ pub trait Source: sealed::Sealed {
         scratch: &'a mut Vec<u8>,
     ) -> Result<&'a [u8]>;
 
-    /// The `len` bytes at `offset` in a fresh owned buffer — used where the bytes
-    /// must outlive the read (the parsed table / ASCII-table backing store). Kept
-    /// distinct from `slice().to_vec()` so a streaming source reads straight into
-    /// the owned buffer (one copy) instead of staging through `scratch` first (two).
-    fn read_owned(&mut self, offset: u64, len: usize) -> Result<Vec<u8>>;
+    /// Append the `len` bytes at `offset` to `out` — used where the bytes must outlive
+    /// the read (a parsed table's storage, a table selection). Kept distinct from
+    /// `slice` so a streaming source reads straight into `out` (one copy) instead of
+    /// staging through `scratch` first (two).
+    fn read_append(&mut self, offset: u64, len: usize, out: &mut Vec<u8>) -> Result<()>;
 }
 
 /// Reject `[offset, offset+len)` that overflows or runs past `size`. A hostile
@@ -79,9 +79,12 @@ fn mem_slice(bytes: &[u8], offset: u64, len: usize) -> Result<&[u8]> {
     Ok(&bytes[off..off + len])
 }
 
-/// Owned copy of [`mem_slice`] — the `read_owned` form for the in-memory sources.
-fn mem_owned(bytes: &[u8], offset: u64, len: usize) -> Result<Vec<u8>> {
-    Ok(mem_slice(bytes, offset, len)?.to_vec())
+/// [`mem_slice`] appended to `out` — the `read_append` form for the in-memory sources.
+fn mem_append(bytes: &[u8], offset: u64, len: usize, out: &mut Vec<u8>) -> Result<()> {
+    let bytes = mem_slice(bytes, offset, len)?;
+    allocation::try_reserve(out, len)?;
+    out.extend_from_slice(bytes);
+    Ok(())
 }
 
 /// A streaming `Read + Seek` source. Each fetch seeks and copies the range out —
@@ -125,12 +128,14 @@ impl<R: Read + Seek> Source for StreamSource<R> {
         Ok(&scratch[..len])
     }
 
-    fn read_owned(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
+    fn read_append(&mut self, offset: u64, len: usize, out: &mut Vec<u8>) -> Result<()> {
         check_range(offset, len, self.len)?;
         self.inner.seek(SeekFrom::Start(offset))?;
-        let mut buf = allocation::try_zeroed(0u8, len)?;
-        self.inner.read_exact(&mut buf)?;
-        Ok(buf)
+        let start = out.len();
+        let end = start.checked_add(len).ok_or(FitsError::DataUnitOverflow)?;
+        allocation::try_resize(out, end, 0)?;
+        self.inner.read_exact(&mut out[start..])?;
+        Ok(())
     }
 }
 
@@ -166,8 +171,8 @@ impl Source for SliceSource<'_> {
         mem_slice(self.bytes, offset, len)
     }
 
-    fn read_owned(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
-        mem_owned(self.bytes, offset, len)
+    fn read_append(&mut self, offset: u64, len: usize, out: &mut Vec<u8>) -> Result<()> {
+        mem_append(self.bytes, offset, len, out)
     }
 }
 
@@ -208,8 +213,8 @@ impl Source for MmapSource {
         mem_slice(&self.map, offset, len)
     }
 
-    fn read_owned(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
-        mem_owned(&self.map, offset, len)
+    fn read_append(&mut self, offset: u64, len: usize, out: &mut Vec<u8>) -> Result<()> {
+        mem_append(&self.map, offset, len, out)
     }
 }
 
@@ -226,7 +231,8 @@ pub(crate) mod internals {
     #[derive(Debug)]
     pub(crate) struct CountingSource<'a> {
         pub(crate) inner: SliceSource<'a>,
-        pub(crate) owned_reads: Rc<Cell<usize>>,
+        /// The bytes fetched through either path.
+        pub(crate) fetched: Rc<Cell<usize>>,
     }
 
     impl sealed::Sealed for CountingSource<'_> {}
@@ -242,12 +248,13 @@ pub(crate) mod internals {
             len: usize,
             scratch: &'a mut Vec<u8>,
         ) -> Result<&'a [u8]> {
+            self.fetched.set(self.fetched.get() + len);
             self.inner.slice(offset, len, scratch)
         }
 
-        fn read_owned(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
-            self.owned_reads.set(self.owned_reads.get() + 1);
-            self.inner.read_owned(offset, len)
+        fn read_append(&mut self, offset: u64, len: usize, out: &mut Vec<u8>) -> Result<()> {
+            self.fetched.set(self.fetched.get() + len);
+            self.inner.read_append(offset, len, out)
         }
     }
 }

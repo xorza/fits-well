@@ -4,6 +4,8 @@
 //! extension, or random-groups formula, rounded up to a block, so the reader never
 //! touches data to find the next HDU.
 
+pub(crate) mod image_geometry;
+
 use crate::block::checked_padded_len;
 use crate::error::FitsError;
 use crate::error::Result;

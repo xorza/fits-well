@@ -834,7 +834,7 @@ pub(super) fn write_compressed<W: Write>(
     writer.ensure_writable()?;
     let zheader = table::compress_table(
         header,
-        table,
+        table.view(),
         rows_per_tile,
         compression,
         &mut writer.scratch,
