@@ -1,4 +1,3 @@
-use crate::bintable::character_field::CharacterField;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::descriptor;
 use crate::bitpix::Bitpix;
@@ -9,6 +8,7 @@ use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Ranked;
 use crate::header_model::Header;
+use crate::ragged::Ragged;
 use crate::reader::data_source;
 use crate::reader::internals::open_fixture;
 use crate::reader::*;
@@ -220,23 +220,16 @@ fn read_wcs_fetches_only_the_referenced_first_row_heap_cells() {
         .set_internal("PS1_2", "INDEX")
         .set_internal("PV1_3", 1);
     let row_count = 64;
-    let coordinates = (0..row_count)
-        .map(|_| ColumnData::F64(vec![10.0, 20.0, 40.0]))
-        .collect();
-    let indices = (0..row_count)
-        .map(|_| ColumnData::F64(vec![10.0, 20.0, 40.0]))
-        .collect();
-    let unused = (0..row_count)
-        .map(|_| ColumnData::Bytes(vec![7; 1024]))
-        .collect();
+    let coordinates = (0..row_count).map(|_| ColumnData::F64(vec![10.0, 20.0, 40.0]));
+    let indices = (0..row_count).map(|_| ColumnData::F64(vec![10.0, 20.0, 40.0]));
+    let unused = (0..row_count).map(|_| ColumnData::Bytes(vec![7; 1024]));
     let table = TableBuilder::explicit(
         row_count,
         vec![
-            WriteColumn::vla("COORD", coordinates)
-                .unwrap()
+            WriteColumn::vla("COORD", Ragged::from_rows(coordinates).unwrap())
                 .with_tdim(vec![1, 3]),
-            WriteColumn::vla("INDEX", indices).unwrap(),
-            WriteColumn::vla("UNUSED", unused).unwrap(),
+            WriteColumn::vla("INDEX", Ragged::from_rows(indices).unwrap()),
+            WriteColumn::vla("UNUSED", Ragged::from_rows(unused).unwrap()),
         ],
     )
     .unwrap();
@@ -1250,12 +1243,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
         ),
         WriteColumn::fixed(
             "NAME",
-            ColumnData::Character(
-                [b"one ", b"two ", b"tri ", b"four"]
-                    .into_iter()
-                    .map(|value| CharacterField::new(value.to_vec()))
-                    .collect(),
-            ),
+            ColumnData::Character(b"one two tri four".to_vec()),
             4,
         ),
         WriteColumn::scalar(
@@ -1285,24 +1273,24 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
         WriteColumn::fixed("ZERO", ColumnData::I16(Vec::new()), 0),
         WriteColumn::vla(
             "VLA",
-            vec![
+            Ragged::from_rows(vec![
                 ColumnData::I32(vec![1]),
                 ColumnData::I32(vec![2, 3]),
                 ColumnData::I32(Vec::new()),
                 ColumnData::I32(vec![4, 5, 6]),
-            ],
-        )
-        .unwrap(),
+            ])
+            .unwrap(),
+        ),
         WriteColumn::vla(
             "QVLA",
-            vec![
+            Ragged::from_rows(vec![
                 ColumnData::F64(vec![0.5]),
                 ColumnData::F64(Vec::new()),
                 ColumnData::F64(vec![2.5, 3.5]),
                 ColumnData::F64(vec![4.5]),
-            ],
+            ])
+            .unwrap(),
         )
-        .unwrap()
         .wide(),
     ];
     let table = TableBuilder::explicit(rows, columns).unwrap();
@@ -1318,17 +1306,12 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     assert_eq!(empty.metadata().nrows, 0);
     assert_eq!(
         empty.column_by_name("VLA").unwrap().vla().unwrap(),
-        Vec::<ColumnData>::new()
+        Ragged::<ColumnData>::new(ColumnData::I32(Vec::new()), Vec::new())
     );
     let full = reader.read_table_rows(1, 0..4).unwrap();
     assert_eq!(
         full.column_by_name("QVLA").unwrap().vla().unwrap(),
-        [
-            ColumnData::F64(vec![0.5]),
-            ColumnData::F64(Vec::new()),
-            ColumnData::F64(vec![2.5, 3.5]),
-            ColumnData::F64(vec![4.5]),
-        ]
+        Ragged::<ColumnData>::new(ColumnData::F64(vec![0.5, 2.5, 3.5, 4.5]), vec![1, 1, 3, 4])
     );
     let ranged = reader.read_table_rows(1, 1..3).unwrap();
     assert_eq!(
@@ -1344,10 +1327,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     );
     assert_eq!(
         ranged.column_by_name("NAME").unwrap().raw().unwrap(),
-        ColumnData::Character(vec![
-            CharacterField::new(b"two ".to_vec()),
-            CharacterField::new(b"tri ".to_vec()),
-        ])
+        ColumnData::Character(b"two tri ".to_vec())
     );
     assert_eq!(
         ranged.column_by_name("COMPLEX").unwrap().complex().unwrap(),
@@ -1358,11 +1338,11 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     assert_eq!(physical[1], 14.0);
     assert_eq!(
         ranged.column_by_name("VLA").unwrap().vla().unwrap(),
-        [ColumnData::I32(vec![2, 3]), ColumnData::I32(Vec::new())]
+        Ragged::<ColumnData>::new(ColumnData::I32(vec![2, 3]), vec![2, 2])
     );
     assert_eq!(
         ranged.column_by_name("QVLA").unwrap().vla().unwrap(),
-        [ColumnData::F64(Vec::new()), ColumnData::F64(vec![2.5, 3.5])]
+        Ragged::<ColumnData>::new(ColumnData::F64(vec![2.5, 3.5]), vec![0, 2])
     );
 
     let selection = reader
@@ -1376,7 +1356,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     assert!(matches!(
         &selection.columns[1].data,
         TableColumnData::Variable(values)
-            if values == &[ColumnData::I32(vec![2, 3]), ColumnData::I32(Vec::new())]
+            if values == &Ragged::<ColumnData>::new(ColumnData::I32(vec![2, 3]), vec![2, 2])
     ));
     assert_eq!(
         reader
@@ -1389,10 +1369,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
         ("LOGICAL", ColumnData::Logical(vec![None])),
         ("BYTE", ColumnData::Bytes(vec![3])),
         ("FLAGS", ColumnData::Bytes(vec![0b1110_0000])),
-        (
-            "NAME",
-            ColumnData::Character(vec![CharacterField::new(b"tri ".to_vec())]),
-        ),
+        ("NAME", ColumnData::Character(b"tri ".to_vec())),
         (
             "COMPLEX",
             ColumnData::ComplexF32(vec![Complex::new(3.0, -3.0)]),
@@ -1445,7 +1422,8 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     ));
     assert!(matches!(
         &selection.columns[1].data,
-        TableColumnData::Variable(values) if values == &[ColumnData::I32(vec![2, 3])]
+        TableColumnData::Variable(values)
+            if values == &Ragged::<ColumnData>::new(ColumnData::I32(vec![2, 3]), vec![2])
     ));
     assert_eq!(
         selective
@@ -1465,7 +1443,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     let one = stream.read_table_rows(1, 3..4).unwrap();
     assert_eq!(
         one.column_by_name("VLA").unwrap().vla().unwrap(),
-        [ColumnData::I32(vec![4, 5, 6])]
+        Ragged::<ColumnData>::new(ColumnData::I32(vec![4, 5, 6]), vec![3])
     );
     assert_eq!(
         stream
@@ -1473,19 +1451,20 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
             .unwrap()
             .columns[0]
             .data,
-        TableColumnData::Variable(vec![
-            ColumnData::F64(vec![0.5]),
-            ColumnData::F64(Vec::new()),
-            ColumnData::F64(vec![2.5, 3.5]),
-            ColumnData::F64(vec![4.5]),
-        ])
+        TableColumnData::Variable(Ragged::<ColumnData>::new(
+            ColumnData::F64(vec![0.5, 2.5, 3.5, 4.5]),
+            vec![1, 1, 3, 4]
+        ))
     );
 }
 
 #[test]
 fn malformed_pq_descriptors_match_across_table_read_paths() {
     for wide in [false, true] {
-        let mut column = WriteColumn::vla("VLA", vec![ColumnData::Bytes(vec![7])]).unwrap();
+        let mut column = WriteColumn::vla(
+            "VLA",
+            Ragged::from_rows(vec![ColumnData::Bytes(vec![7])]).unwrap(),
+        );
         if wide {
             column = column.wide();
         }

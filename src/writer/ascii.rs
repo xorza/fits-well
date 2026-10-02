@@ -228,8 +228,8 @@ impl<'a> AsciiField<'a> {
 /// genuine value does not collide with the column's null marker.
 fn ascii_field<'a>(col: &'a AsciiWriteColumn, row: usize) -> Result<AsciiField<'a>> {
     let field = match &col.data {
-        AsciiColumnData::Text(values) => match &values[row] {
-            Some(value) => AsciiField::value(Cow::Borrowed(value.as_str()), true),
+        AsciiColumnData::Text(values) => match values.get(row) {
+            Some(value) => AsciiField::value(Cow::Borrowed(value), true),
             None => AsciiField::null(col),
         },
         AsciiColumnData::Integer(values) => match values[row] {
@@ -243,7 +243,7 @@ fn ascii_field<'a>(col: &'a AsciiWriteColumn, row: usize) -> Result<AsciiField<'
     };
     validate_ascii_field_width(col, row, field.text.len())?;
     if let AsciiColumnData::Text(values) = &col.data
-        && let Some(value) = &values[row]
+        && let Some(value) = values.get(row)
     {
         validate_ascii(value, "ASCII text cell")?;
     }

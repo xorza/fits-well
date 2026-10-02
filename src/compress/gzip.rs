@@ -27,9 +27,16 @@ pub(super) struct GzipScratch {
 /// Gzip a raw big-endian byte buffer at deflate `level` (0–9; the `GZIP_1` tile
 /// encoder). The level is lossless — only the speed↔ratio tradeoff changes.
 pub(super) fn gzip_encode(raw: &[u8], level: u32) -> Vec<u8> {
-    let mut enc = GzEncoder::new(Vec::new(), Compression::new(level));
+    let mut out = Vec::new();
+    gzip_encode_into(raw, level, &mut out);
+    out
+}
+
+/// [`gzip_encode`], appending the stream to `out`.
+pub(super) fn gzip_encode_into(raw: &[u8], level: u32, out: &mut Vec<u8>) {
+    let mut enc = GzEncoder::new(out, Compression::new(level));
     enc.write_all(raw).expect("gzip into a Vec cannot fail");
-    enc.finish().expect("gzip finish into a Vec cannot fail")
+    enc.finish().expect("gzip finish into a Vec cannot fail");
 }
 
 /// `GZIP_2` encoder: shuffle `raw` into significance byte-planes, then gzip at `level`.
@@ -39,11 +46,24 @@ pub(super) fn gzip2_encode(
     level: u32,
     scratch: &mut GzipScratch,
 ) -> Vec<u8> {
+    let mut out = Vec::new();
+    gzip2_encode_into(raw, width, level, scratch, &mut out);
+    out
+}
+
+/// [`gzip2_encode`], appending the stream to `out`.
+pub(super) fn gzip2_encode_into(
+    raw: &[u8],
+    width: usize,
+    level: u32,
+    scratch: &mut GzipScratch,
+    out: &mut Vec<u8>,
+) {
     if width <= 1 {
-        return gzip_encode(raw, level);
+        return gzip_encode_into(raw, level, out);
     }
     shuffle_bytes_into(raw, width, &mut scratch.reordered);
-    gzip_encode(&scratch.reordered, level)
+    gzip_encode_into(&scratch.reordered, level, out);
 }
 
 /// Shuffle `raw` into `width`-byte significance planes (all byte-0s, then all

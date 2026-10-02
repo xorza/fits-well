@@ -802,11 +802,7 @@ fn first_row_shape_and_values(row_count: usize, reader: ColumnReader<'_>) -> Res
         TformKind::ArrayDesc32 | TformKind::ArrayDesc64
     );
     let values = if variable {
-        reader
-            .vla_physical()?
-            .into_iter()
-            .next()
-            .expect("TAB table has at least one row")
+        reader.vla_physical()?.row(0).to_vec()
     } else {
         let values = reader.physical()?;
         values[..descriptor.tform.repeat].to_vec()

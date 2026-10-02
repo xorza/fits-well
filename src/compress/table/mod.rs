@@ -27,6 +27,7 @@ use crate::hdu::validate_table_field_count;
 use crate::header_model::Header;
 use crate::header_model::value;
 use crate::keyword::key;
+use crate::ragged::Ragged;
 use crate::reserved_keywords;
 
 /// Per-column compression algorithm (`ZCTYPn`).
@@ -267,7 +268,8 @@ pub(crate) fn compress_table(
                     rows.checked_mul(m.width)
                         .ok_or(FitsError::DataUnitOverflow)?,
                 );
-                let mut arrays = Vec::with_capacity(rows);
+                let mut values = Vec::new();
+                let mut ends = Vec::with_capacity(rows);
                 for row in 0..rows {
                     let off = (r0 + row) * naxis1 + m.offset;
                     descriptors.extend_from_slice(&raw[off..off + m.width]);
@@ -275,16 +277,17 @@ pub(crate) fn compress_table(
                     // reference implementation of §10.3 — stores it; a stored length equal
                     // to the raw length is then what marks it raw, and cannot be a stream.
                     let cell = vla.cell(r0 + row)?;
-                    let compressed = compress_payload(m, cell.bytes, gzip_level, scratch)?;
-                    arrays.push(if compressed.len() < cell.bytes.len() {
-                        compressed
-                    } else {
-                        cell.bytes.to_vec()
-                    });
+                    let start = values.len();
+                    compress_payload_into(m, cell.bytes, gzip_level, scratch, &mut values);
+                    if values.len() - start >= cell.bytes.len() {
+                        values.truncate(start);
+                        values.extend_from_slice(cell.bytes);
+                    }
+                    ends.push(values.len());
                 }
                 return Ok(EncodedColumn::Variable {
                     descriptors,
-                    arrays,
+                    arrays: Ragged::<Vec<u8>>::new(values, ends),
                 });
             }
             // Transpose: gather this column's bytes across the tile's rows.
@@ -298,9 +301,10 @@ pub(crate) fn compress_table(
                 scratch.column.extend_from_slice(&raw[off..off + m.width]);
             }
             let column_bytes = std::mem::take(&mut scratch.column);
-            let compressed = compress_payload(m, &column_bytes, gzip_level, scratch);
+            let mut compressed = Vec::new();
+            compress_payload_into(m, &column_bytes, gzip_level, scratch, &mut compressed);
             scratch.column = column_bytes;
-            Ok(EncodedColumn::Fixed(compressed?))
+            Ok(EncodedColumn::Fixed(compressed))
         },
     )?;
 
@@ -322,7 +326,7 @@ pub(crate) fn compress_table(
                     .checked_mul(16)
                     .ok_or(FitsError::DataUnitOverflow)?;
                 let mut combined = allocation::try_zeroed(0u8, compressed_len)?;
-                for (row, mut array) in arrays.into_iter().enumerate() {
+                for (row, array) in arrays.rows().enumerate() {
                     if array.is_empty() {
                         continue;
                     }
@@ -333,7 +337,7 @@ pub(crate) fn compress_table(
                         array.len() as u64,
                         offset as u64,
                     )?;
-                    out.append(&mut array);
+                    out.extend_from_slice(array);
                 }
                 combined.extend_from_slice(&descriptors);
                 gzip::gzip_encode(&combined, gzip_level)
@@ -643,7 +647,7 @@ fn metadata_mismatch(name: impl Into<String>) -> FitsError {
     FitsError::TableMetadataMismatch { name: name.into() }
 }
 
-/// Compress one tile's column-major raw bytes per the column's algorithm.
+/// The buffers a worker reuses from one table tile to the next.
 #[derive(Debug, Default)]
 struct TableEncodeScratch {
     column: Vec<u8>,
@@ -657,19 +661,24 @@ enum EncodedColumn {
     Fixed(Vec<u8>),
     Variable {
         descriptors: Vec<u8>,
-        arrays: Vec<Vec<u8>>,
+        arrays: Ragged<Vec<u8>>,
     },
 }
 
-fn compress_payload(
+/// Compress one tile's column-major raw bytes per the column's codec, appending
+/// the stream to `out`.
+fn compress_payload_into(
     m: &ColMeta,
     bytes: &[u8],
     gzip_level: u32,
     scratch: &mut TableEncodeScratch,
-) -> Result<Vec<u8>> {
-    Ok(match m.algo {
-        Algo::Gzip1 => gzip::gzip_encode(bytes, gzip_level),
-        Algo::Gzip2 => gzip::gzip2_encode(bytes, m.shuffle_width(), gzip_level, &mut scratch.gzip),
+    out: &mut Vec<u8>,
+) {
+    match m.algo {
+        Algo::Gzip1 => gzip::gzip_encode_into(bytes, gzip_level, out),
+        Algo::Gzip2 => {
+            gzip::gzip2_encode_into(bytes, m.shuffle_width(), gzip_level, &mut scratch.gzip, out);
+        }
         Algo::Rice1 => {
             let bytepix = m.rice_bytepix();
             debug_assert!(bytes.len().is_multiple_of(bytepix), "whole Rice pixels");
@@ -678,10 +687,10 @@ fn compress_payload(
                 convert::bytepix_to_bitpix(bytepix),
                 &mut scratch.ints,
             );
-            rice::rice_encode(&scratch.ints, bytepix, 32, &mut scratch.rice)
+            rice::rice_encode_into(&scratch.ints, bytepix, 32, &mut scratch.rice, out);
         }
-        Algo::NoCompress => bytes.to_vec(),
-    })
+        Algo::NoCompress => out.extend_from_slice(bytes),
+    }
 }
 
 #[derive(Debug, Default)]

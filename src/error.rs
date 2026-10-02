@@ -240,9 +240,11 @@ pub enum FitsError {
         "table column {column:?} does not determine a row count; declare the table row count explicitly"
     )]
     TableRowCountUndetermined { column: String },
-    /// An empty VLA column needs an explicit heap element type.
-    #[error("empty VLA column {column:?} needs an explicit heap element type")]
-    EmptyVlaNeedsType { column: String },
+    /// Variable-length rows built from a list of rows need at least one row to
+    /// give their element type; an empty column states it with an empty typed
+    /// `ColumnData`.
+    #[error("variable-length rows need one row to give their element type")]
+    EmptyVlaNeedsType,
     /// A FITS keyword family was addressed with zero even though its indices start at 1.
     #[error("{kind} indices are 1-based and cannot be zero")]
     OneBasedIndexRequired { kind: &'static str },

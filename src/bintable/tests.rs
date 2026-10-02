@@ -30,9 +30,9 @@ fn reads_the_real_aips_antenna_table() {
     assert_eq!(table.schema.columns[3].byte_offset, 32);
     assert_eq!(table.schema.columns[1].unit.as_deref(), Some("METERS"));
 
-    // Decoded element counts: one ANNAME string per row, 3 doubles per row, none for 0D.
+    // Decoded element counts: eight ANNAME bytes per row, 3 doubles per row, none for 0D.
     match table.column_by_idx(0).unwrap().raw().unwrap() {
-        ColumnData::Character(v) => assert_eq!(v.len(), 28),
+        ColumnData::Character(v) => assert_eq!(v.len(), 28 * 8),
         other => panic!("ANNAME should be Character, got {other:?}"),
     }
     match table.column_by_idx(1).unwrap().raw().unwrap() {

@@ -1,11 +1,11 @@
 use crate::bintable::BinTable;
-use crate::bintable::character_field::CharacterField;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::internals::table_header;
 use crate::data::U64_OFFSET;
 use crate::data::unsigned_data::UnsignedData;
 use crate::error::FitsError;
 use crate::error::Indexed;
+use crate::ragged::Ragged;
 use num_complex::Complex;
 
 #[test]
@@ -45,10 +45,7 @@ fn decodes_fixed_width_columns_from_hand_built_data() {
     );
     assert_eq!(
         table.column_by_idx(2).unwrap().raw().unwrap(),
-        ColumnData::Character(vec![
-            CharacterField::new(b"ABC".to_vec()),
-            CharacterField::new(b"DE ".to_vec())
-        ])
+        ColumnData::Character(b"ABCDE ".to_vec())
     );
 }
 
@@ -63,11 +60,11 @@ fn zero_repeat_column_decodes_to_empty() {
     );
     assert_eq!(
         table.column_by_idx(1).unwrap().vla().unwrap(),
-        vec![ColumnData::I32(Vec::new())]
+        Ragged::<ColumnData>::new(ColumnData::I32(Vec::new()), vec![0])
     );
     assert_eq!(
         table.column_by_idx(2).unwrap().vla().unwrap(),
-        vec![ColumnData::F64(Vec::new())]
+        Ragged::<ColumnData>::new(ColumnData::F64(Vec::new()), vec![0])
     );
     assert!(table.column_by_idx(3).unwrap().vla_bits().unwrap()[0].is_empty());
     assert_eq!(
@@ -150,7 +147,7 @@ fn decodes_variable_length_arrays_from_the_heap() {
     let table = BinTable::from_data(&header, data).unwrap();
     assert_eq!(
         table.column_by_idx(0).unwrap().vla().unwrap(),
-        vec![ColumnData::F32(vec![1.0, 2.0]), ColumnData::F32(vec![3.0]),]
+        Ragged::<ColumnData>::new(ColumnData::F32(vec![1.0, 2.0, 3.0]), vec![2, 3])
     );
 }
 
@@ -260,9 +257,10 @@ fn read_vla_column_physical_scales_heap_arrays_and_nulls() {
     }
     let table = BinTable::from_data(&header, data).unwrap();
     let phys = table.column_by_idx(0).unwrap().vla_physical().unwrap();
-    assert_eq!(phys[0][0], 20.0); // 10 + 2·5
-    assert!(phys[0][1].is_nan()); // 99 == TNULL
-    assert_eq!(phys[1], vec![16.0]); // 10 + 2·3
+    assert_eq!(phys.ends(), [2, 3]);
+    assert_eq!(phys.row(0)[0], 20.0); // 10 + 2·5
+    assert!(phys.row(0)[1].is_nan()); // 99 == TNULL
+    assert_eq!(phys.row(1), [16.0]); // 10 + 2·3
 }
 
 #[test]
@@ -294,14 +292,14 @@ fn read_vla_complex_scales_p_and_q_heap_values() {
     // PC: 10 + 2·(1 + 2i) = 12 + 4i; QM: 3 - 0.5·(6 - 8i) = 0 + 4i.
     assert_eq!(
         table.column_by_idx(0).unwrap().vla_complex().unwrap(),
-        vec![
+        Ragged::<Vec<_>>::new(
             vec![Complex { re: 12.0, im: 4.0 }, Complex { re: 4.0, im: 8.0 }],
-            vec![],
-        ]
+            vec![2, 2]
+        )
     );
     assert_eq!(
         table.column_by_idx(1).unwrap().vla_complex().unwrap(),
-        vec![vec![Complex { re: 0.0, im: 4.0 }], vec![]]
+        Ragged::<Vec<_>>::new(vec![Complex { re: 0.0, im: 4.0 }], vec![1, 1])
     );
 }
 
@@ -327,7 +325,10 @@ fn read_vla_unsigned_is_exact_past_f64_integer_precision() {
     }
 
     let table = BinTable::from_data(&header, data.clone()).unwrap();
-    let exact = Some(vec![UnsignedData::U64(expected.to_vec())]);
+    let exact = Some(Ragged::<UnsignedData>::new(
+        UnsignedData::U64(expected.to_vec()),
+        vec![3],
+    ));
     assert_eq!(
         table.column_by_idx(0).unwrap().vla_unsigned().unwrap(),
         exact
@@ -337,7 +338,12 @@ fn read_vla_unsigned_is_exact_past_f64_integer_precision() {
         exact
     );
     assert_eq!(
-        table.column_by_idx(0).unwrap().vla_physical().unwrap()[0][1],
+        table
+            .column_by_idx(0)
+            .unwrap()
+            .vla_physical()
+            .unwrap()
+            .row(0)[1],
         9_007_199_254_740_992.0
     );
 

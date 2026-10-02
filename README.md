@@ -164,25 +164,28 @@ println!("{} rows, {} columns", metadata.nrows, metadata.columns.len());
 // `.raw()` is the stored, typed plane; `.physical()` applies TZEROn/TSCALn and
 // maps TNULLn to NaN, widening to f64. `.unsigned()`, `.complex()`, and `.bits()`
 // cover fixed special kinds; `.vla()` plus `.vla_physical()`, `.vla_unsigned()`,
-// `.vla_complex()`, and `.vla_bits()` cover jagged P/Q heap arrays.
+// `.vla_complex()`, and `.vla_bits()` cover P/Q heap arrays, every row in one
+// buffer as a `Ragged`.
 println!("ID  = {:?}", table.column_by_idx(0)?.raw()?);
 println!("MAG = {:?}", table.column_by_name("MAG")?.physical()?);
 # Ok::<(), fits_well::FitsError>(())
 ```
 
 `TableBuilder` infers row count and scalar type. `WriteColumn::fixed` remains the
-explicit-schema path for vector cells, while `WriteColumn::vla` infers a
-nonempty heap type; use `vla_typed` only for an empty/predeclared VLA. The
-parallel `AsciiTableBuilder`/`AsciiWriteColumn` API lives under
-`fits_well::table`.
+explicit-schema path for vector cells, and `WriteColumn::characters` pads text
+fields to a width. `WriteColumn::vla` takes a `Ragged<ColumnData>` — every row's
+values in one typed buffer plus the row ends — so even an empty column states its
+heap type; `Ragged::from_rows` builds one from a row list. The parallel
+`AsciiTableBuilder`/`AsciiWriteColumn` API lives under `fits_well::table`.
 
-For large tables, discover `hdu.table_schema()` without reading data, then use
+For large tables, read `hdu.table_schema()` without reading data, then use
 `read_table_rows`, `read_table_columns`, or `read_table_cell`. Ranged reads fetch
 only selected rows and referenced P/Q heap cells; `read_table()` remains the
 explicit whole-table materialization path.
 
-Jagged bit arrays use `WriteColumn::vla_bits` with one MSB-first
-`BitVec<u8, Msb0>` per row; call `.wide()` when `QX` descriptors are required.
+Jagged bit arrays use `WriteColumn::vla_bits` with a `Ragged<BitVec<u8, Msb0>>`,
+which collects from one MSB-first bit vector per row; call `.wide()` when `QX`
+descriptors are required.
 
 ### World Coordinate System
 

@@ -32,6 +32,7 @@ use crate::hdu::HduRole;
 use crate::hdu::data_extent;
 use crate::header_model::Header;
 use crate::header_model::card::is_end_record;
+use crate::ragged::Ragged;
 use crate::reader::data_source::DataSource;
 use crate::reader::data_source::TableRows;
 use crate::reader::hdu::Hdu;
@@ -81,7 +82,7 @@ impl From<String> for ColumnSelector {
 #[non_exhaustive]
 pub enum TableColumnData {
     Fixed(ColumnData),
-    Variable(Vec<ColumnData>),
+    Variable(Ragged<ColumnData>),
 }
 
 /// One decoded column in a ranged table selection.
