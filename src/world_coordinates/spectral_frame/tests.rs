@@ -1,6 +1,7 @@
 use crate::error::FitsError;
 use crate::header_model::Header;
 use crate::world_coordinates::Wcs;
+use crate::world_coordinates::axis::spectral_rest::SpectralRest;
 use crate::world_coordinates::spectral_frame::SpectralFrame;
 use crate::world_coordinates::spectral_frame::SpectralReferenceFrame;
 
@@ -45,8 +46,10 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         Some(SpectralFrame {
             coordinate: Some(SpectralReferenceFrame::Barycentric),
             observer: SpectralReferenceFrame::Topocentric,
-            rest_frequency_hz: Some(1_420_405_751.0),
-            rest_wavelength_m: None,
+            rest: SpectralRest {
+                frequency: Some(1_420_405_751.0),
+                wavelength: None,
+            },
         })
     );
     let mut by_wavelength = velocity_axis("VELO-F2V");
@@ -112,8 +115,10 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         Some(SpectralFrame {
             coordinate: Some(SpectralReferenceFrame::Barycentric),
             observer: SpectralReferenceFrame::Geocentric,
-            rest_frequency_hz: Some(1_420_405_751.0),
-            rest_wavelength_m: None,
+            rest: SpectralRest {
+                frequency: Some(1_420_405_751.0),
+                wavelength: None,
+            },
         })
     );
     assert_eq!(
@@ -121,8 +126,10 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         Some(SpectralFrame {
             coordinate: Some(SpectralReferenceFrame::Source),
             observer: SpectralReferenceFrame::Heliocentric,
-            rest_frequency_hz: None,
-            rest_wavelength_m: Some(5.0e-7),
+            rest: SpectralRest {
+                frequency: None,
+                wavelength: Some(5.0e-7),
+            },
         })
     );
 
@@ -144,8 +151,10 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         Some(SpectralFrame {
             coordinate: Some(SpectralReferenceFrame::LsrKinematic),
             observer: SpectralReferenceFrame::Topocentric,
-            rest_frequency_hz: None,
-            rest_wavelength_m: Some(2.997_924_58e8 / 1_420_405_751.0),
+            rest: SpectralRest {
+                frequency: None,
+                wavelength: Some(2.997_924_58e8 / 1_420_405_751.0),
+            },
         })
     );
 
@@ -163,8 +172,10 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         Some(SpectralFrame {
             coordinate: Some(SpectralReferenceFrame::CmbDipole),
             observer: SpectralReferenceFrame::Barycentric,
-            rest_frequency_hz: Some(1_420_405_751.0),
-            rest_wavelength_m: None,
+            rest: SpectralRest {
+                frequency: Some(1_420_405_751.0),
+                wavelength: None,
+            },
         })
     );
 

@@ -7,17 +7,17 @@ use crate::world_coordinates::axis::spectral_kind::{
     invalid_reference, required_grism_parameter,
 };
 
-use crate::world_coordinates::axis::spectral_kind::{Characteristic, SpectralKind};
+use crate::world_coordinates::axis::spectral_algorithm::SpectralAlgorithm;
+use crate::world_coordinates::axis::spectral_kind::SpectralKind;
 use crate::world_coordinates::axis::spectral_rest::ResolvedRest;
 use crate::world_coordinates::axis::spectral_rest::SpectralParameters;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SpectralTransform {
     kind: SpectralKind,
-    sampled: Characteristic,
+    algorithm: SpectralAlgorithm,
     rest: ResolvedRest,
     sampling: SpectralSampling,
-    algorithm: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -38,12 +38,12 @@ struct Grism {
 impl SpectralTransform {
     pub(super) fn new(
         kind: SpectralKind,
-        sampled: Characteristic,
+        algorithm: SpectralAlgorithm,
         reference_world: f64,
         rest: ResolvedRest,
-        algorithm: &'static str,
         parameters: SpectralParameters,
     ) -> Result<SpectralTransform> {
+        let sampled = algorithm.sampled();
         let physical = kind
             .to_characteristic(reference_world, rest)
             .map_err(|()| invalid_reference(kind))?;
@@ -55,20 +55,23 @@ impl SpectralTransform {
         if !reference.is_finite() || !derivative.is_finite() || derivative == 0.0 {
             return Err(invalid_reference(kind));
         }
-        let sampling = if matches!(algorithm, "GRI" | "GRA") {
-            SpectralSampling::Grism(Grism::new(reference, derivative, parameters, algorithm)?)
-        } else {
-            SpectralSampling::Linear {
+        let sampling = match algorithm {
+            SpectralAlgorithm::Grism { .. } => SpectralSampling::Grism(Grism::new(
                 reference,
                 derivative,
-            }
+                parameters,
+                algorithm.name(),
+            )?),
+            SpectralAlgorithm::Pair { .. } => SpectralSampling::Linear {
+                reference,
+                derivative,
+            },
         };
         Ok(SpectralTransform {
             kind,
-            sampled,
+            algorithm,
             rest,
             sampling,
-            algorithm,
         })
     }
 
@@ -76,30 +79,35 @@ impl SpectralTransform {
         let sampled = self
             .sampling
             .to_sampled(intermediate)
-            .map_err(|()| domain_error(axis, self.algorithm))?;
-        let physical = convert(self.sampled, self.kind.characteristic(), sampled, self.rest)
-            .map_err(|()| domain_error(axis, self.algorithm))?;
+            .map_err(|()| domain_error(axis, self.algorithm.name()))?;
+        let physical = convert(
+            self.algorithm.sampled(),
+            self.kind.characteristic(),
+            sampled,
+            self.rest,
+        )
+        .map_err(|()| domain_error(axis, self.algorithm.name()))?;
         self.kind
             .world_from_characteristic(physical, self.rest)
             .and_then(finite)
-            .map_err(|()| domain_error(axis, self.algorithm))
+            .map_err(|()| domain_error(axis, self.algorithm.name()))
     }
 
     pub(super) fn to_intermediate(&self, world: f64, axis: usize) -> Result<f64> {
         let physical = self
             .kind
             .to_characteristic(world, self.rest)
-            .map_err(|()| domain_error(axis, self.algorithm))?;
+            .map_err(|()| domain_error(axis, self.algorithm.name()))?;
         let sampled = convert(
             self.kind.characteristic(),
-            self.sampled,
+            self.algorithm.sampled(),
             physical,
             self.rest,
         )
-        .map_err(|()| domain_error(axis, self.algorithm))?;
+        .map_err(|()| domain_error(axis, self.algorithm.name()))?;
         self.sampling
             .to_intermediate(sampled)
-            .map_err(|()| domain_error(axis, self.algorithm))
+            .map_err(|()| domain_error(axis, self.algorithm.name()))
     }
 }
 

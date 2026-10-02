@@ -3,6 +3,7 @@
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::Header;
+use crate::keyword::AltSuffix;
 use crate::keyword::key;
 use crate::world_coordinates::ctype::Ctype;
 
@@ -45,13 +46,12 @@ impl CelestialFrame {
     /// `None` when neither is declared and no axis needs the frame.
     pub(super) fn from_header(
         header: &Header,
-        alt: Option<char>,
-        suffix: &str,
+        suffix: AltSuffix,
         ctype: &[String],
     ) -> Result<Option<CelestialFrame>> {
         let key = key!("RADESYS{suffix}");
         let mut declared = header.get_text(key.as_str())?;
-        if declared.is_none() && alt.is_none() {
+        if declared.is_none() && !suffix.is_alternate() {
             declared = header.get_text("RADECSYS")?;
         }
         let equinox = header.get_real(key!("EQUINOX{suffix}").as_str())?;

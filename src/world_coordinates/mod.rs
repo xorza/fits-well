@@ -26,7 +26,7 @@ use crate::world_coordinates::spectral_frame::SpectralFrame;
 use crate::world_coordinates::table_wcs::TableWcs;
 use crate::world_coordinates::wcs_axis::WcsAxis;
 
-mod axis;
+pub(crate) mod axis;
 #[cfg(feature = "internals")]
 pub(crate) mod bench;
 mod celestial_axis;
@@ -147,7 +147,7 @@ impl Wcs {
             .collect::<Result<_>>()?;
         let celestial_pair = CelestialAxisPair::find(&ctype);
         let celestial_axes = ProjectedCelestialAxes::find(&ctype)?;
-        let celestial_frame = CelestialFrame::from_header(header, alt, a.as_str(), &ctype)?;
+        let celestial_frame = CelestialFrame::from_header(header, a, &ctype)?;
         let spectral_frames = match spectral_frames {
             Some(frames) => {
                 assert_eq!(frames.len(), naxis, "spectral frame count");
@@ -157,7 +157,7 @@ impl Wcs {
                 let frame = ctype
                     .iter()
                     .any(|ctype| axis::is_spectral_type(ctype))
-                    .then(|| SpectralFrame::from_header(header, alt, a.as_str()))
+                    .then(|| SpectralFrame::from_header(header, a))
                     .transpose()?;
                 ctype
                     .iter()
@@ -174,7 +174,7 @@ impl Wcs {
         let mut axis_scales = vec![1.0; naxis];
         if let Some(axes) = celestial_axes {
             for ax in [axes.longitude, axes.latitude] {
-                axis_scales[ax] = angle_scale(&cunit[ax])?;
+                axis_scales[ax] = world_unit_scale(Ctype::parse(&ctype[ax]), &cunit[ax])?;
                 crval[ax] *= axis_scales[ax];
                 world_units[ax] = Some("deg");
             }
@@ -214,10 +214,7 @@ impl Wcs {
                 *value = header.get_real(key!("PV{}_{parameter}{a}", axis + 1).as_str())?;
             }
             let parameters = SpectralParameters::new(spectral_parameters);
-            let rest = match spectral_frames[axis] {
-                Some(frame) => SpectralRest::new(frame.rest_frequency_hz, frame.rest_wavelength_m)?,
-                None => SpectralRest::NONE,
-            };
+            let rest = spectral_frames[axis].map_or(SpectralRest::NONE, |frame| frame.rest);
             let spec =
                 AxisTransform::parse(&ctype[axis], &cunit[axis], crval[axis], rest, parameters)?;
             axis_scales[axis] = spec.unit_scale;
@@ -502,7 +499,20 @@ impl Wcs {
 }
 
 /// Degrees per `CUNITia` of a celestial axis, whose absent unit is the degree (§8.2).
-pub(crate) fn angle_scale(unit: &str) -> Result<f64> {
+/// The factor from an axis's declared `CUNITi` to the unit its world coordinates
+/// come out in: degrees for a celestial axis (§8.2), the Table-25 default for a
+/// spectral one (§8.4), and the declared unit for any other.
+pub(crate) fn world_unit_scale(ctype: Ctype<'_>, cunit: &str) -> Result<f64> {
+    if let Some(scale) = axis::spectral_unit_scale(ctype.head, cunit)? {
+        return Ok(scale);
+    }
+    if ctype.celestial_axis().is_some() {
+        return angle_scale(cunit);
+    }
+    Ok(1.0)
+}
+
+fn angle_scale(unit: &str) -> Result<f64> {
     if unit.trim().is_empty() {
         return Ok(1.0);
     }

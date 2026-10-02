@@ -2,17 +2,16 @@
 //! crate means the spectral family — the `CTYPEi` codes that pair a sampled
 //! characteristic with an expressed one, and the conversions between them.
 
+pub(super) mod spectral_algorithm;
 pub(super) mod spectral_kind;
-pub(super) mod spectral_rest;
+pub(crate) mod spectral_rest;
 pub(super) mod spectral_transform;
 
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::world_coordinates::axis::spectral_kind::{
-    Characteristic, SpectralKind, algorithm_name, domain_error, finite, is_spectral_pair_syntax,
-    rest_requirement,
-};
-use crate::world_coordinates::axis::spectral_rest::{SpectralParameters, SpectralRest};
+use crate::world_coordinates::axis::spectral_algorithm::SpectralAlgorithm;
+use crate::world_coordinates::axis::spectral_kind::{SpectralKind, domain_error, finite};
+use crate::world_coordinates::axis::spectral_rest::{RestNeed, SpectralParameters, SpectralRest};
 use crate::world_coordinates::axis::spectral_transform::SpectralTransform;
 use crate::world_coordinates::ctype::Ctype;
 
@@ -77,35 +76,22 @@ impl AxisTransform {
         let Some(kind) = kind else {
             return Ok(unsupported());
         };
-        let sampled = match code {
-            "GRI" => Some(Characteristic::Wavelength),
-            "GRA" => Some(Characteristic::AirWavelength),
-            _ => Characteristic::from_algorithm(code, kind.characteristic()),
-        };
-        let Some(sampled) = sampled else {
-            if is_spectral_pair_syntax(code) {
-                return Err(FitsError::InvalidWcs {
-                    detail: format!("spectral CTYPE {ctype:?} has inconsistent variables"),
-                });
-            }
+        let Some(algorithm) = SpectralAlgorithm::parse(code) else {
             return Ok(unsupported());
         };
+        // An `X2P` code must express the coordinate type's own characteristic, and
+        // convert between two distinct ones.
+        if let SpectralAlgorithm::Pair { sampled, expressed } = algorithm
+            && (expressed != kind.characteristic() || sampled == expressed)
+        {
+            return Err(FitsError::InvalidWcs {
+                detail: format!("spectral CTYPE {ctype:?} has inconsistent variables"),
+            });
+        }
         let unit_scale = kind.unit_scale(cunit)?;
-        let requirement = rest_requirement(kind.characteristic(), sampled, kind);
-        let rest = rest.resolve(requirement)?;
-        let algorithm = match code {
-            "GRI" => "GRI",
-            "GRA" => "GRA",
-            _ => algorithm_name(sampled, kind.characteristic()),
-        };
-        let transform = SpectralTransform::new(
-            kind,
-            sampled,
-            reference * unit_scale,
-            rest,
-            algorithm,
-            parameters,
-        )?;
+        let rest = rest.resolve(RestNeed::of(kind, algorithm.sampled()))?;
+        let transform =
+            SpectralTransform::new(kind, algorithm, reference * unit_scale, rest, parameters)?;
         Ok(AxisTransformSpec {
             transform: AxisTransform::Spectral(transform),
             unit_scale,
@@ -144,8 +130,10 @@ pub(super) fn is_spectral_type(ctype: &str) -> bool {
     SpectralKind::from_code(Ctype::parse(ctype).head).is_some()
 }
 
-pub(super) fn spectral_unit_scale(ctype: &str, cunit: &str) -> Result<Option<f64>> {
-    SpectralKind::from_code(Ctype::parse(ctype).head)
+/// The factor from `cunit` to a spectral axis's Table-25 default unit, or `None`
+/// when `head` names no spectral type.
+pub(super) fn spectral_unit_scale(head: &str, cunit: &str) -> Result<Option<f64>> {
+    SpectralKind::from_code(head)
         .map(|kind| kind.unit_scale(cunit))
         .transpose()
 }

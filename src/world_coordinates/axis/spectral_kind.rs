@@ -199,6 +199,8 @@ impl SpectralKind {
     }
 }
 
+/// The four basic spectral characteristics (WCS Paper III, Table 2), in the order
+/// of [`Characteristic::ALL`], which their discriminants index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Characteristic {
     Frequency,
@@ -208,41 +210,31 @@ pub(super) enum Characteristic {
 }
 
 impl Characteristic {
-    pub(super) fn from_algorithm(code: &str, expressed: Characteristic) -> Option<Characteristic> {
-        let sampled = match code {
-            "F2W" | "F2V" | "F2A" => Characteristic::Frequency,
-            "W2F" | "W2V" | "W2A" => Characteristic::Wavelength,
-            "V2F" | "V2W" | "V2A" => Characteristic::Velocity,
-            "A2F" | "A2W" | "A2V" => Characteristic::AirWavelength,
-            _ => return None,
-        };
-        let target = match code.as_bytes()[2] {
-            b'F' => Characteristic::Frequency,
-            b'W' => Characteristic::Wavelength,
-            b'A' => Characteristic::AirWavelength,
-            b'V' => Characteristic::Velocity,
-            _ => return None,
-        };
-        (target == expressed).then_some(sampled)
+    pub(super) const ALL: [Characteristic; 4] = [
+        Characteristic::Frequency,
+        Characteristic::Wavelength,
+        Characteristic::AirWavelength,
+        Characteristic::Velocity,
+    ];
+
+    /// The letter an algorithm code names this characteristic by.
+    pub(super) const fn letter(self) -> u8 {
+        match self {
+            Characteristic::Frequency => b'F',
+            Characteristic::Wavelength => b'W',
+            Characteristic::AirWavelength => b'A',
+            Characteristic::Velocity => b'V',
+        }
+    }
+
+    pub(super) fn from_letter(letter: u8) -> Option<Characteristic> {
+        Characteristic::ALL
+            .into_iter()
+            .find(|characteristic| characteristic.letter() == letter)
     }
 }
 
 pub(super) type DomainResult = std::result::Result<f64, ()>;
-
-pub(super) fn rest_requirement(
-    expressed: Characteristic,
-    sampled: Characteristic,
-    kind: SpectralKind,
-) -> u8 {
-    let mut requirement = u8::from(matches!(
-        kind,
-        SpectralKind::RadioVelocity | SpectralKind::OpticalVelocity | SpectralKind::Redshift
-    ));
-    if (expressed == Characteristic::Velocity) != (sampled == Characteristic::Velocity) {
-        requirement += 2;
-    }
-    requirement
-}
 
 pub(super) fn convert(
     from: Characteristic,
@@ -408,32 +400,6 @@ pub(super) fn refractive_index(inverse_square: f64) -> DomainResult {
         return Err(());
     }
     finite(1.000_064_328 + 2.554e8 / first + 294.981e8 / second)
-}
-
-pub(super) fn is_spectral_pair_syntax(code: &str) -> bool {
-    let bytes = code.as_bytes();
-    bytes.len() == 3
-        && matches!(bytes[0], b'F' | b'W' | b'A' | b'V')
-        && bytes[1] == b'2'
-        && matches!(bytes[2], b'F' | b'W' | b'A' | b'V')
-}
-
-pub(super) fn algorithm_name(sampled: Characteristic, expressed: Characteristic) -> &'static str {
-    match (sampled, expressed) {
-        (Characteristic::Frequency, Characteristic::Wavelength) => "F2W",
-        (Characteristic::Frequency, Characteristic::Velocity) => "F2V",
-        (Characteristic::Frequency, Characteristic::AirWavelength) => "F2A",
-        (Characteristic::Wavelength, Characteristic::Frequency) => "W2F",
-        (Characteristic::Wavelength, Characteristic::Velocity) => "W2V",
-        (Characteristic::Wavelength, Characteristic::AirWavelength) => "W2A",
-        (Characteristic::Velocity, Characteristic::Frequency) => "V2F",
-        (Characteristic::Velocity, Characteristic::Wavelength) => "V2W",
-        (Characteristic::Velocity, Characteristic::AirWavelength) => "V2A",
-        (Characteristic::AirWavelength, Characteristic::Frequency) => "A2F",
-        (Characteristic::AirWavelength, Characteristic::Wavelength) => "A2W",
-        (Characteristic::AirWavelength, Characteristic::Velocity) => "A2V",
-        _ => panic!("spectral algorithm must convert distinct characteristics"),
-    }
 }
 
 /// `[multiplier] length⁻¹` in any of FITS's spellings, per metre.

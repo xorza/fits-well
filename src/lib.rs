@@ -131,6 +131,7 @@ pub mod wcs {
     //! out of scope. Transform methods return explicit errors for invalid projection
     //! domains or failed iterations.
 
+    pub use crate::world_coordinates::axis::spectral_rest::SpectralRest;
     pub use crate::world_coordinates::celestial_frame::{CelestialFrame, CelestialReferenceFrame};
     pub use crate::world_coordinates::celestial_pole::CelestialPole;
     pub use crate::world_coordinates::projection::Projection;
