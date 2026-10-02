@@ -511,26 +511,6 @@ fn decompress_image_rejects_overflowing_znaxis_product() {
         decompress_image(&h, &table),
         Err(FitsError::DataUnitOverflow)
     ));
-
-    let image = crate::data::Image {
-        shape: vec![usize::MAX, 2],
-        samples: ImageData::I16(Vec::new()),
-        scaling: crate::data::scaling::Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
-    };
-    let mut out = Vec::new();
-    assert!(matches!(
-        encode::compress_image(
-            &image,
-            Compression::GZIP,
-            &CompressionOptions::default(),
-            &mut out
-        ),
-        Err(FitsError::DataUnitOverflow)
-    ));
 }
 
 #[test]

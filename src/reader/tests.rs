@@ -16,6 +16,7 @@ use crate::reader::internals::open_fixture;
 use crate::reader::*;
 use crate::world_coordinates::tabular::internals::{lookup_bytes, lookup_header};
 use crate::writer::FitsWriter;
+use crate::writer::internals::written;
 use crate::writer::table::{TableBuilder, WriteColumn};
 use num_complex::Complex;
 use std::cell::{Cell, RefCell};
@@ -706,24 +707,14 @@ fn image_indices_lists_readable_images_including_compressed() {
     assert!(open_fixture("DDTSUVDATA.fits").image_indices().is_empty());
 }
 
-fn write_to_vec(image: &Image) -> Vec<u8> {
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_image(image, None).unwrap();
-    w.into_inner().into_inner()
-}
-
 #[test]
 fn read_image_borrows_u8_samples_with_zero_copy() {
     let image = Image {
         shape: vec![4],
         samples: ImageData::U8(vec![10, 20, 30, 40]),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
-    let buf = write_to_vec(&image);
+    let buf = written(|w| w.write_image(&image, None));
 
     let mut reader = FitsReader::from_bytes(&buf).unwrap();
     let raw = reader.read_image(0).unwrap();
@@ -747,13 +738,9 @@ fn read_image_exposes_big_endian_bytes_for_multibyte_types() {
     let image = Image {
         shape: vec![3],
         samples: ImageData::I16(vec![1, -2, 300]),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
-    let buf = write_to_vec(&image);
+    let buf = written(|w| w.write_image(&image, None));
 
     let mut reader = FitsReader::from_bytes(&buf).unwrap();
     let raw = reader.read_image(0).unwrap();
@@ -787,13 +774,9 @@ fn read_image_view_borrows_u8_samples_with_zero_copy() {
     let image = Image {
         shape: vec![4],
         samples: ImageData::U8(vec![10, 20, 30, 40]),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
-    let buf = write_to_vec(&image);
+    let buf = written(|w| w.write_image(&image, None));
     let mut reader = FitsReader::from_bytes(&buf).unwrap();
     let mut scratch = Vec::new();
     let image = reader.read_image_view(0, &mut scratch).unwrap();
@@ -976,7 +959,7 @@ fn image_sections_match_hand_computed_values_for_every_bitpix() {
     for (samples, expected) in cases {
         let bitpix = samples.bitpix();
         let image = Image::new(vec![5, 4, 3], samples).unwrap();
-        let bytes = write_to_vec(&image);
+        let bytes = written(|w| w.write_image(&image, None));
         let mut reader = FitsReader::from_bytes(&bytes).unwrap();
         let mut scratch = Vec::new();
         let section = reader
@@ -1000,7 +983,7 @@ fn image_sections_preserve_scaling_and_validate_empty_and_invalid_regions() {
         },
     )
     .unwrap();
-    let bytes = write_to_vec(&image);
+    let bytes = written(|w| w.write_image(&image, None));
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
     let section = reader.read_image_section(0, &[1..4, 0..2]).unwrap();
     assert_eq!(section.metadata().shape, [3, 2]);
@@ -1040,7 +1023,7 @@ fn plain_image_section_streams_exact_strided_runs() {
         .map(|index| index as i16 - 100)
         .collect();
     let image = Image::new(shape.to_vec(), samples.clone()).unwrap();
-    let bytes = write_to_vec(&image);
+    let bytes = written(|w| w.write_image(&image, None));
     let bytes_read = Rc::new(Cell::new(0));
     let read_ranges = Rc::new(RefCell::new(Vec::new()));
     let source = CountingCursor {
@@ -1473,7 +1456,7 @@ fn malformed_pq_descriptors_match_across_table_read_paths() {
 #[test]
 fn readers_recover_their_original_sources() {
     let image = Image::new(vec![2], vec![1u8, 2]).unwrap();
-    let bytes = write_to_vec(&image);
+    let bytes = written(|w| w.write_image(&image, None));
     let slice = FitsReader::from_bytes(&bytes).unwrap().into_bytes();
     assert!(std::ptr::eq(slice.as_ptr(), bytes.as_ptr()));
     assert_eq!(slice.len(), bytes.len());

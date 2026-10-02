@@ -1,8 +1,8 @@
 use crate::bintable::BinTable;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::internals::table_header;
-use crate::data::U64_OFFSET;
 use crate::data::unsigned_data::UnsignedData;
+use crate::data::{I8_OFFSET, U16_OFFSET, U64_OFFSET};
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::ragged::Ragged;
@@ -198,8 +198,8 @@ fn read_column_unsigned_recovers_typed_values() {
     // `1I` with TZERO=2¹⁵ → u16; `1B` with TZERO=-128 → i8.
     let mut header = table_header(3, 1, &["1I", "1B"]);
     header
-        .set_internal("TZERO1", 32768.0)
-        .set_internal("TZERO2", -128.0);
+        .set_internal("TZERO1", U16_OFFSET)
+        .set_internal("TZERO2", I8_OFFSET);
     let mut data = Vec::new();
     data.extend_from_slice(&((50000u16 ^ 0x8000) as i16).to_be_bytes());
     data.push(((-10i8) as u8) ^ 0x80);
@@ -219,7 +219,7 @@ fn read_column_unsigned_is_exact_for_u64_and_none_otherwise() {
     // `1K` with TZERO=2⁶³ → u64, exact past 2⁵³; a plain `1J` (TZERO=0) is not
     // an unsigned column.
     let mut header = table_header(12, 1, &["1K", "1J"]);
-    header.set_internal("TZERO1", 9_223_372_036_854_775_808.0); // 2⁶³
+    header.set_internal("TZERO1", U64_OFFSET);
     let mut data = Vec::new();
     data.extend_from_slice(&((u64::MAX ^ 0x8000_0000_0000_0000) as i64).to_be_bytes());
     data.extend_from_slice(&7i32.to_be_bytes());

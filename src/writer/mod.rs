@@ -409,5 +409,47 @@ fn merge_header_template(header: &mut Header, template: Option<&Header>) {
     });
 }
 
+/// In-memory writers and readers for the tests of every module that writes.
+#[cfg(test)]
+pub(crate) mod internals {
+    use std::io::Cursor;
+
+    use crate::error::Result;
+    use crate::reader::{FitsReader, StreamReader};
+    use crate::writer::FitsWriter;
+    use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
+    use crate::writer::table::{TableBuilder, WriteColumn};
+
+    pub(crate) type MemoryWriter = FitsWriter<Cursor<Vec<u8>>>;
+
+    pub(crate) fn binary_table(nrows: usize, columns: &[WriteColumn]) -> TableBuilder {
+        TableBuilder {
+            nrows: Some(nrows),
+            columns: columns.to_vec(),
+        }
+    }
+
+    pub(crate) fn ascii_table(nrows: usize, columns: &[AsciiWriteColumn]) -> AsciiTableBuilder {
+        AsciiTableBuilder {
+            nrows: Some(nrows),
+            columns: columns.to_vec(),
+        }
+    }
+
+    /// The file `write` produces in a fresh in-memory writer.
+    pub(crate) fn written(write: impl FnOnce(&mut MemoryWriter) -> Result<()>) -> Vec<u8> {
+        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+        write(&mut writer).unwrap();
+        writer.into_inner().into_inner()
+    }
+
+    /// A reader over the file `write` produces.
+    pub(crate) fn round_trip(
+        write: impl FnOnce(&mut MemoryWriter) -> Result<()>,
+    ) -> StreamReader<Cursor<Vec<u8>>> {
+        FitsReader::open(Cursor::new(written(write))).unwrap()
+    }
+}
+
 #[cfg(test)]
 mod tests;

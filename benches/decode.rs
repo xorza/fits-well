@@ -138,16 +138,7 @@ fn read_image(c: &mut Criterion) {
     let mut g = c.benchmark_group("read_image");
     for &(name, bitpix) in TYPES {
         let n = count(bitpix);
-        let img = Image::new_scaled(
-            vec![n],
-            sample_data(bitpix, n),
-            Scaling {
-                bscale: 1.0,
-                bzero: 0.0,
-                blank: None,
-            },
-        )
-        .unwrap();
+        let img = Image::new_scaled(vec![n], sample_data(bitpix, n), Scaling::IDENTITY).unwrap();
         let mut w = FitsWriter::new(Cursor::new(Vec::new()));
         w.write_image(&img, None).unwrap();
         // Open once and reuse the reader, whose internal scratch is reused across
@@ -173,16 +164,7 @@ fn read_image_view(c: &mut Criterion) {
     let mut g = c.benchmark_group("read_image_view");
     for &(name, bitpix) in TYPES {
         let n = count(bitpix);
-        let img = Image::new_scaled(
-            vec![n],
-            sample_data(bitpix, n),
-            Scaling {
-                bscale: 1.0,
-                bzero: 0.0,
-                blank: None,
-            },
-        )
-        .unwrap();
+        let img = Image::new_scaled(vec![n], sample_data(bitpix, n), Scaling::IDENTITY).unwrap();
         let mut w = FitsWriter::new(Cursor::new(Vec::new()));
         w.write_image(&img, None).unwrap();
         let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();

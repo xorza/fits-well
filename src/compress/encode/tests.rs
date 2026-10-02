@@ -8,6 +8,7 @@ use crate::error::Ranked;
 use crate::header_model::value::Value;
 use crate::reader::FitsReader;
 use crate::writer::FitsWriter;
+use crate::writer::internals::round_trip;
 use std::io::Cursor;
 
 #[test]
@@ -18,11 +19,7 @@ fn compression_write_round_trips_through_decode() {
     let image = Image {
         shape: vec![24, 16],
         samples: ImageData::I16(samples.clone()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
     for (case, compression, tiles) in [
         ("GZIP_1 row tiles", Compression::GZIP, &[][..]),
@@ -35,10 +32,9 @@ fn compression_write_round_trips_through_decode() {
             &[24, 16],
         ),
     ] {
-        let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-        w.write_compressed_image(&image, compression, &CompressionOptions::tiled(tiles), None)
-            .unwrap();
-        let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+        let mut r = round_trip(|w| {
+            w.write_compressed_image(&image, compression, &CompressionOptions::tiled(tiles), None)
+        });
         if matches!(compression, Compression::Hcompress(_)) {
             let header = &r.hdus()[1].header;
             assert!(matches!(header.get("ZVAL1"), Some(Value::Real(0.0))));
@@ -56,21 +52,16 @@ fn compression_write_round_trips_through_decode() {
     let image_3d = Image {
         shape: vec![5, 4, 3],
         samples: ImageData::I16(samples_3d.clone()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(
-        &image_3d,
-        Compression::GZIP,
-        &CompressionOptions::tiled([3, 2, 2]),
-        None,
-    )
-    .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| {
+        w.write_compressed_image(
+            &image_3d,
+            Compression::GZIP,
+            &CompressionOptions::tiled([3, 2, 2]),
+            None,
+        )
+    });
     let back = r.read_image(1).unwrap();
     assert_eq!(back.shape, vec![5, 4, 3]);
     assert!(matches!(back.decode(), ImageData::I16(v) if v == samples_3d));
@@ -126,15 +117,14 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
             Compression::None,
         ] {
             let cmptype = compression.name();
-            let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-            w.write_compressed_image(
-                &image,
-                compression,
-                &CompressionOptions::tiled([24, 1]),
-                None,
-            )
-            .unwrap();
-            let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+            let mut r = round_trip(|w| {
+                w.write_compressed_image(
+                    &image,
+                    compression,
+                    &CompressionOptions::tiled([24, 1]),
+                    None,
+                )
+            });
             let header = &r.hdus()[1].header;
             match compression {
                 Compression::Rice => {
@@ -312,11 +302,7 @@ fn dither_option_sets_zquantiz_and_round_trips() {
     let image = Image {
         shape: vec![24, 16],
         samples: ImageData::F32(float_field()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
     // Each `DitherMethod` writes its `ZQUANTIZ` keyword and decodes within half a
     // quantization step (plus an f32 ulp for the dither arithmetic and the stored
@@ -328,13 +314,11 @@ fn dither_option_sets_zquantiz_and_round_trips() {
         (DitherMethod::Subtractive1, "SUBTRACTIVE_DITHER_1"),
         (DitherMethod::Subtractive2, "SUBTRACTIVE_DITHER_2"),
     ] {
-        let mut w = FitsWriter::new(Cursor::new(Vec::new()));
         let options = CompressionOptions::tiled([24, 16])
             .with_quantization(0.0, dither)
             .unwrap();
-        w.write_compressed_image(&image, Compression::Rice, &options, None)
-            .unwrap();
-        let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+        let mut r =
+            round_trip(|w| w.write_compressed_image(&image, Compression::Rice, &options, None));
         assert_eq!(
             r.hdus()[1].header.get_text("ZQUANTIZ").unwrap(),
             Some(zquantiz),
@@ -372,11 +356,7 @@ fn tile_shape_with_wrong_rank_is_rejected() {
     let image = Image {
         shape: vec![4, 3],
         samples: ImageData::I16((0..12).map(|i| i as i16).collect()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     let err = w.write_compressed_image(
@@ -406,21 +386,16 @@ fn float_write_preserves_nan_nulls() {
     let image = Image {
         shape: vec![24, 16],
         samples: ImageData::F32(orig.clone()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(
-        &image,
-        Compression::Rice,
-        &CompressionOptions::tiled([24, 16]),
-        None,
-    )
-    .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| {
+        w.write_compressed_image(
+            &image,
+            Compression::Rice,
+            &CompressionOptions::tiled([24, 16]),
+            None,
+        )
+    });
     let zscale = r
         .read_table(1)
         .unwrap()
@@ -461,15 +436,14 @@ fn hcompress_writer_converts_noise_multiplier_to_tile_scale() {
         })
         .collect();
     let image = Image::new(vec![8, 8], samples).unwrap();
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(
-        &image,
-        Compression::Hcompress(Hcompress::lossy(2.0).unwrap()),
-        &CompressionOptions::tiled([8, 8]),
-        None,
-    )
-    .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| {
+        w.write_compressed_image(
+            &image,
+            Compression::Hcompress(Hcompress::lossy(2.0).unwrap()),
+            &CompressionOptions::tiled([8, 8]),
+            None,
+        )
+    });
     assert!(matches!(
         r.hdus()[1].header.get("ZVAL1"),
         Some(Value::Real(2.0))
@@ -554,21 +528,16 @@ fn plio_write_round_trips_through_decode() {
     let image = Image {
         shape: vec![24, 16],
         samples: ImageData::I32(samples.clone()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(
-        &image,
-        Compression::Plio,
-        &CompressionOptions::default(),
-        None,
-    )
-    .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| {
+        w.write_compressed_image(
+            &image,
+            Compression::Plio,
+            &CompressionOptions::default(),
+            None,
+        )
+    });
     match r.read_image(1).unwrap().decode() {
         ImageData::I32(v) => assert_eq!(v, samples, "PLIO_1 round-trip"),
         other => panic!("PLIO_1: expected I32, got {other:?}"),
@@ -589,15 +558,14 @@ fn integer_image_compression_preserves_bscale_bzero_and_blank() {
             blank: Some(-5),
         },
     };
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(
-        &image,
-        Compression::GZIP,
-        &CompressionOptions::default(),
-        None,
-    )
-    .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| {
+        w.write_compressed_image(
+            &image,
+            Compression::GZIP,
+            &CompressionOptions::default(),
+            None,
+        )
+    });
     let back = r.read_image(1).unwrap();
     assert_eq!(back.scaling.bscale, 2.5);
     assert_eq!(back.scaling.bzero, 100.0);
@@ -625,21 +593,16 @@ fn rice_64_bit_pixels_round_trip_extreme_differences() {
     let image = Image {
         shape: vec![samples.len()],
         samples: ImageData::I64(samples.clone()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(
-        &image,
-        Compression::Rice,
-        &CompressionOptions::default(),
-        None,
-    )
-    .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| {
+        w.write_compressed_image(
+            &image,
+            Compression::Rice,
+            &CompressionOptions::default(),
+            None,
+        )
+    });
     let decoded = r.read_image(1).unwrap().decode();
     assert_eq!(decoded, ImageData::I64(samples));
 }
@@ -653,21 +616,16 @@ fn nocompress_image_round_trips() {
     let image = Image {
         shape: vec![24, 16],
         samples: ImageData::I16(samples.clone()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(
-        &image,
-        Compression::None,
-        &CompressionOptions::default(),
-        None,
-    )
-    .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| {
+        w.write_compressed_image(
+            &image,
+            Compression::None,
+            &CompressionOptions::default(),
+            None,
+        )
+    });
     match r.read_image(1).unwrap().decode() {
         ImageData::I16(v) => assert_eq!(v, samples),
         other => panic!("expected I16, got {other:?}"),
@@ -719,21 +677,16 @@ fn empty_naxis0_image_round_trips() {
         let image = Image {
             shape: Vec::new(),
             samples: samples.clone(),
-            scaling: Scaling {
-                bscale: 1.0,
-                bzero: 0.0,
-                blank: None,
-            },
+            scaling: Scaling::IDENTITY,
         };
-        let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-        w.write_compressed_image(
-            &image,
-            Compression::GZIP,
-            &CompressionOptions::default(),
-            None,
-        )
-        .unwrap();
-        let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+        let mut r = round_trip(|w| {
+            w.write_compressed_image(
+                &image,
+                Compression::GZIP,
+                &CompressionOptions::default(),
+                None,
+            )
+        });
         let back = r.read_image(1).unwrap();
         assert!(back.shape.is_empty(), "shape for {samples:?}");
         // Same empty variant back out, no phantom pixel.
@@ -751,22 +704,37 @@ fn empty_first_axis_image_round_trips() {
     let image = Image {
         shape: vec![0],
         samples: ImageData::I16(Vec::new()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(
-        &image,
-        Compression::GZIP,
-        &CompressionOptions::default(),
-        None,
-    )
-    .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| {
+        w.write_compressed_image(
+            &image,
+            Compression::GZIP,
+            &CompressionOptions::default(),
+            None,
+        )
+    });
     let back = r.read_image(1).unwrap();
     assert_eq!(back.shape, [0]);
     assert!(matches!(back.decode(), ImageData::I16(v) if v.is_empty()));
+}
+
+#[test]
+fn compressed_image_with_an_overflowing_shape_is_refused_before_output() {
+    let image = Image {
+        shape: vec![usize::MAX, 2],
+        samples: ImageData::I16(Vec::new()),
+        scaling: Scaling::IDENTITY,
+    };
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_compressed_image(
+            &image,
+            Compression::GZIP,
+            &CompressionOptions::default(),
+            None
+        ),
+        Err(FitsError::DataUnitOverflow)
+    ));
+    assert!(writer.into_inner().into_inner().is_empty());
 }

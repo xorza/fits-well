@@ -10,13 +10,6 @@ use std::fs::File;
 use fits_well::image::{Image, ImageData, ImageView, Scaling};
 use fits_well::{FitsReader, FitsWriter};
 
-/// Identity scaling: physical value = stored, no blanks — the common case.
-const IDENTITY: Scaling = Scaling {
-    bscale: 1.0,
-    bzero: 0.0,
-    blank: None,
-};
-
 fn main() -> fits_well::Result<()> {
     let path = std::env::temp_dir().join("fits_well_image.fits");
 
@@ -25,14 +18,14 @@ fn main() -> fits_well::Result<()> {
     let i16_image = Image::new_scaled(
         vec![4, 3],
         ImageData::I16(vec![0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23]),
-        IDENTITY,
+        Scaling::IDENTITY,
     )?;
     // A second image of a *different* type (32-bit float) — so the file holds two
     // image HDUs of differing BITPIX, which the view loop below reads into one buffer.
     let f32_image = Image::new_scaled(
         vec![2, 2],
         ImageData::F32(vec![1.5, -2.5, 3.5, -4.5]),
-        IDENTITY,
+        Scaling::IDENTITY,
     )?;
 
     // Writing synthesizes the mandatory header (SIMPLE/XTENSION, BITPIX, NAXISn) and

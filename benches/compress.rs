@@ -50,16 +50,7 @@ fn fill<T>(f: impl Fn(usize, usize, i64) -> T) -> Vec<T> {
 }
 
 fn image(samples: ImageData) -> Image {
-    Image::new_scaled(
-        vec![NX, NY],
-        samples,
-        Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
-    )
-    .unwrap()
+    Image::new_scaled(vec![NX, NY], samples, Scaling::IDENTITY).unwrap()
 }
 
 /// A structured 16-bit science image: a smooth diagonal ramp + small noise,

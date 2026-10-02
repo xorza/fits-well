@@ -14,6 +14,7 @@ use crate::ragged::Ragged;
 use crate::reader::FitsReader;
 use crate::reader::internals::open_fixture;
 use crate::writer::FitsWriter;
+use crate::writer::internals::round_trip;
 use crate::writer::render_header;
 use crate::writer::table::{TableBuilder, WriteColumn};
 use std::io::Cursor;
@@ -467,10 +468,8 @@ fn compressed_round_trip(
     nrows: usize,
     compression: Compression,
 ) -> (BinTable, BinTable) {
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(&TableBuilder::explicit(nrows, columns).unwrap(), None)
-        .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r =
+        round_trip(|w| w.write_table(&TableBuilder::explicit(nrows, columns).unwrap(), None));
     let original = r.read_table(1).unwrap();
     let header = r.hdus[1].header.clone();
     let mut cw = FitsWriter::new(Cursor::new(Vec::new()));
@@ -533,10 +532,8 @@ fn a_variable_length_array_is_stored_compressed_only_when_it_shrinks() {
         ColumnData::Bytes(vec![0; 400]),
     ];
     let column = WriteColumn::vla("ARRAYS", Ragged::from_rows(rows.clone()).unwrap());
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(&TableBuilder::explicit(3, vec![column]).unwrap(), None)
-        .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r =
+        round_trip(|w| w.write_table(&TableBuilder::explicit(3, vec![column]).unwrap(), None));
     let original = r.read_table(1).unwrap();
     let header = r.hdus[1].header.clone();
     let mut encoded = Vec::new();
@@ -594,10 +591,8 @@ fn a_variable_length_array_is_stored_compressed_only_when_it_shrinks() {
 #[test]
 fn a_declared_rice_codec_on_a_64_bit_column_is_refused() {
     let column = WriteColumn::scalar("BIG", ColumnData::I64(vec![1, 2, 3]));
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(&TableBuilder::explicit(3, vec![column]).unwrap(), None)
-        .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r =
+        round_trip(|w| w.write_table(&TableBuilder::explicit(3, vec![column]).unwrap(), None));
     let original = r.read_table(1).unwrap();
     let header = r.hdus[1].header.clone();
     let mut cw = FitsWriter::new(Cursor::new(Vec::new()));
