@@ -21,9 +21,9 @@ pub(super) struct LinearTransform {
 }
 
 /// The matrix as the header spells it, before the per-axis unit factors are known.
-/// The `CD`/`PC`/`CROTA` conventions are mutually exclusive, so they are resolved
-/// and validated as the header is read; the scaling and the inversion wait for the
-/// axis parse to report each axis's unit factor.
+/// The `CD`/`PC`/`CROTA` conventions are resolved and validated as the header is
+/// read; the scaling and the inversion wait for the axis parse to report each axis's
+/// unit factor.
 #[derive(Debug)]
 pub(super) struct LinearMatrix {
     values: Vec<f64>,
@@ -34,8 +34,10 @@ impl LinearMatrix {
     /// Read the header's linear keywords.
     ///
     /// Precedence (§8.1): `CDi_j` if present, else `PCi_j × CDELTi`, else the legacy
-    /// `CROTAi` rotation of the celestial pair, else a bare `CDELT` diagonal. A header
-    /// mixing the conventions is rejected rather than silently resolved.
+    /// `CROTAi` rotation of the celestial pair, else a bare `CDELT` diagonal. `PC` with
+    /// `CD`, or `PC` with `CROTA`, is rejected rather than resolved. A `CROTAi` beside a
+    /// `CD` matrix is ignored, as wcslib ignores it: legacy headers often keep a
+    /// redundant `CROTA2` next to the matrix that supersedes it.
     pub(super) fn from_header(
         header: &Header,
         a: AltSuffix,

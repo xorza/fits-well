@@ -199,7 +199,7 @@ impl TableWcsResolver {
                 translated.set_internal(image_root, value);
             }
         }
-        SpectralFrame::from_header(&translated, None, "")
+        SpectralFrame::from_header(&translated, AltSuffix::new(None))
     }
 
     /// Copy the `RADEna`/`EQUIna` celestial-frame keywords of every column in

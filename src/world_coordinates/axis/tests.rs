@@ -1,7 +1,9 @@
 use crate::error::FitsError;
 use crate::header_model::Header;
 use crate::world_coordinates::Wcs;
-use crate::world_coordinates::axis::spectral_kind::{conversion_derivative, convert};
+use crate::world_coordinates::axis::spectral_kind::{
+    Characteristic, conversion_derivative, convert,
+};
 use crate::world_coordinates::axis::spectral_rest::ResolvedRest;
 use crate::world_coordinates::axis::*;
 
@@ -552,4 +554,97 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
         Wcs::from_header(&invalid, None),
         Err(FitsError::InvalidWcs { .. })
     ));
+}
+
+/// Every code parses to the algorithm that names it back, and an `X2P` code must
+/// express the coordinate type's own characteristic and convert between two.
+#[test]
+fn spectral_algorithm_codes_round_trip_and_check_their_variables() {
+    use crate::world_coordinates::axis::spectral_algorithm::SpectralAlgorithm;
+
+    let mut names = Vec::new();
+    for sampled in Characteristic::ALL {
+        for expressed in Characteristic::ALL {
+            let code = format!(
+                "{}2{}",
+                sampled.letter() as char,
+                expressed.letter() as char
+            );
+            let algorithm = SpectralAlgorithm::parse(&code).unwrap();
+            assert_eq!(algorithm, SpectralAlgorithm::Pair { sampled, expressed });
+            assert_eq!(algorithm.name(), code);
+            names.push(code);
+        }
+    }
+    assert_eq!(names.len(), 16);
+    for code in ["GRI", "GRA"] {
+        assert_eq!(SpectralAlgorithm::parse(code).unwrap().name(), code);
+    }
+    assert_eq!(SpectralAlgorithm::parse("TAB"), None);
+    assert_eq!(SpectralAlgorithm::parse("F3W"), None);
+
+    for ctype in ["FREQ-F2F", "FREQ-W2V"] {
+        let mut header = Header::new();
+        header
+            .set_internal("NAXIS", 1)
+            .set_internal("CTYPE1", ctype)
+            .set_internal("CRVAL1", 1.4e9)
+            .set_internal("RESTFRQ", 1.4e9);
+        assert!(
+            matches!(
+                Wcs::from_header(&header, None),
+                Err(FitsError::InvalidWcs { detail }) if detail.contains("inconsistent variables")
+            ),
+            "{ctype}"
+        );
+    }
+}
+
+/// wcslib's `restreq`: a velocity-type coordinate needs a rest value, a conversion
+/// to or from velocity needs one, and when both do they cancel. `VRAD` is a
+/// frequency-based type and `ZOPT` a wavelength-based one (Paper III, Table 1).
+#[test]
+fn rest_need_follows_restreq() {
+    use crate::world_coordinates::axis::spectral_kind::SpectralKind;
+    use crate::world_coordinates::axis::spectral_rest::RestNeed;
+
+    let cases = [
+        (
+            SpectralKind::Frequency,
+            Characteristic::Wavelength,
+            RestNeed::Unused,
+        ),
+        (
+            SpectralKind::Frequency,
+            Characteristic::Velocity,
+            RestNeed::Required,
+        ),
+        (
+            SpectralKind::RadioVelocity,
+            Characteristic::Frequency,
+            RestNeed::Required,
+        ),
+        (
+            SpectralKind::RadioVelocity,
+            Characteristic::Velocity,
+            RestNeed::Cancels,
+        ),
+        (
+            SpectralKind::RelativisticVelocity,
+            Characteristic::Frequency,
+            RestNeed::Required,
+        ),
+        (
+            SpectralKind::Redshift,
+            Characteristic::Wavelength,
+            RestNeed::Required,
+        ),
+    ];
+    for (kind, sampled, need) in cases {
+        assert_eq!(
+            RestNeed::of(kind, sampled),
+            need,
+            "{kind:?} sampled {sampled:?}"
+        );
+    }
 }

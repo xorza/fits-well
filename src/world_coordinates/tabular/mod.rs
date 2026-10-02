@@ -7,9 +7,8 @@ use crate::error::Result;
 use crate::header_model::Header;
 use crate::keyword::AltSuffix;
 use crate::keyword::key;
-use crate::world_coordinates::angle_scale;
-use crate::world_coordinates::axis;
 use crate::world_coordinates::ctype::Ctype;
+use crate::world_coordinates::world_unit_scale;
 
 const MAX_INTERPOLATION_VERTICES: usize = 1 << 20;
 const MAX_INVERSE_WORK: usize = 1 << 22;
@@ -81,7 +80,7 @@ pub(crate) fn descriptors(
         let ctype = header
             .get_text(key!("CTYPE{}{suffix}", axis + 1).as_str())?
             .unwrap_or("");
-        if !ctype.ends_with("-TAB") {
+        if Ctype::parse(ctype).algorithm != Some("TAB") {
             continue;
         }
         let extension_name = required_text(
@@ -150,14 +149,7 @@ pub(crate) fn descriptors(
         let cunit = header
             .get_text(key!("CUNIT{}{suffix}", axis + 1).as_str())?
             .unwrap_or("");
-        descriptor.world_scales[table_axis] =
-            if let Some(scale) = axis::spectral_unit_scale(ctype, cunit)? {
-                scale
-            } else if Ctype::parse(ctype).celestial_axis().is_some() {
-                angle_scale(cunit)?
-            } else {
-                1.0
-            };
+        descriptor.world_scales[table_axis] = world_unit_scale(Ctype::parse(ctype), cunit)?;
     }
     for descriptor in &descriptors {
         if descriptor.axes.contains(&usize::MAX) {
