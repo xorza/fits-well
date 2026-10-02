@@ -60,6 +60,7 @@ mod hdu;
 mod header_model;
 mod keyword;
 mod reader;
+mod reserved_keywords;
 mod time_coordinates;
 mod unit;
 mod words;

@@ -26,7 +26,7 @@ use crate::checksum;
 use crate::error::{FitsError, Result};
 use crate::hdu::{HduKind, HduPosition, HduRole, data_extent};
 use crate::header_model::Header;
-use crate::keyword;
+use crate::reserved_keywords;
 
 pub(crate) mod ascii;
 pub(crate) mod image;
@@ -404,63 +404,9 @@ fn merge_header_template(header: &mut Header, template: Option<&Header>) {
     let Some(template) = template else {
         return;
     };
-    header.append_filtered_from(template, |keyword| !is_structural_keyword(keyword));
-}
-
-fn is_structural_keyword(keyword: &str) -> bool {
-    if matches!(
-        keyword,
-        "SIMPLE"
-            | "XTENSION"
-            | "BITPIX"
-            | "NAXIS"
-            | "PCOUNT"
-            | "GCOUNT"
-            | "EXTEND"
-            | "GROUPS"
-            | "BLOCKED"
-            | "BSCALE"
-            | "BZERO"
-            | "BLANK"
-            | "CHECKSUM"
-            | "DATASUM"
-            | "THEAP"
-            | "TFIELDS"
-            | "ZIMAGE"
-            | "ZTABLE"
-            | "ZTILELEN"
-            | "ZNAXIS"
-            | "ZPCOUNT"
-            | "ZGCOUNT"
-            | "ZSIMPLE"
-            | "ZTENSION"
-            | "ZEXTEND"
-            | "ZBLOCKED"
-            | "ZTHEAP"
-            | "ZHEAPPTR"
-            | "ZHECKSUM"
-            | "ZDATASUM"
-            | "ZCMPTYPE"
-            | "ZBITPIX"
-            | "ZQUANTIZ"
-            | "ZDITHER0"
-            | "ZBLANK"
-            | "ZMASKCMP"
-    ) {
-        return true;
-    }
-    [
-        "NAXIS", "TFORM", "TTYPE", "TUNIT", "TDIM", "TSCAL", "TZERO", "TNULL", "TBCOL", "ZFORM",
-        "ZCTYP", "ZNAXIS", "ZTILE", "ZNAME", "ZVAL",
-    ]
-    .iter()
-    .any(|prefix| indexed_keyword(keyword, prefix))
-}
-
-fn indexed_keyword(keyword: &str, prefix: &str) -> bool {
-    // A conforming card is at most 8 bytes; anything longer is not the indexed
-    // structural keyword it superficially resembles.
-    keyword.len() <= 8 && keyword::index(keyword, prefix).is_some()
+    header.append_filtered_from(template, |keyword| {
+        !reserved_keywords::is_generated(keyword)
+    });
 }
 
 #[cfg(test)]
