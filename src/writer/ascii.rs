@@ -7,9 +7,9 @@ use crate::ascii::AsciiColumnData;
 use crate::block::SPACE_FILL;
 use crate::error::{FitsError, Result};
 use crate::hdu::validate_table_field_count;
-use crate::header::Header;
-use crate::header::card::validate_ascii;
-use crate::header::value;
+use crate::header_model::Header;
+use crate::header_model::card::validate_ascii;
+use crate::header_model::value;
 use crate::keyword::key;
 use crate::writer::{FitsWriter, accept_row_count, validate_scaling};
 

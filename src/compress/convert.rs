@@ -3,13 +3,13 @@
 //! work in, big-endian (de)serialization, and tile-cell accessors.
 
 use crate::allocation;
+use crate::bintable::tform_kind::TformKind;
+use crate::bintable::vla_column::VlaCell;
 use crate::bitpix::Bitpix;
 use crate::data::image_data::ImageData;
 use crate::endian;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::table_impl::tform_kind::TformKind;
-use crate::table_impl::vla_column::VlaCell;
 
 /// Gather the tile rows starting at each of `row_bases` out of a typed sample plane
 /// into `out`, widening each element with `widen`. Axis 0 has stride 1, so a row is

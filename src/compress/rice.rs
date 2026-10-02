@@ -3,7 +3,7 @@
 use crate::compress;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header::Header;
+use crate::header_model::Header;
 use crate::keyword::key;
 
 /// Rice block size and pixel width, from the `ZNAMEi`/`ZVALi` parameters.
@@ -355,7 +355,7 @@ impl<'a> BitReader<'a> {
 mod tests {
     use crate::compress::rice::{self, BitReader};
     use crate::error::FitsError;
-    use crate::header::Header;
+    use crate::header_model::Header;
 
     #[test]
     fn rice_parameters_reject_invalid_header_values() {

@@ -1,8 +1,8 @@
 //! One tile's candidate source cells and the fallback order between them.
 
+use crate::bintable::vla_column::VlaCell;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::table_impl::vla_column::VlaCell;
 
 /// One tile's three candidate source cells, read from
 /// [`TileSources`](crate::compress::decode::tile_sources::TileSources). The tile is

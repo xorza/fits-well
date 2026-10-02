@@ -1,5 +1,5 @@
 use crate::hdu::*;
-use crate::header::from_card_lines as header;
+use crate::header_model::from_card_lines as header;
 
 #[test]
 fn classifies_by_mandatory_keywords() {

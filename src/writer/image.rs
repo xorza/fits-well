@@ -12,8 +12,8 @@ use crate::data::image_data::ImageData;
 use crate::data::scaling::Scaling;
 use crate::data::{Image, shape_product};
 use crate::error::{FitsError, Result};
-use crate::header::Header;
-use crate::header::value;
+use crate::header_model::Header;
+use crate::header_model::value;
 use crate::keyword::key;
 use crate::writer::{
     FitsWriter, PLACEHOLDER_CHECKSUM, WriterState, merge_header_template,

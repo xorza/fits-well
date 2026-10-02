@@ -1,13 +1,13 @@
 //! The caller's output plane, which selects the stored sample type tiles narrow into.
 
+use crate::bintable::table_view::TableView;
 use crate::bitpix::Bitpix;
 use crate::compress::decode::image_decode_plan::ImageDecodePlan;
 use crate::compress::decode::tiled_image::TileSection;
 use crate::compress::decode::tiled_image::TiledImage;
 use crate::data::image_data::ImageData;
 use crate::error::Result;
-use crate::header::Header;
-use crate::table_impl::table_view::TableView;
+use crate::header_model::Header;
 use crate::words;
 
 /// A typed mutable view of the samples a decode writes into — owned [`ImageData`] or

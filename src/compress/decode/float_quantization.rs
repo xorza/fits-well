@@ -1,11 +1,11 @@
 //! Float-image dequantization inputs (§10.2) and the per-tile parameters they yield.
 
+use crate::bintable::column_data::ColumnData;
+use crate::bintable::table_view::TableView;
 use crate::compress::DitherMethod;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header::Header;
-use crate::table_impl::column_data::ColumnData;
-use crate::table_impl::table_view::TableView;
+use crate::header_model::Header;
 
 /// The float-quantization inputs (§10.2): the dither method and seed, and the
 /// per-tile `ZSCALE`/`ZZERO`/`ZBLANK` metadata columns. An integer image parses

@@ -1,5 +1,6 @@
 //! The per-tile codec dispatch, fixed once for a whole tiled image.
 
+use crate::bintable::vla_column::VlaCell;
 use crate::bitpix::Bitpix;
 use crate::compress;
 use crate::compress::ImageCodec;
@@ -16,9 +17,8 @@ use crate::compress::quantize;
 use crate::compress::rice;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header::Header;
+use crate::header_model::Header;
 use crate::keyword::key;
-use crate::table_impl::vla_column::VlaCell;
 
 /// The decode parameters constant across all of a tiled image's tiles: the codec,
 /// the stored/quantized integer bitpix (and float `ZBITPIX`), and the codec knobs.

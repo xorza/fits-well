@@ -1,5 +1,7 @@
 //! The optional per-tile null-pixel mask (§10.1.2) and how it is applied.
 
+use crate::bintable::table_view::TableView;
+use crate::bintable::vla_column::VlaColumn;
 use crate::bitpix::Bitpix;
 use crate::compress::ImageCodec;
 use crate::compress::decode::ensure_tile_size;
@@ -10,9 +12,7 @@ use crate::compress::plio;
 use crate::compress::rice;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header::Header;
-use crate::table_impl::table_view::TableView;
-use crate::table_impl::vla_column::VlaColumn;
+use crate::header_model::Header;
 
 /// The optional null-pixel mask and everything applying it needs: the per-tile mask
 /// column, the `ZMASKCMP` codec that encodes it, and the `BLANK` value an integer

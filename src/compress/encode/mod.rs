@@ -18,8 +18,8 @@ use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Ranked;
 use crate::error::Result;
-use crate::header::Header;
-use crate::header::value;
+use crate::header_model::Header;
+use crate::header_model::value;
 use crate::keyword::key;
 
 /// Per-worker tile-encode scratch, reused across the tiles one rayon worker

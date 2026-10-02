@@ -9,7 +9,7 @@ pub(crate) mod image_geometry;
 use crate::block::checked_padded_len;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header::Header;
+use crate::header_model::Header;
 
 pub(crate) const MAX_TABLE_FIELDS: usize = 999;
 

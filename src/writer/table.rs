@@ -8,6 +8,12 @@ use bitvec::slice::BitSlice;
 use bitvec::vec::BitVec;
 use num_complex::Complex;
 
+#[cfg(feature = "compression")]
+use crate::bintable::BinTable;
+use crate::bintable::character_field::CharacterField;
+use crate::bintable::column_data::ColumnData;
+use crate::bintable::tdim;
+use crate::bintable::tform_kind::TformKind;
 use crate::block::ZERO_FILL;
 #[cfg(feature = "compression")]
 use crate::compress::{Compression, table};
@@ -15,16 +21,10 @@ use crate::data::{U64_OFFSET, U64_OFFSET_INTEGER};
 use crate::endian::{extend_be, validate_pq_descriptor, write_pq_descriptor};
 use crate::error::{FitsError, Result};
 use crate::hdu::validate_table_field_count;
-use crate::header::Header;
-use crate::header::card::validate_ascii;
-use crate::header::value;
+use crate::header_model::Header;
+use crate::header_model::card::validate_ascii;
+use crate::header_model::value;
 use crate::keyword::key;
-#[cfg(feature = "compression")]
-use crate::table_impl::BinTable;
-use crate::table_impl::character_field::CharacterField;
-use crate::table_impl::column_data::ColumnData;
-use crate::table_impl::tdim;
-use crate::table_impl::tform_kind::TformKind;
 use crate::writer::{FitsWriter, accept_row_count, validate_scaling};
 
 /// An element type accepted by a binary-table writer column.
