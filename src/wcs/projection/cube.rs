@@ -260,7 +260,7 @@ fn projected_coordinate(
     tolerance: f64,
 ) -> Result<ProjectedCoordinate> {
     if coordinate.x.abs() > 1.0 + tolerance || coordinate.y.abs() > 1.0 + tolerance {
-        return Err(projection.domain_error());
+        return Err(projection.world_domain_error());
     }
     if matches!(projection, Projection::Csc) {
         let x = coordinate.x.clamp(-1.0, 1.0) as f32 + x0 as f32;

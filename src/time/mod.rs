@@ -380,42 +380,23 @@ impl TimeAxisKind {
     }
 }
 
+/// Seconds per `unit`: the [`unit::TIME`] units, or the tropical (`ta`) and Besselian
+/// (`Ba`) years, whose length depends on the epoch and takes no prefix.
 fn time_unit_seconds(unit: &str, reference_mjd: f64, scale: &TimeScale) -> Result<f64> {
-    let scaled = unit::split_numeric_multiplier(unit).ok_or_else(|| FitsError::InvalidValue {
-        card: format!("time unit '{}'", unit.trim()),
-    })?;
-    let unit = scaled.base;
-    if let Some(seconds) = base_time_unit_seconds(unit, reference_mjd, scale)? {
-        return Ok(scaled.factor * seconds);
+    let invalid = || FitsError::InvalidUnit {
+        unit: unit.to_string(),
+        expected: "a time unit",
+    };
+    if let Some(seconds) = unit::resolve(unit, unit::TIME) {
+        return Ok(seconds);
     }
-    for (prefix, factor) in unit::SI_PREFIXES {
-        if let Some(base) = unit.strip_prefix(prefix)
-            && let Some(seconds) = base_time_unit_seconds(base, reference_mjd, scale)?
-        {
-            return Ok(scaled.factor * factor * seconds);
-        }
-    }
-    Err(FitsError::InvalidValue {
-        card: format!("time unit '{unit}'"),
-    })
-}
-
-fn base_time_unit_seconds(
-    unit: &str,
-    reference_mjd: f64,
-    scale: &TimeScale,
-) -> Result<Option<f64>> {
-    Ok(Some(match unit {
-        "s" => 1.0,
-        "min" => 60.0,
-        "h" => 3600.0,
-        "d" => SEC_PER_DAY,
-        "a" | "yr" => 365.25 * SEC_PER_DAY,
-        "cy" => 36_525.0 * SEC_PER_DAY,
-        "ta" => tropical_year_days(reference_mjd, scale)? * SEC_PER_DAY,
-        "Ba" => besselian_year_days(reference_mjd, scale)? * SEC_PER_DAY,
-        _ => return Ok(None),
-    }))
+    let scaled = unit::split_numeric_multiplier(unit).ok_or_else(invalid)?;
+    let days = match scaled.base {
+        "ta" => tropical_year_days(reference_mjd, scale)?,
+        "Ba" => besselian_year_days(reference_mjd, scale)?,
+        _ => return Err(invalid()),
+    };
+    Ok(scaled.factor * days * SEC_PER_DAY)
 }
 
 fn tropical_year_days(reference_mjd: f64, scale: &TimeScale) -> Result<f64> {

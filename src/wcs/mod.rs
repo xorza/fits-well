@@ -44,6 +44,7 @@ use crate::error::Result;
 use crate::header::Header;
 use crate::keyword::AltSuffix;
 use crate::keyword::key;
+use crate::unit;
 use crate::wcs::axis::AxisTransform;
 use crate::wcs::axis::spectral_rest::SpectralParameters;
 use crate::wcs::axis::spectral_rest::SpectralRest;
@@ -115,6 +116,12 @@ pub(crate) struct AxisWorld<'a> {
 #[derive(Debug, Clone)]
 pub struct Wcs {
     axes: Vec<WcsAxis>,
+    /// Each axis's `CRVALi` in the unit its transform works in: degrees for a celestial
+    /// axis, the Table-25 default unit for a spectral one, the declared unit otherwise.
+    reference: Vec<f64>,
+    /// The unit an axis's world coordinates come out in, where it is not the declared
+    /// `CUNITi`.
+    world_units: Vec<Option<&'static str>>,
     axis_transforms: Vec<AxisTransform>,
     /// The linear layer `(pixel − CRPIX) → intermediate world coordinate`, and its
     /// inverse.
@@ -162,7 +169,9 @@ impl Wcs {
                     .map(|value| value.unwrap_or("").to_string())
             })
             .collect::<Result<_>>()?;
-        let mut crval = axis_vec(header, "CRVAL", a.as_str(), naxis, 0.0)?;
+        let declared_crval = axis_vec(header, "CRVAL", a.as_str(), naxis, 0.0)?;
+        let mut crval = declared_crval.clone();
+        let mut world_units = vec![None; naxis];
         let crpix = axis_vec(header, "CRPIX", a.as_str(), naxis, 0.0)?;
         let cdelt = axis_vec(header, "CDELT", a.as_str(), naxis, 1.0)?;
         let cunit: Vec<String> = (1..=naxis)
@@ -172,6 +181,7 @@ impl Wcs {
                     .map(|value| value.unwrap_or("").to_string())
             })
             .collect::<Result<_>>()?;
+        let celestial_pair = CelestialAxisPair::find(&ctype);
         let celestial_axes = ProjectedCelestialAxes::find(&ctype)?;
         let celestial_frame = CelestialFrame::from_header(header, alt, a.as_str(), &ctype)?;
         let spectral_frames = match spectral_frames {
@@ -200,8 +210,9 @@ impl Wcs {
         let mut axis_scales = vec![1.0; naxis];
         if let Some(axes) = celestial_axes {
             for ax in [axes.longitude, axes.latitude] {
-                axis_scales[ax] = unit_to_degrees(&cunit[ax]);
+                axis_scales[ax] = angle_scale(&cunit[ax])?;
                 crval[ax] *= axis_scales[ax];
+                world_units[ax] = Some("deg");
             }
         }
         let mut axis_transforms = Vec::with_capacity(naxis);
@@ -221,10 +232,14 @@ impl Wcs {
                 parsed_ctype.algorithm == Some("TAB") && resolved_tabular_axes[axis];
             if parsed_ctype.celestial_axis().is_some() {
                 axis_transforms.push(AxisTransform::Linear);
+                // A projection this crate does not evaluate, or an axis with no partner
+                // of its own system, has no transform.
+                let unpaired = !celestial_pair.is_some_and(|pair| pair.contains(axis));
                 if !resolved_tabular
-                    && parsed_ctype
-                        .algorithm
-                        .is_some_and(|code| Projection::from_code(code).is_none())
+                    && (unpaired
+                        || parsed_ctype
+                            .algorithm
+                            .is_some_and(|code| Projection::from_code(code).is_none()))
                 {
                     unsupported_axes.push(axis);
                 }
@@ -243,6 +258,7 @@ impl Wcs {
                 AxisTransform::parse(&ctype[axis], &cunit[axis], crval[axis], rest, parameters)?;
             axis_scales[axis] = spec.unit_scale;
             crval[axis] *= spec.unit_scale;
+            world_units[axis] = spec.world_unit;
             if matches!(&spec.transform, AxisTransform::Unsupported) && !resolved_tabular {
                 unsupported_axes.push(axis);
             }
@@ -268,13 +284,15 @@ impl Wcs {
             .map(|(i, ctype)| WcsAxis {
                 ctype,
                 cunit: cunit[i].clone(),
-                crval: crval[i],
+                crval: declared_crval[i],
                 crpix: crpix[i],
                 spectral_frame: spectral_frames[i],
             })
             .collect();
         Ok(Wcs {
             axes,
+            reference: crval,
+            world_units,
             axis_transforms,
             linear,
             celestial,
@@ -307,6 +325,8 @@ impl Wcs {
         }
     }
 
+    /// One axis's world coordinate at `pixel`, with the unit it is in. A celestial axis
+    /// evaluates its pair's projection, as [`Self::pixel_to_world`] does.
     pub(crate) fn axis_world(&self, axis: usize, pixel: &[f64]) -> Result<AxisWorld<'_>> {
         let naxis = self.axes.len();
         if axis >= naxis {
@@ -326,6 +346,7 @@ impl Wcs {
         if self.unsupported_axes.contains(&axis) {
             return Err(FitsError::UnsupportedWcsTransform { axes: vec![axis] });
         }
+        let cunit = self.world_units[axis].unwrap_or(&self.axes[axis].cunit);
         if let Some(transform) = self
             .tabular
             .iter()
@@ -337,18 +358,32 @@ impl Wcs {
                 .map(|&image_axis| self.linear.intermediate_axis(image_axis, pixel, &self.axes))
                 .collect();
             return Ok(AxisWorld {
-                cunit: &self.axes[axis].cunit,
+                cunit,
                 value: transform.to_world_axis(axis, &intermediate)?,
             });
         }
+        if let Some(c) = self
+            .celestial
+            .as_ref()
+            .filter(|c| axis == c.lng || axis == c.lat)
+        {
+            let native = c.projection.deproject(
+                self.linear.intermediate_axis(c.lng, pixel, &self.axes),
+                self.linear.intermediate_axis(c.lat, pixel, &self.axes),
+                &c.parameters,
+            )?;
+            let celestial = c.pole.to_celestial(native.phi, native.theta);
+            let value = if axis == c.lng {
+                celestial.ra
+            } else {
+                celestial.dec
+            };
+            return Ok(AxisWorld { cunit, value });
+        }
         let intermediate = self.linear.intermediate_axis(axis, pixel, &self.axes);
         Ok(AxisWorld {
-            cunit: &self.axes[axis].cunit,
-            value: self.axis_transforms[axis].to_world(
-                intermediate,
-                self.axes[axis].crval,
-                axis,
-            )?,
+            cunit,
+            value: self.axis_transforms[axis].to_world(intermediate, self.reference[axis], axis)?,
         })
     }
 
@@ -424,16 +459,16 @@ impl Wcs {
         let intermediate = self.linear.intermediate(pixel, &self.axes);
         let mut world = (0..naxis)
             .map(|axis| {
-                self.axis_transforms[axis].to_world(intermediate[axis], self.axes[axis].crval, axis)
+                self.axis_transforms[axis].to_world(intermediate[axis], self.reference[axis], axis)
             })
             .collect::<Result<Vec<_>>>()?;
         for transform in &self.tabular {
             transform.to_world(&intermediate, &mut world)?;
         }
         if let Some(c) = &self.celestial {
-            let native = c
-                .projection
-                .deproject(intermediate[c.lng], intermediate[c.lat], &c.pv)?;
+            let native =
+                c.projection
+                    .deproject(intermediate[c.lng], intermediate[c.lat], &c.parameters)?;
             let celestial = c.pole.to_celestial(native.phi, native.theta);
             world[c.lng] = celestial.ra;
             world[c.lat] = celestial.dec;
@@ -461,7 +496,7 @@ impl Wcs {
         self.require_complete_transform()?;
         let mut intermediate = (0..naxis)
             .map(|axis| {
-                self.axis_transforms[axis].to_intermediate(world[axis], self.axes[axis].crval, axis)
+                self.axis_transforms[axis].to_intermediate(world[axis], self.reference[axis], axis)
             })
             .collect::<Result<Vec<_>>>()?;
         for transform in &self.tabular {
@@ -472,10 +507,12 @@ impl Wcs {
                 || !world[c.lat].is_finite()
                 || !(-90.0 - DOMAIN_TOLERANCE..=90.0 + DOMAIN_TOLERANCE).contains(&world[c.lat])
             {
-                return Err(c.projection.domain_error());
+                return Err(c.projection.world_domain_error());
             }
             let native = c.pole.to_native(world[c.lng], world[c.lat]);
-            let projected = c.projection.project(native.phi, native.theta, &c.pv)?;
+            let projected = c
+                .projection
+                .project(native.phi, native.theta, &c.parameters)?;
             intermediate[c.lng] = projected.x;
             intermediate[c.lat] = projected.y;
         }
@@ -512,15 +549,15 @@ impl Wcs {
     }
 }
 
-/// Degrees per `CUNITia` angle unit; `1.0` for an absent, unknown, or `deg` unit.
-fn unit_to_degrees(unit: &str) -> f64 {
-    match unit.trim() {
-        "arcmin" => 1.0 / 60.0,
-        "arcsec" => 1.0 / 3600.0,
-        "mas" => 1.0 / 3_600_000.0,
-        "rad" => R2D,
-        _ => 1.0, // "deg", "", or anything unrecognized
+/// Degrees per `CUNITia` of a celestial axis, whose absent unit is the degree (§8.2).
+pub(crate) fn angle_scale(unit: &str) -> Result<f64> {
+    if unit.trim().is_empty() {
+        return Ok(1.0);
     }
+    unit::resolve(unit, unit::ANGLE).ok_or_else(|| FitsError::InvalidUnit {
+        unit: unit.to_string(),
+        expected: "an angle unit",
+    })
 }
 
 /// Read `PREFIX1..PREFIXn` (with alternate suffix) into a vector, defaulting
@@ -600,6 +637,33 @@ fn first_real(header: &Header, first: &str, second: &str) -> Result<Option<f64>>
     match header.get_real(first)? {
         Some(value) => Ok(Some(value)),
         None => header.get_real(second),
+    }
+}
+
+/// The quarter turn a multiple of 90° lands on (0 to 3), or `None` for any other angle.
+fn quarter_turn(degrees: f64) -> Option<u8> {
+    (degrees.rem_euclid(90.0) == 0.0).then(|| (degrees / 90.0).rem_euclid(4.0) as u8)
+}
+
+/// `sin` of an angle in degrees, exact at multiples of 90°, where the conversion to
+/// radians would leave a residue of order `1e-17` — wcslib's `sind`, which its boundary
+/// tests rely on.
+fn sind(degrees: f64) -> f64 {
+    match quarter_turn(degrees) {
+        Some(0 | 2) => 0.0,
+        Some(1) => 1.0,
+        Some(_) => -1.0,
+        None => (degrees * D2R).sin(),
+    }
+}
+
+/// `cos` of an angle in degrees, exact at multiples of 90° — wcslib's `cosd`.
+fn cosd(degrees: f64) -> f64 {
+    match quarter_turn(degrees) {
+        Some(0) => 1.0,
+        Some(1 | 3) => 0.0,
+        Some(_) => -1.0,
+        None => (degrees * D2R).cos(),
     }
 }
 

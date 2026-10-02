@@ -5,6 +5,9 @@
 //! (`Aw`, `Iw`, `Fw.d`, `Ew.d`, `Dw.d`). ASCII columns are always scalar, and
 //! [`AsciiColumnData`] retains `TNULLn` cells distinctly from genuine values.
 
+use std::io::{self, Write};
+use std::{fmt, str};
+
 use crate::column;
 use crate::column::Named;
 use crate::error::FitsError;
@@ -336,25 +339,34 @@ impl Named for AsciiColumn {
 /// Parse a Fortran `Fw.d`/`Ew.d`/`Dw.d` field. When a point-less `Fw.d` field has
 /// no exponent, the decimal point is implied `decimals` digits from the right
 /// (§7.2.1, deprecated): the integer mantissa is scaled by `10⁻ᵈ`.
+///
+/// Mantissa and exponent are joined into one decimal literal and parsed once, so the
+/// value is the f64 nearest the decimal the field spells — what strtod gives cfitsio
+/// and astropy — rather than a parsed mantissa times a rounded power of ten.
 fn parse_ascii_float(field: &str, decimals: usize) -> Option<f64> {
-    let (mantissa, exponent) = match split_mantissa_exponent(field) {
-        Some((m, e)) => (m, Some(e)),
-        None => (field, None),
-    };
-    // The §7.2.1 implied decimal point is an `Fw.d` legacy. cfitsio/astropy apply it
-    // only to a bare mantissa and parse an explicit-exponent field literally (strtod),
-    // so `1E5` is 100000, not `1·10⁻ᵈ·10⁵` — match them, since the whole point is to
-    // read the files those tools write.
-    let implied = exponent.is_none() && decimals != 0 && !mantissa.contains('.');
-    let mut value: f64 = if implied {
-        mantissa.parse::<f64>().ok()? / 10f64.powi(decimals as i32)
-    } else {
-        mantissa.parse().ok()?
-    };
-    if let Some(e) = exponent {
-        value *= 10f64.powi(e.trim().parse::<i32>().ok()?);
+    match split_mantissa_exponent(field) {
+        Some((mantissa, exponent)) => parse_literal(format_args!("{mantissa}e{}", exponent.trim())),
+        // The §7.2.1 implied decimal point is an `Fw.d` legacy. cfitsio/astropy apply it
+        // only to a bare mantissa and parse an explicit-exponent field literally, so
+        // `1E5` is 100000, not `1·10⁻ᵈ·10⁵` — match them, since the whole point is to
+        // read the files those tools write.
+        None if decimals != 0 && !field.contains('.') => {
+            parse_literal(format_args!("{field}e-{decimals}"))
+        }
+        None => field.parse().ok(),
     }
-    Some(value)
+}
+
+/// Parses a formatted decimal literal, formatting into a stack buffer when it fits, so a
+/// cell costs no allocation.
+fn parse_literal(literal: fmt::Arguments<'_>) -> Option<f64> {
+    let mut stack = [0; 96];
+    let mut cursor = io::Cursor::new(&mut stack[..]);
+    if cursor.write_fmt(literal).is_ok() {
+        let len = usize::try_from(cursor.position()).expect("at most the buffer length");
+        return str::from_utf8(&stack[..len]).ok()?.parse().ok();
+    }
+    fmt::format(literal).parse().ok()
 }
 
 /// Split a numeric string into mantissa and exponent text. The exponent is

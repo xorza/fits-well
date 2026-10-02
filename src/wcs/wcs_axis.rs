@@ -7,10 +7,9 @@ use crate::wcs::spectral_frame::SpectralFrame;
 pub struct WcsAxis {
     /// The `CTYPEi` string.
     pub ctype: String,
-    /// Declared `CUNITi`, normalized only where the transform requires standard
-    /// projection units.
+    /// `CUNITi` as declared.
     pub cunit: String,
-    /// `CRVALi` — world coordinate at the reference pixel.
+    /// `CRVALi` — world coordinate at the reference pixel, in [`Self::cunit`].
     pub crval: f64,
     /// `CRPIXi` — reference pixel (1-based).
     pub crpix: f64,

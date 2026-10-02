@@ -3,7 +3,7 @@
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI, SQRT_2};
 
 use crate::error::{FitsError, Result};
-use crate::wcs::{D2R, DOMAIN_TOLERANCE, R2D};
+use crate::wcs::{D2R, DOMAIN_TOLERANCE, R2D, cosd};
 
 mod cube;
 mod healpix;
@@ -165,7 +165,11 @@ impl Projection {
         pv
     }
 
-    pub(super) fn validate_parameters(self, pv: &[f64; 21]) -> Result<()> {
+    /// Validates `pv` for this projection and derives what the kernels need from it once.
+    pub(super) fn parameters(self, pv: [f64; 21]) -> Result<ProjectionParameters> {
+        let degenerate = || FitsError::InvalidValue {
+            card: format!("degenerate {} projection parameters", self.code()),
+        };
         let invalid = match self {
             Projection::Cea => pv[1] == 0.0,
             Projection::Cyp => pv[2] == 0.0 || pv[1] + pv[2] == 0.0,
@@ -175,11 +179,84 @@ impl Projection {
             _ => false,
         };
         if invalid {
-            return Err(FitsError::InvalidValue {
-                card: format!("degenerate {} projection parameters", self.code()),
+            return Err(degenerate());
+        }
+        let zpn = if self == Projection::Zpn {
+            ZpnBranch::new(&pv).ok_or_else(degenerate)?
+        } else {
+            ZpnBranch::NONE
+        };
+        Ok(ProjectionParameters { pv, zpn })
+    }
+}
+
+/// A projection's `PVi_m` parameters, validated, with what is derived from them once
+/// rather than per coordinate.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ProjectionParameters {
+    pub(super) pv: [f64; 21],
+    zpn: ZpnBranch,
+}
+
+/// The branch of a ZPN polynomial `R(ζ) = Σ Pₘ ζᵐ` that the projection uses: from the
+/// native pole out to the first point where `R′` vanishes, past which the radius folds
+/// back and two colatitudes share a radius (wcslib `zpnset`).
+#[derive(Debug, Clone, Copy)]
+struct ZpnBranch {
+    /// The highest non-zero coefficient's index.
+    degree: usize,
+    /// The colatitude (rad) where the branch ends: the first zero of `R′`, or π.
+    zeta_max: f64,
+    /// `R(zeta_max)`, the largest radius the branch reaches.
+    radius_max: f64,
+}
+
+impl ZpnBranch {
+    /// No branch: the parameters of a projection other than ZPN.
+    const NONE: ZpnBranch = ZpnBranch {
+        degree: 0,
+        zeta_max: PI,
+        radius_max: f64::INFINITY,
+    };
+
+    /// The branch of `pv`, or `None` when the polynomial is zero, or of degree two or more
+    /// with `P₁ ≤ 0` — falling from the pole, so no branch exists.
+    fn new(pv: &[f64; 21]) -> Option<ZpnBranch> {
+        let degree = pv.iter().rposition(|&coefficient| coefficient != 0.0)?;
+        if degree < 2 {
+            return Some(ZpnBranch {
+                degree,
+                zeta_max: PI,
+                radius_max: evaluate_zpn(PI, pv).value,
             });
         }
-        Ok(())
+        if pv[1] <= 0.0 {
+            return None;
+        }
+        // The first sign change of R′ on a one-degree grid, then bisected to the
+        // precision of the colatitude itself; no change within 180° leaves the whole
+        // sphere on the branch.
+        let derivative = |zeta: f64| evaluate_zpn(zeta, pv).derivative;
+        let zeta_max = (1..=180)
+            .map(|degree| f64::from(degree) * D2R)
+            .find(|&zeta| derivative(zeta) <= 0.0)
+            .map_or(PI, |above| {
+                let (mut low, mut high) = (above - D2R, above);
+                while high - low > f64::EPSILON * high {
+                    let middle = 0.5 * (low + high);
+                    if derivative(middle) > 0.0 {
+                        low = middle;
+                    } else {
+                        high = middle;
+                    }
+                }
+                low
+            });
+        Some(ZpnBranch {
+            degree,
+            zeta_max,
+            radius_max: evaluate_zpn(zeta_max, pv).value,
+        })
     }
 }
 
@@ -187,7 +264,6 @@ impl Projection {
 struct ConicConstants {
     c: f64,
     y0: f64,
-    theta_a: f64,
     theta_a_degrees: f64,
     cos_eta: f64,
     cot_theta_a: f64,
@@ -218,6 +294,12 @@ struct SzpVertex {
 impl Projection {
     pub(super) fn domain_error(self) -> FitsError {
         FitsError::WcsProjectionDomain {
+            projection: self.code(),
+        }
+    }
+
+    pub(super) fn world_domain_error(self) -> FitsError {
+        FitsError::WcsWorldOutOfDomain {
             projection: self.code(),
         }
     }
@@ -269,7 +351,7 @@ impl Projection {
 
     fn projected_coordinate(self, x: f64, y: f64) -> Result<ProjectedCoordinate> {
         if !x.is_finite() || !y.is_finite() {
-            return Err(self.domain_error());
+            return Err(self.world_domain_error());
         }
         Ok(ProjectedCoordinate { x, y })
     }
@@ -294,7 +376,13 @@ impl Projection {
     }
 
     /// Deproject intermediate world `(x, y)` (deg) to native `(φ, θ)` (deg).
-    pub(super) fn deproject(self, x: f64, y: f64, pv: &[f64; 21]) -> Result<NativeCoordinate> {
+    pub(super) fn deproject(
+        self,
+        x: f64,
+        y: f64,
+        parameters: &ProjectionParameters,
+    ) -> Result<NativeCoordinate> {
+        let pv = &parameters.pv;
         let projection = self;
         if matches!(
             projection,
@@ -382,8 +470,7 @@ impl Projection {
                 Projection::Arc => u,
                 Projection::Zea => 2.0 * self.checked_asin(u / 2.0)?,
                 Projection::Stg => 2.0 * (u / 2.0).atan(),
-                // ZPN: solve Σ Pₘ ζᵐ = u for ζ (Newton from ζ = u).
-                Projection::Zpn => zpn_zeta(u, pv)?,
+                Projection::Zpn => self.zpn_zeta(u, pv, parameters.zpn)?,
                 // AIR: solve the transcendental radius for ζ (Newton).
                 Projection::Air => air_zeta(u, pv[1])?,
                 _ => unreachable!(),
@@ -469,19 +556,25 @@ impl Projection {
     }
 
     /// Project native `(φ, θ)` (deg) to intermediate world `(x, y)` (deg).
+    ///
+    /// A point the projection has no image for is refused: behind a zenithal
+    /// projection's horizon, past a perspective projection's limb or beyond its point of
+    /// divergence, at a pole a projection sends to infinity, or past ZPN's inflection.
+    /// The bounds are wcslib's (`*s2x` with `bounds & 1`), SZP's limb excepted.
     pub(super) fn project(
         self,
         phi: f64,
         theta: f64,
-        pv: &[f64; 21],
+        parameters: &ProjectionParameters,
     ) -> Result<ProjectedCoordinate> {
         if !phi.is_finite()
             || !theta.is_finite()
             || !(-90.0 - DOMAIN_TOLERANCE..=90.0 + DOMAIN_TOLERANCE).contains(&theta)
         {
-            return Err(self.domain_error());
+            return Err(self.world_domain_error());
         }
         let theta = theta.clamp(-90.0, 90.0);
+        let pv = &parameters.pv;
         let projection = self;
         if matches!(
             projection,
@@ -495,7 +588,29 @@ impl Projection {
         if matches!(projection, Projection::Azp) {
             let (mu, gr) = (pv[1], pv[2] * D2R);
             let (tr, pr) = (theta * D2R, phi * D2R);
-            let denom = (mu + tr.sin()) + tr.cos() * pr.cos() * gr.tan();
+            let tilt = gr.tan() * pr.cos();
+            let denom = (mu + tr.sin()) + tr.cos() * tilt;
+            if denom == 0.0 {
+                return Err(self.world_domain_error());
+            }
+            // Overlap: from a point of projection outside the sphere (|μ| > 1), the far
+            // side beyond the tangent cone sinθ = −1/μ is hidden.
+            let overlap = if mu.abs() > 1.0 {
+                (-1.0 / mu).asin() * R2D
+            } else {
+                -90.0
+            };
+            if theta < overlap {
+                return Err(self.world_domain_error());
+            }
+            if (mu * gr.cos()).abs() < 1.0 {
+                // Divergence: rays from a point of projection that close to the tilted
+                // plane meet it only on the near side of the cone through that point.
+                let t = mu / (1.0 + tilt * tilt).sqrt();
+                if t.abs() <= 1.0 && theta < limb(-tilt.atan() * R2D, t.asin() * R2D) {
+                    return Err(self.world_domain_error());
+                }
+            }
             let r = R2D * (mu + 1.0) * tr.cos() / denom;
             return self.projected_coordinate(r * pr.sin(), -r * pr.cos() / gr.cos());
         }
@@ -504,15 +619,53 @@ impl Projection {
             let (tr, pr) = (theta * D2R, phi * D2R);
             let sigma = 1.0 - tr.sin();
             let denom = vertex.z - sigma;
+            if denom == 0.0 {
+                return Err(self.world_domain_error());
+            }
+            // Divergence: a point of projection within the sphere's depth range sees no
+            // plane past the depth σ = z_p, sinθ = 1 − z_p.
+            let divergence = if (vertex.z - 1.0).abs() < 1.0 {
+                (1.0 - vertex.z).asin() * R2D
+            } else {
+                -90.0
+            };
+            if theta < divergence {
+                return Err(self.world_domain_error());
+            }
+            if pv[1].abs() > 1.0 {
+                // Overlap: the ray from P = (x_p, y_p, z_p) grazes the unit sphere centred
+                // at depth 1 where (S − P)·(S − C) = 0, i.e.
+                // (z_p − 1) sinθ − s cosθ = −1 with s = x_p sinφ − y_p cosφ, whose root is
+                // θ = ψ − asin(1/R) for ψ = atan2(s, z_p − 1), R = √((z_p − 1)² + s²).
+                // wcslib's `szps2x` takes R² = (z_p − 1)·z_p − 1 + s², which for θc = 90°
+                // misses the AZP limb sinθ = −1/μ of the same geometry (−26.57° against
+                // −30° at μ = 2) and refuses points that do have an image.
+                let s = vertex.x * pr.sin() - vertex.y * pr.cos();
+                let t = 1.0 / (vertex.z - 1.0).hypot(s);
+                if t <= 1.0 && theta < limb(s.atan2(vertex.z - 1.0) * R2D, t.asin() * R2D) {
+                    return Err(self.world_domain_error());
+                }
+            }
             let x = R2D * (vertex.z * tr.cos() * pr.sin() - vertex.x * sigma) / denom;
             let y = R2D * (-vertex.z * tr.cos() * pr.cos() - vertex.y * sigma) / denom;
             return self.projected_coordinate(x, y);
         }
         if matches!(projection, Projection::Sin) {
             let (tr, pr) = (theta * D2R, phi * D2R);
+            let (xi, eta) = (pv[1], pv[2]);
+            // The hemisphere facing the plane: θ ≥ 0 for the orthographic form, and for
+            // the slant form θ ≥ −atan(ξ sinφ − η cosφ).
+            let horizon = if xi == 0.0 && eta == 0.0 {
+                0.0
+            } else {
+                -(xi * pr.sin() - eta * pr.cos()).atan() * R2D
+            };
+            if theta < horizon {
+                return Err(self.world_domain_error());
+            }
             let sigma = 1.0 - tr.sin();
-            let x = R2D * (tr.cos() * pr.sin() + pv[1] * sigma);
-            let y = R2D * (-tr.cos() * pr.cos() + pv[2] * sigma);
+            let x = R2D * (tr.cos() * pr.sin() + xi * sigma);
+            let y = R2D * (-tr.cos() * pr.cos() + eta * sigma);
             return self.projected_coordinate(x, y);
         }
         if self.family() == Family::Conic {
@@ -523,6 +676,18 @@ impl Projection {
         }
         if self.family() == Family::Zenithal {
             let zeta = (90.0 - theta) * D2R;
+            let beyond = match projection {
+                // TAN images only the hemisphere above the plane; the equator diverges.
+                Projection::Tan => (theta * D2R).sin() <= 0.0,
+                // STG sends the antipode of its pole to infinity.
+                Projection::Stg => 1.0 + (theta * D2R).sin() == 0.0,
+                Projection::Zpn => zeta > parameters.zpn.zeta_max,
+                Projection::Air => theta == -90.0,
+                _ => false,
+            };
+            if beyond {
+                return Err(self.world_domain_error());
+            }
             let r = match projection {
                 Projection::Tan => R2D * zeta.tan(),
                 Projection::Sin => unreachable!(),
@@ -543,6 +708,10 @@ impl Projection {
                     let lambda = pv[1];
                     [phi, R2D * t.sin() / lambda]
                 }
+                // The poles are at infinity.
+                Projection::Mer if theta.abs() == 90.0 => {
+                    return Err(self.world_domain_error());
+                }
                 Projection::Mer => [phi, R2D * ((45.0 + theta / 2.0) * D2R).tan().ln()],
                 Projection::Sfl => [phi * t.cos(), theta],
                 Projection::Ait => {
@@ -558,6 +727,10 @@ impl Projection {
                 }
                 Projection::Cyp => {
                     let (mu, lambda) = (pv[1], pv[2]);
+                    // The latitude whose rays run parallel to the cylinder.
+                    if mu + t.cos() == 0.0 {
+                        return Err(self.world_domain_error());
+                    }
                     [lambda * phi, R2D * (mu + lambda) * t.sin() / (mu + t.cos())]
                 }
                 Projection::Par => [
@@ -597,7 +770,23 @@ impl Projection {
         let theta_radians = theta * D2R;
         let radius = match self {
             Projection::Cop => {
-                R2D * conic.cos_eta * (conic.cot_theta_a - (theta_radians - conic.theta_a).tan())
+                let offset = theta - conic.theta_a_degrees;
+                // θ − θa = ±90° diverges; a pole is the cone's apex only on the side
+                // of θa; elsewhere a radius of the wrong sign is the far nappe.
+                if cosd(offset) == 0.0 {
+                    return Err(self.world_domain_error());
+                }
+                if theta.abs() == 90.0 {
+                    if (theta < 0.0) != (conic.theta_a_degrees < 0.0) {
+                        return Err(self.world_domain_error());
+                    }
+                    return Ok(0.0);
+                }
+                let radius = R2D * conic.cos_eta * (conic.cot_theta_a - (offset * D2R).tan());
+                if radius * conic.c < 0.0 {
+                    return Err(self.world_domain_error());
+                }
+                radius
             }
             Projection::Coe => {
                 let value =
@@ -605,13 +794,17 @@ impl Projection {
                 R2D / conic.c * self.checked_sqrt(value, 1.0)?
             }
             Projection::Cod => conic.y0 + (conic.theta_a_degrees - theta),
+            // The far pole is at infinity unless the cone opens towards it.
+            Projection::Coo if theta == -90.0 && conic.c >= 0.0 => {
+                return Err(self.world_domain_error());
+            }
             Projection::Coo => conic.psi * (FRAC_PI_4 - theta_radians / 2.0).tan().powf(conic.c),
             _ => unreachable!(),
         };
         if radius.is_finite() {
             Ok(radius)
         } else {
-            Err(self.domain_error())
+            Err(self.world_domain_error())
         }
     }
 
@@ -638,6 +831,77 @@ impl Projection {
             Err(self.domain_error())
         }
     }
+}
+
+impl Projection {
+    /// The colatitude ζ (rad) on the ZPN branch whose radius is `u = R/(180/π)`, as
+    /// wcslib's `zpnx2s` takes it: exact for a linear or quadratic polynomial, the root
+    /// nearest the pole; above that, bracketed on `[0, ζ_max]` by `[P₀, R(ζ_max)]` and
+    /// narrowed by false position (stepping at least a tenth of the bracket) until the
+    /// residual or the bracket is below `1e-13`, wcslib's tolerance.
+    fn zpn_zeta(self, u: f64, pv: &[f64; 21], branch: ZpnBranch) -> Result<f64> {
+        const TOLERANCE: f64 = 1e-13;
+        match branch.degree {
+            0 => Err(self.domain_error()),
+            1 => Ok((u - pv[0]) / pv[1]),
+            2 => {
+                let (a, b, c) = (pv[2], pv[1], pv[0] - u);
+                let discriminant = b * b - 4.0 * a * c;
+                if discriminant < 0.0 {
+                    return Err(self.domain_error());
+                }
+                let root = discriminant.sqrt();
+                let (z1, z2) = ((-b + root) / (2.0 * a), (-b - root) / (2.0 * a));
+                let mut zeta = z1.min(z2);
+                if zeta < -TOLERANCE {
+                    zeta = z1.max(z2);
+                }
+                if !(-TOLERANCE..=PI + TOLERANCE).contains(&zeta) {
+                    return Err(self.domain_error());
+                }
+                Ok(zeta.clamp(0.0, PI))
+            }
+            _ => {
+                let (mut zeta1, mut radius1) = (0.0, pv[0]);
+                let (mut zeta2, mut radius2) = (branch.zeta_max, branch.radius_max);
+                if u < radius1 - TOLERANCE || u > radius2 + TOLERANCE {
+                    return Err(self.domain_error());
+                }
+                if u <= radius1 {
+                    return Ok(zeta1);
+                }
+                if u >= radius2 {
+                    return Ok(zeta2);
+                }
+                let mut zeta = zeta2;
+                for _ in 0..100 {
+                    let lambda = ((radius2 - u) / (radius2 - radius1)).clamp(0.1, 0.9);
+                    zeta = zeta2 - lambda * (zeta2 - zeta1);
+                    let radius = evaluate_zpn(zeta, pv).value;
+                    if (radius - u).abs() < TOLERANCE {
+                        break;
+                    }
+                    if radius < u {
+                        (zeta1, radius1) = (zeta, radius);
+                    } else {
+                        (zeta2, radius2) = (zeta, radius);
+                    }
+                    if (zeta2 - zeta1).abs() < TOLERANCE {
+                        break;
+                    }
+                }
+                Ok(zeta)
+            }
+        }
+    }
+}
+
+/// The lower of the two latitudes `a = s − t` and `b = s + t + 180°` (each folded to at
+/// most 90°) a perspective projection's limb lies on, from its azimuthal offset `s` and
+/// half-angle `t` (deg) — the bound below which a point has no image.
+fn limb(s: f64, t: f64) -> f64 {
+    let fold = |angle: f64| if angle > 90.0 { angle - 360.0 } else { angle };
+    fold(s - t).max(fold(s + t + 180.0))
 }
 
 impl ConicConstants {
@@ -688,7 +952,6 @@ impl ConicConstants {
         ConicConstants {
             c,
             y0,
-            theta_a,
             theta_a_degrees: pv[1],
             cos_eta,
             cot_theta_a,
@@ -802,17 +1065,6 @@ fn evaluate_zpn(zeta: f64, pv: &[f64; 21]) -> ZpnEvaluation {
     ZpnEvaluation { value, derivative }
 }
 
-/// Invert the ZPN polynomial for ζ given `u = R/(180/π)` (Newton from ζ = u).
-fn zpn_zeta(u: f64, pv: &[f64; 21]) -> Result<f64> {
-    solve_newton(Projection::Zpn, u, |zeta| {
-        let evaluation = evaluate_zpn(zeta, pv);
-        NewtonEvaluation {
-            residual: evaluation.value - u,
-            derivative: evaluation.derivative,
-        }
-    })
-}
-
 fn mollweide_gamma(theta: f64) -> Result<f64> {
     if (theta.abs() - FRAC_PI_2).abs() < DOMAIN_TOLERANCE {
         return Ok(theta.signum() * FRAC_PI_2);
@@ -833,6 +1085,21 @@ fn pco_theta(x: f64, y: f64) -> Result<f64> {
             derivative: -2.0 * delta + 2.0 * cotangent + 2.0 * delta / theta.sin().powi(2),
         }
     })
+}
+
+#[cfg(test)]
+pub(crate) mod internals {
+    use crate::wcs::projection::{ProjectionParameters, ZpnBranch};
+
+    impl ProjectionParameters {
+        /// Parameters taken as given, for kernel tests that bypass validation.
+        pub(crate) fn raw(pv: [f64; 21]) -> Self {
+            Self {
+                pv,
+                zpn: ZpnBranch::new(&pv).unwrap_or(ZpnBranch::NONE),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
