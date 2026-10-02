@@ -192,6 +192,7 @@ pub(crate) fn view_words(words: &[u64], bitpix: Bitpix, nbytes: usize) -> ImageV
 /// The `BZERO`/`TZEROn` offsets that realize the FITS unsigned-integer convention:
 /// a sign-bit flip (`2^(n-1)`), exactly representable as `f64`. Shared by the image
 /// (`BZERO`) and binary-table (`TZEROn`) unsigned paths.
+pub(crate) const I8_OFFSET: f64 = -128.0; // −2⁷
 pub(crate) const U16_OFFSET: f64 = 32_768.0; // 2¹⁵
 pub(crate) const U32_OFFSET: f64 = 2_147_483_648.0; // 2³¹
 pub(crate) const U64_OFFSET_INTEGER: u64 = 1_u64 << 63;
@@ -331,7 +332,7 @@ impl Image {
         Image::offset_image(
             shape,
             ImageData::U8(data.iter().copied().map(store_i8).collect()),
-            -128.0,
+            I8_OFFSET,
         )
     }
 

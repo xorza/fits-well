@@ -13,6 +13,7 @@ use std::{fmt, str};
 use crate::ascii::ascii_text::AsciiText;
 use crate::column;
 use crate::column::Named;
+use crate::column::{ColumnLabels, ColumnScaling};
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::validate_table_field_count;
@@ -136,21 +137,17 @@ impl AsciiTable {
             if start.checked_add(fmt.width).is_none_or(|end| end > row_len) {
                 return Err(FitsError::KeywordOutOfRange { name: "TBCOLn" });
             }
+            let labels = ColumnLabels::read(header, n)?;
+            let scaling = ColumnScaling::read(header, n)?;
             columns.push(AsciiColumn {
-                name: header
-                    .get_text(key!("TTYPE{n}").as_str())?
-                    .map(str::to_string)
-                    .filter(|s| !s.is_empty()),
-                unit: header
-                    .get_text(key!("TUNIT{n}").as_str())?
-                    .map(str::to_string)
-                    .filter(|s| !s.is_empty()),
+                name: labels.name,
+                unit: labels.unit,
                 kind: fmt.kind,
                 start,
                 width: fmt.width,
                 decimals: fmt.decimals,
-                tscale: header.get_real(key!("TSCAL{n}").as_str())?.unwrap_or(1.0),
-                tzero: header.get_real(key!("TZERO{n}").as_str())?.unwrap_or(0.0),
+                tscale: scaling.tscale,
+                tzero: scaling.tzero,
                 null: header
                     .get_text(key!("TNULL{n}").as_str())?
                     .map(|s| s.trim().to_string()),
@@ -209,13 +206,8 @@ impl AsciiTable {
     /// boundary. `from_data` rejected the non-ASCII bytes that could otherwise
     /// masquerade as a blank field and silently decode to 0 in a numeric column.
     fn field(&self, col: &AsciiColumn, r: usize) -> &str {
-        let row = &self.rows[r * self.row_len..(r + 1) * self.row_len];
-        let end = (col.start + col.width).min(row.len());
-        if col.start < end {
-            &row[col.start..end]
-        } else {
-            ""
-        }
+        let start = r * self.row_len + col.start;
+        &self.rows[start..start + col.width]
     }
 }
 

@@ -9,6 +9,8 @@
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Result;
+use crate::header_model::Header;
+use crate::keyword::key;
 
 /// A table column that may carry a `TTYPEn` name.
 pub(crate) trait Named {
@@ -43,4 +45,50 @@ pub(crate) fn validate_index(index: usize, len: usize) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// The `TTYPEn` name and `TUNITn` unit of a column, which both table forms read the
+/// same way: an absent or empty card is `None`.
+#[derive(Debug)]
+pub(crate) struct ColumnLabels {
+    pub(crate) name: Option<String>,
+    pub(crate) unit: Option<String>,
+}
+
+impl ColumnLabels {
+    /// The labels of column `n` (1-based).
+    pub(crate) fn read(header: &Header, n: usize) -> Result<ColumnLabels> {
+        let text = |keyword: &str| -> Result<Option<String>> {
+            Ok(header
+                .get_text(keyword)?
+                .filter(|value| !value.is_empty())
+                .map(str::to_string))
+        };
+        Ok(ColumnLabels {
+            name: text(key!("TTYPE{n}").as_str())?,
+            unit: text(key!("TUNIT{n}").as_str())?,
+        })
+    }
+}
+
+/// The `TSCALn` and `TZEROn` of a column (§7.2.2, §7.3.2): 1 and 0 when absent.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ColumnScaling {
+    pub(crate) tscale: f64,
+    pub(crate) tzero: f64,
+}
+
+impl ColumnScaling {
+    pub(crate) const IDENTITY: ColumnScaling = ColumnScaling {
+        tscale: 1.0,
+        tzero: 0.0,
+    };
+
+    /// The scaling of column `n` (1-based).
+    pub(crate) fn read(header: &Header, n: usize) -> Result<ColumnScaling> {
+        Ok(ColumnScaling {
+            tscale: header.get_real(key!("TSCAL{n}").as_str())?.unwrap_or(1.0),
+            tzero: header.get_real(key!("TZERO{n}").as_str())?.unwrap_or(0.0),
+        })
+    }
 }

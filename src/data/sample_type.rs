@@ -2,7 +2,7 @@
 
 use crate::bitpix::Bitpix;
 use crate::data::scaling::Scaling;
-use crate::data::{U16_OFFSET, U32_OFFSET, U64_OFFSET};
+use crate::data::{I8_OFFSET, U16_OFFSET, U32_OFFSET, U64_OFFSET};
 
 /// Which exact-integer realization of the FITS sign-bit-offset conventions a stored
 /// type carries — effectively the tag of [`UnsignedData`], and the single thing both
@@ -59,7 +59,7 @@ impl SampleType {
     pub fn from_scaling(bitpix: Bitpix, scaling: &Scaling) -> SampleType {
         let offset = scaling.bscale == 1.0;
         match bitpix {
-            Bitpix::U8 if offset && scaling.bzero == -128.0 => SampleType::I8,
+            Bitpix::U8 if offset && scaling.bzero == I8_OFFSET => SampleType::I8,
             Bitpix::U8 => SampleType::U8,
             Bitpix::I16 if offset && scaling.bzero == U16_OFFSET => SampleType::U16,
             Bitpix::I16 => SampleType::I16,
