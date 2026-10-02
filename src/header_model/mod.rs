@@ -19,9 +19,6 @@ use crate::header_model::card::validate_keyword;
 use crate::header_model::card::validate_valued_keyword;
 use crate::header_model::value::Value;
 use crate::keyword::key;
-use crate::time_coordinates::phase_axis::PhaseAxis;
-use crate::time_coordinates::{FitsTime, TimeBounds, TimeCoordinate};
-use crate::world_coordinates::Wcs;
 
 /// A parsed header unit: an *ordered* list of content cards plus a side index
 /// for O(1) keyword lookup.
@@ -247,75 +244,6 @@ impl Header {
     /// The physical-value scaling (`BSCALE`/`BZERO`/`BLANK`) declared by this header.
     pub fn scaling(&self) -> Result<Scaling> {
         Scaling::from_header(self)
-    }
-
-    /// Parse the World Coordinate System (FITS §8) described by this header: the
-    /// primary description (`alt = None`) or an alternate (`alt = Some('A'..='Z')`).
-    pub fn wcs(&self, alt: Option<char>) -> Result<Wcs> {
-        Wcs::from_header(self, alt)
-    }
-
-    /// WCS for a *pixel-list* table (§8.4.2), where the given `columns` hold the
-    /// coordinate axes; `alt` selects the primary (`None`) or an alternate system.
-    pub fn wcs_pixel_list(&self, columns: &[usize], alt: Option<char>) -> Result<Wcs> {
-        Wcs::from_pixel_list(self, columns, alt)
-    }
-
-    /// WCS attached to a single array-valued table `column` (§8.4.1).
-    pub fn wcs_array_column(&self, column: usize, alt: Option<char>) -> Result<Wcs> {
-        Wcs::from_array_column(self, column, alt)
-    }
-
-    /// The time-coordinate frame (FITS §9) parsed from this header — reference
-    /// epoch/scale, units, and any time WCS axis.
-    pub fn time(&self) -> Result<FitsTime> {
-        FitsTime::from_header(self)
-    }
-
-    /// The time-coordinate frame for a binary-table `column` (1-based).
-    /// `TRPOSn` overrides global `TREFPOS`; both default to `TOPOCENTER`.
-    pub fn time_for_column(&self, column: usize) -> Result<FitsTime> {
-        FitsTime::from_header_for_column(self, Some(column))
-    }
-
-    /// The observation Modified Julian Date — `MJD-OBS`, else `DATE-OBS`, else the
-    /// `JEPOCH`/`BEPOCH` epoch, else `None`.
-    pub fn obs_mjd(&self) -> Result<Option<f64>> {
-        FitsTime::obs_mjd(self)
-    }
-
-    /// The Julian (`JEPOCH`) or Besselian (`BEPOCH`) epoch keyword, if present.
-    pub fn epoch(&self) -> Result<Option<TimeCoordinate>> {
-        FitsTime::epoch(self)
-    }
-
-    /// The observation time bounds (start/end/duration, §9.2.3) from this header.
-    pub fn time_bounds(&self) -> Result<TimeBounds> {
-        FitsTime::bounds(self)
-    }
-
-    /// The §9.6 `'PHASE'` parameters for an image WCS `axis` (1-based).
-    pub fn phase_axis(&self, axis: usize, alt: Option<char>) -> Result<Option<PhaseAxis>> {
-        FitsTime::phase_axis(self, axis, alt)
-    }
-
-    /// The §9.6 `'PHASE'` parameters for a binary-table pixel-list `column`.
-    pub fn phase_axis_pixel_list(
-        &self,
-        column: usize,
-        alt: Option<char>,
-    ) -> Result<Option<PhaseAxis>> {
-        FitsTime::phase_axis_pixel_list(self, column, alt)
-    }
-
-    /// The §9.6 `'PHASE'` parameters for an axis in an array-valued table column.
-    pub fn phase_axis_array_column(
-        &self,
-        axis: usize,
-        column: usize,
-        alt: Option<char>,
-    ) -> Result<Option<PhaseAxis>> {
-        FitsTime::phase_axis_array_column(self, axis, column, alt)
     }
 
     /// Create an empty header. Build it with [`Header::set`] and friends.

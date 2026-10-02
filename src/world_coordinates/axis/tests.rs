@@ -476,7 +476,7 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
             .set_internal("CRVAL1", case.reference)
             .set_internal("CDELT1", case.reference / 100.0)
             .set_internal("RESTFRQ", 1_420_405_751.0);
-        let wcs = header.wcs(None).unwrap();
+        let wcs = Wcs::from_header(&header, None).unwrap();
         // The view reports the axis as declared; the world coordinate is in the default unit.
         assert_eq!(wcs.view().axes[0].cunit, case.unit);
         assert_eq!(wcs.view().axes[0].crval, case.reference, "{}", case.ctype);
@@ -495,12 +495,12 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
         .set_internal("CUNIT1", "Hz")
         .set_internal("CRVAL1", 1.0);
     assert!(matches!(
-        invalid.wcs(None),
+        Wcs::from_header(&invalid, None),
         Err(crate::error::FitsError::InvalidUnit { unit, expected: "a length unit" }) if unit == "Hz"
     ));
     invalid.set_internal("CUNIT1", "qHz");
     assert!(matches!(
-        invalid.wcs(None),
+        Wcs::from_header(&invalid, None),
         Err(crate::error::FitsError::InvalidUnit { unit, .. }) if unit == "qHz"
     ));
 }
@@ -515,7 +515,7 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
         .set_internal("CRPIX1", 1.0)
         .set_internal("CRVAL1", 100.0)
         .set_internal("CDELT1", 10.0);
-    let generic = generic.wcs(None).unwrap();
+    let generic = Wcs::from_header(&generic, None).unwrap();
     let expected = 100.0 * 0.2_f64.exp();
     assert_eq!(generic.view().axes[0].cunit, "d");
     assert!((generic.pixel_to_world(&[3.0]).unwrap()[0] - expected).abs() < 1e-13);
@@ -536,7 +536,7 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
         .set_internal("CRPIX1", 1.0)
         .set_internal("CRVAL1", 1.4)
         .set_internal("CDELT1", 0.001);
-    let frequency = frequency.wcs(None).unwrap();
+    let frequency = Wcs::from_header(&frequency, None).unwrap();
     let expected = 1.4e9 * (2.0e6_f64 / 1.4e9).exp();
     assert_eq!(frequency.view().axes[0].cunit, "GHz");
     assert_eq!(frequency.view().axes[0].crval, 1.4);
@@ -549,7 +549,7 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
         .set_internal("CTYPE1", "ABCD-LOG")
         .set_internal("CRVAL1", 0.0);
     assert!(matches!(
-        invalid.wcs(None),
+        Wcs::from_header(&invalid, None),
         Err(FitsError::InvalidWcs { .. })
     ));
 }

@@ -104,9 +104,8 @@ pub struct Wcs {
 
 impl Wcs {
     /// Parse the primary WCS (`alt = None`) or an alternate description
-    /// (`alt = Some('A'..='Z')`) from `header`. The public entry point is
-    /// [`Header::wcs`](crate::header_model::Header::wcs), which forwards here.
-    pub(crate) fn from_header(header: &Header, alt: Option<char>) -> Result<Wcs> {
+    /// (`alt = Some('A'..='Z')`) from `header`.
+    pub fn from_header(header: &Header, alt: Option<char>) -> Result<Wcs> {
         Wcs::from_header_with_context(header, alt, Vec::new(), None)
     }
 
@@ -354,11 +353,7 @@ impl Wcs {
     /// families, both matrix/parameter spellings (`TPC`/`TP`, `TCD`/`TC`,
     /// `TPV`/`TV`), and the longitude column's `LONPna`/`LATPna` pole keywords,
     /// then evaluates them through the same pipeline as image WCS.
-    pub(crate) fn from_pixel_list(
-        header: &Header,
-        columns: &[usize],
-        alt: Option<char>,
-    ) -> Result<Wcs> {
+    pub fn from_pixel_list(header: &Header, columns: &[usize], alt: Option<char>) -> Result<Wcs> {
         let table = TableWcs::pixel_list(alt, columns);
         let translated = table.translate(header)?;
         let mut h = translated.header;
@@ -383,11 +378,7 @@ impl Wcs {
     /// axis-and-column-indexed families, `ijPCna`/`ijCDna`, `iPVn_ma`/`iVn_ma`,
     /// and `LONPna`/`LATPna`, where `i`/`j` are array axes and `n` is the column.
     /// The rank is taken from `WCAXna`, else inferred through the same resolver.
-    pub(crate) fn from_array_column(
-        header: &Header,
-        column: usize,
-        alt: Option<char>,
-    ) -> Result<Wcs> {
+    pub fn from_array_column(header: &Header, column: usize, alt: Option<char>) -> Result<Wcs> {
         let naxis = TableWcs::array_column_rank(header, alt, column)?;
         let table = TableWcs::array_column(alt, naxis, column);
         let translated = table.translate(header)?;

@@ -1,5 +1,6 @@
 use crate::error::FitsError;
 use crate::header_model::Header;
+use crate::world_coordinates::Wcs;
 use crate::world_coordinates::celestial_frame::CelestialFrame;
 use crate::world_coordinates::celestial_frame::CelestialReferenceFrame;
 
@@ -20,15 +21,17 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
         header
     };
     assert_eq!(
-        image(None, None).wcs(None).unwrap().view().celestial_frame,
+        Wcs::from_header(&image(None, None), None)
+            .unwrap()
+            .view()
+            .celestial_frame,
         Some(CelestialFrame {
             reference_frame: CelestialReferenceFrame::Icrs,
             equinox: None,
         })
     );
     assert_eq!(
-        image(Some(1950.0), None)
-            .wcs(None)
+        Wcs::from_header(&image(Some(1950.0), None), None)
             .unwrap()
             .view()
             .celestial_frame,
@@ -38,8 +41,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
         })
     );
     assert_eq!(
-        image(Some(2000.0), None)
-            .wcs(None)
+        Wcs::from_header(&image(Some(2000.0), None), None)
             .unwrap()
             .view()
             .celestial_frame,
@@ -49,8 +51,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
         })
     );
     assert_eq!(
-        image(Some(1975.0), Some("FK4-NO-E"))
-            .wcs(None)
+        Wcs::from_header(&image(Some(1975.0), Some("FK4-NO-E")), None)
             .unwrap()
             .view()
             .celestial_frame,
@@ -66,14 +67,20 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
         .set_internal("CTYPE2A", "DEC--TAN")
         .set_internal("EQUINOXA", 1970.0);
     assert_eq!(
-        alternate.wcs(None).unwrap().view().celestial_frame,
+        Wcs::from_header(&alternate, None)
+            .unwrap()
+            .view()
+            .celestial_frame,
         Some(CelestialFrame {
             reference_frame: CelestialReferenceFrame::Gappt,
             equinox: None,
         })
     );
     assert_eq!(
-        alternate.wcs(Some('A')).unwrap().view().celestial_frame,
+        Wcs::from_header(&alternate, Some('A'))
+            .unwrap()
+            .view()
+            .celestial_frame,
         Some(CelestialFrame {
             reference_frame: CelestialReferenceFrame::Fk4,
             equinox: Some(1970.0),
@@ -89,8 +96,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
         .set_internal("EQUI2A", 2000.0)
         .set_internal("EQUI3A", 2000.0);
     assert_eq!(
-        pixel_list
-            .wcs_pixel_list(&[2, 3], Some('A'))
+        Wcs::from_pixel_list(&pixel_list, &[2, 3], Some('A'))
             .unwrap()
             .view()
             .celestial_frame,
@@ -106,8 +112,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
         .set_internal("2CTY5A", "DEC--TAN")
         .set_internal("RADE5A", "ICRS");
     assert_eq!(
-        vector
-            .wcs_array_column(5, Some('A'))
+        Wcs::from_array_column(&vector, 5, Some('A'))
             .unwrap()
             .view()
             .celestial_frame,
@@ -125,7 +130,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
         .set_internal("RADE3", "FK5")
         .set_internal("EQUI2", 2000.0)
         .set_internal("EQUI3", 2000.0);
-    let unsupported = unsupported.wcs_pixel_list(&[2, 3], None).unwrap();
+    let unsupported = Wcs::from_pixel_list(&unsupported, &[2, 3], None).unwrap();
     assert_eq!(
         unsupported.view().celestial_frame,
         Some(CelestialFrame {
@@ -136,16 +141,16 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
     assert_eq!(unsupported.view().unsupported_axes, [0, 1]);
 
     assert!(matches!(
-        image(None, Some("J2000")).wcs(None),
+        Wcs::from_header(&image(None, Some("J2000")), None),
         Err(FitsError::InvalidWcs { detail }) if detail.contains("RADESYS")
     ));
     assert!(matches!(
-        image(Some(-1.0), None).wcs(None),
+        Wcs::from_header(&image(Some(-1.0), None), None),
         Err(FitsError::InvalidWcs { detail }) if detail.contains("EQUINOX")
     ));
     pixel_list.set_internal("RADE3A", "FK4");
     assert!(matches!(
-        pixel_list.wcs_pixel_list(&[2, 3], Some('A')),
+        Wcs::from_pixel_list(&pixel_list, &[2, 3], Some('A')),
         Err(FitsError::ConflictingWcsKeywords { .. })
     ));
 }

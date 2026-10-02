@@ -5,10 +5,9 @@
 //!
 //! The format's structure maps onto a stack of layers, so the hot decode path
 //! stays lean and the semantic layers compute only on demand. WCS (§8) and time
-//! (§9) are dependency-free, always compiled, and surfaced directly as
-//! [`header::Header`] getters ([`header::Header::wcs`],
-//! [`header::Header::time`]); tiled compression carries a dependency and stays
-//! behind the `compression` feature.
+//! (§9) are dependency-free, always compiled, and parsed from a header on request
+//! ([`wcs::Wcs::from_header`], [`time::FitsTime::from_header`]); tiled compression
+//! carries a dependency and stays behind the `compression` feature.
 //!
 //! ```text
 //! bytes ─► block layer ─► HDU layer ─► header model ─► typed data
@@ -22,9 +21,7 @@
 //! - [`header::Header`], [`header::Value`] — an *ordered* header model
 //!   (an internal `Card` list)
 //!   whose logical records round-trip with a side index for O(1) keyword lookup;
-//!   physical card layout is normalized on write rather than retained. It also
-//!   parses the WCS and time layers on request
-//!   ([`header::Header::wcs`]/[`header::Header::time`]).
+//!   physical card layout is normalized on write rather than retained.
 //! - [`io::HduKind`] — HDU classification and the data-unit sizing formula that makes
 //!   boundaries computable from headers alone (no data read required).
 //! - [`FitsReader`] — lazy, seeking access to the HDU sequence of a file.
@@ -123,8 +120,7 @@ pub mod wcs {
     //! [`FitsError::UnsupportedWcsTransform`](crate::FitsError::UnsupportedWcsTransform).
     //!
     //! Binary-table WCS (Table 22) is supported for both the pixel-list
-    //! ([`Header::wcs_pixel_list`](crate::header_model::Header::wcs_pixel_list)) and vector-cell
-    //! ([`Header::wcs_array_column`](crate::header_model::Header::wcs_array_column)) forms.
+    //! ([`Wcs::from_pixel_list`]) and vector-cell ([`Wcs::from_array_column`]) forms.
     //!
     //! Pixel↔world yields celestial coordinates in the frame the file declares;
     //! [`WcsView::celestial_frame`] and [`WcsAxis::spectral_frame`] expose that typed
@@ -145,10 +141,12 @@ pub mod wcs {
 /// header's time frame.
 pub mod time {
     pub use crate::time_coordinates::datetime::Datetime;
+    pub use crate::time_coordinates::fits_time::FitsTime;
     pub use crate::time_coordinates::phase_axis::PhaseAxis;
+    pub use crate::time_coordinates::time_bounds::TimeBounds;
+    pub use crate::time_coordinates::time_coordinate::TimeCoordinate;
     pub use crate::time_coordinates::time_reference_position::TimeReferencePosition;
     pub use crate::time_coordinates::time_scale::{TimeScale, TimeScaleKind};
-    pub use crate::time_coordinates::{FitsTime, TimeBounds, TimeCoordinate};
 }
 
 /// Binary and ASCII table values, schema and selection metadata, and write
