@@ -69,21 +69,21 @@ impl Algo {
     }
 }
 
-/// Resolved per-column layout used by both directions.
+/// One column's layout and codec, used by both directions.
 #[derive(Debug)]
 struct ColMeta {
     kind: TformKind,
     vla_elem: Option<TformKind>,
-    /// Element width in bytes (the `t` size, e.g. 2 for `I`).
+    /// Element width in bytes of the compressed values (the heap element for a
+    /// `P`/`Q` column), e.g. 2 for `I`.
     elem_size: usize,
-    /// Number of elements per row (`repeat`).
-    repeat: usize,
-    /// Bytes per row for this column (`repeat × elem_size`).
+    /// Bytes per row for this column — the descriptor for a `P`/`Q` column.
     width: usize,
     /// Byte offset of this column within a row.
     offset: usize,
+    /// Valid for the column's type: [`ColMeta::chosen`] clamps a request and
+    /// [`ColMeta::declared`] refuses an invalid `ZCTYPn`.
     algo: Algo,
-    gzip_level: u32,
 }
 
 #[derive(Debug)]
@@ -93,6 +93,38 @@ struct BoundTable<'a> {
 }
 
 impl ColMeta {
+    /// The column `tform` at `offset`, compressed with `requested` clamped to a
+    /// codec valid for its type, as cfitsio does when it writes.
+    fn chosen(tform: &Tform, offset: usize, requested: Algo) -> ColMeta {
+        let mut meta = ColMeta::declared_unchecked(tform, offset, requested);
+        meta.algo = pick_algo(meta.compression_kind(), requested);
+        meta
+    }
+
+    /// The column `tform` at `offset` with the codec its `ZCTYPn` declares. Errors
+    /// when that codec cannot encode the column's type (`RICE_1` takes only `B`, `I`
+    /// and `J` values).
+    fn declared(tform: &Tform, offset: usize, algo: Algo) -> Result<ColMeta> {
+        let meta = ColMeta::declared_unchecked(tform, offset, algo);
+        if algo == Algo::Rice1 && meta.rice_width().is_none() {
+            return Err(FitsError::UnsupportedCompression {
+                name: format!("RICE_1 on a {} column", meta.compression_kind().code()),
+            });
+        }
+        Ok(meta)
+    }
+
+    fn declared_unchecked(tform: &Tform, offset: usize, algo: Algo) -> ColMeta {
+        ColMeta {
+            kind: tform.kind,
+            vla_elem: tform.vla_elem,
+            elem_size: tform.vla_elem.unwrap_or(tform.kind).elem_size(),
+            width: tform.byte_width(),
+            offset,
+            algo,
+        }
+    }
+
     fn is_vla(&self) -> bool {
         self.vla_elem.is_some()
     }
@@ -117,14 +149,19 @@ impl ColMeta {
     }
 
     /// `RICE_1` pixel width (`B`=1, `I`=2, `J`=4); other types can't use Rice.
-    fn rice_bytepix(&self) -> Option<usize> {
+    fn rice_width(&self) -> Option<usize> {
         match self.compression_kind() {
             TformKind::Byte => Some(1),
             TformKind::I16 => Some(2),
             TformKind::I32 => Some(4),
-            TformKind::I64 => Some(8),
             _ => None,
         }
+    }
+
+    /// The `RICE_1` pixel width of a column whose codec is `RICE_1`.
+    fn rice_bytepix(&self) -> usize {
+        self.rice_width()
+            .expect("both constructors keep RICE_1 to B, I and J columns")
     }
 }
 
@@ -161,26 +198,6 @@ fn pick_algo(kind: TformKind, requested: Algo) -> Algo {
     }
 }
 
-/// Build per-column metadata from a column's `Tform`, its byte offset, and the
-/// chosen algorithm.
-fn col_meta(tform: &Tform, offset: usize, algo: Algo, gzip_level: u32) -> Result<ColMeta> {
-    let compression_kind = tform.vla_elem.unwrap_or(tform.kind);
-    let elem_size = compression_kind.elem_size();
-    // Bit columns pack `repeat` bits into bytes; the in-row width is the byte_width.
-    let width = tform.byte_width();
-    let repeat = if width == 0 { 0 } else { width / elem_size };
-    Ok(ColMeta {
-        kind: tform.kind,
-        vla_elem: tform.vla_elem,
-        elem_size,
-        repeat,
-        width,
-        offset,
-        algo: pick_algo(compression_kind, algo),
-        gzip_level,
-    })
-}
-
 /// Compress a `BINTABLE` into a `ZTABLE` container. `rows_per_tile`
 /// is the tile height (clamped to `[1, nrows]`); `default_algo` applies to every
 /// column. Returns the compressed header and its data unit (Q descriptors + heap).
@@ -213,8 +230,8 @@ pub(crate) fn compress_table(
     let metas: Vec<ColMeta> = metadata
         .columns
         .iter()
-        .map(|c| col_meta(&c.tform, c.byte_offset, default_algo, gzip_level))
-        .collect::<Result<_>>()?;
+        .map(|c| ColMeta::chosen(&c.tform, c.byte_offset, default_algo))
+        .collect();
     let vla_columns = metas
         .iter()
         .enumerate()
@@ -258,7 +275,7 @@ pub(crate) fn compress_table(
                     // reference implementation of §10.3 — stores it; a stored length equal
                     // to the raw length is then what marks it raw, and cannot be a stream.
                     let cell = vla.cell(r0 + row)?;
-                    let compressed = compress_payload(m, cell.bytes, cell.element_count, scratch)?;
+                    let compressed = compress_payload(m, cell.bytes, gzip_level, scratch)?;
                     arrays.push(if compressed.len() < cell.bytes.len() {
                         compressed
                     } else {
@@ -281,13 +298,7 @@ pub(crate) fn compress_table(
                 scratch.column.extend_from_slice(&raw[off..off + m.width]);
             }
             let column_bytes = std::mem::take(&mut scratch.column);
-            let compressed = compress_payload(
-                m,
-                &column_bytes,
-                rows.checked_mul(m.repeat)
-                    .ok_or(FitsError::DataUnitOverflow)?,
-                scratch,
-            );
+            let compressed = compress_payload(m, &column_bytes, gzip_level, scratch);
             scratch.column = column_bytes;
             Ok(EncodedColumn::Fixed(compressed?))
         },
@@ -325,7 +336,7 @@ pub(crate) fn compress_table(
                     out.append(&mut array);
                 }
                 combined.extend_from_slice(&descriptors);
-                gzip::gzip_encode(&combined, gzip::DEFAULT_GZIP_LEVEL)
+                gzip::gzip_encode(&combined, gzip_level)
             }
         };
         let offset = out.len() - descriptor_bytes;
@@ -430,7 +441,7 @@ pub(crate) fn uncompress_table(header: &Header, table: TableView<'_>) -> Result<
             Some(s) => Algo::parse(s)?,
             None => Algo::Gzip2, // cfitsio's default when ZCTYPn is absent
         };
-        let m = col_meta(&tform, offset, algo, gzip::DEFAULT_GZIP_LEVEL)?;
+        let m = ColMeta::declared(&tform, offset, algo)?;
         offset = offset
             .checked_add(m.width)
             .ok_or(FitsError::DataUnitOverflow)?;
@@ -678,29 +689,20 @@ enum EncodedColumn {
 fn compress_payload(
     m: &ColMeta,
     bytes: &[u8],
-    element_count: usize,
+    gzip_level: u32,
     scratch: &mut TableEncodeScratch,
 ) -> Result<Vec<u8>> {
     Ok(match m.algo {
-        Algo::Gzip1 => gzip::gzip_encode(bytes, m.gzip_level),
-        Algo::Gzip2 => {
-            gzip::gzip2_encode(bytes, m.shuffle_width(), m.gzip_level, &mut scratch.gzip)
-        }
+        Algo::Gzip1 => gzip::gzip_encode(bytes, gzip_level),
+        Algo::Gzip2 => gzip::gzip2_encode(bytes, m.shuffle_width(), gzip_level, &mut scratch.gzip),
         Algo::Rice1 => {
-            let bytepix = m.rice_bytepix().ok_or(FitsError::UnsupportedCompression {
-                name: format!("RICE_1 on a {} column", m.compression_kind().code()),
-            })?;
+            let bytepix = m.rice_bytepix();
+            debug_assert!(bytes.len().is_multiple_of(bytepix), "whole Rice pixels");
             convert::be_to_i64_into(
                 bytes,
                 convert::bytepix_to_bitpix(bytepix),
                 &mut scratch.ints,
             );
-            if scratch.ints.len() != element_count {
-                return Err(FitsError::DataSizeMismatch {
-                    expected: element_count,
-                    got: scratch.ints.len(),
-                });
-            }
             rice::rice_encode(&scratch.ints, bytepix, 32, &mut scratch.rice)
         }
         Algo::NoCompress => bytes.to_vec(),
@@ -926,9 +928,7 @@ fn decompress_vla_payload(
             &mut scratch.vla,
         )?,
         Algo::Rice1 => {
-            let bytepix = m.rice_bytepix().ok_or(FitsError::UnsupportedCompression {
-                name: format!("RICE_1 on a {} column", m.compression_kind().code()),
-            })?;
+            let bytepix = m.rice_bytepix();
             rice::rice_decode_into(bytes, element_count, bytepix, 32, &mut scratch.ints)?;
             convert::i64_to_be_into(
                 &scratch.ints,
@@ -969,13 +969,8 @@ fn decompress_column_into(
             &mut scratch.bytes,
         )?,
         Algo::Rice1 => {
-            let bytepix = m.rice_bytepix().ok_or(FitsError::UnsupportedCompression {
-                name: format!("RICE_1 on a {} column", m.kind.code()),
-            })?;
-            let nelem = rows
-                .checked_mul(m.repeat)
-                .ok_or(FitsError::DataUnitOverflow)?;
-            rice::rice_decode_into(bytes, nelem, bytepix, 32, &mut scratch.ints)?;
+            let bytepix = m.rice_bytepix();
+            rice::rice_decode_into(bytes, expect / bytepix, bytepix, 32, &mut scratch.ints)?;
             convert::i64_to_be_into(
                 &scratch.ints,
                 convert::bytepix_to_bitpix(bytepix),
