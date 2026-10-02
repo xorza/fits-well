@@ -124,6 +124,19 @@ pub(super) fn rice_encode<T: Copy + Into<i64>>(
     blocksize: usize,
     scratch: &mut RiceScratch,
 ) -> Vec<u8> {
+    let mut out = Vec::new();
+    rice_encode_into(values, bytepix, blocksize, scratch, &mut out);
+    out
+}
+
+/// [`rice_encode`], appending the stream to `out`.
+pub(super) fn rice_encode_into<T: Copy + Into<i64>>(
+    values: &[T],
+    bytepix: usize,
+    blocksize: usize,
+    scratch: &mut RiceScratch,
+    out: &mut Vec<u8>,
+) {
     let nbits = (8 * bytepix) as u32;
     let (fsbits, fsmax) = match bytepix {
         1 => (3i32, 6i32),
@@ -137,7 +150,7 @@ pub(super) fn rice_encode<T: Copy + Into<i64>>(
     } else {
         (1u64 << nbits) - 1
     };
-    let mut bo = BitOutput::new();
+    let mut bo = BitOutput::new(out);
     // Rice output is at most a few bytes per pixel; reserve a pixel's worth up front
     // so the bitstream rarely reallocates mid-tile.
     bo.out.reserve(values.len());
@@ -197,7 +210,6 @@ pub(super) fn rice_encode<T: Copy + Into<i64>>(
         }
         i += thisblock;
     }
-    bo.out
 }
 
 #[derive(Debug, Default)]
@@ -205,17 +217,18 @@ pub(super) struct RiceScratch {
     diffs: Vec<u64>,
 }
 
-/// MSB-first bit output, mirroring cfitsio's `Buffer`/`output_nbits`.
+/// MSB-first bit output appended to a buffer, mirroring cfitsio's
+/// `Buffer`/`output_nbits`.
 #[derive(Debug)]
-struct BitOutput {
-    out: Vec<u8>,
+struct BitOutput<'a> {
+    out: &'a mut Vec<u8>,
     bits_in_last: u8,
 }
 
-impl BitOutput {
-    fn new() -> Self {
+impl<'a> BitOutput<'a> {
+    fn new(out: &'a mut Vec<u8>) -> BitOutput<'a> {
         BitOutput {
-            out: Vec::new(),
+            out,
             bits_in_last: 0,
         }
     }

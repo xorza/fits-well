@@ -16,11 +16,11 @@ fn main() -> fits_well::Result<()> {
     // (the character width for a text column, 1 for a plain scalar column).
     let table = TableBuilder::new()
         .column(WriteColumn::scalar("ID", ColumnData::I32(vec![1, 2, 3])))?
-        .column(WriteColumn::fixed(
+        .column(WriteColumn::characters(
             "NAME",
-            ColumnData::Character(vec!["Vega".into(), "Sirius".into(), "Rigel".into()]),
+            ["Vega", "Sirius", "Rigel"],
             8,
-        ))?
+        )?)?
         .column(
             WriteColumn::scalar("MAG", ColumnData::F64(vec![0.03, -1.46, 0.13])).with_unit("mag"),
         )?;

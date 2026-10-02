@@ -9,6 +9,7 @@ use crate::error::FitsError;
 use crate::header_model::Header;
 use crate::header_model::value::Value;
 use crate::keyword::key;
+use crate::ragged::Ragged;
 use crate::reader::FitsReader;
 use crate::reader::internals::open_fixture;
 use crate::writer::FitsWriter;
@@ -301,10 +302,13 @@ fn decodes_a_cfitsio_compressed_table_with_a_vla_column() {
     );
     let arrays = table.column_by_idx(1).unwrap().vla().unwrap();
     assert_eq!(arrays.len(), 600);
-    for (row, array) in arrays.into_iter().enumerate() {
+    let ColumnData::I32(values) = arrays.values() else {
+        panic!("a J heap decodes to i32 values");
+    };
+    for row in 0..arrays.len() {
         assert_eq!(
-            array,
-            ColumnData::I32((0..(row % 7) as i32).collect()),
+            values[arrays.range(row)],
+            (0..(row % 7) as i32).collect::<Vec<_>>(),
             "row {row}"
         );
     }
@@ -354,7 +358,10 @@ fn compressed_table_vla_round_trips_all_table_codecs() {
 #[test]
 fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
     for wide in [false, true] {
-        let mut column = WriteColumn::vla("VLA", vec![ColumnData::Bytes(vec![7])]).unwrap();
+        let mut column = WriteColumn::vla(
+            "VLA",
+            Ragged::from_rows(vec![ColumnData::Bytes(vec![7])]).unwrap(),
+        );
         if wide {
             column = column.wide();
         }
@@ -572,7 +579,7 @@ fn a_variable_length_array_is_stored_compressed_only_when_it_shrinks() {
         ColumnData::Bytes(Vec::new()),
         ColumnData::Bytes(vec![0; 400]),
     ];
-    let column = WriteColumn::vla("ARRAYS", rows.clone()).unwrap();
+    let column = WriteColumn::vla("ARRAYS", Ragged::from_rows(rows.clone()).unwrap());
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     w.write_table(&TableBuilder::explicit(3, vec![column]).unwrap(), None)
         .unwrap();
@@ -623,7 +630,10 @@ fn a_variable_length_array_is_stored_compressed_only_when_it_shrinks() {
 
     let restored = table::uncompress_table(&encoded_header, encoded_table.view()).unwrap();
     let restored = BinTable::from_data(&restored.header, restored.data).unwrap();
-    assert_eq!(restored.column_by_idx(0).unwrap().vla().unwrap(), rows);
+    assert_eq!(
+        restored.column_by_idx(0).unwrap().vla().unwrap(),
+        Ragged::from_rows(rows).unwrap()
+    );
 }
 
 /// A declared `ZCTYPn` is honoured as written, so `RICE_1` on a 64-bit column —

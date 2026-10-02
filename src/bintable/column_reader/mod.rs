@@ -7,11 +7,11 @@ use crate::bintable::column::Column;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::table_view::TableView;
 use crate::bintable::tform_kind::TformKind;
-use crate::bintable::vla_column::VlaCell;
 use crate::bintable::vla_column::VlaColumn;
 use crate::data::unsigned_data::UnsignedData;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::ragged::Ragged;
 
 /// A handle to one column of a [`BinTable`], from [`BinTable::column_by_idx`] or
 /// [`BinTable::column_by_name`]. Decode through it without re-passing the column
@@ -124,37 +124,37 @@ impl<'a> ColumnReader<'a> {
         Ok(BitColumn::new(self.table, self.index))
     }
 
-    /// Decode a variable-length (`P`/`Q`) column: one [`ColumnData`] per row, each
-    /// holding that row's heap array (which may be empty). Errors for fixed-width
-    /// columns.
-    pub fn vla(&self) -> Result<Vec<ColumnData>> {
-        let column = self.vla_column()?;
-        self.map_vla_rows(column, |cell| Ok(cell.element_type.decode_run(cell.bytes)))
+    /// Decode a variable-length (`P`/`Q`) column: every row's heap array, in one
+    /// [`ColumnData`] with the row ends — a row may be empty. A `PX` row is its
+    /// packed bytes. Errors for fixed-width columns.
+    pub fn vla(&self) -> Result<Ragged<ColumnData>> {
+        let rows = self.vla_rows()?;
+        let kind = rows.column.element_type().heap_kind();
+        let values = kind.decode_cells(rows.bytes(), rows.count());
+        Ok(Ragged::<ColumnData>::new(values, rows.ends))
     }
 
     /// Scale each row of a `P`/`Q` column to its physical plane: `TZEROn + TSCALn ×
     /// element`, mapping integers equal to `TNULLn` to `NaN` (§6.4 — scaling applies to
     /// the heap values). Errors for fixed-width or non-numeric-heap columns.
-    pub fn vla_physical(&self) -> Result<Vec<Vec<f64>>> {
+    pub fn vla_physical(&self) -> Result<Ragged<Vec<f64>>> {
         let col = self.descriptor();
-        let column = self.vla_column()?;
-        self.map_vla_rows(column, |cell| {
-            cell.element_type.decode_physical(
-                std::iter::once(cell.bytes),
-                cell.element_count,
-                col.tscale,
-                col.tzero,
-                col.tnull,
-            )
-        })
+        let rows = self.vla_rows()?;
+        let values = rows.column.element_type().decode_physical(
+            rows.bytes(),
+            rows.count(),
+            col.tscale,
+            col.tzero,
+            col.tnull,
+        )?;
+        Ok(Ragged::<Vec<f64>>::new(values, rows.ends))
     }
 
     /// Exact typed integers for each row of a `P`/`Q` heap array using the FITS
-    /// unsigned (or signed-byte) convention. The outer vector is table rows; each
-    /// row's [`UnsignedData`] owns its jagged array. Returns `Ok(None)` unless the
-    /// heap type and `TSCALn`/`TZEROn`/`TNULLn` metadata form that convention.
-    /// Errors for fixed-width columns.
-    pub fn vla_unsigned(&self) -> Result<Option<Vec<UnsignedData>>> {
+    /// unsigned (or signed-byte) convention. Returns `Ok(None)` unless the heap type
+    /// and `TSCALn`/`TZEROn`/`TNULLn` metadata form that convention. Errors for
+    /// fixed-width columns.
+    pub fn vla_unsigned(&self) -> Result<Option<Ragged<UnsignedData>>> {
         let col = self.descriptor();
         let column = self.vla_column()?;
         let Some(kind) = column
@@ -163,35 +163,24 @@ impl<'a> ColumnReader<'a> {
         else {
             return Ok(None);
         };
-        self.map_vla_rows(column, |cell| {
-            Ok(UnsignedData::from_be_cells(
-                std::iter::once(cell.bytes),
-                cell.element_count,
-                kind,
-            ))
-        })
-        .map(Some)
+        let rows = self.vla_rows()?;
+        let values = UnsignedData::from_be_cells(rows.bytes(), rows.count(), kind);
+        Ok(Some(Ragged::<UnsignedData>::new(values, rows.ends)))
     }
 
     /// Each row of a `PC`/`QC`/`PM`/`QM` heap array as [`Complex<f64>`], applying
     /// `TSCALn` to both components and `TZEROn` to only the real component (§7.3.2).
     /// Empty descriptors produce empty rows. Errors for fixed-width or non-complex
     /// heap columns.
-    pub fn vla_complex(&self) -> Result<Vec<Vec<Complex<f64>>>> {
+    pub fn vla_complex(&self) -> Result<Ragged<Vec<Complex<f64>>>> {
         let col = self.descriptor();
-        let column = self.vla_column()?;
-        let kind = column.element_type();
+        let rows = self.vla_rows()?;
+        let kind = rows.column.element_type();
         if !matches!(kind, TformKind::ComplexF32 | TformKind::ComplexF64) {
             return Err(FitsError::NotAComplexColumn { code: kind.code() });
         }
-        self.map_vla_rows(column, |cell| {
-            kind.decode_complex(
-                std::iter::once(cell.bytes),
-                cell.element_count,
-                col.tscale,
-                col.tzero,
-            )
-        })
+        let values = kind.decode_complex(rows.bytes(), rows.count(), col.tscale, col.tzero)?;
+        Ok(Ragged::<Vec<Complex<f64>>>::new(values, rows.ends))
     }
 
     /// A variable-length `X` (`1PX`/`1QX`) column as a borrowed 2-D [`BitColumn`],
@@ -239,16 +228,44 @@ impl<'a> ColumnReader<'a> {
         ))
     }
 
-    fn map_vla_rows<T>(
-        &self,
-        column: VlaColumn<'a>,
-        decode: impl Fn(VlaCell<'a>) -> Result<T>,
-    ) -> Result<Vec<T>> {
-        let mut rows = Vec::with_capacity(self.table.nrows);
+    /// Every row's heap array, validated before any decode: descriptors in range and
+    /// `TDIMn` extents met, and where each row's elements end.
+    fn vla_rows(&self) -> Result<VlaRows<'a>> {
+        let column = self.vla_column()?;
+        let element_size = column.element_type().heap_kind().elem_size();
+        let mut ends = Vec::with_capacity(self.table.nrows);
+        let mut end = 0usize;
         for row in 0..self.table.nrows {
-            rows.push(decode(column.cell(row)?)?);
+            // A `PX` row is counted in bytes, the elements its values decode to.
+            end += column.cell(row)?.bytes.len() / element_size;
+            ends.push(end);
         }
-        Ok(rows)
+        Ok(VlaRows { column, ends })
+    }
+}
+
+/// A `P`/`Q` column whose every row was validated, with where each row's decoded
+/// elements end.
+#[derive(Debug)]
+struct VlaRows<'a> {
+    column: VlaColumn<'a>,
+    ends: Vec<usize>,
+}
+
+impl<'a> VlaRows<'a> {
+    fn count(&self) -> usize {
+        self.ends.last().copied().unwrap_or(0)
+    }
+
+    /// Each row's heap bytes, in row order.
+    fn bytes(&self) -> impl Iterator<Item = &'a [u8]> + use<'a> {
+        let column = self.column;
+        (0..self.ends.len()).map(move |row| {
+            column
+                .cell(row)
+                .expect("vla_rows validated every row")
+                .bytes
+        })
     }
 }
 

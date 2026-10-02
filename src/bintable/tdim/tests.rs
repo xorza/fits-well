@@ -2,6 +2,7 @@ use crate::bintable::BinTable;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::internals::table_header;
 use crate::error::FitsError;
+use crate::ragged::Ragged;
 use bitvec::bitvec;
 use bitvec::order::Msb0;
 
@@ -57,17 +58,19 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
     let table = BinTable::from_data(&mixed, data).unwrap();
     assert_eq!(
         table.column_by_idx(0).unwrap().vla().unwrap(),
-        vec![
+        Ragged::from_rows([
             ColumnData::I32(vec![]),
             ColumnData::I32(vec![10, 20, 30, 40])
-        ]
+        ])
+        .unwrap()
     );
     assert_eq!(
         table.column_by_idx(1).unwrap().vla().unwrap(),
-        vec![
+        Ragged::from_rows([
             ColumnData::I16(vec![]),
             ColumnData::I16(vec![50, 60, 70, 80])
-        ]
+        ])
+        .unwrap()
     );
 
     let mut mixed_bits = table_header(24, 2, &["1PX", "1QX"]);

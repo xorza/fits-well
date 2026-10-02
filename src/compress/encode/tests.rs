@@ -243,22 +243,22 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
                 .vla()
                 .unwrap();
             assert_ne!(
-                compressed[0].element_count(),
+                compressed.range(0).len(),
                 0,
                 "quantized tile for {bitpix:?} {cmptype}"
             );
             assert_eq!(
-                fallback[0].element_count(),
+                fallback.range(0).len(),
                 0,
                 "quantized tile for {bitpix:?} {cmptype}"
             );
             assert_eq!(
-                compressed[1].element_count(),
+                compressed.range(1).len(),
                 0,
                 "fallback tile for {bitpix:?} {cmptype}"
             );
             assert_ne!(
-                fallback[1].element_count(),
+                fallback.range(1).len(),
                 0,
                 "fallback tile for {bitpix:?} {cmptype}"
             );

@@ -1,4 +1,5 @@
 use crate::ascii::AsciiColumnData;
+use crate::ascii::ascii_text::AsciiText;
 use crate::bintable::character_field::CharacterField;
 use crate::bintable::column_data::ColumnData;
 use crate::bitpix::Bitpix;
@@ -16,11 +17,12 @@ use crate::error::FitsError;
 use crate::hdu::{HduKind, MAX_TABLE_FIELDS};
 use crate::header_model::value::Value;
 use crate::header_model::{Header, from_card_lines as header};
+use crate::ragged::Ragged;
 use crate::reader::FitsReader;
 use crate::reader::{ChecksumReport, ChecksumStatus};
 use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
 use crate::writer::table::internals;
-use crate::writer::table::{ColumnType, TableBuilder, WriteColumn};
+use crate::writer::table::{TableBuilder, WriteColumn};
 use crate::writer::{
     FitsWriter, PLACEHOLDER_CHECKSUM, WriterState, pad_to_block, patch_checksum, render_header,
 };
@@ -279,7 +281,7 @@ fn fixed_columns_by_stored_type() -> Vec<TypedWriteColumn> {
         },
         TypedWriteColumn {
             stored_type: 'A',
-            column: WriteColumn::fixed("A", ColumnData::Character(vec!["a".into()]), 1),
+            column: WriteColumn::fixed("A", ColumnData::Character(b"a".to_vec()), 1),
         },
         TypedWriteColumn {
             stored_type: 'X',
@@ -292,77 +294,79 @@ fn vla_columns_by_stored_type() -> Vec<TypedWriteColumn> {
     vec![
         TypedWriteColumn {
             stored_type: 'L',
-            column: WriteColumn::vla_typed(
+            column: WriteColumn::vla(
                 "PL",
-                ColumnType::Logical,
-                vec![ColumnData::Logical(vec![Some(true)])],
-            )
-            .unwrap(),
+                Ragged::from_rows(vec![ColumnData::Logical(vec![Some(true)])]).unwrap(),
+            ),
         },
         TypedWriteColumn {
             stored_type: 'B',
-            column: WriteColumn::vla_typed(
+            column: WriteColumn::vla(
                 "PB",
-                ColumnType::Byte,
-                vec![ColumnData::Bytes(vec![1])],
-            )
-            .unwrap(),
+                Ragged::from_rows(vec![ColumnData::Bytes(vec![1])]).unwrap(),
+            ),
         },
         TypedWriteColumn {
             stored_type: 'I',
-            column: WriteColumn::vla_typed("PI", ColumnType::I16, vec![ColumnData::I16(vec![1])])
-                .unwrap(),
+            column: WriteColumn::vla(
+                "PI",
+                Ragged::from_rows(vec![ColumnData::I16(vec![1])]).unwrap(),
+            ),
         },
         TypedWriteColumn {
             stored_type: 'J',
-            column: WriteColumn::vla_typed("PJ", ColumnType::I32, vec![ColumnData::I32(vec![1])])
-                .unwrap(),
+            column: WriteColumn::vla(
+                "PJ",
+                Ragged::from_rows(vec![ColumnData::I32(vec![1])]).unwrap(),
+            ),
         },
         TypedWriteColumn {
             stored_type: 'K',
-            column: WriteColumn::vla_typed("PK", ColumnType::I64, vec![ColumnData::I64(vec![1])])
-                .unwrap(),
+            column: WriteColumn::vla(
+                "PK",
+                Ragged::from_rows(vec![ColumnData::I64(vec![1])]).unwrap(),
+            ),
         },
         TypedWriteColumn {
             stored_type: 'E',
-            column: WriteColumn::vla_typed("PE", ColumnType::F32, vec![ColumnData::F32(vec![1.0])])
-                .unwrap(),
+            column: WriteColumn::vla(
+                "PE",
+                Ragged::from_rows(vec![ColumnData::F32(vec![1.0])]).unwrap(),
+            ),
         },
         TypedWriteColumn {
             stored_type: 'D',
-            column: WriteColumn::vla_typed("PD", ColumnType::F64, vec![ColumnData::F64(vec![1.0])])
-                .unwrap(),
+            column: WriteColumn::vla(
+                "PD",
+                Ragged::from_rows(vec![ColumnData::F64(vec![1.0])]).unwrap(),
+            ),
         },
         TypedWriteColumn {
             stored_type: 'C',
-            column: WriteColumn::vla_typed(
+            column: WriteColumn::vla(
                 "PC",
-                ColumnType::ComplexF32,
-                vec![ColumnData::ComplexF32(vec![Complex::new(1.0, 2.0)])],
-            )
-            .unwrap(),
+                Ragged::from_rows(vec![ColumnData::ComplexF32(vec![Complex::new(1.0, 2.0)])])
+                    .unwrap(),
+            ),
         },
         TypedWriteColumn {
             stored_type: 'M',
-            column: WriteColumn::vla_typed(
+            column: WriteColumn::vla(
                 "PM",
-                ColumnType::ComplexF64,
-                vec![ColumnData::ComplexF64(vec![Complex::new(1.0, 2.0)])],
-            )
-            .unwrap(),
+                Ragged::from_rows(vec![ColumnData::ComplexF64(vec![Complex::new(1.0, 2.0)])])
+                    .unwrap(),
+            ),
         },
         TypedWriteColumn {
             stored_type: 'A',
-            column: WriteColumn::vla_typed(
+            column: WriteColumn::vla(
                 "PA",
-                ColumnType::Character,
-                vec![ColumnData::Character(vec!["a".into()])],
-            )
-            .unwrap(),
+                Ragged::from_rows(vec![ColumnData::Character(b"a".to_vec())]).unwrap(),
+            ),
         },
         TypedWriteColumn {
             stored_type: 'X',
-            column: WriteColumn::vla_bits("PX", vec![bitvec![u8, Msb0; 1]]),
+            column: WriteColumn::vla_bits("PX", [bitvec![u8, Msb0; 1]].into_iter().collect()),
         },
     ]
 }
@@ -394,7 +398,7 @@ fn empty_ascii_columns(count: usize) -> Vec<AsciiWriteColumn> {
         .map(|n| AsciiWriteColumn {
             name: format!("C{n}"),
             unit: None,
-            data: AsciiColumnData::Text(Vec::new()),
+            data: AsciiColumnData::Text(AsciiText::default()),
             width: 1,
             decimals: 0,
             tscale: None,
@@ -448,7 +452,7 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
     let ascii = |name: &str, width| AsciiWriteColumn {
         name: name.to_string(),
         unit: None,
-        data: AsciiColumnData::Text(Vec::new()),
+        data: AsciiColumnData::Text(AsciiText::default()),
         width,
         decimals: 0,
         tscale: None,
@@ -475,7 +479,8 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
     ));
     assert!(writer.into_inner().into_inner().is_empty());
 
-    let invalid_vla_bits = WriteColumn::vla_bits("FLAGS", vec![bitvec![u8, Msb0; 1, 0, 1]]);
+    let invalid_vla_bits =
+        WriteColumn::vla_bits("FLAGS", [bitvec![u8, Msb0; 1, 0, 1]].into_iter().collect());
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
         writer.write_table(&binary_table(2, &[invalid_vla_bits]), None),
@@ -487,7 +492,8 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
     assert!(writer.into_inner().into_inner().is_empty());
 
     let invalid_vla_bits =
-        WriteColumn::vla_bits("FLAGS", vec![bitvec![u8, Msb0; 1, 0, 1]]).with_tdim(vec![2, 2]);
+        WriteColumn::vla_bits("FLAGS", [bitvec![u8, Msb0; 1, 0, 1]].into_iter().collect())
+            .with_tdim(vec![2, 2]);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
         writer.write_table(&binary_table(1, &[invalid_vla_bits]), None),
@@ -517,10 +523,11 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
     assert!(writer.into_inner().into_inner().is_empty());
 
     for shape in [vec![], vec![0]] {
-        let invalid_empty_vla =
-            WriteColumn::vla_typed("VEC", ColumnType::I32, vec![ColumnData::I32(vec![])])
-                .unwrap()
-                .with_tdim(shape);
+        let invalid_empty_vla = WriteColumn::vla(
+            "VEC",
+            Ragged::from_rows(vec![ColumnData::I32(vec![])]).unwrap(),
+        )
+        .with_tdim(shape);
         let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
         assert!(matches!(
             writer.write_table(&binary_table(1, &[invalid_empty_vla]), None),
@@ -529,11 +536,9 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
         assert!(writer.into_inner().into_inner().is_empty());
     }
 
-    let invalid_text = WriteColumn::fixed(
-        "NAME",
-        ColumnData::Character(vec![CharacterField::new("Véga".as_bytes().to_vec())]),
-        4,
-    );
+    // "Vég" is four bytes, so it fills the field and reaches the ASCII check.
+    let invalid_text =
+        WriteColumn::fixed("NAME", ColumnData::Character("Vég".as_bytes().to_vec()), 4);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
         writer.write_table(&binary_table(1, &[invalid_text]), None),
@@ -691,7 +696,7 @@ fn typed_table_header_templates_preserve_information_and_regenerate_structure() 
     let ascii = [AsciiWriteColumn {
         name: "TEXT".to_string(),
         unit: Some("label".to_string()),
-        data: AsciiColumnData::Text(vec![Some("A".to_string()), Some("B".to_string())]),
+        data: AsciiColumnData::Text([Some("A"), Some("B")].into_iter().collect()),
         width: 3,
         decimals: 0,
         tscale: None,
@@ -761,7 +766,7 @@ fn typed_table_header_templates_preserve_information_and_regenerate_structure() 
             .unwrap()
             .raw()
             .unwrap(),
-        AsciiColumnData::Text(vec![Some("A  ".to_string()), Some("B  ".to_string())])
+        AsciiColumnData::Text([Some("A  "), Some("B  ")].into_iter().collect())
     );
 }
 
@@ -775,7 +780,7 @@ fn writes_and_reads_back_variable_length_arrays() {
     ];
     let columns = vec![
         WriteColumn::fixed("ID", ColumnData::I32(vec![1, 2, 3]), 1),
-        WriteColumn::vla_typed("DATA", ColumnType::I32, vla_rows.clone()).unwrap(),
+        WriteColumn::vla("DATA", Ragged::from_rows(vla_rows.clone()).unwrap()),
     ];
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     w.write_table(&binary_table(3, &columns), None).unwrap();
@@ -785,14 +790,12 @@ fn writes_and_reads_back_variable_length_arrays() {
     assert_eq!(table.metadata().columns[1].tform.kind.code(), 'P');
     let got = table.column_by_idx(1).unwrap().vla().unwrap();
     assert_eq!(got.len(), 3);
-    for (g, want) in got.iter().zip(&vla_rows) {
-        match (g, want) {
-            (ColumnData::I32(a), ColumnData::I32(b)) => assert_eq!(a, b),
-            _ => panic!("expected I32 VLA cell, got {g:?}"),
-        }
-    }
+    assert_eq!(got, Ragged::from_rows(vla_rows.clone()).unwrap());
 
-    let empty = [WriteColumn::vla_typed("EMPTY", ColumnType::I64, Vec::new()).unwrap()];
+    let empty = [WriteColumn::vla(
+        "EMPTY",
+        Ragged::<ColumnData>::new(ColumnData::I64(Vec::new()), Vec::new()),
+    )];
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     w.write_table(&binary_table(0, &empty), None).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
@@ -807,9 +810,13 @@ fn writes_and_reads_back_variable_length_arrays() {
 #[test]
 fn vla_constructor_rejects_mixed_element_types() {
     assert!(matches!(
-        WriteColumn::vla_typed("BAD", ColumnType::I16, vec![ColumnData::I32(vec![1])]),
+        Ragged::from_rows([ColumnData::I16(vec![1]), ColumnData::I32(vec![2])]),
         Err(FitsError::TypeMismatch { name, expected })
-            if name == "VLA column \"BAD\" row 0" && expected == "i16 column data"
+            if name == "variable-length row 1" && expected == "i16 column data"
+    ));
+    assert!(matches!(
+        Ragged::from_rows(Vec::new()),
+        Err(FitsError::EmptyVlaNeedsType)
     ));
 }
 
@@ -826,30 +833,33 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
         // 2×2 multidimensional column (TDIM '(2,2)'), 4 elements/row.
         WriteColumn::fixed("MAT", ColumnData::I32((1..=8).collect()), 4).with_tdim(vec![2, 2]),
         // 64-bit Q VLA column.
-        WriteColumn::vla_typed(
+        WriteColumn::vla(
             "QV",
-            ColumnType::I16,
-            vec![ColumnData::I16(vec![]), ColumnData::I16(vec![7, 8, 9, 10])],
+            Ragged::from_rows(vec![
+                ColumnData::I16(vec![]),
+                ColumnData::I16(vec![7, 8, 9, 10]),
+            ])
+            .unwrap(),
         )
-        .unwrap()
         .with_tdim(vec![2, 2])
         .wide(),
-        WriteColumn::vla_typed(
+        WriteColumn::vla(
             "PV",
-            ColumnType::I16,
-            vec![ColumnData::I16(vec![]), ColumnData::I16(vec![1, 2, 3, 4])],
+            Ragged::from_rows(vec![
+                ColumnData::I16(vec![]),
+                ColumnData::I16(vec![1, 2, 3, 4]),
+            ])
+            .unwrap(),
         )
-        .unwrap()
         .with_tdim(vec![2, 2]),
-        WriteColumn::vla_typed(
+        WriteColumn::vla(
             "TXT",
-            ColumnType::Character,
-            vec![
-                ColumnData::Character(vec!["hello".into()]),
-                ColumnData::Character(vec!["abc".into()]),
-            ],
-        )
-        .unwrap(),
+            Ragged::from_rows(vec![
+                ColumnData::Character(b"hello".to_vec()),
+                ColumnData::Character(b"abc".to_vec()),
+            ])
+            .unwrap(),
+        ),
         // 12-bit X column: 2 bytes/row.
         WriteColumn::bits("FLAGS", vec![0xAB, 0xCF, 0x12, 0x3F], 12),
     ];
@@ -866,13 +876,13 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
     assert_eq!(metadata.columns[1].tdim, Some(vec![2, 2]));
     assert_eq!(
         t.column_by_idx(1).unwrap().vla().unwrap(),
-        vec![ColumnData::I16(vec![]), ColumnData::I16(vec![7, 8, 9, 10])]
+        Ragged::from_rows([ColumnData::I16(vec![]), ColumnData::I16(vec![7, 8, 9, 10])]).unwrap()
     );
     assert_eq!(metadata.columns[2].tform.kind, TformKind::ArrayDesc32);
     assert_eq!(metadata.columns[2].tdim, Some(vec![2, 2]));
     assert_eq!(
         t.column_by_idx(2).unwrap().vla().unwrap(),
-        vec![ColumnData::I16(vec![]), ColumnData::I16(vec![1, 2, 3, 4])]
+        Ragged::from_rows([ColumnData::I16(vec![]), ColumnData::I16(vec![1, 2, 3, 4])]).unwrap()
     );
     assert_eq!(r.hdus[1].header.get_text("TFORM4").unwrap(), Some("1PA(5)"));
     assert_eq!(metadata.columns[3].tform.repeat, 1);
@@ -880,10 +890,11 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
     assert_eq!(metadata.columns[3].tform.vla_elem, Some(TformKind::Char));
     assert_eq!(
         t.column_by_idx(3).unwrap().vla().unwrap(),
-        vec![
-            ColumnData::Character(vec!["hello".into()]),
-            ColumnData::Character(vec!["abc".into()])
-        ]
+        Ragged::from_rows([
+            ColumnData::Character(b"hello".to_vec()),
+            ColumnData::Character(b"abc".to_vec())
+        ])
+        .unwrap()
     );
     assert_eq!(metadata.columns[4].tform.kind, TformKind::Bit);
     assert_eq!(metadata.columns[4].tform.repeat, 12);
@@ -906,11 +917,11 @@ fn writes_p_q_variable_length_bit_arrays_with_exact_counts_and_padding() {
     assert_eq!(one_bit.as_raw_slice(), &[0xFF]);
     assert_eq!(p_nine.as_raw_slice(), &[0xAA, 0xFF]);
     assert_eq!(q_nine.as_raw_slice(), &[0x55, 0x7F]);
-    let p_rows = vec![BitVec::<u8, Msb0>::new(), one_bit.clone(), p_nine];
-    let q_rows = vec![BitVec::<u8, Msb0>::new(), one_bit, q_nine];
+    let p_rows = [BitVec::<u8, Msb0>::new(), one_bit.clone(), p_nine];
+    let q_rows = [BitVec::<u8, Msb0>::new(), one_bit, q_nine];
     let columns = [
-        WriteColumn::vla_bits("PFLAGS", p_rows.clone()),
-        WriteColumn::vla_bits("QFLAGS", q_rows.clone()).wide(),
+        WriteColumn::vla_bits("PFLAGS", p_rows.iter().collect()),
+        WriteColumn::vla_bits("QFLAGS", q_rows.iter().collect()).wide(),
     ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
@@ -1007,23 +1018,17 @@ fn binary_metadata_is_validated_for_every_fixed_and_vla_stored_type() {
 
 #[derive(Debug)]
 struct NullBoundary {
-    kind: ColumnType,
+    /// One stored zero of the column's integer type.
+    zero: ColumnData,
     valid: &'static [i64],
     invalid: &'static [i64],
 }
 
-fn integer_column(kind: ColumnType, vla: bool) -> WriteColumn {
-    let data = match kind {
-        ColumnType::Byte => ColumnData::Bytes(vec![0]),
-        ColumnType::I16 => ColumnData::I16(vec![0]),
-        ColumnType::I32 => ColumnData::I32(vec![0]),
-        ColumnType::I64 => ColumnData::I64(vec![0]),
-        _ => panic!("integer_column requires an integer stored type"),
-    };
+fn integer_column(zero: &ColumnData, vla: bool) -> WriteColumn {
     if vla {
-        WriteColumn::vla_typed("PINT", kind, vec![data]).unwrap()
+        WriteColumn::vla("PINT", Ragged::<ColumnData>::new(zero.clone(), vec![1]))
     } else {
-        WriteColumn::fixed("INT", data, 1)
+        WriteColumn::fixed("INT", zero.clone(), 1)
     }
 }
 
@@ -1031,22 +1036,22 @@ fn integer_column(kind: ColumnType, vla: bool) -> WriteColumn {
 fn binary_tnull_is_range_checked_for_fixed_and_vla_integer_types() {
     let boundaries = [
         NullBoundary {
-            kind: ColumnType::Byte,
+            zero: ColumnData::Bytes(vec![0]),
             valid: &[0, u8::MAX as i64],
             invalid: &[-1, u8::MAX as i64 + 1],
         },
         NullBoundary {
-            kind: ColumnType::I16,
+            zero: ColumnData::I16(vec![0]),
             valid: &[i16::MIN as i64, i16::MAX as i64],
             invalid: &[i16::MIN as i64 - 1, i16::MAX as i64 + 1],
         },
         NullBoundary {
-            kind: ColumnType::I32,
+            zero: ColumnData::I32(vec![0]),
             valid: &[i32::MIN as i64, i32::MAX as i64],
             invalid: &[i32::MIN as i64 - 1, i32::MAX as i64 + 1],
         },
         NullBoundary {
-            kind: ColumnType::I64,
+            zero: ColumnData::I64(vec![0]),
             valid: &[i64::MIN, i64::MAX],
             invalid: &[],
         },
@@ -1054,11 +1059,11 @@ fn binary_tnull_is_range_checked_for_fixed_and_vla_integer_types() {
     for boundary in boundaries {
         for vla in [false, true] {
             for &tnull in boundary.valid {
-                assert_table_column_writes(integer_column(boundary.kind, vla).with_null(tnull));
+                assert_table_column_writes(integer_column(&boundary.zero, vla).with_null(tnull));
             }
             for &tnull in boundary.invalid {
                 assert_table_column_rejected(
-                    integer_column(boundary.kind, vla).with_null(tnull),
+                    integer_column(&boundary.zero, vla).with_null(tnull),
                     "TNULLn",
                 );
             }
@@ -1099,7 +1104,7 @@ fn binary_nonfinite_scaling_is_rejected_before_output() {
     ];
     for vla in [false, true] {
         for case in &cases {
-            let mut column = integer_column(ColumnType::I32, vla);
+            let mut column = integer_column(&ColumnData::I32(vec![0]), vla);
             internals::set_scaling(&mut column, case.tscale, case.tzero);
             assert_table_column_rejected(column, case.keyword);
         }
@@ -1118,7 +1123,7 @@ fn writes_and_reads_back_a_binary_table() {
         .with_unit("m"),
         WriteColumn::fixed(
             "NAME",
-            ColumnData::Character(vec!["AB".into(), "CDE".into(), "F".into()]),
+            ColumnData::Character(b"AB CDEF  ".to_vec()),
             3, // 3-char field
         ),
     ];
@@ -1148,33 +1153,19 @@ fn writes_and_reads_back_a_binary_table() {
     );
     assert_eq!(
         t.column_by_idx(2).unwrap().raw().unwrap(),
-        ColumnData::Character(vec![
-            CharacterField::new(b"AB ".to_vec()),
-            CharacterField::new(b"CDE".to_vec()),
-            CharacterField::new(b"F  ".to_vec())
-        ])
+        ColumnData::Character(b"AB CDEF  ".to_vec())
     );
 }
 
 #[test]
 fn binary_character_columns_round_trip_exactly_and_reject_over_width() {
-    let fields = vec![
-        CharacterField::new(b"AB  ".to_vec()),
-        CharacterField::new(b"AB\0x".to_vec()),
-        CharacterField::new(b"\0xyz".to_vec()),
-        CharacterField::new(b"    ".to_vec()),
-    ];
-    let vla_rows: Vec<_> = fields
-        .iter()
-        .cloned()
-        .map(|field| ColumnData::Character(vec![field]))
-        .collect();
+    let fields = b"AB  AB\0x\0xyz    ".to_vec();
+    let vla_rows =
+        Ragged::<ColumnData>::new(ColumnData::Character(fields.clone()), vec![4, 8, 12, 16]);
     let columns = [
         WriteColumn::fixed("FIXED", ColumnData::Character(fields.clone()), 4),
-        WriteColumn::vla_typed("PCHAR", ColumnType::Character, vla_rows.clone()).unwrap(),
-        WriteColumn::vla_typed("QCHAR", ColumnType::Character, vla_rows.clone())
-            .unwrap()
-            .wide(),
+        WriteColumn::vla("PCHAR", vla_rows.clone()),
+        WriteColumn::vla("QCHAR", vla_rows.clone()).wide(),
     ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
@@ -1198,26 +1189,36 @@ fn binary_character_columns_round_trip_exactly_and_reject_over_width() {
     );
     assert_eq!(table.column_by_idx(1).unwrap().vla().unwrap(), vla_rows);
     assert_eq!(table.column_by_idx(2).unwrap().vla().unwrap(), vla_rows);
+    let fields: Vec<_> = fields.chunks(4).map(CharacterField::new).collect();
     assert_eq!(fields[0].members(), b"AB  ");
     assert_eq!(fields[1].members(), b"AB");
     assert!(fields[2].is_null());
     assert!(!fields[3].is_null());
     assert_eq!(fields[3].members(), b"    ");
 
-    let too_wide = WriteColumn::fixed(
-        "BAD",
-        ColumnData::Character(vec![CharacterField::new(b"ABCDE".to_vec())]),
-        4,
-    );
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(&binary_table(1, &[too_wide]), None),
+        WriteColumn::characters("BAD", [b"ABCDE"], 4),
         Err(FitsError::RowWidthMismatch {
             computed: 5,
             declared: 4
         })
     ));
-    assert!(writer.into_inner().into_inner().is_empty());
+    let padded = WriteColumn::characters("PAD", ["AB", "CDE", "F"], 3).unwrap();
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer
+        .write_table(&binary_table(3, &[padded]), None)
+        .unwrap();
+    let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
+    assert_eq!(
+        reader
+            .read_table(1)
+            .unwrap()
+            .column_by_idx(0)
+            .unwrap()
+            .raw()
+            .unwrap(),
+        ColumnData::Character(b"AB CDEF  ".to_vec())
+    );
 }
 
 #[test]
@@ -1367,11 +1368,9 @@ fn i64_table_scaling_writes_the_exact_unsigned_offset() {
     let columns = [
         WriteColumn::fixed("U64", ColumnData::I64(vec![i64::MIN, i64::MAX]), 1)
             .scaled(1.0, 9_223_372_036_854_775_808.0),
-        WriteColumn::vla_typed("PU64", ColumnType::I64, rows.clone())
-            .unwrap()
+        WriteColumn::vla("PU64", Ragged::from_rows(rows.clone()).unwrap())
             .scaled(1.0, 9_223_372_036_854_775_808.0),
-        WriteColumn::vla_typed("QU64", ColumnType::I64, rows.clone())
-            .unwrap()
+        WriteColumn::vla("QU64", Ragged::from_rows(rows.clone()).unwrap())
             .wide()
             .scaled(1.0, 9_223_372_036_854_775_808.0),
     ];
@@ -1404,8 +1403,14 @@ fn i64_table_scaling_writes_the_exact_unsigned_offset() {
         table.column_by_idx(0).unwrap().unsigned().unwrap(),
         Some(UnsignedData::U64(vec![u64::MIN, u64::MAX]))
     );
-    assert_eq!(table.column_by_idx(1).unwrap().vla().unwrap(), rows);
-    assert_eq!(table.column_by_idx(2).unwrap().vla().unwrap(), rows);
+    assert_eq!(
+        table.column_by_idx(1).unwrap().vla().unwrap(),
+        Ragged::from_rows(rows.clone()).unwrap()
+    );
+    assert_eq!(
+        table.column_by_idx(2).unwrap().vla().unwrap(),
+        Ragged::from_rows(rows).unwrap()
+    );
 }
 
 #[test]
@@ -1935,26 +1940,25 @@ fn table_builders_infer_rows_and_reject_cross_column_mismatches() {
 
     let inferred_vla = WriteColumn::vla(
         "SAMPLES",
-        vec![
+        Ragged::from_rows(vec![
             ColumnData::I16(vec![1, 2]),
             ColumnData::I16(Vec::new()),
             ColumnData::I16(vec![3]),
-        ],
-    )
-    .unwrap();
+        ])
+        .unwrap(),
+    );
     binary.push(inferred_vla).unwrap();
-    assert!(matches!(
-        WriteColumn::vla("EMPTY", Vec::new()),
-        Err(FitsError::EmptyVlaNeedsType { column }) if column == "EMPTY"
-    ));
     TableBuilder::with_rows(0)
-        .column(WriteColumn::vla_typed("EMPTY", ColumnType::I64, Vec::new()).unwrap())
+        .column(WriteColumn::vla(
+            "EMPTY",
+            Ragged::<ColumnData>::new(ColumnData::I64(Vec::new()), Vec::new()),
+        ))
         .unwrap();
 
     let ascii = AsciiTableBuilder::new()
         .column(AsciiWriteColumn::new(
             "NAME",
-            AsciiColumnData::Text(vec![Some("A".into()), Some("B".into())]),
+            AsciiColumnData::Text([Some("A"), Some("B")].into_iter().collect()),
             2,
         ))
         .unwrap()

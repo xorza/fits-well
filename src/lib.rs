@@ -59,6 +59,7 @@ mod groups;
 mod hdu;
 mod header_model;
 mod keyword;
+mod ragged;
 mod reader;
 mod reserved_keywords;
 mod time_coordinates;
@@ -158,6 +159,7 @@ pub mod table {
     pub use bitvec::vec::BitVec;
     pub use num_complex::Complex;
 
+    pub use crate::ascii::ascii_text::AsciiText;
     pub use crate::ascii::{
         AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiTable, AsciiTableMetadata,
     };
@@ -170,9 +172,10 @@ pub mod table {
     pub use crate::bintable::tform::Tform;
     pub use crate::bintable::tform_kind::TformKind;
     pub use crate::bintable::{BinTable, BinTableMetadata};
+    pub use crate::ragged::Ragged;
     pub use crate::reader::{ColumnSelector, SelectedColumn, TableColumnData, TableSelection};
     pub use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
-    pub use crate::writer::table::{ColumnType, TableBuilder, WriteColumn};
+    pub use crate::writer::table::{TableBuilder, WriteColumn};
 }
 
 /// Lazy FITS source access and HDU-bound operations. Concrete source wrappers

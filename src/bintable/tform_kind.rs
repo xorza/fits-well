@@ -9,7 +9,6 @@ use crate::data::scaling::Scaling;
 use crate::endian::decode_be_cells;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::table::CharacterField;
 
 /// The element type of a binary-table column, from the letter of its `TFORMn`
 /// code (Table 18).
@@ -129,9 +128,8 @@ impl TformKind {
         .unsigned_kind(bitpix)
     }
 
-    /// Decode `cells` as a flat run of this kind's values. `Char` and the two
-    /// descriptor kinds are resolved by the caller, which knows how a row's bytes
-    /// group into fields.
+    /// Decode `cells` as a flat run of this kind's values. A heap element cannot
+    /// itself be a descriptor, so the caller resolves the two descriptor kinds.
     pub(super) fn decode_cells<'a>(
         self,
         cells: impl Iterator<Item = &'a [u8]>,
@@ -148,6 +146,9 @@ impl TformKind {
             }
             TformKind::Byte | TformKind::Bit => {
                 ColumnData::Bytes(decode_be_cells(cells, capacity, |[byte]| byte))
+            }
+            TformKind::Char => {
+                ColumnData::Character(decode_be_cells(cells, capacity, |[byte]| byte))
             }
             TformKind::I16 => ColumnData::I16(decode_be_cells(cells, capacity, i16::from_be_bytes)),
             TformKind::I32 => ColumnData::I32(decode_be_cells(cells, capacity, i32::from_be_bytes)),
@@ -168,23 +169,18 @@ impl TformKind {
                     }
                 }))
             }
-            TformKind::Char | TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
-                unreachable!("character and descriptor cells are resolved by the caller")
+            TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
+                unreachable!("descriptor cells are resolved by the caller")
             }
         }
     }
 
-    /// Decode `bytes` as one contiguous run of this kind's elements — a `P`/`Q`
-    /// row's heap array. The scalar kinds share [`TformKind::decode_cells`] with the
-    /// fixed-width read; only the two run-specific kinds are resolved here.
-    pub(super) fn decode_run(self, bytes: &[u8]) -> ColumnData {
+    /// The kind a `P`/`Q` column's heap values decode as: the element kind itself,
+    /// except that a heap element cannot be a descriptor and keeps its raw bytes.
+    pub(super) fn heap_kind(self) -> TformKind {
         match self {
-            // The whole run is one field: an empty descriptor yields no field at all.
-            TformKind::Char if bytes.is_empty() => ColumnData::Character(Vec::new()),
-            TformKind::Char => ColumnData::Character(vec![CharacterField::new(bytes.to_vec())]),
-            // A heap element can't itself be a descriptor; keep the raw bytes.
-            TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => ColumnData::Bytes(bytes.to_vec()),
-            kind => kind.decode_cells(std::iter::once(bytes), bytes.len() / kind.elem_size()),
+            TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => TformKind::Byte,
+            kind => kind,
         }
     }
 

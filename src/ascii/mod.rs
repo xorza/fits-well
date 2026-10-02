@@ -5,9 +5,12 @@
 //! (`Aw`, `Iw`, `Fw.d`, `Ew.d`, `Dw.d`). ASCII columns are always scalar, and
 //! [`AsciiColumnData`] retains `TNULLn` cells distinctly from genuine values.
 
+pub(crate) mod ascii_text;
+
 use std::io::{self, Write};
 use std::{fmt, str};
 
+use crate::ascii::ascii_text::AsciiText;
 use crate::column;
 use crate::column::Named;
 use crate::error::FitsError;
@@ -32,7 +35,7 @@ pub enum AsciiKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AsciiColumnData {
     /// `Aw` — the complete fixed-width field text, including padding.
-    Text(Vec<Option<String>>),
+    Text(AsciiText),
     /// `Iw` — stored integers before `TSCALn`/`TZEROn`.
     Integer(Vec<Option<i64>>),
     /// `Fw.d` / `Ew.d` / `Dw.d` — stored floating-point values before scaling.
@@ -57,7 +60,7 @@ impl AsciiColumnData {
     /// Whether any row is undefined, and so needs a `TNULLn` marker to be writable.
     pub(crate) fn has_null(&self) -> bool {
         match self {
-            AsciiColumnData::Text(values) => values.iter().any(Option::is_none),
+            AsciiColumnData::Text(values) => values.has_null(),
             AsciiColumnData::Integer(values) => values.iter().any(Option::is_none),
             AsciiColumnData::Float(values) => values.iter().any(Option::is_none),
         }
@@ -243,7 +246,7 @@ impl<'a> AsciiColumnReader<'a> {
                 (0..table.nrows)
                     .map(|r| {
                         let field = table.field(col, r);
-                        (!col.is_null(field.trim())).then(|| field.to_string())
+                        (!col.is_null(field.trim())).then_some(field)
                     })
                     .collect(),
             )),

@@ -68,7 +68,7 @@ fn decodes_hand_built_ascii_rows() {
     assert!(metadata.columns.is_empty());
     assert_eq!(
         table.column_by_idx(0).unwrap().raw().unwrap(),
-        AsciiColumnData::Text(vec![Some("  AB".into()), Some("def ".into())])
+        AsciiColumnData::Text([Some("  AB"), Some("def ")].into_iter().collect())
     );
     assert_eq!(
         table.column_by_idx(1).unwrap().raw().unwrap(),
@@ -195,7 +195,7 @@ fn ascii_table_round_trips_through_write_and_read() {
         AsciiWriteColumn {
             name: "NAME".into(),
             unit: None,
-            data: AsciiColumnData::Text(vec![Some("  AB".into()), Some("beta".into())]),
+            data: AsciiColumnData::Text([Some("  AB"), Some("beta")].into_iter().collect()),
             width: 6,
             decimals: 0,
             tscale: None,
@@ -234,7 +234,7 @@ fn ascii_table_round_trips_through_write_and_read() {
     let t = r.read_ascii_table(1).unwrap();
     assert_eq!(
         t.column_by_idx(0).unwrap().raw().unwrap(),
-        AsciiColumnData::Text(vec![Some("  AB  ".into()), Some("beta  ".into())])
+        AsciiColumnData::Text([Some("  AB  "), Some("beta  ")].into_iter().collect())
     );
     assert_eq!(
         t.column_by_idx(1).unwrap().raw().unwrap(),
@@ -245,7 +245,7 @@ fn ascii_table_round_trips_through_write_and_read() {
         AsciiColumnData::Float(vec![Some(1.5), Some(-2.25)])
     );
 
-    columns[0].data = AsciiColumnData::Text(vec![Some("café".into()), Some("beta".into())]);
+    columns[0].data = AsciiColumnData::Text([Some("café"), Some("beta")].into_iter().collect());
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
         writer.write_ascii_table(&write_table(2, &columns), None),
@@ -438,7 +438,7 @@ fn ascii_writer_accepts_exact_width_values() {
         AsciiWriteColumn {
             name: "TEXT".into(),
             unit: None,
-            data: AsciiColumnData::Text(vec![Some("abc".into())]),
+            data: AsciiColumnData::Text([Some("abc")].into_iter().collect()),
             width: 3,
             decimals: 0,
             tscale: None,
@@ -502,7 +502,7 @@ fn ascii_writer_rejects_one_byte_overflow_before_output() {
             column: AsciiWriteColumn {
                 name: "TEXT".into(),
                 unit: None,
-                data: AsciiColumnData::Text(vec![Some("ok".into()), Some("abcd".into())]),
+                data: AsciiColumnData::Text([Some("ok"), Some("abcd")].into_iter().collect()),
                 width: 3,
                 decimals: 0,
                 tscale: None,
@@ -608,13 +608,13 @@ struct InvalidAsciiScale {
 fn ascii_scaling_metadata_is_validated_by_stored_type_before_output() {
     let cases = [
         InvalidAsciiScale {
-            data: AsciiColumnData::Text(vec![Some("A".into())]),
+            data: AsciiColumnData::Text([Some("A")].into_iter().collect()),
             tscale: Some(2.0),
             tzero: None,
             keyword: "TSCALn",
         },
         InvalidAsciiScale {
-            data: AsciiColumnData::Text(vec![Some("A".into())]),
+            data: AsciiColumnData::Text([Some("A")].into_iter().collect()),
             tscale: None,
             tzero: Some(3.0),
             keyword: "TZEROn",
@@ -658,7 +658,7 @@ fn ascii_nulls_round_trip_distinct_from_zero_and_text() {
         AsciiWriteColumn {
             name: "LABEL".into(),
             unit: None,
-            data: AsciiColumnData::Text(vec![Some("zero".into()), None, Some("star".into())]),
+            data: AsciiColumnData::Text([Some("zero"), None, Some("star")].into_iter().collect()),
             width: 5,
             decimals: 0,
             tscale: None,
@@ -689,7 +689,7 @@ fn ascii_nulls_round_trip_distinct_from_zero_and_text() {
     let table = reader.read_ascii_table(1).unwrap();
     assert_eq!(
         table.column_by_idx(0).unwrap().raw().unwrap(),
-        AsciiColumnData::Text(vec![Some("zero ".into()), None, Some("star ".into())])
+        AsciiColumnData::Text([Some("zero "), None, Some("star ")].into_iter().collect())
     );
     assert_eq!(
         table.column_by_idx(1).unwrap().raw().unwrap(),

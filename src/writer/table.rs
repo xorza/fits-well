@@ -25,11 +25,12 @@ use crate::header_model::Header;
 use crate::header_model::card::validate_ascii;
 use crate::header_model::value;
 use crate::keyword::key;
+use crate::ragged::Ragged;
 use crate::writer::{FitsWriter, accept_row_count, validate_scaling};
 
-/// An element type accepted by a binary-table writer column.
+/// The element type of a binary-table writer column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColumnType {
+enum ColumnType {
     Logical,
     Byte,
     I16,
@@ -50,12 +51,11 @@ enum WriteColumnData {
         repeat: usize,
     },
     Vla {
-        kind: ColumnType,
-        rows: Vec<ColumnData>,
+        rows: Ragged<ColumnData>,
         wide: bool,
     },
     VlaBits {
-        rows: Vec<BitVec<u8, Msb0>>,
+        rows: Ragged<BitVec<u8, Msb0>>,
         wide: bool,
     },
     Bits {
@@ -101,45 +101,45 @@ impl WriteColumn {
         }
     }
 
-    /// A variable-length `P` column whose heap element type is inferred from its
-    /// first row and checked against every remaining row.
-    pub fn vla(name: impl Into<String>, rows: Vec<ColumnData>) -> Result<WriteColumn> {
-        let name = name.into();
-        let kind = rows.first().map(ColumnType::from_data).ok_or_else(|| {
-            FitsError::EmptyVlaNeedsType {
-                column: name.clone(),
+    /// An `A` column of `width`-byte fields, one per row. A shorter field is padded
+    /// with spaces; a longer one is an error.
+    pub fn characters(
+        name: impl Into<String>,
+        fields: impl IntoIterator<Item = impl AsRef<[u8]>>,
+        width: usize,
+    ) -> Result<WriteColumn> {
+        let mut bytes = Vec::new();
+        for field in fields {
+            let field = field.as_ref();
+            if field.len() > width {
+                return Err(FitsError::RowWidthMismatch {
+                    computed: field.len(),
+                    declared: width,
+                });
             }
-        })?;
-        WriteColumn::vla_typed(name, kind, rows)
+            bytes.extend_from_slice(field);
+            bytes.resize(bytes.len() + width - field.len(), b' ');
+        }
+        Ok(WriteColumn::fixed(
+            name,
+            ColumnData::Character(bytes),
+            width,
+        ))
     }
 
-    /// Explicit-schema VLA constructor. Use this for an empty VLA column or when a
-    /// predeclared heap type is part of the schema.
-    pub fn vla_typed(
-        name: impl Into<String>,
-        kind: ColumnType,
-        rows: Vec<ColumnData>,
-    ) -> Result<WriteColumn> {
-        let name = name.into();
-        if let Some(row) = rows.iter().position(|data| !kind.matches(data)) {
-            return Err(FitsError::TypeMismatch {
-                name: format!("VLA column {name:?} row {row}"),
-                expected: kind.name(),
-            });
-        }
-        Ok(WriteColumn {
-            name,
+    /// A variable-length `P` column: row `r` stores `rows.range(r)` of the values,
+    /// and the values' type is the heap element type. [`WriteColumn::wide`] changes
+    /// the descriptors to `Q`.
+    pub fn vla(name: impl Into<String>, rows: Ragged<ColumnData>) -> WriteColumn {
+        WriteColumn {
+            name: name.into(),
             unit: None,
-            values: WriteColumnData::Vla {
-                kind,
-                rows,
-                wide: false,
-            },
+            values: WriteColumnData::Vla { rows, wide: false },
             tdim: None,
             tscale: None,
             tzero: None,
             tnull: None,
-        })
+        }
     }
 
     /// An `X` column of `bit_count` bits per row and its row-packed bytes.
@@ -155,10 +155,10 @@ impl WriteColumn {
         }
     }
 
-    /// A variable-length `PX` bit-array column, with one MSB-first [`BitVec`] per
-    /// table row. Each vector's bit length becomes its descriptor element count;
+    /// A variable-length `PX` bit-array column: row `r` stores `rows.row(r)`,
+    /// MSB-first, and its bit length is the descriptor element count.
     /// [`WriteColumn::wide`] changes the descriptors to `QX`.
-    pub fn vla_bits(name: impl Into<String>, rows: Vec<BitVec<u8, Msb0>>) -> WriteColumn {
+    pub fn vla_bits(name: impl Into<String>, rows: Ragged<BitVec<u8, Msb0>>) -> WriteColumn {
         WriteColumn {
             name: name.into(),
             unit: None,
@@ -185,8 +185,8 @@ impl WriteColumn {
     /// Use 64-bit `Q` descriptors for this VLA column.
     ///
     /// # Panics
-    /// Unless the column is variable-length — from [`WriteColumn::vla`],
-    /// [`WriteColumn::vla_typed`] or [`WriteColumn::vla_bits`].
+    /// Unless the column is variable-length — from [`WriteColumn::vla`] or
+    /// [`WriteColumn::vla_bits`].
     pub fn wide(mut self) -> WriteColumn {
         match &mut self.values {
             WriteColumnData::Vla { wide, .. } | WriteColumnData::VlaBits { wide, .. } => {
@@ -216,9 +216,6 @@ impl WriteColumn {
     fn inferred_rows(&self) -> Result<Option<usize>> {
         match &self.values {
             WriteColumnData::Fixed { data, repeat } => {
-                if matches!(data, ColumnData::Character(_)) {
-                    return Ok(Some(data.element_count()));
-                }
                 if *repeat == 0 {
                     return Ok(None);
                 }
@@ -324,19 +321,14 @@ pub(super) fn write_template<W: Write>(
     for r in 0..nrows {
         for col in columns {
             match &col.values {
-                WriteColumnData::Vla { kind, rows, wide } => {
-                    let cell = &rows[r];
-                    heap_len = next_vla_heap_len(
-                        heap_len,
-                        *wide,
-                        encoded_element_count(*kind, cell)?,
-                        cell_byte_len(*kind, cell)?,
-                    )?;
+                WriteColumnData::Vla { rows, wide } => {
+                    let count = rows.range(r).len();
+                    let element_size = ColumnType::from_data(rows.values()).elem_size();
+                    heap_len = next_vla_heap_len(heap_len, *wide, count, count * element_size)?;
                 }
                 WriteColumnData::VlaBits { rows, wide } => {
-                    let bits = &rows[r];
-                    heap_len =
-                        next_vla_heap_len(heap_len, *wide, bits.len(), bits.len().div_ceil(8))?;
+                    let bits = rows.range(r).len();
+                    heap_len = next_vla_heap_len(heap_len, *wide, bits, bits.div_ceil(8))?;
                 }
                 _ => {}
             }
@@ -366,20 +358,20 @@ pub(super) fn write_template<W: Write>(
         let mut column_offset = 0usize;
         for (col, layout) in columns.iter().zip(&layouts) {
             match &col.values {
-                WriteColumnData::Vla { kind, rows, wide } => {
-                    let cell = &rows[r];
+                WriteColumnData::Vla { rows, wide } => {
+                    let range = rows.range(r);
                     let descriptor_offset = r * row_len + column_offset;
                     write_vla_descriptor(
                         &mut writer.scratch,
                         main_len,
                         descriptor_offset,
                         *wide,
-                        encoded_element_count(*kind, cell)?,
+                        range.len(),
                     )?;
-                    append_be(&mut writer.scratch, cell);
+                    append_cells(&mut writer.scratch, rows.values(), range);
                 }
                 WriteColumnData::VlaBits { rows, wide } => {
-                    let bits = &rows[r];
+                    let bits = rows.row(r);
                     let descriptor_offset = r * row_len + column_offset;
                     write_vla_descriptor(
                         &mut writer.scratch,
@@ -441,7 +433,7 @@ fn bintable_header(
         if let Some(tzero) = col.tzero {
             let stores_i64 = match &col.values {
                 WriteColumnData::Fixed { data, .. } => matches!(data, ColumnData::I64(_)),
-                WriteColumnData::Vla { kind, .. } => *kind == ColumnType::I64,
+                WriteColumnData::Vla { rows, .. } => matches!(rows.values(), ColumnData::I64(_)),
                 WriteColumnData::VlaBits { .. } | WriteColumnData::Bits { .. } => false,
             };
             if stores_i64 && col.tscale.unwrap_or(1.0) == 1.0 && tzero == U64_OFFSET {
@@ -476,25 +468,6 @@ impl ColumnType {
             ColumnData::ComplexF32(_) => ColumnType::ComplexF32,
             ColumnData::ComplexF64(_) => ColumnType::ComplexF64,
             ColumnData::Character(_) => ColumnType::Character,
-        }
-    }
-
-    fn matches(self, data: &ColumnData) -> bool {
-        self == ColumnType::from_data(data)
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            ColumnType::Logical => "logical column data",
-            ColumnType::Byte => "byte column data",
-            ColumnType::I16 => "i16 column data",
-            ColumnType::I32 => "i32 column data",
-            ColumnType::I64 => "i64 column data",
-            ColumnType::F32 => "f32 column data",
-            ColumnType::F64 => "f64 column data",
-            ColumnType::ComplexF32 => "complex-f32 column data",
-            ColumnType::ComplexF64 => "complex-f64 column data",
-            ColumnType::Character => "character column data",
         }
     }
 
@@ -576,31 +549,18 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
             let expected = nrows
                 .checked_mul(*repeat)
                 .ok_or(FitsError::DataUnitOverflow)?;
-            match data {
-                ColumnData::Character(values) => {
-                    if values.len() != nrows {
-                        return Err(FitsError::RowWidthMismatch {
-                            computed: values.len(),
-                            declared: nrows,
-                        });
-                    }
-                    for value in values {
-                        validate_character(value, "binary character cell")?;
-                        if value.bytes.len() > *repeat {
-                            return Err(FitsError::RowWidthMismatch {
-                                computed: value.bytes.len(),
-                                declared: *repeat,
-                            });
-                        }
-                    }
+            if data.element_count() != expected {
+                return Err(FitsError::RowWidthMismatch {
+                    computed: data.element_count(),
+                    declared: expected,
+                });
+            }
+            if let ColumnData::Character(bytes) = data
+                && *repeat > 0
+            {
+                for field in bytes.chunks(*repeat) {
+                    validate_character(CharacterField::new(field), "binary character cell")?;
                 }
-                _ if data.element_count() != expected => {
-                    return Err(FitsError::RowWidthMismatch {
-                        computed: data.element_count(),
-                        declared: expected,
-                    });
-                }
-                _ => {}
             }
             tdim::validate_declared(col.tdim.as_deref(), *repeat)?;
             Ok(ColumnLayout {
@@ -610,7 +570,8 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                 tform: format!("{repeat}{}", kind.letter()),
             })
         }
-        WriteColumnData::Vla { kind, rows, wide } => {
+        WriteColumnData::Vla { rows, wide } => {
+            let kind = ColumnType::from_data(rows.values());
             validate_binary_metadata(col, kind.letter())?;
             if rows.len() != nrows {
                 return Err(FitsError::RowWidthMismatch {
@@ -619,25 +580,16 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                 });
             }
             let mut max_elements = 0usize;
-            for cell in rows {
-                debug_assert!(
-                    kind.matches(cell),
-                    "validated VLA kind must match every cell"
-                );
-                if let ColumnData::Character(values) = cell {
-                    if values.len() > 1 {
-                        return Err(FitsError::RowWidthMismatch {
-                            computed: values.len(),
-                            declared: 1,
-                        });
-                    }
-                    for value in values {
-                        validate_character(value, "binary VLA character cell")?;
-                    }
+            for r in 0..rows.len() {
+                let range = rows.range(r);
+                if let ColumnData::Character(bytes) = rows.values() {
+                    validate_character(
+                        CharacterField::new(&bytes[range.clone()]),
+                        "binary VLA character cell",
+                    )?;
                 }
-                let count = encoded_element_count(*kind, cell)?;
-                max_elements = max_elements.max(count);
-                tdim::validate_declared_vla(col.tdim.as_deref(), count)?;
+                max_elements = max_elements.max(range.len());
+                tdim::validate_declared_vla(col.tdim.as_deref(), range.len())?;
             }
             let descriptor = if *wide { 'Q' } else { 'P' };
             Ok(ColumnLayout {
@@ -654,9 +606,10 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                 });
             }
             let mut max_bits = 0usize;
-            for bits in rows {
-                max_bits = max_bits.max(bits.len());
-                tdim::validate_declared_vla(col.tdim.as_deref(), bits.len())?;
+            for r in 0..rows.len() {
+                let bits = rows.range(r).len();
+                max_bits = max_bits.max(bits);
+                tdim::validate_declared_vla(col.tdim.as_deref(), bits)?;
             }
             let descriptor = if *wide { 'Q' } else { 'P' };
             Ok(ColumnLayout {
@@ -707,27 +660,7 @@ fn validate_binary_metadata(col: &WriteColumn, stored_type: char) -> Result<()> 
     Ok(())
 }
 
-fn cell_byte_len(kind: ColumnType, cell: &ColumnData) -> Result<usize> {
-    encoded_element_count(kind, cell)?
-        .checked_mul(kind.elem_size())
-        .ok_or(FitsError::DataUnitOverflow)
-}
-
-fn encoded_element_count(kind: ColumnType, cell: &ColumnData) -> Result<usize> {
-    debug_assert!(kind.matches(cell), "column kind must match its data");
-    if let ColumnData::Character(values) = cell {
-        values.iter().try_fold(0usize, |len, value| {
-            len.checked_add(value.bytes.len())
-                .ok_or(FitsError::DataUnitOverflow)
-        })
-    } else {
-        Ok(cell.element_count())
-    }
-}
-
-/// Append `data[range]` to `out` as big-endian bytes, for every fixed numeric /
-/// logical / byte / complex kind. Character and ASCII text values are handled by
-/// their format-specific callers, so they are no-ops here.
+/// Append `data[range]` to `out` as stored big-endian bytes.
 fn append_cells(out: &mut Vec<u8>, data: &ColumnData, range: Range<usize>) {
     match data {
         ColumnData::Logical(v) => out.extend(v[range].iter().map(|&b| match b {
@@ -735,7 +668,7 @@ fn append_cells(out: &mut Vec<u8>, data: &ColumnData, range: Range<usize>) {
             Some(false) => b'F',
             None => 0, // §7.3.3 null
         })),
-        ColumnData::Bytes(v) => out.extend_from_slice(&v[range]),
+        ColumnData::Bytes(v) | ColumnData::Character(v) => out.extend_from_slice(&v[range]),
         ColumnData::I16(v) => extend_be(out, &v[range], i16::to_be_bytes),
         ColumnData::I32(v) => extend_be(out, &v[range], i32::to_be_bytes),
         ColumnData::I64(v) => extend_be(out, &v[range], i64::to_be_bytes),
@@ -753,19 +686,6 @@ fn append_cells(out: &mut Vec<u8>, data: &ColumnData, range: Range<usize>) {
                 out.extend_from_slice(&im.to_be_bytes());
             }
         }
-        ColumnData::Character(_) => {}
-    }
-}
-
-/// Append a whole column cell (a VLA row's array) to the heap, big-endian.
-fn append_be(out: &mut Vec<u8>, cell: &ColumnData) {
-    match cell {
-        ColumnData::Character(values) => {
-            for value in values {
-                out.extend_from_slice(&value.bytes);
-            }
-        }
-        _ => append_cells(out, cell, 0..cell.element_count()),
     }
 }
 
@@ -785,14 +705,7 @@ fn pack_cell(out: &mut Vec<u8>, col: &WriteColumn, r: usize) {
     match &col.values {
         WriteColumnData::Fixed { data, repeat } => {
             let base = r * *repeat;
-            match data {
-                ColumnData::Character(values) => {
-                    let bytes = &values[r].bytes;
-                    out.extend_from_slice(bytes);
-                    out.extend(std::iter::repeat_n(b' ', *repeat - bytes.len()));
-                }
-                data => append_cells(out, data, base..base + *repeat),
-            }
+            append_cells(out, data, base..base + *repeat);
         }
         WriteColumnData::Bits { bytes, bit_count } => {
             let width = bit_count.div_ceil(8);
@@ -812,7 +725,7 @@ fn pack_cell(out: &mut Vec<u8>, col: &WriteColumn, r: usize) {
     }
 }
 
-fn validate_character(value: &CharacterField, context: &'static str) -> Result<()> {
+fn validate_character(value: CharacterField<'_>, context: &'static str) -> Result<()> {
     if value
         .members()
         .iter()

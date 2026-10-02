@@ -7,7 +7,6 @@ use crate::bintable::tform::Tform;
 use crate::bintable::tform_kind::TformKind;
 use crate::column::Named;
 use crate::error::Result;
-use crate::table::CharacterField;
 
 /// One column of a binary table: its `TFORMn` format, optional name/unit, the
 /// `TSCALn`/`TZEROn`/`TNULLn` metadata, and its byte offset within a row.
@@ -48,12 +47,6 @@ impl Column {
         row_count: usize,
     ) -> ColumnData {
         match self.tform.kind {
-            // One exact field per row, padding and all — the row *is* the field.
-            TformKind::Char => ColumnData::Character(
-                cells
-                    .map(|cell| CharacterField::new(cell.to_vec()))
-                    .collect(),
-            ),
             TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
                 unreachable!("raw rejects VLA columns before fixed decode")
             }
@@ -82,7 +75,8 @@ impl Column {
             .expect("validated VLA format carries an element type");
         let expected_len = descriptor::payload_len(element_type, element_count)?;
         debug_assert_eq!(bytes.len(), expected_len);
-        Ok(element_type.decode_run(bytes))
+        let kind = element_type.heap_kind();
+        Ok(kind.decode_cells(std::iter::once(bytes), bytes.len() / kind.elem_size()))
     }
 
     /// The `TDIMn` extent check for this column's `P`/`Q` heap array.

@@ -19,7 +19,9 @@ pub(crate) struct VlaColumn<'a> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct VlaCell<'a> {
     pub(crate) bytes: &'a [u8],
+    #[cfg(feature = "compression")]
     pub(crate) element_count: usize,
+    #[cfg(feature = "compression")]
     pub(crate) element_type: TformKind,
 }
 
@@ -50,7 +52,9 @@ impl<'a> VlaColumn<'a> {
         let bytes = self.table.pq_payload(descriptor, self.element_type)?;
         Ok(VlaCell {
             bytes,
+            #[cfg(feature = "compression")]
             element_count: descriptor.count,
+            #[cfg(feature = "compression")]
             element_type: self.element_type,
         })
     }

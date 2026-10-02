@@ -23,6 +23,15 @@ pub enum UnsignedData {
 }
 
 impl UnsignedData {
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            UnsignedData::I8(values) => values.len(),
+            UnsignedData::U16(values) => values.len(),
+            UnsignedData::U32(values) => values.len(),
+            UnsignedData::U64(values) => values.len(),
+        }
+    }
+
     /// Recover exact values from big-endian sign-bit-offset storage (the §5.2.5 /
     /// Table 19 convention) by flipping the stored sign bit. `cells` is one contiguous
     /// run for an image or heap array, or one strided cell per row for a table column;

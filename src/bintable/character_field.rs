@@ -1,24 +1,29 @@
-//! One binary-table `A` field, stored bytes and all.
+//! One binary-table `A` field, read in place.
 
-/// One binary-table `A` field with its stored bytes preserved exactly.
+/// One binary-table `A` field, its stored bytes preserved exactly.
 ///
-/// [`CharacterField::members`] stops at the first NUL, while [`CharacterField::bytes`]
-/// retains the terminator, undefined bytes after it, and all trailing spaces. A NUL
-/// in the first byte is therefore distinguishable from an empty or all-space field.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CharacterField {
-    pub bytes: Vec<u8>,
+/// [`CharacterField::members`] stops at the first NUL, while
+/// [`CharacterField::bytes`] keeps the terminator, undefined bytes after it, and
+/// all trailing spaces. A NUL in the first byte is therefore distinguishable from
+/// an empty or all-space field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CharacterField<'a> {
+    bytes: &'a [u8],
 }
 
-impl CharacterField {
-    pub fn new(bytes: impl Into<Vec<u8>>) -> CharacterField {
-        CharacterField {
-            bytes: bytes.into(),
-        }
+impl<'a> CharacterField<'a> {
+    /// The field stored as `bytes` — a fixed column's `repeat` bytes for one row,
+    /// or one row of a `P`/`Q` character column.
+    pub const fn new(bytes: &'a [u8]) -> CharacterField<'a> {
+        CharacterField { bytes }
+    }
+
+    pub const fn bytes(&self) -> &'a [u8] {
+        self.bytes
     }
 
     /// The defined character members, ending immediately before the first NUL.
-    pub fn members(&self) -> &[u8] {
+    pub fn members(&self) -> &'a [u8] {
         let end = self
             .bytes
             .iter()
@@ -31,34 +36,10 @@ impl CharacterField {
     pub fn is_null(&self) -> bool {
         self.bytes.first() == Some(&0)
     }
-
-    /// Construct the shortest stored representation of a FITS null string.
-    pub fn null() -> CharacterField {
-        CharacterField { bytes: vec![0] }
-    }
-}
-
-impl From<&str> for CharacterField {
-    fn from(value: &str) -> CharacterField {
-        CharacterField::new(value.as_bytes().to_vec())
-    }
-}
-
-impl From<String> for CharacterField {
-    fn from(value: String) -> CharacterField {
-        CharacterField::new(value.into_bytes())
-    }
-}
-
-impl From<Vec<u8>> for CharacterField {
-    fn from(value: Vec<u8>) -> CharacterField {
-        CharacterField::new(value)
-    }
 }
 
 #[cfg(test)]
 mod tests {
-
     use crate::bintable::BinTable;
     use crate::bintable::character_field::CharacterField;
     use crate::bintable::column_data::ColumnData;
@@ -67,28 +48,21 @@ mod tests {
     #[test]
     fn character_columns_preserve_members_terminators_and_null_strings() {
         let header = table_header(4, 4, &["4A"]);
-        let fields = [b"AB  ", b"AB\0x", b"\0xyz", b"    "];
-        let data = fields
-            .iter()
-            .flat_map(|field| field.iter().copied())
-            .collect();
-        let table = BinTable::from_data(&header, data).unwrap();
-        let ColumnData::Character(values) = table.column_by_idx(0).unwrap().raw().unwrap() else {
-            panic!("expected exact binary character fields");
+        let fields: [&[u8]; 4] = [b"AB  ", b"AB\0x", b"\0xyz", b"    "];
+        let data = fields.concat();
+        let table = BinTable::from_data(&header, data.clone()).unwrap();
+        let ColumnData::Character(bytes) = table.column_by_idx(0).unwrap().raw().unwrap() else {
+            panic!("expected exact binary character bytes");
         };
-        assert_eq!(
-            values,
-            fields
-                .iter()
-                .map(|field| CharacterField::new(field.to_vec()))
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(values[0].members(), b"AB  ");
-        assert_eq!(values[1].members(), b"AB");
-        assert!(!values[1].is_null());
-        assert_eq!(values[2].members(), b"");
-        assert!(values[2].is_null());
-        assert_eq!(values[3].members(), b"    ");
-        assert!(!values[3].is_null());
+        assert_eq!(bytes, data);
+        let read: Vec<_> = bytes.chunks(4).map(CharacterField::new).collect();
+        assert_eq!(read[0].members(), b"AB  ");
+        assert_eq!(read[1].members(), b"AB");
+        assert!(!read[1].is_null());
+        assert_eq!(read[2].members(), b"");
+        assert!(read[2].is_null());
+        assert_eq!(read[3].members(), b"    ");
+        assert!(!read[3].is_null());
+        assert_eq!(read[1].bytes(), b"AB\0x");
     }
 }
