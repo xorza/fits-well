@@ -176,3 +176,45 @@ fn matrix_inversion_detects_singularity_relative_to_the_entries() {
     assert_eq!(invert(&[1e-300, 2e-300, 2e-300, 4e-300], 2), None);
     assert_eq!(invert(&[0.1, 0.7, 0.3, 2.1], 2), None);
 }
+
+/// Matrix keywords are matched by their exact names: two-digit indices, the selected alternate
+/// suffix only, no index past the axis count, and no zero-padded spelling, which names a
+/// different keyword. Unset `PC` cells keep the identity, each row scaled by its `CDELT`.
+#[test]
+fn matrix_keywords_are_matched_by_exact_name() {
+    let naxis = 12;
+    let cdelt: Vec<f64> = (1..=naxis).map(|i| i as f64).collect();
+    let mut header = Header::new();
+    header
+        .set_internal("PC10_12", 0.5)
+        .set_internal("PC2_1", 0.25)
+        .set_internal("PC1_1A", 7.0)
+        .set_internal("PC13_1", 9.0)
+        .set_internal("PC01_02", 3.0);
+    let primary =
+        LinearMatrix::from_header(&header, AltSuffix::new(None), naxis, &cdelt, None).unwrap();
+    let mut expected = vec![0.0; naxis * naxis];
+    for i in 0..naxis {
+        expected[i * naxis + i] = cdelt[i];
+    }
+    expected[9 * naxis + 11] = 10.0 * 0.5;
+    expected[naxis] = 2.0 * 0.25;
+    assert_eq!(primary.values, expected);
+
+    let alternate =
+        LinearMatrix::from_header(&header, AltSuffix::new(Some('A')), naxis, &cdelt, None).unwrap();
+    let mut expected = vec![0.0; naxis * naxis];
+    for i in 0..naxis {
+        expected[i * naxis + i] = cdelt[i];
+    }
+    expected[0] = 7.0;
+    assert_eq!(alternate.values, expected);
+
+    let mut cd = Header::new();
+    cd.set_internal("CD3_2", 1.5).set_internal("CD12_12", -2.0);
+    let matrix = LinearMatrix::from_header(&cd, AltSuffix::new(None), naxis, &cdelt, None).unwrap();
+    let mut expected = vec![0.0; naxis * naxis];
+    expected[2 * naxis + 1] = 1.5;
+    expected[naxis * naxis - 1] = -2.0;
+    assert_eq!(matrix.values, expected);
+}

@@ -30,6 +30,55 @@ pub(super) struct LinearMatrix {
     naxis: usize,
 }
 
+/// One `PCi_ja`/`CDi_ja` keyword the header carries, with its zero-based cell.
+#[derive(Debug)]
+struct MatrixCell {
+    keyword: String,
+    row: usize,
+    column: usize,
+}
+
+impl MatrixCell {
+    const fn index(&self, naxis: usize) -> usize {
+        self.row * naxis + self.column
+    }
+}
+
+/// The `{root}i_j{alt}` keywords the header carries with `1 ≤ i, j ≤ naxis`, found in one pass
+/// over its cards. Probing all `naxis²` names instead costs a million lookups for a header that
+/// claims `WCSAXES = 999`. An index is matched exactly as a keyword name spells it: decimal
+/// digits with no leading zero, so `PC01_02` is a different keyword, as it is to a reader that
+/// asks for `PC1_2` by name.
+fn matrix_cells(header: &Header, root: &str, alt: AltSuffix, naxis: usize) -> Vec<MatrixCell> {
+    let index = |digits: &str| -> Option<usize> {
+        let canonical = !digits.is_empty()
+            && !digits.starts_with('0')
+            && digits.bytes().all(|byte| byte.is_ascii_digit());
+        let value: usize = digits.parse().ok().filter(|_| canonical)?;
+        (1..=naxis).contains(&value).then_some(value - 1)
+    };
+    let mut cells: Vec<MatrixCell> = header
+        .iter()
+        .filter(|entry| entry.value.is_some())
+        .filter_map(|entry| {
+            let rest = entry
+                .keyword
+                .strip_prefix(root)?
+                .strip_suffix(alt.as_str())?;
+            let (row, column) = rest.split_once('_')?;
+            Some(MatrixCell {
+                keyword: entry.keyword.to_owned(),
+                row: index(row)?,
+                column: index(column)?,
+            })
+        })
+        .collect();
+    // A repeated keyword names one cell; the header's own lookup reads its first card.
+    cells.sort_by_key(|cell| (cell.row, cell.column));
+    cells.dedup_by_key(|cell| (cell.row, cell.column));
+    cells
+}
+
 impl LinearMatrix {
     /// Read the header's linear keywords.
     ///
@@ -45,10 +94,10 @@ impl LinearMatrix {
         cdelt: &[f64],
         celestial_axes: Option<ProjectedCelestialAxes>,
     ) -> Result<LinearMatrix> {
-        let has_cd = (1..=naxis)
-            .any(|i| (1..=naxis).any(|j| header.get(key!("CD{i}_{j}{a}").as_str()).is_some()));
-        let has_pc = (1..=naxis)
-            .any(|i| (1..=naxis).any(|j| header.get(key!("PC{i}_{j}{a}").as_str()).is_some()));
+        let cd = matrix_cells(header, "CD", a, naxis);
+        let pc = matrix_cells(header, "PC", a, naxis);
+        let has_cd = !cd.is_empty();
+        let has_pc = !pc.is_empty();
         let has_crota = (1..=naxis).any(|i| header.get(key!("CROTA{i}{a}").as_str()).is_some());
         if has_cd && has_pc {
             return Err(FitsError::ConflictingWcsKeywords {
@@ -62,22 +111,17 @@ impl LinearMatrix {
         }
         let mut values = vec![0.0; naxis * naxis];
         if has_cd {
-            for i in 0..naxis {
-                for j in 0..naxis {
-                    values[i * naxis + j] = header
-                        .get_real(key!("CD{}_{}{a}", i + 1, j + 1).as_str())?
-                        .unwrap_or(0.0);
-                }
+            for cell in cd {
+                values[cell.index(naxis)] = header.get_real(&cell.keyword)?.unwrap_or(0.0);
             }
             return Ok(LinearMatrix { values, naxis });
         }
-        for i in 0..naxis {
-            for j in 0..naxis {
-                let pc = header
-                    .get_real(key!("PC{}_{}{a}", i + 1, j + 1).as_str())?
-                    .unwrap_or(if i == j { 1.0 } else { 0.0 });
-                values[i * naxis + j] = cdelt[i] * pc;
-            }
+        for (i, &scale) in cdelt.iter().enumerate() {
+            values[i * naxis + i] = scale;
+        }
+        for cell in pc {
+            values[cell.index(naxis)] =
+                cdelt[cell.row] * header.get_real(&cell.keyword)?.unwrap_or(0.0);
         }
         // Legacy CROTA: rotate the celestial 2-axis sub-block (only when no PC was
         // given, per the convention that CROTA and PC are exclusive).
