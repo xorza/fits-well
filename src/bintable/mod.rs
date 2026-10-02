@@ -92,11 +92,11 @@ impl BinTable {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "internals"))]
 pub(crate) mod internals {
-    #[cfg(feature = "compression")]
+    #[cfg(all(test, feature = "compression"))]
     use crate::bintable::BinTable;
-    #[cfg(feature = "compression")]
+    #[cfg(all(test, feature = "compression"))]
     use crate::bintable::tform_kind::TformKind;
     use crate::header_model::Header;
 
@@ -118,7 +118,7 @@ pub(crate) mod internals {
         h
     }
 
-    #[cfg(feature = "compression")]
+    #[cfg(all(test, feature = "compression"))]
     pub(crate) fn set_column_kind(table: &mut BinTable, column: usize, kind: TformKind) {
         table.schema.columns[column].tform.kind = kind;
     }

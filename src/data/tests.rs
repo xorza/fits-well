@@ -2,7 +2,7 @@ use crate::data::read_image::ReadImage;
 use crate::data::sample_type::UnsignedKind;
 use crate::data::*;
 use crate::header_model::Header;
-use crate::header_model::from_card_lines as header;
+use crate::header_model::internals::from_card_lines as header;
 
 fn image(samples: ImageData, scaling: Scaling) -> Image {
     Image {

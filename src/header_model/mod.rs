@@ -536,20 +536,31 @@ fn fold_continuation(cards: &mut [Card], substring: &str, fragment: Option<&str>
     true
 }
 
-/// Build a header from left-justified 80-column card text lines, appending the
-/// `END` record. Shared test helper for modules that exercise parsed headers.
+/// Card builders for the tests of every module that parses headers.
 #[cfg(test)]
-pub(crate) fn from_card_lines(lines: &[&str]) -> Header {
-    let mut buf = Vec::with_capacity((lines.len() + 1) * CARD_SIZE);
-    for line in lines {
+pub(crate) mod internals {
+    use crate::block::CARD_SIZE;
+    use crate::header_model::Header;
+
+    /// One record: `text` left-justified in 80 blank-filled columns.
+    pub(crate) fn card_bytes(text: &str) -> [u8; CARD_SIZE] {
+        assert!(text.len() <= CARD_SIZE, "{text:?} is longer than a card");
         let mut card = [b' '; CARD_SIZE];
-        card[..line.len()].copy_from_slice(line.as_bytes());
-        buf.extend_from_slice(&card);
+        card[..text.len()].copy_from_slice(text.as_bytes());
+        card
     }
-    let mut end = [b' '; CARD_SIZE];
-    end[..3].copy_from_slice(b"END");
-    buf.extend_from_slice(&end);
-    Header::parse(&buf).unwrap()
+
+    /// The records of `lines`, in order.
+    pub(crate) fn records(lines: &[&str]) -> Vec<u8> {
+        lines.iter().flat_map(|line| card_bytes(line)).collect()
+    }
+
+    /// The header `lines` and an appended `END` record parse to.
+    pub(crate) fn from_card_lines(lines: &[&str]) -> Header {
+        let mut bytes = records(lines);
+        bytes.extend_from_slice(&card_bytes("END"));
+        Header::parse(&bytes).unwrap()
+    }
 }
 
 #[cfg(test)]

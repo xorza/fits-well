@@ -883,5 +883,82 @@ fn domain(axis: usize) -> FitsError {
     }
 }
 
+/// `-TAB` fixtures for the tabular, reader and WCS bench code.
+#[cfg(any(test, feature = "internals"))]
+pub(crate) mod internals {
+    use crate::bintable::BinTable;
+    use crate::bintable::internals::table_header;
+    use crate::header_model::Header;
+    use crate::world_coordinates::Wcs;
+    use crate::world_coordinates::tabular;
+    use crate::world_coordinates::tabular::TabularTransform;
+
+    /// A 2×2 grid of two-axis coordinates, `(2,2,2)`: vertex (i, j) is
+    /// (100 + 10i, 200 + 20j), so the coupled transform it defines is affine.
+    pub(crate) const COUPLED_GRID: [f64; 8] =
+        [100.0, 200.0, 110.0, 200.0, 100.0, 220.0, 110.0, 220.0];
+
+    /// The header of a one-row lookup table: each column (`TTYPEn`, values,
+    /// optional `TDIMn`) is `nD` doubles.
+    pub(crate) fn lookup_header(columns: &[(&str, &[f64], Option<&str>)]) -> Header {
+        let row_len = columns.iter().map(|(_, values, _)| values.len() * 8).sum();
+        let tforms: Vec<String> = columns
+            .iter()
+            .map(|(_, values, _)| format!("{}D", values.len()))
+            .collect();
+        let tforms: Vec<&str> = tforms.iter().map(String::as_str).collect();
+        let mut header = table_header(row_len, 1, &tforms);
+        for (index, (name, _, shape)) in columns.iter().enumerate() {
+            let column = index + 1;
+            header.set_internal(format!("TTYPE{column}").as_str(), *name);
+            if let Some(shape) = shape {
+                header.set_internal(format!("TDIM{column}").as_str(), *shape);
+            }
+        }
+        header
+    }
+
+    /// The row [`lookup_header`] describes.
+    pub(crate) fn lookup_bytes(columns: &[(&str, &[f64], Option<&str>)]) -> Vec<u8> {
+        columns
+            .iter()
+            .flat_map(|(_, values, _)| values.iter().flat_map(|value| value.to_be_bytes()))
+            .collect()
+    }
+
+    pub(crate) fn lookup_table(columns: &[(&str, &[f64], Option<&str>)]) -> BinTable {
+        BinTable::from_data(&lookup_header(columns), lookup_bytes(columns)).unwrap()
+    }
+
+    /// An image header of `axis_count` `-TAB` axes, axis i reading table axis i of
+    /// the `coordinate` column in `WCS-TABLE`, with unit pixels and no offsets.
+    pub(crate) fn tab_header(axis_count: usize, coordinate: &str) -> Header {
+        let mut header = Header::new();
+        header.set_internal("NAXIS", axis_count as i64);
+        for axis in 1..=axis_count {
+            header
+                .set_internal(format!("CTYPE{axis}").as_str(), format!("AX{axis:02}-TAB"))
+                .set_internal(format!("CRPIX{axis}").as_str(), 0.0)
+                .set_internal(format!("CRVAL{axis}").as_str(), 0.0)
+                .set_internal(format!("CDELT{axis}").as_str(), 1.0)
+                .set_internal(format!("PS{axis}_0").as_str(), "WCS-TABLE")
+                .set_internal(format!("PS{axis}_1").as_str(), coordinate)
+                .set_internal(format!("PV{axis}_3").as_str(), axis as i64);
+        }
+        header
+    }
+
+    /// The transform `header` declares, with every `-TAB` axis read from `table`.
+    pub(crate) fn resolved_wcs(header: &Header, table: &BinTable) -> Wcs {
+        let axis_count = usize::try_from(header.get_integer("NAXIS").unwrap().unwrap()).unwrap();
+        let transforms = tabular::descriptors(header, axis_count, None)
+            .unwrap()
+            .into_iter()
+            .map(|descriptor| TabularTransform::from_table(descriptor, table.view()).unwrap())
+            .collect();
+        Wcs::from_header_with_tabular(header, None, transforms).unwrap()
+    }
+}
+
 #[cfg(test)]
 mod tests;
