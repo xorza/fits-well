@@ -11,7 +11,6 @@ use crate::world_coordinates::angle_scale;
 use crate::world_coordinates::axis;
 use crate::world_coordinates::ctype::Ctype;
 
-const TABULAR_TOLERANCE: f64 = 1e-10;
 const MAX_INTERPOLATION_VERTICES: usize = 1 << 20;
 const MAX_INVERSE_WORK: usize = 1 << 22;
 
@@ -602,6 +601,9 @@ struct TabularSearchScratch {
     delta: Vec<f64>,
     indices: Vec<usize>,
     corners: Vec<f64>,
+    /// Per coordinate axis, how far an interpolated corner may sit from the
+    /// exact value through rounding alone — see [`SubvoxelSearch::evaluate_corners`].
+    tolerance: Vec<f64>,
     voxel: Vec<usize>,
     node_work: usize,
     remaining_work: usize,
@@ -620,6 +622,7 @@ impl TabularSearchScratch {
             delta: allocation::try_zeroed(0.0, dimensions)?,
             indices: allocation::try_zeroed(0, dimensions)?,
             corners: allocation::try_zeroed(0.0, corner_count)?,
+            tolerance: allocation::try_zeroed(0.0, dimensions)?,
             voxel: allocation::try_zeroed(0, dimensions)?,
             node_work,
             remaining_work: MAX_INVERSE_WORK,
@@ -651,7 +654,7 @@ impl SubvoxelSearch<'_> {
             for table_axis in 0..dimensions {
                 let difference = self.scratch.corners[vertex * dimensions + table_axis]
                     - self.target[table_axis];
-                if difference.abs() < TABULAR_TOLERANCE {
+                if difference.abs() <= self.scratch.tolerance[table_axis] {
                     self.scratch.equal[table_axis] = true;
                 } else {
                     exact = false;
@@ -739,6 +742,20 @@ impl SubvoxelSearch<'_> {
             let destination = vertex * dimensions;
             self.scratch.corners[destination..destination + dimensions]
                 .copy_from_slice(&self.transform.coordinates[source..source + dimensions]);
+        }
+        // A corner is M linear interpolations of the voxel's coordinates, one per
+        // variable axis, at offsets in [−0.5, 1.5]. Each pass rounds once per term and
+        // at most doubles the magnitude (|1 − δ| + |δ| ≤ 2), so a corner's rounding
+        // error is at most 3·M·2^M·ε/2 of the largest coordinate. A world value the
+        // forward transform interpolated carries the same bound, hence twice that.
+        // Relative to the coordinates, the test means the same in metres as in Hz.
+        let passes = self.transform.variable_axes.len() as f64;
+        let rounding = 3.0 * passes * self.transform.vertex_count as f64 * f64::EPSILON;
+        for (table_axis, tolerance) in self.scratch.tolerance.iter_mut().enumerate() {
+            let largest = (0..self.transform.vertex_count)
+                .map(|vertex| self.scratch.corners[vertex * dimensions + table_axis].abs())
+                .fold(0.0, f64::max);
+            *tolerance = rounding * largest;
         }
         for (bit, &table_axis) in self.transform.variable_axes.iter().enumerate() {
             let lower = self.scratch.delta[table_axis];

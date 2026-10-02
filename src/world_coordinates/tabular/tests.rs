@@ -376,3 +376,24 @@ fn a_one_element_index_vector_maps_onto_its_value() {
     }
     assert_eq!(wcs.world_to_pixel(&[42.0]).unwrap(), [0.0]);
 }
+
+/// The corner test is relative to the coordinates, so a wavelength axis in metres
+/// (cells of 1e-8 m) inverts as precisely as one in nanometres: an absolute 1e-10
+/// once snapped any target within a hundredth of a cell to a corner. The pixel is
+/// off the dyadic grid, so no sub-voxel corner hits it exactly; the inverse then
+/// bisects to 2^-31 of a cell, which bounds the round trip at 1e-9 pixel.
+#[test]
+fn tab_inverse_is_scale_free() {
+    for scale in [1.0, 1e-9, 1e9] {
+        let coordinates = [100.0, 200.0, 110.0, 200.0, 100.0, 220.0, 110.0, 220.0]
+            .map(|value: f64| value * scale);
+        let table = lookup_table(&[("COORD", &coordinates, Some("(2,2,2)"))]);
+        let wcs = resolved_wcs(&tab_header(2, "COORD"), &table);
+        let world = wcs.pixel_to_world(&[1.3, 1.7]).unwrap();
+        let pixel = wcs.world_to_pixel(&world).unwrap();
+        assert!(
+            (pixel[0] - 1.3).abs() < 1e-9 && (pixel[1] - 1.7).abs() < 1e-9,
+            "scale {scale}: {pixel:?}"
+        );
+    }
+}
