@@ -1,3 +1,4 @@
+use crate::bitpix::Bitpix;
 use crate::compress::*;
 use crate::data::Image;
 use crate::data::image_data::ImageData;
@@ -187,6 +188,14 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
                 "fallback tile for {bitpix:?} {cmptype}"
             );
 
+            // Tile 0 is quantized at its ZSCALE, so each sample comes back within
+            // half a step of it, plus the roundings of the dither arithmetic and,
+            // for f32, of storing the result — at most an ulp of the sample.
+            let zscale = table.column_by_name("ZSCALE").unwrap().physical().unwrap()[0];
+            let rounding = match bitpix {
+                Bitpix::F32 => f32::EPSILON as f64,
+                _ => 4.0 * f64::EPSILON,
+            };
             let back = r.read_image(1).unwrap();
             assert_eq!(back.scaling, image.scaling, "{bitpix:?} {cmptype}");
             let physical = back.physical();
@@ -200,13 +209,16 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
                 let expected_physical = -10.0 + 2.5 * expected;
                 if index < 24 {
                     let raw_error = (actual - expected).abs();
+                    let raw_bound = 0.5 * zscale + rounding * expected.abs();
                     assert!(
-                        raw_error < 0.2,
+                        raw_error <= raw_bound,
                         "{bitpix:?} {cmptype} raw pixel {index}: {raw_error}"
                     );
+                    // BSCALE scales the raw error; the scaling itself rounds once more.
                     let physical_error = (physical[index] - expected_physical).abs();
                     assert!(
-                        physical_error < 0.5,
+                        physical_error
+                            <= 2.5 * raw_bound + 2.0 * f64::EPSILON * expected_physical.abs(),
                         "{bitpix:?} {cmptype} physical pixel {index}: {physical_error}"
                     );
                     quantized_changed |= actual != expected;
@@ -388,6 +400,13 @@ fn float_write_preserves_nan_nulls() {
     )
     .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let zscale = r
+        .read_table(1)
+        .unwrap()
+        .column_by_name("ZSCALE")
+        .unwrap()
+        .physical()
+        .unwrap()[0];
     let back = match r.read_image(1).unwrap().decode() {
         ImageData::F32(v) => v,
         other => panic!("expected F32, got {other:?}"),
@@ -397,7 +416,13 @@ fn float_write_preserves_nan_nulls() {
         if o.is_nan() {
             assert!(b.is_nan(), "null pixel {i} must round-trip to NaN");
         } else {
-            assert!((o - b).abs() < 0.2, "pixel {i}: {o} vs {b}");
+            // Half a quantization step, plus an f32 ulp for the dither arithmetic
+            // and the stored result.
+            let error = (o as f64 - b as f64).abs();
+            assert!(
+                error <= 0.5 * zscale + f32::EPSILON as f64 * (o as f64).abs(),
+                "pixel {i}: {o} vs {b}"
+            );
         }
     }
 }

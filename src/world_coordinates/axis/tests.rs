@@ -220,10 +220,20 @@ struct SpectralGolden {
     reference: f64,
     increment: f64,
     world: f64,
+    /// The world change for a relative change of 1 in the sampled quantity: the
+    /// reference for a world proportional to it, c for a velocity, 1 for a redshift
+    /// or β. A rounding in the sampled quantity reaches the world scaled by this — a
+    /// velocity is a ratio minus 1, so there it is the digits the subtraction cancels.
+    scale: f64,
 }
 
+/// Table 26's algorithms and the types derived from them (ENER, WAVN, VRAD, VOPT,
+/// ZOPT, BETA), each evaluated at pixel 3 by wcslib with RESTFRQ = 1420405751 Hz.
 #[test]
-fn table_26_spectral_algorithms_match_wcslib() {
+fn spectral_algorithms_match_wcslib() {
+    // A conversion chain is a few products, quotients and a square root, each
+    // rounding by at most half an ulp of the sampled quantity.
+    const ROUNDING: f64 = 4.0 * f64::EPSILON;
     let cases = [
         SpectralGolden {
             ctype: "WAVE-F2W",
@@ -231,6 +241,7 @@ fn table_26_spectral_algorithms_match_wcslib() {
             reference: 0.211_061_140_655_716_77,
             increment: 1e-4,
             world: 0.211_261_330_354_017_17,
+            scale: 0.211_061_140_655_716_77,
         },
         SpectralGolden {
             ctype: "VELO-F2V",
@@ -238,6 +249,7 @@ fn table_26_spectral_algorithms_match_wcslib() {
             reference: 0.0,
             increment: 1e3,
             world: 2_000.006_671_265_423_6,
+            scale: SPEED_OF_LIGHT,
         },
         SpectralGolden {
             ctype: "AWAV-F2A",
@@ -245,6 +257,7 @@ fn table_26_spectral_algorithms_match_wcslib() {
             reference: 0.211_003_621_269_199_05,
             increment: 1e-4,
             world: 0.211_203_811_019_260_08,
+            scale: 0.211_003_621_269_199_05,
         },
         SpectralGolden {
             ctype: "FREQ-W2F",
@@ -252,6 +265,7 @@ fn table_26_spectral_algorithms_match_wcslib() {
             reference: 1_420_405_751.0,
             increment: 1e6,
             world: 1_422_408_571.067_528,
+            scale: 1_420_405_751.0,
         },
         SpectralGolden {
             ctype: "VELO-W2V",
@@ -259,6 +273,7 @@ fn table_26_spectral_algorithms_match_wcslib() {
             reference: 0.0,
             increment: 1e3,
             world: 1_999.993_328_738_271_7,
+            scale: SPEED_OF_LIGHT,
         },
         SpectralGolden {
             ctype: "AWAV-W2A",
@@ -266,6 +281,7 @@ fn table_26_spectral_algorithms_match_wcslib() {
             reference: 0.211_003_621_269_199_05,
             increment: 1e-4,
             world: 0.211_203_621_269_199_03,
+            scale: 0.211_003_621_269_199_05,
         },
         SpectralGolden {
             ctype: "FREQ-V2F",
@@ -273,6 +289,7 @@ fn table_26_spectral_algorithms_match_wcslib() {
             reference: 1_420_405_751.0,
             increment: 1e6,
             world: 1_422_407_161.033_065_3,
+            scale: 1_420_405_751.0,
         },
         SpectralGolden {
             ctype: "WAVE-V2W",
@@ -280,6 +297,7 @@ fn table_26_spectral_algorithms_match_wcslib() {
             reference: 0.211_061_140_655_716_77,
             increment: 1e-4,
             world: 0.211_261_235_504_845_66,
+            scale: 0.211_061_140_655_716_77,
         },
         SpectralGolden {
             ctype: "AWAV-V2A",
@@ -287,6 +305,7 @@ fn table_26_spectral_algorithms_match_wcslib() {
             reference: 0.211_003_621_269_199_05,
             increment: 1e-4,
             world: 0.211_203_716_144_208_21,
+            scale: 0.211_003_621_269_199_05,
         },
         SpectralGolden {
             ctype: "FREQ-A2F",
@@ -294,6 +313,7 @@ fn table_26_spectral_algorithms_match_wcslib() {
             reference: 1_420_405_751.0,
             increment: 1e6,
             world: 1_422_408_571.067_528,
+            scale: 1_420_405_751.0,
         },
         SpectralGolden {
             ctype: "WAVE-A2W",
@@ -301,6 +321,7 @@ fn table_26_spectral_algorithms_match_wcslib() {
             reference: 0.211_061_140_655_716_77,
             increment: 1e-4,
             world: 0.211_261_140_655_716_77,
+            scale: 0.211_061_140_655_716_77,
         },
         SpectralGolden {
             ctype: "VELO-A2V",
@@ -308,6 +329,55 @@ fn table_26_spectral_algorithms_match_wcslib() {
             reference: 0.0,
             increment: 1e3,
             world: 1_999.993_328_738_271_7,
+            scale: SPEED_OF_LIGHT,
+        },
+        SpectralGolden {
+            ctype: "ENER-W2F",
+            unit: "J",
+            reference: 9.411_715_746_760_2e-25,
+            increment: 6.626_075_5e-28,
+            world: 9.424_986_583_740_556e-25,
+            scale: 9.411_715_746_760_2e-25,
+        },
+        SpectralGolden {
+            ctype: "WAVN-W2F",
+            unit: "/m",
+            reference: 4.737_963_591_465_666,
+            increment: 0.003_335_640_951_981_520_5,
+            world: 4.744_644_280_102_364,
+            scale: 4.737_963_591_465_666,
+        },
+        SpectralGolden {
+            ctype: "VRAD-W2F",
+            unit: "m/s",
+            reference: 0.0,
+            increment: 1e3,
+            world: 1_999.986_657_561_148_6,
+            scale: SPEED_OF_LIGHT,
+        },
+        SpectralGolden {
+            ctype: "VOPT-F2W",
+            unit: "m/s",
+            reference: 0.0,
+            increment: 1e3,
+            world: 2_000.013_342_678_547,
+            scale: SPEED_OF_LIGHT,
+        },
+        SpectralGolden {
+            ctype: "ZOPT-F2W",
+            unit: "",
+            reference: 0.0,
+            increment: 1e-5,
+            world: 2.000_040_000_793_568e-5,
+            scale: 1.0,
+        },
+        SpectralGolden {
+            ctype: "BETA-F2V",
+            unit: "",
+            reference: 0.0,
+            increment: 3.335_640_951_981_520_5e-6,
+            world: 6.671_304_156_909_189e-6,
+            scale: 1.0,
         },
     ];
     for case in cases {
@@ -323,88 +393,18 @@ fn table_26_spectral_algorithms_match_wcslib() {
         let wcs = Wcs::from_header(&header, None).unwrap();
         assert!(wcs.view().unsupported_axes.is_empty(), "{}", case.ctype);
         let world = wcs.pixel_to_world(&[3.0]).unwrap()[0];
-        let tolerance = case.world.abs() * 2e-14;
         assert!(
-            (world - case.world).abs() <= tolerance,
+            (world - case.world).abs() <= ROUNDING * case.scale,
             "{}: got {world:.17e}, wcslib {:.17e}",
             case.ctype,
             case.world
         );
         let pixel = wcs.world_to_pixel(&[case.world]).unwrap()[0];
         assert!(
-            (pixel - 3.0).abs() < 2e-10,
+            (pixel - 3.0).abs() <= ROUNDING * case.scale / case.increment.abs(),
             "{} inverse: {pixel:.17e}",
             case.ctype
         );
-    }
-}
-
-#[test]
-fn derived_spectral_types_match_wcslib() {
-    let cases = [
-        SpectralGolden {
-            ctype: "ENER-W2F",
-            unit: "J",
-            reference: 9.411_715_746_760_2e-25,
-            increment: 6.626_075_5e-28,
-            world: 9.424_986_583_740_556e-25,
-        },
-        SpectralGolden {
-            ctype: "WAVN-W2F",
-            unit: "/m",
-            reference: 4.737_963_591_465_666,
-            increment: 0.003_335_640_951_981_520_5,
-            world: 4.744_644_280_102_364,
-        },
-        SpectralGolden {
-            ctype: "VRAD-W2F",
-            unit: "m/s",
-            reference: 0.0,
-            increment: 1e3,
-            world: 1_999.986_657_561_148_6,
-        },
-        SpectralGolden {
-            ctype: "VOPT-F2W",
-            unit: "m/s",
-            reference: 0.0,
-            increment: 1e3,
-            world: 2_000.013_342_678_547,
-        },
-        SpectralGolden {
-            ctype: "ZOPT-F2W",
-            unit: "",
-            reference: 0.0,
-            increment: 1e-5,
-            world: 2.000_040_000_793_568e-5,
-        },
-        SpectralGolden {
-            ctype: "BETA-F2V",
-            unit: "",
-            reference: 0.0,
-            increment: 3.335_640_951_981_520_5e-6,
-            world: 6.671_304_156_909_189e-6,
-        },
-    ];
-    for case in cases {
-        let mut header = Header::new();
-        header
-            .set_internal("NAXIS", 1)
-            .set_internal("CTYPE1", case.ctype)
-            .set_internal("CUNIT1", case.unit)
-            .set_internal("CRPIX1", 1.0)
-            .set_internal("CRVAL1", case.reference)
-            .set_internal("CDELT1", case.increment)
-            .set_internal("RESTFRQ", 1_420_405_751.0);
-        let wcs = Wcs::from_header(&header, None).unwrap();
-        let world = wcs.pixel_to_world(&[3.0]).unwrap()[0];
-        assert!(
-            (world - case.world).abs() <= case.world.abs() * 5e-11,
-            "{}: got {world:.17e}, wcslib {:.17e}",
-            case.ctype,
-            case.world
-        );
-        let pixel = wcs.world_to_pixel(&[case.world]).unwrap()[0];
-        assert!((pixel - 3.0).abs() < 2e-10, "{}", case.ctype);
     }
 }
 

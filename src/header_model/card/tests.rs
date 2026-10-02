@@ -263,8 +263,8 @@ fn end_requires_the_canonical_blank_record() {
 
 #[test]
 fn long_string_splits_into_a_continue_chain() {
-    // A value too long for one record (with an embedded quote that must not be
-    // split across a record boundary) renders to multiple records.
+    // A value too long for one record, with embedded quotes that must not be split
+    // across a record boundary.
     let value = format!("{}'q'{}", "a".repeat(60), "b".repeat(60));
     let card = Card::Value {
         keyword: "LONGSTR".into(),
@@ -272,17 +272,24 @@ fn long_string_splits_into_a_continue_chain() {
         comment: Some("trailing note".into()),
     };
     let records = render_records(&card);
-    assert!(records.len() >= 2, "expected a CONTINUE chain");
-    assert_eq!(&records[0][..8], b"LONGSTR ");
-    assert_eq!(records[0][8], b'='); // first record carries the value indicator
-    assert_eq!(&records[1][..8], b"CONTINUE");
-    // Non-final records end their quoted substring with the '&' flag.
-    let first = std::str::from_utf8(&records[0]).unwrap();
-    assert!(first.trim_end().ends_with("&'"));
+    // The 123 characters escape to 125. The first record takes 67 of them, ending
+    // after the doubled quotes and two b's, and the second the other 58. The
+    // comment does not fit beside those, so an empty third piece carries it.
+    let records: Vec<&str> = records
+        .iter()
+        .map(|record| std::str::from_utf8(record).unwrap().trim_end())
+        .collect();
+    assert_eq!(
+        records,
+        [
+            format!("LONGSTR = '{}''q''bb&'", "a".repeat(60)),
+            format!("CONTINUE  '{}&'", "b".repeat(58)),
+            "CONTINUE  '' / trailing note".to_string(),
+        ]
+    );
 
     // The chain reassembles to the original value (comment on the last record).
-    let bytes: Vec<u8> = records.iter().flatten().copied().collect();
-    let mut with_end = bytes;
+    let mut with_end: Vec<u8> = render_records(&card).into_iter().flatten().collect();
     with_end.extend_from_slice(&raw("END"));
     let h = Header::parse(&with_end).unwrap();
     assert_eq!(h.get_text("LONGSTR").unwrap(), Some(value.as_str()));

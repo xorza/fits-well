@@ -84,7 +84,7 @@ fn pixel_list_wcs_matches_the_equivalent_image_wcs() {
             lonpole: 180.0,
         }
     );
-    assert_astropy_golden(&alternate_wcs, TAN_GOLDEN, "alternate pixel-list TAN");
+    assert_astropy_golden(&alternate_wcs, &TAN_GOLDEN, "alternate pixel-list TAN");
 
     tab.set_internal("TCRVL2", "not numeric");
     assert!(matches!(
@@ -170,11 +170,11 @@ fn vector_cell_wcs_matches_the_equivalent_image_wcs() {
             lonpole: 180.0,
         }
     );
-    assert_astropy_golden(&inferred, TAN_GOLDEN, "alternate vector-cell TAN");
+    assert_astropy_golden(&inferred, &TAN_GOLDEN, "alternate vector-cell TAN");
 
     alternate.set_internal("WCAX5A", 2);
     let explicit = Wcs::from_array_column(&alternate, 5, Some('A')).unwrap();
-    assert_astropy_golden(&explicit, TAN_GOLDEN, "ranked alternate vector-cell TAN");
+    assert_astropy_golden(&explicit, &TAN_GOLDEN, "ranked alternate vector-cell TAN");
 
     tab.set_internal("1CRVL5", "not numeric");
     assert!(matches!(
@@ -219,11 +219,11 @@ fn table_wcs_parameter_aliases_match_astropy() {
     };
     for parameter in ["TPV3_1", "TV3_1"] {
         let wcs = pixel(parameter, false);
-        assert_astropy_golden(&wcs, CEA_GOLDEN, parameter);
+        assert_astropy_golden(&wcs, &CEA_GOLDEN, parameter);
     }
     for parameter in ["TPV3_1A", "TV3_1A"] {
         let wcs = pixel(parameter, true);
-        assert_astropy_golden(&wcs, CEA_GOLDEN, parameter);
+        assert_astropy_golden(&wcs, &CEA_GOLDEN, parameter);
     }
 
     let vector = |parameter: &str, alternate: bool| {
@@ -262,11 +262,11 @@ fn table_wcs_parameter_aliases_match_astropy() {
     };
     for parameter in ["2PV5_1", "2V5_1"] {
         let wcs = vector(parameter, false);
-        assert_astropy_golden(&wcs, CEA_GOLDEN, parameter);
+        assert_astropy_golden(&wcs, &CEA_GOLDEN, parameter);
     }
     for parameter in ["2PV5_1A", "2V5_1A"] {
         let wcs = vector(parameter, true);
-        assert_astropy_golden(&wcs, CEA_GOLDEN, parameter);
+        assert_astropy_golden(&wcs, &CEA_GOLDEN, parameter);
     }
 }
 
@@ -345,7 +345,7 @@ fn primary_table_wcs_rotation_matches_astropy() {
         .set_internal("TCDLT3", 0.0005);
     pixel.set_internal("TCROT3", 25.0);
     let pixel_wcs = Wcs::from_pixel_list(&pixel, &[2, 3], None).unwrap();
-    assert_astropy_golden(&pixel_wcs, CROTA_GOLDEN, "primary pixel-list CROTA");
+    assert_astropy_golden(&pixel_wcs, &CROTA_GOLDEN, "primary pixel-list CROTA");
 
     let mut vector = Header::new();
     vector.set_internal("WCAX5", 2);
@@ -366,7 +366,7 @@ fn primary_table_wcs_rotation_matches_astropy() {
         .set_internal("2CDLT5", 0.0005);
     vector.set_internal("2CROT5", 25.0);
     let vector_wcs = Wcs::from_array_column(&vector, 5, None).unwrap();
-    assert_astropy_golden(&vector_wcs, CROTA_GOLDEN, "primary vector-cell CROTA");
+    assert_astropy_golden(&vector_wcs, &CROTA_GOLDEN, "primary vector-cell CROTA");
 }
 
 #[test]

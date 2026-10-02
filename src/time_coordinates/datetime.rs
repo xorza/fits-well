@@ -82,20 +82,29 @@ impl Datetime {
     /// UTC leap-second labels remain valid FITS datetimes, but converting one to
     /// a continuous coordinate requires an external leap-second realization.
     pub fn to_jd(&self, scale: &TimeScale) -> Result<f64> {
+        Ok(self.day_start_jd(scale)? + self.day_fraction())
+    }
+
+    /// Modified Julian Date (`JD − 2400000.5`). The day's start is shifted before the
+    /// time of day is added, so the sum rounds at the MJD's own precision — 64 times
+    /// finer than a JD's in the present era.
+    pub fn to_mjd(&self, scale: &TimeScale) -> Result<f64> {
+        Ok((self.day_start_jd(scale)? - MJD0) + self.day_fraction())
+    }
+
+    /// The Julian Date at 0h of this date: a whole number and a half, exact in `f64`.
+    fn day_start_jd(&self, scale: &TimeScale) -> Result<f64> {
         self.validate(scale)?;
         if self.second >= 60.0 {
             return Err(FitsError::ExternalTimeDataRequired {
                 operation: "convert a UTC leap-second label to Julian Date",
             });
         }
-        let day_start = calendar_day_start(self.year, self.month, self.day);
-        let elapsed = self.hour as f64 * 3600.0 + self.minute as f64 * 60.0 + self.second;
-        Ok(day_start + elapsed / SEC_PER_DAY)
+        Ok(gregorian_to_jdn(self.year, self.month as i64, self.day as i64) as f64 - 0.5)
     }
 
-    /// Modified Julian Date (`JD − 2400000.5`).
-    pub fn to_mjd(&self, scale: &TimeScale) -> Result<f64> {
-        Ok(self.to_jd(scale)? - MJD0)
+    fn day_fraction(&self) -> f64 {
+        (self.hour as f64 * 3600.0 + self.minute as f64 * 60.0 + self.second) / SEC_PER_DAY
     }
 
     fn validate(&self, scale: &TimeScale) -> Result<()> {
@@ -145,12 +154,6 @@ fn parse_seconds(s: &str) -> Option<f64> {
     s.parse().ok()
 }
 
-fn calendar_day_start(year: i64, month: u32, day: u32) -> f64 {
-    gregorian_to_jdn(year, month as i64, day as i64) as f64 - 0.5
-}
-
-/// Julian Day Number at noon of a proleptic-Gregorian calendar date (the standard
-/// integer formula).
 /// Whether `year` is a leap year in the proleptic Gregorian calendar.
 fn is_leap_year(year: i64) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
@@ -167,6 +170,8 @@ fn days_in_month(year: i64, month: u32) -> u32 {
     }
 }
 
+/// Julian Day Number at noon of a proleptic-Gregorian calendar date (the standard
+/// integer formula).
 fn gregorian_to_jdn(year: i64, month: i64, day: i64) -> i64 {
     let a = (14 - month).div_euclid(12);
     let y = year + 4800 - a;

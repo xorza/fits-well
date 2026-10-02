@@ -21,16 +21,38 @@ fn reads_the_real_uv_random_groups() {
         ["UU--", "VV--", "WW--", "BASELINE", "DATE", "DATE"]
     );
 
-    // Each group yields PCOUNT params and an array of 12 elements.
+    // Group 0's stored f32s, scaled by PSCALn and offset by PZEROn: the u, v, w
+    // scale is 7.04218409114E-10, and DATE (index 4) adds PZERO5 = 2445728.5 to
+    // 0.2133636474609375 — exact in f64, whose step at 2^21 is 2^-31.
     let params = groups.parameters_physical(0).unwrap();
-    assert_eq!(params.len(), 6);
-    assert_eq!(groups.array_physical(0).unwrap().len(), 12);
-    // The DATE parameter (index 4) has PZERO5 = 2445728.5 (a Julian date), so
-    // its physical value lands in that range, not near zero.
-    assert!(
-        params[4] > 2_445_728.0 && params[4] < 2_445_730.0,
-        "DATE param = {}",
-        params[4]
+    assert_eq!(
+        params,
+        [
+            -11_642.337_890_625 * 7.042_184_091_14e-10,
+            17_055.679_687_5 * 7.042_184_091_14e-10,
+            -14_359.027_343_75 * 7.042_184_091_14e-10,
+            258.0,
+            2_445_728.5 + 0.213_363_647_460_937_5,
+            0.0,
+        ]
+    );
+    // BSCALE 1 and BZERO 0 leave the array as stored.
+    assert_eq!(
+        groups.array_physical(0).unwrap(),
+        [
+            12.430_867_195_129_395,
+            0.568_607_449_531_555_2,
+            3.999_938_726_425_171,
+            12.740_436_553_955_078,
+            0.313_985_109_329_223_63,
+            3.999_938_726_425_171,
+            0.0,
+            0.0,
+            3.999_938_726_425_171,
+            0.0,
+            0.0,
+            3.999_938_726_425_171,
+        ]
     );
     // §6.3: the two PTYPE='DATE' addends (indices 4, 5) sum to the logical DATE.
     assert_eq!(
