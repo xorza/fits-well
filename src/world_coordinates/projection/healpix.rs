@@ -1,4 +1,4 @@
-//! HEALPix projection from Calabretta & Roukema (2007).
+//! `HEALPix` projection from Calabretta & Roukema (2007).
 
 use crate::error::Result;
 use crate::world_coordinates::D2R;
@@ -31,7 +31,7 @@ impl Parameters {
             k_odd: (k.round() as i64).rem_euclid(2) != 0,
             equatorial_sine: (k - 1.0) / k,
             y_per_sine: 90.0 * k / h,
-            polar_y0: (k + 1.0) / 2.0,
+            polar_y0: f64::midpoint(k, 1.0),
             transition_y: 90.0 * (k - 1.0) / h,
             facet_half_width: 180.0 / h,
             facet_index_scale: h / 360.0,

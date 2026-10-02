@@ -4,7 +4,6 @@ use crate::compress::*;
 use crate::data::Image;
 use crate::data::image_data::ImageData;
 use crate::data::scaling::Scaling;
-use crate::error::FitsError;
 use crate::error::Ranked;
 use crate::header_model::value::Value;
 use crate::reader::FitsReader;
@@ -94,12 +93,12 @@ fn float_field() -> Vec<f32> {
 fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
     let mut f32_samples: Vec<f32> = float_field().into_iter().take(24).collect();
     f32_samples.extend(std::iter::repeat_n(42.25, 24));
-    let f64_samples = f32_samples.iter().map(|&value| value as f64).collect();
+    let f64_samples = f32_samples.iter().map(|&value| f64::from(value)).collect();
 
     for samples in [ImageData::F32(f32_samples), ImageData::F64(f64_samples)] {
         let bitpix = samples.bitpix();
         let expected_raw: Vec<f64> = match &samples {
-            ImageData::F32(values) => values.iter().map(|&value| value as f64).collect(),
+            ImageData::F32(values) => values.iter().map(|&value| f64::from(value)).collect(),
             ImageData::F64(values) => values.clone(),
             _ => unreachable!("float cases only"),
         };
@@ -185,14 +184,16 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
             // for f32, of storing the result — at most an ulp of the sample.
             let zscale = table.column_by_name("ZSCALE").unwrap().physical().unwrap()[0];
             let rounding = match bitpix {
-                Bitpix::F32 => f32::EPSILON as f64,
+                Bitpix::F32 => f64::from(f32::EPSILON),
                 _ => 4.0 * f64::EPSILON,
             };
             let back = r.read_image(1).unwrap();
             assert_eq!(back.scaling, image.scaling, "{bitpix:?} {cmptype}");
             let physical = back.physical();
             let actual_raw: Vec<f64> = match back.decode() {
-                ImageData::F32(values) => values.into_iter().map(|value| value as f64).collect(),
+                ImageData::F32(values) => {
+                    values.into_iter().map(|value| f64::from(value)).collect()
+                }
                 ImageData::F64(values) => values,
                 other => panic!("{cmptype}: expected {bitpix:?}, got {other:?}"),
             };
@@ -338,9 +339,9 @@ fn dither_option_sets_zquantiz_and_round_trips() {
         };
         assert_eq!(plane.len(), original.len(), "{dither:?}");
         for (index, (&o, &b)) in original.iter().zip(&plane).enumerate() {
-            let error = (o as f64 - b as f64).abs();
+            let error = (f64::from(o) - f64::from(b)).abs();
             assert!(
-                error <= 0.5 * zscale + f32::EPSILON as f64 * (o as f64).abs(),
+                error <= 0.5 * zscale + f64::from(f32::EPSILON) * f64::from(o).abs(),
                 "{dither:?} pixel {index}: {o} vs {b}"
             );
         }
@@ -416,9 +417,9 @@ fn float_write_preserves_nan_nulls() {
         } else {
             // Half a quantization step, plus an f32 ulp for the dither arithmetic
             // and the stored result.
-            let error = (o as f64 - b as f64).abs();
+            let error = (f64::from(o) - f64::from(b)).abs();
             assert!(
-                error <= 0.5 * zscale + f32::EPSILON as f64 * (o as f64).abs(),
+                error <= 0.5 * zscale + f64::from(f32::EPSILON) * f64::from(o).abs(),
                 "pixel {i}: {o} vs {b}"
             );
         }
@@ -486,7 +487,7 @@ fn hcompress_lossless_write_round_trips_exactly() {
     match reader.read_image(1).unwrap().decode() {
         ImageData::I32(actual) => assert_eq!(actual, samples),
         other => panic!("expected I32, got {other:?}"),
-    };
+    }
 
     let wide = vec![i32::MAX, i32::MAX, i32::MAX, i32::MAX];
     let image = Image::new(vec![2, 2], wide.clone()).unwrap();

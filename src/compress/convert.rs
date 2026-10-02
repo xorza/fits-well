@@ -105,9 +105,9 @@ pub(super) fn float_to_be_into(vals: &[f64], bitpix: FloatBitpix, out: &mut Vec<
 /// along in `decode_be_into`'s inlined, vectorizable per-chunk conversion.
 pub(super) fn be_to_i64_into(bytes: &[u8], bitpix: IntBitpix, out: &mut Vec<i64>) {
     match bitpix {
-        IntBitpix::U8 => endian::decode_be_into(bytes, out, |[b]| b as i64),
-        IntBitpix::I16 => endian::decode_be_into(bytes, out, |b| i16::from_be_bytes(b) as i64),
-        IntBitpix::I32 => endian::decode_be_into(bytes, out, |b| i32::from_be_bytes(b) as i64),
+        IntBitpix::U8 => endian::decode_be_into(bytes, out, |[b]| i64::from(b)),
+        IntBitpix::I16 => endian::decode_be_into(bytes, out, |b| i64::from(i16::from_be_bytes(b))),
+        IntBitpix::I32 => endian::decode_be_into(bytes, out, |b| i64::from(i32::from_be_bytes(b))),
         IntBitpix::I64 => endian::decode_be_into(bytes, out, i64::from_be_bytes),
     }
 }
@@ -116,7 +116,9 @@ pub(super) fn be_to_i64_into(bytes: &[u8], bitpix: IntBitpix, out: &mut Vec<i64>
 /// pass.
 pub(super) fn be_floats_into(bytes: &[u8], bitpix: FloatBitpix, out: &mut Vec<f64>) {
     match bitpix {
-        FloatBitpix::F32 => endian::decode_be_into(bytes, out, |b| f32::from_be_bytes(b) as f64),
+        FloatBitpix::F32 => {
+            endian::decode_be_into(bytes, out, |b| f64::from(f32::from_be_bytes(b)));
+        }
         FloatBitpix::F64 => endian::decode_be_into(bytes, out, f64::from_be_bytes),
     }
 }
@@ -154,7 +156,7 @@ pub(super) fn cell_to_f64_into(
     Ok(())
 }
 
-pub(super) fn byte_cell<'a>(cell: VlaCell<'a>) -> Result<&'a [u8]> {
+pub(super) fn byte_cell(cell: VlaCell<'_>) -> Result<&[u8]> {
     match cell.element_type {
         TformKind::Byte => Ok(cell.bytes),
         _ => Err(FitsError::CorruptCompressedData {
@@ -163,7 +165,7 @@ pub(super) fn byte_cell<'a>(cell: VlaCell<'a>) -> Result<&'a [u8]> {
     }
 }
 
-pub(super) fn plio_cell<'a>(cell: VlaCell<'a>) -> Result<&'a [u8]> {
+pub(super) fn plio_cell(cell: VlaCell<'_>) -> Result<&[u8]> {
     (cell.element_type == TformKind::I16)
         .then_some(cell.bytes)
         .ok_or_else(|| FitsError::CorruptCompressedData {

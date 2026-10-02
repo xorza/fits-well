@@ -111,9 +111,9 @@ fn read_i64_column(table: TableView<'_>, name: &str) -> Result<Option<Vec<i64>>>
         return Ok(None);
     };
     match data {
-        ColumnData::Bytes(v) => Ok(Some(v.iter().map(|&x| x as i64).collect())),
-        ColumnData::I16(v) => Ok(Some(v.iter().map(|&x| x as i64).collect())),
-        ColumnData::I32(v) => Ok(Some(v.iter().map(|&x| x as i64).collect())),
+        ColumnData::Bytes(v) => Ok(Some(v.iter().map(|&x| i64::from(x)).collect())),
+        ColumnData::I16(v) => Ok(Some(v.iter().map(|&x| i64::from(x)).collect())),
+        ColumnData::I32(v) => Ok(Some(v.iter().map(|&x| i64::from(x)).collect())),
         ColumnData::I64(v) => Ok(Some(v)),
         _ => Err(FitsError::TypeMismatch {
             name: name.to_string(),

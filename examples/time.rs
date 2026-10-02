@@ -22,7 +22,7 @@ fn main() -> fits_well::Result<()> {
         .set("BITPIX", 8)?
         .set("NAXIS", 0)?
         .set("DATE-OBS", "2024-03-14T15:09:26")?
-        .set("MJD-OBS", 60383.631551)?
+        .set("MJD-OBS", 60_383.631_551)?
         .set("TIMESYS", "UTC")?;
     let mut writer = FitsWriter::new(File::create(&path)?);
     writer.write_raw_hdu(&header, &[])?; // NAXIS=0 → header only, no data unit

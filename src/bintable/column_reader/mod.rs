@@ -190,14 +190,13 @@ impl<'a> ColumnReader<'a> {
     pub fn vla_bits(&self) -> Result<BitColumn<'a>> {
         let col = self.descriptor();
         match (col.tform.kind, col.tform.vla_elem) {
-            (TformKind::ArrayDesc32, Some(TformKind::Bit))
-            | (TformKind::ArrayDesc64, Some(TformKind::Bit)) => {}
+            (TformKind::ArrayDesc32 | TformKind::ArrayDesc64, Some(TformKind::Bit)) => {}
             _ => {
                 return Err(FitsError::NotABitColumn {
                     code: col.tform.kind.code(),
                 });
             }
-        };
+        }
         // Validate every row's heap span up front (no allocation) so [`BitColumn::row`]
         // can resolve a row lazily and infallibly — the only place an overrun surfaces.
         for r in 0..self.table.nrows {

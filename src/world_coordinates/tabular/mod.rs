@@ -117,21 +117,20 @@ pub(crate) fn descriptors(
             .get_text(key!("PS{}_2{suffix}", axis + 1).as_str())?
             .map(str::to_string);
 
-        let descriptor = match descriptors
+        let descriptor = if let Some(descriptor) = descriptors
             .iter_mut()
             .find(|descriptor| descriptor.reference.identifies_same_array(&reference))
         {
-            Some(descriptor) => descriptor,
-            None => {
-                descriptors.push(TabularDescriptor {
-                    reference,
-                    axes: Vec::new(),
-                    reference_indices: Vec::new(),
-                    index_columns: Vec::new(),
-                    world_scales: Vec::new(),
-                });
-                descriptors.last_mut().unwrap()
-            }
+            descriptor
+        } else {
+            descriptors.push(TabularDescriptor {
+                reference,
+                axes: Vec::new(),
+                reference_indices: Vec::new(),
+                index_columns: Vec::new(),
+                world_scales: Vec::new(),
+            });
+            descriptors.last_mut().unwrap()
         };
         let required_len = table_axis
             .checked_add(1)

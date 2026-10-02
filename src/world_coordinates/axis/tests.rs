@@ -1,4 +1,3 @@
-use crate::error::FitsError;
 use crate::header_model::Header;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::axis::spectral_kind::{
@@ -485,12 +484,12 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
         .set_internal("CRVAL1", 1.0);
     assert!(matches!(
         Wcs::from_header(&invalid, None),
-        Err(crate::error::FitsError::InvalidUnit { unit, expected: "a length unit" }) if unit == "Hz"
+        Err(FitsError::InvalidUnit { unit, expected: "a length unit" }) if unit == "Hz"
     ));
     invalid.set_internal("CUNIT1", "qHz");
     assert!(matches!(
         Wcs::from_header(&invalid, None),
-        Err(crate::error::FitsError::InvalidUnit { unit, .. }) if unit == "qHz"
+        Err(FitsError::InvalidUnit { unit, .. }) if unit == "qHz"
     ));
 }
 

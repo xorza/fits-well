@@ -27,7 +27,7 @@ fn decodes_fixed_width_columns_from_hand_built_data() {
         schema
             .columns
             .iter()
-            .map(|c| c.byte_offset())
+            .map(super::super::column::Column::byte_offset)
             .collect::<Vec<_>>(),
         vec![0, 4, 12]
     );

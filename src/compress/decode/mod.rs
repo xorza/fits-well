@@ -39,12 +39,8 @@ const DECODE_WAVE_BYTES: usize = 4 * 1024 * 1024;
 /// wave's *narrowed* per-tile vectors hold rather than the wide plane they decode in.
 #[cfg(feature = "parallel")]
 pub(super) fn decode_wave_tile_count<D>(geom: &TileGeometry) -> usize {
-    let payload_bytes = geom
-        .max_tile_elements()
-        .saturating_mul(std::mem::size_of::<D>());
-    let retained_bytes = payload_bytes
-        .saturating_add(std::mem::size_of::<Vec<D>>())
-        .max(1);
+    let payload_bytes = geom.max_tile_elements().saturating_mul(size_of::<D>());
+    let retained_bytes = payload_bytes.saturating_add(size_of::<Vec<D>>()).max(1);
     (DECODE_WAVE_BYTES / retained_bytes).max(1)
 }
 

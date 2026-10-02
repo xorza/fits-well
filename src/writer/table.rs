@@ -195,7 +195,7 @@ impl WriteColumn {
             WriteColumnData::Fixed { .. } | WriteColumnData::Bits { .. } => {
                 panic!("only a variable-length column takes `Q` descriptors")
             }
-        };
+        }
         self
     }
 
@@ -424,7 +424,7 @@ fn bintable_header(
             header.set_internal(key!("TUNIT{n}").as_str(), unit.as_str());
         }
         if let Some(shape) = &col.tdim {
-            let dims: Vec<String> = shape.iter().map(|d| d.to_string()).collect();
+            let dims: Vec<String> = shape.iter().map(ToString::to_string).collect();
             header.set_internal(key!("TDIM{n}").as_str(), format!("({})", dims.join(",")));
         }
         if let Some(tscale) = col.tscale {

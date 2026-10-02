@@ -139,7 +139,7 @@ impl ColMeta {
         self.vla_elem.unwrap_or(self.kind)
     }
 
-    /// GZIP_2 byte-shuffle width: the element size for the multi-byte numeric
+    /// `GZIP_2` byte-shuffle width: the element size for the multi-byte numeric
     /// types cfitsio shuffles (`I`/`J`/`E`/`K`/`D`), else 1 (no shuffle).
     fn shuffle_width(&self) -> usize {
         match self.compression_kind() {

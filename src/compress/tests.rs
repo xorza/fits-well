@@ -1,4 +1,3 @@
-use crate::compress;
 use crate::compress::*;
 
 #[test]
@@ -27,10 +26,10 @@ fn typed_compression_configuration_rejects_impossible_values() {
 
 #[test]
 fn compression_parameter_indices_use_the_standard_canonical_form() {
-    assert_eq!(compress::parameter_index("ZNAME1"), Some(1));
-    assert_eq!(compress::parameter_index("ZNAME999"), Some(999));
+    assert_eq!(parameter_index("ZNAME1"), Some(1));
+    assert_eq!(parameter_index("ZNAME999"), Some(999));
     for keyword in ["ZNAME", "ZNAME0", "ZNAME01", "ZNAME1000", "ZNAMEA"] {
-        assert_eq!(compress::parameter_index(keyword), None, "{keyword}");
+        assert_eq!(parameter_index(keyword), None, "{keyword}");
     }
 }
 

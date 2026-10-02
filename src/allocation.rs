@@ -1,7 +1,5 @@
 //! Fallible allocation for buffers sized directly from untrusted FITS metadata.
 
-use std::mem::size_of;
-
 use crate::error::FitsError;
 use crate::error::Result;
 

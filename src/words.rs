@@ -45,7 +45,7 @@ pub(crate) unsafe fn samples<T: Sample>(words: &[u64], count: usize) -> &[T] {
     // SAFETY: `u64` storage is 8-aligned, which satisfies every `Sample`; the caller
     // guarantees the `count` elements are initialized; `Sample` has no invalid bit
     // patterns, so every one of them is a valid `T`.
-    unsafe { std::slice::from_raw_parts(words.as_ptr() as *const T, count) }
+    unsafe { std::slice::from_raw_parts(words.as_ptr().cast::<T>(), count) }
 }
 
 /// The [`samples`] view as a mutable slice, for a decode that writes through it.
@@ -62,7 +62,7 @@ pub(crate) unsafe fn samples_mut<T: Sample>(words: &mut [u64], count: usize) -> 
     );
     // SAFETY: as `samples`, plus the buffer is uniquely borrowed for the returned
     // slice's lifetime, so no other view of these bytes can exist.
-    unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr() as *mut T, count) }
+    unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<T>(), count) }
 }
 
 /// Whether `count` elements of `elem_size` bytes fit `words` `u64`s.

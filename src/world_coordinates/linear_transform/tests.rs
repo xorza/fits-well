@@ -1,12 +1,9 @@
-use crate::error::FitsError;
-use crate::header_model::Header;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::internals::CROTA_GOLDEN;
 use crate::world_coordinates::internals::assert_astropy_golden;
 use crate::world_coordinates::internals::celestial_header;
 use crate::world_coordinates::linear_transform::internals as linear;
 use crate::world_coordinates::linear_transform::*;
-use crate::world_coordinates::wcs_axis::WcsAxis;
 
 /// A transform built straight from a matrix, skipping the header read. The
 /// inverse is still computed here, so the fixture obeys the same invariant a

@@ -69,7 +69,7 @@ pub enum Projection {
     Csc,
     /// `QSC` — quadrilateralized spherical cube.
     Qsc,
-    /// `HPX` — HEALPix (`H = PVi_1`, `K = PVi_2`).
+    /// `HPX` — `HEALPix` (`H = PVi_1`, `K = PVi_2`).
     Hpx,
 }
 
@@ -89,7 +89,7 @@ enum Kind {
     Equatorial(Equatorial),
     /// `θ₀ = 0°` — the spherical cubes.
     Cube(Cube),
-    /// `θ₀ = 0°` — HEALPix.
+    /// `θ₀ = 0°` — `HEALPix`.
     Healpix,
 }
 
@@ -330,7 +330,7 @@ impl ZpnBranch {
             .map_or(PI, |above| {
                 let (mut low, mut high) = (above - D2R, above);
                 while high - low > f64::EPSILON * high {
-                    let middle = 0.5 * (low + high);
+                    let middle = f64::midpoint(low, high);
                     if derivative(middle) > 0.0 {
                         low = middle;
                     } else {
@@ -987,7 +987,7 @@ impl ConicConstants {
                 (c, R2D * cos_eta * cot_theta_a, 0.0)
             }
             Conic::Coe => {
-                let c = (sin_theta1 + sin_theta2) / 2.0;
+                let c = f64::midpoint(sin_theta1, sin_theta2);
                 let y0 = R2D / c
                     * (1.0 + sin_theta1 * sin_theta2 - 2.0 * c * theta_a.sin())
                         .max(0.0)

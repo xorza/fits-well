@@ -21,15 +21,15 @@ fn iso_to_jd_and_mjd_match_astropy() {
     // would end at 60369.27101273136, nine ulps short.
     let fraction = 23_415.5 / 86_400.0;
     let cases: &[(&str, f64, f64)] = &[
-        ("2000-01-01T12:00:00", 2451545.0, 51544.5),
-        ("1858-11-17T00:00:00", 2400000.5, 0.0),
+        ("2000-01-01T12:00:00", 2_451_545.0, 51544.5),
+        ("1858-11-17T00:00:00", 2_400_000.5, 0.0),
         (
             "2024-02-29T06:30:15.5",
-            2460369.5 + fraction,
+            2_460_369.5 + fraction,
             60369.0 + fraction,
         ),
-        ("1900-01-01T00:00:00", 2415020.5, 15020.0),
-        ("2024-06-01", 2460462.5, 60462.0), // date-only ⇒ midnight
+        ("1900-01-01T00:00:00", 2_415_020.5, 15020.0),
+        ("2024-06-01", 2_460_462.5, 60462.0), // date-only ⇒ midnight
     ];
     for &(s, jd, mjd) in cases {
         let d = Datetime::parse(s).unwrap();
@@ -53,7 +53,7 @@ fn rejects_malformed_datetimes() {
         assert!(Datetime::parse(s).is_err(), "{s:?} should be rejected");
     }
 
-    let mut header = crate::header_model::Header::new();
+    let mut header = Header::new();
     header.set_internal("DATE-OBS", "2024-13-01");
     assert!(matches!(
         TimeCoordinate::observation(&header),
@@ -99,7 +99,7 @@ fn iso_8601_strictness() {
         );
     }
     let mut outside_fits_range = Datetime::parse("+99999-12-31").unwrap();
-    outside_fits_range.year = 100000;
+    outside_fits_range.year = 100_000;
     assert!(
         outside_fits_range
             .to_jd(&TimeScale::known(TimeScaleKind::Tt))
@@ -381,7 +381,7 @@ fn numeric_epochs_match_astropy() {
     // astropy's JDs less 2400000.5; each is the f64 nearest its decimal.
     let cases: &[(Epoch, f64)] = &[
         (Epoch::Julian(2000.0), 51544.5),
-        (Epoch::Besselian(1950.0), 33281.92345905),
+        (Epoch::Besselian(1950.0), 33_281.923_459_05),
         (Epoch::Julian(2015.5), 57205.875),
         (Epoch::Besselian(1900.0), 15019.81352),
     ];
@@ -685,7 +685,7 @@ fn time_scale_preserves_realizations_and_local_names() {
         );
     }
 
-    let mut unknown = crate::header_model::Header::new();
+    let mut unknown = Header::new();
     unknown.set_internal("TIMESYS", "BOGUS");
     assert_eq!(
         FitsTime::from_header(&unknown).unwrap().scale,

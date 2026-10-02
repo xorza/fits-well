@@ -226,7 +226,7 @@ impl<'a> AsciiField<'a> {
 
 /// Render row `row` of `col` and validate it: width, restricted ASCII, and that a
 /// genuine value does not collide with the column's null marker.
-fn ascii_field<'a>(col: &'a AsciiWriteColumn, row: usize) -> Result<AsciiField<'a>> {
+fn ascii_field(col: &AsciiWriteColumn, row: usize) -> Result<AsciiField<'_>> {
     let field = match &col.data {
         AsciiColumnData::Text(values) => match values.get(row) {
             Some(value) => AsciiField::value(Cow::Borrowed(value), true),

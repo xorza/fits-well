@@ -6,7 +6,7 @@ use crate::block::padded_len;
 use crate::block::{BLOCK_SIZE, CARD_SIZE, SPACE_FILL, ZERO_FILL};
 use crate::checksum;
 #[cfg(feature = "compression")]
-use crate::compress::{Compression, CompressionOptions};
+use crate::compress::{Compression, CompressionOptions, Hcompress};
 use crate::data::Image;
 use crate::data::image_data::ImageData;
 use crate::data::scaling::Scaling;
@@ -950,8 +950,8 @@ fn binary_metadata_is_validated_for_every_fixed_and_vla_stored_type() {
 struct NullBoundary {
     /// One stored zero of the column's integer type.
     zero: ColumnData,
-    valid: &'static [i64],
-    invalid: &'static [i64],
+    valid: Vec<i64>,
+    invalid: Vec<i64>,
 }
 
 fn integer_column(zero: &ColumnData, vla: bool) -> WriteColumn {
@@ -967,33 +967,33 @@ fn binary_tnull_is_range_checked_for_fixed_and_vla_integer_types() {
     let boundaries = [
         NullBoundary {
             zero: ColumnData::Bytes(vec![0]),
-            valid: &[0, u8::MAX as i64],
-            invalid: &[-1, u8::MAX as i64 + 1],
+            valid: vec![0, i64::from(u8::MAX)],
+            invalid: vec![-1, i64::from(u8::MAX) + 1],
         },
         NullBoundary {
             zero: ColumnData::I16(vec![0]),
-            valid: &[i16::MIN as i64, i16::MAX as i64],
-            invalid: &[i16::MIN as i64 - 1, i16::MAX as i64 + 1],
+            valid: vec![i64::from(i16::MIN), i64::from(i16::MAX)],
+            invalid: vec![i64::from(i16::MIN) - 1, i64::from(i16::MAX) + 1],
         },
         NullBoundary {
             zero: ColumnData::I32(vec![0]),
-            valid: &[i32::MIN as i64, i32::MAX as i64],
-            invalid: &[i32::MIN as i64 - 1, i32::MAX as i64 + 1],
+            valid: vec![i64::from(i32::MIN), i64::from(i32::MAX)],
+            invalid: vec![i64::from(i32::MIN) - 1, i64::from(i32::MAX) + 1],
         },
         NullBoundary {
             zero: ColumnData::I64(vec![0]),
-            valid: &[i64::MIN, i64::MAX],
-            invalid: &[],
+            valid: vec![i64::MIN, i64::MAX],
+            invalid: vec![],
         },
     ];
     for boundary in boundaries {
         for vla in [false, true] {
-            for &tnull in boundary.valid {
+            for &tnull in &boundary.valid {
                 let header =
                     written_table_header(integer_column(&boundary.zero, vla).with_null(tnull));
                 assert_eq!(header.get_integer("TNULL1").unwrap(), Some(tnull));
             }
-            for &tnull in boundary.invalid {
+            for &tnull in &boundary.invalid {
                 assert_table_column_rejected(
                     integer_column(&boundary.zero, vla).with_null(tnull),
                     "TNULLn",
@@ -1507,8 +1507,8 @@ fn raw_hdu_validates_the_complete_unit_before_output() {
 #[derive(Debug)]
 struct ImageBlankBoundary {
     samples: ImageData,
-    valid: &'static [i64],
-    invalid: &'static [i64],
+    valid: Vec<i64>,
+    invalid: Vec<i64>,
 }
 
 #[test]
@@ -1516,37 +1516,37 @@ fn image_blank_is_type_and_range_checked_before_output() {
     let boundaries = [
         ImageBlankBoundary {
             samples: ImageData::U8(vec![0]),
-            valid: &[0, u8::MAX as i64],
-            invalid: &[-1, u8::MAX as i64 + 1],
+            valid: vec![0, i64::from(u8::MAX)],
+            invalid: vec![-1, i64::from(u8::MAX) + 1],
         },
         ImageBlankBoundary {
             samples: ImageData::I16(vec![0]),
-            valid: &[i16::MIN as i64, i16::MAX as i64],
-            invalid: &[i16::MIN as i64 - 1, i16::MAX as i64 + 1],
+            valid: vec![i64::from(i16::MIN), i64::from(i16::MAX)],
+            invalid: vec![i64::from(i16::MIN) - 1, i64::from(i16::MAX) + 1],
         },
         ImageBlankBoundary {
             samples: ImageData::I32(vec![0]),
-            valid: &[i32::MIN as i64, i32::MAX as i64],
-            invalid: &[i32::MIN as i64 - 1, i32::MAX as i64 + 1],
+            valid: vec![i64::from(i32::MIN), i64::from(i32::MAX)],
+            invalid: vec![i64::from(i32::MIN) - 1, i64::from(i32::MAX) + 1],
         },
         ImageBlankBoundary {
             samples: ImageData::I64(vec![0]),
-            valid: &[i64::MIN, i64::MAX],
-            invalid: &[],
+            valid: vec![i64::MIN, i64::MAX],
+            invalid: vec![],
         },
         ImageBlankBoundary {
             samples: ImageData::F32(vec![0.0]),
-            valid: &[],
-            invalid: &[0],
+            valid: vec![],
+            invalid: vec![0],
         },
         ImageBlankBoundary {
             samples: ImageData::F64(vec![0.0]),
-            valid: &[],
-            invalid: &[0],
+            valid: vec![],
+            invalid: vec![0],
         },
     ];
     for boundary in boundaries {
-        for &blank in boundary.valid {
+        for &blank in &boundary.valid {
             let image = Image {
                 shape: vec![1],
                 samples: boundary.samples.clone(),
@@ -1563,7 +1563,7 @@ fn image_blank_is_type_and_range_checked_before_output() {
             );
             assert_eq!(reader.read_image(0).unwrap().scaling.blank, Some(blank));
         }
-        for &blank in boundary.invalid {
+        for &blank in &boundary.invalid {
             let image = Image {
                 shape: vec![1],
                 samples: boundary.samples.clone(),
@@ -1674,7 +1674,7 @@ fn compressed_image_metadata_is_validated_before_automatic_primary() {
     writer
         .write_compressed_image(
             &image,
-            Compression::Hcompress(Default::default()),
+            Compression::Hcompress(Hcompress::default()),
             &CompressionOptions::tiled([1, 1]),
             None,
         )
@@ -1850,7 +1850,7 @@ fn streaming_image_matches_transactional_output_and_checksums() {
     let scaling = Scaling {
         bscale: 2.5,
         bzero: -10.0,
-        blank: Some(i16::MIN as i64),
+        blank: Some(i64::from(i16::MIN)),
     };
     let image = Image::new_scaled(vec![3, 2], samples.clone(), scaling).unwrap();
     let mut template = Header::new();

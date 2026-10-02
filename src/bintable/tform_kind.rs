@@ -203,18 +203,18 @@ impl TformKind {
             }
         };
         Ok(match self {
-            TformKind::Byte => decode_be_cells(cells, capacity, |[x]| scaled_int(x as i64)),
+            TformKind::Byte => decode_be_cells(cells, capacity, |[x]| scaled_int(i64::from(x))),
             TformKind::I16 => decode_be_cells(cells, capacity, |bytes| {
-                scaled_int(i16::from_be_bytes(bytes) as i64)
+                scaled_int(i64::from(i16::from_be_bytes(bytes)))
             }),
             TformKind::I32 => decode_be_cells(cells, capacity, |bytes| {
-                scaled_int(i32::from_be_bytes(bytes) as i64)
+                scaled_int(i64::from(i32::from_be_bytes(bytes)))
             }),
             TformKind::I64 => decode_be_cells(cells, capacity, |bytes| {
                 scaled_int(i64::from_be_bytes(bytes))
             }),
             TformKind::F32 => decode_be_cells(cells, capacity, |bytes| {
-                scale(f32::from_be_bytes(bytes) as f64)
+                scale(f64::from(f32::from_be_bytes(bytes)))
             }),
             TformKind::F64 => {
                 decode_be_cells(cells, capacity, |bytes| scale(f64::from_be_bytes(bytes)))
@@ -239,8 +239,8 @@ impl TformKind {
         match self {
             TformKind::ComplexF32 => Ok(decode_be_cells(cells, capacity, |bytes: [u8; 8]| {
                 scale(
-                    f32::from_be_bytes(bytes[..4].try_into().unwrap()) as f64,
-                    f32::from_be_bytes(bytes[4..].try_into().unwrap()) as f64,
+                    f64::from(f32::from_be_bytes(bytes[..4].try_into().unwrap())),
+                    f64::from(f32::from_be_bytes(bytes[4..].try_into().unwrap())),
                 )
             })),
             TformKind::ComplexF64 => Ok(decode_be_cells(cells, capacity, |bytes: [u8; 16]| {

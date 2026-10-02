@@ -305,34 +305,34 @@ fn csc_inverse(x: f64, y: f64) -> FaceRatios {
 }
 
 fn csc_inverse_polynomial(primary: f32, secondary: f32) -> f32 {
-    const P00: f32 = -0.27292696;
-    const P10: f32 = -0.07629969;
-    const P20: f32 = -0.22797056;
-    const P30: f32 = 0.54852384;
-    const P40: f32 = -0.62930065;
-    const P50: f32 = 0.25795794;
-    const P60: f32 = 0.02584375;
-    const P01: f32 = -0.02819452;
-    const P11: f32 = -0.01471565;
+    const P00: f32 = -0.272_926_96;
+    const P10: f32 = -0.076_299_69;
+    const P20: f32 = -0.227_970_56;
+    const P30: f32 = 0.548_523_84;
+    const P40: f32 = -0.629_300_65;
+    const P50: f32 = 0.257_957_94;
+    const P60: f32 = 0.025_843_75;
+    const P01: f32 = -0.028_194_52;
+    const P11: f32 = -0.014_715_65;
     const P21: f32 = 0.480_515_1;
-    const P31: f32 = -1.7411445;
-    const P41: f32 = 1.7154751;
-    const P51: f32 = -0.53022337;
-    const P02: f32 = 0.2705816;
-    const P12: f32 = -0.5680094;
-    const P22: f32 = 0.30803317;
-    const P32: f32 = 0.989381;
-    const P42: f32 = -0.8318047;
-    const P03: f32 = -0.6044156;
-    const P13: f32 = 1.5088009;
-    const P23: f32 = -0.93678576;
-    const P33: f32 = 0.08693841;
-    const P04: f32 = 0.9341208;
-    const P14: f32 = -1.4160192;
-    const P24: f32 = 0.33887446;
-    const P05: f32 = -0.63915306;
-    const P15: f32 = 0.5203224;
-    const P06: f32 = 0.14381585;
+    const P31: f32 = -1.741_144_5;
+    const P41: f32 = 1.715_475_1;
+    const P51: f32 = -0.530_223_37;
+    const P02: f32 = 0.270_581_6;
+    const P12: f32 = -0.568_009_4;
+    const P22: f32 = 0.308_033_17;
+    const P32: f32 = 0.989_381;
+    const P42: f32 = -0.831_804_7;
+    const P03: f32 = -0.604_415_6;
+    const P13: f32 = 1.508_800_9;
+    const P23: f32 = -0.936_785_76;
+    const P33: f32 = 0.086_938_41;
+    const P04: f32 = 0.934_120_8;
+    const P14: f32 = -1.416_019_2;
+    const P24: f32 = 0.338_874_46;
+    const P05: f32 = -0.639_153_06;
+    const P15: f32 = 0.520_322_4;
+    const P06: f32 = 0.143_815_85;
 
     let z0 = P00
         + primary
@@ -352,18 +352,18 @@ fn csc_inverse_polynomial(primary: f32, secondary: f32) -> f32 {
 }
 
 fn csc_forward_axis(primary: f32, secondary: f32) -> f32 {
-    const GSTAR: f32 = 1.3748485;
-    const M: f32 = 0.004869492;
-    const GAMMA: f32 = -0.13161671;
-    const OMEGA1: f32 = -0.15959623;
-    const D0: f32 = 0.07591962;
-    const D1: f32 = -0.02177625;
-    const C00: f32 = 0.14118963;
-    const C10: f32 = 0.08097013;
-    const C01: f32 = -0.28152853;
-    const C11: f32 = 0.15384112;
-    const C20: f32 = -0.1782512;
-    const C02: f32 = 0.10695947;
+    const GSTAR: f32 = 1.374_848_5;
+    const M: f32 = 0.004_869_492;
+    const GAMMA: f32 = -0.131_616_71;
+    const OMEGA1: f32 = -0.159_596_23;
+    const D0: f32 = 0.075_919_62;
+    const D1: f32 = -0.021_776_25;
+    const C00: f32 = 0.141_189_63;
+    const C10: f32 = 0.080_970_13;
+    const C01: f32 = -0.281_528_53;
+    const C11: f32 = 0.153_841_12;
+    const C20: f32 = -0.178_251_2;
+    const C02: f32 = 0.106_959_47;
 
     let p2 = primary * primary;
     let s2 = secondary * secondary;
@@ -509,13 +509,13 @@ fn qsc_forward(face: FaceDirection, theta: f64) -> FaceCoordinate {
 fn qsc_small_angle_zeco(face: FaceDirection, theta: f64) -> f64 {
     let longitude = face.direction.m.atan2(face.direction.l);
     match face.face {
-        CubeFace::Front => (longitude * longitude + (theta * D2R).powi(2)) / 2.0,
-        CubeFace::Right => ((longitude - PI / 2.0).powi(2) + (theta * D2R).powi(2)) / 2.0,
+        CubeFace::Front => f64::midpoint(longitude * longitude, (theta * D2R).powi(2)),
+        CubeFace::Right => f64::midpoint((longitude - PI / 2.0).powi(2), (theta * D2R).powi(2)),
         CubeFace::Back => {
             let offset = longitude - PI.copysign(longitude);
-            (offset * offset + (theta * D2R).powi(2)) / 2.0
+            f64::midpoint(offset * offset, (theta * D2R).powi(2))
         }
-        CubeFace::Left => ((longitude + PI / 2.0).powi(2) + (theta * D2R).powi(2)) / 2.0,
+        CubeFace::Left => f64::midpoint((longitude + PI / 2.0).powi(2), (theta * D2R).powi(2)),
         CubeFace::South => ((theta + 90.0) * D2R).powi(2) / 2.0,
         CubeFace::North => ((90.0 - theta) * D2R).powi(2) / 2.0,
     }

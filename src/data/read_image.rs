@@ -40,7 +40,7 @@ enum ImageBytes<'a> {
     Raw { bytes: &'a [u8], bitpix: Bitpix },
     /// Compressed image (`ZIMAGE`): pixels reconstructed into an owned, host-endian
     /// buffer (only the `compression` feature ever builds this).
-    #[cfg_attr(not(feature = "compression"), allow(dead_code))]
+    #[cfg_attr(not(feature = "compression"), expect(dead_code))]
     Decoded(ImageData),
 }
 

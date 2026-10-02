@@ -11,8 +11,6 @@ use crate::compress::tile_geometry::TileGeometry;
 use crate::compress::*;
 use crate::data::Image;
 use crate::data::image_data::ImageData;
-use crate::error::FitsError;
-use crate::error::Result;
 use crate::hdu::HduKind;
 use crate::hdu::HduRole;
 use crate::hdu::image_geometry::ImageGeometry;

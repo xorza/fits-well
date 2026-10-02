@@ -123,7 +123,13 @@ impl<'a> NullMask<'a> {
                 &mut scratch.gzip,
             )?,
             ImageCodec::Rice1 => {
-                rice::rice_decode_into(cell.bytes, tile_elems, IntBitpix::U8, rice::BLOCKSIZE, out)?
+                rice::rice_decode_into(
+                    cell.bytes,
+                    tile_elems,
+                    IntBitpix::U8,
+                    rice::BLOCKSIZE,
+                    out,
+                )?;
             }
             ImageCodec::Plio1 => plio::plio_decode_be_into(cell.bytes, tile_elems, out)?,
             ImageCodec::NoCompress => {
@@ -134,7 +140,7 @@ impl<'a> NullMask<'a> {
                     });
                 }
                 out.clear();
-                out.extend(cell.bytes.iter().map(|&value| value as i64));
+                out.extend(cell.bytes.iter().map(|&value| i64::from(value)));
             }
             ImageCodec::Hcompress1 => unreachable!("rejected while building the decode plan"),
         }

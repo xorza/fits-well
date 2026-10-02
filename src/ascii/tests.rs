@@ -185,7 +185,7 @@ fn signed_exponent_without_letter_parses_as_fortran_real() {
     let exact = |got: Option<f64>, want: f64| {
         assert_eq!(got.expect("should parse").to_bits(), want.to_bits());
     };
-    exact(parse_ascii_float("3.14159-2", 5), 0.0314159);
+    exact(parse_ascii_float("3.14159-2", 5), 0.031_415_9);
     exact(parse_ascii_float("2.5+3", 1), 2500.0);
     exact(parse_ascii_float("-3.0-1", 1), -0.3);
     // The leading mantissa sign is NOT an exponent; implicit decimal still applies.
@@ -225,7 +225,7 @@ fn reads_a_column_with_a_bare_sign_exponent_field() {
     let table = AsciiTable::from_data(&header, data).unwrap();
     match table.column_by_idx(0).unwrap().raw().unwrap() {
         AsciiColumnData::Float(values) => {
-            assert_eq!(values, [Some(0.0314159)]);
+            assert_eq!(values, [Some(0.031_415_9)]);
         }
         other => panic!("expected Float, got {other:?}"),
     }

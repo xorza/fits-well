@@ -92,7 +92,10 @@ pub(crate) fn physical_view<O: PhysicalOut>(view: ImageView<'_>, scaling: &Scali
         ImageView::I16(v) => scale_ints(v, scaling),
         ImageView::I32(v) => scale_ints(v, scaling),
         ImageView::I64(v) => scale_ints(v, scaling),
-        ImageView::F32(v) => v.iter().map(|&x| O::scaled(x as f64, scaling)).collect(),
+        ImageView::F32(v) => v
+            .iter()
+            .map(|&x| O::scaled(f64::from(x), scaling))
+            .collect(),
         ImageView::F64(v) => v.iter().map(|&x| O::scaled(x, scaling)).collect(),
     }
 }
@@ -112,16 +115,18 @@ fn physical_from_be<O: PhysicalOut>(bytes: &[u8], bitpix: Bitpix, scaling: &Scal
     match bitpix {
         Bitpix::U8 => bytes
             .iter()
-            .map(|&x| O::scaled_integer(x as i64, scaling))
+            .map(|&x| O::scaled_integer(i64::from(x), scaling))
             .collect(),
         Bitpix::I16 => decode_be(bytes, |b| {
-            O::scaled_integer(i16::from_be_bytes(b) as i64, scaling)
+            O::scaled_integer(i64::from(i16::from_be_bytes(b)), scaling)
         }),
         Bitpix::I32 => decode_be(bytes, |b| {
-            O::scaled_integer(i32::from_be_bytes(b) as i64, scaling)
+            O::scaled_integer(i64::from(i32::from_be_bytes(b)), scaling)
         }),
         Bitpix::I64 => decode_be(bytes, |b| O::scaled_integer(i64::from_be_bytes(b), scaling)),
-        Bitpix::F32 => decode_be(bytes, |b| O::scaled(f32::from_be_bytes(b) as f64, scaling)),
+        Bitpix::F32 => decode_be(bytes, |b| {
+            O::scaled(f64::from(f32::from_be_bytes(b)), scaling)
+        }),
         Bitpix::F64 => decode_be(bytes, |b| O::scaled(f64::from_be_bytes(b), scaling)),
     }
 }
@@ -150,19 +155,19 @@ pub(crate) fn swap_into_words(src: &[u8], bitpix: Bitpix, words: &mut Vec<u64>) 
     unsafe {
         match bitpix {
             Bitpix::I16 => {
-                decode_be_into_slice(src, words::samples_mut(words, count), i16::from_be_bytes)
+                decode_be_into_slice(src, words::samples_mut(words, count), i16::from_be_bytes);
             }
             Bitpix::I32 => {
-                decode_be_into_slice(src, words::samples_mut(words, count), i32::from_be_bytes)
+                decode_be_into_slice(src, words::samples_mut(words, count), i32::from_be_bytes);
             }
             Bitpix::I64 => {
-                decode_be_into_slice(src, words::samples_mut(words, count), i64::from_be_bytes)
+                decode_be_into_slice(src, words::samples_mut(words, count), i64::from_be_bytes);
             }
             Bitpix::F32 => {
-                decode_be_into_slice(src, words::samples_mut(words, count), f32::from_be_bytes)
+                decode_be_into_slice(src, words::samples_mut(words, count), f32::from_be_bytes);
             }
             Bitpix::F64 => {
-                decode_be_into_slice(src, words::samples_mut(words, count), f64::from_be_bytes)
+                decode_be_into_slice(src, words::samples_mut(words, count), f64::from_be_bytes);
             }
             Bitpix::U8 => unreachable!("U8 is handled by the caller, never swapped"),
         }
