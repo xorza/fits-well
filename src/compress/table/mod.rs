@@ -26,8 +26,8 @@ use crate::error::Result;
 use crate::hdu::validate_table_field_count;
 use crate::header_model::Header;
 use crate::header_model::value;
-use crate::keyword;
 use crate::keyword::key;
+use crate::reserved_keywords;
 
 /// Per-column compression algorithm (`ZCTYPn`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,11 +352,7 @@ pub(crate) fn compress_table(
 
     // Header: copy the original, then layer on the Z* keywords.
     let mut h = header.clone();
-    h.rename_keywords(&[
-        ("THEAP", "ZTHEAP"),
-        ("CHECKSUM", "ZHECKSUM"),
-        ("DATASUM", "ZDATASUM"),
-    ]);
+    h.rename_keywords(&reserved_keywords::TABLE_PRESERVED);
     h.set_internal("ZTABLE", true)
         .comment_internal("ZTABLE", "this is a compressed table");
     h.set_internal("ZTILELEN", value::fits_i64(rpt)?);
@@ -545,33 +541,20 @@ pub(crate) fn uncompress_table(header: &Header, table: TableView<'_>) -> Result<
     for (n, zform) in zforms.iter().enumerate() {
         h.set_internal(key!("TFORM{}", n + 1).as_str(), zform.clone());
     }
+    // The container's own heap pointer and checksums give way to the table's.
     h.remove_where(|keyword| {
-        matches!(
-            keyword,
-            "ZTABLE"
-                | "ZTILELEN"
-                | "ZNAXIS1"
-                | "ZNAXIS2"
-                | "ZPCOUNT"
-                | "THEAP"
-                | "CHECKSUM"
-                | "DATASUM"
-        ) || indexed_compression_key(keyword, "ZFORM", ncols)
-            || indexed_compression_key(keyword, "ZCTYP", ncols)
+        reserved_keywords::is_table_compression(keyword, ncols)
+            || reserved_keywords::TABLE_PRESERVED
+                .iter()
+                .any(|&(table, _)| table == keyword)
     });
-    h.rename_keywords(&[
-        ("ZTHEAP", "THEAP"),
-        ("ZHECKSUM", "CHECKSUM"),
-        ("ZDATASUM", "DATASUM"),
-    ]);
+    h.rename_keywords(
+        &reserved_keywords::TABLE_PRESERVED.map(|(table, container)| (container, table)),
+    );
     Ok(HduParts {
         header: h,
         data: out,
     })
-}
-
-fn indexed_compression_key(keyword: &str, prefix: &str, ncols: usize) -> bool {
-    keyword::index(keyword, prefix).is_some_and(|column| (1..=ncols).contains(&column))
 }
 
 fn bind_table<'a>(header: &Header, table: TableView<'a>) -> Result<BoundTable<'a>> {
@@ -645,18 +628,10 @@ fn bind_table<'a>(header: &Header, table: TableView<'a>) -> Result<BoundTable<'a
 
 fn reject_compression_metadata(header: &Header) -> Result<()> {
     for entry in header.iter() {
-        if matches!(
-            entry.keyword,
-            "ZTABLE"
-                | "ZTILELEN"
-                | "ZNAXIS1"
-                | "ZNAXIS2"
-                | "ZPCOUNT"
-                | "ZTHEAP"
-                | "ZHECKSUM"
-                | "ZDATASUM"
-        ) || indexed_compression_key(entry.keyword, "ZFORM", 999)
-            || indexed_compression_key(entry.keyword, "ZCTYP", 999)
+        if reserved_keywords::is_table_compression(entry.keyword, 999)
+            || reserved_keywords::TABLE_PRESERVED
+                .iter()
+                .any(|&(_, container)| container == entry.keyword)
         {
             return Err(metadata_mismatch(entry.keyword));
         }
