@@ -625,3 +625,46 @@ fn a_variable_length_array_is_stored_compressed_only_when_it_shrinks() {
     let restored = BinTable::from_data(&restored.header, restored.data).unwrap();
     assert_eq!(restored.column_by_idx(0).unwrap().vla().unwrap(), rows);
 }
+
+/// A declared `ZCTYPn` is honoured as written, so `RICE_1` on a 64-bit column —
+/// which no conforming writer emits — is refused rather than read as `GZIP_2`.
+#[test]
+fn a_declared_rice_codec_on_a_64_bit_column_is_refused() {
+    let column = WriteColumn::scalar("BIG", ColumnData::I64(vec![1, 2, 3]));
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_table(&TableBuilder::explicit(3, vec![column]).unwrap(), None)
+        .unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let original = r.read_table(1).unwrap();
+    let header = r.hdus[1].header.clone();
+    let mut cw = FitsWriter::new(Cursor::new(Vec::new()));
+    cw.write_compressed_table(&header, &original, 3, Compression::GZIP)
+        .unwrap();
+    let mut cr = FitsReader::open(Cursor::new(cw.into_inner().into_inner())).unwrap();
+    assert_eq!(
+        cr.hdus[1].header.get_text("ZCTYP1").unwrap(),
+        Some("GZIP_1")
+    );
+    assert_eq!(
+        cr.read_compressed_table(1).unwrap().view().raw_rows(),
+        original.view().raw_rows()
+    );
+
+    let mut tampered = cr.hdus[1].header.clone();
+    tampered.set_internal("ZCTYP1", "RICE_1");
+    let data = cr.read_data_raw(1).unwrap().into_data();
+    let mut primary = Header::new();
+    primary
+        .set_internal("SIMPLE", true)
+        .set_internal("BITPIX", 8)
+        .set_internal("NAXIS", 0);
+    let mut file = FitsWriter::new(Cursor::new(Vec::new()));
+    file.write_raw_hdu(&primary, &[]).unwrap();
+    file.write_raw_hdu(&tampered, &data).unwrap();
+    let bytes = file.into_inner().into_inner();
+    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+    assert!(matches!(
+        reader.read_compressed_table(1),
+        Err(FitsError::UnsupportedCompression { name }) if name == "RICE_1 on a K column"
+    ));
+}
