@@ -4,6 +4,7 @@ use crate::bintable::column::Column;
 use crate::bintable::tdim;
 use crate::bintable::tform::Tform;
 use crate::column;
+use crate::column::{ColumnLabels, ColumnScaling};
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::validate_table_field_count;
@@ -62,14 +63,14 @@ impl TableSchema {
                     .transpose()?,
                 ValueKeywords::Skip => None,
             };
-            let (tscale, tzero, tnull) = match values {
+            let (scaling, tnull) = match values {
                 ValueKeywords::Read => (
-                    header.get_real(key!("TSCAL{n}").as_str())?.unwrap_or(1.0),
-                    header.get_real(key!("TZERO{n}").as_str())?.unwrap_or(0.0),
+                    ColumnScaling::read(header, n)?,
                     header.get_integer(key!("TNULL{n}").as_str())?,
                 ),
-                ValueKeywords::Skip => (1.0, 0.0, None),
+                ValueKeywords::Skip => (ColumnScaling::IDENTITY, None),
             };
+            let labels = ColumnLabels::read(header, n)?;
             // A fixed column's cell holds exactly `repeat` elements; a `P`/`Q` cell's
             // count is per-row and is checked as each row's descriptor is read.
             if let Some(dims) = &shape
@@ -78,17 +79,11 @@ impl TableSchema {
                 tdim::validate_extent(dims, tform.repeat)?;
             }
             columns.push(Column {
-                name: header
-                    .get_text(key!("TTYPE{n}").as_str())?
-                    .map(str::to_string)
-                    .filter(|s| !s.is_empty()),
-                unit: header
-                    .get_text(key!("TUNIT{n}").as_str())?
-                    .map(str::to_string)
-                    .filter(|s| !s.is_empty()),
+                name: labels.name,
+                unit: labels.unit,
                 tform,
-                tscale,
-                tzero,
+                tscale: scaling.tscale,
+                tzero: scaling.tzero,
                 tnull,
                 tdim: shape,
                 tdisp: header
