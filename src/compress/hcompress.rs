@@ -1583,8 +1583,7 @@ mod tests {
     fn tile_decode_rejects_dimension_mismatch() {
         // Encode a valid 2×3 tile, then decode it claiming a different element count.
         // The decoder reads nx/ny from the stream and must cross-check them against the
-        // tile size it was handed — rather than allocate/transform `nx*ny` blindly
-        // (a wild-allocation / overflow / empty-buffer-panic guard, R2-4).
+        // tile size it was handed, not allocate and transform `nx*ny` blindly.
         let vals: Vec<i64> = vec![10, 20, 30, 40, 50, 60];
         let mut scratch = hcompress::HcompressScratch::default();
         let bytes = hcompress::hcompress_tile_encode(&vals, &[2, 3], 0, &mut scratch).unwrap();

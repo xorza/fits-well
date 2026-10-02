@@ -39,6 +39,8 @@ use crate::reader::hdu::Hdu;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::tabular;
 
+#[cfg(feature = "bench")]
+pub(crate) mod bench;
 mod data_source;
 pub(crate) mod hdu;
 pub(crate) mod source;

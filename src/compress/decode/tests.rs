@@ -398,7 +398,7 @@ fn compressed_image_rejects_short_tiles() {
 fn decompress_image_rejects_overflowing_znaxis_product() {
     // ZNAXIS1·ZNAXIS2 = 5e9·5e9 = 2.5e19 overflows usize; decode must reject the
     // header up front (before allocating the output plane), not wrap to a small
-    // buffer and then scatter out of bounds (R2-2).
+    // buffer and then scatter out of bounds.
     let h = compressed_image_header(
         "GZIP_1",
         16,

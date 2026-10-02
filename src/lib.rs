@@ -197,72 +197,24 @@ pub mod io {
     };
 }
 
-/// Hot internal entry points re-exposed for the benches under `benches/` and the
-/// allocation-counting integration test (the `internals` feature). These wrap
-/// crate-private functions; they are **not** a stable API — do not depend on them.
+/// Entry points for the allocation-counting integration test (the `internals`
+/// feature). They wrap crate-private fixtures; they are **not** a stable API.
 #[cfg(feature = "internals")]
 pub mod internals {
-    use crate::bitpix::Bitpix;
+    pub use crate::world_coordinates::tabular::internals::{
+        tabular_forward_at_pixel, tabular_inverse_at_fraction, tabular_inverse_at_world,
+    };
+}
+
+/// The criterion groups the benches under `benches/` run (the `bench` feature).
+/// They are **not** a stable API.
+#[cfg(feature = "bench")]
+pub mod bench {
     #[cfg(feature = "compression")]
-    use crate::compress::table;
-    use crate::data::image_data::ImageData;
-    use crate::world_coordinates::bench;
+    pub use crate::compress::bench::{compress, compress_table, decompress, decompress_table};
+    pub use crate::data::bench::{decode, encode, physical};
     #[cfg(feature = "compression")]
-    use crate::writer::table::WriteColumn;
-
-    /// Decode a big-endian data unit into host-endian samples — the per-element
-    /// byte-swap (`ImageData::decode`).
-    pub fn decode_image(bytes: &[u8], bitpix: Bitpix) -> ImageData {
-        ImageData::decode(bytes, bitpix)
-    }
-
-    /// Encode samples back to a big-endian buffer — the inverse swap
-    /// (`ImageData::encode_into` into a fresh buffer).
-    pub fn encode_image(data: &ImageData) -> Vec<u8> {
-        let mut out = Vec::new();
-        data.encode_into(&mut out);
-        out
-    }
-
-    /// The mixed-column table the table-compression bench compresses.
-    #[cfg(feature = "compression")]
-    pub fn mixed_table_columns(nrows: usize) -> Vec<WriteColumn> {
-        table::internals::mixed_columns(nrows)
-    }
-
-    /// Build and cache the WCS benchmark fixtures outside timed iterations.
-    pub fn prepare_wcs_benchmarks() {
-        bench::prepare();
-    }
-
-    /// Transform one fixed batch forward and backward through a four-axis linear WCS.
-    pub fn linear_wcs_round_trip_batch() -> f64 {
-        bench::linear_round_trip_batch()
-    }
-
-    /// Transform one fixed batch through a Table-26 spectral axis.
-    pub fn spectral_wcs_batch() -> f64 {
-        bench::spectral_batch()
-    }
-
-    /// Transform one fixed batch through a large monotonic `-TAB` index vector.
-    pub fn tabular_wcs_batch() -> f64 {
-        bench::tabular_index_batch()
-    }
-
-    /// Transform one pixel through the large monotonic `-TAB` fixture.
-    pub fn tabular_forward_at_pixel(pixel: f64) -> f64 {
-        bench::tabular_forward_at_pixel(pixel)
-    }
-
-    /// Invert one world coordinate through the large monotonic `-TAB` fixture.
-    pub fn tabular_inverse_at_world(world: f64) -> f64 {
-        bench::tabular_inverse_at_world(world)
-    }
-
-    /// Invert one two-dimensional affine `-TAB` coordinate at a chosen dyadic
-    /// fraction, which sets how deep the inverse search goes.
-    pub fn tabular_inverse_at_fraction(fraction: f64) -> f64 {
-        bench::tabular_inverse_at_fraction(fraction)
-    }
+    pub use crate::reader::bench::read_compressed_image_section;
+    pub use crate::reader::bench::{read_image, read_image_view};
+    pub use crate::world_coordinates::bench::wcs;
 }

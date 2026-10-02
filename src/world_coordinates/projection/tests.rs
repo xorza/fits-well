@@ -697,7 +697,8 @@ fn mollweide_poles_are_finite_and_have_canonical_longitude() {
     }
 }
 
-/// Golden pixel→world for all v2 projections, from `astropy.wcs`. Each header is
+/// Golden pixel→world for the zenithal and cylindrical projections, from
+/// `astropy.wcs`. Each header is
 /// `<RA|DEC>---<PROJ>`, CRPIX 50/50, CDELT (−0.05, 0.05); zenithal use CRVAL
 /// (150, 2.5), cylindrical CRVAL (45, 30) so the full pole computation runs.
 #[test]
