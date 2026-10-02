@@ -2,6 +2,7 @@ use crate::bintable::BinTable;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::descriptor;
 use crate::bintable::descriptor::PqDescriptor;
+use crate::bintable::internals::table_header;
 use crate::bintable::tform_kind::TformKind;
 use crate::compress::*;
 use crate::endian::write_pq_descriptor;
@@ -151,17 +152,7 @@ fn decodes_a_cfitsio_compressed_table() {
 
 #[test]
 fn table_compression_rejects_metadata_mismatches() {
-    let mut header = Header::new();
-    header
-        .set_internal("XTENSION", "BINTABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 2)
-        .set_internal("NAXIS2", 2)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1)
-        .set_internal("TFORM1", "1I");
+    let header = table_header(2, 2, &["1I"]);
     let rows = [10i16, -20]
         .into_iter()
         .flat_map(i16::to_be_bytes)
@@ -201,17 +192,8 @@ fn table_compression_rejects_metadata_mismatches() {
 
 #[test]
 fn table_compression_restores_reserved_metadata_exactly() {
-    let mut original_header = Header::new();
+    let mut original_header = table_header(2, 2, &["1I"]);
     original_header
-        .set_internal("XTENSION", "BINTABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 2)
-        .set_internal("NAXIS2", 2)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1)
-        .set_internal("TFORM1", "1I")
         .set_internal("THEAP", 4)
         .comment_internal("THEAP", "original heap start")
         .set_internal("CHECKSUM", "0123456789ABCDEF")
@@ -419,17 +401,9 @@ fn read_compressed_table_rejects_a_plain_bintable() {
 fn uncompress_table_rejects_overflowing_row_product() {
     // ZNAXIS2·ZNAXIS1 = 3e18·8 = 2.4e19 overflows usize; uncompress must reject the
     // header before allocating the row buffer (R2-3).
-    let mut h = Header::new();
-    h.set_internal("XTENSION", "BINTABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 16) // one 1QB descriptor row
-        .set_internal("NAXIS2", 1)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1)
-        .set_internal("TFORM1", "1QB")
-        .set_internal("TTYPE1", "C1")
+    // One 1QB descriptor row.
+    let mut h = table_header(16, 1, &["1QB"]);
+    h.set_internal("TTYPE1", "C1")
         .set_internal("ZTABLE", true)
         .set_internal("ZTILELEN", 1)
         .set_internal("ZNAXIS1", 8)

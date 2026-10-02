@@ -31,12 +31,14 @@ use crate::compress::tile_geometry::TileGeometry;
 use crate::error::FitsError;
 use crate::error::Result;
 
+/// The memory one parallel decode wave's retained tiles may hold.
+#[cfg(feature = "parallel")]
+const DECODE_WAVE_BYTES: usize = 4 * 1024 * 1024;
+
 /// How many tiles one parallel decode wave may retain at once, from the memory a
 /// wave's *narrowed* per-tile vectors hold rather than the wide plane they decode in.
 #[cfg(feature = "parallel")]
 pub(super) fn decode_wave_tile_count<D>(geom: &TileGeometry) -> usize {
-    const DECODE_WAVE_BYTES: usize = 4 * 1024 * 1024;
-
     let payload_bytes = geom
         .max_tile_elements()
         .saturating_mul(std::mem::size_of::<D>());

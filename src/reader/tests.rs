@@ -1,5 +1,6 @@
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::descriptor;
+use crate::bintable::internals::table_header;
 use crate::bitpix::Bitpix;
 use crate::data::Image;
 use crate::data::image_data::ImageData;
@@ -8,10 +9,12 @@ use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Ranked;
 use crate::header_model::Header;
+use crate::header_model::internals::{card_bytes, records};
 use crate::ragged::Ragged;
 use crate::reader::data_source;
 use crate::reader::internals::open_fixture;
 use crate::reader::*;
+use crate::world_coordinates::tabular::internals::{lookup_bytes, lookup_header};
 use crate::writer::FitsWriter;
 use crate::writer::table::{TableBuilder, WriteColumn};
 use num_complex::Complex;
@@ -56,7 +59,7 @@ fn write_tab_lookup(
         writer,
         version,
         level,
-        &[("COORD", coordinates, shape.as_str())],
+        &[("COORD", coordinates, Some(shape.as_str()))],
     );
 }
 
@@ -64,38 +67,16 @@ fn write_tab_lookup_columns(
     writer: &mut FitsWriter<Cursor<Vec<u8>>>,
     version: i64,
     level: i64,
-    columns: &[(&str, &[f64], &str)],
+    columns: &[(&str, &[f64], Option<&str>)],
 ) {
-    let mut header = Header::new();
-    let row_len = columns
-        .iter()
-        .map(|(_, values, _)| values.len() * 8)
-        .sum::<usize>();
+    let mut header = lookup_header(columns);
     header
-        .set_internal("XTENSION", "BINTABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", row_len as i64)
-        .set_internal("NAXIS2", 1)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", columns.len() as i64)
         .set_internal("EXTNAME", "WCS-TABLE")
         .set_internal("EXTVER", version)
         .set_internal("EXTLEVEL", level);
-    let mut bytes = Vec::with_capacity(row_len);
-    for (index, (name, values, shape)) in columns.iter().enumerate() {
-        let column = index + 1;
-        header
-            .set_internal(format!("TTYPE{column}").as_str(), *name)
-            .set_internal(
-                format!("TFORM{column}").as_str(),
-                format!("{}D", values.len()),
-            )
-            .set_internal(format!("TDIM{column}").as_str(), *shape);
-        bytes.extend(values.iter().flat_map(|value| value.to_be_bytes()));
-    }
-    writer.write_raw_hdu(&header, &bytes).unwrap();
+    writer
+        .write_raw_hdu(&header, &lookup_bytes(columns))
+        .unwrap();
 }
 
 #[test]
@@ -121,16 +102,8 @@ fn read_wcs_resolves_the_exact_tabular_extension() {
     // A decoy BINTABLE whose EXTNAME does not match. Its EXTVER is not an integer, so
     // resolving the reference must never interpret it — an unrelated corrupt version
     // card cannot fail a lookup that does not concern it.
-    let mut decoy = Header::new();
+    let mut decoy = table_header(0, 0, &[]);
     decoy
-        .set_internal("XTENSION", "BINTABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 0)
-        .set_internal("NAXIS2", 0)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 0)
         .set_internal("EXTNAME", "OTHER")
         .set_internal("EXTVER", "not-an-integer");
     writer.write_raw_hdu(&decoy, &[]).unwrap();
@@ -181,16 +154,16 @@ fn read_wcs_resolves_shared_arrays_and_extensions_once_per_reference_group() {
         1,
         1,
         &[
-            ("FIRST", &[10.0, 20.0], "(1,2)"),
-            ("SECOND", &[100.0, 200.0], "(1,2)"),
-            ("COUPLED", &coupled, "(2,2,2)"),
+            ("FIRST", &[10.0, 20.0], Some("(1,2)")),
+            ("SECOND", &[100.0, 200.0], Some("(1,2)")),
+            ("COUPLED", &coupled, Some("(2,2,2)")),
         ],
     );
     write_tab_lookup_columns(
         &mut writer,
         2,
         1,
-        &[("DISTINCT", &[1000.0, 2000.0], "(1,2)")],
+        &[("DISTINCT", &[1000.0, 2000.0], Some("(1,2)"))],
     );
 
     let bytes = writer.into_inner().into_inner();
@@ -410,23 +383,11 @@ fn trailing_special_records_and_partial_blocks_are_ignored() {
 /// block-padded (header with spaces, data with NUL).
 fn fits_file(cards: &[&str], data: &[u8]) -> Vec<u8> {
     use crate::block::BLOCK_SIZE;
-    let mut buf = Vec::new();
-    let mut push_card = |text: &str| {
-        let mut card = [b' '; 80];
-        card[..text.len()].copy_from_slice(text.as_bytes());
-        buf.extend_from_slice(&card);
-    };
-    for c in cards {
-        push_card(c);
-    }
-    push_card("END");
-    while buf.len() % BLOCK_SIZE != 0 {
-        buf.push(b' ');
-    }
+    let mut buf = records(cards);
+    buf.extend_from_slice(&card_bytes("END"));
+    buf.resize(buf.len().next_multiple_of(BLOCK_SIZE), b' ');
     buf.extend_from_slice(data);
-    while buf.len() % BLOCK_SIZE != 0 {
-        buf.push(0);
-    }
+    buf.resize(buf.len().next_multiple_of(BLOCK_SIZE), 0);
     buf
 }
 

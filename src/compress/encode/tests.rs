@@ -677,10 +677,16 @@ fn nocompress_image_round_trips() {
 #[cfg(feature = "parallel")]
 #[test]
 fn parallel_full_decode_crosses_the_bounded_wave_boundary() {
-    let samples: Vec<u8> = (0usize..1024 * 4097)
+    use crate::compress::decode::decode_wave_tile_count;
+    use crate::compress::tile_geometry::TileGeometry;
+
+    // One row per tile, one more row than a wave holds.
+    let row = 1024;
+    let rows = decode_wave_tile_count::<u8>(&TileGeometry::new(&[row, 1], &[row, 1])) + 1;
+    let samples: Vec<u8> = (0usize..row * rows)
         .map(|index| (index.wrapping_mul(37) & 0xff) as u8)
         .collect();
-    let image = Image::new(vec![1024, 4097], samples.clone()).unwrap();
+    let image = Image::new(vec![row, rows], samples.clone()).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
         .write_compressed_image(

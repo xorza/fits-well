@@ -1,4 +1,5 @@
 use crate::bintable::BinTable;
+use crate::bintable::internals::table_header;
 use crate::bintable::tform_kind::TformKind;
 #[cfg(feature = "parallel")]
 use crate::compress::decode::decode_wave_tile_count;
@@ -45,6 +46,37 @@ fn check_decoded(name: &str) {
         }
         other => panic!("expected I16, got {other:?}"),
     }
+}
+
+/// A one-tile compressed image's container: `columns` as (`TTYPEn`, `TFORMn`) over a
+/// row of `naxis1` bytes and a heap of `heap` bytes, encoding a `zbitpix` image of
+/// `shape` in tiles of `tile` (no `ZTILEn` when it is empty).
+fn compressed_image_header(
+    cmptype: &str,
+    zbitpix: i64,
+    shape: &[i64],
+    tile: &[i64],
+    columns: &[(&str, &str)],
+    naxis1: usize,
+    heap: i64,
+) -> Header {
+    let tforms: Vec<&str> = columns.iter().map(|&(_, tform)| tform).collect();
+    let mut h = table_header(naxis1, 1, &tforms);
+    h.set_internal("PCOUNT", heap);
+    for (index, &(ttype, _)) in columns.iter().enumerate() {
+        h.set_internal(&format!("TTYPE{}", index + 1), ttype);
+    }
+    h.set_internal("ZIMAGE", true)
+        .set_internal("ZCMPTYPE", cmptype)
+        .set_internal("ZBITPIX", zbitpix)
+        .set_internal("ZNAXIS", shape.len() as i64);
+    for (index, &length) in shape.iter().enumerate() {
+        h.set_internal(&format!("ZNAXIS{}", index + 1), length);
+    }
+    for (index, &length) in tile.iter().enumerate() {
+        h.set_internal(&format!("ZTILE{}", index + 1), length);
+    }
+    h
 }
 
 #[test]
@@ -183,25 +215,15 @@ fn decompresses_quantized_float_no_dither() {
 fn decompresses_nocompress_tile_verbatim() {
     // A 2×2 i16 image as a single NOCOMPRESS tile: the COMPRESSED_DATA cell holds
     // the four pixels verbatim as big-endian i16.
-    let mut h = Header::new();
-    h.set_internal("XTENSION", "BINTABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 8) // one 1P descriptor
-        .set_internal("NAXIS2", 1) // one tile
-        .set_internal("PCOUNT", 8) // heap = 8 raw bytes
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1)
-        .set_internal("TFORM1", "1PB(8)")
-        .set_internal("TTYPE1", "COMPRESSED_DATA")
-        .set_internal("ZIMAGE", true)
-        .set_internal("ZCMPTYPE", "NOCOMPRESS")
-        .set_internal("ZBITPIX", 16)
-        .set_internal("ZNAXIS", 2)
-        .set_internal("ZNAXIS1", 2)
-        .set_internal("ZNAXIS2", 2)
-        .set_internal("ZTILE1", 2)
-        .set_internal("ZTILE2", 2);
+    let h = compressed_image_header(
+        "NOCOMPRESS",
+        16,
+        &[2, 2],
+        &[2, 2],
+        &[("COMPRESSED_DATA", "1PB(8)")],
+        8, // one 1P descriptor
+        8, // heap = 8 raw bytes
+    );
     let mut data = Vec::new();
     data.extend_from_slice(&8i32.to_be_bytes()); // descriptor nelem = 8 bytes
     data.extend_from_slice(&0i32.to_be_bytes()); // descriptor offset = 0
@@ -254,28 +276,19 @@ fn compressed_integer_null_mask_restores_blank_pixels() {
         ("PLIO_1", plio),
         ("NOCOMPRESS", vec![0, 1]),
     ] {
-        let mut h = Header::new();
-        h.set_internal("XTENSION", "BINTABLE")
-            .set_internal("BITPIX", 8)
-            .set_internal("NAXIS", 2)
-            .set_internal("NAXIS1", 16)
-            .set_internal("NAXIS2", 1)
-            .set_internal("PCOUNT", 4 + mask.len() as i64)
-            .set_internal("GCOUNT", 1)
-            .set_internal("TFIELDS", 2)
-            .set_internal("TFORM1", "1PB(4)")
-            .set_internal("TTYPE1", "COMPRESSED_DATA")
-            .set_internal("TFORM2", format!("1PB({})", mask.len()))
-            .set_internal("TTYPE2", "NULL PIXEL MASK")
-            .set_internal("ZIMAGE", true)
-            .set_internal("ZCMPTYPE", "NOCOMPRESS")
-            .set_internal("ZMASKCMP", codec)
-            .set_internal("ZBITPIX", 16)
-            .set_internal("ZNAXIS", 2)
-            .set_internal("ZNAXIS1", 2)
-            .set_internal("ZNAXIS2", 1)
-            .set_internal("ZTILE1", 2)
-            .set_internal("ZTILE2", 1)
+        let mut h = compressed_image_header(
+            "NOCOMPRESS",
+            16,
+            &[2, 1],
+            &[2, 1],
+            &[
+                ("COMPRESSED_DATA", "1PB(4)"),
+                ("NULL PIXEL MASK", format!("1PB({})", mask.len()).as_str()),
+            ],
+            16,
+            4 + mask.len() as i64,
+        );
+        h.set_internal("ZMASKCMP", codec)
             .set_internal("BLANK", -999);
         let mut data = Vec::new();
         data.extend_from_slice(&4i32.to_be_bytes());
@@ -303,32 +316,21 @@ fn compressed_integer_null_mask_restores_blank_pixels() {
 
 #[test]
 fn compressed_float_null_mask_restores_nan_pixels() {
-    let mut h = Header::new();
-    h.set_internal("XTENSION", "BINTABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 32)
-        .set_internal("NAXIS2", 1)
-        .set_internal("PCOUNT", 10)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 4)
-        .set_internal("TFORM1", "1PB(8)")
-        .set_internal("TTYPE1", "COMPRESSED_DATA")
-        .set_internal("TFORM2", "1PB(2)")
-        .set_internal("TTYPE2", "NULL_PIXEL_MASK")
-        .set_internal("TFORM3", "1D")
-        .set_internal("TTYPE3", "ZSCALE")
-        .set_internal("TFORM4", "1D")
-        .set_internal("TTYPE4", "ZZERO")
-        .set_internal("ZIMAGE", true)
-        .set_internal("ZCMPTYPE", "NOCOMPRESS")
-        .set_internal("ZMASKCMP", "NOCOMPRESS")
-        .set_internal("ZBITPIX", -32)
-        .set_internal("ZNAXIS", 2)
-        .set_internal("ZNAXIS1", 2)
-        .set_internal("ZNAXIS2", 1)
-        .set_internal("ZTILE1", 2)
-        .set_internal("ZTILE2", 1);
+    let mut h = compressed_image_header(
+        "NOCOMPRESS",
+        -32,
+        &[2, 1],
+        &[2, 1],
+        &[
+            ("COMPRESSED_DATA", "1PB(8)"),
+            ("NULL_PIXEL_MASK", "1PB(2)"),
+            ("ZSCALE", "1D"),
+            ("ZZERO", "1D"),
+        ],
+        32,
+        10,
+    );
+    h.set_internal("ZMASKCMP", "NOCOMPRESS");
     let mut data = Vec::new();
     data.extend_from_slice(&8i32.to_be_bytes());
     data.extend_from_slice(&0i32.to_be_bytes());
@@ -352,31 +354,20 @@ fn zblank_column_overrides_keyword_per_tile() {
     // A 2×1 float image, one NOCOMPRESS tile of quantized i32 [10, 99]. ZSCALE=2,
     // ZZERO=5 ⇒ pixel 0 = 25.0; pixel 1's quantized int equals the per-tile ZBLANK
     // *column* value (99), so it decodes to NaN — proving the column drives nulls.
-    let mut h = Header::new();
-    h.set_internal("XTENSION", "BINTABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 28) // 1P(8) + 1D + 1D + 1J
-        .set_internal("NAXIS2", 1)
-        .set_internal("PCOUNT", 8)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 4)
-        .set_internal("TFORM1", "1PB(8)")
-        .set_internal("TTYPE1", "COMPRESSED_DATA")
-        .set_internal("TFORM2", "1D")
-        .set_internal("TTYPE2", "ZSCALE")
-        .set_internal("TFORM3", "1D")
-        .set_internal("TTYPE3", "ZZERO")
-        .set_internal("TFORM4", "1J")
-        .set_internal("TTYPE4", "ZBLANK")
-        .set_internal("ZIMAGE", true)
-        .set_internal("ZCMPTYPE", "NOCOMPRESS")
-        .set_internal("ZBITPIX", -32)
-        .set_internal("ZNAXIS", 2)
-        .set_internal("ZNAXIS1", 2)
-        .set_internal("ZNAXIS2", 1)
-        .set_internal("ZTILE1", 2)
-        .set_internal("ZTILE2", 1);
+    let h = compressed_image_header(
+        "NOCOMPRESS",
+        -32,
+        &[2, 1],
+        &[2, 1],
+        &[
+            ("COMPRESSED_DATA", "1PB(8)"),
+            ("ZSCALE", "1D"),
+            ("ZZERO", "1D"),
+            ("ZBLANK", "1J"),
+        ],
+        28, // 1P(8) + 1D + 1D + 1J
+        8,
+    );
     let mut data = Vec::new();
     data.extend_from_slice(&8i32.to_be_bytes()); // descriptor nelem
     data.extend_from_slice(&0i32.to_be_bytes()); // descriptor offset
@@ -448,23 +439,15 @@ fn reading_a_plain_bintable_as_an_image_is_rejected() {
 
 #[test]
 fn compressed_image_rejects_short_tiles() {
-    let mut h = Header::new();
-    h.set_internal("XTENSION", "BINTABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 8)
-        .set_internal("NAXIS2", 1)
-        .set_internal("PCOUNT", 1)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1)
-        .set_internal("TFORM1", "1PB(1)")
-        .set_internal("TTYPE1", "COMPRESSED_DATA")
-        .set_internal("ZIMAGE", true)
-        .set_internal("ZCMPTYPE", "NOCOMPRESS")
-        .set_internal("ZBITPIX", 16)
-        .set_internal("ZNAXIS", 1)
-        .set_internal("ZNAXIS1", 2)
-        .set_internal("ZTILE1", 2);
+    let h = compressed_image_header(
+        "NOCOMPRESS",
+        16,
+        &[2],
+        &[2],
+        &[("COMPRESSED_DATA", "1PB(1)")],
+        8,
+        1,
+    );
     let mut data = Vec::new();
     data.extend_from_slice(&1i32.to_be_bytes());
     data.extend_from_slice(&0i32.to_be_bytes());
@@ -478,13 +461,18 @@ fn compressed_image_rejects_short_tiles() {
         })
     ));
 
-    h.set_internal("NAXIS1", 16)
-        .set_internal("PCOUNT", 2)
-        .set_internal("TFIELDS", 2)
-        .set_internal("TFORM1", "1PB(0)")
-        .set_internal("ZCMPTYPE", "GZIP_1")
-        .set_internal("TFORM2", "1PI(1)")
-        .set_internal("TTYPE2", "UNCOMPRESSED_DATA");
+    let h = compressed_image_header(
+        "GZIP_1",
+        16,
+        &[2],
+        &[2],
+        &[
+            ("COMPRESSED_DATA", "1PB(0)"),
+            ("UNCOMPRESSED_DATA", "1PI(1)"),
+        ],
+        16,
+        2,
+    );
     let mut data = Vec::new();
     data.extend_from_slice(&0i32.to_be_bytes());
     data.extend_from_slice(&0i32.to_be_bytes());
@@ -506,23 +494,15 @@ fn decompress_image_rejects_overflowing_znaxis_product() {
     // ZNAXIS1·ZNAXIS2 = 5e9·5e9 = 2.5e19 overflows usize; decode must reject the
     // header up front (before allocating the output plane), not wrap to a small
     // buffer and then scatter out of bounds (R2-2).
-    let mut h = Header::new();
-    h.set_internal("XTENSION", "BINTABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 8)
-        .set_internal("NAXIS2", 1)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1)
-        .set_internal("TFORM1", "1PB(0)")
-        .set_internal("TTYPE1", "COMPRESSED_DATA")
-        .set_internal("ZIMAGE", true)
-        .set_internal("ZCMPTYPE", "GZIP_1")
-        .set_internal("ZBITPIX", 16)
-        .set_internal("ZNAXIS", 2)
-        .set_internal("ZNAXIS1", 5_000_000_000i64)
-        .set_internal("ZNAXIS2", 5_000_000_000i64);
+    let h = compressed_image_header(
+        "GZIP_1",
+        16,
+        &[5_000_000_000i64, 5_000_000_000i64],
+        &[],
+        &[("COMPRESSED_DATA", "1PB(0)")],
+        8,
+        0,
+    );
     let mut data = Vec::new();
     data.extend_from_slice(&0i32.to_be_bytes()); // empty P descriptor: nelem
     data.extend_from_slice(&0i32.to_be_bytes()); // offset
@@ -558,22 +538,15 @@ fn decompress_image_rejects_oversized_znaxis_product() {
     // ZNAXIS1 = 2^60 does NOT overflow usize (so the overflow guard passes), but
     // allocating that many bytes would abort the process. The output plane is
     // allocated fallibly (`try_reserve`), so decode must return a recoverable error.
-    let mut h = Header::new();
-    h.set_internal("XTENSION", "BINTABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 8)
-        .set_internal("NAXIS2", 1)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1)
-        .set_internal("TFORM1", "1PB(0)")
-        .set_internal("TTYPE1", "COMPRESSED_DATA")
-        .set_internal("ZIMAGE", true)
-        .set_internal("ZCMPTYPE", "GZIP_1")
-        .set_internal("ZBITPIX", 8)
-        .set_internal("ZNAXIS", 1)
-        .set_internal("ZNAXIS1", 1i64 << 60);
+    let h = compressed_image_header(
+        "GZIP_1",
+        8,
+        &[1i64 << 60],
+        &[],
+        &[("COMPRESSED_DATA", "1PB(0)")],
+        8,
+        0,
+    );
     let mut data = Vec::new();
     data.extend_from_slice(&0i32.to_be_bytes()); // empty P descriptor: nelem
     data.extend_from_slice(&0i32.to_be_bytes()); // offset
@@ -587,10 +560,12 @@ fn decompress_image_rejects_oversized_znaxis_product() {
 #[cfg(feature = "parallel")]
 #[test]
 fn parallel_decode_wave_budget_counts_per_tile_vectors() {
-    let geometry = TileGeometry::new(&[1, 4_194_304], &[1, 1]);
-    let retained_bytes = std::mem::size_of::<Vec<u8>>() + 1;
-    assert_eq!(
-        decode_wave_tile_count::<u8>(&geometry),
-        4 * 1024 * 1024 / retained_bytes
-    );
+    // A tile retains its samples and its 24-byte `Vec`: 25 bytes for one u8 and 32
+    // for one i64, so the 4 MiB budget holds ⌊4194304 / 25⌋ and 4194304 / 32 tiles.
+    let single = TileGeometry::new(&[1, 4_194_304], &[1, 1]);
+    assert_eq!(decode_wave_tile_count::<u8>(&single), 167_772);
+    assert_eq!(decode_wave_tile_count::<i64>(&single), 131_072);
+    // One tile larger than the whole budget still makes a wave of one.
+    let whole = TileGeometry::new(&[1, 4_194_304], &[1, 4_194_304]);
+    assert_eq!(decode_wave_tile_count::<u8>(&whole), 1);
 }

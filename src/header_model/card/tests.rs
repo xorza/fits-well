@@ -1,17 +1,10 @@
 use crate::header_model::Header;
 
 use crate::header_model::card::*;
-
-/// Build an 80-byte card from a left-justified text snippet.
-fn raw(text: &str) -> [u8; CARD_SIZE] {
-    assert!(text.len() <= CARD_SIZE);
-    let mut buf = [b' '; CARD_SIZE];
-    buf[..text.len()].copy_from_slice(text.as_bytes());
-    buf
-}
+use crate::header_model::internals::card_bytes;
 
 fn parse(text: &str) -> Card {
-    reparse(&raw(text))
+    reparse(&card_bytes(text))
 }
 
 fn reparse(bytes: &[u8; CARD_SIZE]) -> Card {
@@ -152,7 +145,7 @@ fn parses_complex_integer_and_real() {
 
 #[test]
 fn classifies_end_and_commentary_cards() {
-    assert_eq!(Record::parse(&raw("END")).unwrap(), Record::End);
+    assert_eq!(Record::parse(&card_bytes("END")).unwrap(), Record::End);
 
     let comment = parse("COMMENT  this file is great");
     assert!(matches!(comment, Card::Commentary { .. }));
@@ -189,7 +182,7 @@ fn rejects_non_ascii_card_without_panicking() {
         Err(FitsError::InvalidValue { .. })
     ));
     // A high byte elsewhere in the record is likewise rejected, not decoded.
-    let mut in_value = raw("OBJECT  = 'x'");
+    let mut in_value = card_bytes("OBJECT  = 'x'");
     in_value[11] = 0xFF;
     assert!(matches!(
         Record::parse(&in_value),
@@ -200,7 +193,7 @@ fn rejects_non_ascii_card_without_panicking() {
 #[test]
 fn rejects_lowercase_keyword_on_a_value_card() {
     assert!(matches!(
-        Record::parse(&raw("object  = 'x'")),
+        Record::parse(&card_bytes("object  = 'x'")),
         Err(FitsError::InvalidKeyword { .. })
     ));
 }
@@ -244,7 +237,7 @@ fn integer_boundaries_round_trip_without_real_coercion() {
 #[test]
 fn parses_a_continue_record() {
     assert_eq!(
-        Record::parse(&raw("CONTINUE  'ollowed by more text&'")).unwrap(),
+        Record::parse(&card_bytes("CONTINUE  'ollowed by more text&'")).unwrap(),
         Record::Continue {
             substring: "ollowed by more text&".into(),
             comment: None
@@ -254,9 +247,9 @@ fn parses_a_continue_record() {
 
 #[test]
 fn end_requires_the_canonical_blank_record() {
-    assert_eq!(Record::parse(&raw("END")).unwrap(), Record::End);
+    assert_eq!(Record::parse(&card_bytes("END")).unwrap(), Record::End);
     assert!(matches!(
-        Record::parse(&raw("END     =                    T")),
+        Record::parse(&card_bytes("END     =                    T")),
         Err(FitsError::ReservedKeyword { name }) if name == "END"
     ));
 }
@@ -290,7 +283,7 @@ fn long_string_splits_into_a_continue_chain() {
 
     // The chain reassembles to the original value (comment on the last record).
     let mut with_end: Vec<u8> = render_records(&card).into_iter().flatten().collect();
-    with_end.extend_from_slice(&raw("END"));
+    with_end.extend_from_slice(&card_bytes("END"));
     let h = Header::parse(&with_end).unwrap();
     assert_eq!(h.get_text("LONGSTR").unwrap(), Some(value.as_str()));
 }
@@ -307,7 +300,7 @@ fn long_string_comment_boundary_is_lossless_or_rejected() {
     assert_eq!(records.len(), 2);
     assert_eq!(&records[1][..15], b"CONTINUE  '' / ");
     let mut bytes: Vec<u8> = records.iter().flatten().copied().collect();
-    bytes.extend_from_slice(&raw("END"));
+    bytes.extend_from_slice(&card_bytes("END"));
     let parsed = Header::parse(&bytes).unwrap();
     let entry = parsed.iter().next().unwrap();
     assert_eq!(entry.value.and_then(Value::as_text), Some("x"));
@@ -361,7 +354,7 @@ fn non_finite_reals_are_rejected_on_read() {
     for token in ["inf", "Infinity", "nan", "-inf", "1E400"] {
         let card = format!("BADREAL = {token}");
         assert!(
-            Record::parse(&raw(&card)).is_err(),
+            Record::parse(&card_bytes(&card)).is_err(),
             "expected {token:?} to be rejected, not parsed as a real"
         );
     }

@@ -1,65 +1,11 @@
-use crate::bintable::BinTable;
 use crate::error::FitsError;
 use crate::header_model::Header;
 use crate::time_coordinates::fits_time::FitsTime;
-use crate::world_coordinates::Wcs;
 use crate::world_coordinates::tabular;
 use crate::world_coordinates::tabular::TabularTransform;
-
-fn encoded_f64(values: &[f64]) -> Vec<u8> {
-    values
-        .iter()
-        .flat_map(|value| value.to_be_bytes())
-        .collect()
-}
-
-fn lookup_table(columns: &[(&str, &[f64], Option<&str>)]) -> BinTable {
-    let mut header = Header::new();
-    let row_len = columns
-        .iter()
-        .map(|(_, values, _)| values.len() * 8)
-        .sum::<usize>();
-    header
-        .set_internal("XTENSION", "BINTABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", row_len as i64)
-        .set_internal("NAXIS2", 1)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", columns.len() as i64);
-    let mut bytes = Vec::with_capacity(row_len);
-    for (index, (name, values, shape)) in columns.iter().enumerate() {
-        let column = index + 1;
-        header
-            .set_internal(format!("TTYPE{column}").as_str(), *name)
-            .set_internal(
-                format!("TFORM{column}").as_str(),
-                format!("{}D", values.len()),
-            );
-        if let Some(shape) = shape {
-            header.set_internal(format!("TDIM{column}").as_str(), *shape);
-        }
-        bytes.extend(encoded_f64(values));
-    }
-    BinTable::from_data(&header, bytes).unwrap()
-}
-
-fn tab_header(axis_count: usize, coordinate: &str) -> Header {
-    let mut header = Header::new();
-    header.set_internal("NAXIS", axis_count as i64);
-    for axis in 1..=axis_count {
-        header
-            .set_internal(format!("CTYPE{axis}").as_str(), format!("AX{axis:02}-TAB"))
-            .set_internal(format!("CRPIX{axis}").as_str(), 0.0)
-            .set_internal(format!("CRVAL{axis}").as_str(), 0.0)
-            .set_internal(format!("CDELT{axis}").as_str(), 1.0)
-            .set_internal(format!("PS{axis}_0").as_str(), "WCS-TABLE")
-            .set_internal(format!("PS{axis}_1").as_str(), coordinate)
-            .set_internal(format!("PV{axis}_3").as_str(), axis as i64);
-    }
-    header
-}
+use crate::world_coordinates::tabular::internals::{
+    COUPLED_GRID, lookup_table, resolved_wcs, tab_header,
+};
 
 fn affine_coordinates(dimensions: usize) -> Vec<f64> {
     let mut coordinates = Vec::with_capacity(dimensions * (1 << dimensions));
@@ -80,20 +26,6 @@ fn coordinate_shape(dimensions: usize) -> String {
             .collect::<Vec<_>>()
             .join(",")
     )
-}
-
-fn resolved_wcs(header: &Header, table: &BinTable) -> Wcs {
-    let descriptors = tabular::descriptors(
-        header,
-        usize::try_from(header.get_integer("NAXIS").unwrap().unwrap()).unwrap(),
-        None,
-    )
-    .unwrap();
-    let transforms = descriptors
-        .into_iter()
-        .map(|descriptor| TabularTransform::from_table(descriptor, table.view()).unwrap())
-        .collect();
-    Wcs::from_header_with_tabular(header, None, transforms).unwrap()
 }
 
 #[test]
@@ -172,11 +104,7 @@ fn tab_index_binary_search_preserves_duplicate_and_exact_hit_rules() {
 
 #[test]
 fn multidimensional_tab_interpolates_and_inverts_coupled_axes() {
-    let table = lookup_table(&[(
-        "COORD",
-        &[100.0, 200.0, 110.0, 200.0, 100.0, 220.0, 110.0, 220.0],
-        Some("(2,2,2)"),
-    )]);
+    let table = lookup_table(&[("COORD", &COUPLED_GRID, Some("(2,2,2)"))]);
     let mut header = tab_header(2, "COORD");
     header
         .set_internal("PS1_0", "wcs-table")
@@ -385,8 +313,7 @@ fn a_one_element_index_vector_maps_onto_its_value() {
 #[test]
 fn tab_inverse_is_scale_free() {
     for scale in [1.0, 1e-9, 1e9] {
-        let coordinates = [100.0, 200.0, 110.0, 200.0, 100.0, 220.0, 110.0, 220.0]
-            .map(|value: f64| value * scale);
+        let coordinates = COUPLED_GRID.map(|value: f64| value * scale);
         let table = lookup_table(&[("COORD", &coordinates, Some("(2,2,2)"))]);
         let wcs = resolved_wcs(&tab_header(2, "COORD"), &table);
         let world = wcs.pixel_to_world(&[1.3, 1.7]).unwrap();

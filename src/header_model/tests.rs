@@ -1,21 +1,11 @@
 use crate::writer::render_header;
 
 use crate::error::Indexed;
+use crate::header_model::internals::records;
 use crate::header_model::*;
 
-fn header_bytes(lines: &[&str]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(lines.len() * CARD_SIZE);
-    for line in lines {
-        assert!(line.len() <= CARD_SIZE);
-        let mut card = [b' '; CARD_SIZE];
-        card[..line.len()].copy_from_slice(line.as_bytes());
-        buf.extend_from_slice(&card);
-    }
-    buf
-}
-
 fn sample() -> Header {
-    Header::parse(&header_bytes(&[
+    Header::parse(&records(&[
         "SIMPLE  =                    T",
         "BITPIX  =                   16",
         "NAXIS   =                    2",
@@ -73,7 +63,7 @@ fn strict_optional_getters_distinguish_absent_and_mistyped_values() {
 
 #[test]
 fn bounded_integer_getter_rejects_exact_values_outside_i64() {
-    let h = Header::parse(&header_bytes(&[
+    let h = Header::parse(&records(&[
         "MIN     = -9223372036854775808",
         "MAX     =  9223372036854775807",
         "BELOW   = -9223372036854775809",
@@ -132,7 +122,7 @@ fn iter_yields_every_record_in_order_with_duplicates() {
 
 #[test]
 fn continue_records_reassemble_a_long_string() {
-    let h = Header::parse(&header_bytes(&[
+    let h = Header::parse(&records(&[
         "WEATHER = 'Partly cloudy during the evening f&'",
         "CONTINUE  'ollowed by cloudy skies overnight.&'",
         "CONTINUE  ' Low 21C. Winds NNE at 5 to 10 mph.'",
@@ -152,7 +142,7 @@ fn continue_records_reassemble_a_long_string() {
 
 #[test]
 fn continue_records_concatenate_the_normative_comment_fragments() {
-    let h = Header::parse(&header_bytes(&[
+    let h = Header::parse(&records(&[
         "STRKEY  = 'This keyword value is continued &'",
         "CONTINUE  ' over multiple keyword records.&'",
         "CONTINUE  '&' / The comment field for this",
@@ -175,13 +165,13 @@ fn continue_records_concatenate_the_normative_comment_fragments() {
 
 #[test]
 fn trailing_ampersand_without_a_continue_is_a_literal() {
-    let h = Header::parse(&header_bytes(&["NOTE    = 'ends with amp &'", "END"])).unwrap();
+    let h = Header::parse(&records(&["NOTE    = 'ends with amp &'", "END"])).unwrap();
     assert_eq!(h.get_text("NOTE").unwrap(), Some("ends with amp &"));
 }
 
 #[test]
 fn orphan_continue_is_demoted_to_commentary() {
-    let h = Header::parse(&header_bytes(&[
+    let h = Header::parse(&records(&[
         "CONTINUE  'no predecessor' / retained note",
         "END",
     ]))
@@ -202,7 +192,7 @@ fn orphan_continue_is_demoted_to_commentary() {
 
 #[test]
 fn missing_end_record_is_an_error() {
-    let bytes = header_bytes(&["SIMPLE  =                    T"]);
+    let bytes = records(&["SIMPLE  =                    T"]);
     assert!(matches!(Header::parse(&bytes), Err(FitsError::MissingEnd)));
 }
 
@@ -417,7 +407,7 @@ fn built_header_round_trips_through_render_and_parse() {
 
 #[test]
 fn missing_mandatory_keyword_is_reported() {
-    let h = Header::parse(&header_bytes(&["SIMPLE  =                    T", "END"])).unwrap();
+    let h = Header::parse(&records(&["SIMPLE  =                    T", "END"])).unwrap();
     assert!(matches!(
         h.bitpix(),
         Err(FitsError::MissingKeyword { name: "BITPIX" })
