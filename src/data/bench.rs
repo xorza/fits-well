@@ -58,7 +58,7 @@ pub fn decode(c: &mut Criterion) {
             .collect();
         g.throughput(Throughput::Bytes(raw.len() as u64));
         g.bench_function(name, |b| {
-            b.iter(|| black_box(ImageData::decode(black_box(&raw), bitpix)))
+            b.iter(|| black_box(ImageData::decode(black_box(&raw), bitpix)));
         });
     }
     g.finish();
@@ -76,7 +76,7 @@ pub fn encode(c: &mut Criterion) {
                 out.clear();
                 black_box(&data).encode_into(&mut out);
                 black_box(out.len())
-            })
+            });
         });
     }
     g.finish();
@@ -111,7 +111,7 @@ pub fn physical(c: &mut Criterion) {
             .unwrap();
             g.throughput(Throughput::Elements(n as u64));
             g.bench_function(BenchmarkId::new(name, label), |b| {
-                b.iter(|| black_box(black_box(&img).physical()))
+                b.iter(|| black_box(black_box(&img).physical()));
             });
         }
     }

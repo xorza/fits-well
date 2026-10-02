@@ -119,7 +119,7 @@ pub(super) fn rice_encode_into<T: Copy + Into<i64>>(
     // Rice output is at most a few bytes per pixel; reserve a pixel's worth up front
     // so the bitstream rarely reallocates mid-tile.
     bo.out.reserve(values.len());
-    let first = values.first().copied().map(Into::into).unwrap_or(0) as u64 & mask;
+    let first = values.first().copied().map_or(0, Into::into) as u64 & mask;
     bo.output_nbits(first, nbits);
     let mut lastpix = first;
 
@@ -140,7 +140,7 @@ pub(super) fn rice_encode_into<T: Copy + Into<i64>>(
                 (s.unsigned_abs() << 1).wrapping_sub(1)
             };
             scratch.diffs.push(d);
-            pixelsum += d as u128;
+            pixelsum += u128::from(d);
             lastpix = next;
         }
 
@@ -322,7 +322,7 @@ impl<'a> BitReader<'a> {
                 .copied()
                 .ok_or(FitsError::UnexpectedEof)?;
             self.pos += 1;
-            self.acc = (self.acc << 8) | byte as u64;
+            self.acc = (self.acc << 8) | u64::from(byte);
             self.nbits += 8;
         }
         Ok(())
@@ -347,10 +347,10 @@ impl<'a> BitReader<'a> {
             if run < self.nbits {
                 // Terminating 1 found within the valid bits: consume the zeros + the 1.
                 self.nbits -= run + 1;
-                return Ok(z + run as u64);
+                return Ok(z + u64::from(run));
             }
             // All valid bits were zero: consume them and refill on the next pass.
-            z += self.nbits as u64;
+            z += u64::from(self.nbits);
             self.nbits = 0;
         }
     }
@@ -477,7 +477,7 @@ mod tests {
                 _ => 0,
             })
             .collect();
-        let widened: Vec<i64> = values.iter().map(|&value| value as i64).collect();
+        let widened: Vec<i64> = values.iter().map(|&value| i64::from(value)).collect();
         let mut scratch = rice::RiceScratch::default();
         assert_eq!(
             rice::rice_encode(&values, IntBitpix::I32, 32, &mut scratch),

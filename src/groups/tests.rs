@@ -1,5 +1,3 @@
-use crate::data::image_view::ImageView;
-use crate::error::Indexed;
 use crate::groups::*;
 use crate::reader::internals::open_fixture;
 

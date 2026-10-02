@@ -93,7 +93,7 @@ pub(super) fn plio_encode(values: &[i64]) -> Result<Vec<i16>> {
                 // as opcode 5 (zero run whose final pixel is set high).
                 if np == 1 && pv > 0 {
                     let last = ll.last_mut().unwrap();
-                    *last = (*last as i64 + 20481) as i16;
+                    *last = (i64::from(*last) + 20481) as i16;
                     done = true;
                 }
             }
@@ -178,7 +178,7 @@ fn decode_words(ll: BeWords<'_>, npix: usize, px: &mut Vec<i64>) -> Result<()> {
             continue;
         }
         let word = ll.get(ip - 1).ok_or(FitsError::UnexpectedEof)?;
-        let word = word as u16 as i64;
+        let word = i64::from(word as u16);
         let opcode = word >> 12;
         let data = word & 4095;
         match opcode {
@@ -206,7 +206,7 @@ fn decode_words(ll: BeWords<'_>, npix: usize, px: &mut Vec<i64>) -> Result<()> {
                 if ip >= lllen {
                     return Err(FitsError::UnexpectedEof);
                 }
-                let next = ll.get(ip).ok_or(FitsError::UnexpectedEof)? as u16 as i64;
+                let next = i64::from(ll.get(ip).ok_or(FitsError::UnexpectedEof)? as u16);
                 pv = (next << 12) + data;
                 skip_word = true;
             }

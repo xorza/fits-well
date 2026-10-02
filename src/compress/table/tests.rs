@@ -7,7 +7,6 @@ use crate::bintable::tform_kind::TformKind;
 use crate::compress::table::internals::mixed_columns;
 use crate::compress::*;
 use crate::endian::write_pq_descriptor;
-use crate::error::FitsError;
 use crate::header_model::Header;
 use crate::header_model::value::Value;
 use crate::keyword::key;
@@ -312,7 +311,7 @@ fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
             &mut encoded,
         )
         .unwrap();
-        let outer = descriptor::PqDescriptor::decode(&encoded[16..32], true).unwrap();
+        let outer = PqDescriptor::decode(&encoded[16..32], true).unwrap();
         let stream_range = outer
             .heap_range(TformKind::Byte, 32, encoded.len())
             .unwrap();

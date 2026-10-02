@@ -38,7 +38,7 @@ pub(crate) fn encode(sum: u32, complement: bool) -> [u8; 16] {
     let bytes = sum.to_be_bytes();
     let mut asc = [0u8; 16];
     for (i, &b) in bytes.iter().enumerate() {
-        let byte = b as i32;
+        let byte = i32::from(b);
         let quotient = byte / 4 + OFFSET;
         let remainder = byte % 4;
         // Four characters that sum to `byte`, then nudged off punctuation in
@@ -47,7 +47,7 @@ pub(crate) fn encode(sum: u32, complement: bool) -> [u8; 16] {
         ch[0] += remainder;
         loop {
             let mut changed = false;
-            for &ex in EXCLUDE.iter() {
+            for &ex in &EXCLUDE {
                 let mut j = 0;
                 while j < 4 {
                     if ch[j] == ex || ch[j + 1] == ex {

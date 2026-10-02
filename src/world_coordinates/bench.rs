@@ -35,7 +35,7 @@ pub fn wcs(c: &mut Criterion) {
                     })
                     .sum::<f64>(),
             )
-        })
+        });
     });
     group.bench_function("spectral", |bench| {
         bench.iter(|| {
@@ -48,7 +48,7 @@ pub fn wcs(c: &mut Criterion) {
                     })
                     .sum::<f64>(),
             )
-        })
+        });
     });
     let span = 2 * (INDEX_LENGTH - 1);
     group.bench_function("tabular_index_100k", |bench| {
@@ -61,7 +61,7 @@ pub fn wcs(c: &mut Criterion) {
                     })
                     .sum::<f64>(),
             )
-        })
+        });
     });
     group.finish();
 }

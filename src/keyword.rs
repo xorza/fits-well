@@ -93,7 +93,7 @@ impl KeyBuf {
 }
 
 impl Write for KeyBuf {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
         let end = self.len + s.len();
         // A FITS keyword is ≤ 8 bytes; exceeding KEY_CAP means a caller built an
         // impossible keyword — a logic error, not bad file input.

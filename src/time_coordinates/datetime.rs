@@ -100,11 +100,11 @@ impl Datetime {
                 operation: "convert a UTC leap-second label to Julian Date",
             });
         }
-        Ok(gregorian_to_jdn(self.year, self.month as i64, self.day as i64) as f64 - 0.5)
+        Ok(gregorian_to_jdn(self.year, i64::from(self.month), i64::from(self.day)) as f64 - 0.5)
     }
 
     fn day_fraction(&self) -> f64 {
-        (self.hour as f64 * 3600.0 + self.minute as f64 * 60.0 + self.second) / SEC_PER_DAY
+        (f64::from(self.hour) * 3600.0 + f64::from(self.minute) * 60.0 + self.second) / SEC_PER_DAY
     }
 
     fn validate(&self, scale: &TimeScale) -> Result<()> {

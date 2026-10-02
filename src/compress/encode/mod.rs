@@ -227,7 +227,7 @@ fn hcompress_tile_scale(
     let nx = dimensions[0];
     let ny = dimensions[1];
     let absolute = (factor * quantize::noise3_estimate(floats, nx, ny, scratch)).round();
-    if absolute > i32::MAX as f64 {
+    if absolute > f64::from(i32::MAX) {
         return Err(FitsError::UnsupportedCompression {
             name: "HCOMPRESS_1 tile scale exceeds the 32-bit stream range".to_string(),
         });
@@ -431,7 +431,7 @@ fn compress_float_image(
     if any_null {
         // Quantized nulls are stored as this reserved integer; ZBLANK tells the
         // decoder which value maps back to a blank (NaN) pixel.
-        h.set_internal("ZBLANK", quantize::NULL_VALUE as i64);
+        h.set_internal("ZBLANK", i64::from(quantize::NULL_VALUE));
     }
     image.scaling.add_to_header(&mut h, zbitpix.bitpix())?;
     Ok(h)

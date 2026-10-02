@@ -1,6 +1,5 @@
 use crate::writer::render_header;
 
-use crate::error::Indexed;
 use crate::header_model::internals::records;
 use crate::header_model::*;
 
@@ -98,7 +97,7 @@ fn iter_yields_every_record_in_order_with_duplicates() {
     );
 
     // A valued card carries its Value; the commentary card carries text, no value.
-    assert_eq!(entries[0].value.and_then(|v| v.as_logical()), Some(true)); // SIMPLE = T
+    assert_eq!(entries[0].value.and_then(Value::as_logical), Some(true)); // SIMPLE = T
     assert_eq!(entries[6].keyword, "COMMENT");
     assert_eq!(entries[6].value, None);
     // Commentary text starts at column 9, so the leading space is significant.

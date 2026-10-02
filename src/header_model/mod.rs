@@ -78,12 +78,10 @@ impl Header {
             let card = match Record::parse(chunk)? {
                 Record::End => return Ok(Header { cards, index }),
                 Record::Continue { substring, comment } => {
-                    match fold_continuation(&mut cards, &substring, comment.as_deref()) {
-                        true => continue,
-                        // A CONTINUE with no value card to extend is malformed; keep
-                        // it readable as commentary.
-                        false => demoted_continuation(&substring, comment.as_deref()),
+                    if fold_continuation(&mut cards, &substring, comment.as_deref()) {
+                        continue;
                     }
+                    demoted_continuation(&substring, comment.as_deref())
                 }
                 Record::Card(card) => card,
             };
@@ -255,30 +253,27 @@ impl Header {
     pub fn set(&mut self, keyword: &str, value: impl Into<Value>) -> Result<&mut Self> {
         let value = value.into();
         validate_valued_keyword(keyword)?;
-        match self.index.get(keyword) {
-            Some(&i) => {
+        if let Some(&i) = self.index.get(keyword) {
+            let Card::Value { value: slot, .. } = &mut self.cards[i] else {
+                unreachable!("the keyword index holds value cards only");
+            };
+            let previous = std::mem::replace(slot, value);
+            if let Err(error) = self.cards[i].validate() {
                 let Card::Value { value: slot, .. } = &mut self.cards[i] else {
-                    unreachable!("the keyword index holds value cards only");
+                    unreachable!("the card was a value card a moment ago");
                 };
-                let previous = std::mem::replace(slot, value);
-                if let Err(error) = self.cards[i].validate() {
-                    let Card::Value { value: slot, .. } = &mut self.cards[i] else {
-                        unreachable!("the card was a value card a moment ago");
-                    };
-                    *slot = previous;
-                    return Err(error);
-                }
+                *slot = previous;
+                return Err(error);
             }
-            None => {
-                let card = Card::Value {
-                    keyword: keyword.to_string(),
-                    value,
-                    comment: None,
-                };
-                card.validate()?;
-                self.index.insert(keyword.to_string(), self.cards.len());
-                self.cards.push(card);
-            }
+        } else {
+            let card = Card::Value {
+                keyword: keyword.to_string(),
+                value,
+                comment: None,
+            };
+            card.validate()?;
+            self.index.insert(keyword.to_string(), self.cards.len());
+            self.cards.push(card);
         }
         Ok(self)
     }

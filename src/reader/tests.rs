@@ -1,17 +1,8 @@
-use crate::bintable::column_data::ColumnData;
 use crate::bintable::descriptor;
 use crate::bintable::internals::table_header;
-use crate::bitpix::Bitpix;
-use crate::data::Image;
-use crate::data::image_data::ImageData;
 use crate::data::scaling::Scaling;
-use crate::error::FitsError;
-use crate::error::Indexed;
 use crate::error::Ranked;
-use crate::header_model::Header;
 use crate::header_model::internals::{card_bytes, records};
-use crate::ragged::Ragged;
-use crate::reader::data_source;
 use crate::reader::internals::{fixture_bytes, fixture_path, open_fixture};
 use crate::reader::*;
 use crate::world_coordinates::tabular::internals::{lookup_bytes, lookup_header};
@@ -20,8 +11,7 @@ use crate::writer::internals::written;
 use crate::writer::table::{TableBuilder, WriteColumn};
 use num_complex::Complex;
 use std::cell::RefCell;
-use std::io::{self, Cursor, Read, Seek, SeekFrom};
-use std::ops::Range;
+use std::io::{self, Cursor, SeekFrom};
 use std::rc::Rc;
 
 /// A cursor that records the byte range of every read it serves.
@@ -382,7 +372,6 @@ fn trailing_special_records_and_partial_blocks_are_ignored() {
 /// Assemble an in-memory FITS file from card strings + a raw data unit, both
 /// block-padded (header with spaces, data with NUL).
 fn fits_file(cards: &[&str], data: &[u8]) -> Vec<u8> {
-    use crate::block::BLOCK_SIZE;
     let mut buf = records(cards);
     buf.extend_from_slice(&card_bytes("END"));
     buf.resize(buf.len().next_multiple_of(BLOCK_SIZE), b' ');
@@ -540,13 +529,10 @@ fn role_aware_extents_find_the_exact_next_hdu_boundary() {
     let reader = FitsReader::open(Cursor::new(bytes)).unwrap();
     assert_eq!(reader.hdus.len(), 2);
     assert_eq!(reader.hdus[0].kind, HduKind::Primary);
-    assert_eq!(reader.hdus[0].data_offset, crate::block::BLOCK_SIZE as u64);
+    assert_eq!(reader.hdus[0].data_offset, BLOCK_SIZE as u64);
     assert_eq!(reader.hdus[0].data_bytes, 3);
     assert_eq!(reader.hdus[1].kind, HduKind::Image);
-    assert_eq!(
-        reader.hdus[1].data_offset,
-        (3 * crate::block::BLOCK_SIZE) as u64
-    );
+    assert_eq!(reader.hdus[1].data_offset, (3 * BLOCK_SIZE) as u64);
     assert_eq!(reader.hdus[1].data_bytes, 5);
 }
 
@@ -629,7 +615,10 @@ fn read_image_decodes_the_primary_array_shape_and_type() {
     let ImageData::I16(samples) = raw.decode() else {
         panic!("expected I16 samples");
     };
-    assert_eq!(samples.iter().map(|&v| v as i64).sum::<i64>(), 1_050_151);
+    assert_eq!(
+        samples.iter().map(|&v| i64::from(v)).sum::<i64>(),
+        1_050_151
+    );
     assert_eq!(samples.iter().min(), Some(&-9));
     assert_eq!(samples.iter().max(), Some(&2049));
     let centre = 256 * 512 + 256;
@@ -813,8 +802,8 @@ fn read_image_view_matches_decode_for_a_plain_image() {
 fn read_image_view_matches_decode_for_a_compressed_image() {
     let mut f = open_fixture("comp_gzip_i16.fits");
     let owned = f.read_image(1).unwrap().decode();
-    let mut scratch = Vec::with_capacity(owned.len().div_ceil(4));
-    let scratch_ptr = scratch.as_ptr() as *const i16;
+    let mut scratch: Vec<u64> = Vec::with_capacity(owned.len().div_ceil(4));
+    let scratch_ptr = scratch.as_ptr().cast::<i16>();
     let image = f.read_image_view(1, &mut scratch).unwrap();
     assert_eq!(image.metadata().shape, &[24, 16]);
     match (image.samples, &owned) {
@@ -862,16 +851,16 @@ fn select_2d_section(
 fn assert_image_data_exact(actual: &ImageData, expected: &ImageData, label: &str) {
     match (actual, expected) {
         (ImageData::U8(actual), ImageData::U8(expected)) => {
-            assert_eq!(actual, expected, "{label}")
+            assert_eq!(actual, expected, "{label}");
         }
         (ImageData::I16(actual), ImageData::I16(expected)) => {
-            assert_eq!(actual, expected, "{label}")
+            assert_eq!(actual, expected, "{label}");
         }
         (ImageData::I32(actual), ImageData::I32(expected)) => {
-            assert_eq!(actual, expected, "{label}")
+            assert_eq!(actual, expected, "{label}");
         }
         (ImageData::I64(actual), ImageData::I64(expected)) => {
-            assert_eq!(actual, expected, "{label}")
+            assert_eq!(actual, expected, "{label}");
         }
         (ImageData::F32(actual), ImageData::F32(expected)) => {
             assert_eq!(actual.len(), expected.len(), "{label}");

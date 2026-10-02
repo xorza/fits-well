@@ -146,19 +146,16 @@ impl Card {
     /// silently truncated; every other card renders to exactly one record.
     pub(crate) fn render_into(&self, out: &mut Vec<u8>) -> Result<()> {
         self.validate_contents()?;
-        match self.continuation_chain() {
-            Some(chain) => {
-                let start = out.len();
-                let result = chain.render_into(self.keyword(), out);
-                if result.is_err() {
-                    out.truncate(start);
-                }
-                result
+        if let Some(chain) = self.continuation_chain() {
+            let start = out.len();
+            let result = chain.render_into(self.keyword(), out);
+            if result.is_err() {
+                out.truncate(start);
             }
-            None => {
-                out.extend_from_slice(&self.render_one()?);
-                Ok(())
-            }
+            result
+        } else {
+            out.extend_from_slice(&self.render_one()?);
+            Ok(())
         }
     }
 

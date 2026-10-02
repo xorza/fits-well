@@ -31,8 +31,8 @@ impl PqDescriptor {
             )
         } else {
             (
-                i32::from_be_bytes(bytes[..4].try_into().unwrap()) as i64,
-                i32::from_be_bytes(bytes[4..].try_into().unwrap()) as i64,
+                i64::from(i32::from_be_bytes(bytes[..4].try_into().unwrap())),
+                i64::from(i32::from_be_bytes(bytes[4..].try_into().unwrap())),
             )
         };
         Ok(PqDescriptor {
@@ -118,7 +118,7 @@ pub(crate) mod internals {
                 i32::MIN,
                 0,
                 "count",
-                i32::MIN as i64,
+                i64::from(i32::MIN),
             ),
         ] {
             let mut bytes = Vec::with_capacity(8);

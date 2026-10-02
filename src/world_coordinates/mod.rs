@@ -159,22 +159,19 @@ impl Wcs {
         let celestial_pair = CelestialAxisPair::find(&ctype);
         let celestial_axes = ProjectedCelestialAxes::find(&ctype)?;
         let celestial_frame = CelestialFrame::from_header(header, a, &ctype)?;
-        let spectral_frames = match spectral_frames {
-            Some(frames) => {
-                assert_eq!(frames.len(), naxis, "spectral frame count");
-                frames
-            }
-            None => {
-                let frame = ctype
-                    .iter()
-                    .any(|ctype| axis::is_spectral_type(ctype))
-                    .then(|| SpectralFrame::from_header(header, a))
-                    .transpose()?;
-                ctype
-                    .iter()
-                    .map(|ctype| axis::is_spectral_type(ctype).then_some(frame).flatten())
-                    .collect()
-            }
+        let spectral_frames = if let Some(frames) = spectral_frames {
+            assert_eq!(frames.len(), naxis, "spectral frame count");
+            frames
+        } else {
+            let frame = ctype
+                .iter()
+                .any(|ctype| axis::is_spectral_type(ctype))
+                .then(|| SpectralFrame::from_header(header, a))
+                .transpose()?;
+            ctype
+                .iter()
+                .map(|ctype| axis::is_spectral_type(ctype).then_some(frame).flatten())
+                .collect()
         };
 
         let matrix = LinearMatrix::from_header(header, a, naxis, &cdelt, celestial_axes)?;
@@ -483,9 +480,10 @@ impl Wcs {
     /// of `NAXIS` and the highest axis any WCS keyword names.
     pub(crate) fn image_axis_count(header: &Header, alt: Option<char>) -> Result<usize> {
         let suffix = AltSuffix::new(alt);
-        let value = match header.get_integer(key!("WCSAXES{suffix}").as_str())? {
-            Some(axis_count) => axis_count,
-            None => {
+        let value =
+            if let Some(axis_count) = header.get_integer(key!("WCSAXES{suffix}").as_str())? {
+                axis_count
+            } else {
                 let inferred = infer_image_axis_count(header, suffix.as_str());
                 match header.get_integer("NAXIS")? {
                     Some(axis_count) if axis_count >= 0 => axis_count.max(inferred),
@@ -493,8 +491,7 @@ impl Wcs {
                     None if inferred != 0 => inferred,
                     None => return Err(FitsError::MissingKeyword { name: "WCSAXES" }),
                 }
-            }
-        };
+            };
         validated_axis_count(value, "WCSAXES")
     }
 
@@ -710,37 +707,37 @@ pub(crate) mod internals {
 
     /// `wcs_tan.fits`: `RA---TAN`/`DEC--TAN`, CRVAL 150/2.5, CRPIX 256/256, 1″
     /// pixels, 15° rotation.
-    pub(crate) const TAN_GOLDEN: AstropyGolden = AstropyGolden {
+    pub(crate) const TAN_GOLDEN: AstropyGolden<'_> = AstropyGolden {
         decimals: 12,
         points: &[
-            (1.0, 1.0, 150.050131124369, 2.413246375001),
-            (256.0, 256.0, 150.000000000000, 2.500000000000),
-            (512.0, 512.0, 149.949665615474, 2.587091911566),
-            (100.0, 400.0, 150.052260368590, 2.527420491210),
-            (256.5, 256.5, 149.999901697142, 2.500170103464),
-            (400.0, 123.0, 149.951756061540, 2.474666292235),
+            (1.0, 1.0, 150.050_131_124_369, 2.413_246_375_001),
+            (256.0, 256.0, 150.000_000_000_000, 2.500_000_000_000),
+            (512.0, 512.0, 149.949_665_615_474, 2.587_091_911_566),
+            (100.0, 400.0, 150.052_260_368_590, 2.527_420_491_210),
+            (256.5, 256.5, 149.999_901_697_142, 2.500_170_103_464),
+            (400.0, 123.0, 149.951_756_061_540, 2.474_666_292_235),
         ],
     };
 
-    pub(crate) const CEA_GOLDEN: AstropyGolden = AstropyGolden {
+    pub(crate) const CEA_GOLDEN: AstropyGolden<'_> = AstropyGolden {
         decimals: 10,
         points: &[
-            (20.0, 70.0, 46.7406870828, 30.4886140110),
-            (80.0, 30.0, 43.2767613377, 29.4887155113),
+            (20.0, 70.0, 46.740_687_082_8, 30.488_614_011_0),
+            (80.0, 30.0, 43.276_761_337_7, 29.488_715_511_3),
         ],
     };
 
-    pub(crate) const CROTA_GOLDEN: AstropyGolden = AstropyGolden {
+    pub(crate) const CROTA_GOLDEN: AstropyGolden<'_> = AstropyGolden {
         decimals: 10,
         points: &[
-            (128.0, 128.0, 83.6000000000, 22.0000000000),
-            (1.0, 1.0, 83.6909943156, 21.9692606492),
-            (256.0, 200.0, 83.5210288338, 22.0055606050),
-            (64.0, 192.0, 83.6166986376, 22.0425247793),
+            (128.0, 128.0, 83.600_000_000_0, 22.000_000_000_0),
+            (1.0, 1.0, 83.690_994_315_6, 21.969_260_649_2),
+            (256.0, 200.0, 83.521_028_833_8, 22.005_560_605_0),
+            (64.0, 192.0, 83.616_698_637_6, 22.042_524_779_3),
         ],
     };
 
-    pub(crate) fn assert_astropy_golden(wcs: &Wcs, golden: &AstropyGolden, context: &str) {
+    pub(crate) fn assert_astropy_golden(wcs: &Wcs, golden: &AstropyGolden<'_>, context: &str) {
         // A printed value lies within half a unit in its last place of wcslib's
         // answer, and DEGREE_TOLERANCE covers where this evaluation and wcslib's part.
         let tolerance = 0.5 * 10f64.powi(-golden.decimals) + DEGREE_TOLERANCE;

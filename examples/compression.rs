@@ -34,7 +34,7 @@ fn main() -> fits_well::Result<()> {
     let restored = reader.read_image(images[0])?;
     let restored_shape = restored.metadata().shape.to_vec();
     let lossless = restored.decode() == expected;
-    println!("restored {:?}, lossless = {}", restored_shape, lossless);
+    println!("restored {restored_shape:?}, lossless = {lossless}");
 
     Ok(())
 }

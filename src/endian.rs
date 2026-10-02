@@ -157,7 +157,7 @@ mod tests {
         // Unlike `extend_be`, this *replaces* rather than appends — a long fill
         // followed by a short one must leave no stale tail. It also widens through
         // `conv`, which is how the codecs decode straight into their `i64` scratch.
-        let widen = |b| i16::from_be_bytes(b) as i64;
+        let widen = |b| i64::from(i16::from_be_bytes(b));
         let mut reused = vec![99i64; 8];
         decode_be_into(&[0x00, 0x01, 0xFF, 0xFF], &mut reused, widen);
         assert_eq!(reused, vec![1i64, -1]);

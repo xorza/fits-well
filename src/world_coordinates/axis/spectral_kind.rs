@@ -420,15 +420,14 @@ fn velocity_scale(unit: &str) -> Option<f64> {
     let separator = |c: char| c.is_whitespace() || c == '.' || c == '*';
     let scaled = unit::split_numeric_multiplier(unit)?;
     let text = scaled.base.trim();
-    let (length, time) = match text.split_once('/') {
-        Some((length, time)) => (length.trim(), time.trim()),
-        None => {
-            let per_time = ["**-1", "^-1", "-1"]
-                .into_iter()
-                .find_map(|suffix| text.strip_suffix(suffix))?;
-            let (length, time) = per_time.rsplit_once(separator)?;
-            (length.trim_end_matches(separator), time)
-        }
+    let (length, time) = if let Some((length, time)) = text.split_once('/') {
+        (length.trim(), time.trim())
+    } else {
+        let per_time = ["**-1", "^-1", "-1"]
+            .into_iter()
+            .find_map(|suffix| text.strip_suffix(suffix))?;
+        let (length, time) = per_time.rsplit_once(separator)?;
+        (length.trim_end_matches(separator), time)
     };
     let length = unit::resolve(length, unit::LENGTH)?;
     let time = unit::resolve(time, unit::TIME)?;

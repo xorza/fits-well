@@ -111,7 +111,7 @@ pub mod wcs {
     //! the general fiducial-point pole computation: zenithal `TAN`/`SIN`/`ARC`/`STG`/
     //! `ZEA`/`ZPN`/`AIR`, zenithal-perspective `AZP`/`SZP`, cylindrical `CAR`/`CEA`/
     //! `MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic `COP`/`COE`/`COD`/`COO`,
-    //! pseudoconic `BON`, polyconic `PCO`, quad-cube `TSC`/`CSC`/`QSC`, and HEALPix
+    //! pseudoconic `BON`, polyconic `PCO`, quad-cube `TSC`/`CSC`/`QSC`, and `HEALPix`
     //! `HPX`. Every Table-26 spectral algorithm (`F2*`/`W2*`/`V2*`/`A2*`, detector
     //! `GRI`/`GRA`, and generic `LOG`) is evaluated in both directions. `-TAB`
     //! coordinate arrays are resolved from their BINTABLE through

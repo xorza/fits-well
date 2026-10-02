@@ -12,7 +12,7 @@ use criterion::{BenchmarkId, Criterion, Throughput};
 
 use crate::bintable::BinTable;
 use crate::compress::table::internals::mixed_columns;
-use crate::compress::{Compression, CompressionOptions};
+use crate::compress::{Compression, CompressionOptions, Hcompress};
 use crate::data::Image;
 use crate::data::image_data::ImageData;
 use crate::header_model::Header;
@@ -96,7 +96,7 @@ pub fn decompress(c: &mut Criterion) {
         Compression::GZIP,
         Compression::GZIP_SHUFFLED,
         Compression::Rice,
-        Compression::Hcompress(Default::default()),
+        Compression::Hcompress(Hcompress::default()),
     ] {
         let codec = compression.name();
         let mut r = FitsReader::open(Cursor::new(compressed(&int, compression))).unwrap();
@@ -105,7 +105,7 @@ pub fn decompress(c: &mut Criterion) {
             b.iter(|| {
                 let img = r.read_image(1).unwrap();
                 black_box(&img);
-            })
+            });
         });
     }
 
@@ -115,7 +115,7 @@ pub fn decompress(c: &mut Criterion) {
         b.iter(|| {
             let img = rp.read_image(1).unwrap();
             black_box(&img);
-        })
+        });
     });
 
     for compression in [Compression::Rice, Compression::GZIP] {
@@ -126,7 +126,7 @@ pub fn decompress(c: &mut Criterion) {
             b.iter(|| {
                 let img = r.read_image(1).unwrap();
                 black_box(&img);
-            })
+            });
         });
     }
     g.finish();
@@ -146,7 +146,7 @@ pub fn compress(c: &mut Criterion) {
         Compression::GZIP,
         Compression::GZIP_SHUFFLED,
         Compression::Rice,
-        Compression::Hcompress(Default::default()),
+        Compression::Hcompress(Hcompress::default()),
     ] {
         let codec = compression.name();
         let mut buf = Vec::new();
@@ -158,7 +158,7 @@ pub fn compress(c: &mut Criterion) {
                     .write_compressed_image(black_box(&int), compression, &opts(), None)
                     .unwrap();
                 black_box(buf.len())
-            })
+            });
         });
     }
 
@@ -171,7 +171,7 @@ pub fn compress(c: &mut Criterion) {
                 .write_compressed_image(black_box(&mask), Compression::Plio, &opts(), None)
                 .unwrap();
             black_box(buf.len())
-        })
+        });
     });
 
     for compression in [Compression::Rice, Compression::GZIP] {
@@ -185,7 +185,7 @@ pub fn compress(c: &mut Criterion) {
                     .write_compressed_image(black_box(&flt), compression, &opts(), None)
                     .unwrap();
                 black_box(buf.len())
-            })
+            });
         });
     }
     g.finish();
@@ -243,7 +243,7 @@ pub fn decompress_table(c: &mut Criterion) {
             FitsReader::open(Cursor::new(compressed_table(&header, &table, compression))).unwrap();
         g.throughput(Throughput::Bytes(bytes));
         g.bench_function(algo, |b| {
-            b.iter(|| black_box(r.read_compressed_table(1).unwrap()))
+            b.iter(|| black_box(r.read_compressed_table(1).unwrap()));
         });
     }
     g.finish();
@@ -274,7 +274,7 @@ pub fn compress_table(c: &mut Criterion) {
                     )
                     .unwrap();
                 black_box(buf.len())
-            })
+            });
         });
     }
     g.finish();
