@@ -39,7 +39,7 @@ fn emit_compressed_files_for_astropy() {
         ))
         .unwrap();
         let mut w = FitsWriter::new(f);
-        w.write_compressed_image(&image, compression, &CompressionOptions::tiled(tiles))
+        w.write_compressed_image(&image, compression, &CompressionOptions::tiled(tiles), None)
             .unwrap();
     }
 
@@ -60,6 +60,7 @@ fn emit_compressed_files_for_astropy() {
         &mask_image,
         Compression::Plio,
         &CompressionOptions::default(),
+        None,
     )
     .unwrap();
 
@@ -79,6 +80,7 @@ fn emit_compressed_files_for_astropy() {
         &fimage,
         Compression::Rice,
         &CompressionOptions::tiled([24, 16]),
+        None,
     )
     .unwrap();
 }
@@ -109,7 +111,7 @@ fn compression_write_round_trips_through_decode() {
         ),
     ] {
         let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-        w.write_compressed_image(&image, compression, &CompressionOptions::tiled(tiles))
+        w.write_compressed_image(&image, compression, &CompressionOptions::tiled(tiles), None)
             .unwrap();
         let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
         if matches!(compression, Compression::Hcompress(_)) {
@@ -140,6 +142,7 @@ fn compression_write_round_trips_through_decode() {
         &image_3d,
         Compression::GZIP,
         &CompressionOptions::tiled([3, 2, 2]),
+        None,
     )
     .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
@@ -199,8 +202,13 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
         ] {
             let cmptype = compression.name();
             let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-            w.write_compressed_image(&image, compression, &CompressionOptions::tiled([24, 1]))
-                .unwrap();
+            w.write_compressed_image(
+                &image,
+                compression,
+                &CompressionOptions::tiled([24, 1]),
+                None,
+            )
+            .unwrap();
             let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
             let header = &r.hdus()[1].header;
             match compression {
@@ -306,6 +314,7 @@ fn hcompress_writer_enforces_standard_image_constraints() {
             &line,
             Compression::Hcompress(Hcompress::default()),
             &CompressionOptions::default(),
+            None,
         ),
         Err(FitsError::UnsupportedCompression { name })
             if name == "HCOMPRESS_1 requires a two-dimensional image"
@@ -317,6 +326,7 @@ fn hcompress_writer_enforces_standard_image_constraints() {
             &float,
             Compression::Hcompress(Hcompress::lossy(2.0).unwrap()),
             &CompressionOptions::default(),
+            None,
         ),
         Err(FitsError::UnsupportedCompression { name })
             if name == "HCOMPRESS_1 for float images (write)"
@@ -328,6 +338,7 @@ fn hcompress_writer_enforces_standard_image_constraints() {
             &extreme,
             Compression::Hcompress(Hcompress::default()),
             &CompressionOptions::tiled([2, 2]),
+            None,
         ),
         Err(FitsError::UnsupportedCompression { name })
             if name == "HCOMPRESS_1 tile exceeds the signed 64-bit stream range"
@@ -353,6 +364,7 @@ fn hcompress_writer_enforces_standard_image_constraints() {
             &undefined,
             Compression::Hcompress(Hcompress::lossy(2.0).unwrap()),
             &CompressionOptions::tiled([8, 8]),
+            None,
         ),
         Err(FitsError::UnsupportedCompression { name })
             if name == "lossy HCOMPRESS_1 with undefined pixels requires a null mask"
@@ -381,7 +393,7 @@ fn dither_option_sets_zquantiz_and_round_trips() {
         let options = CompressionOptions::tiled([24, 16])
             .with_quantization(0.0, dither)
             .unwrap();
-        w.write_compressed_image(&image, Compression::Rice, &options)
+        w.write_compressed_image(&image, Compression::Rice, &options, None)
             .unwrap();
         let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
         assert_eq!(
@@ -414,6 +426,7 @@ fn tile_shape_with_wrong_rank_is_rejected() {
         &image,
         Compression::Rice,
         &CompressionOptions::tiled([2, 2, 2]),
+        None,
     );
     assert!(
         matches!(
@@ -447,6 +460,7 @@ fn float_write_preserves_nan_nulls() {
         &image,
         Compression::Rice,
         &CompressionOptions::tiled([24, 16]),
+        None,
     )
     .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
@@ -481,6 +495,7 @@ fn hcompress_writer_converts_noise_multiplier_to_tile_scale() {
         &image,
         Compression::Hcompress(Hcompress::lossy(2.0).unwrap()),
         &CompressionOptions::tiled([8, 8]),
+        None,
     )
     .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
@@ -517,6 +532,7 @@ fn hcompress_lossless_write_round_trips_exactly() {
             &image,
             Compression::Hcompress(Hcompress::default()),
             &CompressionOptions::tiled([16, 16]),
+            None,
         )
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
@@ -533,6 +549,7 @@ fn hcompress_lossless_write_round_trips_exactly() {
             &image,
             Compression::Hcompress(Hcompress::default()),
             &CompressionOptions::tiled([2, 2]),
+            None,
         )
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
@@ -551,6 +568,7 @@ fn hcompress_lossless_write_round_trips_exactly() {
             &image,
             Compression::Hcompress(Hcompress::default()),
             &CompressionOptions::tiled([2, 2]),
+            None,
         )
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
@@ -572,8 +590,13 @@ fn plio_write_round_trips_through_decode() {
         },
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(&image, Compression::Plio, &CompressionOptions::default())
-        .unwrap();
+    w.write_compressed_image(
+        &image,
+        Compression::Plio,
+        &CompressionOptions::default(),
+        None,
+    )
+    .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     match r.read_image(1).unwrap().decode() {
         ImageData::I32(v) => assert_eq!(v, samples, "PLIO_1 round-trip"),
@@ -596,8 +619,13 @@ fn integer_image_compression_preserves_bscale_bzero_and_blank() {
         },
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(&image, Compression::GZIP, &CompressionOptions::default())
-        .unwrap();
+    w.write_compressed_image(
+        &image,
+        Compression::GZIP,
+        &CompressionOptions::default(),
+        None,
+    )
+    .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let back = r.read_image(1).unwrap();
     assert_eq!(back.scaling.bscale, 2.5);
@@ -633,8 +661,13 @@ fn rice_64_bit_pixels_round_trip_extreme_differences() {
         },
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(&image, Compression::Rice, &CompressionOptions::default())
-        .unwrap();
+    w.write_compressed_image(
+        &image,
+        Compression::Rice,
+        &CompressionOptions::default(),
+        None,
+    )
+    .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let decoded = r.read_image(1).unwrap().decode();
     assert_eq!(decoded, ImageData::I64(samples));
@@ -656,8 +689,13 @@ fn nocompress_image_round_trips() {
         },
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(&image, Compression::None, &CompressionOptions::default())
-        .unwrap();
+    w.write_compressed_image(
+        &image,
+        Compression::None,
+        &CompressionOptions::default(),
+        None,
+    )
+    .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     match r.read_image(1).unwrap().decode() {
         ImageData::I16(v) => assert_eq!(v, samples),
@@ -674,7 +712,12 @@ fn parallel_full_decode_crosses_the_bounded_wave_boundary() {
     let image = Image::new(vec![1024, 4097], samples.clone()).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
-        .write_compressed_image(&image, Compression::None, &CompressionOptions::default())
+        .write_compressed_image(
+            &image,
+            Compression::None,
+            &CompressionOptions::default(),
+            None,
+        )
         .unwrap();
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
@@ -706,8 +749,13 @@ fn empty_naxis0_image_round_trips() {
             },
         };
         let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-        w.write_compressed_image(&image, Compression::GZIP, &CompressionOptions::default())
-            .unwrap();
+        w.write_compressed_image(
+            &image,
+            Compression::GZIP,
+            &CompressionOptions::default(),
+            None,
+        )
+        .unwrap();
         let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
         let back = r.read_image(1).unwrap();
         assert!(back.shape.is_empty(), "shape for {samples:?}");
@@ -733,8 +781,13 @@ fn empty_first_axis_image_round_trips() {
         },
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(&image, Compression::GZIP, &CompressionOptions::default())
-        .unwrap();
+    w.write_compressed_image(
+        &image,
+        Compression::GZIP,
+        &CompressionOptions::default(),
+        None,
+    )
+    .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let back = r.read_image(1).unwrap();
     assert_eq!(back.shape, [0]);

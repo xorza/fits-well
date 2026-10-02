@@ -20,7 +20,7 @@ fn main() -> fits_well::Result<()> {
     // while the typed codec prevents invalid or misspelled choices.
     let options = CompressionOptions::tiled([8, 8]);
     let mut writer = FitsWriter::new(File::create(&path)?);
-    writer.write_compressed_image(&image, Compression::Rice, &options)?;
+    writer.write_compressed_image(&image, Compression::Rice, &options, None)?;
     writer.into_inner().sync_all()?;
     println!("wrote {}", path.display());
 

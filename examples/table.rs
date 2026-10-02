@@ -26,7 +26,7 @@ fn main() -> fits_well::Result<()> {
         )?;
 
     let mut writer = FitsWriter::new(File::create(&path)?);
-    writer.write_table(&table)?;
+    writer.write_table(&table, None)?;
     writer.into_inner().sync_all()?;
     println!("wrote {}", path.display());
 

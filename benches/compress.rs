@@ -87,7 +87,8 @@ fn science_f32() -> Image {
 
 fn compressed(img: &Image, compression: Compression) -> Vec<u8> {
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(img, compression, &opts()).unwrap();
+    w.write_compressed_image(img, compression, &opts(), None)
+        .unwrap();
     w.into_inner().into_inner()
 }
 
@@ -167,7 +168,7 @@ fn compress(c: &mut Criterion) {
             b.iter(|| {
                 buf.clear();
                 FitsWriter::new(&mut buf)
-                    .write_compressed_image(black_box(&int), compression, &opts())
+                    .write_compressed_image(black_box(&int), compression, &opts(), None)
                     .unwrap();
                 black_box(buf.len())
             })
@@ -180,7 +181,7 @@ fn compress(c: &mut Criterion) {
         b.iter(|| {
             buf.clear();
             FitsWriter::new(&mut buf)
-                .write_compressed_image(black_box(&mask), Compression::Plio, &opts())
+                .write_compressed_image(black_box(&mask), Compression::Plio, &opts(), None)
                 .unwrap();
             black_box(buf.len())
         })
@@ -194,7 +195,7 @@ fn compress(c: &mut Criterion) {
             b.iter(|| {
                 buf.clear();
                 FitsWriter::new(&mut buf)
-                    .write_compressed_image(black_box(&flt), compression, &opts())
+                    .write_compressed_image(black_box(&flt), compression, &opts(), None)
                     .unwrap();
                 black_box(buf.len())
             })
@@ -246,7 +247,7 @@ fn table_fixture() -> (Header, BinTable) {
     ];
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     let table = TableBuilder::explicit(n, columns).unwrap();
-    w.write_table(&table).unwrap();
+    w.write_table(&table, None).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let table = r.read_table(1).unwrap();
     let header = r.hdus()[1].header.clone();

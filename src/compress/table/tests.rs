@@ -58,7 +58,7 @@ fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
     // 1. Write an uncompressed table and read it back.
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     let source = TableBuilder::explicit(nrows, columns.clone()).unwrap();
-    w.write_table(&source).unwrap();
+    w.write_table(&source, None).unwrap();
     let bytes = w.into_inner().into_inner();
     let mut r = FitsReader::open(Cursor::new(bytes)).unwrap();
     let orig = r.read_table(1).unwrap();
@@ -356,12 +356,12 @@ fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
     for wide in [false, true] {
         let mut column = WriteColumn::vla("VLA", vec![ColumnData::Bytes(vec![7])]).unwrap();
         if wide {
-            column = column.wide().unwrap();
+            column = column.wide();
         }
         let prefix = WriteColumn::scalar("PREFIX", ColumnData::Bytes(vec![3]));
         let builder = TableBuilder::explicit(1, vec![prefix, column]).unwrap();
         let mut source_writer = FitsWriter::new(Cursor::new(Vec::new()));
-        source_writer.write_table(&builder).unwrap();
+        source_writer.write_table(&builder, None).unwrap();
         let source_bytes = source_writer.into_inner().into_inner();
         let mut source = FitsReader::from_bytes(&source_bytes).unwrap();
         let original_header = source.hdus[1].header.clone();
@@ -508,7 +508,7 @@ fn compressed_round_trip(
     compression: Compression,
 ) -> (BinTable, BinTable) {
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(&TableBuilder::explicit(nrows, columns).unwrap())
+    w.write_table(&TableBuilder::explicit(nrows, columns).unwrap(), None)
         .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let original = r.read_table(1).unwrap();
@@ -574,7 +574,7 @@ fn a_variable_length_array_is_stored_compressed_only_when_it_shrinks() {
     ];
     let column = WriteColumn::vla("ARRAYS", rows.clone()).unwrap();
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_table(&TableBuilder::explicit(3, vec![column]).unwrap())
+    w.write_table(&TableBuilder::explicit(3, vec![column]).unwrap(), None)
         .unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let original = r.read_table(1).unwrap();
