@@ -21,7 +21,9 @@ use crate::ragged::Ragged;
 use crate::reader::FitsReader;
 use crate::reader::{ChecksumReport, ChecksumStatus};
 use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
-use crate::writer::internals::{ascii_table, binary_table, round_trip, written};
+use crate::writer::internals::{
+    ascii_table, binary_table, rejected_before_output, round_trip, written,
+};
 use crate::writer::table::internals;
 use crate::writer::table::{TableBuilder, WriteColumn};
 use crate::writer::{
@@ -355,12 +357,10 @@ fn written_table_header(column: WriteColumn) -> Header {
 }
 
 fn assert_table_column_rejected(column: WriteColumn, keyword: &'static str) {
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(&binary_table(1, &[column]), None),
-        Err(FitsError::KeywordOutOfRange { name }) if name == keyword
+        rejected_before_output(|w| w.write_table(&binary_table(1, &[column]), None)),
+        FitsError::KeywordOutOfRange { name } if name == keyword
     ));
-    assert!(writer.into_inner().into_inner().is_empty());
 }
 
 fn empty_binary_columns(count: usize) -> Vec<WriteColumn> {
@@ -394,99 +394,84 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
         samples: ImageData::U8(vec![1]),
         scaling: Scaling::IDENTITY,
     };
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_image(&mismatched, None),
-        Err(FitsError::DataSizeMismatch {
+        rejected_before_output(|w| w.write_image(&mismatched, None)),
+        FitsError::DataSizeMismatch {
             expected: 2,
             got: 1
-        })
+        }
     ));
-    assert!(writer.into_inner().into_inner().is_empty());
 
     let image = Image {
         shape: vec![usize::MAX, 2],
         samples: ImageData::U8(Vec::new()),
         scaling: Scaling::IDENTITY,
     };
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_image(&image, None),
-        Err(FitsError::DataUnitOverflow)
+        rejected_before_output(|w| w.write_image(&image, None)),
+        FitsError::DataUnitOverflow
     ));
 
     let fixed = WriteColumn::fixed("X", ColumnData::Bytes(Vec::new()), usize::MAX);
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(&binary_table(2, &[fixed]), None),
-        Err(FitsError::DataUnitOverflow)
+        rejected_before_output(|w| w.write_table(&binary_table(2, &[fixed]), None)),
+        FitsError::DataUnitOverflow
     ));
 
     let ascii = |name: &str, width| {
         AsciiWriteColumn::new(name, AsciiColumnData::Text(AsciiText::default()), width)
     };
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_ascii_table(
+        rejected_before_output(|w| w.write_ascii_table(
             &ascii_table(0, &[ascii("A", usize::MAX), ascii("B", 1)],),
             None
-        ),
-        Err(FitsError::DataUnitOverflow)
+        )),
+        FitsError::DataUnitOverflow
     ));
 
     let invalid_bits = WriteColumn::bits("FLAGS", vec![0; 3], 12);
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(&binary_table(2, &[invalid_bits]), None),
-        Err(FitsError::RowWidthMismatch {
+        rejected_before_output(|w| w.write_table(&binary_table(2, &[invalid_bits]), None)),
+        FitsError::RowWidthMismatch {
             computed: 3,
             declared: 4
-        })
+        }
     ));
-    assert!(writer.into_inner().into_inner().is_empty());
 
     let invalid_vla_bits =
         WriteColumn::vla_bits("FLAGS", [bitvec![u8, Msb0; 1, 0, 1]].into_iter().collect());
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(&binary_table(2, &[invalid_vla_bits]), None),
-        Err(FitsError::RowWidthMismatch {
+        rejected_before_output(|w| w.write_table(&binary_table(2, &[invalid_vla_bits]), None)),
+        FitsError::RowWidthMismatch {
             computed: 1,
             declared: 2
-        })
+        }
     ));
-    assert!(writer.into_inner().into_inner().is_empty());
 
     let invalid_vla_bits =
         WriteColumn::vla_bits("FLAGS", [bitvec![u8, Msb0; 1, 0, 1]].into_iter().collect())
             .with_tdim(vec![2, 2]);
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(&binary_table(1, &[invalid_vla_bits]), None),
-        Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
+        rejected_before_output(|w| w.write_table(&binary_table(1, &[invalid_vla_bits]), None)),
+        FitsError::KeywordOutOfRange { name: "TDIMn" }
     ));
-    assert!(writer.into_inner().into_inner().is_empty());
 
     let invalid_tdim =
         WriteColumn::fixed("VEC", ColumnData::I32(vec![1, 2, 3, 4]), 4).with_tdim(vec![5]);
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(&binary_table(1, &[invalid_tdim]), None),
-        Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
+        rejected_before_output(|w| w.write_table(&binary_table(1, &[invalid_tdim]), None)),
+        FitsError::KeywordOutOfRange { name: "TDIMn" }
     ));
-    assert!(writer.into_inner().into_inner().is_empty());
 
     // A shape whose product overflows `usize` is out-of-range for the same reason a
     // merely-too-large one is: it cannot describe the cell's element count. The
     // reader reports the overflow identically.
     let overflowing_tdim = WriteColumn::fixed("VEC", ColumnData::I32(vec![1, 2, 3, 4]), 4)
         .with_tdim(vec![usize::MAX, 2]);
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(&binary_table(1, &[overflowing_tdim]), None),
-        Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
+        rejected_before_output(|w| w.write_table(&binary_table(1, &[overflowing_tdim]), None)),
+        FitsError::KeywordOutOfRange { name: "TDIMn" }
     ));
-    assert!(writer.into_inner().into_inner().is_empty());
 
     for shape in [vec![], vec![0]] {
         let invalid_empty_vla = WriteColumn::vla(
@@ -494,32 +479,27 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
             Ragged::from_rows(vec![ColumnData::I32(vec![])]).unwrap(),
         )
         .with_tdim(shape);
-        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
         assert!(matches!(
-            writer.write_table(&binary_table(1, &[invalid_empty_vla]), None),
-            Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
+            rejected_before_output(|w| w.write_table(&binary_table(1, &[invalid_empty_vla]), None)),
+            FitsError::KeywordOutOfRange { name: "TDIMn" }
         ));
-        assert!(writer.into_inner().into_inner().is_empty());
     }
 
     // "Vég" is four bytes, so it fills the field and reaches the ASCII check.
     let invalid_text =
         WriteColumn::fixed("NAME", ColumnData::Character("Vég".as_bytes().to_vec()), 4);
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(&binary_table(1, &[invalid_text]), None),
-        Err(FitsError::InvalidAscii {
+        rejected_before_output(|w| w.write_table(&binary_table(1, &[invalid_text]), None)),
+        FitsError::InvalidAscii {
             context: "binary character cell"
-        })
+        }
     ));
-    assert!(writer.into_inner().into_inner().is_empty());
 
     #[cfg(target_pointer_width = "64")]
     {
-        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
         assert!(matches!(
-            writer.write_table(&binary_table(usize::MAX, &[]), None),
-            Err(FitsError::DataUnitOverflow)
+            rejected_before_output(|w| w.write_table(&binary_table(usize::MAX, &[]), None)),
+            FitsError::DataUnitOverflow
         ));
     }
 }
@@ -545,20 +525,16 @@ fn table_writers_enforce_the_exact_tfields_limit_before_output() {
     );
 
     let binary = empty_binary_columns(MAX_TABLE_FIELDS + 1);
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_table(&binary_table(0, &binary), None),
-        Err(FitsError::KeywordOutOfRange { name: "TFIELDS" })
+        rejected_before_output(|w| w.write_table(&binary_table(0, &binary), None)),
+        FitsError::KeywordOutOfRange { name: "TFIELDS" }
     ));
-    assert!(writer.into_inner().into_inner().is_empty());
 
     let ascii = empty_ascii_columns(MAX_TABLE_FIELDS + 1);
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_ascii_table(&ascii_table(0, &ascii), None),
-        Err(FitsError::KeywordOutOfRange { name: "TFIELDS" })
+        rejected_before_output(|w| w.write_ascii_table(&ascii_table(0, &ascii), None)),
+        FitsError::KeywordOutOfRange { name: "TFIELDS" }
     ));
-    assert!(writer.into_inner().into_inner().is_empty());
 }
 
 #[test]
@@ -1596,12 +1572,10 @@ fn image_blank_is_type_and_range_checked_before_output() {
                     ..Scaling::IDENTITY
                 },
             };
-            let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
             assert!(matches!(
-                writer.write_image(&image, None),
-                Err(FitsError::KeywordOutOfRange { name: "BLANK" })
+                rejected_before_output(|w| w.write_image(&image, None)),
+                FitsError::KeywordOutOfRange { name: "BLANK" }
             ));
-            assert!(writer.into_inner().into_inner().is_empty());
         }
     }
 }
@@ -1647,12 +1621,10 @@ fn image_nonfinite_scaling_is_rejected_before_output() {
                 blank: None,
             },
         };
-        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
         assert!(matches!(
-            writer.write_image(&image, None),
-            Err(FitsError::KeywordOutOfRange { name }) if name == case.keyword
+            rejected_before_output(|w| w.write_image(&image, None)),
+            FitsError::KeywordOutOfRange { name } if name == case.keyword
         ));
-        assert!(writer.into_inner().into_inner().is_empty());
     }
 }
 
@@ -1667,17 +1639,15 @@ fn compressed_image_metadata_is_validated_before_automatic_primary() {
             ..Scaling::IDENTITY
         },
     };
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_compressed_image(
+        rejected_before_output(|w| w.write_compressed_image(
             &image,
             Compression::GZIP,
             &CompressionOptions::default(),
             None
-        ),
-        Err(FitsError::KeywordOutOfRange { name: "BLANK" })
+        )),
+        FitsError::KeywordOutOfRange { name: "BLANK" }
     ));
-    assert!(writer.into_inner().into_inner().is_empty());
 
     let image = Image {
         shape: vec![1, 1],
@@ -1789,12 +1759,10 @@ fn compressed_header_templates_preserve_information_and_regenerate_structure() {
 
     let mut conflicting = source_header.clone();
     conflicting.set_internal("NAXIS2", 99);
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_compressed_table(&conflicting, &source_table, 2, Compression::GZIP),
-        Err(FitsError::TableMetadataMismatch { name }) if name == "NAXIS2"
+        rejected_before_output(|w| w.write_compressed_table(&conflicting, &source_table, 2, Compression::GZIP)),
+        FitsError::TableMetadataMismatch { name } if name == "NAXIS2"
     ));
-    assert!(writer.into_inner().into_inner().is_empty());
 }
 
 #[test]

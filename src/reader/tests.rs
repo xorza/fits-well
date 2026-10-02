@@ -661,7 +661,7 @@ fn read_image_rejects_non_image_hdus() {
 }
 
 #[test]
-fn hdu_index_finds_extensions_by_extname() {
+fn hdu_index_finds_extensions_by_name_and_version() {
     let f = open_fixture("DDTSUVDATA.fits");
     // hdu 1 is the AIPS antenna table, EXTNAME = 'AIPS AN' (trailing spaces trimmed).
     assert_eq!(f.hdu_index("AIPS AN", None).unwrap(), Some(1));
@@ -691,6 +691,36 @@ fn hdu_index_finds_extensions_by_extname() {
         Err(FitsError::TypeMismatch { name, expected })
             if name == "EXTNAME" && expected == "text"
     ));
+
+    // A written extension is found by its name in any case and its EXTVER.
+    let primary = Image::new(vec![1], vec![0u8]).unwrap();
+    let extension = Image::new(vec![3], vec![10i16, 20, 30]).unwrap();
+    let mut extension_header = Header::new();
+    extension_header.set("EXTNAME", "SCI").unwrap();
+    extension_header.set("EXTVER", 2).unwrap();
+    extension_header.set("OBJECT", "target").unwrap();
+
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_image(&primary, None).unwrap();
+    writer
+        .write_image(&extension, Some(&extension_header))
+        .unwrap();
+    let bytes = writer.into_inner().into_inner();
+    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+
+    let index = reader.hdu_index("sci", Some(2)).unwrap().unwrap();
+    assert_eq!(index, 1);
+    assert_eq!(reader.hdus()[index].kind, HduKind::Image);
+    assert_eq!(
+        reader.hdus()[index].header.get_text("OBJECT").unwrap(),
+        Some("target")
+    );
+    assert_eq!(
+        reader.read_image(index).unwrap().decode(),
+        ImageData::I16(vec![10, 20, 30])
+    );
+    assert_eq!(reader.hdus()[0].kind, HduKind::Primary);
+    assert_eq!(reader.hdu_index("SCI", Some(3)).unwrap(), None);
 }
 
 #[test]
@@ -728,6 +758,18 @@ fn read_image_borrows_u8_samples_with_zero_copy() {
         (base..base + buf.len()).contains(&view_ptr),
         "the u8 view must point inside the source buffer (zero-copy)"
     );
+
+    // The view into a caller scratch borrows the source too, leaving the scratch
+    // untouched.
+    let mut scratch = Vec::new();
+    let image = reader.read_image_view(0, &mut scratch).unwrap();
+    assert_eq!(image.metadata().shape, &[4]);
+    let ImageView::U8(v) = image.samples else {
+        panic!("a U8 image must view as U8");
+    };
+    assert_eq!(v, &[10, 20, 30, 40]);
+    assert!((base..base + buf.len()).contains(&(v.as_ptr() as usize)));
+    assert!(scratch.is_empty(), "a U8 view must not touch the scratch");
 }
 
 #[test]
@@ -767,32 +809,6 @@ fn read_image_view_matches_decode_for_a_plain_image() {
 }
 
 #[test]
-fn read_image_view_borrows_u8_samples_with_zero_copy() {
-    let image = Image {
-        shape: vec![4],
-        samples: ImageData::U8(vec![10, 20, 30, 40]),
-        scaling: Scaling::IDENTITY,
-    };
-    let buf = written(|w| w.write_image(&image, None));
-    let mut reader = FitsReader::from_bytes(&buf).unwrap();
-    let mut scratch = Vec::new();
-    let image = reader.read_image_view(0, &mut scratch).unwrap();
-    assert_eq!(image.metadata().shape, &[4]);
-    let ImageView::U8(v) = image.samples else {
-        panic!("a U8 image must view as U8");
-    };
-    assert_eq!(v, &[10, 20, 30, 40]);
-    // U8 needs no swap, so the view borrows the source buffer directly — the caller's
-    // scratch stays untouched (empty).
-    let base = buf.as_ptr() as usize;
-    assert!(
-        (base..base + buf.len()).contains(&(v.as_ptr() as usize)),
-        "the u8 view must point inside the source buffer (zero-copy)"
-    );
-    assert!(scratch.is_empty(), "a U8 view must not touch the scratch");
-}
-
-#[test]
 #[cfg(feature = "compression")]
 fn read_image_view_matches_decode_for_a_compressed_image() {
     let mut f = open_fixture("comp_gzip_i16.fits");
@@ -808,38 +824,6 @@ fn read_image_view_matches_decode_for_a_compressed_image() {
         }
         (v, o) => panic!("expected matching I16 view/decode, got {v:?} / {o:?}"),
     }
-}
-
-#[test]
-fn hdu_index_selects_by_case_insensitive_name_and_version() {
-    let primary = Image::new(vec![1], vec![0u8]).unwrap();
-    let extension = Image::new(vec![3], vec![10i16, 20, 30]).unwrap();
-    let mut extension_header = Header::new();
-    extension_header.set("EXTNAME", "SCI").unwrap();
-    extension_header.set("EXTVER", 2).unwrap();
-    extension_header.set("OBJECT", "target").unwrap();
-
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer.write_image(&primary, None).unwrap();
-    writer
-        .write_image(&extension, Some(&extension_header))
-        .unwrap();
-    let bytes = writer.into_inner().into_inner();
-    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
-
-    let index = reader.hdu_index("sci", Some(2)).unwrap().unwrap();
-    assert_eq!(index, 1);
-    assert_eq!(reader.hdus()[index].kind, HduKind::Image);
-    assert_eq!(
-        reader.hdus()[index].header.get_text("OBJECT").unwrap(),
-        Some("target")
-    );
-    assert_eq!(
-        reader.read_image(index).unwrap().decode(),
-        ImageData::I16(vec![10, 20, 30])
-    );
-    assert_eq!(reader.hdus()[0].kind, HduKind::Primary);
-    assert_eq!(reader.hdu_index("SCI", Some(3)).unwrap(), None);
 }
 
 fn region_indices() -> Vec<usize> {

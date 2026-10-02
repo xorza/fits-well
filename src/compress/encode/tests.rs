@@ -9,30 +9,36 @@ use crate::error::Ranked;
 use crate::header_model::value::Value;
 use crate::reader::FitsReader;
 use crate::writer::FitsWriter;
-use crate::writer::internals::round_trip;
+use crate::writer::internals::{rejected_before_output, round_trip};
 use std::io::Cursor;
 
 #[test]
 fn compression_write_round_trips_through_decode() {
-    let samples = ramp();
-    let image = Image {
-        shape: vec![24, 16],
-        samples: ImageData::I16(samples.clone()),
-        scaling: Scaling::IDENTITY,
-    };
-    for (case, compression, tiles) in [
-        ("GZIP_1 row tiles", Compression::GZIP, &[][..]),
-        ("GZIP_1 2-D tiles", Compression::GZIP, &[7, 5]),
-        ("GZIP_2 row tiles", Compression::GZIP_SHUFFLED, &[]),
-        ("RICE_1 row tiles", Compression::Rice, &[]),
+    let ramp_image = Image::new(vec![24, 16], ramp()).unwrap();
+    // PLIO is a mask codec: non-negative i32 values.
+    let mask_image = Image::new(vec![24, 16], mask()).unwrap();
+    for (case, image, compression, tiles) in [
+        ("GZIP_1 row tiles", &ramp_image, Compression::GZIP, &[][..]),
+        ("GZIP_1 2-D tiles", &ramp_image, Compression::GZIP, &[7, 5]),
+        (
+            "GZIP_2 row tiles",
+            &ramp_image,
+            Compression::GZIP_SHUFFLED,
+            &[],
+        ),
+        ("RICE_1 row tiles", &ramp_image, Compression::Rice, &[]),
         (
             "HCOMPRESS_1 whole image",
+            &ramp_image,
             Compression::Hcompress(Hcompress::default()),
             &[24, 16],
         ),
+        ("PLIO_1 row tiles", &mask_image, Compression::Plio, &[]),
+        // §10.4: tiles stored verbatim, as big-endian pixels.
+        ("NOCOMPRESS row tiles", &ramp_image, Compression::None, &[]),
     ] {
         let mut r = round_trip(|w| {
-            w.write_compressed_image(&image, compression, &CompressionOptions::tiled(tiles), None)
+            w.write_compressed_image(image, compression, &CompressionOptions::tiled(tiles), None)
         });
         if matches!(compression, Compression::Hcompress(_)) {
             let header = &r.hdus()[1].header;
@@ -41,10 +47,7 @@ fn compression_write_round_trips_through_decode() {
         }
         let back = r.read_image(1).unwrap();
         assert_eq!(back.shape, vec![24, 16], "{case}");
-        match back.decode() {
-            ImageData::I16(v) => assert_eq!(v, samples, "{case} round-trip"),
-            other => panic!("{case}: expected I16, got {other:?}"),
-        }
+        assert_eq!(back.decode(), image.samples, "{case}");
     }
 
     let samples_3d: Vec<i16> = (0..5 * 4 * 3).map(|i| i as i16 * 3 - 50).collect();
@@ -520,29 +523,6 @@ fn hcompress_lossless_write_round_trips_exactly() {
 }
 
 #[test]
-fn plio_write_round_trips_through_decode() {
-    // PLIO is a mask codec: non-negative i32 values.
-    let samples = mask();
-    let image = Image {
-        shape: vec![24, 16],
-        samples: ImageData::I32(samples.clone()),
-        scaling: Scaling::IDENTITY,
-    };
-    let mut r = round_trip(|w| {
-        w.write_compressed_image(
-            &image,
-            Compression::Plio,
-            &CompressionOptions::default(),
-            None,
-        )
-    });
-    match r.read_image(1).unwrap().decode() {
-        ImageData::I32(v) => assert_eq!(v, samples, "PLIO_1 round-trip"),
-        other => panic!("PLIO_1: expected I32, got {other:?}"),
-    }
-}
-
-#[test]
 fn integer_image_compression_preserves_bscale_bzero_and_blank() {
     // §10.2: the compressed tiles store *raw* stored integers, so BSCALE/BZERO and
     // the BLANK sentinel must survive in the rebuilt header (was dropped before).
@@ -605,29 +585,6 @@ fn rice_64_bit_pixels_round_trip_extreme_differences() {
     assert_eq!(decoded, ImageData::I64(samples));
 }
 
-#[test]
-fn nocompress_image_round_trips() {
-    // §10.4: tiles stored verbatim (uncompressed big-endian pixels) round-trip.
-    let samples = ramp();
-    let image = Image {
-        shape: vec![24, 16],
-        samples: ImageData::I16(samples.clone()),
-        scaling: Scaling::IDENTITY,
-    };
-    let mut r = round_trip(|w| {
-        w.write_compressed_image(
-            &image,
-            Compression::None,
-            &CompressionOptions::default(),
-            None,
-        )
-    });
-    match r.read_image(1).unwrap().decode() {
-        ImageData::I16(v) => assert_eq!(v, samples),
-        other => panic!("expected I16, got {other:?}"),
-    }
-}
-
 #[cfg(feature = "parallel")]
 #[test]
 fn parallel_full_decode_crosses_the_bounded_wave_boundary() {
@@ -659,19 +616,18 @@ fn parallel_full_decode_crosses_the_bounded_wave_boundary() {
 }
 
 #[test]
-fn empty_naxis0_image_round_trips() {
-    // A `NAXIS = 0` image has no data array. The encoder must emit an empty
-    // `NAXIS2 = 0` ZIMAGE table (not panic on a fabricated phantom tile), and the
-    // decoder must restore the empty image. Exercise both the integer and float
-    // encoder paths.
-    let cases = [
-        ImageData::I16(Vec::new()),
-        ImageData::I32(Vec::new()),
-        ImageData::F32(Vec::new()),
-    ];
-    for samples in cases {
+fn empty_images_round_trip() {
+    // A `NAXIS = 0` image has no data array: the encoder emits an empty
+    // `NAXIS2 = 0` ZIMAGE table, not a phantom tile, through both the integer and
+    // the float paths. An empty first axis holds no pixels either.
+    for (shape, samples) in [
+        (vec![], ImageData::I16(Vec::new())),
+        (vec![], ImageData::I32(Vec::new())),
+        (vec![], ImageData::F32(Vec::new())),
+        (vec![0], ImageData::I16(Vec::new())),
+    ] {
         let image = Image {
-            shape: Vec::new(),
+            shape: shape.clone(),
             samples: samples.clone(),
             scaling: Scaling::IDENTITY,
         };
@@ -684,35 +640,9 @@ fn empty_naxis0_image_round_trips() {
             )
         });
         let back = r.read_image(1).unwrap();
-        assert!(back.shape.is_empty(), "shape for {samples:?}");
-        // Same empty variant back out, no phantom pixel.
-        match (back.decode(), &samples) {
-            (ImageData::I16(v), ImageData::I16(_)) => assert!(v.is_empty()),
-            (ImageData::I32(v), ImageData::I32(_)) => assert!(v.is_empty()),
-            (ImageData::F32(v), ImageData::F32(_)) => assert!(v.is_empty()),
-            (other, _) => panic!("variant mismatch: {other:?}"),
-        }
+        assert_eq!(back.shape, shape, "{samples:?}");
+        assert_eq!(back.decode(), samples);
     }
-}
-
-#[test]
-fn empty_first_axis_image_round_trips() {
-    let image = Image {
-        shape: vec![0],
-        samples: ImageData::I16(Vec::new()),
-        scaling: Scaling::IDENTITY,
-    };
-    let mut r = round_trip(|w| {
-        w.write_compressed_image(
-            &image,
-            Compression::GZIP,
-            &CompressionOptions::default(),
-            None,
-        )
-    });
-    let back = r.read_image(1).unwrap();
-    assert_eq!(back.shape, [0]);
-    assert!(matches!(back.decode(), ImageData::I16(v) if v.is_empty()));
 }
 
 #[test]
@@ -722,15 +652,13 @@ fn compressed_image_with_an_overflowing_shape_is_refused_before_output() {
         samples: ImageData::I16(Vec::new()),
         scaling: Scaling::IDENTITY,
     };
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.write_compressed_image(
+        rejected_before_output(|w| w.write_compressed_image(
             &image,
             Compression::GZIP,
             &CompressionOptions::default(),
             None
-        ),
-        Err(FitsError::DataUnitOverflow)
+        )),
+        FitsError::DataUnitOverflow
     ));
-    assert!(writer.into_inner().into_inner().is_empty());
 }

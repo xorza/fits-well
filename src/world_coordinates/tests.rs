@@ -76,14 +76,6 @@ fn world_to_pixel_inverts_pixel_to_world() {
 }
 
 #[test]
-fn reference_pixel_maps_to_crval() {
-    let w = open_wcs("wcs_tan.fits");
-    let out = w.pixel_to_world(&[256.0, 256.0]).unwrap();
-    assert!((out[0] - 150.0).abs() < 1e-12);
-    assert!((out[1] - 2.5).abs() < 1e-12);
-}
-
-#[test]
 fn transform_failures_return_errors() {
     let build = |projection: &str| {
         let header = celestial_header(projection, [1.0, 1.0], [0.0, 0.0], [100.0, 100.0]);
