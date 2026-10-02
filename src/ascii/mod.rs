@@ -168,8 +168,8 @@ impl AsciiTable {
         let mut data = data;
         data.truncate(total);
         if !data.is_ascii() {
-            return Err(FitsError::InvalidValue {
-                card: "non-ASCII bytes in ASCII-table data".to_string(),
+            return Err(FitsError::InvalidAscii {
+                context: "ASCII-table data",
             });
         }
         Ok(AsciiTable {
@@ -308,8 +308,8 @@ fn parse_integer(field: &str) -> Result<i64> {
     if field.is_empty() {
         return Ok(0);
     }
-    field.parse().map_err(|_| FitsError::InvalidValue {
-        card: field.to_string(),
+    field.parse().map_err(|_| FitsError::InvalidAsciiField {
+        field: field.to_string(),
     })
 }
 
@@ -318,8 +318,8 @@ fn parse_float(field: &str, decimals: usize) -> Result<f64> {
     if field.is_empty() {
         return Ok(0.0);
     }
-    parse_ascii_float(field, decimals).ok_or_else(|| FitsError::InvalidValue {
-        card: field.to_string(),
+    parse_ascii_float(field, decimals).ok_or_else(|| FitsError::InvalidAsciiField {
+        field: field.to_string(),
     })
 }
 

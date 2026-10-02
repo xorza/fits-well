@@ -64,8 +64,8 @@ impl AxisTransform {
                 .transpose()?
                 .unwrap_or(1.0);
             if !reference.is_finite() || reference * unit_scale <= 0.0 {
-                return Err(FitsError::InvalidValue {
-                    card: format!("{ctype} requires a finite, positive CRVAL"),
+                return Err(FitsError::InvalidWcs {
+                    detail: format!("{ctype} requires a finite, positive CRVAL"),
                 });
             }
             return Ok(AxisTransformSpec {
@@ -84,8 +84,8 @@ impl AxisTransform {
         };
         let Some(sampled) = sampled else {
             if is_spectral_pair_syntax(code) {
-                return Err(FitsError::InvalidValue {
-                    card: format!("spectral CTYPE {ctype:?} has inconsistent variables"),
+                return Err(FitsError::InvalidWcs {
+                    detail: format!("spectral CTYPE {ctype:?} has inconsistent variables"),
                 });
             }
             return Ok(unsupported());

@@ -65,8 +65,8 @@ impl FromStr for TimeScale {
     type Err = FitsError;
 
     fn from_str(s: &str) -> Result<TimeScale> {
-        let invalid = || FitsError::InvalidValue {
-            card: format!("time scale '{s}'"),
+        let invalid = || FitsError::InvalidTime {
+            detail: format!("time scale '{s}'"),
         };
         let value = s.trim();
         let (base, realization) = match value.split_once('(') {

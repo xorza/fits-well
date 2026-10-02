@@ -310,7 +310,7 @@ fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
         .set_internal("PS1_1", "COORD");
     assert!(matches!(
         tabular::descriptors(&missing, 1, None),
-        Err(FitsError::InvalidValue { .. })
+        Err(FitsError::InvalidWcs { .. })
     ));
 
     let bad_shape = lookup_table(&[("COORD", &[1.0, 2.0, 3.0, 4.0], Some("(2,2)"))]);
@@ -318,7 +318,7 @@ fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
     let descriptor = tabular::descriptors(&header, 1, None).unwrap().remove(0);
     assert!(matches!(
         TabularTransform::from_table(descriptor, &bad_shape),
-        Err(FitsError::InvalidValue { .. })
+        Err(FitsError::InvalidWcs { .. })
     ));
 
     let bad_index = lookup_table(&[
@@ -330,17 +330,50 @@ fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
     let descriptor = tabular::descriptors(&header, 1, None).unwrap().remove(0);
     assert!(matches!(
         TabularTransform::from_table(descriptor, &bad_index),
-        Err(FitsError::InvalidValue { .. })
+        Err(FitsError::InvalidWcs { .. })
     ));
 
     let mut oversized_axis = tab_header(1, "COORD");
     oversized_axis.set_internal("PV1_3", i64::MAX);
     let oversized = std::panic::catch_unwind(|| tabular::descriptors(&oversized_axis, 1, None));
-    assert!(matches!(oversized, Ok(Err(FitsError::InvalidValue { .. }))));
+    assert!(matches!(oversized, Ok(Err(FitsError::InvalidWcs { .. }))));
 
     assert_eq!(tabular::interpolation_vertex_count(20).unwrap(), 1 << 20);
     assert!(matches!(
         tabular::interpolation_vertex_count(21),
-        Err(FitsError::InvalidValue { .. })
+        Err(FitsError::InvalidWcs { .. })
     ));
+}
+
+/// A one-element index vector Ψ = (100) takes ψ ∈ [99.5, 100.5] to Υ = ψ − Ψ₁ + 1 on the
+/// one coordinate, and back: the coordinate 42 is ψ = 100.
+#[test]
+fn a_one_element_index_vector_maps_onto_its_value() {
+    let table = lookup_table(&[("COORD", &[42.0], Some("(1,1)")), ("INDEX", &[100.0], None)]);
+    let mut header = tab_header(1, "COORD");
+    header
+        .set_internal("PS1_2", "INDEX")
+        .set_internal("CRVAL1", 100.0);
+    let wcs = resolved_wcs(&header, &table);
+
+    for pixel in [-0.5, 0.0, 0.4, 0.5] {
+        assert_eq!(
+            wcs.pixel_to_world(&[pixel]).unwrap(),
+            [42.0],
+            "pixel {pixel}"
+        );
+    }
+    for pixel in [-0.6, 0.6, 100.0] {
+        assert!(
+            matches!(
+                wcs.pixel_to_world(&[pixel]),
+                Err(FitsError::WcsCoordinateDomain {
+                    axis: 0,
+                    algorithm: "TAB"
+                })
+            ),
+            "pixel {pixel}"
+        );
+    }
+    assert_eq!(wcs.world_to_pixel(&[42.0]).unwrap(), [0.0]);
 }

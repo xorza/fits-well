@@ -111,7 +111,7 @@ fn transform_failures_return_errors() {
     ));
 
     // A ZPN polynomial without coefficients maps every colatitude to the pole.
-    assert!(matches!(build("ZPN"), Err(FitsError::InvalidValue { .. })));
+    assert!(matches!(build("ZPN"), Err(FitsError::InvalidWcs { .. })));
 
     let tan = open_wcs("wcs_tan.fits");
     assert!(matches!(

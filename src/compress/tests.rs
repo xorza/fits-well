@@ -7,19 +7,19 @@ fn typed_compression_configuration_rejects_impossible_values() {
     assert!(Gzip::shuffled(0).is_ok());
     assert!(matches!(
         Gzip::new(10),
-        Err(FitsError::InvalidValue { card }) if card == "gzip compression level 10 is outside 0..=9"
+        Err(FitsError::InvalidCompressionParameter { detail }) if detail == "gzip compression level 10 is outside 0..=9"
     ));
     assert!(matches!(
         Hcompress::lossy(0.0),
-        Err(FitsError::InvalidValue { card }) if card == "lossy HCOMPRESS scale 0 must be positive"
+        Err(FitsError::InvalidCompressionParameter { detail }) if detail == "lossy HCOMPRESS scale 0 must be positive"
     ));
     assert!(matches!(
         Hcompress::lossy(f64::NAN),
-        Err(FitsError::InvalidValue { .. })
+        Err(FitsError::InvalidCompressionParameter { .. })
     ));
     assert!(matches!(
         CompressionOptions::default().with_quantization(f64::NAN, DitherMethod::None),
-        Err(FitsError::InvalidValue { .. })
+        Err(FitsError::InvalidCompressionParameter { .. })
     ));
     assert_eq!(Compression::GZIP.name(), "GZIP_1");
     assert_eq!(Compression::GZIP_SHUFFLED.name(), "GZIP_2");

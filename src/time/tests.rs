@@ -38,7 +38,7 @@ fn rejects_malformed_datetimes() {
     header.set_internal("DATE-OBS", "2024-13-01");
     assert!(matches!(
         header.obs_mjd(),
-        Err(FitsError::InvalidValue { card }) if card == "DATE '2024-13-01'"
+        Err(FitsError::InvalidTime { detail }) if detail == "DATE '2024-13-01'"
     ));
 }
 
@@ -96,7 +96,7 @@ fn leap_second_labels_require_utc_and_external_time_data() {
         let datetime = Datetime::parse(text).unwrap();
         assert!(matches!(
             datetime.to_jd(&scale),
-            Err(FitsError::InvalidValue { .. })
+            Err(FitsError::InvalidTime { .. })
         ));
     }
 
@@ -292,7 +292,7 @@ fn reads_phase_axis_metadata() {
     h.set_internal("CTYPE6", "PHASE");
     assert!(matches!(
         h.phase_axis(6, None),
-        Err(FitsError::InvalidValue { card }) if card.contains("CZPHS6")
+        Err(FitsError::InvalidTime { detail }) if detail.contains("CZPHS6")
     ));
 }
 
@@ -607,7 +607,7 @@ fn time_scale_preserves_realizations_and_local_names() {
         assert!(
             matches!(
                 malformed.parse::<TimeScale>(),
-                Err(FitsError::InvalidValue { .. })
+                Err(FitsError::InvalidTime { .. })
             ),
             "{malformed}"
         );

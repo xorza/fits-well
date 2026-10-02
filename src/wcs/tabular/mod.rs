@@ -342,8 +342,11 @@ impl TabularTransform {
         };
         let values = &index.values;
         if values.len() == 1 {
+            // One index value spans the half-units either side of it: Υ = ψ − Ψ₁ + 1 on
+            // [0.5, 1.5]. wcslib's `tabx2s` takes Υ = ψ here and then refuses any Υ past
+            // 1.5, which leaves the case usable only when Ψ₁ ≈ 1.
             if (values[0] - 0.5..=values[0] + 0.5).contains(&psi) {
-                return Ok(psi);
+                return Ok(psi - values[0] + 1.0);
             }
             return Err(domain(self.axes[table_axis]));
         }
@@ -406,7 +409,7 @@ impl TabularTransform {
         };
         let values = &index.values;
         if values.len() == 1 {
-            return values[0];
+            return upsilon + values[0] - 1.0;
         }
         let position = upsilon.floor() as usize;
         let lower = position.saturating_sub(1).min(values.len() - 2);
@@ -864,8 +867,8 @@ fn required_text(header: &Header, keyword: &str, detail: &'static str) -> Result
 }
 
 fn invalid(detail: impl Into<String>) -> FitsError {
-    FitsError::InvalidValue {
-        card: detail.into(),
+    FitsError::InvalidWcs {
+        detail: detail.into(),
     }
 }
 

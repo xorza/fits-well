@@ -92,8 +92,8 @@ impl Gzip {
 
     fn configured(shuffle: bool, level: u32) -> Result<Gzip> {
         if level > 9 {
-            return Err(FitsError::InvalidValue {
-                card: format!("gzip compression level {level} is outside 0..=9"),
+            return Err(FitsError::InvalidCompressionParameter {
+                detail: format!("gzip compression level {level} is outside 0..=9"),
             });
         }
         Ok(Gzip { shuffle, level })
@@ -120,8 +120,8 @@ impl Hcompress {
     /// per-tile background-noise estimate (§10.4.4).
     pub fn lossy(scale: f64) -> Result<Hcompress> {
         if !scale.is_finite() || scale <= 0.0 {
-            return Err(FitsError::InvalidValue {
-                card: format!("lossy HCOMPRESS scale {scale} must be positive"),
+            return Err(FitsError::InvalidCompressionParameter {
+                detail: format!("lossy HCOMPRESS scale {scale} must be positive"),
             });
         }
         Ok(Hcompress { scale })
@@ -188,8 +188,8 @@ impl CompressionOptions {
         dither: DitherMethod,
     ) -> Result<CompressionOptions> {
         if !level.is_finite() || level < 0.0 {
-            return Err(FitsError::InvalidValue {
-                card: format!("float quantization level {level} must be finite and nonnegative"),
+            return Err(FitsError::InvalidCompressionParameter {
+                detail: format!("float quantization level {level} must be finite and nonnegative"),
             });
         }
         self.quantization = Quantization { level, dither };

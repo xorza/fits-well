@@ -259,8 +259,8 @@ fn ascii_field<'a>(col: &'a AsciiWriteColumn, row: usize) -> Result<AsciiField<'
 /// its sign and precision can fit the field at all.
 fn ascii_float_text(col: &AsciiWriteColumn, row: usize, value: f64) -> Result<String> {
     if !value.is_finite() {
-        return Err(FitsError::InvalidValue {
-            card: "ASCII float cells must be finite; use None for null".to_string(),
+        return Err(FitsError::InvalidAsciiValue {
+            reason: "float cells must be finite; use None for null",
         });
     }
     let sign_width = usize::from(value.is_sign_negative());
@@ -280,8 +280,8 @@ fn ascii_float_text(col: &AsciiWriteColumn, row: usize, value: f64) -> Result<St
 
 fn validate_ascii_null_collision(value: &str, marker: Option<&str>) -> Result<()> {
     if marker == Some(value) {
-        Err(FitsError::InvalidValue {
-            card: "ASCII value equals its TNULLn marker".to_string(),
+        Err(FitsError::InvalidAsciiValue {
+            reason: "the value equals its column's TNULLn marker",
         })
     } else {
         Ok(())

@@ -31,8 +31,8 @@ impl SpectralRest {
     pub(crate) fn new(frequency: Option<f64>, wavelength: Option<f64>) -> Result<SpectralRest> {
         for (name, value) in [("RESTFRQ", frequency), ("RESTWAV", wavelength)] {
             if value.is_some_and(|value| !value.is_finite() || value <= 0.0) {
-                return Err(FitsError::InvalidValue {
-                    card: format!("{name} must be finite and positive"),
+                return Err(FitsError::InvalidWcs {
+                    detail: format!("{name} must be finite and positive"),
                 });
             }
         }
@@ -64,8 +64,8 @@ impl SpectralRest {
             });
         }
         if !requirement.is_multiple_of(3) {
-            return Err(FitsError::InvalidValue {
-                card: "spectral CTYPE requires RESTFRQ or RESTWAV".to_string(),
+            return Err(FitsError::InvalidWcs {
+                detail: "spectral CTYPE requires RESTFRQ or RESTWAV".to_string(),
             });
         }
         Ok(ResolvedRest {

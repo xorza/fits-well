@@ -95,7 +95,9 @@ fn decodes_hand_built_ascii_rows() {
     corrupt[2] = 0xFF;
     assert!(matches!(
         AsciiTable::from_data(&header, corrupt),
-        Err(FitsError::InvalidValue { .. })
+        Err(FitsError::InvalidAscii {
+            context: "ASCII-table data"
+        })
     ));
 }
 
@@ -402,7 +404,9 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
         writer.write_ascii_table(&write_table(1, &collision)),
-        Err(FitsError::InvalidValue { card }) if card == "ASCII value equals its TNULLn marker"
+        Err(FitsError::InvalidAsciiValue {
+            reason: "the value equals its column's TNULLn marker"
+        })
     ));
     assert!(writer.into_inner().into_inner().is_empty());
 
@@ -419,8 +423,9 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
         writer.write_ascii_table(&write_table(1, &nonfinite)),
-        Err(FitsError::InvalidValue { card })
-            if card == "ASCII float cells must be finite; use None for null"
+        Err(FitsError::InvalidAsciiValue {
+            reason: "float cells must be finite; use None for null"
+        })
     ));
     assert!(writer.into_inner().into_inner().is_empty());
 }

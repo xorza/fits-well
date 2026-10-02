@@ -137,11 +137,11 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
 
     assert!(matches!(
         image(None, Some("J2000")).wcs(None),
-        Err(FitsError::InvalidValue { card }) if card.contains("RADESYS")
+        Err(FitsError::InvalidWcs { detail }) if detail.contains("RADESYS")
     ));
     assert!(matches!(
         image(Some(-1.0), None).wcs(None),
-        Err(FitsError::InvalidValue { card }) if card.contains("EQUINOX")
+        Err(FitsError::InvalidWcs { detail }) if detail.contains("EQUINOX")
     ));
     pixel_list.set_internal("RADE3A", "FK4");
     assert!(matches!(
