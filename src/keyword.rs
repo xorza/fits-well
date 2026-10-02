@@ -8,6 +8,7 @@
 //! `format!` and call `.as_str()` on the result.
 
 use core::fmt::{self, Write};
+use std::str;
 
 /// The alternate-description suffix — the `a` of the §8 and Table 22 keyword
 /// families. Empty for the primary description, the single letter for an alternate.
@@ -33,7 +34,7 @@ impl AltSuffix {
     }
 
     pub(crate) fn as_str(&self) -> &str {
-        std::str::from_utf8(&self.buf[..self.len]).expect("encode_utf8 writes valid UTF-8")
+        str::from_utf8(&self.buf[..self.len]).expect("encode_utf8 writes valid UTF-8")
     }
 
     /// Whether an alternate description is selected. Several Table 22 families spell
@@ -88,7 +89,7 @@ impl KeyBuf {
     /// The formatted keyword as a string slice.
     pub(crate) fn as_str(&self) -> &str {
         // Only ASCII keyword bytes are ever written, so this is always valid UTF-8.
-        std::str::from_utf8(&self.buf[..self.len]).expect("keyword bytes are ASCII")
+        str::from_utf8(&self.buf[..self.len]).expect("keyword bytes are ASCII")
     }
 }
 

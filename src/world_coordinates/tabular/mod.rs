@@ -9,6 +9,7 @@ use crate::keyword::AltSuffix;
 use crate::keyword::key;
 use crate::world_coordinates::ctype::Ctype;
 use crate::world_coordinates::world_unit_scale;
+use std::iter;
 
 const MAX_INTERPOLATION_VERTICES: usize = 1 << 20;
 const MAX_INVERSE_WORK: usize = 1 << 22;
@@ -160,7 +161,7 @@ pub(crate) fn descriptors(
 
 impl TabularDescriptor {
     pub(crate) fn referenced_columns(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(self.reference.coordinate_column.as_str()).chain(
+        iter::once(self.reference.coordinate_column.as_str()).chain(
             self.index_columns
                 .iter()
                 .filter_map(|column| column.as_deref()),
@@ -562,6 +563,10 @@ impl TabularTransform {
     }
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+)]
 fn interpolation_vertex_count(variable_axes: usize) -> Result<usize> {
     let shift = u32::try_from(variable_axes)
         .map_err(|_| invalid("TAB interpolation dimensionality is too large"))?;
@@ -666,8 +671,7 @@ impl SubvoxelSearch<'_> {
             }
         }
         let possible = (0..dimensions).all(|axis| {
-            (self.scratch.lower[axis] || self.scratch.equal[axis])
-                && (self.scratch.upper[axis] || self.scratch.equal[axis])
+            self.scratch.equal[axis] || (self.scratch.lower[axis] && self.scratch.upper[axis])
         });
         if !possible {
             return Ok(false);

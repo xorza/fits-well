@@ -78,6 +78,10 @@ impl fmt::Display for FitsInteger {
 impl TryFrom<&FitsInteger> for i64 {
     type Error = FitsError;
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the digits are validated, so the parse fails only on overflow, which the error it becomes states"
+    )]
     fn try_from(value: &FitsInteger) -> Result<i64> {
         match &value.repr {
             IntegerRepr::I64(value) => Ok(*value),
@@ -138,6 +142,10 @@ impl_integer_from!(i128, u64, u128);
 /// from geometry (row widths, heap lengths, axis lengths) are `usize` internally but
 /// must fit a header value; an absurd one becomes [`FitsError::DataUnitOverflow`]
 /// rather than wrapping into a plausible-looking card.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+)]
 pub(crate) fn fits_i64(value: usize) -> Result<i64> {
     i64::try_from(value).map_err(|_| FitsError::DataUnitOverflow)
 }

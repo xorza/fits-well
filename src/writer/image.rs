@@ -74,18 +74,18 @@ pub(super) fn write_compressed_template<W: Write>(
 
 pub(super) fn stream_template<'a, W: Write + Seek>(
     writer: &'a mut FitsWriter<W>,
-    shape: Vec<usize>,
+    shape: &[usize],
     bitpix: Bitpix,
     scaling: Scaling,
     template: Option<&Header>,
 ) -> Result<ImageStream<'a, W>> {
     writer.ensure_writable()?;
     scaling.validate(bitpix)?;
-    let expected_samples = shape_product(&shape)?;
+    let expected_samples = shape_product(shape)?;
     // A stream writes its header up front and rewrites it at `finish`, so it
     // never reaches `finish_hdu` — it applies the template merge itself.
     let mut header =
-        image_header_parts(&shape, bitpix, scaling, writer.state == WriterState::Empty)?;
+        image_header_parts(shape, bitpix, scaling, writer.state == WriterState::Empty)?;
     merge_header_template(&mut header, template);
     let header_offset = writer.sink.stream_position()?;
     let mut initial = header.clone();

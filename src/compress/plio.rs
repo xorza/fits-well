@@ -239,6 +239,10 @@ fn decode_words(ll: BeWords<'_>, npix: usize, px: &mut Vec<i64>) -> Result<()> {
     Ok(())
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+)]
 fn nonnegative_word(ll: BeWords<'_>, index: usize) -> Result<usize> {
     let value = ll.get(index).ok_or(FitsError::UnexpectedEof)?;
     usize::try_from(value).map_err(|_| invalid_stream("negative list header value"))

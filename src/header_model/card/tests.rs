@@ -97,7 +97,7 @@ fn large_magnitude_real_renders_with_exponent_and_round_trips() {
             comment: None,
         };
         let rendered = render(&card).unwrap();
-        let text = std::str::from_utf8(&rendered).unwrap();
+        let text = str::from_utf8(&rendered).unwrap();
         assert!(
             text.contains('E') && !text.contains('e'),
             "expected uppercase exponent, got {text:?}"
@@ -227,7 +227,7 @@ fn integer_boundaries_round_trip_without_real_coercion() {
         assert_eq!(value.to_string(), decimal);
         let rendered = render(&card).unwrap();
         assert!(
-            std::str::from_utf8(&rendered).unwrap().contains(decimal),
+            str::from_utf8(&rendered).unwrap().contains(decimal),
             "rendered card changed {decimal}"
         );
         assert_eq!(reparse(&rendered), card);
@@ -270,7 +270,7 @@ fn long_string_splits_into_a_continue_chain() {
     // comment does not fit beside those, so an empty third piece carries it.
     let records: Vec<&str> = records
         .iter()
-        .map(|record| std::str::from_utf8(record).unwrap().trim_end())
+        .map(|record| str::from_utf8(record).unwrap().trim_end())
         .collect();
     assert_eq!(
         records,
@@ -404,7 +404,7 @@ fn every_value_kind_renders_its_fixed_format_field() {
         };
         let record = render(&card).unwrap();
         assert_eq!(
-            std::str::from_utf8(&record).unwrap(),
+            str::from_utf8(&record).unwrap(),
             format!("KEY     = {field:<70}"),
             "{value:?}"
         );

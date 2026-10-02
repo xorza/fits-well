@@ -171,12 +171,14 @@ impl WriteColumn {
     }
 
     /// Attach a unit (`TUNITn`).
+    #[must_use]
     pub fn with_unit(mut self, unit: impl Into<String>) -> WriteColumn {
         self.unit = Some(unit.into());
         self
     }
 
     /// Attach a `TDIMn` array shape (fastest axis first).
+    #[must_use]
     pub fn with_tdim(mut self, shape: Vec<usize>) -> WriteColumn {
         self.tdim = Some(shape);
         self
@@ -187,6 +189,7 @@ impl WriteColumn {
     /// # Panics
     /// Unless the column is variable-length — from [`WriteColumn::vla`] or
     /// [`WriteColumn::vla_bits`].
+    #[must_use]
     pub fn wide(mut self) -> WriteColumn {
         match &mut self.values {
             WriteColumnData::Vla { wide, .. } | WriteColumnData::VlaBits { wide, .. } => {
@@ -201,6 +204,7 @@ impl WriteColumn {
 
     /// Emit `TSCALn`/`TZEROn` so the stored `data` reads back as
     /// `TZEROn + TSCALn × stored` physically.
+    #[must_use]
     pub fn scaled(mut self, tscale: f64, tzero: f64) -> WriteColumn {
         self.tscale = Some(tscale);
         self.tzero = Some(tzero);
@@ -208,6 +212,7 @@ impl WriteColumn {
     }
 
     /// Emit `TNULLn`, the stored integer denoting an undefined element.
+    #[must_use]
     pub fn with_null(mut self, tnull: i64) -> WriteColumn {
         self.tnull = Some(tnull);
         self
@@ -501,6 +506,10 @@ impl ColumnType {
     }
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+)]
 fn next_vla_heap_len(
     heap_len: usize,
     wide: bool,
@@ -515,6 +524,10 @@ fn next_vla_heap_len(
         .ok_or(FitsError::DataUnitOverflow)
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+)]
 fn write_vla_descriptor(
     out: &mut [u8],
     main_len: usize,

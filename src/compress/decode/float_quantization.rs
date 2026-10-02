@@ -21,7 +21,7 @@ pub(super) struct FloatQuantization {
 
 /// Per-tile float dequantization parameters (§10.2): `physical = zero + scale·I`,
 /// the dither method/seed, and the integer null sentinel.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(super) struct Dequant {
     pub(super) scale: f64,
     pub(super) zero: f64,
@@ -72,11 +72,11 @@ impl FloatQuantization {
     /// The dequantization parameters for one tile.
     pub(super) fn dequant(&self, table_row: usize, tile_row: usize) -> Dequant {
         Dequant {
-            scale: column_at(&self.zscale, table_row).unwrap_or(1.0),
-            zero: column_at(&self.zzero, table_row).unwrap_or(0.0),
+            scale: column_at(self.zscale.as_deref(), table_row).unwrap_or(1.0),
+            zero: column_at(self.zzero.as_deref(), table_row).unwrap_or(0.0),
             method: self.method,
             irow: tile_row as i64 + self.zdither0,
-            zblank: column_at(&self.zblank_column, table_row).or(self.zblank_keyword),
+            zblank: column_at(self.zblank_column.as_deref(), table_row).or(self.zblank_keyword),
         }
     }
 }
@@ -122,6 +122,6 @@ fn read_i64_column(table: TableView<'_>, name: &str) -> Result<Option<Vec<i64>>>
     }
 }
 
-fn column_at<T: Copy>(col: &Option<Vec<T>>, t: usize) -> Option<T> {
-    col.as_ref().and_then(|v| v.get(t).copied())
+fn column_at<T: Copy>(col: Option<&[T]>, t: usize) -> Option<T> {
+    col.and_then(|v| v.get(t).copied())
 }

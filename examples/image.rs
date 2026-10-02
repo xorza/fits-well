@@ -5,13 +5,16 @@
 //! cargo run --example image
 //! ```
 
+#![expect(clippy::print_stdout, reason = "an example reports to the terminal")]
+
 use std::fs::File;
 
 use fits_well::image::{Image, ImageData, ImageView, Scaling};
 use fits_well::{FitsReader, FitsWriter};
+use std::env;
 
 fn main() -> fits_well::Result<()> {
-    let path = std::env::temp_dir().join("fits_well_image.fits");
+    let path = env::temp_dir().join("fits_well_image.fits");
 
     // A 4×3 image of signed 16-bit pixels. `shape` is fastest-axis-first
     // (NAXIS1 = 4), and `samples` is the flat row-major buffer.

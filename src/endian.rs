@@ -6,6 +6,7 @@
 
 use crate::error::FitsError;
 use crate::error::Result;
+use std::iter;
 
 /// Decode a packed big-endian buffer into host-endian values of a fixed-width
 /// type, e.g. `decode_be(bytes, i16::from_be_bytes)`.
@@ -18,7 +19,7 @@ pub(crate) fn decode_be<const N: usize, T, F>(bytes: &[u8], conv: F) -> Vec<T>
 where
     F: Fn([u8; N]) -> T,
 {
-    decode_be_cells(std::iter::once(bytes), bytes.len() / N, conv)
+    decode_be_cells(iter::once(bytes), bytes.len() / N, conv)
 }
 
 /// [`decode_be`] over a *sequence* of buffers, decoded in order into one `Vec`. An
@@ -97,6 +98,10 @@ where
 }
 
 /// Validate the signed integer range of a FITS `P` or `Q` descriptor.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+)]
 pub(crate) fn validate_pq_descriptor(wide: bool, count: u64, offset: u64) -> Result<()> {
     if wide {
         i64::try_from(count).map_err(|_| FitsError::DataUnitOverflow)?;

@@ -79,9 +79,8 @@ impl FromStr for TimeScale {
                     Some(realization[..realization.len() - 1].to_string()),
                 )
             }
-            Some(_) => return Err(invalid()),
             None if !value.is_empty() && !value.contains(')') => (value, None),
-            None => return Err(invalid()),
+            Some(_) | None => return Err(invalid()),
         };
         let kind = match base.to_ascii_uppercase().as_str() {
             "UTC" | "GMT" => TimeScaleKind::Utc,

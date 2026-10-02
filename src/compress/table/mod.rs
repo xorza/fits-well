@@ -30,6 +30,8 @@ use crate::header_model::value;
 use crate::keyword::key;
 use crate::ragged::Ragged;
 use crate::reserved_keywords;
+use std::mem;
+use std::result;
 
 /// Per-column compression algorithm (`ZCTYPn`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +59,10 @@ impl Algo {
         self.image_codec().name()
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the error is deliberately replaced by the one this context defines"
+    )]
     fn parse(s: &str) -> Result<Algo> {
         let invalid = || FitsError::UnsupportedCompression {
             name: format!("table column codec {s}"),
@@ -300,7 +306,7 @@ pub(crate) fn compress_table(
                 let off = (r0 + r) * naxis1 + m.offset;
                 scratch.column.extend_from_slice(&raw[off..off + m.width]);
             }
-            let column_bytes = std::mem::take(&mut scratch.column);
+            let column_bytes = mem::take(&mut scratch.column);
             let mut compressed = Vec::new();
             compress_payload_into(m, &column_bytes, gzip_level, scratch, &mut compressed);
             scratch.column = column_bytes;
@@ -389,6 +395,10 @@ pub(crate) struct HduParts {
 
 /// Uncompress a `ZTABLE` container back into its original `BINTABLE`.
 /// Returns the restored header and row-major data unit.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+)]
 pub(crate) fn uncompress_table(header: &Header, table: TableView<'_>) -> Result<HduParts> {
     if header.get_logical("ZTABLE")? != Some(true) {
         return Err(FitsError::NotCompressedTable);
@@ -560,6 +570,10 @@ pub(crate) fn uncompress_table(header: &Header, table: TableView<'_>) -> Result<
     })
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+)]
 fn bind_table<'a>(header: &Header, table: TableView<'a>) -> Result<BoundTable<'a>> {
     let xtension = header
         .get_text("XTENSION")?
@@ -736,13 +750,17 @@ impl RestoreChunk<'_> {
     /// Whether `layout` reads this tile's descriptor block consistently: every
     /// original descriptor must address the restored heap, and must have a compressed
     /// counterpart exactly when it is non-empty.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the error is deliberately replaced by the one this context defines"
+    )]
     fn validate_vla_layout(
         &self,
         table: TableView<'_>,
         descriptors: &[u8],
         layout: VlaLayout,
         m: &ColMeta,
-    ) -> std::result::Result<(), VlaLayoutError> {
+    ) -> result::Result<(), VlaLayoutError> {
         let wide = m.kind == TformKind::ArrayDesc64;
         let element_kind = m
             .vla_elem

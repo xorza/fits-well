@@ -30,7 +30,7 @@ impl PhaseAxis {
         if axis == 0 {
             return Err(FitsError::OneBasedIndexRequired { kind: "WCS axis" });
         }
-        PhaseAxis::from_keywords(header, PhaseAxisKeywords::image(axis, alt))
+        PhaseAxis::from_keywords(header, &PhaseAxisKeywords::image(axis, alt))
     }
 
     /// The §9.6 `'PHASE'` parameters for a binary-table pixel-list `column` (1-based).
@@ -44,7 +44,7 @@ impl PhaseAxis {
                 kind: "table column",
             });
         }
-        PhaseAxis::from_keywords(header, PhaseAxisKeywords::pixel_list(column, alt))
+        PhaseAxis::from_keywords(header, &PhaseAxisKeywords::pixel_list(column, alt))
     }
 
     /// The §9.6 `'PHASE'` parameters for `axis` of an array-valued table `column`
@@ -63,10 +63,10 @@ impl PhaseAxis {
                 kind: "table column",
             });
         }
-        PhaseAxis::from_keywords(header, PhaseAxisKeywords::array_column(axis, column, alt))
+        PhaseAxis::from_keywords(header, &PhaseAxisKeywords::array_column(axis, column, alt))
     }
 
-    fn from_keywords(header: &Header, keywords: PhaseAxisKeywords) -> Result<Option<PhaseAxis>> {
+    fn from_keywords(header: &Header, keywords: &PhaseAxisKeywords) -> Result<Option<PhaseAxis>> {
         let Some(ctype) = header.get_text(keywords.ctype.as_str())? else {
             return Ok(None);
         };

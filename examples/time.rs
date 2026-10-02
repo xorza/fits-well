@@ -5,14 +5,17 @@
 //! cargo run --example time
 //! ```
 
+#![expect(clippy::print_stdout, reason = "an example reports to the terminal")]
+
 use std::fs::File;
 
 use fits_well::header::Header;
 use fits_well::time::{Datetime, TimeCoordinate, TimeScale};
 use fits_well::{FitsReader, FitsWriter};
+use std::env;
 
 fn main() -> fits_well::Result<()> {
-    let path = std::env::temp_dir().join("fits_well_time.fits");
+    let path = env::temp_dir().join("fits_well_time.fits");
 
     // A header-only HDU (NAXIS = 0) recording when an observation was taken — the
     // standard §9 time keywords an instrument writes.

@@ -213,8 +213,8 @@ fn read_column_unsigned_recovers_typed_values() {
         .set_internal("TZERO1", U16_OFFSET)
         .set_internal("TZERO2", I8_OFFSET);
     let mut data = Vec::new();
-    data.extend_from_slice(&((50000u16 ^ 0x8000) as i16).to_be_bytes());
-    data.push(((-10i8) as u8) ^ 0x80);
+    data.extend_from_slice(&17_232i16.to_be_bytes()); // 50 000 − 2¹⁵
+    data.push(118); // −10 + 2⁷
     let table = BinTable::from_data(&header, data).unwrap();
     assert_eq!(
         table.column_by_idx(0).unwrap().unsigned().unwrap(),

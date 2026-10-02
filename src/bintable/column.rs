@@ -7,6 +7,7 @@ use crate::bintable::tform::Tform;
 use crate::bintable::tform_kind::TformKind;
 use crate::column::Named;
 use crate::error::Result;
+use std::iter;
 
 /// One column of a binary table: its `TFORMn` format, optional name/unit, the
 /// `TSCALn`/`TZEROn`/`TNULLn` metadata, and its byte offset within a row.
@@ -69,7 +70,7 @@ impl Column {
     /// [`Column::decode_cells`].
     pub(crate) fn decode_cell(&self, bytes: &[u8]) -> ColumnData {
         debug_assert_eq!(bytes.len(), self.tform.byte_width());
-        self.decode_cells(std::iter::once(bytes), 1)
+        self.decode_cells(iter::once(bytes), 1)
     }
 
     /// Decode one `P`/`Q` row's heap array, whose length the row's descriptor gave.
@@ -82,7 +83,7 @@ impl Column {
         let expected_len = descriptor::payload_len(element_type, element_count)?;
         debug_assert_eq!(bytes.len(), expected_len);
         let kind = element_type.heap_kind();
-        Ok(kind.decode_cells(std::iter::once(bytes), bytes.len() / kind.elem_size()))
+        Ok(kind.decode_cells(iter::once(bytes), bytes.len() / kind.elem_size()))
     }
 
     /// The `TDIMn` extent check for this column's `P`/`Q` heap array.

@@ -7,6 +7,7 @@ use crate::world_coordinates::internals::CEA_GOLDEN;
 use crate::world_coordinates::internals::assert_astropy_golden;
 use crate::world_coordinates::internals::celestial_header;
 use crate::world_coordinates::norm180;
+use crate::world_coordinates::projection::Conic;
 use crate::world_coordinates::projection::evaluate_zpn;
 use crate::world_coordinates::projection::{Projection, ProjectionParameters};
 use std::f64::consts::SQRT_2;
@@ -943,7 +944,7 @@ fn near_limit_projection_formulas_keep_their_precision() {
     let mut pv = [0.0; 21];
     pv[1] = 45.0;
     pv[2] = 1e-7;
-    let coo = ConicConstants::new(crate::world_coordinates::projection::Conic::Coo, &pv);
+    let coo = ConicConstants::new(Conic::Coo, &pv);
     assert!(
         (coo.c - 45f64.to_radians().sin()).abs() <= 2.0 * f64::EPSILON,
         "{}",

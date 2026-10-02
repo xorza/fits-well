@@ -351,7 +351,7 @@ fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
             let bytes = file.into_inner().into_inner();
             let mut reader = FitsReader::from_bytes(&bytes).unwrap();
             let error = reader.read_compressed_table(1).unwrap_err();
-            case.assert_error(error);
+            case.assert_error(&error);
         }
     }
 }

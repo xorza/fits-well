@@ -212,6 +212,10 @@ impl FitsReader<source::MmapSource> {
     /// Memory-map a FITS file and read it zero-copy: data units decode straight from
     /// the mapped pages (no staging copy, no read syscalls). Best for large files
     /// and random HDU access. Requires the `mmap` feature.
+    #[expect(
+        clippy::absolute_paths,
+        reason = "stands in for an import that only the mmap feature uses"
+    )]
     pub fn open_mmap(path: impl AsRef<std::path::Path>) -> Result<MmapReader> {
         FitsReader::from_source(source::MmapSource::open(path.as_ref())?)
     }
@@ -246,13 +250,13 @@ impl<S: Source> FitsReader<S> {
                     // (the HDU is still recorded; a later read bounds-checks it).
                     offset = next.min(source.size());
                 }
-                NextHeader::End if hdus.is_empty() => return Err(FitsError::UnexpectedEof),
-                NextHeader::End => break,
-                // §3.5/§3.6: special records and a trailing partial / fill block may
-                // follow the last HDU; a reader disregards them. But the same shape
-                // *before* any valid HDU means there is no conforming primary.
-                NextHeader::Trailing if hdus.is_empty() => return Err(FitsError::UnexpectedEof),
-                NextHeader::Trailing => break,
+                // §3.5/§3.6: special records and a trailing partial or fill block may
+                // follow the last HDU, and a reader disregards them. Before any HDU,
+                // either shape means there is no conforming primary.
+                NextHeader::End | NextHeader::Trailing if hdus.is_empty() => {
+                    return Err(FitsError::UnexpectedEof);
+                }
+                NextHeader::End | NextHeader::Trailing => break,
             }
         }
         Ok(FitsReader {
@@ -583,11 +587,11 @@ impl<S: Source> FitsReader<S> {
         &mut self,
         index: usize,
         row: usize,
-        column: ColumnSelector,
+        column: &ColumnSelector,
     ) -> Result<ColumnData> {
         let hdu = checked_hdu(&self.hdus, index)?;
         let schema = hdu.table_schema()?;
-        let column = resolve_column_selector(schema, &column)?;
+        let column = resolve_column_selector(schema, column)?;
         self.data
             .read_table_cell(hdu.data_offset, schema, row, column)
     }
@@ -819,6 +823,10 @@ struct DataLengths {
 }
 
 impl DataLengths {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+    )]
     fn new(data_bytes: u64) -> Result<DataLengths> {
         let data = usize::try_from(data_bytes)
             .map_err(|_| FitsError::DataUnitTooLarge { bytes: data_bytes })?;
@@ -906,6 +914,7 @@ fn block_has_end(block: &[u8]) -> bool {
 pub(crate) mod internals {
     use crate::reader::FitsReader;
     use crate::reader::StreamReader;
+    use std::fs;
     use std::fs::File;
 
     /// Where the fixture `name` lies, relative to the crate root tests run in.
@@ -915,7 +924,7 @@ pub(crate) mod internals {
 
     pub(crate) fn fixture_bytes(name: &str) -> Vec<u8> {
         let path = fixture_path(name);
-        std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+        fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
     }
 
     /// Open a fixture as a streaming reader, reporting which file failed rather

@@ -1,5 +1,6 @@
 use crate::ascii::internals::ascii_table_header;
 use crate::ascii::*;
+use crate::io::HduKind;
 use crate::reader::FitsReader;
 use crate::writer::FitsWriter;
 use crate::writer::ascii::AsciiWriteColumn;
@@ -151,7 +152,7 @@ fn ascii_table_round_trips_through_write_and_read() {
     let mut r = round_trip(|w| w.write_ascii_table(&ascii_table(2, &columns), None));
 
     assert_eq!(r.hdus.len(), 2); // auto dataless primary + the TABLE
-    assert_eq!(r.hdus[1].kind, crate::io::HduKind::AsciiTable);
+    assert_eq!(r.hdus[1].kind, HduKind::AsciiTable);
     assert_eq!(&r.read_data_raw(1).unwrap().data()[..6], b"  AB  ");
     let t = r.read_ascii_table(1).unwrap();
     assert_eq!(

@@ -74,6 +74,10 @@ pub(super) fn payload_len(element_kind: TformKind, count: usize) -> Result<usize
     }
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+)]
 fn nonnegative_field(field: &'static str, value: i64) -> Result<usize> {
     if value < 0 {
         return Err(FitsError::InvalidPqDescriptor { field, value });
@@ -95,12 +99,12 @@ pub(crate) mod internals {
     }
 
     impl MalformedDescriptorCase {
-        pub(crate) fn assert_error(&self, error: FitsError) {
+        pub(crate) fn assert_error(&self, error: &FitsError) {
             assert!(
                 matches!(
                     error,
                     FitsError::InvalidPqDescriptor { field, value }
-                        if field == self.field && value == self.value
+                        if *field == self.field && *value == self.value
                 ),
                 "{}: {error:?}",
                 self.name

@@ -105,6 +105,7 @@ impl<W: Write> FitsWriter<W> {
 
     /// Enable `DATASUM`/`CHECKSUM` integrity keywords on every HDU written through
     /// this writer (§J), including [`FitsWriter::write_raw_hdu`].
+    #[must_use]
     pub fn with_checksums(mut self) -> Self {
         self.checksum = true;
         self
@@ -113,6 +114,10 @@ impl<W: Write> FitsWriter<W> {
     /// Write one complete raw HDU after validating the header's role and exact
     /// unpadded data length. The block fill is derived from the HDU kind: spaces
     /// for an ASCII table and NULs for every other data unit.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+    )]
     pub fn write_raw_hdu(&mut self, header: &Header, raw: &[u8]) -> Result<()> {
         self.ensure_writable()?;
         let position = match self.state {
@@ -285,12 +290,12 @@ impl<W: Write + Seek> FitsWriter<W> {
     /// kept; the structural and checksum cards are generated.
     pub fn stream_image(
         &mut self,
-        shape: impl Into<Vec<usize>>,
+        shape: &[usize],
         bitpix: Bitpix,
         scaling: Scaling,
         header: Option<&Header>,
     ) -> Result<ImageStream<'_, W>> {
-        image::stream_template(self, shape.into(), bitpix, scaling, header)
+        image::stream_template(self, shape, bitpix, scaling, header)
     }
 }
 

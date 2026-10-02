@@ -34,6 +34,7 @@ use crate::error::FitsError;
 use crate::error::Ranked;
 use crate::error::Result;
 use crate::words;
+use std::iter;
 use std::ops::Range;
 
 /// Element count for an N-d `shape`: the product of the axis lengths, or `0` for
@@ -135,7 +136,7 @@ fn unsigned_from_be(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Option<U
     assert_whole_elements(bytes, bitpix);
     let kind = scaling.unsigned_kind(bitpix)?;
     Some(UnsignedData::from_be_cells(
-        std::iter::once(bytes),
+        iter::once(bytes),
         bytes.len() / bitpix.elem_size(),
         kind,
     ))

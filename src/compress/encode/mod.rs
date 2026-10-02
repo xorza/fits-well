@@ -297,59 +297,47 @@ fn compress_float_image(
             // Gather + widen this tile's pixels straight from the typed source.
             convert::gather_f64(samples, &s.tile.row_bases, s.tile.row_len, &mut s.floats);
             let irow = t as i64 + zdither0; // = (1-based tile row) + ZDITHER0 - 1
-            Ok(
-                match quantize::quantize_tile(
-                    &s.floats,
-                    nx,
-                    ny,
-                    qlevel,
-                    method,
-                    irow,
-                    &mut s.quantize,
-                ) {
-                    Some(q) => {
-                        let bytes = match codec {
-                            ImageCodec::Gzip1 => {
-                                convert::i32_to_be_into(&s.quantize.ints, &mut s.be);
-                                gzip::gzip_encode(&s.be, gzip_level)
-                            }
-                            ImageCodec::Gzip2 => {
-                                convert::i32_to_be_into(&s.quantize.ints, &mut s.be);
-                                gzip::gzip2_encode(&s.be, 4, gzip_level, &mut s.gzip)
-                            }
-                            ImageCodec::Rice1 => rice::rice_encode(
-                                &s.quantize.ints,
-                                IntBitpix::I32,
-                                rice::BLOCKSIZE,
-                                &mut s.rice,
-                            ),
-                            ImageCodec::NoCompress => {
-                                convert::i32_to_be_into(&s.quantize.ints, &mut s.be);
-                                s.be.clone()
-                            }
-                            _ => unreachable!(),
-                        };
-                        FloatTile {
-                            bytes,
-                            zscale: q.bscale,
-                            zzero: q.bzero,
-                            quantized: true,
-                            has_null: q.has_null,
-                        }
-                    }
-                    // Constant tile: store the raw floats, gzip'd, in the fallback.
-                    None => {
-                        convert::float_to_be_into(&s.floats, zbitpix, &mut s.be);
-                        FloatTile {
-                            bytes: gzip::gzip_encode(&s.be, gzip_level),
-                            zscale: 0.0,
-                            zzero: 0.0,
-                            quantized: false,
-                            has_null: false,
-                        }
-                    }
-                },
-            )
+            let Some(q) =
+                quantize::quantize_tile(&s.floats, nx, ny, qlevel, method, irow, &mut s.quantize)
+            else {
+                // Constant tile: store the raw floats, gzip'd, in the fallback.
+                convert::float_to_be_into(&s.floats, zbitpix, &mut s.be);
+                return Ok(FloatTile {
+                    bytes: gzip::gzip_encode(&s.be, gzip_level),
+                    zscale: 0.0,
+                    zzero: 0.0,
+                    quantized: false,
+                    has_null: false,
+                });
+            };
+            let bytes = match codec {
+                ImageCodec::Gzip1 => {
+                    convert::i32_to_be_into(&s.quantize.ints, &mut s.be);
+                    gzip::gzip_encode(&s.be, gzip_level)
+                }
+                ImageCodec::Gzip2 => {
+                    convert::i32_to_be_into(&s.quantize.ints, &mut s.be);
+                    gzip::gzip2_encode(&s.be, 4, gzip_level, &mut s.gzip)
+                }
+                ImageCodec::Rice1 => rice::rice_encode(
+                    &s.quantize.ints,
+                    IntBitpix::I32,
+                    rice::BLOCKSIZE,
+                    &mut s.rice,
+                ),
+                ImageCodec::NoCompress => {
+                    convert::i32_to_be_into(&s.quantize.ints, &mut s.be);
+                    s.be.clone()
+                }
+                _ => unreachable!(),
+            };
+            Ok(FloatTile {
+                bytes,
+                zscale: q.bscale,
+                zzero: q.bzero,
+                quantized: true,
+                has_null: q.has_null,
+            })
         },
     )?;
 

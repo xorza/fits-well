@@ -6,6 +6,8 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::value::FitsInteger;
 use crate::header_model::value::Value;
+use std::iter;
+use std::str;
 
 /// One stored logical keyword record (§4.1).
 ///
@@ -55,7 +57,7 @@ impl Record {
         if !raw.is_ascii() {
             return Err(FitsError::InvalidValue { card: label(raw) });
         }
-        let text = std::str::from_utf8(raw).expect("ASCII bytes are valid UTF-8");
+        let text = str::from_utf8(raw).expect("ASCII bytes are valid UTF-8");
         let keyword = text[..8].trim_end_matches(' ');
 
         if is_end_record(raw) {
@@ -460,7 +462,7 @@ impl<'a> LongString<'a> {
     fn pieces(self) -> impl Iterator<Item = &'a str> {
         let text = self.text;
         let mut start = Some(0);
-        std::iter::from_fn(move || {
+        iter::from_fn(move || {
             let from = start?;
             let mut width = 0;
             let mut end = from;

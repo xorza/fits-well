@@ -4,6 +4,10 @@ use crate::error::FitsError;
 use crate::error::Result;
 
 /// Parse a `TDIMn` value `'(d1,d2,…)'` into axis lengths (fastest-varying first).
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a number parse error says only that the text is not a number, which the error it becomes states"
+)]
 pub(super) fn parse(value: &str) -> Result<Vec<usize>> {
     let invalid = || FitsError::KeywordOutOfRange { name: "TDIMn" };
     let inner = value

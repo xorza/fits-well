@@ -11,6 +11,12 @@
 //! (`funpack -O unpacked.fits OUT_DIR/compressed_table.fits`) and compare it with
 //! the reference it came from.
 
+#![expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "an example reports to the terminal"
+)]
+
 use std::env;
 use std::fs::{self, File};
 use std::path::Path;
