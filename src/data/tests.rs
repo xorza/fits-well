@@ -497,6 +497,7 @@ fn raw_image_fuses_big_endian_physical_conversion() {
         let raw = ReadImage::raw(&[2], samples.bitpix(), scaling, &bytes);
         assert_eq!(raw.metadata().bitpix, samples.bitpix());
         let physical = raw.physical();
+        assert_eq!(physical.len(), expected.len());
         for (got, want) in physical.iter().zip(&expected) {
             assert!(
                 got == want || got.is_nan() && want.is_nan(),
@@ -505,6 +506,7 @@ fn raw_image_fuses_big_endian_physical_conversion() {
             );
         }
         let physical_f32 = raw.physical_f32();
+        assert_eq!(physical_f32.len(), expected.len());
         for (got, want) in physical_f32.iter().zip(&expected) {
             assert!(
                 *got == *want as f32 || got.is_nan() && want.is_nan(),

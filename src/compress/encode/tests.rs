@@ -7,83 +7,7 @@ use crate::error::Ranked;
 use crate::header_model::value::Value;
 use crate::reader::FitsReader;
 use crate::writer::FitsWriter;
-use std::fs::File;
 use std::io::Cursor;
-
-/// Emit compressed files written by this crate for external (astropy) validation.
-/// Run with `cargo test --features compression -- --ignored emit_`.
-#[test]
-#[ignore]
-fn emit_compressed_files_for_astropy() {
-    let samples: Vec<i16> = (0..24 * 16)
-        .map(|i| (i % 24) as i16 * 7 - (i / 24) as i16 * 5)
-        .collect();
-    let image = Image {
-        shape: vec![24, 16],
-        samples: ImageData::I16(samples),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
-    };
-    for (compression, tiles) in [
-        (Compression::GZIP, &[][..]),
-        (Compression::GZIP_SHUFFLED, &[]),
-        (Compression::Rice, &[]),
-        (Compression::Hcompress(Hcompress::default()), &[24, 16]),
-    ] {
-        let f = File::create(format!(
-            ".tmp/wr_{}.fits",
-            compression.name().to_lowercase()
-        ))
-        .unwrap();
-        let mut w = FitsWriter::new(f);
-        w.write_compressed_image(&image, compression, &CompressionOptions::tiled(tiles), None)
-            .unwrap();
-    }
-
-    // PLIO needs a non-negative mask image.
-    let mask: Vec<i32> = (0..24 * 16).map(|i| (i % 24 + i / 24) % 7).collect();
-    let mask_image = Image {
-        shape: vec![24, 16],
-        samples: ImageData::I32(mask),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
-    };
-    let f = File::create(".tmp/wr_plio_1.fits").unwrap();
-    let mut w = FitsWriter::new(f);
-    w.write_compressed_image(
-        &mask_image,
-        Compression::Plio,
-        &CompressionOptions::default(),
-        None,
-    )
-    .unwrap();
-
-    // Quantized float (SUBTRACTIVE_DITHER_1) for astropy to reconstruct.
-    let fimage = Image {
-        shape: vec![24, 16],
-        samples: ImageData::F32(float_field()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
-    };
-    let f = File::create(".tmp/wr_ricef.fits").unwrap();
-    let mut w = FitsWriter::new(f);
-    w.write_compressed_image(
-        &fimage,
-        Compression::Rice,
-        &CompressionOptions::tiled([24, 16]),
-        None,
-    )
-    .unwrap();
-}
 
 #[test]
 fn compression_write_round_trips_through_decode() {
@@ -468,6 +392,7 @@ fn float_write_preserves_nan_nulls() {
         ImageData::F32(v) => v,
         other => panic!("expected F32, got {other:?}"),
     };
+    assert_eq!(back.len(), orig.len());
     for (i, (&o, &b)) in orig.iter().zip(&back).enumerate() {
         if o.is_nan() {
             assert!(b.is_nan(), "null pixel {i} must round-trip to NaN");

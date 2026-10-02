@@ -179,8 +179,6 @@ fn decompresses_quantized_float_no_dither() {
     check_float("comp_ricef_quant.fits", "comp_ref_quant_f32.fits");
 }
 
-/// Build a fixed-width BINTABLE, write it, then round-trip it through table
-/// compression with `algo`/`rows_per_tile` and assert the data is byte-identical.
 #[test]
 fn decompresses_nocompress_tile_verbatim() {
     // A 2×2 i16 image as a single NOCOMPRESS tile: the COMPRESSED_DATA cell holds

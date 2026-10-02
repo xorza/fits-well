@@ -60,17 +60,6 @@ fn reads_the_real_uv_random_groups() {
             })
         ));
     }
-    let mut detached = groups.metadata();
-    detached.gcount = 0;
-    detached.pcount = usize::MAX;
-    detached.group_shape = &[];
-    detached.parameter_names = &[];
-    detached.bitpix = Bitpix::I64;
-    assert_eq!(detached.gcount, 0);
-    assert_eq!(detached.pcount, usize::MAX);
-    assert!(detached.group_shape.is_empty());
-    assert!(detached.parameter_names.is_empty());
-    assert_eq!(detached.bitpix, Bitpix::I64);
     assert_eq!(groups.parameters_physical(0).unwrap().len(), 6);
 }
 

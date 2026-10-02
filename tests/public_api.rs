@@ -5,24 +5,9 @@ use fits_well::table::{BitVec, ColumnData, Complex, Msb0, TableBuilder, WriteCol
 use fits_well::time::{TimeScale, TimeScaleKind};
 use fits_well::{FitsError, FitsReader, FitsWriter, Result};
 
-#[derive(Debug)]
-struct I16ArrayAdapter {
-    shape: Vec<usize>,
-    samples: Vec<i16>,
-}
-
-fn adapt_i16(shape: &[usize], data: ImageData) -> I16ArrayAdapter {
-    let ImageData::I16(samples) = data else {
-        panic!("fixture is i16");
-    };
-    I16ArrayAdapter {
-        shape: shape.to_vec(),
-        samples,
-    }
-}
-
+/// Every published type sits at its canonical path; this compiles or it does not.
 #[test]
-fn canonical_api_paths_support_a_zero_copy_array_adapter() -> Result<()> {
+fn canonical_api_paths_resolve() -> Result<()> {
     let image = Image::new(vec![3, 2], vec![1i16, 2, 3, 4, 5, 6])?;
     assert_eq!(image.metadata().shape, [3, 2]);
     assert!(matches!(
@@ -30,16 +15,7 @@ fn canonical_api_paths_support_a_zero_copy_array_adapter() -> Result<()> {
         fits_well::image::ImageView::I16([1, 2, 3, 4, 5, 6])
     ));
 
-    let owned = ImageData::I16(vec![7, 8, 9]);
-    let owned_ptr = match &owned {
-        ImageData::I16(values) => values.as_ptr(),
-        _ => unreachable!(),
-    };
-    let adapted = adapt_i16(&[3], owned);
-    assert_eq!(adapted.shape, [3]);
-    assert_eq!(adapted.samples, [7, 8, 9]);
-    assert_eq!(adapted.samples.as_ptr(), owned_ptr);
-
+    let _: ImageData = ImageData::I16(vec![7, 8, 9]);
     let _: Option<FitsError> = None;
     let _: Option<FitsReader<std::io::Cursor<Vec<u8>>>> = None;
     let _: Option<FitsWriter<Vec<u8>>> = None;

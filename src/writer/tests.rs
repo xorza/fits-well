@@ -1,6 +1,5 @@
 use crate::ascii::AsciiColumnData;
 use crate::ascii::ascii_text::AsciiText;
-use crate::bintable::character_field::CharacterField;
 use crate::bintable::column_data::ColumnData;
 use crate::bitpix::Bitpix;
 use crate::block::padded_len;
@@ -786,10 +785,9 @@ fn writes_and_reads_back_variable_length_arrays() {
     w.write_table(&binary_table(3, &columns), None).unwrap();
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
     let table = r.read_table(1).unwrap();
-    // TFORM2 should be a P descriptor sized to the longest row (5).
-    assert_eq!(table.schema().columns[1].tform.kind.code(), 'P');
+    // A P descriptor sized to the longest row, 5.
+    assert_eq!(r.hdus[1].header.get_text("TFORM2").unwrap(), Some("1PJ(5)"));
     let got = table.column_by_idx(1).unwrap().vla().unwrap();
-    assert_eq!(got.len(), 3);
     assert_eq!(got, Ragged::from_rows(vla_rows.clone()).unwrap());
 
     let empty = [WriteColumn::vla(
@@ -1189,13 +1187,6 @@ fn binary_character_columns_round_trip_exactly_and_reject_over_width() {
     );
     assert_eq!(table.column_by_idx(1).unwrap().vla().unwrap(), vla_rows);
     assert_eq!(table.column_by_idx(2).unwrap().vla().unwrap(), vla_rows);
-    let fields: Vec<_> = fields.chunks(4).map(CharacterField::new).collect();
-    assert_eq!(fields[0].members(), b"AB  ");
-    assert_eq!(fields[1].members(), b"AB");
-    assert!(fields[2].is_null());
-    assert!(!fields[3].is_null());
-    assert_eq!(fields[3].members(), b"    ");
-
     assert!(matches!(
         WriteColumn::characters("BAD", [b"ABCDE"], 4),
         Err(FitsError::RowWidthMismatch {

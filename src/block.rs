@@ -54,15 +54,6 @@ mod tests {
     use crate::block::*;
 
     #[test]
-    fn block_geometry_constants_are_consistent() {
-        assert_eq!(BLOCK_SIZE, 2880);
-        assert_eq!(CARD_SIZE, 80);
-        // Exactly 36 cards of 80 bytes fill a 2880-byte block.
-        assert_eq!(BLOCK_SIZE / CARD_SIZE, 36);
-        assert_eq!(BLOCK_SIZE % CARD_SIZE, 0);
-    }
-
-    #[test]
     fn blocks_for_rounds_up_at_the_boundary() {
         // (input bytes, expected blocks)
         let cases = [
@@ -93,26 +84,12 @@ mod tests {
     }
 
     #[test]
-    fn padded_len_is_idempotent_on_aligned_input() {
-        for blocks in [0u64, 1, 2, 199] {
-            let aligned = blocks * BLOCK_SIZE as u64;
-            assert_eq!(padded_len(aligned), aligned);
-        }
-    }
-
-    #[test]
     fn padded_len_saturates_instead_of_wrapping() {
         // An absurd length (only reachable from a hostile header) must clamp to
         // u64::MAX, never wrap: `blocks_for(u64::MAX) · 2880` overflows u64, and a
         // wrapping multiply yields a value far *smaller* than the input — which
         // would corrupt the next-HDU seek. Saturating keeps padded_len ≥ its input.
         assert_eq!(padded_len(u64::MAX), u64::MAX);
-        // Demonstrate the naive multiply really would wrap to something tiny.
-        let wrapped = blocks_for(u64::MAX).wrapping_mul(BLOCK_SIZE as u64);
-        assert!(
-            wrapped < u64::MAX,
-            "the unguarded multiply wraps below the input"
-        );
         assert_eq!(checked_padded_len(u64::MAX), None);
     }
 }

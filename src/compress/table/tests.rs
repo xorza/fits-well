@@ -15,7 +15,6 @@ use crate::reader::internals::open_fixture;
 use crate::writer::FitsWriter;
 use crate::writer::render_header;
 use crate::writer::table::{TableBuilder, WriteColumn};
-use std::fs::File;
 use std::io::Cursor;
 
 fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
@@ -121,23 +120,6 @@ fn table_compression_round_trips() {
     }
 }
 
-/// Emit our `write_compressed_table` output for external (cfitsio) validation of
-/// the *encode* direction. After running, verify with cfitsio:
-///   `funpack -O .tmp/my_unpk.fits .tmp/my_ctable.fits`
-/// then compare `.tmp/my_unpk.fits` against `comp_table_ref.fits` — they match.
-/// Run with `cargo test --features compression -- --ignored emit_compressed_table`.
-#[test]
-#[ignore]
-fn emit_compressed_table_for_funpack() {
-    let src = std::fs::read("tests/data/fits/comp_table_ref.fits").unwrap();
-    let mut r = FitsReader::open(Cursor::new(src)).unwrap();
-    let table = r.read_table(1).unwrap();
-    let header = r.hdus[1].header.clone();
-    let mut w = FitsWriter::new(File::create(".tmp/my_ctable.fits").unwrap());
-    w.write_compressed_table(&header, &table, 100, Compression::Rice)
-        .unwrap();
-}
-
 #[test]
 fn decodes_a_cfitsio_compressed_table() {
     // Ground truth: `comp_table_cfitsio.fits` was produced by cfitsio's `fpack
@@ -161,7 +143,7 @@ fn decodes_a_cfitsio_compressed_table() {
         "decoded cfitsio-compressed table must match the original bytes"
     );
     // Spot-check a decoded value against the known formula (INT = i·100000 − 5).
-    match original.column_by_idx(1).unwrap().raw().unwrap() {
+    match restored.column_by_idx(1).unwrap().raw().unwrap() {
         ColumnData::I32(v) => assert_eq!(v[3], 3 * 100_000 - 5),
         other => panic!("expected I32, got {other:?}"),
     }
