@@ -1,65 +1,53 @@
+use std::fmt;
+use std::fmt::Write as _;
+
 use crate::block::CARD_SIZE;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::value::FitsInteger;
 use crate::header_model::value::Value;
 
-/// What role an 80-byte record plays in a header unit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CardKind {
+/// One stored logical keyword record (§4.1).
+///
+/// A header is an *ordered* list of these; duplicates and order are significant,
+/// so the model never collapses cards into a map. Keywords have trailing spaces
+/// stripped; the blank keyword is empty.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Card {
     /// `KEYWORD = value [/ comment]` — a value indicator sits in bytes 9–10.
-    Value,
-    /// `COMMENT`, `HISTORY`, or the blank keyword — free text in bytes 9–80,
-    /// no value indicator. The text is carried in [`Card::comment`].
-    Commentary,
-    /// A `CONTINUE` record carrying a long-string substring (§4.2.1.2). Produced
-    /// only transiently by [`Card::parse`]; [`Header::parse`](crate::header_model::Header::parse) folds each one into
-    /// the preceding value card and never stores it, so a `Continue` card never
-    /// reaches the writer.
-    Continue,
+    Value {
+        keyword: String,
+        value: Value,
+        /// Trailing spaces are not significant and are stripped.
+        comment: Option<String>,
+    },
+    /// `COMMENT`, `HISTORY`, the blank keyword, or any other record without a
+    /// value indicator — free text in bytes 9–80.
+    Commentary {
+        keyword: String,
+        /// Leading spaces are content; trailing spaces are stripped.
+        text: Option<String>,
+    },
+}
+
+/// What one 80-byte record parses to.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum Record {
+    Card(Card),
+    /// A `CONTINUE` record carrying a long-string substring (§4.2.1.2), which
+    /// [`Header::parse`](crate::header_model::Header::parse) folds into the
+    /// preceding value card.
+    Continue {
+        substring: String,
+        comment: Option<String>,
+    },
     /// The `END` record that terminates a header unit.
     End,
 }
 
-/// One logical keyword record (§4.1).
-///
-/// A header is an *ordered* list of these; duplicates and order are significant,
-/// so the model never collapses cards into a map.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Card {
-    /// Keyword name, trailing spaces stripped. Empty for the blank keyword.
-    pub(super) keyword: String,
-    /// Present only for [`CardKind::Value`] and [`CardKind::Continue`] cards.
-    pub(super) value: Option<Value>,
-    /// The `/`-comment for value cards, or the whole free text for commentary
-    /// cards. Trailing spaces are not significant and are stripped.
-    pub(super) comment: Option<String>,
-    pub(super) kind: CardKind,
-}
-
-impl Card {
-    /// A valued keyword card (`KEYWORD = value`), comment optional.
-    pub(super) fn value(keyword: &str, value: Value) -> Card {
-        Card {
-            keyword: keyword.to_string(),
-            value: Some(value),
-            comment: None,
-            kind: CardKind::Value,
-        }
-    }
-
-    /// A commentary card (`COMMENT`/`HISTORY`/blank keyword) carrying free text.
-    pub(super) fn commentary(keyword: &str, text: &str) -> Card {
-        Card {
-            keyword: keyword.to_string(),
-            value: None,
-            comment: Some(text.to_string()),
-            kind: CardKind::Commentary,
-        }
-    }
-
+impl Record {
     /// Parse a single 80-byte record.
-    pub(super) fn parse(raw: &[u8; CARD_SIZE]) -> Result<Card> {
+    pub(super) fn parse(raw: &[u8; CARD_SIZE]) -> Result<Record> {
         // FITS header records are restricted ASCII (§4.1). Rejecting non-ASCII up
         // front both enforces that and guarantees every fixed-column slice below
         // lands on a char boundary — a valid UTF-8 *multibyte* card would
@@ -68,133 +56,89 @@ impl Card {
             return Err(FitsError::InvalidValue { card: label(raw) });
         }
         let text = std::str::from_utf8(raw).expect("ASCII bytes are valid UTF-8");
-        let keyword = text[..8].trim_end_matches(' ').to_string();
+        let keyword = text[..8].trim_end_matches(' ');
 
         if is_end_record(raw) {
-            return Ok(Card {
-                keyword,
-                value: None,
-                comment: None,
-                kind: CardKind::End,
-            });
+            return Ok(Record::End);
         }
         if keyword == "END" {
-            return Err(FitsError::ReservedKeyword { name: keyword });
-        }
-        if keyword.is_empty() || keyword == "COMMENT" || keyword == "HISTORY" {
-            return Ok(Card {
-                kind: CardKind::Commentary,
-                comment: free_text(&text[8..]),
-                value: None,
-                keyword,
+            return Err(FitsError::ReservedKeyword {
+                name: keyword.to_string(),
             });
+        }
+        let commentary = || {
+            Record::Card(Card::Commentary {
+                keyword: keyword.to_string(),
+                text: free_text(&text[8..]),
+            })
+        };
+        if keyword.is_empty() || keyword == "COMMENT" || keyword == "HISTORY" {
+            return Ok(commentary());
         }
         // A CONTINUE record (no value indicator; substring quoted from byte 11)
-        // carries one piece of a long string. `Header::parse` folds it into the
-        // preceding value card. A malformed CONTINUE falls through to commentary.
-        if keyword == "CONTINUE" && &raw[8..10] == b"  " {
+        // carries one piece of a long string. A malformed CONTINUE reads as
+        // commentary.
+        if keyword == "CONTINUE" {
             let split = split_value_comment(&text[10..]);
-            if split.value_token.starts_with('\'') {
-                let substring = parse_string(split.value_token, raw)?;
-                return Ok(Card {
-                    keyword,
-                    value: Some(Value::Text(substring)),
+            if &raw[8..10] == b"  " && split.value_token.starts_with('\'') {
+                return Ok(Record::Continue {
+                    substring: parse_string(split.value_token, raw)?,
                     comment: split.comment,
-                    kind: CardKind::Continue,
                 });
             }
-        }
-        if keyword == "CONTINUE" {
-            return Ok(Card {
-                kind: CardKind::Commentary,
-                comment: free_text(&text[8..]),
-                value: None,
-                keyword,
-            });
+            return Ok(commentary());
         }
         if raw[8] == b'=' {
-            validate_keyword(&keyword)?;
+            validate_keyword(keyword)?;
             let split = split_value_comment(&text[10..]);
-            let value = parse_value(split.value_token, raw)?;
-            return Ok(Card {
-                keyword,
-                value: Some(value),
+            return Ok(Record::Card(Card::Value {
+                keyword: keyword.to_string(),
+                value: parse_value(split.value_token, raw)?,
                 comment: split.comment,
-                kind: CardKind::Value,
-            });
+            }));
         }
         // Unknown no-value cards remain readable as commentary.
-        Ok(Card {
-            kind: CardKind::Commentary,
-            comment: free_text(&text[8..]),
-            value: None,
-            keyword,
-        })
+        Ok(commentary())
     }
+}
 
-    /// Serialize back to an 80-byte record in fixed format (§4.2): logical,
-    /// integer, real, and complex values are right-justified ending at column 30;
-    /// character strings keep their opening quote at column 11.
-    #[cfg(test)]
-    fn render(&self) -> Result<[u8; CARD_SIZE]> {
-        self.validate_contents()?;
-        self.render_one()
-    }
-
-    fn render_one(&self) -> Result<[u8; CARD_SIZE]> {
-        let mut buf = [b' '; CARD_SIZE];
-        let kw = self.keyword.as_bytes();
-        let n = kw.len().min(8);
-        buf[..n].copy_from_slice(&kw[..n]);
-
-        match self.kind {
-            CardKind::End => {}
-            CardKind::Commentary => {
-                if let Some(text) = &self.comment {
-                    write_at(&mut buf, 8, text, &self.keyword)?;
-                }
-            }
-            CardKind::Value => {
-                buf[8] = b'=';
-                let value = self.value.as_ref().expect("value card carries a value");
-                let body = format_value(value);
-                // Fixed format (§4.2.3–4.2.4): logical/integer/real/complex values
-                // are right-justified ending at column 30; character strings keep
-                // their opening quote at column 11 (left-justified). astropy and
-                // cfitsio both warn on a non-fixed-format mandatory keyword.
-                let end = match value {
-                    Value::Text(_) | Value::Undefined => {
-                        write_at(&mut buf, 10, &body, &self.keyword)?;
-                        10 + body.len()
-                    }
-                    _ => {
-                        let end = (10 + body.len()).max(30);
-                        write_at(&mut buf, end - body.len(), &body, &self.keyword)?;
-                        end
-                    }
-                };
-                if let Some(comment) = &self.comment {
-                    write_at(&mut buf, end, &format!(" / {comment}"), &self.keyword)?;
-                }
-            }
-            // A lone CONTINUE record: the substring (already a string value) sits
-            // at byte 11 with no value indicator. Normally folded away before the
-            // writer sees it; rendered here only for a standalone round-trip.
-            CardKind::Continue => {
-                let s = self
-                    .value
-                    .as_ref()
-                    .and_then(Value::as_text)
-                    .expect("CONTINUE card must carry a text substring");
-                write_at(
-                    &mut buf,
-                    10,
-                    &format!("'{}'", s.replace('\'', "''")),
-                    &self.keyword,
-                )?;
-            }
+impl Card {
+    /// A commentary card (`COMMENT`/`HISTORY`/blank keyword) carrying free text; an
+    /// empty `text` is a physically blank record.
+    pub(super) fn commentary(keyword: &str, text: &str) -> Card {
+        Card::Commentary {
+            keyword: keyword.to_string(),
+            text: (!text.is_empty()).then(|| text.to_string()),
         }
-        Ok(buf)
+    }
+
+    pub(crate) fn keyword(&self) -> &str {
+        match self {
+            Card::Value { keyword, .. } | Card::Commentary { keyword, .. } => keyword,
+        }
+    }
+
+    #[cfg(feature = "compression")]
+    pub(super) fn keyword_mut(&mut self) -> &mut String {
+        match self {
+            Card::Value { keyword, .. } | Card::Commentary { keyword, .. } => keyword,
+        }
+    }
+
+    pub(crate) fn value(&self) -> Option<&Value> {
+        match self {
+            Card::Value { value, .. } => Some(value),
+            Card::Commentary { .. } => None,
+        }
+    }
+
+    /// The inline `/`-comment of a value card, or the free text of a commentary
+    /// card.
+    pub(crate) fn comment(&self) -> Option<&str> {
+        match self {
+            Card::Value { comment, .. } => comment.as_deref(),
+            Card::Commentary { text, .. } => text.as_deref(),
+        }
     }
 
     /// Append one or more 80-byte records to `out`. A string value too long for a
@@ -202,34 +146,15 @@ impl Card {
     /// silently truncated; every other card renders to exactly one record.
     pub(crate) fn render_into(&self, out: &mut Vec<u8>) -> Result<()> {
         self.validate_contents()?;
-        let start = out.len();
-        let result = self.render_validated_into(out);
-        if result.is_err() {
-            out.truncate(start);
-        }
-        result
-    }
-
-    /// The text value that cannot fit one 80-byte record and so must be emitted as a
-    /// `CONTINUE` chain (§4.2.1.2). Only a valued card ever uses the chain — a
-    /// commentary or `CONTINUE` record carries its text in the comment field.
-    fn continuation_chain(&self) -> Option<&str> {
-        let Some(Value::Text(text)) = &self.value else {
-            return None;
-        };
-        if self.kind != CardKind::Value {
-            return None;
-        }
-        // The rendered value is the quoted text with each embedded quote doubled; the
-        // comment adds its ` / ` separator. Byte 11 is where the value starts.
-        let value_len = 2 + text.len() + text.bytes().filter(|&b| b == b'\'').count();
-        let comment_len = self.comment.as_ref().map_or(0, |c| 3 + c.len());
-        (10 + value_len + comment_len > CARD_SIZE).then_some(text.as_str())
-    }
-
-    fn render_validated_into(&self, out: &mut Vec<u8>) -> Result<()> {
         match self.continuation_chain() {
-            Some(text) => render_long_string(&self.keyword, text, self.comment.as_deref(), out),
+            Some(chain) => {
+                let start = out.len();
+                let result = chain.render_into(self.keyword(), out);
+                if result.is_err() {
+                    out.truncate(start);
+                }
+                result
+            }
             None => {
                 out.extend_from_slice(&self.render_one()?);
                 Ok(())
@@ -237,43 +162,86 @@ impl Card {
         }
     }
 
-    /// A card is valid exactly when it renders, so this runs the same path and
-    /// discards the output. Only a `CONTINUE` chain needs a growable buffer; every
-    /// other card renders into a fixed 80-byte record, so the common `Header::set`
-    /// pays no staging allocation.
+    /// A card is valid exactly when it renders. This runs the same checks without
+    /// a heap allocation: a single record renders into a stack array, and a
+    /// `CONTINUE` chain is valid when its final record holds the comment.
     pub(super) fn validate(&self) -> Result<()> {
         self.validate_contents()?;
         match self.continuation_chain() {
-            Some(text) => render_long_string(
-                &self.keyword,
-                text,
-                self.comment.as_deref(),
-                &mut Vec::new(),
-            ),
+            Some(chain) => chain.validate(self.keyword()),
             None => self.render_one().map(|_| ()),
         }
     }
 
-    fn validate_contents(&self) -> Result<()> {
-        match self.kind {
-            CardKind::Value => validate_valued_keyword(&self.keyword)?,
-            CardKind::Commentary | CardKind::Continue | CardKind::End => {}
+    /// Serialize to one 80-byte record in fixed format (§4.2): logical, integer,
+    /// real, and complex values are right-justified ending at column 30; character
+    /// strings keep their opening quote at column 11.
+    fn render_one(&self) -> Result<[u8; CARD_SIZE]> {
+        let mut record = RecordBuf::new(self.keyword());
+        match self {
+            Card::Commentary { text, .. } => {
+                if let Some(text) = text {
+                    record.write_str_at(8, text)?;
+                }
+            }
+            Card::Value { value, comment, .. } => {
+                record.bytes[8] = b'=';
+                // astropy and cfitsio both warn on a non-fixed-format mandatory
+                // keyword (§4.2.3–4.2.4).
+                let end = match value {
+                    Value::Text(_) | Value::Undefined => record.write_value_at(10, value)?,
+                    _ => {
+                        let len = rendered_len(value);
+                        let end = (10 + len).max(30);
+                        record.write_value_at(end - len, value)?
+                    }
+                };
+                if let Some(comment) = comment {
+                    let end = record.write_str_at(end, " / ")?;
+                    record.write_str_at(end, comment)?;
+                }
+            }
         }
-        if let Some(comment) = &self.comment {
+        Ok(record.bytes)
+    }
+
+    /// The long text value that cannot fit one 80-byte record and so must be
+    /// emitted as a `CONTINUE` chain (§4.2.1.2).
+    fn continuation_chain(&self) -> Option<LongString<'_>> {
+        let Card::Value {
+            value: Value::Text(text),
+            comment,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        // The rendered value is the quoted text with each embedded quote doubled; the
+        // comment adds its ` / ` separator. Byte 11 is where the value starts.
+        let value_len = 2 + escaped_len(text);
+        let comment_len = comment.as_ref().map_or(0, |c| 3 + c.len());
+        (10 + value_len + comment_len > CARD_SIZE).then_some(LongString {
+            text,
+            comment: comment.as_deref(),
+        })
+    }
+
+    fn validate_contents(&self) -> Result<()> {
+        if let Card::Value { keyword, .. } = self {
+            validate_valued_keyword(keyword)?;
+        }
+        if let Some(comment) = self.comment() {
             validate_ascii(comment, "header comment")?;
         }
-        let Some(value) = &self.value else {
-            return Ok(());
-        };
-        match value {
-            Value::Text(text) => validate_ascii(text, "header text value"),
-            Value::Real(value) if !value.is_finite() => Err(FitsError::InvalidHeaderValue {
-                keyword: self.keyword.clone(),
+        match self.value() {
+            Some(Value::Text(text)) => validate_ascii(text, "header text value"),
+            Some(Value::Real(value)) if !value.is_finite() => Err(FitsError::InvalidHeaderValue {
+                keyword: self.keyword().to_string(),
                 reason: "real values must be finite",
             }),
-            Value::ComplexReal { re, im } if !re.is_finite() || !im.is_finite() => {
+            Some(Value::ComplexReal { re, im }) if !re.is_finite() || !im.is_finite() => {
                 Err(FitsError::InvalidHeaderValue {
-                    keyword: self.keyword.clone(),
+                    keyword: self.keyword().to_string(),
                     reason: "complex real components must be finite",
                 })
             }
@@ -474,147 +442,246 @@ fn comment_text(field: &str) -> Option<String> {
     }
 }
 
-/// Render a long string value as a `CONTINUE` chain (§4.2.1.2): the first record
-/// holds `KEYWORD= 'sub&'`, each following one `CONTINUE  'sub&'`, and the final
-/// substring drops the `&` and carries any comment. The string value is never
-/// lost; an over-long comment is rejected instead of clipped.
-fn render_long_string(
-    keyword: &str,
-    value: &str,
-    comment: Option<&str>,
-    out: &mut Vec<u8>,
-) -> Result<()> {
-    // Bytes 12–79 hold the quoted substring (68 chars); reserve one for the
-    // continuation `&`, leaving 67 escaped characters per continuation record.
+/// A text value rendered as a `CONTINUE` chain (§4.2.1.2): the first record holds
+/// `KEYWORD= 'sub&'`, each following one `CONTINUE  'sub&'`, and the final
+/// substring drops the `&` and carries any comment. The value is never lost; an
+/// over-long comment is rejected instead of clipped.
+#[derive(Debug, Clone, Copy)]
+struct LongString<'a> {
+    text: &'a str,
+    comment: Option<&'a str>,
+}
+
+impl<'a> LongString<'a> {
+    /// Bytes 12–79 hold the quoted substring (68 characters); one goes to the
+    /// continuation `&`, leaving 67 escaped characters per record.
     const PER_RECORD: usize = 67;
-    let mut subs = split_escaped(value, PER_RECORD);
-    if let Some(comment) = comment {
-        let final_start = 10;
-        let final_len =
-            final_start + 2 + subs.last().expect("one substring").len() + 3 + comment.len();
-        if final_len > CARD_SIZE {
-            let empty_final_len = 10 + 2 + 3 + comment.len();
-            if empty_final_len > CARD_SIZE {
-                return Err(FitsError::HeaderCardTooLong {
-                    keyword: keyword.to_string(),
-                    length: empty_final_len,
-                });
+
+    /// The substrings of the text, in order, each at most [`Self::PER_RECORD`]
+    /// characters once its quotes are doubled. A doubled quote never straddles two
+    /// records, and the null string is one empty substring.
+    fn pieces(self) -> impl Iterator<Item = &'a str> {
+        let text = self.text;
+        let mut start = Some(0);
+        std::iter::from_fn(move || {
+            let from = start?;
+            let mut width = 0;
+            let mut end = from;
+            for byte in text[from..].bytes() {
+                let byte_width = if byte == b'\'' { 2 } else { 1 };
+                if width + byte_width > LongString::PER_RECORD {
+                    break;
+                }
+                width += byte_width;
+                end += 1;
             }
-            subs.push(String::new());
-        }
+            start = (end < text.len()).then_some(end);
+            Some(&text[from..end])
+        })
     }
-    let last = subs.len() - 1;
-    for (i, sub) in subs.iter().enumerate() {
-        let mut buf = [b' '; CARD_SIZE];
-        let body = if i == last {
-            format!("'{sub}'")
-        } else {
-            format!("'{sub}&'")
+
+    /// Whether the comment needs a record of its own: when it does not fit after
+    /// the last substring. Errors when it fits no record at all.
+    fn comment_needs_own_record(self, keyword: &str) -> Result<bool> {
+        let Some(comment) = self.comment else {
+            return Ok(false);
         };
-        let body_start = match i {
-            0 => {
-                let kw = keyword.as_bytes();
-                let n = kw.len().min(8);
-                buf[..n].copy_from_slice(&kw[..n]);
-                buf[8] = b'=';
-                10
-            }
-            _ => {
-                buf[..8].copy_from_slice(b"CONTINUE");
-                10
-            }
-        };
-        write_at(&mut buf, body_start, &body, keyword)?;
-        if i == last
-            && let Some(c) = comment
-        {
-            write_at(
-                &mut buf,
-                body_start + body.len(),
-                &format!(" / {c}"),
-                keyword,
-            )?;
+        let last = self.pieces().last().expect("one substring");
+        if 10 + 2 + escaped_len(last) + 3 + comment.len() <= CARD_SIZE {
+            return Ok(false);
         }
-        out.extend_from_slice(&buf);
+        let alone = 10 + 2 + 3 + comment.len();
+        if alone > CARD_SIZE {
+            return Err(FitsError::HeaderCardTooLong {
+                keyword: keyword.to_string(),
+                length: alone,
+            });
+        }
+        Ok(true)
     }
-    Ok(())
+
+    fn validate(self, keyword: &str) -> Result<()> {
+        self.comment_needs_own_record(keyword).map(|_| ())
+    }
+
+    fn render_into(self, keyword: &str, out: &mut Vec<u8>) -> Result<()> {
+        let own_record = self.comment_needs_own_record(keyword)?;
+        let mut pieces = self.pieces().chain(own_record.then_some("")).peekable();
+        let mut first = true;
+        while let Some(piece) = pieces.next() {
+            let mut record = RecordBuf::new(if first { keyword } else { "CONTINUE" });
+            if first {
+                record.bytes[8] = b'=';
+            }
+            first = false;
+            let last = pieces.peek().is_none();
+            let mut cursor = Cursor {
+                record: &mut record,
+                pos: 10,
+            };
+            let written = write_escaped(&mut cursor, piece, if last { "'" } else { "&'" });
+            let end = cursor.pos;
+            written.expect("a substring fits its record");
+            if last && let Some(comment) = self.comment {
+                let end = record.write_str_at(end, " / ")?;
+                record.write_str_at(end, comment)?;
+            }
+            out.extend_from_slice(&record.bytes);
+        }
+        Ok(())
+    }
 }
 
-/// Split `value` into substrings whose *escaped* form (`'` → `''`) is at most
-/// `budget` characters. Splitting on source characters keeps an escaped quote
-/// pair atomic, so a `''` never straddles a record boundary.
-fn split_escaped(value: &str, budget: usize) -> Vec<String> {
-    let mut subs = Vec::new();
-    let mut cur = String::new();
-    let mut len = 0;
-    for ch in value.chars() {
-        let w = if ch == '\'' { 2 } else { 1 };
-        if len + w > budget {
-            subs.push(std::mem::take(&mut cur));
-            len = 0;
-        }
-        if ch == '\'' {
-            cur.push_str("''");
-        } else {
-            cur.push(ch);
-        }
-        len += w;
-    }
-    subs.push(cur); // always ≥1 substring, even for the null string
-    subs
+/// An 80-byte record under construction, blank-filled with the keyword in bytes
+/// 1–8.
+#[derive(Debug)]
+struct RecordBuf<'k> {
+    bytes: [u8; CARD_SIZE],
+    keyword: &'k str,
 }
 
-fn format_value(value: &Value) -> String {
+impl<'k> RecordBuf<'k> {
+    fn new(keyword: &'k str) -> RecordBuf<'k> {
+        let mut bytes = [b' '; CARD_SIZE];
+        let name = keyword.as_bytes();
+        let n = name.len().min(8);
+        bytes[..n].copy_from_slice(&name[..n]);
+        RecordBuf { bytes, keyword }
+    }
+
+    fn too_long(&self, length: usize) -> FitsError {
+        FitsError::HeaderCardTooLong {
+            keyword: self.keyword.to_string(),
+            length,
+        }
+    }
+
+    /// Write `text` from byte `pos`, returning where it ends. Errors when it would
+    /// run past the record.
+    fn write_str_at(&mut self, pos: usize, text: &str) -> Result<usize> {
+        let end = pos + text.len();
+        if end > CARD_SIZE {
+            return Err(self.too_long(end));
+        }
+        self.bytes[pos..end].copy_from_slice(text.as_bytes());
+        Ok(end)
+    }
+
+    /// Write the fixed-format text of `value` from byte `pos`, returning where it
+    /// ends.
+    fn write_value_at(&mut self, pos: usize, value: &Value) -> Result<usize> {
+        let mut cursor = Cursor { record: self, pos };
+        if write_value(&mut cursor, value).is_err() {
+            return Err(self.too_long(pos + rendered_len(value)));
+        }
+        Ok(cursor.pos)
+    }
+}
+
+/// A [`fmt::Write`] sink over a record from a byte position. Running past the
+/// record is a [`fmt::Error`].
+#[derive(Debug)]
+struct Cursor<'r, 'k> {
+    record: &'r mut RecordBuf<'k>,
+    pos: usize,
+}
+
+impl fmt::Write for Cursor<'_, '_> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let end = self.pos + text.len();
+        if end > CARD_SIZE {
+            return Err(fmt::Error);
+        }
+        self.record.bytes[self.pos..end].copy_from_slice(text.as_bytes());
+        self.pos = end;
+        Ok(())
+    }
+}
+
+/// A [`fmt::Write`] sink that only counts the bytes written through it.
+#[derive(Debug, Default)]
+struct Counter(usize);
+
+impl fmt::Write for Counter {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        self.0 += text.len();
+        Ok(())
+    }
+}
+
+fn counted_len(args: fmt::Arguments<'_>) -> usize {
+    let mut counter = Counter::default();
+    counter.write_fmt(args).expect("counting never fails");
+    counter.0
+}
+
+fn rendered_len(value: &Value) -> usize {
+    let mut counter = Counter::default();
+    write_value(&mut counter, value).expect("counting never fails");
+    counter.0
+}
+
+/// The fixed-format text of `value` (§4.2).
+fn write_value(out: &mut impl fmt::Write, value: &Value) -> fmt::Result {
     match value {
-        Value::Logical(true) => "T".to_string(),
-        Value::Logical(false) => "F".to_string(),
-        Value::Integer(i) => i.to_string(),
-        Value::Real(r) => format_real(*r),
-        Value::Text(s) => format!("'{}'", pad_string(&s.replace('\'', "''"))),
-        Value::ComplexInteger { re, im } => format!("({re}, {im})"),
-        Value::ComplexReal { re, im } => format!("({}, {})", format_real(*re), format_real(*im)),
-        Value::Undefined => String::new(),
+        Value::Logical(true) => out.write_str("T"),
+        Value::Logical(false) => out.write_str("F"),
+        Value::Integer(integer) => write!(out, "{integer}"),
+        Value::Real(real) => write_real(out, *real),
+        Value::Text(text) => {
+            // Many writers pad a string to 8 characters; the padding parses away.
+            let padding = 8usize.saturating_sub(escaped_len(text));
+            write_escaped(out, text, "")?;
+            for _ in 0..padding {
+                out.write_char(' ')?;
+            }
+            out.write_char('\'')
+        }
+        Value::ComplexInteger { re, im } => write!(out, "({re}, {im})"),
+        Value::ComplexReal { re, im } => {
+            out.write_char('(')?;
+            write_real(out, *re)?;
+            out.write_str(", ")?;
+            write_real(out, *im)?;
+            out.write_char(')')
+        }
+        Value::Undefined => Ok(()),
     }
 }
 
-/// Render a real so it always reads back as [`Value::Real`] (never a bare integer).
-fn format_real(r: f64) -> String {
-    debug_assert!(r.is_finite());
-    // Rust's `Display` never uses exponent notation, so an extreme magnitude (e.g.
-    // `1e300`) balloons to hundreds of digits and overflows the value field. Fall
-    // back to the §4.2.4 uppercase-`E` exponent form, which always fits, when the
-    // plain decimal grows long.
-    let plain = format!("{r}");
-    let s = if plain.len() > 20 && format!("{r:E}").len() < plain.len() {
-        format!("{r:E}")
-    } else {
-        plain
-    };
-    if looks_real(&s) { s } else { format!("{s}.0") }
+/// `'`, then `text` with each quote doubled, then `close`.
+fn write_escaped(out: &mut impl fmt::Write, text: &str, close: &str) -> fmt::Result {
+    out.write_char('\'')?;
+    for (i, part) in text.split('\'').enumerate() {
+        if i > 0 {
+            out.write_str("''")?;
+        }
+        out.write_str(part)?;
+    }
+    out.write_str(close)
 }
 
-/// Pad a string value to the 8-character minimum many writers emit; the extra
-/// trailing spaces are insignificant and parse away.
-fn pad_string(s: &str) -> String {
-    if s.len() >= 8 {
-        s.to_string()
-    } else {
-        format!("{s:<8}")
-    }
+/// The length of `text` once each quote is doubled.
+fn escaped_len(text: &str) -> usize {
+    text.len() + text.bytes().filter(|&byte| byte == b'\'').count()
 }
 
-fn write_at(buf: &mut [u8; CARD_SIZE], pos: usize, text: &str, keyword: &str) -> Result<()> {
-    let bytes = text.as_bytes();
-    let end = pos
-        .checked_add(bytes.len())
-        .ok_or(FitsError::DataUnitOverflow)?;
-    if end > CARD_SIZE {
-        return Err(FitsError::HeaderCardTooLong {
-            keyword: keyword.to_string(),
-            length: end,
-        });
+/// A real that always reads back as [`Value::Real`], never a bare integer.
+/// `Display` never uses an exponent, so an extreme magnitude (`1e300`) would
+/// balloon to hundreds of digits and overflow the value field; the §4.2.4
+/// uppercase-`E` form takes over when the plain decimal passes 20 characters and
+/// the exponent form is shorter. A plain decimal shows a point exactly when the
+/// value has a fraction, so an integral one gains `.0`.
+fn write_real(out: &mut impl fmt::Write, real: f64) -> fmt::Result {
+    debug_assert!(real.is_finite());
+    let plain = counted_len(format_args!("{real}"));
+    if plain > 20 && counted_len(format_args!("{real:E}")) < plain {
+        return write!(out, "{real:E}");
     }
-    buf[pos..end].copy_from_slice(bytes);
+    write!(out, "{real}")?;
+    if real.fract() == 0.0 {
+        out.write_str(".0")?;
+    }
     Ok(())
 }
 
