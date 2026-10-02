@@ -318,8 +318,11 @@ fn dither_option_sets_zquantiz_and_round_trips() {
             blank: None,
         },
     };
-    // Each `DitherMethod` writes its `ZQUANTIZ` keyword and round-trips; the option is
-    // honored rather than always emitting the hardcoded SUBTRACTIVE_DITHER_1.
+    // Each `DitherMethod` writes its `ZQUANTIZ` keyword and decodes within half a
+    // quantization step (plus an f32 ulp for the dither arithmetic and the stored
+    // result). The three decoded planes differ pairwise, so the option is honored.
+    let original = float_field();
+    let mut planes = Vec::new();
     for (dither, zquantiz) in [
         (DitherMethod::None, "NO_DITHER"),
         (DitherMethod::Subtractive1, "SUBTRACTIVE_DITHER_1"),
@@ -337,11 +340,29 @@ fn dither_option_sets_zquantiz_and_round_trips() {
             Some(zquantiz),
             "{dither:?} must write {zquantiz}"
         );
-        match r.read_image(1).unwrap().decode() {
-            ImageData::F32(v) => assert_eq!(v.len(), 24 * 16, "{dither:?}"),
-            other => panic!("{dither:?}: expected F32, got {other:?}"),
+        let zscale = r
+            .read_table(1)
+            .unwrap()
+            .column_by_name("ZSCALE")
+            .unwrap()
+            .physical()
+            .unwrap()[0];
+        let ImageData::F32(plane) = r.read_image(1).unwrap().decode() else {
+            panic!("{dither:?}: expected F32");
+        };
+        assert_eq!(plane.len(), original.len(), "{dither:?}");
+        for (index, (&o, &b)) in original.iter().zip(&plane).enumerate() {
+            let error = (o as f64 - b as f64).abs();
+            assert!(
+                error <= 0.5 * zscale + f32::EPSILON as f64 * (o as f64).abs(),
+                "{dither:?} pixel {index}: {o} vs {b}"
+            );
         }
+        planes.push(plane);
     }
+    assert_ne!(planes[0], planes[1]);
+    assert_ne!(planes[0], planes[2]);
+    assert_ne!(planes[1], planes[2]);
 }
 
 #[test]

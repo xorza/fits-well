@@ -257,7 +257,7 @@ fn absent_wcsaxes_uses_the_largest_wcs_index() {
 #[test]
 fn rejects_absurd_wcsaxes() {
     // Axis counts are untrusted; reject both bounds before they size a matrix or
-    // drive the per-axis loops.
+    // drive the per-axis loops. 1 and 999 are the bounds §8.2 allows.
     let mut h = Header::new();
     for value in [-1, 0, 1000] {
         h.set_internal("WCSAXES", value);
@@ -266,6 +266,10 @@ fn rejects_absurd_wcsaxes() {
             Err(FitsError::KeywordOutOfRange { name: "WCSAXES" })
         ));
     }
+    h.set_internal("WCSAXES", 1);
+    assert_eq!(Wcs::from_header(&h, None).unwrap().view().axes.len(), 1);
+    h.set_internal("WCSAXES", 999);
+    assert_eq!(Wcs::image_axis_count(&h, None).unwrap(), 999);
 
     h.set_internal("WCAX5", -1);
     assert!(matches!(

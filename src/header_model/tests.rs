@@ -438,6 +438,6 @@ fn naxis_beyond_999_is_rejected() {
         h.naxis(),
         Err(FitsError::KeywordOutOfRange { name: "NAXIS" })
     ));
-    h.set_internal("NAXIS", 3);
-    assert_eq!(h.naxis().unwrap(), 3);
+    h.set_internal("NAXIS", 999);
+    assert_eq!(h.naxis().unwrap(), 999);
 }

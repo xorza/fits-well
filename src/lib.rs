@@ -197,10 +197,9 @@ pub mod io {
     };
 }
 
-/// Hot internal entry points re-exposed **for benchmarking only** (the `internals`
-/// feature). These wrap crate-private functions so the benches under `benches/`
-/// can measure them in isolation; they are **not** a stable API — do not depend on
-/// them.
+/// Hot internal entry points re-exposed for the benches under `benches/` and the
+/// allocation-counting integration test (the `internals` feature). These wrap
+/// crate-private functions; they are **not** a stable API — do not depend on them.
 #[cfg(feature = "internals")]
 pub mod internals {
     use crate::bitpix::Bitpix;
@@ -252,7 +251,7 @@ pub mod internals {
     }
 
     /// Invert one two-dimensional affine `-TAB` coordinate at a chosen dyadic
-    /// fraction, used to guard the inverse search's allocation count by depth.
+    /// fraction, which sets how deep the inverse search goes.
     pub fn tabular_inverse_at_fraction(fraction: f64) -> f64 {
         bench::tabular_inverse_at_fraction(fraction)
     }
