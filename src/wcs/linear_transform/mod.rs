@@ -112,8 +112,8 @@ impl LinearMatrix {
                 self.values[axis * self.naxis + column] *= scale;
             }
         }
-        let inverse = invert(&self.values, self.naxis).ok_or(FitsError::InvalidValue {
-            card: "singular WCS transform matrix".to_string(),
+        let inverse = invert(&self.values, self.naxis).ok_or(FitsError::InvalidWcs {
+            detail: "singular WCS transform matrix".to_string(),
         })?;
         Ok(LinearTransform {
             matrix: self.values,

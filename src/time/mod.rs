@@ -326,18 +326,18 @@ impl FitsTime {
         }
         let zero_phase = header
             .get_real(keywords.zero_phase.as_str())?
-            .ok_or_else(|| FitsError::InvalidValue {
-                card: format!("PHASE axis requires {}", keywords.zero_phase.as_str()),
+            .ok_or_else(|| FitsError::InvalidTime {
+                detail: format!("PHASE axis requires {}", keywords.zero_phase.as_str()),
             })?;
         if !zero_phase.is_finite() {
-            return Err(FitsError::InvalidValue {
-                card: format!("{} must be finite", keywords.zero_phase.as_str()),
+            return Err(FitsError::InvalidTime {
+                detail: format!("{} must be finite", keywords.zero_phase.as_str()),
             });
         }
         let period = header.get_real(keywords.period.as_str())?;
         if period.is_some_and(|value| !value.is_finite()) {
-            return Err(FitsError::InvalidValue {
-                card: format!("{} must be finite", keywords.period.as_str()),
+            return Err(FitsError::InvalidTime {
+                detail: format!("{} must be finite", keywords.period.as_str()),
             });
         }
         Ok(Some(PhaseAxis {

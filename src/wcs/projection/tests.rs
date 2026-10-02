@@ -328,20 +328,20 @@ fn degenerate_projection_parameters_are_rejected() {
 
     assert!(matches!(
         parse("CEA", &[(1, 0.0)]),
-        Err(FitsError::InvalidValue { .. })
+        Err(FitsError::InvalidWcs { .. })
     ));
     assert!(matches!(
         parse("CYP", &[(2, 0.0)]),
-        Err(FitsError::InvalidValue { .. })
+        Err(FitsError::InvalidWcs { .. })
     ));
     assert!(matches!(
         parse("CYP", &[(1, -1.0), (2, 1.0)]),
-        Err(FitsError::InvalidValue { .. })
+        Err(FitsError::InvalidWcs { .. })
     ));
     for parameters in [[(1, 0.0)], [(1, -1.0)], [(2, 0.0)], [(2, -1.0)]] {
         assert!(matches!(
             parse("HPX", &parameters),
-            Err(FitsError::InvalidValue { .. })
+            Err(FitsError::InvalidWcs { .. })
         ));
     }
 }

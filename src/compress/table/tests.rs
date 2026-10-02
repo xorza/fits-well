@@ -9,6 +9,7 @@ use crate::reader::internals::open_fixture;
 use crate::table_impl::BinTable;
 use crate::table_impl::column_data::ColumnData;
 use crate::table_impl::descriptor;
+use crate::table_impl::descriptor::PqDescriptor;
 use crate::table_impl::tform_kind::TformKind;
 use crate::writer::FitsWriter;
 use crate::writer::render_header;
@@ -496,4 +497,121 @@ fn uncompress_table_rejects_overflowing_row_product() {
         table::uncompress_table(&h, &two_column_table),
         Err(FitsError::DataUnitOverflow)
     ));
+}
+
+/// Compresses `columns` as one table through the writer and reads them back through
+/// `read_compressed_table`.
+fn compressed_round_trip(
+    columns: Vec<WriteColumn>,
+    nrows: usize,
+    compression: Compression,
+) -> (BinTable, BinTable) {
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_table(&TableBuilder::explicit(nrows, columns).unwrap())
+        .unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let original = r.read_table(1).unwrap();
+    let header = r.hdus[1].header.clone();
+    let mut cw = FitsWriter::new(Cursor::new(Vec::new()));
+    cw.write_compressed_table(&header, &original, nrows, compression)
+        .unwrap();
+    let mut cr = FitsReader::open(Cursor::new(cw.into_inner().into_inner())).unwrap();
+    (original, cr.read_compressed_table(1).unwrap())
+}
+
+/// §10.3.1: the copied `TDIMn` describes the uncompressed column, not the compressed
+/// container cell. A constant `100J` column shaped `(10,10)` compresses to far fewer than
+/// 100 elements and once failed the `TDIMn` check on read.
+#[test]
+fn a_shaped_column_reads_back_from_a_compressed_table() {
+    for compression in [
+        Compression::Rice,
+        Compression::GZIP,
+        Compression::GZIP_SHUFFLED,
+    ] {
+        let column = WriteColumn::fixed("CUBE", ColumnData::I32(vec![7; 2 * 100]), 100)
+            .with_tdim(vec![10, 10]);
+        let (original, restored) = compressed_round_trip(vec![column], 2, compression);
+        assert_eq!(
+            restored.column_by_idx(0).unwrap().raw().unwrap(),
+            original.column_by_idx(0).unwrap().raw().unwrap(),
+            "{}",
+            compression.name()
+        );
+        assert_eq!(restored.metadata().columns[0].tdim, Some(vec![10, 10]));
+    }
+}
+
+/// A variable-length array is stored compressed when its codec shrinks it and as is
+/// otherwise — cfitsio's rule, which makes a stored length equal to the raw length the
+/// mark of a raw array. Pseudo-random bytes do not deflate; a run of zeros does.
+#[test]
+fn a_variable_length_array_is_stored_compressed_only_when_it_shrinks() {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut noise = |len: usize| -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect()
+    };
+    let noise_row = noise(40);
+    let rows = vec![
+        ColumnData::Bytes(noise_row.clone()),
+        ColumnData::Bytes(Vec::new()),
+        ColumnData::Bytes(vec![0; 400]),
+    ];
+    let column = WriteColumn::vla("ARRAYS", rows.clone()).unwrap();
+    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
+    w.write_table(&TableBuilder::explicit(3, vec![column]).unwrap())
+        .unwrap();
+    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let original = r.read_table(1).unwrap();
+    let header = r.hdus[1].header.clone();
+    let mut encoded = Vec::new();
+    let encoded_header =
+        table::compress_table(&header, &original, 3, Compression::GZIP, &mut encoded).unwrap();
+    let encoded_table = BinTable::from_data(&encoded_header, encoded).unwrap();
+
+    // The container's one cell gunzips to 3 compressed-array descriptors followed by the
+    // 3 original ones.
+    let cell = encoded_table
+        .column_by_idx(0)
+        .unwrap()
+        .vla_column()
+        .unwrap();
+    let mut combined = Vec::new();
+    gzip::gunzip_into(
+        convert::byte_cell(cell.cell(0).unwrap()).unwrap(),
+        3 * 16 + 3 * 8,
+        &mut combined,
+    )
+    .unwrap();
+    let stored = |row: usize| {
+        let descriptor = &combined[row * 16..(row + 1) * 16];
+        let descriptor = PqDescriptor {
+            count: usize::try_from(u64::from_be_bytes(descriptor[..8].try_into().unwrap()))
+                .unwrap(),
+            offset: usize::try_from(u64::from_be_bytes(descriptor[8..].try_into().unwrap()))
+                .unwrap(),
+        };
+        encoded_table
+            .pq_payload(descriptor, TformKind::Byte)
+            .unwrap()
+            .to_vec()
+    };
+    assert_eq!(stored(0), noise_row, "incompressible: stored as is");
+    assert!(stored(1).is_empty(), "empty: nothing stored");
+    let zeros = stored(2);
+    assert!(
+        zeros.len() < 400 && zeros[..2] == [0x1f, 0x8b],
+        "compressible: a gzip member"
+    );
+
+    let restored = table::uncompress_table(&encoded_header, &encoded_table).unwrap();
+    let restored = BinTable::from_data(&restored.header, restored.data).unwrap();
+    assert_eq!(restored.column_by_idx(0).unwrap().vla().unwrap(), rows);
 }

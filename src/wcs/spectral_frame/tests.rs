@@ -18,11 +18,11 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     };
     assert!(matches!(
         velocity_axis("VELO-F2V").wcs(None),
-        Err(FitsError::InvalidValue { card }) if card.contains("RESTFRQ or RESTWAV")
+        Err(FitsError::InvalidWcs { detail }) if detail.contains("RESTFRQ or RESTWAV")
     ));
     assert!(matches!(
         velocity_axis("VRAD-W2F").wcs(None),
-        Err(FitsError::InvalidValue { card }) if card.contains("RESTFRQ or RESTWAV")
+        Err(FitsError::InvalidWcs { detail }) if detail.contains("RESTFRQ or RESTWAV")
     ));
 
     let no_rest = velocity_axis("VRAD-V2F").wcs(None).unwrap();
@@ -82,7 +82,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     invalid.set_internal("RESTFRQ", 0.0);
     assert!(matches!(
         invalid.wcs(None),
-        Err(FitsError::InvalidValue { card }) if card.contains("RESTFRQ")
+        Err(FitsError::InvalidWcs { detail }) if detail.contains("RESTFRQ")
     ));
 
     let mut pixel_list = Header::new();
@@ -171,7 +171,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     alternate.set_internal("SPECSYSA", "UNKNOWN");
     assert!(matches!(
         alternate.wcs(Some('A')),
-        Err(FitsError::InvalidValue { card }) if card.contains("SPECSYS")
+        Err(FitsError::InvalidWcs { detail }) if detail.contains("SPECSYS")
     ));
 
     for (value, expected) in [

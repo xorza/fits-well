@@ -254,6 +254,9 @@ pub(crate) fn compress_table(
                 for row in 0..rows {
                     let off = (r0 + row) * naxis1 + m.offset;
                     descriptors.extend_from_slice(&raw[off..off + m.width]);
+                    // An array the codec does not shrink is stored as is, as cfitsio — the
+                    // reference implementation of §10.3 — stores it; a stored length equal
+                    // to the raw length is then what marks it raw, and cannot be a stream.
                     let cell = vla.cell(r0 + row)?;
                     let compressed = compress_payload(m, cell.bytes, cell.element_count, scratch)?;
                     arrays.push(if compressed.len() < cell.bytes.len() {
@@ -371,6 +374,20 @@ pub(crate) fn compress_table(
 pub(crate) struct HduParts {
     pub(crate) header: Header,
     pub(crate) data: Vec<u8>,
+}
+
+/// The header the `ZTABLE` container itself parses with: the copied `TDIMn`, `TSCALn`,
+/// `TZEROn` and `TNULLn` describe the uncompressed columns (§10.3.1), not the `1QB` cells
+/// that hold their compressed bytes.
+pub(crate) fn container_header(header: &Header) -> Result<Header> {
+    let ncols = header.required_usize("TFIELDS", "TFIELDS")?;
+    let mut container = header.clone();
+    container.remove_where(|keyword| {
+        ["TDIM", "TSCAL", "TZERO", "TNULL"]
+            .into_iter()
+            .any(|prefix| indexed_compression_key(keyword, prefix, ncols))
+    });
+    Ok(container)
 }
 
 /// Uncompress a `ZTABLE` container back into its original `BINTABLE`.
@@ -902,6 +919,9 @@ fn decompress_vla_payload(
     expected: usize,
     scratch: &mut TableDecodeScratch,
 ) -> Result<()> {
+    // cfitsio stores an array its codec does not shrink as is, and every stream it does
+    // store is shorter than the array: a length equal to the raw length marks a raw array
+    // (cfitsio `fits_uncompress_table`), §10.3.6 notwithstanding.
     if bytes.len() == expected || m.algo == Algo::NoCompress {
         if bytes.len() != expected {
             return Err(FitsError::DataSizeMismatch {

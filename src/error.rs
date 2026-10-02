@@ -114,6 +114,24 @@ pub enum FitsError {
     /// A card's value field could not be parsed as any FITS value type.
     #[error("cannot parse value field of card {card:?}")]
     InvalidValue { card: String },
+    /// WCS keywords that describe no valid transform: a singular matrix, degenerate
+    /// projection parameters, an unknown reference frame, a spectral axis without what
+    /// its algorithm needs.
+    #[error("invalid WCS: {detail}")]
+    InvalidWcs { detail: String },
+    /// Time keywords that are malformed or out of range: a date, a time scale, a phase
+    /// axis.
+    #[error("invalid time metadata: {detail}")]
+    InvalidTime { detail: String },
+    /// A compression parameter outside its valid range.
+    #[error("invalid compression parameter: {detail}")]
+    InvalidCompressionParameter { detail: String },
+    /// An ASCII-table field that does not hold a number of its column's format.
+    #[error("ASCII-table field {field:?} is not a valid number")]
+    InvalidAsciiField { field: String },
+    /// A value an ASCII-table cell cannot hold.
+    #[error("invalid ASCII-table cell value: {reason}")]
+    InvalidAsciiValue { reason: &'static str },
     /// Interpreting a valid FITS time value requires leap-second, Earth-orientation,
     /// or ephemeris data that this format library does not provide.
     #[error("{operation} requires external astronomical time data")]
@@ -435,6 +453,36 @@ mod tests {
         assert_eq!(
             FitsError::UnsupportedWcsTransform { axes: vec![0, 2] }.to_string(),
             "WCS has unsupported nonlinear transforms on zero-based axes [0, 2]"
+        );
+        assert_eq!(
+            FitsError::WcsWorldOutOfDomain { projection: "TAN" }.to_string(),
+            "world coordinate has no image under the TAN projection"
+        );
+        assert_eq!(
+            FitsError::WcsInvalidPole { detail: "none" }.to_string(),
+            "no celestial pole fits the WCS: none"
+        );
+        assert_eq!(
+            FitsError::InvalidUnit {
+                unit: "furlong".to_string(),
+                expected: "an angle unit"
+            }
+            .to_string(),
+            "unit \"furlong\" is not an angle unit"
+        );
+        assert_eq!(
+            FitsError::InvalidWcs {
+                detail: "singular WCS transform matrix".to_string()
+            }
+            .to_string(),
+            "invalid WCS: singular WCS transform matrix"
+        );
+        assert_eq!(
+            FitsError::InvalidAsciiField {
+                field: "1.2.3".to_string()
+            }
+            .to_string(),
+            "ASCII-table field \"1.2.3\" is not a valid number"
         );
         assert_eq!(
             FitsError::WcsProjectionDomain { projection: "SIN" }.to_string(),

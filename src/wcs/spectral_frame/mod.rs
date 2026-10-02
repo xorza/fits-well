@@ -47,8 +47,8 @@ impl SpectralReferenceFrame {
             "LOCALGRP" => Ok(SpectralReferenceFrame::LocalGroup),
             "CMBDIPOL" => Ok(SpectralReferenceFrame::CmbDipole),
             "SOURCE" => Ok(SpectralReferenceFrame::Source),
-            value => Err(FitsError::InvalidValue {
-                card: format!("{keyword} {value:?} is not a standard spectral reference frame"),
+            value => Err(FitsError::InvalidWcs {
+                detail: format!("{keyword} {value:?} is not a standard spectral reference frame"),
             }),
         }
     }

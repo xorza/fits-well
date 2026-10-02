@@ -869,8 +869,8 @@ impl<S: Source> FitsReader<S> {
                     Some(reference.extension_level),
                     Some(HduKind::BinTable),
                 )?
-                .ok_or_else(|| FitsError::InvalidValue {
-                    card: format!(
+                .ok_or_else(|| FitsError::InvalidWcs {
+                    detail: format!(
                         "TAB BINTABLE {:?}, EXTVER {}, EXTLEVEL {} was not found",
                         reference.extension_name,
                         reference.extension_version,
@@ -934,8 +934,11 @@ impl<S: Source> FitsReader<S> {
     /// `NOCOMPRESS`). Requires the `compression` feature.
     #[cfg(feature = "compression")]
     pub fn read_compressed_table(&mut self, index: usize) -> Result<BinTable> {
-        let table = self.read_table(index)?;
-        let parts = table::uncompress_table(&self.hdus[index].header, &table)?;
+        self.checked_hdu(index)?.ensure_bintable()?;
+        let unit = self.read_data_raw(index)?;
+        let header = &self.hdus[index].header;
+        let container = BinTable::from_data(&table::container_header(header)?, unit.bytes)?;
+        let parts = table::uncompress_table(header, &container)?;
         BinTable::from_data(&parts.header, parts.data)
     }
 

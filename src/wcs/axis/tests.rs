@@ -204,7 +204,7 @@ fn grism_axes_reject_incomplete_or_degenerate_detector_metadata() {
         assert!(
             matches!(
                 Wcs::from_header(&header, None),
-                Err(FitsError::InvalidValue { .. })
+                Err(FitsError::InvalidWcs { .. })
             ),
             "{parameter}={value:?}"
         );
@@ -550,6 +550,6 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
         .set_internal("CRVAL1", 0.0);
     assert!(matches!(
         invalid.wcs(None),
-        Err(FitsError::InvalidValue { .. })
+        Err(FitsError::InvalidWcs { .. })
     ));
 }

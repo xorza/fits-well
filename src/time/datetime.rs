@@ -23,8 +23,8 @@ impl Datetime {
     /// `±YYYYY-MM-DD`, optionally followed by `Thh:mm:ss[.sss…]` (§9.1.1). No
     /// component defaulting; the date is required, the time part optional.
     pub fn parse(s: &str) -> Result<Datetime> {
-        let invalid = || FitsError::InvalidValue {
-            card: format!("DATE '{s}'"),
+        let invalid = || FitsError::InvalidTime {
+            detail: format!("DATE '{s}'"),
         };
         let s = s.trim();
         // §9.1.1: no timezone designator is permitted (`Z` or a numeric offset).
@@ -117,8 +117,8 @@ impl Datetime {
         if valid_date && valid_time && valid_second {
             return Ok(());
         }
-        Err(FitsError::InvalidValue {
-            card: format!("datetime {self:?} in {scale:?}"),
+        Err(FitsError::InvalidTime {
+            detail: format!("datetime {self:?} in {scale:?}"),
         })
     }
 }

@@ -494,8 +494,8 @@ pub(super) fn finite(value: f64) -> DomainResult {
 }
 
 pub(super) fn invalid_reference(kind: SpectralKind) -> FitsError {
-    FitsError::InvalidValue {
-        card: format!("{} has an invalid spectral reference value", kind.code()),
+    FitsError::InvalidWcs {
+        detail: format!("{} has an invalid spectral reference value", kind.code()),
     }
 }
 
@@ -514,8 +514,8 @@ pub(super) fn required_grism_parameter(
 }
 
 pub(super) fn invalid_grism(algorithm: &'static str, detail: &str) -> FitsError {
-    FitsError::InvalidValue {
-        card: format!("{algorithm} {detail}"),
+    FitsError::InvalidWcs {
+        detail: format!("{algorithm} {detail}"),
     }
 }
 

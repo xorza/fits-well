@@ -12,6 +12,24 @@ use crate::wcs::projection::{NativeCoordinate, ProjectedCoordinate};
 
 const FACE_SCALE: f64 = 45.0;
 
+/// The spherical cube projections.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Cube {
+    Tsc,
+    Csc,
+    Qsc,
+}
+
+impl Cube {
+    const fn projection(self) -> Projection {
+        match self {
+            Cube::Tsc => Projection::Tsc,
+            Cube::Csc => Projection::Csc,
+            Cube::Qsc => Projection::Qsc,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Direction {
     l: f64,
@@ -53,33 +71,34 @@ struct FaceRatios {
     psi: f32,
 }
 
-pub(super) fn deproject(projection: Projection, x: f64, y: f64) -> Result<NativeCoordinate> {
+pub(super) fn deproject(cube: Cube, x: f64, y: f64) -> Result<NativeCoordinate> {
+    let projection = cube.projection();
     let face = face_coordinate(projection, x, y)?;
-    let direction = match projection {
-        Projection::Tsc => direction_from_ratios(face.face, face.x, face.y),
-        Projection::Csc => {
+    let direction = match cube {
+        Cube::Tsc => direction_from_ratios(face.face, face.x, face.y),
+        Cube::Csc => {
             let ratios = csc_inverse(face.x, face.y);
             direction_from_csc_ratios(face.face, ratios)
         }
-        Projection::Qsc => qsc_inverse(projection, face)?,
-        _ => unreachable!(),
+        Cube::Qsc => qsc_inverse(projection, face)?,
     };
     native_coordinate(projection, direction)
 }
 
-pub(super) fn project(projection: Projection, phi: f64, theta: f64) -> Result<ProjectedCoordinate> {
-    if matches!(projection, Projection::Qsc) && theta.abs() == 90.0 {
+pub(super) fn project(cube: Cube, phi: f64, theta: f64) -> Result<ProjectedCoordinate> {
+    let projection = cube.projection();
+    if matches!(cube, Cube::Qsc) && theta.abs() == 90.0 {
         return projection.projected_coordinate(0.0, theta.signum() * 90.0);
     }
 
     let face = face_direction(phi, theta);
-    let coordinate = match projection {
-        Projection::Tsc => FaceCoordinate {
+    let coordinate = match cube {
+        Cube::Tsc => FaceCoordinate {
             face: face.face,
             x: face.xi / face.zeta,
             y: face.eta / face.zeta,
         },
-        Projection::Csc => {
+        Cube::Csc => {
             let chi = (face.xi / face.zeta) as f32;
             let psi = (face.eta / face.zeta) as f32;
             FaceCoordinate {
@@ -88,15 +107,14 @@ pub(super) fn project(projection: Projection, phi: f64, theta: f64) -> Result<Pr
                 y: f64::from(csc_forward_axis(psi, chi)),
             }
         }
-        Projection::Qsc => qsc_forward(face, theta),
-        _ => unreachable!(),
+        Cube::Qsc => qsc_forward(face, theta),
     };
-    let tolerance = if matches!(projection, Projection::Csc) {
+    let tolerance = if matches!(cube, Cube::Csc) {
         1e-7
     } else {
         DOMAIN_TOLERANCE
     };
-    projected_coordinate(projection, coordinate, face.x0, face.y0, tolerance)
+    projected_coordinate(cube, coordinate, face.x0, face.y0, tolerance)
 }
 
 fn face_coordinate(projection: Projection, x: f64, y: f64) -> Result<FaceCoordinate> {
@@ -253,16 +271,17 @@ fn native_coordinate(projection: Projection, direction: Direction) -> Result<Nat
 }
 
 fn projected_coordinate(
-    projection: Projection,
+    cube: Cube,
     coordinate: FaceCoordinate,
     x0: f64,
     y0: f64,
     tolerance: f64,
 ) -> Result<ProjectedCoordinate> {
+    let projection = cube.projection();
     if coordinate.x.abs() > 1.0 + tolerance || coordinate.y.abs() > 1.0 + tolerance {
         return Err(projection.world_domain_error());
     }
-    if matches!(projection, Projection::Csc) {
+    if matches!(cube, Cube::Csc) {
         let x = coordinate.x.clamp(-1.0, 1.0) as f32 + x0 as f32;
         let y = coordinate.y.clamp(-1.0, 1.0) as f32 + y0 as f32;
         return projection

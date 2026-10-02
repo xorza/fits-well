@@ -33,8 +33,8 @@ impl CelestialReferenceFrame {
             "FK4" => Ok(CelestialReferenceFrame::Fk4),
             "FK4-NO-E" => Ok(CelestialReferenceFrame::Fk4NoE),
             "GAPPT" => Ok(CelestialReferenceFrame::Gappt),
-            value => Err(FitsError::InvalidValue {
-                card: format!("RADESYS {value:?} is not a standard reference frame"),
+            value => Err(FitsError::InvalidWcs {
+                detail: format!("RADESYS {value:?} is not a standard reference frame"),
             }),
         }
     }
@@ -56,8 +56,8 @@ impl CelestialFrame {
         }
         let equinox = header.get_real(key!("EQUINOX{suffix}").as_str())?;
         if equinox.is_some_and(|value| !value.is_finite() || value < 0.0) {
-            return Err(FitsError::InvalidValue {
-                card: "EQUINOX must be finite and non-negative".to_string(),
+            return Err(FitsError::InvalidWcs {
+                detail: "EQUINOX must be finite and non-negative".to_string(),
             });
         }
         let applies = ctype
