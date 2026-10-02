@@ -362,7 +362,10 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
     let invalid_unit = h.wcs(Some('A')).unwrap();
     assert!(matches!(
         t.time_axis_mjd(&invalid_unit, 1, &[1.0]),
-        Err(FitsError::InvalidValue { .. })
+        Err(FitsError::InvalidUnit {
+            expected: "a time unit",
+            ..
+        })
     ));
 
     let mut coupled = Header::new();
@@ -649,7 +652,7 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
     assert_eq!(unit("s"), 1.0);
     assert_eq!(unit("ms"), 1e-3);
     assert_eq!(unit("ks"), 1e3);
-    assert_eq!(unit("Mmin"), 60e6);
+    assert_eq!(unit("Ma"), 1e6 * 365.25 * 86400.0);
     assert_eq!(unit("10**3 s"), 1e3);
 
     let mut tropical = Header::new();
@@ -669,12 +672,13 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
     assert!((besselian.unit_seconds().unwrap() / SEC_PER_DAY - 365.242_198_781_7).abs() < 1e-12);
 
     let mut invalid = Header::new();
-    for value in ["", "m", "Hz", "day", "bogus"] {
+    // The minute, day and century take no SI prefix, the year only multiples (wcslib).
+    for value in ["", "m", "Hz", "day", "bogus", "Mmin", "kd", "ma"] {
         invalid.set_internal("TIMEUNIT", value);
         assert!(
             matches!(
                 FitsTime::from_header(&invalid).unwrap().unit_seconds(),
-                Err(FitsError::InvalidValue { .. })
+                Err(FitsError::InvalidUnit { unit, expected: "a time unit" }) if unit == value
             ),
             "{value:?} should not be accepted as a time unit"
         );

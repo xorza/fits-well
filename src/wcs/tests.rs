@@ -4,6 +4,7 @@ use crate::error::Ranked;
 use crate::header::Header;
 use crate::header::value::Value;
 use crate::reader::FitsReader;
+use crate::wcs::R2D;
 use crate::wcs::Wcs;
 use crate::wcs::celestial_pole::CelestialPole;
 use crate::wcs::internals::TAN_GOLDEN;
@@ -100,25 +101,22 @@ fn transform_failures_return_errors() {
         header
             .set_internal("CDELT1", 100.0)
             .set_internal("CDELT2", 100.0);
-        Wcs::from_header(&header, None).unwrap()
+        Wcs::from_header(&header, None)
     };
 
-    let sin = build("SIN");
+    let sin = build("SIN").unwrap();
     assert!(matches!(
         sin.pixel_to_world(&[2.0, 1.0]),
         Err(FitsError::WcsProjectionDomain { projection: "SIN" })
     ));
 
-    let zpn = build("ZPN");
-    assert!(matches!(
-        zpn.pixel_to_world(&[2.0, 1.0]),
-        Err(FitsError::WcsNoConvergence { algorithm: "ZPN" })
-    ));
+    // A ZPN polynomial without coefficients maps every colatitude to the pole.
+    assert!(matches!(build("ZPN"), Err(FitsError::InvalidValue { .. })));
 
     let tan = open_wcs("wcs_tan.fits");
     assert!(matches!(
         tan.world_to_pixel(&[150.0, 100.0]),
-        Err(FitsError::WcsProjectionDomain { projection: "TAN" })
+        Err(FitsError::WcsWorldOutOfDomain { projection: "TAN" })
     ));
     for result in [
         tan.pixel_to_world(&[1.0]),
@@ -267,4 +265,145 @@ fn rejects_absurd_wcsaxes() {
         Wcs::from_array_column(&h, 5, None),
         Err(FitsError::KeywordOutOfRange { name: "WCAXn" })
     ));
+}
+
+fn celestial_header(projection: &str, keywords: &[(&str, f64)]) -> Header {
+    let mut header = Header::new();
+    header
+        .set_internal("NAXIS", 2)
+        .set_internal("CTYPE1", format!("RA---{projection}"))
+        .set_internal("CTYPE2", format!("DEC--{projection}"));
+    for &(keyword, value) in keywords {
+        header.set_internal(keyword, value);
+    }
+    header
+}
+
+/// CAR with δ₀ = −30° has two poles, δp = u ± v with u = 180°, v = acos(−½) = 120°:
+/// 300° ≡ −60° and 60°. LATPOLE picks between them — the candidate `5π/3` is valid once
+/// wrapped, as wcslib's `celset` wraps it.
+#[test]
+fn latpole_chooses_between_both_valid_poles() {
+    for (latpole, pole) in [(90.0, 60.0), (-90.0, -60.0)] {
+        let header = celestial_header("CAR", &[("CRVAL2", -30.0), ("LATPOLE", latpole)]);
+        let wcs = Wcs::from_header(&header, None).unwrap();
+        let dec = wcs.view().celestial_projection.unwrap().pole[1];
+        assert!((dec - pole).abs() < 1e-12, "LATPOLE {latpole}: {dec}");
+    }
+}
+
+/// With θ₀ = 0 and φp − φ₀ = 120°, a fiducial latitude needs |δ₀| ≤ asin|cos 120°| = 30°;
+/// δ₀ = 60° admits no pole at all.
+#[test]
+fn an_impossible_pole_is_refused() {
+    let header = celestial_header("CAR", &[("CRVAL2", 60.0), ("LONPOLE", 120.0)]);
+    assert!(matches!(
+        Wcs::from_header(&header, None),
+        Err(FitsError::WcsInvalidPole { .. })
+    ));
+}
+
+/// A celestial axis needs a partner of its own system; a lone one, or a pair of two
+/// systems, is not evaluated.
+#[test]
+fn unmatched_celestial_axes_are_unsupported() {
+    for (ctypes, unsupported) in [
+        (["RA---TAN", "FREQ"], vec![0]),
+        (["FREQ", "DEC--TAN"], vec![1]),
+        (["RA---TAN", "GLAT-TAN"], vec![0, 1]),
+        (["GLON-TAN", "GLAT-TAN"], vec![]),
+        (["ELON-CAR", "ELAT-CAR"], vec![]),
+        (["HPLN-TAN", "HPLT-TAN"], vec![]),
+        (["HPLN-TAN", "SOLT-TAN"], vec![0, 1]),
+    ] {
+        let mut header = Header::new();
+        header
+            .set_internal("NAXIS", 2)
+            .set_internal("CTYPE1", ctypes[0])
+            .set_internal("CTYPE2", ctypes[1]);
+        let wcs = Wcs::from_header(&header, None).unwrap();
+        assert_eq!(wcs.view().unsupported_axes, unsupported, "{ctypes:?}");
+        assert_eq!(
+            wcs.view().celestial_projection.is_some(),
+            unsupported.is_empty(),
+            "{ctypes:?}"
+        );
+    }
+}
+
+/// One axis of a celestial pair evaluates the projection, as the complete transform does.
+#[test]
+fn axis_world_of_a_celestial_axis_is_the_projected_value() {
+    let header = celestial_header("TAN", &[("CRVAL1", 150.0), ("CRVAL2", 60.0)]);
+    let wcs = Wcs::from_header(&header, None).unwrap();
+    let pixel = [30.0, 20.0];
+    let complete = wcs.pixel_to_world(&pixel).unwrap();
+    for (axis, &value) in complete.iter().enumerate() {
+        let world = wcs.axis_world(axis, &pixel).unwrap();
+        assert_eq!(world.value, value, "axis {axis}");
+        assert_eq!(world.cunit, "deg", "axis {axis}");
+    }
+}
+
+/// Angle units resolve through one table — SI-prefixed radians, the unprefixed sexagesimal
+/// units, numeric multipliers — and anything else is refused, never read as degrees.
+/// 1 mrad = 0.0572957795°; CDELT 1 then puts pixel 2 that far from CRVAL.
+#[test]
+fn celestial_units_resolve_or_are_refused() {
+    for (unit, degrees) in [
+        ("deg", 1.0),
+        ("", 1.0),
+        ("arcmin", 1.0 / 60.0),
+        ("arcsec", 1.0 / 3600.0),
+        ("mas", 1.0 / 3_600_000.0),
+        ("rad", R2D),
+        ("mrad", 1e-3 * R2D),
+        ("urad", 1e-6 * R2D),
+        ("10**-3 deg", 1e-3),
+    ] {
+        let header = celestial_header("CAR", &[("CRPIX1", 1.0), ("CRPIX2", 1.0)]);
+        let mut header = header;
+        header
+            .set_internal("CUNIT1", unit)
+            .set_internal("CUNIT2", unit);
+        let wcs = Wcs::from_header(&header, None).unwrap();
+        let world = wcs.pixel_to_world(&[2.0, 1.0]).unwrap();
+        // The value passes through the native-to-celestial rotation, whose trigonometry
+        // leaves a few 1e-15 rad — order 1e-14 of a degree.
+        assert!(
+            (world[0] - degrees).abs() < 1e-13 * degrees.max(1.0),
+            "{unit:?}: {world:?}"
+        );
+    }
+    for unit in ["furlong", "mdeg", "karcsec", "Hz"] {
+        let mut header = celestial_header("CAR", &[]);
+        header
+            .set_internal("CUNIT1", unit)
+            .set_internal("CUNIT2", "deg");
+        assert!(
+            matches!(Wcs::from_header(&header, None), Err(FitsError::InvalidUnit { unit: found, .. }) if found == unit),
+            "{unit:?}"
+        );
+    }
+}
+
+/// The view reports the axes as the header declares them; the transform's own unit is
+/// what `axis_world` and the world coordinates use.
+#[test]
+fn the_view_keeps_crval_in_its_declared_unit() {
+    let mut header = celestial_header("TAN", &[("CRVAL1", 3600.0), ("CRVAL2", 7200.0)]);
+    header
+        .set_internal("CUNIT1", "arcsec")
+        .set_internal("CUNIT2", "arcsec");
+    let wcs = Wcs::from_header(&header, None).unwrap();
+    let axes = wcs.view().axes;
+    assert_eq!((axes[0].crval, axes[0].cunit.as_str()), (3600.0, "arcsec"));
+    assert_eq!((axes[1].crval, axes[1].cunit.as_str()), (7200.0, "arcsec"));
+    let world = wcs.pixel_to_world(&[0.0, 0.0]).unwrap();
+    // The reference pixel deprojects to the native pole and rotates back to CRVAL, in
+    // degrees, through a few ULP of trigonometry.
+    assert!(
+        (world[0] - 1.0).abs() < 1e-12 && (world[1] - 2.0).abs() < 1e-12,
+        "{world:?}"
+    );
 }

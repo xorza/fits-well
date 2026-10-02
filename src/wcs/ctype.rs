@@ -28,16 +28,37 @@ impl<'a> Ctype<'a> {
     /// forms are longitudes; `DEC` and `xLAT`/`yzLT` are latitudes; `None` for any
     /// non-celestial axis.
     pub(super) fn celestial_axis(self) -> Option<CelestialAxis> {
-        let head = self.head;
-        if head == "RA" || head.ends_with("LON") || (head.len() == 4 && head.ends_with("LN")) {
-            Some(CelestialAxis::Longitude)
-        } else if head == "DEC"
-            || head.ends_with("LAT")
-            || (head.len() == 4 && head.ends_with("LT"))
-        {
-            Some(CelestialAxis::Latitude)
-        } else {
-            None
-        }
+        self.celestial_system().map(|system| system.axis)
     }
+
+    /// The celestial coordinate this axis carries and the system it belongs to: the head
+    /// without its `LON`/`LAT`/`LN`/`LT` suffix, so `GLON` and `GLAT` share `G` and `HPLN`
+    /// and `HPLT` share `HP`; `RA` and `DEC` share the equatorial system.
+    pub(super) fn celestial_system(self) -> Option<CelestialSystem<'a>> {
+        let head = self.head;
+        let (axis, system) = if head == "RA" {
+            (CelestialAxis::Longitude, "RA/DEC")
+        } else if head == "DEC" {
+            (CelestialAxis::Latitude, "RA/DEC")
+        } else if let Some(system) = head.strip_suffix("LON") {
+            (CelestialAxis::Longitude, system)
+        } else if let Some(system) = head.strip_suffix("LAT") {
+            (CelestialAxis::Latitude, system)
+        } else if head.len() == 4 && head.ends_with("LN") {
+            (CelestialAxis::Longitude, &head[..2])
+        } else if head.len() == 4 && head.ends_with("LT") {
+            (CelestialAxis::Latitude, &head[..2])
+        } else {
+            return None;
+        };
+        Some(CelestialSystem { axis, system })
+    }
+}
+
+/// One axis of a celestial coordinate system, as [`Ctype::celestial_system`] reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CelestialSystem<'a> {
+    pub(super) axis: CelestialAxis,
+    /// What the longitude and latitude of one system share in their names.
+    pub(super) system: &'a str,
 }

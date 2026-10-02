@@ -31,7 +31,11 @@ pub(super) enum AxisTransform {
 #[derive(Debug)]
 pub(super) struct AxisTransformSpec {
     pub(super) transform: AxisTransform,
+    /// The factor from the declared `CUNITi` to [`Self::world_unit`].
     pub(super) unit_scale: f64,
+    /// The unit world coordinates of the axis come out in, when it is not the declared
+    /// one: a spectral quantity's Table-25 default unit.
+    pub(super) world_unit: Option<&'static str>,
 }
 
 impl AxisTransform {
@@ -47,6 +51,7 @@ impl AxisTransform {
             return Ok(AxisTransformSpec {
                 transform: AxisTransform::Linear,
                 unit_scale: 1.0,
+                world_unit: None,
             });
         };
         let kind = SpectralKind::from_code(parsed.head);
@@ -66,6 +71,7 @@ impl AxisTransform {
             return Ok(AxisTransformSpec {
                 transform: AxisTransform::Logarithmic,
                 unit_scale,
+                world_unit: kind.map(SpectralKind::default_unit),
             });
         }
         let Some(kind) = kind else {
@@ -103,6 +109,7 @@ impl AxisTransform {
         Ok(AxisTransformSpec {
             transform: AxisTransform::Spectral(transform),
             unit_scale,
+            world_unit: Some(kind.default_unit()),
         })
     }
 
@@ -147,6 +154,7 @@ fn unsupported() -> AxisTransformSpec {
     AxisTransformSpec {
         transform: AxisTransform::Unsupported,
         unit_scale: 1.0,
+        world_unit: None,
     }
 }
 

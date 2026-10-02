@@ -257,9 +257,10 @@ fn ascii_table_round_trips_through_write_and_read() {
 fn signed_exponent_without_letter_parses_as_fortran_real() {
     // §7.2.5 rule 3(a): a numeric field may be terminated by a bare '+'/'-' that
     // introduces the exponent (no E/D letter), e.g. 3.14159-2 = 3.14159 × 10⁻².
+    // Every value is the f64 nearest the decimal the field spells, as strtod (cfitsio,
+    // astropy) reads it: `-3.0-1` is -0.3, not -3.0 · 0.1 = -0.30000000000000004.
     let approx = |got: Option<f64>, want: f64| {
-        let g = got.expect("should parse");
-        assert!((g - want).abs() < 1e-12, "got {g}, want {want}");
+        assert_eq!(got.expect("should parse"), want);
     };
     approx(parse_ascii_float("3.14159-2", 5), 0.0314159);
     approx(parse_ascii_float("2.5+3", 1), 2500.0);
@@ -275,6 +276,9 @@ fn signed_exponent_without_letter_parses_as_fortran_real() {
     approx(parse_ascii_float("1E5", 3), 100_000.0);
     approx(parse_ascii_float("15E2", 3), 1500.0);
     approx(parse_ascii_float("2E-3", 4), 0.002);
+    // Past 10²², `10f64.powi` is no longer exact; the literal stays exact to the last bit.
+    approx(parse_ascii_float("7", 30), 7e-30);
+    approx(parse_ascii_float("1.7976931348623157E308", 1), f64::MAX);
 
     assert_eq!(
         split_mantissa_exponent("3.14159-2"),

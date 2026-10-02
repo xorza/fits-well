@@ -7,7 +7,7 @@ use crate::keyword::key;
 use crate::wcs::celestial_pole::CelestialPole;
 use crate::wcs::first_real;
 use crate::wcs::projected_celestial_axes::ProjectedCelestialAxes;
-use crate::wcs::projection::Projection;
+use crate::wcs::projection::{Projection, ProjectionParameters};
 
 /// The celestial half of a WCS once the header is resolved: which axes carry the
 /// longitude and latitude, the projection and its `PVi_m` parameters, and the
@@ -19,7 +19,7 @@ pub(super) struct CelestialTransform {
     pub(super) projection: Projection,
     /// The native→celestial pole, computed from the fiducial point.
     pub(super) pole: CelestialPole,
-    pub(super) pv: [f64; 21],
+    pub(super) parameters: ProjectionParameters,
 }
 
 impl CelestialTransform {
@@ -48,7 +48,7 @@ impl CelestialTransform {
                 *value = header_value;
             }
         }
-        proj.validate_parameters(&pv)?;
+        let parameters = proj.parameters(pv)?;
         // A conic's mid-latitude θ_a = PVi_1 is mandatory and must be non-zero; θ_a = 0
         // (absent, or explicitly 0) is a degenerate cone (`1/tan 0`). Treat it like an
         // unimplemented projection — flag the axes so complete transforms fail rather
@@ -88,8 +88,8 @@ impl CelestialTransform {
             lng,
             lat,
             projection: proj,
-            pole: CelestialPole::from_fiducial(phi0, theta0, alpha0, delta0, phip, thetap),
-            pv,
+            pole: CelestialPole::from_fiducial(phi0, theta0, alpha0, delta0, phip, thetap)?,
+            parameters,
         }))
     }
 }

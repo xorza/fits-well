@@ -7,9 +7,9 @@ use crate::keyword::key;
 use crate::table_impl::BinTable;
 use crate::table_impl::column_reader::ColumnReader;
 use crate::table_impl::tform_kind::TformKind;
+use crate::wcs::angle_scale;
 use crate::wcs::axis;
 use crate::wcs::ctype::Ctype;
-use crate::wcs::unit_to_degrees;
 
 const TABULAR_TOLERANCE: f64 = 1e-10;
 const MAX_INTERPOLATION_VERTICES: usize = 1 << 20;
@@ -155,7 +155,7 @@ pub(crate) fn descriptors(
             if let Some(scale) = axis::spectral_unit_scale(ctype, cunit)? {
                 scale
             } else if Ctype::parse(ctype).celestial_axis().is_some() {
-                unit_to_degrees(cunit)
+                angle_scale(cunit)?
             } else {
                 1.0
             };

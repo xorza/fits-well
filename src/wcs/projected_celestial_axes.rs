@@ -23,25 +23,33 @@ pub(super) struct ProjectedCelestialAxes {
 }
 
 impl CelestialAxisPair {
-    /// The first longitude axis and the first latitude axis of `ctype`, or `None`
-    /// unless both are present.
+    /// The first longitude axis of `ctype` that has a latitude axis of its own system,
+    /// paired with the first such latitude axis — or `None`. A celestial axis left over
+    /// is a coordinate the WCS cannot evaluate.
     pub(super) fn find(ctype: &[String]) -> Option<CelestialAxisPair> {
-        let mut lng = None;
-        let mut lat = None;
-        for (i, t) in ctype.iter().enumerate() {
-            match Ctype::parse(t).celestial_axis() {
-                Some(CelestialAxis::Longitude) => lng = lng.or(Some(i)),
-                Some(CelestialAxis::Latitude) => lat = lat.or(Some(i)),
-                None => {}
+        let systems: Vec<_> = ctype
+            .iter()
+            .map(|ctype| Ctype::parse(ctype).celestial_system())
+            .collect();
+        systems.iter().enumerate().find_map(|(longitude, system)| {
+            let system = (*system)?;
+            if system.axis != CelestialAxis::Longitude {
+                return None;
             }
-        }
-        let (Some(lng), Some(lat)) = (lng, lat) else {
-            return None;
-        };
-        Some(CelestialAxisPair {
-            longitude: lng,
-            latitude: lat,
+            let latitude = systems.iter().position(|other| {
+                other.is_some_and(|other| {
+                    other.axis == CelestialAxis::Latitude && other.system == system.system
+                })
+            })?;
+            Some(CelestialAxisPair {
+                longitude,
+                latitude,
+            })
         })
+    }
+
+    pub(super) fn contains(self, axis: usize) -> bool {
+        axis == self.longitude || axis == self.latitude
     }
 }
 

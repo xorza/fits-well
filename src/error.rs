@@ -263,9 +263,26 @@ pub enum FitsError {
     /// [`crate::wcs::WcsView::unsupported_axes`].
     #[error("WCS has unsupported nonlinear transforms on zero-based axes {axes:?}")]
     UnsupportedWcsTransform { axes: Vec<usize> },
-    /// A coordinate lies outside the mathematical domain of its WCS projection.
+    /// An intermediate (projection-plane) coordinate lies outside the region its WCS
+    /// projection maps back onto the sphere (wcslib `PRJERR_BAD_PIX`).
     #[error("coordinate is outside the {projection} projection domain")]
     WcsProjectionDomain { projection: &'static str },
+    /// A native spherical coordinate has no image under its WCS projection: it lies
+    /// behind a zenithal projection's horizon, past a perspective projection's limb, or
+    /// at a pole a projection sends to infinity (wcslib `PRJERR_BAD_WORLD`).
+    #[error("world coordinate has no image under the {projection} projection")]
+    WcsWorldOutOfDomain { projection: &'static str },
+    /// The fiducial point, `LONPOLE` and `LATPOLE` admit no celestial pole (CG 2002 §2.4,
+    /// wcslib `celset`).
+    #[error("no celestial pole fits the WCS: {detail}")]
+    WcsInvalidPole { detail: &'static str },
+    /// A unit string is not a unit of the kind its keyword requires.
+    #[error("unit {unit:?} is not {expected}")]
+    InvalidUnit {
+        unit: String,
+        /// The kind of unit the keyword needs, e.g. "an angle unit".
+        expected: &'static str,
+    },
     /// A world or intermediate coordinate lies outside a non-celestial WCS
     /// algorithm's mathematical domain.
     #[error("coordinate on zero-based axis {axis} is outside the {algorithm} WCS domain")]

@@ -477,14 +477,9 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
             .set_internal("CDELT1", case.reference / 100.0)
             .set_internal("RESTFRQ", 1_420_405_751.0);
         let wcs = header.wcs(None).unwrap();
+        // The view reports the axis as declared; the world coordinate is in the default unit.
         assert_eq!(wcs.view().axes[0].cunit, case.unit);
-        assert!(
-            (wcs.view().axes[0].crval - case.canonical_reference).abs()
-                <= case.canonical_reference.abs() * f64::EPSILON,
-            "{} canonical reference: {:.17e}",
-            case.ctype,
-            wcs.view().axes[0].crval
-        );
+        assert_eq!(wcs.view().axes[0].crval, case.reference, "{}", case.ctype);
         let world = wcs.pixel_to_world(&[1.0]).unwrap()[0];
         assert!(
             (world - case.canonical_reference).abs() <= case.canonical_reference.abs() * 1e-10,
@@ -501,12 +496,12 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
         .set_internal("CRVAL1", 1.0);
     assert!(matches!(
         invalid.wcs(None),
-        Err(crate::error::FitsError::InvalidValue { card }) if card.contains("CUNIT")
+        Err(crate::error::FitsError::InvalidUnit { unit, expected: "a length unit" }) if unit == "Hz"
     ));
     invalid.set_internal("CUNIT1", "qHz");
     assert!(matches!(
         invalid.wcs(None),
-        Err(crate::error::FitsError::InvalidValue { card }) if card.contains("CUNIT")
+        Err(crate::error::FitsError::InvalidUnit { unit, .. }) if unit == "qHz"
     ));
 }
 
@@ -544,7 +539,7 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
     let frequency = frequency.wcs(None).unwrap();
     let expected = 1.4e9 * (2.0e6_f64 / 1.4e9).exp();
     assert_eq!(frequency.view().axes[0].cunit, "GHz");
-    assert_eq!(frequency.view().axes[0].crval, 1.4e9);
+    assert_eq!(frequency.view().axes[0].crval, 1.4);
     assert!((frequency.pixel_to_world(&[3.0]).unwrap()[0] - expected).abs() < 1e-6);
     assert!((frequency.world_to_pixel(&[expected]).unwrap()[0] - 3.0).abs() < 1e-12);
 

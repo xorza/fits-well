@@ -5,8 +5,8 @@ use crate::wcs::Wcs;
 use crate::wcs::internals::CEA_GOLDEN;
 use crate::wcs::internals::assert_astropy_golden;
 use crate::wcs::norm180;
-use crate::wcs::projection::Projection;
 use crate::wcs::projection::evaluate_zpn;
+use crate::wcs::projection::{Projection, ProjectionParameters};
 use std::f64::consts::SQRT_2;
 
 #[test]
@@ -283,21 +283,34 @@ fn projection_parameters_use_standard_defaults() {
         Wcs::from_header(&h, None).unwrap()
     };
 
-    assert_eq!(build("AIR", &[]).celestial.unwrap().pv[1], 90.0);
+    assert_eq!(build("AIR", &[]).celestial.unwrap().parameters.pv[1], 90.0);
 
     let cyp = build("CYP", &[]).celestial.unwrap();
-    assert_eq!([cyp.pv[1], cyp.pv[2]], [1.0, 1.0]);
+    assert_eq!([cyp.parameters.pv[1], cyp.parameters.pv[2]], [1.0, 1.0]);
 
-    assert_eq!(build("CEA", &[]).celestial.unwrap().pv[1], 1.0);
+    assert_eq!(build("CEA", &[]).celestial.unwrap().parameters.pv[1], 1.0);
 
     let szp = build("SZP", &[(1, 2.0)]).celestial.unwrap();
-    assert_eq!([szp.pv[1], szp.pv[2], szp.pv[3]], [2.0, 0.0, 90.0]);
+    assert_eq!(
+        [
+            szp.parameters.pv[1],
+            szp.parameters.pv[2],
+            szp.parameters.pv[3]
+        ],
+        [2.0, 0.0, 90.0]
+    );
 
     let hpx = build("HPX", &[]).celestial.unwrap();
-    assert_eq!([hpx.pv[1], hpx.pv[2]], [4.0, 3.0]);
+    assert_eq!([hpx.parameters.pv[1], hpx.parameters.pv[2]], [4.0, 3.0]);
 
     let explicit_zero = build("CYP", &[(1, 0.0), (2, 1.0)]).celestial.unwrap();
-    assert_eq!([explicit_zero.pv[1], explicit_zero.pv[2]], [0.0, 1.0]);
+    assert_eq!(
+        [
+            explicit_zero.parameters.pv[1],
+            explicit_zero.parameters.pv[2]
+        ],
+        [0.0, 1.0]
+    );
 }
 
 #[test]
@@ -763,8 +776,102 @@ fn projections_match_astropy() {
     }
 }
 
-fn projection_parameters(parameters: &[f64]) -> [f64; 21] {
+/// Parameters as given, unvalidated: the kernels' own tests reach past the header path.
+fn projection_parameters(parameters: &[f64]) -> ProjectionParameters {
     let mut pv = [0.0; 21];
     pv[..parameters.len()].copy_from_slice(parameters);
-    pv
+    ProjectionParameters::raw(pv)
+}
+
+/// Each projection's world domain, at points either side of its boundary — wcslib's
+/// `*s2x` bounds, except SZP's limb, which is the exact tangency (see `Projection::project`).
+#[test]
+fn world_points_without_an_image_are_refused() {
+    use Projection::{Air, Azp, Coo, Cop, Mer, Sin, Stg, Szp, Tan, Zpn};
+    // ZPN 0 + ζ − ζ³/2: R′ = 1 − 1.5ζ² vanishes at ζ = √(2/3) = 46.7647°, θ = 43.2353°.
+    let cases: &[(Projection, &[f64], f64, f64, bool)] = &[
+        (Tan, &[], 0.0, 10.0, true),
+        (Tan, &[], 0.0, 0.0, false),
+        (Tan, &[], 0.0, -10.0, false),
+        (Stg, &[], 0.0, -89.0, true),
+        (Stg, &[], 0.0, -90.0, false),
+        (Sin, &[], 30.0, 0.0, true),
+        (Sin, &[], 30.0, -1.0, false),
+        // Slant SIN: the horizon is θ = −atan(ξ sinφ − η cosφ) = −atan(0.2) = −11.3099° at φ = 90°.
+        (Sin, &[0.0, 0.2, -0.1], 90.0, -11.3, true),
+        (Sin, &[0.0, 0.2, -0.1], 90.0, -11.4, false),
+        // AZP μ = 2: the limb of the tangent cone, sinθ = −1/μ, θ = −30°.
+        (Azp, &[0.0, 2.0], 0.0, -29.9, true),
+        (Azp, &[0.0, 2.0], 0.0, -30.1, false),
+        // AZP μ = 0.5: rays from inside the sphere diverge past θ = −asin(μ) = −30°.
+        (Azp, &[0.0, 0.5], 0.0, -29.9, true),
+        (Azp, &[0.0, 0.5], 0.0, -30.1, false),
+        // SZP with θc = 90° is AZP: the same −30° limb for μ = 2 …
+        (Szp, &[0.0, 2.0, 0.0, 90.0], 0.0, -29.9, true),
+        (Szp, &[0.0, 2.0, 0.0, 90.0], 0.0, -30.1, false),
+        // … and for μ = 0.5 the divergence at sinθ = 1 − z_p = −0.5.
+        (Szp, &[0.0, 0.5, 0.0, 90.0], 0.0, -29.9, true),
+        (Szp, &[0.0, 0.5, 0.0, 90.0], 0.0, -30.1, false),
+        (Zpn, &[0.0, 1.0, 0.0, -0.5], 0.0, 43.3, true),
+        (Zpn, &[0.0, 1.0, 0.0, -0.5], 0.0, 43.1, false),
+        (Air, &[], 0.0, -89.9, true),
+        (Air, &[], 0.0, -90.0, false),
+        (Mer, &[], 0.0, 89.9, true),
+        (Mer, &[], 0.0, 90.0, false),
+        (Mer, &[], 0.0, -90.0, false),
+        // COP θa = 45°: θ − θa = −90° diverges, the far pole is off the cone, and below
+        // θ = −45° the radius changes sign.
+        (Cop, &[0.0, 45.0], 0.0, 90.0, true),
+        (Cop, &[0.0, 45.0], 0.0, -30.0, true),
+        (Cop, &[0.0, 45.0], 0.0, -45.0, false),
+        (Cop, &[0.0, 45.0], 0.0, -60.0, false),
+        (Cop, &[0.0, 45.0], 0.0, -90.0, false),
+        (Coo, &[0.0, 45.0], 0.0, -89.0, true),
+        (Coo, &[0.0, 45.0], 0.0, -90.0, false),
+    ];
+    for &(projection, parameters, phi, theta, imaged) in cases {
+        let mut pv = projection.parameter_defaults();
+        pv[..parameters.len()].copy_from_slice(parameters);
+        let parameters = projection.parameters(pv).unwrap();
+        let result = projection.project(phi, theta, &parameters);
+        if imaged {
+            assert!(
+                result.is_ok(),
+                "{projection:?} {pv:?} ({phi}, {theta}): {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(FitsError::WcsWorldOutOfDomain { projection: code }) if code == projection.code()),
+                "{projection:?} {pv:?} ({phi}, {theta}): {result:?}"
+            );
+        }
+    }
+}
+
+/// The ZPN inverse stays on the branch inside the first point of inflection: a radius
+/// past the polynomial's maximum is refused, one inside it inverts the forward map.
+#[test]
+fn zpn_inverts_only_inside_its_inflection() {
+    let mut pv = [0.0; 21];
+    pv[..4].copy_from_slice(&[0.0, 1.0, 0.0, -0.5]);
+    let parameters = Projection::Zpn.parameters(pv).unwrap();
+    // R(ζ) = ζ − ζ³/2 peaks at ζ = √(2/3): R = √(2/3)·(2/3) = 0.5443 rad = 31.19°.
+    let peak = (2.0f64 / 3.0).sqrt() * 2.0 / 3.0 * R2D;
+    assert!(
+        Projection::Zpn
+            .deproject(0.0, -(peak + 0.01), &parameters)
+            .is_err()
+    );
+    for theta in [80.0, 60.0, 45.0] {
+        let projected = Projection::Zpn.project(0.0, theta, &parameters).unwrap();
+        let native = Projection::Zpn
+            .deproject(projected.x, projected.y, &parameters)
+            .unwrap();
+        assert!((native.theta - theta).abs() < 1e-9, "{theta}: {native:?}");
+    }
+    // Degenerate polynomials have no inverse at all.
+    assert!(Projection::Zpn.parameters([0.0; 21]).is_err());
+    let mut falling = [0.0; 21];
+    falling[..3].copy_from_slice(&[0.0, -1.0, 0.5]);
+    assert!(Projection::Zpn.parameters(falling).is_err());
 }

@@ -146,37 +146,56 @@ impl SpectralKind {
         }
     }
 
+    /// The factor from `unit` to this kind's Table-25 default unit; an absent unit is the
+    /// default unit itself.
     pub(super) fn unit_scale(self, unit: &str) -> Result<f64> {
-        let scaled =
-            unit::split_numeric_multiplier(unit).ok_or_else(|| FitsError::InvalidValue {
-                card: format!("invalid CUNIT {unit:?} for {}", self.code()),
-            })?;
-        let unit = scaled.base;
+        if unit.trim().is_empty() {
+            return Ok(1.0);
+        }
         let scale = match self {
-            SpectralKind::Frequency => prefixed_unit(unit, "Hz", 1.0),
-            SpectralKind::Energy => energy_scale(unit),
+            SpectralKind::Frequency => unit::resolve(unit, unit::FREQUENCY),
+            SpectralKind::Energy => unit::resolve(unit, unit::ENERGY),
             SpectralKind::Wavenumber => wavenumber_scale(unit),
             SpectralKind::RadioVelocity
             | SpectralKind::OpticalVelocity
             | SpectralKind::RelativisticVelocity => velocity_scale(unit),
-            SpectralKind::Wavelength | SpectralKind::AirWavelength => length_scale(unit),
-            SpectralKind::Redshift | SpectralKind::Beta => {
-                if unit.is_empty() || unit == "1" {
-                    Some(1.0)
-                } else {
-                    None
-                }
+            SpectralKind::Wavelength | SpectralKind::AirWavelength => {
+                unit::resolve(unit, unit::LENGTH)
             }
+            SpectralKind::Redshift | SpectralKind::Beta => (unit.trim() == "1").then_some(1.0),
         };
-        scale
-            .or_else(|| unit.is_empty().then_some(1.0))
-            .map(|scale| scaled.factor * scale)
-            .ok_or_else(|| FitsError::InvalidValue {
-                card: format!(
-                    "CUNIT {unit:?} is not convertible to the default unit for {}",
-                    self.code()
-                ),
-            })
+        scale.ok_or_else(|| FitsError::InvalidUnit {
+            unit: unit.to_string(),
+            expected: self.unit_kind(),
+        })
+    }
+
+    /// The Table-25 default unit the transform evaluates this quantity in.
+    pub(super) fn default_unit(self) -> &'static str {
+        match self {
+            SpectralKind::Frequency => "Hz",
+            SpectralKind::Energy => "J",
+            SpectralKind::Wavenumber => "m-1",
+            SpectralKind::RadioVelocity
+            | SpectralKind::OpticalVelocity
+            | SpectralKind::RelativisticVelocity => "m/s",
+            SpectralKind::Wavelength | SpectralKind::AirWavelength => "m",
+            SpectralKind::Redshift | SpectralKind::Beta => "",
+        }
+    }
+
+    /// The kind of unit this quantity is measured in, for error messages.
+    fn unit_kind(self) -> &'static str {
+        match self {
+            SpectralKind::Frequency => "a frequency unit",
+            SpectralKind::Energy => "an energy unit",
+            SpectralKind::Wavenumber => "an inverse length unit",
+            SpectralKind::RadioVelocity
+            | SpectralKind::OpticalVelocity
+            | SpectralKind::RelativisticVelocity => "a velocity unit",
+            SpectralKind::Wavelength | SpectralKind::AirWavelength => "a length unit",
+            SpectralKind::Redshift | SpectralKind::Beta => "dimensionless",
+        }
     }
 }
 
@@ -417,56 +436,37 @@ pub(super) fn algorithm_name(sampled: Characteristic, expressed: Characteristic)
     }
 }
 
-fn prefixed_unit(unit: &str, base: &str, base_scale: f64) -> Option<f64> {
-    if unit == base {
-        return Some(base_scale);
-    }
-    let prefix = unit.strip_suffix(base)?;
-    unit::si_prefix(prefix).map(|scale| scale * base_scale)
-}
-
-fn length_scale(unit: &str) -> Option<f64> {
-    match unit {
-        "m" => Some(1.0),
-        "Angstrom" | "angstrom" => Some(1e-10),
-        _ => prefixed_unit(unit, "m", 1.0),
-    }
-}
-
-fn energy_scale(unit: &str) -> Option<f64> {
-    match unit {
-        "J" => Some(1.0),
-        "erg" => Some(1e-7),
-        "eV" => Some(1.602_176_634e-19),
-        _ => prefixed_unit(unit, "J", 1.0).or_else(|| prefixed_unit(unit, "eV", 1.602_176_634e-19)),
-    }
-}
-
+/// `[multiplier] length⁻¹` in any of FITS's spellings, per metre.
 fn wavenumber_scale(unit: &str) -> Option<f64> {
-    let compact = unit.replace(' ', "");
-    for suffix in ["**-1", "^-1", "-1"] {
-        if let Some(length) = compact.strip_suffix(suffix) {
-            return length_scale(length).map(|scale| 1.0 / scale);
-        }
-    }
-    compact
-        .strip_prefix("1/")
-        .or_else(|| compact.strip_prefix('/'))
-        .and_then(length_scale)
-        .map(|scale| 1.0 / scale)
+    let scaled = unit::split_numeric_multiplier(unit)?;
+    let compact = scaled.base.replace(' ', "");
+    let length = ["**-1", "^-1", "-1"]
+        .into_iter()
+        .find_map(|suffix| compact.strip_suffix(suffix))
+        .or_else(|| compact.strip_prefix("1/"))
+        .or_else(|| compact.strip_prefix('/'))?;
+    unit::resolve(length, unit::LENGTH).map(|scale| scaled.factor / scale)
 }
 
+/// `[multiplier] length / time` in any of FITS's spellings — `km/s`, `m s-1`, `m.s**-1`,
+/// `m*s^-1` — per metre per second.
 fn velocity_scale(unit: &str) -> Option<f64> {
-    let compact = unit.replace([' ', '.'], "");
-    if let Some(length) = compact.strip_suffix("/s") {
-        return length_scale(length);
-    }
-    for suffix in ["s**-1", "s^-1", "s-1"] {
-        if let Some(length) = compact.strip_suffix(suffix) {
-            return length_scale(length.trim_end_matches('*'));
+    let separator = |c: char| c.is_whitespace() || c == '.' || c == '*';
+    let scaled = unit::split_numeric_multiplier(unit)?;
+    let text = scaled.base.trim();
+    let (length, time) = match text.split_once('/') {
+        Some((length, time)) => (length.trim(), time.trim()),
+        None => {
+            let per_time = ["**-1", "^-1", "-1"]
+                .into_iter()
+                .find_map(|suffix| text.strip_suffix(suffix))?;
+            let (length, time) = per_time.rsplit_once(separator)?;
+            (length.trim_end_matches(separator), time)
         }
-    }
-    None
+    };
+    let length = unit::resolve(length, unit::LENGTH)?;
+    let time = unit::resolve(time, unit::TIME)?;
+    Some(scaled.factor * length / time)
 }
 
 fn nonzero(value: f64) -> DomainResult {
