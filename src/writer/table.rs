@@ -757,7 +757,7 @@ pub(super) fn write_compressed<W: Write>(
 }
 
 #[cfg(test)]
-pub(super) mod internals {
+pub(crate) mod internals {
     use crate::writer::table::WriteColumn;
 
     pub(crate) fn set_scaling(column: &mut WriteColumn, tscale: Option<f64>, tzero: Option<f64>) {

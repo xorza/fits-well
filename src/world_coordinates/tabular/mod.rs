@@ -886,6 +886,9 @@ fn domain(axis: usize) -> FitsError {
 /// `-TAB` fixtures for the tabular, reader and WCS bench code.
 #[cfg(any(test, feature = "internals"))]
 pub(crate) mod internals {
+    #[cfg(feature = "internals")]
+    use std::sync::OnceLock;
+
     use crate::bintable::BinTable;
     use crate::bintable::internals::table_header;
     use crate::header_model::Header;
@@ -946,6 +949,66 @@ pub(crate) mod internals {
                 .set_internal(format!("PV{axis}_3").as_str(), axis as i64);
         }
         header
+    }
+
+    #[cfg(feature = "internals")]
+    /// Entries in the [`indexed_wcs`] lookup.
+    pub(crate) const INDEX_LENGTH: usize = 100_000;
+
+    #[cfg(feature = "internals")]
+    /// A `WAVE-TAB` axis over a 100 000-entry monotonic lookup: index value 2i holds
+    /// coordinate 0.25i. Built once per process.
+    pub(crate) fn indexed_wcs() -> &'static Wcs {
+        static WCS: OnceLock<Wcs> = OnceLock::new();
+        WCS.get_or_init(|| {
+            let coordinates: Vec<f64> = (0..INDEX_LENGTH).map(|i| i as f64 * 0.25).collect();
+            let index: Vec<f64> = (0..INDEX_LENGTH).map(|i| i as f64 * 2.0).collect();
+            let shape = format!("(1,{INDEX_LENGTH})");
+            let table = lookup_table(&[
+                ("COORD", &coordinates, Some(shape.as_str())),
+                ("INDEX", &index, None),
+            ]);
+            let mut header = tab_header(1, "COORD");
+            header
+                .set_internal("CTYPE1", "WAVE-TAB")
+                .set_internal("CUNIT1", "m")
+                .set_internal("PS1_2", "INDEX");
+            resolved_wcs(&header, &table)
+        })
+    }
+
+    #[cfg(feature = "internals")]
+    /// The two coupled `-TAB` axes over [`COUPLED_GRID`]. Built once per process.
+    pub(crate) fn coupled_wcs() -> &'static Wcs {
+        static WCS: OnceLock<Wcs> = OnceLock::new();
+        WCS.get_or_init(|| {
+            let table = lookup_table(&[("COORD", &COUPLED_GRID, Some("(2,2,2)"))]);
+            resolved_wcs(&tab_header(2, "COORD"), &table)
+        })
+    }
+
+    #[cfg(feature = "internals")]
+    /// One pixel through the indexed lookup.
+    pub fn tabular_forward_at_pixel(pixel: f64) -> f64 {
+        indexed_wcs().pixel_to_world(&[pixel]).unwrap()[0]
+    }
+
+    #[cfg(feature = "internals")]
+    /// One world coordinate back through the indexed lookup.
+    pub fn tabular_inverse_at_world(world: f64) -> f64 {
+        indexed_wcs().world_to_pixel(&[world]).unwrap()[0]
+    }
+
+    #[cfg(feature = "internals")]
+    /// The world point at `fraction` along the diagonal of the coupled grid, inverted;
+    /// a dyadic fraction sets how deep the sub-voxel search goes.
+    pub fn tabular_inverse_at_fraction(fraction: f64) -> f64 {
+        let world = [100.0 + 10.0 * fraction, 200.0 + 20.0 * fraction];
+        coupled_wcs()
+            .world_to_pixel(&world)
+            .unwrap()
+            .into_iter()
+            .sum()
     }
 
     /// The transform `header` declares, with every `-TAB` axis read from `table`.

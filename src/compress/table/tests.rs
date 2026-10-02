@@ -369,7 +369,7 @@ fn read_compressed_table_rejects_a_plain_bintable() {
 #[test]
 fn uncompress_table_rejects_overflowing_row_product() {
     // ZNAXIS2·ZNAXIS1 = 3e18·8 = 2.4e19 overflows usize; uncompress must reject the
-    // header before allocating the row buffer (R2-3).
+    // header before allocating the row buffer.
     // One 1QB descriptor row.
     let mut h = table_header(16, 1, &["1QB"]);
     h.set_internal("TTYPE1", "C1")

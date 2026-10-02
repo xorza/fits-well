@@ -1,79 +1,69 @@
-//! Criterion entry points for WCS transform throughput.
+//! Criterion group for WCS transform throughput.
 
-use std::sync::OnceLock;
+use std::hint::black_box;
+
+use criterion::{Criterion, Throughput};
 
 use crate::header_model::Header;
 use crate::world_coordinates::Wcs;
-use crate::world_coordinates::tabular::internals::{
-    COUPLED_GRID, lookup_table, resolved_wcs, tab_header,
-};
+use crate::world_coordinates::tabular::internals::{INDEX_LENGTH, indexed_wcs};
 
 const BATCH_SIZE: usize = 1024;
-const TAB_INDEX_LENGTH: usize = 100_000;
 
-static SPECTRAL: OnceLock<Wcs> = OnceLock::new();
-static TABULAR: OnceLock<Wcs> = OnceLock::new();
-static TABULAR_INVERSE: OnceLock<Wcs> = OnceLock::new();
-static LINEAR: OnceLock<Wcs> = OnceLock::new();
-
-pub(crate) fn prepare() {
-    SPECTRAL.get_or_init(spectral_wcs);
-    TABULAR.get_or_init(tabular_wcs);
-    TABULAR_INVERSE.get_or_init(tabular_inverse_wcs);
-    LINEAR.get_or_init(linear_wcs);
-}
-
-pub(crate) fn linear_round_trip_batch() -> f64 {
-    let wcs = LINEAR.get_or_init(linear_wcs);
-    (0..BATCH_SIZE)
-        .map(|index| {
-            let step = index as f64 * 0.001;
-            let pixel = [11.0 + step, -4.0 - step, 8.0 + step, 23.0 - step];
-            let world = wcs.pixel_to_world(&pixel).unwrap();
-            wcs.world_to_pixel(&world).unwrap().into_iter().sum::<f64>()
+/// `wcs` — one batch of pixels forward and back through a four-axis linear WCS,
+/// forward through a Table-26 spectral axis, and forward through a 100 000-entry
+/// `-TAB` index.
+pub fn wcs(c: &mut Criterion) {
+    let linear = linear_wcs();
+    let spectral = spectral_wcs();
+    let tabular = indexed_wcs();
+    let mut group = c.benchmark_group("wcs");
+    group.throughput(Throughput::Elements(BATCH_SIZE as u64));
+    group.bench_function("linear_4d_round_trip", |bench| {
+        bench.iter(|| {
+            black_box(
+                (0..BATCH_SIZE)
+                    .map(|index| {
+                        let step = index as f64 * 0.001;
+                        let pixel = [11.0 + step, -4.0 - step, 8.0 + step, 23.0 - step];
+                        let world = linear.pixel_to_world(&pixel).unwrap();
+                        linear
+                            .world_to_pixel(&world)
+                            .unwrap()
+                            .into_iter()
+                            .sum::<f64>()
+                    })
+                    .sum::<f64>(),
+            )
         })
-        .sum()
-}
-
-pub(crate) fn spectral_batch() -> f64 {
-    let wcs = SPECTRAL.get_or_init(spectral_wcs);
-    (0..BATCH_SIZE)
-        .map(|index| {
-            let pixel = 1.0 + index as f64 * 0.001;
-            wcs.pixel_to_world(&[pixel]).unwrap()[0]
+    });
+    group.bench_function("spectral", |bench| {
+        bench.iter(|| {
+            black_box(
+                (0..BATCH_SIZE)
+                    .map(|index| {
+                        spectral
+                            .pixel_to_world(&[1.0 + index as f64 * 0.001])
+                            .unwrap()[0]
+                    })
+                    .sum::<f64>(),
+            )
         })
-        .sum()
-}
-
-pub(crate) fn tabular_index_batch() -> f64 {
-    let wcs = TABULAR.get_or_init(tabular_wcs);
-    let span = 2 * (TAB_INDEX_LENGTH - 1);
-    (0..BATCH_SIZE)
-        .map(|index| {
-            let pixel = (index * 7919 % span) as f64;
-            wcs.pixel_to_world(&[pixel]).unwrap()[0]
+    });
+    let span = 2 * (INDEX_LENGTH - 1);
+    group.bench_function("tabular_index_100k", |bench| {
+        bench.iter(|| {
+            black_box(
+                (0..BATCH_SIZE)
+                    .map(|index| {
+                        let pixel = (index * 7919 % span) as f64;
+                        tabular.pixel_to_world(&[pixel]).unwrap()[0]
+                    })
+                    .sum::<f64>(),
+            )
         })
-        .sum()
-}
-
-pub(crate) fn tabular_forward_at_pixel(pixel: f64) -> f64 {
-    TABULAR
-        .get_or_init(tabular_wcs)
-        .pixel_to_world(&[pixel])
-        .unwrap()[0]
-}
-
-pub(crate) fn tabular_inverse_at_world(world: f64) -> f64 {
-    TABULAR
-        .get_or_init(tabular_wcs)
-        .world_to_pixel(&[world])
-        .unwrap()[0]
-}
-
-pub(crate) fn tabular_inverse_at_fraction(fraction: f64) -> f64 {
-    let wcs = TABULAR_INVERSE.get_or_init(tabular_inverse_wcs);
-    let world = [100.0 + 10.0 * fraction, 200.0 + 20.0 * fraction];
-    wcs.world_to_pixel(&world).unwrap().into_iter().sum()
+    });
+    group.finish();
 }
 
 fn spectral_wcs() -> Wcs {
@@ -114,29 +104,4 @@ fn linear_wcs() -> Wcs {
         .set_internal("PC3_4", 0.3)
         .set_internal("PC4_1", -0.4);
     Wcs::from_header(&header, None).unwrap()
-}
-
-fn tabular_wcs() -> Wcs {
-    let coordinates: Vec<f64> = (0..TAB_INDEX_LENGTH)
-        .map(|index| index as f64 * 0.25)
-        .collect();
-    let index: Vec<f64> = (0..TAB_INDEX_LENGTH)
-        .map(|index| index as f64 * 2.0)
-        .collect();
-    let shape = format!("(1,{TAB_INDEX_LENGTH})");
-    let table = lookup_table(&[
-        ("COORD", &coordinates, Some(shape.as_str())),
-        ("INDEX", &index, None),
-    ]);
-    let mut header = tab_header(1, "COORD");
-    header
-        .set_internal("CTYPE1", "WAVE-TAB")
-        .set_internal("CUNIT1", "m")
-        .set_internal("PS1_2", "INDEX");
-    resolved_wcs(&header, &table)
-}
-
-fn tabular_inverse_wcs() -> Wcs {
-    let table = lookup_table(&[("COORD", &COUPLED_GRID, Some("(2,2,2)"))]);
-    resolved_wcs(&tab_header(2, "COORD"), &table)
 }

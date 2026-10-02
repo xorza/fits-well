@@ -417,8 +417,8 @@ fn multi_block_header_scan_keeps_geometric_spare_capacity() {
 #[test]
 fn malformed_image_pcount_is_rejected_not_panicked() {
     use std::io::Cursor;
-    // A primary array with PCOUNT=5 is non-conforming (§4.3). `data_extent` sizes
-    // (10+5) bytes, so the old `assert_eq!` would panic; now it is a clean error.
+    // A primary array with PCOUNT=5 is non-conforming (§4.3): an error, not a
+    // panic in the data-extent arithmetic.
     let bytes = fits_file(
         &[
             "SIMPLE  = T",

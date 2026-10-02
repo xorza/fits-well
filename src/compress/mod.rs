@@ -14,6 +14,8 @@
 //! [`gzip`], [`rice`], [`plio`], and [`hcompress`]; tiled *table* compression
 //! (§10.3) lives in [`table`] ([`table::compress_table`]/[`table::uncompress_table`]).
 
+#[cfg(feature = "bench")]
+pub(crate) mod bench;
 mod convert;
 pub(crate) mod decode;
 pub(crate) mod encode;

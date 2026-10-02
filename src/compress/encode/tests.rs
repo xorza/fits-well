@@ -525,7 +525,7 @@ fn hcompress_lossless_write_round_trips_exactly() {
 #[test]
 fn integer_image_compression_preserves_bscale_bzero_and_blank() {
     // §10.2: the compressed tiles store *raw* stored integers, so BSCALE/BZERO and
-    // the BLANK sentinel must survive in the rebuilt header (was dropped before).
+    // the BLANK sentinel must survive in the rebuilt header.
     let samples: Vec<i16> = (0..24 * 16).map(|i| (i % 50) as i16 - 5).collect();
     let image = Image {
         shape: vec![24, 16],
