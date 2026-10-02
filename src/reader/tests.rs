@@ -19,7 +19,7 @@ use crate::writer::FitsWriter;
 use crate::writer::internals::written;
 use crate::writer::table::{TableBuilder, WriteColumn};
 use num_complex::Complex;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::rc::Rc;
@@ -1045,6 +1045,7 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
     use crate::compress::{Compression, CompressionOptions};
     use crate::reader::source::SliceSource;
     use crate::reader::source::internals::CountingSource;
+    use std::cell::Cell;
 
     let count = 9usize * 7;
     let mut f32_values: Vec<f32> = (0..count).map(|index| index as f32 * 0.5).collect();
