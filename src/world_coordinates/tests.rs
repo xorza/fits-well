@@ -56,7 +56,7 @@ fn parses_tan_header() {
 #[test]
 fn pixel_to_world_matches_astropy() {
     let w = open_wcs("wcs_tan.fits");
-    assert_astropy_golden(&w, TAN_GOLDEN, "TAN image");
+    assert_astropy_golden(&w, &TAN_GOLDEN, "TAN image");
 }
 
 #[test]
@@ -66,7 +66,7 @@ fn world_to_pixel_inverts_pixel_to_world() {
     // to ~1e-6 px, so test at 1e-5 px (≈ 10 nano-arcsec) — far tighter than any
     // real use needs.
     let w = open_wcs("wcs_tan.fits");
-    for &(px, py, _, _) in TAN_GOLDEN {
+    for &(px, py, _, _) in TAN_GOLDEN.points {
         let world = w.pixel_to_world(&[px, py]).unwrap();
         let back = w.world_to_pixel(&world).unwrap();
         assert!(

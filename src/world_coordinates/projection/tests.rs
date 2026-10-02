@@ -2,6 +2,7 @@ use crate::error::FitsError;
 use crate::header_model::Header;
 use crate::world_coordinates::R2D;
 use crate::world_coordinates::Wcs;
+use crate::world_coordinates::internals::AstropyGolden;
 use crate::world_coordinates::internals::CEA_GOLDEN;
 use crate::world_coordinates::internals::assert_astropy_golden;
 use crate::world_coordinates::norm180;
@@ -33,19 +34,16 @@ fn sin_projection_matches_astropy() {
     h.set_internal("CRVAL1", 45.0).set_internal("CRVAL2", 30.0);
     h.set_internal("CDELT1", -1e-3).set_internal("CDELT2", 1e-3);
     let w = Wcs::from_header(&h, None).unwrap();
-    let golden: &[(f64, f64, f64, f64)] = &[
-        (100.0, 100.0, 45.000000000000, 30.000000000000),
-        (50.0, 150.0, 45.057764154844, 30.049987404157),
-        (1.0, 1.0, 45.114201616520, 29.900950619091),
-        (180.0, 20.0, 44.907698264374, 29.919967754584),
-    ];
-    for &(px, py, ra, dec) in golden {
-        let out = w.pixel_to_world(&[px, py]).unwrap();
-        assert!(
-            (out[0] - ra).abs() < 1e-9 && (out[1] - dec).abs() < 1e-9,
-            "SIN at ({px},{py}): got {out:?}, want ({ra},{dec})"
-        );
-    }
+    let golden = AstropyGolden {
+        decimals: 12,
+        points: &[
+            (100.0, 100.0, 45.000000000000, 30.000000000000),
+            (50.0, 150.0, 45.057764154844, 30.049987404157),
+            (1.0, 1.0, 45.114201616520, 29.900950619091),
+            (180.0, 20.0, 44.907698264374, 29.919967754584),
+        ],
+    };
+    assert_astropy_golden(&w, &golden, "SIN");
 }
 
 #[test]
@@ -75,13 +73,29 @@ fn slant_sin_matches_the_standard_equations() {
 #[test]
 fn allsky_projections_match_astropy() {
     // AIT/MOL, CRPIX 50/50, CRVAL 45/30, CDELT (−0.2, 0.2). astropy golden.
-    let golden: &[(&str, f64, f64, f64, f64)] = &[
-        ("AIT", 20.0, 70.0, 52.2235197328, 33.8100763254),
-        ("AIT", 80.0, 30.0, 38.3347274957, 25.8258310813),
-        ("MOL", 20.0, 70.0, 52.9816602799, 33.3699739563),
-        ("MOL", 80.0, 30.0, 37.5753525553, 26.1818233270),
+    let golden: &[(&str, AstropyGolden)] = &[
+        (
+            "AIT",
+            AstropyGolden {
+                decimals: 10,
+                points: &[
+                    (20.0, 70.0, 52.2235197328, 33.8100763254),
+                    (80.0, 30.0, 38.3347274957, 25.8258310813),
+                ],
+            },
+        ),
+        (
+            "MOL",
+            AstropyGolden {
+                decimals: 10,
+                points: &[
+                    (20.0, 70.0, 52.9816602799, 33.3699739563),
+                    (80.0, 30.0, 37.5753525553, 26.1818233270),
+                ],
+            },
+        ),
     ];
-    for &(proj, px, py, ra, dec) in golden {
+    for (proj, golden) in golden {
         let mut h = Header::new();
         h.set_internal("NAXIS", 2);
         h.set_internal("CTYPE1", format!("RA---{proj}"));
@@ -90,11 +104,7 @@ fn allsky_projections_match_astropy() {
         h.set_internal("CRVAL1", 45.0).set_internal("CRVAL2", 30.0);
         h.set_internal("CDELT1", -0.2).set_internal("CDELT2", 0.2);
         let w = Wcs::from_header(&h, None).unwrap();
-        let out = w.pixel_to_world(&[px, py]).unwrap();
-        assert!(
-            (out[0] - ra).abs() < 1e-7 && (out[1] - dec).abs() < 1e-7,
-            "{proj} at ({px},{py}): got {out:?}, want ({ra},{dec})"
-        );
+        assert_astropy_golden(&w, golden, proj);
     }
 }
 
@@ -110,7 +120,7 @@ fn cea_lambda_pv_matches_astropy() {
     h.set_internal("CDELT1", -0.05).set_internal("CDELT2", 0.05);
     h.set_internal("PV2_1", 0.5);
     let w = Wcs::from_header(&h, None).unwrap();
-    assert_astropy_golden(&w, CEA_GOLDEN, "CEA λ image");
+    assert_astropy_golden(&w, &CEA_GOLDEN, "CEA λ image");
 }
 
 #[test]
@@ -259,14 +269,11 @@ fn parameterized_projections_match_astropy() {
             h.set_internal(&format!("PV2_{m}"), v);
         }
         let w = Wcs::from_header(&h, None).unwrap();
-        for &(px, py, ra, dec) in c.pts {
-            let out = w.pixel_to_world(&[px, py]).unwrap();
-            assert!(
-                (out[0] - ra).abs() < 1e-7 && (out[1] - dec).abs() < 1e-7,
-                "{} at ({px},{py}): got {out:?}, want ({ra},{dec})",
-                c.proj
-            );
-        }
+        let golden = AstropyGolden {
+            decimals: 9,
+            points: c.pts,
+        };
+        assert_astropy_golden(&w, &golden, c.proj);
     }
 }
 
@@ -469,7 +476,6 @@ fn bonne_with_zero_theta1_equals_sfl() {
             (b[0] - s[0]).abs() < 1e-10 && (b[1] - s[1]).abs() < 1e-10,
             "BON θ₁=0 vs SFL at ({px},{py}): {b:?} vs {s:?}"
         );
-        assert!(b.iter().all(|v| v.is_finite()));
     }
     // The forward (SFL) path round-trips too.
     let world = bon.pixel_to_world(&[40.0, 60.0]).unwrap();
@@ -627,8 +633,15 @@ fn cube_projection_domains_reject_points_outside_the_face_cross() {
             Err(FitsError::WcsProjectionDomain { projection: code })
                 if code == projection.code()
         ));
+        // (315, 45) is the top-right corner of face 4, which is the cube vertex
+        // (1, −1, 1)/√3: φ = −45°, θ = atan(1/√2). The tolerance allows the few
+        // roundings of the face equations, which differ by projection.
         let corner = projection.deproject(315.0, 45.0, &pv).unwrap();
-        assert!(corner.phi.is_finite() && corner.theta.is_finite());
+        let vertex_theta = (1.0 / SQRT_2).atan() * R2D;
+        assert!(
+            (corner.phi + 45.0).abs() < 1e-12 && (corner.theta - vertex_theta).abs() < 1e-12,
+            "{projection:?}: {corner:?}"
+        );
     }
 }
 
@@ -730,7 +743,6 @@ fn mollweide_poles_are_finite_and_have_canonical_longitude() {
             .unwrap();
         assert_eq!(native.phi, 0.0);
         assert!((native.theta - theta).abs() < 1e-12);
-        assert!(native.phi.is_finite() && native.theta.is_finite());
     }
 }
 
@@ -762,12 +774,12 @@ fn projections_match_astropy() {
         h.set_internal("CRVAL1", cv1).set_internal("CRVAL2", cv2);
         h.set_internal("CDELT1", -0.05).set_internal("CDELT2", 0.05);
         let w = Wcs::from_header(&h, None).unwrap();
+        let golden = AstropyGolden {
+            decimals: 10,
+            points: &[(px, py, ra, dec)],
+        };
+        assert_astropy_golden(&w, &golden, proj);
         let out = w.pixel_to_world(&[px, py]).unwrap();
-        assert!(
-            (out[0] - ra).abs() < 1e-8 && (out[1] - dec).abs() < 1e-8,
-            "{proj} at ({px},{py}): got {out:?}, want ({ra},{dec})"
-        );
-        // Full round-trip.
         let back = w.world_to_pixel(&out).unwrap();
         assert!(
             (back[0] - px).abs() < 1e-6 && (back[1] - py).abs() < 1e-6,

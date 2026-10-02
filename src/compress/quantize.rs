@@ -369,8 +369,10 @@ mod tests {
             if o == 0.0 {
                 assert_eq!(b, 0.0, "zero pixel {i} must decode to exactly 0.0");
             } else {
+                // Half a quantization step, plus the few roundings of the scale
+                // division and the reconstruction, each within an ulp of the value.
                 assert!(
-                    (o - b).abs() <= 0.5 * q.bscale + 1e-9,
+                    (o - b).abs() <= 0.5 * q.bscale + 4.0 * f64::EPSILON * o.abs(),
                     "pixel {i}: {o} vs {b}"
                 );
             }

@@ -30,13 +30,28 @@ fn reads_the_real_aips_antenna_table() {
     assert_eq!(table.schema.columns[3].byte_offset, 32);
     assert_eq!(table.schema.columns[1].unit.as_deref(), Some("METERS"));
 
-    // Decoded element counts: eight ANNAME bytes per row, 3 doubles per row, none for 0D.
+    // Eight ANNAME bytes and three STABXYZ doubles per row, none for 0D; the first
+    // and last rows as the file stores them.
     match table.column_by_idx(0).unwrap().raw().unwrap() {
-        ColumnData::Character(v) => assert_eq!(v.len(), 28 * 8),
+        ColumnData::Character(v) => {
+            assert_eq!(v.len(), 28 * 8);
+            assert_eq!(&v[..8], b"VLA:N28 ");
+            assert_eq!(&v[27 * 8..], b"VLA:W20 ");
+        }
         other => panic!("ANNAME should be Character, got {other:?}"),
     }
     match table.column_by_idx(1).unwrap().raw().unwrap() {
-        ColumnData::F64(v) => assert_eq!(v.len(), 28 * 3),
+        ColumnData::F64(v) => {
+            assert_eq!(v.len(), 28 * 3);
+            assert_eq!(
+                v[..3],
+                [-2091.496075, -326.6028655995615, 3089.4143239967525]
+            );
+            assert_eq!(
+                v[27 * 3..],
+                [733.3448115, -1932.9756869990379, -1078.110032999888]
+            );
+        }
         other => panic!("STABXYZ should be F64, got {other:?}"),
     }
     assert_eq!(

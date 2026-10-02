@@ -160,7 +160,7 @@ fn tropical_year_days(reference_mjd: f64, scale: &TimeScale) -> Result<f64> {
             operation: "evaluate a tropical year outside the TDB frame",
         });
     }
-    let centuries = (reference_mjd + MJD0 - 2_451_545.0) / 36_525.0;
+    let centuries = (reference_mjd - 51_544.5) / 36_525.0;
     Ok(
         365.242_190_402_112_4 - 0.000_006_152_513_49 * centuries - 6.0921e-10 * centuries.powi(2)
             + 2.6525e-10 * centuries.powi(3),
@@ -173,18 +173,18 @@ fn besselian_year_days(reference_mjd: f64, scale: &TimeScale) -> Result<f64> {
             operation: "evaluate a Besselian year outside the TT/ET frame",
         });
     }
-    let centuries = (reference_mjd + MJD0 - 2_415_020.0) / 36_525.0;
+    let centuries = (reference_mjd - 15_019.5) / 36_525.0;
     Ok(365.242_198_781_7 - 0.000_007_854_23 * centuries)
 }
 
 /// The reference epoch as MJD: `MJDREF` (or `MJDREFI`+`MJDREFF`), else `JDREF`
 /// (or `JDREFI`+`JDREFF`), else `DATEREF`, else `0.0`.
 fn reference_mjd(header: &Header, scale: &TimeScale) -> Result<f64> {
-    if let Some(mjd) = resolve_split_ref(header, "MJDREF", "MJDREFI", "MJDREFF")? {
+    if let Some(mjd) = resolve_split_ref(header, "MJDREF", "MJDREFI", "MJDREFF", 0.0)? {
         return Ok(mjd);
     }
-    if let Some(jd) = resolve_split_ref(header, "JDREF", "JDREFI", "JDREFF")? {
-        return Ok(jd - MJD0);
+    if let Some(mjd) = resolve_split_ref(header, "JDREF", "JDREFI", "JDREFF", MJD0)? {
+        return Ok(mjd);
     }
     let Some(value) = header.get_text("DATEREF")? else {
         return Ok(0.0);
@@ -195,15 +195,26 @@ fn reference_mjd(header: &Header, scale: &TimeScale) -> Result<f64> {
 /// Resolve a reference epoch from its single (`MJDREF`) and split-precision
 /// (`MJDREFI`+`MJDREFF`) keywords. Per §9.2.2 a *full* integer+fractional split
 /// takes precedence over the single value; otherwise the single value is used,
-/// falling back to a lone split part.
-fn resolve_split_ref(header: &Header, single: &str, int: &str, frac: &str) -> Result<Option<f64>> {
+/// falling back to a lone split part. `offset` is taken from the integer part
+/// before the fraction is added, so a JD split becomes an MJD that rounds at the
+/// MJD's precision, not the JD's.
+fn resolve_split_ref(
+    header: &Header,
+    single: &str,
+    int: &str,
+    frac: &str,
+    offset: f64,
+) -> Result<Option<f64>> {
     let i = header.get_real(int)?;
     let f = header.get_real(frac)?;
     Ok(match (i, f) {
-        (Some(i), Some(f)) => Some(i + f),
-        _ => header.get_real(single)?.or_else(|| match (i, f) {
-            (None, None) => None,
-            _ => Some(i.unwrap_or(0.0) + f.unwrap_or(0.0)),
-        }),
+        (Some(i), Some(f)) => Some((i - offset) + f),
+        _ => header
+            .get_real(single)?
+            .map(|value| value - offset)
+            .or_else(|| match (i, f) {
+                (None, None) => None,
+                _ => Some((i.unwrap_or(0.0) - offset) + f.unwrap_or(0.0)),
+            }),
     })
 }

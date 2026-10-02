@@ -2,6 +2,7 @@ use crate::error::FitsError;
 use crate::header_model::Header;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::internals::CROTA_GOLDEN;
+use crate::world_coordinates::internals::assert_astropy_golden;
 use crate::world_coordinates::linear_transform::internals as linear;
 use crate::world_coordinates::linear_transform::*;
 use crate::world_coordinates::wcs_axis::WcsAxis;
@@ -77,13 +78,7 @@ fn legacy_crota_rotation_matches_astropy() {
         .set_internal("CDELT2", 0.0005);
     h.set_internal("CROTA2", 25.0);
     let w = Wcs::from_header(&h, None).unwrap();
-    for &(px, py, ra, dec) in CROTA_GOLDEN {
-        let out = w.pixel_to_world(&[px, py]).unwrap();
-        assert!(
-            (out[0] - ra).abs() < 1e-8 && (out[1] - dec).abs() < 1e-8,
-            "CROTA at ({px},{py}): got {out:?}, want ({ra},{dec})"
-        );
-    }
+    assert_astropy_golden(&w, &CROTA_GOLDEN, "CROTA");
 }
 
 #[test]

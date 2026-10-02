@@ -663,26 +663,34 @@ fn read_image_decodes_the_primary_array_shape_and_type() {
     let raw = f.read_image(0).unwrap();
     assert_eq!(raw.shape, vec![512, 512]);
     assert_eq!(raw.bitpix(), Bitpix::I16);
-    assert_eq!(raw.physical().len(), 512 * 512);
-    assert_eq!(raw.decode().len(), 512 * 512);
+    // The sum, extremes and centre sample of the 262144 stored values; BSCALE is
+    // 2.0587209E-16 and BZERO 0.
+    let physical = raw.physical();
+    assert_eq!(physical.len(), 512 * 512);
+    let ImageData::I16(samples) = raw.decode() else {
+        panic!("expected I16 samples");
+    };
+    assert_eq!(samples.iter().map(|&v| v as i64).sum::<i64>(), 1_050_151);
+    assert_eq!(samples.iter().min(), Some(&-9));
+    assert_eq!(samples.iter().max(), Some(&2049));
+    let centre = 256 * 512 + 256;
+    assert_eq!(samples[centre], 2);
+    assert_eq!(physical[centre], 2.0 * 2.058_720_9e-16);
 }
 
 #[test]
 fn read_image_raw_samples_match_a_manual_big_endian_decode() {
     let mut f = open_fixture("UITfuv2582gc.fits");
-    // Independently decode the first few pixels straight from the data bytes.
+    // Independently decode every pixel straight from the data bytes.
     let unit = f.read_data_raw(0).unwrap();
-    let manual: Vec<i16> = unit.data()[..8]
+    let manual: Vec<i16> = unit
+        .data()
         .as_chunks::<2>()
         .0
         .iter()
         .map(|c| i16::from_be_bytes(*c))
         .collect();
-    let img = f.read_image(0).unwrap();
-    match img.decode() {
-        ImageData::I16(v) => assert_eq!(&v[..4], manual.as_slice()),
-        other => panic!("expected I16 samples, got {other:?}"),
-    }
+    assert_eq!(f.read_image(0).unwrap().decode(), ImageData::I16(manual));
 }
 
 #[test]
@@ -1177,7 +1185,11 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
             &expected,
             &format!("{bitpix:?} owned"),
         );
-        assert!(owned.physical().iter().any(|value| value.is_nan()));
+        // The blank sits at source (4, 1), which is (2, 0) in the section; no other
+        // sample of any case holds the blank value.
+        let physical = owned.physical();
+        assert!(physical[2].is_nan(), "{bitpix:?}");
+        assert_eq!(physical.iter().filter(|value| value.is_nan()).count(), 1);
 
         let mut words = Vec::new();
         let view = reader

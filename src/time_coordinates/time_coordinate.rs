@@ -2,7 +2,6 @@
 
 use crate::error::Result;
 use crate::header_model::Header;
-use crate::time_coordinates::MJD0;
 use crate::time_coordinates::datetime::Datetime;
 use crate::time_coordinates::time_scale::{TimeScale, TimeScaleKind};
 
@@ -23,15 +22,14 @@ pub(crate) enum Epoch {
 }
 
 impl Epoch {
-    pub(crate) fn to_jd(self) -> f64 {
+    /// J2000.0 is JD 2451545.0 with 365.25-day years, B1900.0 is JD 2415020.31352
+    /// with 365.242198781-day years (Lieske 1979, as ERFA's `epb2jd`), each written
+    /// as an MJD so the sum rounds at the MJD's precision.
+    pub(crate) fn to_mjd(self) -> f64 {
         match self {
-            Epoch::Julian(y) => 2_451_545.0 + (y - 2000.0) * 365.25,
-            Epoch::Besselian(y) => 2_415_020.313_52 + (y - 1900.0) * 365.242_198_781,
+            Epoch::Julian(y) => 51_544.5 + (y - 2000.0) * 365.25,
+            Epoch::Besselian(y) => 15_019.813_52 + (y - 1900.0) * 365.242_198_781,
         }
-    }
-
-    fn to_mjd(self) -> f64 {
-        self.to_jd() - MJD0
     }
 }
 

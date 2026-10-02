@@ -1827,7 +1827,8 @@ fn compressed_header_templates_preserve_information_and_regenerate_structure() {
     assert_eq!(header.get_integer("ZBITPIX").unwrap(), Some(16));
     assert_eq!(header.get_integer("ZNAXIS").unwrap(), Some(1));
     assert_eq!(header.get_integer("ZNAXIS1").unwrap(), Some(2));
-    assert_ne!(header.get_integer("ZTILE1").unwrap(), Some(999));
+    // The default tiling is one row: the whole 2-sample axis.
+    assert_eq!(header.get_integer("ZTILE1").unwrap(), Some(2));
     assert_eq!(header.get("ZSIMPLE"), None);
     assert_eq!(header.get("CHECKSUM"), None);
     assert_eq!(
