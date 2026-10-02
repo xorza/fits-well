@@ -7,6 +7,7 @@ use crate::error::Result;
 use crate::unit;
 use crate::world_coordinates::axis::spectral_rest::ResolvedRest;
 use crate::world_coordinates::axis::{PLANCK_CONSTANT, SPEED_OF_LIGHT};
+use std::result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SpectralKind {
@@ -73,14 +74,15 @@ impl SpectralKind {
             return Err(());
         }
         let result = match self {
-            SpectralKind::Frequency => nonzero(value)?,
+            SpectralKind::Frequency | SpectralKind::Wavelength | SpectralKind::AirWavelength => {
+                nonzero(value)?
+            }
             SpectralKind::Energy => nonzero(value)? / PLANCK_CONSTANT,
             SpectralKind::Wavenumber => nonzero(value)? * SPEED_OF_LIGHT,
             SpectralKind::RadioVelocity => {
                 debug_assert!(rest.frequency != 0.0, "resolved rest frequency");
                 rest.frequency * (1.0 - value / SPEED_OF_LIGHT)
             }
-            SpectralKind::Wavelength => nonzero(value)?,
             SpectralKind::OpticalVelocity => {
                 debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
                 nonzero(rest.wavelength * (1.0 + value / SPEED_OF_LIGHT))?
@@ -89,7 +91,6 @@ impl SpectralKind {
                 debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
                 nonzero(rest.wavelength * (1.0 + value))?
             }
-            SpectralKind::AirWavelength => nonzero(value)?,
             SpectralKind::RelativisticVelocity => subluminal(value)?,
             SpectralKind::Beta => subluminal(value * SPEED_OF_LIGHT)?,
         };
@@ -99,14 +100,16 @@ impl SpectralKind {
     pub(super) fn world_from_characteristic(self, value: f64, rest: ResolvedRest) -> DomainResult {
         let value = finite(value)?;
         let result = match self {
-            SpectralKind::Frequency => value,
+            SpectralKind::Frequency
+            | SpectralKind::Wavelength
+            | SpectralKind::AirWavelength
+            | SpectralKind::RelativisticVelocity => value,
             SpectralKind::Energy => value * PLANCK_CONSTANT,
-            SpectralKind::Wavenumber => value / SPEED_OF_LIGHT,
+            SpectralKind::Wavenumber | SpectralKind::Beta => value / SPEED_OF_LIGHT,
             SpectralKind::RadioVelocity => {
                 debug_assert!(rest.frequency != 0.0, "resolved rest frequency");
                 SPEED_OF_LIGHT * (1.0 - value / rest.frequency)
             }
-            SpectralKind::Wavelength => value,
             SpectralKind::OpticalVelocity => {
                 debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
                 SPEED_OF_LIGHT * (value / rest.wavelength - 1.0)
@@ -115,9 +118,6 @@ impl SpectralKind {
                 debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
                 value / rest.wavelength - 1.0
             }
-            SpectralKind::AirWavelength => value,
-            SpectralKind::RelativisticVelocity => value,
-            SpectralKind::Beta => value / SPEED_OF_LIGHT,
         };
         finite(result)
     }
@@ -129,7 +129,7 @@ impl SpectralKind {
             | SpectralKind::AirWavelength
             | SpectralKind::RelativisticVelocity => 1.0,
             SpectralKind::Energy => 1.0 / PLANCK_CONSTANT,
-            SpectralKind::Wavenumber => SPEED_OF_LIGHT,
+            SpectralKind::Wavenumber | SpectralKind::Beta => SPEED_OF_LIGHT,
             SpectralKind::RadioVelocity => {
                 debug_assert!(rest.frequency != 0.0, "resolved rest frequency");
                 -rest.frequency / SPEED_OF_LIGHT
@@ -142,7 +142,6 @@ impl SpectralKind {
                 debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
                 rest.wavelength
             }
-            SpectralKind::Beta => SPEED_OF_LIGHT,
         }
     }
 
@@ -234,7 +233,7 @@ impl Characteristic {
     }
 }
 
-pub(super) type DomainResult = std::result::Result<f64, ()>;
+pub(super) type DomainResult = result::Result<f64, ()>;
 
 pub(super) fn convert(
     from: Characteristic,

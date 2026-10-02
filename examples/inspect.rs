@@ -5,6 +5,12 @@
 //! cargo run --example inspect -- path/to/file.fits
 //! ```
 
+#![expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "an example reports to the terminal"
+)]
+
 use std::env;
 use std::fs::File;
 use std::process;

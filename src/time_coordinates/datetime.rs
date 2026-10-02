@@ -22,6 +22,10 @@ impl Datetime {
     /// Parse a FITS ISO-8601 datetime: unsigned `YYYY-MM-DD` or signed
     /// `±YYYYY-MM-DD`, optionally followed by `Thh:mm:ss[.sss…]` (§9.1.1). No
     /// component defaulting; the date is required, the time part optional.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a number parse error says only that the text is not a number, which the error it becomes states"
+    )]
     pub fn parse(s: &str) -> Result<Datetime> {
         let invalid = || FitsError::InvalidTime {
             detail: format!("DATE '{s}'"),

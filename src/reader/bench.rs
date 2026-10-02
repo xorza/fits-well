@@ -43,6 +43,10 @@ pub fn read_image(c: &mut Criterion) {
         });
 
         #[cfg(feature = "mmap")]
+        #[expect(
+            clippy::absolute_paths,
+            reason = "stand in for imports that only the mmap feature uses"
+        )]
         {
             let path = std::env::temp_dir().join(format!(
                 "fits-well-read-bench-{}-{name}.fits",

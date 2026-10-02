@@ -282,7 +282,7 @@ impl BitOutput {
         }
         self.out.extend_from_slice(&nbitplanes);
 
-        self.doencode(a, nx, ny, &nbitplanes, qtree, code_buffer);
+        self.doencode(a, nx, ny, nbitplanes, qtree, code_buffer);
         self.out.extend_from_slice(&signbits[..nsign]);
         Ok(())
     }
@@ -293,7 +293,7 @@ impl BitOutput {
         a: &[i64],
         nx: usize,
         ny: usize,
-        nbitplanes: &[u8; 3],
+        nbitplanes: [u8; 3],
         qtree: &mut Vec<u8>,
         code_buffer: &mut Vec<u8>,
     ) {
@@ -535,6 +535,10 @@ fn htrans(
     Ok(())
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+)]
 fn checked_transform_value(value: i128) -> Result<i64> {
     i64::try_from(value).map_err(|_| transform_overflow())
 }
@@ -904,6 +908,10 @@ impl<'a> BitInput<'a> {
 }
 
 /// Top-level: header → quadtree decode → undigitize → inverse H-transform.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+)]
 fn hdecompress_into(
     input: &[u8],
     smooth: bool,
@@ -1566,6 +1574,7 @@ fn unshuffle_rows(a: &mut [i64], nxtop: usize, nytop: usize, ny: usize, row_tmp:
 #[cfg(test)]
 mod tests {
     use crate::compress::hcompress;
+    use crate::error::FitsError;
 
     #[test]
     fn hcompress_64_bit_transform_matches_external_golden() {
@@ -1623,8 +1632,7 @@ mod tests {
             assert!(
                 matches!(
                     hcompress::hcompress_tile_into(&one[..end], false, 1, &mut out, &mut scratch),
-                    Err(crate::error::FitsError::UnexpectedEof
-                        | crate::error::FitsError::CorruptCompressedData { .. })
+                    Err(FitsError::UnexpectedEof | FitsError::CorruptCompressedData { .. })
                 ),
                 "strict HCOMPRESS prefix of length {end} was accepted"
             );
@@ -1634,7 +1642,7 @@ mod tests {
         invalid_planes[22] = 64;
         assert!(matches!(
             hcompress::hcompress_tile_into(&invalid_planes, false, 1, &mut out, &mut scratch),
-            Err(crate::error::FitsError::CorruptCompressedData { detail })
+            Err(FitsError::CorruptCompressedData { detail })
                 if detail == "HCOMPRESS_1: invalid bit-plane count"
         ));
     }

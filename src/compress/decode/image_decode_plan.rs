@@ -18,6 +18,7 @@ use crate::compress::tile_geometry::TileGeometry;
 use crate::compress::tile_geometry::TileScratch;
 use crate::error::Result;
 use crate::header_model::Header;
+use std::convert;
 
 /// Everything a tiled image's decode needs that the header and the table's metadata
 /// columns determine once, up front — grouped by the concern each part serves rather
@@ -76,7 +77,7 @@ impl<'a> ImageDecodePlan<'a> {
                 for (offset, values) in decoded.iter().enumerate() {
                     geom.tile_into(wave_start + offset, &mut scatter);
                     // Already narrowed, in the worker.
-                    scatter.scatter_rows_into(out, values, &std::convert::identity);
+                    scatter.scatter_rows_into(out, values, &convert::identity);
                 }
             }
             Ok(())

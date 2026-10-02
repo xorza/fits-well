@@ -1,6 +1,7 @@
 use crate::ascii::AsciiColumnData;
 use crate::ascii::ascii_text::AsciiText;
 use crate::bintable::column_data::ColumnData;
+use crate::bintable::tform_kind::TformKind;
 use crate::bitpix::Bitpix;
 use crate::block::padded_len;
 use crate::block::{BLOCK_SIZE, CARD_SIZE, SPACE_FILL, ZERO_FILL};
@@ -162,10 +163,10 @@ fn checksum_report_for_keywords(datasum: Option<&str>, checksum: Option<&str>) -
     writer.write_raw_hdu(&header, &[]).unwrap();
     let mut bytes = writer.into_inner().into_inner();
     if datasum == Some("") {
-        patch_null_string(&mut bytes, b"DATASUM ");
+        patch_null_string(&mut bytes, *b"DATASUM ");
     }
     if checksum == Some("") {
-        patch_null_string(&mut bytes, b"CHECKSUM");
+        patch_null_string(&mut bytes, *b"CHECKSUM");
     }
     FitsReader::from_bytes(&bytes)
         .unwrap()
@@ -173,12 +174,12 @@ fn checksum_report_for_keywords(datasum: Option<&str>, checksum: Option<&str>) -
         .unwrap()
 }
 
-fn patch_null_string(header_bytes: &mut [u8], keyword: &[u8; 8]) {
+fn patch_null_string(header_bytes: &mut [u8], keyword: [u8; 8]) {
     let card = header_bytes
         .as_chunks_mut::<CARD_SIZE>()
         .0
         .iter_mut()
-        .find(|card| &card[..8] == keyword)
+        .find(|card| card[..8] == keyword)
         .unwrap();
     card[10..].fill(b' ');
     card[10..12].copy_from_slice(b"''");
@@ -733,7 +734,7 @@ fn writes_and_reads_back_variable_length_arrays() {
     let table = r.read_table(1).unwrap();
     assert_eq!(
         table.schema().columns[0].tform.vla_elem,
-        Some(crate::bintable::tform_kind::TformKind::I64)
+        Some(TformKind::I64)
     );
     assert!(table.column_by_idx(0).unwrap().vla().unwrap().is_empty());
 }
@@ -754,7 +755,7 @@ fn vla_constructor_rejects_mixed_element_types() {
 #[test]
 #[should_panic(expected = "only a variable-length column takes `Q` descriptors")]
 fn a_fixed_column_takes_no_wide_descriptors() {
-    let _ = WriteColumn::fixed("FIXED", ColumnData::I16(vec![1]), 1).wide();
+    drop(WriteColumn::fixed("FIXED", ColumnData::I16(vec![1]), 1).wide());
 }
 
 #[test]
@@ -1863,7 +1864,7 @@ fn streaming_image_matches_transactional_output_and_checksums() {
     let mut streamed = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
     {
         let mut image_stream = streamed
-            .stream_image(vec![3, 2], Bitpix::I16, scaling, Some(&template))
+            .stream_image(&[3, 2], Bitpix::I16, scaling, Some(&template))
             .unwrap();
         image_stream
             .write_chunk(&ImageData::I16(samples[..2].to_vec()))
@@ -1885,7 +1886,7 @@ fn streaming_image_matches_transactional_output_and_checksums() {
     let mut streamed_scaled = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
     {
         let mut image_stream = streamed_scaled
-            .stream_image(vec![3, 2], Bitpix::I16, scaling, None)
+            .stream_image(&[3, 2], Bitpix::I16, scaling, None)
             .unwrap();
         image_stream
             .write_chunk(&ImageData::I16(samples[..3].to_vec()))
@@ -1917,7 +1918,7 @@ fn unfinished_or_invalid_image_stream_poisons_the_writer() {
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     {
         let mut stream = writer
-            .stream_image(vec![2], Bitpix::I16, Scaling::IDENTITY, None)
+            .stream_image(&[2], Bitpix::I16, Scaling::IDENTITY, None)
             .unwrap();
         assert!(matches!(
             stream.write_chunk(&ImageData::U8(vec![1])),
@@ -1932,7 +1933,7 @@ fn unfinished_or_invalid_image_stream_poisons_the_writer() {
 
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     let stream = writer
-        .stream_image(vec![2], Bitpix::I32, Scaling::IDENTITY, None)
+        .stream_image(&[2], Bitpix::I32, Scaling::IDENTITY, None)
         .unwrap();
     assert!(matches!(
         stream.finish(),

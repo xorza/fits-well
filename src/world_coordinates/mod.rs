@@ -592,6 +592,10 @@ fn parse_wcs_index(value: &str) -> Option<i64> {
 }
 
 /// A declared axis count, checked against the standard's `1..=999` range.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+)]
 fn validated_axis_count(value: i64, name: &'static str) -> Result<usize> {
     let count = usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { name })?;
     if !(1..=999).contains(&count) {

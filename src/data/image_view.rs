@@ -5,6 +5,7 @@ use crate::bitpix::Bitpix;
 use crate::data::ImageMetadata;
 use crate::data::image_data::ImageData;
 use crate::data::scaling::Scaling;
+use std::ops::Range;
 
 /// A borrowed, host-endian view of FITS array samples, tagged by `BITPIX` — the
 /// zero-/low-copy counterpart to the owned [`ImageData`]. It is returned by
@@ -90,7 +91,7 @@ impl<'a> ImageView<'a> {
     ///
     /// # Panics
     /// When `range` runs past the view.
-    pub(crate) fn slice(self, range: std::ops::Range<usize>) -> ImageView<'a> {
+    pub(crate) fn slice(self, range: Range<usize>) -> ImageView<'a> {
         match self {
             ImageView::U8(values) => ImageView::U8(&values[range]),
             ImageView::I16(values) => ImageView::I16(&values[range]),

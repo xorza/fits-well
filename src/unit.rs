@@ -204,13 +204,14 @@ fn parse_multiplier_prefix(expression: &str) -> Option<ParsedMultiplier> {
 #[cfg(test)]
 mod tests {
     use crate::unit::{ANGLE, ENERGY, LENGTH, TIME, resolve, split_numeric_multiplier};
+    use std::f64::consts::PI;
 
     /// Each table, exact base units, prefixes where they are admitted, and the refusals.
     #[test]
     fn units_resolve_against_their_kind() {
         for (unit, table, scale) in [
             ("deg", ANGLE, Some(1.0)),
-            ("mrad", ANGLE, Some(1e-3 * (180.0 / std::f64::consts::PI))),
+            ("mrad", ANGLE, Some(1e-3 * (180.0 / PI))),
             ("mas", ANGLE, Some(1.0 / 3_600_000.0)),
             ("mdeg", ANGLE, None),
             ("karcsec", ANGLE, None),

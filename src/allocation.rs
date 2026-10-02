@@ -3,6 +3,10 @@
 use crate::error::FitsError;
 use crate::error::Result;
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a failed reservation says only that the size is too large, which the error it becomes carries"
+)]
 pub(crate) fn try_reserve<T>(values: &mut Vec<T>, additional: usize) -> Result<()> {
     let requested = values
         .len()
@@ -15,6 +19,10 @@ pub(crate) fn try_reserve<T>(values: &mut Vec<T>, additional: usize) -> Result<(
         })
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a failed reservation says only that the size is too large, which the error it becomes carries"
+)]
 pub(crate) fn try_resize<T: Clone>(values: &mut Vec<T>, len: usize, value: T) -> Result<()> {
     if len > values.len() {
         let additional = len - values.len();

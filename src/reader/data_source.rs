@@ -75,6 +75,10 @@ impl<S: Source> DataSource<S> {
     /// The binary table `hdu` holds, viewed in place over the source (or this
     /// source's staging buffer).
     #[cfg(feature = "compression")]
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+    )]
     pub(crate) fn table<'a>(&'a mut self, hdu: &'a Hdu) -> Result<TableView<'a>> {
         let schema = hdu.table_schema()?;
         let len = usize::try_from(hdu.data_bytes).map_err(|_| FitsError::DataUnitTooLarge {

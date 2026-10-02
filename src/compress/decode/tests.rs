@@ -1,4 +1,5 @@
 use crate::bintable::BinTable;
+use crate::bintable::internals;
 use crate::bintable::internals::table_header;
 use crate::bintable::tform_kind::TformKind;
 #[cfg(feature = "parallel")]
@@ -317,7 +318,7 @@ fn zblank_column_overrides_keyword_per_tile() {
         (3, "ZBLANK", TformKind::F32),
     ] {
         let mut malformed = table.clone();
-        crate::bintable::internals::set_column_kind(&mut malformed, column, kind);
+        internals::set_column_kind(&mut malformed, column, kind);
         assert!(matches!(
             decompress_image(&h, &malformed),
             Err(FitsError::TypeMismatch { name: actual, .. }) if actual == name

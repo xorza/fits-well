@@ -4,13 +4,16 @@
 //! cargo run --example table
 //! ```
 
+#![expect(clippy::print_stdout, reason = "an example reports to the terminal")]
+
 use std::fs::File;
 
 use fits_well::table::{ColumnData, TableBuilder, WriteColumn};
 use fits_well::{FitsReader, FitsWriter};
+use std::env;
 
 fn main() -> fits_well::Result<()> {
-    let path = std::env::temp_dir().join("fits_well_table.fits");
+    let path = env::temp_dir().join("fits_well_table.fits");
 
     // Each column holds typed data; the last argument is the per-row element count
     // (the character width for a text column, 1 for a plain scalar column).

@@ -299,6 +299,10 @@ fn defined_field<'a>(table: &'a AsciiTable, col: &AsciiColumn, row: usize) -> Op
 
 /// Parse an `Iw` field. A blank one is a genuine zero, not an undefined value
 /// (§7.2.5) — only `TNULLn` marks undefined, and [`defined_field`] filtered it.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a number parse error says only that the text is not a number, which the error it becomes states"
+)]
 fn parse_integer(field: &str) -> Result<i64> {
     if field.is_empty() {
         return Ok(0);
@@ -387,6 +391,10 @@ struct AsciiFormat {
 }
 
 /// Parse an ASCII `TFORMn` (`Aw`, `Iw`, `Fw.d`, `Ew.d`, `Dw.d`).
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a number parse error says only that the text is not a number, which the error it becomes states"
+)]
 fn parse_ascii_tform(value: &str) -> Result<AsciiFormat> {
     let s = value.trim();
     let invalid = || FitsError::InvalidTform {

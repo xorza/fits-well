@@ -11,8 +11,12 @@ use crate::writer::internals::written;
 use crate::writer::table::{TableBuilder, WriteColumn};
 use num_complex::Complex;
 use std::cell::RefCell;
+use std::fs;
 use std::io::{self, Cursor, SeekFrom};
+use std::iter;
+use std::ptr;
 use std::rc::Rc;
+use std::slice;
 
 /// A cursor that records the byte range of every read it serves.
 #[derive(Debug)]
@@ -350,8 +354,8 @@ fn trailing_special_records_and_partial_blocks_are_ignored() {
     // partial blocks appended — none carrying an `END`. The reader must still find
     // exactly the one real HDU and not error on the trailing bytes.
     let mut bytes = fixture_bytes("UITfuv2582gc.fits");
-    bytes.extend(std::iter::repeat_n(0u8, BLOCK_SIZE)); // trailing all-zero fill block
-    bytes.extend(std::iter::repeat_n(b'x', BLOCK_SIZE)); // a special record (no END)
+    bytes.extend(iter::repeat_n(0u8, BLOCK_SIZE)); // trailing all-zero fill block
+    bytes.extend(iter::repeat_n(b'x', BLOCK_SIZE)); // a special record (no END)
     bytes.extend_from_slice(b"a truncated tail"); // sub-block partial remnant
     let f = FitsReader::open(Cursor::new(bytes)).unwrap();
     assert_eq!(f.hdus.len(), 1);
@@ -563,7 +567,7 @@ fn last_data_unit_ends_exactly_at_end_of_file() {
     ] {
         let f = open_fixture(name);
         let last = f.hdus.last().unwrap();
-        let file_len = std::fs::metadata(fixture_path(name)).unwrap().len();
+        let file_len = fs::metadata(fixture_path(name)).unwrap().len();
         assert_eq!(
             last.data_offset + padded_len(last.data_bytes),
             file_len,
@@ -968,7 +972,7 @@ fn image_sections_preserve_scaling_and_validate_empty_and_invalid_regions() {
     assert!(empty.stored().is_empty());
     let wrong_rank = 0..1;
     assert!(matches!(
-        reader.read_image_section(0, std::slice::from_ref(&wrong_rank)),
+        reader.read_image_section(0, slice::from_ref(&wrong_rank)),
         Err(FitsError::RankMismatch {
             ranked: Ranked::ImageRegion,
             expected: 2,
@@ -1280,7 +1284,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     ));
     assert_eq!(
         reader
-            .read_table_cell(1, 3, ColumnSelector::from("QVLA"))
+            .read_table_cell(1, 3, &ColumnSelector::from("QVLA"))
             .unwrap(),
         ColumnData::F64(vec![4.5])
     );
@@ -1308,7 +1312,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     ] {
         assert_eq!(
             reader
-                .read_table_cell(1, 2, ColumnSelector::from(column))
+                .read_table_cell(1, 2, &ColumnSelector::from(column))
                 .unwrap(),
             expected,
             "{column}"
@@ -1347,7 +1351,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     ));
     assert_eq!(
         selective
-            .read_table_cell(1, 1, ColumnSelector::from("ID"))
+            .read_table_cell(1, 1, &ColumnSelector::from("ID"))
             .unwrap(),
         ColumnData::I32(vec![20])
     );
@@ -1406,15 +1410,15 @@ fn malformed_pq_descriptors_match_across_table_read_paths() {
             let mut reader = FitsReader::from_bytes(&corrupted).unwrap();
 
             let whole = reader.read_table(1).unwrap();
-            case.assert_error(whole.column_by_name("VLA").unwrap().vla().unwrap_err());
+            case.assert_error(&whole.column_by_name("VLA").unwrap().vla().unwrap_err());
             case.assert_error(
-                reader
-                    .read_table_cell(1, 0, ColumnSelector::from("VLA"))
+                &reader
+                    .read_table_cell(1, 0, &ColumnSelector::from("VLA"))
                     .unwrap_err(),
             );
-            case.assert_error(reader.read_table_rows(1, 0..1).unwrap_err());
+            case.assert_error(&reader.read_table_rows(1, 0..1).unwrap_err());
             case.assert_error(
-                reader
+                &reader
                     .read_table_columns(1, 0..1, &[ColumnSelector::from("VLA")])
                     .unwrap_err(),
             );
@@ -1427,7 +1431,7 @@ fn readers_recover_their_original_sources() {
     let image = Image::new(vec![2], vec![1u8, 2]).unwrap();
     let bytes = written(|w| w.write_image(&image, None));
     let slice = FitsReader::from_bytes(&bytes).unwrap().into_bytes();
-    assert!(std::ptr::eq(slice.as_ptr(), bytes.as_ptr()));
+    assert!(ptr::eq(slice.as_ptr(), bytes.as_ptr()));
     assert_eq!(slice.len(), bytes.len());
 
     let cursor = FitsReader::open(Cursor::new(bytes.clone()))

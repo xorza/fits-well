@@ -116,9 +116,9 @@ fn nint(x: f64) -> i32 {
     }
 }
 
-/// Background-noise estimate of a tile (cfitsio `FnNoise3_float`).
+/// A tile's range and background-noise estimate (cfitsio `FnNoise3_float`).
 #[derive(Debug)]
-struct Noise {
+struct TileStatistics {
     min: f64,
     max: f64,
     noise: f64,
@@ -143,7 +143,7 @@ fn noise3(
     ny_in: usize,
     diffs: &mut Vec<f64>,
     row_medians: &mut Vec<f64>,
-) -> Noise {
+) -> TileStatistics {
     let (mut nx, mut ny) = (nx_in.max(1), ny_in.max(1));
     if nx < 5 {
         nx *= ny;
@@ -192,7 +192,7 @@ fn noise3(
     } else {
         0.605_269_7 * proper_median(row_medians)
     };
-    Noise {
+    TileStatistics {
         min: xmin,
         max: xmax,
         noise,

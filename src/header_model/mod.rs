@@ -19,6 +19,7 @@ use crate::header_model::card::validate_keyword;
 use crate::header_model::card::validate_valued_keyword;
 use crate::header_model::value::Value;
 use crate::keyword::key;
+use std::mem;
 
 /// A parsed header unit: an *ordered* list of content cards plus a side index
 /// for O(1) keyword lookup.
@@ -147,6 +148,10 @@ impl Header {
     /// A mandatory integer keyword narrowed to `usize`. A negative or oversized
     /// value is [`FitsError::KeywordOutOfRange`], keeping untrusted sizes from
     /// wrapping into a plausible-looking length.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+    )]
     pub(crate) fn required_usize(&self, keyword: &str, name: &'static str) -> Result<usize> {
         usize::try_from(self.required_integer(keyword, name)?)
             .map_err(|_| FitsError::KeywordOutOfRange { name })
@@ -154,6 +159,10 @@ impl Header {
 
     /// An optional integer keyword narrowed to `usize`, or `default` when the card is
     /// absent. A present but out-of-range value still errors.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a `TryFromIntError` says only that the value does not fit, which the error it becomes states"
+    )]
     pub(crate) fn optional_usize(
         &self,
         keyword: &str,
@@ -257,7 +266,7 @@ impl Header {
             let Card::Value { value: slot, .. } = &mut self.cards[i] else {
                 unreachable!("the keyword index holds value cards only");
             };
-            let previous = std::mem::replace(slot, value);
+            let previous = mem::replace(slot, value);
             if let Err(error) = self.cards[i].validate() {
                 let Card::Value { value: slot, .. } = &mut self.cards[i] else {
                     unreachable!("the card was a value card a moment ago");

@@ -1,6 +1,7 @@
 //! [`SpectralAlgorithm`]: the algorithm code of a spectral axis.
 
 use crate::world_coordinates::axis::spectral_kind::Characteristic;
+use std::str;
 
 /// The algorithm code of a spectral `CTYPEi` (WCS Paper III, Table 2): `X2P`
 /// samples the axis linearly in characteristic X and expresses it as P; `GRI` and
@@ -77,7 +78,7 @@ impl SpectralAlgorithm {
             } => "GRA",
             SpectralAlgorithm::Grism { .. } => "GRI",
             SpectralAlgorithm::Pair { sampled, expressed } => {
-                std::str::from_utf8(&PAIR_CODES[sampled as usize][expressed as usize])
+                str::from_utf8(&PAIR_CODES[sampled as usize][expressed as usize])
                     .expect("characteristic letters are ASCII")
             }
         }

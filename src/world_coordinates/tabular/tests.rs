@@ -6,6 +6,8 @@ use crate::world_coordinates::tabular::TabularTransform;
 use crate::world_coordinates::tabular::internals::{
     COUPLED_GRID, lookup_table, resolved_wcs, tab_header,
 };
+use std::iter;
+use std::panic;
 
 fn affine_coordinates(dimensions: usize) -> Vec<f64> {
     let mut coordinates = Vec::with_capacity(dimensions * (1 << dimensions));
@@ -22,7 +24,7 @@ fn coordinate_shape(dimensions: usize) -> String {
     format!(
         "({},{})",
         dimensions,
-        std::iter::repeat_n("2", dimensions)
+        iter::repeat_n("2", dimensions)
             .collect::<Vec<_>>()
             .join(",")
     )
@@ -262,7 +264,7 @@ fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
 
     let mut oversized_axis = tab_header(1, "COORD");
     oversized_axis.set_internal("PV1_3", i64::MAX);
-    let oversized = std::panic::catch_unwind(|| tabular::descriptors(&oversized_axis, 1, None));
+    let oversized = panic::catch_unwind(|| tabular::descriptors(&oversized_axis, 1, None));
     assert!(matches!(oversized, Ok(Err(FitsError::InvalidWcs { .. }))));
 
     assert_eq!(tabular::interpolation_vertex_count(20).unwrap(), 1 << 20);

@@ -10,6 +10,7 @@ use crate::reader::FitsReader;
 use crate::writer::FitsWriter;
 use crate::writer::internals::{rejected_before_output, round_trip};
 use std::io::Cursor;
+use std::iter;
 
 #[test]
 fn compression_write_round_trips_through_decode() {
@@ -92,7 +93,7 @@ fn float_field() -> Vec<f32> {
 #[test]
 fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
     let mut f32_samples: Vec<f32> = float_field().into_iter().take(24).collect();
-    f32_samples.extend(std::iter::repeat_n(42.25, 24));
+    f32_samples.extend(iter::repeat_n(42.25, 24));
     let f64_samples = f32_samples.iter().map(|&value| f64::from(value)).collect();
 
     for samples in [ImageData::F32(f32_samples), ImageData::F64(f64_samples)] {
@@ -191,9 +192,7 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
             assert_eq!(back.scaling, image.scaling, "{bitpix:?} {cmptype}");
             let physical = back.physical();
             let actual_raw: Vec<f64> = match back.decode() {
-                ImageData::F32(values) => {
-                    values.into_iter().map(|value| f64::from(value)).collect()
-                }
+                ImageData::F32(values) => values.into_iter().map(f64::from).collect(),
                 ImageData::F64(values) => values,
                 other => panic!("{cmptype}: expected {bitpix:?}, got {other:?}"),
             };

@@ -12,6 +12,7 @@ use crate::header_model::card::validate_ascii;
 use crate::header_model::value;
 use crate::keyword::key;
 use crate::writer::{FitsWriter, accept_row_count, validate_scaling};
+use std::iter;
 
 /// One column to write into an ASCII table: nullable typed data, the fixed field
 /// width in characters, and the decimal count for floats.
@@ -46,22 +47,26 @@ impl AsciiWriteColumn {
         }
     }
 
+    #[must_use]
     pub fn with_unit(mut self, unit: impl Into<String>) -> AsciiWriteColumn {
         self.unit = Some(unit.into());
         self
     }
 
+    #[must_use]
     pub fn with_decimals(mut self, decimals: usize) -> AsciiWriteColumn {
         self.decimals = decimals;
         self
     }
 
+    #[must_use]
     pub fn scaled(mut self, tscale: f64, tzero: f64) -> AsciiWriteColumn {
         self.tscale = Some(tscale);
         self.tzero = Some(tzero);
         self
     }
 
+    #[must_use]
     pub fn with_null(mut self, tnull: impl Into<String>) -> AsciiWriteColumn {
         self.tnull = Some(tnull.into());
         self
@@ -345,9 +350,9 @@ fn append_ascii_field(out: &mut Vec<u8>, col: &AsciiWriteColumn, r: usize) -> Re
     let pad = col.width - bytes.len();
     if field.left_aligned {
         out.extend_from_slice(bytes);
-        out.extend(std::iter::repeat_n(b' ', pad));
+        out.extend(iter::repeat_n(b' ', pad));
     } else {
-        out.extend(std::iter::repeat_n(b' ', pad));
+        out.extend(iter::repeat_n(b' ', pad));
         out.extend_from_slice(bytes);
     }
     Ok(())

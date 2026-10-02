@@ -1,9 +1,10 @@
 use std::fmt;
 use std::io;
 
+use std::result;
 use thiserror::Error;
 
-pub type Result<T> = std::result::Result<T, FitsError>;
+pub type Result<T> = result::Result<T, FitsError>;
 
 /// What an out-of-range index was addressing, naming the bound it exceeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +23,10 @@ pub enum Indexed {
 }
 
 impl Indexed {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "thiserror's `fmt` hands the variant and every field by reference"
+    )]
     fn fmt_out_of_bounds(
         &self,
         index: &usize,
@@ -64,6 +69,10 @@ pub enum Ranked {
 }
 
 impl Ranked {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "thiserror's `fmt` hands the variant and every field by reference"
+    )]
     fn fmt_mismatch(
         &self,
         expected: &usize,

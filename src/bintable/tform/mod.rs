@@ -18,6 +18,10 @@ pub struct Tform {
 
 impl Tform {
     /// Parse a `TFORMn` value such as `"8A"`, `"3D"`, `"1J"`, `"E"`, or `"1PE(5)"`.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a number parse error says only that the text is not a number, which the error it becomes states"
+    )]
     pub fn parse(value: &str) -> Result<Tform> {
         let s = value.trim();
         let invalid = || FitsError::InvalidTform {
