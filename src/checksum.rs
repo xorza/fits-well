@@ -101,17 +101,28 @@ mod tests {
         );
     }
 
+    /// Appendix J.2: the value starts at byte 12 of its card, one byte past a word
+    /// boundary. Summing an HDU with sixteen `'0'`s there, then writing the encoded
+    /// complement over them, brings the whole-HDU sum to negative zero.
     #[test]
     fn encoded_checksum_is_alphanumeric_and_sums_to_negative_zero() {
-        // For any HDU sum, the encoded 16 chars (placed word-aligned) plus the
-        // sum must give all-ones. Here we check the chars are alphanumeric and
-        // that decoding the complement is self-consistent.
-        for sum in [0u32, 1, 0x1234_5678, 0xDEAD_BEEF, 0xFFFF_FFFF] {
-            let enc = encode(sum, true);
+        for rest in [
+            [0u8; 8],
+            [0xFF; 8],
+            [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0],
+        ] {
+            let mut hdu = rest.to_vec();
+            // Byte 12 of a word-aligned card is offset 11, three past a boundary.
+            let field = hdu.len() + 3;
+            hdu.resize(hdu.len() + 20, b' ');
+            hdu[field..field + 16].copy_from_slice(b"0000000000000000");
+            let encoded = encode(accumulate(&hdu, 0), true);
             assert!(
-                enc.iter().all(|&b| b.is_ascii_alphanumeric()),
-                "non-alphanumeric output for {sum:#x}: {enc:?}"
+                encoded.iter().all(|&b| b.is_ascii_alphanumeric()),
+                "non-alphanumeric output: {encoded:?}"
             );
+            hdu[field..field + 16].copy_from_slice(&encoded);
+            assert_eq!(accumulate(&hdu, 0), 0xFFFF_FFFF, "{rest:?}");
         }
     }
 }

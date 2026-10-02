@@ -104,3 +104,7 @@ harness = false
 [[example]]
 name = "compression"
 required-features = ["compression"]
+
+[[example]]
+name = "emit_compressed"
+required-features = ["compression"]

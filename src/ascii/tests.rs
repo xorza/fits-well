@@ -59,13 +59,9 @@ fn decodes_hand_built_ascii_rows() {
         .set_internal("TTYPE2", "COUNT");
     let data = b"  AB   123def    -45".to_vec(); // "  AB" + "   123" ; "def " + "   -45"
     let table = AsciiTable::from_data(&header, data).unwrap();
-    let mut metadata = table.metadata();
+    let metadata = table.metadata();
     assert_eq!(metadata.nrows, 2);
     assert_eq!(metadata.columns[1].start, 4);
-    metadata.nrows = usize::MAX;
-    metadata.columns = &[];
-    assert_eq!(metadata.nrows, usize::MAX);
-    assert!(metadata.columns.is_empty());
     assert_eq!(
         table.column_by_idx(0).unwrap().raw().unwrap(),
         AsciiColumnData::Text([Some("  AB"), Some("def ")].into_iter().collect())
@@ -262,26 +258,29 @@ fn signed_exponent_without_letter_parses_as_fortran_real() {
     // introduces the exponent (no E/D letter), e.g. 3.14159-2 = 3.14159 × 10⁻².
     // Every value is the f64 nearest the decimal the field spells, as strtod (cfitsio,
     // astropy) reads it: `-3.0-1` is -0.3, not -3.0 · 0.1 = -0.30000000000000004.
-    let approx = |got: Option<f64>, want: f64| {
-        assert_eq!(got.expect("should parse"), want);
+    let exact = |got: Option<f64>, want: f64| {
+        assert_eq!(got.expect("should parse").to_bits(), want.to_bits());
     };
-    approx(parse_ascii_float("3.14159-2", 5), 0.0314159);
-    approx(parse_ascii_float("2.5+3", 1), 2500.0);
-    approx(parse_ascii_float("-3.0-1", 1), -0.3);
+    exact(parse_ascii_float("3.14159-2", 5), 0.0314159);
+    exact(parse_ascii_float("2.5+3", 1), 2500.0);
+    exact(parse_ascii_float("-3.0-1", 1), -0.3);
     // The leading mantissa sign is NOT an exponent; implicit decimal still applies.
-    approx(parse_ascii_float("-12", 3), -0.012);
+    exact(parse_ascii_float("-12", 3), -0.012);
     // Explicit E/D forms keep working.
-    approx(parse_ascii_float("1.5E2", 1), 150.0);
-    approx(parse_ascii_float("1.5D-2", 1), 0.015);
+    exact(parse_ascii_float("1.5E2", 1), 150.0);
+    exact(parse_ascii_float("1.5D-2", 1), 0.015);
     // A point-less mantissa with an *explicit* exponent is read literally (strtod),
     // NOT implied-decimal-scaled: `1E5` is 100000, `15E2` is 1500 — matching
     // cfitsio/astropy. The implied decimal applies only to point-less `Fw.d` fields.
-    approx(parse_ascii_float("1E5", 3), 100_000.0);
-    approx(parse_ascii_float("15E2", 3), 1500.0);
-    approx(parse_ascii_float("2E-3", 4), 0.002);
+    exact(parse_ascii_float("1E5", 3), 100_000.0);
+    exact(parse_ascii_float("15E2", 3), 1500.0);
+    exact(parse_ascii_float("2E-3", 4), 0.002);
     // Past 10²², `10f64.powi` is no longer exact; the literal stays exact to the last bit.
-    approx(parse_ascii_float("7", 30), 7e-30);
-    approx(parse_ascii_float("1.7976931348623157E308", 1), f64::MAX);
+    exact(parse_ascii_float("7", 30), 7e-30);
+    exact(parse_ascii_float("1.7976931348623157E308", 1), f64::MAX);
+    exact(parse_ascii_float("1.0E+308", 1), 1e308);
+    // A subnormal reads exactly too, where a scale by a power of ten would round twice.
+    exact(parse_ascii_float("1.0E-320", 1), 1e-320);
 
     assert_eq!(
         split_mantissa_exponent("3.14159-2"),
@@ -313,8 +312,7 @@ fn reads_a_column_with_a_bare_sign_exponent_field() {
     let table = AsciiTable::from_data(&header, data).unwrap();
     match table.column_by_idx(0).unwrap().raw().unwrap() {
         AsciiColumnData::Float(values) => {
-            let value = values[0].unwrap();
-            assert!((value - 0.0314159).abs() < 1e-12, "{value}");
+            assert_eq!(values, [Some(0.0314159)]);
         }
         other => panic!("expected Float, got {other:?}"),
     }

@@ -639,11 +639,6 @@ fn read_data_raw_returns_padded_bytes_and_the_data_range() {
     // The padding past the data range is block fill, not samples.
     assert!(view.padded[524_288..].iter().all(|&b| b == 0));
 
-    let mut detached = unit.view();
-    detached.data_range = usize::MAX..usize::MAX;
-    detached.padded = &[];
-    assert_eq!(detached.data_range, usize::MAX..usize::MAX);
-    assert!(detached.padded.is_empty());
     assert_eq!(unit.data().len(), 524_288);
     assert_eq!(unit.clone().into_data().len(), 524_288);
     assert_eq!(unit.into_padded().len(), 527_040);

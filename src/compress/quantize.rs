@@ -364,6 +364,7 @@ mod tests {
             None,
             &mut back,
         );
+        assert_eq!(back.len(), data.len());
         for (i, (&o, &b)) in data.iter().zip(&back).enumerate() {
             if o == 0.0 {
                 assert_eq!(b, 0.0, "zero pixel {i} must decode to exactly 0.0");
