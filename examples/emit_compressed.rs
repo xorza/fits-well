@@ -3,7 +3,7 @@
 //! table — that table compressed with RICE.
 //!
 //! ```sh
-//! cargo run --example emit_compressed -- OUT_DIR [tests/data/fits/comp_table_ref.fits]
+//! cargo run --example emit_compressed -- OUT_DIR [test_resources/comp_table_ref.fits]
 //! ```
 //!
 //! Then read the images with astropy (`astropy.io.fits.open(path)[1].data`) and

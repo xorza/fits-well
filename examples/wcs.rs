@@ -1,5 +1,5 @@
 //! Read the WCS (World Coordinate System) from a FITS file's header and convert
-//! between pixel and sky coordinates. From a checkout, `tests/data/fits/wcs_tan.fits`
+//! between pixel and sky coordinates. From a checkout, `test_resources/wcs_tan.fits`
 //! is a two-axis TAN (gnomonic) sample:
 //!
 //! ```sh

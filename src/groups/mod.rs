@@ -209,7 +209,7 @@ impl RandomGroups {
         self.pcount + self.array_len
     }
 
-    fn checked_group_base(&self, index: usize) -> Result<usize> {
+    const fn checked_group_base(&self, index: usize) -> Result<usize> {
         if index >= self.gcount {
             return Err(FitsError::IndexOutOfBounds {
                 indexed: Indexed::Group,

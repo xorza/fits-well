@@ -326,7 +326,7 @@ where
     (0..ntiles).map(|t| f(&mut scratch, t)).collect()
 }
 
-/// The synthetic planes the codec fixtures in `tests/data/fits/comp_*` encode.
+/// The synthetic planes the codec fixtures in `test_resources/comp_*` encode.
 #[cfg(test)]
 pub(crate) mod internals {
     /// value(x, y) = 7x − 5y over 24×16, row-major: the integer codec fixtures.

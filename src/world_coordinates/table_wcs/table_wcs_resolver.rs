@@ -22,7 +22,7 @@ pub(super) struct TableWcsResolver {
 }
 
 impl TableWcsResolver {
-    pub(super) fn new(alternate: Option<char>) -> TableWcsResolver {
+    pub(super) const fn new(alternate: Option<char>) -> TableWcsResolver {
         TableWcsResolver {
             suffix: AltSuffix::new(alternate),
         }
