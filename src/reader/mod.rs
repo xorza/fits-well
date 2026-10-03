@@ -212,10 +212,6 @@ impl FitsReader<source::MmapSource> {
     /// Memory-map a FITS file and read it zero-copy: data units decode straight from
     /// the mapped pages (no staging copy, no read syscalls). Best for large files
     /// and random HDU access. Requires the `mmap` feature.
-    #[expect(
-        clippy::absolute_paths,
-        reason = "stands in for an import that only the mmap feature uses"
-    )]
     pub fn open_mmap(path: impl AsRef<std::path::Path>) -> Result<MmapReader> {
         FitsReader::from_source(source::MmapSource::open(path.as_ref())?)
     }

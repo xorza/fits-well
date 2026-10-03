@@ -75,10 +75,7 @@ fn bounded_integer_getter_rejects_exact_values_outside_i64() {
                 if value == decimal && target == "i64"
         ));
     }
-    assert_eq!(
-        h.get_real("ABOVE").unwrap(),
-        Some(9_223_372_036_854_775_808.0)
-    );
+    assert_eq!(h.get_real("ABOVE").unwrap(), Some(-(i64::MIN as f64)));
 }
 
 #[test]

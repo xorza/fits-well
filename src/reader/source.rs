@@ -187,10 +187,6 @@ pub struct MmapSource {
 
 #[cfg(feature = "mmap")]
 impl MmapSource {
-    #[expect(
-        clippy::absolute_paths,
-        reason = "stands in for an import that only the mmap feature uses"
-    )]
     pub(super) fn open(path: &std::path::Path) -> Result<MmapSource> {
         let file = File::open(path)?;
         // SAFETY: standard mmap contract — the mapping is read-only and owned here
