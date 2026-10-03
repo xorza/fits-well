@@ -7,8 +7,8 @@ use crate::error::Result;
 /// The widened plane a tile decodes into before narrowing to the stored type: `i64`
 /// for an integer image, `f64` for a quantized float one. The two differ in how a
 /// tile is reconstructed and how its nulls are applied, so selecting the plane by
-/// type makes that split once — where the old code re-tested `ZBITPIX.is_float()` at
-/// every dispatch site and then asserted the buffer agreed.
+/// type makes that split once, rather than re-testing `ZBITPIX.is_float()` at every
+/// dispatch site and asserting the buffer agrees.
 pub(super) trait WidePlane: Copy + Send {
     fn decode_tile(
         plan: &ImageDecodePlan<'_>,
