@@ -4,14 +4,16 @@
 //! extension, or random-groups formula, rounded up to a block, so the reader never
 //! touches data to find the next HDU.
 
-use crate::block::checked_padded_len;
+pub(crate) mod image_geometry;
+
+use crate::block::padded_len;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header::Header;
+use crate::header_model::Header;
 
 pub(crate) const MAX_TABLE_FIELDS: usize = 999;
 
-pub(crate) fn validate_table_field_count(count: usize) -> Result<()> {
+pub(crate) const fn validate_table_field_count(count: usize) -> Result<()> {
     if count > MAX_TABLE_FIELDS {
         return Err(FitsError::KeywordOutOfRange { name: "TFIELDS" });
     }
@@ -138,7 +140,7 @@ pub(crate) fn data_extent(header: &Header, role: HduRole) -> Result<DataExtent> 
     };
     Ok(DataExtent {
         data_bytes,
-        padded_bytes: checked_padded_len(data_bytes).ok_or(FitsError::DataUnitOverflow)?,
+        padded_bytes: padded_len(data_bytes).ok_or(FitsError::DataUnitOverflow)?,
     })
 }
 
@@ -182,8 +184,8 @@ fn required_group_counts(header: &Header) -> Result<GroupCounts> {
         return Err(FitsError::KeywordOutOfRange { name: "GCOUNT" });
     }
     Ok(GroupCounts {
-        pcount: pcount as u64,
-        gcount: gcount as u64,
+        pcount: pcount.cast_unsigned(),
+        gcount: gcount.cast_unsigned(),
     })
 }
 
@@ -198,7 +200,7 @@ fn grouped_data_bytes(elem: u64, array_elements: u64, header: &Header) -> Result
         .ok_or(FitsError::DataUnitOverflow)
 }
 
-fn validate_random_groups_axes(axes: &[usize]) -> Result<()> {
+const fn validate_random_groups_axes(axes: &[usize]) -> Result<()> {
     let Some(&first) = axes.first() else {
         return Err(FitsError::KeywordOutOfRange { name: "NAXIS" });
     };

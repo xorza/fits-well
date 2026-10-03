@@ -1,18 +1,18 @@
 //! The optional per-tile null-pixel mask (§10.1.2) and how it is applied.
 
-use crate::bitpix::Bitpix;
+use crate::bintable::table_view::TableView;
+use crate::bintable::vla_column::VlaColumn;
 use crate::compress::ImageCodec;
 use crate::compress::decode::ensure_tile_size;
-use crate::compress::decode::image_layout::ImageLayout;
 use crate::compress::decode::tile_scratch_set::CodecScratch;
+use crate::compress::decode::tiled_image::TiledImage;
 use crate::compress::gzip;
+use crate::compress::plane::IntBitpix;
 use crate::compress::plio;
 use crate::compress::rice;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header::Header;
-use crate::table_impl::BinTable;
-use crate::table_impl::vla_column::VlaColumn;
+use crate::header_model::Header;
 
 /// The optional null-pixel mask and everything applying it needs: the per-tile mask
 /// column, the `ZMASKCMP` codec that encodes it, and the `BLANK` value an integer
@@ -27,8 +27,8 @@ pub(super) struct NullMask<'a> {
 impl<'a> NullMask<'a> {
     pub(super) fn read(
         header: &Header,
-        table: &'a BinTable,
-        layout: &ImageLayout,
+        table: TableView<'a>,
+        tiled: &TiledImage<'_>,
     ) -> Result<NullMask<'a>> {
         let column = first_column(
             table,
@@ -50,7 +50,7 @@ impl<'a> NullMask<'a> {
         Ok(NullMask {
             column,
             codec,
-            blank: layout.scaling.blank,
+            blank: tiled.image.scaling.blank,
         })
     }
 
@@ -108,13 +108,29 @@ impl<'a> NullMask<'a> {
             .codec
             .ok_or(FitsError::MissingKeyword { name: "ZMASKCMP" })?;
         match codec {
-            ImageCodec::Gzip1 => {
-                gzip::gzip_tile_into(cell.bytes, Bitpix::U8, tile_elems, out, &mut scratch.gzip)?
+            ImageCodec::Gzip1 => gzip::gzip_tile_into(
+                cell.bytes,
+                IntBitpix::U8,
+                tile_elems,
+                out,
+                &mut scratch.gzip,
+            )?,
+            ImageCodec::Gzip2 => gzip::gzip2_tile_into(
+                cell.bytes,
+                IntBitpix::U8,
+                tile_elems,
+                out,
+                &mut scratch.gzip,
+            )?,
+            ImageCodec::Rice1 => {
+                rice::rice_decode_into(
+                    cell.bytes,
+                    tile_elems,
+                    IntBitpix::U8,
+                    rice::BLOCKSIZE,
+                    out,
+                )?;
             }
-            ImageCodec::Gzip2 => {
-                gzip::gzip2_tile_into(cell.bytes, Bitpix::U8, tile_elems, out, &mut scratch.gzip)?
-            }
-            ImageCodec::Rice1 => rice::rice_decode_into(cell.bytes, tile_elems, 1, 32, out)?,
             ImageCodec::Plio1 => plio::plio_decode_be_into(cell.bytes, tile_elems, out)?,
             ImageCodec::NoCompress => {
                 if cell.bytes.len() != tile_elems {
@@ -124,14 +140,14 @@ impl<'a> NullMask<'a> {
                     });
                 }
                 out.clear();
-                out.extend(cell.bytes.iter().map(|&value| value as i64));
+                out.extend(cell.bytes.iter().map(|&value| i64::from(value)));
             }
             ImageCodec::Hcompress1 => unreachable!("rejected while building the decode plan"),
         }
         ensure_tile_size(tile_elems, out.len())?;
         if out.iter().any(|&value| !matches!(value, 0 | 1)) {
-            return Err(FitsError::UnsupportedCompression {
-                name: "null-pixel mask contains a value other than zero or one".to_string(),
+            return Err(FitsError::CorruptCompressedData {
+                detail: "null-pixel mask contains a value other than zero or one".to_string(),
             });
         }
         Ok(true)
@@ -140,7 +156,7 @@ impl<'a> NullMask<'a> {
 
 /// The first of `names` the table carries as a variable-length column — writers
 /// disagree on the mask column's spelling, so all three are accepted.
-fn first_column<'a>(table: &'a BinTable, names: &[&str]) -> Result<Option<VlaColumn<'a>>> {
+fn first_column<'a>(table: TableView<'a>, names: &[&str]) -> Result<Option<VlaColumn<'a>>> {
     for &name in names {
         if let Some(column) = table.optional_vla_column(name)? {
             return Ok(Some(column));

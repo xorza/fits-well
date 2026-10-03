@@ -2,12 +2,13 @@
 //!
 //! Indexed keywords (`NAXIS3`, `PV2_15`, `CD1_2`, `CTYPE1`) are looked up
 //! constantly while reading and writing. Building each with `format!` heap-
-//! allocates a throwaway `String` per lookup — a single [`crate::wcs::Wcs`] parse does
+//! allocates a throwaway `String` per lookup — a single [`crate::world_coordinates::Wcs`] parse does
 //! ~90 of them. A conforming keyword is at most 8 bytes, so [`KeyBuf`] formats it
 //! into a fixed stack buffer instead; use the [`key!`] macro exactly like
 //! `format!` and call `.as_str()` on the result.
 
 use core::fmt::{self, Write};
+use std::str;
 
 /// The alternate-description suffix — the `a` of the §8 and Table 22 keyword
 /// families. Empty for the primary description, the single letter for an alternate.
@@ -17,28 +18,34 @@ use core::fmt::{self, Write};
 /// a `char::to_string` would allocate on every WCS or time parse. Formatting it
 /// directly also means each keyword has one spelling rather than a present/absent
 /// pair.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct AltSuffix {
     buf: [u8; 4],
     len: usize,
 }
 
 impl AltSuffix {
-    pub(crate) fn new(alternate: Option<char>) -> AltSuffix {
-        let mut suffix = AltSuffix::default();
+    pub(crate) const fn new(alternate: Option<char>) -> AltSuffix {
+        let mut suffix = AltSuffix {
+            buf: [0; 4],
+            len: 0,
+        };
         if let Some(alternate) = alternate {
             suffix.len = alternate.encode_utf8(&mut suffix.buf).len();
         }
         suffix
     }
 
-    pub(crate) fn as_str(&self) -> &str {
-        std::str::from_utf8(&self.buf[..self.len]).expect("encode_utf8 writes valid UTF-8")
+    pub(crate) const fn as_str(&self) -> &str {
+        match str::from_utf8(self.buf.split_at(self.len).0) {
+            Ok(text) => text,
+            Err(_) => panic!("encode_utf8 writes valid UTF-8"),
+        }
     }
 
     /// Whether an alternate description is selected. Several Table 22 families spell
     /// their root differently for the primary description, which has no suffix.
-    pub(crate) fn is_alternate(&self) -> bool {
+    pub(crate) const fn is_alternate(&self) -> bool {
         self.len != 0
     }
 }
@@ -78,22 +85,23 @@ pub(crate) struct KeyBuf {
 }
 
 impl KeyBuf {
-    pub(crate) fn new() -> KeyBuf {
+    pub(crate) const fn new() -> KeyBuf {
         KeyBuf {
             buf: [0; KEY_CAP],
             len: 0,
         }
     }
 
-    /// The formatted keyword as a string slice.
-    pub(crate) fn as_str(&self) -> &str {
-        // Only ASCII keyword bytes are ever written, so this is always valid UTF-8.
-        std::str::from_utf8(&self.buf[..self.len]).expect("keyword bytes are ASCII")
+    pub(crate) const fn as_str(&self) -> &str {
+        match str::from_utf8(self.buf.split_at(self.len).0) {
+            Ok(text) => text,
+            Err(_) => panic!("KeyBuf holds only whole `&str` writes"),
+        }
     }
 }
 
 impl Write for KeyBuf {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
         let end = self.len + s.len();
         // A FITS keyword is ≤ 8 bytes; exceeding KEY_CAP means a caller built an
         // impossible keyword — a logic error, not bad file input.
@@ -113,8 +121,6 @@ impl Write for KeyBuf {
 macro_rules! key {
     ($($arg:tt)*) => {{
         let mut k = $crate::keyword::KeyBuf::new();
-        // `KeyBuf::write_str` never returns `Err` (it asserts on the impossible
-        // overflow), so this write is infallible for any conforming keyword.
         core::fmt::Write::write_fmt(&mut k, format_args!($($arg)*))
             .expect("KeyBuf keyword write is infallible");
         k

@@ -1,13 +1,26 @@
-use crate::data::image_view::ImageView;
-use crate::error::Indexed;
 use crate::groups::*;
-use crate::reader::FitsReader;
-use std::fs::File;
+use crate::reader::internals::open_fixture;
+
+/// A random-groups header: `NAXIS1 = 0`, then `axes` for each group's array.
+fn groups_header(bitpix: i64, axes: &[i64], pcount: i64, gcount: i64) -> Header {
+    let mut header = Header::new();
+    header
+        .set_internal("BITPIX", bitpix)
+        .set_internal("NAXIS", i64::try_from(axes.len()).unwrap() + 1)
+        .set_internal("NAXIS1", 0);
+    for (index, &length) in axes.iter().enumerate() {
+        header.set_internal(&format!("NAXIS{}", index + 2), length);
+    }
+    header
+        .set_internal("GROUPS", true)
+        .set_internal("PCOUNT", pcount)
+        .set_internal("GCOUNT", gcount);
+    header
+}
 
 #[test]
 fn reads_the_real_uv_random_groups() {
-    let file = File::open("tests/data/fits/DDTSUVDATA.fits").unwrap();
-    let mut reader = FitsReader::open(file).unwrap();
+    let mut reader = open_fixture("DDTSUVDATA.fits");
     let groups = reader.read_groups(0).unwrap();
     let metadata = groups.metadata();
 
@@ -21,16 +34,38 @@ fn reads_the_real_uv_random_groups() {
         ["UU--", "VV--", "WW--", "BASELINE", "DATE", "DATE"]
     );
 
-    // Each group yields PCOUNT params and an array of 12 elements.
+    // Group 0's stored f32s, scaled by PSCALn and offset by PZEROn: the u, v, w
+    // scale is 7.04218409114E-10, and DATE (index 4) adds PZERO5 = 2445728.5 to
+    // 0.2133636474609375 — exact in f64, whose step at 2^21 is 2^-31.
     let params = groups.parameters_physical(0).unwrap();
-    assert_eq!(params.len(), 6);
-    assert_eq!(groups.array_physical(0).unwrap().len(), 12);
-    // The DATE parameter (index 4) has PZERO5 = 2445728.5 (a Julian date), so
-    // its physical value lands in that range, not near zero.
-    assert!(
-        params[4] > 2_445_728.0 && params[4] < 2_445_730.0,
-        "DATE param = {}",
-        params[4]
+    assert_eq!(
+        params,
+        [
+            -11_642.337_890_625 * 7.042_184_091_14e-10,
+            17_055.679_687_5 * 7.042_184_091_14e-10,
+            -14_359.027_343_75 * 7.042_184_091_14e-10,
+            258.0,
+            2_445_728.5 + 0.213_363_647_460_937_5,
+            0.0,
+        ]
+    );
+    // BSCALE 1 and BZERO 0 leave the array as stored.
+    assert_eq!(
+        groups.array_physical(0).unwrap(),
+        [
+            12.430_867_195_129_395,
+            0.568_607_449_531_555_2,
+            3.999_938_726_425_171,
+            12.740_436_553_955_078,
+            0.313_985_109_329_223_63,
+            3.999_938_726_425_171,
+            0.0,
+            0.0,
+            3.999_938_726_425_171,
+            0.0,
+            0.0,
+            3.999_938_726_425_171,
+        ]
     );
     // §6.3: the two PTYPE='DATE' addends (indices 4, 5) sum to the logical DATE.
     assert_eq!(
@@ -60,17 +95,6 @@ fn reads_the_real_uv_random_groups() {
             })
         ));
     }
-    let mut detached = groups.metadata();
-    detached.gcount = 0;
-    detached.pcount = usize::MAX;
-    detached.group_shape = &[];
-    detached.parameter_names = &[];
-    detached.bitpix = Bitpix::I64;
-    assert_eq!(detached.gcount, 0);
-    assert_eq!(detached.pcount, usize::MAX);
-    assert!(detached.group_shape.is_empty());
-    assert!(detached.parameter_names.is_empty());
-    assert_eq!(detached.bitpix, Bitpix::I64);
     assert_eq!(groups.parameters_physical(0).unwrap().len(), 6);
 }
 
@@ -79,15 +103,8 @@ fn parameter_physical_sums_addends_sharing_a_ptype() {
     // §6.3: two group parameters share PTYPEn='DATE' (a high-precision split); the
     // logical value is the SUM of the two addends' physical values — here both
     // non-zero, so a "return the first addend" bug would be caught.
-    let mut header = Header::new();
+    let mut header = groups_header(-32, &[1], 2, 1);
     header
-        .set_internal("BITPIX", -32)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 0)
-        .set_internal("NAXIS2", 1)
-        .set_internal("GROUPS", true)
-        .set_internal("PCOUNT", 2)
-        .set_internal("GCOUNT", 1)
         .set_internal("PTYPE1", "DATE")
         .set_internal("PSCAL1", 1.0)
         .set_internal("PZERO1", 2_445_728.5)
@@ -126,15 +143,8 @@ fn parameter_physical_sums_addends_sharing_a_ptype() {
 #[test]
 fn array_physical_maps_blank_to_nan_for_every_integer_bitpix() {
     for bitpix in [Bitpix::U8, Bitpix::I16, Bitpix::I32, Bitpix::I64] {
-        let mut header = Header::new();
+        let mut header = groups_header(bitpix.code(), &[3], 1, 1);
         header
-            .set_internal("BITPIX", bitpix.code())
-            .set_internal("NAXIS", 2)
-            .set_internal("NAXIS1", 0)
-            .set_internal("NAXIS2", 3)
-            .set_internal("GROUPS", true)
-            .set_internal("PCOUNT", 1)
-            .set_internal("GCOUNT", 1)
             .set_internal("PTYPE1", "PARAM")
             .set_internal("BSCALE", 2.0)
             .set_internal("BZERO", 5.0)
@@ -175,15 +185,8 @@ fn naxis1_group_has_one_array_element_matching_data_extent() {
     // per Eq. 2, PCOUNT params + an empty-product array of 1 element per group — the
     // way `data_extent` sizes the unit. `array_len` must agree (1, not 0), or
     // `from_data` rejects a unit the reader already sized as readable.
-    let mut header = Header::new();
-    header
-        .set_internal("BITPIX", -32)
-        .set_internal("NAXIS", 1)
-        .set_internal("NAXIS1", 0)
-        .set_internal("GROUPS", true)
-        .set_internal("PCOUNT", 1)
-        .set_internal("GCOUNT", 2)
-        .set_internal("PTYPE1", "P");
+    let mut header = groups_header(-32, &[], 1, 2);
+    header.set_internal("PTYPE1", "P");
     // 2 groups × (1 param + 1 array element) = 4 floats.
     let mut data = Vec::new();
     for v in [1.0f32, 10.0, 2.0, 20.0] {
@@ -201,8 +204,7 @@ fn naxis1_group_has_one_array_element_matching_data_extent() {
 
 #[test]
 fn read_groups_rejects_non_random_groups_hdus() {
-    let file = File::open("tests/data/fits/UITfuv2582gc.fits").unwrap();
-    let mut reader = FitsReader::open(file).unwrap();
+    let mut reader = open_fixture("UITfuv2582gc.fits");
     assert!(matches!(
         reader.read_groups(0),
         Err(FitsError::NotRandomGroups)
@@ -211,15 +213,7 @@ fn read_groups_rejects_non_random_groups_hdus() {
 
 #[test]
 fn raw_group_view_preserves_i64_extremes_and_group_boundaries() {
-    let mut header = Header::new();
-    header
-        .set_internal("BITPIX", 64)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 0)
-        .set_internal("NAXIS2", 2)
-        .set_internal("GROUPS", true)
-        .set_internal("PCOUNT", 2)
-        .set_internal("GCOUNT", 2);
+    let header = groups_header(64, &[2], 2, 2);
     let stored = [
         i64::MIN,
         i64::MAX,
@@ -254,15 +248,7 @@ fn raw_group_view_preserves_i64_extremes_and_group_boundaries() {
 
 #[test]
 fn raw_group_view_preserves_float_bit_patterns() {
-    let mut f32_header = Header::new();
-    f32_header
-        .set_internal("BITPIX", -32)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 0)
-        .set_internal("NAXIS2", 2)
-        .set_internal("GROUPS", true)
-        .set_internal("PCOUNT", 1)
-        .set_internal("GCOUNT", 1);
+    let f32_header = groups_header(-32, &[2], 1, 1);
     let f32_bits = [0x7fc0_1234, 0x8000_0000, 0x0000_0001];
     let f32_data: Vec<u8> = f32_bits.into_iter().flat_map(u32::to_be_bytes).collect();
     let f32_groups = RandomGroups::from_data(&f32_header, &f32_data).unwrap();
@@ -282,15 +268,7 @@ fn raw_group_view_preserves_float_bit_patterns() {
         f32_bits[1..]
     );
 
-    let mut f64_header = Header::new();
-    f64_header
-        .set_internal("BITPIX", -64)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 0)
-        .set_internal("NAXIS2", 2)
-        .set_internal("GROUPS", true)
-        .set_internal("PCOUNT", 1)
-        .set_internal("GCOUNT", 1);
+    let f64_header = groups_header(-64, &[2], 1, 1);
     let f64_bits = [
         0x7ff8_0000_0000_1234,
         0x8000_0000_0000_0000,

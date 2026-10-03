@@ -5,13 +5,16 @@
 //! cargo run --example compression
 //! ```
 
+#![expect(clippy::print_stdout, reason = "an example reports to the terminal")]
+
 use std::fs::File;
 
 use fits_well::image::{Compression, CompressionOptions, Image, ImageData};
 use fits_well::{FitsReader, FitsWriter};
+use std::env;
 
 fn main() -> fits_well::Result<()> {
-    let path = std::env::temp_dir().join("fits_well_compressed.fits");
+    let path = env::temp_dir().join("fits_well_compressed.fits");
 
     let expected = ImageData::I16((0..256).map(|i| (i % 32) as i16).collect());
     let image = Image::new(vec![16, 16], expected.clone())?;
@@ -20,7 +23,7 @@ fn main() -> fits_well::Result<()> {
     // while the typed codec prevents invalid or misspelled choices.
     let options = CompressionOptions::tiled([8, 8]);
     let mut writer = FitsWriter::new(File::create(&path)?);
-    writer.write_compressed_image(&image, Compression::Rice, &options)?;
+    writer.write_compressed_image(&image, Compression::Rice, &options, None)?;
     writer.into_inner().sync_all()?;
     println!("wrote {}", path.display());
 
@@ -34,7 +37,7 @@ fn main() -> fits_well::Result<()> {
     let restored = reader.read_image(images[0])?;
     let restored_shape = restored.metadata().shape.to_vec();
     let lossless = restored.decode() == expected;
-    println!("restored {:?}, lossless = {}", restored_shape, lossless);
+    println!("restored {restored_shape:?}, lossless = {lossless}");
 
     Ok(())
 }

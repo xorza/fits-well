@@ -43,41 +43,32 @@ impl_image_data_from_vec!(F64, f64);
 impl ImageData {
     /// The `BITPIX` element kind backing this buffer.
     pub fn bitpix(&self) -> Bitpix {
-        match self {
-            ImageData::U8(_) => Bitpix::U8,
-            ImageData::I16(_) => Bitpix::I16,
-            ImageData::I32(_) => Bitpix::I32,
-            ImageData::I64(_) => Bitpix::I64,
-            ImageData::F32(_) => Bitpix::F32,
-            ImageData::F64(_) => Bitpix::F64,
-        }
+        self.as_view().bitpix()
     }
 
     /// Number of samples in the buffer.
     pub fn len(&self) -> usize {
-        match self {
-            ImageData::U8(v) => v.len(),
-            ImageData::I16(v) => v.len(),
-            ImageData::I32(v) => v.len(),
-            ImageData::I64(v) => v.len(),
-            ImageData::F32(v) => v.len(),
-            ImageData::F64(v) => v.len(),
-        }
+        self.as_view().len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    pub(crate) fn view(&self, range: Range<usize>) -> ImageView<'_> {
+    /// Every sample, borrowed.
+    pub fn as_view(&self) -> ImageView<'_> {
         match self {
-            ImageData::U8(values) => ImageView::U8(&values[range]),
-            ImageData::I16(values) => ImageView::I16(&values[range]),
-            ImageData::I32(values) => ImageView::I32(&values[range]),
-            ImageData::I64(values) => ImageView::I64(&values[range]),
-            ImageData::F32(values) => ImageView::F32(&values[range]),
-            ImageData::F64(values) => ImageView::F64(&values[range]),
+            ImageData::U8(values) => ImageView::U8(values),
+            ImageData::I16(values) => ImageView::I16(values),
+            ImageData::I32(values) => ImageView::I32(values),
+            ImageData::I64(values) => ImageView::I64(values),
+            ImageData::F32(values) => ImageView::F32(values),
+            ImageData::F64(values) => ImageView::F64(values),
         }
+    }
+
+    pub(crate) fn view(&self, range: Range<usize>) -> ImageView<'_> {
+        self.as_view().slice(range)
     }
 
     /// Decode the raw, big-endian data unit into host-endian typed samples.
@@ -112,13 +103,14 @@ impl ImageData {
     }
 
     pub(crate) fn physical_as<O: PhysicalOut>(&self, scaling: &Scaling) -> Vec<O> {
-        physical_view(self.view(0..self.len()), scaling)
+        physical_view(self.as_view(), scaling)
     }
 
     /// Exact typed unsigned (or signed-byte) reinterpretation when `scaling` is
     /// precisely the FITS unsigned convention (`BSCALE == 1`, no `BLANK`, and
     /// `BZERO` the matching sign-bit offset); `None` otherwise. Exact for all 64-bit
-    /// values (no `f64` rounding). Shared by [`Image::unsigned`]/[`ReadImage::unsigned`].
+    /// values (no `f64` rounding). Shared by [`Image::unsigned`](crate::data::Image::unsigned)/
+    /// [`ReadImage::unsigned`](crate::data::read_image::ReadImage::unsigned).
     pub(crate) fn unsigned(&self, scaling: &Scaling) -> Option<UnsignedData> {
         let kind = scaling.unsigned_kind(self.bitpix())?;
         // The kind is derived from this buffer's own `BITPIX`, so the pairings below

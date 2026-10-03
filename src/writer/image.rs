@@ -12,8 +12,8 @@ use crate::data::image_data::ImageData;
 use crate::data::scaling::Scaling;
 use crate::data::{Image, shape_product};
 use crate::error::{FitsError, Result};
-use crate::header::Header;
-use crate::header::value;
+use crate::header_model::Header;
+use crate::header_model::value;
 use crate::keyword::key;
 use crate::writer::{
     FitsWriter, PLACEHOLDER_CHECKSUM, WriterState, merge_header_template,
@@ -74,18 +74,18 @@ pub(super) fn write_compressed_template<W: Write>(
 
 pub(super) fn stream_template<'a, W: Write + Seek>(
     writer: &'a mut FitsWriter<W>,
-    shape: Vec<usize>,
+    shape: &[usize],
     bitpix: Bitpix,
     scaling: Scaling,
     template: Option<&Header>,
 ) -> Result<ImageStream<'a, W>> {
     writer.ensure_writable()?;
     scaling.validate(bitpix)?;
-    let expected_samples = shape_product(&shape)?;
+    let expected_samples = shape_product(shape)?;
     // A stream writes its header up front and rewrites it at `finish`, so it
     // never reaches `finish_hdu` — it applies the template merge itself.
     let mut header =
-        image_header_parts(&shape, bitpix, scaling, writer.state == WriterState::Empty)?;
+        image_header_parts(shape, bitpix, scaling, writer.state == WriterState::Empty)?;
     merge_header_template(&mut header, template);
     let header_offset = writer.sink.stream_position()?;
     let mut initial = header.clone();
@@ -216,7 +216,7 @@ impl StreamingChecksum {
     }
 }
 
-fn bitpix_name(bitpix: Bitpix) -> &'static str {
+const fn bitpix_name(bitpix: Bitpix) -> &'static str {
     match bitpix {
         Bitpix::U8 => "u8 image data",
         Bitpix::I16 => "i16 image data",

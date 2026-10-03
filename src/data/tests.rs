@@ -1,8 +1,8 @@
 use crate::data::read_image::ReadImage;
 use crate::data::sample_type::UnsignedKind;
 use crate::data::*;
-use crate::header::Header;
-use crate::header::from_card_lines as header;
+use crate::header_model::Header;
+use crate::header_model::internals::from_card_lines as header;
 
 fn image(samples: ImageData, scaling: Scaling) -> Image {
     Image {
@@ -32,11 +32,7 @@ fn shape_product_handles_empty_axes_and_rejects_overflow() {
 
 #[test]
 fn image_constructor_enforces_geometry_for_every_bitpix() {
-    let scaling = Scaling {
-        bscale: 1.0,
-        bzero: 0.0,
-        blank: None,
-    };
+    let scaling = Scaling::IDENTITY;
     let valid = [
         ImageData::U8(vec![1, 2]),
         ImageData::I16(vec![1, 2]),
@@ -83,11 +79,7 @@ fn simple_image_constructor_accepts_typed_vectors_with_identity_scaling() {
 
 #[test]
 fn image_constructor_accepts_empty_geometry_and_rejects_nonempty_samples() {
-    let scaling = Scaling {
-        bscale: 1.0,
-        bzero: 0.0,
-        blank: None,
-    };
+    let scaling = Scaling::IDENTITY;
     for shape in [Vec::new(), vec![0], vec![4, 0, 3]] {
         Image::new_scaled(shape.clone(), ImageData::F64(Vec::new()), scaling).unwrap();
         assert!(matches!(
@@ -112,11 +104,7 @@ fn image_stored_view_preserves_exact_samples_immutably() {
     let image = Image::new_scaled(
         vec![3],
         ImageData::I64(vec![i64::MIN, 0, i64::MAX]),
-        Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        Scaling::IDENTITY,
     )
     .unwrap();
     assert_eq!(image.stored(), ImageView::I64(&[i64::MIN, 0, i64::MAX]));
@@ -310,27 +298,14 @@ fn physical_applies_scaling_and_maps_blank_to_nan() {
     assert_eq!(phys[0], 25.0);
     assert!(phys[1].is_nan());
     assert_eq!(phys[2], -5.0);
-}
-
-#[test]
-fn physical_f32_is_the_single_pass_narrowing_of_physical() {
-    // Same fixture as physical: 10 -> 25, 20 == BLANK -> NaN, -5 -> -5.
-    let img = image(
-        ImageData::I16(vec![10, 20, -5]),
-        Scaling {
-            bscale: 2.0,
-            bzero: 5.0,
-            blank: Some(20),
-        },
-    );
     let f32s = img.physical_f32();
     assert_eq!(f32s[0], 25.0_f32);
     assert!(f32s[1].is_nan());
     assert_eq!(f32s[2], -5.0_f32);
 
-    // It equals the f64 plane narrowed element-wise, even where f32 must round:
-    // BSCALE = 0.1 is not representable, so the scaling accrues error that the
-    // shared f64 evaluation then narrows identically in both methods.
+    // The f32 plane is the f64 plane narrowed element-wise, even where f32 must
+    // round: BSCALE = 0.1 is not representable, so the scaling accrues error that
+    // the shared f64 evaluation then narrows identically in both methods.
     let rounded = image(
         ImageData::I32(vec![0, 7, 123_456_789]),
         Scaling {
@@ -343,46 +318,53 @@ fn physical_f32_is_the_single_pass_narrowing_of_physical() {
     assert_eq!(rounded.physical_f32(), via_f64);
 }
 
+/// Signed storage with the matching `BZERO` offset is the unsigned (or signed-byte)
+/// integer with its sign bit flipped: the typed view recovers it exactly from an
+/// image and from raw big-endian bytes, and the physical plane is its value.
 #[test]
 fn unsigned_view_recovers_exact_typed_integers() {
-    // Signed storage + the matching BZERO offset decodes back to the unsigned (or
-    // signed-byte) values by flipping the stored sign bit.
-    let u16_img = image(
-        ImageData::I16(vec![-32768, 0, 32767]),
-        Scaling {
+    let cases = [
+        (
+            ImageData::U8(vec![0, 128, 255]),
+            I8_OFFSET,
+            UnsignedData::I8(vec![-128, 0, 127]),
+        ),
+        (
+            ImageData::I16(vec![i16::MIN, 0, i16::MAX]),
+            U16_OFFSET,
+            UnsignedData::U16(vec![0, 32_768, u16::MAX]),
+        ),
+        (
+            ImageData::I32(vec![i32::MIN, 0, i32::MAX]),
+            U32_OFFSET,
+            UnsignedData::U32(vec![0, 2_147_483_648, u32::MAX]),
+        ),
+        (
+            ImageData::I64(vec![i64::MIN, 0, i64::MAX]),
+            U64_OFFSET,
+            UnsignedData::U64(vec![0, 9_223_372_036_854_775_808, u64::MAX]),
+        ),
+    ];
+    for (samples, bzero, expected) in cases {
+        let scaling = Scaling {
             bscale: 1.0,
-            bzero: 32768.0,
+            bzero,
             blank: None,
-        },
-    );
-    assert_eq!(
-        u16_img.unsigned(),
-        Some(UnsignedData::U16(vec![0, 32768, 65535]))
-    );
-    let u32_img = image(
-        ImageData::I32(vec![i32::MIN, 0, i32::MAX]),
-        Scaling {
-            bscale: 1.0,
-            bzero: 2_147_483_648.0,
-            blank: None,
-        },
-    );
-    assert_eq!(
-        u32_img.unsigned(),
-        Some(UnsignedData::U32(vec![0, 2_147_483_648, u32::MAX]))
-    );
-    let i8_img = image(
-        ImageData::U8(vec![0, 128, 255]),
-        Scaling {
-            bscale: 1.0,
-            bzero: -128.0,
-            blank: None,
-        },
-    );
-    assert_eq!(
-        i8_img.unsigned(),
-        Some(UnsignedData::I8(vec![-128, 0, 127]))
-    );
+        };
+        let bytes = encoded(&samples);
+        let raw = ReadImage::raw(&[3], samples.bitpix(), scaling, &bytes);
+        assert_eq!(raw.unsigned(), Some(expected.clone()));
+        let image = image(samples, scaling);
+        assert_eq!(image.unsigned(), Some(expected.clone()));
+        // Each value is exact in f64 except u64::MAX, which both sides round to 2⁶⁴.
+        let values: Vec<f64> = match expected {
+            UnsignedData::I8(v) => v.into_iter().map(f64::from).collect(),
+            UnsignedData::U16(v) => v.into_iter().map(f64::from).collect(),
+            UnsignedData::U32(v) => v.into_iter().map(f64::from).collect(),
+            UnsignedData::U64(v) => v.into_iter().map(|v| v as f64).collect(),
+        };
+        assert_eq!(image.physical(), values);
+    }
 }
 
 #[test]
@@ -411,55 +393,33 @@ fn unsigned_u64_view_is_exact_where_physical_rounds() {
     // 2⁵³+1 is the smallest integer f64 cannot represent. The typed view recovers
     // it exactly; physical() (f64) rounds it to 2⁵³.
     let exact = 9_007_199_254_740_993u64; // 2⁵³ + 1
-    let stored = (exact ^ 0x8000_0000_0000_0000) as i64;
+    let stored = (exact ^ 0x8000_0000_0000_0000).cast_signed();
     let img = image(
         ImageData::I64(vec![stored]),
         Scaling {
             bscale: 1.0,
-            bzero: 9_223_372_036_854_775_808.0, // 2⁶³
+            bzero: U64_OFFSET,
             blank: None,
         },
     );
     assert_eq!(img.unsigned(), Some(UnsignedData::U64(vec![exact])));
-    assert_eq!(img.physical()[0] as u64, exact - 1); // rounded to 2⁵³
+    assert_eq!(img.physical()[0], (exact - 1) as f64); // rounded to 2⁵³
 }
 
 #[test]
 fn unsigned_returns_none_for_non_unsigned_scaling() {
     // Plain signed (BZERO=0) and a genuinely scaled image are not unsigned views.
-    let signed = image(
-        ImageData::I16(vec![1, 2, 3]),
-        Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
-    );
+    let signed = image(ImageData::I16(vec![1, 2, 3]), Scaling::IDENTITY);
     assert_eq!(signed.unsigned(), None);
     let scaled = image(
         ImageData::I16(vec![1, 2]),
         Scaling {
             bscale: 2.0,
-            bzero: 32768.0,
+            bzero: U16_OFFSET,
             blank: None,
         },
     );
     assert_eq!(scaled.unsigned(), None); // BSCALE ≠ 1
-}
-
-#[test]
-fn physical_realizes_unsigned_16_bit_via_the_bzero_offset() {
-    // u16 trick: signed-16 storage with BSCALE=1, BZERO=32768.
-    // -32768 -> 0, 0 -> 32768, 32767 -> 65535.
-    let img = image(
-        ImageData::I16(vec![-32768, 0, 32767]),
-        Scaling {
-            bscale: 1.0,
-            bzero: 32768.0,
-            blank: None,
-        },
-    );
-    assert_eq!(img.physical(), vec![0.0, 32768.0, 65535.0]);
 }
 
 #[test]
@@ -494,9 +454,10 @@ fn raw_image_fuses_big_endian_physical_conversion() {
     ];
     for (samples, expected) in cases {
         let bytes = encoded(&samples);
-        let raw = ReadImage::raw(vec![2], samples.bitpix(), scaling, &bytes);
+        let raw = ReadImage::raw(&[2], samples.bitpix(), scaling, &bytes);
         assert_eq!(raw.metadata().bitpix, samples.bitpix());
         let physical = raw.physical();
+        assert_eq!(physical.len(), expected.len());
         for (got, want) in physical.iter().zip(&expected) {
             assert!(
                 got == want || got.is_nan() && want.is_nan(),
@@ -505,6 +466,7 @@ fn raw_image_fuses_big_endian_physical_conversion() {
             );
         }
         let physical_f32 = raw.physical_f32();
+        assert_eq!(physical_f32.len(), expected.len());
         for (got, want) in physical_f32.iter().zip(&expected) {
             assert!(
                 *got == *want as f32 || got.is_nan() && want.is_nan(),
@@ -512,46 +474,6 @@ fn raw_image_fuses_big_endian_physical_conversion() {
                 samples.bitpix()
             );
         }
-    }
-}
-
-#[test]
-fn raw_image_fuses_big_endian_unsigned_conversion() {
-    let cases = [
-        (
-            ImageData::U8(vec![0, 128, 255]),
-            -128.0,
-            UnsignedData::I8(vec![-128, 0, 127]),
-        ),
-        (
-            ImageData::I16(vec![i16::MIN, 0, i16::MAX]),
-            U16_OFFSET,
-            UnsignedData::U16(vec![0, 32_768, u16::MAX]),
-        ),
-        (
-            ImageData::I32(vec![i32::MIN, 0, i32::MAX]),
-            U32_OFFSET,
-            UnsignedData::U32(vec![0, 2_147_483_648, u32::MAX]),
-        ),
-        (
-            ImageData::I64(vec![i64::MIN, 0, i64::MAX]),
-            U64_OFFSET,
-            UnsignedData::U64(vec![0, 9_223_372_036_854_775_808, u64::MAX]),
-        ),
-    ];
-    for (samples, bzero, expected) in cases {
-        let bytes = encoded(&samples);
-        let raw = ReadImage::raw(
-            vec![3],
-            samples.bitpix(),
-            Scaling {
-                bscale: 1.0,
-                bzero,
-                blank: None,
-            },
-            &bytes,
-        );
-        assert_eq!(raw.unsigned(), Some(expected));
     }
 }
 
@@ -579,15 +501,15 @@ fn sample_type_resolves_unsigned_and_signed_byte_conventions() {
 
     // The unsigned convention: BSCALE=1 with BZERO the sign-bit offset 2^(n-1).
     assert_eq!(
-        SampleType::from_scaling(Bitpix::I16, &s(1.0, 32_768.0)),
+        SampleType::from_scaling(Bitpix::I16, &s(1.0, U16_OFFSET)),
         SampleType::U16
     );
     assert_eq!(
-        SampleType::from_scaling(Bitpix::I32, &s(1.0, 2_147_483_648.0)),
+        SampleType::from_scaling(Bitpix::I32, &s(1.0, U32_OFFSET)),
         SampleType::U32
     );
     assert_eq!(
-        SampleType::from_scaling(Bitpix::I64, &s(1.0, 9_223_372_036_854_775_808.0)),
+        SampleType::from_scaling(Bitpix::I64, &s(1.0, U64_OFFSET)),
         SampleType::U64
     );
 
@@ -597,7 +519,7 @@ fn sample_type_resolves_unsigned_and_signed_byte_conventions() {
         SampleType::U8
     );
     assert_eq!(
-        SampleType::from_scaling(Bitpix::U8, &s(1.0, -128.0)),
+        SampleType::from_scaling(Bitpix::U8, &s(1.0, I8_OFFSET)),
         SampleType::I8
     );
 
@@ -613,14 +535,14 @@ fn sample_type_resolves_unsigned_and_signed_byte_conventions() {
 
     // A genuine BSCALE (≠ 1) at the offset BZERO is NOT the unsigned convention.
     assert_eq!(
-        SampleType::from_scaling(Bitpix::I16, &s(2.0, 32_768.0)),
+        SampleType::from_scaling(Bitpix::I16, &s(2.0, U16_OFFSET)),
         SampleType::I16
     );
 
     // BLANK marks nulls within a type; it must not change the classification.
     let with_blank = Scaling {
         bscale: 1.0,
-        bzero: 32_768.0,
+        bzero: U16_OFFSET,
         blank: Some(-1),
     };
     assert_eq!(
@@ -634,11 +556,11 @@ fn sample_type_resolves_unsigned_and_signed_byte_conventions() {
     // (`TZEROn`/`TNULLn`) paths go through — so the two cannot disagree.
     assert_eq!(with_blank.unsigned_kind(Bitpix::I16), None);
     assert_eq!(
-        s(1.0, 32_768.0).unsigned_kind(Bitpix::I16),
+        s(1.0, U16_OFFSET).unsigned_kind(Bitpix::I16),
         Some(UnsignedKind::U16)
     );
     assert_eq!(
-        s(1.0, -128.0).unsigned_kind(Bitpix::U8),
+        s(1.0, I8_OFFSET).unsigned_kind(Bitpix::U8),
         Some(UnsignedKind::I8)
     );
     // No offset to undo: a native unsigned byte, a plain signed integer, a float.
@@ -646,7 +568,7 @@ fn sample_type_resolves_unsigned_and_signed_byte_conventions() {
     assert_eq!(s(1.0, 0.0).unsigned_kind(Bitpix::I16), None);
     assert_eq!(s(1.0, 0.0).unsigned_kind(Bitpix::F32), None);
     // The offset is only the convention at unit BSCALE.
-    assert_eq!(s(2.0, 32_768.0).unsigned_kind(Bitpix::I16), None);
+    assert_eq!(s(2.0, U16_OFFSET).unsigned_kind(Bitpix::I16), None);
 }
 
 #[test]
@@ -666,19 +588,12 @@ fn sample_type_predicates_and_image_accessor() {
         ImageData::I16(vec![0, 1, 2]),
         Scaling {
             bscale: 1.0,
-            bzero: 32_768.0,
+            bzero: U16_OFFSET,
             blank: None,
         },
     );
     assert_eq!(unsigned.sample_type(), SampleType::U16);
-    let signed = image(
-        ImageData::I16(vec![0, 1]),
-        Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
-    );
+    let signed = image(ImageData::I16(vec![0, 1]), Scaling::IDENTITY);
     assert_eq!(signed.sample_type(), SampleType::I16);
 }
 
@@ -695,14 +610,7 @@ fn image_data_reports_its_bitpix() {
 #[test]
 fn scaling_defaults_to_the_identity_map() {
     let s = Scaling::from_header(&header(&["SIMPLE  = T"])).unwrap();
-    assert_eq!(
-        s,
-        Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None
-        }
-    );
+    assert_eq!(s, Scaling::IDENTITY);
     assert!(s.is_identity());
 }
 

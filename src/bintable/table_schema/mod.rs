@@ -1,0 +1,166 @@
+//! A binary table's structure as the header alone determines it.
+
+use crate::bintable::column::Column;
+use crate::bintable::tdim;
+use crate::bintable::tform::Tform;
+use crate::column;
+use crate::column::{ColumnLabels, ColumnScaling};
+use crate::error::FitsError;
+use crate::error::Result;
+use crate::hdu::validate_table_field_count;
+use crate::header_model::Header;
+use crate::keyword::key;
+
+/// Whether a schema reads the keywords that describe a column's values.
+#[derive(Debug, Clone, Copy)]
+enum ValueKeywords {
+    Read,
+    Skip,
+}
+
+/// Binary-table schema parsed entirely from the header, without reading the data
+/// unit. Byte offsets are relative to the start of the data unit.
+#[derive(Debug, Clone)]
+pub struct TableSchema {
+    pub nrows: usize,
+    /// Byte width of one row (`NAXIS1`).
+    pub row_len: usize,
+    /// Where the heap starts (`THEAP`, else the end of the main table) and ends
+    /// (the main table plus `PCOUNT`) — derived and validated, so not public.
+    pub(crate) heap_offset: usize,
+    pub(crate) heap_end: usize,
+    pub columns: Vec<Column>,
+}
+
+impl TableSchema {
+    /// Parse the complete binary-table schema without touching its data unit.
+    pub fn parse(header: &Header) -> Result<TableSchema> {
+        TableSchema::parse_columns(header, ValueKeywords::Read)
+    }
+
+    /// The schema of a tiled-compressed table's `BINTABLE` container. Its `TDIMn`,
+    /// `TSCALn`, `TZEROn` and `TNULLn` describe the uncompressed columns (§10.3.1), not
+    /// the `1QB` cells that hold their compressed bytes, so they are not read.
+    pub(crate) fn parse_container(header: &Header) -> Result<TableSchema> {
+        TableSchema::parse_columns(header, ValueKeywords::Skip)
+    }
+
+    fn parse_columns(header: &Header, values: ValueKeywords) -> Result<TableSchema> {
+        let row_len = header.required_usize("NAXIS1", "NAXIS1")?;
+        let nrows = header.required_usize("NAXIS2", "NAXIS2")?;
+        // §7.3.1: `0 ≤ TFIELDS ≤ 999` — also a guard, since `tfields` sizes the
+        // column `Vec` and drives the `TFORMn` loop (an absurd value would abort).
+        let tfields = header.required_usize("TFIELDS", "TFIELDS")?;
+        validate_table_field_count(tfields)?;
+
+        let mut columns = Vec::with_capacity(tfields);
+        let mut offset = 0;
+        for n in 1..=tfields {
+            let tform_value = header.required_text(key!("TFORM{n}").as_str(), "TFORMn")?;
+            let tform = Tform::parse(tform_value)?;
+            let shape = match values {
+                ValueKeywords::Read => header
+                    .get_text(key!("TDIM{n}").as_str())?
+                    .map(tdim::parse)
+                    .transpose()?,
+                ValueKeywords::Skip => None,
+            };
+            let (scaling, tnull) = match values {
+                ValueKeywords::Read => (
+                    ColumnScaling::read(header, n)?,
+                    header.get_integer(key!("TNULL{n}").as_str())?,
+                ),
+                ValueKeywords::Skip => (ColumnScaling::IDENTITY, None),
+            };
+            let labels = ColumnLabels::read(header, n)?;
+            // A fixed column's cell holds exactly `repeat` elements; a `P`/`Q` cell's
+            // count is per-row and is checked as each row's descriptor is read.
+            if let Some(dims) = &shape
+                && !tform.kind.is_descriptor()
+            {
+                tdim::validate_extent(dims, tform.repeat)?;
+            }
+            columns.push(Column {
+                name: labels.name,
+                unit: labels.unit,
+                tform,
+                tscale: scaling.tscale,
+                tzero: scaling.tzero,
+                tnull,
+                tdim: shape,
+                tdisp: header
+                    .get_text(key!("TDISP{n}").as_str())?
+                    .map(str::to_string),
+                byte_offset: offset,
+            });
+            offset = offset.saturating_add(tform.byte_width());
+        }
+        if offset != row_len {
+            return Err(FitsError::RowWidthMismatch {
+                computed: offset,
+                declared: row_len,
+            });
+        }
+
+        // `nrows · row_len` from untrusted axes: check once (guards a 32-bit-usize
+        // overflow that `data_extent`'s u64 math wouldn't catch) and reuse.
+        let main_table = nrows
+            .checked_mul(row_len)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        let heap_offset = header.optional_usize("THEAP", "THEAP", main_table)?;
+        // §6.6: the heap follows the main table, so THEAP must be ≥ its size.
+        if heap_offset < main_table {
+            return Err(FitsError::KeywordOutOfRange { name: "THEAP" });
+        }
+        // PCOUNT counts the gap-plus-heap bytes after the main table, so the real
+        // heap ends here — anything past it is block fill (§6.6).
+        let pcount = header.optional_usize("PCOUNT", "PCOUNT", 0)?;
+        let heap_end = main_table
+            .checked_add(pcount)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        if heap_offset > heap_end {
+            return Err(FitsError::KeywordOutOfRange { name: "THEAP" });
+        }
+        Ok(TableSchema {
+            nrows,
+            row_len,
+            heap_offset,
+            heap_end,
+            columns,
+        })
+    }
+
+    /// The index of the first column whose `TTYPEn` matches `name`, compared
+    /// case-insensitively per §6.7. Resolvable from the header alone, so a caller
+    /// holding only a [`crate::FitsReader::table_schema`] can locate a column
+    /// without reading the data unit.
+    pub fn column_index(&self, name: &str) -> Option<usize> {
+        column::index_of(&self.columns, name)
+    }
+
+    /// [`TableSchema::column_index`], reporting an absent column as
+    /// [`FitsError::ColumnNotFound`].
+    pub(crate) fn column_index_checked(&self, name: &str) -> Result<usize> {
+        column::checked_index_of(&self.columns, name)
+    }
+
+    /// This schema for a compacted selection of `nrows` rows, whose heap follows the
+    /// rows directly and ends at `data_len`.
+    pub(crate) fn compacted(&self, nrows: usize, data_len: usize) -> TableSchema {
+        let heap_offset = nrows * self.row_len;
+        assert!(
+            heap_offset <= data_len,
+            "a compacted selection holds its rows"
+        );
+        TableSchema {
+            nrows,
+            row_len: self.row_len,
+            heap_offset,
+            heap_end: data_len,
+            columns: self.columns.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

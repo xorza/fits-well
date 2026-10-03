@@ -71,7 +71,7 @@ let image = Image::new(
 )?;
 
 let mut writer = FitsWriter::new(File::create("out.fits")?);
-writer.write_image(&image)?;
+writer.write_image(&image, None)?;
 writer.into_inner().sync_all()?;
 
 let mut reader = FitsReader::open(File::open("out.fits")?)?;
@@ -130,7 +130,7 @@ call — it detects `ZIMAGE` and decompresses transparently. To write one:
 # let image = Image::new(vec![16, 16], vec![0i16; 256])?;
 let options = CompressionOptions::tiled([8, 8]); // 8×8 tiles
 let mut writer = FitsWriter::new(File::create("compressed.fits")?);
-writer.write_compressed_image(&image, Compression::Rice, &options)?;
+writer.write_compressed_image(&image, Compression::Rice, &options, None)?;
 # writer.into_inner().sync_all()?;
 # }
 # Ok::<(), fits_well::FitsError>(())
@@ -153,43 +153,46 @@ let table = TableBuilder::new()
     )?;
 
 let mut writer = FitsWriter::new(File::create("table.fits")?);
-writer.write_table(&table)?; // row count inferred and cross-checked
+writer.write_table(&table, None)?; // row count inferred and cross-checked
 writer.into_inner().sync_all()?;
 
 let mut reader = FitsReader::open(File::open("table.fits")?)?;
 let table = reader.read_table(1)?; // the table is HDU 1 (HDU 0 is the empty primary)
-let metadata = table.metadata();
-println!("{} rows, {} columns", metadata.nrows, metadata.columns.len());
+let schema = table.schema();
+println!("{} rows, {} columns", schema.nrows, schema.columns.len());
 
 // `.raw()` is the stored, typed plane; `.physical()` applies TZEROn/TSCALn and
 // maps TNULLn to NaN, widening to f64. `.unsigned()`, `.complex()`, and `.bits()`
 // cover fixed special kinds; `.vla()` plus `.vla_physical()`, `.vla_unsigned()`,
-// `.vla_complex()`, and `.vla_bits()` cover jagged P/Q heap arrays.
+// `.vla_complex()`, and `.vla_bits()` cover P/Q heap arrays, every row in one
+// buffer as a `Ragged`.
 println!("ID  = {:?}", table.column_by_idx(0)?.raw()?);
 println!("MAG = {:?}", table.column_by_name("MAG")?.physical()?);
 # Ok::<(), fits_well::FitsError>(())
 ```
 
 `TableBuilder` infers row count and scalar type. `WriteColumn::fixed` remains the
-explicit-schema path for vector cells, while `WriteColumn::vla` infers a
-nonempty heap type; use `vla_typed` only for an empty/predeclared VLA. The
-parallel `AsciiTableBuilder`/`AsciiWriteColumn` API lives under
-`fits_well::table`.
+explicit-schema path for vector cells, and `WriteColumn::characters` pads text
+fields to a width. `WriteColumn::vla` takes a `Ragged<ColumnData>` — every row's
+values in one typed buffer plus the row ends — so even an empty column states its
+heap type; `Ragged::from_rows` builds one from a row list. The parallel
+`AsciiTableBuilder`/`AsciiWriteColumn` API lives under `fits_well::table`.
 
-For large tables, discover `hdu.table_schema()` without reading data, then use
+For large tables, read `hdu.table_schema()` without reading data, then use
 `read_table_rows`, `read_table_columns`, or `read_table_cell`. Ranged reads fetch
 only selected rows and referenced P/Q heap cells; `read_table()` remains the
 explicit whole-table materialization path.
 
-Jagged bit arrays use `WriteColumn::vla_bits` with one MSB-first
-`BitVec<u8, Msb0>` per row; call `.wide()?` when `QX` descriptors are required.
+Jagged bit arrays use `WriteColumn::vla_bits` with a `Ragged<BitVec<u8, Msb0>>`,
+which collects from one MSB-first bit vector per row; call `.wide()` when `QX`
+descriptors are required.
 
 ### World Coordinate System
 
 `FitsReader::read_wcs` parses the `CTYPEn`/`CRPIXn`/`CRVALn`/… keywords into a
 transform and resolves any `-TAB` coordinate arrays from their referenced
-`BINTABLE`. `Header::wcs` is the header-only form for descriptions that do not
-need external table data.
+`BINTABLE`. `wcs::Wcs::from_header` is the header-only form for descriptions that
+do not need external table data.
 
 ```rust,no_run
 use std::fs::File;
@@ -209,7 +212,8 @@ Both complete transforms return an error for coordinates outside the projection'
 domain, failed iterative inversion, or a nonlinear algorithm this crate does not
 yet implement.
 
-The typed **time** layer (`Header::time`, `time::Datetime`, `time::TimeScale`)
+The typed **time** layer (`time::FitsTime::from_header`, `time::Datetime`,
+`time::TimeScale`)
 handles strict FITS ISO-8601/JD/MJD, FITS time units, epochs, resolved
 `TREFPOS`/`TRPOSn`, all image/table PHASE keyword forms, and PC/CD-coupled time
 axes through the parsed WCS model. It preserves recognized scale realizations

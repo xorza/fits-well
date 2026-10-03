@@ -13,12 +13,12 @@ use crate::compress::DitherMethod;
 
 const N_RANDOM: usize = 10000;
 const N_RESERVED_VALUES: f64 = 10.0;
-const INT_MAX: f64 = 2147483647.0;
+const INT_MAX: f64 = 2_147_483_647.0;
 
 /// Quantized integer reserved to mark an undefined (null/NaN) pixel.
-pub(super) const NULL_VALUE: i32 = -2147483647;
+pub(super) const NULL_VALUE: i32 = -2_147_483_647;
 /// Quantized integer reserved by `SUBTRACTIVE_DITHER_2` to mark exact zero.
-pub(super) const ZERO_VALUE: i32 = -2147483646;
+pub(super) const ZERO_VALUE: i32 = -2_147_483_646;
 
 /// The shared dither sequence (cfitsio `fits_init_randoms`): a Park–Miller
 /// minstd generator (`a = 16807`, `m = 2³¹−1`) seeded at 1, scaled to `[0, 1)`.
@@ -26,7 +26,7 @@ fn random_values() -> &'static [f32] {
     static VALUES: OnceLock<Vec<f32>> = OnceLock::new();
     VALUES.get_or_init(|| {
         let a = 16807.0f64;
-        let m = 2147483647.0f64;
+        let m = 2_147_483_647.0_f64;
         let mut seed = 1.0f64;
         let mut v = Vec::with_capacity(N_RANDOM);
         for _ in 0..N_RANDOM {
@@ -49,10 +49,15 @@ struct Dither {
     nextrand: usize,
 }
 
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "the random values lie in (0, 1), so an index scaled by 500 is in 0..500"
+)]
 impl Dither {
     fn new(irow: i64) -> Self {
         let rand = random_values();
-        let iseed = (irow - 1).rem_euclid(N_RANDOM as i64) as usize;
+        let period = i64::try_from(N_RANDOM).unwrap();
+        let iseed = usize::try_from((irow - 1).rem_euclid(period)).unwrap();
         let nextrand = (rand[iseed] * 500.0) as usize;
         Dither {
             rand,
@@ -63,7 +68,7 @@ impl Dither {
 
     /// The current dither value, then advance the cursor (cfitsio's wrap logic).
     fn next(&mut self) -> f64 {
-        let r = self.rand[self.nextrand] as f64;
+        let r = f64::from(self.rand[self.nextrand]);
         self.nextrand += 1;
         if self.nextrand == N_RANDOM {
             self.iseed += 1;
@@ -97,7 +102,7 @@ pub(super) fn dequantize_into(
         let r = d.as_mut().map_or(0.0, Dither::next);
         if zblank == Some(v) {
             f64::NAN
-        } else if dither2 && v == ZERO_VALUE as i64 {
+        } else if dither2 && v == i64::from(ZERO_VALUE) {
             0.0
         } else if method.dithered() {
             (v as f64 - r + 0.5) * scale + zero
@@ -116,9 +121,9 @@ fn nint(x: f64) -> i32 {
     }
 }
 
-/// Background-noise estimate of a tile (cfitsio `FnNoise3_float`).
+/// A tile's range and background-noise estimate (cfitsio `FnNoise3_float`).
 #[derive(Debug)]
-struct Noise {
+struct TileStatistics {
     min: f64,
     max: f64,
     noise: f64,
@@ -143,7 +148,7 @@ fn noise3(
     ny_in: usize,
     diffs: &mut Vec<f64>,
     row_medians: &mut Vec<f64>,
-) -> Noise {
+) -> TileStatistics {
     let (mut nx, mut ny) = (nx_in.max(1), ny_in.max(1));
     if nx < 5 {
         nx *= ny;
@@ -190,9 +195,9 @@ fn noise3(
     let noise = if row_medians.is_empty() {
         0.0
     } else {
-        0.6052697 * proper_median(row_medians)
+        0.605_269_7 * proper_median(row_medians)
     };
-    Noise {
+    TileStatistics {
         min: xmin,
         max: xmax,
         noise,
@@ -232,7 +237,7 @@ fn proper_median(v: &mut [f64]) -> f64 {
         upper
     } else {
         let lower = below.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        (lower + upper) / 2.0
+        f64::midpoint(lower, upper)
     }
 }
 
@@ -286,12 +291,12 @@ pub(super) fn quantize_tile(
     // values so NULL_VALUE/ZERO_VALUE never collide with real data; otherwise fudge
     // the zero point to an integer multiple of delta (stable across re-compression).
     let zeropt = if has_null || dither2 {
-        est.min - delta * (NULL_VALUE as f64 + N_RESERVED_VALUES)
+        est.min - delta * (f64::from(NULL_VALUE) + N_RESERVED_VALUES)
     } else if (est.max - est.min) / delta < INT_MAX - N_RESERVED_VALUES {
         let iqfactor = (est.min / delta + 0.5) as i64;
         iqfactor as f64 * delta
     } else {
-        (est.min + est.max) / 2.0
+        f64::midpoint(est.min, est.max)
     };
 
     scratch.ints.clear();
@@ -321,14 +326,13 @@ pub(super) fn quantize_tile(
 mod tests {
 
     use crate::compress::quantize::*;
-    use crate::compress::rice;
 
     #[test]
     fn dither2_quantize_round_trips() {
         // 8×8 field with genuine noise and a scattering of exact zeros.
-        let mut data: Vec<f64> = (0..64)
+        let mut data: Vec<f64> = (0u64..64)
             .map(|i| {
-                let mut z = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                let mut z = i.wrapping_mul(0x9E37_79B9_7F4A_7C15);
                 z ^= z >> 31;
                 10.0 + (z % 1000) as f64 / 100.0
             })
@@ -352,7 +356,7 @@ mod tests {
         for &k in &[0usize, 13, 27, 40, 63] {
             assert_eq!(scratch.ints[k], ZERO_VALUE, "zero pixel {k}");
         }
-        let ints: Vec<i64> = scratch.ints.iter().map(|&v| v as i64).collect();
+        let ints: Vec<i64> = scratch.ints.iter().map(|&v| i64::from(v)).collect();
         let mut back = Vec::new();
         dequantize_into(
             &ints,
@@ -363,12 +367,15 @@ mod tests {
             None,
             &mut back,
         );
+        assert_eq!(back.len(), data.len());
         for (i, (&o, &b)) in data.iter().zip(&back).enumerate() {
             if o == 0.0 {
                 assert_eq!(b, 0.0, "zero pixel {i} must decode to exactly 0.0");
             } else {
+                // Half a quantization step, plus the few roundings of the scale
+                // division and the reconstruction, each within an ulp of the value.
                 assert!(
-                    (o - b).abs() <= 0.5 * q.bscale + 1e-9,
+                    (o - b).abs() <= 0.5 * q.bscale + 4.0 * f64::EPSILON * o.abs(),
                     "pixel {i}: {o} vs {b}"
                 );
             }
@@ -398,14 +405,6 @@ mod tests {
             &mut scratch,
         )
         .unwrap();
-        assert_eq!(q.bscale, 0.6052697 * 9.0);
-
-        // Native i32 Rice input must produce the identical bitstream as the former
-        // widened representation.
-        let widened: Vec<i64> = scratch.ints.iter().map(|&value| value as i64).collect();
-        let mut rice_scratch = rice::RiceScratch::default();
-        let native = rice::rice_encode(&scratch.ints, 4, 32, &mut rice_scratch);
-        let widened = rice::rice_encode(&widened, 4, 32, &mut rice_scratch);
-        assert_eq!(native, widened);
+        assert_eq!(q.bscale, 0.605_269_7 * 9.0);
     }
 }

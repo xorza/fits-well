@@ -1,19 +1,27 @@
 //! Open a FITS file and describe its HDUs and headers — the read-only inspection
-//! path. Pass a path, or it falls back to a bundled sample:
+//! path. From a checkout, `tests/data/fits/UITfuv2582gc.fits` is a sample:
 //!
 //! ```sh
-//! cargo run --example inspect
 //! cargo run --example inspect -- path/to/file.fits
 //! ```
 
+#![expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "an example reports to the terminal"
+)]
+
+use std::env;
 use std::fs::File;
+use std::process;
 
 use fits_well::FitsReader;
 
 fn main() -> fits_well::Result<()> {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "tests/data/fits/UITfuv2582gc.fits".into());
+    let Some(path) = env::args().nth(1) else {
+        eprintln!("usage: inspect <file.fits>");
+        process::exit(2);
+    };
 
     // `open` scans the HDU boundaries from the headers alone — no pixel data read.
     let reader = FitsReader::open(File::open(&path)?)?;

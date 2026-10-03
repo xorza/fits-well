@@ -4,29 +4,32 @@
 //! cargo run --example table
 //! ```
 
+#![expect(clippy::print_stdout, reason = "an example reports to the terminal")]
+
 use std::fs::File;
 
 use fits_well::table::{ColumnData, TableBuilder, WriteColumn};
 use fits_well::{FitsReader, FitsWriter};
+use std::env;
 
 fn main() -> fits_well::Result<()> {
-    let path = std::env::temp_dir().join("fits_well_table.fits");
+    let path = env::temp_dir().join("fits_well_table.fits");
 
     // Each column holds typed data; the last argument is the per-row element count
     // (the character width for a text column, 1 for a plain scalar column).
     let table = TableBuilder::new()
         .column(WriteColumn::scalar("ID", ColumnData::I32(vec![1, 2, 3])))?
-        .column(WriteColumn::fixed(
+        .column(WriteColumn::characters(
             "NAME",
-            ColumnData::Character(vec!["Vega".into(), "Sirius".into(), "Rigel".into()]),
+            ["Vega", "Sirius", "Rigel"],
             8,
-        ))?
+        )?)?
         .column(
             WriteColumn::scalar("MAG", ColumnData::F64(vec![0.03, -1.46, 0.13])).with_unit("mag"),
         )?;
 
     let mut writer = FitsWriter::new(File::create(&path)?);
-    writer.write_table(&table)?;
+    writer.write_table(&table, None)?;
     writer.into_inner().sync_all()?;
     println!("wrote {}", path.display());
 
@@ -34,13 +37,9 @@ fn main() -> fits_well::Result<()> {
     // FITS file begins with.
     let mut reader = FitsReader::open(File::open(&path)?)?;
     let table = reader.read_table(1)?;
-    let metadata = table.metadata();
+    let schema = table.schema();
 
-    println!(
-        "{} rows, {} columns",
-        metadata.nrows,
-        metadata.columns.len()
-    );
+    println!("{} rows, {} columns", schema.nrows, schema.columns.len());
     // Address a column by index or by `TTYPEn` name; the handle decodes on demand.
     println!("ID   = {:?}", table.column_by_idx(0)?.raw()?);
     println!("NAME = {:?}", table.column_by_name("NAME")?.raw()?);

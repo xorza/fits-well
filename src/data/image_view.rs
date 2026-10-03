@@ -5,6 +5,7 @@ use crate::bitpix::Bitpix;
 use crate::data::ImageMetadata;
 use crate::data::image_data::ImageData;
 use crate::data::scaling::Scaling;
+use std::ops::Range;
 
 /// A borrowed, host-endian view of FITS array samples, tagged by `BITPIX` — the
 /// zero-/low-copy counterpart to the owned [`ImageData`]. It is returned by
@@ -23,29 +24,43 @@ pub enum ImageView<'a> {
     F64(&'a [f64]),
 }
 
-/// A scratch-backed image read: owned geometry and scaling paired with a borrowed,
-/// host-endian sample view.
+/// A scratch-backed image read: the shape and scaling paired with a borrowed,
+/// host-endian sample view whose length the shape fixes.
 #[derive(Debug)]
 pub struct BorrowedImage<'a> {
-    pub shape: Vec<usize>,
-    pub scaling: Scaling,
-    pub samples: ImageView<'a>,
+    pub(crate) shape: &'a [usize],
+    pub(crate) scaling: Scaling,
+    pub(crate) samples: ImageView<'a>,
 }
 
-impl BorrowedImage<'_> {
+impl<'a> BorrowedImage<'a> {
+    /// The axis lengths, fastest first.
+    pub const fn shape(&self) -> &'a [usize] {
+        self.shape
+    }
+
+    pub const fn scaling(&self) -> Scaling {
+        self.scaling
+    }
+
+    /// The host-endian samples, as many as the shape's product.
+    pub const fn samples(&self) -> ImageView<'a> {
+        self.samples
+    }
+
     /// The image geometry, stored element type, and physical-value scaling.
-    pub fn metadata(&self) -> ImageMetadata<'_> {
+    pub const fn metadata(&self) -> ImageMetadata<'a> {
         ImageMetadata {
-            shape: &self.shape,
+            shape: self.shape,
             bitpix: self.samples.bitpix(),
             scaling: self.scaling,
         }
     }
 }
 
-impl ImageView<'_> {
+impl<'a> ImageView<'a> {
     /// The `BITPIX` element kind backing this view.
-    pub fn bitpix(&self) -> Bitpix {
+    pub const fn bitpix(&self) -> Bitpix {
         match self {
             ImageView::U8(_) => Bitpix::U8,
             ImageView::I16(_) => Bitpix::I16,
@@ -57,7 +72,7 @@ impl ImageView<'_> {
     }
 
     /// Number of samples in the view.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         match self {
             ImageView::U8(v) => v.len(),
             ImageView::I16(v) => v.len(),
@@ -68,8 +83,23 @@ impl ImageView<'_> {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// The samples at `range`.
+    ///
+    /// # Panics
+    /// When `range` runs past the view.
+    pub(crate) fn slice(self, range: Range<usize>) -> ImageView<'a> {
+        match self {
+            ImageView::U8(values) => ImageView::U8(&values[range]),
+            ImageView::I16(values) => ImageView::I16(&values[range]),
+            ImageView::I32(values) => ImageView::I32(&values[range]),
+            ImageView::I64(values) => ImageView::I64(&values[range]),
+            ImageView::F32(values) => ImageView::F32(&values[range]),
+            ImageView::F64(values) => ImageView::F64(&values[range]),
+        }
     }
 
     /// Copy this borrowed view into the matching owned [`ImageData`] variant.

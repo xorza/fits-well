@@ -2,20 +2,21 @@
 //!
 //! The high-level writers — [`FitsWriter::write_image`], `write_table`,
 //! `write_ascii_table`, and the compressed forms — synthesize the mandatory header
-//! and emit the data unit through one preflighted HDU transaction (which pads to the block grid and
-//! embeds `CHECKSUM`/`DATASUM` when enabled), assembling each unit in the writer's
-//! reused `scratch`. [`FitsWriter::write_raw_hdu`] is the low-level escape hatch for
-//! callers supplying a complete header and already-encoded data unit themselves.
+//! and emit the data unit through one preflighted HDU transaction (which pads to the
+//! block grid and embeds `CHECKSUM`/`DATASUM` when enabled), assembling each unit in
+//! the writer's reused `scratch`. [`FitsWriter::write_raw_hdu`] is the low-level
+//! escape hatch for callers supplying a complete header and already-encoded data
+//! unit themselves.
 
 use std::io::{Seek, Write};
 
+#[cfg(feature = "compression")]
+use crate::bintable::BinTable;
 use crate::bitpix::Bitpix;
 #[cfg(feature = "compression")]
 use crate::compress::{Compression, CompressionOptions};
 use crate::data::Image;
 use crate::data::scaling::Scaling;
-#[cfg(feature = "compression")]
-use crate::table_impl::BinTable;
 use crate::writer::ascii::AsciiTableBuilder;
 use crate::writer::image::ImageStream;
 use crate::writer::table::TableBuilder;
@@ -25,8 +26,8 @@ use crate::block::{CARD_SIZE, SPACE_FILL, ZERO_FILL};
 use crate::checksum;
 use crate::error::{FitsError, Result};
 use crate::hdu::{HduKind, HduPosition, HduRole, data_extent};
-use crate::header::Header;
-use crate::keyword;
+use crate::header_model::Header;
+use crate::reserved_keywords;
 
 pub(crate) mod ascii;
 pub(crate) mod image;
@@ -93,7 +94,7 @@ enum WriterState {
 }
 
 impl<W: Write> FitsWriter<W> {
-    pub fn new(sink: W) -> Self {
+    pub const fn new(sink: W) -> Self {
         FitsWriter {
             sink,
             state: WriterState::Empty,
@@ -105,7 +106,8 @@ impl<W: Write> FitsWriter<W> {
 
     /// Enable `DATASUM`/`CHECKSUM` integrity keywords on every HDU written through
     /// this writer (§J), including [`FitsWriter::write_raw_hdu`].
-    pub fn with_checksums(mut self) -> Self {
+    #[must_use]
+    pub const fn with_checksums(mut self) -> Self {
         self.checksum = true;
         self
     }
@@ -159,8 +161,8 @@ impl<W: Write> FitsWriter<W> {
     /// The template merge lives here rather than in each header builder, so every
     /// write that commits an HDU applies it and none of the four builders has to
     /// remember to. The one write that does not commit through here is
-    /// [`ImageStream`](image::ImageStream), which writes its header up front and
-    /// rewrites it at `finish`; it merges its own.
+    /// [`ImageStream`], which writes its header up front and rewrites it at
+    /// `finish`; it merges its own.
     fn finish_hdu(
         &mut self,
         mut header: Header,
@@ -210,79 +212,55 @@ impl<W: Write> FitsWriter<W> {
 
     /// Write an ASCII table as a `TABLE` extension (a dataless primary is written
     /// first if needed). Columns are packed left-to-right with no gaps; data is
-    /// space-padded per §7.2.3.
-    pub fn write_ascii_table(&mut self, table: &AsciiTableBuilder) -> Result<()> {
-        ascii::write_template(self, table, None)
-    }
-
-    /// Write an ASCII table while preserving the non-structural cards from `header`.
-    /// Mandatory table-layout and checksum cards are regenerated from `columns`.
-    pub fn write_ascii_table_with_header(
+    /// space-padded per §7.2.3. The non-structural cards of `header` are kept; the
+    /// table-layout and checksum cards are generated from `table`.
+    pub fn write_ascii_table(
         &mut self,
         table: &AsciiTableBuilder,
-        header: &Header,
+        header: Option<&Header>,
     ) -> Result<()> {
-        ascii::write_template(self, table, Some(header))
+        ascii::write_template(self, table, header)
     }
 
     /// Write a binary table as a `BINTABLE` extension. A dataless primary HDU is
     /// written automatically first if nothing has been written yet (a table can
     /// never be the primary HDU). Fixed-width and variable-length (`P`/`Q`) columns
     /// are both supported, including jagged `PX`/`QX` bit arrays — VLA columns
-    /// write a heap after the main table.
-    pub fn write_table(&mut self, table: &TableBuilder) -> Result<()> {
-        table::write_template(self, table, None)
-    }
-
-    /// Write a binary table while preserving the non-structural cards from `header`.
-    /// Mandatory table-layout and checksum cards are regenerated from `columns`.
-    pub fn write_table_with_header(&mut self, table: &TableBuilder, header: &Header) -> Result<()> {
-        table::write_template(self, table, Some(header))
+    /// write a heap after the main table. The non-structural cards of `header` are
+    /// kept; the table-layout and checksum cards are generated from `table`.
+    pub fn write_table(&mut self, table: &TableBuilder, header: Option<&Header>) -> Result<()> {
+        table::write_template(self, table, header)
     }
 
     /// Write `image` as the primary HDU (first call) or an `IMAGE` extension
     /// (later calls). The mandatory header is synthesized (`SIMPLE`/`XTENSION`,
     /// `BITPIX`, `NAXISn`, plus `BSCALE`/`BZERO`/`BLANK` when scaling is
-    /// non-trivial), followed by the big-endian data unit.
-    pub fn write_image(&mut self, image: &Image) -> Result<()> {
-        image::write_template(self, image, None)
-    }
-
-    /// Write an image while preserving the non-structural cards from `header`.
-    /// Mandatory image-layout and checksum cards are regenerated from `image`.
-    pub fn write_image_with_header(&mut self, image: &Image, header: &Header) -> Result<()> {
-        image::write_template(self, image, Some(header))
+    /// non-trivial), followed by the big-endian data unit. The non-structural cards
+    /// of `header` are kept; the image-layout and checksum cards are generated from
+    /// `image`.
+    pub fn write_image(&mut self, image: &Image, header: Option<&Header>) -> Result<()> {
+        image::write_template(self, image, header)
     }
 
     /// Write `image` as a tiled-compressed `BINTABLE` extension (§10.1), using the
     /// typed codec and shared [`CompressionOptions`]. Requires the `compression`
     /// feature. Integer images support
     /// `GZIP_1`/`GZIP_2`/`RICE_1`/`PLIO_1`/`HCOMPRESS_1`; float images are quantized
-    /// (`SUBTRACTIVE_DITHER_1`) and compressed with `GZIP_1`/`GZIP_2`/`RICE_1`.
+    /// with the dither method `options` selects (`SUBTRACTIVE_DITHER_1` by default) and
+    /// compressed with `GZIP_1`/`GZIP_2`/`RICE_1`, or stored with `NOCOMPRESS`.
     /// `HCOMPRESS_1` needs a 2-D tile shape, and every `PLIO_1` mask sample must be
-    /// in the lossless `0..=0xFF_FFFF` domain.
+    /// in the lossless `0..=0xFF_FFFF` domain. The non-structural cards of `header`
+    /// are kept; the container, compression, image-layout and checksum cards are
+    /// generated from `image` and `options`.
     #[cfg(feature = "compression")]
     pub fn write_compressed_image(
         &mut self,
         image: &Image,
         compression: Compression,
         options: &CompressionOptions,
+        header: Option<&Header>,
     ) -> Result<()> {
-        image::write_compressed_template(self, image, compression, options, None)
-    }
-
-    /// Write a tiled-compressed image while preserving the non-structural cards
-    /// from `header`. Container, compression, image-layout, and checksum cards are
-    /// regenerated from `image` and `options`.
-    #[cfg(feature = "compression")]
-    pub fn write_compressed_image_with_header(
-        &mut self,
-        image: &Image,
-        compression: Compression,
-        options: &CompressionOptions,
-        header: &Header,
-    ) -> Result<()> {
-        image::write_compressed_template(self, image, compression, options, Some(header))
+        image::write_compressed_template(self, image, compression, options, header)
     }
 
     /// Write a `BINTABLE` as a tiled-compressed table (§10.3). `header` is the
@@ -304,37 +282,18 @@ impl<W: Write> FitsWriter<W> {
 }
 
 impl<W: Write + Seek> FitsWriter<W> {
-    /// Begin a large identity-scaled image write. The returned stream must receive
-    /// exactly the axis-product sample count and be finished successfully.
+    /// Begin a large image write of `shape` samples of `bitpix`, scaled by
+    /// `scaling`. The returned stream must receive exactly the axis-product sample
+    /// count and be finished successfully. The non-structural cards of `header` are
+    /// kept; the structural and checksum cards are generated.
     pub fn stream_image(
         &mut self,
-        shape: impl Into<Vec<usize>>,
-        bitpix: Bitpix,
-    ) -> Result<ImageStream<'_, W>> {
-        image::stream_template(self, shape.into(), bitpix, Scaling::IDENTITY, None)
-    }
-
-    /// Begin a large image write with explicit scaling. Structural and checksum
-    /// cards are generated from the supplied geometry, sample type, and scaling.
-    pub fn stream_image_scaled(
-        &mut self,
-        shape: impl Into<Vec<usize>>,
+        shape: &[usize],
         bitpix: Bitpix,
         scaling: Scaling,
+        header: Option<&Header>,
     ) -> Result<ImageStream<'_, W>> {
-        image::stream_template(self, shape.into(), bitpix, scaling, None)
-    }
-
-    /// Begin a large image write with explicit scaling and an informational header
-    /// template. Structural and checksum cards are regenerated.
-    pub fn stream_image_with_header(
-        &mut self,
-        shape: impl Into<Vec<usize>>,
-        bitpix: Bitpix,
-        scaling: Scaling,
-        header: &Header,
-    ) -> Result<ImageStream<'_, W>> {
-        image::stream_template(self, shape.into(), bitpix, scaling, Some(header))
+        image::stream_template(self, shape, bitpix, scaling, header)
     }
 }
 
@@ -393,8 +352,7 @@ fn empty_primary_header() -> Header {
 }
 
 /// Reconcile one column's implied row count with the table's — the inference rule
-/// [`TableBuilder`](table::TableBuilder) and
-/// [`AsciiTableBuilder`](ascii::AsciiTableBuilder) share: the first column to imply
+/// [`TableBuilder`] and [`AsciiTableBuilder`] share: the first column to imply
 /// a count fixes it, every later column must agree, and a column that implies
 /// nothing at all is acceptable only once the count is already known.
 ///
@@ -423,6 +381,9 @@ fn accept_row_count(
     }
 }
 
+/// [`accept_row_count`] holds every column a builder takes to the table's row count.
+const ROW_COUNT_FIXED: &str = "the table builder fixes every column's row count";
+
 fn validate_scaling(tscale: Option<f64>, tzero: Option<f64>, allowed: bool) -> Result<()> {
     if tscale.is_some_and(|value| !allowed || !value.is_finite()) {
         return Err(FitsError::KeywordOutOfRange { name: "TSCALn" });
@@ -436,75 +397,71 @@ fn validate_scaling(tscale: Option<f64>, tzero: Option<f64>, allowed: bool) -> R
 /// Replace the 16 placeholder bytes of the rendered `CHECKSUM` card's value with
 /// the solved value. The value occupies bytes 12–27 (0-based 11–26) of its card.
 fn patch_checksum(header_bytes: &mut [u8], encoded: &[u8; 16]) {
-    for card in header_bytes.as_chunks_mut::<CARD_SIZE>().0 {
-        if &card[..8] == b"CHECKSUM" {
-            card[11..27].copy_from_slice(encoded);
-            return;
-        }
-    }
+    let card = header_bytes
+        .as_chunks_mut::<CARD_SIZE>()
+        .0
+        .iter_mut()
+        .find(|card| &card[..8] == b"CHECKSUM")
+        .expect("the placeholder CHECKSUM card is rendered before it is patched");
+    card[11..27].copy_from_slice(encoded);
 }
 
 fn merge_header_template(header: &mut Header, template: Option<&Header>) {
     let Some(template) = template else {
         return;
     };
-    header.append_filtered_from(template, |keyword| !is_structural_keyword(keyword));
+    header.append_filtered_from(template, |keyword| {
+        !reserved_keywords::is_generated(keyword)
+    });
 }
 
-fn is_structural_keyword(keyword: &str) -> bool {
-    if matches!(
-        keyword,
-        "SIMPLE"
-            | "XTENSION"
-            | "BITPIX"
-            | "NAXIS"
-            | "PCOUNT"
-            | "GCOUNT"
-            | "EXTEND"
-            | "GROUPS"
-            | "BLOCKED"
-            | "BSCALE"
-            | "BZERO"
-            | "BLANK"
-            | "CHECKSUM"
-            | "DATASUM"
-            | "THEAP"
-            | "TFIELDS"
-            | "ZIMAGE"
-            | "ZTABLE"
-            | "ZTILELEN"
-            | "ZNAXIS"
-            | "ZPCOUNT"
-            | "ZGCOUNT"
-            | "ZSIMPLE"
-            | "ZTENSION"
-            | "ZEXTEND"
-            | "ZBLOCKED"
-            | "ZTHEAP"
-            | "ZHEAPPTR"
-            | "ZHECKSUM"
-            | "ZDATASUM"
-            | "ZCMPTYPE"
-            | "ZBITPIX"
-            | "ZQUANTIZ"
-            | "ZDITHER0"
-            | "ZBLANK"
-            | "ZMASKCMP"
-    ) {
-        return true;
+/// In-memory writers and readers for the tests of every module that writes.
+#[cfg(test)]
+pub(crate) mod internals {
+    use std::io::Cursor;
+
+    use crate::error::{FitsError, Result};
+    use crate::reader::{FitsReader, StreamReader};
+    use crate::writer::FitsWriter;
+    use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
+    use crate::writer::table::{TableBuilder, WriteColumn};
+
+    pub(crate) type MemoryWriter = FitsWriter<Cursor<Vec<u8>>>;
+
+    pub(crate) fn binary_table(nrows: usize, columns: &[WriteColumn]) -> TableBuilder {
+        TableBuilder::explicit(nrows, columns.iter().cloned()).unwrap()
     }
-    [
-        "NAXIS", "TFORM", "TTYPE", "TUNIT", "TDIM", "TSCAL", "TZERO", "TNULL", "TBCOL", "ZFORM",
-        "ZCTYP", "ZNAXIS", "ZTILE", "ZNAME", "ZVAL",
-    ]
-    .iter()
-    .any(|prefix| indexed_keyword(keyword, prefix))
-}
 
-fn indexed_keyword(keyword: &str, prefix: &str) -> bool {
-    // A conforming card is at most 8 bytes; anything longer is not the indexed
-    // structural keyword it superficially resembles.
-    keyword.len() <= 8 && keyword::index(keyword, prefix).is_some()
+    pub(crate) fn ascii_table(nrows: usize, columns: &[AsciiWriteColumn]) -> AsciiTableBuilder {
+        AsciiTableBuilder::explicit(nrows, columns.iter().cloned()).unwrap()
+    }
+
+    /// The file `write` produces in a fresh in-memory writer.
+    pub(crate) fn written(write: impl FnOnce(&mut MemoryWriter) -> Result<()>) -> Vec<u8> {
+        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+        write(&mut writer).unwrap();
+        writer.into_inner().into_inner()
+    }
+
+    /// The error `write` fails with, after asserting that it wrote nothing.
+    pub(crate) fn rejected_before_output(
+        write: impl FnOnce(&mut MemoryWriter) -> Result<()>,
+    ) -> FitsError {
+        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+        let error = write(&mut writer).expect_err("the write must be refused");
+        assert!(
+            writer.into_inner().into_inner().is_empty(),
+            "a refused write must leave no output"
+        );
+        error
+    }
+
+    /// A reader over the file `write` produces.
+    pub(crate) fn round_trip(
+        write: impl FnOnce(&mut MemoryWriter) -> Result<()>,
+    ) -> StreamReader<Cursor<Vec<u8>>> {
+        FitsReader::open(Cursor::new(written(write))).unwrap()
+    }
 }
 
 #[cfg(test)]
