@@ -1,12 +1,13 @@
 [package]
 name = "fits-well"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
+rust-version = "1.89"
 description = "A blazing-fast reader and writer for FITS (Flexible Image Transport System) files, targeting the full FITS 4.0 standard."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/xorza/fits"
+repository = "https://github.com/xorza/fits-well"
 readme = "README.md"
-keywords = ["fits", "astronomy", "image", "fileformat"]
+keywords = ["fits", "astronomy", "wcs", "image", "fileformat"]
 categories = ["science", "parser-implementations"]
 # Keep the published tarball lean: the test fixtures and suites, the verbatim FITS
 # standard reference (incl. a 1.1 MiB PDF), and editor/AI dev notes aren't needed to
