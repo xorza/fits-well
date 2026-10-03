@@ -35,7 +35,7 @@ pub(super) struct TileScratch {
 
 impl TileScratch {
     /// Total pixels in the current tile (`row_len × nrows`).
-    pub(super) fn nelem(&self) -> usize {
+    pub(super) const fn nelem(&self) -> usize {
         self.row_len * self.row_bases.len()
     }
 

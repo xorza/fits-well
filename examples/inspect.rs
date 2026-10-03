@@ -1,5 +1,5 @@
 //! Open a FITS file and describe its HDUs and headers — the read-only inspection
-//! path. From a checkout, `tests/data/fits/UITfuv2582gc.fits` is a sample:
+//! path. From a checkout, `test_resources/UITfuv2582gc.fits` is a sample:
 //!
 //! ```sh
 //! cargo run --example inspect -- path/to/file.fits

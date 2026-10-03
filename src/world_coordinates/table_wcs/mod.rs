@@ -54,7 +54,7 @@ pub(super) struct TranslatedTableWcs {
 
 impl<'a> TableWcs<'a> {
     /// A pixel-list description over the 1-based table `columns`, in axis order.
-    pub(super) fn pixel_list(alt: Option<char>, columns: &'a [usize]) -> TableWcs<'a> {
+    pub(super) const fn pixel_list(alt: Option<char>, columns: &'a [usize]) -> TableWcs<'a> {
         TableWcs {
             resolver: TableWcsResolver::new(alt),
             form: TableWcsForm::PixelList(columns),
@@ -62,7 +62,11 @@ impl<'a> TableWcs<'a> {
     }
 
     /// A vector-cell description of rank `naxis` inside the 1-based table `column`.
-    pub(super) fn array_column(alt: Option<char>, naxis: usize, column: usize) -> TableWcs<'a> {
+    pub(super) const fn array_column(
+        alt: Option<char>,
+        naxis: usize,
+        column: usize,
+    ) -> TableWcs<'a> {
         TableWcs {
             resolver: TableWcsResolver::new(alt),
             form: TableWcsForm::ArrayColumn { naxis, column },

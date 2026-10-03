@@ -1592,8 +1592,8 @@ mod tests {
 
     #[test]
     fn hcompress_64_bit_transform_matches_external_golden() {
-        const RAW: &[u8] = include_bytes!("../../tests/data/fits/hcomp_wide_i32.raw");
-        const COMPRESSED: &[u8] = include_bytes!("../../tests/data/fits/hcomp_wide_i32.huf");
+        const RAW: &[u8] = include_bytes!("../../test_resources/hcomp_wide_i32.raw");
+        const COMPRESSED: &[u8] = include_bytes!("../../test_resources/hcomp_wide_i32.huf");
 
         let values: Vec<i64> = RAW
             .as_chunks::<4>()

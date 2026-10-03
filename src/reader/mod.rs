@@ -910,7 +910,7 @@ pub(crate) mod internals {
 
     /// Where the fixture `name` lies, relative to the crate root tests run in.
     pub(crate) fn fixture_path(name: &str) -> String {
-        format!("tests/data/fits/{name}")
+        format!("test_resources/{name}")
     }
 
     pub(crate) fn fixture_bytes(name: &str) -> Vec<u8> {
