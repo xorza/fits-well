@@ -11,10 +11,6 @@ use crate::error::Result;
 /// line list — a port of cfitsio's `pl_p2li` with `xs = 1`. The returned i16 list
 /// round-trips through [`plio_decode_be_into`]. Values outside `0..=0xFF_FFFF`
 /// are rejected because the format cannot preserve them.
-#[expect(
-    clippy::cast_possible_wrap,
-    reason = "a position is at most the slice length, below isize::MAX, so it fits i64"
-)]
 pub(super) fn plio_encode(values: &[i64]) -> Result<Vec<i16>> {
     if let Some((index, &value)) = values
         .iter()
