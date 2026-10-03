@@ -22,5 +22,6 @@ cargo test --tests --no-default-features --features compression,mmap,internals
 The last two lines build the `cfg(not(feature = "parallel"))` codec paths,
 which `--all-features` never does.
 
-The `decode` and `wcs` benches need `--features internals`:
-`cargo bench --features internals --bench decode`.
+Every bench needs the `bench` feature:
+`cargo bench --features bench --bench decode`. Add `mmap` for the memory-mapped
+arm of the `read` bench.

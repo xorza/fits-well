@@ -2,16 +2,18 @@
 
 [![crates.io](https://img.shields.io/crates/v/fits-well.svg)](https://crates.io/crates/fits-well)
 [![docs.rs](https://img.shields.io/docsrs/fits-well)](https://docs.rs/fits-well)
-[![license](https://img.shields.io/crates/l/fits-well.svg)](https://github.com/xorza/fits#license)
+[![license](https://img.shields.io/crates/l/fits-well.svg)](https://github.com/xorza/fits-well#license)
 
 A fast Rust reader and writer for **FITS**, the standard file format of astronomy,
 covering the whole **FITS 4.0** standard.
 
-- **Fast.** Zero-copy reads where the format allows, lazy HDU access from the
-  headers alone, reused scratch buffers, and tile-parallel (de)compression.
+- **Fast.** Lazy HDU access from the headers alone, zero-copy reads where the
+  format allows, decode into a reused caller-owned buffer, and tile-parallel
+  (de)compression.
 - **Complete.** Images, ASCII and binary tables with variable-length arrays,
   random groups (read), WCS with all 27 projections and `-TAB`, time
-  coordinates, tiled compression of images and tables, and `CHECKSUM`.
+  coordinates, tiled compression of images and tables, and `CHECKSUM`/`DATASUM`
+  (write and verify).
 - **Safe on hostile input.** Sizes, counts and offsets from a file are checked
   before use, so a malformed file is an error rather than a panic.
 
@@ -19,7 +21,7 @@ covering the whole **FITS 4.0** standard.
 
 ```toml
 [dependencies]
-fits-well = "0.2"
+fits-well = "0.3"
 ```
 
 | Feature | Default | Adds |
@@ -28,8 +30,8 @@ fits-well = "0.2"
 | `parallel` | ✅ | Tile-parallel codecs on rayon; implies `compression` |
 | `mmap` | | `FitsReader::open_mmap`: reads straight from mapped pages (`memmap2`) |
 
-With `default-features = false`, the only dependencies are `bitvec` and
-`num-complex`.
+With `default-features = false`, the only dependencies are `bitvec`,
+`num-complex` and `thiserror`. Rust 1.89 or later.
 
 ## Usage
 
@@ -58,8 +60,9 @@ fn main() -> Result<(), fits_well::FitsError> {
 }
 ```
 
-`read_image_section` reads a sub-region, and `stream_image` writes a large
-image chunk by chunk.
+`read_image_view` decodes into a buffer you reuse across reads, so a loop over
+many images allocates once. `read_image_section` reads a sub-region, and
+`stream_image` writes a large image chunk by chunk.
 
 ### Binary tables
 
