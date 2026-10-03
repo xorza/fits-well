@@ -20,10 +20,6 @@ struct CountingAllocator;
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-#[expect(
-    clippy::let_underscore_must_use,
-    reason = "a thread being torn down has no counter left, and its allocations go uncounted"
-)]
 fn count() {
     // A const-initialized `Cell` has no destructor to register, so this access
     // cannot allocate.
