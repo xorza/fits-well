@@ -182,9 +182,9 @@ fn array_physical_maps_blank_to_nan_for_every_integer_bitpix() {
 #[test]
 fn naxis1_group_has_one_array_element_matching_data_extent() {
     // A `NAXIS = 1` random group (only the `NAXIS1 = 0` sentinel, no array axis) has,
-    // per Eq. 2, PCOUNT params + an empty-product array of 1 element per group — the
-    // way `data_extent` sizes the unit. `array_len` must agree (1, not 0), or
-    // `from_data` rejects a unit the reader already sized as readable.
+    // per Eqs. 4 and 6, PCOUNT params + an empty-product array of 1 element per
+    // group — the way `data_extent` sizes the unit. `array_len` must agree (1, not
+    // 0), or `from_data` rejects a unit the reader already sized as readable.
     let mut header = groups_header(-32, &[], 1, 2);
     header.set_internal("PTYPE1", "P");
     // 2 groups × (1 param + 1 array element) = 4 floats.
@@ -291,4 +291,61 @@ fn raw_group_view_preserves_float_bit_patterns() {
             .collect::<Vec<_>>(),
         f64_bits[1..]
     );
+}
+
+/// A parameter past the 999th has no `PTYPEn`/`PSCALn`/`PZEROn` keyword, so it is
+/// unnamed and unscaled. 1001 byte parameters, all 0 but the last three (3, 5, 7):
+/// `PSCAL999 = 2` doubles 3 to 6 under `PTYPE999 = 'A'`, and 5 and 7 read as stored.
+/// The unnamed sum is the 998 zeros plus 5 + 7 = 12.
+#[test]
+fn parameters_past_the_999th_take_the_keyword_defaults() {
+    let mut header = groups_header(8, &[1], 1001, 1);
+    header
+        .set_internal("PTYPE999", "A")
+        .set_internal("PSCAL999", 2.0);
+    let mut data = vec![0u8; 1002];
+    data[998..].copy_from_slice(&[3, 5, 7, 9]);
+    let groups = RandomGroups::from_data(&header, &data).unwrap();
+
+    let metadata = groups.metadata();
+    assert_eq!(metadata.pcount, 1001);
+    assert_eq!(metadata.parameter_names.len(), 999);
+    assert_eq!(metadata.parameter_names[998], "A");
+    let values = groups.parameters_physical(0).unwrap();
+    assert_eq!(values.len(), 1001);
+    assert!(values[..998].iter().all(|&value| value == 0.0));
+    assert_eq!(values[998..], [6.0, 5.0, 7.0]);
+    assert_eq!(groups.parameter_physical(0, "A").unwrap(), Some(6.0));
+    assert_eq!(groups.parameter_physical(0, "").unwrap(), Some(12.0));
+    assert_eq!(groups.array_physical(0).unwrap(), vec![9.0]);
+}
+
+/// The counts are checked against the data before anything is sized from them.
+/// With no groups the unit is empty for any `PCOUNT`, so 2⁶⁰ parameters read as
+/// zero groups with the 999 keyword slots. (2⁶³ − 1)·3 overflows a group's array,
+/// 3·2⁶² + 2⁶² = 2⁶⁴ overflows a group's length, and 4 groups of 2⁶² + 1 elements
+/// overflow the unit.
+#[test]
+fn group_counts_are_checked_before_they_size_anything() {
+    let huge = RandomGroups::from_data(&groups_header(8, &[1], 1 << 60, 0), &[]).unwrap();
+    assert_eq!(huge.metadata().pcount, 1 << 60);
+    assert_eq!(huge.metadata().parameter_names.len(), 999);
+
+    for (header, data) in [
+        (groups_header(8, &[i64::MAX, 3], 0, 1), &[][..]),
+        (groups_header(8, &[1 << 62, 3], 1 << 62, 0), &[]),
+        (groups_header(8, &[1], 1 << 62, 4), &[]),
+    ] {
+        assert!(matches!(
+            RandomGroups::from_data(&header, data),
+            Err(FitsError::DataUnitOverflow)
+        ));
+    }
+    assert!(matches!(
+        RandomGroups::from_data(&groups_header(16, &[2], 1, 2), &[0; 10]),
+        Err(FitsError::DataSizeMismatch {
+            expected: 6,
+            got: 5
+        })
+    ));
 }
