@@ -193,8 +193,8 @@ impl Value {
             // silently mis-size the data unit. Reject integral reals outside i64
             // instead of accepting Rust's saturating float-to-integer cast.
             Value::Real(r) if r.fract() == 0.0 => {
-                const I64_MIN_F64: f64 = -9_223_372_036_854_775_808.0;
-                const I64_MAX_EXCLUSIVE_F64: f64 = 9_223_372_036_854_775_808.0;
+                const I64_MIN_F64: f64 = i64::MIN as f64;
+                const I64_MAX_EXCLUSIVE_F64: f64 = -I64_MIN_F64;
                 if *r >= I64_MIN_F64 && *r < I64_MAX_EXCLUSIVE_F64 {
                     Ok(Some(*r as i64))
                 } else {
@@ -337,13 +337,11 @@ mod tests {
         }
 
         assert_eq!(
-            Value::Real(-9_223_372_036_854_775_808.0)
-                .as_integer()
-                .unwrap(),
+            Value::Real(i64::MIN as f64).as_integer().unwrap(),
             Some(i64::MIN)
         );
         assert!(matches!(
-            Value::Real(9_223_372_036_854_775_808.0).as_integer(),
+            Value::Real(-(i64::MIN as f64)).as_integer(),
             Err(FitsError::IntegerOutOfRange { target: "i64", .. })
         ));
     }
