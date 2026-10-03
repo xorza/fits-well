@@ -11,6 +11,10 @@ use crate::error::Result;
 /// line list — a port of cfitsio's `pl_p2li` with `xs = 1`. The returned i16 list
 /// round-trips through [`plio_decode_be_into`]. Values outside `0..=0xFF_FFFF`
 /// are rejected because the format cannot preserve them.
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "a position is at most the slice length, below isize::MAX, so it fits i64"
+)]
 pub(super) fn plio_encode(values: &[i64]) -> Result<Vec<i16>> {
     if let Some((index, &value)) = values
         .iter()
@@ -93,7 +97,7 @@ pub(super) fn plio_encode(values: &[i64]) -> Result<Vec<i16>> {
                 // as opcode 5 (zero run whose final pixel is set high).
                 if np == 1 && pv > 0 {
                     let last = ll.last_mut().unwrap();
-                    *last = (*last as i64 + 20481) as i16;
+                    *last = (i64::from(*last) + 20481) as i16;
                     done = true;
                 }
             }
@@ -112,10 +116,20 @@ pub(super) fn plio_encode(values: &[i64]) -> Result<Vec<i16>> {
     }
 
     // Total list length (= cfitsio's `op - 1`) split across words 4/5.
-    let total = ll.len();
-    ll[3] = (total % 32768) as i16;
-    ll[4] = (total / 32768) as i16;
+    [ll[3], ll[4]] = length_words(ll.len())?;
     Ok(ll)
+}
+
+/// A list length as the two 15-bit header words that hold it, low first; a list of
+/// 2³⁰ words or more has no such form.
+fn length_words(total: usize) -> Result<[i16; 2]> {
+    let word = |value: usize| i16::try_from(value).ok();
+    match (word(total % 32768), word(total / 32768)) {
+        (Some(low), Some(high)) => Ok([low, high]),
+        _ => Err(FitsError::UnsupportedCompression {
+            name: format!("PLIO_1 line list of {total} words, 2^30 or more"),
+        }),
+    }
 }
 
 pub(super) fn plio_decode_be_into(bytes: &[u8], npix: usize, px: &mut Vec<i64>) -> Result<()> {
@@ -129,7 +143,7 @@ pub(super) fn plio_decode_be_into(bytes: &[u8], npix: usize, px: &mut Vec<i64>) 
 struct BeWords<'a>(&'a [u8]);
 
 impl BeWords<'_> {
-    fn len(self) -> usize {
+    const fn len(self) -> usize {
         self.0.len() / 2
     }
 
@@ -141,6 +155,10 @@ impl BeWords<'_> {
     }
 }
 
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "an output position runs from 1 to the pixel count, so position − 1 indexes `px`"
+)]
 fn decode_words(ll: BeWords<'_>, npix: usize, px: &mut Vec<i64>) -> Result<()> {
     px.clear();
     px.resize(npix, 0);
@@ -151,7 +169,7 @@ fn decode_words(ll: BeWords<'_>, npix: usize, px: &mut Vec<i64>) -> Result<()> {
     // the length is a 30-bit value in ll[3..5] and instructions start at ll[1]+1.
     let v3 = i32::from(ll.get(2).ok_or(FitsError::UnexpectedEof)?);
     let (lllen, llfirst) = if v3 > 0 {
-        (v3 as usize, 4usize)
+        (usize::try_from(v3).unwrap(), 4usize)
     } else {
         let lo = nonnegative_word(ll, 3)?;
         let hi = nonnegative_word(ll, 4)?;
@@ -165,7 +183,7 @@ fn decode_words(ll: BeWords<'_>, npix: usize, px: &mut Vec<i64>) -> Result<()> {
         return Err(invalid_stream("invalid list bounds"));
     }
 
-    let xe = npix as i64; // pixel coordinates are 1-based; xs = 1
+    let xe = i64::try_from(npix).expect("a tile's pixel count fits i64"); // 1-based; xs = 1
     let mut skip_word = false;
     let mut op = 1i64; // next output position (1-based)
     let mut x1 = 1i64; // current pixel coordinate
@@ -178,7 +196,7 @@ fn decode_words(ll: BeWords<'_>, npix: usize, px: &mut Vec<i64>) -> Result<()> {
             continue;
         }
         let word = ll.get(ip - 1).ok_or(FitsError::UnexpectedEof)?;
-        let word = word as u16 as i64;
+        let word = i64::from(word.cast_unsigned());
         let opcode = word >> 12;
         let data = word & 4095;
         match opcode {
@@ -206,7 +224,7 @@ fn decode_words(ll: BeWords<'_>, npix: usize, px: &mut Vec<i64>) -> Result<()> {
                 if ip >= lllen {
                     return Err(FitsError::UnexpectedEof);
                 }
-                let next = ll.get(ip).ok_or(FitsError::UnexpectedEof)? as u16 as i64;
+                let next = i64::from(ll.get(ip).ok_or(FitsError::UnexpectedEof)?.cast_unsigned());
                 pv = (next << 12) + data;
                 skip_word = true;
             }
@@ -245,8 +263,8 @@ fn nonnegative_word(ll: BeWords<'_>, index: usize) -> Result<usize> {
 }
 
 fn invalid_stream(detail: &str) -> FitsError {
-    FitsError::UnsupportedCompression {
-        name: format!("PLIO_1: {detail}"),
+    FitsError::CorruptCompressedData {
+        detail: format!("PLIO_1: {detail}"),
     }
 }
 
@@ -255,6 +273,19 @@ mod tests {
     use crate::compress::plio;
 
     use crate::error::FitsError;
+
+    /// The two header words hold 15 bits each, low first: 2³⁰ − 1 is the longest
+    /// list they can state.
+    #[test]
+    fn list_length_splits_into_two_fifteen_bit_words() {
+        assert_eq!(plio::length_words(0).unwrap(), [0, 0]);
+        assert_eq!(plio::length_words(32_768 + 5).unwrap(), [5, 1]);
+        assert_eq!(plio::length_words((1 << 30) - 1).unwrap(), [32_767, 32_767]);
+        assert!(matches!(
+            plio::length_words(1 << 30),
+            Err(FitsError::UnsupportedCompression { .. })
+        ));
+    }
 
     #[test]
     fn validates_encoding_and_rejects_malformed_streams() {
@@ -293,7 +324,7 @@ mod tests {
         let invalid_opcode = [0, 0, 4, i16::MIN];
         assert!(matches!(
             plio::plio_decode_be_into(&be(&invalid_opcode), 1, &mut out),
-            Err(FitsError::UnsupportedCompression { .. })
+            Err(FitsError::CorruptCompressedData { detail }) if detail == "PLIO_1: invalid opcode"
         ));
     }
 }

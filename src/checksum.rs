@@ -18,9 +18,9 @@ pub(crate) fn accumulate(bytes: &[u8], seed: u32) -> u32 {
     sum
 }
 
-pub(crate) fn combine(left: u32, right: u32) -> u32 {
+pub(crate) const fn combine(left: u32, right: u32) -> u32 {
     let (sum, carry) = left.overflowing_add(right);
-    sum.wrapping_add(u32::from(carry))
+    sum.wrapping_add(carry as u32)
 }
 
 /// Encode a checksum into the 16 ASCII characters of a `CHECKSUM` value
@@ -38,7 +38,7 @@ pub(crate) fn encode(sum: u32, complement: bool) -> [u8; 16] {
     let bytes = sum.to_be_bytes();
     let mut asc = [0u8; 16];
     for (i, &b) in bytes.iter().enumerate() {
-        let byte = b as i32;
+        let byte = i32::from(b);
         let quotient = byte / 4 + OFFSET;
         let remainder = byte % 4;
         // Four characters that sum to `byte`, then nudged off punctuation in
@@ -47,7 +47,7 @@ pub(crate) fn encode(sum: u32, complement: bool) -> [u8; 16] {
         ch[0] += remainder;
         loop {
             let mut changed = false;
-            for &ex in EXCLUDE.iter() {
+            for &ex in &EXCLUDE {
                 let mut j = 0;
                 while j < 4 {
                     if ch[j] == ex || ch[j + 1] == ex {
@@ -63,7 +63,7 @@ pub(crate) fn encode(sum: u32, complement: bool) -> [u8; 16] {
             }
         }
         for j in 0..4 {
-            asc[4 * j + i] = ch[j] as u8;
+            asc[4 * j + i] = u8::try_from(ch[j]).expect("an encoded character is ASCII");
         }
     }
     // Rotate one character right to align with the value's start at column 12.
@@ -73,7 +73,10 @@ pub(crate) fn encode(sum: u32, complement: bool) -> [u8; 16] {
 
 #[cfg(test)]
 mod tests {
+    use crate::block::padded_len;
     use crate::checksum::*;
+    use crate::reader::internals::{fixture_bytes, open_fixture};
+    use crate::reader::{ChecksumReport, ChecksumStatus};
 
     #[test]
     fn accumulate_folds_end_around_carry() {
@@ -101,17 +104,77 @@ mod tests {
         );
     }
 
+    /// Appendix J.2: the value starts at byte 12 of its card, one byte past a word
+    /// boundary. Summing an HDU with sixteen `'0'`s there, then writing the encoded
+    /// complement over them, brings the whole-HDU sum to negative zero.
     #[test]
     fn encoded_checksum_is_alphanumeric_and_sums_to_negative_zero() {
-        // For any HDU sum, the encoded 16 chars (placed word-aligned) plus the
-        // sum must give all-ones. Here we check the chars are alphanumeric and
-        // that decoding the complement is self-consistent.
-        for sum in [0u32, 1, 0x1234_5678, 0xDEAD_BEEF, 0xFFFF_FFFF] {
-            let enc = encode(sum, true);
+        for rest in [
+            [0u8; 8],
+            [0xFF; 8],
+            [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0],
+        ] {
+            let mut hdu = rest.to_vec();
+            // Byte 12 of a word-aligned card is offset 11, three past a boundary.
+            let field = hdu.len() + 3;
+            hdu.resize(hdu.len() + 20, b' ');
+            hdu[field..field + 16].copy_from_slice(b"0000000000000000");
+            let encoded = encode(accumulate(&hdu, 0), true);
             assert!(
-                enc.iter().all(|&b| b.is_ascii_alphanumeric()),
-                "non-alphanumeric output for {sum:#x}: {enc:?}"
+                encoded.iter().all(|&b| b.is_ascii_alphanumeric()),
+                "non-alphanumeric output: {encoded:?}"
             );
+            hdu[field..field + 16].copy_from_slice(&encoded);
+            assert_eq!(accumulate(&hdu, 0), 0xFFFF_FFFF, "{rest:?}");
+        }
+    }
+
+    /// cfitsio wrote both HDUs' `CHECKSUM` and `DATASUM` in these files, so they
+    /// are answers from an independent implementation: each verifies, the data's
+    /// sum is the `DATASUM`, and encoding the HDU's sum with the `CHECKSUM` field
+    /// zeroed reproduces cfitsio's string.
+    #[test]
+    fn encoding_reproduces_cfitsio_checksums() {
+        for name in ["comp_table_cfitsio.fits", "comp_table_vla.fits"] {
+            let bytes = fixture_bytes(name);
+            let mut reader = open_fixture(name);
+            let mut header_start = 0;
+            for index in 0..reader.hdus().len() {
+                assert_eq!(
+                    reader.verify_checksum(index).unwrap(),
+                    ChecksumReport {
+                        datasum: ChecksumStatus::Valid,
+                        checksum: ChecksumStatus::Valid,
+                    },
+                    "{name} HDU {index}"
+                );
+                let hdu = &reader.hdus()[index];
+                let data_start = hdu.data_offset as usize;
+                let data_end = data_start + padded_len(hdu.data_bytes).unwrap() as usize;
+                let data_sum = accumulate(&bytes[data_start..data_end], 0);
+                // cfitsio right-justifies the number in ten characters.
+                let datasum = hdu.header.get_text("DATASUM").unwrap().unwrap();
+                assert_eq!(datasum.trim_start().parse::<u32>(), Ok(data_sum));
+
+                let mut header = bytes[header_start..data_start].to_vec();
+                let card = header
+                    .as_chunks::<80>()
+                    .0
+                    .iter()
+                    .position(|card| card.starts_with(b"CHECKSUM= '"))
+                    .unwrap();
+                let field = card * 80 + 11..card * 80 + 27;
+                let written: [u8; 16] = header[field.clone()].try_into().unwrap();
+                header[field].copy_from_slice(b"0000000000000000");
+                let sum = combine(accumulate(&header, 0), data_sum);
+                assert_eq!(
+                    encode(sum, true),
+                    written,
+                    "{name} HDU {index}: cfitsio wrote {}",
+                    String::from_utf8_lossy(&written)
+                );
+                header_start = data_end;
+            }
         }
     }
 }

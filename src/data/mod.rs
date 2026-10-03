@@ -5,12 +5,14 @@
 //! [`ImageData::decode`] swaps a data unit into an owned, host-endian [`ImageData`]
 //! and [`ImageData::encode_into`] writes them back. When no swap is needed
 //! (`BITPIX = 8`, or a big-endian host) an in-memory reader can skip even that copy
-//! and borrow the data unit in place — see [`ReadImage`] /
+//! and borrow the data unit in place — see [`ReadImage`](read_image::ReadImage) /
 //! [`crate::FitsReader::read_image`]. The per-element swap loops are
 //! memory-bandwidth-bound, so they lean on autovectorization rather than threads
 //! (the thread-parallel layer is the compute-bound tiled codecs in the `compress`
 //! module, not this path).
 
+#[cfg(feature = "bench")]
+pub(crate) mod bench;
 pub(crate) mod image_data;
 pub(crate) mod image_view;
 pub(crate) mod physical_out;
@@ -32,6 +34,7 @@ use crate::error::FitsError;
 use crate::error::Ranked;
 use crate::error::Result;
 use crate::words;
+use std::iter;
 use std::ops::Range;
 
 /// Element count for an N-d `shape`: the product of the axis lengths, or `0` for
@@ -47,14 +50,16 @@ pub(crate) fn shape_product(shape: &[usize]) -> Result<usize> {
     }
 }
 
-/// Validate a zero-based, half-open N-d region against `shape` and return the
-/// selected extent per axis. The region must have the image's rank, and each range
-/// must be ordered and within its axis. Shared by the plain-image section reader and
-/// the tiled-compressed one, which apply the identical rule to the same geometry.
+/// Validate a zero-based, half-open N-d region against `shape` and write the
+/// selected extent per axis to `selected`. The region must have the image's rank, and
+/// each range must be ordered and within its axis. Shared by the plain-image section
+/// reader and the tiled-compressed one, which apply the identical rule to the same
+/// geometry.
 pub(crate) fn validate_image_region(
     ranges: &[Range<usize>],
     shape: &[usize],
-) -> Result<Vec<usize>> {
+    selected: &mut Vec<usize>,
+) -> Result<()> {
     if ranges.len() != shape.len() {
         return Err(FitsError::RankMismatch {
             ranked: Ranked::ImageRegion,
@@ -62,7 +67,8 @@ pub(crate) fn validate_image_region(
             got: ranges.len(),
         });
     }
-    let mut selected = Vec::with_capacity(shape.len());
+    selected.clear();
+    selected.reserve_exact(shape.len());
     for (axis, (range, &len)) in ranges.iter().zip(shape).enumerate() {
         if range.start > range.end || range.end > len {
             return Err(FitsError::ImageRegionOutOfBounds {
@@ -74,7 +80,7 @@ pub(crate) fn validate_image_region(
         }
         selected.push(range.end - range.start);
     }
-    Ok(selected)
+    Ok(())
 }
 
 /// The physical plane of a borrowed sample range: `BZERO + BSCALE × sample`, with
@@ -87,7 +93,10 @@ pub(crate) fn physical_view<O: PhysicalOut>(view: ImageView<'_>, scaling: &Scali
         ImageView::I16(v) => scale_ints(v, scaling),
         ImageView::I32(v) => scale_ints(v, scaling),
         ImageView::I64(v) => scale_ints(v, scaling),
-        ImageView::F32(v) => v.iter().map(|&x| O::scaled(x as f64, scaling)).collect(),
+        ImageView::F32(v) => v
+            .iter()
+            .map(|&x| O::scaled(f64::from(x), scaling))
+            .collect(),
         ImageView::F64(v) => v.iter().map(|&x| O::scaled(x, scaling)).collect(),
     }
 }
@@ -107,16 +116,18 @@ fn physical_from_be<O: PhysicalOut>(bytes: &[u8], bitpix: Bitpix, scaling: &Scal
     match bitpix {
         Bitpix::U8 => bytes
             .iter()
-            .map(|&x| O::scaled_integer(x as i64, scaling))
+            .map(|&x| O::scaled_integer(i64::from(x), scaling))
             .collect(),
         Bitpix::I16 => decode_be(bytes, |b| {
-            O::scaled_integer(i16::from_be_bytes(b) as i64, scaling)
+            O::scaled_integer(i64::from(i16::from_be_bytes(b)), scaling)
         }),
         Bitpix::I32 => decode_be(bytes, |b| {
-            O::scaled_integer(i32::from_be_bytes(b) as i64, scaling)
+            O::scaled_integer(i64::from(i32::from_be_bytes(b)), scaling)
         }),
         Bitpix::I64 => decode_be(bytes, |b| O::scaled_integer(i64::from_be_bytes(b), scaling)),
-        Bitpix::F32 => decode_be(bytes, |b| O::scaled(f32::from_be_bytes(b) as f64, scaling)),
+        Bitpix::F32 => decode_be(bytes, |b| {
+            O::scaled(f64::from(f32::from_be_bytes(b)), scaling)
+        }),
         Bitpix::F64 => decode_be(bytes, |b| O::scaled(f64::from_be_bytes(b), scaling)),
     }
 }
@@ -125,7 +136,7 @@ fn unsigned_from_be(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Option<U
     assert_whole_elements(bytes, bitpix);
     let kind = scaling.unsigned_kind(bitpix)?;
     Some(UnsignedData::from_be_cells(
-        std::iter::once(bytes),
+        iter::once(bytes),
         bytes.len() / bitpix.elem_size(),
         kind,
     ))
@@ -138,26 +149,26 @@ fn unsigned_from_be(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Option<U
 pub(crate) fn swap_into_words(src: &[u8], bitpix: Bitpix, words: &mut Vec<u64>) {
     let count = src.len() / bitpix.elem_size();
     words.resize(src.len().div_ceil(8), 0);
-    // SAFETY: `words` was just sized to hold `src.len()` bytes and filled with zeros,
-    // which is a valid value for every sample type, so each `samples_mut` view covers
-    // initialized storage. `src` is a separate buffer, so the typed slice never
-    // aliases it.
+    // SAFETY: `words` was just sized to hold `src.len()` bytes, and every element of a
+    // `Vec<u64>` is an initialized `u64` — the ones kept from an earlier read as much
+    // as the zeroed new ones — so each `samples_mut` view covers initialized storage.
+    // `src` is a separate buffer, so the typed slice never aliases it.
     unsafe {
         match bitpix {
             Bitpix::I16 => {
-                decode_be_into_slice(src, words::samples_mut(words, count), i16::from_be_bytes)
+                decode_be_into_slice(src, words::samples_mut(words, count), i16::from_be_bytes);
             }
             Bitpix::I32 => {
-                decode_be_into_slice(src, words::samples_mut(words, count), i32::from_be_bytes)
+                decode_be_into_slice(src, words::samples_mut(words, count), i32::from_be_bytes);
             }
             Bitpix::I64 => {
-                decode_be_into_slice(src, words::samples_mut(words, count), i64::from_be_bytes)
+                decode_be_into_slice(src, words::samples_mut(words, count), i64::from_be_bytes);
             }
             Bitpix::F32 => {
-                decode_be_into_slice(src, words::samples_mut(words, count), f32::from_be_bytes)
+                decode_be_into_slice(src, words::samples_mut(words, count), f32::from_be_bytes);
             }
             Bitpix::F64 => {
-                decode_be_into_slice(src, words::samples_mut(words, count), f64::from_be_bytes)
+                decode_be_into_slice(src, words::samples_mut(words, count), f64::from_be_bytes);
             }
             Bitpix::U8 => unreachable!("U8 is handled by the caller, never swapped"),
         }
@@ -189,6 +200,7 @@ pub(crate) fn view_words(words: &[u64], bitpix: Bitpix, nbytes: usize) -> ImageV
 /// The `BZERO`/`TZEROn` offsets that realize the FITS unsigned-integer convention:
 /// a sign-bit flip (`2^(n-1)`), exactly representable as `f64`. Shared by the image
 /// (`BZERO`) and binary-table (`TZEROn`) unsigned paths.
+pub(crate) const I8_OFFSET: f64 = -128.0; // −2⁷
 pub(crate) const U16_OFFSET: f64 = 32_768.0; // 2¹⁵
 pub(crate) const U32_OFFSET: f64 = 2_147_483_648.0; // 2³¹
 pub(crate) const U64_OFFSET_INTEGER: u64 = 1_u64 << 63;
@@ -204,29 +216,29 @@ const U32_SIGN: u32 = 0x8000_0000;
 const U64_SIGN: u64 = U64_OFFSET_INTEGER;
 
 const fn flip_i8(stored: u8) -> i8 {
-    (stored ^ I8_SIGN) as i8
+    (stored ^ I8_SIGN).cast_signed()
 }
 const fn flip_u16(stored: i16) -> u16 {
-    (stored as u16) ^ U16_SIGN
+    stored.cast_unsigned() ^ U16_SIGN
 }
 const fn flip_u32(stored: i32) -> u32 {
-    (stored as u32) ^ U32_SIGN
+    stored.cast_unsigned() ^ U32_SIGN
 }
 const fn flip_u64(stored: i64) -> u64 {
-    (stored as u64) ^ U64_SIGN
+    stored.cast_unsigned() ^ U64_SIGN
 }
 
 const fn store_i8(value: i8) -> u8 {
-    (value as u8) ^ I8_SIGN
+    value.cast_unsigned() ^ I8_SIGN
 }
 const fn store_u16(value: u16) -> i16 {
-    (value ^ U16_SIGN) as i16
+    (value ^ U16_SIGN).cast_signed()
 }
 const fn store_u32(value: u32) -> i32 {
-    (value ^ U32_SIGN) as i32
+    (value ^ U32_SIGN).cast_signed()
 }
 const fn store_u64(value: u64) -> i64 {
-    (value ^ U64_SIGN) as i64
+    (value ^ U64_SIGN).cast_signed()
 }
 
 /// An N-dimensional image: a flat, Fortran-ordered buffer (axis 0 varies
@@ -282,7 +294,7 @@ impl Image {
     /// Borrow the exact host-endian stored sample plane without allowing it to
     /// become inconsistent with the validated geometry.
     pub fn stored(&self) -> ImageView<'_> {
-        self.samples.view(0..self.samples.len())
+        self.samples.as_view()
     }
 
     pub(crate) fn validate_geometry(&self) -> Result<usize> {
@@ -328,7 +340,7 @@ impl Image {
         Image::offset_image(
             shape,
             ImageData::U8(data.iter().copied().map(store_i8).collect()),
-            -128.0,
+            I8_OFFSET,
         )
     }
 

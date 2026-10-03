@@ -27,7 +27,7 @@ use crate::data::{ImageMetadata, physical_from_be, unsigned_from_be};
 /// [`raw_bytes`]: ReadImage::raw_bytes
 #[derive(Debug)]
 pub struct ReadImage<'a> {
-    pub(crate) shape: Vec<usize>,
+    pub(crate) shape: &'a [usize],
     pub(crate) scaling: Scaling,
     data: ImageBytes<'a>,
 }
@@ -40,14 +40,17 @@ enum ImageBytes<'a> {
     Raw { bytes: &'a [u8], bitpix: Bitpix },
     /// Compressed image (`ZIMAGE`): pixels reconstructed into an owned, host-endian
     /// buffer (only the `compression` feature ever builds this).
-    #[cfg_attr(not(feature = "compression"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "compression"),
+        expect(dead_code, reason = "only the compression feature decodes an image")
+    )]
     Decoded(ImageData),
 }
 
 impl<'a> ReadImage<'a> {
     /// A plain image over borrowed big-endian bytes.
-    pub(crate) fn raw(
-        shape: Vec<usize>,
+    pub(crate) const fn raw(
+        shape: &'a [usize],
         bitpix: Bitpix,
         scaling: Scaling,
         bytes: &'a [u8],
@@ -61,9 +64,9 @@ impl<'a> ReadImage<'a> {
 
     /// A compressed image over its reconstructed, host-endian samples.
     #[cfg(feature = "compression")]
-    pub(crate) fn decoded(
+    pub(crate) const fn decoded(
         samples: ImageData,
-        shape: Vec<usize>,
+        shape: &'a [usize],
         scaling: Scaling,
     ) -> ReadImage<'a> {
         ReadImage {
@@ -76,7 +79,7 @@ impl<'a> ReadImage<'a> {
     /// The image geometry, stored element type, and physical-value scaling.
     pub fn metadata(&self) -> ImageMetadata<'_> {
         ImageMetadata {
-            shape: &self.shape,
+            shape: self.shape,
             bitpix: self.bitpix(),
             scaling: self.scaling,
         }
@@ -118,7 +121,7 @@ impl<'a> ReadImage<'a> {
     /// (zero-copy borrow); `None` for a compressed one, whose pixels were
     /// reconstructed and have no on-disk byte form. Use [`ReadImage::decode`] for the
     /// samples regardless of form.
-    pub fn raw_bytes(&self) -> Option<&[u8]> {
+    pub const fn raw_bytes(&self) -> Option<&[u8]> {
         match &self.data {
             ImageBytes::Raw { bytes, .. } => Some(bytes),
             ImageBytes::Decoded(_) => None,

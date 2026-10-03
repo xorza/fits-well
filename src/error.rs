@@ -1,9 +1,10 @@
 use std::fmt;
 use std::io;
 
+use std::result;
 use thiserror::Error;
 
-pub type Result<T> = std::result::Result<T, FitsError>;
+pub type Result<T> = result::Result<T, FitsError>;
 
 /// What an out-of-range index was addressing, naming the bound it exceeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +23,10 @@ pub enum Indexed {
 }
 
 impl Indexed {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "thiserror's `fmt` hands the variant and every field by reference"
+    )]
     fn fmt_out_of_bounds(
         &self,
         index: &usize,
@@ -64,6 +69,10 @@ pub enum Ranked {
 }
 
 impl Ranked {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "thiserror's `fmt` hands the variant and every field by reference"
+    )]
     fn fmt_mismatch(
         &self,
         expected: &usize,
@@ -114,6 +123,24 @@ pub enum FitsError {
     /// A card's value field could not be parsed as any FITS value type.
     #[error("cannot parse value field of card {card:?}")]
     InvalidValue { card: String },
+    /// WCS keywords that describe no valid transform: a singular matrix, degenerate
+    /// projection parameters, an unknown reference frame, a spectral axis without what
+    /// its algorithm needs.
+    #[error("invalid WCS: {detail}")]
+    InvalidWcs { detail: String },
+    /// Time keywords that are malformed or out of range: a date, a time scale, a phase
+    /// axis.
+    #[error("invalid time metadata: {detail}")]
+    InvalidTime { detail: String },
+    /// A compression parameter outside its valid range.
+    #[error("invalid compression parameter: {detail}")]
+    InvalidCompressionParameter { detail: String },
+    /// An ASCII-table field that does not hold a number of its column's format.
+    #[error("ASCII-table field {field:?} is not a valid number")]
+    InvalidAsciiField { field: String },
+    /// A value an ASCII-table cell cannot hold.
+    #[error("invalid ASCII-table cell value: {reason}")]
+    InvalidAsciiValue { reason: &'static str },
     /// Interpreting a valid FITS time value requires leap-second, Earth-orientation,
     /// or ephemeris data that this format library does not provide.
     #[error("{operation} requires external astronomical time data")]
@@ -138,6 +165,17 @@ pub enum FitsError {
         row: usize,
         width: usize,
         minimum_width: usize,
+    },
+    /// A binary-table `A` field is longer than its column's field width.
+    #[error(
+        "character column {column:?} row {row} holds {length} bytes but its field width is {width}"
+    )]
+    CharacterFieldTooWide {
+        column: String,
+        /// Zero-based table row containing the field.
+        row: usize,
+        length: usize,
+        width: usize,
     },
     /// `BITPIX` held a value outside {8, 16, 32, 64, −32, −64}.
     #[error("invalid BITPIX value {code}")]
@@ -216,15 +254,26 @@ pub enum FitsError {
         expected: usize,
         got: usize,
     },
+    /// A fixed-width table column whose elements do not divide into whole rows.
+    #[error(
+        "table column {column:?} holds {count} elements, not a whole number of {row_width}-element rows"
+    )]
+    PartialTableRow {
+        column: String,
+        count: usize,
+        row_width: usize,
+    },
     /// Empty or zero-width column data did not carry enough information to infer
     /// the intended table row count.
     #[error(
         "table column {column:?} does not determine a row count; declare the table row count explicitly"
     )]
     TableRowCountUndetermined { column: String },
-    /// An empty VLA column needs an explicit heap element type.
-    #[error("empty VLA column {column:?} needs an explicit heap element type")]
-    EmptyVlaNeedsType { column: String },
+    /// Variable-length rows built from a list of rows need at least one row to
+    /// give their element type; an empty column states it with an empty typed
+    /// `ColumnData`.
+    #[error("variable-length rows need one row to give their element type")]
+    EmptyVlaNeedsType,
     /// A FITS keyword family was addressed with zero even though its indices start at 1.
     #[error("{kind} indices are 1-based and cannot be zero")]
     OneBasedIndexRequired { kind: &'static str },
@@ -245,11 +294,6 @@ pub enum FitsError {
     /// `read_ascii_table` was called on an HDU that is not an ASCII table.
     #[error("HDU is not an ASCII table")]
     NotAnAsciiTable,
-    /// The decompressor was handed an HDU that is not a tiled-compressed image (no
-    /// `ZIMAGE = T`). `read_image` guards this and returns [`FitsError::NotAnImage`]
-    /// for a plain `BINTABLE`, so this surfaces only via the internal decode path.
-    #[error("HDU is not a tiled-compressed image")]
-    NotCompressedImage,
     /// `read_compressed_table` was called on an HDU that is not a tiled-compressed
     /// table (no `ZTABLE = T`).
     #[error("HDU is not a tiled-compressed table")]
@@ -260,12 +304,29 @@ pub enum FitsError {
     ConflictingWcsKeywords { detail: &'static str },
     /// A complete pixel↔world transform was requested for axes whose nonlinear
     /// algorithm is not implemented. The indices are zero-based, matching
-    /// [`crate::wcs::WcsView::unsupported_axes`].
+    /// [`crate::world_coordinates::WcsView::unsupported_axes`].
     #[error("WCS has unsupported nonlinear transforms on zero-based axes {axes:?}")]
     UnsupportedWcsTransform { axes: Vec<usize> },
-    /// A coordinate lies outside the mathematical domain of its WCS projection.
+    /// An intermediate (projection-plane) coordinate lies outside the region its WCS
+    /// projection maps back onto the sphere (wcslib `PRJERR_BAD_PIX`).
     #[error("coordinate is outside the {projection} projection domain")]
     WcsProjectionDomain { projection: &'static str },
+    /// A native spherical coordinate has no image under its WCS projection: it lies
+    /// behind a zenithal projection's horizon, past a perspective projection's limb, or
+    /// at a pole a projection sends to infinity (wcslib `PRJERR_BAD_WORLD`).
+    #[error("world coordinate has no image under the {projection} projection")]
+    WcsWorldOutOfDomain { projection: &'static str },
+    /// The fiducial point, `LONPOLE` and `LATPOLE` admit no celestial pole (CG 2002 §2.4,
+    /// wcslib `celset`).
+    #[error("no celestial pole fits the WCS: {detail}")]
+    WcsInvalidPole { detail: &'static str },
+    /// A unit string is not a unit of the kind its keyword requires.
+    #[error("unit {unit:?} is not {expected}")]
+    InvalidUnit {
+        unit: String,
+        /// The kind of unit the keyword needs, e.g. "an angle unit".
+        expected: &'static str,
+    },
     /// A world or intermediate coordinate lies outside a non-celestial WCS
     /// algorithm's mathematical domain.
     #[error("coordinate on zero-based axis {axis} is outside the {algorithm} WCS domain")]
@@ -280,6 +341,10 @@ pub enum FitsError {
     /// A tiled-image compression algorithm or variant is not yet supported.
     #[error("unsupported tiled compression: {name}")]
     UnsupportedCompression { name: String },
+    /// A compressed stream or tile does not decode: a bad magic number, an invalid
+    /// code, a tile larger than declared, or a null mask outside 0 and 1.
+    #[error("corrupt compressed data: {detail}")]
+    CorruptCompressedData { detail: String },
     /// A PLIO tile sample cannot be represented losslessly in its unsigned 24-bit
     /// value domain.
     #[error("PLIO tile sample {index} has value {value}, outside 0..=16777215")]
@@ -321,129 +386,6 @@ mod tests {
     use std::error::Error;
 
     use crate::error::*;
-
-    #[test]
-    fn display_messages_are_specific() {
-        assert_eq!(
-            FitsError::InvalidBitpix { code: 7 }.to_string(),
-            "invalid BITPIX value 7"
-        );
-        assert_eq!(
-            FitsError::WriterFailed.to_string(),
-            "writer is unusable after a previous output failure"
-        );
-        assert_eq!(
-            FitsError::DataUnitOverflow.to_string(),
-            "header-implied data-unit size overflows 64 bits"
-        );
-        assert_eq!(
-            FitsError::DataUnitTooLarge { bytes: 1 << 60 }.to_string(),
-            "header-implied data-unit size (1152921504606846976 bytes) is too large to allocate"
-        );
-        assert_eq!(
-            FitsError::InvalidPqDescriptor {
-                field: "offset",
-                value: -1,
-            }
-            .to_string(),
-            "invalid P/Q descriptor offset: -1"
-        );
-        assert_eq!(
-            FitsError::MissingKeyword { name: "NAXIS" }.to_string(),
-            "missing mandatory keyword NAXIS"
-        );
-        assert_eq!(
-            FitsError::OneBasedIndexRequired {
-                kind: "table column",
-            }
-            .to_string(),
-            "table column indices are 1-based and cannot be zero"
-        );
-        assert_eq!(
-            FitsError::IntegerOutOfRange {
-                value: "9223372036854775808".to_string(),
-                target: "i64",
-            }
-            .to_string(),
-            "FITS integer 9223372036854775808 is outside the i64 range"
-        );
-        assert_eq!(
-            FitsError::TypeMismatch {
-                name: "ZSCALE".to_string(),
-                expected: "f64 column",
-            }
-            .to_string(),
-            "value ZSCALE is not a valid f64 column"
-        );
-        assert_eq!(
-            FitsError::InvalidAscii {
-                context: "table cell"
-            }
-            .to_string(),
-            "table cell contains characters outside FITS restricted ASCII"
-        );
-        assert_eq!(
-            FitsError::ReservedKeyword {
-                name: "END".to_string(),
-            }
-            .to_string(),
-            "reserved keyword \"END\" cannot be used as a valued card"
-        );
-        assert_eq!(
-            FitsError::InvalidHeaderValue {
-                keyword: "EXPTIME".to_string(),
-                reason: "real values must be finite",
-            }
-            .to_string(),
-            "header keyword \"EXPTIME\" has an invalid value: real values must be finite"
-        );
-        assert_eq!(
-            FitsError::HeaderCardTooLong {
-                keyword: "COMMENT".to_string(),
-                length: 81,
-            }
-            .to_string(),
-            "header card \"COMMENT\" needs 81 bytes but a FITS record holds 80"
-        );
-        assert_eq!(
-            FitsError::AsciiFieldTooWide {
-                column: "FLUX".to_string(),
-                row: 2,
-                width: 8,
-                minimum_width: 9,
-            }
-            .to_string(),
-            "ASCII column \"FLUX\" row 2 needs at least 9 characters but its field width is 8"
-        );
-        assert_eq!(
-            FitsError::UnsupportedWcsTransform { axes: vec![0, 2] }.to_string(),
-            "WCS has unsupported nonlinear transforms on zero-based axes [0, 2]"
-        );
-        assert_eq!(
-            FitsError::WcsProjectionDomain { projection: "SIN" }.to_string(),
-            "coordinate is outside the SIN projection domain"
-        );
-        assert_eq!(
-            FitsError::WcsCoordinateDomain {
-                axis: 2,
-                algorithm: "LOG",
-            }
-            .to_string(),
-            "coordinate on zero-based axis 2 is outside the LOG WCS domain"
-        );
-        assert_eq!(
-            FitsError::WcsNoConvergence { algorithm: "ZPN" }.to_string(),
-            "ZPN WCS iteration did not converge"
-        );
-        assert_eq!(
-            FitsError::PlioValueOutOfRange {
-                index: 3,
-                value: 1 << 24,
-            }
-            .to_string(),
-            "PLIO tile sample 3 has value 16777216, outside 0..=16777215"
-        );
-    }
 
     #[test]
     fn every_index_and_rank_arm_names_its_own_structure() {

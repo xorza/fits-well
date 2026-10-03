@@ -5,10 +5,9 @@
 //!
 //! The format's structure maps onto a stack of layers, so the hot decode path
 //! stays lean and the semantic layers compute only on demand. WCS (§8) and time
-//! (§9) are dependency-free, always compiled, and surfaced directly as
-//! [`header::Header`] getters ([`header::Header::wcs`],
-//! [`header::Header::time`]); tiled compression carries a dependency and stays
-//! behind the `compression` feature.
+//! (§9) are dependency-free, always compiled, and parsed from a header on request
+//! ([`wcs::Wcs::from_header`], [`time::FitsTime::from_header`]); tiled compression
+//! carries a dependency and stays behind the `compression` feature.
 //!
 //! ```text
 //! bytes ─► block layer ─► HDU layer ─► header model ─► typed data
@@ -19,12 +18,10 @@
 //!
 //! - [`io::BLOCK_SIZE`] — the 2880-byte block grid, padding rules, and rounding math.
 //! - [`image::Bitpix`] — the array element type selector (`BITPIX`).
-//! - [`header::Header`], [`header::value::Value`] — an *ordered* header model
+//! - [`header::Header`], [`header::Value`] — an *ordered* header model
 //!   (an internal `Card` list)
 //!   whose logical records round-trip with a side index for O(1) keyword lookup;
-//!   physical card layout is normalized on write rather than retained. It also
-//!   parses the WCS and time layers on request
-//!   ([`header::Header::wcs`]/[`header::Header::time`]).
+//!   physical card layout is normalized on write rather than retained.
 //! - [`io::HduKind`] — HDU classification and the data-unit sizing formula that makes
 //!   boundaries computable from headers alone (no data read required).
 //! - [`FitsReader`] — lazy, seeking access to the HDU sequence of a file.
@@ -48,6 +45,7 @@ pub struct ReadmeDoctests;
 
 mod allocation;
 mod ascii;
+mod bintable;
 mod bitpix;
 mod block;
 mod checksum;
@@ -59,16 +57,15 @@ mod endian;
 mod error;
 mod groups;
 mod hdu;
-pub mod header;
+mod header_model;
 mod keyword;
+mod ragged;
 mod reader;
-#[path = "table/mod.rs"]
-mod table_impl;
-#[path = "time/mod.rs"]
-mod time_impl;
+mod reserved_keywords;
+mod time_coordinates;
 mod unit;
-pub mod wcs;
 mod words;
+mod world_coordinates;
 mod writer;
 
 pub use error::{FitsError, Indexed, Ranked, Result};
@@ -90,14 +87,69 @@ pub mod image {
     pub use crate::writer::image::ImageStream;
 }
 
+/// The ordered header model: keyword records and their typed values.
+pub mod header {
+    pub use crate::header_model::value::{FitsInteger, Value};
+    pub use crate::header_model::{Header, HeaderEntry, HeaderRecord};
+}
+
+pub mod wcs {
+    //! Typed World Coordinate System (§8).
+    //!
+    //! Parses the per-axis WCS keywords from a [`Header`](crate::header::Header) and
+    //! evaluates the standard pixel↔world pipeline (Greisen & Calabretta, FITS WCS
+    //! papers I & II):
+    //!
+    //! ```text
+    //! pixel ─ CRPIX ─►  ·(PC|CD, ×CDELT)  ─► intermediate coordinate
+    //!        ─► CTYPE algorithm ─► world coordinate
+    //! ```
+    //!
+    //! The linear layer is `PC`+`CDELT`, `CD`, or legacy `CDELT`+`CROTA`, with general
+    //! matrix inversion for the reverse direction, and full `PVi_m` parameters
+    //! (φ₀/θ₀/LONPOLE/LATPOLE overrides plus per-projection params). Projections, via
+    //! the general fiducial-point pole computation: zenithal `TAN`/`SIN`/`ARC`/`STG`/
+    //! `ZEA`/`ZPN`/`AIR`, zenithal-perspective `AZP`/`SZP`, cylindrical `CAR`/`CEA`/
+    //! `MER`/`SFL`/`CYP`, all-sky `AIT`/`MOL`/`PAR`, conic `COP`/`COE`/`COD`/`COO`,
+    //! pseudoconic `BON`, polyconic `PCO`, quad-cube `TSC`/`CSC`/`QSC`, and `HEALPix`
+    //! `HPX`. Every Table-26 spectral algorithm (`F2*`/`W2*`/`V2*`/`A2*`, detector
+    //! `GRI`/`GRA`, and generic `LOG`) is evaluated in both directions. `-TAB`
+    //! coordinate arrays are resolved from their BINTABLE through
+    //! [`FitsReader::read_wcs`](crate::FitsReader::read_wcs). All are validated against
+    //! `astropy.wcs`, wcslib, or exact interpolation fixtures. Convention-only `XPH`
+    //! transforms remain readable in [`WcsView::unsupported_axes`]; complete transforms
+    //! then return
+    //! [`FitsError::UnsupportedWcsTransform`](crate::FitsError::UnsupportedWcsTransform).
+    //!
+    //! Binary-table WCS (Table 22) is supported for both the pixel-list
+    //! ([`Wcs::from_pixel_list`]) and vector-cell ([`Wcs::from_array_column`]) forms.
+    //!
+    //! Pixel↔world yields celestial coordinates in the frame the file declares;
+    //! [`WcsView::celestial_frame`] and [`WcsAxis::spectral_frame`] expose that typed
+    //! `RADESYS`/`EQUINOX` and spectral frame/rest metadata. Converting *between*
+    //! reference frames is astrometry beyond the FITS standard and is intentionally
+    //! out of scope. Transform methods return explicit errors for invalid projection
+    //! domains or failed iterations.
+
+    pub use crate::world_coordinates::axis::spectral_rest::SpectralRest;
+    pub use crate::world_coordinates::celestial_frame::{CelestialFrame, CelestialReferenceFrame};
+    pub use crate::world_coordinates::celestial_pole::CelestialPole;
+    pub use crate::world_coordinates::projection::Projection;
+    pub use crate::world_coordinates::spectral_frame::{SpectralFrame, SpectralReferenceFrame};
+    pub use crate::world_coordinates::wcs_axis::WcsAxis;
+    pub use crate::world_coordinates::{CelestialProjection, Wcs, WcsView};
+}
+
 /// Typed time coordinates (§9): calendar datetimes, time scales, and a
 /// header's time frame.
 pub mod time {
-    pub use crate::time_impl::datetime::Datetime;
-    pub use crate::time_impl::phase_axis::PhaseAxis;
-    pub use crate::time_impl::time_reference_position::TimeReferencePosition;
-    pub use crate::time_impl::time_scale::{TimeScale, TimeScaleKind};
-    pub use crate::time_impl::{FitsTime, TimeBounds, TimeCoordinate};
+    pub use crate::time_coordinates::datetime::Datetime;
+    pub use crate::time_coordinates::fits_time::FitsTime;
+    pub use crate::time_coordinates::phase_axis::PhaseAxis;
+    pub use crate::time_coordinates::time_bounds::TimeBounds;
+    pub use crate::time_coordinates::time_coordinate::TimeCoordinate;
+    pub use crate::time_coordinates::time_reference_position::TimeReferencePosition;
+    pub use crate::time_coordinates::time_scale::{TimeScale, TimeScaleKind};
 }
 
 /// Binary and ASCII table values, schema and selection metadata, and write
@@ -108,21 +160,23 @@ pub mod table {
     pub use bitvec::vec::BitVec;
     pub use num_complex::Complex;
 
+    pub use crate::ascii::ascii_text::AsciiText;
     pub use crate::ascii::{
         AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiTable, AsciiTableMetadata,
     };
+    pub use crate::bintable::BinTable;
+    pub use crate::bintable::bit_column::BitColumn;
+    pub use crate::bintable::character_field::CharacterField;
+    pub use crate::bintable::column::Column;
+    pub use crate::bintable::column_data::ColumnData;
+    pub use crate::bintable::column_reader::ColumnReader;
+    pub use crate::bintable::table_schema::TableSchema;
+    pub use crate::bintable::tform::Tform;
+    pub use crate::bintable::tform_kind::TformKind;
+    pub use crate::ragged::Ragged;
     pub use crate::reader::{ColumnSelector, SelectedColumn, TableColumnData, TableSelection};
-    pub use crate::table_impl::bit_column::BitColumn;
-    pub use crate::table_impl::character_field::CharacterField;
-    pub use crate::table_impl::column::Column;
-    pub use crate::table_impl::column_data::ColumnData;
-    pub use crate::table_impl::column_reader::ColumnReader;
-    pub use crate::table_impl::table_schema::TableSchema;
-    pub use crate::table_impl::tform::Tform;
-    pub use crate::table_impl::tform_kind::TformKind;
-    pub use crate::table_impl::{BinTable, BinTableMetadata};
     pub use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
-    pub use crate::writer::table::{ColumnType, TableBuilder, WriteColumn};
+    pub use crate::writer::table::{TableBuilder, WriteColumn};
 }
 
 /// Lazy FITS source access and HDU-bound operations. Concrete source wrappers
@@ -134,71 +188,33 @@ pub mod io {
     pub use crate::hdu::HduKind;
     #[cfg(feature = "mmap")]
     pub use crate::reader::MmapReader;
+    pub use crate::reader::hdu::Hdu;
     #[cfg(feature = "mmap")]
     pub use crate::reader::source::MmapSource;
     pub use crate::reader::source::{SliceSource, StreamSource};
     pub use crate::reader::{
-        ChecksumReport, ChecksumStatus, DataUnit, DataUnitView, Hdu, SliceReader, StreamReader,
+        ChecksumReport, ChecksumStatus, DataUnit, DataUnitView, SliceReader, StreamReader,
     };
 }
 
-/// Hot internal entry points re-exposed **for benchmarking only** (the `internals`
-/// feature). These wrap crate-private functions so the benches under `benches/`
-/// can measure them in isolation; they are **not** a stable API — do not depend on
-/// them.
+/// Entry points for the allocation-counting integration test (the `internals`
+/// feature). They wrap crate-private fixtures; they are **not** a stable API.
 #[cfg(feature = "internals")]
 pub mod internals {
-    use crate::bitpix::Bitpix;
-    use crate::data::image_data::ImageData;
-    use crate::wcs::bench;
+    pub use crate::world_coordinates::tabular::internals::{
+        tabular_forward_at_pixel, tabular_inverse_at_fraction, tabular_inverse_at_world,
+    };
+}
 
-    /// Decode a big-endian data unit into host-endian samples — the per-element
-    /// byte-swap (`ImageData::decode`).
-    pub fn decode_image(bytes: &[u8], bitpix: Bitpix) -> ImageData {
-        ImageData::decode(bytes, bitpix)
-    }
-
-    /// Encode samples back to a big-endian buffer — the inverse swap
-    /// (`ImageData::encode_into` into a fresh buffer).
-    pub fn encode_image(data: &ImageData) -> Vec<u8> {
-        let mut out = Vec::new();
-        data.encode_into(&mut out);
-        out
-    }
-
-    /// Build and cache the WCS benchmark fixtures outside timed iterations.
-    pub fn prepare_wcs_benchmarks() {
-        bench::prepare();
-    }
-
-    /// Transform one fixed batch forward and backward through a four-axis linear WCS.
-    pub fn linear_wcs_round_trip_batch() -> f64 {
-        bench::linear_round_trip_batch()
-    }
-
-    /// Transform one fixed batch through a Table-26 spectral axis.
-    pub fn spectral_wcs_batch() -> f64 {
-        bench::spectral_batch()
-    }
-
-    /// Transform one fixed batch through a large monotonic `-TAB` index vector.
-    pub fn tabular_wcs_batch() -> f64 {
-        bench::tabular_index_batch()
-    }
-
-    /// Transform one pixel through the large monotonic `-TAB` fixture.
-    pub fn tabular_forward_at_pixel(pixel: f64) -> f64 {
-        bench::tabular_forward_at_pixel(pixel)
-    }
-
-    /// Invert one world coordinate through the large monotonic `-TAB` fixture.
-    pub fn tabular_inverse_at_world(world: f64) -> f64 {
-        bench::tabular_inverse_at_world(world)
-    }
-
-    /// Invert one two-dimensional affine `-TAB` coordinate at a chosen dyadic
-    /// fraction, used to guard the inverse search's allocation count by depth.
-    pub fn tabular_inverse_at_fraction(fraction: f64) -> f64 {
-        bench::tabular_inverse_at_fraction(fraction)
-    }
+/// The criterion groups the benches under `benches/` run (the `bench` feature).
+/// They are **not** a stable API.
+#[cfg(feature = "bench")]
+pub mod bench {
+    #[cfg(feature = "compression")]
+    pub use crate::compress::bench::{compress, compress_table, decompress, decompress_table};
+    pub use crate::data::bench::{decode, encode, physical};
+    #[cfg(feature = "compression")]
+    pub use crate::reader::bench::read_compressed_image_section;
+    pub use crate::reader::bench::{read_image, read_image_view};
+    pub use crate::world_coordinates::bench::wcs;
 }

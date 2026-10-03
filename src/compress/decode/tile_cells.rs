@@ -1,8 +1,8 @@
 //! One tile's candidate source cells and the fallback order between them.
 
+use crate::bintable::vla_column::VlaCell;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::table_impl::vla_column::VlaCell;
 
 /// One tile's three candidate source cells, read from
 /// [`TileSources`](crate::compress::decode::tile_sources::TileSources). The tile is
@@ -34,8 +34,8 @@ impl<'a> TileCells<'a> {
         } else if let Some(c) = self.uncompressed.filter(|cell| cell.element_count > 0) {
             Ok(TileSource::Uncompressed(c))
         } else {
-            Err(FitsError::UnsupportedCompression {
-                name: "empty tile (no compressed or uncompressed data)".to_string(),
+            Err(FitsError::CorruptCompressedData {
+                detail: "empty tile (no compressed or uncompressed data)".to_string(),
             })
         }
     }

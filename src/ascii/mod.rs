@@ -5,12 +5,19 @@
 //! (`Aw`, `Iw`, `Fw.d`, `Ew.d`, `Dw.d`). ASCII columns are always scalar, and
 //! [`AsciiColumnData`] retains `TNULLn` cells distinctly from genuine values.
 
+pub(crate) mod ascii_text;
+
+use std::io::{self, Write};
+use std::{fmt, str};
+
+use crate::ascii::ascii_text::AsciiText;
 use crate::column;
 use crate::column::Named;
+use crate::column::{ColumnLabels, ColumnScaling};
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::validate_table_field_count;
-use crate::header::Header;
+use crate::header_model::Header;
 use crate::keyword::key;
 
 /// The value type of an ASCII-table column.
@@ -29,7 +36,7 @@ pub enum AsciiKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AsciiColumnData {
     /// `Aw` — the complete fixed-width field text, including padding.
-    Text(Vec<Option<String>>),
+    Text(AsciiText),
     /// `Iw` — stored integers before `TSCALn`/`TZEROn`.
     Integer(Vec<Option<i64>>),
     /// `Fw.d` / `Ew.d` / `Dw.d` — stored floating-point values before scaling.
@@ -39,7 +46,7 @@ pub enum AsciiColumnData {
 impl AsciiColumnData {
     /// Number of rows. An ASCII column is always scalar (§7.2), so this is both the
     /// value count and the row count.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         match self {
             AsciiColumnData::Text(values) => values.len(),
             AsciiColumnData::Integer(values) => values.len(),
@@ -47,14 +54,14 @@ impl AsciiColumnData {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Whether any row is undefined, and so needs a `TNULLn` marker to be writable.
     pub(crate) fn has_null(&self) -> bool {
         match self {
-            AsciiColumnData::Text(values) => values.iter().any(Option::is_none),
+            AsciiColumnData::Text(values) => values.has_null(),
             AsciiColumnData::Integer(values) => values.iter().any(Option::is_none),
             AsciiColumnData::Float(values) => values.iter().any(Option::is_none),
         }
@@ -130,21 +137,17 @@ impl AsciiTable {
             if start.checked_add(fmt.width).is_none_or(|end| end > row_len) {
                 return Err(FitsError::KeywordOutOfRange { name: "TBCOLn" });
             }
+            let labels = ColumnLabels::read(header, n)?;
+            let scaling = ColumnScaling::read(header, n)?;
             columns.push(AsciiColumn {
-                name: header
-                    .get_text(key!("TTYPE{n}").as_str())?
-                    .map(str::to_string)
-                    .filter(|s| !s.is_empty()),
-                unit: header
-                    .get_text(key!("TUNIT{n}").as_str())?
-                    .map(str::to_string)
-                    .filter(|s| !s.is_empty()),
+                name: labels.name,
+                unit: labels.unit,
                 kind: fmt.kind,
                 start,
                 width: fmt.width,
                 decimals: fmt.decimals,
-                tscale: header.get_real(key!("TSCAL{n}").as_str())?.unwrap_or(1.0),
-                tzero: header.get_real(key!("TZERO{n}").as_str())?.unwrap_or(0.0),
+                tscale: scaling.tscale,
+                tzero: scaling.tzero,
                 null: header
                     .get_text(key!("TNULL{n}").as_str())?
                     .map(|s| s.trim().to_string()),
@@ -153,7 +156,9 @@ impl AsciiTable {
 
         // `nrows · row_len` from untrusted axes: check the product can't overflow
         // (a 32-bit-usize hazard `data_extent`'s u64 math wouldn't catch).
-        let total = nrows.checked_mul(row_len).ok_or(FitsError::UnexpectedEof)?;
+        let total = nrows
+            .checked_mul(row_len)
+            .ok_or(FitsError::DataUnitOverflow)?;
         if data.len() < total {
             return Err(FitsError::UnexpectedEof);
         }
@@ -165,8 +170,8 @@ impl AsciiTable {
         let mut data = data;
         data.truncate(total);
         if !data.is_ascii() {
-            return Err(FitsError::InvalidValue {
-                card: "non-ASCII bytes in ASCII-table data".to_string(),
+            return Err(FitsError::InvalidAscii {
+                context: "ASCII-table data",
             });
         }
         Ok(AsciiTable {
@@ -203,13 +208,8 @@ impl AsciiTable {
     /// boundary. `from_data` rejected the non-ASCII bytes that could otherwise
     /// masquerade as a blank field and silently decode to 0 in a numeric column.
     fn field(&self, col: &AsciiColumn, r: usize) -> &str {
-        let row = &self.rows[r * self.row_len..(r + 1) * self.row_len];
-        let end = (col.start + col.width).min(row.len());
-        if col.start < end {
-            &row[col.start..end]
-        } else {
-            ""
-        }
+        let start = r * self.row_len + col.start;
+        &self.rows[start..start + col.width]
     }
 }
 
@@ -240,7 +240,7 @@ impl<'a> AsciiColumnReader<'a> {
                 (0..table.nrows)
                     .map(|r| {
                         let field = table.field(col, r);
-                        (!col.is_null(field.trim())).then(|| field.to_string())
+                        (!col.is_null(field.trim())).then_some(field)
                     })
                     .collect(),
             )),
@@ -305,8 +305,8 @@ fn parse_integer(field: &str) -> Result<i64> {
     if field.is_empty() {
         return Ok(0);
     }
-    field.parse().map_err(|_| FitsError::InvalidValue {
-        card: field.to_string(),
+    field.parse().map_err(|_| FitsError::InvalidAsciiField {
+        field: field.to_string(),
     })
 }
 
@@ -315,8 +315,8 @@ fn parse_float(field: &str, decimals: usize) -> Result<f64> {
     if field.is_empty() {
         return Ok(0.0);
     }
-    parse_ascii_float(field, decimals).ok_or_else(|| FitsError::InvalidValue {
-        card: field.to_string(),
+    parse_ascii_float(field, decimals).ok_or_else(|| FitsError::InvalidAsciiField {
+        field: field.to_string(),
     })
 }
 
@@ -336,25 +336,34 @@ impl Named for AsciiColumn {
 /// Parse a Fortran `Fw.d`/`Ew.d`/`Dw.d` field. When a point-less `Fw.d` field has
 /// no exponent, the decimal point is implied `decimals` digits from the right
 /// (§7.2.1, deprecated): the integer mantissa is scaled by `10⁻ᵈ`.
+///
+/// Mantissa and exponent are joined into one decimal literal and parsed once, so the
+/// value is the f64 nearest the decimal the field spells — what strtod gives cfitsio
+/// and astropy — rather than a parsed mantissa times a rounded power of ten.
 fn parse_ascii_float(field: &str, decimals: usize) -> Option<f64> {
-    let (mantissa, exponent) = match split_mantissa_exponent(field) {
-        Some((m, e)) => (m, Some(e)),
-        None => (field, None),
-    };
-    // The §7.2.1 implied decimal point is an `Fw.d` legacy. cfitsio/astropy apply it
-    // only to a bare mantissa and parse an explicit-exponent field literally (strtod),
-    // so `1E5` is 100000, not `1·10⁻ᵈ·10⁵` — match them, since the whole point is to
-    // read the files those tools write.
-    let implied = exponent.is_none() && decimals != 0 && !mantissa.contains('.');
-    let mut value: f64 = if implied {
-        mantissa.parse::<f64>().ok()? / 10f64.powi(decimals as i32)
-    } else {
-        mantissa.parse().ok()?
-    };
-    if let Some(e) = exponent {
-        value *= 10f64.powi(e.trim().parse::<i32>().ok()?);
+    match split_mantissa_exponent(field) {
+        Some((mantissa, exponent)) => parse_literal(format_args!("{mantissa}e{}", exponent.trim())),
+        // The §7.2.1 implied decimal point is an `Fw.d` legacy. cfitsio/astropy apply it
+        // only to a bare mantissa and parse an explicit-exponent field literally, so
+        // `1E5` is 100000, not `1·10⁻ᵈ·10⁵` — match them, since the whole point is to
+        // read the files those tools write.
+        None if decimals != 0 && !field.contains('.') => {
+            parse_literal(format_args!("{field}e-{decimals}"))
+        }
+        None => field.parse().ok(),
     }
-    Some(value)
+}
+
+/// Parses a formatted decimal literal, formatting into a stack buffer when it fits, so a
+/// cell costs no allocation.
+fn parse_literal(literal: fmt::Arguments<'_>) -> Option<f64> {
+    let mut stack = [0; 96];
+    let mut cursor = io::Cursor::new(&mut stack[..]);
+    if cursor.write_fmt(literal).is_ok() {
+        let len = usize::try_from(cursor.position()).expect("at most the buffer length");
+        return str::from_utf8(&stack[..len]).ok()?.parse().ok();
+    }
+    fmt::format(literal).parse().ok()
 }
 
 /// Split a numeric string into mantissa and exponent text. The exponent is
@@ -405,6 +414,39 @@ fn parse_ascii_tform(value: &str) -> Result<AsciiFormat> {
         width,
         decimals,
     })
+}
+
+#[cfg(test)]
+pub(crate) mod internals {
+    use crate::header_model::Header;
+
+    /// A minimal ASCII `TABLE` header: rows of `naxis1` characters, and each column
+    /// at its 1-based `TBCOLn` with its `TFORMn`.
+    pub(crate) fn ascii_table_header(
+        naxis1: usize,
+        naxis2: usize,
+        columns: &[(usize, &str)],
+    ) -> Header {
+        let mut header = Header::new();
+        header
+            .set_internal("XTENSION", "TABLE")
+            .set_internal("BITPIX", 8)
+            .set_internal("NAXIS", 2)
+            .set_internal("NAXIS1", i64::try_from(naxis1).unwrap())
+            .set_internal("NAXIS2", i64::try_from(naxis2).unwrap())
+            .set_internal("PCOUNT", 0)
+            .set_internal("GCOUNT", 1)
+            .set_internal("TFIELDS", i64::try_from(columns.len()).unwrap());
+        for (index, &(tbcol, tform)) in columns.iter().enumerate() {
+            header
+                .set_internal(
+                    &format!("TBCOL{}", index + 1),
+                    i64::try_from(tbcol).unwrap(),
+                )
+                .set_internal(&format!("TFORM{}", index + 1), tform);
+        }
+        header
+    }
 }
 
 #[cfg(test)]

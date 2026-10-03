@@ -1,23 +1,23 @@
 //! Everything a tiled image's decode resolves once, before the first tile.
 
+use crate::bintable::table_view::TableView;
 #[cfg(feature = "parallel")]
 use crate::compress::decode;
 use crate::compress::decode::decode_sample::DecodeSample;
 use crate::compress::decode::float_quantization::FloatQuantization;
-use crate::compress::decode::image_layout::ImageLayout;
 use crate::compress::decode::null_mask::NullMask;
 use crate::compress::decode::tile_decoder::TileDecoder;
 use crate::compress::decode::tile_scratch_set::TileScratchSet;
 use crate::compress::decode::tile_sources::TileSources;
+use crate::compress::decode::tiled_image::TileSection;
+use crate::compress::decode::tiled_image::TiledImage;
 #[cfg(feature = "parallel")]
 use crate::compress::map_tiles;
 use crate::compress::tile_geometry::TileGeometry;
 #[cfg(feature = "parallel")]
 use crate::compress::tile_geometry::TileScratch;
 use crate::error::Result;
-use crate::header::Header;
-use crate::table_impl::BinTable;
-use std::ops::Range;
+use crate::header_model::Header;
 
 /// Everything a tiled image's decode needs that the header and the table's metadata
 /// columns determine once, up front — grouped by the concern each part serves rather
@@ -34,39 +34,16 @@ pub(super) struct ImageDecodePlan<'a> {
 impl<'a> ImageDecodePlan<'a> {
     pub(super) fn new(
         header: &Header,
-        table: &'a BinTable,
-        layout: &ImageLayout,
+        table: TableView<'a>,
+        tiled: &TiledImage<'_>,
     ) -> Result<ImageDecodePlan<'a>> {
-        let tiles = layout.tile_shape(header)?;
         Ok(ImageDecodePlan {
-            geometry: TileGeometry::new(&layout.dims, &tiles),
-            decoder: TileDecoder::new(header, layout)?,
+            geometry: TileGeometry::new(&tiled.image.shape, &tiled.tiles),
+            decoder: TileDecoder::new(header, tiled)?,
             sources: TileSources::read(table)?,
-            null_mask: NullMask::read(header, table, layout)?,
-            quantization: FloatQuantization::read(header, table, layout.bitpix.is_float())?,
+            null_mask: NullMask::read(header, table, tiled)?,
+            quantization: FloatQuantization::read(header, table, tiled.image.bitpix.is_float())?,
         })
-    }
-
-    /// Build the plan for `layout` and check it against a buffer the caller sized
-    /// from the same layout.
-    ///
-    /// The buffer's plane and `ZBITPIX` cannot disagree — every caller derives both
-    /// from one [`ImageLayout`] — but the dispatch selects the tile decoder from the
-    /// plane and the scatter from the buffer, so the pairing is worth stating once
-    /// rather than at each of them.
-    pub(super) fn for_buffer(
-        header: &Header,
-        table: &'a BinTable,
-        layout: &ImageLayout,
-        buffer_is_float: bool,
-    ) -> Result<ImageDecodePlan<'a>> {
-        let plan = ImageDecodePlan::new(header, table, layout)?;
-        debug_assert_eq!(
-            plan.decoder.is_float(),
-            buffer_is_float,
-            "the sample buffer is sized from ZBITPIX, so its plane must match"
-        );
-        Ok(plan)
     }
 
     /// Decode every tile and scatter it into the full image plane.
@@ -92,14 +69,14 @@ impl<'a> ImageDecodePlan<'a> {
                     TileScratchSet::<D::Wide>::default,
                     |scratch, offset| -> Result<Vec<D>> {
                         let tile = wave_start + offset;
-                        scratch.decode(self, tile, tile)?;
+                        self.decode_tile::<D>(scratch, tile, tile)?;
                         Ok(scratch.values.iter().copied().map(D::narrow).collect())
                     },
                 )?;
                 for (offset, values) in decoded.iter().enumerate() {
                     geom.tile_into(wave_start + offset, &mut scatter);
                     // Already narrowed, in the worker.
-                    scatter.scatter_rows_into(out, values, &std::convert::identity);
+                    scatter.scatter_rows_into(out, values, &|value: D| value);
                 }
             }
             Ok(())
@@ -108,7 +85,7 @@ impl<'a> ImageDecodePlan<'a> {
         {
             let mut scratch = TileScratchSet::<D::Wide>::default();
             for tile in 0..geom.ntiles() {
-                scratch.decode(self, tile, tile)?;
+                self.decode_tile::<D>(&mut scratch, tile, tile)?;
                 scratch
                     .tile
                     .scatter_rows_into(out, &scratch.values, &D::narrow);
@@ -122,22 +99,31 @@ impl<'a> ImageDecodePlan<'a> {
     /// subset.
     pub(super) fn decode_region_into<D: DecodeSample>(
         &self,
-        ranges: &[Range<usize>],
-        selected_shape: &[usize],
-        tile_rows: &[usize],
+        section: TileSection<'_>,
         out: &mut [D],
     ) -> Result<()> {
         let mut scratch = TileScratchSet::<D::Wide>::default();
-        for (table_row, &tile_row) in tile_rows.iter().enumerate() {
-            scratch.decode(self, table_row, tile_row)?;
+        for (table_row, &tile_row) in section.rows.iter().enumerate() {
+            self.decode_tile::<D>(&mut scratch, table_row, tile_row)?;
             scratch.tile.scatter_region_into(
-                ranges,
-                selected_shape,
+                section.ranges,
+                section.shape,
                 &scratch.values,
                 out,
                 &D::narrow,
             );
         }
         Ok(())
+    }
+
+    /// One tile decoded into `scratch` and fitted to the stored type `D`.
+    fn decode_tile<D: DecodeSample>(
+        &self,
+        scratch: &mut TileScratchSet<D::Wide>,
+        table_row: usize,
+        tile_row: usize,
+    ) -> Result<()> {
+        scratch.decode(self, table_row, tile_row)?;
+        D::fit(&mut scratch.values, self.decoder.is_lossy())
     }
 }

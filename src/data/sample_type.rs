@@ -2,11 +2,13 @@
 
 use crate::bitpix::Bitpix;
 use crate::data::scaling::Scaling;
-use crate::data::{U16_OFFSET, U32_OFFSET, U64_OFFSET};
+use crate::data::{I8_OFFSET, U16_OFFSET, U32_OFFSET, U64_OFFSET};
 
 /// Which exact-integer realization of the FITS sign-bit-offset conventions a stored
 /// type carries — effectively the tag of [`UnsignedData`], and the single thing both
 /// the image (`BZERO`) and binary-table (`TZEROn`) paths must resolve.
+///
+/// [`UnsignedData`]: crate::data::unsigned_data::UnsignedData
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UnsignedKind {
     I8,
@@ -20,10 +22,13 @@ pub(crate) enum UnsignedKind {
 /// signedness; the FITS unsigned and signed-byte conventions then layer a `BZERO`
 /// offset on top (`BSCALE == 1` with `BZERO = 2^(n-1)`, or `BZERO = -128` for signed
 /// bytes), so the values actually mean an unsigned (or signed-byte) integer. This
-/// enum is what [`ReadImage::physical`](crate::data::read_image::ReadImage::physical) / [`ReadImage::unsigned`](crate::data::read_image::ReadImage::unsigned) yield, resolved up
+/// enum is what [`ReadImage::sample_type`] and [`Image::sample_type`] return, resolved up
 /// front from `BITPIX` + [`Scaling`] without touching the pixels — so a caller can
 /// pick a code path (e.g. a per-type normalization range) without re-deriving the
 /// `BZERO` convention itself.
+///
+/// [`ReadImage::sample_type`]: crate::data::read_image::ReadImage::sample_type
+/// [`Image::sample_type`]: crate::data::Image::sample_type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SampleType {
     /// `BITPIX = 8`, `BZERO = -128`: a signed byte.
@@ -59,7 +64,7 @@ impl SampleType {
     pub fn from_scaling(bitpix: Bitpix, scaling: &Scaling) -> SampleType {
         let offset = scaling.bscale == 1.0;
         match bitpix {
-            Bitpix::U8 if offset && scaling.bzero == -128.0 => SampleType::I8,
+            Bitpix::U8 if offset && scaling.bzero == I8_OFFSET => SampleType::I8,
             Bitpix::U8 => SampleType::U8,
             Bitpix::I16 if offset && scaling.bzero == U16_OFFSET => SampleType::U16,
             Bitpix::I16 => SampleType::I16,
@@ -73,7 +78,7 @@ impl SampleType {
     }
 
     /// `true` for `U8`/`U16`/`U32`/`U64`.
-    pub fn is_unsigned(self) -> bool {
+    pub const fn is_unsigned(self) -> bool {
         matches!(
             self,
             SampleType::U8 | SampleType::U16 | SampleType::U32 | SampleType::U64
@@ -81,19 +86,19 @@ impl SampleType {
     }
 
     /// `true` for `F32`/`F64`.
-    pub fn is_float(self) -> bool {
+    pub const fn is_float(self) -> bool {
         matches!(self, SampleType::F32 | SampleType::F64)
     }
 
     /// `true` for every integer variant (signed or unsigned).
-    pub fn is_integer(self) -> bool {
+    pub const fn is_integer(self) -> bool {
         !self.is_float()
     }
 
     /// The exact-integer realization this type denotes, or `None` when no sign-bit
     /// offset is in play. `U8` is deliberately absent: a `BITPIX = 8` sample is
     /// natively unsigned, so there is nothing to recover.
-    pub(crate) fn unsigned_kind(self) -> Option<UnsignedKind> {
+    pub(crate) const fn unsigned_kind(self) -> Option<UnsignedKind> {
         match self {
             SampleType::I8 => Some(UnsignedKind::I8),
             SampleType::U16 => Some(UnsignedKind::U16),

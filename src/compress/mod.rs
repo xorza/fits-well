@@ -7,18 +7,23 @@
 //! [`CompressionOptions`], the
 //! [`ImageCodec`] dispatch, the per-tile [`map_tiles`] fan-out, and the `P`-vs-`Q`
 //! descriptor threshold — while the directions live in [`decode`]
-//! ([`decode::decompress_image`]) and [`encode`] ([`encode::compress_image`], all five codecs:
+//! ([`TiledImage::decode`]) and [`encode`] ([`encode::compress_image`], all five codecs:
 //! `GZIP_1`, `GZIP_2`, `RICE_1`, `PLIO_1`, `HCOMPRESS_1` with `SMOOTH=1` decode).
 //! Float images are quantized per-tile (`ZSCALE`/`ZZERO`) with `NO_DITHER`,
 //! `SUBTRACTIVE_DITHER_1`, or `SUBTRACTIVE_DITHER_2`. The per-codec work lives in
 //! [`gzip`], [`rice`], [`plio`], and [`hcompress`]; tiled *table* compression
 //! (§10.3) lives in [`table`] ([`table::compress_table`]/[`table::uncompress_table`]).
+//!
+//! [`TiledImage::decode`]: decode::tiled_image::TiledImage::decode
 
+#[cfg(feature = "bench")]
+pub(crate) mod bench;
 mod convert;
 pub(crate) mod decode;
 pub(crate) mod encode;
 mod gzip;
 mod hcompress;
+mod plane;
 mod plio;
 mod quantize;
 mod rice;
@@ -47,7 +52,7 @@ pub enum DitherMethod {
 
 impl DitherMethod {
     /// Whether this method applies a per-pixel dither (everything but `None`).
-    fn dithered(self) -> bool {
+    const fn dithered(self) -> bool {
         !matches!(self, DitherMethod::None)
     }
 
@@ -63,7 +68,7 @@ impl DitherMethod {
         }
     }
 
-    fn name(self) -> &'static str {
+    const fn name(self) -> &'static str {
         match self {
             DitherMethod::None => "NO_DITHER",
             DitherMethod::Subtractive1 => "SUBTRACTIVE_DITHER_1",
@@ -92,8 +97,8 @@ impl Gzip {
 
     fn configured(shuffle: bool, level: u32) -> Result<Gzip> {
         if level > 9 {
-            return Err(FitsError::InvalidValue {
-                card: format!("gzip compression level {level} is outside 0..=9"),
+            return Err(FitsError::InvalidCompressionParameter {
+                detail: format!("gzip compression level {level} is outside 0..=9"),
             });
         }
         Ok(Gzip { shuffle, level })
@@ -120,8 +125,8 @@ impl Hcompress {
     /// per-tile background-noise estimate (§10.4.4).
     pub fn lossy(scale: f64) -> Result<Hcompress> {
         if !scale.is_finite() || scale <= 0.0 {
-            return Err(FitsError::InvalidValue {
-                card: format!("lossy HCOMPRESS scale {scale} must be positive"),
+            return Err(FitsError::InvalidCompressionParameter {
+                detail: format!("lossy HCOMPRESS scale {scale} must be positive"),
             });
         }
         Ok(Hcompress { scale })
@@ -188,8 +193,8 @@ impl CompressionOptions {
         dither: DitherMethod,
     ) -> Result<CompressionOptions> {
         if !level.is_finite() || level < 0.0 {
-            return Err(FitsError::InvalidValue {
-                card: format!("float quantization level {level} must be finite and nonnegative"),
+            return Err(FitsError::InvalidCompressionParameter {
+                detail: format!("float quantization level {level} must be finite and nonnegative"),
             });
         }
         self.quantization = Quantization { level, dither };
@@ -234,7 +239,7 @@ impl ImageCodec {
     /// inverse of [`ImageCodec::parse`], and the only place these names are written.
     /// The table path's narrower `Algo` and the public [`Compression`] both read
     /// them from here.
-    fn name(self) -> &'static str {
+    const fn name(self) -> &'static str {
         match self {
             ImageCodec::Gzip1 => "GZIP_1",
             ImageCodec::Gzip2 => "GZIP_2",
@@ -247,7 +252,7 @@ impl ImageCodec {
 }
 
 impl Compression {
-    fn image_codec(self) -> ImageCodec {
+    const fn image_codec(self) -> ImageCodec {
         match self {
             Compression::Gzip(config) if config.shuffle => ImageCodec::Gzip2,
             Compression::Gzip(_) => ImageCodec::Gzip1,
@@ -259,18 +264,18 @@ impl Compression {
     }
 
     /// FITS `ZCMPTYPE` name written for this choice.
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         self.image_codec().name()
     }
 
-    fn gzip_level(self) -> u32 {
+    const fn gzip_level(self) -> u32 {
         match self {
             Compression::Gzip(config) => config.level,
             _ => gzip::DEFAULT_GZIP_LEVEL,
         }
     }
 
-    fn hcompress_scale(self) -> f64 {
+    const fn hcompress_scale(self) -> f64 {
         match self {
             Compression::Hcompress(config) => config.scale,
             _ => 0.0,
@@ -282,7 +287,7 @@ impl Compression {
 /// `P`: any heap offset or tile element count past the signed-32-bit range (§10.1.3).
 /// The integer encoder promotes to `Q`; the fixed-layout float container instead
 /// rejects (it can't widen its row), so both share this one threshold.
-fn needs_wide(heap_len: usize, max_nelem: usize) -> bool {
+const fn needs_wide(heap_len: usize, max_nelem: usize) -> bool {
     heap_len > i32::MAX as usize || max_nelem > i32::MAX as usize
 }
 
@@ -319,6 +324,22 @@ where
 {
     let mut scratch = init();
     (0..ntiles).map(|t| f(&mut scratch, t)).collect()
+}
+
+/// The synthetic planes the codec fixtures in `tests/data/fits/comp_*` encode.
+#[cfg(test)]
+pub(crate) mod internals {
+    /// value(x, y) = 7x − 5y over 24×16, row-major: the integer codec fixtures.
+    pub(crate) fn ramp() -> Vec<i16> {
+        (0..24 * 16)
+            .map(|i| (i % 24) as i16 * 7 - (i / 24) as i16 * 5)
+            .collect()
+    }
+
+    /// value(x, y) = (x + y) mod 7 over 24×16: the PLIO fixture, a non-negative mask.
+    pub(crate) fn mask() -> Vec<i32> {
+        (0..24 * 16).map(|i| (i % 24 + i / 24) % 7).collect()
+    }
 }
 
 #[cfg(test)]

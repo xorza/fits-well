@@ -1,117 +1,55 @@
+use crate::bitpix::Bitpix;
+use crate::compress::internals::{mask, ramp};
 use crate::compress::*;
 use crate::data::Image;
 use crate::data::image_data::ImageData;
 use crate::data::scaling::Scaling;
-use crate::error::FitsError;
 use crate::error::Ranked;
-use crate::header::value::Value;
+use crate::header_model::value::Value;
 use crate::reader::FitsReader;
 use crate::writer::FitsWriter;
-use std::fs::File;
+use crate::writer::internals::{rejected_before_output, round_trip};
 use std::io::Cursor;
-
-/// Emit compressed files written by this crate for external (astropy) validation.
-/// Run with `cargo test --features compression -- --ignored emit_`.
-#[test]
-#[ignore]
-fn emit_compressed_files_for_astropy() {
-    let samples: Vec<i16> = (0..24 * 16)
-        .map(|i| (i % 24) as i16 * 7 - (i / 24) as i16 * 5)
-        .collect();
-    let image = Image {
-        shape: vec![24, 16],
-        samples: ImageData::I16(samples),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
-    };
-    for (compression, tiles) in [
-        (Compression::GZIP, &[][..]),
-        (Compression::GZIP_SHUFFLED, &[]),
-        (Compression::Rice, &[]),
-        (Compression::Hcompress(Hcompress::default()), &[24, 16]),
-    ] {
-        let f = File::create(format!(
-            ".tmp/wr_{}.fits",
-            compression.name().to_lowercase()
-        ))
-        .unwrap();
-        let mut w = FitsWriter::new(f);
-        w.write_compressed_image(&image, compression, &CompressionOptions::tiled(tiles))
-            .unwrap();
-    }
-
-    // PLIO needs a non-negative mask image.
-    let mask: Vec<i32> = (0..24 * 16).map(|i| (i % 24 + i / 24) % 7).collect();
-    let mask_image = Image {
-        shape: vec![24, 16],
-        samples: ImageData::I32(mask),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
-    };
-    let f = File::create(".tmp/wr_plio_1.fits").unwrap();
-    let mut w = FitsWriter::new(f);
-    w.write_compressed_image(
-        &mask_image,
-        Compression::Plio,
-        &CompressionOptions::default(),
-    )
-    .unwrap();
-
-    // Quantized float (SUBTRACTIVE_DITHER_1) for astropy to reconstruct.
-    let fimage = Image {
-        shape: vec![24, 16],
-        samples: ImageData::F32(float_field()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
-    };
-    let f = File::create(".tmp/wr_ricef.fits").unwrap();
-    let mut w = FitsWriter::new(f);
-    w.write_compressed_image(
-        &fimage,
-        Compression::Rice,
-        &CompressionOptions::tiled([24, 16]),
-    )
-    .unwrap();
-}
+use std::iter;
 
 #[test]
 fn compression_write_round_trips_through_decode() {
-    let samples: Vec<i16> = (0..24 * 16)
-        .map(|i| (i % 24) as i16 * 7 - (i / 24) as i16 * 5)
-        .collect();
-    let image = Image {
-        shape: vec![24, 16],
-        samples: ImageData::I16(samples.clone()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
-    };
-    for (case, compression, tiles) in [
-        ("GZIP_1 row tiles", Compression::GZIP, &[][..]),
-        ("GZIP_1 2-D tiles", Compression::GZIP, &[7, 5]),
-        ("GZIP_2 row tiles", Compression::GZIP_SHUFFLED, &[]),
-        ("RICE_1 row tiles", Compression::Rice, &[]),
+    let ramp_image = Image::new(vec![24, 16], ramp()).unwrap();
+    // PLIO is a mask codec: non-negative i32 values.
+    let mask_image = Image::new(vec![24, 16], mask()).unwrap();
+    // `BITPIX = 8` is unsigned; 37 is coprime with 256, so every byte value occurs.
+    let byte_image = Image::new(
+        vec![24, 16],
+        (0..24 * 16usize)
+            .map(|i| u8::try_from(i * 37 % 256).unwrap())
+            .collect::<Vec<u8>>(),
+    )
+    .unwrap();
+    for (case, image, compression, tiles) in [
+        ("GZIP_1 row tiles", &ramp_image, Compression::GZIP, &[][..]),
+        ("GZIP_1 2-D tiles", &ramp_image, Compression::GZIP, &[7, 5]),
+        (
+            "GZIP_2 row tiles",
+            &ramp_image,
+            Compression::GZIP_SHUFFLED,
+            &[],
+        ),
+        ("RICE_1 row tiles", &ramp_image, Compression::Rice, &[]),
+        ("RICE_1 bytes", &byte_image, Compression::Rice, &[]),
+        ("GZIP_1 bytes", &byte_image, Compression::GZIP, &[]),
         (
             "HCOMPRESS_1 whole image",
+            &ramp_image,
             Compression::Hcompress(Hcompress::default()),
             &[24, 16],
         ),
+        ("PLIO_1 row tiles", &mask_image, Compression::Plio, &[]),
+        // §10.4: tiles stored verbatim, as big-endian pixels.
+        ("NOCOMPRESS row tiles", &ramp_image, Compression::None, &[]),
     ] {
-        let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-        w.write_compressed_image(&image, compression, &CompressionOptions::tiled(tiles))
-            .unwrap();
-        let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+        let mut r = round_trip(|w| {
+            w.write_compressed_image(image, compression, &CompressionOptions::tiled(tiles), None)
+        });
         if matches!(compression, Compression::Hcompress(_)) {
             let header = &r.hdus()[1].header;
             assert!(matches!(header.get("ZVAL1"), Some(Value::Real(0.0))));
@@ -119,30 +57,23 @@ fn compression_write_round_trips_through_decode() {
         }
         let back = r.read_image(1).unwrap();
         assert_eq!(back.shape, vec![24, 16], "{case}");
-        match back.decode() {
-            ImageData::I16(v) => assert_eq!(v, samples, "{case} round-trip"),
-            other => panic!("{case}: expected I16, got {other:?}"),
-        }
+        assert_eq!(back.decode(), image.samples, "{case}");
     }
 
     let samples_3d: Vec<i16> = (0..5 * 4 * 3).map(|i| i as i16 * 3 - 50).collect();
     let image_3d = Image {
         shape: vec![5, 4, 3],
         samples: ImageData::I16(samples_3d.clone()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(
-        &image_3d,
-        Compression::GZIP,
-        &CompressionOptions::tiled([3, 2, 2]),
-    )
-    .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| {
+        w.write_compressed_image(
+            &image_3d,
+            Compression::GZIP,
+            &CompressionOptions::tiled([3, 2, 2]),
+            None,
+        )
+    });
     let back = r.read_image(1).unwrap();
     assert_eq!(back.shape, vec![5, 4, 3]);
     assert!(matches!(back.decode(), ImageData::I16(v) if v == samples_3d));
@@ -163,7 +94,7 @@ fn float_field() -> Vec<f32> {
         .map(|i| {
             let (x, y) = (i % 24, i / 24);
             let smooth = 100.0 + 3.0 * x as f32 - 2.0 * y as f32;
-            let noise = (mix(i as u64) % 2000) as f32 / 1000.0 - 1.0; // ±1.0
+            let noise = (mix(u64::try_from(i).unwrap()) % 2000) as f32 / 1000.0 - 1.0; // ±1.0
             smooth + noise
         })
         .collect()
@@ -172,13 +103,13 @@ fn float_field() -> Vec<f32> {
 #[test]
 fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
     let mut f32_samples: Vec<f32> = float_field().into_iter().take(24).collect();
-    f32_samples.extend(std::iter::repeat_n(42.25, 24));
-    let f64_samples = f32_samples.iter().map(|&value| value as f64).collect();
+    f32_samples.extend(iter::repeat_n(42.25, 24));
+    let f64_samples = f32_samples.iter().map(|&value| f64::from(value)).collect();
 
     for samples in [ImageData::F32(f32_samples), ImageData::F64(f64_samples)] {
         let bitpix = samples.bitpix();
         let expected_raw: Vec<f64> = match &samples {
-            ImageData::F32(values) => values.iter().map(|&value| value as f64).collect(),
+            ImageData::F32(values) => values.iter().map(|&value| f64::from(value)).collect(),
             ImageData::F64(values) => values.clone(),
             _ => unreachable!("float cases only"),
         };
@@ -198,10 +129,14 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
             Compression::None,
         ] {
             let cmptype = compression.name();
-            let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-            w.write_compressed_image(&image, compression, &CompressionOptions::tiled([24, 1]))
-                .unwrap();
-            let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+            let mut r = round_trip(|w| {
+                w.write_compressed_image(
+                    &image,
+                    compression,
+                    &CompressionOptions::tiled([24, 1]),
+                    None,
+                )
+            });
             let header = &r.hdus()[1].header;
             match compression {
                 Compression::Rice => {
@@ -235,31 +170,39 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
                 .vla()
                 .unwrap();
             assert_ne!(
-                compressed[0].element_count(),
+                compressed.range(0).len(),
                 0,
                 "quantized tile for {bitpix:?} {cmptype}"
             );
             assert_eq!(
-                fallback[0].element_count(),
+                fallback.range(0).len(),
                 0,
                 "quantized tile for {bitpix:?} {cmptype}"
             );
             assert_eq!(
-                compressed[1].element_count(),
+                compressed.range(1).len(),
                 0,
                 "fallback tile for {bitpix:?} {cmptype}"
             );
             assert_ne!(
-                fallback[1].element_count(),
+                fallback.range(1).len(),
                 0,
                 "fallback tile for {bitpix:?} {cmptype}"
             );
 
+            // Tile 0 is quantized at its ZSCALE, so each sample comes back within
+            // half a step of it, plus the roundings of the dither arithmetic and,
+            // for f32, of storing the result — at most an ulp of the sample.
+            let zscale = table.column_by_name("ZSCALE").unwrap().physical().unwrap()[0];
+            let rounding = match bitpix {
+                Bitpix::F32 => f64::from(f32::EPSILON),
+                _ => 4.0 * f64::EPSILON,
+            };
             let back = r.read_image(1).unwrap();
             assert_eq!(back.scaling, image.scaling, "{bitpix:?} {cmptype}");
             let physical = back.physical();
             let actual_raw: Vec<f64> = match back.decode() {
-                ImageData::F32(values) => values.into_iter().map(|value| value as f64).collect(),
+                ImageData::F32(values) => values.into_iter().map(f64::from).collect(),
                 ImageData::F64(values) => values,
                 other => panic!("{cmptype}: expected {bitpix:?}, got {other:?}"),
             };
@@ -268,13 +211,16 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
                 let expected_physical = -10.0 + 2.5 * expected;
                 if index < 24 {
                     let raw_error = (actual - expected).abs();
+                    let raw_bound = 0.5 * zscale + rounding * expected.abs();
                     assert!(
-                        raw_error < 0.2,
+                        raw_error <= raw_bound,
                         "{bitpix:?} {cmptype} raw pixel {index}: {raw_error}"
                     );
+                    // BSCALE scales the raw error; the scaling itself rounds once more.
                     let physical_error = (physical[index] - expected_physical).abs();
                     assert!(
-                        physical_error < 0.5,
+                        physical_error
+                            <= 2.5 * raw_bound + 2.0 * f64::EPSILON * expected_physical.abs(),
                         "{bitpix:?} {cmptype} physical pixel {index}: {physical_error}"
                     );
                     quantized_changed |= actual != expected;
@@ -306,6 +252,7 @@ fn hcompress_writer_enforces_standard_image_constraints() {
             &line,
             Compression::Hcompress(Hcompress::default()),
             &CompressionOptions::default(),
+            None,
         ),
         Err(FitsError::UnsupportedCompression { name })
             if name == "HCOMPRESS_1 requires a two-dimensional image"
@@ -317,6 +264,7 @@ fn hcompress_writer_enforces_standard_image_constraints() {
             &float,
             Compression::Hcompress(Hcompress::lossy(2.0).unwrap()),
             &CompressionOptions::default(),
+            None,
         ),
         Err(FitsError::UnsupportedCompression { name })
             if name == "HCOMPRESS_1 for float images (write)"
@@ -328,6 +276,7 @@ fn hcompress_writer_enforces_standard_image_constraints() {
             &extreme,
             Compression::Hcompress(Hcompress::default()),
             &CompressionOptions::tiled([2, 2]),
+            None,
         ),
         Err(FitsError::UnsupportedCompression { name })
             if name == "HCOMPRESS_1 tile exceeds the signed 64-bit stream range"
@@ -353,6 +302,7 @@ fn hcompress_writer_enforces_standard_image_constraints() {
             &undefined,
             Compression::Hcompress(Hcompress::lossy(2.0).unwrap()),
             &CompressionOptions::tiled([8, 8]),
+            None,
         ),
         Err(FitsError::UnsupportedCompression { name })
             if name == "lossy HCOMPRESS_1 with undefined pixels requires a null mask"
@@ -364,36 +314,51 @@ fn dither_option_sets_zquantiz_and_round_trips() {
     let image = Image {
         shape: vec![24, 16],
         samples: ImageData::F32(float_field()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
-    // Each `DitherMethod` writes its `ZQUANTIZ` keyword and round-trips; the option is
-    // honored rather than always emitting the hardcoded SUBTRACTIVE_DITHER_1.
+    // Each `DitherMethod` writes its `ZQUANTIZ` keyword and decodes within half a
+    // quantization step (plus an f32 ulp for the dither arithmetic and the stored
+    // result). The three decoded planes differ pairwise, so the option is honored.
+    let original = float_field();
+    let mut planes = Vec::new();
     for (dither, zquantiz) in [
         (DitherMethod::None, "NO_DITHER"),
         (DitherMethod::Subtractive1, "SUBTRACTIVE_DITHER_1"),
         (DitherMethod::Subtractive2, "SUBTRACTIVE_DITHER_2"),
     ] {
-        let mut w = FitsWriter::new(Cursor::new(Vec::new()));
         let options = CompressionOptions::tiled([24, 16])
             .with_quantization(0.0, dither)
             .unwrap();
-        w.write_compressed_image(&image, Compression::Rice, &options)
-            .unwrap();
-        let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+        let mut r =
+            round_trip(|w| w.write_compressed_image(&image, Compression::Rice, &options, None));
         assert_eq!(
             r.hdus()[1].header.get_text("ZQUANTIZ").unwrap(),
             Some(zquantiz),
             "{dither:?} must write {zquantiz}"
         );
-        match r.read_image(1).unwrap().decode() {
-            ImageData::F32(v) => assert_eq!(v.len(), 24 * 16, "{dither:?}"),
-            other => panic!("{dither:?}: expected F32, got {other:?}"),
+        let zscale = r
+            .read_table(1)
+            .unwrap()
+            .column_by_name("ZSCALE")
+            .unwrap()
+            .physical()
+            .unwrap()[0];
+        let ImageData::F32(plane) = r.read_image(1).unwrap().decode() else {
+            panic!("{dither:?}: expected F32");
+        };
+        assert_eq!(plane.len(), original.len(), "{dither:?}");
+        for (index, (&o, &b)) in original.iter().zip(&plane).enumerate() {
+            let error = (f64::from(o) - f64::from(b)).abs();
+            assert!(
+                error <= 0.5 * zscale + f64::from(f32::EPSILON) * f64::from(o).abs(),
+                "{dither:?} pixel {index}: {o} vs {b}"
+            );
         }
+        planes.push(plane);
     }
+    assert_ne!(planes[0], planes[1]);
+    assert_ne!(planes[0], planes[2]);
+    assert_ne!(planes[1], planes[2]);
 }
 
 #[test]
@@ -403,17 +368,14 @@ fn tile_shape_with_wrong_rank_is_rejected() {
     let image = Image {
         shape: vec![4, 3],
         samples: ImageData::I16((0..12).map(|i| i as i16).collect()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     let err = w.write_compressed_image(
         &image,
         Compression::Rice,
         &CompressionOptions::tiled([2, 2, 2]),
+        None,
     );
     assert!(
         matches!(
@@ -436,29 +398,39 @@ fn float_write_preserves_nan_nulls() {
     let image = Image {
         shape: vec![24, 16],
         samples: ImageData::F32(orig.clone()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(
-        &image,
-        Compression::Rice,
-        &CompressionOptions::tiled([24, 16]),
-    )
-    .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| {
+        w.write_compressed_image(
+            &image,
+            Compression::Rice,
+            &CompressionOptions::tiled([24, 16]),
+            None,
+        )
+    });
+    let zscale = r
+        .read_table(1)
+        .unwrap()
+        .column_by_name("ZSCALE")
+        .unwrap()
+        .physical()
+        .unwrap()[0];
     let back = match r.read_image(1).unwrap().decode() {
         ImageData::F32(v) => v,
         other => panic!("expected F32, got {other:?}"),
     };
+    assert_eq!(back.len(), orig.len());
     for (i, (&o, &b)) in orig.iter().zip(&back).enumerate() {
         if o.is_nan() {
             assert!(b.is_nan(), "null pixel {i} must round-trip to NaN");
         } else {
-            assert!((o - b).abs() < 0.2, "pixel {i}: {o} vs {b}");
+            // Half a quantization step, plus an f32 ulp for the dither arithmetic
+            // and the stored result.
+            let error = (f64::from(o) - f64::from(b)).abs();
+            assert!(
+                error <= 0.5 * zscale + f64::from(f32::EPSILON) * f64::from(o).abs(),
+                "pixel {i}: {o} vs {b}"
+            );
         }
     }
 }
@@ -476,14 +448,14 @@ fn hcompress_writer_converts_noise_multiplier_to_tile_scale() {
         })
         .collect();
     let image = Image::new(vec![8, 8], samples).unwrap();
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(
-        &image,
-        Compression::Hcompress(Hcompress::lossy(2.0).unwrap()),
-        &CompressionOptions::tiled([8, 8]),
-    )
-    .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| {
+        w.write_compressed_image(
+            &image,
+            Compression::Hcompress(Hcompress::lossy(2.0).unwrap()),
+            &CompressionOptions::tiled([8, 8]),
+            None,
+        )
+    });
     assert!(matches!(
         r.hdus()[1].header.get("ZVAL1"),
         Some(Value::Real(2.0))
@@ -517,13 +489,14 @@ fn hcompress_lossless_write_round_trips_exactly() {
             &image,
             Compression::Hcompress(Hcompress::default()),
             &CompressionOptions::tiled([16, 16]),
+            None,
         )
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
     match reader.read_image(1).unwrap().decode() {
         ImageData::I32(actual) => assert_eq!(actual, samples),
         other => panic!("expected I32, got {other:?}"),
-    };
+    }
 
     let wide = vec![i32::MAX, i32::MAX, i32::MAX, i32::MAX];
     let image = Image::new(vec![2, 2], wide.clone()).unwrap();
@@ -533,6 +506,7 @@ fn hcompress_lossless_write_round_trips_exactly() {
             &image,
             Compression::Hcompress(Hcompress::default()),
             &CompressionOptions::tiled([2, 2]),
+            None,
         )
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
@@ -551,6 +525,7 @@ fn hcompress_lossless_write_round_trips_exactly() {
             &image,
             Compression::Hcompress(Hcompress::default()),
             &CompressionOptions::tiled([2, 2]),
+            None,
         )
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
@@ -558,33 +533,9 @@ fn hcompress_lossless_write_round_trips_exactly() {
 }
 
 #[test]
-fn plio_write_round_trips_through_decode() {
-    // PLIO is a mask codec: non-negative i32 values. value(x, y) = (x + y) % 7,
-    // with a few longer runs to exercise multi-word counts.
-    let samples: Vec<i32> = (0..24 * 16).map(|i| (i % 24 + i / 24) % 7).collect();
-    let image = Image {
-        shape: vec![24, 16],
-        samples: ImageData::I32(samples.clone()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
-    };
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(&image, Compression::Plio, &CompressionOptions::default())
-        .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
-    match r.read_image(1).unwrap().decode() {
-        ImageData::I32(v) => assert_eq!(v, samples, "PLIO_1 round-trip"),
-        other => panic!("PLIO_1: expected I32, got {other:?}"),
-    }
-}
-
-#[test]
 fn integer_image_compression_preserves_bscale_bzero_and_blank() {
     // §10.2: the compressed tiles store *raw* stored integers, so BSCALE/BZERO and
-    // the BLANK sentinel must survive in the rebuilt header (was dropped before).
+    // the BLANK sentinel must survive in the rebuilt header.
     let samples: Vec<i16> = (0..24 * 16).map(|i| (i % 50) as i16 - 5).collect();
     let image = Image {
         shape: vec![24, 16],
@@ -595,10 +546,14 @@ fn integer_image_compression_preserves_bscale_bzero_and_blank() {
             blank: Some(-5),
         },
     };
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(&image, Compression::GZIP, &CompressionOptions::default())
-        .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| {
+        w.write_compressed_image(
+            &image,
+            Compression::GZIP,
+            &CompressionOptions::default(),
+            None,
+        )
+    });
     let back = r.read_image(1).unwrap();
     assert_eq!(back.scaling.bscale, 2.5);
     assert_eq!(back.scaling.bzero, 100.0);
@@ -626,55 +581,41 @@ fn rice_64_bit_pixels_round_trip_extreme_differences() {
     let image = Image {
         shape: vec![samples.len()],
         samples: ImageData::I64(samples.clone()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(&image, Compression::Rice, &CompressionOptions::default())
-        .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+    let mut r = round_trip(|w| {
+        w.write_compressed_image(
+            &image,
+            Compression::Rice,
+            &CompressionOptions::default(),
+            None,
+        )
+    });
     let decoded = r.read_image(1).unwrap().decode();
     assert_eq!(decoded, ImageData::I64(samples));
-}
-
-#[test]
-fn nocompress_image_round_trips() {
-    // §10.4: tiles stored verbatim (uncompressed big-endian pixels) round-trip.
-    let samples: Vec<i16> = (0..24 * 16)
-        .map(|i| (i % 24) as i16 * 7 - (i / 24) as i16 * 5)
-        .collect();
-    let image = Image {
-        shape: vec![24, 16],
-        samples: ImageData::I16(samples.clone()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
-    };
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(&image, Compression::None, &CompressionOptions::default())
-        .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
-    match r.read_image(1).unwrap().decode() {
-        ImageData::I16(v) => assert_eq!(v, samples),
-        other => panic!("expected I16, got {other:?}"),
-    }
 }
 
 #[cfg(feature = "parallel")]
 #[test]
 fn parallel_full_decode_crosses_the_bounded_wave_boundary() {
-    let samples: Vec<u8> = (0usize..1024 * 4097)
+    use crate::compress::decode::decode_wave_tile_count;
+    use crate::compress::tile_geometry::TileGeometry;
+
+    // One row per tile, one more row than a wave holds.
+    let row = 1024;
+    let rows = decode_wave_tile_count::<u8>(&TileGeometry::new(&[row, 1], &[row, 1])) + 1;
+    let samples: Vec<u8> = (0usize..row * rows)
         .map(|index| (index.wrapping_mul(37) & 0xff) as u8)
         .collect();
-    let image = Image::new(vec![1024, 4097], samples.clone()).unwrap();
+    let image = Image::new(vec![row, rows], samples.clone()).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
-        .write_compressed_image(&image, Compression::None, &CompressionOptions::default())
+        .write_compressed_image(
+            &image,
+            Compression::None,
+            &CompressionOptions::default(),
+            None,
+        )
         .unwrap();
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
@@ -685,58 +626,49 @@ fn parallel_full_decode_crosses_the_bounded_wave_boundary() {
 }
 
 #[test]
-fn empty_naxis0_image_round_trips() {
-    // A `NAXIS = 0` image has no data array. The encoder must emit an empty
-    // `NAXIS2 = 0` ZIMAGE table (not panic on a fabricated phantom tile), and the
-    // decoder must restore the empty image. Exercise both the integer and float
-    // encoder paths.
-    let cases = [
-        ImageData::I16(Vec::new()),
-        ImageData::I32(Vec::new()),
-        ImageData::F32(Vec::new()),
-    ];
-    for samples in cases {
+fn empty_images_round_trip() {
+    // A `NAXIS = 0` image has no data array: the encoder emits an empty
+    // `NAXIS2 = 0` ZIMAGE table, not a phantom tile, through both the integer and
+    // the float paths. An empty first axis holds no pixels either.
+    for (shape, samples) in [
+        (vec![], ImageData::I16(Vec::new())),
+        (vec![], ImageData::I32(Vec::new())),
+        (vec![], ImageData::F32(Vec::new())),
+        (vec![0], ImageData::I16(Vec::new())),
+    ] {
         let image = Image {
-            shape: Vec::new(),
+            shape: shape.clone(),
             samples: samples.clone(),
-            scaling: Scaling {
-                bscale: 1.0,
-                bzero: 0.0,
-                blank: None,
-            },
+            scaling: Scaling::IDENTITY,
         };
-        let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-        w.write_compressed_image(&image, Compression::GZIP, &CompressionOptions::default())
-            .unwrap();
-        let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
+        let mut r = round_trip(|w| {
+            w.write_compressed_image(
+                &image,
+                Compression::GZIP,
+                &CompressionOptions::default(),
+                None,
+            )
+        });
         let back = r.read_image(1).unwrap();
-        assert!(back.shape.is_empty(), "shape for {samples:?}");
-        // Same empty variant back out, no phantom pixel.
-        match (back.decode(), &samples) {
-            (ImageData::I16(v), ImageData::I16(_)) => assert!(v.is_empty()),
-            (ImageData::I32(v), ImageData::I32(_)) => assert!(v.is_empty()),
-            (ImageData::F32(v), ImageData::F32(_)) => assert!(v.is_empty()),
-            (other, _) => panic!("variant mismatch: {other:?}"),
-        }
+        assert_eq!(back.shape, shape, "{samples:?}");
+        assert_eq!(back.decode(), samples);
     }
 }
 
 #[test]
-fn empty_first_axis_image_round_trips() {
+fn compressed_image_with_an_overflowing_shape_is_refused_before_output() {
     let image = Image {
-        shape: vec![0],
+        shape: vec![usize::MAX, 2],
         samples: ImageData::I16(Vec::new()),
-        scaling: Scaling {
-            bscale: 1.0,
-            bzero: 0.0,
-            blank: None,
-        },
+        scaling: Scaling::IDENTITY,
     };
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(&image, Compression::GZIP, &CompressionOptions::default())
-        .unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
-    let back = r.read_image(1).unwrap();
-    assert_eq!(back.shape, [0]);
-    assert!(matches!(back.decode(), ImageData::I16(v) if v.is_empty()));
+    assert!(matches!(
+        rejected_before_output(|w| w.write_compressed_image(
+            &image,
+            Compression::GZIP,
+            &CompressionOptions::default(),
+            None
+        )),
+        FitsError::DataUnitOverflow
+    ));
 }

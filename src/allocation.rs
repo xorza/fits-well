@@ -1,7 +1,5 @@
 //! Fallible allocation for buffers sized directly from untrusted FITS metadata.
 
-use std::mem::size_of;
-
 use crate::error::FitsError;
 use crate::error::Result;
 
@@ -36,7 +34,7 @@ pub(crate) fn try_zeroed<T: Clone>(value: T, len: usize) -> Result<Vec<T>> {
     Ok(values)
 }
 
-fn allocation_bytes<T>(len: usize) -> u64 {
+const fn allocation_bytes<T>(len: usize) -> u64 {
     (len as u64).saturating_mul(size_of::<T>() as u64)
 }
 

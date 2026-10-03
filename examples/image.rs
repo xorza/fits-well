@@ -5,42 +5,38 @@
 //! cargo run --example image
 //! ```
 
+#![expect(clippy::print_stdout, reason = "an example reports to the terminal")]
+
 use std::fs::File;
 
 use fits_well::image::{Image, ImageData, ImageView, Scaling};
 use fits_well::{FitsReader, FitsWriter};
-
-/// Identity scaling: physical value = stored, no blanks — the common case.
-const IDENTITY: Scaling = Scaling {
-    bscale: 1.0,
-    bzero: 0.0,
-    blank: None,
-};
+use std::env;
 
 fn main() -> fits_well::Result<()> {
-    let path = std::env::temp_dir().join("fits_well_image.fits");
+    let path = env::temp_dir().join("fits_well_image.fits");
 
     // A 4×3 image of signed 16-bit pixels. `shape` is fastest-axis-first
     // (NAXIS1 = 4), and `samples` is the flat row-major buffer.
     let i16_image = Image::new_scaled(
         vec![4, 3],
         ImageData::I16(vec![0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23]),
-        IDENTITY,
+        Scaling::IDENTITY,
     )?;
     // A second image of a *different* type (32-bit float) — so the file holds two
     // image HDUs of differing BITPIX, which the view loop below reads into one buffer.
     let f32_image = Image::new_scaled(
         vec![2, 2],
         ImageData::F32(vec![1.5, -2.5, 3.5, -4.5]),
-        IDENTITY,
+        Scaling::IDENTITY,
     )?;
 
     // Writing synthesizes the mandatory header (SIMPLE/XTENSION, BITPIX, NAXISn) and
     // the big-endian data unit. The first `write_image` is the primary array; the
     // second becomes an `IMAGE` extension.
     let mut writer = FitsWriter::new(File::create(&path)?);
-    writer.write_image(&i16_image)?;
-    writer.write_image(&f32_image)?;
+    writer.write_image(&i16_image, None)?;
+    writer.write_image(&f32_image, None)?;
     writer.into_inner().sync_all()?;
     println!("wrote {}", path.display());
 
@@ -71,7 +67,7 @@ fn main() -> fits_well::Result<()> {
         // The view borrows the reader + scratch, so use it before the next read. For
         // samples you need past the loop, use the owned `read_image().decode()` above.
         let image = reader.read_image_view(idx, &mut scratch)?;
-        match image.samples {
+        match image.samples() {
             ImageView::I16(v) => println!("hdu {idx}: i16 view {v:?}"),
             ImageView::F32(v) => println!("hdu {idx}: f32 view {v:?}"),
             other => println!(

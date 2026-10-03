@@ -3,7 +3,6 @@
 use std::io::Read;
 use std::io::Write;
 
-use crate::bitpix::Bitpix;
 use crate::error::FitsError;
 use crate::error::Result;
 use flate2::Compression;
@@ -11,6 +10,7 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 
 use crate::compress::convert::be_to_i64_into;
+use crate::compress::plane::IntBitpix;
 
 /// Default deflate level used by [`crate::image::Gzip::default`]. Level 1 favors write
 /// speed (gzip was the slowest compress path at the higher default); construct
@@ -27,9 +27,16 @@ pub(super) struct GzipScratch {
 /// Gzip a raw big-endian byte buffer at deflate `level` (0–9; the `GZIP_1` tile
 /// encoder). The level is lossless — only the speed↔ratio tradeoff changes.
 pub(super) fn gzip_encode(raw: &[u8], level: u32) -> Vec<u8> {
-    let mut enc = GzEncoder::new(Vec::new(), Compression::new(level));
+    let mut out = Vec::new();
+    gzip_encode_into(raw, level, &mut out);
+    out
+}
+
+/// [`gzip_encode`], appending the stream to `out`.
+pub(super) fn gzip_encode_into(raw: &[u8], level: u32, out: &mut Vec<u8>) {
+    let mut enc = GzEncoder::new(out, Compression::new(level));
     enc.write_all(raw).expect("gzip into a Vec cannot fail");
-    enc.finish().expect("gzip finish into a Vec cannot fail")
+    enc.finish().expect("gzip finish into a Vec cannot fail");
 }
 
 /// `GZIP_2` encoder: shuffle `raw` into significance byte-planes, then gzip at `level`.
@@ -39,11 +46,24 @@ pub(super) fn gzip2_encode(
     level: u32,
     scratch: &mut GzipScratch,
 ) -> Vec<u8> {
+    let mut out = Vec::new();
+    gzip2_encode_into(raw, width, level, scratch, &mut out);
+    out
+}
+
+/// [`gzip2_encode`], appending the stream to `out`.
+pub(super) fn gzip2_encode_into(
+    raw: &[u8],
+    width: usize,
+    level: u32,
+    scratch: &mut GzipScratch,
+    out: &mut Vec<u8>,
+) {
     if width <= 1 {
-        return gzip_encode(raw, level);
+        return gzip_encode_into(raw, level, out);
     }
     shuffle_bytes_into(raw, width, &mut scratch.reordered);
-    gzip_encode(&scratch.reordered, level)
+    gzip_encode_into(&scratch.reordered, level, out);
 }
 
 /// Shuffle `raw` into `width`-byte significance planes (all byte-0s, then all
@@ -81,14 +101,19 @@ pub(super) fn unshuffle_bytes_into(shuffled: &[u8], width: usize, out: &mut Vec<
 
 /// Inflate a gzip stream to its exact declared size. Reading one byte past the
 /// expected size detects expansion bombs without allowing an unbounded allocation.
+/// The stream is already in memory, so a read that fails is a stream that does not
+/// inflate.
 pub(super) fn gunzip_into(bytes: &[u8], expected: usize, out: &mut Vec<u8>) -> Result<()> {
     out.clear();
     GzDecoder::new(bytes)
         .take(expected.saturating_add(1) as u64)
-        .read_to_end(out)?;
+        .read_to_end(out)
+        .map_err(|error| FitsError::CorruptCompressedData {
+            detail: format!("gzip tile does not inflate: {error}"),
+        })?;
     if out.len() > expected {
-        return Err(FitsError::UnsupportedCompression {
-            name: "gzip tile expands beyond its declared tile size".to_string(),
+        return Err(FitsError::CorruptCompressedData {
+            detail: "gzip tile expands beyond its declared tile size".to_string(),
         });
     }
     if out.len() != expected {
@@ -120,7 +145,7 @@ pub(super) fn gunzip2_into(
 /// inflated size at `tile_elems × bitpix` bytes.
 pub(super) fn gzip_tile_into(
     bytes: &[u8],
-    bitpix: Bitpix,
+    bitpix: IntBitpix,
     tile_elems: usize,
     out: &mut Vec<i64>,
     scratch: &mut GzipScratch,
@@ -138,7 +163,7 @@ pub(super) fn gzip_tile_into(
 /// (all most-significant bytes first, …) before gzip. Inflate, then un-shuffle.
 pub(super) fn gzip2_tile_into(
     bytes: &[u8],
-    bitpix: Bitpix,
+    bitpix: IntBitpix,
     tile_elems: usize,
     out: &mut Vec<i64>,
     scratch: &mut GzipScratch,
@@ -170,13 +195,20 @@ mod tests {
         // Bounded at 1 KiB (a small tile): inflating to 100 KB overruns → error.
         assert!(matches!(
             gzip::gunzip_into(&bomb, 1024, &mut decoded),
-            Err(FitsError::UnsupportedCompression { .. })
+            Err(FitsError::CorruptCompressedData { detail })
+                if detail == "gzip tile expands beyond its declared tile size"
         ));
         // One byte short of the true size still overruns (the +1 detection boundary).
         assert!(gzip::gunzip_into(&bomb, big.len() - 1, &mut decoded).is_err());
         // Bounded at the true size: decodes to exactly the original bytes.
         gzip::gunzip_into(&bomb, big.len(), &mut decoded).unwrap();
         assert_eq!(decoded, big);
+
+        assert!(matches!(
+            gzip::gunzip_into(b"not a gzip stream", 4, &mut decoded),
+            Err(FitsError::CorruptCompressedData { detail })
+                if detail.starts_with("gzip tile does not inflate: ")
+        ));
 
         let short = gzip::gzip_encode(&[1, 2, 3], 1);
         assert!(matches!(

@@ -7,11 +7,12 @@ use crate::ascii::AsciiColumnData;
 use crate::block::SPACE_FILL;
 use crate::error::{FitsError, Result};
 use crate::hdu::validate_table_field_count;
-use crate::header::Header;
-use crate::header::card::validate_ascii;
-use crate::header::value;
+use crate::header_model::Header;
+use crate::header_model::card::validate_ascii;
+use crate::header_model::value;
 use crate::keyword::key;
-use crate::writer::{FitsWriter, accept_row_count, validate_scaling};
+use crate::writer::{FitsWriter, ROW_COUNT_FIXED, accept_row_count, validate_scaling};
+use std::iter;
 
 /// One column to write into an ASCII table: nullable typed data, the fixed field
 /// width in characters, and the decimal count for floats.
@@ -46,22 +47,26 @@ impl AsciiWriteColumn {
         }
     }
 
+    #[must_use]
     pub fn with_unit(mut self, unit: impl Into<String>) -> AsciiWriteColumn {
         self.unit = Some(unit.into());
         self
     }
 
-    pub fn with_decimals(mut self, decimals: usize) -> AsciiWriteColumn {
+    #[must_use]
+    pub const fn with_decimals(mut self, decimals: usize) -> AsciiWriteColumn {
         self.decimals = decimals;
         self
     }
 
-    pub fn scaled(mut self, tscale: f64, tzero: f64) -> AsciiWriteColumn {
+    #[must_use]
+    pub const fn scaled(mut self, tscale: f64, tzero: f64) -> AsciiWriteColumn {
         self.tscale = Some(tscale);
         self.tzero = Some(tzero);
         self
     }
 
+    #[must_use]
     pub fn with_null(mut self, tnull: impl Into<String>) -> AsciiWriteColumn {
         self.tnull = Some(tnull.into());
         self
@@ -77,11 +82,14 @@ pub struct AsciiTableBuilder {
 }
 
 impl AsciiTableBuilder {
-    pub fn new() -> AsciiTableBuilder {
-        AsciiTableBuilder::default()
+    pub const fn new() -> AsciiTableBuilder {
+        AsciiTableBuilder {
+            nrows: None,
+            columns: Vec::new(),
+        }
     }
 
-    pub fn with_rows(nrows: usize) -> AsciiTableBuilder {
+    pub const fn with_rows(nrows: usize) -> AsciiTableBuilder {
         AsciiTableBuilder {
             nrows: Some(nrows),
             columns: Vec::new(),
@@ -126,14 +134,8 @@ pub(super) fn write_template<W: Write>(
     let mut row_len = 0usize;
     for col in columns {
         validate_ascii_column(col)?;
-        let count = col.data.len();
-        if count != nrows {
-            return Err(FitsError::RowWidthMismatch {
-                computed: count,
-                declared: nrows,
-            });
-        }
-        tbcols.push(row_len.checked_add(1).ok_or(FitsError::DataUnitOverflow)?); // 1-based start column
+        assert_eq!(col.data.len(), nrows, "{ROW_COUNT_FIXED}");
+        tbcols.push(row_len.checked_add(1).ok_or(FitsError::DataUnitOverflow)?);
         row_len = row_len
             .checked_add(col.width)
             .ok_or(FitsError::DataUnitOverflow)?;
@@ -157,7 +159,6 @@ fn validate_ascii_column(col: &AsciiWriteColumn) -> Result<()> {
     if let Some(unit) = &col.unit {
         validate_ascii(unit, "ASCII column unit")?;
     }
-    let marker = col.tnull.as_deref().map(str::trim);
     if let Some(marker) = &col.tnull {
         validate_ascii(marker, "ASCII null marker")?;
         if marker.trim().is_empty() || marker.len() > col.width {
@@ -169,7 +170,7 @@ fn validate_ascii_column(col: &AsciiWriteColumn) -> Result<()> {
         col.tzero,
         !matches!(&col.data, AsciiColumnData::Text(_)),
     )?;
-    if col.data.has_null() && marker.is_none() {
+    if col.data.has_null() && col.tnull.is_none() {
         return Err(FitsError::KeywordOutOfRange { name: "TNULLn" });
     }
     Ok(())
@@ -215,7 +216,7 @@ impl<'a> AsciiField<'a> {
         }
     }
 
-    fn value(text: Cow<'a, str>, left_aligned: bool) -> AsciiField<'a> {
+    const fn value(text: Cow<'a, str>, left_aligned: bool) -> AsciiField<'a> {
         AsciiField {
             text,
             left_aligned,
@@ -226,10 +227,10 @@ impl<'a> AsciiField<'a> {
 
 /// Render row `row` of `col` and validate it: width, restricted ASCII, and that a
 /// genuine value does not collide with the column's null marker.
-fn ascii_field<'a>(col: &'a AsciiWriteColumn, row: usize) -> Result<AsciiField<'a>> {
+fn ascii_field(col: &AsciiWriteColumn, row: usize) -> Result<AsciiField<'_>> {
     let field = match &col.data {
-        AsciiColumnData::Text(values) => match &values[row] {
-            Some(value) => AsciiField::value(Cow::Borrowed(value.as_str()), true),
+        AsciiColumnData::Text(values) => match values.get(row) {
+            Some(value) => AsciiField::value(Cow::Borrowed(value), true),
             None => AsciiField::null(col),
         },
         AsciiColumnData::Integer(values) => match values[row] {
@@ -243,7 +244,7 @@ fn ascii_field<'a>(col: &'a AsciiWriteColumn, row: usize) -> Result<AsciiField<'
     };
     validate_ascii_field_width(col, row, field.text.len())?;
     if let AsciiColumnData::Text(values) = &col.data
-        && let Some(value) = &values[row]
+        && let Some(value) = values.get(row)
     {
         validate_ascii(value, "ASCII text cell")?;
     }
@@ -259,8 +260,8 @@ fn ascii_field<'a>(col: &'a AsciiWriteColumn, row: usize) -> Result<AsciiField<'
 /// its sign and precision can fit the field at all.
 fn ascii_float_text(col: &AsciiWriteColumn, row: usize, value: f64) -> Result<String> {
     if !value.is_finite() {
-        return Err(FitsError::InvalidValue {
-            card: "ASCII float cells must be finite; use None for null".to_string(),
+        return Err(FitsError::InvalidAsciiValue {
+            reason: "float cells must be finite; use None for null",
         });
     }
     let sign_width = usize::from(value.is_sign_negative());
@@ -280,8 +281,8 @@ fn ascii_float_text(col: &AsciiWriteColumn, row: usize, value: f64) -> Result<St
 
 fn validate_ascii_null_collision(value: &str, marker: Option<&str>) -> Result<()> {
     if marker == Some(value) {
-        Err(FitsError::InvalidValue {
-            card: "ASCII value equals its TNULLn marker".to_string(),
+        Err(FitsError::InvalidAsciiValue {
+            reason: "the value equals its column's TNULLn marker",
         })
     } else {
         Ok(())
@@ -345,9 +346,9 @@ fn append_ascii_field(out: &mut Vec<u8>, col: &AsciiWriteColumn, r: usize) -> Re
     let pad = col.width - bytes.len();
     if field.left_aligned {
         out.extend_from_slice(bytes);
-        out.extend(std::iter::repeat_n(b' ', pad));
+        out.extend(iter::repeat_n(b' ', pad));
     } else {
-        out.extend(std::iter::repeat_n(b' ', pad));
+        out.extend(iter::repeat_n(b' ', pad));
         out.extend_from_slice(bytes);
     }
     Ok(())

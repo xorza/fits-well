@@ -62,8 +62,8 @@ pub(super) fn hcompress_tile_encode(
     let ny = tdims.first().copied().unwrap_or(vals.len()).max(1);
     let nx = (vals.len() / ny).max(1);
     if nx * ny != vals.len() {
-        return Err(FitsError::UnsupportedCompression {
-            name: "HCOMPRESS_1: tile is not 2-D".to_string(),
+        return Err(FitsError::CorruptCompressedData {
+            detail: "HCOMPRESS_1: tile is not 2-D".to_string(),
         });
     }
     scratch.plane.clear();
@@ -121,7 +121,7 @@ struct Quadrant<'a> {
 }
 
 impl BitOutput {
-    fn new() -> Self {
+    const fn new() -> Self {
         BitOutput {
             out: Vec::new(),
             buffer2: 0,
@@ -137,7 +137,7 @@ impl BitOutput {
         self.out.extend_from_slice(&a.to_be_bytes());
     }
 
-    fn start_outputing_bits(&mut self) {
+    const fn start_outputing_bits(&mut self) {
         self.buffer2 = 0;
         self.bits_to_go2 = 8;
     }
@@ -145,11 +145,11 @@ impl BitOutput {
     /// Output the low `n` bits of `bits` (`n` ≤ 8), MSB-first.
     fn output_nbits(&mut self, bits: i32, n: i32) {
         const MASK: [i32; 9] = [0, 1, 3, 7, 15, 31, 63, 127, 255];
-        self.buffer2 = self.buffer2.wrapping_shl(n as u32) | (bits & MASK[n as usize]);
+        let count = n.cast_unsigned();
+        self.buffer2 = self.buffer2.wrapping_shl(count) | (bits & MASK[count as usize]);
         self.bits_to_go2 -= n;
         if self.bits_to_go2 <= 0 {
-            self.out
-                .push(((self.buffer2 >> (-self.bits_to_go2)) & 0xff) as u8);
+            self.out.push(low_byte(self.buffer2 >> (-self.bits_to_go2)));
             self.bits_to_go2 += 8;
         }
     }
@@ -158,8 +158,7 @@ impl BitOutput {
         self.buffer2 = self.buffer2.wrapping_shl(4) | (bits & 15);
         self.bits_to_go2 -= 4;
         if self.bits_to_go2 <= 0 {
-            self.out
-                .push(((self.buffer2 >> (-self.bits_to_go2)) & 0xff) as u8);
+            self.out.push(low_byte(self.buffer2 >> (-self.bits_to_go2)));
             self.bits_to_go2 += 8;
         }
     }
@@ -167,15 +166,15 @@ impl BitOutput {
     /// Output `n` 4-bit nybbles from `array` (cfitsio's byte-aligned fast path).
     fn output_nnybble(&mut self, n: usize, array: &[u8]) {
         if n == 1 {
-            self.output_nybble(array[0] as i32);
+            self.output_nybble(i32::from(array[0]));
             return;
         }
         let mut kk = 0usize;
         if self.bits_to_go2 <= 4 {
-            self.output_nybble(array[0] as i32);
+            self.output_nybble(i32::from(array[0]));
             kk += 1;
             if n == 2 {
-                self.output_nybble(array[1] as i32);
+                self.output_nybble(i32::from(array[1]));
                 return;
             }
         }
@@ -191,19 +190,19 @@ impl BitOutput {
         } else {
             for _ in 0..jj {
                 self.buffer2 = self.buffer2.wrapping_shl(8)
-                    | (((array[kk] as i32 & 15) << 4) | (array[kk + 1] as i32 & 15));
+                    | (((i32::from(array[kk]) & 15) << 4) | (i32::from(array[kk + 1]) & 15));
                 kk += 2;
-                self.out.push(((self.buffer2 >> shift) & 0xff) as u8);
+                self.out.push(low_byte(self.buffer2 >> shift));
             }
         }
         if kk != n {
-            self.output_nybble(array[n - 1] as i32);
+            self.output_nybble(i32::from(array[n - 1]));
         }
     }
 
     fn done_outputing_bits(&mut self) {
         if self.bits_to_go2 < 8 {
-            self.out.push((self.buffer2 << self.bits_to_go2) as u8);
+            self.out.push(low_byte(self.buffer2 << self.bits_to_go2));
         }
     }
 
@@ -224,8 +223,8 @@ impl BitOutput {
         } = bufs;
         let nel = nx * ny;
         self.out.extend_from_slice(&MAGIC);
-        self.writeint(nx as i32);
-        self.writeint(ny as i32);
+        self.writeint(tile_dimension(nx)?);
+        self.writeint(tile_dimension(ny)?);
         self.writeint(scale);
         self.writelonglong(a[0]);
         a[0] = 0;
@@ -262,7 +261,7 @@ impl BitOutput {
         let mut j = 0usize;
         let mut k = 0usize;
         for &v in a.iter().take(nel) {
-            let q = (j >= ny2) as usize + (k >= nx2) as usize;
+            let q = usize::from(j >= ny2) + usize::from(k >= nx2);
             if vmax[q] < v {
                 vmax[q] = v;
             }
@@ -282,7 +281,7 @@ impl BitOutput {
         }
         self.out.extend_from_slice(&nbitplanes);
 
-        self.doencode(a, nx, ny, &nbitplanes, qtree, code_buffer);
+        self.doencode(a, nx, ny, nbitplanes, qtree, code_buffer);
         self.out.extend_from_slice(&signbits[..nsign]);
         Ok(())
     }
@@ -293,7 +292,7 @@ impl BitOutput {
         a: &[i64],
         nx: usize,
         ny: usize,
-        nbitplanes: &[u8; 3],
+        nbitplanes: [u8; 3],
         qtree: &mut Vec<u8>,
         code_buffer: &mut Vec<u8>,
     ) {
@@ -307,7 +306,7 @@ impl BitOutput {
                 nqx: nx2,
                 nqy: ny2,
             },
-            nbitplanes[0] as i32,
+            i32::from(nbitplanes[0]),
             qtree,
             code_buffer,
         );
@@ -319,7 +318,7 @@ impl BitOutput {
                     nqx: nx2,
                     nqy: ny / 2,
                 },
-                nbitplanes[1] as i32,
+                i32::from(nbitplanes[1]),
                 qtree,
                 code_buffer,
             );
@@ -332,7 +331,7 @@ impl BitOutput {
                     nqx: nx / 2,
                     nqy: ny2,
                 },
-                nbitplanes[1] as i32,
+                i32::from(nbitplanes[1]),
                 qtree,
                 code_buffer,
             );
@@ -345,7 +344,7 @@ impl BitOutput {
                     nqx: nx / 2,
                     nqy: ny / 2,
                 },
-                nbitplanes[2] as i32,
+                i32::from(nbitplanes[2]),
                 qtree,
                 code_buffer,
             );
@@ -423,7 +422,7 @@ impl BitOutput {
                     self.output_nbits(bitbuffer & ((1 << bits_to_go3) - 1), bits_to_go3);
                 }
                 for i in (0..b).rev() {
-                    self.output_nbits(buffer[i] as i32, 8);
+                    self.output_nbits(i32::from(buffer[i]), 8);
                 }
             }
         }
@@ -471,10 +470,10 @@ fn htrans(
             let mut s10 = s00 + ny;
             let mut j = 0usize;
             while j < nytop - oddy {
-                let a00 = a[s00] as i128;
-                let a01 = a[s00 + 1] as i128;
-                let a10 = a[s10] as i128;
-                let a11 = a[s10 + 1] as i128;
+                let a00 = i128::from(a[s00]);
+                let a01 = i128::from(a[s00 + 1]);
+                let a10 = i128::from(a[s10]);
+                let a11 = i128::from(a[s10 + 1]);
                 let h0 = checked_transform_value((a11 + a10 + a01 + a00) >> shift)?;
                 let hx = checked_transform_value((a11 + a10 - a01 - a00) >> shift)?;
                 let hy = checked_transform_value((a11 - a10 + a01 - a00) >> shift)?;
@@ -488,8 +487,12 @@ fn htrans(
                 j += 2;
             }
             if oddy != 0 {
-                let h0 = checked_transform_value((a[s10] as i128 + a[s00] as i128) << (1 - shift))?;
-                let hx = checked_transform_value((a[s10] as i128 - a[s00] as i128) << (1 - shift))?;
+                let h0 = checked_transform_value(
+                    (i128::from(a[s10]) + i128::from(a[s00])) << (1 - shift),
+                )?;
+                let hx = checked_transform_value(
+                    (i128::from(a[s10]) - i128::from(a[s00])) << (1 - shift),
+                )?;
                 a[s10] = rounded_transform_value(hx, if hx >= 0 { prnd } else { 0 }, mask)?;
                 a[s00] = rounded_transform_value(h0, if h0 >= 0 { prnd2 } else { nrnd2 }, mask2)?;
             }
@@ -499,17 +502,19 @@ fn htrans(
             let mut s00 = i * ny;
             let mut j = 0usize;
             while j < nytop - oddy {
-                let h0 =
-                    checked_transform_value((a[s00 + 1] as i128 + a[s00] as i128) << (1 - shift))?;
-                let hy =
-                    checked_transform_value((a[s00 + 1] as i128 - a[s00] as i128) << (1 - shift))?;
+                let h0 = checked_transform_value(
+                    (i128::from(a[s00 + 1]) + i128::from(a[s00])) << (1 - shift),
+                )?;
+                let hy = checked_transform_value(
+                    (i128::from(a[s00 + 1]) - i128::from(a[s00])) << (1 - shift),
+                )?;
                 a[s00 + 1] = rounded_transform_value(hy, if hy >= 0 { prnd } else { 0 }, mask)?;
                 a[s00] = rounded_transform_value(h0, if h0 >= 0 { prnd2 } else { nrnd2 }, mask2)?;
                 s00 += 2;
                 j += 2;
             }
             if oddy != 0 {
-                let h0 = checked_transform_value((a[s00] as i128) << (2 - shift))?;
+                let h0 = checked_transform_value(i128::from(a[s00]) << (2 - shift))?;
                 a[s00] = rounded_transform_value(h0, if h0 >= 0 { prnd2 } else { nrnd2 }, mask2)?;
             }
         }
@@ -529,12 +534,26 @@ fn htrans(
     Ok(())
 }
 
+/// The low eight bits of a bit buffer, as the byte the stream holds.
+const fn low_byte(value: i32) -> u8 {
+    value.to_le_bytes()[0]
+}
+
+/// A tile dimension as the stream's 32-bit header field.
+fn tile_dimension(length: usize) -> Result<i32> {
+    i32::try_from(length)
+        .ok()
+        .ok_or_else(|| FitsError::UnsupportedCompression {
+            name: format!("HCOMPRESS_1 tile dimension {length}, past 2^31 - 1"),
+        })
+}
+
 fn checked_transform_value(value: i128) -> Result<i64> {
     i64::try_from(value).map_err(|_| transform_overflow())
 }
 
 fn rounded_transform_value(value: i64, rounding: i64, mask: i64) -> Result<i64> {
-    Ok(checked_transform_value(value as i128 + rounding as i128)? & mask)
+    Ok(checked_transform_value(i128::from(value) + i128::from(rounding))? & mask)
 }
 
 fn transform_overflow() -> FitsError {
@@ -543,9 +562,17 @@ fn transform_overflow() -> FitsError {
     }
 }
 
+/// A decoded H-transform value as the `i64` the plane holds. A stream an encoder
+/// wrote never leaves that range, so one that does is corrupt.
+fn decoded_coefficient(value: i128) -> Result<i64> {
+    i64::try_from(value).map_err(|_| FitsError::CorruptCompressedData {
+        detail: "HCOMPRESS_1: a decoded coefficient exceeds 64 bits".to_string(),
+    })
+}
+
 /// Group coefficients by order: de-interleave even/odd elements (the inverse of
 /// the decoder's `unshuffle`; cfitsio `shuffle`).
-fn shuffle(a: &mut [i64], n: usize, n2: usize, tmp: &mut [i64]) {
+const fn shuffle(a: &mut [i64], n: usize, n2: usize, tmp: &mut [i64]) {
     let mut pt = 0usize;
     let mut i = 1usize;
     while i < n {
@@ -598,21 +625,25 @@ fn digitize(a: &mut [i64], nx: usize, ny: usize, scale: i32) -> Result<()> {
     if scale <= 1 {
         return Ok(());
     }
-    let d = (scale as i128 + 1) / 2 - 1;
+    let d = (i128::from(scale) + 1) / 2 - 1;
     for v in a.iter_mut().take(nx * ny) {
         let rounded = if *v > 0 {
-            *v as i128 + d
+            i128::from(*v) + d
         } else {
-            *v as i128 - d
+            i128::from(*v) - d
         };
-        *v = checked_transform_value(rounded / scale as i128)?;
+        *v = checked_transform_value(rounded / i128::from(scale))?;
     }
     Ok(())
 }
 
 /// First quadtree reduction step on bit `bit` of `a` → 4-bit codes in `b`
 /// (cfitsio `qtree_onebit`). `a` is non-negative here, so shifts can't sign-fill.
-fn qtree_onebit(quadrant: Quadrant<'_>, b: &mut [u8], bit: i32) {
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "each code is four bits of a non-negative magnitude, so it is in 0..16"
+)]
+const fn qtree_onebit(quadrant: Quadrant<'_>, b: &mut [u8], bit: i32) {
     let Quadrant {
         a,
         n,
@@ -672,17 +703,17 @@ fn qtree_reduce(a: &mut [u8], n: usize, nx: usize, ny: usize) {
         let mut s10 = s00 + n;
         let mut j = 0usize;
         while j + 1 < ny {
-            a[k] = (a[s10 + 1] != 0) as u8
-                | (((a[s10] != 0) as u8) << 1)
-                | (((a[s00 + 1] != 0) as u8) << 2)
-                | (((a[s00] != 0) as u8) << 3);
+            a[k] = u8::from(a[s10 + 1] != 0)
+                | (u8::from(a[s10] != 0) << 1)
+                | (u8::from(a[s00 + 1] != 0) << 2)
+                | (u8::from(a[s00] != 0) << 3);
             k += 1;
             s00 += 2;
             s10 += 2;
             j += 2;
         }
         if j < ny {
-            a[k] = (((a[s10] != 0) as u8) << 1) | (((a[s00] != 0) as u8) << 3);
+            a[k] = (u8::from(a[s10] != 0) << 1) | (u8::from(a[s00] != 0) << 3);
             k += 1;
         }
         i += 2;
@@ -691,13 +722,13 @@ fn qtree_reduce(a: &mut [u8], n: usize, nx: usize, ny: usize) {
         let mut s00 = n * i;
         let mut j = 0usize;
         while j + 1 < ny {
-            a[k] = (((a[s00 + 1] != 0) as u8) << 2) | (((a[s00] != 0) as u8) << 3);
+            a[k] = (u8::from(a[s00 + 1] != 0) << 2) | (u8::from(a[s00] != 0) << 3);
             k += 1;
             s00 += 2;
             j += 2;
         }
         if j < ny {
-            a[k] = ((a[s00] != 0) as u8) << 3;
+            a[k] = u8::from(a[s00] != 0) << 3;
         }
     }
 }
@@ -719,7 +750,7 @@ fn bufcopy(
             *bitbuffer |= CODE[cell as usize] << *bits_to_go3;
             *bits_to_go3 += NCODE[cell as usize];
             if *bits_to_go3 >= 8 {
-                buffer[*b] = (*bitbuffer & 0xFF) as u8;
+                buffer[*b] = low_byte(*bitbuffer);
                 *b += 1;
                 if *b >= bmax {
                     return true;
@@ -732,7 +763,6 @@ fn bufcopy(
     false
 }
 
-/// Bit/byte input over the compressed stream (replaces cfitsio's file globals).
 /// Fast-decode table for the fixed Huffman code: index by the next 6 bits
 /// (MSB-first; 6 = the longest code), yielding the decoded value 0–15 and the code
 /// length (3–6) to consume. Built from the same prefix-code map as the bit-serial
@@ -772,6 +802,7 @@ const HUFFMAN_DECODE: [(u8, i32); 64] = {
     t
 };
 
+/// Bit/byte input over the compressed stream (replaces cfitsio's file globals).
 #[derive(Debug)]
 struct BitInput<'a> {
     data: &'a [u8],
@@ -781,7 +812,7 @@ struct BitInput<'a> {
 }
 
 impl<'a> BitInput<'a> {
-    fn new(data: &'a [u8]) -> Self {
+    const fn new(data: &'a [u8]) -> Self {
         BitInput {
             data,
             pos: 0,
@@ -819,7 +850,7 @@ impl<'a> BitInput<'a> {
         Ok(i64::from_be_bytes(self.read_bytes(8)?.try_into().unwrap()))
     }
 
-    fn start_inputing_bits(&mut self) {
+    const fn start_inputing_bits(&mut self) {
         self.bits_to_go = 0;
     }
 
@@ -849,7 +880,7 @@ impl<'a> BitInput<'a> {
     /// fast path, including the one-byte backspace).
     fn input_nnybble(&mut self, n: usize, array: &mut [u8]) -> Result<()> {
         if n == 1 {
-            array[0] = self.input_nybble()? as u8;
+            array[0] = low_byte(self.input_nybble()?);
             return Ok(());
         }
         if self.bits_to_go == 8 {
@@ -863,20 +894,20 @@ impl<'a> BitInput<'a> {
         if self.bits_to_go == 0 {
             for _ in 0..pairs {
                 self.buffer = (self.buffer << 8) | self.byte()?;
-                array[kk] = ((self.buffer >> 4) & 15) as u8;
-                array[kk + 1] = (self.buffer & 15) as u8;
+                array[kk] = low_byte(self.buffer >> 4) & 15;
+                array[kk + 1] = low_byte(self.buffer) & 15;
                 kk += 2;
             }
         } else {
             for _ in 0..pairs {
                 self.buffer = (self.buffer << 8) | self.byte()?;
-                array[kk] = ((self.buffer >> shift1) & 15) as u8;
-                array[kk + 1] = ((self.buffer >> shift2) & 15) as u8;
+                array[kk] = low_byte(self.buffer >> shift1) & 15;
+                array[kk + 1] = low_byte(self.buffer >> shift2) & 15;
                 kk += 2;
             }
         }
         if pairs * 2 != n {
-            array[n - 1] = self.input_nybble()? as u8;
+            array[n - 1] = low_byte(self.input_nybble()?);
         }
         Ok(())
     }
@@ -890,7 +921,7 @@ impl<'a> BitInput<'a> {
             self.buffer = (self.buffer << 8) | self.byte()?;
             self.bits_to_go += 8;
         }
-        let peek = ((self.buffer >> (self.bits_to_go - 6)) & 0x3F) as usize;
+        let peek = usize::from(low_byte(self.buffer >> (self.bits_to_go - 6)) & 0x3F);
         let (value, len) = HUFFMAN_DECODE[peek];
         self.bits_to_go -= len;
         Ok(value)
@@ -906,31 +937,31 @@ fn hdecompress_into(
 ) -> Result<()> {
     let mut bi = BitInput::new(input);
     if bi.read_bytes(2)? != MAGIC {
-        return Err(FitsError::UnsupportedCompression {
-            name: "HCOMPRESS_1: bad magic".to_string(),
+        return Err(FitsError::CorruptCompressedData {
+            detail: "HCOMPRESS_1: bad magic".to_string(),
         });
     }
-    let nx = usize::try_from(bi.readint()?).map_err(|_| FitsError::UnsupportedCompression {
-        name: "HCOMPRESS_1: negative tile dimension".to_string(),
+    let nx = usize::try_from(bi.readint()?).map_err(|_| FitsError::CorruptCompressedData {
+        detail: "HCOMPRESS_1: negative tile dimension".to_string(),
     })?;
-    let ny = usize::try_from(bi.readint()?).map_err(|_| FitsError::UnsupportedCompression {
-        name: "HCOMPRESS_1: negative tile dimension".to_string(),
+    let ny = usize::try_from(bi.readint()?).map_err(|_| FitsError::CorruptCompressedData {
+        detail: "HCOMPRESS_1: negative tile dimension".to_string(),
     })?;
     // nx/ny come from the untrusted stream; cross-check them against the tile's
     // known element count before allocating/transforming. cfitsio sizes from these
     // blindly — guarding here stops a hostile header from driving a wild `nx*ny`
     // allocation (or an overflow, or an empty-buffer panic at `a[0]` below).
     if tile_elems == 0 || nx.checked_mul(ny) != Some(tile_elems) {
-        return Err(FitsError::UnsupportedCompression {
-            name: "HCOMPRESS_1: tile dimensions do not match the tile size".to_string(),
+        return Err(FitsError::CorruptCompressedData {
+            detail: "HCOMPRESS_1: tile dimensions do not match the tile size".to_string(),
         });
     }
     let scale = bi.readint()?;
     let sumall = bi.readlonglong()?;
     let nbitplanes: [u8; 3] = bi.read_bytes(3)?.try_into().unwrap();
     if nbitplanes.iter().any(|&n| n > 63) {
-        return Err(FitsError::UnsupportedCompression {
-            name: "HCOMPRESS_1: invalid bit-plane count".to_string(),
+        return Err(FitsError::CorruptCompressedData {
+            detail: "HCOMPRESS_1: invalid bit-plane count".to_string(),
         });
     }
 
@@ -964,14 +995,14 @@ fn undigitize(a: &mut [i64], scale: i32) -> Result<()> {
         return Ok(());
     }
     for v in a.iter_mut() {
-        *v = checked_transform_value(*v as i128 * scale as i128)?;
+        *v = decoded_coefficient(i128::from(*v) * i128::from(scale))?;
     }
     Ok(())
 }
 
 /// Decode the four quadrant bit planes, then the sign bits.
 fn dodecode(
-    bi: &mut BitInput,
+    bi: &mut BitInput<'_>,
     a: &mut [i64],
     nx: usize,
     ny: usize,
@@ -982,7 +1013,15 @@ fn dodecode(
     let ny2 = ny.div_ceil(2);
 
     bi.start_inputing_bits();
-    qtree_decode(bi, &mut a[0..], ny, nx2, ny2, nbitplanes[0] as i32, scratch)?;
+    qtree_decode(
+        bi,
+        &mut a[0..],
+        ny,
+        nx2,
+        ny2,
+        i32::from(nbitplanes[0]),
+        scratch,
+    )?;
     if ny / 2 > 0 {
         qtree_decode(
             bi,
@@ -990,7 +1029,7 @@ fn dodecode(
             ny,
             nx2,
             ny / 2,
-            nbitplanes[1] as i32,
+            i32::from(nbitplanes[1]),
             scratch,
         )?;
     }
@@ -1001,7 +1040,7 @@ fn dodecode(
             ny,
             nx / 2,
             ny2,
-            nbitplanes[1] as i32,
+            i32::from(nbitplanes[1]),
             scratch,
         )?;
     }
@@ -1012,14 +1051,14 @@ fn dodecode(
             ny,
             nx / 2,
             ny / 2,
-            nbitplanes[2] as i32,
+            i32::from(nbitplanes[2]),
             scratch,
         )?;
     }
 
     if bi.input_nybble()? != 0 {
-        return Err(FitsError::UnsupportedCompression {
-            name: "HCOMPRESS_1: bad bit plane values".to_string(),
+        return Err(FitsError::CorruptCompressedData {
+            detail: "HCOMPRESS_1: bad bit plane values".to_string(),
         });
     }
     // Sign bits.
@@ -1034,7 +1073,7 @@ fn dodecode(
 
 /// Read one quadrant's bit planes from the stream into `a` (row stride `n`).
 fn qtree_decode(
-    bi: &mut BitInput,
+    bi: &mut BitInput<'_>,
     a: &mut [i64],
     n: usize,
     nqx: usize,
@@ -1053,8 +1092,8 @@ fn qtree_decode(
         if b == 0 {
             read_bdirect(bi, a, n, nqx, nqy, scratch, bit)?;
         } else if b != 0xf {
-            return Err(FitsError::UnsupportedCompression {
-                name: "HCOMPRESS_1: bad format code".to_string(),
+            return Err(FitsError::CorruptCompressedData {
+                detail: "HCOMPRESS_1: bad format code".to_string(),
             });
         } else {
             scratch[0] = bi.input_huffman()?;
@@ -1087,7 +1126,7 @@ fn qtree_decode(
 
 /// One quadtree expansion step: expand each 4-bit value to 2×2, then read new
 /// codes for the non-zero cells.
-fn qtree_expand(bi: &mut BitInput, a: &mut [u8], nx: usize, ny: usize) -> Result<()> {
+fn qtree_expand(bi: &mut BitInput<'_>, a: &mut [u8], nx: usize, ny: usize) -> Result<()> {
     qtree_copy(a, nx, ny, ny);
     for i in (0..nx * ny).rev() {
         if a[i] != 0 {
@@ -1117,7 +1156,7 @@ fn qtree_copy(a: &mut [u8], nx: usize, ny: usize, n: usize) {
 }
 
 /// Expand the stored top-left nybbles into 2×2 bit patterns.
-fn expand_blocks(a: &mut [u8], nx: usize, ny: usize, n: usize) {
+const fn expand_blocks(a: &mut [u8], nx: usize, ny: usize, n: usize) {
     let mut i = 0;
     while i + 1 < nx {
         let mut s00 = n * i;
@@ -1170,7 +1209,7 @@ fn qtree_bitins(a: &[u8], nqx: usize, nqy: usize, b: &mut [i64], n: usize, bit: 
         let mut s00 = n * i;
         let mut j = 0;
         while j + 1 < nqy {
-            let v = a[k] as i64;
+            let v = i64::from(a[k]);
             b[s00 + n + 1] |= (v & 1) << bit;
             b[s00 + n] |= ((v >> 1) & 1) << bit;
             b[s00 + 1] |= ((v >> 2) & 1) << bit;
@@ -1180,7 +1219,7 @@ fn qtree_bitins(a: &[u8], nqx: usize, nqy: usize, b: &mut [i64], n: usize, bit: 
             j += 2;
         }
         if j < nqy {
-            let v = a[k] as i64;
+            let v = i64::from(a[k]);
             b[s00 + n] |= ((v >> 1) & 1) << bit;
             b[s00] |= ((v >> 3) & 1) << bit;
             k += 1;
@@ -1191,7 +1230,7 @@ fn qtree_bitins(a: &[u8], nqx: usize, nqy: usize, b: &mut [i64], n: usize, bit: 
         let mut s00 = n * i;
         let mut j = 0;
         while j + 1 < nqy {
-            let v = a[k] as i64;
+            let v = i64::from(a[k]);
             b[s00 + 1] |= ((v >> 2) & 1) << bit;
             b[s00] |= ((v >> 3) & 1) << bit;
             s00 += 2;
@@ -1199,17 +1238,15 @@ fn qtree_bitins(a: &[u8], nqx: usize, nqy: usize, b: &mut [i64], n: usize, bit: 
             j += 2;
         }
         if j < nqy {
-            let v = a[k] as i64;
+            let v = i64::from(a[k]);
             b[s00] |= ((v >> 3) & 1) << bit;
-            k += 1;
         }
     }
-    let _ = k;
 }
 
 /// A directly-stored (un-quadtree-coded) bit plane: read nybbles, then insert.
 fn read_bdirect(
-    bi: &mut BitInput,
+    bi: &mut BitInput<'_>,
     a: &mut [i64],
     n: usize,
     nqx: usize,
@@ -1223,7 +1260,8 @@ fn read_bdirect(
     Ok(())
 }
 
-/// Inverse H-transform (in place), `SMOOTH = 0`.
+/// Inverse H-transform (in place), smoothing each level first (`SMOOTH = 1`) when
+/// `smooth`.
 fn hinv(
     a: &mut [i64],
     nx: usize,
@@ -1305,14 +1343,14 @@ fn hinv(
                 hy = if hy >= 0 { hy - lowbit0 } else { hy + lowbit0 };
                 let lowbit1 = (hc ^ hx ^ hy) & bit1;
                 let h0 = if h0 >= 0 {
-                    checked_transform_value(h0 as i128 + lowbit0 as i128 - lowbit1 as i128)?
+                    decoded_coefficient(i128::from(h0) + i128::from(lowbit0) - i128::from(lowbit1))?
                 } else {
-                    checked_transform_value(
-                        h0 as i128
+                    decoded_coefficient(
+                        i128::from(h0)
                             + if lowbit0 == 0 {
-                                lowbit1 as i128
+                                i128::from(lowbit1)
                             } else {
-                                lowbit0 as i128 - lowbit1 as i128
+                                i128::from(lowbit0) - i128::from(lowbit1)
                             },
                     )?
                 };
@@ -1328,16 +1366,16 @@ fn hinv(
                 let h0 = a[s00];
                 let hx = round_signed(a[s10], prnd1, nrnd1, mask1)?;
                 let lowbit1 = hx & bit1;
-                let h0 = checked_transform_value(
-                    h0 as i128
+                let h0 = decoded_coefficient(
+                    i128::from(h0)
                         + if h0 >= 0 {
-                            -(lowbit1 as i128)
+                            -i128::from(lowbit1)
                         } else {
-                            lowbit1 as i128
+                            i128::from(lowbit1)
                         },
                 )?;
-                a[s10] = checked_transform_value((h0 as i128 + hx as i128) >> shift)?;
-                a[s00] = checked_transform_value((h0 as i128 - hx as i128) >> shift)?;
+                a[s10] = decoded_coefficient((i128::from(h0) + i128::from(hx)) >> shift)?;
+                a[s00] = decoded_coefficient((i128::from(h0) - i128::from(hx)) >> shift)?;
             }
             i += 2;
         }
@@ -1348,16 +1386,16 @@ fn hinv(
                 let h0 = a[s00];
                 let hy = round_signed(a[s00 + 1], prnd1, nrnd1, mask1)?;
                 let lowbit1 = hy & bit1;
-                let h0 = checked_transform_value(
-                    h0 as i128
+                let h0 = decoded_coefficient(
+                    i128::from(h0)
                         + if h0 >= 0 {
-                            -(lowbit1 as i128)
+                            -i128::from(lowbit1)
                         } else {
-                            lowbit1 as i128
+                            i128::from(lowbit1)
                         },
                 )?;
-                a[s00 + 1] = checked_transform_value((h0 as i128 + hy as i128) >> shift)?;
-                a[s00] = checked_transform_value((h0 as i128 - hy as i128) >> shift)?;
+                a[s00 + 1] = decoded_coefficient((i128::from(h0) + i128::from(hy)) >> shift)?;
+                a[s00] = decoded_coefficient((i128::from(h0) - i128::from(hy)) >> shift)?;
                 s00 += 2;
                 j += 2;
             }
@@ -1385,20 +1423,24 @@ fn inverse_coefficient(
     shift: u32,
     signs: [i8; 3],
 ) -> Result<i64> {
-    let value = h0 as i128
-        + hx as i128 * signs[0] as i128
-        + hy as i128 * signs[1] as i128
-        + hc as i128 * signs[2] as i128;
-    checked_transform_value(value >> shift)
+    let value = i128::from(h0)
+        + i128::from(hx) * i128::from(signs[0])
+        + i128::from(hy) * i128::from(signs[1])
+        + i128::from(hc) * i128::from(signs[2]);
+    decoded_coefficient(value >> shift)
 }
 
 /// Round `v` to a multiple of `-mask`, using the positive or negative rounding
 /// constant per the sign of `v`.
 fn round_signed(v: i64, prnd: i64, nrnd: i64, mask: i64) -> Result<i64> {
-    Ok(
-        checked_transform_value(v as i128 + if v >= 0 { prnd as i128 } else { nrnd as i128 })?
-            & mask,
-    )
+    Ok(decoded_coefficient(
+        i128::from(v)
+            + if v >= 0 {
+                i128::from(prnd)
+            } else {
+                i128::from(nrnd)
+            },
+    )? & mask)
 }
 
 /// Smooth H-transform coefficients by interpolation (cfitsio `hsmooth`): adjust
@@ -1406,7 +1448,7 @@ fn round_signed(v: i64, prnd: i64, nrnd: i64, mask: i64) -> Result<i64> {
 /// each change clamped to ±scale/2 (the rounding slack from digitization).
 /// Only meaningful for lossy decoding (`scale > 1`, `SMOOTH = 1`).
 fn hsmooth(a: &mut [i64], nxtop: usize, nytop: usize, ny: usize, scale: i32) -> Result<()> {
-    let smax = (scale >> 1) as i128;
+    let smax = i128::from(scale >> 1);
     if smax <= 0 {
         return Ok(());
     }
@@ -1426,16 +1468,16 @@ fn hsmooth(a: &mut [i64], nxtop: usize, nytop: usize, ny: usize, scale: i32) -> 
         let (mut s00, mut s10) = (ny * i, ny * i + ny);
         let mut j = 0;
         while j < nytop {
-            let hm = a[s00 - ny2] as i128;
-            let h0 = a[s00] as i128;
-            let hp = a[s00 + ny2] as i128;
+            let hm = i128::from(a[s00 - ny2]);
+            let h0 = i128::from(a[s00]);
+            let hp = i128::from(a[s00 + ny2]);
             let mut diff = hp - hm;
             let dmax = ((hp - h0).min(h0 - hm)).max(0) << 2;
             let dmin = ((hp - h0).max(h0 - hm)).min(0) << 2;
             if dmin < dmax {
                 diff = diff.clamp(dmin, dmax);
-                let s = shr(diff - ((a[s10] as i128) << 3), 3).clamp(-smax, smax);
-                a[s10] = checked_transform_value(a[s10] as i128 + s)?;
+                let s = shr(diff - (i128::from(a[s10]) << 3), 3).clamp(-smax, smax);
+                a[s10] = decoded_coefficient(i128::from(a[s10]) + s)?;
             }
             s00 += 2;
             s10 += 2;
@@ -1450,16 +1492,16 @@ fn hsmooth(a: &mut [i64], nxtop: usize, nytop: usize, ny: usize, scale: i32) -> 
         let mut s00 = ny * i + 2;
         let mut j = 2;
         while j + 2 < nytop {
-            let hm = a[s00 - 2] as i128;
-            let h0 = a[s00] as i128;
-            let hp = a[s00 + 2] as i128;
+            let hm = i128::from(a[s00 - 2]);
+            let h0 = i128::from(a[s00]);
+            let hp = i128::from(a[s00 + 2]);
             let mut diff = hp - hm;
             let dmax = ((hp - h0).min(h0 - hm)).max(0) << 2;
             let dmin = ((hp - h0).max(h0 - hm)).min(0) << 2;
             if dmin < dmax {
                 diff = diff.clamp(dmin, dmax);
-                let s = shr(diff - ((a[s00 + 1] as i128) << 3), 3).clamp(-smax, smax);
-                a[s00 + 1] = checked_transform_value(a[s00 + 1] as i128 + s)?;
+                let s = shr(diff - (i128::from(a[s00 + 1]) << 3), 3).clamp(-smax, smax);
+                a[s00 + 1] = decoded_coefficient(i128::from(a[s00 + 1]) + s)?;
             }
             s00 += 2;
             j += 2;
@@ -1473,14 +1515,14 @@ fn hsmooth(a: &mut [i64], nxtop: usize, nytop: usize, ny: usize, scale: i32) -> 
         let (mut s00, mut s10) = (ny * i + 2, ny * i + 2 + ny);
         let mut j = 2;
         while j + 2 < nytop {
-            let hmm = a[s00 - ny2 - 2] as i128;
-            let hpm = a[s00 + ny2 - 2] as i128;
-            let hmp = a[s00 - ny2 + 2] as i128;
-            let hpp = a[s00 + ny2 + 2] as i128;
-            let h0 = a[s00] as i128;
+            let hmm = i128::from(a[s00 - ny2 - 2]);
+            let hpm = i128::from(a[s00 + ny2 - 2]);
+            let hmp = i128::from(a[s00 - ny2 + 2]);
+            let hpp = i128::from(a[s00 + ny2 + 2]);
+            let h0 = i128::from(a[s00]);
             let mut diff = hpp + hmm - hmp - hpm;
-            let hx2 = (a[s10] as i128) << 1;
-            let hy2 = (a[s00 + 1] as i128) << 1;
+            let hx2 = i128::from(a[s10]) << 1;
+            let hy2 = i128::from(a[s00 + 1]) << 1;
             let m1 = ((hpp - h0).max(0) - hx2 - hy2).min((h0 - hpm).max(0) + hx2 - hy2);
             let m2 = ((h0 - hmp).max(0) - hx2 + hy2).min((hmm - h0).max(0) + hx2 + hy2);
             let dmax = m1.min(m2) << 4;
@@ -1489,8 +1531,8 @@ fn hsmooth(a: &mut [i64], nxtop: usize, nytop: usize, ny: usize, scale: i32) -> 
             let dmin = m1.max(m2) << 4;
             if dmin < dmax {
                 diff = diff.clamp(dmin, dmax);
-                let s = shr(diff - ((a[s10 + 1] as i128) << 6), 6).clamp(-smax, smax);
-                a[s10 + 1] = checked_transform_value(a[s10 + 1] as i128 + s)?;
+                let s = shr(diff - (i128::from(a[s10 + 1]) << 6), 6).clamp(-smax, smax);
+                a[s10 + 1] = decoded_coefficient(i128::from(a[s10 + 1]) + s)?;
             }
             s00 += 2;
             s10 += 2;
@@ -1546,6 +1588,7 @@ fn unshuffle_rows(a: &mut [i64], nxtop: usize, nytop: usize, ny: usize, row_tmp:
 #[cfg(test)]
 mod tests {
     use crate::compress::hcompress;
+    use crate::error::FitsError;
 
     #[test]
     fn hcompress_64_bit_transform_matches_external_golden() {
@@ -1556,11 +1599,11 @@ mod tests {
             .as_chunks::<4>()
             .0
             .iter()
-            .map(|bytes| i32::from_be_bytes(*bytes) as i64)
+            .map(|bytes| i64::from(i32::from_be_bytes(*bytes)))
             .collect();
         assert_eq!(values.len(), 100 * 100);
         assert!(
-            i64::from_be_bytes(COMPRESSED[14..22].try_into().unwrap()) > i32::MAX as i64,
+            i64::from_be_bytes(COMPRESSED[14..22].try_into().unwrap()) > i64::from(i32::MAX),
             "the golden must require a wide H-transform accumulator"
         );
         assert!(
@@ -1583,8 +1626,7 @@ mod tests {
     fn tile_decode_rejects_dimension_mismatch() {
         // Encode a valid 2×3 tile, then decode it claiming a different element count.
         // The decoder reads nx/ny from the stream and must cross-check them against the
-        // tile size it was handed — rather than allocate/transform `nx*ny` blindly
-        // (a wild-allocation / overflow / empty-buffer-panic guard, R2-4).
+        // tile size it was handed, not allocate and transform `nx*ny` blindly.
         let vals: Vec<i64> = vec![10, 20, 30, 40, 50, 60];
         let mut scratch = hcompress::HcompressScratch::default();
         let bytes = hcompress::hcompress_tile_encode(&vals, &[2, 3], 0, &mut scratch).unwrap();
@@ -1604,18 +1646,35 @@ mod tests {
             assert!(
                 matches!(
                     hcompress::hcompress_tile_into(&one[..end], false, 1, &mut out, &mut scratch),
-                    Err(crate::error::FitsError::UnexpectedEof)
-                        | Err(crate::error::FitsError::UnsupportedCompression { .. })
+                    Err(FitsError::UnexpectedEof | FitsError::CorruptCompressedData { .. })
                 ),
                 "strict HCOMPRESS prefix of length {end} was accepted"
             );
         }
 
+        // The header is the magic, nx, ny, scale, the sum and the three plane counts.
+        let mut negative_ny = one.clone();
+        negative_ny[6..10].copy_from_slice(&(-1i32).to_be_bytes());
+        assert!(matches!(
+            hcompress::hcompress_tile_into(&negative_ny, false, 1, &mut out, &mut scratch),
+            Err(FitsError::CorruptCompressedData { detail })
+                if detail == "HCOMPRESS_1: negative tile dimension"
+        ));
+        // Scale 2 doubles the sum i64::MAX past 64 bits — no encoder writes that.
+        let mut overflowing = one.clone();
+        overflowing[10..14].copy_from_slice(&2i32.to_be_bytes());
+        overflowing[14..22].copy_from_slice(&i64::MAX.to_be_bytes());
+        assert!(matches!(
+            hcompress::hcompress_tile_into(&overflowing, false, 1, &mut out, &mut scratch),
+            Err(FitsError::CorruptCompressedData { detail })
+                if detail == "HCOMPRESS_1: a decoded coefficient exceeds 64 bits"
+        ));
         let mut invalid_planes = one;
         invalid_planes[22] = 64;
         assert!(matches!(
             hcompress::hcompress_tile_into(&invalid_planes, false, 1, &mut out, &mut scratch),
-            Err(crate::error::FitsError::UnsupportedCompression { .. })
+            Err(FitsError::CorruptCompressedData { detail })
+                if detail == "HCOMPRESS_1: invalid bit-plane count"
         ));
     }
 }

@@ -1,63 +1,33 @@
+use crate::bintable::BinTable;
+use crate::bintable::column_data::ColumnData;
+use crate::bintable::descriptor;
+use crate::bintable::descriptor::PqDescriptor;
+use crate::bintable::internals::table_header;
+use crate::bintable::tform_kind::TformKind;
+use crate::compress::table::internals::mixed_columns;
 use crate::compress::*;
 use crate::endian::write_pq_descriptor;
-use crate::error::FitsError;
-use crate::header::Header;
-use crate::header::value::Value;
+use crate::header_model::Header;
+use crate::header_model::value::Value;
 use crate::keyword::key;
+use crate::ragged::Ragged;
 use crate::reader::FitsReader;
 use crate::reader::internals::open_fixture;
-use crate::table_impl::BinTable;
-use crate::table_impl::column_data::ColumnData;
-use crate::table_impl::descriptor;
-use crate::table_impl::tform_kind::TformKind;
 use crate::writer::FitsWriter;
+use crate::writer::internals::round_trip;
 use crate::writer::render_header;
 use crate::writer::table::{TableBuilder, WriteColumn};
-use std::fs::File;
 use std::io::Cursor;
 
 fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
     let nrows = 10;
-    let col = |name: &str, data, repeat| WriteColumn::fixed(name, data, repeat);
-    let columns = vec![
-        col(
-            "SHORT",
-            ColumnData::I16((0..nrows).map(|i| i as i16 * 7 - 30).collect()),
-            1,
-        ),
-        col(
-            "INT",
-            ColumnData::I32((0..nrows).map(|i| (i as i32) * 100_000 - 5).collect()),
-            1,
-        ),
-        col(
-            "FLT",
-            ColumnData::F32((0..nrows).map(|i| i as f32 * 1.5 - 3.25).collect()),
-            1,
-        ),
-        col(
-            "DBL",
-            ColumnData::F64((0..nrows).map(|i| i as f64 * 0.1).collect()),
-            1,
-        ),
-        col(
-            "BYTE",
-            ColumnData::Bytes((0..nrows).map(|i| (i * 3) as u8).collect()),
-            1,
-        ),
-        // A multi-element (repeat=3) short column.
-        col(
-            "VEC",
-            ColumnData::I16((0..nrows * 3).map(|i| (i * 2) as i16).collect()),
-            3,
-        ),
-    ];
+    let columns = mixed_columns(nrows);
     let algo = compression.name();
 
     // 1. Write an uncompressed table and read it back.
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     let source = TableBuilder::explicit(nrows, columns.clone()).unwrap();
-    w.write_table(&source).unwrap();
+    w.write_table(&source, None).unwrap();
     let bytes = w.into_inner().into_inner();
     let mut r = FitsReader::open(Cursor::new(bytes)).unwrap();
     let orig = r.read_table(1).unwrap();
@@ -75,7 +45,7 @@ fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
     let table::HduParts {
         header: restored_header,
         data: restored_data,
-    } = table::uncompress_table(&compressed_header, &compressed).unwrap();
+    } = table::uncompress_table(&compressed_header, compressed.view()).unwrap();
     for n in 1..=columns.len() {
         assert_eq!(restored_header.get(key!("ZFORM{n}").as_str()), None);
         assert_eq!(restored_header.get(key!("ZCTYP{n}").as_str()), None);
@@ -93,8 +63,8 @@ fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
 
     // 3. The uncompressed table must be byte-identical to the original.
     assert_eq!(
-        restored.metadata().nrows,
-        orig.metadata().nrows,
+        restored.schema().nrows,
+        orig.schema().nrows,
         "{algo}/{rows_per_tile} nrows"
     );
     assert_eq!(
@@ -102,8 +72,8 @@ fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
         "{algo}/{rows_per_tile} row width"
     );
     assert_eq!(
-        restored.raw_rows().unwrap(),
-        orig.raw_rows().unwrap(),
+        restored.view().raw_rows(),
+        orig.view().raw_rows(),
         "{algo}/{rows_per_tile} data mismatch"
     );
 }
@@ -119,23 +89,6 @@ fn table_compression_round_trips() {
     }
 }
 
-/// Emit our `write_compressed_table` output for external (cfitsio) validation of
-/// the *encode* direction. After running, verify with cfitsio:
-///   `funpack -O .tmp/my_unpk.fits .tmp/my_ctable.fits`
-/// then compare `.tmp/my_unpk.fits` against `comp_table_ref.fits` — they match.
-/// Run with `cargo test --features compression -- --ignored emit_compressed_table`.
-#[test]
-#[ignore]
-fn emit_compressed_table_for_funpack() {
-    let src = std::fs::read("tests/data/fits/comp_table_ref.fits").unwrap();
-    let mut r = FitsReader::open(Cursor::new(src)).unwrap();
-    let table = r.read_table(1).unwrap();
-    let header = r.hdus[1].header.clone();
-    let mut w = FitsWriter::new(File::create(".tmp/my_ctable.fits").unwrap());
-    w.write_compressed_table(&header, &table, 100, Compression::Rice)
-        .unwrap();
-}
-
 #[test]
 fn decodes_a_cfitsio_compressed_table() {
     // Ground truth: `comp_table_cfitsio.fits` was produced by cfitsio's `fpack
@@ -149,17 +102,17 @@ fn decodes_a_cfitsio_compressed_table() {
         .unwrap();
     let original = open_fixture("comp_table_ref.fits").read_table(1).unwrap();
 
-    assert_eq!(restored.metadata().nrows, 500);
-    assert_eq!(restored.metadata().nrows, original.metadata().nrows);
+    assert_eq!(restored.schema().nrows, 500);
+    assert_eq!(restored.schema().nrows, original.schema().nrows);
     assert_eq!(restored.schema.row_len, original.schema.row_len);
-    assert_eq!(restored.metadata().columns.len(), 6);
+    assert_eq!(restored.schema().columns.len(), 6);
     assert_eq!(
-        restored.raw_rows().unwrap(),
-        original.raw_rows().unwrap(),
+        restored.view().raw_rows(),
+        original.view().raw_rows(),
         "decoded cfitsio-compressed table must match the original bytes"
     );
     // Spot-check a decoded value against the known formula (INT = i·100000 − 5).
-    match original.column_by_idx(1).unwrap().raw().unwrap() {
+    match restored.column_by_idx(1).unwrap().raw().unwrap() {
         ColumnData::I32(v) => assert_eq!(v[3], 3 * 100_000 - 5),
         other => panic!("expected I32, got {other:?}"),
     }
@@ -167,17 +120,7 @@ fn decodes_a_cfitsio_compressed_table() {
 
 #[test]
 fn table_compression_rejects_metadata_mismatches() {
-    let mut header = Header::new();
-    header
-        .set_internal("XTENSION", "BINTABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 2)
-        .set_internal("NAXIS2", 2)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1)
-        .set_internal("TFORM1", "1I");
+    let header = table_header(2, 2, &["1I"]);
     let rows = [10i16, -20]
         .into_iter()
         .flat_map(i16::to_be_bytes)
@@ -201,7 +144,7 @@ fn table_compression_rejects_metadata_mismatches() {
         mismatched.set_internal(keyword, value);
         let mut out = vec![0xA5];
         assert!(matches!(
-            table::compress_table(&mismatched, &table, 1, Compression::GZIP, &mut out),
+            table::compress_table(&mismatched, table.view(), 1, Compression::GZIP, &mut out),
             Err(FitsError::TableMetadataMismatch { name }) if name == keyword
         ));
         assert_eq!(out, [0xA5], "{keyword} failure mutated the output");
@@ -210,24 +153,15 @@ fn table_compression_rejects_metadata_mismatches() {
     let mut reserved = header.clone();
     reserved.set_internal("ZTABLE", true);
     assert!(matches!(
-        table::compress_table(&reserved, &table, 1, Compression::GZIP, &mut Vec::new()),
+        table::compress_table(&reserved, table.view(), 1, Compression::GZIP, &mut Vec::new()),
         Err(FitsError::TableMetadataMismatch { name }) if name == "ZTABLE"
     ));
 }
 
 #[test]
 fn table_compression_restores_reserved_metadata_exactly() {
-    let mut original_header = Header::new();
+    let mut original_header = table_header(2, 2, &["1I"]);
     original_header
-        .set_internal("XTENSION", "BINTABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 2)
-        .set_internal("NAXIS2", 2)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1)
-        .set_internal("TFORM1", "1I")
         .set_internal("THEAP", 4)
         .comment_internal("THEAP", "original heap start")
         .set_internal("CHECKSUM", "0123456789ABCDEF")
@@ -243,7 +177,7 @@ fn table_compression_restores_reserved_metadata_exactly() {
     let mut compressed_data = Vec::new();
     let mut compressed_header = table::compress_table(
         &original_header,
-        &original_table,
+        original_table.view(),
         1,
         Compression::GZIP,
         &mut compressed_data,
@@ -272,7 +206,7 @@ fn table_compression_restores_reserved_metadata_exactly() {
         .set_internal("DATASUM", "987654321")
         .comment_internal("DATASUM", "compressed data checksum");
     let compressed_table = BinTable::from_data(&compressed_header, compressed_data).unwrap();
-    let restored = table::uncompress_table(&compressed_header, &compressed_table).unwrap();
+    let restored = table::uncompress_table(&compressed_header, compressed_table.view()).unwrap();
 
     let mut original_bytes = Vec::new();
     let mut restored_bytes = Vec::new();
@@ -286,12 +220,9 @@ fn table_compression_restores_reserved_metadata_exactly() {
 fn decodes_a_cfitsio_compressed_table_with_a_vla_column() {
     let mut f = open_fixture("comp_table_vla.fits");
     let table = f.read_compressed_table(1).unwrap();
+    assert_eq!(table.schema().columns[1].tform.kind, TformKind::ArrayDesc32);
     assert_eq!(
-        table.metadata().columns[1].tform.kind,
-        TformKind::ArrayDesc32
-    );
-    assert_eq!(
-        table.metadata().columns[1].tform.vla_elem,
+        table.schema().columns[1].tform.vla_elem,
         Some(TformKind::I32)
     );
     assert_eq!(
@@ -300,10 +231,13 @@ fn decodes_a_cfitsio_compressed_table_with_a_vla_column() {
     );
     let arrays = table.column_by_idx(1).unwrap().vla().unwrap();
     assert_eq!(arrays.len(), 600);
-    for (row, array) in arrays.into_iter().enumerate() {
+    let ColumnData::I32(values) = arrays.values() else {
+        panic!("a J heap decodes to i32 values");
+    };
+    for row in 0..arrays.len() {
         assert_eq!(
-            array,
-            ColumnData::I32((0..(row % 7) as i32).collect()),
+            values[arrays.range(row)],
+            (0..i32::try_from(row % 7).unwrap()).collect::<Vec<_>>(),
             "row {row}"
         );
     }
@@ -313,7 +247,8 @@ fn decodes_a_cfitsio_compressed_table_with_a_vla_column() {
 fn compressed_table_vla_round_trips_all_table_codecs() {
     let mut source = open_fixture("comp_table_vla.fits");
     let compressed = source.read_table(1).unwrap();
-    let mut original_parts = table::uncompress_table(&source.hdus[1].header, &compressed).unwrap();
+    let mut original_parts =
+        table::uncompress_table(&source.hdus[1].header, compressed.view()).unwrap();
     assert_eq!(
         u32::from_be_bytes(original_parts.data[4..8].try_into().unwrap()),
         0
@@ -331,7 +266,7 @@ fn compressed_table_vla_round_trips_all_table_codecs() {
         let mut encoded = Vec::new();
         let encoded_header = table::compress_table(
             &original_parts.header,
-            &original,
+            original.view(),
             127,
             compression,
             &mut encoded,
@@ -344,7 +279,7 @@ fn compressed_table_vla_round_trips_all_table_codecs() {
             compression.name()
         );
         let encoded_table = BinTable::from_data(&encoded_header, encoded).unwrap();
-        let restored = table::uncompress_table(&encoded_header, &encoded_table).unwrap();
+        let restored = table::uncompress_table(&encoded_header, encoded_table.view()).unwrap();
         assert_eq!(restored.data, original_parts.data, "{}", compression.name());
     }
 }
@@ -352,14 +287,17 @@ fn compressed_table_vla_round_trips_all_table_codecs() {
 #[test]
 fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
     for wide in [false, true] {
-        let mut column = WriteColumn::vla("VLA", vec![ColumnData::Bytes(vec![7])]).unwrap();
+        let mut column = WriteColumn::vla(
+            "VLA",
+            Ragged::from_rows(vec![ColumnData::Bytes(vec![7])]).unwrap(),
+        );
         if wide {
-            column = column.wide().unwrap();
+            column = column.wide();
         }
         let prefix = WriteColumn::scalar("PREFIX", ColumnData::Bytes(vec![3]));
         let builder = TableBuilder::explicit(1, vec![prefix, column]).unwrap();
         let mut source_writer = FitsWriter::new(Cursor::new(Vec::new()));
-        source_writer.write_table(&builder).unwrap();
+        source_writer.write_table(&builder, None).unwrap();
         let source_bytes = source_writer.into_inner().into_inner();
         let mut source = FitsReader::from_bytes(&source_bytes).unwrap();
         let original_header = source.hdus[1].header.clone();
@@ -367,13 +305,13 @@ fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
         let mut encoded = Vec::new();
         let compressed_header = table::compress_table(
             &original_header,
-            &original,
+            original.view(),
             1,
             Compression::GZIP,
             &mut encoded,
         )
         .unwrap();
-        let outer = descriptor::PqDescriptor::decode(&encoded[16..32], true).unwrap();
+        let outer = PqDescriptor::decode(&encoded[16..32], true).unwrap();
         let stream_range = outer
             .heap_range(TformKind::Byte, 32, encoded.len())
             .unwrap();
@@ -400,7 +338,10 @@ fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
             .unwrap();
             data.extend_from_slice(&cell);
             let mut header = compressed_header.clone();
-            header.set_internal("PCOUNT", (heap_prefix.len() + cell.len()) as i64);
+            header.set_internal(
+                "PCOUNT",
+                i64::try_from(heap_prefix.len() + cell.len()).unwrap(),
+            );
 
             let mut primary = Header::new();
             primary
@@ -413,7 +354,7 @@ fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
             let bytes = file.into_inner().into_inner();
             let mut reader = FitsReader::from_bytes(&bytes).unwrap();
             let error = reader.read_compressed_table(1).unwrap_err();
-            case.assert_error(error);
+            case.assert_error(&error);
         }
     }
 }
@@ -430,18 +371,10 @@ fn read_compressed_table_rejects_a_plain_bintable() {
 #[test]
 fn uncompress_table_rejects_overflowing_row_product() {
     // ZNAXIS2·ZNAXIS1 = 3e18·8 = 2.4e19 overflows usize; uncompress must reject the
-    // header before allocating the row buffer (R2-3).
-    let mut h = Header::new();
-    h.set_internal("XTENSION", "BINTABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
-        .set_internal("NAXIS1", 16) // one 1QB descriptor row
-        .set_internal("NAXIS2", 1)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1)
-        .set_internal("TFORM1", "1QB")
-        .set_internal("TTYPE1", "C1")
+    // header before allocating the row buffer.
+    // One 1QB descriptor row.
+    let mut h = table_header(16, 1, &["1QB"]);
+    h.set_internal("TTYPE1", "C1")
         .set_internal("ZTABLE", true)
         .set_internal("ZTILELEN", 1)
         .set_internal("ZNAXIS1", 8)
@@ -453,13 +386,13 @@ fn uncompress_table_rejects_overflowing_row_product() {
     data.extend_from_slice(&0i64.to_be_bytes()); // offset
     let table = BinTable::from_data(&h, data).unwrap();
     assert!(matches!(
-        table::uncompress_table(&h, &table),
+        table::uncompress_table(&h, table.view()),
         Err(FitsError::DataUnitOverflow)
     ));
 
     h.set_internal("ZNAXIS1", 8).set_internal("ZNAXIS2", 2);
     assert!(matches!(
-        table::uncompress_table(&h, &table),
+        table::uncompress_table(&h, table.view()),
         Err(FitsError::DataSizeMismatch {
             expected: 2,
             got: 1
@@ -469,7 +402,7 @@ fn uncompress_table_rejects_overflowing_row_product() {
     for keyword in ["ZNAXIS1", "ZNAXIS2", "ZTILELEN", "TFIELDS"] {
         h.set_internal(keyword, -1);
         assert!(matches!(
-            table::uncompress_table(&h, &table),
+            table::uncompress_table(&h, table.view()),
             Err(FitsError::KeywordOutOfRange { name }) if name == keyword
         ));
         h.set_internal(keyword, 1);
@@ -480,7 +413,7 @@ fn uncompress_table_rejects_overflowing_row_product() {
     // diverge rather than merely being out of range.
     h.set_internal("ZTILELEN", 0);
     assert!(matches!(
-        table::uncompress_table(&h, &table),
+        table::uncompress_table(&h, table.view()),
         Err(FitsError::KeywordOutOfRange { name: "ZTILELEN" })
     ));
     h.set_internal("ZTILELEN", 1);
@@ -493,7 +426,173 @@ fn uncompress_table_rejects_overflowing_row_product() {
         .set_internal("ZFORM2", "1K");
     let two_column_table = BinTable::from_data(&h, vec![0; 32]).unwrap();
     assert!(matches!(
-        table::uncompress_table(&h, &two_column_table),
+        table::uncompress_table(&h, two_column_table.view()),
         Err(FitsError::DataUnitOverflow)
+    ));
+}
+
+/// Compresses `columns` as one table through the writer and reads them back through
+/// `read_compressed_table`.
+fn compressed_round_trip(
+    columns: Vec<WriteColumn>,
+    nrows: usize,
+    compression: Compression,
+) -> (BinTable, BinTable) {
+    let mut r =
+        round_trip(|w| w.write_table(&TableBuilder::explicit(nrows, columns).unwrap(), None));
+    let original = r.read_table(1).unwrap();
+    let header = r.hdus[1].header.clone();
+    let mut cw = FitsWriter::new(Cursor::new(Vec::new()));
+    cw.write_compressed_table(&header, &original, nrows, compression)
+        .unwrap();
+    let mut cr = FitsReader::open(Cursor::new(cw.into_inner().into_inner())).unwrap();
+    // §10.3.1: the copied value keywords describe the uncompressed columns, so the
+    // container's own schema reads none of them.
+    let container = cr.table_schema(1).unwrap();
+    assert!(container.columns.iter().all(|column| column.tdim.is_none()
+        && column.tscale == 1.0
+        && column.tzero == 0.0
+        && column.tnull.is_none()));
+    (original, cr.read_compressed_table(1).unwrap())
+}
+
+/// §10.3.1: the copied `TDIMn` describes the uncompressed column, not the compressed
+/// container cell. A constant `100J` column shaped `(10,10)` compresses to far fewer than
+/// 100 elements and once failed the `TDIMn` check on read.
+#[test]
+fn a_shaped_column_reads_back_from_a_compressed_table() {
+    for compression in [
+        Compression::Rice,
+        Compression::GZIP,
+        Compression::GZIP_SHUFFLED,
+    ] {
+        let column = WriteColumn::fixed("CUBE", ColumnData::I32(vec![7; 2 * 100]), 100)
+            .with_tdim(vec![10, 10]);
+        let (original, restored) = compressed_round_trip(vec![column], 2, compression);
+        assert_eq!(
+            restored.column_by_idx(0).unwrap().raw().unwrap(),
+            original.column_by_idx(0).unwrap().raw().unwrap(),
+            "{}",
+            compression.name()
+        );
+        assert_eq!(restored.schema().columns[0].tdim, Some(vec![10, 10]));
+    }
+}
+
+/// A variable-length array is stored compressed when its codec shrinks it and as is
+/// otherwise — cfitsio's rule, which makes a stored length equal to the raw length the
+/// mark of a raw array. Pseudo-random bytes do not deflate; a run of zeros does.
+#[test]
+fn a_variable_length_array_is_stored_compressed_only_when_it_shrinks() {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut noise = |len: usize| -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect()
+    };
+    let noise_row = noise(40);
+    let rows = vec![
+        ColumnData::Bytes(noise_row.clone()),
+        ColumnData::Bytes(Vec::new()),
+        ColumnData::Bytes(vec![0; 400]),
+    ];
+    let column = WriteColumn::vla("ARRAYS", Ragged::from_rows(rows.clone()).unwrap());
+    let mut r =
+        round_trip(|w| w.write_table(&TableBuilder::explicit(3, vec![column]).unwrap(), None));
+    let original = r.read_table(1).unwrap();
+    let header = r.hdus[1].header.clone();
+    let mut encoded = Vec::new();
+    let encoded_header =
+        table::compress_table(&header, original.view(), 3, Compression::GZIP, &mut encoded)
+            .unwrap();
+    let encoded_table = BinTable::from_data(&encoded_header, encoded).unwrap();
+
+    // The container's one cell gunzips to 3 compressed-array descriptors followed by the
+    // 3 original ones.
+    let cell = encoded_table
+        .column_by_idx(0)
+        .unwrap()
+        .vla_column()
+        .unwrap();
+    let mut combined = Vec::new();
+    gzip::gunzip_into(
+        convert::byte_cell(cell.cell(0).unwrap()).unwrap(),
+        3 * 16 + 3 * 8,
+        &mut combined,
+    )
+    .unwrap();
+    let stored = |row: usize| {
+        let descriptor = &combined[row * 16..(row + 1) * 16];
+        let descriptor = PqDescriptor {
+            count: usize::try_from(u64::from_be_bytes(descriptor[..8].try_into().unwrap()))
+                .unwrap(),
+            offset: usize::try_from(u64::from_be_bytes(descriptor[8..].try_into().unwrap()))
+                .unwrap(),
+        };
+        encoded_table
+            .view()
+            .pq_payload(descriptor, TformKind::Byte)
+            .unwrap()
+            .to_vec()
+    };
+    assert_eq!(stored(0), noise_row, "incompressible: stored as is");
+    assert!(stored(1).is_empty(), "empty: nothing stored");
+    let zeros = stored(2);
+    assert!(
+        zeros.len() < 400 && zeros[..2] == [0x1f, 0x8b],
+        "compressible: a gzip member"
+    );
+
+    let restored = table::uncompress_table(&encoded_header, encoded_table.view()).unwrap();
+    let restored = BinTable::from_data(&restored.header, restored.data).unwrap();
+    assert_eq!(
+        restored.column_by_idx(0).unwrap().vla().unwrap(),
+        Ragged::from_rows(rows).unwrap()
+    );
+}
+
+/// A declared `ZCTYPn` is honoured as written, so `RICE_1` on a 64-bit column —
+/// which no conforming writer emits — is refused rather than read as `GZIP_2`.
+#[test]
+fn a_declared_rice_codec_on_a_64_bit_column_is_refused() {
+    let column = WriteColumn::scalar("BIG", ColumnData::I64(vec![1, 2, 3]));
+    let mut r =
+        round_trip(|w| w.write_table(&TableBuilder::explicit(3, vec![column]).unwrap(), None));
+    let original = r.read_table(1).unwrap();
+    let header = r.hdus[1].header.clone();
+    let mut cw = FitsWriter::new(Cursor::new(Vec::new()));
+    cw.write_compressed_table(&header, &original, 3, Compression::GZIP)
+        .unwrap();
+    let mut cr = FitsReader::open(Cursor::new(cw.into_inner().into_inner())).unwrap();
+    assert_eq!(
+        cr.hdus[1].header.get_text("ZCTYP1").unwrap(),
+        Some("GZIP_1")
+    );
+    assert_eq!(
+        cr.read_compressed_table(1).unwrap().view().raw_rows(),
+        original.view().raw_rows()
+    );
+
+    let mut tampered = cr.hdus[1].header.clone();
+    tampered.set_internal("ZCTYP1", "RICE_1");
+    let data = cr.read_data_raw(1).unwrap().into_data();
+    let mut primary = Header::new();
+    primary
+        .set_internal("SIMPLE", true)
+        .set_internal("BITPIX", 8)
+        .set_internal("NAXIS", 0);
+    let mut file = FitsWriter::new(Cursor::new(Vec::new()));
+    file.write_raw_hdu(&primary, &[]).unwrap();
+    file.write_raw_hdu(&tampered, &data).unwrap();
+    let bytes = file.into_inner().into_inner();
+    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+    assert!(matches!(
+        reader.read_compressed_table(1),
+        Err(FitsError::UnsupportedCompression { name }) if name == "RICE_1 on a K column"
     ));
 }
