@@ -297,6 +297,11 @@ impl Image {
         self.samples.as_view()
     }
 
+    /// Consume the image and return its host-endian stored samples.
+    pub fn into_samples(self) -> ImageData {
+        self.samples
+    }
+
     pub(crate) fn validate_geometry(&self) -> Result<usize> {
         let expected = shape_product(&self.shape)?;
         let got = self.samples.len();

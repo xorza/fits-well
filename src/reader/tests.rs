@@ -1542,6 +1542,18 @@ fn a_data_checksum_summed_during_the_decode_reads_the_unit_once() {
         );
     }
 
+    // The whole image in one summed section is the image written, and its sum is valid.
+    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+    let mut sum = reader.begin_data_checksum(0).unwrap();
+    let whole = reader
+        .read_image_section_summed(0, &[0..7, 0..5], &mut sum)
+        .unwrap();
+    assert_eq!(whole.into_samples(), image.samples);
+    assert_eq!(
+        reader.finish_data_checksum(sum).unwrap().datasum,
+        ChecksumStatus::Valid
+    );
+
     // Rows of 7 samples are 14 bytes. Rows 3 and 4 come first and are not fed; rows 0 to 2 then
     // continue the sum to byte 42, and the finish reads the unit from there.
     let (report, fetched) = read(&bytes, &[3..5, 0..2, 2..3], true);
