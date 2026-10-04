@@ -188,6 +188,7 @@ pub mod io {
     pub use crate::hdu::HduKind;
     #[cfg(feature = "mmap")]
     pub use crate::reader::MmapReader;
+    pub use crate::reader::data_checksum::DataChecksum;
     pub use crate::reader::hdu::Hdu;
     #[cfg(feature = "mmap")]
     pub use crate::reader::source::MmapSource;

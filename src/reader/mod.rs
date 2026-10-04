@@ -33,6 +33,7 @@ use crate::hdu::data_extent;
 use crate::header_model::Header;
 use crate::header_model::card::is_end_record;
 use crate::ragged::Ragged;
+use crate::reader::data_checksum::DataChecksum;
 use crate::reader::data_source::DataSource;
 use crate::reader::data_source::TableRows;
 use crate::reader::hdu::Hdu;
@@ -41,6 +42,7 @@ use crate::world_coordinates::tabular;
 
 #[cfg(feature = "bench")]
 pub(crate) mod bench;
+pub(crate) mod data_checksum;
 mod data_source;
 pub(crate) mod hdu;
 pub(crate) mod source;
@@ -415,6 +417,31 @@ impl<S: Source> FitsReader<S> {
     /// Read a checked N-dimensional rectangular image section. Axis ranges are
     /// zero-based, half-open, and ordered fastest-axis first.
     pub fn read_image_section(&mut self, index: usize, ranges: &[Range<usize>]) -> Result<Image> {
+        self.read_image_section_fed(index, ranges, None)
+    }
+
+    /// [`Self::read_image_section`], feeding the bytes of a plain image to `sum` as they are read.
+    /// A compressed image's tiles are not fed; the finish reads its unit.
+    pub fn read_image_section_summed(
+        &mut self,
+        index: usize,
+        ranges: &[Range<usize>],
+        sum: &mut DataChecksum,
+    ) -> Result<Image> {
+        self.read_image_section_fed(index, ranges, Some(sum))
+    }
+
+    /// [`Self::read_image_section`], feeding `sum`, when given, as it reads a plain image.
+    fn read_image_section_fed(
+        &mut self,
+        index: usize,
+        ranges: &[Range<usize>],
+        sum: Option<&mut DataChecksum>,
+    ) -> Result<Image> {
+        debug_assert!(
+            sum.as_ref().is_none_or(|sum| sum.index == index),
+            "a sum of another HDU"
+        );
         let hdu = checked_hdu(&self.hdus, index)?;
         #[cfg(feature = "compression")]
         if hdu.kind == HduKind::CompressedImage {
@@ -440,6 +467,7 @@ impl<S: Source> FitsReader<S> {
             ranges,
             &mut self.section_shape,
             &mut self.section_bytes,
+            sum,
         )?;
         Image::new_scaled(
             self.section_shape.as_slice(),
@@ -455,6 +483,33 @@ impl<S: Source> FitsReader<S> {
         ranges: &[Range<usize>],
         words: &'a mut Vec<u64>,
     ) -> Result<BorrowedImage<'a>> {
+        self.read_image_section_view_fed(index, ranges, words, None)
+    }
+
+    /// [`Self::read_image_section_view`], feeding the bytes of a plain image to `sum` as they are
+    /// read. A compressed image's tiles are not fed; the finish reads its unit.
+    pub fn read_image_section_view_summed<'a>(
+        &'a mut self,
+        index: usize,
+        ranges: &[Range<usize>],
+        words: &'a mut Vec<u64>,
+        sum: &mut DataChecksum,
+    ) -> Result<BorrowedImage<'a>> {
+        self.read_image_section_view_fed(index, ranges, words, Some(sum))
+    }
+
+    /// [`Self::read_image_section_view`], feeding `sum`, when given, as it reads a plain image.
+    fn read_image_section_view_fed<'a>(
+        &'a mut self,
+        index: usize,
+        ranges: &[Range<usize>],
+        words: &'a mut Vec<u64>,
+        sum: Option<&mut DataChecksum>,
+    ) -> Result<BorrowedImage<'a>> {
+        debug_assert!(
+            sum.as_ref().is_none_or(|sum| sum.index == index),
+            "a sum of another HDU"
+        );
         let hdu = checked_hdu(&self.hdus, index)?;
         #[cfg(feature = "compression")]
         if hdu.kind == HduKind::CompressedImage {
@@ -483,6 +538,7 @@ impl<S: Source> FitsReader<S> {
             ranges,
             &mut self.section_shape,
             &mut self.section_bytes,
+            sum,
         )?;
         let samples = if image.bitpix == Bitpix::U8 {
             ImageView::U8(&self.section_bytes)
@@ -695,7 +751,40 @@ impl<S: Source> FitsReader<S> {
     /// [`ChecksumStatus::Unknown`] because the standard reserves them for
     /// undefined or unknown checksum values.
     pub fn verify_checksum(&mut self, index: usize) -> Result<ChecksumReport> {
+        let sum = self.begin_data_checksum(index)?;
+        self.finish_data_checksum(sum)
+    }
+
+    /// An empty [`DataChecksum`] of HDU `index`'s data unit, for
+    /// [`Self::read_image_section_summed`] or [`Self::read_image_section_view_summed`] to feed and
+    /// [`Self::finish_data_checksum`] to finish.
+    pub fn begin_data_checksum(&self, index: usize) -> Result<DataChecksum> {
         let hdu = checked_hdu(&self.hdus, index)?;
+        let lengths = DataLengths::new(hdu.data_bytes)?;
+        Ok(DataChecksum::new(
+            index,
+            hdu.data_offset,
+            lengths.padded as u64,
+        ))
+    }
+
+    /// Read whatever of the data unit `sum` has not summed, in bounded chunks, and judge the HDU's
+    /// `DATASUM` and `CHECKSUM` against it: the same report as [`Self::verify_checksum`], which is
+    /// this with nothing fed.
+    ///
+    /// # Panics
+    ///
+    /// If `sum` is not [`Self::begin_data_checksum`]'s for an HDU of this reader's layout.
+    pub fn finish_data_checksum(&mut self, mut sum: DataChecksum) -> Result<ChecksumReport> {
+        /// The bytes read at a time: a bounded scratch, whatever the unit's size.
+        const CHUNK: u64 = 1 << 20;
+        let hdu = checked_hdu(&self.hdus, sum.index)?;
+        let padded = DataLengths::new(hdu.data_bytes)?.padded as u64;
+        assert!(
+            sum.covers(hdu.data_offset, padded),
+            "a data checksum of another reader's HDU {}",
+            sum.index
+        );
         let stored_datasum = hdu.header.get_text("DATASUM")?;
         let stored_checksum = hdu.header.get_text("CHECKSUM")?;
         let expected_datasum = stored_datasum
@@ -710,11 +799,14 @@ impl<S: Source> FitsReader<S> {
         if expected_datasum.is_none() && !verify_whole_hdu {
             return Ok(report);
         }
-        let lengths = DataLengths::new(hdu.data_bytes)?;
-        // The block-padded data unit (length = the padded size — the checksum covers
-        // the block fill too).
-        let unit = self.data.slice(hdu.data_offset, lengths.padded)?;
-        let data_sum = checksum::accumulate(unit, 0);
+        let header_sum = hdu.header_sum;
+        while sum.remaining() > 0 {
+            let offset = sum.next;
+            let len = usize::try_from(sum.remaining().min(CHUNK)).expect("a chunk fits usize");
+            let bytes = self.data.slice(offset, len)?;
+            sum.feed(offset, bytes);
+        }
+        let data_sum = sum.sum();
         if let Some(expected) = expected_datasum {
             report.datasum = if expected == data_sum {
                 ChecksumStatus::Valid
@@ -723,7 +815,7 @@ impl<S: Source> FitsReader<S> {
             };
         }
         if verify_whole_hdu {
-            report.checksum = if checksum::combine(hdu.header_sum, data_sum) == 0xFFFF_FFFF {
+            report.checksum = if checksum::combine(header_sum, data_sum) == 0xFFFF_FFFF {
                 ChecksumStatus::Valid
             } else {
                 ChecksumStatus::Invalid
