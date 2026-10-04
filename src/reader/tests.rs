@@ -1481,3 +1481,154 @@ fn readers_recover_their_original_sources() {
         .into_inner();
     assert_eq!(cursor.into_inner(), bytes);
 }
+
+/// A data checksum fed by a decode reading a BITPIX=16 image front to back, in sections whose
+/// runs split words, gives the report `verify_checksum` gives — valid, then invalid once a stored
+/// byte changes — and the decode with its finish fetch the data unit once, block fill included,
+/// where the decode and a separate verification fetch it twice. Sections read out of order feed
+/// only what continues the sum, and the finish reads the rest. The owned and the borrowed section
+/// reads feed the sum alike.
+#[test]
+fn a_data_checksum_summed_during_the_decode_reads_the_unit_once() {
+    use crate::block::padded_len;
+    use crate::data::image_data::ImageData;
+    use crate::reader::source::SliceSource;
+    use crate::reader::source::internals::CountingSource;
+    use std::cell::Cell;
+
+    let image = Image {
+        shape: vec![7, 5],
+        samples: ImageData::I16((0..35).map(|value| value * 731 - 9000).collect()),
+        scaling: Scaling::IDENTITY,
+    };
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
+    writer.write_image(&image, None).unwrap();
+    let bytes = writer.into_inner().into_inner();
+    let padded = padded_len(35 * 2).unwrap() as usize;
+
+    let read = |bytes: &[u8], rows: &[Range<usize>], view: bool| {
+        let fetched = Rc::new(Cell::new(0));
+        let source = CountingSource {
+            inner: SliceSource::new(bytes),
+            fetched: Rc::clone(&fetched),
+        };
+        let mut reader = FitsReader::from_source(source).unwrap();
+        let scanned = fetched.get();
+        let mut sum = reader.begin_data_checksum(0).unwrap();
+        let mut words = Vec::new();
+        for row in rows {
+            let ranges = [0..7, row.clone()];
+            if view {
+                reader
+                    .read_image_section_view_summed(0, &ranges, &mut words, &mut sum)
+                    .unwrap();
+            } else {
+                reader
+                    .read_image_section_summed(0, &ranges, &mut sum)
+                    .unwrap();
+            }
+        }
+        let report = reader.finish_data_checksum(sum).unwrap();
+        (report, fetched.get() - scanned)
+    };
+    let in_order = [0..2, 2..3, 3..5];
+    for view in [false, true] {
+        let (report, fetched) = read(&bytes, &in_order, view);
+        assert_eq!(report.datasum, ChecksumStatus::Valid, "view {view}");
+        assert_eq!(report.checksum, ChecksumStatus::Valid, "view {view}");
+        assert_eq!(
+            fetched, padded,
+            "view {view}: the decode and its finish fetch the unit once"
+        );
+    }
+
+    // Rows of 7 samples are 14 bytes. Rows 3 and 4 come first and are not fed; rows 0 to 2 then
+    // continue the sum to byte 42, and the finish reads the unit from there.
+    let (report, fetched) = read(&bytes, &[3..5, 0..2, 2..3], true);
+    assert_eq!(report.datasum, ChecksumStatus::Valid);
+    assert_eq!(
+        fetched,
+        70 + (padded - 42),
+        "out of order, the finish reads from the first gap"
+    );
+
+    let mut corrupt = bytes.clone();
+    let data_start = bytes.len() - padded;
+    corrupt[data_start + 11] ^= 0x40;
+    let (report, _) = read(&corrupt, &in_order, true);
+    assert_eq!(report.datasum, ChecksumStatus::Invalid);
+    let mut reader = FitsReader::from_bytes(&corrupt).unwrap();
+    assert_eq!(reader.verify_checksum(0).unwrap(), report);
+}
+
+/// A compressed image's sections are decoded from tiles, which feed nothing, so the finish reads
+/// the whole unit and gives `verify_checksum`'s report: valid, and the image the sections read.
+#[cfg(feature = "compression")]
+#[test]
+fn a_compressed_image_summed_through_its_sections_reads_the_unit_at_the_finish() {
+    use crate::compress::{Compression, CompressionOptions};
+    use crate::data::image_data::ImageData;
+
+    let image = Image {
+        shape: vec![9, 7],
+        samples: ImageData::I16((0..63).map(|value| value * 97 - 3000).collect()),
+        scaling: Scaling::IDENTITY,
+    };
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
+    writer
+        .write_compressed_image(
+            &image,
+            Compression::GZIP,
+            &CompressionOptions::tiled([4, 3]),
+            None,
+        )
+        .unwrap();
+    let bytes = writer.into_inner().into_inner();
+    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+    let mut sum = reader.begin_data_checksum(1).unwrap();
+    let mut words = Vec::new();
+    for rows in [0..4, 4..7] {
+        reader
+            .read_image_section_view_summed(1, &[0..9, rows], &mut words, &mut sum)
+            .unwrap();
+    }
+    let report = reader.finish_data_checksum(sum).unwrap();
+    assert_eq!(report.datasum, ChecksumStatus::Valid);
+    assert_eq!(report.checksum, ChecksumStatus::Valid);
+    assert_eq!(reader.verify_checksum(1).unwrap(), report);
+}
+
+/// A sum begun on one file's HDU is refused at the finish on another file whose HDU lies
+/// elsewhere, rather than judging the second file's keywords against the first file's bytes.
+#[test]
+#[should_panic(expected = "a data checksum of another reader's HDU")]
+fn a_sum_finished_on_another_readers_hdu_panics() {
+    use crate::data::image_data::ImageData;
+
+    let file = |extra: &[(&str, i64)]| {
+        let image = Image {
+            shape: vec![4, 4],
+            samples: ImageData::I16(vec![1; 16]),
+            scaling: Scaling::IDENTITY,
+        };
+        let mut header = Header::new();
+        for &(key, value) in extra {
+            header.set(key, value).unwrap();
+        }
+        let mut writer = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
+        writer.write_image(&image, Some(&header)).unwrap();
+        writer.into_inner().into_inner()
+    };
+    let short = file(&[]);
+    // Enough cards to push the data unit a header block further on.
+    let keys: Vec<String> = (0..40).map(|index| format!("KEY{index}")).collect();
+    let cards: Vec<(&str, i64)> = keys.iter().map(|key| (key.as_str(), 1)).collect();
+    let long = file(&cards);
+    let sum = FitsReader::from_bytes(&short)
+        .unwrap()
+        .begin_data_checksum(0)
+        .unwrap();
+    let _ = FitsReader::from_bytes(&long)
+        .unwrap()
+        .finish_data_checksum(sum);
+}

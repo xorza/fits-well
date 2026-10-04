@@ -17,6 +17,7 @@ use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::image_geometry::ImageGeometry;
+use crate::reader::data_checksum::DataChecksum;
 use crate::reader::hdu::Hdu;
 use crate::reader::source::Source;
 
@@ -103,7 +104,8 @@ impl<S: Source> DataSource<S> {
     }
 
     /// Write the shape `ranges` selects from the plain image `hdu` holds to `shape`,
-    /// and its stored big-endian samples to `bytes`, reading only the selected runs.
+    /// and its stored big-endian samples to `bytes`, reading only the selected runs, each fed to
+    /// `sum`, when given, as it is read.
     pub(crate) fn plain_section(
         &mut self,
         hdu: &Hdu,
@@ -111,6 +113,7 @@ impl<S: Source> DataSource<S> {
         ranges: &[Range<usize>],
         shape: &mut Vec<usize>,
         bytes: &mut Vec<u8>,
+        mut sum: Option<&mut DataChecksum>,
     ) -> Result<()> {
         validate_image_region(ranges, &image.shape, shape)?;
         let element_size = image.bitpix.elem_size();
@@ -120,8 +123,13 @@ impl<S: Source> DataSource<S> {
         bytes.clear();
         allocation::try_reserve(bytes, nbytes)?;
         visit_image_region_runs(&image.shape, ranges, shape, element_size, |run| {
-            self.source
-                .read_append(offset_at(hdu.data_offset, run.offset)?, run.len, bytes)
+            let offset = offset_at(hdu.data_offset, run.offset)?;
+            let before = bytes.len();
+            self.source.read_append(offset, run.len, bytes)?;
+            if let Some(sum) = sum.as_deref_mut() {
+                sum.feed(offset, &bytes[before..]);
+            }
+            Ok(())
         })?;
         debug_assert_eq!(bytes.len(), nbytes);
         Ok(())
