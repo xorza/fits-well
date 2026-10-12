@@ -40,7 +40,7 @@ use crate::reader::hdu::Hdu;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::tabular;
 
-#[cfg(feature = "bench")]
+#[cfg(feature = "internals")]
 pub(crate) mod bench;
 pub(crate) mod data_checksum;
 mod data_source;

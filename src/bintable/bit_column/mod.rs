@@ -21,12 +21,15 @@ use crate::bintable::tform_kind::TformKind;
 /// a row with the source lifetime via [`row`](Self::row). Rows are full `bitvec`
 /// slices — `count_ones()`, `iter_ones()`, `.to_bitvec()` to own, etc.
 ///
-/// ```ignore
+/// ```
+/// # fn read(table: &fits_well::table::BinTable, row: usize) -> fits_well::Result<()> {
 /// let flags = table.column_by_name("DQ")?.bits()?;
 /// let bit = flags[(row, 3)];             // bool (panics out of range)
 /// let bit = flags[row][3];               // same, via the row slice
 /// let bit = flags.get(row, 3);           // Option<bool> (checked)
 /// let set = flags[row].count_ones();     // bitvec ops on the row
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct BitColumn<'a> {

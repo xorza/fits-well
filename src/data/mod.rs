@@ -11,7 +11,7 @@
 //! (the thread-parallel layer is the compute-bound tiled codecs in the `compress`
 //! module, not this path).
 
-#[cfg(feature = "bench")]
+#[cfg(feature = "internals")]
 pub(crate) mod bench;
 pub(crate) mod image_data;
 pub(crate) mod image_view;

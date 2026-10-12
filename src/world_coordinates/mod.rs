@@ -27,7 +27,7 @@ use crate::world_coordinates::table_wcs::TableWcs;
 use crate::world_coordinates::wcs_axis::WcsAxis;
 
 pub(crate) mod axis;
-#[cfg(feature = "bench")]
+#[cfg(feature = "internals")]
 pub(crate) mod bench;
 mod celestial_axis;
 pub(crate) mod celestial_frame;

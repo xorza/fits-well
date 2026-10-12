@@ -198,8 +198,8 @@ pub mod io {
     };
 }
 
-/// Entry points for the allocation-counting integration test (the `internals`
-/// feature). They wrap crate-private fixtures; they are **not** a stable API.
+/// Entry points for the allocation-counting integration test. They wrap
+/// crate-private fixtures; they are **not** a stable API.
 #[cfg(feature = "internals")]
 pub mod internals {
     pub use crate::world_coordinates::tabular::internals::{
@@ -207,9 +207,9 @@ pub mod internals {
     };
 }
 
-/// The criterion groups the benches under `benches/` run (the `bench` feature).
-/// They are **not** a stable API.
-#[cfg(feature = "bench")]
+/// The criterion groups the benches under `benches/` run. They are **not** a
+/// stable API.
+#[cfg(feature = "internals")]
 pub mod bench {
     #[cfg(feature = "compression")]
     pub use crate::compress::bench::{compress, compress_table, decompress, decompress_table};
