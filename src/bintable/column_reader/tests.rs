@@ -1,10 +1,10 @@
-use crate::bintable::BinTable;
+use crate::bintable::Table;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::internals::table_header;
-use crate::data::unsigned_data::UnsignedData;
-use crate::data::{I8_OFFSET, U16_OFFSET, U64_OFFSET};
 use crate::error::FitsError;
 use crate::error::Indexed;
+use crate::image_model::unsigned_data::UnsignedData;
+use crate::image_model::{I8_OFFSET, U16_OFFSET, U64_OFFSET};
 use crate::ragged::Ragged;
 use num_complex::Complex;
 
@@ -20,7 +20,7 @@ fn decodes_fixed_width_columns_from_hand_built_data() {
         data.extend_from_slice(text);
     }
 
-    let table = BinTable::from_data(&header, data).unwrap();
+    let table = Table::from_data(&header, data).unwrap();
     let schema = table.schema();
     assert_eq!(schema.nrows, 2);
     assert_eq!(
@@ -49,7 +49,7 @@ fn decodes_fixed_width_columns_from_hand_built_data() {
 fn zero_repeat_column_decodes_to_empty() {
     let header = table_header(4, 1, &["0D", "0PJ", "0QD", "0PX", "1J"]);
     let data = 7i32.to_be_bytes().to_vec();
-    let table = BinTable::from_data(&header, data).unwrap();
+    let table = Table::from_data(&header, data).unwrap();
     assert_eq!(
         table.column_by_idx(0).unwrap().raw().unwrap(),
         ColumnData::F64(vec![])
@@ -81,7 +81,7 @@ fn read_column_physical_applies_tscal_tzero_and_tnull() {
     for x in [3i16, 5, 7] {
         data.extend_from_slice(&x.to_be_bytes());
     }
-    let table = BinTable::from_data(&header, data).unwrap();
+    let table = Table::from_data(&header, data).unwrap();
     // 3 → 10 + 2·3 = 16 ; 5 == TNULL → NaN ; 7 → 10 + 2·7 = 24, by index and by a
     // name in any case.
     for column in [table.column_by_idx(0), table.column_by_name("flux")] {
@@ -107,7 +107,7 @@ fn read_column_physical_applies_tscal_tzero_and_tnull() {
         let mut malformed = header.clone();
         malformed.set_internal(keyword, "not numeric");
         assert!(matches!(
-            BinTable::from_data(&malformed, vec![0; 6]),
+            Table::from_data(&malformed, vec![0; 6]),
             Err(FitsError::TypeMismatch { name, expected: actual })
                 if name == keyword && actual == expected
         ));
@@ -117,7 +117,7 @@ fn read_column_physical_applies_tscal_tzero_and_tnull() {
 #[test]
 fn read_column_physical_rejects_non_numeric_columns() {
     let header = table_header(3, 1, &["3A"]);
-    let table = BinTable::from_data(&header, b"abc".to_vec()).unwrap();
+    let table = Table::from_data(&header, b"abc".to_vec()).unwrap();
     assert!(matches!(
         table.column_by_idx(0).unwrap().physical(),
         Err(FitsError::NonNumericColumn { code: 'A' })
@@ -127,7 +127,7 @@ fn read_column_physical_rejects_non_numeric_columns() {
 #[test]
 fn read_column_on_a_vla_directs_to_read_vla_column() {
     let header = table_header(8, 1, &["1PE(3)"]);
-    let table = BinTable::from_data(&header, vec![0u8; 8]).unwrap();
+    let table = Table::from_data(&header, vec![0u8; 8]).unwrap();
     assert!(matches!(
         table.column_by_idx(0).unwrap().raw(),
         Err(FitsError::VariableLengthColumn { code: 'P' })
@@ -152,7 +152,7 @@ fn decodes_variable_length_arrays_from_the_heap() {
         data.extend_from_slice(&x.to_be_bytes());
     }
 
-    let table = BinTable::from_data(&header, data).unwrap();
+    let table = Table::from_data(&header, data).unwrap();
     assert_eq!(
         table.column_by_idx(0).unwrap().vla().unwrap(),
         Ragged::<ColumnData>::new(ColumnData::F32(vec![1.0, 2.0, 3.0]), vec![2, 3])
@@ -164,7 +164,7 @@ fn preserves_tdisp_without_making_it_part_of_data_decoding() {
     let mut header = table_header(4, 1, &["1J"]);
     for display in ["I5", "Q5", "E12.5E3junk"] {
         header.set_internal("TDISP1", display);
-        let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
+        let table = Table::from_data(&header, vec![0u8; 4]).unwrap();
         assert_eq!(table.schema.columns[0].tdisp.as_deref(), Some(display));
         assert_eq!(
             table.column_by_idx(0).unwrap().raw().unwrap(),
@@ -186,7 +186,7 @@ fn read_column_complex_widens_and_scales() {
     data.extend_from_slice(&2.0f32.to_be_bytes());
     data.extend_from_slice(&1.0f64.to_be_bytes());
     data.extend_from_slice(&2.0f64.to_be_bytes());
-    let table = BinTable::from_data(&header, data).unwrap();
+    let table = Table::from_data(&header, data).unwrap();
     // (4 + 3·1) + (3·2)i = 7 + 6i; TZERO has no imaginary component.
     assert_eq!(
         table.column_by_idx(0).unwrap().complex().unwrap(),
@@ -198,7 +198,7 @@ fn read_column_complex_widens_and_scales() {
     );
     // A non-complex column errors.
     let h2 = table_header(4, 1, &["1J"]);
-    let t2 = BinTable::from_data(&h2, vec![0u8; 4]).unwrap();
+    let t2 = Table::from_data(&h2, vec![0u8; 4]).unwrap();
     assert!(matches!(
         t2.column_by_idx(0).unwrap().complex(),
         Err(FitsError::NotAComplexColumn { code: 'J' })
@@ -215,7 +215,7 @@ fn read_column_unsigned_recovers_typed_values() {
     let mut data = Vec::new();
     data.extend_from_slice(&17_232i16.to_be_bytes()); // 50 000 − 2¹⁵
     data.push(118); // −10 + 2⁷
-    let table = BinTable::from_data(&header, data).unwrap();
+    let table = Table::from_data(&header, data).unwrap();
     assert_eq!(
         table.column_by_idx(0).unwrap().unsigned().unwrap(),
         Some(UnsignedData::U16(vec![50000]))
@@ -239,7 +239,7 @@ fn read_column_unsigned_is_exact_for_u64_and_none_otherwise() {
             .to_be_bytes(),
     );
     data.extend_from_slice(&7i32.to_be_bytes());
-    let table = BinTable::from_data(&header, data).unwrap();
+    let table = Table::from_data(&header, data).unwrap();
     assert_eq!(
         table.column_by_idx(0).unwrap().unsigned().unwrap(),
         Some(UnsignedData::U64(vec![u64::MAX]))
@@ -267,7 +267,7 @@ fn read_vla_column_physical_scales_heap_arrays_and_nulls() {
     for x in [5i32, 99, 3] {
         data.extend_from_slice(&x.to_be_bytes());
     }
-    let table = BinTable::from_data(&header, data).unwrap();
+    let table = Table::from_data(&header, data).unwrap();
     let phys = table.column_by_idx(0).unwrap().vla_physical().unwrap();
     assert_eq!(phys.ends(), [2, 3]);
     assert_eq!(phys.row(0)[0], 20.0); // 10 + 2·5
@@ -300,7 +300,7 @@ fn read_vla_complex_scales_p_and_q_heap_values() {
     data.extend_from_slice(&6.0f64.to_be_bytes());
     data.extend_from_slice(&(-8.0f64).to_be_bytes());
 
-    let table = BinTable::from_data(&header, data).unwrap();
+    let table = Table::from_data(&header, data).unwrap();
     // PC: 10 + 2·(1 + 2i) = 12 + 4i; QM: 3 - 0.5·(6 - 8i) = 0 + 4i.
     assert_eq!(
         table.column_by_idx(0).unwrap().vla_complex().unwrap(),
@@ -336,7 +336,7 @@ fn read_vla_unsigned_is_exact_past_f64_integer_precision() {
         }
     }
 
-    let table = BinTable::from_data(&header, data.clone()).unwrap();
+    let table = Table::from_data(&header, data.clone()).unwrap();
     let exact = Some(Ragged::<UnsignedData>::new(
         UnsignedData::U64(expected.to_vec()),
         vec![3],
@@ -362,7 +362,7 @@ fn read_vla_unsigned_is_exact_past_f64_integer_precision() {
     header
         .set_internal("TSCAL1", 2.0)
         .set_internal("TNULL2", i64::MIN);
-    let non_convention = BinTable::from_data(&header, data).unwrap();
+    let non_convention = Table::from_data(&header, data).unwrap();
     assert_eq!(
         non_convention
             .column_by_idx(0)
@@ -392,7 +392,7 @@ fn vla_descriptor_overrunning_the_heap_is_rejected() {
     data.extend_from_slice(&0i32.to_be_bytes()); // offset = 0
     data.extend_from_slice(&[0u8; 8]); // only 8 heap bytes (then block fill)
     data.resize(2880, 0); // block-padded fill that must NOT be read as heap
-    let table = BinTable::from_data(&header, data).unwrap();
+    let table = Table::from_data(&header, data).unwrap();
     assert!(matches!(
         table.column_by_idx(0).unwrap().vla(),
         Err(FitsError::UnexpectedEof)
@@ -402,7 +402,7 @@ fn vla_descriptor_overrunning_the_heap_is_rejected() {
 #[test]
 fn read_vla_on_a_fixed_column_is_an_error() {
     let header = table_header(4, 1, &["1J"]);
-    let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
+    let table = Table::from_data(&header, vec![0u8; 4]).unwrap();
     assert!(matches!(
         table.column_by_idx(0).unwrap().vla(),
         Err(FitsError::NotAVla { code: 'J' })
@@ -412,7 +412,7 @@ fn read_vla_on_a_fixed_column_is_an_error() {
 #[test]
 fn out_of_bounds_column_is_an_error() {
     let header = table_header(4, 1, &["1J"]);
-    let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
+    let table = Table::from_data(&header, vec![0u8; 4]).unwrap();
     assert!(matches!(
         table.column_by_idx(9),
         Err(FitsError::IndexOutOfBounds {

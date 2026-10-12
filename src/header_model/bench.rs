@@ -9,9 +9,9 @@ use crate::bench::fixture::{Kind, Scale};
 use crate::bench::scene;
 use crate::bitpix::Bitpix;
 use crate::block::CARD_SIZE;
+use crate::fits_writer::FitsWriter;
 use crate::header_model::Header;
 use crate::reader::FitsReader;
-use crate::writer::FitsWriter;
 
 /// `atomic/header/light`: the header unit of a light, as a capture program writes it, parsed into
 /// a [`Header`], as the reader parses each HDU it opens. Per card of the unit, the block's blank

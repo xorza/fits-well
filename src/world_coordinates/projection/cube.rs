@@ -23,9 +23,9 @@ pub(super) enum Cube {
 impl Cube {
     const fn projection(self) -> Projection {
         match self {
-            Cube::Tsc => Projection::Tsc,
-            Cube::Csc => Projection::Csc,
-            Cube::Qsc => Projection::Qsc,
+            Self::Tsc => Projection::Tsc,
+            Self::Csc => Projection::Csc,
+            Self::Qsc => Projection::Qsc,
         }
     }
 }

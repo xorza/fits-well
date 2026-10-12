@@ -35,7 +35,7 @@ impl CelestialTransform {
         celestial_axes: Option<ProjectedCelestialAxes>,
         crval: &[f64],
         unsupported_axes: &mut Vec<usize>,
-    ) -> Result<Option<CelestialTransform>> {
+    ) -> Result<Option<Self>> {
         let Some(axes) = celestial_axes else {
             return Ok(None);
         };
@@ -84,7 +84,7 @@ impl CelestialTransform {
             key!("PV{}_4{a}", lng + 1).as_str(),
         )?
         .unwrap_or(90.0);
-        Ok(Some(CelestialTransform {
+        Ok(Some(Self {
             lng,
             lat,
             projection: proj,

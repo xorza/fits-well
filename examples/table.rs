@@ -8,7 +8,7 @@
 
 use std::fs::File;
 
-use fits_well::table::{ColumnData, TableBuilder, WriteColumn};
+use fits_well::table::{Builder, ColumnData, WriteColumn};
 use fits_well::{FitsReader, FitsWriter};
 use std::env;
 
@@ -17,7 +17,7 @@ fn main() -> fits_well::Result<()> {
 
     // Each column holds typed data; the last argument is the per-row element count
     // (the character width for a text column, 1 for a plain scalar column).
-    let table = TableBuilder::new()
+    let table = Builder::new()
         .column(WriteColumn::scalar("ID", ColumnData::I32(vec![1, 2, 3])))?
         .column(WriteColumn::characters(
             "NAME",

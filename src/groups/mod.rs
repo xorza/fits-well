@@ -6,14 +6,14 @@
 //! decoded but never written.
 
 use crate::bitpix::Bitpix;
-use crate::data::image_data::ImageData;
-use crate::data::image_view::ImageView;
-use crate::data::physical_view;
-use crate::data::scaling::Scaling;
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Result;
 use crate::header_model::Header;
+use crate::image_model::data::Data;
+use crate::image_model::physical_view;
+use crate::image_model::scaling::Scaling;
+use crate::image_model::view::View;
 use crate::keyword::key;
 use std::iter;
 
@@ -38,7 +38,7 @@ pub struct RandomGroups {
     /// `PSCALn`/`PZEROn` of the first `min(pcount, 999)` parameters.
     param_scaling: Vec<ParamScale>,
     /// Flat host-endian samples: `gcount` groups of `pcount + array_len` elements.
-    samples: ImageData,
+    samples: Data,
 }
 
 /// Immutable geometry and representation metadata for a random-groups array.
@@ -70,8 +70,8 @@ struct ParamScale {
 /// the HDU's `BITPIX` representation but occupy distinct borrowed slices (§6.2).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RandomGroupView<'a> {
-    pub parameters: ImageView<'a>,
-    pub array: ImageView<'a>,
+    pub parameters: View<'a>,
+    pub array: View<'a>,
 }
 
 impl RandomGroups {
@@ -86,7 +86,7 @@ impl RandomGroups {
         }
     }
 
-    pub(crate) fn from_data(header: &Header, data: &[u8]) -> Result<RandomGroups> {
+    pub(crate) fn from_data(header: &Header, data: &[u8]) -> Result<Self> {
         let bitpix = header.bitpix()?;
         let axes = header.axes()?;
         // NAXIS1 is the zero sentinel; the per-group array spans the rest.
@@ -124,7 +124,7 @@ impl RandomGroups {
             });
         }
 
-        Ok(RandomGroups {
+        Ok(Self {
             parameter_names,
             group_shape,
             gcount,
@@ -132,7 +132,7 @@ impl RandomGroups {
             array_len,
             array_scaling: header.scaling()?,
             param_scaling,
-            samples: ImageData::decode(data, bitpix),
+            samples: Data::decode(data, bitpix),
         })
     }
 

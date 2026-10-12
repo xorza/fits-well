@@ -1,4 +1,4 @@
-use crate::writer::render_header;
+use crate::fits_writer::render_header;
 
 use crate::header_model::internals::records;
 use crate::header_model::*;

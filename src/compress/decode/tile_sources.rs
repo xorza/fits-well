@@ -16,7 +16,7 @@ pub(super) struct TileSources<'a> {
 }
 
 impl<'a> TileSources<'a> {
-    pub(super) fn read(table: TableView<'a>) -> Result<TileSources<'a>> {
+    pub(super) fn read(table: TableView<'a>) -> Result<Self> {
         Ok(TileSources {
             primary: table.optional_vla_column("COMPRESSED_DATA")?,
             gzip_fallback: table.optional_vla_column("GZIP_COMPRESSED_DATA")?,

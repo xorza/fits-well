@@ -9,17 +9,17 @@ use std::collections::HashMap;
 
 use crate::bitpix::Bitpix;
 use crate::block::CARD_SIZE;
-use crate::data::scaling::Scaling;
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Result;
 use crate::header_model::card::Card;
-use crate::header_model::card::Record;
+use crate::header_model::card::ParsedRecord;
 use crate::header_model::card::validate_ascii;
 #[cfg(feature = "compression")]
 use crate::header_model::card::validate_keyword;
 use crate::header_model::card::validate_valued_keyword;
 use crate::header_model::value::Value;
+use crate::image_model::scaling::Scaling;
 use crate::keyword::key;
 use std::mem;
 
@@ -52,7 +52,7 @@ pub struct Header {
 /// carries the inline `/`-comment of a valued card, or the whole free text of a
 /// commentary card.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct HeaderEntry<'a> {
+pub struct Entry<'a> {
     pub keyword: &'a str,
     pub value: Option<&'a Value>,
     pub comment: Option<&'a str>,
@@ -60,7 +60,7 @@ pub struct HeaderEntry<'a> {
 
 /// One owned logical header record, returned by ordered removal operations.
 #[derive(Debug, Clone, PartialEq)]
-pub struct HeaderRecord {
+pub struct Record {
     pub keyword: String,
     pub value: Option<Value>,
     pub comment: Option<String>,
@@ -69,7 +69,7 @@ pub struct HeaderRecord {
 impl Header {
     /// Parse a header unit from its raw bytes (a whole number of 80-byte cards;
     /// the reader supplies block-aligned input). Stops at the `END` record.
-    pub fn parse(bytes: &[u8]) -> Result<Header> {
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
         // One record per card is the upper bound (CONTINUE folding only merges,
         // never adds; commentary cards skip the index), so reserve both once and
         // let parsing fill them without the grow-reallocations a small header would
@@ -78,15 +78,15 @@ impl Header {
         let mut cards: Vec<Card> = Vec::with_capacity(ncards);
         let mut index = HashMap::with_capacity(ncards);
         for chunk in bytes.as_chunks::<CARD_SIZE>().0 {
-            let card = match Record::parse(chunk)? {
-                Record::End => return Ok(Header { cards, index }),
-                Record::Continue { substring, comment } => {
+            let card = match ParsedRecord::parse(chunk)? {
+                ParsedRecord::End => return Ok(Self { cards, index }),
+                ParsedRecord::Continue { substring, comment } => {
                     if fold_continuation(&mut cards, &substring, comment.as_deref()) {
                         continue;
                     }
                     demoted_continuation(&substring, comment.as_deref())
                 }
-                Record::Card(card) => card,
+                ParsedRecord::Card(card) => card,
             };
             if let Card::Value { keyword, .. } = &card {
                 index.entry(keyword.clone()).or_insert(cards.len());
@@ -98,7 +98,8 @@ impl Header {
 
     /// The value of the first card with this keyword, if it is a valued card.
     pub fn get(&self, keyword: &str) -> Option<&Value> {
-        self.index.get(keyword).and_then(|&i| self.cards[i].value())
+        let &i = self.index.get(keyword)?;
+        self.cards[i].value()
     }
 
     /// Read an optional logical keyword without conflating absence with a wrong type.
@@ -177,13 +178,13 @@ impl Header {
             .ok_or(FitsError::MissingKeyword { name })
     }
 
-    /// Every stored record in file order, as [`HeaderEntry`] views — duplicates and
+    /// Every stored record in file order, as [`Entry`] views — duplicates and
     /// order preserved (the whole point of the ordered model), so `COMMENT`/`HISTORY`
     /// runs and repeated keywords come through intact. The implicit `END` is not a
     /// record and is never yielded. For valued keywords only, filter on
     /// `e.value`: `header.iter().filter_map(|e| Some((e.keyword, e.value?)))`.
-    pub fn iter(&self) -> impl Iterator<Item = HeaderEntry<'_>> {
-        self.cards.iter().map(|card| HeaderEntry {
+    pub fn iter(&self) -> impl Iterator<Item = Entry<'_>> {
+        self.cards.iter().map(|card| Entry {
             keyword: card.keyword(),
             value: card.value(),
             comment: card.comment(),
@@ -244,8 +245,8 @@ impl Header {
     }
 
     /// Create an empty header. Build it with [`Header::set`] and friends.
-    pub fn new() -> Header {
-        Header::default()
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Insert a valued keyword, or replace the value of an existing one, keeping
@@ -327,7 +328,7 @@ impl Header {
     }
 
     /// Remove the first logical record with `keyword`.
-    pub fn remove(&mut self, keyword: &str) -> Option<HeaderRecord> {
+    pub fn remove(&mut self, keyword: &str) -> Option<Record> {
         let index = self
             .cards
             .iter()
@@ -339,7 +340,7 @@ impl Header {
     }
 
     /// Remove one logical record by zero-based position.
-    pub fn remove_at(&mut self, index: usize) -> Result<HeaderRecord> {
+    pub fn remove_at(&mut self, index: usize) -> Result<Record> {
         if index >= self.cards.len() {
             return Err(FitsError::IndexOutOfBounds {
                 indexed: Indexed::HeaderRecord,
@@ -354,12 +355,12 @@ impl Header {
                 keyword,
                 value,
                 comment,
-            } => HeaderRecord {
+            } => Record {
                 keyword,
                 value: Some(value),
                 comment,
             },
-            Card::Commentary { keyword, text } => HeaderRecord {
+            Card::Commentary { keyword, text } => Record {
                 keyword,
                 value: None,
                 comment: text,
@@ -379,7 +380,7 @@ impl Header {
 
     pub(crate) fn append_filtered_from(
         &mut self,
-        source: &Header,
+        source: &Self,
         mut keep: impl FnMut(&str) -> bool,
     ) {
         self.cards.extend(

@@ -17,8 +17,8 @@ fn from_matrix(matrix: Vec<f64>, naxis: usize) -> LinearTransform {
     }
 }
 
-fn axis_at(crpix: f64) -> WcsAxis {
-    WcsAxis {
+fn axis_at(crpix: f64) -> Axis {
+    Axis {
         ctype: String::new(),
         cunit: String::new(),
         crval: 0.0,

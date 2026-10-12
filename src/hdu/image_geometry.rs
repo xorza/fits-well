@@ -1,13 +1,13 @@
 //! What an image HDU's header says its array is.
 
 use crate::bitpix::Bitpix;
-use crate::data::ImageMetadata;
-use crate::data::scaling::Scaling;
-use crate::data::shape_product;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::HduKind;
 use crate::header_model::Header;
+use crate::image_model::Metadata;
+use crate::image_model::scaling::Scaling;
+use crate::image_model::shape_product;
 use crate::keyword::key;
 
 /// The array an image HDU holds, as its header declares it: the axis lengths, the
@@ -25,7 +25,7 @@ impl ImageGeometry {
     /// The geometry of an HDU of `kind`. Errors with [`FitsError::NotAnImage`] for a
     /// table, random groups or an unmodelled extension, and with
     /// [`FitsError::ImageHasGroups`] for a plain image with group structure.
-    pub(crate) fn from_header(header: &Header, kind: HduKind) -> Result<ImageGeometry> {
+    pub(crate) fn from_header(header: &Header, kind: HduKind) -> Result<Self> {
         match kind {
             HduKind::Primary | HduKind::Image => {
                 // §4.3: a plain image array has no group structure, so reserved
@@ -33,9 +33,9 @@ impl ImageGeometry {
                 if header.pcount()? != 0 || header.gcount()? != 1 {
                     return Err(FitsError::ImageHasGroups);
                 }
-                ImageGeometry::new(header, header.axes()?, header.bitpix()?)
+                Self::new(header, header.axes()?, header.bitpix()?)
             }
-            HduKind::CompressedImage => ImageGeometry::compressed(header),
+            HduKind::CompressedImage => Self::compressed(header),
             HduKind::AsciiTable
             | HduKind::BinTable
             | HduKind::CompressedTable
@@ -46,7 +46,7 @@ impl ImageGeometry {
 
     /// The image a tiled-compression `BINTABLE` encodes, from its `ZNAXISn` and
     /// `ZBITPIX` (§10.1.1).
-    fn compressed(header: &Header) -> Result<ImageGeometry> {
+    fn compressed(header: &Header) -> Result<Self> {
         let bitpix = Bitpix::from_code(
             header
                 .get_integer("ZBITPIX")?
@@ -62,13 +62,13 @@ impl ImageGeometry {
         let shape = (1..=rank)
             .map(|axis| header.required_usize(key!("ZNAXIS{axis}").as_str(), "ZNAXISn"))
             .collect::<Result<_>>()?;
-        ImageGeometry::new(header, shape, bitpix)
+        Self::new(header, shape, bitpix)
     }
 
     /// Errors when the sample count does not fit a `usize`, so [`Self::len`] never has to.
-    fn new(header: &Header, shape: Vec<usize>, bitpix: Bitpix) -> Result<ImageGeometry> {
+    fn new(header: &Header, shape: Vec<usize>, bitpix: Bitpix) -> Result<Self> {
         shape_product(&shape)?;
-        Ok(ImageGeometry {
+        Ok(Self {
             shape,
             bitpix,
             scaling: header.scaling()?,
@@ -87,8 +87,8 @@ impl ImageGeometry {
             .ok_or(FitsError::DataUnitOverflow)
     }
 
-    pub(crate) fn metadata(&self) -> ImageMetadata<'_> {
-        ImageMetadata {
+    pub(crate) fn metadata(&self) -> Metadata<'_> {
+        Metadata {
             shape: &self.shape,
             bitpix: self.bitpix,
             scaling: self.scaling,

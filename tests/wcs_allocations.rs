@@ -2,6 +2,11 @@
 //! calling thread's allocations only, so the harness's other threads do not reach
 //! the count.
 
+#![expect(
+    clippy::disallowed_types,
+    reason = "a global allocator has no owner to carry its counters"
+)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::hint::black_box;

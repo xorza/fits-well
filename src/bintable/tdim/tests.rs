@@ -1,4 +1,4 @@
-use crate::bintable::BinTable;
+use crate::bintable::Table;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::internals::table_header;
 use crate::error::FitsError;
@@ -10,11 +10,11 @@ use bitvec::order::Msb0;
 fn tdim_accepts_subshapes_and_checks_vla_cells() {
     let mut fixed = table_header(16, 1, &["4J"]);
     fixed.set_internal("TDIM1", "(2)");
-    assert!(BinTable::from_data(&fixed, vec![0; 16]).is_ok());
+    assert!(Table::from_data(&fixed, vec![0; 16]).is_ok());
     for invalid in ["(5)", "(2,broken)", "()", "(0)"] {
         fixed.set_internal("TDIM1", invalid);
         assert!(matches!(
-            BinTable::from_data(&fixed, vec![0; 16]),
+            Table::from_data(&fixed, vec![0; 16]),
             Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
         ));
     }
@@ -28,7 +28,7 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
     for value in [1i32, 2, 3] {
         data.extend_from_slice(&value.to_be_bytes());
     }
-    let table = BinTable::from_data(&vla, data).unwrap();
+    let table = Table::from_data(&vla, data).unwrap();
     assert!(matches!(
         table.column_by_idx(0).unwrap().vla(),
         Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
@@ -55,7 +55,7 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
     for value in [50i16, 60, 70, 80] {
         data.extend_from_slice(&value.to_be_bytes());
     }
-    let table = BinTable::from_data(&mixed, data).unwrap();
+    let table = Table::from_data(&mixed, data).unwrap();
     assert_eq!(
         table.column_by_idx(0).unwrap().vla().unwrap(),
         Ragged::from_rows([
@@ -88,7 +88,7 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
     data.extend_from_slice(&9i64.to_be_bytes());
     data.extend_from_slice(&2i64.to_be_bytes());
     data.extend_from_slice(&[0xAA, 0x80, 0x55, 0x00]);
-    let table = BinTable::from_data(&mixed_bits, data).unwrap();
+    let table = Table::from_data(&mixed_bits, data).unwrap();
     let p_bits = table.column_by_idx(0).unwrap().vla_bits().unwrap();
     assert!(p_bits.row(0).is_empty());
     assert_eq!(
@@ -105,7 +105,7 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
     let mut malformed_empty = table_header(8, 1, &["1PJ"]);
     malformed_empty.set_internal("TDIM1", "(2,broken)");
     assert!(matches!(
-        BinTable::from_data(&malformed_empty, vec![0; 8]),
+        Table::from_data(&malformed_empty, vec![0; 8]),
         Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
     ));
 }

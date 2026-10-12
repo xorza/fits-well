@@ -2,9 +2,9 @@
 //!
 //! A binary table is `NAXIS2` rows of `NAXIS1` bytes; each of `TFIELDS` columns
 //! occupies a fixed byte range in every row, typed by its `TFORMn` code. That
-//! structure parses into a [`TableSchema`] of [`Column`] descriptors; decoding goes
-//! through a [`ColumnReader`] (from [`BinTable::column_by_idx`] /
-//! [`BinTable::column_by_name`]), whose methods yield typed [`ColumnData`]
+//! structure parses into a [`Schema`] of [`Column`] descriptors; decoding goes
+//! through a [`ColumnReader`] (from [`Table::column_by_idx`] /
+//! [`Table::column_by_name`]), whose methods yield typed [`ColumnData`]
 //! ([`ColumnReader::raw`]), the `TSCALn`/`TZEROn` physical plane
 //! ([`ColumnReader::physical`]), and `P`/`Q` variable-length arrays out of the heap
 //! ([`ColumnReader::vla`]), including their numeric, complex, and exact unsigned
@@ -19,7 +19,7 @@ pub(crate) mod column;
 pub(crate) mod column_data;
 pub(crate) mod column_reader;
 pub(crate) mod descriptor;
-pub(crate) mod table_schema;
+pub(crate) mod schema;
 pub(crate) mod table_view;
 pub(crate) mod tdim;
 pub(crate) mod tform;
@@ -27,7 +27,7 @@ pub(crate) mod tform_kind;
 pub(crate) mod vla_column;
 
 use crate::bintable::column_reader::ColumnReader;
-use crate::bintable::table_schema::TableSchema;
+use crate::bintable::schema::Schema;
 use crate::bintable::table_view::TableView;
 use crate::error::Result;
 #[cfg(any(feature = "compression", feature = "internals"))]
@@ -35,22 +35,22 @@ use crate::header_model::Header;
 
 /// A binary table's structure plus its data unit.
 #[derive(Debug, Clone)]
-pub struct BinTable {
-    /// Everything the header alone determines — the same [`TableSchema`] that
-    /// [`TableSchema::parse`] produces, held rather than re-derived.
-    pub(crate) schema: TableSchema,
+pub struct Table {
+    /// Everything the header alone determines — the same [`Schema`] that
+    /// [`Schema::parse`] produces, held rather than re-derived.
+    pub(crate) schema: Schema,
     /// The whole data unit (the `nrows * row_len` main table, then the heap and
     /// block fill). Fixed-width reads index the main-table prefix; `P`/`Q` columns
     /// follow their descriptors into the heap.
     bytes: Vec<u8>,
 }
 
-impl BinTable {
+impl Table {
     /// The table `schema` describes, over its owned data unit `data` (the main table
     /// followed by the optional heap). Errors when the data ends before the heap does.
-    pub(crate) fn new(schema: TableSchema, data: Vec<u8>) -> Result<BinTable> {
+    pub(crate) fn new(schema: Schema, data: Vec<u8>) -> Result<Self> {
         TableView::new(&schema, &data)?;
-        Ok(BinTable {
+        Ok(Self {
             schema,
             bytes: data,
         })
@@ -59,8 +59,8 @@ impl BinTable {
     /// Build a table from its header and owned data unit (`data` is the main
     /// table followed by the optional heap, as returned by the reader).
     #[cfg(any(feature = "compression", feature = "internals"))]
-    pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<BinTable> {
-        BinTable::new(TableSchema::parse(header)?, data)
+    pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<Self> {
+        Self::new(Schema::parse(header)?, data)
     }
 
     /// The table over its own storage — what every decode reads through.
@@ -69,7 +69,7 @@ impl BinTable {
     }
 
     /// The table's structure: its row count, row width and validated columns.
-    pub const fn schema(&self) -> &TableSchema {
+    pub const fn schema(&self) -> &Schema {
         &self.schema
     }
 
@@ -98,7 +98,7 @@ impl BinTable {
 #[cfg(feature = "internals")]
 pub(crate) mod internals {
     #[cfg(all(test, feature = "compression"))]
-    use crate::bintable::BinTable;
+    use crate::bintable::Table;
     #[cfg(all(test, feature = "compression"))]
     use crate::bintable::tform_kind::TformKind;
     use crate::header_model::Header;
@@ -122,7 +122,7 @@ pub(crate) mod internals {
     }
 
     #[cfg(all(test, feature = "compression"))]
-    pub(crate) fn set_column_kind(table: &mut BinTable, column: usize, kind: TformKind) {
+    pub(crate) fn set_column_kind(table: &mut Table, column: usize, kind: TformKind) {
         table.schema.columns[column].tform.kind = kind;
     }
 }

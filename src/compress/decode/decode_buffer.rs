@@ -5,12 +5,12 @@ use crate::bitpix::Bitpix;
 use crate::compress::decode::image_decode_plan::ImageDecodePlan;
 use crate::compress::decode::tiled_image::TileSection;
 use crate::compress::decode::tiled_image::TiledImage;
-use crate::data::image_data::ImageData;
 use crate::error::Result;
 use crate::header_model::Header;
+use crate::image_model::data::Data;
 use crate::words;
 
-/// A typed mutable view of the samples a decode writes into — owned [`ImageData`] or
+/// A typed mutable view of the samples a decode writes into — owned [`Data`] or
 /// a caller's word-aligned scratch. Its variant, not the plan, picks the narrowing
 /// each tile's values go through on their way to the plane.
 #[derive(Debug)]
@@ -24,22 +24,18 @@ pub(super) enum DecodeBuffer<'a> {
 }
 
 impl<'a> DecodeBuffer<'a> {
-    pub(super) fn from_samples(samples: &'a mut ImageData) -> DecodeBuffer<'a> {
+    pub(super) fn from_samples(samples: &'a mut Data) -> Self {
         match samples {
-            ImageData::U8(values) => DecodeBuffer::U8(values),
-            ImageData::I16(values) => DecodeBuffer::I16(values),
-            ImageData::I32(values) => DecodeBuffer::I32(values),
-            ImageData::I64(values) => DecodeBuffer::I64(values),
-            ImageData::F32(values) => DecodeBuffer::F32(values),
-            ImageData::F64(values) => DecodeBuffer::F64(values),
+            Data::U8(values) => DecodeBuffer::U8(values),
+            Data::I16(values) => DecodeBuffer::I16(values),
+            Data::I32(values) => DecodeBuffer::I32(values),
+            Data::I64(values) => DecodeBuffer::I64(values),
+            Data::F32(values) => DecodeBuffer::F32(values),
+            Data::F64(values) => DecodeBuffer::F64(values),
         }
     }
 
-    pub(super) fn from_words(
-        words: &'a mut [u64],
-        bitpix: Bitpix,
-        count: usize,
-    ) -> DecodeBuffer<'a> {
+    pub(super) fn from_words(words: &'a mut [u64], bitpix: Bitpix, count: usize) -> Self {
         // SAFETY: the callers size `words` to hold `count` samples before this, and
         // every element of a `Vec<u64>` is an initialized `u64`, so the view covers
         // initialized storage. Alignment and bit-pattern validity are

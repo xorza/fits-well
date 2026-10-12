@@ -8,8 +8,8 @@ fn parse(text: &str) -> Card {
 }
 
 fn reparse(bytes: &[u8; CARD_SIZE]) -> Card {
-    match Record::parse(bytes).unwrap() {
-        Record::Card(card) => card,
+    match ParsedRecord::parse(bytes).unwrap() {
+        ParsedRecord::Card(card) => card,
         other => panic!("expected a stored card, got {other:?}"),
     }
 }
@@ -145,7 +145,10 @@ fn parses_complex_integer_and_real() {
 
 #[test]
 fn classifies_end_and_commentary_cards() {
-    assert_eq!(Record::parse(&card_bytes("END")).unwrap(), Record::End);
+    assert_eq!(
+        ParsedRecord::parse(&card_bytes("END")).unwrap(),
+        ParsedRecord::End
+    );
 
     let comment = parse("COMMENT  this file is great");
     assert!(matches!(comment, Card::Commentary { .. }));
@@ -178,14 +181,14 @@ fn rejects_non_ascii_card_without_panicking() {
     bytes[7] = 0xC3;
     bytes[8] = 0xA9;
     assert!(matches!(
-        Record::parse(&bytes),
+        ParsedRecord::parse(&bytes),
         Err(FitsError::InvalidValue { .. })
     ));
     // A high byte elsewhere in the record is likewise rejected, not decoded.
     let mut in_value = card_bytes("OBJECT  = 'x'");
     in_value[11] = 0xFF;
     assert!(matches!(
-        Record::parse(&in_value),
+        ParsedRecord::parse(&in_value),
         Err(FitsError::InvalidValue { .. })
     ));
 }
@@ -193,7 +196,7 @@ fn rejects_non_ascii_card_without_panicking() {
 #[test]
 fn rejects_lowercase_keyword_on_a_value_card() {
     assert!(matches!(
-        Record::parse(&card_bytes("object  = 'x'")),
+        ParsedRecord::parse(&card_bytes("object  = 'x'")),
         Err(FitsError::InvalidKeyword { .. })
     ));
 }
@@ -237,8 +240,8 @@ fn integer_boundaries_round_trip_without_real_coercion() {
 #[test]
 fn parses_a_continue_record() {
     assert_eq!(
-        Record::parse(&card_bytes("CONTINUE  'ollowed by more text&'")).unwrap(),
-        Record::Continue {
+        ParsedRecord::parse(&card_bytes("CONTINUE  'ollowed by more text&'")).unwrap(),
+        ParsedRecord::Continue {
             substring: "ollowed by more text&".into(),
             comment: None
         }
@@ -247,9 +250,12 @@ fn parses_a_continue_record() {
 
 #[test]
 fn end_requires_the_canonical_blank_record() {
-    assert_eq!(Record::parse(&card_bytes("END")).unwrap(), Record::End);
+    assert_eq!(
+        ParsedRecord::parse(&card_bytes("END")).unwrap(),
+        ParsedRecord::End
+    );
     assert!(matches!(
-        Record::parse(&card_bytes("END     =                    T")),
+        ParsedRecord::parse(&card_bytes("END     =                    T")),
         Err(FitsError::ReservedKeyword { name }) if name == "END"
     ));
 }
@@ -354,7 +360,7 @@ fn non_finite_reals_are_rejected_on_read() {
     for token in ["inf", "Infinity", "nan", "-inf", "1E400"] {
         let card = format!("BADREAL = {token}");
         assert!(
-            Record::parse(&card_bytes(&card)).is_err(),
+            ParsedRecord::parse(&card_bytes(&card)).is_err(),
             "expected {token:?} to be rejected, not parsed as a real"
         );
     }

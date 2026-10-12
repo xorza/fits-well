@@ -48,10 +48,10 @@ impl Algo {
     /// distinct type means the per-column match sites cannot be handed one.
     const fn image_codec(self) -> ImageCodec {
         match self {
-            Algo::Gzip1 => ImageCodec::Gzip1,
-            Algo::Gzip2 => ImageCodec::Gzip2,
-            Algo::Rice1 => ImageCodec::Rice1,
-            Algo::NoCompress => ImageCodec::NoCompress,
+            Self::Gzip1 => ImageCodec::Gzip1,
+            Self::Gzip2 => ImageCodec::Gzip2,
+            Self::Rice1 => ImageCodec::Rice1,
+            Self::NoCompress => ImageCodec::NoCompress,
         }
     }
 
@@ -59,15 +59,15 @@ impl Algo {
         self.image_codec().name()
     }
 
-    fn parse(s: &str) -> Result<Algo> {
+    fn parse(s: &str) -> Result<Self> {
         let invalid = || FitsError::UnsupportedCompression {
             name: format!("table column codec {s}"),
         };
         match ImageCodec::parse(s).map_err(|_| invalid())? {
-            ImageCodec::Gzip1 => Ok(Algo::Gzip1),
-            ImageCodec::Gzip2 => Ok(Algo::Gzip2),
-            ImageCodec::Rice1 => Ok(Algo::Rice1),
-            ImageCodec::NoCompress => Ok(Algo::NoCompress),
+            ImageCodec::Gzip1 => Ok(Self::Gzip1),
+            ImageCodec::Gzip2 => Ok(Self::Gzip2),
+            ImageCodec::Rice1 => Ok(Self::Rice1),
+            ImageCodec::NoCompress => Ok(Self::NoCompress),
             ImageCodec::Plio1 | ImageCodec::Hcompress1 => Err(invalid()),
         }
     }
@@ -99,8 +99,8 @@ struct BoundTable<'a> {
 impl ColMeta {
     /// The column `tform` at `offset`, compressed with `requested` clamped to a
     /// codec valid for its type, as cfitsio does when it writes.
-    fn chosen(tform: &Tform, offset: usize, requested: Algo) -> ColMeta {
-        let mut meta = ColMeta::declared_unchecked(tform, offset, requested);
+    fn chosen(tform: &Tform, offset: usize, requested: Algo) -> Self {
+        let mut meta = Self::declared_unchecked(tform, offset, requested);
         meta.algo = pick_algo(meta.compression_kind(), requested);
         meta
     }
@@ -108,8 +108,8 @@ impl ColMeta {
     /// The column `tform` at `offset` with the codec its `ZCTYPn` declares. Errors
     /// when that codec cannot encode the column's type (`RICE_1` takes only `B`, `I`
     /// and `J` values).
-    fn declared(tform: &Tform, offset: usize, algo: Algo) -> Result<ColMeta> {
-        let meta = ColMeta::declared_unchecked(tform, offset, algo);
+    fn declared(tform: &Tform, offset: usize, algo: Algo) -> Result<Self> {
+        let meta = Self::declared_unchecked(tform, offset, algo);
         if algo == Algo::Rice1 && meta.rice_width().is_none() {
             return Err(FitsError::UnsupportedCompression {
                 name: format!("RICE_1 on a {} column", meta.compression_kind().code()),
@@ -118,8 +118,8 @@ impl ColMeta {
         Ok(meta)
     }
 
-    fn declared_unchecked(tform: &Tform, offset: usize, algo: Algo) -> ColMeta {
-        ColMeta {
+    fn declared_unchecked(tform: &Tform, offset: usize, algo: Algo) -> Self {
+        Self {
             kind: tform.kind,
             vla_elem: tform.vla_elem,
             elem_size: tform.vla_elem.unwrap_or(tform.kind).elem_size(),
@@ -991,7 +991,7 @@ fn scatter_column(out: &mut [u8], bytes: &[u8], rows: usize, row_len: usize, m: 
 #[cfg(test)]
 pub(crate) mod internals {
     use crate::bintable::column_data::ColumnData;
-    use crate::writer::table::WriteColumn;
+    use crate::fits_writer::builder::WriteColumn;
 
     /// i16, i32, f32, f64 and byte columns, and a repeat-3 i16 vector, over `nrows`
     /// rows of simple formulas with negative values among them; the integer formulas

@@ -1,6 +1,6 @@
 //! [`TimeAxisKind`]: the time-related WCS axis types.
 
-use crate::time_coordinates::time_scale::TimeScale;
+use crate::time_coordinates::scale::Scale;
 use crate::world_coordinates::ctype::Ctype;
 
 /// A time-related WCS axis type (§9.6).
@@ -18,20 +18,20 @@ pub(crate) enum TimeAxisKind {
 
 impl TimeAxisKind {
     /// Classify a `CTYPE` as a time-related axis (§9.6), or `None` if it is not one.
-    pub(crate) fn from_ctype(ctype: &str) -> Option<TimeAxisKind> {
+    pub(crate) fn from_ctype(ctype: &str) -> Option<Self> {
         let head = Ctype::parse(ctype).head;
         if head.eq_ignore_ascii_case("TIME") {
-            return Some(TimeAxisKind::Time);
+            return Some(Self::Time);
         }
         match head {
-            "PHASE" => Some(TimeAxisKind::Phase),
-            "TIMELAG" => Some(TimeAxisKind::Timelag),
-            "FREQUENCY" => Some(TimeAxisKind::Frequency),
+            "PHASE" => Some(Self::Phase),
+            "TIMELAG" => Some(Self::Timelag),
+            "FREQUENCY" => Some(Self::Frequency),
             _ => head
-                .parse::<TimeScale>()
+                .parse::<Scale>()
                 .ok()
                 .and_then(|scale| scale.kind())
-                .map(|_| TimeAxisKind::Time),
+                .map(|_| Self::Time),
         }
     }
 }

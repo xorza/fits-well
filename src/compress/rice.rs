@@ -213,7 +213,7 @@ impl<'a> BitOutput<'a> {
     /// The most bits one [`BitOutput::push`] takes: the word holds at most 7 pending.
     const CHUNK: u32 = 56;
 
-    const fn new(out: &'a mut Vec<u8>) -> BitOutput<'a> {
+    const fn new(out: &'a mut Vec<u8>) -> Self {
         BitOutput {
             out,
             word: 0,

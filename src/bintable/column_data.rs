@@ -29,32 +29,33 @@ impl ColumnData {
     /// Total element count across all rows (the backing `Vec`'s length).
     pub const fn element_count(&self) -> usize {
         match self {
-            ColumnData::Logical(v) => v.len(),
-            ColumnData::Bytes(v) | ColumnData::Character(v) => v.len(),
-            ColumnData::I16(v) => v.len(),
-            ColumnData::I32(v) => v.len(),
-            ColumnData::I64(v) => v.len(),
-            ColumnData::F32(v) => v.len(),
-            ColumnData::F64(v) => v.len(),
-            ColumnData::ComplexF32(v) => v.len(),
-            ColumnData::ComplexF64(v) => v.len(),
+            Self::Logical(v) => v.len(),
+            Self::Bytes(v) | Self::Character(v) => v.len(),
+            Self::I16(v) => v.len(),
+            Self::I32(v) => v.len(),
+            Self::I64(v) => v.len(),
+            Self::F32(v) => v.len(),
+            Self::F64(v) => v.len(),
+            Self::ComplexF32(v) => v.len(),
+            Self::ComplexF64(v) => v.len(),
         }
     }
 
     /// Append `other`'s values when it holds the same type, returning whether it
     /// did.
-    pub(crate) fn extend_from(&mut self, other: &ColumnData) -> bool {
+    pub(crate) fn extend_from(&mut self, other: &Self) -> bool {
         match (self, other) {
-            (ColumnData::Logical(a), ColumnData::Logical(b)) => a.extend_from_slice(b),
-            (ColumnData::Bytes(a), ColumnData::Bytes(b))
-            | (ColumnData::Character(a), ColumnData::Character(b)) => a.extend_from_slice(b),
-            (ColumnData::I16(a), ColumnData::I16(b)) => a.extend_from_slice(b),
-            (ColumnData::I32(a), ColumnData::I32(b)) => a.extend_from_slice(b),
-            (ColumnData::I64(a), ColumnData::I64(b)) => a.extend_from_slice(b),
-            (ColumnData::F32(a), ColumnData::F32(b)) => a.extend_from_slice(b),
-            (ColumnData::F64(a), ColumnData::F64(b)) => a.extend_from_slice(b),
-            (ColumnData::ComplexF32(a), ColumnData::ComplexF32(b)) => a.extend_from_slice(b),
-            (ColumnData::ComplexF64(a), ColumnData::ComplexF64(b)) => a.extend_from_slice(b),
+            (Self::Logical(a), Self::Logical(b)) => a.extend_from_slice(b),
+            (Self::Bytes(a), Self::Bytes(b)) | (Self::Character(a), Self::Character(b)) => {
+                a.extend_from_slice(b);
+            }
+            (Self::I16(a), Self::I16(b)) => a.extend_from_slice(b),
+            (Self::I32(a), Self::I32(b)) => a.extend_from_slice(b),
+            (Self::I64(a), Self::I64(b)) => a.extend_from_slice(b),
+            (Self::F32(a), Self::F32(b)) => a.extend_from_slice(b),
+            (Self::F64(a), Self::F64(b)) => a.extend_from_slice(b),
+            (Self::ComplexF32(a), Self::ComplexF32(b)) => a.extend_from_slice(b),
+            (Self::ComplexF64(a), Self::ComplexF64(b)) => a.extend_from_slice(b),
             _ => return false,
         }
         true
@@ -63,16 +64,16 @@ impl ColumnData {
     /// What a value of this type is called in a type-mismatch error.
     pub(crate) const fn type_name(&self) -> &'static str {
         match self {
-            ColumnData::Logical(_) => "logical column data",
-            ColumnData::Bytes(_) => "byte column data",
-            ColumnData::I16(_) => "i16 column data",
-            ColumnData::I32(_) => "i32 column data",
-            ColumnData::I64(_) => "i64 column data",
-            ColumnData::F32(_) => "f32 column data",
-            ColumnData::F64(_) => "f64 column data",
-            ColumnData::ComplexF32(_) => "complex-f32 column data",
-            ColumnData::ComplexF64(_) => "complex-f64 column data",
-            ColumnData::Character(_) => "character column data",
+            Self::Logical(_) => "logical column data",
+            Self::Bytes(_) => "byte column data",
+            Self::I16(_) => "i16 column data",
+            Self::I32(_) => "i32 column data",
+            Self::I64(_) => "i64 column data",
+            Self::F32(_) => "f32 column data",
+            Self::F64(_) => "f64 column data",
+            Self::ComplexF32(_) => "complex-f32 column data",
+            Self::ComplexF64(_) => "complex-f64 column data",
+            Self::Character(_) => "character column data",
         }
     }
 }

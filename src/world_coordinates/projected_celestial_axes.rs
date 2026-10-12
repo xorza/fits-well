@@ -26,7 +26,7 @@ impl CelestialAxisPair {
     /// The first longitude axis of `ctype` that has a latitude axis of its own system,
     /// paired with the first such latitude axis — or `None`. A celestial axis left over
     /// is a coordinate the WCS cannot evaluate.
-    pub(super) fn find(ctype: &[String]) -> Option<CelestialAxisPair> {
+    pub(super) fn find(ctype: &[String]) -> Option<Self> {
         let systems: Vec<_> = ctype
             .iter()
             .map(|ctype| Ctype::parse(ctype).celestial_system())
@@ -41,7 +41,7 @@ impl CelestialAxisPair {
                     other.axis == CelestialAxis::Latitude && other.system == system.system
                 })
             })?;
-            Some(CelestialAxisPair {
+            Some(Self {
                 longitude,
                 latitude,
             })
@@ -57,7 +57,7 @@ impl ProjectedCelestialAxes {
     /// Locate the celestial longitude/latitude axis pair and their shared projection,
     /// or `None` if the header has no complete supported pair. Errors if the two axes
     /// declare different projection codes.
-    pub(super) fn find(ctype: &[String]) -> Result<Option<ProjectedCelestialAxes>> {
+    pub(super) fn find(ctype: &[String]) -> Result<Option<Self>> {
         let Some(pair) = CelestialAxisPair::find(ctype) else {
             return Ok(None);
         };
@@ -69,7 +69,7 @@ impl ProjectedCelestialAxes {
         }
         Ok(longitude
             .and_then(Projection::from_code)
-            .map(|projection| ProjectedCelestialAxes {
+            .map(|projection| Self {
                 longitude: pair.longitude,
                 latitude: pair.latitude,
                 projection,

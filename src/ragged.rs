@@ -7,15 +7,15 @@ use bitvec::slice::BitSlice;
 use bitvec::vec::BitVec;
 
 use crate::bintable::column_data::ColumnData;
-use crate::data::unsigned_data::UnsignedData;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::image_model::unsigned_data::UnsignedData;
 
 /// Rows of varying length in one buffer: every row's values in `values`, in row
 /// order, and where each row ends. Row `r` spans `ends[r - 1]..ends[r]` of the
 /// values (from 0 for the first row), so a column of any number of rows costs two
 /// allocations, not one per row.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Ragged<V> {
     values: V,
     ends: Vec<usize>,
@@ -57,12 +57,12 @@ impl<V> Ragged<V> {
     /// # Panics
     /// Unless `ends` never decreases and its last entry is `count`, the length of
     /// `values` — the contract every public constructor states.
-    fn checked(values: V, ends: Vec<usize>, count: usize) -> Ragged<V> {
+    fn checked(values: V, ends: Vec<usize>, count: usize) -> Self {
         assert!(
             ends.is_sorted() && ends.last().copied().unwrap_or(0) == count,
             "row ends must rise to the value count {count}"
         );
-        Ragged { values, ends }
+        Self { values, ends }
     }
 }
 
@@ -71,9 +71,9 @@ impl<T> Ragged<Vec<T>> {
     ///
     /// # Panics
     /// Unless `ends` never decreases and ends at `values.len()`.
-    pub fn new(values: Vec<T>, ends: Vec<usize>) -> Ragged<Vec<T>> {
+    pub fn new(values: Vec<T>, ends: Vec<usize>) -> Self {
         let count = values.len();
-        Ragged::checked(values, ends, count)
+        Self::checked(values, ends, count)
     }
 
     /// Row `r`'s values.
@@ -90,14 +90,14 @@ impl<T> Ragged<Vec<T>> {
 }
 
 impl<T, R: IntoIterator<Item = T>> FromIterator<R> for Ragged<Vec<T>> {
-    fn from_iter<I: IntoIterator<Item = R>>(rows: I) -> Ragged<Vec<T>> {
+    fn from_iter<I: IntoIterator<Item = R>>(rows: I) -> Self {
         let mut values = Vec::new();
         let mut ends = Vec::new();
         for row in rows {
             values.extend(row);
             ends.push(values.len());
         }
-        Ragged { values, ends }
+        Self { values, ends }
     }
 }
 
@@ -107,13 +107,13 @@ impl Ragged<String> {
     /// # Panics
     /// Unless `ends` never decreases, ends at `values.len()`, and falls on character
     /// boundaries.
-    pub fn new(values: String, ends: Vec<usize>) -> Ragged<String> {
+    pub fn new(values: String, ends: Vec<usize>) -> Self {
         assert!(
             ends.iter().all(|&end| values.is_char_boundary(end)),
             "row ends must fall on character boundaries"
         );
         let count = values.len();
-        Ragged::checked(values, ends, count)
+        Self::checked(values, ends, count)
     }
 
     /// Row `r`'s text.
@@ -126,14 +126,14 @@ impl Ragged<String> {
 }
 
 impl<S: AsRef<str>> FromIterator<S> for Ragged<String> {
-    fn from_iter<I: IntoIterator<Item = S>>(rows: I) -> Ragged<String> {
+    fn from_iter<I: IntoIterator<Item = S>>(rows: I) -> Self {
         let mut values = String::new();
         let mut ends = Vec::new();
         for row in rows {
             values.push_str(row.as_ref());
             ends.push(values.len());
         }
-        Ragged { values, ends }
+        Self { values, ends }
     }
 }
 
@@ -142,9 +142,9 @@ impl Ragged<BitVec<u8, Msb0>> {
     ///
     /// # Panics
     /// Unless `ends` never decreases and ends at `values.len()`.
-    pub fn new(values: BitVec<u8, Msb0>, ends: Vec<usize>) -> Ragged<BitVec<u8, Msb0>> {
+    pub fn new(values: BitVec<u8, Msb0>, ends: Vec<usize>) -> Self {
         let count = values.len();
-        Ragged::checked(values, ends, count)
+        Self::checked(values, ends, count)
     }
 
     /// Row `r`'s bits.
@@ -164,7 +164,7 @@ impl<B: AsRef<BitSlice<u8, Msb0>>> FromIterator<B> for Ragged<BitVec<u8, Msb0>> 
             values.extend_from_bitslice(row.as_ref());
             ends.push(values.len());
         }
-        Ragged { values, ends }
+        Self { values, ends }
     }
 }
 
@@ -173,14 +173,14 @@ impl Ragged<ColumnData> {
     ///
     /// # Panics
     /// Unless `ends` never decreases and ends at `values.element_count()`.
-    pub fn new(values: ColumnData, ends: Vec<usize>) -> Ragged<ColumnData> {
+    pub fn new(values: ColumnData, ends: Vec<usize>) -> Self {
         let count = values.element_count();
-        Ragged::checked(values, ends, count)
+        Self::checked(values, ends, count)
     }
 
     /// Rows from one [`ColumnData`] per row, which must all hold one type. Errors
     /// for an empty list, which has no type, and for a row of another type.
-    pub fn from_rows(rows: impl IntoIterator<Item = ColumnData>) -> Result<Ragged<ColumnData>> {
+    pub fn from_rows(rows: impl IntoIterator<Item = ColumnData>) -> Result<Self> {
         let mut rows = rows.into_iter();
         let mut values = rows.next().ok_or(FitsError::EmptyVlaNeedsType)?;
         let mut ends = vec![values.element_count()];
@@ -193,14 +193,14 @@ impl Ragged<ColumnData> {
             }
             ends.push(values.element_count());
         }
-        Ok(Ragged { values, ends })
+        Ok(Self { values, ends })
     }
 }
 
 impl Ragged<UnsignedData> {
-    pub(crate) fn new(values: UnsignedData, ends: Vec<usize>) -> Ragged<UnsignedData> {
+    pub(crate) fn new(values: UnsignedData, ends: Vec<usize>) -> Self {
         let count = values.len();
-        Ragged::checked(values, ends, count)
+        Self::checked(values, ends, count)
     }
 }
 

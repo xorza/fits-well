@@ -38,7 +38,7 @@ pub(crate) enum HduRole {
 }
 
 impl HduRole {
-    pub(crate) fn from_header(header: &Header, position: HduPosition) -> Result<HduRole> {
+    pub(crate) fn from_header(header: &Header, position: HduPosition) -> Result<Self> {
         match position {
             HduPosition::Primary => {
                 header
@@ -46,16 +46,16 @@ impl HduRole {
                     .ok_or(FitsError::MissingKeyword { name: "SIMPLE" })?;
                 if header.get_logical("GROUPS")? == Some(true) {
                     validate_random_groups_axes(&header.axes()?)?;
-                    Ok(HduRole::RandomGroups)
+                    Ok(Self::RandomGroups)
                 } else {
-                    Ok(HduRole::Primary)
+                    Ok(Self::Primary)
                 }
             }
             HduPosition::Extension => {
                 header
                     .get_text("XTENSION")?
                     .ok_or(FitsError::MissingKeyword { name: "XTENSION" })?;
-                Ok(HduRole::Extension)
+                Ok(Self::Extension)
             }
         }
     }
@@ -86,12 +86,12 @@ pub enum HduKind {
 }
 
 impl HduKind {
-    pub(crate) fn classify(header: &Header, role: HduRole) -> Result<HduKind> {
+    pub(crate) fn classify(header: &Header, role: HduRole) -> Result<Self> {
         if role == HduRole::Primary {
-            return Ok(HduKind::Primary);
+            return Ok(Self::Primary);
         }
         if role == HduRole::RandomGroups {
-            return Ok(HduKind::RandomGroups);
+            return Ok(Self::RandomGroups);
         }
 
         // `Value::Text` already stripped the trailing spaces of `'IMAGE   '` etc.
@@ -99,15 +99,15 @@ impl HduKind {
             .get_text("XTENSION")?
             .ok_or(FitsError::MissingKeyword { name: "XTENSION" })?;
         Ok(match xtension {
-            "IMAGE" => HduKind::Image,
-            "TABLE" => HduKind::AsciiTable,
+            "IMAGE" => Self::Image,
+            "TABLE" => Self::AsciiTable,
             // §10: a tiled-compressed image/table rides inside a BINTABLE,
             // flagged by ZIMAGE/ZTABLE — classify by the payload, not the
             // container, so callers see what they can actually read.
-            "BINTABLE" if header.get_logical("ZIMAGE")? == Some(true) => HduKind::CompressedImage,
-            "BINTABLE" if header.get_logical("ZTABLE")? == Some(true) => HduKind::CompressedTable,
-            "BINTABLE" => HduKind::BinTable,
-            _ => HduKind::Other,
+            "BINTABLE" if header.get_logical("ZIMAGE")? == Some(true) => Self::CompressedImage,
+            "BINTABLE" if header.get_logical("ZTABLE")? == Some(true) => Self::CompressedTable,
+            "BINTABLE" => Self::BinTable,
+            _ => Self::Other,
         })
     }
 }
@@ -145,7 +145,7 @@ pub(crate) fn data_extent(header: &Header, role: HduRole) -> Result<DataExtent> 
 }
 
 /// Product of the axis lengths as the on-disk element count. Deliberately `u64`
-/// rather than the `usize` of [`crate::data::shape_product`]: this sizes a data unit
+/// rather than the `usize` of [`crate::image_model::shape_product`]: this sizes a data unit
 /// on disk, which a 32-bit `usize` must not cap.
 ///
 /// A zero-length axis always gives 0 (no data). `empty` is the count for an axis list

@@ -46,11 +46,11 @@ impl CelestialPole {
         d0: f64,
         phip: f64,
         latpole: f64,
-    ) -> Result<CelestialPole> {
+    ) -> Result<Self> {
         /// wcslib's `celset` tolerance on the pole latitude and on `|sin δ₀ / z|`.
         const TOLERANCE: f64 = 1e-10;
         if theta0 == 90.0 {
-            return Ok(CelestialPole {
+            return Ok(Self {
                 ra: a0,
                 dec: d0,
                 lonpole: phip,
@@ -135,7 +135,7 @@ impl CelestialPole {
             let y = sin_dphi * cos_theta0 / cos_d0;
             a0 - y.atan2(x) * R2D
         };
-        Ok(CelestialPole {
+        Ok(Self {
             ra: norm360(ap),
             dec: dp,
             lonpole: phip,
@@ -144,7 +144,7 @@ impl CelestialPole {
 
     /// Native spherical (φ, θ) → celestial (α, δ), all degrees (CG 2002 eq. 2).
     pub(super) fn to_celestial(self, phi: f64, theta: f64) -> CelestialCoordinate {
-        let CelestialPole {
+        let Self {
             ra: ap,
             dec: dp,
             lonpole: fp,
@@ -162,7 +162,7 @@ impl CelestialPole {
 
     /// Celestial (α, δ) → native spherical (φ, θ), all degrees (CG 2002 eq. 5).
     pub(super) fn to_native(self, ra: f64, dec: f64) -> NativeCoordinate {
-        let CelestialPole {
+        let Self {
             ra: ap,
             dec: dp,
             lonpole: fp,

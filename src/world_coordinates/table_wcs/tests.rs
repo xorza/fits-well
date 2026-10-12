@@ -42,8 +42,8 @@ impl Celestial {
         crpix: [f64; 2],
         crval: [f64; 2],
         cdelt: [f64; 2],
-    ) -> Celestial {
-        Celestial {
+    ) -> Self {
+        Self {
             projection,
             crpix,
             crval,
@@ -199,7 +199,7 @@ fn table_wcs_matches_the_equivalent_image_wcs() {
         let context = format!("{family:?}");
         let table = ROTATED_TAN.wcs(family, None);
         assert_eq!(
-            table.view().axes.len(),
+            table.metadata().axes.len(),
             2,
             "{context}: rank from the keywords"
         );
@@ -385,7 +385,7 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
         assert_eq!(
             Wcs::from_array_column(h, 5, None)
                 .unwrap()
-                .view()
+                .metadata()
                 .axes
                 .len(),
             3
@@ -414,7 +414,7 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
         assert_eq!(
             Wcs::from_array_column(header, 5, Some('A'))
                 .unwrap()
-                .view()
+                .metadata()
                 .axes
                 .len(),
             3
@@ -434,7 +434,7 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
     assert_eq!(
         Wcs::from_array_column(&two_digit, 5, None)
             .unwrap()
-            .view()
+            .metadata()
             .axes
             .len(),
         12

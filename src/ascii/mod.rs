@@ -48,9 +48,9 @@ impl AsciiColumnData {
     /// value count and the row count.
     pub const fn len(&self) -> usize {
         match self {
-            AsciiColumnData::Text(values) => values.len(),
-            AsciiColumnData::Integer(values) => values.len(),
-            AsciiColumnData::Float(values) => values.len(),
+            Self::Text(values) => values.len(),
+            Self::Integer(values) => values.len(),
+            Self::Float(values) => values.len(),
         }
     }
 
@@ -61,9 +61,9 @@ impl AsciiColumnData {
     /// Whether any row is undefined, and so needs a `TNULLn` marker to be writable.
     pub(crate) fn has_null(&self) -> bool {
         match self {
-            AsciiColumnData::Text(values) => values.has_null(),
-            AsciiColumnData::Integer(values) => values.iter().any(Option::is_none),
-            AsciiColumnData::Float(values) => values.iter().any(Option::is_none),
+            Self::Text(values) => values.has_null(),
+            Self::Integer(values) => values.iter().any(Option::is_none),
+            Self::Float(values) => values.iter().any(Option::is_none),
         }
     }
 }
@@ -88,7 +88,7 @@ pub struct AsciiColumn {
 
 /// A parsed ASCII table plus its row text.
 #[derive(Debug, Clone)]
-pub struct AsciiTable {
+pub struct Ascii {
     nrows: usize,
     columns: Vec<AsciiColumn>,
     row_len: usize,
@@ -99,23 +99,23 @@ pub struct AsciiTable {
 
 /// Immutable row and column metadata for a parsed ASCII table.
 #[derive(Debug, Clone, Copy)]
-pub struct AsciiTableMetadata<'a> {
+pub struct AsciiMetadata<'a> {
     /// Number of rows in the table.
     pub nrows: usize,
     /// Validated column descriptors in `TFIELDS` order.
     pub columns: &'a [AsciiColumn],
 }
 
-impl AsciiTable {
+impl Ascii {
     /// Borrow the table's validated row count and column descriptors.
-    pub fn metadata(&self) -> AsciiTableMetadata<'_> {
-        AsciiTableMetadata {
+    pub fn metadata(&self) -> AsciiMetadata<'_> {
+        AsciiMetadata {
             nrows: self.nrows,
             columns: &self.columns,
         }
     }
 
-    pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<AsciiTable> {
+    pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<Self> {
         let row_len = header.required_usize("NAXIS1", "NAXIS1")?;
         let nrows = header.required_usize("NAXIS2", "NAXIS2")?;
         // §7.2.1: `0 ≤ TFIELDS ≤ 999` — also a guard, since `tfields` sizes the
@@ -174,7 +174,7 @@ impl AsciiTable {
                 context: "ASCII-table data",
             });
         }
-        Ok(AsciiTable {
+        Ok(Self {
             nrows,
             columns,
             row_len,
@@ -213,13 +213,13 @@ impl AsciiTable {
     }
 }
 
-/// A handle to one column of an [`AsciiTable`], from [`AsciiTable::column_by_idx`] or
-/// [`AsciiTable::column_by_name`]. Decode through it without re-passing the
+/// A handle to one column of an [`Ascii`], from [`Ascii::column_by_idx`] or
+/// [`Ascii::column_by_name`]. Decode through it without re-passing the
 /// descriptor: [`raw`](Self::raw) for the typed values, [`physical`](Self::physical)
 /// for the scaled plane. Borrows the table, so it cannot outlive it.
 #[derive(Debug, Clone, Copy)]
 pub struct AsciiColumnReader<'a> {
-    table: &'a AsciiTable,
+    table: &'a Ascii,
     index: usize,
 }
 
@@ -294,7 +294,7 @@ impl<'a> AsciiColumnReader<'a> {
 
 /// The trimmed text of one field, or `None` when it is the column's `TNULLn` marker
 /// and so carries no value at all (§7.2.5).
-fn defined_field<'a>(table: &'a AsciiTable, col: &AsciiColumn, row: usize) -> Option<&'a str> {
+fn defined_field<'a>(table: &'a Ascii, col: &AsciiColumn, row: usize) -> Option<&'a str> {
     let field = table.field(col, row).trim();
     (!col.is_null(field)).then_some(field)
 }

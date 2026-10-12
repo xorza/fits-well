@@ -45,8 +45,8 @@ struct CodecParams {
 }
 
 impl CodecParams {
-    fn read(header: &Header, codec: ImageCodec) -> Result<CodecParams> {
-        let mut params = CodecParams {
+    fn read(header: &Header, codec: ImageCodec) -> Result<Self> {
+        let mut params = Self {
             blocksize: rice::BLOCKSIZE,
             bytepix: IntBitpix::I32,
             smooth: false,
@@ -89,7 +89,7 @@ impl CodecParams {
 }
 
 impl TileDecoder {
-    pub(super) fn new(header: &Header, tiled: &TiledImage<'_>) -> Result<TileDecoder> {
+    pub(super) fn new(header: &Header, tiled: &TiledImage<'_>) -> Result<Self> {
         let params = CodecParams::read(header, tiled.codec)?;
         // A float image's tiles arrive quantized, so they decode in whichever integer
         // width the codec stored them at — RICE_1 says so in `BYTEPIX`, the rest use
@@ -101,7 +101,7 @@ impl TileDecoder {
             }
             Plane::Float(bitpix) => (IntBitpix::I32, Some(bitpix)),
         };
-        Ok(TileDecoder {
+        Ok(Self {
             codec: tiled.codec,
             int_bitpix,
             float_bitpix,

@@ -6,12 +6,12 @@ use std::io::Cursor;
 
 use crate::bintable::column_data::ColumnData;
 use crate::bitpix::Bitpix;
-use crate::data::Image;
-use crate::data::image_data::ImageData;
-use crate::data::scaling::Scaling;
+use crate::fits_writer::FitsWriter;
+use crate::fits_writer::builder::{Builder, WriteColumn};
 use crate::header_model::Header;
-use crate::writer::FitsWriter;
-use crate::writer::table::{TableBuilder, WriteColumn};
+use crate::image_model::Image;
+use crate::image_model::data::Data;
+use crate::image_model::scaling::Scaling;
 
 /// The standard frame's width: 6000 × 4000, an APS-C camera's 24 MP, as the lumos benches use.
 pub(crate) const WIDTH: usize = 6000;
@@ -42,7 +42,7 @@ pub(crate) fn sky(bitpix: Bitpix, width: usize, height: usize, seed: u64) -> Ima
     let units = (0..width * height).map(|index| SplitMix::pixel(seed, index).sky());
     let shape = vec![width, height];
     let data = match bitpix {
-        Bitpix::U8 => ImageData::U8(units.map(|v| (v * 255.0).round() as u8).collect()),
+        Bitpix::U8 => Data::U8(units.map(|v| (v * 255.0).round() as u8).collect()),
         Bitpix::I16 => {
             let light = units.map(|v| ((v * 65535.0).round() as u16 ^ 0x8000).cast_signed());
             let scaling = Scaling {
@@ -50,16 +50,16 @@ pub(crate) fn sky(bitpix: Bitpix, width: usize, height: usize, seed: u64) -> Ima
                 bzero: 32768.0,
                 blank: None,
             };
-            return Image::new_scaled(shape, ImageData::I16(light.collect()), scaling).unwrap();
+            return Image::new_scaled(shape, Data::I16(light.collect()), scaling).unwrap();
         }
-        Bitpix::I32 => ImageData::I32(
+        Bitpix::I32 => Data::I32(
             units
                 .map(|v| (v * f64::from(i32::MAX)).round() as i32)
                 .collect(),
         ),
-        Bitpix::I64 => ImageData::I64(units.map(|v| (v * 2f64.powi(53)).round() as i64).collect()),
-        Bitpix::F32 => ImageData::F32(units.map(|v| v as f32).collect()),
-        Bitpix::F64 => ImageData::F64(units.collect()),
+        Bitpix::I64 => Data::I64(units.map(|v| (v * 2f64.powi(53)).round() as i64).collect()),
+        Bitpix::F32 => Data::F32(units.map(|v| v as f32).collect()),
+        Bitpix::F64 => Data::F64(units.collect()),
     };
     Image::new(shape, data).unwrap()
 }
@@ -68,7 +68,7 @@ pub(crate) fn sky(bitpix: Bitpix, width: usize, height: usize, seed: u64) -> Ima
 #[cfg(feature = "compression")]
 pub(crate) fn mask(width: usize, height: usize, seed: u64) -> Image {
     let flags = (0..width * height).map(|index| u8::from(SplitMix::pixel(seed, index).star()));
-    Image::new(vec![width, height], ImageData::U8(flags.collect())).unwrap()
+    Image::new(vec![width, height], Data::U8(flags.collect())).unwrap()
 }
 
 /// The header a capture program writes on a light, past the structural keywords the image
@@ -152,7 +152,7 @@ pub(crate) fn frame_file(bitpix: Bitpix) -> Vec<u8> {
 /// A source catalog of the standard frame, [`CATALOG_ROWS`] stars: a running number, the
 /// position in pixels and on the sky, the flux and its error, the width and the elongation, and
 /// the extraction flags.
-pub(crate) fn catalog() -> TableBuilder {
+pub(crate) fn catalog() -> Builder {
     let mut draws = SplitMix(7);
     let x = draws.column(|d| 0.5 + WIDTH as f64 * d.unit());
     let y = draws.column(|d| 0.5 + HEIGHT as f64 * d.unit());
@@ -178,7 +178,7 @@ pub(crate) fn catalog() -> TableBuilder {
         WriteColumn::scalar("ELONG", ColumnData::F32(elong)),
         WriteColumn::scalar("FLAGS", ColumnData::I16(flags)),
     ];
-    TableBuilder::explicit(CATALOG_ROWS, columns).unwrap()
+    Builder::explicit(CATALOG_ROWS, columns).unwrap()
 }
 
 /// The bytes of a file holding [`catalog`] in a binary table after an empty primary.

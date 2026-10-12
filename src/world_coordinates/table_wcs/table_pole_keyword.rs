@@ -8,22 +8,21 @@ pub(super) enum TablePoleKeyword {
 }
 
 impl TablePoleKeyword {
-    pub(super) const BOTH: [TablePoleKeyword; 2] =
-        [TablePoleKeyword::Longitude, TablePoleKeyword::Latitude];
+    pub(super) const BOTH: [Self; 2] = [Self::Longitude, Self::Latitude];
 
     /// The Table-22 column-indexed root.
     pub(super) const fn table_root(self) -> &'static str {
         match self {
-            TablePoleKeyword::Longitude => "LONP",
-            TablePoleKeyword::Latitude => "LATP",
+            Self::Longitude => "LONP",
+            Self::Latitude => "LATP",
         }
     }
 
     /// The image-header root this translates to.
     pub(super) const fn image_root(self) -> &'static str {
         match self {
-            TablePoleKeyword::Longitude => "LONPOLE",
-            TablePoleKeyword::Latitude => "LATPOLE",
+            Self::Longitude => "LONPOLE",
+            Self::Latitude => "LATPOLE",
         }
     }
 }

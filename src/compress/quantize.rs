@@ -59,7 +59,7 @@ impl Dither {
         let period = i64::try_from(N_RANDOM).unwrap();
         let iseed = usize::try_from((irow - 1).rem_euclid(period)).unwrap();
         let nextrand = (rand[iseed] * 500.0) as usize;
-        Dither {
+        Self {
             rand,
             iseed,
             nextrand,

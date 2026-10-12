@@ -22,15 +22,11 @@ pub struct PhaseAxis {
 impl PhaseAxis {
     /// The §9.6 `'PHASE'` parameters for an image WCS `axis` (1-based), or `None`
     /// when that axis is not a phase axis.
-    pub fn from_header(
-        header: &Header,
-        axis: usize,
-        alt: Option<char>,
-    ) -> Result<Option<PhaseAxis>> {
+    pub fn from_header(header: &Header, axis: usize, alt: Option<char>) -> Result<Option<Self>> {
         if axis == 0 {
             return Err(FitsError::OneBasedIndexRequired { kind: "WCS axis" });
         }
-        PhaseAxis::from_keywords(header, &PhaseAxisKeywords::image(axis, alt))
+        Self::from_keywords(header, &PhaseAxisKeywords::image(axis, alt))
     }
 
     /// The §9.6 `'PHASE'` parameters for a binary-table pixel-list `column` (1-based).
@@ -38,13 +34,13 @@ impl PhaseAxis {
         header: &Header,
         column: usize,
         alt: Option<char>,
-    ) -> Result<Option<PhaseAxis>> {
+    ) -> Result<Option<Self>> {
         if column == 0 {
             return Err(FitsError::OneBasedIndexRequired {
                 kind: "table column",
             });
         }
-        PhaseAxis::from_keywords(header, &PhaseAxisKeywords::pixel_list(column, alt))
+        Self::from_keywords(header, &PhaseAxisKeywords::pixel_list(column, alt))
     }
 
     /// The §9.6 `'PHASE'` parameters for `axis` of an array-valued table `column`
@@ -54,7 +50,7 @@ impl PhaseAxis {
         axis: usize,
         column: usize,
         alt: Option<char>,
-    ) -> Result<Option<PhaseAxis>> {
+    ) -> Result<Option<Self>> {
         if axis == 0 {
             return Err(FitsError::OneBasedIndexRequired { kind: "WCS axis" });
         }
@@ -63,10 +59,10 @@ impl PhaseAxis {
                 kind: "table column",
             });
         }
-        PhaseAxis::from_keywords(header, &PhaseAxisKeywords::array_column(axis, column, alt))
+        Self::from_keywords(header, &PhaseAxisKeywords::array_column(axis, column, alt))
     }
 
-    fn from_keywords(header: &Header, keywords: &PhaseAxisKeywords) -> Result<Option<PhaseAxis>> {
+    fn from_keywords(header: &Header, keywords: &PhaseAxisKeywords) -> Result<Option<Self>> {
         let Some(ctype) = header.get_text(keywords.ctype.as_str())? else {
             return Ok(None);
         };
@@ -89,7 +85,7 @@ impl PhaseAxis {
                 detail: format!("{} must be finite", keywords.period.as_str()),
             });
         }
-        Ok(Some(PhaseAxis {
+        Ok(Some(Self {
             zero_phase,
             period: period.filter(|value| *value != 0.0),
         }))
@@ -104,23 +100,23 @@ struct PhaseAxisKeywords {
 }
 
 impl PhaseAxisKeywords {
-    fn image(axis: usize, alt: Option<char>) -> PhaseAxisKeywords {
+    fn image(axis: usize, alt: Option<char>) -> Self {
         let suffix = AltSuffix::new(alt);
-        PhaseAxisKeywords {
+        Self {
             ctype: key!("CTYPE{axis}{suffix}"),
             zero_phase: key!("CZPHS{axis}{suffix}"),
             period: key!("CPERI{axis}{suffix}"),
         }
     }
 
-    fn pixel_list(column: usize, alt: Option<char>) -> PhaseAxisKeywords {
+    fn pixel_list(column: usize, alt: Option<char>) -> Self {
         match alt {
-            Some(alt) => PhaseAxisKeywords {
+            Some(alt) => Self {
                 ctype: key!("TCTY{column}{alt}"),
                 zero_phase: key!("TCZP{column}{alt}"),
                 period: key!("TCPR{column}{alt}"),
             },
-            None => PhaseAxisKeywords {
+            None => Self {
                 ctype: key!("TCTYP{column}"),
                 zero_phase: key!("TCZPH{column}"),
                 period: key!("TCPER{column}"),
@@ -128,14 +124,14 @@ impl PhaseAxisKeywords {
         }
     }
 
-    fn array_column(axis: usize, column: usize, alt: Option<char>) -> PhaseAxisKeywords {
+    fn array_column(axis: usize, column: usize, alt: Option<char>) -> Self {
         match alt {
-            Some(alt) => PhaseAxisKeywords {
+            Some(alt) => Self {
                 ctype: key!("{axis}CTY{column}{alt}"),
                 zero_phase: key!("{axis}CZP{column}{alt}"),
                 period: key!("{axis}CPR{column}{alt}"),
             },
-            None => PhaseAxisKeywords {
+            None => Self {
                 ctype: key!("{axis}CTYP{column}"),
                 zero_phase: key!("{axis}CZPH{column}"),
                 period: key!("{axis}CPER{column}"),

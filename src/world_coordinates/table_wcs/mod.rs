@@ -18,7 +18,7 @@ use crate::header_model::Header;
 use crate::header_model::value;
 use crate::keyword::KeyBuf;
 use crate::keyword::key;
-use crate::world_coordinates::axis;
+use crate::world_coordinates::axis_transform;
 use crate::world_coordinates::spectral_frame::SpectralFrame;
 use crate::world_coordinates::table_wcs::table_axis_keyword::TableAxisKeyword;
 use crate::world_coordinates::table_wcs::table_matrix_keyword::TableMatrixKeyword;
@@ -54,7 +54,7 @@ pub(super) struct TranslatedTableWcs {
 
 impl<'a> TableWcs<'a> {
     /// A pixel-list description over the 1-based table `columns`, in axis order.
-    pub(super) const fn pixel_list(alt: Option<char>, columns: &'a [usize]) -> TableWcs<'a> {
+    pub(super) const fn pixel_list(alt: Option<char>, columns: &'a [usize]) -> Self {
         TableWcs {
             resolver: TableWcsResolver::new(alt),
             form: TableWcsForm::PixelList(columns),
@@ -62,11 +62,7 @@ impl<'a> TableWcs<'a> {
     }
 
     /// A vector-cell description of rank `naxis` inside the 1-based table `column`.
-    pub(super) const fn array_column(
-        alt: Option<char>,
-        naxis: usize,
-        column: usize,
-    ) -> TableWcs<'a> {
+    pub(super) const fn array_column(alt: Option<char>, naxis: usize, column: usize) -> Self {
         TableWcs {
             resolver: TableWcsResolver::new(alt),
             form: TableWcsForm::ArrayColumn { naxis, column },
@@ -181,7 +177,7 @@ impl<'a> TableWcs<'a> {
                 .expect("Table 22 defines primary and alternate axis-type keywords");
             if let Some(t) = header.get_text(type_key.as_str())? {
                 h.set_internal(key!("CTYPE{ax}").as_str(), t);
-                if axis::is_spectral_type(t) {
+                if axis_transform::is_spectral_type(t) {
                     *spectral = Some(self.resolver.spectral_frame(header, self.column(index))?);
                 }
             }

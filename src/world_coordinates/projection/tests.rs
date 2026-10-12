@@ -336,7 +336,7 @@ fn unsupported_projection_codes_reject_complete_transforms() {
     for code in ["XPH", "UV", "U"] {
         let h = celestial_header(code, [1.0, 1.0], [10.0, 20.0], [2.0, 3.0]);
         let w = Wcs::from_header(&h, None).unwrap();
-        assert_eq!(w.view().unsupported_axes, [0, 1], "{code} axes flagged");
+        assert_eq!(w.metadata().unsupported_axes, [0, 1], "{code} axes flagged");
         assert!(w.celestial.is_none(), "{code} not decoded as a projection");
         assert!(matches!(
             w.pixel_to_world(&[3.0, 4.0]),
@@ -392,7 +392,7 @@ fn degenerate_conic_without_pv1_rejects_complete_transforms() {
         let h = celestial_header(code, [1.0, 1.0], [10.0, 20.0], [2.0, 3.0]);
         // No PV2_1 ⇒ θ_a = 0.
         let w = Wcs::from_header(&h, None).unwrap();
-        assert_eq!(w.view().unsupported_axes, [0, 1], "{code} axes flagged");
+        assert_eq!(w.metadata().unsupported_axes, [0, 1], "{code} axes flagged");
         assert!(w.celestial.is_none(), "{code} degenerate, not deprojected");
         assert!(matches!(
             w.pixel_to_world(&[3.0, 4.0]),
@@ -403,7 +403,7 @@ fn degenerate_conic_without_pv1_rejects_complete_transforms() {
     let mut ok = celestial_header("COP", [1.0, 1.0], [10.0, 45.0], [0.5, 0.5]);
     ok.set_internal("PV2_1", 45.0);
     let w = Wcs::from_header(&ok, None).unwrap();
-    assert!(w.view().unsupported_axes.is_empty() && w.celestial.is_some());
+    assert!(w.metadata().unsupported_axes.is_empty() && w.celestial.is_some());
 }
 
 #[test]
@@ -420,7 +420,7 @@ fn bonne_with_zero_theta1_equals_sfl() {
     };
     let bon = build("BON", Some(0.0));
     let sfl = build("SFL", None);
-    assert!(bon.celestial.is_some() && bon.view().unsupported_axes.is_empty());
+    assert!(bon.celestial.is_some() && bon.metadata().unsupported_axes.is_empty());
     for &(px, py) in &[(20.0, 70.0), (80.0, 30.0), (55.0, 45.0)] {
         let b = bon.pixel_to_world(&[px, py]).unwrap();
         let s = sfl.pixel_to_world(&[px, py]).unwrap();

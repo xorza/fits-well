@@ -10,18 +10,18 @@ use criterion::{BenchmarkId, Criterion};
 
 use crate::bench::fixture::{self, Kind, Reading, Scale, ScratchDir, SourceKind};
 use crate::bench::scene::{self, CATALOG_ROW_BYTES, CATALOG_ROWS, HEIGHT, WIDTH};
-use crate::bintable::BinTable;
+use crate::bintable::Table;
 use crate::bitpix::Bitpix;
 use crate::compress::plane::IntBitpix;
 use crate::compress::{
     Compression, CompressionOptions, Hcompress, convert, gzip, hcompress, plio, rice,
 };
-use crate::data::Image;
-use crate::data::image_data::ImageData;
+use crate::fits_writer::FitsWriter;
 use crate::header_model::Header;
+use crate::image_model::Image;
+use crate::image_model::data::Data;
 use crate::reader::FitsReader;
 use crate::reader::source::Source;
-use crate::writer::FitsWriter;
 
 /// The codecs an image case compresses with, and the `BITPIX` of the scene image each takes:
 /// the integer codecs the light, `PLIO_1` the mask, the float-capable ones the float frame.
@@ -221,7 +221,7 @@ fn compressed_file(compression: Compression, bitpix: Bitpix) -> Vec<u8> {
 #[derive(Debug)]
 struct CatalogTable {
     header: Header,
-    table: BinTable,
+    table: Table,
 }
 
 impl CatalogTable {
@@ -263,8 +263,8 @@ impl Tile {
     fn new(compression: Compression, bitpix: Bitpix) -> Self {
         let row = scene_image(compression, bitpix, 1);
         let values = match row.samples {
-            ImageData::U8(values) => values.into_iter().map(i64::from).collect(),
-            ImageData::I16(values) => values.into_iter().map(i64::from).collect(),
+            Data::U8(values) => values.into_iter().map(i64::from).collect(),
+            Data::I16(values) => values.into_iter().map(i64::from).collect(),
             _ => unreachable!("the integer codecs take u8 and i16 tiles"),
         };
         let bitpix = match bitpix {
@@ -339,9 +339,9 @@ impl Tile {
 struct ReadCompressed;
 
 impl Reading for ReadCompressed {
-    type Output = ImageData;
+    type Output = Data;
 
-    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> ImageData {
+    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> Data {
         reader.read_image(1).unwrap().decode()
     }
 }
@@ -350,9 +350,9 @@ impl Reading for ReadCompressed {
 struct ReadCompressedTable;
 
 impl Reading for ReadCompressedTable {
-    type Output = BinTable;
+    type Output = Table;
 
-    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> BinTable {
+    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> Table {
         reader.read_compressed_table(1).unwrap()
     }
 }

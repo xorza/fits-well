@@ -1,6 +1,6 @@
 use crate::error::FitsError;
 use crate::header_model::Header;
-use crate::time_coordinates::fits_time::FitsTime;
+use crate::time_coordinates::frame::Frame;
 use crate::world_coordinates::tabular;
 use crate::world_coordinates::tabular::TabularTransform;
 use crate::world_coordinates::tabular::internals::{
@@ -176,7 +176,7 @@ fn tabular_time_axes_feed_the_typed_time_layer() {
         .set_internal("MJDREF", 50_000.0)
         .set_internal("TIMESYS", "UTC");
     let wcs = resolved_wcs(&header, &table);
-    let coordinate = FitsTime::from_header(&header)
+    let coordinate = Frame::from_header(&header)
         .unwrap()
         .time_axis_mjd(&wcs, 1, &[1.5])
         .unwrap()
@@ -208,7 +208,7 @@ fn tabular_time_axes_feed_the_typed_time_layer() {
         .set_internal("MJDREF", 50_000.0)
         .set_internal("TIMESYS", "UTC");
     let wcs = resolved_wcs(&header, &table);
-    let coordinate = FitsTime::from_header(&header)
+    let coordinate = Frame::from_header(&header)
         .unwrap()
         .time_axis_mjd(&wcs, 2, &[12.0, 20.5, 34.0])
         .unwrap()

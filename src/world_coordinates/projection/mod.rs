@@ -132,100 +132,100 @@ enum Equatorial {
 }
 
 impl Projection {
-    pub(super) fn from_code(code: &str) -> Option<Projection> {
+    pub(super) fn from_code(code: &str) -> Option<Self> {
         Some(match code {
-            "TAN" => Projection::Tan,
-            "SIN" => Projection::Sin,
-            "ARC" => Projection::Arc,
-            "STG" => Projection::Stg,
-            "ZEA" => Projection::Zea,
-            "ZPN" => Projection::Zpn,
-            "AIR" => Projection::Air,
-            "AZP" => Projection::Azp,
-            "SZP" => Projection::Szp,
-            "COP" => Projection::Cop,
-            "COE" => Projection::Coe,
-            "COD" => Projection::Cod,
-            "COO" => Projection::Coo,
-            "CAR" => Projection::Car,
-            "CEA" => Projection::Cea,
-            "MER" => Projection::Mer,
-            "SFL" => Projection::Sfl,
-            "AIT" => Projection::Ait,
-            "MOL" => Projection::Mol,
-            "CYP" => Projection::Cyp,
-            "PAR" => Projection::Par,
-            "BON" => Projection::Bon,
-            "PCO" => Projection::Pco,
-            "TSC" => Projection::Tsc,
-            "CSC" => Projection::Csc,
-            "QSC" => Projection::Qsc,
-            "HPX" => Projection::Hpx,
+            "TAN" => Self::Tan,
+            "SIN" => Self::Sin,
+            "ARC" => Self::Arc,
+            "STG" => Self::Stg,
+            "ZEA" => Self::Zea,
+            "ZPN" => Self::Zpn,
+            "AIR" => Self::Air,
+            "AZP" => Self::Azp,
+            "SZP" => Self::Szp,
+            "COP" => Self::Cop,
+            "COE" => Self::Coe,
+            "COD" => Self::Cod,
+            "COO" => Self::Coo,
+            "CAR" => Self::Car,
+            "CEA" => Self::Cea,
+            "MER" => Self::Mer,
+            "SFL" => Self::Sfl,
+            "AIT" => Self::Ait,
+            "MOL" => Self::Mol,
+            "CYP" => Self::Cyp,
+            "PAR" => Self::Par,
+            "BON" => Self::Bon,
+            "PCO" => Self::Pco,
+            "TSC" => Self::Tsc,
+            "CSC" => Self::Csc,
+            "QSC" => Self::Qsc,
+            "HPX" => Self::Hpx,
             _ => return None,
         })
     }
 
     pub(super) const fn code(self) -> &'static str {
         match self {
-            Projection::Tan => "TAN",
-            Projection::Sin => "SIN",
-            Projection::Arc => "ARC",
-            Projection::Stg => "STG",
-            Projection::Zea => "ZEA",
-            Projection::Zpn => "ZPN",
-            Projection::Air => "AIR",
-            Projection::Azp => "AZP",
-            Projection::Szp => "SZP",
-            Projection::Cop => "COP",
-            Projection::Coe => "COE",
-            Projection::Cod => "COD",
-            Projection::Coo => "COO",
-            Projection::Car => "CAR",
-            Projection::Cea => "CEA",
-            Projection::Mer => "MER",
-            Projection::Sfl => "SFL",
-            Projection::Ait => "AIT",
-            Projection::Mol => "MOL",
-            Projection::Cyp => "CYP",
-            Projection::Par => "PAR",
-            Projection::Bon => "BON",
-            Projection::Pco => "PCO",
-            Projection::Tsc => "TSC",
-            Projection::Csc => "CSC",
-            Projection::Qsc => "QSC",
-            Projection::Hpx => "HPX",
+            Self::Tan => "TAN",
+            Self::Sin => "SIN",
+            Self::Arc => "ARC",
+            Self::Stg => "STG",
+            Self::Zea => "ZEA",
+            Self::Zpn => "ZPN",
+            Self::Air => "AIR",
+            Self::Azp => "AZP",
+            Self::Szp => "SZP",
+            Self::Cop => "COP",
+            Self::Coe => "COE",
+            Self::Cod => "COD",
+            Self::Coo => "COO",
+            Self::Car => "CAR",
+            Self::Cea => "CEA",
+            Self::Mer => "MER",
+            Self::Sfl => "SFL",
+            Self::Ait => "AIT",
+            Self::Mol => "MOL",
+            Self::Cyp => "CYP",
+            Self::Par => "PAR",
+            Self::Bon => "BON",
+            Self::Pco => "PCO",
+            Self::Tsc => "TSC",
+            Self::Csc => "CSC",
+            Self::Qsc => "QSC",
+            Self::Hpx => "HPX",
         }
     }
 
     const fn kind(self) -> Kind {
         match self {
-            Projection::Tan => Kind::Zenithal(Zenithal::Tan),
-            Projection::Arc => Kind::Zenithal(Zenithal::Arc),
-            Projection::Stg => Kind::Zenithal(Zenithal::Stg),
-            Projection::Zea => Kind::Zenithal(Zenithal::Zea),
-            Projection::Zpn => Kind::Zenithal(Zenithal::Zpn),
-            Projection::Air => Kind::Zenithal(Zenithal::Air),
-            Projection::Sin => Kind::Sin,
-            Projection::Azp => Kind::Perspective(Perspective::Azp),
-            Projection::Szp => Kind::Perspective(Perspective::Szp),
-            Projection::Cop => Kind::Conic(Conic::Cop),
-            Projection::Coe => Kind::Conic(Conic::Coe),
-            Projection::Cod => Kind::Conic(Conic::Cod),
-            Projection::Coo => Kind::Conic(Conic::Coo),
-            Projection::Car => Kind::Equatorial(Equatorial::Car),
-            Projection::Cea => Kind::Equatorial(Equatorial::Cea),
-            Projection::Mer => Kind::Equatorial(Equatorial::Mer),
-            Projection::Sfl => Kind::Equatorial(Equatorial::Sfl),
-            Projection::Ait => Kind::Equatorial(Equatorial::Ait),
-            Projection::Mol => Kind::Equatorial(Equatorial::Mol),
-            Projection::Cyp => Kind::Equatorial(Equatorial::Cyp),
-            Projection::Par => Kind::Equatorial(Equatorial::Par),
-            Projection::Bon => Kind::Equatorial(Equatorial::Bon),
-            Projection::Pco => Kind::Equatorial(Equatorial::Pco),
-            Projection::Tsc => Kind::Cube(Cube::Tsc),
-            Projection::Csc => Kind::Cube(Cube::Csc),
-            Projection::Qsc => Kind::Cube(Cube::Qsc),
-            Projection::Hpx => Kind::Healpix,
+            Self::Tan => Kind::Zenithal(Zenithal::Tan),
+            Self::Arc => Kind::Zenithal(Zenithal::Arc),
+            Self::Stg => Kind::Zenithal(Zenithal::Stg),
+            Self::Zea => Kind::Zenithal(Zenithal::Zea),
+            Self::Zpn => Kind::Zenithal(Zenithal::Zpn),
+            Self::Air => Kind::Zenithal(Zenithal::Air),
+            Self::Sin => Kind::Sin,
+            Self::Azp => Kind::Perspective(Perspective::Azp),
+            Self::Szp => Kind::Perspective(Perspective::Szp),
+            Self::Cop => Kind::Conic(Conic::Cop),
+            Self::Coe => Kind::Conic(Conic::Coe),
+            Self::Cod => Kind::Conic(Conic::Cod),
+            Self::Coo => Kind::Conic(Conic::Coo),
+            Self::Car => Kind::Equatorial(Equatorial::Car),
+            Self::Cea => Kind::Equatorial(Equatorial::Cea),
+            Self::Mer => Kind::Equatorial(Equatorial::Mer),
+            Self::Sfl => Kind::Equatorial(Equatorial::Sfl),
+            Self::Ait => Kind::Equatorial(Equatorial::Ait),
+            Self::Mol => Kind::Equatorial(Equatorial::Mol),
+            Self::Cyp => Kind::Equatorial(Equatorial::Cyp),
+            Self::Par => Kind::Equatorial(Equatorial::Par),
+            Self::Bon => Kind::Equatorial(Equatorial::Bon),
+            Self::Pco => Kind::Equatorial(Equatorial::Pco),
+            Self::Tsc => Kind::Cube(Cube::Tsc),
+            Self::Csc => Kind::Cube(Cube::Csc),
+            Self::Qsc => Kind::Cube(Cube::Qsc),
+            Self::Hpx => Kind::Healpix,
         }
     }
 
@@ -236,14 +236,14 @@ impl Projection {
     pub(super) const fn parameter_defaults(self) -> [f64; 21] {
         let mut pv = [0.0; 21];
         match self {
-            Projection::Air => pv[1] = 90.0,
-            Projection::Cyp => {
+            Self::Air => pv[1] = 90.0,
+            Self::Cyp => {
                 pv[1] = 1.0;
                 pv[2] = 1.0;
             }
-            Projection::Cea => pv[1] = 1.0,
-            Projection::Szp => pv[3] = 90.0,
-            Projection::Hpx => {
+            Self::Cea => pv[1] = 1.0,
+            Self::Szp => pv[3] = 90.0,
+            Self::Hpx => {
                 pv[1] = 4.0;
                 pv[2] = 3.0;
             }
@@ -258,17 +258,15 @@ impl Projection {
             detail: format!("degenerate {} projection parameters", self.code()),
         };
         let invalid = match self {
-            Projection::Cea => pv[1] == 0.0,
-            Projection::Cyp => pv[2] == 0.0 || pv[1] + pv[2] == 0.0,
-            Projection::Hpx => {
-                !pv[1].is_finite() || pv[1] <= 0.0 || !pv[2].is_finite() || pv[2] <= 0.0
-            }
+            Self::Cea => pv[1] == 0.0,
+            Self::Cyp => pv[2] == 0.0 || pv[1] + pv[2] == 0.0,
+            Self::Hpx => !pv[1].is_finite() || pv[1] <= 0.0 || !pv[2].is_finite() || pv[2] <= 0.0,
             _ => false,
         };
         if invalid {
             return Err(degenerate());
         }
-        let zpn = if self == Projection::Zpn {
+        let zpn = if self == Self::Zpn {
             ZpnBranch::new(&pv).ok_or_else(degenerate)?
         } else {
             ZpnBranch::NONE
@@ -300,7 +298,7 @@ struct ZpnBranch {
 
 impl ZpnBranch {
     /// No branch: the parameters of a projection other than ZPN.
-    const NONE: ZpnBranch = ZpnBranch {
+    const NONE: Self = Self {
         degree: 0,
         zeta_max: PI,
         radius_max: f64::INFINITY,
@@ -308,10 +306,10 @@ impl ZpnBranch {
 
     /// The branch of `pv`, or `None` when the polynomial is zero, or of degree two or more
     /// with `P₁ ≤ 0` — falling from the pole, so no branch exists.
-    fn new(pv: &[f64; 21]) -> Option<ZpnBranch> {
+    fn new(pv: &[f64; 21]) -> Option<Self> {
         let degree = pv.iter().rposition(|&coefficient| coefficient != 0.0)?;
         if degree < 2 {
-            return Some(ZpnBranch {
+            return Some(Self {
                 degree,
                 zeta_max: PI,
                 radius_max: evaluate_zpn(PI, pv).value,
@@ -339,7 +337,7 @@ impl ZpnBranch {
                 }
                 low
             });
-        Some(ZpnBranch {
+        Some(Self {
             degree,
             zeta_max,
             radius_max: evaluate_zpn(zeta_max, pv).value,
@@ -978,7 +976,7 @@ fn limb(s: f64, t: f64) -> f64 {
 }
 
 impl ConicConstants {
-    fn new(kind: Conic, pv: &[f64; 21]) -> ConicConstants {
+    fn new(kind: Conic, pv: &[f64; 21]) -> Self {
         let theta_a = pv[1] * D2R;
         let eta = pv[2] * D2R;
         let theta1 = theta_a - eta;
@@ -1027,7 +1025,7 @@ impl ConicConstants {
                 (c, y0, psi)
             }
         };
-        ConicConstants {
+        Self {
             kind,
             c,
             y0,

@@ -53,26 +53,26 @@ pub enum DitherMethod {
 impl DitherMethod {
     /// Whether this method applies a per-pixel dither (everything but `None`).
     const fn dithered(self) -> bool {
-        !matches!(self, DitherMethod::None)
+        !matches!(self, Self::None)
     }
 
     /// The `ZQUANTIZ` keyword spelling; `None` for a value this crate does not model.
     /// A float image must be able to reproduce its dither exactly, so the decoder
     /// rejects an unrecognized value there — an integer image ignores `ZQUANTIZ`.
-    fn parse(s: &str) -> Option<DitherMethod> {
+    fn parse(s: &str) -> Option<Self> {
         match s {
-            "NO_DITHER" => Some(DitherMethod::None),
-            "SUBTRACTIVE_DITHER_1" => Some(DitherMethod::Subtractive1),
-            "SUBTRACTIVE_DITHER_2" => Some(DitherMethod::Subtractive2),
+            "NO_DITHER" => Some(Self::None),
+            "SUBTRACTIVE_DITHER_1" => Some(Self::Subtractive1),
+            "SUBTRACTIVE_DITHER_2" => Some(Self::Subtractive2),
             _ => None,
         }
     }
 
     const fn name(self) -> &'static str {
         match self {
-            DitherMethod::None => "NO_DITHER",
-            DitherMethod::Subtractive1 => "SUBTRACTIVE_DITHER_1",
-            DitherMethod::Subtractive2 => "SUBTRACTIVE_DITHER_2",
+            Self::None => "NO_DITHER",
+            Self::Subtractive1 => "SUBTRACTIVE_DITHER_1",
+            Self::Subtractive2 => "SUBTRACTIVE_DITHER_2",
         }
     }
 }
@@ -86,28 +86,28 @@ pub struct Gzip {
 
 impl Gzip {
     /// Standard `GZIP_1` at a validated deflate level.
-    pub fn new(level: u32) -> Result<Gzip> {
-        Gzip::configured(false, level)
+    pub fn new(level: u32) -> Result<Self> {
+        Self::configured(false, level)
     }
 
     /// Byte-shuffled `GZIP_2` at a validated deflate level.
-    pub fn shuffled(level: u32) -> Result<Gzip> {
-        Gzip::configured(true, level)
+    pub fn shuffled(level: u32) -> Result<Self> {
+        Self::configured(true, level)
     }
 
-    fn configured(shuffle: bool, level: u32) -> Result<Gzip> {
+    fn configured(shuffle: bool, level: u32) -> Result<Self> {
         if level > 9 {
             return Err(FitsError::InvalidCompressionParameter {
                 detail: format!("gzip compression level {level} is outside 0..=9"),
             });
         }
-        Ok(Gzip { shuffle, level })
+        Ok(Self { shuffle, level })
     }
 }
 
 impl Default for Gzip {
-    fn default() -> Gzip {
-        Gzip {
+    fn default() -> Self {
+        Self {
             shuffle: false,
             level: gzip::DEFAULT_GZIP_LEVEL,
         }
@@ -123,13 +123,13 @@ pub struct Hcompress {
 impl Hcompress {
     /// Configure lossy HCOMPRESS with a positive finite multiplier of the
     /// per-tile background-noise estimate (§10.4.4).
-    pub fn lossy(scale: f64) -> Result<Hcompress> {
+    pub fn lossy(scale: f64) -> Result<Self> {
         if !scale.is_finite() || scale <= 0.0 {
             return Err(FitsError::InvalidCompressionParameter {
                 detail: format!("lossy HCOMPRESS scale {scale} must be positive"),
             });
         }
-        Ok(Hcompress { scale })
+        Ok(Self { scale })
     }
 }
 
@@ -145,11 +145,11 @@ pub enum Compression {
 }
 
 impl Compression {
-    pub const GZIP: Compression = Compression::Gzip(Gzip {
+    pub const GZIP: Self = Self::Gzip(Gzip {
         shuffle: false,
         level: gzip::DEFAULT_GZIP_LEVEL,
     });
-    pub const GZIP_SHUFFLED: Compression = Compression::Gzip(Gzip {
+    pub const GZIP_SHUFFLED: Self = Self::Gzip(Gzip {
         shuffle: true,
         level: gzip::DEFAULT_GZIP_LEVEL,
     });
@@ -163,8 +163,8 @@ struct Quantization {
 }
 
 impl Default for Quantization {
-    fn default() -> Quantization {
-        Quantization {
+    fn default() -> Self {
+        Self {
             level: 0.0,
             dither: DitherMethod::Subtractive1,
         }
@@ -180,18 +180,14 @@ pub struct CompressionOptions {
 }
 
 impl CompressionOptions {
-    pub fn tiled(tile_shape: impl Into<Vec<usize>>) -> CompressionOptions {
-        CompressionOptions {
+    pub fn tiled(tile_shape: impl Into<Vec<usize>>) -> Self {
+        Self {
             tile_shape: tile_shape.into(),
-            ..CompressionOptions::default()
+            ..Self::default()
         }
     }
 
-    pub fn with_quantization(
-        mut self,
-        level: f64,
-        dither: DitherMethod,
-    ) -> Result<CompressionOptions> {
+    pub fn with_quantization(mut self, level: f64, dither: DitherMethod) -> Result<Self> {
         if !level.is_finite() || level < 0.0 {
             return Err(FitsError::InvalidCompressionParameter {
                 detail: format!("float quantization level {level} must be finite and nonnegative"),
@@ -219,14 +215,14 @@ fn parameter_index(keyword: &str) -> Option<usize> {
 }
 
 impl ImageCodec {
-    fn parse(s: &str) -> Result<ImageCodec> {
+    fn parse(s: &str) -> Result<Self> {
         Ok(match s {
-            "GZIP_1" => ImageCodec::Gzip1,
-            "GZIP_2" => ImageCodec::Gzip2,
-            "RICE_1" => ImageCodec::Rice1,
-            "PLIO_1" => ImageCodec::Plio1,
-            "HCOMPRESS_1" => ImageCodec::Hcompress1,
-            "NOCOMPRESS" => ImageCodec::NoCompress,
+            "GZIP_1" => Self::Gzip1,
+            "GZIP_2" => Self::Gzip2,
+            "RICE_1" => Self::Rice1,
+            "PLIO_1" => Self::Plio1,
+            "HCOMPRESS_1" => Self::Hcompress1,
+            "NOCOMPRESS" => Self::NoCompress,
             other => {
                 return Err(FitsError::UnsupportedCompression {
                     name: other.to_string(),
@@ -241,12 +237,12 @@ impl ImageCodec {
     /// them from here.
     const fn name(self) -> &'static str {
         match self {
-            ImageCodec::Gzip1 => "GZIP_1",
-            ImageCodec::Gzip2 => "GZIP_2",
-            ImageCodec::Rice1 => "RICE_1",
-            ImageCodec::Plio1 => "PLIO_1",
-            ImageCodec::Hcompress1 => "HCOMPRESS_1",
-            ImageCodec::NoCompress => "NOCOMPRESS",
+            Self::Gzip1 => "GZIP_1",
+            Self::Gzip2 => "GZIP_2",
+            Self::Rice1 => "RICE_1",
+            Self::Plio1 => "PLIO_1",
+            Self::Hcompress1 => "HCOMPRESS_1",
+            Self::NoCompress => "NOCOMPRESS",
         }
     }
 }
@@ -254,12 +250,12 @@ impl ImageCodec {
 impl Compression {
     const fn image_codec(self) -> ImageCodec {
         match self {
-            Compression::Gzip(config) if config.shuffle => ImageCodec::Gzip2,
-            Compression::Gzip(_) => ImageCodec::Gzip1,
-            Compression::Rice => ImageCodec::Rice1,
-            Compression::Plio => ImageCodec::Plio1,
-            Compression::Hcompress(_) => ImageCodec::Hcompress1,
-            Compression::None => ImageCodec::NoCompress,
+            Self::Gzip(config) if config.shuffle => ImageCodec::Gzip2,
+            Self::Gzip(_) => ImageCodec::Gzip1,
+            Self::Rice => ImageCodec::Rice1,
+            Self::Plio => ImageCodec::Plio1,
+            Self::Hcompress(_) => ImageCodec::Hcompress1,
+            Self::None => ImageCodec::NoCompress,
         }
     }
 
@@ -270,14 +266,14 @@ impl Compression {
 
     const fn gzip_level(self) -> u32 {
         match self {
-            Compression::Gzip(config) => config.level,
+            Self::Gzip(config) => config.level,
             _ => gzip::DEFAULT_GZIP_LEVEL,
         }
     }
 
     const fn hcompress_scale(self) -> f64 {
         match self {
-            Compression::Hcompress(config) => config.scale,
+            Self::Hcompress(config) => config.scale,
             _ => 0.0,
         }
     }

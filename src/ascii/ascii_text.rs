@@ -4,7 +4,7 @@ use crate::ragged::Ragged;
 
 /// The fields of an ASCII-table `Aw` column, in row order: every row's text in one
 /// buffer, and which rows are undefined (`TNULLn`). An undefined row has no text.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AsciiText {
     text: Ragged<String>,
     defined: Vec<bool>,
@@ -39,7 +39,7 @@ impl AsciiText {
 }
 
 impl<S: AsRef<str>> FromIterator<Option<S>> for AsciiText {
-    fn from_iter<I: IntoIterator<Item = Option<S>>>(rows: I) -> AsciiText {
+    fn from_iter<I: IntoIterator<Item = Option<S>>>(rows: I) -> Self {
         let mut text = String::new();
         let mut ends = Vec::new();
         let mut defined = Vec::new();
@@ -50,7 +50,7 @@ impl<S: AsRef<str>> FromIterator<Option<S>> for AsciiText {
             ends.push(text.len());
             defined.push(row.is_some());
         }
-        AsciiText {
+        Self {
             text: Ragged::<String>::new(text, ends),
             defined,
         }

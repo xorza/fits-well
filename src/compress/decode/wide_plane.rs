@@ -23,7 +23,7 @@ impl WidePlane for i64 {
         plan: &ImageDecodePlan<'_>,
         table_row: usize,
         _tile_row: usize,
-        scratch: &mut TileScratchSet<i64>,
+        scratch: &mut TileScratchSet<Self>,
     ) -> Result<()> {
         let nelem = scratch.tile.nelem();
         plan.decoder.decode_tile_into(
@@ -47,7 +47,7 @@ impl WidePlane for f64 {
         plan: &ImageDecodePlan<'_>,
         table_row: usize,
         tile_row: usize,
-        scratch: &mut TileScratchSet<f64>,
+        scratch: &mut TileScratchSet<Self>,
     ) -> Result<()> {
         let nelem = scratch.tile.nelem();
         plan.decoder.decode_float_tile_into(

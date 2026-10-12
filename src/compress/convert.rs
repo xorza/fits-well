@@ -7,10 +7,10 @@ use crate::bintable::tform_kind::TformKind;
 use crate::bintable::vla_column::VlaCell;
 use crate::bitpix::Bitpix;
 use crate::compress::plane::{FloatBitpix, FloatSamples, IntBitpix, IntSamples};
-use crate::data::image_data::ImageData;
 use crate::endian;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::image_model::data::Data;
 
 /// Gather the tile rows starting at each of `row_bases` out of a typed sample plane
 /// into `out`, widening each element with `widen`. Axis 0 has stride 1, so a row is
@@ -177,14 +177,14 @@ pub(super) fn plio_cell(cell: VlaCell<'_>) -> Result<&[u8]> {
 /// per-tile buffers before scattering, so there is no whole-image `i64` or `f64`
 /// intermediate. `len` comes from untrusted dimension keywords, so allocation is
 /// fallible.
-pub(super) fn zeroed_samples(bitpix: Bitpix, len: usize) -> Result<ImageData> {
+pub(super) fn zeroed_samples(bitpix: Bitpix, len: usize) -> Result<Data> {
     Ok(match bitpix {
-        Bitpix::U8 => ImageData::U8(allocation::try_zeroed(0u8, len)?),
-        Bitpix::I16 => ImageData::I16(allocation::try_zeroed(0i16, len)?),
-        Bitpix::I32 => ImageData::I32(allocation::try_zeroed(0i32, len)?),
-        Bitpix::I64 => ImageData::I64(allocation::try_zeroed(0i64, len)?),
-        Bitpix::F32 => ImageData::F32(allocation::try_zeroed(0.0f32, len)?),
-        Bitpix::F64 => ImageData::F64(allocation::try_zeroed(0.0f64, len)?),
+        Bitpix::U8 => Data::U8(allocation::try_zeroed(0u8, len)?),
+        Bitpix::I16 => Data::I16(allocation::try_zeroed(0i16, len)?),
+        Bitpix::I32 => Data::I32(allocation::try_zeroed(0i32, len)?),
+        Bitpix::I64 => Data::I64(allocation::try_zeroed(0i64, len)?),
+        Bitpix::F32 => Data::F32(allocation::try_zeroed(0.0f32, len)?),
+        Bitpix::F64 => Data::F64(allocation::try_zeroed(0.0f64, len)?),
     })
 }
 

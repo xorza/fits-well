@@ -1,10 +1,10 @@
 use crate::ascii::internals::ascii_table_header;
 use crate::ascii::*;
+use crate::fits_writer::FitsWriter;
+use crate::fits_writer::ascii_builder::AsciiWriteColumn;
+use crate::fits_writer::internals::{ascii_table, rejected_before_output, round_trip};
 use crate::io::HduKind;
 use crate::reader::FitsReader;
-use crate::writer::FitsWriter;
-use crate::writer::ascii::AsciiWriteColumn;
-use crate::writer::internals::{ascii_table, rejected_before_output, round_trip};
 use std::io::Cursor;
 
 #[test]
@@ -42,7 +42,7 @@ fn decodes_hand_built_ascii_rows() {
         .set_internal("TTYPE1", "NAME")
         .set_internal("TTYPE2", "COUNT");
     let data = b"  AB   123def    -45".to_vec(); // "  AB" + "   123" ; "def " + "   -45"
-    let table = AsciiTable::from_data(&header, data).unwrap();
+    let table = Ascii::from_data(&header, data).unwrap();
     let metadata = table.metadata();
     assert_eq!(metadata.nrows, 2);
     assert_eq!(metadata.columns[1].start, 4);
@@ -74,7 +74,7 @@ fn decodes_hand_built_ascii_rows() {
     let mut corrupt = b"  AB   123def    -45".to_vec();
     corrupt[2] = 0xFF;
     assert!(matches!(
-        AsciiTable::from_data(&header, corrupt),
+        Ascii::from_data(&header, corrupt),
         Err(FitsError::InvalidAscii {
             context: "ASCII-table data"
         })
@@ -90,7 +90,7 @@ fn applies_tscal_tzero_and_maps_tnull_to_nan() {
         .set_internal("TZERO1", 10.0)
         .set_internal("TNULL1", "***");
     let data = b"   123         ***".to_vec();
-    let table = AsciiTable::from_data(&header, data).unwrap();
+    let table = Ascii::from_data(&header, data).unwrap();
     // Raw preserves nullness; physical applies TZERO + TSCAL·field and maps null to NaN.
     assert_eq!(
         table.column_by_idx(0).unwrap().raw().unwrap(),
@@ -105,7 +105,7 @@ fn applies_tscal_tzero_and_maps_tnull_to_nan() {
         let mut malformed = header.clone();
         malformed.set_internal(keyword, "not numeric");
         assert!(matches!(
-            AsciiTable::from_data(&malformed, b"   123         ***".to_vec()),
+            Ascii::from_data(&malformed, b"   123         ***".to_vec()),
             Err(FitsError::TypeMismatch { name, .. }) if name == keyword
         ));
     }
@@ -116,7 +116,7 @@ fn implicit_decimal_point_scales_by_ten_to_the_d() {
     // `F8.3`: a field with no explicit point has the point implied 3 from the right.
     let header = ascii_table_header(8, 2, &[(1, "F8.3")]);
     let data = b"   12345  12.345".to_vec(); // implicit "12345" → 12.345 ; explicit 12.345
-    let table = AsciiTable::from_data(&header, data).unwrap();
+    let table = Ascii::from_data(&header, data).unwrap();
     assert_eq!(
         table.column_by_idx(0).unwrap().raw().unwrap(),
         AsciiColumnData::Float(vec![Some(12.345), Some(12.345)])
@@ -127,7 +127,7 @@ fn implicit_decimal_point_scales_by_ten_to_the_d() {
 fn ascii_column_index_is_case_insensitive() {
     let mut header = ascii_table_header(4, 1, &[(1, "I4")]);
     header.set_internal("TTYPE1", "Count");
-    let table = AsciiTable::from_data(&header, b"   7".to_vec()).unwrap();
+    let table = Ascii::from_data(&header, b"   7".to_vec()).unwrap();
     assert_eq!(table.column_index("COUNT"), Some(0));
     assert_eq!(table.column_index("count"), Some(0));
     // §7.2.2 and §6.7 are the same rule, so the ASCII form rejects the same
@@ -223,7 +223,7 @@ fn reads_a_column_with_a_bare_sign_exponent_field() {
     // The letter-less exponent form (CFITSIO emits it) must read, not error.
     let header = ascii_table_header(12, 1, &[(1, "E12.5")]);
     let data = b"   3.14159-2".to_vec(); // 12 chars; 3.14159-2 = 0.0314159
-    let table = AsciiTable::from_data(&header, data).unwrap();
+    let table = Ascii::from_data(&header, data).unwrap();
     match table.column_by_idx(0).unwrap().raw().unwrap() {
         AsciiColumnData::Float(values) => {
             assert_eq!(values, [Some(0.031_415_9)]);
@@ -513,7 +513,7 @@ fn ascii_tfields_beyond_999_is_rejected() {
         .set_internal("GCOUNT", 1)
         .set_internal("TFIELDS", 1000);
     assert!(matches!(
-        AsciiTable::from_data(&header, vec![]),
+        Ascii::from_data(&header, vec![]),
         Err(FitsError::KeywordOutOfRange { name: "TFIELDS" })
     ));
 
@@ -523,7 +523,7 @@ fn ascii_tfields_beyond_999_is_rejected() {
         .set_internal("TBCOL1", 0)
         .set_internal("TFORM1", "A1");
     assert!(matches!(
-        AsciiTable::from_data(&header, vec![]),
+        Ascii::from_data(&header, vec![]),
         Err(FitsError::KeywordOutOfRange { name: "TBCOLn" })
     ));
 }
@@ -534,7 +534,7 @@ fn ascii_row_count_times_width_overflow_is_rejected() {
     // 3e18 rows × 8 chars = 2.4e19 > usize::MAX, so `from_data` must error.
     let header = ascii_table_header(8, 3_000_000_000_000_000_000, &[(1, "I8")]);
     assert!(matches!(
-        AsciiTable::from_data(&header, vec![0u8; 8]),
+        Ascii::from_data(&header, vec![0u8; 8]),
         Err(FitsError::DataUnitOverflow)
     ));
 }

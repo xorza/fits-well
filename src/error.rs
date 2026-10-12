@@ -34,20 +34,20 @@ impl Indexed {
         f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         match self {
-            Indexed::Hdu => write!(f, "HDU index {index} out of bounds (file has {len} HDUs)"),
-            Indexed::HeaderRecord => write!(
+            Self::Hdu => write!(f, "HDU index {index} out of bounds (file has {len} HDUs)"),
+            Self::HeaderRecord => write!(
                 f,
                 "header record index {index} out of bounds (header has {len} records)"
             ),
-            Indexed::Column => write!(
+            Self::Column => write!(
                 f,
                 "column index {index} out of bounds (table has {len} columns)"
             ),
-            Indexed::Group => write!(
+            Self::Group => write!(
                 f,
                 "group index {index} out of bounds (random-groups array has {len} groups)"
             ),
-            Indexed::WcsAxis => write!(
+            Self::WcsAxis => write!(
                 f,
                 "1-based WCS axis {index} out of bounds (WCS has {len} axes)"
             ),
@@ -80,14 +80,14 @@ impl Ranked {
         f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         match self {
-            Ranked::ImageRegion => write!(
+            Self::ImageRegion => write!(
                 f,
                 "image region has {got} axes but the image has {expected}"
             ),
-            Ranked::TileShape => {
+            Self::TileShape => {
                 write!(f, "tile shape has {got} axes but the image has {expected}")
             }
-            Ranked::WcsCoordinate => write!(
+            Self::WcsCoordinate => write!(
                 f,
                 "coordinate has {got} {} but the WCS has {expected} axes",
                 if *got == 1 { "value" } else { "values" }
@@ -304,7 +304,7 @@ pub enum FitsError {
     ConflictingWcsKeywords { detail: &'static str },
     /// A complete pixel↔world transform was requested for axes whose nonlinear
     /// algorithm is not implemented. The indices are zero-based, matching
-    /// [`crate::world_coordinates::WcsView::unsupported_axes`].
+    /// [`crate::world_coordinates::Metadata::unsupported_axes`].
     #[error("WCS has unsupported nonlinear transforms on zero-based axes {axes:?}")]
     UnsupportedWcsTransform { axes: Vec<usize> },
     /// An intermediate (projection-plane) coordinate lies outside the region its WCS

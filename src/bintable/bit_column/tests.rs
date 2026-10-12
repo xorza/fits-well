@@ -1,4 +1,4 @@
-use crate::bintable::BinTable;
+use crate::bintable::Table;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::internals::table_header;
 use crate::error::FitsError;
@@ -10,7 +10,7 @@ fn x_bit_column_unpacks_msb_first() {
     // One `12X` column, 2 bytes/row. 0xAB 0xC0 = 1010_1011 1100_0000; the first
     // 12 bits MSB-first are 1010_1011_1100.
     let header = table_header(2, 1, &["12X"]);
-    let table = BinTable::from_data(&header, vec![0xAB, 0xC0]).unwrap();
+    let table = Table::from_data(&header, vec![0xAB, 0xC0]).unwrap();
     let bits = table.column_by_idx(0).unwrap().bits().unwrap();
     assert_eq!(bits.nrows(), 1);
     assert_eq!(
@@ -35,7 +35,7 @@ fn x_bit_column_unpacks_msb_first() {
 #[test]
 fn read_bit_column_on_a_non_bit_column_errors() {
     let header = table_header(4, 1, &["1J"]);
-    let table = BinTable::from_data(&header, vec![0u8; 4]).unwrap();
+    let table = Table::from_data(&header, vec![0u8; 4]).unwrap();
     assert!(matches!(
         table.column_by_idx(0).unwrap().bits(),
         Err(FitsError::NotABitColumn { code: 'J' })
@@ -54,7 +54,7 @@ fn vla_bit_column_unpacks_msb_first() {
     data.extend_from_slice(&4i32.to_be_bytes()); // row 1: 4 bits …
     data.extend_from_slice(&2i32.to_be_bytes()); //        … at heap offset 2
     data.extend_from_slice(&[0xAB, 0xC0, 0xF0]); // heap
-    let table = BinTable::from_data(&header, data).unwrap();
+    let table = Table::from_data(&header, data).unwrap();
 
     let rows = table.column_by_idx(0).unwrap().vla_bits().unwrap();
     assert_eq!(rows.nrows(), 2);

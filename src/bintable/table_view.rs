@@ -3,7 +3,7 @@
 use crate::bintable::column::Column;
 use crate::bintable::column_reader::ColumnReader;
 use crate::bintable::descriptor::PqDescriptor;
-use crate::bintable::table_schema::TableSchema;
+use crate::bintable::schema::Schema;
 use crate::bintable::tform_kind::TformKind;
 #[cfg(feature = "compression")]
 use crate::bintable::vla_column::VlaColumn;
@@ -12,10 +12,10 @@ use crate::error::FitsError;
 use crate::error::Result;
 
 /// A binary table's columns and extent over a data unit it borrows — the reader's
-/// in-place source bytes, a reused selection buffer, or an owned [`BinTable`]'s
+/// in-place source bytes, a reused selection buffer, or an owned [`Table`]'s
 /// storage. Every column decode goes through it.
 ///
-/// [`BinTable`]: crate::bintable::BinTable
+/// [`Table`]: crate::bintable::Table
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TableView<'a> {
     pub(crate) columns: &'a [Column],
@@ -30,7 +30,7 @@ pub(crate) struct TableView<'a> {
 impl<'a> TableView<'a> {
     /// The table `schema` describes, over its data unit `bytes`. Errors when the
     /// bytes end before the heap does.
-    pub(crate) fn new(schema: &'a TableSchema, bytes: &'a [u8]) -> Result<TableView<'a>> {
+    pub(crate) fn new(schema: &'a Schema, bytes: &'a [u8]) -> Result<Self> {
         if bytes.len() < schema.heap_end {
             return Err(FitsError::UnexpectedEof);
         }
@@ -54,7 +54,7 @@ impl<'a> TableView<'a> {
         nrows: usize,
         row_len: usize,
         bytes: &'a [u8],
-    ) -> TableView<'a> {
+    ) -> Self {
         let heap_offset = nrows * row_len;
         assert!(
             heap_offset <= bytes.len(),

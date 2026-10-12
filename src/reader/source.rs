@@ -21,6 +21,10 @@ use crate::error::Result;
 /// types (`StreamSource`/`SliceSource`/`MmapSource`) — not an extension point, and
 /// its `slice`/`read_append` plumbing is not a public contract.
 mod sealed {
+    #[expect(
+        unnameable_types,
+        reason = "sealed: outside code may use it, never name it"
+    )]
     pub trait Sealed {}
 }
 impl<R> sealed::Sealed for StreamSource<R> {}
@@ -30,6 +34,10 @@ impl sealed::Sealed for MmapSource {}
 
 /// A seekable byte source the reader fetches HDU header and data units from.
 /// Sealed — implemented only by this crate's source types, never externally.
+#[expect(
+    unnameable_types,
+    reason = "sealed: outside code may use it, never name it"
+)]
 pub trait Source: sealed::Sealed {
     /// Total byte length of the source. Fixed for the source's lifetime and used to
     /// reject ranges that run past the end before allocating for them.
@@ -98,9 +106,9 @@ pub struct StreamSource<R> {
 impl<R: Read + Seek> StreamSource<R> {
     /// Capture the source length once (a single seek to the end), so later reads
     /// bounds-check without re-seeking.
-    pub(super) fn new(mut inner: R) -> Result<StreamSource<R>> {
+    pub(super) fn new(mut inner: R) -> Result<Self> {
         let len = inner.seek(SeekFrom::End(0))?;
-        Ok(StreamSource { inner, len })
+        Ok(Self { inner, len })
     }
 
     pub(super) fn into_inner(self) -> R {
@@ -148,7 +156,7 @@ pub struct SliceSource<'a> {
 }
 
 impl<'a> SliceSource<'a> {
-    pub(super) const fn new(bytes: &'a [u8]) -> SliceSource<'a> {
+    pub(super) const fn new(bytes: &'a [u8]) -> Self {
         SliceSource { bytes }
     }
 
@@ -187,14 +195,14 @@ pub struct MmapSource {
 
 #[cfg(feature = "mmap")]
 impl MmapSource {
-    pub(super) fn open(path: &std::path::Path) -> Result<MmapSource> {
+    pub(super) fn open(path: &std::path::Path) -> Result<Self> {
         let file = File::open(path)?;
         // SAFETY: standard mmap contract — the mapping is read-only and owned here
         // (no mutable view is ever handed out). The one inherent caveat is that an
         // external process truncating or modifying the file underneath can change the
         // bytes; choosing `mmap` accepts that, exactly as in cfitsio/astropy.
         let map = unsafe { memmap2::Mmap::map(&file)? };
-        Ok(MmapSource { map })
+        Ok(Self { map })
     }
 }
 

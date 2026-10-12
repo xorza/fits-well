@@ -2,14 +2,14 @@ use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::header_model::Header;
 use crate::time_coordinates::SEC_PER_DAY;
+use crate::time_coordinates::bounds::Bounds;
+use crate::time_coordinates::coordinate::{Coordinate, Epoch};
 use crate::time_coordinates::datetime::Datetime;
-use crate::time_coordinates::fits_time::FitsTime;
+use crate::time_coordinates::frame::Frame;
 use crate::time_coordinates::phase_axis::PhaseAxis;
+use crate::time_coordinates::reference_position::ReferencePosition;
+use crate::time_coordinates::scale::{Scale, ScaleKind};
 use crate::time_coordinates::time_axis_kind::TimeAxisKind;
-use crate::time_coordinates::time_bounds::TimeBounds;
-use crate::time_coordinates::time_coordinate::{Epoch, TimeCoordinate};
-use crate::time_coordinates::time_reference_position::TimeReferencePosition;
-use crate::time_coordinates::time_scale::{TimeScale, TimeScaleKind};
 use crate::world_coordinates::Wcs;
 
 /// Golden values throughout are from `astropy.time` (ERFA).
@@ -33,7 +33,7 @@ fn iso_to_jd_and_mjd_match_astropy() {
     ];
     for &(s, jd, mjd) in cases {
         let d = Datetime::parse(s).unwrap();
-        let utc = TimeScale::known(TimeScaleKind::Utc);
+        let utc = Scale::known(ScaleKind::Utc);
         assert_eq!(d.to_jd(&utc).unwrap(), jd, "{s}");
         assert_eq!(d.to_mjd(&utc).unwrap(), mjd, "{s}");
     }
@@ -56,7 +56,7 @@ fn rejects_malformed_datetimes() {
     let mut header = Header::new();
     header.set_internal("DATE-OBS", "2024-13-01");
     assert!(matches!(
-        TimeCoordinate::observation(&header),
+        Coordinate::observation(&header),
         Err(FitsError::InvalidTime { detail }) if detail == "DATE '2024-13-01'"
     ));
 }
@@ -91,18 +91,13 @@ fn iso_8601_strictness() {
     ] {
         let datetime = Datetime::parse(text).unwrap();
         assert_eq!(datetime.year, year);
-        assert_eq!(
-            datetime
-                .to_jd(&TimeScale::known(TimeScaleKind::Tt))
-                .unwrap(),
-            jd
-        );
+        assert_eq!(datetime.to_jd(&Scale::known(ScaleKind::Tt)).unwrap(), jd);
     }
     let mut outside_fits_range = Datetime::parse("+99999-12-31").unwrap();
     outside_fits_range.year = 100_000;
     assert!(
         outside_fits_range
-            .to_jd(&TimeScale::known(TimeScaleKind::Tt))
+            .to_jd(&Scale::known(ScaleKind::Tt))
             .is_err()
     );
 }
@@ -118,7 +113,7 @@ fn signed_gregorian_years_use_floor_division() {
     for (text, expected_jd) in cases {
         let date = Datetime::parse(text).unwrap();
         assert_eq!(
-            date.to_jd(&TimeScale::known(TimeScaleKind::Tt)).unwrap(),
+            date.to_jd(&Scale::known(ScaleKind::Tt)).unwrap(),
             expected_jd,
             "{text}"
         );
@@ -128,8 +123,8 @@ fn signed_gregorian_years_use_floor_division() {
 #[test]
 fn leap_second_labels_require_utc_and_external_time_data() {
     for (text, scale) in [
-        ("2016-12-31T12:00:60", TimeScale::known(TimeScaleKind::Utc)),
-        ("2016-12-31T23:59:60", TimeScale::known(TimeScaleKind::Tai)),
+        ("2016-12-31T12:00:60", Scale::known(ScaleKind::Utc)),
+        ("2016-12-31T23:59:60", Scale::known(ScaleKind::Tai)),
     ] {
         let datetime = Datetime::parse(text).unwrap();
         assert!(matches!(
@@ -140,7 +135,7 @@ fn leap_second_labels_require_utc_and_external_time_data() {
 
     let leap = Datetime::parse("2030-06-30T23:59:60").unwrap();
     assert!(matches!(
-        leap.to_jd(&TimeScale::known(TimeScaleKind::Utc)),
+        leap.to_jd(&Scale::known(ScaleKind::Utc)),
         Err(FitsError::ExternalTimeDataRequired { .. })
     ));
 }
@@ -153,18 +148,18 @@ fn header_datetimes_use_the_declared_scale() {
         .set_internal("DATEREF", "2017-01-01T00:00:00")
         .set_internal("DATE-OBS", "2017-01-01T00:00:00")
         .set_internal("DATE-END", "2017-01-02T00:00:00");
-    let time = FitsTime::from_header(&header).unwrap();
-    assert_eq!(time.scale, TimeScale::Local("MET".to_string()));
+    let time = Frame::from_header(&header).unwrap();
+    assert_eq!(time.scale, Scale::Local("MET".to_string()));
     assert_eq!(time.mjdref, 57_754.0);
     assert_eq!(
-        TimeCoordinate::observation(&header).unwrap(),
-        Some(TimeCoordinate {
+        Coordinate::observation(&header).unwrap(),
+        Some(Coordinate {
             mjd: 57_754.0,
-            scale: TimeScale::Local("MET".to_string())
+            scale: Scale::Local("MET".to_string())
         })
     );
     assert_eq!(
-        TimeBounds::from_header(&header).unwrap().end_mjd,
+        Bounds::from_header(&header).unwrap().end_mjd,
         Some(57_755.0)
     );
 
@@ -174,15 +169,15 @@ fn header_datetimes_use_the_declared_scale() {
         .set_internal("DATE-OBS", "2016-12-31T23:59:60")
         .set_internal("DATE-END", "2016-12-31T23:59:60");
     assert!(matches!(
-        FitsTime::from_header(&header),
+        Frame::from_header(&header),
         Err(FitsError::ExternalTimeDataRequired { .. })
     ));
     assert!(matches!(
-        TimeCoordinate::observation(&header),
+        Coordinate::observation(&header),
         Err(FitsError::ExternalTimeDataRequired { .. })
     ));
     assert!(matches!(
-        TimeBounds::from_header(&header),
+        Bounds::from_header(&header),
         Err(FitsError::ExternalTimeDataRequired { .. })
     ));
 }
@@ -194,24 +189,24 @@ fn reads_jepoch_and_bepoch_keywords() {
     let mut hj = Header::new();
     hj.set_internal("JEPOCH", 2000.0);
     assert_eq!(
-        TimeCoordinate::epoch(&hj).unwrap(),
-        Some(TimeCoordinate {
+        Coordinate::epoch(&hj).unwrap(),
+        Some(Coordinate {
             mjd: Epoch::Julian(2000.0).to_mjd(),
-            scale: TimeScale::known(TimeScaleKind::Tdb),
+            scale: Scale::known(ScaleKind::Tdb),
         })
     );
     let mut hb = Header::new();
     hb.set_internal("BEPOCH", 1950.0);
     assert_eq!(
-        TimeCoordinate::epoch(&hb).unwrap(),
-        Some(TimeCoordinate {
+        Coordinate::epoch(&hb).unwrap(),
+        Some(Coordinate {
             mjd: Epoch::Besselian(1950.0).to_mjd(),
-            scale: TimeScale::known(TimeScaleKind::Tt),
+            scale: Scale::known(ScaleKind::Tt),
         })
     );
     // Neither keyword ⇒ None.
     let empty = Header::new();
-    assert!(TimeCoordinate::epoch(&empty).unwrap().is_none());
+    assert!(Coordinate::epoch(&empty).unwrap().is_none());
 }
 
 #[test]
@@ -225,7 +220,7 @@ fn reads_bound_duration_and_error_keywords() {
     h.set_internal("TELAPSE", 1500.0);
     h.set_internal("TIMEDEL", 0.1);
     h.set_internal("TIMSYER", 1e-6);
-    let b = TimeBounds::from_header(&h).unwrap();
+    let b = Bounds::from_header(&h).unwrap();
     assert_eq!(b.beg_mjd, Some(58000.0));
     // Resolved from DATE-END: 2017-09-04 is MJD 58000.
     assert_eq!(b.end_mjd, Some(58001.0));
@@ -239,12 +234,12 @@ fn reads_bound_duration_and_error_keywords() {
 
     h.set_internal("TIMESYS", 1)
         .set_internal("MJD-END", 58001.0);
-    assert_eq!(TimeBounds::from_header(&h).unwrap().end_mjd, Some(58001.0));
+    assert_eq!(Bounds::from_header(&h).unwrap().end_mjd, Some(58001.0));
 
     for invalid in [-f64::EPSILON, 1.0 + f64::EPSILON] {
         h.set_internal("TIMEPIXR", invalid);
         assert!(matches!(
-            TimeBounds::from_header(&h),
+            Bounds::from_header(&h),
             Err(FitsError::KeywordOutOfRange { name: "TIMEPIXR" })
         ));
     }
@@ -359,19 +354,19 @@ fn observation_falls_back_to_jepoch_in_its_own_scale() {
     let mut h = Header::new();
     h.set_internal("JEPOCH", 2000.0);
     assert_eq!(
-        TimeCoordinate::observation(&h).unwrap(),
-        Some(TimeCoordinate {
+        Coordinate::observation(&h).unwrap(),
+        Some(Coordinate {
             mjd: Epoch::Julian(2000.0).to_mjd(),
-            scale: TimeScale::known(TimeScaleKind::Tdb)
+            scale: Scale::known(ScaleKind::Tdb)
         })
     );
     // An explicit MJD-OBS still wins, in the declared scale (UTC by default).
     h.set_internal("MJD-OBS", 58000.0);
     assert_eq!(
-        TimeCoordinate::observation(&h).unwrap(),
-        Some(TimeCoordinate {
+        Coordinate::observation(&h).unwrap(),
+        Some(Coordinate {
             mjd: 58000.0,
-            scale: TimeScale::known(TimeScaleKind::Utc)
+            scale: Scale::known(ScaleKind::Utc)
         })
     );
 }
@@ -401,15 +396,15 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
     h.set_internal("CRPIX1A", 1.0)
         .set_internal("CRVAL1A", 0.0)
         .set_internal("CD1_1A", 2.0);
-    let t = FitsTime::from_header(&h).unwrap();
+    let t = Frame::from_header(&h).unwrap();
     let alternate = Wcs::from_header(&h, Some('A')).unwrap();
     // CD1_1 = 2 d/pixel and pixel offset 0.5 produce exactly one day. CUNIT1A and
     // CTYPE1A override the global seconds/UTC frame.
     assert_eq!(
         t.time_axis_mjd(&alternate, 1, &[1.5]).unwrap(),
-        Some(TimeCoordinate {
+        Some(Coordinate {
             mjd: 58001.0,
-            scale: TimeScale::known(TimeScaleKind::Tai),
+            scale: Scale::known(ScaleKind::Tai),
         })
     );
 
@@ -456,7 +451,7 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
     // Row 1 is CDELT1 × PC1_j = [2, 1]. At pixel [3, 5], offsets [2, 4]
     // contribute 2×2 + 1×4 = 8 s, then CRVAL1 adds 10 s.
     let coordinate = t.time_axis_mjd(&wcs, 1, &[3.0, 5.0]).unwrap().unwrap();
-    assert_eq!(coordinate.scale, TimeScale::known(TimeScaleKind::Utc));
+    assert_eq!(coordinate.scale, Scale::known(ScaleKind::Utc));
     assert_eq!(coordinate.mjd, 58000.0 + 18.0 / SEC_PER_DAY);
 
     h.set_internal("CTYPE1A", "TIME-LOG")
@@ -510,49 +505,49 @@ fn fits_time_resolves_reference_and_relative_times() {
     h.set_internal("TSTOP", 86400.0); // one day, in seconds
     h.set_internal("DATE-OBS", "2017-09-04T00:00:00");
 
-    let t = FitsTime::from_header(&h).unwrap();
-    assert_eq!(t.scale, TimeScale::known(TimeScaleKind::Tt));
+    let t = Frame::from_header(&h).unwrap();
+    assert_eq!(t.scale, Scale::known(ScaleKind::Tt));
     assert_eq!(t.mjdref, 58000.0);
-    assert_eq!(t.trefpos, TimeReferencePosition::Topocenter);
+    assert_eq!(t.trefpos, ReferencePosition::Topocenter);
     assert_eq!(t.unit_seconds().unwrap(), 1.0);
     // TSTART=0 → MJDREF; TSTOP=86400 s → one day later.
     assert_eq!(t.relative_to_mjd(0.0).unwrap(), 58000.0);
     assert_eq!(t.relative_to_mjd(86400.0).unwrap(), 58001.0);
     // DATE-OBS 2017-09-04 = MJD 58000.0, a whole day, so exact.
     assert_eq!(
-        TimeCoordinate::observation(&h).unwrap(),
-        Some(TimeCoordinate {
+        Coordinate::observation(&h).unwrap(),
+        Some(Coordinate {
             mjd: 58000.0,
-            scale: TimeScale::known(TimeScaleKind::Tt)
+            scale: Scale::known(ScaleKind::Tt)
         })
     );
 
     let mut malformed = h.clone();
     malformed.set_internal("TIMEOFFS", "not a real");
     assert!(matches!(
-        FitsTime::from_header(&malformed),
+        Frame::from_header(&malformed),
         Err(FitsError::TypeMismatch { name, expected })
             if name == "TIMEOFFS" && expected == "real"
     ));
 
     let mut positions = Header::new();
     assert_eq!(
-        FitsTime::from_header(&positions).unwrap().trefpos,
-        TimeReferencePosition::Topocenter
+        Frame::from_header(&positions).unwrap().trefpos,
+        ReferencePosition::Topocenter
     );
     positions
         .set_internal("TREFPOS", "BARYCENT")
         .set_internal("TRPOS4", "GEOCENTR");
     assert_eq!(
-        FitsTime::from_header(&positions).unwrap().trefpos,
-        TimeReferencePosition::Barycenter
+        Frame::from_header(&positions).unwrap().trefpos,
+        ReferencePosition::Barycenter
     );
     assert_eq!(
-        FitsTime::for_column(&positions, 4).unwrap().trefpos,
-        TimeReferencePosition::Geocenter
+        Frame::for_column(&positions, 4).unwrap().trefpos,
+        ReferencePosition::Geocenter
     );
     assert!(matches!(
-        FitsTime::for_column(&positions, 0),
+        Frame::for_column(&positions, 0),
         Err(FitsError::OneBasedIndexRequired {
             kind: "table column"
         })
@@ -578,44 +573,44 @@ fn fits_time_resolves_reference_and_relative_times() {
         })
     ));
     for (value, expected) in [
-        ("TOP", TimeReferencePosition::Topocenter),
-        ("GEOCENTER", TimeReferencePosition::Geocenter),
-        ("BARYCENTER", TimeReferencePosition::Barycenter),
-        ("RELOCATABLE", TimeReferencePosition::Relocatable),
-        ("CUSTOM", TimeReferencePosition::Custom),
-        ("HELIOCENTER", TimeReferencePosition::Heliocenter),
-        ("GALACTIC", TimeReferencePosition::GalacticCenter),
-        ("EMBARYCENTER", TimeReferencePosition::EarthMoonBarycenter),
-        ("MERCURY", TimeReferencePosition::Mercury),
-        ("VENUS", TimeReferencePosition::Venus),
-        ("MARS", TimeReferencePosition::Mars),
-        ("JUPITER", TimeReferencePosition::Jupiter),
-        ("SATURN", TimeReferencePosition::Saturn),
-        ("URANUS", TimeReferencePosition::Uranus),
-        ("NEPTUNE", TimeReferencePosition::Neptune),
+        ("TOP", ReferencePosition::Topocenter),
+        ("GEOCENTER", ReferencePosition::Geocenter),
+        ("BARYCENTER", ReferencePosition::Barycenter),
+        ("RELOCATABLE", ReferencePosition::Relocatable),
+        ("CUSTOM", ReferencePosition::Custom),
+        ("HELIOCENTER", ReferencePosition::Heliocenter),
+        ("GALACTIC", ReferencePosition::GalacticCenter),
+        ("EMBARYCENTER", ReferencePosition::EarthMoonBarycenter),
+        ("MERCURY", ReferencePosition::Mercury),
+        ("VENUS", ReferencePosition::Venus),
+        ("MARS", ReferencePosition::Mars),
+        ("JUPITER", ReferencePosition::Jupiter),
+        ("SATURN", ReferencePosition::Saturn),
+        ("URANUS", ReferencePosition::Uranus),
+        ("NEPTUNE", ReferencePosition::Neptune),
     ] {
         positions.set_internal("TREFPOS", value);
         assert_eq!(
-            FitsTime::from_header(&positions).unwrap().trefpos,
+            Frame::from_header(&positions).unwrap().trefpos,
             expected,
             "{value}"
         );
     }
     positions.set_internal("TREFPOS", "topocenter");
     assert_eq!(
-        FitsTime::from_header(&positions).unwrap().trefpos,
-        TimeReferencePosition::Other("topocenter".to_string())
+        Frame::from_header(&positions).unwrap().trefpos,
+        ReferencePosition::Other("topocenter".to_string())
     );
 
     positions
         .set_internal("TREFPOS", 42)
         .set_internal("TRPOS4", "GEOCENTR");
     assert_eq!(
-        FitsTime::for_column(&positions, 4).unwrap().trefpos,
-        TimeReferencePosition::Geocenter
+        Frame::for_column(&positions, 4).unwrap().trefpos,
+        ReferencePosition::Geocenter
     );
     assert!(matches!(
-        FitsTime::from_header(&positions),
+        Frame::from_header(&positions),
         Err(FitsError::TypeMismatch { name, expected })
             if name == "TREFPOS" && expected == "text"
     ));
@@ -627,8 +622,8 @@ fn fits_time_reads_split_and_day_unit_references() {
     h.set_internal("MJDREFI", 58000.0);
     h.set_internal("MJDREFF", 0.25);
     h.set_internal("TIMEUNIT", "d");
-    let t = FitsTime::from_header(&h).unwrap();
-    assert_eq!(t.scale, TimeScale::known(TimeScaleKind::Utc)); // default
+    let t = Frame::from_header(&h).unwrap();
+    assert_eq!(t.scale, Scale::known(ScaleKind::Utc)); // default
     assert_eq!(t.mjdref, 58000.25);
     assert_eq!(t.unit_seconds().unwrap(), 86400.0);
     // 2 days past the reference.
@@ -638,47 +633,47 @@ fn fits_time_reads_split_and_day_unit_references() {
 #[test]
 fn time_scale_preserves_realizations_and_local_names() {
     for (text, expected) in [
-        ("tt", TimeScale::known(TimeScaleKind::Tt)),
-        ("TDT", TimeScale::known(TimeScaleKind::Tt)),
-        ("IAT", TimeScale::known(TimeScaleKind::Tai)),
-        ("GMT", TimeScale::known(TimeScaleKind::Utc)),
-        ("UT1", TimeScale::known(TimeScaleKind::Ut1)),
-        ("TAI", TimeScale::known(TimeScaleKind::Tai)),
-        ("TCG", TimeScale::known(TimeScaleKind::Tcg)),
-        ("TDB", TimeScale::known(TimeScaleKind::Tdb)),
-        ("TCB", TimeScale::known(TimeScaleKind::Tcb)),
-        ("GPS", TimeScale::known(TimeScaleKind::Gps)),
+        ("tt", Scale::known(ScaleKind::Tt)),
+        ("TDT", Scale::known(ScaleKind::Tt)),
+        ("IAT", Scale::known(ScaleKind::Tai)),
+        ("GMT", Scale::known(ScaleKind::Utc)),
+        ("UT1", Scale::known(ScaleKind::Ut1)),
+        ("TAI", Scale::known(ScaleKind::Tai)),
+        ("TCG", Scale::known(ScaleKind::Tcg)),
+        ("TDB", Scale::known(ScaleKind::Tdb)),
+        ("TCB", Scale::known(ScaleKind::Tcb)),
+        ("GPS", Scale::known(ScaleKind::Gps)),
     ] {
-        assert_eq!(text.parse::<TimeScale>().unwrap(), expected, "{text}");
+        assert_eq!(text.parse::<Scale>().unwrap(), expected, "{text}");
     }
     assert_eq!(
-        "TT(TAI)".parse::<TimeScale>().unwrap(),
-        TimeScale::Known {
-            kind: TimeScaleKind::Tt,
+        "TT(TAI)".parse::<Scale>().unwrap(),
+        Scale::Known {
+            kind: ScaleKind::Tt,
             realization: Some("TAI".to_string()),
         }
     );
     assert_eq!(
-        "UTC(NIST)".parse::<TimeScale>().unwrap(),
-        TimeScale::Known {
-            kind: TimeScaleKind::Utc,
+        "UTC(NIST)".parse::<Scale>().unwrap(),
+        Scale::Known {
+            kind: ScaleKind::Utc,
             realization: Some("NIST".to_string()),
         }
     );
     for name in ["LOCAL", "MET", "OET", "BOGUS"] {
         assert_eq!(
-            name.parse::<TimeScale>().unwrap(),
-            TimeScale::Local(name.to_string())
+            name.parse::<Scale>().unwrap(),
+            Scale::Local(name.to_string())
         );
     }
     assert_eq!(
-        "LOCAL(clock)".parse::<TimeScale>().unwrap(),
-        TimeScale::Local("LOCAL(clock)".to_string())
+        "LOCAL(clock)".parse::<Scale>().unwrap(),
+        Scale::Local("LOCAL(clock)".to_string())
     );
     for malformed in ["UTC(", "UTC()", "UTC(NIST))"] {
         assert!(
             matches!(
-                malformed.parse::<TimeScale>(),
+                malformed.parse::<Scale>(),
                 Err(FitsError::InvalidTime { .. })
             ),
             "{malformed}"
@@ -688,8 +683,8 @@ fn time_scale_preserves_realizations_and_local_names() {
     let mut unknown = Header::new();
     unknown.set_internal("TIMESYS", "BOGUS");
     assert_eq!(
-        FitsTime::from_header(&unknown).unwrap().scale,
-        TimeScale::Local("BOGUS".to_string())
+        Frame::from_header(&unknown).unwrap().scale,
+        Scale::Local("BOGUS".to_string())
     );
 }
 
@@ -701,7 +696,7 @@ fn timeoffs_shifts_relative_times() {
     h.set_internal("MJDREF", 58000.0);
     h.set_internal("TIMEUNIT", "s");
     h.set_internal("TIMEOFFS", 10.0);
-    let t = FitsTime::from_header(&h).unwrap();
+    let t = Frame::from_header(&h).unwrap();
     assert_eq!(t.timeoffs, 10.0);
     assert_eq!(t.relative_to_mjd(0.0).unwrap(), 58000.0 + 10.0 / 86400.0);
     assert_eq!(t.relative_to_mjd(5.0).unwrap(), 58000.0 + 15.0 / 86400.0);
@@ -712,7 +707,7 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
     let unit = |u: &str| {
         let mut h = Header::new();
         h.set_internal("TIMEUNIT", u);
-        FitsTime::from_header(&h).unwrap().unit_seconds().unwrap()
+        Frame::from_header(&h).unwrap().unit_seconds().unwrap()
     };
     assert_eq!(unit("min"), 60.0);
     assert_eq!(unit("h"), 3600.0);
@@ -730,7 +725,7 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
         .set_internal("TIMESYS", "TDB")
         .set_internal("MJDREF", 51544.5)
         .set_internal("TIMEUNIT", "ta");
-    let tropical = FitsTime::from_header(&tropical).unwrap();
+    let tropical = Frame::from_header(&tropical).unwrap();
     // MJDREF is J2000.0, so the polynomial's terms in centuries all vanish.
     assert_eq!(
         tropical.unit_seconds().unwrap(),
@@ -742,7 +737,7 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
         .set_internal("TIMESYS", "TT")
         .set_internal("MJDREF", 15019.5)
         .set_internal("TIMEUNIT", "Ba");
-    let besselian = FitsTime::from_header(&besselian).unwrap();
+    let besselian = Frame::from_header(&besselian).unwrap();
     // MJDREF is B1900.0's reference day, JD 2415020.0, so the century term vanishes.
     assert_eq!(
         besselian.unit_seconds().unwrap(),
@@ -755,7 +750,7 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
         invalid.set_internal("TIMEUNIT", value);
         assert!(
             matches!(
-                FitsTime::from_header(&invalid).unwrap().unit_seconds(),
+                Frame::from_header(&invalid).unwrap().unit_seconds(),
                 Err(FitsError::InvalidUnit { unit, expected: "a time unit" }) if unit == value
             ),
             "{value:?} should not be accepted as a time unit"
@@ -767,7 +762,7 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
         frame_dependent
             .set_internal("TIMEUNIT", unit)
             .set_internal("TIMESYS", scale);
-        let time = FitsTime::from_header(&frame_dependent).unwrap();
+        let time = Frame::from_header(&frame_dependent).unwrap();
         assert!(matches!(
             time.unit_seconds(),
             Err(FitsError::ExternalTimeDataRequired { .. })
@@ -781,7 +776,7 @@ fn prefixed_relative_time_uses_the_declared_scale() {
     milliseconds
         .set_internal("MJDREF", 58000.0)
         .set_internal("TIMEUNIT", "ms");
-    let milliseconds = FitsTime::from_header(&milliseconds).unwrap();
+    let milliseconds = Frame::from_header(&milliseconds).unwrap();
     assert_eq!(
         milliseconds.relative_to_mjd(1000.0).unwrap(),
         58000.0 + 1.0 / SEC_PER_DAY
@@ -791,7 +786,7 @@ fn prefixed_relative_time_uses_the_declared_scale() {
     kiloseconds
         .set_internal("MJDREF", 58000.0)
         .set_internal("TIMEUNIT", "ks");
-    let kiloseconds = FitsTime::from_header(&kiloseconds).unwrap();
+    let kiloseconds = Frame::from_header(&kiloseconds).unwrap();
     // 86.4 ks = 86,400 s = one day.
     assert_eq!(kiloseconds.relative_to_mjd(86.4).unwrap(), 58001.0);
 }
@@ -803,7 +798,7 @@ fn split_reference_takes_precedence_over_single_mjdref() {
         for &(k, v) in pairs {
             h.set_internal(k, v);
         }
-        FitsTime::from_header(&h).unwrap().mjdref
+        Frame::from_header(&h).unwrap().mjdref
     };
     // §9.2.2: a full integer+fractional split wins over the single value.
     assert_eq!(

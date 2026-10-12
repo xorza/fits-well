@@ -1,4 +1,4 @@
-use crate::bintable::BinTable;
+use crate::bintable::Table;
 use crate::bintable::internals;
 use crate::bintable::internals::table_header;
 use crate::bintable::tform_kind::TformKind;
@@ -11,17 +11,17 @@ use crate::compress::plane::IntBitpix;
 #[cfg(feature = "parallel")]
 use crate::compress::tile_geometry::TileGeometry;
 use crate::compress::*;
-use crate::data::Image;
-use crate::data::image_data::ImageData;
 use crate::hdu::HduKind;
 use crate::hdu::HduRole;
 use crate::hdu::image_geometry::ImageGeometry;
 use crate::header_model::Header;
+use crate::image_model::Image;
+use crate::image_model::data::Data;
 use crate::reader::internals::open_fixture;
 
 /// Decode the tiled image `header` describes from its container `table`, resolving
 /// the kind and geometry the way the reader's scan does.
-fn decompress_image(header: &Header, table: &BinTable) -> Result<Image> {
+fn decompress_image(header: &Header, table: &Table) -> Result<Image> {
     let kind = HduKind::classify(header, HduRole::Extension)?;
     let image = ImageGeometry::from_header(header, kind)?;
     let samples = TiledImage::new(header, &image)?.decode(header, table.view())?;
@@ -63,12 +63,12 @@ fn compressed_image_header(
 #[test]
 fn decompresses_the_integer_codec_fixtures() {
     for (name, want) in [
-        ("comp_gzip_i16.fits", ImageData::I16(ramp())),
-        ("comp_gzip2_i16.fits", ImageData::I16(ramp())),
-        ("comp_rice_i16.fits", ImageData::I16(ramp())),
+        ("comp_gzip_i16.fits", Data::I16(ramp())),
+        ("comp_gzip2_i16.fits", Data::I16(ramp())),
+        ("comp_rice_i16.fits", Data::I16(ramp())),
         // Lossless HCOMPRESS (SCALE=0), one 24×16 tile.
-        ("comp_hcomp_i16.fits", ImageData::I16(ramp())),
-        ("comp_plio_i32.fits", ImageData::I32(mask())),
+        ("comp_hcomp_i16.fits", Data::I16(ramp())),
+        ("comp_plio_i32.fits", Data::I32(mask())),
     ] {
         let mut reader = open_fixture(name);
         let image = reader.read_image(1).unwrap();
@@ -81,13 +81,13 @@ fn decompresses_the_integer_codec_fixtures() {
 /// stored as a plain image beside it; a NaN matches any NaN.
 #[test]
 fn decompresses_to_the_astropy_reconstructions() {
-    fn samples(data: ImageData) -> Vec<Option<u32>> {
+    fn samples(data: Data) -> Vec<Option<u32>> {
         match data {
-            ImageData::I32(values) => values
+            Data::I32(values) => values
                 .into_iter()
                 .map(|v| Some(v.cast_unsigned()))
                 .collect(),
-            ImageData::F32(values) => values
+            Data::F32(values) => values
                 .into_iter()
                 .map(|v| (!v.is_nan()).then(|| v.to_bits()))
                 .collect(),
@@ -138,12 +138,12 @@ fn decompresses_nocompress_tile_verbatim() {
     for x in [1i16, 2, 3, 4] {
         data.extend_from_slice(&x.to_be_bytes());
     }
-    let table = BinTable::from_data(&h, data).unwrap();
+    let table = Table::from_data(&h, data).unwrap();
     let img = decompress_image(&h, &table).unwrap();
     assert_eq!(img.shape, vec![2, 2]);
-    assert_eq!(img.samples, ImageData::I16(vec![1, 2, 3, 4]));
+    assert_eq!(img.samples, Data::I16(vec![1, 2, 3, 4]));
 
-    let mut invalid_hcompress = h.clone();
+    let mut invalid_hcompress = h;
     invalid_hcompress
         .set_internal("ZCMPTYPE", "HCOMPRESS_1")
         .set_internal("ZNAXIS", 1)
@@ -178,7 +178,7 @@ fn decoded_values_fit_the_image_bitpix() {
     for value in values {
         data.extend_from_slice(&i32::try_from(value).unwrap().to_be_bytes());
     }
-    let table = BinTable::from_data(&uncompressed, data).unwrap();
+    let table = Table::from_data(&uncompressed, data).unwrap();
     assert!(matches!(
         decompress_image(&uncompressed, &table),
         Err(FitsError::CorruptCompressedData { detail })
@@ -201,10 +201,10 @@ fn decoded_values_fit_the_image_bitpix() {
     data.extend_from_slice(&i32::try_from(length).unwrap().to_be_bytes());
     data.extend_from_slice(&0i32.to_be_bytes());
     data.extend_from_slice(&stream);
-    let table = BinTable::from_data(&hcompressed, data).unwrap();
+    let table = Table::from_data(&hcompressed, data).unwrap();
     assert_eq!(
         decompress_image(&hcompressed, &table).unwrap().samples,
-        ImageData::I16(vec![i16::MAX, i16::MIN, 7, 8])
+        Data::I16(vec![i16::MAX, i16::MIN, 7, 8])
     );
 
     // The bounds themselves fit; one past them clamps, or is refused.
@@ -268,10 +268,10 @@ fn compressed_integer_null_mask_restores_blank_pixels() {
         data.extend_from_slice(&10i16.to_be_bytes());
         data.extend_from_slice(&20i16.to_be_bytes());
         data.extend_from_slice(&mask);
-        let table = BinTable::from_data(&h, data).unwrap();
+        let table = Table::from_data(&h, data).unwrap();
         assert_eq!(
             decompress_image(&h, &table).unwrap().samples,
-            ImageData::I16(vec![10, -999]),
+            Data::I16(vec![10, -999]),
             "{codec}"
         );
 
@@ -311,8 +311,8 @@ fn compressed_float_null_mask_restores_nan_pixels() {
     data.extend_from_slice(&10i32.to_be_bytes());
     data.extend_from_slice(&20i32.to_be_bytes());
     data.extend_from_slice(&[1, 0]);
-    let table = BinTable::from_data(&h, data).unwrap();
-    let ImageData::F32(values) = decompress_image(&h, &table).unwrap().samples else {
+    let table = Table::from_data(&h, data).unwrap();
+    let Data::F32(values) = decompress_image(&h, &table).unwrap().samples else {
         panic!("expected F32")
     };
     assert!(values[0].is_nan());
@@ -346,9 +346,9 @@ fn zblank_column_overrides_keyword_per_tile() {
     data.extend_from_slice(&99i32.to_be_bytes()); // ZBLANK column value
     data.extend_from_slice(&10i32.to_be_bytes()); // heap: quantized int 0
     data.extend_from_slice(&99i32.to_be_bytes()); // heap: quantized int 1 (== ZBLANK)
-    let table = BinTable::from_data(&h, data).unwrap();
+    let table = Table::from_data(&h, data).unwrap();
     let img = decompress_image(&h, &table).unwrap();
-    let ImageData::F32(px) = img.samples else {
+    let Data::F32(px) = img.samples else {
         panic!("expected F32")
     };
     assert_eq!(px[0], 25.0);
@@ -422,7 +422,7 @@ fn compressed_image_rejects_short_tiles() {
     data.extend_from_slice(&1i32.to_be_bytes());
     data.extend_from_slice(&0i32.to_be_bytes());
     data.push(0);
-    let table = BinTable::from_data(&h, data).unwrap();
+    let table = Table::from_data(&h, data).unwrap();
     assert!(matches!(
         decompress_image(&h, &table),
         Err(FitsError::DataSizeMismatch {
@@ -449,7 +449,7 @@ fn compressed_image_rejects_short_tiles() {
     data.extend_from_slice(&1i32.to_be_bytes());
     data.extend_from_slice(&0i32.to_be_bytes());
     data.extend_from_slice(&1i16.to_be_bytes());
-    let table = BinTable::from_data(&h, data).unwrap();
+    let table = Table::from_data(&h, data).unwrap();
     assert!(matches!(
         decompress_image(&h, &table),
         Err(FitsError::DataSizeMismatch {
@@ -476,7 +476,7 @@ fn decompress_image_rejects_overflowing_znaxis_product() {
     let mut data = Vec::new();
     data.extend_from_slice(&0i32.to_be_bytes()); // empty P descriptor: nelem
     data.extend_from_slice(&0i32.to_be_bytes()); // offset
-    let table = BinTable::from_data(&h, data).unwrap();
+    let table = Table::from_data(&h, data).unwrap();
     assert!(matches!(
         decompress_image(&h, &table),
         Err(FitsError::DataUnitOverflow)
@@ -500,7 +500,7 @@ fn decompress_image_rejects_oversized_znaxis_product() {
     let mut data = Vec::new();
     data.extend_from_slice(&0i32.to_be_bytes()); // empty P descriptor: nelem
     data.extend_from_slice(&0i32.to_be_bytes()); // offset
-    let table = BinTable::from_data(&h, data).unwrap();
+    let table = Table::from_data(&h, data).unwrap();
     assert!(matches!(
         decompress_image(&h, &table),
         Err(FitsError::DataUnitTooLarge { .. })

@@ -7,15 +7,15 @@ use crate::bintable::table_view::TableView;
 use crate::compress::ImageCodec;
 use crate::compress::convert;
 use crate::compress::decode::decode_buffer::DecodeBuffer;
-use crate::data::image_data::ImageData;
-use crate::data::image_view::ImageView;
-use crate::data::shape_product;
-use crate::data::validate_image_region;
-use crate::data::view_words;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::image_geometry::ImageGeometry;
 use crate::header_model::Header;
+use crate::image_model::data::Data;
+use crate::image_model::shape_product;
+use crate::image_model::validate_image_region;
+use crate::image_model::view::View;
+use crate::image_model::view_words;
 use crate::keyword::key;
 
 /// The image a tiled-compression `BINTABLE` encodes, with the codec and tile shape
@@ -40,7 +40,7 @@ pub(crate) struct TileSection<'s> {
 }
 
 impl<'a> TiledImage<'a> {
-    pub(crate) fn new(header: &Header, image: &'a ImageGeometry) -> Result<TiledImage<'a>> {
+    pub(crate) fn new(header: &Header, image: &'a ImageGeometry) -> Result<Self> {
         let codec = ImageCodec::parse(
             header
                 .get_text("ZCMPTYPE")?
@@ -110,7 +110,7 @@ impl<'a> TiledImage<'a> {
     }
 
     /// Decode every tile of the image from its container `table`.
-    pub(crate) fn decode(&self, header: &Header, table: TableView<'_>) -> Result<ImageData> {
+    pub(crate) fn decode(&self, header: &Header, table: TableView<'_>) -> Result<Data> {
         let mut samples = convert::zeroed_samples(self.image.bitpix, self.image.len())?;
         if self.image.len() != 0 {
             DecodeBuffer::from_samples(&mut samples).decode_image(header, table, self)?;
@@ -124,7 +124,7 @@ impl<'a> TiledImage<'a> {
         header: &Header,
         table: TableView<'_>,
         words: &'w mut Vec<u64>,
-    ) -> Result<ImageView<'w>> {
+    ) -> Result<View<'w>> {
         let nbytes = self.image.byte_len()?;
         allocation::try_resize(words, nbytes.div_ceil(8), 0)?;
         if self.image.len() != 0 {
@@ -140,7 +140,7 @@ impl<'a> TiledImage<'a> {
         header: &Header,
         table: TableView<'_>,
         section: TileSection<'_>,
-    ) -> Result<ImageData> {
+    ) -> Result<Data> {
         let len = shape_product(section.shape)?;
         let mut samples = convert::zeroed_samples(self.image.bitpix, len)?;
         if len != 0 {
@@ -157,7 +157,7 @@ impl<'a> TiledImage<'a> {
         table: TableView<'_>,
         section: TileSection<'_>,
         words: &'w mut Vec<u64>,
-    ) -> Result<ImageView<'w>> {
+    ) -> Result<View<'w>> {
         let len = shape_product(section.shape)?;
         let nbytes = len
             .checked_mul(self.image.bitpix.elem_size())

@@ -11,8 +11,8 @@ impl TableMatrixKeyword {
     /// The image-header root, also used verbatim by the vector-cell form (`ijPCna`).
     pub(super) const fn root(self) -> &'static str {
         match self {
-            TableMatrixKeyword::Pc => "PC",
-            TableMatrixKeyword::Cd => "CD",
+            Self::Pc => "PC",
+            Self::Cd => "CD",
         }
     }
 
@@ -20,10 +20,10 @@ impl TableMatrixKeyword {
     /// spelling.
     pub(super) const fn pixel_root(self, abbreviated: bool) -> &'static str {
         match (self, abbreviated) {
-            (TableMatrixKeyword::Pc, false) => "TPC",
-            (TableMatrixKeyword::Pc, true) => "TP",
-            (TableMatrixKeyword::Cd, false) => "TCD",
-            (TableMatrixKeyword::Cd, true) => "TC",
+            (Self::Pc, false) => "TPC",
+            (Self::Pc, true) => "TP",
+            (Self::Cd, false) => "TCD",
+            (Self::Cd, true) => "TC",
         }
     }
 }

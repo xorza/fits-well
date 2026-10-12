@@ -29,8 +29,8 @@ pub(super) struct CodecScratch {
 // Hand-written rather than derived: `Vec<W>` is `Default` for every `W`, so the
 // derive's `W: Default` bound would be a fiction.
 impl<W> Default for TileScratchSet<W> {
-    fn default() -> TileScratchSet<W> {
-        TileScratchSet {
+    fn default() -> Self {
+        Self {
             tile: TileScratch::default(),
             values: Vec::new(),
             aux: Vec::new(),

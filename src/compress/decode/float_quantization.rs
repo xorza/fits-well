@@ -31,15 +31,11 @@ pub(super) struct Dequant {
 }
 
 impl FloatQuantization {
-    pub(super) fn read(
-        header: &Header,
-        table: TableView<'_>,
-        is_float: bool,
-    ) -> Result<FloatQuantization> {
+    pub(super) fn read(header: &Header, table: TableView<'_>, is_float: bool) -> Result<Self> {
         // An integer image is stored without quantization and ignores these keywords
         // and columns altogether.
         if !is_float {
-            return Ok(FloatQuantization {
+            return Ok(Self {
                 method: DitherMethod::None,
                 zdither0: 1,
                 zblank_keyword: None,
@@ -59,7 +55,7 @@ impl FloatQuantization {
         if !(1..=10_000).contains(&zdither0) {
             return Err(FitsError::KeywordOutOfRange { name: "ZDITHER0" });
         }
-        Ok(FloatQuantization {
+        Ok(Self {
             method,
             zdither0,
             zblank_keyword: header.get_integer("ZBLANK")?,
@@ -123,5 +119,6 @@ fn read_i64_column(table: TableView<'_>, name: &str) -> Result<Option<Vec<i64>>>
 }
 
 fn column_at<T: Copy>(col: Option<&[T]>, t: usize) -> Option<T> {
-    col.and_then(|v| v.get(t).copied())
+    let v = col?;
+    v.get(t).copied()
 }

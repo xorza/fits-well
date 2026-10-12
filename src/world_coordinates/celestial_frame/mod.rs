@@ -27,13 +27,13 @@ pub struct CelestialFrame {
 }
 
 impl CelestialReferenceFrame {
-    fn parse(value: &str) -> Result<CelestialReferenceFrame> {
+    fn parse(value: &str) -> Result<Self> {
         match value.trim() {
-            "ICRS" => Ok(CelestialReferenceFrame::Icrs),
-            "FK5" => Ok(CelestialReferenceFrame::Fk5),
-            "FK4" => Ok(CelestialReferenceFrame::Fk4),
-            "FK4-NO-E" => Ok(CelestialReferenceFrame::Fk4NoE),
-            "GAPPT" => Ok(CelestialReferenceFrame::Gappt),
+            "ICRS" => Ok(Self::Icrs),
+            "FK5" => Ok(Self::Fk5),
+            "FK4" => Ok(Self::Fk4),
+            "FK4-NO-E" => Ok(Self::Fk4NoE),
+            "GAPPT" => Ok(Self::Gappt),
             value => Err(FitsError::InvalidWcs {
                 detail: format!("RADESYS {value:?} is not a standard reference frame"),
             }),
@@ -48,7 +48,7 @@ impl CelestialFrame {
         header: &Header,
         suffix: AltSuffix,
         ctype: &[String],
-    ) -> Result<Option<CelestialFrame>> {
+    ) -> Result<Option<Self>> {
         let key = key!("RADESYS{suffix}");
         let mut declared = header.get_text(key.as_str())?;
         if declared.is_none() && !suffix.is_alternate() {
@@ -74,7 +74,7 @@ impl CelestialFrame {
                 None => CelestialReferenceFrame::Icrs,
             },
         };
-        Ok(Some(CelestialFrame {
+        Ok(Some(Self {
             reference_frame,
             equinox,
         }))

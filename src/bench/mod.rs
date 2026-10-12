@@ -21,11 +21,11 @@ use criterion::Criterion;
 
 #[cfg(feature = "compression")]
 use crate::compress;
-use crate::{data, header_model, reader, world_coordinates, writer};
+use crate::{fits_writer, header_model, image_model, reader, world_coordinates};
 
 /// Every case, atomic first.
 pub fn run(c: &mut Criterion) {
-    data::bench::atomic(c);
+    image_model::bench::atomic(c);
     reader::bench::atomic(c);
     header_model::bench::atomic(c);
     #[cfg(feature = "compression")]
@@ -33,7 +33,7 @@ pub fn run(c: &mut Criterion) {
     world_coordinates::bench::atomic(c);
 
     reader::bench::integration(c);
-    writer::bench::integration(c);
+    fits_writer::bench::integration(c);
     #[cfg(feature = "compression")]
     compress::bench::integration(c);
 }

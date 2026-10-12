@@ -3,7 +3,7 @@
 
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::time_coordinates::time_scale::{TimeScale, TimeScaleKind};
+use crate::time_coordinates::scale::{Scale, ScaleKind};
 use crate::time_coordinates::{MJD0, SEC_PER_DAY};
 
 /// A calendar datetime (proleptic Gregorian, time-scale agnostic). `second` may
@@ -22,7 +22,7 @@ impl Datetime {
     /// Parse a FITS ISO-8601 datetime: unsigned `YYYY-MM-DD` or signed
     /// `±YYYYY-MM-DD`, optionally followed by `Thh:mm:ss[.sss…]` (§9.1.1). No
     /// component defaulting; the date is required, the time part optional.
-    pub fn parse(s: &str) -> Result<Datetime> {
+    pub fn parse(s: &str) -> Result<Self> {
         let invalid = || FitsError::InvalidTime {
             detail: format!("DATE '{s}'"),
         };
@@ -67,7 +67,7 @@ impl Datetime {
                 return Err(invalid());
             }
         }
-        Ok(Datetime {
+        Ok(Self {
             year,
             month,
             day,
@@ -81,19 +81,19 @@ impl Datetime {
     ///
     /// UTC leap-second labels remain valid FITS datetimes, but converting one to
     /// a continuous coordinate requires an external leap-second realization.
-    pub fn to_jd(&self, scale: &TimeScale) -> Result<f64> {
+    pub fn to_jd(&self, scale: &Scale) -> Result<f64> {
         Ok(self.day_start_jd(scale)? + self.day_fraction())
     }
 
     /// Modified Julian Date (`JD − 2400000.5`). The day's start is shifted before the
     /// time of day is added, so the sum rounds at the MJD's own precision — 64 times
     /// finer than a JD's in the present era.
-    pub fn to_mjd(&self, scale: &TimeScale) -> Result<f64> {
+    pub fn to_mjd(&self, scale: &Scale) -> Result<f64> {
         Ok((self.day_start_jd(scale)? - MJD0) + self.day_fraction())
     }
 
     /// The Julian Date at 0h of this date: a whole number and a half, exact in `f64`.
-    fn day_start_jd(&self, scale: &TimeScale) -> Result<f64> {
+    fn day_start_jd(&self, scale: &Scale) -> Result<f64> {
         self.validate(scale)?;
         if self.second >= 60.0 {
             return Err(FitsError::ExternalTimeDataRequired {
@@ -107,7 +107,7 @@ impl Datetime {
         (f64::from(self.hour) * 3600.0 + f64::from(self.minute) * 60.0 + self.second) / SEC_PER_DAY
     }
 
-    fn validate(&self, scale: &TimeScale) -> Result<()> {
+    fn validate(&self, scale: &Scale) -> Result<()> {
         let valid_date = (-99999..=99999).contains(&self.year)
             && (1..=12).contains(&self.month)
             && self.day >= 1
@@ -119,7 +119,7 @@ impl Datetime {
         } else {
             valid_date
                 && self.second < 61.0
-                && scale.kind() == Some(TimeScaleKind::Utc)
+                && scale.kind() == Some(ScaleKind::Utc)
                 && self.hour == 23
                 && self.minute == 59
         };

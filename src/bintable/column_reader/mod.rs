@@ -8,13 +8,13 @@ use crate::bintable::column_data::ColumnData;
 use crate::bintable::table_view::TableView;
 use crate::bintable::tform_kind::TformKind;
 use crate::bintable::vla_column::VlaColumn;
-use crate::data::unsigned_data::UnsignedData;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::image_model::unsigned_data::UnsignedData;
 use crate::ragged::Ragged;
 
-/// A handle to one column of a [`BinTable`], from [`BinTable::column_by_idx`] or
-/// [`BinTable::column_by_name`]. Decode through it without re-passing the column
+/// A handle to one column of a [`Table`], from [`Table::column_by_idx`] or
+/// [`Table::column_by_name`]. Decode through it without re-passing the column
 /// descriptor: [`raw`](Self::raw) for the typed values, [`physical`](Self::physical)
 /// for the scaled `f64` plane, [`unsigned`](Self::unsigned)/[`complex`](Self::complex)/
 /// [`bits`](Self::bits) for the special kinds, and [`vla`](Self::vla) (+
@@ -22,9 +22,9 @@ use crate::ragged::Ragged;
 /// [`vla_complex`](Self::vla_complex)/[`vla_bits`](Self::vla_bits)) for variable-length
 /// `P`/`Q` columns. Borrows the table, so it cannot outlive it.
 ///
-/// [`BinTable`]: crate::table::BinTable
-/// [`BinTable::column_by_idx`]: crate::table::BinTable::column_by_idx
-/// [`BinTable::column_by_name`]: crate::table::BinTable::column_by_name
+/// [`Table`]: crate::table::Table
+/// [`Table::column_by_idx`]: crate::table::Table::column_by_idx
+/// [`Table::column_by_name`]: crate::table::Table::column_by_name
 #[derive(Debug, Clone, Copy)]
 pub struct ColumnReader<'a> {
     table: TableView<'a>,
@@ -32,7 +32,7 @@ pub struct ColumnReader<'a> {
 }
 
 impl<'a> ColumnReader<'a> {
-    pub(crate) const fn new(table: TableView<'a>, index: usize) -> ColumnReader<'a> {
+    pub(crate) const fn new(table: TableView<'a>, index: usize) -> Self {
         ColumnReader { table, index }
     }
 
