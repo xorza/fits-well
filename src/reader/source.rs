@@ -197,10 +197,6 @@ pub struct MmapSource {
 impl MmapSource {
     pub(super) fn open(path: &std::path::Path) -> Result<Self> {
         let file = File::open(path)?;
-        // SAFETY: standard mmap contract — the mapping is read-only and owned here
-        // (no mutable view is ever handed out). The one inherent caveat is that an
-        // external process truncating or modifying the file underneath can change the
-        // bytes; choosing `mmap` accepts that, exactly as in cfitsio/astropy.
         let map = unsafe { memmap2::Mmap::map(&file)? };
         Ok(Self { map })
     }

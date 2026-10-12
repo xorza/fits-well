@@ -24,8 +24,6 @@ pub(crate) unsafe trait Sample: Copy {}
 
 macro_rules! impl_sample {
     ($($type:ty),+ $(,)?) => {
-        // SAFETY: every listed type is a `Copy` integer or IEEE-754 float — plain
-        // data, every bit pattern valid, alignment at most 8 (`i64`/`f64`).
         $(unsafe impl Sample for $type {})+
     };
 }
@@ -44,9 +42,6 @@ pub(crate) unsafe fn samples<T: Sample>(words: &[u64], count: usize) -> &[T] {
         fits(words.len(), count, size_of::<T>()),
         "sample count fits"
     );
-    // SAFETY: `u64` storage is 8-aligned, which satisfies every `Sample`; the caller
-    // guarantees the `count` elements are initialized; `Sample` has no invalid bit
-    // patterns, so every one of them is a valid `T`.
     unsafe { slice::from_raw_parts(words.as_ptr().cast::<T>(), count) }
 }
 
@@ -62,8 +57,6 @@ pub(crate) unsafe fn samples_mut<T: Sample>(words: &mut [u64], count: usize) -> 
         fits(words.len(), count, size_of::<T>()),
         "sample count fits"
     );
-    // SAFETY: as `samples`, plus the buffer is uniquely borrowed for the returned
-    // slice's lifetime, so no other view of these bytes can exist.
     unsafe { slice::from_raw_parts_mut(words.as_mut_ptr().cast::<T>(), count) }
 }
 
@@ -81,24 +74,20 @@ mod tests {
         // Two `u64`s = 16 bytes = 4 `i32`s or 2 `f64`s. Write through the mutable
         // view, read back through the shared one, and check the exact values.
         let mut words = vec![0u64; 2];
-        // SAFETY: 4 * 4 = 16 bytes, exactly the buffer; zeroed, so initialized.
         let ints: &mut [i32] = unsafe { samples_mut(&mut words, 4) };
         ints.copy_from_slice(&[1, -1, i32::MAX, i32::MIN]);
-        // SAFETY: the same 16 bytes, written above.
         assert_eq!(
             unsafe { samples::<i32>(&words, 4) },
             [1, -1, i32::MAX, i32::MIN]
         );
 
         // A shorter view of the same storage sees only its own prefix.
-        // SAFETY: 2 * 4 = 8 bytes, within the buffer.
         assert_eq!(unsafe { samples::<i32>(&words, 2) }, [1, -1]);
 
         // Reinterpreting as a wider type reads the same bytes: the first `u64` holds
         // the host-endian pair (1, -1), so as `f64` it is exactly that bit pattern.
         // Compared as bits, not values — this particular pattern is a NaN, and no
         // NaN compares equal to itself.
-        // SAFETY: 1 * 8 = 8 bytes, within the buffer.
         let wide = unsafe { samples::<f64>(&words, 1) };
         assert_eq!(wide[0].to_bits(), words[0]);
     }
