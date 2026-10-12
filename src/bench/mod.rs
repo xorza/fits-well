@@ -1,4 +1,4 @@
-//! The criterion benches, which `benches/fits_well.rs` runs: `cargo benches`.
+//! The criterion benches, which `benches/fits_well.rs` runs: `./x.py bench`.
 //!
 //! Two kinds, and every case is one. An `atomic` case times one operation on the unit the read
 //! and write paths hand it: one row of the standard frame for a sample kernel, a checksum or a
