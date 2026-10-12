@@ -30,6 +30,8 @@ use crate::header_model::Header;
 use crate::reserved_keywords;
 
 pub(crate) mod ascii;
+#[cfg(feature = "internals")]
+pub(crate) mod bench;
 pub(crate) mod image;
 pub(crate) mod table;
 

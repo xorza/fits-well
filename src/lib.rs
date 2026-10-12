@@ -207,15 +207,5 @@ pub mod internals {
     };
 }
 
-/// The criterion groups the benches under `benches/` run. They are **not** a
-/// stable API.
 #[cfg(feature = "internals")]
-pub mod bench {
-    #[cfg(feature = "compression")]
-    pub use crate::compress::bench::{compress, compress_table, decompress, decompress_table};
-    pub use crate::data::bench::{decode, encode, physical};
-    #[cfg(feature = "compression")]
-    pub use crate::reader::bench::read_compressed_image_section;
-    pub use crate::reader::bench::{read_image, read_image_view};
-    pub use crate::world_coordinates::bench::wcs;
-}
+pub mod bench;

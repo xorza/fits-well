@@ -167,31 +167,15 @@ mmap = ["dep:memmap2"]
 # codecs. The WCS (§8) and time (§9) layers are dependency-free and always compiled.
 compression = ["dep:flate2"]
 # What only tests and benches build: crate-private fixtures re-exposed for the integration
-# tests, and the criterion groups the benches under `benches/` run. NOT a stable API. Every test
+# tests, and the bench drivers `benches/fits_well.rs` runs. NOT a stable API. Every test
 # and bench build turns it on through the self dev-dependency below.
 internals = ["dep:criterion"]
 
-# Each bench binary runs the criterion groups of one area (`fits_well::bench`).
-# Throughput is tagged in bytes or elements, so results compare with memory
-# bandwidth: `cargo bench --bench decode`.
-[[bench]]
-name = "decode"
-harness = false
-required-features = ["internals"]
-
-# Seeking (copy into scratch) against in-memory borrow; add `mmap` for its arm.
-[[bench]]
-name = "read"
-harness = false
-required-features = ["internals"]
+[lib]
+bench = false
 
 [[bench]]
-name = "compress"
-harness = false
-required-features = ["internals", "compression"]
-
-[[bench]]
-name = "wcs"
+name = "fits_well"
 harness = false
 required-features = ["internals"]
 
