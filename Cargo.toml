@@ -18,6 +18,7 @@ exclude = [
     "AGENTS.md",
     "CLAUDE.md",
     "todo.txt",
+    "x.py",
 ]
 
 # The Darkroom workspace's lint set, copied as a submodule does not inherit it. Warn, not deny:
@@ -139,6 +140,12 @@ unescaped_backticks = "warn"
 [package.metadata.docs.rs]
 features = ["compression", "parallel", "mmap"]
 rustdoc-args = ["--cfg", "docsrs"]
+
+# The codec paths without `parallel`, and the bare reader. Benches measure every feature.
+[package.metadata.x]
+lint = ["--all-features", "--no-default-features --features compression,mmap", "--no-default-features"]
+test = ["--all-features", "--no-default-features --features compression,mmap"]
+bench = "--all-features"
 
 [dependencies]
 bitvec = "1"
