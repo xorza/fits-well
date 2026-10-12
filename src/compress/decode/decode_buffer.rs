@@ -36,10 +36,6 @@ impl<'a> DecodeBuffer<'a> {
     }
 
     pub(super) fn from_words(words: &'a mut [u64], bitpix: Bitpix, count: usize) -> Self {
-        // SAFETY: the callers size `words` to hold `count` samples before this, and
-        // every element of a `Vec<u64>` is an initialized `u64`, so the view covers
-        // initialized storage. Alignment and bit-pattern validity are
-        // `words::samples_mut`'s to uphold, not this caller's.
         unsafe {
             match bitpix {
                 Bitpix::U8 => DecodeBuffer::U8(words::samples_mut(words, count)),

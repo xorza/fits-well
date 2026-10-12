@@ -149,10 +149,6 @@ fn unsigned_from_be(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Option<U
 pub(crate) fn swap_into_words(src: &[u8], bitpix: Bitpix, words: &mut Vec<u64>) {
     let count = src.len() / bitpix.elem_size();
     words.resize(src.len().div_ceil(8), 0);
-    // SAFETY: `words` was just sized to hold `src.len()` bytes, and every element of a
-    // `Vec<u64>` is an initialized `u64` — the ones kept from an earlier read as much
-    // as the zeroed new ones — so each `samples_mut` view covers initialized storage.
-    // `src` is a separate buffer, so the typed slice never aliases it.
     unsafe {
         match bitpix {
             Bitpix::I16 => {
@@ -181,10 +177,6 @@ pub(crate) fn swap_into_words(src: &[u8], bitpix: Bitpix, words: &mut Vec<u64>) 
 /// `bitpix` elements and `<= words.len() * 8`.
 pub(crate) fn view_words(words: &[u64], bitpix: Bitpix, nbytes: usize) -> View<'_> {
     let count = nbytes / bitpix.elem_size();
-    // SAFETY: `swap_into_words` (or the compressed-image decoder) wrote all `nbytes`
-    // = `count` elements of host-endian samples, so every viewed element is
-    // initialized. Alignment and bit-pattern validity are `words::samples`'s to
-    // uphold, not this caller's.
     unsafe {
         match bitpix {
             Bitpix::U8 => View::U8(words::samples(words, count)),
