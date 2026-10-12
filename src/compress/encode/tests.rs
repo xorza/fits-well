@@ -1,14 +1,14 @@
 use crate::bitpix::Bitpix;
 use crate::compress::internals::{mask, ramp};
 use crate::compress::*;
-use crate::data::Image;
-use crate::data::image_data::ImageData;
-use crate::data::scaling::Scaling;
 use crate::error::Ranked;
+use crate::fits_writer::FitsWriter;
+use crate::fits_writer::internals::{rejected_before_output, round_trip};
 use crate::header_model::value::Value;
+use crate::image_model::Image;
+use crate::image_model::data::Data;
+use crate::image_model::scaling::Scaling;
 use crate::reader::FitsReader;
-use crate::writer::FitsWriter;
-use crate::writer::internals::{rejected_before_output, round_trip};
 use std::io::Cursor;
 use std::iter;
 
@@ -63,7 +63,7 @@ fn compression_write_round_trips_through_decode() {
     let samples_3d: Vec<i16> = (0..5 * 4 * 3).map(|i| i as i16 * 3 - 50).collect();
     let image_3d = Image {
         shape: vec![5, 4, 3],
-        samples: ImageData::I16(samples_3d.clone()),
+        samples: Data::I16(samples_3d.clone()),
         scaling: Scaling::IDENTITY,
     };
     let mut r = round_trip(|w| {
@@ -76,7 +76,7 @@ fn compression_write_round_trips_through_decode() {
     });
     let back = r.read_image(1).unwrap();
     assert_eq!(back.shape, vec![5, 4, 3]);
-    assert!(matches!(back.decode(), ImageData::I16(v) if v == samples_3d));
+    assert!(matches!(back.decode(), Data::I16(v) if v == samples_3d));
 }
 
 /// A 24×16 float field: a smooth ramp plus genuine high-frequency noise (a
@@ -106,11 +106,11 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
     f32_samples.extend(iter::repeat_n(42.25, 24));
     let f64_samples = f32_samples.iter().map(|&value| f64::from(value)).collect();
 
-    for samples in [ImageData::F32(f32_samples), ImageData::F64(f64_samples)] {
+    for samples in [Data::F32(f32_samples), Data::F64(f64_samples)] {
         let bitpix = samples.bitpix();
         let expected_raw: Vec<f64> = match &samples {
-            ImageData::F32(values) => values.iter().map(|&value| f64::from(value)).collect(),
-            ImageData::F64(values) => values.clone(),
+            Data::F32(values) => values.iter().map(|&value| f64::from(value)).collect(),
+            Data::F64(values) => values.clone(),
             _ => unreachable!("float cases only"),
         };
         let image = Image {
@@ -202,8 +202,8 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
             assert_eq!(back.scaling, image.scaling, "{bitpix:?} {cmptype}");
             let physical = back.physical();
             let actual_raw: Vec<f64> = match back.decode() {
-                ImageData::F32(values) => values.into_iter().map(f64::from).collect(),
-                ImageData::F64(values) => values,
+                Data::F32(values) => values.into_iter().map(f64::from).collect(),
+                Data::F64(values) => values,
                 other => panic!("{cmptype}: expected {bitpix:?}, got {other:?}"),
             };
             let mut quantized_changed = false;
@@ -313,7 +313,7 @@ fn hcompress_writer_enforces_standard_image_constraints() {
 fn dither_option_sets_zquantiz_and_round_trips() {
     let image = Image {
         shape: vec![24, 16],
-        samples: ImageData::F32(float_field()),
+        samples: Data::F32(float_field()),
         scaling: Scaling::IDENTITY,
     };
     // Each `DitherMethod` writes its `ZQUANTIZ` keyword and decodes within half a
@@ -343,7 +343,7 @@ fn dither_option_sets_zquantiz_and_round_trips() {
             .unwrap()
             .physical()
             .unwrap()[0];
-        let ImageData::F32(plane) = r.read_image(1).unwrap().decode() else {
+        let Data::F32(plane) = r.read_image(1).unwrap().decode() else {
             panic!("{dither:?}: expected F32");
         };
         assert_eq!(plane.len(), original.len(), "{dither:?}");
@@ -367,7 +367,7 @@ fn tile_shape_with_wrong_rank_is_rejected() {
     // silently row-tiling (an empty shape is still the row-tiling default).
     let image = Image {
         shape: vec![4, 3],
-        samples: ImageData::I16((0..12).map(|i| i as i16).collect()),
+        samples: Data::I16((0..12).map(|i| i as i16).collect()),
         scaling: Scaling::IDENTITY,
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
@@ -397,7 +397,7 @@ fn float_write_preserves_nan_nulls() {
     orig[20 + 10 * 24] = f32::NAN;
     let image = Image {
         shape: vec![24, 16],
-        samples: ImageData::F32(orig.clone()),
+        samples: Data::F32(orig.clone()),
         scaling: Scaling::IDENTITY,
     };
     let mut r = round_trip(|w| {
@@ -416,7 +416,7 @@ fn float_write_preserves_nan_nulls() {
         .physical()
         .unwrap()[0];
     let back = match r.read_image(1).unwrap().decode() {
-        ImageData::F32(v) => v,
+        Data::F32(v) => v,
         other => panic!("expected F32, got {other:?}"),
     };
     assert_eq!(back.len(), orig.len());
@@ -494,7 +494,7 @@ fn hcompress_lossless_write_round_trips_exactly() {
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
     match reader.read_image(1).unwrap().decode() {
-        ImageData::I32(actual) => assert_eq!(actual, samples),
+        Data::I32(actual) => assert_eq!(actual, samples),
         other => panic!("expected I32, got {other:?}"),
     }
 
@@ -510,7 +510,7 @@ fn hcompress_lossless_write_round_trips_exactly() {
         )
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
-    assert_eq!(reader.read_image(1).unwrap().decode(), ImageData::I32(wide));
+    assert_eq!(reader.read_image(1).unwrap().decode(), Data::I32(wide));
 
     let wide = vec![
         1i64 << 40,
@@ -529,7 +529,7 @@ fn hcompress_lossless_write_round_trips_exactly() {
         )
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
-    assert_eq!(reader.read_image(1).unwrap().decode(), ImageData::I64(wide));
+    assert_eq!(reader.read_image(1).unwrap().decode(), Data::I64(wide));
 }
 
 #[test]
@@ -539,7 +539,7 @@ fn integer_image_compression_preserves_bscale_bzero_and_blank() {
     let samples: Vec<i16> = (0..24 * 16).map(|i| (i % 50) as i16 - 5).collect();
     let image = Image {
         shape: vec![24, 16],
-        samples: ImageData::I16(samples.clone()),
+        samples: Data::I16(samples.clone()),
         scaling: Scaling {
             bscale: 2.5,
             bzero: 100.0,
@@ -560,7 +560,7 @@ fn integer_image_compression_preserves_bscale_bzero_and_blank() {
     assert_eq!(back.scaling.blank, Some(-5));
 
     match back.decode() {
-        ImageData::I16(v) => assert_eq!(v, samples, "raw samples"),
+        Data::I16(v) => assert_eq!(v, samples, "raw samples"),
         other => panic!("expected I16, got {other:?}"),
     }
 }
@@ -580,7 +580,7 @@ fn rice_64_bit_pixels_round_trip_extreme_differences() {
     ];
     let image = Image {
         shape: vec![samples.len()],
-        samples: ImageData::I64(samples.clone()),
+        samples: Data::I64(samples.clone()),
         scaling: Scaling::IDENTITY,
     };
     let mut r = round_trip(|w| {
@@ -592,7 +592,7 @@ fn rice_64_bit_pixels_round_trip_extreme_differences() {
         )
     });
     let decoded = r.read_image(1).unwrap().decode();
-    assert_eq!(decoded, ImageData::I64(samples));
+    assert_eq!(decoded, Data::I64(samples));
 }
 
 #[cfg(feature = "parallel")]
@@ -619,10 +619,7 @@ fn parallel_full_decode_crosses_the_bounded_wave_boundary() {
         .unwrap();
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
-    assert_eq!(
-        reader.read_image(1).unwrap().decode(),
-        ImageData::U8(samples)
-    );
+    assert_eq!(reader.read_image(1).unwrap().decode(), Data::U8(samples));
 }
 
 #[test]
@@ -631,10 +628,10 @@ fn empty_images_round_trip() {
     // `NAXIS2 = 0` ZIMAGE table, not a phantom tile, through both the integer and
     // the float paths. An empty first axis holds no pixels either.
     for (shape, samples) in [
-        (vec![], ImageData::I16(Vec::new())),
-        (vec![], ImageData::I32(Vec::new())),
-        (vec![], ImageData::F32(Vec::new())),
-        (vec![0], ImageData::I16(Vec::new())),
+        (vec![], Data::I16(Vec::new())),
+        (vec![], Data::I32(Vec::new())),
+        (vec![], Data::F32(Vec::new())),
+        (vec![0], Data::I16(Vec::new())),
     ] {
         let image = Image {
             shape: shape.clone(),
@@ -659,7 +656,7 @@ fn empty_images_round_trip() {
 fn compressed_image_with_an_overflowing_shape_is_refused_before_output() {
     let image = Image {
         shape: vec![usize::MAX, 2],
-        samples: ImageData::I16(Vec::new()),
+        samples: Data::I16(Vec::new()),
         scaling: Scaling::IDENTITY,
     };
     assert!(matches!(

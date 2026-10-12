@@ -5,7 +5,7 @@ use crate::error::Result;
 use crate::header_model::Header;
 use crate::keyword::AltSuffix;
 use crate::keyword::key;
-use crate::world_coordinates::axis::spectral_rest::SpectralRest;
+use crate::world_coordinates::axis_transform::spectral_rest::SpectralRest;
 
 /// A standard spectral reference system from FITS Table 27.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,18 +34,18 @@ pub struct SpectralFrame {
 }
 
 impl SpectralReferenceFrame {
-    fn parse(keyword: &str, value: &str) -> Result<SpectralReferenceFrame> {
+    fn parse(keyword: &str, value: &str) -> Result<Self> {
         match value.trim() {
-            "TOPOCENT" => Ok(SpectralReferenceFrame::Topocentric),
-            "GEOCENTR" => Ok(SpectralReferenceFrame::Geocentric),
-            "BARYCENT" => Ok(SpectralReferenceFrame::Barycentric),
-            "HELIOCEN" => Ok(SpectralReferenceFrame::Heliocentric),
-            "LSRK" => Ok(SpectralReferenceFrame::LsrKinematic),
-            "LSRD" => Ok(SpectralReferenceFrame::LsrDynamic),
-            "GALACTOC" => Ok(SpectralReferenceFrame::Galactocentric),
-            "LOCALGRP" => Ok(SpectralReferenceFrame::LocalGroup),
-            "CMBDIPOL" => Ok(SpectralReferenceFrame::CmbDipole),
-            "SOURCE" => Ok(SpectralReferenceFrame::Source),
+            "TOPOCENT" => Ok(Self::Topocentric),
+            "GEOCENTR" => Ok(Self::Geocentric),
+            "BARYCENT" => Ok(Self::Barycentric),
+            "HELIOCEN" => Ok(Self::Heliocentric),
+            "LSRK" => Ok(Self::LsrKinematic),
+            "LSRD" => Ok(Self::LsrDynamic),
+            "GALACTOC" => Ok(Self::Galactocentric),
+            "LOCALGRP" => Ok(Self::LocalGroup),
+            "CMBDIPOL" => Ok(Self::CmbDipole),
+            "SOURCE" => Ok(Self::Source),
             value => Err(FitsError::InvalidWcs {
                 detail: format!("{keyword} {value:?} is not a standard spectral reference frame"),
             }),
@@ -56,8 +56,8 @@ impl SpectralReferenceFrame {
 impl SpectralFrame {
     /// Resolve `SPECSYSa`/`SSYSOBSa` and the `RESTFRQa`/`RESTWAVa` rest values from
     /// an image header.
-    pub(super) fn from_header(header: &Header, suffix: AltSuffix) -> Result<SpectralFrame> {
-        let rest = SpectralFrame::rest(header, suffix)?;
+    pub(super) fn from_header(header: &Header, suffix: AltSuffix) -> Result<Self> {
+        let rest = Self::rest(header, suffix)?;
         let coordinate = header
             .get_text(key!("SPECSYS{suffix}").as_str())?
             .map(|value| SpectralReferenceFrame::parse("SPECSYS", value))
@@ -67,7 +67,7 @@ impl SpectralFrame {
             .map(|value| SpectralReferenceFrame::parse("SSYSOBS", value))
             .transpose()?
             .unwrap_or(SpectralReferenceFrame::Topocentric);
-        Ok(SpectralFrame {
+        Ok(Self {
             coordinate,
             observer,
             rest,

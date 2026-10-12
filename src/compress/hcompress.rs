@@ -122,7 +122,7 @@ struct Quadrant<'a> {
 
 impl BitOutput {
     const fn new() -> Self {
-        BitOutput {
+        Self {
             out: Vec::new(),
             buffer2: 0,
             bits_to_go2: 8,

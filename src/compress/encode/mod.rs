@@ -14,13 +14,13 @@ use crate::compress::tile_geometry::TileScratch;
 use crate::compress::{Compression, CompressionOptions, ImageCodec, map_tiles, needs_wide};
 use crate::compress::{gzip, hcompress, plio, quantize, rice};
 
-use crate::data::Image;
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Ranked;
 use crate::error::Result;
 use crate::header_model::Header;
 use crate::header_model::value;
+use crate::image_model::Image;
 use crate::keyword::key;
 
 /// Per-worker tile-encode scratch, reused across the tiles one rayon worker
@@ -437,15 +437,15 @@ impl TileCell {
     /// Element count for the `P` descriptor (bytes, or i16 words).
     const fn nelem(&self) -> usize {
         match self {
-            TileCell::Bytes(b) => b.len(),
-            TileCell::I16(v) => v.len(),
+            Self::Bytes(b) => b.len(),
+            Self::I16(v) => v.len(),
         }
     }
 
     fn byte_len(&self) -> Result<usize> {
         match self {
-            TileCell::Bytes(bytes) => Ok(bytes.len()),
-            TileCell::I16(values) => values
+            Self::Bytes(bytes) => Ok(bytes.len()),
+            Self::I16(values) => values
                 .len()
                 .checked_mul(2)
                 .ok_or(FitsError::DataUnitOverflow),
@@ -454,8 +454,8 @@ impl TileCell {
 
     fn append_to(self, out: &mut Vec<u8>) {
         match self {
-            TileCell::Bytes(mut bytes) => out.append(&mut bytes),
-            TileCell::I16(v) => {
+            Self::Bytes(mut bytes) => out.append(&mut bytes),
+            Self::I16(v) => {
                 for x in v {
                     out.extend_from_slice(&x.to_be_bytes());
                 }

@@ -22,7 +22,7 @@ use std::fs::{self, File};
 use std::path::Path;
 use std::process;
 
-use fits_well::image::{Compression, CompressionOptions, Hcompress, Image, ImageData};
+use fits_well::image::{Compression, CompressionOptions, Data, Hcompress, Image};
 use fits_well::{FitsReader, FitsWriter};
 
 fn main() -> fits_well::Result<()> {
@@ -70,7 +70,7 @@ fn main() -> fits_well::Result<()> {
     let path = out_dir.join("rice_float.fits");
     write_image(
         &path,
-        &Image::new(vec![24, 16], ImageData::F32(floats))?,
+        &Image::new(vec![24, 16], Data::F32(floats))?,
         Compression::Rice,
         &CompressionOptions::tiled([24, 16]),
     )?;

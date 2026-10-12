@@ -7,16 +7,16 @@ use crate::allocation;
 use crate::bintable::column::Column;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::descriptor::PqDescriptor;
-use crate::bintable::table_schema::TableSchema;
+use crate::bintable::schema::Schema;
 #[cfg(feature = "compression")]
 use crate::bintable::table_view::TableView;
 use crate::bintable::tform_kind::TformKind;
-use crate::data::shape_product;
-use crate::data::validate_image_region;
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::image_geometry::ImageGeometry;
+use crate::image_model::shape_product;
+use crate::image_model::validate_image_region;
 use crate::reader::data_checksum::DataChecksum;
 use crate::reader::hdu::Hdu;
 use crate::reader::source::Source;
@@ -53,8 +53,8 @@ impl TableRows<'_> {
 }
 
 impl<S: Source> DataSource<S> {
-    pub(crate) const fn new(source: S, scratch: Vec<u8>) -> DataSource<S> {
-        DataSource { source, scratch }
+    pub(crate) const fn new(source: S, scratch: Vec<u8>) -> Self {
+        Self { source, scratch }
     }
 
     pub(crate) fn into_source(self) -> S {
@@ -142,7 +142,7 @@ impl<S: Source> DataSource<S> {
     pub(crate) fn select_table(
         &mut self,
         data_offset: u64,
-        schema: &TableSchema,
+        schema: &Schema,
         rows: TableRows<'_>,
         columns: Option<&[bool]>,
         out: &mut Vec<u8>,
@@ -198,7 +198,7 @@ impl<S: Source> DataSource<S> {
     pub(crate) fn read_table_cell(
         &mut self,
         data_offset: u64,
-        schema: &TableSchema,
+        schema: &Schema,
         row: usize,
         column: usize,
     ) -> Result<ColumnData> {
@@ -234,18 +234,13 @@ struct VlaCellSpan {
 }
 
 impl VlaCellSpan {
-    fn new(
-        schema: &TableSchema,
-        column: &Column,
-        descriptor_bytes: &[u8],
-        wide: bool,
-    ) -> Result<VlaCellSpan> {
+    fn new(schema: &Schema, column: &Column, descriptor_bytes: &[u8], wide: bool) -> Result<Self> {
         let descriptor = PqDescriptor::decode(descriptor_bytes, wide)?;
         let element_type = column
             .tform
             .vla_elem
             .expect("validated VLA format carries an element type");
-        Ok(VlaCellSpan {
+        Ok(Self {
             count: descriptor.count,
             heap_range: descriptor.heap_range(element_type, schema.heap_offset, schema.heap_end)?,
         })

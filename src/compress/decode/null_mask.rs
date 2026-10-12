@@ -29,7 +29,7 @@ impl<'a> NullMask<'a> {
         header: &Header,
         table: TableView<'a>,
         tiled: &TiledImage<'_>,
-    ) -> Result<NullMask<'a>> {
+    ) -> Result<Self> {
         let column = first_column(
             table,
             &[

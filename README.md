@@ -39,7 +39,7 @@ With `default-features = false`, the only dependencies are `bitvec`,
 
 ```rust no_run
 use std::fs::File;
-use fits_well::image::{Image, ImageData};
+use fits_well::image::{Image, Data};
 use fits_well::{FitsReader, FitsWriter};
 
 fn main() -> Result<(), fits_well::FitsError> {
@@ -53,7 +53,7 @@ fn main() -> Result<(), fits_well::FitsError> {
     let image = reader.read_image(reader.image_indices()[0])?;
     println!("{:?} {:?}", image.metadata().shape, image.sample_type());
     let physical = image.physical(); // BSCALE/BZERO applied, BLANK as NaN
-    if let ImageData::I16(pixels) = image.decode() {
+    if let Data::I16(pixels) = image.decode() {
         println!("{pixels:?}"); // stored values, host-endian
     }
     Ok(())
@@ -68,11 +68,11 @@ many images allocates once. `read_image_section` reads a sub-region, and
 
 ```rust no_run
 use std::fs::File;
-use fits_well::table::{ColumnData, TableBuilder, WriteColumn};
+use fits_well::table::{ColumnData, Builder, WriteColumn};
 use fits_well::{FitsReader, FitsWriter};
 
 fn main() -> Result<(), fits_well::FitsError> {
-    let table = TableBuilder::new()
+    let table = Builder::new()
         .column(WriteColumn::scalar("ID", ColumnData::I32(vec![1, 2, 3])))?
         .column(
             WriteColumn::scalar("MAG", ColumnData::F64(vec![0.03, -1.46, 0.13]))
@@ -107,7 +107,7 @@ fn main() -> Result<(), fits_well::FitsError> {
 }
 ```
 
-`time::FitsTime::from_header` reads the time keywords. More programs are in
+`time::Frame::from_header` reads the time keywords. More programs are in
 [`examples/`](examples/).
 
 ## License

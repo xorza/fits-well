@@ -11,12 +11,12 @@ pub(crate) struct PqDescriptor {
 }
 
 impl PqDescriptor {
-    pub(super) const EMPTY: PqDescriptor = PqDescriptor {
+    pub(super) const EMPTY: Self = Self {
         count: 0,
         offset: 0,
     };
 
-    pub(crate) fn decode(bytes: &[u8], wide: bool) -> Result<PqDescriptor> {
+    pub(crate) fn decode(bytes: &[u8], wide: bool) -> Result<Self> {
         let expected = if wide { 16 } else { 8 };
         if bytes.len() != expected {
             return Err(FitsError::DataSizeMismatch {
@@ -35,7 +35,7 @@ impl PqDescriptor {
                 i64::from(i32::from_be_bytes(bytes[4..].try_into().unwrap())),
             )
         };
-        Ok(PqDescriptor {
+        Ok(Self {
             count: nonnegative_field("count", count)?,
             offset: nonnegative_field("offset", offset)?,
         })

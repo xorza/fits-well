@@ -108,7 +108,7 @@ impl TileScratch {
 }
 
 impl TileGeometry {
-    pub(super) fn new(dims: &[usize], tiles: &[usize]) -> TileGeometry {
+    pub(super) fn new(dims: &[usize], tiles: &[usize]) -> Self {
         let n = dims.len();
         let ntiles_axis = dims
             .iter()
@@ -122,7 +122,7 @@ impl TileGeometry {
                 stride[i] = stride[i - 1] * dims[i - 1];
             }
         }
-        TileGeometry {
+        Self {
             dims: dims.to_vec(),
             tiles: tiles.to_vec(),
             stride,

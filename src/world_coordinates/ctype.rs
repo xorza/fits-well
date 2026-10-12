@@ -14,7 +14,7 @@ pub(crate) struct Ctype<'a> {
 }
 
 impl<'a> Ctype<'a> {
-    pub(crate) fn parse(value: &'a str) -> Ctype<'a> {
+    pub(crate) fn parse(value: &'a str) -> Self {
         Ctype {
             head: value.split('-').next().unwrap_or("").trim(),
             algorithm: value

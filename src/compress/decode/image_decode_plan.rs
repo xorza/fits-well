@@ -36,7 +36,7 @@ impl<'a> ImageDecodePlan<'a> {
         header: &Header,
         table: TableView<'a>,
         tiled: &TiledImage<'_>,
-    ) -> Result<ImageDecodePlan<'a>> {
+    ) -> Result<Self> {
         Ok(ImageDecodePlan {
             geometry: TileGeometry::new(&tiled.image.shape, &tiled.tiles),
             decoder: TileDecoder::new(header, tiled)?,

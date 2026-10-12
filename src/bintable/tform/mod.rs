@@ -18,7 +18,7 @@ pub struct Tform {
 
 impl Tform {
     /// Parse a `TFORMn` value such as `"8A"`, `"3D"`, `"1J"`, `"E"`, or `"1PE(5)"`.
-    pub fn parse(value: &str) -> Result<Tform> {
+    pub fn parse(value: &str) -> Result<Self> {
         let s = value.trim();
         let invalid = || FitsError::InvalidTform {
             tform: value.to_string(),
@@ -64,7 +64,7 @@ impl Tform {
             }
             None
         };
-        Ok(Tform {
+        Ok(Self {
             repeat,
             kind,
             vla_elem,
@@ -77,7 +77,7 @@ impl Tform {
             TformKind::Bit => self.repeat.div_ceil(8),
             // Saturating: an absurd `repeat` from a hostile `TFORMn` saturates to
             // `usize::MAX` rather than wrapping to a small width that could slip
-            // past the row-width check in `TableSchema::parse`.
+            // past the row-width check in `Schema::parse`.
             _ => self.repeat.saturating_mul(self.kind.elem_size()),
         }
     }

@@ -6,9 +6,9 @@ use crate::header_model::Header;
 use crate::keyword::AltSuffix;
 use crate::keyword::key;
 use crate::world_coordinates::D2R;
+use crate::world_coordinates::axis::Axis;
 use crate::world_coordinates::first_real;
 use crate::world_coordinates::projected_celestial_axes::ProjectedCelestialAxes;
-use crate::world_coordinates::wcs_axis::WcsAxis;
 
 /// The matrix `A` mapping `(pixel − CRPIX)` to intermediate world coordinates, held
 /// beside its inverse so both directions stay consistent by construction. Both are
@@ -93,7 +93,7 @@ impl LinearMatrix {
         naxis: usize,
         cdelt: &[f64],
         celestial_axes: Option<ProjectedCelestialAxes>,
-    ) -> Result<LinearMatrix> {
+    ) -> Result<Self> {
         let cd = matrix_cells(header, "CD", a, naxis);
         let pc = matrix_cells(header, "PC", a, naxis);
         let has_cd = !cd.is_empty();
@@ -114,7 +114,7 @@ impl LinearMatrix {
             for cell in cd {
                 values[cell.index(naxis)] = header.get_real(&cell.keyword)?.unwrap_or(0.0);
             }
-            return Ok(LinearMatrix { values, naxis });
+            return Ok(Self { values, naxis });
         }
         for (i, &scale) in cdelt.iter().enumerate() {
             values[i * naxis + i] = scale;
@@ -142,7 +142,7 @@ impl LinearMatrix {
                 values[lat * naxis + lat] = cdelt[lat] * c;
             }
         }
-        Ok(LinearMatrix { values, naxis })
+        Ok(Self { values, naxis })
     }
 
     /// Scale row `i` by `axis_scales[i]` and invert.
@@ -158,7 +158,7 @@ impl LinearMatrix {
                 self.values[axis * self.naxis + column] *= scale;
             }
         }
-        let inverse = invert(&self.values, self.naxis).ok_or(FitsError::InvalidWcs {
+        let inverse = invert(&self.values, self.naxis).ok_or_else(|| FitsError::InvalidWcs {
             detail: "singular WCS transform matrix".to_string(),
         })?;
         Ok(LinearTransform {
@@ -171,7 +171,7 @@ impl LinearMatrix {
 
 impl LinearTransform {
     /// Intermediate world coordinates for a complete 1-based `pixel` coordinate.
-    pub(super) fn intermediate(&self, pixel: &[f64], axes: &[WcsAxis]) -> Vec<f64> {
+    pub(super) fn intermediate(&self, pixel: &[f64], axes: &[Axis]) -> Vec<f64> {
         self.matrix
             .chunks_exact(self.naxis)
             .map(|row| offset_row(row, pixel, axes))
@@ -179,14 +179,14 @@ impl LinearTransform {
     }
 
     /// One axis's intermediate world coordinate, without evaluating the others.
-    pub(super) fn intermediate_axis(&self, axis: usize, pixel: &[f64], axes: &[WcsAxis]) -> f64 {
+    pub(super) fn intermediate_axis(&self, axis: usize, pixel: &[f64], axes: &[Axis]) -> f64 {
         let row = &self.matrix[axis * self.naxis..(axis + 1) * self.naxis];
         offset_row(row, pixel, axes)
     }
 
     /// The 1-based pixel coordinate for a complete intermediate world coordinate —
     /// the inverse of [`LinearTransform::intermediate`].
-    pub(super) fn pixel(&self, intermediate: &[f64], axes: &[WcsAxis]) -> Vec<f64> {
+    pub(super) fn pixel(&self, intermediate: &[f64], axes: &[Axis]) -> Vec<f64> {
         self.inverse
             .chunks_exact(self.naxis)
             .zip(axes)
@@ -199,7 +199,7 @@ impl LinearTransform {
 }
 
 /// One matrix row applied to `(pixel − CRPIX)`.
-fn offset_row(row: &[f64], pixel: &[f64], axes: &[WcsAxis]) -> f64 {
+fn offset_row(row: &[f64], pixel: &[f64], axes: &[Axis]) -> f64 {
     row.iter()
         .zip(pixel)
         .zip(axes)

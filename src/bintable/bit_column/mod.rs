@@ -22,7 +22,7 @@ use crate::bintable::tform_kind::TformKind;
 /// slices — `count_ones()`, `iter_ones()`, `.to_bitvec()` to own, etc.
 ///
 /// ```
-/// # fn read(table: &fits_well::table::BinTable, row: usize) -> fits_well::Result<()> {
+/// # fn read(table: &fits_well::table::Table, row: usize) -> fits_well::Result<()> {
 /// let flags = table.column_by_name("DQ")?.bits()?;
 /// let bit = flags[(row, 3)];             // bool (panics out of range)
 /// let bit = flags[row][3];               // same, via the row slice
@@ -38,7 +38,7 @@ pub struct BitColumn<'a> {
 }
 
 impl<'a> BitColumn<'a> {
-    pub(crate) const fn new(table: TableView<'a>, index: usize) -> BitColumn<'a> {
+    pub(crate) const fn new(table: TableView<'a>, index: usize) -> Self {
         BitColumn { table, index }
     }
 

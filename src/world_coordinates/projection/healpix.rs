@@ -21,11 +21,11 @@ struct Parameters {
 }
 
 impl Parameters {
-    fn new(pv: &[f64; 21]) -> Parameters {
+    fn new(pv: &[f64; 21]) -> Self {
         let h = pv[1];
         let k = pv[2];
         debug_assert!(h.is_finite() && h > 0.0 && k.is_finite() && k > 0.0);
-        Parameters {
+        Self {
             k,
             h_odd: (h.round() as i64).rem_euclid(2),
             k_odd: (k.round() as i64).rem_euclid(2) != 0,

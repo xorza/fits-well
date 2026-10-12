@@ -27,12 +27,12 @@ impl Bitpix {
     /// Parse the integer `BITPIX` keyword value.
     pub const fn from_code(code: i64) -> Result<Self> {
         match code {
-            8 => Ok(Bitpix::U8),
-            16 => Ok(Bitpix::I16),
-            32 => Ok(Bitpix::I32),
-            64 => Ok(Bitpix::I64),
-            -32 => Ok(Bitpix::F32),
-            -64 => Ok(Bitpix::F64),
+            8 => Ok(Self::U8),
+            16 => Ok(Self::I16),
+            32 => Ok(Self::I32),
+            64 => Ok(Self::I64),
+            -32 => Ok(Self::F32),
+            -64 => Ok(Self::F64),
             _ => Err(FitsError::InvalidBitpix { code }),
         }
     }
@@ -40,12 +40,12 @@ impl Bitpix {
     /// The integer `BITPIX` keyword value for this type.
     pub const fn code(self) -> i64 {
         match self {
-            Bitpix::U8 => 8,
-            Bitpix::I16 => 16,
-            Bitpix::I32 => 32,
-            Bitpix::I64 => 64,
-            Bitpix::F32 => -32,
-            Bitpix::F64 => -64,
+            Self::U8 => 8,
+            Self::I16 => 16,
+            Self::I32 => 32,
+            Self::I64 => 64,
+            Self::F32 => -32,
+            Self::F64 => -64,
         }
     }
 
@@ -55,7 +55,7 @@ impl Bitpix {
     }
 
     pub const fn is_float(self) -> bool {
-        matches!(self, Bitpix::F32 | Bitpix::F64)
+        matches!(self, Self::F32 | Self::F64)
     }
 
     pub const fn is_integer(self) -> bool {

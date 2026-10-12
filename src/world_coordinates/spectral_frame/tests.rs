@@ -1,8 +1,8 @@
 use crate::error::FitsError;
 use crate::header_model::Header;
 use crate::world_coordinates::Wcs;
-use crate::world_coordinates::axis::SPEED_OF_LIGHT;
-use crate::world_coordinates::axis::spectral_rest::SpectralRest;
+use crate::world_coordinates::axis_transform::SPEED_OF_LIGHT;
+use crate::world_coordinates::axis_transform::spectral_rest::SpectralRest;
 use crate::world_coordinates::internals::axis_header;
 use crate::world_coordinates::spectral_frame::SpectralFrame;
 use crate::world_coordinates::spectral_frame::SpectralReferenceFrame;
@@ -33,7 +33,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         .set_internal("SPECSYS", "BARYCENT");
     let by_frequency = Wcs::from_header(&by_frequency, None).unwrap();
     assert_eq!(
-        by_frequency.view().axes[0].spectral_frame,
+        by_frequency.metadata().axes[0].spectral_frame,
         Some(SpectralFrame {
             coordinate: Some(SpectralReferenceFrame::Barycentric),
             observer: SpectralReferenceFrame::Topocentric,
@@ -102,7 +102,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         (pixel_list.pixel_to_world(&[3.0, 1.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9
     );
     assert_eq!(
-        pixel_list.view().axes[0].spectral_frame,
+        pixel_list.metadata().axes[0].spectral_frame,
         Some(SpectralFrame {
             coordinate: Some(SpectralReferenceFrame::Barycentric),
             observer: SpectralReferenceFrame::Geocentric,
@@ -113,7 +113,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         })
     );
     assert_eq!(
-        pixel_list.view().axes[1].spectral_frame,
+        pixel_list.metadata().axes[1].spectral_frame,
         Some(SpectralFrame {
             coordinate: Some(SpectralReferenceFrame::Source),
             observer: SpectralReferenceFrame::Heliocentric,
@@ -138,7 +138,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     let vector = Wcs::from_array_column(&vector, 5, Some('A')).unwrap();
     assert!((vector.pixel_to_world(&[3.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9);
     assert_eq!(
-        vector.view().axes[0].spectral_frame,
+        vector.metadata().axes[0].spectral_frame,
         Some(SpectralFrame {
             coordinate: Some(SpectralReferenceFrame::LsrKinematic),
             observer: SpectralReferenceFrame::Topocentric,
@@ -159,7 +159,11 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         .set_internal("SSYSOBSA", "BARYCENT")
         .set_internal("RESTFRQA", 1_420_405_751.0);
     assert_eq!(
-        Wcs::from_header(&alternate, Some('A')).unwrap().view().axes[0].spectral_frame,
+        Wcs::from_header(&alternate, Some('A'))
+            .unwrap()
+            .metadata()
+            .axes[0]
+            .spectral_frame,
         Some(SpectralFrame {
             coordinate: Some(SpectralReferenceFrame::CmbDipole),
             observer: SpectralReferenceFrame::Barycentric,
@@ -194,7 +198,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
             .set_internal("CTYPE1", "WAVE")
             .set_internal("SPECSYS", value);
         assert_eq!(
-            Wcs::from_header(&header, None).unwrap().view().axes[0]
+            Wcs::from_header(&header, None).unwrap().metadata().axes[0]
                 .spectral_frame
                 .unwrap()
                 .coordinate,

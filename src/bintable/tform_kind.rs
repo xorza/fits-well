@@ -4,11 +4,11 @@ use num_complex::Complex;
 
 use crate::bintable::column_data::ColumnData;
 use crate::bitpix::Bitpix;
-use crate::data::sample_type::UnsignedKind;
-use crate::data::scaling::Scaling;
 use crate::endian::decode_be_cells;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::image_model::sample_type::UnsignedKind;
+use crate::image_model::scaling::Scaling;
 
 /// The element type of a binary-table column, from the letter of its `TFORMn`
 /// code (Table 18).
@@ -43,21 +43,21 @@ pub enum TformKind {
 }
 
 impl TformKind {
-    pub(super) const fn from_code(code: u8) -> Option<TformKind> {
+    pub(super) const fn from_code(code: u8) -> Option<Self> {
         Some(match code {
-            b'L' => TformKind::Logical,
-            b'X' => TformKind::Bit,
-            b'B' => TformKind::Byte,
-            b'I' => TformKind::I16,
-            b'J' => TformKind::I32,
-            b'K' => TformKind::I64,
-            b'A' => TformKind::Char,
-            b'E' => TformKind::F32,
-            b'D' => TformKind::F64,
-            b'C' => TformKind::ComplexF32,
-            b'M' => TformKind::ComplexF64,
-            b'P' => TformKind::ArrayDesc32,
-            b'Q' => TformKind::ArrayDesc64,
+            b'L' => Self::Logical,
+            b'X' => Self::Bit,
+            b'B' => Self::Byte,
+            b'I' => Self::I16,
+            b'J' => Self::I32,
+            b'K' => Self::I64,
+            b'A' => Self::Char,
+            b'E' => Self::F32,
+            b'D' => Self::F64,
+            b'C' => Self::ComplexF32,
+            b'M' => Self::ComplexF64,
+            b'P' => Self::ArrayDesc32,
+            b'Q' => Self::ArrayDesc64,
             _ => return None,
         })
     }
@@ -65,19 +65,19 @@ impl TformKind {
     /// The `TFORMn` letter for this kind.
     pub const fn code(self) -> char {
         match self {
-            TformKind::Logical => 'L',
-            TformKind::Bit => 'X',
-            TformKind::Byte => 'B',
-            TformKind::I16 => 'I',
-            TformKind::I32 => 'J',
-            TformKind::I64 => 'K',
-            TformKind::Char => 'A',
-            TformKind::F32 => 'E',
-            TformKind::F64 => 'D',
-            TformKind::ComplexF32 => 'C',
-            TformKind::ComplexF64 => 'M',
-            TformKind::ArrayDesc32 => 'P',
-            TformKind::ArrayDesc64 => 'Q',
+            Self::Logical => 'L',
+            Self::Bit => 'X',
+            Self::Byte => 'B',
+            Self::I16 => 'I',
+            Self::I32 => 'J',
+            Self::I64 => 'K',
+            Self::Char => 'A',
+            Self::F32 => 'E',
+            Self::F64 => 'D',
+            Self::ComplexF32 => 'C',
+            Self::ComplexF64 => 'M',
+            Self::ArrayDesc32 => 'P',
+            Self::ArrayDesc64 => 'Q',
         }
     }
 
@@ -86,11 +86,11 @@ impl TformKind {
     /// column's true in-row width.
     pub(crate) const fn elem_size(self) -> usize {
         match self {
-            TformKind::Logical | TformKind::Bit | TformKind::Byte | TformKind::Char => 1,
-            TformKind::I16 => 2,
-            TformKind::I32 | TformKind::F32 => 4,
-            TformKind::I64 | TformKind::F64 | TformKind::ComplexF32 | TformKind::ArrayDesc32 => 8,
-            TformKind::ComplexF64 | TformKind::ArrayDesc64 => 16,
+            Self::Logical | Self::Bit | Self::Byte | Self::Char => 1,
+            Self::I16 => 2,
+            Self::I32 | Self::F32 => 4,
+            Self::I64 | Self::F64 | Self::ComplexF32 | Self::ArrayDesc32 => 8,
+            Self::ComplexF64 | Self::ArrayDesc64 => 16,
         }
     }
 
@@ -98,7 +98,7 @@ impl TformKind {
     /// stored value: those cells address the heap, so every fixed-width decode
     /// rejects them.
     pub(crate) const fn is_descriptor(self) -> bool {
-        matches!(self, TformKind::ArrayDesc32 | TformKind::ArrayDesc64)
+        matches!(self, Self::ArrayDesc32 | Self::ArrayDesc64)
     }
 
     /// Whether a column's `scaling` realizes a FITS unsigned (or signed-byte)
@@ -107,10 +107,10 @@ impl TformKind {
     /// [`Scaling::unsigned_kind`], which resolves the convention for both paths.
     pub(super) fn unsigned_kind(self, scaling: &Scaling) -> Option<UnsignedKind> {
         let bitpix = match self {
-            TformKind::Byte => Bitpix::U8,
-            TformKind::I16 => Bitpix::I16,
-            TformKind::I32 => Bitpix::I32,
-            TformKind::I64 => Bitpix::I64,
+            Self::Byte => Bitpix::U8,
+            Self::I16 => Bitpix::I16,
+            Self::I32 => Bitpix::I32,
+            Self::I64 => Bitpix::I64,
             _ => return None,
         };
         scaling.unsigned_kind(bitpix)
@@ -124,7 +124,7 @@ impl TformKind {
         capacity: usize,
     ) -> ColumnData {
         match self {
-            TformKind::Logical => {
+            Self::Logical => {
                 ColumnData::Logical(decode_be_cells(cells, capacity, |[byte]| match byte {
                     b'T' => Some(true),
                     b'F' => Some(false),
@@ -132,24 +132,22 @@ impl TformKind {
                     _ => None,
                 }))
             }
-            TformKind::Byte | TformKind::Bit => {
+            Self::Byte | Self::Bit => {
                 ColumnData::Bytes(decode_be_cells(cells, capacity, |[byte]| byte))
             }
-            TformKind::Char => {
-                ColumnData::Character(decode_be_cells(cells, capacity, |[byte]| byte))
-            }
-            TformKind::I16 => ColumnData::I16(decode_be_cells(cells, capacity, i16::from_be_bytes)),
-            TformKind::I32 => ColumnData::I32(decode_be_cells(cells, capacity, i32::from_be_bytes)),
-            TformKind::I64 => ColumnData::I64(decode_be_cells(cells, capacity, i64::from_be_bytes)),
-            TformKind::F32 => ColumnData::F32(decode_be_cells(cells, capacity, f32::from_be_bytes)),
-            TformKind::F64 => ColumnData::F64(decode_be_cells(cells, capacity, f64::from_be_bytes)),
-            TformKind::ComplexF32 => {
+            Self::Char => ColumnData::Character(decode_be_cells(cells, capacity, |[byte]| byte)),
+            Self::I16 => ColumnData::I16(decode_be_cells(cells, capacity, i16::from_be_bytes)),
+            Self::I32 => ColumnData::I32(decode_be_cells(cells, capacity, i32::from_be_bytes)),
+            Self::I64 => ColumnData::I64(decode_be_cells(cells, capacity, i64::from_be_bytes)),
+            Self::F32 => ColumnData::F32(decode_be_cells(cells, capacity, f32::from_be_bytes)),
+            Self::F64 => ColumnData::F64(decode_be_cells(cells, capacity, f64::from_be_bytes)),
+            Self::ComplexF32 => {
                 ColumnData::ComplexF32(decode_be_cells(cells, capacity, |bytes: [u8; 8]| Complex {
                     re: f32::from_be_bytes(bytes[..4].try_into().unwrap()),
                     im: f32::from_be_bytes(bytes[4..].try_into().unwrap()),
                 }))
             }
-            TformKind::ComplexF64 => {
+            Self::ComplexF64 => {
                 ColumnData::ComplexF64(decode_be_cells(cells, capacity, |bytes: [u8; 16]| {
                     Complex {
                         re: f64::from_be_bytes(bytes[..8].try_into().unwrap()),
@@ -157,7 +155,7 @@ impl TformKind {
                     }
                 }))
             }
-            TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
+            Self::ArrayDesc32 | Self::ArrayDesc64 => {
                 unreachable!("descriptor cells are resolved by the caller")
             }
         }
@@ -165,9 +163,9 @@ impl TformKind {
 
     /// The kind a `P`/`Q` column's heap values decode as: the element kind itself,
     /// except that a heap element cannot be a descriptor and keeps its raw bytes.
-    pub(super) const fn heap_kind(self) -> TformKind {
+    pub(super) const fn heap_kind(self) -> Self {
         match self {
-            TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => TformKind::Byte,
+            Self::ArrayDesc32 | Self::ArrayDesc64 => Self::Byte,
             kind => kind,
         }
     }
@@ -181,22 +179,22 @@ impl TformKind {
         scaling: &Scaling,
     ) -> Result<Vec<f64>> {
         Ok(match self {
-            TformKind::Byte => {
+            Self::Byte => {
                 decode_be_cells(cells, capacity, |[x]| scaling.scale_integer(i64::from(x)))
             }
-            TformKind::I16 => decode_be_cells(cells, capacity, |bytes| {
+            Self::I16 => decode_be_cells(cells, capacity, |bytes| {
                 scaling.scale_integer(i64::from(i16::from_be_bytes(bytes)))
             }),
-            TformKind::I32 => decode_be_cells(cells, capacity, |bytes| {
+            Self::I32 => decode_be_cells(cells, capacity, |bytes| {
                 scaling.scale_integer(i64::from(i32::from_be_bytes(bytes)))
             }),
-            TformKind::I64 => decode_be_cells(cells, capacity, |bytes| {
+            Self::I64 => decode_be_cells(cells, capacity, |bytes| {
                 scaling.scale_integer(i64::from_be_bytes(bytes))
             }),
-            TformKind::F32 => decode_be_cells(cells, capacity, |bytes| {
+            Self::F32 => decode_be_cells(cells, capacity, |bytes| {
                 scaling.scale(f64::from(f32::from_be_bytes(bytes)))
             }),
-            TformKind::F64 => decode_be_cells(cells, capacity, |bytes| {
+            Self::F64 => decode_be_cells(cells, capacity, |bytes| {
                 scaling.scale(f64::from_be_bytes(bytes))
             }),
             _ => return Err(FitsError::NonNumericColumn { code: self.code() }),
@@ -217,13 +215,13 @@ impl TformKind {
             im: tscale * im,
         };
         match self {
-            TformKind::ComplexF32 => Ok(decode_be_cells(cells, capacity, |bytes: [u8; 8]| {
+            Self::ComplexF32 => Ok(decode_be_cells(cells, capacity, |bytes: [u8; 8]| {
                 scale(
                     f64::from(f32::from_be_bytes(bytes[..4].try_into().unwrap())),
                     f64::from(f32::from_be_bytes(bytes[4..].try_into().unwrap())),
                 )
             })),
-            TformKind::ComplexF64 => Ok(decode_be_cells(cells, capacity, |bytes: [u8; 16]| {
+            Self::ComplexF64 => Ok(decode_be_cells(cells, capacity, |bytes: [u8; 16]| {
                 scale(
                     f64::from_be_bytes(bytes[..8].try_into().unwrap()),
                     f64::from_be_bytes(bytes[8..].try_into().unwrap()),

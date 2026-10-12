@@ -14,7 +14,7 @@
 //! resolves once up front, and [`DecodeBuffer`](decode_buffer::DecodeBuffer) is the
 //! caller's output plane, which selects the stored sample type the tiles narrow into.
 //!
-//! [`Image`]: crate::data::Image
+//! [`Image`]: crate::image_model::Image
 
 mod decode_buffer;
 mod decode_sample;

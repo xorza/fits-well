@@ -228,14 +228,14 @@ fn raw_group_view_preserves_i64_extremes_and_group_boundaries() {
     let groups = RandomGroups::from_data(&header, &data).unwrap();
 
     let first = groups.group_by_idx(0).unwrap();
-    assert_eq!(first.parameters, ImageView::I64(&[i64::MIN, i64::MAX]));
+    assert_eq!(first.parameters, View::I64(&[i64::MIN, i64::MAX]));
     assert_eq!(
         first.array,
-        ImageView::I64(&[9_007_199_254_740_993, -9_007_199_254_740_993])
+        View::I64(&[9_007_199_254_740_993, -9_007_199_254_740_993])
     );
     let second = groups.group_by_idx(1).unwrap();
-    assert_eq!(second.parameters, ImageView::I64(&[7, 8]));
-    assert_eq!(second.array, ImageView::I64(&[9, 10]));
+    assert_eq!(second.parameters, View::I64(&[7, 8]));
+    assert_eq!(second.array, View::I64(&[9, 10]));
     assert!(matches!(
         groups.group_by_idx(2),
         Err(FitsError::IndexOutOfBounds {
@@ -253,10 +253,10 @@ fn raw_group_view_preserves_float_bit_patterns() {
     let f32_data: Vec<u8> = f32_bits.into_iter().flat_map(u32::to_be_bytes).collect();
     let f32_groups = RandomGroups::from_data(&f32_header, &f32_data).unwrap();
     let f32_group = f32_groups.group_by_idx(0).unwrap();
-    let ImageView::F32(f32_parameters) = f32_group.parameters else {
+    let View::F32(f32_parameters) = f32_group.parameters else {
         panic!("BITPIX -32 parameters must be f32");
     };
-    let ImageView::F32(f32_array) = f32_group.array else {
+    let View::F32(f32_array) = f32_group.array else {
         panic!("BITPIX -32 array must be f32");
     };
     assert_eq!(f32_parameters[0].to_bits(), f32_bits[0]);
@@ -277,10 +277,10 @@ fn raw_group_view_preserves_float_bit_patterns() {
     let f64_data: Vec<u8> = f64_bits.into_iter().flat_map(u64::to_be_bytes).collect();
     let f64_groups = RandomGroups::from_data(&f64_header, &f64_data).unwrap();
     let f64_group = f64_groups.group_by_idx(0).unwrap();
-    let ImageView::F64(f64_parameters) = f64_group.parameters else {
+    let View::F64(f64_parameters) = f64_group.parameters else {
         panic!("BITPIX -64 parameters must be f64");
     };
-    let ImageView::F64(f64_array) = f64_group.array else {
+    let View::F64(f64_array) = f64_group.array else {
         panic!("BITPIX -64 array must be f64");
     };
     assert_eq!(f64_parameters[0].to_bits(), f64_bits[0]);

@@ -14,43 +14,43 @@ pub(super) enum TableAxisKeyword {
 }
 
 impl TableAxisKeyword {
-    pub(super) const ALL: [TableAxisKeyword; 6] = [
-        TableAxisKeyword::Type,
-        TableAxisKeyword::Unit,
-        TableAxisKeyword::ReferenceValue,
-        TableAxisKeyword::Increment,
-        TableAxisKeyword::ReferencePoint,
-        TableAxisKeyword::Rotation,
+    pub(super) const ALL: [Self; 6] = [
+        Self::Type,
+        Self::Unit,
+        Self::ReferenceValue,
+        Self::Increment,
+        Self::ReferencePoint,
+        Self::Rotation,
     ];
 
     /// The Table-22 root for this family, or `None` where an alternate description
     /// has no spelling for it (`CROTA` has no shortened alternate form).
     pub(super) const fn table_root(self, alternate: bool) -> Option<&'static str> {
         match (self, alternate) {
-            (TableAxisKeyword::Type, false) => Some("CTYP"),
-            (TableAxisKeyword::Type, true) => Some("CTY"),
-            (TableAxisKeyword::Unit, false) => Some("CUNI"),
-            (TableAxisKeyword::Unit, true) => Some("CUN"),
-            (TableAxisKeyword::ReferenceValue, false) => Some("CRVL"),
-            (TableAxisKeyword::ReferenceValue, true) => Some("CRV"),
-            (TableAxisKeyword::Increment, false) => Some("CDLT"),
-            (TableAxisKeyword::Increment, true) => Some("CDE"),
-            (TableAxisKeyword::ReferencePoint, false) => Some("CRPX"),
-            (TableAxisKeyword::ReferencePoint, true) => Some("CRP"),
-            (TableAxisKeyword::Rotation, false) => Some("CROT"),
-            (TableAxisKeyword::Rotation, true) => None,
+            (Self::Type, false) => Some("CTYP"),
+            (Self::Type, true) => Some("CTY"),
+            (Self::Unit, false) => Some("CUNI"),
+            (Self::Unit, true) => Some("CUN"),
+            (Self::ReferenceValue, false) => Some("CRVL"),
+            (Self::ReferenceValue, true) => Some("CRV"),
+            (Self::Increment, false) => Some("CDLT"),
+            (Self::Increment, true) => Some("CDE"),
+            (Self::ReferencePoint, false) => Some("CRPX"),
+            (Self::ReferencePoint, true) => Some("CRP"),
+            (Self::Rotation, false) => Some("CROT"),
+            (Self::Rotation, true) => None,
         }
     }
 
     /// The image-header root this family translates to.
     pub(super) const fn image_root(self) -> &'static str {
         match self {
-            TableAxisKeyword::Type => "CTYPE",
-            TableAxisKeyword::Unit => "CUNIT",
-            TableAxisKeyword::ReferenceValue => "CRVAL",
-            TableAxisKeyword::Increment => "CDELT",
-            TableAxisKeyword::ReferencePoint => "CRPIX",
-            TableAxisKeyword::Rotation => "CROTA",
+            Self::Type => "CTYPE",
+            Self::Unit => "CUNIT",
+            Self::ReferenceValue => "CRVAL",
+            Self::Increment => "CDELT",
+            Self::ReferencePoint => "CRPIX",
+            Self::Rotation => "CROTA",
         }
     }
 }

@@ -20,9 +20,9 @@ enum IntegerRepr {
 }
 
 impl FitsInteger {
-    pub(super) fn parse(token: &str) -> Option<FitsInteger> {
+    pub(super) fn parse(token: &str) -> Option<Self> {
         if let Ok(value) = token.parse::<i64>() {
-            return Some(FitsInteger::from(value));
+            return Some(Self::from(value));
         }
         let (negative, digits) = match token.as_bytes().first() {
             Some(b'+') => (false, &token[1..]),
@@ -34,14 +34,14 @@ impl FitsInteger {
         }
         let significant = digits.trim_start_matches('0');
         if significant.is_empty() {
-            return Some(FitsInteger::from(0_i64));
+            return Some(Self::from(0_i64));
         }
         let decimal = if negative {
             format!("-{significant}")
         } else {
             significant.to_string()
         };
-        Some(FitsInteger {
+        Some(Self {
             repr: IntegerRepr::Decimal(decimal.into_boxed_str()),
         })
     }
@@ -78,11 +78,11 @@ impl fmt::Display for FitsInteger {
 impl TryFrom<&FitsInteger> for i64 {
     type Error = FitsError;
 
-    fn try_from(value: &FitsInteger) -> Result<i64> {
+    fn try_from(value: &FitsInteger) -> Result<Self> {
         match &value.repr {
             IntegerRepr::I64(value) => Ok(*value),
             IntegerRepr::Decimal(decimal) => decimal
-                .parse::<i64>()
+                .parse::<Self>()
                 .map_err(|_| value.out_of_range("i64")),
         }
     }
@@ -113,22 +113,22 @@ macro_rules! impl_integer_from {
 }
 
 impl From<i64> for FitsInteger {
-    fn from(value: i64) -> FitsInteger {
-        FitsInteger {
+    fn from(value: i64) -> Self {
+        Self {
             repr: IntegerRepr::I64(value),
         }
     }
 }
 
 impl From<i32> for FitsInteger {
-    fn from(value: i32) -> FitsInteger {
-        FitsInteger::from(i64::from(value))
+    fn from(value: i32) -> Self {
+        Self::from(i64::from(value))
     }
 }
 
 impl From<u32> for FitsInteger {
-    fn from(value: u32) -> FitsInteger {
-        FitsInteger::from(i64::from(value))
+    fn from(value: u32) -> Self {
+        Self::from(i64::from(value))
     }
 }
 
@@ -172,7 +172,7 @@ pub enum Value {
 impl Value {
     pub const fn as_logical(&self) -> Option<bool> {
         match self {
-            Value::Logical(b) => Some(*b),
+            Self::Logical(b) => Some(*b),
             _ => None,
         }
     }
@@ -187,12 +187,12 @@ impl Value {
     /// `i64`, including an integral [`Value::Real`] outside that range.
     pub fn as_integer(&self) -> Result<Option<i64>> {
         match self {
-            Value::Integer(i) => Ok(Some(i64::try_from(i)?)),
+            Self::Integer(i) => Ok(Some(i64::try_from(i)?)),
             // A mandatory-integer keyword written in real form (e.g. `NAXIS = 2.0`):
             // accept an integral value rather than reporting it absent, which would
             // silently mis-size the data unit. Reject integral reals outside i64
             // instead of accepting Rust's saturating float-to-integer cast.
-            Value::Real(r) if r.fract() == 0.0 => {
+            Self::Real(r) if r.fract() == 0.0 => {
                 const I64_MIN_F64: f64 = i64::MIN as f64;
                 const I64_MAX_EXCLUSIVE_F64: f64 = -I64_MIN_F64;
                 if *r >= I64_MIN_F64 && *r < I64_MAX_EXCLUSIVE_F64 {
@@ -216,15 +216,15 @@ impl Value {
     /// for a finite `f64`.
     pub fn as_real(&self) -> Result<Option<f64>> {
         match self {
-            Value::Real(r) => Ok(Some(*r)),
-            Value::Integer(i) => Ok(Some(i.to_f64()?)),
+            Self::Real(r) => Ok(Some(*r)),
+            Self::Integer(i) => Ok(Some(i.to_f64()?)),
             _ => Ok(None),
         }
     }
 
     pub fn as_text(&self) -> Option<&str> {
         match self {
-            Value::Text(s) => Some(s),
+            Self::Text(s) => Some(s),
             _ => None,
         }
     }
@@ -232,13 +232,13 @@ impl Value {
 
 impl From<bool> for Value {
     fn from(b: bool) -> Self {
-        Value::Logical(b)
+        Self::Logical(b)
     }
 }
 
 impl From<FitsInteger> for Value {
     fn from(integer: FitsInteger) -> Self {
-        Value::Integer(integer)
+        Self::Integer(integer)
     }
 }
 
@@ -260,19 +260,19 @@ impl_value_from_integer!(i32, i64, i128, u32, u64, u128);
 
 impl From<f64> for Value {
     fn from(r: f64) -> Self {
-        Value::Real(r)
+        Self::Real(r)
     }
 }
 
 impl From<&str> for Value {
     fn from(s: &str) -> Self {
-        Value::Text(s.to_string())
+        Self::Text(s.to_string())
     }
 }
 
 impl From<String> for Value {
     fn from(s: String) -> Self {
-        Value::Text(s)
+        Self::Text(s)
     }
 }
 

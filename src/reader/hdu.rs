@@ -1,12 +1,12 @@
 //! One header and data unit as the reader's scan found it.
 
-use crate::bintable::table_schema::TableSchema;
-use crate::data::ImageMetadata;
+use crate::bintable::schema::Schema;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::HduKind;
 use crate::hdu::image_geometry::ImageGeometry;
 use crate::header_model::Header;
+use crate::image_model::Metadata;
 
 /// One Header/Data Unit located by the reader.
 ///
@@ -32,7 +32,7 @@ pub struct Hdu {
     image: Option<ImageGeometry>,
     /// `None` when the HDU is not a binary table, or its header does not resolve to
     /// one; [`Hdu::table_schema`] then reports why.
-    table: Option<TableSchema>,
+    table: Option<Schema>,
 }
 
 impl Hdu {
@@ -45,8 +45,8 @@ impl Hdu {
         header_sum: u32,
         data_offset: u64,
         data_bytes: u64,
-    ) -> Hdu {
-        Hdu {
+    ) -> Self {
+        Self {
             image: ImageGeometry::from_header(&header, kind).ok(),
             table: table_schema(&header, kind).ok(),
             header,
@@ -108,7 +108,7 @@ impl Hdu {
     /// [`FitsError::NotAnImage`] for any other kind, with
     /// [`FitsError::ImageHasGroups`] for a plain image with group structure, and with
     /// the header's own error when its image keywords are malformed.
-    pub fn image(&self) -> Result<ImageMetadata<'_>> {
+    pub fn image(&self) -> Result<Metadata<'_>> {
         self.image_geometry().map(ImageGeometry::metadata)
     }
 
@@ -133,7 +133,7 @@ impl Hdu {
     /// that of its `BINTABLE` container. Errors with [`FitsError::NotABinTable`] for
     /// any other kind, and with the header's own error when its table keywords are
     /// malformed.
-    pub fn table_schema(&self) -> Result<&TableSchema> {
+    pub fn table_schema(&self) -> Result<&Schema> {
         match &self.table {
             Some(schema) => Ok(schema),
             None => Err(table_schema(&self.header, self.kind)
@@ -145,10 +145,10 @@ impl Hdu {
 /// The schema a binary-table path reads an HDU of `kind` with. A tiled-compressed
 /// image or table is structurally a `BINTABLE`, and the compression layer reads its
 /// container through the same path.
-fn table_schema(header: &Header, kind: HduKind) -> Result<TableSchema> {
+fn table_schema(header: &Header, kind: HduKind) -> Result<Schema> {
     match kind {
-        HduKind::BinTable | HduKind::CompressedImage => TableSchema::parse(header),
-        HduKind::CompressedTable => TableSchema::parse_container(header),
+        HduKind::BinTable | HduKind::CompressedImage => Schema::parse(header),
+        HduKind::CompressedTable => Schema::parse_container(header),
         HduKind::Primary
         | HduKind::Image
         | HduKind::AsciiTable

@@ -1,14 +1,14 @@
 use crate::bintable::descriptor;
 use crate::bintable::internals::table_header;
-use crate::data::scaling::Scaling;
 use crate::error::Ranked;
+use crate::fits_writer::FitsWriter;
+use crate::fits_writer::builder::{Builder, WriteColumn};
+use crate::fits_writer::internals::written;
 use crate::header_model::internals::{card_bytes, records};
+use crate::image_model::scaling::Scaling;
 use crate::reader::internals::{fixture_bytes, fixture_path, open_fixture};
 use crate::reader::*;
 use crate::world_coordinates::tabular::internals::{lookup_bytes, lookup_header};
-use crate::writer::FitsWriter;
-use crate::writer::internals::written;
-use crate::writer::table::{TableBuilder, WriteColumn};
 use num_complex::Complex;
 use std::cell::RefCell;
 use std::fs;
@@ -190,7 +190,7 @@ fn read_wcs_fetches_only_the_referenced_first_row_heap_cells() {
     let coordinates = (0..row_count).map(|_| ColumnData::F64(vec![10.0, 20.0, 40.0]));
     let indices = (0..row_count).map(|_| ColumnData::F64(vec![10.0, 20.0, 40.0]));
     let unused = (0..row_count).map(|_| ColumnData::Bytes(vec![7; 1024]));
-    let table = TableBuilder::explicit(
+    let table = Builder::explicit(
         row_count,
         vec![
             WriteColumn::vla("COORD", Ragged::from_rows(coordinates).unwrap())
@@ -616,7 +616,7 @@ fn read_image_decodes_the_primary_array_shape_and_type() {
     // 2.0587209E-16 and BZERO 0.
     let physical = raw.physical();
     assert_eq!(physical.len(), 512 * 512);
-    let ImageData::I16(samples) = raw.decode() else {
+    let Data::I16(samples) = raw.decode() else {
         panic!("expected I16 samples");
     };
     assert_eq!(
@@ -642,7 +642,7 @@ fn read_image_raw_samples_match_a_manual_big_endian_decode() {
         .iter()
         .map(|c| i16::from_be_bytes(*c))
         .collect();
-    assert_eq!(f.read_image(0).unwrap().decode(), ImageData::I16(manual));
+    assert_eq!(f.read_image(0).unwrap().decode(), Data::I16(manual));
 }
 
 #[test]
@@ -710,7 +710,7 @@ fn hdu_index_finds_extensions_by_name_and_version() {
     );
     assert_eq!(
         reader.read_image(index).unwrap().decode(),
-        ImageData::I16(vec![10, 20, 30])
+        Data::I16(vec![10, 20, 30])
     );
     assert_eq!(reader.hdus()[0].kind, HduKind::Primary);
     assert_eq!(reader.hdu_index("SCI", Some(3)).unwrap(), None);
@@ -731,7 +731,7 @@ fn image_indices_lists_readable_images_including_compressed() {
 fn read_image_borrows_u8_samples_with_zero_copy() {
     let image = Image {
         shape: vec![4],
-        samples: ImageData::U8(vec![10, 20, 30, 40]),
+        samples: Data::U8(vec![10, 20, 30, 40]),
         scaling: Scaling::IDENTITY,
     };
     let buf = written(|w| w.write_image(&image, None));
@@ -757,7 +757,7 @@ fn read_image_borrows_u8_samples_with_zero_copy() {
     let mut scratch = Vec::new();
     let image = reader.read_image_view(0, &mut scratch).unwrap();
     assert_eq!(image.metadata().shape, &[4]);
-    let ImageView::U8(v) = image.samples else {
+    let View::U8(v) = image.samples else {
         panic!("a U8 image must view as U8");
     };
     assert_eq!(v, &[10, 20, 30, 40]);
@@ -769,7 +769,7 @@ fn read_image_borrows_u8_samples_with_zero_copy() {
 fn read_image_exposes_big_endian_bytes_for_multibyte_types() {
     let image = Image {
         shape: vec![3],
-        samples: ImageData::I16(vec![1, -2, 300]),
+        samples: Data::I16(vec![1, -2, 300]),
         scaling: Scaling::IDENTITY,
     };
     let buf = written(|w| w.write_image(&image, None));
@@ -781,7 +781,7 @@ fn read_image_exposes_big_endian_bytes_for_multibyte_types() {
     // The raw bytes are big-endian: 1 → 0x0001, -2 → 0xFFFE, 300 → 0x012C.
     assert_eq!(raw.raw_bytes(), Some(&[0, 1, 255, 254, 1, 44][..]));
     // `decode()` swaps them into the same host-endian samples it borrowed.
-    assert_eq!(raw.decode(), ImageData::I16(vec![1, -2, 300]));
+    assert_eq!(raw.decode(), Data::I16(vec![1, -2, 300]));
 }
 
 #[test]
@@ -796,7 +796,7 @@ fn read_image_view_matches_decode_for_a_plain_image() {
     assert_eq!(image.metadata().shape, &[512, 512]);
     assert_eq!(image.metadata().scaling, expected_scaling);
     match (image.samples, &owned) {
-        (ImageView::I16(v), ImageData::I16(o)) => assert_eq!(v, o.as_slice()),
+        (View::I16(v), Data::I16(o)) => assert_eq!(v, o.as_slice()),
         (v, o) => panic!("expected matching I16 view/decode, got {v:?} / {o:?}"),
     }
 }
@@ -811,7 +811,7 @@ fn read_image_view_matches_decode_for_a_compressed_image() {
     let image = f.read_image_view(1, &mut scratch).unwrap();
     assert_eq!(image.metadata().shape, &[24, 16]);
     match (image.samples, &owned) {
-        (ImageView::I16(v), ImageData::I16(o)) => {
+        (View::I16(v), Data::I16(o)) => {
             assert_eq!(v, o.as_slice());
             assert_eq!(v.as_ptr(), scratch_ptr);
         }
@@ -832,41 +832,36 @@ fn region_indices() -> Vec<usize> {
 }
 
 #[cfg(feature = "compression")]
-fn select_2d_section(
-    samples: &ImageData,
-    width: usize,
-    x: Range<usize>,
-    y: Range<usize>,
-) -> ImageData {
+fn select_2d_section(samples: &Data, width: usize, x: Range<usize>, y: Range<usize>) -> Data {
     let indices: Vec<usize> = y
         .flat_map(|row| x.clone().map(move |column| column + width * row))
         .collect();
     match samples {
-        ImageData::U8(values) => ImageData::U8(indices.iter().map(|&i| values[i]).collect()),
-        ImageData::I16(values) => ImageData::I16(indices.iter().map(|&i| values[i]).collect()),
-        ImageData::I32(values) => ImageData::I32(indices.iter().map(|&i| values[i]).collect()),
-        ImageData::I64(values) => ImageData::I64(indices.iter().map(|&i| values[i]).collect()),
-        ImageData::F32(values) => ImageData::F32(indices.iter().map(|&i| values[i]).collect()),
-        ImageData::F64(values) => ImageData::F64(indices.iter().map(|&i| values[i]).collect()),
+        Data::U8(values) => Data::U8(indices.iter().map(|&i| values[i]).collect()),
+        Data::I16(values) => Data::I16(indices.iter().map(|&i| values[i]).collect()),
+        Data::I32(values) => Data::I32(indices.iter().map(|&i| values[i]).collect()),
+        Data::I64(values) => Data::I64(indices.iter().map(|&i| values[i]).collect()),
+        Data::F32(values) => Data::F32(indices.iter().map(|&i| values[i]).collect()),
+        Data::F64(values) => Data::F64(indices.iter().map(|&i| values[i]).collect()),
     }
 }
 
 #[cfg(feature = "compression")]
-fn assert_image_data_exact(actual: &ImageData, expected: &ImageData, label: &str) {
+fn assert_image_data_exact(actual: &Data, expected: &Data, label: &str) {
     match (actual, expected) {
-        (ImageData::U8(actual), ImageData::U8(expected)) => {
+        (Data::U8(actual), Data::U8(expected)) => {
             assert_eq!(actual, expected, "{label}");
         }
-        (ImageData::I16(actual), ImageData::I16(expected)) => {
+        (Data::I16(actual), Data::I16(expected)) => {
             assert_eq!(actual, expected, "{label}");
         }
-        (ImageData::I32(actual), ImageData::I32(expected)) => {
+        (Data::I32(actual), Data::I32(expected)) => {
             assert_eq!(actual, expected, "{label}");
         }
-        (ImageData::I64(actual), ImageData::I64(expected)) => {
+        (Data::I64(actual), Data::I64(expected)) => {
             assert_eq!(actual, expected, "{label}");
         }
-        (ImageData::F32(actual), ImageData::F32(expected)) => {
+        (Data::F32(actual), Data::F32(expected)) => {
             assert_eq!(actual.len(), expected.len(), "{label}");
             for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
                 assert_eq!(
@@ -876,7 +871,7 @@ fn assert_image_data_exact(actual: &ImageData, expected: &ImageData, label: &str
                 );
             }
         }
-        (ImageData::F64(actual), ImageData::F64(expected)) => {
+        (Data::F64(actual), Data::F64(expected)) => {
             assert_eq!(actual.len(), expected.len(), "{label}");
             for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
                 assert_eq!(
@@ -900,16 +895,16 @@ fn image_sections_match_hand_computed_values_for_every_bitpix() {
     let selected = region_indices();
     let cases = [
         (
-            ImageData::U8(all.iter().map(|&value| value as u8).collect()),
-            ImageData::U8(selected.iter().map(|&value| value as u8).collect()),
+            Data::U8(all.iter().map(|&value| value as u8).collect()),
+            Data::U8(selected.iter().map(|&value| value as u8).collect()),
         ),
         (
-            ImageData::I16(
+            Data::I16(
                 all.iter()
                     .map(|&value| i16::try_from(value).unwrap() - 30)
                     .collect(),
             ),
-            ImageData::I16(
+            Data::I16(
                 selected
                     .iter()
                     .map(|&value| i16::try_from(value).unwrap() - 30)
@@ -917,12 +912,12 @@ fn image_sections_match_hand_computed_values_for_every_bitpix() {
             ),
         ),
         (
-            ImageData::I32(
+            Data::I32(
                 all.iter()
                     .map(|&value| i32::try_from(value).unwrap() * 1000 - 7)
                     .collect(),
             ),
-            ImageData::I32(
+            Data::I32(
                 selected
                     .iter()
                     .map(|&value| i32::try_from(value).unwrap() * 1000 - 7)
@@ -930,12 +925,12 @@ fn image_sections_match_hand_computed_values_for_every_bitpix() {
             ),
         ),
         (
-            ImageData::I64(
+            Data::I64(
                 all.iter()
                     .map(|&value| i64::try_from(value).unwrap() * -50)
                     .collect(),
             ),
-            ImageData::I64(
+            Data::I64(
                 selected
                     .iter()
                     .map(|&value| i64::try_from(value).unwrap() * -50)
@@ -943,12 +938,12 @@ fn image_sections_match_hand_computed_values_for_every_bitpix() {
             ),
         ),
         (
-            ImageData::F32(all.iter().map(|&value| value as f32 * 0.5).collect()),
-            ImageData::F32(selected.iter().map(|&value| value as f32 * 0.5).collect()),
+            Data::F32(all.iter().map(|&value| value as f32 * 0.5).collect()),
+            Data::F32(selected.iter().map(|&value| value as f32 * 0.5).collect()),
         ),
         (
-            ImageData::F64(all.iter().map(|&value| value as f64 * -0.25).collect()),
-            ImageData::F64(selected.iter().map(|&value| value as f64 * -0.25).collect()),
+            Data::F64(all.iter().map(|&value| value as f64 * -0.25).collect()),
+            Data::F64(selected.iter().map(|&value| value as f64 * -0.25).collect()),
         ),
     ];
 
@@ -1044,13 +1039,13 @@ fn plain_image_section_streams_exact_strided_runs() {
         }
     }
     assert_eq!(section.metadata().shape, [2, 3, 4, 2]);
-    assert_eq!(section.stored(), ImageView::I16(&expected_values));
+    assert_eq!(section.stored(), View::I16(&expected_values));
     assert_eq!(&*read_ranges.borrow(), &expected_reads);
 
     let mut slice = FitsReader::from_bytes(&bytes).unwrap();
     assert_eq!(
         slice.read_image_section(0, &ranges).unwrap().stored(),
-        ImageView::I16(&expected_values)
+        View::I16(&expected_values)
     );
 }
 
@@ -1069,11 +1064,11 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
     f64_values[13] = f64::from_bits(0x7FF8_0000_0000_1234);
     let cases = [
         (
-            ImageData::U8((0..count).map(|index| index as u8).collect()),
+            Data::U8((0..count).map(|index| index as u8).collect()),
             Some(13),
         ),
         (
-            ImageData::I16(
+            Data::I16(
                 (0..count)
                     .map(|index| i16::try_from(index).unwrap() - 30)
                     .collect(),
@@ -1081,7 +1076,7 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
             Some(-17),
         ),
         (
-            ImageData::I32(
+            Data::I32(
                 (0..count)
                     .map(|index| i32::try_from(index).unwrap() * 1000 - 7)
                     .collect(),
@@ -1089,15 +1084,15 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
             Some(12_993),
         ),
         (
-            ImageData::I64(
+            Data::I64(
                 (0..count)
                     .map(|index| i64::try_from(index).unwrap() * -50)
                     .collect(),
             ),
             Some(-650),
         ),
-        (ImageData::F32(f32_values), None),
-        (ImageData::F64(f64_values), None),
+        (Data::F32(f32_values), None),
+        (Data::F64(f64_values), None),
     ];
 
     for (samples, blank) in cases {
@@ -1251,7 +1246,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
         )
         .wide(),
     ];
-    let table = TableBuilder::explicit(rows, columns).unwrap();
+    let table = Builder::explicit(rows, columns).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer.write_table(&table, None).unwrap();
     let bytes = writer.into_inner().into_inner();
@@ -1309,11 +1304,11 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     assert_eq!(selection.rows, 1..3);
     assert!(matches!(
         &selection.columns[0].data,
-        TableColumnData::Fixed(ColumnData::I32(values)) if values == &[20, 30]
+        SelectedData::Fixed(ColumnData::I32(values)) if values == &[20, 30]
     ));
     assert!(matches!(
         &selection.columns[1].data,
-        TableColumnData::Variable(values)
+        SelectedData::Variable(values)
             if values == &Ragged::<ColumnData>::new(ColumnData::I32(vec![2, 3]), vec![2, 2])
     ));
     assert_eq!(
@@ -1384,11 +1379,11 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
         .unwrap();
     assert!(matches!(
         &selection.columns[0].data,
-        TableColumnData::Fixed(ColumnData::I32(values)) if values == &[20]
+        SelectedData::Fixed(ColumnData::I32(values)) if values == &[20]
     ));
     assert!(matches!(
         &selection.columns[1].data,
-        TableColumnData::Variable(values)
+        SelectedData::Variable(values)
             if values == &Ragged::<ColumnData>::new(ColumnData::I32(vec![2, 3]), vec![2])
     ));
     assert_eq!(
@@ -1417,7 +1412,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
             .unwrap()
             .columns[0]
             .data,
-        TableColumnData::Variable(Ragged::<ColumnData>::new(
+        SelectedData::Variable(Ragged::<ColumnData>::new(
             ColumnData::F64(vec![0.5, 2.5, 3.5, 4.5]),
             vec![1, 1, 3, 4]
         ))
@@ -1434,7 +1429,7 @@ fn malformed_pq_descriptors_match_across_table_read_paths() {
         if wide {
             column = column.wide();
         }
-        let table = TableBuilder::explicit(1, vec![column]).unwrap();
+        let table = Builder::explicit(1, vec![column]).unwrap();
         let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
         writer.write_table(&table, None).unwrap();
         let bytes = writer.into_inner().into_inner();
@@ -1491,14 +1486,14 @@ fn readers_recover_their_original_sources() {
 #[test]
 fn a_data_checksum_summed_during_the_decode_reads_the_unit_once() {
     use crate::block::padded_len;
-    use crate::data::image_data::ImageData;
+    use crate::image_model::data::Data;
     use crate::reader::source::SliceSource;
     use crate::reader::source::internals::CountingSource;
     use std::cell::Cell;
 
     let image = Image {
         shape: vec![7, 5],
-        samples: ImageData::I16((0..35).map(|value| value * 731 - 9000).collect()),
+        samples: Data::I16((0..35).map(|value| value * 731 - 9000).collect()),
         scaling: Scaling::IDENTITY,
     };
     let mut writer = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
@@ -1579,11 +1574,11 @@ fn a_data_checksum_summed_during_the_decode_reads_the_unit_once() {
 #[test]
 fn a_compressed_image_summed_through_its_sections_reads_the_unit_at_the_finish() {
     use crate::compress::{Compression, CompressionOptions};
-    use crate::data::image_data::ImageData;
+    use crate::image_model::data::Data;
 
     let image = Image {
         shape: vec![9, 7],
-        samples: ImageData::I16((0..63).map(|value| value * 97 - 3000).collect()),
+        samples: Data::I16((0..63).map(|value| value * 97 - 3000).collect()),
         scaling: Scaling::IDENTITY,
     };
     let mut writer = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
@@ -1615,12 +1610,12 @@ fn a_compressed_image_summed_through_its_sections_reads_the_unit_at_the_finish()
 #[test]
 #[should_panic(expected = "a data checksum of another reader's HDU")]
 fn a_sum_finished_on_another_readers_hdu_panics() {
-    use crate::data::image_data::ImageData;
+    use crate::image_model::data::Data;
 
     let file = |extra: &[(&str, i64)]| {
         let image = Image {
             shape: vec![4, 4],
-            samples: ImageData::I16(vec![1; 16]),
+            samples: Data::I16(vec![1; 16]),
             scaling: Scaling::IDENTITY,
         };
         let mut header = Header::new();

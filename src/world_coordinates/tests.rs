@@ -6,12 +6,12 @@ use crate::header_model::value::Value;
 use crate::reader::internals::open_fixture;
 use crate::world_coordinates::R2D;
 use crate::world_coordinates::Wcs;
+use crate::world_coordinates::axis::Axis;
 use crate::world_coordinates::celestial_pole::CelestialPole;
 use crate::world_coordinates::internals::TAN_GOLDEN;
 use crate::world_coordinates::internals::assert_astropy_golden;
 use crate::world_coordinates::internals::celestial_header;
 use crate::world_coordinates::projection::Projection;
-use crate::world_coordinates::wcs_axis::WcsAxis;
 
 /// Load the WCS from the primary header of a fixture.
 fn open_wcs(name: &str) -> Wcs {
@@ -22,16 +22,16 @@ fn open_wcs(name: &str) -> Wcs {
 fn parses_tan_header() {
     let w = open_wcs("wcs_tan.fits");
     assert_eq!(
-        w.view().axes,
+        w.metadata().axes,
         [
-            WcsAxis {
+            Axis {
                 ctype: "RA---TAN".to_string(),
                 cunit: "deg".to_string(),
                 crval: 150.0,
                 crpix: 256.0,
                 spectral_frame: None,
             },
-            WcsAxis {
+            Axis {
                 ctype: "DEC--TAN".to_string(),
                 cunit: "deg".to_string(),
                 crval: 2.5,
@@ -128,7 +128,7 @@ fn public_wcs_metadata_exposes_units_and_celestial_projection_pair() {
         .set_internal("CUNIT1", "deg")
         .set_internal("CUNIT2", "deg");
     let wcs = Wcs::from_header(&header, None).unwrap();
-    let view = wcs.view();
+    let view = wcs.metadata();
     assert_eq!(view.axes[0].cunit, "deg");
     assert_eq!(view.axes[1].cunit, "deg");
     let celestial = view.celestial_projection.unwrap();
@@ -196,7 +196,7 @@ fn absent_wcsaxes_uses_the_largest_wcs_index() {
         cd,
     ];
     for h in &cases {
-        assert_eq!(Wcs::from_header(h, None).unwrap().view().axes.len(), 4);
+        assert_eq!(Wcs::from_header(h, None).unwrap().metadata().axes.len(), 4);
     }
 
     for alternate in [
@@ -207,7 +207,7 @@ fn absent_wcsaxes_uses_the_largest_wcs_index() {
         assert_eq!(
             Wcs::from_header(&alternate, None)
                 .unwrap()
-                .view()
+                .metadata()
                 .axes
                 .len(),
             2
@@ -215,7 +215,7 @@ fn absent_wcsaxes_uses_the_largest_wcs_index() {
         assert_eq!(
             Wcs::from_header(&alternate, Some('A'))
                 .unwrap()
-                .view()
+                .metadata()
                 .axes
                 .len(),
             4
@@ -236,7 +236,7 @@ fn rejects_absurd_wcsaxes() {
         ));
     }
     h.set_internal("WCSAXES", 1);
-    assert_eq!(Wcs::from_header(&h, None).unwrap().view().axes.len(), 1);
+    assert_eq!(Wcs::from_header(&h, None).unwrap().metadata().axes.len(), 1);
     h.set_internal("WCSAXES", 999);
     assert_eq!(Wcs::image_axis_count(&h, None).unwrap(), 999);
 
@@ -265,7 +265,7 @@ fn latpole_chooses_between_both_valid_poles() {
     for (latpole, pole) in [(90.0, 60.0), (-90.0, -60.0)] {
         let header = celestial_with("CAR", &[("CRVAL2", -30.0), ("LATPOLE", latpole)]);
         let wcs = Wcs::from_header(&header, None).unwrap();
-        let dec = wcs.view().celestial_projection.unwrap().pole.dec;
+        let dec = wcs.metadata().celestial_projection.unwrap().pole.dec;
         assert!((dec - pole).abs() < 1e-12, "LATPOLE {latpole}: {dec}");
     }
 }
@@ -300,9 +300,9 @@ fn unmatched_celestial_axes_are_unsupported() {
             .set_internal("CTYPE1", ctypes[0])
             .set_internal("CTYPE2", ctypes[1]);
         let wcs = Wcs::from_header(&header, None).unwrap();
-        assert_eq!(wcs.view().unsupported_axes, unsupported, "{ctypes:?}");
+        assert_eq!(wcs.metadata().unsupported_axes, unsupported, "{ctypes:?}");
         assert_eq!(
-            wcs.view().celestial_projection.is_some(),
+            wcs.metadata().celestial_projection.is_some(),
             unsupported.is_empty(),
             "{ctypes:?}"
         );
@@ -374,7 +374,7 @@ fn the_view_keeps_crval_in_its_declared_unit() {
         .set_internal("CUNIT1", "arcsec")
         .set_internal("CUNIT2", "arcsec");
     let wcs = Wcs::from_header(&header, None).unwrap();
-    let axes = wcs.view().axes;
+    let axes = wcs.metadata().axes;
     assert_eq!((axes[0].crval, axes[0].cunit.as_str()), (3600.0, "arcsec"));
     assert_eq!((axes[1].crval, axes[1].cunit.as_str()), (7200.0, "arcsec"));
     let world = wcs.pixel_to_world(&[0.0, 0.0]).unwrap();

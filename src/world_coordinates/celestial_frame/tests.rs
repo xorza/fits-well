@@ -23,7 +23,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
     assert_eq!(
         Wcs::from_header(&image(None, None), None)
             .unwrap()
-            .view()
+            .metadata()
             .celestial_frame,
         Some(CelestialFrame {
             reference_frame: CelestialReferenceFrame::Icrs,
@@ -40,7 +40,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
         assert_eq!(
             Wcs::from_header(&image(Some(equinox), None), None)
                 .unwrap()
-                .view()
+                .metadata()
                 .celestial_frame,
             Some(CelestialFrame {
                 reference_frame,
@@ -51,7 +51,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
     assert_eq!(
         Wcs::from_header(&image(Some(1975.0), Some("FK4-NO-E")), None)
             .unwrap()
-            .view()
+            .metadata()
             .celestial_frame,
         Some(CelestialFrame {
             reference_frame: CelestialReferenceFrame::Fk4NoE,
@@ -67,7 +67,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
     assert_eq!(
         Wcs::from_header(&alternate, None)
             .unwrap()
-            .view()
+            .metadata()
             .celestial_frame,
         Some(CelestialFrame {
             reference_frame: CelestialReferenceFrame::Gappt,
@@ -77,7 +77,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
     assert_eq!(
         Wcs::from_header(&alternate, Some('A'))
             .unwrap()
-            .view()
+            .metadata()
             .celestial_frame,
         Some(CelestialFrame {
             reference_frame: CelestialReferenceFrame::Fk4,
@@ -96,7 +96,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
     assert_eq!(
         Wcs::from_pixel_list(&pixel_list, &[2, 3], Some('A'))
             .unwrap()
-            .view()
+            .metadata()
             .celestial_frame,
         Some(CelestialFrame {
             reference_frame: CelestialReferenceFrame::Fk5,
@@ -112,7 +112,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
     assert_eq!(
         Wcs::from_array_column(&vector, 5, Some('A'))
             .unwrap()
-            .view()
+            .metadata()
             .celestial_frame,
         Some(CelestialFrame {
             reference_frame: CelestialReferenceFrame::Icrs,
@@ -130,13 +130,13 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
         .set_internal("EQUI3", 2000.0);
     let unsupported = Wcs::from_pixel_list(&unsupported, &[2, 3], None).unwrap();
     assert_eq!(
-        unsupported.view().celestial_frame,
+        unsupported.metadata().celestial_frame,
         Some(CelestialFrame {
             reference_frame: CelestialReferenceFrame::Fk5,
             equinox: Some(2000.0),
         })
     );
-    assert_eq!(unsupported.view().unsupported_axes, [0, 1]);
+    assert_eq!(unsupported.metadata().unsupported_axes, [0, 1]);
 
     assert!(matches!(
         Wcs::from_header(&image(None, Some("J2000")), None),

@@ -10,9 +10,10 @@ use crate::header_model::Header;
 use crate::keyword::AltSuffix;
 use crate::keyword::key;
 use crate::unit;
-use crate::world_coordinates::axis::AxisTransform;
-use crate::world_coordinates::axis::spectral_rest::SpectralParameters;
-use crate::world_coordinates::axis::spectral_rest::SpectralRest;
+use crate::world_coordinates::axis::Axis;
+use crate::world_coordinates::axis_transform::AxisTransform;
+use crate::world_coordinates::axis_transform::spectral_rest::SpectralParameters;
+use crate::world_coordinates::axis_transform::spectral_rest::SpectralRest;
 use crate::world_coordinates::celestial_frame::CelestialFrame;
 use crate::world_coordinates::celestial_pole::CelestialPole;
 use crate::world_coordinates::celestial_transform::CelestialTransform;
@@ -24,9 +25,9 @@ use crate::world_coordinates::projected_celestial_axes::ProjectedCelestialAxes;
 use crate::world_coordinates::projection::Projection;
 use crate::world_coordinates::spectral_frame::SpectralFrame;
 use crate::world_coordinates::table_wcs::TableWcs;
-use crate::world_coordinates::wcs_axis::WcsAxis;
 
 pub(crate) mod axis;
+pub(crate) mod axis_transform;
 #[cfg(feature = "internals")]
 pub(crate) mod bench;
 mod celestial_axis;
@@ -40,7 +41,6 @@ pub(crate) mod projection;
 pub(crate) mod spectral_frame;
 mod table_wcs;
 pub(crate) mod tabular;
-pub(crate) mod wcs_axis;
 
 const R2D: f64 = 180.0 / PI;
 const D2R: f64 = PI / 180.0;
@@ -71,8 +71,8 @@ pub struct CelestialProjection {
 
 /// A read-only snapshot of a parsed WCS's source metadata and support status.
 #[derive(Debug, Clone, Copy)]
-pub struct WcsView<'a> {
-    pub axes: &'a [WcsAxis],
+pub struct Metadata<'a> {
+    pub axes: &'a [Axis],
     /// The resolved `RADESYSa`/`EQUINOXa` metadata when applicable.
     pub celestial_frame: Option<CelestialFrame>,
     /// Resolved celestial axes, projection, and native pole.
@@ -91,7 +91,7 @@ pub(crate) struct AxisWorld<'a> {
 /// A parsed world coordinate system for one (optionally alternate) axis set.
 #[derive(Debug, Clone)]
 pub struct Wcs {
-    axes: Vec<WcsAxis>,
+    axes: Vec<Axis>,
     /// Each axis's `CRVALi` in the unit its transform works in: degrees for a celestial
     /// axis, the Table-25 default unit for a spectral one, the declared unit otherwise.
     reference: Vec<f64>,
@@ -116,16 +116,16 @@ pub struct Wcs {
 impl Wcs {
     /// Parse the primary WCS (`alt = None`) or an alternate description
     /// (`alt = Some('A'..='Z')`) from `header`.
-    pub fn from_header(header: &Header, alt: Option<char>) -> Result<Wcs> {
-        Wcs::from_header_with_context(header, alt, Vec::new(), None)
+    pub fn from_header(header: &Header, alt: Option<char>) -> Result<Self> {
+        Self::from_header_with_context(header, alt, Vec::new(), None)
     }
 
     pub(crate) fn from_header_with_tabular(
         header: &Header,
         alt: Option<char>,
         tabular: Vec<tabular::TabularTransform>,
-    ) -> Result<Wcs> {
-        Wcs::from_header_with_context(header, alt, tabular, None)
+    ) -> Result<Self> {
+        Self::from_header_with_context(header, alt, tabular, None)
     }
 
     fn from_header_with_context(
@@ -133,9 +133,9 @@ impl Wcs {
         alt: Option<char>,
         tabular: Vec<tabular::TabularTransform>,
         spectral_frames: Option<Vec<Option<SpectralFrame>>>,
-    ) -> Result<Wcs> {
+    ) -> Result<Self> {
         let a = AltSuffix::new(alt);
-        let naxis = Wcs::image_axis_count(header, alt)?;
+        let naxis = Self::image_axis_count(header, alt)?;
 
         let ctype: Vec<String> = (1..=naxis)
             .map(|i| {
@@ -165,12 +165,16 @@ impl Wcs {
         } else {
             let frame = ctype
                 .iter()
-                .any(|ctype| axis::is_spectral_type(ctype))
+                .any(|ctype| axis_transform::is_spectral_type(ctype))
                 .then(|| SpectralFrame::from_header(header, a))
                 .transpose()?;
             ctype
                 .iter()
-                .map(|ctype| axis::is_spectral_type(ctype).then_some(frame).flatten())
+                .map(|ctype| {
+                    axis_transform::is_spectral_type(ctype)
+                        .then_some(frame)
+                        .flatten()
+                })
                 .collect()
         };
 
@@ -250,7 +254,7 @@ impl Wcs {
         let axes = ctype
             .into_iter()
             .enumerate()
-            .map(|(i, ctype)| WcsAxis {
+            .map(|(i, ctype)| Axis {
                 ctype,
                 cunit: cunit[i].clone(),
                 crval: declared_crval[i],
@@ -258,7 +262,7 @@ impl Wcs {
                 spectral_frame: spectral_frames[i],
             })
             .collect();
-        Ok(Wcs {
+        Ok(Self {
             axes,
             reference: crval,
             world_units,
@@ -273,8 +277,8 @@ impl Wcs {
 
     /// Borrow the parsed axis metadata and unsupported-axis flags without exposing
     /// the transform's invariant-bearing owned state for mutation.
-    pub fn view(&self) -> WcsView<'_> {
-        WcsView {
+    pub fn metadata(&self) -> Metadata<'_> {
+        Metadata {
             axes: &self.axes,
             celestial_frame: self.celestial_frame,
             celestial_projection: self
@@ -358,7 +362,7 @@ impl Wcs {
     /// families, both matrix/parameter spellings (`TPC`/`TP`, `TCD`/`TC`,
     /// `TPV`/`TV`), and the longitude column's `LONPna`/`LATPna` pole keywords,
     /// then evaluates them through the same pipeline as image WCS.
-    pub fn from_pixel_list(header: &Header, columns: &[usize], alt: Option<char>) -> Result<Wcs> {
+    pub fn from_pixel_list(header: &Header, columns: &[usize], alt: Option<char>) -> Result<Self> {
         let table = TableWcs::pixel_list(alt, columns);
         let translated = table.translate(header)?;
         let mut h = translated.header;
@@ -374,7 +378,7 @@ impl Wcs {
             let celestial_columns = [columns[pair.longitude], columns[pair.latitude]];
             table.copy_celestial_keywords(header, &mut h, &celestial_columns)?;
         }
-        Wcs::from_header_with_context(&h, None, Vec::new(), Some(translated.spectral_frames))
+        Self::from_header_with_context(&h, None, Vec::new(), Some(translated.spectral_frames))
     }
 
     /// Build a WCS for an image stored in a binary-table **vector cell** (§8,
@@ -383,7 +387,7 @@ impl Wcs {
     /// axis-and-column-indexed families, `ijPCna`/`ijCDna`, `iPVn_ma`/`iVn_ma`,
     /// and `LONPna`/`LATPna`, where `i`/`j` are array axes and `n` is the column.
     /// The rank is taken from `WCAXna`, else inferred through the same resolver.
-    pub fn from_array_column(header: &Header, column: usize, alt: Option<char>) -> Result<Wcs> {
+    pub fn from_array_column(header: &Header, column: usize, alt: Option<char>) -> Result<Self> {
         let naxis = TableWcs::array_column_rank(header, alt, column)?;
         let table = TableWcs::array_column(alt, naxis, column);
         let translated = table.translate(header)?;
@@ -391,7 +395,7 @@ impl Wcs {
         // Every axis lives in one column, so that column's pole and frame keywords
         // apply whichever axes turn out to be celestial.
         table.copy_celestial_keywords(header, &mut h, &[column])?;
-        Wcs::from_header_with_context(&h, None, Vec::new(), Some(translated.spectral_frames))
+        Self::from_header_with_context(&h, None, Vec::new(), Some(translated.spectral_frames))
     }
 
     /// Map 1-based pixel coordinates to complete world coordinates. Celestial axes
@@ -510,7 +514,7 @@ impl Wcs {
 /// come out in: degrees for a celestial axis (§8.2), the Table-25 default for a
 /// spectral one (§8.4), and the declared unit for any other.
 pub(crate) fn world_unit_scale(ctype: Ctype<'_>, cunit: &str) -> Result<f64> {
-    if let Some(scale) = axis::spectral_unit_scale(ctype.head, cunit)? {
+    if let Some(scale) = axis_transform::spectral_unit_scale(ctype.head, cunit)? {
         return Ok(scale);
     }
     if ctype.celestial_axis().is_some() {

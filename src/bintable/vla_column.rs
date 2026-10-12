@@ -26,11 +26,7 @@ pub(crate) struct VlaCell<'a> {
 }
 
 impl<'a> VlaColumn<'a> {
-    pub(crate) const fn new(
-        table: TableView<'a>,
-        index: usize,
-        element_type: TformKind,
-    ) -> VlaColumn<'a> {
+    pub(crate) const fn new(table: TableView<'a>, index: usize, element_type: TformKind) -> Self {
         VlaColumn {
             table,
             index,

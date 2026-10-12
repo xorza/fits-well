@@ -6,8 +6,8 @@ use crate::bintable::tdim;
 use crate::bintable::tform::Tform;
 use crate::bintable::tform_kind::TformKind;
 use crate::column::Named;
-use crate::data::scaling::Scaling;
 use crate::error::Result;
+use crate::image_model::scaling::Scaling;
 use std::iter;
 
 /// One column of a binary table: its `TFORMn` format, optional name/unit, the

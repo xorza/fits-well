@@ -8,10 +8,10 @@ use criterion::{BenchmarkId, Criterion};
 
 use crate::bench::fixture::{self, Kind, Reading, Scale, ScratchDir, SourceKind};
 use crate::bench::scene::{self, CATALOG_ROW_BYTES, CATALOG_ROWS, HEIGHT, TYPES, WIDTH};
-use crate::bintable::BinTable;
+use crate::bintable::Table;
 use crate::bitpix::Bitpix;
 use crate::checksum;
-use crate::data::image_data::ImageData;
+use crate::image_model::data::Data;
 use crate::reader::source::Source;
 use crate::reader::{ChecksumReport, FitsReader};
 
@@ -54,7 +54,7 @@ fn read_image(c: &mut Criterion, dir: &ScratchDir) {
             let id = BenchmarkId::new(source.id(), fixture::bitpix_id(bitpix));
             group.bench_function(id, |b| {
                 let path = frame_path(&mut path, dir, bitpix);
-                source.bench(b, path, ReadImage);
+                source.bench(b, path, Lazy);
             });
         }
     }
@@ -105,12 +105,12 @@ fn frame_path<'a>(path: &'a mut Option<PathBuf>, dir: &ScratchDir, bitpix: Bitpi
 }
 
 #[derive(Debug)]
-struct ReadImage;
+struct Lazy;
 
-impl Reading for ReadImage {
-    type Output = ImageData;
+impl Reading for Lazy {
+    type Output = Data;
 
-    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> ImageData {
+    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> Data {
         reader.read_image(0).unwrap().decode()
     }
 }
@@ -140,9 +140,9 @@ impl Reading for ReadSections {
 struct ReadTable;
 
 impl Reading for ReadTable {
-    type Output = BinTable;
+    type Output = Table;
 
-    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> BinTable {
+    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> Table {
         reader.read_table(1).unwrap()
     }
 }

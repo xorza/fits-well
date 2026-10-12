@@ -21,40 +21,40 @@ pub(super) trait DecodeSample: Copy + Send + Sync {
 
 impl DecodeSample for u8 {
     type Wide = i64;
-    fn fit(values: &mut [i64], lossy: bool) -> Result<()> {
-        fit_integers(values, 0, u8::MAX.into(), lossy)
+    fn fit(values: &mut [Self::Wide], lossy: bool) -> Result<()> {
+        fit_integers(values, 0, Self::MAX.into(), lossy)
     }
-    fn narrow(wide: i64) -> u8 {
-        wide.cast_unsigned() as u8
+    fn narrow(wide: Self::Wide) -> Self {
+        wide.cast_unsigned() as Self
     }
 }
 
 impl DecodeSample for i16 {
     type Wide = i64;
-    fn fit(values: &mut [i64], lossy: bool) -> Result<()> {
-        fit_integers(values, i16::MIN.into(), i16::MAX.into(), lossy)
+    fn fit(values: &mut [Self::Wide], lossy: bool) -> Result<()> {
+        fit_integers(values, Self::MIN.into(), Self::MAX.into(), lossy)
     }
-    fn narrow(wide: i64) -> i16 {
-        wide as i16
+    fn narrow(wide: Self::Wide) -> Self {
+        wide as Self
     }
 }
 
 impl DecodeSample for i32 {
     type Wide = i64;
-    fn fit(values: &mut [i64], lossy: bool) -> Result<()> {
-        fit_integers(values, i32::MIN.into(), i32::MAX.into(), lossy)
+    fn fit(values: &mut [Self::Wide], lossy: bool) -> Result<()> {
+        fit_integers(values, Self::MIN.into(), Self::MAX.into(), lossy)
     }
-    fn narrow(wide: i64) -> i32 {
-        wide as i32
+    fn narrow(wide: Self::Wide) -> Self {
+        wide as Self
     }
 }
 
 impl DecodeSample for i64 {
-    type Wide = i64;
-    fn fit(_: &mut [i64], _: bool) -> Result<()> {
+    type Wide = Self;
+    fn fit(_: &mut [Self::Wide], _: bool) -> Result<()> {
         Ok(())
     }
-    fn narrow(wide: i64) -> i64 {
+    fn narrow(wide: Self::Wide) -> Self {
         wide
     }
 }
@@ -62,20 +62,20 @@ impl DecodeSample for i64 {
 impl DecodeSample for f32 {
     type Wide = f64;
     /// Narrowing a float rounds rather than overflows.
-    fn fit(_: &mut [f64], _: bool) -> Result<()> {
+    fn fit(_: &mut [Self::Wide], _: bool) -> Result<()> {
         Ok(())
     }
-    fn narrow(wide: f64) -> f32 {
-        wide as f32
+    fn narrow(wide: Self::Wide) -> Self {
+        wide as Self
     }
 }
 
 impl DecodeSample for f64 {
-    type Wide = f64;
-    fn fit(_: &mut [f64], _: bool) -> Result<()> {
+    type Wide = Self;
+    fn fit(_: &mut [Self::Wide], _: bool) -> Result<()> {
         Ok(())
     }
-    fn narrow(wide: f64) -> f64 {
+    fn narrow(wide: Self::Wide) -> Self {
         wide
     }
 }

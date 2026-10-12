@@ -22,14 +22,14 @@ pub(crate) struct TabularReference {
 }
 
 impl TabularReference {
-    pub(crate) fn identifies_same_extension(&self, other: &TabularReference) -> bool {
+    pub(crate) fn identifies_same_extension(&self, other: &Self) -> bool {
         self.extension_name
             .eq_ignore_ascii_case(&other.extension_name)
             && self.extension_version == other.extension_version
             && self.extension_level == other.extension_level
     }
 
-    fn identifies_same_array(&self, other: &TabularReference) -> bool {
+    fn identifies_same_array(&self, other: &Self) -> bool {
         self.identifies_same_extension(other)
             && self
                 .coordinate_column
@@ -169,10 +169,7 @@ impl TabularDescriptor {
 }
 
 impl TabularTransform {
-    pub(crate) fn from_table(
-        descriptor: TabularDescriptor,
-        table: TableView<'_>,
-    ) -> Result<TabularTransform> {
+    pub(crate) fn from_table(descriptor: TabularDescriptor, table: TableView<'_>) -> Result<Self> {
         let dimensions = descriptor.axes.len();
         let coordinate = table.column_by_name(&descriptor.reference.coordinate_column)?;
         let coordinate_shape = first_row_shape_and_values(table.nrows, coordinate)?;
@@ -235,7 +232,7 @@ impl TabularTransform {
                 direction,
             }));
         }
-        Ok(TabularTransform {
+        Ok(Self {
             axes: descriptor.axes,
             reference_indices: descriptor.reference_indices,
             lengths,
@@ -600,12 +597,12 @@ struct TabularSearchScratch {
 }
 
 impl TabularSearchScratch {
-    fn new(dimensions: usize, vertex_count: usize) -> Result<TabularSearchScratch> {
+    fn new(dimensions: usize, vertex_count: usize) -> Result<Self> {
         let node_work = inverse_node_work(dimensions, vertex_count)?;
         let corner_count = dimensions
             .checked_mul(vertex_count)
             .ok_or(FitsError::DataUnitOverflow)?;
-        Ok(TabularSearchScratch {
+        Ok(Self {
             lower: allocation::try_zeroed(false, dimensions)?,
             upper: allocation::try_zeroed(false, dimensions)?,
             equal: allocation::try_zeroed(false, dimensions)?,
@@ -875,7 +872,7 @@ const fn domain(axis: usize) -> FitsError {
 pub(crate) mod internals {
     use std::sync::OnceLock;
 
-    use crate::bintable::BinTable;
+    use crate::bintable::Table;
     use crate::bintable::internals::table_header;
     use crate::header_model::Header;
     use crate::world_coordinates::Wcs;
@@ -915,8 +912,8 @@ pub(crate) mod internals {
             .collect()
     }
 
-    pub(crate) fn lookup_table(columns: &[(&str, &[f64], Option<&str>)]) -> BinTable {
-        BinTable::from_data(&lookup_header(columns), lookup_bytes(columns)).unwrap()
+    pub(crate) fn lookup_table(columns: &[(&str, &[f64], Option<&str>)]) -> Table {
+        Table::from_data(&lookup_header(columns), lookup_bytes(columns)).unwrap()
     }
 
     /// An image header of `axis_count` `-TAB` axes, axis i reading table axis i of
@@ -992,7 +989,7 @@ pub(crate) mod internals {
     }
 
     /// The transform `header` declares, with every `-TAB` axis read from `table`.
-    pub(crate) fn resolved_wcs(header: &Header, table: &BinTable) -> Wcs {
+    pub(crate) fn resolved_wcs(header: &Header, table: &Table) -> Wcs {
         let axis_count = usize::try_from(header.get_integer("NAXIS").unwrap().unwrap()).unwrap();
         let transforms = tabular::descriptors(header, axis_count, None)
             .unwrap()

@@ -34,7 +34,7 @@ pub(crate) enum Card {
 
 /// What one 80-byte record parses to.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum Record {
+pub(super) enum ParsedRecord {
     Card(Card),
     /// A `CONTINUE` record carrying a long-string substring (§4.2.1.2), which
     /// [`Header::parse`](crate::header_model::Header::parse) folds into the
@@ -47,9 +47,9 @@ pub(super) enum Record {
     End,
 }
 
-impl Record {
+impl ParsedRecord {
     /// Parse a single 80-byte record.
-    pub(super) fn parse(raw: &[u8; CARD_SIZE]) -> Result<Record> {
+    pub(super) fn parse(raw: &[u8; CARD_SIZE]) -> Result<Self> {
         // FITS header records are restricted ASCII (§4.1). Rejecting non-ASCII up
         // front both enforces that and guarantees every fixed-column slice below
         // lands on a char boundary — a valid UTF-8 *multibyte* card would
@@ -61,7 +61,7 @@ impl Record {
         let keyword = text[..8].trim_end_matches(' ');
 
         if is_end_record(raw) {
-            return Ok(Record::End);
+            return Ok(Self::End);
         }
         if keyword == "END" {
             return Err(FitsError::ReservedKeyword {
@@ -69,7 +69,7 @@ impl Record {
             });
         }
         let commentary = || {
-            Record::Card(Card::Commentary {
+            Self::Card(Card::Commentary {
                 keyword: keyword.to_string(),
                 text: free_text(&text[8..]),
             })
@@ -83,7 +83,7 @@ impl Record {
         if keyword == "CONTINUE" {
             let split = split_value_comment(&text[10..]);
             if &raw[8..10] == b"  " && split.value_token.starts_with('\'') {
-                return Ok(Record::Continue {
+                return Ok(Self::Continue {
                     substring: parse_string(split.value_token, raw)?,
                     comment: split.comment,
                 });
@@ -93,7 +93,7 @@ impl Record {
         if raw[8] == b'=' {
             validate_keyword(keyword)?;
             let split = split_value_comment(&text[10..]);
-            return Ok(Record::Card(Card::Value {
+            return Ok(Self::Card(Card::Value {
                 keyword: keyword.to_string(),
                 value: parse_value(split.value_token, raw)?,
                 comment: split.comment,
@@ -107,8 +107,8 @@ impl Record {
 impl Card {
     /// A commentary card (`COMMENT`/`HISTORY`/blank keyword) carrying free text; an
     /// empty `text` is a physically blank record.
-    pub(super) fn commentary(keyword: &str, text: &str) -> Card {
-        Card::Commentary {
+    pub(super) fn commentary(keyword: &str, text: &str) -> Self {
+        Self::Commentary {
             keyword: keyword.to_string(),
             text: (!text.is_empty()).then(|| text.to_string()),
         }
@@ -116,21 +116,21 @@ impl Card {
 
     pub(crate) fn keyword(&self) -> &str {
         match self {
-            Card::Value { keyword, .. } | Card::Commentary { keyword, .. } => keyword,
+            Self::Value { keyword, .. } | Self::Commentary { keyword, .. } => keyword,
         }
     }
 
     #[cfg(feature = "compression")]
     pub(super) const fn keyword_mut(&mut self) -> &mut String {
         match self {
-            Card::Value { keyword, .. } | Card::Commentary { keyword, .. } => keyword,
+            Self::Value { keyword, .. } | Self::Commentary { keyword, .. } => keyword,
         }
     }
 
     pub(crate) const fn value(&self) -> Option<&Value> {
         match self {
-            Card::Value { value, .. } => Some(value),
-            Card::Commentary { .. } => None,
+            Self::Value { value, .. } => Some(value),
+            Self::Commentary { .. } => None,
         }
     }
 
@@ -138,8 +138,8 @@ impl Card {
     /// card.
     pub(crate) fn comment(&self) -> Option<&str> {
         match self {
-            Card::Value { comment, .. } => comment.as_deref(),
-            Card::Commentary { text, .. } => text.as_deref(),
+            Self::Value { comment, .. } => comment.as_deref(),
+            Self::Commentary { text, .. } => text.as_deref(),
         }
     }
 
@@ -178,12 +178,12 @@ impl Card {
     fn render_one(&self) -> Result<[u8; CARD_SIZE]> {
         let mut record = RecordBuf::new(self.keyword());
         match self {
-            Card::Commentary { text, .. } => {
+            Self::Commentary { text, .. } => {
                 if let Some(text) = text {
                     record.write_str_at(8, text)?;
                 }
             }
-            Card::Value { value, comment, .. } => {
+            Self::Value { value, comment, .. } => {
                 record.bytes[8] = b'=';
                 // astropy and cfitsio both warn on a non-fixed-format mandatory
                 // keyword (§4.2.3–4.2.4).
@@ -207,7 +207,7 @@ impl Card {
     /// The long text value that cannot fit one 80-byte record and so must be
     /// emitted as a `CONTINUE` chain (§4.2.1.2).
     fn continuation_chain(&self) -> Option<LongString<'_>> {
-        let Card::Value {
+        let Self::Value {
             value: Value::Text(text),
             comment,
             ..
@@ -226,7 +226,7 @@ impl Card {
     }
 
     fn validate_contents(&self) -> Result<()> {
-        if let Card::Value { keyword, .. } = self {
+        if let Self::Value { keyword, .. } = self {
             validate_valued_keyword(keyword)?;
         }
         if let Some(comment) = self.comment() {
@@ -541,7 +541,7 @@ struct RecordBuf<'k> {
 }
 
 impl<'k> RecordBuf<'k> {
-    fn new(keyword: &'k str) -> RecordBuf<'k> {
+    fn new(keyword: &'k str) -> Self {
         let mut bytes = [b' '; CARD_SIZE];
         let name = keyword.as_bytes();
         let n = name.len().min(8);

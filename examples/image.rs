@@ -9,7 +9,7 @@
 
 use std::fs::File;
 
-use fits_well::image::{Image, ImageData, ImageView, Scaling};
+use fits_well::image::{Data, Image, Scaling, View};
 use fits_well::{FitsReader, FitsWriter};
 use std::env;
 
@@ -20,14 +20,14 @@ fn main() -> fits_well::Result<()> {
     // (NAXIS1 = 4), and `samples` is the flat row-major buffer.
     let i16_image = Image::new_scaled(
         vec![4, 3],
-        ImageData::I16(vec![0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23]),
+        Data::I16(vec![0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23]),
         Scaling::IDENTITY,
     )?;
     // A second image of a *different* type (32-bit float) — so the file holds two
     // image HDUs of differing BITPIX, which the view loop below reads into one buffer.
     let f32_image = Image::new_scaled(
         vec![2, 2],
-        ImageData::F32(vec![1.5, -2.5, 3.5, -4.5]),
+        Data::F32(vec![1.5, -2.5, 3.5, -4.5]),
         Scaling::IDENTITY,
     )?;
 
@@ -46,7 +46,7 @@ fn main() -> fits_well::Result<()> {
     let images = reader.image_indices();
     println!("image HDUs: {images:?}");
 
-    // `read_image` borrows the data unit in place (zero-copy) as a `ReadImage`; `decode`
+    // `read_image` borrows the data unit in place (zero-copy) as a `Lazy`; `decode`
     // byte-swaps the big-endian samples into an *owned* host-endian buffer you can keep
     // and move (a BITPIX=8 image's bytes come back copy-free via `raw.u8()`).
     let raw = reader.read_image(images[0])?;
@@ -54,7 +54,7 @@ fn main() -> fits_well::Result<()> {
     println!("hdu 0: shape {:?}, {:?}", metadata.shape, metadata.bitpix);
     // `physical()` applies BSCALE/BZERO and maps any BLANK value to NaN.
     println!("  physical {:?}", raw.physical());
-    if let ImageData::I16(pixels) = raw.decode() {
+    if let Data::I16(pixels) = raw.decode() {
         println!("  pixels   {pixels:?}");
     }
 
@@ -68,8 +68,8 @@ fn main() -> fits_well::Result<()> {
         // samples you need past the loop, use the owned `read_image().decode()` above.
         let image = reader.read_image_view(idx, &mut scratch)?;
         match image.samples() {
-            ImageView::I16(v) => println!("hdu {idx}: i16 view {v:?}"),
-            ImageView::F32(v) => println!("hdu {idx}: f32 view {v:?}"),
+            View::I16(v) => println!("hdu {idx}: i16 view {v:?}"),
+            View::F32(v) => println!("hdu {idx}: f32 view {v:?}"),
             other => println!(
                 "hdu {idx}: {:?} view, {} samples",
                 other.bitpix(),

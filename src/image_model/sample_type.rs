@@ -1,0 +1,107 @@
+//! [`SampleType`]: which of the six FITS sample types an array holds.
+
+use crate::bitpix::Bitpix;
+use crate::image_model::scaling::Scaling;
+use crate::image_model::{I8_OFFSET, U16_OFFSET, U32_OFFSET, U64_OFFSET};
+
+/// Which exact-integer realization of the FITS sign-bit-offset conventions a stored
+/// type carries — effectively the tag of [`UnsignedData`], and the single thing both
+/// the image (`BZERO`) and binary-table (`TZEROn`) paths must resolve.
+///
+/// [`UnsignedData`]: crate::image_model::unsigned_data::UnsignedData
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnsignedKind {
+    I8,
+    U16,
+    U32,
+    U64,
+}
+
+/// The effective element type of an image's *physical* samples — the analogue of
+/// cfitsio's image "equivalent type". `BITPIX` records only the stored width and
+/// signedness; the FITS unsigned and signed-byte conventions then layer a `BZERO`
+/// offset on top (`BSCALE == 1` with `BZERO = 2^(n-1)`, or `BZERO = -128` for signed
+/// bytes), so the values actually mean an unsigned (or signed-byte) integer. This
+/// enum is what [`Lazy::sample_type`] and [`Image::sample_type`] return, resolved up
+/// front from `BITPIX` + [`Scaling`] without touching the pixels — so a caller can
+/// pick a code path (e.g. a per-type normalization range) without re-deriving the
+/// `BZERO` convention itself.
+///
+/// [`Lazy::sample_type`]: crate::image_model::lazy::Lazy::sample_type
+/// [`Image::sample_type`]: crate::image_model::Image::sample_type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SampleType {
+    /// `BITPIX = 8`, `BZERO = -128`: a signed byte.
+    I8,
+    /// `BITPIX = 8`: an unsigned byte (the FITS default for `BITPIX = 8`).
+    U8,
+    /// `BITPIX = 16`, no unsigned offset.
+    I16,
+    /// `BITPIX = 16`, `BZERO = 2¹⁵`.
+    U16,
+    /// `BITPIX = 32`, no unsigned offset.
+    I32,
+    /// `BITPIX = 32`, `BZERO = 2³¹`.
+    U32,
+    /// `BITPIX = 64`, no unsigned offset.
+    I64,
+    /// `BITPIX = 64`, `BZERO = 2⁶³`.
+    U64,
+    /// `BITPIX = -32`.
+    F32,
+    /// `BITPIX = -64`.
+    F64,
+}
+
+impl SampleType {
+    /// Resolve the effective type from the stored `BITPIX` and its [`Scaling`].
+    ///
+    /// A signed integer `BITPIX` whose scaling is exactly the unsigned (or signed-byte)
+    /// convention — `BSCALE == 1` and `BZERO` the matching sign-bit offset — resolves
+    /// to the corresponding unsigned (or `I8`) type; any other scaling leaves the
+    /// stored type as-is. `BLANK` does not affect the classification: it marks null
+    /// samples *within* a type, not the type itself.
+    pub fn from_scaling(bitpix: Bitpix, scaling: &Scaling) -> Self {
+        let offset = scaling.bscale == 1.0;
+        match bitpix {
+            Bitpix::U8 if offset && scaling.bzero == I8_OFFSET => Self::I8,
+            Bitpix::U8 => Self::U8,
+            Bitpix::I16 if offset && scaling.bzero == U16_OFFSET => Self::U16,
+            Bitpix::I16 => Self::I16,
+            Bitpix::I32 if offset && scaling.bzero == U32_OFFSET => Self::U32,
+            Bitpix::I32 => Self::I32,
+            Bitpix::I64 if offset && scaling.bzero == U64_OFFSET => Self::U64,
+            Bitpix::I64 => Self::I64,
+            Bitpix::F32 => Self::F32,
+            Bitpix::F64 => Self::F64,
+        }
+    }
+
+    /// `true` for `U8`/`U16`/`U32`/`U64`.
+    pub const fn is_unsigned(self) -> bool {
+        matches!(self, Self::U8 | Self::U16 | Self::U32 | Self::U64)
+    }
+
+    /// `true` for `F32`/`F64`.
+    pub const fn is_float(self) -> bool {
+        matches!(self, Self::F32 | Self::F64)
+    }
+
+    /// `true` for every integer variant (signed or unsigned).
+    pub const fn is_integer(self) -> bool {
+        !self.is_float()
+    }
+
+    /// The exact-integer realization this type denotes, or `None` when no sign-bit
+    /// offset is in play. `U8` is deliberately absent: a `BITPIX = 8` sample is
+    /// natively unsigned, so there is nothing to recover.
+    pub(crate) const fn unsigned_kind(self) -> Option<UnsignedKind> {
+        match self {
+            Self::I8 => Some(UnsignedKind::I8),
+            Self::U16 => Some(UnsignedKind::U16),
+            Self::U32 => Some(UnsignedKind::U32),
+            Self::U64 => Some(UnsignedKind::U64),
+            _ => None,
+        }
+    }
+}

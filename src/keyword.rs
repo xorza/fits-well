@@ -25,8 +25,8 @@ pub(crate) struct AltSuffix {
 }
 
 impl AltSuffix {
-    pub(crate) const fn new(alternate: Option<char>) -> AltSuffix {
-        let mut suffix = AltSuffix {
+    pub(crate) const fn new(alternate: Option<char>) -> Self {
+        let mut suffix = Self {
             buf: [0; 4],
             len: 0,
         };
@@ -85,8 +85,8 @@ pub(crate) struct KeyBuf {
 }
 
 impl KeyBuf {
-    pub(crate) const fn new() -> KeyBuf {
-        KeyBuf {
+    pub(crate) const fn new() -> Self {
+        Self {
             buf: [0; KEY_CAP],
             len: 0,
         }

@@ -57,14 +57,14 @@ pub(crate) struct ColumnLabels {
 
 impl ColumnLabels {
     /// The labels of column `n` (1-based).
-    pub(crate) fn read(header: &Header, n: usize) -> Result<ColumnLabels> {
+    pub(crate) fn read(header: &Header, n: usize) -> Result<Self> {
         let text = |keyword: &str| -> Result<Option<String>> {
             Ok(header
                 .get_text(keyword)?
                 .filter(|value| !value.is_empty())
                 .map(str::to_string))
         };
-        Ok(ColumnLabels {
+        Ok(Self {
             name: text(key!("TTYPE{n}").as_str())?,
             unit: text(key!("TUNIT{n}").as_str())?,
         })
@@ -79,14 +79,14 @@ pub(crate) struct ColumnScaling {
 }
 
 impl ColumnScaling {
-    pub(crate) const IDENTITY: ColumnScaling = ColumnScaling {
+    pub(crate) const IDENTITY: Self = Self {
         tscale: 1.0,
         tzero: 0.0,
     };
 
     /// The scaling of column `n` (1-based).
-    pub(crate) fn read(header: &Header, n: usize) -> Result<ColumnScaling> {
-        Ok(ColumnScaling {
+    pub(crate) fn read(header: &Header, n: usize) -> Result<Self> {
+        Ok(Self {
             tscale: header.get_real(key!("TSCAL{n}").as_str())?.unwrap_or(1.0),
             tzero: header.get_real(key!("TZERO{n}").as_str())?.unwrap_or(0.0),
         })

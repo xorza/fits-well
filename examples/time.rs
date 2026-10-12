@@ -10,7 +10,7 @@
 use std::fs::File;
 
 use fits_well::header::Header;
-use fits_well::time::{Datetime, TimeCoordinate, TimeScale};
+use fits_well::time::{Coordinate, Datetime, Scale};
 use fits_well::{FitsReader, FitsWriter};
 use std::env;
 
@@ -36,14 +36,14 @@ fn main() -> fits_well::Result<()> {
     let reader = FitsReader::open(File::open(&path)?)?;
     let header = &reader.hdus()[0].header;
 
-    // `TimeCoordinate::observation` resolves the observation time (MJD-OBS, else
+    // `Coordinate::observation` resolves the observation time (MJD-OBS, else
     // DATE-OBS) with its scale.
-    println!("observation = {:?}", TimeCoordinate::observation(header)?);
+    println!("observation = {:?}", Coordinate::observation(header)?);
 
     let timesys = header
         .get_text("TIMESYS")?
         .expect("example header sets TIMESYS")
-        .parse::<TimeScale>()?;
+        .parse::<Scale>()?;
 
     // The DATE-OBS string itself parses to a `Datetime`, then to Julian Date.
     let t = Datetime::parse(

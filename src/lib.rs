@@ -6,7 +6,7 @@
 //! The format's structure maps onto a stack of layers, so the hot decode path
 //! stays lean and the semantic layers compute only on demand. WCS (§8) and time
 //! (§9) are dependency-free, always compiled, and parsed from a header on request
-//! ([`wcs::Wcs::from_header`], [`time::FitsTime::from_header`]); tiled compression
+//! ([`wcs::Wcs::from_header`], [`time::Frame::from_header`]); tiled compression
 //! carries a dependency and stays behind the `compression` feature.
 //!
 //! ```text
@@ -52,12 +52,13 @@ mod checksum;
 mod column;
 #[cfg(feature = "compression")]
 mod compress;
-mod data;
 mod endian;
 mod error;
+mod fits_writer;
 mod groups;
 mod hdu;
 mod header_model;
+mod image_model;
 mod keyword;
 mod ragged;
 mod reader;
@@ -66,31 +67,30 @@ mod time_coordinates;
 mod unit;
 mod words;
 mod world_coordinates;
-mod writer;
 
 pub use error::{FitsError, Indexed, Ranked, Result};
+pub use fits_writer::FitsWriter;
 pub use reader::FitsReader;
-pub use writer::FitsWriter;
 
 /// Typed image values, scratch-backed views, compression, and incremental output.
 pub mod image {
     pub use crate::bitpix::Bitpix;
     #[cfg(feature = "compression")]
     pub use crate::compress::{Compression, CompressionOptions, DitherMethod, Gzip, Hcompress};
-    pub use crate::data::image_data::ImageData;
-    pub use crate::data::image_view::{BorrowedImage, ImageView};
-    pub use crate::data::read_image::ReadImage;
-    pub use crate::data::sample_type::SampleType;
-    pub use crate::data::scaling::Scaling;
-    pub use crate::data::unsigned_data::UnsignedData;
-    pub use crate::data::{Image, ImageMetadata};
-    pub use crate::writer::image::ImageStream;
+    pub use crate::fits_writer::writer::Writer;
+    pub use crate::image_model::data::Data;
+    pub use crate::image_model::lazy::Lazy;
+    pub use crate::image_model::sample_type::SampleType;
+    pub use crate::image_model::scaling::Scaling;
+    pub use crate::image_model::unsigned_data::UnsignedData;
+    pub use crate::image_model::view::{Borrowed, View};
+    pub use crate::image_model::{Image, Metadata};
 }
 
 /// The ordered header model: keyword records and their typed values.
 pub mod header {
     pub use crate::header_model::value::{FitsInteger, Value};
-    pub use crate::header_model::{Header, HeaderEntry, HeaderRecord};
+    pub use crate::header_model::{Entry, Header, Record};
 }
 
 pub mod wcs {
@@ -117,7 +117,7 @@ pub mod wcs {
     //! coordinate arrays are resolved from their BINTABLE through
     //! [`FitsReader::read_wcs`](crate::FitsReader::read_wcs). All are validated against
     //! `astropy.wcs`, wcslib, or exact interpolation fixtures. Convention-only `XPH`
-    //! transforms remain readable in [`WcsView::unsupported_axes`]; complete transforms
+    //! transforms remain readable in [`Metadata::unsupported_axes`]; complete transforms
     //! then return
     //! [`FitsError::UnsupportedWcsTransform`](crate::FitsError::UnsupportedWcsTransform).
     //!
@@ -125,31 +125,31 @@ pub mod wcs {
     //! ([`Wcs::from_pixel_list`]) and vector-cell ([`Wcs::from_array_column`]) forms.
     //!
     //! Pixel↔world yields celestial coordinates in the frame the file declares;
-    //! [`WcsView::celestial_frame`] and [`WcsAxis::spectral_frame`] expose that typed
+    //! [`Metadata::celestial_frame`] and [`Axis::spectral_frame`] expose that typed
     //! `RADESYS`/`EQUINOX` and spectral frame/rest metadata. Converting *between*
     //! reference frames is astrometry beyond the FITS standard and is intentionally
     //! out of scope. Transform methods return explicit errors for invalid projection
     //! domains or failed iterations.
 
-    pub use crate::world_coordinates::axis::spectral_rest::SpectralRest;
+    pub use crate::world_coordinates::axis::Axis;
+    pub use crate::world_coordinates::axis_transform::spectral_rest::SpectralRest;
     pub use crate::world_coordinates::celestial_frame::{CelestialFrame, CelestialReferenceFrame};
     pub use crate::world_coordinates::celestial_pole::CelestialPole;
     pub use crate::world_coordinates::projection::Projection;
     pub use crate::world_coordinates::spectral_frame::{SpectralFrame, SpectralReferenceFrame};
-    pub use crate::world_coordinates::wcs_axis::WcsAxis;
-    pub use crate::world_coordinates::{CelestialProjection, Wcs, WcsView};
+    pub use crate::world_coordinates::{CelestialProjection, Metadata, Wcs};
 }
 
 /// Typed time coordinates (§9): calendar datetimes, time scales, and a
 /// header's time frame.
 pub mod time {
+    pub use crate::time_coordinates::bounds::Bounds;
+    pub use crate::time_coordinates::coordinate::Coordinate;
     pub use crate::time_coordinates::datetime::Datetime;
-    pub use crate::time_coordinates::fits_time::FitsTime;
+    pub use crate::time_coordinates::frame::Frame;
     pub use crate::time_coordinates::phase_axis::PhaseAxis;
-    pub use crate::time_coordinates::time_bounds::TimeBounds;
-    pub use crate::time_coordinates::time_coordinate::TimeCoordinate;
-    pub use crate::time_coordinates::time_reference_position::TimeReferencePosition;
-    pub use crate::time_coordinates::time_scale::{TimeScale, TimeScaleKind};
+    pub use crate::time_coordinates::reference_position::ReferencePosition;
+    pub use crate::time_coordinates::scale::{Scale, ScaleKind};
 }
 
 /// Binary and ASCII table values, schema and selection metadata, and write
@@ -162,21 +162,21 @@ pub mod table {
 
     pub use crate::ascii::ascii_text::AsciiText;
     pub use crate::ascii::{
-        AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiTable, AsciiTableMetadata,
+        Ascii, AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiMetadata,
     };
-    pub use crate::bintable::BinTable;
+    pub use crate::bintable::Table;
     pub use crate::bintable::bit_column::BitColumn;
     pub use crate::bintable::character_field::CharacterField;
     pub use crate::bintable::column::Column;
     pub use crate::bintable::column_data::ColumnData;
     pub use crate::bintable::column_reader::ColumnReader;
-    pub use crate::bintable::table_schema::TableSchema;
+    pub use crate::bintable::schema::Schema;
     pub use crate::bintable::tform::Tform;
     pub use crate::bintable::tform_kind::TformKind;
+    pub use crate::fits_writer::ascii_builder::{AsciiBuilder, AsciiWriteColumn};
+    pub use crate::fits_writer::builder::{Builder, WriteColumn};
     pub use crate::ragged::Ragged;
-    pub use crate::reader::{ColumnSelector, SelectedColumn, TableColumnData, TableSelection};
-    pub use crate::writer::ascii::{AsciiTableBuilder, AsciiWriteColumn};
-    pub use crate::writer::table::{TableBuilder, WriteColumn};
+    pub use crate::reader::{ColumnSelector, SelectedColumn, SelectedData, Selection};
 }
 
 /// Lazy FITS source access and HDU-bound operations. Concrete source wrappers

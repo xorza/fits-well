@@ -14,7 +14,7 @@ pub struct CharacterField<'a> {
 impl<'a> CharacterField<'a> {
     /// The field stored as `bytes` — a fixed column's `repeat` bytes for one row,
     /// or one row of a `P`/`Q` character column.
-    pub const fn new(bytes: &'a [u8]) -> CharacterField<'a> {
+    pub const fn new(bytes: &'a [u8]) -> Self {
         CharacterField { bytes }
     }
 
@@ -40,7 +40,7 @@ impl<'a> CharacterField<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::bintable::BinTable;
+    use crate::bintable::Table;
     use crate::bintable::character_field::CharacterField;
     use crate::bintable::column_data::ColumnData;
     use crate::bintable::internals::table_header;
@@ -50,7 +50,7 @@ mod tests {
         let header = table_header(4, 4, &["4A"]);
         let fields: [&[u8]; 4] = [b"AB  ", b"AB\0x", b"\0xyz", b"    "];
         let data = fields.concat();
-        let table = BinTable::from_data(&header, data.clone()).unwrap();
+        let table = Table::from_data(&header, data.clone()).unwrap();
         let ColumnData::Character(bytes) = table.column_by_idx(0).unwrap().raw().unwrap() else {
             panic!("expected exact binary character bytes");
         };
