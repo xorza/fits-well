@@ -229,6 +229,7 @@ version = "0.3.0"
 dependencies = [
  "bitvec",
  "criterion",
+ "fits-well",
  "flate2",
  "memmap2",
  "num-complex",

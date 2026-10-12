@@ -16,7 +16,7 @@
 //!
 //! [`TiledImage::decode`]: decode::tiled_image::TiledImage::decode
 
-#[cfg(feature = "bench")]
+#[cfg(feature = "internals")]
 pub(crate) mod bench;
 mod convert;
 pub(crate) mod decode;

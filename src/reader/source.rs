@@ -218,7 +218,7 @@ impl Source for MmapSource {
     }
 }
 
-#[cfg(all(test, feature = "compression"))]
+#[cfg(test)]
 pub(crate) mod internals {
     use std::cell::Cell;
     use std::rc::Rc;

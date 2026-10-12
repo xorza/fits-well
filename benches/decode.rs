@@ -1,4 +1,4 @@
-//! The in-memory sample paths: `cargo bench --features bench --bench decode`.
+//! The in-memory sample paths: `cargo bench --bench decode`.
 //! For SIMD codegen (a non-portable binary), add `RUSTFLAGS="-C target-cpu=native"`.
 
 use criterion::{criterion_group, criterion_main};

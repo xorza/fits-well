@@ -1,4 +1,4 @@
-//! The tiled codecs: `cargo bench --features bench,compression --bench compress`.
+//! The tiled codecs: `cargo bench --features compression --bench compress`.
 
 use criterion::{criterion_group, criterion_main};
 use fits_well::bench;

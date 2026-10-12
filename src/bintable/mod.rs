@@ -30,7 +30,7 @@ use crate::bintable::column_reader::ColumnReader;
 use crate::bintable::table_schema::TableSchema;
 use crate::bintable::table_view::TableView;
 use crate::error::Result;
-#[cfg(any(feature = "compression", feature = "internals", test))]
+#[cfg(any(feature = "compression", feature = "internals"))]
 use crate::header_model::Header;
 
 /// A binary table's structure plus its data unit.
@@ -58,7 +58,7 @@ impl BinTable {
 
     /// Build a table from its header and owned data unit (`data` is the main
     /// table followed by the optional heap, as returned by the reader).
-    #[cfg(any(feature = "compression", feature = "internals", test))]
+    #[cfg(any(feature = "compression", feature = "internals"))]
     pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<BinTable> {
         BinTable::new(TableSchema::parse(header)?, data)
     }
@@ -95,7 +95,7 @@ impl BinTable {
     }
 }
 
-#[cfg(any(test, feature = "internals"))]
+#[cfg(feature = "internals")]
 pub(crate) mod internals {
     #[cfg(all(test, feature = "compression"))]
     use crate::bintable::BinTable;

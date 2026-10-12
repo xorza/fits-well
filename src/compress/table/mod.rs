@@ -988,7 +988,7 @@ fn scatter_column(out: &mut [u8], bytes: &[u8], rows: usize, row_len: usize, m: 
 }
 
 /// The mixed-column table the table-compression tests and bench compress.
-#[cfg(any(test, feature = "bench"))]
+#[cfg(feature = "internals")]
 pub(crate) mod internals {
     use crate::bintable::column_data::ColumnData;
     use crate::writer::table::WriteColumn;

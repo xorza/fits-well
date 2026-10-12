@@ -871,9 +871,8 @@ const fn domain(axis: usize) -> FitsError {
 }
 
 /// `-TAB` fixtures for the tabular, reader and WCS bench code.
-#[cfg(any(test, feature = "internals"))]
+#[cfg(feature = "internals")]
 pub(crate) mod internals {
-    #[cfg(feature = "internals")]
     use std::sync::OnceLock;
 
     use crate::bintable::BinTable;
@@ -938,11 +937,9 @@ pub(crate) mod internals {
         header
     }
 
-    #[cfg(feature = "internals")]
     /// Entries in the [`indexed_wcs`] lookup.
     pub(crate) const INDEX_LENGTH: usize = 100_000;
 
-    #[cfg(feature = "internals")]
     /// A `WAVE-TAB` axis over a 100 000-entry monotonic lookup: index value 2i holds
     /// coordinate 0.25i. Built once per process.
     pub(crate) fn indexed_wcs() -> &'static Wcs {
@@ -964,7 +961,6 @@ pub(crate) mod internals {
         })
     }
 
-    #[cfg(feature = "internals")]
     /// The two coupled `-TAB` axes over [`COUPLED_GRID`]. Built once per process.
     pub(crate) fn coupled_wcs() -> &'static Wcs {
         static WCS: OnceLock<Wcs> = OnceLock::new();
@@ -974,19 +970,16 @@ pub(crate) mod internals {
         })
     }
 
-    #[cfg(feature = "internals")]
     /// One pixel through the indexed lookup.
     pub fn tabular_forward_at_pixel(pixel: f64) -> f64 {
         indexed_wcs().pixel_to_world(&[pixel]).unwrap()[0]
     }
 
-    #[cfg(feature = "internals")]
     /// One world coordinate back through the indexed lookup.
     pub fn tabular_inverse_at_world(world: f64) -> f64 {
         indexed_wcs().world_to_pixel(&[world]).unwrap()[0]
     }
 
-    #[cfg(feature = "internals")]
     /// The world point at `fraction` along the diagonal of the coupled grid, inverted;
     /// a dyadic fraction sets how deep the sub-voxel search goes.
     pub fn tabular_inverse_at_fraction(fraction: f64) -> f64 {

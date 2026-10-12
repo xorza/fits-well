@@ -1,4 +1,4 @@
-//! The read paths: `cargo bench --features bench --bench read`, with `mmap` for its
+//! The read paths: `cargo bench --bench read`, with `mmap` for its
 //! arm and `compression` for the compressed sections.
 
 use criterion::{criterion_group, criterion_main};
