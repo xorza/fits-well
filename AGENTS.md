@@ -24,9 +24,11 @@ cargo clippy -- -D warnings
 Lines 4 and 5 build the codec paths without `parallel`, which
 `--all-features` never does; line 6 builds the crate with no codec at all. The
 last lints the build that ships: every other target turns `internals` on
-through the self dev-dependency.
+through the self dev-dependency. A change to bench code adds
+`cargo benches -- --test`, which runs each case once. `.cargo/config.toml`
+builds x86-64 for x86-64-v3, the CPU darkroom builds for.
 
-## Test code and benches
+## Test code
 
 `internals` is the one feature for what only tests and benches build; the
 crate's dev-dependency on itself turns it on in every test and bench build.
@@ -35,5 +37,16 @@ would build `parallel` after all. Code a bench or an integration test reaches
 is gated `#[cfg(feature = "internals")]`; a reach-in only the crate's own unit
 tests call is gated `#[cfg(test)]`. Never `any(test, feature = "internals")`.
 
-A bench: `cargo bench --bench decode`; add `--features mmap` for the
-memory-mapped arm of the `read` bench.
+## Benches
+
+One target runs every case through `bench::run`; each driver sits in a
+`bench.rs` beside the code it measures, and `src/bench/mod.rs` states the
+rules. `cargo benches` runs them with every feature, so a case always measures
+the same build. An id is `<kind>/<group>/<case>`, the case the variant (a
+source, where a group has several) then the input: an `atomic` case times one
+operation on the unit the read and write paths hand it (one row of the
+standard frame, which is also a codec's default tile); an `integration` case
+times a public entry point end to end on the 24 MP standard frame or the
+source catalog, from each source (`stream`, `slice`, `mmap`) or to a `file`. A
+filter selects by id: `cargo benches -- --list`, `-- '^atomic/'`,
+`-- --exact integration/read_section/stream/i16`.

@@ -1,157 +1,148 @@
-//! Criterion groups for the read paths: a seeking (`Read + Seek`) source, which
-//! copies each data unit into the reader's scratch before decoding, against an
-//! in-memory source (`from_bytes`, and mmap under the `mmap` feature), which
-//! decodes straight from the borrowed bytes — one fewer memory pass over the data.
+//! The read cases: the data checksum on one row, and a whole image, an image in row sections,
+//! and a table, each from a file on every source.
 
 use std::hint::black_box;
-use std::io::Cursor;
+use std::path::PathBuf;
 
-use criterion::{BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion};
 
+use crate::bench::fixture::{self, Kind, Reading, Scale, ScratchDir, SourceKind};
+use crate::bench::scene::{self, CATALOG_ROW_BYTES, CATALOG_ROWS, HEIGHT, TYPES, WIDTH};
+use crate::bintable::BinTable;
 use crate::bitpix::Bitpix;
-use crate::data::Image;
-use crate::data::bench::{TYPES, UNIT_BYTES, sample_data, unit_count};
-use crate::reader::FitsReader;
-use crate::writer::FitsWriter;
+use crate::checksum;
+use crate::data::image_data::ImageData;
+use crate::reader::source::Source;
+use crate::reader::{ChecksumReport, FitsReader};
 
-/// A single-HDU file of a [`UNIT_BYTES`] data unit of `bitpix`, as bytes.
-fn unit_file(bitpix: Bitpix) -> Vec<u8> {
-    let n = unit_count(bitpix);
-    let image = Image::new(vec![n], sample_data(bitpix, n)).unwrap();
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_image(&image, None).unwrap();
-    w.into_inner().into_inner()
+/// The samples a section read takes at a time, as the lumos light reader does: 64 Ki samples,
+/// whole rows of the standard frame, so ten rows a section.
+const SECTION_ROWS: usize = (64 * 1024) / WIDTH;
+
+/// `atomic/checksum/i16`: the ones'-complement sum of one row of the standard frame's stored
+/// bytes, the kernel a section read feeds. Per sample.
+pub(crate) fn atomic(c: &mut Criterion) {
+    let mut group = Kind::Atomic.group(c, "checksum", Scale::Sample);
+    group.throughput(fixture::throughput(WIDTH, Bitpix::I16.elem_size()));
+    group.bench_function(fixture::bitpix_id(Bitpix::I16), |b| {
+        let mut row = Vec::new();
+        scene::sky(Bitpix::I16, WIDTH, 1, 1)
+            .samples
+            .encode_into(&mut row);
+        b.iter(|| checksum::accumulate(black_box(&row), 0));
+    });
+    group.finish();
 }
 
-/// `read_image` — an owned decode end to end: `seek` stages each data unit into the
-/// reader's scratch and decodes from it, `slice` (and `mmap`) decode straight from
-/// the borrowed bytes. The reader is opened once, so the header scan is not timed.
-pub fn read_image(c: &mut Criterion) {
-    let mut g = c.benchmark_group("read_image");
-    for (name, bitpix) in TYPES {
-        let bytes = unit_file(bitpix);
-        g.throughput(Throughput::Bytes(UNIT_BYTES as u64));
+/// `integration/read_image/<source>/<type>`, `integration/read_section/<source>/<type>` and
+/// `integration/read_table/<source>/catalog`, from opening the file to the last sample.
+pub(crate) fn integration(c: &mut Criterion) {
+    let dir = ScratchDir::new("read");
+    read_image(c, &dir);
+    read_section(c, &dir);
+    read_table(c, &dir);
+}
 
-        let mut seek = FitsReader::open(Cursor::new(bytes.clone())).unwrap();
-        g.bench_function(BenchmarkId::new("seek", name), |b| {
-            b.iter(|| black_box(seek.read_image(0).unwrap().decode()));
-        });
-
-        let mut slice = FitsReader::from_bytes(&bytes).unwrap();
-        g.bench_function(BenchmarkId::new("slice", name), |b| {
-            b.iter(|| black_box(slice.read_image(0).unwrap().decode()));
-        });
-
-        #[cfg(feature = "mmap")]
-        {
-            let path = std::env::temp_dir().join(format!(
-                "fits-well-read-bench-{}-{name}.fits",
-                std::process::id()
-            ));
-            std::fs::write(&path, &bytes).unwrap();
-            let mut mmap = FitsReader::open_mmap(&path).unwrap();
-            g.bench_function(BenchmarkId::new("mmap", name), |b| {
-                b.iter(|| black_box(mmap.read_image(0).unwrap().decode()));
+/// `integration/read_image/<source>/<type>`: the standard frame decoded into owned samples. Per
+/// sample, in the stored bytes.
+fn read_image(c: &mut Criterion, dir: &ScratchDir) {
+    let mut group = Kind::Integration.group(c, "read_image", Scale::Frame);
+    for bitpix in TYPES {
+        let mut path = None;
+        group.throughput(fixture::throughput(WIDTH * HEIGHT, bitpix.elem_size()));
+        for source in SourceKind::all() {
+            let id = BenchmarkId::new(source.id(), fixture::bitpix_id(bitpix));
+            group.bench_function(id, |b| {
+                let path = frame_path(&mut path, dir, bitpix);
+                source.bench(b, path, ReadImage);
             });
-            drop(mmap);
-            std::fs::remove_file(&path).unwrap();
         }
     }
-    g.finish();
+    group.finish();
 }
 
-/// `read_image_view` — the borrowed view into a caller-owned reused scratch: no
-/// per-call output allocation, the cost the owned decode pays every call. Over the
-/// seeking source every type still stages one copy; over the slice source a `u8`
-/// view is a zero-copy borrow in constant time, so it reports calls per second, not
-/// bytes.
-pub fn read_image_view(c: &mut Criterion) {
-    let mut g = c.benchmark_group("read_image_view");
-    for (name, bitpix) in TYPES {
-        let bytes = unit_file(bitpix);
-
-        g.throughput(Throughput::Bytes(UNIT_BYTES as u64));
-        let mut seek = FitsReader::open(Cursor::new(bytes.clone())).unwrap();
-        let mut seek_scratch: Vec<u64> = Vec::new();
-        g.bench_function(BenchmarkId::new("seek", name), |b| {
-            // The view borrows reader and scratch, so it cannot leave the closure;
-            // `black_box(&view)` keeps the swap from being elided.
-            b.iter(|| {
-                let view = seek.read_image_view(0, &mut seek_scratch).unwrap();
-                black_box(&view);
+/// `integration/read_section/<source>/<type>`: the standard frame as the lumos light reader
+/// takes it, ten rows a section into one reused buffer, each section fed to the data checksum,
+/// then the checksum judged. Per sample, in the stored bytes.
+fn read_section(c: &mut Criterion, dir: &ScratchDir) {
+    let mut group = Kind::Integration.group(c, "read_section", Scale::Frame);
+    for bitpix in TYPES {
+        let mut path = None;
+        group.throughput(fixture::throughput(WIDTH * HEIGHT, bitpix.elem_size()));
+        for source in SourceKind::all() {
+            let id = BenchmarkId::new(source.id(), fixture::bitpix_id(bitpix));
+            group.bench_function(id, |b| {
+                let path = frame_path(&mut path, dir, bitpix);
+                source.bench(b, path, ReadSections { words: Vec::new() });
             });
-        });
-
-        if bitpix == Bitpix::U8 {
-            g.throughput(Throughput::Elements(1));
         }
-        let mut slice = FitsReader::from_bytes(&bytes).unwrap();
-        let mut slice_scratch: Vec<u64> = Vec::new();
-        g.bench_function(BenchmarkId::new("slice", name), |b| {
-            b.iter(|| {
-                let view = slice.read_image_view(0, &mut slice_scratch).unwrap();
-                black_box(&view);
-            });
-        });
     }
-    g.finish();
+    group.finish();
 }
 
-/// `read_compressed_image_section_view` — a section of a RICE image in 64×64 tiles:
-/// one tile, then 64, over both sources.
-#[cfg(feature = "compression")]
-pub fn read_compressed_image_section(c: &mut Criterion) {
-    use crate::compress::{Compression, CompressionOptions};
-
-    const WIDTH: usize = 1024;
-    const HEIGHT: usize = 1024;
-
-    let image = Image::new(
-        vec![WIDTH, HEIGHT],
-        (0..WIDTH * HEIGHT)
-            .map(|index| (index as u16).cast_signed())
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer
-        .write_compressed_image(
-            &image,
-            Compression::Rice,
-            &CompressionOptions::tiled([64, 64]),
-            None,
-        )
-        .unwrap();
-    let bytes = writer.into_inner().into_inner();
-    let mut group = c.benchmark_group("read_compressed_image_section_view");
-    for (name, ranges) in [
-        ("one_tile", [8..56, 8..56]),
-        ("sixty_four_tiles", [8..504, 8..504]),
-    ] {
-        let section_bytes = ranges.iter().map(ExactSizeIterator::len).product::<usize>() * 2;
-        group.throughput(Throughput::Bytes(section_bytes as u64));
-
-        let mut seek = FitsReader::open(Cursor::new(bytes.clone())).unwrap();
-        let mut seek_scratch = Vec::new();
-        group.bench_function(BenchmarkId::new("seek", name), |bench| {
-            bench.iter(|| {
-                let view = seek
-                    .read_image_section_view(1, &ranges, &mut seek_scratch)
-                    .unwrap();
-                black_box(&view);
-            });
-        });
-
-        let mut slice = FitsReader::from_bytes(&bytes).unwrap();
-        let mut slice_scratch = Vec::new();
-        group.bench_function(BenchmarkId::new("slice", name), |bench| {
-            bench.iter(|| {
-                let view = slice
-                    .read_image_section_view(1, &ranges, &mut slice_scratch)
-                    .unwrap();
-                black_box(&view);
-            });
+/// `integration/read_table/<source>/catalog`: the source catalog decoded into a table. Per row,
+/// in the table's bytes.
+fn read_table(c: &mut Criterion, dir: &ScratchDir) {
+    let mut group = Kind::Integration.group(c, "read_table", Scale::Frame);
+    group.throughput(fixture::throughput(CATALOG_ROWS, CATALOG_ROW_BYTES));
+    let mut path = None;
+    for source in SourceKind::all() {
+        group.bench_function(BenchmarkId::new(source.id(), "catalog"), |b| {
+            let path =
+                path.get_or_insert_with(|| dir.write("catalog.fits", &scene::catalog_file()));
+            source.bench(b, path, ReadTable);
         });
     }
     group.finish();
+}
+
+/// The file of the standard frame of `bitpix`, written the first time a case needs it.
+fn frame_path<'a>(path: &'a mut Option<PathBuf>, dir: &ScratchDir, bitpix: Bitpix) -> &'a PathBuf {
+    path.get_or_insert_with(|| {
+        let name = format!("frame_{}.fits", fixture::bitpix_id(bitpix));
+        dir.write(&name, &scene::frame_file(bitpix))
+    })
+}
+
+#[derive(Debug)]
+struct ReadImage;
+
+impl Reading for ReadImage {
+    type Output = ImageData;
+
+    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> ImageData {
+        reader.read_image(0).unwrap().decode()
+    }
+}
+
+#[derive(Debug)]
+struct ReadSections {
+    words: Vec<u64>,
+}
+
+impl Reading for ReadSections {
+    type Output = ChecksumReport;
+
+    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> ChecksumReport {
+        let mut sum = reader.begin_data_checksum(0).unwrap();
+        for top in (0..HEIGHT).step_by(SECTION_ROWS) {
+            let ranges = [0..WIDTH, top..(top + SECTION_ROWS).min(HEIGHT)];
+            let section = reader
+                .read_image_section_view_summed(0, &ranges, &mut self.words, &mut sum)
+                .unwrap();
+            black_box(&section);
+        }
+        reader.finish_data_checksum(sum).unwrap()
+    }
+}
+
+#[derive(Debug)]
+struct ReadTable;
+
+impl Reading for ReadTable {
+    type Output = BinTable;
+
+    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> BinTable {
+        reader.read_table(1).unwrap()
+    }
 }

@@ -1,120 +1,120 @@
-//! Criterion groups for the in-memory sample paths: the big-endian swap both ways
-//! and the physical scaling plane.
-//!
-//! Every typed bench moves a fixed [`UNIT_BYTES`] of data (the element count is
-//! derived per type), so the numbers are comparable *and* the working set clears
-//! the last-level cache — the swap is DRAM-bandwidth-bound, not cache-resident.
+//! The sample cases, on one row of the standard frame: the big-endian swap both ways, the
+//! physical scaling, and the unsigned reinterpretation.
 
 use std::hint::black_box;
 
-use criterion::{BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion};
 
+use crate::bench::fixture::{self, Kind, Scale};
+use crate::bench::scene::{self, TYPES, WIDTH};
 use crate::bitpix::Bitpix;
-use crate::data::Image;
-use crate::data::image_data::ImageData;
 use crate::data::scaling::Scaling;
+use crate::data::swap_into_words;
 
-/// Bytes moved per typed bench. 64 MiB is comfortably past the last-level cache
-/// (incl. Apple Silicon's large L2 + system-level cache), so even the 1-byte type
-/// is DRAM-bound rather than cache-resident, and every type moves the same bytes.
-pub(crate) const UNIT_BYTES: usize = 64 << 20;
-
-/// All `BITPIX` element types. `u8` has no byte-swap (decode/encode are a plain
-/// copy) — the memory-bandwidth reference the swapped types are measured against.
-pub(crate) const TYPES: [(&str, Bitpix); 6] = [
-    ("u8", Bitpix::U8),
-    ("i16", Bitpix::I16),
-    ("i32", Bitpix::I32),
-    ("i64", Bitpix::I64),
-    ("f32", Bitpix::F32),
-    ("f64", Bitpix::F64),
-];
-
-/// Element count giving a [`UNIT_BYTES`] data unit for this type.
-pub(crate) const fn unit_count(bitpix: Bitpix) -> usize {
-    UNIT_BYTES / bitpix.elem_size()
+/// `atomic/decode/<type>`, `atomic/encode/<type>`, `atomic/physical/<scaling>/<type>` and
+/// `atomic/unsigned/<type>`, each on one row of the standard frame. Per sample, in the stored
+/// bytes.
+pub(crate) fn atomic(c: &mut Criterion) {
+    decode(c);
+    encode(c);
+    physical(c);
+    unsigned(c);
 }
 
-/// `n` host-endian samples of the given type.
-pub(crate) fn sample_data(bitpix: Bitpix, n: usize) -> ImageData {
-    match bitpix {
-        Bitpix::U8 => ImageData::U8((0..n).map(|i| i as u8).collect()),
-        // The i16 ramp wraps every 2¹⁶ samples; the swap does not care.
-        Bitpix::I16 => ImageData::I16((0..n).map(|i| (i as u16).cast_signed()).collect()),
-        Bitpix::I32 => ImageData::I32((0..n).map(|i| i32::try_from(i).unwrap()).collect()),
-        Bitpix::I64 => ImageData::I64((0..n).map(|i| i64::try_from(i).unwrap()).collect()),
-        Bitpix::F32 => ImageData::F32((0..n).map(|i| i as f32).collect()),
-        Bitpix::F64 => ImageData::F64((0..n).map(|i| i as f64).collect()),
-    }
-}
-
-/// `decode` — big-endian → host byte-swap (`ImageData::decode`).
-pub fn decode(c: &mut Criterion) {
-    let mut g = c.benchmark_group("decode");
-    for (name, bitpix) in TYPES {
-        // The byte values don't affect swap throughput; a non-trivial pattern
-        // keeps the optimizer honest.
-        let raw: Vec<u8> = (0..UNIT_BYTES)
-            .map(|i| (i as u8).wrapping_mul(31))
-            .collect();
-        g.throughput(Throughput::Bytes(raw.len() as u64));
-        g.bench_function(name, |b| {
-            b.iter(|| black_box(ImageData::decode(black_box(&raw), bitpix)));
+/// `atomic/decode/<type>`: the big-endian row swapped into a reused buffer of words, as a view
+/// read decodes. `u8` has no swap, so no case.
+fn decode(c: &mut Criterion) {
+    let mut group = Kind::Atomic.group(c, "decode", Scale::Sample);
+    let mut words = Vec::new();
+    for bitpix in swapped_types() {
+        group.throughput(fixture::throughput(WIDTH, bitpix.elem_size()));
+        group.bench_function(fixture::bitpix_id(bitpix), |b| {
+            let mut row = Vec::new();
+            scene::sky(bitpix, WIDTH, 1, 1)
+                .samples
+                .encode_into(&mut row);
+            b.iter(|| swap_into_words(black_box(&row), bitpix, &mut words));
         });
     }
-    g.finish();
+    group.finish();
 }
 
-/// `encode` — host → big-endian byte-swap into a reused buffer, as the writer does.
-pub fn encode(c: &mut Criterion) {
-    let mut g = c.benchmark_group("encode");
+/// `atomic/encode/<type>`: the row appended big-endian to a reused buffer, as the writer stages
+/// a data unit. `u8` is a copy, so no case.
+fn encode(c: &mut Criterion) {
+    let mut group = Kind::Atomic.group(c, "encode", Scale::Sample);
     let mut out = Vec::new();
-    for (name, bitpix) in TYPES {
-        let data = sample_data(bitpix, unit_count(bitpix));
-        g.throughput(Throughput::Bytes(UNIT_BYTES as u64));
-        g.bench_function(name, |b| {
+    for bitpix in swapped_types() {
+        group.throughput(fixture::throughput(WIDTH, bitpix.elem_size()));
+        group.bench_function(fixture::bitpix_id(bitpix), |b| {
+            let row = scene::sky(bitpix, WIDTH, 1, 1);
             b.iter(|| {
                 out.clear();
-                black_box(&data).encode_into(&mut out);
-                black_box(out.len())
+                black_box(&row.samples).encode_into(&mut out);
             });
         });
     }
-    g.finish();
+    group.finish();
 }
 
-/// `physical` — the `BZERO + BSCALE·x` scaling plane, with and without a `BLANK`
-/// sentinel for integer storage (the data-dependent branch). Output is always
-/// `f64`, so size by the f64 output (≈ `UNIT_BYTES`, past cache) and report per
-/// element — the work is one scaled value per pixel regardless of the stored width.
-pub fn physical(c: &mut Criterion) {
-    const FLOAT_CASES: &[(&str, Option<i64>)] = &[("plain", None)];
-    const INTEGER_CASES: &[(&str, Option<i64>)] = &[("plain", None), ("blank", Some(7i64))];
-
-    let n = UNIT_BYTES / 8;
-    let mut g = c.benchmark_group("physical");
-    for (name, bitpix) in TYPES {
-        let cases = if bitpix.is_integer() {
-            INTEGER_CASES
+/// `atomic/physical/<scaling>/<type>`: `BZERO + BSCALE × sample` into a new `f64` row, under the
+/// frame's own scaling (`stored`) and, for an integer, with a `BLANK` sentinel too (`blank`),
+/// the branch a sentinel adds.
+fn physical(c: &mut Criterion) {
+    let mut group = Kind::Atomic.group(c, "physical", Scale::Sample);
+    for bitpix in TYPES {
+        let scalings: &[(&str, Option<i64>)] = if bitpix.is_integer() {
+            &[("stored", None), ("blank", Some(0))]
         } else {
-            FLOAT_CASES
+            &[("stored", None)]
         };
-        for &(label, blank) in cases {
-            let img = Image::new_scaled(
-                vec![n],
-                sample_data(bitpix, n),
-                Scaling {
-                    bscale: 2.5,
-                    bzero: 100.0,
+        for &(name, blank) in scalings {
+            group.throughput(fixture::throughput(WIDTH, bitpix.elem_size()));
+            let id = BenchmarkId::new(name, fixture::bitpix_id(bitpix));
+            group.bench_function(id, |b| {
+                let row = scene::sky(bitpix, WIDTH, 1, 1);
+                let scaling = Scaling {
                     blank,
-                },
-            )
-            .unwrap();
-            g.throughput(Throughput::Elements(n as u64));
-            g.bench_function(BenchmarkId::new(name, label), |b| {
-                b.iter(|| black_box(black_box(&img).physical()));
+                    ..row.scaling
+                };
+                b.iter(|| black_box(&row.samples).physical_as::<f64>(&scaling));
             });
         }
     }
-    g.finish();
+    group.finish();
+}
+
+/// `atomic/unsigned/<type>`: the exact reinterpretation of a stored signed integer as its
+/// unsigned type under the FITS sign-bit `BZERO` (a `u8` as signed bytes), into a new row.
+fn unsigned(c: &mut Criterion) {
+    let mut group = Kind::Atomic.group(c, "unsigned", Scale::Sample);
+    for bitpix in TYPES.into_iter().filter(|bitpix| bitpix.is_integer()) {
+        group.throughput(fixture::throughput(WIDTH, bitpix.elem_size()));
+        group.bench_function(fixture::bitpix_id(bitpix), |b| {
+            let row = scene::sky(bitpix, WIDTH, 1, 1);
+            let scaling = Scaling {
+                bscale: 1.0,
+                bzero: sign_bit_offset(bitpix),
+                blank: None,
+            };
+            b.iter(|| black_box(&row.samples).unsigned(&scaling).unwrap());
+        });
+    }
+    group.finish();
+}
+
+/// Every type but `u8`, which is stored as it is.
+fn swapped_types() -> impl Iterator<Item = Bitpix> {
+    TYPES.into_iter().filter(|&bitpix| bitpix != Bitpix::U8)
+}
+
+/// The `BZERO` that makes `bitpix` the unsigned convention's type (§5.2.5).
+fn sign_bit_offset(bitpix: Bitpix) -> f64 {
+    match bitpix {
+        Bitpix::U8 => -128.0,
+        Bitpix::I16 => 32768.0,
+        Bitpix::I32 => 2f64.powi(31),
+        Bitpix::I64 => 2f64.powi(63),
+        Bitpix::F32 | Bitpix::F64 => unreachable!("a float has no unsigned convention"),
+    }
 }

@@ -1,0 +1,11 @@
+[alias]
+# Every bench case, with every feature, so a case always measures the same build: `cargo benches
+# -- --list`, `-- '^atomic/'`, `-- --exact integration/read_section/stream/i16`.
+benches = "bench --bench fits_well --all-features"
+
+# x86-64-v3 (Haswell, 2013; Excavator, 2015): the CPU darkroom builds this crate for, so tests and
+# benches here build the code it ships. An optimization only: the crate has no arch-specific
+# code, so the flag changes the codegen, never the behaviour. `cfg`-scoped rather than `[build]`
+# so non-x86 targets aren't handed a CPU they aren't.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-cpu=x86-64-v3"]

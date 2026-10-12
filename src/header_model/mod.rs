@@ -1,5 +1,7 @@
 //! The ordered header model, published as [`crate::header`].
 
+#[cfg(feature = "internals")]
+pub(crate) mod bench;
 pub(crate) mod card;
 pub(crate) mod value;
 

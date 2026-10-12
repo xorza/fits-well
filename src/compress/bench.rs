@@ -1,282 +1,358 @@
-//! Criterion groups for the tiled codecs, in uncompressed bytes per second so they
-//! compare with the raw `decode` numbers. Codecs are compute-bound and their speed
-//! depends on the data, so the fixtures are realistic — a structured ramp plus light
-//! noise (a science image), a blocky label field (a mask, for PLIO), and a smooth
-//! float field — never random bytes, which would push RICE into its uncompressed
-//! block fallback and show GZIP at its worst.
+//! The compression cases: each codec on one tile, and compressed images and tables written to
+//! and read from files. The inputs are the scene's, never random bytes, as a codec's speed
+//! follows its data: the light for the integer codecs, its defect mask for `PLIO_1`, the float
+//! frame for quantized compression, the source catalog for tables.
 
-use std::hint::black_box;
-use std::io::Cursor;
+use std::fs::File;
+use std::path::PathBuf;
 
-use criterion::{BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion};
 
+use crate::bench::fixture::{self, Kind, Reading, Scale, ScratchDir, SourceKind};
+use crate::bench::scene::{self, CATALOG_ROW_BYTES, CATALOG_ROWS, HEIGHT, WIDTH};
 use crate::bintable::BinTable;
-use crate::compress::table::internals::mixed_columns;
-use crate::compress::{Compression, CompressionOptions, Hcompress};
+use crate::bitpix::Bitpix;
+use crate::compress::plane::IntBitpix;
+use crate::compress::{
+    Compression, CompressionOptions, Hcompress, convert, gzip, hcompress, plio, rice,
+};
 use crate::data::Image;
 use crate::data::image_data::ImageData;
 use crate::header_model::Header;
 use crate::reader::FitsReader;
+use crate::reader::source::Source;
 use crate::writer::FitsWriter;
-use crate::writer::table::TableBuilder;
 
-/// Image-compression options pinned to the bench tile shape.
-fn opts() -> CompressionOptions {
-    CompressionOptions::tiled(TILE)
+/// The codecs an image case compresses with, and the `BITPIX` of the scene image each takes:
+/// the integer codecs the light, `PLIO_1` the mask, the float-capable ones the float frame.
+/// `HCOMPRESS_1` at its default, lossless scale.
+fn image_codecs() -> [(Compression, Bitpix); 8] {
+    [
+        (Compression::GZIP, Bitpix::I16),
+        (Compression::GZIP_SHUFFLED, Bitpix::I16),
+        (Compression::Rice, Bitpix::I16),
+        (Compression::Hcompress(Hcompress::default()), Bitpix::I16),
+        (Compression::Plio, Bitpix::U8),
+        (Compression::GZIP, Bitpix::F32),
+        (Compression::GZIP_SHUFFLED, Bitpix::F32),
+        (Compression::Rice, Bitpix::F32),
+    ]
 }
 
-const NX: usize = 2048;
-const NY: usize = 2048;
-/// 2-D tiles (HCOMPRESS requires 2-D) → 8×8 = 64 independent tiles, representative
-/// of a real tiled image and what a future parallel decode would fan out over.
-const TILE: [usize; 2] = [256, 256];
+/// The codecs a table case compresses with.
+const TABLE_CODECS: [Compression; 3] = [
+    Compression::GZIP,
+    Compression::GZIP_SHUFFLED,
+    Compression::Rice,
+];
 
-/// Fill an `NX×NY` buffer from `f(x, y, noise)`, where `noise` is a deterministic
-/// xorshift byte (0–255) — no `rand` dependency, reproducible across runs.
-fn fill<T>(f: impl Fn(usize, usize, i64) -> T) -> Vec<T> {
-    let mut s = 0x2545_F491_4F6C_DD1Du64;
-    (0..NX * NY)
-        .map(|i| {
-            s ^= s << 13;
-            s ^= s >> 7;
-            s ^= s << 17;
-            f(i % NX, i / NX, (s >> 56).cast_signed())
-        })
-        .collect()
-}
-
-fn image(samples: ImageData) -> Image {
-    Image::new(vec![NX, NY], samples).unwrap()
-}
-
-/// A structured 16-bit science image: a smooth diagonal ramp + small noise,
-/// non-negative (so every codec, incl. PLIO, accepts it). Values stay small enough
-/// for the 32-bit HCOMPRESS transform.
-fn science_i16() -> Image {
-    image(ImageData::I16(fill(|x, y, n| {
-        (i64::try_from((x + y) % 4096).unwrap() + (n % 17) - 8).max(0) as i16
-    })))
-}
-
-/// A blocky 16-bit label field — long constant runs, the workload PLIO targets.
-fn mask_i16() -> Image {
-    image(ImageData::I16(fill(|x, y, _| {
-        i16::try_from(((x / 64) + (y / 64)) % 4).unwrap()
-    })))
-}
-
-/// A smooth 32-bit float field + light noise (quantized on compression).
-fn science_f32() -> Image {
-    image(ImageData::F32(fill(|x, y, n| {
-        (x as f32 * 0.001).sin() + (y as f32 * 0.001).cos() + (n % 17) as f32 * 0.01
-    })))
-}
-
-fn compressed(img: &Image, compression: Compression) -> Vec<u8> {
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_image(img, compression, &opts(), None)
-        .unwrap();
-    w.into_inner().into_inner()
-}
-
-const INT_BYTES: u64 = (NX * NY * 2) as u64;
-const FLOAT_BYTES: u64 = (NX * NY * 4) as u64;
-
-/// `decompress` — `read_image`, per codec, throughput in uncompressed
-/// bytes (the compressed image is HDU 1, after the auto dataless primary).
-pub fn decompress(c: &mut Criterion) {
-    let int = science_i16();
-    let mask = mask_i16();
-    let flt = science_f32();
-    let mut g = c.benchmark_group("decompress");
-
-    // Open each compressed fixture once and reuse the reader, so we measure
-    // decompression per call — not repeated header parsing.
-    for compression in [
-        Compression::GZIP,
-        Compression::GZIP_SHUFFLED,
-        Compression::Rice,
-        Compression::Hcompress(Hcompress::default()),
-    ] {
-        let codec = compression.name();
-        let mut r = FitsReader::open(Cursor::new(compressed(&int, compression))).unwrap();
-        g.throughput(Throughput::Bytes(INT_BYTES));
-        g.bench_function(codec, |b| {
-            b.iter(|| {
-                let img = r.read_image(1).unwrap();
-                black_box(&img);
-            });
-        });
-    }
-
-    let mut rp = FitsReader::open(Cursor::new(compressed(&mask, Compression::Plio))).unwrap();
-    g.throughput(Throughput::Bytes(INT_BYTES));
-    g.bench_function("PLIO_1", |b| {
-        b.iter(|| {
-            let img = rp.read_image(1).unwrap();
-            black_box(&img);
-        });
-    });
-
-    for compression in [Compression::Rice, Compression::GZIP] {
-        let codec = compression.name();
-        let mut r = FitsReader::open(Cursor::new(compressed(&flt, compression))).unwrap();
-        g.throughput(Throughput::Bytes(FLOAT_BYTES));
-        g.bench_function(BenchmarkId::new("float", codec), |b| {
-            b.iter(|| {
-                let img = r.read_image(1).unwrap();
-                black_box(&img);
-            });
-        });
-    }
-    g.finish();
-}
-
-/// `compress` — `write_compressed_image`, per codec.
-pub fn compress(c: &mut Criterion) {
-    let int = science_i16();
-    let mask = mask_i16();
-    let flt = science_f32();
-    let mut g = c.benchmark_group("compress");
-
-    // Reuse the sink `Vec` across iterations so the per-iter output allocation
-    // isn't measured — only the codec work (which still allocates per tile, as the
-    // implementation inherently does).
-    for compression in [
-        Compression::GZIP,
-        Compression::GZIP_SHUFFLED,
-        Compression::Rice,
-        Compression::Hcompress(Hcompress::default()),
-    ] {
-        let codec = compression.name();
-        let mut buf = Vec::new();
-        g.throughput(Throughput::Bytes(INT_BYTES));
-        g.bench_function(codec, |b| {
-            b.iter(|| {
-                buf.clear();
-                FitsWriter::new(&mut buf)
-                    .write_compressed_image(black_box(&int), compression, &opts(), None)
-                    .unwrap();
-                black_box(buf.len())
-            });
-        });
-    }
-
-    let mut buf = Vec::new();
-    g.throughput(Throughput::Bytes(INT_BYTES));
-    g.bench_function("PLIO_1", |b| {
-        b.iter(|| {
-            buf.clear();
-            FitsWriter::new(&mut buf)
-                .write_compressed_image(black_box(&mask), Compression::Plio, &opts(), None)
-                .unwrap();
-            black_box(buf.len())
-        });
-    });
-
-    for compression in [Compression::Rice, Compression::GZIP] {
-        let codec = compression.name();
-        let mut buf = Vec::new();
-        g.throughput(Throughput::Bytes(FLOAT_BYTES));
-        g.bench_function(BenchmarkId::new("float", codec), |b| {
-            b.iter(|| {
-                buf.clear();
-                FitsWriter::new(&mut buf)
-                    .write_compressed_image(black_box(&flt), compression, &opts(), None)
-                    .unwrap();
-                black_box(buf.len())
-            });
-        });
-    }
-    g.finish();
-}
-
-const TABLE_ROWS: usize = 200_000;
-/// Rows per §10.3 tile — a chunk, so the table splits into ~49 independent tiles
-/// (each column transposed and compressed per tile).
+/// The rows of one table tile: a chunk of the catalog, so it splits into 25 tiles.
 const ROWS_PER_TILE: usize = 4096;
 
-/// The mixed-column table, written then read back — the input to table compression.
-#[derive(Debug)]
-struct TableFixture {
-    header: Header,
-    table: BinTable,
-}
-
-fn table_fixture() -> TableFixture {
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    let table = TableBuilder::explicit(TABLE_ROWS, mixed_columns(TABLE_ROWS)).unwrap();
-    w.write_table(&table, None).unwrap();
-    let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
-    TableFixture {
-        table: r.read_table(1).unwrap(),
-        header: r.hdus()[1].header.clone(),
-    }
-}
-
-/// Uncompressed data-unit size = `NAXIS1` (row width, from the public header) ×
-/// `NAXIS2` rows.
-fn table_bytes(header: &Header, table: &BinTable) -> u64 {
-    u64::try_from(header.get_integer("NAXIS1").unwrap().unwrap()).unwrap()
-        * table.schema().nrows as u64
-}
-
-fn compressed_table(header: &Header, table: &BinTable, compression: Compression) -> Vec<u8> {
-    let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_compressed_table(header, table, ROWS_PER_TILE, compression)
-        .unwrap();
-    w.into_inner().into_inner()
-}
-
-/// `decompress_table` — `read_compressed_table` per column codec (uncompressed
-/// bytes/s); the compressed table is HDU 1.
-pub fn decompress_table(c: &mut Criterion) {
-    let TableFixture { header, table } = table_fixture();
-    let bytes = table_bytes(&header, &table);
-    let mut g = c.benchmark_group("decompress_table");
-    for compression in [
-        Compression::GZIP,
-        Compression::GZIP_SHUFFLED,
-        Compression::Rice,
-    ] {
-        let algo = compression.name();
-        let mut r =
-            FitsReader::open(Cursor::new(compressed_table(&header, &table, compression))).unwrap();
-        g.throughput(Throughput::Bytes(bytes));
-        g.bench_function(algo, |b| {
-            b.iter(|| black_box(r.read_compressed_table(1).unwrap()));
+/// `atomic/compress/<codec>/<type>` and `atomic/decompress/<codec>/<type>`: one tile of the
+/// default tiling, one row of the standard frame, through each integer codec's tile encoder and
+/// decoder, into reused buffers. A decode case first checks that the tile round-trips, as each
+/// codec is lossless here. Per sample, in the stored bytes.
+pub(crate) fn atomic(c: &mut Criterion) {
+    let codecs = image_codecs()
+        .into_iter()
+        .filter(|(_, bitpix)| bitpix.is_integer());
+    let mut group = Kind::Atomic.group(c, "compress", Scale::Sample);
+    for (compression, bitpix) in codecs.clone() {
+        group.throughput(fixture::throughput(WIDTH, bitpix.elem_size()));
+        group.bench_function(case_id(compression, bitpix), |b| {
+            let mut tile = Tile::new(compression, bitpix);
+            b.iter(|| tile.encode());
         });
     }
-    g.finish();
+    group.finish();
+
+    let mut group = Kind::Atomic.group(c, "decompress", Scale::Sample);
+    for (compression, bitpix) in codecs {
+        group.throughput(fixture::throughput(WIDTH, bitpix.elem_size()));
+        group.bench_function(case_id(compression, bitpix), |b| {
+            let mut tile = Tile::new(compression, bitpix);
+            tile.encode();
+            tile.decode();
+            assert_eq!(tile.decoded, tile.values, "the codec round-trips the tile");
+            b.iter(|| tile.decode());
+        });
+    }
+    group.finish();
 }
 
-/// `compress_table` — `write_compressed_table` per column codec (reused sink).
-pub fn compress_table(c: &mut Criterion) {
-    let TableFixture { header, table } = table_fixture();
-    let bytes = table_bytes(&header, &table);
-    let mut g = c.benchmark_group("compress_table");
-    for compression in [
-        Compression::GZIP,
-        Compression::GZIP_SHUFFLED,
-        Compression::Rice,
-    ] {
-        let algo = compression.name();
-        let mut buf = Vec::new();
-        g.throughput(Throughput::Bytes(bytes));
-        g.bench_function(algo, |b| {
+/// `integration/write_compressed/file/<codec>/<type>`, `integration/read_compressed/<source>/
+/// <codec>/<type>`, `integration/write_compressed_table/file/<codec>` and
+/// `integration/read_compressed_table/<source>/<codec>`: the standard frame under the light
+/// header in the default row tiles, a float frame quantized; the catalog in tiles of 4096 rows.
+/// From creating or opening the file to the last byte or sample. Per sample or row,
+/// uncompressed.
+pub(crate) fn integration(c: &mut Criterion) {
+    let dir = ScratchDir::new("compress");
+    write_compressed(c, &dir);
+    read_compressed(c, &dir);
+    write_compressed_table(c, &dir);
+    read_compressed_table(c, &dir);
+}
+
+fn write_compressed(c: &mut Criterion, dir: &ScratchDir) {
+    let mut group = Kind::Integration.group(c, "write_compressed", Scale::Frame);
+    let path = dir.file("frame.fits");
+    for (compression, bitpix) in image_codecs() {
+        let mut image = None;
+        group.throughput(fixture::throughput(WIDTH * HEIGHT, bitpix.elem_size()));
+        let id = BenchmarkId::new("file", case_id(compression, bitpix));
+        group.bench_function(id, |b| {
+            let image = image.get_or_insert_with(|| scene_image(compression, bitpix, HEIGHT));
+            let header = scene::light_header();
             b.iter(|| {
-                buf.clear();
-                FitsWriter::new(&mut buf)
+                let mut writer = FitsWriter::new(File::create(&path).unwrap()).with_checksums();
+                writer
+                    .write_compressed_image(
+                        image,
+                        compression,
+                        &CompressionOptions::default(),
+                        Some(&header),
+                    )
+                    .unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
+fn read_compressed(c: &mut Criterion, dir: &ScratchDir) {
+    let mut group = Kind::Integration.group(c, "read_compressed", Scale::Frame);
+    for (compression, bitpix) in image_codecs() {
+        let mut path = None;
+        group.throughput(fixture::throughput(WIDTH * HEIGHT, bitpix.elem_size()));
+        for source in SourceKind::all() {
+            let id = BenchmarkId::new(source.id(), case_id(compression, bitpix));
+            group.bench_function(id, |b| {
+                let path = path.get_or_insert_with(|| {
+                    let name = format!("{}.fits", case_id(compression, bitpix).replace('/', "_"));
+                    dir.write(&name, &compressed_file(compression, bitpix))
+                });
+                source.bench(b, path, ReadCompressed);
+            });
+        }
+    }
+    group.finish();
+}
+
+fn write_compressed_table(c: &mut Criterion, dir: &ScratchDir) {
+    let mut group = Kind::Integration.group(c, "write_compressed_table", Scale::Frame);
+    group.throughput(fixture::throughput(CATALOG_ROWS, CATALOG_ROW_BYTES));
+    let path = dir.file("catalog.fits");
+    let mut catalog = None;
+    for compression in TABLE_CODECS {
+        group.bench_function(BenchmarkId::new("file", codec_id(compression)), |b| {
+            let catalog = catalog.get_or_insert_with(CatalogTable::read);
+            b.iter(|| {
+                let mut writer = FitsWriter::new(File::create(&path).unwrap());
+                writer
                     .write_compressed_table(
-                        black_box(&header),
-                        black_box(&table),
+                        &catalog.header,
+                        &catalog.table,
                         ROWS_PER_TILE,
                         compression,
                     )
                     .unwrap();
-                black_box(buf.len())
             });
         });
     }
-    g.finish();
+    group.finish();
+}
+
+fn read_compressed_table(c: &mut Criterion, dir: &ScratchDir) {
+    let mut group = Kind::Integration.group(c, "read_compressed_table", Scale::Frame);
+    group.throughput(fixture::throughput(CATALOG_ROWS, CATALOG_ROW_BYTES));
+    for compression in TABLE_CODECS {
+        let mut path: Option<PathBuf> = None;
+        for source in SourceKind::all() {
+            group.bench_function(BenchmarkId::new(source.id(), codec_id(compression)), |b| {
+                let path = path.get_or_insert_with(|| {
+                    let catalog = CatalogTable::read();
+                    let mut writer = FitsWriter::new(Vec::new());
+                    writer
+                        .write_compressed_table(
+                            &catalog.header,
+                            &catalog.table,
+                            ROWS_PER_TILE,
+                            compression,
+                        )
+                        .unwrap();
+                    let name = format!("catalog_{}.fits", codec_id(compression));
+                    dir.write(&name, &writer.into_inner())
+                });
+                source.bench(b, path, ReadCompressedTable);
+            });
+        }
+    }
+    group.finish();
+}
+
+/// The first `height` rows of the scene image `compression` takes in `bitpix`: the defect mask
+/// for `PLIO_1`, else the standard frame.
+fn scene_image(compression: Compression, bitpix: Bitpix, height: usize) -> Image {
+    if matches!(compression, Compression::Plio) {
+        scene::mask(WIDTH, height, 1)
+    } else {
+        scene::sky(bitpix, WIDTH, height, 1)
+    }
+}
+
+/// The bytes of a file holding [`scene_image`] compressed by `compression` under the light
+/// header, with its checksums.
+fn compressed_file(compression: Compression, bitpix: Bitpix) -> Vec<u8> {
+    let mut writer = FitsWriter::new(Vec::new()).with_checksums();
+    writer
+        .write_compressed_image(
+            &scene_image(compression, bitpix, HEIGHT),
+            compression,
+            &CompressionOptions::default(),
+            Some(&scene::light_header()),
+        )
+        .unwrap();
+    writer.into_inner()
+}
+
+/// The catalog as a table's header and contents, the input a compressed table is written from.
+#[derive(Debug)]
+struct CatalogTable {
+    header: Header,
+    table: BinTable,
+}
+
+impl CatalogTable {
+    /// The catalog, read back from its file.
+    fn read() -> Self {
+        let file = scene::catalog_file();
+        let mut reader = FitsReader::from_bytes(&file).unwrap();
+        let table = reader.read_table(1).unwrap();
+        Self {
+            header: reader.hdus()[1].header.clone(),
+            table,
+        }
+    }
+}
+
+fn codec_id(compression: Compression) -> String {
+    compression.name().to_lowercase()
+}
+
+fn case_id(compression: Compression, bitpix: Bitpix) -> String {
+    format!("{}/{}", codec_id(compression), fixture::bitpix_id(bitpix))
+}
+
+/// One tile of the light, or of its mask for `PLIO_1`, and the reused buffers its codec writes.
+#[derive(Debug)]
+struct Tile {
+    compression: Compression,
+    bitpix: IntBitpix,
+    values: Vec<i64>,
+    be: Vec<u8>,
+    encoded: Vec<u8>,
+    decoded: Vec<i64>,
+    gzip: gzip::GzipScratch,
+    rice: rice::RiceScratch,
+    hcompress: hcompress::HcompressScratch,
+}
+
+impl Tile {
+    fn new(compression: Compression, bitpix: Bitpix) -> Self {
+        let row = scene_image(compression, bitpix, 1);
+        let values = match row.samples {
+            ImageData::U8(values) => values.into_iter().map(i64::from).collect(),
+            ImageData::I16(values) => values.into_iter().map(i64::from).collect(),
+            _ => unreachable!("the integer codecs take u8 and i16 tiles"),
+        };
+        let bitpix = match bitpix {
+            Bitpix::U8 => IntBitpix::U8,
+            _ => IntBitpix::I16,
+        };
+        Self {
+            compression,
+            bitpix,
+            values,
+            be: Vec::new(),
+            encoded: Vec::new(),
+            decoded: Vec::new(),
+            gzip: gzip::GzipScratch::default(),
+            rice: rice::RiceScratch::default(),
+            hcompress: hcompress::HcompressScratch::default(),
+        }
+    }
+
+    /// Encodes the tile into [`Self::encoded`], as the tile encoder of `compress_image` does.
+    fn encode(&mut self) {
+        let level = self.compression.gzip_level();
+        self.encoded = match self.compression {
+            Compression::Gzip(config) if config.shuffle => {
+                convert::i64_to_be_into(&self.values, self.bitpix, &mut self.be);
+                gzip::gzip2_encode(&self.be, self.bitpix.elem_size(), level, &mut self.gzip)
+            }
+            Compression::Gzip(_) => {
+                convert::i64_to_be_into(&self.values, self.bitpix, &mut self.be);
+                gzip::gzip_encode(&self.be, level)
+            }
+            Compression::Rice => {
+                rice::rice_encode(&self.values, self.bitpix, rice::BLOCKSIZE, &mut self.rice)
+            }
+            Compression::Hcompress(_) => {
+                hcompress::hcompress_tile_encode(&self.values, &[WIDTH, 1], 0, &mut self.hcompress)
+                    .unwrap()
+            }
+            Compression::Plio => plio::plio_encode(&self.values)
+                .unwrap()
+                .into_iter()
+                .flat_map(i16::to_be_bytes)
+                .collect(),
+            Compression::None => unreachable!("no case stores a tile uncompressed"),
+        };
+    }
+
+    /// Decodes [`Self::encoded`] into [`Self::decoded`], as the tile decoder of a read does.
+    fn decode(&mut self) {
+        let (bytes, out) = (&self.encoded, &mut self.decoded);
+        match self.compression {
+            Compression::Gzip(config) if config.shuffle => {
+                gzip::gzip2_tile_into(bytes, self.bitpix, WIDTH, out, &mut self.gzip)
+            }
+            Compression::Gzip(_) => {
+                gzip::gzip_tile_into(bytes, self.bitpix, WIDTH, out, &mut self.gzip)
+            }
+            Compression::Rice => {
+                rice::rice_decode_into(bytes, WIDTH, self.bitpix, rice::BLOCKSIZE, out)
+            }
+            Compression::Hcompress(_) => {
+                hcompress::hcompress_tile_into(bytes, false, WIDTH, out, &mut self.hcompress)
+            }
+            Compression::Plio => plio::plio_decode_be_into(bytes, WIDTH, out),
+            Compression::None => unreachable!("no case stores a tile uncompressed"),
+        }
+        .unwrap();
+    }
+}
+
+#[derive(Debug)]
+struct ReadCompressed;
+
+impl Reading for ReadCompressed {
+    type Output = ImageData;
+
+    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> ImageData {
+        reader.read_image(1).unwrap().decode()
+    }
+}
+
+#[derive(Debug)]
+struct ReadCompressedTable;
+
+impl Reading for ReadCompressedTable {
+    type Output = BinTable;
+
+    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> BinTable {
+        reader.read_compressed_table(1).unwrap()
+    }
 }
