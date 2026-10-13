@@ -174,7 +174,9 @@ impl Default for Quantization {
 /// Shared tiled-image options. Codec-specific knobs are part of [`Compression`].
 #[derive(Debug, Clone, Default)]
 pub struct CompressionOptions {
-    /// Tile shape, fastest axis first. Empty means one tile per row.
+    /// Tile shape, fastest axis first. Empty means one tile per row, or for `HCOMPRESS_1`
+    /// cfitsio's default: full rows, one band up to 30 rows, else bands of 16 rows unless
+    /// that leaves a last band of 1 to 3, which moves to cfitsio's next candidate height.
     tile_shape: Vec<usize>,
     quantization: Quantization,
 }

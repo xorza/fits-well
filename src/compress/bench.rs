@@ -12,6 +12,7 @@ use crate::bench::fixture::{self, Kind, Reading, Scale, ScratchDir, SourceKind};
 use crate::bench::scene::{self, CATALOG_ROW_BYTES, CATALOG_ROWS, HEIGHT, WIDTH};
 use crate::bintable::Table;
 use crate::bitpix::Bitpix;
+use crate::compress::encode::hcompress_default_rows;
 use crate::compress::plane::IntBitpix;
 use crate::compress::{
     Compression, CompressionOptions, Hcompress, convert, gzip, hcompress, plio, rice,
@@ -50,16 +51,19 @@ const TABLE_CODECS: [Compression; 3] = [
 const ROWS_PER_TILE: usize = 4096;
 
 /// `atomic/compress/<codec>/<type>` and `atomic/decompress/<codec>/<type>`: one tile of the
-/// default tiling, one row of the standard frame, through each integer codec's tile encoder and
-/// decoder, into reused buffers. A decode case first checks that the tile round-trips, as each
-/// codec is lossless here. Per sample, in the stored bytes.
+/// default tiling of the standard frame ([`tile_rows`] rows), through each integer codec's
+/// tile encoder and decoder, into reused buffers. A decode case first checks that the tile
+/// round-trips, as each codec is lossless here. Per sample, in the stored bytes.
 pub(crate) fn atomic(c: &mut Criterion) {
     let codecs = image_codecs()
         .into_iter()
         .filter(|(_, bitpix)| bitpix.is_integer());
     let mut group = Kind::Atomic.group(c, "compress", Scale::Sample);
     for (compression, bitpix) in codecs.clone() {
-        group.throughput(fixture::throughput(WIDTH, bitpix.elem_size()));
+        group.throughput(fixture::throughput(
+            WIDTH * tile_rows(compression),
+            bitpix.elem_size(),
+        ));
         group.bench_function(case_id(compression, bitpix), |b| {
             let mut tile = Tile::new(compression, bitpix);
             b.iter(|| tile.encode());
@@ -69,7 +73,10 @@ pub(crate) fn atomic(c: &mut Criterion) {
 
     let mut group = Kind::Atomic.group(c, "decompress", Scale::Sample);
     for (compression, bitpix) in codecs {
-        group.throughput(fixture::throughput(WIDTH, bitpix.elem_size()));
+        group.throughput(fixture::throughput(
+            WIDTH * tile_rows(compression),
+            bitpix.elem_size(),
+        ));
         group.bench_function(case_id(compression, bitpix), |b| {
             let mut tile = Tile::new(compression, bitpix);
             tile.encode();
@@ -245,6 +252,14 @@ fn case_id(compression: Compression, bitpix: Bitpix) -> String {
     format!("{}/{}", codec_id(compression), fixture::bitpix_id(bitpix))
 }
 
+/// The rows of one default tile of the standard frame: one, or cfitsio's `HCOMPRESS_1` height.
+const fn tile_rows(compression: Compression) -> usize {
+    match compression {
+        Compression::Hcompress(_) => hcompress_default_rows(HEIGHT),
+        _ => 1,
+    }
+}
+
 /// One tile of the light, or of its mask for `PLIO_1`, and the reused buffers its codec writes.
 #[derive(Debug)]
 struct Tile {
@@ -261,8 +276,8 @@ struct Tile {
 
 impl Tile {
     fn new(compression: Compression, bitpix: Bitpix) -> Self {
-        let row = scene_image(compression, bitpix, 1);
-        let values = match row.samples {
+        let plane = scene_image(compression, bitpix, tile_rows(compression));
+        let values = match plane.samples {
             Data::U8(values) => values.into_iter().map(i64::from).collect(),
             Data::I16(values) => values.into_iter().map(i64::from).collect(),
             _ => unreachable!("the integer codecs take u8 and i16 tiles"),
@@ -300,7 +315,8 @@ impl Tile {
                 rice::rice_encode(&self.values, self.bitpix, rice::BLOCKSIZE, &mut self.rice)
             }
             Compression::Hcompress(_) => {
-                hcompress::hcompress_tile_encode(&self.values, &[WIDTH, 1], 0, &mut self.hcompress)
+                let tdims = [WIDTH, tile_rows(self.compression)];
+                hcompress::hcompress_tile_encode(&self.values, &tdims, 0, &mut self.hcompress)
                     .unwrap()
             }
             Compression::Plio => plio::plio_encode(&self.values)
@@ -326,7 +342,8 @@ impl Tile {
                 rice::rice_decode_into(bytes, WIDTH, self.bitpix, rice::BLOCKSIZE, out)
             }
             Compression::Hcompress(_) => {
-                hcompress::hcompress_tile_into(bytes, false, WIDTH, out, &mut self.hcompress)
+                let elems = WIDTH * tile_rows(self.compression);
+                hcompress::hcompress_tile_into(bytes, false, elems, out, &mut self.hcompress)
             }
             Compression::Plio => plio::plio_decode_be_into(bytes, WIDTH, out),
             Compression::None => unreachable!("no case stores a tile uncompressed"),

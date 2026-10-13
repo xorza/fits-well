@@ -338,6 +338,11 @@ pub enum FitsError {
     /// An iterative WCS algorithm did not reach a valid solution.
     #[error("{algorithm} WCS iteration did not converge")]
     WcsNoConvergence { algorithm: &'static str },
+    /// An `HCOMPRESS_1` tile with a side under 4 pixels, which cfitsio neither writes
+    /// nor reads; `axis` is 0-based, `length` the shortest tile along it, the last
+    /// tile's remainder included.
+    #[error("HCOMPRESS_1 tile is {length} pixels along axis {axis}, under the minimum of 4")]
+    HcompressTileTooSmall { axis: usize, length: usize },
     /// A tiled-image compression algorithm or variant is not yet supported.
     #[error("unsupported tiled compression: {name}")]
     UnsupportedCompression { name: String },

@@ -67,7 +67,7 @@ pub(crate) fn compress_image(
     };
     let bitpix = samples.bitpix();
     let dims = &image.shape;
-    let tiles = resolve_tile_shape(dims, &options.tile_shape)?;
+    let tiles = resolve_tile_shape(dims, &options.tile_shape, codec)?;
 
     let geom = TileGeometry::new(dims, &tiles);
     // A `NAXIS = 0` image has no data array; `geom.ntiles()` would otherwise be the
@@ -273,7 +273,7 @@ fn compress_float_image(
     }
     let zbitpix = samples.bitpix();
     let dims = &image.shape;
-    let tiles = resolve_tile_shape(dims, &options.tile_shape)?;
+    let tiles = resolve_tile_shape(dims, &options.tile_shape, codec)?;
 
     let geom = TileGeometry::new(dims, &tiles);
     // See `compress_image`: zero tiles for a `NAXIS = 0` image, avoiding the phantom
@@ -465,22 +465,73 @@ impl TileCell {
 }
 
 /// Resolve the tile shape for an image: an empty `tile_shape` defaults to row-tiling
-/// (the first axis whole, the rest 1); a non-empty one is used as given (each axis
-/// clamped to ≥1) and must match the image rank, else [`FitsError::RankMismatch`].
-fn resolve_tile_shape(dims: &[usize], tile_shape: &[usize]) -> Result<Vec<usize>> {
-    if tile_shape.is_empty() {
-        Ok((0..dims.len())
-            .map(|i| if i == 0 { dims[i].max(1) } else { 1 })
-            .collect())
+/// (the first axis whole, the rest 1), or for `HCOMPRESS_1` to cfitsio's default (see
+/// [`hcompress_default_rows`]); a non-empty one is used as given (each axis clamped to
+/// ≥1) and must match the image rank, else [`FitsError::RankMismatch`]. An
+/// `HCOMPRESS_1` tiling with a side under 4 pixels, the last tile's included, is
+/// refused rather than adjusted.
+fn resolve_tile_shape(
+    dims: &[usize],
+    tile_shape: &[usize],
+    codec: ImageCodec,
+) -> Result<Vec<usize>> {
+    let tiles: Vec<usize> = if tile_shape.is_empty() {
+        (0..dims.len())
+            .map(|i| match i {
+                0 => dims[i].max(1),
+                1 if codec == ImageCodec::Hcompress1 => hcompress_default_rows(dims[1]).max(1),
+                _ => 1,
+            })
+            .collect()
     } else if tile_shape.len() == dims.len() {
-        Ok(tile_shape.iter().map(|&t| t.max(1)).collect())
+        tile_shape.iter().map(|&t| t.max(1)).collect()
     } else {
-        Err(FitsError::RankMismatch {
+        return Err(FitsError::RankMismatch {
             ranked: Ranked::TileShape,
             expected: dims.len(),
             got: tile_shape.len(),
-        })
+        });
+    };
+    // An empty image has no tiles to refuse.
+    if codec == ImageCodec::Hcompress1 && !dims.contains(&0) {
+        for (axis, (&length, &tile)) in dims.iter().zip(&tiles).enumerate() {
+            let tile = tile.min(length);
+            let shortest = match length % tile {
+                0 => tile,
+                remainder => remainder,
+            };
+            if shortest < HCOMPRESS_MIN_TILE {
+                return Err(FitsError::HcompressTileTooSmall {
+                    axis,
+                    length: shortest,
+                });
+            }
+        }
     }
+    Ok(tiles)
+}
+
+/// The shortest tile side cfitsio's `HCOMPRESS_1` writes or reads.
+const HCOMPRESS_MIN_TILE: usize = 4;
+
+/// cfitsio's default `HCOMPRESS_1` tile height for an image of `rows` (`imcomp_init_table`,
+/// pinned against `fpack -h` output): the whole image up to 30 rows, else the first of
+/// 16, 24, 20, 30, 28, 26, 22, 18 and 14 rows that leaves no remainder or one of at
+/// least [`HCOMPRESS_MIN_TILE`] rows, else 17.
+pub(super) const fn hcompress_default_rows(rows: usize) -> usize {
+    const CANDIDATES: [usize; 9] = [16, 24, 20, 30, 28, 26, 22, 18, 14];
+    if rows <= 30 {
+        return rows;
+    }
+    let mut i = 0;
+    while i < CANDIDATES.len() {
+        let remainder = rows % CANDIDATES[i];
+        if remainder == 0 || remainder >= HCOMPRESS_MIN_TILE {
+            return CANDIDATES[i];
+        }
+        i += 1;
+    }
+    17
 }
 
 /// Append the `ZIMAGE`/`ZCMPTYPE`/`ZBITPIX`/`ZNAXIS` keywords plus the per-axis
