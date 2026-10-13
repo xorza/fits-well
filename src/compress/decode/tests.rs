@@ -62,27 +62,37 @@ fn compressed_image_header(
 /// Each integer fixture decodes to the plane it was written from.
 #[test]
 fn decompresses_the_integer_codec_fixtures() {
-    for (name, want) in [
-        ("comp_gzip_i16.fits", Data::I16(ramp())),
-        ("comp_gzip2_i16.fits", Data::I16(ramp())),
-        ("comp_rice_i16.fits", Data::I16(ramp())),
+    // `fpack -h -s 0 -t 17,17` (CFITSIO 4.070) of the plane `(7919·i + 13) mod 2001 − 1000`:
+    // both halves odd at every level of the inverse transform, the corner case 24×16 never reaches.
+    let odd: Vec<i16> = (0..17 * 17)
+        .map(|i| i16::try_from((i * 7919 + 13) % 2001).unwrap() - 1000)
+        .collect();
+    for (name, shape, want) in [
+        ("comp_gzip_i16.fits", [24, 16], Data::I16(ramp())),
+        ("comp_gzip2_i16.fits", [24, 16], Data::I16(ramp())),
+        ("comp_rice_i16.fits", [24, 16], Data::I16(ramp())),
         // Lossless HCOMPRESS (SCALE=0), one 24×16 tile.
-        ("comp_hcomp_i16.fits", Data::I16(ramp())),
-        ("comp_plio_i32.fits", Data::I32(mask())),
+        ("comp_hcomp_i16.fits", [24, 16], Data::I16(ramp())),
+        ("comp_hcomp_odd_i16.fits", [17, 17], Data::I16(odd)),
+        ("comp_plio_i32.fits", [24, 16], Data::I32(mask())),
     ] {
         let mut reader = open_fixture(name);
         let image = reader.read_image(1).unwrap();
-        assert_eq!(image.shape, [24, 16], "{name}");
+        assert_eq!(image.shape, shape, "{name}");
         assert_eq!(image.decode(), want, "{name}");
     }
 }
 
-/// Each lossy or float fixture decodes bit for bit to astropy's reconstruction,
-/// stored as a plain image beside it; a NaN matches any NaN.
+/// Each lossy or float fixture decodes bit for bit to astropy's or cfitsio's
+/// reconstruction, stored as a plain image beside it; a NaN matches any NaN.
 #[test]
-fn decompresses_to_the_astropy_reconstructions() {
+fn decompresses_to_the_reference_reconstructions() {
     fn samples(data: Data) -> Vec<Option<u32>> {
         match data {
+            Data::I16(values) => values
+                .into_iter()
+                .map(|v| Some(i32::from(v).cast_unsigned()))
+                .collect(),
             Data::I32(values) => values
                 .into_iter()
                 .map(|v| Some(v.cast_unsigned()))
@@ -91,12 +101,19 @@ fn decompresses_to_the_astropy_reconstructions() {
                 .into_iter()
                 .map(|v| (!v.is_nan()).then(|| v.to_bits()))
                 .collect(),
-            other => panic!("expected I32 or F32, got {other:?}"),
+            other => panic!("expected I16, I32 or F32, got {other:?}"),
         }
     }
     for (compressed, reference, nulls) in [
         // Lossy HCOMPRESS, SCALE=4: undigitize multiplies by the scale.
         ("comp_hcomp_lossy.fits", "comp_ref_hcomp_lossy.fits", 0),
+        // `fpack -h -s 4` of the 17×17 lossless fixture's plane against `funpack`'s
+        // reconstruction (CFITSIO 4.070): the odd-on-both-axes corner under a scale.
+        (
+            "comp_hcomp_lossy_odd.fits",
+            "comp_ref_hcomp_lossy_odd.fits",
+            0,
+        ),
         // SMOOTH=1 smooths during the inverse transform.
         ("comp_hcomp_smooth.fits", "comp_ref_hcomp_smooth.fits", 0),
         // Smooth data stored losslessly: ZSCALE=0, the floats gzip'd in

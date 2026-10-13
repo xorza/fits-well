@@ -1400,7 +1400,7 @@ fn hinv(
                 j += 2;
             }
             if oddy != 0 {
-                a[ny * i] >>= shift;
+                a[s00] >>= shift;
             }
         }
         bit1 = bit0;

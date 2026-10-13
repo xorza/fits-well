@@ -1660,21 +1660,17 @@ fn compressed_image_metadata_is_validated_before_automatic_primary() {
         Data::I64(vec![i64::MIN])
     );
 
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer
-        .write_compressed_image(
+    // Only a 1×1 tile carries `i64::MIN` through HCOMPRESS, as any larger one takes its
+    // difference with a neighbour; HCOMPRESS takes no tile under 4 pixels, so it is refused.
+    assert!(matches!(
+        rejected_before_output(|w| w.write_compressed_image(
             &image,
             Compression::Hcompress(Hcompress::default()),
             &CompressionOptions::tiled([1, 1]),
-            None,
-        )
-        .unwrap();
-    let bytes = writer.into_inner().into_inner();
-    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
-    assert_eq!(
-        reader.read_image(1).unwrap().decode(),
-        Data::I64(vec![i64::MIN])
-    );
+            None
+        )),
+        FitsError::HcompressTileTooSmall { axis: 0, length: 1 }
+    ));
 }
 
 #[cfg(feature = "compression")]

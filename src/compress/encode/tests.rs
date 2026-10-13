@@ -1,4 +1,5 @@
 use crate::bitpix::Bitpix;
+use crate::compress::encode::hcompress_default_rows;
 use crate::compress::internals::{mask, ramp};
 use crate::compress::*;
 use crate::error::Ranked;
@@ -270,12 +271,12 @@ fn hcompress_writer_enforces_standard_image_constraints() {
             if name == "HCOMPRESS_1 for float images (write)"
     ));
 
-    let extreme = Image::new(vec![2, 2], vec![i64::MAX; 4]).unwrap();
+    let extreme = Image::new(vec![4, 4], vec![i64::MAX; 16]).unwrap();
     assert!(matches!(
         writer.write_compressed_image(
             &extreme,
             Compression::Hcompress(Hcompress::default()),
-            &CompressionOptions::tiled([2, 2]),
+            &CompressionOptions::tiled([4, 4]),
             None,
         ),
         Err(FitsError::UnsupportedCompression { name })
@@ -473,6 +474,105 @@ fn hcompress_writer_converts_noise_multiplier_to_tile_scale() {
     assert_eq!(i32::from_be_bytes(stream[10..14].try_into().unwrap()), 10);
 }
 
+/// cfitsio's default `HCOMPRESS_1` tile height, pinned against `fpack -h -s 0`
+/// (CFITSIO 4.070): short images are one tile, and each row reaches the next
+/// candidate because every earlier one leaves a 1–3 row remainder (33 = 2·16 + 1,
+/// 49 = 2·24 + 1, 241 = 8·30 + 1, 1681 = 60·28 + 1, …).
+#[test]
+fn hcompress_default_tiles_follow_cfitsio() {
+    for (rows, tile) in [
+        (4, 4),
+        (30, 30),
+        (31, 16),
+        (36, 16),
+        (33, 24),
+        (49, 20),
+        (241, 28),
+        (1681, 26),
+        (21841, 22),
+        (240_241, 18),
+        (720_721, 17),
+    ] {
+        assert_eq!(hcompress_default_rows(rows), tile, "{rows} rows");
+    }
+
+    let image = Image::new(vec![64, 33], vec![0i16; 64 * 33]).unwrap();
+    let r = round_trip(|w| {
+        w.write_compressed_image(
+            &image,
+            Compression::Hcompress(Hcompress::default()),
+            &CompressionOptions::default(),
+            None,
+        )
+    });
+    let header = &r.hdus()[1].header;
+    assert_eq!(header.get_integer("ZTILE1").unwrap(), Some(64));
+    assert_eq!(header.get_integer("ZTILE2").unwrap(), Some(24));
+}
+
+/// A tiling with a side under 4 pixels is refused, never adjusted: an explicit thin
+/// tile, a remainder the explicit tile leaves, and an image too thin for any tile.
+#[test]
+fn hcompress_refuses_tiles_under_four_pixels() {
+    let refused = |shape: Vec<usize>, tiles: &[usize]| {
+        let image = Image::new(shape.clone(), vec![0i16; shape.iter().product()]).unwrap();
+        rejected_before_output(|w| {
+            w.write_compressed_image(
+                &image,
+                Compression::Hcompress(Hcompress::default()),
+                &CompressionOptions::tiled(tiles.to_vec()),
+                None,
+            )
+        })
+    };
+    for (shape, tiles, axis, length) in [
+        (vec![17, 1], &[17, 1][..], 1, 1),
+        (vec![64, 33], &[64, 16][..], 1, 1),
+        (vec![64, 3], &[][..], 1, 3),
+        (vec![3, 64], &[][..], 0, 3),
+    ] {
+        let error = refused(shape.clone(), tiles);
+        assert!(
+            matches!(error, FitsError::HcompressTileTooSmall { axis: a, length: l } if a == axis && l == length),
+            "{shape:?} in {tiles:?} tiles: {error:?}",
+        );
+    }
+}
+
+/// Lossless tiles whose halves turn odd on both axes at once, the corner the inverse
+/// transform once misplaced, round-trip exactly beside ones that never do (64×64,
+/// 24×16); 6000×40 takes the default tiling, two 16-row tiles and an 8-row one.
+#[test]
+fn hcompress_round_trips_tiles_odd_on_both_axes() {
+    for shape in [
+        [17, 17],
+        [100, 100],
+        [17, 5],
+        [5, 17],
+        [64, 64],
+        [24, 16],
+        [6000, 40],
+    ] {
+        let samples: Vec<i16> = (0..shape[0] * shape[1])
+            .map(|i| i16::try_from((i * 7919 + 13) % 2001).unwrap() - 1000)
+            .collect();
+        let image = Image::new(shape.to_vec(), samples.clone()).unwrap();
+        let mut r = round_trip(|w| {
+            w.write_compressed_image(
+                &image,
+                Compression::Hcompress(Hcompress::default()),
+                &CompressionOptions::default(),
+                None,
+            )
+        });
+        assert_eq!(
+            r.read_image(1).unwrap().decode(),
+            Data::I16(samples),
+            "{shape:?}"
+        );
+    }
+}
+
 #[test]
 fn hcompress_lossless_write_round_trips_exactly() {
     let samples: Vec<i32> = (0..16 * 16)
@@ -498,33 +598,34 @@ fn hcompress_lossless_write_round_trips_exactly() {
         other => panic!("expected I32, got {other:?}"),
     }
 
-    let wide = vec![i32::MAX, i32::MAX, i32::MAX, i32::MAX];
-    let image = Image::new(vec![2, 2], wide.clone()).unwrap();
+    let wide = vec![i32::MAX; 16];
+    let image = Image::new(vec![4, 4], wide.clone()).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
         .write_compressed_image(
             &image,
             Compression::Hcompress(Hcompress::default()),
-            &CompressionOptions::tiled([2, 2]),
+            &CompressionOptions::tiled([4, 4]),
             None,
         )
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
     assert_eq!(reader.read_image(1).unwrap().decode(), Data::I32(wide));
 
-    let wide = vec![
+    let wide = [
         1i64 << 40,
         -(1i64 << 40),
         (1i64 << 40) + 1,
         -(1i64 << 40) + 2,
-    ];
-    let image = Image::new(vec![2, 2], wide.clone()).unwrap();
+    ]
+    .repeat(4);
+    let image = Image::new(vec![4, 4], wide.clone()).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
         .write_compressed_image(
             &image,
             Compression::Hcompress(Hcompress::default()),
-            &CompressionOptions::tiled([2, 2]),
+            &CompressionOptions::tiled([4, 4]),
             None,
         )
         .unwrap();
