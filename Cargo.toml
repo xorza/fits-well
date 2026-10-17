@@ -185,6 +185,7 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
 # Full debug info, which `darkroom/packaging` splits out of the shipped binary.
 [profile.release]
