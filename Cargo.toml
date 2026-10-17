@@ -18,7 +18,7 @@ exclude = [
     "AGENTS.md",
     "CLAUDE.md",
     "todo.txt",
-    "x.py",
+    "drive/",
 ]
 
 # Warn, not deny: the verification chain runs clippy with `-D warnings`.
@@ -136,7 +136,7 @@ features = ["compression", "parallel", "mmap"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 # The codec paths without `parallel`, and the bare reader. Benches measure every feature.
-[package.metadata.x]
+[package.metadata.drive]
 lint = ["--all-features", "--no-default-features --features compression,mmap", "--no-default-features"]
 test = ["--all-features", "--no-default-features --features compression,mmap"]
 bench = "--all-features"
