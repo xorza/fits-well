@@ -140,6 +140,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 lint = ["--all-features", "--no-default-features --features compression,mmap", "--no-default-features"]
 test = ["--all-features", "--no-default-features --features compression,mmap"]
 bench = "--all-features"
+docs = true
 
 [dependencies]
 bitvec = "1"
