@@ -137,6 +137,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 # The codec paths without `parallel`, and the bare reader. Benches measure every feature.
 [package.metadata.drive]
+version = "0.2"
 lint = ["--all-features", "--no-default-features --features compression,mmap", "--no-default-features"]
 test = ["--all-features", "--no-default-features --features compression,mmap"]
 bench = "--all-features"
