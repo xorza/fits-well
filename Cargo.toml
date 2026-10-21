@@ -18,7 +18,6 @@ exclude = [
     "AGENTS.md",
     "CLAUDE.md",
     "todo.txt",
-    "drive/",
 ]
 
 # Warn, not deny: the verification chain runs clippy with `-D warnings`.
