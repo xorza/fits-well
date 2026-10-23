@@ -65,6 +65,11 @@ and the dated measurements in `docs/research/`.
   extension with `NAXIS = 0` but not such a primary. Also refused: requiring the
   whole geometry to resolve, which would turn a malformed image into "not an
   image" and hide the error that `Hdu::image_metadata` reports. Source: §4.4.1.
+- **An image's geometry has one public source:** `Hdu::image_metadata` before a
+  read, `ImageReader::metadata` during one. Both give a compressed image's own
+  shape and `BITPIX`. Refused: public `Header::bitpix`, `naxis`, `axes` and
+  `scaling`, which read the keywords as they stand and so give a compressed
+  image's container, `BITPIX = 8` and its table axes.
 - **A checksum report gives two verdicts:** `is_valid`, both checksums present
   and verified, and `has_invalid`, either one malformed or contradicted by its
   bytes. A caller's policy for `Absent` and `Unknown` stays its own. Refused: a
@@ -95,6 +100,12 @@ and the dated measurements in `docs/research/`.
   restored table. The cost: a table with variable-length columns restores its
   whole heap, because each descriptor addresses the heap by its absolute
   offset.
+- **A table's facts live on its schema.** `Schema` and `AsciiSchema` give the row
+  count, row width, columns and `column_index`; `Table` and `Ascii` give the schema
+  and read columns. A builder adds a column with `push` and is built whole with
+  `with_columns`. Refused: `Table::column_index`, a second way to the schema's, and
+  a consuming `Builder::column`, a third way to add a column under the name a
+  table reads one by.
 - **A column is named by one borrowed `ColumnSelector`,** an index or a `TTYPEn`
   name compared case-insensitively, through one `column` method on `Table`,
   `Ascii` and `Selection`, and through each reader method. Refused: a
@@ -197,6 +208,9 @@ and the dated measurements in `docs/research/`.
 - **The structural cards are always generated.** A caller names an extension with
   one `EXTNAME` card in the header it passes. Refused: an `EXTNAME` argument on
   each write.
+- **An owned image is built as the borrowed one is,** from a shape, samples and a
+  `Scaling` (`Scaling::IDENTITY` for none): `Image::new` mirrors `Borrowed::new`.
+  Refused: `new` and `new_scaled`, two constructors where one takes the scaling.
 - **The unsigned constructors stay four.** `Image::from_u16`, `from_u32`,
   `from_u64` and `from_i8` take any shape `Image::new` takes. Refused: one
   `from_unsigned` over a borrowed view; the write converts the samples to signed
@@ -278,6 +292,13 @@ and the dated measurements in `docs/research/`.
   `Unit::seconds` evaluates it with the scale in use. A malformed `TIMEUNIT`
   refuses the frame. Refused: the `TIMEUNIT` text, parsed again by every
   conversion, so a bad unit surfaced only at the first one.
+
+- **Time fields say what they are; the docs name their keywords.** `Frame` has
+  `reference_mjd`, `unit`, `clock_offset` and `reference_position`; `Bounds` has
+  `start_mjd`, `end_mjd`, `mid_mjd`, `exposure`, `elapsed`, `resolution`,
+  `pixel_position`, `systematic_error` and `random_error`. Refused: the keyword
+  spellings (`mjdref`, `timeoffs`, `xposure`, `timrder`), which mixed with the
+  descriptive ones.
 
 ## Crate boundary
 

@@ -13,23 +13,23 @@ use crate::time_coordinates::scale::Scale;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Bounds {
     /// Observation start: `MJD-BEG`, else `DATE-BEG` → MJD.
-    pub beg_mjd: Option<f64>,
+    pub start_mjd: Option<f64>,
     /// Observation end: `MJD-END`, else `DATE-END` → MJD.
     pub end_mjd: Option<f64>,
     /// Observation midpoint: `MJD-AVG`, else `DATE-AVG` → MJD (§9.5, Table 35).
-    pub avg_mjd: Option<f64>,
+    pub mid_mjd: Option<f64>,
     /// `XPOSURE` — effective exposure time.
-    pub xposure: Option<f64>,
+    pub exposure: Option<f64>,
     /// `TELAPSE` — total elapsed time.
-    pub telapse: Option<f64>,
+    pub elapsed: Option<f64>,
     /// `TIMEDEL` — time resolution / bin width.
-    pub timedel: Option<f64>,
+    pub resolution: Option<f64>,
     /// `TIMEPIXR` — pixel position within a bin (0–1, default 0.5).
-    pub timepixr: f64,
+    pub pixel_position: f64,
     /// `TIMSYER` — systematic time error.
-    pub timsyer: Option<f64>,
+    pub systematic_error: Option<f64>,
     /// `TIMRDER` — random time error.
-    pub timrder: Option<f64>,
+    pub random_error: Option<f64>,
 }
 
 impl Bounds {
@@ -47,22 +47,22 @@ impl Bounds {
                 .to_mjd(&Scale::declared(header)?)
                 .map(Some)
         };
-        let timepixr = header.get_real(keywords::TIMEPIXR)?.unwrap_or(0.5);
-        if !(0.0..=1.0).contains(&timepixr) {
+        let pixel_position = header.get_real(keywords::TIMEPIXR)?.unwrap_or(0.5);
+        if !(0.0..=1.0).contains(&pixel_position) {
             return Err(FitsError::KeywordOutOfRange {
                 keyword: keywords::TIMEPIXR,
             });
         }
         Ok(Self {
-            beg_mjd: mjd_or_date(keywords::MJD_BEG, keywords::DATE_BEG)?,
+            start_mjd: mjd_or_date(keywords::MJD_BEG, keywords::DATE_BEG)?,
             end_mjd: mjd_or_date(keywords::MJD_END, keywords::DATE_END)?,
-            avg_mjd: mjd_or_date(keywords::MJD_AVG, keywords::DATE_AVG)?,
-            xposure: header.get_real(keywords::XPOSURE)?,
-            telapse: header.get_real(keywords::TELAPSE)?,
-            timedel: header.get_real(keywords::TIMEDEL)?,
-            timepixr,
-            timsyer: header.get_real(keywords::TIMSYER)?,
-            timrder: header.get_real(keywords::TIMRDER)?,
+            mid_mjd: mjd_or_date(keywords::MJD_AVG, keywords::DATE_AVG)?,
+            exposure: header.get_real(keywords::XPOSURE)?,
+            elapsed: header.get_real(keywords::TELAPSE)?,
+            resolution: header.get_real(keywords::TIMEDEL)?,
+            pixel_position,
+            systematic_error: header.get_real(keywords::TIMSYER)?,
+            random_error: header.get_real(keywords::TIMRDER)?,
         })
     }
 }

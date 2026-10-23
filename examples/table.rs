@@ -17,14 +17,15 @@ fn main() -> fits_well::Result<()> {
 
     // Each column holds typed data; the last argument is the per-row element count
     // (the character width for a text column, 1 for a plain scalar column).
-    let table = Builder::new()
-        .column(WriteColumn::scalar("ID", ColumnData::I32(vec![1, 2, 3])))?
-        .column(WriteColumn::characters(
+    let mut table = Builder::new();
+    table
+        .push(WriteColumn::scalar("ID", ColumnData::I32(vec![1, 2, 3])))?
+        .push(WriteColumn::characters(
             "NAME",
             ["Vega", "Sirius", "Rigel"],
             8,
         )?)?
-        .column(
+        .push(
             WriteColumn::scalar("MAG", ColumnData::F64(vec![0.03, -1.46, 0.13])).with_unit("mag"),
         )?;
 

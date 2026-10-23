@@ -339,11 +339,6 @@ impl Builder {
         Ok(self)
     }
 
-    pub fn column(mut self, column: WriteColumn) -> Result<Self> {
-        self.push(column)?;
-        Ok(self)
-    }
-
     /// Build from an explicit row count and complete column list.
     pub fn with_columns(
         row_count: usize,

@@ -597,7 +597,7 @@ fn deprojections_past_a_half_turn_of_longitude_are_refused() {
         assert!(
             matches!(
                 projection.deproject(x, y, &pv),
-                Err(FitsError::WcsProjectionDomain { projection: code })
+                Err(FitsError::WcsPixelOutOfDomain { projection: code })
                     if code == projection.code()
             ),
             "{projection:?} ({x}, {y})"
@@ -611,7 +611,7 @@ fn cube_projection_domains_reject_points_outside_the_face_cross() {
     for projection in [Projection::Tsc, Projection::Csc, Projection::Qsc] {
         assert!(matches!(
             projection.deproject(100.0, 100.0, &pv),
-            Err(FitsError::WcsProjectionDomain { projection: code })
+            Err(FitsError::WcsPixelOutOfDomain { projection: code })
                 if code == projection.code()
         ));
         // (315, 45) is the top-right corner of face 4, which is the cube vertex

@@ -510,7 +510,7 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
     assert!((to_pixel(&generic, &[expected]).unwrap()[0] - 3.0).abs() < 1e-13);
     assert!(matches!(
         to_pixel(&generic, &[0.0]),
-        Err(FitsError::WcsCoordinateDomain {
+        Err(FitsError::WcsCoordinateOutOfDomain {
             axis: 0,
             algorithm: "LOG"
         })

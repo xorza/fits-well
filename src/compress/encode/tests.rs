@@ -18,15 +18,16 @@ use std::iter;
 
 #[test]
 fn compression_write_round_trips_through_decode() {
-    let ramp_image = Image::new(vec![24, 16], ramp()).unwrap();
+    let ramp_image = Image::new(vec![24, 16], ramp(), Scaling::IDENTITY).unwrap();
     // PLIO is a mask codec: non-negative i32 values.
-    let mask_image = Image::new(vec![24, 16], mask()).unwrap();
+    let mask_image = Image::new(vec![24, 16], mask(), Scaling::IDENTITY).unwrap();
     // `BITPIX = 8` is unsigned; 37 is coprime with 256, so every byte value occurs.
     let byte_image = Image::new(
         vec![24, 16],
         (0..24 * 16usize)
             .map(|i| u8::try_from(i * 37 % 256).unwrap())
             .collect::<Vec<u8>>(),
+        Scaling::IDENTITY,
     )
     .unwrap();
     for (case, image, compression, tiles) in [
@@ -246,7 +247,7 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
 
 #[test]
 fn hcompress_writer_enforces_standard_image_constraints() {
-    let line = Image::new(vec![4], vec![1i16, 2, 3, 4]).unwrap();
+    let line = Image::new(vec![4], vec![1i16, 2, 3, 4], Scaling::IDENTITY).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
         writer.write_compressed_image(line.view(), &CompressionConfig::new(Compression::Hcompress(Hcompress::default())), None),
@@ -254,21 +255,21 @@ fn hcompress_writer_enforces_standard_image_constraints() {
             if name == "HCOMPRESS_1 requires a two-dimensional image"
     ));
 
-    let float = Image::new(vec![4, 1], vec![1.0f32, 2.0, 3.0, 4.0]).unwrap();
+    let float = Image::new(vec![4, 1], vec![1.0f32, 2.0, 3.0, 4.0], Scaling::IDENTITY).unwrap();
     assert!(matches!(
         writer.write_compressed_image(float.view(), &CompressionConfig::new(Compression::Hcompress(Hcompress::lossy(2.0).unwrap())), None),
         Err(FitsError::UnsupportedCompression { name })
             if name == "HCOMPRESS_1 for float images (write)"
     ));
 
-    let extreme = Image::new(vec![4, 4], vec![i64::MAX; 16]).unwrap();
+    let extreme = Image::new(vec![4, 4], vec![i64::MAX; 16], Scaling::IDENTITY).unwrap();
     assert!(matches!(
         writer.write_compressed_image(extreme.view(), &CompressionConfig::new(Compression::Hcompress(Hcompress::default())).with_tiles([4, 4]), None),
         Err(FitsError::UnsupportedCompression { name })
             if name == "HCOMPRESS_1 tile exceeds the signed 64-bit stream range"
     ));
 
-    let undefined = Image::new_scaled(
+    let undefined = Image::new(
         vec![8, 8],
         (0..64)
             .map(|index| {
@@ -426,7 +427,7 @@ fn hcompress_writer_converts_noise_multiplier_to_tile_scale() {
             x * x + 3 * y
         })
         .collect();
-    let image = Image::new(vec![8, 8], samples).unwrap();
+    let image = Image::new(vec![8, 8], samples, Scaling::IDENTITY).unwrap();
     let mut r = round_trip(|w| {
         w.write_compressed_image(
             image.view(),
@@ -474,7 +475,7 @@ fn hcompress_default_tiles_follow_cfitsio() {
         assert_eq!(hcompress_default_rows(rows), tile, "{rows} rows");
     }
 
-    let image = Image::new(vec![64, 33], vec![0i16; 64 * 33]).unwrap();
+    let image = Image::new(vec![64, 33], vec![0i16; 64 * 33], Scaling::IDENTITY).unwrap();
     let r = round_trip(|w| {
         w.write_compressed_image(
             image.view(),
@@ -492,7 +493,12 @@ fn hcompress_default_tiles_follow_cfitsio() {
 #[test]
 fn hcompress_refuses_tiles_under_four_pixels() {
     let refused = |shape: Vec<usize>, tiles: &[usize]| {
-        let image = Image::new(shape.clone(), vec![0i16; shape.iter().product()]).unwrap();
+        let image = Image::new(
+            shape.clone(),
+            vec![0i16; shape.iter().product()],
+            Scaling::IDENTITY,
+        )
+        .unwrap();
         rejected_before_output(|w| {
             w.write_compressed_image(
                 image.view(),
@@ -533,7 +539,7 @@ fn hcompress_round_trips_tiles_odd_on_both_axes() {
         let samples: Vec<i16> = (0..shape[0] * shape[1])
             .map(|i| i16::try_from((i * 7919 + 13) % 2001).unwrap() - 1000)
             .collect();
-        let image = Image::new(shape.to_vec(), samples.clone()).unwrap();
+        let image = Image::new(shape.to_vec(), samples.clone(), Scaling::IDENTITY).unwrap();
         let mut r = round_trip(|w| {
             w.write_compressed_image(
                 image.view(),
@@ -558,7 +564,7 @@ fn hcompress_lossless_write_round_trips_exactly() {
             x * x - 3 * y
         })
         .collect();
-    let image = Image::new(vec![16, 16], samples.clone()).unwrap();
+    let image = Image::new(vec![16, 16], samples.clone(), Scaling::IDENTITY).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
         .write_compressed_image(
@@ -575,7 +581,7 @@ fn hcompress_lossless_write_round_trips_exactly() {
     }
 
     let wide = vec![i32::MAX; 16];
-    let image = Image::new(vec![4, 4], wide.clone()).unwrap();
+    let image = Image::new(vec![4, 4], wide.clone(), Scaling::IDENTITY).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
         .write_compressed_image(
@@ -595,7 +601,7 @@ fn hcompress_lossless_write_round_trips_exactly() {
         -(1i64 << 40) + 2,
     ]
     .repeat(4);
-    let image = Image::new(vec![4, 4], wide.clone()).unwrap();
+    let image = Image::new(vec![4, 4], wide.clone(), Scaling::IDENTITY).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
         .write_compressed_image(
@@ -682,7 +688,7 @@ fn parallel_full_decode_crosses_the_bounded_wave_boundary() {
     let samples: Vec<u8> = (0usize..row * rows)
         .map(|index| (index.wrapping_mul(37) & 0xff) as u8)
         .collect();
-    let image = Image::new(vec![row, rows], samples.clone()).unwrap();
+    let image = Image::new(vec![row, rows], samples.clone(), Scaling::IDENTITY).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
         .write_compressed_image(

@@ -192,12 +192,6 @@ impl Ascii {
         })
     }
 
-    /// The index of the first column whose `TTYPEn` matches `name`, compared
-    /// case-insensitively per §7.2.2.
-    pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.schema.column_index(name)
-    }
-
     /// A reader handle for the column `column` selects, by index or `TTYPEn` name. Decode
     /// through it — [`AsciiColumnReader::raw`]/[`physical`](AsciiColumnReader::physical) —
     /// without re-passing the descriptor. Errors with

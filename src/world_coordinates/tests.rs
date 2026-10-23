@@ -88,7 +88,7 @@ fn transform_failures_return_errors() {
     let sin = build("SIN").unwrap();
     assert!(matches!(
         to_world(&sin, &[2.0, 1.0]),
-        Err(FitsError::WcsProjectionDomain { projection: "SIN" })
+        Err(FitsError::WcsPixelOutOfDomain { projection: "SIN" })
     ));
 
     // A ZPN polynomial without coefficients maps every colatitude to the pole.

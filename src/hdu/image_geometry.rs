@@ -74,7 +74,7 @@ impl ImageGeometry {
         Ok(Self {
             shape,
             bitpix,
-            scaling: header.scaling()?,
+            scaling: Scaling::from_header(header)?,
         })
     }
 

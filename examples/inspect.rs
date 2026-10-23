@@ -30,11 +30,9 @@ fn main() -> fits_well::Result<()> {
     for (i, hdu) in reader.hdus().iter().enumerate() {
         println!("\nHDU {i}: {:?}", hdu.kind);
 
-        // `axes()` returns the NAXISn dimensions (empty for a header-only HDU).
-        if let Ok(axes) = hdu.header.axes()
-            && !axes.is_empty()
-        {
-            println!("  dimensions = {axes:?}");
+        // An image's geometry, compressed or not, from its header alone.
+        if let Ok(metadata) = hdu.image_metadata() {
+            println!("  dimensions = {:?}", metadata.shape);
         }
 
         // The typed getters return `None` when a keyword is absent.

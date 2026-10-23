@@ -26,6 +26,17 @@ pub enum Indexed {
 }
 
 impl Indexed {
+    /// What the index counts, in words.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Hdu => "HDU",
+            Self::HeaderRecord => "header record",
+            Self::Column => "table column",
+            Self::Group => "group",
+            Self::WcsAxis => "WCS axis",
+        }
+    }
+
     #[expect(
         clippy::trivially_copy_pass_by_ref,
         reason = "thiserror's `fmt` hands the variant and every field by reference"
@@ -294,8 +305,8 @@ pub enum FitsError {
     #[error("variable-length rows need one row to give their element type")]
     EmptyVlaNeedsType,
     /// A FITS keyword family was addressed with zero even though its indices start at 1.
-    #[error("{kind} indices are 1-based and cannot be zero")]
-    OneBasedIndexRequired { kind: &'static str },
+    #[error("{} indices are 1-based and cannot be zero", .indexed.name())]
+    OneBasedIndexRequired { indexed: Indexed },
     /// No HDU carries the extension name, version and level a read named.
     #[error("no HDU named {name:?} (EXTVER {version:?}, EXTLEVEL {level:?})")]
     HduNotFound {
@@ -336,7 +347,7 @@ pub enum FitsError {
     /// An intermediate (projection-plane) coordinate lies outside the region its WCS
     /// projection maps back onto the sphere (wcslib `PRJERR_BAD_PIX`).
     #[error("coordinate is outside the {projection} projection domain")]
-    WcsProjectionDomain { projection: &'static str },
+    WcsPixelOutOfDomain { projection: &'static str },
     /// A native spherical coordinate has no image under its WCS projection: it lies
     /// behind a zenithal projection's horizon, past a perspective projection's limb, or
     /// at a pole a projection sends to infinity (wcslib `PRJERR_BAD_WORLD`).
@@ -356,7 +367,7 @@ pub enum FitsError {
     /// A world or intermediate coordinate lies outside a non-celestial WCS
     /// algorithm's mathematical domain.
     #[error("coordinate on zero-based axis {axis} is outside the {algorithm} WCS domain")]
-    WcsCoordinateDomain {
+    WcsCoordinateOutOfDomain {
         /// Zero-based WCS axis containing the invalid coordinate.
         axis: usize,
         algorithm: &'static str,

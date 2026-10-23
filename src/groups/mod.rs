@@ -129,7 +129,7 @@ impl RandomGroups {
             gcount,
             pcount,
             array_len,
-            array_scaling: header.scaling()?,
+            array_scaling: Scaling::from_header(header)?,
             param_scaling,
             samples: Data::decode(data, bitpix),
         })

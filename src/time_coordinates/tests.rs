@@ -155,7 +155,7 @@ fn header_datetimes_use_the_declared_scale() {
         .set_internal(keywords::DATE_END, "2017-01-02T00:00:00");
     let time = Frame::from_header(&header).unwrap();
     assert_eq!(time.scale, Scale::Local("MET".to_string()));
-    assert_eq!(time.mjdref, 57_754.0);
+    assert_eq!(time.reference_mjd, 57_754.0);
     assert_eq!(
         Coordinate::observation(&header).unwrap(),
         Some(Coordinate {
@@ -226,16 +226,16 @@ fn reads_bound_duration_and_error_keywords() {
     h.set_internal(keywords::TIMEDEL, 0.1);
     h.set_internal(keywords::TIMSYER, 1e-6);
     let b = Bounds::from_header(&h).unwrap();
-    assert_eq!(b.beg_mjd, Some(58000.0));
+    assert_eq!(b.start_mjd, Some(58000.0));
     // Resolved from DATE-END: 2017-09-04 is MJD 58000.
     assert_eq!(b.end_mjd, Some(58001.0));
-    assert_eq!(b.avg_mjd, Some(58000.5)); // §9.5 midpoint
-    assert_eq!(b.xposure, Some(1200.0));
-    assert_eq!(b.telapse, Some(1500.0));
-    assert_eq!(b.timedel, Some(0.1));
-    assert_eq!(b.timepixr, 0.5); // default when absent
-    assert_eq!(b.timsyer, Some(1e-6));
-    assert_eq!(b.timrder, None);
+    assert_eq!(b.mid_mjd, Some(58000.5)); // §9.5 midpoint
+    assert_eq!(b.exposure, Some(1200.0));
+    assert_eq!(b.elapsed, Some(1500.0));
+    assert_eq!(b.resolution, Some(0.1));
+    assert_eq!(b.pixel_position, 0.5); // default when absent
+    assert_eq!(b.systematic_error, Some(1e-6));
+    assert_eq!(b.random_error, None);
 
     h.set_internal(keywords::TIMESYS, 1)
         .set_internal(keywords::MJD_END, 58001.0);
@@ -484,7 +484,9 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
     ));
     assert!(matches!(
         t.time_axis_mjd(&unsupported, 0, &[1.0]),
-        Err(FitsError::OneBasedIndexRequired { kind: "WCS axis" })
+        Err(FitsError::OneBasedIndexRequired {
+            indexed: Indexed::WcsAxis
+        })
     ));
     assert!(matches!(
         t.time_axis_mjd(&unsupported, 2, &[1.0]),
@@ -509,8 +511,8 @@ fn fits_time_resolves_reference_and_relative_times() {
 
     let t = Frame::from_header(&h).unwrap();
     assert_eq!(t.scale, Scale::known(ScaleKind::Tt));
-    assert_eq!(t.mjdref, 58000.0);
-    assert_eq!(t.trefpos, ReferencePosition::Topocenter);
+    assert_eq!(t.reference_mjd, 58000.0);
+    assert_eq!(t.reference_position, ReferencePosition::Topocenter);
     assert_eq!(t.unit_seconds().unwrap(), 1.0);
     // TSTART=0 → MJDREF; TSTOP=86400 s → one day later.
     assert_eq!(t.relative_to_mjd(0.0).unwrap(), 58000.0);
@@ -534,44 +536,50 @@ fn fits_time_resolves_reference_and_relative_times() {
 
     let mut positions = Header::new();
     assert_eq!(
-        Frame::from_header(&positions).unwrap().trefpos,
+        Frame::from_header(&positions).unwrap().reference_position,
         ReferencePosition::Topocenter
     );
     positions
         .set_internal(keywords::TREFPOS, "BARYCENT")
         .set_internal("TRPOS4", "GEOCENTR");
     assert_eq!(
-        Frame::from_header(&positions).unwrap().trefpos,
+        Frame::from_header(&positions).unwrap().reference_position,
         ReferencePosition::Barycenter
     );
     assert_eq!(
-        Frame::from_column(&positions, 4).unwrap().trefpos,
+        Frame::from_column(&positions, 4)
+            .unwrap()
+            .reference_position,
         ReferencePosition::Geocenter
     );
     assert!(matches!(
         Frame::from_column(&positions, 0),
         Err(FitsError::OneBasedIndexRequired {
-            kind: "table column"
+            indexed: Indexed::Column
         })
     ));
     assert!(matches!(
         PhaseAxis::from_header(&positions, 0, None),
-        Err(FitsError::OneBasedIndexRequired { kind: "WCS axis" })
+        Err(FitsError::OneBasedIndexRequired {
+            indexed: Indexed::WcsAxis
+        })
     ));
     assert!(matches!(
         PhaseAxis::from_pixel_list(&positions, 0, None),
         Err(FitsError::OneBasedIndexRequired {
-            kind: "table column"
+            indexed: Indexed::Column
         })
     ));
     assert!(matches!(
         PhaseAxis::from_array_column(&positions, 0, 1, None),
-        Err(FitsError::OneBasedIndexRequired { kind: "WCS axis" })
+        Err(FitsError::OneBasedIndexRequired {
+            indexed: Indexed::WcsAxis
+        })
     ));
     assert!(matches!(
         PhaseAxis::from_array_column(&positions, 1, 0, None),
         Err(FitsError::OneBasedIndexRequired {
-            kind: "table column"
+            indexed: Indexed::Column
         })
     ));
     for (value, expected) in [
@@ -593,14 +601,14 @@ fn fits_time_resolves_reference_and_relative_times() {
     ] {
         positions.set_internal(keywords::TREFPOS, value);
         assert_eq!(
-            Frame::from_header(&positions).unwrap().trefpos,
+            Frame::from_header(&positions).unwrap().reference_position,
             expected,
             "{value}"
         );
     }
     positions.set_internal(keywords::TREFPOS, "topocenter");
     assert_eq!(
-        Frame::from_header(&positions).unwrap().trefpos,
+        Frame::from_header(&positions).unwrap().reference_position,
         ReferencePosition::Other("topocenter".to_string())
     );
 
@@ -608,7 +616,9 @@ fn fits_time_resolves_reference_and_relative_times() {
         .set_internal(keywords::TREFPOS, 42)
         .set_internal("TRPOS4", "GEOCENTR");
     assert_eq!(
-        Frame::from_column(&positions, 4).unwrap().trefpos,
+        Frame::from_column(&positions, 4)
+            .unwrap()
+            .reference_position,
         ReferencePosition::Geocenter
     );
     assert!(matches!(
@@ -626,7 +636,7 @@ fn fits_time_reads_split_and_day_unit_references() {
     h.set_internal(keywords::TIMEUNIT, "d");
     let t = Frame::from_header(&h).unwrap();
     assert_eq!(t.scale, Scale::known(ScaleKind::Utc)); // default
-    assert_eq!(t.mjdref, 58000.25);
+    assert_eq!(t.reference_mjd, 58000.25);
     assert_eq!(t.unit_seconds().unwrap(), 86400.0);
     // 2 days past the reference.
     assert_eq!(t.relative_to_mjd(2.0).unwrap(), 58002.25);
@@ -699,7 +709,7 @@ fn timeoffs_shifts_relative_times() {
     h.set_internal(keywords::TIMEUNIT, "s");
     h.set_internal(keywords::TIMEOFFS, 10.0);
     let t = Frame::from_header(&h).unwrap();
-    assert_eq!(t.timeoffs, 10.0);
+    assert_eq!(t.clock_offset, 10.0);
     assert_eq!(t.relative_to_mjd(0.0).unwrap(), 58000.0 + 10.0 / 86400.0);
     assert_eq!(t.relative_to_mjd(5.0).unwrap(), 58000.0 + 15.0 / 86400.0);
 }
@@ -803,30 +813,30 @@ fn prefixed_relative_time_uses_the_declared_scale() {
 
 #[test]
 fn split_reference_takes_precedence_over_single_mjdref() {
-    let mjdref = |pairs: &[(&str, f64)]| {
+    let reference_mjd = |pairs: &[(&str, f64)]| {
         let mut h = Header::new();
         for &(k, v) in pairs {
             h.set_internal(k, v);
         }
-        Frame::from_header(&h).unwrap().mjdref
+        Frame::from_header(&h).unwrap().reference_mjd
     };
     // §9.2.2: a full integer+fractional split wins over the single value.
     assert_eq!(
-        mjdref(&[("MJDREF", 58000.0), ("MJDREFI", 59000.0), ("MJDREFF", 0.5)]),
+        reference_mjd(&[("MJDREF", 58000.0), ("MJDREFI", 59000.0), ("MJDREFF", 0.5)]),
         59000.5
     );
     // Single value alone is used as-is.
-    assert_eq!(mjdref(&[("MJDREF", 58000.0)]), 58000.0);
+    assert_eq!(reference_mjd(&[("MJDREF", 58000.0)]), 58000.0);
     // An incomplete split (integer part only) defers to the single value.
     assert_eq!(
-        mjdref(&[("MJDREF", 58000.0), ("MJDREFI", 59000.0)]),
+        reference_mjd(&[("MJDREF", 58000.0), ("MJDREFI", 59000.0)]),
         58000.0
     );
     // A JD split is shifted to an MJD before its fraction is added: summed as a JD
     // first, 0.5003 would round to the JD's precision and end at 51544.000299999956.
     assert_eq!(
-        mjdref(&[("JDREFI", 2_451_544.0), ("JDREFF", 0.5003)]),
+        reference_mjd(&[("JDREFI", 2_451_544.0), ("JDREFF", 0.5003)]),
         51544.0003
     );
-    assert_eq!(mjdref(&[("JDREF", 2_451_544.5)]), 51544.0);
+    assert_eq!(reference_mjd(&[("JDREF", 2_451_544.5)]), 51544.0);
 }

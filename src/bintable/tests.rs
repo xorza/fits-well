@@ -66,7 +66,7 @@ fn reads_the_real_aips_antenna_table() {
         table.column(2).unwrap().raw().unwrap(),
         ColumnData::F64(vec![])
     );
-    assert_eq!(table.column_index("NOSTA"), Some(3));
+    assert_eq!(table.schema().column_index("NOSTA"), Some(3));
 }
 
 #[test]

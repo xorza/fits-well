@@ -149,19 +149,19 @@ impl<'r, S: Source> ImageReader<'r, S> {
             return match region {
                 Region::All => {
                     let table = self.data.table(self.hdu, self.sum.as_mut())?;
-                    Image::new_scaled(&*self.image.shape, tiled.decode(header, table)?, scaling)
+                    Image::new(&*self.image.shape, tiled.decode(header, table)?, scaling)
                 }
                 Region::Section(ranges) => {
                     let tiles = tiles(self.data, self.hdu, tiled, self.scratch, ranges)?;
                     let section = tiles.section(ranges);
                     let samples = tiled.decode_section(header, tiles.table, section)?;
-                    Image::new_scaled(tiles.shape, samples, scaling)
+                    Image::new(tiles.shape, samples, scaling)
                 }
             };
         }
         let bitpix = self.image.bitpix;
         let stored = self.plain(region)?;
-        Image::new_scaled(stored.shape, Data::decode(stored.bytes, bitpix), scaling)
+        Image::new(stored.shape, Data::decode(stored.bytes, bitpix), scaling)
     }
 
     /// Append the physical values of `region` to `out`, as

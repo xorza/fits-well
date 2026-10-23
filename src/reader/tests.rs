@@ -715,8 +715,8 @@ fn hdu_selectors_find_hdus_by_index_name_version_and_level() {
     ));
 
     // A written extension is found by its name in any case and its EXTVER.
-    let primary = Image::new(vec![1], vec![0u8]).unwrap();
-    let extension = Image::new(vec![3], vec![10i16, 20, 30]).unwrap();
+    let primary = Image::new(vec![1], vec![0u8], Scaling::IDENTITY).unwrap();
+    let extension = Image::new(vec![3], vec![10i16, 20, 30], Scaling::IDENTITY).unwrap();
     let mut extension_header = Header::new();
     extension_header.set(keywords::EXTNAME, "SCI").unwrap();
     extension_header.set(keywords::EXTVER, 2).unwrap();
@@ -863,7 +863,7 @@ fn a_whole_view_matches_the_owned_read_of_a_plain_image() {
     let mut f = open_fixture("UITfuv2582gc.fits");
     // The owned decode is the reference; the borrowed view (into a caller scratch)
     // must equal it.
-    let expected_scaling = f.hdus()[0].header.scaling().unwrap();
+    let expected_scaling = f.hdus()[0].image_metadata().unwrap().scaling;
     let owned = read_whole(&mut f, 0).samples;
     let mut scratch = Vec::new();
     let mut image = f.image(0).unwrap();
@@ -1025,7 +1025,7 @@ fn image_sections_match_hand_computed_values_for_every_bitpix() {
 
     for (samples, expected) in cases {
         let bitpix = samples.bitpix();
-        let image = Image::new(vec![5, 4, 3], samples).unwrap();
+        let image = Image::new(vec![5, 4, 3], samples, Scaling::IDENTITY).unwrap();
         let bytes = written(|w| w.write_image(image.view(), None));
         let mut reader = FitsReader::from_bytes(&bytes).unwrap();
         let mut scratch = Vec::new();
@@ -1039,7 +1039,7 @@ fn image_sections_match_hand_computed_values_for_every_bitpix() {
 
 #[test]
 fn image_sections_preserve_scaling_and_validate_empty_and_invalid_regions() {
-    let image = Image::new_scaled(
+    let image = Image::new(
         vec![4, 3],
         vec![1i16, 2, -99, 4, 5, 6, 7, 8, 9, 10, 11, 12],
         Scaling {
@@ -1105,7 +1105,7 @@ fn plain_image_section_streams_exact_strided_runs() {
     let samples: Vec<i16> = (0..shape.iter().product::<usize>())
         .map(|index| i16::try_from(index).unwrap() - 100)
         .collect();
-    let image = Image::new(shape.to_vec(), samples.clone()).unwrap();
+    let image = Image::new(shape.to_vec(), samples.clone(), Scaling::IDENTITY).unwrap();
     let bytes = written(|w| w.write_image(image.view(), None));
     let read_ranges = Rc::new(RefCell::new(Vec::new()));
     let source = CountingCursor {
@@ -1194,7 +1194,7 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
             bzero: 10.0,
             blank,
         };
-        let image = Image::new_scaled(vec![9, 7], samples, scaling).unwrap();
+        let image = Image::new(vec![9, 7], samples, scaling).unwrap();
         let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
         writer
             .write_compressed_image(
@@ -1597,7 +1597,7 @@ fn malformed_pq_descriptors_match_across_table_read_paths() {
 
 #[test]
 fn readers_recover_their_original_sources() {
-    let image = Image::new(vec![2], vec![1u8, 2]).unwrap();
+    let image = Image::new(vec![2], vec![1u8, 2], Scaling::IDENTITY).unwrap();
     let bytes = written(|w| w.write_image(image.view(), None));
     let slice = FitsReader::from_bytes(&bytes).unwrap().into_bytes();
     assert!(ptr::eq(slice.as_ptr(), bytes.as_ptr()));

@@ -103,11 +103,6 @@ impl AsciiBuilder {
         Ok(self)
     }
 
-    pub fn column(mut self, column: AsciiWriteColumn) -> Result<Self> {
-        self.push(column)?;
-        Ok(self)
-    }
-
     pub fn with_columns(
         row_count: usize,
         columns: impl IntoIterator<Item = AsciiWriteColumn>,
