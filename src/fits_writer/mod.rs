@@ -470,11 +470,11 @@ pub(crate) mod internals {
     pub(crate) type MemoryWriter = FitsWriter<Cursor<Vec<u8>>>;
 
     pub(crate) fn binary_table(nrows: usize, columns: &[WriteColumn]) -> Builder {
-        Builder::explicit(nrows, columns.iter().cloned()).unwrap()
+        Builder::with_columns(nrows, columns.iter().cloned()).unwrap()
     }
 
     pub(crate) fn ascii_table(nrows: usize, columns: &[AsciiWriteColumn]) -> AsciiBuilder {
-        AsciiBuilder::explicit(nrows, columns.iter().cloned()).unwrap()
+        AsciiBuilder::with_columns(nrows, columns.iter().cloned()).unwrap()
     }
 
     /// The file `write` produces in a fresh in-memory writer.

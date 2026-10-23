@@ -90,7 +90,7 @@ pub(crate) fn atomic(c: &mut Criterion) {
 
 /// `integration/write_compressed/file/<codec>/<type>`, `integration/read_compressed/<source>/
 /// <codec>/<type>`, `integration/write_compressed_table/file/<codec>` and
-/// `integration/read_compressed_table/<source>/<codec>`: the standard frame under the light
+/// `integration/read_table/<source>/<codec>`: the standard frame under the light
 /// header in the default row tiles, a float frame quantized; the catalog in tiles of 4096 rows.
 /// From creating or opening the file to the last byte or sample. Per sample or row,
 /// uncompressed.
@@ -99,7 +99,7 @@ pub(crate) fn integration(c: &mut Criterion) {
     write_compressed(c, &dir);
     read_compressed(c, &dir);
     write_compressed_table(c, &dir);
-    read_compressed_table(c, &dir);
+    read_table(c, &dir);
 }
 
 fn write_compressed(c: &mut Criterion, dir: &ScratchDir) {
@@ -166,8 +166,8 @@ fn write_compressed_table(c: &mut Criterion, dir: &ScratchDir) {
     group.finish();
 }
 
-fn read_compressed_table(c: &mut Criterion, dir: &ScratchDir) {
-    let mut group = Kind::Integration.group(c, "read_compressed_table", Scale::Frame);
+fn read_table(c: &mut Criterion, dir: &ScratchDir) {
+    let mut group = Kind::Integration.group(c, "read_table", Scale::Frame);
     group.throughput(fixture::throughput(CATALOG_ROWS, CATALOG_ROW_BYTES));
     for compression in TABLE_CODECS {
         let mut path: Option<PathBuf> = None;
@@ -348,6 +348,6 @@ impl Reading for ReadCompressedTable {
     type Output = Table;
 
     fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> Table {
-        reader.read_compressed_table(1).unwrap()
+        reader.read_table(1).unwrap()
     }
 }

@@ -165,6 +165,21 @@ impl Schema {
             columns: self.columns.clone(),
         }
     }
+
+    /// This schema over `nrows` rows that the same heap follows, at the same gap: the
+    /// table that a run of this table's rows and its whole heap make.
+    #[cfg(feature = "compression")]
+    pub(crate) fn with_row_count(&self, nrows: usize) -> Self {
+        let main_len = self.nrows * self.row_len;
+        let shift = |offset: usize| offset - main_len + nrows * self.row_len;
+        Self {
+            nrows,
+            row_len: self.row_len,
+            heap_offset: shift(self.heap_offset),
+            heap_end: shift(self.heap_end),
+            columns: self.columns.clone(),
+        }
+    }
 }
 
 #[cfg(test)]

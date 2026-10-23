@@ -87,7 +87,7 @@ fn main() -> Result<(), fits_well::FitsError> {
 
     let mut reader = FitsReader::open(File::open("table.fits")?)?;
     let table = reader.read_table(1)?; // HDU 0 is the empty primary
-    println!("{:?}", table.column_by_name("MAG")?.physical()?); // TSCALn/TZEROn applied
+    println!("{:?}", table.column("MAG")?.physical()?); // TSCALn/TZEROn applied
     Ok(())
 }
 ```

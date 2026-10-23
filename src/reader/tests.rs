@@ -196,8 +196,8 @@ fn read_wcs_fetches_only_the_referenced_first_row_heap_cells() {
     let row_count = 64;
     let coordinates = (0..row_count).map(|_| ColumnData::F64(vec![10.0, 20.0, 40.0]));
     let indices = (0..row_count).map(|_| ColumnData::F64(vec![10.0, 20.0, 40.0]));
-    let unused = (0..row_count).map(|_| ColumnData::Bytes(vec![7; 1024]));
-    let table = Builder::explicit(
+    let unused = (0..row_count).map(|_| ColumnData::U8(vec![7; 1024]));
+    let table = Builder::with_columns(
         row_count,
         vec![
             WriteColumn::vla("COORD", Ragged::from_rows(coordinates).unwrap())
@@ -1271,7 +1271,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
             "LOGICAL",
             ColumnData::Logical(vec![Some(true), Some(false), None, Some(true)]),
         ),
-        WriteColumn::scalar("BYTE", ColumnData::Bytes(vec![1, 2, 3, 4])),
+        WriteColumn::scalar("BYTE", ColumnData::U8(vec![1, 2, 3, 4])),
         WriteColumn::bits(
             "FLAGS",
             vec![0b1010_0000, 0b0101_0000, 0b1110_0000, 0b0001_0000],
@@ -1329,7 +1329,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
         )
         .wide(),
     ];
-    let table = Builder::explicit(rows, columns).unwrap();
+    let table = Builder::with_columns(rows, columns).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer.write_table(&table, None).unwrap();
     let bytes = writer.into_inner().into_inner();
@@ -1341,20 +1341,20 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     let empty = reader.read_table_rows(1, 2..2).unwrap();
     assert_eq!(empty.schema().nrows, 0);
     assert_eq!(
-        empty.column_by_name("VLA").unwrap().vla().unwrap(),
+        empty.column("VLA").unwrap().vla().unwrap(),
         Ragged::<ColumnData>::new(ColumnData::I32(Vec::new()), Vec::new())
     );
     let full = reader.read_table_rows(1, 0..4).unwrap();
     assert_eq!(
-        full.column_by_name("QVLA").unwrap().vla().unwrap(),
+        full.column("QVLA").unwrap().vla().unwrap(),
         Ragged::<ColumnData>::new(ColumnData::F64(vec![0.5, 2.5, 3.5, 4.5]), vec![1, 1, 3, 4])
     );
     let ranged = reader.read_table_rows(1, 1..3).unwrap();
     assert_eq!(
-        ranged.column_by_name("ID").unwrap().raw().unwrap(),
+        ranged.column("ID").unwrap().raw().unwrap(),
         ColumnData::I32(vec![20, 30])
     );
-    let flags = ranged.column_by_name("FLAGS").unwrap().bits().unwrap();
+    let flags = ranged.column("FLAGS").unwrap().bits().unwrap();
     assert_eq!(
         (0..5)
             .map(|column| flags.get(0, column).unwrap())
@@ -1362,28 +1362,26 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
         [false, true, false, true, false]
     );
     assert_eq!(
-        ranged.column_by_name("NAME").unwrap().raw().unwrap(),
+        ranged.column("NAME").unwrap().raw().unwrap(),
         ColumnData::Character(b"two tri ".to_vec())
     );
     assert_eq!(
-        ranged.column_by_name("COMPLEX").unwrap().complex().unwrap(),
+        ranged.column("COMPLEX").unwrap().complex().unwrap(),
         [Complex::new(2.0, -2.0), Complex::new(3.0, -3.0)]
     );
-    let physical = ranged.column_by_name("SCALED").unwrap().physical().unwrap();
+    let physical = ranged.column("SCALED").unwrap().physical().unwrap();
     assert!(physical[0].is_nan());
     assert_eq!(physical[1], 14.0);
     assert_eq!(
-        ranged.column_by_name("VLA").unwrap().vla().unwrap(),
+        ranged.column("VLA").unwrap().vla().unwrap(),
         Ragged::<ColumnData>::new(ColumnData::I32(vec![2, 3]), vec![2, 2])
     );
     assert_eq!(
-        ranged.column_by_name("QVLA").unwrap().vla().unwrap(),
+        ranged.column("QVLA").unwrap().vla().unwrap(),
         Ragged::<ColumnData>::new(ColumnData::F64(vec![2.5, 3.5]), vec![0, 2])
     );
 
-    let selection = reader
-        .read_table_columns(1, 1..3, &[ColumnSelector::from("ID"), "VLA".into()])
-        .unwrap();
+    let selection = reader.read_table_columns(1, 1..3, ["ID", "VLA"]).unwrap();
     assert_eq!(selection.rows, 1..3);
     assert!(matches!(
         &selection.columns[0].data,
@@ -1394,17 +1392,58 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
         SelectedData::Variable(values)
             if values == &Ragged::<ColumnData>::new(ColumnData::I32(vec![2, 3]), vec![2, 2])
     ));
+    // `ID` is column 0 and `VLA` column 12 of the table; `QVLA`, column 13, is not selected.
+    let number = |column: Option<&SelectedColumn>| column.map(|column| column.descriptor.number);
+    assert_eq!(number(selection.column("id")), Some(1));
+    assert_eq!(number(selection.column(0)), Some(1));
+    assert_eq!(number(selection.column(12)), Some(13));
+    assert!(selection.column(13).is_none());
+    assert!(selection.column("QVLA").is_none());
+
+    let mut reused = selection.clone();
+    let id_buffer = match &reused.columns[0].data {
+        SelectedData::Fixed(ColumnData::I32(values)) => values.as_ptr(),
+        other => panic!("{other:?}"),
+    };
+    reader
+        .read_table_columns_into(1, 1..3, ["ID", "VLA"], &mut reused)
+        .unwrap();
+    assert_eq!(reused.rows, selection.rows);
+    assert_eq!(reused.columns[0].data, selection.columns[0].data);
+    assert_eq!(reused.columns[1].data, selection.columns[1].data);
+    assert!(matches!(
+        &reused.columns[0].data,
+        SelectedData::Fixed(ColumnData::I32(values)) if values.as_ptr() == id_buffer
+    ));
+    // The fixed `ID` column becomes the variable `QVLA` column, and `VLA` is dropped.
+    reader
+        .read_table_columns_into(1, 0..4, ["QVLA"], &mut reused)
+        .unwrap();
+    assert_eq!(reused.rows, 0..4);
+    assert_eq!(reused.columns.len(), 1);
+    assert_eq!(reused.columns[0].descriptor.name.as_deref(), Some("QVLA"));
     assert_eq!(
-        reader
-            .read_table_cell(1, 3, &ColumnSelector::from("QVLA"))
-            .unwrap(),
+        reused.columns[0].data,
+        SelectedData::Variable(Ragged::<ColumnData>::new(
+            ColumnData::F64(vec![0.5, 2.5, 3.5, 4.5]),
+            vec![1, 1, 3, 4]
+        ))
+    );
+    assert!(matches!(
+        reader.read_table_columns_into(1, 0..4, ["ID", "MISSING"], &mut reused),
+        Err(FitsError::ColumnNotFound { name }) if name == "MISSING"
+    ));
+    assert_eq!(reused.rows, 0..0);
+    assert!(reused.columns.is_empty());
+    assert_eq!(
+        reader.read_table_cell(1, 3, "QVLA").unwrap(),
         ColumnData::F64(vec![4.5])
     );
     for (column, expected) in [
         ("ID", ColumnData::I32(vec![30])),
         ("LOGICAL", ColumnData::Logical(vec![None])),
-        ("BYTE", ColumnData::Bytes(vec![3])),
-        ("FLAGS", ColumnData::Bytes(vec![0b1110_0000])),
+        ("BYTE", ColumnData::U8(vec![3])),
+        ("FLAGS", ColumnData::U8(vec![0b1110_0000])),
         ("NAME", ColumnData::Character(b"tri ".to_vec())),
         (
             "COMPLEX",
@@ -1423,9 +1462,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
         ("QVLA", ColumnData::F64(vec![2.5, 3.5])),
     ] {
         assert_eq!(
-            reader
-                .read_table_cell(1, 2, &ColumnSelector::from(column))
-                .unwrap(),
+            reader.read_table_cell(1, 2, column).unwrap(),
             expected,
             "{column}"
         );
@@ -1439,7 +1476,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
         })
     ));
     assert!(matches!(
-        reader.read_table_cell(1, 4, &ColumnSelector::from("ID")),
+        reader.read_table_cell(1, 4, "ID"),
         Err(FitsError::RowRangeOutOfBounds {
             start: 4,
             end: 5,
@@ -1458,7 +1495,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     corrupted[qvla_slot..qvla_slot + qvla.tform.byte_width()].fill(0xff);
     let mut selective = FitsReader::from_bytes(&corrupted).unwrap();
     let selection = selective
-        .read_table_columns(1, 1..2, &[ColumnSelector::from("ID"), "VLA".into()])
+        .read_table_columns(1, 1..2, ["ID", "VLA"])
         .unwrap();
     assert!(matches!(
         &selection.columns[0].data,
@@ -1470,9 +1507,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
             if values == &Ragged::<ColumnData>::new(ColumnData::I32(vec![2, 3]), vec![2])
     ));
     assert_eq!(
-        selective
-            .read_table_cell(1, 1, &ColumnSelector::from("ID"))
-            .unwrap(),
+        selective.read_table_cell(1, 1, "ID").unwrap(),
         ColumnData::I32(vec![20])
     );
     assert!(matches!(
@@ -1486,12 +1521,12 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     let mut stream = FitsReader::open(Cursor::new(bytes)).unwrap();
     let one = stream.read_table_rows(1, 3..4).unwrap();
     assert_eq!(
-        one.column_by_name("VLA").unwrap().vla().unwrap(),
+        one.column("VLA").unwrap().vla().unwrap(),
         Ragged::<ColumnData>::new(ColumnData::I32(vec![4, 5, 6]), vec![3])
     );
     assert_eq!(
         stream
-            .read_table_columns(1, 0..4, &[ColumnSelector::from("QVLA")])
+            .read_table_columns(1, 0..4, ["QVLA"])
             .unwrap()
             .columns[0]
             .data,
@@ -1507,12 +1542,12 @@ fn malformed_pq_descriptors_match_across_table_read_paths() {
     for width in [DescriptorWidth::P, DescriptorWidth::Q] {
         let mut column = WriteColumn::vla(
             "VLA",
-            Ragged::from_rows(vec![ColumnData::Bytes(vec![7])]).unwrap(),
+            Ragged::from_rows(vec![ColumnData::U8(vec![7])]).unwrap(),
         );
         if width == DescriptorWidth::Q {
             column = column.wide();
         }
-        let table = Builder::explicit(1, vec![column]).unwrap();
+        let table = Builder::with_columns(1, vec![column]).unwrap();
         let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
         writer.write_table(&table, None).unwrap();
         let bytes = writer.into_inner().into_inner();
@@ -1530,18 +1565,10 @@ fn malformed_pq_descriptors_match_across_table_read_paths() {
             let mut reader = FitsReader::from_bytes(&corrupted).unwrap();
 
             let whole = reader.read_table(1).unwrap();
-            case.assert_error(&whole.column_by_name("VLA").unwrap().vla().unwrap_err());
-            case.assert_error(
-                &reader
-                    .read_table_cell(1, 0, &ColumnSelector::from("VLA"))
-                    .unwrap_err(),
-            );
+            case.assert_error(&whole.column("VLA").unwrap().vla().unwrap_err());
+            case.assert_error(&reader.read_table_cell(1, 0, "VLA").unwrap_err());
             case.assert_error(&reader.read_table_rows(1, 0..1).unwrap_err());
-            case.assert_error(
-                &reader
-                    .read_table_columns(1, 0..1, &[ColumnSelector::from("VLA")])
-                    .unwrap_err(),
-            );
+            case.assert_error(&reader.read_table_columns(1, 0..1, ["VLA"]).unwrap_err());
         }
     }
 }

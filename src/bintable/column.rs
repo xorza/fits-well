@@ -13,7 +13,7 @@ use std::iter;
 
 /// One column of a binary table: its `TFORMn` format, optional name/unit, the
 /// `TSCALn`/`TZEROn`/`TNULLn` metadata, and its byte offset within a row.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Column {
     pub name: Option<String>,
     pub unit: Option<String>,
@@ -36,6 +36,50 @@ pub struct Column {
     /// Byte offset of this column from the start of a row: the sum of the widths
     /// before it, so derived and not public.
     pub(crate) byte_offset: usize,
+}
+
+/// `clone_from` reuses the strings and shape of `self`, so a selection refilled with a
+/// table's columns makes no allocation.
+impl Clone for Column {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            unit: self.unit.clone(),
+            tform: self.tform,
+            tscale: self.tscale,
+            tzero: self.tzero,
+            tnull: self.tnull,
+            tdim: self.tdim.clone(),
+            tdisp: self.tdisp.clone(),
+            number: self.number,
+            byte_offset: self.byte_offset,
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        let Self {
+            name,
+            unit,
+            tform,
+            tscale,
+            tzero,
+            tnull,
+            tdim,
+            tdisp,
+            number,
+            byte_offset,
+        } = source;
+        self.name.clone_from(name);
+        self.unit.clone_from(unit);
+        self.tform = *tform;
+        self.tscale = *tscale;
+        self.tzero = *tzero;
+        self.tnull = *tnull;
+        self.tdim.clone_from(tdim);
+        self.tdisp.clone_from(tdisp);
+        self.number = *number;
+        self.byte_offset = *byte_offset;
+    }
 }
 
 impl Named for Column {
@@ -67,6 +111,19 @@ impl Column {
         cells: impl ExactSizeIterator<Item = &'a [u8]>,
         row_count: usize,
     ) -> ColumnData {
+        let mut out = ColumnData::U8(Vec::new());
+        self.decode_cells_into(cells, row_count, &mut out);
+        out
+    }
+
+    /// [`Column::decode_cells`] into `out`, whose buffer it reuses when `out` already
+    /// holds values of this column's type.
+    pub(super) fn decode_cells_into<'a>(
+        &self,
+        cells: impl ExactSizeIterator<Item = &'a [u8]>,
+        row_count: usize,
+        out: &mut ColumnData,
+    ) {
         match self.tform.kind {
             TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
                 unreachable!("raw rejects VLA columns before fixed decode")
@@ -74,9 +131,9 @@ impl Column {
             // `X` packs `repeat` bits into `byte_width` bytes, so its element count is
             // the byte width rather than the repeat.
             kind @ (TformKind::Byte | TformKind::Bit) => {
-                kind.decode_cells(cells, row_count * self.tform.byte_width())
+                kind.decode_cells_into(cells, row_count * self.tform.byte_width(), out);
             }
-            kind => kind.decode_cells(cells, row_count * self.tform.repeat),
+            kind => kind.decode_cells_into(cells, row_count * self.tform.repeat, out),
         }
     }
 

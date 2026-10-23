@@ -28,7 +28,6 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::validate_table_field_count;
 use crate::header_model::{Header, keywords, value};
-use crate::keyword::Keyword;
 use crate::ragged::Ragged;
 use crate::reserved_keywords;
 use std::mem;
@@ -390,188 +389,244 @@ pub(crate) fn compress_table(
     Ok(h)
 }
 
-/// A restored header and its decompressed data unit.
+/// A tiled-compressed table's layout, read once from its container's header: the table
+/// it restores to, and where and how each tile column is stored.
 #[derive(Debug)]
-pub(crate) struct HduParts {
+pub(crate) struct TiledTable {
+    /// The restored table's header, which the tests of the restore read.
+    #[cfg(test)]
     pub(crate) header: Header,
-    pub(crate) data: Vec<u8>,
+    /// The restored table's schema: what every read of the table gives.
+    pub(crate) schema: Schema,
+    /// `ZTILELEN`, cut to `1..=nrows`.
+    rows_per_tile: usize,
+    metas: Vec<ColMeta>,
+    /// Bytes `ZTHEAP` leaves between the main table and the heap.
+    heap_gap: usize,
+    /// The restored data unit's length: main table, gap and heap.
+    data_len: usize,
 }
 
-/// Uncompress a `ZTABLE` container back into its original `BINTABLE`.
-/// Returns the restored header and row-major data unit.
-pub(crate) fn uncompress_table(header: &Header, table: TableView<'_>) -> Result<HduParts> {
-    if header.get_logical(keywords::ZTABLE)? != Some(true) {
-        return Err(FitsError::NotCompressedTable);
-    }
-    bind_table(header, table)?;
-    let naxis1 = header.require_usize(keywords::ZNAXIS.indexed(1)?)?;
-    let nrows = header.require_usize(keywords::ZNAXIS.indexed(2)?)?;
-    let zpcount = header.require_usize(keywords::ZPCOUNT)?;
-    let original_bytes = nrows
-        .checked_mul(naxis1)
-        .ok_or(FitsError::DataUnitOverflow)?;
-    let original_heap_offset = match header.get_integer(keywords::ZTHEAP)? {
-        Some(ztheap) => usize::try_from(ztheap).map_err(|_| FitsError::KeywordOutOfRange {
-            keyword: keywords::ZTHEAP,
-        })?,
-        None => original_bytes,
-    };
-    let total = original_bytes
-        .checked_add(zpcount)
-        .ok_or(FitsError::DataUnitOverflow)?;
-    if !(original_bytes..=total).contains(&original_heap_offset) {
-        return Err(FitsError::TableMetadataMismatch {
-            name: "ZTHEAP".to_string(),
-        });
-    }
-    header.get_text(keywords::ZHECKSUM)?;
-    header.get_text(keywords::ZDATASUM)?;
-    let mut rpt = header.require_usize(keywords::ZTILELEN)?;
-    // A zero tile height would make the row-tile count diverge; §10.3 requires ≥ 1.
-    if rpt == 0 {
-        return Err(FitsError::KeywordOutOfRange {
-            keyword: keywords::ZTILELEN,
-        });
-    }
-    if rpt > nrows {
-        rpt = nrows.max(1);
-    }
-    let ncols = header.require_usize(keywords::TFIELDS)?;
-    validate_table_field_count(ncols)?;
-
-    // Resolve each column's original form and codec.
-    let mut metas = Vec::with_capacity(ncols);
-    let mut zforms = Vec::with_capacity(ncols);
-    let mut offset = 0;
-    for n in 1..=ncols {
-        let zform = header
-            .require_text(keywords::ZFORM.indexed(n)?)?
-            .to_string();
-        let tform = Tform::parse(&zform)?;
-        let algo = match header.get_text(keywords::ZCTYP.indexed(n)?)? {
-            Some(s) => Algo::parse(s)?,
-            None => Algo::Gzip2, // cfitsio's default when ZCTYPn is absent
-        };
-        let m = ColMeta::declared(&tform, offset, algo)?;
-        offset = offset
-            .checked_add(m.width)
+impl TiledTable {
+    /// The layout `header`, a `ZTABLE` container's, declares.
+    pub(crate) fn new(header: &Header) -> Result<Self> {
+        debug_assert_eq!(
+            header.get_logical(keywords::ZTABLE).ok().flatten(),
+            Some(true)
+        );
+        let naxis1 = header.require_usize(keywords::ZNAXIS.indexed(1)?)?;
+        let nrows = header.require_usize(keywords::ZNAXIS.indexed(2)?)?;
+        let zpcount = header.require_usize(keywords::ZPCOUNT)?;
+        let original_bytes = nrows
+            .checked_mul(naxis1)
             .ok_or(FitsError::DataUnitOverflow)?;
-        zforms.push(zform);
-        metas.push(m);
-    }
-    if offset != naxis1 {
-        return Err(FitsError::RowWidthMismatch {
-            computed: offset,
-            declared: naxis1,
-        });
-    }
-
-    let nchunks = nrows.div_ceil(rpt);
-    let tile_count = nchunks
-        .checked_mul(ncols)
-        .ok_or(FitsError::DataUnitOverflow)?;
-    if table.nrows != nchunks {
-        return Err(FitsError::DataSizeMismatch {
-            expected: nchunks,
-            got: table.nrows,
-        });
-    }
-    let cells: Vec<_> = (0..ncols)
-        .map(|ci| table.column_by_idx(ci)?.vla_column())
-        .collect::<Result<_>>()?;
-
-    let mut out = allocation::try_zeroed(0u8, total)?;
-    let has_vla = metas.iter().any(ColMeta::is_stored_vla);
-    if has_vla {
-        let (main, heap) = out.split_at_mut(original_bytes);
-        let heap_gap = original_heap_offset - original_bytes;
-        let mut scratch = TableDecodeScratch::default();
-        for chunk in 0..nchunks {
-            let rows = rpt.min(nrows - chunk * rpt);
-            let chunk_start = chunk
-                .checked_mul(rpt)
-                .and_then(|row| row.checked_mul(naxis1))
-                .ok_or(FitsError::DataUnitOverflow)?;
-            let chunk_len = rows
-                .checked_mul(naxis1)
-                .ok_or(FitsError::DataUnitOverflow)?;
-            let mut restore = RestoreChunk {
-                main: &mut main[chunk_start..chunk_start + chunk_len],
-                heap: &mut *heap,
-                rows,
-                row_len: naxis1,
-                heap_gap,
-            };
-            for column in 0..ncols {
-                let m = &metas[column];
-                let cell = cells[column].cell(chunk)?;
-                let bytes = convert::byte_cell(cell)?;
-                if m.is_stored_vla() {
-                    restore.decompress_vla_column(table, bytes, m, &mut scratch)?;
-                } else {
-                    decompress_column_into(bytes, m, rows, &mut scratch)?;
-                    scatter_column(restore.main, &scratch.bytes, rows, naxis1, m);
-                }
-            }
+        let original_heap_offset = match header.get_integer(keywords::ZTHEAP)? {
+            Some(ztheap) => usize::try_from(ztheap).map_err(|_| FitsError::KeywordOutOfRange {
+                keyword: keywords::ZTHEAP,
+            })?,
+            None => original_bytes,
+        };
+        let data_len = original_bytes
+            .checked_add(zpcount)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        if !(original_bytes..=data_len).contains(&original_heap_offset) {
+            return Err(FitsError::TableMetadataMismatch {
+                name: "ZTHEAP".to_string(),
+            });
         }
-    } else if tile_count != 0 {
+        header.get_text(keywords::ZHECKSUM)?;
+        header.get_text(keywords::ZDATASUM)?;
+        let mut rows_per_tile = header.require_usize(keywords::ZTILELEN)?;
+        // A zero tile height would make the row-tile count diverge; §10.3 requires ≥ 1.
+        if rows_per_tile == 0 {
+            return Err(FitsError::KeywordOutOfRange {
+                keyword: keywords::ZTILELEN,
+            });
+        }
+        rows_per_tile = rows_per_tile.min(nrows.max(1));
+        let ncols = header.require_usize(keywords::TFIELDS)?;
+        validate_table_field_count(ncols)?;
+
+        // Resolve each column's original form and codec.
+        let mut metas = Vec::with_capacity(ncols);
+        let mut zforms = Vec::with_capacity(ncols);
+        let mut offset = 0;
+        for n in 1..=ncols {
+            let zform = header
+                .require_text(keywords::ZFORM.indexed(n)?)?
+                .to_string();
+            let tform = Tform::parse(&zform)?;
+            let algo = match header.get_text(keywords::ZCTYP.indexed(n)?)? {
+                Some(s) => Algo::parse(s)?,
+                None => Algo::Gzip2, // cfitsio's default when ZCTYPn is absent
+            };
+            let m = ColMeta::declared(&tform, offset, algo)?;
+            offset = offset
+                .checked_add(m.width)
+                .ok_or(FitsError::DataUnitOverflow)?;
+            zforms.push(zform);
+            metas.push(m);
+        }
+        if offset != naxis1 {
+            return Err(FitsError::RowWidthMismatch {
+                computed: offset,
+                declared: naxis1,
+            });
+        }
+
+        // Restore the original header: drop the Z* keywords, reinstate NAXIS/PCOUNT.
+        let mut restored = header.clone();
+        restored.set_internal(keywords::NAXIS.indexed(1)?, value::fits_i64(naxis1)?);
+        restored.set_internal(keywords::NAXIS.indexed(2)?, value::fits_i64(nrows)?);
+        restored.set_internal(keywords::PCOUNT, value::fits_i64(zpcount)?);
+        for (n, zform) in zforms.into_iter().enumerate() {
+            restored.set_internal(keywords::TFORM.indexed(n + 1)?, zform);
+        }
+        // The container's own heap pointer and checksums give way to the table's.
+        restored.remove_where(|keyword| {
+            reserved_keywords::is_table_compression(keyword, ncols)
+                || reserved_keywords::TABLE_PRESERVED
+                    .iter()
+                    .any(|&(table, _)| table.as_str() == keyword)
+        });
+        restored.rename_keywords(
+            &reserved_keywords::TABLE_PRESERVED.map(|(table, container)| (container, table)),
+        );
+        let schema = Schema::parse(&restored)?;
+        Ok(Self {
+            #[cfg(test)]
+            header: restored,
+            schema,
+            rows_per_tile,
+            metas,
+            heap_gap: original_heap_offset - original_bytes,
+            data_len,
+        })
+    }
+
+    /// The row tiles that hold `rows`.
+    fn tiles(&self, rows: &Range<usize>) -> Range<usize> {
+        if rows.is_empty() {
+            return 0..0;
+        }
+        rows.start / self.rows_per_tile..rows.end.div_ceil(self.rows_per_tile)
+    }
+
+    /// The tiles that hold `rows`, a range of the restored table's rows, decoded with the
+    /// table's heap arrays, of the `columns` selected (every column when `None`). Every
+    /// byte of a column not selected is zero. `header` and `container` are the
+    /// container's.
+    pub(crate) fn decode(
+        &self,
+        header: &Header,
+        container: TableView<'_>,
+        rows: &Range<usize>,
+        columns: Option<&[bool]>,
+    ) -> Result<DecodedRows> {
+        bind_table(header, container)?;
+        let nrows = self.schema.nrows;
+        let naxis1 = self.schema.row_len;
+        let rpt = self.rows_per_tile;
+        let nchunks = nrows.div_ceil(rpt);
+        if container.nrows != nchunks {
+            return Err(FitsError::DataSizeMismatch {
+                expected: nchunks,
+                got: container.nrows,
+            });
+        }
+        debug_assert!(rows.end <= nrows, "a validated row range");
+        debug_assert!(columns.is_none_or(|columns| columns.len() == self.metas.len()));
+        let tiles = self.tiles(rows);
+        let first_row = if tiles.is_empty() {
+            rows.start
+        } else {
+            tiles.start * rpt
+        };
+        let row_count = (tiles.end * rpt).min(nrows).saturating_sub(first_row);
+        let selected = |column: usize| columns.is_none_or(|columns| columns[column]);
+        let cells: Vec<_> = (0..self.metas.len())
+            .map(|ci| container.column(ci)?.vla_column())
+            .collect::<Result<_>>()?;
+        let main_len = row_count * naxis1;
+        let pcount = self.data_len - nrows * naxis1;
+        let mut out = allocation::try_zeroed(0u8, main_len + pcount)?;
         let chunk_len = rpt.checked_mul(naxis1).ok_or(FitsError::DataUnitOverflow)?;
-        let main = &mut out[..original_bytes];
         let decode_chunk =
             |scratch: &mut TableDecodeScratch, chunk: usize, out: &mut [u8]| -> Result<()> {
                 let rows = rpt.min(nrows - chunk * rpt);
-                for column in 0..ncols {
-                    let m = &metas[column];
+                for (column, m) in self.metas.iter().enumerate() {
+                    if !selected(column) {
+                        continue;
+                    }
                     let cell = cells[column].cell(chunk)?;
                     decompress_column_into(convert::byte_cell(cell)?, m, rows, scratch)?;
                     scatter_column(out, &scratch.bytes, rows, naxis1, m);
                 }
                 Ok(())
             };
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-
-            main.par_chunks_mut(chunk_len)
-                .enumerate()
-                .try_for_each_init(TableDecodeScratch::default, |scratch, (chunk, out)| {
-                    decode_chunk(scratch, chunk, out)
-                })?;
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
+        if self.metas.iter().any(ColMeta::is_stored_vla) {
+            let (main, heap) = out.split_at_mut(main_len);
             let mut scratch = TableDecodeScratch::default();
-            for (chunk, out) in main.chunks_mut(chunk_len).enumerate() {
-                decode_chunk(&mut scratch, chunk, out)?;
+            for chunk in tiles.clone() {
+                let rows = rpt.min(nrows - chunk * rpt);
+                let chunk_start = (chunk - tiles.start) * chunk_len;
+                let mut restore = RestoreChunk {
+                    main: &mut main[chunk_start..chunk_start + rows * naxis1],
+                    heap: &mut *heap,
+                    rows,
+                    row_len: naxis1,
+                    heap_gap: self.heap_gap,
+                };
+                for (column, m) in self.metas.iter().enumerate() {
+                    if !selected(column) {
+                        continue;
+                    }
+                    let bytes = convert::byte_cell(cells[column].cell(chunk)?)?;
+                    if m.is_stored_vla() {
+                        restore.decompress_vla_column(container, bytes, m, &mut scratch)?;
+                    } else {
+                        decompress_column_into(bytes, m, rows, &mut scratch)?;
+                        scatter_column(restore.main, &scratch.bytes, rows, naxis1, m);
+                    }
+                }
+            }
+        } else if main_len != 0 {
+            let first = tiles.start;
+            let main = &mut out[..main_len];
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+
+                main.par_chunks_mut(chunk_len)
+                    .enumerate()
+                    .try_for_each_init(TableDecodeScratch::default, |scratch, (chunk, out)| {
+                        decode_chunk(scratch, first + chunk, out)
+                    })?;
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                let mut scratch = TableDecodeScratch::default();
+                for (chunk, out) in main.chunks_mut(chunk_len).enumerate() {
+                    decode_chunk(&mut scratch, first + chunk, out)?;
+                }
             }
         }
+        Ok(DecodedRows {
+            first_row,
+            schema: self.schema.with_row_count(row_count),
+            data: out,
+        })
     }
+}
 
-    // Restore the original header: drop the Z* keywords, reinstate NAXIS/PCOUNT.
-    let mut h = header.clone();
-    h.set_internal(keywords::NAXIS.indexed(1)?, value::fits_i64(naxis1)?);
-    h.set_internal(keywords::NAXIS.indexed(2)?, value::fits_i64(nrows)?);
-    h.set_internal(keywords::PCOUNT, value::fits_i64(zpcount)?);
-    for (n, zform) in zforms.iter().enumerate() {
-        h.set_internal(
-            Keyword::try_from(format_args!("TFORM{}", n + 1))?,
-            zform.clone(),
-        );
-    }
-    // The container's own heap pointer and checksums give way to the table's.
-    h.remove_where(|keyword| {
-        reserved_keywords::is_table_compression(keyword, ncols)
-            || reserved_keywords::TABLE_PRESERVED
-                .iter()
-                .any(|&(table, _)| table.as_str() == keyword)
-    });
-    h.rename_keywords(
-        &reserved_keywords::TABLE_PRESERVED.map(|(table, container)| (container, table)),
-    );
-    Ok(HduParts {
-        header: h,
-        data: out,
-    })
+/// The rows of a tiled-compressed table that [`TiledTable::decode`] restores: whole tiles
+/// and the heap after them, laid out as a table of their own.
+#[derive(Debug)]
+pub(crate) struct DecodedRows {
+    /// The row of the restored table that is row 0 here.
+    pub(crate) first_row: usize,
+    pub(crate) schema: Schema,
+    pub(crate) data: Vec<u8>,
 }
 
 fn bind_table(header: &Header, table: TableView<'_>) -> Result<()> {
@@ -1008,7 +1063,30 @@ fn scatter_column(out: &mut [u8], bytes: &[u8], rows: usize, row_len: usize, m: 
 #[cfg(test)]
 pub(crate) mod internals {
     use crate::bintable::column_data::ColumnData;
+    use crate::bintable::table_view::TableView;
+    use crate::compress::table::TiledTable;
+    use crate::error::Result;
     use crate::fits_writer::builder::WriteColumn;
+    use crate::header_model::Header;
+
+    /// A restored header and its decompressed data unit.
+    #[derive(Debug)]
+    pub(crate) struct HduParts {
+        pub(crate) header: Header,
+        pub(crate) data: Vec<u8>,
+    }
+
+    /// The table the container `header` and `table` hold, restored whole.
+    pub(crate) fn uncompress_table(header: &Header, table: TableView<'_>) -> Result<HduParts> {
+        let tiled = TiledTable::new(header)?;
+        let data = tiled
+            .decode(header, table, &(0..tiled.schema.nrows), None)?
+            .data;
+        Ok(HduParts {
+            header: tiled.header,
+            data,
+        })
+    }
 
     /// i16, i32, f32, f64 and byte columns, and a repeat-3 i16 vector, over `nrows`
     /// rows of simple formulas with negative values among them; the integer formulas
@@ -1045,7 +1123,7 @@ pub(crate) mod internals {
             ),
             WriteColumn::fixed(
                 "BYTE",
-                ColumnData::Bytes((0..nrows).map(|i| (i * 3) as u8).collect()),
+                ColumnData::U8((0..nrows).map(|i| (i * 3) as u8).collect()),
                 1,
             ),
             WriteColumn::fixed(

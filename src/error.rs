@@ -304,20 +304,12 @@ pub enum FitsError {
     /// `read_table` was called on an HDU that is not a binary table.
     #[error("HDU is not a binary table")]
     NotABinTable,
-    /// A binary-table read or schema of a tiled-compressed table, which those reads
-    /// do not decompress; `read_compressed_table` does, with the `compression` feature.
-    #[error("HDU is a tiled-compressed table, which binary-table reads do not decompress")]
-    TableIsCompressed,
     /// `read_groups` was called on an HDU that is not a random-groups primary.
     #[error("HDU is not a random-groups primary")]
     NotRandomGroups,
     /// `read_ascii_table` was called on an HDU that is not an ASCII table.
     #[error("HDU is not an ASCII table")]
     NotAnAsciiTable,
-    /// `read_compressed_table` was called on an HDU that is not a tiled-compressed
-    /// table (no `ZTABLE = T`).
-    #[error("HDU is not a tiled-compressed table")]
-    NotCompressedTable,
     /// Two mutually-exclusive WCS keyword conventions are both present (e.g. `PC`
     /// and `CD`, or `CROTA` and `PC`); a conforming header uses only one (§8).
     #[error("conflicting WCS keywords: {detail}")]

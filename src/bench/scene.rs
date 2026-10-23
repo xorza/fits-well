@@ -178,7 +178,7 @@ pub(crate) fn catalog() -> Builder {
         WriteColumn::scalar("ELONG", ColumnData::F32(elong)),
         WriteColumn::scalar("FLAGS", ColumnData::I16(flags)),
     ];
-    Builder::explicit(CATALOG_ROWS, columns).unwrap()
+    Builder::with_columns(CATALOG_ROWS, columns).unwrap()
 }
 
 /// The bytes of a file holding [`catalog`] in a binary table after an empty primary.

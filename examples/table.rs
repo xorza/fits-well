@@ -41,19 +41,16 @@ fn main() -> fits_well::Result<()> {
 
     println!("{} rows, {} columns", schema.nrows, schema.columns.len());
     // Address a column by index or by `TTYPEn` name; the handle decodes on demand.
-    println!("ID   = {:?}", table.column_by_idx(0)?.raw()?);
-    println!("NAME = {:?}", table.column_by_name("NAME")?.raw()?);
-    println!("MAG  = {:?}", table.column_by_name("MAG")?.raw()?);
+    println!("ID   = {:?}", table.column(0)?.raw()?);
+    println!("NAME = {:?}", table.column("NAME")?.raw()?);
+    println!("MAG  = {:?}", table.column("MAG")?.raw()?);
 
     // `.raw()` is the stored, typed plane. The handle also interprets: `.physical()`
     // applies `TZEROn + TSCALn ×` and maps `TNULLn` to NaN, widening any numeric
     // column to `f64` (MAG is unscaled here, so these are just the stored values).
     // `.unsigned()`, `.complex()`, and `.bits()` cover the unsigned, complex, and
     // bit-array columns the same way — no need to pass the column descriptor back.
-    println!(
-        "MAG (physical) = {:?}",
-        table.column_by_name("MAG")?.physical()?
-    );
+    println!("MAG (physical) = {:?}", table.column("MAG")?.physical()?);
 
     Ok(())
 }

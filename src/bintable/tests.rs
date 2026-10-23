@@ -32,7 +32,7 @@ fn reads_the_real_aips_antenna_table() {
 
     // Eight ANNAME bytes and three STABXYZ doubles per row, none for 0D; the first
     // and last rows as the file stores them.
-    match table.column_by_idx(0).unwrap().raw().unwrap() {
+    match table.column(0).unwrap().raw().unwrap() {
         ColumnData::Character(v) => {
             assert_eq!(v.len(), 28 * 8);
             assert_eq!(&v[..8], b"VLA:N28 ");
@@ -40,7 +40,7 @@ fn reads_the_real_aips_antenna_table() {
         }
         other => panic!("ANNAME should be Character, got {other:?}"),
     }
-    match table.column_by_idx(1).unwrap().raw().unwrap() {
+    match table.column(1).unwrap().raw().unwrap() {
         ColumnData::F64(v) => {
             assert_eq!(v.len(), 28 * 3);
             assert_eq!(
@@ -63,7 +63,7 @@ fn reads_the_real_aips_antenna_table() {
         other => panic!("STABXYZ should be F64, got {other:?}"),
     }
     assert_eq!(
-        table.column_by_idx(2).unwrap().raw().unwrap(),
+        table.column(2).unwrap().raw().unwrap(),
         ColumnData::F64(vec![])
     );
     assert_eq!(table.column_index("NOSTA"), Some(3));

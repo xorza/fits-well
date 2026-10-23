@@ -13,8 +13,7 @@ use crate::error::Result;
 use crate::image_model::unsigned_data::UnsignedData;
 use crate::ragged::Ragged;
 
-/// A handle to one column of a [`Table`], from [`Table::column_by_idx`] or
-/// [`Table::column_by_name`]. Decode through it without re-passing the column
+/// A handle to one column of a [`Table`], from [`Table::column`]. Decode through it without re-passing the column
 /// descriptor: [`raw`](Self::raw) for the typed values, [`physical`](Self::physical)
 /// for the scaled `f64` plane, [`unsigned`](Self::unsigned)/[`complex`](Self::complex)/
 /// [`bits`](Self::bits) for the special kinds, and [`vla`](Self::vla) (+
@@ -23,8 +22,7 @@ use crate::ragged::Ragged;
 /// `P`/`Q` columns. Borrows the table, so it cannot outlive it.
 ///
 /// [`Table`]: crate::table::Table
-/// [`Table::column_by_idx`]: crate::table::Table::column_by_idx
-/// [`Table::column_by_name`]: crate::table::Table::column_by_name
+/// [`Table::column`]: crate::table::Table::column
 #[derive(Debug, Clone, Copy)]
 pub struct ColumnReader<'a> {
     table: TableView<'a>,
@@ -63,6 +61,14 @@ impl<'a> ColumnReader<'a> {
     pub fn raw(&self) -> Result<ColumnData> {
         let col = self.fixed_descriptor()?;
         Ok(col.decode_cells(self.table.cells(col), self.table.nrows))
+    }
+
+    /// [`ColumnReader::raw`] into `out`, whose buffer it reuses when `out` already holds
+    /// values of this column's type.
+    pub(crate) fn raw_into(&self, out: &mut ColumnData) -> Result<()> {
+        let col = self.fixed_descriptor()?;
+        col.decode_cells_into(self.table.cells(col), self.table.nrows, out);
+        Ok(())
     }
 
     /// The numeric column scaled to its physical `f64` plane: `TZEROn + TSCALn × raw`,
@@ -123,10 +129,28 @@ impl<'a> ColumnReader<'a> {
     /// [`ColumnData`] with the row ends — a row may be empty. A `PX` row is its
     /// packed bytes. Errors for fixed-width columns.
     pub fn vla(&self) -> Result<Ragged<ColumnData>> {
-        let rows = self.vla_rows()?;
-        let kind = rows.column.element_type().heap_kind();
-        let values = kind.decode_cells(rows.bytes(), rows.count());
-        Ok(Ragged::<ColumnData>::new(values, rows.ends))
+        let mut out = Ragged::<ColumnData>::new(ColumnData::U8(Vec::new()), Vec::new());
+        self.vla_into(&mut out)?;
+        Ok(out)
+    }
+
+    /// [`ColumnReader::vla`] into `out`, whose buffers it reuses.
+    pub(crate) fn vla_into(&self, out: &mut Ragged<ColumnData>) -> Result<()> {
+        let column = self.vla_column()?;
+        out.refill(|values, ends| {
+            let count = vla_ends(column, self.table.nrows, ends)?;
+            let bytes = (0..ends.len()).map(|row| {
+                column
+                    .cell(row)
+                    .expect("vla_ends validated every row")
+                    .bytes
+            });
+            column
+                .element_type()
+                .heap_kind()
+                .decode_cells_into(bytes, count, values);
+            Ok(())
+        })
     }
 
     /// Scale each row of a `P`/`Q` column to its physical plane: `TZEROn + TSCALn ×
@@ -221,16 +245,25 @@ impl<'a> ColumnReader<'a> {
     /// `TDIMn` extents met, and where each row's elements end.
     fn vla_rows(&self) -> Result<VlaRows<'a>> {
         let column = self.vla_column()?;
-        let element_size = column.element_type().heap_kind().elem_size();
-        let mut ends = Vec::with_capacity(self.table.nrows);
-        let mut end = 0usize;
-        for row in 0..self.table.nrows {
-            // A `PX` row is counted in bytes, the elements its values decode to.
-            end += column.cell(row)?.bytes.len() / element_size;
-            ends.push(end);
-        }
+        let mut ends = Vec::new();
+        vla_ends(column, self.table.nrows, &mut ends)?;
         Ok(VlaRows { column, ends })
     }
+}
+
+/// Validate every one of the `nrows` rows of `column`, write where each row's decoded
+/// elements end to `ends`, cleared first, and give the element count.
+fn vla_ends(column: VlaColumn<'_>, nrows: usize, ends: &mut Vec<usize>) -> Result<usize> {
+    let element_size = column.element_type().heap_kind().elem_size();
+    ends.clear();
+    ends.reserve(nrows);
+    let mut end = 0usize;
+    for row in 0..nrows {
+        // A `PX` row is counted in bytes, the elements its values decode to.
+        end += column.cell(row)?.bytes.len() / element_size;
+        ends.push(end);
+    }
+    Ok(end)
 }
 
 /// A `P`/`Q` column whose every row was validated, with where each row's decoded

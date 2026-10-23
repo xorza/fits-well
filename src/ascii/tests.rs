@@ -48,24 +48,24 @@ fn decodes_hand_built_ascii_rows() {
     assert_eq!(metadata.nrows, 2);
     assert_eq!(metadata.columns[1].start, 4);
     assert_eq!(
-        table.column_by_idx(0).unwrap().raw().unwrap(),
+        table.column(0).unwrap().raw().unwrap(),
         AsciiColumnData::Text([Some("  AB"), Some("def ")].into_iter().collect())
     );
     assert_eq!(
-        table.column_by_idx(1).unwrap().raw().unwrap(),
+        table.column(1).unwrap().raw().unwrap(),
         AsciiColumnData::Integer(vec![Some(123), Some(-45)])
     );
     // By-name access (case-insensitive) mirrors the by-index reads.
     assert_eq!(
-        table.column_by_name("count").unwrap().raw().unwrap(),
+        table.column("count").unwrap().raw().unwrap(),
         AsciiColumnData::Integer(vec![Some(123), Some(-45)])
     );
     assert_eq!(
-        table.column_by_name("COUNT").unwrap().physical().unwrap(),
+        table.column("COUNT").unwrap().physical().unwrap(),
         vec![123.0, -45.0]
     );
     assert!(matches!(
-        table.column_by_name("missing"),
+        table.column("missing"),
         Err(FitsError::ColumnNotFound { .. })
     ));
 
@@ -94,10 +94,10 @@ fn applies_tscal_tzero_and_maps_tnull_to_nan() {
     let table = Ascii::from_data(&header, data).unwrap();
     // Raw preserves nullness; physical applies TZERO + TSCAL·field and maps null to NaN.
     assert_eq!(
-        table.column_by_idx(0).unwrap().raw().unwrap(),
+        table.column(0).unwrap().raw().unwrap(),
         AsciiColumnData::Integer(vec![Some(123), Some(0), None])
     );
-    let phys = table.column_by_idx(0).unwrap().physical().unwrap();
+    let phys = table.column(0).unwrap().physical().unwrap();
     assert_eq!(phys[0], 256.0); // 10 + 2·123
     assert_eq!(phys[1], 10.0); // blank field = stored zero
     assert!(phys[2].is_nan());
@@ -119,7 +119,7 @@ fn implicit_decimal_point_scales_by_ten_to_the_d() {
     let data = b"   12345  12.345".to_vec(); // implicit "12345" → 12.345 ; explicit 12.345
     let table = Ascii::from_data(&header, data).unwrap();
     assert_eq!(
-        table.column_by_idx(0).unwrap().raw().unwrap(),
+        table.column(0).unwrap().raw().unwrap(),
         AsciiColumnData::Float(vec![Some(12.345), Some(12.345)])
     );
 }
@@ -157,15 +157,15 @@ fn ascii_table_round_trips_through_write_and_read() {
     assert_eq!(&r.read_data_raw(1).unwrap().data()[..6], b"  AB  ");
     let t = r.read_ascii_table(1).unwrap();
     assert_eq!(
-        t.column_by_idx(0).unwrap().raw().unwrap(),
+        t.column(0).unwrap().raw().unwrap(),
         AsciiColumnData::Text([Some("  AB  "), Some("beta  ")].into_iter().collect())
     );
     assert_eq!(
-        t.column_by_idx(1).unwrap().raw().unwrap(),
+        t.column(1).unwrap().raw().unwrap(),
         AsciiColumnData::Integer(vec![Some(7), Some(-3)])
     );
     assert_eq!(
-        t.column_by_idx(2).unwrap().raw().unwrap(),
+        t.column(2).unwrap().raw().unwrap(),
         AsciiColumnData::Float(vec![Some(1.5), Some(-2.25)])
     );
 
@@ -246,7 +246,7 @@ fn reads_a_column_with_a_bare_sign_exponent_field() {
     let header = ascii_table_header(12, 1, &[(1, "E12.5")]);
     let data = b"   3.14159-2".to_vec(); // 12 chars; 3.14159-2 = 0.0314159
     let table = Ascii::from_data(&header, data).unwrap();
-    match table.column_by_idx(0).unwrap().raw().unwrap() {
+    match table.column(0).unwrap().raw().unwrap() {
         AsciiColumnData::Float(values) => {
             assert_eq!(values, [Some(0.031_415_9)]);
         }
@@ -274,19 +274,16 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     let t = r.read_ascii_table(1).unwrap();
     // Raw stored integers, then the scaled physical plane TZERO + TSCAL·field.
     assert_eq!(
-        t.column_by_idx(0).unwrap().raw().unwrap(),
+        t.column(0).unwrap().raw().unwrap(),
         AsciiColumnData::Integer(vec![Some(5), Some(10)])
     );
-    assert_eq!(
-        t.column_by_idx(0).unwrap().physical().unwrap(),
-        vec![110.0, 120.0]
-    );
+    assert_eq!(t.column(0).unwrap().physical().unwrap(), vec![110.0, 120.0]);
     // The TNULL-marked float cell reads back as NaN.
-    let flux = t.column_by_idx(1).unwrap().physical().unwrap();
+    let flux = t.column(1).unwrap().physical().unwrap();
     assert_eq!(flux[0], 1.5);
     assert!(flux[1].is_nan());
     assert_eq!(
-        t.column_by_idx(1).unwrap().raw().unwrap(),
+        t.column(1).unwrap().raw().unwrap(),
         AsciiColumnData::Float(vec![Some(1.5), None])
     );
 
@@ -508,14 +505,14 @@ fn ascii_nulls_round_trip_distinct_from_zero_and_text() {
 
     let table = reader.read_ascii_table(1).unwrap();
     assert_eq!(
-        table.column_by_idx(0).unwrap().raw().unwrap(),
+        table.column(0).unwrap().raw().unwrap(),
         AsciiColumnData::Text([Some("zero "), None, Some("star ")].into_iter().collect())
     );
     assert_eq!(
-        table.column_by_idx(1).unwrap().raw().unwrap(),
+        table.column(1).unwrap().raw().unwrap(),
         AsciiColumnData::Integer(vec![Some(0), None, Some(-2)])
     );
-    let physical = table.column_by_idx(1).unwrap().physical().unwrap();
+    let physical = table.column(1).unwrap().physical().unwrap();
     assert_eq!(physical[0], 0.0);
     assert!(physical[1].is_nan());
     assert_eq!(physical[2], -2.0);

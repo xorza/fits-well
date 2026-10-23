@@ -12,6 +12,7 @@ use std::{fmt, str};
 
 use crate::ascii::ascii_text::AsciiText;
 use crate::column;
+use crate::column::ColumnSelector;
 use crate::column::Named;
 use crate::column::{ColumnLabels, ColumnScaling};
 use crate::error::FitsError;
@@ -190,18 +191,16 @@ impl Ascii {
         column::index_of(&self.columns, name)
     }
 
-    /// A reader handle for the column at `index`. Decode through it —
-    /// [`AsciiColumnReader::raw`]/[`physical`](AsciiColumnReader::physical) — without
-    /// re-passing the descriptor. Errors with [`FitsError::IndexOutOfBounds`].
-    pub fn column_by_idx(&self, index: usize) -> Result<AsciiColumnReader<'_>> {
-        column::validate_index(index, self.columns.len())?;
-        Ok(AsciiColumnReader { table: self, index })
-    }
-
-    /// A reader handle for the column named `name` (`TTYPEn`, case-insensitive, §7.2.2).
-    /// Errors with [`FitsError::ColumnNotFound`] if no such column exists.
-    pub fn column_by_name(&self, name: &str) -> Result<AsciiColumnReader<'_>> {
-        let index = column::checked_index_of(&self.columns, name)?;
+    /// A reader handle for the column `column` selects, by index or `TTYPEn` name. Decode
+    /// through it — [`AsciiColumnReader::raw`]/[`physical`](AsciiColumnReader::physical) —
+    /// without re-passing the descriptor. Errors with
+    /// [`FitsError::IndexOutOfBounds`] for an index past the last column, and with
+    /// [`FitsError::ColumnNotFound`] for a name no column carries.
+    pub fn column<'n>(
+        &self,
+        column: impl Into<ColumnSelector<'n>>,
+    ) -> Result<AsciiColumnReader<'_>> {
+        let index = column.into().resolve(&self.columns)?;
         Ok(AsciiColumnReader { table: self, index })
     }
 
@@ -215,8 +214,7 @@ impl Ascii {
     }
 }
 
-/// A handle to one column of an [`Ascii`], from [`Ascii::column_by_idx`] or
-/// [`Ascii::column_by_name`]. Decode through it without re-passing the
+/// A handle to one column of an [`Ascii`], from [`Ascii::column`]. Decode through it without re-passing the
 /// descriptor: [`raw`](Self::raw) for the typed values, [`physical`](Self::physical)
 /// for the scaled plane. Borrows the table, so it cannot outlive it.
 #[derive(Debug, Clone, Copy)]

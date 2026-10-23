@@ -35,13 +35,6 @@ and the dated review in `.notes/API_REVIEW.md`.
 - **Names do not repeat their module.** The borrowed image is `image::Borrowed`, and
   the handle is `fits_well::ImageReader`, beside `FitsReader`. Refused:
   `image::ImageView` and `image::ImageReader`.
-- **A binary-table read never gives a compressed container.** A tiled-compressed
-  image or table is stored as a `BINTABLE`, but `read_table`, `read_table_rows`,
-  `read_table_columns`, `read_table_cell` and `table_schema` refuse it:
-  `NotABinTable` for an image, `TableIsCompressed` for a table. Refused: handing
-  back the container, which reads as a table of compressed cells and is quietly
-  wrong. A compressed table reads whole through `read_compressed_table`. Source:
-  §10.1, §10.3.
 - **A read names its HDU with an `HduSelector`:** an index, an `EXTNAME`
   (case-insensitive), or a name with `EXTVER` and `EXTLEVEL`, each 1 when absent.
   A primary with no `EXTNAME` is `PRIMARY`, as in astropy. Every reader method
@@ -59,6 +52,43 @@ and the dated review in `.notes/API_REVIEW.md`.
 - **The `Source` trait is sealed and cannot be named.** A source is not an
   extension point, and no caller is generic over sources. Refused: exporting it
   before such a caller exists.
+
+## Tables
+
+- **A tiled-compressed table reads as the table it restores.** `read_table`,
+  `read_table_rows`, `read_table_columns`, `read_table_cell` and `table_schema`
+  give the logical table, as an image read gives a compressed image's pixels. A
+  compressed image is `NotABinTable` to each. Refused: a separate
+  `read_compressed_table`, which made a caller check the kind first, and the
+  container, a table of compressed cells that reads quietly wrong. Source: §10.3.
+- **A partial read decodes only the tiles its rows touch, and only the columns it
+  selects,** as an image section decodes only its tiles. The touched tiles and
+  the heap decode into a table of their own, which the plain selection reads.
+  Refused: a second selection path over the tiles, and a buffer of the whole
+  restored table. The cost: a table with variable-length columns restores its
+  whole heap, because each descriptor addresses the heap by its absolute
+  offset.
+- **A column is named by one borrowed `ColumnSelector`,** an index or a `TTYPEn`
+  name compared case-insensitively, through one `column` method on `Table`,
+  `Ascii` and `Selection`, and through each reader method. Refused: a
+  `column_by_idx` and `column_by_name` pair on each type, and an owned `String`
+  name, which allocated on each read. Source: §7.2.2, §7.3.
+- **`read_table_columns_into` refills the caller's `Selection`.** Each column
+  keeps its buffers when its type is the same, so a loop over the chunks of a
+  plain table allocates nothing after the first chunk. On an error, the
+  selection holds no column. Refused: a new `Selection` for each call, which is
+  what `read_table_columns` gives.
+- **`ColumnData` gives its values typed:** an `as_*` accessor for each variant,
+  and `TryFrom<ColumnData> for Vec<T>`, which moves the values. Refused: a
+  `let … else` on the variant at each caller.
+- **Table types are named for their module:** `table::Table`, `table::Ascii`,
+  `table::Builder` and `table::AsciiBuilder`. A builder from a row count and its
+  columns is `with_columns`, and `RandomGroups::group` gives one group. Refused:
+  `AsciiTable` and `TableBuilder`, which repeat the module, as `image::ImageView`
+  would.
+- **One name for an element type and a count across the crate:**
+  `ColumnData::U8`, as `Data::U8`, and `len` with `is_empty`, as `Data` and
+  `AsciiColumnData` have. Refused: `ColumnData::Bytes` and `element_count`.
 
 ## Writing
 

@@ -51,10 +51,8 @@ FitsError
         NotAnImage
         ImageHasGroups
         NotABinTable
-        TableIsCompressed
         NotRandomGroups
         NotAnAsciiTable
-        NotCompressedTable
         ConflictingWcsKeywords { detail: &'static str }
         UnsupportedWcsTransform { axes: Vec<usize> }
         WcsProjectionDomain { projection: &'static str }
@@ -77,7 +75,7 @@ FitsError
         RowWidthMismatch { computed: usize, declared: usize }
         TableMetadataMismatch { name: String }
 
-FitsReader  [shape differs by feature]
+FitsReader
     struct FitsReader<S>
         impl<R: Read + Seek> FitsReader<StreamSource<R>>
             pub fn open(source: R) -> Result<Self>
@@ -95,8 +93,9 @@ FitsReader  [shape differs by feature]
             pub fn read_table<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Table>
             pub fn table_schema<'h>(&self, hdu: impl Into<HduSelector<'h>>) -> Result<&Schema>
             pub fn read_table_rows<'h>(&mut self, hdu: impl Into<HduSelector<'h>>, rows: Range<usize>) -> Result<Table>
-            pub fn read_table_columns<'h>(&mut self, hdu: impl Into<HduSelector<'h>>, rows: Range<usize>, columns: &[ColumnSelector]) -> Result<Selection>
-            pub fn read_table_cell<'h>(&mut self, hdu: impl Into<HduSelector<'h>>, row: usize, column: &ColumnSelector) -> Result<ColumnData>
+            pub fn read_table_columns<'h, 'c>(&mut self, hdu: impl Into<HduSelector<'h>>, rows: Range<usize>, columns: impl IntoIterator<Item = impl Into<ColumnSelector<'c>>>) -> Result<Selection>
+            pub fn read_table_columns_into<'h, 'c>(&mut self, hdu: impl Into<HduSelector<'h>>, rows: Range<usize>, columns: impl IntoIterator<Item = impl Into<ColumnSelector<'c>>>, out: &mut Selection) -> Result<()>
+            pub fn read_table_cell<'h, 'c>(&mut self, hdu: impl Into<HduSelector<'h>>, row: usize, column: impl Into<ColumnSelector<'c>>) -> Result<ColumnData>
             pub fn read_wcs<'h>(&mut self, hdu: impl Into<HduSelector<'h>>, alt: Option<char>) -> Result<Wcs>
             pub fn read_ascii_table<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Ascii>
             pub fn read_groups<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<RandomGroups>
@@ -833,7 +832,7 @@ io::RandomGroups
     struct RandomGroups: Clone, Debug
         pub fn metadata(&self) -> RandomGroupsMetadata<'_>
         pub const fn array_len(&self) -> usize
-        pub fn group_by_idx(&self, index: usize) -> Result<RandomGroupView<'_>>
+        pub fn group(&self, index: usize) -> Result<RandomGroupView<'_>>
         pub fn parameters_physical(&self, group: usize) -> Result<Vec<f64>>
         pub fn parameter_physical(&self, group: usize, name: &str) -> Result<Option<f64>>
         pub fn array_physical(&self, group: usize) -> Result<Vec<f64>>
@@ -866,8 +865,7 @@ table::Ascii
     struct Ascii: Clone, Debug
         pub fn metadata(&self) -> AsciiMetadata<'_>
         pub fn column_index(&self, name: &str) -> Option<usize>
-        pub fn column_by_idx(&self, index: usize) -> Result<AsciiColumnReader<'_>>
-        pub fn column_by_name(&self, name: &str) -> Result<AsciiColumnReader<'_>>
+        pub fn column<'n>(&self, column: impl Into<ColumnSelector<'n>>) -> Result<AsciiColumnReader<'_>>
 
 table::AsciiBuilder
     struct AsciiBuilder: Clone, Debug, Default
@@ -875,7 +873,7 @@ table::AsciiBuilder
         pub const fn with_rows(nrows: usize) -> Self
         pub fn push(&mut self, column: AsciiWriteColumn) -> Result<&mut Self>
         pub fn column(self, column: AsciiWriteColumn) -> Result<Self>
-        pub fn explicit(nrows: usize, columns: impl IntoIterator<Item = AsciiWriteColumn>) -> Result<Self>
+        pub fn with_columns(nrows: usize, columns: impl IntoIterator<Item = AsciiWriteColumn>) -> Result<Self>
 
 table::AsciiColumn
     struct AsciiColumn: Clone, Debug
@@ -944,7 +942,7 @@ table::Builder
         pub const fn with_rows(nrows: usize) -> Self
         pub fn push(&mut self, column: WriteColumn) -> Result<&mut Self>
         pub fn column(self, column: WriteColumn) -> Result<Self>
-        pub fn explicit(nrows: usize, columns: impl IntoIterator<Item = WriteColumn>) -> Result<Self>
+        pub fn with_columns(nrows: usize, columns: impl IntoIterator<Item = WriteColumn>) -> Result<Self>
 
 table::CharacterField
     struct CharacterField<'a>: Clone, Copy, Debug, Eq, PartialEq
@@ -966,9 +964,9 @@ table::Column
         pub const fn byte_offset(&self) -> usize
 
 table::ColumnData
-    enum ColumnData: Clone, Debug, PartialEq
+    enum ColumnData: Clone, Debug, From<Vec<Complex<f32>>>, From<Vec<Complex<f64>>>, From<Vec<Option<bool>>>, From<Vec<f32>>, From<Vec<f64>>, From<Vec<i16>>, From<Vec<i32>>, From<Vec<i64>>, From<Vec<u8>>, PartialEq
         Logical(Vec<Option<bool>>)
-        Bytes(Vec<u8>)
+        U8(Vec<u8>)
         I16(Vec<i16>)
         I32(Vec<i32>)
         I64(Vec<i64>)
@@ -977,7 +975,27 @@ table::ColumnData
         ComplexF32(Vec<Complex<f32>>)
         ComplexF64(Vec<Complex<f64>>)
         Character(Vec<u8>)
-        pub const fn element_count(&self) -> usize
+        pub const fn len(&self) -> usize
+        pub const fn is_empty(&self) -> bool
+        pub const fn as_logical(&self) -> Option<&[Option<bool>]>
+        pub const fn as_u8(&self) -> Option<&[u8]>
+        pub const fn as_i16(&self) -> Option<&[i16]>
+        pub const fn as_i32(&self) -> Option<&[i32]>
+        pub const fn as_i64(&self) -> Option<&[i64]>
+        pub const fn as_f32(&self) -> Option<&[f32]>
+        pub const fn as_f64(&self) -> Option<&[f64]>
+        pub const fn as_complex_f32(&self) -> Option<&[Complex<f32>]>
+        pub const fn as_complex_f64(&self) -> Option<&[Complex<f64>]>
+        pub const fn as_character(&self) -> Option<&[u8]>
+        impl TryFrom<ColumnData> for Vec<Complex<f32>>
+        impl TryFrom<ColumnData> for Vec<Complex<f64>>
+        impl TryFrom<ColumnData> for Vec<Option<bool>>
+        impl TryFrom<ColumnData> for Vec<f32>
+        impl TryFrom<ColumnData> for Vec<f64>
+        impl TryFrom<ColumnData> for Vec<i16>
+        impl TryFrom<ColumnData> for Vec<i32>
+        impl TryFrom<ColumnData> for Vec<i64>
+        impl TryFrom<ColumnData> for Vec<u8>
 
 table::ColumnReader
     struct ColumnReader<'a>: Clone, Copy, Debug
@@ -994,9 +1012,9 @@ table::ColumnReader
         pub fn vla_bits(&self) -> Result<BitColumn<'a>>
 
 table::ColumnSelector
-    enum ColumnSelector: Clone, Debug, Eq, From<&str>, From<String>, From<usize>, PartialEq
+    enum ColumnSelector<'a>: Clone, Copy, Debug, Eq, From<&'a String>, From<&'a str>, From<&ColumnSelector<'_>>, From<usize>, PartialEq
         Index(usize)
-        Name(String)
+        Name(&'a str)
 
 table::Ragged
     struct Ragged<V>
@@ -1051,13 +1069,13 @@ table::Selection
     struct Selection: Clone, Debug
         pub rows: Range<usize>
         pub columns: Vec<SelectedColumn>
+        pub fn column<'c>(&self, column: impl Into<ColumnSelector<'c>>) -> Option<&SelectedColumn>
 
 table::Table
     struct Table: Clone, Debug
         pub const fn schema(&self) -> &Schema
         pub fn column_index(&self, name: &str) -> Option<usize>
-        pub fn column_by_idx(&self, index: usize) -> Result<ColumnReader<'_>>
-        pub fn column_by_name(&self, name: &str) -> Result<ColumnReader<'_>>
+        pub fn column<'n>(&self, column: impl Into<ColumnSelector<'n>>) -> Result<ColumnReader<'_>>
 
 table::Tform
     struct Tform: Clone, Copy, Debug, Eq, PartialEq

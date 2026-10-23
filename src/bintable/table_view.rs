@@ -7,7 +7,9 @@ use crate::bintable::schema::Schema;
 use crate::bintable::tform_kind::TformKind;
 #[cfg(feature = "compression")]
 use crate::bintable::vla_column::VlaColumn;
+#[cfg(feature = "compression")]
 use crate::column;
+use crate::column::ColumnSelector;
 use crate::error::FitsError;
 use crate::error::Result;
 
@@ -82,7 +84,7 @@ impl<'a> TableView<'a> {
     #[cfg(feature = "compression")]
     pub(crate) fn optional_vla_column(&self, name: &str) -> Result<Option<VlaColumn<'a>>> {
         match self.column_index(name) {
-            Some(index) => Ok(Some(self.column_by_idx(index)?.vla_column()?)),
+            Some(index) => Ok(Some(self.column(index)?.vla_column()?)),
             None => Ok(None),
         }
     }
@@ -101,13 +103,11 @@ impl<'a> TableView<'a> {
         Ok(&self.bytes[range])
     }
 
-    pub(crate) fn column_by_idx(&self, index: usize) -> Result<ColumnReader<'a>> {
-        column::validate_index(index, self.columns.len())?;
-        Ok(ColumnReader::new(*self, index))
-    }
-
-    pub(crate) fn column_by_name(&self, name: &str) -> Result<ColumnReader<'a>> {
-        let index = column::checked_index_of(self.columns, name)?;
+    pub(crate) fn column<'n>(
+        &self,
+        column: impl Into<ColumnSelector<'n>>,
+    ) -> Result<ColumnReader<'a>> {
+        let index = column.into().resolve(self.columns)?;
         Ok(ColumnReader::new(*self, index))
     }
 

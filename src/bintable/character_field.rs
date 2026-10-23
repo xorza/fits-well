@@ -51,7 +51,7 @@ mod tests {
         let fields: [&[u8]; 4] = [b"AB  ", b"AB\0x", b"\0xyz", b"    "];
         let data = fields.concat();
         let table = Table::from_data(&header, data.clone()).unwrap();
-        let ColumnData::Character(bytes) = table.column_by_idx(0).unwrap().raw().unwrap() else {
+        let ColumnData::Character(bytes) = table.column(0).unwrap().raw().unwrap() else {
             panic!("expected exact binary character bytes");
         };
         assert_eq!(bytes, data);

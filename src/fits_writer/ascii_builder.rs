@@ -109,7 +109,7 @@ impl AsciiBuilder {
         Ok(self)
     }
 
-    pub fn explicit(
+    pub fn with_columns(
         nrows: usize,
         columns: impl IntoIterator<Item = AsciiWriteColumn>,
     ) -> Result<Self> {

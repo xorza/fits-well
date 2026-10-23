@@ -169,12 +169,26 @@ impl<B: AsRef<BitSlice<u8, Msb0>>> FromIterator<B> for Ragged<BitVec<u8, Msb0>> 
 }
 
 impl Ragged<ColumnData> {
+    /// Refill these rows in place: `fill` writes the values and each row's end into
+    /// this `Ragged`'s own buffers, so a refill of the same size allocates nothing.
+    pub(crate) fn refill(
+        &mut self,
+        fill: impl FnOnce(&mut ColumnData, &mut Vec<usize>) -> Result<()>,
+    ) -> Result<()> {
+        fill(&mut self.values, &mut self.ends)?;
+        debug_assert!(
+            self.ends.is_sorted() && self.ends.last().copied().unwrap_or(0) == self.values.len(),
+            "a refill writes rising row ends up to the value count"
+        );
+        Ok(())
+    }
+
     /// Rows over the typed `values`, row `r` ending at element `ends[r]`.
     ///
     /// # Panics
-    /// Unless `ends` never decreases and ends at `values.element_count()`.
+    /// Unless `ends` never decreases and ends at `values.len()`.
     pub fn new(values: ColumnData, ends: Vec<usize>) -> Self {
-        let count = values.element_count();
+        let count = values.len();
         Self::checked(values, ends, count)
     }
 
@@ -183,7 +197,7 @@ impl Ragged<ColumnData> {
     pub fn from_rows(rows: impl IntoIterator<Item = ColumnData>) -> Result<Self> {
         let mut rows = rows.into_iter();
         let mut values = rows.next().ok_or(FitsError::EmptyVlaNeedsType)?;
-        let mut ends = vec![values.element_count()];
+        let mut ends = vec![values.len()];
         for (row, data) in rows.enumerate() {
             if !values.extend_from(&data) {
                 return Err(FitsError::TypeMismatch {
@@ -191,7 +205,7 @@ impl Ragged<ColumnData> {
                     expected: values.type_name(),
                 });
             }
-            ends.push(values.element_count());
+            ends.push(values.len());
         }
         Ok(Self { values, ends })
     }
