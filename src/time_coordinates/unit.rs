@@ -3,6 +3,7 @@
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::time_coordinates::SEC_PER_DAY;
+use crate::time_coordinates::mjd::Mjd;
 use crate::time_coordinates::scale::{Scale, ScaleKind};
 use crate::unit;
 use std::str::FromStr;
@@ -25,7 +26,8 @@ impl Unit {
     /// The unit's length in seconds at the epoch `reference_mjd` in `scale`. Errors with
     /// [`FitsError::ExternalTimeDataRequired`] for a tropical year outside TDB or a
     /// Besselian year outside TT, which need ephemeris data.
-    pub fn seconds(self, reference_mjd: f64, scale: &Scale) -> Result<f64> {
+    pub fn seconds(self, reference_mjd: Mjd, scale: &Scale) -> Result<f64> {
+        let reference_mjd = reference_mjd.to_f64();
         match self {
             Self::Seconds(seconds) => Ok(seconds),
             Self::TropicalYears(factor) => {

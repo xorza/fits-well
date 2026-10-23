@@ -89,11 +89,15 @@ pub(super) fn stream_template<'a, W: Write + Seek>(
     merge_header_template(&mut header, template);
     let header_offset = writer.sink.stream_position()?;
     let mut initial = header.clone();
-    if writer.checksums == Checksums::On {
+    if writer.form.checksums == Checksums::On {
         initial.set_internal(keywords::DATASUM, "0");
         initial.set_internal(keywords::CHECKSUM, PLACEHOLDER_CHECKSUM);
     }
-    render_header(&initial, &mut writer.header_scratch)?;
+    render_header(
+        &initial,
+        writer.form.spare_records,
+        &mut writer.header_scratch,
+    )?;
     if let Err(error) = writer.sink.write_all(&writer.header_scratch) {
         writer.state = WriterState::Failed;
         return Err(FitsError::Io(error));
@@ -165,11 +169,12 @@ impl<W: Write + Seek> ImageWriter<'_, W> {
         self.checksum.update(&zeros[..padding]);
         debug_assert_eq!(self.checksum.pending_len, 0);
 
-        if self.writer.checksums == Checksums::On {
+        if self.writer.form.checksums == Checksums::On {
             let end = self.writer.sink.stream_position()?;
             prepare_header_with_data_sum(
                 self.header.clone(),
                 self.checksum.sum,
+                self.writer.form.spare_records,
                 &mut self.writer.header_scratch,
             )?;
             self.writer.sink.seek(SeekFrom::Start(self.header_offset))?;

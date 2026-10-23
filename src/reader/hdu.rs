@@ -1,12 +1,15 @@
 //! One header and data unit as the reader's scan found it.
 
 use crate::bintable::schema::Schema;
-use crate::block::padded_len;
+use crate::block::{BLOCK_SIZE, padded_len};
 #[cfg(feature = "compression")]
 use crate::compress::table::TiledTable;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::HduKind;
+use crate::hdu::HduPosition;
+use crate::hdu::HduRole;
+use crate::hdu::data_extent;
 use crate::hdu::image_geometry::ImageGeometry;
 use crate::header_model::{Header, keywords};
 use crate::image_model::Metadata;
@@ -28,6 +31,9 @@ pub struct Hdu {
     pub kind: HduKind,
     /// One's-complement sum of the exact block-padded header bytes as read.
     pub(crate) header_sum: u32,
+    /// Byte offset of the header from the start of the source; the header fills the
+    /// whole blocks up to `data_offset`.
+    pub(crate) header_offset: u64,
     /// Byte offset of the data unit from the start of the source.
     pub(crate) data_offset: u64,
     /// Unpadded data length (`Nbits / 8`) — where the meaningful data ends within
@@ -46,18 +52,27 @@ pub struct Hdu {
 }
 
 impl Hdu {
-    /// Resolves the image geometry and table schema `header` declares. A header that
-    /// does not resolve leaves its HDU readable for what it does hold — the rest of
-    /// the file, and the header itself.
-    pub(crate) fn new(
+    /// The HDU at `index` whose header unit, `bytes` summing to `header_sum`, starts at
+    /// `header_offset`; its data unit follows the header. Resolves the image geometry
+    /// and table schema the header declares. A header that does not resolve leaves its
+    /// HDU readable for what it does hold — the rest of the file, and the header
+    /// itself.
+    pub(crate) fn parse(
         index: usize,
-        header: Header,
-        kind: HduKind,
+        bytes: &[u8],
         header_sum: u32,
-        data_offset: u64,
-        data_bytes: u64,
-    ) -> Self {
-        Self {
+        header_offset: u64,
+    ) -> Result<Self> {
+        let position = if index == 0 {
+            HduPosition::Primary
+        } else {
+            HduPosition::Extension
+        };
+        let header = Header::parse(bytes)?;
+        let role = HduRole::from_header(&header, position)?;
+        let kind = HduKind::classify(&header, role)?;
+        let extent = data_extent(&header, role)?;
+        Ok(Self {
             index,
             image: ImageGeometry::from_header(&header, kind).ok(),
             table: table_schema(&header, kind).ok(),
@@ -70,9 +85,15 @@ impl Hdu {
             header,
             kind,
             header_sum,
-            data_offset,
-            data_bytes,
-        }
+            header_offset,
+            data_offset: header_offset + bytes.len() as u64,
+            data_bytes: extent.data_bytes,
+        })
+    }
+
+    /// The number of 2880-byte blocks the header fills.
+    pub(crate) const fn header_blocks(&self) -> u64 {
+        (self.data_offset - self.header_offset) / BLOCK_SIZE as u64
     }
 
     /// Whether this HDU holds an image array of at least one axis: a primary array, an

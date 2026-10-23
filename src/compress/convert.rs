@@ -63,6 +63,27 @@ pub(super) fn gather_f64(
     }
 }
 
+/// Gather a tile's float pixels straight from the typed source into `out` as their
+/// big-endian bytes, with no widening, so every bit survives, a NaN's payload included.
+pub(super) fn gather_float_be(
+    samples: FloatSamples<'_>,
+    row_bases: &[usize],
+    row_len: usize,
+    out: &mut Vec<u8>,
+) {
+    out.clear();
+    for &base in row_bases {
+        match samples {
+            FloatSamples::F32(v) => {
+                endian::extend_be(out, &v[base..base + row_len], f32::to_be_bytes);
+            }
+            FloatSamples::F64(v) => {
+                endian::extend_be(out, &v[base..base + row_len], f64::to_be_bytes);
+            }
+        }
+    }
+}
+
 /// Narrow + pack `i64` values to big-endian `bitpix`-width integers in `out`, in a
 /// single pass (no intermediate narrowed `Vec`). `out` is cleared first, so it can
 /// be a reused scratch buffer. The narrowing rides along in `extend_be`'s
@@ -89,15 +110,6 @@ pub(super) fn i64_to_be(vals: &[i64], bitpix: IntBitpix) -> Vec<u8> {
 pub(super) fn i32_to_be_into(vals: &[i32], out: &mut Vec<u8>) {
     out.clear();
     endian::extend_be(out, vals, i32::to_be_bytes);
-}
-
-/// Encode `f64` values as big-endian `bitpix`-width floats into reusable storage.
-pub(super) fn float_to_be_into(vals: &[f64], bitpix: FloatBitpix, out: &mut Vec<u8>) {
-    out.clear();
-    match bitpix {
-        FloatBitpix::F32 => endian::extend_be(out, vals, |value| (value as f32).to_be_bytes()),
-        FloatBitpix::F64 => endian::extend_be(out, vals, f64::to_be_bytes),
-    }
 }
 
 /// Decode a big-endian buffer of `bitpix` integers into widened `i64` values in `out`

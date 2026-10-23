@@ -4,6 +4,7 @@ use crate::header_model::{Header, keywords};
 use crate::world_coordinates::internals::{to_pixel, to_world};
 
 use crate::time_coordinates::frame::Frame;
+use crate::time_coordinates::mjd::Mjd;
 use crate::world_coordinates::tabular;
 use crate::world_coordinates::tabular::TabularTransform;
 use crate::world_coordinates::tabular::internals::{
@@ -183,7 +184,7 @@ fn tabular_time_axes_feed_the_typed_time_layer() {
         .unwrap()
         .time_axis_mjd(&wcs, 1, &[1.5])
         .unwrap();
-    assert_eq!(coordinate.mjd, 50_001.0);
+    assert_eq!(coordinate.mjd, Mjd::new(50_001, 0.0));
 
     let table = lookup_table(&[("COORD", &[100.0, 200.0, 300.0, 400.0], Some("(1,4)"))]);
     let mut header = Header::new();
@@ -214,7 +215,7 @@ fn tabular_time_axes_feed_the_typed_time_layer() {
         .unwrap()
         .time_axis_mjd(&wcs, 2, &[12.0, 20.5, 34.0])
         .unwrap();
-    assert_eq!(coordinate.mjd, 50_000.0 + 250.0 / 86_400.0);
+    assert_eq!(coordinate.mjd, Mjd::new(50_000, 250.0 / 86_400.0));
 }
 
 #[test]

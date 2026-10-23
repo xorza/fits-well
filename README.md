@@ -11,9 +11,9 @@ covering the whole **FITS 4.0** standard.
   format allows, decode into a reused caller-owned buffer, and tile-parallel
   (de)compression.
 - **Complete.** Images, ASCII and binary tables with variable-length arrays,
-  random groups (read), WCS with all 27 projections and `-TAB`, time
-  coordinates, tiled compression of images and tables, and `CHECKSUM`/`DATASUM`
-  (write and verify).
+  random groups (read), WCS with all 27 projections, `-TAB` and the SIP and TPV
+  distortions, time coordinates, tiled compression of images and tables, and
+  `CHECKSUM`/`DATASUM` (write and verify).
 - **Safe on hostile input.** Sizes, counts and offsets from a file are checked
   before use, so a malformed file is an error rather than a panic.
 
@@ -26,7 +26,7 @@ fits-well = "0.3"
 
 | Feature | Default | Adds |
 | --- | :---: | --- |
-| `compression` | ✅ | Tiled compression: `GZIP_1`/`GZIP_2`, `RICE_1`, `PLIO_1`, `HCOMPRESS_1`, `NOCOMPRESS`, float quantization (`flate2`) |
+| `compression` | ✅ | Tiled compression: `GZIP_1`/`GZIP_2`, `RICE_1`, `PLIO_1`, `HCOMPRESS_1`, `NOCOMPRESS`, float quantization or lossless floats (`flate2`) |
 | `parallel` | ✅ | Tile-parallel codecs on rayon; implies `compression` |
 
 With `default-features = false`, the only dependencies are `bitvec`,
@@ -67,6 +67,11 @@ reuse across reads, so a loop allocates once, `read` copies a region into an
 owned `Image`, and `physical_into` converts it in one pass. A region is the whole
 image or one range per axis. `stream_image` writes a large image chunk by chunk.
 
+`write_compressed_image` writes a tiled-compressed image with a `CompressionConfig`:
+the codec, the tiles and, for a float image, its `Quantization`: `relative` or
+`absolute` levels with a `Dither`, as fpack's `-q`, or `Quantization::NONE` for
+lossless floats.
+
 ### Binary tables
 
 ```rust no_run
@@ -96,6 +101,13 @@ fn main() -> Result<(), fits_well::FitsError> {
 `read_table_rows`, `read_table_columns` and `read_table_cell` read only part of
 a large table.
 
+### Editing a file
+
+`FitsEditor` replaces a header in place when the new one fits the old one's blocks,
+keeping `CHECKSUM` valid; `replace_header_into` writes the whole edited file to a
+second sink when it does not, and `append` gives a writer at the end of the file.
+`FitsWriter::with_spare_records` leaves room in each header for later edits.
+
 ### World coordinates and time
 
 ```rust no_run
@@ -113,8 +125,9 @@ fn main() -> Result<(), fits_well::FitsError> {
 }
 ```
 
-`time::Frame::from_header` reads the time keywords. More programs are in
-[`examples/`](examples/).
+`time::Frame::from_header` reads the time keywords, and gives each time as a
+`time::Mjd`: a whole day and a fraction of it, with a spacing of 1e-11 s. More
+programs are in [`examples/`](examples/).
 
 ## License
 

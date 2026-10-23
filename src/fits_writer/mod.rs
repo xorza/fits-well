@@ -36,12 +36,19 @@ pub(crate) mod image_writer;
 const PLACEHOLDER_CHECKSUM: &str = "0000000000000000";
 
 /// Serialize a header unit into reusable storage: every card rendered to 80 bytes,
-/// the `END` record, then space padding to the next 2880-byte boundary.
-pub(crate) fn render_header(header: &Header, buf: &mut Vec<u8>) -> Result<()> {
+/// `spare_records` blank records, the `END` record, then space padding to the next
+/// 2880-byte boundary. The blank records are space a later edit can fill in place,
+/// as cfitsio's `ffhdef` reserves it.
+pub(crate) fn render_header(
+    header: &Header,
+    spare_records: usize,
+    buf: &mut Vec<u8>,
+) -> Result<()> {
     let min_len = header
         .cards
         .len()
-        .checked_add(1)
+        .checked_add(spare_records)
+        .and_then(|records| records.checked_add(1))
         .and_then(|records| records.checked_mul(CARD_SIZE))
         .ok_or(FitsError::DataUnitOverflow)?;
     buf.clear();
@@ -49,6 +56,7 @@ pub(crate) fn render_header(header: &Header, buf: &mut Vec<u8>) -> Result<()> {
     for card in &header.cards {
         card.render_into(buf)?;
     }
+    buf.resize(buf.len() + spare_records * CARD_SIZE, SPACE_FILL);
     let mut end = [SPACE_FILL; CARD_SIZE];
     end[..3].copy_from_slice(b"END");
     buf.extend_from_slice(&end);
@@ -74,7 +82,7 @@ fn pad_to_block(buf: &mut Vec<u8>, fill: u8) -> Result<()> {
 pub struct FitsWriter<W> {
     sink: W,
     state: WriterState,
-    checksums: Checksums,
+    form: HeaderForm,
     /// Reused buffer the data unit is assembled into before padding + writing, so
     /// writing many HDUs allocates no per-call staging. Each high-level write
     /// `clear`s it, builds the unit, and hands it to the HDU commit path.
@@ -91,9 +99,17 @@ enum WriterState {
     Failed,
 }
 
+/// What every header the writer renders carries besides its records: the checksums,
+/// and the blank records before `END`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeaderForm {
+    pub(crate) checksums: Checksums,
+    pub(crate) spare_records: usize,
+}
+
 /// Whether each HDU carries `DATASUM` and `CHECKSUM` (§J).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Checksums {
+pub(crate) enum Checksums {
     Off,
     On,
 }
@@ -111,17 +127,36 @@ impl<W: Write> FitsWriter<W> {
         Self {
             sink,
             state: WriterState::Empty,
-            checksums: Checksums::Off,
+            form: HeaderForm {
+                checksums: Checksums::Off,
+                spare_records: 0,
+            },
             scratch: Vec::new(),
             header_scratch: Vec::new(),
         }
+    }
+
+    /// A writer that continues a file whose primary is written, at the sink's position.
+    pub(crate) const fn continuing(sink: W) -> Self {
+        let mut writer = Self::new(sink);
+        writer.state = WriterState::Active;
+        writer
     }
 
     /// Enable `DATASUM`/`CHECKSUM` integrity keywords on every HDU written through
     /// this writer (§J), including [`FitsWriter::write_raw_hdu`].
     #[must_use]
     pub const fn with_checksums(mut self) -> Self {
-        self.checksums = Checksums::On;
+        self.form.checksums = Checksums::On;
+        self
+    }
+
+    /// Write at least `records` blank records before each header's `END`, so a later
+    /// [`FitsEditor::replace_header`](crate::FitsEditor::replace_header) with more
+    /// records fits in place, as cfitsio's `ffhdef` reserves space.
+    #[must_use]
+    pub const fn with_spare_records(mut self, records: usize) -> Self {
+        self.form.spare_records = records;
         self
     }
 
@@ -190,22 +225,12 @@ impl<W: Write> FitsWriter<W> {
     ) -> Result<()> {
         merge_header_template(&mut header, template);
         pad_to_block(&mut self.scratch, fill)?;
-        prepare_header(
-            header,
-            &self.scratch,
-            self.checksums,
-            &mut self.header_scratch,
-        )?;
+        prepare_header(header, &self.scratch, self.form, &mut self.header_scratch)?;
 
         let primary_header =
             if opening == Opening::EmptyPrimary && self.next_position() == HduPosition::Primary {
                 let mut primary_header = Vec::new();
-                prepare_header(
-                    empty_primary_header(),
-                    &[],
-                    self.checksums,
-                    &mut primary_header,
-                )?;
+                prepare_header(empty_primary_header(), &[], self.form, &mut primary_header)?;
                 Some(primary_header)
             } else {
                 None
@@ -279,10 +304,12 @@ impl<W: Write> FitsWriter<W> {
     /// Integer images support `GZIP_1`/`GZIP_2`/`RICE_1`/`PLIO_1`/`HCOMPRESS_1`; float
     /// images are quantized with the dither method `config` selects
     /// (`SUBTRACTIVE_DITHER_1` by default) and compressed with `GZIP_1`/`GZIP_2`/
-    /// `RICE_1`, or stored with `NOCOMPRESS`. `HCOMPRESS_1` needs a 2-D tile shape, and
-    /// every `PLIO_1` mask sample must be in the lossless `0..=0xFF_FFFF` domain. The
-    /// non-structural cards of `header` are kept; the container, compression,
-    /// image-layout and checksum cards are generated from `image` and `config`.
+    /// `RICE_1`/`HCOMPRESS_1`, or stored with `NOCOMPRESS`; with `Quantization::NONE`
+    /// they are stored losslessly with `GZIP_1`/`GZIP_2`. `HCOMPRESS_1` needs a 2-D tile
+    /// shape, and every `PLIO_1` mask sample must be in the lossless `0..=0xFF_FFFF`
+    /// domain. The non-structural cards of `header` are kept; the container,
+    /// compression, image-layout and checksum cards are generated from `image` and
+    /// `config`.
     #[cfg(feature = "compression")]
     pub fn write_compressed_image(
         &mut self,
@@ -295,9 +322,10 @@ impl<W: Write> FitsWriter<W> {
 
     /// Write `table` as a tiled-compressed table (§10.3): the table [`Self::write_table`]
     /// writes, compressed in tiles of the rows `config` sets with its codec on every
-    /// column (`GZIP_1`/`GZIP_2`/`RICE_1`/`NOCOMPRESS`, each clamped to one its type
-    /// takes). Fixed-width and P/Q variable-length columns are supported. Errors when
-    /// `config` has more than one tile axis or a quantization. The non-structural
+    /// column (`GZIP_1`/`GZIP_2`/`RICE_1`, each clamped to one its type takes, so that
+    /// cfitsio reads every column). Fixed-width and P/Q variable-length columns are
+    /// supported. Errors when `config` has more than one tile axis or a quantization,
+    /// or is `Compression::None`, which `write_table` is. The non-structural
     /// cards of `header` are kept. Requires the `compression` feature.
     #[cfg(feature = "compression")]
     pub fn write_compressed_table(
@@ -327,25 +355,32 @@ impl<W: Write + Seek> FitsWriter<W> {
 fn prepare_header(
     header: Header,
     padded_data: &[u8],
-    checksums: Checksums,
+    form: HeaderForm,
     out: &mut Vec<u8>,
 ) -> Result<()> {
-    match checksums {
-        Checksums::On => {
-            prepare_header_with_data_sum(header, checksum::accumulate(padded_data, 0), out)
-        }
-        Checksums::Off => render_header(&header, out),
+    match form.checksums {
+        Checksums::On => prepare_header_with_data_sum(
+            header,
+            checksum::accumulate(padded_data, 0),
+            form.spare_records,
+            out,
+        ),
+        Checksums::Off => render_header(&header, form.spare_records, out),
     }
 }
 
-fn prepare_header_with_data_sum(
+/// Render `header` with `DATASUM` set to `data_sum` and a `CHECKSUM` that makes the
+/// whole HDU sum to negative zero (Appendix J), `spare_records` blank records before
+/// `END`.
+pub(crate) fn prepare_header_with_data_sum(
     mut header: Header,
     data_sum: u32,
+    spare_records: usize,
     out: &mut Vec<u8>,
 ) -> Result<()> {
     header.set_internal(keywords::DATASUM, data_sum.to_string());
     header.set_internal(keywords::CHECKSUM, PLACEHOLDER_CHECKSUM);
-    render_header(&header, out)?;
+    render_header(&header, spare_records, out)?;
     let hdu_sum = checksum::combine(checksum::accumulate(out, 0), data_sum);
     patch_checksum(out, &checksum::encode(hdu_sum));
     Ok(())

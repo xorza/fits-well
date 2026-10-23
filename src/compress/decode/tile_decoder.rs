@@ -5,7 +5,8 @@ use crate::compress;
 use crate::compress::ImageCodec;
 use crate::compress::convert;
 use crate::compress::decode::decode_sample::Overshoot;
-use crate::compress::decode::float_quantization::Dequant;
+use crate::compress::decode::float_quantization::FloatEncoding;
+use crate::compress::decode::float_quantization::LosslessCodec;
 use crate::compress::decode::tile_cells::TileCells;
 use crate::compress::decode::tile_cells::TileSource;
 use crate::compress::decode::tile_scratch_set::CodecScratch;
@@ -33,6 +34,9 @@ pub(super) struct TileDecoder {
     /// `Some` exactly for a float image.
     float_bitpix: Option<FloatBitpix>,
     params: CodecParams,
+    /// What a `PLIO_1` value exceeds the stored value by: 32768 for a u16 image, whose
+    /// stream holds the physical values, as PLIO takes no negative value; 0 otherwise.
+    plio_offset: i64,
 }
 
 /// The codec knobs from `ZNAMEi`/`ZVALi`, read in one pass: the Rice block size and
@@ -116,6 +120,7 @@ impl TileDecoder {
             int_bitpix,
             float_bitpix,
             params,
+            plio_offset: compress::plio_offset(tiled.image.bitpix, tiled.image.scaling),
         })
     }
 
@@ -161,31 +166,46 @@ impl TileDecoder {
 
     /// Decode one tile of a *float* image into `out`. A primary `COMPRESSED_DATA` cell
     /// holds quantized integers (decoded into the reused `ints` buffer, then dequantized
-    /// as `scale·int + zero`); otherwise the `GZIP_COMPRESSED_DATA`/`UNCOMPRESSED_DATA`
-    /// fallbacks hold the raw float values.
+    /// as `scale·int + zero`), or a lossless image's gzip'd floats; the
+    /// `GZIP_COMPRESSED_DATA`/`UNCOMPRESSED_DATA` fallbacks hold the raw float values.
     pub(super) fn decode_float_tile_into(
         &self,
         cells: TileCells<'_>,
         tile_elems: usize,
-        dq: Dequant,
+        encoding: FloatEncoding,
         out: &mut Vec<f64>,
         ints: &mut Vec<i64>,
         scratch: &mut CodecScratch,
     ) -> Result<()> {
         match cells.resolve()? {
-            TileSource::Compressed(cell) => {
-                // The primary stream holds quantized integers for every float-image codec.
-                self.decode_cell_into(cell, tile_elems, ints, scratch)?;
-                quantize::dequantize_into(
-                    ints, dq.scale, dq.zero, dq.method, dq.irow, dq.zblank, out,
-                );
-                Ok(())
-            }
+            TileSource::Compressed(cell) => match encoding {
+                FloatEncoding::Quantized(dq) => {
+                    self.decode_cell_into(cell, tile_elems, ints, scratch)?;
+                    quantize::dequantize_into(
+                        ints, dq.scale, dq.zero, dq.method, dq.irow, dq.zblank, out,
+                    );
+                    Ok(())
+                }
+                FloatEncoding::Lossless(codec) => {
+                    let zbitpix = self.zbitpix();
+                    let width = match codec {
+                        LosslessCodec::Gzip1 => 1,
+                        LosslessCodec::Gzip2 => zbitpix.elem_size(),
+                    };
+                    let floats = scratch.gzip.inflate(
+                        convert::byte_cell(cell)?,
+                        tile_elems.saturating_mul(zbitpix.elem_size()),
+                        width,
+                    )?;
+                    convert::be_floats_into(floats, zbitpix, out);
+                    Ok(())
+                }
+            },
             TileSource::Gzip(cell) => {
                 // Raw floats, bounded at the tile's known byte size (`tile_elems` floats).
                 let max = tile_elems.saturating_mul(self.zbitpix().elem_size());
-                gzip::gunzip_into(convert::byte_cell(cell)?, max, &mut scratch.gzip.bytes)?;
-                convert::be_floats_into(&scratch.gzip.bytes, self.zbitpix(), out);
+                let floats = scratch.gzip.inflate(convert::byte_cell(cell)?, max, 1)?;
+                convert::be_floats_into(floats, self.zbitpix(), out);
                 Ok(())
             }
             TileSource::Uncompressed(cell) => convert::cell_to_f64_into(cell, self.zbitpix(), out),
@@ -225,7 +245,13 @@ impl TileDecoder {
                 out,
             ),
             ImageCodec::Plio1 => {
-                plio::plio_decode_be_into(convert::plio_cell(cell)?, tile_elems, out)
+                plio::plio_decode_be_into(convert::plio_cell(cell)?, tile_elems, out)?;
+                if self.plio_offset != 0 {
+                    for value in out.iter_mut() {
+                        *value -= self.plio_offset;
+                    }
+                }
+                Ok(())
             }
             ImageCodec::Hcompress1 => hcompress::hcompress_tile_into(
                 convert::byte_cell(cell)?,

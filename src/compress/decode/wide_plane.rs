@@ -56,7 +56,7 @@ impl WidePlane for f64 {
             plan.quantization
                 .as_ref()
                 .expect("only a float image decodes in the float plane")
-                .dequant(table_row, tile_row),
+                .encoding(table_row, tile_row),
             &mut scratch.values,
             &mut scratch.aux,
             &mut scratch.codecs,

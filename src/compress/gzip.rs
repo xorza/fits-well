@@ -20,8 +20,17 @@ pub(super) const DEFAULT_GZIP_LEVEL: u32 = 1;
 
 #[derive(Debug, Default)]
 pub(super) struct GzipScratch {
-    pub(super) bytes: Vec<u8>,
+    bytes: Vec<u8>,
     reordered: Vec<u8>,
+}
+
+impl GzipScratch {
+    /// Inflate a tile's gzip stream to its `expected` bytes, un-shuffled from `width`-byte
+    /// significance planes for `GZIP_2` (`width` 1 for `GZIP_1`), and lend them.
+    pub(super) fn inflate(&mut self, bytes: &[u8], expected: usize, width: usize) -> Result<&[u8]> {
+        gunzip2_into(bytes, expected, width, &mut self.reordered, &mut self.bytes)?;
+        Ok(&self.bytes)
+    }
 }
 
 /// Gzip a raw big-endian byte buffer at deflate `level` (0–9; the `GZIP_1` tile
@@ -150,12 +159,8 @@ pub(super) fn gzip_tile_into(
     out: &mut Vec<i64>,
     scratch: &mut GzipScratch,
 ) -> Result<()> {
-    gunzip_into(
-        bytes,
-        tile_elems.saturating_mul(bitpix.elem_size()),
-        &mut scratch.bytes,
-    )?;
-    be_to_i64_into(&scratch.bytes, bitpix, out);
+    let raw = scratch.inflate(bytes, tile_elems.saturating_mul(bitpix.elem_size()), 1)?;
+    be_to_i64_into(raw, bitpix, out);
     Ok(())
 }
 
@@ -168,12 +173,8 @@ pub(super) fn gzip2_tile_into(
     out: &mut Vec<i64>,
     scratch: &mut GzipScratch,
 ) -> Result<()> {
-    let expected = tile_elems.saturating_mul(bitpix.elem_size());
-    let GzipScratch {
-        bytes: raw,
-        reordered,
-    } = scratch;
-    gunzip2_into(bytes, expected, bitpix.elem_size(), reordered, raw)?;
+    let width = bitpix.elem_size();
+    let raw = scratch.inflate(bytes, tile_elems.saturating_mul(width), width)?;
     be_to_i64_into(raw, bitpix, out);
     Ok(())
 }

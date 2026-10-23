@@ -392,7 +392,7 @@ fn empty_ascii_columns(count: usize) -> Vec<AsciiWriteColumn> {
 
 fn rendered_header(header: &Header) -> Vec<u8> {
     let mut bytes = Vec::new();
-    render_header(header, &mut bytes).unwrap();
+    render_header(header, 0, &mut bytes).unwrap();
     bytes
 }
 

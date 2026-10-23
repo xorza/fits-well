@@ -1,14 +1,14 @@
-//! [`Datetime`]: a FITS ISO-8601 calendar datetime and its Julian Date
-//! conversions.
+//! [`Datetime`]: a FITS ISO-8601 calendar datetime and its MJD.
 
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::time_coordinates::SEC_PER_DAY;
+use crate::time_coordinates::mjd::Mjd;
 use crate::time_coordinates::scale::{Scale, ScaleKind};
-use crate::time_coordinates::{MJD0, SEC_PER_DAY};
 use std::str::FromStr;
 
 /// A calendar datetime (proleptic Gregorian, time-scale agnostic). `second` may
-/// reach 60.x; [`Datetime::to_jd`] accepts that label only for UTC.
+/// reach 60.x; [`Datetime::to_mjd`] accepts that label only for UTC.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Datetime {
     pub year: i64,
@@ -20,30 +20,22 @@ pub struct Datetime {
 }
 
 impl Datetime {
-    /// Julian Date of this datetime in its declared `scale`.
+    /// The MJD of this datetime in its declared `scale`: the date's day, and the time
+    /// of day rounded once into the fraction.
     ///
     /// UTC leap-second labels remain valid FITS datetimes, but converting one to
     /// a continuous coordinate requires an external leap-second realization.
-    pub fn to_jd(&self, scale: &Scale) -> Result<f64> {
-        Ok(self.day_start_jd(scale)? + self.day_fraction())
-    }
-
-    /// Modified Julian Date (`JD − 2400000.5`). The day's start is shifted before the
-    /// time of day is added, so the sum rounds at the MJD's own precision — 64 times
-    /// finer than a JD's in the present era.
-    pub fn to_mjd(&self, scale: &Scale) -> Result<f64> {
-        Ok((self.day_start_jd(scale)? - MJD0) + self.day_fraction())
-    }
-
-    /// The Julian Date at 0h of this date: a whole number and a half, exact in `f64`.
-    fn day_start_jd(&self, scale: &Scale) -> Result<f64> {
+    pub fn to_mjd(&self, scale: &Scale) -> Result<Mjd> {
         self.validate(scale)?;
         if self.second >= 60.0 {
             return Err(FitsError::ExternalTimeDataRequired {
-                operation: "convert a UTC leap-second label to Julian Date",
+                operation: "convert a UTC leap-second label to MJD",
             });
         }
-        Ok(gregorian_to_jdn(self.year, i64::from(self.month), i64::from(self.day)) as f64 - 0.5)
+        // The JDN counts from noon and the MJD from the midnight 2400000.5 days later.
+        let day =
+            gregorian_to_jdn(self.year, i64::from(self.month), i64::from(self.day)) - 2_400_001;
+        Ok(Mjd::new(day, self.day_fraction()))
     }
 
     fn day_fraction(&self) -> f64 {

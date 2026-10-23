@@ -17,6 +17,7 @@ fn from_matrix(matrix: Vec<f64>, naxis: usize) -> LinearTransform {
         matrix,
         factors,
         naxis,
+        sip: None,
     }
 }
 
@@ -63,7 +64,7 @@ fn matrix_product_applies_reference_pixel_offsets_while_accumulating() {
         assert_eq!(transform.intermediate_axis(axis, &pixel, &axes), value);
     }
     // The inverse direction returns the pixel the intermediate came from, in place.
-    transform.pixel(&mut intermediate, &axes);
+    transform.pixel(&mut intermediate, &axes).unwrap();
     for (got, want) in intermediate.iter().zip(&pixel) {
         assert!((got - want).abs() < 1e-12, "{got} vs {want}");
     }

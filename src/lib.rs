@@ -55,6 +55,7 @@ mod column;
 mod compress;
 mod endian;
 mod error;
+mod fits_editor;
 mod fits_writer;
 mod groups;
 mod hdu;
@@ -70,6 +71,7 @@ mod words;
 mod world_coordinates;
 
 pub use error::{FitsError, Indexed, Ranked, Result};
+pub use fits_editor::FitsEditor;
 pub use fits_writer::FitsWriter;
 pub use fits_writer::image_writer::ImageWriter;
 pub use reader::FitsReader;
@@ -79,7 +81,9 @@ pub use reader::image_reader::ImageReader;
 pub mod image {
     pub use crate::bitpix::Bitpix;
     #[cfg(feature = "compression")]
-    pub use crate::compress::{Compression, CompressionConfig, DitherMethod, Gzip, Hcompress};
+    pub use crate::compress::quantization::{Dither, DitherSeed, Quantization};
+    #[cfg(feature = "compression")]
+    pub use crate::compress::{Compression, CompressionConfig, Gzip, Hcompress};
     pub use crate::image_model::data::Data;
     pub use crate::image_model::physical_sample::PhysicalSample;
     pub use crate::image_model::region::Region;
@@ -92,7 +96,10 @@ pub mod image {
 
 /// The ordered header model: keyword records and their typed values.
 pub mod header {
+    pub use crate::header_model::defect::Defect;
+    pub use crate::header_model::hierarch_name::HierarchName;
     pub use crate::header_model::keywords;
+    pub use crate::header_model::repair::{Repair, RepairKind};
     pub use crate::header_model::value::{FitsInteger, Value};
     pub use crate::header_model::{Header, Iter, Record, RecordView};
     pub use crate::keyword::Keyword;
@@ -121,7 +128,13 @@ pub mod wcs {
     //! `GRI`/`GRA`, and generic `LOG`) is evaluated in both directions. `-TAB`
     //! coordinate arrays are resolved from their BINTABLE through
     //! [`FitsReader::read_wcs`](crate::FitsReader::read_wcs). All are validated against
-    //! `astropy.wcs`, wcslib, or exact interpolation fixtures. Convention-only `XPH`
+    //! `astropy.wcs`, wcslib, or exact interpolation fixtures. The SIP polynomial (a
+    //! prior distortion of the pixel offsets) and the TPV polynomial (a sequent
+    //! distortion of the celestial intermediate coordinates) are evaluated in both
+    //! directions; [`Metadata::distortion`] names the one that applies.
+    //! [`Wcs::write_into`] writes a description back into a header, in wcslib's form,
+    //! and [`Wcs::crop`] and [`Wcs::bin`] derive the WCS of a cut-out or a binned image.
+    //! Convention-only `XPH`
     //! transforms remain readable in [`Metadata::unsupported_axes`]; complete transforms
     //! then return
     //! [`FitsError::UnsupportedWcsTransform`](crate::FitsError::UnsupportedWcsTransform).
@@ -141,6 +154,7 @@ pub mod wcs {
     pub use crate::world_coordinates::axis_transform::spectral_rest::SpectralRest;
     pub use crate::world_coordinates::celestial_frame::{CelestialFrame, CelestialReferenceFrame};
     pub use crate::world_coordinates::celestial_pole::CelestialPole;
+    pub use crate::world_coordinates::distortion::Distortion;
     pub use crate::world_coordinates::projection::Projection;
     pub use crate::world_coordinates::spectral_frame::{SpectralFrame, SpectralReferenceFrame};
     pub use crate::world_coordinates::{CelestialProjection, Metadata, Wcs};
@@ -153,6 +167,7 @@ pub mod time {
     pub use crate::time_coordinates::coordinate::Coordinate;
     pub use crate::time_coordinates::datetime::Datetime;
     pub use crate::time_coordinates::frame::Frame;
+    pub use crate::time_coordinates::mjd::Mjd;
     pub use crate::time_coordinates::phase_axis::PhaseAxis;
     pub use crate::time_coordinates::reference_position::ReferencePosition;
     pub use crate::time_coordinates::scale::{Scale, ScaleKind};

@@ -24,6 +24,7 @@ use crate::ragged::Ragged;
 use crate::reader::FitsReader;
 use crate::reader::internals::open_fixture;
 use crate::reader::source::SliceSource;
+use num_complex::Complex;
 use std::io::Cursor;
 
 fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
@@ -101,7 +102,114 @@ fn table_compression_round_trips() {
         check_table_roundtrip(Compression::GZIP, rpt);
         check_table_roundtrip(Compression::GZIP_SHUFFLED, rpt);
         check_table_roundtrip(Compression::Rice, rpt);
-        check_table_roundtrip(Compression::None, rpt);
+    }
+    let table = Builder::with_columns(10, mixed_columns(10)).unwrap();
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_compressed_table(&table, &CompressionConfig::new(Compression::None), None),
+        Err(FitsError::InvalidCompressionParameter { detail })
+            if detail.starts_with("a compressed table takes a codec")
+    ));
+}
+
+/// `comp_table_nocompress.fits` holds `ZCTYPn = 'NOCOMPRESS'` columns (§10.4, Table 36),
+/// fixed and variable-length, written by fits-well before its writer refused them
+/// (cfitsio cannot read them); the reader still restores such a table exactly.
+#[test]
+fn reads_nocompress_table_columns() {
+    let rows = 12;
+    let arrays =
+        Ragged::from_rows((0..rows).map(|r| ColumnData::I16((0..r as i16).collect()))).unwrap();
+    let table = Builder::with_columns(
+        rows,
+        vec![
+            WriteColumn::scalar("ID", ColumnData::I32((0..rows as i32).collect())),
+            WriteColumn::scalar(
+                "FLUX",
+                ColumnData::F64((0..rows).map(|r| r as f64 * 1.5 - 3.0).collect()),
+            ),
+            WriteColumn::vla("ARRAY", arrays),
+        ],
+    )
+    .unwrap();
+    let mut reader = open_fixture("comp_table_nocompress.fits");
+    for n in 1..=3 {
+        assert_eq!(
+            reader.hdus[1].header.get_text(format!("ZCTYP{n}")).unwrap(),
+            Some("NOCOMPRESS")
+        );
+    }
+    let container = reader.read_container_table(1).unwrap();
+    let restored =
+        table::internals::uncompress_table(&reader.hdus[1].header, container.view()).unwrap();
+    assert_eq!(restored.data, plain(&table).data);
+}
+
+/// Each column type takes the codec cfitsio reads for it: `GZIP_2` only on `I`, `J`,
+/// `K`, `E` and `D`, `RICE_1` only on `B`, `I` and `J`, and `GZIP_1` on the rest.
+#[test]
+fn table_codecs_are_the_ones_cfitsio_reads() {
+    let rows = 3;
+    let bits: [BitVec<u8, Msb0>; 3] = [
+        BitVec::repeat(true, 5),
+        BitVec::repeat(false, 5),
+        BitVec::repeat(true, 5),
+    ];
+    let table = Builder::with_columns(
+        rows,
+        vec![
+            WriteColumn::scalar(
+                "L",
+                ColumnData::Logical(vec![Some(true), None, Some(false)]),
+            ),
+            WriteColumn::bits("X", &bits, 5).unwrap(),
+            WriteColumn::characters("A", ["a", "bc", "def"], 3).unwrap(),
+            WriteColumn::scalar("B", ColumnData::U8(vec![1, 2, 3])),
+            WriteColumn::scalar("I", ColumnData::I16(vec![1, 2, 3])),
+            WriteColumn::scalar("J", ColumnData::I32(vec![1, 2, 3])),
+            WriteColumn::scalar("K", ColumnData::I64(vec![1, 2, 3])),
+            WriteColumn::scalar("E", ColumnData::F32(vec![1.0, 2.0, 3.0])),
+            WriteColumn::scalar("D", ColumnData::F64(vec![1.0, 2.0, 3.0])),
+            WriteColumn::scalar("C", ColumnData::ComplexF32(vec![Complex::new(1.0, 2.0); 3])),
+            WriteColumn::scalar("M", ColumnData::ComplexF64(vec![Complex::new(1.0, 2.0); 3])),
+        ],
+    )
+    .unwrap();
+    let original = plain(&table);
+    for (compression, codecs) in [
+        (
+            Compression::GZIP_SHUFFLED,
+            [
+                "GZIP_1", "GZIP_1", "GZIP_1", "GZIP_1", "GZIP_2", "GZIP_2", "GZIP_2", "GZIP_2",
+                "GZIP_2", "GZIP_1", "GZIP_1",
+            ],
+        ),
+        (
+            Compression::Rice,
+            [
+                "GZIP_1", "GZIP_1", "GZIP_1", "RICE_1", "RICE_1", "RICE_1", "GZIP_2", "GZIP_2",
+                "GZIP_2", "GZIP_1", "GZIP_1",
+            ],
+        ),
+        (Compression::GZIP, ["GZIP_1"; 11]),
+    ] {
+        let container = compressed(&table, &CompressionConfig::new(compression));
+        for (n, codec) in codecs.iter().enumerate() {
+            assert_eq!(
+                container
+                    .header
+                    .get_text(format!("ZCTYP{}", n + 1))
+                    .unwrap(),
+                Some(*codec),
+                "{} column {}",
+                compression.name(),
+                n + 1
+            );
+        }
+        let container_table = Table::from_data(&container.header, container.data).unwrap();
+        let restored =
+            table::internals::uncompress_table(&container.header, container_table.view()).unwrap();
+        assert_eq!(restored.data, original.data, "{}", compression.name());
     }
 }
 
@@ -199,8 +307,8 @@ fn table_decompression_restores_reserved_metadata_exactly() {
         .set_comment_internal(keywords::DATASUM, "original data checksum");
     let mut original_bytes = Vec::new();
     let mut restored_bytes = Vec::new();
-    render_header(&original.header, &mut original_bytes).unwrap();
-    render_header(&restored.header, &mut restored_bytes).unwrap();
+    render_header(&original.header, 0, &mut original_bytes).unwrap();
+    render_header(&restored.header, 0, &mut restored_bytes).unwrap();
     assert_eq!(restored_bytes, original_bytes);
     assert_eq!(restored.data, original.data);
 }
@@ -267,7 +375,6 @@ fn compressed_table_vla_round_trips_all_table_codecs() {
         Compression::GZIP,
         Compression::GZIP_SHUFFLED,
         Compression::Rice,
-        Compression::None,
     ] {
         let container = compressed(
             &table,
