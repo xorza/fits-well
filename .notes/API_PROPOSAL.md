@@ -2,63 +2,17 @@
 
 2026-10-23. This document puts every finding of `API_REVIEW.md` and every entry of `ISSUES.md` into one design and one plan of work. The review keeps the evidence: the `file:line` references and the comparison with other libraries. Here, each item names the review section that it answers.
 
-This proposal is temporary. When a phase lands, its decisions go into `docs/design.md`, and the items that it closes are removed from here and from `ISSUES.md`. Phase 1, the quiet traps, has landed.
+This proposal is temporary. When a phase lands, its decisions go into `docs/design.md`, and the items that it closes are removed from here and from `ISSUES.md`. Phase 1, the quiet traps, and phase 2, the image reader, have landed.
 
 ## Principles
 
-- **One borrowed image type for reads and writes.** The reader gives an `ImageView`, the writer takes an `ImageView`, and `Image::view()` makes one from owned data. Then a caller never copies data only to satisfy a signature.
+- **One borrowed image type for reads and writes.** The reader gives an `image::Borrowed`, the writer takes one, and `Image::view()` makes one from owned data. Then a caller never copies data only to satisfy a signature.
 - **Parse at the boundary, one time.** Keywords, HDU names and WCS alternates are types, checked when they are made. A header lookup cannot fail because of the spelling of its argument.
 - **One entry point for each operation.** A region selects the part of an image, a selector selects an HDU or a column, and a config selects the compression. No suffix such as `_view` or `_summed` multiplies the methods.
-- **The caller owns the large buffers. The reader owns only small staging buffers.** The documented decision of `read_image_view` stays.
+- **The caller owns the large buffers. The reader owns only small staging buffers.** The documented decision of the view read stays: `ImageReader::view` fills the caller's `words`.
 - **No quiet result.** An operation that cannot do what its name says returns an error. It does not return the container, do nothing, or return `None`.
 
 ## The design
-
-### Reading images
-
-The review sections that this answers: "One entry point", "Physical conversion into a caller buffer", "Typed access to `View` and `ColumnData`", "Memory planning", and "Header borrows against data reads", partly.
-
-```rust
-impl<S: Source> FitsReader<S> {
-    pub fn image<'r>(&'r mut self, hdu: impl Into<HduSelector<'_>>) -> Result<ImageReader<'r, S>>;
-}
-
-pub enum Region<'a> { All, Section(&'a [Range<usize>]) }    // From<&[Range<usize>]> and From<&[Range<usize>; N]>
-
-impl<'r, S: Source> ImageReader<'r, S> {
-    pub fn header(&self) -> &'r Header;             // lives as long as the reader borrow, not the handle borrow
-    pub fn metadata(&self) -> Metadata<'r>;
-    pub fn with_checksum(self) -> Self;              // feeds the plain bytes of each read to a DataChecksum
-    pub fn view<'a>(&'a mut self, region: impl Into<Region<'_>>, words: &'a mut Vec<u64>) -> Result<ImageView<'a>>;
-    pub fn read(&mut self, region: impl Into<Region<'_>>) -> Result<Image>;
-    pub fn physical_into<T: PhysicalSample>(&mut self, region: impl Into<Region<'_>>, out: &mut [T]) -> Result<()>;
-    pub fn scratch_bytes(&self, region: impl Into<Region<'_>>) -> Result<usize>;
-    pub fn finish(self) -> Result<ChecksumReport>;   // reads what the reads did not feed, as finish_data_checksum does now
-}
-```
-
-**What goes away**
-- All six `read_image*` methods.
-- `Lazy`.
-- `begin_data_checksum` and `finish_data_checksum`, which become private.
-- `Borrowed`, which becomes `ImageView`.
-
-**What the handle gives**
-- **Parsing:** the handle parses the image geometry and the tiled-image header one time. Today, each section call runs `TiledImage::new` again.
-- **Zero copy:** `Region::All` keeps the zero-copy path of `read_image_view`.
-- **Single-pass conversion:** `physical_into` converts the big-endian bytes to physical values in one pass, with `BLANK → NaN`. It does not fill `words`. The arithmetic already exists as `physical_from_be`. `PhysicalSample` is the private `PhysicalOut`, made public and sealed. The element type of `out` selects it, so a caller never writes a turbofish.
-- **Checksum:** `DataChecksum` already sums only the bytes that continue the sum, and at the finish it reads the rest. So `with_checksum` changes nothing for a caller that does not finish. The `_summed` variants are not necessary.
-
-**`ImageView`** (the former `Borrowed`) has these methods:
-- `new(shape, samples, scaling) -> Result`, which validates the geometry and the scaling
-- `shape`, `scaling`, `samples` and `metadata`
-- `physical_into`, `unsigned`, `sample_type` and `to_image()`
-
-`Image` keeps its owned data. `Image::view()` gives an `ImageView`. `Image::physical_f64` (renamed from `physical`), `physical_f32`, `unsigned` and `sample_type` call the `ImageView` code, so each conversion has one implementation.
-
-**Typed access:**
-- `View::as_f32() -> Option<&[f32]>`, and the same for each variant
-- `TryFrom<Data> for Vec<T>`, the reverse of the `From` impls
 
 ### Writing
 
@@ -66,8 +20,8 @@ The review sections that this answers: "Borrowed data on every write path", "One
 
 ```rust
 impl<W: Write> FitsWriter<W> {
-    pub fn write_image(&mut self, image: ImageView<'_>, header: Option<&Header>) -> Result<()>;
-    pub fn write_compressed_image(&mut self, image: ImageView<'_>, config: &CompressionConfig, header: Option<&Header>) -> Result<()>;
+    pub fn write_image(&mut self, image: Borrowed<'_>, header: Option<&Header>) -> Result<()>;
+    pub fn write_compressed_image(&mut self, image: Borrowed<'_>, config: &CompressionConfig, header: Option<&Header>) -> Result<()>;
     pub fn write_table(&mut self, table: &TableBuilder, header: Option<&Header>) -> Result<()>;
     pub fn write_compressed_table(&mut self, table: &TableBuilder, config: &CompressionConfig, header: Option<&Header>) -> Result<()>;
     pub fn write_ascii_table(&mut self, table: &AsciiTableBuilder, header: Option<&Header>) -> Result<()>;
@@ -242,32 +196,9 @@ Each phase is one change to fits-well and its lumos migration. No phase keeps an
 - Run `cargo drive surface` in fits-well, and review its diff as the record of the API change.
 - Phases 2 and 3 also compare the fits-well benches (`integration/read_section/*`, `integration/write*`, `atomic/*`) and the lumos benches before and after. A slower case blocks the phase.
 
-### Phase 2: the image reader
-
-1. Add `Region`, `ImageReader`, `ImageView` (renamed from `Borrowed`) and the public sealed `PhysicalSample`.
-   - Move the section, view and tiled paths of `reader/mod.rs` into the handle, which parses the geometry and the `TiledImage` one time.
-2. Add `physical_into` on `ImageView`, and on the handle from the big-endian bytes.
-   - `Image::physical_f64`, `Image::physical_f32` and `RandomGroups::*_physical` call it.
-3. Add `with_checksum` and `finish` on the handle. `begin_data_checksum` and `finish_data_checksum` become private.
-4. Add `scratch_bytes(region)` and `Hdu::padded_data_bytes()`.
-5. Add the typed accessors on `View`, and `TryFrom<Data> for Vec<T>`.
-6. Remove the six `read_image*` methods and `Lazy`.
-
-**Tests**
-- Port the existing section, view and checksum tests to the handle.
-- `physical_into` against `physical_f64` on every `BITPIX`, with and without scaling and `BLANK`, from a plain and from a compressed image.
-- `scratch_bytes` equals the capacity that a read actually uses, for a plain and for a compressed section.
-- A handle that reads every row band, then calls `finish`, gives the same report as `verify_checksum`.
-
-**lumos**
-- `HduSections` goes away, and so do `ExtensionSample`, `padded_data_bytes`, and the internal sizes that `plan.rs` derives itself.
-- The two chunk readers (`selected_fits.rs:314-343` and `pixels/mod.rs:264-339`) use one handle each.
-- `selected_fits.rs:234` stops cloning the header.
-- lumos's fused conversion (`pixels/mod.rs:423-508`) moves to `physical_into` only if its bench does not get slower. Otherwise it stays, and it reads `ImageView` through the typed accessors.
-
 ### Phase 3: writing
 
-1. `write_image(ImageView, …)`, `write_compressed_image(ImageView, &CompressionConfig, …)` and `write_chunk(View)`. Remove `Image`-taking writes and `&Data` chunks.
+1. `write_image(Borrowed, …)`, `write_compressed_image(Borrowed, &CompressionConfig, …)` and `write_chunk(View)`. Remove `Image`-taking writes and `&Data` chunks.
 2. `stream_image(Metadata, Option<&Header>)`.
 3. `CompressionConfig` replaces `CompressionOptions` and the separate `Compression` argument.
 4. `write_compressed_table(&Builder, &CompressionConfig, Option<&Header>)`. `Builder` is renamed in phase 5.
@@ -331,18 +262,19 @@ This phase changes the most call sites, about 280 in lumos, so it is one phase. 
 
 1. `ChecksumReport::is_valid` and `has_invalid`.
    - lumos: `calibration_bundle/mod.rs:178` and `fits_load_config.rs:82-93`.
-2. `WcsAlt`, and `pixel_to_world` / `world_to_pixel` into a caller slice.
-3. lumos tries `Wcs::from_header` for `celestial_reference`, as described in "WCS" above.
-4. Write `docs/design.md` with the decisions of all phases, then delete this proposal and `API_REVIEW.md`.
+2. **The scratch a region read holds, for lumos's memory plan.** lumos plans its memory from an `Hdu`, before any handle exists, and its model of a compressed section (two times the stored unit) is an estimate, not a count. So the query belongs on `Hdu`, and it is added only with a measurement of what a compressed section decode holds at its peak. Until then, lumos keeps its own model, which now reads the padded size from `Hdu::padded_data_bytes`.
+3. **lumos's fused conversion.** `pixels/mod.rs` converts, divides and locates nulls in one pass per chunk. It moves to `ImageReader::physical_into` and a second pass over the chunk only if a pinned bench shows no loss.
+4. `WcsAlt`, and `pixel_to_world` / `world_to_pixel` into a caller slice.
+5. lumos tries `Wcs::from_header` for `celestial_reference`, as described in "WCS" above.
+6. Delete this proposal and `API_REVIEW.md`. Their decisions are in `docs/design.md`.
 
 ## Order and size
 
 | Phase | fits-well | lumos | Depends on |
 |---|---|---|---|
-| 2. The image reader | large: `reader/mod.rs`, `image_model` | medium: decode | none |
-| 3. Writing | medium: `fits_writer`, `compress` | small: `plane_hdu`, bundle | 2, which brings `ImageView` |
+| 3. Writing | medium: `fits_writer`, `compress` | small: `plane_hdu`, bundle | none |
 | 4. Header and HDU selection | large: `header_model`, `reader`, `error` | large: about 280 call sites | none |
 | 5. Tables and names | medium: `compress/table`, `bintable`, renames | small | 4, which brings selectors |
 | 6. Small items | small | small | 4 |
 
-Phases 2 and 4 are independent, so either can go first. Phase 2 removes the most lumos code, and it is the one with a performance gain to measure.
+Phases 3 and 4 are independent, so either can go first.

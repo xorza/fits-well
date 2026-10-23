@@ -9,7 +9,7 @@
 
 use std::fs::File;
 
-use fits_well::image::{Data, Image, Scaling, View};
+use fits_well::image::{Data, Image, Region, Scaling, View};
 use fits_well::{FitsReader, FitsWriter};
 use std::env;
 
@@ -46,28 +46,30 @@ fn main() -> fits_well::Result<()> {
     let images = reader.image_indices();
     println!("image HDUs: {images:?}");
 
-    // `read_image` borrows the data unit in place (zero-copy) as a `Lazy`; `decode`
-    // byte-swaps the big-endian samples into an *owned* host-endian buffer you can keep
-    // and move (a BITPIX=8 image's bytes come back copy-free via `raw.u8()`).
-    let raw = reader.read_image(images[0])?;
-    let metadata = raw.metadata();
+    // `image` resolves the HDU's geometry once; `metadata` reads it without touching
+    // the data. `physical_into` applies BSCALE/BZERO, maps any BLANK value to NaN, and
+    // appends to a buffer you own; `read` copies the samples into an owned image.
+    let mut image = reader.image(images[0])?;
+    let metadata = image.metadata();
     println!("hdu 0: shape {:?}, {:?}", metadata.shape, metadata.bitpix);
-    // `physical()` applies BSCALE/BZERO and maps any BLANK value to NaN.
-    println!("  physical {:?}", raw.physical());
-    if let Data::I16(pixels) = raw.decode() {
+    let mut physical: Vec<f64> = Vec::new();
+    image.physical_into(Region::All, &mut physical)?;
+    println!("  physical {physical:?}");
+    if let Data::I16(pixels) = image.read(Region::All)?.into_samples() {
         println!("  pixels   {pixels:?}");
     }
 
-    // `read_image_view` byte-swaps into a *caller-owned* scratch instead of allocating
-    // a fresh buffer per call — so a loop over many images pays the output allocation
-    // once and reuses it across reads, even across differing BITPIX (i16 then f32
-    // here). The reader retains nothing; you own `scratch` and drop it when done.
+    // `view` byte-swaps into a *caller-owned* scratch instead of allocating a fresh
+    // buffer per call — so a loop over many images pays the output allocation once and
+    // reuses it across reads, even across differing BITPIX (i16 then f32 here). The
+    // reader retains nothing image-sized; you own `scratch` and drop it when done.
     let mut scratch: Vec<u64> = Vec::new();
     for &idx in &images {
         // The view borrows the reader + scratch, so use it before the next read. For
-        // samples you need past the loop, use the owned `read_image().decode()` above.
-        let image = reader.read_image_view(idx, &mut scratch)?;
-        match image.samples() {
+        // samples you need past the loop, use the owned `read` above.
+        let mut image = reader.image(idx)?;
+        let view = image.view(Region::All, &mut scratch)?;
+        match view.samples() {
             View::I16(v) => println!("hdu {idx}: i16 view {v:?}"),
             View::F32(v) => println!("hdu {idx}: f32 view {v:?}"),
             other => println!(

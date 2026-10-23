@@ -87,9 +87,9 @@ impl ImageGeometry {
             .ok_or(FitsError::DataUnitOverflow)
     }
 
-    pub(crate) fn metadata(&self) -> Metadata<'_> {
+    pub(crate) const fn metadata(&self) -> Metadata<'_> {
         Metadata {
-            shape: &self.shape,
+            shape: self.shape.as_slice(),
             bitpix: self.bitpix,
             scaling: self.scaling,
         }

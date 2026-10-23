@@ -20,6 +20,83 @@ exclude = [
     "todo.txt",
 ]
 
+
+[package.metadata.docs.rs]
+features = ["compression", "parallel"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+# The codec paths without `parallel`, and the bare reader. Benches measure every feature.
+[package.metadata.drive]
+version = "0.2.1"
+lint = ["--all-features", "--no-default-features --features compression", "--no-default-features"]
+test = ["--all-features", "--no-default-features --features compression"]
+bench = "--all-features"
+docs = true
+
+[dependencies]
+bitvec = "1"
+num-complex = "0.4"
+thiserror = "2.0"
+flate2 = { version = "1.1", optional = true }
+rayon = { version = "1", optional = true }
+criterion = { version = "0.8", optional = true }
+
+# No default features, so a `--no-default-features` run stays one.
+[dev-dependencies]
+fits-well = { path = ".", default-features = false, features = ["internals"] }
+
+[features]
+default = ["parallel"]
+# Tile-parallel codecs; the memory-bound sample paths stay serial, as threads measured no gain.
+parallel = ["compression", "dep:rayon"]
+compression = ["dep:flate2"]
+internals = ["dep:criterion"]
+
+[lib]
+bench = false
+
+[[bench]]
+name = "fits_well"
+harness = false
+required-features = ["internals"]
+
+[[example]]
+name = "compression"
+required-features = ["compression"]
+
+[[example]]
+name = "emit_compressed"
+required-features = ["compression"]
+
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+# Full debug info, which `darkroom/packaging` splits out of the shipped binary.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = "full"
+split-debuginfo = "off"
+
+[profile.bench]
+debug = "line-tables-only"
+strip = "none"
+
+[profile.release-dev]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+incremental = true
+debug = "line-tables-only"
+
+
+
 # Warn, not deny: the verification chain runs clippy with `-D warnings`.
 [lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }
@@ -129,77 +206,3 @@ broken_intra_doc_links = "warn"
 private_intra_doc_links = "warn"
 redundant_explicit_links = "warn"
 unescaped_backticks = "warn"
-
-[package.metadata.docs.rs]
-features = ["compression", "parallel"]
-rustdoc-args = ["--cfg", "docsrs"]
-
-# The codec paths without `parallel`, and the bare reader. Benches measure every feature.
-[package.metadata.drive]
-version = "0.2.1"
-lint = ["--all-features", "--no-default-features --features compression", "--no-default-features"]
-test = ["--all-features", "--no-default-features --features compression"]
-bench = "--all-features"
-docs = true
-
-[dependencies]
-bitvec = "1"
-num-complex = "0.4"
-thiserror = "2.0"
-flate2 = { version = "1.1", optional = true }
-rayon = { version = "1", optional = true }
-criterion = { version = "0.8", optional = true }
-
-# No default features, so a `--no-default-features` run stays one.
-[dev-dependencies]
-fits-well = { path = ".", default-features = false, features = ["internals"] }
-
-[features]
-default = ["parallel"]
-# Tile-parallel codecs; the memory-bound sample paths stay serial, as threads measured no gain.
-parallel = ["compression", "dep:rayon"]
-compression = ["dep:flate2"]
-internals = ["dep:criterion"]
-
-[lib]
-bench = false
-
-[[bench]]
-name = "fits_well"
-harness = false
-required-features = ["internals"]
-
-[[example]]
-name = "compression"
-required-features = ["compression"]
-
-[[example]]
-name = "emit_compressed"
-required-features = ["compression"]
-
-[profile.dev]
-opt-level = 1
-debug = "line-tables-only"
-
-[profile.dev.package."*"]
-opt-level = 3
-debug = false
-
-# Full debug info, which `darkroom/packaging` splits out of the shipped binary.
-[profile.release]
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-debug = "full"
-split-debuginfo = "off"
-
-[profile.bench]
-debug = "line-tables-only"
-strip = "none"
-
-[profile.release-dev]
-inherits = "release"
-lto = "thin"
-codegen-units = 16
-incremental = true
-debug = "line-tables-only"

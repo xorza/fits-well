@@ -3,13 +3,8 @@
 use crate::bitpix::Bitpix;
 use crate::endian::decode_be;
 use crate::endian::extend_be;
-use crate::image_model::physical_out::PhysicalOut;
-use crate::image_model::sample_type::UnsignedKind;
-use crate::image_model::scaling::Scaling;
-use crate::image_model::unsigned_data::UnsignedData;
+use crate::image_model::assert_whole_elements;
 use crate::image_model::view::View;
-use crate::image_model::{assert_whole_elements, physical_view};
-use crate::image_model::{flip_i8, flip_u16, flip_u32, flip_u64};
 use std::ops::Range;
 
 /// An owned, host-endian sample buffer, tagged by its `BITPIX` element type.
@@ -23,22 +18,35 @@ pub enum Data {
     F64(Vec<f64>),
 }
 
-macro_rules! impl_image_data_from_vec {
+/// `Data` from a typed vector, and back: the reverse gives the data back when it holds
+/// another type.
+macro_rules! impl_data_vec_conversions {
     ($variant:ident, $type:ty) => {
         impl From<Vec<$type>> for Data {
             fn from(values: Vec<$type>) -> Data {
                 Data::$variant(values)
             }
         }
+
+        impl TryFrom<Data> for Vec<$type> {
+            type Error = Data;
+
+            fn try_from(data: Data) -> core::result::Result<Self, Data> {
+                match data {
+                    Data::$variant(values) => Ok(values),
+                    other => Err(other),
+                }
+            }
+        }
     };
 }
 
-impl_image_data_from_vec!(U8, u8);
-impl_image_data_from_vec!(I16, i16);
-impl_image_data_from_vec!(I32, i32);
-impl_image_data_from_vec!(I64, i64);
-impl_image_data_from_vec!(F32, f32);
-impl_image_data_from_vec!(F64, f64);
+impl_data_vec_conversions!(U8, u8);
+impl_data_vec_conversions!(I16, i16);
+impl_data_vec_conversions!(I32, i32);
+impl_data_vec_conversions!(I64, i64);
+impl_data_vec_conversions!(F32, f32);
+impl_data_vec_conversions!(F64, f64);
 
 impl Data {
     /// The `BITPIX` element kind backing this buffer.
@@ -100,35 +108,5 @@ impl Data {
             Self::F32(v) => extend_be(out, v, f32::to_be_bytes),
             Self::F64(v) => extend_be(out, v, f64::to_be_bytes),
         }
-    }
-
-    pub(crate) fn physical_as<O: PhysicalOut>(&self, scaling: &Scaling) -> Vec<O> {
-        physical_view(self.as_view(), scaling)
-    }
-
-    /// Exact typed unsigned (or signed-byte) reinterpretation when `scaling` is
-    /// precisely the FITS unsigned convention (`BSCALE == 1`, no `BLANK`, and
-    /// `BZERO` the matching sign-bit offset); `None` otherwise. Exact for all 64-bit
-    /// values (no `f64` rounding). Shared by [`Image::unsigned`](crate::image_model::Image::unsigned)/
-    /// [`Lazy::unsigned`](crate::image_model::lazy::Lazy::unsigned).
-    pub(crate) fn unsigned(&self, scaling: &Scaling) -> Option<UnsignedData> {
-        let kind = scaling.unsigned_kind(self.bitpix())?;
-        // The kind is derived from this buffer's own `BITPIX`, so the pairings below
-        // are the only reachable ones.
-        Some(match (self, kind) {
-            (Self::U8(v), UnsignedKind::I8) => {
-                UnsignedData::I8(v.iter().map(|&x| flip_i8(x)).collect())
-            }
-            (Self::I16(v), UnsignedKind::U16) => {
-                UnsignedData::U16(v.iter().map(|&x| flip_u16(x)).collect())
-            }
-            (Self::I32(v), UnsignedKind::U32) => {
-                UnsignedData::U32(v.iter().map(|&x| flip_u32(x)).collect())
-            }
-            (Self::I64(v), UnsignedKind::U64) => {
-                UnsignedData::U64(v.iter().map(|&x| flip_u64(x)).collect())
-            }
-            _ => return None,
-        })
     }
 }

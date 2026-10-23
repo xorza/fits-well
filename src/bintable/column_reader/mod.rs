@@ -81,7 +81,7 @@ impl<'a> ColumnReader<'a> {
     /// convention — `TSCALn == 1`, no `TNULLn`, `TZEROn` the matching sign-bit offset
     /// on a `B`/`I`/`J`/`K` column — without the `f64` rounding of
     /// [`physical`](Self::physical). `Ok(None)` for any other column; errors only for a
-    /// variable-length column. Mirrors [`crate::image::Image::unsigned`].
+    /// variable-length column. Mirrors [`crate::image::Borrowed::unsigned`].
     pub fn unsigned(&self) -> Result<Option<UnsignedData>> {
         let col = self.fixed_descriptor()?;
         let Some(kind) = col.tform.kind.unsigned_kind(&col.scaling()) else {

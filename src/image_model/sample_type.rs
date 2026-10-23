@@ -22,13 +22,11 @@ pub(crate) enum UnsignedKind {
 /// signedness; the FITS unsigned and signed-byte conventions then layer a `BZERO`
 /// offset on top (`BSCALE == 1` with `BZERO = 2^(n-1)`, or `BZERO = -128` for signed
 /// bytes), so the values actually mean an unsigned (or signed-byte) integer. This
-/// enum is what [`Lazy::sample_type`] and [`Image::sample_type`] return, resolved up
-/// front from `BITPIX` + [`Scaling`] without touching the pixels — so a caller can
-/// pick a code path (e.g. a per-type normalization range) without re-deriving the
-/// `BZERO` convention itself.
+/// enum is what [`Borrowed::sample_type`] returns, resolved up front from `BITPIX` +
+/// [`Scaling`] without touching the pixels — so a caller can pick a code path (e.g. a
+/// per-type normalization range) without re-deriving the `BZERO` convention itself.
 ///
-/// [`Lazy::sample_type`]: crate::image_model::lazy::Lazy::sample_type
-/// [`Image::sample_type`]: crate::image_model::Image::sample_type
+/// [`Borrowed::sample_type`]: crate::image::Borrowed::sample_type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SampleType {
     /// `BITPIX = 8`, `BZERO = -128`: a signed byte.

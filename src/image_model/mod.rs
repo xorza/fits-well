@@ -4,9 +4,8 @@
 //! *physical* plane (`BZERO + BSCALE × raw`). The stored samples are big-endian, so
 //! [`Data::decode`] swaps a data unit into an owned, host-endian [`Data`]
 //! and [`Data::encode_into`] writes them back. When no swap is needed
-//! (`BITPIX = 8`, or a big-endian host) an in-memory reader can skip even that copy
-//! and borrow the data unit in place — see [`Lazy`](lazy::Lazy) /
-//! [`crate::FitsReader::read_image`]. The per-element swap loops are
+//! (`BITPIX = 8`) an in-memory reader can skip even that copy and borrow the data
+//! unit in place — see [`crate::ImageReader::view`]. The per-element swap loops are
 //! memory-bandwidth-bound, so they lean on autovectorization rather than threads
 //! (the thread-parallel layer is the compute-bound tiled codecs in the `compress`
 //! module, not this path).
@@ -14,27 +13,23 @@
 #[cfg(feature = "internals")]
 pub(crate) mod bench;
 pub(crate) mod data;
-pub(crate) mod lazy;
-pub(crate) mod physical_out;
+pub(crate) mod physical_sample;
+pub(crate) mod region;
 pub(crate) mod sample_type;
 pub(crate) mod scaling;
 pub(crate) mod unsigned_data;
 pub(crate) mod view;
 
 use crate::bitpix::Bitpix;
-use crate::endian::decode_be;
 use crate::endian::decode_be_into_slice;
 use crate::error::FitsError;
 use crate::error::Ranked;
 use crate::error::Result;
 use crate::image_model::data::Data;
-use crate::image_model::physical_out::PhysicalOut;
-use crate::image_model::sample_type::SampleType;
+use crate::image_model::physical_sample::PhysicalSample;
 use crate::image_model::scaling::Scaling;
-use crate::image_model::unsigned_data::UnsignedData;
-use crate::image_model::view::View;
+use crate::image_model::view::{Borrowed, View};
 use crate::words;
-use std::iter;
 use std::ops::Range;
 
 /// Element count for an N-d `shape`: the product of the axis lengths, or `0` for
@@ -48,6 +43,18 @@ pub(crate) fn shape_product(shape: &[usize]) -> Result<usize> {
             .try_fold(1usize, |acc, &len| acc.checked_mul(len))
             .ok_or(FitsError::DataUnitOverflow)
     }
+}
+
+/// `shape`'s sample count, which must be `samples`.
+pub(crate) fn check_sample_count(shape: &[usize], samples: usize) -> Result<usize> {
+    let expected = shape_product(shape)?;
+    if samples != expected {
+        return Err(FitsError::DataSizeMismatch {
+            expected,
+            got: samples,
+        });
+    }
+    Ok(expected)
 }
 
 /// Validate a zero-based, half-open N-d region against `shape` and write the
@@ -83,22 +90,32 @@ pub(crate) fn validate_image_region(
     Ok(())
 }
 
-/// The physical plane of a borrowed sample range: `BZERO + BSCALE × sample`, with
-/// integer samples equal to `BLANK` mapping to `NaN` (§3.4). The `BITPIX` match runs
-/// once for the whole view rather than once per element, so a caller wanting a
-/// sub-range (a random group's parameters or array) slices the view, not the loop.
-pub(crate) fn physical_view<O: PhysicalOut>(view: View<'_>, scaling: &Scaling) -> Vec<O> {
+/// Append the physical plane of a borrowed sample range to `out`: `BZERO + BSCALE ×
+/// sample`, with integer samples equal to `BLANK` mapping to `NaN` (§3.4). The
+/// `BITPIX` match runs once for the whole view rather than once per element, so a
+/// caller wanting a sub-range (a random group's parameters or array) slices the view,
+/// not the loop.
+pub(crate) fn extend_physical<O: PhysicalSample>(
+    view: View<'_>,
+    scaling: &Scaling,
+    out: &mut Vec<O>,
+) {
+    out.reserve(view.len());
     match view {
-        View::U8(v) => scale_ints(v, scaling),
-        View::I16(v) => scale_ints(v, scaling),
-        View::I32(v) => scale_ints(v, scaling),
-        View::I64(v) => scale_ints(v, scaling),
-        View::F32(v) => v
-            .iter()
-            .map(|&x| O::scaled(f64::from(x), scaling))
-            .collect(),
-        View::F64(v) => v.iter().map(|&x| O::scaled(x, scaling)).collect(),
+        View::U8(v) => out.extend(v.iter().map(|&x| O::scaled_integer(i64::from(x), scaling))),
+        View::I16(v) => out.extend(v.iter().map(|&x| O::scaled_integer(i64::from(x), scaling))),
+        View::I32(v) => out.extend(v.iter().map(|&x| O::scaled_integer(i64::from(x), scaling))),
+        View::I64(v) => out.extend(v.iter().map(|&x| O::scaled_integer(x, scaling))),
+        View::F32(v) => out.extend(v.iter().map(|&x| O::scaled(f64::from(x), scaling))),
+        View::F64(v) => out.extend(v.iter().map(|&x| O::scaled(x, scaling))),
     }
+}
+
+/// [`extend_physical`] into a new `Vec`.
+pub(crate) fn physical_view<O: PhysicalSample>(view: View<'_>, scaling: &Scaling) -> Vec<O> {
+    let mut out = Vec::new();
+    extend_physical(view, scaling, &mut out);
+    out
 }
 
 /// Assert the buffer holds a whole number of `bitpix` elements — an invariant
@@ -111,35 +128,36 @@ fn assert_whole_elements(bytes: &[u8], bitpix: Bitpix) {
     );
 }
 
-fn physical_from_be<O: PhysicalOut>(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Vec<O> {
+/// [`extend_physical`] straight from the big-endian stored bytes, in one pass: no
+/// host-endian copy of the samples is made.
+pub(crate) fn extend_physical_be<O: PhysicalSample>(
+    bytes: &[u8],
+    bitpix: Bitpix,
+    scaling: &Scaling,
+    out: &mut Vec<O>,
+) {
     assert_whole_elements(bytes, bitpix);
+    out.reserve(bytes.len() / bitpix.elem_size());
+    let integer = |raw: i64| O::scaled_integer(raw, scaling);
     match bitpix {
-        Bitpix::U8 => bytes
-            .iter()
-            .map(|&x| O::scaled_integer(i64::from(x), scaling))
-            .collect(),
-        Bitpix::I16 => decode_be(bytes, |b| {
-            O::scaled_integer(i64::from(i16::from_be_bytes(b)), scaling)
-        }),
-        Bitpix::I32 => decode_be(bytes, |b| {
-            O::scaled_integer(i64::from(i32::from_be_bytes(b)), scaling)
-        }),
-        Bitpix::I64 => decode_be(bytes, |b| O::scaled_integer(i64::from_be_bytes(b), scaling)),
-        Bitpix::F32 => decode_be(bytes, |b| {
-            O::scaled(f64::from(f32::from_be_bytes(b)), scaling)
-        }),
-        Bitpix::F64 => decode_be(bytes, |b| O::scaled(f64::from_be_bytes(b), scaling)),
+        Bitpix::U8 => out.extend(bytes.iter().map(|&x| integer(i64::from(x)))),
+        Bitpix::I16 => out.extend(
+            (bytes.as_chunks().0.iter()).map(|&b| integer(i64::from(i16::from_be_bytes(b)))),
+        ),
+        Bitpix::I32 => out.extend(
+            (bytes.as_chunks().0.iter()).map(|&b| integer(i64::from(i32::from_be_bytes(b)))),
+        ),
+        Bitpix::I64 => {
+            out.extend((bytes.as_chunks().0.iter()).map(|&b| integer(i64::from_be_bytes(b))));
+        }
+        Bitpix::F32 => out.extend(
+            (bytes.as_chunks().0.iter())
+                .map(|&b| O::scaled(f64::from(f32::from_be_bytes(b)), scaling)),
+        ),
+        Bitpix::F64 => out.extend(
+            (bytes.as_chunks().0.iter()).map(|&b| O::scaled(f64::from_be_bytes(b), scaling)),
+        ),
     }
-}
-
-fn unsigned_from_be(bytes: &[u8], bitpix: Bitpix, scaling: &Scaling) -> Option<UnsignedData> {
-    assert_whole_elements(bytes, bitpix);
-    let kind = scaling.unsigned_kind(bitpix)?;
-    Some(UnsignedData::from_be_cells(
-        iter::once(bytes),
-        bytes.len() / bitpix.elem_size(),
-        kind,
-    ))
 }
 
 /// Byte-swap big-endian image bytes `src` into `words` — a `u64`-backed (8-byte-
@@ -274,19 +292,14 @@ impl Image {
         Ok(image)
     }
 
-    /// The image geometry, stored element type, and physical-value scaling.
-    pub fn metadata(&self) -> Metadata<'_> {
-        Metadata {
+    /// The image, borrowed: its geometry, scaling and host-endian stored samples, and
+    /// the conversions from them.
+    pub fn view(&self) -> Borrowed<'_> {
+        Borrowed {
             shape: &self.shape,
-            bitpix: self.samples.bitpix(),
             scaling: self.scaling,
+            samples: self.samples.as_view(),
         }
-    }
-
-    /// Borrow the exact host-endian stored sample plane without allowing it to
-    /// become inconsistent with the validated geometry.
-    pub fn stored(&self) -> View<'_> {
-        self.samples.as_view()
     }
 
     /// Consume the image and return its host-endian stored samples.
@@ -295,17 +308,12 @@ impl Image {
     }
 
     pub(crate) fn validate_geometry(&self) -> Result<usize> {
-        let expected = shape_product(&self.shape)?;
-        let got = self.samples.len();
-        if got != expected {
-            return Err(FitsError::DataSizeMismatch { expected, got });
-        }
-        Ok(expected)
+        check_sample_count(&self.shape, self.samples.len())
     }
 
     /// Build an image storing a `u16` buffer via the FITS unsigned convention
     /// (`BITPIX = 16`, `BZERO = 2¹⁵`, `BSCALE = 1`) — the inverse of
-    /// [`Image::unsigned`]. The writer emits the `BZERO` keyword so it round-trips.
+    /// [`Borrowed::unsigned`]. The writer emits the `BZERO` keyword so it round-trips.
     pub fn from_u16(shape: Vec<usize>, data: &[u16]) -> Result<Self> {
         Self::offset_image(
             shape,
@@ -352,47 +360,19 @@ impl Image {
             },
         )
     }
-
-    /// Reinterpret the stored buffer as exact typed integers when the scaling is
-    /// precisely a FITS unsigned-integer (or signed-byte) convention: `BSCALE == 1`,
-    /// no `BLANK`, and `BZERO` the matching sign-bit offset. Unlike
-    /// [`Image::physical`], this is exact for all 64-bit values (no `f64` rounding
-    /// past 2⁵³). Returns `None` for any other scaling or element type.
-    pub fn unsigned(&self) -> Option<UnsignedData> {
-        self.samples.unsigned(&self.scaling)
-    }
-
-    /// The physical-plane values: `BZERO + BSCALE × sample` for every sample
-    /// (§3.4). Integer samples equal to the `BLANK` sentinel become `NaN`; float
-    /// `NaN`/`Inf` pass through. The unsigned-integer convention falls out for
-    /// free — e.g. a signed-16 buffer with `BZERO = 32768` yields the `u16` value.
-    pub fn physical(&self) -> Vec<f64> {
-        self.samples.physical_as::<f64>(&self.scaling)
-    }
-
-    /// The physical plane narrowed to `f32` in a single pass — the compact, lossy
-    /// counterpart to [`physical`](Image::physical); see [`Lazy::physical_f32`](crate::image_model::lazy::Lazy::physical_f32).
-    pub fn physical_f32(&self) -> Vec<f32> {
-        self.samples.physical_as::<f32>(&self.scaling)
-    }
-
-    /// The effective element type these samples represent, resolving the unsigned and
-    /// signed-byte conventions from the stored `BITPIX` + [`Scaling`].
-    pub fn sample_type(&self) -> SampleType {
-        SampleType::from_scaling(self.samples.bitpix(), &self.scaling)
-    }
 }
 
-/// Scale an integer sample buffer to the physical plane, mapping the `BLANK`
-/// sentinel (a stored integer value) to `NaN`.
-fn scale_ints<T, O>(v: &[T], scaling: &Scaling) -> Vec<O>
-where
-    T: Copy + Into<i64>,
-    O: PhysicalOut,
-{
-    v.iter()
-        .map(|&x| O::scaled_integer(x.into(), scaling))
-        .collect()
+#[cfg(test)]
+pub(crate) mod internals {
+    use crate::image_model::Image;
+    use crate::image_model::physical_sample::PhysicalSample;
+
+    /// The physical plane of `image`, in a new buffer.
+    pub(crate) fn physical<T: PhysicalSample>(image: &Image) -> Vec<T> {
+        let mut out = Vec::new();
+        image.view().physical_into(&mut out);
+        out
+    }
 }
 
 #[cfg(test)]

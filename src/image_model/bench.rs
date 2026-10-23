@@ -8,8 +8,10 @@ use criterion::{BenchmarkId, Criterion};
 use crate::bench::fixture::{self, Kind, Scale};
 use crate::bench::scene::{self, TYPES, WIDTH};
 use crate::bitpix::Bitpix;
+use crate::image_model::physical_view;
 use crate::image_model::scaling::Scaling;
 use crate::image_model::swap_into_words;
+use crate::image_model::view::Borrowed;
 
 /// `atomic/decode/<type>`, `atomic/encode/<type>`, `atomic/physical/<scaling>/<type>` and
 /// `atomic/unsigned/<type>`, each on one row of the standard frame. Per sample, in the stored
@@ -77,7 +79,7 @@ fn physical(c: &mut Criterion) {
                     blank,
                     ..row.scaling
                 };
-                b.iter(|| black_box(&row.samples).physical_as::<f64>(&scaling));
+                b.iter(|| physical_view::<f64>(black_box(row.samples.as_view()), &scaling));
             });
         }
     }
@@ -97,7 +99,12 @@ fn unsigned(c: &mut Criterion) {
                 bzero: sign_bit_offset(bitpix),
                 blank: None,
             };
-            b.iter(|| black_box(&row.samples).unsigned(&scaling).unwrap());
+            let view = Borrowed {
+                shape: &row.shape,
+                scaling,
+                samples: row.samples.as_view(),
+            };
+            b.iter(|| black_box(view).unsigned().unwrap());
         });
     }
     group.finish();

@@ -18,6 +18,7 @@ use crate::header_model::Header;
 use crate::image_model::Image;
 use crate::image_model::data::Data;
 use crate::reader::internals::open_fixture;
+use crate::reader::internals::read_whole;
 
 /// Decode the tiled image `header` describes from its container `table`, resolving
 /// the kind and geometry the way the reader's scan does.
@@ -77,9 +78,9 @@ fn decompresses_the_integer_codec_fixtures() {
         ("comp_plio_i32.fits", [24, 16], Data::I32(mask())),
     ] {
         let mut reader = open_fixture(name);
-        let image = reader.read_image(1).unwrap();
+        let image = read_whole(&mut reader, 1);
         assert_eq!(image.shape, shape, "{name}");
-        assert_eq!(image.decode(), want, "{name}");
+        assert_eq!(image.samples, want, "{name}");
     }
 }
 
@@ -125,8 +126,8 @@ fn decompresses_to_the_reference_reconstructions() {
         // SUBTRACTIVE_DITHER_1 with ZBLANK: two pixels are null.
         ("comp_nan_f32.fits", "comp_ref_nan_f32.fits", 2),
     ] {
-        let got = samples(open_fixture(compressed).read_image(1).unwrap().decode());
-        let want = samples(open_fixture(reference).read_image(0).unwrap().decode());
+        let got = samples(read_whole(&mut open_fixture(compressed), 1).samples);
+        let want = samples(read_whole(&mut open_fixture(reference), 0).samples);
         assert_eq!(got, want, "{compressed}");
         assert_eq!(
             got.iter().filter(|v| v.is_none()).count(),
@@ -413,9 +414,9 @@ fn zblank_column_overrides_keyword_per_tile() {
 fn reading_a_plain_bintable_as_an_image_is_rejected() {
     // DDTSUVDATA hdu 1 is an ordinary BINTABLE (no ZIMAGE).
     let mut f = open_fixture("DDTSUVDATA.fits");
-    // Public path: `read_image` sees a non-ZIMAGE bintable and rejects it as a
+    // Public path: `image` sees a non-ZIMAGE bintable and rejects it as a
     // non-image (it never reaches the decompressor).
-    assert!(matches!(f.read_image(1), Err(FitsError::NotAnImage)));
+    assert!(matches!(f.image(1), Err(FitsError::NotAnImage)));
     // The decoder reads the geometry the same classification resolves.
     let table = f.read_table(1).unwrap();
     assert!(matches!(
