@@ -32,15 +32,3 @@ fn compression_parameter_indices_use_the_standard_canonical_form() {
         assert_eq!(parameter_index(keyword), None, "{keyword}");
     }
 }
-
-#[test]
-fn needs_wide_promotes_past_the_32_bit_descriptor_range() {
-    // §10.1.3: a 32-bit `P` descriptor holds a signed 32-bit offset/count, so a heap
-    // or tile element count past `i32::MAX` needs a 64-bit `Q` (the integer encoder
-    // promotes; the fixed-layout float encoder errors). The threshold is shared.
-    let max = i32::MAX as usize;
-    assert!(!needs_wide(0, 0));
-    assert!(!needs_wide(max, max)); // exactly i32::MAX still fits a 32-bit P
-    assert!(needs_wide(max + 1, 0)); // heap offset past the range
-    assert!(needs_wide(0, max + 1)); // a tile's element count past the range
-}

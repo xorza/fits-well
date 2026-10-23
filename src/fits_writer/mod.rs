@@ -78,7 +78,7 @@ fn pad_to_block(buf: &mut Vec<u8>, fill: u8) -> Result<()> {
 pub struct FitsWriter<W> {
     sink: W,
     state: WriterState,
-    checksum: bool,
+    checksums: Checksums,
     /// Reused buffer the data unit is assembled into before padding + writing, so
     /// writing many HDUs allocates no per-call staging. Each high-level write
     /// `clear`s it, builds the unit, and hands it to the HDU commit path.
@@ -95,12 +95,27 @@ enum WriterState {
     Failed,
 }
 
+/// Whether each HDU carries `DATASUM` and `CHECKSUM` (§J).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Checksums {
+    Off,
+    On,
+}
+
+/// What a file starts with when an HDU is its first: the HDU itself, as its primary, or an
+/// empty primary it then follows, as a table or a compressed image is an extension only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Opening {
+    Itself,
+    EmptyPrimary,
+}
+
 impl<W: Write> FitsWriter<W> {
     pub const fn new(sink: W) -> Self {
         Self {
             sink,
             state: WriterState::Empty,
-            checksum: false,
+            checksums: Checksums::Off,
             scratch: Vec::new(),
             header_scratch: Vec::new(),
         }
@@ -110,7 +125,7 @@ impl<W: Write> FitsWriter<W> {
     /// this writer (§J), including [`FitsWriter::write_raw_hdu`].
     #[must_use]
     pub const fn with_checksums(mut self) -> Self {
-        self.checksum = true;
+        self.checksums = Checksums::On;
         self
     }
 
@@ -119,11 +134,7 @@ impl<W: Write> FitsWriter<W> {
     /// for an ASCII table and NULs for every other data unit.
     pub fn write_raw_hdu(&mut self, header: &Header, raw: &[u8]) -> Result<()> {
         self.ensure_writable()?;
-        let position = match self.state {
-            WriterState::Empty => HduPosition::Primary,
-            WriterState::Active => HduPosition::Extension,
-            WriterState::Failed => unreachable!("failed writer rejected above"),
-        };
+        let position = self.next_position();
         let role = HduRole::from_header(header, position)?;
         let kind = HduKind::classify(header, role)?;
         let extent = data_extent(header, role)?;
@@ -146,7 +157,16 @@ impl<W: Write> FitsWriter<W> {
         };
         // No template: this is the escape hatch for a caller supplying a complete
         // header, so there is nothing to merge into it.
-        self.finish_hdu(header.clone(), None, fill, false)
+        self.finish_hdu(header.clone(), None, fill, Opening::Itself)
+    }
+
+    /// Where the next HDU goes: the primary of an empty file, an extension after it.
+    fn next_position(&self) -> HduPosition {
+        match self.state {
+            WriterState::Empty => HduPosition::Primary,
+            WriterState::Active => HduPosition::Extension,
+            WriterState::Failed => unreachable!("a failed writer writes nothing"),
+        }
     }
 
     fn ensure_writable(&self) -> Result<()> {
@@ -170,29 +190,30 @@ impl<W: Write> FitsWriter<W> {
         mut header: Header,
         template: Option<&Header>,
         fill: u8,
-        automatic_primary: bool,
+        opening: Opening,
     ) -> Result<()> {
         merge_header_template(&mut header, template);
         pad_to_block(&mut self.scratch, fill)?;
         prepare_header(
             header,
             &self.scratch,
-            self.checksum,
+            self.checksums,
             &mut self.header_scratch,
         )?;
 
-        let primary_header = if automatic_primary && self.state == WriterState::Empty {
-            let mut primary_header = Vec::new();
-            prepare_header(
-                empty_primary_header(),
-                &[],
-                self.checksum,
-                &mut primary_header,
-            )?;
-            Some(primary_header)
-        } else {
-            None
-        };
+        let primary_header =
+            if opening == Opening::EmptyPrimary && self.next_position() == HduPosition::Primary {
+                let mut primary_header = Vec::new();
+                prepare_header(
+                    empty_primary_header(),
+                    &[],
+                    self.checksums,
+                    &mut primary_header,
+                )?;
+                Some(primary_header)
+            } else {
+                None
+            };
         if let Some(primary_header) = primary_header {
             write_prepared(&mut self.sink, &mut self.state, &primary_header, &[])?;
         }
@@ -302,13 +323,14 @@ impl<W: Write + Seek> FitsWriter<W> {
 fn prepare_header(
     header: Header,
     padded_data: &[u8],
-    with_checksum: bool,
+    checksums: Checksums,
     out: &mut Vec<u8>,
 ) -> Result<()> {
-    if with_checksum {
-        prepare_header_with_data_sum(header, checksum::accumulate(padded_data, 0), out)
-    } else {
-        render_header(&header, out)
+    match checksums {
+        Checksums::On => {
+            prepare_header_with_data_sum(header, checksum::accumulate(padded_data, 0), out)
+        }
+        Checksums::Off => render_header(&header, out),
     }
 }
 

@@ -7,6 +7,7 @@
 //! the spelling, then translates the whole description into the image keywords the
 //! rest of the WCS pipeline already evaluates.
 
+pub(super) mod keyword_spelling;
 pub(super) mod table_axis_keyword;
 pub(super) mod table_matrix_keyword;
 pub(super) mod table_pole_keyword;

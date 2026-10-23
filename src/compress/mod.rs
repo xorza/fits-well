@@ -281,14 +281,6 @@ impl Compression {
     }
 }
 
-/// Whether a tiled-image data unit needs 64-bit `Q` descriptors rather than 32-bit
-/// `P`: any heap offset or tile element count past the signed-32-bit range (§10.1.3).
-/// The integer encoder promotes to `Q`; the fixed-layout float container instead
-/// rejects (it can't widen its row), so both share this one threshold.
-const fn needs_wide(heap_len: usize, max_nelem: usize) -> bool {
-    heap_len > i32::MAX as usize || max_nelem > i32::MAX as usize
-}
-
 /// Map `f` over each tile index `0..ntiles`, collecting the per-tile results in
 /// tile order and short-circuiting on the first error. `init` builds the reusable
 /// per-worker scratch `f` writes through (one per thread under `parallel`, reused

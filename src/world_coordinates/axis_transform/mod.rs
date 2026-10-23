@@ -106,7 +106,7 @@ impl AxisTransform {
         match self {
             Self::Linear => Ok(reference + intermediate),
             Self::Logarithmic => finite(reference * (intermediate / reference).exp())
-                .map_err(|()| domain_error(axis, "LOG")),
+                .ok_or_else(|| domain_error(axis, "LOG")),
             Self::Spectral(transform) => transform.to_world(intermediate, axis),
             Self::Unsupported => {
                 panic!("unsupported WCS transform passed completeness check")

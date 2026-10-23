@@ -7,7 +7,6 @@ use crate::error::Result;
 use crate::unit;
 use crate::world_coordinates::axis_transform::spectral_rest::ResolvedRest;
 use crate::world_coordinates::axis_transform::{PLANCK_CONSTANT, SPEED_OF_LIGHT};
-use std::result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SpectralKind {
@@ -66,9 +65,9 @@ impl SpectralKind {
         }
     }
 
-    pub(super) fn to_characteristic(self, value: f64, rest: ResolvedRest) -> DomainResult {
+    pub(super) fn to_characteristic(self, value: f64, rest: ResolvedRest) -> Option<f64> {
         if !value.is_finite() {
-            return Err(());
+            return None;
         }
         let result = match self {
             Self::Frequency | Self::Wavelength | Self::AirWavelength => nonzero(value)?,
@@ -92,7 +91,7 @@ impl SpectralKind {
         finite(result)
     }
 
-    pub(super) fn world_from_characteristic(self, value: f64, rest: ResolvedRest) -> DomainResult {
+    pub(super) fn world_from_characteristic(self, value: f64, rest: ResolvedRest) -> Option<f64> {
         let value = finite(value)?;
         let result = match self {
             Self::Frequency
@@ -224,22 +223,20 @@ impl Characteristic {
     }
 }
 
-pub(super) type DomainResult = result::Result<f64, ()>;
-
 pub(super) fn convert(
     from: Characteristic,
     to: Characteristic,
     value: f64,
     rest: ResolvedRest,
-) -> DomainResult {
+) -> Option<f64> {
     let value = finite(value)?;
     if from == to {
-        return Ok(value);
+        return Some(value);
     }
     match (from, to) {
         (Characteristic::Frequency, Characteristic::Wavelength)
         | (Characteristic::Wavelength, Characteristic::Frequency) => {
-            Ok(SPEED_OF_LIGHT / nonzero(value)?)
+            Some(SPEED_OF_LIGHT / nonzero(value)?)
         }
         (Characteristic::Wavelength, Characteristic::AirWavelength) => wave_to_air(value),
         (Characteristic::AirWavelength, Characteristic::Wavelength) => air_to_wave(value),
@@ -247,7 +244,7 @@ pub(super) fn convert(
             wave_to_air(SPEED_OF_LIGHT / nonzero(value)?)
         }
         (Characteristic::AirWavelength, Characteristic::Frequency) => {
-            Ok(SPEED_OF_LIGHT / nonzero(air_to_wave(value)?)?)
+            Some(SPEED_OF_LIGHT / nonzero(air_to_wave(value)?)?)
         }
         (Characteristic::Frequency, Characteristic::Velocity) => {
             debug_assert!(rest.frequency != 0.0, "resolved rest frequency");
@@ -293,9 +290,9 @@ pub(super) fn conversion_derivative(
     from_value: f64,
     to_value: f64,
     rest: ResolvedRest,
-) -> DomainResult {
+) -> Option<f64> {
     if from == to {
-        return Ok(1.0);
+        return Some(1.0);
     }
     let derivative = match (from, to) {
         (Characteristic::Frequency, Characteristic::Wavelength)
@@ -339,24 +336,24 @@ pub(super) fn conversion_derivative(
     finite(derivative)
 }
 
-fn frequency_derivative_from_velocity(value: f64, rest: ResolvedRest) -> DomainResult {
+fn frequency_derivative_from_velocity(value: f64, rest: ResolvedRest) -> Option<f64> {
     let gamma = lorentz_factor(value)?;
     debug_assert!(rest.frequency != 0.0, "resolved rest frequency");
     finite(-gamma * rest.frequency / (SPEED_OF_LIGHT + value))
 }
 
-fn wavelength_derivative_from_velocity(value: f64, rest: ResolvedRest) -> DomainResult {
+fn wavelength_derivative_from_velocity(value: f64, rest: ResolvedRest) -> Option<f64> {
     let gamma = lorentz_factor(value)?;
     debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
     finite(gamma * rest.wavelength / (SPEED_OF_LIGHT - value))
 }
 
-fn lorentz_factor(value: f64) -> DomainResult {
+fn lorentz_factor(value: f64) -> Option<f64> {
     let value = subluminal(value)?;
     finite(1.0 / (1.0 - (value / SPEED_OF_LIGHT).powi(2)).sqrt())
 }
 
-fn wave_to_air(wave: f64) -> DomainResult {
+fn wave_to_air(wave: f64) -> Option<f64> {
     let wave = nonzero(wave)?;
     let mut index = 1.0;
     for _ in 0..4 {
@@ -366,28 +363,28 @@ fn wave_to_air(wave: f64) -> DomainResult {
     finite(wave / index)
 }
 
-fn air_to_wave(air: f64) -> DomainResult {
+fn air_to_wave(air: f64) -> Option<f64> {
     let air = nonzero(air)?;
     finite(air * refractive_index((1.0 / air).powi(2))?)
 }
 
-fn wave_derivative_from_air(air: f64) -> DomainResult {
+fn wave_derivative_from_air(air: f64) -> Option<f64> {
     let air = nonzero(air)?;
     let inverse_square = (1.0 / air).powi(2);
     let first = 0.41e14 - inverse_square;
     let second = 1.46e14 - inverse_square;
     if first == 0.0 || second == 0.0 {
-        return Err(());
+        return None;
     }
     let index = refractive_index(inverse_square)?;
     finite(index - 2.0 * inverse_square * (2.554e8 / first.powi(2) + 294.981e8 / second.powi(2)))
 }
 
-pub(super) fn refractive_index(inverse_square: f64) -> DomainResult {
+pub(super) fn refractive_index(inverse_square: f64) -> Option<f64> {
     let first = 0.41e14 - inverse_square;
     let second = 1.46e14 - inverse_square;
     if first == 0.0 || second == 0.0 {
-        return Err(());
+        return None;
     }
     finite(1.000_064_328 + 2.554e8 / first + 294.981e8 / second)
 }
@@ -424,28 +421,16 @@ fn velocity_scale(unit: &str) -> Option<f64> {
     Some(scaled.factor * length / time)
 }
 
-fn nonzero(value: f64) -> DomainResult {
-    if value.is_finite() && value != 0.0 {
-        Ok(value)
-    } else {
-        Err(())
-    }
+fn nonzero(value: f64) -> Option<f64> {
+    (value.is_finite() && value != 0.0).then_some(value)
 }
 
-fn subluminal(value: f64) -> DomainResult {
-    if value.is_finite() && value.abs() < SPEED_OF_LIGHT {
-        Ok(value)
-    } else {
-        Err(())
-    }
+fn subluminal(value: f64) -> Option<f64> {
+    (value.is_finite() && value.abs() < SPEED_OF_LIGHT).then_some(value)
 }
 
-pub(super) const fn finite(value: f64) -> DomainResult {
-    if value.is_finite() {
-        Ok(value)
-    } else {
-        Err(())
-    }
+pub(super) const fn finite(value: f64) -> Option<f64> {
+    if value.is_finite() { Some(value) } else { None }
 }
 
 pub(super) fn invalid_reference(kind: SpectralKind) -> FitsError {

@@ -113,11 +113,20 @@ pub struct Wcs {
     unsupported_axes: Vec<usize>,
 }
 
+/// Where the spectral reference frame of each image axis comes from.
+#[derive(Debug)]
+enum SpectralFrames {
+    /// The header's own keywords, one frame for every spectral axis.
+    Header,
+    /// Each axis's frame as a binary table's columns stated it, one entry per axis.
+    Columns(Vec<Option<SpectralFrame>>),
+}
+
 impl Wcs {
     /// Parse the primary WCS (`alt = None`) or an alternate description
     /// (`alt = Some('A'..='Z')`) from `header`.
     pub fn from_header(header: &Header, alt: Option<char>) -> Result<Self> {
-        Self::from_header_with_context(header, alt, Vec::new(), None)
+        Self::from_header_with_context(header, alt, Vec::new(), SpectralFrames::Header)
     }
 
     pub(crate) fn from_header_with_tabular(
@@ -125,14 +134,14 @@ impl Wcs {
         alt: Option<char>,
         tabular: Vec<tabular::TabularTransform>,
     ) -> Result<Self> {
-        Self::from_header_with_context(header, alt, tabular, None)
+        Self::from_header_with_context(header, alt, tabular, SpectralFrames::Header)
     }
 
     fn from_header_with_context(
         header: &Header,
         alt: Option<char>,
         tabular: Vec<tabular::TabularTransform>,
-        spectral_frames: Option<Vec<Option<SpectralFrame>>>,
+        spectral_frames: SpectralFrames,
     ) -> Result<Self> {
         let a = AltSuffix::new(alt);
         let naxis = Self::image_axis_count(header, alt)?;
@@ -159,7 +168,7 @@ impl Wcs {
         let celestial_pair = CelestialAxisPair::find(&ctype);
         let celestial_axes = ProjectedCelestialAxes::find(&ctype)?;
         let celestial_frame = CelestialFrame::from_header(header, a, &ctype)?;
-        let spectral_frames = if let Some(frames) = spectral_frames {
+        let spectral_frames = if let SpectralFrames::Columns(frames) = spectral_frames {
             assert_eq!(frames.len(), naxis, "spectral frame count");
             frames
         } else {
@@ -378,7 +387,12 @@ impl Wcs {
             let celestial_columns = [columns[pair.longitude], columns[pair.latitude]];
             table.copy_celestial_keywords(header, &mut h, &celestial_columns)?;
         }
-        Self::from_header_with_context(&h, None, Vec::new(), Some(translated.spectral_frames))
+        Self::from_header_with_context(
+            &h,
+            None,
+            Vec::new(),
+            SpectralFrames::Columns(translated.spectral_frames),
+        )
     }
 
     /// Build a WCS for an image stored in a binary-table **vector cell** (§8,
@@ -395,7 +409,12 @@ impl Wcs {
         // Every axis lives in one column, so that column's pole and frame keywords
         // apply whichever axes turn out to be celestial.
         table.copy_celestial_keywords(header, &mut h, &[column])?;
-        Self::from_header_with_context(&h, None, Vec::new(), Some(translated.spectral_frames))
+        Self::from_header_with_context(
+            &h,
+            None,
+            Vec::new(),
+            SpectralFrames::Columns(translated.spectral_frames),
+        )
     }
 
     /// Map 1-based pixel coordinates to complete world coordinates. Celestial axes

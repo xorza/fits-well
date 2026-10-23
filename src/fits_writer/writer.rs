@@ -10,9 +10,10 @@ use crate::checksum;
 use crate::compress::{Compression, CompressionOptions, encode};
 use crate::error::{FitsError, Result};
 use crate::fits_writer::{
-    FitsWriter, PLACEHOLDER_CHECKSUM, WriterState, merge_header_template,
+    Checksums, FitsWriter, Opening, PLACEHOLDER_CHECKSUM, WriterState, merge_header_template,
     prepare_header_with_data_sum, render_header,
 };
+use crate::hdu::HduPosition;
 use crate::header_model::Header;
 use crate::header_model::value;
 use crate::image_model::data::Data;
@@ -52,11 +53,11 @@ pub(super) fn write_template<W: Write>(
     let encoded_len = expected
         .checked_mul(image.samples.bitpix().elem_size())
         .ok_or(FitsError::DataUnitOverflow)?;
-    let header = image_header(image, writer.state == WriterState::Empty)?;
+    let header = image_header(image, writer.next_position())?;
     writer.scratch.clear();
     writer.scratch.reserve_exact(encoded_len);
     image.samples.encode_into(&mut writer.scratch);
-    writer.finish_hdu(header, template, ZERO_FILL, false)
+    writer.finish_hdu(header, template, ZERO_FILL, Opening::Itself)
 }
 
 #[cfg(feature = "compression")]
@@ -69,7 +70,7 @@ pub(super) fn write_compressed_template<W: Write>(
 ) -> Result<()> {
     writer.ensure_writable()?;
     let header = encode::compress_image(image, compression, options, &mut writer.scratch)?;
-    writer.finish_hdu(header, template, ZERO_FILL, true)
+    writer.finish_hdu(header, template, ZERO_FILL, Opening::EmptyPrimary)
 }
 
 pub(super) fn stream_template<'a, W: Write + Seek>(
@@ -84,12 +85,11 @@ pub(super) fn stream_template<'a, W: Write + Seek>(
     let expected_samples = shape_product(shape)?;
     // A stream writes its header up front and rewrites it at `finish`, so it
     // never reaches `finish_hdu` — it applies the template merge itself.
-    let mut header =
-        image_header_parts(shape, bitpix, scaling, writer.state == WriterState::Empty)?;
+    let mut header = image_header_parts(shape, bitpix, scaling, writer.next_position())?;
     merge_header_template(&mut header, template);
     let header_offset = writer.sink.stream_position()?;
     let mut initial = header.clone();
-    if writer.checksum {
+    if writer.checksums == Checksums::On {
         initial.set_internal("DATASUM", "0");
         initial.set_internal("CHECKSUM", PLACEHOLDER_CHECKSUM);
     }
@@ -165,7 +165,7 @@ impl<W: Write + Seek> Writer<'_, W> {
         self.checksum.update(&zeros[..padding]);
         debug_assert_eq!(self.checksum.pending_len, 0);
 
-        if self.writer.checksum {
+        if self.writer.checksums == Checksums::On {
             let end = self.writer.sink.stream_position()?;
             prepare_header_with_data_sum(
                 self.header.clone(),
@@ -227,21 +227,26 @@ const fn bitpix_name(bitpix: Bitpix) -> &'static str {
     }
 }
 
-/// Image header: the primary array (§4.4.1) when `primary`, else an `IMAGE`
-/// extension (§7.1). The two differ only in the prologue (`SIMPLE`+`EXTEND` vs
+/// Image header at `position`: the primary array (§4.4.1), or an `IMAGE` extension
+/// (§7.1). The two differ only in the prologue (`SIMPLE`+`EXTEND` vs
 /// `XTENSION`+`PCOUNT`/`GCOUNT`); the axes and scaling keywords are identical.
-fn image_header(image: &Image, primary: bool) -> Result<Header> {
-    image_header_parts(&image.shape, image.samples.bitpix(), image.scaling, primary)
+fn image_header(image: &Image, position: HduPosition) -> Result<Header> {
+    image_header_parts(
+        &image.shape,
+        image.samples.bitpix(),
+        image.scaling,
+        position,
+    )
 }
 
 fn image_header_parts(
     shape: &[usize],
     bitpix: Bitpix,
     scaling: Scaling,
-    primary: bool,
+    position: HduPosition,
 ) -> Result<Header> {
     let mut header = Header::new();
-    if primary {
+    if position == HduPosition::Primary {
         header
             .set_internal("SIMPLE", true)
             .comment_internal("SIMPLE", "file conforms to FITS standard");

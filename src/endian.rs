@@ -4,6 +4,7 @@
 //! reused `Vec`, an existing slice, appended bytes), all built on the same
 //! monomorphized per-element conversion.
 
+use crate::bintable::descriptor::DescriptorWidth;
 use crate::error::FitsError;
 use crate::error::Result;
 use std::iter;
@@ -97,13 +98,20 @@ where
 }
 
 /// Validate the signed integer range of a FITS `P` or `Q` descriptor.
-pub(crate) fn validate_pq_descriptor(wide: bool, count: u64, offset: u64) -> Result<()> {
-    if wide {
-        i64::try_from(count).map_err(|_| FitsError::DataUnitOverflow)?;
-        i64::try_from(offset).map_err(|_| FitsError::DataUnitOverflow)?;
-    } else {
-        i32::try_from(count).map_err(|_| FitsError::DataUnitOverflow)?;
-        i32::try_from(offset).map_err(|_| FitsError::DataUnitOverflow)?;
+pub(crate) fn validate_pq_descriptor(
+    width: DescriptorWidth,
+    count: u64,
+    offset: u64,
+) -> Result<()> {
+    match width {
+        DescriptorWidth::Q => {
+            i64::try_from(count).map_err(|_| FitsError::DataUnitOverflow)?;
+            i64::try_from(offset).map_err(|_| FitsError::DataUnitOverflow)?;
+        }
+        DescriptorWidth::P => {
+            i32::try_from(count).map_err(|_| FitsError::DataUnitOverflow)?;
+            i32::try_from(offset).map_err(|_| FitsError::DataUnitOverflow)?;
+        }
     }
     Ok(())
 }
@@ -111,19 +119,21 @@ pub(crate) fn validate_pq_descriptor(wide: bool, count: u64, offset: u64) -> Res
 /// Write a validated big-endian `P` or `Q` descriptor into an existing row slot.
 pub(crate) fn write_pq_descriptor(
     out: &mut [u8],
-    wide: bool,
+    width: DescriptorWidth,
     count: u64,
     offset: u64,
 ) -> Result<()> {
-    validate_pq_descriptor(wide, count, offset)?;
-    let expected = if wide { 16 } else { 8 };
-    assert_eq!(out.len(), expected, "descriptor slot width");
-    if wide {
-        out[..8].copy_from_slice(&i64::try_from(count).unwrap().to_be_bytes());
-        out[8..].copy_from_slice(&i64::try_from(offset).unwrap().to_be_bytes());
-    } else {
-        out[..4].copy_from_slice(&i32::try_from(count).unwrap().to_be_bytes());
-        out[4..].copy_from_slice(&i32::try_from(offset).unwrap().to_be_bytes());
+    validate_pq_descriptor(width, count, offset)?;
+    assert_eq!(out.len(), width.bytes(), "descriptor slot width");
+    match width {
+        DescriptorWidth::Q => {
+            out[..8].copy_from_slice(&i64::try_from(count).unwrap().to_be_bytes());
+            out[8..].copy_from_slice(&i64::try_from(offset).unwrap().to_be_bytes());
+        }
+        DescriptorWidth::P => {
+            out[..4].copy_from_slice(&i32::try_from(count).unwrap().to_be_bytes());
+            out[4..].copy_from_slice(&i32::try_from(offset).unwrap().to_be_bytes());
+        }
     }
     Ok(())
 }
@@ -177,36 +187,41 @@ mod tests {
     fn pq_descriptors_are_big_endian_count_then_offset() {
         let p_max = i32::MAX as u64;
         let q_max = i64::MAX as u64;
-        for (wide, count, offset, expected) in [
-            (false, 7, 40, Some(&[0, 0, 0, 7, 0, 0, 0, 40][..])),
+        for (width, count, offset, expected) in [
             (
-                false,
+                DescriptorWidth::P,
+                7,
+                40,
+                Some(&[0, 0, 0, 7, 0, 0, 0, 40][..]),
+            ),
+            (
+                DescriptorWidth::P,
                 p_max,
                 p_max,
                 Some(&[0x7F, 0xFF, 0xFF, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF][..]),
             ),
-            (false, p_max + 1, 0, None),
-            (false, 0, p_max + 1, None),
+            (DescriptorWidth::P, p_max + 1, 0, None),
+            (DescriptorWidth::P, 0, p_max + 1, None),
             // A count past u32 and an offset past 2^33: no 32-bit truncation.
             (
-                true,
+                DescriptorWidth::Q,
                 0x1_0000_0004,
                 0x3_0000_0002,
                 Some(&[0, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0, 3, 0, 0, 0, 2][..]),
             ),
-            (true, q_max + 1, 0, None),
-            (true, 0, q_max + 1, None),
+            (DescriptorWidth::Q, q_max + 1, 0, None),
+            (DescriptorWidth::Q, 0, q_max + 1, None),
         ] {
-            let mut slot = vec![0xA5; if wide { 16 } else { 8 }];
-            let written = write_pq_descriptor(&mut slot, wide, count, offset);
+            let mut slot = vec![0xA5; width.bytes()];
+            let written = write_pq_descriptor(&mut slot, width, count, offset);
             match expected {
                 Some(bytes) => {
                     written.unwrap();
-                    assert_eq!(slot, bytes, "{wide} {count} {offset}");
+                    assert_eq!(slot, bytes, "{width:?} {count} {offset}");
                 }
                 None => assert!(
                     matches!(written, Err(FitsError::DataUnitOverflow)),
-                    "{wide} {count} {offset}"
+                    "{width:?} {count} {offset}"
                 ),
             }
         }

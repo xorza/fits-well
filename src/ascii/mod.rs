@@ -342,7 +342,9 @@ impl Named for AsciiColumn {
 /// and astropy — rather than a parsed mantissa times a rounded power of ten.
 fn parse_ascii_float(field: &str, decimals: usize) -> Option<f64> {
     match split_mantissa_exponent(field) {
-        Some((mantissa, exponent)) => parse_literal(format_args!("{mantissa}e{}", exponent.trim())),
+        Some(Scientific { mantissa, exponent }) => {
+            parse_literal(format_args!("{mantissa}e{}", exponent.trim()))
+        }
         // The §7.2.1 implied decimal point is an `Fw.d` legacy. cfitsio/astropy apply it
         // only to a bare mantissa and parse an explicit-exponent field literally, so
         // `1E5` is 100000, not `1·10⁻ᵈ·10⁵` — match them, since the whole point is to
@@ -371,13 +373,26 @@ fn parse_literal(literal: fmt::Arguments<'_>) -> Option<f64> {
 /// a bare `+`/`-` sign past the leading mantissa sign (the letter-less form, §7.2.5
 /// rule 3, e.g. `3.14159-2` = 3.14159 × 10⁻²). Matching `D`/`d` here means the parse
 /// never has to normalize the field into a fresh `String` first.
-fn split_mantissa_exponent(s: &str) -> Option<(&str, &str)> {
+fn split_mantissa_exponent(s: &str) -> Option<Scientific<'_>> {
     if let Some(i) = s.find(['E', 'e', 'D', 'd']) {
-        return Some((&s[..i], &s[i + 1..]));
+        return Some(Scientific {
+            mantissa: &s[..i],
+            exponent: &s[i + 1..],
+        });
     }
     s.char_indices()
         .find(|&(i, c)| i > 0 && (c == '+' || c == '-'))
-        .map(|(i, _)| (&s[..i], &s[i..]))
+        .map(|(i, _)| Scientific {
+            mantissa: &s[..i],
+            exponent: &s[i..],
+        })
+}
+
+/// A number's text split at its exponent: the mantissa, and the exponent with its sign.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Scientific<'a> {
+    mantissa: &'a str,
+    exponent: &'a str,
 }
 
 /// A parsed ASCII `TFORMn`: element kind, field width, and decimal count.

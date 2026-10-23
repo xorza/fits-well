@@ -12,6 +12,7 @@ use num_complex::Complex;
 use crate::bintable::Table;
 use crate::bintable::character_field::CharacterField;
 use crate::bintable::column_data::ColumnData;
+use crate::bintable::descriptor::DescriptorWidth;
 use crate::bintable::tdim;
 use crate::bintable::tform_kind::TformKind;
 use crate::block::ZERO_FILL;
@@ -19,7 +20,9 @@ use crate::block::ZERO_FILL;
 use crate::compress::{Compression, table};
 use crate::endian::{extend_be, validate_pq_descriptor, write_pq_descriptor};
 use crate::error::{FitsError, Result};
-use crate::fits_writer::{FitsWriter, ROW_COUNT_FIXED, accept_row_count, validate_scaling};
+use crate::fits_writer::{
+    FitsWriter, Opening, ROW_COUNT_FIXED, accept_row_count, validate_scaling,
+};
 use crate::hdu::validate_table_field_count;
 use crate::header_model::Header;
 use crate::header_model::card::validate_ascii;
@@ -52,11 +55,11 @@ enum WriteColumnData {
     },
     Vla {
         rows: Ragged<ColumnData>,
-        wide: bool,
+        width: DescriptorWidth,
     },
     VlaBits {
         rows: Ragged<BitVec<u8, Msb0>>,
-        wide: bool,
+        width: DescriptorWidth,
     },
     Bits {
         bytes: Vec<u8>,
@@ -133,7 +136,10 @@ impl WriteColumn {
         Self {
             name: name.into(),
             unit: None,
-            values: WriteColumnData::Vla { rows, wide: false },
+            values: WriteColumnData::Vla {
+                rows,
+                width: DescriptorWidth::P,
+            },
             tdim: None,
             tscale: None,
             tzero: None,
@@ -161,7 +167,10 @@ impl WriteColumn {
         Self {
             name: name.into(),
             unit: None,
-            values: WriteColumnData::VlaBits { rows, wide: false },
+            values: WriteColumnData::VlaBits {
+                rows,
+                width: DescriptorWidth::P,
+            },
             tdim: None,
             tscale: None,
             tzero: None,
@@ -191,8 +200,8 @@ impl WriteColumn {
     #[must_use]
     pub fn wide(mut self) -> Self {
         match &mut self.values {
-            WriteColumnData::Vla { wide, .. } | WriteColumnData::VlaBits { wide, .. } => {
-                *wide = true;
+            WriteColumnData::Vla { width, .. } | WriteColumnData::VlaBits { width, .. } => {
+                *width = DescriptorWidth::Q;
             }
             WriteColumnData::Fixed { .. } | WriteColumnData::Bits { .. } => {
                 panic!("only a variable-length column takes `Q` descriptors")
@@ -310,14 +319,14 @@ pub(super) fn write_template<W: Write>(
     for r in 0..nrows {
         for col in columns {
             match &col.values {
-                WriteColumnData::Vla { rows, wide } => {
+                WriteColumnData::Vla { rows, width } => {
                     let count = rows.range(r).len();
                     let element_size = ColumnType::from_data(rows.values()).elem_size();
-                    heap_len = next_vla_heap_len(heap_len, *wide, count, count * element_size)?;
+                    heap_len = next_vla_heap_len(heap_len, *width, count, count * element_size)?;
                 }
-                WriteColumnData::VlaBits { rows, wide } => {
+                WriteColumnData::VlaBits { rows, width } => {
                     let bits = rows.range(r).len();
-                    heap_len = next_vla_heap_len(heap_len, *wide, bits, bits.div_ceil(8))?;
+                    heap_len = next_vla_heap_len(heap_len, *width, bits, bits.div_ceil(8))?;
                 }
                 _ => {}
             }
@@ -335,9 +344,11 @@ pub(super) fn write_template<W: Write>(
     for r in 0..nrows {
         for col in columns {
             match &col.values {
-                WriteColumnData::Vla { wide, .. } | WriteColumnData::VlaBits { wide, .. } => writer
-                    .scratch
-                    .resize(writer.scratch.len() + if *wide { 16 } else { 8 }, 0),
+                WriteColumnData::Vla { width, .. } | WriteColumnData::VlaBits { width, .. } => {
+                    writer
+                        .scratch
+                        .resize(writer.scratch.len() + width.bytes(), 0);
+                }
                 _ => pack_cell(&mut writer.scratch, col, r),
             }
         }
@@ -347,26 +358,26 @@ pub(super) fn write_template<W: Write>(
         let mut column_offset = 0usize;
         for (col, layout) in columns.iter().zip(&layouts) {
             match &col.values {
-                WriteColumnData::Vla { rows, wide } => {
+                WriteColumnData::Vla { rows, width } => {
                     let range = rows.range(r);
                     let descriptor_offset = r * row_len + column_offset;
                     write_vla_descriptor(
                         &mut writer.scratch,
                         main_len,
                         descriptor_offset,
-                        *wide,
+                        *width,
                         range.len(),
                     )?;
                     append_cells(&mut writer.scratch, rows.values(), range);
                 }
-                WriteColumnData::VlaBits { rows, wide } => {
+                WriteColumnData::VlaBits { rows, width } => {
                     let bits = rows.row(r);
                     let descriptor_offset = r * row_len + column_offset;
                     write_vla_descriptor(
                         &mut writer.scratch,
                         main_len,
                         descriptor_offset,
-                        *wide,
+                        *width,
                         bits.len(),
                     )?;
                     append_bits(&mut writer.scratch, bits);
@@ -377,7 +388,7 @@ pub(super) fn write_template<W: Write>(
         }
     }
     let header = bintable_header(nrows, row_len, columns, &layouts, heap_len)?;
-    writer.finish_hdu(header, template, ZERO_FILL, true)
+    writer.finish_hdu(header, template, ZERO_FILL, Opening::EmptyPrimary)
 }
 
 /// `BINTABLE` extension header (§7.3.1) for the given columns.
@@ -492,13 +503,13 @@ impl ColumnType {
 
 fn next_vla_heap_len(
     heap_len: usize,
-    wide: bool,
+    width: DescriptorWidth,
     element_count: usize,
     byte_len: usize,
 ) -> Result<usize> {
     let count = u64::try_from(element_count).map_err(|_| FitsError::DataUnitOverflow)?;
     let offset = u64::try_from(heap_len).map_err(|_| FitsError::DataUnitOverflow)?;
-    validate_pq_descriptor(wide, count, offset)?;
+    validate_pq_descriptor(width, count, offset)?;
     heap_len
         .checked_add(byte_len)
         .ok_or(FitsError::DataUnitOverflow)
@@ -508,10 +519,9 @@ fn write_vla_descriptor(
     out: &mut [u8],
     main_len: usize,
     descriptor_offset: usize,
-    wide: bool,
+    width: DescriptorWidth,
     element_count: usize,
 ) -> Result<()> {
-    let width = if wide { 16 } else { 8 };
     let count = u64::try_from(element_count).map_err(|_| FitsError::DataUnitOverflow)?;
     let heap_offset = out
         .len()
@@ -519,8 +529,8 @@ fn write_vla_descriptor(
         .expect("VLA heap follows the complete main table");
     let heap_offset = u64::try_from(heap_offset).map_err(|_| FitsError::DataUnitOverflow)?;
     write_pq_descriptor(
-        &mut out[descriptor_offset..descriptor_offset + width],
-        wide,
+        &mut out[descriptor_offset..descriptor_offset + width.bytes()],
+        width,
         count,
         heap_offset,
     )
@@ -551,7 +561,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                 tform: format!("{repeat}{}", kind.letter()),
             })
         }
-        WriteColumnData::Vla { rows, wide } => {
+        WriteColumnData::Vla { rows, width } => {
             let kind = ColumnType::from_data(rows.values());
             validate_binary_metadata(col, kind.letter())?;
             assert_eq!(rows.len(), nrows, "{ROW_COUNT_FIXED}");
@@ -567,13 +577,12 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                 max_elements = max_elements.max(range.len());
                 tdim::validate_declared_vla(col.tdim.as_deref(), range.len())?;
             }
-            let descriptor = if *wide { 'Q' } else { 'P' };
             Ok(ColumnLayout {
-                row_width: if *wide { 16 } else { 8 },
-                tform: format!("1{descriptor}{}({max_elements})", kind.letter()),
+                row_width: width.bytes(),
+                tform: format!("1{}{}({max_elements})", width.letter(), kind.letter()),
             })
         }
-        WriteColumnData::VlaBits { rows, wide } => {
+        WriteColumnData::VlaBits { rows, width } => {
             validate_binary_metadata(col, 'X')?;
             assert_eq!(rows.len(), nrows, "{ROW_COUNT_FIXED}");
             let mut max_bits = 0usize;
@@ -582,10 +591,9 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                 max_bits = max_bits.max(bits);
                 tdim::validate_declared_vla(col.tdim.as_deref(), bits)?;
             }
-            let descriptor = if *wide { 'Q' } else { 'P' };
             Ok(ColumnLayout {
-                row_width: if *wide { 16 } else { 8 },
-                tform: format!("1{descriptor}X({max_bits})"),
+                row_width: width.bytes(),
+                tform: format!("1{}X({max_bits})", width.letter()),
             })
         }
         WriteColumnData::Bits { bytes, bit_count } => {
@@ -716,7 +724,7 @@ pub(super) fn write_compressed<W: Write>(
         compression,
         &mut writer.scratch,
     )?;
-    writer.finish_hdu(zheader, None, ZERO_FILL, true)
+    writer.finish_hdu(zheader, None, ZERO_FILL, Opening::EmptyPrimary)
 }
 
 #[cfg(test)]

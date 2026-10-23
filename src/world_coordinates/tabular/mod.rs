@@ -40,10 +40,26 @@ impl TabularReference {
 #[derive(Debug, Clone)]
 pub(crate) struct TabularDescriptor {
     pub(crate) reference: TabularReference,
-    axes: Vec<usize>,
-    reference_indices: Vec<f64>,
-    index_columns: Vec<Option<String>>,
-    world_scales: Vec<f64>,
+    /// Each table axis, in order.
+    axes: Vec<TableAxis>,
+}
+
+/// One axis of a `-TAB` table: the image axis it maps, its reference index (`CRVAL`), the
+/// column of its index vector when it has one, and the scale of its world unit.
+#[derive(Debug, Clone)]
+struct TableAxis {
+    image_axis: usize,
+    reference_index: f64,
+    index_column: Option<String>,
+    world_scale: f64,
+}
+
+/// A descriptor whose table axes are still being read: each table axis once a header axis
+/// names it.
+#[derive(Debug)]
+struct PendingDescriptor {
+    reference: TabularReference,
+    axes: Vec<Option<TableAxis>>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,7 +91,7 @@ pub(crate) fn descriptors(
     alt: Option<char>,
 ) -> Result<Vec<TabularDescriptor>> {
     let suffix = AltSuffix::new(alt);
-    let mut descriptors = Vec::<TabularDescriptor>::new();
+    let mut descriptors = Vec::<PendingDescriptor>::new();
     for axis in 0..axis_count {
         let ctype = header
             .get_text(key!("CTYPE{}{suffix}", axis + 1).as_str())?
@@ -123,53 +139,57 @@ pub(crate) fn descriptors(
         {
             descriptor
         } else {
-            descriptors.push(TabularDescriptor {
+            descriptors.push(PendingDescriptor {
                 reference,
                 axes: Vec::new(),
-                reference_indices: Vec::new(),
-                index_columns: Vec::new(),
-                world_scales: Vec::new(),
             });
             descriptors.last_mut().unwrap()
         };
         let required_len = table_axis
             .checked_add(1)
             .ok_or_else(|| invalid("TAB table-axis number is too large"))?;
-        descriptor.axes.resize(required_len, usize::MAX);
-        descriptor.reference_indices.resize(required_len, 0.0);
-        descriptor.index_columns.resize(required_len, None);
-        descriptor.world_scales.resize(required_len, 1.0);
-        if descriptor.axes[table_axis] != usize::MAX {
+        if descriptor.axes.len() < required_len {
+            descriptor.axes.resize_with(required_len, || None);
+        }
+        if descriptor.axes[table_axis].is_some() {
             return Err(invalid("TAB table-axis mapping is duplicated"));
         }
-        descriptor.axes[table_axis] = axis;
-        descriptor.reference_indices[table_axis] = reference_index;
-        descriptor.index_columns[table_axis] = index_column;
         let cunit = header
             .get_text(key!("CUNIT{}{suffix}", axis + 1).as_str())?
             .unwrap_or("");
-        descriptor.world_scales[table_axis] = world_unit_scale(Ctype::parse(ctype), cunit)?;
+        descriptor.axes[table_axis] = Some(TableAxis {
+            image_axis: axis,
+            reference_index,
+            index_column,
+            world_scale: world_unit_scale(Ctype::parse(ctype), cunit)?,
+        });
     }
-    for descriptor in &descriptors {
-        if descriptor.axes.contains(&usize::MAX) {
-            return Err(invalid("TAB table-axis mapping is incomplete"));
-        }
-    }
-    Ok(descriptors)
+    descriptors
+        .into_iter()
+        .map(|PendingDescriptor { reference, axes }| {
+            Ok(TabularDescriptor {
+                reference,
+                axes: axes
+                    .into_iter()
+                    .collect::<Option<_>>()
+                    .ok_or_else(|| invalid("TAB table-axis mapping is incomplete"))?,
+            })
+        })
+        .collect()
 }
 
 impl TabularDescriptor {
     pub(crate) fn referenced_columns(&self) -> impl Iterator<Item = &str> {
         iter::once(self.reference.coordinate_column.as_str()).chain(
-            self.index_columns
+            self.axes
                 .iter()
-                .filter_map(|column| column.as_deref()),
+                .filter_map(|axis| axis.index_column.as_deref()),
         )
     }
 }
 
 impl TabularTransform {
-    pub(crate) fn from_table(descriptor: TabularDescriptor, table: TableView<'_>) -> Result<Self> {
+    pub(crate) fn from_table(descriptor: &TabularDescriptor, table: TableView<'_>) -> Result<Self> {
         let dimensions = descriptor.axes.len();
         let coordinate = table.column_by_name(&descriptor.reference.coordinate_column)?;
         let coordinate_shape = first_row_shape_and_values(table.nrows, coordinate)?;
@@ -208,14 +228,14 @@ impl TabularTransform {
         }
         let mut coordinates = coordinate_shape.values;
         for point in coordinates.chunks_exact_mut(dimensions) {
-            for (table_axis, value) in point.iter_mut().enumerate() {
-                *value *= descriptor.world_scales[table_axis];
+            for (value, axis) in point.iter_mut().zip(&descriptor.axes) {
+                *value *= axis.world_scale;
             }
         }
 
         let mut indices = Vec::with_capacity(dimensions);
-        for (table_axis, column) in descriptor.index_columns.iter().enumerate() {
-            let Some(column) = column else {
+        for (table_axis, axis) in descriptor.axes.iter().enumerate() {
+            let Some(column) = &axis.index_column else {
                 indices.push(None);
                 continue;
             };
@@ -233,8 +253,12 @@ impl TabularTransform {
             }));
         }
         Ok(Self {
-            axes: descriptor.axes,
-            reference_indices: descriptor.reference_indices,
+            axes: descriptor.axes.iter().map(|axis| axis.image_axis).collect(),
+            reference_indices: descriptor
+                .axes
+                .iter()
+                .map(|axis| axis.reference_index)
+                .collect(),
             lengths,
             variable_axes,
             vertex_count,
@@ -994,7 +1018,7 @@ pub(crate) mod internals {
         let transforms = tabular::descriptors(header, axis_count, None)
             .unwrap()
             .into_iter()
-            .map(|descriptor| TabularTransform::from_table(descriptor, table.view()).unwrap())
+            .map(|descriptor| TabularTransform::from_table(&descriptor, table.view()).unwrap())
             .collect();
         Wcs::from_header_with_tabular(header, None, transforms).unwrap()
     }

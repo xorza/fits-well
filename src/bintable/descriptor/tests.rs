@@ -1,5 +1,5 @@
 use crate::bintable::descriptor;
-use crate::bintable::descriptor::PqDescriptor;
+use crate::bintable::descriptor::{DescriptorWidth, PqDescriptor};
 use crate::bintable::tform_kind::TformKind;
 use crate::error::FitsError;
 
@@ -9,7 +9,7 @@ fn decodes_signed_boundaries_and_rejects_malformed_widths() {
     narrow.extend_from_slice(&i32::MAX.to_be_bytes());
     narrow.extend_from_slice(&i32::MAX.to_be_bytes());
     assert_eq!(
-        PqDescriptor::decode(&narrow, false).unwrap(),
+        PqDescriptor::decode(&narrow, DescriptorWidth::P).unwrap(),
         PqDescriptor {
             count: i32::MAX as usize,
             offset: i32::MAX as usize,
@@ -19,7 +19,7 @@ fn decodes_signed_boundaries_and_rejects_malformed_widths() {
     let mut wide = Vec::new();
     wide.extend_from_slice(&i64::MAX.to_be_bytes());
     wide.extend_from_slice(&i64::MAX.to_be_bytes());
-    let decoded = PqDescriptor::decode(&wide, true);
+    let decoded = PqDescriptor::decode(&wide, DescriptorWidth::Q);
     if usize::BITS >= 64 {
         assert_eq!(
             decoded.unwrap(),
@@ -32,20 +32,23 @@ fn decodes_signed_boundaries_and_rejects_malformed_widths() {
         assert!(matches!(decoded, Err(FitsError::DataUnitOverflow)));
     }
     assert_eq!(
-        PqDescriptor::decode(&[0; 8], false).unwrap(),
+        PqDescriptor::decode(&[0; 8], DescriptorWidth::P).unwrap(),
         PqDescriptor::EMPTY
     );
     assert_eq!(
-        PqDescriptor::decode(&[0; 16], true).unwrap(),
+        PqDescriptor::decode(&[0; 16], DescriptorWidth::Q).unwrap(),
         PqDescriptor::EMPTY
     );
 
     for case in descriptor::internals::malformed_descriptor_cases() {
-        case.assert_error(&PqDescriptor::decode(&case.bytes, case.wide).unwrap_err());
+        case.assert_error(&PqDescriptor::decode(&case.bytes, case.width).unwrap_err());
     }
-    for (bytes, wide, expected) in [(&[0u8; 7][..], false, 8), (&[0u8; 15], true, 16)] {
+    for (bytes, width, expected) in [
+        (&[0u8; 7][..], DescriptorWidth::P, 8),
+        (&[0u8; 15], DescriptorWidth::Q, 16),
+    ] {
         assert!(matches!(
-            PqDescriptor::decode(bytes, wide),
+            PqDescriptor::decode(bytes, width),
             Err(FitsError::DataSizeMismatch { expected: got, got: len })
                 if got == expected && len == bytes.len()
         ));
@@ -116,4 +119,24 @@ fn payload_lengths_and_heap_ranges_cover_boundaries() {
         .heap_range(TformKind::Byte, 10, 14),
         Err(FitsError::UnexpectedEof)
     ));
+}
+
+/// §10.1.3: a 32-bit `P` descriptor holds a signed 32-bit offset and count, so a heap or a cell
+/// count past `i32::MAX` needs a 64-bit `Q`; exactly `i32::MAX` still fits a `P`.
+#[cfg(feature = "compression")]
+#[test]
+fn a_descriptor_widens_past_the_32_bit_range() {
+    let max = i32::MAX as usize;
+    for (heap_len, max_count, width) in [
+        (0, 0, DescriptorWidth::P),
+        (max, max, DescriptorWidth::P),
+        (max + 1, 0, DescriptorWidth::Q),
+        (0, max + 1, DescriptorWidth::Q),
+    ] {
+        assert_eq!(
+            DescriptorWidth::addressing(heap_len, max_count),
+            width,
+            "{heap_len} {max_count}"
+        );
+    }
 }

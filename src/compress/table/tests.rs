@@ -1,7 +1,7 @@
 use crate::bintable::Table;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::descriptor;
-use crate::bintable::descriptor::PqDescriptor;
+use crate::bintable::descriptor::{DescriptorWidth, PqDescriptor};
 use crate::bintable::internals::table_header;
 use crate::bintable::tform_kind::TformKind;
 use crate::compress::table::internals::mixed_columns;
@@ -285,12 +285,12 @@ fn compressed_table_vla_round_trips_all_table_codecs() {
 
 #[test]
 fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
-    for wide in [false, true] {
+    for width in [DescriptorWidth::P, DescriptorWidth::Q] {
         let mut column = WriteColumn::vla(
             "VLA",
             Ragged::from_rows(vec![ColumnData::Bytes(vec![7])]).unwrap(),
         );
-        if wide {
+        if width == DescriptorWidth::Q {
             column = column.wide();
         }
         let prefix = WriteColumn::scalar("PREFIX", ColumnData::Bytes(vec![3]));
@@ -310,18 +310,18 @@ fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
             &mut encoded,
         )
         .unwrap();
-        let outer = PqDescriptor::decode(&encoded[16..32], true).unwrap();
+        let outer = PqDescriptor::decode(&encoded[16..32], DescriptorWidth::Q).unwrap();
         let stream_range = outer
             .heap_range(TformKind::Byte, 32, encoded.len())
             .unwrap();
         let heap_prefix = encoded[32..stream_range.start].to_vec();
-        let combined_len = 16 + if wide { 16 } else { 8 };
+        let combined_len = 16 + width.bytes();
         let mut combined = Vec::new();
         gzip::gunzip_into(&encoded[stream_range], combined_len, &mut combined).unwrap();
 
         for case in descriptor::internals::malformed_descriptor_cases()
             .into_iter()
-            .filter(|case| case.wide == wide)
+            .filter(|case| case.width == width)
         {
             let mut malformed = combined.clone();
             malformed[16..16 + case.bytes.len()].copy_from_slice(&case.bytes);
@@ -330,7 +330,7 @@ fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
             data.extend_from_slice(&heap_prefix);
             write_pq_descriptor(
                 &mut data[16..32],
-                true,
+                DescriptorWidth::Q,
                 cell.len() as u64,
                 heap_prefix.len() as u64,
             )
