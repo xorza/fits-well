@@ -363,6 +363,12 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
             context: "header comment"
         })
     ));
+    let before = header.clone();
+    assert!(matches!(
+        header.comment("ABSENT", "lost"),
+        Err(FitsError::KeywordNotFound { keyword }) if keyword == "ABSENT"
+    ));
+    assert_eq!(header.cards, before.cards);
 
     header.push_comment(&"x".repeat(72)).unwrap();
     assert!(matches!(

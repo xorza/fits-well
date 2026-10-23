@@ -29,6 +29,7 @@ FitsError
         InvalidBitpix { code: i64 }
         MissingEnd
         MissingKeyword { name: &'static str }
+        KeywordNotFound { keyword: String }
         KeywordOutOfRange { name: &'static str }
         IntegerOutOfRange { value: String, target: &'static str }
         UnexpectedEof
@@ -48,6 +49,7 @@ FitsError
         NotAnImage
         ImageHasGroups
         NotABinTable
+        TableIsCompressed
         NotRandomGroups
         NotAnAsciiTable
         NotCompressedTable
@@ -81,8 +83,6 @@ FitsReader
         impl<'a> FitsReader<SliceSource<'a>>
             pub fn from_bytes(bytes: &'a [u8]) -> Result<Self>
             pub fn into_bytes(self) -> &'a [u8]
-        impl FitsReader<MmapSource>  [features: mmap]
-            pub fn open_mmap(path: impl AsRef<Path>) -> Result<Self>  [features: mmap]
         impl<S: Source> FitsReader<S>
             pub fn hdus(&self) -> &[Hdu]
             pub fn hdu_index(&self, name: &str, version: Option<i64>) -> Result<Option<usize>>
@@ -413,12 +413,6 @@ io::HduKind
         RandomGroups
         Other
 
-io::MmapReader  [features: mmap]
-    type MmapReader = FitsReader<MmapSource>
-
-io::MmapSource  [features: mmap]
-    struct MmapSource: Debug
-
 io::RandomGroupView
     struct RandomGroupView<'a>: Clone, Copy, Debug, PartialEq
         pub parameters: View<'a>
@@ -533,12 +527,6 @@ table::BitColumn
         pub fn get(&self, row: usize, col: usize) -> Option<bool>
         pub fn iter(&self) -> impl ExactSizeIterator<Item = &'a BitSlice<u8, Msb0>> + '_
 
-table::BitSlice
-    pub use bitvec::slice::BitSlice as BitSlice
-
-table::BitVec
-    pub use bitvec::vec::BitVec as BitVec
-
 table::Builder
     struct Builder: Clone, Debug, Default
         pub const fn new() -> Self
@@ -598,12 +586,6 @@ table::ColumnSelector
     enum ColumnSelector: Clone, Debug, Eq, From<&str>, From<String>, From<usize>, PartialEq
         Index(usize)
         Name(String)
-
-table::Complex
-    pub use num_complex::Complex as Complex
-
-table::Msb0
-    pub use bitvec::order::Msb0 as Msb0
 
 table::Ragged
     struct Ragged<V>

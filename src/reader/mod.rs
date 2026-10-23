@@ -176,11 +176,6 @@ pub type StreamReader<R> = FitsReader<StreamSource<R>>;
 /// returns. The lifetime is that of the borrowed bytes.
 pub type SliceReader<'a> = FitsReader<SliceSource<'a>>;
 
-/// A [`FitsReader`] over a memory-mapped file — the type [`FitsReader::open_mmap`]
-/// returns. Requires the `mmap` feature.
-#[cfg(feature = "mmap")]
-pub type MmapReader = FitsReader<source::MmapSource>;
-
 impl<R: Read + Seek> FitsReader<StreamSource<R>> {
     /// Open a seekable byte source (file, cursor). Data units are copied into the
     /// reader's scratch on demand; for an in-memory file prefer
@@ -196,9 +191,10 @@ impl<R: Read + Seek> FitsReader<StreamSource<R>> {
 }
 
 impl<'a> FitsReader<SliceSource<'a>> {
-    /// Open an in-memory FITS file — the whole thing as a byte slice (e.g. an mmap,
-    /// or bytes already in RAM). Data units decode straight from the borrowed bytes
-    /// with no staging copy, and no scratch allocation.
+    /// Open an in-memory FITS file — the whole thing as a byte slice: bytes already in
+    /// RAM, or a memory map the caller holds, which is how to read a mapped file. Data
+    /// units decode straight from the borrowed bytes with no staging copy, and no
+    /// scratch allocation.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self> {
         FitsReader::from_source(SliceSource::new(bytes))
     }
@@ -206,16 +202,6 @@ impl<'a> FitsReader<SliceSource<'a>> {
     /// Consume the reader and recover the original borrowed byte slice.
     pub fn into_bytes(self) -> &'a [u8] {
         self.data.into_source().into_bytes()
-    }
-}
-
-#[cfg(feature = "mmap")]
-impl FitsReader<source::MmapSource> {
-    /// Memory-map a FITS file and read it zero-copy: data units decode straight from
-    /// the mapped pages (no staging copy, no read syscalls). Best for large files
-    /// and random HDU access. Requires the `mmap` feature.
-    pub fn open_mmap(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        Self::from_source(source::MmapSource::open(path.as_ref())?)
     }
 }
 
@@ -561,16 +547,25 @@ impl<S: Source> FitsReader<S> {
     }
 
     /// Read a `BINTABLE` extension and parse its column structure. Decode
-    /// individual columns lazily with [`Table::column_by_idx`]. Errors with
-    /// [`FitsError::NotABinTable`] for any other HDU kind.
+    /// individual columns lazily with [`Table::column_by_idx`]. Errors as
+    /// [`Hdu::table_schema`] does for an HDU that is not a plain binary table.
     pub fn read_table(&mut self, index: usize) -> Result<Table> {
-        let schema = checked_hdu(&self.hdus, index)?.table_schema()?.clone();
+        self.read_table_as(index, Hdu::table_schema)
+    }
+
+    /// [`Self::read_table`] under the schema `schema` gives the HDU.
+    fn read_table_as(
+        &mut self,
+        index: usize,
+        schema: fn(&Hdu) -> Result<&Schema>,
+    ) -> Result<Table> {
+        let schema = schema(checked_hdu(&self.hdus, index)?)?.clone();
         let unit = self.read_data_raw(index)?;
         Table::new(schema, unit.bytes)
     }
 
-    /// A binary table's schema, parsed from its header when the file was opened. For
-    /// a tiled-compressed image or table, the schema of its `BINTABLE` container.
+    /// A binary table's schema, parsed from its header when the file was opened. Errors
+    /// as [`Hdu::table_schema`] does.
     pub fn table_schema(&self, index: usize) -> Result<&Schema> {
         checked_hdu(&self.hdus, index)?.table_schema()
     }
@@ -578,8 +573,18 @@ impl<S: Source> FitsReader<S> {
     /// Materialize only the requested contiguous row range, including only the VLA
     /// heap cells referenced by those rows.
     pub fn read_table_rows(&mut self, index: usize, rows: Range<usize>) -> Result<Table> {
+        self.read_table_rows_as(index, rows, Hdu::table_schema)
+    }
+
+    /// [`Self::read_table_rows`] under the schema `schema` gives the HDU.
+    fn read_table_rows_as(
+        &mut self,
+        index: usize,
+        rows: Range<usize>,
+        schema: fn(&Hdu) -> Result<&Schema>,
+    ) -> Result<Table> {
         let hdu = checked_hdu(&self.hdus, index)?;
-        let schema = hdu.table_schema()?;
+        let schema = schema(hdu)?;
         let row_count = rows.len();
         let mut data = Vec::new();
         self.data.select_table(
@@ -1002,6 +1007,33 @@ pub(crate) mod internals {
     use crate::reader::StreamReader;
     use std::fs;
     use std::fs::File;
+
+    /// The `BINTABLE` a tiled-compressed HDU is stored as, its cells still compressed:
+    /// what a test of the container's own columns reads.
+    #[cfg(feature = "compression")]
+    mod container {
+        use std::ops::Range;
+
+        use crate::bintable::Table;
+        use crate::error::Result;
+        use crate::reader::FitsReader;
+        use crate::reader::hdu::Hdu;
+        use crate::reader::source::Source;
+
+        impl<S: Source> FitsReader<S> {
+            pub(crate) fn read_container_table(&mut self, index: usize) -> Result<Table> {
+                self.read_table_as(index, Hdu::container_schema)
+            }
+
+            pub(crate) fn read_container_rows(
+                &mut self,
+                index: usize,
+                rows: Range<usize>,
+            ) -> Result<Table> {
+                self.read_table_rows_as(index, rows, Hdu::container_schema)
+            }
+        }
+    }
 
     /// Where the fixture `name` lies, relative to the crate root tests run in.
     pub(crate) fn fixture_path(name: &str) -> String {

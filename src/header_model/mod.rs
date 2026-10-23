@@ -434,13 +434,16 @@ impl Header {
         }
     }
 
-    /// Attach (or replace) the inline comment of an existing valued keyword. A
-    /// missing valid keyword remains a no-op. An error leaves the header unchanged.
+    /// Attach (or replace) the inline comment of an existing valued keyword. Errors
+    /// with [`FitsError::KeywordNotFound`] for a valid keyword the header does not
+    /// hold. An error leaves the header unchanged.
     pub fn comment(&mut self, keyword: &str, text: &str) -> Result<&mut Self> {
         validate_ascii(text, "header comment")?;
         let Some(&i) = self.index.get(keyword) else {
             validate_valued_keyword(keyword)?;
-            return Ok(self);
+            return Err(FitsError::KeywordNotFound {
+                keyword: keyword.to_owned(),
+            });
         };
         let Card::Value { comment, .. } = &mut self.cards[i] else {
             unreachable!("the keyword index holds value cards only");

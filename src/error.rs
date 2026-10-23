@@ -186,6 +186,9 @@ pub enum FitsError {
     /// A mandatory keyword was absent where the structure requires it.
     #[error("missing mandatory keyword {name}")]
     MissingKeyword { name: &'static str },
+    /// An edit of a card the header does not hold.
+    #[error("the header has no {keyword} card")]
+    KeywordNotFound { keyword: String },
     /// A keyword was present and well-typed but its value lies outside the range
     /// the standard permits for its role (e.g. `NAXIS > 999`, `PCOUNT < 0`,
     /// a negative `GCOUNT` or axis length, or a `THEAP` that precedes the heap).
@@ -288,6 +291,10 @@ pub enum FitsError {
     /// `read_table` was called on an HDU that is not a binary table.
     #[error("HDU is not a binary table")]
     NotABinTable,
+    /// A binary-table read or schema of a tiled-compressed table, which those reads
+    /// do not decompress; `read_compressed_table` does, with the `compression` feature.
+    #[error("HDU is a tiled-compressed table, which binary-table reads do not decompress")]
+    TableIsCompressed,
     /// `read_groups` was called on an HDU that is not a random-groups primary.
     #[error("HDU is not a random-groups primary")]
     NotRandomGroups,

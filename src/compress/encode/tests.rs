@@ -159,7 +159,7 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
                 "{bitpix:?} {cmptype}"
             );
 
-            let table = r.read_table(1).unwrap();
+            let table = r.read_container_table(1).unwrap();
             let compressed = table
                 .column_by_name("COMPRESSED_DATA")
                 .unwrap()
@@ -338,7 +338,7 @@ fn dither_option_sets_zquantiz_and_round_trips() {
             "{dither:?} must write {zquantiz}"
         );
         let zscale = r
-            .read_table(1)
+            .read_container_table(1)
             .unwrap()
             .column_by_name("ZSCALE")
             .unwrap()
@@ -410,7 +410,7 @@ fn float_write_preserves_nan_nulls() {
         )
     });
     let zscale = r
-        .read_table(1)
+        .read_container_table(1)
         .unwrap()
         .column_by_name("ZSCALE")
         .unwrap()
@@ -461,7 +461,7 @@ fn hcompress_writer_converts_noise_multiplier_to_tile_scale() {
         r.hdus()[1].header.get("ZVAL1"),
         Some(Value::Real(2.0))
     ));
-    let table = r.read_table(1).unwrap();
+    let table = r.read_container_table(1).unwrap();
     let stream = table
         .column_by_name("COMPRESSED_DATA")
         .unwrap()

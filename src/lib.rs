@@ -155,11 +155,6 @@ pub mod time {
 /// Binary and ASCII table values, schema and selection metadata, and write
 /// builders.
 pub mod table {
-    pub use bitvec::order::Msb0;
-    pub use bitvec::slice::BitSlice;
-    pub use bitvec::vec::BitVec;
-    pub use num_complex::Complex;
-
     pub use crate::ascii::ascii_text::AsciiText;
     pub use crate::ascii::{
         Ascii, AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiMetadata,
@@ -186,12 +181,8 @@ pub mod io {
     pub use crate::block::{BLOCK_SIZE, CARD_SIZE};
     pub use crate::groups::{RandomGroupView, RandomGroups, RandomGroupsMetadata};
     pub use crate::hdu::HduKind;
-    #[cfg(feature = "mmap")]
-    pub use crate::reader::MmapReader;
     pub use crate::reader::data_checksum::DataChecksum;
     pub use crate::reader::hdu::Hdu;
-    #[cfg(feature = "mmap")]
-    pub use crate::reader::source::MmapSource;
     pub use crate::reader::source::{SliceSource, StreamSource};
     pub use crate::reader::{
         ChecksumReport, ChecksumStatus, DataUnit, DataUnitView, SliceReader, StreamReader,

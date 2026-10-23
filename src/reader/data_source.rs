@@ -76,7 +76,7 @@ impl<S: Source> DataSource<S> {
     /// source's staging buffer).
     #[cfg(feature = "compression")]
     pub(crate) fn table<'a>(&'a mut self, hdu: &'a Hdu) -> Result<TableView<'a>> {
-        let schema = hdu.table_schema()?;
+        let schema = hdu.container_schema()?;
         let len = usize::try_from(hdu.data_bytes).map_err(|_| FitsError::DataUnitTooLarge {
             bytes: hdu.data_bytes,
         })?;
@@ -92,7 +92,7 @@ impl<S: Source> DataSource<S> {
         rows: &[usize],
         out: &'a mut Vec<u8>,
     ) -> Result<TableView<'a>> {
-        let schema = hdu.table_schema()?;
+        let schema = hdu.container_schema()?;
         self.select_table(hdu.data_offset, schema, TableRows::Picked(rows), None, out)?;
         Ok(TableView::compact(
             &schema.columns,

@@ -28,7 +28,6 @@ fits-well = "0.3"
 | --- | :---: | --- |
 | `compression` | ✅ | Tiled compression: `GZIP_1`/`GZIP_2`, `RICE_1`, `PLIO_1`, `HCOMPRESS_1`, `NOCOMPRESS`, float quantization (`flate2`) |
 | `parallel` | ✅ | Tile-parallel codecs on rayon; implies `compression` |
-| `mmap` | | `FitsReader::open_mmap`: reads straight from mapped pages (`memmap2`) |
 
 With `default-features = false`, the only dependencies are `bitvec`,
 `num-complex` and `thiserror`. Rust 1.89 or later.
@@ -40,9 +39,10 @@ With `default-features = false`, the only dependencies are `bitvec`,
 ```rust no_run
 use std::fs::File;
 use fits_well::image::{Image, Data};
-use fits_well::{FitsReader, FitsWriter};
+use fits_well::io::Hdu;
+use fits_well::{FitsError, FitsReader, FitsWriter};
 
-fn main() -> Result<(), fits_well::FitsError> {
+fn main() -> Result<(), FitsError> {
     let image = Image::new(vec![4, 3], (0..12).collect::<Vec<i16>>())?; // NAXIS1 first
     let mut writer = FitsWriter::new(File::create("out.fits")?);
     writer.write_image(&image, None)?;
@@ -50,7 +50,8 @@ fn main() -> Result<(), fits_well::FitsError> {
 
     // `open` reads only the headers. A tile-compressed image reads the same way.
     let mut reader = FitsReader::open(File::open("out.fits")?)?;
-    let image = reader.read_image(reader.image_indices()[0])?;
+    let first = reader.hdus().iter().position(Hdu::is_image).ok_or(FitsError::NotAnImage)?;
+    let image = reader.read_image(first)?;
     println!("{:?} {:?}", image.metadata().shape, image.sample_type());
     let physical = image.physical(); // BSCALE/BZERO applied, BLANK as NaN
     if let Data::I16(pixels) = image.decode() {

@@ -2,7 +2,7 @@
 
 2026-10-23. This document puts every finding of `API_REVIEW.md` and every entry of `ISSUES.md` into one design and one plan of work. The review keeps the evidence: the `file:line` references and the comparison with other libraries. Here, each item names the review section that it answers.
 
-This proposal is temporary. When a phase lands, its decisions go into a design document for fits-well (`docs/design.md`, new), and the items that it closes are removed from here and from `ISSUES.md`.
+This proposal is temporary. When a phase lands, its decisions go into `docs/design.md`, and the items that it closes are removed from here and from `ISSUES.md`. Phase 1, the quiet traps, has landed.
 
 ## Principles
 
@@ -116,14 +116,13 @@ impl<S: Source> FitsReader<S> {
 - **Every reader method takes `impl Into<HduSelector>`.**
 - **A name matches `EXTNAME` case-insensitively.** A primary HDU with no `EXTNAME` matches `PRIMARY`, as in astropy.
 - **`Hdu::matches_extension` becomes `Hdu::matches(&HduSelector)`.** Then the reader and the HDU accept the same arguments, and `level` is no longer lost.
-- **`Hdu::is_image` means "an image kind with `NAXIS > 0`"** for every image kind. Today the primary and the extensions disagree. No new predicate is added: `kind` tells an empty image extension.
 - **`image_indices() -> Vec` becomes `images()`, an iterator.** "The first image" is `images().next()`, and the README uses it.
 - **`Hdu::image()` becomes `Hdu::image_metadata()`**, beside `Hdu::table_schema()`.
 - **New:** `Hdu::padded_data_bytes()`.
 
 ### Header
 
-The review sections that this answers: "A typed `Keyword`", "Optional and required values", "Comments, commentary cards and collection traits", "`Value` conversions", and the `MissingKeyword` part of "Errors". It also closes the `get` case trap and the `comment` no-op of `ISSUES.md`.
+The review sections that this answers: "A typed `Keyword`", "Optional and required values", "Comments, commentary cards and collection traits", "`Value` conversions", and the `MissingKeyword` part of "Errors". It also closes the `get` case trap of `ISSUES.md`.
 
 ```rust
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -143,7 +142,7 @@ impl Header {
     pub fn require_logical / require_integer / require_real / require_text(&self, Keyword) -> Result<T>;   // MissingKeyword
     pub fn set(&mut self, keyword: Keyword, value: impl Into<Value>) -> Result<&mut Self>;
     pub fn set_optional(&mut self, keyword: Keyword, value: Option<impl Into<Value>>) -> Result<&mut Self>;   // None removes the card
-    pub fn set_comment(&mut self, keyword: Keyword, text: &str) -> Result<&mut Self>;    // MissingKeyword when it is absent
+    pub fn set_comment(&mut self, keyword: Keyword, text: &str) -> Result<&mut Self>;    // KeywordNotFound when it is absent
     pub fn len, is_empty, contains(Keyword), index_of(Keyword) -> Option<usize>;
     pub fn history(&self) / comments(&self) -> impl ExactSizeIterator<Item = &str>;
     pub fn iter(&self) -> impl ExactSizeIterator<Item = Entry<'_>>;          // and IntoIterator for &Header
@@ -160,7 +159,7 @@ impl Header {
 **`set` stays fallible.** A NaN or infinite real and non-ASCII text are invalid in FITS, so `Result` is honest. `h.set(A, 1)?.set(B, 2)?` already chains, so the `and_then` closures in lumos become `?`.
 
 **Errors:**
-- `MissingKeyword` and `KeywordOutOfRange` carry a `Keyword`, so a caller can report a keyword that it made at run time.
+- `MissingKeyword`, `KeywordOutOfRange` and `KeywordNotFound` carry a `Keyword`, so a caller can report a keyword that it made at run time. `MissingKeyword` also names the families that are not keywords today (`"ZFORMn"`, `"iCTYPn"`): those become the first absent member, such as `ZFORM3`.
 - `InvalidHeaderValue`'s keyword becomes a `Keyword`.
 
 **`Value` gets `From<usize>`, `From<f32>` and `From<u16>`.**
@@ -169,12 +168,12 @@ impl Header {
 
 ### Tables
 
-The review sections that this answers: "`read_table` on a compressed table", "One way to name a column", "Names", "Allocation per call", and part of "Typed access". It also closes the compressed-table issue in `ISSUES.md`.
+The review sections that this answers: "`read_table` on a compressed table", "One way to name a column", "Names", "Allocation per call", and part of "Typed access".
 
 - **Compressed tables are transparent, as compressed images are.**
   - `read_table`, `read_table_rows`, `read_table_columns`, `read_table_cell` and `table_schema` give the logical table.
   - A partial read decodes only the tiles that its rows touch, and only the columns that it selects. That mirrors image sections.
-  - `read_compressed_table` goes away. Today the partial reads and `table_schema` also give the container: `Hdu::table_schema` returns `Schema::parse_container` for a `CompressedTable`. So the defect is larger than `read_table` alone.
+  - `read_compressed_table` and `FitsError::TableIsCompressed` go away. Since phase 1, these reads refuse a compressed table, and they no longer give its container.
 - **`ColumnSelector<'a> { Index(usize), Name(&'a str) }`** borrows its name, so it does not allocate.
   - `Table::column(impl Into<ColumnSelector>)` and `AsciiTable::column(…)` replace each `column_by_idx` / `column_by_name` pair.
   - `Selection::column(…) -> Option<&SelectedColumn>` is new.
@@ -212,13 +211,6 @@ The review sections that this answers: "Best-effort access", "Batch transforms" 
 - **`pixel_to_world(&self, pixel: &[f64], world: &mut [f64]) -> Result<()>`** and the same for `world_to_pixel`. This is a better fix than a batch API. A point costs no allocation, and a caller loops over its points with one buffer.
 - **lumos can use `Wcs::from_header` now** for its `CTYPEn`/`CRVALn` lookup. The parse succeeds with unsupported axes, which only the transforms refuse. fits-well needs no change. lumos checks this on its fixtures, and it keeps its hand lookup only for a header that `from_header` refuses.
 
-### The crate boundary
-
-The review sections that this answers: "Other crates' types in the API" and "`open_mmap` takes a path". It also closes the re-export issue of `ISSUES.md`.
-
-- **Remove `table::{BitSlice, BitVec, Msb0, Complex}`.** A caller that names them depends on `bitvec` and `num_complex` itself, at the version that its workspace pins. That is the workspace rule. fits-well does not need its own bit and complex types: the rule refuses only the re-export, and these are the standard types of the Rust ecosystem.
-- **`open_mmap(file: &File)`.** The caller opens the file through its own I/O layer, which is the Darkroom rule for submodules. `memmap2` maps from a `&File` already.
-
 ## Findings not to address
 
 | Finding | Why not |
@@ -230,7 +222,6 @@ The review sections that this answers: "Other crates' types in the API" and "`op
 | Borrowed table columns | A table write transposes the columns into rows in the writer's scratch, and that copy dominates. Borrowing would add a lifetime to `TableBuilder` for a small gain. |
 | One `from_unsigned` constructor | The four typed constructors are clear. Writing unsigned data converts it to signed + `BZERO` in any case, so a borrowed form would save nothing. Only their shape parameter changes. |
 | A `serde` feature | lumos's copy of `SampleType` keeps lumos's file format separate from fits-well's enum, so a fits-well rename cannot break saved files. It would also add a dependency. |
-| Naming the `Source` trait | It is sealed on purpose (`lib.rs`, `io` module doc). No caller is generic over sources, and lumos uses `StreamReader<File>` alone. Do it only when such a caller exists. |
 | A general split of the header borrow from the data borrow | The image handle covers the read path, because `ImageReader::header` outlives the handle borrow. The other clone (`product/mod.rs:150`) copies one header for each file, which is small and not on a hot path. |
 | Verify while reading a bundle | lumos verifies before it trusts a byte, on purpose. |
 | A helper for the row chunks of an N-D plane | The ranges are a stack array. lumos's two copies of this code are lumos's own duplication. |
@@ -250,24 +241,6 @@ Each phase is one change to fits-well and its lumos migration. No phase keeps an
 - From the Darkroom root, run `cargo drive check` and `cargo drive test`.
 - Run `cargo drive surface` in fits-well, and review its diff as the record of the API change.
 - Phases 2 and 3 also compare the fits-well benches (`integration/read_section/*`, `integration/write*`, `atomic/*`) and the lumos benches before and after. A slower case blocks the phase.
-
-### Phase 1: the quiet traps
-
-These are small and independent, so they land first.
-
-1. **The compressed-table readers fail and do not give the container.** `read_table`, `read_table_rows`, `read_table_columns`, `read_table_cell` and `table_schema` on a `CompressedTable` return `FitsError::CompressedTable` until phase 5 decompresses them. `read_compressed_table` stays until then.
-   - Test: each of the five calls on a compressed fixture gives the error.
-2. **`Header::comment` on a missing keyword returns `MissingKeyword`.**
-   - Test: an absent keyword gives the error, and the header does not change.
-3. **`Hdu::is_image` requires `NAXIS > 0` for every image kind.**
-   - Test: a primary, an image extension and a compressed image, each with `NAXIS = 0` and `NAXIS = 2`, give false, false, false, then true, true, true.
-   - lumos: remove the `&& naxis()? > 0` at `extension_claims.rs:89`.
-4. **The README picks the first image with `iter().position(Hdu::is_image)`.** Phase 4 changes it to `images().next()`.
-5. **Remove the `bitvec` and `num_complex` re-exports.** lumos needs no change, because it uses neither.
-6. **`open_mmap(&File)`.**
-   - Test: the mmap reader tests open through a `File`.
-
-When phase 1 lands, remove its entries from `ISSUES.md`. The `get` case trap stays there until phase 4.
 
 ### Phase 2: the image reader
 
@@ -338,10 +311,11 @@ This phase changes the most call sites, about 280 in lumos, so it is one phase. 
 - `set_optional_*` (three functions), `missing()` and the `and_then` chains go away.
 - The hand-written `EXTNAME` matches use `HduSelector` (`lumos_extension.rs:194`, `calibration_bundle/mod.rs:192`, `extension_claims.rs:81,106`).
 - `ISSUES.md` loses the `get` case entry.
+- The README picks the first image with `images().next()`.
 
 ### Phase 5: tables and names
 
-1. Transparent compressed tables: whole reads, partial reads by tile and by column, and `table_schema`. Remove `read_compressed_table`.
+1. Transparent compressed tables: whole reads, partial reads by tile and by column, and `table_schema`. Remove `read_compressed_table` and `TableIsCompressed`. The test reach-ins `read_container_table` and `read_container_rows` stay for the tests of the container's own columns.
 2. Borrowed `ColumnSelector`, the `column(…)` methods, `Selection::column` and `read_table_columns_into`.
 3. The renames of the "Names" table above.
 4. The typed accessors on `ColumnData`, and `TryFrom<ColumnData> for Vec<T>`.
@@ -365,10 +339,9 @@ This phase changes the most call sites, about 280 in lumos, so it is one phase. 
 
 | Phase | fits-well | lumos | Depends on |
 |---|---|---|---|
-| 1. The quiet traps | small | small | none |
-| 2. The image reader | large: `reader/mod.rs`, `image_model` | medium: decode | 1 |
+| 2. The image reader | large: `reader/mod.rs`, `image_model` | medium: decode | none |
 | 3. Writing | medium: `fits_writer`, `compress` | small: `plane_hdu`, bundle | 2, which brings `ImageView` |
-| 4. Header and HDU selection | large: `header_model`, `reader`, `error` | large: about 280 call sites | 1 |
+| 4. Header and HDU selection | large: `header_model`, `reader`, `error` | large: about 280 call sites | none |
 | 5. Tables and names | medium: `compress/table`, `bintable`, renames | small | 4, which brings selectors |
 | 6. Small items | small | small | 4 |
 

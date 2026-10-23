@@ -75,6 +75,6 @@ source, where a group has several) then the input: an `atomic` case times one
 operation on the unit the read and write paths hand it (one row of the
 standard frame, which is also a codec's default tile); an `integration` case
 times a public entry point end to end on the 24 MP standard frame or the
-source catalog, from each source (`stream`, `slice`, `mmap`) or to a `file`. A
+source catalog, from each source (`stream`, `slice`) or to a `file`. A
 filter selects by id: `cargo drive bench --list`, `'^atomic/'`,
 `--exact integration/read_section/stream/i16`.

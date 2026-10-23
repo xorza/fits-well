@@ -1,11 +1,14 @@
 use fits_well::header::Header;
 use std::io::Cursor;
 
+use bitvec::order::Msb0;
+use bitvec::vec::BitVec;
 use fits_well::image::{Data, Image, View};
 use fits_well::io::HduKind;
-use fits_well::table::{BitVec, Builder, ColumnData, Complex, Msb0, WriteColumn};
+use fits_well::table::{Builder, ColumnData, WriteColumn};
 use fits_well::time::{Scale, ScaleKind};
 use fits_well::{FitsError, FitsReader, FitsWriter, Result};
+use num_complex::Complex;
 
 /// Every published type sits at its canonical path; this compiles or it does not.
 #[test]
