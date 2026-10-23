@@ -8,8 +8,8 @@
 //!
 //! A case's id is `<kind>/<group>/<case>`, with the same depth across a group; the group is the
 //! operation, and the case its variant, where the group times one operation several ways, then its
-//! input. A read's variant is its source (`stream` over a `File`, `slice` over bytes in memory,
-//! `mmap`), a write's the `file` it writes. Each case states its throughput in samples and in the
+//! input. A read's variant is its source (`stream` over a `File`, `slice` over bytes in memory),
+//! a write's the `file` it writes. Each case states its throughput in samples and in the
 //! uncompressed bytes they take. A case builds its input in its own closure, from the scene's fixed
 //! seeds, so a filtered run builds only what it times; files go to a scratch directory and stay in
 //! the page cache, so a read times the decode, not the disk.

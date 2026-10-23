@@ -118,20 +118,11 @@ pub(crate) enum SourceKind {
     Stream,
     /// `FitsReader::from_bytes` over the file's bytes in memory: decoded where they lie.
     Slice,
-    /// `FitsReader::open_mmap` over the file: decoded where the pages map it.
-    #[cfg(feature = "mmap")]
-    Mmap,
 }
 
 impl SourceKind {
-    /// Every source of this build.
-    pub(crate) fn all() -> Vec<Self> {
-        vec![
-            Self::Stream,
-            Self::Slice,
-            #[cfg(feature = "mmap")]
-            Self::Mmap,
-        ]
+    pub(crate) const fn all() -> [Self; 2] {
+        [Self::Stream, Self::Slice]
     }
 
     /// The variant part of a case's id.
@@ -139,8 +130,6 @@ impl SourceKind {
         match self {
             Self::Stream => "stream",
             Self::Slice => "slice",
-            #[cfg(feature = "mmap")]
-            Self::Mmap => "mmap",
         }
     }
 }
@@ -165,10 +154,6 @@ impl SourceKind {
             Self::Slice => {
                 let bytes = fs::read(path).expect("a bench file is read");
                 b.iter_with_large_drop(|| reading.read(FitsReader::from_bytes(&bytes).unwrap()));
-            }
-            #[cfg(feature = "mmap")]
-            Self::Mmap => {
-                b.iter_with_large_drop(|| reading.read(FitsReader::open_mmap(path).unwrap()));
             }
         }
     }

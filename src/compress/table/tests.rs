@@ -15,8 +15,8 @@ use crate::header_model::Header;
 use crate::header_model::value::Value;
 use crate::keyword::key;
 use crate::ragged::Ragged;
-use crate::reader::FitsReader;
 use crate::reader::internals::open_fixture;
+use crate::reader::{ColumnSelector, FitsReader};
 use std::io::Cursor;
 
 fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
@@ -39,7 +39,7 @@ fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
         .unwrap();
     let cbytes = cw.into_inner().into_inner();
     let mut cr = FitsReader::open(Cursor::new(cbytes)).unwrap();
-    let compressed = cr.read_table(1).unwrap();
+    let compressed = cr.read_container_table(1).unwrap();
     let mut compressed_header = cr.hdus[1].header.clone();
     compressed_header.set_internal("ZFORM01", "preserve");
     let table::HduParts {
@@ -246,7 +246,7 @@ fn decodes_a_cfitsio_compressed_table_with_a_vla_column() {
 #[test]
 fn compressed_table_vla_round_trips_all_table_codecs() {
     let mut source = open_fixture("comp_table_vla.fits");
-    let compressed = source.read_table(1).unwrap();
+    let compressed = source.read_container_table(1).unwrap();
     let mut original_parts =
         table::uncompress_table(&source.hdus[1].header, compressed.view()).unwrap();
     assert_eq!(
@@ -367,6 +367,36 @@ fn read_compressed_table_rejects_a_plain_bintable() {
     ));
 }
 
+/// The binary-table reads of a tiled-compressed table or image refuse it rather than
+/// hand back the container's compressed cells.
+#[test]
+fn table_reads_refuse_a_compressed_container() {
+    fn refused(fixture: &str, expected: fn(&FitsError) -> bool) {
+        let mut f = open_fixture(fixture);
+        let errors = [
+            f.table_schema(1).map(|_| ()).unwrap_err(),
+            f.hdus()[1].table_schema().map(|_| ()).unwrap_err(),
+            f.read_table(1).map(|_| ()).unwrap_err(),
+            f.read_table_rows(1, 0..1).map(|_| ()).unwrap_err(),
+            f.read_table_columns(1, 0..1, &[ColumnSelector::Index(0)])
+                .map(|_| ())
+                .unwrap_err(),
+            f.read_table_cell(1, 0, &ColumnSelector::Index(0))
+                .map(|_| ())
+                .unwrap_err(),
+        ];
+        for error in errors {
+            assert!(expected(&error), "{fixture}: {error:?}");
+        }
+    }
+    refused("comp_table_cfitsio.fits", |e| {
+        matches!(e, FitsError::TableIsCompressed)
+    });
+    refused("comp_gzip_i16.fits", |e| {
+        matches!(e, FitsError::NotABinTable)
+    });
+}
+
 #[test]
 fn uncompress_table_rejects_overflowing_row_product() {
     // ZNAXIS2·ZNAXIS1 = 3e18·8 = 2.4e19 overflows usize; uncompress must reject the
@@ -446,7 +476,7 @@ fn compressed_round_trip(
     let mut cr = FitsReader::open(Cursor::new(cw.into_inner().into_inner())).unwrap();
     // §10.3.1: the copied value keywords describe the uncompressed columns, so the
     // container's own schema reads none of them.
-    let container = cr.table_schema(1).unwrap();
+    let container = cr.hdus[1].container_schema().unwrap();
     assert!(container.columns.iter().all(|column| column.tdim.is_none()
         && column.tscale == 1.0
         && column.tzero == 0.0

@@ -131,14 +131,14 @@ redundant_explicit_links = "warn"
 unescaped_backticks = "warn"
 
 [package.metadata.docs.rs]
-features = ["compression", "parallel", "mmap"]
+features = ["compression", "parallel"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 # The codec paths without `parallel`, and the bare reader. Benches measure every feature.
 [package.metadata.drive]
 version = "0.2.1"
-lint = ["--all-features", "--no-default-features --features compression,mmap", "--no-default-features"]
-test = ["--all-features", "--no-default-features --features compression,mmap"]
+lint = ["--all-features", "--no-default-features --features compression", "--no-default-features"]
+test = ["--all-features", "--no-default-features --features compression"]
 bench = "--all-features"
 docs = true
 
@@ -148,7 +148,6 @@ num-complex = "0.4"
 thiserror = "2.0"
 flate2 = { version = "1.1", optional = true }
 rayon = { version = "1", optional = true }
-memmap2 = { version = "0.9", optional = true }
 criterion = { version = "0.8", optional = true }
 
 # No default features, so a `--no-default-features` run stays one.
@@ -159,7 +158,6 @@ fits-well = { path = ".", default-features = false, features = ["internals"] }
 default = ["parallel"]
 # Tile-parallel codecs; the memory-bound sample paths stay serial, as threads measured no gain.
 parallel = ["compression", "dep:rayon"]
-mmap = ["dep:memmap2"]
 compression = ["dep:flate2"]
 internals = ["dep:criterion"]
 

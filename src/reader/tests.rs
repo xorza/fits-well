@@ -254,26 +254,6 @@ fn read_data_raw_is_stable_across_reads() {
     );
 }
 
-#[cfg(feature = "mmap")]
-#[test]
-fn mmap_read_matches_seeking_read() {
-    let path = fixture_path("UITfuv2582gc.fits");
-    let mut seek = open_fixture("UITfuv2582gc.fits");
-    let want = seek.read_image(0).unwrap();
-    let want_shape = want.shape.to_vec();
-    let want_samples = want.decode(); // own, releasing the borrow on `seek`
-
-    let mut m = FitsReader::open_mmap(path).unwrap();
-    assert_eq!(m.hdus.len(), 1);
-    let got = m.read_image(0).unwrap();
-    assert_eq!(got.shape, want_shape);
-    assert_eq!(
-        got.decode(),
-        want_samples,
-        "mmap decode matches the seeking read"
-    );
-}
-
 #[test]
 fn read_image_reuses_internal_scratch_across_reads() {
     let mut f = open_fixture("UITfuv2582gc.fits");
@@ -726,6 +706,29 @@ fn image_indices_lists_readable_images_including_compressed() {
     assert_eq!(open_fixture("comp_gzip_i16.fits").image_indices(), vec![1]);
     // Random-groups primary + plain bintable: no images at all.
     assert!(open_fixture("DDTSUVDATA.fits").image_indices().is_empty());
+
+    // `NAXIS = 0` holds no array in a primary and in an image extension alike.
+    let mut bytes = fits_file(
+        &["SIMPLE  = T", "BITPIX  = 8", "NAXIS   = 0", "EXTEND  = T"],
+        &[],
+    );
+    let extensions: [(&[&str], &[u8]); 2] = [
+        (&["NAXIS   = 0"], &[]),
+        (&["NAXIS   = 1", "NAXIS1  = 2"], &[1, 2]),
+    ];
+    for (naxis, data) in extensions {
+        let cards = [
+            &["XTENSION= 'IMAGE   '", "BITPIX  = 8"][..],
+            naxis,
+            &["PCOUNT  = 0", "GCOUNT  = 1"],
+        ]
+        .concat();
+        bytes.extend(fits_file(&cards, data));
+    }
+    let reader = FitsReader::open(Cursor::new(bytes)).unwrap();
+    let images: Vec<bool> = reader.hdus().iter().map(Hdu::is_image).collect();
+    assert_eq!(images, [false, false, true]);
+    assert_eq!(reader.image_indices(), vec![2]);
 }
 
 #[test]
@@ -1121,7 +1124,7 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
             (metadata.shape, metadata.bitpix, metadata.scaling),
             (&[9, 7][..], bitpix, scaling)
         );
-        assert_eq!(reader.table_schema(1).unwrap().nrows, 3 * 3);
+        assert_eq!(reader.hdus()[1].container_schema().unwrap().nrows, 3 * 3);
         let whole = reader.read_image(1).unwrap().decode();
         let expected = select_2d_section(&whole, 9, 2..9, 1..7);
         let owned = reader.read_image_section(1, &[2..9, 1..7]).unwrap();
@@ -1173,7 +1176,7 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
                     .unwrap();
                 fetched.get() - scanned
             });
-            let first_tile = reader.read_table_rows(1, 0..1).unwrap().schema.heap_end;
+            let first_tile = reader.read_container_rows(1, 0..1).unwrap().schema.heap_end;
             let data_bytes = reader.hdus()[1].data_bytes as usize;
             assert_eq!(fetched, [first_tile, data_bytes]);
         }

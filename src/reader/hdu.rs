@@ -30,8 +30,8 @@ pub struct Hdu {
     /// `None` when the HDU is not an image, or its header does not resolve to one;
     /// [`Hdu::image_geometry`] then reports why.
     image: Option<ImageGeometry>,
-    /// `None` when the HDU is not a binary table, or its header does not resolve to
-    /// one; [`Hdu::table_schema`] then reports why.
+    /// `None` when the HDU is not structurally a binary table, or its header does not
+    /// resolve to one; [`Hdu::container_schema`] then reports why.
     table: Option<Schema>,
 }
 
@@ -57,19 +57,22 @@ impl Hdu {
         }
     }
 
-    /// Whether this HDU holds an image array: an image extension, a tiled-compressed
-    /// image, or a primary array with at least one axis (`NAXIS = 0` makes the
-    /// primary a container). A primary whose `NAXIS` does not parse is not one.
+    /// Whether this HDU holds an image array of at least one axis: a primary array, an
+    /// image extension or a tiled-compressed image whose `NAXIS` (`ZNAXIS` for a
+    /// compressed image) is above 0. `NAXIS = 0` holds no array, whatever the kind; a
+    /// rank that does not parse is none either. The other image keywords are not
+    /// judged: [`Hdu::image`] reports why they do not resolve.
     pub fn is_image(&self) -> bool {
-        match self.kind {
-            HduKind::Image | HduKind::CompressedImage => true,
-            HduKind::Primary => self.header.naxis().is_ok_and(|naxis| naxis > 0),
+        let rank = match self.kind {
+            HduKind::Primary | HduKind::Image => self.header.get_integer("NAXIS"),
+            HduKind::CompressedImage => self.header.get_integer("ZNAXIS"),
             HduKind::AsciiTable
             | HduKind::BinTable
             | HduKind::CompressedTable
             | HduKind::RandomGroups
-            | HduKind::Other => false,
-        }
+            | HduKind::Other => return false,
+        };
+        rank.is_ok_and(|rank| rank.is_some_and(|rank| rank > 0))
     }
 
     /// Whether this HDU's `EXTNAME` matches `name` case-insensitively, with `version`
@@ -129,11 +132,28 @@ impl Hdu {
         self.image_geometry()
     }
 
-    /// The binary-table schema of this HDU — for a tiled-compressed image or table,
-    /// that of its `BINTABLE` container. Errors with [`FitsError::NotABinTable`] for
-    /// any other kind, and with the header's own error when its table keywords are
-    /// malformed.
+    /// The schema of the binary table this HDU holds. Errors with
+    /// [`FitsError::TableIsCompressed`] for a tiled-compressed table, with
+    /// [`FitsError::NotABinTable`] for any other kind but a plain `BINTABLE` — a
+    /// tiled-compressed image among them — and with the header's own error when its
+    /// table keywords are malformed.
     pub fn table_schema(&self) -> Result<&Schema> {
+        match self.kind {
+            HduKind::BinTable => self.container_schema(),
+            HduKind::CompressedTable => Err(FitsError::TableIsCompressed),
+            HduKind::Primary
+            | HduKind::Image
+            | HduKind::AsciiTable
+            | HduKind::CompressedImage
+            | HduKind::RandomGroups
+            | HduKind::Other => Err(FitsError::NotABinTable),
+        }
+    }
+
+    /// The schema of the `BINTABLE` this HDU is stored as: a plain table's own, or the
+    /// container of a tiled-compressed image or table, which the compression layer
+    /// reads through the binary-table path.
+    pub(crate) fn container_schema(&self) -> Result<&Schema> {
         match &self.table {
             Some(schema) => Ok(schema),
             None => Err(table_schema(&self.header, self.kind)
