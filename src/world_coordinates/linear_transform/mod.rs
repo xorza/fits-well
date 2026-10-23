@@ -4,6 +4,7 @@ use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::Header;
+use crate::header_model::RecordView;
 use crate::keyword::Keyword;
 use crate::world_coordinates::D2R;
 use crate::world_coordinates::axis::Axis;
@@ -72,16 +73,17 @@ fn matrix_cells(header: &Header, root: &str, alt: Alternate, naxis: usize) -> Ve
     };
     let mut cells: Vec<MatrixCell> = header
         .iter()
-        .filter(|entry| entry.value.is_some())
-        .filter_map(|entry| {
-            let rest = entry
-                .keyword
+        .filter_map(|record| {
+            let RecordView::Valued { keyword, .. } = record else {
+                return None;
+            };
+            let rest = keyword
+                .as_str()
                 .strip_prefix(root)?
                 .strip_suffix(alt.as_str())?;
             let (row, column) = rest.split_once('_')?;
             Some(MatrixCell {
-                keyword: Keyword::try_from(entry.keyword)
-                    .expect("a card with a value holds a checked keyword"),
+                keyword: *keyword,
                 row: index(row)?,
                 column: index(column)?,
             })

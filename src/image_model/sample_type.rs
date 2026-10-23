@@ -59,7 +59,7 @@ impl SampleType {
     /// to the corresponding unsigned (or `I8`) type; any other scaling leaves the
     /// stored type as-is. `BLANK` does not affect the classification: it marks null
     /// samples *within* a type, not the type itself.
-    pub fn from_scaling(bitpix: Bitpix, scaling: &Scaling) -> Self {
+    pub fn from_scaling(bitpix: Bitpix, scaling: Scaling) -> Self {
         let offset = scaling.bscale == 1.0;
         match bitpix {
             Bitpix::U8 if offset && scaling.bzero == I8_OFFSET => Self::I8,

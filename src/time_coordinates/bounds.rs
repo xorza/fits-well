@@ -42,7 +42,8 @@ impl Bounds {
             let Some(value) = header.get_text(date)? else {
                 return Ok(None);
             };
-            Datetime::parse(value)?
+            value
+                .parse::<Datetime>()?
                 .to_mjd(&Scale::declared(header)?)
                 .map(Some)
         };

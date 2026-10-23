@@ -54,7 +54,7 @@ fn compression_write_round_trips_through_decode() {
         let mut r = round_trip(|w| {
             w.write_compressed_image(
                 image.view(),
-                &CompressionConfig::new(compression).tiled(tiles),
+                &CompressionConfig::new(compression).with_tiles(tiles),
                 None,
             )
         });
@@ -80,7 +80,7 @@ fn compression_write_round_trips_through_decode() {
     let mut r = round_trip(|w| {
         w.write_compressed_image(
             image_3d.view(),
-            &CompressionConfig::new(Compression::GZIP).tiled([3, 2, 2]),
+            &CompressionConfig::new(Compression::GZIP).with_tiles([3, 2, 2]),
             None,
         )
     });
@@ -142,7 +142,7 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
             let mut r = round_trip(|w| {
                 w.write_compressed_image(
                     image.view(),
-                    &CompressionConfig::new(compression).tiled([24, 1]),
+                    &CompressionConfig::new(compression).with_tiles([24, 1]),
                     None,
                 )
             });
@@ -263,7 +263,7 @@ fn hcompress_writer_enforces_standard_image_constraints() {
 
     let extreme = Image::new(vec![4, 4], vec![i64::MAX; 16]).unwrap();
     assert!(matches!(
-        writer.write_compressed_image(extreme.view(), &CompressionConfig::new(Compression::Hcompress(Hcompress::default())).tiled([4, 4]), None),
+        writer.write_compressed_image(extreme.view(), &CompressionConfig::new(Compression::Hcompress(Hcompress::default())).with_tiles([4, 4]), None),
         Err(FitsError::UnsupportedCompression { name })
             if name == "HCOMPRESS_1 tile exceeds the signed 64-bit stream range"
     ));
@@ -284,7 +284,7 @@ fn hcompress_writer_enforces_standard_image_constraints() {
     )
     .unwrap();
     assert!(matches!(
-        writer.write_compressed_image(undefined.view(), &CompressionConfig::new(Compression::Hcompress(Hcompress::lossy(2.0).unwrap())).tiled([8, 8]), None),
+        writer.write_compressed_image(undefined.view(), &CompressionConfig::new(Compression::Hcompress(Hcompress::lossy(2.0).unwrap())).with_tiles([8, 8]), None),
         Err(FitsError::UnsupportedCompression { name })
             if name == "lossy HCOMPRESS_1 with undefined pixels requires a null mask"
     ));
@@ -308,7 +308,7 @@ fn dither_option_sets_zquantiz_and_round_trips() {
         (DitherMethod::Subtractive2, "SUBTRACTIVE_DITHER_2"),
     ] {
         let config = CompressionConfig::new(Compression::Rice)
-            .tiled([24, 16])
+            .with_tiles([24, 16])
             .with_quantization(0.0, dither)
             .unwrap();
         let mut r = round_trip(|w| w.write_compressed_image(image.view(), &config, None));
@@ -354,7 +354,7 @@ fn tile_shape_with_wrong_rank_is_rejected() {
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
     let err = w.write_compressed_image(
         image.view(),
-        &CompressionConfig::new(Compression::Rice).tiled([2, 2, 2]),
+        &CompressionConfig::new(Compression::Rice).with_tiles([2, 2, 2]),
         None,
     );
     assert!(
@@ -383,7 +383,7 @@ fn float_write_preserves_nan_nulls() {
     let mut r = round_trip(|w| {
         w.write_compressed_image(
             image.view(),
-            &CompressionConfig::new(Compression::Rice).tiled([24, 16]),
+            &CompressionConfig::new(Compression::Rice).with_tiles([24, 16]),
             None,
         )
     });
@@ -431,7 +431,7 @@ fn hcompress_writer_converts_noise_multiplier_to_tile_scale() {
         w.write_compressed_image(
             image.view(),
             &CompressionConfig::new(Compression::Hcompress(Hcompress::lossy(2.0).unwrap()))
-                .tiled([8, 8]),
+                .with_tiles([8, 8]),
             None,
         )
     });
@@ -497,7 +497,7 @@ fn hcompress_refuses_tiles_under_four_pixels() {
             w.write_compressed_image(
                 image.view(),
                 &CompressionConfig::new(Compression::Hcompress(Hcompress::default()))
-                    .tiled(tiles.to_vec()),
+                    .with_tiles(tiles.to_vec()),
                 None,
             )
         })
@@ -563,7 +563,8 @@ fn hcompress_lossless_write_round_trips_exactly() {
     writer
         .write_compressed_image(
             image.view(),
-            &CompressionConfig::new(Compression::Hcompress(Hcompress::default())).tiled([16, 16]),
+            &CompressionConfig::new(Compression::Hcompress(Hcompress::default()))
+                .with_tiles([16, 16]),
             None,
         )
         .unwrap();
@@ -579,7 +580,8 @@ fn hcompress_lossless_write_round_trips_exactly() {
     writer
         .write_compressed_image(
             image.view(),
-            &CompressionConfig::new(Compression::Hcompress(Hcompress::default())).tiled([4, 4]),
+            &CompressionConfig::new(Compression::Hcompress(Hcompress::default()))
+                .with_tiles([4, 4]),
             None,
         )
         .unwrap();
@@ -598,7 +600,8 @@ fn hcompress_lossless_write_round_trips_exactly() {
     writer
         .write_compressed_image(
             image.view(),
-            &CompressionConfig::new(Compression::Hcompress(Hcompress::default())).tiled([4, 4]),
+            &CompressionConfig::new(Compression::Hcompress(Hcompress::default()))
+                .with_tiles([4, 4]),
             None,
         )
         .unwrap();

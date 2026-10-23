@@ -17,7 +17,7 @@ fn image(samples: Data, scaling: Scaling) -> Image {
 /// round-trip tests read against.
 fn encoded(data: &Data) -> Vec<u8> {
     let mut out = Vec::new();
-    data.as_view().encode_into(&mut out);
+    data.view().encode_into(&mut out);
     out
 }
 
@@ -147,22 +147,22 @@ fn decodes_big_endian_integers_and_floats() {
 #[test]
 fn image_data_views_preserve_ranges_for_every_sample_type() {
     let u8_values = Data::U8(vec![1, 2, 3, 4]);
-    assert_eq!(u8_values.view(1..3), View::U8(&[2, 3]));
+    assert_eq!(u8_values.view_range(1..3), View::U8(&[2, 3]));
 
     let i16_values = Data::I16(vec![-2, -1, 0, 1]);
-    assert_eq!(i16_values.view(1..3), View::I16(&[-1, 0]));
+    assert_eq!(i16_values.view_range(1..3), View::I16(&[-1, 0]));
 
     let i32_values = Data::I32(vec![-20, -10, 0, 10]);
-    assert_eq!(i32_values.view(1..3), View::I32(&[-10, 0]));
+    assert_eq!(i32_values.view_range(1..3), View::I32(&[-10, 0]));
 
     let i64_values = Data::I64(vec![i64::MIN, -1, 0, i64::MAX]);
-    assert_eq!(i64_values.view(1..3), View::I64(&[-1, 0]));
+    assert_eq!(i64_values.view_range(1..3), View::I64(&[-1, 0]));
 
     let f32_values = Data::F32(vec![-2.5, -0.0, 0.0, 3.5]);
-    assert_eq!(f32_values.view(1..3), View::F32(&[-0.0, 0.0]));
+    assert_eq!(f32_values.view_range(1..3), View::F32(&[-0.0, 0.0]));
 
     let f64_values = Data::F64(vec![-2.5, -0.0, 0.0, 3.5]);
-    assert_eq!(f64_values.view(1..3), View::F64(&[-0.0, 0.0]));
+    assert_eq!(f64_values.view_range(1..3), View::F64(&[-0.0, 0.0]));
 
     // Each typed accessor answers for its own variant alone, and the owned data converts
     // back to its vector, or comes back whole for any other type.
@@ -186,9 +186,9 @@ fn image_data_views_preserve_ranges_for_every_sample_type() {
     ];
     for (variant, data) in all.into_iter().enumerate() {
         let expected: [bool; 6] = std::array::from_fn(|index| index == variant);
-        assert_eq!(typed(data.as_view()), expected, "{:?}", data.bitpix());
+        assert_eq!(typed(data.view()), expected, "{:?}", data.bitpix());
     }
-    assert_eq!(i16_values.as_view().as_i16(), Some(&[-2, -1, 0, 1][..]));
+    assert_eq!(i16_values.view().as_i16(), Some(&[-2, -1, 0, 1][..]));
     assert_eq!(
         Vec::<i16>::try_from(i16_values.clone()),
         Ok(vec![-2, -1, 0, 1])
@@ -566,55 +566,55 @@ fn sample_type_resolves_unsigned_and_signed_byte_conventions() {
 
     // Plain signed BITPIX (no offset) keeps the stored signed type.
     assert_eq!(
-        SampleType::from_scaling(Bitpix::I16, &s(1.0, 0.0)),
+        SampleType::from_scaling(Bitpix::I16, s(1.0, 0.0)),
         SampleType::I16
     );
     assert_eq!(
-        SampleType::from_scaling(Bitpix::I32, &s(1.0, 0.0)),
+        SampleType::from_scaling(Bitpix::I32, s(1.0, 0.0)),
         SampleType::I32
     );
     assert_eq!(
-        SampleType::from_scaling(Bitpix::I64, &s(1.0, 0.0)),
+        SampleType::from_scaling(Bitpix::I64, s(1.0, 0.0)),
         SampleType::I64
     );
 
     // The unsigned convention: BSCALE=1 with BZERO the sign-bit offset 2^(n-1).
     assert_eq!(
-        SampleType::from_scaling(Bitpix::I16, &s(1.0, U16_OFFSET)),
+        SampleType::from_scaling(Bitpix::I16, s(1.0, U16_OFFSET)),
         SampleType::U16
     );
     assert_eq!(
-        SampleType::from_scaling(Bitpix::I32, &s(1.0, U32_OFFSET)),
+        SampleType::from_scaling(Bitpix::I32, s(1.0, U32_OFFSET)),
         SampleType::U32
     );
     assert_eq!(
-        SampleType::from_scaling(Bitpix::I64, &s(1.0, U64_OFFSET)),
+        SampleType::from_scaling(Bitpix::I64, s(1.0, U64_OFFSET)),
         SampleType::U64
     );
 
     // BITPIX=8 is unsigned by default; BZERO=-128 is the signed-byte convention.
     assert_eq!(
-        SampleType::from_scaling(Bitpix::U8, &s(1.0, 0.0)),
+        SampleType::from_scaling(Bitpix::U8, s(1.0, 0.0)),
         SampleType::U8
     );
     assert_eq!(
-        SampleType::from_scaling(Bitpix::U8, &s(1.0, I8_OFFSET)),
+        SampleType::from_scaling(Bitpix::U8, s(1.0, I8_OFFSET)),
         SampleType::I8
     );
 
     // Floats are unaffected by scaling.
     assert_eq!(
-        SampleType::from_scaling(Bitpix::F32, &s(10.0, 1.0)),
+        SampleType::from_scaling(Bitpix::F32, s(10.0, 1.0)),
         SampleType::F32
     );
     assert_eq!(
-        SampleType::from_scaling(Bitpix::F64, &s(1.0, 0.0)),
+        SampleType::from_scaling(Bitpix::F64, s(1.0, 0.0)),
         SampleType::F64
     );
 
     // A genuine BSCALE (≠ 1) at the offset BZERO is NOT the unsigned convention.
     assert_eq!(
-        SampleType::from_scaling(Bitpix::I16, &s(2.0, U16_OFFSET)),
+        SampleType::from_scaling(Bitpix::I16, s(2.0, U16_OFFSET)),
         SampleType::I16
     );
 
@@ -625,7 +625,7 @@ fn sample_type_resolves_unsigned_and_signed_byte_conventions() {
         blank: Some(-1),
     };
     assert_eq!(
-        SampleType::from_scaling(Bitpix::I16, &with_blank),
+        SampleType::from_scaling(Bitpix::I16, with_blank),
         SampleType::U16
     );
 

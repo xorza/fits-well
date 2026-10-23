@@ -7,6 +7,7 @@ use bitvec::slice::BitSlice;
 use bitvec::vec::BitVec;
 
 use crate::bintable::column_data::ColumnData;
+use crate::bintable::column_view::ColumnView;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::image_model::unsigned_data::UnsignedData;
@@ -123,6 +124,10 @@ impl Ragged<String> {
     pub fn row(&self, r: usize) -> &str {
         &self.values[self.range(r)]
     }
+
+    pub fn rows(&self) -> impl ExactSizeIterator<Item = &str> {
+        (0..self.len()).map(|r| self.row(r))
+    }
 }
 
 impl<S: AsRef<str>> FromIterator<S> for Ragged<String> {
@@ -154,6 +159,10 @@ impl Ragged<BitVec<u8, Msb0>> {
     pub fn row(&self, r: usize) -> &BitSlice<u8, Msb0> {
         &self.values[self.range(r)]
     }
+
+    pub fn rows(&self) -> impl ExactSizeIterator<Item = &BitSlice<u8, Msb0>> {
+        (0..self.len()).map(|r| self.row(r))
+    }
 }
 
 impl<B: AsRef<BitSlice<u8, Msb0>>> FromIterator<B> for Ragged<BitVec<u8, Msb0>> {
@@ -169,6 +178,18 @@ impl<B: AsRef<BitSlice<u8, Msb0>>> FromIterator<B> for Ragged<BitVec<u8, Msb0>> 
 }
 
 impl Ragged<ColumnData> {
+    /// Row `r`'s values.
+    ///
+    /// # Panics
+    /// When `r` is not a row.
+    pub fn row(&self, r: usize) -> ColumnView<'_> {
+        self.values.view().slice(self.range(r))
+    }
+
+    pub fn rows(&self) -> impl ExactSizeIterator<Item = ColumnView<'_>> {
+        (0..self.len()).map(|r| self.row(r))
+    }
+
     /// Refill these rows in place: `fill` writes the values and each row's end into
     /// this `Ragged`'s own buffers, so a refill of the same size allocates nothing.
     pub(crate) fn refill(
@@ -225,6 +246,8 @@ mod tests {
     use bitvec::vec::BitVec;
 
     use crate::ascii::ascii_text::AsciiText;
+    use crate::bintable::column_data::ColumnData;
+    use crate::bintable::column_view::ColumnView;
     use crate::ragged::Ragged;
 
     /// Three rows of lengths 0, 2 and 1 end at 0, 2 and 3; collecting the rows
@@ -244,6 +267,7 @@ mod tests {
         let text: Ragged<String> = ["ab", "", "c"].into_iter().collect();
         assert_eq!(text.ends(), [2, 2, 3]);
         assert_eq!(text.row(2), "c");
+        assert_eq!(text.rows().collect::<Vec<_>>(), ["ab", "", "c"]);
 
         let bits: Ragged<BitVec<u8, Msb0>> = [bitvec![u8, Msb0; 1, 0, 1], bitvec![u8, Msb0;]]
             .into_iter()
@@ -251,6 +275,29 @@ mod tests {
         assert_eq!(bits.ends(), [3, 3]);
         assert_eq!(bits.row(0), bitvec![u8, Msb0; 1, 0, 1]);
         assert!(bits.row(1).is_empty());
+        assert_eq!(bits.rows().len(), 2);
+
+        // A variable-length column's rows are borrowed views of its one buffer, which
+        // own again as the rows they were built from.
+        let column = Ragged::<ColumnData>::from_rows([
+            ColumnData::I16(vec![4, 5]),
+            ColumnData::I16(vec![]),
+            ColumnData::I16(vec![6]),
+        ])
+        .unwrap();
+        assert_eq!(column.row(0), ColumnView::I16(&[4, 5]));
+        assert_eq!(column.row(0).as_i16(), Some(&[4, 5][..]));
+        assert_eq!(column.row(0).as_i32(), None);
+        assert!(column.row(1).is_empty());
+        assert_eq!(
+            column.rows().map(|row| row.to_data()).collect::<Vec<_>>(),
+            [
+                ColumnData::I16(vec![4, 5]),
+                ColumnData::I16(vec![]),
+                ColumnData::I16(vec![6])
+            ]
+        );
+        assert_eq!(column.values().view().to_data(), *column.values());
 
         let fields: AsciiText = [Some("x"), None, Some("yz")].into_iter().collect();
         assert_eq!(

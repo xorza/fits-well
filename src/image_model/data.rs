@@ -49,33 +49,33 @@ impl_data_vec_conversions!(F64, f64);
 
 impl Data {
     /// The `BITPIX` element kind backing this buffer.
-    pub fn bitpix(&self) -> Bitpix {
-        self.as_view().bitpix()
+    pub const fn bitpix(&self) -> Bitpix {
+        self.view().bitpix()
     }
 
     /// Number of samples in the buffer.
-    pub fn len(&self) -> usize {
-        self.as_view().len()
+    pub const fn len(&self) -> usize {
+        self.view().len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Every sample, borrowed.
-    pub fn as_view(&self) -> View<'_> {
+    pub const fn view(&self) -> View<'_> {
         match self {
-            Self::U8(values) => View::U8(values),
-            Self::I16(values) => View::I16(values),
-            Self::I32(values) => View::I32(values),
-            Self::I64(values) => View::I64(values),
-            Self::F32(values) => View::F32(values),
-            Self::F64(values) => View::F64(values),
+            Self::U8(values) => View::U8(values.as_slice()),
+            Self::I16(values) => View::I16(values.as_slice()),
+            Self::I32(values) => View::I32(values.as_slice()),
+            Self::I64(values) => View::I64(values.as_slice()),
+            Self::F32(values) => View::F32(values.as_slice()),
+            Self::F64(values) => View::F64(values.as_slice()),
         }
     }
 
-    pub(crate) fn view(&self, range: Range<usize>) -> View<'_> {
-        self.as_view().slice(range)
+    pub(crate) fn view_range(&self, range: Range<usize>) -> View<'_> {
+        self.view().slice(range)
     }
 
     /// Decode the raw, big-endian data unit into host-endian typed samples.

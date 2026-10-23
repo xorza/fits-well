@@ -1,4 +1,4 @@
-use crate::header_model::Header;
+use crate::header_model::{Header, RecordView};
 
 use crate::header_model::card::*;
 use crate::header_model::internals::card_bytes;
@@ -317,9 +317,11 @@ fn long_string_comment_boundary_is_lossless_or_rejected() {
     let mut bytes: Vec<u8> = records.iter().flatten().copied().collect();
     bytes.extend_from_slice(&card_bytes("END"));
     let parsed = Header::parse(&bytes).unwrap();
-    let entry = parsed.iter().next().unwrap();
-    assert_eq!(entry.value.and_then(Value::as_text), Some("x"));
-    assert_eq!(entry.comment, Some(exact_comment.as_str()));
+    let Some(RecordView::Valued { value, comment, .. }) = parsed.iter().next() else {
+        panic!("the folded card reads back as one valued record");
+    };
+    assert_eq!(value.as_text(), Some("x"));
+    assert_eq!(comment, Some(exact_comment.as_str()));
 
     let overflow = Card::Value {
         keyword: Keyword::new("TEXT"),

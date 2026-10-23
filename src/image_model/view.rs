@@ -114,14 +114,14 @@ impl<'a> Borrowed<'a> {
     /// The effective element type these samples represent, resolving the unsigned and
     /// signed-byte conventions from the stored `BITPIX` and the [`Scaling`].
     pub fn sample_type(&self) -> SampleType {
-        SampleType::from_scaling(self.samples.bitpix(), &self.scaling)
+        SampleType::from_scaling(self.samples.bitpix(), self.scaling)
     }
 
     /// The image, copied into owned storage.
     pub fn to_image(&self) -> Image {
         Image {
             shape: self.shape.to_vec(),
-            samples: self.samples.to_owned_data(),
+            samples: self.samples.to_data(),
             scaling: self.scaling,
         }
     }
@@ -235,7 +235,7 @@ impl<'a> View<'a> {
     }
 
     /// Copy this borrowed view into the matching owned [`Data`] variant.
-    pub fn to_owned_data(&self) -> Data {
+    pub fn to_data(&self) -> Data {
         match self {
             View::U8(values) => Data::U8(values.to_vec()),
             View::I16(values) => Data::I16(values.to_vec()),

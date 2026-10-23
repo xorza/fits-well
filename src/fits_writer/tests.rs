@@ -21,7 +21,7 @@ use crate::fits_writer::{
 use crate::hdu::{HduKind, MAX_TABLE_FIELDS};
 use crate::header_model::internals::from_card_lines as header;
 use crate::header_model::value::Value;
-use crate::header_model::{Header, keywords};
+use crate::header_model::{Header, RecordView, keywords};
 use crate::image_model::data::Data;
 use crate::image_model::internals::physical;
 use crate::image_model::scaling::Scaling;
@@ -138,8 +138,12 @@ fn assert_informational_header(header: &Header) {
     }
     let commentary: Vec<_> = header
         .iter()
-        .filter(|entry| matches!(entry.keyword, "COMMENT" | "HISTORY"))
-        .map(|entry| (entry.keyword, entry.comment.unwrap_or("")))
+        .filter_map(|record| match record {
+            RecordView::Commentary { name, text } if matches!(name, "COMMENT" | "HISTORY") => {
+                Some((name, text.unwrap_or("")))
+            }
+            _ => None,
+        })
         .collect();
     assert_eq!(
         commentary,
@@ -265,7 +269,7 @@ fn fixed_columns_by_stored_type() -> Vec<TypedWriteColumn> {
         },
         TypedWriteColumn {
             stored_type: 'X',
-            column: WriteColumn::bits("X", vec![0x80], 1),
+            column: WriteColumn::bits("X", [bitvec![u8, Msb0; 1]], 1).unwrap(),
         },
     ]
 }
@@ -742,7 +746,7 @@ fn vla_constructor_rejects_mixed_element_types() {
 #[test]
 #[should_panic(expected = "only a variable-length column takes `Q` descriptors")]
 fn a_fixed_column_takes_no_wide_descriptors() {
-    drop(WriteColumn::fixed("FIXED", ColumnData::I16(vec![1]), 1).wide());
+    drop(WriteColumn::fixed("FIXED", ColumnData::I16(vec![1]), 1).with_wide_descriptors());
 }
 
 #[test]
@@ -761,7 +765,7 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
             .unwrap(),
         )
         .with_tdim(vec![2, 2])
-        .wide(),
+        .with_wide_descriptors(),
         WriteColumn::vla(
             "PV",
             Ragged::from_rows(vec![
@@ -779,8 +783,16 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
             ])
             .unwrap(),
         ),
-        // 12-bit X column: 2 bytes/row.
-        WriteColumn::bits("FLAGS", vec![0xAB, 0xCF, 0x12, 0x3F], 12),
+        // 12-bit X column: 2 bytes/row, the 4 bits past the width zeroed.
+        WriteColumn::bits(
+            "FLAGS",
+            [
+                bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0],
+                bitvec![u8, Msb0; 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1],
+            ],
+            12,
+        )
+        .unwrap(),
     ];
     let mut r = round_trip(|w| w.write_table(&binary_table(2, &columns), None));
     let t = r.read_table(1).unwrap();
@@ -804,7 +816,10 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
     assert_eq!(r.hdus[1].header.get_text("TFORM4").unwrap(), Some("1PA(5)"));
     assert_eq!(metadata.columns[3].tform.repeat, 1);
     assert_eq!(metadata.columns[3].tform.kind, TformKind::ArrayDesc32);
-    assert_eq!(metadata.columns[3].tform.vla_elem, Some(TformKind::Char));
+    assert_eq!(
+        metadata.columns[3].tform.vla_elem,
+        Some(TformKind::Character)
+    );
     assert_eq!(
         t.column(3).unwrap().vla().unwrap(),
         Ragged::from_rows([
@@ -838,7 +853,7 @@ fn writes_p_q_variable_length_bit_arrays_with_exact_counts_and_padding() {
     let q_rows = [BitVec::<u8, Msb0>::new(), one_bit, q_nine];
     let columns = [
         WriteColumn::vla_bits("PFLAGS", p_rows.iter().collect()),
-        WriteColumn::vla_bits("QFLAGS", q_rows.iter().collect()).wide(),
+        WriteColumn::vla_bits("QFLAGS", q_rows.iter().collect()).with_wide_descriptors(),
     ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
@@ -859,7 +874,7 @@ fn writes_p_q_variable_length_bit_arrays_with_exact_counts_and_padding() {
         Some(6)
     );
 
-    let data = reader.read_data_raw(1).unwrap();
+    let data = reader.read_data_unit(1).unwrap();
     let raw = data.data();
     assert_eq!(i32::from_be_bytes(raw[0..4].try_into().unwrap()), 0);
     assert_eq!(i32::from_be_bytes(raw[4..8].try_into().unwrap()), 0);
@@ -894,7 +909,7 @@ fn writes_tscal_tzero_tnull_and_reads_back_physical() {
     // Stored [5, 99] with TSCAL=2, TZERO=10, TNULL=99 ⇒ physical [20, NaN].
     let columns = vec![
         WriteColumn::fixed("X", ColumnData::I32(vec![5, 99]), 1)
-            .scaled(2.0, 10.0)
+            .with_scaling(2.0, 10.0)
             .with_null(99),
     ];
     let mut r = round_trip(|w| w.write_table(&binary_table(2, &columns), None));
@@ -914,13 +929,13 @@ fn binary_metadata_is_validated_for_every_fixed_and_vla_stored_type() {
         .chain(vla_columns_by_stored_type())
     {
         if matches!(typed.stored_type, 'A' | 'L' | 'X') {
-            assert_table_column_rejected(typed.column.clone().scaled(2.0, 3.0), "TSCAL1");
+            assert_table_column_rejected(typed.column.clone().with_scaling(2.0, 3.0), "TSCAL1");
 
             let mut tzero_only = typed.column.clone();
             internals::set_scaling(&mut tzero_only, None, Some(3.0));
             assert_table_column_rejected(tzero_only, "TZERO1");
         } else {
-            let header = written_table_header(typed.column.clone().scaled(2.0, 3.0));
+            let header = written_table_header(typed.column.clone().with_scaling(2.0, 3.0));
             assert_eq!(header.get_real("TSCAL1").unwrap(), Some(2.0), "{typed:?}");
             assert_eq!(header.get_real("TZERO1").unwrap(), Some(3.0), "{typed:?}");
         }
@@ -1057,7 +1072,7 @@ fn writes_and_reads_back_a_binary_table() {
 
     let t = r.read_table(1).unwrap();
     let metadata = t.schema();
-    assert_eq!(metadata.nrows, 3);
+    assert_eq!(metadata.row_count, 3);
     assert_eq!(metadata.columns.len(), 3);
     assert_eq!(metadata.columns[0].name.as_deref(), Some("NOSTA"));
     assert_eq!(metadata.columns[1].unit.as_deref(), Some("m"));
@@ -1135,7 +1150,7 @@ fn binary_character_columns_round_trip_exactly_and_reject_over_width() {
     let columns = [
         WriteColumn::fixed("FIXED", ColumnData::Character(fields.clone()), 4),
         WriteColumn::vla("PCHAR", vla_rows.clone()),
-        WriteColumn::vla("QCHAR", vla_rows.clone()).wide(),
+        WriteColumn::vla("QCHAR", vla_rows.clone()).with_wide_descriptors(),
     ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
@@ -1173,6 +1188,17 @@ fn binary_character_columns_round_trip_exactly_and_reject_over_width() {
         too_wide.to_string(),
         "character column \"BAD\" row 1 holds 5 bytes but its field width is 4"
     );
+    // A bit row has no padding, so a shorter row is refused as a longer one is.
+    for (row, bits) in [
+        (0, bitvec![u8, Msb0; 1, 0]),
+        (0, bitvec![u8, Msb0; 1, 0, 1, 1]),
+    ] {
+        assert!(matches!(
+            WriteColumn::bits("BITS", [bits.clone()], 3),
+            Err(FitsError::BitFieldLengthMismatch { column, row: r, length, width: 3 })
+                if column == "BITS" && r == row && length == bits.len()
+        ));
+    }
     let padded = WriteColumn::characters("PAD", ["AB", "CDE", "F"], 3).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
@@ -1344,11 +1370,12 @@ fn i64_table_scaling_writes_the_exact_unsigned_offset() {
     ];
     let columns = [
         WriteColumn::fixed("U64", ColumnData::I64(vec![i64::MIN, i64::MAX]), 1)
-            .scaled(1.0, U64_OFFSET),
-        WriteColumn::vla("PU64", Ragged::from_rows(rows.clone()).unwrap()).scaled(1.0, U64_OFFSET),
+            .with_scaling(1.0, U64_OFFSET),
+        WriteColumn::vla("PU64", Ragged::from_rows(rows.clone()).unwrap())
+            .with_scaling(1.0, U64_OFFSET),
         WriteColumn::vla("QU64", Ragged::from_rows(rows.clone()).unwrap())
-            .wide()
-            .scaled(1.0, U64_OFFSET),
+            .with_wide_descriptors()
+            .with_scaling(1.0, U64_OFFSET),
     ];
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
@@ -1772,7 +1799,8 @@ fn compressed_image_metadata_is_validated_before_automatic_primary() {
     assert!(matches!(
         rejected_before_output(|w| w.write_compressed_image(
             image.view(),
-            &CompressionConfig::new(Compression::Hcompress(Hcompress::default())).tiled([1, 1]),
+            &CompressionConfig::new(Compression::Hcompress(Hcompress::default()))
+                .with_tiles([1, 1]),
             None
         )),
         FitsError::HcompressTileTooSmall { axis: 0, length: 1 }
@@ -1818,7 +1846,7 @@ fn compressed_header_templates_preserve_information_and_regenerate_structure() {
     writer
         .write_compressed_table(
             &binary_table(3, &columns),
-            &CompressionConfig::new(Compression::GZIP).tiled([2]),
+            &CompressionConfig::new(Compression::GZIP).with_tiles([2]),
             Some(&template),
         )
         .unwrap();
@@ -1869,7 +1897,7 @@ fn table_builders_infer_rows_and_reject_cross_column_mismatches() {
             2,
         ))
         .unwrap();
-    assert_eq!(binary.nrows, Some(3));
+    assert_eq!(binary.row_count, Some(3));
     assert!(matches!(
         binary.push(WriteColumn::scalar(
             "SHORT",
@@ -1903,14 +1931,12 @@ fn table_builders_infer_rows_and_reject_cross_column_mismatches() {
             7,
             3,
         ),
-        ("B", WriteColumn::bits("B", vec![0; 3], 12), 3, 2),
         (
             "Z",
             WriteColumn::fixed("Z", ColumnData::I16(vec![1, 2]), 0),
             2,
             0,
         ),
-        ("X", WriteColumn::bits("X", vec![0], 0), 1, 0),
     ] {
         assert!(matches!(
             Builder::with_rows(2).column(column),
@@ -1921,7 +1947,7 @@ fn table_builders_infer_rows_and_reject_cross_column_mismatches() {
     let empty = Builder::with_rows(2)
         .column(WriteColumn::fixed("Z", ColumnData::I16(Vec::new()), 0))
         .unwrap();
-    assert_eq!(empty.nrows, Some(2));
+    assert_eq!(empty.row_count, Some(2));
     Builder::with_rows(0)
         .column(WriteColumn::vla(
             "EMPTY",
@@ -1942,7 +1968,7 @@ fn table_builders_infer_rows_and_reject_cross_column_mismatches() {
                 .with_null("NULL"),
         )
         .unwrap();
-    assert_eq!(ascii.nrows, Some(2));
+    assert_eq!(ascii.row_count, Some(2));
 }
 
 #[test]

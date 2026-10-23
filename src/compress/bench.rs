@@ -215,7 +215,7 @@ fn compressed_file(compression: Compression, bitpix: Bitpix) -> Vec<u8> {
 
 /// The catalog's tiles of [`ROWS_PER_TILE`] rows, compressed by `compression`.
 fn table_config(compression: Compression) -> CompressionConfig {
-    CompressionConfig::new(compression).tiled([ROWS_PER_TILE])
+    CompressionConfig::new(compression).with_tiles([ROWS_PER_TILE])
 }
 
 fn codec_id(compression: Compression) -> String {

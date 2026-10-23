@@ -11,7 +11,7 @@ use crate::bintable::tform_kind::TformKind;
 
 /// A binary table's `X` (bit-array) column as a borrowed, 2-D bit view — from
 /// [`ColumnReader::bits`](crate::table::ColumnReader::bits)
-/// (rectangular, `nrows × repeat`) or
+/// (rectangular, `row_count × repeat`) or
 /// [`ColumnReader::vla_bits`](crate::table::ColumnReader::vla_bits)
 /// (jagged `PX`/`QX`). Bits are MSB-first (§7.3.2) and viewed in place over the data
 /// unit (zero-copy), so this borrows the table and can't outlive it.
@@ -43,23 +43,23 @@ impl<'a> BitColumn<'a> {
     }
 
     /// The number of rows.
-    pub const fn nrows(&self) -> usize {
-        self.table.nrows
+    pub const fn len(&self) -> usize {
+        self.table.row_count
     }
 
     /// Whether the column has no rows.
     pub const fn is_empty(&self) -> bool {
-        self.table.nrows == 0
+        self.table.row_count == 0
     }
 
     /// Row `r`'s bits as a borrowed [`BitSlice`], MSB-first — resolved on demand from
     /// the data unit (no per-row storage). Index it (`row[c]`), iterate it, or
-    /// `.to_bitvec()` to own it. Panics if `r >= nrows()`.
+    /// `.to_bitvec()` to own it. Panics if `r >= len()`.
     pub fn row(&self, r: usize) -> &'a BitSlice<u8, Msb0> {
         assert!(
-            r < self.table.nrows,
+            r < self.table.row_count,
             "row {r} out of bounds ({} rows)",
-            self.table.nrows
+            self.table.row_count
         );
         let col = &self.table.columns[self.index];
         if col.tform.kind == TformKind::Bit {
@@ -85,7 +85,7 @@ impl<'a> BitColumn<'a> {
 
     /// The bit at `(row, col)`, MSB-first — `None` if either index is out of range.
     pub fn get(&self, row: usize, col: usize) -> Option<bool> {
-        if row >= self.table.nrows {
+        if row >= self.table.row_count {
             return None;
         }
         let bits = self.row(row);
@@ -94,7 +94,7 @@ impl<'a> BitColumn<'a> {
 
     /// Iterate the rows, each a borrowed [`BitSlice`], resolved on demand.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &'a BitSlice<u8, Msb0>> + '_ {
-        (0..self.table.nrows).map(move |r| self.row(r))
+        (0..self.table.row_count).map(move |r| self.row(r))
     }
 }
 

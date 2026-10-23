@@ -9,13 +9,13 @@ fn reads_the_real_aips_antenna_table() {
     let mut reader = open_fixture("DDTSUVDATA.fits");
     let table = reader.read_table(1).unwrap();
 
-    assert_eq!(table.schema.nrows, 28);
+    assert_eq!(table.schema.row_count, 28);
     assert_eq!(table.schema.columns.len(), 12);
     // ANNAME = 8A, STABXYZ = 3D, ORBPARM = 0D, NOSTA = 1J ...
     assert_eq!(table.schema.columns[0].name.as_deref(), Some("ANNAME"));
     assert_eq!(
         table.schema.columns[0].tform,
-        tform(8, TformKind::Char, None)
+        tform(8, TformKind::Character, None)
     );
     assert_eq!(
         table.schema.columns[1].tform,

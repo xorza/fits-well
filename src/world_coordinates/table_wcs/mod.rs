@@ -268,11 +268,11 @@ impl<'a> TableWcs<'a> {
 /// impossible by the substring argument above.
 fn candidate_vector_axes(header: &Header) -> Vec<usize> {
     let mut axes: Vec<usize> = Vec::new();
-    for entry in header {
-        let digits = entry
-            .keyword
+    for record in header {
+        let name = record.name();
+        let digits = name
             .find(|c: char| !c.is_ascii_digit())
-            .map_or(entry.keyword, |end| &entry.keyword[..end]);
+            .map_or(name, |end| &name[..end]);
         for start in 0..digits.len() {
             for end in start + 1..=digits.len() {
                 let text = &digits[start..end];

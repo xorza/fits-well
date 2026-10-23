@@ -23,7 +23,7 @@ use crate::keyword::Keyword;
 /// are typed host-endian samples; the stream encodes and writes each one
 /// immediately, then finalizes padding and checksums.
 #[derive(Debug)]
-pub struct Writer<'a, W: Write + Seek> {
+pub struct ImageWriter<'a, W: Write + Seek> {
     writer: &'a mut FitsWriter<W>,
     header: Header,
     header_offset: u64,
@@ -79,7 +79,7 @@ pub(super) fn stream_template<'a, W: Write + Seek>(
     writer: &'a mut FitsWriter<W>,
     layout: Metadata<'_>,
     template: Option<&Header>,
-) -> Result<Writer<'a, W>> {
+) -> Result<ImageWriter<'a, W>> {
     writer.ensure_writable()?;
     layout.scaling.validate(layout.bitpix)?;
     let expected_samples = shape_product(layout.shape)?;
@@ -99,7 +99,7 @@ pub(super) fn stream_template<'a, W: Write + Seek>(
         return Err(FitsError::Io(error));
     }
     writer.state = WriterState::Active;
-    Ok(Writer {
+    Ok(ImageWriter {
         writer,
         header,
         header_offset,
@@ -111,7 +111,7 @@ pub(super) fn stream_template<'a, W: Write + Seek>(
     })
 }
 
-impl<W: Write + Seek> Writer<'_, W> {
+impl<W: Write + Seek> ImageWriter<'_, W> {
     /// Append one typed chunk. Every chunk must have the stream's `BITPIX` type.
     pub fn write_chunk(&mut self, samples: View<'_>) -> Result<()> {
         if samples.bitpix() != self.bitpix {
@@ -184,7 +184,7 @@ impl<W: Write + Seek> Writer<'_, W> {
     }
 }
 
-impl<W: Write + Seek> Drop for Writer<'_, W> {
+impl<W: Write + Seek> Drop for ImageWriter<'_, W> {
     fn drop(&mut self) {
         if !self.finished {
             self.writer.state = WriterState::Failed;

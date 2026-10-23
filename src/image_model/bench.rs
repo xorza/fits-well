@@ -34,7 +34,7 @@ fn decode(c: &mut Criterion) {
             let mut row = Vec::new();
             scene::sky(bitpix, WIDTH, 1, 1)
                 .samples
-                .as_view()
+                .view()
                 .encode_into(&mut row);
             b.iter(|| swap_into_words(black_box(&row), bitpix, &mut words));
         });
@@ -53,7 +53,7 @@ fn encode(c: &mut Criterion) {
             let row = scene::sky(bitpix, WIDTH, 1, 1);
             b.iter(|| {
                 out.clear();
-                black_box(row.samples.as_view()).encode_into(&mut out);
+                black_box(row.samples.view()).encode_into(&mut out);
             });
         });
     }
@@ -80,7 +80,7 @@ fn physical(c: &mut Criterion) {
                     blank,
                     ..row.scaling
                 };
-                b.iter(|| physical_view::<f64>(black_box(row.samples.as_view()), &scaling));
+                b.iter(|| physical_view::<f64>(black_box(row.samples.view()), &scaling));
             });
         }
     }
@@ -103,7 +103,7 @@ fn unsigned(c: &mut Criterion) {
             let view = Borrowed {
                 shape: &row.shape,
                 scaling,
-                samples: row.samples.as_view(),
+                samples: row.samples.view(),
             };
             b.iter(|| black_box(view).unsigned().unwrap());
         });

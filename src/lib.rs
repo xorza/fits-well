@@ -71,6 +71,7 @@ mod world_coordinates;
 
 pub use error::{FitsError, Indexed, Ranked, Result};
 pub use fits_writer::FitsWriter;
+pub use fits_writer::image_writer::ImageWriter;
 pub use reader::FitsReader;
 pub use reader::image_reader::ImageReader;
 
@@ -79,7 +80,6 @@ pub mod image {
     pub use crate::bitpix::Bitpix;
     #[cfg(feature = "compression")]
     pub use crate::compress::{Compression, CompressionConfig, DitherMethod, Gzip, Hcompress};
-    pub use crate::fits_writer::writer::Writer;
     pub use crate::image_model::data::Data;
     pub use crate::image_model::physical_sample::PhysicalSample;
     pub use crate::image_model::region::Region;
@@ -94,7 +94,7 @@ pub mod image {
 pub mod header {
     pub use crate::header_model::keywords;
     pub use crate::header_model::value::{FitsInteger, Value};
-    pub use crate::header_model::{Entry, Header, Iter, Record};
+    pub use crate::header_model::{Header, Iter, Record, RecordView};
     pub use crate::keyword::Keyword;
 }
 
@@ -156,6 +156,7 @@ pub mod time {
     pub use crate::time_coordinates::phase_axis::PhaseAxis;
     pub use crate::time_coordinates::reference_position::ReferencePosition;
     pub use crate::time_coordinates::scale::{Scale, ScaleKind};
+    pub use crate::time_coordinates::unit::Unit;
 }
 
 /// Binary and ASCII table values, schema and selection metadata, and write
@@ -163,7 +164,7 @@ pub mod time {
 pub mod table {
     pub use crate::ascii::ascii_text::AsciiText;
     pub use crate::ascii::{
-        Ascii, AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiMetadata,
+        Ascii, AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiSchema,
     };
     pub use crate::bintable::Table;
     pub use crate::bintable::bit_column::BitColumn;
@@ -171,6 +172,7 @@ pub mod table {
     pub use crate::bintable::column::Column;
     pub use crate::bintable::column_data::ColumnData;
     pub use crate::bintable::column_reader::ColumnReader;
+    pub use crate::bintable::column_view::ColumnView;
     pub use crate::bintable::schema::Schema;
     pub use crate::bintable::tform::Tform;
     pub use crate::bintable::tform_kind::TformKind;

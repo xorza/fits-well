@@ -47,7 +47,7 @@ impl Coordinate {
         if let Some(value) = header.get_text(keywords::DATE_OBS)? {
             let scale = Scale::declared(header)?;
             return Ok(Some(Self {
-                mjd: Datetime::parse(value)?.to_mjd(&scale)?,
+                mjd: value.parse::<Datetime>()?.to_mjd(&scale)?,
                 scale,
             }));
         }

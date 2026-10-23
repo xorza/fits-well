@@ -76,7 +76,7 @@ impl<'a> DecodeBuffer<'a> {
         section: TileSection<'_>,
     ) -> Result<()> {
         debug_assert_eq!(self.bitpix(), tiled.image.bitpix);
-        debug_assert_eq!(table.nrows, section.rows.len());
+        debug_assert_eq!(table.row_count, section.rows.len());
         let plan = ImageDecodePlan::new(header, table, tiled)?;
         match self {
             DecodeBuffer::U8(out) => plan.decode_region_into(section, out),

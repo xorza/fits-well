@@ -208,7 +208,7 @@ impl CompressionConfig {
     /// The tile shape: one length per image axis, fastest first, or one row count for
     /// a table.
     #[must_use]
-    pub fn tiled(mut self, tiles: impl Into<Vec<usize>>) -> Self {
+    pub fn with_tiles(mut self, tiles: impl Into<Vec<usize>>) -> Self {
         self.tiles = tiles.into();
         self
     }
@@ -225,9 +225,9 @@ impl CompressionConfig {
         Ok(self)
     }
 
-    /// Rows per tile of a table of `nrows` rows of `row_len` bytes, in `1..=nrows`.
+    /// Rows per tile of a table of `row_count` rows of `row_len` bytes, in `1..=row_count`.
     /// Errors when the tiles have more than one axis or quantization is set.
-    fn table_tile_rows(&self, nrows: usize, row_len: usize) -> Result<usize> {
+    fn table_tile_rows(&self, row_count: usize, row_len: usize) -> Result<usize> {
         if self.quantization.is_some() {
             return Err(FitsError::InvalidCompressionParameter {
                 detail: "a compressed table takes no float quantization".to_string(),
@@ -236,7 +236,7 @@ impl CompressionConfig {
         let rows = match *self.tiles.as_slice() {
             [] => DEFAULT_TABLE_TILE_BYTES
                 .checked_div(row_len)
-                .unwrap_or(nrows),
+                .unwrap_or(row_count),
             [rows] => rows,
             ref tiles => {
                 return Err(FitsError::RankMismatch {
@@ -246,7 +246,7 @@ impl CompressionConfig {
                 });
             }
         };
-        Ok(rows.clamp(1, nrows.max(1)))
+        Ok(rows.clamp(1, row_count.max(1)))
     }
 }
 

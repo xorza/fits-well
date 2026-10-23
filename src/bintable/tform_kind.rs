@@ -20,7 +20,7 @@ pub enum TformKind {
     /// `X` — bit array (`repeat` bits packed into `ceil(repeat/8)` bytes).
     Bit,
     /// `B` — unsigned byte.
-    Byte,
+    U8,
     /// `I` — 16-bit integer.
     I16,
     /// `J` — 32-bit integer.
@@ -28,7 +28,7 @@ pub enum TformKind {
     /// `K` — 64-bit integer.
     I64,
     /// `A` — character (a `repeat`-length string per row).
-    Char,
+    Character,
     /// `E` — single-precision float.
     F32,
     /// `D` — double-precision float.
@@ -48,11 +48,11 @@ impl TformKind {
         Some(match code {
             b'L' => Self::Logical,
             b'X' => Self::Bit,
-            b'B' => Self::Byte,
+            b'B' => Self::U8,
             b'I' => Self::I16,
             b'J' => Self::I32,
             b'K' => Self::I64,
-            b'A' => Self::Char,
+            b'A' => Self::Character,
             b'E' => Self::F32,
             b'D' => Self::F64,
             b'C' => Self::ComplexF32,
@@ -68,11 +68,11 @@ impl TformKind {
         match self {
             Self::Logical => 'L',
             Self::Bit => 'X',
-            Self::Byte => 'B',
+            Self::U8 => 'B',
             Self::I16 => 'I',
             Self::I32 => 'J',
             Self::I64 => 'K',
-            Self::Char => 'A',
+            Self::Character => 'A',
             Self::F32 => 'E',
             Self::F64 => 'D',
             Self::ComplexF32 => 'C',
@@ -87,7 +87,7 @@ impl TformKind {
     /// column's true in-row width.
     pub(crate) const fn elem_size(self) -> usize {
         match self {
-            Self::Logical | Self::Bit | Self::Byte | Self::Char => 1,
+            Self::Logical | Self::Bit | Self::U8 | Self::Character => 1,
             Self::I16 => 2,
             Self::I32 | Self::F32 => 4,
             Self::I64 | Self::F64 | Self::ComplexF32 | Self::ArrayDesc32 => 8,
@@ -108,7 +108,7 @@ impl TformKind {
     /// [`Scaling::unsigned_kind`], which resolves the convention for both paths.
     pub(super) fn unsigned_kind(self, scaling: &Scaling) -> Option<UnsignedKind> {
         let bitpix = match self {
-            Self::Byte => Bitpix::U8,
+            Self::U8 => Bitpix::U8,
             Self::I16 => Bitpix::I16,
             Self::I32 => Bitpix::I32,
             Self::I64 => Bitpix::I64,
@@ -139,8 +139,8 @@ impl TformKind {
     ) {
         match self {
             Self::Logical => refill(out, cells, capacity, logical_from_byte, ColumnData::Logical),
-            Self::Byte | Self::Bit => refill(out, cells, capacity, |[byte]| byte, ColumnData::U8),
-            Self::Char => {
+            Self::U8 | Self::Bit => refill(out, cells, capacity, |[byte]| byte, ColumnData::U8),
+            Self::Character => {
                 let mut values = match mem::replace(out, ColumnData::U8(Vec::new())) {
                     ColumnData::Character(values) => values,
                     _ => Vec::new(),
@@ -183,7 +183,7 @@ impl TformKind {
     /// except that a heap element cannot be a descriptor and keeps its raw bytes.
     pub(super) const fn heap_kind(self) -> Self {
         match self {
-            Self::ArrayDesc32 | Self::ArrayDesc64 => Self::Byte,
+            Self::ArrayDesc32 | Self::ArrayDesc64 => Self::U8,
             kind => kind,
         }
     }
@@ -197,9 +197,7 @@ impl TformKind {
         scaling: &Scaling,
     ) -> Result<Vec<f64>> {
         Ok(match self {
-            Self::Byte => {
-                decode_be_cells(cells, capacity, |[x]| scaling.scale_integer(i64::from(x)))
-            }
+            Self::U8 => decode_be_cells(cells, capacity, |[x]| scaling.scale_integer(i64::from(x))),
             Self::I16 => decode_be_cells(cells, capacity, |bytes| {
                 scaling.scale_integer(i64::from(i16::from_be_bytes(bytes)))
             }),
@@ -215,7 +213,7 @@ impl TformKind {
             Self::F64 => decode_be_cells(cells, capacity, |bytes| {
                 scaling.scale(f64::from_be_bytes(bytes))
             }),
-            _ => return Err(FitsError::NonNumericColumn { code: self.code() }),
+            _ => return Err(FitsError::NotANumericColumn { code: self.code() }),
         })
     }
 

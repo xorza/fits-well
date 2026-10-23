@@ -45,35 +45,64 @@ pub struct Header {
     index: HashMap<Keyword, usize>,
 }
 
-/// A read-only view of one stored header record, yielded by [`Header::iter`].
-///
-/// `value` is `None` for commentary (`COMMENT`/`HISTORY`/blank-keyword) cards and
-/// `Some` for valued ones — that distinction is all a caller needs. `comment`
-/// carries the inline `/`-comment of a valued card, or the whole free text of a
-/// commentary card.
+/// One stored header record, borrowed, as [`Header::iter`] yields it.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Entry<'a> {
-    pub keyword: &'a str,
-    pub value: Option<&'a Value>,
-    pub comment: Option<&'a str>,
+pub enum RecordView<'a> {
+    /// `KEYWORD = value [/ comment]`, with its inline comment.
+    Valued {
+        keyword: &'a Keyword,
+        value: &'a Value,
+        comment: Option<&'a str>,
+    },
+    /// `COMMENT`, `HISTORY`, the blank keyword, or any other record without a value
+    /// indicator: its name, which may be any 8 bytes (§4.1.2.1) and so is text, and
+    /// its free text.
+    Commentary {
+        name: &'a str,
+        text: Option<&'a str>,
+    },
 }
 
-impl<'a> Entry<'a> {
+impl<'a> RecordView<'a> {
     fn of(card: &'a Card) -> Self {
-        Entry {
-            keyword: card.keyword(),
-            value: card.value(),
-            comment: card.comment(),
+        match card {
+            Card::Value {
+                keyword,
+                value,
+                comment,
+            } => Self::Valued {
+                keyword,
+                value,
+                comment: comment.as_deref(),
+            },
+            Card::Commentary { keyword, text } => Self::Commentary {
+                name: keyword,
+                text: text.as_deref(),
+            },
+        }
+    }
+
+    /// The record's name: a valued record's keyword, or a commentary record's text.
+    pub const fn name(self) -> &'a str {
+        match self {
+            Self::Valued { keyword, .. } => keyword.as_str(),
+            Self::Commentary { name, .. } => name,
         }
     }
 }
 
-/// One owned logical header record, returned by ordered removal operations.
+/// One header record, owned: the owned twin of [`RecordView`], which the ordered
+/// removals return.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Record {
-    pub keyword: String,
-    pub value: Option<Value>,
-    pub comment: Option<String>,
+pub enum Record {
+    /// `KEYWORD = value [/ comment]`, with its inline comment.
+    Valued {
+        keyword: Keyword,
+        value: Value,
+        comment: Option<String>,
+    },
+    /// A record without a value indicator: its name and its free text.
+    Commentary { name: String, text: Option<String> },
 }
 
 impl Header {
@@ -121,13 +150,18 @@ impl Header {
         self.cards[i].value()
     }
 
-    /// The first valued card with this keyword: its value and its comment.
-    pub fn entry(
+    /// The inline comment of the first valued card with this keyword; `None` when the
+    /// card has none or the header holds no such card. The read twin of
+    /// [`Header::set_comment`].
+    pub fn get_comment(
         &self,
         keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
-    ) -> Result<Option<Entry<'_>>> {
+    ) -> Result<Option<&str>> {
         let keyword = checked(keyword)?;
-        Ok(self.index.get(&keyword).map(|&i| Entry::of(&self.cards[i])))
+        Ok(self
+            .index
+            .get(&keyword)
+            .and_then(|&i| self.cards[i].comment()))
     }
 
     /// Read an optional logical keyword without conflating absence with a wrong type.
@@ -274,11 +308,11 @@ impl Header {
             .position(|card| card.keyword() == keyword.as_str()))
     }
 
-    /// Every stored record in file order, as [`Entry`] views — duplicates and
-    /// order preserved (the whole point of the ordered model), so `COMMENT`/`HISTORY`
-    /// runs and repeated keywords come through intact. The implicit `END` is not a
-    /// record and is never yielded. For valued keywords only, filter on
-    /// `e.value`: `header.iter().filter_map(|e| Some((e.keyword, e.value?)))`.
+    /// Every stored record in file order, as a [`RecordView`] — duplicates and order
+    /// preserved (the whole point of the ordered model), so `COMMENT`/`HISTORY` runs
+    /// and repeated keywords come through intact. The implicit `END` is not a record
+    /// and is never yielded. A valued record is [`RecordView::Valued`], with its
+    /// [`Keyword`].
     pub fn iter(&self) -> Iter<'_> {
         Iter {
             cards: self.cards.iter(),
@@ -503,15 +537,14 @@ impl Header {
                 keyword,
                 value,
                 comment,
-            } => Record {
-                keyword: keyword.to_string(),
-                value: Some(value),
+            } => Record::Valued {
+                keyword,
+                value,
                 comment,
             },
-            Card::Commentary { keyword, text } => Record {
-                keyword,
-                value: None,
-                comment: text,
+            Card::Commentary { keyword, text } => Record::Commentary {
+                name: keyword,
+                text,
             },
         })
     }
@@ -589,7 +622,7 @@ impl Header {
     }
 
     /// Attach (or replace) the inline comment of an existing valued keyword. Errors
-    /// with [`FitsError::KeywordNotFound`] for a keyword the header does not hold.
+    /// with [`FitsError::MissingKeyword`] for a keyword the header does not hold.
     /// An error leaves the header unchanged.
     pub fn set_comment(
         &mut self,
@@ -599,7 +632,7 @@ impl Header {
         let keyword = checked(keyword)?;
         validate_ascii(text, "header comment")?;
         let Some(&i) = self.index.get(&keyword) else {
-            return Err(FitsError::KeywordNotFound { keyword });
+            return Err(FitsError::MissingKeyword { keyword });
         };
         let Card::Value { comment, .. } = &mut self.cards[i] else {
             unreachable!("the keyword index holds value cards only");
@@ -659,7 +692,7 @@ fn checked(name: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Keywor
 }
 
 impl<'a> IntoIterator for &'a Header {
-    type Item = Entry<'a>;
+    type Item = RecordView<'a>;
     type IntoIter = Iter<'a>;
 
     fn into_iter(self) -> Iter<'a> {
@@ -667,17 +700,17 @@ impl<'a> IntoIterator for &'a Header {
     }
 }
 
-/// The records of a [`Header`], in order, as [`Entry`] views.
+/// The records of a [`Header`], in order, as [`RecordView`] views.
 #[derive(Debug, Clone)]
 pub struct Iter<'a> {
     cards: slice::Iter<'a, Card>,
 }
 
 impl<'a> Iterator for Iter<'a> {
-    type Item = Entry<'a>;
+    type Item = RecordView<'a>;
 
-    fn next(&mut self) -> Option<Entry<'a>> {
-        self.cards.next().map(Entry::of)
+    fn next(&mut self) -> Option<RecordView<'a>> {
+        self.cards.next().map(RecordView::of)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {

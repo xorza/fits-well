@@ -77,7 +77,7 @@ fn payload_lengths_and_heap_ranges_cover_boundaries() {
             count: 0,
             offset: usize::MAX,
         }
-        .heap_range(TformKind::Byte, 10, 10)
+        .heap_range(TformKind::U8, 10, 10)
         .unwrap(),
         10..10
     );
@@ -91,7 +91,7 @@ fn payload_lengths_and_heap_ranges_cover_boundaries() {
         offset: 2,
     };
     assert_eq!(
-        byte_alias.heap_range(TformKind::Byte, 8, 12).unwrap(),
+        byte_alias.heap_range(TformKind::U8, 8, 12).unwrap(),
         integer_alias.heap_range(TformKind::I16, 8, 12).unwrap()
     );
     assert_eq!(
@@ -99,7 +99,7 @@ fn payload_lengths_and_heap_ranges_cover_boundaries() {
             count: 1,
             offset: usize::MAX - 1,
         }
-        .heap_range(TformKind::Byte, 0, usize::MAX)
+        .heap_range(TformKind::U8, 0, usize::MAX)
         .unwrap(),
         usize::MAX - 1..usize::MAX
     );
@@ -108,7 +108,7 @@ fn payload_lengths_and_heap_ranges_cover_boundaries() {
             count: 2,
             offset: usize::MAX - 1,
         }
-        .heap_range(TformKind::Byte, 0, usize::MAX),
+        .heap_range(TformKind::U8, 0, usize::MAX),
         Err(FitsError::DataUnitOverflow)
     ));
     assert!(matches!(
@@ -116,7 +116,7 @@ fn payload_lengths_and_heap_ranges_cover_boundaries() {
             count: 2,
             offset: 3,
         }
-        .heap_range(TformKind::Byte, 10, 14),
+        .heap_range(TformKind::U8, 10, 14),
         Err(FitsError::UnexpectedEof)
     ));
 }

@@ -284,7 +284,7 @@ impl Image {
     ) -> Result<Self> {
         let shape = shape.into();
         let samples = samples.into();
-        Borrowed::new(&shape, samples.as_view(), scaling)?;
+        Borrowed::new(&shape, samples.view(), scaling)?;
         Ok(Self {
             shape,
             samples,
@@ -298,7 +298,7 @@ impl Image {
         Borrowed {
             shape: &self.shape,
             scaling: self.scaling,
-            samples: self.samples.as_view(),
+            samples: self.samples.view(),
         }
     }
 

@@ -150,7 +150,7 @@ impl ColMeta {
     /// `RICE_1` pixel width (`B`, `I` and `J`); other types can't use Rice.
     fn rice_width(&self) -> Option<IntBitpix> {
         match self.compression_kind() {
-            TformKind::Byte => Some(IntBitpix::U8),
+            TformKind::U8 => Some(IntBitpix::U8),
             TformKind::I16 => Some(IntBitpix::I16),
             TformKind::I32 => Some(IntBitpix::I32),
             _ => None,
@@ -174,7 +174,7 @@ fn pick_algo(kind: TformKind, requested: Algo) -> Algo {
         // Logical/bit/char/complex always gzip (Rice/shuffle are ill-defined).
         TformKind::Logical
         | TformKind::Bit
-        | TformKind::Char
+        | TformKind::Character
         | TformKind::ComplexF32
         | TformKind::ComplexF64 => {
             if requested == Algo::Gzip2 {
@@ -190,7 +190,7 @@ fn pick_algo(kind: TformKind, requested: Algo) -> Algo {
                 Algo::Gzip2
             }
         }
-        TformKind::I16 | TformKind::I32 | TformKind::Byte => requested,
+        TformKind::I16 | TformKind::I32 | TformKind::U8 => requested,
         TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
             unreachable!("compression is selected from the VLA element type")
         }
@@ -235,7 +235,7 @@ pub(crate) fn compress_table(
     );
     let schema = Schema::parse(header)?;
     let ncols = schema.columns.len();
-    let nrows = schema.nrows;
+    let nrows = schema.row_count;
     let naxis1 = schema.row_len;
     let pcount = header.require_usize(keywords::PCOUNT)?;
     let rpt = config.table_tile_rows(nrows, naxis1)?;
@@ -452,7 +452,7 @@ impl TiledTable {
             let zform = header
                 .require_text(keywords::ZFORM.indexed(n)?)?
                 .to_string();
-            let tform = Tform::parse(&zform)?;
+            let tform = zform.parse::<Tform>()?;
             let algo = match header.get_text(keywords::ZCTYP.indexed(n)?)? {
                 Some(s) => Algo::parse(s)?,
                 None => Algo::Gzip2, // cfitsio's default when ZCTYPn is absent
@@ -521,14 +521,14 @@ impl TiledTable {
         columns: Option<&[bool]>,
     ) -> Result<DecodedRows> {
         bind_table(header, container)?;
-        let nrows = self.schema.nrows;
+        let nrows = self.schema.row_count;
         let naxis1 = self.schema.row_len;
         let rpt = self.rows_per_tile;
         let nchunks = nrows.div_ceil(rpt);
-        if container.nrows != nchunks {
+        if container.row_count != nchunks {
             return Err(FitsError::DataSizeMismatch {
                 expected: nchunks,
-                got: container.nrows,
+                got: container.row_count,
             });
         }
         debug_assert!(rows.end <= nrows, "a validated row range");
@@ -639,7 +639,7 @@ fn bind_table(header: &Header, table: TableView<'_>) -> Result<()> {
         (keywords::BITPIX, 8usize),
         (keywords::NAXIS, 2),
         (keywords::NAXIS.indexed(1)?, table.row_len),
-        (keywords::NAXIS.indexed(2)?, table.nrows),
+        (keywords::NAXIS.indexed(2)?, table.row_count),
         (keywords::GCOUNT, 1),
         (keywords::TFIELDS, table.columns.len()),
     ] {
@@ -660,7 +660,7 @@ fn bind_table(header: &Header, table: TableView<'_>) -> Result<()> {
             .ok_or(FitsError::DataUnitOverflow)?;
         let keyword = keywords::TFORM.indexed(n)?;
         let tform = header.require_text(keyword)?;
-        if Tform::parse(tform)? != column.tform {
+        if tform.parse::<Tform>()? != column.tform {
             return Err(metadata_mismatch(keyword.as_str()));
         }
     }
@@ -695,13 +695,14 @@ fn bind_table(header: &Header, table: TableView<'_>) -> Result<()> {
 }
 
 fn reject_compression_metadata(header: &Header) -> Result<()> {
-    for entry in header {
-        if reserved_keywords::is_table_compression(entry.keyword, 999)
+    for record in header {
+        let name = record.name();
+        if reserved_keywords::is_table_compression(name, 999)
             || reserved_keywords::TABLE_PRESERVED
                 .iter()
-                .any(|&(_, container)| container.as_str() == entry.keyword)
+                .any(|&(_, container)| container.as_str() == name)
         {
-            return Err(metadata_mismatch(entry.keyword));
+            return Err(metadata_mismatch(name));
         }
     }
     Ok(())
@@ -838,7 +839,7 @@ impl RestoreChunk<'_> {
             }
             if compressed.count == 0
                 || compressed
-                    .heap_range(TformKind::Byte, table.heap_offset, table.heap_end)
+                    .heap_range(TformKind::U8, table.heap_offset, table.heap_end)
                     .is_err()
             {
                 return Err(VlaLayoutError::Rejected);
@@ -946,7 +947,7 @@ impl RestoreChunk<'_> {
                 }
                 continue;
             }
-            let stream = table.pq_payload(compressed, TformKind::Byte)?;
+            let stream = table.pq_payload(compressed, TformKind::U8)?;
             decompress_vla_payload(stream, m, original.count, expected, scratch)?;
             self.heap[original_range].copy_from_slice(&scratch.vla);
         }
@@ -1077,7 +1078,7 @@ pub(crate) mod internals {
     pub(crate) fn uncompress_table(header: &Header, table: TableView<'_>) -> Result<HduParts> {
         let tiled = TiledTable::new(header)?;
         let data = tiled
-            .decode(header, table, &(0..tiled.schema.nrows), None)?
+            .decode(header, table, &(0..tiled.schema.row_count), None)?
             .data;
         Ok(HduParts {
             header: tiled.header,
@@ -1085,15 +1086,15 @@ pub(crate) mod internals {
         })
     }
 
-    /// i16, i32, f32, f64 and byte columns, and a repeat-3 i16 vector, over `nrows`
-    /// rows of simple formulas with negative values among them; the integer formulas
-    /// repeat every 1000 or 10 000 rows, so they stay in range for any row count.
-    pub(crate) fn mixed_columns(nrows: usize) -> Vec<WriteColumn> {
+    /// i16, i32, f32, f64 and byte columns, and a repeat-3 i16 vector, over
+    /// `row_count` rows of simple formulas with negative values among them; the integer
+    /// formulas repeat every 1000 or 10 000 rows, so they stay in range for any count.
+    pub(crate) fn mixed_columns(row_count: usize) -> Vec<WriteColumn> {
         vec![
             WriteColumn::fixed(
                 "SHORT",
                 ColumnData::I16(
-                    (0..nrows)
+                    (0..row_count)
                         .map(|i| i16::try_from(i % 1000).unwrap() * 7 - 30)
                         .collect(),
                 ),
@@ -1102,7 +1103,7 @@ pub(crate) mod internals {
             WriteColumn::fixed(
                 "INT",
                 ColumnData::I32(
-                    (0..nrows)
+                    (0..row_count)
                         .map(|i| i32::try_from(i % 10_000).unwrap() * 100_000 - 5)
                         .collect(),
                 ),
@@ -1110,23 +1111,23 @@ pub(crate) mod internals {
             ),
             WriteColumn::fixed(
                 "FLT",
-                ColumnData::F32((0..nrows).map(|i| i as f32 * 1.5 - 3.25).collect()),
+                ColumnData::F32((0..row_count).map(|i| i as f32 * 1.5 - 3.25).collect()),
                 1,
             ),
             WriteColumn::fixed(
                 "DBL",
-                ColumnData::F64((0..nrows).map(|i| i as f64 * 0.1).collect()),
+                ColumnData::F64((0..row_count).map(|i| i as f64 * 0.1).collect()),
                 1,
             ),
             WriteColumn::fixed(
                 "BYTE",
-                ColumnData::U8((0..nrows).map(|i| (i * 3) as u8).collect()),
+                ColumnData::U8((0..row_count).map(|i| (i * 3) as u8).collect()),
                 1,
             ),
             WriteColumn::fixed(
                 "VEC",
                 ColumnData::I16(
-                    (0..nrows * 3)
+                    (0..row_count * 3)
                         .map(|i| i16::try_from(i % 10_000).unwrap() * 2)
                         .collect(),
                 ),

@@ -46,11 +46,10 @@ fn main() -> fits_well::Result<()> {
         .parse::<Scale>()?;
 
     // The DATE-OBS string itself parses to a `Datetime`, then to Julian Date.
-    let t = Datetime::parse(
-        header
-            .get_text("DATE-OBS")?
-            .expect("example header sets DATE-OBS"),
-    )?;
+    let t = header
+        .get_text("DATE-OBS")?
+        .expect("example header sets DATE-OBS")
+        .parse::<Datetime>()?;
     let jd = t.to_jd(&timesys)?;
     println!(
         "DATE-OBS -> JD {:.5}, MJD {:.5} in {timesys:?}",

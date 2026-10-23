@@ -43,7 +43,7 @@ fn main() -> fits_well::Result<()> {
     // `images` lists the HDUs that hold images, so you pick indices rather than
     // hard-coding them — here the primary plus the extension, `[0, 1]`.
     let mut reader = FitsReader::open(File::open(&path)?)?;
-    let images: Vec<usize> = reader.images().collect();
+    let images: Vec<usize> = reader.images().map(|hdu| hdu.index).collect();
     println!("image HDUs: {images:?}");
 
     // `image` resolves the HDU's geometry once; `metadata` reads it without touching

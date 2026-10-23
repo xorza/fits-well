@@ -17,6 +17,7 @@ pub(crate) mod phase_axis;
 pub(crate) mod reference_position;
 pub(crate) mod scale;
 pub(crate) mod time_axis_kind;
+pub(crate) mod unit;
 
 /// JD of the MJD zero point (1858-11-17T00:00 UTC).
 const MJD0: f64 = 2_400_000.5;

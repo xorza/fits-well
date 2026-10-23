@@ -37,15 +37,15 @@ fn table_tile_rows_follow_the_config_and_cfitsio_default() {
     assert_eq!(rice.table_tile_rows(1_000_000, 4000).unwrap(), 2500);
     // Rows of no bytes have no default height: the whole table is one tile.
     assert_eq!(rice.table_tile_rows(7, 0).unwrap(), 7);
-    // A set height is cut to 1..=nrows; an empty table still has a height of 1.
-    let tiled = |rows: usize| rice.clone().tiled([rows]);
+    // A set height is cut to 1..=row_count; an empty table still has a height of 1.
+    let tiled = |rows: usize| rice.clone().with_tiles([rows]);
     assert_eq!(tiled(3).table_tile_rows(10, 8).unwrap(), 3);
     assert_eq!(tiled(0).table_tile_rows(10, 8).unwrap(), 1);
     assert_eq!(tiled(30).table_tile_rows(10, 8).unwrap(), 10);
     assert_eq!(tiled(3).table_tile_rows(0, 8).unwrap(), 1);
 
     assert!(matches!(
-        rice.clone().tiled([3, 2]).table_tile_rows(10, 8),
+        rice.clone().with_tiles([3, 2]).table_tile_rows(10, 8),
         Err(FitsError::RankMismatch {
             ranked: Ranked::TileShape,
             expected: 1,

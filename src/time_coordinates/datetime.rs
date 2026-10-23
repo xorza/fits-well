@@ -5,6 +5,7 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::time_coordinates::scale::{Scale, ScaleKind};
 use crate::time_coordinates::{MJD0, SEC_PER_DAY};
+use std::str::FromStr;
 
 /// A calendar datetime (proleptic Gregorian, time-scale agnostic). `second` may
 /// reach 60.x; [`Datetime::to_jd`] accepts that label only for UTC.
@@ -19,64 +20,6 @@ pub struct Datetime {
 }
 
 impl Datetime {
-    /// Parse a FITS ISO-8601 datetime: unsigned `YYYY-MM-DD` or signed
-    /// `±YYYYY-MM-DD`, optionally followed by `Thh:mm:ss[.sss…]` (§9.1.1). No
-    /// component defaulting; the date is required, the time part optional.
-    pub fn parse(s: &str) -> Result<Self> {
-        let invalid = || FitsError::InvalidTime {
-            detail: format!("DATE '{s}'"),
-        };
-        let s = s.trim();
-        // §9.1.1: no timezone designator is permitted (`Z` or a numeric offset).
-        if s.contains(['Z', 'z']) {
-            return Err(invalid());
-        }
-        let (date, time) = match s.split_once('T') {
-            Some((d, t)) => (d, Some(t)),
-            None => (s, None),
-        };
-        // `[±C]CCYY-MM-DD`: the sign selects the five-digit extended form.
-        let (sign, year_width, rest) = match date.strip_prefix('-') {
-            Some(r) => (-1, 5, r),
-            None => match date.strip_prefix('+') {
-                Some(r) => (1, 5, r),
-                None => (1, 4, date),
-            },
-        };
-        let mut dp = rest.split('-');
-        let y_str = dp.next().ok_or_else(invalid)?;
-        let m_str = dp.next().ok_or_else(invalid)?;
-        let d_str = dp.next().ok_or_else(invalid)?;
-        if dp.next().is_some() || y_str.len() != year_width || !all_digits(y_str) {
-            return Err(invalid());
-        }
-        let year = sign * y_str.parse::<i64>().map_err(|_| invalid())?;
-        let month = parse_fixed(m_str, 2).ok_or_else(invalid)?;
-        let day = parse_fixed(d_str, 2).ok_or_else(invalid)?;
-        if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
-            return Err(invalid());
-        }
-
-        let (mut hour, mut minute, mut second) = (0u32, 0u32, 0.0f64);
-        if let Some(t) = time {
-            let mut tp = t.split(':');
-            hour = parse_fixed(tp.next().ok_or_else(invalid)?, 2).ok_or_else(invalid)?;
-            minute = parse_fixed(tp.next().ok_or_else(invalid)?, 2).ok_or_else(invalid)?;
-            second = parse_seconds(tp.next().ok_or_else(invalid)?).ok_or_else(invalid)?;
-            if tp.next().is_some() || hour >= 24 || minute >= 60 || !(0.0..61.0).contains(&second) {
-                return Err(invalid());
-            }
-        }
-        Ok(Self {
-            year,
-            month,
-            day,
-            hour,
-            minute,
-            second,
-        })
-    }
-
     /// Julian Date of this datetime in its declared `scale`.
     ///
     /// UTC leap-second labels remain valid FITS datetimes, but converting one to
@@ -128,6 +71,68 @@ impl Datetime {
         }
         Err(FitsError::InvalidTime {
             detail: format!("datetime {self:?} in {scale:?}"),
+        })
+    }
+}
+
+/// Parse a FITS ISO-8601 datetime: unsigned `YYYY-MM-DD` or signed
+/// `±YYYYY-MM-DD`, optionally followed by `Thh:mm:ss[.sss…]` (§9.1.1). No
+/// component defaulting; the date is required, the time part optional.
+impl FromStr for Datetime {
+    type Err = FitsError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let invalid = || FitsError::InvalidTime {
+            detail: format!("DATE '{s}'"),
+        };
+        let s = s.trim();
+        // §9.1.1: no timezone designator is permitted (`Z` or a numeric offset).
+        if s.contains(['Z', 'z']) {
+            return Err(invalid());
+        }
+        let (date, time) = match s.split_once('T') {
+            Some((d, t)) => (d, Some(t)),
+            None => (s, None),
+        };
+        // `[±C]CCYY-MM-DD`: the sign selects the five-digit extended form.
+        let (sign, year_width, rest) = match date.strip_prefix('-') {
+            Some(r) => (-1, 5, r),
+            None => match date.strip_prefix('+') {
+                Some(r) => (1, 5, r),
+                None => (1, 4, date),
+            },
+        };
+        let mut dp = rest.split('-');
+        let y_str = dp.next().ok_or_else(invalid)?;
+        let m_str = dp.next().ok_or_else(invalid)?;
+        let d_str = dp.next().ok_or_else(invalid)?;
+        if dp.next().is_some() || y_str.len() != year_width || !all_digits(y_str) {
+            return Err(invalid());
+        }
+        let year = sign * y_str.parse::<i64>().map_err(|_| invalid())?;
+        let month = parse_fixed(m_str, 2).ok_or_else(invalid)?;
+        let day = parse_fixed(d_str, 2).ok_or_else(invalid)?;
+        if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
+            return Err(invalid());
+        }
+
+        let (mut hour, mut minute, mut second) = (0u32, 0u32, 0.0f64);
+        if let Some(t) = time {
+            let mut tp = t.split(':');
+            hour = parse_fixed(tp.next().ok_or_else(invalid)?, 2).ok_or_else(invalid)?;
+            minute = parse_fixed(tp.next().ok_or_else(invalid)?, 2).ok_or_else(invalid)?;
+            second = parse_seconds(tp.next().ok_or_else(invalid)?).ok_or_else(invalid)?;
+            if tp.next().is_some() || hour >= 24 || minute >= 60 || !(0.0..61.0).contains(&second) {
+                return Err(invalid());
+            }
+        }
+        Ok(Self {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
         })
     }
 }

@@ -19,8 +19,8 @@ use crate::compress::quantize;
 use crate::compress::rice;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::header_model::RecordView;
 use crate::header_model::{Header, keywords};
-use crate::keyword::Keyword;
 
 /// The decode parameters constant across all of a tiled image's tiles: the codec,
 /// the integer plane the tiles are stored in (and, for a float image, its float
@@ -53,11 +53,14 @@ impl CodecParams {
             bytepix: IntBitpix::I32,
             smoothing: Smoothing::Off,
         };
-        for entry in header {
-            let Some(i) = compress::parameter_index(entry.keyword) else {
+        for record in header {
+            let RecordView::Valued { keyword, .. } = record else {
                 continue;
             };
-            let Some(name) = header.get_text(Keyword::try_from(entry.keyword)?)? else {
+            let Some(i) = compress::parameter_index(keyword.as_str()) else {
+                continue;
+            };
+            let Some(name) = header.get_text(*keyword)? else {
                 continue;
             };
             let zval = keywords::ZVAL.indexed(i)?;

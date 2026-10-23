@@ -122,7 +122,7 @@ impl<'r, S: Source> ImageReader<'r, S> {
     /// image's sections and whole reads, and a compressed image's whole reads. A
     /// compressed section's tiles are not, and the finish reads what was not.
     #[must_use]
-    pub const fn with_checksum(mut self) -> Self {
+    pub const fn with_checksums(mut self) -> Self {
         self.sum = Some(DataChecksum::of(self.hdu));
         self
     }
@@ -189,7 +189,7 @@ impl<'r, S: Source> ImageReader<'r, S> {
         Ok(())
     }
 
-    /// Judge the HDU's `DATASUM` and `CHECKSUM`: the sum [`with_checksum`](Self::with_checksum)
+    /// Judge the HDU's `DATASUM` and `CHECKSUM`: the sum [`with_checksums`](Self::with_checksums)
     /// began, completed from whatever the reads did not feed, or, without it, the whole
     /// data unit read now — the report of
     /// [`FitsReader::verify_checksum`](crate::FitsReader::verify_checksum).

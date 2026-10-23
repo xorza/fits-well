@@ -21,7 +21,7 @@ use crate::error::Result;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TableView<'a> {
     pub(crate) columns: &'a [Column],
-    pub(crate) nrows: usize,
+    pub(crate) row_count: usize,
     /// Byte width of one row (`NAXIS1`).
     pub(crate) row_len: usize,
     pub(crate) heap_offset: usize,
@@ -38,7 +38,7 @@ impl<'a> TableView<'a> {
         }
         Ok(TableView {
             columns: &schema.columns,
-            nrows: schema.nrows,
+            row_count: schema.row_count,
             row_len: schema.row_len,
             heap_offset: schema.heap_offset,
             heap_end: schema.heap_end,
@@ -46,25 +46,25 @@ impl<'a> TableView<'a> {
         })
     }
 
-    /// A compacted row selection: `nrows` rows of `row_len` bytes, then a heap that
+    /// A compacted row selection: `row_count` rows of `row_len` bytes, then a heap that
     /// runs to the end of `bytes`.
     ///
     /// # Panics
     /// When `bytes` is shorter than the rows — the selection builds both together.
     pub(crate) fn compact(
         columns: &'a [Column],
-        nrows: usize,
+        row_count: usize,
         row_len: usize,
         bytes: &'a [u8],
     ) -> Self {
-        let heap_offset = nrows * row_len;
+        let heap_offset = row_count * row_len;
         assert!(
             heap_offset <= bytes.len(),
             "a compacted selection holds its rows"
         );
         TableView {
             columns,
-            nrows,
+            row_count,
             row_len,
             heap_offset,
             heap_end: bytes.len(),
@@ -72,10 +72,10 @@ impl<'a> TableView<'a> {
         }
     }
 
-    /// The fixed-width main table (`nrows × NAXIS1` bytes), excluding the heap.
+    /// The fixed-width main table (`row_count × NAXIS1` bytes), excluding the heap.
     #[cfg(feature = "compression")]
     pub(crate) fn raw_rows(&self) -> &'a [u8] {
-        &self.bytes[..self.nrows * self.row_len]
+        &self.bytes[..self.row_count * self.row_len]
     }
 
     /// A handle to the variable-length column named `name`, or `None` when the table
@@ -126,6 +126,6 @@ impl<'a> TableView<'a> {
     }
 
     pub(crate) fn cells(self, col: &'a Column) -> impl ExactSizeIterator<Item = &'a [u8]> + 'a {
-        (0..self.nrows).map(move |row| self.cell(col, row))
+        (0..self.row_count).map(move |row| self.cell(col, row))
     }
 }
