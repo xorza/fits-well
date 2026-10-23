@@ -5,7 +5,8 @@ use crate::error::Result;
 use crate::header_model::Header;
 use crate::keyword::Keyword;
 use crate::world_coordinates::celestial_pole::CelestialPole;
-use crate::world_coordinates::first_real;
+use crate::world_coordinates::distortion::Distortion;
+use crate::world_coordinates::distortion::tpv::Tpv;
 use crate::world_coordinates::projected_celestial_axes::ProjectedCelestialAxes;
 use crate::world_coordinates::projection::{Projection, ProjectionParameters};
 use crate::world_coordinates::read_real;
@@ -21,6 +22,8 @@ pub(super) struct CelestialTransform {
     /// The native→celestial pole, computed from the fiducial point.
     pub(super) pole: CelestialPole,
     pub(super) parameters: ProjectionParameters,
+    /// The TPV polynomials between the matrix and the projection, for a `-TPV` pair.
+    pub(super) tpv: Option<Tpv>,
 }
 
 impl CelestialTransform {
@@ -35,6 +38,7 @@ impl CelestialTransform {
         alt: Alternate,
         celestial_axes: Option<ProjectedCelestialAxes>,
         crval: &[f64],
+        pv_meaning: PvMeaning,
         unsupported_axes: &mut Vec<usize>,
     ) -> Result<Option<Self>> {
         let Some(axes) = celestial_axes else {
@@ -43,12 +47,22 @@ impl CelestialTransform {
         let lng = axes.longitude;
         let lat = axes.latitude;
         let proj = axes.projection;
+        let tpv = (axes.distortion == Some(Distortion::Tpv))
+            .then(|| Tpv::from_header(header, alt, lng, lat))
+            .transpose()?;
+        // The celestial `PVi_m` are TPV terms on a `-TPV` pair, and SCAMP's leftovers
+        // beside SIP; either way they set no projection parameter, fiducial point or pole.
+        let read_pv = |keyword: Option<Keyword>| -> Result<Option<f64>> {
+            match pv_meaning {
+                PvMeaning::Projection if tpv.is_none() => read_real(header, keyword),
+                PvMeaning::Projection | PvMeaning::Distortion => Ok(None),
+            }
+        };
         let mut pv = proj.parameter_defaults();
         for (m, value) in pv.iter_mut().enumerate() {
-            if let Some(header_value) = read_real(
-                header,
-                Keyword::fitting(format_args!("PV{}_{m}{alt}", lat + 1)),
-            )? {
+            if let Some(header_value) =
+                read_pv(Keyword::fitting(format_args!("PV{}_{m}{alt}", lat + 1)))?
+            {
                 *value = header_value;
             }
         }
@@ -67,32 +81,24 @@ impl CelestialTransform {
         // longitude axis (§8.3).
         let reference = proj.reference_point(&pv);
         let (mut phi0, mut theta0) = (reference.phi, reference.theta);
-        if let Some(v) = read_real(
-            header,
-            Keyword::fitting(format_args!("PV{}_1{alt}", lng + 1)),
-        )? {
+        if let Some(v) = read_pv(Keyword::fitting(format_args!("PV{}_1{alt}", lng + 1)))? {
             phi0 = v;
         }
-        if let Some(v) = read_real(
-            header,
-            Keyword::fitting(format_args!("PV{}_2{alt}", lng + 1)),
-        )? {
+        if let Some(v) = read_pv(Keyword::fitting(format_args!("PV{}_2{alt}", lng + 1)))? {
             theta0 = v;
         }
         let (alpha0, delta0) = (crval[lng], crval[lat]);
         // LONPOLE (= LONPOLEa or PVi_3a): default φ0 if δ0 ≥ θ0, else φ0 + 180°.
-        let phip = first_real(
-            header,
-            Keyword::fitting(format_args!("LONPOLE{alt}")),
-            Keyword::fitting(format_args!("PV{}_3{alt}", lng + 1)),
-        )?
+        let phip = match read_real(header, Keyword::fitting(format_args!("LONPOLE{alt}")))? {
+            Some(value) => Some(value),
+            None => read_pv(Keyword::fitting(format_args!("PV{}_3{alt}", lng + 1)))?,
+        }
         .unwrap_or(if delta0 >= theta0 { phi0 } else { phi0 + 180.0 });
         // LATPOLE (= LATPOLEa or PVi_4a): default 90°.
-        let thetap = first_real(
-            header,
-            Keyword::fitting(format_args!("LATPOLE{alt}")),
-            Keyword::fitting(format_args!("PV{}_4{alt}", lng + 1)),
-        )?
+        let thetap = match read_real(header, Keyword::fitting(format_args!("LATPOLE{alt}")))? {
+            Some(value) => Some(value),
+            None => read_pv(Keyword::fitting(format_args!("PV{}_4{alt}", lng + 1)))?,
+        }
         .unwrap_or(90.0);
         Ok(Some(Self {
             lng,
@@ -100,6 +106,31 @@ impl CelestialTransform {
             projection: proj,
             pole: CelestialPole::from_fiducial(phi0, theta0, alpha0, delta0, phip, thetap)?,
             parameters,
+            tpv,
         }))
     }
+}
+
+impl CelestialTransform {
+    /// The intermediate coordinates the projection takes: `(x, y)` through TPV on a
+    /// `-TPV` pair, as they are otherwise.
+    pub(super) fn distort(&self, x: f64, y: f64) -> [f64; 2] {
+        self.tpv.as_ref().map_or([x, y], |tpv| tpv.forward(x, y))
+    }
+
+    /// The inverse of [`Self::distort`].
+    pub(super) fn undistort(&self, x: f64, y: f64) -> Result<[f64; 2]> {
+        self.tpv
+            .as_ref()
+            .map_or(Ok([x, y]), |tpv| tpv.inverse(x, y))
+    }
+}
+
+/// What the celestial `PVi_m` of a pair carry besides TPV terms: projection parameters,
+/// or a distortion's terms that set nothing (SCAMP's TPV terms beside SIP, which
+/// astropy drops: `wcs.py`, `_fix_scamp`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PvMeaning {
+    Projection,
+    Distortion,
 }

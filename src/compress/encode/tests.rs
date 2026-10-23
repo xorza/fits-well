@@ -1,18 +1,24 @@
-use crate::bitpix::Bitpix;
-use crate::compress::encode::hcompress_default_rows;
+use crate::bintable::Table;
+use crate::bintable::descriptor::DescriptorWidth;
+use crate::compress::decode::tiled_image::TiledImage;
+use crate::compress::encode::{FloatImage, QuantizedFloatImage, hcompress_default_rows};
 use crate::compress::internals::{mask, ramp};
+use crate::compress::plane::FloatSamples;
+use crate::compress::quantization::{Dither, DitherSeed, Levels, QuantizationStep};
 use crate::compress::*;
 use crate::fits_writer::FitsWriter;
 use crate::fits_writer::internals::{rejected_before_output, round_trip};
+use crate::hdu::image_geometry::ImageGeometry;
+use crate::hdu::{HduKind, HduRole};
 use crate::header_model::keywords;
 use crate::header_model::value::Value;
 use crate::image_model::Image;
 use crate::image_model::data::Data;
 use crate::image_model::internals::physical;
-use crate::image_model::scaling::Scaling;
 
 use crate::reader::FitsReader;
-use crate::reader::internals::read_whole;
+use crate::reader::internals::{open_fixture, read_whole};
+use crate::reader::source::Source;
 use std::io::Cursor;
 use std::iter;
 
@@ -255,11 +261,17 @@ fn hcompress_writer_enforces_standard_image_constraints() {
             if name == "HCOMPRESS_1 requires a two-dimensional image"
     ));
 
-    let float = Image::new(vec![4, 1], vec![1.0f32, 2.0, 3.0, 4.0], Scaling::IDENTITY).unwrap();
+    let float = Image::new(vec![8, 8], float_field()[..64].to_vec(), Scaling::IDENTITY).unwrap();
+    let dither2 =
+        Quantization::relative(4.0, Dither::Subtractive2(DitherSeed::FROM_SAMPLES)).unwrap();
     assert!(matches!(
-        writer.write_compressed_image(float.view(), &CompressionConfig::new(Compression::Hcompress(Hcompress::lossy(2.0).unwrap())), None),
-        Err(FitsError::UnsupportedCompression { name })
-            if name == "HCOMPRESS_1 for float images (write)"
+        writer.write_compressed_image(float.view(), &CompressionConfig::new(Compression::Hcompress(Hcompress::default())).with_quantization(dither2), None),
+        Err(FitsError::InvalidCompressionParameter { detail })
+            if detail == "HCOMPRESS_1 cannot keep SUBTRACTIVE_DITHER_2's zeros"
+    ));
+    assert!(matches!(
+        writer.write_compressed_image(float.view(), &CompressionConfig::new(Compression::Plio), None),
+        Err(FitsError::UnsupportedCompression { name }) if name == "PLIO_1 for float images (write)"
     ));
 
     let extreme = Image::new(vec![4, 4], vec![i64::MAX; 16], Scaling::IDENTITY).unwrap();
@@ -285,7 +297,7 @@ fn hcompress_writer_enforces_standard_image_constraints() {
     )
     .unwrap();
     assert!(matches!(
-        writer.write_compressed_image(undefined.view(), &CompressionConfig::new(Compression::Hcompress(Hcompress::lossy(2.0).unwrap())).with_tiles([8, 8]), None),
+        writer.write_compressed_image(undefined.view(), &CompressionConfig::new(Compression::Hcompress(Hcompress::relative(2.0).unwrap())).with_tiles([8, 8]), None),
         Err(FitsError::UnsupportedCompression { name })
             if name == "lossy HCOMPRESS_1 with undefined pixels requires a null mask"
     ));
@@ -298,25 +310,40 @@ fn dither_option_sets_zquantiz_and_round_trips() {
         samples: Data::F32(float_field()),
         scaling: Scaling::IDENTITY,
     };
-    // Each `DitherMethod` writes its `ZQUANTIZ` keyword and decodes within half a
+    // Each `Dither` writes its `ZQUANTIZ` keyword and decodes within half a
     // quantization step (plus an f32 ulp for the dither arithmetic and the stored
-    // result). The three decoded planes differ pairwise, so the option is honored.
+    // result). The three decoded planes differ pairwise, so the option is honored. A
+    // dither writes the seed of the samples' bytes as `ZDITHER0`; no dither writes none.
     let original = float_field();
+    let seed = quantize::sample_seed(FloatSamples::F32(&original));
     let mut planes = Vec::new();
-    for (dither, zquantiz) in [
-        (DitherMethod::None, "NO_DITHER"),
-        (DitherMethod::Subtractive1, "SUBTRACTIVE_DITHER_1"),
-        (DitherMethod::Subtractive2, "SUBTRACTIVE_DITHER_2"),
+    for (dither, zquantiz, zdither0) in [
+        (Dither::None, "NO_DITHER", None),
+        (
+            Dither::Subtractive1(DitherSeed::FROM_SAMPLES),
+            "SUBTRACTIVE_DITHER_1",
+            Some(seed),
+        ),
+        (
+            Dither::Subtractive2(DitherSeed::FROM_SAMPLES),
+            "SUBTRACTIVE_DITHER_2",
+            Some(seed),
+        ),
     ] {
         let config = CompressionConfig::new(Compression::Rice)
             .with_tiles([24, 16])
-            .with_quantization(0.0, dither)
-            .unwrap();
+            .with_quantization(Quantization::relative(4.0, dither).unwrap());
         let mut r = round_trip(|w| w.write_compressed_image(image.view(), &config, None));
+        let header = &r.hdus()[1].header;
         assert_eq!(
-            r.hdus()[1].header.get_text(keywords::ZQUANTIZ).unwrap(),
+            header.get_text(keywords::ZQUANTIZ).unwrap(),
             Some(zquantiz),
             "{dither:?} must write {zquantiz}"
+        );
+        assert_eq!(
+            header.get_integer(keywords::ZDITHER0).unwrap(),
+            zdither0,
+            "{dither:?}"
         );
         let zscale = r
             .read_container_table(1)
@@ -341,6 +368,273 @@ fn dither_option_sets_zquantiz_and_round_trips() {
     assert_ne!(planes[0], planes[1]);
     assert_ne!(planes[0], planes[2]);
     assert_ne!(planes[1], planes[2]);
+}
+
+/// `ZDITHER0` is the byte sum of all the samples: two images whose first rows are
+/// equal get different seeds, the same image gives the same bytes, and a fixed seed
+/// is written as given and drives the decoder's dither.
+#[test]
+fn the_dither_seed_comes_from_every_sample() {
+    let write = |samples: Vec<f32>, dither: Dither| {
+        let image = Image::new(vec![24, 16], samples, Scaling::IDENTITY).unwrap();
+        let config = CompressionConfig::new(Compression::Rice)
+            .with_quantization(Quantization::relative(4.0, dither).unwrap());
+        let mut sink = Cursor::new(Vec::new());
+        let mut writer = FitsWriter::new(&mut sink);
+        writer
+            .write_compressed_image(image.view(), &config, None)
+            .unwrap();
+        sink.into_inner()
+    };
+    let zdither0 = |bytes: &[u8]| {
+        let reader = FitsReader::from_bytes(bytes).unwrap();
+        reader.hdus()[1]
+            .header
+            .get_integer(keywords::ZDITHER0)
+            .unwrap()
+            .unwrap()
+    };
+    let first = float_field();
+    let mut second = first.clone();
+    for value in &mut second[24..] {
+        *value += 1.0;
+    }
+    let dither = Dither::default();
+    let (a, b) = (write(first.clone(), dither), write(second, dither));
+    assert_ne!(zdither0(&a), zdither0(&b));
+    assert_eq!(
+        write(first.clone(), dither),
+        a,
+        "the same image gives the same file"
+    );
+
+    let fixed = write(
+        first.clone(),
+        Dither::Subtractive1(DitherSeed::fixed(17).unwrap()),
+    );
+    assert_eq!(zdither0(&fixed), 17);
+    let mut reader = FitsReader::from_bytes(&fixed).unwrap();
+    let zscale = reader
+        .read_container_table(1)
+        .unwrap()
+        .column("ZSCALE")
+        .unwrap()
+        .physical()
+        .unwrap();
+    let Data::F32(plane) = read_whole(&mut reader, 1).samples else {
+        panic!("expected F32");
+    };
+    for (row, (&o, &b)) in first.iter().zip(&plane).enumerate() {
+        let error = (f64::from(o) - f64::from(b)).abs();
+        assert!(
+            error <= 0.5 * zscale[row / 24] + f64::from(f32::EPSILON) * f64::from(o).abs(),
+            "pixel {row}"
+        );
+    }
+}
+
+/// `Quantization::NONE` stores the floats themselves: a NaN's payload, ±0.0 and
+/// subnormals come back bit for bit, with `ZQUANTIZ = 'NONE'` and no scale columns or
+/// seed.
+#[test]
+fn lossless_float_compression_round_trips_bit_for_bit() {
+    let f32s: Vec<f32> = (0..24 * 16)
+        .map(|i| match i % 7 {
+            0 => f32::from_bits(0x7FC0_0001),
+            1 => -0.0,
+            2 => f32::from_bits(1),
+            3 => f32::MAX,
+            _ => i as f32 * 0.37 - 50.0,
+        })
+        .collect();
+    let f64s: Vec<f64> = f32s
+        .iter()
+        .map(|&v| {
+            if v.is_nan() {
+                f64::from_bits(0x7FF8_0000_0000_0001)
+            } else {
+                f64::from(v) * 1.000_000_1
+            }
+        })
+        .collect();
+    for compression in [Compression::GZIP, Compression::GZIP_SHUFFLED] {
+        let config = CompressionConfig::new(compression).with_quantization(Quantization::NONE);
+        for image in [
+            Image::new(vec![24, 16], f32s.clone(), Scaling::IDENTITY).unwrap(),
+            Image::new(vec![24, 16], f64s.clone(), Scaling::IDENTITY).unwrap(),
+        ] {
+            let mut r = round_trip(|w| w.write_compressed_image(image.view(), &config, None));
+            let header = &r.hdus()[1].header;
+            assert_eq!(header.get_text(keywords::ZQUANTIZ).unwrap(), Some("NONE"));
+            assert_eq!(header.get_integer(keywords::ZDITHER0).unwrap(), None);
+            assert_eq!(header.get_integer(keywords::TFIELDS).unwrap(), Some(1));
+            let bits = |data: &Data| -> Vec<u64> {
+                match data {
+                    Data::F32(values) => values.iter().map(|v| u64::from(v.to_bits())).collect(),
+                    Data::F64(values) => values.iter().map(|v| v.to_bits()).collect(),
+                    other => panic!("expected floats, got {other:?}"),
+                }
+            };
+            assert_eq!(
+                bits(&read_whole(&mut r, 1).samples),
+                bits(&image.samples),
+                "{compression:?}"
+            );
+        }
+    }
+    let image = Image::new(vec![24, 16], f32s, Scaling::IDENTITY).unwrap();
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.write_compressed_image(
+            image.view(),
+            &CompressionConfig::new(Compression::Rice).with_quantization(Quantization::NONE),
+            None
+        ),
+        Err(FitsError::UnsupportedCompression { name }) if name == "RICE_1 for a lossless float image"
+    ));
+}
+
+/// fits-well quantizes as fpack does: `fpack -q17 4` and `fpack -q17 -0.01` (CFITSIO
+/// 4.070, seed 17, `RICE_1`, row tiles) of the 64×16 f32 plane
+/// `1000 + ((2654435761·i) mod 2³²) / 2³² · 100` give the same `ZSCALE` and `ZZERO`
+/// for each tile and decode to the same floats as fits-well's write of that plane with
+/// the same quantization. cfitsio takes the level as a C `float`, so the absolute step
+/// is `0.01f32`. The plane has no run of three equal values, where the noise2 medians
+/// would differ (see `quantize::noise5`).
+#[test]
+fn float_quantization_matches_fpack() {
+    fn columns<S: Source>(r: &mut FitsReader<S>) -> [Vec<f64>; 2] {
+        let table = r.read_container_table(1).unwrap();
+        ["ZSCALE", "ZZERO"].map(|name| table.column(name).unwrap().physical().unwrap())
+    }
+    let plane: Vec<f32> = (0u64..64 * 16)
+        .map(|i| {
+            (1000.0 + ((i * 2_654_435_761) % (1 << 32)) as f64 / 4_294_967_296.0 * 100.0) as f32
+        })
+        .collect();
+    let image = Image::new(vec![64, 16], plane, Scaling::IDENTITY).unwrap();
+    let dither = Dither::Subtractive1(DitherSeed::fixed(17).unwrap());
+    let hcompress = Compression::Hcompress(Hcompress::relative(2.5).unwrap());
+    for (fixture, compression, quantization) in [
+        (
+            "comp_quant_rel_seed17_f32.fits",
+            Compression::Rice,
+            Quantization::relative(4.0, dither),
+        ),
+        (
+            "comp_quant_abs_seed17_f32.fits",
+            Compression::Rice,
+            Quantization::absolute(f64::from(0.01f32), dither),
+        ),
+        // `fpack -q17 4 -h -s 2.5`: HCOMPRESS of the quantized integers.
+        (
+            "comp_hcomp_quant_seed17_f32.fits",
+            hcompress,
+            Quantization::relative(4.0, dither),
+        ),
+    ] {
+        let config = CompressionConfig::new(compression).with_quantization(quantization.unwrap());
+        let mut ours = round_trip(|w| w.write_compressed_image(image.view(), &config, None));
+        let mut fpack = open_fixture(fixture);
+        assert_eq!(columns(&mut ours), columns(&mut fpack), "{fixture}");
+        assert_eq!(
+            read_whole(&mut ours, 1).samples,
+            read_whole(&mut fpack, 1).samples,
+            "{fixture}"
+        );
+    }
+}
+
+/// fits-well's HCOMPRESS scale is fpack's: `fpack -h -s 2.5` and `fpack -h -s -30`
+/// (CFITSIO 4.070) of the 64×32 i16 plane `500 + ((40503·i) mod 65536) mod 200` decode to
+/// the same values as fits-well's write with `Hcompress::relative(2.5)` and
+/// `Hcompress::absolute(30.0)`, and record the same `ZVAL1`.
+#[test]
+fn hcompress_scales_match_fpack() {
+    let plane: Vec<i16> = (0..64 * 32)
+        .map(|i| 500 + i16::try_from((i * 40503) % 65536 % 200).unwrap())
+        .collect();
+    let image = Image::new(vec![64, 32], plane, Scaling::IDENTITY).unwrap();
+    for (fixture, hcompress, zval1) in [
+        ("comp_hcomp_rel_i16.fits", Hcompress::relative(2.5), 2.5),
+        ("comp_hcomp_abs_i16.fits", Hcompress::absolute(30.0), -30.0),
+    ] {
+        let config = CompressionConfig::new(Compression::Hcompress(hcompress.unwrap()));
+        let mut ours = round_trip(|w| w.write_compressed_image(image.view(), &config, None));
+        assert_eq!(
+            ours.hdus()[1].header.get_real("ZVAL1").unwrap(),
+            Some(zval1),
+            "{fixture}"
+        );
+        let mut fpack = open_fixture(fixture);
+        assert_eq!(
+            read_whole(&mut ours, 1).samples,
+            read_whole(&mut fpack, 1).samples,
+            "{fixture}"
+        );
+    }
+}
+
+/// The float container widens both descriptors to `Q` past the 32-bit range, as the
+/// integer one does; the layout is taken at `Q` here, as no test writes a 2 GiB heap.
+#[test]
+fn the_float_container_lays_out_q_descriptors() {
+    let image = Image::new(vec![24, 16], float_field(), Scaling::IDENTITY).unwrap();
+    let Data::F32(samples) = &image.samples else {
+        unreachable!("an f32 image")
+    };
+    let config = CompressionConfig::new(Compression::Rice);
+    let encode = || {
+        let float = FloatImage {
+            image: image.view(),
+            samples: FloatSamples::F32(samples),
+        };
+        let levels = Levels {
+            step: QuantizationStep::Relative(4.0),
+            dither: Dither::default(),
+        };
+        QuantizedFloatImage::encode(float, &config, levels).unwrap()
+    };
+    assert_eq!(encode().addressing().unwrap(), DescriptorWidth::P);
+    let read = |width: DescriptorWidth| {
+        let mut data = Vec::new();
+        let header = encode().lay_out(width, &mut data).unwrap();
+        assert_eq!(
+            header
+                .get_text("TFORM1")
+                .unwrap()
+                .map(|tform| tform.as_bytes()[1]),
+            Some(width.letter() as u8)
+        );
+        let table = Table::from_data(&header, data).unwrap();
+        let kind = HduKind::classify(&header, HduRole::Extension).unwrap();
+        let geometry = ImageGeometry::from_header(&header, kind).unwrap();
+        TiledImage::new(&header, &geometry)
+            .unwrap()
+            .decode(&header, table.view())
+            .unwrap()
+    };
+    assert_eq!(read(DescriptorWidth::Q), read(DescriptorWidth::P));
+}
+
+/// A u16 image's `PLIO_1` stream holds its physical values, which PLIO takes as it
+/// takes no negative value; the image reads back stored as `physical − 32768`.
+#[test]
+fn plio_writes_a_u16_image() {
+    let physical = [0u16, 1, 32767, 32768, 65535, 7, 40000, 12345];
+    let image = Image::from_u16(vec![8, 1], &physical).unwrap();
+    let mut r = round_trip(|w| {
+        w.write_compressed_image(
+            image.view(),
+            &CompressionConfig::new(Compression::Plio),
+            None,
+        )
+    });
+    let stored: Vec<i16> = physical
+        .iter()
+        .map(|&v| (i32::from(v) - 32768) as i16)
+        .collect();
+    assert_eq!(read_whole(&mut r, 1).samples, Data::I16(stored));
 }
 
 #[test]
@@ -431,7 +725,7 @@ fn hcompress_writer_converts_noise_multiplier_to_tile_scale() {
     let mut r = round_trip(|w| {
         w.write_compressed_image(
             image.view(),
-            &CompressionConfig::new(Compression::Hcompress(Hcompress::lossy(2.0).unwrap()))
+            &CompressionConfig::new(Compression::Hcompress(Hcompress::relative(2.0).unwrap()))
                 .with_tiles([8, 8]),
             None,
         )

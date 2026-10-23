@@ -26,10 +26,8 @@ use crate::error::Result;
 use crate::groups::RandomGroups;
 use crate::hdu::HduKind;
 use crate::hdu::HduPosition;
-use crate::hdu::HduRole;
-use crate::hdu::data_extent;
 use crate::header_model::card::is_end_record;
-use crate::header_model::{Header, keywords};
+use crate::header_model::keywords;
 use crate::ragged::Ragged;
 use crate::reader::data_checksum::DataChecksum;
 use crate::reader::data_source::DataSource;
@@ -254,22 +252,11 @@ impl<S: Source> FitsReader<S> {
             };
             match scan_header_unit(&mut source, &mut offset, &mut scratch, position)? {
                 NextHeader::Found { bytes, sum } => {
-                    let header = Header::parse(&bytes)?;
-                    let role = HduRole::from_header(&header, position)?;
-                    let kind = HduKind::classify(&header, role)?;
-                    let data_offset = offset;
-                    let extent = data_extent(&header, role)?;
-                    let next = data_offset
-                        .checked_add(extent.padded_bytes)
+                    let hdu = Hdu::parse(hdus.len(), &bytes, sum, offset - bytes.len() as u64)?;
+                    let next = padded_len(hdu.data_bytes)
+                        .and_then(|padded| hdu.data_offset.checked_add(padded))
                         .ok_or(FitsError::DataUnitOverflow)?;
-                    hdus.push(Hdu::new(
-                        hdus.len(),
-                        header,
-                        kind,
-                        sum,
-                        data_offset,
-                        extent.data_bytes,
-                    ));
+                    hdus.push(hdu);
                     // Skip past the data unit to the next header. Clamp at the source
                     // end so a declared unit larger than the file just ends the scan
                     // (the HDU is still recorded; a later read bounds-checks it).
@@ -292,8 +279,8 @@ impl<S: Source> FitsReader<S> {
     }
 
     /// The scanned HDU records, read-only and in file order — each carrying its
-    /// parsed [`Header`] and [`HduKind`]. Every read names its HDU with an
-    /// [`HduSelector`]: an index into this slice, `"SCI"`, or `("SCI", 2)`.
+    /// parsed [`Header`](crate::header::Header) and [`HduKind`]. Every read names its
+    /// HDU with an [`HduSelector`]: an index into this slice, `"SCI"`, or `("SCI", 2)`.
     pub fn hdus(&self) -> &[Hdu] {
         &self.hdus
     }
@@ -303,6 +290,11 @@ impl<S: Source> FitsReader<S> {
     /// [`FitsError::HduNotFound`] for a name no HDU carries.
     pub fn hdu<'h>(&self, hdu: impl Into<HduSelector<'h>>) -> Result<&Hdu> {
         selected_hdu(&self.hdus, hdu.into())
+    }
+
+    /// The scanned HDU records, taken from the reader.
+    pub(crate) fn into_hdus(self) -> Vec<Hdu> {
+        self.hdus
     }
 
     /// Every HDU [`FitsReader::image`] can read as an image: image extensions,
@@ -672,7 +664,7 @@ fn decoded_rows<S: Source>(
 
 /// The HDU `selector` names. A free function over the records, so a read can hold an
 /// HDU while it fetches bytes from the source.
-fn selected_hdu<'h>(hdus: &'h [Hdu], selector: HduSelector<'_>) -> Result<&'h Hdu> {
+pub(crate) fn selected_hdu<'h>(hdus: &'h [Hdu], selector: HduSelector<'_>) -> Result<&'h Hdu> {
     match selector {
         HduSelector::Index(index) => hdus.get(index).ok_or(FitsError::IndexOutOfBounds {
             indexed: Indexed::Hdu,

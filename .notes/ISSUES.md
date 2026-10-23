@@ -1,7 +1,7 @@
 # Issues
 
 
-- A tile-compressed float image with no `ZSCALE`/`ZZERO` columns, which §10.2 defines as losslessly compressed, decodes its stored float bytes as quantized integers: the tile of f32 `[1.5, -2.25, …]` reads as `[1069547500.0, -1072693250.0, …]`, with no error (`src/compress/decode/tile_decoder.rs`, `src/compress/decode/float_quantization.rs`).
-- A tile-compressed float image with `ZQUANTIZ = 'NONE'`, which cfitsio and fpack write for lossless float compression, fails with `UnsupportedCompression { name: "float quantization NONE" }` (`src/compress/decode/float_quantization.rs:36-43`).
-- `write_compressed_image` with `Compression::Plio` on an unsigned 16-bit image fails with `PlioValueOutOfRange { value: -32768 }` for values below 32768. cfitsio stores a u16 image's PLIO stream offset by 32768 and removes the offset on read; fits-well applies no offset, so such a cfitsio file does not read back as its physical values.
-- `docs/design.md` cites `docs/research/2026-10-23-wcs-into-slice.md` twice, and `docs/research/` is empty.
+- A tiled-compressed float image reads a signaling NaN back as a quiet NaN: its tiles decode through an `f64` plane (`src/compress/decode/wide_plane.rs`), and the `f32` → `f64` conversion sets the quiet bit.
+- A TAN `Wcs` round trip `world_to_pixel(pixel_to_world(p))` misses `p` by about 7e-12° in world terms: 2e-8 pixel at a corner of astropy's IRAC header (`test_resources/wcs_irac_sip.hdr` without its SIP keywords), and 2.2e-6 pixel at an offset of 1e5 pixels of 1e-6°, where the spacing of a double is far smaller.
+- `atomic/wcs/to_pixel/tabular` takes 457 ms a row from commit `e1dcdea` on, and 394 ms at `e1dcdea^`; that commit does not change `src/world_coordinates/tabular/`, whose `locate_one_dimensional` scan holds the time.
+- A tiled-compressed float image whose `ZSCALE` or `ZZERO` is a header keyword rather than a table column decodes with a scale of 1 and a zero of 0 (`src/compress/decode/float_quantization.rs`, `Quantized::dequant`); cfitsio takes the keyword's value for every tile (`imcompress.c`, `imcomp_get_compressed_image_par`). With neither column, a lossless read ignores the keywords, where cfitsio applies them.

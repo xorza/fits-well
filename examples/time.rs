@@ -1,5 +1,5 @@
 //! Record an observation time in a FITS header, read it back, and resolve its
-//! ISO-8601 and Julian Date representations:
+//! ISO-8601 and MJD representations:
 //!
 //! ```sh
 //! cargo run --example time
@@ -45,16 +45,17 @@ fn main() -> fits_well::Result<()> {
         .expect("example header sets TIMESYS")
         .parse::<Scale>()?;
 
-    // The DATE-OBS string itself parses to a `Datetime`, then to Julian Date.
-    let t = header
+    // The DATE-OBS string itself parses to a `Datetime`, then to an MJD: a whole day
+    // and the fraction of it.
+    let mjd = header
         .get_text("DATE-OBS")?
         .expect("example header sets DATE-OBS")
-        .parse::<Datetime>()?;
-    let jd = t.to_jd(&timesys)?;
+        .parse::<Datetime>()?
+        .to_mjd(&timesys)?;
     println!(
-        "DATE-OBS -> JD {:.5}, MJD {:.5} in {timesys:?}",
-        jd,
-        t.to_mjd(&timesys)?
+        "DATE-OBS -> MJD day {} + {:.9} in {timesys:?}",
+        mjd.day(),
+        mjd.fraction()
     );
 
     Ok(())

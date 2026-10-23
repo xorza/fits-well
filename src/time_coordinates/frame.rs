@@ -5,13 +5,14 @@ use crate::error::Indexed;
 use crate::error::Result;
 use crate::header_model::{Header, keywords};
 use crate::keyword::Keyword;
+use crate::time_coordinates::SEC_PER_DAY;
 use crate::time_coordinates::coordinate::Coordinate;
 use crate::time_coordinates::datetime::Datetime;
+use crate::time_coordinates::mjd::{Expansion, Mjd};
 use crate::time_coordinates::reference_position::ReferencePosition;
 use crate::time_coordinates::scale::Scale;
 use crate::time_coordinates::time_axis_kind::TimeAxisKind;
 use crate::time_coordinates::unit::Unit;
-use crate::time_coordinates::{MJD0, SEC_PER_DAY};
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::ctype::Ctype;
 
@@ -22,8 +23,8 @@ pub struct Frame {
     /// `TIMESYS` time scale (default `UTC`).
     pub scale: Scale,
     /// Reference epoch as MJD (from `MJDREF`/`MJDREFI`+`MJDREFF`, `JDREF*`, or
-    /// `DATEREF`); `0.0` if none is given.
-    pub reference_mjd: f64,
+    /// `DATEREF`); MJD 0 if none is given.
+    pub reference_mjd: Mjd,
     /// `TIMEUNIT` (default `'s'`).
     pub unit: Unit,
     /// `TIMEOFFS` (§9.4.1): a uniform additive clock correction in `TIMEUNIT`,
@@ -85,14 +86,22 @@ impl Frame {
 
     /// Resolve a time value measured *relative* to `MJDREF` (e.g. `TSTART`,
     /// `TSTOP`), in `TIMEUNIT`, to an absolute MJD in the frame's own scale. The
-    /// `TIMEOFFS` clock correction (§9.4.1) is added before scaling.
-    pub fn relative_to_mjd(&self, value: f64) -> Result<f64> {
+    /// `TIMEOFFS` clock correction (§9.4.1) is added before scaling. The sum, the
+    /// product and the quotient keep their rounding errors, which the MJD's fraction
+    /// takes in one last rounding.
+    pub fn relative_to_mjd(&self, value: f64) -> Result<Mjd> {
         self.relative_to_mjd_in(value, self.unit, &self.scale)
     }
 
-    fn relative_to_mjd_in(&self, value: f64, unit: Unit, scale: &Scale) -> Result<f64> {
-        Ok(self.reference_mjd
-            + (value + self.clock_offset) * unit.seconds(self.reference_mjd, scale)? / SEC_PER_DAY)
+    fn relative_to_mjd_in(&self, value: f64, unit: Unit, scale: &Scale) -> Result<Mjd> {
+        let days = Expansion::two_sum(value, self.clock_offset)
+            .scaled(unit.seconds(self.reference_mjd, scale)?)
+            .divided(SEC_PER_DAY);
+        self.reference_mjd
+            .plus(days)
+            .ok_or_else(|| FitsError::InvalidTime {
+                detail: format!("relative time {value} {unit:?} outside the MJD range"),
+            })
     }
 
     /// Evaluate a 1-based time `axis` through its complete WCS row and coordinate
@@ -136,28 +145,26 @@ impl Frame {
 }
 
 /// The reference epoch as MJD: `MJDREF` (or `MJDREFI`+`MJDREFF`), else `JDREF`
-/// (or `JDREFI`+`JDREFF`), else `DATEREF`, else `0.0`.
-fn reference_mjd(header: &Header, scale: &Scale) -> Result<f64> {
+/// (or `JDREFI`+`JDREFF`), else `DATEREF`, else MJD 0.
+fn reference_mjd(header: &Header, scale: &Scale) -> Result<Mjd> {
     if let Some(mjd) = resolve_split_ref(
         header,
         keywords::MJDREF,
         keywords::MJDREFI,
         keywords::MJDREFF,
-        0.0,
     )? {
         return Ok(mjd);
     }
-    if let Some(mjd) = resolve_split_ref(
-        header,
-        keywords::JDREF,
-        keywords::JDREFI,
-        keywords::JDREFF,
-        MJD0,
-    )? {
-        return Ok(mjd);
+    if let Some(jd) =
+        resolve_split_ref(header, keywords::JDREF, keywords::JDREFI, keywords::JDREFF)?
+    {
+        // The MJD's zero point, JD 2400000.5, is exact in `f64`.
+        return Ok(jd
+            .plus(Expansion::from(-2_400_000.5))
+            .expect("a day below 2⁵³ moves by the MJD's zero point"));
     }
     let Some(value) = header.get_text(keywords::DATEREF)? else {
-        return Ok(0.0);
+        return Ok(Mjd::new(0, 0.0));
     };
     value.parse::<Datetime>()?.to_mjd(scale)
 }
@@ -165,26 +172,24 @@ fn reference_mjd(header: &Header, scale: &Scale) -> Result<f64> {
 /// Resolve a reference epoch from its single (`MJDREF`) and split-precision
 /// (`MJDREFI`+`MJDREFF`) keywords. Per §9.2.2 a *full* integer+fractional split
 /// takes precedence over the single value; otherwise the single value is used,
-/// falling back to a lone split part. `offset` is taken from the integer part
-/// before the fraction is added, so a JD split becomes an MJD that rounds at the
-/// MJD's precision, not the JD's.
+/// falling back to a lone split part.
 fn resolve_split_ref(
     header: &Header,
     single: Keyword,
     int: Keyword,
     frac: Keyword,
-    offset: f64,
-) -> Result<Option<f64>> {
+) -> Result<Option<Mjd>> {
     let i = header.get_real(int)?;
     let f = header.get_real(frac)?;
-    Ok(match (i, f) {
-        (Some(i), Some(f)) => Some((i - offset) + f),
-        _ => header
-            .get_real(single)?
-            .map(|value| value - offset)
-            .or_else(|| match (i, f) {
-                (None, None) => None,
-                _ => Some((i.unwrap_or(0.0) - offset) + f.unwrap_or(0.0)),
-            }),
-    })
+    let (keyword, whole, fraction) = match (i, f) {
+        (Some(i), Some(f)) => (int, i, f),
+        _ => match header.get_real(single)? {
+            Some(value) => (single, value, 0.0),
+            None if i.is_none() && f.is_none() => return Ok(None),
+            None => (int, i.unwrap_or(0.0), f.unwrap_or(0.0)),
+        },
+    };
+    Mjd::from_days(whole, fraction)
+        .ok_or(FitsError::KeywordOutOfRange { keyword })
+        .map(Some)
 }

@@ -25,58 +25,19 @@ mod gzip;
 mod hcompress;
 mod plane;
 mod plio;
+pub(crate) mod quantization;
 mod quantize;
 mod rice;
 pub(crate) mod table;
 mod tile_geometry;
 
+use crate::bitpix::Bitpix;
+use crate::compress::quantization::Quantization;
 use crate::error::FitsError;
 use crate::error::Ranked;
 use crate::error::Result;
+use crate::image_model::scaling::Scaling;
 use crate::keyword;
-
-/// Float-quantization dithering for [`crate::FitsWriter::write_compressed_image`]
-/// (`ZQUANTIZ`, §10.2). Applies only when compressing a float image; the integer
-/// codecs ignore it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DitherMethod {
-    /// `NO_DITHER` — plain linear quantization.
-    None,
-    /// `SUBTRACTIVE_DITHER_1` — per-pixel dither from the shared random sequence
-    /// (cfitsio's default).
-    #[default]
-    Subtractive1,
-    /// `SUBTRACTIVE_DITHER_2` — like `Subtractive1`, but exact zeros are preserved
-    /// (stored as a reserved integer rather than dithered).
-    Subtractive2,
-}
-
-impl DitherMethod {
-    /// Whether this method applies a per-pixel dither (everything but `None`).
-    const fn dithered(self) -> bool {
-        !matches!(self, Self::None)
-    }
-
-    /// The `ZQUANTIZ` keyword spelling; `None` for a value this crate does not model.
-    /// A float image must be able to reproduce its dither exactly, so the decoder
-    /// rejects an unrecognized value there — an integer image ignores `ZQUANTIZ`.
-    fn parse(s: &str) -> Option<Self> {
-        match s {
-            "NO_DITHER" => Some(Self::None),
-            "SUBTRACTIVE_DITHER_1" => Some(Self::Subtractive1),
-            "SUBTRACTIVE_DITHER_2" => Some(Self::Subtractive2),
-            _ => None,
-        }
-    }
-
-    const fn name(self) -> &'static str {
-        match self {
-            Self::None => "NO_DITHER",
-            Self::Subtractive1 => "SUBTRACTIVE_DITHER_1",
-            Self::Subtractive2 => "SUBTRACTIVE_DITHER_2",
-        }
-    }
-}
 
 /// Validated GZIP configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,22 +82,83 @@ impl Default for Gzip {
     }
 }
 
-/// Validated HCOMPRESS configuration.
+/// Validated HCOMPRESS configuration; the default is lossless.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Hcompress {
-    scale: f64,
+    scale: HcompressScale,
+}
+
+/// The HCOMPRESS `SCALE` (§10.4.4): the step its coefficients are rounded to.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+enum HcompressScale {
+    #[default]
+    Lossless,
+    /// A multiple of each tile's background-noise estimate.
+    Relative(f64),
+    /// One step for every tile.
+    Absolute(f64),
 }
 
 impl Hcompress {
-    /// Configure lossy HCOMPRESS with a positive finite multiplier of the
-    /// per-tile background-noise estimate (§10.4.4).
-    pub fn lossy(scale: f64) -> Result<Self> {
+    /// Lossy HCOMPRESS whose scale is `scale` times each tile's background noise, a
+    /// finite positive number, as fpack's `-s scale`.
+    pub fn relative(scale: f64) -> Result<Self> {
+        Ok(Self {
+            scale: HcompressScale::Relative(Self::positive(scale)?),
+        })
+    }
+
+    /// Lossy HCOMPRESS with one scale `scale` for every tile, a finite positive
+    /// number, as fpack's `-s -scale`.
+    pub fn absolute(scale: f64) -> Result<Self> {
+        Ok(Self {
+            scale: HcompressScale::Absolute(Self::positive(scale)?),
+        })
+    }
+
+    fn positive(scale: f64) -> Result<f64> {
         if !scale.is_finite() || scale <= 0.0 {
             return Err(FitsError::InvalidCompressionParameter {
-                detail: format!("lossy HCOMPRESS scale {scale} must be positive"),
+                detail: format!("HCOMPRESS scale {scale} must be finite and positive"),
             });
         }
-        Ok(Self { scale })
+        Ok(scale)
+    }
+}
+
+impl HcompressScale {
+    /// The integer scale one tile of `values`, of `dimensions`, is compressed at:
+    /// cfitsio rounds a relative scale times the tile's noise, or an absolute one
+    /// (`imcomp_compress_tile`).
+    fn tile_scale(
+        self,
+        values: &[i64],
+        dimensions: &[usize],
+        scratch: &mut quantize::QuantizeScratch,
+    ) -> Result<i32> {
+        let scale = match self {
+            Self::Lossless => return Ok(0),
+            Self::Absolute(scale) => scale.round(),
+            Self::Relative(factor) => {
+                let noise = scratch.integer_noise(values, dimensions[0]);
+                (factor * noise).round()
+            }
+        };
+        if scale > f64::from(i32::MAX) {
+            return Err(FitsError::UnsupportedCompression {
+                name: "HCOMPRESS_1 tile scale exceeds the 32-bit stream range".to_string(),
+            });
+        }
+        Ok(scale as i32)
+    }
+
+    /// The `ZVAL1` cfitsio writes for `ZNAME1 = 'SCALE'`: an absolute scale negated.
+    const fn keyword_value(self) -> f64 {
+        match self {
+            Self::Lossless => 0.0,
+            Self::Relative(scale) => scale,
+            Self::Absolute(scale) => -scale,
+        }
     }
 }
 
@@ -160,22 +182,6 @@ impl Compression {
         shuffle: true,
         level: gzip::DEFAULT_GZIP_LEVEL,
     });
-}
-
-/// Float quantization shared by the lossless integer codecs.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Quantization {
-    level: f64,
-    dither: DitherMethod,
-}
-
-impl Default for Quantization {
-    fn default() -> Self {
-        Self {
-            level: 0.0,
-            dither: DitherMethod::Subtractive1,
-        }
-    }
 }
 
 /// A tiled-compression write: the codec, the tiles, and a float image's quantization.
@@ -213,16 +219,12 @@ impl CompressionConfig {
         self
     }
 
-    /// A float image's quantization: the noise divisor `level` (`0` takes cfitsio's
-    /// default of 4) and the dither. A table write refuses it.
-    pub fn with_quantization(mut self, level: f64, dither: DitherMethod) -> Result<Self> {
-        if !level.is_finite() || level < 0.0 {
-            return Err(FitsError::InvalidCompressionParameter {
-                detail: format!("float quantization level {level} must be finite and nonnegative"),
-            });
-        }
-        self.quantization = Some(Quantization { level, dither });
-        Ok(self)
+    /// A float image's quantization; [`Quantization::default`] when it is not set. A
+    /// table write refuses it.
+    #[must_use]
+    pub const fn with_quantization(mut self, quantization: Quantization) -> Self {
+        self.quantization = Some(quantization);
+        self
     }
 
     /// Rows per tile of a table of `row_count` rows of `row_len` bytes, in `1..=row_count`.
@@ -260,6 +262,18 @@ enum ImageCodec {
     Plio1,
     Hcompress1,
     NoCompress,
+}
+
+/// The offset between a `PLIO_1` stream's values and an image's stored values: 32768
+/// for a u16 image (`BITPIX = 16`, `BZERO = 32768`), whose stream holds the physical
+/// values, as cfitsio writes and reads it (`imcompress.c`, `imcomp_convert_tile_tshort`
+/// and `imcomp_decompress_tile`); 0 for any other image.
+fn plio_offset(bitpix: Bitpix, scaling: Scaling) -> i64 {
+    if bitpix == Bitpix::I16 && scaling.bzero == 32768.0 {
+        32768
+    } else {
+        0
+    }
 }
 
 fn parameter_index(keyword: &str) -> Option<usize> {
@@ -323,10 +337,10 @@ impl Compression {
         }
     }
 
-    const fn hcompress_scale(self) -> f64 {
+    const fn hcompress_scale(self) -> HcompressScale {
         match self {
             Self::Hcompress(config) => config.scale,
-            _ => 0.0,
+            _ => HcompressScale::Lossless,
         }
     }
 }

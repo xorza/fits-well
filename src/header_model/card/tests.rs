@@ -8,9 +8,31 @@ fn parse(text: &str) -> Card {
 }
 
 fn reparse(bytes: &[u8; CARD_SIZE]) -> Card {
-    match ParsedRecord::parse(bytes).unwrap() {
+    match record(bytes) {
         ParsedRecord::Card(card) => card,
         other => panic!("expected a stored card, got {other:?}"),
+    }
+}
+
+/// The record `bytes` parse to, as the first of a header.
+fn record(bytes: &[u8; CARD_SIZE]) -> ParsedRecord {
+    ParsedRecord::parse(bytes, 1, &mut Vec::new())
+}
+
+/// The repairs the parse of `text` makes.
+fn repairs(text: &str) -> Vec<RepairKind> {
+    let mut repairs = Vec::new();
+    ParsedRecord::parse(&card_bytes(text), 1, &mut repairs);
+    repairs.into_iter().map(|repair| repair.kind).collect()
+}
+
+impl Card {
+    const fn value(&self) -> Option<&Value> {
+        match self {
+            Self::Value { value, .. } => Some(value),
+            Self::Hierarch { value, .. } => Some(value),
+            Self::Commentary { .. } | Self::Malformed { .. } => None,
+        }
     }
 }
 
@@ -154,10 +176,7 @@ fn parses_complex_integer_and_real() {
 
 #[test]
 fn classifies_end_and_commentary_cards() {
-    assert_eq!(
-        ParsedRecord::parse(&card_bytes("END")).unwrap(),
-        ParsedRecord::End
-    );
+    assert_eq!(record(&card_bytes("END")), ParsedRecord::End);
 
     let comment = parse("COMMENT  this file is great");
     assert!(matches!(comment, Card::Commentary { .. }));
@@ -181,47 +200,189 @@ fn commentary_text_starting_with_equals_is_not_misread_as_a_value() {
     assert!(card.value().is_none());
 }
 
+/// A non-ASCII byte in the name names nothing, and one in a value spoils it: both
+/// keep the record malformed, with no panic in slicing a multibyte character. One in
+/// a comment or commentary text reads as `?`, a repair.
 #[test]
-fn rejects_non_ascii_card_without_panicking() {
-    // A valid-UTF-8 *multibyte* byte (é = 0xC3 0xA9) straddling the column-8
-    // keyword boundary must be rejected, not panic in str slicing.
+fn non_ascii_bytes_mark_or_repair_a_record_by_their_place() {
+    // A valid-UTF-8 multibyte é (0xC3 0xA9) straddling the name field's end.
     let mut bytes = [b' '; CARD_SIZE];
     bytes[..7].copy_from_slice(b"OBJECT ");
     bytes[7] = 0xC3;
     bytes[8] = 0xA9;
     assert!(matches!(
-        ParsedRecord::parse(&bytes),
-        Err(FitsError::InvalidValue { .. })
+        reparse(&bytes),
+        Card::Malformed {
+            keyword: None,
+            defect: Defect::Name,
+            ..
+        }
     ));
-    // A high byte elsewhere in the record is likewise rejected, not decoded.
     let mut in_value = card_bytes("OBJECT  = 'x'");
     in_value[11] = 0xFF;
     assert!(matches!(
-        ParsedRecord::parse(&in_value),
-        Err(FitsError::InvalidValue { .. })
+        reparse(&in_value),
+        Card::Malformed { keyword: Some(keyword), defect: Defect::Value, .. } if keyword == "OBJECT"
     ));
-}
-
-#[test]
-fn rejects_lowercase_keyword_on_a_value_card() {
-    assert!(matches!(
-        ParsedRecord::parse(&card_bytes("object  = 'x'")),
-        Err(FitsError::InvalidKeyword { .. })
-    ));
-}
-
-#[test]
-fn preserves_a_hierarch_record_as_opaque_commentary() {
-    let card = parse("HIERARCH ESO DET CHIP1 NAME = 'CCD-44' / detector");
-    assert!(matches!(card, Card::Commentary { .. }));
-    assert_eq!(card.keyword(), "HIERARCH");
-    assert_eq!(card.value(), None);
+    let mut in_comment = card_bytes("OBJECT  = 'x' / caf");
+    in_comment[19] = 0xE9;
+    let mut log = Vec::new();
+    let ParsedRecord::Card(card) = ParsedRecord::parse(&in_comment, 7, &mut log) else {
+        panic!("a card");
+    };
+    assert_eq!(card.comment(), Some("caf?"));
     assert_eq!(
-        card.comment(),
-        Some(" ESO DET CHIP1 NAME = 'CCD-44' / detector")
+        log,
+        [Repair {
+            record: 7,
+            kind: RepairKind::NonAsciiText
+        }]
     );
-    let reparsed = reparse(&render(&card).unwrap());
-    assert_eq!(reparsed, card);
+    let mut in_history = card_bytes("HISTORY reduced");
+    in_history[15] = 0x80;
+    assert_eq!(reparse(&in_history).comment(), Some("reduced?"));
+}
+
+/// cfitsio and astropy read a lowercase name as its keyword, and a value after an
+/// `=` placed early or with no blank after it; each is a repair.
+#[test]
+fn repairs_a_lowercase_name_and_a_misplaced_value_indicator() {
+    assert_eq!(parse("object  = 'x'"), parse("OBJECT  = 'x'"));
+    assert_eq!(repairs("object  = 'x'"), [RepairKind::LowercaseName]);
+    assert_eq!(parse("OBJECT  ='M31'"), parse("OBJECT  = 'M31'"));
+    assert_eq!(repairs("OBJECT  ='M31'"), [RepairKind::ValueIndicator]);
+    assert_eq!(parse("EXPOS= 5"), parse("EXPOS   = 5"));
+    assert_eq!(
+        repairs("expos= 5 / s"),
+        [RepairKind::ValueIndicator, RepairKind::LowercaseName]
+    );
+    assert_eq!(repairs("OBJECT  = 'M31'"), []);
+    // A name with a character no keyword takes, and a value that does not parse.
+    assert!(matches!(
+        parse("GA!N    = 1"),
+        Card::Malformed {
+            keyword: None,
+            defect: Defect::Name,
+            ..
+        }
+    ));
+    assert!(matches!(
+        parse("GAIN    = 1.2.3"),
+        Card::Malformed { keyword: Some(keyword), defect: Defect::Value, .. } if keyword == "GAIN"
+    ));
+    assert!(matches!(
+        parse("OBJECT  = 'open"),
+        Card::Malformed {
+            defect: Defect::Value,
+            ..
+        }
+    ));
+}
+
+/// `HIERARCH name = value` reads its name to the `=` and its value and comment in free
+/// format, of every value type; one with no `=` stays commentary.
+#[test]
+fn reads_hierarch_records() {
+    let name = |text: &str| text.parse::<HierarchName>().unwrap();
+    for (text, value) in [
+        (
+            "HIERARCH ESO DET CHIP1 NAME = 'CCD-44' / detector",
+            Value::Text("CCD-44".into()),
+        ),
+        (
+            "HIERARCH ESO DET CHIP1 NX = 2048",
+            Value::Integer(2048.into()),
+        ),
+        (
+            "HIERARCH ESO TEL FOCU SCALE = 1.489 / (deg/m)",
+            Value::Real(1.489),
+        ),
+        ("HIERARCH ESO INS OPTI-3 ON = T", Value::Logical(true)),
+    ] {
+        let Card::Hierarch { value: read, .. } = parse(text) else {
+            panic!("{text:?} is no HIERARCH card");
+        };
+        assert_eq!(read, value, "{text:?}");
+    }
+    let card = parse("HIERARCH ESO  DET   CHIP1 NAME = 'CCD-44' / detector");
+    assert_eq!(
+        card,
+        Card::Hierarch {
+            name: name("ESO DET CHIP1 NAME"),
+            value: Value::Text("CCD-44".into()),
+            comment: Some("detector".into()),
+        }
+    );
+    assert_eq!(card.keyword(), "HIERARCH");
+    assert!(matches!(
+        parse("HIERARCH LONGKEYWORDNAME.X = 1"),
+        Card::Hierarch { .. }
+    ));
+    assert!(matches!(
+        parse("HIERARCH without a value indicator"),
+        Card::Commentary { .. }
+    ));
+    assert_eq!(repairs("hierarch ESO X = 1"), [RepairKind::LowercaseName]);
+    assert!(matches!(
+        parse("HIERARCH  = 1"),
+        Card::Malformed {
+            defect: Defect::Name,
+            ..
+        }
+    ));
+    assert!(matches!(
+        parse("HIERARCH ESO X = 1.2.3"),
+        Card::Malformed {
+            defect: Defect::Value,
+            ..
+        }
+    ));
+}
+
+/// A HIERARCH record keeps the blank before its `=` unless the record needs that byte,
+/// as cfitsio and astropy write it, and refuses a comment that does not fit.
+#[test]
+fn writes_hierarch_records() {
+    let card = |name: &str, value: Value, comment: Option<&str>| Card::Hierarch {
+        name: name.parse().unwrap(),
+        value,
+        comment: comment.map(str::to_string),
+    };
+    let short = card(
+        "ESO DET CHIP1 NAME",
+        Value::Text("CCD-44".into()),
+        Some("detector"),
+    );
+    let record = render(&short).unwrap();
+    assert_eq!(
+        str::from_utf8(&record).unwrap().trim_end(),
+        "HIERARCH ESO DET CHIP1 NAME = 'CCD-44  ' / detector"
+    );
+    assert_eq!(reparse(&record), short);
+
+    // 9 + 67 + 3 + 1 = 80 bytes keep the blank; 9 + 68 + 3 + 1 = 81 drop it.
+    let name67 = format!("ESO {}", "A".repeat(63));
+    let name68 = format!("ESO {}", "A".repeat(64));
+    let fits = render(&card(&name67, Value::Integer(1.into()), None)).unwrap();
+    assert_eq!(
+        str::from_utf8(&fits).unwrap(),
+        format!("HIERARCH {name67} = 1")
+    );
+    let tight = render(&card(&name68, Value::Integer(1.into()), None)).unwrap();
+    assert_eq!(
+        str::from_utf8(&tight).unwrap(),
+        format!("HIERARCH {name68}= 1")
+    );
+    assert_eq!(
+        reparse(&tight),
+        card(&name68, Value::Integer(1.into()), None)
+    );
+
+    let long_comment = card("ESO X", Value::Integer(1.into()), Some(&"c".repeat(70)));
+    assert!(matches!(
+        render(&long_comment),
+        Err(FitsError::HeaderCardTooLong { keyword, .. }) if keyword == "HIERARCH ESO X"
+    ));
 }
 
 #[test]
@@ -249,7 +410,7 @@ fn integer_boundaries_round_trip_without_real_coercion() {
 #[test]
 fn parses_a_continue_record() {
     assert_eq!(
-        ParsedRecord::parse(&card_bytes("CONTINUE  'ollowed by more text&'")).unwrap(),
+        record(&card_bytes("CONTINUE  'ollowed by more text&'")),
         ParsedRecord::Continue {
             substring: "ollowed by more text&".into(),
             comment: None
@@ -259,13 +420,14 @@ fn parses_a_continue_record() {
 
 #[test]
 fn end_requires_the_canonical_blank_record() {
-    assert_eq!(
-        ParsedRecord::parse(&card_bytes("END")).unwrap(),
-        ParsedRecord::End
-    );
+    assert_eq!(record(&card_bytes("END")), ParsedRecord::End);
     assert!(matches!(
-        ParsedRecord::parse(&card_bytes("END     =                    T")),
-        Err(FitsError::ReservedKeyword { keyword }) if keyword == "END"
+        parse("END     =                    T"),
+        Card::Malformed {
+            keyword: None,
+            defect: Defect::Name,
+            ..
+        }
     ));
 }
 
@@ -371,7 +533,13 @@ fn non_finite_reals_are_rejected_on_read() {
     for token in ["inf", "Infinity", "nan", "-inf", "1E400"] {
         let card = format!("BADREAL = {token}");
         assert!(
-            ParsedRecord::parse(&card_bytes(&card)).is_err(),
+            matches!(
+                parse(&card),
+                Card::Malformed {
+                    defect: Defect::Value,
+                    ..
+                }
+            ),
             "expected {token:?} to be rejected, not parsed as a real"
         );
     }
@@ -436,6 +604,7 @@ fn every_value_kind_renders_its_fixed_format_field() {
 fn a_long_string_splits_at_67_escaped_characters() {
     let pieces = |text: &str| -> Vec<String> {
         LongString {
+            lead: Lead::Keyword("LONGSTR"),
             text,
             comment: None,
         }

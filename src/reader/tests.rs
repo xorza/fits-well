@@ -9,7 +9,11 @@ use crate::error::Ranked;
 use crate::fits_writer::FitsWriter;
 use crate::fits_writer::builder::{Builder, WriteColumn};
 use crate::fits_writer::internals::written;
+use crate::fits_writer::render_header;
+use crate::header_model::defect::Defect;
 use crate::header_model::internals::{card_bytes, records};
+use crate::header_model::repair::{Repair, RepairKind};
+use crate::header_model::{Header, RecordView};
 use crate::image_model::Image;
 use crate::image_model::data::Data;
 use crate::image_model::region::Region;
@@ -369,6 +373,122 @@ fn fits_file(cards: &[&str], data: &[u8]) -> Vec<u8> {
     buf.extend_from_slice(data);
     buf.resize(buf.len().next_multiple_of(BLOCK_SIZE), 0);
     buf
+}
+
+/// A near-valid record in one HDU is repaired and reported, a record with a bad value
+/// is kept as malformed, and the other HDUs read as before; only a defect in a keyword
+/// that sizes an HDU stops the open.
+#[test]
+fn defective_records_fail_only_the_reads_that_need_them() {
+    let primary = fits_file(
+        &[
+            "SIMPLE  =                    T",
+            "BITPIX  =                    8",
+            "NAXIS   =                    0",
+        ],
+        &[],
+    );
+    let defective = [
+        "XTENSION= 'IMAGE   '",
+        "BITPIX  =                    8",
+        "NAXIS   =                    0",
+        "PCOUNT  =                    0",
+        "GCOUNT  =                    1",
+        "exptime =                   30",
+        "OBJECT  ='M31'",
+        "EXPOS= 5",
+        "NOTE    = 'x' / caf",
+        "GAIN    = 1.2.3",
+    ];
+    let mut first = fits_file(&defective, &[]);
+    let note = 8 * 80;
+    first[note + 19] = 0xE9;
+    let last = fits_file(
+        &[
+            "XTENSION= 'IMAGE   '",
+            "BITPIX  =                    8",
+            "NAXIS   =                    1",
+            "NAXIS1  =                    3",
+            "PCOUNT  =                    0",
+            "GCOUNT  =                    1",
+        ],
+        &[7, 8, 9],
+    );
+    let bytes = [primary.clone(), first, last.clone()].concat();
+    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+    assert_eq!(reader.hdus().len(), 3);
+    assert_eq!(read_whole(&mut reader, 2).samples, Data::U8(vec![7, 8, 9]));
+
+    let header = &reader.hdus()[1].header;
+    assert_eq!(header.get_integer("EXPTIME").unwrap(), Some(30));
+    assert_eq!(header.get_text("OBJECT").unwrap(), Some("M31"));
+    assert_eq!(header.get_integer("EXPOS").unwrap(), Some(5));
+    assert_eq!(header.get_comment("NOTE").unwrap(), Some("caf?"));
+    assert_eq!(
+        header.repairs(),
+        [
+            (6, RepairKind::LowercaseName),
+            (7, RepairKind::ValueIndicator),
+            (8, RepairKind::ValueIndicator),
+            (9, RepairKind::NonAsciiText),
+        ]
+        .map(|(record, kind)| Repair { record, kind })
+    );
+    assert!(
+        matches!(header.get("GAIN"), Err(FitsError::InvalidValue { card }) if card == "GAIN    = 1.2.3")
+    );
+    assert!(header.iter().any(|record| matches!(
+        record,
+        RecordView::Malformed { keyword: Some(keyword), defect: Defect::Value, .. } if *keyword == "GAIN"
+    )));
+    let mut rendered = Vec::new();
+    let mut edited = header.clone();
+    assert!(matches!(
+        render_header(&edited, 0, &mut rendered),
+        Err(FitsError::InvalidValue { .. })
+    ));
+    edited.set("GAIN", 1.25).unwrap();
+    render_header(&edited, 0, &mut rendered).unwrap();
+    let text = String::from_utf8(rendered).unwrap();
+    for record in [
+        "EXPTIME =                   30",
+        "OBJECT  = 'M31     '",
+        "EXPOS   =                    5",
+        "GAIN    =                 1.25",
+    ] {
+        assert!(text.contains(record), "{record}");
+    }
+    assert!(reader.hdus()[0].header.repairs().is_empty());
+
+    // A defect in NAXIS1 leaves the next HDU unfound; one in TFORM2 fails only the
+    // table read.
+    let mut bad_size = last;
+    bad_size[3 * 80 + 10..3 * 80 + 30].copy_from_slice(b"               1.2.3");
+    assert!(matches!(
+        FitsReader::from_bytes(&[primary.clone(), bad_size].concat()),
+        Err(FitsError::InvalidValue { .. })
+    ));
+    let table = fits_file(
+        &[
+            "XTENSION= 'BINTABLE'",
+            "BITPIX  =                    8",
+            "NAXIS   =                    2",
+            "NAXIS1  =                    2",
+            "NAXIS2  =                    1",
+            "PCOUNT  =                    0",
+            "GCOUNT  =                    1",
+            "TFIELDS =                    2",
+            "TFORM1  = '1B      '",
+            "TFORM2  = '1B",
+        ],
+        &[1, 2],
+    );
+    let bytes = [primary, table].concat();
+    let mut reader = FitsReader::from_bytes(&bytes).unwrap();
+    assert!(matches!(
+        reader.read_table(1),
+        Err(FitsError::InvalidValue { .. })
+    ));
 }
 
 #[test]

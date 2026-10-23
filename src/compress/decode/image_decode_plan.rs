@@ -48,7 +48,7 @@ impl<'a> ImageDecodePlan<'a> {
                 .image
                 .bitpix
                 .is_float()
-                .then(|| FloatQuantization::read(header, table))
+                .then(|| FloatQuantization::read(header, table, tiled.codec))
                 .transpose()?,
         })
     }

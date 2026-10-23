@@ -5,6 +5,7 @@ use crate::error::Result;
 use crate::header_model::{Header, keywords};
 use crate::keyword::Keyword;
 use crate::time_coordinates::datetime::Datetime;
+use crate::time_coordinates::mjd::Mjd;
 use crate::time_coordinates::scale::Scale;
 
 /// The global bound / duration / error time keywords (§9.4, §9.5, §9.7). Start
@@ -13,11 +14,11 @@ use crate::time_coordinates::scale::Scale;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Bounds {
     /// Observation start: `MJD-BEG`, else `DATE-BEG` → MJD.
-    pub start_mjd: Option<f64>,
+    pub start_mjd: Option<Mjd>,
     /// Observation end: `MJD-END`, else `DATE-END` → MJD.
-    pub end_mjd: Option<f64>,
+    pub end_mjd: Option<Mjd>,
     /// Observation midpoint: `MJD-AVG`, else `DATE-AVG` → MJD (§9.5, Table 35).
-    pub mid_mjd: Option<f64>,
+    pub mid_mjd: Option<Mjd>,
     /// `XPOSURE` — effective exposure time.
     pub exposure: Option<f64>,
     /// `TELAPSE` — total elapsed time.
@@ -35,9 +36,11 @@ pub struct Bounds {
 impl Bounds {
     /// The bounds `header` declares. Errors when `TIMEPIXR` lies outside `[0, 1]`.
     pub fn from_header(header: &Header) -> Result<Self> {
-        let mjd_or_date = |mjd: Keyword, date: Keyword| -> Result<Option<f64>> {
+        let mjd_or_date = |mjd: Keyword, date: Keyword| -> Result<Option<Mjd>> {
             if let Some(value) = header.get_real(mjd)? {
-                return Ok(Some(value));
+                return Mjd::from_days(value, 0.0)
+                    .ok_or(FitsError::KeywordOutOfRange { keyword: mjd })
+                    .map(Some);
             }
             let Some(value) = header.get_text(date)? else {
                 return Ok(None);

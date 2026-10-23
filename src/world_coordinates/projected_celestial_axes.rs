@@ -4,6 +4,7 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::world_coordinates::celestial_axis::CelestialAxis;
 use crate::world_coordinates::ctype::Ctype;
+use crate::world_coordinates::distortion::Distortion;
 use crate::world_coordinates::projection::Projection;
 
 /// A celestial longitude/latitude axis pair, before their projection is resolved.
@@ -20,6 +21,8 @@ pub(super) struct ProjectedCelestialAxes {
     pub(super) longitude: usize,
     pub(super) latitude: usize,
     pub(super) projection: Projection,
+    /// The distortion the axes' `CTYPEia` code or algorithm names.
+    pub(super) distortion: Option<Distortion>,
 }
 
 impl CelestialAxisPair {
@@ -61,18 +64,19 @@ impl ProjectedCelestialAxes {
         let Some(pair) = CelestialAxisPair::find(ctype) else {
             return Ok(None);
         };
-        let longitude = Ctype::parse(&ctype[pair.longitude]).algorithm;
-        if longitude != Ctype::parse(&ctype[pair.latitude]).algorithm {
+        let longitude = Ctype::parse(&ctype[pair.longitude]);
+        let latitude = Ctype::parse(&ctype[pair.latitude]);
+        if (longitude.algorithm, longitude.distortion) != (latitude.algorithm, latitude.distortion)
+        {
             return Err(FitsError::ConflictingWcsKeywords {
                 detail: "celestial longitude and latitude axes declare different projections",
             });
         }
-        Ok(longitude
-            .and_then(Projection::from_code)
-            .map(|projection| Self {
-                longitude: pair.longitude,
-                latitude: pair.latitude,
-                projection,
-            }))
+        Ok(longitude.projection().map(|(projection, distortion)| Self {
+            longitude: pair.longitude,
+            latitude: pair.latitude,
+            projection,
+            distortion,
+        }))
     }
 }

@@ -6,6 +6,17 @@ no features and one build per public feature; a tag names the builds an item nee
 loses. `internals` is the crate's own test surface and is left out.
 
 ```text
+FitsEditor
+    struct FitsEditor<F>
+        impl<F: Read + Write + Seek> FitsEditor<F>
+            pub fn open(file: F) -> Result<Self>
+            pub fn hdus(&self) -> &[Hdu]
+            pub fn into_inner(self) -> F
+            pub fn replace_header<'h>(&mut self, hdu: impl Into<HduSelector<'h>>, header: &Header) -> Result<()>
+            pub fn replace_header_into<'h>(&mut self, hdu: impl Into<HduSelector<'h>>, header: &Header, sink: impl Write) -> Result<()>
+            pub fn append(self) -> Result<FitsWriter<F>>
+        impl<F: Debug> Debug for FitsEditor<F>
+
 FitsError
     #[non_exhaustive]
     enum FitsError: Debug, Display, Error, From<Error>, From<Infallible>
@@ -48,6 +59,8 @@ FitsError
         TableRowCountUndetermined { column: String }
         EmptyVlaNeedsType
         OneBasedIndexRequired { indexed: Indexed }
+        HeaderDoesNotFit { needed: usize, available: usize }
+        FileOffBlockGrid { len: u64 }
         HduNotFound { name: String, version: Option<i64>, level: Option<i64> }
         NotAnImage
         ImageHasGroups
@@ -108,6 +121,7 @@ FitsWriter  [shape differs by feature]
         impl<W: Write> FitsWriter<W>
             pub const fn new(sink: W) -> Self
             pub const fn with_checksums(self) -> Self
+            pub const fn with_spare_records(self, records: usize) -> Self
             pub fn write_raw_hdu(&mut self, header: &Header, raw: &[u8]) -> Result<()>
             pub fn into_inner(self) -> W
             pub fn write_ascii_table(&mut self, table: &AsciiBuilder, header: Option<&Header>) -> Result<()>
@@ -151,12 +165,18 @@ Ranked
         ImageRegion
         TileShape
         WcsCoordinate
+        BinFactors
 
 Result
     type Result<T> = Result<T, FitsError>
 
 header
     mod
+
+header::Defect
+    enum Defect: Clone, Copy, Debug, Eq, PartialEq
+        Name
+        Value
 
 header::FitsInteger
     struct FitsInteger: Clone, Debug, Display, Eq, From<i128>, From<i32>, From<i64>, From<u128>, From<u16>, From<u32>, From<u64>, From<usize>, Hash, PartialEq
@@ -166,6 +186,7 @@ header::FitsInteger
 header::Header
     struct Header: Clone, Debug, Default
         pub fn parse(bytes: &[u8]) -> Result<Self>
+        pub fn repairs(&self) -> &[Repair]
         pub fn get(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<&Value>>
         pub fn get_comment(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<&str>>
         pub fn get_logical(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<bool>>
@@ -191,11 +212,17 @@ header::Header
         pub fn remove(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<Record>>
         pub fn remove_at(&mut self, index: usize) -> Result<Record>
         pub fn remove_all(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<usize>
+        pub fn get_hierarch(&self, name: impl TryInto<HierarchName, Error: Into<FitsError>>) -> Result<Option<&Value>>
+        pub fn set_hierarch(&mut self, name: impl TryInto<HierarchName, Error: Into<FitsError>>, value: impl Into<Value>) -> Result<&mut Self>
         pub fn set_comment(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, text: &str) -> Result<&mut Self>
         pub fn push_comment(&mut self, text: &str) -> Result<&mut Self>
         pub fn push_history(&mut self, text: &str) -> Result<&mut Self>
         pub fn push_blank(&mut self, text: &str) -> Result<&mut Self>
         impl<'a> IntoIterator for &'a Header
+
+header::HierarchName
+    struct HierarchName: Clone, Debug, Display, Eq, FromStr, Hash, PartialEq, TryFrom<&str>
+        pub fn as_str(&self) -> &str
 
 header::Iter
     struct Iter<'a>: Clone, Debug, ExactSizeIterator, Iterator
@@ -210,12 +237,27 @@ header::Record
     enum Record: Clone, Debug, PartialEq
         Valued { keyword: Keyword, value: Value, comment: Option<String> }
         Commentary { name: String, text: Option<String> }
+        Hierarch { name: HierarchName, value: Value, comment: Option<String> }
+        Malformed { keyword: Option<Keyword>, raw: [u8; 80], defect: Defect }
 
 header::RecordView
     enum RecordView<'a>: Clone, Copy, Debug, PartialEq
         Valued { keyword: &'a Keyword, value: &'a Value, comment: Option<&'a str> }
         Commentary { name: &'a str, text: Option<&'a str> }
+        Hierarch { name: &'a HierarchName, value: &'a Value, comment: Option<&'a str> }
+        Malformed { keyword: Option<&'a Keyword>, raw: &'a [u8; 80], defect: Defect }
         pub const fn name(self) -> &'a str
+
+header::Repair
+    struct Repair: Clone, Copy, Debug, Eq, PartialEq
+        pub record: usize
+        pub kind: RepairKind
+
+header::RepairKind
+    enum RepairKind: Clone, Copy, Debug, Eq, PartialEq
+        LowercaseName
+        ValueIndicator
+        NonAsciiText
 
 header::Value
     enum Value: Clone, Debug, From<&str>, From<FitsInteger>, From<String>, From<bool>, From<f32>, From<f64>, From<i128>, From<i32>, From<i64>, From<u128>, From<u16>, From<u32>, From<u64>, From<usize>, PartialEq
@@ -644,7 +686,7 @@ image::CompressionConfig  [features: compression or parallel]
     struct CompressionConfig: Clone, Debug, PartialEq
         pub const fn new(compression: Compression) -> Self
         pub fn with_tiles(self, tiles: impl Into<Vec<usize>>) -> Self
-        pub fn with_quantization(self, level: f64, dither: DitherMethod) -> Result<Self>
+        pub const fn with_quantization(self, quantization: Quantization) -> Self
 
 image::Data
     enum Data: Clone, Debug, From<Vec<f32>>, From<Vec<f64>>, From<Vec<i16>>, From<Vec<i32>>, From<Vec<i64>>, From<Vec<u8>>, PartialEq
@@ -671,11 +713,16 @@ image::Data
         impl TryFrom<Data> for Vec<i64>
         impl TryFrom<Data> for Vec<u8>
 
-image::DitherMethod  [features: compression or parallel]
-    enum DitherMethod: Clone, Copy, Debug, Default, Eq, PartialEq
+image::Dither  [features: compression or parallel]
+    enum Dither: Clone, Copy, Debug, Default, Eq, PartialEq
         None
-        Subtractive1
-        Subtractive2
+        Subtractive1(DitherSeed)
+        Subtractive2(DitherSeed)
+
+image::DitherSeed  [features: compression or parallel]
+    struct DitherSeed: Clone, Copy, Debug, Eq, PartialEq
+        pub const FROM_SAMPLES: Self
+        pub fn fixed(seed: u16) -> Result<Self>
 
 image::Gzip  [features: compression or parallel]
     struct Gzip: Clone, Copy, Debug, Default, Eq, PartialEq
@@ -684,7 +731,8 @@ image::Gzip  [features: compression or parallel]
 
 image::Hcompress  [features: compression or parallel]
     struct Hcompress: Clone, Copy, Debug, Default, PartialEq
-        pub fn lossy(scale: f64) -> Result<Self>
+        pub fn relative(scale: f64) -> Result<Self>
+        pub fn absolute(scale: f64) -> Result<Self>
 
 image::Image
     struct Image: Clone, Debug
@@ -704,6 +752,12 @@ image::Metadata
 
 image::PhysicalSample
     trait PhysicalSample: Narrow
+
+image::Quantization  [features: compression or parallel]
+    struct Quantization: Clone, Copy, Debug, Default, PartialEq
+        pub const NONE: Self
+        pub fn relative(level: f64, dither: Dither) -> Result<Self>
+        pub fn absolute(step: f64, dither: Dither) -> Result<Self>
 
 image::Region
     enum Region<'a>: Clone, Copy, Debug, Eq, From<&'a [Range<usize>]>, PartialEq
@@ -1152,9 +1206,9 @@ time
 
 time::Bounds
     struct Bounds: Clone, Copy, Debug, PartialEq
-        pub start_mjd: Option<f64>
-        pub end_mjd: Option<f64>
-        pub mid_mjd: Option<f64>
+        pub start_mjd: Option<Mjd>
+        pub end_mjd: Option<Mjd>
+        pub mid_mjd: Option<Mjd>
         pub exposure: Option<f64>
         pub elapsed: Option<f64>
         pub resolution: Option<f64>
@@ -1165,7 +1219,7 @@ time::Bounds
 
 time::Coordinate
     struct Coordinate: Clone, Debug, PartialEq
-        pub mjd: f64
+        pub mjd: Mjd
         pub scale: Scale
         pub fn observation(header: &Header) -> Result<Option<Self>>
         pub fn epoch(header: &Header) -> Result<Option<Self>>
@@ -1178,21 +1232,27 @@ time::Datetime
         pub hour: u32
         pub minute: u32
         pub second: f64
-        pub fn to_jd(&self, scale: &Scale) -> Result<f64>
-        pub fn to_mjd(&self, scale: &Scale) -> Result<f64>
+        pub fn to_mjd(&self, scale: &Scale) -> Result<Mjd>
 
 time::Frame
     struct Frame: Clone, Debug
         pub scale: Scale
-        pub reference_mjd: f64
+        pub reference_mjd: Mjd
         pub unit: Unit
         pub clock_offset: f64
         pub reference_position: ReferencePosition
         pub fn from_header(header: &Header) -> Result<Self>
         pub fn from_column(header: &Header, column: usize) -> Result<Self>
         pub fn unit_seconds(&self) -> Result<f64>
-        pub fn relative_to_mjd(&self, value: f64) -> Result<f64>
+        pub fn relative_to_mjd(&self, value: f64) -> Result<Mjd>
         pub fn time_axis_mjd(&self, wcs: &Wcs, axis: usize, pixel: &[f64]) -> Result<Coordinate>
+
+time::Mjd
+    struct Mjd: Clone, Copy, Debug, PartialEq, PartialOrd
+        pub fn new(day: i64, fraction: f64) -> Self
+        pub const fn day(self) -> i64
+        pub const fn fraction(self) -> f64
+        pub fn to_f64(self) -> f64
 
 time::PhaseAxis
     struct PhaseAxis: Clone, Copy, Debug, PartialEq
@@ -1243,7 +1303,7 @@ time::Unit
         Seconds(f64)
         TropicalYears(f64)
         BesselianYears(f64)
-        pub fn seconds(self, reference_mjd: f64, scale: &Scale) -> Result<f64>
+        pub fn seconds(self, reference_mjd: Mjd, scale: &Scale) -> Result<f64>
 
 wcs
     mod
@@ -1288,12 +1348,18 @@ wcs::CelestialReferenceFrame
         Fk4NoE
         Gappt
 
+wcs::Distortion
+    enum Distortion: Clone, Copy, Debug, Eq, PartialEq
+        Sip
+        Tpv
+
 wcs::Metadata
     struct Metadata<'a>: Clone, Copy, Debug
         pub axes: &'a [Axis]
         pub celestial_frame: Option<CelestialFrame>
         pub celestial_projection: Option<CelestialProjection>
         pub unsupported_axes: &'a [usize]
+        pub distortion: Option<Distortion>
 
 wcs::Projection
     enum Projection: Clone, Copy, Debug, Eq, PartialEq
@@ -1352,6 +1418,9 @@ wcs::SpectralRest
 wcs::Wcs
     struct Wcs: Clone, Debug
         pub fn from_header(header: &Header, alt: impl TryInto<Alternate, Error: Into<FitsError>>) -> Result<Self>
+        pub fn crop(&self, region: Region<'_>) -> Result<Self>
+        pub fn bin(&self, factors: &[usize]) -> Result<Self>
+        pub fn write_into(&self, header: &mut Header, alt: impl TryInto<Alternate, Error: Into<FitsError>>) -> Result<()>
         pub fn metadata(&self) -> Metadata<'_>
         pub fn from_pixel_list(header: &Header, columns: &[usize], alt: impl TryInto<Alternate, Error: Into<FitsError>>) -> Result<Self>
         pub fn from_array_column(header: &Header, column: usize, alt: impl TryInto<Alternate, Error: Into<FitsError>>) -> Result<Self>

@@ -132,21 +132,134 @@ and the dated measurements in `docs/research/`.
   `ColumnData::U8`, as `Data::U8`, and `len` with `is_empty`, as `Data` and
   `AsciiColumnData` have. Refused: `ColumnData::Bytes` and `element_count`.
 
+## Compression
+
+- **A float image with no `ZSCALE` and no `ZZERO` column, or with `ZQUANTIZ =
+  'NONE'`, is lossless.** Its `COMPRESSED_DATA` cells hold GZIP_1 or GZIP_2 big-endian
+  floats at `ZBITPIX` width, and another codec on such an image is
+  `UnsupportedCompression`. cfitsio treats the absent columns as `'NONE'` whatever
+  `ZQUANTIZ` says, and allows only GZIP for it. Refused: the integer decode of those
+  cells, which read the float bits as quantized integers. Sources: §10.2; cfitsio
+  `imcomp_get_compressed_image_par`, `imcomp_init_table`.
+- **A float image's quantization is one opaque type, `Quantization`:**
+  `Quantization::NONE` for lossless (`ZQUANTIZ = 'NONE'`), `relative(level, dither)`
+  for levels spaced at each tile's noise divided by `level`, and `absolute(step,
+  dither)` for one spacing for every tile, as fpack's `-q level` and `-q -step`.
+  `Hcompress::relative` and `Hcompress::absolute` are the same pair for the HCOMPRESS
+  scale, as fpack's `-s`. Refused: cfitsio's one number, where 0 is lossless and a
+  negative value absolute, and fits-well's former level 0 for "the default of 4":
+  both put a mode into a magic value. Refused: an enum with public variants, whose
+  values anyone could build unchecked, as `Alternate` refuses. Sources: cfitsio
+  `fpackguide.md` §C, `fits_quantize_float`.
+- **`Dither` holds the method and its seed:** `None`, `Subtractive1(seed)` and
+  `Subtractive2(seed)`, so a seed never stands beside no dither. `DitherSeed` is
+  opaque: `FROM_SAMPLES`, the default, or `fixed(1..=10000)`.
+- **The default seed is `(Σ bytes of every sample mod 10000) + 1`.** A byte sum does not
+  depend on the byte order. The same image gives the same file, and frames whose first
+  tiles are equal, such as registered frames with blank edges, still get different
+  seeds; the reader takes any seed, so the rule has no effect on interop. The cost: one
+  more read of the samples. Refused: the first tile's byte sum (fpack `-qt`, astropy
+  `DITHER_SEED_CHECKSUM`), as equal first tiles give equal seeds; the clock (cfitsio's
+  and astropy's default), which writes a different file on each run; and the former
+  fixed seed of 1, which gives every image one dither pattern, which fpack warns loses
+  the benefit of dither when images are added. Source: `fpackguide.md`, `-qt`.
+- **The noise estimate is cfitsio's:** noise3, or noise2 or noise5 where either is
+  nonzero and smaller, each from the 2nd, 3rd and 5th order median absolute
+  differences, in `float` arithmetic for an f32 image, for the float quantization and
+  the HCOMPRESS scale. A write then matches fpack's `ZSCALE`, `ZZERO` and HCOMPRESS
+  scale bit for bit. Refused: noise3 alone, which gave a larger step than fpack. Two
+  differences from cfitsio stay: each median runs over its own differences, where
+  cfitsio takes noise2's over the noise3 count and reads entries left from earlier rows
+  when a run of three equal values drops one (`quantize.c` `FnNoise5_float`); and a
+  level or a step stays an `f64`, where cfitsio takes it as a C `float`. Sources:
+  cfitsio `fits_quantize_float`, `fits_img_stats_int`; Stoehr et al., ST-ECF
+  newsletter 42.
+- **A quantized float image takes HCOMPRESS_1**, and the HCOMPRESS scale applies to
+  the quantized integers, as in cfitsio. `SUBTRACTIVE_DITHER_2` with it is
+  `InvalidCompressionParameter`, as fpack refuses `-qz` with `-h`. Refused: cfitsio's
+  library way, which changes the method to `SUBTRACTIVE_DITHER_1` with a warning, a
+  change the caller did not ask for. `PLIO_1` for floats stays refused: a quantized
+  tile seldom fits its 24-bit range. Sources: `fpackguide.md` `-qz`; cfitsio
+  `imcomp_init_table`.
+- **The float container widens its two descriptors to `Q`** past the 32-bit range, as
+  the integer container does. Refused: the former `DataUnitOverflow` for such a heap.
+- **A lossless float write gathers the samples as bytes**, so the floats come back as
+  written, a NaN's payload included. Refused: the `f64` gather the quantizer uses,
+  which sets a signaling NaN's quiet bit.
+- **A u16 image's `PLIO_1` stream holds its physical values:** the stored value plus
+  32768, as PLIO takes no negative value, when `BITPIX = 16` and `BZERO = 32768`.
+  cfitsio writes and reads it so. The cost: cfitsio also subtracts 32768 from a 32-bit
+  PLIO image with `BZERO = 32768`, which its own writer does not offset; fits-well
+  offsets only the 16-bit case. Refused: astropy's way, which refuses the write and
+  reads with no offset, so it misreads cfitsio's files. Sources: cfitsio
+  `imcomp_convert_tile_tshort`, `imcomp_decompress_tile`; astropy
+  `_tiled_compression.py`. cfitsio 4.7.0's `fpack -p` aborts on a u16 image, so the
+  read test builds its stream; `funpack` reads fits-well's u16 PLIO file back exactly.
+
 ## World coordinates
 
+- **The `CTYPEia` grammar takes a distortion code.** A 12-character value with `-` in
+  byte 9 carries a distortion code after any projection (`RA---TAN-SIP`), as wcslib
+  excises one; `RA---TPV` is TAN with the TPV polynomial. An unknown code leaves the
+  axes unsupported. Source: wcslib `wcsset`; Shupe et al. 2005; the TPV registration.
+- **`Wcs::write_into(header, alt)` writes a description into a header, in wcslib's
+  form.** It first removes every record of that description, then sets `WCSAXES`,
+  `CRPIX`, `PCi_j` (an identity term omitted), `CDELT`, `CUNIT`, `CTYPE`, `CRVAL`, the
+  pole, frame and spectral keywords and `PVi_m` as they were read, and the SIP terms.
+  The `Wcs` keeps its `PC` and `CDELT` as read, a `CD` matrix as `PC = CD` with
+  `CDELT = 1`, as wcslib's `wcsset` keeps it and as TPV needs; so `from_header` of the
+  result gives back the same transform bit for bit. A legacy `CROTA` writes the `PC`
+  it derives, whose off-diagonal terms round once. A `-TAB` axis is
+  `UnsupportedWcsTransform`, as its arrays live in another HDU. Refused: a new header
+  the caller merges, as astropy's `to_header` gives, where a merge over a `CD` header
+  leaves `CD` beside the new `PC`, which `from_header` refuses; `CD` output of the
+  product matrix, which leaves the form wcslib and astropy write; and a `PC` and
+  `CDELT` factored from the product, which rounds. Source: wcslib `wcshdo`.
+- **`Wcs::crop(region)` and `Wcs::bin(factors)` derive a new WCS exactly.** A crop takes
+  the `Region` the image read takes, so one value crops the image and its WCS, and
+  subtracts each range's start from `CRPIX`. A bin by `b` on pixel axis `j` maps
+  `CRPIX` to `(CRPIX − 0.5)/b + 0.5`, the centre of the first block, as astropy's
+  `slice` with a step does, and multiplies column `j` of `PC` by `b`, as a bin scales a
+  pixel axis. With factors `b₁`, `b₂` on the SIP axes, `A_p_q·b₁^p·b₂^q/b₁` and
+  `B_p_q·b₁^p·b₂^q/b₂`, `AP` and `BP` alike; TPV, after the matrix, stays. Both go
+  through the header `write_into` writes, so a `-TAB` axis is refused as there. Refused:
+  astropy's way, which multiplies `CDELT` and keeps the SIP terms, correct only for an
+  equal bin on both axes with no SIP; and a stride on `Region` ("No section stride").
+- **SIP is a prior distortion, from its keywords, on the primary description only.**
+  `(U, V) = (u + f(u, v), v + g(u, v))` on the offsets of the first two pixel axes
+  from `CRPIX`, before the matrix, up to order 9 (wcslib reads one digit for `p` and
+  `q`). `A_ORDER` and `B_ORDER` turn it on with or without the `-SIP` code, as wcslib
+  and astropy read it; a `-SIP` code without them is `MissingKeyword`; its keywords
+  carry no alternate letter; a `-TPV` code drops them, as astropy does. The inverse
+  solves the forward polynomials by Newton steps with their exact Jacobian, from
+  `AP`/`BP` as the first guess when present, until each residual is within 1e-13,
+  absolute below 1 and relative above, and is `WcsNoConvergence` after 30 steps:
+  wcslib's rule and limit (`disx2p`, `disitermax`). Refused: `AP`/`BP` alone as the inverse, an
+  approximate fit whose round trip misses the pixel (astrometry.net does this);
+  astropy's `all_world2pix` default of 1e-4 pixel; a fixed absolute 1e-12 pixel, which a
+  coordinate past about 4500 can never meet; and SIP only with the `-SIP` code, which
+  would read astropy's SIP files without their distortion. SCAMP's `PVi_m` with `m` of
+  5 or more beside SIP set no projection parameter, as astropy drops them.
+- **TPV is a sequent distortion, on the celestial intermediate coordinates in degrees:**
+  `ξ = P₁(x, y)` from the longitude axis's `PV` and `η = P₂(y, x)` from the latitude
+  axis's, the registered 40 terms, an absent term 0 except `PVi_1`, which is 1, so a
+  header with no `PV` is plain TAN, as the registration states. On a `-TPV` pair no
+  celestial `PV` sets `φ₀`, `θ₀` or the pole; `LONPOLE` and `LATPOLE` still do, as
+  wcslib reads it. The inverse uses the SIP stop rule. Refused: TNX, ZPX, TPU and TPD,
+  which no darkroom input uses. Source: TPV registration; wcslib `wcsset`, `tpvset`.
 - **A transform writes one point into the caller's slice.** `pixel_to_world` and
   `world_to_pixel` take the input and the output as slices of one value per
   axis, so a caller loops over its points with one buffer and a point makes no
   allocation unless an axis is `-TAB`. Refused: a new `Vec` for each point, and
   a batch API, which the loop makes unnecessary. wcslib also writes into the
-  caller's arrays. Source: `docs/research/2026-10-23-wcs-into-slice.md`.
+  caller's arrays. Source: `docs/research/2026-10-24-wcs-into-slice.md`.
 - **The inverse linear step solves with the matrix's LU factors,** in place in
   the output slice. Refused: the explicit inverse, whose product needs its input
   kept apart from its output, so a buffer for each point. Solving is as accurate
   as the product with the inverse or better (Higham, §14.1), and it keeps the
   division for each row rather than a reciprocal. The cost: four coupled linear
   axes invert 34% slower, four dependent divisions where the product was one
-  pass. Source: `docs/research/2026-10-23-wcs-into-slice.md`.
+  pass. Source: `docs/research/2026-10-24-wcs-into-slice.md`.
 - **A WCS or time read selects its description with `impl TryInto<Alternate>`,**
   as a keyword argument takes `impl TryInto<Keyword>`: `None` for the primary
   description, and `'A'` or `Some('A')` for an alternate. `Alternate` holds the
@@ -188,6 +301,19 @@ and the dated measurements in `docs/research/`.
   first. Also refused: a builder from a read `Table`; `read_data_unit` and
   `write_raw_hdu` copy an HDU as it is. Sources: cfitsio `imcompress.c`, rustfits
   `CompressedTableHDU`.
+- **A compressed table takes GZIP_2 only on `I`, `J`, `K`, `E` and `D` columns.** The
+  table's `Compression` is a preference that each column clamps to a codec its type
+  takes, as cfitsio's writer does; `L`, `X`, `A`, `B`, `C` and `M` take GZIP_1 when
+  GZIP_2 is asked, because cfitsio's reader unshuffles only those five types, and a
+  shuffle of 1-byte values does nothing. Refused: GZIP_2 on `C` and `M`, which
+  cfitsio's writer emits but its own reader refuses. Source: cfitsio
+  `fits_compress_table`, `fits_uncompress_table`.
+- **`write_compressed_table` refuses `Compression::None`** with
+  `InvalidCompressionParameter`; a table with no compression is `write_table`. The
+  reader still restores `NOCOMPRESS` columns. Refused: `ZCTYPn = 'NOCOMPRESS'` on
+  write, which the standard permits (Table 36) and cfitsio refuses to read. Refused: a
+  clamp to GZIP_1 at deflate level 0, which compresses nothing and still writes a gzip
+  stream for each tile.
 - **A table compresses straight from the builder's columns.** Each tile gathers its
   column's cells from the `Builder`, through the `TableCells` trait, and computes
   the descriptors the plain table would hold. Refused: encoding the rows first and
@@ -215,6 +341,26 @@ and the dated measurements in `docs/research/`.
   `from_u64` and `from_i8` take any shape `Image::new` takes. Refused: one
   `from_unsigned` over a borrowed view; the write converts the samples to signed
   values and `BZERO` in any case, so it saves no copy.
+
+## Editing
+
+- **`FitsEditor` edits a file that exists**, over `Read + Write + Seek`, beside
+  `FitsReader` and `FitsWriter`. An edit in place parses the header it writes and
+  reads no other, as the other HDUs do not move.
+  `replace_header` writes a header in place when it fits the HDU's header blocks, the
+  free space before `END` blank records, and is `HeaderDoesNotFit` otherwise; the new
+  header must give the same data unit. A header that holds `CHECKSUM` gets a valid one:
+  from its `DATASUM`, trusted as it was before the edit, else from the data unit, read
+  once, also for a blank `DATASUM`, the standard's unknown sum. `replace_header_into`
+  writes the whole edited file into a second sink, which the caller renames over the
+  first, as astropy does in update mode.
+  `FitsWriter::with_spare_records(n)` writes `n` blank records before each `END`, so a
+  later edit fits in place, as cfitsio's `ffhdef` reserves space; "spare", as
+  "reserved" names the standard's reserved keywords. `append` consumes the editor and
+  gives a `FitsWriter` at the end of a file that ends on a block boundary, so two
+  handles never write one file. Refused: a move of every byte after the header, as
+  cfitsio (`ffiblk`) and fitsio-pure do, a large write that leaves a broken file when
+  it stops in the middle; and row and column insert and delete, which a copy does.
 
 ## Header
 
@@ -265,6 +411,44 @@ and the dated measurements in `docs/research/`.
   `Entry`, a name unrelated to its owned twin; one struct whose `Option` value
   told the kinds apart and whose `comment` meant two things; and a `record(k)`
   lookup that could only give the valued kind.
+- **A near-valid record is repaired and reported; a record with a bad value is kept as
+  malformed.** `Header::parse` repairs three defects, each a `Repair` that
+  `Header::repairs()` lists by the record's 1-based position in the header unit as
+  read: a lowercase name reads as its uppercase keyword; a value indicator `=` before
+  byte 9, or in byte 9 with no blank in byte 10, reads the value that follows it; a
+  non-ASCII byte in a comment or commentary text reads as `?`. A repaired record is an
+  ordinary record after that, so a write gives the corrected record. A record whose
+  name is no keyword, or whose value does not parse or holds a non-ASCII byte, is
+  `RecordView::Malformed` with its 80 bytes: a lookup of its keyword and a write of its
+  header fail with `InvalidValue`, and `Header::set` replaces it. So a read fails only
+  when it needs that record; a defect in a keyword that sizes an HDU still stops the
+  open, as the next HDU cannot be found. Sources: cfitsio finds a lowercase keyword,
+  reads a value after a misplaced `=` and parses a value only on request
+  (`ffgcrd`, `ffpsvc`, `ffgphd`); astropy uppercases the name, accepts an early `=`
+  and replaces non-ASCII with `?` (`card.py`, `util.py`). Refused: a lenient mode,
+  which is modal state; a repair without a report; `Malformed` for every defect, which
+  leaves a lowercase `exptime` out of reach by name; and the former refusal of the
+  whole file for one bad optional record.
+- **The blank records just before `END` are space, not content:** `Header::parse`
+  drops them, so a header read and edited fits again in the space they held. Sources:
+  astropy fills trailing blanks first (`Header.append(useblanks=True)`); cfitsio
+  writes the space `ffhdef` reserves as blank records before `END`. Refused: keeping
+  them as commentary, which makes every edited header one record larger than its
+  space.
+- **HIERARCH records are typed.** `HIERARCH ESO DET CHIP1 NAME = 'x' / c` reads as
+  `RecordView::Hierarch` with a checked `HierarchName`: one or more tokens of printable
+  ASCII other than `=`, joined by one blank, as the blanks between tokens carry no
+  meaning. Names compare without regard to ASCII case, as cfitsio and astropy compare
+  them, and keep the case they were read with. `get_hierarch` and `set_hierarch` take
+  `impl TryInto<HierarchName>`, as the keyword methods take `impl TryInto<Keyword>`, and
+  look the name up in a second index. A long string continues on `CONTINUE` records,
+  as astropy writes it; the blank before `=` goes only when the record needs that
+  byte, as cfitsio and astropy write it; a comment that does not fit is
+  `HeaderCardTooLong`. Refused: a `Keyword` longer than 8 bytes, which would end
+  `Keyword: Copy`; astropy's silent truncation of a long comment; and ESO's token rule
+  (`A`–`Z`, `0`–`9`, `-`, `_`) as a read check, which would make the HIERARCH records
+  cfitsio and astropy write malformed. Sources: Wicenec, Grosbøl and Pence, "The ESO
+  HIERARCH Keyword Conventions" (2009); cfitsio `ffgcrd`, `ffmkky`; astropy `card.py`.
 - **A commentary card keeps its name as text.** The standard lets a record with
   no value indicator start with any 8 bytes, which no `Keyword` holds, so
   `RecordView::Commentary` gives the name as `&str`, while a valued record's is a
@@ -283,8 +467,34 @@ and the dated measurements in `docs/research/`.
   files. Refused: the feature and its dependency.
 - **No general split of the header borrow from the data borrow.**
   `ImageReader::header` outlives the handle borrow, which covers the read path.
+- **No gzip'd file, non-seekable stream or async input.** These wrap the format
+  and are not part of it: the caller inflates a `.fits.gz` and calls
+  `FitsReader::from_bytes`. Refused: a gzip reader and an async API, which would add
+  a dependency each, and a stream reader, which cannot read the HDUs lazily.
+- **No HCOMPRESS `SMOOTH` on write.** `SMOOTH` is a hint for the reader, which
+  smooths when a file asks for it. Refused: a write option that stores the hint.
+- **No random groups write, public unit grammar or cfitsio tool features.** Random
+  groups are deprecated for all data but radio interferometry (§6), and read only; a
+  unit is parsed only where a WCS or time axis needs one; row filters, the extended
+  file-name syntax and the other cfitsio tool features are programs over the library,
+  not the format.
 
 ## Time
+
+- **No time-scale conversion.** A time keeps the scale its header declares; a
+  conversion needs leap-second, ephemeris and Earth-orientation data from outside the
+  file, as ERFA and astropy take them. Refused: built-in tables, which go out of date.
+- **A time is an integer MJD day and a fraction:** `time::Mjd`, opaque, with
+  `Mjd::new(day, fraction)` moving the fraction into [0, 1). The fraction has a
+  spacing of at most 2⁻⁵³ day ≈ 1e-11 s. A relative time joins the reference epoch
+  with error-free operations, two-sum, two-product and a division with its exact
+  remainder, rounded once into the fraction, as astropy's `day_frac` does
+  (`time/utils.py`, after Shewchuk 1997). A day past 2⁵³ in size holds no fraction
+  and is refused. Source: §9.2.2. Refused: one `f64` MJD, which at MJD 60000 has a
+  spacing of 2⁻³⁷ day ≈ 0.63 µs. Refused: astropy's fraction in [−0.5, 0.5], which
+  centres the day on a JD's noon; an MJD day starts at 0 h, so [0, 1) keeps the day
+  number of the date. Refused: a JD in one `f64`, which loses more than an MJD.
+  Refused: public fields, which let a fraction outside [0, 1) exist.
 
 - **A time unit is parsed once, with its frame.** `Frame::unit` is a
   `time::Unit`: a fixed length, or a multiple of the tropical or Besselian year,

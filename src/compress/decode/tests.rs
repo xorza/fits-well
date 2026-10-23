@@ -305,6 +305,127 @@ fn compressed_integer_null_mask_restores_blank_pixels() {
     }
 }
 
+/// `fpack -g1 -q 0` and `fpack -g2 -q 0` (CFITSIO 4.070) of a 24×16 plane
+/// `((7919·i + 13) mod 2001) / 7 − 100`, NaN where `i mod 97 = 5`: `ZQUANTIZ = 'NONE'`,
+/// no `ZSCALE`/`ZZERO` column, each tile's floats gzip'd (and shuffled for `GZIP_2`).
+#[test]
+fn decompresses_the_lossless_float_fixtures() {
+    let plane = || {
+        (0..24 * 16)
+            .map(|i: u32| (i % 97 != 5).then(|| f64::from((i * 7919 + 13) % 2001) / 7.0 - 100.0))
+    };
+    let want: Vec<Option<u64>> = plane().map(|v| v.map(f64::to_bits)).collect();
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the f32 fixtures hold the f64 plane rounded to f32"
+    )]
+    let want_f32: Vec<Option<u32>> = plane().map(|v| v.map(|v| (v as f32).to_bits())).collect();
+    for name in [
+        "comp_lossless_gzip1_f64.fits",
+        "comp_lossless_gzip2_f64.fits",
+    ] {
+        let Data::F64(got) = read_whole(&mut open_fixture(name), 1).samples else {
+            panic!("{name}: expected F64")
+        };
+        let got: Vec<Option<u64>> = got
+            .iter()
+            .map(|v| (!v.is_nan()).then(|| v.to_bits()))
+            .collect();
+        assert_eq!(got, want, "{name}");
+    }
+    for name in [
+        "comp_lossless_gzip1_f32.fits",
+        "comp_lossless_gzip2_f32.fits",
+    ] {
+        let Data::F32(got) = read_whole(&mut open_fixture(name), 1).samples else {
+            panic!("{name}: expected F32")
+        };
+        let got: Vec<Option<u32>> = got
+            .iter()
+            .map(|v| (!v.is_nan()).then(|| v.to_bits()))
+            .collect();
+        assert_eq!(got, want_f32, "{name}");
+    }
+}
+
+/// A float image with no `ZSCALE` and no `ZZERO` column is lossless whatever its
+/// `ZQUANTIZ` says, as cfitsio reads it; lossless floats take only a gzip codec.
+#[test]
+fn a_float_image_without_scale_columns_is_lossless() {
+    let values = [1.5f32, -2.25, 3.0, 100.125, 0.0, 7.75, -8.5, 42.0];
+    let raw: Vec<u8> = values.iter().flat_map(|v| v.to_be_bytes()).collect();
+    let heap = gzip::gzip_encode(&raw, 6);
+    let heap_len = i64::try_from(heap.len()).unwrap();
+    let h = compressed_image_header(
+        "GZIP_1",
+        -32,
+        &[4, 2],
+        &[4, 2],
+        &[("COMPRESSED_DATA", &format!("1PB({heap_len})"))],
+        8,
+        heap_len,
+    );
+    let mut data = Vec::new();
+    data.extend_from_slice(&i32::try_from(heap.len()).unwrap().to_be_bytes());
+    data.extend_from_slice(&0i32.to_be_bytes());
+    data.extend_from_slice(&heap);
+    let table = Table::from_data(&h, data).unwrap();
+    let mut dithered = h.clone();
+    dithered.set_internal(keywords::ZQUANTIZ, "SUBTRACTIVE_DITHER_1");
+    for header in [&h, &dithered] {
+        assert_eq!(
+            decompress_image(header, &table).unwrap().samples,
+            Data::F32(values.to_vec())
+        );
+    }
+
+    let mut rice = h;
+    rice.set_internal(keywords::ZCMPTYPE, "RICE_1");
+    assert!(matches!(
+        decompress_image(&rice, &table),
+        Err(FitsError::UnsupportedCompression { name }) if name == "RICE_1 for a lossless float image"
+    ));
+}
+
+/// A u16 image's `PLIO_1` stream holds the physical values, and the reader subtracts
+/// 32768 for the stored ones, as cfitsio's `imcomp_decompress_tile` does. The stream
+/// is built here: cfitsio 4.7.0's `fpack -p` aborts on a u16 image.
+#[test]
+fn plio_of_a_u16_image_holds_its_physical_values() {
+    let plio_image = |physical: &[i64], bzero: Option<i64>| {
+        let stream = plio::plio_encode(physical).unwrap();
+        let width = i64::try_from(physical.len()).unwrap();
+        let count = i64::try_from(stream.len()).unwrap();
+        let mut h = compressed_image_header(
+            "PLIO_1",
+            16,
+            &[width, 1],
+            &[width, 1],
+            &[("COMPRESSED_DATA", &format!("1PI({count})"))],
+            8,
+            2 * count,
+        );
+        if let Some(bzero) = bzero {
+            h.set_internal(keywords::BZERO, bzero);
+        }
+        let mut data = Vec::new();
+        data.extend_from_slice(&i32::try_from(count).unwrap().to_be_bytes());
+        data.extend_from_slice(&0i32.to_be_bytes());
+        for word in stream {
+            data.extend_from_slice(&word.to_be_bytes());
+        }
+        let table = Table::from_data(&h, data).unwrap();
+        decompress_image(&h, &table).unwrap().samples
+    };
+    // Stored = physical − 32768.
+    assert_eq!(
+        plio_image(&[0, 1, 32767, 32768, 65535], Some(32768)),
+        Data::I16(vec![-32768, -32767, -1, 0, 32767])
+    );
+    // Without BZERO = 32768 the stream holds the stored values.
+    assert_eq!(plio_image(&[0, 1, 2, 3], None), Data::I16(vec![0, 1, 2, 3]));
+}
+
 #[test]
 fn compressed_float_null_mask_restores_nan_pixels() {
     let mut h = compressed_image_header(

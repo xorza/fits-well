@@ -1,3 +1,4 @@
+use crate::compress::quantization::{Dither, DitherSeed};
 use crate::compress::*;
 
 #[test]
@@ -8,22 +9,37 @@ fn typed_compression_configuration_rejects_impossible_values() {
         Gzip::new(10),
         Err(FitsError::InvalidCompressionParameter { detail }) if detail == "gzip compression level 10 is outside 0..=9"
     ));
-    assert!(matches!(
-        Hcompress::lossy(0.0),
-        Err(FitsError::InvalidCompressionParameter { detail }) if detail == "lossy HCOMPRESS scale 0 must be positive"
-    ));
-    assert!(matches!(
-        Hcompress::lossy(f64::NAN),
-        Err(FitsError::InvalidCompressionParameter { .. })
-    ));
-    assert!(matches!(
-        CompressionConfig::new(Compression::Rice).with_quantization(f64::NAN, DitherMethod::None),
-        Err(FitsError::InvalidCompressionParameter { .. })
-    ));
-    assert!(matches!(
-        CompressionConfig::new(Compression::Rice).with_quantization(-1.0, DitherMethod::None),
-        Err(FitsError::InvalidCompressionParameter { .. })
-    ));
+    for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            Hcompress::relative(value),
+            Err(FitsError::InvalidCompressionParameter { detail })
+                if detail == format!("HCOMPRESS scale {value} must be finite and positive")
+        ));
+        assert!(Hcompress::absolute(value).is_err(), "{value}");
+        assert!(matches!(
+            Quantization::relative(value, Dither::None),
+            Err(FitsError::InvalidCompressionParameter { detail })
+                if detail == format!("relative quantization level {value} must be finite and positive")
+        ));
+        assert!(matches!(
+            Quantization::absolute(value, Dither::None),
+            Err(FitsError::InvalidCompressionParameter { detail })
+                if detail == format!("absolute quantization step {value} must be finite and positive")
+        ));
+    }
+    assert!(Hcompress::relative(1.0).is_ok() && Hcompress::absolute(30.0).is_ok());
+    for seed in [0, 10_001] {
+        assert!(matches!(
+            DitherSeed::fixed(seed),
+            Err(FitsError::InvalidCompressionParameter { detail })
+                if detail == format!("dither seed {seed} is outside 1..=10000")
+        ));
+    }
+    assert!(DitherSeed::fixed(1).is_ok() && DitherSeed::fixed(10_000).is_ok());
+    assert_eq!(
+        Quantization::default(),
+        Quantization::relative(4.0, Dither::Subtractive1(DitherSeed::FROM_SAMPLES)).unwrap()
+    );
     assert_eq!(Compression::GZIP.name(), "GZIP_1");
     assert_eq!(Compression::GZIP_SHUFFLED.name(), "GZIP_2");
 }
@@ -53,8 +69,7 @@ fn table_tile_rows_follow_the_config_and_cfitsio_default() {
         })
     ));
     assert!(matches!(
-        rice.with_quantization(4.0, DitherMethod::None)
-            .unwrap()
+        rice.with_quantization(Quantization::relative(4.0, Dither::None).unwrap())
             .table_tile_rows(10, 8),
         Err(FitsError::InvalidCompressionParameter { detail })
             if detail == "a compressed table takes no float quantization"

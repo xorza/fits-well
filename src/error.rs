@@ -80,6 +80,8 @@ pub enum Ranked {
     TileShape,
     /// A pixel or world coordinate, against its WCS.
     WcsCoordinate,
+    /// The bin factors of a WCS, one per pixel axis, against its WCS.
+    BinFactors,
 }
 
 impl Ranked {
@@ -106,6 +108,9 @@ impl Ranked {
                 "coordinate has {got} {} but the WCS has {expected} axes",
                 if *got == 1 { "value" } else { "values" }
             ),
+            Self::BinFactors => {
+                write!(f, "{got} bin factors given but the WCS has {expected} axes")
+            }
         }
     }
 }
@@ -307,6 +312,13 @@ pub enum FitsError {
     /// A FITS keyword family was addressed with zero even though its indices start at 1.
     #[error("{} indices are 1-based and cannot be zero", .indexed.name())]
     OneBasedIndexRequired { indexed: Indexed },
+    /// A replacement header needs more 2880-byte blocks than the header it replaces in
+    /// place holds.
+    #[error("the header needs {needed} blocks but the file holds {available} for it")]
+    HeaderDoesNotFit { needed: usize, available: usize },
+    /// A file to append to does not end on a 2880-byte block boundary.
+    #[error("the file is {len} bytes, which ends off the 2880-byte block grid")]
+    FileOffBlockGrid { len: u64 },
     /// No HDU carries the extension name, version and level a read named.
     #[error("no HDU named {name:?} (EXTVER {version:?}, EXTLEVEL {level:?})")]
     HduNotFound {

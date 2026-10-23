@@ -8,6 +8,7 @@ use crate::header_model::RecordView;
 use crate::keyword::Keyword;
 use crate::world_coordinates::D2R;
 use crate::world_coordinates::axis::Axis;
+use crate::world_coordinates::distortion::sip::Sip;
 use crate::world_coordinates::first_real;
 use crate::world_coordinates::projected_celestial_axes::ProjectedCelestialAxes;
 use crate::world_coordinates::read_value;
@@ -20,6 +21,8 @@ pub(super) struct LinearTransform {
     matrix: Vec<f64>,
     factors: LuFactors,
     naxis: usize,
+    /// SIP, a prior distortion of the offsets of the first two pixel axes.
+    sip: Option<Sip>,
 }
 
 /// The LU factors of a row-major `n×n` matrix `A` with partial pivoting, `P·A = L·U`: `U`
@@ -42,6 +45,18 @@ struct LuFactors {
 pub(super) struct LinearMatrix {
     values: Vec<f64>,
     naxis: usize,
+    /// The `PC` and `CDELT` the values are the product of, in wcslib's form.
+    declared: DeclaredMatrix,
+}
+
+/// A matrix as `PCi_j` and `CDELTi`, the form wcslib keeps and writes (`wcsset`,
+/// `wcshdo`): a `CD` matrix is `PC = CD` with `CDELT = 1`, and a legacy `CROTA` the `PC`
+/// its rotation gives.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DeclaredMatrix {
+    /// Row-major `naxis²`.
+    pub(crate) pc: Vec<f64>,
+    pub(crate) cdelt: Vec<f64>,
 }
 
 /// One `PCi_ja`/`CDi_ja` keyword the header carries, with its zero-based cell.
@@ -131,14 +146,28 @@ impl LinearMatrix {
             for cell in cd {
                 values[cell.index(naxis)] = header.get_real(cell.keyword)?.unwrap_or(0.0);
             }
-            return Ok(Self { values, naxis });
+            let declared = DeclaredMatrix {
+                pc: values.clone(),
+                cdelt: vec![1.0; naxis],
+            };
+            return Ok(Self {
+                values,
+                naxis,
+                declared,
+            });
         }
+        let mut declared = DeclaredMatrix {
+            pc: vec![0.0; naxis * naxis],
+            cdelt: cdelt.to_vec(),
+        };
         for (i, &scale) in cdelt.iter().enumerate() {
             values[i * naxis + i] = scale;
+            declared.pc[i * naxis + i] = 1.0;
         }
         for cell in pc {
-            values[cell.index(naxis)] =
-                cdelt[cell.row] * header.get_real(cell.keyword)?.unwrap_or(0.0);
+            let value = header.get_real(cell.keyword)?.unwrap_or(0.0);
+            values[cell.index(naxis)] = cdelt[cell.row] * value;
+            declared.pc[cell.index(naxis)] = value;
         }
         // Legacy CROTA: rotate the celestial 2-axis sub-block (only when no PC was
         // given, per the convention that CROTA and PC are exclusive).
@@ -157,9 +186,22 @@ impl LinearMatrix {
                 values[lng * naxis + lat] = -cdelt[lat] * s;
                 values[lat * naxis + lng] = cdelt[lng] * s;
                 values[lat * naxis + lat] = cdelt[lat] * c;
+                declared.pc[lng * naxis + lng] = c;
+                declared.pc[lng * naxis + lat] = -s * cdelt[lat] / cdelt[lng];
+                declared.pc[lat * naxis + lng] = s * cdelt[lng] / cdelt[lat];
+                declared.pc[lat * naxis + lat] = c;
             }
         }
-        Ok(Self { values, naxis })
+        Ok(Self {
+            values,
+            naxis,
+            declared,
+        })
+    }
+
+    /// The `PC` and `CDELT` of this matrix.
+    pub(super) fn declared(&self) -> DeclaredMatrix {
+        self.declared.clone()
     }
 
     /// Scale row `i` by `axis_scales[i]` and factor.
@@ -168,7 +210,11 @@ impl LinearMatrix {
     /// (celestial) or the Table-25 default (spectral), so each axis's whole matrix row
     /// carries its unit factor. The inverse is computed from the scaled matrix, so both
     /// directions stay consistent.
-    pub(super) fn scaled(mut self, axis_scales: &[f64]) -> Result<LinearTransform> {
+    pub(super) fn scaled(
+        mut self,
+        axis_scales: &[f64],
+        sip: Option<Sip>,
+    ) -> Result<LinearTransform> {
         debug_assert_eq!(axis_scales.len(), self.naxis);
         for (axis, &scale) in axis_scales.iter().enumerate() {
             for column in 0..self.naxis {
@@ -183,6 +229,7 @@ impl LinearMatrix {
             matrix: self.values,
             factors,
             naxis: self.naxis,
+            sip,
         })
     }
 }
@@ -192,33 +239,59 @@ impl LinearTransform {
     /// coordinate to `out`.
     pub(super) fn intermediate(&self, pixel: &[f64], axes: &[Axis], out: &mut [f64]) {
         debug_assert_eq!(out.len(), self.naxis);
+        let distorted = self.distorted(pixel, axes);
         for (row, value) in self.matrix.chunks_exact(self.naxis).zip(out) {
-            *value = offset_row(row, pixel, axes);
+            *value = offset_row(row, pixel, axes, distorted);
         }
     }
 
     /// One axis's intermediate world coordinate, without evaluating the others.
     pub(super) fn intermediate_axis(&self, axis: usize, pixel: &[f64], axes: &[Axis]) -> f64 {
         let row = &self.matrix[axis * self.naxis..(axis + 1) * self.naxis];
-        offset_row(row, pixel, axes)
+        offset_row(row, pixel, axes, self.distorted(pixel, axes))
+    }
+
+    pub(super) const fn sip(&self) -> Option<&Sip> {
+        self.sip.as_ref()
+    }
+
+    /// The SIP-distorted offsets of the first two pixel axes, when SIP applies.
+    fn distorted(&self, pixel: &[f64], axes: &[Axis]) -> Option<[f64; 2]> {
+        let sip = self.sip.as_ref()?;
+        Some(sip.forward(pixel[0] - axes[0].crpix, pixel[1] - axes[1].crpix))
     }
 
     /// Replace the complete intermediate world coordinate in `coordinates` with its
     /// 1-based pixel coordinate, the inverse of [`LinearTransform::intermediate`].
-    pub(super) fn pixel(&self, coordinates: &mut [f64], axes: &[Axis]) {
+    /// Errors when the SIP inverse does not converge.
+    pub(super) fn pixel(&self, coordinates: &mut [f64], axes: &[Axis]) -> Result<()> {
         self.factors.solve(coordinates);
+        if let Some(sip) = &self.sip {
+            let [u, v] = sip.inverse(coordinates[0], coordinates[1])?;
+            coordinates[0] = u;
+            coordinates[1] = v;
+        }
         for (value, axis) in coordinates.iter_mut().zip(axes) {
             *value += axis.crpix;
         }
+        Ok(())
     }
 }
 
-/// One matrix row applied to `(pixel − CRPIX)`.
-fn offset_row(row: &[f64], pixel: &[f64], axes: &[Axis]) -> f64 {
+/// One matrix row applied to `(pixel − CRPIX)`, the first two offsets replaced by their
+/// SIP-`distorted` ones when SIP applies.
+fn offset_row(row: &[f64], pixel: &[f64], axes: &[Axis], distorted: Option<[f64; 2]>) -> f64 {
     row.iter()
         .zip(pixel)
         .zip(axes)
-        .map(|((&coefficient, &value), axis)| coefficient * (value - axis.crpix))
+        .enumerate()
+        .map(|(axis_index, ((&coefficient, &value), axis))| {
+            let offset = match distorted {
+                Some(distorted) if axis_index < 2 => distorted[axis_index],
+                _ => value - axis.crpix,
+            };
+            coefficient * offset
+        })
         .sum()
 }
 

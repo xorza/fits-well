@@ -167,22 +167,18 @@ impl ColMeta {
 /// Clamp a requested algorithm to one valid for the column type, mirroring
 /// cfitsio's per-type sanity overrides.
 fn pick_algo(kind: TformKind, requested: Algo) -> Algo {
-    if requested == Algo::NoCompress {
-        return requested;
-    }
+    debug_assert!(
+        requested != Algo::NoCompress,
+        "the writer refuses NOCOMPRESS"
+    );
     match kind {
-        // Logical/bit/char/complex always gzip (Rice/shuffle are ill-defined).
+        // RICE_1 takes no logical, bit, text or complex value, and cfitsio's reader
+        // unshuffles GZIP_2 only for I, J, K, E and D (`fits_uncompress_table`).
         TformKind::Logical
         | TformKind::Bit
         | TformKind::Character
         | TformKind::ComplexF32
-        | TformKind::ComplexF64 => {
-            if requested == Algo::Gzip2 {
-                Algo::Gzip2
-            } else {
-                Algo::Gzip1
-            }
-        }
+        | TformKind::ComplexF64 => Algo::Gzip1,
         TformKind::F32 | TformKind::F64 | TformKind::I64 => {
             if requested == Algo::Gzip1 {
                 Algo::Gzip1
@@ -190,6 +186,8 @@ fn pick_algo(kind: TformKind, requested: Algo) -> Algo {
                 Algo::Gzip2
             }
         }
+        // A shuffle of 1-byte values changes nothing, and cfitsio refuses it.
+        TformKind::U8 if requested == Algo::Gzip2 => Algo::Gzip1,
         TformKind::I16 | TformKind::I32 | TformKind::U8 => requested,
         TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
             unreachable!("compression is selected from the VLA element type")
@@ -222,7 +220,13 @@ pub(crate) fn compress_table(
         Compression::Gzip(config) if config.shuffle => (Algo::Gzip2, config.level),
         Compression::Gzip(config) => (Algo::Gzip1, config.level),
         Compression::Rice => (Algo::Rice1, gzip::DEFAULT_GZIP_LEVEL),
-        Compression::None => (Algo::NoCompress, gzip::DEFAULT_GZIP_LEVEL),
+        Compression::None => {
+            return Err(FitsError::InvalidCompressionParameter {
+                detail: "a compressed table takes a codec: cfitsio cannot read NOCOMPRESS \
+                         columns, and write_table writes the table uncompressed"
+                    .to_string(),
+            });
+        }
         other => {
             return Err(FitsError::UnsupportedCompression {
                 name: format!("{} for compressed tables", other.name()),

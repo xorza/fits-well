@@ -8,11 +8,14 @@
 
 use crate::bintable::descriptor::DescriptorWidth;
 use crate::bitpix::Bitpix;
+use crate::compress;
 use crate::compress::convert;
-use crate::compress::plane::{FloatSamples, IntBitpix, Samples};
+use crate::compress::plane::{FloatBitpix, FloatSamples, IntBitpix, Samples};
+use crate::compress::quantization::{DitherMethod, Levels, Seed, Spacing};
+use crate::compress::quantize::{Precision, Quantizer, TileValues};
 use crate::compress::tile_geometry::TileGeometry;
 use crate::compress::tile_geometry::TileScratch;
-use crate::compress::{CompressionConfig, ImageCodec, map_tiles};
+use crate::compress::{Compression, CompressionConfig, HcompressScale, ImageCodec, map_tiles};
 use crate::compress::{gzip, hcompress, plio, quantize, rice};
 use crate::header_model::{Header, keywords, value};
 
@@ -20,6 +23,7 @@ use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Ranked;
 use crate::error::Result;
+use crate::image_model::scaling::Scaling;
 use crate::image_model::view::Borrowed;
 use crate::keyword::Keyword;
 
@@ -66,7 +70,7 @@ pub(crate) fn compress_image(
     }
     let samples = match Samples::of(image.samples) {
         Samples::Float(samples) => {
-            return compress_float_image(image, samples, config, out);
+            return compress_float_image(FloatImage { image, samples }, config, out);
         }
         Samples::Int(samples) => samples,
     };
@@ -75,12 +79,9 @@ pub(crate) fn compress_image(
     let tiles = resolve_tile_shape(dims, &config.tiles, codec)?;
 
     let geom = TileGeometry::new(dims, &tiles);
-    // A `NAXIS = 0` image has no data array; `geom.ntiles()` would otherwise be the
-    // empty product (1) and fabricate a phantom one-pixel tile that indexes the empty
-    // sample buffer. Zero tiles yields an empty `NAXIS2 = 0` table, which the decoder's
-    // matching `ZNAXIS = 0` guard turns back into the empty image.
-    let ntiles = if total == 0 { 0 } else { geom.ntiles() };
+    let ntiles = tile_count(total, &geom);
     let (gzip_level, scale) = (compression.gzip_level(), compression.hcompress_scale());
+    let plio_offset = compress::plio_offset(bitpix.bitpix(), image.scaling);
 
     // Compress every tile independently (the compute-bound step — parallel under
     // the `parallel` feature). The heap layout is sequential (each descriptor's
@@ -90,6 +91,12 @@ pub(crate) fn compress_image(
         // Gather + widen this tile's pixels straight from the typed source — no
         // whole-image `i64` buffer.
         convert::gather_i64(samples, &s.tile.row_bases, s.tile.row_len, &mut s.ints);
+        if codec == ImageCodec::Plio1 && plio_offset != 0 {
+            // A u16 image's stream holds the physical values (`compress::plio_offset`).
+            for value in &mut s.ints {
+                *value += plio_offset;
+            }
+        }
         let vals = &s.ints;
         Ok(match codec {
             ImageCodec::Gzip1 => {
@@ -113,13 +120,7 @@ pub(crate) fn compress_image(
             )),
             ImageCodec::Plio1 => TileCell::I16(plio::plio_encode(vals)?),
             ImageCodec::Hcompress1 => {
-                let tile_scale = hcompress_tile_scale(
-                    vals,
-                    &s.tile.tdims,
-                    scale,
-                    &mut s.floats,
-                    &mut s.quantize,
-                )?;
+                let tile_scale = scale.tile_scale(vals, &s.tile.tdims, &mut s.quantize)?;
                 if tile_scale > 1
                     && image
                         .scaling
@@ -143,18 +144,43 @@ pub(crate) fn compress_image(
         })
     })?;
 
+    let mut h = lay_out_cells(cells, codec, out)?;
+    set_zimage_axes(&mut h, compression.name(), bitpix.bitpix(), dims, &tiles)?;
+    match codec {
+        ImageCodec::Rice1 => set_rice_parameters(&mut h, bitpix)?,
+        ImageCodec::Hcompress1 => {
+            h.set_internal(keywords::ZNAME.indexed(1)?, "SCALE")
+                .set_internal(keywords::ZVAL.indexed(1)?, scale.keyword_value());
+        }
+        _ => {}
+    }
+    image.scaling.add_to_header(&mut h, bitpix.bitpix())?;
+    Ok(h)
+}
+
+/// The tiles of an image of `sample_count` samples. A `NAXIS = 0` image has no data
+/// array; `geom.ntiles()` would otherwise be the empty product (1) and fabricate a
+/// phantom one-pixel tile that indexes the empty sample buffer. Zero tiles yields an
+/// empty `NAXIS2 = 0` table, which the decoder's matching `ZNAXIS = 0` guard turns back
+/// into the empty image.
+fn tile_count(sample_count: usize, geom: &TileGeometry) -> usize {
+    if sample_count == 0 { 0 } else { geom.ntiles() }
+}
+
+/// Lay out one `COMPRESSED_DATA` cell per tile into `out`: a descriptor for each tile,
+/// then the heap, with 64-bit `Q` descriptors once the heap or a tile's element count
+/// passes the 32-bit `P` range (§10.1.3). Returns the container's header up to its
+/// one column.
+fn lay_out_cells(cells: Vec<TileCell>, codec: ImageCodec, out: &mut Vec<u8>) -> Result<Header> {
+    let ntiles = cells.len();
     let heap_len = cells.iter().try_fold(0usize, |len, cell| {
         len.checked_add(cell.byte_len()?)
             .ok_or(FitsError::DataUnitOverflow)
     })?;
     let maxnelem = cells.iter().map(TileCell::nelem).max().unwrap_or(0);
-    // §10.1.3: use 64-bit `Q` descriptors once the heap or a tile's element count
-    // exceeds the 32-bit `P` range; otherwise the compact `P` form.
     let width = DescriptorWidth::addressing(heap_len, maxnelem);
     let descriptor_width = width.bytes();
 
-    // Data unit: an array descriptor (count, heap offset) per tile, then the heap.
-    // Built into the caller's reused buffer (the writer's scratch).
     out.clear();
     let descriptor_len = ntiles
         .checked_mul(descriptor_width)
@@ -183,16 +209,6 @@ pub(crate) fn compress_image(
         keywords::TFORM.indexed(1)?,
         format!("1{}{tform_letter}({maxnelem})", width.letter()),
     );
-    set_zimage_axes(&mut h, compression.name(), bitpix.bitpix(), dims, &tiles)?;
-    match codec {
-        ImageCodec::Rice1 => set_rice_parameters(&mut h, bitpix)?,
-        ImageCodec::Hcompress1 => {
-            h.set_internal(keywords::ZNAME.indexed(1)?, "SCALE")
-                .set_internal(keywords::ZVAL.indexed(1)?, scale);
-        }
-        _ => {}
-    }
-    image.scaling.add_to_header(&mut h, bitpix.bitpix())?;
     Ok(h)
 }
 
@@ -227,29 +243,6 @@ fn set_rice_parameters(h: &mut Header, bytepix: IntBitpix) -> Result<()> {
     Ok(())
 }
 
-fn hcompress_tile_scale(
-    values: &[i64],
-    dimensions: &[usize],
-    factor: f64,
-    floats: &mut Vec<f64>,
-    scratch: &mut quantize::QuantizeScratch,
-) -> Result<i32> {
-    if factor == 0.0 {
-        return Ok(0);
-    }
-    floats.clear();
-    floats.extend(values.iter().map(|&value| value as f64));
-    let nx = dimensions[0];
-    let ny = dimensions[1];
-    let absolute = (factor * quantize::noise3_estimate(floats, nx, ny, scratch)).round();
-    if absolute > f64::from(i32::MAX) {
-        return Err(FitsError::UnsupportedCompression {
-            name: "HCOMPRESS_1 tile scale exceeds the 32-bit stream range".to_string(),
-        });
-    }
-    Ok(absolute as i32)
-}
-
 /// One encoded float tile.
 #[derive(Debug)]
 enum FloatTile {
@@ -274,193 +267,341 @@ impl FloatTile {
     }
 }
 
-/// Encode a float image as a quantized, tiled-compressed `BINTABLE`, dithered by
-/// the method `config` selects. Each tile is quantized to int32 with a per-tile
-/// `ZSCALE`/`ZZERO`, then compressed with the selected lossless integer codec;
-/// a tile that can't be quantized (constant data) is stored as raw gzip'd floats
-/// in `GZIP_COMPRESSED_DATA`. The table has four columns: `COMPRESSED_DATA`,
-/// `GZIP_COMPRESSED_DATA`, `ZSCALE`, `ZZERO`.
+/// A float image to compress, and its samples typed.
+#[derive(Debug, Clone, Copy)]
+struct FloatImage<'a> {
+    image: Borrowed<'a>,
+    samples: FloatSamples<'a>,
+}
+
+/// Encode a float image as a tiled-compressed `BINTABLE`, losslessly or quantized as
+/// `config` selects, with descriptors as wide as its heap needs.
 fn compress_float_image(
-    image: Borrowed<'_>,
-    samples: FloatSamples<'_>,
+    float: FloatImage<'_>,
+    config: &CompressionConfig,
+    out: &mut Vec<u8>,
+) -> Result<Header> {
+    match config.quantization.unwrap_or_default().spacing() {
+        Spacing::None => compress_lossless_float_image(float, config, out),
+        Spacing::Quantized(levels) => {
+            let encoded = QuantizedFloatImage::encode(float, config, levels)?;
+            let width = encoded.addressing()?;
+            encoded.lay_out(width, out)
+        }
+    }
+}
+
+/// Encode a float image losslessly (§10.2): each tile's big-endian floats gzip'd in
+/// `COMPRESSED_DATA`, byte-shuffled for `GZIP_2`, with `ZQUANTIZ = 'NONE'` and no
+/// `ZSCALE`/`ZZERO` column. cfitsio takes no other codec for it (`imcomp_init_table`).
+fn compress_lossless_float_image(
+    FloatImage { image, samples }: FloatImage<'_>,
     config: &CompressionConfig,
     out: &mut Vec<u8>,
 ) -> Result<Header> {
     let compression = config.compression;
     let codec = compression.image_codec();
-    if !matches!(
-        codec,
-        ImageCodec::Gzip1 | ImageCodec::Gzip2 | ImageCodec::Rice1 | ImageCodec::NoCompress
-    ) {
+    if !matches!(codec, ImageCodec::Gzip1 | ImageCodec::Gzip2) {
         return Err(FitsError::UnsupportedCompression {
-            name: format!("{} for float images (write)", compression.name()),
+            name: format!("{} for a lossless float image", compression.name()),
         });
     }
     let zbitpix = samples.bitpix();
     let dims = image.shape;
     let tiles = resolve_tile_shape(dims, &config.tiles, codec)?;
-
     let geom = TileGeometry::new(dims, &tiles);
-    // See `compress_image`: zero tiles for a `NAXIS = 0` image, avoiding the phantom
-    // one-pixel tile the empty-product `ntiles` would otherwise produce.
-    let ntiles = if image.samples.is_empty() {
-        0
-    } else {
-        geom.ntiles()
-    };
-
-    let zdither0 = 1i64; // deterministic dither seed (any 1..=10000 is valid)
-    let quantization = config.quantization.unwrap_or_default();
-    let method = quantization.dither;
-    let (gzip_level, qlevel) = (compression.gzip_level(), quantization.level);
-
-    // Quantize + compress each tile independently (the compute-bound step —
-    // parallel under the `parallel` feature); the §10 row layout and heap offsets
-    // are assembled serially after, since they are sequential.
-    let tiles_out = map_tiles(
-        ntiles,
-        EncodeScratch::default,
-        |s, t| -> Result<FloatTile> {
-            geom.tile_into(t, &mut s.tile);
-            let nx = s.tile.tdims[0];
-            let ny = s.tile.row_bases.len();
-            // Gather + widen this tile's pixels straight from the typed source.
-            convert::gather_f64(samples, &s.tile.row_bases, s.tile.row_len, &mut s.floats);
-            let irow = i64::try_from(t).expect("a tile row fits i64") + zdither0; // = (1-based tile row) + ZDITHER0 - 1
-            let Some(q) =
-                quantize::quantize_tile(&s.floats, nx, ny, qlevel, method, irow, &mut s.quantize)
-            else {
-                // Constant tile: store the raw floats, gzip'd, in the fallback.
-                convert::float_to_be_into(&s.floats, zbitpix, &mut s.be);
-                return Ok(FloatTile::Raw {
-                    bytes: gzip::gzip_encode(&s.be, gzip_level),
-                });
-            };
-            let bytes = match codec {
-                ImageCodec::Gzip1 => {
-                    convert::i32_to_be_into(&s.quantize.ints, &mut s.be);
-                    gzip::gzip_encode(&s.be, gzip_level)
-                }
-                ImageCodec::Gzip2 => {
-                    convert::i32_to_be_into(&s.quantize.ints, &mut s.be);
-                    gzip::gzip2_encode(&s.be, 4, gzip_level, &mut s.gzip)
-                }
-                ImageCodec::Rice1 => rice::rice_encode(
-                    &s.quantize.ints,
-                    IntBitpix::I32,
-                    rice::BLOCKSIZE,
-                    &mut s.rice,
-                ),
-                ImageCodec::NoCompress => {
-                    convert::i32_to_be_into(&s.quantize.ints, &mut s.be);
-                    s.be.clone()
-                }
-                _ => unreachable!(),
-            };
-            Ok(FloatTile::Quantized {
-                bytes,
-                zscale: q.bscale,
-                zzero: q.bzero,
-                has_null: q.has_null,
-            })
-        },
-    )?;
-
-    let heap_len = tiles_out.iter().try_fold(0usize, |len, tile| {
-        len.checked_add(tile.bytes().len())
-            .ok_or(FitsError::DataUnitOverflow)
+    let ntiles = tile_count(image.samples.len(), &geom);
+    let gzip_level = compression.gzip_level();
+    let cells = map_tiles(ntiles, EncodeScratch::default, |s, t| -> Result<TileCell> {
+        geom.tile_into(t, &mut s.tile);
+        convert::gather_float_be(samples, &s.tile.row_bases, s.tile.row_len, &mut s.be);
+        Ok(TileCell::Bytes(if codec == ImageCodec::Gzip2 {
+            gzip::gzip2_encode(&s.be, zbitpix.elem_size(), gzip_level, &mut s.gzip)
+        } else {
+            gzip::gzip_encode(&s.be, gzip_level)
+        }))
     })?;
-    let max_cd = tiles_out
-        .iter()
-        .filter(|tile| matches!(tile, FloatTile::Quantized { .. }))
-        .map(|tile| tile.bytes().len())
-        .max()
-        .unwrap_or(0);
-    let max_gz = tiles_out
-        .iter()
-        .filter(|tile| matches!(tile, FloatTile::Raw { .. }))
-        .map(|tile| tile.bytes().len())
-        .max()
-        .unwrap_or(0);
-    let any_null = tiles_out
-        .iter()
-        .any(|tile| matches!(tile, FloatTile::Quantized { has_null: true, .. }));
-
-    // The float container's row layout is a fixed pair of 32-bit `P` descriptors, so
-    // unlike the integer encoder it can't promote to `Q`; a heap or tile element count
-    // past the 32-bit range can't be addressed, so refuse rather than write a truncated
-    // descriptor and an unreadable file. Reachable only for an absurdly large image.
-    if DescriptorWidth::addressing(heap_len, max_cd.max(max_gz)) == DescriptorWidth::Q {
-        return Err(FitsError::DataUnitOverflow);
-    }
-
-    // Fixed table: per tile, the two `P` descriptors then the `ZSCALE`/`ZZERO`
-    // doubles (row width 32), followed by the heap.
-    out.clear();
-    let rows_len = ntiles.checked_mul(32).ok_or(FitsError::DataUnitOverflow)?;
-    let output_len = rows_len
-        .checked_add(heap_len)
-        .ok_or(FitsError::DataUnitOverflow)?;
-    out.reserve_exact(output_len);
-    out.resize(rows_len, 0);
-    for (tile_index, tile) in tiles_out.into_iter().enumerate() {
-        let row = tile_index * 32;
-        let offset = out.len() - rows_len;
-        // A raw tile has no quantization to invert, so its `ZSCALE`/`ZZERO` are zero.
-        let (mut bytes, zscale, zzero, cd_count, gz_count) = match tile {
-            FloatTile::Quantized {
-                bytes,
-                zscale,
-                zzero,
-                ..
-            } => {
-                let len = bytes.len();
-                (bytes, zscale, zzero, len, 0)
-            }
-            FloatTile::Raw { bytes } => {
-                let len = bytes.len();
-                (bytes, 0.0, 0.0, 0, len)
-            }
-        };
-        write_pq_descriptor(
-            &mut out[row..row + 8],
-            DescriptorWidth::P,
-            cd_count as u64,
-            offset as u64,
-        )?;
-        write_pq_descriptor(
-            &mut out[row + 8..row + 16],
-            DescriptorWidth::P,
-            gz_count as u64,
-            offset as u64,
-        )?;
-        out[row + 16..row + 24].copy_from_slice(&zscale.to_be_bytes());
-        out[row + 24..row + 32].copy_from_slice(&zzero.to_be_bytes());
-        out.append(&mut bytes);
-    }
-
-    let mut h = container_header(32, ntiles, heap_len, 4)?;
-    h.set_internal(keywords::TTYPE.indexed(1)?, "COMPRESSED_DATA")
-        .set_internal(keywords::TFORM.indexed(1)?, format!("1PB({max_cd})"));
-    h.set_internal(keywords::TTYPE.indexed(2)?, "GZIP_COMPRESSED_DATA")
-        .set_internal(keywords::TFORM.indexed(2)?, format!("1PB({max_gz})"));
-    h.set_internal(keywords::TTYPE.indexed(3)?, "ZSCALE")
-        .set_internal(keywords::TFORM.indexed(3)?, "1D");
-    h.set_internal(keywords::TTYPE.indexed(4)?, "ZZERO")
-        .set_internal(keywords::TFORM.indexed(4)?, "1D");
+    let mut h = lay_out_cells(cells, codec, out)?;
     set_zimage_axes(&mut h, compression.name(), zbitpix.bitpix(), dims, &tiles)?;
-    if codec == ImageCodec::Rice1 {
-        set_rice_parameters(&mut h, IntBitpix::I32)?;
-    }
-    h.set_internal(keywords::ZQUANTIZ, method.name());
-    h.set_internal(keywords::ZDITHER0, zdither0);
-    if any_null {
-        // Quantized nulls are stored as this reserved integer; ZBLANK tells the
-        // decoder which value maps back to a blank (NaN) pixel.
-        h.set_internal(keywords::ZBLANK, i64::from(quantize::NULL_VALUE));
-    }
+    h.set_internal(keywords::ZQUANTIZ, "NONE");
     image.scaling.add_to_header(&mut h, zbitpix.bitpix())?;
     Ok(h)
+}
+
+/// The integer codec a quantized float image's tiles are stored with.
+#[derive(Debug, Clone, Copy)]
+enum QuantizedCodec {
+    Gzip1,
+    Gzip2,
+    Rice1,
+    Hcompress1(HcompressScale),
+    NoCompress,
+}
+
+impl QuantizedCodec {
+    /// The codec `compression` names for quantized tiles. `PLIO_1` takes a quantized
+    /// tile only within its 24-bit range, seldom met; `HCOMPRESS_1` cannot keep
+    /// `SUBTRACTIVE_DITHER_2`'s exact zeros, which fpack refuses too (`-qz` with `-h`).
+    fn of(compression: Compression, method: DitherMethod) -> Result<Self> {
+        Ok(match compression.image_codec() {
+            ImageCodec::Gzip1 => Self::Gzip1,
+            ImageCodec::Gzip2 => Self::Gzip2,
+            ImageCodec::Rice1 => Self::Rice1,
+            ImageCodec::NoCompress => Self::NoCompress,
+            ImageCodec::Hcompress1 if method == DitherMethod::Subtractive2 => {
+                return Err(FitsError::InvalidCompressionParameter {
+                    detail: "HCOMPRESS_1 cannot keep SUBTRACTIVE_DITHER_2's zeros".to_string(),
+                });
+            }
+            ImageCodec::Hcompress1 => Self::Hcompress1(compression.hcompress_scale()),
+            ImageCodec::Plio1 => {
+                return Err(FitsError::UnsupportedCompression {
+                    name: format!("{} for float images (write)", compression.name()),
+                });
+            }
+        })
+    }
+
+    /// Compress one tile's quantized integers, `has_null` when one is the null marker.
+    fn encode(self, has_null: bool, gzip_level: u32, s: &mut EncodeScratch) -> Result<Vec<u8>> {
+        Ok(match self {
+            Self::Gzip1 => {
+                convert::i32_to_be_into(&s.quantize.ints, &mut s.be);
+                gzip::gzip_encode(&s.be, gzip_level)
+            }
+            Self::Gzip2 => {
+                convert::i32_to_be_into(&s.quantize.ints, &mut s.be);
+                gzip::gzip2_encode(&s.be, 4, gzip_level, &mut s.gzip)
+            }
+            Self::Rice1 => rice::rice_encode(
+                &s.quantize.ints,
+                IntBitpix::I32,
+                rice::BLOCKSIZE,
+                &mut s.rice,
+            ),
+            Self::Hcompress1(scale) => {
+                s.ints.clear();
+                s.ints
+                    .extend(s.quantize.ints.iter().map(|&value| i64::from(value)));
+                let tile_scale = scale.tile_scale(&s.ints, &s.tile.tdims, &mut s.quantize)?;
+                if tile_scale > 1 && has_null {
+                    return Err(FitsError::UnsupportedCompression {
+                        name: "lossy HCOMPRESS_1 with undefined pixels requires a null mask"
+                            .to_string(),
+                    });
+                }
+                hcompress::hcompress_tile_encode(
+                    &s.ints,
+                    &s.tile.tdims,
+                    tile_scale,
+                    &mut s.hcompress,
+                )?
+            }
+            Self::NoCompress => {
+                let mut raw = Vec::new();
+                convert::i32_to_be_into(&s.quantize.ints, &mut raw);
+                raw
+            }
+        })
+    }
+}
+
+/// A quantized float image's encoded tiles, with what its container header records.
+#[derive(Debug)]
+struct QuantizedFloatImage<'a> {
+    tiles: Vec<FloatTile>,
+    compression: Compression,
+    codec: QuantizedCodec,
+    zbitpix: FloatBitpix,
+    shape: &'a [usize],
+    tile_shape: Vec<usize>,
+    method: DitherMethod,
+    zdither0: Option<i64>,
+    scaling: Scaling,
+}
+
+impl<'a> QuantizedFloatImage<'a> {
+    /// Quantize each tile to int32 with its own `ZSCALE`/`ZZERO`, then compress it with
+    /// the selected integer codec; a tile that can't be quantized (constant or all-null
+    /// data) is stored as raw gzip'd floats for `GZIP_COMPRESSED_DATA`.
+    fn encode(
+        FloatImage { image, samples }: FloatImage<'a>,
+        config: &CompressionConfig,
+        Levels { step, dither }: Levels,
+    ) -> Result<Self> {
+        let compression = config.compression;
+        let method = dither.method();
+        let codec = QuantizedCodec::of(compression, method)?;
+        let zbitpix = samples.bitpix();
+        let shape = image.shape;
+        let tile_shape = resolve_tile_shape(shape, &config.tiles, compression.image_codec())?;
+        let geom = TileGeometry::new(shape, &tile_shape);
+        let ntiles = tile_count(image.samples.len(), &geom);
+        let zdither0 = dither.seed().map(|seed| match seed.source() {
+            Seed::FromSamples => quantize::sample_seed(samples),
+            Seed::Fixed(seed) => i64::from(seed),
+        });
+        let quantizer = Quantizer {
+            precision: match zbitpix {
+                FloatBitpix::F32 => Precision::Single,
+                FloatBitpix::F64 => Precision::Double,
+            },
+            step,
+            method,
+            zdither0: zdither0.unwrap_or(1),
+        };
+        let gzip_level = compression.gzip_level();
+        // Quantize + compress each tile independently (the compute-bound step —
+        // parallel under the `parallel` feature); the heap is assembled serially after.
+        let tiles = map_tiles(
+            ntiles,
+            EncodeScratch::default,
+            |s, t| -> Result<FloatTile> {
+                geom.tile_into(t, &mut s.tile);
+                convert::gather_f64(samples, &s.tile.row_bases, s.tile.row_len, &mut s.floats);
+                let tile = TileValues {
+                    values: &s.floats,
+                    width: s.tile.tdims[0],
+                    index: t,
+                };
+                let Some(q) = quantizer.quantize(tile, &mut s.quantize) else {
+                    convert::gather_float_be(samples, &s.tile.row_bases, s.tile.row_len, &mut s.be);
+                    return Ok(FloatTile::Raw {
+                        bytes: gzip::gzip_encode(&s.be, gzip_level),
+                    });
+                };
+                Ok(FloatTile::Quantized {
+                    bytes: codec.encode(q.has_null, gzip_level, s)?,
+                    zscale: q.bscale,
+                    zzero: q.bzero,
+                    has_null: q.has_null,
+                })
+            },
+        )?;
+        Ok(Self {
+            tiles,
+            compression,
+            codec,
+            zbitpix,
+            shape,
+            tile_shape,
+            method,
+            zdither0,
+            scaling: image.scaling,
+        })
+    }
+
+    fn heap_len(&self) -> Result<usize> {
+        self.tiles.iter().try_fold(0usize, |len, tile| {
+            len.checked_add(tile.bytes().len())
+                .ok_or(FitsError::DataUnitOverflow)
+        })
+    }
+
+    /// The longest cell of the `quantized` or the raw tiles.
+    fn longest_cell(&self, quantized: bool) -> usize {
+        self.tiles
+            .iter()
+            .filter(|tile| matches!(tile, FloatTile::Quantized { .. }) == quantized)
+            .map(|tile| tile.bytes().len())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The narrowest descriptors that address this heap (§10.1.3).
+    fn addressing(&self) -> Result<DescriptorWidth> {
+        let longest = self.longest_cell(true).max(self.longest_cell(false));
+        Ok(DescriptorWidth::addressing(self.heap_len()?, longest))
+    }
+
+    /// Lay out the container into `out` with `width` descriptors: for each tile the
+    /// `COMPRESSED_DATA` and `GZIP_COMPRESSED_DATA` descriptors and the `ZSCALE`/`ZZERO`
+    /// doubles, then the heap. Returns the container's header.
+    fn lay_out(self, width: DescriptorWidth, out: &mut Vec<u8>) -> Result<Header> {
+        let heap_len = self.heap_len()?;
+        let (max_cd, max_gz) = (self.longest_cell(true), self.longest_cell(false));
+        let any_null = self
+            .tiles
+            .iter()
+            .any(|tile| matches!(tile, FloatTile::Quantized { has_null: true, .. }));
+        let descriptor = width.bytes();
+        let row_len = 2 * descriptor + 16;
+        let ntiles = self.tiles.len();
+        out.clear();
+        let rows_len = ntiles
+            .checked_mul(row_len)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        let output_len = rows_len
+            .checked_add(heap_len)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        out.reserve_exact(output_len);
+        out.resize(rows_len, 0);
+        for (tile_index, tile) in self.tiles.into_iter().enumerate() {
+            let row = tile_index * row_len;
+            let offset = (out.len() - rows_len) as u64;
+            // A raw tile has no quantization to invert, so its `ZSCALE`/`ZZERO` are zero.
+            let (mut bytes, zscale, zzero, quantized) = match tile {
+                FloatTile::Quantized {
+                    bytes,
+                    zscale,
+                    zzero,
+                    ..
+                } => (bytes, zscale, zzero, true),
+                FloatTile::Raw { bytes } => (bytes, 0.0, 0.0, false),
+            };
+            let len = bytes.len() as u64;
+            let (cd_count, gz_count) = if quantized { (len, 0) } else { (0, len) };
+            write_pq_descriptor(&mut out[row..row + descriptor], width, cd_count, offset)?;
+            write_pq_descriptor(
+                &mut out[row + descriptor..row + 2 * descriptor],
+                width,
+                gz_count,
+                offset,
+            )?;
+            let scales = row + 2 * descriptor;
+            out[scales..scales + 8].copy_from_slice(&zscale.to_be_bytes());
+            out[scales + 8..scales + 16].copy_from_slice(&zzero.to_be_bytes());
+            out.append(&mut bytes);
+        }
+
+        let letter = width.letter();
+        let mut h = container_header(row_len, ntiles, heap_len, 4)?;
+        h.set_internal(keywords::TTYPE.indexed(1)?, "COMPRESSED_DATA")
+            .set_internal(keywords::TFORM.indexed(1)?, format!("1{letter}B({max_cd})"));
+        h.set_internal(keywords::TTYPE.indexed(2)?, "GZIP_COMPRESSED_DATA")
+            .set_internal(keywords::TFORM.indexed(2)?, format!("1{letter}B({max_gz})"));
+        h.set_internal(keywords::TTYPE.indexed(3)?, "ZSCALE")
+            .set_internal(keywords::TFORM.indexed(3)?, "1D");
+        h.set_internal(keywords::TTYPE.indexed(4)?, "ZZERO")
+            .set_internal(keywords::TFORM.indexed(4)?, "1D");
+        let zbitpix = self.zbitpix.bitpix();
+        set_zimage_axes(
+            &mut h,
+            self.compression.name(),
+            zbitpix,
+            self.shape,
+            &self.tile_shape,
+        )?;
+        match self.codec {
+            QuantizedCodec::Rice1 => set_rice_parameters(&mut h, IntBitpix::I32)?,
+            QuantizedCodec::Hcompress1(scale) => {
+                h.set_internal(keywords::ZNAME.indexed(1)?, "SCALE")
+                    .set_internal(keywords::ZVAL.indexed(1)?, scale.keyword_value());
+            }
+            QuantizedCodec::Gzip1 | QuantizedCodec::Gzip2 | QuantizedCodec::NoCompress => {}
+        }
+        h.set_internal(keywords::ZQUANTIZ, self.method.name());
+        if let Some(zdither0) = self.zdither0 {
+            h.set_internal(keywords::ZDITHER0, zdither0);
+        }
+        if any_null {
+            // Quantized nulls are stored as this reserved integer; ZBLANK tells the
+            // decoder which value maps back to a blank (NaN) pixel.
+            h.set_internal(keywords::ZBLANK, i64::from(quantize::NULL_VALUE));
+        }
+        self.scaling.add_to_header(&mut h, zbitpix)?;
+        Ok(h)
+    }
 }
 
 /// One tile's compressed payload: a byte stream (`1PB`) for most codecs, or an

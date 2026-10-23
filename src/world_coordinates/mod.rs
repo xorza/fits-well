@@ -8,7 +8,8 @@ use crate::error::Indexed;
 use crate::error::Ranked;
 use crate::error::Result;
 use crate::header_model::value::Value;
-use crate::header_model::{Header, keywords};
+use crate::header_model::{Header, RecordView, keywords};
+use crate::image_model::region::Region;
 use crate::keyword::Keyword;
 use crate::unit;
 use crate::world_coordinates::axis::Axis;
@@ -17,8 +18,11 @@ use crate::world_coordinates::axis_transform::spectral_rest::SpectralParameters;
 use crate::world_coordinates::axis_transform::spectral_rest::SpectralRest;
 use crate::world_coordinates::celestial_frame::CelestialFrame;
 use crate::world_coordinates::celestial_pole::CelestialPole;
-use crate::world_coordinates::celestial_transform::CelestialTransform;
+use crate::world_coordinates::celestial_transform::{CelestialTransform, PvMeaning};
 use crate::world_coordinates::ctype::Ctype;
+use crate::world_coordinates::declared::Declared;
+use crate::world_coordinates::distortion::Distortion;
+use crate::world_coordinates::distortion::sip::Sip;
 use crate::world_coordinates::linear_transform::LinearMatrix;
 use crate::world_coordinates::linear_transform::LinearTransform;
 use crate::world_coordinates::projected_celestial_axes::CelestialAxisPair;
@@ -36,6 +40,8 @@ pub(crate) mod celestial_frame;
 pub(crate) mod celestial_pole;
 mod celestial_transform;
 pub(crate) mod ctype;
+mod declared;
+pub(crate) mod distortion;
 mod linear_transform;
 mod projected_celestial_axes;
 pub(crate) mod projection;
@@ -80,6 +86,8 @@ pub struct Metadata<'a> {
     pub celestial_projection: Option<CelestialProjection>,
     /// Zero-based axes whose non-linear transform is not evaluated.
     pub unsupported_axes: &'a [usize],
+    /// The distortion the transform applies, if any.
+    pub distortion: Option<Distortion>,
 }
 
 /// One axis's world coordinate together with the unit it is expressed in.
@@ -112,6 +120,9 @@ pub struct Wcs {
     /// celestial projection or convention, or another non-linear coordinate
     /// algorithm (§8.3/§8.4). Complete transforms reject these axes.
     unsupported_axes: Vec<usize>,
+    distortion: Option<Distortion>,
+    /// The description as the header declared it, which `write_into` writes back.
+    declared: Declared,
 }
 
 /// Where the spectral reference frame of each image axis comes from.
@@ -224,9 +235,7 @@ impl Wcs {
                 let unpaired = !celestial_pair.is_some_and(|pair| pair.contains(axis));
                 if !resolved_tabular
                     && (unpaired
-                        || parsed_ctype
-                            .algorithm
-                            .is_some_and(|code| Projection::from_code(code).is_none()))
+                        || parsed_ctype.algorithm.is_some() && parsed_ctype.projection().is_none())
                 {
                     unsupported_axes.push(axis);
                 }
@@ -255,13 +264,45 @@ impl Wcs {
                 spec.transform
             });
         }
-        let linear = matrix.scaled(&axis_scales)?;
+        // SIP comes from its keywords, with or without the `-SIP` code, as wcslib and
+        // astropy read it; its keywords carry no alternate letter, and a `-TPV` code
+        // drops them, as astropy does (`wcs.py`, `_read_sip_kw`, `_fix_pre2012`).
+        let code = celestial_axes.and_then(|axes| axes.distortion);
+        let sip = if alt == Alternate::PRIMARY && code != Some(Distortion::Tpv) {
+            Sip::from_header(header)?
+        } else {
+            None
+        };
+        if code == Some(Distortion::Sip) && alt == Alternate::PRIMARY && sip.is_none() {
+            return Err(FitsError::MissingKeyword {
+                keyword: Keyword::new("A_ORDER"),
+            });
+        }
+        if sip.is_some() && naxis < 2 {
+            return Err(FitsError::ConflictingWcsKeywords {
+                detail: "SIP needs two pixel axes",
+            });
+        }
+        let pv_meaning = match celestial_axes {
+            Some(axes) if sip.is_some() && has_scamp_terms(header, alt, axes) => {
+                PvMeaning::Distortion
+            }
+            _ => PvMeaning::Projection,
+        };
+        let distortion = if sip.is_some() {
+            Some(Distortion::Sip)
+        } else {
+            code.filter(|&code| code == Distortion::Tpv)
+        };
+        let declared = Declared::read(header, alt, naxis, matrix.declared())?;
+        let linear = matrix.scaled(&axis_scales, sip)?;
 
         let celestial = CelestialTransform::from_header(
             header,
             alt,
             celestial_axes,
             &crval,
+            pv_meaning,
             &mut unsupported_axes,
         )?;
 
@@ -286,7 +327,122 @@ impl Wcs {
             celestial_frame,
             tabular,
             unsupported_axes,
+            distortion,
+            declared,
         })
+    }
+
+    /// The WCS of the part of the image `region` selects, its ranges' starts subtracted
+    /// from `CRPIX`: the `Region` the image read takes, so one value crops the image and
+    /// its WCS. `Region::All` gives this WCS. Errors as [`Wcs::write_into`], and with
+    /// `RankMismatch` for a region of another rank.
+    pub fn crop(&self, region: Region<'_>) -> Result<Self> {
+        let Region::Section(ranges) = region else {
+            return Ok(self.clone());
+        };
+        if ranges.len() != self.axes.len() {
+            return Err(FitsError::RankMismatch {
+                ranked: Ranked::ImageRegion,
+                expected: self.axes.len(),
+                got: ranges.len(),
+            });
+        }
+        self.derive(|header| {
+            for (axis, range) in ranges.iter().enumerate() {
+                let crpix = Keyword::try_from(format_args!("CRPIX{}", axis + 1))?;
+                let value = header.require_real(crpix)? - range.start as f64;
+                header.set(crpix, value)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// The WCS of the image binned by `factors`, one per pixel axis, each block of
+    /// `b` pixels one pixel. On axis `j`, `CRPIX` becomes `(CRPIX − 0.5)/b + 0.5`, the
+    /// centre of the first block, as astropy's `slice` with a step gives it, and column
+    /// `j` of `PC` is multiplied by `b`, as a bin scales a pixel axis. With factors `b₁`
+    /// and `b₂` on the SIP axes, `A_p_q` becomes `A_p_q·b₁^p·b₂^q/b₁` and `B_p_q`
+    /// `B_p_q·b₁^p·b₂^q/b₂`, as the offsets from `CRPIX` scale by `b` and the focal-plane
+    /// offset is divided by `b` again; `AP` and `BP` scale alike, and TPV, after the
+    /// matrix, stays. Errors as [`Wcs::write_into`], and with `RankMismatch` for
+    /// factors of another count.
+    ///
+    /// # Panics
+    ///
+    /// When a factor is 0.
+    pub fn bin(&self, factors: &[usize]) -> Result<Self> {
+        let naxis = self.axes.len();
+        if factors.len() != naxis {
+            return Err(FitsError::RankMismatch {
+                ranked: Ranked::BinFactors,
+                expected: naxis,
+                got: factors.len(),
+            });
+        }
+        assert!(factors.iter().all(|&b| b > 0), "a bin factor is at least 1");
+        let b: Vec<f64> = factors.iter().map(|&b| b as f64).collect();
+        self.derive(|header| {
+            for (j, &bj) in b.iter().enumerate() {
+                let crpix = Keyword::try_from(format_args!("CRPIX{}", j + 1))?;
+                let value = (header.require_real(crpix)? - 0.5) / bj + 0.5;
+                header.set(crpix, value)?;
+                for i in 0..naxis {
+                    let pc = Keyword::try_from(format_args!("PC{}_{}", i + 1, j + 1))?;
+                    let value = header
+                        .get_real(pc)?
+                        .unwrap_or(if i == j { 1.0 } else { 0.0 });
+                    header.set(pc, value * bj)?;
+                }
+            }
+            let sip_terms: Vec<(Keyword, f64)> = header
+                .iter()
+                .filter_map(|record| {
+                    let RecordView::Valued { keyword, value, .. } = record else {
+                        return None;
+                    };
+                    let (root, p, q) = sip_term(keyword.as_str())?;
+                    let value = value.as_real().ok().flatten()?;
+                    // `A` and `AP` correct the first axis, `B` and `BP` the second.
+                    let divisor = if root.starts_with('A') { b[0] } else { b[1] };
+                    Some((*keyword, value * b[0].powi(p) * b[1].powi(q) / divisor))
+                })
+                .collect();
+            for (keyword, value) in sip_terms {
+                header.set(keyword, value)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// The WCS `edit` makes of this one's primary-form header.
+    fn derive(&self, edit: impl FnOnce(&mut Header) -> Result<()>) -> Result<Self> {
+        let mut header = Header::new();
+        self.write_into(&mut header, None)?;
+        edit(&mut header)?;
+        Self::from_header(&header, None)
+    }
+
+    /// Write this description into `header` as its description `alt` (`None` for the
+    /// primary one), in wcslib's form: first every record of that description is
+    /// removed, so no `CD` stays beside the `PC` written; then `WCSAXES`, `CRPIX`, `PCi_j`,
+    /// `CDELT`, `CUNIT`, `CTYPE`, `CRVAL`, the pole, frame and spectral keywords and
+    /// `PVi_m` as they were read, and the SIP terms. [`Wcs::from_header`] of the result
+    /// gives back this transform. A `-TAB` axis is `UnsupportedWcsTransform`, as its
+    /// arrays live in another HDU; SIP as an alternate is `ConflictingWcsKeywords`, as its
+    /// keywords have no alternate form.
+    pub fn write_into(
+        &self,
+        header: &mut Header,
+        alt: impl TryInto<Alternate, Error: Into<FitsError>>,
+    ) -> Result<()> {
+        let tabular: Vec<usize> = (0..self.axes.len())
+            .filter(|&axis| Ctype::parse(&self.axes[axis].ctype).algorithm == Some("TAB"))
+            .collect();
+        if !tabular.is_empty() {
+            return Err(FitsError::UnsupportedWcsTransform { axes: tabular });
+        }
+        self.declared
+            .write(header, Alternate::of(alt)?, &self.axes, self.linear.sip())
     }
 
     /// Borrow the parsed axis metadata and unsupported-axis flags without exposing
@@ -305,6 +461,7 @@ impl Wcs {
                     pole: celestial.pole,
                 }),
             unsupported_axes: &self.unsupported_axes,
+            distortion: self.distortion,
         }
     }
 
@@ -350,11 +507,11 @@ impl Wcs {
             .as_ref()
             .filter(|c| axis == c.lng || axis == c.lat)
         {
-            let native = c.projection.deproject(
+            let [x, y] = c.distort(
                 self.linear.intermediate_axis(c.lng, pixel, &self.axes),
                 self.linear.intermediate_axis(c.lat, pixel, &self.axes),
-                &c.parameters,
-            )?;
+            );
+            let native = c.projection.deproject(x, y, &c.parameters)?;
             let celestial = c.pole.to_celestial(native.phi, native.theta);
             let value = if axis == c.lng {
                 celestial.ra
@@ -461,9 +618,8 @@ impl Wcs {
             transform.to_world(world)?;
         }
         if let Some(c) = &self.celestial {
-            let native = c
-                .projection
-                .deproject(world[c.lng], world[c.lat], &c.parameters)?;
+            let [x, y] = c.distort(world[c.lng], world[c.lat]);
+            let native = c.projection.deproject(x, y, &c.parameters)?;
             let celestial = c.pole.to_celestial(native.phi, native.theta);
             world[c.lng] = celestial.ra;
             world[c.lat] = celestial.dec;
@@ -499,11 +655,9 @@ impl Wcs {
             let projected = c
                 .projection
                 .project(native.phi, native.theta, &c.parameters)?;
-            pixel[c.lng] = projected.x;
-            pixel[c.lat] = projected.y;
+            [pixel[c.lng], pixel[c.lat]] = c.undistort(projected.x, projected.y)?;
         }
-        self.linear.pixel(pixel, &self.axes);
-        Ok(())
+        self.linear.pixel(pixel, &self.axes)
     }
 
     /// Refuse a `point` that does not hold one value per axis.
@@ -573,6 +727,31 @@ fn angle_scale(unit: &str) -> Result<f64> {
     unit::resolve(unit, unit::ANGLE).ok_or_else(|| FitsError::InvalidUnit {
         unit: unit.to_string(),
         expected: "an angle unit",
+    })
+}
+
+/// The root and powers of a SIP term `A_p_q`, `B_p_q`, `AP_p_q` or `BP_p_q`.
+fn sip_term(name: &str) -> Option<(&str, i32, i32)> {
+    let (root, rest) = name.split_once('_')?;
+    if !matches!(root, "A" | "B" | "AP" | "BP") {
+        return None;
+    }
+    let (p, q) = rest.split_once('_')?;
+    let digit = |text: &str| (text.len() == 1).then(|| text.parse().ok()).flatten();
+    Some((root, digit(p)?, digit(q)?))
+}
+
+/// Whether the celestial pair carries SCAMP's TPV terms, `PVi_m` with `m` of 5 or more,
+/// which no projection takes beside SIP (astropy `wcs.py`, `_fix_scamp`).
+fn has_scamp_terms(header: &Header, alt: Alternate, axes: ProjectedCelestialAxes) -> bool {
+    [axes.longitude, axes.latitude].into_iter().any(|axis| {
+        (5..=39).any(|m| {
+            read_value(
+                header,
+                Keyword::fitting(format_args!("PV{}_{m}{alt}", axis + 1)),
+            )
+            .is_some()
+        })
     })
 }
 

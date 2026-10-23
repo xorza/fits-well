@@ -1,6 +1,6 @@
 use crate::fits_writer::render_header;
 
-use crate::header_model::internals::records;
+use crate::header_model::internals::{from_card_lines, records};
 use crate::header_model::*;
 
 fn sample() -> Header {
@@ -21,8 +21,8 @@ fn sample() -> Header {
 /// A valued record's text value; `None` for any other record.
 fn valued_text(record: RecordView<'_>) -> Option<&str> {
     match record {
-        RecordView::Valued { value, .. } => value.as_text(),
-        RecordView::Commentary { .. } => None,
+        RecordView::Valued { value, .. } | RecordView::Hierarch { value, .. } => value.as_text(),
+        RecordView::Commentary { .. } | RecordView::Malformed { .. } => None,
     }
 }
 
@@ -267,7 +267,7 @@ fn orphan_continue_is_demoted_to_commentary() {
     assert_eq!(h.get("CONTINUE").unwrap(), None);
 
     let mut rendered = Vec::new();
-    render_header(&h, &mut rendered).unwrap();
+    render_header(&h, 0, &mut rendered).unwrap();
     let expected = b"CONTINUE  'no predecessor' / retained note";
     assert_eq!(&rendered[..expected.len()], expected);
 }
@@ -556,4 +556,83 @@ fn naxis_beyond_999_is_rejected() {
     ));
     h.set_internal(keywords::NAXIS, 999);
     assert_eq!(h.naxis().unwrap(), 999);
+}
+
+/// The blank records before `END` are space, not content; a blank record among the
+/// others stays.
+#[test]
+fn trailing_blank_records_are_space() {
+    let header = from_card_lines(&[
+        "SIMPLE  =                    T",
+        "",
+        "COMMENT x",
+        "",
+        "",
+        "",
+    ]);
+    assert_eq!(header.len(), 3);
+    assert!(matches!(
+        header.iter().nth(1),
+        Some(RecordView::Commentary {
+            name: "",
+            text: None
+        })
+    ));
+}
+
+/// HIERARCH records are found by name without regard to case, and set in place or
+/// appended; a long string continues on `CONTINUE` records and reads back whole, and
+/// the records keep their order with the others.
+#[test]
+fn hierarch_records_are_found_and_set_by_name() {
+    let mut header = from_card_lines(&[
+        "SIMPLE  =                    T",
+        "HIERARCH ESO DET CHIP1 NAME = 'CCD-44'",
+        "OBJECT  = 'M31'",
+    ]);
+    assert_eq!(
+        header.get_hierarch("eso det  chip1 name").unwrap(),
+        Some(&Value::Text("CCD-44".into()))
+    );
+    assert_eq!(header.get_hierarch("ESO DET CHIP2 NAME").unwrap(), None);
+    assert!(matches!(
+        header.get_hierarch("A=B"),
+        Err(FitsError::InvalidKeyword { .. })
+    ));
+    header.set_hierarch("ESO DET CHIP1 NAME", "CCD-45").unwrap();
+    let long = "x".repeat(100);
+    header.set_hierarch("ESO OBS NAME", long.as_str()).unwrap();
+    assert!(matches!(
+        header.set_hierarch("ESO BAD", "caf\u{e9}"),
+        Err(FitsError::InvalidAscii { .. })
+    ));
+
+    let mut bytes = Vec::new();
+    render_header(&header, 0, &mut bytes).unwrap();
+    let lines: Vec<&str> = bytes
+        .as_chunks::<80>()
+        .0
+        .iter()
+        .map(|record| str::from_utf8(record).unwrap().trim_end())
+        .take(6)
+        .collect();
+    // 80 − (9 + 12 + 3) − 3 = 53 characters fit the first record, 47 the next.
+    assert_eq!(
+        lines,
+        [
+            "SIMPLE  =                    T",
+            "HIERARCH ESO DET CHIP1 NAME = 'CCD-45  '",
+            "OBJECT  = 'M31     '",
+            &format!("HIERARCH ESO OBS NAME = '{}&'", "x".repeat(53)),
+            &format!("CONTINUE  '{}'", "x".repeat(47)),
+            "END",
+        ]
+    );
+    let reread = Header::parse(&bytes).unwrap();
+    assert_eq!(
+        reread.get_hierarch("ESO OBS NAME").unwrap(),
+        Some(&Value::Text(long))
+    );
+    let names: Vec<&str> = reread.iter().map(RecordView::name).collect();
+    assert_eq!(names, ["SIMPLE", "HIERARCH", "OBJECT", "HIERARCH"]);
 }
