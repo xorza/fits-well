@@ -1,4 +1,6 @@
+use crate::alternate::Alternate;
 use crate::header_model::keywords;
+use crate::world_coordinates::internals::to_world;
 
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::internals::CROTA_GOLDEN;
@@ -8,15 +10,22 @@ use crate::world_coordinates::linear_transform::internals as linear;
 use crate::world_coordinates::linear_transform::*;
 
 /// A transform built straight from a matrix, skipping the header read. The
-/// inverse is still computed here, so the fixture obeys the same invariant a
+/// factors are still computed here, so the fixture obeys the same invariant a
 /// parsed transform does.
 fn from_matrix(matrix: Vec<f64>, naxis: usize) -> LinearTransform {
-    let inverse = invert(&matrix, naxis).expect("non-singular fixture");
+    let factors = LuFactors::new(&matrix, naxis).expect("non-singular fixture");
     LinearTransform {
         matrix,
-        inverse,
+        factors,
         naxis,
     }
+}
+
+/// `x` with `A·x = b` for the `n×n` matrix `a`.
+fn solved(a: &[f64], n: usize, b: &[f64]) -> Vec<f64> {
+    let mut x = b.to_vec();
+    LuFactors::new(a, n).unwrap().solve(&mut x);
+    x
 }
 
 fn axis_at(crpix: f64) -> Axis {
@@ -29,19 +38,17 @@ fn axis_at(crpix: f64) -> Axis {
     }
 }
 
-/// A matrix inversion sanity check independent of any fixture.
+/// The solve gives the columns of the inverse, independent of any fixture.
 #[test]
-fn matrix_inverse_is_correct() {
-    let m = vec![2.0, 1.0, 1.0, 3.0]; // [[2,1],[1,3]], det = 5
-    let inv = invert(&m, 2).unwrap();
-    // inverse = 1/5 [[3,-1],[-1,2]]
-    let expect = [0.6, -0.2, -0.2, 0.4];
-    for (a, b) in inv.iter().zip(&expect) {
-        assert!((a - b).abs() < 1e-12, "{a} vs {b}");
-    }
-    // m · inv = I
-    let prod = [m[0] * inv[0] + m[1] * inv[2], m[2] * inv[0] + m[3] * inv[2]];
-    assert!((prod[0] - 1.0).abs() < 1e-12 && prod[1].abs() < 1e-12);
+fn lu_solve_inverts_the_matrix() {
+    // [[2,1],[1,3]], det = 5, inverse = 1/5 [[3,-1],[-1,2]]. The pivot is 2, so
+    // L = [[1,0],[0.5,1]] and U = [[2,1],[0,2.5]]: e₁ gives y = (1, −0.5) and
+    // x = ((1 + 0.2)/2, −0.5/2.5), and e₂ gives y = (0, 1) and x = ((0 − 0.4)/2, 1/2.5).
+    let m = [2.0, 1.0, 1.0, 3.0];
+    assert_eq!(solved(&m, 2, &[1.0, 0.0]), [0.6, -0.2]);
+    assert_eq!(solved(&m, 2, &[0.0, 1.0]), [-0.2, 0.4]);
+    // A zero leading entry needs the row swap: [[0,1],[1,0]] swaps the coordinates.
+    assert_eq!(solved(&[0.0, 1.0, 1.0, 0.0], 2, &[3.0, 5.0]), [5.0, 3.0]);
 }
 
 #[test]
@@ -49,17 +56,16 @@ fn matrix_product_applies_reference_pixel_offsets_while_accumulating() {
     let axes = [axis_at(10.0), axis_at(-2.0), axis_at(4.0)];
     let transform = from_matrix(vec![2.0, -1.0, 0.5, 0.0, 3.0, 4.0, -2.0, 1.0, 1.5], 3);
     let pixel = [13.0, 3.0, 2.0];
-    assert_eq!(transform.intermediate(&pixel, &axes), [0.0, 7.0, -4.0]);
+    let mut intermediate = [f64::NAN; 3];
+    transform.intermediate(&pixel, &axes, &mut intermediate);
+    assert_eq!(intermediate, [0.0, 7.0, -4.0]);
     // Every row of the batch form agrees with the single-axis form.
-    for axis in 0..3 {
-        assert_eq!(
-            transform.intermediate_axis(axis, &pixel, &axes),
-            transform.intermediate(&pixel, &axes)[axis]
-        );
+    for (axis, &value) in intermediate.iter().enumerate() {
+        assert_eq!(transform.intermediate_axis(axis, &pixel, &axes), value);
     }
-    // The inverse direction returns the pixel the intermediate came from.
-    let round_trip = transform.pixel(&[0.0, 7.0, -4.0], &axes);
-    for (got, want) in round_trip.iter().zip(&pixel) {
+    // The inverse direction returns the pixel the intermediate came from, in place.
+    transform.pixel(&mut intermediate, &axes);
+    for (got, want) in intermediate.iter().zip(&pixel) {
         assert!((got - want).abs() < 1e-12, "{got} vs {want}");
     }
 }
@@ -147,8 +153,8 @@ fn cunit_scales_celestial_axes_to_degrees() {
     let w_deg = build(1.0, None);
     let w_asec = build(3600.0, Some("arcsec"));
     for &(px, py) in &[(1.0, 1.0), (50.0, 50.0), (80.0, 20.0), (33.0, 77.0)] {
-        let a = w_deg.pixel_to_world(&[px, py]).unwrap();
-        let b = w_asec.pixel_to_world(&[px, py]).unwrap();
+        let a = to_world(&w_deg, &[px, py]).unwrap();
+        let b = to_world(&w_asec, &[px, py]).unwrap();
         assert!(
             (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
             "deg {a:?} vs arcsec {b:?} at ({px},{py})"
@@ -156,27 +162,25 @@ fn cunit_scales_celestial_axes_to_degrees() {
     }
     // The reference pixel maps exactly to CRVAL = (150°, 30°) — proving the arcsec
     // CRVAL was scaled to degrees, not taken literally.
-    let r = w_asec.pixel_to_world(&[50.0, 50.0]).unwrap();
+    let r = to_world(&w_asec, &[50.0, 50.0]).unwrap();
     assert!(
         (r[0] - 150.0).abs() < 1e-9 && (r[1] - 30.0).abs() < 1e-9,
         "{r:?}"
     );
 }
 
-/// The singular test is relative: a matrix in tiny units inverts, and a rank-one
+/// The singular test is relative: a matrix in tiny units factors, and a rank-one
 /// matrix does not — also when rounding leaves its second pivot at −1.1e-16 rather
-/// than 0, which an absolute threshold took for a value and inverted to 1e16s.
+/// than 0, which an absolute threshold took for a value and solved to 1e16s.
 #[test]
-fn matrix_inversion_detects_singularity_relative_to_the_entries() {
-    use crate::world_coordinates::linear_transform::invert;
-
+fn matrix_factoring_detects_singularity_relative_to_the_entries() {
     assert_eq!(
-        invert(&[1e-20, 0.0, 0.0, 4e-20], 2),
-        Some(vec![1e20, 0.0, 0.0, 2.5e19])
+        solved(&[1e-20, 0.0, 0.0, 4e-20], 2, &[1.0, 1.0]),
+        [1.0 / 1e-20, 1.0 / 4e-20]
     );
-    assert_eq!(invert(&[1.0, 2.0, 2.0, 4.0], 2), None);
-    assert_eq!(invert(&[1e-300, 2e-300, 2e-300, 4e-300], 2), None);
-    assert_eq!(invert(&[0.1, 0.7, 0.3, 2.1], 2), None);
+    assert!(LuFactors::new(&[1.0, 2.0, 2.0, 4.0], 2).is_none());
+    assert!(LuFactors::new(&[1e-300, 2e-300, 2e-300, 4e-300], 2).is_none());
+    assert!(LuFactors::new(&[0.1, 0.7, 0.3, 2.1], 2).is_none());
 }
 
 /// Matrix keywords are matched by their exact names: two-digit indices, the selected alternate
@@ -203,8 +207,14 @@ fn matrix_keywords_are_matched_by_exact_name() {
     expected[naxis] = 2.0 * 0.25;
     assert_eq!(primary.values, expected);
 
-    let alternate =
-        LinearMatrix::from_header(&header, AltSuffix::new(Some('A')), naxis, &cdelt, None).unwrap();
+    let alternate = LinearMatrix::from_header(
+        &header,
+        AltSuffix::new(Some(Alternate::new('A'))),
+        naxis,
+        &cdelt,
+        None,
+    )
+    .unwrap();
     let mut expected = vec![0.0; naxis * naxis];
     for i in 0..naxis {
         expected[i * naxis + i] = cdelt[i];

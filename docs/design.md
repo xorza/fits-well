@@ -2,7 +2,7 @@
 
 The decisions that shape the public API. The code and its doc comments show how
 each one works. Sources: the FITS 4.0 standard (`docs/refs/fits_standard40.md`)
-and the dated review in `.notes/API_REVIEW.md`.
+and the dated measurements in `docs/research/`.
 
 ## Reading
 
@@ -49,6 +49,10 @@ and the dated review in `.notes/API_REVIEW.md`.
   extension with `NAXIS = 0` but not such a primary. Also refused: requiring the
   whole geometry to resolve, which would turn a malformed image into "not an
   image" and hide the error that `Hdu::image_metadata` reports. Source: §4.4.1.
+- **A checksum report gives two verdicts:** `is_valid`, both checksums present
+  and verified, and `has_invalid`, either one malformed or contradicted by its
+  bytes. A caller's policy for `Absent` and `Unknown` stays its own. Refused: a
+  single verdict, which would choose that policy for every caller.
 - **The `Source` trait is sealed and cannot be named.** A source is not an
   extension point, and no caller is generic over sources. Refused: exporting it
   before such a caller exists.
@@ -89,6 +93,27 @@ and the dated review in `.notes/API_REVIEW.md`.
 - **One name for an element type and a count across the crate:**
   `ColumnData::U8`, as `Data::U8`, and `len` with `is_empty`, as `Data` and
   `AsciiColumnData` have. Refused: `ColumnData::Bytes` and `element_count`.
+
+## World coordinates
+
+- **A transform writes one point into the caller's slice.** `pixel_to_world` and
+  `world_to_pixel` take the input and the output as slices of one value per
+  axis, so a caller loops over its points with one buffer and a point makes no
+  allocation unless an axis is `-TAB`. Refused: a new `Vec` for each point, and
+  a batch API, which the loop makes unnecessary. wcslib also writes into the
+  caller's arrays. Source: `docs/research/2026-10-23-wcs-into-slice.md`.
+- **The inverse linear step solves with the matrix's LU factors,** in place in
+  the output slice. Refused: the explicit inverse, whose product needs its input
+  kept apart from its output, so a buffer for each point. Solving is as accurate
+  as the product with the inverse or better (Higham, §14.1), and it keeps the
+  division for each row rather than a reciprocal. The cost: four coupled linear
+  axes invert 34% slower, four dependent divisions where the product was one
+  pass. Source: `docs/research/2026-10-23-wcs-into-slice.md`.
+- **An alternate description is a `wcs::Alternate`, a letter `A` to `Z` checked
+  when it is made** (§8.2). `Alternate::new` checks a constant at compile time,
+  and `TryFrom<char>` a letter read at run time. Refused: `Option<char>`, which
+  let a digit spell another keyword (`CTYPE1` and `1` read axis 11), and
+  `WcsAlt`, which repeats its module.
 
 ## Writing
 
@@ -177,6 +202,20 @@ and the dated review in `.notes/API_REVIEW.md`.
   no value indicator start with any 8 bytes, which no `Keyword` holds, so `Entry`
   gives the name as `&str`, and `history` and `comments` read the commentary
   records.
+
+## Scope
+
+- **No section stride.** A preview reads full-resolution chunks and decimates
+  them. Refused: a stride on `Region`, which would complicate the plain and the
+  tiled section paths for no caller.
+- **No partial reads of an ASCII table.** ASCII tables are a legacy format, and
+  every reader of them reads the whole table. Refused: the row, column and cell
+  reads of a binary table for them.
+- **No `serde` feature.** A caller that stores a fits-well enum keeps its own
+  copy, as lumos does with `SampleType`, so a rename here cannot break its saved
+  files. Refused: the feature and its dependency.
+- **No general split of the header borrow from the data borrow.**
+  `ImageReader::header` outlives the handle borrow, which covers the read path.
 
 ## Crate boundary
 

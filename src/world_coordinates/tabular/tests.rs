@@ -1,5 +1,6 @@
 use crate::error::FitsError;
 use crate::header_model::{Header, keywords};
+use crate::world_coordinates::internals::{to_pixel, to_world};
 
 use crate::time_coordinates::frame::Frame;
 use crate::world_coordinates::tabular;
@@ -45,12 +46,12 @@ fn one_dimensional_tab_supports_nonmonotonic_coordinates_and_boundaries() {
         (4.5, 37.5),
     ];
     for (pixel, expected) in cases {
-        assert_eq!(wcs.pixel_to_world(&[pixel]).unwrap(), [expected]);
+        assert_eq!(to_world(&wcs, &[pixel]).unwrap(), [expected]);
     }
-    assert_eq!(wcs.world_to_pixel(&[17.5]).unwrap(), [1.75]);
-    assert_eq!(wcs.world_to_pixel(&[37.5]).unwrap(), [4.5]);
+    assert_eq!(to_pixel(&wcs, &[17.5]).unwrap(), [1.75]);
+    assert_eq!(to_pixel(&wcs, &[37.5]).unwrap(), [4.5]);
     assert!(matches!(
-        wcs.pixel_to_world(&[0.49]),
+        to_world(&wcs, &[0.49]),
         Err(FitsError::WcsCoordinateDomain {
             axis: 0,
             algorithm: "TAB"
@@ -70,12 +71,12 @@ fn tab_index_vectors_may_decrease_and_change_sampling() {
         .set_internal("CRVAL1", 30.0);
     let wcs = resolved_wcs(&header, &table);
 
-    assert_eq!(wcs.pixel_to_world(&[0.0]).unwrap(), [200.0]);
-    assert_eq!(wcs.pixel_to_world(&[5.0]).unwrap(), [150.0]);
-    assert_eq!(wcs.pixel_to_world(&[-22.5]).unwrap(), [500.0]);
+    assert_eq!(to_world(&wcs, &[0.0]).unwrap(), [200.0]);
+    assert_eq!(to_world(&wcs, &[5.0]).unwrap(), [150.0]);
+    assert_eq!(to_world(&wcs, &[-22.5]).unwrap(), [500.0]);
     for pixel in [5.0, 0.0, -22.5] {
-        let world = wcs.pixel_to_world(&[pixel]).unwrap();
-        let round_trip = wcs.world_to_pixel(&world).unwrap();
+        let world = to_world(&wcs, &[pixel]).unwrap();
+        let round_trip = to_pixel(&wcs, &world).unwrap();
         assert!(
             (round_trip[0] - pixel).abs() < 1e-12,
             "{pixel}: {round_trip:?}"
@@ -100,8 +101,8 @@ fn tab_index_binary_search_preserves_duplicate_and_exact_hit_rules() {
             .set_internal("PS1_2", "INDEX")
             .set_internal("CRVAL1", reference);
         let wcs = resolved_wcs(&header, &table);
-        assert_eq!(wcs.pixel_to_world(&[0.0]).unwrap(), [expected]);
-        assert_eq!(wcs.world_to_pixel(&[expected]).unwrap(), [0.0]);
+        assert_eq!(to_world(&wcs, &[0.0]).unwrap(), [expected]);
+        assert_eq!(to_pixel(&wcs, &[expected]).unwrap(), [0.0]);
     }
 }
 
@@ -114,15 +115,15 @@ fn multidimensional_tab_interpolates_and_inverts_coupled_axes() {
         .set_internal("PS1_1", "coord");
     let wcs = resolved_wcs(&header, &table);
 
-    let world = wcs.pixel_to_world(&[1.25, 1.5]).unwrap();
+    let world = to_world(&wcs, &[1.25, 1.5]).unwrap();
     assert_eq!(world, [102.5, 210.0]);
-    let pixel = wcs.world_to_pixel(&world).unwrap();
+    let pixel = to_pixel(&wcs, &world).unwrap();
     assert!((pixel[0] - 1.25).abs() < 1e-9, "{pixel:?}");
     assert!((pixel[1] - 1.5).abs() < 1e-9, "{pixel:?}");
 
     for boundary in [[0.5, 1.5], [1.25, 2.5], [0.5, 2.5]] {
-        let world = wcs.pixel_to_world(&boundary).unwrap();
-        let pixel = wcs.world_to_pixel(&world).unwrap();
+        let world = to_world(&wcs, &boundary).unwrap();
+        let pixel = to_pixel(&wcs, &world).unwrap();
         assert!(
             (pixel[0] - boundary[0]).abs() < 1e-9 && (pixel[1] - boundary[1]).abs() < 1e-9,
             "{boundary:?}: {world:?} -> {pixel:?}"
@@ -136,12 +137,12 @@ fn multidimensional_tab_interpolates_and_inverts_coupled_axes() {
         let header = tab_header(dimensions, "COORD");
         let wcs = resolved_wcs(&header, &table);
         let pixel = vec![1.25; dimensions];
-        let world = wcs.pixel_to_world(&pixel).unwrap();
+        let world = to_world(&wcs, &pixel).unwrap();
         for (axis, &value) in world.iter().enumerate() {
             let expected = 100.0 * axis as f64 + 0.25 * (axis + 1) as f64;
             assert!((value - expected).abs() < 1e-12, "{dimensions}: {world:?}");
         }
-        let round_trip = wcs.world_to_pixel(&world).unwrap();
+        let round_trip = to_pixel(&wcs, &world).unwrap();
         assert!(
             round_trip
                 .iter()
@@ -160,9 +161,9 @@ fn multidimensional_tab_inverse_has_a_bounded_work_budget() {
     let table = lookup_table(&[("COORD", &coordinates, Some(&shape))]);
     let header = tab_header(dimensions, "COORD");
     let wcs = resolved_wcs(&header, &table);
-    let world = wcs.pixel_to_world(&vec![1.25; dimensions]).unwrap();
+    let world = to_world(&wcs, &vec![1.25; dimensions]).unwrap();
     assert!(matches!(
-        wcs.world_to_pixel(&world),
+        to_pixel(&wcs, &world),
         Err(FitsError::WcsNoConvergence { algorithm: "TAB" })
     ));
 }
@@ -225,9 +226,9 @@ fn tabular_spectral_coordinates_normalize_declared_units() {
         .set_internal("CTYPE1", "WAVE-TAB")
         .set_internal("CUNIT1", "nm");
     let wcs = resolved_wcs(&header, &table);
-    let world = wcs.pixel_to_world(&[1.5]).unwrap();
+    let world = to_world(&wcs, &[1.5]).unwrap();
     assert!((world[0] - 5.5e-7).abs() < 1e-20, "{world:?}");
-    let pixel = wcs.world_to_pixel(&world).unwrap();
+    let pixel = to_pixel(&wcs, &world).unwrap();
     assert!((pixel[0] - 1.5).abs() < 1e-12, "{pixel:?}");
 }
 
@@ -304,16 +305,12 @@ fn a_one_element_index_vector_maps_onto_its_value() {
     let wcs = resolved_wcs(&header, &table);
 
     for pixel in [-0.5, 0.0, 0.4, 0.5] {
-        assert_eq!(
-            wcs.pixel_to_world(&[pixel]).unwrap(),
-            [42.0],
-            "pixel {pixel}"
-        );
+        assert_eq!(to_world(&wcs, &[pixel]).unwrap(), [42.0], "pixel {pixel}");
     }
     for pixel in [-0.6, 0.6, 100.0] {
         assert!(
             matches!(
-                wcs.pixel_to_world(&[pixel]),
+                to_world(&wcs, &[pixel]),
                 Err(FitsError::WcsCoordinateDomain {
                     axis: 0,
                     algorithm: "TAB"
@@ -322,7 +319,7 @@ fn a_one_element_index_vector_maps_onto_its_value() {
             "pixel {pixel}"
         );
     }
-    assert_eq!(wcs.world_to_pixel(&[42.0]).unwrap(), [0.0]);
+    assert_eq!(to_pixel(&wcs, &[42.0]).unwrap(), [0.0]);
 }
 
 /// The corner test is relative to the coordinates, so a wavelength axis in metres
@@ -336,8 +333,8 @@ fn tab_inverse_is_scale_free() {
         let coordinates = COUPLED_GRID.map(|value: f64| value * scale);
         let table = lookup_table(&[("COORD", &coordinates, Some("(2,2,2)"))]);
         let wcs = resolved_wcs(&tab_header(2, "COORD"), &table);
-        let world = wcs.pixel_to_world(&[1.3, 1.7]).unwrap();
-        let pixel = wcs.world_to_pixel(&world).unwrap();
+        let world = to_world(&wcs, &[1.3, 1.7]).unwrap();
+        let pixel = to_pixel(&wcs, &world).unwrap();
         assert!(
             (pixel[0] - 1.3).abs() < 1e-9 && (pixel[1] - 1.7).abs() < 1e-9,
             "scale {scale}: {pixel:?}"

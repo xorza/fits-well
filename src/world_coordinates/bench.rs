@@ -24,20 +24,22 @@ pub(crate) fn atomic(c: &mut Criterion) {
         Scale::Frame.apply(&mut group);
         group.bench_function(BenchmarkId::new("to_world", axes.id()), |b| {
             let Fixture { wcs, pixels, .. } = built.get_or_insert_with(|| axes.fixture());
-            let naxis = wcs.axes.len();
+            let mut world = vec![0.0; wcs.axes.len()];
             b.iter(|| {
-                for pixel in pixels.chunks_exact(naxis) {
-                    black_box(wcs.pixel_to_world(black_box(pixel)).unwrap());
+                for pixel in pixels.chunks_exact(world.len()) {
+                    wcs.pixel_to_world(black_box(pixel), &mut world).unwrap();
+                    black_box(&world);
                 }
             });
         });
         axes.inverse_scale().apply(&mut group);
         group.bench_function(BenchmarkId::new("to_pixel", axes.id()), |b| {
             let Fixture { wcs, worlds, .. } = built.get_or_insert_with(|| axes.fixture());
-            let naxis = wcs.axes.len();
+            let mut pixel = vec![0.0; wcs.axes.len()];
             b.iter(|| {
-                for world in worlds.chunks_exact(naxis) {
-                    black_box(wcs.world_to_pixel(black_box(world)).unwrap());
+                for world in worlds.chunks_exact(pixel.len()) {
+                    wcs.world_to_pixel(black_box(world), &mut pixel).unwrap();
+                    black_box(&pixel);
                 }
             });
         });
@@ -101,10 +103,13 @@ impl Fixture {
     /// `wcs` over the row of points `pixel` gives for each column.
     fn new(wcs: Wcs, pixel: impl Fn(usize) -> Vec<f64>) -> Self {
         let pixels: Vec<f64> = (0..WIDTH).flat_map(pixel).collect();
-        let worlds = pixels
+        let mut worlds = vec![0.0; pixels.len()];
+        for (pixel, world) in pixels
             .chunks_exact(wcs.axes.len())
-            .flat_map(|pixel| wcs.pixel_to_world(pixel).unwrap())
-            .collect();
+            .zip(worlds.chunks_exact_mut(wcs.axes.len()))
+        {
+            wcs.pixel_to_world(pixel, world).unwrap();
+        }
         Self {
             wcs,
             pixels,

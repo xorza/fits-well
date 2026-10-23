@@ -1,4 +1,5 @@
 use crate::allocation;
+use crate::alternate::Alternate;
 use crate::bintable::column_reader::ColumnReader;
 use crate::bintable::table_view::TableView;
 use crate::error::FitsError;
@@ -88,7 +89,7 @@ struct IndexVector {
 pub(crate) fn descriptors(
     header: &Header,
     axis_count: usize,
-    alt: Option<char>,
+    alt: Option<Alternate>,
 ) -> Result<Vec<TabularDescriptor>> {
     let suffix = AltSuffix::new(alt);
     let mut descriptors = Vec::<PendingDescriptor>::new();
@@ -275,17 +276,19 @@ impl TabularTransform {
         })
     }
 
-    pub(super) fn to_world(&self, intermediate: &[f64], world: &mut [f64]) -> Result<()> {
-        let mut location = self.interpolation_location(|_, image_axis| intermediate[image_axis])?;
+    /// Replace the intermediate world coordinate of this transform's axes in
+    /// `coordinates` with their world coordinate.
+    pub(super) fn to_world(&self, coordinates: &mut [f64]) -> Result<()> {
+        let mut location = self.interpolation_location(|_, image_axis| coordinates[image_axis])?;
         for &image_axis in &self.axes {
-            world[image_axis] = 0.0;
+            coordinates[image_axis] = 0.0;
         }
         self.for_each_interpolation_vertex(
             &mut location.base,
             &location.delta,
             |offset, weight| {
                 for (table_axis, &image_axis) in self.axes.iter().enumerate() {
-                    world[image_axis] += self.coordinates[offset + table_axis] * weight;
+                    coordinates[image_axis] += self.coordinates[offset + table_axis] * weight;
                 }
             },
         );
@@ -303,11 +306,13 @@ impl TabularTransform {
         Ok(self.interpolate_axis(&mut location.base, &location.delta, table_axis))
     }
 
-    pub(super) fn to_intermediate(&self, world: &[f64], intermediate: &mut [f64]) -> Result<()> {
+    /// Replace the world coordinate of this transform's axes in `coordinates` with
+    /// their intermediate world coordinate.
+    pub(super) fn to_intermediate(&self, coordinates: &mut [f64]) -> Result<()> {
         let location = if self.axes.len() == 1 {
-            self.locate_one_dimensional(world[self.axes[0]])?
+            self.locate_one_dimensional(coordinates[self.axes[0]])?
         } else {
-            let target: Vec<f64> = self.axes.iter().map(|&axis| world[axis]).collect();
+            let target: Vec<f64> = self.axes.iter().map(|&axis| coordinates[axis]).collect();
             self.locate_multidimensional(&target)?
         };
         for table_axis in 0..self.axes.len() {
@@ -316,7 +321,7 @@ impl TabularTransform {
                 return Err(domain(self.axes[table_axis]));
             }
             let psi = self.array_to_index(table_axis, upsilon);
-            intermediate[self.axes[table_axis]] = psi - self.reference_indices[table_axis];
+            coordinates[self.axes[table_axis]] = psi - self.reference_indices[table_axis];
         }
         Ok(())
     }
@@ -1001,23 +1006,25 @@ pub(crate) mod internals {
 
     /// One pixel through the indexed lookup.
     pub fn tabular_forward_at_pixel(pixel: f64) -> f64 {
-        indexed_wcs().pixel_to_world(&[pixel]).unwrap()[0]
+        let mut world = [0.0];
+        indexed_wcs().pixel_to_world(&[pixel], &mut world).unwrap();
+        world[0]
     }
 
     /// One world coordinate back through the indexed lookup.
     pub fn tabular_inverse_at_world(world: f64) -> f64 {
-        indexed_wcs().world_to_pixel(&[world]).unwrap()[0]
+        let mut pixel = [0.0];
+        indexed_wcs().world_to_pixel(&[world], &mut pixel).unwrap();
+        pixel[0]
     }
 
     /// The world point at `fraction` along the diagonal of the coupled grid, inverted;
     /// a dyadic fraction sets how deep the sub-voxel search goes.
     pub fn tabular_inverse_at_fraction(fraction: f64) -> f64 {
         let world = [100.0 + 10.0 * fraction, 200.0 + 20.0 * fraction];
-        coupled_wcs()
-            .world_to_pixel(&world)
-            .unwrap()
-            .into_iter()
-            .sum()
+        let mut pixel = [0.0; 2];
+        coupled_wcs().world_to_pixel(&world, &mut pixel).unwrap();
+        pixel.into_iter().sum()
     }
 
     /// The transform `header` declares, with every `-TAB` axis read from `table`.

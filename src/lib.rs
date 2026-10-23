@@ -44,6 +44,7 @@
 pub struct ReadmeDoctests;
 
 mod allocation;
+mod alternate;
 mod ascii;
 mod bintable;
 mod bitpix;
@@ -109,8 +110,8 @@ pub mod wcs {
     //!        ─► CTYPE algorithm ─► world coordinate
     //! ```
     //!
-    //! The linear layer is `PC`+`CDELT`, `CD`, or legacy `CDELT`+`CROTA`, with general
-    //! matrix inversion for the reverse direction, and full `PVi_m` parameters
+    //! The linear layer is `PC`+`CDELT`, `CD`, or legacy `CDELT`+`CROTA`, solved through
+    //! its LU factors for the reverse direction, and full `PVi_m` parameters
     //! (φ₀/θ₀/LONPOLE/LATPOLE overrides plus per-projection params). Projections, via
     //! the general fiducial-point pole computation: zenithal `TAN`/`SIN`/`ARC`/`STG`/
     //! `ZEA`/`ZPN`/`AIR`, zenithal-perspective `AZP`/`SZP`, cylindrical `CAR`/`CEA`/
@@ -135,6 +136,7 @@ pub mod wcs {
     //! out of scope. Transform methods return explicit errors for invalid projection
     //! domains or failed iterations.
 
+    pub use crate::alternate::Alternate;
     pub use crate::world_coordinates::axis::Axis;
     pub use crate::world_coordinates::axis_transform::spectral_rest::SpectralRest;
     pub use crate::world_coordinates::celestial_frame::{CelestialFrame, CelestialReferenceFrame};

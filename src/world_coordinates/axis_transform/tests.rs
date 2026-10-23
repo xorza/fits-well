@@ -1,4 +1,5 @@
 use crate::header_model::{Header, keywords};
+use crate::world_coordinates::internals::{to_pixel, to_world};
 
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::axis_transform::spectral_kind::{
@@ -108,15 +109,15 @@ fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
 
         if unsupported {
             assert!(matches!(
-                wcs.pixel_to_world(&[1.0, 1.0, 3.0]),
+                to_world(&wcs, &[1.0, 1.0, 3.0]),
                 Err(FitsError::UnsupportedWcsTransform { axes }) if axes == [2]
             ));
             assert!(matches!(
-                wcs.world_to_pixel(&[45.0, 30.0, 1.402e9]),
+                to_pixel(&wcs, &[45.0, 30.0, 1.402e9]),
                 Err(FitsError::UnsupportedWcsTransform { axes }) if axes == [2]
             ));
         } else {
-            let out = wcs.pixel_to_world(&[1.0, 1.0, 3.0]).unwrap();
+            let out = to_world(&wcs, &[1.0, 1.0, 3.0]).unwrap();
             let expected = if ctype.ends_with("-LOG") {
                 1.4e9 * (2.0e6_f64 / 1.4e9).exp()
             } else {
@@ -167,12 +168,12 @@ fn grism_axes_match_wcslib_and_invert() {
         let wcs = grism_wcs(ctype, reference);
         assert!(wcs.metadata().unsupported_axes.is_empty(), "{ctype}");
         for (expected_world, pixel) in goldens {
-            let world = wcs.pixel_to_world(&[pixel]).unwrap();
+            let world = to_world(&wcs, &[pixel]).unwrap();
             assert!(
                 (world[0] - expected_world).abs() < 1e-18,
                 "{ctype} pixel {pixel}: {world:?}"
             );
-            let round_trip = wcs.world_to_pixel(&world).unwrap();
+            let round_trip = to_pixel(&wcs, &world).unwrap();
             assert!(
                 (round_trip[0] - pixel).abs() < 1e-12,
                 "{ctype} pixel {pixel}: {round_trip:?}"
@@ -380,14 +381,14 @@ fn spectral_algorithms_match_wcslib() {
         header.set_internal(keywords::RESTFRQ, 1_420_405_751.0);
         let wcs = Wcs::from_header(&header, None).unwrap();
         assert!(wcs.metadata().unsupported_axes.is_empty(), "{}", case.ctype);
-        let world = wcs.pixel_to_world(&[3.0]).unwrap()[0];
+        let world = to_world(&wcs, &[3.0]).unwrap()[0];
         assert!(
             (world - case.world).abs() <= ROUNDING * case.scale,
             "{}: got {world:.17e}, wcslib {:.17e}",
             case.ctype,
             case.world
         );
-        let pixel = wcs.world_to_pixel(&[case.world]).unwrap()[0];
+        let pixel = to_pixel(&wcs, &[case.world]).unwrap()[0];
         assert!(
             (pixel - 3.0).abs() <= ROUNDING * case.scale / case.increment.abs(),
             "{} inverse: {pixel:.17e}",
@@ -474,7 +475,7 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
             "{}",
             case.ctype
         );
-        let world = wcs.pixel_to_world(&[1.0]).unwrap()[0];
+        let world = to_world(&wcs, &[1.0]).unwrap()[0];
         assert!(
             (world - case.canonical_reference).abs() <= case.canonical_reference.abs() * 1e-10,
             "{} reference: {world:.17e}",
@@ -505,10 +506,10 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
     let generic = Wcs::from_header(&generic, None).unwrap();
     let expected = 100.0 * 0.2_f64.exp();
     assert_eq!(generic.metadata().axes[0].cunit, "d");
-    assert!((generic.pixel_to_world(&[3.0]).unwrap()[0] - expected).abs() < 1e-13);
-    assert!((generic.world_to_pixel(&[expected]).unwrap()[0] - 3.0).abs() < 1e-13);
+    assert!((to_world(&generic, &[3.0]).unwrap()[0] - expected).abs() < 1e-13);
+    assert!((to_pixel(&generic, &[expected]).unwrap()[0] - 3.0).abs() < 1e-13);
     assert!(matches!(
-        generic.world_to_pixel(&[0.0]),
+        to_pixel(&generic, &[0.0]),
         Err(FitsError::WcsCoordinateDomain {
             axis: 0,
             algorithm: "LOG"
@@ -520,8 +521,8 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
     let expected = 1.4e9 * (2.0e6_f64 / 1.4e9).exp();
     assert_eq!(frequency.metadata().axes[0].cunit, "GHz");
     assert_eq!(frequency.metadata().axes[0].crval, 1.4);
-    assert!((frequency.pixel_to_world(&[3.0]).unwrap()[0] - expected).abs() < 1e-6);
-    assert!((frequency.world_to_pixel(&[expected]).unwrap()[0] - 3.0).abs() < 1e-12);
+    assert!((to_world(&frequency, &[3.0]).unwrap()[0] - expected).abs() < 1e-6);
+    assert!((to_pixel(&frequency, &[expected]).unwrap()[0] - 3.0).abs() < 1e-12);
 
     let mut invalid = Header::new();
     invalid

@@ -1519,6 +1519,41 @@ fn checksum_status_distinguishes_absent_unknown_valid_and_invalid() {
             checksum: ChecksumStatus::Valid,
         }
     );
+
+    // Of the 16 pairs, only (Valid, Valid) is valid, and the 7 with an `Invalid` side
+    // have one.
+    let statuses = [
+        ChecksumStatus::Absent,
+        ChecksumStatus::Unknown,
+        ChecksumStatus::Valid,
+        ChecksumStatus::Invalid,
+    ];
+    let mut valid = Vec::new();
+    let mut invalid = Vec::new();
+    for datasum in statuses {
+        for checksum in statuses {
+            let report = ChecksumReport { datasum, checksum };
+            if report.is_valid() {
+                valid.push((datasum, checksum));
+            }
+            if report.has_invalid() {
+                invalid.push((datasum, checksum));
+            }
+        }
+    }
+    assert_eq!(valid, [(ChecksumStatus::Valid, ChecksumStatus::Valid)]);
+    assert_eq!(
+        invalid,
+        [
+            (ChecksumStatus::Absent, ChecksumStatus::Invalid),
+            (ChecksumStatus::Unknown, ChecksumStatus::Invalid),
+            (ChecksumStatus::Valid, ChecksumStatus::Invalid),
+            (ChecksumStatus::Invalid, ChecksumStatus::Absent),
+            (ChecksumStatus::Invalid, ChecksumStatus::Unknown),
+            (ChecksumStatus::Invalid, ChecksumStatus::Valid),
+            (ChecksumStatus::Invalid, ChecksumStatus::Invalid),
+        ]
+    );
 }
 
 #[test]

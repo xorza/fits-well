@@ -11,13 +11,25 @@ use crate::world_coordinates::projected_celestial_axes::ProjectedCelestialAxes;
 use crate::world_coordinates::read_value;
 
 /// The matrix `A` mapping `(pixel − CRPIX)` to intermediate world coordinates, held
-/// beside its inverse so both directions stay consistent by construction. Both are
-/// row-major `naxis²`.
+/// beside its LU factors, which solve the inverse direction in place. Both are row-major
+/// `naxis²`.
 #[derive(Debug, Clone)]
 pub(super) struct LinearTransform {
     matrix: Vec<f64>,
-    inverse: Vec<f64>,
+    factors: LuFactors,
     naxis: usize,
+}
+
+/// The LU factors of a row-major `n×n` matrix `A` with partial pivoting, `P·A = L·U`: `U`
+/// on and above the diagonal, the unit-diagonal `L` below it, and `P` as the row each
+/// step swapped into place. Solving with them is as accurate as a product with the
+/// explicit inverse or better, and it needs no buffer beside the right-hand side
+/// (Higham, *Accuracy and Stability of Numerical Algorithms*, §14.1).
+#[derive(Debug, Clone)]
+struct LuFactors {
+    lu: Vec<f64>,
+    /// One row for each column, so its length is `n`.
+    swaps: Vec<usize>,
 }
 
 /// The matrix as the header spells it, before the per-axis unit factors are known.
@@ -146,7 +158,7 @@ impl LinearMatrix {
         Ok(Self { values, naxis })
     }
 
-    /// Scale row `i` by `axis_scales[i]` and invert.
+    /// Scale row `i` by `axis_scales[i]` and factor.
     ///
     /// §8.2: `CRVAL`/`CDELT` are in `CUNITia` units, but the transforms run in degrees
     /// (celestial) or the Table-25 default (spectral), so each axis's whole matrix row
@@ -159,24 +171,26 @@ impl LinearMatrix {
                 self.values[axis * self.naxis + column] *= scale;
             }
         }
-        let inverse = invert(&self.values, self.naxis).ok_or_else(|| FitsError::InvalidWcs {
-            detail: "singular WCS transform matrix".to_string(),
-        })?;
+        let factors =
+            LuFactors::new(&self.values, self.naxis).ok_or_else(|| FitsError::InvalidWcs {
+                detail: "singular WCS transform matrix".to_string(),
+            })?;
         Ok(LinearTransform {
             matrix: self.values,
-            inverse,
+            factors,
             naxis: self.naxis,
         })
     }
 }
 
 impl LinearTransform {
-    /// Intermediate world coordinates for a complete 1-based `pixel` coordinate.
-    pub(super) fn intermediate(&self, pixel: &[f64], axes: &[Axis]) -> Vec<f64> {
-        self.matrix
-            .chunks_exact(self.naxis)
-            .map(|row| offset_row(row, pixel, axes))
-            .collect()
+    /// Write the intermediate world coordinate of the complete 1-based `pixel`
+    /// coordinate to `out`.
+    pub(super) fn intermediate(&self, pixel: &[f64], axes: &[Axis], out: &mut [f64]) {
+        debug_assert_eq!(out.len(), self.naxis);
+        for (row, value) in self.matrix.chunks_exact(self.naxis).zip(out) {
+            *value = offset_row(row, pixel, axes);
+        }
     }
 
     /// One axis's intermediate world coordinate, without evaluating the others.
@@ -185,17 +199,13 @@ impl LinearTransform {
         offset_row(row, pixel, axes)
     }
 
-    /// The 1-based pixel coordinate for a complete intermediate world coordinate —
-    /// the inverse of [`LinearTransform::intermediate`].
-    pub(super) fn pixel(&self, intermediate: &[f64], axes: &[Axis]) -> Vec<f64> {
-        self.inverse
-            .chunks_exact(self.naxis)
-            .zip(axes)
-            .map(|(row, axis)| {
-                let offset: f64 = row.iter().zip(intermediate).map(|(&a, &b)| a * b).sum();
-                offset + axis.crpix
-            })
-            .collect()
+    /// Replace the complete intermediate world coordinate in `coordinates` with its
+    /// 1-based pixel coordinate, the inverse of [`LinearTransform::intermediate`].
+    pub(super) fn pixel(&self, coordinates: &mut [f64], axes: &[Axis]) {
+        self.factors.solve(coordinates);
+        for (value, axis) in coordinates.iter_mut().zip(axes) {
+            *value += axis.crpix;
+        }
     }
 }
 
@@ -208,54 +218,67 @@ fn offset_row(row: &[f64], pixel: &[f64], axes: &[Axis]) -> f64 {
         .sum()
 }
 
-/// Invert a row-major `n×n` matrix by Gauss–Jordan elimination with partial
-/// pivoting. Returns `None` if singular: when a pivot is no larger than the rounding
-/// elimination leaves in an entry, about `n·ε` of the largest one (Higham, *Accuracy
-/// and Stability of Numerical Algorithms*, §9.3, for the typical growth of partial
-/// pivoting). The test is relative, so a matrix in tiny units is not singular.
-fn invert(m: &[f64], n: usize) -> Option<Vec<f64>> {
-    let singular = n as f64 * f64::EPSILON * m.iter().fold(0.0f64, |max, &x| max.max(x.abs()));
-    let mut a = m.to_vec();
-    let mut inv = vec![0.0; n * n];
-    for i in 0..n {
-        inv[i * n + i] = 1.0;
-    }
-    for col in 0..n {
-        // Partial pivot: largest magnitude in this column at or below the diagonal.
-        let mut pivot = col;
-        for r in (col + 1)..n {
-            if a[r * n + col].abs() > a[pivot * n + col].abs() {
-                pivot = r;
+impl LuFactors {
+    /// Factor `m` by Gaussian elimination with partial pivoting. Returns `None` if `m` is
+    /// singular: when a pivot is no larger than the rounding elimination leaves in an
+    /// entry, about `n·ε` of the largest one (Higham, §9.3, for the typical growth of
+    /// partial pivoting). The test is relative, so a matrix in tiny units is not
+    /// singular.
+    fn new(m: &[f64], n: usize) -> Option<Self> {
+        let singular = n as f64 * f64::EPSILON * m.iter().fold(0.0f64, |max, &x| max.max(x.abs()));
+        let mut lu = m.to_vec();
+        let mut swaps = Vec::with_capacity(n);
+        for col in 0..n {
+            let mut pivot = col;
+            for r in (col + 1)..n {
+                if lu[r * n + col].abs() > lu[pivot * n + col].abs() {
+                    pivot = r;
+                }
             }
-        }
-        if a[pivot * n + col].abs() <= singular {
-            return None;
-        }
-        if pivot != col {
-            for k in 0..n {
-                a.swap(col * n + k, pivot * n + k);
-                inv.swap(col * n + k, pivot * n + k);
+            if lu[pivot * n + col].abs() <= singular {
+                return None;
             }
-        }
-        let d = a[col * n + col];
-        for k in 0..n {
-            a[col * n + k] /= d;
-            inv[col * n + k] /= d;
-        }
-        for r in 0..n {
-            if r == col {
-                continue;
-            }
-            let f = a[r * n + col];
-            if f != 0.0 {
+            if pivot != col {
                 for k in 0..n {
-                    a[r * n + k] -= f * a[col * n + k];
-                    inv[r * n + k] -= f * inv[col * n + k];
+                    lu.swap(col * n + k, pivot * n + k);
+                }
+            }
+            swaps.push(pivot);
+            let d = lu[col * n + col];
+            for r in (col + 1)..n {
+                let f = lu[r * n + col] / d;
+                lu[r * n + col] = f;
+                if f != 0.0 {
+                    for k in (col + 1)..n {
+                        lu[r * n + k] -= f * lu[col * n + k];
+                    }
                 }
             }
         }
+        Some(Self { lu, swaps })
     }
-    Some(inv)
+
+    /// Replace `b` with the `x` that solves `A·x = b`.
+    fn solve(&self, b: &mut [f64]) {
+        let n = self.swaps.len();
+        debug_assert_eq!(b.len(), n);
+        for (col, &pivot) in self.swaps.iter().enumerate() {
+            b.swap(col, pivot);
+        }
+        for i in 1..n {
+            let row = &self.lu[i * n..i * n + i];
+            b[i] -= row.iter().zip(&b[..i]).map(|(&l, &y)| l * y).sum::<f64>();
+        }
+        for i in (0..n).rev() {
+            let row = &self.lu[i * n..(i + 1) * n];
+            let tail: f64 = row[i + 1..]
+                .iter()
+                .zip(&b[i + 1..])
+                .map(|(&u, &x)| u * x)
+                .sum();
+            b[i] = (b[i] - tail) / row[i];
+        }
+    }
 }
 
 #[cfg(test)]

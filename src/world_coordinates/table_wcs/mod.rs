@@ -13,6 +13,7 @@ pub(super) mod table_matrix_keyword;
 pub(super) mod table_pole_keyword;
 pub(super) mod table_wcs_resolver;
 
+use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::{Header, keywords, value};
@@ -54,7 +55,7 @@ pub(super) struct TranslatedTableWcs {
 
 impl<'a> TableWcs<'a> {
     /// A pixel-list description over the 1-based table `columns`, in axis order.
-    pub(super) const fn pixel_list(alt: Option<char>, columns: &'a [usize]) -> Self {
+    pub(super) const fn pixel_list(alt: Option<Alternate>, columns: &'a [usize]) -> Self {
         TableWcs {
             resolver: TableWcsResolver::new(alt),
             form: TableWcsForm::PixelList(columns),
@@ -62,7 +63,7 @@ impl<'a> TableWcs<'a> {
     }
 
     /// A vector-cell description of rank `naxis` inside the 1-based table `column`.
-    pub(super) const fn array_column(alt: Option<char>, naxis: usize, column: usize) -> Self {
+    pub(super) const fn array_column(alt: Option<Alternate>, naxis: usize, column: usize) -> Self {
         TableWcs {
             resolver: TableWcsResolver::new(alt),
             form: TableWcsForm::ArrayColumn { naxis, column },
@@ -73,7 +74,7 @@ impl<'a> TableWcs<'a> {
     /// axis any Table-22 vector keyword names for that column.
     pub(super) fn array_column_rank(
         header: &Header,
-        alt: Option<char>,
+        alt: Option<Alternate>,
         column: usize,
     ) -> Result<usize> {
         let resolver = TableWcsResolver::new(alt);

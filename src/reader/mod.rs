@@ -3,6 +3,7 @@ use std::io::Seek;
 use std::ops::Range;
 
 use crate::allocation;
+use crate::alternate::Alternate;
 use crate::ascii::Ascii;
 use crate::bintable::Table;
 use crate::bintable::column::Column;
@@ -521,7 +522,7 @@ impl<S: Source> FitsReader<S> {
     pub fn read_wcs<'h>(
         &mut self,
         hdu: impl Into<HduSelector<'h>>,
-        alt: Option<char>,
+        alt: Option<Alternate>,
     ) -> Result<Wcs> {
         let header = &selected_hdu(&self.hdus, hdu.into())?.header;
         let descriptors = tabular::descriptors(header, Wcs::image_axis_count(header, alt)?, alt)?;
@@ -736,6 +737,23 @@ pub enum ChecksumStatus {
 pub struct ChecksumReport {
     pub datasum: ChecksumStatus,
     pub checksum: ChecksumStatus,
+}
+
+impl ChecksumReport {
+    /// Whether both `DATASUM` and `CHECKSUM` are present and verify.
+    pub const fn is_valid(&self) -> bool {
+        matches!(
+            (self.datasum, self.checksum),
+            (ChecksumStatus::Valid, ChecksumStatus::Valid)
+        )
+    }
+
+    /// Whether `DATASUM` or `CHECKSUM` is malformed or does not match its recomputed
+    /// value.
+    pub const fn has_invalid(&self) -> bool {
+        matches!(self.datasum, ChecksumStatus::Invalid)
+            || matches!(self.checksum, ChecksumStatus::Invalid)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

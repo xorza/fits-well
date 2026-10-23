@@ -25,6 +25,9 @@ const PLANCK_CONSTANT: f64 = 6.626_075_5e-34;
 #[derive(Debug, Clone)]
 pub(super) enum AxisTransform {
     Linear,
+    /// An axis the celestial or the tabular transform evaluates with its partners: the
+    /// per-axis step passes its value through to that joint step.
+    Joint,
     Logarithmic,
     Spectral(SpectralTransform),
     Unsupported,
@@ -105,6 +108,7 @@ impl AxisTransform {
     pub(super) fn to_world(&self, intermediate: f64, reference: f64, axis: usize) -> Result<f64> {
         match self {
             Self::Linear => Ok(reference + intermediate),
+            Self::Joint => Ok(intermediate),
             Self::Logarithmic => finite(reference * (intermediate / reference).exp())
                 .ok_or_else(|| domain_error(axis, "LOG")),
             Self::Spectral(transform) => transform.to_world(intermediate, axis),
@@ -117,6 +121,7 @@ impl AxisTransform {
     pub(super) fn to_intermediate(&self, world: f64, reference: f64, axis: usize) -> Result<f64> {
         match self {
             Self::Linear => Ok(world - reference),
+            Self::Joint => Ok(world),
             Self::Logarithmic if world.is_finite() && world > 0.0 => {
                 Ok(reference * (world / reference).ln())
             }

@@ -1,8 +1,10 @@
+use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Ranked;
 use crate::header_model::value::Value;
 use crate::header_model::{Header, keywords};
+use crate::world_coordinates::internals::{to_pixel, to_world};
 
 use crate::reader::internals::open_fixture;
 use crate::world_coordinates::R2D;
@@ -67,8 +69,8 @@ fn world_to_pixel_inverts_pixel_to_world() {
     // real use needs.
     let w = open_wcs("wcs_tan.fits");
     for &(px, py, _, _) in TAN_GOLDEN.points {
-        let world = w.pixel_to_world(&[px, py]).unwrap();
-        let back = w.world_to_pixel(&world).unwrap();
+        let world = to_world(&w, &[px, py]).unwrap();
+        let back = to_pixel(&w, &world).unwrap();
         assert!(
             (back[0] - px).abs() < 1e-5 && (back[1] - py).abs() < 1e-5,
             "pixel→world→pixel at ({px},{py}): got {back:?}"
@@ -85,7 +87,7 @@ fn transform_failures_return_errors() {
 
     let sin = build("SIN").unwrap();
     assert!(matches!(
-        sin.pixel_to_world(&[2.0, 1.0]),
+        to_world(&sin, &[2.0, 1.0]),
         Err(FitsError::WcsProjectionDomain { projection: "SIN" })
     ));
 
@@ -94,14 +96,14 @@ fn transform_failures_return_errors() {
 
     let tan = open_wcs("wcs_tan.fits");
     assert!(matches!(
-        tan.world_to_pixel(&[150.0, 100.0]),
+        to_pixel(&tan, &[150.0, 100.0]),
         Err(FitsError::WcsWorldOutOfDomain { projection: "TAN" })
     ));
     for result in [
-        tan.pixel_to_world(&[1.0]),
-        tan.pixel_to_world(&[1.0, 2.0, 3.0]),
-        tan.world_to_pixel(&[150.0]),
-        tan.world_to_pixel(&[150.0, 2.5, 1.0]),
+        to_world(&tan, &[1.0]),
+        to_world(&tan, &[1.0, 2.0, 3.0]),
+        to_pixel(&tan, &[150.0]),
+        to_pixel(&tan, &[150.0, 2.5, 1.0]),
     ] {
         assert!(matches!(
             result,
@@ -167,8 +169,8 @@ fn planetary_solar_lonlat_axes_are_celestial() {
         "HPLN/HPLT must be recognized as a celestial pair"
     );
     for &(px, py) in &[(1.0, 1.0), (64.0, 64.0), (100.0, 30.0)] {
-        let a = radec.pixel_to_world(&[px, py]).unwrap();
-        let b = helio.pixel_to_world(&[px, py]).unwrap();
+        let a = to_world(&radec, &[px, py]).unwrap();
+        let b = to_world(&helio, &[px, py]).unwrap();
         assert!(
             (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
             "RA/DEC {a:?} vs HPLN/HPLT {b:?}"
@@ -215,7 +217,7 @@ fn absent_wcsaxes_uses_the_largest_wcs_index() {
             2
         );
         assert_eq!(
-            Wcs::from_header(&alternate, Some('A'))
+            Wcs::from_header(&alternate, Some(Alternate::new('A')))
                 .unwrap()
                 .metadata()
                 .axes
@@ -319,7 +321,7 @@ fn axis_world_of_a_celestial_axis_is_the_projected_value() {
     let header = celestial_with("TAN", &[("CRVAL1", 150.0), ("CRVAL2", 60.0)]);
     let wcs = Wcs::from_header(&header, None).unwrap();
     let pixel = [30.0, 20.0];
-    let complete = wcs.pixel_to_world(&pixel).unwrap();
+    let complete = to_world(&wcs, &pixel).unwrap();
     for (axis, &value) in complete.iter().enumerate() {
         let world = wcs.axis_world(axis, &pixel).unwrap();
         assert_eq!(world.value, value, "axis {axis}");
@@ -349,7 +351,7 @@ fn celestial_units_resolve_or_are_refused() {
             .set_internal("CUNIT1", unit)
             .set_internal("CUNIT2", unit);
         let wcs = Wcs::from_header(&header, None).unwrap();
-        let world = wcs.pixel_to_world(&[2.0, 1.0]).unwrap();
+        let world = to_world(&wcs, &[2.0, 1.0]).unwrap();
         // The value passes through the native-to-celestial rotation, whose trigonometry
         // leaves a few 1e-15 rad — order 1e-14 of a degree.
         assert!(
@@ -381,7 +383,7 @@ fn the_view_keeps_crval_in_its_declared_unit() {
     let axes = wcs.metadata().axes;
     assert_eq!((axes[0].crval, axes[0].cunit.as_str()), (3600.0, "arcsec"));
     assert_eq!((axes[1].crval, axes[1].cunit.as_str()), (7200.0, "arcsec"));
-    let world = wcs.pixel_to_world(&[0.0, 0.0]).unwrap();
+    let world = to_world(&wcs, &[0.0, 0.0]).unwrap();
     // The reference pixel deprojects to the native pole and rotates back to CRVAL, in
     // degrees, through a few ULP of trigonometry.
     assert!(

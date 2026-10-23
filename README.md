@@ -104,8 +104,10 @@ use fits_well::FitsReader;
 fn main() -> Result<(), fits_well::FitsError> {
     let mut reader = FitsReader::open(File::open("wcs_tan.fits")?)?;
     let wcs = reader.read_wcs(0, None)?; // resolves `-TAB` arrays from their tables
-    let sky = wcs.pixel_to_world(&[256.0, 256.0])?;
-    let pixel = wcs.world_to_pixel(&sky)?;
+    let mut sky = [0.0; 2];
+    wcs.pixel_to_world(&[256.0, 256.0], &mut sky)?; // into the caller's buffer
+    let mut pixel = [0.0; 2];
+    wcs.world_to_pixel(&sky, &mut pixel)?;
     Ok(())
 }
 ```
