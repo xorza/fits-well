@@ -4,7 +4,7 @@
 //! (`ZBITPIX`, `ZNAXISn`) is split into `ZTILEn` tiles, each compressed and stored
 //! in `COMPRESSED_DATA` (with `GZIP_COMPRESSED_DATA`/`UNCOMPRESSED_DATA` fallbacks).
 //! This module holds the shared pieces — the write-time [`Compression`] and
-//! [`CompressionOptions`], the
+//! [`CompressionConfig`], the
 //! [`ImageCodec`] dispatch, the per-tile [`map_tiles`] fan-out, and the `P`-vs-`Q`
 //! descriptor threshold — while the directions live in [`decode`]
 //! ([`TiledImage::decode`]) and [`encode`] ([`encode::compress_image`], all five codecs:
@@ -31,6 +31,7 @@ pub(crate) mod table;
 mod tile_geometry;
 
 use crate::error::FitsError;
+use crate::error::Ranked;
 use crate::error::Result;
 use crate::keyword;
 
@@ -171,32 +172,75 @@ impl Default for Quantization {
     }
 }
 
-/// Shared tiled-image options. Codec-specific knobs are part of [`Compression`].
-#[derive(Debug, Clone, Default)]
-pub struct CompressionOptions {
-    /// Tile shape, fastest axis first. Empty means one tile per row, or for `HCOMPRESS_1`
-    /// cfitsio's default: full rows, one band up to 30 rows, else bands of 16 rows unless
-    /// that leaves a last band of 1 to 3, which moves to cfitsio's next candidate height.
-    tile_shape: Vec<usize>,
-    quantization: Quantization,
+/// A tiled-compression write: the codec, the tiles, and a float image's quantization.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompressionConfig {
+    codec: Compression,
+    /// Fastest axis first for an image; one axis, the rows, for a table. Empty means
+    /// the default: for an image one tile per row, or for `HCOMPRESS_1` cfitsio's
+    /// default (full rows, one band up to 30 rows, else bands of 16 rows unless that
+    /// leaves a last band of 1 to 3, which moves to cfitsio's next candidate height);
+    /// for a table cfitsio's tiles of about [`DEFAULT_TABLE_TILE_BYTES`].
+    tiles: Vec<usize>,
+    /// `None` until set, which a float image reads as the default and a table refuses.
+    quantization: Option<Quantization>,
 }
 
-impl CompressionOptions {
-    pub fn tiled(tile_shape: impl Into<Vec<usize>>) -> Self {
+/// cfitsio's `maxchunksize`, the bytes of rows in one tile of a table compressed with
+/// no tile height set (`fits_compress_table`).
+const DEFAULT_TABLE_TILE_BYTES: usize = 10_000_000;
+
+impl CompressionConfig {
+    pub const fn new(codec: Compression) -> Self {
         Self {
-            tile_shape: tile_shape.into(),
-            ..Self::default()
+            codec,
+            tiles: Vec::new(),
+            quantization: None,
         }
     }
 
+    /// The tile shape: one length per image axis, fastest first, or one row count for
+    /// a table.
+    #[must_use]
+    pub fn tiled(mut self, tiles: impl Into<Vec<usize>>) -> Self {
+        self.tiles = tiles.into();
+        self
+    }
+
+    /// A float image's quantization: the noise divisor `level` (`0` takes cfitsio's
+    /// default of 4) and the dither. A table write refuses it.
     pub fn with_quantization(mut self, level: f64, dither: DitherMethod) -> Result<Self> {
         if !level.is_finite() || level < 0.0 {
             return Err(FitsError::InvalidCompressionParameter {
                 detail: format!("float quantization level {level} must be finite and nonnegative"),
             });
         }
-        self.quantization = Quantization { level, dither };
+        self.quantization = Some(Quantization { level, dither });
         Ok(self)
+    }
+
+    /// Rows per tile of a table of `nrows` rows of `row_len` bytes, in `1..=nrows`.
+    /// Errors when the tiles have more than one axis or quantization is set.
+    fn table_tile_rows(&self, nrows: usize, row_len: usize) -> Result<usize> {
+        if self.quantization.is_some() {
+            return Err(FitsError::InvalidCompressionParameter {
+                detail: "a compressed table takes no float quantization".to_string(),
+            });
+        }
+        let rows = match *self.tiles.as_slice() {
+            [] => DEFAULT_TABLE_TILE_BYTES
+                .checked_div(row_len)
+                .unwrap_or(nrows),
+            [rows] => rows,
+            ref tiles => {
+                return Err(FitsError::RankMismatch {
+                    ranked: Ranked::TileShape,
+                    expected: 1,
+                    got: tiles.len(),
+                });
+            }
+        };
+        Ok(rows.clamp(1, nrows.max(1)))
     }
 }
 

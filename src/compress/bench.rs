@@ -15,10 +15,9 @@ use crate::bitpix::Bitpix;
 use crate::compress::encode::hcompress_default_rows;
 use crate::compress::plane::IntBitpix;
 use crate::compress::{
-    Compression, CompressionOptions, Hcompress, convert, gzip, hcompress, plio, rice,
+    Compression, CompressionConfig, Hcompress, convert, gzip, hcompress, plio, rice,
 };
 use crate::fits_writer::FitsWriter;
-use crate::header_model::Header;
 use crate::image_model::Image;
 use crate::image_model::data::Data;
 use crate::image_model::region::Region;
@@ -117,9 +116,8 @@ fn write_compressed(c: &mut Criterion, dir: &ScratchDir) {
                 let mut writer = FitsWriter::new(File::create(&path).unwrap()).with_checksums();
                 writer
                     .write_compressed_image(
-                        image,
-                        compression,
-                        &CompressionOptions::default(),
+                        image.view(),
+                        &CompressionConfig::new(compression),
                         Some(&header),
                     )
                     .unwrap();
@@ -155,16 +153,12 @@ fn write_compressed_table(c: &mut Criterion, dir: &ScratchDir) {
     let mut catalog = None;
     for compression in TABLE_CODECS {
         group.bench_function(BenchmarkId::new("file", codec_id(compression)), |b| {
-            let catalog = catalog.get_or_insert_with(CatalogTable::read);
+            let catalog = catalog.get_or_insert_with(scene::catalog);
+            let config = table_config(compression);
             b.iter(|| {
                 let mut writer = FitsWriter::new(File::create(&path).unwrap());
                 writer
-                    .write_compressed_table(
-                        &catalog.header,
-                        &catalog.table,
-                        ROWS_PER_TILE,
-                        compression,
-                    )
+                    .write_compressed_table(catalog, &config, None)
                     .unwrap();
             });
         });
@@ -180,15 +174,9 @@ fn read_compressed_table(c: &mut Criterion, dir: &ScratchDir) {
         for source in SourceKind::all() {
             group.bench_function(BenchmarkId::new(source.id(), codec_id(compression)), |b| {
                 let path = path.get_or_insert_with(|| {
-                    let catalog = CatalogTable::read();
                     let mut writer = FitsWriter::new(Vec::new());
                     writer
-                        .write_compressed_table(
-                            &catalog.header,
-                            &catalog.table,
-                            ROWS_PER_TILE,
-                            compression,
-                        )
+                        .write_compressed_table(&scene::catalog(), &table_config(compression), None)
                         .unwrap();
                     let name = format!("catalog_{}.fits", codec_id(compression));
                     dir.write(&name, &writer.into_inner())
@@ -216,33 +204,17 @@ fn compressed_file(compression: Compression, bitpix: Bitpix) -> Vec<u8> {
     let mut writer = FitsWriter::new(Vec::new()).with_checksums();
     writer
         .write_compressed_image(
-            &scene_image(compression, bitpix, HEIGHT),
-            compression,
-            &CompressionOptions::default(),
+            scene_image(compression, bitpix, HEIGHT).view(),
+            &CompressionConfig::new(compression),
             Some(&scene::light_header()),
         )
         .unwrap();
     writer.into_inner()
 }
 
-/// The catalog as a table's header and contents, the input a compressed table is written from.
-#[derive(Debug)]
-struct CatalogTable {
-    header: Header,
-    table: Table,
-}
-
-impl CatalogTable {
-    /// The catalog, read back from its file.
-    fn read() -> Self {
-        let file = scene::catalog_file();
-        let mut reader = FitsReader::from_bytes(&file).unwrap();
-        let table = reader.read_table(1).unwrap();
-        Self {
-            header: reader.hdus()[1].header.clone(),
-            table,
-        }
-    }
+/// The catalog's tiles of [`ROWS_PER_TILE`] rows, compressed by `compression`.
+fn table_config(compression: Compression) -> CompressionConfig {
+    CompressionConfig::new(compression).tiled([ROWS_PER_TILE])
 }
 
 fn codec_id(compression: Compression) -> String {

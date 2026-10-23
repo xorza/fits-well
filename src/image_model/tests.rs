@@ -17,7 +17,7 @@ fn image(samples: Data, scaling: Scaling) -> Image {
 /// round-trip tests read against.
 fn encoded(data: &Data) -> Vec<u8> {
     let mut out = Vec::new();
-    data.encode_into(&mut out);
+    data.as_view().encode_into(&mut out);
     out
 }
 

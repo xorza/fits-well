@@ -3,7 +3,7 @@
 
 use crate::bintable::tform_kind::TformKind;
 use crate::bitpix::Bitpix;
-use crate::image_model::data::Data;
+use crate::image_model::view::View;
 
 /// An integer `BITPIX`: the plane the lossless codecs work in, and the one a float
 /// image's quantized tiles are stored at.
@@ -114,15 +114,15 @@ pub(super) enum FloatSamples<'a> {
     F64(&'a [f64]),
 }
 
-impl Samples<'_> {
-    pub(super) fn of(data: &Data) -> Samples<'_> {
-        match data {
-            Data::U8(values) => Samples::Int(IntSamples::U8(values)),
-            Data::I16(values) => Samples::Int(IntSamples::I16(values)),
-            Data::I32(values) => Samples::Int(IntSamples::I32(values)),
-            Data::I64(values) => Samples::Int(IntSamples::I64(values)),
-            Data::F32(values) => Samples::Float(FloatSamples::F32(values)),
-            Data::F64(values) => Samples::Float(FloatSamples::F64(values)),
+impl<'a> Samples<'a> {
+    pub(super) const fn of(view: View<'a>) -> Self {
+        match view {
+            View::U8(values) => Samples::Int(IntSamples::U8(values)),
+            View::I16(values) => Samples::Int(IntSamples::I16(values)),
+            View::I32(values) => Samples::Int(IntSamples::I32(values)),
+            View::I64(values) => Samples::Int(IntSamples::I64(values)),
+            View::F32(values) => Samples::Float(FloatSamples::F32(values)),
+            View::F64(values) => Samples::Float(FloatSamples::F64(values)),
         }
     }
 }

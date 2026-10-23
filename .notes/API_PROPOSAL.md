@@ -2,7 +2,7 @@
 
 2026-10-23. This document puts every finding of `API_REVIEW.md` and every entry of `ISSUES.md` into one design and one plan of work. The review keeps the evidence: the `file:line` references and the comparison with other libraries. Here, each item names the review section that it answers.
 
-This proposal is temporary. When a phase lands, its decisions go into `docs/design.md`, and the items that it closes are removed from here and from `ISSUES.md`. Phase 1, the quiet traps, and phase 2, the image reader, have landed.
+This proposal is temporary. When a phase lands, its decisions go into `docs/design.md`, and the items that it closes are removed from here and from `ISSUES.md`. Phase 1, the quiet traps, phase 2, the image reader, and phase 3, writing, have landed.
 
 ## Principles
 
@@ -13,42 +13,6 @@ This proposal is temporary. When a phase lands, its decisions go into `docs/desi
 - **No quiet result.** An operation that cannot do what its name says returns an error. It does not return the container, do nothing, or return `None`.
 
 ## The design
-
-### Writing
-
-The review sections that this answers: "Borrowed data on every write path", "One compression config, and compressed tables from a `Builder`", "Structural headers", and "Unsigned constructors".
-
-```rust
-impl<W: Write> FitsWriter<W> {
-    pub fn write_image(&mut self, image: Borrowed<'_>, header: Option<&Header>) -> Result<()>;
-    pub fn write_compressed_image(&mut self, image: Borrowed<'_>, config: &CompressionConfig, header: Option<&Header>) -> Result<()>;
-    pub fn write_table(&mut self, table: &TableBuilder, header: Option<&Header>) -> Result<()>;
-    pub fn write_compressed_table(&mut self, table: &TableBuilder, config: &CompressionConfig, header: Option<&Header>) -> Result<()>;
-    pub fn write_ascii_table(&mut self, table: &AsciiTableBuilder, header: Option<&Header>) -> Result<()>;
-    pub fn write_empty_primary(&mut self, header: Option<&Header>) -> Result<()>;   // NAXIS = 0; an error when it is not the first HDU
-    pub fn write_raw_hdu(&mut self, header: &Header, raw: &[u8]) -> Result<()>;
-}
-impl<W: Write + Seek> FitsWriter<W> {
-    pub fn stream_image(&mut self, layout: Metadata<'_>, header: Option<&Header>) -> Result<Writer<'_, W>>;
-}
-impl Writer<'_, W> { pub fn write_chunk(&mut self, samples: View<'_>) -> Result<()>; }
-
-pub struct CompressionConfig { /* codec, tiles, quantization */ }
-impl CompressionConfig {
-    pub fn new(codec: Compression) -> Self;
-    pub fn tiled(self, tiles: impl Into<Vec<usize>>) -> Self;     // a table takes one axis: rows per tile
-    pub fn with_quantization(self, level: f64, dither: DitherMethod) -> Result<Self>;
-}
-```
-
-**Why this shape**
-- **Borrowed images.** Both encoders already work from a view (`Data::encode_into`), so a borrowed write costs nothing. It removes the whole-image `to_vec()` of a caller that keeps its buffer, and the buffer juggling for each chunk in lumos's `plane_hdu.rs`.
-- **Signatures.** `write_compressed_table` now matches `write_table`: it takes the builder, and the header is an `Option` in the last place. Internally it encodes the builder into the writer's scratch, as `write_table` does, then compresses that table. So the compressor does not change.
-- **`stream_image` takes the reader's `Metadata`** (shape, bitpix and scaling). Thus the method has two parameters, not four, and it is symmetric with the reader.
-- **`CompressionConfig` holds the codec,** so the codec and its settings are no longer separate arguments. The name follows the workspace rule that refuses `*Options`.
-  - A table write fails with `InvalidCompressionParameter` when the tiles have more than one axis or quantization is set.
-- **`write_empty_primary`** replaces the four hand-written structural cards. The writer already adds an empty primary by itself before a first table or compressed image (`Opening::EmptyPrimary`). This method is for a primary that carries the caller's keywords.
-- **`Image::from_u16/u32/u64/i8`** take `shape: impl Into<Vec<usize>>`, as `Image::new` does.
 
 ### HDUs
 
@@ -169,12 +133,8 @@ The review sections that this answers: "Best-effort access", "Batch transforms" 
 
 | Finding | Why not |
 |---|---|
-| A stream writer to a sink without `Seek` | No caller. Seek is necessary only for checksums, and a type state for that puts a second type parameter on every writer method. A caller that writes to a pipe can write to a `Vec` and copy it. |
 | Section stride | No caller. A preview can read full-resolution chunks and decimate them. Stride complicates the plain and the tiled section paths. |
 | ASCII partial reads | No caller. ASCII tables are a legacy format, and every reader of them reads the whole table. |
-| Table read → write round trip (`TableBuilder::from(&Table)`) | No caller. `read_data_raw` + `write_raw_hdu` copies an HDU verbatim. |
-| Borrowed table columns | A table write transposes the columns into rows in the writer's scratch, and that copy dominates. Borrowing would add a lifetime to `TableBuilder` for a small gain. |
-| One `from_unsigned` constructor | The four typed constructors are clear. Writing unsigned data converts it to signed + `BZERO` in any case, so a borrowed form would save nothing. Only their shape parameter changes. |
 | A `serde` feature | lumos's copy of `SampleType` keeps lumos's file format separate from fits-well's enum, so a fits-well rename cannot break saved files. It would also add a dependency. |
 | A general split of the header borrow from the data borrow | The image handle covers the read path, because `ImageReader::header` outlives the handle borrow. The other clone (`product/mod.rs:150`) copies one header for each file, which is small and not on a hot path. |
 | Verify while reading a bundle | lumos verifies before it trusts a byte, on purpose. |
@@ -182,7 +142,6 @@ The review sections that this answers: "Best-effort access", "Batch transforms" 
 | Range-checked getters | The ranges come from the lumos domain. `require_*` covers the general need. |
 | `set_with_comment` | `set(…)?.set_comment(…)` does the same, now that `set_comment` fails on a missing keyword. |
 | An infallible `set` | A NaN real and non-ASCII text are invalid in FITS. |
-| An `EXTNAME` argument on writes | A header with one `set` already carries it. |
 | `first_image()` | This is `images().next()`. |
 | `Hdu::has_pixels()` | Fixing `is_image` is the better change. |
 
@@ -194,27 +153,6 @@ Each phase is one change to fits-well and its lumos migration. No phase keeps an
 - In fits-well, run `cargo drive gate`.
 - From the Darkroom root, run `cargo drive check` and `cargo drive test`.
 - Run `cargo drive surface` in fits-well, and review its diff as the record of the API change.
-- Phases 2 and 3 also compare the fits-well benches (`integration/read_section/*`, `integration/write*`, `atomic/*`) and the lumos benches before and after. A slower case blocks the phase.
-
-### Phase 3: writing
-
-1. `write_image(Borrowed, …)`, `write_compressed_image(Borrowed, &CompressionConfig, …)` and `write_chunk(View)`. Remove `Image`-taking writes and `&Data` chunks.
-2. `stream_image(Metadata, Option<&Header>)`.
-3. `CompressionConfig` replaces `CompressionOptions` and the separate `Compression` argument.
-4. `write_compressed_table(&Builder, &CompressionConfig, Option<&Header>)`. `Builder` is renamed in phase 5.
-5. `write_empty_primary(Option<&Header>)`.
-6. The shape of `Image::from_u16/u32/u64/i8` becomes `impl Into<Vec<usize>>`.
-
-**Tests**
-- A borrowed write is byte-identical to the former owned write for every `BITPIX`, plain and compressed, with and without checksums.
-- A compressed table from a `Builder` decompresses to the same table that `write_table` writes.
-- The table-config errors: tiles with two axes, and quantization set.
-- `write_empty_primary` as the first HDU, and its error as the second.
-
-**lumos**
-- `PlaneSample::into_data/from_data` and its `unreachable!` go away. `write_chunk` takes the chunk's slice.
-- The bundle primary uses `write_empty_primary`.
-- `bench/files.rs:105` writes the plane without `to_vec()`.
 
 ### Phase 4: header and HDU selection
 
@@ -272,9 +210,8 @@ This phase changes the most call sites, about 280 in lumos, so it is one phase. 
 
 | Phase | fits-well | lumos | Depends on |
 |---|---|---|---|
-| 3. Writing | medium: `fits_writer`, `compress` | small: `plane_hdu`, bundle | none |
 | 4. Header and HDU selection | large: `header_model`, `reader`, `error` | large: about 280 call sites | none |
 | 5. Tables and names | medium: `compress/table`, `bintable`, renames | small | 4, which brings selectors |
 | 6. Small items | small | small | 4 |
 
-Phases 3 and 4 are independent, so either can go first.
+Phase 4 comes next, and phases 5 and 6 build on it.

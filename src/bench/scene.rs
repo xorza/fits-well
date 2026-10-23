@@ -144,7 +144,7 @@ pub(crate) fn light_header() -> Header {
 pub(crate) fn frame_file(bitpix: Bitpix) -> Vec<u8> {
     let mut writer = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
     writer
-        .write_image(&sky(bitpix, WIDTH, HEIGHT, 1), Some(&light_header()))
+        .write_image(sky(bitpix, WIDTH, HEIGHT, 1).view(), Some(&light_header()))
         .unwrap();
     writer.into_inner().into_inner()
 }

@@ -12,7 +12,7 @@ use crate::compress::convert;
 use crate::compress::plane::{FloatSamples, IntBitpix, Samples};
 use crate::compress::tile_geometry::TileGeometry;
 use crate::compress::tile_geometry::TileScratch;
-use crate::compress::{Compression, CompressionOptions, ImageCodec, map_tiles};
+use crate::compress::{CompressionConfig, ImageCodec, map_tiles};
 use crate::compress::{gzip, hcompress, plio, quantize, rice};
 
 use crate::endian::write_pq_descriptor;
@@ -21,7 +21,7 @@ use crate::error::Ranked;
 use crate::error::Result;
 use crate::header_model::Header;
 use crate::header_model::value;
-use crate::image_model::Image;
+use crate::image_model::view::Borrowed;
 use crate::keyword::key;
 
 /// Per-worker tile-encode scratch, reused across the tiles one rayon worker
@@ -44,31 +44,34 @@ struct EncodeScratch {
     hcompress: hcompress::HcompressScratch,
 }
 
-/// Encode an integer [`Image`] as a tiled-compressed `BINTABLE`: returns the
-/// `ZIMAGE` header and the data unit (per-tile `P` descriptors + the heap of
-/// compressed tile bytes). Float images and codecs without an encoder are rejected.
+/// Encode an image as a tiled-compressed `BINTABLE`: returns the `ZIMAGE` header and
+/// writes the data unit (per-tile descriptors + the heap of compressed tile bytes) to
+/// `out`. A float image goes through [`compress_float_image`].
 pub(crate) fn compress_image(
-    image: &Image,
-    compression: Compression,
-    options: &CompressionOptions,
+    image: Borrowed<'_>,
+    config: &CompressionConfig,
     out: &mut Vec<u8>,
 ) -> Result<Header> {
-    let total = validate_image(image)?;
+    if image.shape.len() > 999 {
+        return Err(FitsError::KeywordOutOfRange { name: "NAXIS" });
+    }
+    let total = image.samples.len();
+    let compression = config.codec;
     let codec = compression.image_codec();
     if codec == ImageCodec::Hcompress1 && image.shape.len() != 2 {
         return Err(FitsError::UnsupportedCompression {
             name: "HCOMPRESS_1 requires a two-dimensional image".to_string(),
         });
     }
-    let samples = match Samples::of(&image.samples) {
+    let samples = match Samples::of(image.samples) {
         Samples::Float(samples) => {
-            return compress_float_image(image, samples, compression, options, total, out);
+            return compress_float_image(image, samples, config, out);
         }
         Samples::Int(samples) => samples,
     };
     let bitpix = samples.bitpix();
-    let dims = &image.shape;
-    let tiles = resolve_tile_shape(dims, &options.tile_shape, codec)?;
+    let dims = image.shape;
+    let tiles = resolve_tile_shape(dims, &config.tiles, codec)?;
 
     let geom = TileGeometry::new(dims, &tiles);
     // A `NAXIS = 0` image has no data array; `geom.ntiles()` would otherwise be the
@@ -251,20 +254,19 @@ struct FloatTile {
     has_null: bool,
 }
 
-/// Encode a float [`Image`] as a quantized, tiled-compressed `BINTABLE`, dithered by
-/// the method `options` selects. Each tile is quantized to int32 with a per-tile
+/// Encode a float image as a quantized, tiled-compressed `BINTABLE`, dithered by
+/// the method `config` selects. Each tile is quantized to int32 with a per-tile
 /// `ZSCALE`/`ZZERO`, then compressed with the selected lossless integer codec;
 /// a tile that can't be quantized (constant data) is stored as raw gzip'd floats
 /// in `GZIP_COMPRESSED_DATA`. The table has four columns: `COMPRESSED_DATA`,
 /// `GZIP_COMPRESSED_DATA`, `ZSCALE`, `ZZERO`.
 fn compress_float_image(
-    image: &Image,
+    image: Borrowed<'_>,
     samples: FloatSamples<'_>,
-    compression: Compression,
-    options: &CompressionOptions,
-    total: usize,
+    config: &CompressionConfig,
     out: &mut Vec<u8>,
 ) -> Result<Header> {
+    let compression = config.codec;
     let codec = compression.image_codec();
     if !matches!(
         codec,
@@ -275,17 +277,22 @@ fn compress_float_image(
         });
     }
     let zbitpix = samples.bitpix();
-    let dims = &image.shape;
-    let tiles = resolve_tile_shape(dims, &options.tile_shape, codec)?;
+    let dims = image.shape;
+    let tiles = resolve_tile_shape(dims, &config.tiles, codec)?;
 
     let geom = TileGeometry::new(dims, &tiles);
     // See `compress_image`: zero tiles for a `NAXIS = 0` image, avoiding the phantom
     // one-pixel tile the empty-product `ntiles` would otherwise produce.
-    let ntiles = if total == 0 { 0 } else { geom.ntiles() };
+    let ntiles = if image.samples.is_empty() {
+        0
+    } else {
+        geom.ntiles()
+    };
 
     let zdither0 = 1i64; // deterministic dither seed (any 1..=10000 is valid)
-    let method = options.quantization.dither;
-    let (gzip_level, qlevel) = (compression.gzip_level(), options.quantization.level);
+    let quantization = config.quantization.unwrap_or_default();
+    let method = quantization.dither;
+    let (gzip_level, qlevel) = (compression.gzip_level(), quantization.level);
 
     // Quantize + compress each tile independently (the compute-bound step —
     // parallel under the `parallel` feature); the §10 row layout and heap offsets
@@ -559,14 +566,6 @@ fn set_zimage_axes(
         h.set_internal(key!("ZTILE{}", i + 1).as_str(), value::fits_i64(t)?);
     }
     Ok(())
-}
-
-fn validate_image(image: &Image) -> Result<usize> {
-    image.scaling.validate(image.samples.bitpix())?;
-    if image.shape.len() > 999 {
-        return Err(FitsError::KeywordOutOfRange { name: "NAXIS" });
-    }
-    image.validate_geometry()
 }
 
 #[cfg(test)]

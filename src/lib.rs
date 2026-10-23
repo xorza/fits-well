@@ -77,7 +77,7 @@ pub use reader::image_reader::ImageReader;
 pub mod image {
     pub use crate::bitpix::Bitpix;
     #[cfg(feature = "compression")]
-    pub use crate::compress::{Compression, CompressionOptions, DitherMethod, Gzip, Hcompress};
+    pub use crate::compress::{Compression, CompressionConfig, DitherMethod, Gzip, Hcompress};
     pub use crate::fits_writer::writer::Writer;
     pub use crate::image_model::data::Data;
     pub use crate::image_model::physical_sample::PhysicalSample;

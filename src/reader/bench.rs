@@ -29,6 +29,7 @@ pub(crate) fn atomic(c: &mut Criterion) {
         let mut row = Vec::new();
         scene::sky(Bitpix::I16, WIDTH, 1, 1)
             .samples
+            .as_view()
             .encode_into(&mut row);
         b.iter(|| checksum::accumulate(black_box(&row), 0));
     });

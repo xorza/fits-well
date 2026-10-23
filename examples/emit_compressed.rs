@@ -1,15 +1,15 @@
 //! Write compressed files for a cross-check against the reference implementations:
-//! one image per codec, a quantized float image, and — given cfitsio's reference
-//! table — that table compressed with RICE.
+//! one image per codec, a quantized float image, and a table both plain and
+//! compressed with RICE.
 //!
 //! ```sh
-//! cargo run --example emit_compressed -- OUT_DIR [test_resources/comp_table_ref.fits]
+//! cargo run --example emit_compressed -- OUT_DIR
 //! ```
 //!
 //! Then read the images with astropy (`astropy.io.fits.open(path)[1].data`) and
 //! compare them with the formulas below, and unpack the table with cfitsio
 //! (`funpack -O unpacked.fits OUT_DIR/compressed_table.fits`) and compare it with
-//! the reference it came from.
+//! `OUT_DIR/table.fits`.
 
 #![expect(
     clippy::print_stdout,
@@ -22,12 +22,13 @@ use std::fs::{self, File};
 use std::path::Path;
 use std::process;
 
-use fits_well::image::{Compression, CompressionOptions, Data, Hcompress, Image};
-use fits_well::{FitsReader, FitsWriter};
+use fits_well::FitsWriter;
+use fits_well::image::{Compression, CompressionConfig, Data, Hcompress, Image};
+use fits_well::table::{Builder, ColumnData, WriteColumn};
 
 fn main() -> fits_well::Result<()> {
     let Some(out_dir) = env::args().nth(1) else {
-        eprintln!("usage: emit_compressed OUT_DIR [comp_table_ref.fits]");
+        eprintln!("usage: emit_compressed OUT_DIR");
         process::exit(2);
     };
     let out_dir = Path::new(&out_dir);
@@ -48,8 +49,7 @@ fn main() -> fits_well::Result<()> {
         write_image(
             &path,
             &image,
-            compression,
-            &CompressionOptions::tiled(tiles),
+            &CompressionConfig::new(compression).tiled(tiles),
         )?;
     }
 
@@ -59,8 +59,7 @@ fn main() -> fits_well::Result<()> {
     write_image(
         &path,
         &Image::new(vec![24, 16], mask)?,
-        Compression::Plio,
-        &CompressionOptions::default(),
+        &CompressionConfig::new(Compression::Plio),
     )?;
 
     // A quantized float (SUBTRACTIVE_DITHER_1): 100 + 3x − 2y.
@@ -71,30 +70,39 @@ fn main() -> fits_well::Result<()> {
     write_image(
         &path,
         &Image::new(vec![24, 16], Data::F32(floats))?,
-        Compression::Rice,
-        &CompressionOptions::tiled([24, 16]),
+        &CompressionConfig::new(Compression::Rice).tiled([24, 16]),
     )?;
 
-    if let Some(reference) = env::args().nth(2) {
-        let mut reader = FitsReader::open(File::open(&reference)?)?;
-        let table = reader.read_table(1)?;
-        let header = reader.hdus()[1].header.clone();
-        let path = out_dir.join("compressed_table.fits");
-        let mut writer = FitsWriter::new(File::create(&path)?);
-        writer.write_compressed_table(&header, &table, 100, Compression::Rice)?;
-        println!("wrote {}", path.display());
-    }
+    // 1000 rows: id = i, flux = 0.5i − 3, flag = i mod 7, in tiles of 100 rows.
+    let table = Builder::new()
+        .column(WriteColumn::scalar(
+            "ID",
+            ColumnData::I32((0..1000).collect()),
+        ))?
+        .column(WriteColumn::scalar(
+            "FLUX",
+            ColumnData::F64((0..1000).map(|i| f64::from(i) * 0.5 - 3.0).collect()),
+        ))?
+        .column(WriteColumn::scalar(
+            "FLAG",
+            ColumnData::I16((0..1000).map(|i| i % 7).collect()),
+        ))?;
+    let path = out_dir.join("table.fits");
+    FitsWriter::new(File::create(&path)?).write_table(&table, None)?;
+    println!("wrote {}", path.display());
+    let path = out_dir.join("compressed_table.fits");
+    FitsWriter::new(File::create(&path)?).write_compressed_table(
+        &table,
+        &CompressionConfig::new(Compression::Rice).tiled([100]),
+        None,
+    )?;
+    println!("wrote {}", path.display());
     Ok(())
 }
 
-fn write_image(
-    path: &Path,
-    image: &Image,
-    compression: Compression,
-    options: &CompressionOptions,
-) -> fits_well::Result<()> {
+fn write_image(path: &Path, image: &Image, config: &CompressionConfig) -> fits_well::Result<()> {
     let mut writer = FitsWriter::new(File::create(path)?);
-    writer.write_compressed_image(image, compression, options, None)?;
+    writer.write_compressed_image(image.view(), config, None)?;
     println!("wrote {}", path.display());
     Ok(())
 }

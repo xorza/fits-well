@@ -680,9 +680,9 @@ fn hdu_index_finds_extensions_by_name_and_version() {
     extension_header.set("OBJECT", "target").unwrap();
 
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer.write_image(&primary, None).unwrap();
+    writer.write_image(primary.view(), None).unwrap();
     writer
-        .write_image(&extension, Some(&extension_header))
+        .write_image(extension.view(), Some(&extension_header))
         .unwrap();
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
@@ -743,7 +743,7 @@ fn a_u8_view_borrows_the_source_with_zero_copy() {
         samples: Data::U8(vec![10, 20, 30, 40]),
         scaling: Scaling::IDENTITY,
     };
-    let buf = written(|w| w.write_image(&image, None));
+    let buf = written(|w| w.write_image(image.view(), None));
 
     let mut reader = FitsReader::from_bytes(&buf).unwrap();
     let mut image = reader.image(0).unwrap();
@@ -771,7 +771,7 @@ fn a_multibyte_view_swaps_into_the_callers_words() {
         samples: Data::I16(vec![1, -2, 300]),
         scaling: Scaling::IDENTITY,
     };
-    let buf = written(|w| w.write_image(&image, None));
+    let buf = written(|w| w.write_image(image.view(), None));
 
     // The stored bytes are big-endian: 1 → 0x0001, -2 → 0xFFFE, 300 → 0x012C.
     let mut reader = FitsReader::from_bytes(&buf).unwrap();
@@ -956,7 +956,7 @@ fn image_sections_match_hand_computed_values_for_every_bitpix() {
     for (samples, expected) in cases {
         let bitpix = samples.bitpix();
         let image = Image::new(vec![5, 4, 3], samples).unwrap();
-        let bytes = written(|w| w.write_image(&image, None));
+        let bytes = written(|w| w.write_image(image.view(), None));
         let mut reader = FitsReader::from_bytes(&bytes).unwrap();
         let mut scratch = Vec::new();
         let mut image = reader.image(0).unwrap();
@@ -979,7 +979,7 @@ fn image_sections_preserve_scaling_and_validate_empty_and_invalid_regions() {
         },
     )
     .unwrap();
-    let bytes = written(|w| w.write_image(&image, None));
+    let bytes = written(|w| w.write_image(image.view(), None));
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
     let mut handle = reader.image(0).unwrap();
     let section = handle.read(&[1..4, 0..2]).unwrap();
@@ -1036,7 +1036,7 @@ fn plain_image_section_streams_exact_strided_runs() {
         .map(|index| i16::try_from(index).unwrap() - 100)
         .collect();
     let image = Image::new(shape.to_vec(), samples.clone()).unwrap();
-    let bytes = written(|w| w.write_image(&image, None));
+    let bytes = written(|w| w.write_image(image.view(), None));
     let read_ranges = Rc::new(RefCell::new(Vec::new()));
     let source = CountingCursor {
         inner: Cursor::new(bytes.clone()),
@@ -1074,7 +1074,7 @@ fn plain_image_section_streams_exact_strided_runs() {
 #[cfg(feature = "compression")]
 #[test]
 fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
-    use crate::compress::{Compression, CompressionOptions};
+    use crate::compress::{Compression, CompressionConfig};
     use crate::reader::source::SliceSource;
     use crate::reader::source::internals::CountingSource;
     use std::cell::Cell;
@@ -1128,9 +1128,8 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
         let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
         writer
             .write_compressed_image(
-                &image,
-                Compression::GZIP,
-                &CompressionOptions::tiled([4, 3]),
+                image.view(),
+                &CompressionConfig::new(Compression::GZIP).tiled([4, 3]),
                 None,
             )
             .unwrap();
@@ -1493,7 +1492,7 @@ fn malformed_pq_descriptors_match_across_table_read_paths() {
 #[test]
 fn readers_recover_their_original_sources() {
     let image = Image::new(vec![2], vec![1u8, 2]).unwrap();
-    let bytes = written(|w| w.write_image(&image, None));
+    let bytes = written(|w| w.write_image(image.view(), None));
     let slice = FitsReader::from_bytes(&bytes).unwrap().into_bytes();
     assert!(ptr::eq(slice.as_ptr(), bytes.as_ptr()));
     assert_eq!(slice.len(), bytes.len());
@@ -1524,7 +1523,7 @@ fn a_data_checksum_summed_during_the_decode_reads_the_unit_once() {
         scaling: Scaling::IDENTITY,
     };
     let mut writer = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
-    writer.write_image(&image, None).unwrap();
+    writer.write_image(image.view(), None).unwrap();
     let bytes = writer.into_inner().into_inner();
     let padded = padded_len(35 * 2).unwrap() as usize;
 
@@ -1608,7 +1607,7 @@ fn a_data_checksum_summed_during_the_decode_reads_the_unit_once() {
 #[cfg(feature = "compression")]
 #[test]
 fn a_compressed_image_summed_through_its_sections_reads_the_unit_at_the_finish() {
-    use crate::compress::{Compression, CompressionOptions};
+    use crate::compress::{Compression, CompressionConfig};
     use crate::image_model::data::Data;
     use crate::reader::source::SliceSource;
     use crate::reader::source::internals::CountingSource;
@@ -1622,9 +1621,8 @@ fn a_compressed_image_summed_through_its_sections_reads_the_unit_at_the_finish()
     let mut writer = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
     writer
         .write_compressed_image(
-            &image,
-            Compression::GZIP,
-            &CompressionOptions::tiled([4, 3]),
+            image.view(),
+            &CompressionConfig::new(Compression::GZIP).tiled([4, 3]),
             None,
         )
         .unwrap();

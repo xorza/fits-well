@@ -34,7 +34,7 @@ fn header_unit() -> Vec<u8> {
     let mut writer = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
     let image = scene::sky(Bitpix::I16, 1, 1, 1);
     writer
-        .write_image(&image, Some(&scene::light_header()))
+        .write_image(image.view(), Some(&scene::light_header()))
         .unwrap();
     let file = writer.into_inner().into_inner();
     let data_offset = FitsReader::from_bytes(&file).unwrap().hdus()[0].data_offset;

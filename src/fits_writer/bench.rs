@@ -31,7 +31,9 @@ fn write_image(c: &mut Criterion, dir: &ScratchDir) {
             let header = scene::light_header();
             b.iter(|| {
                 let mut writer = FitsWriter::new(File::create(&path).unwrap()).with_checksums();
-                writer.write_image(black_box(frame), Some(&header)).unwrap();
+                writer
+                    .write_image(black_box(frame.view()), Some(&header))
+                    .unwrap();
             });
         });
     }

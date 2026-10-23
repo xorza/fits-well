@@ -105,6 +105,9 @@ pub enum FitsError {
     /// writes are rejected because appending cannot repair that FITS stream.
     #[error("writer is unusable after a previous output failure")]
     WriterFailed,
+    /// `write_empty_primary` was called after an HDU, which made the primary.
+    #[error("the primary HDU is already written")]
+    PrimaryAlreadyWritten,
     /// A keyword name violated FITS syntax.
     #[error("invalid keyword name {name:?}")]
     InvalidKeyword { name: String },

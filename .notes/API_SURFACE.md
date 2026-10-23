@@ -2,8 +2,8 @@
 
 Every item the crate exports, rendered as its declaration from rustdoc JSON
 (`cargo drive surface`), sorted by path. The surface is the union of a build with
-no features and one build per public feature; a tag names the builds an item or a line
-needs or loses. `internals` is the crate's own test surface and is left out.
+no features and one build per public feature; a tag names the builds an item needs or
+loses. `internals` is the crate's own test surface and is left out.
 
 ```text
 FitsError
@@ -11,6 +11,7 @@ FitsError
     enum FitsError: Debug, Display, Error, From<Error>
         Io(Error)
         WriterFailed
+        PrimaryAlreadyWritten
         InvalidKeyword { name: String }
         ReservedKeyword { name: String }
         InvalidHeaderValue { keyword: String, reason: &'static str }
@@ -75,7 +76,7 @@ FitsError
         RowWidthMismatch { computed: usize, declared: usize }
         TableMetadataMismatch { name: String }
 
-FitsReader
+FitsReader  [shape differs by feature]
     struct FitsReader<S>
         impl<R: Read + Seek> FitsReader<StreamSource<R>>
             pub fn open(source: R) -> Result<Self>
@@ -97,11 +98,10 @@ FitsReader
             pub fn read_wcs(&mut self, index: usize, alt: Option<char>) -> Result<Wcs>
             pub fn read_ascii_table(&mut self, index: usize) -> Result<Ascii>
             pub fn read_groups(&mut self, index: usize) -> Result<RandomGroups>
-            pub fn read_compressed_table(&mut self, index: usize) -> Result<Table>  [features: compression or parallel]
             pub fn verify_checksum(&mut self, index: usize) -> Result<ChecksumReport>
         impl<S: Debug> Debug for FitsReader<S>
 
-FitsWriter
+FitsWriter  [shape differs by feature]
     struct FitsWriter<W>
         impl<W: Write> FitsWriter<W>
             pub const fn new(sink: W) -> Self
@@ -110,11 +110,10 @@ FitsWriter
             pub fn into_inner(self) -> W
             pub fn write_ascii_table(&mut self, table: &AsciiBuilder, header: Option<&Header>) -> Result<()>
             pub fn write_table(&mut self, table: &Builder, header: Option<&Header>) -> Result<()>
-            pub fn write_image(&mut self, image: &Image, header: Option<&Header>) -> Result<()>
-            pub fn write_compressed_image(&mut self, image: &Image, compression: Compression, options: &CompressionOptions, header: Option<&Header>) -> Result<()>  [features: compression or parallel]
-            pub fn write_compressed_table(&mut self, header: &Header, table: &Table, rows_per_tile: usize, compression: Compression) -> Result<()>  [features: compression or parallel]
+            pub fn write_image(&mut self, image: Borrowed<'_>, header: Option<&Header>) -> Result<()>
+            pub fn write_empty_primary(&mut self, header: Option<&Header>) -> Result<()>
         impl<W: Write + Seek> FitsWriter<W>
-            pub fn stream_image(&mut self, shape: &[usize], bitpix: Bitpix, scaling: Scaling, header: Option<&Header>) -> Result<Writer<'_, W>>
+            pub fn stream_image(&mut self, layout: Metadata<'_>, header: Option<&Header>) -> Result<Writer<'_, W>>
         impl<W: Debug> Debug for FitsWriter<W>
 
 ImageReader
@@ -247,9 +246,10 @@ image::Compression  [features: compression or parallel]
         pub const GZIP_SHUFFLED: Self
         pub const fn name(self) -> &'static str
 
-image::CompressionOptions  [features: compression or parallel]
-    struct CompressionOptions: Clone, Debug, Default
-        pub fn tiled(tile_shape: impl Into<Vec<usize>>) -> Self
+image::CompressionConfig  [features: compression or parallel]
+    struct CompressionConfig: Clone, Debug, PartialEq
+        pub const fn new(codec: Compression) -> Self
+        pub fn tiled(self, tiles: impl Into<Vec<usize>>) -> Self
         pub fn with_quantization(self, level: f64, dither: DitherMethod) -> Result<Self>
 
 image::Data
@@ -292,10 +292,10 @@ image::Image
         pub fn new_scaled(shape: impl Into<Vec<usize>>, samples: impl Into<Data>, scaling: Scaling) -> Result<Self>
         pub fn view(&self) -> Borrowed<'_>
         pub fn into_samples(self) -> Data
-        pub fn from_u16(shape: Vec<usize>, data: &[u16]) -> Result<Self>
-        pub fn from_u32(shape: Vec<usize>, data: &[u32]) -> Result<Self>
-        pub fn from_u64(shape: Vec<usize>, data: &[u64]) -> Result<Self>
-        pub fn from_i8(shape: Vec<usize>, data: &[i8]) -> Result<Self>
+        pub fn from_u16(shape: impl Into<Vec<usize>>, data: &[u16]) -> Result<Self>
+        pub fn from_u32(shape: impl Into<Vec<usize>>, data: &[u32]) -> Result<Self>
+        pub fn from_u64(shape: impl Into<Vec<usize>>, data: &[u64]) -> Result<Self>
+        pub fn from_i8(shape: impl Into<Vec<usize>>, data: &[i8]) -> Result<Self>
 
 image::Metadata
     struct Metadata<'a>: Clone, Copy, Debug, PartialEq
@@ -365,7 +365,7 @@ image::View
 
 image::Writer
     struct Writer<'a, W: Write + Seek>: Drop
-        pub fn write_chunk(&mut self, samples: &Data) -> Result<()>
+        pub fn write_chunk(&mut self, samples: View<'_>) -> Result<()>
         pub fn finish(self) -> Result<()>
         impl<'a, W: Debug + Write + Seek> Debug for Writer<'a, W>
 
