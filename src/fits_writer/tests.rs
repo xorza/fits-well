@@ -221,7 +221,7 @@ fn fixed_columns_by_stored_type() -> Vec<TypedWriteColumn> {
         },
         TypedWriteColumn {
             stored_type: 'B',
-            column: WriteColumn::fixed("B", ColumnData::Bytes(vec![1]), 1),
+            column: WriteColumn::fixed("B", ColumnData::U8(vec![1]), 1),
         },
         TypedWriteColumn {
             stored_type: 'I',
@@ -283,7 +283,7 @@ fn vla_columns_by_stored_type() -> Vec<TypedWriteColumn> {
             stored_type: 'B',
             column: WriteColumn::vla(
                 "PB",
-                Ragged::from_rows(vec![ColumnData::Bytes(vec![1])]).unwrap(),
+                Ragged::from_rows(vec![ColumnData::U8(vec![1])]).unwrap(),
             ),
         },
         TypedWriteColumn {
@@ -370,7 +370,7 @@ fn assert_table_column_rejected(column: WriteColumn, expected: &'static str) {
 
 fn empty_binary_columns(count: usize) -> Vec<WriteColumn> {
     (1..=count)
-        .map(|n| WriteColumn::fixed(format!("C{n}"), ColumnData::Bytes(Vec::new()), 1))
+        .map(|n| WriteColumn::fixed(format!("C{n}"), ColumnData::U8(Vec::new()), 1))
         .collect()
 }
 
@@ -676,7 +676,7 @@ fn typed_table_header_templates_preserve_information_and_regenerate_structure() 
         reader
             .read_table(1)
             .unwrap()
-            .column_by_idx(0)
+            .column(0)
             .unwrap()
             .raw()
             .unwrap(),
@@ -686,7 +686,7 @@ fn typed_table_header_templates_preserve_information_and_regenerate_structure() 
         reader
             .read_ascii_table(2)
             .unwrap()
-            .column_by_idx(0)
+            .column(0)
             .unwrap()
             .raw()
             .unwrap(),
@@ -710,7 +710,7 @@ fn writes_and_reads_back_variable_length_arrays() {
     let table = r.read_table(1).unwrap();
     // A P descriptor sized to the longest row, 5.
     assert_eq!(r.hdus[1].header.get_text("TFORM2").unwrap(), Some("1PJ(5)"));
-    let got = table.column_by_idx(1).unwrap().vla().unwrap();
+    let got = table.column(1).unwrap().vla().unwrap();
     assert_eq!(got, Ragged::from_rows(vla_rows).unwrap());
 
     let empty = [WriteColumn::vla(
@@ -723,7 +723,7 @@ fn writes_and_reads_back_variable_length_arrays() {
         table.schema().columns[0].tform.vla_elem,
         Some(TformKind::I64)
     );
-    assert!(table.column_by_idx(0).unwrap().vla().unwrap().is_empty());
+    assert!(table.column(0).unwrap().vla().unwrap().is_empty());
 }
 
 #[test]
@@ -792,13 +792,13 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
     assert_eq!(metadata.columns[1].tform.kind, TformKind::ArrayDesc64);
     assert_eq!(metadata.columns[1].tdim, Some(vec![2, 2]));
     assert_eq!(
-        t.column_by_idx(1).unwrap().vla().unwrap(),
+        t.column(1).unwrap().vla().unwrap(),
         Ragged::from_rows([ColumnData::I16(vec![]), ColumnData::I16(vec![7, 8, 9, 10])]).unwrap()
     );
     assert_eq!(metadata.columns[2].tform.kind, TformKind::ArrayDesc32);
     assert_eq!(metadata.columns[2].tdim, Some(vec![2, 2]));
     assert_eq!(
-        t.column_by_idx(2).unwrap().vla().unwrap(),
+        t.column(2).unwrap().vla().unwrap(),
         Ragged::from_rows([ColumnData::I16(vec![]), ColumnData::I16(vec![1, 2, 3, 4])]).unwrap()
     );
     assert_eq!(r.hdus[1].header.get_text("TFORM4").unwrap(), Some("1PA(5)"));
@@ -806,7 +806,7 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
     assert_eq!(metadata.columns[3].tform.kind, TformKind::ArrayDesc32);
     assert_eq!(metadata.columns[3].tform.vla_elem, Some(TformKind::Char));
     assert_eq!(
-        t.column_by_idx(3).unwrap().vla().unwrap(),
+        t.column(3).unwrap().vla().unwrap(),
         Ragged::from_rows([
             ColumnData::Character(b"hello".to_vec()),
             ColumnData::Character(b"abc".to_vec())
@@ -815,8 +815,8 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
     );
     assert_eq!(metadata.columns[4].tform.kind, TformKind::Bit);
     assert_eq!(metadata.columns[4].tform.repeat, 12);
-    match t.column_by_idx(4).unwrap().raw().unwrap() {
-        ColumnData::Bytes(b) => assert_eq!(b, vec![0xAB, 0xC0, 0x12, 0x30]),
+    match t.column(4).unwrap().raw().unwrap() {
+        ColumnData::U8(b) => assert_eq!(b, vec![0xAB, 0xC0, 0x12, 0x30]),
         other => panic!("{other:?}"),
     }
 }
@@ -881,8 +881,8 @@ fn writes_p_q_variable_length_bit_arrays_with_exact_counts_and_padding() {
     assert_eq!(metadata.columns[0].tform.vla_elem, Some(TformKind::Bit));
     assert_eq!(metadata.columns[1].tform.kind, TformKind::ArrayDesc64);
     assert_eq!(metadata.columns[1].tform.vla_elem, Some(TformKind::Bit));
-    let p = table.column_by_idx(0).unwrap().vla_bits().unwrap();
-    let q = table.column_by_idx(1).unwrap().vla_bits().unwrap();
+    let p = table.column(0).unwrap().vla_bits().unwrap();
+    let q = table.column(1).unwrap().vla_bits().unwrap();
     for row in 0..3 {
         assert_eq!(p.row(row), p_rows[row].as_bitslice());
         assert_eq!(q.row(row), q_rows[row].as_bitslice());
@@ -902,7 +902,7 @@ fn writes_tscal_tzero_tnull_and_reads_back_physical() {
     assert_eq!(r.hdus[1].header.get_real("TZERO1").unwrap(), Some(10.0));
     assert_eq!(r.hdus[1].header.get_integer("TNULL1").unwrap(), Some(99));
     let t = r.read_table(1).unwrap();
-    let phys = t.column_by_idx(0).unwrap().physical().unwrap();
+    let phys = t.column(0).unwrap().physical().unwrap();
     assert_eq!(phys[0], 20.0);
     assert!(phys[1].is_nan());
 }
@@ -954,7 +954,7 @@ fn integer_column(zero: &ColumnData, vla: bool) -> WriteColumn {
 fn binary_tnull_is_range_checked_for_fixed_and_vla_integer_types() {
     let boundaries = [
         NullBoundary {
-            zero: ColumnData::Bytes(vec![0]),
+            zero: ColumnData::U8(vec![0]),
             valid: vec![0, i64::from(u8::MAX)],
             invalid: vec![-1, i64::from(u8::MAX) + 1],
         },
@@ -1062,15 +1062,15 @@ fn writes_and_reads_back_a_binary_table() {
     assert_eq!(metadata.columns[0].name.as_deref(), Some("NOSTA"));
     assert_eq!(metadata.columns[1].unit.as_deref(), Some("m"));
     assert_eq!(
-        t.column_by_idx(0).unwrap().raw().unwrap(),
+        t.column(0).unwrap().raw().unwrap(),
         ColumnData::I32(vec![1, 2, 3])
     );
     assert_eq!(
-        t.column_by_idx(1).unwrap().raw().unwrap(),
+        t.column(1).unwrap().raw().unwrap(),
         ColumnData::F32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0])
     );
     assert_eq!(
-        t.column_by_idx(2).unwrap().raw().unwrap(),
+        t.column(2).unwrap().raw().unwrap(),
         ColumnData::Character(b"AB CDEF  ".to_vec())
     );
 }
@@ -1154,11 +1154,11 @@ fn binary_character_columns_round_trip_exactly_and_reject_over_width() {
     );
     let table = reader.read_table(1).unwrap();
     assert_eq!(
-        table.column_by_idx(0).unwrap().raw().unwrap(),
+        table.column(0).unwrap().raw().unwrap(),
         ColumnData::Character(fields)
     );
-    assert_eq!(table.column_by_idx(1).unwrap().vla().unwrap(), vla_rows);
-    assert_eq!(table.column_by_idx(2).unwrap().vla().unwrap(), vla_rows);
+    assert_eq!(table.column(1).unwrap().vla().unwrap(), vla_rows);
+    assert_eq!(table.column(2).unwrap().vla().unwrap(), vla_rows);
     let too_wide = WriteColumn::characters("BAD", [&b"ABCD"[..], b"ABCDE"], 4).unwrap_err();
     assert!(matches!(
         &too_wide,
@@ -1183,7 +1183,7 @@ fn binary_character_columns_round_trip_exactly_and_reject_over_width() {
         reader
             .read_table(1)
             .unwrap()
-            .column_by_idx(0)
+            .column(0)
             .unwrap()
             .raw()
             .unwrap(),
@@ -1376,15 +1376,15 @@ fn i64_table_scaling_writes_the_exact_unsigned_offset() {
     );
     let table = reader.read_table(1).unwrap();
     assert_eq!(
-        table.column_by_idx(0).unwrap().unsigned().unwrap(),
+        table.column(0).unwrap().unsigned().unwrap(),
         Some(UnsignedData::U64(vec![u64::MIN, u64::MAX]))
     );
     assert_eq!(
-        table.column_by_idx(1).unwrap().vla().unwrap(),
+        table.column(1).unwrap().vla().unwrap(),
         Ragged::from_rows(rows.clone()).unwrap()
     );
     assert_eq!(
-        table.column_by_idx(2).unwrap().vla().unwrap(),
+        table.column(2).unwrap().vla().unwrap(),
         Ragged::from_rows(rows).unwrap()
     );
 }
@@ -1796,9 +1796,9 @@ fn compressed_header_templates_preserve_information_and_regenerate_structure() {
     assert_eq!(header.get_text("TFORM1").unwrap(), Some("1QB"));
     assert_eq!(
         reader
-            .read_compressed_table(1)
+            .read_table(1)
             .unwrap()
-            .column_by_idx(0)
+            .column(0)
             .unwrap()
             .raw()
             .unwrap(),
@@ -1816,12 +1816,7 @@ fn logical_column_round_trips_with_null_state() {
     )];
     let mut r = round_trip(|w| w.write_table(&binary_table(3, &columns), None));
     assert_eq!(
-        r.read_table(1)
-            .unwrap()
-            .column_by_idx(0)
-            .unwrap()
-            .raw()
-            .unwrap(),
+        r.read_table(1).unwrap().column(0).unwrap().raw().unwrap(),
         ColumnData::Logical(vec![Some(true), None, Some(false)])
     );
 }

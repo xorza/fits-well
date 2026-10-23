@@ -3,8 +3,7 @@
 //! A binary table is `NAXIS2` rows of `NAXIS1` bytes; each of `TFIELDS` columns
 //! occupies a fixed byte range in every row, typed by its `TFORMn` code. That
 //! structure parses into a [`Schema`] of [`Column`] descriptors; decoding goes
-//! through a [`ColumnReader`] (from [`Table::column_by_idx`] /
-//! [`Table::column_by_name`]), whose methods yield typed [`ColumnData`]
+//! through a [`ColumnReader`] (from [`Table::column`]), whose methods yield typed [`ColumnData`]
 //! ([`ColumnReader::raw`]), the `TSCALn`/`TZEROn` physical plane
 //! ([`ColumnReader::physical`]), and `P`/`Q` variable-length arrays out of the heap
 //! ([`ColumnReader::vla`]), including their numeric, complex, and exact unsigned
@@ -29,9 +28,8 @@ pub(crate) mod vla_column;
 use crate::bintable::column_reader::ColumnReader;
 use crate::bintable::schema::Schema;
 use crate::bintable::table_view::TableView;
+use crate::column::ColumnSelector;
 use crate::error::Result;
-#[cfg(any(feature = "compression", feature = "internals"))]
-use crate::header_model::Header;
 
 /// A binary table's structure plus its data unit.
 #[derive(Debug, Clone)]
@@ -56,13 +54,6 @@ impl Table {
         })
     }
 
-    /// Build a table from its header and owned data unit (`data` is the main
-    /// table followed by the optional heap, as returned by the reader).
-    #[cfg(any(feature = "compression", feature = "internals"))]
-    pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<Self> {
-        Self::new(Schema::parse(header)?, data)
-    }
-
     /// The table over its own storage — what every decode reads through.
     pub(crate) fn view(&self) -> TableView<'_> {
         TableView::new(&self.schema, &self.bytes).expect("`new` checked the heap extent")
@@ -79,29 +70,35 @@ impl Table {
         self.schema.column_index(name)
     }
 
-    /// A reader handle for the column at `index`. Decode through it — [`ColumnReader`]
-    /// exposes `raw`/`physical`/`unsigned`/`complex`/`bits` and the `vla*` variants —
-    /// without re-passing the column descriptor. Errors with
-    /// [`FitsError::IndexOutOfBounds`](crate::FitsError::IndexOutOfBounds) for a bad index.
-    pub fn column_by_idx(&self, index: usize) -> Result<ColumnReader<'_>> {
-        self.view().column_by_idx(index)
-    }
-
-    /// A reader handle for the column named `name` (`TTYPEn`, case-insensitive, §6.7).
-    /// Errors with [`FitsError::ColumnNotFound`](crate::FitsError::ColumnNotFound) if no
-    /// such column exists.
-    pub fn column_by_name(&self, name: &str) -> Result<ColumnReader<'_>> {
-        self.view().column_by_name(name)
+    /// A reader handle for the column `column` selects, by index or `TTYPEn` name. Decode
+    /// through it — [`ColumnReader`] exposes `raw`/`physical`/`unsigned`/`complex`/`bits`
+    /// and the `vla*` variants — without re-passing the column descriptor. Errors with
+    /// [`FitsError::IndexOutOfBounds`] for an index past the last column, and with
+    /// [`FitsError::ColumnNotFound`] for a name no column carries.
+    ///
+    /// [`FitsError::IndexOutOfBounds`]: crate::FitsError::IndexOutOfBounds
+    /// [`FitsError::ColumnNotFound`]: crate::FitsError::ColumnNotFound
+    pub fn column<'n>(&self, column: impl Into<ColumnSelector<'n>>) -> Result<ColumnReader<'_>> {
+        self.view().column(column)
     }
 }
 
 #[cfg(feature = "internals")]
 pub(crate) mod internals {
-    #[cfg(all(test, feature = "compression"))]
     use crate::bintable::Table;
+    use crate::bintable::schema::Schema;
     #[cfg(all(test, feature = "compression"))]
     use crate::bintable::tform_kind::TformKind;
+    use crate::error::Result;
     use crate::header_model::{Header, keywords};
+
+    impl Table {
+        /// Build a table from its header and owned data unit (`data` is the main
+        /// table followed by the optional heap, as returned by the reader).
+        pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<Self> {
+            Self::new(Schema::parse(header)?, data)
+        }
+    }
 
     /// A minimal `BINTABLE` header for `tforms`, sized by the caller — the fixture
     /// every read-path test builds its table from.

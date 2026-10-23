@@ -83,7 +83,7 @@ impl FloatQuantization {
 /// it — every such column is optional, so absence is not an error.
 fn read_tile_metadata(table: TableView<'_>, name: &str) -> Result<Option<ColumnData>> {
     match table.column_index(name) {
-        Some(index) => Ok(Some(table.column_by_idx(index)?.raw()?)),
+        Some(index) => Ok(Some(table.column(index)?.raw()?)),
         None => Ok(None),
     }
 }
@@ -109,7 +109,7 @@ fn read_i64_column(table: TableView<'_>, name: &str) -> Result<Option<Vec<i64>>>
         return Ok(None);
     };
     match data {
-        ColumnData::Bytes(v) => Ok(Some(v.iter().map(|&x| i64::from(x)).collect())),
+        ColumnData::U8(v) => Ok(Some(v.iter().map(|&x| i64::from(x)).collect())),
         ColumnData::I16(v) => Ok(Some(v.iter().map(|&x| i64::from(x)).collect())),
         ColumnData::I32(v) => Ok(Some(v.iter().map(|&x| i64::from(x)).collect())),
         ColumnData::I64(v) => Ok(Some(v)),

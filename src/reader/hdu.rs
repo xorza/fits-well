@@ -2,6 +2,8 @@
 
 use crate::bintable::schema::Schema;
 use crate::block::padded_len;
+#[cfg(feature = "compression")]
+use crate::compress::table::TiledTable;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::HduKind;
@@ -37,6 +39,10 @@ pub struct Hdu {
     /// `None` when the HDU is not structurally a binary table, or its header does not
     /// resolve to one; [`Hdu::container_schema`] then reports why.
     table: Option<Schema>,
+    /// `None` when the HDU is not a tiled-compressed table, or its header does not
+    /// resolve to one; [`Hdu::tiled_table`] then reports why.
+    #[cfg(feature = "compression")]
+    tiled_table: Option<TiledTable>,
 }
 
 impl Hdu {
@@ -55,6 +61,10 @@ impl Hdu {
             index,
             image: ImageGeometry::from_header(&header, kind).ok(),
             table: table_schema(&header, kind).ok(),
+            #[cfg(feature = "compression")]
+            tiled_table: (kind == HduKind::CompressedTable)
+                .then(|| TiledTable::new(&header).ok())
+                .flatten(),
             header,
             kind,
             header_sum,
@@ -150,21 +160,42 @@ impl Hdu {
         self.image_geometry()
     }
 
-    /// The schema of the binary table this HDU holds. Errors with
-    /// [`FitsError::TableIsCompressed`] for a tiled-compressed table, with
-    /// [`FitsError::NotABinTable`] for any other kind but a plain `BINTABLE` — a
-    /// tiled-compressed image among them — and with the header's own error when its
-    /// table keywords are malformed.
+    /// The schema of the binary table this HDU holds: a plain `BINTABLE`'s, or the table a
+    /// tiled-compressed one restores to. Errors with [`FitsError::NotABinTable`] for any
+    /// other kind — a tiled-compressed image among them, and a compressed table without
+    /// the `compression` feature — and with the header's own error when its table
+    /// keywords are malformed.
     pub fn table_schema(&self) -> Result<&Schema> {
         match self.kind {
             HduKind::BinTable => self.container_schema(),
-            HduKind::CompressedTable => Err(FitsError::TableIsCompressed),
+            #[cfg(feature = "compression")]
+            HduKind::CompressedTable => Ok(&self
+                .tiled_table()?
+                .expect("a compressed table has a tile layout")
+                .schema),
+            #[cfg(not(feature = "compression"))]
+            HduKind::CompressedTable => Err(FitsError::NotABinTable),
             HduKind::Primary
             | HduKind::Image
             | HduKind::AsciiTable
             | HduKind::CompressedImage
             | HduKind::RandomGroups
             | HduKind::Other => Err(FitsError::NotABinTable),
+        }
+    }
+
+    /// The tile layout of a tiled-compressed table; `None` for any other HDU.
+    #[cfg(feature = "compression")]
+    pub(crate) fn tiled_table(&self) -> Result<Option<&TiledTable>> {
+        if self.kind != HduKind::CompressedTable {
+            return Ok(None);
+        }
+        match &self.tiled_table {
+            Some(tiled) => Ok(Some(tiled)),
+            None => {
+                Err(TiledTable::new(&self.header)
+                    .expect_err("the scan could not resolve this header"))
+            }
         }
     }
 

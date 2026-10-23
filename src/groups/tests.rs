@@ -228,17 +228,17 @@ fn raw_group_view_preserves_i64_extremes_and_group_boundaries() {
     let data: Vec<u8> = stored.into_iter().flat_map(i64::to_be_bytes).collect();
     let groups = RandomGroups::from_data(&header, &data).unwrap();
 
-    let first = groups.group_by_idx(0).unwrap();
+    let first = groups.group(0).unwrap();
     assert_eq!(first.parameters, View::I64(&[i64::MIN, i64::MAX]));
     assert_eq!(
         first.array,
         View::I64(&[9_007_199_254_740_993, -9_007_199_254_740_993])
     );
-    let second = groups.group_by_idx(1).unwrap();
+    let second = groups.group(1).unwrap();
     assert_eq!(second.parameters, View::I64(&[7, 8]));
     assert_eq!(second.array, View::I64(&[9, 10]));
     assert!(matches!(
-        groups.group_by_idx(2),
+        groups.group(2),
         Err(FitsError::IndexOutOfBounds {
             indexed: Indexed::Group,
             index: 2,
@@ -253,7 +253,7 @@ fn raw_group_view_preserves_float_bit_patterns() {
     let f32_bits = [0x7fc0_1234, 0x8000_0000, 0x0000_0001];
     let f32_data: Vec<u8> = f32_bits.into_iter().flat_map(u32::to_be_bytes).collect();
     let f32_groups = RandomGroups::from_data(&f32_header, &f32_data).unwrap();
-    let f32_group = f32_groups.group_by_idx(0).unwrap();
+    let f32_group = f32_groups.group(0).unwrap();
     let View::F32(f32_parameters) = f32_group.parameters else {
         panic!("BITPIX -32 parameters must be f32");
     };
@@ -277,7 +277,7 @@ fn raw_group_view_preserves_float_bit_patterns() {
     ];
     let f64_data: Vec<u8> = f64_bits.into_iter().flat_map(u64::to_be_bytes).collect();
     let f64_groups = RandomGroups::from_data(&f64_header, &f64_data).unwrap();
-    let f64_group = f64_groups.group_by_idx(0).unwrap();
+    let f64_group = f64_groups.group(0).unwrap();
     let View::F64(f64_parameters) = f64_group.parameters else {
         panic!("BITPIX -64 parameters must be f64");
     };

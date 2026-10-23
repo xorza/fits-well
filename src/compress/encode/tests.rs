@@ -168,16 +168,8 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
             );
 
             let table = r.read_container_table(1).unwrap();
-            let compressed = table
-                .column_by_name("COMPRESSED_DATA")
-                .unwrap()
-                .vla()
-                .unwrap();
-            let fallback = table
-                .column_by_name("GZIP_COMPRESSED_DATA")
-                .unwrap()
-                .vla()
-                .unwrap();
+            let compressed = table.column("COMPRESSED_DATA").unwrap().vla().unwrap();
+            let fallback = table.column("GZIP_COMPRESSED_DATA").unwrap().vla().unwrap();
             assert_ne!(
                 compressed.range(0).len(),
                 0,
@@ -202,7 +194,7 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
             // Tile 0 is quantized at its ZSCALE, so each sample comes back within
             // half a step of it, plus the roundings of the dither arithmetic and,
             // for f32, of storing the result — at most an ulp of the sample.
-            let zscale = table.column_by_name("ZSCALE").unwrap().physical().unwrap()[0];
+            let zscale = table.column("ZSCALE").unwrap().physical().unwrap()[0];
             let rounding = match bitpix {
                 Bitpix::F32 => f64::from(f32::EPSILON),
                 _ => 4.0 * f64::EPSILON,
@@ -328,7 +320,7 @@ fn dither_option_sets_zquantiz_and_round_trips() {
         let zscale = r
             .read_container_table(1)
             .unwrap()
-            .column_by_name("ZSCALE")
+            .column("ZSCALE")
             .unwrap()
             .physical()
             .unwrap()[0];
@@ -398,7 +390,7 @@ fn float_write_preserves_nan_nulls() {
     let zscale = r
         .read_container_table(1)
         .unwrap()
-        .column_by_name("ZSCALE")
+        .column("ZSCALE")
         .unwrap()
         .physical()
         .unwrap()[0];
@@ -449,7 +441,7 @@ fn hcompress_writer_converts_noise_multiplier_to_tile_scale() {
     ));
     let table = r.read_container_table(1).unwrap();
     let stream = table
-        .column_by_name("COMPRESSED_DATA")
+        .column("COMPRESSED_DATA")
         .unwrap()
         .vla_column()
         .unwrap()

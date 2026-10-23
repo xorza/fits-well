@@ -1,10 +1,11 @@
 //! The `TFORMn` element kind and the per-kind decode dispatch it selects.
 
 use num_complex::Complex;
+use std::mem;
 
 use crate::bintable::column_data::ColumnData;
 use crate::bitpix::Bitpix;
-use crate::endian::decode_be_cells;
+use crate::endian::{decode_be_cells, decode_be_cells_into};
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::image_model::sample_type::UnsignedKind;
@@ -123,38 +124,55 @@ impl TformKind {
         cells: impl Iterator<Item = &'a [u8]>,
         capacity: usize,
     ) -> ColumnData {
+        let mut out = ColumnData::U8(Vec::new());
+        self.decode_cells_into(cells, capacity, &mut out);
+        out
+    }
+
+    /// [`TformKind::decode_cells`] into `out`, whose buffer it reuses when `out` already
+    /// holds values of this kind.
+    pub(super) fn decode_cells_into<'a>(
+        self,
+        cells: impl Iterator<Item = &'a [u8]>,
+        capacity: usize,
+        out: &mut ColumnData,
+    ) {
         match self {
-            Self::Logical => {
-                ColumnData::Logical(decode_be_cells(cells, capacity, |[byte]| match byte {
-                    b'T' => Some(true),
-                    b'F' => Some(false),
-                    // 0x00 (or any non-T/F byte) is the §7.3.3 undefined value.
-                    _ => None,
-                }))
+            Self::Logical => refill(out, cells, capacity, logical_from_byte, ColumnData::Logical),
+            Self::Byte | Self::Bit => refill(out, cells, capacity, |[byte]| byte, ColumnData::U8),
+            Self::Char => {
+                let mut values = match mem::replace(out, ColumnData::U8(Vec::new())) {
+                    ColumnData::Character(values) => values,
+                    _ => Vec::new(),
+                };
+                decode_be_cells_into(cells, capacity, |[byte]| byte, &mut values);
+                *out = ColumnData::Character(values);
             }
-            Self::Byte | Self::Bit => {
-                ColumnData::Bytes(decode_be_cells(cells, capacity, |[byte]| byte))
-            }
-            Self::Char => ColumnData::Character(decode_be_cells(cells, capacity, |[byte]| byte)),
-            Self::I16 => ColumnData::I16(decode_be_cells(cells, capacity, i16::from_be_bytes)),
-            Self::I32 => ColumnData::I32(decode_be_cells(cells, capacity, i32::from_be_bytes)),
-            Self::I64 => ColumnData::I64(decode_be_cells(cells, capacity, i64::from_be_bytes)),
-            Self::F32 => ColumnData::F32(decode_be_cells(cells, capacity, f32::from_be_bytes)),
-            Self::F64 => ColumnData::F64(decode_be_cells(cells, capacity, f64::from_be_bytes)),
-            Self::ComplexF32 => {
-                ColumnData::ComplexF32(decode_be_cells(cells, capacity, |bytes: [u8; 8]| Complex {
+            Self::I16 => refill(out, cells, capacity, i16::from_be_bytes, ColumnData::I16),
+            Self::I32 => refill(out, cells, capacity, i32::from_be_bytes, ColumnData::I32),
+            Self::I64 => refill(out, cells, capacity, i64::from_be_bytes, ColumnData::I64),
+            Self::F32 => refill(out, cells, capacity, f32::from_be_bytes, ColumnData::F32),
+            Self::F64 => refill(out, cells, capacity, f64::from_be_bytes, ColumnData::F64),
+            Self::ComplexF32 => refill(
+                out,
+                cells,
+                capacity,
+                |bytes: [u8; 8]| Complex {
                     re: f32::from_be_bytes(bytes[..4].try_into().unwrap()),
                     im: f32::from_be_bytes(bytes[4..].try_into().unwrap()),
-                }))
-            }
-            Self::ComplexF64 => {
-                ColumnData::ComplexF64(decode_be_cells(cells, capacity, |bytes: [u8; 16]| {
-                    Complex {
-                        re: f64::from_be_bytes(bytes[..8].try_into().unwrap()),
-                        im: f64::from_be_bytes(bytes[8..].try_into().unwrap()),
-                    }
-                }))
-            }
+                },
+                ColumnData::ComplexF32,
+            ),
+            Self::ComplexF64 => refill(
+                out,
+                cells,
+                capacity,
+                |bytes: [u8; 16]| Complex {
+                    re: f64::from_be_bytes(bytes[..8].try_into().unwrap()),
+                    im: f64::from_be_bytes(bytes[8..].try_into().unwrap()),
+                },
+                ColumnData::ComplexF64,
+            ),
             Self::ArrayDesc32 | Self::ArrayDesc64 => {
                 unreachable!("descriptor cells are resolved by the caller")
             }
@@ -230,4 +248,31 @@ impl TformKind {
             _ => Err(FitsError::NotAComplexColumn { code: self.code() }),
         }
     }
+}
+
+/// An `L` value: `T` and `F`, and `None` for `0x00` or any other byte, the §7.3.3
+/// undefined value.
+const fn logical_from_byte([byte]: [u8; 1]) -> Option<bool> {
+    match byte {
+        b'T' => Some(true),
+        b'F' => Some(false),
+        _ => None,
+    }
+}
+
+/// Decode `cells` into the vector `out` holds as `wrap`'s variant, reusing it, or into a
+/// new one when `out` holds another type.
+fn refill<'a, const N: usize, T>(
+    out: &mut ColumnData,
+    cells: impl Iterator<Item = &'a [u8]>,
+    capacity: usize,
+    conv: impl Fn([u8; N]) -> T,
+    wrap: fn(Vec<T>) -> ColumnData,
+) where
+    Vec<T>: TryFrom<ColumnData>,
+{
+    let mut values =
+        Vec::<T>::try_from(mem::replace(out, ColumnData::U8(Vec::new()))).unwrap_or_default();
+    decode_be_cells_into(cells, capacity, conv, &mut values);
+    *out = wrap(values);
 }

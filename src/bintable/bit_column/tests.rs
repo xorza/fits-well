@@ -13,7 +13,7 @@ fn x_bit_column_unpacks_msb_first() {
     // 12 bits MSB-first are 1010_1011_1100.
     let header = table_header(2, 1, &["12X"]);
     let table = Table::from_data(&header, vec![0xAB, 0xC0]).unwrap();
-    let bits = table.column_by_idx(0).unwrap().bits().unwrap();
+    let bits = table.column(0).unwrap().bits().unwrap();
     assert_eq!(bits.nrows(), 1);
     assert_eq!(
         bits.row(0),
@@ -29,8 +29,8 @@ fn x_bit_column_unpacks_msb_first() {
     assert!(!bits[(0, 1)]);
     // `raw()` still yields the packed bytes.
     assert_eq!(
-        table.column_by_idx(0).unwrap().raw().unwrap(),
-        ColumnData::Bytes(vec![0xAB, 0xC0])
+        table.column(0).unwrap().raw().unwrap(),
+        ColumnData::U8(vec![0xAB, 0xC0])
     );
 }
 
@@ -39,7 +39,7 @@ fn read_bit_column_on_a_non_bit_column_errors() {
     let header = table_header(4, 1, &["1J"]);
     let table = Table::from_data(&header, vec![0u8; 4]).unwrap();
     assert!(matches!(
-        table.column_by_idx(0).unwrap().bits(),
+        table.column(0).unwrap().bits(),
         Err(FitsError::NotABitColumn { code: 'J' })
     ));
 }
@@ -58,7 +58,7 @@ fn vla_bit_column_unpacks_msb_first() {
     data.extend_from_slice(&[0xAB, 0xC0, 0xF0]); // heap
     let table = Table::from_data(&header, data).unwrap();
 
-    let rows = table.column_by_idx(0).unwrap().vla_bits().unwrap();
+    let rows = table.column(0).unwrap().vla_bits().unwrap();
     assert_eq!(rows.nrows(), 2);
     assert_eq!(
         rows.row(0),

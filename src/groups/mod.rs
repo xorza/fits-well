@@ -144,7 +144,7 @@ impl RandomGroups {
     /// Borrow the exact host-endian stored values for group `index`, before
     /// `PSCALn`/`PZEROn` or `BSCALE`/`BZERO` conversion. This preserves all integer
     /// values and floating-point bit patterns that the physical `f64` APIs cannot.
-    pub fn group_by_idx(&self, index: usize) -> Result<RandomGroupView<'_>> {
+    pub fn group(&self, index: usize) -> Result<RandomGroupView<'_>> {
         let start = self.checked_group_base(index)?;
         let group_len = self.group_len();
         let parameters_end = start + self.pcount;

@@ -263,7 +263,7 @@ impl WriteColumn {
     /// which fits any row count.
     fn inferred_rows(&self) -> Result<Option<usize>> {
         let (count, row_width) = match &self.values {
-            WriteColumnData::Fixed { data, repeat } => (data.element_count(), *repeat),
+            WriteColumnData::Fixed { data, repeat } => (data.len(), *repeat),
             WriteColumnData::Bits { bytes, bit_count } => (bytes.len(), bit_count.div_ceil(8)),
             WriteColumnData::Vla { rows, .. } => return Ok(Some(rows.len())),
             WriteColumnData::VlaBits { rows, .. } => return Ok(Some(rows.len())),
@@ -319,7 +319,10 @@ impl Builder {
     }
 
     /// Build from an explicit row count and complete column list.
-    pub fn explicit(nrows: usize, columns: impl IntoIterator<Item = WriteColumn>) -> Result<Self> {
+    pub fn with_columns(
+        nrows: usize,
+        columns: impl IntoIterator<Item = WriteColumn>,
+    ) -> Result<Self> {
         let mut table = Self::with_rows(nrows);
         for column in columns {
             table.push(column)?;
@@ -629,7 +632,7 @@ impl ColumnType {
     const fn from_data(data: &ColumnData) -> Self {
         match data {
             ColumnData::Logical(_) => Self::Logical,
-            ColumnData::Bytes(_) => Self::Byte,
+            ColumnData::U8(_) => Self::Byte,
             ColumnData::I16(_) => Self::I16,
             ColumnData::I32(_) => Self::I32,
             ColumnData::I64(_) => Self::I64,
@@ -721,7 +724,7 @@ fn validate_column(col: &WriteColumn, nrows: usize, n: usize) -> Result<ColumnLa
         WriteColumnData::Fixed { data, repeat } => {
             let kind = ColumnType::from_data(data);
             validate_binary_metadata(col, kind.letter(), n)?;
-            assert_eq!(data.element_count(), nrows * repeat, "{ROW_COUNT_FIXED}");
+            assert_eq!(data.len(), nrows * repeat, "{ROW_COUNT_FIXED}");
             if let ColumnData::Character(bytes) = data
                 && *repeat > 0
             {
@@ -818,7 +821,7 @@ fn append_cells(out: &mut Vec<u8>, data: &ColumnData, range: Range<usize>) {
             Some(false) => b'F',
             None => 0, // §7.3.3 null
         })),
-        ColumnData::Bytes(v) | ColumnData::Character(v) => out.extend_from_slice(&v[range]),
+        ColumnData::U8(v) | ColumnData::Character(v) => out.extend_from_slice(&v[range]),
         ColumnData::I16(v) => extend_be(out, &v[range], i16::to_be_bytes),
         ColumnData::I32(v) => extend_be(out, &v[range], i32::to_be_bytes),
         ColumnData::I64(v) => extend_be(out, &v[range], i64::to_be_bytes),

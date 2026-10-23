@@ -23,7 +23,7 @@ use crate::bintable::tform_kind::TformKind;
 ///
 /// ```
 /// # fn read(table: &fits_well::table::Table, row: usize) -> fits_well::Result<()> {
-/// let flags = table.column_by_name("DQ")?.bits()?;
+/// let flags = table.column("DQ")?.bits()?;
 /// let bit = flags[(row, 3)];             // bool (panics out of range)
 /// let bit = flags[row][3];               // same, via the row slice
 /// let bit = flags.get(row, 3);           // Option<bool> (checked)

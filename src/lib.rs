@@ -172,10 +172,11 @@ pub mod table {
     pub use crate::bintable::schema::Schema;
     pub use crate::bintable::tform::Tform;
     pub use crate::bintable::tform_kind::TformKind;
+    pub use crate::column::ColumnSelector;
     pub use crate::fits_writer::ascii_builder::{AsciiBuilder, AsciiWriteColumn};
     pub use crate::fits_writer::builder::{Builder, WriteColumn};
     pub use crate::ragged::Ragged;
-    pub use crate::reader::{ColumnSelector, SelectedColumn, SelectedData, Selection};
+    pub use crate::reader::{SelectedColumn, SelectedData, Selection};
 }
 
 /// Lazy FITS source access and HDU-bound operations. Concrete source wrappers

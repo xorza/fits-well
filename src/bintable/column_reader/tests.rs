@@ -34,15 +34,15 @@ fn decodes_fixed_width_columns_from_hand_built_data() {
         vec![0, 4, 12]
     );
     assert_eq!(
-        table.column_by_idx(0).unwrap().raw().unwrap(),
+        table.column(0).unwrap().raw().unwrap(),
         ColumnData::I32(vec![1, 2])
     );
     assert_eq!(
-        table.column_by_idx(1).unwrap().raw().unwrap(),
+        table.column(1).unwrap().raw().unwrap(),
         ColumnData::F32(vec![1.0, 2.0, 3.0, 4.0])
     );
     assert_eq!(
-        table.column_by_idx(2).unwrap().raw().unwrap(),
+        table.column(2).unwrap().raw().unwrap(),
         ColumnData::Character(b"ABCDE ".to_vec())
     );
 }
@@ -53,20 +53,20 @@ fn zero_repeat_column_decodes_to_empty() {
     let data = 7i32.to_be_bytes().to_vec();
     let table = Table::from_data(&header, data).unwrap();
     assert_eq!(
-        table.column_by_idx(0).unwrap().raw().unwrap(),
+        table.column(0).unwrap().raw().unwrap(),
         ColumnData::F64(vec![])
     );
     assert_eq!(
-        table.column_by_idx(1).unwrap().vla().unwrap(),
+        table.column(1).unwrap().vla().unwrap(),
         Ragged::<ColumnData>::new(ColumnData::I32(Vec::new()), vec![0])
     );
     assert_eq!(
-        table.column_by_idx(2).unwrap().vla().unwrap(),
+        table.column(2).unwrap().vla().unwrap(),
         Ragged::<ColumnData>::new(ColumnData::F64(Vec::new()), vec![0])
     );
-    assert!(table.column_by_idx(3).unwrap().vla_bits().unwrap()[0].is_empty());
+    assert!(table.column(3).unwrap().vla_bits().unwrap()[0].is_empty());
     assert_eq!(
-        table.column_by_idx(4).unwrap().raw().unwrap(),
+        table.column(4).unwrap().raw().unwrap(),
         ColumnData::I32(vec![7])
     );
 }
@@ -86,18 +86,18 @@ fn read_column_physical_applies_tscal_tzero_and_tnull() {
     let table = Table::from_data(&header, data).unwrap();
     // 3 → 10 + 2·3 = 16 ; 5 == TNULL → NaN ; 7 → 10 + 2·7 = 24, by index and by a
     // name in any case.
-    for column in [table.column_by_idx(0), table.column_by_name("flux")] {
+    for column in [table.column(0), table.column("flux")] {
         let phys = column.unwrap().physical().unwrap();
         assert_eq!(phys[0], 16.0);
         assert!(phys[1].is_nan());
         assert_eq!(phys[2], 24.0);
     }
     assert_eq!(
-        table.column_by_name("FLUX").unwrap().raw().unwrap(),
+        table.column("FLUX").unwrap().raw().unwrap(),
         ColumnData::I16(vec![3, 5, 7])
     );
     assert!(matches!(
-        table.column_by_name("nope"),
+        table.column("nope"),
         Err(FitsError::ColumnNotFound { .. })
     ));
 
@@ -121,7 +121,7 @@ fn read_column_physical_rejects_non_numeric_columns() {
     let header = table_header(3, 1, &["3A"]);
     let table = Table::from_data(&header, b"abc".to_vec()).unwrap();
     assert!(matches!(
-        table.column_by_idx(0).unwrap().physical(),
+        table.column(0).unwrap().physical(),
         Err(FitsError::NonNumericColumn { code: 'A' })
     ));
 }
@@ -131,7 +131,7 @@ fn read_column_on_a_vla_directs_to_read_vla_column() {
     let header = table_header(8, 1, &["1PE(3)"]);
     let table = Table::from_data(&header, vec![0u8; 8]).unwrap();
     assert!(matches!(
-        table.column_by_idx(0).unwrap().raw(),
+        table.column(0).unwrap().raw(),
         Err(FitsError::VariableLengthColumn { code: 'P' })
     ));
 }
@@ -156,7 +156,7 @@ fn decodes_variable_length_arrays_from_the_heap() {
 
     let table = Table::from_data(&header, data).unwrap();
     assert_eq!(
-        table.column_by_idx(0).unwrap().vla().unwrap(),
+        table.column(0).unwrap().vla().unwrap(),
         Ragged::<ColumnData>::new(ColumnData::F32(vec![1.0, 2.0, 3.0]), vec![2, 3])
     );
 }
@@ -169,7 +169,7 @@ fn preserves_tdisp_without_making_it_part_of_data_decoding() {
         let table = Table::from_data(&header, vec![0u8; 4]).unwrap();
         assert_eq!(table.schema.columns[0].tdisp.as_deref(), Some(display));
         assert_eq!(
-            table.column_by_idx(0).unwrap().raw().unwrap(),
+            table.column(0).unwrap().raw().unwrap(),
             ColumnData::I32(vec![0])
         );
     }
@@ -191,18 +191,18 @@ fn read_column_complex_widens_and_scales() {
     let table = Table::from_data(&header, data).unwrap();
     // (4 + 3·1) + (3·2)i = 7 + 6i; TZERO has no imaginary component.
     assert_eq!(
-        table.column_by_idx(0).unwrap().complex().unwrap(),
+        table.column(0).unwrap().complex().unwrap(),
         vec![Complex { re: 7.0, im: 6.0 }]
     );
     assert_eq!(
-        table.column_by_idx(1).unwrap().complex().unwrap(),
+        table.column(1).unwrap().complex().unwrap(),
         vec![Complex { re: 7.0, im: 6.0 }]
     );
     // A non-complex column errors.
     let h2 = table_header(4, 1, &["1J"]);
     let t2 = Table::from_data(&h2, vec![0u8; 4]).unwrap();
     assert!(matches!(
-        t2.column_by_idx(0).unwrap().complex(),
+        t2.column(0).unwrap().complex(),
         Err(FitsError::NotAComplexColumn { code: 'J' })
     ));
 }
@@ -219,11 +219,11 @@ fn read_column_unsigned_recovers_typed_values() {
     data.push(118); // −10 + 2⁷
     let table = Table::from_data(&header, data).unwrap();
     assert_eq!(
-        table.column_by_idx(0).unwrap().unsigned().unwrap(),
+        table.column(0).unwrap().unsigned().unwrap(),
         Some(UnsignedData::U16(vec![50000]))
     );
     assert_eq!(
-        table.column_by_idx(1).unwrap().unsigned().unwrap(),
+        table.column(1).unwrap().unsigned().unwrap(),
         Some(UnsignedData::I8(vec![-10]))
     );
 }
@@ -243,11 +243,11 @@ fn read_column_unsigned_is_exact_for_u64_and_none_otherwise() {
     data.extend_from_slice(&7i32.to_be_bytes());
     let table = Table::from_data(&header, data).unwrap();
     assert_eq!(
-        table.column_by_idx(0).unwrap().unsigned().unwrap(),
+        table.column(0).unwrap().unsigned().unwrap(),
         Some(UnsignedData::U64(vec![u64::MAX]))
     );
     assert_eq!(
-        table.column_by_idx(1).unwrap().unsigned().unwrap(),
+        table.column(1).unwrap().unsigned().unwrap(),
         None // TZERO=0
     );
 }
@@ -270,7 +270,7 @@ fn read_vla_column_physical_scales_heap_arrays_and_nulls() {
         data.extend_from_slice(&x.to_be_bytes());
     }
     let table = Table::from_data(&header, data).unwrap();
-    let phys = table.column_by_idx(0).unwrap().vla_physical().unwrap();
+    let phys = table.column(0).unwrap().vla_physical().unwrap();
     assert_eq!(phys.ends(), [2, 3]);
     assert_eq!(phys.row(0)[0], 20.0); // 10 + 2·5
     assert!(phys.row(0)[1].is_nan()); // 99 == TNULL
@@ -305,14 +305,14 @@ fn read_vla_complex_scales_p_and_q_heap_values() {
     let table = Table::from_data(&header, data).unwrap();
     // PC: 10 + 2·(1 + 2i) = 12 + 4i; QM: 3 - 0.5·(6 - 8i) = 0 + 4i.
     assert_eq!(
-        table.column_by_idx(0).unwrap().vla_complex().unwrap(),
+        table.column(0).unwrap().vla_complex().unwrap(),
         Ragged::<Vec<_>>::new(
             vec![Complex { re: 12.0, im: 4.0 }, Complex { re: 4.0, im: 8.0 }],
             vec![2, 2]
         )
     );
     assert_eq!(
-        table.column_by_idx(1).unwrap().vla_complex().unwrap(),
+        table.column(1).unwrap().vla_complex().unwrap(),
         Ragged::<Vec<_>>::new(vec![Complex { re: 0.0, im: 4.0 }], vec![1, 1])
     );
 }
@@ -343,21 +343,10 @@ fn read_vla_unsigned_is_exact_past_f64_integer_precision() {
         UnsignedData::U64(expected.to_vec()),
         vec![3],
     ));
+    assert_eq!(table.column(0).unwrap().vla_unsigned().unwrap(), exact);
+    assert_eq!(table.column(1).unwrap().vla_unsigned().unwrap(), exact);
     assert_eq!(
-        table.column_by_idx(0).unwrap().vla_unsigned().unwrap(),
-        exact
-    );
-    assert_eq!(
-        table.column_by_idx(1).unwrap().vla_unsigned().unwrap(),
-        exact
-    );
-    assert_eq!(
-        table
-            .column_by_idx(0)
-            .unwrap()
-            .vla_physical()
-            .unwrap()
-            .row(0)[1],
+        table.column(0).unwrap().vla_physical().unwrap().row(0)[1],
         9_007_199_254_740_992.0
     );
 
@@ -366,19 +355,11 @@ fn read_vla_unsigned_is_exact_past_f64_integer_precision() {
         .set_internal("TNULL2", i64::MIN);
     let non_convention = Table::from_data(&header, data).unwrap();
     assert_eq!(
-        non_convention
-            .column_by_idx(0)
-            .unwrap()
-            .vla_unsigned()
-            .unwrap(),
+        non_convention.column(0).unwrap().vla_unsigned().unwrap(),
         None
     );
     assert_eq!(
-        non_convention
-            .column_by_idx(1)
-            .unwrap()
-            .vla_unsigned()
-            .unwrap(),
+        non_convention.column(1).unwrap().vla_unsigned().unwrap(),
         None
     );
 }
@@ -396,7 +377,7 @@ fn vla_descriptor_overrunning_the_heap_is_rejected() {
     data.resize(2880, 0); // block-padded fill that must NOT be read as heap
     let table = Table::from_data(&header, data).unwrap();
     assert!(matches!(
-        table.column_by_idx(0).unwrap().vla(),
+        table.column(0).unwrap().vla(),
         Err(FitsError::UnexpectedEof)
     ));
 }
@@ -406,7 +387,7 @@ fn read_vla_on_a_fixed_column_is_an_error() {
     let header = table_header(4, 1, &["1J"]);
     let table = Table::from_data(&header, vec![0u8; 4]).unwrap();
     assert!(matches!(
-        table.column_by_idx(0).unwrap().vla(),
+        table.column(0).unwrap().vla(),
         Err(FitsError::NotAVla { code: 'J' })
     ));
 }
@@ -416,7 +397,7 @@ fn out_of_bounds_column_is_an_error() {
     let header = table_header(4, 1, &["1J"]);
     let table = Table::from_data(&header, vec![0u8; 4]).unwrap();
     assert!(matches!(
-        table.column_by_idx(9),
+        table.column(9),
         Err(FitsError::IndexOutOfBounds {
             indexed: Indexed::Column,
             index: 9,

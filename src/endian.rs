@@ -35,12 +35,26 @@ pub(crate) fn decode_be_cells<'a, const N: usize, T, F>(
 where
     F: Fn([u8; N]) -> T,
 {
-    let mut out = Vec::with_capacity(capacity);
+    let mut out = Vec::new();
+    decode_be_cells_into(cells, capacity, conv, &mut out);
+    out
+}
+
+/// [`decode_be_cells`] into `out`, cleared first, so a caller reuses its buffer.
+pub(crate) fn decode_be_cells_into<'a, const N: usize, T, F>(
+    cells: impl Iterator<Item = &'a [u8]>,
+    capacity: usize,
+    conv: F,
+    out: &mut Vec<T>,
+) where
+    F: Fn([u8; N]) -> T,
+{
+    out.clear();
+    out.reserve(capacity);
     for cell in cells {
         debug_assert_eq!(cell.len() % N, 0, "whole big-endian elements");
         out.extend(cell.as_chunks::<N>().0.iter().map(|c| conv(*c)));
     }
-    out
 }
 
 /// [`decode_be`] into a reused buffer rather than a fresh `Vec`: clears `out`, then

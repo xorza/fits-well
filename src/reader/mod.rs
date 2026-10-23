@@ -7,13 +7,18 @@ use crate::ascii::Ascii;
 use crate::bintable::Table;
 use crate::bintable::column::Column;
 use crate::bintable::column_data::ColumnData;
+use crate::bintable::column_reader::ColumnReader;
 use crate::bintable::schema::Schema;
 use crate::bintable::table_view::TableView;
 use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
 use crate::block::padded_len;
 use crate::checksum;
-use crate::column;
+use crate::column::ColumnSelector;
+use crate::column::Named;
+use crate::column::index_of;
+#[cfg(feature = "compression")]
+use crate::compress::table::DecodedRows;
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Result;
@@ -28,6 +33,8 @@ use crate::ragged::Ragged;
 use crate::reader::data_checksum::DataChecksum;
 use crate::reader::data_source::DataSource;
 use crate::reader::data_source::TableRows;
+#[cfg(feature = "compression")]
+use crate::reader::data_source::validate_row_range;
 use crate::reader::hdu::Hdu;
 use crate::reader::hdu_selector::HduSelector;
 use crate::reader::image_reader::ImageReader;
@@ -47,34 +54,6 @@ use source::SliceSource;
 use source::Source;
 use source::StreamSource;
 
-#[cfg(feature = "compression")]
-use crate::compress::table;
-
-/// Zero-based or case-insensitive named table-column selection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ColumnSelector {
-    Index(usize),
-    Name(String),
-}
-
-impl From<usize> for ColumnSelector {
-    fn from(index: usize) -> Self {
-        Self::Index(index)
-    }
-}
-
-impl From<&str> for ColumnSelector {
-    fn from(name: &str) -> Self {
-        Self::Name(name.to_string())
-    }
-}
-
-impl From<String> for ColumnSelector {
-    fn from(name: String) -> Self {
-        Self::Name(name)
-    }
-}
-
 /// Raw data for one selected table column over a row range.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -90,11 +69,61 @@ pub struct SelectedColumn {
     pub data: SelectedData,
 }
 
+impl SelectedColumn {
+    fn new(column: &ColumnReader<'_>) -> Result<Self> {
+        let descriptor = column.descriptor().clone();
+        let data = if descriptor.tform.kind.is_descriptor() {
+            SelectedData::Variable(column.vla()?)
+        } else {
+            SelectedData::Fixed(column.raw()?)
+        };
+        Ok(Self { descriptor, data })
+    }
+
+    /// Decode `column` into this column's own buffers, which it reuses when they hold
+    /// the same kind of data.
+    fn refill(&mut self, column: &ColumnReader<'_>) -> Result<()> {
+        self.descriptor.clone_from(column.descriptor());
+        let variable = self.descriptor.tform.kind.is_descriptor();
+        match &mut self.data {
+            SelectedData::Variable(rows) if variable => column.vla_into(rows),
+            SelectedData::Fixed(values) if !variable => column.raw_into(values),
+            _ => {
+                *self = Self::new(column)?;
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Named for SelectedColumn {
+    fn name(&self) -> Option<&str> {
+        self.descriptor.name()
+    }
+}
+
 /// Selected columns decoded over a zero-based half-open row range.
 #[derive(Debug, Clone)]
 pub struct Selection {
     pub rows: Range<usize>,
     pub columns: Vec<SelectedColumn>,
+}
+
+impl Selection {
+    /// The selected column that `column` names: an index of the table's columns, or a
+    /// `TTYPEn` name compared case-insensitively. `None` when the selection does not
+    /// hold it.
+    pub fn column<'c>(&self, column: impl Into<ColumnSelector<'c>>) -> Option<&SelectedColumn> {
+        match column.into() {
+            ColumnSelector::Index(index) => self
+                .columns
+                .iter()
+                .find(|selected| selected.descriptor.number == index + 1),
+            ColumnSelector::Name(name) => {
+                index_of(&self.columns, name).map(|pos| &self.columns[pos])
+            }
+        }
+    }
 }
 
 /// A data unit read from the source: the full block-padded bytes plus the range
@@ -157,7 +186,7 @@ pub struct FitsReader<S> {
 
 /// The reader's reused buffers a section or selection read fills and the result
 /// borrows: the selected section's shape, its stored samples, the tile rows it
-/// touches, a compacted table selection, and the words a compressed image's physical
+/// touches, a compacted table selection with the columns it selects, and the words a compressed image's physical
 /// read decodes into.
 #[derive(Debug, Default)]
 pub(crate) struct Scratch {
@@ -166,6 +195,8 @@ pub(crate) struct Scratch {
     #[cfg(feature = "compression")]
     pub(crate) tile_rows: Vec<usize>,
     pub(crate) selection: Vec<u8>,
+    pub(crate) column_indices: Vec<usize>,
+    pub(crate) column_mask: Vec<bool>,
     #[cfg(feature = "compression")]
     pub(crate) words: Vec<u64>,
 }
@@ -317,10 +348,18 @@ impl<S: Source> FitsReader<S> {
     }
 
     /// Read a `BINTABLE` extension and parse its column structure. Decode
-    /// individual columns lazily with [`Table::column_by_idx`]. Errors as
+    /// individual columns lazily with [`Table::column`]. Errors as
     /// [`Hdu::table_schema`] does for an HDU that is not a plain binary table.
     pub fn read_table<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Table> {
         let index = self.hdu_index(hdu)?;
+        #[cfg(feature = "compression")]
+        {
+            let hdu = &self.hdus[index];
+            let schema = hdu.table_schema()?;
+            if let Some(decoded) = decoded_rows(&mut self.data, hdu, &(0..schema.nrows), None)? {
+                return Table::new(decoded.schema, decoded.data);
+            }
+        }
         self.read_table_as(index, Hdu::table_schema)
     }
 
@@ -348,88 +387,129 @@ impl<S: Source> FitsReader<S> {
         hdu: impl Into<HduSelector<'h>>,
         rows: Range<usize>,
     ) -> Result<Table> {
-        let index = self.hdu_index(hdu)?;
-        self.read_table_rows_as(index, rows, Hdu::table_schema)
-    }
-
-    /// [`Self::read_table_rows`] under the schema `schema` gives the HDU.
-    fn read_table_rows_as(
-        &mut self,
-        index: usize,
-        rows: Range<usize>,
-        schema: fn(&Hdu) -> Result<&Schema>,
-    ) -> Result<Table> {
-        let hdu = &self.hdus[index];
-        let schema = schema(hdu)?;
+        let hdu = selected_hdu(&self.hdus, hdu.into())?;
+        let schema = hdu.table_schema()?;
         let row_count = rows.len();
         let mut data = Vec::new();
-        self.data.select_table(
-            hdu.data_offset,
-            schema,
-            TableRows::Range(rows),
-            None,
-            &mut data,
-        )?;
+        select_rows(&mut self.data, hdu, schema, rows, None, &mut data)?;
         Table::new(schema.compacted(row_count, data.len()), data)
     }
 
     /// Decode selected columns over a row range without reading unrelated rows.
-    pub fn read_table_columns<'h>(
+    pub fn read_table_columns<'h, 'c>(
         &mut self,
         hdu: impl Into<HduSelector<'h>>,
         rows: Range<usize>,
-        columns: &[ColumnSelector],
+        columns: impl IntoIterator<Item = impl Into<ColumnSelector<'c>>>,
     ) -> Result<Selection> {
-        let hdu = selected_hdu(&self.hdus, hdu.into())?;
+        let mut selection = Selection {
+            rows: 0..0,
+            columns: Vec::new(),
+        };
+        self.read_table_columns_into(hdu, rows, columns, &mut selection)?;
+        Ok(selection)
+    }
+
+    /// [`Self::read_table_columns`] into `out`, whose buffers it refills: a read of the
+    /// same columns over as many rows as the last allocates nothing for a plain table.
+    /// On an error, `out` holds no column.
+    pub fn read_table_columns_into<'h, 'c>(
+        &mut self,
+        hdu: impl Into<HduSelector<'h>>,
+        rows: Range<usize>,
+        columns: impl IntoIterator<Item = impl Into<ColumnSelector<'c>>>,
+        out: &mut Selection,
+    ) -> Result<()> {
+        let filled = self
+            .resolve_columns(hdu.into(), columns)
+            .and_then(|index| self.fill_selection(index, rows, out));
+        if filled.is_err() {
+            out.rows = 0..0;
+            out.columns.clear();
+        }
+        filled
+    }
+
+    /// Resolve `columns` of the table `hdu` selects into the scratch, and give the index
+    /// of that HDU.
+    fn resolve_columns<'c>(
+        &mut self,
+        hdu: HduSelector<'_>,
+        columns: impl IntoIterator<Item = impl Into<ColumnSelector<'c>>>,
+    ) -> Result<usize> {
+        let hdu = selected_hdu(&self.hdus, hdu)?;
         let schema = hdu.table_schema()?;
-        let selected_indices = columns
-            .iter()
-            .map(|selector| resolve_column_selector(schema, selector))
-            .collect::<Result<Vec<_>>>()?;
-        let mut selected = vec![false; schema.columns.len()];
-        for &index in &selected_indices {
-            selected[index] = true;
+        let column_indices = &mut self.scratch.column_indices;
+        column_indices.clear();
+        for selector in columns {
+            column_indices.push(selector.into().resolve(&schema.columns)?);
         }
-        self.data.select_table(
-            hdu.data_offset,
+        Ok(hdu.index)
+    }
+
+    /// Decode the columns [`Self::resolve_columns`] resolved of HDU `index` over `rows`
+    /// into `out`.
+    fn fill_selection(
+        &mut self,
+        index: usize,
+        rows: Range<usize>,
+        out: &mut Selection,
+    ) -> Result<()> {
+        let hdu = &self.hdus[index];
+        let schema = hdu.table_schema()?;
+        let Scratch {
+            selection,
+            column_indices,
+            column_mask,
+            ..
+        } = &mut self.scratch;
+        column_mask.clear();
+        column_mask.resize(schema.columns.len(), false);
+        for &index in column_indices.iter() {
+            column_mask[index] = true;
+        }
+        select_rows(
+            &mut self.data,
+            hdu,
             schema,
-            TableRows::Range(rows.clone()),
-            Some(&selected),
-            &mut self.scratch.selection,
+            rows.clone(),
+            Some(column_mask),
+            selection,
         )?;
-        let table = TableView::compact(
-            &schema.columns,
-            rows.len(),
-            schema.row_len,
-            &self.scratch.selection,
-        );
-        let mut decoded = Vec::with_capacity(columns.len());
-        for &index in &selected_indices {
-            let column = table.column_by_idx(index)?;
-            let descriptor = column.descriptor().clone();
-            let data = if descriptor.tform.kind.is_descriptor() {
-                SelectedData::Variable(column.vla()?)
+        let table = TableView::compact(&schema.columns, rows.len(), schema.row_len, selection);
+        out.rows = rows;
+        out.columns.truncate(column_indices.len());
+        for (pos, &index) in column_indices.iter().enumerate() {
+            let column = table.column(index)?;
+            if let Some(selected) = out.columns.get_mut(pos) {
+                selected.refill(&column)?;
             } else {
-                SelectedData::Fixed(column.raw()?)
-            };
-            decoded.push(SelectedColumn { descriptor, data });
+                out.columns.push(SelectedColumn::new(&column)?);
+            }
         }
-        Ok(Selection {
-            rows,
-            columns: decoded,
-        })
+        Ok(())
     }
 
     /// Decode one fixed or variable-length table cell without materializing other rows.
-    pub fn read_table_cell<'h>(
+    pub fn read_table_cell<'h, 'c>(
         &mut self,
         hdu: impl Into<HduSelector<'h>>,
         row: usize,
-        column: &ColumnSelector,
+        column: impl Into<ColumnSelector<'c>>,
     ) -> Result<ColumnData> {
         let hdu = selected_hdu(&self.hdus, hdu.into())?;
         let schema = hdu.table_schema()?;
-        let column = resolve_column_selector(schema, column)?;
+        let column = column.into().resolve(&schema.columns)?;
+        #[cfg(feature = "compression")]
+        {
+            let mut selected = vec![false; schema.columns.len()];
+            selected[column] = true;
+            let rows = row..row.saturating_add(1);
+            if let Some(decoded) = decoded_rows(&mut self.data, hdu, &rows, Some(&selected))? {
+                return DataSource::new(SliceSource::new(&decoded.data), Vec::new())
+                    .read_table_cell(0, &decoded.schema, row - decoded.first_row, column);
+            }
+        }
         self.data
             .read_table_cell(hdu.data_offset, schema, row, column)
     }
@@ -532,21 +612,6 @@ impl<S: Source> FitsReader<S> {
         RandomGroups::from_data(&hdu.header, &unit[..lengths.data])
     }
 
-    /// Read a tiled-compressed table (§10.3) — a `BINTABLE` with `ZTABLE = T` —
-    /// and uncompress it into the original [`Table`]. Fixed-width and `P`/`Q`
-    /// variable-length columns are supported (`GZIP_1`/`GZIP_2`/`RICE_1`/
-    /// `NOCOMPRESS`). Requires the `compression` feature.
-    #[cfg(feature = "compression")]
-    pub fn read_compressed_table<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Table> {
-        let hdu = selected_hdu(&self.hdus, hdu.into())?;
-        if hdu.kind != HduKind::CompressedTable {
-            return Err(FitsError::NotCompressedTable);
-        }
-        let container = self.data.table(hdu, None)?;
-        let parts = table::uncompress_table(&hdu.header, container)?;
-        Table::from_data(&parts.header, parts.data)
-    }
-
     /// Verify the `DATASUM`/`CHECKSUM` integrity keywords of an HDU (§J).
     /// Strings containing one or more blanks are reported as
     /// [`ChecksumStatus::Unknown`] because the standard reserves them for
@@ -558,6 +623,57 @@ impl<S: Source> FitsReader<S> {
         let hdu = selected_hdu(&self.hdus, hdu.into())?;
         DataChecksum::of(hdu).finish(hdu, &mut self.data)
     }
+}
+
+/// Select `rows` and `columns` (every column when `None`) of the binary table `hdu` holds
+/// into `out`, as [`DataSource::select_table`] does: from the source for a plain table, from
+/// the decoded tiles for a tiled-compressed one. A free function over the reader's fields,
+/// so the HDU stays borrowed while the source is read.
+fn select_rows<S: Source>(
+    data: &mut DataSource<S>,
+    hdu: &Hdu,
+    schema: &Schema,
+    rows: Range<usize>,
+    columns: Option<&[bool]>,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    #[cfg(feature = "compression")]
+    if let Some(decoded) = decoded_rows(data, hdu, &rows, columns)? {
+        let rows = rows.start - decoded.first_row..rows.end - decoded.first_row;
+        return DataSource::new(SliceSource::new(&decoded.data), Vec::new()).select_table(
+            0,
+            &decoded.schema,
+            TableRows::Range(rows),
+            columns,
+            out,
+        );
+    }
+    data.select_table(
+        hdu.data_offset,
+        schema,
+        TableRows::Range(rows),
+        columns,
+        out,
+    )
+}
+
+/// The tiles of the table a tiled-compressed `hdu` holds that `rows` touch, decoded with
+/// the table's heap, of the `columns` selected; `None` for any other HDU.
+#[cfg(feature = "compression")]
+fn decoded_rows<S: Source>(
+    data: &mut DataSource<S>,
+    hdu: &Hdu,
+    rows: &Range<usize>,
+    columns: Option<&[bool]>,
+) -> Result<Option<DecodedRows>> {
+    let Some(tiled) = hdu.tiled_table()? else {
+        return Ok(None);
+    };
+    validate_row_range(rows, tiled.schema.nrows)?;
+    let container = data.table(hdu, None)?;
+    tiled
+        .decode(&hdu.header, container, rows, columns)
+        .map(Some)
 }
 
 /// The HDU `selector` names. A free function over the records, so a read can hold an
@@ -600,16 +716,6 @@ fn find_extension<'h>(
         }
     }
     Ok(None)
-}
-
-fn resolve_column_selector(schema: &Schema, selector: &ColumnSelector) -> Result<usize> {
-    match selector {
-        ColumnSelector::Index(index) => {
-            column::validate_index(*index, schema.columns.len())?;
-            Ok(*index)
-        }
-        ColumnSelector::Name(name) => schema.column_index_checked(name),
-    }
 }
 
 /// The state of one FITS checksum keyword.
@@ -744,6 +850,7 @@ pub(crate) mod internals {
         use crate::bintable::Table;
         use crate::error::Result;
         use crate::reader::FitsReader;
+        use crate::reader::data_source::TableRows;
         use crate::reader::hdu::Hdu;
         use crate::reader::source::Source;
 
@@ -757,7 +864,18 @@ pub(crate) mod internals {
                 index: usize,
                 rows: Range<usize>,
             ) -> Result<Table> {
-                self.read_table_rows_as(index, rows, Hdu::container_schema)
+                let hdu = &self.hdus[index];
+                let schema = hdu.container_schema()?;
+                let row_count = rows.len();
+                let mut data = Vec::new();
+                self.data.select_table(
+                    hdu.data_offset,
+                    schema,
+                    TableRows::Range(rows),
+                    None,
+                    &mut data,
+                )?;
+                Table::new(schema.compacted(row_count, data.len()), data)
             }
         }
     }

@@ -2,7 +2,7 @@
 
 2026-10-23. This document puts every finding of `API_REVIEW.md` and every entry of `ISSUES.md` into one design and one plan of work. The review keeps the evidence: the `file:line` references and the comparison with other libraries. Here, each item names the review section that it answers.
 
-This proposal is temporary. When a phase lands, its decisions go into `docs/design.md`, and the items that it closes are removed from here and from `ISSUES.md`. Phase 1, the quiet traps, phase 2, the image reader, phase 3, writing, and phase 4, header and HDU selection, have landed.
+This proposal is temporary. When a phase lands, its decisions go into `docs/design.md`, and the items that it closes are removed from here and from `ISSUES.md`. Phase 1, the quiet traps, phase 2, the image reader, phase 3, writing, phase 4, header and HDU selection, and phase 5, tables and names, have landed.
 
 ## Principles
 
@@ -13,34 +13,6 @@ This proposal is temporary. When a phase lands, its decisions go into `docs/desi
 - **No quiet result.** An operation that cannot do what its name says returns an error. It does not return the container, do nothing, or return `None`.
 
 ## The design
-
-### Tables
-
-The review sections that this answers: "`read_table` on a compressed table", "One way to name a column", "Names", "Allocation per call", and part of "Typed access".
-
-- **Compressed tables are transparent, as compressed images are.**
-  - `read_table`, `read_table_rows`, `read_table_columns`, `read_table_cell` and `table_schema` give the logical table.
-  - A partial read decodes only the tiles that its rows touch, and only the columns that it selects. That mirrors image sections.
-  - `read_compressed_table` and `FitsError::TableIsCompressed` go away. Since phase 1, these reads refuse a compressed table, and they no longer give its container.
-- **`ColumnSelector<'a> { Index(usize), Name(&'a str) }`** borrows its name, so it does not allocate.
-  - `Table::column(impl Into<ColumnSelector>)` and `AsciiTable::column(…)` replace each `column_by_idx` / `column_by_name` pair.
-  - `Selection::column(…) -> Option<&SelectedColumn>` is new.
-  - The reader takes `columns: impl IntoIterator<Item = impl Into<ColumnSelector<'c>>>`.
-- **`read_table_columns_into(&mut Selection)`** refills the buffers of an earlier call.
-- **Names:**
-
-  | Today | Proposed |
-  |---|---|
-  | `Ascii` | `AsciiTable` |
-  | `Builder` | `TableBuilder` |
-  | `AsciiBuilder` | `AsciiTableBuilder` |
-  | `explicit` | `with_columns` |
-  | `ColumnData::Bytes` | `ColumnData::U8`, as in `Data` |
-  | `ColumnData::element_count` | `len` and `is_empty` |
-  | `RandomGroups::group_by_idx` | `group` |
-
-  `Table` stays the binary table, which FITS users call "the table".
-- **Typed access on `ColumnData`:** `as_i64() -> Option<&[i64]>` and the other variants, and `TryFrom<ColumnData> for Vec<T>`.
 
 ### Checksums
 
@@ -79,20 +51,6 @@ Each phase is one change to fits-well and its lumos migration. No phase keeps an
 - From the Darkroom root, run `cargo drive check` and `cargo drive test`.
 - Run `cargo drive surface` in fits-well, and review its diff as the record of the API change.
 
-### Phase 5: tables and names
-
-1. Transparent compressed tables: whole reads, partial reads by tile and by column, and `table_schema`. Remove `read_compressed_table` and `TableIsCompressed`. The test reach-ins `read_container_table` and `read_container_rows` stay for the tests of the container's own columns.
-2. Borrowed `ColumnSelector`, the `column(…)` methods, `Selection::column` and `read_table_columns_into`.
-3. The renames of the "Names" table above.
-4. The typed accessors on `ColumnData`, and `TryFrom<ColumnData> for Vec<T>`.
-
-**Tests**
-- A partial read of a compressed table equals the same slice of its full decode, for ranges inside one tile, across tiles, and at the last partial tile.
-- `read_table_columns_into` reuses its buffers: the capacity does not grow on a second call of the same size.
-
-**lumos**
-- `calibration_bundle/mod.rs:260-276` reads its columns through `as_i64` and the other accessors, with no `let … else`.
-
 ### Phase 6: the small items
 
 1. `ChecksumReport::is_valid` and `has_invalid`.
@@ -107,7 +65,4 @@ Each phase is one change to fits-well and its lumos migration. No phase keeps an
 
 | Phase | fits-well | lumos | Depends on |
 |---|---|---|---|
-| 5. Tables and names | medium: `compress/table`, `bintable`, renames | small | none |
 | 6. Small items | small | small | none |
-
-Phases 5 and 6 are independent, so either can go first.

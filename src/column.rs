@@ -47,6 +47,53 @@ pub(crate) const fn validate_index(index: usize, len: usize) -> Result<()> {
     Ok(())
 }
 
+/// A table column: its zero-based index, or its `TTYPEn` name, compared
+/// case-insensitively (§6.7, §7.2.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnSelector<'a> {
+    Index(usize),
+    Name(&'a str),
+}
+
+impl From<usize> for ColumnSelector<'_> {
+    fn from(index: usize) -> Self {
+        Self::Index(index)
+    }
+}
+
+impl<'a> From<&'a str> for ColumnSelector<'a> {
+    fn from(name: &'a str) -> Self {
+        Self::Name(name)
+    }
+}
+
+impl<'a> From<&'a String> for ColumnSelector<'a> {
+    fn from(name: &'a String) -> Self {
+        Self::Name(name)
+    }
+}
+
+impl From<&Self> for ColumnSelector<'_> {
+    fn from(selector: &Self) -> Self {
+        *selector
+    }
+}
+
+impl ColumnSelector<'_> {
+    /// The index of the column this selects among `columns`. Errors with
+    /// [`FitsError::IndexOutOfBounds`] for an index past the last column, and with
+    /// [`FitsError::ColumnNotFound`] for a name no column carries.
+    pub(crate) fn resolve<C: Named>(self, columns: &[C]) -> Result<usize> {
+        match self {
+            Self::Index(index) => {
+                validate_index(index, columns.len())?;
+                Ok(index)
+            }
+            Self::Name(name) => checked_index_of(columns, name),
+        }
+    }
+}
+
 /// The `TTYPEn` name and `TUNITn` unit of a column, which both table forms read the
 /// same way: an absent or empty card is `None`.
 #[derive(Debug)]

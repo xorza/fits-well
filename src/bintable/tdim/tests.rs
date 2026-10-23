@@ -32,7 +32,7 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
     }
     let table = Table::from_data(&vla, data).unwrap();
     assert!(matches!(
-        table.column_by_idx(0).unwrap().vla(),
+        table.column(0).unwrap().vla(),
         Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "TDIM1"
     ));
 
@@ -59,7 +59,7 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
     }
     let table = Table::from_data(&mixed, data).unwrap();
     assert_eq!(
-        table.column_by_idx(0).unwrap().vla().unwrap(),
+        table.column(0).unwrap().vla().unwrap(),
         Ragged::from_rows([
             ColumnData::I32(vec![]),
             ColumnData::I32(vec![10, 20, 30, 40])
@@ -67,7 +67,7 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
         .unwrap()
     );
     assert_eq!(
-        table.column_by_idx(1).unwrap().vla().unwrap(),
+        table.column(1).unwrap().vla().unwrap(),
         Ragged::from_rows([
             ColumnData::I16(vec![]),
             ColumnData::I16(vec![50, 60, 70, 80])
@@ -91,13 +91,13 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
     data.extend_from_slice(&2i64.to_be_bytes());
     data.extend_from_slice(&[0xAA, 0x80, 0x55, 0x00]);
     let table = Table::from_data(&mixed_bits, data).unwrap();
-    let p_bits = table.column_by_idx(0).unwrap().vla_bits().unwrap();
+    let p_bits = table.column(0).unwrap().vla_bits().unwrap();
     assert!(p_bits.row(0).is_empty());
     assert_eq!(
         p_bits.row(1),
         bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 0, 1].as_bitslice()
     );
-    let q_bits = table.column_by_idx(1).unwrap().vla_bits().unwrap();
+    let q_bits = table.column(1).unwrap().vla_bits().unwrap();
     assert!(q_bits.row(0).is_empty());
     assert_eq!(
         q_bits.row(1),

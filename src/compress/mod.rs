@@ -12,7 +12,7 @@
 //! Float images are quantized per-tile (`ZSCALE`/`ZZERO`) with `NO_DITHER`,
 //! `SUBTRACTIVE_DITHER_1`, or `SUBTRACTIVE_DITHER_2`. The per-codec work lives in
 //! [`gzip`], [`rice`], [`plio`], and [`hcompress`]; tiled *table* compression
-//! (§10.3) lives in [`table`] ([`table::compress_table`]/[`table::uncompress_table`]).
+//! (§10.3) lives in [`table`] ([`table::compress_table`] and [`table::TiledTable`]).
 //!
 //! [`TiledImage::decode`]: decode::tiled_image::TiledImage::decode
 
