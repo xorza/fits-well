@@ -2,7 +2,6 @@
 
 use crate::bitpix::Bitpix;
 use crate::endian::decode_be;
-use crate::endian::extend_be;
 use crate::image_model::assert_whole_elements;
 use crate::image_model::view::View;
 use std::ops::Range;
@@ -92,21 +91,6 @@ impl Data {
             Bitpix::I64 => Self::I64(decode_be(bytes, i64::from_be_bytes)),
             Bitpix::F32 => Self::F32(decode_be(bytes, f32::from_be_bytes)),
             Bitpix::F64 => Self::F64(decode_be(bytes, f64::from_be_bytes)),
-        }
-    }
-
-    /// Append the samples to `out` in big-endian order — the inverse of
-    /// [`Data::decode`]. This is the unpadded data unit; the writer pads it
-    /// to the 2880-byte block grid. Appends (never clears), so a writer reusing one
-    /// buffer across HDUs clears it first and pays no per-image staging allocation.
-    pub(crate) fn encode_into(&self, out: &mut Vec<u8>) {
-        match self {
-            Self::U8(v) => out.extend_from_slice(v),
-            Self::I16(v) => extend_be(out, v, i16::to_be_bytes),
-            Self::I32(v) => extend_be(out, v, i32::to_be_bytes),
-            Self::I64(v) => extend_be(out, v, i64::to_be_bytes),
-            Self::F32(v) => extend_be(out, v, f32::to_be_bytes),
-            Self::F64(v) => extend_be(out, v, f64::to_be_bytes),
         }
     }
 }

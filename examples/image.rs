@@ -1,5 +1,5 @@
 //! Create images, write them to a FITS file, and read them back two ways — an owned
-//! decode you can keep, and the borrowed `read_image_view` hot path:
+//! decode you can keep, and the borrowed `view` hot path:
 //!
 //! ```sh
 //! cargo run --example image
@@ -35,8 +35,8 @@ fn main() -> fits_well::Result<()> {
     // the big-endian data unit. The first `write_image` is the primary array; the
     // second becomes an `IMAGE` extension.
     let mut writer = FitsWriter::new(File::create(&path)?);
-    writer.write_image(&i16_image, None)?;
-    writer.write_image(&f32_image, None)?;
+    writer.write_image(i16_image.view(), None)?;
+    writer.write_image(f32_image.view(), None)?;
     writer.into_inner().sync_all()?;
     println!("wrote {}", path.display());
 

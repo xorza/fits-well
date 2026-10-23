@@ -8,18 +8,22 @@ use bitvec::slice::BitSlice;
 use bitvec::vec::BitVec;
 use num_complex::Complex;
 
-#[cfg(feature = "compression")]
-use crate::bintable::Table;
 use crate::bintable::character_field::CharacterField;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::descriptor::DescriptorWidth;
+#[cfg(feature = "compression")]
+use crate::bintable::descriptor::PqDescriptor;
 use crate::bintable::tdim;
 use crate::bintable::tform_kind::TformKind;
 use crate::block::ZERO_FILL;
 #[cfg(feature = "compression")]
-use crate::compress::{Compression, table};
+use crate::compress::CompressionConfig;
+#[cfg(feature = "compression")]
+use crate::compress::table::{self, TableCells};
 use crate::endian::{extend_be, validate_pq_descriptor, write_pq_descriptor};
 use crate::error::{FitsError, Result};
+#[cfg(feature = "compression")]
+use crate::fits_writer::merge_header_template;
 use crate::fits_writer::{
     FitsWriter, Opening, ROW_COUNT_FIXED, accept_row_count, validate_scaling,
 };
@@ -226,6 +230,37 @@ impl WriteColumn {
         self
     }
 
+    const fn is_array(&self) -> bool {
+        matches!(
+            self.values,
+            WriteColumnData::Vla { .. } | WriteColumnData::VlaBits { .. }
+        )
+    }
+
+    /// The array of a variable-length column at `row`; `None` for a fixed-width column.
+    fn array_len(&self, row: usize) -> Option<ArrayLen> {
+        match &self.values {
+            WriteColumnData::Vla { rows, width } => {
+                let count = rows.range(row).len();
+                let element_size = ColumnType::from_data(rows.values()).elem_size();
+                Some(ArrayLen {
+                    width: *width,
+                    count,
+                    bytes: count * element_size,
+                })
+            }
+            WriteColumnData::VlaBits { rows, width } => {
+                let count = rows.range(row).len();
+                Some(ArrayLen {
+                    width: *width,
+                    count,
+                    bytes: count.div_ceil(8),
+                })
+            }
+            WriteColumnData::Fixed { .. } | WriteColumnData::Bits { .. } => None,
+        }
+    }
+
     /// The row count the payload implies: `None` for an empty zero-width column,
     /// which fits any row count.
     fn inferred_rows(&self) -> Result<Option<usize>> {
@@ -293,6 +328,122 @@ impl Builder {
         }
         Ok(table)
     }
+
+    /// The extent of the table this writes, checked before any byte is.
+    fn layout(&self) -> Result<TableLayout> {
+        let nrows = self.nrows.unwrap_or(0);
+        validate_table_field_count(self.columns.len())?;
+        value::fits_i64(nrows)?;
+        let mut columns = Vec::with_capacity(self.columns.len());
+        let mut row_len = 0usize;
+        for col in &self.columns {
+            let layout = validate_column(col, nrows)?;
+            row_len = row_len
+                .checked_add(layout.row_width)
+                .ok_or(FitsError::DataUnitOverflow)?;
+            columns.push(layout);
+        }
+        value::fits_i64(row_len)?;
+        let mut heap_len = 0usize;
+        for array in self.heap_arrays(nrows) {
+            heap_len = next_vla_heap_len(heap_len, array)?;
+        }
+        value::fits_i64(heap_len)?;
+        Ok(TableLayout {
+            nrows,
+            row_len,
+            heap_len,
+            columns,
+        })
+    }
+
+    /// The variable-length arrays of `nrows` rows in the order the heap holds them: row by
+    /// row, each variable-length column in turn.
+    fn heap_arrays(&self, nrows: usize) -> impl Iterator<Item = ArrayLen> + '_ {
+        (0..self.heap_rows(nrows))
+            .flat_map(move |r| self.columns.iter().filter_map(move |col| col.array_len(r)))
+    }
+
+    /// The rows of `nrows` that put an array in the heap: all of them when a column is
+    /// variable-length, else none, so a table of fixed-width columns walks no row.
+    fn heap_rows(&self, nrows: usize) -> usize {
+        if self.columns.iter().any(WriteColumn::is_array) {
+            nrows
+        } else {
+            0
+        }
+    }
+
+    /// The `BINTABLE` header of the table laid out as `layout`.
+    fn header(&self, layout: &TableLayout) -> Result<Header> {
+        bintable_header(
+            layout.nrows,
+            layout.row_len,
+            &self.columns,
+            &layout.columns,
+            layout.heap_len,
+        )
+    }
+
+    /// The `BINTABLE` header, with the unpadded data unit (rows, then heap) written to
+    /// `out`.
+    fn encode(&self, out: &mut Vec<u8>) -> Result<Header> {
+        let layout = self.layout()?;
+        let TableLayout {
+            nrows,
+            row_len,
+            heap_len,
+            ..
+        } = layout;
+        let columns = &self.columns;
+        out.clear();
+        let main_len = nrows
+            .checked_mul(row_len)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        let total_len = main_len
+            .checked_add(heap_len)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        out.reserve_exact(total_len);
+        for r in 0..nrows {
+            for col in columns {
+                match &col.values {
+                    WriteColumnData::Vla { width, .. } | WriteColumnData::VlaBits { width, .. } => {
+                        out.resize(out.len() + width.bytes(), 0);
+                    }
+                    _ => pack_cell(out, col, r),
+                }
+            }
+        }
+        debug_assert_eq!(out.len(), main_len, "main table layout");
+        for r in 0..self.heap_rows(nrows) {
+            let mut column_offset = 0usize;
+            for (col, column) in columns.iter().zip(&layout.columns) {
+                match &col.values {
+                    WriteColumnData::Vla { rows, width } => {
+                        let range = rows.range(r);
+                        let descriptor_offset = r * row_len + column_offset;
+                        write_vla_descriptor(
+                            out,
+                            main_len,
+                            descriptor_offset,
+                            *width,
+                            range.len(),
+                        )?;
+                        append_cells(out, rows.values(), range);
+                    }
+                    WriteColumnData::VlaBits { rows, width } => {
+                        let bits = rows.row(r);
+                        let descriptor_offset = r * row_len + column_offset;
+                        write_vla_descriptor(out, main_len, descriptor_offset, *width, bits.len())?;
+                        append_bits(out, bits);
+                    }
+                    _ => {}
+                }
+                column_offset += column.row_width;
+            }
+        }
+        self.header(&layout)
+    }
 }
 
 pub(super) fn write_template<W: Write>(
@@ -301,94 +452,104 @@ pub(super) fn write_template<W: Write>(
     template: Option<&Header>,
 ) -> Result<()> {
     writer.ensure_writable()?;
-    let nrows = table.nrows.unwrap_or(0);
-    let columns = &table.columns;
-    validate_table_field_count(columns.len())?;
-    value::fits_i64(nrows)?;
-    let mut layouts = Vec::with_capacity(columns.len());
-    let mut row_len = 0usize;
-    for col in columns {
-        let layout = validate_column(col, nrows)?;
-        row_len = row_len
-            .checked_add(layout.row_width)
-            .ok_or(FitsError::DataUnitOverflow)?;
-        layouts.push(layout);
-    }
-    value::fits_i64(row_len)?;
-    let mut heap_len = 0usize;
-    for r in 0..nrows {
-        for col in columns {
-            match &col.values {
-                WriteColumnData::Vla { rows, width } => {
-                    let count = rows.range(r).len();
-                    let element_size = ColumnType::from_data(rows.values()).elem_size();
-                    heap_len = next_vla_heap_len(heap_len, *width, count, count * element_size)?;
-                }
-                WriteColumnData::VlaBits { rows, width } => {
-                    let bits = rows.range(r).len();
-                    heap_len = next_vla_heap_len(heap_len, *width, bits, bits.div_ceil(8))?;
-                }
-                _ => {}
-            }
-        }
-    }
-    value::fits_i64(heap_len)?;
-    writer.scratch.clear();
-    let main_len = nrows
-        .checked_mul(row_len)
-        .ok_or(FitsError::DataUnitOverflow)?;
-    let total_len = main_len
-        .checked_add(heap_len)
-        .ok_or(FitsError::DataUnitOverflow)?;
-    writer.scratch.reserve_exact(total_len);
-    for r in 0..nrows {
-        for col in columns {
-            match &col.values {
-                WriteColumnData::Vla { width, .. } | WriteColumnData::VlaBits { width, .. } => {
-                    writer
-                        .scratch
-                        .resize(writer.scratch.len() + width.bytes(), 0);
-                }
-                _ => pack_cell(&mut writer.scratch, col, r),
-            }
-        }
-    }
-    assert_eq!(writer.scratch.len(), main_len, "main table layout");
-    for r in 0..nrows {
-        let mut column_offset = 0usize;
-        for (col, layout) in columns.iter().zip(&layouts) {
-            match &col.values {
-                WriteColumnData::Vla { rows, width } => {
-                    let range = rows.range(r);
-                    let descriptor_offset = r * row_len + column_offset;
-                    write_vla_descriptor(
-                        &mut writer.scratch,
-                        main_len,
-                        descriptor_offset,
-                        *width,
-                        range.len(),
-                    )?;
-                    append_cells(&mut writer.scratch, rows.values(), range);
-                }
-                WriteColumnData::VlaBits { rows, width } => {
-                    let bits = rows.row(r);
-                    let descriptor_offset = r * row_len + column_offset;
-                    write_vla_descriptor(
-                        &mut writer.scratch,
-                        main_len,
-                        descriptor_offset,
-                        *width,
-                        bits.len(),
-                    )?;
-                    append_bits(&mut writer.scratch, bits);
-                }
-                _ => {}
-            }
-            column_offset += layout.row_width;
-        }
-    }
-    let header = bintable_header(nrows, row_len, columns, &layouts, heap_len)?;
+    let header = table.encode(&mut writer.scratch)?;
     writer.finish_hdu(header, template, ZERO_FILL, Opening::EmptyPrimary)
+}
+
+/// Compress the table `write_template` would write, with `config`, straight from the
+/// builder's columns: no row-major copy of the table is made.
+#[cfg(feature = "compression")]
+pub(super) fn write_compressed<W: Write>(
+    writer: &mut FitsWriter<W>,
+    table: &Builder,
+    config: &CompressionConfig,
+    template: Option<&Header>,
+) -> Result<()> {
+    writer.ensure_writable()?;
+    let layout = table.layout()?;
+    let mut header = table.header(&layout)?;
+    merge_header_template(&mut header, template);
+    let cells = BuilderCells::new(table, layout.nrows);
+    let container = table::compress_table(&header, &cells, config, &mut writer.scratch)?;
+    writer.finish_hdu(container, None, ZERO_FILL, Opening::EmptyPrimary)
+}
+
+/// A builder's cells by column, and the heap offset each array has in the table
+/// `write_table` writes, which the compressed table keeps in its descriptors.
+#[cfg(feature = "compression")]
+#[derive(Debug)]
+struct BuilderCells<'a> {
+    columns: &'a [WriteColumn],
+    /// For each column, its index among the variable-length ones.
+    arrays: Vec<Option<usize>>,
+    array_count: usize,
+    /// Row-major: each row's heap offset for each variable-length column.
+    heap_offsets: Vec<usize>,
+}
+
+#[cfg(feature = "compression")]
+impl<'a> BuilderCells<'a> {
+    /// The cells of `table`'s `nrows` rows, which [`Builder::layout`] checked.
+    fn new(table: &'a Builder, nrows: usize) -> Self {
+        let mut array_count = 0;
+        let arrays: Vec<Option<usize>> = table
+            .columns
+            .iter()
+            .map(|col| {
+                col.is_array().then(|| {
+                    array_count += 1;
+                    array_count - 1
+                })
+            })
+            .collect();
+        let mut heap_offsets = Vec::with_capacity(nrows * array_count);
+        let mut heap_len = 0;
+        for array in table.heap_arrays(nrows) {
+            heap_offsets.push(heap_len);
+            heap_len += array.bytes;
+        }
+        Self {
+            columns: &table.columns,
+            arrays,
+            array_count,
+            heap_offsets,
+        }
+    }
+}
+
+#[cfg(feature = "compression")]
+impl TableCells for BuilderCells<'_> {
+    fn fixed(&self, column: usize, rows: Range<usize>, out: &mut Vec<u8>) {
+        let col = &self.columns[column];
+        match &col.values {
+            WriteColumnData::Fixed { data, repeat } => {
+                append_cells(out, data, rows.start * repeat..rows.end * repeat);
+            }
+            _ => rows.for_each(|r| pack_cell(out, col, r)),
+        }
+    }
+
+    fn array(&self, column: usize, row: usize, out: &mut Vec<u8>) -> PqDescriptor {
+        let slot = self.arrays[column].expect("an array is read from a variable-length column");
+        let offset = self.heap_offsets[row * self.array_count + slot];
+        let count = match &self.columns[column].values {
+            WriteColumnData::Vla { rows, .. } => {
+                let range = rows.range(row);
+                let count = range.len();
+                append_cells(out, rows.values(), range);
+                count
+            }
+            WriteColumnData::VlaBits { rows, .. } => {
+                let bits = rows.row(row);
+                append_bits(out, bits);
+                bits.len()
+            }
+            WriteColumnData::Fixed { .. } | WriteColumnData::Bits { .. } => {
+                unreachable!("a fixed-width column holds no array")
+            }
+        };
+        PqDescriptor { count, offset }
+    }
 }
 
 /// `BINTABLE` extension header (§7.3.1) for the given columns.
@@ -455,6 +616,15 @@ struct ColumnLayout {
     tform: String,
 }
 
+/// The extent of the table a [`Builder`] writes.
+#[derive(Debug)]
+struct TableLayout {
+    nrows: usize,
+    row_len: usize,
+    heap_len: usize,
+    columns: Vec<ColumnLayout>,
+}
+
 impl ColumnType {
     const fn from_data(data: &ColumnData) -> Self {
         match data {
@@ -501,18 +671,22 @@ impl ColumnType {
     }
 }
 
-fn next_vla_heap_len(
-    heap_len: usize,
-    width: DescriptorWidth,
-    element_count: usize,
-    byte_len: usize,
-) -> Result<usize> {
-    let count = u64::try_from(element_count).map_err(|_| FitsError::DataUnitOverflow)?;
+/// The heap's length after `array`, which its descriptor addresses at `heap_len`.
+fn next_vla_heap_len(heap_len: usize, array: ArrayLen) -> Result<usize> {
+    let count = u64::try_from(array.count).map_err(|_| FitsError::DataUnitOverflow)?;
     let offset = u64::try_from(heap_len).map_err(|_| FitsError::DataUnitOverflow)?;
-    validate_pq_descriptor(width, count, offset)?;
+    validate_pq_descriptor(array.width, count, offset)?;
     heap_len
-        .checked_add(byte_len)
+        .checked_add(array.bytes)
         .ok_or(FitsError::DataUnitOverflow)
+}
+
+/// One variable-length array's descriptor width, element count and bytes in the heap.
+#[derive(Debug, Clone, Copy)]
+struct ArrayLen {
+    width: DescriptorWidth,
+    count: usize,
+    bytes: usize,
 }
 
 fn write_vla_descriptor(
@@ -706,25 +880,6 @@ fn validate_character(value: CharacterField<'_>, context: &'static str) -> Resul
     } else {
         Err(FitsError::InvalidAscii { context })
     }
-}
-
-#[cfg(feature = "compression")]
-pub(super) fn write_compressed<W: Write>(
-    writer: &mut FitsWriter<W>,
-    header: &Header,
-    table: &Table,
-    rows_per_tile: usize,
-    compression: Compression,
-) -> Result<()> {
-    writer.ensure_writable()?;
-    let zheader = table::compress_table(
-        header,
-        table.view(),
-        rows_per_tile,
-        compression,
-        &mut writer.scratch,
-    )?;
-    writer.finish_hdu(zheader, None, ZERO_FILL, Opening::EmptyPrimary)
 }
 
 #[cfg(test)]

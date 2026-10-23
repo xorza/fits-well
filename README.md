@@ -45,7 +45,7 @@ use fits_well::{FitsError, FitsReader, FitsWriter};
 fn main() -> Result<(), FitsError> {
     let image = Image::new(vec![4, 3], (0..12).collect::<Vec<i16>>())?; // NAXIS1 first
     let mut writer = FitsWriter::new(File::create("out.fits")?);
-    writer.write_image(&image, None)?;
+    writer.write_image(image.view(), None)?;
     writer.into_inner().sync_all()?;
 
     // `open` reads only the headers. A tile-compressed image reads the same way.

@@ -3,7 +3,7 @@
 //! FITS exposes image data on two planes: a *raw* plane (the stored samples) and a
 //! *physical* plane (`BZERO + BSCALE × raw`). The stored samples are big-endian, so
 //! [`Data::decode`] swaps a data unit into an owned, host-endian [`Data`]
-//! and [`Data::encode_into`] writes them back. When no swap is needed
+//! and [`View::encode_into`] writes them back. When no swap is needed
 //! (`BITPIX = 8`) an in-memory reader can skip even that copy and borrow the data
 //! unit in place — see [`crate::ImageReader::view`]. The per-element swap loops are
 //! memory-bandwidth-bound, so they lean on autovectorization rather than threads
@@ -282,14 +282,14 @@ impl Image {
         samples: impl Into<Data>,
         scaling: Scaling,
     ) -> Result<Self> {
-        let image = Self {
-            shape: shape.into(),
-            samples: samples.into(),
+        let shape = shape.into();
+        let samples = samples.into();
+        Borrowed::new(&shape, samples.as_view(), scaling)?;
+        Ok(Self {
+            shape,
+            samples,
             scaling,
-        };
-        image.validate_geometry()?;
-        image.scaling.validate(image.samples.bitpix())?;
-        Ok(image)
+        })
     }
 
     /// The image, borrowed: its geometry, scaling and host-endian stored samples, and
@@ -307,14 +307,10 @@ impl Image {
         self.samples
     }
 
-    pub(crate) fn validate_geometry(&self) -> Result<usize> {
-        check_sample_count(&self.shape, self.samples.len())
-    }
-
     /// Build an image storing a `u16` buffer via the FITS unsigned convention
     /// (`BITPIX = 16`, `BZERO = 2¹⁵`, `BSCALE = 1`) — the inverse of
     /// [`Borrowed::unsigned`]. The writer emits the `BZERO` keyword so it round-trips.
-    pub fn from_u16(shape: Vec<usize>, data: &[u16]) -> Result<Self> {
+    pub fn from_u16(shape: impl Into<Vec<usize>>, data: &[u16]) -> Result<Self> {
         Self::offset_image(
             shape,
             Data::I16(data.iter().copied().map(store_u16).collect()),
@@ -323,7 +319,7 @@ impl Image {
     }
 
     /// Build an image storing a `u32` buffer (`BITPIX = 32`, `BZERO = 2³¹`).
-    pub fn from_u32(shape: Vec<usize>, data: &[u32]) -> Result<Self> {
+    pub fn from_u32(shape: impl Into<Vec<usize>>, data: &[u32]) -> Result<Self> {
         Self::offset_image(
             shape,
             Data::I32(data.iter().copied().map(store_u32).collect()),
@@ -332,7 +328,7 @@ impl Image {
     }
 
     /// Build an image storing a `u64` buffer (`BITPIX = 64`, `BZERO = 2⁶³`).
-    pub fn from_u64(shape: Vec<usize>, data: &[u64]) -> Result<Self> {
+    pub fn from_u64(shape: impl Into<Vec<usize>>, data: &[u64]) -> Result<Self> {
         Self::offset_image(
             shape,
             Data::I64(data.iter().copied().map(store_u64).collect()),
@@ -341,7 +337,7 @@ impl Image {
     }
 
     /// Build an image storing a signed-`i8` buffer (`BITPIX = 8`, `BZERO = -128`).
-    pub fn from_i8(shape: Vec<usize>, data: &[i8]) -> Result<Self> {
+    pub fn from_i8(shape: impl Into<Vec<usize>>, data: &[i8]) -> Result<Self> {
         Self::offset_image(
             shape,
             Data::U8(data.iter().copied().map(store_i8).collect()),
@@ -349,7 +345,7 @@ impl Image {
         )
     }
 
-    fn offset_image(shape: Vec<usize>, samples: Data, bzero: f64) -> Result<Self> {
+    fn offset_image(shape: impl Into<Vec<usize>>, samples: Data, bzero: f64) -> Result<Self> {
         Self::new_scaled(
             shape,
             samples,

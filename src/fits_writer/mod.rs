@@ -11,15 +11,12 @@
 use std::io::{Seek, Write};
 
 #[cfg(feature = "compression")]
-use crate::bintable::Table;
-use crate::bitpix::Bitpix;
-#[cfg(feature = "compression")]
-use crate::compress::{Compression, CompressionOptions};
+use crate::compress::CompressionConfig;
 use crate::fits_writer::ascii_builder::AsciiBuilder;
 use crate::fits_writer::builder::Builder;
 use crate::fits_writer::writer::Writer;
-use crate::image_model::Image;
-use crate::image_model::scaling::Scaling;
+use crate::image_model::Metadata;
+use crate::image_model::view::Borrowed;
 
 use crate::block;
 use crate::block::{CARD_SIZE, SPACE_FILL, ZERO_FILL};
@@ -260,63 +257,71 @@ impl<W: Write> FitsWriter<W> {
     /// `BITPIX`, `NAXISn`, plus `BSCALE`/`BZERO`/`BLANK` when scaling is
     /// non-trivial), followed by the big-endian data unit. The non-structural cards
     /// of `header` are kept; the image-layout and checksum cards are generated from
-    /// `image`.
-    pub fn write_image(&mut self, image: &Image, header: Option<&Header>) -> Result<()> {
+    /// `image`. An owned [`Image`](crate::image::Image) lends one with `view`.
+    pub fn write_image(&mut self, image: Borrowed<'_>, header: Option<&Header>) -> Result<()> {
         writer::write_template(self, image, header)
     }
 
-    /// Write `image` as a tiled-compressed `BINTABLE` extension (§10.1), using the
-    /// typed codec and shared [`CompressionOptions`]. Requires the `compression`
-    /// feature. Integer images support
-    /// `GZIP_1`/`GZIP_2`/`RICE_1`/`PLIO_1`/`HCOMPRESS_1`; float images are quantized
-    /// with the dither method `options` selects (`SUBTRACTIVE_DITHER_1` by default) and
-    /// compressed with `GZIP_1`/`GZIP_2`/`RICE_1`, or stored with `NOCOMPRESS`.
-    /// `HCOMPRESS_1` needs a 2-D tile shape, and every `PLIO_1` mask sample must be
-    /// in the lossless `0..=0xFF_FFFF` domain. The non-structural cards of `header`
-    /// are kept; the container, compression, image-layout and checksum cards are
-    /// generated from `image` and `options`.
+    /// Write a primary HDU with no data (`NAXIS = 0`) that carries the non-structural
+    /// cards of `header`. Errors with [`FitsError::PrimaryAlreadyWritten`] after any
+    /// other HDU. A table or a compressed image written first gets an empty primary
+    /// without this call.
+    pub fn write_empty_primary(&mut self, header: Option<&Header>) -> Result<()> {
+        self.ensure_writable()?;
+        if self.next_position() != HduPosition::Primary {
+            return Err(FitsError::PrimaryAlreadyWritten);
+        }
+        self.scratch.clear();
+        self.finish_hdu(empty_primary_header(), header, ZERO_FILL, Opening::Itself)
+    }
+
+    /// Write `image` as a tiled-compressed `BINTABLE` extension (§10.1), with the
+    /// codec, tiles and quantization of `config`. Requires the `compression` feature.
+    /// Integer images support `GZIP_1`/`GZIP_2`/`RICE_1`/`PLIO_1`/`HCOMPRESS_1`; float
+    /// images are quantized with the dither method `config` selects
+    /// (`SUBTRACTIVE_DITHER_1` by default) and compressed with `GZIP_1`/`GZIP_2`/
+    /// `RICE_1`, or stored with `NOCOMPRESS`. `HCOMPRESS_1` needs a 2-D tile shape, and
+    /// every `PLIO_1` mask sample must be in the lossless `0..=0xFF_FFFF` domain. The
+    /// non-structural cards of `header` are kept; the container, compression,
+    /// image-layout and checksum cards are generated from `image` and `config`.
     #[cfg(feature = "compression")]
     pub fn write_compressed_image(
         &mut self,
-        image: &Image,
-        compression: Compression,
-        options: &CompressionOptions,
+        image: Borrowed<'_>,
+        config: &CompressionConfig,
         header: Option<&Header>,
     ) -> Result<()> {
-        writer::write_compressed_template(self, image, compression, options, header)
+        writer::write_compressed_template(self, image, config, header)
     }
 
-    /// Write a `BINTABLE` as a tiled-compressed table (§10.3). `header` is the
-    /// original table's header (column metadata is copied from it), `table` its
-    /// parsed data, `rows_per_tile` the tile height, and `compression` the default
-    /// per-column codec (`GZIP_1`/`GZIP_2`/`RICE_1`/`NOCOMPRESS`). Fixed-width and
-    /// P/Q variable-length columns are supported. Requires the `compression`
-    /// feature.
+    /// Write `table` as a tiled-compressed table (§10.3): the table [`Self::write_table`]
+    /// writes, compressed in tiles of the rows `config` sets with its codec on every
+    /// column (`GZIP_1`/`GZIP_2`/`RICE_1`/`NOCOMPRESS`, each clamped to one its type
+    /// takes). Fixed-width and P/Q variable-length columns are supported. Errors when
+    /// `config` has more than one tile axis or a quantization. The non-structural
+    /// cards of `header` are kept. Requires the `compression` feature.
     #[cfg(feature = "compression")]
     pub fn write_compressed_table(
         &mut self,
-        header: &Header,
-        table: &Table,
-        rows_per_tile: usize,
-        compression: Compression,
+        table: &Builder,
+        config: &CompressionConfig,
+        header: Option<&Header>,
     ) -> Result<()> {
-        builder::write_compressed(self, header, table, rows_per_tile, compression)
+        builder::write_compressed(self, table, config, header)
     }
 }
 
 impl<W: Write + Seek> FitsWriter<W> {
-    /// Begin a large image write of `shape` samples of `bitpix`, scaled by
-    /// `scaling`. The returned stream must receive exactly the axis-product sample
-    /// count and be finished successfully. The non-structural cards of `header` are
-    /// kept; the structural and checksum cards are generated.
+    /// Begin a large image write of `layout`: its shape, `BITPIX` and scaling. The
+    /// returned stream must receive exactly the axis-product sample count and be
+    /// finished successfully. The non-structural cards of `header` are kept; the
+    /// structural and checksum cards are generated.
     pub fn stream_image(
         &mut self,
-        shape: &[usize],
-        bitpix: Bitpix,
-        scaling: Scaling,
+        layout: Metadata<'_>,
         header: Option<&Header>,
     ) -> Result<Writer<'_, W>> {
-        writer::stream_template(self, shape, bitpix, scaling, header)
+        writer::stream_template(self, layout, header)
     }
 }
 

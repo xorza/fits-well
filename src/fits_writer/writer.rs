@@ -7,7 +7,7 @@ use crate::block;
 use crate::block::{BLOCK_SIZE, ZERO_FILL};
 use crate::checksum;
 #[cfg(feature = "compression")]
-use crate::compress::{Compression, CompressionOptions, encode};
+use crate::compress::{CompressionConfig, encode};
 use crate::error::{FitsError, Result};
 use crate::fits_writer::{
     Checksums, FitsWriter, Opening, PLACEHOLDER_CHECKSUM, WriterState, merge_header_template,
@@ -16,9 +16,8 @@ use crate::fits_writer::{
 use crate::hdu::HduPosition;
 use crate::header_model::Header;
 use crate::header_model::value;
-use crate::image_model::data::Data;
-use crate::image_model::scaling::Scaling;
-use crate::image_model::{Image, shape_product};
+use crate::image_model::view::{Borrowed, View};
+use crate::image_model::{Metadata, check_sample_count, shape_product};
 use crate::keyword::key;
 
 /// Incremental image-HDU write for outputs too large to stage in memory. Chunks
@@ -45,15 +44,20 @@ struct StreamingChecksum {
 
 pub(super) fn write_template<W: Write>(
     writer: &mut FitsWriter<W>,
-    image: &Image,
+    image: Borrowed<'_>,
     template: Option<&Header>,
 ) -> Result<()> {
     writer.ensure_writable()?;
-    let expected = image.validate_geometry()?;
-    let encoded_len = expected
+    debug_assert!(
+        check_sample_count(image.shape, image.samples.len()).is_ok(),
+        "a borrowed image's shape fixes its sample count"
+    );
+    let encoded_len = image
+        .samples
+        .len()
         .checked_mul(image.samples.bitpix().elem_size())
         .ok_or(FitsError::DataUnitOverflow)?;
-    let header = image_header(image, writer.next_position())?;
+    let header = image_header(image.metadata(), writer.next_position())?;
     writer.scratch.clear();
     writer.scratch.reserve_exact(encoded_len);
     image.samples.encode_into(&mut writer.scratch);
@@ -63,29 +67,26 @@ pub(super) fn write_template<W: Write>(
 #[cfg(feature = "compression")]
 pub(super) fn write_compressed_template<W: Write>(
     writer: &mut FitsWriter<W>,
-    image: &Image,
-    compression: Compression,
-    options: &CompressionOptions,
+    image: Borrowed<'_>,
+    config: &CompressionConfig,
     template: Option<&Header>,
 ) -> Result<()> {
     writer.ensure_writable()?;
-    let header = encode::compress_image(image, compression, options, &mut writer.scratch)?;
+    let header = encode::compress_image(image, config, &mut writer.scratch)?;
     writer.finish_hdu(header, template, ZERO_FILL, Opening::EmptyPrimary)
 }
 
 pub(super) fn stream_template<'a, W: Write + Seek>(
     writer: &'a mut FitsWriter<W>,
-    shape: &[usize],
-    bitpix: Bitpix,
-    scaling: Scaling,
+    layout: Metadata<'_>,
     template: Option<&Header>,
 ) -> Result<Writer<'a, W>> {
     writer.ensure_writable()?;
-    scaling.validate(bitpix)?;
-    let expected_samples = shape_product(shape)?;
+    layout.scaling.validate(layout.bitpix)?;
+    let expected_samples = shape_product(layout.shape)?;
     // A stream writes its header up front and rewrites it at `finish`, so it
     // never reaches `finish_hdu` — it applies the template merge itself.
-    let mut header = image_header_parts(shape, bitpix, scaling, writer.next_position())?;
+    let mut header = image_header(layout, writer.next_position())?;
     merge_header_template(&mut header, template);
     let header_offset = writer.sink.stream_position()?;
     let mut initial = header.clone();
@@ -105,7 +106,7 @@ pub(super) fn stream_template<'a, W: Write + Seek>(
         header_offset,
         expected_samples,
         written_samples: 0,
-        bitpix,
+        bitpix: layout.bitpix,
         checksum: StreamingChecksum::default(),
         finished: false,
     })
@@ -113,7 +114,7 @@ pub(super) fn stream_template<'a, W: Write + Seek>(
 
 impl<W: Write + Seek> Writer<'_, W> {
     /// Append one typed chunk. Every chunk must have the stream's `BITPIX` type.
-    pub fn write_chunk(&mut self, samples: &Data) -> Result<()> {
+    pub fn write_chunk(&mut self, samples: View<'_>) -> Result<()> {
         if samples.bitpix() != self.bitpix {
             return Err(FitsError::TypeMismatch {
                 name: "streaming image chunk".to_string(),
@@ -230,21 +231,12 @@ const fn bitpix_name(bitpix: Bitpix) -> &'static str {
 /// Image header at `position`: the primary array (§4.4.1), or an `IMAGE` extension
 /// (§7.1). The two differ only in the prologue (`SIMPLE`+`EXTEND` vs
 /// `XTENSION`+`PCOUNT`/`GCOUNT`); the axes and scaling keywords are identical.
-fn image_header(image: &Image, position: HduPosition) -> Result<Header> {
-    image_header_parts(
-        &image.shape,
-        image.samples.bitpix(),
-        image.scaling,
-        position,
-    )
-}
-
-fn image_header_parts(
-    shape: &[usize],
-    bitpix: Bitpix,
-    scaling: Scaling,
-    position: HduPosition,
-) -> Result<Header> {
+fn image_header(layout: Metadata<'_>, position: HduPosition) -> Result<Header> {
+    let Metadata {
+        shape,
+        bitpix,
+        scaling,
+    } = layout;
     let mut header = Header::new();
     if position == HduPosition::Primary {
         header

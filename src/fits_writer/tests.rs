@@ -7,7 +7,7 @@ use crate::block::padded_len;
 use crate::block::{BLOCK_SIZE, CARD_SIZE, SPACE_FILL, ZERO_FILL};
 use crate::checksum;
 #[cfg(feature = "compression")]
-use crate::compress::{Compression, CompressionOptions, Hcompress};
+use crate::compress::{Compression, CompressionConfig, Hcompress};
 use crate::error::FitsError;
 use crate::fits_writer::ascii_builder::{AsciiBuilder, AsciiWriteColumn};
 use crate::fits_writer::builder::internals;
@@ -22,11 +22,12 @@ use crate::hdu::{HduKind, MAX_TABLE_FIELDS};
 use crate::header_model::Header;
 use crate::header_model::internals::from_card_lines as header;
 use crate::header_model::value::Value;
-use crate::image_model::Image;
 use crate::image_model::data::Data;
 use crate::image_model::internals::physical;
 use crate::image_model::scaling::Scaling;
 use crate::image_model::unsigned_data::UnsignedData;
+use crate::image_model::view::{Borrowed, View};
+use crate::image_model::{Image, Metadata};
 use crate::image_model::{U16_OFFSET, U64_OFFSET};
 use crate::ragged::Ragged;
 use crate::reader::FitsReader;
@@ -392,27 +393,18 @@ fn rendered_header(header: &Header) -> Vec<u8> {
 
 #[test]
 fn writer_rejects_invalid_or_overflowing_layouts() {
-    let mismatched = Image {
-        shape: vec![2],
-        samples: Data::U8(vec![1]),
-        scaling: Scaling::IDENTITY,
-    };
+    // A borrowed image is checked when it is made, so the writer never sees one whose
+    // shape does not fix its sample count.
     assert!(matches!(
-        rejected_before_output(|w| w.write_image(&mismatched, None)),
-        FitsError::DataSizeMismatch {
+        Borrowed::new(&[2], View::U8(&[1]), Scaling::IDENTITY),
+        Err(FitsError::DataSizeMismatch {
             expected: 2,
             got: 1
-        }
+        })
     ));
-
-    let image = Image {
-        shape: vec![usize::MAX, 2],
-        samples: Data::U8(Vec::new()),
-        scaling: Scaling::IDENTITY,
-    };
     assert!(matches!(
-        rejected_before_output(|w| w.write_image(&image, None)),
-        FitsError::DataUnitOverflow
+        Borrowed::new(&[usize::MAX, 2], View::U8(&[]), Scaling::IDENTITY),
+        Err(FitsError::DataUnitOverflow)
     ));
 
     // usize::MAX two-byte elements per row overflow the row width.
@@ -531,14 +523,14 @@ fn partial_hdu_failure_permanently_rejects_subsequent_writes() {
     };
     let mut writer = FitsWriter::new(FailMidHdu::default());
     assert!(matches!(
-        writer.write_image(&image, None),
+        writer.write_image(image.view(), None),
         Err(FitsError::Io(_))
     ));
     assert_eq!(writer.state, WriterState::Failed);
     assert_eq!(writer.sink.bytes.len(), 127);
 
     assert!(matches!(
-        writer.write_image(&image, None),
+        writer.write_image(image.view(), None),
         Err(FitsError::WriterFailed)
     ));
     assert_eq!(writer.into_inner().bytes.len(), 127);
@@ -557,10 +549,10 @@ fn writes_a_multi_hdu_image_file() {
         scaling: Scaling::IDENTITY,
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new()));
-    w.write_image(&primary, None).unwrap();
+    w.write_image(primary.view(), None).unwrap();
     let header_ptr = w.header_scratch.as_ptr();
     let header_capacity = w.header_scratch.capacity();
-    w.write_image(&ext, None).unwrap(); // second image ⇒ IMAGE extension
+    w.write_image(ext.view(), None).unwrap(); // second image ⇒ IMAGE extension
     assert_eq!(w.header_scratch.as_ptr(), header_ptr);
     assert_eq!(w.header_scratch.capacity(), header_capacity);
     let mut r = FitsReader::open(Cursor::new(w.into_inner().into_inner())).unwrap();
@@ -581,7 +573,7 @@ fn typed_image_header_template_preserves_information_and_regenerates_structure()
     };
     let template = informational_header_template();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
-    writer.write_image(&image, Some(&template)).unwrap();
+    writer.write_image(image.view(), Some(&template)).unwrap();
 
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::open(Cursor::new(bytes)).unwrap();
@@ -1064,6 +1056,49 @@ fn writes_and_reads_back_a_binary_table() {
 }
 
 #[test]
+fn an_empty_primary_carries_the_template_only_as_the_first_hdu() {
+    let template = informational_header_template();
+    let table = binary_table(1, &[WriteColumn::scalar("V", ColumnData::I16(vec![5]))]);
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
+    writer.write_empty_primary(Some(&template)).unwrap();
+    writer.write_table(&table, None).unwrap();
+    let written_len = writer.sink.get_ref().len();
+    assert!(matches!(
+        writer.write_empty_primary(None),
+        Err(FitsError::PrimaryAlreadyWritten)
+    ));
+    assert_eq!(writer.sink.get_ref().len(), written_len);
+
+    // The table follows the caller's primary, not an automatic second one.
+    let mut reader = FitsReader::from_bytes(writer.sink.get_ref()).unwrap();
+    assert_eq!(reader.hdus.len(), 2);
+    let primary = &reader.hdus[0];
+    assert_eq!(primary.kind, HduKind::Primary);
+    assert_eq!(primary.header.naxis().unwrap(), 0);
+    assert_eq!(primary.header.get_logical("SIMPLE").unwrap(), Some(true));
+    assert_eq!(primary.header.get_logical("EXTEND").unwrap(), Some(true));
+    assert_eq!(primary.header.get_integer("BITPIX").unwrap(), Some(8));
+    assert_informational_header(&primary.header);
+    assert_eq!(
+        reader.verify_checksum(0).unwrap(),
+        ChecksumReport {
+            datasum: ChecksumStatus::Valid,
+            checksum: ChecksumStatus::Valid,
+        }
+    );
+    assert_eq!(reader.hdus[1].kind, HduKind::BinTable);
+
+    // An image written first is itself the primary.
+    let image = Image::new(vec![1], vec![7u8]).unwrap();
+    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
+    writer.write_image(image.view(), None).unwrap();
+    assert!(matches!(
+        writer.write_empty_primary(None),
+        Err(FitsError::PrimaryAlreadyWritten)
+    ));
+}
+
+#[test]
 fn binary_character_columns_round_trip_exactly_and_reject_over_width() {
     let fields = b"AB  AB\0x\0xyz    ".to_vec();
     let vla_rows =
@@ -1194,7 +1229,7 @@ fn image_round_trips_through_write_image_and_a_whole_read() {
         samples: Data::I16(vec![1, -2, 3, -4, 5, -6]),
         scaling: Scaling::IDENTITY,
     };
-    let bytes = written(|w| w.write_image(&image, None));
+    let bytes = written(|w| w.write_image(image.view(), None));
     assert_eq!(bytes.len(), 2 * BLOCK_SIZE); // one header block + one data block
 
     let mut r = FitsReader::open(Cursor::new(bytes)).unwrap();
@@ -1217,7 +1252,8 @@ fn write_image_emits_scaling_keywords_and_preserves_unsigned_values() {
             blank: None,
         },
     };
-    let mut r = FitsReader::open(Cursor::new(written(|w| w.write_image(&image, None)))).unwrap();
+    let mut r =
+        FitsReader::open(Cursor::new(written(|w| w.write_image(image.view(), None)))).unwrap();
     assert_eq!(r.hdus[0].header.get_real("BZERO").unwrap(), Some(32768.0));
     assert_eq!(r.hdus[0].header.get_real("BSCALE").unwrap(), Some(1.0));
     let back = read_whole(&mut r, 0);
@@ -1230,7 +1266,8 @@ fn from_u16_round_trips_through_write_and_read() {
     // The `from_u16` constructor + writer emit BZERO=32768 so the exact u16 values
     // come back via the typed `unsigned()` view.
     let built = Image::from_u16(vec![3], &[0, 32768, 65535]).unwrap();
-    let mut r = FitsReader::open(Cursor::new(written(|w| w.write_image(&built, None)))).unwrap();
+    let mut r =
+        FitsReader::open(Cursor::new(written(|w| w.write_image(built.view(), None)))).unwrap();
     assert_eq!(r.hdus[0].header.get_real("BZERO").unwrap(), Some(32768.0));
     assert_eq!(
         read_whole(&mut r, 0).view().unsigned(),
@@ -1241,7 +1278,7 @@ fn from_u16_round_trips_through_write_and_read() {
 #[test]
 fn from_u64_writes_the_exact_offset_and_round_trips_extremes() {
     let built = Image::from_u64(vec![2], &[u64::MIN, u64::MAX]).unwrap();
-    let bytes = written(|w| w.write_image(&built, None));
+    let bytes = written(|w| w.write_image(built.view(), None));
     let bzero = bytes[..BLOCK_SIZE]
         .as_chunks::<CARD_SIZE>()
         .0
@@ -1322,7 +1359,7 @@ fn checksums_round_trip_and_verify() {
         scaling: Scaling::IDENTITY,
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
-    w.write_image(&image, None).unwrap();
+    w.write_image(image.view(), None).unwrap();
     let bytes = w.into_inner().into_inner();
     let mut r = FitsReader::open(Cursor::new(bytes.clone())).unwrap();
     let report = r.verify_checksum(0).unwrap();
@@ -1346,7 +1383,7 @@ fn corrupted_data_fails_checksum() {
         scaling: Scaling::IDENTITY,
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
-    w.write_image(&image, None).unwrap();
+    w.write_image(image.view(), None).unwrap();
     let mut bytes = w.into_inner().into_inner();
     bytes[BLOCK_SIZE] ^= 0xFF; // flip the first data byte (data starts at block 1)
 
@@ -1369,7 +1406,7 @@ fn corrupted_header_padding_fails_only_the_whole_hdu_checksum() {
         scaling: Scaling::IDENTITY,
     };
     let mut w = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
-    w.write_image(&image, None).unwrap();
+    w.write_image(image.view(), None).unwrap();
     let mut bytes = w.into_inner().into_inner();
     let end = bytes[..BLOCK_SIZE]
         .as_chunks::<CARD_SIZE>()
@@ -1396,7 +1433,8 @@ fn checksum_status_distinguishes_absent_unknown_valid_and_invalid() {
         samples: Data::U8(vec![0, 0, 0, 0]),
         scaling: Scaling::IDENTITY,
     };
-    let mut r = FitsReader::open(Cursor::new(written(|w| w.write_image(&image, None)))).unwrap();
+    let mut r =
+        FitsReader::open(Cursor::new(written(|w| w.write_image(image.view(), None)))).unwrap();
     let report = r.verify_checksum(0).unwrap();
     assert_eq!(
         report,
@@ -1539,7 +1577,8 @@ fn image_blank_is_type_and_range_checked_before_output() {
                 },
             };
             let mut reader =
-                FitsReader::open(Cursor::new(written(|w| w.write_image(&image, None)))).unwrap();
+                FitsReader::open(Cursor::new(written(|w| w.write_image(image.view(), None))))
+                    .unwrap();
             assert_eq!(
                 reader.hdus[0].header.get_integer("BLANK").unwrap(),
                 Some(blank)
@@ -1556,7 +1595,7 @@ fn image_blank_is_type_and_range_checked_before_output() {
                 },
             };
             assert!(matches!(
-                rejected_before_output(|w| w.write_image(&image, None)),
+                rejected_before_output(|w| w.write_image(image.view(), None)),
                 FitsError::KeywordOutOfRange { name: "BLANK" }
             ));
         }
@@ -1605,7 +1644,7 @@ fn image_nonfinite_scaling_is_rejected_before_output() {
             },
         };
         assert!(matches!(
-            rejected_before_output(|w| w.write_image(&image, None)),
+            rejected_before_output(|w| w.write_image(image.view(), None)),
             FitsError::KeywordOutOfRange { name } if name == case.keyword
         ));
     }
@@ -1624,9 +1663,8 @@ fn compressed_image_metadata_is_validated_before_automatic_primary() {
     };
     assert!(matches!(
         rejected_before_output(|w| w.write_compressed_image(
-            &image,
-            Compression::GZIP,
-            &CompressionOptions::default(),
+            image.view(),
+            &CompressionConfig::new(Compression::GZIP),
             None
         )),
         FitsError::KeywordOutOfRange { name: "BLANK" }
@@ -1640,9 +1678,8 @@ fn compressed_image_metadata_is_validated_before_automatic_primary() {
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
         .write_compressed_image(
-            &image,
-            Compression::Rice,
-            &CompressionOptions::default(),
+            image.view(),
+            &CompressionConfig::new(Compression::Rice),
             None,
         )
         .unwrap();
@@ -1657,9 +1694,8 @@ fn compressed_image_metadata_is_validated_before_automatic_primary() {
     // difference with a neighbour; HCOMPRESS takes no tile under 4 pixels, so it is refused.
     assert!(matches!(
         rejected_before_output(|w| w.write_compressed_image(
-            &image,
-            Compression::Hcompress(Hcompress::default()),
-            &CompressionOptions::tiled([1, 1]),
+            image.view(),
+            &CompressionConfig::new(Compression::Hcompress(Hcompress::default())).tiled([1, 1]),
             None
         )),
         FitsError::HcompressTileTooSmall { axis: 0, length: 1 }
@@ -1678,9 +1714,8 @@ fn compressed_header_templates_preserve_information_and_regenerate_structure() {
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
         .write_compressed_image(
-            &image,
-            Compression::GZIP,
-            &CompressionOptions::default(),
+            image.view(),
+            &CompressionConfig::new(Compression::GZIP),
             Some(&template),
         )
         .unwrap();
@@ -1702,18 +1737,13 @@ fn compressed_header_templates_preserve_information_and_regenerate_structure() {
         ColumnData::I32(vec![7, 8, 9]),
         1,
     )];
-    let mut source_writer = FitsWriter::new(Cursor::new(Vec::new()));
-    source_writer
-        .write_table(&binary_table(3, &columns), Some(&template))
-        .unwrap();
-    let mut source =
-        FitsReader::open(Cursor::new(source_writer.into_inner().into_inner())).unwrap();
-    let source_header = source.hdus[1].header.clone();
-    let source_table = source.read_table(1).unwrap();
-
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer
-        .write_compressed_table(&source_header, &source_table, 2, Compression::GZIP)
+        .write_compressed_table(
+            &binary_table(3, &columns),
+            &CompressionConfig::new(Compression::GZIP).tiled([2]),
+            Some(&template),
+        )
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
     let header = &reader.hdus[1].header;
@@ -1732,13 +1762,6 @@ fn compressed_header_templates_preserve_information_and_regenerate_structure() {
             .unwrap(),
         ColumnData::I32(vec![7, 8, 9])
     );
-
-    let mut conflicting = source_header.clone();
-    conflicting.set_internal("NAXIS2", 99);
-    assert!(matches!(
-        rejected_before_output(|w| w.write_compressed_table(&conflicting, &source_table, 2, Compression::GZIP)),
-        FitsError::TableMetadataMismatch { name } if name == "NAXIS2"
-    ));
 }
 
 #[test]
@@ -1863,42 +1886,32 @@ fn streaming_image_matches_transactional_output_and_checksums() {
     template.set("OBJECT", "streamed").unwrap();
 
     let mut regular = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
-    regular.write_image(&image, Some(&template)).unwrap();
+    regular.write_image(image.view(), Some(&template)).unwrap();
     let expected = regular.into_inner().into_inner();
 
     let mut streamed = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
     {
         let mut image_stream = streamed
-            .stream_image(&[3, 2], Bitpix::I16, scaling, Some(&template))
+            .stream_image(image.view().metadata(), Some(&template))
             .unwrap();
-        image_stream
-            .write_chunk(&Data::I16(samples[..2].to_vec()))
-            .unwrap();
-        image_stream
-            .write_chunk(&Data::I16(samples[2..5].to_vec()))
-            .unwrap();
-        image_stream
-            .write_chunk(&Data::I16(samples[5..].to_vec()))
-            .unwrap();
+        image_stream.write_chunk(View::I16(&samples[..2])).unwrap();
+        image_stream.write_chunk(View::I16(&samples[2..5])).unwrap();
+        image_stream.write_chunk(View::I16(&samples[5..])).unwrap();
         image_stream.finish().unwrap();
     }
     let actual = streamed.into_inner().into_inner();
     assert_eq!(actual, expected);
 
     let mut regular_scaled = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
-    regular_scaled.write_image(&image, None).unwrap();
+    regular_scaled.write_image(image.view(), None).unwrap();
     let expected_scaled = regular_scaled.into_inner().into_inner();
     let mut streamed_scaled = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
     {
         let mut image_stream = streamed_scaled
-            .stream_image(&[3, 2], Bitpix::I16, scaling, None)
+            .stream_image(image.view().metadata(), None)
             .unwrap();
-        image_stream
-            .write_chunk(&Data::I16(samples[..3].to_vec()))
-            .unwrap();
-        image_stream
-            .write_chunk(&Data::I16(samples[3..].to_vec()))
-            .unwrap();
+        image_stream.write_chunk(View::I16(&samples[..3])).unwrap();
+        image_stream.write_chunk(View::I16(&samples[3..])).unwrap();
         image_stream.finish().unwrap();
     }
     assert_eq!(streamed_scaled.into_inner().into_inner(), expected_scaled);
@@ -1920,22 +1933,36 @@ fn unfinished_or_invalid_image_stream_poisons_the_writer() {
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     {
         let mut stream = writer
-            .stream_image(&[2], Bitpix::I16, Scaling::IDENTITY, None)
+            .stream_image(
+                Metadata {
+                    shape: &[2],
+                    bitpix: Bitpix::I16,
+                    scaling: Scaling::IDENTITY,
+                },
+                None,
+            )
             .unwrap();
         assert!(matches!(
-            stream.write_chunk(&Data::U8(vec![1])),
+            stream.write_chunk(View::U8(&[1])),
             Err(FitsError::TypeMismatch { name, expected })
                 if name == "streaming image chunk" && expected == "i16 image data"
         ));
     }
     assert!(matches!(
-        writer.write_image(&fallback, None),
+        writer.write_image(fallback.view(), None),
         Err(FitsError::WriterFailed)
     ));
 
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     let stream = writer
-        .stream_image(&[2], Bitpix::I32, Scaling::IDENTITY, None)
+        .stream_image(
+            Metadata {
+                shape: &[2],
+                bitpix: Bitpix::I32,
+                scaling: Scaling::IDENTITY,
+            },
+            None,
+        )
         .unwrap();
     assert!(matches!(
         stream.finish(),
@@ -1945,7 +1972,7 @@ fn unfinished_or_invalid_image_stream_poisons_the_writer() {
         })
     ));
     assert!(matches!(
-        writer.write_image(&fallback, None),
+        writer.write_image(fallback.view(), None),
         Err(FitsError::WriterFailed)
     ));
 }

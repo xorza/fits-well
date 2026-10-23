@@ -52,6 +52,56 @@ and the dated review in `.notes/API_REVIEW.md`.
   extension point, and no caller is generic over sources. Refused: exporting it
   before such a caller exists.
 
+## Writing
+
+- **Every image write borrows its samples.** `write_image` and
+  `write_compressed_image` take a `Borrowed`, and a stream's `write_chunk` takes a
+  `View`. An owned `Image` lends one with `view`. Refused: an owned `Image` or
+  `Data`, which made a caller copy a buffer it already held, as a whole plane or
+  as one `Vec` for each chunk.
+- **`stream_image` takes the image's `Metadata`**, the shape, `BITPIX` and scaling
+  that the reader gives. Refused: the three as separate arguments.
+- **A stream needs `Seek`, even without checksums.** It seeks only to write
+  `CHECKSUM` again after the data. Refused: a type state for checksums, which puts
+  a second type parameter on every writer method for a sink no caller has. A
+  caller that writes to a pipe writes to a `Vec` and copies it.
+- **One `CompressionConfig` holds the codec, the tiles and the quantization.**
+  Refused: the codec as a separate argument beside `CompressionOptions`, and a
+  table's tile height as a third form. A table takes one tile axis, its rows, and
+  no quantization; a config with more axes fails with `RankMismatch`, and one
+  with a quantization with `InvalidCompressionParameter`.
+- **A table with no tile height set uses cfitsio's tiles of about 10 MB of rows**
+  (`maxchunksize` in `fits_compress_table`), and one tile when its rows have no
+  bytes. Refused: one row per tile, the former result of a height of 0, which
+  compresses badly. Source: cfitsio `imcompress.c`.
+- **`write_compressed_table` takes the `Builder` that `write_table` takes**, and the
+  header last, as an `Option`, as rustfits takes the same columns for a compressed
+  table as for a plain one. Refused: the read-side `Table` with its header first,
+  cfitsio's HDU-to-HDU `fits_compress_table`, which is a second way to write the
+  same table and made a table that a program built go through a write and a read
+  first. Also refused: a builder from a read `Table`; `read_data_raw` and
+  `write_raw_hdu` copy an HDU as it is. Sources: cfitsio `imcompress.c`, rustfits
+  `CompressedTableHDU`.
+- **A table compresses straight from the builder's columns.** Each tile gathers its
+  column's cells from the `Builder`, through the `TableCells` trait, and computes
+  the descriptors the plain table would hold. Refused: encoding the rows first and
+  gathering each column back from them, cfitsio's route, which it takes because its
+  input is a file of rows; it doubled the time of a write.
+- **Table columns stay owned.** A table write transposes its columns into rows in
+  the writer's scratch, and that copy dominates. Refused: borrowed columns, which
+  put a lifetime on `Builder` for a small gain.
+- **`write_empty_primary` writes a primary with no data that carries the caller's
+  cards**, and fails with `PrimaryAlreadyWritten` after any HDU. A table or a
+  compressed image that comes first gets such a primary without it. Refused: four
+  structural cards that each caller writes through `write_raw_hdu`.
+- **The structural cards are always generated.** A caller names an extension with
+  one `EXTNAME` card in the header it passes. Refused: an `EXTNAME` argument on
+  each write.
+- **The unsigned constructors stay four.** `Image::from_u16`, `from_u32`,
+  `from_u64` and `from_i8` take any shape `Image::new` takes. Refused: one
+  `from_unsigned` over a borrowed view; the write converts the samples to signed
+  values and `BZERO` in any case, so it saves no copy.
+
 ## Header
 
 - **Editing the comment of an absent card fails with `KeywordNotFound`.**

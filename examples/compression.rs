@@ -9,7 +9,7 @@
 
 use std::fs::File;
 
-use fits_well::image::{Compression, CompressionOptions, Data, Image, Region};
+use fits_well::image::{Compression, CompressionConfig, Data, Image, Region};
 use fits_well::{FitsReader, FitsWriter};
 use std::env;
 
@@ -19,11 +19,11 @@ fn main() -> fits_well::Result<()> {
     let expected = Data::I16((0..256).map(|i| (i % 32) as i16).collect());
     let image = Image::new(vec![16, 16], expected.clone())?;
 
-    // Compress with RICE in 8×8 tiles. `CompressionOptions::tiled` sets the tile shape
-    // while the typed codec prevents invalid or misspelled choices.
-    let options = CompressionOptions::tiled([8, 8]);
+    // Compress with RICE in 8×8 tiles. The typed codec prevents invalid or misspelled
+    // choices, and `tiled` sets the tile shape.
+    let config = CompressionConfig::new(Compression::Rice).tiled([8, 8]);
     let mut writer = FitsWriter::new(File::create(&path)?);
-    writer.write_compressed_image(&image, Compression::Rice, &options, None)?;
+    writer.write_compressed_image(image.view(), &config, None)?;
     writer.into_inner().sync_all()?;
     println!("wrote {}", path.display());
 

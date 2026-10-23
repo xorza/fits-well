@@ -11,10 +11,12 @@
 
 use crate::allocation;
 use crate::bintable::descriptor::{DescriptorWidth, PqDescriptor};
+use crate::bintable::schema::Schema;
 use crate::bintable::table_view::TableView;
 use crate::bintable::tform::Tform;
 use crate::bintable::tform_kind::TformKind;
 use crate::compress::Compression;
+use crate::compress::CompressionConfig;
 use crate::compress::ImageCodec;
 use crate::compress::convert;
 use crate::compress::gzip;
@@ -31,6 +33,7 @@ use crate::keyword::key;
 use crate::ragged::Ragged;
 use crate::reserved_keywords;
 use std::mem;
+use std::ops::Range;
 use std::result;
 
 /// Per-column compression algorithm (`ZCTYPn`).
@@ -88,12 +91,6 @@ struct ColMeta {
     /// Valid for the column's type: [`ColMeta::chosen`] clamps a request and
     /// [`ColMeta::declared`] refuses an invalid `ZCTYPn`.
     algo: Algo,
-}
-
-#[derive(Debug)]
-struct BoundTable<'a> {
-    rows: &'a [u8],
-    pcount: usize,
 }
 
 impl ColMeta {
@@ -202,17 +199,28 @@ fn pick_algo(kind: TformKind, requested: Algo) -> Algo {
     }
 }
 
-/// Compress a `BINTABLE` into a `ZTABLE` container. `rows_per_tile`
-/// is the tile height (clamped to `[1, nrows]`); `default_algo` applies to every
-/// column. Returns the compressed header and its data unit (Q descriptors + heap).
+/// The cells of a table being compressed, read by column: what a tile of each column is
+/// made from. A table built for a write gives them with no row-major copy of itself.
+pub(crate) trait TableCells: Sync {
+    /// Append the stored bytes of the fixed-width `column`'s cells in `rows` to `out`.
+    fn fixed(&self, column: usize, rows: Range<usize>, out: &mut Vec<u8>);
+
+    /// Append the stored bytes of the variable-length `column`'s array at `row` to
+    /// `out`, and give the descriptor the uncompressed table holds for it.
+    fn array(&self, column: usize, row: usize, out: &mut Vec<u8>) -> PqDescriptor;
+}
+
+/// Compress the `BINTABLE` that `header` describes, its cells from `cells`, into a
+/// `ZTABLE` container, with the tile height and the codec of every column from
+/// `config`. Returns the container's header and writes its data unit (Q descriptors
+/// + heap) to `out`.
 pub(crate) fn compress_table(
     header: &Header,
-    table: TableView<'_>,
-    rows_per_tile: usize,
-    compression: Compression,
+    cells: &impl TableCells,
+    config: &CompressionConfig,
     out: &mut Vec<u8>,
 ) -> Result<Header> {
-    let (default_algo, gzip_level) = match compression {
+    let (default_algo, gzip_level) = match config.codec {
         Compression::Gzip(config) if config.shuffle => (Algo::Gzip2, config.level),
         Compression::Gzip(config) => (Algo::Gzip1, config.level),
         Compression::Rice => (Algo::Rice1, gzip::DEFAULT_GZIP_LEVEL),
@@ -223,29 +231,22 @@ pub(crate) fn compress_table(
             });
         }
     };
-    let bound = bind_table(header, table)?;
-    reject_compression_metadata(header)?;
-    let ncols = table.columns.len();
-    let nrows = table.nrows;
-    let naxis1 = table.row_len;
-    let raw = bound.rows;
-
-    let metas: Vec<ColMeta> = table
+    debug_assert!(
+        reject_compression_metadata(header).is_ok(),
+        "a written table's header holds no compression keyword"
+    );
+    let schema = Schema::parse(header)?;
+    let ncols = schema.columns.len();
+    let nrows = schema.nrows;
+    let naxis1 = schema.row_len;
+    let pcount = header.required_usize("PCOUNT", "PCOUNT")?;
+    let rpt = config.table_tile_rows(nrows, naxis1)?;
+    let metas: Vec<ColMeta> = schema
         .columns
         .iter()
         .map(|c| ColMeta::chosen(&c.tform, c.byte_offset, default_algo))
         .collect();
-    let vla_columns = metas
-        .iter()
-        .enumerate()
-        .map(|(index, meta)| {
-            meta.is_stored_vla()
-                .then(|| table.column_by_idx(index)?.vla_column())
-                .transpose()
-        })
-        .collect::<Result<Vec<_>>>()?;
 
-    let rpt = rows_per_tile.clamp(1, nrows.max(1));
     let nchunks = nrows.div_ceil(rpt);
     let compressed_row_len = ncols.checked_mul(16).ok_or(FitsError::DataUnitOverflow)?;
     let tile_count = nchunks
@@ -265,43 +266,49 @@ pub(crate) fn compress_table(
             let m = &metas[column];
             let r0 = chunk * rpt;
             let rows = rpt.min(nrows - r0);
-            if let Some(vla) = vla_columns[column] {
-                let mut descriptors = Vec::with_capacity(
+            if m.is_stored_vla() {
+                let width = DescriptorWidth::of(m.kind);
+                let mut descriptors = allocation::try_zeroed(
+                    0u8,
                     rows.checked_mul(m.width)
                         .ok_or(FitsError::DataUnitOverflow)?,
-                );
+                )?;
                 let mut values = Vec::new();
                 let mut ends = Vec::with_capacity(rows);
+                let mut array = mem::take(&mut scratch.array);
                 for row in 0..rows {
-                    let off = (r0 + row) * naxis1 + m.offset;
-                    descriptors.extend_from_slice(&raw[off..off + m.width]);
+                    array.clear();
+                    let descriptor = cells.array(column, r0 + row, &mut array);
+                    write_pq_descriptor(
+                        &mut descriptors[row * m.width..(row + 1) * m.width],
+                        width,
+                        descriptor.count as u64,
+                        descriptor.offset as u64,
+                    )?;
                     // An array the codec does not shrink is stored as is, as cfitsio — the
                     // reference implementation of §10.3 — stores it; a stored length equal
                     // to the raw length is then what marks it raw, and cannot be a stream.
-                    let cell = vla.cell(r0 + row)?;
                     let start = values.len();
-                    compress_payload_into(m, cell.bytes, gzip_level, scratch, &mut values);
-                    if values.len() - start >= cell.bytes.len() {
+                    compress_payload_into(m, &array, gzip_level, scratch, &mut values);
+                    if values.len() - start >= array.len() {
                         values.truncate(start);
-                        values.extend_from_slice(cell.bytes);
+                        values.extend_from_slice(&array);
                     }
                     ends.push(values.len());
                 }
+                scratch.array = array;
                 return Ok(EncodedColumn::Variable {
                     descriptors,
                     arrays: Ragged::<Vec<u8>>::new(values, ends),
                 });
             }
-            // Transpose: gather this column's bytes across the tile's rows.
             scratch.column.clear();
             let cell_len = rows
                 .checked_mul(m.width)
                 .ok_or(FitsError::DataUnitOverflow)?;
             scratch.column.reserve_exact(cell_len);
-            for r in 0..rows {
-                let off = (r0 + r) * naxis1 + m.offset;
-                scratch.column.extend_from_slice(&raw[off..off + m.width]);
-            }
+            cells.fixed(column, r0..r0 + rows, &mut scratch.column);
+            debug_assert_eq!(scratch.column.len(), cell_len, "a tile's whole cells");
             let column_bytes = mem::take(&mut scratch.column);
             let mut compressed = Vec::new();
             compress_payload_into(m, &column_bytes, gzip_level, scratch, &mut compressed);
@@ -358,13 +365,12 @@ pub(crate) fn compress_table(
 
     // Header: copy the original, then layer on the Z* keywords.
     let mut h = header.clone();
-    h.rename_keywords(&reserved_keywords::TABLE_PRESERVED);
     h.set_internal("ZTABLE", true)
         .comment_internal("ZTABLE", "this is a compressed table");
     h.set_internal("ZTILELEN", value::fits_i64(rpt)?);
     h.set_internal("ZNAXIS1", value::fits_i64(naxis1)?);
     h.set_internal("ZNAXIS2", value::fits_i64(nrows)?);
-    h.set_internal("ZPCOUNT", value::fits_i64(bound.pcount)?);
+    h.set_internal("ZPCOUNT", value::fits_i64(pcount)?);
     for (ci, m) in metas.iter().enumerate() {
         let n = ci + 1;
         let zform = header
@@ -562,7 +568,7 @@ pub(crate) fn uncompress_table(header: &Header, table: TableView<'_>) -> Result<
     })
 }
 
-fn bind_table<'a>(header: &Header, table: TableView<'a>) -> Result<BoundTable<'a>> {
+fn bind_table(header: &Header, table: TableView<'_>) -> Result<()> {
     let xtension = header
         .get_text("XTENSION")?
         .ok_or(FitsError::MissingKeyword { name: "XTENSION" })?;
@@ -627,7 +633,7 @@ fn bind_table<'a>(header: &Header, table: TableView<'a>) -> Result<BoundTable<'a
     if theap != table.heap_offset {
         return Err(metadata_mismatch("THEAP"));
     }
-    Ok(BoundTable { rows, pcount })
+    Ok(())
 }
 
 fn reject_compression_metadata(header: &Header) -> Result<()> {
@@ -651,6 +657,7 @@ fn metadata_mismatch(name: impl Into<String>) -> FitsError {
 #[derive(Debug, Default)]
 struct TableEncodeScratch {
     column: Vec<u8>,
+    array: Vec<u8>,
     ints: Vec<i64>,
     gzip: gzip::GzipScratch,
     rice: rice::RiceScratch,
