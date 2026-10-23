@@ -13,6 +13,7 @@ use crate::bench::scene::{self, CATALOG_ROW_BYTES, CATALOG_ROWS, HEIGHT, WIDTH};
 use crate::bintable::Table;
 use crate::bitpix::Bitpix;
 use crate::compress::encode::hcompress_default_rows;
+use crate::compress::hcompress::Smoothing;
 use crate::compress::plane::IntBitpix;
 use crate::compress::{
     Compression, CompressionConfig, Hcompress, convert, gzip, hcompress, plio, rice,
@@ -316,7 +317,13 @@ impl Tile {
             }
             Compression::Hcompress(_) => {
                 let elems = WIDTH * tile_rows(self.compression);
-                hcompress::hcompress_tile_into(bytes, false, elems, out, &mut self.hcompress)
+                hcompress::hcompress_tile_into(
+                    bytes,
+                    Smoothing::Off,
+                    elems,
+                    out,
+                    &mut self.hcompress,
+                )
             }
             Compression::Plio => plio::plio_decode_be_into(bytes, WIDTH, out),
             Compression::None => unreachable!("no case stores a tile uncompressed"),

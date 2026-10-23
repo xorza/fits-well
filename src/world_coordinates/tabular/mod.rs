@@ -95,7 +95,7 @@ pub(crate) fn descriptors(
     for axis in 0..axis_count {
         let ctype = read_text(
             header,
-            Keyword::try_from(format_args!("CTYPE{}{alt}", axis + 1)),
+            Keyword::fitting(format_args!("CTYPE{}{alt}", axis + 1)),
         )?
         .unwrap_or("");
         if Ctype::parse(ctype).algorithm != Some("TAB") {
@@ -127,7 +127,7 @@ pub(crate) fn descriptors(
         }
         let reference_index = read_real(
             header,
-            Keyword::try_from(format_args!("CRVAL{}{alt}", axis + 1)),
+            Keyword::fitting(format_args!("CRVAL{}{alt}", axis + 1)),
         )?
         .unwrap_or(0.0);
         if !reference_index.is_finite() {
@@ -135,7 +135,7 @@ pub(crate) fn descriptors(
         }
         let index_column = read_text(
             header,
-            Keyword::try_from(format_args!("PS{}_2{alt}", axis + 1)),
+            Keyword::fitting(format_args!("PS{}_2{alt}", axis + 1)),
         )?
         .map(str::to_string);
 
@@ -162,7 +162,7 @@ pub(crate) fn descriptors(
         }
         let cunit = read_text(
             header,
-            Keyword::try_from(format_args!("CUNIT{}{alt}", axis + 1)),
+            Keyword::fitting(format_args!("CUNIT{}{alt}", axis + 1)),
         )?
         .unwrap_or("");
         descriptor.axes[table_axis] = Some(TableAxis {
@@ -872,7 +872,7 @@ fn integer_parameter(
     alt: Alternate,
     default: i64,
 ) -> Result<i64> {
-    let key = Keyword::try_from(format_args!("PV{}_{parameter}{alt}", axis + 1));
+    let key = Keyword::fitting(format_args!("PV{}_{parameter}{alt}", axis + 1));
     match read_integer(header, key)? {
         None => Ok(default),
         Some(value) if value >= 1 => Ok(value),

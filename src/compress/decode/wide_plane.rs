@@ -53,7 +53,10 @@ impl WidePlane for f64 {
         plan.decoder.decode_float_tile_into(
             plan.sources.cells(table_row)?,
             nelem,
-            plan.quantization.dequant(table_row, tile_row),
+            plan.quantization
+                .as_ref()
+                .expect("only a float image decodes in the float plane")
+                .dequant(table_row, tile_row),
             &mut scratch.values,
             &mut scratch.aux,
             &mut scratch.codecs,

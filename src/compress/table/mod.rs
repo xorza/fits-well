@@ -410,10 +410,7 @@ pub(crate) struct TiledTable {
 impl TiledTable {
     /// The layout `header`, a `ZTABLE` container's, declares.
     pub(crate) fn new(header: &Header) -> Result<Self> {
-        debug_assert_eq!(
-            header.get_logical(keywords::ZTABLE).ok().flatten(),
-            Some(true)
-        );
+        debug_assert_eq!(header.get_logical(keywords::ZTABLE).unwrap(), Some(true));
         let naxis1 = header.require_usize(keywords::ZNAXIS.indexed(1)?)?;
         let nrows = header.require_usize(keywords::ZNAXIS.indexed(2)?)?;
         let zpcount = header.require_usize(keywords::ZPCOUNT)?;

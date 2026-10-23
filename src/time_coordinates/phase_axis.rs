@@ -114,24 +114,24 @@ struct PhaseAxisKeywords {
 impl PhaseAxisKeywords {
     fn image(axis: usize, alt: Alternate) -> Option<Self> {
         Some(Self {
-            ctype: Keyword::try_from(format_args!("CTYPE{axis}{alt}")).ok()?,
-            zero_phase: Keyword::try_from(format_args!("CZPHS{axis}{alt}")).ok()?,
-            period: Keyword::try_from(format_args!("CPERI{axis}{alt}")).ok()?,
+            ctype: Keyword::fitting(format_args!("CTYPE{axis}{alt}"))?,
+            zero_phase: Keyword::fitting(format_args!("CZPHS{axis}{alt}"))?,
+            period: Keyword::fitting(format_args!("CPERI{axis}{alt}"))?,
         })
     }
 
     fn pixel_list(column: usize, alt: Alternate) -> Option<Self> {
         if alt.is_alternate() {
             Some(Self {
-                ctype: Keyword::try_from(format_args!("TCTY{column}{alt}")).ok()?,
-                zero_phase: Keyword::try_from(format_args!("TCZP{column}{alt}")).ok()?,
-                period: Keyword::try_from(format_args!("TCPR{column}{alt}")).ok()?,
+                ctype: Keyword::fitting(format_args!("TCTY{column}{alt}"))?,
+                zero_phase: Keyword::fitting(format_args!("TCZP{column}{alt}"))?,
+                period: Keyword::fitting(format_args!("TCPR{column}{alt}"))?,
             })
         } else {
             Some(Self {
-                ctype: Keyword::try_from(format_args!("TCTYP{column}")).ok()?,
-                zero_phase: Keyword::try_from(format_args!("TCZPH{column}")).ok()?,
-                period: Keyword::try_from(format_args!("TCPER{column}")).ok()?,
+                ctype: Keyword::fitting(format_args!("TCTYP{column}"))?,
+                zero_phase: Keyword::fitting(format_args!("TCZPH{column}"))?,
+                period: Keyword::fitting(format_args!("TCPER{column}"))?,
             })
         }
     }
@@ -139,15 +139,15 @@ impl PhaseAxisKeywords {
     fn array_column(axis: usize, column: usize, alt: Alternate) -> Option<Self> {
         if alt.is_alternate() {
             Some(Self {
-                ctype: Keyword::try_from(format_args!("{axis}CTY{column}{alt}")).ok()?,
-                zero_phase: Keyword::try_from(format_args!("{axis}CZP{column}{alt}")).ok()?,
-                period: Keyword::try_from(format_args!("{axis}CPR{column}{alt}")).ok()?,
+                ctype: Keyword::fitting(format_args!("{axis}CTY{column}{alt}"))?,
+                zero_phase: Keyword::fitting(format_args!("{axis}CZP{column}{alt}"))?,
+                period: Keyword::fitting(format_args!("{axis}CPR{column}{alt}"))?,
             })
         } else {
             Some(Self {
-                ctype: Keyword::try_from(format_args!("{axis}CTYP{column}")).ok()?,
-                zero_phase: Keyword::try_from(format_args!("{axis}CZPH{column}")).ok()?,
-                period: Keyword::try_from(format_args!("{axis}CPER{column}")).ok()?,
+                ctype: Keyword::fitting(format_args!("{axis}CTYP{column}"))?,
+                zero_phase: Keyword::fitting(format_args!("{axis}CZPH{column}"))?,
+                period: Keyword::fitting(format_args!("{axis}CPER{column}"))?,
             })
         }
     }

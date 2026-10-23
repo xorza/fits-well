@@ -2,7 +2,7 @@ use crate::bintable::Table;
 use crate::bintable::internals;
 use crate::bintable::internals::table_header;
 use crate::bintable::tform_kind::TformKind;
-use crate::compress::decode::decode_sample::DecodeSample;
+use crate::compress::decode::decode_sample::{DecodeSample, Overshoot};
 #[cfg(feature = "parallel")]
 use crate::compress::decode::decode_wave_tile_count;
 use crate::compress::decode::tiled_image::TiledImage;
@@ -228,12 +228,12 @@ fn decoded_values_fit_the_image_bitpix() {
 
     // The bounds themselves fit; one past them clamps, or is refused.
     let mut bytes = [-1, 0, 255, 256];
-    <u8 as DecodeSample>::fit(&mut bytes, true).unwrap();
+    <u8 as DecodeSample>::fit(&mut bytes, Overshoot::Clamp).unwrap();
     assert_eq!(bytes, [0, 0, 255, 255]);
-    assert!(<u8 as DecodeSample>::fit(&mut [0, 256], false).is_err());
+    assert!(<u8 as DecodeSample>::fit(&mut [0, 256], Overshoot::Refuse).is_err());
     let mut words = [i64::from(i32::MIN), i64::from(i32::MAX)];
-    <i32 as DecodeSample>::fit(&mut words, false).unwrap();
-    assert!(<i32 as DecodeSample>::fit(&mut [i64::from(i32::MAX) + 1], false).is_err());
+    <i32 as DecodeSample>::fit(&mut words, Overshoot::Refuse).unwrap();
+    assert!(<i32 as DecodeSample>::fit(&mut [i64::from(i32::MAX) + 1], Overshoot::Refuse).is_err());
 }
 
 #[test]

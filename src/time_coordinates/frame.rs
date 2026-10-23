@@ -98,12 +98,7 @@ impl Frame {
     /// Evaluate a 1-based time `axis` through its complete WCS row and coordinate
     /// algorithm, then convert it to MJD. `pixel` must contain one coordinate per
     /// WCS axis.
-    pub fn time_axis_mjd(
-        &self,
-        wcs: &Wcs,
-        axis: usize,
-        pixel: &[f64],
-    ) -> Result<Option<Coordinate>> {
+    pub fn time_axis_mjd(&self, wcs: &Wcs, axis: usize, pixel: &[f64]) -> Result<Coordinate> {
         let zero_based = axis
             .checked_sub(1)
             .ok_or(FitsError::OneBasedIndexRequired { kind: "WCS axis" })?;
@@ -117,7 +112,7 @@ impl Frame {
                     len: wcs.metadata().axes.len(),
                 })?;
         if TimeAxisKind::from_ctype(&metadata.ctype) != Some(TimeAxisKind::Time) {
-            return Ok(None);
+            return Err(FitsError::NotATimeAxis { axis });
         }
         let head = Ctype::parse(&metadata.ctype).head;
         let scale = if head.eq_ignore_ascii_case("TIME") {
@@ -131,10 +126,10 @@ impl Frame {
         } else {
             world.cunit
         };
-        Ok(Some(Coordinate {
+        Ok(Coordinate {
             mjd: self.relative_to_mjd_in(world.value, unit, &scale)?,
             scale,
-        }))
+        })
     }
 }
 

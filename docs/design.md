@@ -53,6 +53,13 @@ and the dated measurements in `docs/research/`.
   and verified, and `has_invalid`, either one malformed or contradicted by its
   bytes. A caller's policy for `Absent` and `Unknown` stays its own. Refused: a
   single verdict, which would choose that policy for every caller.
+- **`Ok(None)` means only that an optional value is absent.** A header getter gives
+  it for an absent keyword, and an accessor such as `Value::as_real` or
+  `ColumnReader::unsigned` for a value not in that form. An operation that cannot
+  do what its name says errors instead: `parameter_physical` with a name no
+  parameter carries (`GroupParameterNotFound`), and `time_axis_mjd` on an axis
+  that is no time axis (`NotATimeAxis`). Refused: `Ok(None)` for a miss, which a
+  caller reads as "absent" and goes on.
 - **The `Source` trait is sealed and cannot be named.** A source is not an
   extension point, and no caller is generic over sources. Refused: exporting it
   before such a caller exists.
@@ -195,7 +202,13 @@ and the dated measurements in `docs/research/`.
 - **A name formatted from an axis or column number that is no keyword is
   absent.** The long spelling of a table-WCS family with a wide column (`TPV123_45`)
   can be on no card, so the WCS reads treat it as absent, as the `&str` lookup
-  did. Refused: an error, which failed a WCS with a wide column.
+  did. Such a name is an `Option<Keyword>` from `Keyword::fitting`, `None` where no
+  card can hold it, for that reason or because its family has no spelling in that
+  description; only the error that reports a missing keyword formats its name as a
+  `Result`. A name that fits but is no keyword panics: its pattern is wrong, which
+  no header can cause. Refused: an
+  error, which failed a WCS with a wide column, and a `Result<Keyword>` that each
+  read turned back into absence.
 - **`require_*` reads a mandatory keyword, `set_optional` writes an optional
   one.** `set_optional(k, None)` removes every record with `k`, so the header
   holds the value or nothing. Refused: range-checked getters, whose ranges belong

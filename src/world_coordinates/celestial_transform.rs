@@ -47,7 +47,7 @@ impl CelestialTransform {
         for (m, value) in pv.iter_mut().enumerate() {
             if let Some(header_value) = read_real(
                 header,
-                Keyword::try_from(format_args!("PV{}_{m}{alt}", lat + 1)),
+                Keyword::fitting(format_args!("PV{}_{m}{alt}", lat + 1)),
             )? {
                 *value = header_value;
             }
@@ -69,13 +69,13 @@ impl CelestialTransform {
         let (mut phi0, mut theta0) = (reference.phi, reference.theta);
         if let Some(v) = read_real(
             header,
-            Keyword::try_from(format_args!("PV{}_1{alt}", lng + 1)),
+            Keyword::fitting(format_args!("PV{}_1{alt}", lng + 1)),
         )? {
             phi0 = v;
         }
         if let Some(v) = read_real(
             header,
-            Keyword::try_from(format_args!("PV{}_2{alt}", lng + 1)),
+            Keyword::fitting(format_args!("PV{}_2{alt}", lng + 1)),
         )? {
             theta0 = v;
         }
@@ -83,15 +83,15 @@ impl CelestialTransform {
         // LONPOLE (= LONPOLEa or PVi_3a): default φ0 if δ0 ≥ θ0, else φ0 + 180°.
         let phip = first_real(
             header,
-            Keyword::try_from(format_args!("LONPOLE{alt}")),
-            Keyword::try_from(format_args!("PV{}_3{alt}", lng + 1)),
+            Keyword::fitting(format_args!("LONPOLE{alt}")),
+            Keyword::fitting(format_args!("PV{}_3{alt}", lng + 1)),
         )?
         .unwrap_or(if delta0 >= theta0 { phi0 } else { phi0 + 180.0 });
         // LATPOLE (= LATPOLEa or PVi_4a): default 90°.
         let thetap = first_real(
             header,
-            Keyword::try_from(format_args!("LATPOLE{alt}")),
-            Keyword::try_from(format_args!("PV{}_4{alt}", lng + 1)),
+            Keyword::fitting(format_args!("LATPOLE{alt}")),
+            Keyword::fitting(format_args!("PV{}_4{alt}", lng + 1)),
         )?
         .unwrap_or(90.0);
         Ok(Some(Self {

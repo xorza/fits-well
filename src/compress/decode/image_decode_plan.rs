@@ -28,7 +28,9 @@ pub(super) struct ImageDecodePlan<'a> {
     pub(super) decoder: TileDecoder,
     pub(super) sources: TileSources<'a>,
     pub(super) null_mask: NullMask<'a>,
-    pub(super) quantization: FloatQuantization,
+    /// A float image's quantization; `None` for an integer image, which is stored
+    /// without one and ignores its keywords and columns.
+    pub(super) quantization: Option<FloatQuantization>,
 }
 
 impl<'a> ImageDecodePlan<'a> {
@@ -42,7 +44,12 @@ impl<'a> ImageDecodePlan<'a> {
             decoder: TileDecoder::new(header, tiled)?,
             sources: TileSources::read(table)?,
             null_mask: NullMask::read(header, table, tiled)?,
-            quantization: FloatQuantization::read(header, table, tiled.image.bitpix.is_float())?,
+            quantization: tiled
+                .image
+                .bitpix
+                .is_float()
+                .then(|| FloatQuantization::read(header, table))
+                .transpose()?,
         })
     }
 
@@ -124,6 +131,6 @@ impl<'a> ImageDecodePlan<'a> {
         tile_row: usize,
     ) -> Result<()> {
         scratch.decode(self, table_row, tile_row)?;
-        D::fit(&mut scratch.values, self.decoder.is_lossy())
+        D::fit(&mut scratch.values, self.decoder.overshoot())
     }
 }

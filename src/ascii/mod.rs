@@ -363,7 +363,10 @@ fn parse_literal(literal: fmt::Arguments<'_>) -> Option<f64> {
     let mut cursor = io::Cursor::new(&mut stack[..]);
     if cursor.write_fmt(literal).is_ok() {
         let len = usize::try_from(cursor.position()).expect("at most the buffer length");
-        return str::from_utf8(&stack[..len]).ok()?.parse().ok();
+        return str::from_utf8(&stack[..len])
+            .expect("`write_fmt` writes whole `str`s")
+            .parse()
+            .ok();
     }
     fmt::format(literal).parse().ok()
 }

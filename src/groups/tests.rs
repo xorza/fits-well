@@ -71,14 +71,14 @@ fn reads_the_real_uv_random_groups() {
     // §6.3: the two PTYPE='DATE' addends (indices 4, 5) sum to the logical DATE.
     assert_eq!(
         groups.parameter_physical(0, "DATE").unwrap(),
-        Some(params[4] + params[5])
+        params[4] + params[5]
     );
-    // A single-occurrence name returns just that parameter; an absent name → None.
-    assert_eq!(
-        groups.parameter_physical(0, "BASELINE").unwrap(),
-        Some(params[3])
-    );
-    assert_eq!(groups.parameter_physical(0, "NONE").unwrap(), None);
+    // A single-occurrence name returns just that parameter; an absent name is refused.
+    assert_eq!(groups.parameter_physical(0, "BASELINE").unwrap(), params[3]);
+    assert!(matches!(
+        groups.parameter_physical(0, "NONE"),
+        Err(FitsError::GroupParameterNotFound { name }) if name == "NONE"
+    ));
 
     for result in [
         groups.parameters_physical(metadata.gcount).map(|_| ()),
@@ -125,11 +125,11 @@ fn parameter_physical_sums_addends_sharing_a_ptype() {
         vec![2_445_738.5, 0.75]
     );
     // Summed logical DATE = (2445728.5 + 10) + (0.25 + 0.5) = 2445739.25.
-    assert_eq!(
-        groups.parameter_physical(0, "DATE").unwrap(),
-        Some(2_445_739.25)
-    );
-    assert_eq!(groups.parameter_physical(0, "NONE").unwrap(), None);
+    assert_eq!(groups.parameter_physical(0, "DATE").unwrap(), 2_445_739.25);
+    assert!(matches!(
+        groups.parameter_physical(0, "NONE"),
+        Err(FitsError::GroupParameterNotFound { name }) if name == "NONE"
+    ));
 
     for keyword in ["PSCAL1", "PZERO1", "BSCALE"] {
         let mut malformed = header.clone();
@@ -316,8 +316,8 @@ fn parameters_past_the_999th_take_the_keyword_defaults() {
     assert_eq!(values.len(), 1001);
     assert!(values[..998].iter().all(|&value| value == 0.0));
     assert_eq!(values[998..], [6.0, 5.0, 7.0]);
-    assert_eq!(groups.parameter_physical(0, "A").unwrap(), Some(6.0));
-    assert_eq!(groups.parameter_physical(0, "").unwrap(), Some(12.0));
+    assert_eq!(groups.parameter_physical(0, "A").unwrap(), 6.0);
+    assert_eq!(groups.parameter_physical(0, "").unwrap(), 12.0);
     assert_eq!(groups.array_physical(0).unwrap(), vec![9.0]);
 }
 

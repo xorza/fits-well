@@ -140,9 +140,10 @@ fn all_digits(s: &str) -> bool {
 /// Parse a fixed-width all-digit field (§9.1.1 forbids omitted leading zeros, so
 /// the length must be exact).
 fn parse_fixed(s: &str, width: usize) -> Option<u32> {
-    (s.len() == width && all_digits(s))
-        .then(|| s.parse().ok())
-        .flatten()
+    if s.len() != width || !all_digits(s) {
+        return None;
+    }
+    s.parse().ok()
 }
 
 /// Parse a `ss[.s…]` seconds field: exactly two integer digits, optional fraction.

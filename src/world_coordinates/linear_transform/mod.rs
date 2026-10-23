@@ -80,7 +80,8 @@ fn matrix_cells(header: &Header, root: &str, alt: Alternate, naxis: usize) -> Ve
                 .strip_suffix(alt.as_str())?;
             let (row, column) = rest.split_once('_')?;
             Some(MatrixCell {
-                keyword: Keyword::try_from(entry.keyword).ok()?,
+                keyword: Keyword::try_from(entry.keyword)
+                    .expect("a card with a value holds a checked keyword"),
                 row: index(row)?,
                 column: index(column)?,
             })
@@ -111,9 +112,8 @@ impl LinearMatrix {
         let pc = matrix_cells(header, "PC", alt, naxis);
         let has_cd = !cd.is_empty();
         let has_pc = !pc.is_empty();
-        let has_crota = (1..=naxis).any(|i| {
-            read_value(header, Keyword::try_from(format_args!("CROTA{i}{alt}"))).is_some()
-        });
+        let has_crota = (1..=naxis)
+            .any(|i| read_value(header, Keyword::fitting(format_args!("CROTA{i}{alt}"))).is_some());
         if has_cd && has_pc {
             return Err(FitsError::ConflictingWcsKeywords {
                 detail: "PC and CD conventions overlap",
@@ -145,8 +145,8 @@ impl LinearMatrix {
             let lat = axes.latitude;
             let rho = first_real(
                 header,
-                Keyword::try_from(format_args!("CROTA{}{alt}", lat + 1)),
-                Keyword::try_from(format_args!("CROTA{}{alt}", lng + 1)),
+                Keyword::fitting(format_args!("CROTA{}{alt}", lat + 1)),
+                Keyword::fitting(format_args!("CROTA{}{alt}", lng + 1)),
             )?
             .unwrap_or(0.0);
             if rho != 0.0 {

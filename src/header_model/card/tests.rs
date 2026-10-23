@@ -133,6 +133,15 @@ fn parses_complex_integer_and_real() {
         parse("CPLXR   = (1.0, -2.5)").value(),
         Some(&Value::ComplexReal { re: 1.0, im: -2.5 })
     );
+    // An integer part beside a real one widens, in either position.
+    assert_eq!(
+        parse("CPLXM   = (3, -2.5)").value(),
+        Some(&Value::ComplexReal { re: 3.0, im: -2.5 })
+    );
+    assert_eq!(
+        parse("CPLXM   = (1.5, -4)").value(),
+        Some(&Value::ComplexReal { re: 1.5, im: -4.0 })
+    );
 
     let exact = parse("CPLXBIG = (9223372036854775808, -9223372036854775809)");
     let Some(Value::ComplexInteger { re, im }) = exact.value() else {

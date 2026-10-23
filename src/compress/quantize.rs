@@ -122,13 +122,12 @@ fn nint(x: f64) -> i32 {
 }
 
 /// A tile's range and background-noise estimate (cfitsio `FnNoise3_float`).
+/// The range and noise of a tile's finite (non-null) pixels.
 #[derive(Debug)]
 struct TileStatistics {
     min: f64,
     max: f64,
     noise: f64,
-    /// True when at least one finite (non-null) pixel was seen.
-    any_good: bool,
 }
 
 #[derive(Debug, Default)]
@@ -141,14 +140,14 @@ pub(super) struct QuantizeScratch {
 /// 3rd-order MAD noise: `0.6052697 · median(|2·f(i) − f(i−2) − f(i+2)|)`, taken as
 /// the median of per-row medians. Non-finite pixels (NaN/Inf) are treated as nulls
 /// and skipped, matching cfitsio's `nullcheck`. Returns `noise = 0` for constant
-/// data and `any_good = false` for an all-null tile.
+/// data and `None` for an all-null tile.
 fn noise3(
     data: &[f64],
     nx_in: usize,
     ny_in: usize,
     diffs: &mut Vec<f64>,
     row_medians: &mut Vec<f64>,
-) -> TileStatistics {
+) -> Option<TileStatistics> {
     let (mut nx, mut ny) = (nx_in.max(1), ny_in.max(1));
     if nx < 5 {
         nx *= ny;
@@ -197,12 +196,11 @@ fn noise3(
     } else {
         0.605_269_7 * proper_median(row_medians)
     };
-    TileStatistics {
+    any_good.then_some(TileStatistics {
         min: xmin,
         max: xmax,
         noise,
-        any_good,
-    }
+    })
 }
 
 pub(super) fn noise3_estimate(
@@ -211,7 +209,8 @@ pub(super) fn noise3_estimate(
     ny: usize,
     scratch: &mut QuantizeScratch,
 ) -> f64 {
-    noise3(data, nx, ny, &mut scratch.diffs, &mut scratch.row_medians).noise
+    noise3(data, nx, ny, &mut scratch.diffs, &mut scratch.row_medians)
+        .map_or(0.0, |statistics| statistics.noise)
 }
 
 /// Lower median (element at index `(n−1)/2` of the sorted values), matching
@@ -269,10 +268,8 @@ pub(super) fn quantize_tile(
     if n <= 1 {
         return None;
     }
-    let est = noise3(fdata, nx, ny, &mut scratch.diffs, &mut scratch.row_medians);
-    if !est.any_good {
-        return None; // all-null tile → store raw (preserves the NaNs exactly)
-    }
+    // An all-null tile is stored raw, which keeps its NaNs exactly.
+    let est = noise3(fdata, nx, ny, &mut scratch.diffs, &mut scratch.row_medians)?;
     let delta = if qlevel == 0.0 {
         est.noise / 4.0
     } else {
