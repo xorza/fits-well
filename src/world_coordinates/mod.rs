@@ -6,9 +6,9 @@ use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Ranked;
 use crate::error::Result;
-use crate::header_model::Header;
-use crate::keyword::AltSuffix;
-use crate::keyword::key;
+use crate::header_model::value::Value;
+use crate::header_model::{Header, keywords};
+use crate::keyword::{AltSuffix, Keyword};
 use crate::unit;
 use crate::world_coordinates::axis::Axis;
 use crate::world_coordinates::axis_transform::AxisTransform;
@@ -148,8 +148,7 @@ impl Wcs {
 
         let ctype: Vec<String> = (1..=naxis)
             .map(|i| {
-                header
-                    .get_text(key!("CTYPE{i}{a}").as_str())
+                read_text(header, Keyword::try_from(format_args!("CTYPE{i}{a}")))
                     .map(|value| value.unwrap_or("").to_string())
             })
             .collect::<Result<_>>()?;
@@ -160,8 +159,7 @@ impl Wcs {
         let cdelt = axis_vec(header, "CDELT", a.as_str(), naxis, 1.0)?;
         let cunit: Vec<String> = (1..=naxis)
             .map(|i| {
-                header
-                    .get_text(key!("CUNIT{i}{a}").as_str())
+                read_text(header, Keyword::try_from(format_args!("CUNIT{i}{a}")))
                     .map(|value| value.unwrap_or("").to_string())
             })
             .collect::<Result<_>>()?;
@@ -232,7 +230,10 @@ impl Wcs {
             }
             let mut spectral_parameters = [None; 7];
             for (parameter, value) in spectral_parameters.iter_mut().enumerate() {
-                *value = header.get_real(key!("PV{}_{parameter}{a}", axis + 1).as_str())?;
+                *value = read_real(
+                    header,
+                    Keyword::try_from(format_args!("PV{}_{parameter}{a}", axis + 1)),
+                )?;
             }
             let parameters = SpectralParameters::new(spectral_parameters);
             let rest = spectral_frames[axis].map_or(SpectralRest::NONE, |frame| frame.rest);
@@ -377,7 +378,7 @@ impl Wcs {
         let mut h = translated.header;
         let ctype = (1..=columns.len())
             .map(|axis| {
-                h.get_text(key!("CTYPE{axis}").as_str())
+                h.get_text(keywords::CTYPE.indexed(axis)?)
                     .map(|value| value.unwrap_or("").to_string())
             })
             .collect::<Result<Vec<_>>>()?;
@@ -503,19 +504,24 @@ impl Wcs {
     /// of `NAXIS` and the highest axis any WCS keyword names.
     pub(crate) fn image_axis_count(header: &Header, alt: Option<char>) -> Result<usize> {
         let suffix = AltSuffix::new(alt);
-        let value =
-            if let Some(axis_count) = header.get_integer(key!("WCSAXES{suffix}").as_str())? {
-                axis_count
-            } else {
-                let inferred = infer_image_axis_count(header, suffix.as_str());
-                match header.get_integer("NAXIS")? {
-                    Some(axis_count) if axis_count >= 0 => axis_count.max(inferred),
-                    Some(axis_count) => axis_count,
-                    None if inferred != 0 => inferred,
-                    None => return Err(FitsError::MissingKeyword { name: "WCSAXES" }),
+        let value = if let Some(axis_count) =
+            read_integer(header, Keyword::try_from(format_args!("WCSAXES{suffix}")))?
+        {
+            axis_count
+        } else {
+            let inferred = infer_image_axis_count(header, suffix.as_str());
+            match header.get_integer(keywords::NAXIS)? {
+                Some(axis_count) if axis_count >= 0 => axis_count.max(inferred),
+                Some(axis_count) => axis_count,
+                None if inferred != 0 => inferred,
+                None => {
+                    return Err(FitsError::MissingKeyword {
+                        keyword: keywords::WCSAXES,
+                    });
                 }
-            };
-        validated_axis_count(value, "WCSAXES")
+            }
+        };
+        validated_axis_count(value, keywords::WCSAXES)
     }
 
     fn require_complete_transform(&self) -> Result<()> {
@@ -563,8 +569,7 @@ fn axis_vec(
 ) -> Result<Vec<f64>> {
     (1..=naxis)
         .map(|i| {
-            header
-                .get_real(key!("{prefix}{i}{alt}").as_str())
+            read_real(header, Keyword::try_from(format_args!("{prefix}{i}{alt}")))
                 .map(|value| value.unwrap_or(default))
         })
         .collect()
@@ -615,21 +620,47 @@ fn parse_wcs_index(value: &str) -> Option<i64> {
 }
 
 /// A declared axis count, checked against the standard's `1..=999` range.
-fn validated_axis_count(value: i64, name: &'static str) -> Result<usize> {
-    let count = usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { name })?;
+fn validated_axis_count(value: i64, keyword: Keyword) -> Result<usize> {
+    let count = usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { keyword })?;
     if !(1..=999).contains(&count) {
-        return Err(FitsError::KeywordOutOfRange { name });
+        return Err(FitsError::KeywordOutOfRange { keyword });
     }
     Ok(count)
 }
 
 /// The first of two keywords that carries a real value — the shape every
 /// long/short and primary/`PVi_m` keyword alternative takes.
-fn first_real(header: &Header, first: &str, second: &str) -> Result<Option<f64>> {
-    match header.get_real(first)? {
+fn first_real(
+    header: &Header,
+    first: Result<Keyword>,
+    second: Result<Keyword>,
+) -> Result<Option<f64>> {
+    match read_real(header, first)? {
         Some(value) => Ok(Some(value)),
-        None => header.get_real(second),
+        None => read_real(header, second),
     }
+}
+
+/// The value of the keyword a formatted name checks into; `None` when the card is absent,
+/// or when the text is no keyword, as a wide axis or column number makes the long
+/// spellings, and so no card can hold it.
+fn read_value(header: &Header, keyword: Result<Keyword>) -> Option<&Value> {
+    header.get(keyword.ok()?).ok().flatten()
+}
+
+/// [`read_value`] for a real keyword.
+fn read_real(header: &Header, keyword: Result<Keyword>) -> Result<Option<f64>> {
+    keyword.map_or(Ok(None), |keyword| header.get_real(keyword))
+}
+
+/// [`read_value`] for a text keyword.
+fn read_text(header: &Header, keyword: Result<Keyword>) -> Result<Option<&str>> {
+    keyword.map_or(Ok(None), |keyword| header.get_text(keyword))
+}
+
+/// [`read_value`] for an integer keyword.
+fn read_integer(header: &Header, keyword: Result<Keyword>) -> Result<Option<i64>> {
+    keyword.map_or(Ok(None), |keyword| header.get_integer(keyword))
 }
 
 /// The quarter turn a multiple of 90° lands on (0 to 3), or `None` for any other angle.
@@ -689,6 +720,7 @@ fn norm180(a: f64) -> f64 {
 #[cfg(test)]
 pub(crate) mod internals {
     use crate::header_model::Header;
+    use crate::header_model::keywords;
     use crate::world_coordinates::DEGREE_TOLERANCE;
     use crate::world_coordinates::Wcs;
 
@@ -702,7 +734,7 @@ pub(crate) mod internals {
     ) -> Header {
         let mut header = Header::new();
         header
-            .set_internal("NAXIS", 1)
+            .set_internal(keywords::NAXIS, 1)
             .set_internal("CTYPE1", ctype)
             .set_internal("CUNIT1", cunit)
             .set_internal("CRPIX1", crpix)
@@ -720,7 +752,7 @@ pub(crate) mod internals {
     ) -> Header {
         let mut header = Header::new();
         header
-            .set_internal("NAXIS", 2)
+            .set_internal(keywords::NAXIS, 2)
             .set_internal("CTYPE1", format!("RA---{projection}"))
             .set_internal("CTYPE2", format!("DEC--{projection}"))
             .set_internal("CRPIX1", crpix[0])

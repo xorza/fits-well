@@ -10,10 +10,8 @@ use crate::fits_writer::{
     FitsWriter, Opening, ROW_COUNT_FIXED, accept_row_count, validate_scaling,
 };
 use crate::hdu::validate_table_field_count;
-use crate::header_model::Header;
 use crate::header_model::card::validate_ascii;
-use crate::header_model::value;
-use crate::keyword::key;
+use crate::header_model::{Header, keywords, value};
 use std::iter;
 
 /// One column to write into an ASCII table: nullable typed data, the fixed field
@@ -134,8 +132,8 @@ pub(super) fn write_template<W: Write>(
     validate_table_field_count(columns.len())?;
     let mut tbcols = Vec::with_capacity(columns.len());
     let mut row_len = 0usize;
-    for col in columns {
-        validate_ascii_column(col)?;
+    for (i, col) in columns.iter().enumerate() {
+        validate_ascii_column(col, i + 1)?;
         assert_eq!(col.data.len(), nrows, "{ROW_COUNT_FIXED}");
         tbcols.push(row_len.checked_add(1).ok_or(FitsError::DataUnitOverflow)?);
         row_len = row_len
@@ -156,7 +154,11 @@ pub(super) fn write_template<W: Write>(
     writer.finish_hdu(header, template, SPACE_FILL, Opening::EmptyPrimary)
 }
 
-fn validate_ascii_column(col: &AsciiWriteColumn) -> Result<()> {
+/// Errors when `col`, the table's column `n`, cannot be written.
+fn validate_ascii_column(col: &AsciiWriteColumn, n: usize) -> Result<()> {
+    let tnull = FitsError::KeywordOutOfRange {
+        keyword: keywords::TNULL.indexed(n)?,
+    };
     validate_ascii(&col.name, "ASCII column name")?;
     if let Some(unit) = &col.unit {
         validate_ascii(unit, "ASCII column unit")?;
@@ -164,16 +166,17 @@ fn validate_ascii_column(col: &AsciiWriteColumn) -> Result<()> {
     if let Some(marker) = &col.tnull {
         validate_ascii(marker, "ASCII null marker")?;
         if marker.trim().is_empty() || marker.len() > col.width {
-            return Err(FitsError::KeywordOutOfRange { name: "TNULLn" });
+            return Err(tnull);
         }
     }
     validate_scaling(
         col.tscale,
         col.tzero,
         !matches!(&col.data, AsciiColumnData::Text(_)),
+        n,
     )?;
     if col.data.has_null() && col.tnull.is_none() {
-        return Err(FitsError::KeywordOutOfRange { name: "TNULLn" });
+        return Err(tnull);
     }
     Ok(())
 }
@@ -300,35 +303,39 @@ fn ascii_table_header(
 ) -> Result<Header> {
     let mut header = Header::new();
     header
-        .set_internal("XTENSION", "TABLE")
-        .comment_internal("XTENSION", "ASCII table extension");
-    header.set_internal("BITPIX", 8).set_internal("NAXIS", 2);
+        .set_internal(keywords::XTENSION, "TABLE")
+        .set_comment_internal(keywords::XTENSION, "ASCII table extension");
     header
-        .set_internal("NAXIS1", value::fits_i64(row_len)?)
-        .comment_internal("NAXIS1", "width of table in characters");
+        .set_internal(keywords::BITPIX, 8)
+        .set_internal(keywords::NAXIS, 2);
     header
-        .set_internal("NAXIS2", value::fits_i64(nrows)?)
-        .comment_internal("NAXIS2", "number of rows");
-    header.set_internal("PCOUNT", 0).set_internal("GCOUNT", 1);
+        .set_internal(keywords::NAXIS.indexed(1)?, value::fits_i64(row_len)?)
+        .set_comment_internal(keywords::NAXIS.indexed(1)?, "width of table in characters");
     header
-        .set_internal("TFIELDS", value::fits_i64(columns.len())?)
-        .comment_internal("TFIELDS", "number of columns");
+        .set_internal(keywords::NAXIS.indexed(2)?, value::fits_i64(nrows)?)
+        .set_comment_internal(keywords::NAXIS.indexed(2)?, "number of rows");
+    header
+        .set_internal(keywords::PCOUNT, 0)
+        .set_internal(keywords::GCOUNT, 1);
+    header
+        .set_internal(keywords::TFIELDS, value::fits_i64(columns.len())?)
+        .set_comment_internal(keywords::TFIELDS, "number of columns");
     for (i, col) in columns.iter().enumerate() {
         let n = i + 1;
-        header.set_internal(key!("TBCOL{n}").as_str(), value::fits_i64(tbcols[i])?);
-        header.set_internal(key!("TFORM{n}").as_str(), ascii_tform(col));
-        header.set_internal(key!("TTYPE{n}").as_str(), col.name.as_str());
+        header.set_internal(keywords::TBCOL.indexed(n)?, value::fits_i64(tbcols[i])?);
+        header.set_internal(keywords::TFORM.indexed(n)?, ascii_tform(col));
+        header.set_internal(keywords::TTYPE.indexed(n)?, col.name.as_str());
         if let Some(unit) = &col.unit {
-            header.set_internal(key!("TUNIT{n}").as_str(), unit.as_str());
+            header.set_internal(keywords::TUNIT.indexed(n)?, unit.as_str());
         }
         if let Some(tscale) = col.tscale {
-            header.set_internal(key!("TSCAL{n}").as_str(), tscale);
+            header.set_internal(keywords::TSCAL.indexed(n)?, tscale);
         }
         if let Some(tzero) = col.tzero {
-            header.set_internal(key!("TZERO{n}").as_str(), tzero);
+            header.set_internal(keywords::TZERO.indexed(n)?, tzero);
         }
         if let Some(tnull) = &col.tnull {
-            header.set_internal(key!("TNULL{n}").as_str(), tnull.as_str());
+            header.set_internal(keywords::TNULL.indexed(n)?, tnull.as_str());
         }
     }
     Ok(header)

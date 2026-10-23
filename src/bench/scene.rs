@@ -8,7 +8,7 @@ use crate::bintable::column_data::ColumnData;
 use crate::bitpix::Bitpix;
 use crate::fits_writer::FitsWriter;
 use crate::fits_writer::builder::{Builder, WriteColumn};
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
 use crate::image_model::Image;
 use crate::image_model::data::Data;
 use crate::image_model::scaling::Scaling;
@@ -81,7 +81,7 @@ pub(crate) fn light_header() -> Header {
         .set_internal("EXPOSURE", 120.0)
         .set_internal("EXPTIME", 120.0)
         .set_internal("DATE-LOC", "2026-03-14T22:41:07.123")
-        .set_internal("DATE-OBS", "2026-03-14T21:41:07.123")
+        .set_internal(keywords::DATE_OBS, "2026-03-14T21:41:07.123")
         .set_internal("XBINNING", 1)
         .set_internal("YBINNING", 1)
         .set_internal("GAIN", 100)
@@ -89,10 +89,10 @@ pub(crate) fn light_header() -> Header {
         .set_internal("EGAIN", 0.25)
         .set_internal("XPIXSZ", 3.76)
         .set_internal("YPIXSZ", 3.76)
-        .set_internal("INSTRUME", "ZWO ASI2600MC Pro")
+        .set_internal(keywords::INSTRUME, "ZWO ASI2600MC Pro")
         .set_internal("SET-TEMP", -10.0)
         .set_internal("CCD-TEMP", -10.1)
-        .set_internal("TELESCOP", "RedCat 51")
+        .set_internal(keywords::TELESCOP, "RedCat 51")
         .set_internal("FOCALLEN", 250.0)
         .set_internal("FOCRATIO", 4.9)
         .set_internal("RA", 83.822)
@@ -106,12 +106,12 @@ pub(crate) fn light_header() -> Header {
         .set_internal("SITELONG", 8.54)
         .set_internal("FWHEEL", "ZWO EFW")
         .set_internal("FILTER", "L-eXtreme")
-        .set_internal("OBJECT", "M 42")
+        .set_internal(keywords::OBJECT, "M 42")
         .set_internal("OBJCTRA", "05 35 17")
         .set_internal("OBJCTDEC", "-05 23 28")
         .set_internal("OBJCTROT", 92.4)
         .set_internal("ROWORDER", "TOP-DOWN")
-        .set_internal("EQUINOX", 2000.0)
+        .set_internal(keywords::EQUINOX, 2000.0)
         .set_internal("BAYERPAT", "RGGB")
         .set_internal("XBAYROFF", 0)
         .set_internal("YBAYROFF", 0)

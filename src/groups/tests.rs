@@ -1,20 +1,21 @@
 use crate::groups::*;
+
 use crate::reader::internals::open_fixture;
 
 /// A random-groups header: `NAXIS1 = 0`, then `axes` for each group's array.
 fn groups_header(bitpix: i64, axes: &[i64], pcount: i64, gcount: i64) -> Header {
     let mut header = Header::new();
     header
-        .set_internal("BITPIX", bitpix)
-        .set_internal("NAXIS", i64::try_from(axes.len()).unwrap() + 1)
+        .set_internal(keywords::BITPIX, bitpix)
+        .set_internal(keywords::NAXIS, i64::try_from(axes.len()).unwrap() + 1)
         .set_internal("NAXIS1", 0);
     for (index, &length) in axes.iter().enumerate() {
-        header.set_internal(&format!("NAXIS{}", index + 2), length);
+        header.set_internal(format!("NAXIS{}", index + 2), length);
     }
     header
-        .set_internal("GROUPS", true)
-        .set_internal("PCOUNT", pcount)
-        .set_internal("GCOUNT", gcount);
+        .set_internal(keywords::GROUPS, true)
+        .set_internal(keywords::PCOUNT, pcount)
+        .set_internal(keywords::GCOUNT, gcount);
     header
 }
 
@@ -146,9 +147,9 @@ fn array_physical_maps_blank_to_nan_for_every_integer_bitpix() {
         let mut header = groups_header(bitpix.code(), &[3], 1, 1);
         header
             .set_internal("PTYPE1", "PARAM")
-            .set_internal("BSCALE", 2.0)
-            .set_internal("BZERO", 5.0)
-            .set_internal("BLANK", 10);
+            .set_internal(keywords::BSCALE, 2.0)
+            .set_internal(keywords::BZERO, 5.0)
+            .set_internal(keywords::BLANK, 10);
         let data = match bitpix {
             Bitpix::U8 => vec![10, 9, 10, 11],
             Bitpix::I16 => [10i16, 9, 10, 11]

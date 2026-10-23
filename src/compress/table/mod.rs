@@ -27,9 +27,8 @@ use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::validate_table_field_count;
-use crate::header_model::Header;
-use crate::header_model::value;
-use crate::keyword::key;
+use crate::header_model::{Header, keywords, value};
+use crate::keyword::Keyword;
 use crate::ragged::Ragged;
 use crate::reserved_keywords;
 use std::mem;
@@ -239,7 +238,7 @@ pub(crate) fn compress_table(
     let ncols = schema.columns.len();
     let nrows = schema.nrows;
     let naxis1 = schema.row_len;
-    let pcount = header.required_usize("PCOUNT", "PCOUNT")?;
+    let pcount = header.require_usize(keywords::PCOUNT)?;
     let rpt = config.table_tile_rows(nrows, naxis1)?;
     let metas: Vec<ColMeta> = schema
         .columns
@@ -365,26 +364,29 @@ pub(crate) fn compress_table(
 
     // Header: copy the original, then layer on the Z* keywords.
     let mut h = header.clone();
-    h.set_internal("ZTABLE", true)
-        .comment_internal("ZTABLE", "this is a compressed table");
-    h.set_internal("ZTILELEN", value::fits_i64(rpt)?);
-    h.set_internal("ZNAXIS1", value::fits_i64(naxis1)?);
-    h.set_internal("ZNAXIS2", value::fits_i64(nrows)?);
-    h.set_internal("ZPCOUNT", value::fits_i64(pcount)?);
+    h.set_internal(keywords::ZTABLE, true)
+        .set_comment_internal(keywords::ZTABLE, "this is a compressed table");
+    h.set_internal(keywords::ZTILELEN, value::fits_i64(rpt)?);
+    h.set_internal(keywords::ZNAXIS.indexed(1)?, value::fits_i64(naxis1)?);
+    h.set_internal(keywords::ZNAXIS.indexed(2)?, value::fits_i64(nrows)?);
+    h.set_internal(keywords::ZPCOUNT, value::fits_i64(pcount)?);
     for (ci, m) in metas.iter().enumerate() {
         let n = ci + 1;
         let zform = header
-            .get_text(key!("TFORM{n}").as_str())?
+            .get_text(keywords::TFORM.indexed(n)?)?
             .unwrap_or("")
             .to_string();
-        h.set_internal(key!("ZFORM{n}").as_str(), zform);
-        h.set_internal(key!("TFORM{n}").as_str(), "1QB");
-        h.set_internal(key!("ZCTYP{n}").as_str(), m.algo.name());
+        h.set_internal(keywords::ZFORM.indexed(n)?, zform);
+        h.set_internal(keywords::TFORM.indexed(n)?, "1QB");
+        h.set_internal(keywords::ZCTYP.indexed(n)?, m.algo.name());
     }
-    h.set_internal("NAXIS1", value::fits_i64(compressed_row_len)?);
-    h.set_internal("NAXIS2", value::fits_i64(nchunks)?);
-    h.set_internal("PCOUNT", value::fits_i64(heap_len)?);
-    h.set_internal("GCOUNT", 1);
+    h.set_internal(
+        keywords::NAXIS.indexed(1)?,
+        value::fits_i64(compressed_row_len)?,
+    );
+    h.set_internal(keywords::NAXIS.indexed(2)?, value::fits_i64(nchunks)?);
+    h.set_internal(keywords::PCOUNT, value::fits_i64(heap_len)?);
+    h.set_internal(keywords::GCOUNT, 1);
     Ok(h)
 }
 
@@ -398,20 +400,20 @@ pub(crate) struct HduParts {
 /// Uncompress a `ZTABLE` container back into its original `BINTABLE`.
 /// Returns the restored header and row-major data unit.
 pub(crate) fn uncompress_table(header: &Header, table: TableView<'_>) -> Result<HduParts> {
-    if header.get_logical("ZTABLE")? != Some(true) {
+    if header.get_logical(keywords::ZTABLE)? != Some(true) {
         return Err(FitsError::NotCompressedTable);
     }
     bind_table(header, table)?;
-    let naxis1 = header.required_usize("ZNAXIS1", "ZNAXIS1")?;
-    let nrows = header.required_usize("ZNAXIS2", "ZNAXIS2")?;
-    let zpcount = header.required_usize("ZPCOUNT", "ZPCOUNT")?;
+    let naxis1 = header.require_usize(keywords::ZNAXIS.indexed(1)?)?;
+    let nrows = header.require_usize(keywords::ZNAXIS.indexed(2)?)?;
+    let zpcount = header.require_usize(keywords::ZPCOUNT)?;
     let original_bytes = nrows
         .checked_mul(naxis1)
         .ok_or(FitsError::DataUnitOverflow)?;
-    let original_heap_offset = match header.get_integer("ZTHEAP")? {
-        Some(ztheap) => {
-            usize::try_from(ztheap).map_err(|_| FitsError::KeywordOutOfRange { name: "ZTHEAP" })?
-        }
+    let original_heap_offset = match header.get_integer(keywords::ZTHEAP)? {
+        Some(ztheap) => usize::try_from(ztheap).map_err(|_| FitsError::KeywordOutOfRange {
+            keyword: keywords::ZTHEAP,
+        })?,
         None => original_bytes,
     };
     let total = original_bytes
@@ -422,17 +424,19 @@ pub(crate) fn uncompress_table(header: &Header, table: TableView<'_>) -> Result<
             name: "ZTHEAP".to_string(),
         });
     }
-    header.get_text("ZHECKSUM")?;
-    header.get_text("ZDATASUM")?;
-    let mut rpt = header.required_usize("ZTILELEN", "ZTILELEN")?;
+    header.get_text(keywords::ZHECKSUM)?;
+    header.get_text(keywords::ZDATASUM)?;
+    let mut rpt = header.require_usize(keywords::ZTILELEN)?;
     // A zero tile height would make the row-tile count diverge; §10.3 requires ≥ 1.
     if rpt == 0 {
-        return Err(FitsError::KeywordOutOfRange { name: "ZTILELEN" });
+        return Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::ZTILELEN,
+        });
     }
     if rpt > nrows {
         rpt = nrows.max(1);
     }
-    let ncols = header.required_usize("TFIELDS", "TFIELDS")?;
+    let ncols = header.require_usize(keywords::TFIELDS)?;
     validate_table_field_count(ncols)?;
 
     // Resolve each column's original form and codec.
@@ -441,11 +445,10 @@ pub(crate) fn uncompress_table(header: &Header, table: TableView<'_>) -> Result<
     let mut offset = 0;
     for n in 1..=ncols {
         let zform = header
-            .get_text(key!("ZFORM{n}").as_str())?
-            .ok_or(FitsError::MissingKeyword { name: "ZFORMn" })?
+            .require_text(keywords::ZFORM.indexed(n)?)?
             .to_string();
         let tform = Tform::parse(&zform)?;
-        let algo = match header.get_text(key!("ZCTYP{n}").as_str())? {
+        let algo = match header.get_text(keywords::ZCTYP.indexed(n)?)? {
             Some(s) => Algo::parse(s)?,
             None => Algo::Gzip2, // cfitsio's default when ZCTYPn is absent
         };
@@ -546,18 +549,21 @@ pub(crate) fn uncompress_table(header: &Header, table: TableView<'_>) -> Result<
 
     // Restore the original header: drop the Z* keywords, reinstate NAXIS/PCOUNT.
     let mut h = header.clone();
-    h.set_internal("NAXIS1", value::fits_i64(naxis1)?);
-    h.set_internal("NAXIS2", value::fits_i64(nrows)?);
-    h.set_internal("PCOUNT", value::fits_i64(zpcount)?);
+    h.set_internal(keywords::NAXIS.indexed(1)?, value::fits_i64(naxis1)?);
+    h.set_internal(keywords::NAXIS.indexed(2)?, value::fits_i64(nrows)?);
+    h.set_internal(keywords::PCOUNT, value::fits_i64(zpcount)?);
     for (n, zform) in zforms.iter().enumerate() {
-        h.set_internal(key!("TFORM{}", n + 1).as_str(), zform.clone());
+        h.set_internal(
+            Keyword::try_from(format_args!("TFORM{}", n + 1))?,
+            zform.clone(),
+        );
     }
     // The container's own heap pointer and checksums give way to the table's.
     h.remove_where(|keyword| {
         reserved_keywords::is_table_compression(keyword, ncols)
             || reserved_keywords::TABLE_PRESERVED
                 .iter()
-                .any(|&(table, _)| table == keyword)
+                .any(|&(table, _)| table.as_str() == keyword)
     });
     h.rename_keywords(
         &reserved_keywords::TABLE_PRESERVED.map(|(table, container)| (container, table)),
@@ -570,21 +576,23 @@ pub(crate) fn uncompress_table(header: &Header, table: TableView<'_>) -> Result<
 
 fn bind_table(header: &Header, table: TableView<'_>) -> Result<()> {
     let xtension = header
-        .get_text("XTENSION")?
-        .ok_or(FitsError::MissingKeyword { name: "XTENSION" })?;
+        .get_text(keywords::XTENSION)?
+        .ok_or(FitsError::MissingKeyword {
+            keyword: keywords::XTENSION,
+        })?;
     if xtension != "BINTABLE" {
         return Err(metadata_mismatch("XTENSION"));
     }
     for (keyword, expected) in [
-        ("BITPIX", 8usize),
-        ("NAXIS", 2),
-        ("NAXIS1", table.row_len),
-        ("NAXIS2", table.nrows),
-        ("GCOUNT", 1),
-        ("TFIELDS", table.columns.len()),
+        (keywords::BITPIX, 8usize),
+        (keywords::NAXIS, 2),
+        (keywords::NAXIS.indexed(1)?, table.row_len),
+        (keywords::NAXIS.indexed(2)?, table.nrows),
+        (keywords::GCOUNT, 1),
+        (keywords::TFIELDS, table.columns.len()),
     ] {
-        if header.required_usize(keyword, keyword)? != expected {
-            return Err(metadata_mismatch(keyword));
+        if header.require_usize(keyword)? != expected {
+            return Err(metadata_mismatch(keyword.as_str()));
         }
     }
     validate_table_field_count(table.columns.len())?;
@@ -598,10 +606,8 @@ fn bind_table(header: &Header, table: TableView<'_>) -> Result<()> {
         row_width = row_width
             .checked_add(column.tform.byte_width())
             .ok_or(FitsError::DataUnitOverflow)?;
-        let keyword = key!("TFORM{n}");
-        let tform = header
-            .get_text(keyword.as_str())?
-            .ok_or(FitsError::MissingKeyword { name: "TFORMn" })?;
+        let keyword = keywords::TFORM.indexed(n)?;
+        let tform = header.require_text(keyword)?;
         if Tform::parse(tform)? != column.tform {
             return Err(metadata_mismatch(keyword.as_str()));
         }
@@ -621,13 +627,13 @@ fn bind_table(header: &Header, table: TableView<'_>) -> Result<()> {
         return Err(metadata_mismatch("THEAP"));
     }
     let pcount = table.heap_end - rows.len();
-    if header.required_usize("PCOUNT", "PCOUNT")? != pcount {
+    if header.require_usize(keywords::PCOUNT)? != pcount {
         return Err(metadata_mismatch("PCOUNT"));
     }
-    let theap = match header.get_integer("THEAP")? {
-        Some(value) => {
-            usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { name: "THEAP" })?
-        }
+    let theap = match header.get_integer(keywords::THEAP)? {
+        Some(value) => usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange {
+            keyword: keywords::THEAP,
+        })?,
         None => rows.len(),
     };
     if theap != table.heap_offset {
@@ -637,11 +643,11 @@ fn bind_table(header: &Header, table: TableView<'_>) -> Result<()> {
 }
 
 fn reject_compression_metadata(header: &Header) -> Result<()> {
-    for entry in header.iter() {
+    for entry in header {
         if reserved_keywords::is_table_compression(entry.keyword, 999)
             || reserved_keywords::TABLE_PRESERVED
                 .iter()
-                .any(|&(_, container)| container == entry.keyword)
+                .any(|&(_, container)| container.as_str() == entry.keyword)
         {
             return Err(metadata_mismatch(entry.keyword));
         }

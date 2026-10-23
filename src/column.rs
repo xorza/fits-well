@@ -9,8 +9,8 @@
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Result;
-use crate::header_model::Header;
-use crate::keyword::key;
+use crate::header_model::{Header, keywords};
+use crate::keyword::Keyword;
 
 /// A table column that may carry a `TTYPEn` name.
 pub(crate) trait Named {
@@ -58,15 +58,15 @@ pub(crate) struct ColumnLabels {
 impl ColumnLabels {
     /// The labels of column `n` (1-based).
     pub(crate) fn read(header: &Header, n: usize) -> Result<Self> {
-        let text = |keyword: &str| -> Result<Option<String>> {
+        let text = |keyword: Keyword| -> Result<Option<String>> {
             Ok(header
                 .get_text(keyword)?
                 .filter(|value| !value.is_empty())
                 .map(str::to_string))
         };
         Ok(Self {
-            name: text(key!("TTYPE{n}").as_str())?,
-            unit: text(key!("TUNIT{n}").as_str())?,
+            name: text(keywords::TTYPE.indexed(n)?)?,
+            unit: text(keywords::TUNIT.indexed(n)?)?,
         })
     }
 }
@@ -87,8 +87,8 @@ impl ColumnScaling {
     /// The scaling of column `n` (1-based).
     pub(crate) fn read(header: &Header, n: usize) -> Result<Self> {
         Ok(Self {
-            tscale: header.get_real(key!("TSCAL{n}").as_str())?.unwrap_or(1.0),
-            tzero: header.get_real(key!("TZERO{n}").as_str())?.unwrap_or(0.0),
+            tscale: header.get_real(keywords::TSCAL.indexed(n)?)?.unwrap_or(1.0),
+            tzero: header.get_real(keywords::TZERO.indexed(n)?)?.unwrap_or(0.0),
         })
     }
 }

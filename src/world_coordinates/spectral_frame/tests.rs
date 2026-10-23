@@ -1,5 +1,6 @@
 use crate::error::FitsError;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
+
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::axis_transform::SPEED_OF_LIGHT;
 use crate::world_coordinates::axis_transform::spectral_rest::SpectralRest;
@@ -29,8 +30,8 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
 
     let mut by_frequency = velocity_axis("VELO-F2V");
     by_frequency
-        .set_internal("RESTFRQ", 1_420_405_751.0)
-        .set_internal("SPECSYS", "BARYCENT");
+        .set_internal(keywords::RESTFRQ, 1_420_405_751.0)
+        .set_internal(keywords::SPECSYS, "BARYCENT");
     let by_frequency = Wcs::from_header(&by_frequency, None).unwrap();
     assert_eq!(
         by_frequency.metadata().axes[0].spectral_frame,
@@ -44,7 +45,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         })
     );
     let mut by_wavelength = velocity_axis("VELO-F2V");
-    by_wavelength.set_internal("RESTWAV", SPEED_OF_LIGHT / 1_420_405_751.0);
+    by_wavelength.set_internal(keywords::RESTWAV, SPEED_OF_LIGHT / 1_420_405_751.0);
     let by_wavelength = Wcs::from_header(&by_wavelength, None).unwrap();
     assert!(
         (by_frequency.pixel_to_world(&[3.0]).unwrap()[0]
@@ -61,7 +62,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     ));
 
     let mut deprecated = velocity_axis("VELO-F2V");
-    deprecated.set_internal("RESTFREQ", 1_420_405_751.0);
+    deprecated.set_internal(keywords::RESTFREQ, 1_420_405_751.0);
     assert!(
         (Wcs::from_header(&deprecated, None)
             .unwrap()
@@ -73,10 +74,10 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     );
 
     let mut invalid = velocity_axis("VELO-F2V");
-    invalid.set_internal("RESTFRQ", 0.0);
+    invalid.set_internal(keywords::RESTFRQ, 0.0);
     assert!(matches!(
         Wcs::from_header(&invalid, None),
-        Err(FitsError::InvalidWcs { detail }) if detail.contains("RESTFRQ")
+        Err(FitsError::InvalidWcs { detail }) if detail.contains(keywords::RESTFRQ.as_str())
     ));
 
     let mut pixel_list = Header::new();
@@ -151,10 +152,10 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
 
     let mut alternate = Header::new();
     alternate
-        .set_internal("NAXIS", 1)
+        .set_internal(keywords::NAXIS, 1)
         .set_internal("CTYPE1", "WAVE")
         .set_internal("CTYPE1A", "FREQ")
-        .set_internal("SPECSYS", "GEOCENTR")
+        .set_internal(keywords::SPECSYS, "GEOCENTR")
         .set_internal("SPECSYSA", "CMBDIPOL")
         .set_internal("SSYSOBSA", "BARYCENT")
         .set_internal("RESTFRQA", 1_420_405_751.0);
@@ -177,7 +178,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     alternate.set_internal("SPECSYSA", "UNKNOWN");
     assert!(matches!(
         Wcs::from_header(&alternate, Some('A')),
-        Err(FitsError::InvalidWcs { detail }) if detail.contains("SPECSYS")
+        Err(FitsError::InvalidWcs { detail }) if detail.contains(keywords::SPECSYS.as_str())
     ));
 
     for (value, expected) in [
@@ -194,9 +195,9 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     ] {
         let mut header = Header::new();
         header
-            .set_internal("NAXIS", 1)
+            .set_internal(keywords::NAXIS, 1)
             .set_internal("CTYPE1", "WAVE")
-            .set_internal("SPECSYS", value);
+            .set_internal(keywords::SPECSYS, value);
         assert_eq!(
             Wcs::from_header(&header, None).unwrap().metadata().axes[0]
                 .spectral_frame

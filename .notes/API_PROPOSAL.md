@@ -2,7 +2,7 @@
 
 2026-10-23. This document puts every finding of `API_REVIEW.md` and every entry of `ISSUES.md` into one design and one plan of work. The review keeps the evidence: the `file:line` references and the comparison with other libraries. Here, each item names the review section that it answers.
 
-This proposal is temporary. When a phase lands, its decisions go into `docs/design.md`, and the items that it closes are removed from here and from `ISSUES.md`. Phase 1, the quiet traps, phase 2, the image reader, and phase 3, writing, have landed.
+This proposal is temporary. When a phase lands, its decisions go into `docs/design.md`, and the items that it closes are removed from here and from `ISSUES.md`. Phase 1, the quiet traps, phase 2, the image reader, phase 3, writing, and phase 4, header and HDU selection, have landed.
 
 ## Principles
 
@@ -13,76 +13,6 @@ This proposal is temporary. When a phase lands, its decisions go into `docs/desi
 - **No quiet result.** An operation that cannot do what its name says returns an error. It does not return the container, do nothing, or return `None`.
 
 ## The design
-
-### HDUs
-
-The review sections that this answers: "`HduSelector`" and "Classification".
-
-```rust
-pub enum HduSelector<'a> {
-    Index(usize),
-    Extension { name: &'a str, version: Option<i64>, level: Option<i64> },
-}   // From<usize>, From<&'a str>, From<(&'a str, i64)>
-
-impl<S: Source> FitsReader<S> {
-    pub fn hdu(&self, hdu: impl Into<HduSelector<'_>>) -> Result<&Hdu>;
-    pub fn hdu_index(&self, hdu: impl Into<HduSelector<'_>>) -> Result<usize>;   // FitsError::HduNotFound
-    pub fn images(&self) -> impl Iterator<Item = usize> + '_;
-}
-```
-
-- **Every reader method takes `impl Into<HduSelector>`.**
-- **A name matches `EXTNAME` case-insensitively.** A primary HDU with no `EXTNAME` matches `PRIMARY`, as in astropy.
-- **`Hdu::matches_extension` becomes `Hdu::matches(&HduSelector)`.** Then the reader and the HDU accept the same arguments, and `level` is no longer lost.
-- **`image_indices() -> Vec` becomes `images()`, an iterator.** "The first image" is `images().next()`, and the README uses it.
-- **`Hdu::image()` becomes `Hdu::image_metadata()`**, beside `Hdu::table_schema()`.
-- **New:** `Hdu::padded_data_bytes()`.
-
-### Header
-
-The review sections that this answers: "A typed `Keyword`", "Optional and required values", "Comments, commentary cards and collection traits", "`Value` conversions", and the `MissingKeyword` part of "Errors". It also closes the `get` case trap of `ISSUES.md`.
-
-```rust
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct Keyword { /* [u8; 8] and a length */ }
-impl Keyword {
-    pub const fn new(name: &str) -> Self;                          // panics on an invalid name; in a const, at compile time
-    pub fn indexed(root: Self, index: u32) -> Result<Self>;        // CTYPE + 2 = CTYPE2, with no allocation
-    pub fn as_str(&self) -> &str;
-}   // TryFrom<&str> for names from data; Display
-
-pub mod header::keywords { pub const SIMPLE: Keyword = …; /* the reserved keywords of §4.4 and of the conventions fits-well reads */ }
-
-impl Header {
-    pub fn get(&self, keyword: Keyword) -> Option<&Value>;
-    pub fn entry(&self, keyword: Keyword) -> Option<Entry<'_>>;              // value and comment
-    pub fn get_logical / get_integer / get_real / get_text(&self, Keyword) -> Result<Option<T>>;
-    pub fn require_logical / require_integer / require_real / require_text(&self, Keyword) -> Result<T>;   // MissingKeyword
-    pub fn set(&mut self, keyword: Keyword, value: impl Into<Value>) -> Result<&mut Self>;
-    pub fn set_optional(&mut self, keyword: Keyword, value: Option<impl Into<Value>>) -> Result<&mut Self>;   // None removes the card
-    pub fn set_comment(&mut self, keyword: Keyword, text: &str) -> Result<&mut Self>;    // KeywordNotFound when it is absent
-    pub fn len, is_empty, contains(Keyword), index_of(Keyword) -> Option<usize>;
-    pub fn history(&self) / comments(&self) -> impl ExactSizeIterator<Item = &str>;
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = Entry<'_>>;          // and IntoIterator for &Header
-}
-```
-
-**Why a type and not `&str`**
-- **The spelling trap goes away.** A lowercase or invalid name cannot become a `Keyword`, so the case trap of `get` cannot happen.
-- **Constants are checked at compile time.** lumos already names its keywords as constants: `const PRODUCT_KEYWORD: Keyword = Keyword::new("…")` fails the build on a typo.
-- **No allocation for indexed keywords.** `Keyword::indexed` replaces each `format!`.
-- **Parsing a header allocates less.** Today it allocates two `String`s for each valued card: the `Card` keyword (`header_model/card/mod.rs`) and the index key (`header_model/mod.rs:92`). A `Copy` key removes both.
-- **The reserved-keyword lists become constants that callers can use.** Today they are the `&str` arrays in `reserved_keywords.rs`.
-
-**`set` stays fallible.** A NaN or infinite real and non-ASCII text are invalid in FITS, so `Result` is honest. `h.set(A, 1)?.set(B, 2)?` already chains, so the `and_then` closures in lumos become `?`.
-
-**Errors:**
-- `MissingKeyword`, `KeywordOutOfRange` and `KeywordNotFound` carry a `Keyword`, so a caller can report a keyword that it made at run time. `MissingKeyword` also names the families that are not keywords today (`"ZFORMn"`, `"iCTYPn"`): those become the first absent member, such as `ZFORM3`.
-- `InvalidHeaderValue`'s keyword becomes a `Keyword`.
-
-**`Value` gets `From<usize>`, `From<f32>` and `From<u16>`.**
-
-**A risk:** the HIERARCH convention (ESO) has keywords longer than 8 bytes. fits-well does not support it today. Such a card parses as a commentary `HIERARCH` card, which an 8-byte `Keyword` holds. If support is added later, `Keyword` gets a long form. The API stays the same.
 
 ### Tables
 
@@ -139,11 +69,6 @@ The review sections that this answers: "Best-effort access", "Batch transforms" 
 | A general split of the header borrow from the data borrow | The image handle covers the read path, because `ImageReader::header` outlives the handle borrow. The other clone (`product/mod.rs:150`) copies one header for each file, which is small and not on a hot path. |
 | Verify while reading a bundle | lumos verifies before it trusts a byte, on purpose. |
 | A helper for the row chunks of an N-D plane | The ranges are a stack array. lumos's two copies of this code are lumos's own duplication. |
-| Range-checked getters | The ranges come from the lumos domain. `require_*` covers the general need. |
-| `set_with_comment` | `set(…)?.set_comment(…)` does the same, now that `set_comment` fails on a missing keyword. |
-| An infallible `set` | A NaN real and non-ASCII text are invalid in FITS. |
-| `first_image()` | This is `images().next()`. |
-| `Hdu::has_pixels()` | Fixing `is_image` is the better change. |
 
 ## Plan
 
@@ -153,34 +78,6 @@ Each phase is one change to fits-well and its lumos migration. No phase keeps an
 - In fits-well, run `cargo drive gate`.
 - From the Darkroom root, run `cargo drive check` and `cargo drive test`.
 - Run `cargo drive surface` in fits-well, and review its diff as the record of the API change.
-
-### Phase 4: header and HDU selection
-
-This phase changes the most call sites, about 280 in lumos, so it is one phase. It does not change data paths.
-
-1. `Keyword`, `Keyword::indexed`, and `header::keywords` (from `reserved_keywords.rs`).
-   - `Card`, the index and every `Header` method take `Keyword`.
-   - `MissingKeyword`, `KeywordOutOfRange` and `InvalidHeaderValue` carry it.
-2. `require_*`, `set_optional`, `set_comment` (renamed from `comment`), `entry`, `history`, `comments`, `len`, `is_empty`, `contains` and `index_of`.
-   - `iter()` becomes `ExactSizeIterator`, and `IntoIterator for &Header` is new.
-3. `Value: From<usize>`, `From<f32>` and `From<u16>`.
-4. `HduSelector` on every reader method, `hdu`, `hdu_index -> Result<usize>`, `images()`, `Hdu::matches` and `Hdu::image_metadata`. Add `FitsError::HduNotFound`.
-
-**Tests**
-- `Keyword::new` refuses lowercase, length 9, and a character outside the set. Test this through `TryFrom`, which uses the same check.
-- `Keyword::indexed(CTYPE, 2)` gives `CTYPE2`, and `(NAXIS, 1000)` gives an error.
-- Each `require_*` gives absent → `MissingKeyword` and wrong type → `TypeMismatch`.
-- `set_optional(None)` removes an existing card.
-- `HduSelector` from index, name, `(name, version)` and `PRIMARY`, and the not-found error.
-- A header-parse bench before and after, as the evidence for the allocation claim.
-
-**lumos**
-- Its keyword constants become `Keyword`.
-- The `format!` keywords become `Keyword::indexed`.
-- `set_optional_*` (three functions), `missing()` and the `and_then` chains go away.
-- The hand-written `EXTNAME` matches use `HduSelector` (`lumos_extension.rs:194`, `calibration_bundle/mod.rs:192`, `extension_claims.rs:81,106`).
-- `ISSUES.md` loses the `get` case entry.
-- The README picks the first image with `images().next()`.
 
 ### Phase 5: tables and names
 
@@ -210,8 +107,7 @@ This phase changes the most call sites, about 280 in lumos, so it is one phase. 
 
 | Phase | fits-well | lumos | Depends on |
 |---|---|---|---|
-| 4. Header and HDU selection | large: `header_model`, `reader`, `error` | large: about 280 call sites | none |
-| 5. Tables and names | medium: `compress/table`, `bintable`, renames | small | 4, which brings selectors |
-| 6. Small items | small | small | 4 |
+| 5. Tables and names | medium: `compress/table`, `bintable`, renames | small | none |
+| 6. Small items | small | small | none |
 
-Phase 4 comes next, and phases 5 and 6 build on it.
+Phases 5 and 6 are independent, so either can go first.

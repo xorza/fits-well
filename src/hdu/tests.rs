@@ -80,7 +80,9 @@ fn rejects_negative_pcount_and_gcount_instead_of_clamping() {
     ]);
     assert!(matches!(
         data_extent(&neg_pcount, HduRole::Extension),
-        Err(FitsError::KeywordOutOfRange { name: "PCOUNT" })
+        Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::PCOUNT
+        })
     ));
 
     let negative_gcount = header(&[
@@ -93,11 +95,13 @@ fn rejects_negative_pcount_and_gcount_instead_of_clamping() {
     ]);
     assert!(matches!(
         data_extent(&negative_gcount, HduRole::Extension),
-        Err(FitsError::KeywordOutOfRange { name: "GCOUNT" })
+        Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::GCOUNT
+        })
     ));
 
     let mut mistyped_pcount = neg_pcount;
-    mistyped_pcount.set_internal("PCOUNT", "not an integer");
+    mistyped_pcount.set_internal(keywords::PCOUNT, "not an integer");
     assert!(matches!(
         data_extent(&mistyped_pcount, HduRole::Extension),
         Err(FitsError::TypeMismatch { name, expected })
@@ -200,7 +204,9 @@ fn role_specific_extents_require_counts_and_ignore_groups_on_extensions() {
     ]);
     assert!(matches!(
         data_extent(&missing_counts, HduRole::Extension),
-        Err(FitsError::MissingKeyword { name: "PCOUNT" })
+        Err(FitsError::MissingKeyword {
+            keyword: keywords::PCOUNT
+        })
     ));
 
     let missing_gcount = header(&[
@@ -212,7 +218,9 @@ fn role_specific_extents_require_counts_and_ignore_groups_on_extensions() {
     ]);
     assert!(matches!(
         data_extent(&missing_gcount, HduRole::Extension),
-        Err(FitsError::MissingKeyword { name: "GCOUNT" })
+        Err(FitsError::MissingKeyword {
+            keyword: keywords::GCOUNT
+        })
     ));
 
     let extension_with_groups = header(&[
@@ -234,7 +242,9 @@ fn random_groups_role_requires_the_zero_first_axis_signature() {
     let no_axes = header(&["SIMPLE  = T", "BITPIX  = 8", "NAXIS   = 0", "GROUPS  = T"]);
     assert!(matches!(
         HduRole::from_header(&no_axes, HduPosition::Primary),
-        Err(FitsError::KeywordOutOfRange { name: "NAXIS" })
+        Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::NAXIS
+        })
     ));
 
     let nonzero_first_axis = header(&[
@@ -246,6 +256,6 @@ fn random_groups_role_requires_the_zero_first_axis_signature() {
     ]);
     assert!(matches!(
         HduRole::from_header(&nonzero_first_axis, HduPosition::Primary),
-        Err(FitsError::KeywordOutOfRange { name: "NAXIS1" })
+        Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "NAXIS1"
     ));
 }

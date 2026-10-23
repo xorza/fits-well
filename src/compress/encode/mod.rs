@@ -14,15 +14,14 @@ use crate::compress::tile_geometry::TileGeometry;
 use crate::compress::tile_geometry::TileScratch;
 use crate::compress::{CompressionConfig, ImageCodec, map_tiles};
 use crate::compress::{gzip, hcompress, plio, quantize, rice};
+use crate::header_model::{Header, keywords, value};
 
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Ranked;
 use crate::error::Result;
-use crate::header_model::Header;
-use crate::header_model::value;
 use crate::image_model::view::Borrowed;
-use crate::keyword::key;
+use crate::keyword::Keyword;
 
 /// Per-worker tile-encode scratch, reused across the tiles one rayon worker
 /// handles (via `map_tiles`'s `init`): the tile geometry plus the gather and codec
@@ -53,7 +52,9 @@ pub(crate) fn compress_image(
     out: &mut Vec<u8>,
 ) -> Result<Header> {
     if image.shape.len() > 999 {
-        return Err(FitsError::KeywordOutOfRange { name: "NAXIS" });
+        return Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::NAXIS,
+        });
     }
     let total = image.samples.len();
     let compression = config.codec;
@@ -177,17 +178,17 @@ pub(crate) fn compress_image(
 
     let tform_letter = if codec == ImageCodec::Plio1 { 'I' } else { 'B' };
     let mut h = container_header(descriptor_width, ntiles, heap_len, 1)?;
-    h.set_internal("TTYPE1", "COMPRESSED_DATA");
+    h.set_internal(keywords::TTYPE.indexed(1)?, "COMPRESSED_DATA");
     h.set_internal(
-        "TFORM1",
+        keywords::TFORM.indexed(1)?,
         format!("1{}{tform_letter}({maxnelem})", width.letter()),
     );
     set_zimage_axes(&mut h, compression.name(), bitpix.bitpix(), dims, &tiles)?;
     match codec {
-        ImageCodec::Rice1 => set_rice_parameters(&mut h, bitpix),
+        ImageCodec::Rice1 => set_rice_parameters(&mut h, bitpix)?,
         ImageCodec::Hcompress1 => {
-            h.set_internal("ZNAME1", "SCALE")
-                .set_internal("ZVAL1", scale);
+            h.set_internal(keywords::ZNAME.indexed(1)?, "SCALE")
+                .set_internal(keywords::ZVAL.indexed(1)?, scale);
         }
         _ => {}
     }
@@ -199,23 +200,31 @@ pub(crate) fn compress_image(
 /// `ntiles` rows of `row_len` bytes, a heap of `heap_len` bytes, `fields` columns.
 fn container_header(row_len: usize, ntiles: usize, heap_len: usize, fields: i64) -> Result<Header> {
     let mut h = Header::new();
-    h.set_internal("XTENSION", "BINTABLE")
-        .comment_internal("XTENSION", "binary table extension");
-    h.set_internal("BITPIX", 8).set_internal("NAXIS", 2);
-    h.set_internal("NAXIS1", value::fits_i64(row_len)?)
-        .set_internal("NAXIS2", value::fits_i64(ntiles)?);
-    h.set_internal("PCOUNT", value::fits_i64(heap_len)?)
-        .set_internal("GCOUNT", 1);
-    h.set_internal("TFIELDS", fields);
+    h.set_internal(keywords::XTENSION, "BINTABLE")
+        .set_comment_internal(keywords::XTENSION, "binary table extension");
+    h.set_internal(keywords::BITPIX, 8)
+        .set_internal(keywords::NAXIS, 2);
+    h.set_internal(keywords::NAXIS.indexed(1)?, value::fits_i64(row_len)?)
+        .set_internal(keywords::NAXIS.indexed(2)?, value::fits_i64(ntiles)?);
+    h.set_internal(keywords::PCOUNT, value::fits_i64(heap_len)?)
+        .set_internal(keywords::GCOUNT, 1);
+    h.set_internal(keywords::TFIELDS, fields);
     Ok(h)
 }
 
 /// The `RICE_1` parameters every stream fits-well writes uses (§10.4.1 Table 37).
-fn set_rice_parameters(h: &mut Header, bytepix: IntBitpix) {
-    h.set_internal("ZNAME1", "BLOCKSIZE")
-        .set_internal("ZVAL1", i64::try_from(rice::BLOCKSIZE).unwrap());
-    h.set_internal("ZNAME2", "BYTEPIX")
-        .set_internal("ZVAL2", i64::try_from(bytepix.elem_size()).unwrap());
+fn set_rice_parameters(h: &mut Header, bytepix: IntBitpix) -> Result<()> {
+    h.set_internal(keywords::ZNAME.indexed(1)?, "BLOCKSIZE")
+        .set_internal(
+            keywords::ZVAL.indexed(1)?,
+            i64::try_from(rice::BLOCKSIZE).unwrap(),
+        );
+    h.set_internal(keywords::ZNAME.indexed(2)?, "BYTEPIX")
+        .set_internal(
+            keywords::ZVAL.indexed(2)?,
+            i64::try_from(bytepix.elem_size()).unwrap(),
+        );
+    Ok(())
 }
 
 fn hcompress_tile_scale(
@@ -412,24 +421,24 @@ fn compress_float_image(
     }
 
     let mut h = container_header(32, ntiles, heap_len, 4)?;
-    h.set_internal("TTYPE1", "COMPRESSED_DATA")
-        .set_internal("TFORM1", format!("1PB({max_cd})"));
-    h.set_internal("TTYPE2", "GZIP_COMPRESSED_DATA")
-        .set_internal("TFORM2", format!("1PB({max_gz})"));
-    h.set_internal("TTYPE3", "ZSCALE")
-        .set_internal("TFORM3", "1D");
-    h.set_internal("TTYPE4", "ZZERO")
-        .set_internal("TFORM4", "1D");
+    h.set_internal(keywords::TTYPE.indexed(1)?, "COMPRESSED_DATA")
+        .set_internal(keywords::TFORM.indexed(1)?, format!("1PB({max_cd})"));
+    h.set_internal(keywords::TTYPE.indexed(2)?, "GZIP_COMPRESSED_DATA")
+        .set_internal(keywords::TFORM.indexed(2)?, format!("1PB({max_gz})"));
+    h.set_internal(keywords::TTYPE.indexed(3)?, "ZSCALE")
+        .set_internal(keywords::TFORM.indexed(3)?, "1D");
+    h.set_internal(keywords::TTYPE.indexed(4)?, "ZZERO")
+        .set_internal(keywords::TFORM.indexed(4)?, "1D");
     set_zimage_axes(&mut h, compression.name(), zbitpix.bitpix(), dims, &tiles)?;
     if codec == ImageCodec::Rice1 {
-        set_rice_parameters(&mut h, IntBitpix::I32);
+        set_rice_parameters(&mut h, IntBitpix::I32)?;
     }
-    h.set_internal("ZQUANTIZ", method.name());
-    h.set_internal("ZDITHER0", zdither0);
+    h.set_internal(keywords::ZQUANTIZ, method.name());
+    h.set_internal(keywords::ZDITHER0, zdither0);
     if any_null {
         // Quantized nulls are stored as this reserved integer; ZBLANK tells the
         // decoder which value maps back to a blank (NaN) pixel.
-        h.set_internal("ZBLANK", i64::from(quantize::NULL_VALUE));
+        h.set_internal(keywords::ZBLANK, i64::from(quantize::NULL_VALUE));
     }
     image.scaling.add_to_header(&mut h, zbitpix.bitpix())?;
     Ok(h)
@@ -554,16 +563,22 @@ fn set_zimage_axes(
     dims: &[usize],
     tiles: &[usize],
 ) -> Result<()> {
-    h.set_internal("ZIMAGE", true)
-        .comment_internal("ZIMAGE", "this is a tiled-compressed image");
-    h.set_internal("ZCMPTYPE", cmptype);
-    h.set_internal("ZBITPIX", zbitpix.code());
-    h.set_internal("ZNAXIS", value::fits_i64(dims.len())?);
+    h.set_internal(keywords::ZIMAGE, true)
+        .set_comment_internal(keywords::ZIMAGE, "this is a tiled-compressed image");
+    h.set_internal(keywords::ZCMPTYPE, cmptype);
+    h.set_internal(keywords::ZBITPIX, zbitpix.code());
+    h.set_internal(keywords::ZNAXIS, value::fits_i64(dims.len())?);
     for (i, &n) in dims.iter().enumerate() {
-        h.set_internal(key!("ZNAXIS{}", i + 1).as_str(), value::fits_i64(n)?);
+        h.set_internal(
+            Keyword::try_from(format_args!("ZNAXIS{}", i + 1))?,
+            value::fits_i64(n)?,
+        );
     }
     for (i, &t) in tiles.iter().enumerate() {
-        h.set_internal(key!("ZTILE{}", i + 1).as_str(), value::fits_i64(t)?);
+        h.set_internal(
+            Keyword::try_from(format_args!("ZTILE{}", i + 1))?,
+            value::fits_i64(t)?,
+        );
     }
     Ok(())
 }

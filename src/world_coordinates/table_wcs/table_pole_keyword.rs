@@ -1,4 +1,6 @@
 //! The two celestial-pole keywords, in their image and Table-22 spellings.
+use crate::header_model::keywords;
+use crate::keyword::Keyword;
 
 /// One of the two celestial-pole keywords, `LONPOLEa` or `LATPOLEa`.
 #[derive(Debug, Clone, Copy)]
@@ -19,10 +21,10 @@ impl TablePoleKeyword {
     }
 
     /// The image-header root this translates to.
-    pub(super) const fn image_root(self) -> &'static str {
+    pub(super) const fn image_root(self) -> Keyword {
         match self {
-            Self::Longitude => "LONPOLE",
-            Self::Latitude => "LATPOLE",
+            Self::Longitude => keywords::LONPOLE,
+            Self::Latitude => keywords::LATPOLE,
         }
     }
 }

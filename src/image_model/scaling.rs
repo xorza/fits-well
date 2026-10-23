@@ -4,7 +4,7 @@
 use crate::bitpix::Bitpix;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
 use crate::image_model::sample_type::{SampleType, UnsignedKind};
 use crate::image_model::{U64_OFFSET, U64_OFFSET_INTEGER};
 
@@ -34,9 +34,9 @@ impl Scaling {
     /// The public entry point is [`Header::scaling`](crate::header_model::Header::scaling).
     pub(crate) fn from_header(header: &Header) -> Result<Self> {
         Ok(Self {
-            bscale: header.get_real("BSCALE")?.unwrap_or(1.0),
-            bzero: header.get_real("BZERO")?.unwrap_or(0.0),
-            blank: header.get_integer("BLANK")?,
+            bscale: header.get_real(keywords::BSCALE)?.unwrap_or(1.0),
+            bzero: header.get_real(keywords::BZERO)?.unwrap_or(0.0),
+            blank: header.get_integer(keywords::BLANK)?,
         })
     }
 
@@ -69,10 +69,14 @@ impl Scaling {
 
     pub(crate) fn validate(&self, bitpix: Bitpix) -> Result<()> {
         if !self.bscale.is_finite() {
-            return Err(FitsError::KeywordOutOfRange { name: "BSCALE" });
+            return Err(FitsError::KeywordOutOfRange {
+                keyword: keywords::BSCALE,
+            });
         }
         if !self.bzero.is_finite() {
-            return Err(FitsError::KeywordOutOfRange { name: "BZERO" });
+            return Err(FitsError::KeywordOutOfRange {
+                keyword: keywords::BZERO,
+            });
         }
         let Some(blank) = self.blank else {
             return Ok(());
@@ -85,7 +89,9 @@ impl Scaling {
             Bitpix::F32 | Bitpix::F64 => false,
         };
         if !valid {
-            return Err(FitsError::KeywordOutOfRange { name: "BLANK" });
+            return Err(FitsError::KeywordOutOfRange {
+                keyword: keywords::BLANK,
+            });
         }
         Ok(())
     }
@@ -94,14 +100,14 @@ impl Scaling {
         self.validate(bitpix)?;
         if !self.is_identity() {
             if bitpix == Bitpix::I64 && self.bscale == 1.0 && self.bzero == U64_OFFSET {
-                header.set_internal("BZERO", U64_OFFSET_INTEGER);
+                header.set_internal(keywords::BZERO, U64_OFFSET_INTEGER);
             } else {
-                header.set_internal("BZERO", self.bzero);
+                header.set_internal(keywords::BZERO, self.bzero);
             }
-            header.set_internal("BSCALE", self.bscale);
+            header.set_internal(keywords::BSCALE, self.bscale);
         }
         if let Some(blank) = self.blank {
-            header.set_internal("BLANK", blank);
+            header.set_internal(keywords::BLANK, blank);
         }
         Ok(())
     }

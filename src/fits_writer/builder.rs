@@ -28,11 +28,9 @@ use crate::fits_writer::{
     FitsWriter, Opening, ROW_COUNT_FIXED, accept_row_count, validate_scaling,
 };
 use crate::hdu::validate_table_field_count;
-use crate::header_model::Header;
 use crate::header_model::card::validate_ascii;
-use crate::header_model::value;
+use crate::header_model::{Header, keywords, value};
 use crate::image_model::{U64_OFFSET, U64_OFFSET_INTEGER};
-use crate::keyword::key;
 use crate::ragged::Ragged;
 
 /// The element type of a binary-table writer column.
@@ -336,8 +334,8 @@ impl Builder {
         value::fits_i64(nrows)?;
         let mut columns = Vec::with_capacity(self.columns.len());
         let mut row_len = 0usize;
-        for col in &self.columns {
-            let layout = validate_column(col, nrows)?;
+        for (i, col) in self.columns.iter().enumerate() {
+            let layout = validate_column(col, nrows, i + 1)?;
             row_len = row_len
                 .checked_add(layout.row_width)
                 .ok_or(FitsError::DataUnitOverflow)?;
@@ -562,34 +560,36 @@ fn bintable_header(
 ) -> Result<Header> {
     let mut header = Header::new();
     header
-        .set_internal("XTENSION", "BINTABLE")
-        .comment_internal("XTENSION", "binary table extension");
-    header.set_internal("BITPIX", 8).set_internal("NAXIS", 2);
+        .set_internal(keywords::XTENSION, "BINTABLE")
+        .set_comment_internal(keywords::XTENSION, "binary table extension");
     header
-        .set_internal("NAXIS1", value::fits_i64(row_len)?)
-        .comment_internal("NAXIS1", "width of table in bytes");
+        .set_internal(keywords::BITPIX, 8)
+        .set_internal(keywords::NAXIS, 2);
     header
-        .set_internal("NAXIS2", value::fits_i64(nrows)?)
-        .comment_internal("NAXIS2", "number of rows");
+        .set_internal(keywords::NAXIS.indexed(1)?, value::fits_i64(row_len)?)
+        .set_comment_internal(keywords::NAXIS.indexed(1)?, "width of table in bytes");
     header
-        .set_internal("PCOUNT", value::fits_i64(heap_len)?)
-        .set_internal("GCOUNT", 1);
+        .set_internal(keywords::NAXIS.indexed(2)?, value::fits_i64(nrows)?)
+        .set_comment_internal(keywords::NAXIS.indexed(2)?, "number of rows");
     header
-        .set_internal("TFIELDS", value::fits_i64(columns.len())?)
-        .comment_internal("TFIELDS", "number of columns");
+        .set_internal(keywords::PCOUNT, value::fits_i64(heap_len)?)
+        .set_internal(keywords::GCOUNT, 1);
+    header
+        .set_internal(keywords::TFIELDS, value::fits_i64(columns.len())?)
+        .set_comment_internal(keywords::TFIELDS, "number of columns");
     for (i, (col, layout)) in columns.iter().zip(layouts).enumerate() {
         let n = i + 1;
-        header.set_internal(key!("TFORM{n}").as_str(), layout.tform.as_str());
-        header.set_internal(key!("TTYPE{n}").as_str(), col.name.as_str());
+        header.set_internal(keywords::TFORM.indexed(n)?, layout.tform.as_str());
+        header.set_internal(keywords::TTYPE.indexed(n)?, col.name.as_str());
         if let Some(unit) = &col.unit {
-            header.set_internal(key!("TUNIT{n}").as_str(), unit.as_str());
+            header.set_internal(keywords::TUNIT.indexed(n)?, unit.as_str());
         }
         if let Some(shape) = &col.tdim {
             let dims: Vec<String> = shape.iter().map(ToString::to_string).collect();
-            header.set_internal(key!("TDIM{n}").as_str(), format!("({})", dims.join(",")));
+            header.set_internal(keywords::TDIM.indexed(n)?, format!("({})", dims.join(",")));
         }
         if let Some(tscale) = col.tscale {
-            header.set_internal(key!("TSCAL{n}").as_str(), tscale);
+            header.set_internal(keywords::TSCAL.indexed(n)?, tscale);
         }
         if let Some(tzero) = col.tzero {
             let stores_i64 = match &col.values {
@@ -598,13 +598,13 @@ fn bintable_header(
                 WriteColumnData::VlaBits { .. } | WriteColumnData::Bits { .. } => false,
             };
             if stores_i64 && col.tscale.unwrap_or(1.0) == 1.0 && tzero == U64_OFFSET {
-                header.set_internal(key!("TZERO{n}").as_str(), U64_OFFSET_INTEGER);
+                header.set_internal(keywords::TZERO.indexed(n)?, U64_OFFSET_INTEGER);
             } else {
-                header.set_internal(key!("TZERO{n}").as_str(), tzero);
+                header.set_internal(keywords::TZERO.indexed(n)?, tzero);
             }
         }
         if let Some(tnull) = col.tnull {
-            header.set_internal(key!("TNULL{n}").as_str(), tnull);
+            header.set_internal(keywords::TNULL.indexed(n)?, tnull);
         }
     }
     Ok(header)
@@ -710,7 +710,9 @@ fn write_vla_descriptor(
     )
 }
 
-fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
+/// The layout of `col`, the table's column `n`, after checking it.
+fn validate_column(col: &WriteColumn, nrows: usize, n: usize) -> Result<ColumnLayout> {
+    let tdim_keyword = keywords::TDIM.indexed(n)?;
     validate_ascii(&col.name, "binary column name")?;
     if let Some(unit) = &col.unit {
         validate_ascii(unit, "binary column unit")?;
@@ -718,7 +720,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
     match &col.values {
         WriteColumnData::Fixed { data, repeat } => {
             let kind = ColumnType::from_data(data);
-            validate_binary_metadata(col, kind.letter())?;
+            validate_binary_metadata(col, kind.letter(), n)?;
             assert_eq!(data.element_count(), nrows * repeat, "{ROW_COUNT_FIXED}");
             if let ColumnData::Character(bytes) = data
                 && *repeat > 0
@@ -727,7 +729,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                     validate_character(CharacterField::new(field), "binary character cell")?;
                 }
             }
-            tdim::validate_declared(col.tdim.as_deref(), *repeat)?;
+            tdim::validate_declared(col.tdim.as_deref(), *repeat, tdim_keyword)?;
             Ok(ColumnLayout {
                 row_width: repeat
                     .checked_mul(kind.elem_size())
@@ -737,7 +739,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
         }
         WriteColumnData::Vla { rows, width } => {
             let kind = ColumnType::from_data(rows.values());
-            validate_binary_metadata(col, kind.letter())?;
+            validate_binary_metadata(col, kind.letter(), n)?;
             assert_eq!(rows.len(), nrows, "{ROW_COUNT_FIXED}");
             let mut max_elements = 0usize;
             for r in 0..rows.len() {
@@ -749,7 +751,7 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
                     )?;
                 }
                 max_elements = max_elements.max(range.len());
-                tdim::validate_declared_vla(col.tdim.as_deref(), range.len())?;
+                tdim::validate_declared_vla(col.tdim.as_deref(), range.len(), tdim_keyword)?;
             }
             Ok(ColumnLayout {
                 row_width: width.bytes(),
@@ -757,13 +759,13 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
             })
         }
         WriteColumnData::VlaBits { rows, width } => {
-            validate_binary_metadata(col, 'X')?;
+            validate_binary_metadata(col, 'X', n)?;
             assert_eq!(rows.len(), nrows, "{ROW_COUNT_FIXED}");
             let mut max_bits = 0usize;
             for r in 0..rows.len() {
                 let bits = rows.range(r).len();
                 max_bits = max_bits.max(bits);
-                tdim::validate_declared_vla(col.tdim.as_deref(), bits)?;
+                tdim::validate_declared_vla(col.tdim.as_deref(), bits, tdim_keyword)?;
             }
             Ok(ColumnLayout {
                 row_width: width.bytes(),
@@ -771,10 +773,10 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
             })
         }
         WriteColumnData::Bits { bytes, bit_count } => {
-            validate_binary_metadata(col, 'X')?;
+            validate_binary_metadata(col, 'X', n)?;
             let row_width = bit_count.div_ceil(8);
             assert_eq!(bytes.len(), nrows * row_width, "{ROW_COUNT_FIXED}");
-            tdim::validate_declared(col.tdim.as_deref(), *bit_count)?;
+            tdim::validate_declared(col.tdim.as_deref(), *bit_count, tdim_keyword)?;
             Ok(ColumnLayout {
                 row_width,
                 tform: format!("{bit_count}X"),
@@ -783,11 +785,12 @@ fn validate_column(col: &WriteColumn, nrows: usize) -> Result<ColumnLayout> {
     }
 }
 
-fn validate_binary_metadata(col: &WriteColumn, stored_type: char) -> Result<()> {
+fn validate_binary_metadata(col: &WriteColumn, stored_type: char, n: usize) -> Result<()> {
     validate_scaling(
         col.tscale,
         col.tzero,
         !matches!(stored_type, 'A' | 'L' | 'X'),
+        n,
     )?;
     let Some(tnull) = col.tnull else {
         return Ok(());
@@ -800,7 +803,9 @@ fn validate_binary_metadata(col: &WriteColumn, stored_type: char) -> Result<()> 
         _ => false,
     };
     if !valid {
-        return Err(FitsError::KeywordOutOfRange { name: "TNULLn" });
+        return Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::TNULL.indexed(n)?,
+        });
     }
     Ok(())
 }

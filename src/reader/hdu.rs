@@ -6,8 +6,9 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::HduKind;
 use crate::hdu::image_geometry::ImageGeometry;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
 use crate::image_model::Metadata;
+use crate::reader::hdu_selector::HduSelector;
 
 /// One Header/Data Unit located by the reader.
 ///
@@ -19,6 +20,8 @@ use crate::image_model::Metadata;
 /// [`FitsReader::read_data_raw`]: crate::FitsReader::read_data_raw
 #[derive(Debug)]
 pub struct Hdu {
+    /// The HDU's 0-based position in the file.
+    pub index: usize,
     pub header: Header,
     pub kind: HduKind,
     /// One's-complement sum of the exact block-padded header bytes as read.
@@ -41,6 +44,7 @@ impl Hdu {
     /// does not resolve leaves its HDU readable for what it does hold — the rest of
     /// the file, and the header itself.
     pub(crate) fn new(
+        index: usize,
         header: Header,
         kind: HduKind,
         header_sum: u32,
@@ -48,6 +52,7 @@ impl Hdu {
         data_bytes: u64,
     ) -> Self {
         Self {
+            index,
             image: ImageGeometry::from_header(&header, kind).ok(),
             table: table_schema(&header, kind).ok(),
             header,
@@ -62,11 +67,11 @@ impl Hdu {
     /// image extension or a tiled-compressed image whose `NAXIS` (`ZNAXIS` for a
     /// compressed image) is above 0. `NAXIS = 0` holds no array, whatever the kind; a
     /// rank that does not parse is none either. The other image keywords are not
-    /// judged: [`Hdu::image`] reports why they do not resolve.
+    /// judged: [`Hdu::image_metadata`] reports why they do not resolve.
     pub fn is_image(&self) -> bool {
         let rank = match self.kind {
-            HduKind::Primary | HduKind::Image => self.header.get_integer("NAXIS"),
-            HduKind::CompressedImage => self.header.get_integer("ZNAXIS"),
+            HduKind::Primary | HduKind::Image => self.header.get_integer(keywords::NAXIS),
+            HduKind::CompressedImage => self.header.get_integer(keywords::ZNAXIS),
             HduKind::AsciiTable
             | HduKind::BinTable
             | HduKind::CompressedTable
@@ -76,31 +81,37 @@ impl Hdu {
         rank.is_ok_and(|rank| rank.is_some_and(|rank| rank > 0))
     }
 
-    /// Whether this HDU's `EXTNAME` matches `name` case-insensitively, with `version`
-    /// and `level` (`EXTVER`/`EXTLEVEL`, each 1 where the card is absent, §4.4.1)
-    /// narrowing the match when given. `EXTVER`/`EXTLEVEL` are read only once the
-    /// name matches, so a malformed version card on an unrelated HDU cannot fail a
-    /// lookup.
-    pub fn matches_extension(
-        &self,
-        name: &str,
-        version: Option<i64>,
-        level: Option<i64>,
-    ) -> Result<bool> {
-        let name_matches = self
-            .header
-            .get_text("EXTNAME")?
-            .is_some_and(|value| value.eq_ignore_ascii_case(name));
-        if !name_matches {
+    /// Whether `selector` names this HDU, as [`HduSelector`] states. `EXTVER` and
+    /// `EXTLEVEL` are read only once the name matches, so a malformed version card on
+    /// an unrelated HDU cannot fail a lookup.
+    pub fn matches<'a>(&self, selector: impl Into<HduSelector<'a>>) -> Result<bool> {
+        self.matches_selector(selector.into())
+    }
+
+    fn matches_selector(&self, selector: HduSelector<'_>) -> Result<bool> {
+        let (name, version, level) = match selector {
+            HduSelector::Index(index) => return Ok(index == self.index),
+            HduSelector::Extension {
+                name,
+                version,
+                level,
+            } => (name, version, level),
+        };
+        let own_name = match self.header.get_text(keywords::EXTNAME)? {
+            Some(own_name) => own_name,
+            None if self.index == 0 => "PRIMARY",
+            None => return Ok(false),
+        };
+        if !own_name.eq_ignore_ascii_case(name) {
             return Ok(false);
         }
         if let Some(version) = version
-            && self.header.get_integer("EXTVER")?.unwrap_or(1) != version
+            && self.header.get_integer(keywords::EXTVER)?.unwrap_or(1) != version
         {
             return Ok(false);
         }
         if let Some(level) = level
-            && self.header.get_integer("EXTLEVEL")?.unwrap_or(1) != level
+            && self.header.get_integer(keywords::EXTLEVEL)?.unwrap_or(1) != level
         {
             return Ok(false);
         }
@@ -118,7 +129,7 @@ impl Hdu {
     /// [`FitsError::NotAnImage`] for any other kind, with
     /// [`FitsError::ImageHasGroups`] for a plain image with group structure, and with
     /// the header's own error when its image keywords are malformed.
-    pub fn image(&self) -> Result<Metadata<'_>> {
+    pub fn image_metadata(&self) -> Result<Metadata<'_>> {
         self.image_geometry().map(ImageGeometry::metadata)
     }
 

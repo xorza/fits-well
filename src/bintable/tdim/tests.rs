@@ -2,6 +2,8 @@ use crate::bintable::Table;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::internals::table_header;
 use crate::error::FitsError;
+use crate::header_model::keywords;
+
 use crate::ragged::Ragged;
 use bitvec::bitvec;
 use bitvec::order::Msb0;
@@ -15,12 +17,12 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
         fixed.set_internal("TDIM1", invalid);
         assert!(matches!(
             Table::from_data(&fixed, vec![0; 16]),
-            Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
+            Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "TDIM1"
         ));
     }
 
     let mut vla = table_header(8, 1, &["1PJ"]);
-    vla.set_internal("PCOUNT", 12)
+    vla.set_internal(keywords::PCOUNT, 12)
         .set_internal("TDIM1", "(2,2)");
     let mut data = Vec::new();
     data.extend_from_slice(&3i32.to_be_bytes());
@@ -31,12 +33,12 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
     let table = Table::from_data(&vla, data).unwrap();
     assert!(matches!(
         table.column_by_idx(0).unwrap().vla(),
-        Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
+        Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "TDIM1"
     ));
 
     let mut mixed = table_header(24, 2, &["1PJ", "1QI"]);
     mixed
-        .set_internal("PCOUNT", 24)
+        .set_internal(keywords::PCOUNT, 24)
         .set_internal("TDIM1", "(2,2)")
         .set_internal("TDIM2", "(2,2)");
     let mut data = Vec::new();
@@ -75,7 +77,7 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
 
     let mut mixed_bits = table_header(24, 2, &["1PX", "1QX"]);
     mixed_bits
-        .set_internal("PCOUNT", 4)
+        .set_internal(keywords::PCOUNT, 4)
         .set_internal("TDIM1", "(3,3)")
         .set_internal("TDIM2", "(3,3)");
     let mut data = Vec::new();
@@ -106,6 +108,6 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
     malformed_empty.set_internal("TDIM1", "(2,broken)");
     assert!(matches!(
         Table::from_data(&malformed_empty, vec![0; 8]),
-        Err(FitsError::KeywordOutOfRange { name: "TDIMn" })
+        Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "TDIM1"
     ));
 }

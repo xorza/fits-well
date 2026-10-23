@@ -19,9 +19,9 @@ use crate::fits_writer::{
     FitsWriter, PLACEHOLDER_CHECKSUM, WriterState, pad_to_block, patch_checksum, render_header,
 };
 use crate::hdu::{HduKind, MAX_TABLE_FIELDS};
-use crate::header_model::Header;
 use crate::header_model::internals::from_card_lines as header;
 use crate::header_model::value::Value;
+use crate::header_model::{Header, keywords};
 use crate::image_model::data::Data;
 use crate::image_model::internals::physical;
 use crate::image_model::scaling::Scaling;
@@ -29,6 +29,7 @@ use crate::image_model::unsigned_data::UnsignedData;
 use crate::image_model::view::{Borrowed, View};
 use crate::image_model::{Image, Metadata};
 use crate::image_model::{U16_OFFSET, U64_OFFSET};
+
 use crate::ragged::Ragged;
 use crate::reader::FitsReader;
 use crate::reader::internals::read_whole;
@@ -70,16 +71,16 @@ impl Write for FailMidHdu {
 fn informational_header_template() -> Header {
     let mut header = Header::new();
     header
-        .set_internal("SIMPLE", false)
-        .set_internal("XTENSION", "TABLE")
-        .set_internal("BITPIX", 64)
-        .set_internal("NAXIS", 3)
+        .set_internal(keywords::SIMPLE, false)
+        .set_internal(keywords::XTENSION, "TABLE")
+        .set_internal(keywords::BITPIX, 64)
+        .set_internal(keywords::NAXIS, 3)
         .set_internal("NAXIS1", 999)
         .set_internal("NAXIS2", 999)
         .set_internal("NAXIS3", 999)
-        .set_internal("PCOUNT", 999)
-        .set_internal("GCOUNT", 999)
-        .set_internal("TFIELDS", 999)
+        .set_internal(keywords::PCOUNT, 999)
+        .set_internal(keywords::GCOUNT, 999)
+        .set_internal(keywords::TFIELDS, 999)
         .set_internal("TFORM1", "99D")
         .set_internal("TTYPE1", "STALE")
         .set_internal("TUNIT1", "stale")
@@ -91,27 +92,27 @@ fn informational_header_template() -> Header {
         .set_internal("NAXIS01", "preserved lookalike")
         .set_internal("TFORM01", "preserved lookalike")
         .set_internal("ZFORM01", "preserved lookalike")
-        .set_internal("BSCALE", 99.0)
-        .set_internal("BZERO", 99.0)
-        .set_internal("BLANK", 99)
-        .set_internal("CHECKSUM", "stale")
-        .set_internal("DATASUM", "999")
-        .set_internal("ZIMAGE", false)
-        .set_internal("ZCMPTYPE", "STALE")
-        .set_internal("ZBITPIX", 64)
-        .set_internal("ZNAXIS", 3)
+        .set_internal(keywords::BSCALE, 99.0)
+        .set_internal(keywords::BZERO, 99.0)
+        .set_internal(keywords::BLANK, 99)
+        .set_internal(keywords::CHECKSUM, "stale")
+        .set_internal(keywords::DATASUM, "999")
+        .set_internal(keywords::ZIMAGE, false)
+        .set_internal(keywords::ZCMPTYPE, "STALE")
+        .set_internal(keywords::ZBITPIX, 64)
+        .set_internal(keywords::ZNAXIS, 3)
         .set_internal("ZNAXIS1", 999)
         .set_internal("ZTILE1", 999)
-        .set_internal("ZSIMPLE", false)
-        .set_internal("OBJECT", "M42")
-        .set_internal("EXTNAME", "SCI")
+        .set_internal(keywords::ZSIMPLE, false)
+        .set_internal(keywords::OBJECT, "M42")
+        .set_internal(keywords::EXTNAME, "SCI")
         .set_internal("CTYPE1", "RA---TAN")
         .set_internal("CUNIT1", "deg")
         .set_internal("CRPIX1", 1.0)
         .set_internal("CRVAL1", 83.822)
         .set_internal("CDELT1", 0.1)
-        .set_internal("TIMESYS", "UTC")
-        .set_internal("MJDREF", 60_000.0);
+        .set_internal(keywords::TIMESYS, "UTC")
+        .set_internal(keywords::MJDREF, 60_000.0);
     header.push_comment("first preserved comment").unwrap();
     header.push_history("preserved history").unwrap();
     header.push_comment("second preserved comment").unwrap();
@@ -119,15 +120,15 @@ fn informational_header_template() -> Header {
 }
 
 fn assert_informational_header(header: &Header) {
-    assert_eq!(header.get_text("OBJECT").unwrap(), Some("M42"));
-    assert_eq!(header.get_text("EXTNAME").unwrap(), Some("SCI"));
+    assert_eq!(header.get_text(keywords::OBJECT).unwrap(), Some("M42"));
+    assert_eq!(header.get_text(keywords::EXTNAME).unwrap(), Some("SCI"));
     assert_eq!(header.get_text("CTYPE1").unwrap(), Some("RA---TAN"));
     assert_eq!(header.get_text("CUNIT1").unwrap(), Some("deg"));
     assert_eq!(header.get_real("CRPIX1").unwrap(), Some(1.0));
     assert_eq!(header.get_real("CRVAL1").unwrap(), Some(83.822));
     assert_eq!(header.get_real("CDELT1").unwrap(), Some(0.1));
-    assert_eq!(header.get_text("TIMESYS").unwrap(), Some("UTC"));
-    assert_eq!(header.get_real("MJDREF").unwrap(), Some(60_000.0));
+    assert_eq!(header.get_text(keywords::TIMESYS).unwrap(), Some("UTC"));
+    assert_eq!(header.get_real(keywords::MJDREF).unwrap(), Some(60_000.0));
     for keyword in ["NAXIS01", "TFORM01", "ZFORM01"] {
         assert_eq!(
             header.get_text(keyword).unwrap(),
@@ -153,14 +154,14 @@ fn assert_informational_header(header: &Header) {
 fn checksum_report_for_keywords(datasum: Option<&str>, checksum: Option<&str>) -> ChecksumReport {
     let mut header = Header::new();
     header
-        .set_internal("SIMPLE", true)
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 0);
+        .set_internal(keywords::SIMPLE, true)
+        .set_internal(keywords::BITPIX, 8)
+        .set_internal(keywords::NAXIS, 0);
     if let Some(value) = datasum {
-        header.set_internal("DATASUM", value);
+        header.set_internal(keywords::DATASUM, value);
     }
     if let Some(value) = checksum {
-        header.set_internal("CHECKSUM", value);
+        header.set_internal(keywords::CHECKSUM, value);
     }
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer.write_raw_hdu(&header, &[]).unwrap();
@@ -191,10 +192,10 @@ fn patch_null_string(header_bytes: &mut [u8], keyword: [u8; 8]) {
 fn valid_checksum_only_report() -> ChecksumReport {
     let mut header = Header::new();
     header
-        .set_internal("SIMPLE", true)
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 0)
-        .set_internal("CHECKSUM", PLACEHOLDER_CHECKSUM);
+        .set_internal(keywords::SIMPLE, true)
+        .set_internal(keywords::BITPIX, 8)
+        .set_internal(keywords::NAXIS, 0)
+        .set_internal(keywords::CHECKSUM, PLACEHOLDER_CHECKSUM);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer.write_raw_hdu(&header, &[]).unwrap();
     let mut bytes = writer.into_inner().into_inner();
@@ -360,10 +361,10 @@ fn written_table_header(column: WriteColumn) -> Header {
     reader.hdus.swap_remove(1).header
 }
 
-fn assert_table_column_rejected(column: WriteColumn, keyword: &'static str) {
+fn assert_table_column_rejected(column: WriteColumn, expected: &'static str) {
     assert!(matches!(
         rejected_before_output(|w| w.write_table(&binary_table(1, &[column]), None)),
-        FitsError::KeywordOutOfRange { name } if name == keyword
+        FitsError::KeywordOutOfRange { keyword } if keyword == expected
     ));
 }
 
@@ -430,14 +431,14 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
             .with_tdim(vec![2, 2]);
     assert!(matches!(
         rejected_before_output(|w| w.write_table(&binary_table(1, &[invalid_vla_bits]), None)),
-        FitsError::KeywordOutOfRange { name: "TDIMn" }
+        FitsError::KeywordOutOfRange { keyword } if keyword == "TDIM1"
     ));
 
     let invalid_tdim =
         WriteColumn::fixed("VEC", ColumnData::I32(vec![1, 2, 3, 4]), 4).with_tdim(vec![5]);
     assert!(matches!(
         rejected_before_output(|w| w.write_table(&binary_table(1, &[invalid_tdim]), None)),
-        FitsError::KeywordOutOfRange { name: "TDIMn" }
+        FitsError::KeywordOutOfRange { keyword } if keyword == "TDIM1"
     ));
 
     // A shape whose product overflows `usize` is out-of-range for the same reason a
@@ -447,7 +448,7 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
         .with_tdim(vec![usize::MAX, 2]);
     assert!(matches!(
         rejected_before_output(|w| w.write_table(&binary_table(1, &[overflowing_tdim]), None)),
-        FitsError::KeywordOutOfRange { name: "TDIMn" }
+        FitsError::KeywordOutOfRange { keyword } if keyword == "TDIM1"
     ));
 
     for shape in [vec![], vec![0]] {
@@ -458,7 +459,7 @@ fn writer_rejects_invalid_or_overflowing_layouts() {
         .with_tdim(shape);
         assert!(matches!(
             rejected_before_output(|w| w.write_table(&binary_table(1, &[invalid_empty_vla]), None)),
-            FitsError::KeywordOutOfRange { name: "TDIMn" }
+            FitsError::KeywordOutOfRange { keyword } if keyword == "TDIM1"
         ));
     }
 
@@ -486,7 +487,10 @@ fn table_writers_enforce_the_exact_tfields_limit_before_output() {
     let binary = empty_binary_columns(MAX_TABLE_FIELDS);
     let reader = round_trip(|w| w.write_table(&binary_table(0, &binary), None));
     assert_eq!(
-        reader.hdus[1].header.get_integer("TFIELDS").unwrap(),
+        reader.hdus[1]
+            .header
+            .get_integer(keywords::TFIELDS)
+            .unwrap(),
         Some(i64::try_from(MAX_TABLE_FIELDS).unwrap())
     );
 
@@ -497,20 +501,27 @@ fn table_writers_enforce_the_exact_tfields_limit_before_output() {
         .unwrap();
     let reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
     assert_eq!(
-        reader.hdus[1].header.get_integer("TFIELDS").unwrap(),
+        reader.hdus[1]
+            .header
+            .get_integer(keywords::TFIELDS)
+            .unwrap(),
         Some(i64::try_from(MAX_TABLE_FIELDS).unwrap())
     );
 
     let binary = empty_binary_columns(MAX_TABLE_FIELDS + 1);
     assert!(matches!(
         rejected_before_output(|w| w.write_table(&binary_table(0, &binary), None)),
-        FitsError::KeywordOutOfRange { name: "TFIELDS" }
+        FitsError::KeywordOutOfRange {
+            keyword: keywords::TFIELDS
+        }
     ));
 
     let ascii = empty_ascii_columns(MAX_TABLE_FIELDS + 1);
     assert!(matches!(
         rejected_before_output(|w| w.write_ascii_table(&ascii_table(0, &ascii), None)),
-        FitsError::KeywordOutOfRange { name: "TFIELDS" }
+        FitsError::KeywordOutOfRange {
+            keyword: keywords::TFIELDS
+        }
     ));
 }
 
@@ -579,14 +590,14 @@ fn typed_image_header_template_preserves_information_and_regenerates_structure()
     let mut reader = FitsReader::open(Cursor::new(bytes)).unwrap();
     let header = &reader.hdus[0].header;
     assert_informational_header(header);
-    assert_eq!(header.get_logical("SIMPLE").unwrap(), Some(true));
-    assert_eq!(header.get_integer("BITPIX").unwrap(), Some(16));
+    assert_eq!(header.get_logical(keywords::SIMPLE).unwrap(), Some(true));
+    assert_eq!(header.get_integer(keywords::BITPIX).unwrap(), Some(16));
     assert_eq!(header.axes().unwrap(), [2]);
-    assert_eq!(header.get("XTENSION"), None);
-    assert_eq!(header.get("TFIELDS"), None);
-    assert_eq!(header.get("ZIMAGE"), None);
-    assert_ne!(header.get_text("CHECKSUM").unwrap(), Some("stale"));
-    assert_ne!(header.get_text("DATASUM").unwrap(), Some("999"));
+    assert_eq!(header.get(keywords::XTENSION).unwrap(), None);
+    assert_eq!(header.get(keywords::TFIELDS).unwrap(), None);
+    assert_eq!(header.get(keywords::ZIMAGE).unwrap(), None);
+    assert_ne!(header.get_text(keywords::CHECKSUM).unwrap(), Some("stale"));
+    assert_ne!(header.get_text(keywords::DATASUM).unwrap(), Some("999"));
     assert_eq!(
         reader.verify_checksum(0).unwrap(),
         ChecksumReport {
@@ -623,11 +634,20 @@ fn typed_table_header_templates_preserve_information_and_regenerate_structure() 
             Some(2)
         );
         assert_eq!(
-            reader.hdus[index].header.get_integer("TFIELDS").unwrap(),
+            reader.hdus[index]
+                .header
+                .get_integer(keywords::TFIELDS)
+                .unwrap(),
             Some(1)
         );
-        assert_eq!(reader.hdus[index].header.get("CHECKSUM"), None);
-        assert_eq!(reader.hdus[index].header.get("DATASUM"), None);
+        assert_eq!(
+            reader.hdus[index].header.get(keywords::CHECKSUM).unwrap(),
+            None
+        );
+        assert_eq!(
+            reader.hdus[index].header.get(keywords::DATASUM).unwrap(),
+            None
+        );
     }
     assert_eq!(reader.hdus[1].kind, HduKind::BinTable);
     assert_eq!(
@@ -638,7 +658,7 @@ fn typed_table_header_templates_preserve_information_and_regenerate_structure() 
         reader.hdus[1].header.get_text("TTYPE1").unwrap(),
         Some("VALUE")
     );
-    assert_eq!(reader.hdus[1].header.get("TBCOL1"), None);
+    assert_eq!(reader.hdus[1].header.get("TBCOL1").unwrap(), None);
     assert_eq!(reader.hdus[2].kind, HduKind::AsciiTable);
     assert_eq!(
         reader.hdus[2].header.get_text("TFORM1").unwrap(),
@@ -835,7 +855,7 @@ fn writes_p_q_variable_length_bit_arrays_with_exact_counts_and_padding() {
         Some("1QX(9)")
     );
     assert_eq!(
-        reader.hdus[1].header.get_integer("PCOUNT").unwrap(),
+        reader.hdus[1].header.get_integer(keywords::PCOUNT).unwrap(),
         Some(6)
     );
 
@@ -894,11 +914,11 @@ fn binary_metadata_is_validated_for_every_fixed_and_vla_stored_type() {
         .chain(vla_columns_by_stored_type())
     {
         if matches!(typed.stored_type, 'A' | 'L' | 'X') {
-            assert_table_column_rejected(typed.column.clone().scaled(2.0, 3.0), "TSCALn");
+            assert_table_column_rejected(typed.column.clone().scaled(2.0, 3.0), "TSCAL1");
 
             let mut tzero_only = typed.column.clone();
             internals::set_scaling(&mut tzero_only, None, Some(3.0));
-            assert_table_column_rejected(tzero_only, "TZEROn");
+            assert_table_column_rejected(tzero_only, "TZERO1");
         } else {
             let header = written_table_header(typed.column.clone().scaled(2.0, 3.0));
             assert_eq!(header.get_real("TSCAL1").unwrap(), Some(2.0), "{typed:?}");
@@ -909,7 +929,7 @@ fn binary_metadata_is_validated_for_every_fixed_and_vla_stored_type() {
             let header = written_table_header(typed.column.clone().with_null(0));
             assert_eq!(header.get_integer("TNULL1").unwrap(), Some(0), "{typed:?}");
         } else {
-            assert_table_column_rejected(typed.column.with_null(0), "TNULLn");
+            assert_table_column_rejected(typed.column.with_null(0), "TNULL1");
         }
     }
 }
@@ -964,7 +984,7 @@ fn binary_tnull_is_range_checked_for_fixed_and_vla_integer_types() {
             for &tnull in &boundary.invalid {
                 assert_table_column_rejected(
                     integer_column(&boundary.zero, vla).with_null(tnull),
-                    "TNULLn",
+                    "TNULL1",
                 );
             }
         }
@@ -982,22 +1002,22 @@ struct NonfiniteTableScale {
 fn binary_nonfinite_scaling_is_rejected_before_output() {
     let cases = [
         NonfiniteTableScale {
-            keyword: "TSCALn",
+            keyword: "TSCAL1",
             tscale: Some(f64::NAN),
             tzero: None,
         },
         NonfiniteTableScale {
-            keyword: "TSCALn",
+            keyword: "TSCAL1",
             tscale: Some(f64::INFINITY),
             tzero: None,
         },
         NonfiniteTableScale {
-            keyword: "TZEROn",
+            keyword: "TZERO1",
             tscale: None,
             tzero: Some(f64::NAN),
         },
         NonfiniteTableScale {
-            keyword: "TZEROn",
+            keyword: "TZERO1",
             tscale: None,
             tzero: Some(f64::NEG_INFINITY),
         },
@@ -1075,9 +1095,18 @@ fn an_empty_primary_carries_the_template_only_as_the_first_hdu() {
     let primary = &reader.hdus[0];
     assert_eq!(primary.kind, HduKind::Primary);
     assert_eq!(primary.header.naxis().unwrap(), 0);
-    assert_eq!(primary.header.get_logical("SIMPLE").unwrap(), Some(true));
-    assert_eq!(primary.header.get_logical("EXTEND").unwrap(), Some(true));
-    assert_eq!(primary.header.get_integer("BITPIX").unwrap(), Some(8));
+    assert_eq!(
+        primary.header.get_logical(keywords::SIMPLE).unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        primary.header.get_logical(keywords::EXTEND).unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        primary.header.get_integer(keywords::BITPIX).unwrap(),
+        Some(8)
+    );
     assert_informational_header(&primary.header);
     assert_eq!(
         reader.verify_checksum(0).unwrap(),
@@ -1214,7 +1243,7 @@ fn header_round_trips_through_render_and_parse() {
 
     let mut invalid = Header::new();
     assert!(matches!(
-        invalid.set("OBJECT", "Véga"),
+        invalid.set(keywords::OBJECT, "Véga"),
         Err(FitsError::InvalidAscii {
             context: "header text value"
         })
@@ -1254,8 +1283,14 @@ fn write_image_emits_scaling_keywords_and_preserves_unsigned_values() {
     };
     let mut r =
         FitsReader::open(Cursor::new(written(|w| w.write_image(image.view(), None)))).unwrap();
-    assert_eq!(r.hdus[0].header.get_real("BZERO").unwrap(), Some(32768.0));
-    assert_eq!(r.hdus[0].header.get_real("BSCALE").unwrap(), Some(1.0));
+    assert_eq!(
+        r.hdus[0].header.get_real(keywords::BZERO).unwrap(),
+        Some(32768.0)
+    );
+    assert_eq!(
+        r.hdus[0].header.get_real(keywords::BSCALE).unwrap(),
+        Some(1.0)
+    );
     let back = read_whole(&mut r, 0);
     assert_eq!(physical::<f64>(&back), vec![0.0, 32768.0, 65535.0]);
     assert_eq!(back.samples, Data::I16(vec![-32768, 0, 32767]));
@@ -1268,7 +1303,10 @@ fn from_u16_round_trips_through_write_and_read() {
     let built = Image::from_u16(vec![3], &[0, 32768, 65535]).unwrap();
     let mut r =
         FitsReader::open(Cursor::new(written(|w| w.write_image(built.view(), None)))).unwrap();
-    assert_eq!(r.hdus[0].header.get_real("BZERO").unwrap(), Some(32768.0));
+    assert_eq!(
+        r.hdus[0].header.get_real(keywords::BZERO).unwrap(),
+        Some(32768.0)
+    );
     assert_eq!(
         read_whole(&mut r, 0).view().unsigned(),
         Some(UnsignedData::U16(vec![0, 32768, 65535]))
@@ -1288,7 +1326,7 @@ fn from_u64_writes_the_exact_offset_and_round_trips_extremes() {
     assert_eq!(&bzero[10..30], b" 9223372036854775808");
 
     let mut reader = FitsReader::open(Cursor::new(bytes)).unwrap();
-    let Value::Integer(offset) = reader.hdus[0].header.get("BZERO").unwrap() else {
+    let Some(Value::Integer(offset)) = reader.hdus[0].header.get(keywords::BZERO).unwrap() else {
         panic!("unsigned-64 BZERO was not stored as an exact integer");
     };
     assert_eq!(offset.to_string(), "9223372036854775808");
@@ -1580,7 +1618,7 @@ fn image_blank_is_type_and_range_checked_before_output() {
                 FitsReader::open(Cursor::new(written(|w| w.write_image(image.view(), None))))
                     .unwrap();
             assert_eq!(
-                reader.hdus[0].header.get_integer("BLANK").unwrap(),
+                reader.hdus[0].header.get_integer(keywords::BLANK).unwrap(),
                 Some(blank)
             );
             assert_eq!(read_whole(&mut reader, 0).scaling.blank, Some(blank));
@@ -1596,7 +1634,9 @@ fn image_blank_is_type_and_range_checked_before_output() {
             };
             assert!(matches!(
                 rejected_before_output(|w| w.write_image(image.view(), None)),
-                FitsError::KeywordOutOfRange { name: "BLANK" }
+                FitsError::KeywordOutOfRange {
+                    keyword: keywords::BLANK
+                }
             ));
         }
     }
@@ -1645,7 +1685,7 @@ fn image_nonfinite_scaling_is_rejected_before_output() {
         };
         assert!(matches!(
             rejected_before_output(|w| w.write_image(image.view(), None)),
-            FitsError::KeywordOutOfRange { name } if name == case.keyword
+            FitsError::KeywordOutOfRange { keyword } if keyword == case.keyword
         ));
     }
 }
@@ -1667,7 +1707,9 @@ fn compressed_image_metadata_is_validated_before_automatic_primary() {
             &CompressionConfig::new(Compression::GZIP),
             None
         )),
-        FitsError::KeywordOutOfRange { name: "BLANK" }
+        FitsError::KeywordOutOfRange {
+            keyword: keywords::BLANK
+        }
     ));
 
     let image = Image {
@@ -1722,14 +1764,14 @@ fn compressed_header_templates_preserve_information_and_regenerate_structure() {
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
     let header = &reader.hdus[1].header;
     assert_informational_header(header);
-    assert_eq!(header.get_logical("ZIMAGE").unwrap(), Some(true));
-    assert_eq!(header.get_integer("ZBITPIX").unwrap(), Some(16));
-    assert_eq!(header.get_integer("ZNAXIS").unwrap(), Some(1));
+    assert_eq!(header.get_logical(keywords::ZIMAGE).unwrap(), Some(true));
+    assert_eq!(header.get_integer(keywords::ZBITPIX).unwrap(), Some(16));
+    assert_eq!(header.get_integer(keywords::ZNAXIS).unwrap(), Some(1));
     assert_eq!(header.get_integer("ZNAXIS1").unwrap(), Some(2));
     // The default tiling is one row: the whole 2-sample axis.
     assert_eq!(header.get_integer("ZTILE1").unwrap(), Some(2));
-    assert_eq!(header.get("ZSIMPLE"), None);
-    assert_eq!(header.get("CHECKSUM"), None);
+    assert_eq!(header.get(keywords::ZSIMPLE).unwrap(), None);
+    assert_eq!(header.get(keywords::CHECKSUM).unwrap(), None);
     assert_eq!(read_whole(&mut reader, 1).samples, Data::I16(vec![10, 20]));
 
     let columns = [WriteColumn::fixed(
@@ -1748,7 +1790,7 @@ fn compressed_header_templates_preserve_information_and_regenerate_structure() {
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
     let header = &reader.hdus[1].header;
     assert_informational_header(header);
-    assert_eq!(header.get_logical("ZTABLE").unwrap(), Some(true));
+    assert_eq!(header.get_logical(keywords::ZTABLE).unwrap(), Some(true));
     assert_eq!(header.get_integer("ZNAXIS2").unwrap(), Some(3));
     assert_eq!(header.get_text("ZFORM1").unwrap(), Some("1J"));
     assert_eq!(header.get_text("TFORM1").unwrap(), Some("1QB"));
@@ -1883,7 +1925,7 @@ fn streaming_image_matches_transactional_output_and_checksums() {
     };
     let image = Image::new_scaled(vec![3, 2], samples.clone(), scaling).unwrap();
     let mut template = Header::new();
-    template.set("OBJECT", "streamed").unwrap();
+    template.set(keywords::OBJECT, "streamed").unwrap();
 
     let mut regular = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
     regular.write_image(image.view(), Some(&template)).unwrap();

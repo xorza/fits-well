@@ -17,8 +17,7 @@ use crate::column::{ColumnLabels, ColumnScaling};
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::validate_table_field_count;
-use crate::header_model::Header;
-use crate::keyword::key;
+use crate::header_model::{Header, keywords};
 
 /// The value type of an ASCII-table column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,26 +115,29 @@ impl Ascii {
     }
 
     pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<Self> {
-        let row_len = header.required_usize("NAXIS1", "NAXIS1")?;
-        let nrows = header.required_usize("NAXIS2", "NAXIS2")?;
+        let row_len = header.require_usize(keywords::NAXIS.indexed(1)?)?;
+        let nrows = header.require_usize(keywords::NAXIS.indexed(2)?)?;
         // §7.2.1: `0 ≤ TFIELDS ≤ 999` — also a guard, since `tfields` sizes the
         // column `Vec` and drives the `TFORMn` loop (an absurd value would abort).
-        let tfields = header.required_usize("TFIELDS", "TFIELDS")?;
+        let tfields = header.require_usize(keywords::TFIELDS)?;
         validate_table_field_count(tfields)?;
 
         let mut columns = Vec::with_capacity(tfields);
         for n in 1..=tfields {
-            let tbcol = header.required_usize(key!("TBCOL{n}").as_str(), "TBCOLn")?;
-            let tform = header.required_text(key!("TFORM{n}").as_str(), "TFORMn")?;
+            let tbcol_keyword = keywords::TBCOL.indexed(n)?;
+            let tbcol = header.require_usize(tbcol_keyword)?;
+            let tform = header.require_text(keywords::TFORM.indexed(n)?)?;
             let fmt = parse_ascii_tform(tform)?;
-            let start = tbcol
-                .checked_sub(1)
-                .ok_or(FitsError::KeywordOutOfRange { name: "TBCOLn" })?;
+            let start = tbcol.checked_sub(1).ok_or(FitsError::KeywordOutOfRange {
+                keyword: tbcol_keyword,
+            })?;
             // §7.2.3: each field must lie within the row (`NAXIS1`). A column declared
             // past the row width is malformed — reject it rather than let `field()`
             // silently truncate to empty.
             if start.checked_add(fmt.width).is_none_or(|end| end > row_len) {
-                return Err(FitsError::KeywordOutOfRange { name: "TBCOLn" });
+                return Err(FitsError::KeywordOutOfRange {
+                    keyword: tbcol_keyword,
+                });
             }
             let labels = ColumnLabels::read(header, n)?;
             let scaling = ColumnScaling::read(header, n)?;
@@ -149,7 +151,7 @@ impl Ascii {
                 tscale: scaling.tscale,
                 tzero: scaling.tzero,
                 null: header
-                    .get_text(key!("TNULL{n}").as_str())?
+                    .get_text(keywords::TNULL.indexed(n)?)?
                     .map(|s| s.trim().to_string()),
             });
         }
@@ -434,6 +436,7 @@ fn parse_ascii_tform(value: &str) -> Result<AsciiFormat> {
 #[cfg(test)]
 pub(crate) mod internals {
     use crate::header_model::Header;
+    use crate::header_model::keywords;
 
     /// A minimal ASCII `TABLE` header: rows of `naxis1` characters, and each column
     /// at its 1-based `TBCOLn` with its `TFORMn`.
@@ -444,21 +447,18 @@ pub(crate) mod internals {
     ) -> Header {
         let mut header = Header::new();
         header
-            .set_internal("XTENSION", "TABLE")
-            .set_internal("BITPIX", 8)
-            .set_internal("NAXIS", 2)
+            .set_internal(keywords::XTENSION, "TABLE")
+            .set_internal(keywords::BITPIX, 8)
+            .set_internal(keywords::NAXIS, 2)
             .set_internal("NAXIS1", i64::try_from(naxis1).unwrap())
             .set_internal("NAXIS2", i64::try_from(naxis2).unwrap())
-            .set_internal("PCOUNT", 0)
-            .set_internal("GCOUNT", 1)
-            .set_internal("TFIELDS", i64::try_from(columns.len()).unwrap());
+            .set_internal(keywords::PCOUNT, 0)
+            .set_internal(keywords::GCOUNT, 1)
+            .set_internal(keywords::TFIELDS, i64::try_from(columns.len()).unwrap());
         for (index, &(tbcol, tform)) in columns.iter().enumerate() {
             header
-                .set_internal(
-                    &format!("TBCOL{}", index + 1),
-                    i64::try_from(tbcol).unwrap(),
-                )
-                .set_internal(&format!("TFORM{}", index + 1), tform);
+                .set_internal(format!("TBCOL{}", index + 1), i64::try_from(tbcol).unwrap())
+                .set_internal(format!("TFORM{}", index + 1), tform);
         }
         header
     }

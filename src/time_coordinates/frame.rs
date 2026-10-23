@@ -3,8 +3,8 @@
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Result;
-use crate::header_model::Header;
-use crate::keyword::key;
+use crate::header_model::{Header, keywords};
+use crate::keyword::Keyword;
 use crate::time_coordinates::coordinate::Coordinate;
 use crate::time_coordinates::datetime::Datetime;
 use crate::time_coordinates::reference_position::ReferencePosition;
@@ -52,21 +52,26 @@ impl Frame {
             });
         }
         let scale = Scale::declared(header)?;
-        let timeunit = header.get_text("TIMEUNIT")?.unwrap_or("s").to_string();
+        let timeunit = header
+            .get_text(keywords::TIMEUNIT)?
+            .unwrap_or("s")
+            .to_string();
         let column_trefpos = match column {
-            Some(column) => header.get_text(key!("TRPOS{column}").as_str())?,
+            Some(column) => header.get_text(keywords::TRPOS.indexed(column)?)?,
             None => None,
         };
         let trefpos = match column_trefpos {
             Some(value) => ReferencePosition::parse(value),
-            None => ReferencePosition::parse(header.get_text("TREFPOS")?.unwrap_or("TOPOCENTER")),
+            None => ReferencePosition::parse(
+                header.get_text(keywords::TREFPOS)?.unwrap_or("TOPOCENTER"),
+            ),
         };
         let mjdref = reference_mjd(header, &scale)?;
         let fits_time = Self {
             scale,
             mjdref,
             timeunit,
-            timeoffs: header.get_real("TIMEOFFS")?.unwrap_or(0.0),
+            timeoffs: header.get_real(keywords::TIMEOFFS)?.unwrap_or(0.0),
             trefpos,
         };
         Ok(fits_time)
@@ -178,13 +183,25 @@ fn besselian_year_days(reference_mjd: f64, scale: &Scale) -> Result<f64> {
 /// The reference epoch as MJD: `MJDREF` (or `MJDREFI`+`MJDREFF`), else `JDREF`
 /// (or `JDREFI`+`JDREFF`), else `DATEREF`, else `0.0`.
 fn reference_mjd(header: &Header, scale: &Scale) -> Result<f64> {
-    if let Some(mjd) = resolve_split_ref(header, "MJDREF", "MJDREFI", "MJDREFF", 0.0)? {
+    if let Some(mjd) = resolve_split_ref(
+        header,
+        keywords::MJDREF,
+        keywords::MJDREFI,
+        keywords::MJDREFF,
+        0.0,
+    )? {
         return Ok(mjd);
     }
-    if let Some(mjd) = resolve_split_ref(header, "JDREF", "JDREFI", "JDREFF", MJD0)? {
+    if let Some(mjd) = resolve_split_ref(
+        header,
+        keywords::JDREF,
+        keywords::JDREFI,
+        keywords::JDREFF,
+        MJD0,
+    )? {
         return Ok(mjd);
     }
-    let Some(value) = header.get_text("DATEREF")? else {
+    let Some(value) = header.get_text(keywords::DATEREF)? else {
         return Ok(0.0);
     };
     Datetime::parse(value)?.to_mjd(scale)
@@ -198,9 +215,9 @@ fn reference_mjd(header: &Header, scale: &Scale) -> Result<f64> {
 /// MJD's precision, not the JD's.
 fn resolve_split_ref(
     header: &Header,
-    single: &str,
-    int: &str,
-    frac: &str,
+    single: Keyword,
+    int: Keyword,
+    frac: Keyword,
     offset: f64,
 ) -> Result<Option<f64>> {
     let i = header.get_real(int)?;

@@ -7,7 +7,7 @@ use criterion::{BenchmarkId, Criterion, Throughput};
 
 use crate::bench::fixture::{Kind, Scale};
 use crate::bench::scene::{self, HEIGHT, WIDTH};
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::tabular::internals::{INDEX_LENGTH, indexed_wcs};
 
@@ -115,7 +115,7 @@ impl Fixture {
     /// The light's plate solution over the middle row of the frame.
     fn tan() -> Self {
         let mut header = scene::light_header();
-        header.set_internal("NAXIS", 2);
+        header.set_internal(keywords::NAXIS, 2);
         let wcs = Wcs::from_header(&header, None).unwrap();
         Self::new(wcs, |x| vec![x as f64 + 1.0, (HEIGHT / 2) as f64])
     }
@@ -124,7 +124,7 @@ impl Fixture {
     fn linear() -> Self {
         let mut header = Header::new();
         header
-            .set_internal("NAXIS", 4)
+            .set_internal(keywords::NAXIS, 4)
             .set_internal("CTYPE1", "LINEAR")
             .set_internal("CTYPE2", "LINEAR")
             .set_internal("CTYPE3", "LINEAR")
@@ -156,13 +156,13 @@ impl Fixture {
     fn spectral() -> Self {
         let mut header = Header::new();
         header
-            .set_internal("NAXIS", 1)
+            .set_internal(keywords::NAXIS, 1)
             .set_internal("CTYPE1", "FREQ-W2F")
             .set_internal("CUNIT1", "Hz")
             .set_internal("CRPIX1", 1.0)
             .set_internal("CRVAL1", 1_420_405_751.0)
             .set_internal("CDELT1", 1e6)
-            .set_internal("RESTFRQ", 1_420_405_751.0);
+            .set_internal(keywords::RESTFRQ, 1_420_405_751.0);
         let wcs = Wcs::from_header(&header, None).unwrap();
         Self::new(wcs, |x| vec![1.0 + x as f64 * 0.001])
     }

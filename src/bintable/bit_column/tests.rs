@@ -2,6 +2,8 @@ use crate::bintable::Table;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::internals::table_header;
 use crate::error::FitsError;
+use crate::header_model::keywords;
+
 use bitvec::bitvec;
 use bitvec::order::Msb0;
 
@@ -47,7 +49,7 @@ fn vla_bit_column_unpacks_msb_first() {
     // A `1PX` column: row 0 = 12 bits (0xAB 0xC0), row 1 = 4 bits (0xF0), MSB-first.
     // One P descriptor (2 × i32) per row, and 3 heap bytes.
     let mut header = table_header(8, 2, &["1PX"]);
-    header.set_internal("PCOUNT", 3);
+    header.set_internal(keywords::PCOUNT, 3);
     let mut data = Vec::new();
     data.extend_from_slice(&12i32.to_be_bytes()); // row 0: 12 bits …
     data.extend_from_slice(&0i32.to_be_bytes()); //        … at heap offset 0

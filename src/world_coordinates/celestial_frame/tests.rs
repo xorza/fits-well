@@ -1,5 +1,6 @@
 use crate::error::FitsError;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
+
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::celestial_frame::CelestialFrame;
 use crate::world_coordinates::celestial_frame::CelestialReferenceFrame;
@@ -9,14 +10,14 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
     let image = |equinox: Option<f64>, radesys: Option<&str>| {
         let mut header = Header::new();
         header
-            .set_internal("NAXIS", 2)
+            .set_internal(keywords::NAXIS, 2)
             .set_internal("CTYPE1", "RA---TAN")
             .set_internal("CTYPE2", "DEC--TAN");
         if let Some(equinox) = equinox {
-            header.set_internal("EQUINOX", equinox);
+            header.set_internal(keywords::EQUINOX, equinox);
         }
         if let Some(radesys) = radesys {
-            header.set_internal("RADESYS", radesys);
+            header.set_internal(keywords::RADESYS, radesys);
         }
         header
     };
@@ -140,11 +141,11 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
 
     assert!(matches!(
         Wcs::from_header(&image(None, Some("J2000")), None),
-        Err(FitsError::InvalidWcs { detail }) if detail.contains("RADESYS")
+        Err(FitsError::InvalidWcs { detail }) if detail.contains(keywords::RADESYS.as_str())
     ));
     assert!(matches!(
         Wcs::from_header(&image(Some(-1.0), None), None),
-        Err(FitsError::InvalidWcs { detail }) if detail.contains("EQUINOX")
+        Err(FitsError::InvalidWcs { detail }) if detail.contains(keywords::EQUINOX.as_str())
     ));
     pixel_list.set_internal("RADE3A", "FK4");
     assert!(matches!(

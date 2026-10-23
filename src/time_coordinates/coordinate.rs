@@ -1,7 +1,7 @@
 //! [`Coordinate`]: an absolute time with its scale.
 
 use crate::error::Result;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
 use crate::time_coordinates::datetime::Datetime;
 use crate::time_coordinates::scale::{Scale, ScaleKind};
 
@@ -38,13 +38,13 @@ impl Coordinate {
     /// scale; else the [`Coordinate::epoch`] in its implied scale (§9.5).
     /// `None` when the header gives none of them.
     pub fn observation(header: &Header) -> Result<Option<Self>> {
-        if let Some(mjd) = header.get_real("MJD-OBS")? {
+        if let Some(mjd) = header.get_real(keywords::MJD_OBS)? {
             return Ok(Some(Self {
                 mjd,
                 scale: Scale::declared(header)?,
             }));
         }
-        if let Some(value) = header.get_text("DATE-OBS")? {
+        if let Some(value) = header.get_text(keywords::DATE_OBS)? {
             let scale = Scale::declared(header)?;
             return Ok(Some(Self {
                 mjd: Datetime::parse(value)?.to_mjd(&scale)?,
@@ -58,13 +58,13 @@ impl Coordinate {
     /// scale ET ≈ TT) epoch keyword, if present (§9.1.2, §9.5). `JEPOCH` wins if
     /// both appear.
     pub fn epoch(header: &Header) -> Result<Option<Self>> {
-        if let Some(j) = header.get_real("JEPOCH")? {
+        if let Some(j) = header.get_real(keywords::JEPOCH)? {
             return Ok(Some(Self {
                 mjd: Epoch::Julian(j).to_mjd(),
                 scale: Scale::known(ScaleKind::Tdb),
             }));
         }
-        let Some(b) = header.get_real("BEPOCH")? else {
+        let Some(b) = header.get_real(keywords::BEPOCH)? else {
             return Ok(None);
         };
         Ok(Some(Self {

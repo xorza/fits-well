@@ -42,12 +42,20 @@ and the dated review in `.notes/API_REVIEW.md`.
   back the container, which reads as a table of compressed cells and is quietly
   wrong. A compressed table reads whole through `read_compressed_table`. Source:
   §10.1, §10.3.
+- **A read names its HDU with an `HduSelector`:** an index, an `EXTNAME`
+  (case-insensitive), or a name with `EXTVER` and `EXTLEVEL`, each 1 when absent.
+  A primary with no `EXTNAME` is `PRIMARY`, as in astropy. Every reader method
+  takes `impl Into<HduSelector>`, and `Hdu::matches` answers the same selector,
+  so a caller does not compare `EXTNAME` by hand. A name no HDU carries is
+  `HduNotFound`, and `images()` iterates the image HDUs. Refused: a separate
+  `hdu_index` lookup before each read, an `Option` result for a missing name, and
+  `first_image()`, which is `images().next()`.
 - **`Hdu::is_image` classifies by rank alone.** An HDU is an image when it is a
   primary array, an image extension or a tiled-compressed image whose `NAXIS`
   (`ZNAXIS`) is above 0. Refused: the kind alone, which counted an image
   extension with `NAXIS = 0` but not such a primary. Also refused: requiring the
   whole geometry to resolve, which would turn a malformed image into "not an
-  image" and hide the error that `Hdu::image` reports. Source: §4.4.1.
+  image" and hide the error that `Hdu::image_metadata` reports. Source: §4.4.1.
 - **The `Source` trait is sealed and cannot be named.** A source is not an
   extension point, and no caller is generic over sources. Refused: exporting it
   before such a caller exists.
@@ -104,8 +112,41 @@ and the dated review in `.notes/API_REVIEW.md`.
 
 ## Header
 
+- **A keyword is a `Keyword`: 1 to 8 bytes of `A`–`Z`, `0`–`9`, `-` and `_`, held
+  inline and `Copy`.** It is checked when it is made, so a lookup cannot miss on
+  its spelling, and the header's index keys on it, so a parse makes no `String`
+  for each valued card. Refused: `&str` keys, which made `get("naxis")` quietly
+  `None` while `set("naxis")` failed.
+- **Every method that names a keyword takes `impl TryInto<Keyword>`.** A
+  `Keyword`, a `header::keywords` preset or a `&str` all work, so callers write
+  `set("EXPTIME", 30.0)` or `set(keywords::NAXIS, 2)`; a `&str` that is no keyword
+  is `InvalidKeyword`, so `get` and the other lookups are fallible. `Keyword`
+  converts with `Infallible`, which `FitsError` takes. Refused: `Keyword`
+  arguments alone, which made a call site spell every name twice, and
+  `From<&str>`, whose conversion would panic on a bad name.
+- **`header::keywords` holds the keywords the standard defines (§4–§10) and the
+  roots of its indexed families.** `NAXIS.indexed(3)` gives `NAXIS3`, and
+  `Keyword::try_from(format_args!(…))` formats a compound name on the stack.
+  Refused: macros for keyword names, and a constant for each numbered member.
+- **A keyword error names the keyword.** `MissingKeyword`, `KeywordOutOfRange`,
+  `KeywordNotFound`, `ReservedKeyword` and `InvalidHeaderValue` carry a `Keyword`, and a family is
+  reported by its member, `TDIM3`, not `TDIMn`. Refused: `&'static str` names,
+  which a run-time keyword could not use.
+- **A name formatted from an axis or column number that is no keyword is
+  absent.** The long spelling of a table-WCS family with a wide column (`TPV123_45`)
+  can be on no card, so the WCS reads treat it as absent, as the `&str` lookup
+  did. Refused: an error, which failed a WCS with a wide column.
+- **`require_*` reads a mandatory keyword, `set_optional` writes an optional
+  one.** `set_optional(k, None)` removes every record with `k`, so the header
+  holds the value or nothing. Refused: range-checked getters, whose ranges belong
+  to the caller's domain; `set_with_comment`, which is `set(…)?.set_comment(…)`;
+  and an infallible `set`, as a NaN real and non-ASCII text are invalid in FITS.
 - **Editing the comment of an absent card fails with `KeywordNotFound`.**
   Refused: a no-op, which loses a misspelled keyword without a trace.
+- **A commentary card keeps its name as text.** The standard lets a record with
+  no value indicator start with any 8 bytes, which no `Keyword` holds, so `Entry`
+  gives the name as `&str`, and `history` and `comments` read the commentary
+  records.
 
 ## Crate boundary
 

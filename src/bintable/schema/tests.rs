@@ -2,15 +2,20 @@ use crate::bintable::Table;
 use crate::bintable::internals::table_header;
 use crate::bintable::schema::Schema;
 use crate::error::FitsError;
+use crate::header_model::keywords;
 
 #[test]
 fn theap_below_the_main_table_is_rejected() {
     // §6.6: the heap follows the main table, so THEAP < NAXIS1·NAXIS2 is invalid.
     let mut header = table_header(4, 2, &["1J"]); // main table = 8 bytes
-    header.set_internal("PCOUNT", 4).set_internal("THEAP", 4); // THEAP 4 < 8
+    header
+        .set_internal(keywords::PCOUNT, 4)
+        .set_internal(keywords::THEAP, 4); // THEAP 4 < 8
     assert!(matches!(
         Table::from_data(&header, vec![0u8; 12]),
-        Err(FitsError::KeywordOutOfRange { name: "THEAP" })
+        Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::THEAP
+        })
     ));
 }
 
@@ -52,21 +57,29 @@ fn row_width_mismatch_is_an_error() {
 fn tfields_beyond_999_is_rejected() {
     // §7.3.1 caps TFIELDS at 999; an absurd value must error, not size a huge Vec.
     let mut header = table_header(0, 0, &[]);
-    header.set_internal("TFIELDS", 1000);
+    header.set_internal(keywords::TFIELDS, 1000);
     assert!(matches!(
         Table::from_data(&header, vec![]),
-        Err(FitsError::KeywordOutOfRange { name: "TFIELDS" })
+        Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::TFIELDS
+        })
     ));
 
-    header.set_internal("TFIELDS", 0).set_internal("NAXIS1", -1);
+    header
+        .set_internal(keywords::TFIELDS, 0)
+        .set_internal("NAXIS1", -1);
     assert!(matches!(
         Table::from_data(&header, vec![]),
-        Err(FitsError::KeywordOutOfRange { name: "NAXIS1" })
+        Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "NAXIS1"
     ));
-    header.set_internal("NAXIS1", 0).set_internal("PCOUNT", -1);
+    header
+        .set_internal("NAXIS1", 0)
+        .set_internal(keywords::PCOUNT, -1);
     assert!(matches!(
         Table::from_data(&header, vec![]),
-        Err(FitsError::KeywordOutOfRange { name: "PCOUNT" })
+        Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::PCOUNT
+        })
     ));
 }
 

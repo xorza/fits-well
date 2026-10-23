@@ -4,10 +4,10 @@ use crate::bintable::table_view::TableView;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::Header;
-use crate::keyword::AltSuffix;
-use crate::keyword::key;
+use crate::keyword::{AltSuffix, Keyword};
 use crate::world_coordinates::ctype::Ctype;
 use crate::world_coordinates::world_unit_scale;
+use crate::world_coordinates::{read_integer, read_real, read_text};
 use std::iter;
 
 const MAX_INTERPOLATION_VERTICES: usize = 1 << 20;
@@ -93,20 +93,22 @@ pub(crate) fn descriptors(
     let suffix = AltSuffix::new(alt);
     let mut descriptors = Vec::<PendingDescriptor>::new();
     for axis in 0..axis_count {
-        let ctype = header
-            .get_text(key!("CTYPE{}{suffix}", axis + 1).as_str())?
-            .unwrap_or("");
+        let ctype = read_text(
+            header,
+            Keyword::try_from(format_args!("CTYPE{}{suffix}", axis + 1)),
+        )?
+        .unwrap_or("");
         if Ctype::parse(ctype).algorithm != Some("TAB") {
             continue;
         }
         let extension_name = required_text(
             header,
-            key!("PS{}_0{suffix}", axis + 1).as_str(),
+            Keyword::try_from(format_args!("PS{}_0{suffix}", axis + 1))?,
             "TAB requires PSi_0",
         )?;
         let coordinate_column = required_text(
             header,
-            key!("PS{}_1{suffix}", axis + 1).as_str(),
+            Keyword::try_from(format_args!("PS{}_1{suffix}", axis + 1))?,
             "TAB requires PSi_1",
         )?;
         let reference = TabularReference {
@@ -123,15 +125,19 @@ pub(crate) fn descriptors(
         if table_axis >= axis_count {
             return Err(invalid("PVi_3 exceeds the WCS axis count"));
         }
-        let reference_index = header
-            .get_real(key!("CRVAL{}{suffix}", axis + 1).as_str())?
-            .unwrap_or(0.0);
+        let reference_index = read_real(
+            header,
+            Keyword::try_from(format_args!("CRVAL{}{suffix}", axis + 1)),
+        )?
+        .unwrap_or(0.0);
         if !reference_index.is_finite() {
             return Err(invalid("TAB CRVAL must be finite"));
         }
-        let index_column = header
-            .get_text(key!("PS{}_2{suffix}", axis + 1).as_str())?
-            .map(str::to_string);
+        let index_column = read_text(
+            header,
+            Keyword::try_from(format_args!("PS{}_2{suffix}", axis + 1)),
+        )?
+        .map(str::to_string);
 
         let descriptor = if let Some(descriptor) = descriptors
             .iter_mut()
@@ -154,9 +160,11 @@ pub(crate) fn descriptors(
         if descriptor.axes[table_axis].is_some() {
             return Err(invalid("TAB table-axis mapping is duplicated"));
         }
-        let cunit = header
-            .get_text(key!("CUNIT{}{suffix}", axis + 1).as_str())?
-            .unwrap_or("");
+        let cunit = read_text(
+            header,
+            Keyword::try_from(format_args!("CUNIT{}{suffix}", axis + 1)),
+        )?
+        .unwrap_or("");
         descriptor.axes[table_axis] = Some(TableAxis {
             image_axis: axis,
             reference_index,
@@ -860,8 +868,8 @@ fn integer_parameter(
     suffix: AltSuffix,
     default: i64,
 ) -> Result<i64> {
-    let key = key!("PV{}_{parameter}{suffix}", axis + 1);
-    match header.get_integer(key.as_str())? {
+    let key = Keyword::try_from(format_args!("PV{}_{parameter}{suffix}", axis + 1));
+    match read_integer(header, key)? {
         None => Ok(default),
         Some(value) if value >= 1 => Ok(value),
         Some(_) => Err(invalid(
@@ -870,7 +878,7 @@ fn integer_parameter(
     }
 }
 
-fn required_text(header: &Header, keyword: &str, detail: &'static str) -> Result<String> {
+fn required_text(header: &Header, keyword: Keyword, detail: &'static str) -> Result<String> {
     header
         .get_text(keyword)?
         .filter(|value| !value.is_empty())
@@ -894,11 +902,11 @@ const fn domain(axis: usize) -> FitsError {
 /// `-TAB` fixtures for the tabular, reader and WCS bench code.
 #[cfg(feature = "internals")]
 pub(crate) mod internals {
+    use crate::header_model::{Header, keywords};
     use std::sync::OnceLock;
 
     use crate::bintable::Table;
     use crate::bintable::internals::table_header;
-    use crate::header_model::Header;
     use crate::world_coordinates::Wcs;
     use crate::world_coordinates::tabular;
     use crate::world_coordinates::tabular::TabularTransform;
@@ -944,7 +952,7 @@ pub(crate) mod internals {
     /// the `coordinate` column in `WCS-TABLE`, with unit pixels and no offsets.
     pub(crate) fn tab_header(axis_count: usize, coordinate: &str) -> Header {
         let mut header = Header::new();
-        header.set_internal("NAXIS", i64::try_from(axis_count).unwrap());
+        header.set_internal(keywords::NAXIS, i64::try_from(axis_count).unwrap());
         for axis in 1..=axis_count {
             header
                 .set_internal(format!("CTYPE{axis}").as_str(), format!("AX{axis:02}-TAB"))
@@ -1014,7 +1022,8 @@ pub(crate) mod internals {
 
     /// The transform `header` declares, with every `-TAB` axis read from `table`.
     pub(crate) fn resolved_wcs(header: &Header, table: &Table) -> Wcs {
-        let axis_count = usize::try_from(header.get_integer("NAXIS").unwrap().unwrap()).unwrap();
+        let axis_count =
+            usize::try_from(header.get_integer(keywords::NAXIS).unwrap().unwrap()).unwrap();
         let transforms = tabular::descriptors(header, axis_count, None)
             .unwrap()
             .into_iter()

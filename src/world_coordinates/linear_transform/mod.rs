@@ -3,12 +3,12 @@
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::Header;
-use crate::keyword::AltSuffix;
-use crate::keyword::key;
+use crate::keyword::{AltSuffix, Keyword};
 use crate::world_coordinates::D2R;
 use crate::world_coordinates::axis::Axis;
 use crate::world_coordinates::first_real;
 use crate::world_coordinates::projected_celestial_axes::ProjectedCelestialAxes;
+use crate::world_coordinates::read_value;
 
 /// The matrix `A` mapping `(pixel − CRPIX)` to intermediate world coordinates, held
 /// beside its inverse so both directions stay consistent by construction. Both are
@@ -33,7 +33,7 @@ pub(super) struct LinearMatrix {
 /// One `PCi_ja`/`CDi_ja` keyword the header carries, with its zero-based cell.
 #[derive(Debug)]
 struct MatrixCell {
-    keyword: String,
+    keyword: Keyword,
     row: usize,
     column: usize,
 }
@@ -67,7 +67,7 @@ fn matrix_cells(header: &Header, root: &str, alt: AltSuffix, naxis: usize) -> Ve
                 .strip_suffix(alt.as_str())?;
             let (row, column) = rest.split_once('_')?;
             Some(MatrixCell {
-                keyword: entry.keyword.to_owned(),
+                keyword: Keyword::try_from(entry.keyword).ok()?,
                 row: index(row)?,
                 column: index(column)?,
             })
@@ -98,7 +98,8 @@ impl LinearMatrix {
         let pc = matrix_cells(header, "PC", a, naxis);
         let has_cd = !cd.is_empty();
         let has_pc = !pc.is_empty();
-        let has_crota = (1..=naxis).any(|i| header.get(key!("CROTA{i}{a}").as_str()).is_some());
+        let has_crota = (1..=naxis)
+            .any(|i| read_value(header, Keyword::try_from(format_args!("CROTA{i}{a}"))).is_some());
         if has_cd && has_pc {
             return Err(FitsError::ConflictingWcsKeywords {
                 detail: "PC and CD conventions overlap",
@@ -112,7 +113,7 @@ impl LinearMatrix {
         let mut values = vec![0.0; naxis * naxis];
         if has_cd {
             for cell in cd {
-                values[cell.index(naxis)] = header.get_real(&cell.keyword)?.unwrap_or(0.0);
+                values[cell.index(naxis)] = header.get_real(cell.keyword)?.unwrap_or(0.0);
             }
             return Ok(Self { values, naxis });
         }
@@ -121,7 +122,7 @@ impl LinearMatrix {
         }
         for cell in pc {
             values[cell.index(naxis)] =
-                cdelt[cell.row] * header.get_real(&cell.keyword)?.unwrap_or(0.0);
+                cdelt[cell.row] * header.get_real(cell.keyword)?.unwrap_or(0.0);
         }
         // Legacy CROTA: rotate the celestial 2-axis sub-block (only when no PC was
         // given, per the convention that CROTA and PC are exclusive).
@@ -130,8 +131,8 @@ impl LinearMatrix {
             let lat = axes.latitude;
             let rho = first_real(
                 header,
-                key!("CROTA{}{a}", lat + 1).as_str(),
-                key!("CROTA{}{a}", lng + 1).as_str(),
+                Keyword::try_from(format_args!("CROTA{}{a}", lat + 1)),
+                Keyword::try_from(format_args!("CROTA{}{a}", lng + 1)),
             )?
             .unwrap_or(0.0);
             if rho != 0.0 {

@@ -8,13 +8,13 @@ loses. `internals` is the crate's own test surface and is left out.
 ```text
 FitsError
     #[non_exhaustive]
-    enum FitsError: Debug, Display, Error, From<Error>
+    enum FitsError: Debug, Display, Error, From<Error>, From<Infallible>
         Io(Error)
         WriterFailed
         PrimaryAlreadyWritten
         InvalidKeyword { name: String }
-        ReservedKeyword { name: String }
-        InvalidHeaderValue { keyword: String, reason: &'static str }
+        ReservedKeyword { keyword: Keyword }
+        InvalidHeaderValue { keyword: Keyword, reason: &'static str }
         HeaderCardTooLong { keyword: String, length: usize }
         InvalidValue { card: String }
         InvalidWcs { detail: String }
@@ -29,9 +29,9 @@ FitsError
         CharacterFieldTooWide { column: String, row: usize, length: usize, width: usize }
         InvalidBitpix { code: i64 }
         MissingEnd
-        MissingKeyword { name: &'static str }
-        KeywordNotFound { keyword: String }
-        KeywordOutOfRange { name: &'static str }
+        MissingKeyword { keyword: Keyword }
+        KeywordNotFound { keyword: Keyword }
+        KeywordOutOfRange { keyword: Keyword }
         IntegerOutOfRange { value: String, target: &'static str }
         UnexpectedEof
         DataUnitOverflow
@@ -47,6 +47,7 @@ FitsError
         TableRowCountUndetermined { column: String }
         EmptyVlaNeedsType
         OneBasedIndexRequired { kind: &'static str }
+        HduNotFound { name: String, version: Option<i64>, level: Option<i64> }
         NotAnImage
         ImageHasGroups
         NotABinTable
@@ -86,19 +87,20 @@ FitsReader  [shape differs by feature]
             pub fn into_bytes(self) -> &'a [u8]
         impl<S: Source> FitsReader<S>
             pub fn hdus(&self) -> &[Hdu]
-            pub fn hdu_index(&self, name: &str, version: Option<i64>) -> Result<Option<usize>>
-            pub fn image_indices(&self) -> Vec<usize>
-            pub fn read_data_raw(&mut self, index: usize) -> Result<DataUnit>
-            pub fn image(&mut self, index: usize) -> Result<ImageReader<'_, S>>
-            pub fn read_table(&mut self, index: usize) -> Result<Table>
-            pub fn table_schema(&self, index: usize) -> Result<&Schema>
-            pub fn read_table_rows(&mut self, index: usize, rows: Range<usize>) -> Result<Table>
-            pub fn read_table_columns(&mut self, index: usize, rows: Range<usize>, columns: &[ColumnSelector]) -> Result<Selection>
-            pub fn read_table_cell(&mut self, index: usize, row: usize, column: &ColumnSelector) -> Result<ColumnData>
-            pub fn read_wcs(&mut self, index: usize, alt: Option<char>) -> Result<Wcs>
-            pub fn read_ascii_table(&mut self, index: usize) -> Result<Ascii>
-            pub fn read_groups(&mut self, index: usize) -> Result<RandomGroups>
-            pub fn verify_checksum(&mut self, index: usize) -> Result<ChecksumReport>
+            pub fn hdu<'h>(&self, hdu: impl Into<HduSelector<'h>>) -> Result<&Hdu>
+            pub fn hdu_index<'h>(&self, hdu: impl Into<HduSelector<'h>>) -> Result<usize>
+            pub fn images(&self) -> impl Iterator<Item = usize> + '_
+            pub fn read_data_raw<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<DataUnit>
+            pub fn image<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<ImageReader<'_, S>>
+            pub fn read_table<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Table>
+            pub fn table_schema<'h>(&self, hdu: impl Into<HduSelector<'h>>) -> Result<&Schema>
+            pub fn read_table_rows<'h>(&mut self, hdu: impl Into<HduSelector<'h>>, rows: Range<usize>) -> Result<Table>
+            pub fn read_table_columns<'h>(&mut self, hdu: impl Into<HduSelector<'h>>, rows: Range<usize>, columns: &[ColumnSelector]) -> Result<Selection>
+            pub fn read_table_cell<'h>(&mut self, hdu: impl Into<HduSelector<'h>>, row: usize, column: &ColumnSelector) -> Result<ColumnData>
+            pub fn read_wcs<'h>(&mut self, hdu: impl Into<HduSelector<'h>>, alt: Option<char>) -> Result<Wcs>
+            pub fn read_ascii_table<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Ascii>
+            pub fn read_groups<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<RandomGroups>
+            pub fn verify_checksum<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<ChecksumReport>
         impl<S: Debug> Debug for FitsReader<S>
 
 FitsWriter  [shape differs by feature]
@@ -157,34 +159,56 @@ header::Entry
         pub comment: Option<&'a str>
 
 header::FitsInteger
-    struct FitsInteger: Clone, Debug, Display, Eq, From<i128>, From<i32>, From<i64>, From<u128>, From<u32>, From<u64>, Hash, PartialEq
+    struct FitsInteger: Clone, Debug, Display, Eq, From<i128>, From<i32>, From<i64>, From<u128>, From<u16>, From<u32>, From<u64>, From<usize>, Hash, PartialEq
         impl From<FitsInteger> for Value
         impl TryFrom<&FitsInteger> for i64
 
 header::Header
     struct Header: Clone, Debug, Default
         pub fn parse(bytes: &[u8]) -> Result<Self>
-        pub fn get(&self, keyword: &str) -> Option<&Value>
-        pub fn get_logical(&self, keyword: &str) -> Result<Option<bool>>
-        pub fn get_integer(&self, keyword: &str) -> Result<Option<i64>>
-        pub fn get_real(&self, keyword: &str) -> Result<Option<f64>>
-        pub fn get_text(&self, keyword: &str) -> Result<Option<&str>>
-        pub fn iter(&self) -> impl Iterator<Item = Entry<'_>>
+        pub fn get(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<&Value>>
+        pub fn entry(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<Entry<'_>>>
+        pub fn get_logical(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<bool>>
+        pub fn get_integer(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<i64>>
+        pub fn get_real(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<f64>>
+        pub fn get_text(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<&str>>
+        pub fn require_logical(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<bool>
+        pub fn require_integer(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<i64>
+        pub fn require_real(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<f64>
+        pub fn require_text(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<&str>
+        pub const fn len(&self) -> usize
+        pub const fn is_empty(&self) -> bool
+        pub fn contains(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<bool>
+        pub fn index_of(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<usize>>
+        pub fn iter(&self) -> Iter<'_>
+        pub fn history(&self) -> impl Iterator<Item = &str>
+        pub fn comments(&self) -> impl Iterator<Item = &str>
         pub fn bitpix(&self) -> Result<Bitpix>
         pub fn naxis(&self) -> Result<usize>
         pub fn axes(&self) -> Result<Vec<usize>>
         pub fn scaling(&self) -> Result<Scaling>
         pub fn new() -> Self
-        pub fn set(&mut self, keyword: &str, value: impl Into<Value>) -> Result<&mut Self>
-        pub fn append(&mut self, keyword: &str, value: impl Into<Value>) -> Result<&mut Self>
-        pub fn insert(&mut self, index: usize, keyword: &str, value: impl Into<Value>) -> Result<&mut Self>
-        pub fn remove(&mut self, keyword: &str) -> Option<Record>
+        pub fn set(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, value: impl Into<Value>) -> Result<&mut Self>
+        pub fn set_optional(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, value: Option<impl Into<Value>>) -> Result<&mut Self>
+        pub fn append(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, value: impl Into<Value>) -> Result<&mut Self>
+        pub fn insert(&mut self, index: usize, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, value: impl Into<Value>) -> Result<&mut Self>
+        pub fn remove(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<Record>>
         pub fn remove_at(&mut self, index: usize) -> Result<Record>
-        pub fn remove_all(&mut self, keyword: &str) -> usize
-        pub fn comment(&mut self, keyword: &str, text: &str) -> Result<&mut Self>
+        pub fn remove_all(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<usize>
+        pub fn set_comment(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, text: &str) -> Result<&mut Self>
         pub fn push_comment(&mut self, text: &str) -> Result<&mut Self>
         pub fn push_history(&mut self, text: &str) -> Result<&mut Self>
         pub fn push_blank(&mut self, text: &str) -> Result<&mut Self>
+        impl<'a> IntoIterator for &'a Header
+
+header::Iter
+    struct Iter<'a>: Clone, Debug, ExactSizeIterator, Iterator
+
+header::Keyword
+    struct Keyword: Clone, Copy, Debug, Display, Eq, Hash, PartialEq, PartialEq<&str>, PartialEq<str>, TryFrom<&String>, TryFrom<&str>, TryFrom<Arguments<'_>>, TryFrom<String>
+        pub const fn new(name: &str) -> Self
+        pub fn indexed(self, index: usize) -> Result<Self>
+        pub const fn as_str(&self) -> &str
 
 header::Record
     struct Record: Clone, Debug, PartialEq
@@ -193,7 +217,7 @@ header::Record
         pub comment: Option<String>
 
 header::Value
-    enum Value: Clone, Debug, From<&str>, From<FitsInteger>, From<String>, From<bool>, From<f64>, From<i128>, From<i32>, From<i64>, From<u128>, From<u32>, From<u64>, PartialEq
+    enum Value: Clone, Debug, From<&str>, From<FitsInteger>, From<String>, From<bool>, From<f32>, From<f64>, From<i128>, From<i32>, From<i64>, From<u128>, From<u16>, From<u32>, From<u64>, From<usize>, PartialEq
         Logical(bool)
         Integer(FitsInteger)
         Real(f64)
@@ -205,6 +229,375 @@ header::Value
         pub fn as_integer(&self) -> Result<Option<i64>>
         pub fn as_real(&self) -> Result<Option<f64>>
         pub fn as_text(&self) -> Option<&str>
+
+header::keywords
+    mod
+
+header::keywords::AUTHOR
+    const AUTHOR: Keyword
+
+header::keywords::BEPOCH
+    const BEPOCH: Keyword
+
+header::keywords::BITPIX
+    const BITPIX: Keyword
+
+header::keywords::BLANK
+    const BLANK: Keyword
+
+header::keywords::BLOCKED
+    const BLOCKED: Keyword
+
+header::keywords::BSCALE
+    const BSCALE: Keyword
+
+header::keywords::BUNIT
+    const BUNIT: Keyword
+
+header::keywords::BZERO
+    const BZERO: Keyword
+
+header::keywords::CDELT
+    const CDELT: Keyword
+
+header::keywords::CHECKSUM
+    const CHECKSUM: Keyword
+
+header::keywords::CNAME
+    const CNAME: Keyword
+
+header::keywords::COMMENT
+    const COMMENT: Keyword
+
+header::keywords::CRDER
+    const CRDER: Keyword
+
+header::keywords::CROTA
+    const CROTA: Keyword
+
+header::keywords::CRPIX
+    const CRPIX: Keyword
+
+header::keywords::CRVAL
+    const CRVAL: Keyword
+
+header::keywords::CSYER
+    const CSYER: Keyword
+
+header::keywords::CTYPE
+    const CTYPE: Keyword
+
+header::keywords::CUNIT
+    const CUNIT: Keyword
+
+header::keywords::DATAMAX
+    const DATAMAX: Keyword
+
+header::keywords::DATAMIN
+    const DATAMIN: Keyword
+
+header::keywords::DATASUM
+    const DATASUM: Keyword
+
+header::keywords::DATE
+    const DATE: Keyword
+
+header::keywords::DATEREF
+    const DATEREF: Keyword
+
+header::keywords::DATE_AVG
+    const DATE_AVG: Keyword
+
+header::keywords::DATE_BEG
+    const DATE_BEG: Keyword
+
+header::keywords::DATE_END
+    const DATE_END: Keyword
+
+header::keywords::DATE_OBS
+    const DATE_OBS: Keyword
+
+header::keywords::EPOCH
+    const EPOCH: Keyword
+
+header::keywords::EQUINOX
+    const EQUINOX: Keyword
+
+header::keywords::EXTEND
+    const EXTEND: Keyword
+
+header::keywords::EXTLEVEL
+    const EXTLEVEL: Keyword
+
+header::keywords::EXTNAME
+    const EXTNAME: Keyword
+
+header::keywords::EXTVER
+    const EXTVER: Keyword
+
+header::keywords::GCOUNT
+    const GCOUNT: Keyword
+
+header::keywords::GROUPS
+    const GROUPS: Keyword
+
+header::keywords::HISTORY
+    const HISTORY: Keyword
+
+header::keywords::INSTRUME
+    const INSTRUME: Keyword
+
+header::keywords::JDREF
+    const JDREF: Keyword
+
+header::keywords::JDREFF
+    const JDREFF: Keyword
+
+header::keywords::JDREFI
+    const JDREFI: Keyword
+
+header::keywords::JEPOCH
+    const JEPOCH: Keyword
+
+header::keywords::LATPOLE
+    const LATPOLE: Keyword
+
+header::keywords::LONPOLE
+    const LONPOLE: Keyword
+
+header::keywords::MJDREF
+    const MJDREF: Keyword
+
+header::keywords::MJDREFF
+    const MJDREFF: Keyword
+
+header::keywords::MJDREFI
+    const MJDREFI: Keyword
+
+header::keywords::MJD_AVG
+    const MJD_AVG: Keyword
+
+header::keywords::MJD_BEG
+    const MJD_BEG: Keyword
+
+header::keywords::MJD_END
+    const MJD_END: Keyword
+
+header::keywords::MJD_OBS
+    const MJD_OBS: Keyword
+
+header::keywords::NAXIS
+    const NAXIS: Keyword
+
+header::keywords::OBJECT
+    const OBJECT: Keyword
+
+header::keywords::OBSERVER
+    const OBSERVER: Keyword
+
+header::keywords::ORIGIN
+    const ORIGIN: Keyword
+
+header::keywords::PCOUNT
+    const PCOUNT: Keyword
+
+header::keywords::PSCAL
+    const PSCAL: Keyword
+
+header::keywords::PTYPE
+    const PTYPE: Keyword
+
+header::keywords::PZERO
+    const PZERO: Keyword
+
+header::keywords::RADECSYS
+    const RADECSYS: Keyword
+
+header::keywords::RADESYS
+    const RADESYS: Keyword
+
+header::keywords::REFERENC
+    const REFERENC: Keyword
+
+header::keywords::RESTFREQ
+    const RESTFREQ: Keyword
+
+header::keywords::RESTFRQ
+    const RESTFRQ: Keyword
+
+header::keywords::RESTWAV
+    const RESTWAV: Keyword
+
+header::keywords::SIMPLE
+    const SIMPLE: Keyword
+
+header::keywords::SPECSYS
+    const SPECSYS: Keyword
+
+header::keywords::SSYSOBS
+    const SSYSOBS: Keyword
+
+header::keywords::TBCOL
+    const TBCOL: Keyword
+
+header::keywords::TCPER
+    const TCPER: Keyword
+
+header::keywords::TCTYP
+    const TCTYP: Keyword
+
+header::keywords::TCZPH
+    const TCZPH: Keyword
+
+header::keywords::TDIM
+    const TDIM: Keyword
+
+header::keywords::TDISP
+    const TDISP: Keyword
+
+header::keywords::TELAPSE
+    const TELAPSE: Keyword
+
+header::keywords::TELESCOP
+    const TELESCOP: Keyword
+
+header::keywords::TFIELDS
+    const TFIELDS: Keyword
+
+header::keywords::TFORM
+    const TFORM: Keyword
+
+header::keywords::THEAP
+    const THEAP: Keyword
+
+header::keywords::TIMEDEL
+    const TIMEDEL: Keyword
+
+header::keywords::TIMEOFFS
+    const TIMEOFFS: Keyword
+
+header::keywords::TIMEPIXR
+    const TIMEPIXR: Keyword
+
+header::keywords::TIMESYS
+    const TIMESYS: Keyword
+
+header::keywords::TIMEUNIT
+    const TIMEUNIT: Keyword
+
+header::keywords::TIMRDER
+    const TIMRDER: Keyword
+
+header::keywords::TIMSYER
+    const TIMSYER: Keyword
+
+header::keywords::TNULL
+    const TNULL: Keyword
+
+header::keywords::TREFPOS
+    const TREFPOS: Keyword
+
+header::keywords::TRPOS
+    const TRPOS: Keyword
+
+header::keywords::TSCAL
+    const TSCAL: Keyword
+
+header::keywords::TTYPE
+    const TTYPE: Keyword
+
+header::keywords::TUNIT
+    const TUNIT: Keyword
+
+header::keywords::TZERO
+    const TZERO: Keyword
+
+header::keywords::WCSAXES
+    const WCSAXES: Keyword
+
+header::keywords::WCSNAME
+    const WCSNAME: Keyword
+
+header::keywords::XPOSURE
+    const XPOSURE: Keyword
+
+header::keywords::XTENSION
+    const XTENSION: Keyword
+
+header::keywords::ZBITPIX
+    const ZBITPIX: Keyword
+
+header::keywords::ZBLANK
+    const ZBLANK: Keyword
+
+header::keywords::ZBLOCKED
+    const ZBLOCKED: Keyword
+
+header::keywords::ZCMPTYPE
+    const ZCMPTYPE: Keyword
+
+header::keywords::ZCTYP
+    const ZCTYP: Keyword
+
+header::keywords::ZDATASUM
+    const ZDATASUM: Keyword
+
+header::keywords::ZDITHER0
+    const ZDITHER0: Keyword
+
+header::keywords::ZEXTEND
+    const ZEXTEND: Keyword
+
+header::keywords::ZFORM
+    const ZFORM: Keyword
+
+header::keywords::ZGCOUNT
+    const ZGCOUNT: Keyword
+
+header::keywords::ZHEAPPTR
+    const ZHEAPPTR: Keyword
+
+header::keywords::ZHECKSUM
+    const ZHECKSUM: Keyword
+
+header::keywords::ZIMAGE
+    const ZIMAGE: Keyword
+
+header::keywords::ZMASKCMP
+    const ZMASKCMP: Keyword
+
+header::keywords::ZNAME
+    const ZNAME: Keyword
+
+header::keywords::ZNAXIS
+    const ZNAXIS: Keyword
+
+header::keywords::ZPCOUNT
+    const ZPCOUNT: Keyword
+
+header::keywords::ZQUANTIZ
+    const ZQUANTIZ: Keyword
+
+header::keywords::ZSIMPLE
+    const ZSIMPLE: Keyword
+
+header::keywords::ZTABLE
+    const ZTABLE: Keyword
+
+header::keywords::ZTENSION
+    const ZTENSION: Keyword
+
+header::keywords::ZTHEAP
+    const ZTHEAP: Keyword
+
+header::keywords::ZTILE
+    const ZTILE: Keyword
+
+header::keywords::ZTILELEN
+    const ZTILELEN: Keyword
+
+header::keywords::ZVAL
+    const ZVAL: Keyword
 
 image
     mod
@@ -404,13 +797,14 @@ io::DataUnitView
 
 io::Hdu
     struct Hdu: Debug
+        pub index: usize
         pub header: Header
         pub kind: HduKind
         pub data_bytes: u64
         pub fn is_image(&self) -> bool
-        pub fn matches_extension(&self, name: &str, version: Option<i64>, level: Option<i64>) -> Result<bool>
+        pub fn matches<'a>(&self, selector: impl Into<HduSelector<'a>>) -> Result<bool>
         pub const fn padded_data_bytes(&self) -> u64
-        pub fn image(&self) -> Result<Metadata<'_>>
+        pub fn image_metadata(&self) -> Result<Metadata<'_>>
         pub fn table_schema(&self) -> Result<&Schema>
 
 io::HduKind
@@ -424,6 +818,11 @@ io::HduKind
         CompressedTable
         RandomGroups
         Other
+
+io::HduSelector
+    enum HduSelector<'a>: Clone, Copy, Debug, Eq, From<&'a str>, From<(&'a str, i64)>, From<usize>, PartialEq
+        Index(usize)
+        Extension { name: &'a str, version: Option<i64>, level: Option<i64> }
 
 io::RandomGroupView
     struct RandomGroupView<'a>: Clone, Copy, Debug, PartialEq

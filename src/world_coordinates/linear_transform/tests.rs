@@ -1,3 +1,5 @@
+use crate::header_model::keywords;
+
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::internals::CROTA_GOLDEN;
 use crate::world_coordinates::internals::assert_astropy_golden;
@@ -75,7 +77,7 @@ fn legacy_crota_rotation_matches_astropy() {
 fn conflicting_linear_keywords_are_rejected() {
     let base = || {
         let mut h = Header::new();
-        h.set_internal("NAXIS", 2)
+        h.set_internal(keywords::NAXIS, 2)
             .set_internal("CTYPE1", "RA---TAN")
             .set_internal("CTYPE2", "DEC--TAN")
             .set_internal("CRPIX1", 1.0)

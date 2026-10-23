@@ -2,16 +2,15 @@
 
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header_model::Header;
-use crate::keyword::AltSuffix;
-use crate::keyword::KeyBuf;
-use crate::keyword::key;
+use crate::header_model::{Header, keywords};
+use crate::keyword::{AltSuffix, Keyword};
 use crate::world_coordinates::first_real;
 use crate::world_coordinates::spectral_frame::SpectralFrame;
 use crate::world_coordinates::table_wcs::keyword_spelling::KeywordSpelling;
 use crate::world_coordinates::table_wcs::table_axis_keyword::TableAxisKeyword;
 use crate::world_coordinates::table_wcs::table_matrix_keyword::TableMatrixKeyword;
 use crate::world_coordinates::table_wcs::table_pole_keyword::TablePoleKeyword;
+use crate::world_coordinates::{read_integer, read_real, read_text, read_value};
 
 /// Builds the Table-22 keyword names for one (optionally alternate) WCS description.
 /// Every family has a pixel-list and a vector-cell spelling, and several have a
@@ -39,10 +38,14 @@ impl TableWcsResolver {
         }
     }
 
-    pub(super) fn pixel_axis_key(self, keyword: TableAxisKeyword, column: usize) -> Option<KeyBuf> {
+    pub(super) fn pixel_axis_key(
+        self,
+        keyword: TableAxisKeyword,
+        column: usize,
+    ) -> Option<Result<Keyword>> {
         let root = keyword.table_root(self.spelling())?;
         let suffix = self.suffix;
-        Some(key!("T{root}{column}{suffix}"))
+        Some(Keyword::try_from(format_args!("T{root}{column}{suffix}")))
     }
 
     pub(super) fn vector_axis_key(
@@ -50,10 +53,12 @@ impl TableWcsResolver {
         keyword: TableAxisKeyword,
         axis: usize,
         column: usize,
-    ) -> Option<KeyBuf> {
+    ) -> Option<Result<Keyword>> {
         let root = keyword.table_root(self.spelling())?;
         let suffix = self.suffix;
-        Some(key!("{axis}{root}{column}{suffix}"))
+        Some(Keyword::try_from(format_args!(
+            "{axis}{root}{column}{suffix}"
+        )))
     }
 
     fn pixel_matrix_key(
@@ -62,10 +67,10 @@ impl TableWcsResolver {
         row_column: usize,
         input_column: usize,
         spelling: KeywordSpelling,
-    ) -> KeyBuf {
+    ) -> Result<Keyword> {
         let root = keyword.pixel_root(spelling);
         let suffix = self.suffix;
-        key!("{root}{row_column}_{input_column}{suffix}")
+        Keyword::try_from(format_args!("{root}{row_column}_{input_column}{suffix}"))
     }
 
     pub(super) fn pixel_matrix_real(
@@ -77,7 +82,7 @@ impl TableWcsResolver {
     ) -> Result<Option<f64>> {
         let [long, short] = KeywordSpelling::BOTH
             .map(|spelling| self.pixel_matrix_key(keyword, row_column, input_column, spelling));
-        first_real(header, long.as_str(), short.as_str())
+        first_real(header, long, short)
     }
 
     pub(super) fn vector_matrix_key(
@@ -86,10 +91,10 @@ impl TableWcsResolver {
         row_axis: usize,
         input_axis: usize,
         column: usize,
-    ) -> KeyBuf {
+    ) -> Result<Keyword> {
         let root = keyword.root();
         let suffix = self.suffix;
-        key!("{row_axis}{input_axis}{root}{column}{suffix}")
+        Keyword::try_from(format_args!("{row_axis}{input_axis}{root}{column}{suffix}"))
     }
 
     fn pixel_parameter_key(
@@ -97,13 +102,13 @@ impl TableWcsResolver {
         column: usize,
         parameter: usize,
         spelling: KeywordSpelling,
-    ) -> KeyBuf {
+    ) -> Result<Keyword> {
         let root = match spelling {
             KeywordSpelling::Full => "TPV",
             KeywordSpelling::Short => "TV",
         };
         let suffix = self.suffix;
-        key!("{root}{column}_{parameter}{suffix}")
+        Keyword::try_from(format_args!("{root}{column}_{parameter}{suffix}"))
     }
 
     pub(super) fn pixel_parameter_real(
@@ -114,7 +119,7 @@ impl TableWcsResolver {
     ) -> Result<Option<f64>> {
         let [long, short] = KeywordSpelling::BOTH
             .map(|spelling| self.pixel_parameter_key(column, parameter, spelling));
-        first_real(header, long.as_str(), short.as_str())
+        first_real(header, long, short)
     }
 
     fn vector_parameter_key(
@@ -123,13 +128,13 @@ impl TableWcsResolver {
         column: usize,
         parameter: usize,
         spelling: KeywordSpelling,
-    ) -> KeyBuf {
+    ) -> Result<Keyword> {
         let root = match spelling {
             KeywordSpelling::Full => "PV",
             KeywordSpelling::Short => "V",
         };
         let suffix = self.suffix;
-        key!("{axis}{root}{column}_{parameter}{suffix}")
+        Keyword::try_from(format_args!("{axis}{root}{column}_{parameter}{suffix}"))
     }
 
     pub(super) fn vector_parameter_real(
@@ -141,7 +146,7 @@ impl TableWcsResolver {
     ) -> Result<Option<f64>> {
         let [long, short] = KeywordSpelling::BOTH
             .map(|spelling| self.vector_parameter_key(axis, column, parameter, spelling));
-        first_real(header, long.as_str(), short.as_str())
+        first_real(header, long, short)
     }
 
     fn vector_string_parameter_key(
@@ -150,18 +155,18 @@ impl TableWcsResolver {
         column: usize,
         parameter: usize,
         spelling: KeywordSpelling,
-    ) -> KeyBuf {
+    ) -> Result<Keyword> {
         let root = match spelling {
             KeywordSpelling::Full => "PS",
             KeywordSpelling::Short => "S",
         };
         let suffix = self.suffix;
-        key!("{axis}{root}{column}_{parameter}{suffix}")
+        Keyword::try_from(format_args!("{axis}{root}{column}_{parameter}{suffix}"))
     }
 
-    fn column_key(self, root: &str, column: usize) -> KeyBuf {
+    pub(super) fn column_key(self, root: &str, column: usize) -> Result<Keyword> {
         let suffix = self.suffix;
-        key!("{root}{column}{suffix}")
+        Keyword::try_from(format_args!("{root}{column}{suffix}"))
     }
 
     pub(super) fn pole_real(
@@ -170,13 +175,11 @@ impl TableWcsResolver {
         pole: TablePoleKeyword,
         column: usize,
     ) -> Result<Option<f64>> {
-        let key = self.column_key(pole.table_root(), column);
-        header.get_real(key.as_str())
+        read_real(header, self.column_key(pole.table_root(), column))
     }
 
     pub(super) fn vector_rank(self, header: &Header, column: usize) -> Result<Option<i64>> {
-        let key = self.column_key("WCAX", column);
-        header.get_integer(key.as_str())
+        read_integer(header, self.column_key("WCAX", column))
     }
 
     /// Whether any Table-22 vector keyword names array axis `axis` of `column` — the
@@ -184,7 +187,7 @@ impl TableWcsResolver {
     pub(super) fn vector_axis_present(self, header: &Header, column: usize, axis: usize) -> bool {
         if TableAxisKeyword::ALL.into_iter().any(|keyword| {
             self.vector_axis_key(keyword, axis, column)
-                .is_some_and(|key| header.get(key.as_str()).is_some())
+                .is_some_and(|key| read_value(header, key).is_some())
         }) {
             return true;
         }
@@ -192,7 +195,7 @@ impl TableWcsResolver {
             KeywordSpelling::BOTH.into_iter().any(|spelling| {
                 let real = self.vector_parameter_key(axis, column, parameter, spelling);
                 let text = self.vector_string_parameter_key(axis, column, parameter, spelling);
-                header.get(real.as_str()).is_some() || header.get(text.as_str()).is_some()
+                read_value(header, real).is_some() || read_value(header, text).is_some()
             })
         }) {
             return true;
@@ -203,7 +206,7 @@ impl TableWcsResolver {
                 .any(|keyword| {
                     let row = self.vector_matrix_key(keyword, axis, other, column);
                     let input = self.vector_matrix_key(keyword, other, axis, column);
-                    header.get(row.as_str()).is_some() || header.get(input.as_str()).is_some()
+                    read_value(header, row).is_some() || read_value(header, input).is_some()
                 })
         })
     }
@@ -212,15 +215,13 @@ impl TableWcsResolver {
     /// column-indexed roots and resolved by the image-header path.
     pub(super) fn spectral_frame(self, header: &Header, column: usize) -> Result<SpectralFrame> {
         let mut translated = Header::new();
-        for (table_root, image_root) in [("RFRQ", "RESTFRQ"), ("RWAV", "RESTWAV")] {
-            let source = self.column_key(table_root, column);
-            if let Some(value) = header.get_real(source.as_str())? {
+        for (table_root, image_root) in [("RFRQ", keywords::RESTFRQ), ("RWAV", keywords::RESTWAV)] {
+            if let Some(value) = read_real(header, self.column_key(table_root, column))? {
                 translated.set_internal(image_root, value);
             }
         }
-        for (table_root, image_root) in [("SPEC", "SPECSYS"), ("SOBS", "SSYSOBS")] {
-            let source = self.column_key(table_root, column);
-            if let Some(value) = header.get_text(source.as_str())? {
+        for (table_root, image_root) in [("SPEC", keywords::SPECSYS), ("SOBS", keywords::SSYSOBS)] {
+            if let Some(value) = read_text(header, self.column_key(table_root, column))? {
                 translated.set_internal(image_root, value);
             }
         }
@@ -237,27 +238,25 @@ impl TableWcsResolver {
         columns: &[usize],
     ) -> Result<()> {
         for &column in columns {
-            let radesys = self.column_key("RADE", column);
-            if let Some(value) = source.get_text(radesys.as_str())? {
-                if let Some(existing) = destination.get_text("RADESYS")?
+            if let Some(value) = read_text(source, self.column_key("RADE", column))? {
+                if let Some(existing) = destination.get_text(keywords::RADESYS)?
                     && existing != value
                 {
                     return Err(FitsError::ConflictingWcsKeywords {
                         detail: "table celestial axes declare different RADESYS values",
                     });
                 }
-                destination.set_internal("RADESYS", value);
+                destination.set_internal(keywords::RADESYS, value);
             }
-            let equinox = self.column_key("EQUI", column);
-            if let Some(value) = source.get_real(equinox.as_str())? {
-                if let Some(existing) = destination.get_real("EQUINOX")?
+            if let Some(value) = read_real(source, self.column_key("EQUI", column))? {
+                if let Some(existing) = destination.get_real(keywords::EQUINOX)?
                     && existing != value
                 {
                     return Err(FitsError::ConflictingWcsKeywords {
                         detail: "table celestial axes declare different EQUINOX values",
                     });
                 }
-                destination.set_internal("EQUINOX", value);
+                destination.set_internal(keywords::EQUINOX, value);
             }
         }
         Ok(())
@@ -313,19 +312,35 @@ mod tests {
             axis_cases
         {
             assert_eq!(
-                primary.pixel_axis_key(keyword, 17).unwrap().as_str(),
+                primary
+                    .pixel_axis_key(keyword, 17)
+                    .unwrap()
+                    .unwrap()
+                    .as_str(),
                 primary_pixel
             );
             assert_eq!(
-                alternate.pixel_axis_key(keyword, 17).unwrap().as_str(),
+                alternate
+                    .pixel_axis_key(keyword, 17)
+                    .unwrap()
+                    .unwrap()
+                    .as_str(),
                 alternate_pixel
             );
             assert_eq!(
-                primary.vector_axis_key(keyword, 3, 17).unwrap().as_str(),
+                primary
+                    .vector_axis_key(keyword, 3, 17)
+                    .unwrap()
+                    .unwrap()
+                    .as_str(),
                 primary_vector
             );
             assert_eq!(
-                alternate.vector_axis_key(keyword, 3, 17).unwrap().as_str(),
+                alternate
+                    .vector_axis_key(keyword, 3, 17)
+                    .unwrap()
+                    .unwrap()
+                    .as_str(),
                 alternate_vector
             );
         }
@@ -333,12 +348,14 @@ mod tests {
             primary
                 .pixel_axis_key(TableAxisKeyword::Rotation, 17)
                 .unwrap()
+                .unwrap()
                 .as_str(),
             "TCROT17"
         );
         assert_eq!(
             primary
                 .vector_axis_key(TableAxisKeyword::Rotation, 3, 17)
+                .unwrap()
                 .unwrap()
                 .as_str(),
             "3CROT17"
@@ -357,59 +374,77 @@ mod tests {
         assert_eq!(
             alternate
                 .pixel_matrix_key(TableMatrixKeyword::Pc, 2, 3, KeywordSpelling::Full)
+                .unwrap()
                 .as_str(),
             "TPC2_3A"
         );
         assert_eq!(
             alternate
                 .pixel_matrix_key(TableMatrixKeyword::Pc, 2, 3, KeywordSpelling::Short)
+                .unwrap()
                 .as_str(),
             "TP2_3A"
         );
         assert_eq!(
             alternate
                 .pixel_matrix_key(TableMatrixKeyword::Cd, 2, 3, KeywordSpelling::Full)
+                .unwrap()
                 .as_str(),
             "TCD2_3A"
         );
         assert_eq!(
             alternate
                 .pixel_matrix_key(TableMatrixKeyword::Cd, 2, 3, KeywordSpelling::Short)
+                .unwrap()
                 .as_str(),
             "TC2_3A"
         );
         assert_eq!(
             alternate
                 .vector_matrix_key(TableMatrixKeyword::Pc, 2, 3, 17)
+                .unwrap()
                 .as_str(),
             "23PC17A"
         );
         assert_eq!(
             alternate
                 .pixel_parameter_key(2, 1, KeywordSpelling::Full)
+                .unwrap()
                 .as_str(),
             "TPV2_1A"
         );
         assert_eq!(
             alternate
                 .pixel_parameter_key(2, 1, KeywordSpelling::Short)
+                .unwrap()
                 .as_str(),
             "TV2_1A"
         );
         assert_eq!(
             alternate
                 .vector_parameter_key(2, 17, 1, KeywordSpelling::Full)
+                .unwrap()
                 .as_str(),
             "2PV17_1A"
         );
         assert_eq!(
             alternate
                 .vector_parameter_key(2, 17, 1, KeywordSpelling::Short)
+                .unwrap()
                 .as_str(),
             "2V17_1A"
         );
-        assert_eq!(alternate.column_key("LONP", 17).as_str(), "LONP17A");
-        assert_eq!(alternate.column_key("LATP", 17).as_str(), "LATP17A");
-        assert_eq!(alternate.column_key("WCAX", 17).as_str(), "WCAX17A");
+        assert_eq!(
+            alternate.column_key("LONP", 17).unwrap().as_str(),
+            "LONP17A"
+        );
+        assert_eq!(
+            alternate.column_key("LATP", 17).unwrap().as_str(),
+            "LATP17A"
+        );
+        assert_eq!(
+            alternate.column_key("WCAX", 17).unwrap().as_str(),
+            "WCAX17A"
+        );
     }
 }

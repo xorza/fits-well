@@ -2,6 +2,7 @@
 
 use crate::checksum;
 use crate::error::Result;
+use crate::header_model::keywords;
 use crate::reader::data_source::DataSource;
 use crate::reader::hdu::Hdu;
 use crate::reader::source::Source;
@@ -58,8 +59,8 @@ impl DataChecksum {
             self.covers(hdu.data_offset, hdu.padded_data_bytes()),
             "a data checksum of another HDU"
         );
-        let stored_datasum = hdu.header.get_text("DATASUM")?;
-        let stored_checksum = hdu.header.get_text("CHECKSUM")?;
+        let stored_datasum = hdu.header.get_text(keywords::DATASUM)?;
+        let stored_checksum = hdu.header.get_text(keywords::CHECKSUM)?;
         let expected_datasum = stored_datasum
             .filter(|value| !value.is_empty() && !is_unknown(value))
             .and_then(|value| value.trim().parse::<u32>().ok());

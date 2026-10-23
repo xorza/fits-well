@@ -10,13 +10,12 @@ use crate::compress::decode::decode_buffer::DecodeBuffer;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::image_geometry::ImageGeometry;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
 use crate::image_model::data::Data;
 use crate::image_model::shape_product;
 use crate::image_model::validate_image_region;
 use crate::image_model::view::View;
 use crate::image_model::view_words;
-use crate::keyword::key;
 
 /// The image a tiled-compression `BINTABLE` encodes, with the codec and tile shape
 /// its header names — everything a decode needs from the header before the first
@@ -41,11 +40,11 @@ pub(crate) struct TileSection<'s> {
 
 impl<'a> TiledImage<'a> {
     pub(crate) fn new(header: &Header, image: &'a ImageGeometry) -> Result<Self> {
-        let codec = ImageCodec::parse(
-            header
-                .get_text("ZCMPTYPE")?
-                .ok_or(FitsError::MissingKeyword { name: "ZCMPTYPE" })?,
-        )?;
+        let codec = ImageCodec::parse(header.get_text(keywords::ZCMPTYPE)?.ok_or(
+            FitsError::MissingKeyword {
+                keyword: keywords::ZCMPTYPE,
+            },
+        )?)?;
         if codec == ImageCodec::Hcompress1 && image.shape.len() != 2 {
             return Err(FitsError::UnsupportedCompression {
                 name: "HCOMPRESS_1 requires a two-dimensional image".to_string(),
@@ -182,11 +181,12 @@ fn tile_shape(header: &Header, dims: &[usize]) -> Result<Vec<usize>> {
     (1..=dims.len())
         .map(|i| -> Result<usize> {
             let default = if i == 1 { dims[0].max(1) } else { 1 };
-            match header.get_integer(key!("ZTILE{i}").as_str())? {
+            let keyword = keywords::ZTILE.indexed(i)?;
+            match header.get_integer(keyword)? {
                 Some(value) => usize::try_from(value)
                     .ok()
                     .filter(|&value| value > 0)
-                    .ok_or(FitsError::KeywordOutOfRange { name: "ZTILEn" }),
+                    .ok_or(FitsError::KeywordOutOfRange { keyword }),
                 None => Ok(default),
             }
         })

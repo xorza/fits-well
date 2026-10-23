@@ -1,5 +1,6 @@
 use crate::error::FitsError;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
+
 use crate::time_coordinates::frame::Frame;
 use crate::world_coordinates::tabular;
 use crate::world_coordinates::tabular::TabularTransform;
@@ -173,8 +174,8 @@ fn tabular_time_axes_feed_the_typed_time_layer() {
     header
         .set_internal("CTYPE1", "TIME-TAB")
         .set_internal("CUNIT1", "d")
-        .set_internal("MJDREF", 50_000.0)
-        .set_internal("TIMESYS", "UTC");
+        .set_internal(keywords::MJDREF, 50_000.0)
+        .set_internal(keywords::TIMESYS, "UTC");
     let wcs = resolved_wcs(&header, &table);
     let coordinate = Frame::from_header(&header)
         .unwrap()
@@ -186,7 +187,7 @@ fn tabular_time_axes_feed_the_typed_time_layer() {
     let table = lookup_table(&[("COORD", &[100.0, 200.0, 300.0, 400.0], Some("(1,4)"))]);
     let mut header = Header::new();
     header
-        .set_internal("NAXIS", 3)
+        .set_internal(keywords::NAXIS, 3)
         .set_internal("CTYPE1", "LINEAR")
         .set_internal("CTYPE2", "TIME-TAB")
         .set_internal("CTYPE3", "LINEAR")
@@ -205,8 +206,8 @@ fn tabular_time_axes_feed_the_typed_time_layer() {
         .set_internal("PS2_0", "WCS-TABLE")
         .set_internal("PS2_1", "COORD")
         .set_internal("PV2_3", 1)
-        .set_internal("MJDREF", 50_000.0)
-        .set_internal("TIMESYS", "UTC");
+        .set_internal(keywords::MJDREF, 50_000.0)
+        .set_internal(keywords::TIMESYS, "UTC");
     let wcs = resolved_wcs(&header, &table);
     let coordinate = Frame::from_header(&header)
         .unwrap()
@@ -234,7 +235,7 @@ fn tabular_spectral_coordinates_normalize_declared_units() {
 fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
     let mut missing = Header::new();
     missing
-        .set_internal("NAXIS", 1)
+        .set_internal(keywords::NAXIS, 1)
         .set_internal("CTYPE1", "AX01-TAB")
         .set_internal("PS1_1", "COORD");
     assert!(matches!(

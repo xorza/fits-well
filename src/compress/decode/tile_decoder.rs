@@ -17,8 +17,8 @@ use crate::compress::quantize;
 use crate::compress::rice;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header_model::Header;
-use crate::keyword::key;
+use crate::header_model::{Header, keywords};
+use crate::keyword::Keyword;
 
 /// The decode parameters constant across all of a tiled image's tiles: the codec,
 /// the integer plane the tiles are stored in (and, for a float image, its float
@@ -51,15 +51,16 @@ impl CodecParams {
             bytepix: IntBitpix::I32,
             smooth: false,
         };
-        for entry in header.iter() {
+        for entry in header {
             let Some(i) = compress::parameter_index(entry.keyword) else {
                 continue;
             };
-            let Some(name) = header.get_text(entry.keyword)? else {
+            let Some(name) = header.get_text(Keyword::try_from(entry.keyword)?)? else {
                 continue;
             };
-            let value = || header.get_integer(key!("ZVAL{i}").as_str());
-            let out_of_range = FitsError::KeywordOutOfRange { name: "ZVALn" };
+            let zval = keywords::ZVAL.indexed(i)?;
+            let value = || header.get_integer(zval);
+            let out_of_range = FitsError::KeywordOutOfRange { keyword: zval };
             match (codec, name) {
                 (ImageCodec::Rice1, "BLOCKSIZE") => {
                     if let Some(v) = value()? {
@@ -277,7 +278,7 @@ mod tests {
             refused.set_internal(name, value);
             assert!(matches!(
                 CodecParams::read(&refused, ImageCodec::Rice1),
-                Err(FitsError::KeywordOutOfRange { name: "ZVALn" })
+                Err(FitsError::KeywordOutOfRange { keyword }) if keyword == name
             ));
             assert!(CodecParams::read(&refused, ImageCodec::Gzip1).is_ok());
         }

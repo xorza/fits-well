@@ -2,7 +2,9 @@
 //! so it drops them from a template header, and table compression moves them
 //! between a table and its container.
 
+use crate::header_model::keywords;
 use crate::keyword;
+use crate::keyword::Keyword;
 
 /// Fixed-name keywords of the HDU structure (§4.4), array scaling (§5.3), the
 /// checksums (Appendix J) and the binary-table heap (§7.3).
@@ -34,10 +36,10 @@ pub(crate) const TABLE_COMPRESSION_INDEXED: [&str; 2] = ["ZFORM", "ZCTYP"];
 
 /// The keywords table compression keeps under a `Z` name, as (table, container)
 /// pairs (§10.3.1).
-pub(crate) const TABLE_PRESERVED: [(&str, &str); 3] = [
-    ("THEAP", "ZTHEAP"),
-    ("CHECKSUM", "ZHECKSUM"),
-    ("DATASUM", "ZDATASUM"),
+pub(crate) const TABLE_PRESERVED: [(Keyword, Keyword); 3] = [
+    (keywords::THEAP, keywords::ZTHEAP),
+    (keywords::CHECKSUM, keywords::ZHECKSUM),
+    (keywords::DATASUM, keywords::ZDATASUM),
 ];
 
 /// Whether a writer generates `keyword` rather than copying it from a template.
@@ -50,7 +52,7 @@ pub(crate) fn is_generated(keyword: &str) -> bool {
         || TABLE_COMPRESSION.contains(&keyword)
         || TABLE_PRESERVED
             .iter()
-            .any(|&(_, container)| container == keyword)
+            .any(|&(_, container)| container.as_str() == keyword)
         || STRUCTURE_INDEXED.iter().any(indexed)
         || IMAGE_COMPRESSION_INDEXED.iter().any(indexed)
         || TABLE_COMPRESSION_INDEXED.iter().any(indexed)

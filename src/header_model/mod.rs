@@ -3,6 +3,7 @@
 #[cfg(feature = "internals")]
 pub(crate) mod bench;
 pub(crate) mod card;
+pub mod keywords;
 pub(crate) mod value;
 
 use std::collections::HashMap;
@@ -15,13 +16,12 @@ use crate::error::Result;
 use crate::header_model::card::Card;
 use crate::header_model::card::ParsedRecord;
 use crate::header_model::card::validate_ascii;
-#[cfg(feature = "compression")]
-use crate::header_model::card::validate_keyword;
 use crate::header_model::card::validate_valued_keyword;
 use crate::header_model::value::Value;
 use crate::image_model::scaling::Scaling;
-use crate::keyword::key;
+use crate::keyword::Keyword;
 use std::mem;
+use std::slice;
 
 /// A parsed header unit: an *ordered* list of content cards plus a side index
 /// for O(1) keyword lookup.
@@ -42,7 +42,7 @@ pub struct Header {
     /// Parsing builds the index alongside the card list; every mutation method
     /// either maintains or rebuilds it. Raw card mutation stays private so the
     /// two cannot be desynchronized.
-    index: HashMap<String, usize>,
+    index: HashMap<Keyword, usize>,
 }
 
 /// A read-only view of one stored header record, yielded by [`Header::iter`].
@@ -56,6 +56,16 @@ pub struct Entry<'a> {
     pub keyword: &'a str,
     pub value: Option<&'a Value>,
     pub comment: Option<&'a str>,
+}
+
+impl<'a> Entry<'a> {
+    fn of(card: &'a Card) -> Self {
+        Entry {
+            keyword: card.keyword(),
+            value: card.value(),
+            comment: card.comment(),
+        }
+    }
 }
 
 /// One owned logical header record, returned by ordered removal operations.
@@ -89,46 +99,76 @@ impl Header {
                 ParsedRecord::Card(card) => card,
             };
             if let Card::Value { keyword, .. } = &card {
-                index.entry(keyword.clone()).or_insert(cards.len());
+                index.entry(*keyword).or_insert(cards.len());
             }
             cards.push(card);
         }
         Err(FitsError::MissingEnd)
     }
 
-    /// The value of the first card with this keyword, if it is a valued card.
-    pub fn get(&self, keyword: &str) -> Option<&Value> {
-        let &i = self.index.get(keyword)?;
+    /// The value of the first valued card with this keyword. Every method that names a
+    /// keyword takes a [`Keyword`], such as a [`keywords`] preset, or a `&str`, which
+    /// errors with [`FitsError::InvalidKeyword`] when it is no keyword.
+    pub fn get(
+        &self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+    ) -> Result<Option<&Value>> {
+        Ok(self.value(checked(keyword)?))
+    }
+
+    fn value(&self, keyword: Keyword) -> Option<&Value> {
+        let &i = self.index.get(&keyword)?;
         self.cards[i].value()
     }
 
+    /// The first valued card with this keyword: its value and its comment.
+    pub fn entry(
+        &self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+    ) -> Result<Option<Entry<'_>>> {
+        let keyword = checked(keyword)?;
+        Ok(self.index.get(&keyword).map(|&i| Entry::of(&self.cards[i])))
+    }
+
     /// Read an optional logical keyword without conflating absence with a wrong type.
-    pub fn get_logical(&self, keyword: &str) -> Result<Option<bool>> {
-        self.typed_optional(keyword, "logical", |value| Ok(value.as_logical()))
+    pub fn get_logical(
+        &self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+    ) -> Result<Option<bool>> {
+        self.typed_optional(checked(keyword)?, "logical", |value| Ok(value.as_logical()))
     }
 
     /// Read an optional integer keyword without conflating absence with a wrong type.
-    pub fn get_integer(&self, keyword: &str) -> Result<Option<i64>> {
-        self.typed_optional(keyword, "integer", Value::as_integer)
+    pub fn get_integer(
+        &self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+    ) -> Result<Option<i64>> {
+        self.typed_optional(checked(keyword)?, "integer", Value::as_integer)
     }
 
     /// Read an optional real keyword without conflating absence with a wrong type.
-    pub fn get_real(&self, keyword: &str) -> Result<Option<f64>> {
-        self.typed_optional(keyword, "real", Value::as_real)
+    pub fn get_real(
+        &self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+    ) -> Result<Option<f64>> {
+        self.typed_optional(checked(keyword)?, "real", Value::as_real)
     }
 
     /// Read an optional text keyword without conflating absence with a wrong type.
-    pub fn get_text(&self, keyword: &str) -> Result<Option<&str>> {
-        self.typed_optional(keyword, "text", |value| Ok(value.as_text()))
+    pub fn get_text(
+        &self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+    ) -> Result<Option<&str>> {
+        self.typed_optional(checked(keyword)?, "text", |value| Ok(value.as_text()))
     }
 
     fn typed_optional<'a, T>(
         &'a self,
-        keyword: &str,
+        keyword: Keyword,
         expected: &'static str,
         convert: impl FnOnce(&'a Value) -> Result<Option<T>>,
     ) -> Result<Option<T>> {
-        let Some(value) = self.get(keyword) else {
+        let Some(value) = self.value(keyword) else {
             return Ok(None);
         };
         convert(value)?
@@ -139,43 +179,99 @@ impl Header {
             })
     }
 
-    /// A mandatory integer keyword. `keyword` is the card to look up — possibly an
-    /// indexed form built with [`key!`](crate::keyword::key) — while `name` is the
-    /// generic name errors report (`NAXIS3` is reported as `NAXISn`). For a
-    /// non-indexed keyword the two are the same literal.
-    pub(crate) fn required_integer(&self, keyword: &str, name: &'static str) -> Result<i64> {
+    /// A mandatory logical keyword: [`FitsError::MissingKeyword`] when it is absent,
+    /// [`FitsError::TypeMismatch`] when it holds another type.
+    pub fn require_logical(
+        &self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+    ) -> Result<bool> {
+        let keyword = checked(keyword)?;
+        self.get_logical(keyword)?
+            .ok_or(FitsError::MissingKeyword { keyword })
+    }
+
+    /// A mandatory integer keyword, as [`Header::require_logical`].
+    pub fn require_integer(
+        &self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+    ) -> Result<i64> {
+        let keyword = checked(keyword)?;
         self.get_integer(keyword)?
-            .ok_or(FitsError::MissingKeyword { name })
+            .ok_or(FitsError::MissingKeyword { keyword })
+    }
+
+    /// A mandatory real keyword, as [`Header::require_logical`].
+    pub fn require_real(
+        &self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+    ) -> Result<f64> {
+        let keyword = checked(keyword)?;
+        self.get_real(keyword)?
+            .ok_or(FitsError::MissingKeyword { keyword })
+    }
+
+    /// A mandatory text keyword, as [`Header::require_logical`].
+    pub fn require_text(
+        &self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+    ) -> Result<&str> {
+        let keyword = checked(keyword)?;
+        self.get_text(keyword)?
+            .ok_or(FitsError::MissingKeyword { keyword })
     }
 
     /// A mandatory integer keyword narrowed to `usize`. A negative or oversized
     /// value is [`FitsError::KeywordOutOfRange`], keeping untrusted sizes from
     /// wrapping into a plausible-looking length.
-    pub(crate) fn required_usize(&self, keyword: &str, name: &'static str) -> Result<usize> {
-        usize::try_from(self.required_integer(keyword, name)?)
-            .map_err(|_| FitsError::KeywordOutOfRange { name })
+    pub(crate) fn require_usize(
+        &self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+    ) -> Result<usize> {
+        let keyword = checked(keyword)?;
+        usize::try_from(self.require_integer(keyword)?)
+            .map_err(|_| FitsError::KeywordOutOfRange { keyword })
     }
 
     /// An optional integer keyword narrowed to `usize`, or `default` when the card is
     /// absent. A present but out-of-range value still errors.
     pub(crate) fn optional_usize(
         &self,
-        keyword: &str,
-        name: &'static str,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
         default: usize,
     ) -> Result<usize> {
+        let keyword = checked(keyword)?;
         match self.get_integer(keyword)? {
             Some(value) => {
-                usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { name })
+                usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { keyword })
             }
             None => Ok(default),
         }
     }
 
-    /// A mandatory text keyword, named as in [`Header::required_integer`].
-    pub(crate) fn required_text(&self, keyword: &str, name: &'static str) -> Result<&str> {
-        self.get_text(keyword)?
-            .ok_or(FitsError::MissingKeyword { name })
+    /// The number of records, commentary ones included.
+    pub const fn len(&self) -> usize {
+        self.cards.len()
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.cards.is_empty()
+    }
+
+    /// Whether a record, valued or commentary, has this keyword.
+    pub fn contains(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<bool> {
+        Ok(self.index_of(keyword)?.is_some())
+    }
+
+    /// The position of the first record, valued or commentary, with this keyword.
+    pub fn index_of(
+        &self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+    ) -> Result<Option<usize>> {
+        let keyword = checked(keyword)?;
+        Ok(self
+            .cards
+            .iter()
+            .position(|card| card.keyword() == keyword.as_str()))
     }
 
     /// Every stored record in file order, as [`Entry`] views — duplicates and
@@ -183,28 +279,48 @@ impl Header {
     /// runs and repeated keywords come through intact. The implicit `END` is not a
     /// record and is never yielded. For valued keywords only, filter on
     /// `e.value`: `header.iter().filter_map(|e| Some((e.keyword, e.value?)))`.
-    pub fn iter(&self) -> impl Iterator<Item = Entry<'_>> {
-        self.cards.iter().map(|card| Entry {
-            keyword: card.keyword(),
-            value: card.value(),
-            comment: card.comment(),
+    pub fn iter(&self) -> Iter<'_> {
+        Iter {
+            cards: self.cards.iter(),
+        }
+    }
+
+    /// The text of each `HISTORY` record, in order; an empty record gives `""`.
+    pub fn history(&self) -> impl Iterator<Item = &str> {
+        self.commentary("HISTORY")
+    }
+
+    /// The text of each `COMMENT` record, in order; an empty record gives `""`.
+    pub fn comments(&self) -> impl Iterator<Item = &str> {
+        self.commentary("COMMENT")
+    }
+
+    fn commentary(&self, keyword: &'static str) -> impl Iterator<Item = &str> {
+        self.cards.iter().filter_map(move |card| match card {
+            Card::Commentary {
+                keyword: name,
+                text,
+            } if name == keyword => Some(text.as_deref().unwrap_or("")),
+            _ => None,
         })
     }
 
     /// `BITPIX`, mapped to the typed element kind.
     pub fn bitpix(&self) -> Result<Bitpix> {
-        let code = self.required_integer("BITPIX", "BITPIX")?;
+        let code = self.require_integer(keywords::BITPIX)?;
         Bitpix::from_code(code)
     }
 
     /// `NAXIS` — the number of axes (0 means no data array).
     pub fn naxis(&self) -> Result<usize> {
-        let n = self.required_usize("NAXIS", "NAXIS")?;
+        let n = self.require_usize(keywords::NAXIS)?;
         // §4.4.1: `0 ≤ NAXIS ≤ 999`. Rejecting an out-of-range value is both
         // conformance and a guard — `axes()` reserves `Vec::with_capacity(NAXIS)`,
         // so an absurd `NAXIS` from an untrusted header would otherwise abort.
         if n > 999 {
-            return Err(FitsError::KeywordOutOfRange { name: "NAXIS" });
+            return Err(FitsError::KeywordOutOfRange {
+                keyword: keywords::NAXIS,
+            });
         }
         Ok(n)
     }
@@ -214,7 +330,7 @@ impl Header {
         let naxis = self.naxis()?;
         let mut axes = Vec::with_capacity(naxis);
         for n in 1..=naxis {
-            axes.push(self.required_usize(key!("NAXIS{n}").as_str(), "NAXISn")?);
+            axes.push(self.require_usize(keywords::NAXIS.indexed(n)?)?);
         }
         Ok(axes)
     }
@@ -223,8 +339,10 @@ impl Header {
     /// checks and random-groups decode use this defaulted view; role-aware extension
     /// sizing requires the keyword explicitly.
     pub(crate) fn pcount(&self) -> Result<u64> {
-        match self.get_integer("PCOUNT")? {
-            Some(p) if p < 0 => Err(FitsError::KeywordOutOfRange { name: "PCOUNT" }),
+        match self.get_integer(keywords::PCOUNT)? {
+            Some(p) if p < 0 => Err(FitsError::KeywordOutOfRange {
+                keyword: keywords::PCOUNT,
+            }),
             Some(p) => Ok(p.cast_unsigned()),
             None => Ok(0),
         }
@@ -232,8 +350,10 @@ impl Header {
 
     /// `GCOUNT` (default 1), rejecting a negative value (§4.4.1) — see [`Header::pcount`].
     pub(crate) fn gcount(&self) -> Result<u64> {
-        match self.get_integer("GCOUNT")? {
-            Some(g) if g < 0 => Err(FitsError::KeywordOutOfRange { name: "GCOUNT" }),
+        match self.get_integer(keywords::GCOUNT)? {
+            Some(g) if g < 0 => Err(FitsError::KeywordOutOfRange {
+                keyword: keywords::GCOUNT,
+            }),
             Some(g) => Ok(g.cast_unsigned()),
             None => Ok(1),
         }
@@ -250,14 +370,18 @@ impl Header {
     }
 
     /// Insert a valued keyword, or replace the value of an existing one, keeping
-    /// the keyword index in sync. The keyword must be a valid FITS keyword name
-    /// (≤ 8 chars of `A–Z`, `0–9`, `-`, `_`) and must not be a control or
-    /// commentary keyword. Text must use restricted ASCII and numeric values must
-    /// have a finite FITS representation. An error leaves the header unchanged.
-    pub fn set(&mut self, keyword: &str, value: impl Into<Value>) -> Result<&mut Self> {
+    /// the keyword index in sync. The keyword must not be a control or commentary
+    /// keyword. Text must use restricted ASCII and numeric values must have a
+    /// finite FITS representation. An error leaves the header unchanged.
+    pub fn set(
+        &mut self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        value: impl Into<Value>,
+    ) -> Result<&mut Self> {
+        let keyword = checked(keyword)?;
         let value = value.into();
         validate_valued_keyword(keyword)?;
-        if let Some(&i) = self.index.get(keyword) {
+        if let Some(&i) = self.index.get(&keyword) {
             let Card::Value { value: slot, .. } = &mut self.cards[i] else {
                 unreachable!("the keyword index holds value cards only");
             };
@@ -271,26 +395,50 @@ impl Header {
             }
         } else {
             let card = Card::Value {
-                keyword: keyword.to_string(),
+                keyword,
                 value,
                 comment: None,
             };
             card.validate()?;
-            self.index.insert(keyword.to_string(), self.cards.len());
+            self.index.insert(keyword, self.cards.len());
             self.cards.push(card);
         }
         Ok(self)
     }
 
+    /// [`Header::set`] for `Some`; for `None`, remove every record with this keyword,
+    /// so the header holds `value` or nothing.
+    pub fn set_optional(
+        &mut self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        value: Option<impl Into<Value>>,
+    ) -> Result<&mut Self> {
+        let keyword = checked(keyword)?;
+        validate_valued_keyword(keyword)?;
+        let Some(value) = value else {
+            self.remove_all(keyword)?;
+            return Ok(self);
+        };
+        self.set(keyword, value)
+    }
+
     #[track_caller]
-    pub(crate) fn set_internal(&mut self, keyword: &str, value: impl Into<Value>) -> &mut Self {
+    pub(crate) fn set_internal(
+        &mut self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        value: impl Into<Value>,
+    ) -> &mut Self {
         self.set(keyword, value)
             .expect("internal FITS header metadata must be valid")
     }
 
     /// Append a duplicate valued card without replacing an earlier occurrence.
     /// Lookup continues to return the first occurrence, matching parsed headers.
-    pub fn append(&mut self, keyword: &str, value: impl Into<Value>) -> Result<&mut Self> {
+    pub fn append(
+        &mut self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        value: impl Into<Value>,
+    ) -> Result<&mut Self> {
         self.insert(self.cards.len(), keyword, value)
     }
 
@@ -299,14 +447,15 @@ impl Header {
     pub fn insert(
         &mut self,
         index: usize,
-        keyword: &str,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
         value: impl Into<Value>,
     ) -> Result<&mut Self> {
+        let keyword = checked(keyword)?;
         validate_valued_keyword(keyword)?;
         self.insert_card(
             index,
             Card::Value {
-                keyword: keyword.to_string(),
+                keyword,
                 value: value.into(),
                 comment: None,
             },
@@ -328,15 +477,14 @@ impl Header {
     }
 
     /// Remove the first logical record with `keyword`.
-    pub fn remove(&mut self, keyword: &str) -> Option<Record> {
-        let index = self
-            .cards
-            .iter()
-            .position(|card| card.keyword() == keyword)?;
-        Some(
-            self.remove_at(index)
-                .expect("position came from the header record list"),
-        )
+    pub fn remove(
+        &mut self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+    ) -> Result<Option<Record>> {
+        let Some(index) = self.index_of(keyword)? else {
+            return Ok(None);
+        };
+        self.remove_at(index).map(Some)
     }
 
     /// Remove one logical record by zero-based position.
@@ -356,7 +504,7 @@ impl Header {
                 value,
                 comment,
             } => Record {
-                keyword,
+                keyword: keyword.to_string(),
                 value: Some(value),
                 comment,
             },
@@ -372,10 +520,14 @@ impl Header {
     ///
     /// Each call that removes anything rebuilds the keyword index, so dropping
     /// several keywords is one pass' worth of work per call.
-    pub fn remove_all(&mut self, keyword: &str) -> usize {
+    pub fn remove_all(
+        &mut self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+    ) -> Result<usize> {
+        let keyword = checked(keyword)?;
         let old_len = self.cards.len();
-        self.remove_where(|card| card == keyword);
-        old_len - self.cards.len()
+        self.remove_where(|card| card == keyword.as_str());
+        Ok(old_len - self.cards.len())
     }
 
     pub(crate) fn append_filtered_from(
@@ -410,12 +562,14 @@ impl Header {
     /// Rename valued cards in place so their order, values, and comments survive
     /// a reversible metadata transformation.
     #[cfg(feature = "compression")]
-    pub(crate) fn rename_keywords(&mut self, renames: &[(&str, &str)]) {
+    pub(crate) fn rename_keywords(&mut self, renames: &[(Keyword, Keyword)]) {
         let mut changed = false;
         for card in &mut self.cards {
-            if let Some((_, to)) = renames.iter().find(|(from, _)| card.keyword() == *from) {
-                debug_assert!(validate_keyword(to).is_ok());
-                *card.keyword_mut() = (*to).to_string();
+            let Card::Value { keyword, .. } = card else {
+                continue;
+            };
+            if let Some(&(_, to)) = renames.iter().find(|(from, _)| keyword == from) {
+                *keyword = to;
                 changed = true;
             }
         }
@@ -429,21 +583,23 @@ impl Header {
         self.index.clear();
         for (i, card) in self.cards.iter().enumerate() {
             if let Card::Value { keyword, .. } = card {
-                self.index.entry(keyword.clone()).or_insert(i);
+                self.index.entry(*keyword).or_insert(i);
             }
         }
     }
 
     /// Attach (or replace) the inline comment of an existing valued keyword. Errors
-    /// with [`FitsError::KeywordNotFound`] for a valid keyword the header does not
-    /// hold. An error leaves the header unchanged.
-    pub fn comment(&mut self, keyword: &str, text: &str) -> Result<&mut Self> {
+    /// with [`FitsError::KeywordNotFound`] for a keyword the header does not hold.
+    /// An error leaves the header unchanged.
+    pub fn set_comment(
+        &mut self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        text: &str,
+    ) -> Result<&mut Self> {
+        let keyword = checked(keyword)?;
         validate_ascii(text, "header comment")?;
-        let Some(&i) = self.index.get(keyword) else {
-            validate_valued_keyword(keyword)?;
-            return Err(FitsError::KeywordNotFound {
-                keyword: keyword.to_owned(),
-            });
+        let Some(&i) = self.index.get(&keyword) else {
+            return Err(FitsError::KeywordNotFound { keyword });
         };
         let Card::Value { comment, .. } = &mut self.cards[i] else {
             unreachable!("the keyword index holds value cards only");
@@ -460,8 +616,12 @@ impl Header {
     }
 
     #[track_caller]
-    pub(crate) fn comment_internal(&mut self, keyword: &str, text: &str) -> &mut Self {
-        self.comment(keyword, text)
+    pub(crate) fn set_comment_internal(
+        &mut self,
+        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        text: &str,
+    ) -> &mut Self {
+        self.set_comment(keyword, text)
             .expect("internal FITS header comments must be valid")
     }
 
@@ -492,6 +652,40 @@ impl Header {
         Ok(self)
     }
 }
+
+/// The keyword `name` names: a [`Keyword`] as it is, a `&str` checked into one.
+fn checked(name: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Keyword> {
+    name.try_into().map_err(Into::into)
+}
+
+impl<'a> IntoIterator for &'a Header {
+    type Item = Entry<'a>;
+    type IntoIter = Iter<'a>;
+
+    fn into_iter(self) -> Iter<'a> {
+        self.iter()
+    }
+}
+
+/// The records of a [`Header`], in order, as [`Entry`] views.
+#[derive(Debug, Clone)]
+pub struct Iter<'a> {
+    cards: slice::Iter<'a, Card>,
+}
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = Entry<'a>;
+
+    fn next(&mut self) -> Option<Entry<'a>> {
+        self.cards.next().map(Entry::of)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.cards.size_hint()
+    }
+}
+
+impl ExactSizeIterator for Iter<'_> {}
 
 /// A `CONTINUE` record with no value card to extend, as the commentary record its
 /// bytes 9–80 spell.

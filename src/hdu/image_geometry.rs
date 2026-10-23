@@ -4,11 +4,10 @@ use crate::bitpix::Bitpix;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::HduKind;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
 use crate::image_model::Metadata;
 use crate::image_model::scaling::Scaling;
 use crate::image_model::shape_product;
-use crate::keyword::key;
 
 /// The array an image HDU holds, as its header declares it: the axis lengths, the
 /// stored element type and the physical scaling. For a tiled-compressed image these
@@ -47,20 +46,24 @@ impl ImageGeometry {
     /// The image a tiled-compression `BINTABLE` encodes, from its `ZNAXISn` and
     /// `ZBITPIX` (§10.1.1).
     fn compressed(header: &Header) -> Result<Self> {
-        let bitpix = Bitpix::from_code(
-            header
-                .get_integer("ZBITPIX")?
-                .ok_or(FitsError::MissingKeyword { name: "ZBITPIX" })?,
-        )?;
+        let bitpix = Bitpix::from_code(header.get_integer(keywords::ZBITPIX)?.ok_or(
+            FitsError::MissingKeyword {
+                keyword: keywords::ZBITPIX,
+            },
+        )?)?;
         let rank = header
-            .get_integer("ZNAXIS")?
-            .ok_or(FitsError::MissingKeyword { name: "ZNAXIS" })?;
+            .get_integer(keywords::ZNAXIS)?
+            .ok_or(FitsError::MissingKeyword {
+                keyword: keywords::ZNAXIS,
+            })?;
         let rank = usize::try_from(rank)
             .ok()
             .filter(|rank| *rank <= 999)
-            .ok_or(FitsError::KeywordOutOfRange { name: "ZNAXIS" })?;
+            .ok_or(FitsError::KeywordOutOfRange {
+                keyword: keywords::ZNAXIS,
+            })?;
         let shape = (1..=rank)
-            .map(|axis| header.required_usize(key!("ZNAXIS{axis}").as_str(), "ZNAXISn"))
+            .map(|axis| header.require_usize(keywords::ZNAXIS.indexed(axis)?))
             .collect::<Result<_>>()?;
         Self::new(header, shape, bitpix)
     }

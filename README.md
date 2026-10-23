@@ -39,7 +39,6 @@ With `default-features = false`, the only dependencies are `bitvec`,
 ```rust no_run
 use std::fs::File;
 use fits_well::image::{Data, Image, Region};
-use fits_well::io::Hdu;
 use fits_well::{FitsError, FitsReader, FitsWriter};
 
 fn main() -> Result<(), FitsError> {
@@ -50,7 +49,7 @@ fn main() -> Result<(), FitsError> {
 
     // `open` reads only the headers. A tile-compressed image reads the same way.
     let mut reader = FitsReader::open(File::open("out.fits")?)?;
-    let first = reader.hdus().iter().position(Hdu::is_image).ok_or(FitsError::NotAnImage)?;
+    let first = reader.images().next().ok_or(FitsError::NotAnImage)?;
     let mut image = reader.image(first)?;
     println!("{:?}", image.metadata().shape);
     let mut physical: Vec<f32> = Vec::new();
@@ -62,7 +61,8 @@ fn main() -> Result<(), FitsError> {
 }
 ```
 
-`image` gives a reader of one HDU: `view` decodes a region into a buffer you
+An HDU is named by its index, by its `EXTNAME` (`"SCI"`), or by its name and
+`EXTVER` (`("SCI", 2)`). `image` gives a reader of one HDU: `view` decodes a region into a buffer you
 reuse across reads, so a loop allocates once, `read` copies a region into an
 owned `Image`, and `physical_into` converts it in one pass. A region is the whole
 image or one range per axis. `stream_image` writes a large image chunk by chunk.

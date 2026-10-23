@@ -3,8 +3,10 @@ use crate::bintable::column_data::ColumnData;
 use crate::bintable::internals::table_header;
 use crate::error::FitsError;
 use crate::error::Indexed;
+use crate::header_model::keywords;
 use crate::image_model::unsigned_data::UnsignedData;
 use crate::image_model::{I8_OFFSET, U16_OFFSET, U64_OFFSET};
+
 use crate::ragged::Ragged;
 use num_complex::Complex;
 
@@ -140,7 +142,7 @@ fn decodes_variable_length_arrays_from_the_heap() {
     // Main table = two 8-byte `P` descriptors; the heap follows at THEAP
     // (default = main size = 16).
     let mut header = table_header(8, 2, &["1PE(3)"]);
-    header.set_internal("PCOUNT", 12); // heap = 3 × f32
+    header.set_internal(keywords::PCOUNT, 12); // heap = 3 × f32
     let mut data = Vec::new();
     // descriptors: row 0 → (nelem 2, offset 0), row 1 → (nelem 1, offset 8)
     for (nelem, offset) in [(2i32, 0i32), (1, 8)] {
@@ -255,7 +257,7 @@ fn read_vla_column_physical_scales_heap_arrays_and_nulls() {
     // 1PJ column, TSCAL=2, TZERO=10, TNULL=99. Row 0 = [5, 99(null)], row 1 = [3].
     let mut header = table_header(8, 2, &["1PJ(2)"]);
     header
-        .set_internal("PCOUNT", 12)
+        .set_internal(keywords::PCOUNT, 12)
         .set_internal("TSCAL1", 2.0)
         .set_internal("TZERO1", 10.0)
         .set_internal("TNULL1", 99);
@@ -279,7 +281,7 @@ fn read_vla_column_physical_scales_heap_arrays_and_nulls() {
 fn read_vla_complex_scales_p_and_q_heap_values() {
     let mut header = table_header(24, 2, &["1PC(2)", "1QM(1)"]);
     header
-        .set_internal("PCOUNT", 32)
+        .set_internal(keywords::PCOUNT, 32)
         .set_internal("TSCAL1", 2.0)
         .set_internal("TZERO1", 10.0)
         .set_internal("TSCAL2", -0.5)
@@ -319,7 +321,7 @@ fn read_vla_complex_scales_p_and_q_heap_values() {
 fn read_vla_unsigned_is_exact_past_f64_integer_precision() {
     let mut header = table_header(24, 1, &["1PK(3)", "1QK(3)"]);
     header
-        .set_internal("PCOUNT", 48)
+        .set_internal(keywords::PCOUNT, 48)
         .set_internal("TZERO1", U64_OFFSET)
         .set_internal("TZERO2", U64_OFFSET);
     let mut data = Vec::new();
@@ -386,7 +388,7 @@ fn vla_descriptor_overrunning_the_heap_is_rejected() {
     // §6.6: a span must lie within the heap (`PCOUNT` bytes), not the block fill.
     // Heap is 8 bytes (PCOUNT=8) but the descriptor claims 3 f32 = 12 bytes.
     let mut header = table_header(8, 1, &["1PE(3)"]);
-    header.set_internal("PCOUNT", 8);
+    header.set_internal(keywords::PCOUNT, 8);
     let mut data = Vec::new();
     data.extend_from_slice(&3i32.to_be_bytes()); // nelem = 3
     data.extend_from_slice(&0i32.to_be_bytes()); // offset = 0

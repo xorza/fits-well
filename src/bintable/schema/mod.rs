@@ -8,8 +8,7 @@ use crate::column::{ColumnLabels, ColumnScaling};
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::validate_table_field_count;
-use crate::header_model::Header;
-use crate::keyword::key;
+use crate::header_model::{Header, keywords};
 
 /// Whether a schema reads the keywords that describe a column's values.
 #[derive(Debug, Clone, Copy)]
@@ -46,29 +45,30 @@ impl Schema {
     }
 
     fn parse_columns(header: &Header, values: ValueKeywords) -> Result<Self> {
-        let row_len = header.required_usize("NAXIS1", "NAXIS1")?;
-        let nrows = header.required_usize("NAXIS2", "NAXIS2")?;
+        let row_len = header.require_usize(keywords::NAXIS.indexed(1)?)?;
+        let nrows = header.require_usize(keywords::NAXIS.indexed(2)?)?;
         // §7.3.1: `0 ≤ TFIELDS ≤ 999` — also a guard, since `tfields` sizes the
         // column `Vec` and drives the `TFORMn` loop (an absurd value would abort).
-        let tfields = header.required_usize("TFIELDS", "TFIELDS")?;
+        let tfields = header.require_usize(keywords::TFIELDS)?;
         validate_table_field_count(tfields)?;
 
         let mut columns = Vec::with_capacity(tfields);
         let mut offset = 0;
         for n in 1..=tfields {
-            let tform_value = header.required_text(key!("TFORM{n}").as_str(), "TFORMn")?;
+            let tform_value = header.require_text(keywords::TFORM.indexed(n)?)?;
             let tform = Tform::parse(tform_value)?;
+            let tdim_keyword = keywords::TDIM.indexed(n)?;
             let shape = match values {
                 ValueKeywords::Read => header
-                    .get_text(key!("TDIM{n}").as_str())?
-                    .map(tdim::parse)
+                    .get_text(tdim_keyword)?
+                    .map(|value| tdim::parse(value, tdim_keyword))
                     .transpose()?,
                 ValueKeywords::Skip => None,
             };
             let (scaling, tnull) = match values {
                 ValueKeywords::Read => (
                     ColumnScaling::read(header, n)?,
-                    header.get_integer(key!("TNULL{n}").as_str())?,
+                    header.get_integer(keywords::TNULL.indexed(n)?)?,
                 ),
                 ValueKeywords::Skip => (ColumnScaling::IDENTITY, None),
             };
@@ -78,7 +78,7 @@ impl Schema {
             if let Some(dims) = &shape
                 && !tform.kind.is_descriptor()
             {
-                tdim::validate_extent(dims, tform.repeat)?;
+                tdim::validate_extent(dims, tform.repeat, tdim_keyword)?;
             }
             columns.push(Column {
                 name: labels.name,
@@ -89,8 +89,9 @@ impl Schema {
                 tnull,
                 tdim: shape,
                 tdisp: header
-                    .get_text(key!("TDISP{n}").as_str())?
+                    .get_text(keywords::TDISP.indexed(n)?)?
                     .map(str::to_string),
+                number: n,
                 byte_offset: offset,
             });
             offset = offset.saturating_add(tform.byte_width());
@@ -107,19 +108,23 @@ impl Schema {
         let main_table = nrows
             .checked_mul(row_len)
             .ok_or(FitsError::DataUnitOverflow)?;
-        let heap_offset = header.optional_usize("THEAP", "THEAP", main_table)?;
+        let heap_offset = header.optional_usize(keywords::THEAP, main_table)?;
         // §6.6: the heap follows the main table, so THEAP must be ≥ its size.
         if heap_offset < main_table {
-            return Err(FitsError::KeywordOutOfRange { name: "THEAP" });
+            return Err(FitsError::KeywordOutOfRange {
+                keyword: keywords::THEAP,
+            });
         }
         // PCOUNT counts the gap-plus-heap bytes after the main table, so the real
         // heap ends here — anything past it is block fill (§6.6).
-        let pcount = header.optional_usize("PCOUNT", "PCOUNT", 0)?;
+        let pcount = header.optional_usize(keywords::PCOUNT, 0)?;
         let heap_end = main_table
             .checked_add(pcount)
             .ok_or(FitsError::DataUnitOverflow)?;
         if heap_offset > heap_end {
-            return Err(FitsError::KeywordOutOfRange { name: "THEAP" });
+            return Err(FitsError::KeywordOutOfRange {
+                keyword: keywords::THEAP,
+            });
         }
         Ok(Self {
             nrows,

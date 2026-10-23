@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
 
 /// A recognized FITS time-scale meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +45,7 @@ impl Scale {
 
     /// The `TIMESYS` scale `header` declares, `UTC` by default.
     pub(crate) fn declared(header: &Header) -> Result<Self> {
-        Ok(match header.get_text("TIMESYS")? {
+        Ok(match header.get_text(keywords::TIMESYS)? {
             Some(value) => value.parse()?,
             None => Self::known(ScaleKind::Utc),
         })

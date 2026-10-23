@@ -6,6 +6,7 @@ use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::value::FitsInteger;
 use crate::header_model::value::Value;
+use crate::keyword::Keyword;
 use std::iter;
 use std::str;
 
@@ -18,7 +19,7 @@ use std::str;
 pub(crate) enum Card {
     /// `KEYWORD = value [/ comment]` — a value indicator sits in bytes 9–10.
     Value {
-        keyword: String,
+        keyword: Keyword,
         value: Value,
         /// Trailing spaces are not significant and are stripped.
         comment: Option<String>,
@@ -65,7 +66,7 @@ impl ParsedRecord {
         }
         if keyword == "END" {
             return Err(FitsError::ReservedKeyword {
-                name: keyword.to_string(),
+                keyword: Keyword::new("END"),
             });
         }
         let commentary = || {
@@ -91,10 +92,10 @@ impl ParsedRecord {
             return Ok(commentary());
         }
         if raw[8] == b'=' {
-            validate_keyword(keyword)?;
+            let keyword = Keyword::try_from(keyword)?;
             let split = split_value_comment(&text[10..]);
             return Ok(Self::Card(Card::Value {
-                keyword: keyword.to_string(),
+                keyword,
                 value: parse_value(split.value_token, raw)?,
                 comment: split.comment,
             }));
@@ -116,14 +117,8 @@ impl Card {
 
     pub(crate) fn keyword(&self) -> &str {
         match self {
-            Self::Value { keyword, .. } | Self::Commentary { keyword, .. } => keyword,
-        }
-    }
-
-    #[cfg(feature = "compression")]
-    pub(super) const fn keyword_mut(&mut self) -> &mut String {
-        match self {
-            Self::Value { keyword, .. } | Self::Commentary { keyword, .. } => keyword,
+            Self::Value { keyword, .. } => keyword.as_str(),
+            Self::Commentary { keyword, .. } => keyword,
         }
     }
 
@@ -226,21 +221,22 @@ impl Card {
     }
 
     fn validate_contents(&self) -> Result<()> {
-        if let Self::Value { keyword, .. } = self {
-            validate_valued_keyword(keyword)?;
-        }
         if let Some(comment) = self.comment() {
             validate_ascii(comment, "header comment")?;
         }
-        match self.value() {
-            Some(Value::Text(text)) => validate_ascii(text, "header text value"),
-            Some(Value::Real(value)) if !value.is_finite() => Err(FitsError::InvalidHeaderValue {
-                keyword: self.keyword().to_string(),
+        let Self::Value { keyword, value, .. } = self else {
+            return Ok(());
+        };
+        validate_valued_keyword(*keyword)?;
+        match value {
+            Value::Text(text) => validate_ascii(text, "header text value"),
+            Value::Real(value) if !value.is_finite() => Err(FitsError::InvalidHeaderValue {
+                keyword: *keyword,
                 reason: "real values must be finite",
             }),
-            Some(Value::ComplexReal { re, im }) if !re.is_finite() || !im.is_finite() => {
+            Value::ComplexReal { re, im } if !re.is_finite() || !im.is_finite() => {
                 Err(FitsError::InvalidHeaderValue {
-                    keyword: self.keyword().to_string(),
+                    keyword: *keyword,
                     reason: "complex real components must be finite",
                 })
             }
@@ -382,27 +378,11 @@ fn parse_real(token: &str) -> Option<f64> {
     parsed.ok().filter(|v| v.is_finite())
 }
 
-pub(super) fn validate_keyword(name: &str) -> Result<()> {
-    let ok = name.len() <= 8
-        && !name.is_empty()
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
-    if ok {
-        Ok(())
-    } else {
-        Err(FitsError::InvalidKeyword {
-            name: name.to_string(),
-        })
-    }
-}
-
-pub(super) fn validate_valued_keyword(name: &str) -> Result<()> {
-    validate_keyword(name)?;
-    if matches!(name, "END" | "CONTINUE" | "COMMENT" | "HISTORY") {
-        Err(FitsError::ReservedKeyword {
-            name: name.to_string(),
-        })
+/// Errors when `keyword` is a control or commentary keyword, which a valued card
+/// cannot carry.
+pub(super) fn validate_valued_keyword(keyword: Keyword) -> Result<()> {
+    if matches!(keyword.as_str(), "END" | "CONTINUE" | "COMMENT" | "HISTORY") {
+        Err(FitsError::ReservedKeyword { keyword })
     } else {
         Ok(())
     }

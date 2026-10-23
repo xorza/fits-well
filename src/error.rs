@@ -1,7 +1,10 @@
+use std::convert::Infallible;
 use std::fmt;
 use std::io;
 
 use std::result;
+
+use crate::keyword::Keyword;
 use thiserror::Error;
 
 pub type Result<T> = result::Result<T, FitsError>;
@@ -112,12 +115,12 @@ pub enum FitsError {
     #[error("invalid keyword name {name:?}")]
     InvalidKeyword { name: String },
     /// A control or commentary keyword was used where a valued card was requested.
-    #[error("reserved keyword {name:?} cannot be used as a valued card")]
-    ReservedKeyword { name: String },
+    #[error("reserved keyword {keyword} cannot be used as a valued card")]
+    ReservedKeyword { keyword: Keyword },
     /// A header value has no conforming FITS representation.
     #[error("header keyword {keyword:?} has an invalid value: {reason}")]
     InvalidHeaderValue {
-        keyword: String,
+        keyword: Keyword,
         reason: &'static str,
     },
     /// A logical header card cannot fit one physical 80-byte record.
@@ -187,16 +190,16 @@ pub enum FitsError {
     #[error("header unit ended without an END record")]
     MissingEnd,
     /// A mandatory keyword was absent where the structure requires it.
-    #[error("missing mandatory keyword {name}")]
-    MissingKeyword { name: &'static str },
+    #[error("missing mandatory keyword {keyword}")]
+    MissingKeyword { keyword: Keyword },
     /// An edit of a card the header does not hold.
     #[error("the header has no {keyword} card")]
-    KeywordNotFound { keyword: String },
+    KeywordNotFound { keyword: Keyword },
     /// A keyword was present and well-typed but its value lies outside the range
     /// the standard permits for its role (e.g. `NAXIS > 999`, `PCOUNT < 0`,
     /// a negative `GCOUNT` or axis length, or a `THEAP` that precedes the heap).
-    #[error("keyword {name} has an out-of-range value")]
-    KeywordOutOfRange { name: &'static str },
+    #[error("keyword {keyword} has an out-of-range value")]
+    KeywordOutOfRange { keyword: Keyword },
     /// An exact FITS integer cannot be represented by the requested bounded type.
     #[error("FITS integer {value} is outside the {target} range")]
     IntegerOutOfRange { value: String, target: &'static str },
@@ -283,6 +286,13 @@ pub enum FitsError {
     /// A FITS keyword family was addressed with zero even though its indices start at 1.
     #[error("{kind} indices are 1-based and cannot be zero")]
     OneBasedIndexRequired { kind: &'static str },
+    /// No HDU carries the extension name, version and level a read named.
+    #[error("no HDU named {name:?} (EXTVER {version:?}, EXTLEVEL {level:?})")]
+    HduNotFound {
+        name: String,
+        version: Option<i64>,
+        level: Option<i64>,
+    },
     /// `FitsReader::image` was called on an HDU that is not an image array (a table,
     /// random-groups, or unmodelled extension).
     #[error("HDU is not an image array")]
@@ -394,6 +404,14 @@ pub enum FitsError {
     /// table's validated structure.
     #[error("header metadata {name} disagrees with the binary table")]
     TableMetadataMismatch { name: String },
+}
+
+/// A conversion that cannot fail, such as a [`Keyword`] passed where a name is
+/// checked into one.
+impl From<Infallible> for FitsError {
+    fn from(never: Infallible) -> Self {
+        match never {}
+    }
 }
 
 #[cfg(test)]

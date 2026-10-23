@@ -89,7 +89,7 @@ impl TryFrom<&FitsInteger> for i64 {
 }
 
 /// Widths that may not fit `i64` and so fall back to the decimal representation.
-/// `i32`/`u32`/`i64` are written out separately below: their `i64::try_from` can
+/// `i32`/`u32`/`u16`/`i64` are written out separately below: their `i64::try_from` can
 /// never fail, and spelling an infallible conversion fallibly is both misleading and
 /// a clippy lint.
 macro_rules! impl_integer_from {
@@ -132,7 +132,13 @@ impl From<u32> for FitsInteger {
     }
 }
 
-impl_integer_from!(i128, u64, u128);
+impl From<u16> for FitsInteger {
+    fn from(value: u16) -> Self {
+        Self::from(i64::from(value))
+    }
+}
+
+impl_integer_from!(i128, u64, u128, usize);
 
 /// Narrow a `usize` count to the `i64` a FITS integer card holds. Counts derived
 /// from geometry (row widths, heap lengths, axis lengths) are `usize` internally but
@@ -256,11 +262,17 @@ macro_rules! impl_value_from_integer {
 
 // Every integer width `FitsInteger` accepts, wrapped identically — unlike the
 // `FitsInteger` conversions above, none of these needs a fallible narrowing.
-impl_value_from_integer!(i32, i64, i128, u32, u64, u128);
+impl_value_from_integer!(i32, i64, i128, u16, u32, u64, u128, usize);
 
 impl From<f64> for Value {
     fn from(r: f64) -> Self {
         Self::Real(r)
+    }
+}
+
+impl From<f32> for Value {
+    fn from(r: f32) -> Self {
+        Self::Real(f64::from(r))
     }
 }
 

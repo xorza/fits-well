@@ -1,8 +1,9 @@
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Ranked;
-use crate::header_model::Header;
 use crate::header_model::value::Value;
+use crate::header_model::{Header, keywords};
+
 use crate::reader::internals::open_fixture;
 use crate::world_coordinates::R2D;
 use crate::world_coordinates::Wcs;
@@ -152,7 +153,7 @@ fn planetary_solar_lonlat_axes_are_celestial() {
     // (the frame label is preserved, never converted — that is out of scope).
     let build = |t1: &str, t2: &str| {
         let mut h = Header::new();
-        h.set_internal("NAXIS", 2);
+        h.set_internal(keywords::NAXIS, 2);
         h.set_internal("CTYPE1", t1).set_internal("CTYPE2", t2);
         h.set_internal("CRPIX1", 64.0).set_internal("CRPIX2", 64.0);
         h.set_internal("CRVAL1", 10.0).set_internal("CRVAL2", -20.0);
@@ -179,11 +180,12 @@ fn planetary_solar_lonlat_axes_are_celestial() {
 fn absent_wcsaxes_uses_the_largest_wcs_index() {
     let build = |keyword: &str, value: Value| {
         let mut h = Header::new();
-        h.set_internal("NAXIS", 2).set_internal(keyword, value);
+        h.set_internal(keywords::NAXIS, 2)
+            .set_internal(keyword, value);
         h
     };
     let mut cd = Header::new();
-    cd.set_internal("NAXIS", 2)
+    cd.set_internal(keywords::NAXIS, 2)
         .set_internal("CD1_1", 1.0)
         .set_internal("CD2_2", 1.0)
         .set_internal("CD3_3", 1.0)
@@ -229,21 +231,23 @@ fn rejects_absurd_wcsaxes() {
     // drive the per-axis loops. 1 and 999 are the bounds §8.2 allows.
     let mut h = Header::new();
     for value in [-1, 0, 1000] {
-        h.set_internal("WCSAXES", value);
+        h.set_internal(keywords::WCSAXES, value);
         assert!(matches!(
             Wcs::from_header(&h, None),
-            Err(FitsError::KeywordOutOfRange { name: "WCSAXES" })
+            Err(FitsError::KeywordOutOfRange {
+                keyword: keywords::WCSAXES
+            })
         ));
     }
-    h.set_internal("WCSAXES", 1);
+    h.set_internal(keywords::WCSAXES, 1);
     assert_eq!(Wcs::from_header(&h, None).unwrap().metadata().axes.len(), 1);
-    h.set_internal("WCSAXES", 999);
+    h.set_internal(keywords::WCSAXES, 999);
     assert_eq!(Wcs::image_axis_count(&h, None).unwrap(), 999);
 
     h.set_internal("WCAX5", -1);
     assert!(matches!(
         Wcs::from_array_column(&h, 5, None),
-        Err(FitsError::KeywordOutOfRange { name: "WCAXn" })
+        Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "WCAX5"
     ));
 }
 
@@ -296,7 +300,7 @@ fn unmatched_celestial_axes_are_unsupported() {
     ] {
         let mut header = Header::new();
         header
-            .set_internal("NAXIS", 2)
+            .set_internal(keywords::NAXIS, 2)
             .set_internal("CTYPE1", ctypes[0])
             .set_internal("CTYPE2", ctypes[1]);
         let wcs = Wcs::from_header(&header, None).unwrap();

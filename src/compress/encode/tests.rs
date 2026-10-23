@@ -4,11 +4,13 @@ use crate::compress::internals::{mask, ramp};
 use crate::compress::*;
 use crate::fits_writer::FitsWriter;
 use crate::fits_writer::internals::{rejected_before_output, round_trip};
+use crate::header_model::keywords;
 use crate::header_model::value::Value;
 use crate::image_model::Image;
 use crate::image_model::data::Data;
 use crate::image_model::internals::physical;
 use crate::image_model::scaling::Scaling;
+
 use crate::reader::FitsReader;
 use crate::reader::internals::read_whole;
 use std::io::Cursor;
@@ -58,7 +60,10 @@ fn compression_write_round_trips_through_decode() {
         });
         if matches!(compression, Compression::Hcompress(_)) {
             let header = &r.hdus()[1].header;
-            assert!(matches!(header.get("ZVAL1"), Some(Value::Real(0.0))));
+            assert!(matches!(
+                header.get("ZVAL1").unwrap(),
+                Some(Value::Real(0.0))
+            ));
             assert_eq!(header.get_text("ZNAME2").unwrap(), None);
         }
         let back = read_whole(&mut r, 1);
@@ -152,12 +157,12 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
                 }
             }
             assert_eq!(
-                header.get_real("BSCALE").unwrap(),
+                header.get_real(keywords::BSCALE).unwrap(),
                 Some(2.5),
                 "{bitpix:?} {cmptype}"
             );
             assert_eq!(
-                header.get_real("BZERO").unwrap(),
+                header.get_real(keywords::BZERO).unwrap(),
                 Some(-10.0),
                 "{bitpix:?} {cmptype}"
             );
@@ -316,7 +321,7 @@ fn dither_option_sets_zquantiz_and_round_trips() {
             .unwrap();
         let mut r = round_trip(|w| w.write_compressed_image(image.view(), &config, None));
         assert_eq!(
-            r.hdus()[1].header.get_text("ZQUANTIZ").unwrap(),
+            r.hdus()[1].header.get_text(keywords::ZQUANTIZ).unwrap(),
             Some(zquantiz),
             "{dither:?} must write {zquantiz}"
         );
@@ -439,7 +444,7 @@ fn hcompress_writer_converts_noise_multiplier_to_tile_scale() {
         )
     });
     assert!(matches!(
-        r.hdus()[1].header.get("ZVAL1"),
+        r.hdus()[1].header.get("ZVAL1").unwrap(),
         Some(Value::Real(2.0))
     ));
     let table = r.read_container_table(1).unwrap();

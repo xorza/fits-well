@@ -91,8 +91,10 @@ pub mod image {
 
 /// The ordered header model: keyword records and their typed values.
 pub mod header {
+    pub use crate::header_model::keywords;
     pub use crate::header_model::value::{FitsInteger, Value};
-    pub use crate::header_model::{Entry, Header, Record};
+    pub use crate::header_model::{Entry, Header, Iter, Record};
+    pub use crate::keyword::Keyword;
 }
 
 pub mod wcs {
@@ -184,6 +186,7 @@ pub mod io {
     pub use crate::groups::{RandomGroupView, RandomGroups, RandomGroupsMetadata};
     pub use crate::hdu::HduKind;
     pub use crate::reader::hdu::Hdu;
+    pub use crate::reader::hdu_selector::HduSelector;
     pub use crate::reader::source::{SliceSource, StreamSource};
     pub use crate::reader::{
         ChecksumReport, ChecksumStatus, DataUnit, DataUnitView, SliceReader, StreamReader,
