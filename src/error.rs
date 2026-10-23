@@ -114,6 +114,9 @@ pub enum FitsError {
     /// A keyword name violated FITS syntax.
     #[error("invalid keyword name {name:?}")]
     InvalidKeyword { name: String },
+    /// A WCS alternate that is not a letter `A` to `Z` (§8.2).
+    #[error("invalid WCS alternate {alternate:?}: an alternate is a letter A to Z")]
+    InvalidAlternate { alternate: char },
     /// A control or commentary keyword was used where a valued card was requested.
     #[error("reserved keyword {keyword} cannot be used as a valued card")]
     ReservedKeyword { keyword: Keyword },

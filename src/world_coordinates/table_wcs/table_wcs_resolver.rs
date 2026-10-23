@@ -1,5 +1,6 @@
 //! Spelling the Table-22 keyword families for one alternate description.
 
+use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::{Header, keywords};
@@ -22,7 +23,7 @@ pub(super) struct TableWcsResolver {
 }
 
 impl TableWcsResolver {
-    pub(super) const fn new(alternate: Option<char>) -> Self {
+    pub(super) const fn new(alternate: Option<Alternate>) -> Self {
         Self {
             suffix: AltSuffix::new(alternate),
         }
@@ -270,7 +271,7 @@ mod tests {
     #[test]
     fn table_wcs_resolver_matches_table_22() {
         let primary = TableWcsResolver::new(None);
-        let alternate = TableWcsResolver::new(Some('A'));
+        let alternate = TableWcsResolver::new(Some(Alternate::new('A')));
         let axis_cases = [
             (
                 TableAxisKeyword::Type,

@@ -9,45 +9,35 @@
 use core::fmt::{self, Write};
 use std::str;
 
+use crate::alternate::Alternate;
 use crate::error::{FitsError, Result};
 
 /// The alternate-description suffix — the `a` of the §8 and Table 22 keyword
 /// families. Empty for the primary description, the single letter for an alternate.
 ///
-/// Held in a fixed stack buffer so it can be formatted into a [`Keyword`] *and*
-/// borrowed as a `&str` (the keyword scans strip it) without the throwaway `String`
-/// a `char::to_string` would allocate on every WCS or time parse. Formatting it
-/// directly also means each keyword has one spelling rather than a present/absent
-/// pair.
+/// Formatted into a [`Keyword`] *and* borrowed as a `&str` (the keyword scans strip
+/// it), so each keyword has one spelling rather than a present/absent pair.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AltSuffix {
-    buf: [u8; 4],
-    len: usize,
+    alt: Option<Alternate>,
 }
 
 impl AltSuffix {
-    pub(crate) const fn new(alternate: Option<char>) -> Self {
-        let mut suffix = Self {
-            buf: [0; 4],
-            len: 0,
-        };
-        if let Some(alternate) = alternate {
-            suffix.len = alternate.encode_utf8(&mut suffix.buf).len();
-        }
-        suffix
+    pub(crate) const fn new(alt: Option<Alternate>) -> Self {
+        Self { alt }
     }
 
     pub(crate) const fn as_str(&self) -> &str {
-        match str::from_utf8(self.buf.split_at(self.len).0) {
-            Ok(text) => text,
-            Err(_) => panic!("encode_utf8 writes valid UTF-8"),
+        match &self.alt {
+            Some(alt) => alt.as_str(),
+            None => "",
         }
     }
 
     /// Whether an alternate description is selected. Several Table 22 families spell
     /// their root differently for the primary description, which has no suffix.
-    pub(crate) const fn is_alternate(&self) -> bool {
-        self.len != 0
+    pub(crate) const fn is_alternate(self) -> bool {
+        self.alt.is_some()
     }
 }
 

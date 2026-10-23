@@ -1,5 +1,6 @@
 //! [`PhaseAxis`]: the §9.6 `'PHASE'` axis folding parameters.
 
+use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::Header;
@@ -20,7 +21,11 @@ pub struct PhaseAxis {
 impl PhaseAxis {
     /// The §9.6 `'PHASE'` parameters for an image WCS `axis` (1-based), or `None`
     /// when that axis is not a phase axis.
-    pub fn from_header(header: &Header, axis: usize, alt: Option<char>) -> Result<Option<Self>> {
+    pub fn from_header(
+        header: &Header,
+        axis: usize,
+        alt: Option<Alternate>,
+    ) -> Result<Option<Self>> {
         if axis == 0 {
             return Err(FitsError::OneBasedIndexRequired { kind: "WCS axis" });
         }
@@ -31,7 +36,7 @@ impl PhaseAxis {
     pub fn from_pixel_list(
         header: &Header,
         column: usize,
-        alt: Option<char>,
+        alt: Option<Alternate>,
     ) -> Result<Option<Self>> {
         if column == 0 {
             return Err(FitsError::OneBasedIndexRequired {
@@ -47,7 +52,7 @@ impl PhaseAxis {
         header: &Header,
         axis: usize,
         column: usize,
-        alt: Option<char>,
+        alt: Option<Alternate>,
     ) -> Result<Option<Self>> {
         if axis == 0 {
             return Err(FitsError::OneBasedIndexRequired { kind: "WCS axis" });
@@ -104,7 +109,7 @@ struct PhaseAxisKeywords {
 }
 
 impl PhaseAxisKeywords {
-    fn image(axis: usize, alt: Option<char>) -> Option<Self> {
+    fn image(axis: usize, alt: Option<Alternate>) -> Option<Self> {
         let suffix = AltSuffix::new(alt);
         Some(Self {
             ctype: Keyword::try_from(format_args!("CTYPE{axis}{suffix}")).ok()?,
@@ -113,7 +118,7 @@ impl PhaseAxisKeywords {
         })
     }
 
-    fn pixel_list(column: usize, alt: Option<char>) -> Option<Self> {
+    fn pixel_list(column: usize, alt: Option<Alternate>) -> Option<Self> {
         match alt {
             Some(alt) => Some(Self {
                 ctype: Keyword::try_from(format_args!("TCTY{column}{alt}")).ok()?,
@@ -128,7 +133,7 @@ impl PhaseAxisKeywords {
         }
     }
 
-    fn array_column(axis: usize, column: usize, alt: Option<char>) -> Option<Self> {
+    fn array_column(axis: usize, column: usize, alt: Option<Alternate>) -> Option<Self> {
         match alt {
             Some(alt) => Some(Self {
                 ctype: Keyword::try_from(format_args!("{axis}CTY{column}{alt}")).ok()?,

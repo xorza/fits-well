@@ -2,6 +2,7 @@
 
 use std::f64::consts::PI;
 
+use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Ranked;
@@ -123,15 +124,15 @@ enum SpectralFrames {
 }
 
 impl Wcs {
-    /// Parse the primary WCS (`alt = None`) or an alternate description
-    /// (`alt = Some('A'..='Z')`) from `header`.
-    pub fn from_header(header: &Header, alt: Option<char>) -> Result<Self> {
+    /// Parse the primary WCS (`alt = None`) or the alternate description `alt` names
+    /// from `header`.
+    pub fn from_header(header: &Header, alt: Option<Alternate>) -> Result<Self> {
         Self::from_header_with_context(header, alt, Vec::new(), SpectralFrames::Header)
     }
 
     pub(crate) fn from_header_with_tabular(
         header: &Header,
-        alt: Option<char>,
+        alt: Option<Alternate>,
         tabular: Vec<tabular::TabularTransform>,
     ) -> Result<Self> {
         Self::from_header_with_context(header, alt, tabular, SpectralFrames::Header)
@@ -139,7 +140,7 @@ impl Wcs {
 
     fn from_header_with_context(
         header: &Header,
-        alt: Option<char>,
+        alt: Option<Alternate>,
         tabular: Vec<tabular::TabularTransform>,
         spectral_frames: SpectralFrames,
     ) -> Result<Self> {
@@ -214,7 +215,7 @@ impl Wcs {
             let resolved_tabular =
                 parsed_ctype.algorithm == Some("TAB") && resolved_tabular_axes[axis];
             if parsed_ctype.celestial_axis().is_some() {
-                axis_transforms.push(AxisTransform::Linear);
+                axis_transforms.push(AxisTransform::Joint);
                 // A projection this crate does not evaluate, or an axis with no partner
                 // of its own system, has no transform.
                 let unpaired = !celestial_pair.is_some_and(|pair| pair.contains(axis));
@@ -246,7 +247,7 @@ impl Wcs {
                 unsupported_axes.push(axis);
             }
             axis_transforms.push(if resolved_tabular {
-                AxisTransform::Linear
+                AxisTransform::Joint
             } else {
                 spec.transform
             });
@@ -372,7 +373,11 @@ impl Wcs {
     /// families, both matrix/parameter spellings (`TPC`/`TP`, `TCD`/`TC`,
     /// `TPV`/`TV`), and the longitude column's `LONPna`/`LATPna` pole keywords,
     /// then evaluates them through the same pipeline as image WCS.
-    pub fn from_pixel_list(header: &Header, columns: &[usize], alt: Option<char>) -> Result<Self> {
+    pub fn from_pixel_list(
+        header: &Header,
+        columns: &[usize],
+        alt: Option<Alternate>,
+    ) -> Result<Self> {
         let table = TableWcs::pixel_list(alt, columns);
         let translated = table.translate(header)?;
         let mut h = translated.header;
@@ -402,7 +407,11 @@ impl Wcs {
     /// axis-and-column-indexed families, `ijPCna`/`ijCDna`, `iPVn_ma`/`iVn_ma`,
     /// and `LONPna`/`LATPna`, where `i`/`j` are array axes and `n` is the column.
     /// The rank is taken from `WCAXna`, else inferred through the same resolver.
-    pub fn from_array_column(header: &Header, column: usize, alt: Option<char>) -> Result<Self> {
+    pub fn from_array_column(
+        header: &Header,
+        column: usize,
+        alt: Option<Alternate>,
+    ) -> Result<Self> {
         let naxis = TableWcs::array_column_rank(header, alt, column)?;
         let table = TableWcs::array_column(alt, naxis, column);
         let translated = table.translate(header)?;
@@ -418,70 +427,55 @@ impl Wcs {
         )
     }
 
-    /// Map 1-based pixel coordinates to complete world coordinates. Celestial axes
-    /// return `(α, δ)` in degrees, nonlinear spectral axes use their Table-25
-    /// default units, and other axes retain their declared units.
+    /// Write the complete world coordinate of the 1-based `pixel` coordinate to `world`,
+    /// one value per axis. Celestial axes give `(α, δ)` in degrees, nonlinear spectral
+    /// axes their Table-25 default units, and other axes their declared units. A point
+    /// makes no allocation unless an axis is `-TAB`.
     ///
     /// # Errors
     ///
-    /// Returns [`FitsError::UnsupportedWcsTransform`] if any nonlinear axis is not
-    /// implemented, or a projection error when the coordinate is outside its domain.
-    ///
-    pub fn pixel_to_world(&self, pixel: &[f64]) -> Result<Vec<f64>> {
-        let naxis = self.axes.len();
-        if pixel.len() != naxis {
-            return Err(FitsError::RankMismatch {
-                ranked: Ranked::WcsCoordinate,
-                expected: naxis,
-                got: pixel.len(),
-            });
-        }
+    /// Returns [`FitsError::RankMismatch`] unless `pixel` and `world` each hold one value
+    /// per axis, [`FitsError::UnsupportedWcsTransform`] if any nonlinear axis is not
+    /// implemented, or a projection error when the coordinate is outside its domain. On
+    /// an error, `world` holds no defined value.
+    pub fn pixel_to_world(&self, pixel: &[f64], world: &mut [f64]) -> Result<()> {
+        self.require_point(pixel)?;
+        self.require_point(world)?;
         self.require_complete_transform()?;
-        let intermediate = self.linear.intermediate(pixel, &self.axes);
-        let mut world = (0..naxis)
-            .map(|axis| {
-                self.axis_transforms[axis].to_world(intermediate[axis], self.reference[axis], axis)
-            })
-            .collect::<Result<Vec<_>>>()?;
+        self.linear.intermediate(pixel, &self.axes, world);
+        for (axis, value) in world.iter_mut().enumerate() {
+            *value = self.axis_transforms[axis].to_world(*value, self.reference[axis], axis)?;
+        }
         for transform in &self.tabular {
-            transform.to_world(&intermediate, &mut world)?;
+            transform.to_world(world)?;
         }
         if let Some(c) = &self.celestial {
-            let native =
-                c.projection
-                    .deproject(intermediate[c.lng], intermediate[c.lat], &c.parameters)?;
+            let native = c
+                .projection
+                .deproject(world[c.lng], world[c.lat], &c.parameters)?;
             let celestial = c.pole.to_celestial(native.phi, native.theta);
             world[c.lng] = celestial.ra;
             world[c.lat] = celestial.dec;
         }
-        Ok(world)
+        Ok(())
     }
 
-    /// Map complete world coordinates back to 1-based pixel coordinates, the inverse
-    /// of [`Wcs::pixel_to_world`].
+    /// Write the 1-based pixel coordinate of the complete `world` coordinate to `pixel`,
+    /// the inverse of [`Wcs::pixel_to_world`].
     ///
     /// # Errors
     ///
-    /// Returns [`FitsError::UnsupportedWcsTransform`] if any nonlinear axis is not
-    /// implemented, or a projection error when the coordinate is outside its domain.
-    ///
-    pub fn world_to_pixel(&self, world: &[f64]) -> Result<Vec<f64>> {
-        let naxis = self.axes.len();
-        if world.len() != naxis {
-            return Err(FitsError::RankMismatch {
-                ranked: Ranked::WcsCoordinate,
-                expected: naxis,
-                got: world.len(),
-            });
-        }
+    /// As [`Wcs::pixel_to_world`]. On an error, `pixel` holds no defined value.
+    pub fn world_to_pixel(&self, world: &[f64], pixel: &mut [f64]) -> Result<()> {
+        self.require_point(world)?;
+        self.require_point(pixel)?;
         self.require_complete_transform()?;
-        let mut intermediate = (0..naxis)
-            .map(|axis| {
-                self.axis_transforms[axis].to_intermediate(world[axis], self.reference[axis], axis)
-            })
-            .collect::<Result<Vec<_>>>()?;
+        for (axis, (value, &world)) in pixel.iter_mut().zip(world).enumerate() {
+            *value =
+                self.axis_transforms[axis].to_intermediate(world, self.reference[axis], axis)?;
+        }
         for transform in &self.tabular {
-            transform.to_intermediate(world, &mut intermediate)?;
+            transform.to_intermediate(pixel)?;
         }
         if let Some(c) = self.celestial.as_ref() {
             if !world[c.lng].is_finite()
@@ -494,15 +488,29 @@ impl Wcs {
             let projected = c
                 .projection
                 .project(native.phi, native.theta, &c.parameters)?;
-            intermediate[c.lng] = projected.x;
-            intermediate[c.lat] = projected.y;
+            pixel[c.lng] = projected.x;
+            pixel[c.lat] = projected.y;
         }
-        Ok(self.linear.pixel(&intermediate, &self.axes))
+        self.linear.pixel(pixel, &self.axes);
+        Ok(())
+    }
+
+    /// Refuse a `point` that does not hold one value per axis.
+    const fn require_point(&self, point: &[f64]) -> Result<()> {
+        let naxis = self.axes.len();
+        if point.len() != naxis {
+            return Err(FitsError::RankMismatch {
+                ranked: Ranked::WcsCoordinate,
+                expected: naxis,
+                got: point.len(),
+            });
+        }
+        Ok(())
     }
 
     /// The number of WCS axes an image header declares: `WCSAXESa`, else the larger
     /// of `NAXIS` and the highest axis any WCS keyword names.
-    pub(crate) fn image_axis_count(header: &Header, alt: Option<char>) -> Result<usize> {
+    pub(crate) fn image_axis_count(header: &Header, alt: Option<Alternate>) -> Result<usize> {
         let suffix = AltSuffix::new(alt);
         let value = if let Some(axis_count) =
             read_integer(header, Keyword::try_from(format_args!("WCSAXES{suffix}")))?
@@ -719,10 +727,25 @@ fn norm180(a: f64) -> f64 {
 /// assembled from, not just by [`Wcs`]'s own.
 #[cfg(test)]
 pub(crate) mod internals {
+    use crate::error::Result;
     use crate::header_model::Header;
     use crate::header_model::keywords;
     use crate::world_coordinates::DEGREE_TOLERANCE;
     use crate::world_coordinates::Wcs;
+
+    /// [`Wcs::pixel_to_world`] into a new `Vec`, for the tests that compare whole points.
+    pub(crate) fn to_world(wcs: &Wcs, pixel: &[f64]) -> Result<Vec<f64>> {
+        let mut world = vec![0.0; wcs.axes.len()];
+        wcs.pixel_to_world(pixel, &mut world)?;
+        Ok(world)
+    }
+
+    /// [`Wcs::world_to_pixel`] into a new `Vec`, for the tests that compare whole points.
+    pub(crate) fn to_pixel(wcs: &Wcs, world: &[f64]) -> Result<Vec<f64>> {
+        let mut pixel = vec![0.0; wcs.axes.len()];
+        wcs.world_to_pixel(world, &mut pixel)?;
+        Ok(pixel)
+    }
 
     /// A one-axis image header.
     pub(crate) fn axis_header(
@@ -809,7 +832,7 @@ pub(crate) mod internals {
         // answer, and DEGREE_TOLERANCE covers where this evaluation and wcslib's part.
         let tolerance = 0.5 * 10f64.powi(-golden.decimals) + DEGREE_TOLERANCE;
         for &(px, py, ra, dec) in golden.points {
-            let world = wcs.pixel_to_world(&[px, py]).unwrap();
+            let world = to_world(wcs, &[px, py]).unwrap();
             assert!(
                 (world[0] - ra).abs() <= tolerance && (world[1] - dec).abs() <= tolerance,
                 "{context} at ({px},{py}): got {world:?}, want ({ra},{dec})"

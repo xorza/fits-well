@@ -1,5 +1,7 @@
+use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::header_model::{Header, keywords};
+use crate::world_coordinates::internals::{to_pixel, to_world};
 
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::axis_transform::SPEED_OF_LIGHT;
@@ -21,12 +23,12 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     ));
 
     let no_rest = Wcs::from_header(&velocity_axis("VRAD-V2F"), None).unwrap();
-    let world = no_rest.pixel_to_world(&[3.0]).unwrap()[0];
+    let world = to_world(&no_rest, &[3.0]).unwrap()[0];
     let frequency =
         SPEED_OF_LIGHT * ((SPEED_OF_LIGHT - 2_000.0) / (SPEED_OF_LIGHT + 2_000.0)).sqrt();
     let expected = SPEED_OF_LIGHT * (1.0 - frequency / SPEED_OF_LIGHT);
     assert!((world - expected).abs() < 1e-8);
-    assert!((no_rest.world_to_pixel(&[world]).unwrap()[0] - 3.0).abs() < 1e-10);
+    assert!((to_pixel(&no_rest, &[world]).unwrap()[0] - 3.0).abs() < 1e-10);
 
     let mut by_frequency = velocity_axis("VELO-F2V");
     by_frequency
@@ -48,13 +50,13 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     by_wavelength.set_internal(keywords::RESTWAV, SPEED_OF_LIGHT / 1_420_405_751.0);
     let by_wavelength = Wcs::from_header(&by_wavelength, None).unwrap();
     assert!(
-        (by_frequency.pixel_to_world(&[3.0]).unwrap()[0]
-            - by_wavelength.pixel_to_world(&[3.0]).unwrap()[0])
+        (to_world(&by_frequency, &[3.0]).unwrap()[0]
+            - to_world(&by_wavelength, &[3.0]).unwrap()[0])
             .abs()
             < 1e-12
     );
     assert!(matches!(
-        by_frequency.world_to_pixel(&[SPEED_OF_LIGHT]),
+        to_pixel(&by_frequency, &[SPEED_OF_LIGHT]),
         Err(FitsError::WcsCoordinateDomain {
             axis: 0,
             algorithm: "F2V"
@@ -64,10 +66,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     let mut deprecated = velocity_axis("VELO-F2V");
     deprecated.set_internal(keywords::RESTFREQ, 1_420_405_751.0);
     assert!(
-        (Wcs::from_header(&deprecated, None)
-            .unwrap()
-            .pixel_to_world(&[3.0])
-            .unwrap()[0]
+        (to_world(&Wcs::from_header(&deprecated, None).unwrap(), &[3.0]).unwrap()[0]
             - 2_000.006_671_265_423_6)
             .abs()
             < 1e-9
@@ -100,7 +99,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         .set_internal("SOBS4", "HELIOCEN");
     let pixel_list = Wcs::from_pixel_list(&pixel_list, &[2, 4], None).unwrap();
     assert!(
-        (pixel_list.pixel_to_world(&[3.0, 1.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9
+        (to_world(&pixel_list, &[3.0, 1.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9
     );
     assert_eq!(
         pixel_list.metadata().axes[0].spectral_frame,
@@ -136,8 +135,8 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         .set_internal("RWAV5A", SPEED_OF_LIGHT / 1_420_405_751.0)
         .set_internal("SPEC5A", "LSRK")
         .set_internal("SOBS5A", "TOPOCENT");
-    let vector = Wcs::from_array_column(&vector, 5, Some('A')).unwrap();
-    assert!((vector.pixel_to_world(&[3.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9);
+    let vector = Wcs::from_array_column(&vector, 5, Some(Alternate::new('A'))).unwrap();
+    assert!((to_world(&vector, &[3.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9);
     assert_eq!(
         vector.metadata().axes[0].spectral_frame,
         Some(SpectralFrame {
@@ -160,7 +159,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         .set_internal("SSYSOBSA", "BARYCENT")
         .set_internal("RESTFRQA", 1_420_405_751.0);
     assert_eq!(
-        Wcs::from_header(&alternate, Some('A'))
+        Wcs::from_header(&alternate, Some(Alternate::new('A')))
             .unwrap()
             .metadata()
             .axes[0]
@@ -177,7 +176,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
 
     alternate.set_internal("SPECSYSA", "UNKNOWN");
     assert!(matches!(
-        Wcs::from_header(&alternate, Some('A')),
+        Wcs::from_header(&alternate, Some(Alternate::new('A'))),
         Err(FitsError::InvalidWcs { detail }) if detail.contains(keywords::SPECSYS.as_str())
     ));
 

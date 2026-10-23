@@ -1,4 +1,4 @@
-//! Allocation counts of the `-TAB` transforms, under an allocator that counts the
+//! Allocation counts of the WCS transforms, under an allocator that counts the
 //! calling thread's allocations only, so the harness's other threads do not reach
 //! the count.
 
@@ -11,9 +11,11 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::hint::black_box;
 
+use fits_well::header::Header;
 use fits_well::internals::{
     tabular_forward_at_pixel, tabular_inverse_at_fraction, tabular_inverse_at_world,
 };
+use fits_well::wcs::Wcs;
 
 thread_local! {
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
@@ -58,22 +60,78 @@ fn allocations(run: impl FnOnce() -> f64) -> usize {
     ALLOCATIONS.with(Cell::get)
 }
 
-/// A one-dimensional `-TAB` transform allocates four vectors each way: forward,
-/// the intermediate coordinates, the interpolation location's base and fraction,
-/// and the world result; inverse, the intermediate coordinates, the location's two
-/// vectors, and the pixel result.
+/// A celestial pair beside a frequency axis sampled in wavelength writes into the
+/// caller's buffers and allocates nothing either way.
 #[test]
-fn one_dimensional_tabular_transforms_allocate_four_vectors() {
+fn celestial_and_spectral_transforms_allocate_nothing() {
+    let mut header = Header::new();
+    header
+        .set("NAXIS", 3)
+        .unwrap()
+        .set("CTYPE1", "RA---TAN")
+        .unwrap()
+        .set("CTYPE2", "DEC--TAN")
+        .unwrap()
+        .set("CRPIX1", 100.0)
+        .unwrap()
+        .set("CRPIX2", 100.0)
+        .unwrap()
+        .set("CRVAL1", 83.6)
+        .unwrap()
+        .set("CRVAL2", 22.0)
+        .unwrap()
+        .set("CDELT1", -0.0005)
+        .unwrap()
+        .set("CDELT2", 0.0005)
+        .unwrap()
+        .set("CTYPE3", "FREQ-W2F")
+        .unwrap()
+        .set("CUNIT3", "Hz")
+        .unwrap()
+        .set("CRPIX3", 1.0)
+        .unwrap()
+        .set("CRVAL3", 1_420_405_751.0)
+        .unwrap()
+        .set("CDELT3", 1e6)
+        .unwrap()
+        .set("RESTFRQ", 1_420_405_751.0)
+        .unwrap()
+        .set("PC1_3", 0.1)
+        .unwrap();
+    let wcs = Wcs::from_header(&header, None).unwrap();
+    let mut world = [0.0; 3];
+    let mut pixel = [0.0; 3];
+    assert_eq!(
+        allocations(|| {
+            wcs.pixel_to_world(black_box(&[120.0, 80.0, 5.0]), &mut world)
+                .unwrap();
+            world[0]
+        }),
+        0
+    );
+    assert_eq!(
+        allocations(|| {
+            wcs.world_to_pixel(black_box(&world), &mut pixel).unwrap();
+            pixel[0]
+        }),
+        0
+    );
+}
+
+/// A one-dimensional `-TAB` transform allocates two vectors each way, the
+/// interpolation location's base and fraction.
+#[test]
+fn one_dimensional_tabular_transforms_allocate_two_vectors() {
     let pixel = 12_345.25;
     // The first call builds the cached fixture.
     let world = tabular_forward_at_pixel(pixel);
     assert_eq!(
         allocations(|| tabular_forward_at_pixel(black_box(pixel))),
-        4
+        2
     );
     assert_eq!(
         allocations(|| tabular_inverse_at_world(black_box(world))),
-        4
+        2
     );
 }
 

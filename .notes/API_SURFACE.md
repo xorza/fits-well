@@ -13,6 +13,7 @@ FitsError
         WriterFailed
         PrimaryAlreadyWritten
         InvalidKeyword { name: String }
+        InvalidAlternate { alternate: char }
         ReservedKeyword { keyword: Keyword }
         InvalidHeaderValue { keyword: Keyword, reason: &'static str }
         HeaderCardTooLong { keyword: String, length: usize }
@@ -96,7 +97,7 @@ FitsReader
             pub fn read_table_columns<'h, 'c>(&mut self, hdu: impl Into<HduSelector<'h>>, rows: Range<usize>, columns: impl IntoIterator<Item = impl Into<ColumnSelector<'c>>>) -> Result<Selection>
             pub fn read_table_columns_into<'h, 'c>(&mut self, hdu: impl Into<HduSelector<'h>>, rows: Range<usize>, columns: impl IntoIterator<Item = impl Into<ColumnSelector<'c>>>, out: &mut Selection) -> Result<()>
             pub fn read_table_cell<'h, 'c>(&mut self, hdu: impl Into<HduSelector<'h>>, row: usize, column: impl Into<ColumnSelector<'c>>) -> Result<ColumnData>
-            pub fn read_wcs<'h>(&mut self, hdu: impl Into<HduSelector<'h>>, alt: Option<char>) -> Result<Wcs>
+            pub fn read_wcs<'h>(&mut self, hdu: impl Into<HduSelector<'h>>, alt: Option<Alternate>) -> Result<Wcs>
             pub fn read_ascii_table<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Ascii>
             pub fn read_groups<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<RandomGroups>
             pub fn verify_checksum<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<ChecksumReport>
@@ -774,6 +775,8 @@ io::ChecksumReport
     struct ChecksumReport: Clone, Copy, Debug, Eq, PartialEq
         pub datasum: ChecksumStatus
         pub checksum: ChecksumStatus
+        pub const fn is_valid(&self) -> bool
+        pub const fn has_invalid(&self) -> bool
 
 io::ChecksumStatus
     enum ChecksumStatus: Clone, Copy, Debug, Eq, PartialEq
@@ -1168,9 +1171,9 @@ time::PhaseAxis
     struct PhaseAxis: Clone, Copy, Debug, PartialEq
         pub zero_phase: f64
         pub period: Option<f64>
-        pub fn from_header(header: &Header, axis: usize, alt: Option<char>) -> Result<Option<Self>>
-        pub fn from_pixel_list(header: &Header, column: usize, alt: Option<char>) -> Result<Option<Self>>
-        pub fn from_array_column(header: &Header, axis: usize, column: usize, alt: Option<char>) -> Result<Option<Self>>
+        pub fn from_header(header: &Header, axis: usize, alt: Option<Alternate>) -> Result<Option<Self>>
+        pub fn from_pixel_list(header: &Header, column: usize, alt: Option<Alternate>) -> Result<Option<Self>>
+        pub fn from_array_column(header: &Header, axis: usize, column: usize, alt: Option<Alternate>) -> Result<Option<Self>>
 
 time::ReferencePosition
     enum ReferencePosition: Clone, Debug, Eq, PartialEq
@@ -1210,6 +1213,11 @@ time::ScaleKind
 
 wcs
     mod
+
+wcs::Alternate
+    struct Alternate: Clone, Copy, Debug, Display, Eq, Hash, PartialEq, TryFrom<char>
+        pub const fn new(letter: char) -> Self
+        pub const fn as_char(self) -> char
 
 wcs::Axis
     struct Axis: Clone, Debug, PartialEq
@@ -1308,12 +1316,12 @@ wcs::SpectralRest
 
 wcs::Wcs
     struct Wcs: Clone, Debug
-        pub fn from_header(header: &Header, alt: Option<char>) -> Result<Self>
+        pub fn from_header(header: &Header, alt: Option<Alternate>) -> Result<Self>
         pub fn metadata(&self) -> Metadata<'_>
-        pub fn from_pixel_list(header: &Header, columns: &[usize], alt: Option<char>) -> Result<Self>
-        pub fn from_array_column(header: &Header, column: usize, alt: Option<char>) -> Result<Self>
-        pub fn pixel_to_world(&self, pixel: &[f64]) -> Result<Vec<f64>>
-        pub fn world_to_pixel(&self, world: &[f64]) -> Result<Vec<f64>>
+        pub fn from_pixel_list(header: &Header, columns: &[usize], alt: Option<Alternate>) -> Result<Self>
+        pub fn from_array_column(header: &Header, column: usize, alt: Option<Alternate>) -> Result<Self>
+        pub fn pixel_to_world(&self, pixel: &[f64], world: &mut [f64]) -> Result<()>
+        pub fn world_to_pixel(&self, world: &[f64], pixel: &mut [f64]) -> Result<()>
 
 ```
 

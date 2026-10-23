@@ -12,6 +12,7 @@ use crate::image_model::data::Data;
 use crate::image_model::region::Region;
 use crate::image_model::scaling::Scaling;
 use crate::image_model::view::View;
+use crate::world_coordinates::internals::{to_pixel, to_world};
 
 use crate::reader::internals::{fixture_bytes, fixture_path, open_fixture, read_whole};
 use crate::reader::*;
@@ -114,12 +115,12 @@ fn read_wcs_resolves_the_exact_tabular_extension() {
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
     assert!(matches!(
-        Wcs::from_header(&reader.hdus[0].header, None).unwrap().pixel_to_world(&[2.0]),
+        to_world(&Wcs::from_header(&reader.hdus[0].header, None).unwrap(), &[2.0]),
         Err(FitsError::UnsupportedWcsTransform { axes }) if axes == [0]
     ));
     let wcs = reader.read_wcs(0, None).unwrap();
-    assert_eq!(wcs.pixel_to_world(&[2.0]).unwrap(), [20.0]);
-    assert_eq!(wcs.world_to_pixel(&[30.0]).unwrap(), [2.5]);
+    assert_eq!(to_world(&wcs, &[2.0]).unwrap(), [20.0]);
+    assert_eq!(to_pixel(&wcs, &[30.0]).unwrap(), [2.5]);
 }
 
 #[test]
@@ -171,7 +172,7 @@ fn read_wcs_resolves_shared_arrays_and_extensions_once_per_reference_group() {
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
     let wcs = reader.read_wcs(0, None).unwrap();
     assert_eq!(
-        wcs.pixel_to_world(&[1.0, 1.0, 1.0, 1.0, 1.0]).unwrap(),
+        to_world(&wcs, &[1.0, 1.0, 1.0, 1.0, 1.0]).unwrap(),
         [10.0, 100.0, 30.0, 40.0, 1000.0]
     );
 }
@@ -223,7 +224,7 @@ fn read_wcs_fetches_only_the_referenced_first_row_heap_cells() {
     let wcs = reader.read_wcs(0, None).unwrap();
     let bytes_read: usize = read_ranges.borrow().iter().map(Range::len).sum();
     assert_eq!(bytes_read, 24 + 6 * size_of::<f64>());
-    assert_eq!(wcs.pixel_to_world(&[2.0]).unwrap(), [20.0]);
+    assert_eq!(to_world(&wcs, &[2.0]).unwrap(), [20.0]);
 }
 
 #[test]

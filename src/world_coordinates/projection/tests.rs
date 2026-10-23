@@ -1,5 +1,6 @@
 use crate::error::FitsError;
 use crate::header_model::{Header, keywords};
+use crate::world_coordinates::internals::{to_pixel, to_world};
 
 use crate::world_coordinates::R2D;
 use crate::world_coordinates::Wcs;
@@ -340,11 +341,11 @@ fn unsupported_projection_codes_reject_complete_transforms() {
         assert_eq!(w.metadata().unsupported_axes, [0, 1], "{code} axes flagged");
         assert!(w.celestial.is_none(), "{code} not decoded as a projection");
         assert!(matches!(
-            w.pixel_to_world(&[3.0, 4.0]),
+            to_world(&w, &[3.0, 4.0]),
             Err(FitsError::UnsupportedWcsTransform { axes }) if axes == [0, 1]
         ));
         assert!(matches!(
-            w.world_to_pixel(&[10.0, 20.0]),
+            to_pixel(&w, &[10.0, 20.0]),
             Err(FitsError::UnsupportedWcsTransform { axes }) if axes == [0, 1]
         ));
     }
@@ -396,7 +397,7 @@ fn degenerate_conic_without_pv1_rejects_complete_transforms() {
         assert_eq!(w.metadata().unsupported_axes, [0, 1], "{code} axes flagged");
         assert!(w.celestial.is_none(), "{code} degenerate, not deprojected");
         assert!(matches!(
-            w.pixel_to_world(&[3.0, 4.0]),
+            to_world(&w, &[3.0, 4.0]),
             Err(FitsError::UnsupportedWcsTransform { axes }) if axes == [0, 1]
         ));
     }
@@ -423,16 +424,16 @@ fn bonne_with_zero_theta1_equals_sfl() {
     let sfl = build("SFL", None);
     assert!(bon.celestial.is_some() && bon.metadata().unsupported_axes.is_empty());
     for &(px, py) in &[(20.0, 70.0), (80.0, 30.0), (55.0, 45.0)] {
-        let b = bon.pixel_to_world(&[px, py]).unwrap();
-        let s = sfl.pixel_to_world(&[px, py]).unwrap();
+        let b = to_world(&bon, &[px, py]).unwrap();
+        let s = to_world(&sfl, &[px, py]).unwrap();
         assert!(
             (b[0] - s[0]).abs() < 1e-10 && (b[1] - s[1]).abs() < 1e-10,
             "BON θ₁=0 vs SFL at ({px},{py}): {b:?} vs {s:?}"
         );
     }
     // The forward (SFL) path round-trips too.
-    let world = bon.pixel_to_world(&[40.0, 60.0]).unwrap();
-    let p = bon.world_to_pixel(&world).unwrap();
+    let world = to_world(&bon, &[40.0, 60.0]).unwrap();
+    let p = to_pixel(&bon, &world).unwrap();
     assert!(
         (p[0] - 40.0).abs() < 1e-7 && (p[1] - 60.0).abs() < 1e-7,
         "BON θ₁=0 round-trip: {p:?}"
@@ -850,8 +851,8 @@ fn projections_match_astropy() {
             points: &[(px, py, ra, dec)],
         };
         assert_astropy_golden(&w, &golden, proj);
-        let out = w.pixel_to_world(&[px, py]).unwrap();
-        let back = w.world_to_pixel(&out).unwrap();
+        let out = to_world(&w, &[px, py]).unwrap();
+        let back = to_pixel(&w, &out).unwrap();
         assert!(
             (back[0] - px).abs() < 1e-6 && (back[1] - py).abs() < 1e-6,
             "{proj} round-trip: {back:?}"
