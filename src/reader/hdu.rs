@@ -62,9 +62,11 @@ impl Hdu {
             image: ImageGeometry::from_header(&header, kind).ok(),
             table: table_schema(&header, kind).ok(),
             #[cfg(feature = "compression")]
-            tiled_table: (kind == HduKind::CompressedTable)
-                .then(|| TiledTable::new(&header).ok())
-                .flatten(),
+            tiled_table: if kind == HduKind::CompressedTable {
+                TiledTable::new(&header).ok()
+            } else {
+                None
+            },
             header,
             kind,
             header_sum,

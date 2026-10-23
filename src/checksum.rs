@@ -23,18 +23,17 @@ pub(crate) const fn combine(left: u32, right: u32) -> u32 {
     sum.wrapping_add(carry as u32)
 }
 
-/// Encode a checksum into the 16 ASCII characters of a `CHECKSUM` value
-/// (Appendix J.2). With `complement` set, the complement of `sum` is encoded, so
-/// that re-summing the HDU yields negative zero. The output is always
-/// alphanumeric (`0-9`, `A-Z`, `a-z`).
-pub(crate) fn encode(sum: u32, complement: bool) -> [u8; 16] {
+/// Encode the complement of `sum` into the 16 ASCII characters of a `CHECKSUM`
+/// value (Appendix J.2), so that summing the HDU again yields negative zero. The
+/// output is always alphanumeric (`0-9`, `A-Z`, `a-z`).
+pub(crate) fn encode(sum: u32) -> [u8; 16] {
     // ASCII punctuation between the digit and letter ranges, to be avoided.
     const EXCLUDE: [i32; 13] = [
         0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f, 0x60,
     ];
     const OFFSET: i32 = 0x30; // ASCII '0'
 
-    let sum = if complement { 0xFFFF_FFFF - sum } else { sum };
+    let sum = 0xFFFF_FFFF - sum;
     let bytes = sum.to_be_bytes();
     let mut asc = [0u8; 16];
     for (i, &b) in bytes.iter().enumerate() {
@@ -120,7 +119,7 @@ mod tests {
             let field = hdu.len() + 3;
             hdu.resize(hdu.len() + 20, b' ');
             hdu[field..field + 16].copy_from_slice(b"0000000000000000");
-            let encoded = encode(accumulate(&hdu, 0), true);
+            let encoded = encode(accumulate(&hdu, 0));
             assert!(
                 encoded.iter().all(|&b| b.is_ascii_alphanumeric()),
                 "non-alphanumeric output: {encoded:?}"
@@ -169,7 +168,7 @@ mod tests {
                 header[field].copy_from_slice(b"0000000000000000");
                 let sum = combine(accumulate(&header, 0), data_sum);
                 assert_eq!(
-                    encode(sum, true),
+                    encode(sum),
                     written,
                     "{name} HDU {index}: cfitsio wrote {}",
                     String::from_utf8_lossy(&written)

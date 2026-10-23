@@ -25,7 +25,7 @@ use crate::error::{FitsError, Result};
 #[cfg(feature = "compression")]
 use crate::fits_writer::merge_header_template;
 use crate::fits_writer::{
-    FitsWriter, Opening, ROW_COUNT_FIXED, accept_row_count, validate_scaling,
+    FitsWriter, Opening, ROW_COUNT_FIXED, Scalable, accept_row_count, validate_scaling,
 };
 use crate::hdu::validate_table_field_count;
 use crate::header_model::card::validate_ascii;
@@ -723,7 +723,7 @@ fn validate_column(col: &WriteColumn, nrows: usize, n: usize) -> Result<ColumnLa
     match &col.values {
         WriteColumnData::Fixed { data, repeat } => {
             let kind = ColumnType::from_data(data);
-            validate_binary_metadata(col, kind.letter(), n)?;
+            validate_binary_metadata(col, kind.tform_kind(), n)?;
             assert_eq!(data.len(), nrows * repeat, "{ROW_COUNT_FIXED}");
             if let ColumnData::Character(bytes) = data
                 && *repeat > 0
@@ -742,7 +742,7 @@ fn validate_column(col: &WriteColumn, nrows: usize, n: usize) -> Result<ColumnLa
         }
         WriteColumnData::Vla { rows, width } => {
             let kind = ColumnType::from_data(rows.values());
-            validate_binary_metadata(col, kind.letter(), n)?;
+            validate_binary_metadata(col, kind.tform_kind(), n)?;
             assert_eq!(rows.len(), nrows, "{ROW_COUNT_FIXED}");
             let mut max_elements = 0usize;
             for r in 0..rows.len() {
@@ -762,7 +762,7 @@ fn validate_column(col: &WriteColumn, nrows: usize, n: usize) -> Result<ColumnLa
             })
         }
         WriteColumnData::VlaBits { rows, width } => {
-            validate_binary_metadata(col, 'X', n)?;
+            validate_binary_metadata(col, TformKind::Bit, n)?;
             assert_eq!(rows.len(), nrows, "{ROW_COUNT_FIXED}");
             let mut max_bits = 0usize;
             for r in 0..rows.len() {
@@ -776,7 +776,7 @@ fn validate_column(col: &WriteColumn, nrows: usize, n: usize) -> Result<ColumnLa
             })
         }
         WriteColumnData::Bits { bytes, bit_count } => {
-            validate_binary_metadata(col, 'X', n)?;
+            validate_binary_metadata(col, TformKind::Bit, n)?;
             let row_width = bit_count.div_ceil(8);
             assert_eq!(bytes.len(), nrows * row_width, "{ROW_COUNT_FIXED}");
             tdim::validate_declared(col.tdim.as_deref(), *bit_count, tdim_keyword)?;
@@ -788,21 +788,32 @@ fn validate_column(col: &WriteColumn, nrows: usize, n: usize) -> Result<ColumnLa
     }
 }
 
-fn validate_binary_metadata(col: &WriteColumn, stored_type: char, n: usize) -> Result<()> {
-    validate_scaling(
-        col.tscale,
-        col.tzero,
-        !matches!(stored_type, 'A' | 'L' | 'X'),
-        n,
-    )?;
+/// Errors when column `n`, stored as `kind`, sets a scaling or a `TNULLn` its values
+/// cannot take.
+fn validate_binary_metadata(col: &WriteColumn, kind: TformKind, n: usize) -> Result<()> {
+    let scalable = match kind {
+        TformKind::Char | TformKind::Logical | TformKind::Bit => Scalable::Unscaled,
+        TformKind::Byte
+        | TformKind::I16
+        | TformKind::I32
+        | TformKind::I64
+        | TformKind::F32
+        | TformKind::F64
+        | TformKind::ComplexF32
+        | TformKind::ComplexF64 => Scalable::Numeric,
+        TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
+            unreachable!("a stored element is no descriptor")
+        }
+    };
+    validate_scaling(col.tscale, col.tzero, scalable, n)?;
     let Some(tnull) = col.tnull else {
         return Ok(());
     };
-    let valid = match stored_type {
-        'B' => u8::try_from(tnull).is_ok(),
-        'I' => i16::try_from(tnull).is_ok(),
-        'J' => i32::try_from(tnull).is_ok(),
-        'K' => true,
+    let valid = match kind {
+        TformKind::Byte => u8::try_from(tnull).is_ok(),
+        TformKind::I16 => i16::try_from(tnull).is_ok(),
+        TformKind::I32 => i32::try_from(tnull).is_ok(),
+        TformKind::I64 => true,
         _ => false,
     };
     if !valid {

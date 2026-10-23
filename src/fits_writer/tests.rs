@@ -200,7 +200,7 @@ fn valid_checksum_only_report() -> ChecksumReport {
     writer.write_raw_hdu(&header, &[]).unwrap();
     let mut bytes = writer.into_inner().into_inner();
     let hdu_sum = checksum::accumulate(&bytes, 0);
-    patch_checksum(&mut bytes, &checksum::encode(hdu_sum, true));
+    patch_checksum(&mut bytes, &checksum::encode(hdu_sum));
     FitsReader::from_bytes(&bytes)
         .unwrap()
         .verify_checksum(0)

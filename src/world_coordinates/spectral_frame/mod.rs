@@ -59,10 +59,10 @@ impl SpectralFrame {
     /// an image header.
     pub(super) fn from_header(header: &Header, alt: Alternate) -> Result<Self> {
         let rest = Self::rest(header, alt)?;
-        let coordinate = read_text(header, Keyword::try_from(format_args!("SPECSYS{alt}")))?
+        let coordinate = read_text(header, Keyword::fitting(format_args!("SPECSYS{alt}")))?
             .map(|value| SpectralReferenceFrame::parse("SPECSYS", value))
             .transpose()?;
-        let observer = read_text(header, Keyword::try_from(format_args!("SSYSOBS{alt}")))?
+        let observer = read_text(header, Keyword::fitting(format_args!("SSYSOBS{alt}")))?
             .map(|value| SpectralReferenceFrame::parse("SSYSOBS", value))
             .transpose()?
             .unwrap_or(SpectralReferenceFrame::Topocentric);
@@ -74,11 +74,11 @@ impl SpectralFrame {
     }
 
     fn rest(header: &Header, alt: Alternate) -> Result<SpectralRest> {
-        let mut frequency = read_real(header, Keyword::try_from(format_args!("RESTFRQ{alt}")))?;
+        let mut frequency = read_real(header, Keyword::fitting(format_args!("RESTFRQ{alt}")))?;
         if frequency.is_none() && !alt.is_alternate() {
             frequency = header.get_real(keywords::RESTFREQ)?;
         }
-        let wavelength = read_real(header, Keyword::try_from(format_args!("RESTWAV{alt}")))?;
+        let wavelength = read_real(header, Keyword::fitting(format_args!("RESTWAV{alt}")))?;
         SpectralRest::new(frequency, wavelength)
     }
 }

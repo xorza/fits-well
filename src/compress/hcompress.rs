@@ -34,17 +34,25 @@ struct CodingBuffers {
     code_buffer: Vec<u8>,
 }
 
+/// Whether the inverse H-transform smooths each level first, as the `SMOOTH`
+/// parameter of `HCOMPRESS_1` asks (Table 37).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Smoothing {
+    Off,
+    On,
+}
+
 /// Decode an `HCOMPRESS_1` tile into row-major integer values (`ny` fastest, the
 /// FITS axis-1 order the orchestrator expects), appended to `out` (cleared first; a
 /// reused buffer). Transform and quadtree storage come from the worker scratch.
 pub(super) fn hcompress_tile_into(
     bytes: &[u8],
-    smooth: bool,
+    smoothing: Smoothing,
     tile_elems: usize,
     out: &mut Vec<i64>,
     scratch: &mut HcompressScratch,
 ) -> Result<()> {
-    hdecompress_into(bytes, smooth, tile_elems, scratch)?;
+    hdecompress_into(bytes, smoothing, tile_elems, scratch)?;
     out.clear();
     out.extend_from_slice(&scratch.plane);
     Ok(())
@@ -931,7 +939,7 @@ impl<'a> BitInput<'a> {
 /// Top-level: header → quadtree decode → undigitize → inverse H-transform.
 fn hdecompress_into(
     input: &[u8],
-    smooth: bool,
+    smoothing: Smoothing,
     tile_elems: usize,
     scratch: &mut HcompressScratch,
 ) -> Result<()> {
@@ -983,7 +991,7 @@ fn hdecompress_into(
         nx,
         ny,
         scale,
-        smooth,
+        smoothing,
         &mut scratch.transform,
         &mut scratch.rows,
     )?;
@@ -1260,14 +1268,14 @@ fn read_bdirect(
     Ok(())
 }
 
-/// Inverse H-transform (in place), smoothing each level first (`SMOOTH = 1`) when
-/// `smooth`.
+/// Inverse H-transform (in place), smoothing each level first when `smoothing` is
+/// [`Smoothing::On`] (`SMOOTH = 1`).
 fn hinv(
     a: &mut [i64],
     nx: usize,
     ny: usize,
     scale: i32,
-    smooth: bool,
+    smoothing: Smoothing,
     tmp: &mut Vec<i64>,
     row_tmp: &mut Vec<i64>,
 ) -> Result<()> {
@@ -1322,7 +1330,7 @@ fn hinv(
         }
         unshuffle_rows(a, nxtop, nytop, ny, row_tmp);
         // Smooth by interpolating coefficients (SMOOTH=1, lossy scale>1 only).
-        if smooth {
+        if smoothing == Smoothing::On {
             hsmooth(a, nxtop, nytop, ny, scale)?;
         }
         let oddx = nxtop % 2;
@@ -1588,6 +1596,7 @@ fn unshuffle_rows(a: &mut [i64], nxtop: usize, nytop: usize, ny: usize, row_tmp:
 #[cfg(test)]
 mod tests {
     use crate::compress::hcompress;
+    use crate::compress::hcompress::Smoothing;
     use crate::error::FitsError;
 
     #[test]
@@ -1617,8 +1626,14 @@ mod tests {
         assert_eq!(encoded, COMPRESSED);
 
         let mut decoded = Vec::new();
-        hcompress::hcompress_tile_into(COMPRESSED, false, values.len(), &mut decoded, &mut scratch)
-            .unwrap();
+        hcompress::hcompress_tile_into(
+            COMPRESSED,
+            Smoothing::Off,
+            values.len(),
+            &mut decoded,
+            &mut scratch,
+        )
+        .unwrap();
         assert_eq!(decoded, values);
     }
 
@@ -1632,20 +1647,32 @@ mod tests {
         let bytes = hcompress::hcompress_tile_encode(&vals, &[2, 3], 0, &mut scratch).unwrap();
         // The correct element count round-trips losslessly (scale 0).
         let mut out = Vec::new();
-        hcompress::hcompress_tile_into(&bytes, false, 6, &mut out, &mut scratch).unwrap();
+        hcompress::hcompress_tile_into(&bytes, Smoothing::Off, 6, &mut out, &mut scratch).unwrap();
         assert_eq!(out, vals);
         // A mismatched element count is rejected, not decoded.
-        assert!(hcompress::hcompress_tile_into(&bytes, false, 7, &mut out, &mut scratch).is_err());
-        assert!(hcompress::hcompress_tile_into(&bytes, false, 5, &mut out, &mut scratch).is_err());
+        assert!(
+            hcompress::hcompress_tile_into(&bytes, Smoothing::Off, 7, &mut out, &mut scratch)
+                .is_err()
+        );
+        assert!(
+            hcompress::hcompress_tile_into(&bytes, Smoothing::Off, 5, &mut out, &mut scratch)
+                .is_err()
+        );
 
         let one = hcompress::hcompress_tile_encode(&[-7], &[1, 1], 0, &mut scratch).unwrap();
-        hcompress::hcompress_tile_into(&one, false, 1, &mut out, &mut scratch).unwrap();
+        hcompress::hcompress_tile_into(&one, Smoothing::Off, 1, &mut out, &mut scratch).unwrap();
         assert_eq!(out, [-7], "a 1x1 tile must skip its empty quadrants");
 
         for end in 0..one.len() {
             assert!(
                 matches!(
-                    hcompress::hcompress_tile_into(&one[..end], false, 1, &mut out, &mut scratch),
+                    hcompress::hcompress_tile_into(
+                        &one[..end],
+                        Smoothing::Off,
+                        1,
+                        &mut out,
+                        &mut scratch
+                    ),
                     Err(FitsError::UnexpectedEof | FitsError::CorruptCompressedData { .. })
                 ),
                 "strict HCOMPRESS prefix of length {end} was accepted"
@@ -1656,7 +1683,7 @@ mod tests {
         let mut negative_ny = one.clone();
         negative_ny[6..10].copy_from_slice(&(-1i32).to_be_bytes());
         assert!(matches!(
-            hcompress::hcompress_tile_into(&negative_ny, false, 1, &mut out, &mut scratch),
+            hcompress::hcompress_tile_into(&negative_ny, Smoothing::Off, 1, &mut out, &mut scratch),
             Err(FitsError::CorruptCompressedData { detail })
                 if detail == "HCOMPRESS_1: negative tile dimension"
         ));
@@ -1665,14 +1692,14 @@ mod tests {
         overflowing[10..14].copy_from_slice(&2i32.to_be_bytes());
         overflowing[14..22].copy_from_slice(&i64::MAX.to_be_bytes());
         assert!(matches!(
-            hcompress::hcompress_tile_into(&overflowing, false, 1, &mut out, &mut scratch),
+            hcompress::hcompress_tile_into(&overflowing, Smoothing::Off, 1, &mut out, &mut scratch),
             Err(FitsError::CorruptCompressedData { detail })
                 if detail == "HCOMPRESS_1: a decoded coefficient exceeds 64 bits"
         ));
         let mut invalid_planes = one;
         invalid_planes[22] = 64;
         assert!(matches!(
-            hcompress::hcompress_tile_into(&invalid_planes, false, 1, &mut out, &mut scratch),
+            hcompress::hcompress_tile_into(&invalid_planes, Smoothing::Off, 1, &mut out, &mut scratch),
             Err(FitsError::CorruptCompressedData { detail })
                 if detail == "HCOMPRESS_1: invalid bit-plane count"
         ));

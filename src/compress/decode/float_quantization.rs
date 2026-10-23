@@ -31,19 +31,8 @@ pub(super) struct Dequant {
 }
 
 impl FloatQuantization {
-    pub(super) fn read(header: &Header, table: TableView<'_>, is_float: bool) -> Result<Self> {
-        // An integer image is stored without quantization and ignores these keywords
-        // and columns altogether.
-        if !is_float {
-            return Ok(Self {
-                method: DitherMethod::None,
-                zdither0: 1,
-                zblank_keyword: None,
-                zblank_column: None,
-                zscale: None,
-                zzero: None,
-            });
-        }
+    /// The quantization a float image's `header` and `table` declare.
+    pub(super) fn read(header: &Header, table: TableView<'_>) -> Result<Self> {
         let quantiz = header.get_text(keywords::ZQUANTIZ)?.unwrap_or("NO_DITHER");
         // A float image's samples cannot be reconstructed without reproducing its
         // dither exactly.

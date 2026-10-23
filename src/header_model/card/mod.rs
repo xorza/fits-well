@@ -336,14 +336,21 @@ fn parse_string(token: &str, raw: &[u8; CARD_SIZE]) -> Result<String> {
     Ok(out)
 }
 
+/// A `(re, im)` complex value; `None` for a token of another form. An integer part
+/// beside a real one widens to `f64`.
 fn parse_complex(token: &str) -> Option<Value> {
     let inner = token.strip_prefix('(')?.strip_suffix(')')?;
     let (re, im) = inner.split_once(',')?;
+    let real = |part: &Value| {
+        part.as_real()
+            .expect("a value field of 70 bytes holds no integer past the range of f64")
+            .expect("a scalar is a real or an integer")
+    };
     match (parse_scalar(re.trim())?, parse_scalar(im.trim())?) {
         (Value::Integer(re), Value::Integer(im)) => Some(Value::ComplexInteger { re, im }),
         (re, im) => Some(Value::ComplexReal {
-            re: re.as_real().ok()??,
-            im: im.as_real().ok()??,
+            re: real(&re),
+            im: real(&im),
         }),
     }
 }

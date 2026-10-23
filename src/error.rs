@@ -307,6 +307,10 @@ pub enum FitsError {
     /// `read_table` was called on an HDU that is not a binary table.
     #[error("HDU is not a binary table")]
     NotABinTable,
+    /// A time-axis evaluation was asked of WCS axis `axis` (1-based), whose `CTYPEn` is
+    /// no time axis (§9.6).
+    #[error("WCS axis {axis} is not a time axis")]
+    NotATimeAxis { axis: usize },
     /// `read_groups` was called on an HDU that is not a random-groups primary.
     #[error("HDU is not a random-groups primary")]
     NotRandomGroups,
@@ -392,6 +396,9 @@ pub enum FitsError {
     /// No column with the requested `TTYPEn` name exists in the table.
     #[error("no column named {name:?} in the table")]
     ColumnNotFound { name: String },
+    /// No group parameter with the requested `PTYPEn` name exists.
+    #[error("no group parameter named {name:?}")]
+    GroupParameterNotFound { name: String },
     /// The summed column widths disagree with the declared row width (`NAXIS1`).
     #[error("column widths sum to {computed} bytes but NAXIS1 declares {declared}")]
     RowWidthMismatch { computed: usize, declared: usize },

@@ -194,7 +194,9 @@ fn parse_multiplier_prefix(expression: &str) -> Option<ParsedMultiplier> {
     }
     // `1e<exponent>` parses to the f64 nearest the power of ten; `powi` multiplies its way
     // there and is a few ULP off below 10⁻²².
-    let factor: f64 = format!("1e{exponent}").parse().ok()?;
+    let factor: f64 = format!("1e{exponent}")
+        .parse()
+        .expect("`1e` and an integer is a float literal");
     (factor.is_finite() && factor > 0.0).then_some(ParsedMultiplier {
         factor,
         length: position,

@@ -174,9 +174,10 @@ impl RandomGroups {
     /// The physical value of the named group parameter (§6.3): when extra
     /// precision splits one logical parameter into two or more group parameters
     /// sharing a `PTYPEn` name, the value is the **sum** of those addends'
-    /// physical values. `None` if no parameter has the name. (For the raw
-    /// per-addend values, use [`RandomGroups::parameters_physical`].)
-    pub fn parameter_physical(&self, group: usize, name: &str) -> Result<Option<f64>> {
+    /// physical values. Errors with [`FitsError::GroupParameterNotFound`] if no
+    /// parameter has the name. (For the raw per-addend values, use
+    /// [`RandomGroups::parameters_physical`].)
+    pub fn parameter_physical(&self, group: usize, name: &str) -> Result<f64> {
         let values = self.parameters_physical(group)?;
         let mut sum = 0.0;
         let mut found = false;
@@ -191,7 +192,13 @@ impl RandomGroups {
                 sum += value;
             }
         }
-        Ok(found.then_some(sum))
+        if found {
+            Ok(sum)
+        } else {
+            Err(FitsError::GroupParameterNotFound {
+                name: name.to_string(),
+            })
+        }
     }
 
     /// The physical array values of group `g`: `BZERO + BSCALE × raw`, with integer

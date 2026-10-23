@@ -1,13 +1,12 @@
 //! ASCII-table writer schema, validation, and encoding.
 
-use std::borrow::Cow;
 use std::io::Write;
 
 use crate::ascii::AsciiColumnData;
 use crate::block::SPACE_FILL;
 use crate::error::{FitsError, Result};
 use crate::fits_writer::{
-    FitsWriter, Opening, ROW_COUNT_FIXED, accept_row_count, validate_scaling,
+    FitsWriter, Opening, ROW_COUNT_FIXED, Scalable, accept_row_count, validate_scaling,
 };
 use crate::hdu::validate_table_field_count;
 use crate::header_model::card::validate_ascii;
@@ -169,12 +168,11 @@ fn validate_ascii_column(col: &AsciiWriteColumn, n: usize) -> Result<()> {
             return Err(tnull);
         }
     }
-    validate_scaling(
-        col.tscale,
-        col.tzero,
-        !matches!(&col.data, AsciiColumnData::Text(_)),
-        n,
-    )?;
+    let scalable = match &col.data {
+        AsciiColumnData::Text(_) => Scalable::Unscaled,
+        AsciiColumnData::Integer(_) | AsciiColumnData::Float(_) => Scalable::Numeric,
+    };
+    validate_scaling(col.tscale, col.tzero, scalable, n)?;
     if col.data.has_null() && col.tnull.is_none() {
         return Err(tnull);
     }
@@ -197,35 +195,30 @@ fn validate_ascii_field_width(
     Ok(())
 }
 
-/// One rendered ASCII-table field: the text to write, whether it pads on the right,
-/// and whether it is the `TNULLn` marker rather than a value.
+/// One rendered ASCII-table field.
 #[derive(Debug)]
-struct AsciiField<'a> {
-    text: Cow<'a, str>,
-    left_aligned: bool,
-    is_null: bool,
+enum AsciiField<'a> {
+    /// A text cell's value, left-aligned.
+    Text(&'a str),
+    /// An integer or float cell's value, right-aligned.
+    Number(String),
+    /// The column's validated `TNULLn` marker, left-aligned whatever the column's type.
+    Null(&'a str),
 }
 
 impl<'a> AsciiField<'a> {
-    /// A null cell renders its validated `TNULLn` marker, left-aligned whatever the
-    /// column's type.
     fn null(col: &'a AsciiWriteColumn) -> Self {
-        AsciiField {
-            text: Cow::Borrowed(
-                col.tnull
-                    .as_deref()
-                    .expect("null ASCII cells require a validated TNULLn marker"),
-            ),
-            left_aligned: true,
-            is_null: true,
-        }
+        Self::Null(
+            col.tnull
+                .as_deref()
+                .expect("null ASCII cells require a validated TNULLn marker"),
+        )
     }
 
-    const fn value(text: Cow<'a, str>, left_aligned: bool) -> Self {
-        AsciiField {
-            text,
-            left_aligned,
-            is_null: false,
+    fn text(&self) -> &str {
+        match self {
+            Self::Text(text) | Self::Null(text) => text,
+            Self::Number(text) => text,
         }
     }
 }
@@ -235,28 +228,28 @@ impl<'a> AsciiField<'a> {
 fn ascii_field(col: &AsciiWriteColumn, row: usize) -> Result<AsciiField<'_>> {
     let field = match &col.data {
         AsciiColumnData::Text(values) => match values.get(row) {
-            Some(value) => AsciiField::value(Cow::Borrowed(value), true),
+            Some(value) => AsciiField::Text(value),
             None => AsciiField::null(col),
         },
         AsciiColumnData::Integer(values) => match values[row] {
-            Some(value) => AsciiField::value(Cow::Owned(value.to_string()), false),
+            Some(value) => AsciiField::Number(value.to_string()),
             None => AsciiField::null(col),
         },
         AsciiColumnData::Float(values) => match values[row] {
-            Some(value) => AsciiField::value(Cow::Owned(ascii_float_text(col, row, value)?), false),
+            Some(value) => AsciiField::Number(ascii_float_text(col, row, value)?),
             None => AsciiField::null(col),
         },
     };
-    validate_ascii_field_width(col, row, field.text.len())?;
+    validate_ascii_field_width(col, row, field.text().len())?;
     if let AsciiColumnData::Text(values) = &col.data
         && let Some(value) = values.get(row)
     {
         validate_ascii(value, "ASCII text cell")?;
     }
-    if !field.is_null {
+    if !matches!(field, AsciiField::Null(_)) {
         // Integer and float text never carries surrounding spaces, so trimming is a
         // no-op there and applies the §7.2.4 comparison to a text cell's own value.
-        validate_ascii_null_collision(field.text.trim(), col.tnull.as_deref().map(str::trim))?;
+        validate_ascii_null_collision(field.text().trim(), col.tnull.as_deref().map(str::trim))?;
     }
     Ok(field)
 }
@@ -351,14 +344,17 @@ fn ascii_tform(col: &AsciiWriteColumn) -> String {
 
 fn append_ascii_field(out: &mut Vec<u8>, col: &AsciiWriteColumn, r: usize) -> Result<()> {
     let field = ascii_field(col, r)?;
-    let bytes = field.text.as_bytes();
-    let pad = col.width - bytes.len();
-    if field.left_aligned {
-        out.extend_from_slice(bytes);
-        out.extend(iter::repeat_n(b' ', pad));
-    } else {
-        out.extend(iter::repeat_n(b' ', pad));
-        out.extend_from_slice(bytes);
+    let bytes = field.text().as_bytes();
+    let pad = iter::repeat_n(b' ', col.width - bytes.len());
+    match field {
+        AsciiField::Text(_) | AsciiField::Null(_) => {
+            out.extend_from_slice(bytes);
+            out.extend(pad);
+        }
+        AsciiField::Number(_) => {
+            out.extend(pad);
+            out.extend_from_slice(bytes);
+        }
     }
     Ok(())
 }

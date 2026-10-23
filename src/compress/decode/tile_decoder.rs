@@ -4,6 +4,7 @@ use crate::bintable::vla_column::VlaCell;
 use crate::compress;
 use crate::compress::ImageCodec;
 use crate::compress::convert;
+use crate::compress::decode::decode_sample::Overshoot;
 use crate::compress::decode::float_quantization::Dequant;
 use crate::compress::decode::tile_cells::TileCells;
 use crate::compress::decode::tile_cells::TileSource;
@@ -11,6 +12,7 @@ use crate::compress::decode::tile_scratch_set::CodecScratch;
 use crate::compress::decode::tiled_image::TiledImage;
 use crate::compress::gzip;
 use crate::compress::hcompress;
+use crate::compress::hcompress::Smoothing;
 use crate::compress::plane::{FloatBitpix, IntBitpix, Plane};
 use crate::compress::plio;
 use crate::compress::quantize;
@@ -41,7 +43,7 @@ pub(super) struct TileDecoder {
 struct CodecParams {
     blocksize: usize,
     bytepix: IntBitpix,
-    smooth: bool,
+    smoothing: Smoothing,
 }
 
 impl CodecParams {
@@ -49,7 +51,7 @@ impl CodecParams {
         let mut params = Self {
             blocksize: rice::BLOCKSIZE,
             bytepix: IntBitpix::I32,
-            smooth: false,
+            smoothing: Smoothing::Off,
         };
         for entry in header {
             let Some(i) = compress::parameter_index(entry.keyword) else {
@@ -80,7 +82,11 @@ impl CodecParams {
                     }
                 }
                 (ImageCodec::Hcompress1, "SMOOTH") => {
-                    params.smooth = value()?.unwrap_or(0) != 0;
+                    params.smoothing = if value()?.unwrap_or(0) == 0 {
+                        Smoothing::Off
+                    } else {
+                        Smoothing::On
+                    };
                 }
                 _ => {}
             }
@@ -110,10 +116,17 @@ impl TileDecoder {
         })
     }
 
-    /// Whether the codec is lossy: `HCOMPRESS_1`, whose reconstruction may overshoot
-    /// the range of the image's values.
-    pub(super) const fn is_lossy(&self) -> bool {
-        matches!(self.codec, ImageCodec::Hcompress1)
+    /// What a decoded value outside the image's range means for this codec: lossy
+    /// `HCOMPRESS_1` may overshoot the range of the image's values.
+    pub(super) const fn overshoot(&self) -> Overshoot {
+        match self.codec {
+            ImageCodec::Hcompress1 => Overshoot::Clamp,
+            ImageCodec::Gzip1
+            | ImageCodec::Gzip2
+            | ImageCodec::Rice1
+            | ImageCodec::Plio1
+            | ImageCodec::NoCompress => Overshoot::Refuse,
+        }
     }
 
     /// The float `ZBITPIX` of a float image.
@@ -213,7 +226,7 @@ impl TileDecoder {
             }
             ImageCodec::Hcompress1 => hcompress::hcompress_tile_into(
                 convert::byte_cell(cell)?,
-                params.smooth,
+                params.smoothing,
                 tile_elems,
                 out,
                 &mut scratch.hcompress,
@@ -241,6 +254,7 @@ impl TileDecoder {
 mod tests {
     use crate::compress::ImageCodec;
     use crate::compress::decode::tile_decoder::CodecParams;
+    use crate::compress::hcompress::Smoothing;
     use crate::compress::plane::IntBitpix;
     use crate::error::FitsError;
     use crate::header_model::Header;
@@ -252,8 +266,8 @@ mod tests {
         let mut header = Header::new();
         let defaults = CodecParams::read(&header, ImageCodec::Rice1).unwrap();
         assert_eq!(
-            (defaults.blocksize, defaults.bytepix, defaults.smooth),
-            (32, IntBitpix::I32, false)
+            (defaults.blocksize, defaults.bytepix, defaults.smoothing),
+            (32, IntBitpix::I32, Smoothing::Off)
         );
         header
             .set_internal("ZNAME2", "BYTEPIX")
@@ -264,13 +278,14 @@ mod tests {
             .set_internal("ZVAL5", 1);
         let rice = CodecParams::read(&header, ImageCodec::Rice1).unwrap();
         assert_eq!(
-            (rice.blocksize, rice.bytepix, rice.smooth),
-            (16, IntBitpix::I64, false)
+            (rice.blocksize, rice.bytepix, rice.smoothing),
+            (16, IntBitpix::I64, Smoothing::Off)
         );
-        assert!(
+        assert_eq!(
             CodecParams::read(&header, ImageCodec::Hcompress1)
                 .unwrap()
-                .smooth
+                .smoothing,
+            Smoothing::On
         );
 
         for (name, value) in [("ZVAL3", 17), ("ZVAL2", 3)] {

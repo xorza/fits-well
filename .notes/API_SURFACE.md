@@ -52,6 +52,7 @@ FitsError
         NotAnImage
         ImageHasGroups
         NotABinTable
+        NotATimeAxis { axis: usize }
         NotRandomGroups
         NotAnAsciiTable
         ConflictingWcsKeywords { detail: &'static str }
@@ -73,6 +74,7 @@ FitsError
         NotAComplexColumn { code: char }
         NonNumericColumn { code: char }
         ColumnNotFound { name: String }
+        GroupParameterNotFound { name: String }
         RowWidthMismatch { computed: usize, declared: usize }
         TableMetadataMismatch { name: String }
 
@@ -837,7 +839,7 @@ io::RandomGroups
         pub const fn array_len(&self) -> usize
         pub fn group(&self, index: usize) -> Result<RandomGroupView<'_>>
         pub fn parameters_physical(&self, group: usize) -> Result<Vec<f64>>
-        pub fn parameter_physical(&self, group: usize, name: &str) -> Result<Option<f64>>
+        pub fn parameter_physical(&self, group: usize, name: &str) -> Result<f64>
         pub fn array_physical(&self, group: usize) -> Result<Vec<f64>>
 
 io::RandomGroupsMetadata
@@ -1165,7 +1167,7 @@ time::Frame
         pub fn for_column(header: &Header, column: usize) -> Result<Self>
         pub fn unit_seconds(&self) -> Result<f64>
         pub fn relative_to_mjd(&self, value: f64) -> Result<f64>
-        pub fn time_axis_mjd(&self, wcs: &Wcs, axis: usize, pixel: &[f64]) -> Result<Option<Coordinate>>
+        pub fn time_axis_mjd(&self, wcs: &Wcs, axis: usize, pixel: &[f64]) -> Result<Coordinate>
 
 time::PhaseAxis
     struct PhaseAxis: Clone, Copy, Debug, PartialEq

@@ -347,7 +347,7 @@ fn prepare_header_with_data_sum(
     header.set_internal(keywords::CHECKSUM, PLACEHOLDER_CHECKSUM);
     render_header(&header, out)?;
     let hdu_sum = checksum::combine(checksum::accumulate(out, 0), data_sum);
-    patch_checksum(out, &checksum::encode(hdu_sum, true));
+    patch_checksum(out, &checksum::encode(hdu_sum));
     Ok(())
 }
 
@@ -414,20 +414,29 @@ fn accept_row_count(
 /// [`accept_row_count`] holds every column a builder takes to the table's row count.
 const ROW_COUNT_FIXED: &str = "the table builder fixes every column's row count";
 
-/// Errors when column `n` sets a scaling its type takes none of, or one that is not
+/// Whether a column's values take `TSCALn` and `TZEROn` (§7.2.5, §7.3.2): numbers do,
+/// and text, logical and bit values do not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scalable {
+    Numeric,
+    Unscaled,
+}
+
+/// Errors when column `n` sets a scaling its values take none of, or one that is not
 /// finite.
 fn validate_scaling(
     tscale: Option<f64>,
     tzero: Option<f64>,
-    allowed: bool,
+    scalable: Scalable,
     n: usize,
 ) -> Result<()> {
-    if tscale.is_some_and(|value| !allowed || !value.is_finite()) {
+    let refused = |value: f64| scalable == Scalable::Unscaled || !value.is_finite();
+    if tscale.is_some_and(refused) {
         return Err(FitsError::KeywordOutOfRange {
             keyword: keywords::TSCAL.indexed(n)?,
         });
     }
-    if tzero.is_some_and(|value| !allowed || !value.is_finite()) {
+    if tzero.is_some_and(refused) {
         return Err(FitsError::KeywordOutOfRange {
             keyword: keywords::TZERO.indexed(n)?,
         });

@@ -37,29 +37,37 @@ impl TableWcsResolver {
         }
     }
 
+    /// The keyword of `keyword`'s family for the pixel-list `column`; `None` where no
+    /// card can hold one: the family has no spelling in this description, or a wide
+    /// column number makes the name longer than a keyword.
     pub(super) fn pixel_axis_key(
         self,
         keyword: TableAxisKeyword,
         column: usize,
-    ) -> Option<Result<Keyword>> {
+    ) -> Option<Keyword> {
         let root = keyword.table_root(self.spelling())?;
-        Some(Keyword::try_from(format_args!(
-            "T{root}{column}{}",
-            self.alt
-        )))
+        Keyword::fitting(format_args!("T{root}{column}{}", self.alt))
     }
 
+    /// [`Self::pixel_axis_key`] for array axis `axis` of the vector-cell `column`.
     pub(super) fn vector_axis_key(
         self,
         keyword: TableAxisKeyword,
         axis: usize,
         column: usize,
-    ) -> Option<Result<Keyword>> {
+    ) -> Option<Keyword> {
         let root = keyword.table_root(self.spelling())?;
-        Some(Keyword::try_from(format_args!(
-            "{axis}{root}{column}{}",
-            self.alt
-        )))
+        Keyword::fitting(format_args!("{axis}{root}{column}{}", self.alt))
+    }
+
+    /// The type keyword of the first array axis of the vector-cell `column`, which a
+    /// cell with no axis reports missing. Errors with [`FitsError::InvalidKeyword`] for
+    /// a column so wide that no card can hold the name.
+    pub(super) fn first_vector_type(self, column: usize) -> Result<Keyword> {
+        let root = TableAxisKeyword::Type
+            .table_root(self.spelling())
+            .expect("Table 22 spells the axis type in every description");
+        Keyword::try_from(format_args!("1{root}{column}{}", self.alt))
     }
 
     fn pixel_matrix_key(
@@ -68,9 +76,9 @@ impl TableWcsResolver {
         row_column: usize,
         input_column: usize,
         spelling: KeywordSpelling,
-    ) -> Result<Keyword> {
+    ) -> Option<Keyword> {
         let root = keyword.pixel_root(spelling);
-        Keyword::try_from(format_args!(
+        Keyword::fitting(format_args!(
             "{root}{row_column}_{input_column}{}",
             self.alt
         ))
@@ -94,9 +102,9 @@ impl TableWcsResolver {
         row_axis: usize,
         input_axis: usize,
         column: usize,
-    ) -> Result<Keyword> {
+    ) -> Option<Keyword> {
         let root = keyword.root();
-        Keyword::try_from(format_args!(
+        Keyword::fitting(format_args!(
             "{row_axis}{input_axis}{root}{column}{}",
             self.alt
         ))
@@ -107,12 +115,12 @@ impl TableWcsResolver {
         column: usize,
         parameter: usize,
         spelling: KeywordSpelling,
-    ) -> Result<Keyword> {
+    ) -> Option<Keyword> {
         let root = match spelling {
             KeywordSpelling::Full => "TPV",
             KeywordSpelling::Short => "TV",
         };
-        Keyword::try_from(format_args!("{root}{column}_{parameter}{}", self.alt))
+        Keyword::fitting(format_args!("{root}{column}_{parameter}{}", self.alt))
     }
 
     pub(super) fn pixel_parameter_real(
@@ -132,12 +140,12 @@ impl TableWcsResolver {
         column: usize,
         parameter: usize,
         spelling: KeywordSpelling,
-    ) -> Result<Keyword> {
+    ) -> Option<Keyword> {
         let root = match spelling {
             KeywordSpelling::Full => "PV",
             KeywordSpelling::Short => "V",
         };
-        Keyword::try_from(format_args!("{axis}{root}{column}_{parameter}{}", self.alt))
+        Keyword::fitting(format_args!("{axis}{root}{column}_{parameter}{}", self.alt))
     }
 
     pub(super) fn vector_parameter_real(
@@ -158,16 +166,16 @@ impl TableWcsResolver {
         column: usize,
         parameter: usize,
         spelling: KeywordSpelling,
-    ) -> Result<Keyword> {
+    ) -> Option<Keyword> {
         let root = match spelling {
             KeywordSpelling::Full => "PS",
             KeywordSpelling::Short => "S",
         };
-        Keyword::try_from(format_args!("{axis}{root}{column}_{parameter}{}", self.alt))
+        Keyword::fitting(format_args!("{axis}{root}{column}_{parameter}{}", self.alt))
     }
 
-    pub(super) fn column_key(self, root: &str, column: usize) -> Result<Keyword> {
-        Keyword::try_from(format_args!("{root}{column}{}", self.alt))
+    pub(super) fn column_key(self, root: &str, column: usize) -> Option<Keyword> {
+        Keyword::fitting(format_args!("{root}{column}{}", self.alt))
     }
 
     pub(super) fn pole_real(
@@ -313,35 +321,19 @@ mod tests {
             axis_cases
         {
             assert_eq!(
-                primary
-                    .pixel_axis_key(keyword, 17)
-                    .unwrap()
-                    .unwrap()
-                    .as_str(),
+                primary.pixel_axis_key(keyword, 17).unwrap().as_str(),
                 primary_pixel
             );
             assert_eq!(
-                alternate
-                    .pixel_axis_key(keyword, 17)
-                    .unwrap()
-                    .unwrap()
-                    .as_str(),
+                alternate.pixel_axis_key(keyword, 17).unwrap().as_str(),
                 alternate_pixel
             );
             assert_eq!(
-                primary
-                    .vector_axis_key(keyword, 3, 17)
-                    .unwrap()
-                    .unwrap()
-                    .as_str(),
+                primary.vector_axis_key(keyword, 3, 17).unwrap().as_str(),
                 primary_vector
             );
             assert_eq!(
-                alternate
-                    .vector_axis_key(keyword, 3, 17)
-                    .unwrap()
-                    .unwrap()
-                    .as_str(),
+                alternate.vector_axis_key(keyword, 3, 17).unwrap().as_str(),
                 alternate_vector
             );
         }
@@ -349,14 +341,12 @@ mod tests {
             primary
                 .pixel_axis_key(TableAxisKeyword::Rotation, 17)
                 .unwrap()
-                .unwrap()
                 .as_str(),
             "TCROT17"
         );
         assert_eq!(
             primary
                 .vector_axis_key(TableAxisKeyword::Rotation, 3, 17)
-                .unwrap()
                 .unwrap()
                 .as_str(),
             "3CROT17"
@@ -371,6 +361,25 @@ mod tests {
                 .vector_axis_key(TableAxisKeyword::Rotation, 3, 17)
                 .is_none()
         );
+        // A family that has a spelling but a column too wide for a keyword: `TCTYP1000`
+        // and `3CTY1000A` are 9 bytes, so no card holds them and a read finds nothing,
+        // while the one error that names the type keyword still reports the name.
+        assert!(
+            primary
+                .pixel_axis_key(TableAxisKeyword::Type, 1000)
+                .is_none()
+        );
+        assert!(
+            alternate
+                .vector_axis_key(TableAxisKeyword::Type, 3, 1000)
+                .is_none()
+        );
+        assert_eq!(primary.first_vector_type(17).unwrap().as_str(), "1CTYP17");
+        assert_eq!(alternate.first_vector_type(17).unwrap().as_str(), "1CTY17A");
+        assert!(matches!(
+            primary.first_vector_type(1000),
+            Err(FitsError::InvalidKeyword { name }) if name == "1CTYP1000"
+        ));
 
         assert_eq!(
             alternate

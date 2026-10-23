@@ -404,19 +404,16 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
     // CTYPE1A override the global seconds/UTC frame.
     assert_eq!(
         t.time_axis_mjd(&alternate, 1, &[1.5]).unwrap(),
-        Some(Coordinate {
+        Coordinate {
             mjd: 58001.0,
             scale: Scale::known(ScaleKind::Tai),
-        })
+        }
     );
 
     h.set_internal("CUNIT1A", "ms");
     let milliseconds = Wcs::from_header(&h, 'A').unwrap();
     // With the same CD row, an offset of 500 pixels is 1000 ms = 1 s.
-    let coordinate = t
-        .time_axis_mjd(&milliseconds, 1, &[501.0])
-        .unwrap()
-        .unwrap();
+    let coordinate = t.time_axis_mjd(&milliseconds, 1, &[501.0]).unwrap();
     assert_eq!(coordinate.mjd, 58000.0 + 1.0 / SEC_PER_DAY);
 
     h.set_internal("CUNIT1A", "Hz");
@@ -452,7 +449,7 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
     let wcs = Wcs::from_header(&coupled, None).unwrap();
     // Row 1 is CDELT1 × PC1_j = [2, 1]. At pixel [3, 5], offsets [2, 4]
     // contribute 2×2 + 1×4 = 8 s, then CRVAL1 adds 10 s.
-    let coordinate = t.time_axis_mjd(&wcs, 1, &[3.0, 5.0]).unwrap().unwrap();
+    let coordinate = t.time_axis_mjd(&wcs, 1, &[3.0, 5.0]).unwrap();
     assert_eq!(coordinate.scale, Scale::known(ScaleKind::Utc));
     assert_eq!(coordinate.mjd, 58000.0 + 18.0 / SEC_PER_DAY);
 
@@ -461,7 +458,7 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
         .set_internal("CRVAL1A", 10.0)
         .set_internal("CD1_1A", 2.0);
     let logarithmic = Wcs::from_header(&h, 'A').unwrap();
-    let coordinate = t.time_axis_mjd(&logarithmic, 1, &[2.0]).unwrap().unwrap();
+    let coordinate = t.time_axis_mjd(&logarithmic, 1, &[2.0]).unwrap();
     let expected_days = 10.0 * 0.2_f64.exp();
     assert_eq!(coordinate.mjd, 58000.0 + expected_days);
 
@@ -469,11 +466,10 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
     non_time
         .set_internal(keywords::NAXIS, 1)
         .set_internal("CTYPE1", "LINEAR");
-    assert!(
-        t.time_axis_mjd(&Wcs::from_header(&non_time, None).unwrap(), 1, &[1.0])
-            .unwrap()
-            .is_none()
-    );
+    assert!(matches!(
+        t.time_axis_mjd(&Wcs::from_header(&non_time, None).unwrap(), 1, &[1.0]),
+        Err(FitsError::NotATimeAxis { axis: 1 })
+    ));
 
     h.set_internal("CTYPE1A", "TIME-TAB")
         .set_internal("CUNIT1A", "d");

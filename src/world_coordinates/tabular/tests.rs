@@ -182,7 +182,6 @@ fn tabular_time_axes_feed_the_typed_time_layer() {
     let coordinate = Frame::from_header(&header)
         .unwrap()
         .time_axis_mjd(&wcs, 1, &[1.5])
-        .unwrap()
         .unwrap();
     assert_eq!(coordinate.mjd, 50_001.0);
 
@@ -214,7 +213,6 @@ fn tabular_time_axes_feed_the_typed_time_layer() {
     let coordinate = Frame::from_header(&header)
         .unwrap()
         .time_axis_mjd(&wcs, 2, &[12.0, 20.5, 34.0])
-        .unwrap()
         .unwrap();
     assert_eq!(coordinate.mjd, 50_000.0 + 250.0 / 86_400.0);
 }

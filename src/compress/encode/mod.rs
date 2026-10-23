@@ -250,17 +250,28 @@ fn hcompress_tile_scale(
     Ok(absolute as i32)
 }
 
-/// One encoded float tile: its compressed bytes plus the per-tile dequantization
-/// metadata. `quantized` distinguishes a normal tile (bytes → `COMPRESSED_DATA`,
-/// `zscale`/`zzero` meaningful) from a constant tile stored as raw gzip'd floats in
-/// the `GZIP_COMPRESSED_DATA` fallback.
+/// One encoded float tile.
 #[derive(Debug)]
-struct FloatTile {
-    bytes: Vec<u8>,
-    zscale: f64,
-    zzero: f64,
-    quantized: bool,
-    has_null: bool,
+enum FloatTile {
+    /// Quantized integers in `COMPRESSED_DATA`, with the `ZSCALE`/`ZZERO` that invert
+    /// the quantization and whether a pixel was null.
+    Quantized {
+        bytes: Vec<u8>,
+        zscale: f64,
+        zzero: f64,
+        has_null: bool,
+    },
+    /// A constant tile, which does not quantize, as raw gzip'd floats in the
+    /// `GZIP_COMPRESSED_DATA` fallback.
+    Raw { bytes: Vec<u8> },
+}
+
+impl FloatTile {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Quantized { bytes, .. } | Self::Raw { bytes } => bytes,
+        }
+    }
 }
 
 /// Encode a float image as a quantized, tiled-compressed `BINTABLE`, dithered by
@@ -321,12 +332,8 @@ fn compress_float_image(
             else {
                 // Constant tile: store the raw floats, gzip'd, in the fallback.
                 convert::float_to_be_into(&s.floats, zbitpix, &mut s.be);
-                return Ok(FloatTile {
+                return Ok(FloatTile::Raw {
                     bytes: gzip::gzip_encode(&s.be, gzip_level),
-                    zscale: 0.0,
-                    zzero: 0.0,
-                    quantized: false,
-                    has_null: false,
                 });
             };
             let bytes = match codec {
@@ -350,33 +357,34 @@ fn compress_float_image(
                 }
                 _ => unreachable!(),
             };
-            Ok(FloatTile {
+            Ok(FloatTile::Quantized {
                 bytes,
                 zscale: q.bscale,
                 zzero: q.bzero,
-                quantized: true,
                 has_null: q.has_null,
             })
         },
     )?;
 
     let heap_len = tiles_out.iter().try_fold(0usize, |len, tile| {
-        len.checked_add(tile.bytes.len())
+        len.checked_add(tile.bytes().len())
             .ok_or(FitsError::DataUnitOverflow)
     })?;
     let max_cd = tiles_out
         .iter()
-        .filter(|tile| tile.quantized)
-        .map(|tile| tile.bytes.len())
+        .filter(|tile| matches!(tile, FloatTile::Quantized { .. }))
+        .map(|tile| tile.bytes().len())
         .max()
         .unwrap_or(0);
     let max_gz = tiles_out
         .iter()
-        .filter(|tile| !tile.quantized)
-        .map(|tile| tile.bytes.len())
+        .filter(|tile| matches!(tile, FloatTile::Raw { .. }))
+        .map(|tile| tile.bytes().len())
         .max()
         .unwrap_or(0);
-    let any_null = tiles_out.iter().any(|tile| tile.has_null);
+    let any_null = tiles_out
+        .iter()
+        .any(|tile| matches!(tile, FloatTile::Quantized { has_null: true, .. }));
 
     // The float container's row layout is a fixed pair of 32-bit `P` descriptors, so
     // unlike the integer encoder it can't promote to `Q`; a heap or tile element count
@@ -395,13 +403,24 @@ fn compress_float_image(
         .ok_or(FitsError::DataUnitOverflow)?;
     out.reserve_exact(output_len);
     out.resize(rows_len, 0);
-    for (tile_index, mut tile) in tiles_out.into_iter().enumerate() {
+    for (tile_index, tile) in tiles_out.into_iter().enumerate() {
         let row = tile_index * 32;
         let offset = out.len() - rows_len;
-        let (cd_count, gz_count) = if tile.quantized {
-            (tile.bytes.len(), 0)
-        } else {
-            (0, tile.bytes.len())
+        // A raw tile has no quantization to invert, so its `ZSCALE`/`ZZERO` are zero.
+        let (mut bytes, zscale, zzero, cd_count, gz_count) = match tile {
+            FloatTile::Quantized {
+                bytes,
+                zscale,
+                zzero,
+                ..
+            } => {
+                let len = bytes.len();
+                (bytes, zscale, zzero, len, 0)
+            }
+            FloatTile::Raw { bytes } => {
+                let len = bytes.len();
+                (bytes, 0.0, 0.0, 0, len)
+            }
         };
         write_pq_descriptor(
             &mut out[row..row + 8],
@@ -415,9 +434,9 @@ fn compress_float_image(
             gz_count as u64,
             offset as u64,
         )?;
-        out[row + 16..row + 24].copy_from_slice(&tile.zscale.to_be_bytes());
-        out[row + 24..row + 32].copy_from_slice(&tile.zzero.to_be_bytes());
-        out.append(&mut tile.bytes);
+        out[row + 16..row + 24].copy_from_slice(&zscale.to_be_bytes());
+        out[row + 24..row + 32].copy_from_slice(&zzero.to_be_bytes());
+        out.append(&mut bytes);
     }
 
     let mut h = container_header(32, ntiles, heap_len, 4)?;

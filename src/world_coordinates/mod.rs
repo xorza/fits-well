@@ -156,7 +156,7 @@ impl Wcs {
 
         let ctype: Vec<String> = (1..=naxis)
             .map(|i| {
-                read_text(header, Keyword::try_from(format_args!("CTYPE{i}{alt}")))
+                read_text(header, Keyword::fitting(format_args!("CTYPE{i}{alt}")))
                     .map(|value| value.unwrap_or("").to_string())
             })
             .collect::<Result<_>>()?;
@@ -167,7 +167,7 @@ impl Wcs {
         let cdelt = axis_vec(header, "CDELT", alt.as_str(), naxis, 1.0)?;
         let cunit: Vec<String> = (1..=naxis)
             .map(|i| {
-                read_text(header, Keyword::try_from(format_args!("CUNIT{i}{alt}")))
+                read_text(header, Keyword::fitting(format_args!("CUNIT{i}{alt}")))
                     .map(|value| value.unwrap_or("").to_string())
             })
             .collect::<Result<_>>()?;
@@ -185,11 +185,7 @@ impl Wcs {
                 .transpose()?;
             ctype
                 .iter()
-                .map(|ctype| {
-                    axis_transform::is_spectral_type(ctype)
-                        .then_some(frame)
-                        .flatten()
-                })
+                .map(|ctype| frame.filter(|_| axis_transform::is_spectral_type(ctype)))
                 .collect()
         };
 
@@ -240,7 +236,7 @@ impl Wcs {
             for (parameter, value) in spectral_parameters.iter_mut().enumerate() {
                 *value = read_real(
                     header,
-                    Keyword::try_from(format_args!("PV{}_{parameter}{alt}", axis + 1)),
+                    Keyword::fitting(format_args!("PV{}_{parameter}{alt}", axis + 1)),
                 )?;
             }
             let parameters = SpectralParameters::new(spectral_parameters);
@@ -527,7 +523,7 @@ impl Wcs {
     /// of `NAXIS` and the highest axis any WCS keyword names.
     pub(crate) fn image_axis_count(header: &Header, alt: Alternate) -> Result<usize> {
         let value = if let Some(axis_count) =
-            read_integer(header, Keyword::try_from(format_args!("WCSAXES{alt}")))?
+            read_integer(header, Keyword::fitting(format_args!("WCSAXES{alt}")))?
         {
             axis_count
         } else {
@@ -591,7 +587,7 @@ fn axis_vec(
 ) -> Result<Vec<f64>> {
     (1..=naxis)
         .map(|i| {
-            read_real(header, Keyword::try_from(format_args!("{prefix}{i}{alt}")))
+            read_real(header, Keyword::fitting(format_args!("{prefix}{i}{alt}")))
                 .map(|value| value.unwrap_or(default))
         })
         .collect()
@@ -654,8 +650,8 @@ fn validated_axis_count(value: i64, keyword: Keyword) -> Result<usize> {
 /// long/short and primary/`PVi_m` keyword alternative takes.
 fn first_real(
     header: &Header,
-    first: Result<Keyword>,
-    second: Result<Keyword>,
+    first: impl Into<Option<Keyword>>,
+    second: impl Into<Option<Keyword>>,
 ) -> Result<Option<f64>> {
     match read_real(header, first)? {
         Some(value) => Ok(Some(value)),
@@ -663,26 +659,34 @@ fn first_real(
     }
 }
 
-/// The value of the keyword a formatted name checks into; `None` when the card is absent,
-/// or when the text is no keyword, as a wide axis or column number makes the long
-/// spellings, and so no card can hold it.
-fn read_value(header: &Header, keyword: Result<Keyword>) -> Option<&Value> {
-    header.get(keyword.ok()?).ok().flatten()
+/// The value of `keyword`; `None` when the card is absent, or when there is no keyword,
+/// as where a wide axis or column number makes a formatted name longer than a keyword,
+/// and so no card can hold it.
+fn read_value(header: &Header, keyword: impl Into<Option<Keyword>>) -> Option<&Value> {
+    header
+        .get(keyword.into()?)
+        .expect("a `Keyword` argument needs no conversion")
 }
 
 /// [`read_value`] for a real keyword.
-fn read_real(header: &Header, keyword: Result<Keyword>) -> Result<Option<f64>> {
-    keyword.map_or(Ok(None), |keyword| header.get_real(keyword))
+fn read_real(header: &Header, keyword: impl Into<Option<Keyword>>) -> Result<Option<f64>> {
+    keyword
+        .into()
+        .map_or(Ok(None), |keyword| header.get_real(keyword))
 }
 
 /// [`read_value`] for a text keyword.
-fn read_text(header: &Header, keyword: Result<Keyword>) -> Result<Option<&str>> {
-    keyword.map_or(Ok(None), |keyword| header.get_text(keyword))
+fn read_text(header: &Header, keyword: impl Into<Option<Keyword>>) -> Result<Option<&str>> {
+    keyword
+        .into()
+        .map_or(Ok(None), |keyword| header.get_text(keyword))
 }
 
 /// [`read_value`] for an integer keyword.
-fn read_integer(header: &Header, keyword: Result<Keyword>) -> Result<Option<i64>> {
-    keyword.map_or(Ok(None), |keyword| header.get_integer(keyword))
+fn read_integer(header: &Header, keyword: impl Into<Option<Keyword>>) -> Result<Option<i64>> {
+    keyword
+        .into()
+        .map_or(Ok(None), |keyword| header.get_integer(keyword))
 }
 
 /// The quarter turn a multiple of 90° lands on (0 to 3), or `None` for any other angle.

@@ -79,7 +79,12 @@ impl<'a> TableWcs<'a> {
     ) -> Result<usize> {
         let resolver = TableWcsResolver::new(alt);
         let naxis = match resolver.vector_rank(header, column)? {
-            Some(value) => validated_axis_count(value, resolver.column_key("WCAX", column)?)?,
+            Some(value) => validated_axis_count(
+                value,
+                resolver
+                    .column_key("WCAX", column)
+                    .expect("the rank was read under this keyword"),
+            )?,
             // Highest-first over the axes the cards could name, so the first hit is
             // the rank. Probing a blind `(1..=99).rev()` instead costs ~800 header
             // lookups per axis that turns out to be absent.
@@ -89,11 +94,8 @@ impl<'a> TableWcs<'a> {
                 .unwrap_or(0),
         };
         if naxis == 0 {
-            let first_type = resolver
-                .vector_axis_key(TableAxisKeyword::Type, 1, column)
-                .expect("Table 22 defines primary and alternate axis-type keywords")?;
             return Err(FitsError::MissingKeyword {
-                keyword: first_type,
+                keyword: resolver.first_vector_type(column)?,
             });
         }
         Ok(naxis)
@@ -115,7 +117,7 @@ impl<'a> TableWcs<'a> {
         }
     }
 
-    fn axis_key(&self, keyword: TableAxisKeyword, index: usize) -> Option<Result<Keyword>> {
+    fn axis_key(&self, keyword: TableAxisKeyword, index: usize) -> Option<Keyword> {
         match self.form {
             TableWcsForm::PixelList(columns) => {
                 self.resolver.pixel_axis_key(keyword, columns[index])
@@ -178,19 +180,13 @@ impl<'a> TableWcs<'a> {
         let mut spectral_frames = vec![None; naxis];
         for (index, spectral) in spectral_frames.iter_mut().enumerate() {
             let ax = index + 1;
-            let type_key = self
-                .axis_key(TableAxisKeyword::Type, index)
-                .expect("Table 22 defines primary and alternate axis-type keywords");
-            if let Some(t) = read_text(header, type_key)? {
+            if let Some(t) = read_text(header, self.axis_key(TableAxisKeyword::Type, index))? {
                 h.set_internal(keywords::CTYPE.indexed(ax)?, t);
                 if axis_transform::is_spectral_type(t) {
                     *spectral = Some(self.resolver.spectral_frame(header, self.column(index))?);
                 }
             }
-            let unit_key = self
-                .axis_key(TableAxisKeyword::Unit, index)
-                .expect("Table 22 defines primary and alternate axis-unit keywords");
-            if let Some(t) = read_text(header, unit_key)? {
+            if let Some(t) = read_text(header, self.axis_key(TableAxisKeyword::Unit, index))? {
                 h.set_internal(keywords::CUNIT.indexed(ax)?, t);
             }
             for keyword in [
@@ -199,9 +195,7 @@ impl<'a> TableWcs<'a> {
                 TableAxisKeyword::Increment,
                 TableAxisKeyword::Rotation,
             ] {
-                if let Some(source) = self.axis_key(keyword, index)
-                    && let Some(value) = read_real(header, source)?
-                {
+                if let Some(value) = read_real(header, self.axis_key(keyword, index))? {
                     h.set_internal(keyword.image_root().indexed(ax)?, value);
                 }
             }

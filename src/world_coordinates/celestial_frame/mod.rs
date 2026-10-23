@@ -50,11 +50,11 @@ impl CelestialFrame {
         alt: Alternate,
         ctype: &[String],
     ) -> Result<Option<Self>> {
-        let mut declared = read_text(header, Keyword::try_from(format_args!("RADESYS{alt}")))?;
+        let mut declared = read_text(header, Keyword::fitting(format_args!("RADESYS{alt}")))?;
         if declared.is_none() && !alt.is_alternate() {
             declared = header.get_text(keywords::RADECSYS)?;
         }
-        let equinox = read_real(header, Keyword::try_from(format_args!("EQUINOX{alt}")))?;
+        let equinox = read_real(header, Keyword::fitting(format_args!("EQUINOX{alt}")))?;
         if equinox.is_some_and(|value| !value.is_finite() || value < 0.0) {
             return Err(FitsError::InvalidWcs {
                 detail: "EQUINOX must be finite and non-negative".to_string(),

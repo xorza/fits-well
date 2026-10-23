@@ -80,6 +80,19 @@ impl Keyword {
         Self::try_from(format_args!("{self}{index}"))
     }
 
+    /// The keyword the formatted `name` spells, or `None` when the name is longer than
+    /// a keyword, as a wide axis or column number makes it: no card can hold it.
+    ///
+    /// # Panics
+    /// When the name fits but holds a byte no keyword has: the pattern that formats it
+    /// is wrong, which no header can cause.
+    pub(crate) fn fitting(name: fmt::Arguments<'_>) -> Option<Self> {
+        let mut buf = KeyBuf::new();
+        buf.write_fmt(name).ok()?;
+        let text = buf.as_str();
+        Some(Self::checked(text).unwrap_or_else(|| panic!("{text:?} is no keyword")))
+    }
+
     pub const fn as_str(&self) -> &str {
         match str::from_utf8(self.bytes.split_at(self.len as usize).0) {
             Ok(text) => text,
@@ -263,6 +276,22 @@ mod tests {
     #[should_panic(expected = "1 to 8 bytes")]
     fn new_panics_on_an_invalid_name() {
         let _ = Keyword::new(std::hint::black_box("naxis"));
+    }
+
+    /// A formatted name that does not fit is absent, and one that fits but holds a
+    /// byte no keyword has is a bug in its pattern, which panics.
+    #[test]
+    fn fitting_is_absent_only_past_eight_bytes() {
+        let column = 17;
+        assert_eq!(
+            Keyword::fitting(format_args!("TCTYP{column}")),
+            Some(Keyword::new("TCTYP17"))
+        );
+        let column = 1000;
+        assert_eq!(Keyword::fitting(format_args!("TCTYP{column}")), None);
+        let column = 17;
+        let pattern = std::panic::catch_unwind(|| Keyword::fitting(format_args!("tctyp{column}")));
+        assert!(pattern.is_err());
     }
 
     #[test]

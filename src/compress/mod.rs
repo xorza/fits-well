@@ -88,21 +88,27 @@ pub struct Gzip {
 impl Gzip {
     /// Standard `GZIP_1` at a validated deflate level.
     pub fn new(level: u32) -> Result<Self> {
-        Self::configured(false, level)
+        Ok(Self {
+            shuffle: false,
+            level: Self::checked_level(level)?,
+        })
     }
 
     /// Byte-shuffled `GZIP_2` at a validated deflate level.
     pub fn shuffled(level: u32) -> Result<Self> {
-        Self::configured(true, level)
+        Ok(Self {
+            shuffle: true,
+            level: Self::checked_level(level)?,
+        })
     }
 
-    fn configured(shuffle: bool, level: u32) -> Result<Self> {
+    fn checked_level(level: u32) -> Result<u32> {
         if level > 9 {
             return Err(FitsError::InvalidCompressionParameter {
                 detail: format!("gzip compression level {level} is outside 0..=9"),
             });
         }
-        Ok(Self { shuffle, level })
+        Ok(level)
     }
 }
 
