@@ -60,6 +60,12 @@ line beside its test, as the current fixtures do.
   unshuffles only those five (`imcompress.c:9028-9175`). A shuffle of a 1-byte
   column does nothing. Refused: GZIP_2 on `C` and `M`, which cfitsio's writer emits
   but its own reader refuses.
+- **`write_compressed_table` refuses `Compression::None`** with
+  `InvalidCompressionParameter`. A table with no compression is `write_table`.
+  Refused: `ZCTYPn = 'NOCOMPRESS'`, which the standard permits (Table 36) and cfitsio
+  refuses to read (`imcompress.c:8870-8887`). Refused: GZIP_1 at deflate level 0,
+  which writes a keyword the caller did not ask for. Chosen by the owner,
+  2026-10-23.
 
 ### Header
 
@@ -90,7 +96,9 @@ line beside its test, as the current fixtures do.
   `RA`, the projection `TAN` and the distortion `SIP`. `RA---TPV` is the projection
   `TAN` with the distortion `TPV`. Source: Shupe et al. 2005 §2; TPV registration.
 - **SIP sits in the linear layer, before the matrix:** `(u, v) = p − CRPIX`, then
-  `u + f(u, v)`, `v + g(u, v)` with `A_p_q`/`B_p_q` up to `A_ORDER`/`B_ORDER` (0 to 9).
+  `u + f(u, v)`, `v + g(u, v)` with `A_p_q`/`B_p_q` for `p + q ≤ A_ORDER`/`B_ORDER`.
+  No order cap past what an 8-byte keyword names (`AP_p_q` with `p, q < 100`). astropy's
+  `sip.c` has none either.
   The inverse solves the forward polynomial with Newton steps, from `AP`/`BP` as the
   first guess when present, else from `(U, V)`. It stops when the step is below 1e-12
   pixel: a pixel coordinate of order 1e4 has a spacing of 1e4 · 2⁻⁵² ≈ 2e-12, so a
@@ -105,16 +113,18 @@ line beside its test, as the current fixtures do.
   (IRAF `WAT` text and wcslib's record-valued `DPj`), which no darkroom input uses.
 - **A `Wcs` writes its header.** `Wcs::to_header(alt)` gives the canonical form:
   `WCSAXES`, `CTYPE`, `CUNIT` in the unit the transform works in, `CRPIX`, `CRVAL`,
-  the `PC` matrix with `CDELT` (the parsed matrix, factored with `CDELT` as the
-  diagonal so a plain scale writes `PC = I`), `PVi_m`, `LONPOLE`, `LATPOLE`,
+  the `CDi_j` matrix as the transform holds it, `PVi_m`, `LONPOLE`, `LATPOLE`,
   `RADESYS`, `EQUINOX`, the spectral rest and frame keywords, and SIP/TPV terms.
   A `-TAB` axis is `UnsupportedWcsTransform` here, because its arrays live in
-  another HDU. Refused: `CD` output, which drops the `CDELT` that viewers show as the
-  pixel scale.
+  another HDU. Refused: `PC` with `CDELT`, which some viewers show as the pixel
+  scale. To factor the matrix into the two rounds its values, so a write and a read
+  would not give back the same transform.
 - **`Wcs::crop(origin)` and `Wcs::bin(factors)` derive a new WCS exactly.** A crop
   subtracts the 0-based origin from `CRPIX`. A bin by `b` on an axis maps `CRPIX`
-  to `(CRPIX − 0.5)/b + 0.5`, multiplies that matrix column by `b`, and multiplies
-  each SIP term `A_p_q` by `b^(p+q−1)`. Refused: astropy's `slice` with a stride on
+  to `(CRPIX − 0.5)/b + 0.5` and multiplies that matrix column by `b`. With bin
+  factors `b₁`, `b₂` on the SIP axes, `A'_p_q = A_p_q·b₁^p·b₂^q / b₁` and
+  `B'_p_q = B_p_q·b₁^p·b₂^q / b₂`, because the offsets from `CRPIX` scale by `b`
+  and the focal-plane offset is divided by `b` again. Refused: astropy's `slice` with a stride on
   `Region`, which `docs/design.md` "No section stride" refuses.
 
 ### Files
@@ -147,9 +157,6 @@ line beside its test, as the current fixtures do.
 - HCOMPRESS `SMOOTH` on write: a hint for the reader, which already smooths.
 - PLIO_1 for float images; time-scale conversion; a public unit grammar; TNX, ZPX,
   TPD; random groups write; row filters and the other cfitsio tool features.
-- An open decision: what a compressed table column with `Compression::None` writes.
-  `NOCOMPRESS` is valid (§10.4, Table 36), and cfitsio refuses it
-  (`imcompress.c:8870-8887`). Item 9 waits for this decision.
 
 ## Plan
 
@@ -219,7 +226,9 @@ line beside its test, as the current fixtures do.
    `A`, `B`, `C` and `M`. Tests: the existing table tests updated with the column
    types and codecs shown; one written table with every column type unpacks with
    `funpack -F` and `fitsverify` reports no error (checked once to make a fixture).
-   `Compression::None` waits for the open decision above.
+   `write_compressed_table` with `Compression::None` is
+   `InvalidCompressionParameter`, and the `Algo::NoCompress` arm of `pick_algo`
+   goes away if no other path reaches it.
 
 ### Batch 4 — header
 
@@ -248,21 +257,32 @@ line beside its test, as the current fixtures do.
     code. Tests: `RA---TAN-SIP`, `DEC--TAN-SIP`, `RA---TPV`, `GLON-CAR`, `FREQ`.
 13. **SIP.** A `sip.rs` in `src/world_coordinates/linear_transform/` with the
     coefficients and the forward and Newton inverse, applied by `LinearTransform`.
-    Tests: astrometry.net's SIP header from a real solve (a fixture with its
-    `wcs-xy2rd` output for 5 pixels at 1e-9°); a hand-built order-2 header with the
-    forward polynomial worked by hand; a round trip at the image corners to 1e-10
-    pixel; a header with `AP`/`BP` gives the same inverse as one without; an order
-    over 9 is `KeywordOutOfRange`; `WcsNoConvergence` on a polynomial with a fold
-    inside the image.
+    Tests: a hand-built order-2 header with the forward polynomial worked by hand;
+    astropy's `irac_sip.hdr` (copied from `astropy/wcs/tests/data`, BSD-3, with its
+    source named), where astropy's `test_sip` gives pixel (200, 200) → focal (72, 72)
+    within 1e-3; a round trip at the image corners to 1e-10 pixel; a header with
+    `AP`/`BP` gives the same inverse as one without; `WcsNoConvergence` on a
+    polynomial with a fold inside the image. wcslib and astropy are not installed,
+    and an install needs the user's approval, so the values come from hand work and
+    from the astropy test files.
 14. **TPV.** The registered 40-term polynomial in a `tpv.rs`, applied between the
     matrix and the projection, and `CelestialTransform` skipping `PV1_1`..`PV1_4`
-    on a `-TPV` axis. Tests: a SCAMP header (a DECam CCD) against wcslib/astropy
-    values for 5 pixels, recorded with the generating command; a polynomial with
-    only `PV1_1 = PV2_1 = 1` equals plain TAN.
-15. **`Wcs::to_header`.** Tests: `from_header(to_header(w))` equals `w` on every
+    on a `-TPV` axis. Tests: astropy's `siponly.hdr` and `tpvonly.hdr` give one
+    distortion in the two forms. astropy's `test_sip_tpv_agreement`
+    (`test_wcs.py:967-1001`) makes them agree to 6 decimals at `CRPIX` only, so
+    fits-well's SIP and TPV must agree there to that precision. Away from `CRPIX` the
+    two headers are a fitted conversion, so measure their difference at 25 pixels
+    once, write it into the test with that reason, and assert it. Also: a polynomial
+    with only `PV1_1 = PV2_1 = 1` equals plain TAN, and one term is worked by hand.
+    Both headers use the deprecated `RADECSYS`, so check that item 10 or the WCS
+    parse does not refuse them.
+15. **`Wcs::to_header`.** Tests: `from_header(to_header(w))` gives the same
+    metadata and the same `pixel_to_world` at 25 pixels, bit for bit, on every
     projection fixture, a spectral cube, an alternate `A`, SIP and TPV; a `-TAB`
-    axis is `UnsupportedWcsTransform`; `CDELT` and `PC` of a CD-only header worked
-    by hand.
+    axis is `UnsupportedWcsTransform`; the `CDi_j` written for a `PC` + `CDELT`
+    header and for a legacy `CROTA` header, worked by hand. The metadata compare
+    is on what the transform holds: the declared `CDELT` and `CROTA` keywords do not
+    come back.
 16. **`Wcs::crop` and `Wcs::bin`.** Tests: for TAN and TAN-SIP, a crop's
     `pixel_to_world(p − origin)` equals the parent's `pixel_to_world(p)` to 1e-12°;
     a 2×2 bin's pixel `p'` equals the parent at `2(p' − 0.5) + 0.5`; the bin of a
