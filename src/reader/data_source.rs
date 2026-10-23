@@ -73,14 +73,22 @@ impl<S: Source> DataSource<S> {
     }
 
     /// The binary table `hdu` holds, viewed in place over the source (or this
-    /// source's staging buffer).
+    /// source's staging buffer), its bytes fed to `sum`, when given, as they are read.
     #[cfg(feature = "compression")]
-    pub(crate) fn table<'a>(&'a mut self, hdu: &'a Hdu) -> Result<TableView<'a>> {
+    pub(crate) fn table<'a>(
+        &'a mut self,
+        hdu: &'a Hdu,
+        sum: Option<&mut DataChecksum>,
+    ) -> Result<TableView<'a>> {
         let schema = hdu.container_schema()?;
         let len = usize::try_from(hdu.data_bytes).map_err(|_| FitsError::DataUnitTooLarge {
             bytes: hdu.data_bytes,
         })?;
-        TableView::new(schema, self.slice(hdu.data_offset, len)?)
+        let bytes = self.slice(hdu.data_offset, len)?;
+        if let Some(sum) = sum {
+            sum.feed(hdu.data_offset, bytes);
+        }
+        TableView::new(schema, bytes)
     }
 
     /// The rows `rows` of the binary table `hdu` holds, compacted into `out` — see

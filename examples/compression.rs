@@ -9,7 +9,7 @@
 
 use std::fs::File;
 
-use fits_well::image::{Compression, CompressionOptions, Data, Image};
+use fits_well::image::{Compression, CompressionOptions, Data, Image, Region};
 use fits_well::{FitsReader, FitsWriter};
 use std::env;
 
@@ -29,14 +29,14 @@ fn main() -> fits_well::Result<()> {
 
     // A compressed image lives in a BINTABLE extension, but `image_indices` reports
     // it as an image all the same — so you find and read it without knowing it sits
-    // at HDU 1, or that it's compressed at all. `read_image` detects `ZIMAGE` and
-    // decompresses transparently — the same call as for a plain image.
+    // at HDU 1, or that it's compressed at all. `image` detects `ZIMAGE` and
+    // decompresses transparently — the same calls as for a plain image.
     let mut reader = FitsReader::open(File::open(&path)?)?;
     let images = reader.image_indices();
     println!("image HDUs: {images:?}"); // [1] — the compressed image extension
-    let restored = reader.read_image(images[0])?;
-    let restored_shape = restored.metadata().shape.to_vec();
-    let lossless = restored.decode() == expected;
+    let restored = reader.image(images[0])?.read(Region::All)?;
+    let restored_shape = restored.view().shape().to_vec();
+    let lossless = restored.into_samples() == expected;
     println!("restored {restored_shape:?}, lossless = {lossless}");
 
     Ok(())

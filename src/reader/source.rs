@@ -45,8 +45,8 @@ pub trait Source: sealed::Sealed {
     ///
     /// The returned borrow is tied to `&mut self` (a streaming source genuinely seeks
     /// and mutates), so a reader hands out one data unit at a time even for a fully
-    /// resident `SliceSource` — `read_image` borrows `&mut self`, and to
-    /// hold several images at once you `decode()` each to owned samples. This uniform
+    /// resident `SliceSource` — an image read borrows `&mut self`, and to hold several
+    /// images at once you read each into an owned `Image`. This uniform
     /// single-path API is a deliberate tradeoff; if a caller ever needs *concurrent
     /// zero-copy* views from a resident file, the fix is a separate resident-only
     /// accessor that borrows with the source's own lifetime (not `&mut self`), added

@@ -1,6 +1,7 @@
 //! One header and data unit as the reader's scan found it.
 
 use crate::bintable::schema::Schema;
+use crate::block::padded_len;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::HduKind;
@@ -104,6 +105,12 @@ impl Hdu {
             return Ok(false);
         }
         Ok(true)
+    }
+
+    /// The data unit's length on disk: [`Hdu::data_bytes`](Hdu#structfield.data_bytes)
+    /// rounded up to the 2880-byte block grid.
+    pub const fn padded_data_bytes(&self) -> u64 {
+        padded_len(self.data_bytes).expect("the scan bounded the padded data unit")
     }
 
     /// The shape, stored element type and scaling of the image this HDU holds — for a

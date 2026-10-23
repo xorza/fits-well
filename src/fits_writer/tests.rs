@@ -24,11 +24,13 @@ use crate::header_model::internals::from_card_lines as header;
 use crate::header_model::value::Value;
 use crate::image_model::Image;
 use crate::image_model::data::Data;
+use crate::image_model::internals::physical;
 use crate::image_model::scaling::Scaling;
 use crate::image_model::unsigned_data::UnsignedData;
 use crate::image_model::{U16_OFFSET, U64_OFFSET};
 use crate::ragged::Ragged;
 use crate::reader::FitsReader;
+use crate::reader::internals::read_whole;
 use crate::reader::{ChecksumReport, ChecksumStatus};
 use bitvec::bitvec;
 use bitvec::order::Msb0;
@@ -566,14 +568,8 @@ fn writes_a_multi_hdu_image_file() {
     assert_eq!(r.hdus.len(), 2);
     assert_eq!(r.hdus[0].kind, HduKind::Primary);
     assert_eq!(r.hdus[1].kind, HduKind::Image);
-    assert_eq!(
-        r.read_image(0).unwrap().decode(),
-        Data::U8(vec![1, 2, 3, 4])
-    );
-    assert_eq!(
-        r.read_image(1).unwrap().decode(),
-        Data::I16(vec![10, 20, 30])
-    );
+    assert_eq!(read_whole(&mut r, 0).samples, Data::U8(vec![1, 2, 3, 4]));
+    assert_eq!(read_whole(&mut r, 1).samples, Data::I16(vec![10, 20, 30]));
 }
 
 #[test]
@@ -606,10 +602,7 @@ fn typed_image_header_template_preserves_information_and_regenerates_structure()
             checksum: ChecksumStatus::Valid,
         }
     );
-    assert_eq!(
-        reader.read_image(0).unwrap().decode(),
-        Data::I16(vec![10, 20])
-    );
+    assert_eq!(read_whole(&mut reader, 0).samples, Data::I16(vec![10, 20]));
 }
 
 #[test]
@@ -1195,7 +1188,7 @@ fn header_round_trips_through_render_and_parse() {
 }
 
 #[test]
-fn image_round_trips_through_write_image_and_read_image() {
+fn image_round_trips_through_write_image_and_a_whole_read() {
     let image = Image {
         shape: vec![2, 3],
         samples: Data::I16(vec![1, -2, 3, -4, 5, -6]),
@@ -1207,9 +1200,9 @@ fn image_round_trips_through_write_image_and_read_image() {
     let mut r = FitsReader::open(Cursor::new(bytes)).unwrap();
     assert_eq!(r.hdus.len(), 1);
     assert_eq!(r.hdus[0].kind, HduKind::Primary);
-    let back = r.read_image(0).unwrap();
+    let back = read_whole(&mut r, 0);
     assert_eq!(back.shape, vec![2, 3]);
-    assert_eq!(back.decode(), Data::I16(vec![1, -2, 3, -4, 5, -6]));
+    assert_eq!(back.samples, Data::I16(vec![1, -2, 3, -4, 5, -6]));
 }
 
 #[test]
@@ -1227,9 +1220,9 @@ fn write_image_emits_scaling_keywords_and_preserves_unsigned_values() {
     let mut r = FitsReader::open(Cursor::new(written(|w| w.write_image(&image, None)))).unwrap();
     assert_eq!(r.hdus[0].header.get_real("BZERO").unwrap(), Some(32768.0));
     assert_eq!(r.hdus[0].header.get_real("BSCALE").unwrap(), Some(1.0));
-    let back = r.read_image(0).unwrap();
-    assert_eq!(back.physical(), vec![0.0, 32768.0, 65535.0]);
-    assert_eq!(back.decode(), Data::I16(vec![-32768, 0, 32767]));
+    let back = read_whole(&mut r, 0);
+    assert_eq!(physical::<f64>(&back), vec![0.0, 32768.0, 65535.0]);
+    assert_eq!(back.samples, Data::I16(vec![-32768, 0, 32767]));
 }
 
 #[test]
@@ -1240,7 +1233,7 @@ fn from_u16_round_trips_through_write_and_read() {
     let mut r = FitsReader::open(Cursor::new(written(|w| w.write_image(&built, None)))).unwrap();
     assert_eq!(r.hdus[0].header.get_real("BZERO").unwrap(), Some(32768.0));
     assert_eq!(
-        r.read_image(0).unwrap().unsigned(),
+        read_whole(&mut r, 0).view().unsigned(),
         Some(UnsignedData::U16(vec![0, 32768, 65535]))
     );
 }
@@ -1263,7 +1256,7 @@ fn from_u64_writes_the_exact_offset_and_round_trips_extremes() {
     };
     assert_eq!(offset.to_string(), "9223372036854775808");
     assert_eq!(
-        reader.read_image(0).unwrap().unsigned(),
+        read_whole(&mut reader, 0).view().unsigned(),
         Some(UnsignedData::U64(vec![u64::MIN, u64::MAX]))
     );
 }
@@ -1551,7 +1544,7 @@ fn image_blank_is_type_and_range_checked_before_output() {
                 reader.hdus[0].header.get_integer("BLANK").unwrap(),
                 Some(blank)
             );
-            assert_eq!(reader.read_image(0).unwrap().scaling.blank, Some(blank));
+            assert_eq!(read_whole(&mut reader, 0).scaling.blank, Some(blank));
         }
         for &blank in &boundary.invalid {
             let image = Image {
@@ -1656,7 +1649,7 @@ fn compressed_image_metadata_is_validated_before_automatic_primary() {
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
     assert_eq!(
-        reader.read_image(1).unwrap().decode(),
+        read_whole(&mut reader, 1).samples,
         Data::I64(vec![i64::MIN])
     );
 
@@ -1702,10 +1695,7 @@ fn compressed_header_templates_preserve_information_and_regenerate_structure() {
     assert_eq!(header.get_integer("ZTILE1").unwrap(), Some(2));
     assert_eq!(header.get("ZSIMPLE"), None);
     assert_eq!(header.get("CHECKSUM"), None);
-    assert_eq!(
-        reader.read_image(1).unwrap().decode(),
-        Data::I16(vec![10, 20])
-    );
+    assert_eq!(read_whole(&mut reader, 1).samples, Data::I16(vec![10, 20]));
 
     let columns = [WriteColumn::fixed(
         "VALUE",
@@ -1921,7 +1911,7 @@ fn streaming_image_matches_transactional_output_and_checksums() {
             checksum: ChecksumStatus::Valid,
         }
     );
-    assert_eq!(reader.read_image(0).unwrap().decode(), Data::I16(samples));
+    assert_eq!(read_whole(&mut reader, 0).samples, Data::I16(samples));
 }
 
 #[test]

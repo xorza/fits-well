@@ -38,7 +38,7 @@ With `default-features = false`, the only dependencies are `bitvec`,
 
 ```rust no_run
 use std::fs::File;
-use fits_well::image::{Image, Data};
+use fits_well::image::{Data, Image, Region};
 use fits_well::io::Hdu;
 use fits_well::{FitsError, FitsReader, FitsWriter};
 
@@ -51,19 +51,21 @@ fn main() -> Result<(), FitsError> {
     // `open` reads only the headers. A tile-compressed image reads the same way.
     let mut reader = FitsReader::open(File::open("out.fits")?)?;
     let first = reader.hdus().iter().position(Hdu::is_image).ok_or(FitsError::NotAnImage)?;
-    let image = reader.read_image(first)?;
-    println!("{:?} {:?}", image.metadata().shape, image.sample_type());
-    let physical = image.physical(); // BSCALE/BZERO applied, BLANK as NaN
-    if let Data::I16(pixels) = image.decode() {
+    let mut image = reader.image(first)?;
+    println!("{:?}", image.metadata().shape);
+    let mut physical: Vec<f32> = Vec::new();
+    image.physical_into(Region::All, &mut physical)?; // BSCALE/BZERO applied, BLANK as NaN
+    if let Data::I16(pixels) = image.read(Region::All)?.into_samples() {
         println!("{pixels:?}"); // stored values, host-endian
     }
     Ok(())
 }
 ```
 
-`read_image_view` decodes into a buffer you reuse across reads, so a loop over
-many images allocates once. `read_image_section` reads a sub-region, and
-`stream_image` writes a large image chunk by chunk.
+`image` gives a reader of one HDU: `view` decodes a region into a buffer you
+reuse across reads, so a loop allocates once, `read` copies a region into an
+owned `Image`, and `physical_into` converts it in one pass. A region is the whole
+image or one range per axis. `stream_image` writes a large image chunk by chunk.
 
 ### Binary tables
 

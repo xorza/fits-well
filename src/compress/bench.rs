@@ -21,6 +21,7 @@ use crate::fits_writer::FitsWriter;
 use crate::header_model::Header;
 use crate::image_model::Image;
 use crate::image_model::data::Data;
+use crate::image_model::region::Region;
 use crate::reader::FitsReader;
 use crate::reader::source::Source;
 
@@ -359,7 +360,12 @@ impl Reading for ReadCompressed {
     type Output = Data;
 
     fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> Data {
-        reader.read_image(1).unwrap().decode()
+        reader
+            .image(1)
+            .unwrap()
+            .read(Region::All)
+            .unwrap()
+            .into_samples()
     }
 }
 

@@ -74,7 +74,7 @@ pub enum HduKind {
     /// `XTENSION = 'BINTABLE'` — binary table (with optional heap).
     BinTable,
     /// A tiled-compressed image (§10.1): structurally a `BINTABLE` with `ZIMAGE = T`.
-    /// `read_image` reads it like any other image.
+    /// `FitsReader::image` reads it like any other image.
     CompressedImage,
     /// A tiled-compressed table (§10.3): structurally a `BINTABLE` with `ZTABLE = T`.
     /// `read_compressed_table` uncompresses it.

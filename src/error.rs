@@ -280,7 +280,7 @@ pub enum FitsError {
     /// A FITS keyword family was addressed with zero even though its indices start at 1.
     #[error("{kind} indices are 1-based and cannot be zero")]
     OneBasedIndexRequired { kind: &'static str },
-    /// `read_image` was called on an HDU that is not an image array (a table,
+    /// `FitsReader::image` was called on an HDU that is not an image array (a table,
     /// random-groups, or unmodelled extension).
     #[error("HDU is not an image array")]
     NotAnImage,

@@ -9,7 +9,6 @@ use crate::bintable::column::Column;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::schema::Schema;
 use crate::bintable::table_view::TableView;
-use crate::bitpix::Bitpix;
 use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
 use crate::block::padded_len;
@@ -25,18 +24,12 @@ use crate::hdu::HduRole;
 use crate::hdu::data_extent;
 use crate::header_model::Header;
 use crate::header_model::card::is_end_record;
-use crate::image_model::Image;
-use crate::image_model::data::Data;
-use crate::image_model::lazy::Lazy;
-use crate::image_model::swap_into_words;
-use crate::image_model::view::Borrowed;
-use crate::image_model::view::View;
-use crate::image_model::view_words;
 use crate::ragged::Ragged;
 use crate::reader::data_checksum::DataChecksum;
 use crate::reader::data_source::DataSource;
 use crate::reader::data_source::TableRows;
 use crate::reader::hdu::Hdu;
+use crate::reader::image_reader::ImageReader;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::tabular;
 
@@ -45,14 +38,13 @@ pub(crate) mod bench;
 pub(crate) mod data_checksum;
 mod data_source;
 pub(crate) mod hdu;
+pub(crate) mod image_reader;
 pub(crate) mod source;
 
 use source::SliceSource;
 use source::Source;
 use source::StreamSource;
 
-#[cfg(feature = "compression")]
-use crate::compress::decode::tiled_image::{TileSection, TiledImage};
 #[cfg(feature = "compression")]
 use crate::compress::table;
 
@@ -158,14 +150,22 @@ pub struct FitsReader<S> {
     /// The scanned HDU records; exposed read-only via [`FitsReader::hdus`].
     pub(crate) hdus: Vec<Hdu>,
     data: DataSource<S>,
-    /// Reused buffers a section or selection read fills and the result borrows: the
-    /// selected section's shape, its assembled samples, the tile rows it touches, and
-    /// a compacted table selection.
-    section_shape: Vec<usize>,
-    section_bytes: Vec<u8>,
+    scratch: Scratch,
+}
+
+/// The reader's reused buffers a section or selection read fills and the result
+/// borrows: the selected section's shape, its stored samples, the tile rows it
+/// touches, a compacted table selection, and the words a compressed image's physical
+/// read decodes into.
+#[derive(Debug, Default)]
+pub(crate) struct Scratch {
+    pub(crate) section_shape: Vec<usize>,
+    pub(crate) section_bytes: Vec<u8>,
     #[cfg(feature = "compression")]
-    tile_rows: Vec<usize>,
-    selection: Vec<u8>,
+    pub(crate) tile_rows: Vec<usize>,
+    pub(crate) selection: Vec<u8>,
+    #[cfg(feature = "compression")]
+    pub(crate) words: Vec<u64>,
 }
 
 /// A [`FitsReader`] over a seeking byte source (`Read + Seek`, e.g. a `File`) — the
@@ -246,11 +246,7 @@ impl<S: Source> FitsReader<S> {
         Ok(Self {
             hdus,
             data: DataSource::new(source, scratch),
-            section_shape: Vec::new(),
-            section_bytes: Vec::new(),
-            #[cfg(feature = "compression")]
-            tile_rows: Vec::new(),
-            selection: Vec::new(),
+            scratch: Scratch::default(),
         })
     }
 
@@ -272,11 +268,11 @@ impl<S: Source> FitsReader<S> {
         find_extension(&self.hdus, name, version, None, None)
     }
 
-    /// The indices of every HDU [`FitsReader::read_image`] can read as an image: image
+    /// The indices of every HDU [`FitsReader::image`] can read as an image: image
     /// extensions, tiled-compressed images, and a non-empty primary array (an empty
     /// `NAXIS = 0` primary is a container, not an image, and is skipped). A FITS file
     /// may hold any number of images — pick an `index` from this list to pass to
-    /// [`FitsReader::read_image`] without inspecting [`HduKind`] yourself.
+    /// [`FitsReader::image`] without inspecting [`HduKind`] yourself.
     pub fn image_indices(&self) -> Vec<usize> {
         self.hdus
             .iter()
@@ -293,7 +289,7 @@ impl<S: Source> FitsReader<S> {
     ///
     /// This is the owned form, backing the table readers (which keep the bytes as
     /// the parsed table's storage). Image and random-groups reads instead stage
-    /// through the reader's reused internal scratch — see [`FitsReader::read_image`].
+    /// through the reader's reused internal scratch — see [`FitsReader::image`].
     pub fn read_data_raw(&mut self, index: usize) -> Result<DataUnit> {
         let hdu = checked_hdu(&self.hdus, index)?;
         let lengths = DataLengths::new(hdu.data_bytes)?;
@@ -304,246 +300,13 @@ impl<S: Source> FitsReader<S> {
         })
     }
 
-    /// Read an HDU's image as a [`Lazy`], transparently handling **both** plain
-    /// and tiled-compressed (`ZIMAGE`) images — the caller doesn't need to know which.
-    /// Errors with [`FitsError::NotAnImage`] for tables, random groups, and unmodelled
-    /// extensions.
-    ///
-    /// A plain image is **zero-copy**: its big-endian bytes are viewed in place over
-    /// the source (or the reader's reused scratch for a seeking source), decoded only
-    /// when you ask. A compressed image is decompressed into an owned buffer (with the
-    /// `compression` feature; without it this returns [`FitsError::NotAnImage`] for a
-    /// `ZIMAGE` HDU). Either way, reach for the samples via [`Lazy::u8`]
-    /// (zero-copy `BITPIX = 8`), [`Lazy::decode`] (host-endian), or
-    /// [`Lazy::physical`] (scaled). The result borrows the reader, so handle one
-    /// image before reading the next.
-    pub fn read_image(&mut self, index: usize) -> Result<Lazy<'_>> {
+    /// The image HDU `index` holds, plain or tiled-compressed alike, ready to read a
+    /// region at a time. Errors with [`FitsError::NotAnImage`] for tables, random
+    /// groups and unmodelled extensions, a compressed image among them without the
+    /// `compression` feature.
+    pub fn image(&mut self, index: usize) -> Result<ImageReader<'_, S>> {
         let hdu = checked_hdu(&self.hdus, index)?;
-        // §10.1: a tiled-compressed image is classified [`HduKind::CompressedImage`]
-        // (a `ZIMAGE` BINTABLE). Route it through the decompressor so callers see one
-        // image API regardless of storage.
-        #[cfg(feature = "compression")]
-        if hdu.kind == HduKind::CompressedImage {
-            let image = hdu.image_geometry()?;
-            let tiled = TiledImage::new(&hdu.header, image)?;
-            let table = self.data.table(hdu)?;
-            let samples = tiled.decode(&hdu.header, table)?;
-            return Ok(Lazy::decoded(samples, &image.shape, image.scaling));
-        }
-
-        let image = hdu.plain_image_geometry()?;
-        let lengths = DataLengths::new(hdu.data_bytes)?;
-        let unit = self.data.slice(hdu.data_offset, lengths.padded)?;
-        let bytes = &unit[..lengths.data];
-        // With PCOUNT = 0 and GCOUNT = 1, `data_extent` sized the unit as
-        // `elem · Π(axes)` — an invariant between the scan and the geometry, not a
-        // runtime failure mode.
-        debug_assert!(image.byte_len().is_ok_and(|len| len == bytes.len()));
-        Ok(Lazy::raw(&image.shape, image.bitpix, image.scaling, bytes))
-    }
-
-    /// Read an image as a borrowed, host-endian [`View`], byte-swapping into the
-    /// caller-owned `scratch` — the fast, low-copy path for a loop that processes each
-    /// image and moves on. Where [`read_image`](FitsReader::read_image)`.decode()`
-    /// allocates a fresh owned buffer per call (page-fault-bound — profiling found
-    /// that dominates a plain typed read), this reuses `scratch`, so a hot loop pays
-    /// the output allocation once and reuses it across reads — even across differing
-    /// `BITPIX`. The caller owns `scratch`, so the reader retains nothing image-sized
-    /// beyond a seeking source's staging buffer; pass the same `Vec` each call and
-    /// drop it when the loop ends.
-    ///
-    /// `scratch` is `Vec<u64>` so the swapped samples stay 8-byte aligned for the
-    /// typed views. A `BITPIX = 8` image needs no swap and the view borrows the source
-    /// bytes directly (zero-copy, `scratch` untouched); a compressed image is
-    /// decompressed directly into `scratch` from its table viewed in place. The view
-    /// borrows the reader and `scratch`, so handle one image before reading the next.
-    /// For samples you need to keep, use [`Lazy::decode`].
-    pub fn read_image_view<'a>(
-        &'a mut self,
-        index: usize,
-        scratch: &'a mut Vec<u64>,
-    ) -> Result<Borrowed<'a>> {
-        let hdu = checked_hdu(&self.hdus, index)?;
-        #[cfg(feature = "compression")]
-        if hdu.kind == HduKind::CompressedImage {
-            let image = hdu.image_geometry()?;
-            let tiled = TiledImage::new(&hdu.header, image)?;
-            let table = self.data.table(hdu)?;
-            return Ok(Borrowed {
-                shape: &image.shape,
-                scaling: image.scaling,
-                samples: tiled.decode_into_words(&hdu.header, table, scratch)?,
-            });
-        }
-
-        let image = hdu.plain_image_geometry()?;
-        let lengths = DataLengths::new(hdu.data_bytes)?;
-        let unit = self.data.slice(hdu.data_offset, lengths.padded)?;
-        let be = &unit[..lengths.data];
-        let samples = if image.bitpix == Bitpix::U8 {
-            // No byte-swap: the on-disk bytes already are the host-endian samples, so
-            // borrow them straight (zero-copy) — `scratch` stays untouched.
-            View::U8(be)
-        } else {
-            swap_into_words(be, image.bitpix, scratch);
-            view_words(scratch, image.bitpix, lengths.data)
-        };
-        Ok(Borrowed {
-            shape: &image.shape,
-            scaling: image.scaling,
-            samples,
-        })
-    }
-
-    /// Read a checked N-dimensional rectangular image section. Axis ranges are
-    /// zero-based, half-open, and ordered fastest-axis first.
-    pub fn read_image_section(&mut self, index: usize, ranges: &[Range<usize>]) -> Result<Image> {
-        self.read_image_section_fed(index, ranges, None)
-    }
-
-    /// [`Self::read_image_section`], feeding the bytes of a plain image to `sum` as they are read.
-    /// A compressed image's tiles are not fed; the finish reads its unit.
-    pub fn read_image_section_summed(
-        &mut self,
-        index: usize,
-        ranges: &[Range<usize>],
-        sum: &mut DataChecksum,
-    ) -> Result<Image> {
-        self.read_image_section_fed(index, ranges, Some(sum))
-    }
-
-    /// [`Self::read_image_section`], feeding `sum`, when given, as it reads a plain image.
-    fn read_image_section_fed(
-        &mut self,
-        index: usize,
-        ranges: &[Range<usize>],
-        sum: Option<&mut DataChecksum>,
-    ) -> Result<Image> {
-        #[expect(
-            clippy::debug_assert_with_mut_call,
-            reason = "`as_ref` only reads the sum, which is mutable for the caller"
-        )]
-        {
-            debug_assert!(
-                sum.as_ref().is_none_or(|sum| sum.index == index),
-                "a sum of another HDU"
-            );
-        }
-        let hdu = checked_hdu(&self.hdus, index)?;
-        #[cfg(feature = "compression")]
-        if hdu.kind == HduKind::CompressedImage {
-            let image = hdu.image_geometry()?;
-            let tiled = TiledImage::new(&hdu.header, image)?;
-            tiled.select(ranges, &mut self.section_shape, &mut self.tile_rows)?;
-            let table = self
-                .data
-                .table_rows(hdu, &self.tile_rows, &mut self.selection)?;
-            let section = TileSection {
-                ranges,
-                shape: &self.section_shape,
-                rows: &self.tile_rows,
-            };
-            let samples = tiled.decode_section(&hdu.header, table, section)?;
-            return Image::new_scaled(self.section_shape.as_slice(), samples, image.scaling);
-        }
-
-        let image = hdu.plain_image_geometry()?;
-        self.data.plain_section(
-            hdu,
-            image,
-            ranges,
-            &mut self.section_shape,
-            &mut self.section_bytes,
-            sum,
-        )?;
-        Image::new_scaled(
-            self.section_shape.as_slice(),
-            Data::decode(&self.section_bytes, image.bitpix),
-            image.scaling,
-        )
-    }
-
-    /// Scratch-reusing counterpart to [`FitsReader::read_image_section`].
-    pub fn read_image_section_view<'a>(
-        &'a mut self,
-        index: usize,
-        ranges: &[Range<usize>],
-        words: &'a mut Vec<u64>,
-    ) -> Result<Borrowed<'a>> {
-        self.read_image_section_view_fed(index, ranges, words, None)
-    }
-
-    /// [`Self::read_image_section_view`], feeding the bytes of a plain image to `sum` as they are
-    /// read. A compressed image's tiles are not fed; the finish reads its unit.
-    pub fn read_image_section_view_summed<'a>(
-        &'a mut self,
-        index: usize,
-        ranges: &[Range<usize>],
-        words: &'a mut Vec<u64>,
-        sum: &mut DataChecksum,
-    ) -> Result<Borrowed<'a>> {
-        self.read_image_section_view_fed(index, ranges, words, Some(sum))
-    }
-
-    /// [`Self::read_image_section_view`], feeding `sum`, when given, as it reads a plain image.
-    fn read_image_section_view_fed<'a>(
-        &'a mut self,
-        index: usize,
-        ranges: &[Range<usize>],
-        words: &'a mut Vec<u64>,
-        sum: Option<&mut DataChecksum>,
-    ) -> Result<Borrowed<'a>> {
-        #[expect(
-            clippy::debug_assert_with_mut_call,
-            reason = "`as_ref` only reads the sum, which is mutable for the caller"
-        )]
-        {
-            debug_assert!(
-                sum.as_ref().is_none_or(|sum| sum.index == index),
-                "a sum of another HDU"
-            );
-        }
-        let hdu = checked_hdu(&self.hdus, index)?;
-        #[cfg(feature = "compression")]
-        if hdu.kind == HduKind::CompressedImage {
-            let image = hdu.image_geometry()?;
-            let tiled = TiledImage::new(&hdu.header, image)?;
-            tiled.select(ranges, &mut self.section_shape, &mut self.tile_rows)?;
-            let table = self
-                .data
-                .table_rows(hdu, &self.tile_rows, &mut self.selection)?;
-            let section = TileSection {
-                ranges,
-                shape: &self.section_shape,
-                rows: &self.tile_rows,
-            };
-            return Ok(Borrowed {
-                shape: &self.section_shape,
-                scaling: image.scaling,
-                samples: tiled.decode_section_into_words(&hdu.header, table, section, words)?,
-            });
-        }
-
-        let image = hdu.plain_image_geometry()?;
-        self.data.plain_section(
-            hdu,
-            image,
-            ranges,
-            &mut self.section_shape,
-            &mut self.section_bytes,
-            sum,
-        )?;
-        let samples = if image.bitpix == Bitpix::U8 {
-            View::U8(&self.section_bytes)
-        } else {
-            swap_into_words(&self.section_bytes, image.bitpix, words);
-            view_words(words, image.bitpix, self.section_bytes.len())
-        };
-        Ok(Borrowed {
-            shape: &self.section_shape,
-            scaling: image.scaling,
-            samples,
-        })
+        ImageReader::new(hdu, &mut self.data, &mut self.scratch)
     }
 
     /// Read a `BINTABLE` extension and parse its column structure. Decode
@@ -619,10 +382,14 @@ impl<S: Source> FitsReader<S> {
             schema,
             TableRows::Range(rows.clone()),
             Some(&selected),
-            &mut self.selection,
+            &mut self.scratch.selection,
         )?;
-        let table =
-            TableView::compact(&schema.columns, rows.len(), schema.row_len, &self.selection);
+        let table = TableView::compact(
+            &schema.columns,
+            rows.len(),
+            schema.row_len,
+            &self.scratch.selection,
+        );
         let mut decoded = Vec::with_capacity(columns.len());
         for &index in &selected_indices {
             let column = table.column_by_idx(index)?;
@@ -709,10 +476,14 @@ impl<S: Source> FitsReader<S> {
                 schema,
                 TableRows::Range(rows),
                 Some(&selected),
-                &mut self.selection,
+                &mut self.scratch.selection,
             )?;
-            let table =
-                TableView::compact(&schema.columns, row_count, schema.row_len, &self.selection);
+            let table = TableView::compact(
+                &schema.columns,
+                row_count,
+                schema.row_len,
+                &self.scratch.selection,
+            );
             for descriptor in group {
                 transforms.push(tabular::TabularTransform::from_table(&descriptor, table)?);
             }
@@ -753,7 +524,7 @@ impl<S: Source> FitsReader<S> {
         if hdu.kind != HduKind::CompressedTable {
             return Err(FitsError::NotCompressedTable);
         }
-        let container = self.data.table(hdu)?;
+        let container = self.data.table(hdu, None)?;
         let parts = table::uncompress_table(&hdu.header, container)?;
         Table::from_data(&parts.header, parts.data)
     }
@@ -763,77 +534,8 @@ impl<S: Source> FitsReader<S> {
     /// [`ChecksumStatus::Unknown`] because the standard reserves them for
     /// undefined or unknown checksum values.
     pub fn verify_checksum(&mut self, index: usize) -> Result<ChecksumReport> {
-        let sum = self.begin_data_checksum(index)?;
-        self.finish_data_checksum(sum)
-    }
-
-    /// An empty [`DataChecksum`] of HDU `index`'s data unit, for
-    /// [`Self::read_image_section_summed`] or [`Self::read_image_section_view_summed`] to feed and
-    /// [`Self::finish_data_checksum`] to finish.
-    pub fn begin_data_checksum(&self, index: usize) -> Result<DataChecksum> {
         let hdu = checked_hdu(&self.hdus, index)?;
-        let lengths = DataLengths::new(hdu.data_bytes)?;
-        Ok(DataChecksum::new(
-            index,
-            hdu.data_offset,
-            lengths.padded as u64,
-        ))
-    }
-
-    /// Read whatever of the data unit `sum` has not summed, in bounded chunks, and judge the HDU's
-    /// `DATASUM` and `CHECKSUM` against it: the same report as [`Self::verify_checksum`], which is
-    /// this with nothing fed.
-    ///
-    /// # Panics
-    ///
-    /// If `sum` is not [`Self::begin_data_checksum`]'s for an HDU of this reader's layout.
-    pub fn finish_data_checksum(&mut self, mut sum: DataChecksum) -> Result<ChecksumReport> {
-        /// The bytes read at a time: a bounded scratch, whatever the unit's size.
-        const CHUNK: u64 = 1 << 20;
-        let hdu = checked_hdu(&self.hdus, sum.index)?;
-        let padded = DataLengths::new(hdu.data_bytes)?.padded as u64;
-        assert!(
-            sum.covers(hdu.data_offset, padded),
-            "a data checksum of another reader's HDU {}",
-            sum.index
-        );
-        let stored_datasum = hdu.header.get_text("DATASUM")?;
-        let stored_checksum = hdu.header.get_text("CHECKSUM")?;
-        let expected_datasum = stored_datasum
-            .filter(|value| !value.is_empty() && !is_unknown_checksum(value))
-            .and_then(|value| value.trim().parse::<u32>().ok());
-        let verify_whole_hdu =
-            stored_checksum.is_some_and(|value| !value.is_empty() && !is_unknown_checksum(value));
-        let mut report = ChecksumReport {
-            datasum: initial_status(stored_datasum),
-            checksum: initial_status(stored_checksum),
-        };
-        if expected_datasum.is_none() && !verify_whole_hdu {
-            return Ok(report);
-        }
-        let header_sum = hdu.header_sum;
-        while sum.remaining() > 0 {
-            let offset = sum.next;
-            let len = usize::try_from(sum.remaining().min(CHUNK)).expect("a chunk fits usize");
-            let bytes = self.data.slice(offset, len)?;
-            sum.feed(offset, bytes);
-        }
-        let data_sum = sum.sum();
-        if let Some(expected) = expected_datasum {
-            report.datasum = if expected == data_sum {
-                ChecksumStatus::Valid
-            } else {
-                ChecksumStatus::Invalid
-            };
-        }
-        if verify_whole_hdu {
-            report.checksum = if checksum::combine(header_sum, data_sum) == 0xFFFF_FFFF {
-                ChecksumStatus::Valid
-            } else {
-                ChecksumStatus::Invalid
-            };
-        }
-        Ok(report)
+        DataChecksum::of(hdu).finish(hdu, &mut self.data)
     }
 }
 
@@ -874,20 +576,6 @@ fn resolve_column_selector(schema: &Schema, selector: &ColumnSelector) -> Result
         }
         ColumnSelector::Name(name) => schema.column_index_checked(name),
     }
-}
-
-/// Where a stored integrity keyword starts before anything is recomputed: absent,
-/// the standard all-blank "unknown", or provisionally invalid until it verifies.
-fn initial_status(stored: Option<&str>) -> ChecksumStatus {
-    match stored {
-        None => ChecksumStatus::Absent,
-        Some(value) if is_unknown_checksum(value) => ChecksumStatus::Unknown,
-        Some(_) => ChecksumStatus::Invalid,
-    }
-}
-
-fn is_unknown_checksum(value: &str) -> bool {
-    !value.is_empty() && value.bytes().all(|byte| byte == b' ')
 }
 
 /// The state of one FITS checksum keyword.
@@ -1003,8 +691,11 @@ fn block_has_end(block: &[u8]) -> bool {
 
 #[cfg(test)]
 pub(crate) mod internals {
+    use crate::image_model::Image;
+    use crate::image_model::region::Region;
     use crate::reader::FitsReader;
     use crate::reader::StreamReader;
+    use crate::reader::source::Source;
     use std::fs;
     use std::fs::File;
 
@@ -1043,6 +734,11 @@ pub(crate) mod internals {
     pub(crate) fn fixture_bytes(name: &str) -> Vec<u8> {
         let path = fixture_path(name);
         fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+    }
+
+    /// HDU `index` read whole into an owned image.
+    pub(crate) fn read_whole<S: Source>(reader: &mut FitsReader<S>, index: usize) -> Image {
+        reader.image(index).unwrap().read(Region::All).unwrap()
     }
 
     /// Open a fixture as a streaming reader, reporting which file failed rather

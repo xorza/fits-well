@@ -6,6 +6,35 @@ and the dated review in `.notes/API_REVIEW.md`.
 
 ## Reading
 
+- **One handle reads an image: `FitsReader::image` gives an `ImageReader`.** A
+  `Region` picks the whole image or one range per axis, and the handle reads it
+  three ways: `view` into the caller's `words`, `read` into an owned `Image`, and
+  `physical_into`. The handle resolves the geometry and a compressed image's codec
+  and tiles once. Refused: one method per combination of whole or section, owned
+  or borrowed, and summed or not (six methods, with the checksum as a suffix), and
+  `Lazy`, a second form of the same read.
+- **A checksum is summed by the handle that reads.** With `with_checksum`, a read
+  feeds the stored bytes it fetches, as long as they continue the sum: a plain
+  image's whole reads and sections, and a compressed image's whole reads. A
+  compressed section's tiles are not fed. `finish` reads only what the reads did
+  not feed, and without `with_checksum` it reads the whole unit. Refused: a caller-held sum passed to each read, which a caller could finish
+  against another HDU.
+- **A physical read appends to the caller's `Vec`.** `physical_into` extends `out`,
+  so a caller can append chunk after chunk to one plane, and nothing is zeroed
+  first. A plain image converts from its stored big-endian bytes in one pass.
+  Refused: a `&mut [T]` that the caller must size and zero, and a new `Vec` for each
+  call.
+- **`Borrowed` is the borrowed image, the twin of `Image`.** Every read result is one,
+  `Image::view` lends one, and the conversions (`physical_into`, `unsigned`,
+  `sample_type`) live on it alone. `View` has a typed accessor for each type, and
+  `Data` converts back to its `Vec`. Refused: the same conversions on `Image`, `Lazy`
+  and `Borrowed`, each with its own code.
+- **The caller owns the image-sized buffers.** `view` fills the caller's `words`,
+  and the reader keeps only staging: a section's stored bytes, and the words a
+  compressed image's physical read decodes into, both the size of the region read.
+- **Names do not repeat their module.** The borrowed image is `image::Borrowed`, and
+  the handle is `fits_well::ImageReader`, beside `FitsReader`. Refused:
+  `image::ImageView` and `image::ImageReader`.
 - **A binary-table read never gives a compressed container.** A tiled-compressed
   image or table is stored as a `BINTABLE`, but `read_table`, `read_table_rows`,
   `read_table_columns`, `read_table_cell` and `table_schema` refuse it:

@@ -12,6 +12,7 @@ use crate::bintable::Table;
 use crate::bitpix::Bitpix;
 use crate::checksum;
 use crate::image_model::data::Data;
+use crate::image_model::region::Region;
 use crate::reader::source::Source;
 use crate::reader::{ChecksumReport, FitsReader};
 
@@ -54,7 +55,7 @@ fn read_image(c: &mut Criterion, dir: &ScratchDir) {
             let id = BenchmarkId::new(source.id(), fixture::bitpix_id(bitpix));
             group.bench_function(id, |b| {
                 let path = frame_path(&mut path, dir, bitpix);
-                source.bench(b, path, Lazy);
+                source.bench(b, path, Whole);
             });
         }
     }
@@ -105,13 +106,18 @@ fn frame_path<'a>(path: &'a mut Option<PathBuf>, dir: &ScratchDir, bitpix: Bitpi
 }
 
 #[derive(Debug)]
-struct Lazy;
+struct Whole;
 
-impl Reading for Lazy {
+impl Reading for Whole {
     type Output = Data;
 
     fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> Data {
-        reader.read_image(0).unwrap().decode()
+        reader
+            .image(0)
+            .unwrap()
+            .read(Region::All)
+            .unwrap()
+            .into_samples()
     }
 }
 
@@ -124,15 +130,13 @@ impl Reading for ReadSections {
     type Output = ChecksumReport;
 
     fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> ChecksumReport {
-        let mut sum = reader.begin_data_checksum(0).unwrap();
+        let mut image = reader.image(0).unwrap().with_checksum();
         for top in (0..HEIGHT).step_by(SECTION_ROWS) {
             let ranges = [0..WIDTH, top..(top + SECTION_ROWS).min(HEIGHT)];
-            let section = reader
-                .read_image_section_view_summed(0, &ranges, &mut self.words, &mut sum)
-                .unwrap();
+            let section = image.view(&ranges, &mut self.words).unwrap();
             black_box(&section);
         }
-        reader.finish_data_checksum(sum).unwrap()
+        image.finish().unwrap()
     }
 }
 

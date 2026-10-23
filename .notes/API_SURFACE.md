@@ -88,12 +88,7 @@ FitsReader
             pub fn hdu_index(&self, name: &str, version: Option<i64>) -> Result<Option<usize>>
             pub fn image_indices(&self) -> Vec<usize>
             pub fn read_data_raw(&mut self, index: usize) -> Result<DataUnit>
-            pub fn read_image(&mut self, index: usize) -> Result<Lazy<'_>>
-            pub fn read_image_view<'a>(&'a mut self, index: usize, scratch: &'a mut Vec<u64>) -> Result<Borrowed<'a>>
-            pub fn read_image_section(&mut self, index: usize, ranges: &[Range<usize>]) -> Result<Image>
-            pub fn read_image_section_summed(&mut self, index: usize, ranges: &[Range<usize>], sum: &mut DataChecksum) -> Result<Image>
-            pub fn read_image_section_view<'a>(&'a mut self, index: usize, ranges: &[Range<usize>], words: &'a mut Vec<u64>) -> Result<Borrowed<'a>>
-            pub fn read_image_section_view_summed<'a>(&'a mut self, index: usize, ranges: &[Range<usize>], words: &'a mut Vec<u64>, sum: &mut DataChecksum) -> Result<Borrowed<'a>>
+            pub fn image(&mut self, index: usize) -> Result<ImageReader<'_, S>>
             pub fn read_table(&mut self, index: usize) -> Result<Table>
             pub fn table_schema(&self, index: usize) -> Result<&Schema>
             pub fn read_table_rows(&mut self, index: usize, rows: Range<usize>) -> Result<Table>
@@ -104,8 +99,6 @@ FitsReader
             pub fn read_groups(&mut self, index: usize) -> Result<RandomGroups>
             pub fn read_compressed_table(&mut self, index: usize) -> Result<Table>  [features: compression or parallel]
             pub fn verify_checksum(&mut self, index: usize) -> Result<ChecksumReport>
-            pub fn begin_data_checksum(&self, index: usize) -> Result<DataChecksum>
-            pub fn finish_data_checksum(&mut self, sum: DataChecksum) -> Result<ChecksumReport>
         impl<S: Debug> Debug for FitsReader<S>
 
 FitsWriter
@@ -123,6 +116,18 @@ FitsWriter
         impl<W: Write + Seek> FitsWriter<W>
             pub fn stream_image(&mut self, shape: &[usize], bitpix: Bitpix, scaling: Scaling, header: Option<&Header>) -> Result<Writer<'_, W>>
         impl<W: Debug> Debug for FitsWriter<W>
+
+ImageReader
+    struct ImageReader<'r, S>
+        impl<'r, S: Source> ImageReader<'r, S>
+            pub const fn header(&self) -> &'r Header
+            pub const fn metadata(&self) -> Metadata<'r>
+            pub const fn with_checksum(self) -> Self
+            pub fn view<'a, 'g>(&'a mut self, region: impl Into<Region<'g>>, words: &'a mut Vec<u64>) -> Result<Borrowed<'a>>
+            pub fn read<'g>(&mut self, region: impl Into<Region<'g>>) -> Result<Image>
+            pub fn physical_into<'g, T: PhysicalSample>(&mut self, region: impl Into<Region<'g>>, out: &mut Vec<T>) -> Result<()>
+            pub fn finish(self) -> Result<ChecksumReport>
+        impl<'r, S: Debug> Debug for ImageReader<'r, S>
 
 Indexed
     #[non_exhaustive]
@@ -220,11 +225,16 @@ image::Bitpix
         pub const fn is_integer(self) -> bool
 
 image::Borrowed
-    struct Borrowed<'a>: Debug
+    struct Borrowed<'a>: Clone, Copy, Debug
+        pub fn new(shape: &'a [usize], samples: View<'a>, scaling: Scaling) -> Result<Self>
         pub const fn shape(&self) -> &'a [usize]
         pub const fn scaling(&self) -> Scaling
         pub const fn samples(&self) -> View<'a>
         pub const fn metadata(&self) -> Metadata<'a>
+        pub fn physical_into<T: PhysicalSample>(&self, out: &mut Vec<T>)
+        pub fn unsigned(&self) -> Option<UnsignedData>
+        pub fn sample_type(&self) -> SampleType
+        pub fn to_image(&self) -> Image
 
 image::Compression  [features: compression or parallel]
     enum Compression: Clone, Copy, Debug, PartialEq
@@ -254,6 +264,12 @@ image::Data
         pub fn len(&self) -> usize
         pub fn is_empty(&self) -> bool
         pub fn as_view(&self) -> View<'_>
+        impl TryFrom<Data> for Vec<f32>
+        impl TryFrom<Data> for Vec<f64>
+        impl TryFrom<Data> for Vec<i16>
+        impl TryFrom<Data> for Vec<i32>
+        impl TryFrom<Data> for Vec<i64>
+        impl TryFrom<Data> for Vec<u8>
 
 image::DitherMethod  [features: compression or parallel]
     enum DitherMethod: Clone, Copy, Debug, Default, Eq, PartialEq
@@ -274,35 +290,27 @@ image::Image
     struct Image: Clone, Debug
         pub fn new(shape: impl Into<Vec<usize>>, samples: impl Into<Data>) -> Result<Self>
         pub fn new_scaled(shape: impl Into<Vec<usize>>, samples: impl Into<Data>, scaling: Scaling) -> Result<Self>
-        pub fn metadata(&self) -> Metadata<'_>
-        pub fn stored(&self) -> View<'_>
+        pub fn view(&self) -> Borrowed<'_>
         pub fn into_samples(self) -> Data
         pub fn from_u16(shape: Vec<usize>, data: &[u16]) -> Result<Self>
         pub fn from_u32(shape: Vec<usize>, data: &[u32]) -> Result<Self>
         pub fn from_u64(shape: Vec<usize>, data: &[u64]) -> Result<Self>
         pub fn from_i8(shape: Vec<usize>, data: &[i8]) -> Result<Self>
-        pub fn unsigned(&self) -> Option<UnsignedData>
-        pub fn physical(&self) -> Vec<f64>
-        pub fn physical_f32(&self) -> Vec<f32>
-        pub fn sample_type(&self) -> SampleType
-
-image::Lazy
-    struct Lazy<'a>: Debug
-        pub fn metadata(&self) -> Metadata<'_>
-        pub fn bitpix(&self) -> Bitpix
-        pub fn decode(self) -> Data
-        pub fn u8(&self) -> Option<&[u8]>
-        pub const fn raw_bytes(&self) -> Option<&[u8]>
-        pub fn physical(&self) -> Vec<f64>
-        pub fn physical_f32(&self) -> Vec<f32>
-        pub fn unsigned(&self) -> Option<UnsignedData>
-        pub fn sample_type(&self) -> SampleType
 
 image::Metadata
     struct Metadata<'a>: Clone, Copy, Debug, PartialEq
         pub shape: &'a [usize]
         pub bitpix: Bitpix
         pub scaling: Scaling
+
+image::PhysicalSample
+    trait PhysicalSample: Narrow
+
+image::Region
+    enum Region<'a>: Clone, Copy, Debug, Eq, From<&'a [Range<usize>]>, PartialEq
+        All
+        Section(&'a [Range<usize>])
+        impl<'a, const N: usize> From<&'a [Range<usize>; N]> for Region<'a>
 
 image::SampleType
     enum SampleType: Clone, Copy, Debug, Eq, Hash, PartialEq
@@ -347,6 +355,12 @@ image::View
         pub const fn bitpix(&self) -> Bitpix
         pub const fn len(&self) -> usize
         pub const fn is_empty(&self) -> bool
+        pub const fn as_u8(&self) -> Option<&'a [u8]>
+        pub const fn as_i16(&self) -> Option<&'a [i16]>
+        pub const fn as_i32(&self) -> Option<&'a [i32]>
+        pub const fn as_i64(&self) -> Option<&'a [i64]>
+        pub const fn as_f32(&self) -> Option<&'a [f32]>
+        pub const fn as_f64(&self) -> Option<&'a [f64]>
         pub fn to_owned_data(&self) -> Data
 
 image::Writer
@@ -376,9 +390,6 @@ io::ChecksumStatus
         Valid
         Invalid
 
-io::DataChecksum
-    struct DataChecksum: Clone, Debug
-
 io::DataUnit
     struct DataUnit: Clone, Debug
         pub fn view(&self) -> DataUnitView<'_>
@@ -398,6 +409,7 @@ io::Hdu
         pub data_bytes: u64
         pub fn is_image(&self) -> bool
         pub fn matches_extension(&self, name: &str, version: Option<i64>, level: Option<i64>) -> Result<bool>
+        pub const fn padded_data_bytes(&self) -> u64
         pub fn image(&self) -> Result<Metadata<'_>>
         pub fn table_schema(&self) -> Result<&Schema>
 

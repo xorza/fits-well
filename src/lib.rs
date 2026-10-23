@@ -71,6 +71,7 @@ mod world_coordinates;
 pub use error::{FitsError, Indexed, Ranked, Result};
 pub use fits_writer::FitsWriter;
 pub use reader::FitsReader;
+pub use reader::image_reader::ImageReader;
 
 /// Typed image values, scratch-backed views, compression, and incremental output.
 pub mod image {
@@ -79,7 +80,8 @@ pub mod image {
     pub use crate::compress::{Compression, CompressionOptions, DitherMethod, Gzip, Hcompress};
     pub use crate::fits_writer::writer::Writer;
     pub use crate::image_model::data::Data;
-    pub use crate::image_model::lazy::Lazy;
+    pub use crate::image_model::physical_sample::PhysicalSample;
+    pub use crate::image_model::region::Region;
     pub use crate::image_model::sample_type::SampleType;
     pub use crate::image_model::scaling::Scaling;
     pub use crate::image_model::unsigned_data::UnsignedData;
@@ -181,7 +183,6 @@ pub mod io {
     pub use crate::block::{BLOCK_SIZE, CARD_SIZE};
     pub use crate::groups::{RandomGroupView, RandomGroups, RandomGroupsMetadata};
     pub use crate::hdu::HduKind;
-    pub use crate::reader::data_checksum::DataChecksum;
     pub use crate::reader::hdu::Hdu;
     pub use crate::reader::source::{SliceSource, StreamSource};
     pub use crate::reader::{

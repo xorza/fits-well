@@ -8,8 +8,10 @@ use crate::fits_writer::internals::{rejected_before_output, round_trip};
 use crate::header_model::value::Value;
 use crate::image_model::Image;
 use crate::image_model::data::Data;
+use crate::image_model::internals::physical;
 use crate::image_model::scaling::Scaling;
 use crate::reader::FitsReader;
+use crate::reader::internals::read_whole;
 use std::io::Cursor;
 use std::iter;
 
@@ -56,9 +58,9 @@ fn compression_write_round_trips_through_decode() {
             assert!(matches!(header.get("ZVAL1"), Some(Value::Real(0.0))));
             assert_eq!(header.get_text("ZNAME2").unwrap(), None);
         }
-        let back = r.read_image(1).unwrap();
+        let back = read_whole(&mut r, 1);
         assert_eq!(back.shape, vec![24, 16], "{case}");
-        assert_eq!(back.decode(), image.samples, "{case}");
+        assert_eq!(back.samples, image.samples, "{case}");
     }
 
     let samples_3d: Vec<i16> = (0..5 * 4 * 3).map(|i| i as i16 * 3 - 50).collect();
@@ -75,9 +77,9 @@ fn compression_write_round_trips_through_decode() {
             None,
         )
     });
-    let back = r.read_image(1).unwrap();
+    let back = read_whole(&mut r, 1);
     assert_eq!(back.shape, vec![5, 4, 3]);
-    assert!(matches!(back.decode(), Data::I16(v) if v == samples_3d));
+    assert!(matches!(back.samples, Data::I16(v) if v == samples_3d));
 }
 
 /// A 24×16 float field: a smooth ramp plus genuine high-frequency noise (a
@@ -199,10 +201,10 @@ fn float_compression_preserves_scaling_across_quantized_and_fallback_tiles() {
                 Bitpix::F32 => f64::from(f32::EPSILON),
                 _ => 4.0 * f64::EPSILON,
             };
-            let back = r.read_image(1).unwrap();
+            let back = read_whole(&mut r, 1);
             assert_eq!(back.scaling, image.scaling, "{bitpix:?} {cmptype}");
-            let physical = back.physical();
-            let actual_raw: Vec<f64> = match back.decode() {
+            let physical = physical::<f64>(&back);
+            let actual_raw: Vec<f64> = match back.samples {
                 Data::F32(values) => values.into_iter().map(f64::from).collect(),
                 Data::F64(values) => values,
                 other => panic!("{cmptype}: expected {bitpix:?}, got {other:?}"),
@@ -344,7 +346,7 @@ fn dither_option_sets_zquantiz_and_round_trips() {
             .unwrap()
             .physical()
             .unwrap()[0];
-        let Data::F32(plane) = r.read_image(1).unwrap().decode() else {
+        let Data::F32(plane) = read_whole(&mut r, 1).samples else {
             panic!("{dither:?}: expected F32");
         };
         assert_eq!(plane.len(), original.len(), "{dither:?}");
@@ -416,7 +418,7 @@ fn float_write_preserves_nan_nulls() {
         .unwrap()
         .physical()
         .unwrap()[0];
-    let back = match r.read_image(1).unwrap().decode() {
+    let back = match read_whole(&mut r, 1).samples {
         Data::F32(v) => v,
         other => panic!("expected F32, got {other:?}"),
     };
@@ -566,7 +568,7 @@ fn hcompress_round_trips_tiles_odd_on_both_axes() {
             )
         });
         assert_eq!(
-            r.read_image(1).unwrap().decode(),
+            read_whole(&mut r, 1).samples,
             Data::I16(samples),
             "{shape:?}"
         );
@@ -593,7 +595,7 @@ fn hcompress_lossless_write_round_trips_exactly() {
         )
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
-    match reader.read_image(1).unwrap().decode() {
+    match read_whole(&mut reader, 1).samples {
         Data::I32(actual) => assert_eq!(actual, samples),
         other => panic!("expected I32, got {other:?}"),
     }
@@ -610,7 +612,7 @@ fn hcompress_lossless_write_round_trips_exactly() {
         )
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
-    assert_eq!(reader.read_image(1).unwrap().decode(), Data::I32(wide));
+    assert_eq!(read_whole(&mut reader, 1).samples, Data::I32(wide));
 
     let wide = [
         1i64 << 40,
@@ -630,7 +632,7 @@ fn hcompress_lossless_write_round_trips_exactly() {
         )
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
-    assert_eq!(reader.read_image(1).unwrap().decode(), Data::I64(wide));
+    assert_eq!(read_whole(&mut reader, 1).samples, Data::I64(wide));
 }
 
 #[test]
@@ -655,12 +657,12 @@ fn integer_image_compression_preserves_bscale_bzero_and_blank() {
             None,
         )
     });
-    let back = r.read_image(1).unwrap();
+    let back = read_whole(&mut r, 1);
     assert_eq!(back.scaling.bscale, 2.5);
     assert_eq!(back.scaling.bzero, 100.0);
     assert_eq!(back.scaling.blank, Some(-5));
 
-    match back.decode() {
+    match back.samples {
         Data::I16(v) => assert_eq!(v, samples, "raw samples"),
         other => panic!("expected I16, got {other:?}"),
     }
@@ -692,7 +694,7 @@ fn rice_64_bit_pixels_round_trip_extreme_differences() {
             None,
         )
     });
-    let decoded = r.read_image(1).unwrap().decode();
+    let decoded = read_whole(&mut r, 1).samples;
     assert_eq!(decoded, Data::I64(samples));
 }
 
@@ -720,7 +722,7 @@ fn parallel_full_decode_crosses_the_bounded_wave_boundary() {
         .unwrap();
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
-    assert_eq!(reader.read_image(1).unwrap().decode(), Data::U8(samples));
+    assert_eq!(read_whole(&mut reader, 1).samples, Data::U8(samples));
 }
 
 #[test]
@@ -747,9 +749,9 @@ fn empty_images_round_trip() {
                 None,
             )
         });
-        let back = r.read_image(1).unwrap();
+        let back = read_whole(&mut r, 1);
         assert_eq!(back.shape, shape, "{samples:?}");
-        assert_eq!(back.decode(), samples);
+        assert_eq!(back.samples, samples);
     }
 }
 

@@ -1,13 +1,18 @@
 use crate::bintable::descriptor;
 use crate::bintable::descriptor::DescriptorWidth;
 use crate::bintable::internals::table_header;
+use crate::bitpix::Bitpix;
 use crate::error::Ranked;
 use crate::fits_writer::FitsWriter;
 use crate::fits_writer::builder::{Builder, WriteColumn};
 use crate::fits_writer::internals::written;
 use crate::header_model::internals::{card_bytes, records};
+use crate::image_model::Image;
+use crate::image_model::data::Data;
+use crate::image_model::region::Region;
 use crate::image_model::scaling::Scaling;
-use crate::reader::internals::{fixture_bytes, fixture_path, open_fixture};
+use crate::image_model::view::View;
+use crate::reader::internals::{fixture_bytes, fixture_path, open_fixture, read_whole};
 use crate::reader::*;
 use crate::world_coordinates::tabular::internals::{lookup_bytes, lookup_header};
 use num_complex::Complex;
@@ -255,25 +260,21 @@ fn read_data_raw_is_stable_across_reads() {
 }
 
 #[test]
-fn read_image_reuses_internal_scratch_across_reads() {
+fn whole_reads_reuse_the_internal_scratch() {
     let mut f = open_fixture("UITfuv2582gc.fits");
-    let raw1 = f.read_image(0).unwrap();
-    let shape1 = raw1.shape.to_vec();
-    let data1 = raw1.decode(); // own the samples, releasing the borrow on `f`
+    let first = read_whole(&mut f, 0);
     // The reader staged the raw unit through its internal scratch, which now holds
     // the full block-padded data unit and is reused (not reallocated) on the next
-    // read — only each `decode()` freshly allocates.
+    // read — only each owned image freshly allocates.
     assert_eq!(
         data_source::internals::scratch(&f.data).len(),
         padded_len(f.hdus[0].data_bytes).unwrap() as usize,
         "scratch holds the padded data unit after a read"
     );
     let cap = data_source::internals::scratch(&f.data).capacity();
-    let raw2 = f.read_image(0).unwrap();
-    let shape2 = raw2.shape.to_vec();
-    let data2 = raw2.decode();
-    assert_eq!(shape1, shape2);
-    assert_eq!(data1, data2);
+    let second = read_whole(&mut f, 0);
+    assert_eq!(first.shape, second.shape);
+    assert_eq!(first.samples, second.samples);
     assert_eq!(
         data_source::internals::scratch(&f.data).capacity(),
         cap,
@@ -405,7 +406,7 @@ fn malformed_image_pcount_is_rejected_not_panicked() {
         &[0u8; 15],
     );
     let mut r = FitsReader::open(Cursor::new(bytes)).unwrap();
-    assert!(matches!(r.read_image(0), Err(FitsError::ImageHasGroups)));
+    assert!(matches!(r.image(0), Err(FitsError::ImageHasGroups)));
     // The scan could not resolve the image, and reports why on request.
     assert!(matches!(
         r.hdus()[0].image(),
@@ -434,7 +435,10 @@ fn data_unit_larger_than_the_file_is_rejected_not_allocated() {
         &[0u8; 16],
     );
     let mut r = FitsReader::open(Cursor::new(bytes)).unwrap();
-    assert!(matches!(r.read_image(0), Err(FitsError::UnexpectedEof)));
+    assert!(matches!(
+        r.image(0).unwrap().read(Region::All),
+        Err(FitsError::UnexpectedEof)
+    ));
     assert!(matches!(r.read_table(0), Err(FitsError::NotABinTable)));
     assert!(matches!(
         r.read_ascii_table(0),
@@ -588,16 +592,17 @@ fn read_data_raw_rejects_out_of_bounds_index() {
 }
 
 #[test]
-fn read_image_decodes_the_primary_array_shape_and_type() {
+fn image_reads_the_primary_array_shape_and_type() {
     let mut f = open_fixture("UITfuv2582gc.fits");
-    let raw = f.read_image(0).unwrap();
-    assert_eq!(raw.shape, vec![512, 512]);
-    assert_eq!(raw.bitpix(), Bitpix::I16);
+    let mut image = f.image(0).unwrap();
+    assert_eq!(image.metadata().shape, [512, 512]);
+    assert_eq!(image.metadata().bitpix, Bitpix::I16);
     // The sum, extremes and centre sample of the 262144 stored values; BSCALE is
     // 2.0587209E-16 and BZERO 0.
-    let physical = raw.physical();
+    let mut physical: Vec<f64> = Vec::new();
+    image.physical_into(Region::All, &mut physical).unwrap();
     assert_eq!(physical.len(), 512 * 512);
-    let Data::I16(samples) = raw.decode() else {
+    let Data::I16(samples) = image.read(Region::All).unwrap().samples else {
         panic!("expected I16 samples");
     };
     assert_eq!(
@@ -612,7 +617,7 @@ fn read_image_decodes_the_primary_array_shape_and_type() {
 }
 
 #[test]
-fn read_image_raw_samples_match_a_manual_big_endian_decode() {
+fn image_samples_match_a_manual_big_endian_decode() {
     let mut f = open_fixture("UITfuv2582gc.fits");
     // Independently decode every pixel straight from the data bytes.
     let unit = f.read_data_raw(0).unwrap();
@@ -623,15 +628,15 @@ fn read_image_raw_samples_match_a_manual_big_endian_decode() {
         .iter()
         .map(|c| i16::from_be_bytes(*c))
         .collect();
-    assert_eq!(f.read_image(0).unwrap().decode(), Data::I16(manual));
+    assert_eq!(read_whole(&mut f, 0).samples, Data::I16(manual));
 }
 
 #[test]
-fn read_image_rejects_non_image_hdus() {
+fn image_rejects_non_image_hdus() {
     // hdu[0] is random groups, hdu[1] is a binary table — neither is an image.
     let mut f = open_fixture("DDTSUVDATA.fits");
-    assert!(matches!(f.read_image(0), Err(FitsError::NotAnImage)));
-    assert!(matches!(f.read_image(1), Err(FitsError::NotAnImage)));
+    assert!(matches!(f.image(0), Err(FitsError::NotAnImage)));
+    assert!(matches!(f.image(1), Err(FitsError::NotAnImage)));
 }
 
 #[test]
@@ -690,7 +695,7 @@ fn hdu_index_finds_extensions_by_name_and_version() {
         Some("target")
     );
     assert_eq!(
-        reader.read_image(index).unwrap().decode(),
+        read_whole(&mut reader, index).samples,
         Data::I16(vec![10, 20, 30])
     );
     assert_eq!(reader.hdus()[0].kind, HduKind::Primary);
@@ -732,7 +737,7 @@ fn image_indices_lists_readable_images_including_compressed() {
 }
 
 #[test]
-fn read_image_borrows_u8_samples_with_zero_copy() {
+fn a_u8_view_borrows_the_source_with_zero_copy() {
     let image = Image {
         shape: vec![4],
         samples: Data::U8(vec![10, 20, 30, 40]),
@@ -741,36 +746,26 @@ fn read_image_borrows_u8_samples_with_zero_copy() {
     let buf = written(|w| w.write_image(&image, None));
 
     let mut reader = FitsReader::from_bytes(&buf).unwrap();
-    let raw = reader.read_image(0).unwrap();
-    assert_eq!(raw.shape, vec![4]);
-    assert_eq!(raw.bitpix(), Bitpix::U8);
-    // U8 needs no byte-swap, so `.u8()` hands back the stored bytes directly.
-    let view = raw.u8().expect("a U8 image has a zero-copy u8 view");
-    assert_eq!(view, &[10, 20, 30, 40]);
-    // Prove it is a borrow into the source buffer, not a copy: the view's address
-    // lies within `buf`.
+    let mut image = reader.image(0).unwrap();
+    assert_eq!(image.metadata().shape, [4]);
+    assert_eq!(image.metadata().bitpix, Bitpix::U8);
+    // U8 needs no byte-swap, so the view borrows the stored bytes in the source: its
+    // address lies within `buf`, and the caller's words stay untouched.
+    let mut scratch = Vec::new();
+    let view = image.view(Region::All, &mut scratch).unwrap();
+    assert_eq!(view.shape(), [4]);
+    let v = view.samples().as_u8().expect("a U8 image views as U8");
+    assert_eq!(v, &[10, 20, 30, 40]);
     let base = buf.as_ptr() as usize;
-    let view_ptr = view.as_ptr() as usize;
     assert!(
-        (base..base + buf.len()).contains(&view_ptr),
+        (base..base + buf.len()).contains(&(v.as_ptr() as usize)),
         "the u8 view must point inside the source buffer (zero-copy)"
     );
-
-    // The view into a caller scratch borrows the source too, leaving the scratch
-    // untouched.
-    let mut scratch = Vec::new();
-    let image = reader.read_image_view(0, &mut scratch).unwrap();
-    assert_eq!(image.metadata().shape, &[4]);
-    let View::U8(v) = image.samples else {
-        panic!("a U8 image must view as U8");
-    };
-    assert_eq!(v, &[10, 20, 30, 40]);
-    assert!((base..base + buf.len()).contains(&(v.as_ptr() as usize)));
     assert!(scratch.is_empty(), "a U8 view must not touch the scratch");
 }
 
 #[test]
-fn read_image_exposes_big_endian_bytes_for_multibyte_types() {
+fn a_multibyte_view_swaps_into_the_callers_words() {
     let image = Image {
         shape: vec![3],
         samples: Data::I16(vec![1, -2, 300]),
@@ -778,28 +773,34 @@ fn read_image_exposes_big_endian_bytes_for_multibyte_types() {
     };
     let buf = written(|w| w.write_image(&image, None));
 
+    // The stored bytes are big-endian: 1 → 0x0001, -2 → 0xFFFE, 300 → 0x012C.
     let mut reader = FitsReader::from_bytes(&buf).unwrap();
-    let raw = reader.read_image(0).unwrap();
-    // A type that needs byte-swapping has no zero-copy typed view.
-    assert_eq!(raw.u8(), None);
-    // The raw bytes are big-endian: 1 → 0x0001, -2 → 0xFFFE, 300 → 0x012C.
-    assert_eq!(raw.raw_bytes(), Some(&[0, 1, 255, 254, 1, 44][..]));
-    // `decode()` swaps them into the same host-endian samples it borrowed.
-    assert_eq!(raw.decode(), Data::I16(vec![1, -2, 300]));
+    assert_eq!(
+        reader.read_data_raw(0).unwrap().data(),
+        [0, 1, 255, 254, 1, 44]
+    );
+    // A type that needs byte-swapping views from the caller's words, not the source.
+    let mut image = reader.image(0).unwrap();
+    let mut words = Vec::new();
+    let view = image.view(Region::All, &mut words).unwrap();
+    let v = view.samples().as_i16().expect("an I16 image views as I16");
+    assert_eq!(v, [1, -2, 300]);
+    assert_eq!(v.as_ptr(), words.as_ptr().cast::<i16>());
 }
 
 #[test]
-fn read_image_view_matches_decode_for_a_plain_image() {
+fn a_whole_view_matches_the_owned_read_of_a_plain_image() {
     let mut f = open_fixture("UITfuv2582gc.fits");
     // The owned decode is the reference; the borrowed view (into a caller scratch)
     // must equal it.
     let expected_scaling = f.hdus()[0].header.scaling().unwrap();
-    let owned = f.read_image(0).unwrap().decode();
+    let owned = read_whole(&mut f, 0).samples;
     let mut scratch = Vec::new();
-    let image = f.read_image_view(0, &mut scratch).unwrap();
-    assert_eq!(image.metadata().shape, &[512, 512]);
-    assert_eq!(image.metadata().scaling, expected_scaling);
-    match (image.samples, &owned) {
+    let mut image = f.image(0).unwrap();
+    let view = image.view(Region::All, &mut scratch).unwrap();
+    assert_eq!(view.shape(), [512, 512]);
+    assert_eq!(view.scaling(), expected_scaling);
+    match (view.samples(), &owned) {
         (View::I16(v), Data::I16(o)) => assert_eq!(v, o.as_slice()),
         (v, o) => panic!("expected matching I16 view/decode, got {v:?} / {o:?}"),
     }
@@ -807,14 +808,15 @@ fn read_image_view_matches_decode_for_a_plain_image() {
 
 #[test]
 #[cfg(feature = "compression")]
-fn read_image_view_matches_decode_for_a_compressed_image() {
+fn a_whole_view_matches_the_owned_read_of_a_compressed_image() {
     let mut f = open_fixture("comp_gzip_i16.fits");
-    let owned = f.read_image(1).unwrap().decode();
+    let owned = read_whole(&mut f, 1).samples;
     let mut scratch: Vec<u64> = Vec::with_capacity(owned.len().div_ceil(4));
     let scratch_ptr = scratch.as_ptr().cast::<i16>();
-    let image = f.read_image_view(1, &mut scratch).unwrap();
-    assert_eq!(image.metadata().shape, &[24, 16]);
-    match (image.samples, &owned) {
+    let mut image = f.image(1).unwrap();
+    let view = image.view(Region::All, &mut scratch).unwrap();
+    assert_eq!(view.shape(), [24, 16]);
+    match (view.samples(), &owned) {
         (View::I16(v), Data::I16(o)) => {
             assert_eq!(v, o.as_slice());
             assert_eq!(v.as_ptr(), scratch_ptr);
@@ -957,9 +959,8 @@ fn image_sections_match_hand_computed_values_for_every_bitpix() {
         let bytes = written(|w| w.write_image(&image, None));
         let mut reader = FitsReader::from_bytes(&bytes).unwrap();
         let mut scratch = Vec::new();
-        let section = reader
-            .read_image_section_view(0, &[1..4, 1..3, 1..3], &mut scratch)
-            .unwrap();
+        let mut image = reader.image(0).unwrap();
+        let section = image.view(&[1..4, 1..3, 1..3], &mut scratch).unwrap();
         assert_eq!(section.shape, [3, 2, 2], "{bitpix:?}");
         assert_eq!(section.scaling, Scaling::IDENTITY, "{bitpix:?}");
         assert_eq!(section.samples.to_owned_data(), expected, "{bitpix:?}");
@@ -980,20 +981,37 @@ fn image_sections_preserve_scaling_and_validate_empty_and_invalid_regions() {
     .unwrap();
     let bytes = written(|w| w.write_image(&image, None));
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
-    let section = reader.read_image_section(0, &[1..4, 0..2]).unwrap();
-    assert_eq!(section.metadata().shape, [3, 2]);
-    assert_eq!(section.metadata().scaling, image.metadata().scaling);
-    let physical = section.physical();
-    assert_eq!(physical[0], 14.0);
-    assert!(physical[1].is_nan());
-    assert_eq!(physical[2..], [18.0, 22.0, 24.0, 26.0]);
+    let mut handle = reader.image(0).unwrap();
+    let section = handle.read(&[1..4, 0..2]).unwrap();
+    assert_eq!(section.shape, [3, 2]);
+    assert_eq!(section.scaling, image.scaling);
+    // Stored 2, -99 (BLANK), 4, 6, 7, 8: 10 + 2·2 = 14, NaN, 18, 22, 24, 26 — the owned
+    // read's view and the handle's one pass from the stored bytes agree, appended
+    // after what `out` already held.
+    let expected = [14.0, f64::NAN, 18.0, 22.0, 24.0, 26.0];
+    let mut from_view: Vec<f64> = Vec::new();
+    section.view().physical_into(&mut from_view);
+    let mut from_bytes = vec![-1.0];
+    handle
+        .physical_into(&[1..4, 0..2], &mut from_bytes)
+        .unwrap();
+    for physical in [&*from_view, &from_bytes[1..]] {
+        assert_eq!(physical.len(), expected.len());
+        for (got, want) in physical.iter().zip(expected) {
+            assert!(
+                got == &want || got.is_nan() && want.is_nan(),
+                "{physical:?}"
+            );
+        }
+    }
+    assert_eq!(from_bytes[0], -1.0);
 
-    let empty = reader.read_image_section(0, &[2..2, 1..3]).unwrap();
-    assert_eq!(empty.metadata().shape, [0, 2]);
-    assert!(empty.stored().is_empty());
+    let empty = handle.read(&[2..2, 1..3]).unwrap();
+    assert_eq!(empty.shape, [0, 2]);
+    assert!(empty.samples.is_empty());
     let wrong_rank = 0..1;
     assert!(matches!(
-        reader.read_image_section(0, slice::from_ref(&wrong_rank)),
+        handle.read(slice::from_ref(&wrong_rank)),
         Err(FitsError::RankMismatch {
             ranked: Ranked::ImageRegion,
             expected: 2,
@@ -1001,7 +1019,7 @@ fn image_sections_preserve_scaling_and_validate_empty_and_invalid_regions() {
         })
     ));
     assert!(matches!(
-        reader.read_image_section(0, &[0..5, 0..1]),
+        handle.read(&[0..5, 0..1]),
         Err(FitsError::ImageRegionOutOfBounds {
             axis: 0,
             start: 0,
@@ -1028,7 +1046,7 @@ fn plain_image_section_streams_exact_strided_runs() {
     let data_offset = stream.hdus[0].data_offset as usize;
     read_ranges.borrow_mut().clear();
     let ranges = [1..3, 1..4, 0..4, 1..3];
-    let section = stream.read_image_section(0, &ranges).unwrap();
+    let section = stream.image(0).unwrap().read(&ranges).unwrap();
 
     let mut expected_values = Vec::new();
     let mut expected_reads = Vec::new();
@@ -1042,14 +1060,14 @@ fn plain_image_section_streams_exact_strided_runs() {
             }
         }
     }
-    assert_eq!(section.metadata().shape, [2, 3, 4, 2]);
-    assert_eq!(section.stored(), View::I16(&expected_values));
+    assert_eq!(section.shape, [2, 3, 4, 2]);
+    assert_eq!(section.samples, Data::I16(expected_values.clone()));
     assert_eq!(&*read_ranges.borrow(), &expected_reads);
 
     let mut slice = FitsReader::from_bytes(&bytes).unwrap();
     assert_eq!(
-        slice.read_image_section(0, &ranges).unwrap().stored(),
-        View::I16(&expected_values)
+        slice.image(0).unwrap().read(&ranges).unwrap().samples,
+        Data::I16(expected_values)
     );
 }
 
@@ -1125,26 +1143,29 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
             (&[9, 7][..], bitpix, scaling)
         );
         assert_eq!(reader.hdus()[1].container_schema().unwrap().nrows, 3 * 3);
-        let whole = reader.read_image(1).unwrap().decode();
+        let whole = read_whole(&mut reader, 1).samples;
         let expected = select_2d_section(&whole, 9, 2..9, 1..7);
-        let owned = reader.read_image_section(1, &[2..9, 1..7]).unwrap();
-        assert_eq!(owned.metadata().shape, [7, 6], "{bitpix:?}");
-        assert_eq!(owned.metadata().scaling, scaling, "{bitpix:?}");
-        assert_image_data_exact(
-            &owned.stored().to_owned_data(),
-            &expected,
-            &format!("{bitpix:?} owned"),
-        );
+        let mut image = reader.image(1).unwrap();
+        let owned = image.read(&[2..9, 1..7]).unwrap();
+        assert_eq!(owned.shape, [7, 6], "{bitpix:?}");
+        assert_eq!(owned.scaling, scaling, "{bitpix:?}");
+        assert_image_data_exact(&owned.samples, &expected, &format!("{bitpix:?} owned"));
         // The blank sits at source (4, 1), which is (2, 0) in the section; no other
-        // sample of any case holds the blank value.
-        let physical = owned.physical();
+        // sample of any case holds the blank value. The handle's physical read decodes
+        // the same tiles, so it gives the owned read's values bit for bit.
+        let mut physical: Vec<f64> = Vec::new();
+        owned.view().physical_into(&mut physical);
         assert!(physical[2].is_nan(), "{bitpix:?}");
         assert_eq!(physical.iter().filter(|value| value.is_nan()).count(), 1);
+        let mut from_handle: Vec<f64> = Vec::new();
+        image
+            .physical_into(&[2..9, 1..7], &mut from_handle)
+            .unwrap();
+        let bits = |values: &[f64]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&from_handle), bits(&physical), "{bitpix:?}");
 
         let mut words = Vec::new();
-        let view = reader
-            .read_image_section_view(1, &[2..9, 1..7], &mut words)
-            .unwrap();
+        let view = image.view(&[2..9, 1..7], &mut words).unwrap();
         assert_eq!(view.shape, [7, 6], "{bitpix:?}");
         assert_eq!(view.scaling, scaling, "{bitpix:?}");
         assert_image_data_exact(
@@ -1153,9 +1174,9 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
             &format!("{bitpix:?} view"),
         );
 
-        let empty = reader.read_image_section(1, &[2..2, 1..7]).unwrap();
-        assert_eq!(empty.metadata().shape, [0, 6], "{bitpix:?}");
-        assert!(empty.stored().is_empty(), "{bitpix:?}");
+        let empty = image.read(&[2..2, 1..7]).unwrap();
+        assert_eq!(empty.shape, [0, 6], "{bitpix:?}");
+        assert!(empty.samples.is_empty(), "{bitpix:?}");
 
         if bitpix == Bitpix::U8 {
             // A one-tile corner fetches its tile's row and the heap bytes that row
@@ -1172,7 +1193,9 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
                 let scanned = fetched.get();
                 let mut scratch = Vec::new();
                 counted
-                    .read_image_section_view(1, &ranges, &mut scratch)
+                    .image(1)
+                    .unwrap()
+                    .view(&ranges, &mut scratch)
                     .unwrap();
                 fetched.get() - scanned
             });
@@ -1513,21 +1536,17 @@ fn a_data_checksum_summed_during_the_decode_reads_the_unit_once() {
         };
         let mut reader = FitsReader::from_source(source).unwrap();
         let scanned = fetched.get();
-        let mut sum = reader.begin_data_checksum(0).unwrap();
+        let mut image = reader.image(0).unwrap().with_checksum();
         let mut words = Vec::new();
         for row in rows {
             let ranges = [0..7, row.clone()];
             if view {
-                reader
-                    .read_image_section_view_summed(0, &ranges, &mut words, &mut sum)
-                    .unwrap();
+                image.view(&ranges, &mut words).unwrap();
             } else {
-                reader
-                    .read_image_section_summed(0, &ranges, &mut sum)
-                    .unwrap();
+                image.read(&ranges).unwrap();
             }
         }
-        let report = reader.finish_data_checksum(sum).unwrap();
+        let report = image.finish().unwrap();
         (report, fetched.get() - scanned)
     };
     let in_order = [0..2, 2..3, 3..5];
@@ -1543,15 +1562,27 @@ fn a_data_checksum_summed_during_the_decode_reads_the_unit_once() {
 
     // The whole image in one summed section is the image written, and its sum is valid.
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
-    let mut sum = reader.begin_data_checksum(0).unwrap();
-    let whole = reader
-        .read_image_section_summed(0, &[0..7, 0..5], &mut sum)
-        .unwrap();
-    assert_eq!(whole.into_samples(), image.samples);
-    assert_eq!(
-        reader.finish_data_checksum(sum).unwrap().datasum,
-        ChecksumStatus::Valid
-    );
+    let mut whole = reader.image(0).unwrap().with_checksum();
+    assert_eq!(whole.read(&[0..7, 0..5]).unwrap().samples, image.samples);
+    assert_eq!(whole.finish().unwrap().datasum, ChecksumStatus::Valid);
+
+    // A whole-image read feeds the padded unit it views, so the finish reads nothing more;
+    // a handle that read nothing reads the unit at its finish, as `verify_checksum` does.
+    for read_first in [true, false] {
+        let fetched = Rc::new(Cell::new(0));
+        let source = CountingSource {
+            inner: SliceSource::new(&bytes),
+            fetched: Rc::clone(&fetched),
+        };
+        let mut reader = FitsReader::from_source(source).unwrap();
+        let scanned = fetched.get();
+        let mut handle = reader.image(0).unwrap().with_checksum();
+        if read_first {
+            assert_eq!(handle.read(Region::All).unwrap().samples, image.samples);
+        }
+        assert_eq!(handle.finish().unwrap().checksum, ChecksumStatus::Valid);
+        assert_eq!(fetched.get() - scanned, padded, "read first: {read_first}");
+    }
 
     // Rows of 7 samples are 14 bytes. Rows 3 and 4 come first and are not fed; rows 0 to 2 then
     // continue the sum to byte 42, and the finish reads the unit from there.
@@ -1579,6 +1610,9 @@ fn a_data_checksum_summed_during_the_decode_reads_the_unit_once() {
 fn a_compressed_image_summed_through_its_sections_reads_the_unit_at_the_finish() {
     use crate::compress::{Compression, CompressionOptions};
     use crate::image_model::data::Data;
+    use crate::reader::source::SliceSource;
+    use crate::reader::source::internals::CountingSource;
+    use std::cell::Cell;
 
     let image = Image {
         shape: vec![9, 7],
@@ -1596,50 +1630,28 @@ fn a_compressed_image_summed_through_its_sections_reads_the_unit_at_the_finish()
         .unwrap();
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
-    let mut sum = reader.begin_data_checksum(1).unwrap();
+    let mut sections = reader.image(1).unwrap().with_checksum();
     let mut words = Vec::new();
     for rows in [0..4, 4..7] {
-        reader
-            .read_image_section_view_summed(1, &[0..9, rows], &mut words, &mut sum)
-            .unwrap();
+        sections.view(&[0..9, rows], &mut words).unwrap();
     }
-    let report = reader.finish_data_checksum(sum).unwrap();
+    let report = sections.finish().unwrap();
     assert_eq!(report.datasum, ChecksumStatus::Valid);
     assert_eq!(report.checksum, ChecksumStatus::Valid);
     assert_eq!(reader.verify_checksum(1).unwrap(), report);
-}
 
-/// A sum begun on one file's HDU is refused at the finish on another file whose HDU lies
-/// elsewhere, rather than judging the second file's keywords against the first file's bytes.
-#[test]
-#[should_panic(expected = "a data checksum of another reader's HDU")]
-fn a_sum_finished_on_another_readers_hdu_panics() {
-    use crate::image_model::data::Data;
-
-    let file = |extra: &[(&str, i64)]| {
-        let image = Image {
-            shape: vec![4, 4],
-            samples: Data::I16(vec![1; 16]),
-            scaling: Scaling::IDENTITY,
-        };
-        let mut header = Header::new();
-        for &(key, value) in extra {
-            header.set(key, value).unwrap();
-        }
-        let mut writer = FitsWriter::new(Cursor::new(Vec::new())).with_checksums();
-        writer.write_image(&image, Some(&header)).unwrap();
-        writer.into_inner().into_inner()
+    // A whole read fetches the container's stored bytes and feeds them, so the finish reads
+    // only the block fill after them: the unit, once.
+    let fetched = Rc::new(Cell::new(0));
+    let source = CountingSource {
+        inner: SliceSource::new(&bytes),
+        fetched: Rc::clone(&fetched),
     };
-    let short = file(&[]);
-    // Enough cards to push the data unit a header block further on.
-    let keys: Vec<String> = (0..40).map(|index| format!("KEY{index}")).collect();
-    let cards: Vec<(&str, i64)> = keys.iter().map(|key| (key.as_str(), 1)).collect();
-    let long = file(&cards);
-    let sum = FitsReader::from_bytes(&short)
-        .unwrap()
-        .begin_data_checksum(0)
-        .unwrap();
-    let _ = FitsReader::from_bytes(&long)
-        .unwrap()
-        .finish_data_checksum(sum);
+    let mut counted = FitsReader::from_source(source).unwrap();
+    let scanned = fetched.get();
+    let mut whole = counted.image(1).unwrap().with_checksum();
+    assert_eq!(whole.read(Region::All).unwrap().samples, image.samples);
+    assert_eq!(whole.finish().unwrap(), report);
+    let padded = usize::try_from(counted.hdus()[1].padded_data_bytes()).unwrap();
+    assert_eq!(fetched.get() - scanned, padded);
 }
