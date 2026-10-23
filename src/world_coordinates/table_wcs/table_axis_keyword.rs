@@ -1,5 +1,8 @@
 //! The per-axis `CTYPE`-family keywords, in their image and Table-22 spellings.
 
+use crate::header_model::keywords;
+use crate::keyword::Keyword;
+
 use crate::world_coordinates::table_wcs::keyword_spelling::KeywordSpelling;
 
 /// One of the six per-axis keyword families a WCS axis is described by. Table 22
@@ -45,14 +48,14 @@ impl TableAxisKeyword {
     }
 
     /// The image-header root this family translates to.
-    pub(super) const fn image_root(self) -> &'static str {
+    pub(super) const fn image_root(self) -> Keyword {
         match self {
-            Self::Type => "CTYPE",
-            Self::Unit => "CUNIT",
-            Self::ReferenceValue => "CRVAL",
-            Self::Increment => "CDELT",
-            Self::ReferencePoint => "CRPIX",
-            Self::Rotation => "CROTA",
+            Self::Type => keywords::CTYPE,
+            Self::Unit => keywords::CUNIT,
+            Self::ReferenceValue => keywords::CRVAL,
+            Self::Increment => keywords::CDELT,
+            Self::ReferencePoint => keywords::CRPIX,
+            Self::Rotation => keywords::CROTA,
         }
     }
 }

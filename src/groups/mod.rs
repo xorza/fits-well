@@ -9,12 +9,11 @@ use crate::bitpix::Bitpix;
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Result;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
 use crate::image_model::data::Data;
 use crate::image_model::physical_view;
 use crate::image_model::scaling::Scaling;
 use crate::image_model::view::View;
-use crate::keyword::key;
 use std::iter;
 
 /// The last parameter a `PTYPEn`/`PSCALn`/`PZEROn` keyword can describe: each root
@@ -114,13 +113,13 @@ impl RandomGroups {
         for j in 1..=described {
             parameter_names.push(
                 header
-                    .get_text(key!("PTYPE{j}").as_str())?
+                    .get_text(keywords::PTYPE.indexed(j)?)?
                     .unwrap_or("")
                     .to_string(),
             );
             param_scaling.push(ParamScale {
-                pscal: header.get_real(key!("PSCAL{j}").as_str())?.unwrap_or(1.0),
-                pzero: header.get_real(key!("PZERO{j}").as_str())?.unwrap_or(0.0),
+                pscal: header.get_real(keywords::PSCAL.indexed(j)?)?.unwrap_or(1.0),
+                pzero: header.get_real(keywords::PZERO.indexed(j)?)?.unwrap_or(0.0),
             });
         }
 

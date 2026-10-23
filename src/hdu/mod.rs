@@ -9,13 +9,16 @@ pub(crate) mod image_geometry;
 use crate::block::padded_len;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
+use crate::keyword::Keyword;
 
 pub(crate) const MAX_TABLE_FIELDS: usize = 999;
 
 pub(crate) const fn validate_table_field_count(count: usize) -> Result<()> {
     if count > MAX_TABLE_FIELDS {
-        return Err(FitsError::KeywordOutOfRange { name: "TFIELDS" });
+        return Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::TFIELDS,
+        });
     }
     Ok(())
 }
@@ -42,9 +45,11 @@ impl HduRole {
         match position {
             HduPosition::Primary => {
                 header
-                    .get_logical("SIMPLE")?
-                    .ok_or(FitsError::MissingKeyword { name: "SIMPLE" })?;
-                if header.get_logical("GROUPS")? == Some(true) {
+                    .get_logical(keywords::SIMPLE)?
+                    .ok_or(FitsError::MissingKeyword {
+                        keyword: keywords::SIMPLE,
+                    })?;
+                if header.get_logical(keywords::GROUPS)? == Some(true) {
                     validate_random_groups_axes(&header.axes()?)?;
                     Ok(Self::RandomGroups)
                 } else {
@@ -53,8 +58,10 @@ impl HduRole {
             }
             HduPosition::Extension => {
                 header
-                    .get_text("XTENSION")?
-                    .ok_or(FitsError::MissingKeyword { name: "XTENSION" })?;
+                    .get_text(keywords::XTENSION)?
+                    .ok_or(FitsError::MissingKeyword {
+                        keyword: keywords::XTENSION,
+                    })?;
                 Ok(Self::Extension)
             }
         }
@@ -96,16 +103,22 @@ impl HduKind {
 
         // `Value::Text` already stripped the trailing spaces of `'IMAGE   '` etc.
         let xtension = header
-            .get_text("XTENSION")?
-            .ok_or(FitsError::MissingKeyword { name: "XTENSION" })?;
+            .get_text(keywords::XTENSION)?
+            .ok_or(FitsError::MissingKeyword {
+                keyword: keywords::XTENSION,
+            })?;
         Ok(match xtension {
             "IMAGE" => Self::Image,
             "TABLE" => Self::AsciiTable,
             // §10: a tiled-compressed image/table rides inside a BINTABLE,
             // flagged by ZIMAGE/ZTABLE — classify by the payload, not the
             // container, so callers see what they can actually read.
-            "BINTABLE" if header.get_logical("ZIMAGE")? == Some(true) => Self::CompressedImage,
-            "BINTABLE" if header.get_logical("ZTABLE")? == Some(true) => Self::CompressedTable,
+            "BINTABLE" if header.get_logical(keywords::ZIMAGE)? == Some(true) => {
+                Self::CompressedImage
+            }
+            "BINTABLE" if header.get_logical(keywords::ZTABLE)? == Some(true) => {
+                Self::CompressedTable
+            }
             "BINTABLE" => Self::BinTable,
             _ => Self::Other,
         })
@@ -172,16 +185,24 @@ struct GroupCounts {
 
 fn required_group_counts(header: &Header) -> Result<GroupCounts> {
     let pcount = header
-        .get_integer("PCOUNT")?
-        .ok_or(FitsError::MissingKeyword { name: "PCOUNT" })?;
+        .get_integer(keywords::PCOUNT)?
+        .ok_or(FitsError::MissingKeyword {
+            keyword: keywords::PCOUNT,
+        })?;
     if pcount < 0 {
-        return Err(FitsError::KeywordOutOfRange { name: "PCOUNT" });
+        return Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::PCOUNT,
+        });
     }
     let gcount = header
-        .get_integer("GCOUNT")?
-        .ok_or(FitsError::MissingKeyword { name: "GCOUNT" })?;
+        .get_integer(keywords::GCOUNT)?
+        .ok_or(FitsError::MissingKeyword {
+            keyword: keywords::GCOUNT,
+        })?;
     if gcount < 0 {
-        return Err(FitsError::KeywordOutOfRange { name: "GCOUNT" });
+        return Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::GCOUNT,
+        });
     }
     Ok(GroupCounts {
         pcount: pcount.cast_unsigned(),
@@ -202,10 +223,14 @@ fn grouped_data_bytes(elem: u64, array_elements: u64, header: &Header) -> Result
 
 const fn validate_random_groups_axes(axes: &[usize]) -> Result<()> {
     let Some(&first) = axes.first() else {
-        return Err(FitsError::KeywordOutOfRange { name: "NAXIS" });
+        return Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::NAXIS,
+        });
     };
     if first != 0 {
-        return Err(FitsError::KeywordOutOfRange { name: "NAXIS1" });
+        return Err(FitsError::KeywordOutOfRange {
+            keyword: Keyword::new("NAXIS1"),
+        });
     }
     Ok(())
 }

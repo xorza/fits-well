@@ -1,6 +1,7 @@
 use crate::error::FitsError;
-use crate::header_model::Header;
 use crate::header_model::value::Value;
+use crate::header_model::{Header, keywords};
+
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::celestial_pole::CelestialPole;
 use crate::world_coordinates::internals::CEA_GOLDEN;
@@ -84,7 +85,7 @@ impl Celestial {
 
         let mut header = Header::new();
         if family == Family::Image {
-            header.set_internal("NAXIS", 2);
+            header.set_internal(keywords::NAXIS, 2);
         }
         let ctype = names("CTYPE", "CTYP", "CTY");
         header
@@ -107,7 +108,7 @@ impl Celestial {
         }
         if let Some(pc) = self.pc {
             for (index, value) in pc.into_iter().enumerate() {
-                header.set_internal(&matrix(index / 2 + 1, index % 2 + 1), value);
+                header.set_internal(matrix(index / 2 + 1, index % 2 + 1), value);
             }
         }
         if let Some(crota) = self.crota {
@@ -126,8 +127,8 @@ impl Celestial {
         }
         if let Some([lonpole, latpole]) = self.poles {
             header
-                .set_internal(&pole("LONPOLE"), lonpole)
-                .set_internal(&pole("LATPOLE"), latpole);
+                .set_internal(pole("LONPOLE"), lonpole)
+                .set_internal(pole("LATPOLE"), latpole);
         }
         header
     }
@@ -293,10 +294,10 @@ fn table_wcs_matrix_aliases_resolve_exactly() {
                 .set_internal("TCTYP3", "LINEAR");
         }
         header
-            .set_internal(&format!("{root}2_2{suffix}"), expected[0])
-            .set_internal(&format!("{root}2_3{suffix}"), expected[1])
-            .set_internal(&format!("{root}3_2{suffix}"), expected[2])
-            .set_internal(&format!("{root}3_3{suffix}"), expected[3]);
+            .set_internal(format!("{root}2_2{suffix}"), expected[0])
+            .set_internal(format!("{root}2_3{suffix}"), expected[1])
+            .set_internal(format!("{root}3_2{suffix}"), expected[2])
+            .set_internal(format!("{root}3_3{suffix}"), expected[3]);
         let wcs = Wcs::from_pixel_list(&header, &[2, 3], alternate.then_some('A')).unwrap();
         assert_eq!(
             linear::matrix(&wcs.linear),
@@ -308,12 +309,12 @@ fn table_wcs_matrix_aliases_resolve_exactly() {
     for (root, alternate) in [("PC", false), ("CD", false), ("PC", true), ("CD", true)] {
         let suffix = if alternate { "A" } else { "" };
         let mut header = Header::new();
-        header.set_internal(&format!("WCAX5{suffix}"), 2);
+        header.set_internal(format!("WCAX5{suffix}"), 2);
         header
-            .set_internal(&format!("11{root}5{suffix}"), expected[0])
-            .set_internal(&format!("12{root}5{suffix}"), expected[1])
-            .set_internal(&format!("21{root}5{suffix}"), expected[2])
-            .set_internal(&format!("22{root}5{suffix}"), expected[3]);
+            .set_internal(format!("11{root}5{suffix}"), expected[0])
+            .set_internal(format!("12{root}5{suffix}"), expected[1])
+            .set_internal(format!("21{root}5{suffix}"), expected[2])
+            .set_internal(format!("22{root}5{suffix}"), expected[3]);
         let wcs = Wcs::from_array_column(&header, 5, alternate.then_some('A')).unwrap();
         assert_eq!(
             linear::matrix(&wcs.linear),
@@ -424,7 +425,7 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
     let invalid_long_alternate = build("3CTYP5A", Value::Text("LINEAR".to_string()));
     assert!(matches!(
         Wcs::from_array_column(&invalid_long_alternate, 5, Some('A')),
-        Err(FitsError::MissingKeyword { name: "iCTYPn" })
+        Err(FitsError::MissingKeyword { keyword }) if keyword == "1CTY5A"
     ));
 
     // A two-digit array axis: the whole leading digit run is the axis, where in
@@ -445,6 +446,13 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
     let padded_index = build("03CTYP5", Value::Text("LINEAR".to_string()));
     assert!(matches!(
         Wcs::from_array_column(&padded_index, 5, None),
-        Err(FitsError::MissingKeyword { name: "iCTYPn" })
+        Err(FitsError::MissingKeyword { keyword }) if keyword == "1CTYP5"
+    ));
+
+    // A column number too wide for any keyword finds no card and errors, not panics.
+    let column = usize::MAX;
+    assert!(matches!(
+        Wcs::from_array_column(&padded_index, column, Some('A')),
+        Err(FitsError::InvalidKeyword { name }) if name == format!("1CTY{column}A")
     ));
 }

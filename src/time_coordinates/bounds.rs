@@ -2,7 +2,8 @@
 
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
+use crate::keyword::Keyword;
 use crate::time_coordinates::datetime::Datetime;
 use crate::time_coordinates::scale::Scale;
 
@@ -34,7 +35,7 @@ pub struct Bounds {
 impl Bounds {
     /// The bounds `header` declares. Errors when `TIMEPIXR` lies outside `[0, 1]`.
     pub fn from_header(header: &Header) -> Result<Self> {
-        let mjd_or_date = |mjd: &str, date: &str| -> Result<Option<f64>> {
+        let mjd_or_date = |mjd: Keyword, date: Keyword| -> Result<Option<f64>> {
             if let Some(value) = header.get_real(mjd)? {
                 return Ok(Some(value));
             }
@@ -45,20 +46,22 @@ impl Bounds {
                 .to_mjd(&Scale::declared(header)?)
                 .map(Some)
         };
-        let timepixr = header.get_real("TIMEPIXR")?.unwrap_or(0.5);
+        let timepixr = header.get_real(keywords::TIMEPIXR)?.unwrap_or(0.5);
         if !(0.0..=1.0).contains(&timepixr) {
-            return Err(FitsError::KeywordOutOfRange { name: "TIMEPIXR" });
+            return Err(FitsError::KeywordOutOfRange {
+                keyword: keywords::TIMEPIXR,
+            });
         }
         Ok(Self {
-            beg_mjd: mjd_or_date("MJD-BEG", "DATE-BEG")?,
-            end_mjd: mjd_or_date("MJD-END", "DATE-END")?,
-            avg_mjd: mjd_or_date("MJD-AVG", "DATE-AVG")?,
-            xposure: header.get_real("XPOSURE")?,
-            telapse: header.get_real("TELAPSE")?,
-            timedel: header.get_real("TIMEDEL")?,
+            beg_mjd: mjd_or_date(keywords::MJD_BEG, keywords::DATE_BEG)?,
+            end_mjd: mjd_or_date(keywords::MJD_END, keywords::DATE_END)?,
+            avg_mjd: mjd_or_date(keywords::MJD_AVG, keywords::DATE_AVG)?,
+            xposure: header.get_real(keywords::XPOSURE)?,
+            telapse: header.get_real(keywords::TELAPSE)?,
+            timedel: header.get_real(keywords::TIMEDEL)?,
             timepixr,
-            timsyer: header.get_real("TIMSYER")?,
-            timrder: header.get_real("TIMRDER")?,
+            timsyer: header.get_real(keywords::TIMSYER)?,
+            timrder: header.get_real(keywords::TIMRDER)?,
         })
     }
 }

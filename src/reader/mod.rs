@@ -22,13 +22,14 @@ use crate::hdu::HduKind;
 use crate::hdu::HduPosition;
 use crate::hdu::HduRole;
 use crate::hdu::data_extent;
-use crate::header_model::Header;
 use crate::header_model::card::is_end_record;
+use crate::header_model::{Header, keywords};
 use crate::ragged::Ragged;
 use crate::reader::data_checksum::DataChecksum;
 use crate::reader::data_source::DataSource;
 use crate::reader::data_source::TableRows;
 use crate::reader::hdu::Hdu;
+use crate::reader::hdu_selector::HduSelector;
 use crate::reader::image_reader::ImageReader;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::tabular;
@@ -38,6 +39,7 @@ pub(crate) mod bench;
 pub(crate) mod data_checksum;
 mod data_source;
 pub(crate) mod hdu;
+pub(crate) mod hdu_selector;
 pub(crate) mod image_reader;
 pub(crate) mod source;
 
@@ -228,7 +230,14 @@ impl<S: Source> FitsReader<S> {
                     let next = data_offset
                         .checked_add(extent.padded_bytes)
                         .ok_or(FitsError::DataUnitOverflow)?;
-                    hdus.push(Hdu::new(header, kind, sum, data_offset, extent.data_bytes));
+                    hdus.push(Hdu::new(
+                        hdus.len(),
+                        header,
+                        kind,
+                        sum,
+                        data_offset,
+                        extent.data_bytes,
+                    ));
                     // Skip past the data unit to the next header. Clamp at the source
                     // end so a declared unit larger than the file just ends the scan
                     // (the HDU is still recorded; a later read bounds-checks it).
@@ -251,35 +260,33 @@ impl<S: Source> FitsReader<S> {
     }
 
     /// The scanned HDU records, read-only and in file order — each carrying its
-    /// parsed [`Header`] and [`HduKind`]. Index, iterate, or `.len()` the slice; pick
-    /// an index for a `read_*` method (or use [`FitsReader::image_indices`] /
-    /// [`FitsReader::hdu_index`] to find one).
+    /// parsed [`Header`] and [`HduKind`]. Every read names its HDU with an
+    /// [`HduSelector`]: an index into this slice, `"SCI"`, or `("SCI", 2)`.
     pub fn hdus(&self) -> &[Hdu] {
         &self.hdus
     }
 
-    /// Index of the extension named `name` by its `EXTNAME` keyword (compared
-    /// case-insensitively, as `EXTNAME` is conventionally matched), or `None`. When
-    /// `version` is `Some`, also require a matching `EXTVER` (which defaults to `1`
-    /// where the card is absent, §4.4.1) — the way duplicate extensions like
-    /// `('SCI', 1)` and `('SCI', 2)` are told apart. The primary array has no
-    /// `EXTNAME`. Pair the returned index with a `read_*` method.
-    pub fn hdu_index(&self, name: &str, version: Option<i64>) -> Result<Option<usize>> {
-        find_extension(&self.hdus, name, version, None, None)
+    /// The HDU `hdu` names: the first that [`Hdu::matches`] it. Errors with
+    /// [`FitsError::IndexOutOfBounds`] for an index past the last HDU, and with
+    /// [`FitsError::HduNotFound`] for a name no HDU carries.
+    pub fn hdu<'h>(&self, hdu: impl Into<HduSelector<'h>>) -> Result<&Hdu> {
+        selected_hdu(&self.hdus, hdu.into())
+    }
+
+    /// The index of the HDU `hdu` names, as [`FitsReader::hdu`] finds it.
+    pub fn hdu_index<'h>(&self, hdu: impl Into<HduSelector<'h>>) -> Result<usize> {
+        Ok(self.hdu(hdu)?.index)
     }
 
     /// The indices of every HDU [`FitsReader::image`] can read as an image: image
     /// extensions, tiled-compressed images, and a non-empty primary array (an empty
-    /// `NAXIS = 0` primary is a container, not an image, and is skipped). A FITS file
-    /// may hold any number of images — pick an `index` from this list to pass to
-    /// [`FitsReader::image`] without inspecting [`HduKind`] yourself.
-    pub fn image_indices(&self) -> Vec<usize> {
+    /// `NAXIS = 0` primary is a container, not an image, and is skipped). The first
+    /// image is `images().next()`.
+    pub fn images(&self) -> impl Iterator<Item = usize> + '_ {
         self.hdus
             .iter()
-            .enumerate()
-            .filter(|(_, hdu)| hdu.is_image())
-            .map(|(index, _)| index)
-            .collect()
+            .filter(|hdu| hdu.is_image())
+            .map(|hdu| hdu.index)
     }
 
     /// Read the raw, still-encoded (big-endian, unscaled) data unit into a fresh,
@@ -290,8 +297,8 @@ impl<S: Source> FitsReader<S> {
     /// This is the owned form, backing the table readers (which keep the bytes as
     /// the parsed table's storage). Image and random-groups reads instead stage
     /// through the reader's reused internal scratch — see [`FitsReader::image`].
-    pub fn read_data_raw(&mut self, index: usize) -> Result<DataUnit> {
-        let hdu = checked_hdu(&self.hdus, index)?;
+    pub fn read_data_raw<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<DataUnit> {
+        let hdu = selected_hdu(&self.hdus, hdu.into())?;
         let lengths = DataLengths::new(hdu.data_bytes)?;
         let bytes = self.data.read_owned(hdu.data_offset, lengths.padded)?;
         Ok(DataUnit {
@@ -304,15 +311,16 @@ impl<S: Source> FitsReader<S> {
     /// region at a time. Errors with [`FitsError::NotAnImage`] for tables, random
     /// groups and unmodelled extensions, a compressed image among them without the
     /// `compression` feature.
-    pub fn image(&mut self, index: usize) -> Result<ImageReader<'_, S>> {
-        let hdu = checked_hdu(&self.hdus, index)?;
+    pub fn image<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<ImageReader<'_, S>> {
+        let hdu = selected_hdu(&self.hdus, hdu.into())?;
         ImageReader::new(hdu, &mut self.data, &mut self.scratch)
     }
 
     /// Read a `BINTABLE` extension and parse its column structure. Decode
     /// individual columns lazily with [`Table::column_by_idx`]. Errors as
     /// [`Hdu::table_schema`] does for an HDU that is not a plain binary table.
-    pub fn read_table(&mut self, index: usize) -> Result<Table> {
+    pub fn read_table<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Table> {
+        let index = self.hdu_index(hdu)?;
         self.read_table_as(index, Hdu::table_schema)
     }
 
@@ -322,20 +330,25 @@ impl<S: Source> FitsReader<S> {
         index: usize,
         schema: fn(&Hdu) -> Result<&Schema>,
     ) -> Result<Table> {
-        let schema = schema(checked_hdu(&self.hdus, index)?)?.clone();
+        let schema = schema(&self.hdus[index])?.clone();
         let unit = self.read_data_raw(index)?;
         Table::new(schema, unit.bytes)
     }
 
     /// A binary table's schema, parsed from its header when the file was opened. Errors
     /// as [`Hdu::table_schema`] does.
-    pub fn table_schema(&self, index: usize) -> Result<&Schema> {
-        checked_hdu(&self.hdus, index)?.table_schema()
+    pub fn table_schema<'h>(&self, hdu: impl Into<HduSelector<'h>>) -> Result<&Schema> {
+        selected_hdu(&self.hdus, hdu.into())?.table_schema()
     }
 
     /// Materialize only the requested contiguous row range, including only the VLA
     /// heap cells referenced by those rows.
-    pub fn read_table_rows(&mut self, index: usize, rows: Range<usize>) -> Result<Table> {
+    pub fn read_table_rows<'h>(
+        &mut self,
+        hdu: impl Into<HduSelector<'h>>,
+        rows: Range<usize>,
+    ) -> Result<Table> {
+        let index = self.hdu_index(hdu)?;
         self.read_table_rows_as(index, rows, Hdu::table_schema)
     }
 
@@ -346,7 +359,7 @@ impl<S: Source> FitsReader<S> {
         rows: Range<usize>,
         schema: fn(&Hdu) -> Result<&Schema>,
     ) -> Result<Table> {
-        let hdu = checked_hdu(&self.hdus, index)?;
+        let hdu = &self.hdus[index];
         let schema = schema(hdu)?;
         let row_count = rows.len();
         let mut data = Vec::new();
@@ -361,13 +374,13 @@ impl<S: Source> FitsReader<S> {
     }
 
     /// Decode selected columns over a row range without reading unrelated rows.
-    pub fn read_table_columns(
+    pub fn read_table_columns<'h>(
         &mut self,
-        index: usize,
+        hdu: impl Into<HduSelector<'h>>,
         rows: Range<usize>,
         columns: &[ColumnSelector],
     ) -> Result<Selection> {
-        let hdu = checked_hdu(&self.hdus, index)?;
+        let hdu = selected_hdu(&self.hdus, hdu.into())?;
         let schema = hdu.table_schema()?;
         let selected_indices = columns
             .iter()
@@ -408,13 +421,13 @@ impl<S: Source> FitsReader<S> {
     }
 
     /// Decode one fixed or variable-length table cell without materializing other rows.
-    pub fn read_table_cell(
+    pub fn read_table_cell<'h>(
         &mut self,
-        index: usize,
+        hdu: impl Into<HduSelector<'h>>,
         row: usize,
         column: &ColumnSelector,
     ) -> Result<ColumnData> {
-        let hdu = checked_hdu(&self.hdus, index)?;
+        let hdu = selected_hdu(&self.hdus, hdu.into())?;
         let schema = hdu.table_schema()?;
         let column = resolve_column_selector(schema, column)?;
         self.data
@@ -425,8 +438,12 @@ impl<S: Source> FitsReader<S> {
     /// their referenced `BINTABLE` extensions. Header-only WCS descriptions use the
     /// same path as [`Wcs::from_header`]; this method is required for `-TAB` because its
     /// coordinate values and optional index vectors live outside the source header.
-    pub fn read_wcs(&mut self, index: usize, alt: Option<char>) -> Result<Wcs> {
-        let header = &checked_hdu(&self.hdus, index)?.header;
+    pub fn read_wcs<'h>(
+        &mut self,
+        hdu: impl Into<HduSelector<'h>>,
+        alt: Option<char>,
+    ) -> Result<Wcs> {
+        let header = &selected_hdu(&self.hdus, hdu.into())?.header;
         let descriptors = tabular::descriptors(header, Wcs::image_axis_count(header, alt)?, alt)?;
         if descriptors.is_empty() {
             return Wcs::from_header(header, alt);
@@ -446,22 +463,22 @@ impl<S: Source> FitsReader<S> {
         let mut transforms = Vec::with_capacity(transform_count);
         for group in groups {
             let reference = &group[0].reference;
-            let table_index = find_extension(
-                &self.hdus,
-                &reference.extension_name,
-                Some(reference.extension_version),
-                Some(reference.extension_level),
-                Some(HduKind::BinTable),
-            )?
-            .ok_or_else(|| FitsError::InvalidWcs {
-                detail: format!(
-                    "TAB BINTABLE {:?}, EXTVER {}, EXTLEVEL {} was not found",
-                    reference.extension_name,
-                    reference.extension_version,
-                    reference.extension_level
-                ),
-            })?;
-            let table_hdu = &self.hdus[table_index];
+            let selector = HduSelector::Extension {
+                name: &reference.extension_name,
+                version: Some(reference.extension_version),
+                level: Some(reference.extension_level),
+            };
+            let table_hdu =
+                find_extension(&self.hdus, selector, HduKind::BinTable)?.ok_or_else(|| {
+                    FitsError::InvalidWcs {
+                        detail: format!(
+                            "TAB BINTABLE {:?}, EXTVER {}, EXTLEVEL {} was not found",
+                            reference.extension_name,
+                            reference.extension_version,
+                            reference.extension_level
+                        ),
+                    }
+                })?;
             let schema = table_hdu.table_schema()?;
             let mut selected = vec![false; schema.columns.len()];
             for descriptor in &group {
@@ -493,19 +510,20 @@ impl<S: Source> FitsReader<S> {
 
     /// Read an `TABLE` (ASCII table) extension and parse its column structure.
     /// Errors with [`FitsError::NotAnAsciiTable`] for any other HDU.
-    pub fn read_ascii_table(&mut self, index: usize) -> Result<Ascii> {
-        let hdu = checked_hdu(&self.hdus, index)?;
+    pub fn read_ascii_table<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Ascii> {
+        let hdu = selected_hdu(&self.hdus, hdu.into())?;
         if hdu.kind != HduKind::AsciiTable {
             return Err(FitsError::NotAnAsciiTable);
         }
+        let index = hdu.index;
         let unit = self.read_data_raw(index)?;
         Ascii::from_data(&self.hdus[index].header, unit.bytes)
     }
 
     /// Read and decode a random-groups primary array (§6). Errors with
     /// [`FitsError::NotRandomGroups`] for any other HDU.
-    pub fn read_groups(&mut self, index: usize) -> Result<RandomGroups> {
-        let hdu = checked_hdu(&self.hdus, index)?;
+    pub fn read_groups<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<RandomGroups> {
+        let hdu = selected_hdu(&self.hdus, hdu.into())?;
         if hdu.kind != HduKind::RandomGroups {
             return Err(FitsError::NotRandomGroups);
         }
@@ -519,8 +537,8 @@ impl<S: Source> FitsReader<S> {
     /// variable-length columns are supported (`GZIP_1`/`GZIP_2`/`RICE_1`/
     /// `NOCOMPRESS`). Requires the `compression` feature.
     #[cfg(feature = "compression")]
-    pub fn read_compressed_table(&mut self, index: usize) -> Result<Table> {
-        let hdu = checked_hdu(&self.hdus, index)?;
+    pub fn read_compressed_table<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Table> {
+        let hdu = selected_hdu(&self.hdus, hdu.into())?;
         if hdu.kind != HduKind::CompressedTable {
             return Err(FitsError::NotCompressedTable);
         }
@@ -533,36 +551,52 @@ impl<S: Source> FitsReader<S> {
     /// Strings containing one or more blanks are reported as
     /// [`ChecksumStatus::Unknown`] because the standard reserves them for
     /// undefined or unknown checksum values.
-    pub fn verify_checksum(&mut self, index: usize) -> Result<ChecksumReport> {
-        let hdu = checked_hdu(&self.hdus, index)?;
+    pub fn verify_checksum<'h>(
+        &mut self,
+        hdu: impl Into<HduSelector<'h>>,
+    ) -> Result<ChecksumReport> {
+        let hdu = selected_hdu(&self.hdus, hdu.into())?;
         DataChecksum::of(hdu).finish(hdu, &mut self.data)
     }
 }
 
-/// The HDU at `index`, or [`FitsError::IndexOutOfBounds`]. A free function over the
-/// records, so a read can hold an HDU while it fetches bytes from the source.
-fn checked_hdu(hdus: &[Hdu], index: usize) -> Result<&Hdu> {
-    hdus.get(index).ok_or(FitsError::IndexOutOfBounds {
-        indexed: Indexed::Hdu,
-        index,
-        len: hdus.len(),
-    })
+/// The HDU `selector` names. A free function over the records, so a read can hold an
+/// HDU while it fetches bytes from the source.
+fn selected_hdu<'h>(hdus: &'h [Hdu], selector: HduSelector<'_>) -> Result<&'h Hdu> {
+    match selector {
+        HduSelector::Index(index) => hdus.get(index).ok_or(FitsError::IndexOutOfBounds {
+            indexed: Indexed::Hdu,
+            index,
+            len: hdus.len(),
+        }),
+        HduSelector::Extension {
+            name,
+            version,
+            level,
+        } => {
+            for hdu in hdus {
+                if hdu.matches(selector)? {
+                    return Ok(hdu);
+                }
+            }
+            Err(FitsError::HduNotFound {
+                name: name.to_string(),
+                version,
+                level,
+            })
+        }
+    }
 }
 
-/// Index of the first HDU of `kind` (any kind when `None`) that
-/// [`Hdu::matches_extension`].
-fn find_extension(
-    hdus: &[Hdu],
-    name: &str,
-    version: Option<i64>,
-    level: Option<i64>,
-    kind: Option<HduKind>,
-) -> Result<Option<usize>> {
-    for (index, hdu) in hdus.iter().enumerate() {
-        if kind.is_none_or(|kind| hdu.kind == kind)
-            && hdu.matches_extension(name, version, level)?
-        {
-            return Ok(Some(index));
+/// The first HDU of `kind` that `selector` names.
+fn find_extension<'h>(
+    hdus: &'h [Hdu],
+    selector: HduSelector<'_>,
+    kind: HduKind,
+) -> Result<Option<&'h Hdu>> {
+    for hdu in hdus {
+        if hdu.kind == kind && hdu.matches(selector)? {
+            return Ok(Some(hdu));
         }
     }
     Ok(None)
@@ -661,7 +695,9 @@ fn scan_header_unit<S: Source>(
             let keyword = &block[..8];
             match position {
                 HduPosition::Primary if keyword != b"SIMPLE  " => {
-                    return Err(FitsError::MissingKeyword { name: "SIMPLE" });
+                    return Err(FitsError::MissingKeyword {
+                        keyword: keywords::SIMPLE,
+                    });
                 }
                 // §3.5: a post-HDU block whose first card is not XTENSION begins
                 // special records, regardless of any END-shaped bytes later in it.

@@ -14,7 +14,8 @@ use crate::fits_writer::FitsWriter;
 use crate::fits_writer::builder::{Builder, WriteColumn};
 use crate::fits_writer::internals::round_trip;
 use crate::fits_writer::render_header;
-use crate::keyword::key;
+use crate::header_model::keywords;
+
 use crate::ragged::Ragged;
 use crate::reader::internals::open_fixture;
 use crate::reader::{ColumnSelector, FitsReader};
@@ -47,8 +48,18 @@ fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
         data: restored_data,
     } = table::uncompress_table(&compressed_header, compressed.view()).unwrap();
     for n in 1..=columns.len() {
-        assert_eq!(restored_header.get(key!("ZFORM{n}").as_str()), None);
-        assert_eq!(restored_header.get(key!("ZCTYP{n}").as_str()), None);
+        assert_eq!(
+            restored_header
+                .get(keywords::ZFORM.indexed(n).unwrap())
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            restored_header
+                .get(keywords::ZCTYP.indexed(n).unwrap())
+                .unwrap(),
+            None
+        );
     }
     assert_eq!(
         restored_header.get_text("ZFORM01").unwrap(),
@@ -57,7 +68,7 @@ fn check_table_roundtrip(compression: Compression, rows_per_tile: usize) {
     for keyword in [
         "ZTABLE", "ZTILELEN", "ZNAXIS1", "ZNAXIS2", "ZPCOUNT", "ZHEAPPTR",
     ] {
-        assert_eq!(restored_header.get(keyword), None);
+        assert_eq!(restored_header.get(keyword).unwrap(), None);
     }
     let restored = Table::from_data(&restored_header, restored_data).unwrap();
 
@@ -154,33 +165,33 @@ fn table_decompression_restores_reserved_metadata_exactly() {
         &CompressionConfig::new(Compression::GZIP).tiled([1]),
     );
     container_header
-        .set_internal("ZTHEAP", 4)
-        .comment_internal("ZTHEAP", "original heap start")
-        .set_internal("ZHECKSUM", "0123456789ABCDEF")
-        .comment_internal("ZHECKSUM", "original HDU checksum")
-        .set_internal("ZDATASUM", "123456789")
-        .comment_internal("ZDATASUM", "original data checksum");
+        .set_internal(keywords::ZTHEAP, 4)
+        .set_comment_internal(keywords::ZTHEAP, "original heap start")
+        .set_internal(keywords::ZHECKSUM, "0123456789ABCDEF")
+        .set_comment_internal(keywords::ZHECKSUM, "original HDU checksum")
+        .set_internal(keywords::ZDATASUM, "123456789")
+        .set_comment_internal(keywords::ZDATASUM, "original data checksum");
     let container_main = container_header.get_integer("NAXIS1").unwrap().unwrap()
         * container_header.get_integer("NAXIS2").unwrap().unwrap();
     container_header
-        .set_internal("THEAP", container_main)
-        .comment_internal("THEAP", "compressed heap start")
-        .set_internal("CHECKSUM", "FEDCBA9876543210")
-        .comment_internal("CHECKSUM", "compressed HDU checksum")
-        .set_internal("DATASUM", "987654321")
-        .comment_internal("DATASUM", "compressed data checksum");
+        .set_internal(keywords::THEAP, container_main)
+        .set_comment_internal(keywords::THEAP, "compressed heap start")
+        .set_internal(keywords::CHECKSUM, "FEDCBA9876543210")
+        .set_comment_internal(keywords::CHECKSUM, "compressed HDU checksum")
+        .set_internal(keywords::DATASUM, "987654321")
+        .set_comment_internal(keywords::DATASUM, "compressed data checksum");
     let container = Table::from_data(&container_header, container_data).unwrap();
     let restored = table::uncompress_table(&container_header, container.view()).unwrap();
 
     let mut original = plain(&table);
     original
         .header
-        .set_internal("THEAP", 4)
-        .comment_internal("THEAP", "original heap start")
-        .set_internal("CHECKSUM", "0123456789ABCDEF")
-        .comment_internal("CHECKSUM", "original HDU checksum")
-        .set_internal("DATASUM", "123456789")
-        .comment_internal("DATASUM", "original data checksum");
+        .set_internal(keywords::THEAP, 4)
+        .set_comment_internal(keywords::THEAP, "original heap start")
+        .set_internal(keywords::CHECKSUM, "0123456789ABCDEF")
+        .set_comment_internal(keywords::CHECKSUM, "original HDU checksum")
+        .set_internal(keywords::DATASUM, "123456789")
+        .set_comment_internal(keywords::DATASUM, "original data checksum");
     let mut original_bytes = Vec::new();
     let mut restored_bytes = Vec::new();
     render_header(&original.header, &mut original_bytes).unwrap();
@@ -255,8 +266,8 @@ fn compressed_table_vla_round_trips_all_table_codecs() {
     ] {
         let container = compressed(&table, &CompressionConfig::new(compression).tiled([127]));
         assert_eq!(
-            container.header.get_integer("ZPCOUNT").unwrap(),
-            original.header.get_integer("PCOUNT").unwrap(),
+            container.header.get_integer(keywords::ZPCOUNT).unwrap(),
+            original.header.get_integer(keywords::PCOUNT).unwrap(),
             "{}",
             compression.name()
         );
@@ -313,7 +324,7 @@ fn compressed_table_decode_rejects_the_shared_malformed_pq_corpus() {
             data.extend_from_slice(&cell);
             let mut header = compressed_header.clone();
             header.set_internal(
-                "PCOUNT",
+                keywords::PCOUNT,
                 i64::try_from(heap_prefix.len() + cell.len()).unwrap(),
             );
 
@@ -374,11 +385,11 @@ fn uncompress_table_rejects_overflowing_row_product() {
     // One 1QB descriptor row.
     let mut h = table_header(16, 1, &["1QB"]);
     h.set_internal("TTYPE1", "C1")
-        .set_internal("ZTABLE", true)
-        .set_internal("ZTILELEN", 1)
+        .set_internal(keywords::ZTABLE, true)
+        .set_internal(keywords::ZTILELEN, 1)
         .set_internal("ZNAXIS1", 8)
         .set_internal("ZNAXIS2", 3_000_000_000_000_000_000i64)
-        .set_internal("ZPCOUNT", 0)
+        .set_internal(keywords::ZPCOUNT, 0)
         .set_internal("ZFORM1", "1K");
     let mut data = Vec::new();
     data.extend_from_slice(&0i64.to_be_bytes()); // Q descriptor: nelem
@@ -402,7 +413,7 @@ fn uncompress_table_rejects_overflowing_row_product() {
         h.set_internal(keyword, -1);
         assert!(matches!(
             table::uncompress_table(&h, table.view()),
-            Err(FitsError::KeywordOutOfRange { name }) if name == keyword
+            Err(FitsError::KeywordOutOfRange { keyword }) if keyword == keyword
         ));
         h.set_internal(keyword, 1);
     }
@@ -410,14 +421,16 @@ fn uncompress_table_rejects_overflowing_row_product() {
     // ZTILELEN alone also rejects zero: unlike the other three (where zero is a
     // legitimate empty count), a zero tile height would make the row-tile count
     // diverge rather than merely being out of range.
-    h.set_internal("ZTILELEN", 0);
+    h.set_internal(keywords::ZTILELEN, 0);
     assert!(matches!(
         table::uncompress_table(&h, table.view()),
-        Err(FitsError::KeywordOutOfRange { name: "ZTILELEN" })
+        Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::ZTILELEN
+        })
     ));
-    h.set_internal("ZTILELEN", 1);
+    h.set_internal(keywords::ZTILELEN, 1);
 
-    h.set_internal("TFIELDS", 2)
+    h.set_internal(keywords::TFIELDS, 2)
         .set_internal("NAXIS1", 32)
         .set_internal("TFORM2", "1QB")
         .set_internal("ZNAXIS1", 8)

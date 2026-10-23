@@ -14,9 +14,10 @@ use crate::compress::*;
 use crate::hdu::HduKind;
 use crate::hdu::HduRole;
 use crate::hdu::image_geometry::ImageGeometry;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
 use crate::image_model::Image;
 use crate::image_model::data::Data;
+
 use crate::reader::internals::open_fixture;
 use crate::reader::internals::read_whole;
 
@@ -43,19 +44,19 @@ fn compressed_image_header(
 ) -> Header {
     let tforms: Vec<&str> = columns.iter().map(|&(_, tform)| tform).collect();
     let mut h = table_header(naxis1, 1, &tforms);
-    h.set_internal("PCOUNT", heap);
+    h.set_internal(keywords::PCOUNT, heap);
     for (index, &(ttype, _)) in columns.iter().enumerate() {
-        h.set_internal(&format!("TTYPE{}", index + 1), ttype);
+        h.set_internal(format!("TTYPE{}", index + 1), ttype);
     }
-    h.set_internal("ZIMAGE", true)
-        .set_internal("ZCMPTYPE", cmptype)
-        .set_internal("ZBITPIX", zbitpix)
-        .set_internal("ZNAXIS", i64::try_from(shape.len()).unwrap());
+    h.set_internal(keywords::ZIMAGE, true)
+        .set_internal(keywords::ZCMPTYPE, cmptype)
+        .set_internal(keywords::ZBITPIX, zbitpix)
+        .set_internal(keywords::ZNAXIS, i64::try_from(shape.len()).unwrap());
     for (index, &length) in shape.iter().enumerate() {
-        h.set_internal(&format!("ZNAXIS{}", index + 1), length);
+        h.set_internal(format!("ZNAXIS{}", index + 1), length);
     }
     for (index, &length) in tile.iter().enumerate() {
-        h.set_internal(&format!("ZTILE{}", index + 1), length);
+        h.set_internal(format!("ZTILE{}", index + 1), length);
     }
     h
 }
@@ -163,8 +164,8 @@ fn decompresses_nocompress_tile_verbatim() {
 
     let mut invalid_hcompress = h;
     invalid_hcompress
-        .set_internal("ZCMPTYPE", "HCOMPRESS_1")
-        .set_internal("ZNAXIS", 1)
+        .set_internal(keywords::ZCMPTYPE, "HCOMPRESS_1")
+        .set_internal(keywords::ZNAXIS, 1)
         .set_internal("ZNAXIS1", 4);
     assert!(matches!(
         decompress_image(&invalid_hcompress, &table),
@@ -276,8 +277,8 @@ fn compressed_integer_null_mask_restores_blank_pixels() {
             16,
             4 + i64::try_from(mask.len()).unwrap(),
         );
-        h.set_internal("ZMASKCMP", codec)
-            .set_internal("BLANK", -999);
+        h.set_internal(keywords::ZMASKCMP, codec)
+            .set_internal(keywords::BLANK, -999);
         let mut data = Vec::new();
         data.extend_from_slice(&4i32.to_be_bytes());
         data.extend_from_slice(&0i32.to_be_bytes());
@@ -294,10 +295,12 @@ fn compressed_integer_null_mask_restores_blank_pixels() {
         );
 
         let mut missing_blank = h.clone();
-        missing_blank.remove_all("BLANK");
+        missing_blank.remove_all(keywords::BLANK).unwrap();
         assert!(matches!(
             decompress_image(&missing_blank, &table),
-            Err(FitsError::MissingKeyword { name: "BLANK" })
+            Err(FitsError::MissingKeyword {
+                keyword: keywords::BLANK
+            })
         ));
     }
 }
@@ -318,7 +321,7 @@ fn compressed_float_null_mask_restores_nan_pixels() {
         32,
         10,
     );
-    h.set_internal("ZMASKCMP", "NOCOMPRESS");
+    h.set_internal(keywords::ZMASKCMP, "NOCOMPRESS");
     let mut data = Vec::new();
     data.extend_from_slice(&8i32.to_be_bytes());
     data.extend_from_slice(&0i32.to_be_bytes());
@@ -374,15 +377,17 @@ fn zblank_column_overrides_keyword_per_tile() {
 
     for invalid in [0, 10_001] {
         let mut invalid_dither = h.clone();
-        invalid_dither.set_internal("ZDITHER0", invalid);
+        invalid_dither.set_internal(keywords::ZDITHER0, invalid);
         assert!(matches!(
             decompress_image(&invalid_dither, &table),
-            Err(FitsError::KeywordOutOfRange { name: "ZDITHER0" })
+            Err(FitsError::KeywordOutOfRange {
+                keyword: keywords::ZDITHER0
+            })
         ));
     }
 
     let mut mistyped_header = h.clone();
-    mistyped_header.set_internal("ZBITPIX", "not an integer");
+    mistyped_header.set_internal(keywords::ZBITPIX, "not an integer");
     assert!(matches!(
         decompress_image(&mistyped_header, &table),
         Err(FitsError::TypeMismatch { name, expected })
@@ -393,7 +398,7 @@ fn zblank_column_overrides_keyword_per_tile() {
     out_of_range_header.set_internal("ZTILE1", 0);
     assert!(matches!(
         decompress_image(&out_of_range_header, &table),
-        Err(FitsError::KeywordOutOfRange { name: "ZTILEn" })
+        Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "ZTILE1"
     ));
 
     for (column, name, kind) in [

@@ -2,12 +2,12 @@
 
 use crate::error::Result;
 use crate::header_model::Header;
-use crate::keyword::AltSuffix;
-use crate::keyword::key;
+use crate::keyword::{AltSuffix, Keyword};
 use crate::world_coordinates::celestial_pole::CelestialPole;
 use crate::world_coordinates::first_real;
 use crate::world_coordinates::projected_celestial_axes::ProjectedCelestialAxes;
 use crate::world_coordinates::projection::{Projection, ProjectionParameters};
+use crate::world_coordinates::read_real;
 
 /// The celestial half of a WCS once the header is resolved: which axes carry the
 /// longitude and latitude, the projection and its `PVi_m` parameters, and the
@@ -44,7 +44,10 @@ impl CelestialTransform {
         let proj = axes.projection;
         let mut pv = proj.parameter_defaults();
         for (m, value) in pv.iter_mut().enumerate() {
-            if let Some(header_value) = header.get_real(key!("PV{}_{m}{a}", lat + 1).as_str())? {
+            if let Some(header_value) = read_real(
+                header,
+                Keyword::try_from(format_args!("PV{}_{m}{a}", lat + 1)),
+            )? {
                 *value = header_value;
             }
         }
@@ -63,25 +66,31 @@ impl CelestialTransform {
         // longitude axis (§8.3).
         let reference = proj.reference_point(&pv);
         let (mut phi0, mut theta0) = (reference.phi, reference.theta);
-        if let Some(v) = header.get_real(key!("PV{}_1{a}", lng + 1).as_str())? {
+        if let Some(v) = read_real(
+            header,
+            Keyword::try_from(format_args!("PV{}_1{a}", lng + 1)),
+        )? {
             phi0 = v;
         }
-        if let Some(v) = header.get_real(key!("PV{}_2{a}", lng + 1).as_str())? {
+        if let Some(v) = read_real(
+            header,
+            Keyword::try_from(format_args!("PV{}_2{a}", lng + 1)),
+        )? {
             theta0 = v;
         }
         let (alpha0, delta0) = (crval[lng], crval[lat]);
         // LONPOLE (= LONPOLEa or PVi_3a): default φ0 if δ0 ≥ θ0, else φ0 + 180°.
         let phip = first_real(
             header,
-            key!("LONPOLE{a}").as_str(),
-            key!("PV{}_3{a}", lng + 1).as_str(),
+            Keyword::try_from(format_args!("LONPOLE{a}")),
+            Keyword::try_from(format_args!("PV{}_3{a}", lng + 1)),
         )?
         .unwrap_or(if delta0 >= theta0 { phi0 } else { phi0 + 180.0 });
         // LATPOLE (= LATPOLEa or PVi_4a): default 90°.
         let thetap = first_real(
             header,
-            key!("LATPOLE{a}").as_str(),
-            key!("PV{}_4{a}", lng + 1).as_str(),
+            Keyword::try_from(format_args!("LATPOLE{a}")),
+            Keyword::try_from(format_args!("PV{}_4{a}", lng + 1)),
         )?
         .unwrap_or(90.0);
         Ok(Some(Self {

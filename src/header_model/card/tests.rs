@@ -92,7 +92,7 @@ fn large_magnitude_real_renders_with_exponent_and_round_trips() {
     // format_real must use the §4.2.4 uppercase-`E` form instead (no truncation).
     for &r in &[1e300_f64, -1e300, 1e-300, 2.5e123] {
         let card = Card::Value {
-            keyword: "BIG".into(),
+            keyword: Keyword::new("BIG"),
             value: Value::Real(r),
             comment: None,
         };
@@ -256,7 +256,7 @@ fn end_requires_the_canonical_blank_record() {
     );
     assert!(matches!(
         ParsedRecord::parse(&card_bytes("END     =                    T")),
-        Err(FitsError::ReservedKeyword { name }) if name == "END"
+        Err(FitsError::ReservedKeyword { keyword }) if keyword == "END"
     ));
 }
 
@@ -266,7 +266,7 @@ fn long_string_splits_into_a_continue_chain() {
     // across a record boundary.
     let value = format!("{}'q'{}", "a".repeat(60), "b".repeat(60));
     let card = Card::Value {
-        keyword: "LONGSTR".into(),
+        keyword: Keyword::new("LONGSTR"),
         value: Value::Text(value.clone()),
         comment: Some("trailing note".into()),
     };
@@ -298,7 +298,7 @@ fn long_string_splits_into_a_continue_chain() {
 fn long_string_comment_boundary_is_lossless_or_rejected() {
     let exact_comment = "c".repeat(65);
     let exact = Card::Value {
-        keyword: "TEXT".into(),
+        keyword: Keyword::new("TEXT"),
         value: Value::Text("x".into()),
         comment: Some(exact_comment.clone()),
     };
@@ -313,7 +313,7 @@ fn long_string_comment_boundary_is_lossless_or_rejected() {
     assert_eq!(entry.comment, Some(exact_comment.as_str()));
 
     let overflow = Card::Value {
-        keyword: "TEXT".into(),
+        keyword: Keyword::new("TEXT"),
         value: Value::Text("x".into()),
         comment: Some("c".repeat(66)),
     };
@@ -370,7 +370,7 @@ fn non_finite_reals_are_rejected_on_read() {
 #[test]
 fn rendering_a_non_finite_real_returns_an_error() {
     let card = Card::Value {
-        keyword: "BAD".into(),
+        keyword: Keyword::new("BAD"),
         value: Value::Real(f64::INFINITY),
         comment: None,
     };
@@ -404,7 +404,7 @@ fn every_value_kind_renders_its_fixed_format_field() {
     ];
     for (value, field) in cases {
         let card = Card::Value {
-            keyword: "KEY".into(),
+            keyword: Keyword::new("KEY"),
             value: value.clone(),
             comment: None,
         };

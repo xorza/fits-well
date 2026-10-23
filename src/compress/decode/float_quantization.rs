@@ -5,7 +5,7 @@ use crate::bintable::table_view::TableView;
 use crate::compress::DitherMethod;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
 
 /// The float-quantization inputs (§10.2): the dither method and seed, and the
 /// per-tile `ZSCALE`/`ZZERO`/`ZBLANK` metadata columns. An integer image has none.
@@ -44,21 +44,23 @@ impl FloatQuantization {
                 zzero: None,
             });
         }
-        let quantiz = header.get_text("ZQUANTIZ")?.unwrap_or("NO_DITHER");
+        let quantiz = header.get_text(keywords::ZQUANTIZ)?.unwrap_or("NO_DITHER");
         // A float image's samples cannot be reconstructed without reproducing its
         // dither exactly.
         let method =
             DitherMethod::parse(quantiz).ok_or_else(|| FitsError::UnsupportedCompression {
                 name: format!("float quantization {quantiz}"),
             })?;
-        let zdither0 = header.get_integer("ZDITHER0")?.unwrap_or(1);
+        let zdither0 = header.get_integer(keywords::ZDITHER0)?.unwrap_or(1);
         if !(1..=10_000).contains(&zdither0) {
-            return Err(FitsError::KeywordOutOfRange { name: "ZDITHER0" });
+            return Err(FitsError::KeywordOutOfRange {
+                keyword: keywords::ZDITHER0,
+            });
         }
         Ok(Self {
             method,
             zdither0,
-            zblank_keyword: header.get_integer("ZBLANK")?,
+            zblank_keyword: header.get_integer(keywords::ZBLANK)?,
             zblank_column: read_i64_column(table, "ZBLANK")?,
             zscale: read_f64_column(table, "ZSCALE")?,
             zzero: read_f64_column(table, "ZZERO")?,

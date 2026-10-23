@@ -10,20 +10,19 @@
 
 use std::io::{Seek, Write};
 
-#[cfg(feature = "compression")]
-use crate::compress::CompressionConfig;
-use crate::fits_writer::ascii_builder::AsciiBuilder;
-use crate::fits_writer::builder::Builder;
-use crate::fits_writer::writer::Writer;
-use crate::image_model::Metadata;
-use crate::image_model::view::Borrowed;
-
 use crate::block;
 use crate::block::{CARD_SIZE, SPACE_FILL, ZERO_FILL};
 use crate::checksum;
+#[cfg(feature = "compression")]
+use crate::compress::CompressionConfig;
 use crate::error::{FitsError, Result};
+use crate::fits_writer::ascii_builder::AsciiBuilder;
+use crate::fits_writer::builder::Builder;
+use crate::fits_writer::writer::Writer;
 use crate::hdu::{HduKind, HduPosition, HduRole, data_extent};
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
+use crate::image_model::Metadata;
+use crate::image_model::view::Borrowed;
 use crate::reserved_keywords;
 
 pub(crate) mod ascii_builder;
@@ -344,8 +343,8 @@ fn prepare_header_with_data_sum(
     data_sum: u32,
     out: &mut Vec<u8>,
 ) -> Result<()> {
-    header.set_internal("DATASUM", data_sum.to_string());
-    header.set_internal("CHECKSUM", PLACEHOLDER_CHECKSUM);
+    header.set_internal(keywords::DATASUM, data_sum.to_string());
+    header.set_internal(keywords::CHECKSUM, PLACEHOLDER_CHECKSUM);
     render_header(&header, out)?;
     let hdu_sum = checksum::combine(checksum::accumulate(out, 0), data_sum);
     patch_checksum(out, &checksum::encode(hdu_sum, true));
@@ -371,12 +370,14 @@ fn write_prepared<W: Write>(
 fn empty_primary_header() -> Header {
     let mut header = Header::new();
     header
-        .set_internal("SIMPLE", true)
-        .comment_internal("SIMPLE", "file conforms to FITS standard");
-    header.set_internal("BITPIX", 8).set_internal("NAXIS", 0);
+        .set_internal(keywords::SIMPLE, true)
+        .set_comment_internal(keywords::SIMPLE, "file conforms to FITS standard");
     header
-        .set_internal("EXTEND", true)
-        .comment_internal("EXTEND", "extensions follow");
+        .set_internal(keywords::BITPIX, 8)
+        .set_internal(keywords::NAXIS, 0);
+    header
+        .set_internal(keywords::EXTEND, true)
+        .set_comment_internal(keywords::EXTEND, "extensions follow");
     header
 }
 
@@ -413,12 +414,23 @@ fn accept_row_count(
 /// [`accept_row_count`] holds every column a builder takes to the table's row count.
 const ROW_COUNT_FIXED: &str = "the table builder fixes every column's row count";
 
-fn validate_scaling(tscale: Option<f64>, tzero: Option<f64>, allowed: bool) -> Result<()> {
+/// Errors when column `n` sets a scaling its type takes none of, or one that is not
+/// finite.
+fn validate_scaling(
+    tscale: Option<f64>,
+    tzero: Option<f64>,
+    allowed: bool,
+    n: usize,
+) -> Result<()> {
     if tscale.is_some_and(|value| !allowed || !value.is_finite()) {
-        return Err(FitsError::KeywordOutOfRange { name: "TSCALn" });
+        return Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::TSCAL.indexed(n)?,
+        });
     }
     if tzero.is_some_and(|value| !allowed || !value.is_finite()) {
-        return Err(FitsError::KeywordOutOfRange { name: "TZEROn" });
+        return Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::TZERO.indexed(n)?,
+        });
     }
     Ok(())
 }

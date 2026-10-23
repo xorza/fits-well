@@ -12,6 +12,7 @@ use crate::image_model::data::Data;
 use crate::image_model::region::Region;
 use crate::image_model::scaling::Scaling;
 use crate::image_model::view::View;
+
 use crate::reader::internals::{fixture_bytes, fixture_path, open_fixture, read_whole};
 use crate::reader::*;
 use crate::world_coordinates::tabular::internals::{lookup_bytes, lookup_header};
@@ -71,9 +72,9 @@ fn write_tab_lookup_columns(
 ) {
     let mut header = lookup_header(columns);
     header
-        .set_internal("EXTNAME", "WCS-TABLE")
-        .set_internal("EXTVER", version)
-        .set_internal("EXTLEVEL", level);
+        .set_internal(keywords::EXTNAME, "WCS-TABLE")
+        .set_internal(keywords::EXTVER, version)
+        .set_internal(keywords::EXTLEVEL, level);
     writer
         .write_raw_hdu(&header, &lookup_bytes(columns))
         .unwrap();
@@ -83,9 +84,9 @@ fn write_tab_lookup_columns(
 fn read_wcs_resolves_the_exact_tabular_extension() {
     let mut primary = Header::new();
     primary
-        .set_internal("SIMPLE", true)
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 1)
+        .set_internal(keywords::SIMPLE, true)
+        .set_internal(keywords::BITPIX, 8)
+        .set_internal(keywords::NAXIS, 1)
         .set_internal("NAXIS1", 1)
         .set_internal("CTYPE1", "WAVE-TAB")
         .set_internal("CUNIT1", "m")
@@ -104,8 +105,8 @@ fn read_wcs_resolves_the_exact_tabular_extension() {
     // card cannot fail a lookup that does not concern it.
     let mut decoy = table_header(0, 0, &[]);
     decoy
-        .set_internal("EXTNAME", "OTHER")
-        .set_internal("EXTVER", "not-an-integer");
+        .set_internal(keywords::EXTNAME, "OTHER")
+        .set_internal(keywords::EXTVER, "not-an-integer");
     writer.write_raw_hdu(&decoy, &[]).unwrap();
     write_tab_lookup(&mut writer, 2, 1, &[100.0, 200.0, 400.0]);
     write_tab_lookup(&mut writer, 2, 3, &[10.0, 20.0, 40.0]);
@@ -125,10 +126,10 @@ fn read_wcs_resolves_the_exact_tabular_extension() {
 fn read_wcs_resolves_shared_arrays_and_extensions_once_per_reference_group() {
     let mut primary = Header::new();
     primary
-        .set_internal("SIMPLE", true)
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 0)
-        .set_internal("WCSAXES", 5);
+        .set_internal(keywords::SIMPLE, true)
+        .set_internal(keywords::BITPIX, 8)
+        .set_internal(keywords::NAXIS, 0)
+        .set_internal(keywords::WCSAXES, 5);
     for (axis, column, version, table_axis) in [
         (1, "FIRST", 1, 1),
         (2, "SECOND", 1, 1),
@@ -179,9 +180,9 @@ fn read_wcs_resolves_shared_arrays_and_extensions_once_per_reference_group() {
 fn read_wcs_fetches_only_the_referenced_first_row_heap_cells() {
     let mut primary = Header::new();
     primary
-        .set_internal("SIMPLE", true)
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 1)
+        .set_internal(keywords::SIMPLE, true)
+        .set_internal(keywords::BITPIX, 8)
+        .set_internal(keywords::NAXIS, 1)
         .set_internal("NAXIS1", 1)
         .set_internal("CTYPE1", "WAVE-TAB")
         .set_internal("CUNIT1", "m")
@@ -207,7 +208,7 @@ fn read_wcs_fetches_only_the_referenced_first_row_heap_cells() {
     )
     .unwrap();
     let mut lookup_header = Header::new();
-    lookup_header.set_internal("EXTNAME", "WCS-TABLE");
+    lookup_header.set_internal(keywords::EXTNAME, "WCS-TABLE");
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer.write_raw_hdu(&primary, &[0]).unwrap();
     writer.write_table(&table, Some(&lookup_header)).unwrap();
@@ -409,7 +410,7 @@ fn malformed_image_pcount_is_rejected_not_panicked() {
     assert!(matches!(r.image(0), Err(FitsError::ImageHasGroups)));
     // The scan could not resolve the image, and reports why on request.
     assert!(matches!(
-        r.hdus()[0].image(),
+        r.hdus()[0].image_metadata(),
         Err(FitsError::ImageHasGroups)
     ));
     assert!(matches!(
@@ -454,7 +455,9 @@ fn content_before_any_valid_hdu_is_rejected() {
     let bytes = vec![b'x'; BLOCK_SIZE + 17];
     assert!(matches!(
         FitsReader::open(Cursor::new(bytes)),
-        Err(FitsError::MissingKeyword { name: "SIMPLE" })
+        Err(FitsError::MissingKeyword {
+            keyword: keywords::SIMPLE
+        })
     ));
 }
 
@@ -477,7 +480,9 @@ fn role_aware_scanning_rejects_invalid_file_starts_and_group_signatures() {
     );
     assert!(matches!(
         FitsReader::open(Cursor::new(extension_only)),
-        Err(FitsError::MissingKeyword { name: "SIMPLE" })
+        Err(FitsError::MissingKeyword {
+            keyword: keywords::SIMPLE
+        })
     ));
 
     let invalid_groups = fits_file(
@@ -494,7 +499,7 @@ fn role_aware_scanning_rejects_invalid_file_starts_and_group_signatures() {
     );
     assert!(matches!(
         FitsReader::open(Cursor::new(invalid_groups)),
-        Err(FitsError::KeywordOutOfRange { name: "NAXIS1" })
+        Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "NAXIS1"
     ));
 }
 
@@ -539,7 +544,9 @@ fn extensions_require_pcount_and_gcount_for_boundary_sizing() {
     ));
     assert!(matches!(
         FitsReader::open(Cursor::new(bytes)),
-        Err(FitsError::MissingKeyword { name: "PCOUNT" })
+        Err(FitsError::MissingKeyword {
+            keyword: keywords::PCOUNT
+        })
     ));
 }
 
@@ -640,33 +647,64 @@ fn image_rejects_non_image_hdus() {
 }
 
 #[test]
-fn hdu_index_finds_extensions_by_name_and_version() {
+fn hdu_selectors_find_hdus_by_index_name_version_and_level() {
     let f = open_fixture("DDTSUVDATA.fits");
     // hdu 1 is the AIPS antenna table, EXTNAME = 'AIPS AN' (trailing spaces trimmed).
-    assert_eq!(f.hdu_index("AIPS AN", None).unwrap(), Some(1));
-    assert_eq!(f.hdu_index("aips an", None).unwrap(), Some(1)); // case-insensitive
-    assert_eq!(f.hdu_index("AIPS AN", Some(99)).unwrap(), None); // no such EXTVER
-    assert_eq!(f.hdu_index("MISSING", None).unwrap(), None);
+    assert_eq!(f.hdu_index("AIPS AN").unwrap(), 1);
+    assert_eq!(f.hdu_index("aips an").unwrap(), 1); // case-insensitive
+    assert_eq!(f.hdu_index(1).unwrap(), 1);
+    // The primary has no EXTNAME, so it is named PRIMARY, in any case.
+    assert_eq!(f.hdu_index("PRIMARY").unwrap(), 0);
+    assert_eq!(f.hdu_index("primary").unwrap(), 0);
+    assert!(f.hdus()[0].matches("PRIMARY").unwrap());
+    assert!(!f.hdus()[1].matches("PRIMARY").unwrap());
+    assert!(matches!(
+        f.hdu_index(("AIPS AN", 99)), // no such EXTVER
+        Err(FitsError::HduNotFound { name, version: Some(99), level: None }) if name == "AIPS AN"
+    ));
+    // EXTLEVEL is 1 where the card is absent.
+    let level = |level| HduSelector::Extension {
+        name: "AIPS AN",
+        version: None,
+        level: Some(level),
+    };
+    assert_eq!(f.hdu_index(level(1)).unwrap(), 1);
+    assert!(matches!(
+        f.hdu_index(level(2)),
+        Err(FitsError::HduNotFound { level: Some(2), .. })
+    ));
+    assert!(matches!(
+        f.hdu_index("MISSING"),
+        Err(FitsError::HduNotFound { name, version: None, level: None }) if name == "MISSING"
+    ));
+    assert!(matches!(
+        f.hdu(9),
+        Err(FitsError::IndexOutOfBounds {
+            indexed: Indexed::Hdu,
+            index: 9,
+            len: 2
+        })
+    ));
     // A tiled-compressed image extension is found by its EXTNAME too.
     assert_eq!(
         open_fixture("comp_gzip_i16.fits")
-            .hdu_index("COMPRESSED_IMAGE", None)
+            .hdu_index("COMPRESSED_IMAGE")
             .unwrap(),
-        Some(1)
+        1
     );
 
     let mut header = Header::new();
     header
-        .set_internal("SIMPLE", true)
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 0)
-        .set_internal("EXTNAME", 7);
+        .set_internal(keywords::SIMPLE, true)
+        .set_internal(keywords::BITPIX, 8)
+        .set_internal(keywords::NAXIS, 0)
+        .set_internal(keywords::EXTNAME, 7);
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer.write_raw_hdu(&header, &[]).unwrap();
     let bytes = writer.into_inner().into_inner();
     let malformed = FitsReader::from_bytes(&bytes).unwrap();
     assert!(matches!(
-        malformed.hdu_index("SCI", None),
+        malformed.hdu_index("SCI"),
         Err(FitsError::TypeMismatch { name, expected })
             if name == "EXTNAME" && expected == "text"
     ));
@@ -675,9 +713,9 @@ fn hdu_index_finds_extensions_by_name_and_version() {
     let primary = Image::new(vec![1], vec![0u8]).unwrap();
     let extension = Image::new(vec![3], vec![10i16, 20, 30]).unwrap();
     let mut extension_header = Header::new();
-    extension_header.set("EXTNAME", "SCI").unwrap();
-    extension_header.set("EXTVER", 2).unwrap();
-    extension_header.set("OBJECT", "target").unwrap();
+    extension_header.set(keywords::EXTNAME, "SCI").unwrap();
+    extension_header.set(keywords::EXTVER, 2).unwrap();
+    extension_header.set(keywords::OBJECT, "target").unwrap();
 
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer.write_image(primary.view(), None).unwrap();
@@ -687,30 +725,49 @@ fn hdu_index_finds_extensions_by_name_and_version() {
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
 
-    let index = reader.hdu_index("sci", Some(2)).unwrap().unwrap();
+    let index = reader.hdu_index(("sci", 2)).unwrap();
     assert_eq!(index, 1);
     assert_eq!(reader.hdus()[index].kind, HduKind::Image);
     assert_eq!(
-        reader.hdus()[index].header.get_text("OBJECT").unwrap(),
+        reader.hdus()[index]
+            .header
+            .get_text(keywords::OBJECT)
+            .unwrap(),
         Some("target")
     );
     assert_eq!(
         read_whole(&mut reader, index).samples,
         Data::I16(vec![10, 20, 30])
     );
+    assert_eq!(
+        reader
+            .image(("SCI", 2))
+            .unwrap()
+            .read(Region::All)
+            .unwrap()
+            .into_samples(),
+        Data::I16(vec![10, 20, 30])
+    );
     assert_eq!(reader.hdus()[0].kind, HduKind::Primary);
-    assert_eq!(reader.hdu_index("SCI", Some(3)).unwrap(), None);
+    assert!(matches!(
+        reader.hdu_index(("SCI", 3)),
+        Err(FitsError::HduNotFound {
+            version: Some(3),
+            ..
+        })
+    ));
 }
 
 #[test]
-fn image_indices_lists_readable_images_including_compressed() {
+fn images_lists_readable_images_including_compressed() {
+    let images = |name: &str| open_fixture(name).images().collect::<Vec<_>>();
     // A single primary array image.
-    assert_eq!(open_fixture("UITfuv2582gc.fits").image_indices(), vec![0]);
+    assert_eq!(images("UITfuv2582gc.fits"), [0]);
     // Empty primary + a tiled-compressed image extension (classified by ZIMAGE),
     // so only HDU 1 is an image — the `NAXIS = 0` primary is skipped.
-    assert_eq!(open_fixture("comp_gzip_i16.fits").image_indices(), vec![1]);
+    assert_eq!(images("comp_gzip_i16.fits"), [1]);
     // Random-groups primary + plain bintable: no images at all.
-    assert!(open_fixture("DDTSUVDATA.fits").image_indices().is_empty());
+    assert!(images("DDTSUVDATA.fits").is_empty());
 
     // `NAXIS = 0` holds no array in a primary and in an image extension alike.
     let mut bytes = fits_file(
@@ -733,7 +790,7 @@ fn image_indices_lists_readable_images_including_compressed() {
     let reader = FitsReader::open(Cursor::new(bytes)).unwrap();
     let images: Vec<bool> = reader.hdus().iter().map(Hdu::is_image).collect();
     assert_eq!(images, [false, false, true]);
-    assert_eq!(reader.image_indices(), vec![2]);
+    assert_eq!(reader.images().collect::<Vec<_>>(), [2]);
 }
 
 #[test]
@@ -1136,7 +1193,7 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
         let bytes = writer.into_inner().into_inner();
         let mut reader = FitsReader::from_bytes(&bytes).unwrap();
         // The encoded image's geometry, not the container's two-axis BINTABLE.
-        let metadata = reader.hdus()[1].image().unwrap();
+        let metadata = reader.hdus()[1].image_metadata().unwrap();
         assert_eq!(
             (metadata.shape, metadata.bitpix, metadata.scaling),
             (&[9, 7][..], bitpix, scaling)

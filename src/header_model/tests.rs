@@ -29,27 +29,78 @@ fn parses_structural_keywords() {
 #[test]
 fn keyword_lookup_returns_first_occurrence() {
     let h = sample();
-    assert_eq!(h.get_text("OBJECT").unwrap(), Some("Cygnus X-1"));
-    assert_eq!(h.get("MISSING"), None);
+    assert_eq!(h.get_text(keywords::OBJECT).unwrap(), Some("Cygnus X-1"));
+    assert_eq!(h.get("MISSING").unwrap(), None);
+    // A name and its preset look up the same card; a name that is no keyword is an
+    // error, not an absent card.
+    assert_eq!(
+        h.get("NAXIS1").unwrap(),
+        h.get(keywords::NAXIS.indexed(1).unwrap()).unwrap()
+    );
+    for name in ["naxis", "NAXIS1234"] {
+        assert!(matches!(
+            h.get_integer(name),
+            Err(FitsError::InvalidKeyword { name: n }) if n == name
+        ));
+    }
+    let entry = h.entry(keywords::OBJECT).unwrap().unwrap();
+    assert_eq!(entry.keyword, "OBJECT");
+    assert_eq!(entry.value.and_then(Value::as_text), Some("Cygnus X-1"));
+    assert_eq!(h.entry(keywords::EXTNAME).unwrap(), None);
 }
 
 #[test]
 fn strict_optional_getters_distinguish_absent_and_mistyped_values() {
     let h = sample();
-    assert_eq!(h.get_logical("SIMPLE").unwrap(), Some(true));
-    assert_eq!(h.get_integer("BITPIX").unwrap(), Some(16));
-    assert_eq!(h.get_real("BITPIX").unwrap(), Some(16.0));
-    assert_eq!(h.get_text("OBJECT").unwrap(), Some("Cygnus X-1"));
+    assert_eq!(h.get_logical(keywords::SIMPLE).unwrap(), Some(true));
+    assert_eq!(h.get_integer(keywords::BITPIX).unwrap(), Some(16));
+    assert_eq!(h.get_real(keywords::BITPIX).unwrap(), Some(16.0));
+    assert_eq!(h.get_text(keywords::OBJECT).unwrap(), Some("Cygnus X-1"));
     assert_eq!(h.get_real("MISSING").unwrap(), None);
     assert!(matches!(
-        h.get_real("OBJECT"),
+        h.get_real(keywords::OBJECT),
         Err(FitsError::TypeMismatch { name, expected })
             if name == "OBJECT" && expected == "real"
     ));
     assert!(matches!(
-        h.get_logical("BITPIX"),
+        h.get_logical(keywords::BITPIX),
         Err(FitsError::TypeMismatch { name, expected })
             if name == "BITPIX" && expected == "logical"
+    ));
+
+    // `require_*`: the value when present, `MissingKeyword` when absent, and the same
+    // `TypeMismatch` as `get_*` when it holds another type.
+    assert!(h.require_logical(keywords::SIMPLE).unwrap());
+    assert_eq!(h.require_integer(keywords::BITPIX).unwrap(), 16);
+    assert_eq!(h.require_real(keywords::BITPIX).unwrap(), 16.0);
+    assert_eq!(h.require_text(keywords::OBJECT).unwrap(), "Cygnus X-1");
+    assert!(matches!(
+        h.require_logical(keywords::EXTEND),
+        Err(FitsError::MissingKeyword {
+            keyword: keywords::EXTEND
+        })
+    ));
+    assert!(matches!(
+        h.require_integer(keywords::PCOUNT),
+        Err(FitsError::MissingKeyword {
+            keyword: keywords::PCOUNT
+        })
+    ));
+    assert!(matches!(
+        h.require_real(keywords::BSCALE),
+        Err(FitsError::MissingKeyword {
+            keyword: keywords::BSCALE
+        })
+    ));
+    assert!(matches!(
+        h.require_text(keywords::EXTNAME),
+        Err(FitsError::MissingKeyword {
+            keyword: keywords::EXTNAME
+        })
+    ));
+    assert!(matches!(
+        h.require_text(keywords::BITPIX),
+        Err(FitsError::TypeMismatch { name, expected }) if name == "BITPIX" && expected == "text"
     ));
 }
 
@@ -106,7 +157,21 @@ fn iter_yields_every_record_in_order_with_duplicates() {
         Some("Cygnus X-1")
     );
     assert_eq!(entries[7].value.and_then(|v| v.as_text()), Some("shadowed"));
-    assert_eq!(h.get_text("OBJECT").unwrap(), Some("Cygnus X-1"));
+    assert_eq!(h.get_text(keywords::OBJECT).unwrap(), Some("Cygnus X-1"));
+
+    // The collection view: an exact length, iteration by reference, and positions that
+    // count commentary records too.
+    assert_eq!(h.len(), 8);
+    assert!(!h.is_empty());
+    assert!(Header::new().is_empty());
+    assert_eq!(h.iter().len(), 8);
+    assert_eq!((&h).into_iter().count(), 8);
+    assert_eq!(h.index_of(keywords::OBJECT).unwrap(), Some(5));
+    assert_eq!(h.index_of(keywords::COMMENT).unwrap(), Some(6));
+    assert!(h.contains(keywords::COMMENT).unwrap());
+    assert!(!h.contains(keywords::EXTNAME).unwrap());
+    assert_eq!(h.comments().collect::<Vec<_>>(), [" some annotation"]);
+    assert_eq!(h.history().count(), 0);
 }
 
 #[test]
@@ -171,7 +236,7 @@ fn orphan_continue_is_demoted_to_commentary() {
         h.cards[0].comment(),
         Some("  'no predecessor' / retained note")
     );
-    assert_eq!(h.get("CONTINUE"), None);
+    assert_eq!(h.get("CONTINUE").unwrap(), None);
 
     let mut rendered = Vec::new();
     render_header(&h, &mut rendered).unwrap();
@@ -188,18 +253,18 @@ fn missing_end_record_is_an_error() {
 #[test]
 fn builder_sets_replaces_and_indexes_keywords() {
     let mut h = Header::new();
-    h.set_internal("SIMPLE", true)
-        .comment_internal("SIMPLE", "conforms")
-        .set_internal("BITPIX", 16)
-        .set_internal("OBJECT", "NGC4151");
-    assert_eq!(h.get_logical("SIMPLE").unwrap(), Some(true));
-    assert_eq!(h.get_integer("BITPIX").unwrap(), Some(16));
-    assert_eq!(h.get_text("OBJECT").unwrap(), Some("NGC4151"));
+    h.set_internal(keywords::SIMPLE, true)
+        .set_comment_internal(keywords::SIMPLE, "conforms")
+        .set_internal(keywords::BITPIX, 16)
+        .set_internal(keywords::OBJECT, "NGC4151");
+    assert_eq!(h.get_logical(keywords::SIMPLE).unwrap(), Some(true));
+    assert_eq!(h.get_integer(keywords::BITPIX).unwrap(), Some(16));
+    assert_eq!(h.get_text(keywords::OBJECT).unwrap(), Some("NGC4151"));
     assert_eq!(h.cards.len(), 3);
 
     // Re-setting a keyword replaces in place — no duplicate card, index stable.
-    h.set_internal("BITPIX", -32);
-    assert_eq!(h.get_integer("BITPIX").unwrap(), Some(-32));
+    h.set_internal(keywords::BITPIX, -32);
+    assert_eq!(h.get_integer(keywords::BITPIX).unwrap(), Some(-32));
     assert_eq!(h.cards.len(), 3);
     // The attached comment survives on its card.
     assert_eq!(h.cards[0].comment(), Some("conforms"));
@@ -210,10 +275,10 @@ fn builder_sets_replaces_and_indexes_keywords() {
             .set_internal("ZCTYP1", "GZIP_1")
             .set_internal("KEEP", 7);
         h.remove_where(|keyword| matches!(keyword, "ZFORM1" | "ZCTYP1"));
-        assert_eq!(h.get("ZFORM1"), None);
-        assert_eq!(h.get("ZCTYP1"), None);
+        assert_eq!(h.get("ZFORM1").unwrap(), None);
+        assert_eq!(h.get("ZCTYP1").unwrap(), None);
         assert_eq!(h.get_integer("KEEP").unwrap(), Some(7));
-        assert_eq!(h.get_integer("BITPIX").unwrap(), Some(-32));
+        assert_eq!(h.get_integer(keywords::BITPIX).unwrap(), Some(-32));
     }
 }
 
@@ -236,7 +301,7 @@ fn builder_rejects_nonstandard_keyword_names_without_mutating() {
 #[test]
 fn builder_appends_commentary_cards() {
     let mut h = Header::new();
-    h.set_internal("SIMPLE", true);
+    h.set_internal(keywords::SIMPLE, true);
     h.push_comment("made by fits").unwrap();
     h.push_history("step 1").unwrap();
     assert_eq!(h.cards.len(), 3);
@@ -244,43 +309,85 @@ fn builder_appends_commentary_cards() {
     assert_eq!(h.cards[1].keyword(), "COMMENT");
     assert_eq!(h.cards[2].keyword(), "HISTORY");
     // Commentary cards are not keyword-indexed.
-    assert_eq!(h.get("COMMENT"), None);
+    assert_eq!(h.get(keywords::COMMENT).unwrap(), None);
 }
 
 #[test]
 fn ordered_header_edits_preserve_duplicates_and_rebuild_lookup() {
     let mut header = Header::new();
-    header.set("OBJECT", "first").unwrap();
-    header.append("OBJECT", "second").unwrap();
+    header.set(keywords::OBJECT, "first").unwrap();
+    header.append(keywords::OBJECT, "second").unwrap();
     header.insert(1, "EXPTIME", 30.0).unwrap();
     header
-        .set("INSTRUME", "CCD-1")
+        .set(keywords::INSTRUME, "CCD-1")
         .unwrap()
         .push_blank("")
         .unwrap();
 
-    assert_eq!(header.get_text("OBJECT").unwrap(), Some("first"));
+    assert_eq!(header.get_text(keywords::OBJECT).unwrap(), Some("first"));
     assert_eq!(header.get_real("EXPTIME").unwrap(), Some(30.0));
-    assert_eq!(header.get_text("INSTRUME").unwrap(), Some("CCD-1"));
+    assert_eq!(header.get_text(keywords::INSTRUME).unwrap(), Some("CCD-1"));
     assert_eq!(
         header.iter().map(|entry| entry.keyword).collect::<Vec<_>>(),
         ["OBJECT", "EXPTIME", "OBJECT", "INSTRUME", ""]
     );
 
-    let removed = header.remove("OBJECT").unwrap();
+    let removed = header.remove(keywords::OBJECT).unwrap().unwrap();
     assert_eq!(removed.keyword, "OBJECT");
     assert_eq!(removed.value.unwrap().as_text(), Some("first"));
-    assert_eq!(header.get_text("OBJECT").unwrap(), Some("second"));
-    assert_eq!(header.remove_all("OBJECT"), 1);
-    assert_eq!(header.get("OBJECT"), None);
+    assert_eq!(header.get_text(keywords::OBJECT).unwrap(), Some("second"));
+    assert_eq!(header.remove_all(keywords::OBJECT).unwrap(), 1);
+    assert_eq!(header.get(keywords::OBJECT).unwrap(), None);
+
+    // `set_optional`: `Some` sets as `set` does; `None` removes every record with the
+    // keyword, duplicates included, so the header holds the value or nothing.
+    header
+        .set_optional(keywords::OBJECT, Some("third"))
+        .unwrap();
+    header.append(keywords::OBJECT, "fourth").unwrap();
+    assert_eq!(header.get_text(keywords::OBJECT).unwrap(), Some("third"));
+    header.set_optional(keywords::OBJECT, None::<&str>).unwrap();
+    assert!(!header.contains(keywords::OBJECT).unwrap());
+    header.set_optional(keywords::OBJECT, None::<&str>).unwrap();
+    assert_eq!(header.len(), 3);
+    // A commentary keyword is refused with a value and without one alike.
+    header.push_comment("kept").unwrap();
+    for value in [Some("text"), None] {
+        assert!(matches!(
+            header.set_optional(keywords::COMMENT, value),
+            Err(FitsError::ReservedKeyword {
+                keyword: keywords::COMMENT
+            })
+        ));
+    }
+    assert_eq!(header.comments().collect::<Vec<_>>(), ["kept"]);
     assert!(matches!(
         header.remove_at(99),
         Err(FitsError::IndexOutOfBounds {
             indexed: Indexed::HeaderRecord,
             index: 99,
-            len: 3
+            len: 4
         })
     ));
+}
+
+#[test]
+fn values_convert_from_the_widths_callers_hold() {
+    // Every conversion is exact: an f32 widens to the same f64, and a usize past
+    // i64::MAX keeps its exact decimal.
+    assert_eq!(Value::from(7u16).as_integer().unwrap(), Some(7));
+    assert_eq!(Value::from(1.5f32).as_real().unwrap(), Some(1.5));
+    assert_eq!(
+        Value::from(0.1f32).as_real().unwrap(),
+        Some(f64::from(0.1f32))
+    );
+    assert_eq!(Value::from(42usize).as_integer().unwrap(), Some(42));
+    let mut header = Header::new();
+    header.set("WIDE", usize::MAX).unwrap();
+    let Some(Value::Integer(wide)) = header.get("WIDE").unwrap() else {
+        panic!("a usize is an exact integer");
+    };
+    assert_eq!(wide.to_string(), usize::MAX.to_string());
 }
 
 #[test]
@@ -293,7 +400,7 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
     for keyword in ["END", "CONTINUE", "COMMENT", "HISTORY"] {
         assert!(matches!(
             header.set(keyword, 1),
-            Err(FitsError::ReservedKeyword { name }) if name == keyword
+            Err(FitsError::ReservedKeyword { keyword: reserved }) if reserved == keyword
         ));
     }
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
@@ -304,8 +411,7 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
         ));
     }
     assert!(matches!(
-        header.set(
-            "COMPLEX",
+        header.set("COMPLEX",
             Value::ComplexReal {
                 re: 1.0,
                 im: f64::NAN,
@@ -315,14 +421,13 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
             if keyword == "COMPLEX" && reason == "complex real components must be finite"
     ));
     assert!(matches!(
-        header.set("OBJECT", "Véga"),
+        header.set(keywords::OBJECT, "Véga"),
         Err(FitsError::InvalidAscii {
             context: "header text value"
         })
     ));
     assert!(matches!(
-        header.set(
-            "COMPLEX",
+        header.set("COMPLEX",
             Value::ComplexInteger {
                 re: u128::MAX.into(),
                 im: u128::MAX.into(),
@@ -348,9 +453,9 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
     assert!(header.cards.is_empty());
 
     header.set("VALUE", 1).unwrap();
-    header.comment("VALUE", &"c".repeat(47)).unwrap();
+    header.set_comment("VALUE", &"c".repeat(47)).unwrap();
     assert!(matches!(
-        header.comment("VALUE", &"c".repeat(48)),
+        header.set_comment("VALUE", &"c".repeat(48)),
         Err(FitsError::HeaderCardTooLong {
             keyword,
             length: 81,
@@ -358,14 +463,14 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
     ));
     assert_eq!(header.cards[0].comment(), Some("c".repeat(47).as_str()));
     assert!(matches!(
-        header.comment("VALUE", "bad\ncomment"),
+        header.set_comment("VALUE", "bad\ncomment"),
         Err(FitsError::InvalidAscii {
             context: "header comment"
         })
     ));
     let before = header.clone();
     assert!(matches!(
-        header.comment("ABSENT", "lost"),
+        header.set_comment("ABSENT", "lost"),
         Err(FitsError::KeywordNotFound { keyword }) if keyword == "ABSENT"
     ));
     assert_eq!(header.cards, before.cards);
@@ -392,11 +497,15 @@ fn missing_mandatory_keyword_is_reported() {
     let h = Header::parse(&records(&["SIMPLE  =                    T", "END"])).unwrap();
     assert!(matches!(
         h.bitpix(),
-        Err(FitsError::MissingKeyword { name: "BITPIX" })
+        Err(FitsError::MissingKeyword {
+            keyword: keywords::BITPIX
+        })
     ));
     assert!(matches!(
         h.naxis(),
-        Err(FitsError::MissingKeyword { name: "NAXIS" })
+        Err(FitsError::MissingKeyword {
+            keyword: keywords::NAXIS
+        })
     ));
 }
 
@@ -405,11 +514,13 @@ fn naxis_beyond_999_is_rejected() {
     // §4.4.1 caps NAXIS at 999; an absurd value must error rather than drive
     // `Vec::with_capacity(NAXIS)` in `axes()` (an allocation DoS from a tiny header).
     let mut h = Header::new();
-    h.set_internal("NAXIS", 1000);
+    h.set_internal(keywords::NAXIS, 1000);
     assert!(matches!(
         h.naxis(),
-        Err(FitsError::KeywordOutOfRange { name: "NAXIS" })
+        Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::NAXIS
+        })
     ));
-    h.set_internal("NAXIS", 999);
+    h.set_internal(keywords::NAXIS, 999);
     assert_eq!(h.naxis().unwrap(), 999);
 }

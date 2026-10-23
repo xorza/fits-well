@@ -1,4 +1,5 @@
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
+
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::axis_transform::spectral_kind::{
     Characteristic, conversion_derivative, convert,
@@ -70,7 +71,7 @@ fn conversion_derivatives_match_the_conversions_they_describe() {
 fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
     let build = |t3: &str| {
         let mut h = Header::new();
-        h.set_internal("NAXIS", 3);
+        h.set_internal(keywords::NAXIS, 3);
         h.set_internal("CTYPE1", "RA---TAN")
             .set_internal("CTYPE2", "DEC--TAN")
             .set_internal("CTYPE3", t3);
@@ -185,7 +186,7 @@ fn grism_axes_reject_incomplete_or_degenerate_detector_metadata() {
     for (parameter, value) in [("PV1_0", None), ("PV1_1", None), ("PV1_0", Some(0.0))] {
         let mut header = Header::new();
         header
-            .set_internal("NAXIS", 1)
+            .set_internal(keywords::NAXIS, 1)
             .set_internal("CTYPE1", "WAVE-GRI")
             .set_internal("CRVAL1", 650.0e-9);
         if parameter != "PV1_0" {
@@ -376,7 +377,7 @@ fn spectral_algorithms_match_wcslib() {
     ];
     for case in cases {
         let mut header = axis_header(case.ctype, case.unit, 1.0, case.reference, case.increment);
-        header.set_internal("RESTFRQ", 1_420_405_751.0);
+        header.set_internal(keywords::RESTFRQ, 1_420_405_751.0);
         let wcs = Wcs::from_header(&header, None).unwrap();
         assert!(wcs.metadata().unsupported_axes.is_empty(), "{}", case.ctype);
         let world = wcs.pixel_to_world(&[3.0]).unwrap()[0];
@@ -463,7 +464,7 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
             case.reference,
             case.reference / 100.0,
         );
-        header.set_internal("RESTFRQ", 1_420_405_751.0);
+        header.set_internal(keywords::RESTFRQ, 1_420_405_751.0);
         let wcs = Wcs::from_header(&header, None).unwrap();
         // The view reports the axis as declared; the world coordinate is in the default unit.
         assert_eq!(wcs.metadata().axes[0].cunit, case.unit);
@@ -483,7 +484,7 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
 
     let mut invalid = Header::new();
     invalid
-        .set_internal("NAXIS", 1)
+        .set_internal(keywords::NAXIS, 1)
         .set_internal("CTYPE1", "WAVE-F2W")
         .set_internal("CUNIT1", "Hz")
         .set_internal("CRVAL1", 1.0);
@@ -524,7 +525,7 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
 
     let mut invalid = Header::new();
     invalid
-        .set_internal("NAXIS", 1)
+        .set_internal(keywords::NAXIS, 1)
         .set_internal("CTYPE1", "ABCD-LOG")
         .set_internal("CRVAL1", 0.0);
     assert!(matches!(
@@ -563,10 +564,10 @@ fn spectral_algorithm_codes_round_trip_and_check_their_variables() {
     for ctype in ["FREQ-F2F", "FREQ-W2V"] {
         let mut header = Header::new();
         header
-            .set_internal("NAXIS", 1)
+            .set_internal(keywords::NAXIS, 1)
             .set_internal("CTYPE1", ctype)
             .set_internal("CRVAL1", 1.4e9)
-            .set_internal("RESTFRQ", 1.4e9);
+            .set_internal(keywords::RESTFRQ, 1.4e9);
         assert!(
             matches!(
                 Wcs::from_header(&header, None),

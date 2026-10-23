@@ -7,6 +7,7 @@ use crate::bintable::tform::Tform;
 use crate::bintable::tform_kind::TformKind;
 use crate::column::Named;
 use crate::error::Result;
+use crate::header_model::keywords;
 use crate::image_model::scaling::Scaling;
 use std::iter;
 
@@ -30,6 +31,8 @@ pub struct Column {
     pub tdim: Option<Vec<usize>>,
     /// Raw `TDISPn` display recommendation (§7.3.4), if declared.
     pub tdisp: Option<String>,
+    /// The column's 1-based number, the `n` of its keywords.
+    pub(crate) number: usize,
     /// Byte offset of this column from the start of a row: the sum of the widths
     /// before it, so derived and not public.
     pub(crate) byte_offset: usize,
@@ -100,7 +103,9 @@ impl Column {
     /// The `TDIMn` extent check for this column's `P`/`Q` heap array.
     pub(super) fn validate_vla_tdim(&self, element_count: usize) -> Result<()> {
         match &self.tdim {
-            Some(dims) => tdim::validate_vla_extent(dims, element_count),
+            Some(dims) => {
+                tdim::validate_vla_extent(dims, element_count, keywords::TDIM.indexed(self.number)?)
+            }
             None => Ok(()),
         }
     }

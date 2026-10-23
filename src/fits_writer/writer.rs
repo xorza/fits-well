@@ -14,11 +14,10 @@ use crate::fits_writer::{
     prepare_header_with_data_sum, render_header,
 };
 use crate::hdu::HduPosition;
-use crate::header_model::Header;
-use crate::header_model::value;
+use crate::header_model::{Header, keywords, value};
 use crate::image_model::view::{Borrowed, View};
 use crate::image_model::{Metadata, check_sample_count, shape_product};
-use crate::keyword::key;
+use crate::keyword::Keyword;
 
 /// Incremental image-HDU write for outputs too large to stage in memory. Chunks
 /// are typed host-endian samples; the stream encodes and writes each one
@@ -91,8 +90,8 @@ pub(super) fn stream_template<'a, W: Write + Seek>(
     let header_offset = writer.sink.stream_position()?;
     let mut initial = header.clone();
     if writer.checksums == Checksums::On {
-        initial.set_internal("DATASUM", "0");
-        initial.set_internal("CHECKSUM", PLACEHOLDER_CHECKSUM);
+        initial.set_internal(keywords::DATASUM, "0");
+        initial.set_internal(keywords::CHECKSUM, PLACEHOLDER_CHECKSUM);
     }
     render_header(&initial, &mut writer.header_scratch)?;
     if let Err(error) = writer.sink.write_all(&writer.header_scratch) {
@@ -240,18 +239,20 @@ fn image_header(layout: Metadata<'_>, position: HduPosition) -> Result<Header> {
     let mut header = Header::new();
     if position == HduPosition::Primary {
         header
-            .set_internal("SIMPLE", true)
-            .comment_internal("SIMPLE", "file conforms to FITS standard");
+            .set_internal(keywords::SIMPLE, true)
+            .set_comment_internal(keywords::SIMPLE, "file conforms to FITS standard");
         add_image_axes(&mut header, shape, bitpix)?;
         header
-            .set_internal("EXTEND", true)
-            .comment_internal("EXTEND", "extensions may follow");
+            .set_internal(keywords::EXTEND, true)
+            .set_comment_internal(keywords::EXTEND, "extensions may follow");
     } else {
         header
-            .set_internal("XTENSION", "IMAGE")
-            .comment_internal("XTENSION", "image extension");
+            .set_internal(keywords::XTENSION, "IMAGE")
+            .set_comment_internal(keywords::XTENSION, "image extension");
         add_image_axes(&mut header, shape, bitpix)?;
-        header.set_internal("PCOUNT", 0).set_internal("GCOUNT", 1);
+        header
+            .set_internal(keywords::PCOUNT, 0)
+            .set_internal(keywords::GCOUNT, 1);
     }
     scaling.add_to_header(&mut header, bitpix)?;
     Ok(header)
@@ -260,16 +261,21 @@ fn image_header(layout: Metadata<'_>, position: HduPosition) -> Result<Header> {
 /// `BITPIX`, `NAXIS`, `NAXISn` — the mandatory array-shape keywords, in order.
 fn add_image_axes(header: &mut Header, shape: &[usize], bitpix: Bitpix) -> Result<()> {
     if shape.len() > 999 {
-        return Err(FitsError::KeywordOutOfRange { name: "NAXIS" });
+        return Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::NAXIS,
+        });
     }
     header
-        .set_internal("BITPIX", bitpix.code())
-        .comment_internal("BITPIX", "number of bits per data pixel");
+        .set_internal(keywords::BITPIX, bitpix.code())
+        .set_comment_internal(keywords::BITPIX, "number of bits per data pixel");
     header
-        .set_internal("NAXIS", value::fits_i64(shape.len())?)
-        .comment_internal("NAXIS", "number of data axes");
+        .set_internal(keywords::NAXIS, value::fits_i64(shape.len())?)
+        .set_comment_internal(keywords::NAXIS, "number of data axes");
     for (i, &n) in shape.iter().enumerate() {
-        header.set_internal(key!("NAXIS{}", i + 1).as_str(), value::fits_i64(n)?);
+        header.set_internal(
+            Keyword::try_from(format_args!("NAXIS{}", i + 1))?,
+            value::fits_i64(n)?,
+        );
     }
     Ok(())
 }

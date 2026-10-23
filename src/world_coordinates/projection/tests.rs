@@ -1,5 +1,6 @@
 use crate::error::FitsError;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
+
 use crate::world_coordinates::R2D;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::internals::AstropyGolden;
@@ -243,7 +244,7 @@ fn parameterized_projections_match_astropy() {
     for c in &cases {
         let mut h = celestial_header(c.proj, [50.0, 50.0], [45.0, c.cv2], [-c.cd, c.cd]);
         for &(m, v) in c.pv {
-            h.set_internal(&format!("PV2_{m}"), v);
+            h.set_internal(format!("PV2_{m}"), v);
         }
         let w = Wcs::from_header(&h, None).unwrap();
         let golden = AstropyGolden {
@@ -258,11 +259,11 @@ fn parameterized_projections_match_astropy() {
 fn projection_parameters_use_standard_defaults() {
     let build = |projection: &str, parameters: &[(usize, f64)]| {
         let mut h = Header::new();
-        h.set_internal("NAXIS", 2);
+        h.set_internal(keywords::NAXIS, 2);
         h.set_internal("CTYPE1", format!("RA---{projection}"));
         h.set_internal("CTYPE2", format!("DEC--{projection}"));
         for &(m, value) in parameters {
-            h.set_internal(&format!("PV2_{m}"), value);
+            h.set_internal(format!("PV2_{m}"), value);
         }
         Wcs::from_header(&h, None).unwrap()
     };
@@ -301,11 +302,11 @@ fn projection_parameters_use_standard_defaults() {
 fn degenerate_projection_parameters_are_rejected() {
     let parse = |projection: &str, parameters: &[(usize, f64)]| {
         let mut h = Header::new();
-        h.set_internal("NAXIS", 2);
+        h.set_internal(keywords::NAXIS, 2);
         h.set_internal("CTYPE1", format!("RA---{projection}"));
         h.set_internal("CTYPE2", format!("DEC--{projection}"));
         for &(m, value) in parameters {
-            h.set_internal(&format!("PV2_{m}"), value);
+            h.set_internal(format!("PV2_{m}"), value);
         }
         Wcs::from_header(&h, None)
     };
@@ -355,7 +356,7 @@ fn mismatched_celestial_projections_are_rejected() {
     // RA---TAN with DEC--SIN is malformed — reject it rather than silently adopt
     // whichever axis is seen first.
     let mut h = Header::new();
-    h.set_internal("NAXIS", 2);
+    h.set_internal(keywords::NAXIS, 2);
     h.set_internal("CTYPE1", "RA---TAN")
         .set_internal("CTYPE2", "DEC--SIN");
     h.set_internal("CRPIX1", 1.0).set_internal("CRPIX2", 1.0);
@@ -369,7 +370,7 @@ fn mismatched_celestial_projections_are_rejected() {
     // A galactic-frame pair sharing TAN builds fine — exercises the one shared
     // classifier on the non-RA/DEC longitude/latitude forms (`GLON`/`GLAT`).
     let mut g = Header::new();
-    g.set_internal("NAXIS", 2);
+    g.set_internal(keywords::NAXIS, 2);
     g.set_internal("CTYPE1", "GLON-TAN")
         .set_internal("CTYPE2", "GLAT-TAN");
     g.set_internal("CRPIX1", 1.0).set_internal("CRPIX2", 1.0);

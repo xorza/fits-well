@@ -16,7 +16,7 @@ use std::env;
 fn main() -> fits_well::Result<()> {
     let path = env::temp_dir().join("fits_well_compressed.fits");
 
-    let expected = Data::I16((0..256).map(|i| (i % 32) as i16).collect());
+    let expected = Data::I16((0..256).map(|i| i % 32).collect());
     let image = Image::new(vec![16, 16], expected.clone())?;
 
     // Compress with RICE in 8×8 tiles. The typed codec prevents invalid or misspelled
@@ -27,14 +27,17 @@ fn main() -> fits_well::Result<()> {
     writer.into_inner().sync_all()?;
     println!("wrote {}", path.display());
 
-    // A compressed image lives in a BINTABLE extension, but `image_indices` reports
-    // it as an image all the same — so you find and read it without knowing it sits
-    // at HDU 1, or that it's compressed at all. `image` detects `ZIMAGE` and
-    // decompresses transparently — the same calls as for a plain image.
+    // A compressed image lives in a BINTABLE extension, but `images` reports it as an
+    // image all the same — so you find and read it without knowing it sits at HDU 1,
+    // or that it's compressed at all. `image` detects `ZIMAGE` and decompresses
+    // transparently — the same calls as for a plain image.
     let mut reader = FitsReader::open(File::open(&path)?)?;
-    let images = reader.image_indices();
-    println!("image HDUs: {images:?}"); // [1] — the compressed image extension
-    let restored = reader.image(images[0])?.read(Region::All)?;
+    let first = reader
+        .images()
+        .next()
+        .expect("the file holds the compressed image");
+    println!("first image HDU: {first}"); // 1 — the compressed image extension
+    let restored = reader.image(first)?.read(Region::All)?;
     let restored_shape = restored.view().shape().to_vec();
     let lossless = restored.into_samples() == expected;
     println!("restored {restored_shape:?}, lossless = {lossless}");

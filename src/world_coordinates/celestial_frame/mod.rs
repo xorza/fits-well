@@ -2,10 +2,10 @@
 
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header_model::Header;
-use crate::keyword::AltSuffix;
-use crate::keyword::key;
+use crate::header_model::{Header, keywords};
+use crate::keyword::{AltSuffix, Keyword};
 use crate::world_coordinates::ctype::Ctype;
+use crate::world_coordinates::{read_real, read_text};
 
 /// The reference frame named by `RADESYSa`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,12 +49,11 @@ impl CelestialFrame {
         suffix: AltSuffix,
         ctype: &[String],
     ) -> Result<Option<Self>> {
-        let key = key!("RADESYS{suffix}");
-        let mut declared = header.get_text(key.as_str())?;
+        let mut declared = read_text(header, Keyword::try_from(format_args!("RADESYS{suffix}")))?;
         if declared.is_none() && !suffix.is_alternate() {
-            declared = header.get_text("RADECSYS")?;
+            declared = header.get_text(keywords::RADECSYS)?;
         }
-        let equinox = header.get_real(key!("EQUINOX{suffix}").as_str())?;
+        let equinox = read_real(header, Keyword::try_from(format_args!("EQUINOX{suffix}")))?;
         if equinox.is_some_and(|value| !value.is_finite() || value < 0.0) {
             return Err(FitsError::InvalidWcs {
                 detail: "EQUINOX must be finite and non-negative".to_string(),

@@ -4,6 +4,7 @@ use crate::fits_writer::FitsWriter;
 use crate::fits_writer::ascii_builder::AsciiWriteColumn;
 use crate::fits_writer::internals::{ascii_table, rejected_before_output, round_trip};
 use crate::io::HduKind;
+
 use crate::reader::FitsReader;
 use std::io::Cursor;
 
@@ -302,7 +303,7 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
         }];
         assert!(matches!(
             rejected_before_output(|w| w.write_ascii_table(&ascii_table(1, &invalid), None)),
-            FitsError::KeywordOutOfRange { name: "TNULLn" }
+            FitsError::KeywordOutOfRange { keyword } if keyword == "TNULL1"
         ));
     }
 
@@ -421,7 +422,7 @@ fn ascii_writer_rejects_one_byte_overflow_before_output() {
     ];
     assert!(matches!(
         rejected_before_output(|w| w.write_ascii_table(&ascii_table(1, &columns), None)),
-        FitsError::KeywordOutOfRange { name: "TNULLn" }
+        FitsError::KeywordOutOfRange { keyword } if keyword == "TNULL1"
     ));
 }
 
@@ -440,25 +441,25 @@ fn ascii_scaling_metadata_is_validated_by_stored_type_before_output() {
             data: AsciiColumnData::Text([Some("A")].into_iter().collect()),
             tscale: Some(2.0),
             tzero: None,
-            keyword: "TSCALn",
+            keyword: "TSCAL1",
         },
         InvalidAsciiScale {
             data: AsciiColumnData::Text([Some("A")].into_iter().collect()),
             tscale: None,
             tzero: Some(3.0),
-            keyword: "TZEROn",
+            keyword: "TZERO1",
         },
         InvalidAsciiScale {
             data: AsciiColumnData::Integer(vec![Some(1)]),
             tscale: Some(f64::NAN),
             tzero: None,
-            keyword: "TSCALn",
+            keyword: "TSCAL1",
         },
         InvalidAsciiScale {
             data: AsciiColumnData::Float(vec![Some(1.0)]),
             tscale: None,
             tzero: Some(f64::INFINITY),
-            keyword: "TZEROn",
+            keyword: "TZERO1",
         },
     ];
     for case in cases {
@@ -474,7 +475,7 @@ fn ascii_scaling_metadata_is_validated_by_stored_type_before_output() {
         }];
         assert!(matches!(
             rejected_before_output(|w| w.write_ascii_table(&ascii_table(1, &columns), None)),
-            FitsError::KeywordOutOfRange { name } if name == case.keyword
+            FitsError::KeywordOutOfRange { keyword } if keyword == case.keyword
         ));
     }
 }
@@ -525,27 +526,29 @@ fn ascii_tfields_beyond_999_is_rejected() {
     // §7.2.1 caps TFIELDS at 999; an absurd value must error, not size a huge Vec.
     let mut header = Header::new();
     header
-        .set_internal("XTENSION", "TABLE")
-        .set_internal("BITPIX", 8)
-        .set_internal("NAXIS", 2)
+        .set_internal(keywords::XTENSION, "TABLE")
+        .set_internal(keywords::BITPIX, 8)
+        .set_internal(keywords::NAXIS, 2)
         .set_internal("NAXIS1", 0)
         .set_internal("NAXIS2", 0)
-        .set_internal("PCOUNT", 0)
-        .set_internal("GCOUNT", 1)
-        .set_internal("TFIELDS", 1000);
+        .set_internal(keywords::PCOUNT, 0)
+        .set_internal(keywords::GCOUNT, 1)
+        .set_internal(keywords::TFIELDS, 1000);
     assert!(matches!(
         Ascii::from_data(&header, vec![]),
-        Err(FitsError::KeywordOutOfRange { name: "TFIELDS" })
+        Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::TFIELDS
+        })
     ));
 
     header
         .set_internal("NAXIS1", 1)
-        .set_internal("TFIELDS", 1)
+        .set_internal(keywords::TFIELDS, 1)
         .set_internal("TBCOL1", 0)
         .set_internal("TFORM1", "A1");
     assert!(matches!(
         Ascii::from_data(&header, vec![]),
-        Err(FitsError::KeywordOutOfRange { name: "TBCOLn" })
+        Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "TBCOL1"
     ));
 }
 

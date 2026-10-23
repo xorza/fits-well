@@ -2,10 +2,10 @@
 
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header_model::Header;
-use crate::keyword::AltSuffix;
-use crate::keyword::key;
+use crate::header_model::{Header, keywords};
+use crate::keyword::{AltSuffix, Keyword};
 use crate::world_coordinates::axis_transform::spectral_rest::SpectralRest;
+use crate::world_coordinates::{read_real, read_text};
 
 /// A standard spectral reference system from FITS Table 27.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,12 +58,10 @@ impl SpectralFrame {
     /// an image header.
     pub(super) fn from_header(header: &Header, suffix: AltSuffix) -> Result<Self> {
         let rest = Self::rest(header, suffix)?;
-        let coordinate = header
-            .get_text(key!("SPECSYS{suffix}").as_str())?
+        let coordinate = read_text(header, Keyword::try_from(format_args!("SPECSYS{suffix}")))?
             .map(|value| SpectralReferenceFrame::parse("SPECSYS", value))
             .transpose()?;
-        let observer = header
-            .get_text(key!("SSYSOBS{suffix}").as_str())?
+        let observer = read_text(header, Keyword::try_from(format_args!("SSYSOBS{suffix}")))?
             .map(|value| SpectralReferenceFrame::parse("SSYSOBS", value))
             .transpose()?
             .unwrap_or(SpectralReferenceFrame::Topocentric);
@@ -75,11 +73,11 @@ impl SpectralFrame {
     }
 
     fn rest(header: &Header, suffix: AltSuffix) -> Result<SpectralRest> {
-        let mut frequency = header.get_real(key!("RESTFRQ{suffix}").as_str())?;
+        let mut frequency = read_real(header, Keyword::try_from(format_args!("RESTFRQ{suffix}")))?;
         if frequency.is_none() && !suffix.is_alternate() {
-            frequency = header.get_real("RESTFREQ")?;
+            frequency = header.get_real(keywords::RESTFREQ)?;
         }
-        let wavelength = header.get_real(key!("RESTWAV{suffix}").as_str())?;
+        let wavelength = read_real(header, Keyword::try_from(format_args!("RESTWAV{suffix}")))?;
         SpectralRest::new(frequency, wavelength)
     }
 }

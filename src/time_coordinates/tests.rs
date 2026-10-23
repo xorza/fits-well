@@ -1,6 +1,7 @@
 use crate::error::FitsError;
 use crate::error::Indexed;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
+
 use crate::time_coordinates::SEC_PER_DAY;
 use crate::time_coordinates::bounds::Bounds;
 use crate::time_coordinates::coordinate::{Coordinate, Epoch};
@@ -54,7 +55,7 @@ fn rejects_malformed_datetimes() {
     }
 
     let mut header = Header::new();
-    header.set_internal("DATE-OBS", "2024-13-01");
+    header.set_internal(keywords::DATE_OBS, "2024-13-01");
     assert!(matches!(
         Coordinate::observation(&header),
         Err(FitsError::InvalidTime { detail }) if detail == "DATE '2024-13-01'"
@@ -144,10 +145,10 @@ fn leap_second_labels_require_utc_and_external_time_data() {
 fn header_datetimes_use_the_declared_scale() {
     let mut header = Header::new();
     header
-        .set_internal("TIMESYS", "MET")
-        .set_internal("DATEREF", "2017-01-01T00:00:00")
-        .set_internal("DATE-OBS", "2017-01-01T00:00:00")
-        .set_internal("DATE-END", "2017-01-02T00:00:00");
+        .set_internal(keywords::TIMESYS, "MET")
+        .set_internal(keywords::DATEREF, "2017-01-01T00:00:00")
+        .set_internal(keywords::DATE_OBS, "2017-01-01T00:00:00")
+        .set_internal(keywords::DATE_END, "2017-01-02T00:00:00");
     let time = Frame::from_header(&header).unwrap();
     assert_eq!(time.scale, Scale::Local("MET".to_string()));
     assert_eq!(time.mjdref, 57_754.0);
@@ -164,10 +165,10 @@ fn header_datetimes_use_the_declared_scale() {
     );
 
     header
-        .set_internal("TIMESYS", "UTC")
-        .set_internal("DATEREF", "2016-12-31T23:59:60")
-        .set_internal("DATE-OBS", "2016-12-31T23:59:60")
-        .set_internal("DATE-END", "2016-12-31T23:59:60");
+        .set_internal(keywords::TIMESYS, "UTC")
+        .set_internal(keywords::DATEREF, "2016-12-31T23:59:60")
+        .set_internal(keywords::DATE_OBS, "2016-12-31T23:59:60")
+        .set_internal(keywords::DATE_END, "2016-12-31T23:59:60");
     assert!(matches!(
         Frame::from_header(&header),
         Err(FitsError::ExternalTimeDataRequired { .. })
@@ -187,7 +188,7 @@ fn reads_jepoch_and_bepoch_keywords() {
     // JEPOCH is in its implied TDB, BEPOCH in ET ≈ TT; `numeric_epochs_match_astropy`
     // pins the dates themselves.
     let mut hj = Header::new();
-    hj.set_internal("JEPOCH", 2000.0);
+    hj.set_internal(keywords::JEPOCH, 2000.0);
     assert_eq!(
         Coordinate::epoch(&hj).unwrap(),
         Some(Coordinate {
@@ -196,7 +197,7 @@ fn reads_jepoch_and_bepoch_keywords() {
         })
     );
     let mut hb = Header::new();
-    hb.set_internal("BEPOCH", 1950.0);
+    hb.set_internal(keywords::BEPOCH, 1950.0);
     assert_eq!(
         Coordinate::epoch(&hb).unwrap(),
         Some(Coordinate {
@@ -213,13 +214,13 @@ fn reads_jepoch_and_bepoch_keywords() {
 fn reads_bound_duration_and_error_keywords() {
     use crate::error::FitsError;
     let mut h = Header::new();
-    h.set_internal("MJD-BEG", 58000.0);
-    h.set_internal("DATE-END", "2017-09-05T00:00:00");
-    h.set_internal("MJD-AVG", 58000.5);
-    h.set_internal("XPOSURE", 1200.0);
-    h.set_internal("TELAPSE", 1500.0);
-    h.set_internal("TIMEDEL", 0.1);
-    h.set_internal("TIMSYER", 1e-6);
+    h.set_internal(keywords::MJD_BEG, 58000.0);
+    h.set_internal(keywords::DATE_END, "2017-09-05T00:00:00");
+    h.set_internal(keywords::MJD_AVG, 58000.5);
+    h.set_internal(keywords::XPOSURE, 1200.0);
+    h.set_internal(keywords::TELAPSE, 1500.0);
+    h.set_internal(keywords::TIMEDEL, 0.1);
+    h.set_internal(keywords::TIMSYER, 1e-6);
     let b = Bounds::from_header(&h).unwrap();
     assert_eq!(b.beg_mjd, Some(58000.0));
     // Resolved from DATE-END: 2017-09-04 is MJD 58000.
@@ -232,15 +233,17 @@ fn reads_bound_duration_and_error_keywords() {
     assert_eq!(b.timsyer, Some(1e-6));
     assert_eq!(b.timrder, None);
 
-    h.set_internal("TIMESYS", 1)
-        .set_internal("MJD-END", 58001.0);
+    h.set_internal(keywords::TIMESYS, 1)
+        .set_internal(keywords::MJD_END, 58001.0);
     assert_eq!(Bounds::from_header(&h).unwrap().end_mjd, Some(58001.0));
 
     for invalid in [-f64::EPSILON, 1.0 + f64::EPSILON] {
-        h.set_internal("TIMEPIXR", invalid);
+        h.set_internal(keywords::TIMEPIXR, invalid);
         assert!(matches!(
             Bounds::from_header(&h),
-            Err(FitsError::KeywordOutOfRange { name: "TIMEPIXR" })
+            Err(FitsError::KeywordOutOfRange {
+                keyword: keywords::TIMEPIXR
+            })
         ));
     }
 }
@@ -352,7 +355,7 @@ fn observation_falls_back_to_jepoch_in_its_own_scale() {
     // §9.5: absent DATE-OBS/MJD-OBS, JEPOCH stands in for the observation time, in
     // its implied TDB.
     let mut h = Header::new();
-    h.set_internal("JEPOCH", 2000.0);
+    h.set_internal(keywords::JEPOCH, 2000.0);
     assert_eq!(
         Coordinate::observation(&h).unwrap(),
         Some(Coordinate {
@@ -361,7 +364,7 @@ fn observation_falls_back_to_jepoch_in_its_own_scale() {
         })
     );
     // An explicit MJD-OBS still wins, in the declared scale (UTC by default).
-    h.set_internal("MJD-OBS", 58000.0);
+    h.set_internal(keywords::MJD_OBS, 58000.0);
     assert_eq!(
         Coordinate::observation(&h).unwrap(),
         Some(Coordinate {
@@ -388,9 +391,10 @@ fn numeric_epochs_match_astropy() {
 #[test]
 fn time_axis_uses_complete_wcs_row_unit_and_scale() {
     let mut h = Header::new();
-    h.set_internal("NAXIS", 1).set_internal("MJDREF", 58000.0);
-    h.set_internal("TIMESYS", "UTC")
-        .set_internal("TIMEUNIT", "s");
+    h.set_internal(keywords::NAXIS, 1)
+        .set_internal(keywords::MJDREF, 58000.0);
+    h.set_internal(keywords::TIMESYS, "UTC")
+        .set_internal(keywords::TIMEUNIT, "s");
     h.set_internal("CTYPE1A", "TAI")
         .set_internal("CUNIT1A", "d");
     h.set_internal("CRPIX1A", 1.0)
@@ -429,9 +433,9 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
 
     let mut coupled = Header::new();
     coupled
-        .set_internal("NAXIS", 2)
-        .set_internal("MJDREF", 58000.0)
-        .set_internal("TIMEUNIT", "s");
+        .set_internal(keywords::NAXIS, 2)
+        .set_internal(keywords::MJDREF, 58000.0)
+        .set_internal(keywords::TIMEUNIT, "s");
     coupled
         .set_internal("CTYPE1", "TIME")
         .set_internal("CTYPE2", "LINEAR");
@@ -465,7 +469,7 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
 
     let mut non_time = Header::new();
     non_time
-        .set_internal("NAXIS", 1)
+        .set_internal(keywords::NAXIS, 1)
         .set_internal("CTYPE1", "LINEAR");
     assert!(
         t.time_axis_mjd(&Wcs::from_header(&non_time, None).unwrap(), 1, &[1.0])
@@ -497,13 +501,13 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
 #[test]
 fn fits_time_resolves_reference_and_relative_times() {
     let mut h = Header::new();
-    h.set_internal("TIMESYS", "TT");
-    h.set_internal("MJDREF", 58000.0);
-    h.set_internal("TIMEUNIT", "s");
-    h.set_internal("TREFPOS", "TOPOCENTER");
+    h.set_internal(keywords::TIMESYS, "TT");
+    h.set_internal(keywords::MJDREF, 58000.0);
+    h.set_internal(keywords::TIMEUNIT, "s");
+    h.set_internal(keywords::TREFPOS, "TOPOCENTER");
     h.set_internal("TSTART", 0.0);
     h.set_internal("TSTOP", 86400.0); // one day, in seconds
-    h.set_internal("DATE-OBS", "2017-09-04T00:00:00");
+    h.set_internal(keywords::DATE_OBS, "2017-09-04T00:00:00");
 
     let t = Frame::from_header(&h).unwrap();
     assert_eq!(t.scale, Scale::known(ScaleKind::Tt));
@@ -523,7 +527,7 @@ fn fits_time_resolves_reference_and_relative_times() {
     );
 
     let mut malformed = h.clone();
-    malformed.set_internal("TIMEOFFS", "not a real");
+    malformed.set_internal(keywords::TIMEOFFS, "not a real");
     assert!(matches!(
         Frame::from_header(&malformed),
         Err(FitsError::TypeMismatch { name, expected })
@@ -536,7 +540,7 @@ fn fits_time_resolves_reference_and_relative_times() {
         ReferencePosition::Topocenter
     );
     positions
-        .set_internal("TREFPOS", "BARYCENT")
+        .set_internal(keywords::TREFPOS, "BARYCENT")
         .set_internal("TRPOS4", "GEOCENTR");
     assert_eq!(
         Frame::from_header(&positions).unwrap().trefpos,
@@ -589,21 +593,21 @@ fn fits_time_resolves_reference_and_relative_times() {
         ("URANUS", ReferencePosition::Uranus),
         ("NEPTUNE", ReferencePosition::Neptune),
     ] {
-        positions.set_internal("TREFPOS", value);
+        positions.set_internal(keywords::TREFPOS, value);
         assert_eq!(
             Frame::from_header(&positions).unwrap().trefpos,
             expected,
             "{value}"
         );
     }
-    positions.set_internal("TREFPOS", "topocenter");
+    positions.set_internal(keywords::TREFPOS, "topocenter");
     assert_eq!(
         Frame::from_header(&positions).unwrap().trefpos,
         ReferencePosition::Other("topocenter".to_string())
     );
 
     positions
-        .set_internal("TREFPOS", 42)
+        .set_internal(keywords::TREFPOS, 42)
         .set_internal("TRPOS4", "GEOCENTR");
     assert_eq!(
         Frame::for_column(&positions, 4).unwrap().trefpos,
@@ -619,9 +623,9 @@ fn fits_time_resolves_reference_and_relative_times() {
 #[test]
 fn fits_time_reads_split_and_day_unit_references() {
     let mut h = Header::new();
-    h.set_internal("MJDREFI", 58000.0);
-    h.set_internal("MJDREFF", 0.25);
-    h.set_internal("TIMEUNIT", "d");
+    h.set_internal(keywords::MJDREFI, 58000.0);
+    h.set_internal(keywords::MJDREFF, 0.25);
+    h.set_internal(keywords::TIMEUNIT, "d");
     let t = Frame::from_header(&h).unwrap();
     assert_eq!(t.scale, Scale::known(ScaleKind::Utc)); // default
     assert_eq!(t.mjdref, 58000.25);
@@ -681,7 +685,7 @@ fn time_scale_preserves_realizations_and_local_names() {
     }
 
     let mut unknown = Header::new();
-    unknown.set_internal("TIMESYS", "BOGUS");
+    unknown.set_internal(keywords::TIMESYS, "BOGUS");
     assert_eq!(
         Frame::from_header(&unknown).unwrap().scale,
         Scale::Local("BOGUS".to_string())
@@ -693,9 +697,9 @@ fn timeoffs_shifts_relative_times() {
     // MJDREF=58000, TIMEUNIT=s, TIMEOFFS=10 s: the offset is added before scaling,
     // so a relative value of 0 lands 10 s past the reference (§9.4.1).
     let mut h = Header::new();
-    h.set_internal("MJDREF", 58000.0);
-    h.set_internal("TIMEUNIT", "s");
-    h.set_internal("TIMEOFFS", 10.0);
+    h.set_internal(keywords::MJDREF, 58000.0);
+    h.set_internal(keywords::TIMEUNIT, "s");
+    h.set_internal(keywords::TIMEOFFS, 10.0);
     let t = Frame::from_header(&h).unwrap();
     assert_eq!(t.timeoffs, 10.0);
     assert_eq!(t.relative_to_mjd(0.0).unwrap(), 58000.0 + 10.0 / 86400.0);
@@ -706,7 +710,7 @@ fn timeoffs_shifts_relative_times() {
 fn time_units_parse_prefixes_and_epoch_dependent_years() {
     let unit = |u: &str| {
         let mut h = Header::new();
-        h.set_internal("TIMEUNIT", u);
+        h.set_internal(keywords::TIMEUNIT, u);
         Frame::from_header(&h).unwrap().unit_seconds().unwrap()
     };
     assert_eq!(unit("min"), 60.0);
@@ -722,9 +726,9 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
 
     let mut tropical = Header::new();
     tropical
-        .set_internal("TIMESYS", "TDB")
-        .set_internal("MJDREF", 51544.5)
-        .set_internal("TIMEUNIT", "ta");
+        .set_internal(keywords::TIMESYS, "TDB")
+        .set_internal(keywords::MJDREF, 51544.5)
+        .set_internal(keywords::TIMEUNIT, "ta");
     let tropical = Frame::from_header(&tropical).unwrap();
     // MJDREF is J2000.0, so the polynomial's terms in centuries all vanish.
     assert_eq!(
@@ -734,9 +738,9 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
 
     let mut besselian = Header::new();
     besselian
-        .set_internal("TIMESYS", "TT")
-        .set_internal("MJDREF", 15019.5)
-        .set_internal("TIMEUNIT", "Ba");
+        .set_internal(keywords::TIMESYS, "TT")
+        .set_internal(keywords::MJDREF, 15019.5)
+        .set_internal(keywords::TIMEUNIT, "Ba");
     let besselian = Frame::from_header(&besselian).unwrap();
     // MJDREF is B1900.0's reference day, JD 2415020.0, so the century term vanishes.
     assert_eq!(
@@ -747,7 +751,7 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
     let mut invalid = Header::new();
     // The minute, day and century take no SI prefix, the year only multiples (wcslib).
     for value in ["", "m", "Hz", "day", "bogus", "Mmin", "kd", "ma"] {
-        invalid.set_internal("TIMEUNIT", value);
+        invalid.set_internal(keywords::TIMEUNIT, value);
         assert!(
             matches!(
                 Frame::from_header(&invalid).unwrap().unit_seconds(),
@@ -760,8 +764,8 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
     let mut frame_dependent = Header::new();
     for (unit, scale) in [("ta", "UTC"), ("Ba", "TDB")] {
         frame_dependent
-            .set_internal("TIMEUNIT", unit)
-            .set_internal("TIMESYS", scale);
+            .set_internal(keywords::TIMEUNIT, unit)
+            .set_internal(keywords::TIMESYS, scale);
         let time = Frame::from_header(&frame_dependent).unwrap();
         assert!(matches!(
             time.unit_seconds(),
@@ -774,8 +778,8 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
 fn prefixed_relative_time_uses_the_declared_scale() {
     let mut milliseconds = Header::new();
     milliseconds
-        .set_internal("MJDREF", 58000.0)
-        .set_internal("TIMEUNIT", "ms");
+        .set_internal(keywords::MJDREF, 58000.0)
+        .set_internal(keywords::TIMEUNIT, "ms");
     let milliseconds = Frame::from_header(&milliseconds).unwrap();
     assert_eq!(
         milliseconds.relative_to_mjd(1000.0).unwrap(),
@@ -784,8 +788,8 @@ fn prefixed_relative_time_uses_the_declared_scale() {
 
     let mut kiloseconds = Header::new();
     kiloseconds
-        .set_internal("MJDREF", 58000.0)
-        .set_internal("TIMEUNIT", "ks");
+        .set_internal(keywords::MJDREF, 58000.0)
+        .set_internal(keywords::TIMEUNIT, "ks");
     let kiloseconds = Frame::from_header(&kiloseconds).unwrap();
     // 86.4 ks = 86,400 s = one day.
     assert_eq!(kiloseconds.relative_to_mjd(86.4).unwrap(), 58001.0);

@@ -75,6 +75,7 @@ pub(crate) fn encode(sum: u32, complement: bool) -> [u8; 16] {
 mod tests {
     use crate::block::padded_len;
     use crate::checksum::*;
+    use crate::header_model::keywords;
     use crate::reader::internals::{fixture_bytes, open_fixture};
     use crate::reader::{ChecksumReport, ChecksumStatus};
 
@@ -153,7 +154,7 @@ mod tests {
                 let data_end = data_start + padded_len(hdu.data_bytes).unwrap() as usize;
                 let data_sum = accumulate(&bytes[data_start..data_end], 0);
                 // cfitsio right-justifies the number in ten characters.
-                let datasum = hdu.header.get_text("DATASUM").unwrap().unwrap();
+                let datasum = hdu.header.get_text(keywords::DATASUM).unwrap().unwrap();
                 assert_eq!(datasum.trim_start().parse::<u32>(), Ok(data_sum));
 
                 let mut header = bytes[header_start..data_start].to_vec();

@@ -12,7 +12,7 @@ use crate::compress::plio;
 use crate::compress::rice;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header_model::Header;
+use crate::header_model::{Header, keywords};
 
 /// The optional null-pixel mask and everything applying it needs: the per-tile mask
 /// column, the `ZMASKCMP` codec that encodes it, and the `BLANK` value an integer
@@ -39,7 +39,7 @@ impl<'a> NullMask<'a> {
             ],
         )?;
         let codec = header
-            .get_text("ZMASKCMP")?
+            .get_text(keywords::ZMASKCMP)?
             .map(ImageCodec::parse)
             .transpose()?;
         if column.is_some() && codec == Some(ImageCodec::Hcompress1) {
@@ -66,9 +66,9 @@ impl<'a> NullMask<'a> {
         if !self.decode_into(table_row, tile_elems, mask, scratch)? {
             return Ok(());
         }
-        let blank = self
-            .blank
-            .ok_or(FitsError::MissingKeyword { name: "BLANK" })?;
+        let blank = self.blank.ok_or(FitsError::MissingKeyword {
+            keyword: keywords::BLANK,
+        })?;
         fill_masked(values, mask, blank);
         Ok(())
     }
@@ -104,9 +104,9 @@ impl<'a> NullMask<'a> {
         if cell.element_count == 0 {
             return Ok(false);
         }
-        let codec = self
-            .codec
-            .ok_or(FitsError::MissingKeyword { name: "ZMASKCMP" })?;
+        let codec = self.codec.ok_or(FitsError::MissingKeyword {
+            keyword: keywords::ZMASKCMP,
+        })?;
         match codec {
             ImageCodec::Gzip1 => gzip::gzip_tile_into(
                 cell.bytes,

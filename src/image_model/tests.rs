@@ -1,5 +1,5 @@
-use crate::header_model::Header;
 use crate::header_model::internals::from_card_lines as header;
+use crate::header_model::{Header, keywords};
 use crate::image_model::internals::physical;
 use crate::image_model::sample_type::{SampleType, UnsignedKind};
 use crate::image_model::unsigned_data::UnsignedData;
@@ -217,7 +217,9 @@ fn a_borrowed_image_checks_its_sample_count_and_scaling() {
     };
     assert!(matches!(
         Borrowed::new(&[3, 2], View::F32(&floats), blank),
-        Err(FitsError::KeywordOutOfRange { name: "BLANK" })
+        Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::BLANK
+        })
     ));
     assert!(Borrowed::new(&[3, 2], View::I16(&samples), blank).is_ok());
 }

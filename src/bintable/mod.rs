@@ -101,22 +101,22 @@ pub(crate) mod internals {
     use crate::bintable::Table;
     #[cfg(all(test, feature = "compression"))]
     use crate::bintable::tform_kind::TformKind;
-    use crate::header_model::Header;
+    use crate::header_model::{Header, keywords};
 
     /// A minimal `BINTABLE` header for `tforms`, sized by the caller — the fixture
     /// every read-path test builds its table from.
     pub(crate) fn table_header(naxis1: usize, naxis2: usize, tforms: &[&str]) -> Header {
         let mut h = Header::new();
-        h.set_internal("XTENSION", "BINTABLE")
-            .set_internal("BITPIX", 8)
-            .set_internal("NAXIS", 2)
+        h.set_internal(keywords::XTENSION, "BINTABLE")
+            .set_internal(keywords::BITPIX, 8)
+            .set_internal(keywords::NAXIS, 2)
             .set_internal("NAXIS1", i64::try_from(naxis1).unwrap())
             .set_internal("NAXIS2", i64::try_from(naxis2).unwrap())
-            .set_internal("PCOUNT", 0)
-            .set_internal("GCOUNT", 1)
-            .set_internal("TFIELDS", i64::try_from(tforms.len()).unwrap());
+            .set_internal(keywords::PCOUNT, 0)
+            .set_internal(keywords::GCOUNT, 1)
+            .set_internal(keywords::TFIELDS, i64::try_from(tforms.len()).unwrap());
         for (i, tform) in tforms.iter().enumerate() {
-            h.set_internal(&format!("TFORM{}", i + 1), *tform);
+            h.set_internal(keywords::TFORM.indexed(i + 1).unwrap(), *tform);
         }
         h
     }

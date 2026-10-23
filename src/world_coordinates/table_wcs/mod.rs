@@ -15,10 +15,8 @@ pub(super) mod table_wcs_resolver;
 
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header_model::Header;
-use crate::header_model::value;
-use crate::keyword::KeyBuf;
-use crate::keyword::key;
+use crate::header_model::{Header, keywords, value};
+use crate::keyword::Keyword;
 use crate::world_coordinates::axis_transform;
 use crate::world_coordinates::spectral_frame::SpectralFrame;
 use crate::world_coordinates::table_wcs::table_axis_keyword::TableAxisKeyword;
@@ -26,6 +24,7 @@ use crate::world_coordinates::table_wcs::table_matrix_keyword::TableMatrixKeywor
 use crate::world_coordinates::table_wcs::table_pole_keyword::TablePoleKeyword;
 use crate::world_coordinates::table_wcs::table_wcs_resolver::TableWcsResolver;
 use crate::world_coordinates::validated_axis_count;
+use crate::world_coordinates::{read_real, read_text};
 
 /// A Table 22 WCS description: how its axes are addressed, plus the resolver that
 /// spells each keyword family for the selected alternate.
@@ -79,7 +78,7 @@ impl<'a> TableWcs<'a> {
     ) -> Result<usize> {
         let resolver = TableWcsResolver::new(alt);
         let naxis = match resolver.vector_rank(header, column)? {
-            Some(value) => validated_axis_count(value, "WCAXn")?,
+            Some(value) => validated_axis_count(value, resolver.column_key("WCAX", column)?)?,
             // Highest-first over the axes the cards could name, so the first hit is
             // the rank. Probing a blind `(1..=99).rev()` instead costs ~800 header
             // lookups per axis that turns out to be absent.
@@ -89,7 +88,12 @@ impl<'a> TableWcs<'a> {
                 .unwrap_or(0),
         };
         if naxis == 0 {
-            return Err(FitsError::MissingKeyword { name: "iCTYPn" });
+            let first_type = resolver
+                .vector_axis_key(TableAxisKeyword::Type, 1, column)
+                .expect("Table 22 defines primary and alternate axis-type keywords")?;
+            return Err(FitsError::MissingKeyword {
+                keyword: first_type,
+            });
         }
         Ok(naxis)
     }
@@ -110,7 +114,7 @@ impl<'a> TableWcs<'a> {
         }
     }
 
-    fn axis_key(&self, keyword: TableAxisKeyword, index: usize) -> Option<KeyBuf> {
+    fn axis_key(&self, keyword: TableAxisKeyword, index: usize) -> Option<Result<Keyword>> {
         match self.form {
             TableWcsForm::PixelList(columns) => {
                 self.resolver.pixel_axis_key(keyword, columns[index])
@@ -155,7 +159,7 @@ impl<'a> TableWcs<'a> {
                 let source = self
                     .resolver
                     .vector_matrix_key(keyword, row + 1, input + 1, column);
-                header.get_real(source.as_str())
+                read_real(header, source)
             }
         }
     }
@@ -169,15 +173,15 @@ impl<'a> TableWcs<'a> {
     pub(super) fn translate(&self, header: &Header) -> Result<TranslatedTableWcs> {
         let naxis = self.naxis();
         let mut h = Header::new();
-        h.set_internal("WCSAXES", value::fits_i64(naxis)?);
+        h.set_internal(keywords::WCSAXES, value::fits_i64(naxis)?);
         let mut spectral_frames = vec![None; naxis];
         for (index, spectral) in spectral_frames.iter_mut().enumerate() {
             let ax = index + 1;
             let type_key = self
                 .axis_key(TableAxisKeyword::Type, index)
                 .expect("Table 22 defines primary and alternate axis-type keywords");
-            if let Some(t) = header.get_text(type_key.as_str())? {
-                h.set_internal(key!("CTYPE{ax}").as_str(), t);
+            if let Some(t) = read_text(header, type_key)? {
+                h.set_internal(keywords::CTYPE.indexed(ax)?, t);
                 if axis_transform::is_spectral_type(t) {
                     *spectral = Some(self.resolver.spectral_frame(header, self.column(index))?);
                 }
@@ -185,8 +189,8 @@ impl<'a> TableWcs<'a> {
             let unit_key = self
                 .axis_key(TableAxisKeyword::Unit, index)
                 .expect("Table 22 defines primary and alternate axis-unit keywords");
-            if let Some(t) = header.get_text(unit_key.as_str())? {
-                h.set_internal(key!("CUNIT{ax}").as_str(), t);
+            if let Some(t) = read_text(header, unit_key)? {
+                h.set_internal(keywords::CUNIT.indexed(ax)?, t);
             }
             for keyword in [
                 TableAxisKeyword::ReferencePoint,
@@ -195,15 +199,15 @@ impl<'a> TableWcs<'a> {
                 TableAxisKeyword::Rotation,
             ] {
                 if let Some(source) = self.axis_key(keyword, index)
-                    && let Some(value) = header.get_real(source.as_str())?
+                    && let Some(value) = read_real(header, source)?
                 {
-                    h.set_internal(key!("{}{ax}", keyword.image_root()).as_str(), value);
+                    h.set_internal(keyword.image_root().indexed(ax)?, value);
                 }
             }
             // `PVi_m` arrives as `TPVn_ma`/`TVn_ma`, or `iPVn_ma`/`iVn_ma`.
             for m in 0..=20 {
                 if let Some(v) = self.parameter_real(header, index, m)? {
-                    h.set_internal(key!("PV{ax}_{m}").as_str(), v);
+                    h.set_internal(Keyword::try_from(format_args!("PV{ax}_{m}"))?, v);
                 }
             }
         }
@@ -214,7 +218,12 @@ impl<'a> TableWcs<'a> {
                 for keyword in [TableMatrixKeyword::Pc, TableMatrixKeyword::Cd] {
                     if let Some(value) = self.matrix_real(header, keyword, row, input)? {
                         h.set_internal(
-                            key!("{}{}_{}", keyword.root(), row + 1, input + 1).as_str(),
+                            Keyword::try_from(format_args!(
+                                "{}{}_{}",
+                                keyword.root(),
+                                row + 1,
+                                input + 1
+                            ))?,
                             value,
                         );
                     }
@@ -264,7 +273,7 @@ impl<'a> TableWcs<'a> {
 /// impossible by the substring argument above.
 fn candidate_vector_axes(header: &Header) -> Vec<usize> {
     let mut axes: Vec<usize> = Vec::new();
-    for entry in header.iter() {
+    for entry in header {
         let digits = entry
             .keyword
             .find(|c: char| !c.is_ascii_digit())
