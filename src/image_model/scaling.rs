@@ -31,7 +31,8 @@ impl Scaling {
         blank: None,
     };
 
-    /// The public entry point is [`Header::scaling`](crate::header_model::Header::scaling).
+    /// The `BSCALE`, `BZERO` and `BLANK` that `header` declares, as they stand; an
+    /// image's own scaling is [`Hdu::image_metadata`](crate::io::Hdu::image_metadata)'s.
     pub(crate) fn from_header(header: &Header) -> Result<Self> {
         Ok(Self {
             bscale: header.get_real(keywords::BSCALE)?.unwrap_or(1.0),

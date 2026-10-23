@@ -27,7 +27,7 @@ fn decompress_image(header: &Header, table: &Table) -> Result<Image> {
     let kind = HduKind::classify(header, HduRole::Extension)?;
     let image = ImageGeometry::from_header(header, kind)?;
     let samples = TiledImage::new(header, &image)?.decode(header, table.view())?;
-    Image::new_scaled(image.shape.clone(), samples, image.scaling)
+    Image::new(image.shape.clone(), samples, image.scaling)
 }
 
 /// A one-tile compressed image's container: `columns` as (`TTYPEn`, `TFORMn`) over a

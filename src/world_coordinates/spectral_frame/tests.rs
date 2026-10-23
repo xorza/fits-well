@@ -56,7 +56,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     );
     assert!(matches!(
         to_pixel(&by_frequency, &[SPEED_OF_LIGHT]),
-        Err(FitsError::WcsCoordinateDomain {
+        Err(FitsError::WcsCoordinateOutOfDomain {
             axis: 0,
             algorithm: "F2V"
         })

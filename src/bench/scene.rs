@@ -50,7 +50,7 @@ pub(crate) fn sky(bitpix: Bitpix, width: usize, height: usize, seed: u64) -> Ima
                 bzero: 32768.0,
                 blank: None,
             };
-            return Image::new_scaled(shape, Data::I16(light.collect()), scaling).unwrap();
+            return Image::new(shape, Data::I16(light.collect()), scaling).unwrap();
         }
         Bitpix::I32 => Data::I32(
             units
@@ -61,14 +61,19 @@ pub(crate) fn sky(bitpix: Bitpix, width: usize, height: usize, seed: u64) -> Ima
         Bitpix::F32 => Data::F32(units.map(|v| v as f32).collect()),
         Bitpix::F64 => Data::F64(units.collect()),
     };
-    Image::new(shape, data).unwrap()
+    Image::new(shape, data, Scaling::IDENTITY).unwrap()
 }
 
 /// The defect mask of [`sky`] at `seed`: `u8` flags, 1 on every star.
 #[cfg(feature = "compression")]
 pub(crate) fn mask(width: usize, height: usize, seed: u64) -> Image {
     let flags = (0..width * height).map(|index| u8::from(SplitMix::pixel(seed, index).star()));
-    Image::new(vec![width, height], Data::U8(flags.collect())).unwrap()
+    Image::new(
+        vec![width, height],
+        Data::U8(flags.collect()),
+        Scaling::IDENTITY,
+    )
+    .unwrap()
 }
 
 /// The header a capture program writes on a light, past the structural keywords the image

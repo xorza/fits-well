@@ -9,7 +9,7 @@
 
 use std::fs::File;
 
-use fits_well::image::{Compression, CompressionConfig, Data, Image, Region};
+use fits_well::image::{Compression, CompressionConfig, Data, Image, Region, Scaling};
 use fits_well::{FitsReader, FitsWriter};
 use std::env;
 
@@ -17,7 +17,7 @@ fn main() -> fits_well::Result<()> {
     let path = env::temp_dir().join("fits_well_compressed.fits");
 
     let expected = Data::I16((0..256).map(|i| i % 32).collect());
-    let image = Image::new(vec![16, 16], expected.clone())?;
+    let image = Image::new(vec![16, 16], expected.clone(), Scaling::IDENTITY)?;
 
     // Compress with RICE in 8×8 tiles. The typed codec prevents invalid or misspelled
     // choices, and `with_tiles` sets the tile shape.

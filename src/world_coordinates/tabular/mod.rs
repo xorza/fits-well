@@ -897,7 +897,7 @@ fn invalid(detail: impl Into<String>) -> FitsError {
 }
 
 const fn domain(axis: usize) -> FitsError {
-    FitsError::WcsCoordinateDomain {
+    FitsError::WcsCoordinateOutOfDomain {
         axis,
         algorithm: "TAB",
     }

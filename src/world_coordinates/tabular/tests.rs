@@ -53,7 +53,7 @@ fn one_dimensional_tab_supports_nonmonotonic_coordinates_and_boundaries() {
     assert_eq!(to_pixel(&wcs, &[37.5]).unwrap(), [4.5]);
     assert!(matches!(
         to_world(&wcs, &[0.49]),
-        Err(FitsError::WcsCoordinateDomain {
+        Err(FitsError::WcsCoordinateOutOfDomain {
             axis: 0,
             algorithm: "TAB"
         })
@@ -315,7 +315,7 @@ fn a_one_element_index_vector_maps_onto_its_value() {
         assert!(
             matches!(
                 to_world(&wcs, &[pixel]),
-                Err(FitsError::WcsCoordinateDomain {
+                Err(FitsError::WcsCoordinateOutOfDomain {
                     axis: 0,
                     algorithm: "TAB"
                 })

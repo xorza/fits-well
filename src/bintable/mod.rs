@@ -65,12 +65,6 @@ impl Table {
         &self.schema
     }
 
-    /// The index of the first column whose `TTYPEn` matches `name`, compared
-    /// case-insensitively per §6.7.
-    pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.schema.column_index(name)
-    }
-
     /// A reader handle for the column `column` selects, by index or `TTYPEn` name. Decode
     /// through it — [`ColumnReader`] exposes `raw`/`physical`/`unsigned`/`complex`/`bits`
     /// and the `vla*` variants — without re-passing the column descriptor. Errors with

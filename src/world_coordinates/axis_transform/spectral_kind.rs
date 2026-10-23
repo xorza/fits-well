@@ -460,5 +460,5 @@ pub(super) fn invalid_grism(algorithm: &'static str, detail: &str) -> FitsError 
 }
 
 pub(super) const fn domain_error(axis: usize, algorithm: &'static str) -> FitsError {
-    FitsError::WcsCoordinateDomain { axis, algorithm }
+    FitsError::WcsCoordinateOutOfDomain { axis, algorithm }
 }

@@ -379,7 +379,7 @@ struct SzpVertex {
 
 impl Projection {
     pub(super) const fn domain_error(self) -> FitsError {
-        FitsError::WcsProjectionDomain {
+        FitsError::WcsPixelOutOfDomain {
             projection: self.code(),
         }
     }

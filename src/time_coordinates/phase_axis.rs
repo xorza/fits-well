@@ -2,6 +2,7 @@
 
 use crate::alternate::Alternate;
 use crate::error::FitsError;
+use crate::error::Indexed;
 use crate::error::Result;
 use crate::header_model::Header;
 use crate::keyword::Keyword;
@@ -28,7 +29,9 @@ impl PhaseAxis {
     ) -> Result<Option<Self>> {
         let alt = Alternate::of(alt)?;
         if axis == 0 {
-            return Err(FitsError::OneBasedIndexRequired { kind: "WCS axis" });
+            return Err(FitsError::OneBasedIndexRequired {
+                indexed: Indexed::WcsAxis,
+            });
         }
         Self::from_keywords(header, PhaseAxisKeywords::image(axis, alt))
     }
@@ -42,7 +45,7 @@ impl PhaseAxis {
         let alt = Alternate::of(alt)?;
         if column == 0 {
             return Err(FitsError::OneBasedIndexRequired {
-                kind: "table column",
+                indexed: Indexed::Column,
             });
         }
         Self::from_keywords(header, PhaseAxisKeywords::pixel_list(column, alt))
@@ -58,11 +61,13 @@ impl PhaseAxis {
     ) -> Result<Option<Self>> {
         let alt = Alternate::of(alt)?;
         if axis == 0 {
-            return Err(FitsError::OneBasedIndexRequired { kind: "WCS axis" });
+            return Err(FitsError::OneBasedIndexRequired {
+                indexed: Indexed::WcsAxis,
+            });
         }
         if column == 0 {
             return Err(FitsError::OneBasedIndexRequired {
-                kind: "table column",
+                indexed: Indexed::Column,
             });
         }
         Self::from_keywords(header, PhaseAxisKeywords::array_column(axis, column, alt))

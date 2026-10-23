@@ -270,14 +270,9 @@ pub struct Metadata<'a> {
 }
 
 impl Image {
-    /// Build an identity-scaled image from any typed vector accepted by
-    /// [`Data`].
-    pub fn new(shape: impl Into<Vec<usize>>, samples: impl Into<Data>) -> Result<Self> {
-        Self::new_scaled(shape, samples, Scaling::IDENTITY)
-    }
-
-    /// Build an image with explicit physical-value scaling.
-    pub fn new_scaled(
+    /// An image of `shape` over `samples`, any typed vector [`Data`] accepts, with
+    /// `scaling` ([`Scaling::IDENTITY`] for none), as [`Borrowed::new`] builds a view.
+    pub fn new(
         shape: impl Into<Vec<usize>>,
         samples: impl Into<Data>,
         scaling: Scaling,
@@ -346,7 +341,7 @@ impl Image {
     }
 
     fn offset_image(shape: impl Into<Vec<usize>>, samples: Data, bzero: f64) -> Result<Self> {
-        Self::new_scaled(
+        Self::new(
             shape,
             samples,
             Scaling {

@@ -57,7 +57,7 @@ pub(crate) fn compress_image(
         });
     }
     let total = image.samples.len();
-    let compression = config.codec;
+    let compression = config.compression;
     let codec = compression.image_codec();
     if codec == ImageCodec::Hcompress1 && image.shape.len() != 2 {
         return Err(FitsError::UnsupportedCompression {
@@ -286,7 +286,7 @@ fn compress_float_image(
     config: &CompressionConfig,
     out: &mut Vec<u8>,
 ) -> Result<Header> {
-    let compression = config.codec;
+    let compression = config.compression;
     let codec = compression.image_codec();
     if !matches!(
         codec,

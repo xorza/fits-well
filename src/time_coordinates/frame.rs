@@ -23,14 +23,14 @@ pub struct Frame {
     pub scale: Scale,
     /// Reference epoch as MJD (from `MJDREF`/`MJDREFI`+`MJDREFF`, `JDREF*`, or
     /// `DATEREF`); `0.0` if none is given.
-    pub mjdref: f64,
+    pub reference_mjd: f64,
     /// `TIMEUNIT` (default `'s'`).
     pub unit: Unit,
     /// `TIMEOFFS` (§9.4.1): a uniform additive clock correction in `TIMEUNIT`,
     /// equivalent to shifting the reference time. Default `0.0`.
-    pub timeoffs: f64,
+    pub clock_offset: f64,
     /// `TREFPOS`/`TRPOSn`, including the standard `TOPOCENTER` default.
-    pub trefpos: ReferencePosition,
+    pub reference_position: ReferencePosition,
 }
 
 impl Frame {
@@ -48,7 +48,7 @@ impl Frame {
     fn parse(header: &Header, column: Option<usize>) -> Result<Self> {
         if column == Some(0) {
             return Err(FitsError::OneBasedIndexRequired {
-                kind: "table column",
+                indexed: Indexed::Column,
             });
         }
         let scale = Scale::declared(header)?;
@@ -60,19 +60,19 @@ impl Frame {
             Some(column) => header.get_text(keywords::TRPOS.indexed(column)?)?,
             None => None,
         };
-        let trefpos = match column_trefpos {
+        let reference_position = match column_trefpos {
             Some(value) => ReferencePosition::parse(value),
             None => ReferencePosition::parse(
                 header.get_text(keywords::TREFPOS)?.unwrap_or("TOPOCENTER"),
             ),
         };
-        let mjdref = reference_mjd(header, &scale)?;
+        let reference_mjd = reference_mjd(header, &scale)?;
         let fits_time = Self {
             scale,
-            mjdref,
+            reference_mjd,
             unit,
-            timeoffs: header.get_real(keywords::TIMEOFFS)?.unwrap_or(0.0),
-            trefpos,
+            clock_offset: header.get_real(keywords::TIMEOFFS)?.unwrap_or(0.0),
+            reference_position,
         };
         Ok(fits_time)
     }
@@ -80,7 +80,7 @@ impl Frame {
     /// `TIMEUNIT` expressed in seconds. Standard SI prefixes are accepted and
     /// tropical/Besselian years are evaluated at `MJDREF`.
     pub fn unit_seconds(&self) -> Result<f64> {
-        self.unit.seconds(self.mjdref, &self.scale)
+        self.unit.seconds(self.reference_mjd, &self.scale)
     }
 
     /// Resolve a time value measured *relative* to `MJDREF` (e.g. `TSTART`,
@@ -91,7 +91,8 @@ impl Frame {
     }
 
     fn relative_to_mjd_in(&self, value: f64, unit: Unit, scale: &Scale) -> Result<f64> {
-        Ok(self.mjdref + (value + self.timeoffs) * unit.seconds(self.mjdref, scale)? / SEC_PER_DAY)
+        Ok(self.reference_mjd
+            + (value + self.clock_offset) * unit.seconds(self.reference_mjd, scale)? / SEC_PER_DAY)
     }
 
     /// Evaluate a 1-based time `axis` through its complete WCS row and coordinate
@@ -100,7 +101,9 @@ impl Frame {
     pub fn time_axis_mjd(&self, wcs: &Wcs, axis: usize, pixel: &[f64]) -> Result<Coordinate> {
         let zero_based = axis
             .checked_sub(1)
-            .ok_or(FitsError::OneBasedIndexRequired { kind: "WCS axis" })?;
+            .ok_or(FitsError::OneBasedIndexRequired {
+                indexed: Indexed::WcsAxis,
+            })?;
         let metadata =
             wcs.metadata()
                 .axes

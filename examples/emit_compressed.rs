@@ -23,7 +23,7 @@ use std::path::Path;
 use std::process;
 
 use fits_well::FitsWriter;
-use fits_well::image::{Compression, CompressionConfig, Data, Hcompress, Image};
+use fits_well::image::{Compression, CompressionConfig, Data, Hcompress, Image, Scaling};
 use fits_well::table::{Builder, ColumnData, WriteColumn};
 
 fn main() -> fits_well::Result<()> {
@@ -38,7 +38,7 @@ fn main() -> fits_well::Result<()> {
     let samples: Vec<i16> = (0..24 * 16)
         .map(|i| (i % 24) as i16 * 7 - (i / 24) as i16 * 5)
         .collect();
-    let image = Image::new(vec![24, 16], samples)?;
+    let image = Image::new(vec![24, 16], samples, Scaling::IDENTITY)?;
     for (compression, tiles) in [
         (Compression::GZIP, &[][..]),
         (Compression::GZIP_SHUFFLED, &[]),
@@ -58,7 +58,7 @@ fn main() -> fits_well::Result<()> {
     let path = out_dir.join("plio_1.fits");
     write_image(
         &path,
-        &Image::new(vec![24, 16], mask)?,
+        &Image::new(vec![24, 16], mask, Scaling::IDENTITY)?,
         &CompressionConfig::new(Compression::Plio),
     )?;
 
@@ -69,21 +69,22 @@ fn main() -> fits_well::Result<()> {
     let path = out_dir.join("rice_float.fits");
     write_image(
         &path,
-        &Image::new(vec![24, 16], Data::F32(floats))?,
+        &Image::new(vec![24, 16], Data::F32(floats), Scaling::IDENTITY)?,
         &CompressionConfig::new(Compression::Rice).with_tiles([24, 16]),
     )?;
 
     // 1000 rows: id = i, flux = 0.5i − 3, flag = i mod 7, in tiles of 100 rows.
-    let table = Builder::new()
-        .column(WriteColumn::scalar(
+    let mut table = Builder::new();
+    table
+        .push(WriteColumn::scalar(
             "ID",
             ColumnData::I32((0..1000).collect()),
         ))?
-        .column(WriteColumn::scalar(
+        .push(WriteColumn::scalar(
             "FLUX",
             ColumnData::F64((0..1000).map(|i| f64::from(i) * 0.5 - 3.0).collect()),
         ))?
-        .column(WriteColumn::scalar(
+        .push(WriteColumn::scalar(
             "FLAG",
             ColumnData::I16((0..1000).map(|i| i % 7).collect()),
         ))?;

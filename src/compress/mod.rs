@@ -181,7 +181,7 @@ impl Default for Quantization {
 /// A tiled-compression write: the codec, the tiles, and a float image's quantization.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompressionConfig {
-    codec: Compression,
+    compression: Compression,
     /// Fastest axis first for an image; one axis, the rows, for a table. Empty means
     /// the default: for an image one tile per row, or for `HCOMPRESS_1` cfitsio's
     /// default (full rows, one band up to 30 rows, else bands of 16 rows unless that
@@ -197,9 +197,9 @@ pub struct CompressionConfig {
 const DEFAULT_TABLE_TILE_BYTES: usize = 10_000_000;
 
 impl CompressionConfig {
-    pub const fn new(codec: Compression) -> Self {
+    pub const fn new(compression: Compression) -> Self {
         Self {
-            codec,
+            compression,
             tiles: Vec::new(),
             quantization: None,
         }

@@ -3,7 +3,7 @@ use std::io::Cursor;
 
 use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
-use fits_well::image::{Borrowed, Data, Image, PhysicalSample, Region, View};
+use fits_well::image::{Borrowed, Data, Image, PhysicalSample, Region, Scaling, View};
 use fits_well::io::HduKind;
 use fits_well::table::{Builder, ColumnData, WriteColumn};
 use fits_well::time::{Scale, ScaleKind};
@@ -17,7 +17,7 @@ use num_complex::Complex;
     reason = "each annotation names a published type at its canonical path"
 )]
 fn canonical_api_paths_resolve() -> Result<()> {
-    let image = Image::new(vec![3, 2], vec![1i16, 2, 3, 4, 5, 6])?;
+    let image = Image::new(vec![3, 2], vec![1i16, 2, 3, 4, 5, 6], Scaling::IDENTITY)?;
     assert_eq!(image.view().metadata().shape, [3, 2]);
     assert!(matches!(
         image.view().samples(),

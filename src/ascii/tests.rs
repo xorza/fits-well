@@ -131,12 +131,12 @@ fn ascii_column_index_is_case_insensitive() {
     let mut header = ascii_table_header(4, 1, &[(1, "I4")]);
     header.set_internal("TTYPE1", "Count");
     let table = Ascii::from_data(&header, b"   7".to_vec()).unwrap();
-    assert_eq!(table.column_index("COUNT"), Some(0));
-    assert_eq!(table.column_index("count"), Some(0));
+    assert_eq!(table.schema().column_index("COUNT"), Some(0));
+    assert_eq!(table.schema().column_index("count"), Some(0));
     // §7.2.2 and §6.7 are the same rule, so the ASCII form rejects the same
     // non-matches the binary one does.
-    assert_eq!(table.column_index("missing"), None);
-    assert_eq!(table.column_index(""), None);
+    assert_eq!(table.schema().column_index("missing"), None);
+    assert_eq!(table.schema().column_index(""), None);
 }
 
 #[test]

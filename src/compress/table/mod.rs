@@ -218,7 +218,7 @@ pub(crate) fn compress_table(
     config: &CompressionConfig,
     out: &mut Vec<u8>,
 ) -> Result<Header> {
-    let (default_algo, gzip_level) = match config.codec {
+    let (default_algo, gzip_level) = match config.compression {
         Compression::Gzip(config) if config.shuffle => (Algo::Gzip2, config.level),
         Compression::Gzip(config) => (Algo::Gzip1, config.level),
         Compression::Rice => (Algo::Rice1, gzip::DEFAULT_GZIP_LEVEL),

@@ -47,7 +47,7 @@ FitsError
         PartialTableRow { column: String, count: usize, row_width: usize }
         TableRowCountUndetermined { column: String }
         EmptyVlaNeedsType
-        OneBasedIndexRequired { kind: &'static str }
+        OneBasedIndexRequired { indexed: Indexed }
         HduNotFound { name: String, version: Option<i64>, level: Option<i64> }
         NotAnImage
         ImageHasGroups
@@ -57,11 +57,11 @@ FitsError
         NotAnAsciiTable
         ConflictingWcsKeywords { detail: &'static str }
         UnsupportedWcsTransform { axes: Vec<usize> }
-        WcsProjectionDomain { projection: &'static str }
+        WcsPixelOutOfDomain { projection: &'static str }
         WcsWorldOutOfDomain { projection: &'static str }
         WcsInvalidPole { detail: &'static str }
         InvalidUnit { unit: String, expected: &'static str }
-        WcsCoordinateDomain { axis: usize, algorithm: &'static str }
+        WcsCoordinateOutOfDomain { axis: usize, algorithm: &'static str }
         WcsNoConvergence { algorithm: &'static str }
         HcompressTileTooSmall { axis: usize, length: usize }
         UnsupportedCompression { name: String }
@@ -183,10 +183,6 @@ header::Header
         pub fn iter(&self) -> Iter<'_>
         pub fn history(&self) -> impl Iterator<Item = &str>
         pub fn comments(&self) -> impl Iterator<Item = &str>
-        pub fn bitpix(&self) -> Result<Bitpix>
-        pub fn naxis(&self) -> Result<usize>
-        pub fn axes(&self) -> Result<Vec<usize>>
-        pub fn scaling(&self) -> Result<Scaling>
         pub fn new() -> Self
         pub fn set(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, value: impl Into<Value>) -> Result<&mut Self>
         pub fn set_optional(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, value: Option<impl Into<Value>>) -> Result<&mut Self>
@@ -646,7 +642,7 @@ image::Compression  [features: compression or parallel]
 
 image::CompressionConfig  [features: compression or parallel]
     struct CompressionConfig: Clone, Debug, PartialEq
-        pub const fn new(codec: Compression) -> Self
+        pub const fn new(compression: Compression) -> Self
         pub fn with_tiles(self, tiles: impl Into<Vec<usize>>) -> Self
         pub fn with_quantization(self, level: f64, dither: DitherMethod) -> Result<Self>
 
@@ -662,6 +658,12 @@ image::Data
         pub const fn len(&self) -> usize
         pub const fn is_empty(&self) -> bool
         pub const fn view(&self) -> View<'_>
+        pub const fn as_u8(&self) -> Option<&[u8]>
+        pub const fn as_i16(&self) -> Option<&[i16]>
+        pub const fn as_i32(&self) -> Option<&[i32]>
+        pub const fn as_i64(&self) -> Option<&[i64]>
+        pub const fn as_f32(&self) -> Option<&[f32]>
+        pub const fn as_f64(&self) -> Option<&[f64]>
         impl TryFrom<Data> for Vec<f32>
         impl TryFrom<Data> for Vec<f64>
         impl TryFrom<Data> for Vec<i16>
@@ -686,8 +688,7 @@ image::Hcompress  [features: compression or parallel]
 
 image::Image
     struct Image: Clone, Debug
-        pub fn new(shape: impl Into<Vec<usize>>, samples: impl Into<Data>) -> Result<Self>
-        pub fn new_scaled(shape: impl Into<Vec<usize>>, samples: impl Into<Data>, scaling: Scaling) -> Result<Self>
+        pub fn new(shape: impl Into<Vec<usize>>, samples: impl Into<Data>, scaling: Scaling) -> Result<Self>
         pub fn view(&self) -> Borrowed<'_>
         pub fn into_samples(self) -> Data
         pub fn from_u16(shape: impl Into<Vec<usize>>, data: &[u16]) -> Result<Self>
@@ -866,7 +867,6 @@ table
 table::Ascii
     struct Ascii: Clone, Debug
         pub const fn schema(&self) -> &AsciiSchema
-        pub fn column_index(&self, name: &str) -> Option<usize>
         pub fn column<'n>(&self, column: impl Into<ColumnSelector<'n>>) -> Result<AsciiColumnReader<'_>>
 
 table::AsciiBuilder
@@ -874,7 +874,6 @@ table::AsciiBuilder
         pub const fn new() -> Self
         pub const fn with_rows(row_count: usize) -> Self
         pub fn push(&mut self, column: AsciiWriteColumn) -> Result<&mut Self>
-        pub fn column(self, column: AsciiWriteColumn) -> Result<Self>
         pub fn with_columns(row_count: usize, columns: impl IntoIterator<Item = AsciiWriteColumn>) -> Result<Self>
 
 table::AsciiColumn
@@ -945,7 +944,6 @@ table::Builder
         pub const fn new() -> Self
         pub const fn with_rows(row_count: usize) -> Self
         pub fn push(&mut self, column: WriteColumn) -> Result<&mut Self>
-        pub fn column(self, column: WriteColumn) -> Result<Self>
         pub fn with_columns(row_count: usize, columns: impl IntoIterator<Item = WriteColumn>) -> Result<Self>
 
 table::CharacterField
@@ -1109,7 +1107,6 @@ table::Selection
 table::Table
     struct Table: Clone, Debug
         pub const fn schema(&self) -> &Schema
-        pub fn column_index(&self, name: &str) -> Option<usize>
         pub fn column<'n>(&self, column: impl Into<ColumnSelector<'n>>) -> Result<ColumnReader<'_>>
 
 table::Tform
@@ -1155,15 +1152,15 @@ time
 
 time::Bounds
     struct Bounds: Clone, Copy, Debug, PartialEq
-        pub beg_mjd: Option<f64>
+        pub start_mjd: Option<f64>
         pub end_mjd: Option<f64>
-        pub avg_mjd: Option<f64>
-        pub xposure: Option<f64>
-        pub telapse: Option<f64>
-        pub timedel: Option<f64>
-        pub timepixr: f64
-        pub timsyer: Option<f64>
-        pub timrder: Option<f64>
+        pub mid_mjd: Option<f64>
+        pub exposure: Option<f64>
+        pub elapsed: Option<f64>
+        pub resolution: Option<f64>
+        pub pixel_position: f64
+        pub systematic_error: Option<f64>
+        pub random_error: Option<f64>
         pub fn from_header(header: &Header) -> Result<Self>
 
 time::Coordinate
@@ -1187,10 +1184,10 @@ time::Datetime
 time::Frame
     struct Frame: Clone, Debug
         pub scale: Scale
-        pub mjdref: f64
+        pub reference_mjd: f64
         pub unit: Unit
-        pub timeoffs: f64
-        pub trefpos: ReferencePosition
+        pub clock_offset: f64
+        pub reference_position: ReferencePosition
         pub fn from_header(header: &Header) -> Result<Self>
         pub fn from_column(header: &Header, column: usize) -> Result<Self>
         pub fn unit_seconds(&self) -> Result<f64>

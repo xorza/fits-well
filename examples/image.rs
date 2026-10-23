@@ -18,14 +18,14 @@ fn main() -> fits_well::Result<()> {
 
     // A 4×3 image of signed 16-bit pixels. `shape` is fastest-axis-first
     // (NAXIS1 = 4), and `samples` is the flat row-major buffer.
-    let i16_image = Image::new_scaled(
+    let i16_image = Image::new(
         vec![4, 3],
         Data::I16(vec![0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23]),
         Scaling::IDENTITY,
     )?;
     // A second image of a *different* type (32-bit float) — so the file holds two
     // image HDUs of differing BITPIX, which the view loop below reads into one buffer.
-    let f32_image = Image::new_scaled(
+    let f32_image = Image::new(
         vec![2, 2],
         Data::F32(vec![1.5, -2.5, 3.5, -4.5]),
         Scaling::IDENTITY,

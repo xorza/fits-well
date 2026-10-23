@@ -38,11 +38,11 @@ With `default-features = false`, the only dependencies are `bitvec`,
 
 ```rust no_run
 use std::fs::File;
-use fits_well::image::{Data, Image, Region};
+use fits_well::image::{Data, Image, Region, Scaling};
 use fits_well::{FitsError, FitsReader, FitsWriter};
 
 fn main() -> Result<(), FitsError> {
-    let image = Image::new(vec![4, 3], (0..12).collect::<Vec<i16>>())?; // NAXIS1 first
+    let image = Image::new(vec![4, 3], (0..12).collect::<Vec<i16>>(), Scaling::IDENTITY)?; // NAXIS1 first
     let mut writer = FitsWriter::new(File::create("out.fits")?);
     writer.write_image(image.view(), None)?;
     writer.into_inner().sync_all()?;
@@ -75,9 +75,10 @@ use fits_well::table::{ColumnData, Builder, WriteColumn};
 use fits_well::{FitsReader, FitsWriter};
 
 fn main() -> Result<(), fits_well::FitsError> {
-    let table = Builder::new()
-        .column(WriteColumn::scalar("ID", ColumnData::I32(vec![1, 2, 3])))?
-        .column(
+    let mut table = Builder::new();
+    table
+        .push(WriteColumn::scalar("ID", ColumnData::I32(vec![1, 2, 3])))?
+        .push(
             WriteColumn::scalar("MAG", ColumnData::F64(vec![0.03, -1.46, 0.13]))
                 .with_unit("mag"),
         )?;

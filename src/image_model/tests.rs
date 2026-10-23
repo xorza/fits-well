@@ -44,7 +44,7 @@ fn image_constructor_enforces_geometry_for_every_bitpix() {
     ];
     for samples in valid {
         let bitpix = samples.bitpix();
-        let image = Image::new_scaled(vec![2], samples, scaling).unwrap();
+        let image = Image::new(vec![2], samples, scaling).unwrap();
         assert_eq!(image.view().metadata().shape, [2]);
         assert_eq!(image.view().metadata().bitpix, bitpix);
     }
@@ -59,7 +59,7 @@ fn image_constructor_enforces_geometry_for_every_bitpix() {
     ];
     for samples in short {
         assert!(matches!(
-            Image::new_scaled(vec![2], samples, scaling),
+            Image::new(vec![2], samples, scaling),
             Err(FitsError::DataSizeMismatch {
                 expected: 2,
                 got: 1
@@ -70,7 +70,7 @@ fn image_constructor_enforces_geometry_for_every_bitpix() {
 
 #[test]
 fn simple_image_constructor_accepts_typed_vectors_with_identity_scaling() {
-    let image = Image::new(vec![2, 2], vec![1i16, 2, 3, 4]).unwrap();
+    let image = Image::new(vec![2, 2], vec![1i16, 2, 3, 4], Scaling::IDENTITY).unwrap();
     assert_eq!(image.view().metadata().shape, [2, 2]);
     assert_eq!(image.view().metadata().bitpix, Bitpix::I16);
     assert_eq!(image.view().metadata().scaling, Scaling::IDENTITY);
@@ -82,9 +82,9 @@ fn simple_image_constructor_accepts_typed_vectors_with_identity_scaling() {
 fn image_constructor_accepts_empty_geometry_and_rejects_nonempty_samples() {
     let scaling = Scaling::IDENTITY;
     for shape in [Vec::new(), vec![0], vec![4, 0, 3]] {
-        Image::new_scaled(shape.clone(), Data::F64(Vec::new()), scaling).unwrap();
+        Image::new(shape.clone(), Data::F64(Vec::new()), scaling).unwrap();
         assert!(matches!(
-            Image::new_scaled(shape, Data::F64(vec![1.0]), scaling),
+            Image::new(shape, Data::F64(vec![1.0]), scaling),
             Err(FitsError::DataSizeMismatch {
                 expected: 0,
                 got: 1
@@ -102,7 +102,7 @@ fn image_constructor_accepts_empty_geometry_and_rejects_nonempty_samples() {
 
 #[test]
 fn image_stored_view_preserves_exact_samples_immutably() {
-    let image = Image::new_scaled(
+    let image = Image::new(
         vec![3],
         Data::I64(vec![i64::MIN, 0, i64::MAX]),
         Scaling::IDENTITY,
@@ -148,6 +148,11 @@ fn decodes_big_endian_integers_and_floats() {
 fn image_data_views_preserve_ranges_for_every_sample_type() {
     let u8_values = Data::U8(vec![1, 2, 3, 4]);
     assert_eq!(u8_values.view_range(1..3), View::U8(&[2, 3]));
+    // The typed accessors give the samples only as their own type, as `View`'s do.
+    assert_eq!(u8_values.as_u8(), Some(&[1, 2, 3, 4][..]));
+    assert_eq!(u8_values.as_i16(), None);
+    assert_eq!(Data::F64(vec![0.5]).as_f64(), Some(&[0.5][..]));
+    assert_eq!(Data::F64(vec![0.5]).as_f32(), None);
 
     let i16_values = Data::I16(vec![-2, -1, 0, 1]);
     assert_eq!(i16_values.view_range(1..3), View::I16(&[-1, 0]));

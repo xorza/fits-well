@@ -18,7 +18,6 @@ use crate::header_model::card::ParsedRecord;
 use crate::header_model::card::validate_ascii;
 use crate::header_model::card::validate_valued_keyword;
 use crate::header_model::value::Value;
-use crate::image_model::scaling::Scaling;
 use crate::keyword::Keyword;
 use std::mem;
 use std::slice;
@@ -340,13 +339,13 @@ impl Header {
     }
 
     /// `BITPIX`, mapped to the typed element kind.
-    pub fn bitpix(&self) -> Result<Bitpix> {
+    pub(crate) fn bitpix(&self) -> Result<Bitpix> {
         let code = self.require_integer(keywords::BITPIX)?;
         Bitpix::from_code(code)
     }
 
     /// `NAXIS` — the number of axes (0 means no data array).
-    pub fn naxis(&self) -> Result<usize> {
+    pub(crate) fn naxis(&self) -> Result<usize> {
         let n = self.require_usize(keywords::NAXIS)?;
         // §4.4.1: `0 ≤ NAXIS ≤ 999`. Rejecting an out-of-range value is both
         // conformance and a guard — `axes()` reserves `Vec::with_capacity(NAXIS)`,
@@ -360,7 +359,7 @@ impl Header {
     }
 
     /// The axis lengths `NAXIS1..NAXIS{NAXIS}`, in order.
-    pub fn axes(&self) -> Result<Vec<usize>> {
+    pub(crate) fn axes(&self) -> Result<Vec<usize>> {
         let naxis = self.naxis()?;
         let mut axes = Vec::with_capacity(naxis);
         for n in 1..=naxis {
@@ -391,11 +390,6 @@ impl Header {
             Some(g) => Ok(g.cast_unsigned()),
             None => Ok(1),
         }
-    }
-
-    /// The physical-value scaling (`BSCALE`/`BZERO`/`BLANK`) declared by this header.
-    pub fn scaling(&self) -> Result<Scaling> {
-        Scaling::from_header(self)
     }
 
     /// Create an empty header. Build it with [`Header::set`] and friends.

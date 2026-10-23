@@ -1133,7 +1133,7 @@ fn an_empty_primary_carries_the_template_only_as_the_first_hdu() {
     assert_eq!(reader.hdus[1].kind, HduKind::BinTable);
 
     // An image written first is itself the primary.
-    let image = Image::new(vec![1], vec![7u8]).unwrap();
+    let image = Image::new(vec![1], vec![7u8], Scaling::IDENTITY).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     writer.write_image(image.view(), None).unwrap();
     assert!(matches!(
@@ -1939,30 +1939,32 @@ fn table_builders_infer_rows_and_reject_cross_column_mismatches() {
         ),
     ] {
         assert!(matches!(
-            Builder::with_rows(2).column(column),
+            Builder::with_rows(2).push(column).map(|_| ()),
             Err(FitsError::PartialTableRow { column, count: c, row_width: w })
                 if column == name && c == count && w == row_width
         ));
     }
-    let empty = Builder::with_rows(2)
-        .column(WriteColumn::fixed("Z", ColumnData::I16(Vec::new()), 0))
+    let mut empty = Builder::with_rows(2);
+    empty
+        .push(WriteColumn::fixed("Z", ColumnData::I16(Vec::new()), 0))
         .unwrap();
     assert_eq!(empty.row_count, Some(2));
     Builder::with_rows(0)
-        .column(WriteColumn::vla(
+        .push(WriteColumn::vla(
             "EMPTY",
             Ragged::<ColumnData>::new(ColumnData::I64(Vec::new()), Vec::new()),
         ))
         .unwrap();
 
-    let ascii = AsciiBuilder::new()
-        .column(AsciiWriteColumn::new(
+    let mut ascii = AsciiBuilder::new();
+    ascii
+        .push(AsciiWriteColumn::new(
             "NAME",
             AsciiColumnData::Text([Some("A"), Some("B")].into_iter().collect()),
             2,
         ))
         .unwrap()
-        .column(
+        .push(
             AsciiWriteColumn::new("VALUE", AsciiColumnData::Float(vec![Some(1.25), None]), 8)
                 .with_decimals(2)
                 .with_null("NULL"),
@@ -1979,7 +1981,7 @@ fn streaming_image_matches_transactional_output_and_checksums() {
         bzero: -10.0,
         blank: Some(i64::from(i16::MIN)),
     };
-    let image = Image::new_scaled(vec![3, 2], samples.clone(), scaling).unwrap();
+    let image = Image::new(vec![3, 2], samples.clone(), scaling).unwrap();
     let mut template = Header::new();
     template.set(keywords::OBJECT, "streamed").unwrap();
 
@@ -2027,7 +2029,7 @@ fn streaming_image_matches_transactional_output_and_checksums() {
 
 #[test]
 fn unfinished_or_invalid_image_stream_poisons_the_writer() {
-    let fallback = Image::new(vec![1], vec![7u8]).unwrap();
+    let fallback = Image::new(vec![1], vec![7u8], Scaling::IDENTITY).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
     {
         let mut stream = writer
