@@ -30,7 +30,7 @@ fn main() -> fits_well::Result<()> {
     let header = &reader.hdus()[0].header;
 
     // `Wcs::from_header` parses those keywords into a usable transform. `None` selects
-    // the primary WCS (an alternate would be `Some(Alternate::new('A'))`, etc.).
+    // the primary WCS (an alternate would be `'A'`, etc.).
     let wcs = Wcs::from_header(header, None)?;
     println!("axes: {:?}", wcs.metadata().axes);
 

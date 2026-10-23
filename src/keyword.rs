@@ -9,43 +9,7 @@
 use core::fmt::{self, Write};
 use std::str;
 
-use crate::alternate::Alternate;
 use crate::error::{FitsError, Result};
-
-/// The alternate-description suffix — the `a` of the §8 and Table 22 keyword
-/// families. Empty for the primary description, the single letter for an alternate.
-///
-/// Formatted into a [`Keyword`] *and* borrowed as a `&str` (the keyword scans strip
-/// it), so each keyword has one spelling rather than a present/absent pair.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct AltSuffix {
-    alt: Option<Alternate>,
-}
-
-impl AltSuffix {
-    pub(crate) const fn new(alt: Option<Alternate>) -> Self {
-        Self { alt }
-    }
-
-    pub(crate) const fn as_str(&self) -> &str {
-        match &self.alt {
-            Some(alt) => alt.as_str(),
-            None => "",
-        }
-    }
-
-    /// Whether an alternate description is selected. Several Table 22 families spell
-    /// their root differently for the primary description, which has no suffix.
-    pub(crate) const fn is_alternate(self) -> bool {
-        self.alt.is_some()
-    }
-}
-
-impl fmt::Display for AltSuffix {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
 
 /// The 1-based index of an indexed FITS keyword: `index("NAXIS3", "NAXIS")` is
 /// `Some(3)`. The suffix must be a non-empty digit run with no leading zero, so a

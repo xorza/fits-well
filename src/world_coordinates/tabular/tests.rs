@@ -1,3 +1,4 @@
+use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::header_model::{Header, keywords};
 use crate::world_coordinates::internals::{to_pixel, to_world};
@@ -240,13 +241,15 @@ fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
         .set_internal("CTYPE1", "AX01-TAB")
         .set_internal("PS1_1", "COORD");
     assert!(matches!(
-        tabular::descriptors(&missing, 1, None),
+        tabular::descriptors(&missing, 1, Alternate::PRIMARY),
         Err(FitsError::InvalidWcs { .. })
     ));
 
     let bad_shape = lookup_table(&[("COORD", &[1.0, 2.0, 3.0, 4.0], Some("(2,2)"))]);
     let header = tab_header(1, "COORD");
-    let descriptor = tabular::descriptors(&header, 1, None).unwrap().remove(0);
+    let descriptor = tabular::descriptors(&header, 1, Alternate::PRIMARY)
+        .unwrap()
+        .remove(0);
     assert!(matches!(
         TabularTransform::from_table(&descriptor, bad_shape.view()),
         Err(FitsError::InvalidWcs { .. })
@@ -258,7 +261,9 @@ fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
     ]);
     let mut header = tab_header(1, "COORD");
     header.set_internal("PS1_2", "INDEX");
-    let descriptor = tabular::descriptors(&header, 1, None).unwrap().remove(0);
+    let descriptor = tabular::descriptors(&header, 1, Alternate::PRIMARY)
+        .unwrap()
+        .remove(0);
     assert!(matches!(
         TabularTransform::from_table(&descriptor, bad_index.view()),
         Err(FitsError::InvalidWcs { .. })
@@ -266,7 +271,8 @@ fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
 
     let mut oversized_axis = tab_header(1, "COORD");
     oversized_axis.set_internal("PV1_3", i64::MAX);
-    let oversized = panic::catch_unwind(|| tabular::descriptors(&oversized_axis, 1, None));
+    let oversized =
+        panic::catch_unwind(|| tabular::descriptors(&oversized_axis, 1, Alternate::PRIMARY));
     assert!(matches!(oversized, Ok(Err(FitsError::InvalidWcs { .. }))));
 
     // An EXTVER is a positive integer: zero is refused, a fraction is no integer, and
@@ -274,7 +280,7 @@ fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
     for (value, refused) in [(0.0, "zero"), (1.5, "fraction"), (2f64.powi(63), "2^63")] {
         let mut header = tab_header(1, "COORD");
         header.set_internal("PV1_1", value);
-        let error = tabular::descriptors(&header, 1, None).unwrap_err();
+        let error = tabular::descriptors(&header, 1, Alternate::PRIMARY).unwrap_err();
         assert!(
             matches!(
                 (refused, &error),

@@ -1,9 +1,10 @@
 //! Reference-frame and rest-value metadata for a spectral WCS axis (§8.4).
 
+use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::{Header, keywords};
-use crate::keyword::{AltSuffix, Keyword};
+use crate::keyword::Keyword;
 use crate::world_coordinates::axis_transform::spectral_rest::SpectralRest;
 use crate::world_coordinates::{read_real, read_text};
 
@@ -56,12 +57,12 @@ impl SpectralReferenceFrame {
 impl SpectralFrame {
     /// Resolve `SPECSYSa`/`SSYSOBSa` and the `RESTFRQa`/`RESTWAVa` rest values from
     /// an image header.
-    pub(super) fn from_header(header: &Header, suffix: AltSuffix) -> Result<Self> {
-        let rest = Self::rest(header, suffix)?;
-        let coordinate = read_text(header, Keyword::try_from(format_args!("SPECSYS{suffix}")))?
+    pub(super) fn from_header(header: &Header, alt: Alternate) -> Result<Self> {
+        let rest = Self::rest(header, alt)?;
+        let coordinate = read_text(header, Keyword::try_from(format_args!("SPECSYS{alt}")))?
             .map(|value| SpectralReferenceFrame::parse("SPECSYS", value))
             .transpose()?;
-        let observer = read_text(header, Keyword::try_from(format_args!("SSYSOBS{suffix}")))?
+        let observer = read_text(header, Keyword::try_from(format_args!("SSYSOBS{alt}")))?
             .map(|value| SpectralReferenceFrame::parse("SSYSOBS", value))
             .transpose()?
             .unwrap_or(SpectralReferenceFrame::Topocentric);
@@ -72,12 +73,12 @@ impl SpectralFrame {
         })
     }
 
-    fn rest(header: &Header, suffix: AltSuffix) -> Result<SpectralRest> {
-        let mut frequency = read_real(header, Keyword::try_from(format_args!("RESTFRQ{suffix}")))?;
-        if frequency.is_none() && !suffix.is_alternate() {
+    fn rest(header: &Header, alt: Alternate) -> Result<SpectralRest> {
+        let mut frequency = read_real(header, Keyword::try_from(format_args!("RESTFRQ{alt}")))?;
+        if frequency.is_none() && !alt.is_alternate() {
             frequency = header.get_real(keywords::RESTFREQ)?;
         }
-        let wavelength = read_real(header, Keyword::try_from(format_args!("RESTWAV{suffix}")))?;
+        let wavelength = read_real(header, Keyword::try_from(format_args!("RESTWAV{alt}")))?;
         SpectralRest::new(frequency, wavelength)
     }
 }

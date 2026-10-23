@@ -1,9 +1,10 @@
 //! The linear layer of a WCS (§8.1) and its inverse.
 
+use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::Header;
-use crate::keyword::{AltSuffix, Keyword};
+use crate::keyword::Keyword;
 use crate::world_coordinates::D2R;
 use crate::world_coordinates::axis::Axis;
 use crate::world_coordinates::first_real;
@@ -61,7 +62,7 @@ impl MatrixCell {
 /// claims `WCSAXES = 999`. An index is matched exactly as a keyword name spells it: decimal
 /// digits with no leading zero, so `PC01_02` is a different keyword, as it is to a reader that
 /// asks for `PC1_2` by name.
-fn matrix_cells(header: &Header, root: &str, alt: AltSuffix, naxis: usize) -> Vec<MatrixCell> {
+fn matrix_cells(header: &Header, root: &str, alt: Alternate, naxis: usize) -> Vec<MatrixCell> {
     let index = |digits: &str| -> Option<usize> {
         let canonical = !digits.is_empty()
             && !digits.starts_with('0')
@@ -101,17 +102,18 @@ impl LinearMatrix {
     /// redundant `CROTA2` next to the matrix that supersedes it.
     pub(super) fn from_header(
         header: &Header,
-        a: AltSuffix,
+        alt: Alternate,
         naxis: usize,
         cdelt: &[f64],
         celestial_axes: Option<ProjectedCelestialAxes>,
     ) -> Result<Self> {
-        let cd = matrix_cells(header, "CD", a, naxis);
-        let pc = matrix_cells(header, "PC", a, naxis);
+        let cd = matrix_cells(header, "CD", alt, naxis);
+        let pc = matrix_cells(header, "PC", alt, naxis);
         let has_cd = !cd.is_empty();
         let has_pc = !pc.is_empty();
-        let has_crota = (1..=naxis)
-            .any(|i| read_value(header, Keyword::try_from(format_args!("CROTA{i}{a}"))).is_some());
+        let has_crota = (1..=naxis).any(|i| {
+            read_value(header, Keyword::try_from(format_args!("CROTA{i}{alt}"))).is_some()
+        });
         if has_cd && has_pc {
             return Err(FitsError::ConflictingWcsKeywords {
                 detail: "PC and CD conventions overlap",
@@ -143,8 +145,8 @@ impl LinearMatrix {
             let lat = axes.latitude;
             let rho = first_real(
                 header,
-                Keyword::try_from(format_args!("CROTA{}{a}", lat + 1)),
-                Keyword::try_from(format_args!("CROTA{}{a}", lng + 1)),
+                Keyword::try_from(format_args!("CROTA{}{alt}", lat + 1)),
+                Keyword::try_from(format_args!("CROTA{}{alt}", lng + 1)),
             )?
             .unwrap_or(0.0);
             if rho != 0.0 {

@@ -1,4 +1,3 @@
-use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::header_model::{Header, keywords};
 use crate::world_coordinates::internals::{to_pixel, to_world};
@@ -135,7 +134,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         .set_internal("RWAV5A", SPEED_OF_LIGHT / 1_420_405_751.0)
         .set_internal("SPEC5A", "LSRK")
         .set_internal("SOBS5A", "TOPOCENT");
-    let vector = Wcs::from_array_column(&vector, 5, Some(Alternate::new('A'))).unwrap();
+    let vector = Wcs::from_array_column(&vector, 5, 'A').unwrap();
     assert!((to_world(&vector, &[3.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9);
     assert_eq!(
         vector.metadata().axes[0].spectral_frame,
@@ -159,11 +158,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         .set_internal("SSYSOBSA", "BARYCENT")
         .set_internal("RESTFRQA", 1_420_405_751.0);
     assert_eq!(
-        Wcs::from_header(&alternate, Some(Alternate::new('A')))
-            .unwrap()
-            .metadata()
-            .axes[0]
-            .spectral_frame,
+        Wcs::from_header(&alternate, 'A').unwrap().metadata().axes[0].spectral_frame,
         Some(SpectralFrame {
             coordinate: Some(SpectralReferenceFrame::CmbDipole),
             observer: SpectralReferenceFrame::Barycentric,
@@ -176,7 +171,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
 
     alternate.set_internal("SPECSYSA", "UNKNOWN");
     assert!(matches!(
-        Wcs::from_header(&alternate, Some(Alternate::new('A'))),
+        Wcs::from_header(&alternate, 'A'),
         Err(FitsError::InvalidWcs { detail }) if detail.contains(keywords::SPECSYS.as_str())
     ));
 

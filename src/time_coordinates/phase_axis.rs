@@ -4,7 +4,7 @@ use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::Header;
-use crate::keyword::{AltSuffix, Keyword};
+use crate::keyword::Keyword;
 use crate::time_coordinates::time_axis_kind::TimeAxisKind;
 
 /// The §9.6 `'PHASE'` axis folding parameters: the zero-phase reference time
@@ -24,8 +24,9 @@ impl PhaseAxis {
     pub fn from_header(
         header: &Header,
         axis: usize,
-        alt: Option<Alternate>,
+        alt: impl TryInto<Alternate, Error: Into<FitsError>>,
     ) -> Result<Option<Self>> {
+        let alt = Alternate::of(alt)?;
         if axis == 0 {
             return Err(FitsError::OneBasedIndexRequired { kind: "WCS axis" });
         }
@@ -36,8 +37,9 @@ impl PhaseAxis {
     pub fn from_pixel_list(
         header: &Header,
         column: usize,
-        alt: Option<Alternate>,
+        alt: impl TryInto<Alternate, Error: Into<FitsError>>,
     ) -> Result<Option<Self>> {
+        let alt = Alternate::of(alt)?;
         if column == 0 {
             return Err(FitsError::OneBasedIndexRequired {
                 kind: "table column",
@@ -52,8 +54,9 @@ impl PhaseAxis {
         header: &Header,
         axis: usize,
         column: usize,
-        alt: Option<Alternate>,
+        alt: impl TryInto<Alternate, Error: Into<FitsError>>,
     ) -> Result<Option<Self>> {
+        let alt = Alternate::of(alt)?;
         if axis == 0 {
             return Err(FitsError::OneBasedIndexRequired { kind: "WCS axis" });
         }
@@ -109,42 +112,43 @@ struct PhaseAxisKeywords {
 }
 
 impl PhaseAxisKeywords {
-    fn image(axis: usize, alt: Option<Alternate>) -> Option<Self> {
-        let suffix = AltSuffix::new(alt);
+    fn image(axis: usize, alt: Alternate) -> Option<Self> {
         Some(Self {
-            ctype: Keyword::try_from(format_args!("CTYPE{axis}{suffix}")).ok()?,
-            zero_phase: Keyword::try_from(format_args!("CZPHS{axis}{suffix}")).ok()?,
-            period: Keyword::try_from(format_args!("CPERI{axis}{suffix}")).ok()?,
+            ctype: Keyword::try_from(format_args!("CTYPE{axis}{alt}")).ok()?,
+            zero_phase: Keyword::try_from(format_args!("CZPHS{axis}{alt}")).ok()?,
+            period: Keyword::try_from(format_args!("CPERI{axis}{alt}")).ok()?,
         })
     }
 
-    fn pixel_list(column: usize, alt: Option<Alternate>) -> Option<Self> {
-        match alt {
-            Some(alt) => Some(Self {
+    fn pixel_list(column: usize, alt: Alternate) -> Option<Self> {
+        if alt.is_alternate() {
+            Some(Self {
                 ctype: Keyword::try_from(format_args!("TCTY{column}{alt}")).ok()?,
                 zero_phase: Keyword::try_from(format_args!("TCZP{column}{alt}")).ok()?,
                 period: Keyword::try_from(format_args!("TCPR{column}{alt}")).ok()?,
-            }),
-            None => Some(Self {
+            })
+        } else {
+            Some(Self {
                 ctype: Keyword::try_from(format_args!("TCTYP{column}")).ok()?,
                 zero_phase: Keyword::try_from(format_args!("TCZPH{column}")).ok()?,
                 period: Keyword::try_from(format_args!("TCPER{column}")).ok()?,
-            }),
+            })
         }
     }
 
-    fn array_column(axis: usize, column: usize, alt: Option<Alternate>) -> Option<Self> {
-        match alt {
-            Some(alt) => Some(Self {
+    fn array_column(axis: usize, column: usize, alt: Alternate) -> Option<Self> {
+        if alt.is_alternate() {
+            Some(Self {
                 ctype: Keyword::try_from(format_args!("{axis}CTY{column}{alt}")).ok()?,
                 zero_phase: Keyword::try_from(format_args!("{axis}CZP{column}{alt}")).ok()?,
                 period: Keyword::try_from(format_args!("{axis}CPR{column}{alt}")).ok()?,
-            }),
-            None => Some(Self {
+            })
+        } else {
+            Some(Self {
                 ctype: Keyword::try_from(format_args!("{axis}CTYP{column}")).ok()?,
                 zero_phase: Keyword::try_from(format_args!("{axis}CZPH{column}")).ok()?,
                 period: Keyword::try_from(format_args!("{axis}CPER{column}")).ok()?,
-            }),
+            })
         }
     }
 }

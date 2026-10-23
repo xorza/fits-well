@@ -1,4 +1,3 @@
-use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::header_model::{Header, keywords};
 
@@ -77,7 +76,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
         })
     );
     assert_eq!(
-        Wcs::from_header(&alternate, Some(Alternate::new('A')))
+        Wcs::from_header(&alternate, 'A')
             .unwrap()
             .metadata()
             .celestial_frame,
@@ -96,7 +95,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
         .set_internal("EQUI2A", 2000.0)
         .set_internal("EQUI3A", 2000.0);
     assert_eq!(
-        Wcs::from_pixel_list(&pixel_list, &[2, 3], Some(Alternate::new('A')))
+        Wcs::from_pixel_list(&pixel_list, &[2, 3], 'A')
             .unwrap()
             .metadata()
             .celestial_frame,
@@ -112,7 +111,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
         .set_internal("2CTY5A", "DEC--TAN")
         .set_internal("RADE5A", "ICRS");
     assert_eq!(
-        Wcs::from_array_column(&vector, 5, Some(Alternate::new('A')))
+        Wcs::from_array_column(&vector, 5, 'A')
             .unwrap()
             .metadata()
             .celestial_frame,
@@ -150,7 +149,7 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
     ));
     pixel_list.set_internal("RADE3A", "FK4");
     assert!(matches!(
-        Wcs::from_pixel_list(&pixel_list, &[2, 3], Some(Alternate::new('A'))),
+        Wcs::from_pixel_list(&pixel_list, &[2, 3], 'A'),
         Err(FitsError::ConflictingWcsKeywords { .. })
     ));
 }

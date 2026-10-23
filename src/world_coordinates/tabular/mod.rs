@@ -5,7 +5,7 @@ use crate::bintable::table_view::TableView;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::Header;
-use crate::keyword::{AltSuffix, Keyword};
+use crate::keyword::Keyword;
 use crate::world_coordinates::ctype::Ctype;
 use crate::world_coordinates::world_unit_scale;
 use crate::world_coordinates::{read_integer, read_real, read_text};
@@ -89,14 +89,13 @@ struct IndexVector {
 pub(crate) fn descriptors(
     header: &Header,
     axis_count: usize,
-    alt: Option<Alternate>,
+    alt: Alternate,
 ) -> Result<Vec<TabularDescriptor>> {
-    let suffix = AltSuffix::new(alt);
     let mut descriptors = Vec::<PendingDescriptor>::new();
     for axis in 0..axis_count {
         let ctype = read_text(
             header,
-            Keyword::try_from(format_args!("CTYPE{}{suffix}", axis + 1)),
+            Keyword::try_from(format_args!("CTYPE{}{alt}", axis + 1)),
         )?
         .unwrap_or("");
         if Ctype::parse(ctype).algorithm != Some("TAB") {
@@ -104,21 +103,21 @@ pub(crate) fn descriptors(
         }
         let extension_name = required_text(
             header,
-            Keyword::try_from(format_args!("PS{}_0{suffix}", axis + 1))?,
+            Keyword::try_from(format_args!("PS{}_0{alt}", axis + 1))?,
             "TAB requires PSi_0",
         )?;
         let coordinate_column = required_text(
             header,
-            Keyword::try_from(format_args!("PS{}_1{suffix}", axis + 1))?,
+            Keyword::try_from(format_args!("PS{}_1{alt}", axis + 1))?,
             "TAB requires PSi_1",
         )?;
         let reference = TabularReference {
             extension_name,
-            extension_version: integer_parameter(header, axis, 1, suffix, 1)?,
-            extension_level: integer_parameter(header, axis, 2, suffix, 1)?,
+            extension_version: integer_parameter(header, axis, 1, alt, 1)?,
+            extension_level: integer_parameter(header, axis, 2, alt, 1)?,
             coordinate_column,
         };
-        let table_axis = integer_parameter(header, axis, 3, suffix, 1)?;
+        let table_axis = integer_parameter(header, axis, 3, alt, 1)?;
         let table_axis = usize::try_from(table_axis)
             .ok()
             .and_then(|value| value.checked_sub(1))
@@ -128,7 +127,7 @@ pub(crate) fn descriptors(
         }
         let reference_index = read_real(
             header,
-            Keyword::try_from(format_args!("CRVAL{}{suffix}", axis + 1)),
+            Keyword::try_from(format_args!("CRVAL{}{alt}", axis + 1)),
         )?
         .unwrap_or(0.0);
         if !reference_index.is_finite() {
@@ -136,7 +135,7 @@ pub(crate) fn descriptors(
         }
         let index_column = read_text(
             header,
-            Keyword::try_from(format_args!("PS{}_2{suffix}", axis + 1)),
+            Keyword::try_from(format_args!("PS{}_2{alt}", axis + 1)),
         )?
         .map(str::to_string);
 
@@ -163,7 +162,7 @@ pub(crate) fn descriptors(
         }
         let cunit = read_text(
             header,
-            Keyword::try_from(format_args!("CUNIT{}{suffix}", axis + 1)),
+            Keyword::try_from(format_args!("CUNIT{}{alt}", axis + 1)),
         )?
         .unwrap_or("");
         descriptor.axes[table_axis] = Some(TableAxis {
@@ -870,10 +869,10 @@ fn integer_parameter(
     header: &Header,
     axis: usize,
     parameter: usize,
-    suffix: AltSuffix,
+    alt: Alternate,
     default: i64,
 ) -> Result<i64> {
-    let key = Keyword::try_from(format_args!("PV{}_{parameter}{suffix}", axis + 1));
+    let key = Keyword::try_from(format_args!("PV{}_{parameter}{alt}", axis + 1));
     match read_integer(header, key)? {
         None => Ok(default),
         Some(value) if value >= 1 => Ok(value),
@@ -907,6 +906,7 @@ const fn domain(axis: usize) -> FitsError {
 /// `-TAB` fixtures for the tabular, reader and WCS bench code.
 #[cfg(feature = "internals")]
 pub(crate) mod internals {
+    use crate::alternate::Alternate;
     use crate::header_model::{Header, keywords};
     use std::sync::OnceLock;
 
@@ -1031,12 +1031,12 @@ pub(crate) mod internals {
     pub(crate) fn resolved_wcs(header: &Header, table: &Table) -> Wcs {
         let axis_count =
             usize::try_from(header.get_integer(keywords::NAXIS).unwrap().unwrap()).unwrap();
-        let transforms = tabular::descriptors(header, axis_count, None)
+        let transforms = tabular::descriptors(header, axis_count, Alternate::PRIMARY)
             .unwrap()
             .into_iter()
             .map(|descriptor| TabularTransform::from_table(&descriptor, table.view()).unwrap())
             .collect();
-        Wcs::from_header_with_tabular(header, None, transforms).unwrap()
+        Wcs::from_header_with_tabular(header, Alternate::PRIMARY, transforms).unwrap()
     }
 }
 

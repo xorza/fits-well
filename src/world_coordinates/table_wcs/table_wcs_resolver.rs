@@ -4,7 +4,7 @@ use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::{Header, keywords};
-use crate::keyword::{AltSuffix, Keyword};
+use crate::keyword::Keyword;
 use crate::world_coordinates::first_real;
 use crate::world_coordinates::spectral_frame::SpectralFrame;
 use crate::world_coordinates::table_wcs::keyword_spelling::KeywordSpelling;
@@ -19,20 +19,18 @@ use crate::world_coordinates::{read_integer, read_real, read_text, read_value};
 /// so the names are built here rather than at each read site.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TableWcsResolver {
-    suffix: AltSuffix,
+    alt: Alternate,
 }
 
 impl TableWcsResolver {
-    pub(super) const fn new(alternate: Option<Alternate>) -> Self {
-        Self {
-            suffix: AltSuffix::new(alternate),
-        }
+    pub(super) const fn new(alt: Alternate) -> Self {
+        Self { alt }
     }
 
     /// The spelling the axis roots take: the short one for an alternate description, whose
     /// suffix takes the last character.
     const fn spelling(self) -> KeywordSpelling {
-        if self.suffix.is_alternate() {
+        if self.alt.is_alternate() {
             KeywordSpelling::Short
         } else {
             KeywordSpelling::Full
@@ -45,8 +43,10 @@ impl TableWcsResolver {
         column: usize,
     ) -> Option<Result<Keyword>> {
         let root = keyword.table_root(self.spelling())?;
-        let suffix = self.suffix;
-        Some(Keyword::try_from(format_args!("T{root}{column}{suffix}")))
+        Some(Keyword::try_from(format_args!(
+            "T{root}{column}{}",
+            self.alt
+        )))
     }
 
     pub(super) fn vector_axis_key(
@@ -56,9 +56,9 @@ impl TableWcsResolver {
         column: usize,
     ) -> Option<Result<Keyword>> {
         let root = keyword.table_root(self.spelling())?;
-        let suffix = self.suffix;
         Some(Keyword::try_from(format_args!(
-            "{axis}{root}{column}{suffix}"
+            "{axis}{root}{column}{}",
+            self.alt
         )))
     }
 
@@ -70,8 +70,10 @@ impl TableWcsResolver {
         spelling: KeywordSpelling,
     ) -> Result<Keyword> {
         let root = keyword.pixel_root(spelling);
-        let suffix = self.suffix;
-        Keyword::try_from(format_args!("{root}{row_column}_{input_column}{suffix}"))
+        Keyword::try_from(format_args!(
+            "{root}{row_column}_{input_column}{}",
+            self.alt
+        ))
     }
 
     pub(super) fn pixel_matrix_real(
@@ -94,8 +96,10 @@ impl TableWcsResolver {
         column: usize,
     ) -> Result<Keyword> {
         let root = keyword.root();
-        let suffix = self.suffix;
-        Keyword::try_from(format_args!("{row_axis}{input_axis}{root}{column}{suffix}"))
+        Keyword::try_from(format_args!(
+            "{row_axis}{input_axis}{root}{column}{}",
+            self.alt
+        ))
     }
 
     fn pixel_parameter_key(
@@ -108,8 +112,7 @@ impl TableWcsResolver {
             KeywordSpelling::Full => "TPV",
             KeywordSpelling::Short => "TV",
         };
-        let suffix = self.suffix;
-        Keyword::try_from(format_args!("{root}{column}_{parameter}{suffix}"))
+        Keyword::try_from(format_args!("{root}{column}_{parameter}{}", self.alt))
     }
 
     pub(super) fn pixel_parameter_real(
@@ -134,8 +137,7 @@ impl TableWcsResolver {
             KeywordSpelling::Full => "PV",
             KeywordSpelling::Short => "V",
         };
-        let suffix = self.suffix;
-        Keyword::try_from(format_args!("{axis}{root}{column}_{parameter}{suffix}"))
+        Keyword::try_from(format_args!("{axis}{root}{column}_{parameter}{}", self.alt))
     }
 
     pub(super) fn vector_parameter_real(
@@ -161,13 +163,11 @@ impl TableWcsResolver {
             KeywordSpelling::Full => "PS",
             KeywordSpelling::Short => "S",
         };
-        let suffix = self.suffix;
-        Keyword::try_from(format_args!("{axis}{root}{column}_{parameter}{suffix}"))
+        Keyword::try_from(format_args!("{axis}{root}{column}_{parameter}{}", self.alt))
     }
 
     pub(super) fn column_key(self, root: &str, column: usize) -> Result<Keyword> {
-        let suffix = self.suffix;
-        Keyword::try_from(format_args!("{root}{column}{suffix}"))
+        Keyword::try_from(format_args!("{root}{column}{}", self.alt))
     }
 
     pub(super) fn pole_real(
@@ -226,7 +226,7 @@ impl TableWcsResolver {
                 translated.set_internal(image_root, value);
             }
         }
-        SpectralFrame::from_header(&translated, AltSuffix::new(None))
+        SpectralFrame::from_header(&translated, Alternate::PRIMARY)
     }
 
     /// Copy the `RADEna`/`EQUIna` celestial-frame keywords of every column in
@@ -270,8 +270,8 @@ mod tests {
 
     #[test]
     fn table_wcs_resolver_matches_table_22() {
-        let primary = TableWcsResolver::new(None);
-        let alternate = TableWcsResolver::new(Some(Alternate::new('A')));
+        let primary = TableWcsResolver::new(Alternate::PRIMARY);
+        let alternate = TableWcsResolver::new(Alternate::new('A'));
         let axis_cases = [
             (
                 TableAxisKeyword::Type,
