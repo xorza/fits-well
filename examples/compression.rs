@@ -20,8 +20,8 @@ fn main() -> fits_well::Result<()> {
     let image = Image::new(vec![16, 16], expected.clone())?;
 
     // Compress with RICE in 8×8 tiles. The typed codec prevents invalid or misspelled
-    // choices, and `tiled` sets the tile shape.
-    let config = CompressionConfig::new(Compression::Rice).tiled([8, 8]);
+    // choices, and `with_tiles` sets the tile shape.
+    let config = CompressionConfig::new(Compression::Rice).with_tiles([8, 8]);
     let mut writer = FitsWriter::new(File::create(&path)?);
     writer.write_compressed_image(image.view(), &config, None)?;
     writer.into_inner().sync_all()?;
@@ -35,7 +35,8 @@ fn main() -> fits_well::Result<()> {
     let first = reader
         .images()
         .next()
-        .expect("the file holds the compressed image");
+        .expect("the file holds the compressed image")
+        .index;
     println!("first image HDU: {first}"); // 1 — the compressed image extension
     let restored = reader.image(first)?.read(Region::All)?;
     let restored_shape = restored.view().shape().to_vec();

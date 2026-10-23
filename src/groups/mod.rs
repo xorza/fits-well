@@ -150,8 +150,8 @@ impl RandomGroups {
         let parameters_end = start + self.pcount;
         let group_end = start + group_len;
         Ok(RandomGroupView {
-            parameters: self.samples.view(start..parameters_end),
-            array: self.samples.view(parameters_end..group_end),
+            parameters: self.samples.view_range(start..parameters_end),
+            array: self.samples.view_range(parameters_end..group_end),
         })
     }
 
@@ -162,7 +162,7 @@ impl RandomGroups {
         // then apply each described parameter's own `PSCALn`/`PZEROn`; a later one
         // keeps the identity its absent keywords mean.
         let mut values = physical_view(
-            self.samples.view(base..base + self.pcount),
+            self.samples.view_range(base..base + self.pcount),
             &Scaling::IDENTITY,
         );
         for (value, &ParamScale { pscal, pzero }) in values.iter_mut().zip(&self.param_scaling) {
@@ -206,7 +206,7 @@ impl RandomGroups {
     pub fn array_physical(&self, group: usize) -> Result<Vec<f64>> {
         let base = self.checked_group_base(group)? + self.pcount;
         Ok(physical_view(
-            self.samples.view(base..base + self.array_len()),
+            self.samples.view_range(base..base + self.array_len()),
             &self.array_scaling,
         ))
     }

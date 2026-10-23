@@ -45,7 +45,7 @@ impl IntBitpix {
     /// The integer a table column of `kind` stores, or `None` for any other kind.
     pub(super) const fn from_tform(kind: TformKind) -> Option<Self> {
         match kind {
-            TformKind::Byte => Some(Self::U8),
+            TformKind::U8 => Some(Self::U8),
             TformKind::I16 => Some(Self::I16),
             TformKind::I32 => Some(Self::I32),
             TformKind::I64 => Some(Self::I64),

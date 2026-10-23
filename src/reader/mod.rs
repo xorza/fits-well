@@ -305,20 +305,12 @@ impl<S: Source> FitsReader<S> {
         selected_hdu(&self.hdus, hdu.into())
     }
 
-    /// The index of the HDU `hdu` names, as [`FitsReader::hdu`] finds it.
-    pub fn hdu_index<'h>(&self, hdu: impl Into<HduSelector<'h>>) -> Result<usize> {
-        Ok(self.hdu(hdu)?.index)
-    }
-
-    /// The indices of every HDU [`FitsReader::image`] can read as an image: image
-    /// extensions, tiled-compressed images, and a non-empty primary array (an empty
-    /// `NAXIS = 0` primary is a container, not an image, and is skipped). The first
-    /// image is `images().next()`.
-    pub fn images(&self) -> impl Iterator<Item = usize> + '_ {
-        self.hdus
-            .iter()
-            .filter(|hdu| hdu.is_image())
-            .map(|hdu| hdu.index)
+    /// Every HDU [`FitsReader::image`] can read as an image: image extensions,
+    /// tiled-compressed images, and a non-empty primary array (an empty `NAXIS = 0`
+    /// primary is a container, not an image, and is skipped). The first image is
+    /// `images().next()`, and its [`Hdu::index`] selects it.
+    pub fn images(&self) -> impl Iterator<Item = &Hdu> + '_ {
+        self.hdus.iter().filter(|hdu| hdu.is_image())
     }
 
     /// Read the raw, still-encoded (big-endian, unscaled) data unit into a fresh,
@@ -329,7 +321,7 @@ impl<S: Source> FitsReader<S> {
     /// This is the owned form, backing the table readers (which keep the bytes as
     /// the parsed table's storage). Image and random-groups reads instead stage
     /// through the reader's reused internal scratch — see [`FitsReader::image`].
-    pub fn read_data_raw<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<DataUnit> {
+    pub fn read_data_unit<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<DataUnit> {
         let hdu = selected_hdu(&self.hdus, hdu.into())?;
         let lengths = DataLengths::new(hdu.data_bytes)?;
         let bytes = self.data.read_owned(hdu.data_offset, lengths.padded)?;
@@ -352,12 +344,13 @@ impl<S: Source> FitsReader<S> {
     /// individual columns lazily with [`Table::column`]. Errors as
     /// [`Hdu::table_schema`] does for an HDU that is not a plain binary table.
     pub fn read_table<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Table> {
-        let index = self.hdu_index(hdu)?;
+        let index = self.hdu(hdu)?.index;
         #[cfg(feature = "compression")]
         {
             let hdu = &self.hdus[index];
             let schema = hdu.table_schema()?;
-            if let Some(decoded) = decoded_rows(&mut self.data, hdu, &(0..schema.nrows), None)? {
+            if let Some(decoded) = decoded_rows(&mut self.data, hdu, &(0..schema.row_count), None)?
+            {
                 return Table::new(decoded.schema, decoded.data);
             }
         }
@@ -371,14 +364,8 @@ impl<S: Source> FitsReader<S> {
         schema: fn(&Hdu) -> Result<&Schema>,
     ) -> Result<Table> {
         let schema = schema(&self.hdus[index])?.clone();
-        let unit = self.read_data_raw(index)?;
+        let unit = self.read_data_unit(index)?;
         Table::new(schema, unit.bytes)
-    }
-
-    /// A binary table's schema, parsed from its header when the file was opened. Errors
-    /// as [`Hdu::table_schema`] does.
-    pub fn table_schema<'h>(&self, hdu: impl Into<HduSelector<'h>>) -> Result<&Schema> {
-        selected_hdu(&self.hdus, hdu.into())?.table_schema()
     }
 
     /// Materialize only the requested contiguous row range, including only the VLA
@@ -573,7 +560,7 @@ impl<S: Source> FitsReader<S> {
                     selected[schema.column_index_checked(name)?] = true;
                 }
             }
-            let rows = 0..usize::from(schema.nrows != 0);
+            let rows = 0..usize::from(schema.row_count != 0);
             let row_count = rows.len();
             self.data.select_table(
                 table_hdu.data_offset,
@@ -603,7 +590,7 @@ impl<S: Source> FitsReader<S> {
             return Err(FitsError::NotAnAsciiTable);
         }
         let index = hdu.index;
-        let unit = self.read_data_raw(index)?;
+        let unit = self.read_data_unit(index)?;
         Ascii::from_data(&self.hdus[index].header, unit.bytes)
     }
 
@@ -676,7 +663,7 @@ fn decoded_rows<S: Source>(
     let Some(tiled) = hdu.tiled_table()? else {
         return Ok(None);
     };
-    validate_row_range(rows, tiled.schema.nrows)?;
+    validate_row_range(rows, tiled.schema.row_count)?;
     let container = data.table(hdu, None)?;
     tiled
         .decode(&hdu.header, container, rows, columns)

@@ -21,7 +21,7 @@ enum ValueKeywords {
 /// unit. Byte offsets are relative to the start of the data unit.
 #[derive(Debug, Clone)]
 pub struct Schema {
-    pub nrows: usize,
+    pub row_count: usize,
     /// Byte width of one row (`NAXIS1`).
     pub row_len: usize,
     /// Where the heap starts (`THEAP`, else the end of the main table) and ends
@@ -46,7 +46,7 @@ impl Schema {
 
     fn parse_columns(header: &Header, values: ValueKeywords) -> Result<Self> {
         let row_len = header.require_usize(keywords::NAXIS.indexed(1)?)?;
-        let nrows = header.require_usize(keywords::NAXIS.indexed(2)?)?;
+        let row_count = header.require_usize(keywords::NAXIS.indexed(2)?)?;
         // §7.3.1: `0 ≤ TFIELDS ≤ 999` — also a guard, since `tfields` sizes the
         // column `Vec` and drives the `TFORMn` loop (an absurd value would abort).
         let tfields = header.require_usize(keywords::TFIELDS)?;
@@ -56,7 +56,7 @@ impl Schema {
         let mut offset = 0;
         for n in 1..=tfields {
             let tform_value = header.require_text(keywords::TFORM.indexed(n)?)?;
-            let tform = Tform::parse(tform_value)?;
+            let tform = tform_value.parse::<Tform>()?;
             let tdim_keyword = keywords::TDIM.indexed(n)?;
             let shape = match values {
                 ValueKeywords::Read => header
@@ -103,9 +103,9 @@ impl Schema {
             });
         }
 
-        // `nrows · row_len` from untrusted axes: check once (guards a 32-bit-usize
+        // `row_count · row_len` from untrusted axes: check once (guards a 32-bit-usize
         // overflow that `data_extent`'s u64 math wouldn't catch) and reuse.
-        let main_table = nrows
+        let main_table = row_count
             .checked_mul(row_len)
             .ok_or(FitsError::DataUnitOverflow)?;
         let heap_offset = header.optional_usize(keywords::THEAP, main_table)?;
@@ -127,7 +127,7 @@ impl Schema {
             });
         }
         Ok(Self {
-            nrows,
+            row_count,
             row_len,
             heap_offset,
             heap_end,
@@ -137,7 +137,7 @@ impl Schema {
 
     /// The index of the first column whose `TTYPEn` matches `name`, compared
     /// case-insensitively per §6.7. Resolvable from the header alone, so a caller
-    /// holding only a [`crate::FitsReader::table_schema`] can locate a column
+    /// holding only a [`Hdu::table_schema`](crate::io::Hdu::table_schema) can locate a column
     /// without reading the data unit.
     pub fn column_index(&self, name: &str) -> Option<usize> {
         column::index_of(&self.columns, name)
@@ -149,16 +149,16 @@ impl Schema {
         column::checked_index_of(&self.columns, name)
     }
 
-    /// This schema for a compacted selection of `nrows` rows, whose heap follows the
+    /// This schema for a compacted selection of `row_count` rows, whose heap follows the
     /// rows directly and ends at `data_len`.
-    pub(crate) fn compacted(&self, nrows: usize, data_len: usize) -> Self {
-        let heap_offset = nrows * self.row_len;
+    pub(crate) fn compacted(&self, row_count: usize, data_len: usize) -> Self {
+        let heap_offset = row_count * self.row_len;
         assert!(
             heap_offset <= data_len,
             "a compacted selection holds its rows"
         );
         Self {
-            nrows,
+            row_count,
             row_len: self.row_len,
             heap_offset,
             heap_end: data_len,
@@ -166,14 +166,14 @@ impl Schema {
         }
     }
 
-    /// This schema over `nrows` rows that the same heap follows, at the same gap: the
+    /// This schema over `row_count` rows that the same heap follows, at the same gap: the
     /// table that a run of this table's rows and its whole heap make.
     #[cfg(feature = "compression")]
-    pub(crate) fn with_row_count(&self, nrows: usize) -> Self {
-        let main_len = self.nrows * self.row_len;
-        let shift = |offset: usize| offset - main_len + nrows * self.row_len;
+    pub(crate) fn with_row_count(&self, row_count: usize) -> Self {
+        let main_len = self.row_count * self.row_len;
+        let shift = |offset: usize| offset - main_len + row_count * self.row_len;
         Self {
-            nrows,
+            row_count,
             row_len: self.row_len,
             heap_offset: shift(self.heap_offset),
             heap_end: shift(self.heap_end),

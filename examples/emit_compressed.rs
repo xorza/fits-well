@@ -49,7 +49,7 @@ fn main() -> fits_well::Result<()> {
         write_image(
             &path,
             &image,
-            &CompressionConfig::new(compression).tiled(tiles),
+            &CompressionConfig::new(compression).with_tiles(tiles),
         )?;
     }
 
@@ -70,7 +70,7 @@ fn main() -> fits_well::Result<()> {
     write_image(
         &path,
         &Image::new(vec![24, 16], Data::F32(floats))?,
-        &CompressionConfig::new(Compression::Rice).tiled([24, 16]),
+        &CompressionConfig::new(Compression::Rice).with_tiles([24, 16]),
     )?;
 
     // 1000 rows: id = i, flux = 0.5i − 3, flag = i mod 7, in tiles of 100 rows.
@@ -93,7 +93,7 @@ fn main() -> fits_well::Result<()> {
     let path = out_dir.join("compressed_table.fits");
     FitsWriter::new(File::create(&path)?).write_compressed_table(
         &table,
-        &CompressionConfig::new(Compression::Rice).tiled([100]),
+        &CompressionConfig::new(Compression::Rice).with_tiles([100]),
         None,
     )?;
     println!("wrote {}", path.display());

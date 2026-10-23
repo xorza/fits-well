@@ -14,12 +14,12 @@ use crate::reader::hdu_selector::HduSelector;
 
 /// One Header/Data Unit located by the reader.
 ///
-/// The data unit itself is read lazily via [`FitsReader::read_data_raw`]; this
+/// The data unit itself is read lazily via [`FitsReader::read_data_unit`]; this
 /// record carries the parsed header, the inferred [`HduKind`], the data unit's byte
 /// range within the source, and the image geometry or table schema the header
 /// declares, resolved once when the file is opened.
 ///
-/// [`FitsReader::read_data_raw`]: crate::FitsReader::read_data_raw
+/// [`FitsReader::read_data_unit`]: crate::FitsReader::read_data_unit
 #[derive(Debug)]
 pub struct Hdu {
     /// The HDU's 0-based position in the file.

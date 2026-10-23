@@ -200,7 +200,7 @@ impl TabularTransform {
     pub(crate) fn from_table(descriptor: &TabularDescriptor, table: TableView<'_>) -> Result<Self> {
         let dimensions = descriptor.axes.len();
         let coordinate = table.column(&descriptor.reference.coordinate_column)?;
-        let coordinate_shape = first_row_shape_and_values(table.nrows, coordinate)?;
+        let coordinate_shape = first_row_shape_and_values(table.row_count, coordinate)?;
         let mut shape = coordinate_shape.shape;
         if dimensions == 1 && shape.len() == 1 {
             shape.insert(0, 1);
@@ -248,7 +248,7 @@ impl TabularTransform {
                 continue;
             };
             let reader = table.column(column)?;
-            let index = first_row_shape_and_values(table.nrows, reader)?;
+            let index = first_row_shape_and_values(table.row_count, reader)?;
             if index.shape.len() > 1 || index.values.len() != lengths[table_axis] {
                 return Err(invalid(
                     "TAB index-vector length must match its coordinate axis",

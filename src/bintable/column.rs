@@ -130,7 +130,7 @@ impl Column {
             }
             // `X` packs `repeat` bits into `byte_width` bytes, so its element count is
             // the byte width rather than the repeat.
-            kind @ (TformKind::Byte | TformKind::Bit) => {
+            kind @ (TformKind::U8 | TformKind::Bit) => {
                 kind.decode_cells_into(cells, row_count * self.tform.byte_width(), out);
             }
             kind => kind.decode_cells_into(cells, row_count * self.tform.repeat, out),

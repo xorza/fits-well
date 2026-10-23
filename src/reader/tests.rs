@@ -1,3 +1,6 @@
+use bitvec::bitvec;
+use bitvec::order::Msb0;
+
 use crate::bintable::descriptor;
 use crate::bintable::descriptor::DescriptorWidth;
 use crate::bintable::internals::table_header;
@@ -245,10 +248,10 @@ fn reads_a_single_hdu_image_with_exact_boundaries() {
 }
 
 #[test]
-fn read_data_raw_is_stable_across_reads() {
+fn read_data_unit_is_stable_across_reads() {
     let mut f = open_fixture("UITfuv2582gc.fits");
-    let a = f.read_data_raw(0).unwrap();
-    let b = f.read_data_raw(0).unwrap();
+    let a = f.read_data_unit(0).unwrap();
+    let b = f.read_data_unit(0).unwrap();
     assert_eq!(
         a.data(),
         b.data(),
@@ -570,9 +573,9 @@ fn last_data_unit_ends_exactly_at_end_of_file() {
 }
 
 #[test]
-fn read_data_raw_returns_padded_bytes_and_the_data_range() {
+fn read_data_unit_returns_padded_bytes_and_the_data_range() {
     let mut f = open_fixture("UITfuv2582gc.fits");
-    let unit = f.read_data_raw(0).unwrap();
+    let unit = f.read_data_unit(0).unwrap();
     // 512×512 i16: 524_288 bytes of data, padded up to 527_040 on disk.
     let view = unit.view();
     assert_eq!(view.padded.len(), 527_040);
@@ -587,10 +590,10 @@ fn read_data_raw_returns_padded_bytes_and_the_data_range() {
 }
 
 #[test]
-fn read_data_raw_rejects_out_of_bounds_index() {
+fn read_data_unit_rejects_out_of_bounds_index() {
     let mut f = open_fixture("UITfuv2582gc.fits"); // a single-HDU file
     assert!(matches!(
-        f.read_data_raw(5),
+        f.read_data_unit(5),
         Err(FitsError::IndexOutOfBounds {
             indexed: Indexed::Hdu,
             index: 5,
@@ -628,7 +631,7 @@ fn image_reads_the_primary_array_shape_and_type() {
 fn image_samples_match_a_manual_big_endian_decode() {
     let mut f = open_fixture("UITfuv2582gc.fits");
     // Independently decode every pixel straight from the data bytes.
-    let unit = f.read_data_raw(0).unwrap();
+    let unit = f.read_data_unit(0).unwrap();
     let manual: Vec<i16> = unit
         .data()
         .as_chunks::<2>()
@@ -651,16 +654,16 @@ fn image_rejects_non_image_hdus() {
 fn hdu_selectors_find_hdus_by_index_name_version_and_level() {
     let f = open_fixture("DDTSUVDATA.fits");
     // hdu 1 is the AIPS antenna table, EXTNAME = 'AIPS AN' (trailing spaces trimmed).
-    assert_eq!(f.hdu_index("AIPS AN").unwrap(), 1);
-    assert_eq!(f.hdu_index("aips an").unwrap(), 1); // case-insensitive
-    assert_eq!(f.hdu_index(1).unwrap(), 1);
+    assert_eq!(f.hdu("AIPS AN").unwrap().index, 1);
+    assert_eq!(f.hdu("aips an").unwrap().index, 1); // case-insensitive
+    assert_eq!(f.hdu(1).unwrap().index, 1);
     // The primary has no EXTNAME, so it is named PRIMARY, in any case.
-    assert_eq!(f.hdu_index("PRIMARY").unwrap(), 0);
-    assert_eq!(f.hdu_index("primary").unwrap(), 0);
+    assert_eq!(f.hdu("PRIMARY").unwrap().index, 0);
+    assert_eq!(f.hdu("primary").unwrap().index, 0);
     assert!(f.hdus()[0].matches("PRIMARY").unwrap());
     assert!(!f.hdus()[1].matches("PRIMARY").unwrap());
     assert!(matches!(
-        f.hdu_index(("AIPS AN", 99)), // no such EXTVER
+        f.hdu(("AIPS AN", 99)), // no such EXTVER
         Err(FitsError::HduNotFound { name, version: Some(99), level: None }) if name == "AIPS AN"
     ));
     // EXTLEVEL is 1 where the card is absent.
@@ -669,13 +672,13 @@ fn hdu_selectors_find_hdus_by_index_name_version_and_level() {
         version: None,
         level: Some(level),
     };
-    assert_eq!(f.hdu_index(level(1)).unwrap(), 1);
+    assert_eq!(f.hdu(level(1)).unwrap().index, 1);
     assert!(matches!(
-        f.hdu_index(level(2)),
+        f.hdu(level(2)),
         Err(FitsError::HduNotFound { level: Some(2), .. })
     ));
     assert!(matches!(
-        f.hdu_index("MISSING"),
+        f.hdu("MISSING"),
         Err(FitsError::HduNotFound { name, version: None, level: None }) if name == "MISSING"
     ));
     assert!(matches!(
@@ -689,8 +692,9 @@ fn hdu_selectors_find_hdus_by_index_name_version_and_level() {
     // A tiled-compressed image extension is found by its EXTNAME too.
     assert_eq!(
         open_fixture("comp_gzip_i16.fits")
-            .hdu_index("COMPRESSED_IMAGE")
-            .unwrap(),
+            .hdu("COMPRESSED_IMAGE")
+            .unwrap()
+            .index,
         1
     );
 
@@ -705,7 +709,7 @@ fn hdu_selectors_find_hdus_by_index_name_version_and_level() {
     let bytes = writer.into_inner().into_inner();
     let malformed = FitsReader::from_bytes(&bytes).unwrap();
     assert!(matches!(
-        malformed.hdu_index("SCI"),
+        malformed.hdu("SCI"),
         Err(FitsError::TypeMismatch { name, expected })
             if name == "EXTNAME" && expected == "text"
     ));
@@ -726,7 +730,7 @@ fn hdu_selectors_find_hdus_by_index_name_version_and_level() {
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
 
-    let index = reader.hdu_index(("sci", 2)).unwrap();
+    let index = reader.hdu(("sci", 2)).unwrap().index;
     assert_eq!(index, 1);
     assert_eq!(reader.hdus()[index].kind, HduKind::Image);
     assert_eq!(
@@ -751,7 +755,7 @@ fn hdu_selectors_find_hdus_by_index_name_version_and_level() {
     );
     assert_eq!(reader.hdus()[0].kind, HduKind::Primary);
     assert!(matches!(
-        reader.hdu_index(("SCI", 3)),
+        reader.hdu(("SCI", 3)),
         Err(FitsError::HduNotFound {
             version: Some(3),
             ..
@@ -761,7 +765,12 @@ fn hdu_selectors_find_hdus_by_index_name_version_and_level() {
 
 #[test]
 fn images_lists_readable_images_including_compressed() {
-    let images = |name: &str| open_fixture(name).images().collect::<Vec<_>>();
+    let images = |name: &str| {
+        open_fixture(name)
+            .images()
+            .map(|hdu| hdu.index)
+            .collect::<Vec<_>>()
+    };
     // A single primary array image.
     assert_eq!(images("UITfuv2582gc.fits"), [0]);
     // Empty primary + a tiled-compressed image extension (classified by ZIMAGE),
@@ -791,7 +800,10 @@ fn images_lists_readable_images_including_compressed() {
     let reader = FitsReader::open(Cursor::new(bytes)).unwrap();
     let images: Vec<bool> = reader.hdus().iter().map(Hdu::is_image).collect();
     assert_eq!(images, [false, false, true]);
-    assert_eq!(reader.images().collect::<Vec<_>>(), [2]);
+    assert_eq!(
+        reader.images().map(|hdu| hdu.index).collect::<Vec<_>>(),
+        [2]
+    );
 }
 
 #[test]
@@ -834,7 +846,7 @@ fn a_multibyte_view_swaps_into_the_callers_words() {
     // The stored bytes are big-endian: 1 → 0x0001, -2 → 0xFFFE, 300 → 0x012C.
     let mut reader = FitsReader::from_bytes(&buf).unwrap();
     assert_eq!(
-        reader.read_data_raw(0).unwrap().data(),
+        reader.read_data_unit(0).unwrap().data(),
         [0, 1, 255, 254, 1, 44]
     );
     // A type that needs byte-swapping views from the caller's words, not the source.
@@ -1021,7 +1033,7 @@ fn image_sections_match_hand_computed_values_for_every_bitpix() {
         let section = image.view(&[1..4, 1..3, 1..3], &mut scratch).unwrap();
         assert_eq!(section.shape, [3, 2, 2], "{bitpix:?}");
         assert_eq!(section.scaling, Scaling::IDENTITY, "{bitpix:?}");
-        assert_eq!(section.samples.to_owned_data(), expected, "{bitpix:?}");
+        assert_eq!(section.samples.to_data(), expected, "{bitpix:?}");
     }
 }
 
@@ -1187,7 +1199,7 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
         writer
             .write_compressed_image(
                 image.view(),
-                &CompressionConfig::new(Compression::GZIP).tiled([4, 3]),
+                &CompressionConfig::new(Compression::GZIP).with_tiles([4, 3]),
                 None,
             )
             .unwrap();
@@ -1199,7 +1211,10 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
             (metadata.shape, metadata.bitpix, metadata.scaling),
             (&[9, 7][..], bitpix, scaling)
         );
-        assert_eq!(reader.hdus()[1].container_schema().unwrap().nrows, 3 * 3);
+        assert_eq!(
+            reader.hdus()[1].container_schema().unwrap().row_count,
+            3 * 3
+        );
         let whole = read_whole(&mut reader, 1).samples;
         let expected = select_2d_section(&whole, 9, 2..9, 1..7);
         let mut image = reader.image(1).unwrap();
@@ -1226,7 +1241,7 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
         assert_eq!(view.shape, [7, 6], "{bitpix:?}");
         assert_eq!(view.scaling, scaling, "{bitpix:?}");
         assert_image_data_exact(
-            &view.samples.to_owned_data(),
+            &view.samples.to_data(),
             &expected,
             &format!("{bitpix:?} view"),
         );
@@ -1275,9 +1290,15 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
         WriteColumn::scalar("BYTE", ColumnData::U8(vec![1, 2, 3, 4])),
         WriteColumn::bits(
             "FLAGS",
-            vec![0b1010_0000, 0b0101_0000, 0b1110_0000, 0b0001_0000],
+            [
+                bitvec![u8, Msb0; 1, 0, 1, 0, 0],
+                bitvec![u8, Msb0; 0, 1, 0, 1, 0],
+                bitvec![u8, Msb0; 1, 1, 1, 0, 0],
+                bitvec![u8, Msb0; 0, 0, 0, 1, 0],
+            ],
             5,
-        ),
+        )
+        .unwrap(),
         WriteColumn::fixed(
             "NAME",
             ColumnData::Character(b"one two tri four".to_vec()),
@@ -1302,7 +1323,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
             ]),
         ),
         WriteColumn::scalar("SCALED", ColumnData::I16(vec![1, -99, 2, 3]))
-            .scaled(2.0, 10.0)
+            .with_scaling(2.0, 10.0)
             .with_null(-99),
         WriteColumn::scalar("LONG", ColumnData::I64(vec![100, 200, 300, 400])),
         WriteColumn::scalar("FLOAT", ColumnData::F32(vec![1.5, 2.5, 3.5, 4.5])),
@@ -1328,7 +1349,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
             ])
             .unwrap(),
         )
-        .wide(),
+        .with_wide_descriptors(),
     ];
     let table = Builder::with_columns(rows, columns).unwrap();
     let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
@@ -1336,11 +1357,11 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
 
-    let schema = reader.table_schema(1).unwrap().clone();
-    assert_eq!(schema.nrows, 4);
+    let schema = reader.hdu(1).unwrap().table_schema().unwrap().clone();
+    assert_eq!(schema.row_count, 4);
     assert_eq!(schema.columns.len(), 14);
     let empty = reader.read_table_rows(1, 2..2).unwrap();
-    assert_eq!(empty.schema().nrows, 0);
+    assert_eq!(empty.schema().row_count, 0);
     assert_eq!(
         empty.column("VLA").unwrap().vla().unwrap(),
         Ragged::<ColumnData>::new(ColumnData::I32(Vec::new()), Vec::new())
@@ -1546,14 +1567,14 @@ fn malformed_pq_descriptors_match_across_table_read_paths() {
             Ragged::from_rows(vec![ColumnData::U8(vec![7])]).unwrap(),
         );
         if width == DescriptorWidth::Q {
-            column = column.wide();
+            column = column.with_wide_descriptors();
         }
         let table = Builder::with_columns(1, vec![column]).unwrap();
         let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
         writer.write_table(&table, None).unwrap();
         let bytes = writer.into_inner().into_inner();
         let base_reader = FitsReader::from_bytes(&bytes).unwrap();
-        let schema = base_reader.table_schema(1).unwrap();
+        let schema = base_reader.hdu(1).unwrap().table_schema().unwrap();
         let slot = usize::try_from(base_reader.hdus[1].data_offset).unwrap()
             + schema.columns[0].byte_offset;
 
@@ -1620,7 +1641,7 @@ fn a_data_checksum_summed_during_the_decode_reads_the_unit_once() {
         };
         let mut reader = FitsReader::from_source(source).unwrap();
         let scanned = fetched.get();
-        let mut image = reader.image(0).unwrap().with_checksum();
+        let mut image = reader.image(0).unwrap().with_checksums();
         let mut words = Vec::new();
         for row in rows {
             let ranges = [0..7, row.clone()];
@@ -1646,7 +1667,7 @@ fn a_data_checksum_summed_during_the_decode_reads_the_unit_once() {
 
     // The whole image in one summed section is the image written, and its sum is valid.
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
-    let mut whole = reader.image(0).unwrap().with_checksum();
+    let mut whole = reader.image(0).unwrap().with_checksums();
     assert_eq!(whole.read(&[0..7, 0..5]).unwrap().samples, image.samples);
     assert_eq!(whole.finish().unwrap().datasum, ChecksumStatus::Valid);
 
@@ -1660,7 +1681,7 @@ fn a_data_checksum_summed_during_the_decode_reads_the_unit_once() {
         };
         let mut reader = FitsReader::from_source(source).unwrap();
         let scanned = fetched.get();
-        let mut handle = reader.image(0).unwrap().with_checksum();
+        let mut handle = reader.image(0).unwrap().with_checksums();
         if read_first {
             assert_eq!(handle.read(Region::All).unwrap().samples, image.samples);
         }
@@ -1707,13 +1728,13 @@ fn a_compressed_image_summed_through_its_sections_reads_the_unit_at_the_finish()
     writer
         .write_compressed_image(
             image.view(),
-            &CompressionConfig::new(Compression::GZIP).tiled([4, 3]),
+            &CompressionConfig::new(Compression::GZIP).with_tiles([4, 3]),
             None,
         )
         .unwrap();
     let bytes = writer.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
-    let mut sections = reader.image(1).unwrap().with_checksum();
+    let mut sections = reader.image(1).unwrap().with_checksums();
     let mut words = Vec::new();
     for rows in [0..4, 4..7] {
         sections.view(&[0..9, rows], &mut words).unwrap();
@@ -1732,7 +1753,7 @@ fn a_compressed_image_summed_through_its_sections_reads_the_unit_at_the_finish()
     };
     let mut counted = FitsReader::from_source(source).unwrap();
     let scanned = fetched.get();
-    let mut whole = counted.image(1).unwrap().with_checksum();
+    let mut whole = counted.image(1).unwrap().with_checksums();
     assert_eq!(whole.read(Region::All).unwrap().samples, image.samples);
     assert_eq!(whole.finish().unwrap(), report);
     let padded = usize::try_from(counted.hdus()[1].padded_data_bytes()).unwrap();

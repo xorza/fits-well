@@ -37,7 +37,7 @@ use crate::ragged::Ragged;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ColumnType {
     Logical,
-    Byte,
+    U8,
     I16,
     I32,
     I64,
@@ -132,7 +132,7 @@ impl WriteColumn {
     }
 
     /// A variable-length `P` column: row `r` stores `rows.range(r)` of the values,
-    /// and the values' type is the heap element type. [`WriteColumn::wide`] changes
+    /// and the values' type is the heap element type. [`WriteColumn::with_wide_descriptors`] changes
     /// the descriptors to `Q`.
     pub fn vla(name: impl Into<String>, rows: Ragged<ColumnData>) -> Self {
         Self {
@@ -149,22 +149,48 @@ impl WriteColumn {
         }
     }
 
-    /// An `X` column of `bit_count` bits per row and its row-packed bytes.
-    pub fn bits(name: impl Into<String>, bytes: Vec<u8>, bit_count: usize) -> Self {
-        Self {
-            name: name.into(),
+    /// An `X` column of `width` bits per row, one row of bits each, MSB-first. A row of
+    /// another length is an error: unlike a text field, a bit row has no padding.
+    pub fn bits(
+        name: impl Into<String>,
+        rows: impl IntoIterator<Item = impl AsRef<BitSlice<u8, Msb0>>>,
+        width: usize,
+    ) -> Result<Self> {
+        let name = name.into();
+        let row_bytes = width.div_ceil(8);
+        let mut bytes = Vec::new();
+        for (row, bits) in rows.into_iter().enumerate() {
+            let bits = bits.as_ref();
+            if bits.len() != width {
+                return Err(FitsError::BitFieldLengthMismatch {
+                    column: name,
+                    row,
+                    length: bits.len(),
+                    width,
+                });
+            }
+            let start = bytes.len();
+            bytes.resize(start + row_bytes, 0);
+            BitSlice::<u8, Msb0>::from_slice_mut(&mut bytes[start..])[..width]
+                .copy_from_bitslice(bits);
+        }
+        Ok(Self {
+            name,
             unit: None,
-            values: WriteColumnData::Bits { bytes, bit_count },
+            values: WriteColumnData::Bits {
+                bytes,
+                bit_count: width,
+            },
             tdim: None,
             tscale: None,
             tzero: None,
             tnull: None,
-        }
+        })
     }
 
     /// A variable-length `PX` bit-array column: row `r` stores `rows.row(r)`,
     /// MSB-first, and its bit length is the descriptor element count.
-    /// [`WriteColumn::wide`] changes the descriptors to `QX`.
+    /// [`WriteColumn::with_wide_descriptors`] changes the descriptors to `QX`.
     pub fn vla_bits(name: impl Into<String>, rows: Ragged<BitVec<u8, Msb0>>) -> Self {
         Self {
             name: name.into(),
@@ -189,8 +215,8 @@ impl WriteColumn {
 
     /// Attach a `TDIMn` array shape (fastest axis first).
     #[must_use]
-    pub fn with_tdim(mut self, shape: Vec<usize>) -> Self {
-        self.tdim = Some(shape);
+    pub fn with_tdim(mut self, shape: impl Into<Vec<usize>>) -> Self {
+        self.tdim = Some(shape.into());
         self
     }
 
@@ -200,7 +226,7 @@ impl WriteColumn {
     /// Unless the column is variable-length — from [`WriteColumn::vla`] or
     /// [`WriteColumn::vla_bits`].
     #[must_use]
-    pub fn wide(mut self) -> Self {
+    pub fn with_wide_descriptors(mut self) -> Self {
         match &mut self.values {
             WriteColumnData::Vla { width, .. } | WriteColumnData::VlaBits { width, .. } => {
                 *width = DescriptorWidth::Q;
@@ -215,7 +241,7 @@ impl WriteColumn {
     /// Emit `TSCALn`/`TZEROn` so the stored `data` reads back as
     /// `TZEROn + TSCALn × stored` physically.
     #[must_use]
-    pub const fn scaled(mut self, tscale: f64, tzero: f64) -> Self {
+    pub const fn with_scaling(mut self, tscale: f64, tzero: f64) -> Self {
         self.tscale = Some(tscale);
         self.tzero = Some(tzero);
         self
@@ -284,22 +310,22 @@ impl WriteColumn {
 /// unless an explicit count is supplied for an empty or zero-width schema.
 #[derive(Debug, Clone, Default)]
 pub struct Builder {
-    pub(super) nrows: Option<usize>,
+    pub(super) row_count: Option<usize>,
     pub(super) columns: Vec<WriteColumn>,
 }
 
 impl Builder {
     pub const fn new() -> Self {
         Self {
-            nrows: None,
+            row_count: None,
             columns: Vec::new(),
         }
     }
 
     /// Declare the row count for an empty/predeclared schema.
-    pub const fn with_rows(nrows: usize) -> Self {
+    pub const fn with_rows(row_count: usize) -> Self {
         Self {
-            nrows: Some(nrows),
+            row_count: Some(row_count),
             columns: Vec::new(),
         }
     }
@@ -308,7 +334,7 @@ impl Builder {
     /// columns already present.
     pub fn push(&mut self, column: WriteColumn) -> Result<&mut Self> {
         let inferred = column.inferred_rows()?;
-        accept_row_count(&mut self.nrows, &column.name, inferred)?;
+        accept_row_count(&mut self.row_count, &column.name, inferred)?;
         self.columns.push(column);
         Ok(self)
     }
@@ -320,10 +346,10 @@ impl Builder {
 
     /// Build from an explicit row count and complete column list.
     pub fn with_columns(
-        nrows: usize,
+        row_count: usize,
         columns: impl IntoIterator<Item = WriteColumn>,
     ) -> Result<Self> {
-        let mut table = Self::with_rows(nrows);
+        let mut table = Self::with_rows(row_count);
         for column in columns {
             table.push(column)?;
         }
@@ -332,13 +358,13 @@ impl Builder {
 
     /// The extent of the table this writes, checked before any byte is.
     fn layout(&self) -> Result<TableLayout> {
-        let nrows = self.nrows.unwrap_or(0);
+        let row_count = self.row_count.unwrap_or(0);
         validate_table_field_count(self.columns.len())?;
-        value::fits_i64(nrows)?;
+        value::fits_i64(row_count)?;
         let mut columns = Vec::with_capacity(self.columns.len());
         let mut row_len = 0usize;
         for (i, col) in self.columns.iter().enumerate() {
-            let layout = validate_column(col, nrows, i + 1)?;
+            let layout = validate_column(col, row_count, i + 1)?;
             row_len = row_len
                 .checked_add(layout.row_width)
                 .ok_or(FitsError::DataUnitOverflow)?;
@@ -346,30 +372,30 @@ impl Builder {
         }
         value::fits_i64(row_len)?;
         let mut heap_len = 0usize;
-        for array in self.heap_arrays(nrows) {
+        for array in self.heap_arrays(row_count) {
             heap_len = next_vla_heap_len(heap_len, array)?;
         }
         value::fits_i64(heap_len)?;
         Ok(TableLayout {
-            nrows,
+            row_count,
             row_len,
             heap_len,
             columns,
         })
     }
 
-    /// The variable-length arrays of `nrows` rows in the order the heap holds them: row by
+    /// The variable-length arrays of `row_count` rows in the order the heap holds them: row by
     /// row, each variable-length column in turn.
-    fn heap_arrays(&self, nrows: usize) -> impl Iterator<Item = ArrayLen> + '_ {
-        (0..self.heap_rows(nrows))
+    fn heap_arrays(&self, row_count: usize) -> impl Iterator<Item = ArrayLen> + '_ {
+        (0..self.heap_rows(row_count))
             .flat_map(move |r| self.columns.iter().filter_map(move |col| col.array_len(r)))
     }
 
-    /// The rows of `nrows` that put an array in the heap: all of them when a column is
+    /// The rows of `row_count` that put an array in the heap: all of them when a column is
     /// variable-length, else none, so a table of fixed-width columns walks no row.
-    fn heap_rows(&self, nrows: usize) -> usize {
+    fn heap_rows(&self, row_count: usize) -> usize {
         if self.columns.iter().any(WriteColumn::is_array) {
-            nrows
+            row_count
         } else {
             0
         }
@@ -378,7 +404,7 @@ impl Builder {
     /// The `BINTABLE` header of the table laid out as `layout`.
     fn header(&self, layout: &TableLayout) -> Result<Header> {
         bintable_header(
-            layout.nrows,
+            layout.row_count,
             layout.row_len,
             &self.columns,
             &layout.columns,
@@ -391,21 +417,21 @@ impl Builder {
     fn encode(&self, out: &mut Vec<u8>) -> Result<Header> {
         let layout = self.layout()?;
         let TableLayout {
-            nrows,
+            row_count,
             row_len,
             heap_len,
             ..
         } = layout;
         let columns = &self.columns;
         out.clear();
-        let main_len = nrows
+        let main_len = row_count
             .checked_mul(row_len)
             .ok_or(FitsError::DataUnitOverflow)?;
         let total_len = main_len
             .checked_add(heap_len)
             .ok_or(FitsError::DataUnitOverflow)?;
         out.reserve_exact(total_len);
-        for r in 0..nrows {
+        for r in 0..row_count {
             for col in columns {
                 match &col.values {
                     WriteColumnData::Vla { width, .. } | WriteColumnData::VlaBits { width, .. } => {
@@ -416,7 +442,7 @@ impl Builder {
             }
         }
         debug_assert_eq!(out.len(), main_len, "main table layout");
-        for r in 0..self.heap_rows(nrows) {
+        for r in 0..self.heap_rows(row_count) {
             let mut column_offset = 0usize;
             for (col, column) in columns.iter().zip(&layout.columns) {
                 match &col.values {
@@ -470,7 +496,7 @@ pub(super) fn write_compressed<W: Write>(
     let layout = table.layout()?;
     let mut header = table.header(&layout)?;
     merge_header_template(&mut header, template);
-    let cells = BuilderCells::new(table, layout.nrows);
+    let cells = BuilderCells::new(table, layout.row_count);
     let container = table::compress_table(&header, &cells, config, &mut writer.scratch)?;
     writer.finish_hdu(container, None, ZERO_FILL, Opening::EmptyPrimary)
 }
@@ -490,8 +516,8 @@ struct BuilderCells<'a> {
 
 #[cfg(feature = "compression")]
 impl<'a> BuilderCells<'a> {
-    /// The cells of `table`'s `nrows` rows, which [`Builder::layout`] checked.
-    fn new(table: &'a Builder, nrows: usize) -> Self {
+    /// The cells of `table`'s `row_count` rows, which [`Builder::layout`] checked.
+    fn new(table: &'a Builder, row_count: usize) -> Self {
         let mut array_count = 0;
         let arrays: Vec<Option<usize>> = table
             .columns
@@ -503,9 +529,9 @@ impl<'a> BuilderCells<'a> {
                 })
             })
             .collect();
-        let mut heap_offsets = Vec::with_capacity(nrows * array_count);
+        let mut heap_offsets = Vec::with_capacity(row_count * array_count);
         let mut heap_len = 0;
-        for array in table.heap_arrays(nrows) {
+        for array in table.heap_arrays(row_count) {
             heap_offsets.push(heap_len);
             heap_len += array.bytes;
         }
@@ -555,7 +581,7 @@ impl TableCells for BuilderCells<'_> {
 
 /// `BINTABLE` extension header (§7.3.1) for the given columns.
 fn bintable_header(
-    nrows: usize,
+    row_count: usize,
     row_len: usize,
     columns: &[WriteColumn],
     layouts: &[ColumnLayout],
@@ -572,7 +598,7 @@ fn bintable_header(
         .set_internal(keywords::NAXIS.indexed(1)?, value::fits_i64(row_len)?)
         .set_comment_internal(keywords::NAXIS.indexed(1)?, "width of table in bytes");
     header
-        .set_internal(keywords::NAXIS.indexed(2)?, value::fits_i64(nrows)?)
+        .set_internal(keywords::NAXIS.indexed(2)?, value::fits_i64(row_count)?)
         .set_comment_internal(keywords::NAXIS.indexed(2)?, "number of rows");
     header
         .set_internal(keywords::PCOUNT, value::fits_i64(heap_len)?)
@@ -622,7 +648,7 @@ struct ColumnLayout {
 /// The extent of the table a [`Builder`] writes.
 #[derive(Debug)]
 struct TableLayout {
-    nrows: usize,
+    row_count: usize,
     row_len: usize,
     heap_len: usize,
     columns: Vec<ColumnLayout>,
@@ -632,7 +658,7 @@ impl ColumnType {
     const fn from_data(data: &ColumnData) -> Self {
         match data {
             ColumnData::Logical(_) => Self::Logical,
-            ColumnData::U8(_) => Self::Byte,
+            ColumnData::U8(_) => Self::U8,
             ColumnData::I16(_) => Self::I16,
             ColumnData::I32(_) => Self::I32,
             ColumnData::I64(_) => Self::I64,
@@ -653,7 +679,7 @@ impl ColumnType {
     const fn tform_kind(self) -> TformKind {
         match self {
             Self::Logical => TformKind::Logical,
-            Self::Byte => TformKind::Byte,
+            Self::U8 => TformKind::U8,
             Self::I16 => TformKind::I16,
             Self::I32 => TformKind::I32,
             Self::I64 => TformKind::I64,
@@ -661,7 +687,7 @@ impl ColumnType {
             Self::F64 => TformKind::F64,
             Self::ComplexF32 => TformKind::ComplexF32,
             Self::ComplexF64 => TformKind::ComplexF64,
-            Self::Character => TformKind::Char,
+            Self::Character => TformKind::Character,
         }
     }
 
@@ -714,7 +740,7 @@ fn write_vla_descriptor(
 }
 
 /// The layout of `col`, the table's column `n`, after checking it.
-fn validate_column(col: &WriteColumn, nrows: usize, n: usize) -> Result<ColumnLayout> {
+fn validate_column(col: &WriteColumn, row_count: usize, n: usize) -> Result<ColumnLayout> {
     let tdim_keyword = keywords::TDIM.indexed(n)?;
     validate_ascii(&col.name, "binary column name")?;
     if let Some(unit) = &col.unit {
@@ -724,7 +750,7 @@ fn validate_column(col: &WriteColumn, nrows: usize, n: usize) -> Result<ColumnLa
         WriteColumnData::Fixed { data, repeat } => {
             let kind = ColumnType::from_data(data);
             validate_binary_metadata(col, kind.tform_kind(), n)?;
-            assert_eq!(data.len(), nrows * repeat, "{ROW_COUNT_FIXED}");
+            assert_eq!(data.len(), row_count * repeat, "{ROW_COUNT_FIXED}");
             if let ColumnData::Character(bytes) = data
                 && *repeat > 0
             {
@@ -743,7 +769,7 @@ fn validate_column(col: &WriteColumn, nrows: usize, n: usize) -> Result<ColumnLa
         WriteColumnData::Vla { rows, width } => {
             let kind = ColumnType::from_data(rows.values());
             validate_binary_metadata(col, kind.tform_kind(), n)?;
-            assert_eq!(rows.len(), nrows, "{ROW_COUNT_FIXED}");
+            assert_eq!(rows.len(), row_count, "{ROW_COUNT_FIXED}");
             let mut max_elements = 0usize;
             for r in 0..rows.len() {
                 let range = rows.range(r);
@@ -763,7 +789,7 @@ fn validate_column(col: &WriteColumn, nrows: usize, n: usize) -> Result<ColumnLa
         }
         WriteColumnData::VlaBits { rows, width } => {
             validate_binary_metadata(col, TformKind::Bit, n)?;
-            assert_eq!(rows.len(), nrows, "{ROW_COUNT_FIXED}");
+            assert_eq!(rows.len(), row_count, "{ROW_COUNT_FIXED}");
             let mut max_bits = 0usize;
             for r in 0..rows.len() {
                 let bits = rows.range(r).len();
@@ -778,7 +804,7 @@ fn validate_column(col: &WriteColumn, nrows: usize, n: usize) -> Result<ColumnLa
         WriteColumnData::Bits { bytes, bit_count } => {
             validate_binary_metadata(col, TformKind::Bit, n)?;
             let row_width = bit_count.div_ceil(8);
-            assert_eq!(bytes.len(), nrows * row_width, "{ROW_COUNT_FIXED}");
+            assert_eq!(bytes.len(), row_count * row_width, "{ROW_COUNT_FIXED}");
             tdim::validate_declared(col.tdim.as_deref(), *bit_count, tdim_keyword)?;
             Ok(ColumnLayout {
                 row_width,
@@ -792,8 +818,8 @@ fn validate_column(col: &WriteColumn, nrows: usize, n: usize) -> Result<ColumnLa
 /// cannot take.
 fn validate_binary_metadata(col: &WriteColumn, kind: TformKind, n: usize) -> Result<()> {
     let scalable = match kind {
-        TformKind::Char | TformKind::Logical | TformKind::Bit => Scalable::Unscaled,
-        TformKind::Byte
+        TformKind::Character | TformKind::Logical | TformKind::Bit => Scalable::Unscaled,
+        TformKind::U8
         | TformKind::I16
         | TformKind::I32
         | TformKind::I64
@@ -810,7 +836,7 @@ fn validate_binary_metadata(col: &WriteColumn, kind: TformKind, n: usize) -> Res
         return Ok(());
     };
     let valid = match kind {
-        TformKind::Byte => u8::try_from(tnull).is_ok(),
+        TformKind::U8 => u8::try_from(tnull).is_ok(),
         TformKind::I16 => i16::try_from(tnull).is_ok(),
         TformKind::I32 => i32::try_from(tnull).is_ok(),
         TformKind::I64 => true,

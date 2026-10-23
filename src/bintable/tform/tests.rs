@@ -6,7 +6,7 @@ use crate::error::FitsError;
 #[test]
 fn parses_tform_repeat_and_kind() {
     let cases = [
-        ("8A", tform(8, TformKind::Char, None)),
+        ("8A", tform(8, TformKind::Character, None)),
         ("3D", tform(3, TformKind::F64, None)),
         ("0D", tform(0, TformKind::F64, None)),
         ("1J", tform(1, TformKind::I32, None)),
@@ -23,7 +23,7 @@ fn parses_tform_repeat_and_kind() {
         ),
     ];
     for (s, expected) in cases {
-        assert_eq!(Tform::parse(s).unwrap(), expected, "{s}");
+        assert_eq!(s.parse::<Tform>().unwrap(), expected, "{s}");
     }
     for bad in [
         "9Z",
@@ -43,7 +43,7 @@ fn parses_tform_repeat_and_kind() {
         // "1P" lacks the heap element-type letter; "2PE"/"3QD" violate the §6.3
         // rule that a P/Q descriptor's repeat count is 0 or 1.
         assert!(
-            matches!(Tform::parse(bad), Err(FitsError::InvalidTform { .. })),
+            matches!(bad.parse::<Tform>(), Err(FitsError::InvalidTform { .. })),
             "{bad}"
         );
     }
@@ -51,11 +51,11 @@ fn parses_tform_repeat_and_kind() {
 
 #[test]
 fn byte_width_handles_arrays_bits_and_descriptors() {
-    assert_eq!(Tform::parse("8A").unwrap().byte_width(), 8);
-    assert_eq!(Tform::parse("3D").unwrap().byte_width(), 24);
-    assert_eq!(Tform::parse("0D").unwrap().byte_width(), 0);
-    assert_eq!(Tform::parse("16X").unwrap().byte_width(), 2); // 16 bits = 2 bytes
-    assert_eq!(Tform::parse("9X").unwrap().byte_width(), 2); //  9 bits = 2 bytes
-    assert_eq!(Tform::parse("1PB").unwrap().byte_width(), 8); // 32-bit descriptor
-    assert_eq!(Tform::parse("1QB").unwrap().byte_width(), 16); // 64-bit descriptor
+    assert_eq!("8A".parse::<Tform>().unwrap().byte_width(), 8);
+    assert_eq!("3D".parse::<Tform>().unwrap().byte_width(), 24);
+    assert_eq!("0D".parse::<Tform>().unwrap().byte_width(), 0);
+    assert_eq!("16X".parse::<Tform>().unwrap().byte_width(), 2); // 16 bits = 2 bytes
+    assert_eq!("9X".parse::<Tform>().unwrap().byte_width(), 2); //  9 bits = 2 bytes
+    assert_eq!("1PB".parse::<Tform>().unwrap().byte_width(), 8); // 32-bit descriptor
+    assert_eq!("1QB".parse::<Tform>().unwrap().byte_width(), 16); // 64-bit descriptor
 }

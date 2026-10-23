@@ -59,7 +59,7 @@ impl AsciiWriteColumn {
     }
 
     #[must_use]
-    pub const fn scaled(mut self, tscale: f64, tzero: f64) -> Self {
+    pub const fn with_scaling(mut self, tscale: f64, tzero: f64) -> Self {
         self.tscale = Some(tscale);
         self.tzero = Some(tzero);
         self
@@ -76,21 +76,21 @@ impl AsciiWriteColumn {
 /// [`Builder`](crate::fits_writer::builder::Builder).
 #[derive(Debug, Clone, Default)]
 pub struct AsciiBuilder {
-    pub(crate) nrows: Option<usize>,
+    pub(crate) row_count: Option<usize>,
     pub(crate) columns: Vec<AsciiWriteColumn>,
 }
 
 impl AsciiBuilder {
     pub const fn new() -> Self {
         Self {
-            nrows: None,
+            row_count: None,
             columns: Vec::new(),
         }
     }
 
-    pub const fn with_rows(nrows: usize) -> Self {
+    pub const fn with_rows(row_count: usize) -> Self {
         Self {
-            nrows: Some(nrows),
+            row_count: Some(row_count),
             columns: Vec::new(),
         }
     }
@@ -98,7 +98,7 @@ impl AsciiBuilder {
     pub fn push(&mut self, column: AsciiWriteColumn) -> Result<&mut Self> {
         // An ASCII column is always scalar (§7.2), so its value count *is* its row
         // count and it always determines one.
-        accept_row_count(&mut self.nrows, &column.name, Some(column.data.len()))?;
+        accept_row_count(&mut self.row_count, &column.name, Some(column.data.len()))?;
         self.columns.push(column);
         Ok(self)
     }
@@ -109,10 +109,10 @@ impl AsciiBuilder {
     }
 
     pub fn with_columns(
-        nrows: usize,
+        row_count: usize,
         columns: impl IntoIterator<Item = AsciiWriteColumn>,
     ) -> Result<Self> {
-        let mut table = Self::with_rows(nrows);
+        let mut table = Self::with_rows(row_count);
         for column in columns {
             table.push(column)?;
         }
@@ -126,26 +126,26 @@ pub(super) fn write_template<W: Write>(
     template: Option<&Header>,
 ) -> Result<()> {
     writer.ensure_writable()?;
-    let nrows = table.nrows.unwrap_or(0);
+    let row_count = table.row_count.unwrap_or(0);
     let columns = &table.columns;
     validate_table_field_count(columns.len())?;
     let mut tbcols = Vec::with_capacity(columns.len());
     let mut row_len = 0usize;
     for (i, col) in columns.iter().enumerate() {
         validate_ascii_column(col, i + 1)?;
-        assert_eq!(col.data.len(), nrows, "{ROW_COUNT_FIXED}");
+        assert_eq!(col.data.len(), row_count, "{ROW_COUNT_FIXED}");
         tbcols.push(row_len.checked_add(1).ok_or(FitsError::DataUnitOverflow)?);
         row_len = row_len
             .checked_add(col.width)
             .ok_or(FitsError::DataUnitOverflow)?;
     }
-    let header = ascii_table_header(nrows, row_len, columns, &tbcols)?;
+    let header = ascii_table_header(row_count, row_len, columns, &tbcols)?;
     writer.scratch.clear();
-    let total_len = nrows
+    let total_len = row_count
         .checked_mul(row_len)
         .ok_or(FitsError::DataUnitOverflow)?;
     writer.scratch.reserve_exact(total_len);
-    for r in 0..nrows {
+    for r in 0..row_count {
         for col in columns {
             append_ascii_field(&mut writer.scratch, col, r)?;
         }
@@ -289,7 +289,7 @@ fn validate_ascii_null_collision(value: &str, marker: Option<&str>) -> Result<()
 
 /// `TABLE` extension header (§7.2) for the given columns and computed `TBCOLn`s.
 fn ascii_table_header(
-    nrows: usize,
+    row_count: usize,
     row_len: usize,
     columns: &[AsciiWriteColumn],
     tbcols: &[usize],
@@ -305,7 +305,7 @@ fn ascii_table_header(
         .set_internal(keywords::NAXIS.indexed(1)?, value::fits_i64(row_len)?)
         .set_comment_internal(keywords::NAXIS.indexed(1)?, "width of table in characters");
     header
-        .set_internal(keywords::NAXIS.indexed(2)?, value::fits_i64(nrows)?)
+        .set_internal(keywords::NAXIS.indexed(2)?, value::fits_i64(row_count)?)
         .set_comment_internal(keywords::NAXIS.indexed(2)?, "number of rows");
     header
         .set_internal(keywords::PCOUNT, 0)

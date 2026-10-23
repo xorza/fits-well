@@ -17,6 +17,7 @@ pub(crate) mod character_field;
 pub(crate) mod column;
 pub(crate) mod column_data;
 pub(crate) mod column_reader;
+pub(crate) mod column_view;
 pub(crate) mod descriptor;
 pub(crate) mod schema;
 pub(crate) mod table_view;
@@ -37,7 +38,7 @@ pub struct Table {
     /// Everything the header alone determines — the same [`Schema`] that
     /// [`Schema::parse`] produces, held rather than re-derived.
     pub(crate) schema: Schema,
-    /// The whole data unit (the `nrows * row_len` main table, then the heap and
+    /// The whole data unit (the `row_count * row_len` main table, then the heap and
     /// block fill). Fixed-width reads index the main-table prefix; `P`/`Q` columns
     /// follow their descriptors into the heap.
     bytes: Vec<u8>,

@@ -13,11 +13,11 @@ and the dated measurements in `docs/research/`.
   and tiles once. Refused: one method per combination of whole or section, owned
   or borrowed, and summed or not (six methods, with the checksum as a suffix), and
   `Lazy`, a second form of the same read.
-- **A checksum is summed by the handle that reads.** With `with_checksum`, a read
+- **A checksum is summed by the handle that reads.** With `with_checksums`, a read
   feeds the stored bytes it fetches, as long as they continue the sum: a plain
   image's whole reads and sections, and a compressed image's whole reads. A
   compressed section's tiles are not fed. `finish` reads only what the reads did
-  not feed, and without `with_checksum` it reads the whole unit. Refused: a caller-held sum passed to each read, which a caller could finish
+  not feed, and without `with_checksums` it reads the whole unit. Refused: a caller-held sum passed to each read, which a caller could finish
   against another HDU.
 - **A physical read appends to the caller's `Vec`.** `physical_into` extends `out`,
   so a caller can append chunk after chunk to one plane, and nothing is zeroed
@@ -33,16 +33,32 @@ and the dated measurements in `docs/research/`.
   and the reader keeps only staging: a section's stored bytes, and the words a
   compressed image's physical read decodes into, both the size of the region read.
 - **Names do not repeat their module.** The borrowed image is `image::Borrowed`, and
-  the handle is `fits_well::ImageReader`, beside `FitsReader`. Refused:
-  `image::ImageView` and `image::ImageReader`.
+  the handles are `fits_well::ImageReader` and `fits_well::ImageWriter`, beside
+  `FitsReader` and `FitsWriter`. Refused: `image::ImageView`, `image::ImageReader`
+  and `image::Writer`.
+- **A name pairs with its counterpart.** The reader and the writer share
+  `with_checksums`; the two table forms share `schema()` (`Schema`, `AsciiSchema`)
+  and the `tnull` field; a stored kind and its decoded data share variant names
+  (`TformKind::U8`/`Character` with `ColumnData::U8`/`Character`,
+  `AsciiKind::Text` with `AsciiColumnData::Text`); an owned type lends with `view()`
+  and its view owns again with `to_*()` (`Image`/`Borrowed::to_image`,
+  `Data`/`View::to_data`); a builder option is `with_*` and a constructor `from_*`.
+  A type read from text implements `FromStr` (`Scale`, `Tform`, `Datetime`,
+  `time::Unit`), so it parses with `str::parse`; an inherent `parse` stays for input
+  that is not text (`Header::parse(bytes)`, `Schema::parse(header)`).
+  A count is `*_count` (`row_count`, `bit_count`), except a FITS keyword's own name
+  (`gcount`, `pcount`). Refused: one spelling on each side, which a caller must
+  remember twice, and `nrows`, a third spelling of a count.
 - **A read names its HDU with an `HduSelector`:** an index, an `EXTNAME`
   (case-insensitive), or a name with `EXTVER` and `EXTLEVEL`, each 1 when absent.
   A primary with no `EXTNAME` is `PRIMARY`, as in astropy. Every reader method
   takes `impl Into<HduSelector>`, and `Hdu::matches` answers the same selector,
   so a caller does not compare `EXTNAME` by hand. A name no HDU carries is
-  `HduNotFound`, and `images()` iterates the image HDUs. Refused: a separate
-  `hdu_index` lookup before each read, an `Option` result for a missing name, and
-  `first_image()`, which is `images().next()`.
+  `HduNotFound`, and `images()` iterates the image HDUs as `&Hdu`, as `hdus()`
+  gives them. A fact about an HDU is read from the `Hdu` that `hdu()` gives: its
+  `index`, its `table_schema()`. Refused: `hdu_index` and a reader-level
+  `table_schema`, second ways to the same fact; an `Option` result for a missing
+  name; and `first_image()`, which is `images().next()`.
 - **`Hdu::is_image` classifies by rank alone.** An HDU is an image when it is a
   primary array, an image extension or a tiled-compressed image whose `NAXIS`
   (`ZNAXIS`) is above 0. Refused: the kind alone, which counted an image
@@ -67,7 +83,7 @@ and the dated measurements in `docs/research/`.
 ## Tables
 
 - **A tiled-compressed table reads as the table it restores.** `read_table`,
-  `read_table_rows`, `read_table_columns`, `read_table_cell` and `table_schema`
+  `read_table_rows`, `read_table_columns`, `read_table_cell` and `Hdu::table_schema`
   give the logical table, as an image read gives a compressed image's pixels. A
   compressed image is `NotABinTable` to each. Refused: a separate
   `read_compressed_table`, which made a caller check the kind first, and the
@@ -89,6 +105,10 @@ and the dated measurements in `docs/research/`.
   plain table allocates nothing after the first chunk. On an error, the
   selection holds no column. Refused: a new `Selection` for each call, which is
   what `read_table_columns` gives.
+- **Every `Ragged` gives `row(r)` and `rows()`,** whatever its values: a slice, a
+  `&str`, a `&BitSlice`, or for a variable-length column a `ColumnView`, the
+  borrowed twin of `ColumnData` as `View` is of `Data`. Refused: `range(r)` and
+  `values()` as the only way to a variable-length row.
 - **`ColumnData` gives its values typed:** an `as_*` accessor for each variant,
   and `TryFrom<ColumnData> for Vec<T>`, which moves the values. Refused: a
   `let … else` on the variant at each caller.
@@ -154,7 +174,7 @@ and the dated measurements in `docs/research/`.
   table as for a plain one. Refused: the read-side `Table` with its header first,
   cfitsio's HDU-to-HDU `fits_compress_table`, which is a second way to write the
   same table and made a table that a program built go through a write and a read
-  first. Also refused: a builder from a read `Table`; `read_data_raw` and
+  first. Also refused: a builder from a read `Table`; `read_data_unit` and
   `write_raw_hdu` copy an HDU as it is. Sources: cfitsio `imcompress.c`, rustfits
   `CompressedTableHDU`.
 - **A table compresses straight from the builder's columns.** Each tile gathers its
@@ -162,6 +182,11 @@ and the dated measurements in `docs/research/`.
   the descriptors the plain table would hold. Refused: encoding the rows first and
   gathering each column back from them, cfitsio's route, which it takes because its
   input is a file of rows; it doubled the time of a write.
+- **A bit column takes rows of bits and their width,** as a text column takes
+  fields and theirs: `WriteColumn::bits(name, rows, width)`, packed inside. A row
+  of another length is `BitFieldLengthMismatch`: unlike a text field, a bit row has
+  no padding to fill. Refused: bytes the caller packed, which `vla_bits` never asked
+  for.
 - **Table columns stay owned.** A table write transposes its columns into rows in
   the writer's scratch, and that copy dominates. Refused: borrowed columns, which
   put a lifetime on `Builder` for a small gain.
@@ -196,7 +221,7 @@ and the dated measurements in `docs/research/`.
   `Keyword::try_from(format_args!(…))` formats a compound name on the stack.
   Refused: macros for keyword names, and a constant for each numbered member.
 - **A keyword error names the keyword.** `MissingKeyword`, `KeywordOutOfRange`,
-  `KeywordNotFound`, `ReservedKeyword` and `InvalidHeaderValue` carry a `Keyword`, and a family is
+  `ReservedKeyword` and `InvalidHeaderValue` carry a `Keyword`, and a family is
   reported by its member, `TDIM3`, not `TDIMn`. Refused: `&'static str` names,
   which a run-time keyword could not use.
 - **A name formatted from an axis or column number that is no keyword is
@@ -214,12 +239,22 @@ and the dated measurements in `docs/research/`.
   holds the value or nothing. Refused: range-checked getters, whose ranges belong
   to the caller's domain; `set_with_comment`, which is `set(…)?.set_comment(…)`;
   and an infallible `set`, as a NaN real and non-ASCII text are invalid in FITS.
-- **Editing the comment of an absent card fails with `KeywordNotFound`.**
+- **Editing the comment of an absent card fails with `MissingKeyword`,** the one
+  variant for an absent keyword, whether a file lacks a mandatory one or an edit
+  names a card the header lacks.
   Refused: a no-op, which loses a misspelled keyword without a trace.
+- **A header record is a `Record`, and its borrowed form a `RecordView`,** as the
+  standard calls one a keyword record: `iter()` gives views, `remove` the owned
+  record. Each is an enum of the two kinds a record is: `Valued` with its
+  `Keyword`, value and inline comment, and `Commentary` with its name and text.
+  An inline comment reads with `get_comment`, the twin of `set_comment`. Refused:
+  `Entry`, a name unrelated to its owned twin; one struct whose `Option` value
+  told the kinds apart and whose `comment` meant two things; and a `record(k)`
+  lookup that could only give the valued kind.
 - **A commentary card keeps its name as text.** The standard lets a record with
-  no value indicator start with any 8 bytes, which no `Keyword` holds, so `Entry`
-  gives the name as `&str`, and `history` and `comments` read the commentary
-  records.
+  no value indicator start with any 8 bytes, which no `Keyword` holds, so
+  `RecordView::Commentary` gives the name as `&str`, while a valued record's is a
+  `Keyword`; `history` and `comments` read the commentary records.
 
 ## Scope
 
@@ -234,6 +269,15 @@ and the dated measurements in `docs/research/`.
   files. Refused: the feature and its dependency.
 - **No general split of the header borrow from the data borrow.**
   `ImageReader::header` outlives the handle borrow, which covers the read path.
+
+## Time
+
+- **A time unit is parsed once, with its frame.** `Frame::unit` is a
+  `time::Unit`: a fixed length, or a multiple of the tropical or Besselian year,
+  whose length depends on the epoch and holds only in a TDB or TT frame, so
+  `Unit::seconds` evaluates it with the scale in use. A malformed `TIMEUNIT`
+  refuses the frame. Refused: the `TIMEUNIT` text, parsed again by every
+  conversion, so a bad unit surfaced only at the first one.
 
 ## Crate boundary
 

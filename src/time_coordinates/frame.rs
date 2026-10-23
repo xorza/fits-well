@@ -8,10 +8,10 @@ use crate::keyword::Keyword;
 use crate::time_coordinates::coordinate::Coordinate;
 use crate::time_coordinates::datetime::Datetime;
 use crate::time_coordinates::reference_position::ReferencePosition;
-use crate::time_coordinates::scale::{Scale, ScaleKind};
+use crate::time_coordinates::scale::Scale;
 use crate::time_coordinates::time_axis_kind::TimeAxisKind;
+use crate::time_coordinates::unit::Unit;
 use crate::time_coordinates::{MJD0, SEC_PER_DAY};
-use crate::unit;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::ctype::Ctype;
 
@@ -25,7 +25,7 @@ pub struct Frame {
     /// `DATEREF`); `0.0` if none is given.
     pub mjdref: f64,
     /// `TIMEUNIT` (default `'s'`).
-    pub timeunit: String,
+    pub unit: Unit,
     /// `TIMEOFFS` (§9.4.1): a uniform additive clock correction in `TIMEUNIT`,
     /// equivalent to shifting the reference time. Default `0.0`.
     pub timeoffs: f64,
@@ -41,7 +41,7 @@ impl Frame {
 
     /// The time frame for a binary-table `column` (1-based): `TRPOSn` overrides the
     /// global `TREFPOS`, and both default to `TOPOCENTER`.
-    pub fn for_column(header: &Header, column: usize) -> Result<Self> {
+    pub fn from_column(header: &Header, column: usize) -> Result<Self> {
         Self::parse(header, Some(column))
     }
 
@@ -52,10 +52,10 @@ impl Frame {
             });
         }
         let scale = Scale::declared(header)?;
-        let timeunit = header
+        let unit = header
             .get_text(keywords::TIMEUNIT)?
             .unwrap_or("s")
-            .to_string();
+            .parse::<Unit>()?;
         let column_trefpos = match column {
             Some(column) => header.get_text(keywords::TRPOS.indexed(column)?)?,
             None => None,
@@ -70,7 +70,7 @@ impl Frame {
         let fits_time = Self {
             scale,
             mjdref,
-            timeunit,
+            unit,
             timeoffs: header.get_real(keywords::TIMEOFFS)?.unwrap_or(0.0),
             trefpos,
         };
@@ -80,19 +80,18 @@ impl Frame {
     /// `TIMEUNIT` expressed in seconds. Standard SI prefixes are accepted and
     /// tropical/Besselian years are evaluated at `MJDREF`.
     pub fn unit_seconds(&self) -> Result<f64> {
-        time_unit_seconds(&self.timeunit, self.mjdref, &self.scale)
+        self.unit.seconds(self.mjdref, &self.scale)
     }
 
     /// Resolve a time value measured *relative* to `MJDREF` (e.g. `TSTART`,
     /// `TSTOP`), in `TIMEUNIT`, to an absolute MJD in the frame's own scale. The
     /// `TIMEOFFS` clock correction (§9.4.1) is added before scaling.
     pub fn relative_to_mjd(&self, value: f64) -> Result<f64> {
-        self.relative_to_mjd_in(value, &self.timeunit, &self.scale)
+        self.relative_to_mjd_in(value, self.unit, &self.scale)
     }
 
-    fn relative_to_mjd_in(&self, value: f64, unit: &str, scale: &Scale) -> Result<f64> {
-        Ok(self.mjdref
-            + (value + self.timeoffs) * time_unit_seconds(unit, self.mjdref, scale)? / SEC_PER_DAY)
+    fn relative_to_mjd_in(&self, value: f64, unit: Unit, scale: &Scale) -> Result<f64> {
+        Ok(self.mjdref + (value + self.timeoffs) * unit.seconds(self.mjdref, scale)? / SEC_PER_DAY)
     }
 
     /// Evaluate a 1-based time `axis` through its complete WCS row and coordinate
@@ -122,57 +121,15 @@ impl Frame {
         };
         let world = wcs.axis_world(zero_based, pixel)?;
         let unit = if world.cunit.trim().is_empty() {
-            &self.timeunit
+            self.unit
         } else {
-            world.cunit
+            world.cunit.parse::<Unit>()?
         };
         Ok(Coordinate {
             mjd: self.relative_to_mjd_in(world.value, unit, &scale)?,
             scale,
         })
     }
-}
-
-/// Seconds per `unit`: the [`unit::TIME`] units, or the tropical (`ta`) and Besselian
-/// (`Ba`) years, whose length depends on the epoch and takes no prefix.
-fn time_unit_seconds(unit: &str, reference_mjd: f64, scale: &Scale) -> Result<f64> {
-    let invalid = || FitsError::InvalidUnit {
-        unit: unit.to_string(),
-        expected: "a time unit",
-    };
-    if let Some(seconds) = unit::resolve(unit, unit::TIME) {
-        return Ok(seconds);
-    }
-    let scaled = unit::split_numeric_multiplier(unit).ok_or_else(invalid)?;
-    let days = match scaled.base {
-        "ta" => tropical_year_days(reference_mjd, scale)?,
-        "Ba" => besselian_year_days(reference_mjd, scale)?,
-        _ => return Err(invalid()),
-    };
-    Ok(scaled.factor * days * SEC_PER_DAY)
-}
-
-fn tropical_year_days(reference_mjd: f64, scale: &Scale) -> Result<f64> {
-    if scale.kind() != Some(ScaleKind::Tdb) {
-        return Err(FitsError::ExternalTimeDataRequired {
-            operation: "evaluate a tropical year outside the TDB frame",
-        });
-    }
-    let centuries = (reference_mjd - 51_544.5) / 36_525.0;
-    Ok(
-        365.242_190_402_112_4 - 0.000_006_152_513_49 * centuries - 6.0921e-10 * centuries.powi(2)
-            + 2.6525e-10 * centuries.powi(3),
-    )
-}
-
-fn besselian_year_days(reference_mjd: f64, scale: &Scale) -> Result<f64> {
-    if scale.kind() != Some(ScaleKind::Tt) {
-        return Err(FitsError::ExternalTimeDataRequired {
-            operation: "evaluate a Besselian year outside the TT/ET frame",
-        });
-    }
-    let centuries = (reference_mjd - 15_019.5) / 36_525.0;
-    Ok(365.242_198_781_7 - 0.000_007_854_23 * centuries)
 }
 
 /// The reference epoch as MJD: `MJDREF` (or `MJDREFI`+`MJDREFF`), else `JDREF`
@@ -199,7 +156,7 @@ fn reference_mjd(header: &Header, scale: &Scale) -> Result<f64> {
     let Some(value) = header.get_text(keywords::DATEREF)? else {
         return Ok(0.0);
     };
-    Datetime::parse(value)?.to_mjd(scale)
+    value.parse::<Datetime>()?.to_mjd(scale)
 }
 
 /// Resolve a reference epoch from its single (`MJDREF`) and split-precision

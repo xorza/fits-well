@@ -162,7 +162,7 @@ impl<S: Source> DataSource<S> {
             .ok_or(FitsError::DataUnitOverflow)?;
         match rows {
             TableRows::Range(rows) => {
-                validate_row_range(&rows, schema.nrows)?;
+                validate_row_range(&rows, schema.row_count)?;
                 if !rows.is_empty() {
                     let offset = row_offset(data_offset, rows.start, schema.row_len)?;
                     self.source.read_append(offset, main_len, out)?;
@@ -170,7 +170,7 @@ impl<S: Source> DataSource<S> {
             }
             TableRows::Picked(rows) => {
                 for &row in rows {
-                    validate_row(row, schema.nrows)?;
+                    validate_row(row, schema.row_count)?;
                     let offset = row_offset(data_offset, row, schema.row_len)?;
                     self.source.read_append(offset, schema.row_len, out)?;
                 }
@@ -209,7 +209,7 @@ impl<S: Source> DataSource<S> {
         row: usize,
         column: usize,
     ) -> Result<ColumnData> {
-        validate_row(row, schema.nrows)?;
+        validate_row(row, schema.row_count)?;
         let column = &schema.columns[column];
         let cell_offset = offset_at(
             row_offset(data_offset, row, schema.row_len)?,

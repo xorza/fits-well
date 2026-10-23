@@ -52,7 +52,7 @@ impl Scaling {
         if self.blank.is_some() {
             return None;
         }
-        SampleType::from_scaling(bitpix, self).unsigned_kind()
+        SampleType::from_scaling(bitpix, *self).unsigned_kind()
     }
 
     pub(crate) fn scale(&self, raw: f64) -> f64 {

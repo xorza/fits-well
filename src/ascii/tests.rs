@@ -15,7 +15,7 @@ fn parses_ascii_tform_codes() {
         width,
         decimals,
     };
-    assert_eq!(parse_ascii_tform("A8").unwrap(), fmt(AsciiKind::Char, 8, 0));
+    assert_eq!(parse_ascii_tform("A8").unwrap(), fmt(AsciiKind::Text, 8, 0));
     assert_eq!(
         parse_ascii_tform("I10").unwrap(),
         fmt(AsciiKind::Integer, 10, 0)
@@ -44,9 +44,11 @@ fn decodes_hand_built_ascii_rows() {
         .set_internal("TTYPE2", "COUNT");
     let data = b"  AB   123def    -45".to_vec(); // "  AB" + "   123" ; "def " + "   -45"
     let table = Ascii::from_data(&header, data).unwrap();
-    let metadata = table.metadata();
-    assert_eq!(metadata.nrows, 2);
-    assert_eq!(metadata.columns[1].start, 4);
+    let schema = table.schema();
+    assert_eq!(schema.row_count, 2);
+    assert_eq!(schema.row_len, 10);
+    assert_eq!(schema.columns[1].start, 4);
+    assert_eq!(schema.column_index("count"), Some(1));
     assert_eq!(
         table.column(0).unwrap().raw().unwrap(),
         AsciiColumnData::Text([Some("  AB"), Some("def ")].into_iter().collect())
@@ -154,7 +156,7 @@ fn ascii_table_round_trips_through_write_and_read() {
 
     assert_eq!(r.hdus.len(), 2); // auto dataless primary + the TABLE
     assert_eq!(r.hdus[1].kind, HduKind::AsciiTable);
-    assert_eq!(&r.read_data_raw(1).unwrap().data()[..6], b"  AB  ");
+    assert_eq!(&r.read_data_unit(1).unwrap().data()[..6], b"  AB  ");
     let t = r.read_ascii_table(1).unwrap();
     assert_eq!(
         t.column(0).unwrap().raw().unwrap(),
@@ -260,7 +262,7 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     // undefined cell is written via TNULL and reads back as NaN (§7.2.2/§7.2.4).
     let columns = vec![
         AsciiWriteColumn::new("RAW", AsciiColumnData::Integer(vec![Some(5), Some(10)]), 6)
-            .scaled(2.0, 100.0),
+            .with_scaling(2.0, 100.0),
         AsciiWriteColumn::new("FLUX", AsciiColumnData::Float(vec![Some(1.5), None]), 10)
             .with_decimals(3)
             .with_null("NULL"),
@@ -348,7 +350,7 @@ fn ascii_writer_accepts_exact_width_values() {
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
     assert_eq!(
-        &reader.read_data_raw(1).unwrap().data()[..14],
+        &reader.read_data_unit(1).unwrap().data()[..14],
         b"abc-121.25NULL"
     );
 }
@@ -356,7 +358,7 @@ fn ascii_writer_accepts_exact_width_values() {
 #[derive(Debug)]
 struct AsciiOverflowCase {
     column: AsciiWriteColumn,
-    nrows: usize,
+    row_count: usize,
     row: usize,
     minimum_width: usize,
 }
@@ -370,27 +372,27 @@ fn ascii_writer_rejects_one_byte_overflow_before_output() {
                 AsciiColumnData::Text([Some("ok"), Some("abcd")].into_iter().collect()),
                 3,
             ),
-            nrows: 2,
+            row_count: 2,
             row: 1,
             minimum_width: 4,
         },
         AsciiOverflowCase {
             column: AsciiWriteColumn::new("INT", AsciiColumnData::Integer(vec![Some(-123)]), 3),
-            nrows: 1,
+            row_count: 1,
             row: 0,
             minimum_width: 4,
         },
         AsciiOverflowCase {
             column: AsciiWriteColumn::new("FLOAT", AsciiColumnData::Float(vec![Some(-1.25)]), 4)
                 .with_decimals(2),
-            nrows: 1,
+            row_count: 1,
             row: 0,
             minimum_width: 5,
         },
         AsciiOverflowCase {
             column: AsciiWriteColumn::new("PRECISION", AsciiColumnData::Float(vec![Some(1.0)]), 1)
                 .with_decimals(usize::MAX),
-            nrows: 1,
+            row_count: 1,
             row: 0,
             minimum_width: usize::MAX,
         },
@@ -399,7 +401,7 @@ fn ascii_writer_rejects_one_byte_overflow_before_output() {
         let column_name = case.column.name.clone();
         let width = case.column.width;
         assert!(matches!(
-            rejected_before_output(|w| w.write_ascii_table(&ascii_table(case.nrows, &[case.column]), None)),
+            rejected_before_output(|w| w.write_ascii_table(&ascii_table(case.row_count, &[case.column]), None)),
             FitsError::AsciiFieldTooWide {
                 column,
                 row,
@@ -499,7 +501,7 @@ fn ascii_nulls_round_trip_distinct_from_zero_and_text() {
         .unwrap();
     let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
     assert_eq!(
-        reader.read_data_raw(1).unwrap().data()[..30],
+        reader.read_data_unit(1).unwrap().data()[..30],
         *b"zero     0NULL NULL star    -2"
     );
 

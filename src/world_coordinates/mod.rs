@@ -596,7 +596,7 @@ fn axis_vec(
 fn infer_image_axis_count(header: &Header, alt: &str) -> i64 {
     header
         .iter()
-        .filter_map(|entry| image_wcs_axis_index(entry.keyword, alt))
+        .filter_map(|record| image_wcs_axis_index(record.name(), alt))
         .max()
         .unwrap_or(0)
 }

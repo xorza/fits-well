@@ -186,18 +186,25 @@ pub enum FitsError {
         length: usize,
         width: usize,
     },
+    /// A binary-table `X` row's bit count differs from its column's width.
+    #[error("bit column {column:?} row {row} holds {length} bits but its width is {width}")]
+    BitFieldLengthMismatch {
+        column: String,
+        /// Zero-based table row containing the field.
+        row: usize,
+        length: usize,
+        width: usize,
+    },
     /// `BITPIX` held a value outside {8, 16, 32, 64, −32, −64}.
     #[error("invalid BITPIX value {code}")]
     InvalidBitpix { code: i64 },
     /// A header unit ended (ran out of cards) without an `END` record.
     #[error("header unit ended without an END record")]
     MissingEnd,
-    /// A mandatory keyword was absent where the structure requires it.
-    #[error("missing mandatory keyword {keyword}")]
+    /// A keyword is absent: a mandatory one the structure requires, or the card an
+    /// edit names.
+    #[error("missing keyword {keyword}")]
     MissingKeyword { keyword: Keyword },
-    /// An edit of a card the header does not hold.
-    #[error("the header has no {keyword} card")]
-    KeywordNotFound { keyword: Keyword },
     /// A keyword was present and well-typed but its value lies outside the range
     /// the standard permits for its role (e.g. `NAXIS > 999`, `PCOUNT < 0`,
     /// a negative `GCOUNT` or axis length, or a `THEAP` that precedes the heap).
@@ -379,7 +386,7 @@ pub enum FitsError {
     /// `ColumnReader::raw` was called on a variable-length-array (`P`/`Q`) column;
     /// use `ColumnReader::vla` instead.
     #[error("column format '{code}' is a variable-length array; use the column reader's vla()")]
-    VariableLengthColumn { code: char },
+    NotAFixedColumn { code: char },
     /// `ColumnReader::vla` was called on a fixed-width column.
     #[error("column format '{code}' is not a variable-length array")]
     NotAVla { code: char },
@@ -392,7 +399,7 @@ pub enum FitsError {
     /// `ColumnReader::physical` was called on a column with no numeric physical
     /// value (`A`/`L`/`X`/`C`/`M`).
     #[error("column format '{code}' has no numeric physical value")]
-    NonNumericColumn { code: char },
+    NotANumericColumn { code: char },
     /// No column with the requested `TTYPEn` name exists in the table.
     #[error("no column named {name:?} in the table")]
     ColumnNotFound { name: String },

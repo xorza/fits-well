@@ -14,7 +14,7 @@ fn x_bit_column_unpacks_msb_first() {
     let header = table_header(2, 1, &["12X"]);
     let table = Table::from_data(&header, vec![0xAB, 0xC0]).unwrap();
     let bits = table.column(0).unwrap().bits().unwrap();
-    assert_eq!(bits.nrows(), 1);
+    assert_eq!(bits.len(), 1);
     assert_eq!(
         bits.row(0),
         bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0].as_bitslice()
@@ -59,7 +59,7 @@ fn vla_bit_column_unpacks_msb_first() {
     let table = Table::from_data(&header, data).unwrap();
 
     let rows = table.column(0).unwrap().vla_bits().unwrap();
-    assert_eq!(rows.nrows(), 2);
+    assert_eq!(rows.len(), 2);
     assert_eq!(
         rows.row(0),
         bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0].as_bitslice()

@@ -18,6 +18,14 @@ fn sample() -> Header {
     .unwrap()
 }
 
+/// A valued record's text value; `None` for any other record.
+fn valued_text(record: RecordView<'_>) -> Option<&str> {
+    match record {
+        RecordView::Valued { value, .. } => value.as_text(),
+        RecordView::Commentary { .. } => None,
+    }
+}
+
 #[test]
 fn parses_structural_keywords() {
     let h = sample();
@@ -43,10 +51,20 @@ fn keyword_lookup_returns_first_occurrence() {
             Err(FitsError::InvalidKeyword { name: n }) if n == name
         ));
     }
-    let entry = h.entry(keywords::OBJECT).unwrap().unwrap();
-    assert_eq!(entry.keyword, "OBJECT");
-    assert_eq!(entry.value.and_then(Value::as_text), Some("Cygnus X-1"));
-    assert_eq!(h.entry(keywords::EXTNAME).unwrap(), None);
+    // The inline comment reads like a value: the first card's, trimmed; `None` for a
+    // card without one and for an absent card.
+    let commented = Header::parse(&records(&[
+        "OBJECT  = 'M31' /  the target  ",
+        "NAXIS   = 2",
+        "END",
+    ]))
+    .unwrap();
+    assert_eq!(
+        commented.get_comment(keywords::OBJECT).unwrap(),
+        Some("the target")
+    );
+    assert_eq!(commented.get_comment(keywords::NAXIS).unwrap(), None);
+    assert_eq!(commented.get_comment(keywords::EXTNAME).unwrap(), None);
 }
 
 #[test]
@@ -136,7 +154,7 @@ fn iter_yields_every_record_in_order_with_duplicates() {
 
     // Every stored card; END is implicit and not stored.
     assert_eq!(entries.len(), 8);
-    let keywords: Vec<&str> = entries.iter().map(|e| e.keyword).collect();
+    let keywords: Vec<&str> = entries.iter().map(|record| record.name()).collect();
     assert_eq!(
         keywords,
         [
@@ -144,19 +162,27 @@ fn iter_yields_every_record_in_order_with_duplicates() {
         ]
     );
 
-    // A valued card carries its Value; the commentary card carries text, no value.
-    assert_eq!(entries[0].value.and_then(Value::as_logical), Some(true)); // SIMPLE = T
-    assert_eq!(entries[6].keyword, "COMMENT");
-    assert_eq!(entries[6].value, None);
-    // Commentary text starts at column 9, so the leading space is significant.
-    assert_eq!(entries[6].comment, Some(" some annotation"));
+    // A valued card carries its keyword and Value; the commentary card its name and
+    // text. Commentary text starts at column 9, so the leading space is significant.
+    assert_eq!(
+        entries[0],
+        RecordView::Valued {
+            keyword: &keywords::SIMPLE,
+            value: &Value::Logical(true),
+            comment: None,
+        }
+    );
+    assert_eq!(
+        entries[6],
+        RecordView::Commentary {
+            name: "COMMENT",
+            text: Some(" some annotation"),
+        }
+    );
 
     // Duplicates are preserved in order — unlike `get`, which collapses to the first.
-    assert_eq!(
-        entries[5].value.and_then(|v| v.as_text()),
-        Some("Cygnus X-1")
-    );
-    assert_eq!(entries[7].value.and_then(|v| v.as_text()), Some("shadowed"));
+    assert_eq!(valued_text(entries[5]), Some("Cygnus X-1"));
+    assert_eq!(valued_text(entries[7]), Some("shadowed"));
     assert_eq!(h.get_text(keywords::OBJECT).unwrap(), Some("Cygnus X-1"));
 
     // The collection view: an exact length, iteration by reference, and positions that
@@ -205,13 +231,15 @@ fn continue_records_concatenate_the_normative_comment_fragments() {
         "END",
     ]))
     .unwrap();
-    let entry = h.iter().next().unwrap();
+    let Some(RecordView::Valued { value, comment, .. }) = h.iter().next() else {
+        panic!("the CONTINUE chain reads back as one valued record");
+    };
     assert_eq!(
-        entry.value.and_then(Value::as_text),
+        value.as_text(),
         Some("This keyword value is continued  over multiple keyword records.")
     );
     assert_eq!(
-        entry.comment,
+        comment,
         Some("The comment field for this keyword is also continued over multiple records.")
     );
     assert_eq!(h.cards.len(), 1);
@@ -328,13 +356,18 @@ fn ordered_header_edits_preserve_duplicates_and_rebuild_lookup() {
     assert_eq!(header.get_real("EXPTIME").unwrap(), Some(30.0));
     assert_eq!(header.get_text(keywords::INSTRUME).unwrap(), Some("CCD-1"));
     assert_eq!(
-        header.iter().map(|entry| entry.keyword).collect::<Vec<_>>(),
+        header.iter().map(RecordView::name).collect::<Vec<_>>(),
         ["OBJECT", "EXPTIME", "OBJECT", "INSTRUME", ""]
     );
 
-    let removed = header.remove(keywords::OBJECT).unwrap().unwrap();
-    assert_eq!(removed.keyword, "OBJECT");
-    assert_eq!(removed.value.unwrap().as_text(), Some("first"));
+    assert_eq!(
+        header.remove(keywords::OBJECT).unwrap(),
+        Some(Record::Valued {
+            keyword: keywords::OBJECT,
+            value: Value::Text("first".to_string()),
+            comment: None,
+        })
+    );
     assert_eq!(header.get_text(keywords::OBJECT).unwrap(), Some("second"));
     assert_eq!(header.remove_all(keywords::OBJECT).unwrap(), 1);
     assert_eq!(header.get(keywords::OBJECT).unwrap(), None);
@@ -471,7 +504,7 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
     let before = header.clone();
     assert!(matches!(
         header.set_comment("ABSENT", "lost"),
-        Err(FitsError::KeywordNotFound { keyword }) if keyword == "ABSENT"
+        Err(FitsError::MissingKeyword { keyword }) if keyword == "ABSENT"
     ));
     assert_eq!(header.cards, before.cards);
 

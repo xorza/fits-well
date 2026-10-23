@@ -18,7 +18,7 @@ use crate::compress::CompressionConfig;
 use crate::error::{FitsError, Result};
 use crate::fits_writer::ascii_builder::AsciiBuilder;
 use crate::fits_writer::builder::Builder;
-use crate::fits_writer::writer::Writer;
+use crate::fits_writer::image_writer::ImageWriter;
 use crate::hdu::{HduKind, HduPosition, HduRole, data_extent};
 use crate::header_model::{Header, keywords};
 use crate::image_model::Metadata;
@@ -29,7 +29,7 @@ pub(crate) mod ascii_builder;
 #[cfg(feature = "internals")]
 pub(crate) mod bench;
 pub(crate) mod builder;
-pub(crate) mod writer;
+pub(crate) mod image_writer;
 
 /// 16-zero `CHECKSUM` value written before the real checksum is solved and
 /// patched in (Appendix J.1).
@@ -179,7 +179,7 @@ impl<W: Write> FitsWriter<W> {
     /// The template merge lives here rather than in each header builder, so every
     /// write that commits an HDU applies it and none of the four builders has to
     /// remember to. The one write that does not commit through here is
-    /// [`Writer`], which writes its header up front and rewrites it at
+    /// [`ImageWriter`], which writes its header up front and rewrites it at
     /// `finish`; it merges its own.
     fn finish_hdu(
         &mut self,
@@ -258,7 +258,7 @@ impl<W: Write> FitsWriter<W> {
     /// of `header` are kept; the image-layout and checksum cards are generated from
     /// `image`. An owned [`Image`](crate::image::Image) lends one with `view`.
     pub fn write_image(&mut self, image: Borrowed<'_>, header: Option<&Header>) -> Result<()> {
-        writer::write_template(self, image, header)
+        image_writer::write_template(self, image, header)
     }
 
     /// Write a primary HDU with no data (`NAXIS = 0`) that carries the non-structural
@@ -290,7 +290,7 @@ impl<W: Write> FitsWriter<W> {
         config: &CompressionConfig,
         header: Option<&Header>,
     ) -> Result<()> {
-        writer::write_compressed_template(self, image, config, header)
+        image_writer::write_compressed_template(self, image, config, header)
     }
 
     /// Write `table` as a tiled-compressed table (§10.3): the table [`Self::write_table`]
@@ -319,8 +319,8 @@ impl<W: Write + Seek> FitsWriter<W> {
         &mut self,
         layout: Metadata<'_>,
         header: Option<&Header>,
-    ) -> Result<Writer<'_, W>> {
-        writer::stream_template(self, layout, header)
+    ) -> Result<ImageWriter<'_, W>> {
+        image_writer::stream_template(self, layout, header)
     }
 }
 
@@ -390,18 +390,18 @@ fn empty_primary_header() -> Header {
 /// (an empty or zero-width one). An ASCII column is always scalar, so its row count
 /// is its value count and it never reaches the undetermined case.
 fn accept_row_count(
-    nrows: &mut Option<usize>,
+    row_count: &mut Option<usize>,
     column: &str,
     inferred: Option<usize>,
 ) -> Result<()> {
-    match (*nrows, inferred) {
+    match (*row_count, inferred) {
         (Some(expected), Some(got)) if expected != got => Err(FitsError::TableRowCountMismatch {
             column: column.to_string(),
             expected,
             got,
         }),
         (None, Some(rows)) => {
-            *nrows = Some(rows);
+            *row_count = Some(rows);
             Ok(())
         }
         (None, None) => Err(FitsError::TableRowCountUndetermined {
@@ -478,12 +478,12 @@ pub(crate) mod internals {
 
     pub(crate) type MemoryWriter = FitsWriter<Cursor<Vec<u8>>>;
 
-    pub(crate) fn binary_table(nrows: usize, columns: &[WriteColumn]) -> Builder {
-        Builder::with_columns(nrows, columns.iter().cloned()).unwrap()
+    pub(crate) fn binary_table(row_count: usize, columns: &[WriteColumn]) -> Builder {
+        Builder::with_columns(row_count, columns.iter().cloned()).unwrap()
     }
 
-    pub(crate) fn ascii_table(nrows: usize, columns: &[AsciiWriteColumn]) -> AsciiBuilder {
-        AsciiBuilder::with_columns(nrows, columns.iter().cloned()).unwrap()
+    pub(crate) fn ascii_table(row_count: usize, columns: &[AsciiWriteColumn]) -> AsciiBuilder {
+        AsciiBuilder::with_columns(row_count, columns.iter().cloned()).unwrap()
     }
 
     /// The file `write` produces in a fresh in-memory writer.

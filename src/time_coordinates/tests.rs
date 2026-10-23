@@ -11,6 +11,7 @@ use crate::time_coordinates::phase_axis::PhaseAxis;
 use crate::time_coordinates::reference_position::ReferencePosition;
 use crate::time_coordinates::scale::{Scale, ScaleKind};
 use crate::time_coordinates::time_axis_kind::TimeAxisKind;
+use crate::time_coordinates::unit::Unit;
 use crate::world_coordinates::Wcs;
 
 /// Golden values throughout are from `astropy.time` (ERFA).
@@ -33,7 +34,7 @@ fn iso_to_jd_and_mjd_match_astropy() {
         ("2024-06-01", 2_460_462.5, 60462.0), // date-only ⇒ midnight
     ];
     for &(s, jd, mjd) in cases {
-        let d = Datetime::parse(s).unwrap();
+        let d = s.parse::<Datetime>().unwrap();
         let utc = Scale::known(ScaleKind::Utc);
         assert_eq!(d.to_jd(&utc).unwrap(), jd, "{s}");
         assert_eq!(d.to_mjd(&utc).unwrap(), mjd, "{s}");
@@ -51,7 +52,7 @@ fn rejects_malformed_datetimes() {
         "2024-01-01T06:30",
         "x",
     ] {
-        assert!(Datetime::parse(s).is_err(), "{s:?} should be rejected");
+        assert!(s.parse::<Datetime>().is_err(), "{s:?} should be rejected");
     }
 
     let mut header = Header::new();
@@ -79,10 +80,13 @@ fn iso_8601_strictness() {
         "+100000-01-01",        // signed 6-digit year
         "-100000-01-01",        // signed 6-digit year
     ] {
-        assert!(Datetime::parse(bad).is_err(), "{bad:?} should be rejected");
+        assert!(
+            bad.parse::<Datetime>().is_err(),
+            "{bad:?} should be rejected"
+        );
     }
-    assert_eq!(Datetime::parse("-00044-03-15").unwrap().year, -44);
-    assert_eq!(Datetime::parse("+02024-06-01").unwrap().year, 2024);
+    assert_eq!("-00044-03-15".parse::<Datetime>().unwrap().year, -44);
+    assert_eq!("+02024-06-01".parse::<Datetime>().unwrap().year, 2024);
     // A Gregorian 400-year cycle is 146097 days. 2000-01-01 is JD 2451544.5, so
     // 100000-01-01 is 245 cycles on and 99999-12-31 a day before it; 2001-01-01 is
     // JD 2451910.5, and -99999-01-01 is 255 cycles before it.
@@ -90,11 +94,11 @@ fn iso_8601_strictness() {
         ("-99999-01-01", -99999, 2_451_910.5 - 255.0 * 146_097.0),
         ("+99999-12-31", 99999, 2_451_544.5 + 245.0 * 146_097.0 - 1.0),
     ] {
-        let datetime = Datetime::parse(text).unwrap();
+        let datetime = text.parse::<Datetime>().unwrap();
         assert_eq!(datetime.year, year);
         assert_eq!(datetime.to_jd(&Scale::known(ScaleKind::Tt)).unwrap(), jd);
     }
-    let mut outside_fits_range = Datetime::parse("+99999-12-31").unwrap();
+    let mut outside_fits_range = "+99999-12-31".parse::<Datetime>().unwrap();
     outside_fits_range.year = 100_000;
     assert!(
         outside_fits_range
@@ -112,7 +116,7 @@ fn signed_gregorian_years_use_floor_division() {
         ("-04713-11-24T12:00:00", 0.0),
     ];
     for (text, expected_jd) in cases {
-        let date = Datetime::parse(text).unwrap();
+        let date = text.parse::<Datetime>().unwrap();
         assert_eq!(
             date.to_jd(&Scale::known(ScaleKind::Tt)).unwrap(),
             expected_jd,
@@ -127,14 +131,14 @@ fn leap_second_labels_require_utc_and_external_time_data() {
         ("2016-12-31T12:00:60", Scale::known(ScaleKind::Utc)),
         ("2016-12-31T23:59:60", Scale::known(ScaleKind::Tai)),
     ] {
-        let datetime = Datetime::parse(text).unwrap();
+        let datetime = text.parse::<Datetime>().unwrap();
         assert!(matches!(
             datetime.to_jd(&scale),
             Err(FitsError::InvalidTime { .. })
         ));
     }
 
-    let leap = Datetime::parse("2030-06-30T23:59:60").unwrap();
+    let leap = "2030-06-30T23:59:60".parse::<Datetime>().unwrap();
     assert!(matches!(
         leap.to_jd(&Scale::known(ScaleKind::Utc)),
         Err(FitsError::ExternalTimeDataRequired { .. })
@@ -541,11 +545,11 @@ fn fits_time_resolves_reference_and_relative_times() {
         ReferencePosition::Barycenter
     );
     assert_eq!(
-        Frame::for_column(&positions, 4).unwrap().trefpos,
+        Frame::from_column(&positions, 4).unwrap().trefpos,
         ReferencePosition::Geocenter
     );
     assert!(matches!(
-        Frame::for_column(&positions, 0),
+        Frame::from_column(&positions, 0),
         Err(FitsError::OneBasedIndexRequired {
             kind: "table column"
         })
@@ -604,7 +608,7 @@ fn fits_time_resolves_reference_and_relative_times() {
         .set_internal(keywords::TREFPOS, 42)
         .set_internal("TRPOS4", "GEOCENTR");
     assert_eq!(
-        Frame::for_column(&positions, 4).unwrap().trefpos,
+        Frame::from_column(&positions, 4).unwrap().trefpos,
         ReferencePosition::Geocenter
     );
     assert!(matches!(
@@ -742,13 +746,21 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
         365.242_198_781_7 * SEC_PER_DAY
     );
 
+    // A year unit keeps its multiple; its length waits for the frame's epoch and scale.
+    assert_eq!(tropical.unit, Unit::TropicalYears(1.0));
+    assert_eq!(
+        "10**2 Ba".parse::<Unit>().unwrap(),
+        Unit::BesselianYears(100.0)
+    );
+
     let mut invalid = Header::new();
     // The minute, day and century take no SI prefix, the year only multiples (wcslib).
+    // The unit is parsed with the frame, so a bad one refuses the frame.
     for value in ["", "m", "Hz", "day", "bogus", "Mmin", "kd", "ma"] {
         invalid.set_internal(keywords::TIMEUNIT, value);
         assert!(
             matches!(
-                Frame::from_header(&invalid).unwrap().unit_seconds(),
+                Frame::from_header(&invalid),
                 Err(FitsError::InvalidUnit { unit, expected: "a time unit" }) if unit == value
             ),
             "{value:?} should not be accepted as a time unit"

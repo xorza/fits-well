@@ -145,7 +145,7 @@ pub(super) fn cell_to_f64_into(
     let bitpix = match cell.element_type {
         TformKind::F32 => FloatBitpix::F32,
         TformKind::F64 => FloatBitpix::F64,
-        TformKind::Byte => zbitpix,
+        TformKind::U8 => zbitpix,
         _ => {
             return Err(FitsError::CorruptCompressedData {
                 detail: "uncompressed float tile is not a float array".to_string(),
@@ -158,7 +158,7 @@ pub(super) fn cell_to_f64_into(
 
 pub(super) fn byte_cell(cell: VlaCell<'_>) -> Result<&[u8]> {
     match cell.element_type {
-        TformKind::Byte => Ok(cell.bytes),
+        TformKind::U8 => Ok(cell.bytes),
         _ => Err(FitsError::CorruptCompressedData {
             detail: "compressed cell is not a byte array".to_string(),
         }),

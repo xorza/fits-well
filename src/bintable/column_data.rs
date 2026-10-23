@@ -2,6 +2,8 @@
 
 use num_complex::Complex;
 
+use crate::bintable::column_view::ColumnView;
+
 /// A decoded column, flattened across all rows in row order: each row contributes
 /// its `repeat` elements. Values are raw (big-endian decoded but not
 /// `TSCALn`/`TZEROn`-scaled). A `P`/`Q` column's rows vary in length, so its values
@@ -62,105 +64,69 @@ impl_column_data_vec_conversions!(ComplexF64, Complex<f64>);
 impl ColumnData {
     /// Total element count across all rows (the backing `Vec`'s length).
     pub const fn len(&self) -> usize {
-        match self {
-            Self::Logical(v) => v.len(),
-            Self::U8(v) | Self::Character(v) => v.len(),
-            Self::I16(v) => v.len(),
-            Self::I32(v) => v.len(),
-            Self::I64(v) => v.len(),
-            Self::F32(v) => v.len(),
-            Self::F64(v) => v.len(),
-            Self::ComplexF32(v) => v.len(),
-            Self::ComplexF64(v) => v.len(),
-        }
+        self.view().len()
     }
 
     pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    pub const fn as_logical(&self) -> Option<&[Option<bool>]> {
-        if let Self::Logical(values) = self {
-            Some(values.as_slice())
-        } else {
-            None
+    /// Every value, borrowed.
+    pub const fn view(&self) -> ColumnView<'_> {
+        match self {
+            Self::Logical(values) => ColumnView::Logical(values.as_slice()),
+            Self::U8(values) => ColumnView::U8(values.as_slice()),
+            Self::I16(values) => ColumnView::I16(values.as_slice()),
+            Self::I32(values) => ColumnView::I32(values.as_slice()),
+            Self::I64(values) => ColumnView::I64(values.as_slice()),
+            Self::F32(values) => ColumnView::F32(values.as_slice()),
+            Self::F64(values) => ColumnView::F64(values.as_slice()),
+            Self::ComplexF32(values) => ColumnView::ComplexF32(values.as_slice()),
+            Self::ComplexF64(values) => ColumnView::ComplexF64(values.as_slice()),
+            Self::Character(values) => ColumnView::Character(values.as_slice()),
         }
+    }
+
+    pub const fn as_logical(&self) -> Option<&[Option<bool>]> {
+        self.view().as_logical()
     }
 
     pub const fn as_u8(&self) -> Option<&[u8]> {
-        if let Self::U8(values) = self {
-            Some(values.as_slice())
-        } else {
-            None
-        }
+        self.view().as_u8()
     }
 
     pub const fn as_i16(&self) -> Option<&[i16]> {
-        if let Self::I16(values) = self {
-            Some(values.as_slice())
-        } else {
-            None
-        }
+        self.view().as_i16()
     }
 
     pub const fn as_i32(&self) -> Option<&[i32]> {
-        if let Self::I32(values) = self {
-            Some(values.as_slice())
-        } else {
-            None
-        }
+        self.view().as_i32()
     }
 
     pub const fn as_i64(&self) -> Option<&[i64]> {
-        if let Self::I64(values) = self {
-            Some(values.as_slice())
-        } else {
-            None
-        }
+        self.view().as_i64()
     }
 
     pub const fn as_f32(&self) -> Option<&[f32]> {
-        if let Self::F32(values) = self {
-            Some(values.as_slice())
-        } else {
-            None
-        }
+        self.view().as_f32()
     }
 
     pub const fn as_f64(&self) -> Option<&[f64]> {
-        if let Self::F64(values) = self {
-            Some(values.as_slice())
-        } else {
-            None
-        }
+        self.view().as_f64()
     }
 
     pub const fn as_complex_f32(&self) -> Option<&[Complex<f32>]> {
-        if let Self::ComplexF32(values) = self {
-            Some(values.as_slice())
-        } else {
-            None
-        }
+        self.view().as_complex_f32()
     }
 
     pub const fn as_complex_f64(&self) -> Option<&[Complex<f64>]> {
-        if let Self::ComplexF64(values) = self {
-            Some(values.as_slice())
-        } else {
-            None
-        }
+        self.view().as_complex_f64()
     }
 
     pub const fn as_character(&self) -> Option<&[u8]> {
-        if let Self::Character(values) = self {
-            Some(values.as_slice())
-        } else {
-            None
-        }
+        self.view().as_character()
     }
 
-    /// Append `other`'s values when it holds the same type, returning whether it
-    /// did.
     pub(crate) fn extend_from(&mut self, other: &Self) -> bool {
         match (self, other) {
             (Self::Logical(a), Self::Logical(b)) => a.extend_from_slice(b),

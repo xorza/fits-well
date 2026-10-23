@@ -39,7 +39,7 @@ impl<'a> VlaColumn<'a> {
     }
 
     pub(crate) fn cell(&self, row: usize) -> Result<VlaCell<'a>> {
-        if row >= self.table.nrows {
+        if row >= self.table.row_count {
             return Err(FitsError::UnexpectedEof);
         }
         let col = &self.table.columns[self.index];

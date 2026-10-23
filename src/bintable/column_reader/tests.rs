@@ -24,7 +24,7 @@ fn decodes_fixed_width_columns_from_hand_built_data() {
 
     let table = Table::from_data(&header, data).unwrap();
     let schema = table.schema();
-    assert_eq!(schema.nrows, 2);
+    assert_eq!(schema.row_count, 2);
     assert_eq!(
         schema
             .columns
@@ -122,7 +122,7 @@ fn read_column_physical_rejects_non_numeric_columns() {
     let table = Table::from_data(&header, b"abc".to_vec()).unwrap();
     assert!(matches!(
         table.column(0).unwrap().physical(),
-        Err(FitsError::NonNumericColumn { code: 'A' })
+        Err(FitsError::NotANumericColumn { code: 'A' })
     ));
 }
 
@@ -132,7 +132,7 @@ fn read_column_on_a_vla_directs_to_read_vla_column() {
     let table = Table::from_data(&header, vec![0u8; 8]).unwrap();
     assert!(matches!(
         table.column(0).unwrap().raw(),
-        Err(FitsError::VariableLengthColumn { code: 'P' })
+        Err(FitsError::NotAFixedColumn { code: 'P' })
     ));
 }
 

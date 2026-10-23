@@ -15,7 +15,7 @@ pub(super) struct TileGeometry {
 
 /// Reusable per-tile scratch, filled by [`TileGeometry::tile_into`] each
 /// iteration so a tile loop allocates these buffers once instead of per tile
-/// (the `row_bases` buffer is `nrows` long — the dominant per-tile cost).
+/// (the `row_bases` buffer is `row_count` long — the dominant per-tile cost).
 #[derive(Debug, Default)]
 pub(super) struct TileScratch {
     /// Per-axis origin of the current tile (scratch for the index computation).
@@ -34,7 +34,7 @@ pub(super) struct TileScratch {
 }
 
 impl TileScratch {
-    /// Total pixels in the current tile (`row_len × nrows`).
+    /// Total pixels in the current tile (`row_len × row_count`).
     pub(super) const fn nelem(&self) -> usize {
         self.row_len * self.row_bases.len()
     }
@@ -165,23 +165,23 @@ impl TileGeometry {
             s.tdims.push(self.tiles[i].min(self.dims[i] - origin));
         }
         // Axis 0 has stride 1, so each tile row is `row_len` contiguous elements and the
-        // tile is `nrows` such rows (the product of the higher-axis extents). Emit only
+        // tile is `row_count` such rows (the product of the higher-axis extents). Emit only
         // the row starts — walking the *higher* axes as an odometer, `flat` maintained
         // by stride adds with no per-pixel division — and let gather/scatter copy each
         // row as a contiguous slice. The row order matches a row-major pixel walk, so
         // decoded values still land in the right pixels.
         s.row_len = if n == 0 { 1 } else { s.tdims[0] };
-        let nrows: usize = if n <= 1 {
+        let row_count: usize = if n <= 1 {
             1
         } else {
             s.tdims[1..].iter().product()
         };
         let mut flat: usize = (0..n).map(|i| s.origin[i] * self.stride[i]).sum();
         s.row_bases.clear();
-        s.row_bases.reserve_exact(nrows);
+        s.row_bases.reserve_exact(row_count);
         s.coord.clear();
         s.coord.resize(n, 0);
-        for _ in 0..nrows {
+        for _ in 0..row_count {
             s.row_bases.push(flat);
             for i in 1..n {
                 s.coord[i] += 1;

@@ -29,7 +29,7 @@ pub(crate) fn atomic(c: &mut Criterion) {
         let mut row = Vec::new();
         scene::sky(Bitpix::I16, WIDTH, 1, 1)
             .samples
-            .as_view()
+            .view()
             .encode_into(&mut row);
         b.iter(|| checksum::accumulate(black_box(&row), 0));
     });
@@ -131,7 +131,7 @@ impl Reading for ReadSections {
     type Output = ChecksumReport;
 
     fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> ChecksumReport {
-        let mut image = reader.image(0).unwrap().with_checksum();
+        let mut image = reader.image(0).unwrap().with_checksums();
         for top in (0..HEIGHT).step_by(SECTION_ROWS) {
             let ranges = [0..WIDTH, top..(top + SECTION_ROWS).min(HEIGHT)];
             let section = image.view(&ranges, &mut self.words).unwrap();

@@ -39,7 +39,11 @@ fn main() -> fits_well::Result<()> {
     let table = reader.read_table(1)?;
     let schema = table.schema();
 
-    println!("{} rows, {} columns", schema.nrows, schema.columns.len());
+    println!(
+        "{} rows, {} columns",
+        schema.row_count,
+        schema.columns.len()
+    );
     // Address a column by index or by `TTYPEn` name; the handle decodes on demand.
     println!("ID   = {:?}", table.column(0)?.raw()?);
     println!("NAME = {:?}", table.column("NAME")?.raw()?);
