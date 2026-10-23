@@ -9,7 +9,7 @@ use crate::error::Ranked;
 use crate::error::Result;
 use crate::header_model::value::Value;
 use crate::header_model::{Header, keywords};
-use crate::keyword::{AltSuffix, Keyword};
+use crate::keyword::Keyword;
 use crate::unit;
 use crate::world_coordinates::axis::Axis;
 use crate::world_coordinates::axis_transform::AxisTransform;
@@ -124,15 +124,23 @@ enum SpectralFrames {
 }
 
 impl Wcs {
-    /// Parse the primary WCS (`alt = None`) or the alternate description `alt` names
-    /// from `header`.
-    pub fn from_header(header: &Header, alt: Option<Alternate>) -> Result<Self> {
-        Self::from_header_with_context(header, alt, Vec::new(), SpectralFrames::Header)
+    /// Parse the description `alt` selects from `header`: `None` for the primary one,
+    /// `'A'` to `'Z'` for an alternate.
+    pub fn from_header(
+        header: &Header,
+        alt: impl TryInto<Alternate, Error: Into<FitsError>>,
+    ) -> Result<Self> {
+        Self::from_header_with_context(
+            header,
+            Alternate::of(alt)?,
+            Vec::new(),
+            SpectralFrames::Header,
+        )
     }
 
     pub(crate) fn from_header_with_tabular(
         header: &Header,
-        alt: Option<Alternate>,
+        alt: Alternate,
         tabular: Vec<tabular::TabularTransform>,
     ) -> Result<Self> {
         Self::from_header_with_context(header, alt, tabular, SpectralFrames::Header)
@@ -140,33 +148,32 @@ impl Wcs {
 
     fn from_header_with_context(
         header: &Header,
-        alt: Option<Alternate>,
+        alt: Alternate,
         tabular: Vec<tabular::TabularTransform>,
         spectral_frames: SpectralFrames,
     ) -> Result<Self> {
-        let a = AltSuffix::new(alt);
         let naxis = Self::image_axis_count(header, alt)?;
 
         let ctype: Vec<String> = (1..=naxis)
             .map(|i| {
-                read_text(header, Keyword::try_from(format_args!("CTYPE{i}{a}")))
+                read_text(header, Keyword::try_from(format_args!("CTYPE{i}{alt}")))
                     .map(|value| value.unwrap_or("").to_string())
             })
             .collect::<Result<_>>()?;
-        let declared_crval = axis_vec(header, "CRVAL", a.as_str(), naxis, 0.0)?;
+        let declared_crval = axis_vec(header, "CRVAL", alt.as_str(), naxis, 0.0)?;
         let mut crval = declared_crval.clone();
         let mut world_units = vec![None; naxis];
-        let crpix = axis_vec(header, "CRPIX", a.as_str(), naxis, 0.0)?;
-        let cdelt = axis_vec(header, "CDELT", a.as_str(), naxis, 1.0)?;
+        let crpix = axis_vec(header, "CRPIX", alt.as_str(), naxis, 0.0)?;
+        let cdelt = axis_vec(header, "CDELT", alt.as_str(), naxis, 1.0)?;
         let cunit: Vec<String> = (1..=naxis)
             .map(|i| {
-                read_text(header, Keyword::try_from(format_args!("CUNIT{i}{a}")))
+                read_text(header, Keyword::try_from(format_args!("CUNIT{i}{alt}")))
                     .map(|value| value.unwrap_or("").to_string())
             })
             .collect::<Result<_>>()?;
         let celestial_pair = CelestialAxisPair::find(&ctype);
         let celestial_axes = ProjectedCelestialAxes::find(&ctype)?;
-        let celestial_frame = CelestialFrame::from_header(header, a, &ctype)?;
+        let celestial_frame = CelestialFrame::from_header(header, alt, &ctype)?;
         let spectral_frames = if let SpectralFrames::Columns(frames) = spectral_frames {
             assert_eq!(frames.len(), naxis, "spectral frame count");
             frames
@@ -174,7 +181,7 @@ impl Wcs {
             let frame = ctype
                 .iter()
                 .any(|ctype| axis_transform::is_spectral_type(ctype))
-                .then(|| SpectralFrame::from_header(header, a))
+                .then(|| SpectralFrame::from_header(header, alt))
                 .transpose()?;
             ctype
                 .iter()
@@ -186,7 +193,7 @@ impl Wcs {
                 .collect()
         };
 
-        let matrix = LinearMatrix::from_header(header, a, naxis, &cdelt, celestial_axes)?;
+        let matrix = LinearMatrix::from_header(header, alt, naxis, &cdelt, celestial_axes)?;
         // Each axis's `CUNITia` factor, applied to its `CRVAL` here and to its whole
         // matrix row once the axis parse reports it: the projection math runs in
         // degrees and the spectral algorithms in their Table-25 default units, so the
@@ -233,7 +240,7 @@ impl Wcs {
             for (parameter, value) in spectral_parameters.iter_mut().enumerate() {
                 *value = read_real(
                     header,
-                    Keyword::try_from(format_args!("PV{}_{parameter}{a}", axis + 1)),
+                    Keyword::try_from(format_args!("PV{}_{parameter}{alt}", axis + 1)),
                 )?;
             }
             let parameters = SpectralParameters::new(spectral_parameters);
@@ -256,7 +263,7 @@ impl Wcs {
 
         let celestial = CelestialTransform::from_header(
             header,
-            a,
+            alt,
             celestial_axes,
             &crval,
             &mut unsupported_axes,
@@ -376,8 +383,12 @@ impl Wcs {
     pub fn from_pixel_list(
         header: &Header,
         columns: &[usize],
-        alt: Option<Alternate>,
+        alt: impl TryInto<Alternate, Error: Into<FitsError>>,
     ) -> Result<Self> {
+        Self::parse_pixel_list(header, columns, Alternate::of(alt)?)
+    }
+
+    fn parse_pixel_list(header: &Header, columns: &[usize], alt: Alternate) -> Result<Self> {
         let table = TableWcs::pixel_list(alt, columns);
         let translated = table.translate(header)?;
         let mut h = translated.header;
@@ -395,7 +406,7 @@ impl Wcs {
         }
         Self::from_header_with_context(
             &h,
-            None,
+            Alternate::PRIMARY,
             Vec::new(),
             SpectralFrames::Columns(translated.spectral_frames),
         )
@@ -410,8 +421,12 @@ impl Wcs {
     pub fn from_array_column(
         header: &Header,
         column: usize,
-        alt: Option<Alternate>,
+        alt: impl TryInto<Alternate, Error: Into<FitsError>>,
     ) -> Result<Self> {
+        Self::parse_array_column(header, column, Alternate::of(alt)?)
+    }
+
+    fn parse_array_column(header: &Header, column: usize, alt: Alternate) -> Result<Self> {
         let naxis = TableWcs::array_column_rank(header, alt, column)?;
         let table = TableWcs::array_column(alt, naxis, column);
         let translated = table.translate(header)?;
@@ -421,7 +436,7 @@ impl Wcs {
         table.copy_celestial_keywords(header, &mut h, &[column])?;
         Self::from_header_with_context(
             &h,
-            None,
+            Alternate::PRIMARY,
             Vec::new(),
             SpectralFrames::Columns(translated.spectral_frames),
         )
@@ -510,14 +525,13 @@ impl Wcs {
 
     /// The number of WCS axes an image header declares: `WCSAXESa`, else the larger
     /// of `NAXIS` and the highest axis any WCS keyword names.
-    pub(crate) fn image_axis_count(header: &Header, alt: Option<Alternate>) -> Result<usize> {
-        let suffix = AltSuffix::new(alt);
+    pub(crate) fn image_axis_count(header: &Header, alt: Alternate) -> Result<usize> {
         let value = if let Some(axis_count) =
-            read_integer(header, Keyword::try_from(format_args!("WCSAXES{suffix}")))?
+            read_integer(header, Keyword::try_from(format_args!("WCSAXES{alt}")))?
         {
             axis_count
         } else {
-            let inferred = infer_image_axis_count(header, suffix.as_str());
+            let inferred = infer_image_axis_count(header, alt.as_str());
             match header.get_integer(keywords::NAXIS)? {
                 Some(axis_count) if axis_count >= 0 => axis_count.max(inferred),
                 Some(axis_count) => axis_count,

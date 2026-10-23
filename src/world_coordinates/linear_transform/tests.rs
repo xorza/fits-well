@@ -1,4 +1,3 @@
-use crate::alternate::Alternate;
 use crate::header_model::keywords;
 use crate::world_coordinates::internals::to_world;
 
@@ -198,7 +197,7 @@ fn matrix_keywords_are_matched_by_exact_name() {
         .set_internal("PC13_1", 9.0)
         .set_internal("PC01_02", 3.0);
     let primary =
-        LinearMatrix::from_header(&header, AltSuffix::new(None), naxis, &cdelt, None).unwrap();
+        LinearMatrix::from_header(&header, Alternate::PRIMARY, naxis, &cdelt, None).unwrap();
     let mut expected = vec![0.0; naxis * naxis];
     for i in 0..naxis {
         expected[i * naxis + i] = cdelt[i];
@@ -207,14 +206,8 @@ fn matrix_keywords_are_matched_by_exact_name() {
     expected[naxis] = 2.0 * 0.25;
     assert_eq!(primary.values, expected);
 
-    let alternate = LinearMatrix::from_header(
-        &header,
-        AltSuffix::new(Some(Alternate::new('A'))),
-        naxis,
-        &cdelt,
-        None,
-    )
-    .unwrap();
+    let alternate =
+        LinearMatrix::from_header(&header, Alternate::new('A'), naxis, &cdelt, None).unwrap();
     let mut expected = vec![0.0; naxis * naxis];
     for i in 0..naxis {
         expected[i * naxis + i] = cdelt[i];
@@ -224,7 +217,7 @@ fn matrix_keywords_are_matched_by_exact_name() {
 
     let mut cd = Header::new();
     cd.set_internal("CD3_2", 1.5).set_internal("CD12_12", -2.0);
-    let matrix = LinearMatrix::from_header(&cd, AltSuffix::new(None), naxis, &cdelt, None).unwrap();
+    let matrix = LinearMatrix::from_header(&cd, Alternate::PRIMARY, naxis, &cdelt, None).unwrap();
     let mut expected = vec![0.0; naxis * naxis];
     expected[2 * naxis + 1] = 1.5;
     expected[naxis * naxis - 1] = -2.0;

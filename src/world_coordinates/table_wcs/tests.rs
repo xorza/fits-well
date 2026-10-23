@@ -59,9 +59,14 @@ impl Celestial {
         }
     }
 
-    fn header(&self, family: Family, alt: Option<Alternate>) -> Header {
-        let a = alt.map(|alt| alt.to_string()).unwrap_or_default();
-        let primary = alt.is_none();
+    fn header(
+        &self,
+        family: Family,
+        alt: impl TryInto<Alternate, Error: Into<FitsError>>,
+    ) -> Header {
+        let alt = Alternate::of(alt).unwrap();
+        let a = alt.to_string();
+        let primary = !alt.is_alternate();
         // Both axes' keyword for an image root, a long table root, and the short
         // table root an alternate description takes (Table 22).
         let names = |image_root: &str, long: &str, short: &str| {
@@ -135,7 +140,8 @@ impl Celestial {
         header
     }
 
-    fn wcs(&self, family: Family, alt: Option<Alternate>) -> Wcs {
+    fn wcs(&self, family: Family, alt: impl TryInto<Alternate, Error: Into<FitsError>>) -> Wcs {
+        let alt = Alternate::of(alt).unwrap();
         let header = self.header(family, alt);
         match family {
             Family::Image => Wcs::from_header(&header, alt),
@@ -217,7 +223,7 @@ fn table_wcs_matches_the_equivalent_image_wcs() {
             &context,
         );
 
-        let alternate = TAN_FIXTURE.wcs(family, Some(Alternate::new('A')));
+        let alternate = TAN_FIXTURE.wcs(family, 'A');
         assert_eq!(
             alternate.celestial.as_ref().unwrap().pole,
             CelestialPole {
@@ -229,9 +235,9 @@ fn table_wcs_matches_the_equivalent_image_wcs() {
         assert_astropy_golden(&alternate, &TAN_GOLDEN, &format!("alternate {context}"));
     }
 
-    let mut ranked = TAN_FIXTURE.header(Family::VectorCell, Some(Alternate::new('A')));
+    let mut ranked = TAN_FIXTURE.header(Family::VectorCell, 'A');
     ranked.set_internal("WCAX5A", 2);
-    let explicit = Wcs::from_array_column(&ranked, 5, Some(Alternate::new('A'))).unwrap();
+    let explicit = Wcs::from_array_column(&ranked, 5, 'A').unwrap();
     assert_astropy_golden(&explicit, &TAN_GOLDEN, "ranked alternate vector-cell TAN");
 
     let mut pixel_list = ROTATED_TAN.header(Family::PixelList, None);
@@ -253,12 +259,12 @@ fn table_wcs_parameter_aliases_match_astropy() {
     for (parameter, family, alt) in [
         ("TPV3_1", Family::PixelList, None),
         ("TV3_1", Family::PixelList, None),
-        ("TPV3_1A", Family::PixelList, Some(Alternate::new('A'))),
-        ("TV3_1A", Family::PixelList, Some(Alternate::new('A'))),
+        ("TPV3_1A", Family::PixelList, Some('A')),
+        ("TV3_1A", Family::PixelList, Some('A')),
         ("2PV5_1", Family::VectorCell, None),
         ("2V5_1", Family::VectorCell, None),
-        ("2PV5_1A", Family::VectorCell, Some(Alternate::new('A'))),
-        ("2V5_1A", Family::VectorCell, Some(Alternate::new('A'))),
+        ("2PV5_1A", Family::VectorCell, Some('A')),
+        ("2V5_1A", Family::VectorCell, Some('A')),
     ] {
         let mut header = CEA.header(family, alt);
         header.set_internal(parameter, 0.5);
@@ -300,8 +306,7 @@ fn table_wcs_matrix_aliases_resolve_exactly() {
             .set_internal(format!("{root}2_3{suffix}"), expected[1])
             .set_internal(format!("{root}3_2{suffix}"), expected[2])
             .set_internal(format!("{root}3_3{suffix}"), expected[3]);
-        let wcs = Wcs::from_pixel_list(&header, &[2, 3], alternate.then_some(Alternate::new('A')))
-            .unwrap();
+        let wcs = Wcs::from_pixel_list(&header, &[2, 3], alternate.then_some('A')).unwrap();
         assert_eq!(
             linear::matrix(&wcs.linear),
             expected,
@@ -318,8 +323,7 @@ fn table_wcs_matrix_aliases_resolve_exactly() {
             .set_internal(format!("12{root}5{suffix}"), expected[1])
             .set_internal(format!("21{root}5{suffix}"), expected[2])
             .set_internal(format!("22{root}5{suffix}"), expected[3]);
-        let wcs =
-            Wcs::from_array_column(&header, 5, alternate.then_some(Alternate::new('A'))).unwrap();
+        let wcs = Wcs::from_array_column(&header, 5, alternate.then_some('A')).unwrap();
         assert_eq!(
             linear::matrix(&wcs.linear),
             expected,
@@ -350,7 +354,7 @@ fn table_wcs_column_poles_match_the_equivalent_image_wcs() {
     assert_eq!(image_pole.lonpole, 0.0);
 
     for family in [Family::PixelList, Family::VectorCell] {
-        let table = description.wcs(family, Some(Alternate::new('A')));
+        let table = description.wcs(family, 'A');
         assert_eq!(table.celestial.as_ref().unwrap().pole, image_pole);
         assert_same_transform(
             &table,
@@ -417,7 +421,7 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
     ];
     for header in &alternate_cases {
         assert_eq!(
-            Wcs::from_array_column(header, 5, Some(Alternate::new('A')))
+            Wcs::from_array_column(header, 5, 'A')
                 .unwrap()
                 .metadata()
                 .axes
@@ -428,7 +432,7 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
 
     let invalid_long_alternate = build("3CTYP5A", Value::Text("LINEAR".to_string()));
     assert!(matches!(
-        Wcs::from_array_column(&invalid_long_alternate, 5, Some(Alternate::new('A'))),
+        Wcs::from_array_column(&invalid_long_alternate, 5, 'A'),
         Err(FitsError::MissingKeyword { keyword }) if keyword == "1CTY5A"
     ));
 
@@ -456,7 +460,7 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
     // A column number too wide for any keyword finds no card and errors, not panics.
     let column = usize::MAX;
     assert!(matches!(
-        Wcs::from_array_column(&padded_index, column, Some(Alternate::new('A'))),
+        Wcs::from_array_column(&padded_index, column, 'A'),
         Err(FitsError::InvalidKeyword { name }) if name == format!("1CTY{column}A")
     ));
 }

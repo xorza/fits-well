@@ -1,9 +1,10 @@
 //! The celestial reference frame a WCS declares (`RADESYSa`/`EQUINOXa`, §8.2).
 
+use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::{Header, keywords};
-use crate::keyword::{AltSuffix, Keyword};
+use crate::keyword::Keyword;
 use crate::world_coordinates::ctype::Ctype;
 use crate::world_coordinates::{read_real, read_text};
 
@@ -46,14 +47,14 @@ impl CelestialFrame {
     /// `None` when neither is declared and no axis needs the frame.
     pub(super) fn from_header(
         header: &Header,
-        suffix: AltSuffix,
+        alt: Alternate,
         ctype: &[String],
     ) -> Result<Option<Self>> {
-        let mut declared = read_text(header, Keyword::try_from(format_args!("RADESYS{suffix}")))?;
-        if declared.is_none() && !suffix.is_alternate() {
+        let mut declared = read_text(header, Keyword::try_from(format_args!("RADESYS{alt}")))?;
+        if declared.is_none() && !alt.is_alternate() {
             declared = header.get_text(keywords::RADECSYS)?;
         }
-        let equinox = read_real(header, Keyword::try_from(format_args!("EQUINOX{suffix}")))?;
+        let equinox = read_real(header, Keyword::try_from(format_args!("EQUINOX{alt}")))?;
         if equinox.is_some_and(|value| !value.is_finite() || value < 0.0) {
             return Err(FitsError::InvalidWcs {
                 detail: "EQUINOX must be finite and non-negative".to_string(),

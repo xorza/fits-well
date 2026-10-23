@@ -1,8 +1,9 @@
 //! The resolved celestial pair of a WCS: its axes, projection, parameters, and pole.
 
+use crate::alternate::Alternate;
 use crate::error::Result;
 use crate::header_model::Header;
-use crate::keyword::{AltSuffix, Keyword};
+use crate::keyword::Keyword;
 use crate::world_coordinates::celestial_pole::CelestialPole;
 use crate::world_coordinates::first_real;
 use crate::world_coordinates::projected_celestial_axes::ProjectedCelestialAxes;
@@ -31,7 +32,7 @@ impl CelestialTransform {
     /// evaluated, so a complete transform refuses rather than returning `NaN`.
     pub(super) fn from_header(
         header: &Header,
-        a: AltSuffix,
+        alt: Alternate,
         celestial_axes: Option<ProjectedCelestialAxes>,
         crval: &[f64],
         unsupported_axes: &mut Vec<usize>,
@@ -46,14 +47,14 @@ impl CelestialTransform {
         for (m, value) in pv.iter_mut().enumerate() {
             if let Some(header_value) = read_real(
                 header,
-                Keyword::try_from(format_args!("PV{}_{m}{a}", lat + 1)),
+                Keyword::try_from(format_args!("PV{}_{m}{alt}", lat + 1)),
             )? {
                 *value = header_value;
             }
         }
         let parameters = proj.parameters(pv)?;
         // A conic's mid-latitude θ_a = PVi_1 is mandatory and must be non-zero; θ_a = 0
-        // (absent, or explicitly 0) is a degenerate cone (`1/tan 0`). Treat it like an
+        // (absent, or explicitly 0) is alt degenerate cone (`1/tan 0`). Treat it like an
         // unimplemented projection — flag the axes so complete transforms fail rather
         // than returning NaN.
         if proj.is_conic() && pv[1] == 0.0 {
@@ -68,13 +69,13 @@ impl CelestialTransform {
         let (mut phi0, mut theta0) = (reference.phi, reference.theta);
         if let Some(v) = read_real(
             header,
-            Keyword::try_from(format_args!("PV{}_1{a}", lng + 1)),
+            Keyword::try_from(format_args!("PV{}_1{alt}", lng + 1)),
         )? {
             phi0 = v;
         }
         if let Some(v) = read_real(
             header,
-            Keyword::try_from(format_args!("PV{}_2{a}", lng + 1)),
+            Keyword::try_from(format_args!("PV{}_2{alt}", lng + 1)),
         )? {
             theta0 = v;
         }
@@ -82,15 +83,15 @@ impl CelestialTransform {
         // LONPOLE (= LONPOLEa or PVi_3a): default φ0 if δ0 ≥ θ0, else φ0 + 180°.
         let phip = first_real(
             header,
-            Keyword::try_from(format_args!("LONPOLE{a}")),
-            Keyword::try_from(format_args!("PV{}_3{a}", lng + 1)),
+            Keyword::try_from(format_args!("LONPOLE{alt}")),
+            Keyword::try_from(format_args!("PV{}_3{alt}", lng + 1)),
         )?
         .unwrap_or(if delta0 >= theta0 { phi0 } else { phi0 + 180.0 });
         // LATPOLE (= LATPOLEa or PVi_4a): default 90°.
         let thetap = first_real(
             header,
-            Keyword::try_from(format_args!("LATPOLE{a}")),
-            Keyword::try_from(format_args!("PV{}_4{a}", lng + 1)),
+            Keyword::try_from(format_args!("LATPOLE{alt}")),
+            Keyword::try_from(format_args!("PV{}_4{alt}", lng + 1)),
         )?
         .unwrap_or(90.0);
         Ok(Some(Self {

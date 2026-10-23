@@ -109,11 +109,16 @@ and the dated measurements in `docs/research/`.
   division for each row rather than a reciprocal. The cost: four coupled linear
   axes invert 34% slower, four dependent divisions where the product was one
   pass. Source: `docs/research/2026-10-23-wcs-into-slice.md`.
-- **An alternate description is a `wcs::Alternate`, a letter `A` to `Z` checked
-  when it is made** (§8.2). `Alternate::new` checks a constant at compile time,
-  and `TryFrom<char>` a letter read at run time. Refused: `Option<char>`, which
-  let a digit spell another keyword (`CTYPE1` and `1` read axis 11), and
-  `WcsAlt`, which repeats its module.
+- **A WCS or time read selects its description with `impl TryInto<Alternate>`,**
+  as a keyword argument takes `impl TryInto<Keyword>`: `None` for the primary
+  description, and `'A'` or `Some('A')` for an alternate. `Alternate` holds the
+  primary description or a letter `A` to `Z`, checked when it is made (§8.2).
+  Refused: `Option<char>`, which let a digit spell another keyword (`CTYPE1`
+  and `1` read axis 11); `Option<Alternate>`, which made each call spell
+  `Some(Alternate::new('A'))`; a public enum, whose letter variant anyone
+  could build unchecked; and `WcsAlt`, which repeats its module. A bare `None`
+  infers its type only while `Option<char>` is the one `Option` that
+  `Alternate` converts from.
 
 ## Writing
 

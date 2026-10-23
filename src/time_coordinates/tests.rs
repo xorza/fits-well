@@ -1,4 +1,3 @@
-use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::header_model::{Header, keywords};
@@ -288,9 +287,7 @@ fn reads_phase_axis_metadata() {
     assert_eq!(image.zero_phase, 5.0);
     assert_eq!(image.period, Some(2.0));
 
-    let alternate = PhaseAxis::from_header(&h, 2, Some(Alternate::new('A')))
-        .unwrap()
-        .unwrap();
+    let alternate = PhaseAxis::from_header(&h, 2, 'A').unwrap().unwrap();
     assert_eq!(
         alternate,
         PhaseAxis {
@@ -306,9 +303,7 @@ fn reads_phase_axis_metadata() {
         }
     );
     assert_eq!(
-        PhaseAxis::from_pixel_list(&h, 3, Some(Alternate::new('A')))
-            .unwrap()
-            .unwrap(),
+        PhaseAxis::from_pixel_list(&h, 3, 'A').unwrap().unwrap(),
         PhaseAxis {
             zero_phase: 13.0,
             period: Some(6.0),
@@ -324,7 +319,7 @@ fn reads_phase_axis_metadata() {
         }
     );
     assert_eq!(
-        PhaseAxis::from_array_column(&h, 1, 5, Some(Alternate::new('A')))
+        PhaseAxis::from_array_column(&h, 1, 5, 'A')
             .unwrap()
             .unwrap(),
         PhaseAxis {
@@ -404,7 +399,7 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
         .set_internal("CRVAL1A", 0.0)
         .set_internal("CD1_1A", 2.0);
     let t = Frame::from_header(&h).unwrap();
-    let alternate = Wcs::from_header(&h, Some(Alternate::new('A'))).unwrap();
+    let alternate = Wcs::from_header(&h, 'A').unwrap();
     // CD1_1 = 2 d/pixel and pixel offset 0.5 produce exactly one day. CUNIT1A and
     // CTYPE1A override the global seconds/UTC frame.
     assert_eq!(
@@ -416,7 +411,7 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
     );
 
     h.set_internal("CUNIT1A", "ms");
-    let milliseconds = Wcs::from_header(&h, Some(Alternate::new('A'))).unwrap();
+    let milliseconds = Wcs::from_header(&h, 'A').unwrap();
     // With the same CD row, an offset of 500 pixels is 1000 ms = 1 s.
     let coordinate = t
         .time_axis_mjd(&milliseconds, 1, &[501.0])
@@ -425,7 +420,7 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
     assert_eq!(coordinate.mjd, 58000.0 + 1.0 / SEC_PER_DAY);
 
     h.set_internal("CUNIT1A", "Hz");
-    let invalid_unit = Wcs::from_header(&h, Some(Alternate::new('A'))).unwrap();
+    let invalid_unit = Wcs::from_header(&h, 'A').unwrap();
     assert!(matches!(
         t.time_axis_mjd(&invalid_unit, 1, &[1.0]),
         Err(FitsError::InvalidUnit {
@@ -465,7 +460,7 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
         .set_internal("CUNIT1A", "d")
         .set_internal("CRVAL1A", 10.0)
         .set_internal("CD1_1A", 2.0);
-    let logarithmic = Wcs::from_header(&h, Some(Alternate::new('A'))).unwrap();
+    let logarithmic = Wcs::from_header(&h, 'A').unwrap();
     let coordinate = t.time_axis_mjd(&logarithmic, 1, &[2.0]).unwrap().unwrap();
     let expected_days = 10.0 * 0.2_f64.exp();
     assert_eq!(coordinate.mjd, 58000.0 + expected_days);
@@ -482,7 +477,7 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
 
     h.set_internal("CTYPE1A", "TIME-TAB")
         .set_internal("CUNIT1A", "d");
-    let unsupported = Wcs::from_header(&h, Some(Alternate::new('A'))).unwrap();
+    let unsupported = Wcs::from_header(&h, 'A').unwrap();
     assert!(matches!(
         t.time_axis_mjd(&unsupported, 1, &[1.0]),
         Err(FitsError::UnsupportedWcsTransform { axes }) if axes == vec![0]

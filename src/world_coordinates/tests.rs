@@ -217,7 +217,7 @@ fn absent_wcsaxes_uses_the_largest_wcs_index() {
             2
         );
         assert_eq!(
-            Wcs::from_header(&alternate, Some(Alternate::new('A')))
+            Wcs::from_header(&alternate, 'A')
                 .unwrap()
                 .metadata()
                 .axes
@@ -243,8 +243,23 @@ fn rejects_absurd_wcsaxes() {
     }
     h.set_internal(keywords::WCSAXES, 1);
     assert_eq!(Wcs::from_header(&h, None).unwrap().metadata().axes.len(), 1);
+    // The alternate argument selects `WCSAXESA` in each of its forms, and a letter
+    // outside A to Z is refused before any keyword is read.
+    h.set_internal("WCSAXESA", 2);
+    for alt in [Some('A'), None] {
+        let axes = if alt.is_some() { 2 } else { 1 };
+        assert_eq!(
+            Wcs::from_header(&h, alt).unwrap().metadata().axes.len(),
+            axes
+        );
+    }
+    assert_eq!(Wcs::from_header(&h, 'A').unwrap().metadata().axes.len(), 2);
+    assert!(matches!(
+        Wcs::from_header(&h, 'a'),
+        Err(FitsError::InvalidAlternate { alternate: 'a' })
+    ));
     h.set_internal(keywords::WCSAXES, 999);
-    assert_eq!(Wcs::image_axis_count(&h, None).unwrap(), 999);
+    assert_eq!(Wcs::image_axis_count(&h, Alternate::PRIMARY).unwrap(), 999);
 
     h.set_internal("WCAX5", -1);
     assert!(matches!(

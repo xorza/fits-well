@@ -522,9 +522,15 @@ impl<S: Source> FitsReader<S> {
     pub fn read_wcs<'h>(
         &mut self,
         hdu: impl Into<HduSelector<'h>>,
-        alt: Option<Alternate>,
+        alt: impl TryInto<Alternate, Error: Into<FitsError>>,
     ) -> Result<Wcs> {
-        let header = &selected_hdu(&self.hdus, hdu.into())?.header;
+        let alt = Alternate::of(alt)?;
+        self.resolve_wcs(hdu.into(), alt)
+    }
+
+    /// [`Self::read_wcs`] of the HDU `hdu` selects, the description `alt` selects.
+    fn resolve_wcs(&mut self, hdu: HduSelector<'_>, alt: Alternate) -> Result<Wcs> {
+        let header = &selected_hdu(&self.hdus, hdu)?.header;
         let descriptors = tabular::descriptors(header, Wcs::image_axis_count(header, alt)?, alt)?;
         if descriptors.is_empty() {
             return Wcs::from_header(header, alt);
