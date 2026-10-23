@@ -246,7 +246,7 @@ fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
     let header = tab_header(1, "COORD");
     let descriptor = tabular::descriptors(&header, 1, None).unwrap().remove(0);
     assert!(matches!(
-        TabularTransform::from_table(descriptor, bad_shape.view()),
+        TabularTransform::from_table(&descriptor, bad_shape.view()),
         Err(FitsError::InvalidWcs { .. })
     ));
 
@@ -258,7 +258,7 @@ fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
     header.set_internal("PS1_2", "INDEX");
     let descriptor = tabular::descriptors(&header, 1, None).unwrap().remove(0);
     assert!(matches!(
-        TabularTransform::from_table(descriptor, bad_index.view()),
+        TabularTransform::from_table(&descriptor, bad_index.view()),
         Err(FitsError::InvalidWcs { .. })
     ));
 

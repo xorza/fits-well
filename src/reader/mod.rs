@@ -709,7 +709,7 @@ impl<S: Source> FitsReader<S> {
             let table =
                 TableView::compact(&schema.columns, row_count, schema.row_len, &self.selection);
             for descriptor in group {
-                transforms.push(tabular::TabularTransform::from_table(descriptor, table)?);
+                transforms.push(tabular::TabularTransform::from_table(&descriptor, table)?);
             }
         }
         Wcs::from_header_with_tabular(header, alt, transforms)

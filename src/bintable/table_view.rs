@@ -2,7 +2,7 @@
 
 use crate::bintable::column::Column;
 use crate::bintable::column_reader::ColumnReader;
-use crate::bintable::descriptor::PqDescriptor;
+use crate::bintable::descriptor::{DescriptorWidth, PqDescriptor};
 use crate::bintable::schema::Schema;
 use crate::bintable::tform_kind::TformKind;
 #[cfg(feature = "compression")]
@@ -121,10 +121,7 @@ impl<'a> TableView<'a> {
         if col.tform.repeat == 0 {
             Ok(PqDescriptor::EMPTY)
         } else {
-            PqDescriptor::decode(
-                self.cell(col, row),
-                col.tform.kind == TformKind::ArrayDesc64,
-            )
+            PqDescriptor::decode(self.cell(col, row), DescriptorWidth::of(col.tform.kind))
         }
     }
 

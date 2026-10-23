@@ -209,12 +209,33 @@ fn signed_exponent_without_letter_parses_as_fortran_real() {
 
     assert_eq!(
         split_mantissa_exponent("3.14159-2"),
-        Some(("3.14159", "-2"))
+        Some(Scientific {
+            mantissa: "3.14159",
+            exponent: "-2",
+        })
     );
-    assert_eq!(split_mantissa_exponent("-3.0-1"), Some(("-3.0", "-1")));
-    assert_eq!(split_mantissa_exponent("1.5E2"), Some(("1.5", "2")));
+    assert_eq!(
+        split_mantissa_exponent("-3.0-1"),
+        Some(Scientific {
+            mantissa: "-3.0",
+            exponent: "-1",
+        })
+    );
+    assert_eq!(
+        split_mantissa_exponent("1.5E2"),
+        Some(Scientific {
+            mantissa: "1.5",
+            exponent: "2",
+        })
+    );
     // The Fortran double `D`/`d` exponent splits in place (no String normalization).
-    assert_eq!(split_mantissa_exponent("1.5D-2"), Some(("1.5", "-2")));
+    assert_eq!(
+        split_mantissa_exponent("1.5D-2"),
+        Some(Scientific {
+            mantissa: "1.5",
+            exponent: "-2",
+        })
+    );
     assert_eq!(split_mantissa_exponent("123"), None);
 }
 

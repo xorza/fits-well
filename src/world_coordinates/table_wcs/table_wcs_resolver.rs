@@ -8,6 +8,7 @@ use crate::keyword::KeyBuf;
 use crate::keyword::key;
 use crate::world_coordinates::first_real;
 use crate::world_coordinates::spectral_frame::SpectralFrame;
+use crate::world_coordinates::table_wcs::keyword_spelling::KeywordSpelling;
 use crate::world_coordinates::table_wcs::table_axis_keyword::TableAxisKeyword;
 use crate::world_coordinates::table_wcs::table_matrix_keyword::TableMatrixKeyword;
 use crate::world_coordinates::table_wcs::table_pole_keyword::TablePoleKeyword;
@@ -28,8 +29,18 @@ impl TableWcsResolver {
         }
     }
 
+    /// The spelling the axis roots take: the short one for an alternate description, whose
+    /// suffix takes the last character.
+    const fn spelling(self) -> KeywordSpelling {
+        if self.suffix.is_alternate() {
+            KeywordSpelling::Short
+        } else {
+            KeywordSpelling::Full
+        }
+    }
+
     pub(super) fn pixel_axis_key(self, keyword: TableAxisKeyword, column: usize) -> Option<KeyBuf> {
-        let root = keyword.table_root(self.suffix.is_alternate())?;
+        let root = keyword.table_root(self.spelling())?;
         let suffix = self.suffix;
         Some(key!("T{root}{column}{suffix}"))
     }
@@ -40,7 +51,7 @@ impl TableWcsResolver {
         axis: usize,
         column: usize,
     ) -> Option<KeyBuf> {
-        let root = keyword.table_root(self.suffix.is_alternate())?;
+        let root = keyword.table_root(self.spelling())?;
         let suffix = self.suffix;
         Some(key!("{axis}{root}{column}{suffix}"))
     }
@@ -50,9 +61,9 @@ impl TableWcsResolver {
         keyword: TableMatrixKeyword,
         row_column: usize,
         input_column: usize,
-        abbreviated: bool,
+        spelling: KeywordSpelling,
     ) -> KeyBuf {
-        let root = keyword.pixel_root(abbreviated);
+        let root = keyword.pixel_root(spelling);
         let suffix = self.suffix;
         key!("{root}{row_column}_{input_column}{suffix}")
     }
@@ -64,8 +75,8 @@ impl TableWcsResolver {
         row_column: usize,
         input_column: usize,
     ) -> Result<Option<f64>> {
-        let long = self.pixel_matrix_key(keyword, row_column, input_column, false);
-        let short = self.pixel_matrix_key(keyword, row_column, input_column, true);
+        let [long, short] = KeywordSpelling::BOTH
+            .map(|spelling| self.pixel_matrix_key(keyword, row_column, input_column, spelling));
         first_real(header, long.as_str(), short.as_str())
     }
 
@@ -81,8 +92,16 @@ impl TableWcsResolver {
         key!("{row_axis}{input_axis}{root}{column}{suffix}")
     }
 
-    fn pixel_parameter_key(self, column: usize, parameter: usize, short: bool) -> KeyBuf {
-        let root = if short { "TV" } else { "TPV" };
+    fn pixel_parameter_key(
+        self,
+        column: usize,
+        parameter: usize,
+        spelling: KeywordSpelling,
+    ) -> KeyBuf {
+        let root = match spelling {
+            KeywordSpelling::Full => "TPV",
+            KeywordSpelling::Short => "TV",
+        };
         let suffix = self.suffix;
         key!("{root}{column}_{parameter}{suffix}")
     }
@@ -93,8 +112,8 @@ impl TableWcsResolver {
         column: usize,
         parameter: usize,
     ) -> Result<Option<f64>> {
-        let long = self.pixel_parameter_key(column, parameter, false);
-        let short = self.pixel_parameter_key(column, parameter, true);
+        let [long, short] = KeywordSpelling::BOTH
+            .map(|spelling| self.pixel_parameter_key(column, parameter, spelling));
         first_real(header, long.as_str(), short.as_str())
     }
 
@@ -103,9 +122,12 @@ impl TableWcsResolver {
         axis: usize,
         column: usize,
         parameter: usize,
-        short: bool,
+        spelling: KeywordSpelling,
     ) -> KeyBuf {
-        let root = if short { "V" } else { "PV" };
+        let root = match spelling {
+            KeywordSpelling::Full => "PV",
+            KeywordSpelling::Short => "V",
+        };
         let suffix = self.suffix;
         key!("{axis}{root}{column}_{parameter}{suffix}")
     }
@@ -117,8 +139,8 @@ impl TableWcsResolver {
         column: usize,
         parameter: usize,
     ) -> Result<Option<f64>> {
-        let long = self.vector_parameter_key(axis, column, parameter, false);
-        let short = self.vector_parameter_key(axis, column, parameter, true);
+        let [long, short] = KeywordSpelling::BOTH
+            .map(|spelling| self.vector_parameter_key(axis, column, parameter, spelling));
         first_real(header, long.as_str(), short.as_str())
     }
 
@@ -127,9 +149,12 @@ impl TableWcsResolver {
         axis: usize,
         column: usize,
         parameter: usize,
-        short: bool,
+        spelling: KeywordSpelling,
     ) -> KeyBuf {
-        let root = if short { "S" } else { "PS" };
+        let root = match spelling {
+            KeywordSpelling::Full => "PS",
+            KeywordSpelling::Short => "S",
+        };
         let suffix = self.suffix;
         key!("{axis}{root}{column}_{parameter}{suffix}")
     }
@@ -164,9 +189,9 @@ impl TableWcsResolver {
             return true;
         }
         if (0..=99).any(|parameter| {
-            [false, true].into_iter().any(|short| {
-                let real = self.vector_parameter_key(axis, column, parameter, short);
-                let text = self.vector_string_parameter_key(axis, column, parameter, short);
+            KeywordSpelling::BOTH.into_iter().any(|spelling| {
+                let real = self.vector_parameter_key(axis, column, parameter, spelling);
+                let text = self.vector_string_parameter_key(axis, column, parameter, spelling);
                 header.get(real.as_str()).is_some() || header.get(text.as_str()).is_some()
             })
         }) {
@@ -331,25 +356,25 @@ mod tests {
 
         assert_eq!(
             alternate
-                .pixel_matrix_key(TableMatrixKeyword::Pc, 2, 3, false)
+                .pixel_matrix_key(TableMatrixKeyword::Pc, 2, 3, KeywordSpelling::Full)
                 .as_str(),
             "TPC2_3A"
         );
         assert_eq!(
             alternate
-                .pixel_matrix_key(TableMatrixKeyword::Pc, 2, 3, true)
+                .pixel_matrix_key(TableMatrixKeyword::Pc, 2, 3, KeywordSpelling::Short)
                 .as_str(),
             "TP2_3A"
         );
         assert_eq!(
             alternate
-                .pixel_matrix_key(TableMatrixKeyword::Cd, 2, 3, false)
+                .pixel_matrix_key(TableMatrixKeyword::Cd, 2, 3, KeywordSpelling::Full)
                 .as_str(),
             "TCD2_3A"
         );
         assert_eq!(
             alternate
-                .pixel_matrix_key(TableMatrixKeyword::Cd, 2, 3, true)
+                .pixel_matrix_key(TableMatrixKeyword::Cd, 2, 3, KeywordSpelling::Short)
                 .as_str(),
             "TC2_3A"
         );
@@ -360,16 +385,27 @@ mod tests {
             "23PC17A"
         );
         assert_eq!(
-            alternate.pixel_parameter_key(2, 1, false).as_str(),
+            alternate
+                .pixel_parameter_key(2, 1, KeywordSpelling::Full)
+                .as_str(),
             "TPV2_1A"
         );
-        assert_eq!(alternate.pixel_parameter_key(2, 1, true).as_str(), "TV2_1A");
         assert_eq!(
-            alternate.vector_parameter_key(2, 17, 1, false).as_str(),
+            alternate
+                .pixel_parameter_key(2, 1, KeywordSpelling::Short)
+                .as_str(),
+            "TV2_1A"
+        );
+        assert_eq!(
+            alternate
+                .vector_parameter_key(2, 17, 1, KeywordSpelling::Full)
+                .as_str(),
             "2PV17_1A"
         );
         assert_eq!(
-            alternate.vector_parameter_key(2, 17, 1, true).as_str(),
+            alternate
+                .vector_parameter_key(2, 17, 1, KeywordSpelling::Short)
+                .as_str(),
             "2V17_1A"
         );
         assert_eq!(alternate.column_key("LONP", 17).as_str(), "LONP17A");

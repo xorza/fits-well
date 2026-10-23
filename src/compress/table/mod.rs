@@ -10,7 +10,7 @@
 //! as `ZFORMn`/`ZNAXIS1`/`ZNAXIS2`/`ZPCOUNT`.
 
 use crate::allocation;
-use crate::bintable::descriptor::PqDescriptor;
+use crate::bintable::descriptor::{DescriptorWidth, PqDescriptor};
 use crate::bintable::table_view::TableView;
 use crate::bintable::tform::Tform;
 use crate::bintable::tform_kind::TformKind;
@@ -335,7 +335,7 @@ pub(crate) fn compress_table(
                     let offset = out.len() - descriptor_bytes;
                     write_pq_descriptor(
                         &mut combined[row * 16..(row + 1) * 16],
-                        true,
+                        DescriptorWidth::Q,
                         array.len() as u64,
                         offset as u64,
                     )?;
@@ -348,7 +348,7 @@ pub(crate) fn compress_table(
         let offset = out.len() - descriptor_bytes;
         write_pq_descriptor(
             &mut out[tile * 16..tile * 16 + 16],
-            true,
+            DescriptorWidth::Q,
             cell.len() as u64,
             offset as u64,
         )?;
@@ -745,19 +745,23 @@ impl RestoreChunk<'_> {
         layout: VlaLayout,
         m: &ColMeta,
     ) -> result::Result<(), VlaLayoutError> {
-        let wide = m.kind == TformKind::ArrayDesc64;
+        let width = DescriptorWidth::of(m.kind);
         let element_kind = m
             .vla_elem
             .expect("VLA column metadata carries its element kind");
         for row in 0..self.rows {
             let original_start = layout.original_start + row * m.width;
             let compressed_start = layout.compressed_start + row * 16;
-            let original =
-                PqDescriptor::decode(&descriptors[original_start..original_start + m.width], wide)
-                    .map_err(VlaLayoutError::OriginalDescriptor)?;
-            let compressed =
-                PqDescriptor::decode(&descriptors[compressed_start..compressed_start + 16], true)
-                    .map_err(|_| VlaLayoutError::Rejected)?;
+            let original = PqDescriptor::decode(
+                &descriptors[original_start..original_start + m.width],
+                width,
+            )
+            .map_err(VlaLayoutError::OriginalDescriptor)?;
+            let compressed = PqDescriptor::decode(
+                &descriptors[compressed_start..compressed_start + 16],
+                DescriptorWidth::Q,
+            )
+            .map_err(|_| VlaLayoutError::Rejected)?;
             let original_range = original
                 .heap_range(element_kind, self.heap_gap, self.heap.len())
                 .map_err(|_| VlaLayoutError::Rejected)?;
@@ -850,7 +854,7 @@ impl RestoreChunk<'_> {
             self.main[offset..offset + m.width].copy_from_slice(descriptor);
         }
 
-        let wide = m.kind == TformKind::ArrayDesc64;
+        let width = DescriptorWidth::of(m.kind);
         let element_kind = m
             .vla_elem
             .expect("VLA column metadata carries its element kind");
@@ -858,12 +862,12 @@ impl RestoreChunk<'_> {
             let original_start = layout.original_start + row * m.width;
             let original = PqDescriptor::decode(
                 &scratch.descriptors[original_start..original_start + m.width],
-                wide,
+                width,
             )?;
             let compressed_start = layout.compressed_start + row * 16;
             let compressed = PqDescriptor::decode(
                 &scratch.descriptors[compressed_start..compressed_start + 16],
-                true,
+                DescriptorWidth::Q,
             )?;
             let original_range =
                 original.heap_range(element_kind, self.heap_gap, self.heap.len())?;

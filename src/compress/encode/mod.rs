@@ -6,12 +6,13 @@
 //! quantized to int32 with a `ZSCALE`/`ZZERO` first ([`compress_float_image`]). The
 //! per-codec work lives in the sibling codec modules.
 
+use crate::bintable::descriptor::DescriptorWidth;
 use crate::bitpix::Bitpix;
 use crate::compress::convert;
 use crate::compress::plane::{FloatSamples, IntBitpix, Samples};
 use crate::compress::tile_geometry::TileGeometry;
 use crate::compress::tile_geometry::TileScratch;
-use crate::compress::{Compression, CompressionOptions, ImageCodec, map_tiles, needs_wide};
+use crate::compress::{Compression, CompressionOptions, ImageCodec, map_tiles};
 use crate::compress::{gzip, hcompress, plio, quantize, rice};
 
 use crate::endian::write_pq_descriptor;
@@ -145,26 +146,26 @@ pub(crate) fn compress_image(
     let maxnelem = cells.iter().map(TileCell::nelem).max().unwrap_or(0);
     // §10.1.3: use 64-bit `Q` descriptors once the heap or a tile's element count
     // exceeds the 32-bit `P` range; otherwise the compact `P` form.
-    let wide = needs_wide(heap_len, maxnelem);
+    let width = DescriptorWidth::addressing(heap_len, maxnelem);
+    let descriptor_width = width.bytes();
 
     // Data unit: an array descriptor (count, heap offset) per tile, then the heap.
     // Built into the caller's reused buffer (the writer's scratch).
     out.clear();
     let descriptor_len = ntiles
-        .checked_mul(if wide { 16 } else { 8 })
+        .checked_mul(descriptor_width)
         .ok_or(FitsError::DataUnitOverflow)?;
     let output_len = descriptor_len
         .checked_add(heap_len)
         .ok_or(FitsError::DataUnitOverflow)?;
     out.reserve_exact(output_len);
     out.resize(descriptor_len, 0);
-    let descriptor_width = if wide { 16 } else { 8 };
     for (tile, cell) in cells.into_iter().enumerate() {
         let offset = out.len() - descriptor_len;
         let slot = tile * descriptor_width;
         write_pq_descriptor(
             &mut out[slot..slot + descriptor_width],
-            wide,
+            width,
             cell.nelem() as u64,
             offset as u64,
         )?;
@@ -172,10 +173,12 @@ pub(crate) fn compress_image(
     }
 
     let tform_letter = if codec == ImageCodec::Plio1 { 'I' } else { 'B' };
-    let desc = if wide { 'Q' } else { 'P' };
     let mut h = container_header(descriptor_width, ntiles, heap_len, 1)?;
     h.set_internal("TTYPE1", "COMPRESSED_DATA");
-    h.set_internal("TFORM1", format!("1{desc}{tform_letter}({maxnelem})"));
+    h.set_internal(
+        "TFORM1",
+        format!("1{}{tform_letter}({maxnelem})", width.letter()),
+    );
     set_zimage_axes(&mut h, compression.name(), bitpix.bitpix(), dims, &tiles)?;
     match codec {
         ImageCodec::Rice1 => set_rice_parameters(&mut h, bitpix),
@@ -363,7 +366,7 @@ fn compress_float_image(
     // unlike the integer encoder it can't promote to `Q`; a heap or tile element count
     // past the 32-bit range can't be addressed, so refuse rather than write a truncated
     // descriptor and an unreadable file. Reachable only for an absurdly large image.
-    if needs_wide(heap_len, max_cd.max(max_gz)) {
+    if DescriptorWidth::addressing(heap_len, max_cd.max(max_gz)) == DescriptorWidth::Q {
         return Err(FitsError::DataUnitOverflow);
     }
 
@@ -386,13 +389,13 @@ fn compress_float_image(
         };
         write_pq_descriptor(
             &mut out[row..row + 8],
-            false,
+            DescriptorWidth::P,
             cd_count as u64,
             offset as u64,
         )?;
         write_pq_descriptor(
             &mut out[row + 8..row + 16],
-            false,
+            DescriptorWidth::P,
             gz_count as u64,
             offset as u64,
         )?;

@@ -6,11 +6,10 @@ use std::ops::Range;
 use crate::allocation;
 use crate::bintable::column::Column;
 use crate::bintable::column_data::ColumnData;
-use crate::bintable::descriptor::PqDescriptor;
+use crate::bintable::descriptor::{DescriptorWidth, PqDescriptor};
 use crate::bintable::schema::Schema;
 #[cfg(feature = "compression")]
 use crate::bintable::table_view::TableView;
-use crate::bintable::tform_kind::TformKind;
 use crate::endian::write_pq_descriptor;
 use crate::error::FitsError;
 use crate::error::Result;
@@ -174,21 +173,21 @@ impl<S: Source> DataSource<S> {
                 if !column.tform.kind.is_descriptor() || column.tform.repeat == 0 {
                     continue;
                 }
-                let wide = column.tform.kind == TformKind::ArrayDesc64;
+                let width = DescriptorWidth::of(column.tform.kind);
                 let slot = row * schema.row_len + column.byte_offset;
                 let slot = slot..slot + column.tform.byte_width();
                 if columns.is_some_and(|columns| !columns[index]) {
-                    write_pq_descriptor(&mut out[slot], wide, 0, 0)?;
+                    write_pq_descriptor(&mut out[slot], width, 0, 0)?;
                     continue;
                 }
-                let span = VlaCellSpan::new(schema, column, &out[slot.clone()], wide)?;
+                let span = VlaCellSpan::new(schema, column, &out[slot.clone()], width)?;
                 let heap_offset = out.len() - main_len;
                 self.source.read_append(
                     offset_at(data_offset, span.heap_range.start)?,
                     span.heap_range.len(),
                     out,
                 )?;
-                write_pq_descriptor(&mut out[slot], wide, span.count as u64, heap_offset as u64)?;
+                write_pq_descriptor(&mut out[slot], width, span.count as u64, heap_offset as u64)?;
             }
         }
         Ok(())
@@ -208,15 +207,14 @@ impl<S: Source> DataSource<S> {
             row_offset(data_offset, row, schema.row_len)?,
             column.byte_offset,
         )?;
-        let width = column.tform.byte_width();
+        let cell = self.slice(cell_offset, column.tform.byte_width())?;
         if !column.tform.kind.is_descriptor() {
-            return Ok(column.decode_cell(self.slice(cell_offset, width)?));
+            return Ok(column.decode_cell(cell));
         }
-        let wide = column.tform.kind == TformKind::ArrayDesc64;
         if column.tform.repeat == 0 {
             return column.decode_vla_cell(&[], 0);
         }
-        let span = VlaCellSpan::new(schema, column, self.slice(cell_offset, width)?, wide)?;
+        let span = VlaCellSpan::new(schema, column, cell, DescriptorWidth::of(column.tform.kind))?;
         let bytes = self.slice(
             offset_at(data_offset, span.heap_range.start)?,
             span.heap_range.len(),
@@ -234,8 +232,13 @@ struct VlaCellSpan {
 }
 
 impl VlaCellSpan {
-    fn new(schema: &Schema, column: &Column, descriptor_bytes: &[u8], wide: bool) -> Result<Self> {
-        let descriptor = PqDescriptor::decode(descriptor_bytes, wide)?;
+    fn new(
+        schema: &Schema,
+        column: &Column,
+        descriptor_bytes: &[u8],
+        width: DescriptorWidth,
+    ) -> Result<Self> {
+        let descriptor = PqDescriptor::decode(descriptor_bytes, width)?;
         let element_type = column
             .tform
             .vla_elem

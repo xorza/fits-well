@@ -4,6 +4,55 @@ use crate::bintable::tform_kind::TformKind;
 use crate::error::FitsError;
 use crate::error::Result;
 
+/// A variable-length array descriptor's integers: `P`'s two 32-bit ones, or `Q`'s two 64-bit
+/// ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DescriptorWidth {
+    P,
+    Q,
+}
+
+impl DescriptorWidth {
+    /// The descriptors of a column of `kind`.
+    ///
+    /// # Panics
+    /// When `kind` is no descriptor.
+    pub(crate) fn of(kind: TformKind) -> Self {
+        match kind {
+            TformKind::ArrayDesc32 => Self::P,
+            TformKind::ArrayDesc64 => Self::Q,
+            other => panic!("{other:?} is no array descriptor"),
+        }
+    }
+
+    /// The narrower descriptor that addresses a heap of `heap_len` bytes and cells of up to
+    /// `max_count` elements: `Q` once either is past the signed 32-bit range (§10.1.3).
+    #[cfg(feature = "compression")]
+    pub(crate) const fn addressing(heap_len: usize, max_count: usize) -> Self {
+        if heap_len > i32::MAX as usize || max_count > i32::MAX as usize {
+            Self::Q
+        } else {
+            Self::P
+        }
+    }
+
+    /// The bytes a descriptor takes.
+    pub(crate) const fn bytes(self) -> usize {
+        match self {
+            Self::P => 8,
+            Self::Q => 16,
+        }
+    }
+
+    /// The `TFORM` letter.
+    pub(crate) const fn letter(self) -> char {
+        match self {
+            Self::P => 'P',
+            Self::Q => 'Q',
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PqDescriptor {
     pub(crate) count: usize,
@@ -16,24 +65,23 @@ impl PqDescriptor {
         offset: 0,
     };
 
-    pub(crate) fn decode(bytes: &[u8], wide: bool) -> Result<Self> {
-        let expected = if wide { 16 } else { 8 };
+    pub(crate) fn decode(bytes: &[u8], width: DescriptorWidth) -> Result<Self> {
+        let expected = width.bytes();
         if bytes.len() != expected {
             return Err(FitsError::DataSizeMismatch {
                 expected,
                 got: bytes.len(),
             });
         }
-        let (count, offset) = if wide {
-            (
+        let (count, offset) = match width {
+            DescriptorWidth::Q => (
                 i64::from_be_bytes(bytes[..8].try_into().unwrap()),
                 i64::from_be_bytes(bytes[8..].try_into().unwrap()),
-            )
-        } else {
-            (
+            ),
+            DescriptorWidth::P => (
                 i64::from(i32::from_be_bytes(bytes[..4].try_into().unwrap())),
                 i64::from(i32::from_be_bytes(bytes[4..].try_into().unwrap())),
-            )
+            ),
         };
         Ok(Self {
             count: nonnegative_field("count", count)?,
@@ -83,12 +131,13 @@ fn nonnegative_field(field: &'static str, value: i64) -> Result<usize> {
 
 #[cfg(test)]
 pub(crate) mod internals {
+    use crate::bintable::descriptor::DescriptorWidth;
     use crate::error::FitsError;
 
     #[derive(Debug)]
     pub(crate) struct MalformedDescriptorCase {
         name: &'static str,
-        pub(crate) wide: bool,
+        pub(crate) width: DescriptorWidth,
         pub(crate) bytes: Vec<u8>,
         field: &'static str,
         value: i64,
@@ -126,7 +175,7 @@ pub(crate) mod internals {
             bytes.extend_from_slice(&offset.to_be_bytes());
             cases.push(MalformedDescriptorCase {
                 name,
-                wide: false,
+                width: DescriptorWidth::P,
                 bytes,
                 field,
                 value,
@@ -142,7 +191,7 @@ pub(crate) mod internals {
             bytes.extend_from_slice(&offset.to_be_bytes());
             cases.push(MalformedDescriptorCase {
                 name,
-                wide: true,
+                width: DescriptorWidth::Q,
                 bytes,
                 field,
                 value,

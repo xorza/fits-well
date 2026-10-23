@@ -1,4 +1,5 @@
 use crate::bintable::descriptor;
+use crate::bintable::descriptor::DescriptorWidth;
 use crate::bintable::internals::table_header;
 use crate::error::Ranked;
 use crate::fits_writer::FitsWriter;
@@ -1421,12 +1422,12 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
 
 #[test]
 fn malformed_pq_descriptors_match_across_table_read_paths() {
-    for wide in [false, true] {
+    for width in [DescriptorWidth::P, DescriptorWidth::Q] {
         let mut column = WriteColumn::vla(
             "VLA",
             Ragged::from_rows(vec![ColumnData::Bytes(vec![7])]).unwrap(),
         );
-        if wide {
+        if width == DescriptorWidth::Q {
             column = column.wide();
         }
         let table = Builder::explicit(1, vec![column]).unwrap();
@@ -1440,7 +1441,7 @@ fn malformed_pq_descriptors_match_across_table_read_paths() {
 
         for case in descriptor::internals::malformed_descriptor_cases()
             .into_iter()
-            .filter(|case| case.wide == wide)
+            .filter(|case| case.width == width)
         {
             let mut corrupted = bytes.clone();
             corrupted[slot..slot + case.bytes.len()].copy_from_slice(&case.bytes);

@@ -3,8 +3,8 @@
 
 use crate::error::Result;
 use crate::world_coordinates::axis_transform::spectral_kind::{
-    DomainResult, conversion_derivative, convert, domain_error, finite, invalid_grism,
-    invalid_reference, required_grism_parameter,
+    conversion_derivative, convert, domain_error, finite, invalid_grism, invalid_reference,
+    required_grism_parameter,
 };
 
 use crate::world_coordinates::axis_transform::spectral_algorithm::SpectralAlgorithm;
@@ -46,12 +46,12 @@ impl SpectralTransform {
         let sampled = algorithm.sampled();
         let physical = kind
             .to_characteristic(reference_world, rest)
-            .map_err(|()| invalid_reference(kind))?;
+            .ok_or_else(|| invalid_reference(kind))?;
         let reference = convert(kind.characteristic(), sampled, physical, rest)
-            .map_err(|()| invalid_reference(kind))?;
+            .ok_or_else(|| invalid_reference(kind))?;
         let derivative = kind.derivative(rest)
             * conversion_derivative(kind.characteristic(), sampled, physical, reference, rest)
-                .map_err(|()| invalid_reference(kind))?;
+                .ok_or_else(|| invalid_reference(kind))?;
         if !reference.is_finite() || !derivative.is_finite() || derivative == 0.0 {
             return Err(invalid_reference(kind));
         }
@@ -79,40 +79,40 @@ impl SpectralTransform {
         let sampled = self
             .sampling
             .to_sampled(intermediate)
-            .map_err(|()| domain_error(axis, self.algorithm.name()))?;
+            .ok_or_else(|| domain_error(axis, self.algorithm.name()))?;
         let physical = convert(
             self.algorithm.sampled(),
             self.kind.characteristic(),
             sampled,
             self.rest,
         )
-        .map_err(|()| domain_error(axis, self.algorithm.name()))?;
+        .ok_or_else(|| domain_error(axis, self.algorithm.name()))?;
         self.kind
             .world_from_characteristic(physical, self.rest)
             .and_then(finite)
-            .map_err(|()| domain_error(axis, self.algorithm.name()))
+            .ok_or_else(|| domain_error(axis, self.algorithm.name()))
     }
 
     pub(super) fn to_intermediate(&self, world: f64, axis: usize) -> Result<f64> {
         let physical = self
             .kind
             .to_characteristic(world, self.rest)
-            .map_err(|()| domain_error(axis, self.algorithm.name()))?;
+            .ok_or_else(|| domain_error(axis, self.algorithm.name()))?;
         let sampled = convert(
             self.kind.characteristic(),
             self.algorithm.sampled(),
             physical,
             self.rest,
         )
-        .map_err(|()| domain_error(axis, self.algorithm.name()))?;
+        .ok_or_else(|| domain_error(axis, self.algorithm.name()))?;
         self.sampling
             .to_intermediate(sampled)
-            .map_err(|()| domain_error(axis, self.algorithm.name()))
+            .ok_or_else(|| domain_error(axis, self.algorithm.name()))
     }
 }
 
 impl SpectralSampling {
-    fn to_sampled(&self, intermediate: f64) -> DomainResult {
+    fn to_sampled(&self, intermediate: f64) -> Option<f64> {
         match self {
             Self::Linear {
                 reference,
@@ -122,7 +122,7 @@ impl SpectralSampling {
         }
     }
 
-    pub(super) fn to_intermediate(&self, sampled: f64) -> DomainResult {
+    pub(super) fn to_intermediate(&self, sampled: f64) -> Option<f64> {
         match self {
             Self::Linear {
                 reference,
@@ -203,16 +203,16 @@ impl Grism {
         })
     }
 
-    fn to_sampled(self, intermediate: f64) -> DomainResult {
+    fn to_sampled(self, intermediate: f64) -> Option<f64> {
         let grism_parameter = finite(self.offset + intermediate * self.scale)?;
         let beta = grism_parameter.atan() + self.beta_reference;
         finite((beta.sin() + self.refractive_term) * self.wavelength_scale)
     }
 
-    pub(super) fn to_intermediate(self, sampled: f64) -> DomainResult {
+    pub(super) fn to_intermediate(self, sampled: f64) -> Option<f64> {
         let sine = sampled / self.wavelength_scale - self.refractive_term;
         if !sine.is_finite() || !(-1.0..=1.0).contains(&sine) {
-            return Err(());
+            return None;
         }
         let grism_parameter = (sine.asin() - self.beta_reference).tan();
         finite((grism_parameter - self.offset) / self.scale)

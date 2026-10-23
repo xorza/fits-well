@@ -6,7 +6,9 @@ use std::io::Write;
 use crate::ascii::AsciiColumnData;
 use crate::block::SPACE_FILL;
 use crate::error::{FitsError, Result};
-use crate::fits_writer::{FitsWriter, ROW_COUNT_FIXED, accept_row_count, validate_scaling};
+use crate::fits_writer::{
+    FitsWriter, Opening, ROW_COUNT_FIXED, accept_row_count, validate_scaling,
+};
 use crate::hdu::validate_table_field_count;
 use crate::header_model::Header;
 use crate::header_model::card::validate_ascii;
@@ -151,7 +153,7 @@ pub(super) fn write_template<W: Write>(
             append_ascii_field(&mut writer.scratch, col, r)?;
         }
     }
-    writer.finish_hdu(header, template, SPACE_FILL, true)
+    writer.finish_hdu(header, template, SPACE_FILL, Opening::EmptyPrimary)
 }
 
 fn validate_ascii_column(col: &AsciiWriteColumn) -> Result<()> {
