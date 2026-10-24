@@ -1,30 +1,39 @@
-//! The header case: a capture program's light header parsed from its bytes.
+//! The header cases: a capture program's light header parsed from its bytes, and rendered
+//! back.
 
 use std::hint::black_box;
 use std::io::Cursor;
 
-use criterion::{Criterion, Throughput};
+use criterion::Criterion;
 
-use crate::bench::fixture::{Kind, Scale};
+use crate::bench::fixture::{self, Kind, Scale};
 use crate::bitpix::Bitpix;
 use crate::block::CARD_SIZE;
 use crate::fits_writer::FitsWriter;
-use crate::header_model::Header;
+use crate::header_model::{Header, Signing, Space};
 use crate::internals::scene;
 use crate::reader::FitsReader;
 
-/// `atomic/header/light`: the header unit of a light, as a capture program writes it, parsed into
-/// a [`Header`], as the reader parses each HDU it opens. Per card of the unit, the block's blank
-/// fill included. The unit is a one-pixel file's, so it is built at once.
+/// `atomic/header/light` and `atomic/header/render`: the header unit of a light, as a capture
+/// program writes it, parsed into a [`Header`], as the reader parses each HDU it opens, and that
+/// header rendered into a reused buffer, as the writer renders each header it writes. Per card of
+/// the unit, the block's blank fill included. The unit is a one-pixel file's, so it is built at
+/// once.
 pub(crate) fn atomic(c: &mut Criterion) {
     let mut group = Kind::Atomic.group(c, "header", Scale::Sample);
     let unit = header_unit();
-    group.throughput(Throughput::ElementsAndBytes {
-        elements: (unit.len() / CARD_SIZE) as u64,
-        bytes: unit.len() as u64,
-    });
+    group.throughput(fixture::throughput(unit.len() / CARD_SIZE, CARD_SIZE));
     group.bench_function("light", |b| {
         b.iter(|| Header::parse(black_box(&unit)).unwrap());
+    });
+    let header = Header::parse(&unit).unwrap();
+    let mut out = Vec::with_capacity(unit.len());
+    group.bench_function("render", |b| {
+        b.iter(|| {
+            black_box(&header)
+                .render_into(Signing::Unsigned, Space::Spare(0), &mut out)
+                .unwrap();
+        });
     });
     group.finish();
 }

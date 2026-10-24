@@ -4,13 +4,16 @@
 //! frame for quantized compression, the source catalog for tables.
 
 use std::fs::File;
+use std::hint::black_box;
+use std::mem;
 use std::path::PathBuf;
 
 use criterion::{BenchmarkId, Criterion};
 
-use crate::bench::fixture::{self, Kind, Reading, Scale, ScratchDir, SourceKind};
+use crate::bench::fixture::{self, Kind, Reading, SECTION_ROWS, Scale, ScratchDir, SourceKind};
 use crate::bintable::Table;
 use crate::bitpix::Bitpix;
+use crate::checksum::checksum_report::ChecksumReport;
 use crate::compression::encode::hcompress_default_rows;
 use crate::compression::plane::IntBitpix;
 use crate::compression::tile_codec::{CodecScratch, Tile, TileCodec, TileSamples};
@@ -22,7 +25,6 @@ use crate::image_model::region::Region;
 use crate::internals::scene::{self, CATALOG_ROW_BYTES, CATALOG_ROWS, HEIGHT, WIDTH};
 use crate::reader::FitsReader;
 use crate::reader::source::Source;
-use std::mem;
 
 /// The codecs an image case compresses with, and the `BITPIX` of the scene image each takes:
 /// the integer codecs the light, `PLIO_1` the mask, the float-capable ones the float frame.
@@ -88,20 +90,25 @@ pub(crate) fn atomic(c: &mut Criterion) {
     group.finish();
 }
 
-/// `integration/write_compressed/file/<codec>/<type>`, `integration/read_compressed/<source>/
-/// <codec>/<type>`, `integration/write_compressed_table/file/<codec>` and
-/// `integration/read_table/<source>/<codec>`: the standard frame under the light
-/// header in the default row tiles, a float frame quantized; the catalog in tiles of 4096 rows.
-/// From creating or opening the file to the last byte or sample. Per sample or row,
-/// uncompressed.
+/// `integration/write_compressed/file/<codec>/<type>`,
+/// `integration/read_compressed/<source>/<codec>/<type>`,
+/// `integration/read_compressed_section/<source>/<codec>/<type>`,
+/// `integration/write_compressed_table/file/<codec>` and
+/// `integration/read_compressed_table/<source>/<codec>`, from creating or opening the file to
+/// the last byte or sample.
 pub(crate) fn integration(c: &mut Criterion) {
     let dir = ScratchDir::new("compress");
+    let mut images = image_codecs().map(|_| None);
     write_compressed(c, &dir);
-    read_compressed(c, &dir);
+    read_compressed(c, &dir, &mut images);
+    read_compressed_section(c, &dir, &mut images);
     write_compressed_table(c, &dir);
-    read_table(c, &dir);
+    read_compressed_table(c, &dir);
 }
 
+/// `integration/write_compressed/file/<codec>/<type>`: the standard frame under the light
+/// header with its checksums, in each codec's default tiles, a float frame quantized. Per sample,
+/// uncompressed.
 fn write_compressed(c: &mut Criterion, dir: &ScratchDir) {
     let mut group = Kind::Integration.group(c, "write_compressed", Scale::Frame);
     let path = dir.file("frame.fits");
@@ -127,25 +134,60 @@ fn write_compressed(c: &mut Criterion, dir: &ScratchDir) {
     group.finish();
 }
 
-fn read_compressed(c: &mut Criterion, dir: &ScratchDir) {
+/// `integration/read_compressed/<source>/<codec>/<type>`: the file of [`write_compressed`]
+/// decoded into owned samples. Per sample, uncompressed.
+fn read_compressed(c: &mut Criterion, dir: &ScratchDir, images: &mut [Option<PathBuf>]) {
     let mut group = Kind::Integration.group(c, "read_compressed", Scale::Frame);
-    for (compression, bitpix) in image_codecs() {
-        let mut path = None;
+    for ((compression, bitpix), path) in image_codecs().into_iter().zip(images) {
         group.throughput(fixture::throughput(WIDTH * HEIGHT, bitpix.elem_size()));
         for source in SourceKind::all() {
             let id = BenchmarkId::new(source.id(), case_id(compression, bitpix));
             group.bench_function(id, |b| {
-                let path = path.get_or_insert_with(|| {
-                    let name = format!("{}.fits", case_id(compression, bitpix).replace('/', "_"));
-                    dir.write(&name, &compressed_file(compression, bitpix))
-                });
-                source.bench(b, path, ReadCompressed);
+                source.bench(
+                    b,
+                    image_path(path, dir, compression, bitpix),
+                    ReadCompressed,
+                );
             });
         }
     }
     group.finish();
 }
 
+/// `integration/read_compressed_section/<source>/<codec>/<type>`: the file of
+/// [`write_compressed`] as `read_section` takes the plain frame, ten rows a section into one
+/// reused buffer, each section decoding only the tiles it touches, and the checksum judged. Per
+/// sample, uncompressed.
+fn read_compressed_section(c: &mut Criterion, dir: &ScratchDir, images: &mut [Option<PathBuf>]) {
+    let mut group = Kind::Integration.group(c, "read_compressed_section", Scale::Frame);
+    for ((compression, bitpix), path) in image_codecs().into_iter().zip(images) {
+        group.throughput(fixture::throughput(WIDTH * HEIGHT, bitpix.elem_size()));
+        for source in SourceKind::all() {
+            let id = BenchmarkId::new(source.id(), case_id(compression, bitpix));
+            group.bench_function(id, |b| {
+                let reading = ReadCompressedSections { words: Vec::new() };
+                source.bench(b, image_path(path, dir, compression, bitpix), reading);
+            });
+        }
+    }
+    group.finish();
+}
+
+/// The file of [`compressed_file`], written the first time a case needs it.
+fn image_path<'a>(
+    path: &'a mut Option<PathBuf>,
+    dir: &ScratchDir,
+    compression: Compression,
+    bitpix: Bitpix,
+) -> &'a PathBuf {
+    path.get_or_insert_with(|| {
+        let name = format!("{}.fits", case_id(compression, bitpix).replace('/', "_"));
+        dir.write(&name, &compressed_file(compression, bitpix))
+    })
+}
+
+/// `integration/write_compressed_table/file/<codec>`: the source catalog in tiles of
+/// [`ROWS_PER_TILE`] rows. Per row, uncompressed.
 fn write_compressed_table(c: &mut Criterion, dir: &ScratchDir) {
     let mut group = Kind::Integration.group(c, "write_compressed_table", Scale::Frame);
     group.throughput(fixture::throughput(CATALOG_ROWS, CATALOG_ROW_BYTES));
@@ -166,8 +208,10 @@ fn write_compressed_table(c: &mut Criterion, dir: &ScratchDir) {
     group.finish();
 }
 
-fn read_table(c: &mut Criterion, dir: &ScratchDir) {
-    let mut group = Kind::Integration.group(c, "read_table", Scale::Frame);
+/// `integration/read_compressed_table/<source>/<codec>`: the file of
+/// [`write_compressed_table`] decoded into a table. Per row, uncompressed.
+fn read_compressed_table(c: &mut Criterion, dir: &ScratchDir) {
+    let mut group = Kind::Integration.group(c, "read_compressed_table", Scale::Frame);
     group.throughput(fixture::throughput(CATALOG_ROWS, CATALOG_ROW_BYTES));
     for compression in TABLE_CODECS {
         let mut path: Option<PathBuf> = None;
@@ -271,14 +315,13 @@ impl CodecTile {
 
     /// Encodes the tile into [`Self::encoded`], as the tile encoder of `compress_image` does.
     fn encode(&mut self) {
-        let tile = Tile {
-            shape: &self.shape,
-            width: self.bitpix,
-            blank: None,
-        };
         let stream = self
             .codec
-            .encode(tile, TileSamples::Ints(&self.values), &mut self.scratch)
+            .encode(
+                tile(&self.shape, self.bitpix),
+                TileSamples::Ints(&self.values),
+                &mut self.scratch,
+            )
             .unwrap();
         self.encoded.clear();
         self.encoded.extend_from_slice(stream);
@@ -286,16 +329,24 @@ impl CodecTile {
 
     /// Decodes [`Self::encoded`] into [`Self::decoded`], as the tile decoder of a read does.
     fn decode(&mut self) {
-        let tile = Tile {
-            shape: &self.shape,
-            width: self.bitpix,
-            blank: None,
-        };
         let decoded = self
             .codec
-            .decode_ints(tile, &self.encoded, &mut self.scratch)
+            .decode_ints(
+                tile(&self.shape, self.bitpix),
+                &self.encoded,
+                &mut self.scratch,
+            )
             .unwrap();
         mem::swap(&mut self.decoded, decoded);
+    }
+}
+
+/// A tile of `shape` and `width` with no blank, as the codec takes it.
+const fn tile(shape: &[usize; 2], width: IntBitpix) -> Tile<'_> {
+    Tile {
+        shape,
+        width,
+        blank: None,
     }
 }
 
@@ -323,5 +374,24 @@ impl Reading for ReadCompressedTable {
 
     fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> Table {
         reader.read_table(1).unwrap()
+    }
+}
+
+#[derive(Debug)]
+struct ReadCompressedSections {
+    words: Vec<u64>,
+}
+
+impl Reading for ReadCompressedSections {
+    type Output = ChecksumReport;
+
+    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> ChecksumReport {
+        let mut image = reader.image(1).unwrap().with_checksums();
+        for top in (0..HEIGHT).step_by(SECTION_ROWS) {
+            let ranges = [0..WIDTH, top..(top + SECTION_ROWS).min(HEIGHT)];
+            let section = image.view(&ranges, &mut self.words).unwrap();
+            black_box(&section);
+        }
+        image.finish().unwrap()
     }
 }
