@@ -345,7 +345,7 @@ impl Header {
     /// `BITPIX`, mapped to the typed element kind.
     pub(crate) fn bitpix(&self) -> Result<Bitpix> {
         let code = self.require_integer(keywords::BITPIX)?;
-        Bitpix::from_code(code)
+        Bitpix::try_from(code)
     }
 
     /// `NAXIS` — the number of axes (0 means no data array).

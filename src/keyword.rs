@@ -8,6 +8,7 @@
 
 use core::fmt::{self, Write};
 use std::str;
+use std::str::FromStr;
 
 use crate::error::{FitsError, Result};
 
@@ -123,6 +124,14 @@ impl TryFrom<String> for Keyword {
 
     fn try_from(name: String) -> Result<Self> {
         Self::try_from(name.as_str())
+    }
+}
+
+impl FromStr for Keyword {
+    type Err = FitsError;
+
+    fn from_str(name: &str) -> Result<Self> {
+        Self::try_from(name)
     }
 }
 
@@ -245,6 +254,7 @@ mod tests {
             assert_eq!(keyword.as_str(), name);
             assert_eq!(keyword.to_string(), name);
             assert_eq!(format!("{keyword:?}"), format!("{name:?}"));
+            assert_eq!(name.parse::<Keyword>().unwrap(), keyword);
         }
         for name in ["", "naxis", "NAXIS1234", "CCD TEMP", "A.B", "\u{c4}"] {
             assert!(

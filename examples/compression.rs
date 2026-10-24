@@ -9,7 +9,7 @@
 
 use std::fs::File;
 
-use fits_well::image::{Compression, CompressionConfig, Data, Image, Region, Scaling};
+use fits_well::image::{Compression, CompressionConfig, Data, Image, Scaling};
 use fits_well::{FitsReader, FitsWriter};
 use std::env;
 
@@ -38,7 +38,7 @@ fn main() -> fits_well::Result<()> {
         .expect("the file holds the compressed image")
         .index;
     println!("first image HDU: {first}"); // 1 — the compressed image extension
-    let restored = reader.image(first)?.read(Region::All)?;
+    let restored = reader.image(first)?.read(..)?;
     let restored_shape = restored.view().shape().to_vec();
     let lossless = restored.into_samples() == expected;
     println!("restored {restored_shape:?}, lossless = {lossless}");

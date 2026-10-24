@@ -27,9 +27,12 @@ pub enum Bitpix {
     F64,
 }
 
-impl Bitpix {
-    /// Parse the integer `BITPIX` keyword value.
-    pub const fn from_code(code: i64) -> Result<Self> {
+/// The type the integer `BITPIX` keyword value `code` names, the inverse of
+/// [`Bitpix::code`].
+impl TryFrom<i64> for Bitpix {
+    type Error = FitsError;
+
+    fn try_from(code: i64) -> Result<Self> {
         match code {
             8 => Ok(Self::U8),
             16 => Ok(Self::I16),
@@ -40,7 +43,9 @@ impl Bitpix {
             _ => Err(FitsError::InvalidBitpix { code }),
         }
     }
+}
 
+impl Bitpix {
     /// The integer `BITPIX` keyword value for this type.
     pub const fn code(self) -> i64 {
         match self {

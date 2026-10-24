@@ -356,7 +356,7 @@ header
     mod
 
 header::CommentaryName
-    struct CommentaryName: Clone, Copy, Debug, Display, Eq, Hash, PartialEq, TryFrom<&str>
+    struct CommentaryName: Clone, Copy, Debug, Display, Eq, FromStr, Hash, PartialEq, TryFrom<&String>, TryFrom<&str>, TryFrom<String>
         pub const COMMENT: Self
         pub const HISTORY: Self
         pub const BLANK: Self
@@ -414,14 +414,14 @@ header::Header
         impl<'a> IntoIterator for &'a Header
 
 header::HierarchName
-    struct HierarchName: Clone, Debug, Display, Eq, FromStr, Hash, PartialEq, TryFrom<&str>
+    struct HierarchName: Clone, Debug, Display, Eq, FromStr, Hash, PartialEq, TryFrom<&String>, TryFrom<&str>, TryFrom<String>
         pub fn as_str(&self) -> &str
 
 header::Iter
     struct Iter<'a>: Clone, Debug, ExactSizeIterator, Iterator
 
 header::Keyword
-    struct Keyword: Clone, Copy, Debug, Display, Eq, Hash, PartialEq, PartialEq<&str>, PartialEq<str>, TryFrom<&String>, TryFrom<&str>, TryFrom<Arguments<'_>>, TryFrom<String>
+    struct Keyword: Clone, Copy, Debug, Display, Eq, FromStr, Hash, PartialEq, PartialEq<&str>, PartialEq<str>, TryFrom<&String>, TryFrom<&str>, TryFrom<Arguments<'_>>, TryFrom<String>
         pub const fn new(name: &str) -> Self
         pub fn indexed(self, index: usize) -> Result<Self>
         pub const fn as_str(&self) -> &str
@@ -855,14 +855,13 @@ image
     mod
 
 image::Bitpix
-    enum Bitpix: Clone, Copy, Debug, Eq, Hash, PartialEq
+    enum Bitpix: Clone, Copy, Debug, Eq, Hash, PartialEq, TryFrom<i64>
         U8
         I16
         I32
         I64
         F32
         F64
-        pub const fn from_code(code: i64) -> Result<Self>
         pub const fn code(self) -> i64
         pub const fn elem_size(self) -> usize
         pub const fn is_float(self) -> bool
@@ -984,10 +983,6 @@ image::Region
 image::Sample
     trait Sample: Raw + Copy + Send + Sync + 'static
         const BITPIX: Bitpix
-        fn view(samples: &[Self]) -> View<'_>
-        fn of(view: View<'_>) -> Option<&[Self]>
-        fn data(samples: Vec<Self>) -> Data
-        fn of_data(data: Data) -> Result<Vec<Self>, Data>
 
 image::SampleType
     enum SampleType: Clone, Copy, Debug, Eq, Hash, PartialEq
@@ -1065,6 +1060,7 @@ image::View
         pub const fn as_f64(&self) -> Option<&'a [f64]>
         pub fn to_data(&self) -> Data
         impl<'a, T: Sample> From<&'a [T]> for View<'a>
+        impl<'a, T: Sample> TryFrom<View<'a>> for &'a [T]
 
 io
     mod
@@ -1181,9 +1177,9 @@ table::AsciiColumn
         pub name: Option<String>
         pub unit: Option<String>
         pub kind: AsciiKind
-        pub start: usize
         pub width: usize
         pub decimals: usize
+        pub const fn byte_offset(&self) -> usize
         pub fn tscale(&self) -> Result<f64>
         pub fn tzero(&self) -> Result<f64>
         pub fn tnull(&self) -> Result<Option<&str>>
@@ -1228,10 +1224,10 @@ table::AsciiRows
 
 table::AsciiSchema
     struct AsciiSchema: Clone, Debug
-        pub row_count: usize
-        pub row_len: usize
         pub columns: Vec<AsciiColumn>
         pub fn parse(header: &Header) -> Result<Self>
+        pub const fn row_count(&self) -> usize
+        pub const fn row_len(&self) -> usize
         pub fn column_index(&self, name: &str) -> Option<usize>
 
 table::AsciiText

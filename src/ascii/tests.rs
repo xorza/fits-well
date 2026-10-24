@@ -61,9 +61,9 @@ fn decodes_hand_built_ascii_rows() {
     let data = b"  AB   123def    -45".to_vec(); // "  AB" + "   123" ; "def " + "   -45"
     let table = Ascii::from_data(&header, data).unwrap();
     let schema = table.schema();
-    assert_eq!(schema.row_count, 2);
-    assert_eq!(schema.row_len, 10);
-    assert_eq!(schema.columns[1].start, 4);
+    assert_eq!(schema.row_count(), 2);
+    assert_eq!(schema.row_len(), 10);
+    assert_eq!(schema.columns[1].byte_offset(), 4);
     assert_eq!(schema.column_index("count"), Some(1));
     assert_eq!(
         table.column(0).unwrap().raw().unwrap(),
@@ -201,7 +201,7 @@ fn ascii_table_round_trips_through_write_and_read() {
     assert_eq!(r.hdus[1].kind, HduKind::AsciiTable);
     // The header alone gives the schema the read gives, and only for a `TABLE`.
     let schema = r.hdus[1].ascii_schema().unwrap().clone();
-    assert_eq!((schema.row_count, schema.row_len), (2, 19));
+    assert_eq!((schema.row_count(), schema.row_len()), (2, 19));
     assert_eq!(schema.column_index("x"), Some(2));
     assert!(matches!(
         r.hdus[0].ascii_schema(),

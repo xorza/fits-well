@@ -43,10 +43,13 @@ and the dated measurements in `docs/research/`.
   Refused: cfitsio's product then sum, which rounds twice, and astropy's `float32`
   arithmetic for `BITPIX` ≤ 16. Source:
   `docs/research/2026-10-24-reference-library-practice.md`.
-- **The six sample types are one sealed trait, `image::Sample`:** its `BITPIX`, the
-  view and owned wraps, and the sealed big-endian and physical operations every loop
-  shares. Refused: a `match` written by hand for each operation, and a trait of its
-  own in each caller, as lumos wrote `PlaneSample` and `ExtensionSample`.
+- **The six sample types are one sealed trait, `image::Sample`:** its `BITPIX` public,
+  and sealed the view and owned wraps and the big-endian and physical operations every
+  loop shares. A generic caller converts with the std traits: `View::from`,
+  `Data::from`, `<&[T]>::try_from(view)` and `Vec::<T>::try_from(data)`, each failed
+  conversion giving its input back. Refused: a `match` written by hand for each
+  operation; a trait of its own in each caller, as lumos wrote `PlaneSample` and
+  `ExtensionSample`; and public `Sample` methods beside the std conversions.
 - **Every image path reads one scaling, checked when the header is read:** a float
   image ignores `BLANK`, which §5.2.5 defines for integers, as cfitsio ignores it and
   astropy warns and ignores it, and an integer `BLANK` its `BITPIX` cannot hold is
@@ -192,8 +195,9 @@ and the dated measurements in `docs/research/`.
   whole heap, because each descriptor addresses the heap by its absolute
   offset.
 - **A table's facts live on its schema.** `Schema` and `AsciiSchema` give the row
-  count, row width, columns and `column_index`; `Table` and `Ascii` give the schema
-  and read columns. A builder adds a column with `push` and is built whole with
+  count and row width by method, the columns as a field, and `column_index`; a
+  `Column` and an `AsciiColumn` give their `byte_offset()` alike. `Table` and `Ascii`
+  give the schema and read columns. A builder adds a column with `push` and is built whole with
   `with_columns`. Refused: `Table::column_index`, a second way to the schema's, and
   a consuming `Builder::column`, a third way to add a column under the name a
   table reads one by.

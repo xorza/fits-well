@@ -4,7 +4,7 @@ use crate::internals::samples::BITPIXES;
 #[test]
 fn code_round_trips_for_every_variant() {
     for bp in BITPIXES {
-        assert_eq!(Bitpix::from_code(bp.code()).unwrap(), bp);
+        assert_eq!(Bitpix::try_from(bp.code()).unwrap(), bp);
     }
 }
 
@@ -31,7 +31,7 @@ fn codes_and_sizes_match_the_standard() {
 fn rejects_codes_outside_the_allowed_set() {
     for bad in [0, 7, 1, -1, 24, 128, -16] {
         assert!(matches!(
-            Bitpix::from_code(bad),
+            Bitpix::try_from(bad),
             Err(FitsError::InvalidBitpix { code }) if code == bad
         ));
     }
