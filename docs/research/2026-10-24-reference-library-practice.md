@@ -1,7 +1,7 @@
 # How cfitsio, astropy and wcslib handle the open questions of the review
 
-Date: 2026-10-24. Sources are the clones in `/tmp/fits-compare`: cfitsio, astropy, and
-the wcslib bundled at `astropy/cextern/wcslib`. Each fact is from a source read.
+Date: 2026-10-24. Each fact is from a source read of cfitsio, astropy, and the wcslib
+astropy bundles (`astropy/cextern/wcslib`).
 
 ## Header
 

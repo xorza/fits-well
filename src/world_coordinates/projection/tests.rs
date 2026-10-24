@@ -360,6 +360,8 @@ const NATIVE_DEGREES: Tolerance = Tolerance::abs(
     "two ulps of a coordinate below 256°",
 );
 
+/// Native points and their plane points: the TSC, CSC, QSC and HPX rows from wcslib 8.5's
+/// `*s2x` and `*x2s`, the others worked by hand as their comments show.
 const NATIVE_GOLDEN: &[NativeGolden] = &[
     // Paper II eqs. 61–62, σ = 1 − sin θ: x = cos θ sin φ + 0.2σ, y = −cos θ cos φ − 0.1σ,
     // in degrees.
