@@ -146,10 +146,12 @@ impl Hdu {
                 level,
             } => (name, version, level),
         };
+        // An `EXTNAME` that is no text names nothing, so a lookup passes over its HDU
+        // rather than failing for a name it does not ask for.
         let own_name = match self.extname() {
-            Some(own_name) => own_name,
-            None if self.index == 0 && self.header.get(keywords::EXTNAME)?.is_none() => "PRIMARY",
-            None => return Ok(false),
+            Ok(Some(own_name)) => own_name,
+            Ok(None) if self.index == 0 => "PRIMARY",
+            Ok(None) | Err(_) => return Ok(false),
         };
         if !own_name.eq_ignore_ascii_case(name) {
             return Ok(false);
@@ -167,10 +169,10 @@ impl Hdu {
         Ok(true)
     }
 
-    /// The `EXTNAME` of this HDU (§4.4.2.6); `None` when it has none, or one that is no
+    /// The `EXTNAME` of this HDU (§4.4.2.6), `None` when absent. Errors when it is no
     /// text, which no name lookup then matches.
-    pub fn extname(&self) -> Option<&str> {
-        self.header.get_text(keywords::EXTNAME).ok().flatten()
+    pub fn extname(&self) -> Result<Option<&str>> {
+        self.header.get_text(keywords::EXTNAME)
     }
 
     /// The `EXTVER` of this HDU, 1 when absent (§4.4.2.6). Errors when it is no integer.

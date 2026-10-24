@@ -63,8 +63,6 @@ solidity, convenience, canonical and idiomatic Rust (the API Guidelines, std).
     idiom (`From<RangeFull>`).
   - `Image` has no `shape()`, `scaling()` or `samples()`: every read of them goes
     through `view()`. There is `into_samples` and no `into_parts`.
-  - `Header` is `Extend<Record>` and not `FromIterator<Record>` (the guide's
-    collection constructor).
   - Three of `image::Sample`'s public methods (`view`, `data`, `of_data`) repeat
     `From<&[T]> for View`, `From<Vec<T>> for Data` and `TryFrom<Data> for Vec<T>`; the
     fourth, `of`, is the one generic slice extraction, which no conversion trait gives.
@@ -107,7 +105,7 @@ solidity, convenience, canonical and idiomatic Rust (the API Guidelines, std).
   `world_unit` gives `Result` with `IndexOutOfBounds`; `AxisWorld::cunit` →
   `AxisWorld::unit`.
 - **Convenience.** `From<RangeFull> for Region`; `Image::shape`, `scaling`,
-  `samples` and `into_parts`; `FromIterator<Record> for Header`; `TryFrom<View<'a>> for
+  `samples` and `into_parts`; `TryFrom<View<'a>> for
   &'a [T]` in place of `Sample::of`, so `Sample` keeps `BITPIX` alone and its
   conversions are the std traits.
 
@@ -125,6 +123,9 @@ solidity, convenience, canonical and idiomatic Rust (the API Guidelines, std).
   of `read_table_columns`.
 - **No rename of `gcount`/`pcount` in `RandomGroupsMetadata`.** design.md keeps a
   FITS keyword's own name for a count.
+- **No `FromIterator<Record>` for `Header`, and no `Extend<Record>`.** A record
+  must render, so a `collect` would panic on caller data; `insert_record` refuses
+  it. The `Extend` that panicked is removed.
 - **No change to `write_raw_hdu(header, raw)` argument order.** Its header is the
   HDU's own, not a template, which the other writes take last as an `Option`.
 
@@ -134,9 +135,7 @@ Each batch leaves `cargo drive gate` green, updates `docs/design.md` with its
 decisions, regenerates `.notes/API_SURFACE.md`, and lists the lumos call sites it
 moves.
 
-1. **Solid edges and convenience** (no decision): `extname`, `world_unit`,
-   `AxisWorld::unit`, `From<RangeFull> for Region`, `Image` accessors and
-   `into_parts`, `FromIterator<Record> for Header`, `const` accessors.
+1. **Solid edges and convenience** (done).
 2. **Twins agree** (no decision): `AsciiSchema`, `AsciiColumn::byte_offset`,
    `Selection::column`, name-type conversions, `TryFrom` for `Bitpix` and
    `DitherSeed`, `Sample` methods sealed.

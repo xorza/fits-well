@@ -318,9 +318,9 @@ fn tabular_spectral_coordinates_normalize_declared_units() {
         "nm",
     );
     // The table's nanometres come out in metres, and the axis says so.
-    assert_eq!(wcs.world_unit(0), "m");
+    assert_eq!(wcs.world_unit(0).unwrap(), "m");
     let axis = wcs.axis_world(0, &[1.5]).unwrap();
-    assert_eq!((axis.cunit, axis.value), ("m", world[0]));
+    assert_eq!((axis.unit, axis.value), ("m", world[0]));
 }
 
 #[test]

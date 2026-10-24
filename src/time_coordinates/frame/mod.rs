@@ -195,7 +195,7 @@ pub(crate) mod internals {
             pixel: &[f64],
         ) -> Result<Option<Coordinate>> {
             let world = wcs.axis_world(axis, pixel)?;
-            let Some(time) = self.time_axis(&wcs.metadata().axes[axis].ctype, world.cunit)? else {
+            let Some(time) = self.time_axis(&wcs.metadata().axes[axis].ctype, world.unit)? else {
                 return Ok(None);
             };
             Ok(Some(Coordinate {

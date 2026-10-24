@@ -134,48 +134,78 @@ impl ColumnData {
         }
     }
 
-    pub fn as_logical(&self) -> Option<&[Option<bool>]> {
-        self.view().as_logical()
+    pub const fn as_logical(&self) -> Option<&[Option<bool>]> {
+        match self {
+            Self::Logical(values) => Some(values.as_slice()),
+            _ => None,
+        }
     }
 
     pub fn as_bit(&self) -> Option<&BitSlice<u8, Msb0>> {
         self.view().as_bit()
     }
 
-    pub fn as_u8(&self) -> Option<&[u8]> {
-        self.view().as_u8()
+    pub const fn as_u8(&self) -> Option<&[u8]> {
+        match self {
+            Self::U8(values) => Some(values.as_slice()),
+            _ => None,
+        }
     }
 
-    pub fn as_i16(&self) -> Option<&[i16]> {
-        self.view().as_i16()
+    pub const fn as_i16(&self) -> Option<&[i16]> {
+        match self {
+            Self::I16(values) => Some(values.as_slice()),
+            _ => None,
+        }
     }
 
-    pub fn as_i32(&self) -> Option<&[i32]> {
-        self.view().as_i32()
+    pub const fn as_i32(&self) -> Option<&[i32]> {
+        match self {
+            Self::I32(values) => Some(values.as_slice()),
+            _ => None,
+        }
     }
 
-    pub fn as_i64(&self) -> Option<&[i64]> {
-        self.view().as_i64()
+    pub const fn as_i64(&self) -> Option<&[i64]> {
+        match self {
+            Self::I64(values) => Some(values.as_slice()),
+            _ => None,
+        }
     }
 
-    pub fn as_f32(&self) -> Option<&[f32]> {
-        self.view().as_f32()
+    pub const fn as_f32(&self) -> Option<&[f32]> {
+        match self {
+            Self::F32(values) => Some(values.as_slice()),
+            _ => None,
+        }
     }
 
-    pub fn as_f64(&self) -> Option<&[f64]> {
-        self.view().as_f64()
+    pub const fn as_f64(&self) -> Option<&[f64]> {
+        match self {
+            Self::F64(values) => Some(values.as_slice()),
+            _ => None,
+        }
     }
 
-    pub fn as_complex_f32(&self) -> Option<&[Complex<f32>]> {
-        self.view().as_complex_f32()
+    pub const fn as_complex_f32(&self) -> Option<&[Complex<f32>]> {
+        match self {
+            Self::ComplexF32(values) => Some(values.as_slice()),
+            _ => None,
+        }
     }
 
-    pub fn as_complex_f64(&self) -> Option<&[Complex<f64>]> {
-        self.view().as_complex_f64()
+    pub const fn as_complex_f64(&self) -> Option<&[Complex<f64>]> {
+        match self {
+            Self::ComplexF64(values) => Some(values.as_slice()),
+            _ => None,
+        }
     }
 
-    pub fn as_character(&self) -> Option<&[u8]> {
-        self.view().as_character()
+    pub const fn as_character(&self) -> Option<&[u8]> {
+        match self {
+            Self::Character(values) => Some(values.as_slice()),
+            _ => None,
+        }
     }
 
     pub(crate) fn extend_from(&mut self, other: &Self) -> bool {

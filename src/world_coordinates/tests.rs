@@ -388,7 +388,7 @@ fn axis_world_of_a_celestial_axis_is_the_projected_value() {
     for (axis, &value) in complete.iter().enumerate() {
         let world = wcs.axis_world(axis, &pixel).unwrap();
         assert_eq!(world.value, value, "axis {axis}");
-        assert_eq!(world.cunit, "deg", "axis {axis}");
+        assert_eq!(world.unit, "deg", "axis {axis}");
     }
     // Through SIP, which one point's offsets carry for both axes, the same bits.
     let sip = Wcs::from_header(&Fixture::WcsIracSip.header(), None).unwrap();
@@ -422,8 +422,16 @@ fn each_axis_names_its_world_unit() {
         .set_internal("CTYPE5", "LINEAR")
         .set_internal("CUNIT5", "furlong");
     let wcs = Wcs::from_header(&header, None).unwrap();
-    let units: Vec<&str> = (0..5).map(|axis| wcs.world_unit(axis)).collect();
+    let units: Vec<&str> = (0..5).map(|axis| wcs.world_unit(axis).unwrap()).collect();
     assert_eq!(units, ["deg", "deg", "Hz", "GHz", "furlong"]);
+    assert!(matches!(
+        wcs.world_unit(5),
+        Err(FitsError::IndexOutOfBounds {
+            indexed: Indexed::WcsAxis,
+            index: 6,
+            len: 5
+        })
+    ));
 }
 
 /// Angle units resolve through one table — SI-prefixed radians, the unprefixed sexagesimal

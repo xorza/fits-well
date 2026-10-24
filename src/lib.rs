@@ -97,7 +97,7 @@ pub mod image {
     pub use crate::image_model::unsigned_data::UnsignedData;
     pub use crate::image_model::unsigned_view::UnsignedView;
     pub use crate::image_model::view::{Borrowed, View};
-    pub use crate::image_model::{Image, Metadata};
+    pub use crate::image_model::{Image, Metadata, Parts};
 }
 
 /// The ordered header model: keyword records and their typed values.
