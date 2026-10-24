@@ -3,6 +3,19 @@
 Three parts, each a proposal and a plan: Part 1 the production code, Part 2 the test
 suite, Part 3 the benches. A batch number without a part names a batch of the same part.
 
+## Order across parts
+
+- **Part 1 Batches 1–5 fix bugs and wait for nothing.**
+- **Part 2 Batches 1–8 go before Part 1 Batch 6.** Part 1 Batches 6–14 change APIs that many
+  tests call (reads into the caller's buffer, the codec shape, error cases). A failure that
+  prints its value and a setup that sits in one shared helper make each of those changes one
+  edit, not forty.
+- **Part 3 Batches 1–6 go before the Part 1 batch that each case measures** (the
+  coverage map at the end of Part 3). A change needs a number from before it. Part 3 Batch 4
+  changes the scene, so the baseline is taken after Part 3 Batch 4.
+- **Part 2 Batches 9 and 11 go after Part 1 Batches 6, 7 and 14.** Those batches move
+  `PlainRead`, the HDU record and `Bitpix`, and the test files follow the modules.
+
 # Part 1 — Production code
 
 Scope: `src/` of the crate, test code aside. Paths are relative to `src/`.
@@ -506,8 +519,8 @@ coverage for time.
    for slice sources alone.
 3. **Error assertions hide the actual value.** 383 `assert!(matches!(…))` print only
    `assertion failed` on a failure. About 25 more match a variant with `{ .. }` where the fields
-   can be computed. `std::assert_matches!` is stable on the pinned toolchain (rustc 1.99.1,
-   checked) and prints the left value.
+   can be computed. `std::assert_matches!` is stable on the stable toolchain that CI installs
+   (rustc 1.99.1 here, checked) and prints the left value.
 4. **The same property is written as N near-copies, not as one sweep.** The coverage matrix has
    holes with no visible reason: codec × `BITPIX` × tiling, ASCII vs binary schema, SIP vs TPV,
    forward vs inverse, image vs table decode, slice vs stream.
@@ -575,23 +588,27 @@ coverage for time.
   keyword) -> Range<usize>` replaces the hard-coded card offsets. `cards` also gets
   `ChecksumReport` constants beside `VALID`.
 - **Integration tests: one binary per piece of global state.** A global allocator and a rayon
-  pool size force a separate binary. Nothing else does. So `tests/api/` holds `round_trip`,
-  `examples` and `cross_check` as modules of one binary; `tests/allocations.rs` holds the
-  one-worker view-bytes test and the WCS allocation counts; `tests/allocations_parallel.rs`
-  holds the four-worker one. One counting allocator in `tests/support/counting.rs` counts both
-  calls per thread and live/peak bytes. This gives 3 binaries instead of 6, with one allocator.
-  Refused: a single binary, because the rayon pool size is global.
+  pool size force a separate binary, and so does a peak count, which counts every thread but
+  the harness's: a second test in its binary would add its allocations to the peak under
+  `cargo test`, which runs the tests of a binary on threads. So `tests/api/` holds
+  `round_trip`, `examples` and `cross_check` as modules of one binary; `view_bytes.rs`,
+  `view_bytes_parallel.rs` and `wcs_allocations.rs` stay alone. One counting allocator in
+  `tests/support/counting.rs` counts calls per thread and live/peak bytes for all three. This
+  gives 4 binaries instead of 6, and one allocator instead of two. Refused: one binary for the
+  allocation tests, for the reason above.
 - **Test files follow the code.** One test file covers one module. A test file past 150 lines or
-  40 % of its module is a `tests.rs`. A `tests.rs` past about 600 lines becomes `tests/mod.rs`
-  plus one file per topic. One `#[test]` covers one property. A test past about 80 lines
-  splits.
+  40 % of its module is a `tests.rs`. A `tests.rs` past 600 lines becomes `tests/mod.rs` plus
+  one file per topic. One `#[test]` covers one property, and a test past 80 lines splits. Both
+  limits are a review threshold, not a measured optimum: they catch the files and tests that
+  Batch 9 lists, and nothing that reads well today.
 - **Naming rule.** A test name states the behavior: subject first, present tense, no leading
   article, and no prefix that repeats the module path. A refusal is `…_refuses_…` (or
   `…_is_refused` when the subject is the input), which matches "Refused" in `docs/design.md`.
   A name covers everything the test checks, or the test splits.
 - **Sweeps over the full matrix.** A property that holds for N siblings is one table-driven
   test over all N. A sibling that it excludes appears in the table with the reason, for
-  example `HCOMPRESS × row tiles: refused, a tile is at least 4 rows`.
+  example `HCOMPRESS × row tiles: refused, a tile needs two extents above 1` (the rule of Part 1
+  Batch 5).
 
 ## Plan
 
@@ -641,10 +658,12 @@ Files: `src/internals/memory.rs`, `src/internals/fixture.rs`, and the callers in
 `src/compression/{encode,table}/tests.rs`, `src/ascii/tests.rs`.
 
 - [ ] `memory.rs`: `written`/`written_by` return `Written(Vec<u8>)`, with `bytes()`, `slice()`
-  and `stream()` as on `Fixture`. Delete `round_trip` and `round_trip_by`, and change their 18
-  callers to `written(…).stream()`. `read_whole` stays generic over `S: Source`.
-- [ ] `memory.rs` `rejected_before_output`: also assert that the writer state is `Empty`. Replace
-  the hand copy at `fits_writer/tests.rs:1429–1439`.
+  and `stream()` as on `Fixture`. Delete `round_trip` and `round_trip_by`, and change their 45
+  call sites to `written(…).stream()`. `read_whole` stays generic over `S: Source`.
+- [ ] `memory.rs` `rejected_before_output`: also assert that the writer state is `Empty`. The
+  `state` field is private, so add a `FitsWriter::is_empty` reach-in in `fits_writer`'s
+  `internals`, gated `feature = "internals"` as `memory` is. Replace the hand copy at
+  `fits_writer/tests.rs:1429–1439`.
 - [ ] Hand-built writers (about 40): `reader/tests.rs:120, 196, 265, 921`;
   `fits_writer/tests.rs:243, 384, 502, 727, 1048, 1369, 1504, 1534` → `written`;
   `fits_writer/tests.rs:448, 960, 990, 1701, 1717, 1800, 1825` → `memory_writer()` kept for its
@@ -705,7 +724,7 @@ Files: `src/internals/{samples,container}.rs`, `src/image_model/data.rs` (intern
   `assert_same_bits` and `nan_blind_bits` and use them.
 - [ ] `Image` struct literals: `encode/tests.rs` (9), `fits_writer/tests.rs` (13),
   `reader/tests.rs` (6). Use `Image::new`.
-- [ ] `Scaling { bscale, bzero, blank: None }` (37 sites) and `Metadata { shape: &[2], … }`
+- [ ] `Scaling { bscale, bzero, blank: None }` (24 sites in test files) and `Metadata { shape: &[2], … }`
   (`fits_writer/tests.rs:1773, 1804, 1828`): add `samples::linear(bscale, bzero)` and use the
   local closure at `image_model/tests.rs:613` as the model.
 - [ ] Reference-fixture compares are written five ways (`decode/tests.rs:58, 83, 244`;
@@ -713,7 +732,8 @@ Files: `src/internals/{samples,container}.rs`, `src/image_model/data.rs` (intern
   `assert_decodes_to(fixture, hdu, &Data)`.
 - [ ] The half-step quantization bound is written three times with different rounding terms
   (`encode/tests.rs:143, 253`; `quantize/tests.rs:60`). Add one
-  `assert_within_half_step(original, back, zscale, precision)` in `compression::internals`.
+  `assert_within_half_step(original, back, zscale, precision)` in `compression::internals`,
+  gated `feature = "internals"`: the bench check of Part 3 Batch 2 calls it too.
 - [ ] The compressed round trip (`round_trip` + `write_compressed_image` + `read_whole(r, 1)`)
   is repeated at about 16 sites in `encode/tests.rs`, and `decompress_image`
   (`decode/tests.rs:33`) is inlined again at `encode/tests.rs:666`. Move both to
@@ -801,16 +821,17 @@ Files: `tests/`.
   `tests/support/peak.rs:20`.
 - [ ] Merge `tests/round_trip.rs`, `tests/examples.rs` and `tests/cross_check.rs` into
   `tests/api/main.rs` with one module each.
-- [ ] Merge `tests/view_bytes.rs` and `tests/wcs_allocations.rs` into `tests/allocations.rs`.
-  Rename `tests/view_bytes_parallel.rs` to `tests/allocations_parallel.rs`. Update the
-  `cross_check` run command in its doc comment.
+- [ ] `tests/view_bytes.rs`, `tests/view_bytes_parallel.rs` and `tests/wcs_allocations.rs` use
+  the shared allocator and stay one binary each. Update the `cross_check` run command in its
+  doc comment.
 
 ### Batch 9 — Layout and placement
 
-Do after Batches 2–7, so that the moved code is already in its final form. Files: the test files
-named below.
+Do after Batches 2–7 and after Part 1 Batches 6, 7 and 14, so that the moved code and the
+modules are in their final form. Files: the test files named below.
 
-- [ ] Split `src/reader/tests.rs` into `reader/tests/{mod,scan,image,table,wcs,checksum}.rs`, and
+- [ ] Move the scan tests of `src/reader/tests.rs` to the tests of `hdu`, where Part 1 Batch 7
+  puts `Hdus`. Split the rest into `reader/tests/{mod,image,table,wcs,checksum}.rs`, and
   `src/fits_writer/tests.rs` into `fits_writer/tests/{mod,image,table,checksum,stream,template}.rs`.
 - [ ] Split `src/world_coordinates/projection/tests.rs` by kernel file (zenithal, cylindrical,
   conic, cube, HEALPix, polyconic…), to match the source layout, and
@@ -822,7 +843,8 @@ named below.
   → `image_model`. `Borrowed::new`, `Ragged::from_rows`: `fits_writer/tests.rs:282, 589` → their
   modules. Checksum statuses and their helpers: `fits_writer/tests.rs:173–199, 1269–1359` →
   `checksum/tests.rs`. `Bitpix::swap_into_words`, `view_words`, `extend_physical_be`:
-  `image_model/tests.rs:305, 553` → `bitpix/tests.rs`. `padded_len`: `hdu/tests.rs:66, 73, 170,
+  `image_model/tests.rs:305, 553` → the tests of `Bitpix`, in `image_model` after Part 1
+  Batch 14. `padded_len`: `hdu/tests.rs:66, 73, 170,
   185` → drop (`block/tests.rs` covers it). `norm360`/`norm180`:
   `world_coordinates/tests.rs:521, 532` → `angle.rs`. Error `Display`:
   `fits_writer/tests.rs:1032` → `fits_error.rs`.
@@ -841,7 +863,8 @@ Needs Batches 2, 4 and 5. Each item is one table-driven test.
 
 - [ ] Compressed images: codec × `BITPIXES` × tiling over `samples::ramp`
   (`encode/tests.rs:41–62` has no GZIP_2 u8, i32/i64 only for Rice and HCOMPRESS, 2-D tiles only
-  for GZIP_1). PLIO and HCOMPRESS appear with their limits as rows. Merge the HCOMPRESS
+  for GZIP_1). PLIO and HCOMPRESS appear with their limits as rows, and HCOMPRESS with the
+  cube tiles of Part 1 Batch 5. Merge the HCOMPRESS
   lossless tests `:891` and `:931` into it. Add BSCALE/BZERO/BLANK preservation and empty images
   (`:965`, `:1069`, GZIP only now) for every codec.
 - [ ] Null masks: the float mask for every codec (`decode/tests.rs:307` covers NOCOMPRESS only),
@@ -850,7 +873,8 @@ Needs Batches 2, 4 and 5. Each item is one table-driven test.
   only) and "a corrupt untouched tile still reads" (`table/tests.rs:595`, tables only) for both.
   Put the wrong-tile-rank tests (`encode/tests.rs:734`, `compression/tests.rs:106`) together.
 - [ ] Table codecs: one `TABLE_CODECS` const in place of the list at `table/tests.rs:84, 365, 794`.
-- [ ] `hdu/tests.rs`: one table of (cards, role, `Ok(bytes)` or the error) in place of the six
+- [ ] `hdu/tests.rs`: one table of (cards, `HduKind`, `Ok(bytes)` or the error), over the
+  `data_extent(header, kind)` of Part 1 Batch 7, in place of the six
   `data_extent` success tests (`:55, 69, 118, 151, 174, 189`) and the four error tests.
 - [ ] `Fixture` layout: one sweep over `Uit`, `Ddts` and `Iue` in place of
   `reader/tests.rs:283, 319, 348`, with `header_sum` for all three.
@@ -932,11 +956,11 @@ built inside each case's closure, files written once and served from the page ca
    inline write in `read_compressed_table`) hold the files. One of them is
    `&mut [Option<PathBuf>]`, and the code zips it with `image_codecs()` by position.
 2. **Coverage follows the history of the code, not the public entry points or the hot
-   paths.** Nine public entry points have no case: `ImageReader::physical_into`,
+   paths.** Eight public entry points have no case: `ImageReader::physical_into`,
    `stream_image`/`write_chunk` (the lumos write path), `read_table_rows`, `read_table_cell`,
-   `read_ascii_table`, `write_ascii_table`, `FitsEditor::replace_header`, `verify_checksum`,
-   and the open of a file of many HDUs. The production review (Part 1) changes 15 hot paths,
-   and 8 of them have no case that measures the change (the table in Batch 5).
+   `read_ascii_table`, `write_ascii_table`, `FitsEditor::replace_header` and
+   `verify_checksum`. No case opens a file of many HDUs. Part 1 changes 15 hot paths, and 9 of
+   them have no case that measures the change (the coverage map at the end of this part).
 3. **Some cases time something different from what their names say.**
    - `integration/read_table` returns a `Table`, which holds the raw data unit
      (`bintable/mod.rs:39`). So it decodes no column, and it breaks the rule "to the last
@@ -962,23 +986,28 @@ built inside each case's closure, files written once and served from the page ca
    timed. `atomic/decompress` already asserts the round trip once before it times.
 6. **Ids and policy are not symmetric.**
    - `atomic/header/light` and `atomic/header/render` mix an input name and an operation name
-     at one level of the id.
+     at one level of the id, and `atomic/wcs/<direction>/<axes>` holds two operations in one
+     group, against "the group is the operation" (`src/bench/mod.rs`).
    - Every write has the variant `file`, a dimension with one value.
    - Image writes compute checksums, but table writes do not, although lumos writes every
      HDU with checksums.
    - `Scale::Sample` names a row or a header. "Sample" already means a pixel value and a
      criterion sample.
-   - `bench::fixture` holds the policy, but `internals::fixture` holds files (Part 2,
-     Batch 9).
+   - `bench::fixture` holds the policy, but `internals::fixture` holds files.
    - `header_model/bench.rs:44` builds its writer by hand, beside `memory::written_by`.
 
 ### Target design
 
-- **One case matrix: operation × source or sink × storage × input.** A group is one operation.
-  Its id is `<kind>/<operation>/<source|sink>/<storage>/<input>`, for example
-  `integration/read_image/stream/rice_1/i16`. Plain storage is the variant `plain`, so plain
-  and compressed results sit side by side in one group. Every operation runs on every storage
-  that its input takes. Refused: separate compressed groups, which are the root cause above.
+- **One case matrix: operation × source or sink × storage × input.** A group is one operation,
+  in atomic and integration cases alike. An integration id is
+  `integration/<operation>/<source|sink>/<storage>/<input>`, for example
+  `integration/read_image/stream/rice_1/i16`; the storage segment is always there, `plain`
+  where only plain data applies. An atomic id is `atomic/<operation>/<variant>/<input>`, the
+  variant left out where an operation has one. Plain and compressed results sit side by side in
+  one group. Every operation runs on every storage that its input takes, with two exceptions:
+  `verify_checksum` sums the same raw bytes on every storage, and stream writes, ASCII tables
+  and header edits have plain data alone. Refused: separate compressed groups, which are the
+  root cause above.
 - **One storage table.** `bench::policy::Storage` lists the storage of each input once:
   - The i16 light: `plain`, `gzip_1`, `gzip_2`, `rice_1`, `hcompress_1`.
   - The u8 defect mask: `plain`, `plio_1`.
@@ -998,8 +1027,10 @@ built inside each case's closure, files written once and served from the page ca
   holds the data. One `Reading` per operation takes that HDU, so each `Reading` pair becomes
   one type.
 - **Each read case checks once, then times.** Before the timed loop, the case compares what it
-  reads with the scene: bit-exact for lossless storage, within half a quantization step for
-  `rice_1` f32. A check that fails stops the bench run.
+  reads with the scene input it came from (the samples of an image, the columns of a table):
+  bit-exact for lossless storage through `samples::assert_same_bits`, within half a
+  quantization step for `rice_1` f32 through `assert_within_half_step` (Part 2 Batch 4). A
+  check that fails stops the bench run.
 - **The scene is one observation.**
   - One star list makes both the frame and the catalog. Each star is a Gaussian PSF with the
     catalog's FWHM and a power-law flux.
@@ -1028,6 +1059,10 @@ built inside each case's closure, files written once and served from the page ca
   - `read_wcs`: it resolves a `-TAB` table once per file, and the atomic tabular cases time
     the transform.
   - `NOCOMPRESS`: no writer uses it for real data.
+  - `read_data_unit` and `write_raw_hdu`: raw copies with no decode, the same I/O as
+    `verify_checksum`.
+  - Peak memory: a bench times. Part 1's memory items (the staged table unit, the kept region
+    buffer) are held by allocation tests (`tests/view_bytes*.rs`, Part 2 Batch 8), not here.
 
 ## Plan
 
@@ -1041,8 +1076,9 @@ Independent. Files: `src/reader/bench.rs`, `src/compression/bench.rs`,
 `src/image_model/bench.rs`, `src/header_model/bench.rs`, `src/fits_writer/bench.rs`.
 
 - [ ] `reader/bench.rs` `ReadTable`, `compression/bench.rs` `ReadCompressedTable`: they return a
-  `Table` and decode no column. Decode every column through the public column API into
-  buffers that the case reuses, as a caller reads a catalog.
+  `Table` and decode no column. Decode every column through the public column API, as a
+  caller reads a catalog. The column reads allocate until Part 1 Batch 12 adds the `_into`
+  forms; until then, the doc of the case says that it times those allocations too.
 - [ ] `image_model/bench.rs` `physical`: it times the reach-in `View::physical` on host
   samples, with an allocation in each iteration. Time `Bitpix::extend_physical_be` from the
   big-endian row into a reused `Vec<f32>` and a reused `Vec<f64>`:
@@ -1050,8 +1086,11 @@ Independent. Files: `src/reader/bench.rs`, `src/compression/bench.rs`,
 - [ ] `image_model/bench.rs` `unsigned`: it allocates in the timed loop. Use the `unsigned_into`
   that Part 1 Batch 12 adds, into a reused `UnsignedData`. Until that batch lands, the doc of
   the case says that it times the allocation too.
-- [ ] `header_model/bench.rs`: `atomic/header/light` and `atomic/header/render` → `atomic/header/
-  parse/light` and `atomic/header/render/light`. Build the unit with `memory::written_by`.
+- [ ] `header_model/bench.rs`: `atomic/header/light` and `atomic/header/render` →
+  `atomic/parse_header/light` and `atomic/render_header/light`. Build the unit with
+  `memory::written_by`.
+- [ ] `world_coordinates/bench.rs`: `atomic/wcs/<direction>/<axes>` → `atomic/to_world/<axes>`
+  and `atomic/to_pixel/<axes>`.
 - [ ] `fits_writer/bench.rs` `write_table`, `compression/bench.rs` `write_compressed_table`: use
   `with_checksums()`, as the image writes and lumos do.
 
@@ -1067,8 +1106,8 @@ Files: `src/bench/{mod,fixture}.rs` → `src/bench/{mod,policy}.rs`, every `benc
 - [ ] Add `SceneFiles`, keyed by `SceneFile` (input × storage), with the HDU of the data. Delete
   `frame_path`, `catalog_path`, `image_path`, the inline write in `read_compressed_table`, and
   the `images: &mut [Option<PathBuf>]` slots.
-- [ ] Add the check that runs once before timing: `SceneFile::assert_read(&Data)`, bit-exact or
-  within half a quantization step.
+- [ ] Add the check that runs once before timing: `SceneFile::assert_read`, over the samples of
+  an image or the columns of a table, through the helpers named in the target design.
 
 ### Batch 3 — One group per operation
 
@@ -1103,6 +1142,7 @@ Needs Batch 2 (the file cache). Files: `src/internals/scene.rs`, `src/internals/
   Gaussian PSFs into the frame, and write the same list as the catalog.
 - [ ] `scene.rs` `mask`: 2 % of pixels at random. Mark hot pixels, bad columns and the
   saturated cores of the star list.
+- [ ] `rng.rs`: add the power-law draw that the star fluxes take.
 - [ ] Add `scene::mosaic_file()` (a primary plus 60 `EXTNAME`d image extensions under the light
   header) and `scene::spectra()` (a table with a variable-length `f32` column).
 - [ ] Record the compressed sizes and the timings before and after the change in a dated research
@@ -1113,53 +1153,55 @@ Needs Batch 2 (the file cache). Files: `src/internals/scene.rs`, `src/internals/
 Needs Batches 2–4. Files: `src/reader/bench.rs`, `src/fits_writer/bench.rs`, a new
 `src/fits_editor/bench.rs`, `src/bench/mod.rs` (registration).
 
-- [ ] `integration/open/<source>/{frame,mosaic}`: open the file and select the last HDU by
-  `EXTNAME`. This measures the header scan and the stream seeks (Part 1 Batch 7, the copy
-  per block; Batch 8, `seek_relative`).
+- [ ] `integration/open/<source>/plain/{frame,mosaic}`: open the file and select its last HDU,
+  by `EXTNAME` in the mosaic. This measures the header scan and the stream seeks (Part 1
+  Batch 7, the copy per block; Part 1 Batch 8, `seek_relative`).
 - [ ] `integration/read_physical/<source>/<storage>/<type>`: `physical_into` a reused
   `Vec<f32>`, a section at a time, as `read_section` does (Part 1 Batch 8, the compressed
   `physical_into` buffer).
+- [ ] `integration/read_table_rows/<source>/<storage>/catalog`: every column, in chunks of
+  `CHUNK_ROWS` rows through `read_table_rows`, beside `read_table_columns`.
 - [ ] `integration/read_table_cells/<source>/<storage>/{catalog,spectra}`: 1 000 cells at
   seeded random rows through `read_table_cell` (Part 1 Batch 8, the decode per call).
 - [ ] `integration/read_table_columns/<source>/<storage>/spectra`: the fixed columns of a table
   with an array column (Part 1 Batch 8, `has_arrays` ignores the selection).
-- [ ] `integration/verify_checksum/<source>/<type>`: the plain frames. The sum reads raw
+- [ ] `integration/verify_checksum/<source>/plain/<type>`: the plain frames. The sum reads raw
   bytes, so the storage does not change the work.
-- [ ] `integration/write_image_stream/<sink>/<type>`: `stream_image` plus `write_chunk` of
+- [ ] `integration/write_image_stream/<sink>/plain/<type>`: `stream_image` plus `write_chunk` of
   `SECTION_ROWS` rows with checksums, the lumos write path. This mirrors `read_section`.
-- [ ] `integration/{read,write}_ascii_table/<source|sink>/catalog`: the catalog as an ASCII
+- [ ] `integration/{read,write}_ascii_table/<source|sink>/plain/catalog`: the catalog as an ASCII
   table.
-- [ ] `integration/edit_header/file/light`: `FitsEditor::replace_header` that adds the plate
+- [ ] `integration/edit_header/file/plain/light`: `FitsEditor::replace_header` that adds the plate
   solution to a light on disk, as a solver does.
 
 ### Batch 6 — Atomic coverage
 
 Needs Batch 2 (the storage table). Files: `src/compression/bench.rs`,
-`src/world_coordinates/bench.rs`, `src/reader/bench.rs`, new `src/bintable/bench.rs`,
+`src/world_coordinates/bench.rs`, new `src/bintable/bench.rs`,
 `src/ascii/bench.rs`, `src/time_coordinates/bench.rs`, `src/bench/mod.rs`.
 
-- [ ] `atomic/{compress,decompress}/<codec>/<width>`: every codec of the storage table on one
+- [ ] `atomic/{compress,decompress}/<storage>/<width>`: every codec of the storage table on one
   default tile at i16 and i32 width (the quantized f32 ints are i32), `plio_1` on the mask,
   and the byte path of `gzip_2_lossless` on an f32 row. `CodecTile` takes every width and the
   byte path.
-- [ ] `atomic/{quantize,dequantize}/f32`: one row of the f32 frame at the default quantization
- .
-- [ ] `atomic/wcs/parse/light`: `Wcs::from_header` of the light header (Part 1 Batch 10, `CTYPE`
+- [ ] `atomic/{quantize,dequantize}/f32`: one row of the f32 frame at the default quantization.
+- [ ] `atomic/parse_wcs/light`: `Wcs::from_header` of the light header (Part 1 Batch 10, `CTYPE`
   parsed 5–7 times).
-- [ ] `atomic/wcs/<direction>/{sip,tpv,tabular_coupled}`: the light's plate solution with an
+- [ ] `atomic/{to_world,to_pixel}/{sip,tpv,tabular_coupled}`: the light's plate solution with an
   order-3 SIP, without `AP`/`BP` so that the inverse iterates; the same as TPV; the 2-D
   coupled `-TAB` (Part 1 Batch 10, the allocations per point and TPV's partials).
-- [ ] `atomic/time/to_mjd/<scale>`: one row of relative times to MJD in `utc`, `tt` and
+- [ ] `atomic/to_mjd/<scale>`: one row of relative times to MJD in `utc`, `tt` and
   `tt_tai` (Part 1 Batch 10, `relative_to_mjd`'s allocation per value).
-- [ ] `atomic/column/physical/<type>`: one catalog column's big-endian cells into a reused
-  buffer for i16, i32, f32 and f64; `atomic/column/vla/f32`: the spectra column (Part 1
+- [ ] `atomic/read_column/fixed/<type>`: one catalog column's big-endian cells into a reused
+  buffer for i16, i32, f32 and f64; `atomic/read_column/vla/f32`: the spectra column (Part 1
   Batch 12, the column `_into` reads).
-- [ ] `atomic/ascii/{parse,format}/catalog`: one catalog row as ASCII fields.
+- [ ] `atomic/{parse_ascii,format_ascii}/catalog`: one catalog row as ASCII fields.
 
 ### Coverage map
 
 Each hot path that Part 1 changes, and the case that measures the change. A dash marks a
-case that one of the batches above adds.
+case that one of the batches above adds. Two rows change memory more than time; their
+allocation test is named beside the case.
 
 | Part 1 change | Case |
 |---|---|
@@ -1168,13 +1210,13 @@ case that one of the batches above adds.
 | Batch 8: `TiledTable::decode` allocates per call | `read_table/*/{gzip,rice}*` |
 | Batch 8: `has_arrays` ignores the selection | — `read_table_columns/*/spectra` |
 | Batch 8: compressed `read_table_cell` decodes per call | — `read_table_cells` |
-| Batch 8: compressed `physical_into` keeps a region buffer | — `read_physical` |
+| Batch 8: compressed `physical_into` keeps a region buffer | — `read_physical`; `tests/view_bytes.rs` |
 | Batch 8: `words.clear()` zeroes each view | `read_section` |
 | Batch 8: `StreamSource` seeks from the start | `read_section/stream`, — `open/stream` |
-| Batch 9: binary-table write stages the unit | `write_table` |
-| Batch 10: `CTYPE` parsed 5–7 times | — `wcs/parse` |
-| Batch 10: coupled `-TAB` allocates per point | — `wcs/*/tabular_coupled` |
-| Batch 10: TPV evaluates its partials | — `wcs/*/tpv` |
-| Batch 10: `relative_to_mjd` allocates per value | — `time/to_mjd` |
+| Batch 9: binary-table write stages the unit | `write_table`; a peak count under the shared allocator |
+| Batch 10: `CTYPE` parsed 5–7 times | — `parse_wcs` |
+| Batch 10: coupled `-TAB` allocates per point | — `to_world/tabular_coupled`, `to_pixel/tabular_coupled` |
+| Batch 10: TPV evaluates its partials | — `to_world/tpv` |
+| Batch 10: `relative_to_mjd` allocates per value | — `to_mjd` |
 | Batch 11: codecs fill the caller's buffer | `compress`, `decompress` |
-| Batch 12: column reads allocate | — `column/physical`, `read_table` |
+| Batch 12: column reads allocate | — `read_column`, `read_table` |
