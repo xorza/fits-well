@@ -1109,6 +1109,7 @@ image::View
         pub const fn bitpix(&self) -> Bitpix
         pub const fn len(&self) -> usize
         pub const fn is_empty(&self) -> bool
+        pub fn slice(self, range: Range<usize>) -> Self
         pub const fn as_u8(&self) -> Option<&'a [u8]>
         pub const fn as_i16(&self) -> Option<&'a [i16]>
         pub const fn as_i32(&self) -> Option<&'a [i32]>
