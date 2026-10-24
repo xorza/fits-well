@@ -22,11 +22,14 @@ A reader and writer for **FITS**, the standard file format of astronomy, in pure
   binary tables, in parallel over tiles. The float quantization gives fpack's
   `ZSCALE` bit for bit, and lossless floats come back bit for bit.
 - **Fast.** `open` reads only the headers. A read decodes into a buffer that you
-  reuse, and a section read of a compressed image decodes only the tiles it touches.
+  reuse. Opening a compressed image reads its tile index once, a section then fetches
+  and decodes only the tiles it touches, and a checksummed read of a stream reads the
+  file once.
 - **Files larger than memory, and files in memory.** Read one section of an image or
-  some rows of a table, and write an image chunk by chunk. `FitsReader::from_bytes`
-  reads bytes you already hold, with no copy, and a writer writes into any `Write`,
-  a `Vec<u8>` too.
+  some rows of a table, and write an image chunk by chunk. `ImageReader::view_bytes`
+  bounds the memory a run of section reads holds, so you can budget before you read.
+  `FitsReader::from_bytes` reads bytes you already hold, with no copy, and a writer
+  writes into any `Write`, a `Vec<u8>` too.
 - **Safe on bad files.** See [Safety](#safety).
 
 ## Compared with other Rust libraries

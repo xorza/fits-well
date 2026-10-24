@@ -1,8 +1,8 @@
 //! Float-image dequantization inputs (§10.2) and the per-tile parameters they yield.
 
-use crate::bintable::table_view::TableView;
 use crate::compression::decode::float_sample::FloatSample;
-use crate::compression::decode::tile_value::{self, TileValue};
+use crate::compression::decode::tile_index::TileIndex;
+use crate::compression::decode::tile_value::TileValue;
 use crate::compression::quantization::DitherMethod;
 use crate::compression::quantize::{DitherSequence, ZERO_VALUE};
 use crate::compression::tile_codec::TileCodec;
@@ -15,8 +15,8 @@ use crate::header_model::{Header, keywords};
 /// `ZQUANTIZ`, `ZDITHER0`, and the `ZSCALE` and `ZZERO` keywords that fix a parameter
 /// for every tile.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct FloatKeywords {
-    quantiz: Quantiz,
+pub(super) struct FloatKeywords<'a> {
+    quantiz: Quantiz<'a>,
     zdither0: i64,
     zscale: Option<f64>,
     zzero: Option<f64>,
@@ -24,23 +24,23 @@ pub(super) struct FloatKeywords {
 
 /// A `ZQUANTIZ` value.
 #[derive(Debug, Clone, PartialEq)]
-enum Quantiz {
+enum Quantiz<'a> {
     /// `'NONE'`: the floats are stored losslessly.
     None,
     Method(DitherMethod),
     /// A value this crate does not model, refused only when the image is quantized.
-    Unknown(String),
+    Unknown(&'a str),
 }
 
 /// How a float image's tiles hold their values (§10.2). An integer image has none.
 #[derive(Debug)]
-pub(super) enum FloatQuantization {
+pub(super) enum FloatQuantization<'a> {
     /// No `ZSCALE` and no `ZZERO`, as a keyword or a column, or `ZQUANTIZ = 'NONE'`: each
     /// primary cell holds the floats themselves, gzip'd, as cfitsio reads it whatever
     /// `ZQUANTIZ` says (`imcompress.c`, `imcomp_get_compressed_image_par`).
     /// The floats gzip'd with a codec that [`TileCodec::stores_lossless_floats`].
     Lossless(TileCodec),
-    Quantized(Quantized),
+    Quantized(Quantized<'a>),
 }
 
 /// How each tile's values come back: as stored floats, or dequantized.
@@ -53,12 +53,12 @@ pub(super) enum FloatEncoding {
 /// The quantization inputs: the dither method and seed, and the per-tile `ZSCALE`,
 /// `ZZERO` and `ZBLANK`.
 #[derive(Debug)]
-pub(super) struct Quantized {
+pub(super) struct Quantized<'a> {
     method: DitherMethod,
     zdither0: i64,
-    zscale: TileValue<f64>,
-    zzero: TileValue<f64>,
-    zblank: TileValue<i64>,
+    zscale: TileValue<'a, f64>,
+    zzero: TileValue<'a, f64>,
+    zblank: TileValue<'a, i64>,
 }
 
 /// Per-tile float dequantization parameters (§10.2): `physical = zero + scale·I`,
@@ -72,12 +72,11 @@ pub(crate) struct Dequant {
     pub(crate) zblank: Option<i64>,
 }
 
-impl FloatKeywords {
-    pub(super) fn read(header: &Header) -> Result<Self> {
+impl<'a> FloatKeywords<'a> {
+    pub(super) fn read(header: &'a Header) -> Result<Self> {
         let quantiz = match header.get_text(keywords::ZQUANTIZ)?.unwrap_or("NO_DITHER") {
             "NONE" => Quantiz::None,
-            name => DitherMethod::parse(name)
-                .map_or_else(|| Quantiz::Unknown(name.to_string()), Quantiz::Method),
+            name => DitherMethod::parse(name).map_or(Quantiz::Unknown(name), Quantiz::Method),
         };
         let zdither0 = header.get_integer(keywords::ZDITHER0)?.unwrap_or(1);
         if matches!(quantiz, Quantiz::Method(method) if method.dithered())
@@ -96,17 +95,17 @@ impl FloatKeywords {
     }
 }
 
-impl FloatKeywords {
-    /// The quantization these keywords, the quantized null `zblank` and the container
-    /// `table` declare, the tiles stored with `codec`.
-    pub(super) fn quantization(
+impl FloatKeywords<'_> {
+    /// The quantization these keywords, the quantized null `zblank` and the container's
+    /// `index` declare, the tiles stored with `codec`.
+    pub(super) fn quantization<'a>(
         &self,
-        zblank: TileValue<i64>,
-        table: TableView<'_>,
+        zblank: TileValue<'a, i64>,
+        index: &'a TileIndex,
         codec: TileCodec,
-    ) -> Result<FloatQuantization> {
-        let zscale = TileValue::new(self.zscale, tile_value::real_column(table, "ZSCALE")?);
-        let zzero = TileValue::new(self.zzero, tile_value::real_column(table, "ZZERO")?);
+    ) -> Result<FloatQuantization<'a>> {
+        let zscale = TileValue::new(self.zscale, index.zscale());
+        let zzero = TileValue::new(self.zzero, index.zzero());
         if self.quantiz == Quantiz::None || (zscale.is_absent() && zzero.is_absent()) {
             if !codec.stores_lossless_floats() {
                 return Err(FitsError::UnsupportedCompression {
@@ -123,7 +122,9 @@ impl FloatKeywords {
             Quantiz::Method(method) => *method,
             Quantiz::Unknown(name) => {
                 return Err(FitsError::UnsupportedCompression {
-                    feature: CompressionFeature::Quantization { name: name.clone() },
+                    feature: CompressionFeature::Quantization {
+                        name: (*name).to_owned(),
+                    },
                 });
             }
             Quantiz::None => unreachable!("a lossless image returned above"),
@@ -138,28 +139,26 @@ impl FloatKeywords {
     }
 }
 
-impl FloatQuantization {
-    /// How one tile's values come back.
-    pub(super) fn encoding(&self, table_row: usize, tile_row: usize) -> FloatEncoding {
+impl FloatQuantization<'_> {
+    /// How the values of tile `tile` come back.
+    pub(super) fn encoding(&self, tile: usize) -> FloatEncoding {
         match self {
             Self::Lossless(codec) => FloatEncoding::Lossless(*codec),
-            Self::Quantized(quantized) => {
-                FloatEncoding::Quantized(quantized.dequant(table_row, tile_row))
-            }
+            Self::Quantized(quantized) => FloatEncoding::Quantized(quantized.dequant(tile)),
         }
     }
 }
 
-impl Quantized {
-    /// The dequantization parameters for one tile: a scale of 1 and a zero of 0 where
+impl Quantized<'_> {
+    /// The dequantization parameters for tile `tile`: a scale of 1 and a zero of 0 where
     /// neither the keyword nor the column gives one, as cfitsio defaults them.
-    fn dequant(&self, table_row: usize, tile_row: usize) -> Dequant {
+    fn dequant(&self, tile: usize) -> Dequant {
         Dequant {
-            scale: self.zscale.at(table_row).unwrap_or(1.0),
-            zero: self.zzero.at(table_row).unwrap_or(0.0),
+            scale: self.zscale.at(tile).unwrap_or(1.0),
+            zero: self.zzero.at(tile).unwrap_or(0.0),
             method: self.method,
-            irow: i64::try_from(tile_row).expect("a tile row fits i64") + self.zdither0,
-            zblank: self.zblank.at(table_row),
+            irow: i64::try_from(tile).expect("a tile row fits i64") + self.zdither0,
+            zblank: self.zblank.at(tile),
         }
     }
 }

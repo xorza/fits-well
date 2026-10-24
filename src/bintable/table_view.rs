@@ -114,7 +114,7 @@ pub(crate) mod internals {
 
     impl<'a> TableView<'a> {
         /// The fixed-width main table (`row_count × NAXIS1` bytes), excluding the heap.
-        pub(crate) fn raw_rows(&self) -> &'a [u8] {
+        pub(crate) fn main_rows(&self) -> &'a [u8] {
             &self.bytes[..self.extent.row_count * self.extent.row_len]
         }
     }

@@ -70,11 +70,16 @@ and the dated measurements in `docs/research/`.
   not, and four reader methods cover it. Refused: a `TableReader`, a type and a
   lifetime for the same calls.
 - **A checksum is summed by the handle that reads.** With `with_checksums`, a read
-  feeds the stored bytes it fetches, as long as they continue the sum: a plain
-  image's whole reads and sections, and a compressed image's whole reads. A
-  compressed section's tiles are not fed. `finish` reads only what the reads did
-  not feed, and without `with_checksums` it reads the whole unit. Refused: a caller-held sum passed to each read, which a caller could finish
-  against another HDU.
+  feeds the stored bytes it fetches, as long as they reach past what is summed: a
+  plain image's whole reads and sections; a compressed image's tile index, summed
+  from memory as the sum begins, its whole reads, and, from a stream, its sections'
+  heap cells, so sections that take the tiles in heap order leave the finish only the
+  block fill. `finish` reads only what the reads did not feed, and without
+  `with_checksums` it reads the whole unit. A resident source's sections are not fed:
+  the finish sums them in place with no read, and summing between the decodes of
+  sections left the workers waiting, 16 % on a RICE frame. Refused: a caller-held sum
+  passed to each read, which a caller could finish against another HDU; a stream's
+  compressed sections left unsummed, which read every compressed image twice.
 - **A physical read appends to the caller's `Vec`.** `physical_into` extends `out`,
   so a caller can append chunk after chunk to one plane, and nothing is zeroed
   first. A plain image converts from its stored big-endian bytes in one pass.
@@ -296,8 +301,37 @@ and the dated measurements in `docs/research/`.
   differs from it reads with the image's. Source: §10.1.1, Table 36.
 - **The header's compression keywords resolve once, for the image handle.** Codec
   parameters, `ZQUANTIZ`, `ZDITHER0`, `ZMASKCMP` and the parameter keywords are read by
-  `FitsReader::image`, so a bad keyword fails there; a read resolves only the columns.
+  `FitsReader::image`, so a bad keyword fails there; a read resolves only the cells.
   `ZDITHER0` is checked only for a method that dithers.
+- **A compressed image's tile index is read once, when its handle opens.** The
+  container's main table — a row a tile, its heap descriptors and its `ZSCALE`,
+  `ZZERO` and `ZBLANK` — is read by `FitsReader::image` and kept by the reader for the
+  image it opened last, so a second handle on the image reads nothing again. A section
+  then fetches only its tiles' heap cells, a whole read only the heap, and the bytes a
+  read holds are known before it starts. Refused: a section's tile rows read with
+  each section, and the parameter columns parsed for each read; a bound from `PCOUNT`
+  alone, correct but loose by the tile count.
+- **A tile set reserves its buffers before its first tile.** Each codec states the
+  buffers that decoding the largest tile fills, from the tile's shape and width, and a
+  set grows to them once, so no buffer grows within a read. Refused: buffers that grow
+  as tiles fill them, whose size follows the tiles each worker drew, and which hold
+  their old block beside the new while they move.
+- **`ImageReader::view_bytes` is a bound on a run of views, by owner.** `kept` is what
+  the reader keeps — the tile index and what its buffers grow to — and `handle` the
+  tile grid and the larger of the largest decode and the largest old block a buffer
+  holds while it grows, which never meet, as a read fetches before it decodes. A
+  decode counts a tile set for each worker that may take a run of its tiles: no loop
+  of the decode starts another, so a worker holds one set at a time. The figure is
+  never below the peak, and equals it on one worker over a run that grows each buffer
+  once; `finish_bytes` bounds the checksum's finish the same way. Refused: an exact figure, which fixed the split of each wave across the
+  workers and gave up rayon's balancing; buffers kept from one read to the next, which
+  needed that fixed split. Research: `2026-10-24-read-bytes.md`.
+- **gzip reads its own member framing.** A tile set holds one raw-deflate
+  `flate2::Decompress`, made by its first gzip tile and reset for each after; fits-well reads the header's optional
+  fields and checks its CRC, and checks the trailer's CRC-32 and size. A tile inflates
+  into a buffer a byte past its size, so an expansion bomb shows without allocating
+  for it. Refused: a `GzDecoder` for each tile, which allocated a 32 KiB read buffer
+  and an inflate state of 43 KB every time. Source: RFC 1952.
 - **A float image's quantization is one opaque type, `Quantization`:**
   `Quantization::NONE` for lossless (`ZQUANTIZ = 'NONE'`), `relative(level, dither)`
   for levels spaced at each tile's noise divided by `level`, and `absolute(step,

@@ -8,14 +8,16 @@ use crate::compression::decode::tile_scratch_set::TileScratchSet;
 use crate::compression::decode::tile_sources::TileSource;
 use crate::fits_error::Result;
 
-/// What one tile's decode reads: the image's decoder and nulls, the tile's source cell
-/// and table row, and, for a float image, how its values come back.
+/// What one tile's decode reads: the image's decoder and nulls, the tile's source cell,
+/// its table row and its index in the image's grid, and, for a float image, how its
+/// values come back.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TileJob<'a> {
     pub(super) decoder: &'a TileDecoder,
     pub(super) nulls: &'a NullMask<'a>,
     pub(super) source: TileSource<'a>,
     pub(super) table_row: usize,
+    pub(super) tile: usize,
     /// `Some` exactly for a float image.
     pub(super) encoding: Option<FloatEncoding>,
 }
@@ -34,7 +36,7 @@ pub(super) trait WidePlane: Copy + Send {
 impl WidePlane for i64 {
     fn decode_tile(job: TileJob<'_>, scratch: &mut TileScratchSet<Self>) -> Result<Overshoot> {
         let overshoot = job.decoder.decode_tile_into(job.source, scratch)?;
-        job.nulls.apply_integer(job.table_row, scratch)?;
+        job.nulls.apply_integer(job.table_row, job.tile, scratch)?;
         Ok(overshoot)
     }
 }

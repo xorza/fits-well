@@ -25,6 +25,10 @@ pub(crate) struct DataChecksum {
     sum: Running,
 }
 
+/// The bytes [`DataChecksum::finish`] reads at a time: a bounded scratch, whatever the
+/// unit's size.
+pub(crate) const FINISH_CHUNK: usize = 1 << 20;
+
 impl DataChecksum {
     /// An empty sum of `hdu`'s data unit.
     pub(crate) const fn of(hdu: &Hdu) -> Self {
@@ -47,8 +51,6 @@ impl DataChecksum {
         hdu: &Hdu,
         data: &mut DataSource<S>,
     ) -> Result<ChecksumReport> {
-        /// The bytes read at a time: a bounded scratch, whatever the unit's size.
-        const CHUNK: u64 = 1 << 20;
         debug_assert!(
             self.covers(hdu.data_offset, hdu.padded_data_bytes()),
             "a data checksum of another HDU"
@@ -56,7 +58,8 @@ impl DataChecksum {
         Declared::read(&hdu.header).report(hdu.header_sum, || {
             while self.remaining() > 0 {
                 let offset = self.next;
-                let len = usize::try_from(self.remaining().min(CHUNK)).expect("a chunk fits usize");
+                let len = usize::try_from(self.remaining().min(FINISH_CHUNK as u64))
+                    .expect("a chunk fits usize");
                 let bytes = data.slice(offset, len)?;
                 self.feed(offset, bytes);
             }
@@ -65,17 +68,25 @@ impl DataChecksum {
         })
     }
 
-    /// Sum `bytes`, read from file offset `offset`, when they continue what is summed; anything
-    /// else waits for the finish.
+    /// Sum the part of `bytes`, read from file offset `offset`, that continues what is
+    /// summed: a run that starts at or before the next byte to sum and reaches past it.
+    /// Anything else waits for the finish.
     pub(crate) fn feed(&mut self, offset: u64, bytes: &[u8]) {
-        if offset != self.next || self.next >= self.end {
+        let Some(skip) = self
+            .next
+            .checked_sub(offset)
+            .and_then(|skip| usize::try_from(skip).ok())
+            .filter(|&skip| skip < bytes.len())
+        else {
+            return;
+        };
+        if self.next >= self.end {
             return;
         }
-        let take = bytes
-            .len()
-            .min(usize::try_from(self.end - self.next).unwrap_or(usize::MAX));
+        let take =
+            (bytes.len() - skip).min(usize::try_from(self.end - self.next).unwrap_or(usize::MAX));
         self.next += take as u64;
-        self.sum.update(&bytes[..take]);
+        self.sum.update(&bytes[skip..skip + take]);
     }
 
     /// Whether this sums the unit of `padded` bytes from `start`.

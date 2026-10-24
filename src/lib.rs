@@ -75,7 +75,7 @@ pub use fits_error::{FitsError, Result};
 pub use fits_writer::FitsWriter;
 pub use fits_writer::image_writer::ImageWriter;
 pub use reader::FitsReader;
-pub use reader::image_reader::ImageReader;
+pub use reader::image_reader::{ImageReader, ViewBytes};
 
 /// The cases a [`FitsError`] variant carries: what was indexed, ranked or expected,
 /// and why a value, a WCS or a compressed tile fails.
@@ -245,6 +245,13 @@ pub mod internals {
             reason = "a bench or the allocation test uses part of the fixtures"
         )
     )]
+
+    #[cfg(feature = "compression")]
+    use crate::compression::gzip;
+
+    /// The bound a tile set counts for its gzip inflate state.
+    #[cfg(feature = "compression")]
+    pub const INFLATE_STATE_BYTES: usize = gzip::INFLATE_STATE_BYTES;
 
     pub use crate::world_coordinates::tabular::internals::{
         tabular_forward_at_pixel, tabular_inverse_at_fraction, tabular_inverse_at_world,

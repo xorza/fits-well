@@ -90,7 +90,7 @@ pub(crate) fn compress_image(
     let dims = image.shape;
     let tiles = resolve_tile_shape(dims, &config.tiles, codec)?;
 
-    let geom = TileGeometry::new(dims, &tiles);
+    let geom = TileGeometry::new(dims, tiles.as_slice());
     let ntiles = tile_count(total, &geom);
 
     // Compress every tile independently (the compute-bound step — parallel under
@@ -282,7 +282,7 @@ fn compress_lossless_float_image(
     }
     let dims = image.shape;
     let tiles = resolve_tile_shape(dims, &config.tiles, codec)?;
-    let geom = TileGeometry::new(dims, &tiles);
+    let geom = TileGeometry::new(dims, tiles.as_slice());
     let ntiles = tile_count(image.samples.len(), &geom);
     let cells = map_tiles(ntiles, EncodeScratch::default, |s, t| -> Result<Vec<u8>> {
         geom.tile_into(t, &mut s.tile);
@@ -360,7 +360,7 @@ impl<'a> QuantizedFloatImage<'a> {
         let zbitpix = samples.bitpix();
         let shape = image.shape;
         let tile_shape = resolve_tile_shape(shape, &config.tiles, codec)?;
-        let geom = TileGeometry::new(shape, &tile_shape);
+        let geom = TileGeometry::new(shape, tile_shape.as_slice());
         let ntiles = tile_count(image.samples.len(), &geom);
         let zdither0 = dither.seed().map(|seed| match seed.source() {
             Seed::FromSamples => quantize::sample_seed(samples),

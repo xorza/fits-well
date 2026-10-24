@@ -21,7 +21,7 @@ mod convert;
 pub(crate) mod decode;
 pub(crate) mod encode;
 pub(crate) mod encoded_unit;
-mod gzip;
+pub(crate) mod gzip;
 mod hcompress;
 mod nocompress;
 mod plane;

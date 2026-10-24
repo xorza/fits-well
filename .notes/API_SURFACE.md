@@ -141,10 +141,13 @@ ImageReader
         impl<'r, S: Source> ImageReader<'r, S>
             pub const fn header(&self) -> &'r Header
             pub const fn metadata(&self) -> Metadata<'r>
-            pub const fn with_checksums(self) -> Self
+            pub fn with_checksums(self) -> Self
+            pub fn tiles(&self) -> Option<&[usize]>
             pub fn view<'a, 'g>(&'a mut self, region: impl Into<Region<'g>>, words: &'a mut Vec<u64>) -> Result<Borrowed<'a>>
             pub fn read<'g>(&mut self, region: impl Into<Region<'g>>) -> Result<Image>
             pub fn physical_into<'g, T: PhysicalSample>(&mut self, region: impl Into<Region<'g>>, out: &mut Vec<T>) -> Result<()>
+            pub fn view_bytes<'g>(&self, regions: impl IntoIterator<Item = Region<'g>>) -> Result<ViewBytes>
+            pub fn finish_bytes(&self) -> u64
             pub fn finish(self) -> Result<ChecksumReport>
         impl<'r, S: Debug> Debug for ImageReader<'r, S>
 
@@ -156,6 +159,11 @@ ImageWriter
 
 Result
     type Result<T> = Result<T, FitsError>
+
+ViewBytes
+    struct ViewBytes: Clone, Copy, Debug, Default, Eq, PartialEq
+        pub kept: u64
+        pub handle: u64
 
 compress  [features: compression or parallel]
     mod
@@ -216,7 +224,10 @@ error::AsciiValueDefect
 error::CompressedDataDefect
     #[non_exhaustive]
     enum CompressedDataDefect: Debug, Display, Error
-        GzipStream(Error)
+        GzipHeader
+        GzipStream(DecompressError)  [features: compression or parallel]
+        GzipTruncated
+        GzipChecksum
         GzipOverrun
         RiceBitField { bits: u32 }
         Plio(PlioDefect)

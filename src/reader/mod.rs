@@ -13,6 +13,8 @@ use crate::bintable::table_view::TableView;
 use crate::checksum::checksum_report::ChecksumReport;
 use crate::column::ColumnSelector;
 #[cfg(feature = "compression")]
+use crate::compression::decode::tile_index::TileIndex;
+#[cfg(feature = "compression")]
 use crate::compression::table::{ContainerTiles, DecodedRows};
 use crate::fits_error::ExpectedHdu;
 use crate::fits_error::FitsError;
@@ -53,14 +55,19 @@ pub struct FitsReader<S> {
 }
 
 /// The reader's reused buffers a section or selection read fills and the result
-/// borrows: the selected section's shape, the tile rows it
-/// touches, a compacted table selection with the columns it selects, and the words a compressed image's physical
-/// read decodes into.
+/// borrows: the selected section's shape, the tile rows it touches and the odometer
+/// that walks them, a compacted table selection with the columns it selects, the words
+/// a compressed image's physical read decodes into, and the last compressed image's
+/// tile index, which every handle on that image reuses.
 #[derive(Debug, Default)]
 pub(crate) struct Scratch {
     pub(crate) section_shape: Vec<usize>,
     #[cfg(feature = "compression")]
     pub(crate) tile_rows: Vec<usize>,
+    #[cfg(feature = "compression")]
+    pub(crate) tile_coordinates: Vec<usize>,
+    #[cfg(feature = "compression")]
+    pub(crate) tile_index: TileIndex,
     pub(crate) selection: Vec<u8>,
     pub(crate) column_indices: Vec<usize>,
     pub(crate) column_mask: Vec<bool>,

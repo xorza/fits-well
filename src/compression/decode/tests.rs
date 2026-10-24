@@ -33,7 +33,7 @@ use crate::internals::samples::{assert_same_bits, nan_blind_bits};
 fn decompress_image(header: &Header, table: &Table) -> Result<Image> {
     let kind = HduKind::classify(header, HduRole::Extension)?;
     let image = ImageGeometry::from_header(header, kind)?;
-    let samples = TiledImage::new(header, &image)?.decode(table.view())?;
+    let samples = TiledImage::new(header, &image)?.decode_table(table)?;
     Image::new(image.shape.clone(), samples, image.scaling)
 }
 
@@ -634,10 +634,10 @@ fn decompress_image_rejects_oversized_znaxis_product() {
 fn parallel_decode_wave_budget_counts_slot_bytes() {
     // A wave's one buffer holds a slot of the largest tile for each: 1 byte for one u8
     // and 8 for one i64, so the 4 MiB budget holds 4194304 and 4194304 / 8 tiles.
-    let single = TileGeometry::new(&[1, 4_194_304], &[1, 1]);
+    let single = TileGeometry::new(&[1, 4_194_304], [1, 1]);
     assert_eq!(decode_wave_tile_count::<u8>(&single), 4_194_304);
     assert_eq!(decode_wave_tile_count::<i64>(&single), 524_288);
     // One tile larger than the whole budget still makes a wave of one.
-    let whole = TileGeometry::new(&[1, 4_194_304], &[1, 4_194_304]);
+    let whole = TileGeometry::new(&[1, 4_194_304], [1, 4_194_304]);
     assert_eq!(decode_wave_tile_count::<u8>(&whole), 1);
 }

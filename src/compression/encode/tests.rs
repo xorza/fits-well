@@ -668,7 +668,7 @@ fn the_float_container_lays_out_q_descriptors() {
         let geometry = ImageGeometry::from_header(header, kind).unwrap();
         TiledImage::new(header, &geometry)
             .unwrap()
-            .decode(table.view())
+            .decode_table(&table)
             .unwrap()
     };
     assert_eq!(read(DescriptorWidth::Q), read(DescriptorWidth::P));
@@ -1033,7 +1033,7 @@ fn parallel_full_decode_crosses_the_bounded_wave_boundary() {
     // One column per tile makes one band of every tile, so the decode takes waves: one
     // more column than a wave holds.
     let height = 4096;
-    let geometry = TileGeometry::new(&[1, height], &[1, height]);
+    let geometry = TileGeometry::new(&[1, height], [1, height]);
     let columns = decode_wave_tile_count::<u8>(&geometry) + 1;
     let samples: Vec<u8> = (0usize..columns * height)
         .map(|index| (index.wrapping_mul(37) & 0xff) as u8)

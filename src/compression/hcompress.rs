@@ -10,6 +10,7 @@
 //! `SMOOTH = 0`. Encoding rejects a tile when an H-transform intermediate
 //! cannot be represented exactly in the standard stream's signed 64-bit field.
 
+use crate::allocation;
 use crate::compression::HcompressScale;
 use crate::compression::quantize::QuantizeScratch;
 use crate::compression::tile_codec::Tile;
@@ -40,6 +41,60 @@ struct CodingBuffers {
     signbits: Vec<u8>,
     qtree: Vec<u8>,
     code_buffer: Vec<u8>,
+}
+
+/// The elements of the buffers of an [`HcompressScratch`] that decoding one tile fills:
+/// its plane, the inverse transform's line and rows, and the quadtree's cells.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct HcompressCapacities {
+    plane: usize,
+    transform: usize,
+    rows: usize,
+    qtree: usize,
+}
+
+impl HcompressCapacities {
+    /// What decoding a tile of `ny` × `nx` fills: [`Codec::decode`] resizes each buffer
+    /// to these, the quadtree to the first, largest, quadrant's cells.
+    pub(super) const fn decode(ny: usize, nx: usize) -> Self {
+        let nmax = if nx > ny { nx } else { ny };
+        let (transform, rows) = if nmax <= 1 {
+            (0, 0)
+        } else {
+            (nmax.div_ceil(2), nx.div_ceil(2) * ny)
+        };
+        let qtree = nx.div_ceil(2).div_ceil(2) * ny.div_ceil(2).div_ceil(2);
+        Self {
+            plane: nx * ny,
+            transform,
+            rows,
+            qtree: if qtree == 0 { 1 } else { qtree },
+        }
+    }
+
+    pub(super) fn max(self, other: Self) -> Self {
+        Self {
+            plane: self.plane.max(other.plane),
+            transform: self.transform.max(other.transform),
+            rows: self.rows.max(other.rows),
+            qtree: self.qtree.max(other.qtree),
+        }
+    }
+
+    /// The heap bytes the buffers take.
+    pub(super) const fn heap_bytes(&self) -> usize {
+        (self.plane + self.transform + self.rows) * size_of::<i64>() + self.qtree
+    }
+}
+
+impl HcompressScratch {
+    /// Grow the buffers to `capacities`, no room past them.
+    pub(super) fn reserve(&mut self, capacities: &HcompressCapacities) -> Result<()> {
+        allocation::try_grow_to(&mut self.plane, capacities.plane)?;
+        allocation::try_grow_to(&mut self.transform, capacities.transform)?;
+        allocation::try_grow_to(&mut self.rows, capacities.rows)?;
+        allocation::try_grow_to(&mut self.coding.qtree, capacities.qtree)
+    }
 }
 
 /// Whether the inverse H-transform smooths each level first, as the `SMOOTH`

@@ -2,6 +2,9 @@
 
 use std::ops::Range;
 
+use crate::allocation;
+use crate::fits_error::Result;
+
 /// The tiling of an N-d image: axis lengths, per-axis tile sizes, and the derived
 /// strides and per-axis tile counts. Iterating `0..ntiles()` and calling `tile_into`
 /// yields each tile's clipped dimensions and flat pixel indices.
@@ -11,6 +14,8 @@ pub(super) struct TileGeometry {
     tiles: Vec<usize>,
     stride: Vec<usize>,
     ntiles_axis: Vec<usize>,
+    /// The extent of the largest tile: the tile's, clipped to the image.
+    max_tile: Vec<usize>,
 }
 
 /// The runs of an image that the tiles at each index along its slowest axis write,
@@ -65,7 +70,30 @@ pub(super) struct TileScratch {
     coord: Vec<usize>,
 }
 
+/// The elements of a [`TileScratch`]'s buffers that the largest tile of a geometry
+/// fills: its origin, extent and odometer, an element an axis, and its row starts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct TileCapacities {
+    axes: usize,
+    rows: usize,
+}
+
+impl TileCapacities {
+    /// The heap bytes the buffers take.
+    pub(super) const fn heap_bytes(&self) -> usize {
+        (3 * self.axes + self.rows) * size_of::<usize>()
+    }
+}
+
 impl TileScratch {
+    /// Grow the buffers to `capacities`, no room past them.
+    pub(super) fn reserve(&mut self, capacities: &TileCapacities) -> Result<()> {
+        allocation::try_grow_to(&mut self.origin, capacities.axes)?;
+        allocation::try_grow_to(&mut self.tdims, capacities.axes)?;
+        allocation::try_grow_to(&mut self.coord, capacities.axes)?;
+        allocation::try_grow_to(&mut self.row_bases, capacities.rows)
+    }
+
     /// Total pixels in the current tile (`row_len × row_count`).
     pub(super) const fn nelem(&self) -> usize {
         self.row_len * self.row_bases.len()
@@ -141,11 +169,12 @@ impl TileScratch {
 }
 
 impl TileGeometry {
-    pub(super) fn new(dims: &[usize], tiles: &[usize]) -> Self {
+    pub(super) fn new(dims: &[usize], tiles: impl Into<Vec<usize>>) -> Self {
+        let tiles = tiles.into();
         let n = dims.len();
         let ntiles_axis = dims
             .iter()
-            .zip(tiles)
+            .zip(&tiles)
             .map(|(&d, &t)| d.div_ceil(t))
             .collect();
         let mut stride = vec![0usize; n];
@@ -155,12 +184,47 @@ impl TileGeometry {
                 stride[i] = stride[i - 1] * dims[i - 1];
             }
         }
+        let max_tile = dims
+            .iter()
+            .zip(&tiles)
+            .map(|(&dim, &tile)| dim.min(tile))
+            .collect();
         Self {
             dims: dims.to_vec(),
-            tiles: tiles.to_vec(),
+            tiles,
             stride,
             ntiles_axis,
+            max_tile,
         }
+    }
+
+    /// The heap bytes the geometry takes: its per-axis lists.
+    pub(super) const fn heap_bytes(&self) -> usize {
+        (self.dims.capacity()
+            + self.tiles.capacity()
+            + self.stride.capacity()
+            + self.ntiles_axis.capacity()
+            + self.max_tile.capacity())
+            * size_of::<usize>()
+    }
+
+    /// The extent of the largest tile, a length an axis.
+    pub(super) fn max_tile(&self) -> &[usize] {
+        &self.max_tile
+    }
+
+    /// What [`Self::tile_into`] fills of a [`TileScratch`] for the largest tile.
+    pub(super) fn tile_capacities(&self) -> TileCapacities {
+        let rows = self.max_tile.iter().skip(1).product();
+        TileCapacities {
+            axes: self.dims.len(),
+            rows,
+        }
+    }
+
+    /// The tile extents along each axis.
+    pub(super) fn tiles(&self) -> &[usize] {
+        &self.tiles
     }
 
     pub(super) fn ntiles(&self) -> usize {
@@ -188,16 +252,8 @@ impl TileGeometry {
         }
     }
 
-    #[cfg(any(feature = "parallel", test))]
     pub(super) fn max_tile_elements(&self) -> usize {
-        if self.dims.is_empty() {
-            return 1;
-        }
-        self.dims
-            .iter()
-            .zip(&self.tiles)
-            .map(|(&dim, &tile)| dim.min(tile))
-            .product()
+        self.max_tile.iter().product()
     }
 
     /// Fill `s` (reusing its buffers) with tile `t`'s edge-clipped extent and the
@@ -256,7 +312,7 @@ mod tests {
     /// last one 1·20, each written by the 3·2 tiles that share the index, and by no other.
     #[test]
     fn bands_are_the_runs_each_slowest_tile_index_writes() {
-        let geom = TileGeometry::new(&[5, 4, 3], &[2, 3, 2]);
+        let geom = TileGeometry::new(&[5, 4, 3], [2, 3, 2]);
         let bands = geom.bands();
         assert_eq!(
             bands,
@@ -282,7 +338,7 @@ mod tests {
         }
         // A 0-dimensional image is one band of its one sample.
         assert_eq!(
-            TileGeometry::new(&[], &[]).bands(),
+            TileGeometry::new(&[], []).bands(),
             Bands {
                 count: 1,
                 len: 1,
@@ -305,7 +361,7 @@ mod tests {
 
         // 4×3 image (x fastest, strides [1, 4]) tiled 2×2 → 4 tiles; the top row of tiles
         // is edge-clipped to height 1. Same scratch reused across tiles (no stale rows).
-        let geom = TileGeometry::new(&[4, 3], &[2, 2]);
+        let geom = TileGeometry::new(&[4, 3], [2, 2]);
         assert_eq!(geom.ntiles(), 4);
         assert_eq!(geom.max_tile_elements(), 4);
         let mut s = TileScratch::default();
@@ -325,7 +381,7 @@ mod tests {
 
         // 4×2×2 image (strides [1, 4, 8]) tiled 2×2×2 → 2 tiles: exercises the odometer
         // carrying across the two higher axes; each tile is 4 rows of 2.
-        let geom3 = TileGeometry::new(&[4, 2, 2], &[2, 2, 2]);
+        let geom3 = TileGeometry::new(&[4, 2, 2], [2, 2, 2]);
         assert_eq!(geom3.ntiles(), 2);
         geom3.tile_into(0, &mut s);
         assert_eq!(s.row_bases, vec![0, 4, 8, 12]);
@@ -333,7 +389,7 @@ mod tests {
         geom3.tile_into(1, &mut s);
         assert_eq!(flat(&s), vec![2, 3, 6, 7, 10, 11, 14, 15]);
 
-        let empty = TileGeometry::new(&[usize::MAX, usize::MAX, 0], &[1, 1, 1]);
+        let empty = TileGeometry::new(&[usize::MAX, usize::MAX, 0], [1, 1, 1]);
         assert_eq!(empty.ntiles(), 0);
     }
 }
