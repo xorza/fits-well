@@ -1,81 +1,67 @@
 # fits-well
 
-A **FITS** reader and writer, built for two goals:
+A reader and writer for **FITS**, the standard file format of astronomy.
 
-1. **Speed** — zero-copy where the format allows, borrowed views into
-   caller-owned scratch, single-pass byte-swap and scaling, parallel
-   (de)compression, lazy access.
-2. **The whole FITS 4.0 standard** — images, ASCII tables, binary tables with
-   heap and variable-length arrays, random groups for read, WCS, time
-   coordinates, tiled compression.
+## Goals
+
+- **The whole FITS 4.0 standard.** Images, ASCII and binary tables with
+  variable-length arrays, random groups (read), world coordinates, time
+  coordinates, tiled compression of images and tables, and checksums. A feature
+  the standard defines is implemented completely, or refused with an error;
+  never half-read.
+- **Pure Rust.** No C library, no build script, and few dependencies; each new
+  one needs a reason the standard library cannot meet.
+- **Performance.** Lazy access from the headers alone, zero-copy reads where the
+  format allows, one pass for the byte swap and the scaling, and parallel codecs.
+  A section or row read touches only the data it needs.
+- **Efficient memory.** The caller owns the large buffers and reuses them across
+  reads; the reader keeps nothing image-sized. A hot path allocates nothing per
+  row, tile or point.
+- **Safe on untrusted files.** Every size, count and offset from a file is checked
+  before use, so a bad file is an error, never a panic or an oversized allocation.
+- **Interoperable.** Files read and write as cfitsio, fpack and astropy read and
+  write them; where they differ, `docs/design.md` says which one we follow and why.
+- **A standalone crate.** It builds and tests outside darkroom, with its own
+  lockfile and profiles. The API takes bytes, readers and writers, never paths.
+
+## Where things are
+
+- `docs/design.md` holds the decisions, each with the options refused and its
+  source; `docs/research/` holds the facts they cite.
+- `.notes/ISSUES.md` lists the open issues; `.notes/API_SURFACE.md` lists the
+  public API (`cargo drive surface`).
+- Each bench driver sits in a `bench.rs` beside the code it measures;
+  `src/bench/mod.rs` states the rules every case follows.
 
 ## Verification
 
-`cargo drive` runs every check: the driver is `cargo-drive`, the same in every
-project, installed with `cargo install --locked --git
-https://github.com/xorza/drive`. The drive table's `version` names the driver
-the project needs, and an older or newer one refuses to run. Run it from the
-root.
+`cargo drive` runs every check; run it from the root, and never run cargo by
+hand, which builds another copy of the crates.
 
 ```
-cargo drive check          # after each change: fmt, then clippy --all-targets --all-features
-cargo drive test [args]    # the tests, each time; the runner's arguments pick some: a test name
-cargo drive bench [args]   # the benches; a filter, or --test to run each case once
-cargo drive gate           # the full check: fmt, each lint set, ship, tests, docs; CI adds --ci
+cargo drive check          # after each change: fmt, then clippy on every target
+cargo drive test [args]    # the tests; an argument picks some by name
+cargo drive gate           # every check CI runs, the docs and doc tests included
+cargo drive bench [args]   # the benches; --test runs each case once
 cargo drive run examples   # each example, run once
 ```
 
-`check` takes no arguments: each lane covers the whole workspace, and the
-workspace of each path dependency outside it, in its own folder. A step does
-not run again when no input changed since it passed; under nextest, the tests
-run only for the crates a change reaches and every crate that depends on them.
-Each step prints one line; a failure prints each diagnostic once and names its
-log, `target/drive/log/<step>.log`, which holds no passing test. A run ends on
-one verdict line: `ok`, or `FAIL` with the failed steps and the first error,
-and `target/drive/last-<command>.txt`, which holds all the run printed; above
-it, each failed step shows its first lines again. So `| tail -1` is enough: on
-a failure, read the file it names rather than run the command again. Never
-run cargo by hand: another shape of a cargo command builds another copy of
-the crates.
-`check` and `gate` format the code and end at the first failed step; `gate
---ci` formats nothing and runs every step.
+Each command ends on one line, `ok` or `FAIL` with the file that holds the
+details, so `| tail -1` is enough; on a failure, read that file rather than run
+the command again. A change to bench code adds `cargo drive bench --test`.
 
-A root's flags are in its `Cargo.toml`, under `[workspace.metadata.drive]`,
-or `[package.metadata.drive]` in a root that is one package. `gate` lints with
-each set of the `lint` key and tests with each set of the `test` key, both
-`--all-features` by default; `check` lints with `--all-features` alone.
-`docs = true` adds rustdoc and the doc tests to `gate`, after the others; they
-are off by default. `test-runner` is `nextest` (the default) or `cargo-test`,
-which needs nothing installed but runs every test when a change reaches any
-crate. Every lane runs `--locked`: after a change to the dependencies,
-`cargo update --workspace` writes the lock.
-
-The second lint and test sets build the codec paths without `parallel`, which
-`--all-features` never does; the third lint set builds the crate with no codec
-at all. The plain clippy lints the build that ships: every other target turns
-`internals` on through the self dev-dependency. A change to bench code adds
-`cargo drive bench --test`, which runs each case once. `.cargo/config.toml` builds
-x86-64 for x86-64-v3, the CPU darkroom builds for.
+`gate` builds three feature sets: all features, `compression` without
+`parallel`, and no codec at all. Code must build in each, and its tests pass in
+the first two.
 
 ## Test code
 
 `internals` is the one feature for what only tests and benches build; the
-crate's dev-dependency on itself turns it on in every test and bench build.
-That dev-dependency takes no default features, or the lines without them
-would build `parallel` after all. Code a bench or an integration test reaches
-is gated `#[cfg(feature = "internals")]`; a reach-in only the crate's own unit
-tests call is gated `#[cfg(test)]`. Never `any(test, feature = "internals")`.
+crate's dev-dependency on itself turns it on. Code a bench or an integration
+test reaches is gated `#[cfg(feature = "internals")]`; a reach-in only the
+crate's own unit tests call is gated `#[cfg(test)]`. Never
+`any(test, feature = "internals")`.
 
-## Benches
-
-One target runs every case through `bench::run`; each driver sits in a
-`bench.rs` beside the code it measures, and `src/bench/mod.rs` states the
-rules. `cargo drive bench` runs them with every feature, so a case always measures
-the same build. An id is `<kind>/<group>/<case>`, the case the variant (a
-source, where a group has several) then the input: an `atomic` case times one
-operation on the unit the read and write paths hand it (one row of the
-standard frame, which is also a codec's default tile); an `integration` case
-times a public entry point end to end on the 24 MP standard frame or the
-source catalog, from each source (`stream`, `slice`) or to a `file`. A
-filter selects by id: `cargo drive bench --list`, `'^atomic/'`,
-`--exact integration/read_section/stream/i16`.
+`tests/` holds what must use the public API alone, or a binary of its own:
+the round trips through `fits_well::` paths, and the allocation counts under a
+global allocator.
