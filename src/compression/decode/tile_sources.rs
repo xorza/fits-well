@@ -32,6 +32,16 @@ impl<'a> TileSources<'a> {
         })
     }
 
+    /// Whether the container has the primary `COMPRESSED_DATA` column.
+    pub(super) const fn has_primary(&self) -> bool {
+        self.primary.is_some()
+    }
+
+    /// Whether the container has the `GZIP_COMPRESSED_DATA` fallback column.
+    pub(super) const fn has_gzip_fallback(&self) -> bool {
+        self.gzip_fallback.is_some()
+    }
+
     /// The source of the tile in table row `row`: the primary `COMPRESSED_DATA` cell,
     /// then the gzip and uncompressed fallbacks, each read only when the ones before it
     /// are empty, as cfitsio reads them. Errors when every cell is empty.

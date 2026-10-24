@@ -37,6 +37,9 @@ pub(super) struct Codec {
 impl Codec {
     /// Decode a tile of `nx` integer values into `out` (cleared first; a reused buffer,
     /// so steady-state decode allocates nothing).
+    // Out of `TileCodec::decode_ints`, so a change to another codec's arm cannot move this
+    // loop: inlined, it ran 10 % slower after the gzip arm changed.
+    #[inline(never)]
     pub(super) fn decode(self, bytes: &[u8], nx: usize, out: &mut Vec<i64>) -> Result<()> {
         let Self { blocksize, bytepix } = self;
         out.clear();

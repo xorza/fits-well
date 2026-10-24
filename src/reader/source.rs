@@ -139,8 +139,9 @@ impl<R: Read + Seek> Source for StreamSource<R> {
         scratch: &'a mut Vec<u8>,
     ) -> Result<&'a [u8]> {
         // `clear` keeps `scratch`'s capacity across calls, so a reused buffer
-        // reallocates only when a larger unit appears.
+        // reallocates only when a larger unit appears, and then to that unit's size.
         scratch.clear();
+        allocation::try_grow_to(scratch, len)?;
         self.read_at(offset, len, scratch)?;
         Ok(scratch)
     }

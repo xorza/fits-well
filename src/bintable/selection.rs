@@ -204,6 +204,49 @@ pub(crate) struct TableSelection<'a> {
 }
 
 impl TableSelection<'_> {
+    /// The bytes [`Self::copy_into`] writes: the selected rows, and the heap arrays of
+    /// their selected columns, which the descriptors in `main`, the table's whole main
+    /// table, address.
+    #[cfg(feature = "compression")]
+    pub(crate) fn copied_len(&self, main: &[u8]) -> Result<usize> {
+        let Self {
+            schema,
+            rows,
+            columns,
+        } = self;
+        let row_len = schema.extent.row_len;
+        let mut len = rows
+            .len()
+            .checked_mul(row_len)
+            .ok_or(FitsError::DataUnitOverflow)?;
+        let mut add = |row: usize| -> Result<()> {
+            validate_row(row, schema.extent.row_count)?;
+            for (index, column) in schema.columns.iter().enumerate() {
+                if column.tform.descriptor_width().is_none()
+                    || column.tform.repeat() == 0
+                    || columns.is_some_and(|columns| !columns[index])
+                {
+                    continue;
+                }
+                let slot = row * row_len + column.byte_offset;
+                let descriptor = &main[slot..slot + column.tform.byte_width()];
+                let span = VlaCellSpan::new(schema, column, descriptor)?;
+                len = len
+                    .checked_add(span.heap_range.len())
+                    .ok_or(FitsError::DataUnitOverflow)?;
+            }
+            Ok(())
+        };
+        match rows {
+            TableRows::Range(rows) => {
+                validate_row_range(rows, schema.extent.row_count)?;
+                rows.clone().try_for_each(&mut add)?;
+            }
+            TableRows::Picked(rows) => rows.iter().try_for_each(|&row| add(row))?,
+        }
+        Ok(len)
+    }
+
     /// Replace `out` with the selected rows, followed by the heap arrays those rows
     /// address, packed in row order — the data unit of a table holding just those rows.
     /// A `P`/`Q` column the selection leaves out keeps an empty descriptor and no heap

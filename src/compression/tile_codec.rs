@@ -1,5 +1,6 @@
 //! [`TileCodec`]: the one dispatch between a tile's samples and its compressed stream.
 
+use crate::allocation;
 use crate::compression::HcompressScale;
 use crate::compression::convert;
 use crate::compression::hcompress::Smoothing;
@@ -57,6 +58,45 @@ pub(super) struct CodecScratch {
     gzip: gzip::GzipScratch,
     rice: rice::RiceScratch,
     hcompress: hcompress::HcompressScratch,
+}
+
+/// The elements of the buffers of a [`CodecScratch`] that decoding one tile fills.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct CodecCapacities {
+    decoded: usize,
+    bytes: usize,
+    gzip: gzip::GzipCapacities,
+    hcompress: hcompress::HcompressCapacities,
+}
+
+impl CodecCapacities {
+    /// Room for both `self` and `other`.
+    pub(super) fn max(self, other: Self) -> Self {
+        Self {
+            decoded: self.decoded.max(other.decoded),
+            bytes: self.bytes.max(other.bytes),
+            gzip: self.gzip.max(other.gzip),
+            hcompress: self.hcompress.max(other.hcompress),
+        }
+    }
+
+    /// The heap bytes the buffers take.
+    pub(super) const fn heap_bytes(&self) -> usize {
+        self.decoded * size_of::<i64>()
+            + self.bytes
+            + self.gzip.heap_bytes()
+            + self.hcompress.heap_bytes()
+    }
+}
+
+impl CodecScratch {
+    /// Grow the buffers to `capacities`, no room past them.
+    pub(super) fn reserve(&mut self, capacities: &CodecCapacities) -> Result<()> {
+        allocation::try_grow_to(&mut self.decoded, capacities.decoded)?;
+        allocation::try_grow_to(&mut self.bytes, capacities.bytes)?;
+        self.gzip.reserve(&capacities.gzip)?;
+        self.hcompress.reserve(&capacities.hcompress)
+    }
 }
 
 impl Tile<'_> {
@@ -201,6 +241,58 @@ impl TileCodec {
                 Ok(&scratch.stream)
             }
         }
+    }
+
+    /// What [`Self::decode_ints`] of a whole tile of `tile` fills.
+    pub(super) fn ints_capacities(self, tile: Tile<'_>) -> Result<CodecCapacities> {
+        let count = tile.count();
+        Ok(match self {
+            Self::Rice(_) | Self::Plio(_) | Self::NoCompress => CodecCapacities {
+                decoded: count,
+                ..CodecCapacities::default()
+            },
+            Self::Hcompress(_) => {
+                let &[ny, nx] = tile.shape else {
+                    unreachable!("an HCOMPRESS_1 tile is two-dimensional");
+                };
+                CodecCapacities {
+                    hcompress: hcompress::HcompressCapacities::decode(ny, nx),
+                    ..CodecCapacities::default()
+                }
+            }
+            Self::Gzip1 { level } | Self::Gzip2 { level } => {
+                let codec = gzip::Codec {
+                    level,
+                    shuffle: self.shuffle(tile),
+                };
+                CodecCapacities {
+                    decoded: count,
+                    gzip: codec.decode_capacities(tile.byte_len()?),
+                    ..CodecCapacities::default()
+                }
+            }
+        })
+    }
+
+    /// What [`Self::decode_bytes`] of a whole tile of `tile` fills.
+    pub(super) fn bytes_capacities(self, tile: Tile<'_>) -> Result<CodecCapacities> {
+        Ok(match self {
+            Self::Gzip1 { level } | Self::Gzip2 { level } => {
+                let codec = gzip::Codec {
+                    level,
+                    shuffle: self.shuffle(tile),
+                };
+                CodecCapacities {
+                    gzip: codec.decode_capacities(tile.byte_len()?),
+                    ..CodecCapacities::default()
+                }
+            }
+            Self::NoCompress => CodecCapacities::default(),
+            Self::Rice(_) | Self::Plio(_) | Self::Hcompress(_) => CodecCapacities {
+                bytes: tile.byte_len()?,
+                ..self.ints_capacities(tile)?
+            },
+        })
     }
 
     /// Decode `stream`, one tile `tile` describes, and lend its integer samples from

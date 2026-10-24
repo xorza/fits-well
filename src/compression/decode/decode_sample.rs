@@ -4,10 +4,11 @@ use crate::compression::decode::tile_decoder::Overshoot;
 use crate::compression::decode::wide_plane::WidePlane;
 use crate::fits_error::CompressedDataDefect;
 use crate::fits_error::Result;
+use crate::image_model::sample::Sample;
 
 /// A stored sample type the decoder scatters into, paired with the plane its tiles
 /// decode in. Narrowing happens only as values land in the output plane.
-pub(super) trait DecodeSample: Copy + Default + Send + Sync {
+pub(super) trait DecodeSample: Sample + Copy + Default + Send + Sync {
     type Wide: WidePlane;
 
     /// Fit a decoded tile into this type's range, so that [`DecodeSample::narrow`] is

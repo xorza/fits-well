@@ -1312,10 +1312,11 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
         assert!(empty.samples.is_empty(), "{bitpix:?}");
 
         if bitpix == Bitpix::U8 {
-            // A one-tile corner fetches its tile's row and the heap bytes that row
-            // addresses — exactly what a one-row table selection holds. The whole image
-            // fetches every row and the whole heap, which the writer packs without gaps:
-            // the data unit, once.
+            // Opening the image reads its container's main table, a row a tile. A
+            // one-tile corner then fetches the heap bytes its tile's row addresses — what
+            // a one-row table selection holds past its row. The whole image fetches the
+            // whole heap, which the writer packs after the rows without gaps: with the
+            // rows, the data unit, once.
             let fetched = [[0..2, 0..2], [0..9, 0..7]].map(|ranges| {
                 let mut counted = CountedReader::open(&bytes);
                 let mut scratch = Vec::new();
@@ -1334,7 +1335,9 @@ fn compressed_image_sections_cross_tile_boundaries_and_match_the_whole_image() {
                 .extent
                 .heap_end;
             let data_bytes = reader.hdus()[1].data_bytes as usize;
-            assert_eq!(fetched, [first_tile, data_bytes]);
+            let extent = reader.hdus()[1].container_schema().unwrap().extent;
+            let main = extent.row_count * extent.row_len;
+            assert_eq!(fetched, [main + first_tile - extent.row_len, data_bytes]);
         }
     }
 }
@@ -1746,11 +1749,15 @@ fn a_data_checksum_summed_during_the_decode_reads_the_unit_once() {
     assert_eq!(reader.verify_checksum(0).unwrap(), report);
 }
 
-/// A compressed image's sections are decoded from tiles, which feed nothing, so the finish reads
-/// the whole unit and gives `verify_checksum`'s report: valid, and the image the sections read.
+/// A compressed image's checksum sums its tile index when the sum begins, and then each
+/// tile's heap cells as a section fetches them: sections that take the tile rows in order,
+/// tiles 3 rows high, leave the finish only the block fill, so the unit is read once, and
+/// a section that cuts a tile row fetches that row's cells again but sums them once. A
+/// whole read fetches the heap after the index. Each gives `verify_checksum`'s report:
+/// valid, and the image the reads read.
 #[cfg(feature = "compression")]
 #[test]
-fn a_compressed_image_summed_through_its_sections_reads_the_unit_at_the_finish() {
+fn a_compressed_image_summed_through_its_reads_reads_its_unit_once() {
     let image = Image {
         shape: vec![9, 7],
         samples: Data::I16((0..63).map(|value| value * 97 - 3000).collect()),
@@ -1764,24 +1771,62 @@ fn a_compressed_image_summed_through_its_sections_reads_the_unit_at_the_finish()
         )
     });
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
-    let mut sections = reader.image(1).unwrap().with_checksums();
-    let mut words = Vec::new();
-    for rows in [0..4, 4..7] {
-        sections.view(&[0..9, rows], &mut words).unwrap();
-    }
-    let report = sections.finish().unwrap();
+    let report = reader.verify_checksum(1).unwrap();
     assert_eq!(report.datasum, ChecksumStatus::Valid);
     assert_eq!(report.checksum, ChecksumStatus::Valid);
-    assert_eq!(reader.verify_checksum(1).unwrap(), report);
+    let padded = usize::try_from(reader.hdus()[1].padded_data_bytes()).unwrap();
 
-    // A whole read fetches the container's stored bytes and feeds them, so the finish reads
-    // only the block fill after them: the unit, once.
+    let mut words = Vec::new();
+    for sections in [&[0..3, 3..6, 6..7][..], &[0..4, 4..7]] {
+        let mut counted = CountedReader::open(&bytes);
+        let mut image = counted.reader.image(1).unwrap().with_checksums();
+        for rows in sections {
+            image.view(&[0..9, rows.clone()], &mut words).unwrap();
+        }
+        assert_eq!(image.finish().unwrap(), report, "{sections:?}");
+        if sections.len() == 3 {
+            assert_eq!(counted.fetched(), padded);
+        }
+    }
+
     let mut counted = CountedReader::open(&bytes);
     let mut whole = counted.reader.image(1).unwrap().with_checksums();
     assert_eq!(whole.read(Region::All).unwrap().samples, image.samples);
     assert_eq!(whole.finish().unwrap(), report);
-    let padded = usize::try_from(counted.reader.hdus()[1].padded_data_bytes()).unwrap();
     assert_eq!(counted.fetched(), padded);
+}
+
+/// `finish_bytes` bounds what the finish adds to the reader: for a stream, its staging
+/// buffer grown past the one block the header scan left in it to the padded unit, which
+/// is under the 1 MiB a finish reads at a time; nothing for a resident source, which the
+/// finish borrows. `tiles` gives a compressed image's `ZTILEn`, and none of a plain image.
+#[cfg(feature = "compression")]
+#[test]
+fn finish_bytes_counts_a_streams_staging_and_tiles_give_the_tiling() {
+    let image = Image {
+        shape: vec![100, 100],
+        samples: Data::I16((0..10_000).map(|value| (value % 3001) as i16).collect()),
+        scaling: Scaling::IDENTITY,
+    };
+    let bytes = written(|w| {
+        w.write_compressed_image(
+            image.view(),
+            &CompressionConfig::new(Compression::None).with_tiles([100, 10]),
+            None,
+        )
+    });
+    let mut stream = FitsReader::open(Cursor::new(bytes.as_slice())).unwrap();
+    let padded = stream.hdus()[1].padded_data_bytes();
+    assert!(padded > 2880, "a unit past the scan's one block");
+    let handle = stream.image(1).unwrap();
+    assert_eq!(handle.finish_bytes(), padded);
+    assert_eq!(handle.tiles(), Some(&[100, 10][..]));
+    let mut resident = FitsReader::from_bytes(&bytes).unwrap();
+    assert_eq!(resident.image(1).unwrap().finish_bytes(), 0);
+
+    let plain = written(|w| w.write_image(image.view(), None));
+    let mut plain = FitsReader::from_bytes(&plain).unwrap();
+    assert_eq!(plain.image(0).unwrap().tiles(), None);
 }
 
 /// A partial read of a tiled-compressed table with no arrays fetches only the tiles its

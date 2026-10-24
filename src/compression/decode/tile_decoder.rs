@@ -7,14 +7,14 @@ use crate::compression::convert;
 use crate::compression::decode::float_quantization::FloatEncoding;
 use crate::compression::decode::float_sample::FloatSample;
 use crate::compression::decode::tile_scratch_set::TileScratchSet;
-use crate::compression::decode::tile_sources::TileSource;
+use crate::compression::decode::tile_sources::{TileSource, TileSources};
 use crate::compression::gzip;
 use crate::compression::hcompress;
 use crate::compression::hcompress::Smoothing;
 use crate::compression::plane::{FloatBitpix, IntBitpix, Plane};
 use crate::compression::plio;
 use crate::compression::rice;
-use crate::compression::tile_codec::{CodecScratch, Tile, TileCodec};
+use crate::compression::tile_codec::{CodecCapacities, CodecScratch, Tile, TileCodec};
 use crate::compression::tile_geometry::TileScratch;
 use crate::fits_error::FitsError;
 use crate::fits_error::Result;
@@ -123,6 +123,41 @@ impl TileDecoder {
             int_bitpix,
             float_bitpix,
         })
+    }
+
+    /// What decoding a whole tile of `shape` fills of a set's codec buffers, whichever
+    /// cell of `sources` it is read from; the floats of a `lossless` float image come
+    /// back as bytes, every other image's tiles as integers.
+    pub(super) fn capacities(
+        &self,
+        shape: &[usize],
+        sources: &TileSources<'_>,
+        lossless: bool,
+    ) -> Result<CodecCapacities> {
+        let ints = Tile {
+            shape,
+            width: self.int_bitpix,
+            blank: None,
+        };
+        let floats = self.float_bitpix.map(|bitpix| Tile {
+            shape,
+            width: bitpix.integer_width(),
+            blank: None,
+        });
+        let mut capacities = CodecCapacities::default();
+        if sources.has_primary() {
+            capacities = capacities.max(match floats {
+                Some(floats) if lossless => self.codec.bytes_capacities(floats)?,
+                _ => self.codec.ints_capacities(ints)?,
+            });
+        }
+        if sources.has_gzip_fallback() {
+            capacities = capacities.max(match floats {
+                Some(floats) => FALLBACK_GZIP.bytes_capacities(floats)?,
+                None => FALLBACK_GZIP.ints_capacities(ints)?,
+            });
+        }
+        Ok(capacities)
     }
 
     /// The codec of the tiles' `COMPRESSED_DATA` cells.

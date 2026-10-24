@@ -17,12 +17,14 @@
 //! [`Image`]: crate::image_model::Image
 
 mod decode_buffer;
+pub(crate) mod decode_capacities;
 mod decode_sample;
 pub(super) mod float_quantization;
 pub(super) mod float_sample;
 mod image_decode_plan;
 mod null_mask;
 mod tile_decoder;
+pub(crate) mod tile_index;
 mod tile_scratch_set;
 pub(crate) mod tile_section;
 mod tile_sources;

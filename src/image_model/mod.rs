@@ -65,6 +65,16 @@ pub(crate) fn validate_image_region(
     shape: &[usize],
     selected: &mut Vec<usize>,
 ) -> Result<()> {
+    check_image_region(ranges, shape)?;
+    selected.clear();
+    selected.reserve_exact(shape.len());
+    selected.extend(ranges.iter().map(|range| range.end - range.start));
+    Ok(())
+}
+
+/// Refuse `ranges` unless it is a region of an image of `shape`: a range an axis, each
+/// within the axis.
+pub(crate) fn check_image_region(ranges: &[Range<usize>], shape: &[usize]) -> Result<()> {
     if ranges.len() != shape.len() {
         return Err(FitsError::RankMismatch {
             ranked: Ranked::ImageRegion,
@@ -72,8 +82,6 @@ pub(crate) fn validate_image_region(
             got: ranges.len(),
         });
     }
-    selected.clear();
-    selected.reserve_exact(shape.len());
     for (axis, (range, &len)) in ranges.iter().zip(shape).enumerate() {
         if range.start > range.end || range.end > len {
             return Err(FitsError::ImageRegionOutOfBounds {
@@ -83,7 +91,6 @@ pub(crate) fn validate_image_region(
                 len,
             });
         }
-        selected.push(range.end - range.start);
     }
     Ok(())
 }

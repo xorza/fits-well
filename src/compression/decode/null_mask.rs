@@ -8,7 +8,7 @@ use crate::compression::decode::tile_scratch_set::TileScratchSet;
 use crate::compression::decode::tile_value::TileValue;
 use crate::compression::plane::IntBitpix;
 use crate::compression::rice;
-use crate::compression::tile_codec::{CodecScratch, Tile, TileCodec};
+use crate::compression::tile_codec::{CodecCapacities, CodecScratch, Tile, TileCodec};
 use crate::fits_error::CompressedDataDefect;
 use crate::fits_error::CompressionFeature;
 use crate::fits_error::FitsError;
@@ -19,12 +19,12 @@ use crate::header_model::record_name::RecordName;
 /// How an image spells its nulls: the `BLANK` value an integer image's nulls take (a
 /// float image's take `NaN`), and the value an integer tile stores its nulls as.
 #[derive(Debug)]
-pub(super) struct NullValues {
+pub(super) struct NullValues<'a> {
     pub(super) blank: Option<i64>,
     /// An integer tile's stored null: `ZBLANK` as a keyword, else as a column, else
     /// `BLANK`, as cfitsio resolves it. Absent for a float image, whose quantized nulls
     /// the dequantization maps.
-    pub(super) stored: TileValue<i64>,
+    pub(super) stored: TileValue<'a, i64>,
 }
 
 /// An image's nulls and everything applying them needs: the per-tile mask column, the
@@ -34,14 +34,14 @@ pub(super) struct NullMask<'a> {
     column: Option<VlaColumn<'a>>,
     /// `ZMASKCMP`, its RICE samples a byte wide.
     codec: Option<TileCodec>,
-    values: NullValues,
+    values: NullValues<'a>,
 }
 
 impl<'a> NullMask<'a> {
     pub(super) fn read(
         table: TableView<'a>,
         codec: Option<TileCodec>,
-        values: NullValues,
+        values: NullValues<'a>,
     ) -> Result<Self> {
         let column = first_column(
             table,
@@ -69,11 +69,13 @@ impl<'a> NullMask<'a> {
         })
     }
 
-    /// Give every null of an integer tile in `scratch` the image's `BLANK`: an element
-    /// the tile stores as its null value, and an element the mask marks.
+    /// Give every null of integer tile `tile`, in `scratch`, the image's `BLANK`: an
+    /// element the tile stores as its null value, and an element the mask in its
+    /// `table_row` marks.
     pub(super) fn apply_integer(
         &self,
         table_row: usize,
+        tile: usize,
         scratch: &mut TileScratchSet<i64>,
     ) -> Result<()> {
         let values = &mut scratch.values;
@@ -86,7 +88,7 @@ impl<'a> NullMask<'a> {
                 name: RecordName::Keyword(keywords::BLANK),
             })
         };
-        if let Some(stored) = stored.at(table_row)
+        if let Some(stored) = stored.at(tile)
             && Some(stored) != *declared
             && values.contains(&stored)
         {
@@ -114,6 +116,19 @@ impl<'a> NullMask<'a> {
     }
 
     /// One tile's mask, lent from `codecs`, or `None` when the tile has none.
+    /// What decoding the mask of a tile of `tile_elems` elements fills of a set's codec
+    /// buffers: nothing for an image without a mask column.
+    pub(super) fn capacities(&self, tile_elems: usize) -> Result<CodecCapacities> {
+        let (Some(_), Some(codec)) = (self.column, self.codec) else {
+            return Ok(CodecCapacities::default());
+        };
+        codec.ints_capacities(Tile {
+            shape: &[tile_elems],
+            width: IntBitpix::U8,
+            blank: None,
+        })
+    }
+
     fn decode<'s>(
         &self,
         table_row: usize,

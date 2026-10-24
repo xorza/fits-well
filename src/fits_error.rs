@@ -521,9 +521,20 @@ pub enum PoleDefect {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum CompressedDataDefect {
-    /// A gzip stream does not inflate: a bad header, block or checksum.
+    /// A gzip stream's header is not a gzip member's (RFC 1952): its magic, method or
+    /// flags, or a field it announces that the stream does not hold.
+    #[error("a gzip stream's header is not a gzip member's")]
+    GzipHeader,
+    /// A gzip stream's deflate data does not inflate.
+    #[cfg(feature = "compression")]
     #[error("a gzip stream does not inflate: {0}")]
-    GzipStream(#[source] io::Error),
+    GzipStream(#[source] flate2::DecompressError),
+    /// A gzip stream ends before its deflate data or its trailer does.
+    #[error("a gzip stream ends before its data does")]
+    GzipTruncated,
+    /// A gzip stream's trailer states a CRC-32 or a size its inflated bytes do not have.
+    #[error("a gzip stream's trailer does not match its inflated bytes")]
+    GzipChecksum,
     /// A gzip stream inflates past the size of its tile.
     #[error("a gzip stream inflates past the size of its tile")]
     GzipOverrun,

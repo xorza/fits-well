@@ -238,8 +238,8 @@ fn decodes_a_cfitsio_compressed_table() {
     assert_eq!(restored.schema.row_len(), original.schema.row_len());
     assert_eq!(restored.schema().columns.len(), 6);
     assert_eq!(
-        restored.view().raw_rows(),
-        original.view().raw_rows(),
+        restored.view().main_rows(),
+        original.view().main_rows(),
         "decoded cfitsio-compressed table must match the original bytes"
     );
     // Spot-check a decoded value against the known formula (INT = i·100000 − 5).
@@ -514,11 +514,15 @@ fn table_reads_give_a_compressed_table_as_the_table_it_restores() {
             compressed.read_table_rows(1, rows.clone()),
         ]
         .map(Result::unwrap);
-        assert_eq!(part.view().raw_rows(), whole.view().raw_rows(), "{rows:?}");
+        assert_eq!(
+            part.view().main_rows(),
+            whole.view().main_rows(),
+            "{rows:?}"
+        );
     }
     assert_eq!(
-        compressed.read_table(1).unwrap().view().raw_rows(),
-        plain.read_table(1).unwrap().view().raw_rows()
+        compressed.read_table(1).unwrap().view().main_rows(),
+        plain.read_table(1).unwrap().view().main_rows()
     );
     for (row, column) in [(0, 0), (8, 6), (49, 5), (13, 3)] {
         let column = ColumnSelector::Index(column);
@@ -548,7 +552,7 @@ fn table_reads_give_a_compressed_table_as_the_table_it_restores() {
     // cfitsio's own compressed table restores to the table it came from.
     let cfitsio = Fixture::CompTableCfitsio.stream().read_table(1).unwrap();
     let reference = Fixture::CompTableRef.stream().read_table(1).unwrap();
-    assert_eq!(cfitsio.view().raw_rows(), reference.view().raw_rows());
+    assert_eq!(cfitsio.view().main_rows(), reference.view().main_rows());
 
     // A compressed image is no table.
     let mut image = Fixture::CompGzipI16.stream();
@@ -708,7 +712,7 @@ fn a_partial_read_decodes_only_the_tiles_and_columns_it_reads() {
             matches!(
                 error,
                 FitsError::CorruptCompressedData {
-                    defect: CompressedDataDefect::GzipStream(_)
+                    defect: CompressedDataDefect::GzipChecksum
                 }
             ),
             "{error:?}"
@@ -900,8 +904,8 @@ fn a_declared_rice_codec_on_a_64_bit_column_is_refused() {
         Some("GZIP_1")
     );
     assert_eq!(
-        cr.read_table(1).unwrap().view().raw_rows(),
-        original.view().raw_rows()
+        cr.read_table(1).unwrap().view().main_rows(),
+        original.view().main_rows()
     );
 
     let mut tampered = cr.hdus[1].header.clone();
