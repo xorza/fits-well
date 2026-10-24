@@ -9,7 +9,8 @@
 
 use std::fs::File;
 
-use fits_well::image::{Compression, CompressionConfig, Data, Image, Scaling};
+use fits_well::compress::{Compression, CompressionConfig};
+use fits_well::image::{Data, Image, Scaling};
 use fits_well::{FitsReader, FitsWriter};
 use std::env;
 

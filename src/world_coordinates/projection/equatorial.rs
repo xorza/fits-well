@@ -5,7 +5,7 @@
 use crate::world_coordinates::angle;
 use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, FRAC_PI_4, PI, SQRT_2};
 
-use crate::error::Result;
+use crate::fits_error::Result;
 use crate::world_coordinates::angle::D2R;
 use crate::world_coordinates::angle::DEGREE_TOLERANCE;
 use crate::world_coordinates::angle::R2D;

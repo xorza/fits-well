@@ -1,9 +1,9 @@
 //! Spelling the Table-22 keyword families for one alternate description.
 
 use crate::alternate::Alternate;
-use crate::error::FitsError;
-use crate::error::Result;
-use crate::error::WcsConflict;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
+use crate::fits_error::WcsConflict;
 use crate::header_model::{Header, keywords};
 use crate::keyword::Keyword;
 use crate::world_coordinates::header_read;

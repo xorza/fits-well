@@ -65,7 +65,10 @@ and the dated measurements in `docs/research/`.
   `physical_into`. The handle resolves the geometry and a compressed image's codec
   and tiles once. Refused: one method per combination of whole or section, owned
   or borrowed, and summed or not (six methods, with the checksum as a suffix), and
-  `Lazy`, a second form of the same read.
+  `Lazy`, a second form of the same read. A table has no handle: an image handle
+  carries a checksum pass and a borrow of the caller's words, which a table read has
+  not, and four reader methods cover it. Refused: a `TableReader`, a type and a
+  lifetime for the same calls.
 - **A checksum is summed by the handle that reads.** With `with_checksums`, a read
   feeds the stored bytes it fetches, as long as they continue the sum: a plain
   image's whole reads and sections, and a compressed image's whole reads. A
@@ -89,6 +92,15 @@ and the dated measurements in `docs/research/`.
   the handles are `fits_well::ImageReader` and `fits_well::ImageWriter`, beside
   `FitsReader` and `FitsWriter`. Refused: `image::ImageView`, `image::ImageReader`
   and `image::Writer`.
+- **A module holds what is its own.** The root holds the reader, the writer, the
+  editor, `FitsError` and `Result`; `error` holds the enums a `FitsError` variant
+  carries, and `compress` the codec, quantization and dither settings, which a
+  compressed table takes as an image does. A type keeps one name in the crate, so the
+  WCS axis and snapshot are `wcs::AxisDescription` and `wcs::Description`, from
+  `Wcs::description`, beside `time::Axis` and `image::Metadata`. Refused: 16 helper
+  enums at the root beside the four types a caller starts from, compression settings
+  under `image`, and two `Axis` and two `Metadata` that a caller who names both must
+  alias.
 - **A name pairs with its counterpart.** The reader and the writer share
   `with_checksums`; the two table forms share `schema()` (`Schema`, `AsciiSchema`)
   and the `tnull` field; a stored kind and its decoded data share variant names
@@ -98,7 +110,13 @@ and the dated measurements in `docs/research/`.
   `Data`/`View::to_data`); a builder option is `with_*` and a constructor `from_*`.
   A type read from text implements `FromStr` (`Scale`, `Tform`, `Datetime`,
   `time::Unit`), so it parses with `str::parse`; an inherent `parse` stays for input
-  that is not text (`Header::parse(bytes)`, `Schema::parse(header)`).
+  that is not text (`Header::parse(bytes)`, `Schema::parse(header)`). `Display` is
+  the exact inverse of the parse for each value it gives (`Scale`, `Tform`,
+  `Datetime`, `time::Unit`, `Keyword`), in the canonical spelling: `1E` for `E`, `TT`
+  for `TDT`, `10**3 s` for `10+3 s`, a datetime's shortest fraction that reads back as
+  its `f64`. Refused: a `Display` that prints the input as it was read, which a parse
+  does not keep. The reader and the editor `open`, as `open` reads and checks the HDU
+  list, which a `new` does not promise.
   A count is `*_count` (`row_count`, `field_count`), except a FITS keyword's own name
   (`gcount`, `pcount`). Refused: one spelling on each side, which a caller must
   remember twice, and `nrows`, a third spelling of a count.
@@ -181,7 +199,8 @@ and the dated measurements in `docs/research/`.
   `docs/research/2026-10-24-reference-library-practice.md`.
 - **A `Tform` is a repeat, an element kind and a storage:** `ElementKind` names the
   values (Table 18), and `Storage` is `Fixed` or `Array(DescriptorWidth)` for a `P`
-  or `Q` column. Refused: one kind enum that held the descriptors beside the element
+  or `Q` column. A `P`/`Q` column's `(emax)` is not kept, as the parse ignores it, so
+  the writer adds it to the `Tform` it prints. Refused: one kind enum that held the descriptors beside the element
   types, which put an `Option` element type beside it and an `unreachable!` in each
   decode that had to refuse a descriptor.
 - **`X` and `PX` decode to bits:** `ColumnData::Bit` and `ColumnView::Bit` hold the
@@ -216,12 +235,15 @@ and the dated measurements in `docs/research/`.
   name compared case-insensitively, through one `column` method on `Table`,
   `Ascii` and `Selection`, and through each reader method. Refused: a
   `column_by_idx` and `column_by_name` pair on each type, and an owned `String`
-  name, which allocated on each read. Source: §7.2.2, §7.3.
+  name, which allocated on each read. `Selection::column` gives an `Option`, a lookup
+  in the columns the caller selected, as `Schema::column_index` does; refused: a
+  `Result`, as no error case fits a column the table holds and the selection does not. Source: §7.2.2, §7.3.
 - **`read_table_columns_into` refills the caller's `Selection`.** Each column
   keeps its buffers when its type is the same, so a loop over the chunks of a
   plain table allocates nothing after the first chunk. On an error, the
   selection holds no column. Refused: a new `Selection` for each call, which is
-  what `read_table_columns` gives.
+  what `read_table_columns` gives, and a request struct, which the out-parameter
+  twin of `read_table_columns` does not need.
 - **Every row collection gives `row(r)` and `iter()`, and `IntoIterator` for a
   reference,** `Ragged`, `BitColumn` and `AsciiText` alike, with an exact count.
   `Ragged<V>` gives them once, for each `V: RowValues`: a slice, a `&str`, or for a
@@ -288,7 +310,9 @@ and the dated measurements in `docs/research/`.
   `fpackguide.md` §C, `fits_quantize_float`.
 - **`Dither` holds the method and its seed:** `None`, `Subtractive1(seed)` and
   `Subtractive2(seed)`, so a seed never stands beside no dither. `DitherSeed` is
-  opaque: `FROM_SAMPLES`, the default, or `fixed(1..=10000)`.
+  opaque: `FROM_SAMPLES`, the default, or `fixed(1..=10000)`. Refused:
+  `TryFrom<u16>`, as `DitherSeed::fixed(17)` names the kind of seed beside
+  `FROM_SAMPLES` and `try_from(17)` does not.
 - **The default seed is `(Σ bytes of every sample mod 10000) + 1`.** A byte sum does not
   depend on the byte order. The same image gives the same file, and frames whose first
   tiles are equal, such as registered frames with blank edges, still get different
@@ -555,8 +579,9 @@ and the dated measurements in `docs/research/`.
   cfitsio's HDU-to-HDU `fits_compress_table`, which is a second way to write the
   same table and made a table that a program built go through a write and a read
   first. Also refused: a builder from a read `Table`; `read_data_unit` and
-  `write_raw_hdu` copy an HDU as it is. Sources: cfitsio `imcompress.c`, rustfits
-  `CompressedTableHDU`.
+  `write_raw_hdu` copy an HDU as it is, and `write_raw_hdu(header, raw)` takes its
+  header first, as it is the HDU's own and not a template. Sources: cfitsio
+  `imcompress.c`, rustfits `CompressedTableHDU`.
 - **A compressed table takes GZIP_2 only on `I`, `J`, `K`, `E` and `D` columns.** The
   table's `Compression` is a preference that each column clamps to a codec its type
   takes, as cfitsio's writer does; `L`, `X`, `A`, `B`, `C` and `M` take GZIP_1 when
@@ -662,22 +687,29 @@ and the dated measurements in `docs/research/`.
   its spelling, and the header's index keys on it, so a parse makes no `String`
   for each valued card. Refused: `&str` keys, which made `get("naxis")` quietly
   `None` while `set("naxis")` failed.
-- **Every method that names a keyword takes `impl TryInto<Keyword>`.** A
-  `Keyword`, a `header::keywords` preset or a `&str` all work, so callers write
-  `set("EXPTIME", 30.0)` or `set(keywords::NAXIS, 2)`; a `&str` that is no keyword
-  is `InvalidKeyword`, so `get` and the other lookups are fallible. `Keyword`
-  converts with `Infallible`, which `FitsError` takes. Refused: `Keyword`
-  arguments alone, which made a call site spell every name twice, and
-  `From<&str>`, whose conversion would panic on a bad name.
+- **Every method that names a record takes `impl TryInto<RecordName>`, and a typed
+  getter keeps `get_`.** A
+  `Keyword`, a `header::keywords` preset, a `HierarchName` or a `&str` all work, so
+  callers write `set("EXPTIME", 30.0)`, `get_real("HIERARCH ESO DET DIT")` or
+  `set(keywords::NAXIS, 2)`; a `&str` parses as the record spells its name, and one
+  that is neither is `InvalidKeyword`, so `get` and the other lookups are fallible.
+  So a `HIERARCH` record has every typed getter, `require_*`, `contains` and
+  `index_of` a keyword has. A `CommentaryName` names commentary records only: a valued
+  edit refuses it with `ReservedName`, and a read finds no value. `Keyword` converts
+  with `Infallible`, which `FitsError` takes. Refused: `Keyword` arguments alone,
+  which made a call site spell every name twice; `From<&str>`, whose conversion would
+  panic on a bad name; a second family of `*_hierarch` methods, which had four of
+  the keyword methods and missed the rest; and `real(keyword)` for `get_real`, as the
+  guideline against `get_` is for field getters and a keyed lookup is `HashMap::get`.
 - **`header::keywords` holds the keywords the standard defines (§4–§10) and the
   roots of its indexed families.** `NAXIS.indexed(3)` gives `NAXIS3`, and
   `Keyword::try_from(format_args!(…))` formats a compound name on the stack.
   Refused: macros for keyword names, and a constant for each numbered member.
 - **A keyword error names the keyword, and a record error the record.**
-  `MissingKeyword`, `KeywordOutOfRange` and `ReservedKeyword` carry a `Keyword`, and a
-  family is reported by its member, `TDIM3`, not `TDIMn`. `ValueTypeMismatch`,
-  `InvalidValue`, `InvalidHeaderValue`, `HeaderCardTooLong` and `InvalidAscii` carry
-  the `RecordName`, and a fixed set of causes is an enum (`ValueKind`, `NonFinite`,
+  `KeywordOutOfRange` carries a `Keyword`, and a family is reported by its member,
+  `TDIM3`, not `TDIMn`. `MissingKeyword`, `ReservedName`, `IntegerOutOfRange`,
+  `ValueTypeMismatch`, `InvalidValue`, `InvalidHeaderValue`, `HeaderCardTooLong` and
+  `InvalidAscii` carry the `RecordName`, as a `HIERARCH` read reaches them too, and a fixed set of causes is an enum (`ValueKind`, `NonFinite`,
   `TextOrigin`, `NumericTarget`). Refused: `&'static str` names, which a run-time
   keyword could not use, and a message string in place of a case.
 - **A name formatted from an axis or column number that is no keyword is
@@ -701,8 +733,7 @@ and the dated measurements in `docs/research/`.
   Refused: a no-op, which loses a misspelled keyword without a trace.
 - **A header record is a `Record`, and its borrowed form a `RecordView`,** as the
   standard calls one a keyword record: a header stores `Record`, `iter()` gives
-  views, `remove` the owned record, and `insert_record` and `Extend<Record>` put
-  records back. Each is an enum of the kinds a record is: `Valued` with its
+  views, `remove` the owned record, and `insert_record` puts one back. Each is an enum of the kinds a record is: `Valued` with its
   `Keyword`, value and inline comment, `Commentary` with its name and text,
   `Hierarch`, and `Malformed`; a record's name is a `RecordName`. An inline comment
   reads with `get_comment`, the twin of `set_comment`. Refused: `Entry`, a name
@@ -720,8 +751,8 @@ and the dated measurements in `docs/research/`.
   ordinary record after that, so a write gives the corrected record. A record whose
   name is no keyword, or whose value does not parse or holds a non-ASCII byte, is
   `RecordView::Malformed` with its 80 bytes and its name when it has one: a lookup of
-  its name and a write of its header fail with `InvalidValue`, and `Header::set` or
-  `set_hierarch` replaces it. So a read fails only
+  its name and a write of its header fail with `InvalidValue`, and `Header::set`
+  replaces it. So a read fails only
   when it needs that record; a defect in a keyword that sizes an HDU still stops the
   open, as the next HDU cannot be found. Sources: cfitsio finds a lowercase keyword,
   reads a value after a misplaced `=` and parses a value only on request
@@ -740,9 +771,8 @@ and the dated measurements in `docs/research/`.
   `RecordView::Hierarch` with a checked `HierarchName`: one or more tokens of printable
   ASCII other than `=`, joined by one blank, as the blanks between tokens carry no
   meaning. Names compare without regard to ASCII case, as cfitsio and astropy compare
-  them, and keep the case they were read with. `get_hierarch` and `set_hierarch` take
-  `impl TryInto<HierarchName>`, as the keyword methods take `impl TryInto<Keyword>`, and
-  look the name up in a second index. A long string continues on `CONTINUE` records,
+  them, and keep the case they were read with. The keyed methods look a `HIERARCH`
+  name up in a second index. A long string continues on `CONTINUE` records,
   as astropy writes it; the blank before `=` goes only when the record needs that
   byte, as cfitsio and astropy write it; a comment that does not fit is
   `HeaderCardTooLong`, as is `COMMENT` or `HISTORY` text that does not fit one record.
@@ -755,9 +785,14 @@ and the dated measurements in `docs/research/`.
 - **A commentary record's name is a `CommentaryName`.** The standard lets a record
   with no value indicator start with any 8 bytes of printable ASCII, which no `Keyword`
   holds, so the name is its own inline, `Copy` type, while a valued record's is a
-  `Keyword`; `history_records` and `comment_records` read the commentary records.
-  Refused: a `String` name, which allocated for each `COMMENT` record a parse read,
-  and `comments`, which gave "comment" a second meaning beside the inline comment.
+  `Keyword`. `push_commentary(name, text)` and `commentary(name)` write and read the
+  records of any name; `commentary` takes the `CommentaryName` itself, so a read that
+  cannot fail gives no `Result`. A push refuses with `AmbiguousCommentary` a record that
+  would read back as another, as `SIMPLE` with `= T` would. A push drops trailing
+  blanks, as a parse drops them. Refused: a `String` name, which allocated for each
+  `COMMENT` record a parse read; `comments`, which gave "comment" a second meaning
+  beside the inline comment; and a method for each name (`push_history`,
+  `history_records`, …), which reached three names of the many the standard allows.
 - **The null string is written as `''`.** Any other string pads to 8 characters, as
   cfitsio writes it, but padding the null string would read back as one blank, so it
   stays `''`, as astropy writes it. A text value drops its trailing blanks when it is
@@ -835,6 +870,12 @@ and the dated measurements in `docs/research/`.
   scale and the unit on each call and tied the time layer to the WCS layer, and the
   offset scaled by `CUNITi`, which moved `TIMEOFFS = 10` s by 10 days on a day axis.
 
+- **A time unit keeps its spelling.** `time::Unit` holds its power-of-ten multiplier
+  and its prefix and base from the time table, or a tropical or Besselian year, and
+  `seconds` derives its length, so `Display` prints the unit that was read. The one
+  split in `unit` gives the spelling and `resolve` the length from it, so the two
+  cannot disagree. Refused: the length alone, which `ks` and `10**3 s` share and no
+  text could give back, and a search for a spelling at print time.
 - **A datetime is valid by construction.** `Datetime` has private fields,
   `Datetime::date(…).at(…)`, and its second as a whole number and a fraction, the
   fraction kept below 1. `to_mjd` needs no scale: a leap second needs a leap-second

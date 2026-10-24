@@ -15,8 +15,8 @@ use crate::column;
 use crate::column::ColumnSelector;
 use crate::column::Named;
 use crate::column::{ColumnLabels, ColumnScaling, Keyed, TableShape};
-use crate::error::Result;
-use crate::error::{ExpectedColumn, FitsError, TextOrigin};
+use crate::fits_error::Result;
+use crate::fits_error::{ExpectedColumn, FitsError, TextOrigin};
 use crate::header_model::{Header, keywords};
 
 /// The value type of an ASCII-table column.
@@ -539,7 +539,7 @@ fn parse_ascii_tform(value: &str) -> Result<AsciiFormat> {
 #[cfg(test)]
 pub(crate) mod internals {
     use crate::ascii::{Ascii, AsciiSchema};
-    use crate::error::Result;
+    use crate::fits_error::Result;
     use crate::header_model::Header;
     use crate::header_model::keywords;
     use crate::internals::cards;

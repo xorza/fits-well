@@ -1,10 +1,11 @@
 //! [`Scale`]: a `TIMESYS` / `CTYPEi` time-scale declaration, and the
 //! [`ScaleKind`] it resolves to.
 
+use std::fmt;
 use std::str::FromStr;
 
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 use crate::header_model::{Header, keywords};
 
 /// A recognized FITS time-scale meaning.
@@ -95,6 +96,41 @@ impl FromStr for Scale {
             _ => return Ok(Self::Local(base.to_string())),
         };
         Ok(Self::Known { kind, realization })
+    }
+}
+
+/// The standard code of the scale, as `TIMESYS` spells it: `TT` for `TDT` and `ET`
+/// alike.
+impl fmt::Display for ScaleKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Utc => "UTC",
+            Self::Ut1 => "UT1",
+            Self::Tai => "TAI",
+            Self::Tt => "TT",
+            Self::Tcg => "TCG",
+            Self::Tdb => "TDB",
+            Self::Tcb => "TCB",
+            Self::Gps => "GPS",
+        })
+    }
+}
+
+/// A standard scale as its code and its realization, `TT(TAI)`, and a local one as it
+/// was read: text that parses back to the same scale.
+impl fmt::Display for Scale {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Known {
+                kind,
+                realization: None,
+            } => fmt::Display::fmt(kind, f),
+            Self::Known {
+                kind,
+                realization: Some(realization),
+            } => write!(f, "{kind}({realization})"),
+            Self::Local(code) => f.write_str(code),
+        }
     }
 }
 

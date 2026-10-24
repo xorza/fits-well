@@ -1,8 +1,8 @@
 //! [`Record`]: one header record, and [`RecordView`], its borrowed form.
 
 use crate::block::CARD_SIZE;
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 use crate::header_model::commentary_name::CommentaryName;
 use crate::header_model::defect::Defect;
 use crate::header_model::hierarch_name::HierarchName;
@@ -105,9 +105,53 @@ impl Record {
         }
     }
 
-    /// A commentary record carrying free text; an empty `text` is a physically blank
-    /// record.
+    /// A valued record of `name`, or a `HIERARCH` one, without a comment;
+    /// [`FitsError::ReservedName`] for a name no valued record can carry.
+    pub(crate) fn valued(name: RecordName, value: Value) -> Result<Self> {
+        name.validate_valued()?;
+        Ok(match name {
+            RecordName::Keyword(keyword) => Self::Valued {
+                keyword,
+                value,
+                comment: None,
+            },
+            RecordName::Hierarch(name) => Self::Hierarch {
+                name,
+                value,
+                comment: None,
+            },
+            RecordName::Commentary(_) => unreachable!("validate_valued refuses a commentary name"),
+        })
+    }
+
+    /// This valued or `HIERARCH` record with the inline comment `text`;
+    /// [`FitsError::InvalidValue`] for a malformed record, which has no value to keep.
+    pub(crate) fn with_comment(&self, text: &str) -> Result<Self> {
+        let comment = Some(text.to_string());
+        match self {
+            Self::Valued { keyword, value, .. } => Ok(Self::Valued {
+                keyword: *keyword,
+                value: value.clone(),
+                comment,
+            }),
+            Self::Hierarch { name, value, .. } => Ok(Self::Hierarch {
+                name: name.clone(),
+                value: value.clone(),
+                comment,
+            }),
+            Self::Malformed { .. } => Err(self
+                .value_or_defect()
+                .expect_err("a malformed record has no value")),
+            Self::Commentary { .. } => {
+                unreachable!("the indexes hold valued, HIERARCH and malformed records only")
+            }
+        }
+    }
+
+    /// A commentary record carrying free text, its trailing blanks stripped as a parse
+    /// strips them; an empty `text` is a physically blank record.
     pub(crate) fn commentary(name: CommentaryName, text: &str) -> Self {
+        let text = text.trim_end_matches(' ');
         Self::Commentary {
             name,
             text: (!text.is_empty()).then(|| text.to_string()),
@@ -140,11 +184,31 @@ impl Record {
         }
     }
 
-    /// Whether this record's name is the `keyword` a commentary or valued record has.
-    pub(crate) fn is_named(&self, keyword: Keyword) -> bool {
+    /// Whether `name` names this record: a keyword a valued record, or a commentary
+    /// record of its text; a `HIERARCH` name a `HIERARCH` record; a commentary name a
+    /// commentary record. A malformed record answers to the name it has.
+    pub(crate) fn is_named(&self, name: &RecordName) -> bool {
+        match name {
+            RecordName::Keyword(keyword) => {
+                self.keyword() == Some(*keyword)
+                    || self
+                        .commentary_name()
+                        .is_some_and(|name| name.as_str() == keyword.as_str())
+            }
+            RecordName::Hierarch(wanted) => self.hierarch_name() == Some(wanted),
+            RecordName::Commentary(wanted) => self.commentary_name() == Some(*wanted),
+        }
+    }
+
+    /// A commentary record's name, or a malformed record's that is one.
+    const fn commentary_name(&self) -> Option<CommentaryName> {
         match self {
-            Self::Commentary { name, .. } => name.as_str() == keyword.as_str(),
-            _ => self.keyword() == Some(keyword),
+            Self::Commentary { name, .. }
+            | Self::Malformed {
+                name: Some(RecordName::Commentary(name)),
+                ..
+            } => Some(*name),
+            Self::Valued { .. } | Self::Hierarch { .. } | Self::Malformed { .. } => None,
         }
     }
 

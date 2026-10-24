@@ -32,11 +32,16 @@ fn main() -> fits_well::Result<()> {
     // `Wcs::from_header` parses those keywords into a usable transform. `None` selects
     // the primary WCS (an alternate would be `'A'`, etc.).
     let wcs = Wcs::from_header(header, None)?;
-    println!("axes: {:?}", wcs.metadata().axes);
+    println!("axes: {:?}", wcs.description().axes);
 
     // Pixel → world: the reference pixel (CRPIXn) maps to the reference sky
     // coordinate (CRVALn).
-    let reference_pixel: Vec<f64> = wcs.metadata().axes.iter().map(|axis| axis.crpix).collect();
+    let reference_pixel: Vec<f64> = wcs
+        .description()
+        .axes
+        .iter()
+        .map(|axis| axis.crpix)
+        .collect();
     // Each call writes one point into a buffer the caller owns and reuses.
     let mut reference = vec![0.0; reference_pixel.len()];
     wcs.pixel_to_world(&reference_pixel, &mut reference)?;

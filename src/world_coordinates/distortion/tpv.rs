@@ -2,8 +2,8 @@
 //! distortion of the celestial intermediate coordinates.
 
 use crate::alternate::Alternate;
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 use crate::header_model::Header;
 use crate::keyword::Keyword;
 use crate::world_coordinates::distortion::{MAX_STEPS, converged};

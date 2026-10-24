@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 
-use crate::error::{FitsError, Result};
+use crate::fits_error::{FitsError, Result};
 use crate::fits_writer::FitsWriter;
 use crate::fits_writer::ascii_builder::{AsciiBuilder, AsciiWriteColumn};
 use crate::fits_writer::builder::{Builder, WriteColumn};

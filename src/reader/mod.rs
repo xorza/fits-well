@@ -13,10 +13,10 @@ use crate::bintable::table_view::TableView;
 use crate::checksum::checksum_report::ChecksumReport;
 use crate::column::ColumnSelector;
 #[cfg(feature = "compression")]
-use crate::compress::table::{ContainerTiles, DecodedRows};
-use crate::error::ExpectedHdu;
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::compression::table::{ContainerTiles, DecodedRows};
+use crate::fits_error::ExpectedHdu;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 use crate::groups::RandomGroups;
 use crate::hdu::HduKind;
 use crate::reader::data_checksum::DataChecksum;
@@ -468,7 +468,7 @@ pub(crate) mod internals {
 
         use crate::bintable::Table;
         use crate::bintable::selection::{TableRows, TableSelection};
-        use crate::error::Result;
+        use crate::fits_error::Result;
         use crate::reader::FitsReader;
         use crate::reader::source::Source;
 

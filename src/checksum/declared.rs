@@ -2,7 +2,7 @@
 
 use crate::checksum;
 use crate::checksum::checksum_report::{ChecksumReport, ChecksumStatus};
-use crate::error::Result;
+use crate::fits_error::Result;
 use crate::header_model::value::Value;
 use crate::header_model::{Header, keywords};
 use crate::keyword::Keyword;

@@ -1,4 +1,4 @@
-use crate::error::{NonFinite, NumericTarget};
+use crate::fits_error::{NonFinite, NumericTarget};
 use crate::header_model::*;
 use crate::internals::cards::{from_card_lines, record_lines, records};
 use crate::internals::rng::SplitMix;
@@ -100,25 +100,25 @@ fn strict_optional_getters_distinguish_absent_and_mistyped_values() {
     assert!(matches!(
         h.require_logical(keywords::EXTEND),
         Err(FitsError::MissingKeyword {
-            keyword: keywords::EXTEND
+            name: RecordName::Keyword(keywords::EXTEND)
         })
     ));
     assert!(matches!(
         h.require_integer(keywords::PCOUNT),
         Err(FitsError::MissingKeyword {
-            keyword: keywords::PCOUNT
+            name: RecordName::Keyword(keywords::PCOUNT)
         })
     ));
     assert!(matches!(
         h.require_real(keywords::BSCALE),
         Err(FitsError::MissingKeyword {
-            keyword: keywords::BSCALE
+            name: RecordName::Keyword(keywords::BSCALE)
         })
     ));
     assert!(matches!(
         h.require_text(keywords::EXTNAME),
         Err(FitsError::MissingKeyword {
-            keyword: keywords::EXTNAME
+            name: RecordName::Keyword(keywords::EXTNAME)
         })
     ));
     assert!(matches!(
@@ -152,26 +152,31 @@ fn bounded_integer_getter_rejects_exact_values_outside_i64() {
 
     // The `usize` forms take 7, refuse a negative value as out of range and pass the
     // i64 refusal on; an absent card is missing, or the default.
-    assert_eq!(h.require_usize("SEVEN").unwrap(), 7);
-    assert_eq!(h.optional_usize("SEVEN", 3).unwrap(), 7);
-    assert_eq!(h.optional_usize("ABSENT", 3).unwrap(), 3);
+    let key = |name| Keyword::try_from(name).unwrap();
+    assert_eq!(h.require_usize(key("SEVEN")).unwrap(), 7);
+    assert_eq!(h.optional_usize(key("SEVEN"), 3).unwrap(), 7);
+    assert_eq!(h.optional_usize(key("ABSENT"), 3).unwrap(), 3);
     assert!(matches!(
-        h.require_usize("ABSENT"),
-        Err(FitsError::MissingKeyword { keyword }) if keyword == "ABSENT"
+        h.require_usize(key("ABSENT")),
+        Err(FitsError::MissingKeyword { name: RecordName::Keyword(keyword) }) if keyword == "ABSENT"
     ));
-    for result in [h.require_usize("MIN"), h.optional_usize("MIN", 3)] {
+    for result in [h.require_usize(key("MIN")), h.optional_usize(key("MIN"), 3)] {
         assert!(matches!(
             result,
             Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "MIN"
         ));
     }
-    for result in [h.require_usize("ABOVE"), h.optional_usize("ABOVE", 3)] {
+    for result in [
+        h.require_usize(key("ABOVE")),
+        h.optional_usize(key("ABOVE"), 3),
+    ] {
         assert!(matches!(
             result,
             Err(FitsError::IntegerOutOfRange {
+                name: Some(RecordName::Keyword(keyword)),
                 target: NumericTarget::I64,
                 ..
-            })
+            }) if keyword == "ABOVE"
         ));
     }
 }
@@ -270,10 +275,10 @@ fn iter_yields_every_record_in_order_with_duplicates() {
     assert!(h.contains(keywords::COMMENT).unwrap());
     assert!(!h.contains(keywords::EXTNAME).unwrap());
     assert_eq!(
-        h.comment_records().collect::<Vec<_>>(),
+        h.commentary(CommentaryName::COMMENT).collect::<Vec<_>>(),
         [" some annotation"]
     );
-    assert_eq!(h.history_records().count(), 0);
+    assert_eq!(h.commentary(CommentaryName::HISTORY).count(), 0);
 }
 
 #[test]
@@ -410,8 +415,10 @@ fn builder_rejects_nonstandard_keyword_names_without_mutating() {
 fn builder_appends_commentary_cards() {
     let mut h = Header::new();
     h.set_internal(keywords::SIMPLE, true);
-    h.push_comment("made by fits").unwrap();
-    h.push_history("step 1").unwrap();
+    h.push_commentary(CommentaryName::COMMENT, "made by fits")
+        .unwrap();
+    h.push_commentary(CommentaryName::HISTORY, "step 1")
+        .unwrap();
     assert_eq!(h.records.len(), 3);
     assert!(matches!(h.records[1], Record::Commentary { .. }));
     assert_eq!(names(&h)[1..], ["COMMENT", "HISTORY"]);
@@ -428,7 +435,7 @@ fn ordered_header_edits_preserve_duplicates_and_rebuild_lookup() {
     header
         .set(keywords::INSTRUME, "CCD-1")
         .unwrap()
-        .push_blank("")
+        .push_commentary(CommentaryName::BLANK, "")
         .unwrap();
 
     assert_eq!(header.get_text(keywords::OBJECT).unwrap(), Some("first"));
@@ -463,16 +470,23 @@ fn ordered_header_edits_preserve_duplicates_and_rebuild_lookup() {
     header.set_optional(keywords::OBJECT, None::<&str>).unwrap();
     assert_eq!(header.len(), 3);
     // A commentary keyword is refused with a value and without one alike.
-    header.push_comment("kept").unwrap();
+    header
+        .push_commentary(CommentaryName::COMMENT, "kept")
+        .unwrap();
     for value in [Some("text"), None] {
         assert!(matches!(
             header.set_optional(keywords::COMMENT, value),
-            Err(FitsError::ReservedKeyword {
-                keyword: keywords::COMMENT
+            Err(FitsError::ReservedName {
+                name: RecordName::Keyword(keywords::COMMENT)
             })
         ));
     }
-    assert_eq!(header.comment_records().collect::<Vec<_>>(), ["kept"]);
+    assert_eq!(
+        header
+            .commentary(CommentaryName::COMMENT)
+            .collect::<Vec<_>>(),
+        ["kept"]
+    );
     assert!(matches!(
         header.remove_at(99),
         Err(FitsError::IndexOutOfBounds {
@@ -481,6 +495,15 @@ fn ordered_header_edits_preserve_duplicates_and_rebuild_lookup() {
             len: 4
         })
     ));
+    // A commentary name of any printable text names its records, and a parse strips
+    // the trailing blanks a push strips.
+    let free = CommentaryName::try_from("ab cd").unwrap();
+    header.push_commentary("ab cd", "free text  ").unwrap();
+    assert_eq!(header.commentary(free).collect::<Vec<_>>(), ["free text"]);
+    assert_eq!(header.index_of(free).unwrap(), Some(4));
+    assert_eq!(header.index_of(keywords::COMMENT).unwrap(), Some(3));
+    assert_eq!(header.remove_all(free).unwrap(), 1);
+    assert_eq!(header.len(), 4);
 }
 
 #[test]
@@ -512,8 +535,35 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
     for keyword in ["END", "CONTINUE", "COMMENT", "HISTORY"] {
         assert!(matches!(
             header.set(keyword, 1),
-            Err(FitsError::ReservedKeyword { keyword: reserved }) if reserved == keyword
+            Err(FitsError::ReservedName { name: RecordName::Keyword(reserved) }) if reserved == keyword
         ));
+    }
+    // A commentary name carries no value, nor an inline comment.
+    let free = CommentaryName::try_from("ab cd").unwrap();
+    assert!(matches!(
+        header.set(free, 1),
+        Err(FitsError::ReservedName { name: RecordName::Commentary(name) }) if name == free
+    ));
+    assert!(matches!(
+        header.set_comment(free, "c"),
+        Err(FitsError::ReservedName { name: RecordName::Commentary(name) }) if name == free
+    ));
+    // A commentary record that would read back as an `END`, valued, `HIERARCH` or
+    // `CONTINUE` record is refused.
+    for (name, text) in [
+        ("END", "x"),
+        ("SIMPLE", "= T"),
+        ("A=B", "x"),
+        ("HIERARCH", " ESO DET = 1"),
+        ("CONTINUE", "  'abc'"),
+    ] {
+        assert!(
+            matches!(
+                header.push_commentary(name, text),
+                Err(FitsError::AmbiguousCommentary { name: refused }) if refused.as_str() == name
+            ),
+            "{name:?} {text:?}"
+        );
     }
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         assert!(matches!(
@@ -579,20 +629,22 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
     let before = header.clone();
     assert!(matches!(
         header.set_comment("ABSENT", "lost"),
-        Err(FitsError::MissingKeyword { keyword }) if keyword == "ABSENT"
+        Err(FitsError::MissingKeyword { name: RecordName::Keyword(keyword) }) if keyword == "ABSENT"
     ));
     assert_eq!(header.records, before.records);
 
-    header.push_comment(&"x".repeat(72)).unwrap();
+    header
+        .push_commentary(CommentaryName::COMMENT, &"x".repeat(72))
+        .unwrap();
     assert!(matches!(
-        header.push_comment(&"x".repeat(73)),
+        header.push_commentary(CommentaryName::COMMENT, &"x".repeat(73)),
         Err(FitsError::HeaderCardTooLong {
             name,
             length: 81,
         }) if name.to_string() == "COMMENT"
     ));
     assert!(matches!(
-        header.push_history("history\nline"),
+        header.push_commentary(CommentaryName::HISTORY, "history\nline"),
         Err(FitsError::InvalidAscii { text: TextOrigin::Comment(name) }) if name.to_string() == "HISTORY"
     ));
     assert_eq!(header.records.len(), 2);
@@ -604,13 +656,13 @@ fn missing_mandatory_keyword_is_reported() {
     assert!(matches!(
         h.bitpix(),
         Err(FitsError::MissingKeyword {
-            keyword: keywords::BITPIX
+            name: RecordName::Keyword(keywords::BITPIX)
         })
     ));
     assert!(matches!(
         h.naxis(),
         Err(FitsError::MissingKeyword {
-            keyword: keywords::NAXIS
+            name: RecordName::Keyword(keywords::NAXIS)
         })
     ));
 }
@@ -653,30 +705,48 @@ fn trailing_blank_records_are_space() {
     ));
 }
 
-/// HIERARCH records are found by name without regard to case, and set in place or
-/// appended; a long string continues on `CONTINUE` records and reads back whole, and
-/// the records keep their order with the others.
+/// HIERARCH records are found by name without regard to case, through every keyed
+/// method a keyword takes, and set in place or appended; a long string continues on
+/// `CONTINUE` records and reads back whole, and the records keep their order with the
+/// others.
 #[test]
 fn hierarch_records_are_found_and_set_by_name() {
     let mut header = from_card_lines(&[
         "SIMPLE  =                    T",
         "HIERARCH ESO DET CHIP1 NAME = 'CCD-44'",
+        "HIERARCH ESO DET DIT = 2.5",
         "OBJECT  = 'M31'",
     ]);
     assert_eq!(
-        header.get_hierarch("eso det  chip1 name").unwrap(),
+        header.get("HIERARCH eso det  chip1 name").unwrap(),
         Some(&Value::Text("CCD-44".into()))
     );
-    assert_eq!(header.get_hierarch("ESO DET CHIP2 NAME").unwrap(), None);
+    assert_eq!(header.get_real("HIERARCH ESO DET DIT").unwrap(), Some(2.5));
+    assert_eq!(header.require_real("HIERARCH ESO DET DIT").unwrap(), 2.5);
+    let chip2: RecordName = "HIERARCH ESO DET CHIP2 NAME".parse().unwrap();
+    assert_eq!(header.get(chip2.clone()).unwrap(), None);
     assert!(matches!(
-        header.get_hierarch("A=B"),
-        Err(FitsError::InvalidKeyword { .. })
+        header.require_text(chip2.clone()),
+        Err(FitsError::MissingKeyword { name }) if name == chip2
     ));
-    header.set_hierarch("ESO DET CHIP1 NAME", "CCD-45").unwrap();
-    let long = "x".repeat(100);
-    header.set_hierarch("ESO OBS NAME", long.as_str()).unwrap();
     assert!(matches!(
-        header.set_hierarch("ESO BAD", "caf\u{e9}"),
+        header.get_integer("HIERARCH ESO DET CHIP1 NAME"),
+        Err(FitsError::ValueTypeMismatch { name: RecordName::Hierarch(name), expected: ValueKind::Integer })
+            if name.as_str() == "ESO DET CHIP1 NAME"
+    ));
+    assert_eq!(header.index_of("HIERARCH ESO DET DIT").unwrap(), Some(2));
+    assert!(!header.contains(chip2).unwrap());
+    assert!(matches!(
+        header.get("HIERARCH A=B"),
+        Err(FitsError::InvalidKeyword { name }) if name == "HIERARCH A=B"
+    ));
+    header.append("HIERARCH ESO DET DIT", 3.0).unwrap();
+    assert_eq!(header.remove_all("HIERARCH ESO DET DIT").unwrap(), 2);
+    header.set("HIERARCH ESO DET CHIP1 NAME", "CCD-45").unwrap();
+    let long = "x".repeat(100);
+    header.set("HIERARCH ESO OBS NAME", long.as_str()).unwrap();
+    assert!(matches!(
+        header.set("HIERARCH ESO BAD", "caf\u{e9}"),
         Err(FitsError::InvalidAscii { .. })
     ));
 
@@ -699,7 +769,7 @@ fn hierarch_records_are_found_and_set_by_name() {
     );
     let reread = Header::parse(&bytes).unwrap();
     assert_eq!(
-        reread.get_hierarch("ESO OBS NAME").unwrap(),
+        reread.get("HIERARCH ESO OBS NAME").unwrap(),
         Some(&Value::Text(long))
     );
     assert_eq!(
@@ -714,8 +784,8 @@ fn hierarch_records_are_found_and_set_by_name() {
 }
 
 /// A HIERARCH record whose value does not parse keeps its name: its lookup fails as a
-/// keyword's does, `set_hierarch` replaces it in its place, and `remove_hierarch` removes
-/// it. Its comment reads with `get_hierarch_comment`.
+/// keyword's does, `set` replaces it in its place, and `remove` removes it. Its comment
+/// reads with `get_comment` and changes with `set_comment`.
 #[test]
 fn a_malformed_hierarch_record_keeps_its_name() {
     let mut h = from_card_lines(&[
@@ -723,26 +793,36 @@ fn a_malformed_hierarch_record_keeps_its_name() {
         "HIERARCH ESO DET NAME = 'CCD' / the chip",
     ]);
     assert!(matches!(
-        h.get_hierarch("ESO DET GAIN"),
+        h.get("HIERARCH ESO DET GAIN"),
+        Err(FitsError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        h.set_comment("HIERARCH ESO DET GAIN", "gain"),
         Err(FitsError::InvalidValue { .. })
     ));
     assert_eq!(
-        h.get_hierarch_comment("eso det name").unwrap(),
+        h.get_comment("HIERARCH eso det name").unwrap(),
         Some("the chip")
     );
-    h.set_hierarch("ESO DET GAIN", 1.5).unwrap();
+    h.set_comment("HIERARCH ESO DET NAME", "the detector")
+        .unwrap();
+    assert_eq!(
+        h.get_comment("HIERARCH ESO DET NAME").unwrap(),
+        Some("the detector")
+    );
+    h.set("HIERARCH ESO DET GAIN", 1.5).unwrap();
     assert_eq!(h.len(), 2);
     assert_eq!(
-        h.get_hierarch("ESO DET GAIN").unwrap(),
+        h.get("HIERARCH ESO DET GAIN").unwrap(),
         Some(&Value::Real(1.5))
     );
     assert_eq!(names(&h)[0], "HIERARCH ESO DET GAIN");
     assert!(matches!(
-        h.remove_hierarch("ESO DET NAME").unwrap(),
+        h.remove("HIERARCH ESO DET NAME").unwrap(),
         Some(Record::Hierarch { .. })
     ));
-    assert_eq!(h.get_hierarch("ESO DET NAME").unwrap(), None);
-    assert_eq!(h.remove_hierarch("ESO DET NAME").unwrap(), None);
+    assert_eq!(h.get("HIERARCH ESO DET NAME").unwrap(), None);
+    assert_eq!(h.remove("HIERARCH ESO DET NAME").unwrap(), None);
 }
 
 /// Each edit keeps both indexes on the first record of each name: after a seeded run of
@@ -792,13 +872,13 @@ fn edits_keep_the_indexes_on_the_first_record_of_each_name() {
                 RecordView::Hierarch { name, value, .. } if *name == wanted => Some(value),
                 _ => None,
             });
-            assert_eq!(h.get_hierarch(name).unwrap(), first, "step {step}: {name}");
+            assert_eq!(h.get(wanted).unwrap(), first, "step {step}: {name}");
         }
     }
 }
 
-/// `insert_record` puts back what `remove_at` took, and `Extend` appends records as
-/// `insert_record` does: a header rebuilt from its own records equals it.
+/// `insert_record` puts back what `remove_at` took: a header rebuilt from its own
+/// records, one at a time, equals it.
 #[test]
 fn insert_record_is_the_inverse_of_remove_at() {
     let original = sample();

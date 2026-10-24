@@ -13,10 +13,10 @@ use crate::bintable::table_view::TableView;
 use crate::bitpix::Bitpix;
 use crate::checksum::checksum_report::ChecksumReport;
 #[cfg(feature = "compression")]
-use crate::compress::decode::tile_section::TileSection;
+use crate::compression::decode::tile_section::TileSection;
 #[cfg(feature = "compression")]
-use crate::compress::decode::tiled_image::TiledImage;
-use crate::error::{FitsError, Result};
+use crate::compression::decode::tiled_image::TiledImage;
+use crate::fits_error::{FitsError, Result};
 #[cfg(feature = "compression")]
 use crate::hdu::HduKind;
 use crate::hdu::image_geometry::ImageGeometry;

@@ -7,9 +7,9 @@ pub(super) mod spectral_kind;
 pub(crate) mod spectral_rest;
 pub(super) mod spectral_transform;
 
-use crate::error::FitsError;
-use crate::error::Result;
-use crate::error::WcsDefect;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
+use crate::fits_error::WcsDefect;
 use crate::world_coordinates::axis_transform::spectral_algorithm::SpectralAlgorithm;
 use crate::world_coordinates::axis_transform::spectral_kind::{SpectralKind, domain_error, finite};
 use crate::world_coordinates::axis_transform::spectral_rest::{

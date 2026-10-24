@@ -4,10 +4,10 @@ use crate::ascii::AsciiSchema;
 use crate::bintable::schema::Schema;
 use crate::block::{BLOCK_SIZE, padded_len};
 #[cfg(feature = "compression")]
-use crate::compress::table::TiledTable;
-use crate::error::ExpectedHdu;
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::compression::table::TiledTable;
+use crate::fits_error::ExpectedHdu;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 use crate::hdu::HduKind;
 use crate::hdu::HduPosition;
 use crate::hdu::HduRole;

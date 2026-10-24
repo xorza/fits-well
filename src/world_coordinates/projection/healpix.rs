@@ -1,6 +1,6 @@
 //! `HEALPix` projection from Calabretta & Roukema (2007).
 
-use crate::error::Result;
+use crate::fits_error::Result;
 use crate::world_coordinates::angle::DEGREE_TOLERANCE;
 use crate::world_coordinates::angle::R2D;
 use crate::world_coordinates::native_coordinate::NativeCoordinate;

@@ -1,7 +1,7 @@
 use std::fmt;
 
-use crate::error::Result;
-use crate::error::{FitsError, NumericTarget};
+use crate::fits_error::Result;
+use crate::fits_error::{FitsError, NumericTarget};
 
 /// A signed decimal FITS integer (§4.2.3).
 ///
@@ -60,7 +60,7 @@ impl FitsInteger {
 
     fn out_of_range(&self, target: NumericTarget) -> FitsError {
         FitsError::IntegerOutOfRange {
-            keyword: None,
+            name: None,
             value: self.to_string(),
             target,
         }
@@ -206,7 +206,7 @@ impl Value {
                     Ok(Some(*r as i64))
                 } else {
                     Err(FitsError::IntegerOutOfRange {
-                        keyword: None,
+                        name: None,
                         value: r.to_string(),
                         target: NumericTarget::I64,
                     })
@@ -355,7 +355,7 @@ mod tests {
                 Some(expected) => assert_eq!(i64::try_from(&value).unwrap(), expected),
                 None => assert!(matches!(
                     i64::try_from(&value),
-                    Err(FitsError::IntegerOutOfRange { keyword: None, value, target })
+                    Err(FitsError::IntegerOutOfRange { name: None, value, target })
                         if value == decimal && target == NumericTarget::I64
                 )),
             }

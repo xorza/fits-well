@@ -6,9 +6,9 @@
 //! decoded but never written.
 
 use crate::bitpix::Bitpix;
-use crate::error::FitsError;
-use crate::error::Indexed;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Indexed;
+use crate::fits_error::Result;
 use crate::header_model::{Header, keywords};
 use crate::image_model::data::Data;
 use crate::image_model::physical_sample::PhysicalSample;
@@ -252,7 +252,7 @@ impl RandomGroups {
 
 #[cfg(test)]
 pub(crate) mod internals {
-    use crate::error::Result;
+    use crate::fits_error::Result;
     use crate::groups::RandomGroups;
     use crate::header_model::Header;
     use crate::image_model::data::Data;

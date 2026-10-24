@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use crate::error::Result;
+use crate::fits_error::Result;
 
 /// Rows of varying length in one buffer: every row's values in `values`, in row
 /// order, and where each row ends. Row `r` spans `ends[r - 1]..ends[r]` of the

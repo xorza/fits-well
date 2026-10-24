@@ -12,8 +12,8 @@ use std::io::Seek;
 use std::io::SeekFrom;
 
 use crate::allocation;
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 
 /// Seals [`Source`] so it is a closed set implemented only by the in-tree source
 /// types (`StreamSource`/`SliceSource`) — not an extension point, and
@@ -226,7 +226,7 @@ pub(crate) mod internals {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use crate::error::Result;
+    use crate::fits_error::Result;
     use crate::reader::FitsReader;
     use crate::reader::source::SliceSource;
     use crate::reader::source::Source;
@@ -308,7 +308,7 @@ pub(crate) mod internals {
 mod tests {
     use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
-    use crate::error::FitsError;
+    use crate::fits_error::FitsError;
     use crate::reader::source::{Source, StreamSource};
 
     /// A cursor that counts its seeks and its reads.

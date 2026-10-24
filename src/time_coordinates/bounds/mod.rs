@@ -1,7 +1,7 @@
 //! [`Bounds`]: a header's observation bounds, durations and time errors.
 
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 use crate::header_model::{Header, keywords};
 use crate::keyword::Keyword;
 use crate::time_coordinates::coordinate::Coordinate;

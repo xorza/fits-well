@@ -1,9 +1,9 @@
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::element_kind::ElementKind;
 use crate::bintable::tform::Storage;
-use crate::bintable::tform::internals::tform;
-use crate::error::ExpectedHdu;
-use crate::error::FitsError;
+use crate::bintable::tform::Tform;
+use crate::fits_error::ExpectedHdu;
+use crate::fits_error::FitsError;
 use crate::hdu::HduKind;
 use crate::internals::fixture::Fixture;
 
@@ -18,15 +18,15 @@ fn reads_the_real_aips_antenna_table() {
     assert_eq!(table.schema.columns[0].name.as_deref(), Some("ANNAME"));
     assert_eq!(
         table.schema.columns[0].tform,
-        tform(8, ElementKind::Character, Storage::Fixed)
+        Tform::new(8, ElementKind::Character, Storage::Fixed)
     );
     assert_eq!(
         table.schema.columns[1].tform,
-        tform(3, ElementKind::F64, Storage::Fixed)
+        Tform::new(3, ElementKind::F64, Storage::Fixed)
     );
     assert_eq!(
         table.schema.columns[2].tform,
-        tform(0, ElementKind::F64, Storage::Fixed)
+        Tform::new(0, ElementKind::F64, Storage::Fixed)
     );
     // The 0D ORBPARM column contributes no width, so NOSTA shares its offset.
     assert_eq!(table.schema.columns[2].byte_offset, 32);

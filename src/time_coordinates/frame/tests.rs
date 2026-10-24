@@ -1,8 +1,8 @@
-use crate::error::FitsError;
-use crate::error::Indexed;
-use crate::error::TimeConversion;
-use crate::error::UnitKind;
-use crate::error::ValueKind;
+use crate::fits_error::FitsError;
+use crate::fits_error::Indexed;
+use crate::fits_error::TimeConversion;
+use crate::fits_error::UnitKind;
+use crate::fits_error::ValueKind;
 use crate::header_model::record_name::RecordName;
 use crate::header_model::{Header, keywords};
 use crate::internals::cards::header_of;

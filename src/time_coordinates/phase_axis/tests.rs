@@ -1,6 +1,7 @@
-use crate::error::FitsError;
-use crate::error::Indexed;
+use crate::fits_error::FitsError;
+use crate::fits_error::Indexed;
 use crate::header_model::Header;
+use crate::header_model::record_name::RecordName;
 use crate::internals::cards::header_of;
 
 use crate::time_coordinates::phase_axis::PhaseAxis;
@@ -89,7 +90,7 @@ fn reads_phase_axis_metadata() {
     h.set_internal("CTYPE6", "PHASE");
     assert!(matches!(
         PhaseAxis::from_header(&h, 6, None),
-        Err(FitsError::MissingKeyword { keyword }) if keyword.as_str() == "CZPHS6"
+        Err(FitsError::MissingKeyword { name: RecordName::Keyword(keyword) }) if keyword.as_str() == "CZPHS6"
     ));
 
     let empty = Header::new();

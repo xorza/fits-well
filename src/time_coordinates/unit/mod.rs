@@ -1,27 +1,35 @@
 //! [`Unit`]: a parsed `TIMEUNIT` or time-axis `CUNITi`.
 
-use crate::error::FitsError;
-use crate::error::Result;
-use crate::error::TimeConversion;
-use crate::error::UnitKind;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
+use crate::fits_error::TimeConversion;
+use crate::fits_error::UnitKind;
 use crate::time_coordinates::mjd::Mjd;
 use crate::time_coordinates::scale::{Scale, ScaleKind};
 use crate::unit;
 use crate::unit::SECONDS_PER_DAY;
+use crate::unit::{PowerOfTen, UnitParts};
+use std::fmt;
 use std::str::FromStr;
 
-/// A time unit (§9.3, Table 31), parsed once from its keyword. Most units have a fixed
-/// length; the tropical and Besselian years have a length that depends on the reference
-/// epoch and is defined only in a TDB or TT frame, so it is evaluated by
-/// [`Unit::seconds`].
+/// A time unit (§9.3, Table 31), parsed once from its keyword, as it is spelled: a
+/// power-of-ten multiplier, and a base unit with its SI prefix or a year of epoch-dependent
+/// length. Most units have a fixed length; the tropical and Besselian years have a length
+/// that depends on the reference epoch and is defined only in a TDB or TT frame, so
+/// [`Unit::seconds`] evaluates it.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Unit {
-    /// A fixed length, in seconds.
-    Seconds(f64),
+pub struct Unit {
+    spelling: Spelling,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Spelling {
+    /// A unit of fixed length from the time table.
+    Fixed(UnitParts),
     /// A multiple of the tropical year (`ta`).
-    TropicalYears(f64),
+    TropicalYears(PowerOfTen),
     /// A multiple of the Besselian year (`Ba`).
-    BesselianYears(f64),
+    BesselianYears(PowerOfTen),
 }
 
 impl Unit {
@@ -30,14 +38,14 @@ impl Unit {
     /// Besselian year outside TT, which need ephemeris data.
     pub fn seconds(self, reference_mjd: Mjd, scale: &Scale) -> Result<f64> {
         let reference_mjd = reference_mjd.to_f64();
-        match self {
-            Self::Seconds(seconds) => Ok(seconds),
-            Self::TropicalYears(factor) => {
-                Ok(factor * tropical_year_days(reference_mjd, scale)? * SECONDS_PER_DAY)
-            }
-            Self::BesselianYears(factor) => {
-                Ok(factor * besselian_year_days(reference_mjd, scale)? * SECONDS_PER_DAY)
-            }
+        match self.spelling {
+            Spelling::Fixed(parts) => Ok(parts.scale()),
+            Spelling::TropicalYears(multiplier) => Ok(multiplier.factor()
+                * tropical_year_days(reference_mjd, scale)?
+                * SECONDS_PER_DAY),
+            Spelling::BesselianYears(multiplier) => Ok(multiplier.factor()
+                * besselian_year_days(reference_mjd, scale)?
+                * SECONDS_PER_DAY),
         }
     }
 }
@@ -52,14 +60,43 @@ impl FromStr for Unit {
             unit: text.to_string(),
             expected: UnitKind::Time,
         };
-        if let Some(seconds) = unit::resolve(text, unit::TIME) {
-            return Ok(Self::Seconds(seconds));
+        if let Some(parts) = unit::split(text, unit::TIME) {
+            return Ok(Self {
+                spelling: Spelling::Fixed(parts),
+            });
         }
         let scaled = unit::split_numeric_multiplier(text).ok_or_else(invalid)?;
-        match scaled.base {
-            "ta" => Ok(Self::TropicalYears(scaled.factor)),
-            "Ba" => Ok(Self::BesselianYears(scaled.factor)),
-            _ => Err(invalid()),
+        let spelling = match scaled.base {
+            "ta" => Spelling::TropicalYears(scaled.multiplier),
+            "Ba" => Spelling::BesselianYears(scaled.multiplier),
+            _ => return Err(invalid()),
+        };
+        Ok(Self { spelling })
+    }
+}
+
+/// The multiplier as `10**k` when it is not 1, then the prefix and the base: `ms`,
+/// `10**3 d`, `ta`. A spelling of the multiplier other than `10**k` prints as `10**k`.
+impl fmt::Display for Unit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let multiplier = match self.spelling {
+            Spelling::Fixed(parts) => parts.multiplier,
+            Spelling::TropicalYears(multiplier) | Spelling::BesselianYears(multiplier) => {
+                multiplier
+            }
+        };
+        if multiplier.exponent() != 0 {
+            write!(f, "10**{} ", multiplier.exponent())?;
+        }
+        match self.spelling {
+            Spelling::Fixed(parts) => {
+                if let Some(prefix) = parts.prefix {
+                    f.write_str(prefix.symbol)?;
+                }
+                f.write_str(parts.base.symbol)
+            }
+            Spelling::TropicalYears(_) => f.write_str("ta"),
+            Spelling::BesselianYears(_) => f.write_str("Ba"),
         }
     }
 }

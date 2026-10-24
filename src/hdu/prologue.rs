@@ -1,7 +1,7 @@
 //! [`Prologue`]: the structural records an HDU's header opens with.
 
 use crate::bitpix::Bitpix;
-use crate::error::{FitsError, Result};
+use crate::fits_error::{FitsError, Result};
 use crate::header_model::{Header, keywords, value};
 
 /// What an HDU's header opens with.

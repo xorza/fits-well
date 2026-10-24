@@ -10,7 +10,7 @@ use core::fmt::{self, Write};
 use std::str;
 use std::str::FromStr;
 
-use crate::error::{FitsError, Result};
+use crate::fits_error::{FitsError, Result};
 
 /// A FITS keyword name: 1 to 8 bytes of `A`–`Z`, `0`–`9`, `-` and `_` (§4.1.2.1),
 /// held inline, so it is `Copy` and makes no allocation.

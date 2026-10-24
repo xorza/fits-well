@@ -1,7 +1,7 @@
 //! [`Coordinate`]: an absolute time with its scale.
 
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 use crate::header_model::{Header, keywords};
 use crate::time_coordinates::datetime::Datetime;
 use crate::time_coordinates::mjd::{Expansion, Mjd};

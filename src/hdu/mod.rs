@@ -8,8 +8,9 @@ pub(crate) mod image_geometry;
 pub(crate) mod prologue;
 
 use crate::block::padded_len;
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
+use crate::header_model::record_name::RecordName;
 use crate::header_model::{Header, keywords};
 
 /// An HDU's position-derived header form before its complete role is known.
@@ -47,7 +48,7 @@ impl HduRole {
                 header
                     .get_logical(keywords::SIMPLE)?
                     .ok_or(FitsError::MissingKeyword {
-                        keyword: keywords::SIMPLE,
+                        name: RecordName::Keyword(keywords::SIMPLE),
                     })?;
                 if header.get_logical(keywords::GROUPS)? == Some(true) {
                     validate_random_groups_axes(&header.axes()?)?;
@@ -60,7 +61,7 @@ impl HduRole {
                 header
                     .get_text(keywords::XTENSION)?
                     .ok_or(FitsError::MissingKeyword {
-                        keyword: keywords::XTENSION,
+                        name: RecordName::Keyword(keywords::XTENSION),
                     })?;
                 Ok(Self::Extension)
             }
@@ -105,7 +106,7 @@ impl HduKind {
         let xtension = header
             .get_text(keywords::XTENSION)?
             .ok_or(FitsError::MissingKeyword {
-                keyword: keywords::XTENSION,
+                name: RecordName::Keyword(keywords::XTENSION),
             })?;
         Ok(match xtension {
             "IMAGE" => Self::Image,
@@ -182,7 +183,7 @@ fn required_group_counts(header: &Header) -> Result<GroupCounts> {
     let pcount = header
         .get_integer(keywords::PCOUNT)?
         .ok_or(FitsError::MissingKeyword {
-            keyword: keywords::PCOUNT,
+            name: RecordName::Keyword(keywords::PCOUNT),
         })?;
     if pcount < 0 {
         return Err(FitsError::KeywordOutOfRange {
@@ -192,7 +193,7 @@ fn required_group_counts(header: &Header) -> Result<GroupCounts> {
     let gcount = header
         .get_integer(keywords::GCOUNT)?
         .ok_or(FitsError::MissingKeyword {
-            keyword: keywords::GCOUNT,
+            name: RecordName::Keyword(keywords::GCOUNT),
         })?;
     if gcount < 0 {
         return Err(FitsError::KeywordOutOfRange {

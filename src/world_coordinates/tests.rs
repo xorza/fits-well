@@ -1,8 +1,8 @@
 use crate::alternate::Alternate;
-use crate::error::FitsError;
-use crate::error::Indexed;
-use crate::error::Ranked;
-use crate::error::WcsDefect;
+use crate::fits_error::FitsError;
+use crate::fits_error::Indexed;
+use crate::fits_error::Ranked;
+use crate::fits_error::WcsDefect;
 use crate::header_model::value::Value;
 use crate::header_model::{Header, keywords};
 use crate::image_model::region::Region;
@@ -13,7 +13,7 @@ use crate::internals::wcs_header::{Family, WcsHeader};
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::angle;
 use crate::world_coordinates::angle::R2D;
-use crate::world_coordinates::axis::Axis;
+use crate::world_coordinates::axis_description::AxisDescription;
 use crate::world_coordinates::celestial_pole::CelestialPole;
 use crate::world_coordinates::internals::TAN_GOLDEN;
 use crate::world_coordinates::internals::assert_astropy_golden;
@@ -26,16 +26,16 @@ use crate::world_coordinates::projection::Projection;
 fn parses_tan_header() {
     let w = Fixture::WcsTan.wcs();
     assert_eq!(
-        w.metadata().axes,
+        w.description().axes,
         [
-            Axis {
+            AxisDescription {
                 ctype: "RA---TAN".to_string(),
                 cunit: "deg".to_string(),
                 crval: 150.0,
                 crpix: 256.0,
                 spectral_frame: None,
             },
-            Axis {
+            AxisDescription {
                 ctype: "DEC--TAN".to_string(),
                 cunit: "deg".to_string(),
                 crval: 2.5,
@@ -186,7 +186,7 @@ fn public_wcs_metadata_exposes_units_and_celestial_projection_pair() {
         .set_internal("CUNIT1", "deg")
         .set_internal("CUNIT2", "deg");
     let wcs = Wcs::from_header(&header, None).unwrap();
-    let view = wcs.metadata();
+    let view = wcs.description();
     assert_eq!(view.axes[0].cunit, "deg");
     assert_eq!(view.axes[1].cunit, "deg");
     let celestial = view.celestial_projection.unwrap();
@@ -254,7 +254,10 @@ fn absent_wcsaxes_uses_the_largest_wcs_index() {
         cd,
     ];
     for h in &cases {
-        assert_eq!(Wcs::from_header(h, None).unwrap().metadata().axes.len(), 4);
+        assert_eq!(
+            Wcs::from_header(h, None).unwrap().description().axes.len(),
+            4
+        );
     }
 
     for alternate in [
@@ -265,7 +268,7 @@ fn absent_wcsaxes_uses_the_largest_wcs_index() {
         assert_eq!(
             Wcs::from_header(&alternate, None)
                 .unwrap()
-                .metadata()
+                .description()
                 .axes
                 .len(),
             2
@@ -273,7 +276,7 @@ fn absent_wcsaxes_uses_the_largest_wcs_index() {
         assert_eq!(
             Wcs::from_header(&alternate, 'A')
                 .unwrap()
-                .metadata()
+                .description()
                 .axes
                 .len(),
             4
@@ -296,18 +299,24 @@ fn rejects_absurd_wcsaxes() {
         ));
     }
     h.set_internal(keywords::WCSAXES, 1);
-    assert_eq!(Wcs::from_header(&h, None).unwrap().metadata().axes.len(), 1);
+    assert_eq!(
+        Wcs::from_header(&h, None).unwrap().description().axes.len(),
+        1
+    );
     // The alternate argument selects `WCSAXESA` in each of its forms, and a letter
     // outside A to Z is refused before any keyword is read.
     h.set_internal("WCSAXESA", 2);
     for alt in [Some('A'), None] {
         let axes = if alt.is_some() { 2 } else { 1 };
         assert_eq!(
-            Wcs::from_header(&h, alt).unwrap().metadata().axes.len(),
+            Wcs::from_header(&h, alt).unwrap().description().axes.len(),
             axes
         );
     }
-    assert_eq!(Wcs::from_header(&h, 'A').unwrap().metadata().axes.len(), 2);
+    assert_eq!(
+        Wcs::from_header(&h, 'A').unwrap().description().axes.len(),
+        2
+    );
     assert!(matches!(
         Wcs::from_header(&h, 'a'),
         Err(FitsError::InvalidAlternate { alternate: 'a' })
@@ -340,7 +349,7 @@ fn latpole_chooses_between_both_valid_poles() {
     for (latpole, pole) in [(90.0, 60.0), (-90.0, -60.0)] {
         let header = celestial_with("CAR", &[("CRVAL2", -30.0), ("LATPOLE", latpole)]);
         let wcs = Wcs::from_header(&header, None).unwrap();
-        let dec = wcs.metadata().celestial_projection.unwrap().pole.dec;
+        let dec = wcs.description().celestial_projection.unwrap().pole.dec;
         assert!((dec - pole).abs() < 1e-12, "LATPOLE {latpole}: {dec}");
     }
 }
@@ -375,9 +384,13 @@ fn unmatched_celestial_axes_are_unsupported() {
             .set_internal("CTYPE1", ctypes[0])
             .set_internal("CTYPE2", ctypes[1]);
         let wcs = Wcs::from_header(&header, None).unwrap();
-        assert_eq!(wcs.metadata().unsupported_axes, unsupported, "{ctypes:?}");
         assert_eq!(
-            wcs.metadata().celestial_projection.is_some(),
+            wcs.description().unsupported_axes,
+            unsupported,
+            "{ctypes:?}"
+        );
+        assert_eq!(
+            wcs.description().celestial_projection.is_some(),
             unsupported.is_empty(),
             "{ctypes:?}"
         );
@@ -491,7 +504,7 @@ fn the_view_keeps_crval_in_its_declared_unit() {
         .set_internal("CUNIT1", "arcsec")
         .set_internal("CUNIT2", "arcsec");
     let wcs = Wcs::from_header(&header, None).unwrap();
-    let axes = wcs.metadata().axes;
+    let axes = wcs.description().axes;
     assert_eq!((axes[0].crval, axes[0].cunit.as_str()), (3600.0, "arcsec"));
     assert_eq!((axes[1].crval, axes[1].cunit.as_str()), (7200.0, "arcsec"));
     let world = to_world(&wcs, &[0.0, 0.0]).unwrap();
@@ -543,7 +556,7 @@ fn written_back(wcs: &Wcs, alt: Option<char>) -> Wcs {
 /// `b` is `a`: the same metadata, and the same world coordinate, bit for bit, or the same
 /// refusal, at 25 pixels around the reference pixel.
 fn assert_same_transform(a: &Wcs, b: &Wcs, what: &str) {
-    let (ma, mb) = (a.metadata(), b.metadata());
+    let (ma, mb) = (a.description(), b.description());
     assert_eq!(ma.axes, mb.axes, "{what}");
     assert_eq!(ma.celestial_frame, mb.celestial_frame, "{what}");
     assert_eq!(ma.celestial_projection, mb.celestial_projection, "{what}");
@@ -753,7 +766,10 @@ fn crop_shifts_the_reference_pixel() {
     ] {
         let parent = Wcs::from_header(&header, None).unwrap();
         let crop = parent.crop(Region::from(&ranges)).unwrap();
-        assert_eq!(crop.metadata().distortion, parent.metadata().distortion);
+        assert_eq!(
+            crop.description().distortion,
+            parent.description().distortion
+        );
         for p in [[11.0, 21.0], [57.5, 99.25], [99.0, 199.0]] {
             assert_close(
                 &to_world(&crop, &[p[0] - 10.0, p[1] - 20.0]).unwrap(),

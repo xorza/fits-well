@@ -2,8 +2,8 @@
 
 use crate::bintable::element_kind::ElementKind;
 use crate::bintable::table_view::TableView;
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 
 /// A handle to one `P`/`Q` column of a binary table, resolving a row's heap array on
 /// demand. Borrows the table, so it cannot outlive it.

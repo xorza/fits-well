@@ -1,7 +1,7 @@
 //! Fallible allocation for buffers sized directly from untrusted FITS metadata.
 
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 
 pub(crate) fn try_reserve<T>(values: &mut Vec<T>, additional: usize) -> Result<()> {
     let requested = values

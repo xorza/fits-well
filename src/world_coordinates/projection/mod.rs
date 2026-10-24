@@ -7,7 +7,7 @@
 use std::f64::consts::PI;
 use std::fmt;
 
-use crate::error::{FitsError, Result, WcsDefect};
+use crate::fits_error::{FitsError, Result, WcsDefect};
 use crate::world_coordinates::angle::D2R;
 use crate::world_coordinates::angle::DEGREE_TOLERANCE;
 use crate::world_coordinates::angle::UNIT_TOLERANCE;

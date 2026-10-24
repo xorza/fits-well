@@ -1,4 +1,4 @@
-use crate::error::ValueKind;
+use crate::fits_error::ValueKind;
 use crate::header_model::record_name::RecordName;
 use crate::internals::tolerance::{Tolerance, assert_close};
 use crate::internals::wcs_header::WcsHeader;

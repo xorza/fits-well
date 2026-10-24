@@ -1,9 +1,9 @@
 //! [`SpectralRest`]: the rest frequency or wavelength a spectral axis is
 //! measured against, and the [`SpectralParameters`] it is read from.
 
-use crate::error::FitsError;
-use crate::error::Result;
-use crate::error::WcsDefect;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
+use crate::fits_error::WcsDefect;
 use crate::header_model::keywords;
 use crate::world_coordinates::axis_transform::spectral_kind::SPEED_OF_LIGHT;
 use crate::world_coordinates::axis_transform::spectral_kind::{Characteristic, SpectralKind};

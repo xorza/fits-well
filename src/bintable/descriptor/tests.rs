@@ -1,7 +1,7 @@
 use crate::bintable::descriptor;
 use crate::bintable::descriptor::{DescriptorWidth, PqDescriptor};
 use crate::bintable::element_kind::ElementKind;
-use crate::error::{FitsError, SizeUnit};
+use crate::fits_error::{FitsError, SizeUnit};
 
 #[test]
 fn decodes_signed_boundaries_and_rejects_malformed_widths() {

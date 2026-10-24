@@ -2,9 +2,9 @@
 //! conversions between the [`Characteristic`]s one axis can be sampled and
 //! expressed in.
 
-use crate::error::FitsError;
-use crate::error::Result;
-use crate::error::{GrismDefect, UnitKind, WcsDefect};
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
+use crate::fits_error::{GrismDefect, UnitKind, WcsDefect};
 use crate::unit;
 use crate::world_coordinates::axis_transform::spectral_rest::ResolvedRest;
 
@@ -409,7 +409,7 @@ fn wavenumber_scale(unit: &str) -> Option<f64> {
         .find_map(|suffix| compact.strip_suffix(suffix))
         .or_else(|| compact.strip_prefix("1/"))
         .or_else(|| compact.strip_prefix('/'))?;
-    unit::resolve(length, unit::LENGTH).map(|scale| scaled.factor / scale)
+    unit::resolve(length, unit::LENGTH).map(|scale| scaled.multiplier.factor() / scale)
 }
 
 /// `[multiplier] length / time` in any of FITS's spellings — `km/s`, `m s-1`, `m.s**-1`,
@@ -429,7 +429,7 @@ fn velocity_scale(unit: &str) -> Option<f64> {
     };
     let length = unit::resolve(length, unit::LENGTH)?;
     let time = unit::resolve(time, unit::TIME)?;
-    Some(scaled.factor * length / time)
+    Some(scaled.multiplier.factor() * length / time)
 }
 
 fn nonzero(value: f64) -> Option<f64> {

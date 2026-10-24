@@ -10,8 +10,8 @@ use crate::bintable::descriptor::PqDescriptor;
 use crate::bintable::schema::Schema;
 use crate::bintable::table_view::TableView;
 use crate::column::{ColumnSelector, Named, index_of};
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 use crate::ragged::Ragged;
 
 /// Raw data for one selected table column over a row range.
@@ -352,7 +352,7 @@ mod tests {
     use crate::bintable::internals::table_header;
     use crate::bintable::schema::Schema;
     use crate::bintable::selection::{Fetch, TableRows, TableSelection};
-    use crate::error::Result;
+    use crate::fits_error::Result;
 
     /// A data unit in memory that records each range a selection fetches.
     #[derive(Debug)]

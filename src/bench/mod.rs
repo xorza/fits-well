@@ -19,7 +19,7 @@ pub(crate) mod fixture;
 use criterion::Criterion;
 
 #[cfg(feature = "compression")]
-use crate::compress;
+use crate::compression;
 use crate::{fits_writer, header_model, image_model, reader, world_coordinates};
 
 /// Every case, atomic first.
@@ -28,11 +28,11 @@ pub fn run(c: &mut Criterion) {
     reader::bench::atomic(c);
     header_model::bench::atomic(c);
     #[cfg(feature = "compression")]
-    compress::bench::atomic(c);
+    compression::bench::atomic(c);
     world_coordinates::bench::atomic(c);
 
     reader::bench::integration(c);
     fits_writer::bench::integration(c);
     #[cfg(feature = "compression")]
-    compress::bench::integration(c);
+    compression::bench::integration(c);
 }

@@ -1,6 +1,6 @@
 //! [`Axis`]: a WCS time axis in its frame, resolved once.
 
-use crate::error::{FitsError, Result};
+use crate::fits_error::{FitsError, Result};
 use crate::time_coordinates::mjd::{Expansion, Mjd};
 use crate::time_coordinates::scale::Scale;
 use crate::unit::SECONDS_PER_DAY;

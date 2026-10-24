@@ -1,6 +1,7 @@
 use crate::alternate::Alternate;
-use crate::error::FitsError;
+use crate::fits_error::FitsError;
 use crate::header_model::Header;
+use crate::header_model::record_name::RecordName;
 use crate::internals::fixture::Fixture;
 use crate::internals::tolerance::{Tolerance, assert_close, max_abs_diff};
 use crate::internals::wcs_header::{Family, WcsHeader};
@@ -62,7 +63,7 @@ fn ctype_distortion_codes() {
     let mut header =
         WcsHeader::celestial("TAN-XYZ", [1.0, 1.0], [0.0, 0.0], [1e-3, 1e-3]).image_header();
     let wcs = Wcs::from_header(&header, None).unwrap();
-    assert_eq!(wcs.metadata().unsupported_axes, [0, 1]);
+    assert_eq!(wcs.description().unsupported_axes, [0, 1]);
     header.set_internal("CTYPE1", "RA---TAN");
     assert!(matches!(
         Wcs::from_header(&header, None),
@@ -86,7 +87,7 @@ fn sip_is_a_prior_distortion_worked_by_hand() {
     assert!((v + 1.988).abs() <= 4.0 * f64::EPSILON * 2.0, "{v}");
 
     let wcs = Wcs::from_header(&header, None).unwrap();
-    assert_eq!(wcs.metadata().distortion, Some(Distortion::Sip));
+    assert_eq!(wcs.description().distortion, Some(Distortion::Sip));
     let plain = Wcs::from_header(
         &WcsHeader::celestial("TAN", [10.0, 20.0], [30.0, 40.0], [1e-3, 1e-3]).image_header(),
         None,
@@ -118,7 +119,7 @@ fn sip_on_astropys_irac_header() {
     assert!((u - expected_u).abs() <= 1e-12, "{u} {expected_u}");
 
     let wcs = Wcs::from_header(&header, None).unwrap();
-    assert_eq!(wcs.metadata().distortion, Some(Distortion::Sip));
+    assert_eq!(wcs.description().distortion, Some(Distortion::Sip));
     let mut without_approximation = header.clone();
     without_approximation
         .remove_where(|name| name.as_str().starts_with("AP_") || name.as_str().starts_with("BP_"));
@@ -138,7 +139,7 @@ fn sip_on_astropys_irac_header() {
         .set_internal("CTYPE1", "RA---TAN")
         .set_internal("CTYPE2", "DEC--TAN");
     let uncoded = Wcs::from_header(&no_code, None).unwrap();
-    assert_eq!(uncoded.metadata().distortion, Some(Distortion::Sip));
+    assert_eq!(uncoded.description().distortion, Some(Distortion::Sip));
     assert_eq!(
         to_world(&uncoded, &[17.0, 230.0]).unwrap(),
         to_world(&wcs, &[17.0, 230.0]).unwrap()
@@ -149,7 +150,7 @@ fn sip_on_astropys_irac_header() {
         .remove_where(|name| name.as_str().starts_with("A_") || name.as_str().starts_with("B_"));
     assert!(matches!(
         Wcs::from_header(&no_keywords, None),
-        Err(FitsError::MissingKeyword { keyword }) if keyword == "A_ORDER"
+        Err(FitsError::MissingKeyword { name: RecordName::Keyword(keyword) }) if keyword == "A_ORDER"
     ));
     let mut too_high = header.clone();
     too_high.set_internal("A_ORDER", 10);
@@ -161,7 +162,7 @@ fn sip_on_astropys_irac_header() {
     b_alone.remove_where(|name| name.as_str().starts_with("A_"));
     assert!(matches!(
         Wcs::from_header(&b_alone, None),
-        Err(FitsError::MissingKeyword { keyword }) if keyword == "A_ORDER"
+        Err(FitsError::MissingKeyword { name: RecordName::Keyword(keyword) }) if keyword == "A_ORDER"
     ));
 }
 
@@ -172,11 +173,11 @@ fn an_alternate_description_takes_no_sip() {
     let mut header = description.sip().image_header();
     description.write_into(&mut header, Family::Image, 'A');
     let alternate = Wcs::from_header(&header, 'A').unwrap();
-    assert_eq!(alternate.metadata().distortion, None);
+    assert_eq!(alternate.description().distortion, None);
     assert_eq!(
         Wcs::from_header(&header, None)
             .unwrap()
-            .metadata()
+            .description()
             .distortion,
         Some(Distortion::Sip)
     );
@@ -218,8 +219,8 @@ fn the_sip_inverse_converges_far_from_crpix() {
 fn sip_and_tpv_forms_of_one_header_agree() {
     let sip = Wcs::from_header(&Fixture::WcsSipOnly.header(), None).unwrap();
     let tpv = Wcs::from_header(&Fixture::WcsTpvOnly.header(), None).unwrap();
-    assert_eq!(sip.metadata().distortion, Some(Distortion::Sip));
-    assert_eq!(tpv.metadata().distortion, Some(Distortion::Tpv));
+    assert_eq!(sip.description().distortion, Some(Distortion::Sip));
+    assert_eq!(tpv.description().distortion, Some(Distortion::Tpv));
     let crpix = [-3925.16, 4360.23];
     assert!(
         max_abs_diff(

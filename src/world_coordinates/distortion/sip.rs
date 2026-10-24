@@ -1,9 +1,10 @@
 //! [`Sip`]: the Simple Imaging Polynomial (Shupe et al. 2005), a prior distortion of the
 //! first two pixel axes.
 
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 use crate::header_model::Header;
+use crate::header_model::record_name::RecordName;
 use crate::keyword::Keyword;
 use crate::world_coordinates::distortion::{MAX_STEPS, converged};
 
@@ -201,6 +202,6 @@ fn order_keyword(root: &str) -> Keyword {
 
 fn missing_order(root: &str) -> FitsError {
     FitsError::MissingKeyword {
-        keyword: order_keyword(root),
+        name: RecordName::Keyword(order_keyword(root)),
     }
 }

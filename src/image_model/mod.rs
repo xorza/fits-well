@@ -23,10 +23,10 @@ pub(crate) mod unsigned_view;
 pub(crate) mod view;
 
 use crate::bitpix::Bitpix;
-use crate::error::FitsError;
-use crate::error::Ranked;
-use crate::error::Result;
-use crate::error::SizeUnit;
+use crate::fits_error::FitsError;
+use crate::fits_error::Ranked;
+use crate::fits_error::Result;
+use crate::fits_error::SizeUnit;
 use crate::image_model::data::Data;
 use crate::image_model::sample_type::SampleType;
 use crate::image_model::scaling::Scaling;

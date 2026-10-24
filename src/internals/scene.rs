@@ -4,6 +4,7 @@
 use crate::bintable::column_data::ColumnData;
 use crate::bitpix::Bitpix;
 use crate::fits_writer::builder::{Builder, WriteColumn};
+use crate::header_model::commentary_name::CommentaryName;
 use crate::header_model::{Header, keywords};
 use crate::image_model::Image;
 use crate::image_model::data::Data;
@@ -125,9 +126,12 @@ pub(crate) fn light_header() -> Header {
         .set_internal("CD2_1", -8.6047e-4)
         .set_internal("CD2_2", -3.584e-5);
     header
-        .push_comment("NINA - Nighttime Imaging 'N' Astronomy")
+        .push_commentary(
+            CommentaryName::COMMENT,
+            "NINA - Nighttime Imaging 'N' Astronomy",
+        )
         .unwrap()
-        .push_history("Calibrated: none")
+        .push_commentary(CommentaryName::HISTORY, "Calibrated: none")
         .unwrap();
     header
 }

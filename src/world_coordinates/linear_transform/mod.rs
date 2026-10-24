@@ -1,9 +1,9 @@
 //! The linear layer of a WCS (§8.1) and its inverse.
 
 use crate::alternate::Alternate;
-use crate::error::FitsError;
-use crate::error::Result;
-use crate::error::{WcsConflict, WcsDefect};
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
+use crate::fits_error::{WcsConflict, WcsDefect};
 use crate::header_model::Header;
 use crate::header_model::record::RecordView;
 use crate::keyword::Keyword;

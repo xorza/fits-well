@@ -14,9 +14,10 @@ pub(super) mod table_pole_keyword;
 pub(super) mod table_wcs_resolver;
 
 use crate::alternate::Alternate;
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 use crate::header_model::record::RecordView;
+use crate::header_model::record_name::RecordName;
 use crate::header_model::{Header, keywords, value};
 use crate::keyword::Keyword;
 use crate::world_coordinates::axis_transform;
@@ -96,7 +97,7 @@ impl<'a> TableWcs<'a> {
         };
         if naxis == 0 {
             return Err(FitsError::MissingKeyword {
-                keyword: resolver.first_vector_type(column)?,
+                name: RecordName::Keyword(resolver.first_vector_type(column)?),
             });
         }
         Ok(naxis)

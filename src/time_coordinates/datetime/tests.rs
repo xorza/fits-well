@@ -1,5 +1,5 @@
-use crate::error::FitsError;
-use crate::error::TimeConversion;
+use crate::fits_error::FitsError;
+use crate::fits_error::TimeConversion;
 use crate::header_model::{Header, keywords};
 
 use crate::time_coordinates::coordinate::Coordinate;
@@ -172,6 +172,35 @@ fn time_of_day_rounds_once() {
         .unwrap();
     assert_eq!(mjd, Mjd::new(60369, 0.999_996_527_777_777_8));
     assert_ne!(mjd.fraction(), (86_399.0 + 0.7) / SECONDS_PER_DAY);
+}
+
+/// A datetime prints as the form it parses from: the year in four digits, or signed in
+/// five outside 0 to 9999, the time always, and the shortest fraction that reads back.
+#[test]
+fn a_datetime_prints_as_it_parses() {
+    for (text, printed) in [
+        ("2026-10-24", "2026-10-24T00:00:00"),
+        ("2026-10-24T12:00:00.5", "2026-10-24T12:00:00.5"),
+        ("+02026-10-24T12:00:00.500", "2026-10-24T12:00:00.5"),
+        ("14/03/94", "1994-03-14T00:00:00"),
+        ("2016-12-31T23:59:60.25", "2016-12-31T23:59:60.25"),
+        ("-04713-11-24T12:00:00", "-04713-11-24T12:00:00"),
+        ("+10000-01-01T00:00:00", "+10000-01-01T00:00:00"),
+        (
+            "0000-01-01T00:00:00.000000000000000000001",
+            "0000-01-01T00:00:00.000000000000000000001",
+        ),
+        // The largest f64 below 1, whose shortest decimal has 16 nines.
+        (
+            "2024-01-01T23:59:59.99999999999999999",
+            "2024-01-01T23:59:59.9999999999999999",
+        ),
+        ("2024-01-01T00:00:00.1", "2024-01-01T00:00:00.1"),
+    ] {
+        let datetime = text.parse::<Datetime>().unwrap();
+        assert_eq!(datetime.to_string(), printed, "{text}");
+        assert_eq!(printed.parse::<Datetime>().unwrap(), datetime, "{text}");
+    }
 }
 
 #[test]

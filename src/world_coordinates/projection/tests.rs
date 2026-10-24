@@ -1,5 +1,5 @@
-use crate::error::FitsError;
-use crate::error::WcsDefect;
+use crate::fits_error::FitsError;
+use crate::fits_error::WcsDefect;
 use crate::header_model::{Header, keywords};
 use crate::internals::tolerance::{Tolerance, assert_close};
 use crate::internals::wcs_header::{WcsHeader, assert_round_trip};
@@ -727,7 +727,11 @@ fn unsupported_projection_codes_reject_complete_transforms() {
     for code in ["XPH", "UV", "U"] {
         let h = WcsHeader::celestial(code, [1.0, 1.0], [10.0, 20.0], [2.0, 3.0]).image_header();
         let w = Wcs::from_header(&h, None).unwrap();
-        assert_eq!(w.metadata().unsupported_axes, [0, 1], "{code} axes flagged");
+        assert_eq!(
+            w.description().unsupported_axes,
+            [0, 1],
+            "{code} axes flagged"
+        );
         assert!(w.celestial.is_none(), "{code} not decoded as a projection");
         assert!(matches!(
             to_world(&w, &[3.0, 4.0]),
@@ -783,7 +787,11 @@ fn degenerate_conic_without_pv1_rejects_complete_transforms() {
         let h = WcsHeader::celestial(code, [1.0, 1.0], [10.0, 20.0], [2.0, 3.0]).image_header();
         // No PV2_1 ⇒ θ_a = 0.
         let w = Wcs::from_header(&h, None).unwrap();
-        assert_eq!(w.metadata().unsupported_axes, [0, 1], "{code} axes flagged");
+        assert_eq!(
+            w.description().unsupported_axes,
+            [0, 1],
+            "{code} axes flagged"
+        );
         assert!(w.celestial.is_none(), "{code} degenerate, not deprojected");
         assert!(matches!(
             to_world(&w, &[3.0, 4.0]),
@@ -794,7 +802,7 @@ fn degenerate_conic_without_pv1_rejects_complete_transforms() {
     let mut ok = WcsHeader::celestial("COP", [1.0, 1.0], [10.0, 45.0], [0.5, 0.5]).image_header();
     ok.set_internal("PV2_1", 45.0);
     let w = Wcs::from_header(&ok, None).unwrap();
-    assert!(w.metadata().unsupported_axes.is_empty() && w.celestial.is_some());
+    assert!(w.description().unsupported_axes.is_empty() && w.celestial.is_some());
 }
 
 #[test]
@@ -812,7 +820,7 @@ fn bonne_with_zero_theta1_equals_sfl() {
     };
     let bon = build("BON", Some(0.0));
     let sfl = build("SFL", None);
-    assert!(bon.celestial.is_some() && bon.metadata().unsupported_axes.is_empty());
+    assert!(bon.celestial.is_some() && bon.description().unsupported_axes.is_empty());
     for pixel in [[20.0, 70.0], [80.0, 30.0], [55.0, 45.0]] {
         assert_eq!(
             to_world(&bon, &pixel).unwrap(),

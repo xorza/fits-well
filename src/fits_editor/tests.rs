@@ -2,11 +2,12 @@ use std::io::Cursor;
 
 use crate::bintable::column_data::ColumnData;
 use crate::block::BLOCK_SIZE;
-use crate::error::{FitsError, SizeUnit};
 use crate::fits_editor::FitsEditor;
+use crate::fits_error::{FitsError, SizeUnit};
 use crate::fits_writer::FitsWriter;
 use crate::fits_writer::builder::{Builder, WriteColumn};
 use crate::hdu::HduKind;
+use crate::header_model::commentary_name::CommentaryName;
 use crate::header_model::{Header, keywords};
 use crate::image_model::Image;
 use crate::image_model::data::Data;
@@ -79,7 +80,10 @@ fn replace_header_writes_in_place() {
     // 36 records fill a block, `END` included: `records + 36 − records` more need two.
     for _ in 0..36 - records {
         grown
-            .push_comment("a comment for each record the block holds")
+            .push_commentary(
+                CommentaryName::COMMENT,
+                "a comment for each record the block holds",
+            )
             .unwrap();
     }
     assert!(matches!(
@@ -135,11 +139,13 @@ fn spare_records_leave_room_for_an_edit() {
     );
     let mut grown = primary.header.clone();
     for n in 0..40 {
-        grown.push_history(&format!("step {n}")).unwrap();
+        grown
+            .push_commentary(CommentaryName::HISTORY, &format!("step {n}"))
+            .unwrap();
     }
     editor.replace_header(0, &grown).unwrap();
     let reread = editor.hdus()[0].header.clone();
-    assert_eq!(reread.history_records().count(), 40);
+    assert_eq!(reread.commentary(CommentaryName::HISTORY).count(), 40);
     editor.replace_header(0, &reread).unwrap();
     let bytes = editor.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
@@ -159,7 +165,9 @@ fn replace_header_into_writes_a_whole_file() {
     let mut editor = FitsEditor::open(Cursor::new(original.clone())).unwrap();
     let mut grown = editor.hdus()[1].header.clone();
     for n in 0..60 {
-        grown.push_comment(&format!("line {n}")).unwrap();
+        grown
+            .push_commentary(CommentaryName::COMMENT, &format!("line {n}"))
+            .unwrap();
     }
     let mut copy = Vec::new();
     editor.replace_header_into(1, &grown, &mut copy).unwrap();
@@ -173,7 +181,13 @@ fn replace_header_into_writes_a_whole_file() {
         new.hdus()[1].header_blocks(),
         u64::try_from((records + 60 + 40 + 1).div_ceil(36)).unwrap()
     );
-    assert_eq!(new.hdus()[1].header.comment_records().count(), 60);
+    assert_eq!(
+        new.hdus()[1]
+            .header
+            .commentary(CommentaryName::COMMENT)
+            .count(),
+        60
+    );
     let primary_end = usize::try_from(old.hdus()[1].header_offset).unwrap();
     assert_eq!(copy[..primary_end], original[..primary_end]);
     let old_tail = usize::try_from(old.hdus()[1].data_offset).unwrap();

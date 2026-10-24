@@ -11,9 +11,9 @@ use crate::bintable::element_kind::{Cell, ElementKind};
 use crate::bintable::table_view::TableView;
 use crate::bintable::tform::Storage;
 use crate::bintable::vla_column::VlaColumn;
-use crate::error::ExpectedColumn;
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::ExpectedColumn;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 use crate::image_model::unsigned_data::UnsignedData;
 use crate::ragged::Ragged;
 

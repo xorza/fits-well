@@ -1,12 +1,13 @@
 //! [`Datetime`]: a FITS ISO-8601 calendar datetime and its MJD.
 
-use crate::error::FitsError;
-use crate::error::Result;
-use crate::error::TimeConversion;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
+use crate::fits_error::TimeConversion;
 use crate::header_model::Header;
 use crate::keyword::Keyword;
 use crate::time_coordinates::mjd::{Expansion, Mjd};
 use crate::unit::SECONDS_PER_DAY;
+use std::fmt;
 use std::str::FromStr;
 
 /// A calendar datetime (proleptic Gregorian, time-scale agnostic), valid by
@@ -228,6 +229,33 @@ impl FromStr for Datetime {
                 fraction,
             },
         )
+    }
+}
+
+/// `YYYY-MM-DDThh:mm:ss[.s…]`, a year outside 0 to 9999 as `±YYYYY`: the form the parse
+/// reads, with the shortest fraction that reads back as the same `f64`. A date alone
+/// prints its midnight, which reads back as the same datetime.
+impl fmt::Display for Datetime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if (0..=9999).contains(&self.year) {
+            write!(f, "{:04}", self.year)?;
+        } else {
+            write!(f, "{:+06}", self.year)?;
+        }
+        write!(
+            f,
+            "-{:02}-{:02}T{:02}:{:02}:{:02}",
+            self.month, self.day, self.hour, self.minute, self.second
+        )?;
+        if self.fraction > 0.0 {
+            let fraction = self.fraction.to_string();
+            f.write_str(
+                fraction
+                    .strip_prefix('0')
+                    .expect("a fraction in (0, 1) prints as 0.…"),
+            )?;
+        }
+        Ok(())
     }
 }
 

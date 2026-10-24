@@ -10,8 +10,8 @@ use crate::bintable::selection::Fetch;
 use crate::bintable::selection::{TableRows, TableSelection};
 #[cfg(feature = "compression")]
 use crate::bintable::table_view::TableView;
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 #[cfg(feature = "compression")]
 use crate::reader::data_checksum::DataChecksum;
 use crate::reader::data_len;

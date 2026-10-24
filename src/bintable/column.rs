@@ -5,7 +5,7 @@ use crate::bintable::element_kind::Cell;
 use crate::bintable::tdim;
 use crate::bintable::tform::{Storage, Tform};
 use crate::column::{Keyed, Named};
-use crate::error::Result;
+use crate::fits_error::Result;
 use crate::header_model::keywords;
 use crate::image_model::scaling::Scaling;
 use std::iter;

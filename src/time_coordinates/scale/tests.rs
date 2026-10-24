@@ -1,4 +1,4 @@
-use crate::error::FitsError;
+use crate::fits_error::FitsError;
 use crate::header_model::{Header, keywords};
 
 use crate::time_coordinates::frame::Frame;
@@ -44,6 +44,26 @@ fn time_scale_preserves_realizations_and_local_names() {
         "LOCAL(clock)".parse::<Scale>().unwrap(),
         Scale::Local("LOCAL(clock)".to_string())
     );
+    // Each scale prints as its standard code, or as it was read, and parses back.
+    for (text, printed) in [
+        ("tt", "TT"),
+        ("ET", "TT"),
+        ("GMT", "UTC"),
+        ("UT", "UT1"),
+        ("IAT", "TAI"),
+        ("TCG", "TCG"),
+        ("TDB", "TDB"),
+        ("TCB", "TCB"),
+        ("GPS", "GPS"),
+        ("TDT (TAI)", "TT(TAI)"),
+        ("UTC(NIST)", "UTC(NIST)"),
+        ("MET", "MET"),
+        ("LOCAL(clock)", "LOCAL(clock)"),
+    ] {
+        let scale = text.parse::<Scale>().unwrap();
+        assert_eq!(scale.to_string(), printed, "{text}");
+        assert_eq!(printed.parse::<Scale>().unwrap(), scale, "{text}");
+    }
     for malformed in ["UTC(", "UTC()", "UTC(NIST))"] {
         assert!(
             matches!(

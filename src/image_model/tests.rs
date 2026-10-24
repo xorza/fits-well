@@ -1,4 +1,4 @@
-use crate::error::NumericTarget;
+use crate::fits_error::NumericTarget;
 use crate::header_model::record_name::RecordName;
 use crate::header_model::{Header, keywords};
 use crate::image_model::internals::physical;
@@ -785,7 +785,7 @@ fn scaling_reads_explicit_keywords() {
     assert!(matches!(
         Scaling::from_header(&oversized_blank, Bitpix::I64),
         Err(FitsError::IntegerOutOfRange {
-            keyword: Some(keywords::BLANK),
+            name: Some(RecordName::Keyword(keywords::BLANK)),
             value,
             target: NumericTarget::I64,
         }) if value == "9223372036854775808"

@@ -2,8 +2,8 @@
 //! physical values.
 
 use crate::bitpix::Bitpix;
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 use crate::header_model::{Header, keywords};
 use crate::image_model::physical_sample::PhysicalSample;
 use crate::image_model::sample::Sample;

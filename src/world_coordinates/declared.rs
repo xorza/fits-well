@@ -1,14 +1,14 @@
 //! [`Declared`]: a WCS description as its header declares it, to write back.
 
 use crate::alternate::Alternate;
-use crate::error::FitsError;
-use crate::error::Result;
-use crate::error::WcsConflict;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
+use crate::fits_error::WcsConflict;
 use crate::header_model::Header;
 use crate::header_model::record::RecordView;
 use crate::header_model::value::Value;
 use crate::keyword::Keyword;
-use crate::world_coordinates::axis::Axis;
+use crate::world_coordinates::axis_description::AxisDescription;
 use crate::world_coordinates::distortion::sip::Sip;
 use crate::world_coordinates::linear_transform::DeclaredMatrix;
 
@@ -101,7 +101,7 @@ impl Declared {
         &self,
         header: &mut Header,
         alt: Alternate,
-        axes: &[Axis],
+        axes: &[AxisDescription],
         sip: Option<&Sip>,
     ) -> Result<()> {
         if sip.is_some() && alt != Alternate::PRIMARY {

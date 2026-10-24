@@ -1,10 +1,11 @@
 //! [`PhaseAxis`]: the §9.6 `'PHASE'` axis folding parameters.
 
 use crate::alternate::Alternate;
-use crate::error::FitsError;
-use crate::error::Indexed;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Indexed;
+use crate::fits_error::Result;
 use crate::header_model::Header;
+use crate::header_model::record_name::RecordName;
 use crate::keyword::Keyword;
 use crate::time_coordinates::time_axis_kind::TimeAxisKind;
 
@@ -89,7 +90,7 @@ impl PhaseAxis {
             header
                 .get_real(keywords.zero_phase)?
                 .ok_or(FitsError::MissingKeyword {
-                    keyword: keywords.zero_phase,
+                    name: RecordName::Keyword(keywords.zero_phase),
                 })?;
         let period = header.get_real(keywords.period)?;
         Ok(Some(Self {

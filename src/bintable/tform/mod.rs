@@ -2,8 +2,9 @@
 
 use crate::bintable::descriptor::DescriptorWidth;
 use crate::bintable::element_kind::ElementKind;
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
+use std::fmt;
 use std::str::FromStr;
 
 /// A parsed `TFORMn` value (§7.3.1): a repeat count, the type of the elements, and
@@ -27,6 +28,20 @@ pub enum Storage {
 }
 
 impl Tform {
+    /// The format of `repeat` elements of `element`, stored as `storage` says. An array
+    /// column's `repeat` is 0 or 1 (§6.3).
+    pub(crate) const fn new(repeat: usize, element: ElementKind, storage: Storage) -> Self {
+        debug_assert!(
+            matches!(storage, Storage::Fixed) || repeat <= 1,
+            "an array column holds 0 or 1 descriptors"
+        );
+        Self {
+            repeat,
+            element,
+            storage,
+        }
+    }
+
     /// The repeat count: the elements of a fixed-width cell, or for an array column
     /// its descriptors, 0 or 1.
     pub const fn repeat(self) -> usize {
@@ -125,18 +140,16 @@ impl FromStr for Tform {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod internals {
-    use crate::bintable::element_kind::ElementKind;
-    use crate::bintable::tform::{Storage, Tform};
-
-    /// A `TFORMn` value spelled out field by field, for tests asserting what a
-    /// parsed or schema-derived format resolved to.
-    pub(crate) const fn tform(repeat: usize, element: ElementKind, storage: Storage) -> Tform {
-        Tform {
-            repeat,
-            element,
-            storage,
+/// The `rT` or `rPt`/`rQt` form the parse reads, the repeat count always written: `"E"`
+/// prints as `"1E"`, and a `P`/`Q` column's `(emax)`, which is not retained, is not
+/// written.
+impl fmt::Display for Tform {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let repeat = self.repeat;
+        let element = self.element.code();
+        match self.storage {
+            Storage::Fixed => write!(f, "{repeat}{element}"),
+            Storage::Array(width) => write!(f, "{repeat}{}{element}", width.letter()),
         }
     }
 }
