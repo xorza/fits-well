@@ -9,10 +9,11 @@ on:
 permissions:
   contents: read
 
-# master keeps a status per commit; a pull request needs only its latest push.
+# A new push cancels the older run of its branch or pull request, master included: only the
+# latest commit's result is read.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 # No RUSTFLAGS: it would replace the x86-64-v3 flags of `.cargo/config.toml`.
 env:
