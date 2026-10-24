@@ -22,6 +22,7 @@ cargo drive check          # after each change: fmt, then clippy --all-targets -
 cargo drive test [args]    # the tests, each time; the runner's arguments pick some: a test name
 cargo drive bench [args]   # the benches; a filter, or --test to run each case once
 cargo drive gate           # the full check: fmt, each lint set, ship, tests, docs; CI adds --ci
+cargo drive run examples   # each example, run once
 ```
 
 `check` takes no arguments: each lane covers the whole workspace, and the

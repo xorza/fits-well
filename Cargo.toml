@@ -31,6 +31,21 @@ test = ["--all-features", "--no-default-features --features compression"]
 bench = "--all-features"
 docs = true
 
+# Each example, run once: `cargo drive run examples`. `inspect` reads a sample file.
+[package.metadata.drive.commands.examples]
+steps = [
+    { cargo = "run --locked --example image" },
+    { cargo = "run --locked --example compression" },
+    { cargo = "run --locked --example table" },
+    { cargo = "run --locked --example ascii_table" },
+    { cargo = "run --locked --example header" },
+    { cargo = "run --locked --example edit" },
+    { cargo = "run --locked --example stream" },
+    { cargo = "run --locked --example wcs" },
+    { cargo = "run --locked --example time" },
+    { cargo = "run --locked --example inspect -- test_resources/UITfuv2582gc.fits" },
+]
+
 [dependencies]
 bitvec = "1"
 num-complex = "0.4"
@@ -60,10 +75,6 @@ required-features = ["internals"]
 
 [[example]]
 name = "compression"
-required-features = ["compression"]
-
-[[example]]
-name = "emit_compressed"
 required-features = ["compression"]
 
 [profile.dev]

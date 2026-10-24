@@ -2,9 +2,9 @@
 
 use std::hint::black_box;
 
-use criterion::{BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion};
 
-use crate::bench::fixture::{Kind, Scale};
+use crate::bench::fixture::{self, Kind, Scale};
 use crate::header_model::{Header, keywords};
 use crate::internals::scene::{self, HEIGHT, WIDTH};
 use crate::world_coordinates::Wcs;
@@ -14,11 +14,11 @@ use crate::world_coordinates::tabular::internals::{INDEX_LENGTH, indexed_wcs};
 /// `to_world` through `Wcs::pixel_to_world` and `to_pixel` back through `Wcs::world_to_pixel`.
 /// The axes: `tan`, the light's plate solution; `linear`, four coupled linear axes; `spectral`,
 /// a frequency axis sampled in wavelength (Table 26); `tabular`, a `-TAB` axis over a 100 000-entry
-/// index. Per point.
+/// index. Per point, in the `f64` coordinates of its axes.
 pub(crate) fn atomic(c: &mut Criterion) {
     let mut group = Kind::Atomic.group(c, "wcs", Scale::Frame);
-    group.throughput(Throughput::Elements(WIDTH as u64));
     for axes in Axes::ALL {
+        group.throughput(fixture::throughput(WIDTH, axes.count() * size_of::<f64>()));
         let mut built = None;
         group.bench_function(BenchmarkId::new("to_world", axes.id()), |b| {
             let Fixture { wcs, pixels, .. } = built.get_or_insert_with(|| axes.fixture());
@@ -56,6 +56,15 @@ enum Axes {
 impl Axes {
     const ALL: [Self; 4] = [Self::Tan, Self::Linear, Self::Spectral, Self::Tabular];
 
+    /// The axes of the transform, the coordinates of each point.
+    const fn count(self) -> usize {
+        match self {
+            Self::Tan => 2,
+            Self::Linear => 4,
+            Self::Spectral | Self::Tabular => 1,
+        }
+    }
+
     const fn id(self) -> &'static str {
         match self {
             Self::Tan => "tan",
@@ -66,12 +75,18 @@ impl Axes {
     }
 
     fn fixture(self) -> Fixture {
-        match self {
+        let fixture = match self {
             Self::Tan => Fixture::tan(),
             Self::Linear => Fixture::linear(),
             Self::Spectral => Fixture::spectral(),
             Self::Tabular => Fixture::tabular(),
-        }
+        };
+        assert_eq!(
+            fixture.wcs.axes.len(),
+            self.count(),
+            "the throughput counts each axis"
+        );
+        fixture
     }
 }
 

@@ -11,7 +11,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::hint::black_box;
 
-use fits_well::header::Header;
+use fits_well::header::{Header, Value};
 use fits_well::internals::{
     tabular_forward_at_pixel, tabular_inverse_at_fraction, tabular_inverse_at_world,
 };
@@ -65,39 +65,27 @@ fn allocations(run: impl FnOnce() -> f64) -> usize {
 #[test]
 fn celestial_and_spectral_transforms_allocate_nothing() {
     let mut header = Header::new();
-    header
-        .set("NAXIS", 3)
-        .unwrap()
-        .set("CTYPE1", "RA---TAN")
-        .unwrap()
-        .set("CTYPE2", "DEC--TAN")
-        .unwrap()
-        .set("CRPIX1", 100.0)
-        .unwrap()
-        .set("CRPIX2", 100.0)
-        .unwrap()
-        .set("CRVAL1", 83.6)
-        .unwrap()
-        .set("CRVAL2", 22.0)
-        .unwrap()
-        .set("CDELT1", -0.0005)
-        .unwrap()
-        .set("CDELT2", 0.0005)
-        .unwrap()
-        .set("CTYPE3", "FREQ-W2F")
-        .unwrap()
-        .set("CUNIT3", "Hz")
-        .unwrap()
-        .set("CRPIX3", 1.0)
-        .unwrap()
-        .set("CRVAL3", 1_420_405_751.0)
-        .unwrap()
-        .set("CDELT3", 1e6)
-        .unwrap()
-        .set("RESTFRQ", 1_420_405_751.0)
-        .unwrap()
-        .set("PC1_3", 0.1)
-        .unwrap();
+    let cards: [(&str, Value); 16] = [
+        ("NAXIS", 3.into()),
+        ("CTYPE1", "RA---TAN".into()),
+        ("CTYPE2", "DEC--TAN".into()),
+        ("CRPIX1", 100.0.into()),
+        ("CRPIX2", 100.0.into()),
+        ("CRVAL1", 83.6.into()),
+        ("CRVAL2", 22.0.into()),
+        ("CDELT1", (-0.0005).into()),
+        ("CDELT2", 0.0005.into()),
+        ("CTYPE3", "FREQ-W2F".into()),
+        ("CUNIT3", "Hz".into()),
+        ("CRPIX3", 1.0.into()),
+        ("CRVAL3", 1_420_405_751.0.into()),
+        ("CDELT3", 1e6.into()),
+        ("RESTFRQ", 1_420_405_751.0.into()),
+        ("PC1_3", 0.1.into()),
+    ];
+    for (keyword, value) in cards {
+        header.set(keyword, value).unwrap();
+    }
     let wcs = Wcs::from_header(&header, None).unwrap();
     let mut world = [0.0; 3];
     let mut pixel = [0.0; 3];

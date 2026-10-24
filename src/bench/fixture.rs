@@ -10,8 +10,13 @@ use criterion::measurement::WallTime;
 use criterion::{Bencher, BenchmarkGroup, Criterion, SamplingMode, Throughput};
 
 use crate::bitpix::Bitpix;
+use crate::internals::scene::WIDTH;
 use crate::reader::FitsReader;
 use crate::reader::source::Source;
+
+/// The rows a section read takes at a time, as the lumos light reader does: 64 Ki samples,
+/// whole rows of the standard frame, so ten rows a section.
+pub(crate) const SECTION_ROWS: usize = (64 * 1024) / WIDTH;
 
 /// What a case times, the first part of its id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
