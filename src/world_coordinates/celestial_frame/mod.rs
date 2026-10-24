@@ -3,10 +3,11 @@
 use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::error::WcsDefect;
 use crate::header_model::{Header, keywords};
 use crate::keyword::Keyword;
 use crate::world_coordinates::ctype::Ctype;
-use crate::world_coordinates::{read_real, read_text};
+use crate::world_coordinates::header_read;
 
 /// The reference frame named by `RADESYSa`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +37,9 @@ impl CelestialReferenceFrame {
             "FK4-NO-E" => Ok(Self::Fk4NoE),
             "GAPPT" => Ok(Self::Gappt),
             value => Err(FitsError::InvalidWcs {
-                detail: format!("RADESYS {value:?} is not a standard reference frame"),
+                defect: WcsDefect::UnknownCelestialFrame {
+                    value: value.to_string(),
+                },
             }),
         }
     }
@@ -50,14 +53,15 @@ impl CelestialFrame {
         alt: Alternate,
         ctype: &[String],
     ) -> Result<Option<Self>> {
-        let mut declared = read_text(header, Keyword::fitting(format_args!("RADESYS{alt}")))?;
+        let mut declared =
+            header_read::text(header, Keyword::fitting(format_args!("RADESYS{alt}")))?;
         if declared.is_none() && !alt.is_alternate() {
             declared = header.get_text(keywords::RADECSYS)?;
         }
-        let equinox = read_real(header, Keyword::fitting(format_args!("EQUINOX{alt}")))?;
+        let equinox = header_read::real(header, Keyword::fitting(format_args!("EQUINOX{alt}")))?;
         if equinox.is_some_and(|value| !value.is_finite() || value < 0.0) {
             return Err(FitsError::InvalidWcs {
-                detail: "EQUINOX must be finite and non-negative".to_string(),
+                defect: WcsDefect::InvalidEquinox,
             });
         }
         let applies = ctype

@@ -114,6 +114,15 @@ impl Expansion {
         }
     }
 
+    /// This value plus `other`, rounded once to the expansion's precision.
+    pub(crate) fn plus(self, other: Self) -> Self {
+        let sum = Self::two_sum(self.hi, other.hi);
+        Self {
+            hi: sum.hi,
+            lo: sum.lo + (self.lo + other.lo),
+        }
+    }
+
     /// This value over `divisor`: the quotient and the exact remainder `hi − q ×
     /// divisor` over `divisor`.
     pub(crate) fn divided(self, divisor: f64) -> Self {
@@ -129,5 +138,99 @@ impl Expansion {
 impl From<f64> for Expansion {
     fn from(value: f64) -> Self {
         Self { hi: value, lo: 0.0 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::internals::rng::SplitMix;
+    use crate::time_coordinates::mjd::*;
+
+    /// The day moves by whole days into the fraction's [0, 1).
+    #[test]
+    fn mjd_normalizes_its_fraction() {
+        for (day, fraction, expected_day, expected_fraction) in [
+            (5, 1.0, 6, 0.0),
+            (5, -0.25, 4, 0.75),
+            (5, 2.5, 7, 0.5),
+            (-3, 0.0, -3, 0.0),
+            (0, -f64::MIN_POSITIVE, 0, 0.0),
+        ] {
+            let mjd = Mjd::new(day, fraction);
+            assert_eq!(
+                (mjd.day(), mjd.fraction()),
+                (expected_day, expected_fraction),
+                "{day} + {fraction}"
+            );
+        }
+        assert!(Mjd::new(4, 0.75) < Mjd::new(5, 0.0));
+        assert_eq!(Mjd::new(60000, 0.25).to_f64(), 60000.25);
+    }
+
+    /// `value` in units of 2⁻¹⁰⁴: exact for a multiple of 2⁻¹⁰⁴ below 2²³ in size.
+    fn fixed(value: f64) -> i128 {
+        let scaled = value * 2f64.powi(104);
+        debug_assert_eq!(scaled.fract(), 0.0, "{value:e} is not a multiple of 2⁻¹⁰⁴");
+        scaled as i128
+    }
+
+    /// A draw of either sign whose size has its binary exponent in `exponents`, so it is
+    /// a multiple of 2 to the exponent's start less 52.
+    fn draw(draws: &mut SplitMix, exponents: std::ops::Range<i32>) -> f64 {
+        let span = u64::try_from(exponents.end - exponents.start).unwrap();
+        let exponent = exponents.start + i32::try_from(draws.next() % span).unwrap();
+        let sign = if draws.next() & 1 == 0 { 1.0 } else { -1.0 };
+        sign * (1.0 + draws.unit()) * 2f64.powi(exponent)
+    }
+
+    /// Two-sum and two-product are exact, checked in i128 at 2⁻¹⁰⁴: for addends of size
+    /// 2⁻⁴⁰ to 2⁴, and for factors of size 1 to 2⁴, every input, `hi` and `lo` is a
+    /// multiple of 2⁻¹⁰⁴, and the product of two is below 2⁸.
+    #[test]
+    fn two_sum_and_two_product_are_exact() {
+        let mut draws = SplitMix::new(7);
+        for _ in 0..10_000 {
+            let [a, b] = [draw(&mut draws, 0..4), draw(&mut draws, -40..4)];
+            let sum = Expansion::two_sum(a, b);
+            assert_eq!(
+                fixed(sum.hi) + fixed(sum.lo),
+                fixed(a) + fixed(b),
+                "{a:e} + {b:e}"
+            );
+            let b = draw(&mut draws, 0..4);
+            let product = Expansion::two_product(a, b);
+            let exact = (fixed(a) >> 52) * (fixed(b) >> 52);
+            assert_eq!(
+                fixed(product.hi) + fixed(product.lo),
+                exact,
+                "{a:e} × {b:e}"
+            );
+        }
+    }
+
+    /// `Mjd::plus` rounds the sum once into the fraction, which lies in [0, 1), so it is
+    /// within half its ulp, 2⁻⁵⁴ day, of the exact sum in i128 at 2⁻¹⁰⁴ day.
+    #[test]
+    fn plus_rounds_once() {
+        let mut draws = SplitMix::new(11);
+        for _ in 0..10_000 {
+            let start = Mjd::new(60_000, (draws.next() >> 12) as f64 * 2f64.powi(-52));
+            let days = Expansion {
+                hi: draw(&mut draws, -40..20),
+                lo: draw(&mut draws, -52..-48),
+            };
+            let sum = start.plus(days).unwrap();
+            let exact = (i128::from(start.day()) << 104)
+                + fixed(start.fraction())
+                + fixed(days.hi)
+                + fixed(days.lo);
+            let got =
+                (i128::from(sum.day()) << 104) + (sum.fraction() * 2f64.powi(104)).round() as i128;
+            assert!(
+                (got - exact).abs() <= 1 << 50,
+                "{start:?} + {days:?} = {sum:?}: off by {} × 2⁻¹⁰⁴",
+                got - exact
+            );
+        }
     }
 }

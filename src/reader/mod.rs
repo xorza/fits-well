@@ -2,41 +2,28 @@ use std::io::Read;
 use std::io::Seek;
 use std::ops::Range;
 
-use crate::allocation;
 use crate::alternate::Alternate;
 use crate::ascii::Ascii;
 use crate::bintable::Table;
-use crate::bintable::column::Column;
 use crate::bintable::column_data::ColumnData;
-use crate::bintable::column_reader::ColumnReader;
-use crate::bintable::schema::Schema;
-use crate::bintable::table_view::TableView;
-use crate::block::BLOCK_SIZE;
-use crate::block::CARD_SIZE;
-use crate::block::padded_len;
-use crate::checksum;
-use crate::column::ColumnSelector;
-use crate::column::Named;
-use crate::column::index_of;
 #[cfg(feature = "compression")]
-use crate::compress::table::DecodedRows;
+use crate::bintable::selection::validate_row_range;
+use crate::bintable::selection::{Selection, TableCell, TableRows, TableSelection};
+use crate::bintable::table_view::TableView;
+use crate::checksum::checksum_report::ChecksumReport;
+use crate::column::ColumnSelector;
+#[cfg(feature = "compression")]
+use crate::compress::table::{ContainerTiles, DecodedRows};
 use crate::error::FitsError;
-use crate::error::Indexed;
 use crate::error::Result;
 use crate::groups::RandomGroups;
 use crate::hdu::HduKind;
-use crate::hdu::HduPosition;
-use crate::header_model::card::is_end_record;
-use crate::header_model::keywords;
-use crate::ragged::Ragged;
 use crate::reader::data_checksum::DataChecksum;
 use crate::reader::data_source::DataSource;
-use crate::reader::data_source::TableRows;
-#[cfg(feature = "compression")]
-use crate::reader::data_source::validate_row_range;
 use crate::reader::hdu::Hdu;
 use crate::reader::hdu_selector::HduSelector;
-use crate::reader::image_reader::ImageReader;
+use crate::reader::hdus::Hdus;
+use crate::reader::image_reader::{ImageReader, PlainRead, StoredRuns};
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::tabular;
 
@@ -46,6 +33,7 @@ pub(crate) mod data_checksum;
 mod data_source;
 pub(crate) mod hdu;
 pub(crate) mod hdu_selector;
+pub(crate) mod hdus;
 pub(crate) mod image_reader;
 pub(crate) mod source;
 
@@ -53,144 +41,23 @@ use source::SliceSource;
 use source::Source;
 use source::StreamSource;
 
-/// Raw data for one selected table column over a row range.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub enum SelectedData {
-    Fixed(ColumnData),
-    Variable(Ragged<ColumnData>),
-}
-
-/// One decoded column in a ranged table selection.
-#[derive(Debug, Clone)]
-pub struct SelectedColumn {
-    pub descriptor: Column,
-    pub data: SelectedData,
-}
-
-impl SelectedColumn {
-    fn new(column: &ColumnReader<'_>) -> Result<Self> {
-        let descriptor = column.descriptor().clone();
-        let data = if descriptor.tform.kind.is_descriptor() {
-            SelectedData::Variable(column.vla()?)
-        } else {
-            SelectedData::Fixed(column.raw()?)
-        };
-        Ok(Self { descriptor, data })
-    }
-
-    /// Decode `column` into this column's own buffers, which it reuses when they hold
-    /// the same kind of data.
-    fn refill(&mut self, column: &ColumnReader<'_>) -> Result<()> {
-        self.descriptor.clone_from(column.descriptor());
-        let variable = self.descriptor.tform.kind.is_descriptor();
-        match &mut self.data {
-            SelectedData::Variable(rows) if variable => column.vla_into(rows),
-            SelectedData::Fixed(values) if !variable => column.raw_into(values),
-            _ => {
-                *self = Self::new(column)?;
-                Ok(())
-            }
-        }
-    }
-}
-
-impl Named for SelectedColumn {
-    fn name(&self) -> Option<&str> {
-        self.descriptor.name()
-    }
-}
-
-/// Selected columns decoded over a zero-based half-open row range.
-#[derive(Debug, Clone)]
-pub struct Selection {
-    pub rows: Range<usize>,
-    pub columns: Vec<SelectedColumn>,
-}
-
-impl Selection {
-    /// The selected column that `column` names: an index of the table's columns, or a
-    /// `TTYPEn` name compared case-insensitively. `None` when the selection does not
-    /// hold it.
-    pub fn column<'c>(&self, column: impl Into<ColumnSelector<'c>>) -> Option<&SelectedColumn> {
-        match column.into() {
-            ColumnSelector::Index(index) => self
-                .columns
-                .iter()
-                .find(|selected| selected.descriptor.number == index + 1),
-            ColumnSelector::Name(name) => {
-                index_of(&self.columns, name).map(|pos| &self.columns[pos])
-            }
-        }
-    }
-}
-
-/// A data unit read from the source: the full block-padded bytes plus the range
-/// within them holding the actual data. The bytes after `data_range` are FITS
-/// block fill, not part of the data array.
-#[derive(Debug, Clone)]
-pub struct DataUnit {
-    /// The on-disk data unit, padded to the 2880-byte block grid.
-    bytes: Vec<u8>,
-    /// The sub-range of `bytes` that is meaningful data (`0..Nbits/8`).
-    data_range: Range<usize>,
-}
-
-/// Immutable view of a padded data unit and its meaningful byte range.
-#[derive(Debug, Clone)]
-pub struct DataUnitView<'a> {
-    /// Complete on-disk unit, including trailing 2880-byte block fill.
-    pub padded: &'a [u8],
-    /// Meaningful data bytes within [`DataUnitView::padded`].
-    pub data_range: Range<usize>,
-}
-
-impl DataUnit {
-    /// Borrow the complete padded unit and the meaningful data range within it.
-    pub fn view(&self) -> DataUnitView<'_> {
-        DataUnitView {
-            padded: &self.bytes,
-            data_range: self.data_range.clone(),
-        }
-    }
-
-    /// The meaningful data with the trailing block fill sliced off — what a
-    /// decoder should consume.
-    pub fn data(&self) -> &[u8] {
-        &self.bytes[self.data_range.clone()]
-    }
-
-    /// Consume the unit and return only its meaningful data bytes, without block fill.
-    pub fn into_data(mut self) -> Vec<u8> {
-        debug_assert_eq!(self.data_range.start, 0);
-        self.bytes.truncate(self.data_range.end);
-        self.bytes
-    }
-
-    /// Consume the unit and return its complete block-padded bytes.
-    pub fn into_padded(self) -> Vec<u8> {
-        self.bytes
-    }
-}
-
 /// A FITS file opened over a seekable byte source. Opening scans HDU boundaries
 /// from headers alone (no data is read); data units are fetched on demand.
 #[derive(Debug)]
 pub struct FitsReader<S> {
     /// The scanned HDU records; exposed read-only via [`FitsReader::hdus`].
-    pub(crate) hdus: Vec<Hdu>,
+    pub(crate) hdus: Hdus,
     data: DataSource<S>,
     scratch: Scratch,
 }
 
 /// The reader's reused buffers a section or selection read fills and the result
-/// borrows: the selected section's shape, its stored samples, the tile rows it
+/// borrows: the selected section's shape, the tile rows it
 /// touches, a compacted table selection with the columns it selects, and the words a compressed image's physical
 /// read decodes into.
 #[derive(Debug, Default)]
 pub(crate) struct Scratch {
     pub(crate) section_shape: Vec<usize>,
-    pub(crate) section_bytes: Vec<u8>,
     #[cfg(feature = "compression")]
     pub(crate) tile_rows: Vec<usize>,
     pub(crate) selection: Vec<u8>,
@@ -242,35 +109,7 @@ impl<S: Source> FitsReader<S> {
     /// range of each data unit — without reading any data.
     fn from_source(mut source: S) -> Result<Self> {
         let mut scratch = Vec::new();
-        let mut hdus = Vec::new();
-        let mut offset = 0u64;
-        loop {
-            let position = if hdus.is_empty() {
-                HduPosition::Primary
-            } else {
-                HduPosition::Extension
-            };
-            match scan_header_unit(&mut source, &mut offset, &mut scratch, position)? {
-                NextHeader::Found { bytes, sum } => {
-                    let hdu = Hdu::parse(hdus.len(), &bytes, sum, offset - bytes.len() as u64)?;
-                    let next = padded_len(hdu.data_bytes)
-                        .and_then(|padded| hdu.data_offset.checked_add(padded))
-                        .ok_or(FitsError::DataUnitOverflow)?;
-                    hdus.push(hdu);
-                    // Skip past the data unit to the next header. Clamp at the source
-                    // end so a declared unit larger than the file just ends the scan
-                    // (the HDU is still recorded; a later read bounds-checks it).
-                    offset = next.min(source.size());
-                }
-                // §3.5/§3.6: special records and a trailing partial or fill block may
-                // follow the last HDU, and a reader disregards them. Before any HDU,
-                // either shape means there is no conforming primary.
-                NextHeader::End | NextHeader::Trailing if hdus.is_empty() => {
-                    return Err(FitsError::UnexpectedEof);
-                }
-                NextHeader::End | NextHeader::Trailing => break,
-            }
-        }
+        let hdus = Hdus::scan(&mut source, &mut scratch)?;
         Ok(Self {
             hdus,
             data: DataSource::new(source, scratch),
@@ -282,19 +121,14 @@ impl<S: Source> FitsReader<S> {
     /// parsed [`Header`](crate::header::Header) and [`HduKind`]. Every read names its
     /// HDU with an [`HduSelector`]: an index into this slice, `"SCI"`, or `("SCI", 2)`.
     pub fn hdus(&self) -> &[Hdu] {
-        &self.hdus
+        self.hdus.as_slice()
     }
 
     /// The HDU `hdu` names: the first that [`Hdu::matches`] it. Errors with
     /// [`FitsError::IndexOutOfBounds`] for an index past the last HDU, and with
     /// [`FitsError::HduNotFound`] for a name no HDU carries.
     pub fn hdu<'h>(&self, hdu: impl Into<HduSelector<'h>>) -> Result<&Hdu> {
-        selected_hdu(&self.hdus, hdu.into())
-    }
-
-    /// The scanned HDU records, taken from the reader.
-    pub(crate) fn into_hdus(self) -> Vec<Hdu> {
-        self.hdus
+        self.hdus.select(hdu.into())
     }
 
     /// Every HDU [`FitsReader::image`] can read as an image: image extensions,
@@ -302,25 +136,19 @@ impl<S: Source> FitsReader<S> {
     /// primary is a container, not an image, and is skipped). The first image is
     /// `images().next()`, and its [`Hdu::index`] selects it.
     pub fn images(&self) -> impl Iterator<Item = &Hdu> + '_ {
-        self.hdus.iter().filter(|hdu| hdu.is_image())
+        self.hdus.images()
     }
 
     /// Read the raw, still-encoded (big-endian, unscaled) data unit into a fresh,
-    /// caller-owned buffer. The returned [`DataUnit`] carries the full block-padded
-    /// bytes plus the range of actual data within them, so a decoder consumes
-    /// [`DataUnit::data`] and the block fill is never mistaken for samples.
+    /// caller-owned buffer: its [`Hdu::data_bytes`](Hdu#structfield.data_bytes), without
+    /// the block fill after them.
     ///
     /// This is the owned form, backing the table readers (which keep the bytes as
     /// the parsed table's storage). Image and random-groups reads instead stage
     /// through the reader's reused internal scratch — see [`FitsReader::image`].
-    pub fn read_data_unit<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<DataUnit> {
-        let hdu = selected_hdu(&self.hdus, hdu.into())?;
-        let lengths = DataLengths::new(hdu.data_bytes)?;
-        let bytes = self.data.read_owned(hdu.data_offset, lengths.padded)?;
-        Ok(DataUnit {
-            bytes,
-            data_range: 0..lengths.data,
-        })
+    pub fn read_data_unit<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Vec<u8>> {
+        let hdu = self.hdus.select(hdu.into())?;
+        self.data.data_unit(hdu)
     }
 
     /// The image HDU `index` holds, plain or tiled-compressed alike, ready to read a
@@ -328,7 +156,7 @@ impl<S: Source> FitsReader<S> {
     /// groups and unmodelled extensions, a compressed image among them without the
     /// `compression` feature.
     pub fn image<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<ImageReader<'_, S>> {
-        let hdu = selected_hdu(&self.hdus, hdu.into())?;
+        let hdu = self.hdus.select(hdu.into())?;
         ImageReader::new(hdu, &mut self.data, &mut self.scratch)
     }
 
@@ -336,28 +164,15 @@ impl<S: Source> FitsReader<S> {
     /// individual columns lazily with [`Table::column`]. Errors as
     /// [`Hdu::table_schema`] does for an HDU that is not a plain binary table.
     pub fn read_table<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Table> {
-        let index = self.hdu(hdu)?.index;
+        let hdu = self.hdus.select(hdu.into())?;
+        let schema = hdu.table_schema()?;
         #[cfg(feature = "compression")]
+        if let Some(decoded) =
+            decoded_rows(&mut self.data, hdu, &(0..schema.extent.row_count), None)?
         {
-            let hdu = &self.hdus[index];
-            let schema = hdu.table_schema()?;
-            if let Some(decoded) = decoded_rows(&mut self.data, hdu, &(0..schema.row_count), None)?
-            {
-                return Table::new(decoded.schema, decoded.data);
-            }
+            return Table::new(decoded.schema, decoded.data);
         }
-        self.read_table_as(index, Hdu::table_schema)
-    }
-
-    /// [`Self::read_table`] under the schema `schema` gives the HDU.
-    fn read_table_as(
-        &mut self,
-        index: usize,
-        schema: fn(&Hdu) -> Result<&Schema>,
-    ) -> Result<Table> {
-        let schema = schema(&self.hdus[index])?.clone();
-        let unit = self.read_data_unit(index)?;
-        Table::new(schema, unit.bytes)
+        Table::new(schema.clone(), self.data.data_unit(hdu)?)
     }
 
     /// Materialize only the requested contiguous row range, including only the VLA
@@ -367,11 +182,11 @@ impl<S: Source> FitsReader<S> {
         hdu: impl Into<HduSelector<'h>>,
         rows: Range<usize>,
     ) -> Result<Table> {
-        let hdu = selected_hdu(&self.hdus, hdu.into())?;
+        let hdu = self.hdus.select(hdu.into())?;
         let schema = hdu.table_schema()?;
         let row_count = rows.len();
         let mut data = Vec::new();
-        select_rows(&mut self.data, hdu, schema, rows, None, &mut data)?;
+        select_rows(&mut self.data, hdu, rows, None, &mut data)?;
         Table::new(schema.compacted(row_count, data.len()), data)
     }
 
@@ -400,74 +215,39 @@ impl<S: Source> FitsReader<S> {
         columns: impl IntoIterator<Item = impl Into<ColumnSelector<'c>>>,
         out: &mut Selection,
     ) -> Result<()> {
-        let filled = self
-            .resolve_columns(hdu.into(), columns)
-            .and_then(|index| self.fill_selection(index, rows, out));
+        let filled = self.hdus.select(hdu.into()).and_then(|hdu| {
+            let schema = hdu.table_schema()?;
+            self.scratch.column_indices.clear();
+            for selector in columns {
+                let index = selector.into().resolve(&schema.columns)?;
+                self.scratch.column_indices.push(index);
+            }
+            let Scratch {
+                selection,
+                column_indices,
+                column_mask,
+                ..
+            } = &mut self.scratch;
+            column_mask.clear();
+            column_mask.resize(schema.columns.len(), false);
+            for &index in column_indices.iter() {
+                column_mask[index] = true;
+            }
+            select_rows(
+                &mut self.data,
+                hdu,
+                rows.clone(),
+                Some(column_mask),
+                selection,
+            )?;
+            let table = TableView::compact(schema, rows.len(), selection);
+            out.refill(table, rows, column_indices)
+        });
         if filled.is_err() {
             out.rows = 0..0;
             out.columns.clear();
         }
         filled
-    }
-
-    /// Resolve `columns` of the table `hdu` selects into the scratch, and give the index
-    /// of that HDU.
-    fn resolve_columns<'c>(
-        &mut self,
-        hdu: HduSelector<'_>,
-        columns: impl IntoIterator<Item = impl Into<ColumnSelector<'c>>>,
-    ) -> Result<usize> {
-        let hdu = selected_hdu(&self.hdus, hdu)?;
-        let schema = hdu.table_schema()?;
-        let column_indices = &mut self.scratch.column_indices;
-        column_indices.clear();
-        for selector in columns {
-            column_indices.push(selector.into().resolve(&schema.columns)?);
-        }
-        Ok(hdu.index)
-    }
-
-    /// Decode the columns [`Self::resolve_columns`] resolved of HDU `index` over `rows`
-    /// into `out`.
-    fn fill_selection(
-        &mut self,
-        index: usize,
-        rows: Range<usize>,
-        out: &mut Selection,
-    ) -> Result<()> {
-        let hdu = &self.hdus[index];
-        let schema = hdu.table_schema()?;
-        let Scratch {
-            selection,
-            column_indices,
-            column_mask,
-            ..
-        } = &mut self.scratch;
-        column_mask.clear();
-        column_mask.resize(schema.columns.len(), false);
-        for &index in column_indices.iter() {
-            column_mask[index] = true;
-        }
-        select_rows(
-            &mut self.data,
-            hdu,
-            schema,
-            rows.clone(),
-            Some(column_mask),
-            selection,
-        )?;
-        let table = TableView::compact(&schema.columns, rows.len(), schema.row_len, selection);
-        out.rows = rows;
-        out.columns.truncate(column_indices.len());
-        for (pos, &index) in column_indices.iter().enumerate() {
-            let column = table.column(index)?;
-            if let Some(selected) = out.columns.get_mut(pos) {
-                selected.refill(&column)?;
-            } else {
-                out.columns.push(SelectedColumn::new(&column)?);
-            }
-        }
-        Ok(())
     }
 
     /// Decode one fixed or variable-length table cell without materializing other rows.
@@ -477,7 +257,7 @@ impl<S: Source> FitsReader<S> {
         row: usize,
         column: impl Into<ColumnSelector<'c>>,
     ) -> Result<ColumnData> {
-        let hdu = selected_hdu(&self.hdus, hdu.into())?;
+        let hdu = self.hdus.select(hdu.into())?;
         let schema = hdu.table_schema()?;
         let column = column.into().resolve(&schema.columns)?;
         #[cfg(feature = "compression")]
@@ -486,30 +266,36 @@ impl<S: Source> FitsReader<S> {
             selected[column] = true;
             let rows = row..row.saturating_add(1);
             if let Some(decoded) = decoded_rows(&mut self.data, hdu, &rows, Some(&selected))? {
-                return DataSource::new(SliceSource::new(&decoded.data), Vec::new())
-                    .read_table_cell(0, &decoded.schema, row - decoded.first_row, column);
+                let cell = TableCell {
+                    schema: &decoded.schema,
+                    row: row - decoded.first_row,
+                    column,
+                };
+                return cell.read(&mut decoded.data.as_slice());
             }
         }
-        self.data
-            .read_table_cell(hdu.data_offset, schema, row, column)
+        let cell = TableCell {
+            schema,
+            row,
+            column,
+        };
+        cell.read(&mut self.data.unit(hdu))
     }
 
-    /// Parse an HDU's WCS and resolve any standard `-TAB` coordinate arrays from
-    /// their referenced `BINTABLE` extensions. Header-only WCS descriptions use the
-    /// same path as [`Wcs::from_header`]; this method is required for `-TAB` because its
-    /// coordinate values and optional index vectors live outside the source header.
+    /// Parse an image HDU's WCS and resolve any standard `-TAB` coordinate arrays from
+    /// their referenced `BINTABLE` extensions, plain or tiled-compressed. Header-only WCS
+    /// descriptions use the same path as [`Wcs::from_header`]; this method is required
+    /// for `-TAB` because its coordinate values and optional index vectors live outside
+    /// the source header. It resolves `-TAB` for an image header only: a binary table's
+    /// own coordinate columns are not read here. A `-TAB` extension the file does not
+    /// hold is [`FitsError::HduNotFound`].
     pub fn read_wcs<'h>(
         &mut self,
         hdu: impl Into<HduSelector<'h>>,
         alt: impl TryInto<Alternate, Error: Into<FitsError>>,
     ) -> Result<Wcs> {
         let alt = Alternate::of(alt)?;
-        self.resolve_wcs(hdu.into(), alt)
-    }
-
-    /// [`Self::read_wcs`] of the HDU `hdu` selects, the description `alt` selects.
-    fn resolve_wcs(&mut self, hdu: HduSelector<'_>, alt: Alternate) -> Result<Wcs> {
-        let header = &selected_hdu(&self.hdus, hdu)?.header;
+        let header = &self.hdus.select(hdu.into())?.header;
         let descriptors = tabular::descriptors(header, Wcs::image_axis_count(header, alt)?, alt)?;
         if descriptors.is_empty() {
             return Wcs::from_header(header, alt);
@@ -529,22 +315,11 @@ impl<S: Source> FitsReader<S> {
         let mut transforms = Vec::with_capacity(transform_count);
         for group in groups {
             let reference = &group[0].reference;
-            let selector = HduSelector::Extension {
+            let table_hdu = self.hdus.select(HduSelector::Extension {
                 name: &reference.extension_name,
                 version: Some(reference.extension_version),
                 level: Some(reference.extension_level),
-            };
-            let table_hdu =
-                find_extension(&self.hdus, selector, HduKind::BinTable)?.ok_or_else(|| {
-                    FitsError::InvalidWcs {
-                        detail: format!(
-                            "TAB BINTABLE {:?}, EXTVER {}, EXTLEVEL {} was not found",
-                            reference.extension_name,
-                            reference.extension_version,
-                            reference.extension_level
-                        ),
-                    }
-                })?;
+            })?;
             let schema = table_hdu.table_schema()?;
             let mut selected = vec![false; schema.columns.len()];
             for descriptor in &group {
@@ -552,21 +327,16 @@ impl<S: Source> FitsReader<S> {
                     selected[schema.column_index_checked(name)?] = true;
                 }
             }
-            let rows = 0..usize::from(schema.row_count != 0);
+            let rows = 0..usize::from(schema.extent.row_count != 0);
             let row_count = rows.len();
-            self.data.select_table(
-                table_hdu.data_offset,
-                schema,
-                TableRows::Range(rows),
+            select_rows(
+                &mut self.data,
+                table_hdu,
+                rows,
                 Some(&selected),
                 &mut self.scratch.selection,
             )?;
-            let table = TableView::compact(
-                &schema.columns,
-                row_count,
-                schema.row_len,
-                &self.scratch.selection,
-            );
+            let table = TableView::compact(schema, row_count, &self.scratch.selection);
             for descriptor in group {
                 transforms.push(tabular::TabularTransform::from_table(&descriptor, table)?);
             }
@@ -577,48 +347,51 @@ impl<S: Source> FitsReader<S> {
     /// Read an `TABLE` (ASCII table) extension and parse its column structure.
     /// Errors with [`FitsError::NotAnAsciiTable`] for any other HDU.
     pub fn read_ascii_table<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Ascii> {
-        let hdu = selected_hdu(&self.hdus, hdu.into())?;
-        if hdu.kind != HduKind::AsciiTable {
-            return Err(FitsError::NotAnAsciiTable);
-        }
-        let index = hdu.index;
-        let unit = self.read_data_unit(index)?;
-        Ascii::from_data(&self.hdus[index].header, unit.bytes)
+        let hdu = self.hdus.select(hdu.into())?;
+        let schema = hdu.ascii_schema()?.clone();
+        Ascii::new(schema, self.data.data_unit(hdu)?)
     }
 
     /// Read and decode a random-groups primary array (§6). Errors with
     /// [`FitsError::NotRandomGroups`] for any other HDU.
     pub fn read_groups<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<RandomGroups> {
-        let hdu = selected_hdu(&self.hdus, hdu.into())?;
+        let hdu = self.hdus.select(hdu.into())?;
         if hdu.kind != HduKind::RandomGroups {
             return Err(FitsError::NotRandomGroups);
         }
-        let lengths = DataLengths::new(hdu.data_bytes)?;
-        let unit = self.data.slice(hdu.data_offset, lengths.padded)?;
-        RandomGroups::from_data(&hdu.header, &unit[..lengths.data])
+        let runs = StoredRuns::All {
+            len: data_len(hdu.data_bytes)?,
+            shape: &[],
+        };
+        let mut read = PlainRead {
+            data: &mut self.data,
+            data_offset: hdu.data_offset,
+            sum: None,
+        };
+        let samples = read.data(runs, hdu.header.bitpix()?)?;
+        RandomGroups::from_samples(&hdu.header, samples)
     }
 
-    /// Verify the `DATASUM`/`CHECKSUM` integrity keywords of an HDU (§J).
-    /// Strings containing one or more blanks are reported as
-    /// [`ChecksumStatus::Unknown`] because the standard reserves them for
-    /// undefined or unknown checksum values.
+    /// Verify the `DATASUM`/`CHECKSUM` integrity keywords of an HDU (§J). An empty or
+    /// all-blank value is [`ChecksumStatus::Unknown`], as the standard reserves it for an
+    /// undefined or unknown checksum.
+    ///
+    /// [`ChecksumStatus::Unknown`]: crate::io::ChecksumStatus::Unknown
     pub fn verify_checksum<'h>(
         &mut self,
         hdu: impl Into<HduSelector<'h>>,
     ) -> Result<ChecksumReport> {
-        let hdu = selected_hdu(&self.hdus, hdu.into())?;
+        let hdu = self.hdus.select(hdu.into())?;
         DataChecksum::of(hdu).finish(hdu, &mut self.data)
     }
 }
 
 /// Select `rows` and `columns` (every column when `None`) of the binary table `hdu` holds
-/// into `out`, as [`DataSource::select_table`] does: from the source for a plain table, from
-/// the decoded tiles for a tiled-compressed one. A free function over the reader's fields,
-/// so the HDU stays borrowed while the source is read.
+/// into `out`, as [`TableSelection::copy_into`] does: from the source for a plain table, from
+/// the decoded tiles for a tiled-compressed one.
 fn select_rows<S: Source>(
     data: &mut DataSource<S>,
     hdu: &Hdu,
-    schema: &Schema,
     rows: Range<usize>,
     columns: Option<&[bool]>,
     out: &mut Vec<u8>,
@@ -626,21 +399,19 @@ fn select_rows<S: Source>(
     #[cfg(feature = "compression")]
     if let Some(decoded) = decoded_rows(data, hdu, &rows, columns)? {
         let rows = rows.start - decoded.first_row..rows.end - decoded.first_row;
-        return DataSource::new(SliceSource::new(&decoded.data), Vec::new()).select_table(
-            0,
-            &decoded.schema,
-            TableRows::Range(rows),
+        let selection = TableSelection {
+            schema: &decoded.schema,
+            rows: TableRows::Range(rows),
             columns,
-            out,
-        );
+        };
+        return selection.copy_into(&mut decoded.data.as_slice(), out);
     }
-    data.select_table(
-        hdu.data_offset,
-        schema,
-        TableRows::Range(rows),
+    let selection = TableSelection {
+        schema: hdu.table_schema()?,
+        rows: TableRows::Range(rows),
         columns,
-        out,
-    )
+    };
+    selection.copy_into(&mut data.unit(hdu), out)
 }
 
 /// The tiles of the table a tiled-compressed `hdu` holds that `rows` touch, decoded with
@@ -655,195 +426,36 @@ fn decoded_rows<S: Source>(
     let Some(tiled) = hdu.tiled_table()? else {
         return Ok(None);
     };
-    validate_row_range(rows, tiled.schema.row_count)?;
-    let container = data.table(hdu, None)?;
-    tiled
-        .decode(&hdu.header, container, rows, columns)
-        .map(Some)
-}
-
-/// The HDU `selector` names. A free function over the records, so a read can hold an
-/// HDU while it fetches bytes from the source.
-pub(crate) fn selected_hdu<'h>(hdus: &'h [Hdu], selector: HduSelector<'_>) -> Result<&'h Hdu> {
-    match selector {
-        HduSelector::Index(index) => hdus.get(index).ok_or(FitsError::IndexOutOfBounds {
-            indexed: Indexed::Hdu,
-            index,
-            len: hdus.len(),
-        }),
-        HduSelector::Extension {
-            name,
-            version,
-            level,
-        } => {
-            for hdu in hdus {
-                if hdu.matches(selector)? {
-                    return Ok(hdu);
-                }
-            }
-            Err(FitsError::HduNotFound {
-                name: name.to_string(),
-                version,
-                level,
-            })
-        }
+    validate_row_range(rows, tiled.schema.extent.row_count)?;
+    let tiles = tiled.tiles(rows);
+    let all = 0..hdu.container_schema()?.extent.row_count;
+    // A tile's arrays have descriptors that address the whole container heap, and a read
+    // of every tile reads the whole container: then the container is read whole, else
+    // only the touched tiles.
+    if tiled.has_arrays() || tiles == all {
+        let container = data.table(hdu, None)?;
+        let tiles = ContainerTiles {
+            view: container,
+            first_tile: 0,
+        };
+        return tiled.decode(tiles, rows, columns).map(Some);
     }
+    let first_tile = tiles.start;
+    let container = data.table_rows(hdu, TableRows::Range(tiles))?;
+    let tiles = ContainerTiles {
+        view: container,
+        first_tile,
+    };
+    tiled.decode(tiles, rows, columns).map(Some)
 }
 
-/// The first HDU of `kind` that `selector` names.
-fn find_extension<'h>(
-    hdus: &'h [Hdu],
-    selector: HduSelector<'_>,
-    kind: HduKind,
-) -> Result<Option<&'h Hdu>> {
-    for hdu in hdus {
-        if hdu.kind == kind && hdu.matches(selector)? {
-            return Ok(Some(hdu));
-        }
-    }
-    Ok(None)
-}
-
-/// The state of one FITS checksum keyword.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChecksumStatus {
-    /// The keyword is not present, so the HDU asserts no checksum knowledge.
-    Absent,
-    /// The keyword contains one or more blanks and nothing else.
-    Unknown,
-    /// The asserted checksum matches the recomputed value.
-    Valid,
-    /// The value is malformed or does not match the recomputed checksum.
-    Invalid,
-}
-
-/// Result of [`FitsReader::verify_checksum`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChecksumReport {
-    pub datasum: ChecksumStatus,
-    pub checksum: ChecksumStatus,
-}
-
-impl ChecksumReport {
-    /// Whether both `DATASUM` and `CHECKSUM` are present and verify.
-    pub const fn is_valid(&self) -> bool {
-        matches!(
-            (self.datasum, self.checksum),
-            (ChecksumStatus::Valid, ChecksumStatus::Valid)
-        )
-    }
-
-    /// Whether `DATASUM` or `CHECKSUM` is malformed or does not match its recomputed
-    /// value.
-    pub const fn has_invalid(&self) -> bool {
-        matches!(self.datasum, ChecksumStatus::Invalid)
-            || matches!(self.checksum, ChecksumStatus::Invalid)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct DataLengths {
-    data: usize,
-    padded: usize,
-}
-
-impl DataLengths {
-    fn new(data_bytes: u64) -> Result<Self> {
-        let data = usize::try_from(data_bytes)
-            .map_err(|_| FitsError::DataUnitTooLarge { bytes: data_bytes })?;
-        let padded_bytes = padded_len(data_bytes).expect("data_extent bounds the padded data unit");
-        let padded = usize::try_from(padded_bytes).map_err(|_| FitsError::DataUnitTooLarge {
-            bytes: padded_bytes,
-        })?;
-        Ok(Self { data, padded })
-    }
-}
-
-/// Outcome of scanning for the next header unit.
-#[derive(Debug)]
-enum NextHeader {
-    /// A complete header unit terminated by an `END` card.
-    Found { bytes: Vec<u8>, sum: u32 },
-    /// Clean end of stream at a block boundary — no more HDUs.
-    End,
-    /// Trailing bytes carrying no `END`: special records (§3.5) or a trailing
-    /// partial / fill block (§3.6). Disregarded after the last HDU.
-    Trailing,
-}
-
-/// Read one header unit at `*offset`, advancing `offset` past each consumed block,
-/// until a block carries the `END` record. Blocks come through [`Source::slice`], so
-/// the same scan drives both seeking and in-memory sources.
-fn scan_header_unit<S: Source>(
-    source: &mut S,
-    offset: &mut u64,
-    scratch: &mut Vec<u8>,
-    position: HduPosition,
-) -> Result<NextHeader> {
-    let size = source.size();
-    // Most headers are a single block; reserve it so the common case parses with one
-    // allocation and only multi-block headers grow.
-    let mut bytes = Vec::with_capacity(BLOCK_SIZE);
-    let mut sum = 0;
-    loop {
-        match size - *offset {
-            // Clean end at a block boundary.
-            0 if bytes.is_empty() => return Ok(NextHeader::End),
-            // Once a valid SIMPLE/XTENSION prefix was seen, EOF before END is a
-            // malformed header rather than ignorable trailing content.
-            0 => return Err(FitsError::UnexpectedEof),
-            // A sub-block remnant before any header is trailing content (§3.6).
-            avail if avail < BLOCK_SIZE as u64 && bytes.is_empty() => {
-                return Ok(NextHeader::Trailing);
-            }
-            avail if avail < BLOCK_SIZE as u64 => return Err(FitsError::UnexpectedEof),
-            _ => {}
-        }
-        let block = source.slice(*offset, BLOCK_SIZE, scratch)?;
-        if bytes.is_empty() {
-            let keyword = &block[..8];
-            match position {
-                HduPosition::Primary if keyword != b"SIMPLE  " => {
-                    return Err(FitsError::MissingKeyword {
-                        keyword: keywords::SIMPLE,
-                    });
-                }
-                // §3.5: a post-HDU block whose first card is not XTENSION begins
-                // special records, regardless of any END-shaped bytes later in it.
-                HduPosition::Extension if keyword != b"XTENSION" => {
-                    return Ok(NextHeader::Trailing);
-                }
-                _ => {}
-            }
-        }
-        *offset += BLOCK_SIZE as u64;
-        sum = checksum::accumulate(block, sum);
-        allocation::try_reserve(&mut bytes, block.len())?;
-        bytes.extend_from_slice(block);
-        if block_has_end(block) {
-            return Ok(NextHeader::Found { bytes, sum });
-        }
-    }
-}
-
-fn block_has_end(block: &[u8]) -> bool {
-    block
-        .as_chunks::<CARD_SIZE>()
-        .0
-        .iter()
-        .any(|card| is_end_record(card))
+/// The `data_bytes` of a data unit as a length in memory.
+pub(crate) fn data_len(data_bytes: u64) -> Result<usize> {
+    usize::try_from(data_bytes).map_err(|_| FitsError::DataUnitTooLarge { bytes: data_bytes })
 }
 
 #[cfg(test)]
 pub(crate) mod internals {
-    use crate::image_model::Image;
-    use crate::image_model::region::Region;
-    use crate::reader::FitsReader;
-    use crate::reader::StreamReader;
-    use crate::reader::source::Source;
-    use std::fs;
-    use std::fs::File;
-
     /// The `BINTABLE` a tiled-compressed HDU is stored as, its cells still compressed:
     /// what a test of the container's own columns reads.
     #[cfg(feature = "compression")]
@@ -851,15 +463,15 @@ pub(crate) mod internals {
         use std::ops::Range;
 
         use crate::bintable::Table;
+        use crate::bintable::selection::{TableRows, TableSelection};
         use crate::error::Result;
         use crate::reader::FitsReader;
-        use crate::reader::data_source::TableRows;
-        use crate::reader::hdu::Hdu;
         use crate::reader::source::Source;
 
         impl<S: Source> FitsReader<S> {
             pub(crate) fn read_container_table(&mut self, index: usize) -> Result<Table> {
-                self.read_table_as(index, Hdu::container_schema)
+                let hdu = &self.hdus[index];
+                Table::new(hdu.container_schema()?.clone(), self.data.data_unit(hdu)?)
             }
 
             pub(crate) fn read_container_rows(
@@ -871,39 +483,15 @@ pub(crate) mod internals {
                 let schema = hdu.container_schema()?;
                 let row_count = rows.len();
                 let mut data = Vec::new();
-                self.data.select_table(
-                    hdu.data_offset,
+                let selection = TableSelection {
                     schema,
-                    TableRows::Range(rows),
-                    None,
-                    &mut data,
-                )?;
+                    rows: TableRows::Range(rows),
+                    columns: None,
+                };
+                selection.copy_into(&mut self.data.unit(hdu), &mut data)?;
                 Table::new(schema.compacted(row_count, data.len()), data)
             }
         }
-    }
-
-    /// Where the fixture `name` lies, relative to the crate root tests run in.
-    pub(crate) fn fixture_path(name: &str) -> String {
-        format!("test_resources/{name}")
-    }
-
-    pub(crate) fn fixture_bytes(name: &str) -> Vec<u8> {
-        let path = fixture_path(name);
-        fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
-    }
-
-    /// HDU `index` read whole into an owned image.
-    pub(crate) fn read_whole<S: Source>(reader: &mut FitsReader<S>, index: usize) -> Image {
-        reader.image(index).unwrap().read(Region::All).unwrap()
-    }
-
-    /// Open a fixture as a streaming reader, reporting which file failed rather
-    /// than a bare unwrap — every read-path test starts here.
-    pub(crate) fn open_fixture(name: &str) -> StreamReader<File> {
-        let path = fixture_path(name);
-        FitsReader::open(File::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}")))
-            .unwrap_or_else(|e| panic!("parse {name}: {e}"))
     }
 }
 

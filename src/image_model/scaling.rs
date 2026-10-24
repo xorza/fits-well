@@ -5,6 +5,8 @@ use crate::bitpix::Bitpix;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::{Header, keywords};
+use crate::image_model::physical_sample::PhysicalSample;
+use crate::image_model::sample::Sample;
 use crate::image_model::sample_type::{SampleType, UnsignedKind};
 use crate::image_model::{U64_OFFSET, U64_OFFSET_INTEGER};
 
@@ -31,14 +33,22 @@ impl Scaling {
         blank: None,
     };
 
-    /// The `BSCALE`, `BZERO` and `BLANK` that `header` declares, as they stand; an
-    /// image's own scaling is [`Hdu::image_metadata`](crate::io::Hdu::image_metadata)'s.
-    pub(crate) fn from_header(header: &Header) -> Result<Self> {
-        Ok(Self {
+    /// The `BSCALE`, `BZERO` and `BLANK` that `header` declares for samples stored as
+    /// `bitpix`, checked as [`Scaling::validate`] checks them. A float array ignores
+    /// `BLANK`, which §5.2.5 defines for integers only, as cfitsio ignores it and
+    /// astropy warns and ignores it; its undefined values are `NaN`.
+    pub(crate) fn from_header(header: &Header, bitpix: Bitpix) -> Result<Self> {
+        let scaling = Self {
             bscale: header.get_real(keywords::BSCALE)?.unwrap_or(1.0),
             bzero: header.get_real(keywords::BZERO)?.unwrap_or(0.0),
-            blank: header.get_integer(keywords::BLANK)?,
-        })
+            blank: if bitpix.is_float() {
+                None
+            } else {
+                header.get_integer(keywords::BLANK)?
+            },
+        };
+        scaling.validate(bitpix)?;
+        Ok(scaling)
     }
 
     /// The exact-integer realization this scaling denotes for samples stored as
@@ -56,15 +66,63 @@ impl Scaling {
         SampleType::from_scaling(bitpix, *self).unsigned_kind()
     }
 
-    pub(crate) fn scale(&self, raw: f64) -> f64 {
-        self.bzero + self.bscale * raw
+    /// Append the physical values of `samples` to `out`: `BZERO + BSCALE × sample`
+    /// (§3.4, §5.2.5), the samples equal to an integer `BLANK` as `NaN`, and a float's
+    /// `NaN` and infinities passed through. The affine is one fused multiply-add, the
+    /// correctly rounded `f64` of the exact value, where cfitsio rounds twice. The
+    /// `BLANK` test and the identity are decided once, outside the loop, which then
+    /// has no branch the data takes.
+    pub(crate) fn extend_physical<T: Sample, O: PhysicalSample>(
+        &self,
+        samples: &[T],
+        out: &mut Vec<O>,
+    ) {
+        out.reserve(samples.len());
+        let Self {
+            bscale,
+            bzero,
+            blank,
+        } = *self;
+        let affine = |sample: T| O::from_f64(bscale.mul_add(sample.to_f64(), bzero));
+        let identity = |sample: T| O::from_f64(sample.to_f64());
+        match (blank.and_then(T::integer), self.is_identity()) {
+            (None, true) => out.extend(samples.iter().map(|&sample| identity(sample))),
+            (None, false) => out.extend(samples.iter().map(|&sample| affine(sample))),
+            (Some(blank), true) => out.extend(samples.iter().map(|&sample| {
+                if sample == blank {
+                    O::from_f64(f64::NAN)
+                } else {
+                    identity(sample)
+                }
+            })),
+            (Some(blank), false) => out.extend(samples.iter().map(|&sample| {
+                if sample == blank {
+                    O::from_f64(f64::NAN)
+                } else {
+                    affine(sample)
+                }
+            })),
+        }
     }
 
-    pub(crate) fn scale_integer(&self, raw: i64) -> f64 {
-        if self.blank == Some(raw) {
-            f64::NAN
-        } else {
-            self.scale(raw as f64)
+    /// [`Scaling::extend_physical`] straight from big-endian samples of type `T`,
+    /// decoded a block at a time in a stack buffer: no host-endian copy of the whole
+    /// run is made.
+    pub(crate) fn extend_physical_be<T: Sample, O: PhysicalSample>(
+        &self,
+        bytes: &[u8],
+        out: &mut Vec<O>,
+    ) {
+        /// The samples decoded at a time: 2 KiB of `f64`, which stays in L1.
+        const BLOCK: usize = 256;
+        let size = size_of::<T>();
+        debug_assert_eq!(bytes.len() % size, 0, "whole big-endian samples");
+        out.reserve(bytes.len() / size);
+        let mut block = [T::default(); BLOCK];
+        for chunk in bytes.chunks(BLOCK * size) {
+            let decoded = &mut block[..chunk.len() / size];
+            T::decode_be(chunk, decoded);
+            self.extend_physical(decoded, out);
         }
     }
 
@@ -82,14 +140,7 @@ impl Scaling {
         let Some(blank) = self.blank else {
             return Ok(());
         };
-        let valid = match bitpix {
-            Bitpix::U8 => u8::try_from(blank).is_ok(),
-            Bitpix::I16 => i16::try_from(blank).is_ok(),
-            Bitpix::I32 => i32::try_from(blank).is_ok(),
-            Bitpix::I64 => true,
-            Bitpix::F32 | Bitpix::F64 => false,
-        };
-        if !valid {
+        if !bitpix.holds_integer(blank) {
             return Err(FitsError::KeywordOutOfRange {
                 keyword: keywords::BLANK,
             });
@@ -113,7 +164,8 @@ impl Scaling {
         Ok(())
     }
 
-    /// `true` when decoding needs no arithmetic — just an endian swap or copy.
+    /// Whether the affine map is the identity, `BSCALE = 1` and `BZERO = 0`. `BLANK` is
+    /// a separate fact: an identity scaling with a `BLANK` still maps the null to `NaN`.
     pub fn is_identity(&self) -> bool {
         self.bscale == 1.0 && self.bzero == 0.0
     }

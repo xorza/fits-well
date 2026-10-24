@@ -2,6 +2,8 @@
 
 use std::ops::Range;
 
+use bitvec::order::Msb0;
+use bitvec::slice::BitSlice;
 use num_complex::Complex;
 
 use crate::bintable::column_data::ColumnData;
@@ -12,6 +14,7 @@ use crate::bintable::column_data::ColumnData;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ColumnView<'a> {
     Logical(&'a [Option<bool>]),
+    Bit(&'a BitSlice<u8, Msb0>),
     U8(&'a [u8]),
     I16(&'a [i16]),
     I32(&'a [i32]),
@@ -25,9 +28,10 @@ pub enum ColumnView<'a> {
 
 impl<'a> ColumnView<'a> {
     /// Element count.
-    pub const fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         match self {
             Self::Logical(values) => values.len(),
+            Self::Bit(values) => values.len(),
             Self::U8(values) | Self::Character(values) => values.len(),
             Self::I16(values) => values.len(),
             Self::I32(values) => values.len(),
@@ -39,12 +43,20 @@ impl<'a> ColumnView<'a> {
         }
     }
 
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     pub const fn as_logical(&self) -> Option<&'a [Option<bool>]> {
         if let Self::Logical(values) = self {
+            Some(values)
+        } else {
+            None
+        }
+    }
+
+    pub const fn as_bit(&self) -> Option<&'a BitSlice<u8, Msb0>> {
+        if let Self::Bit(values) = self {
             Some(values)
         } else {
             None
@@ -127,6 +139,7 @@ impl<'a> ColumnView<'a> {
     pub(crate) fn slice(self, range: Range<usize>) -> Self {
         match self {
             Self::Logical(values) => Self::Logical(&values[range]),
+            Self::Bit(values) => Self::Bit(&values[range]),
             Self::U8(values) => Self::U8(&values[range]),
             Self::I16(values) => Self::I16(&values[range]),
             Self::I32(values) => Self::I32(&values[range]),
@@ -143,6 +156,7 @@ impl<'a> ColumnView<'a> {
     pub fn to_data(&self) -> ColumnData {
         match self {
             Self::Logical(values) => ColumnData::Logical(values.to_vec()),
+            Self::Bit(values) => ColumnData::Bit(values.to_bitvec()),
             Self::U8(values) => ColumnData::U8(values.to_vec()),
             Self::I16(values) => ColumnData::I16(values.to_vec()),
             Self::I32(values) => ColumnData::I32(values.to_vec()),

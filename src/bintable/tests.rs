@@ -1,29 +1,30 @@
 use crate::bintable::column_data::ColumnData;
+use crate::bintable::element_kind::ElementKind;
+use crate::bintable::tform::Storage;
 use crate::bintable::tform::internals::tform;
-use crate::bintable::tform_kind::TformKind;
 use crate::error::FitsError;
-use crate::reader::internals::open_fixture;
+use crate::internals::fixture::Fixture;
 
 #[test]
 fn reads_the_real_aips_antenna_table() {
-    let mut reader = open_fixture("DDTSUVDATA.fits");
+    let mut reader = Fixture::Ddts.stream();
     let table = reader.read_table(1).unwrap();
 
-    assert_eq!(table.schema.row_count, 28);
+    assert_eq!(table.schema.row_count(), 28);
     assert_eq!(table.schema.columns.len(), 12);
     // ANNAME = 8A, STABXYZ = 3D, ORBPARM = 0D, NOSTA = 1J ...
     assert_eq!(table.schema.columns[0].name.as_deref(), Some("ANNAME"));
     assert_eq!(
         table.schema.columns[0].tform,
-        tform(8, TformKind::Character, None)
+        tform(8, ElementKind::Character, Storage::Fixed)
     );
     assert_eq!(
         table.schema.columns[1].tform,
-        tform(3, TformKind::F64, None)
+        tform(3, ElementKind::F64, Storage::Fixed)
     );
     assert_eq!(
         table.schema.columns[2].tform,
-        tform(0, TformKind::F64, None)
+        tform(0, ElementKind::F64, Storage::Fixed)
     );
     // The 0D ORBPARM column contributes no width, so NOSTA shares its offset.
     assert_eq!(table.schema.columns[2].byte_offset, 32);
@@ -71,7 +72,7 @@ fn reads_the_real_aips_antenna_table() {
 
 #[test]
 fn read_table_rejects_non_bintable_hdus() {
-    let mut reader = open_fixture("DDTSUVDATA.fits");
+    let mut reader = Fixture::Ddts.stream();
     // HDU 0 is a random-groups primary, not a binary table.
     assert!(matches!(reader.read_table(0), Err(FitsError::NotABinTable)));
 }

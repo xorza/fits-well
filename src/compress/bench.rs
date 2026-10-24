@@ -9,21 +9,20 @@ use std::path::PathBuf;
 use criterion::{BenchmarkId, Criterion};
 
 use crate::bench::fixture::{self, Kind, Reading, Scale, ScratchDir, SourceKind};
-use crate::bench::scene::{self, CATALOG_ROW_BYTES, CATALOG_ROWS, HEIGHT, WIDTH};
 use crate::bintable::Table;
 use crate::bitpix::Bitpix;
 use crate::compress::encode::hcompress_default_rows;
-use crate::compress::hcompress::Smoothing;
 use crate::compress::plane::IntBitpix;
-use crate::compress::{
-    Compression, CompressionConfig, Hcompress, convert, gzip, hcompress, plio, rice,
-};
+use crate::compress::tile_codec::{CodecScratch, Tile, TileCodec, TileSamples};
+use crate::compress::{Compression, CompressionConfig, Hcompress};
 use crate::fits_writer::FitsWriter;
 use crate::image_model::Image;
 use crate::image_model::data::Data;
 use crate::image_model::region::Region;
+use crate::internals::scene::{self, CATALOG_ROW_BYTES, CATALOG_ROWS, HEIGHT, WIDTH};
 use crate::reader::FitsReader;
 use crate::reader::source::Source;
+use std::mem;
 
 /// The codecs an image case compresses with, and the `BITPIX` of the scene image each takes:
 /// the integer codecs the light, `PLIO_1` the mask, the float-capable ones the float frame.
@@ -66,7 +65,7 @@ pub(crate) fn atomic(c: &mut Criterion) {
             bitpix.elem_size(),
         ));
         group.bench_function(case_id(compression, bitpix), |b| {
-            let mut tile = Tile::new(compression, bitpix);
+            let mut tile = CodecTile::new(compression, bitpix);
             b.iter(|| tile.encode());
         });
     }
@@ -79,7 +78,7 @@ pub(crate) fn atomic(c: &mut Criterion) {
             bitpix.elem_size(),
         ));
         group.bench_function(case_id(compression, bitpix), |b| {
-            let mut tile = Tile::new(compression, bitpix);
+            let mut tile = CodecTile::new(compression, bitpix);
             tile.encode();
             tile.decode();
             assert_eq!(tile.decoded, tile.values, "the codec round-trips the tile");
@@ -234,21 +233,20 @@ const fn tile_rows(compression: Compression) -> usize {
     }
 }
 
-/// One tile of the light, or of its mask for `PLIO_1`, and the reused buffers its codec writes.
+/// One tile of the light, or of its mask for `PLIO_1`, through the tile codec a write
+/// and a read take, and the reused buffers it writes.
 #[derive(Debug)]
-struct Tile {
-    compression: Compression,
+struct CodecTile {
+    codec: TileCodec,
     bitpix: IntBitpix,
+    shape: [usize; 2],
     values: Vec<i64>,
-    be: Vec<u8>,
     encoded: Vec<u8>,
     decoded: Vec<i64>,
-    gzip: gzip::GzipScratch,
-    rice: rice::RiceScratch,
-    hcompress: hcompress::HcompressScratch,
+    scratch: CodecScratch,
 }
 
-impl Tile {
+impl CodecTile {
     fn new(compression: Compression, bitpix: Bitpix) -> Self {
         let plane = scene_image(compression, bitpix, tile_rows(compression));
         let values = match plane.samples {
@@ -261,74 +259,43 @@ impl Tile {
             _ => IntBitpix::I16,
         };
         Self {
-            compression,
+            codec: compression.tile_codec(bitpix, 0),
             bitpix,
+            shape: [WIDTH, tile_rows(compression)],
             values,
-            be: Vec::new(),
             encoded: Vec::new(),
             decoded: Vec::new(),
-            gzip: gzip::GzipScratch::default(),
-            rice: rice::RiceScratch::default(),
-            hcompress: hcompress::HcompressScratch::default(),
+            scratch: CodecScratch::default(),
         }
     }
 
     /// Encodes the tile into [`Self::encoded`], as the tile encoder of `compress_image` does.
     fn encode(&mut self) {
-        let level = self.compression.gzip_level();
-        self.encoded = match self.compression {
-            Compression::Gzip(config) if config.shuffle => {
-                convert::i64_to_be_into(&self.values, self.bitpix, &mut self.be);
-                gzip::gzip2_encode(&self.be, self.bitpix.elem_size(), level, &mut self.gzip)
-            }
-            Compression::Gzip(_) => {
-                convert::i64_to_be_into(&self.values, self.bitpix, &mut self.be);
-                gzip::gzip_encode(&self.be, level)
-            }
-            Compression::Rice => {
-                rice::rice_encode(&self.values, self.bitpix, rice::BLOCKSIZE, &mut self.rice)
-            }
-            Compression::Hcompress(_) => {
-                let tdims = [WIDTH, tile_rows(self.compression)];
-                hcompress::hcompress_tile_encode(&self.values, &tdims, 0, &mut self.hcompress)
-                    .unwrap()
-            }
-            Compression::Plio => plio::plio_encode(&self.values)
-                .unwrap()
-                .into_iter()
-                .flat_map(i16::to_be_bytes)
-                .collect(),
-            Compression::None => unreachable!("no case stores a tile uncompressed"),
+        let tile = Tile {
+            shape: &self.shape,
+            width: self.bitpix,
+            blank: None,
         };
+        let stream = self
+            .codec
+            .encode(tile, TileSamples::Ints(&self.values), &mut self.scratch)
+            .unwrap();
+        self.encoded.clear();
+        self.encoded.extend_from_slice(stream);
     }
 
     /// Decodes [`Self::encoded`] into [`Self::decoded`], as the tile decoder of a read does.
     fn decode(&mut self) {
-        let (bytes, out) = (&self.encoded, &mut self.decoded);
-        match self.compression {
-            Compression::Gzip(config) if config.shuffle => {
-                gzip::gzip2_tile_into(bytes, self.bitpix, WIDTH, out, &mut self.gzip)
-            }
-            Compression::Gzip(_) => {
-                gzip::gzip_tile_into(bytes, self.bitpix, WIDTH, out, &mut self.gzip)
-            }
-            Compression::Rice => {
-                rice::rice_decode_into(bytes, WIDTH, self.bitpix, rice::BLOCKSIZE, out)
-            }
-            Compression::Hcompress(_) => {
-                let elems = WIDTH * tile_rows(self.compression);
-                hcompress::hcompress_tile_into(
-                    bytes,
-                    Smoothing::Off,
-                    elems,
-                    out,
-                    &mut self.hcompress,
-                )
-            }
-            Compression::Plio => plio::plio_decode_be_into(bytes, WIDTH, out),
-            Compression::None => unreachable!("no case stores a tile uncompressed"),
-        }
-        .unwrap();
+        let tile = Tile {
+            shape: &self.shape,
+            width: self.bitpix,
+            blank: None,
+        };
+        let decoded = self
+            .codec
+            .decode_ints(tile, &self.encoded, &mut self.scratch)
+            .unwrap();
+        mem::swap(&mut self.decoded, decoded);
     }
 }
 

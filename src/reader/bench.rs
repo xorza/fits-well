@@ -7,14 +7,16 @@ use std::path::PathBuf;
 use criterion::{BenchmarkId, Criterion};
 
 use crate::bench::fixture::{self, Kind, Reading, Scale, ScratchDir, SourceKind};
-use crate::bench::scene::{self, CATALOG_ROW_BYTES, CATALOG_ROWS, HEIGHT, TYPES, WIDTH};
 use crate::bintable::Table;
 use crate::bitpix::Bitpix;
 use crate::checksum;
+use crate::checksum::checksum_report::ChecksumReport;
 use crate::image_model::data::Data;
 use crate::image_model::region::Region;
+use crate::internals::samples::BITPIXES;
+use crate::internals::scene::{self, CATALOG_ROW_BYTES, CATALOG_ROWS, HEIGHT, WIDTH};
+use crate::reader::FitsReader;
 use crate::reader::source::Source;
-use crate::reader::{ChecksumReport, FitsReader};
 
 /// The samples a section read takes at a time, as the lumos light reader does: 64 Ki samples,
 /// whole rows of the standard frame, so ten rows a section.
@@ -49,7 +51,7 @@ pub(crate) fn integration(c: &mut Criterion) {
 /// sample, in the stored bytes.
 fn read_image(c: &mut Criterion, dir: &ScratchDir) {
     let mut group = Kind::Integration.group(c, "read_image", Scale::Frame);
-    for bitpix in TYPES {
+    for bitpix in BITPIXES {
         let mut path = None;
         group.throughput(fixture::throughput(WIDTH * HEIGHT, bitpix.elem_size()));
         for source in SourceKind::all() {
@@ -68,7 +70,7 @@ fn read_image(c: &mut Criterion, dir: &ScratchDir) {
 /// then the checksum judged. Per sample, in the stored bytes.
 fn read_section(c: &mut Criterion, dir: &ScratchDir) {
     let mut group = Kind::Integration.group(c, "read_section", Scale::Frame);
-    for bitpix in TYPES {
+    for bitpix in BITPIXES {
         let mut path = None;
         group.throughput(fixture::throughput(WIDTH * HEIGHT, bitpix.elem_size()));
         for source in SourceKind::all() {

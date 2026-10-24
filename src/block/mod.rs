@@ -10,6 +10,9 @@ pub const BLOCK_SIZE: usize = 2880;
 /// A keyword record (card) is 80 bytes of restricted ASCII.
 pub const CARD_SIZE: usize = 80;
 
+/// The records of a header block.
+pub(crate) const RECORDS_PER_BLOCK: usize = BLOCK_SIZE / CARD_SIZE;
+
 /// Fill byte for header units and ASCII-table data units: ASCII space.
 pub(crate) const SPACE_FILL: u8 = b' ';
 

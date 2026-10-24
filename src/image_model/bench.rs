@@ -6,12 +6,11 @@ use std::hint::black_box;
 use criterion::{BenchmarkId, Criterion};
 
 use crate::bench::fixture::{self, Kind, Scale};
-use crate::bench::scene::{self, TYPES, WIDTH};
 use crate::bitpix::Bitpix;
-use crate::image_model::physical_view;
 use crate::image_model::scaling::Scaling;
-use crate::image_model::swap_into_words;
 use crate::image_model::view::Borrowed;
+use crate::internals::samples::BITPIXES;
+use crate::internals::scene::{self, WIDTH};
 
 /// `atomic/decode/<type>`, `atomic/encode/<type>`, `atomic/physical/<scaling>/<type>` and
 /// `atomic/unsigned/<type>`, each on one row of the standard frame. Per sample, in the stored
@@ -36,7 +35,7 @@ fn decode(c: &mut Criterion) {
                 .samples
                 .view()
                 .encode_into(&mut row);
-            b.iter(|| swap_into_words(black_box(&row), bitpix, &mut words));
+            b.iter(|| bitpix.swap_into_words(black_box(&row), &mut words));
         });
     }
     group.finish();
@@ -65,7 +64,7 @@ fn encode(c: &mut Criterion) {
 /// the branch a sentinel adds.
 fn physical(c: &mut Criterion) {
     let mut group = Kind::Atomic.group(c, "physical", Scale::Sample);
-    for bitpix in TYPES {
+    for bitpix in BITPIXES {
         let scalings: &[(&str, Option<i64>)] = if bitpix.is_integer() {
             &[("stored", None), ("blank", Some(0))]
         } else {
@@ -80,7 +79,7 @@ fn physical(c: &mut Criterion) {
                     blank,
                     ..row.scaling
                 };
-                b.iter(|| physical_view::<f64>(black_box(row.samples.view()), &scaling));
+                b.iter(|| black_box(row.samples.view()).physical::<f64>(&scaling));
             });
         }
     }
@@ -91,7 +90,7 @@ fn physical(c: &mut Criterion) {
 /// unsigned type under the FITS sign-bit `BZERO` (a `u8` as signed bytes), into a new row.
 fn unsigned(c: &mut Criterion) {
     let mut group = Kind::Atomic.group(c, "unsigned", Scale::Sample);
-    for bitpix in TYPES.into_iter().filter(|bitpix| bitpix.is_integer()) {
+    for bitpix in BITPIXES.into_iter().filter(|bitpix| bitpix.is_integer()) {
         group.throughput(fixture::throughput(WIDTH, bitpix.elem_size()));
         group.bench_function(fixture::bitpix_id(bitpix), |b| {
             let row = scene::sky(bitpix, WIDTH, 1, 1);
@@ -113,7 +112,7 @@ fn unsigned(c: &mut Criterion) {
 
 /// Every type but `u8`, which is stored as it is.
 fn swapped_types() -> impl Iterator<Item = Bitpix> {
-    TYPES.into_iter().filter(|&bitpix| bitpix != Bitpix::U8)
+    BITPIXES.into_iter().filter(|&bitpix| bitpix != Bitpix::U8)
 }
 
 /// The `BZERO` that makes `bitpix` the unsigned convention's type (§5.2.5).

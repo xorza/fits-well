@@ -1,15 +1,14 @@
-use crate::header_model::{Header, RecordView};
-
 use crate::header_model::card::*;
-use crate::header_model::internals::card_bytes;
+use crate::header_model::{Header, RecordView};
+use crate::internals::cards::card_bytes;
 
-fn parse(text: &str) -> Card {
+fn parse(text: &str) -> Record {
     reparse(&card_bytes(text))
 }
 
-fn reparse(bytes: &[u8; CARD_SIZE]) -> Card {
+fn reparse(bytes: &[u8; CARD_SIZE]) -> Record {
     match record(bytes) {
-        ParsedRecord::Card(card) => card,
+        ParsedRecord::Record(card) => card,
         other => panic!("expected a stored card, got {other:?}"),
     }
 }
@@ -26,35 +25,50 @@ fn repairs(text: &str) -> Vec<RepairKind> {
     repairs.into_iter().map(|repair| repair.kind).collect()
 }
 
-impl Card {
+impl Record {
     const fn value(&self) -> Option<&Value> {
         match self {
-            Self::Value { value, .. } => Some(value),
+            Self::Valued { value, .. } => Some(value),
             Self::Hierarch { value, .. } => Some(value),
             Self::Commentary { .. } | Self::Malformed { .. } => None,
+        }
+    }
+
+    /// The record's name as text, `""` for none.
+    fn name_text(&self) -> String {
+        self.view()
+            .name()
+            .map_or_else(String::new, |name| name.to_string())
+    }
+
+    /// A valued record's comment, or a commentary record's text.
+    fn text(&self) -> Option<&str> {
+        match self {
+            Self::Commentary { text, .. } => text.as_deref(),
+            _ => self.comment(),
         }
     }
 }
 
 /// One record: the card's checks, then its single-record rendering.
-fn render(card: &Card) -> Result<[u8; CARD_SIZE]> {
-    card.validate_contents()?;
-    card.render_one()
+fn render(card: &Record) -> Result<[u8; CARD_SIZE]> {
+    validate_contents(card)?;
+    render_one(card)
 }
 
-fn render_records(card: &Card) -> Vec<[u8; CARD_SIZE]> {
+fn render_records(card: &Record) -> Vec<[u8; CARD_SIZE]> {
     let mut bytes = Vec::new();
-    card.render_into(&mut bytes).unwrap();
+    render_into(card, &mut bytes).unwrap();
     bytes.as_chunks::<CARD_SIZE>().0.to_vec()
 }
 
 #[test]
 fn parses_a_logical_card_with_comment() {
     let card = parse("SIMPLE  =                    T / file does conform");
-    assert_eq!(card.keyword(), "SIMPLE");
-    assert!(matches!(card, Card::Value { .. }));
+    assert_eq!(card.name_text(), "SIMPLE");
+    assert!(matches!(card, Record::Valued { .. }));
     assert_eq!(card.value(), Some(&Value::Logical(true)));
-    assert_eq!(card.comment(), Some("file does conform"));
+    assert_eq!(card.text(), Some("file does conform"));
 }
 
 #[test]
@@ -113,7 +127,7 @@ fn large_magnitude_real_renders_with_exponent_and_round_trips() {
     // Display would expand 1e300 to 301 digits and overflow the 80-byte card;
     // format_real must use the §4.2.4 uppercase-`E` form instead (no truncation).
     for &r in &[1e300_f64, -1e300, 1e-300, 2.5e123] {
-        let card = Card::Value {
+        let card = Record::Valued {
             keyword: Keyword::new("BIG"),
             value: Value::Real(r),
             comment: None,
@@ -133,7 +147,7 @@ fn large_magnitude_real_renders_with_exponent_and_round_trips() {
 fn slash_inside_a_string_is_not_a_comment_boundary() {
     let card = parse("PATH    = 'a/b/c' / the real comment");
     assert_eq!(card.value(), Some(&Value::Text("a/b/c".into())));
-    assert_eq!(card.comment(), Some("the real comment"));
+    assert_eq!(card.text(), Some("the real comment"));
 }
 
 #[test]
@@ -179,24 +193,24 @@ fn classifies_end_and_commentary_cards() {
     assert_eq!(record(&card_bytes("END")), ParsedRecord::End);
 
     let comment = parse("COMMENT  this file is great");
-    assert!(matches!(comment, Card::Commentary { .. }));
-    assert_eq!(comment.keyword(), "COMMENT");
-    assert_eq!(comment.comment(), Some(" this file is great"));
+    assert!(matches!(comment, Record::Commentary { .. }));
+    assert_eq!(comment.name_text(), "COMMENT");
+    assert_eq!(comment.text(), Some(" this file is great"));
 
     let history = parse("HISTORY processed 2026-05-31");
-    assert!(matches!(history, Card::Commentary { .. }));
-    assert_eq!(history.keyword(), "HISTORY");
+    assert!(matches!(history, Record::Commentary { .. }));
+    assert_eq!(history.name_text(), "HISTORY");
 
     // Blank-keyword commentary card.
     let blank = parse("         free annotation");
-    assert!(matches!(blank, Card::Commentary { .. }));
-    assert_eq!(blank.keyword(), "");
+    assert!(matches!(blank, Record::Commentary { .. }));
+    assert_eq!(blank.name_text(), "");
 }
 
 #[test]
 fn commentary_text_starting_with_equals_is_not_misread_as_a_value() {
     let card = parse("COMMENT = not a value indicator");
-    assert!(matches!(card, Card::Commentary { .. }));
+    assert!(matches!(card, Record::Commentary { .. }));
     assert!(card.value().is_none());
 }
 
@@ -212,8 +226,8 @@ fn non_ascii_bytes_mark_or_repair_a_record_by_their_place() {
     bytes[8] = 0xA9;
     assert!(matches!(
         reparse(&bytes),
-        Card::Malformed {
-            keyword: None,
+        Record::Malformed {
+            name: None,
             defect: Defect::Name,
             ..
         }
@@ -222,15 +236,15 @@ fn non_ascii_bytes_mark_or_repair_a_record_by_their_place() {
     in_value[11] = 0xFF;
     assert!(matches!(
         reparse(&in_value),
-        Card::Malformed { keyword: Some(keyword), defect: Defect::Value, .. } if keyword == "OBJECT"
+        Record::Malformed { name: Some(RecordName::Keyword(keyword)), defect: Defect::Value, .. } if keyword == "OBJECT"
     ));
     let mut in_comment = card_bytes("OBJECT  = 'x' / caf");
     in_comment[19] = 0xE9;
     let mut log = Vec::new();
-    let ParsedRecord::Card(card) = ParsedRecord::parse(&in_comment, 7, &mut log) else {
+    let ParsedRecord::Record(card) = ParsedRecord::parse(&in_comment, 7, &mut log) else {
         panic!("a card");
     };
-    assert_eq!(card.comment(), Some("caf?"));
+    assert_eq!(card.text(), Some("caf?"));
     assert_eq!(
         log,
         [Repair {
@@ -240,7 +254,7 @@ fn non_ascii_bytes_mark_or_repair_a_record_by_their_place() {
     );
     let mut in_history = card_bytes("HISTORY reduced");
     in_history[15] = 0x80;
-    assert_eq!(reparse(&in_history).comment(), Some("reduced?"));
+    assert_eq!(reparse(&in_history).text(), Some("reduced?"));
 }
 
 /// cfitsio and astropy read a lowercase name as its keyword, and a value after an
@@ -260,19 +274,19 @@ fn repairs_a_lowercase_name_and_a_misplaced_value_indicator() {
     // A name with a character no keyword takes, and a value that does not parse.
     assert!(matches!(
         parse("GA!N    = 1"),
-        Card::Malformed {
-            keyword: None,
+        Record::Malformed {
+            name: None,
             defect: Defect::Name,
             ..
         }
     ));
     assert!(matches!(
         parse("GAIN    = 1.2.3"),
-        Card::Malformed { keyword: Some(keyword), defect: Defect::Value, .. } if keyword == "GAIN"
+        Record::Malformed { name: Some(RecordName::Keyword(keyword)), defect: Defect::Value, .. } if keyword == "GAIN"
     ));
     assert!(matches!(
         parse("OBJECT  = 'open"),
-        Card::Malformed {
+        Record::Malformed {
             defect: Defect::Value,
             ..
         }
@@ -299,7 +313,7 @@ fn reads_hierarch_records() {
         ),
         ("HIERARCH ESO INS OPTI-3 ON = T", Value::Logical(true)),
     ] {
-        let Card::Hierarch { value: read, .. } = parse(text) else {
+        let Record::Hierarch { value: read, .. } = parse(text) else {
             panic!("{text:?} is no HIERARCH card");
         };
         assert_eq!(read, value, "{text:?}");
@@ -307,32 +321,32 @@ fn reads_hierarch_records() {
     let card = parse("HIERARCH ESO  DET   CHIP1 NAME = 'CCD-44' / detector");
     assert_eq!(
         card,
-        Card::Hierarch {
+        Record::Hierarch {
             name: name("ESO DET CHIP1 NAME"),
             value: Value::Text("CCD-44".into()),
             comment: Some("detector".into()),
         }
     );
-    assert_eq!(card.keyword(), "HIERARCH");
+    assert_eq!(card.name_text(), "HIERARCH ESO DET CHIP1 NAME");
     assert!(matches!(
         parse("HIERARCH LONGKEYWORDNAME.X = 1"),
-        Card::Hierarch { .. }
+        Record::Hierarch { .. }
     ));
     assert!(matches!(
         parse("HIERARCH without a value indicator"),
-        Card::Commentary { .. }
+        Record::Commentary { .. }
     ));
     assert_eq!(repairs("hierarch ESO X = 1"), [RepairKind::LowercaseName]);
     assert!(matches!(
         parse("HIERARCH  = 1"),
-        Card::Malformed {
+        Record::Malformed {
             defect: Defect::Name,
             ..
         }
     ));
     assert!(matches!(
         parse("HIERARCH ESO X = 1.2.3"),
-        Card::Malformed {
+        Record::Malformed {
             defect: Defect::Value,
             ..
         }
@@ -343,7 +357,7 @@ fn reads_hierarch_records() {
 /// as cfitsio and astropy write it, and refuses a comment that does not fit.
 #[test]
 fn writes_hierarch_records() {
-    let card = |name: &str, value: Value, comment: Option<&str>| Card::Hierarch {
+    let card = |name: &str, value: Value, comment: Option<&str>| Record::Hierarch {
         name: name.parse().unwrap(),
         value,
         comment: comment.map(str::to_string),
@@ -381,7 +395,7 @@ fn writes_hierarch_records() {
     let long_comment = card("ESO X", Value::Integer(1.into()), Some(&"c".repeat(70)));
     assert!(matches!(
         render(&long_comment),
-        Err(FitsError::HeaderCardTooLong { keyword, .. }) if keyword == "HIERARCH ESO X"
+        Err(FitsError::HeaderCardTooLong { name, .. }) if name.to_string() == "HIERARCH ESO X"
     ));
 }
 
@@ -413,22 +427,28 @@ fn parses_a_continue_record() {
         record(&card_bytes("CONTINUE  'ollowed by more text&'")),
         ParsedRecord::Continue {
             substring: "ollowed by more text&".into(),
-            comment: None
+            comment: None,
+            tail: Some("  'ollowed by more text&'".into()),
         }
     );
 }
 
+/// A record named `END` ends the header; bytes other than blanks after the name are a
+/// repair, as cfitsio and astropy read it.
 #[test]
-fn end_requires_the_canonical_blank_record() {
+fn end_ends_the_header_and_its_stray_bytes_are_a_repair() {
     assert_eq!(record(&card_bytes("END")), ParsedRecord::End);
-    assert!(matches!(
-        parse("END     =                    T"),
-        Card::Malformed {
-            keyword: None,
-            defect: Defect::Name,
-            ..
-        }
-    ));
+    assert_eq!(repairs("END"), []);
+    assert_eq!(
+        record(&card_bytes("END     =                    T")),
+        ParsedRecord::End
+    );
+    assert_eq!(
+        repairs("END     =                    T"),
+        [RepairKind::EndText]
+    );
+    // A longer name is another keyword.
+    assert!(matches!(parse("ENDX    = 1"), Record::Valued { .. }));
 }
 
 #[test]
@@ -436,7 +456,7 @@ fn long_string_splits_into_a_continue_chain() {
     // A value too long for one record, with embedded quotes that must not be split
     // across a record boundary.
     let value = format!("{}'q'{}", "a".repeat(60), "b".repeat(60));
-    let card = Card::Value {
+    let card = Record::Valued {
         keyword: Keyword::new("LONGSTR"),
         value: Value::Text(value.clone()),
         comment: Some("trailing note".into()),
@@ -468,7 +488,7 @@ fn long_string_splits_into_a_continue_chain() {
 #[test]
 fn long_string_comment_boundary_is_lossless_or_rejected() {
     let exact_comment = "c".repeat(65);
-    let exact = Card::Value {
+    let exact = Record::Valued {
         keyword: Keyword::new("TEXT"),
         value: Value::Text("x".into()),
         comment: Some(exact_comment.clone()),
@@ -485,18 +505,18 @@ fn long_string_comment_boundary_is_lossless_or_rejected() {
     assert_eq!(value.as_text(), Some("x"));
     assert_eq!(comment, Some(exact_comment.as_str()));
 
-    let overflow = Card::Value {
+    let overflow = Record::Valued {
         keyword: Keyword::new("TEXT"),
         value: Value::Text("x".into()),
         comment: Some("c".repeat(66)),
     };
     let mut output = vec![1, 2, 3];
     assert!(matches!(
-        overflow.render_into(&mut output),
+        render_into(&overflow, &mut output),
         Err(FitsError::HeaderCardTooLong {
-            keyword,
+            name,
             length: 81,
-        }) if keyword == "TEXT"
+        }) if name.to_string() == "TEXT"
     ));
     assert_eq!(output, vec![1, 2, 3]);
 }
@@ -535,7 +555,7 @@ fn non_finite_reals_are_rejected_on_read() {
         assert!(
             matches!(
                 parse(&card),
-                Card::Malformed {
+                Record::Malformed {
                     defect: Defect::Value,
                     ..
                 }
@@ -548,21 +568,22 @@ fn non_finite_reals_are_rejected_on_read() {
 
 #[test]
 fn rendering_a_non_finite_real_returns_an_error() {
-    let card = Card::Value {
+    let card = Record::Valued {
         keyword: Keyword::new("BAD"),
         value: Value::Real(f64::INFINITY),
         comment: None,
     };
     assert!(matches!(
         render(&card),
-        Err(FitsError::InvalidHeaderValue { keyword, reason })
-            if keyword == "BAD" && reason == "real values must be finite"
+        Err(FitsError::InvalidHeaderValue { name, reason: NonFinite::Real })
+            if name.to_string() == "BAD"
     ));
 }
 
 /// The value field of each kind, exactly: right-justified to column 30 except
-/// strings, an integral real gains `.0`, an extreme real takes the `E` form, and a
-/// string pads to 8 characters once its quotes are doubled.
+/// strings, an integral real gains `.0`, an extreme real takes the `E` form, a
+/// string pads to 8 characters once its quotes are doubled, and the null string and a
+/// string of blanks keep apart.
 #[test]
 fn every_value_kind_renders_its_fixed_format_field() {
     let right = |text: &str| format!("{text:>20}");
@@ -579,10 +600,12 @@ fn every_value_kind_renders_its_fixed_format_field() {
         ),
         (Value::Text("ab".into()), "'ab      '".to_string()),
         (Value::Text("O'Brien".into()), "'O''Brien'".to_string()),
+        (Value::Text(String::new()), "''".to_string()),
+        (Value::Text(" ".into()), "'        '".to_string()),
         (Value::Undefined, String::new()),
     ];
     for (value, field) in cases {
-        let card = Card::Value {
+        let card = Record::Valued {
             keyword: Keyword::new("KEY"),
             value: value.clone(),
             comment: None,
@@ -604,7 +627,7 @@ fn every_value_kind_renders_its_fixed_format_field() {
 fn a_long_string_splits_at_67_escaped_characters() {
     let pieces = |text: &str| -> Vec<String> {
         LongString {
-            lead: Lead::Keyword("LONGSTR"),
+            lead: Lead::Keyword(Keyword::new("LONGSTR")),
             text,
             comment: None,
         }

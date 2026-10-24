@@ -10,14 +10,22 @@
 //! `SMOOTH = 0`. Encoding rejects a tile when an H-transform intermediate
 //! cannot be represented exactly in the standard stream's signed 64-bit field.
 
+use crate::compress::HcompressScale;
+use crate::compress::quantize::QuantizeScratch;
+use crate::compress::tile_codec::Tile;
+use crate::error::CompressionFeature;
 use crate::error::FitsError;
+use crate::error::HcompressDefect;
 use crate::error::Result;
 
 const MAGIC: [u8; 2] = [0xDD, 0x99];
 
 #[derive(Debug, Default)]
 pub(super) struct HcompressScratch {
+    /// The noise estimate of a relative scale.
+    noise: QuantizeScratch,
     plane: Vec<i64>,
+    stream: Vec<u8>,
     transform: Vec<i64>,
     rows: Vec<i64>,
     coding: CodingBuffers,
@@ -42,51 +50,95 @@ pub(super) enum Smoothing {
     On,
 }
 
-/// Decode an `HCOMPRESS_1` tile into row-major integer values (`ny` fastest, the
-/// FITS axis-1 order the orchestrator expects), appended to `out` (cleared first; a
-/// reused buffer). Transform and quadtree storage come from the worker scratch.
-pub(super) fn hcompress_tile_into(
-    bytes: &[u8],
-    smoothing: Smoothing,
-    tile_elems: usize,
-    out: &mut Vec<i64>,
-    scratch: &mut HcompressScratch,
-) -> Result<()> {
-    hdecompress_into(bytes, smoothing, tile_elems, scratch)?;
-    out.clear();
-    out.extend_from_slice(&scratch.plane);
-    Ok(())
+/// An `HCOMPRESS_1` stream's parameters: the `scale` it is written at and the
+/// `smoothing` it is read back with.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Codec {
+    pub(super) scale: HcompressScale,
+    pub(super) smoothing: Smoothing,
 }
 
-/// Encode one tile (`vals` in `ny`-fastest order, `tdims[0]` = ny = FITS axis-1)
-/// as an `HCOMPRESS_1` byte stream. `scale = 0` is lossless. The result decodes
-/// back through [`hcompress_tile_into`] to the original values.
-pub(super) fn hcompress_tile_encode(
-    vals: &[i64],
-    tdims: &[usize],
-    scale: i32,
-    scratch: &mut HcompressScratch,
-) -> Result<Vec<u8>> {
-    let ny = tdims.first().copied().unwrap_or(vals.len()).max(1);
-    let nx = (vals.len() / ny).max(1);
-    if nx * ny != vals.len() {
-        return Err(FitsError::CorruptCompressedData {
-            detail: "HCOMPRESS_1: tile is not 2-D".to_string(),
-        });
+impl Codec {
+    /// Decode a two-dimensional `tile`, whose shape is `[ny, nx]` with `ny` = FITS axis 1,
+    /// as [`Self::encode`] takes it, into row-major integer values (`ny` fastest, the FITS
+    /// axis-1 order the orchestrator expects), and lend them in `scratch`'s plane, which a
+    /// caller may swap out. Transform and quadtree storage come from the worker scratch.
+    pub(super) fn decode<'s>(
+        self,
+        bytes: &[u8],
+        tile: Tile<'_>,
+        scratch: &'s mut HcompressScratch,
+    ) -> Result<&'s mut Vec<i64>> {
+        let &[ny, nx] = tile.shape else {
+            unreachable!("an HCOMPRESS_1 tile is two-dimensional");
+        };
+        self.hdecompress_into(bytes, [ny, nx], scratch)?;
+        Ok(&mut scratch.plane)
     }
-    scratch.plane.clear();
-    scratch.plane.extend_from_slice(vals);
-    htrans(
-        &mut scratch.plane,
-        nx,
-        ny,
-        &mut scratch.transform,
-        &mut scratch.rows,
-    )?;
-    digitize(&mut scratch.plane, nx, ny, scale)?;
-    let mut enc = BitOutput::new();
-    enc.encode(&mut scratch.plane, nx, ny, scale, &mut scratch.coding)?;
-    Ok(enc.out)
+
+    /// Encode one `tile` of `values`, `ny`-fastest with `ny` = FITS axis 1 first in its
+    /// shape, and lend the stream from `scratch`; a lossless scale decodes back through
+    /// [`Self::decode`] to the original values. A lossy scale refuses a tile that holds
+    /// its blank, whose nulls it would not keep without a null mask.
+    pub(super) fn encode<'s>(
+        self,
+        values: &[i64],
+        tile: Tile<'_>,
+        scratch: &'s mut HcompressScratch,
+    ) -> Result<&'s [u8]> {
+        let scale = self.tile_scale(values, tile.shape, &mut scratch.noise)?;
+        if scale > 1 && tile.blank.is_some_and(|blank| values.contains(&blank)) {
+            return Err(FitsError::UnsupportedCompression {
+                feature: CompressionFeature::LossyHcompressNulls,
+            });
+        }
+        let ny = tile.shape.first().copied().unwrap_or(values.len()).max(1);
+        let nx = (values.len() / ny).max(1);
+        debug_assert_eq!(nx * ny, values.len(), "the tile's shape holds its samples");
+        scratch.plane.clear();
+        scratch.plane.extend_from_slice(values);
+        htrans(
+            &mut scratch.plane,
+            nx,
+            ny,
+            &mut scratch.transform,
+            &mut scratch.rows,
+        )?;
+        digitize(&mut scratch.plane, nx, ny, scale)?;
+        scratch.stream.clear();
+        BitOutput::new(&mut scratch.stream).encode(
+            &mut scratch.plane,
+            nx,
+            ny,
+            scale,
+            &mut scratch.coding,
+        )?;
+        Ok(&scratch.stream)
+    }
+
+    /// The integer scale one tile of `values`, of `dimensions`, is compressed at: cfitsio
+    /// rounds a relative scale times the tile's noise, or an absolute one
+    /// (`imcomp_compress_tile`).
+    fn tile_scale(
+        self,
+        values: &[i64],
+        dimensions: &[usize],
+        noise: &mut QuantizeScratch,
+    ) -> Result<i32> {
+        let scale = match self.scale {
+            HcompressScale::Lossless => return Ok(0),
+            HcompressScale::Absolute(scale) => scale.round(),
+            HcompressScale::Relative(factor) => {
+                (factor * noise.integer_noise(values, dimensions[0])).round()
+            }
+        };
+        if scale > f64::from(i32::MAX) {
+            return Err(FitsError::UnsupportedCompression {
+                feature: CompressionFeature::HcompressScale,
+            });
+        }
+        Ok(scale as i32)
+    }
 }
 
 /// `CODE`/`NCODE`: the fixed Huffman code (value, bit length) for each 4-bit
@@ -110,8 +162,8 @@ fn log2_ceil(n: usize) -> i32 {
 /// Bit/byte output buffer (replaces cfitsio's file + `buffer2`/`bits_to_go2`
 /// globals). Holds the compressed byte stream.
 #[derive(Debug)]
-struct BitOutput {
-    out: Vec<u8>,
+struct BitOutput<'a> {
+    out: &'a mut Vec<u8>,
     buffer2: i32,
     bits_to_go2: i32,
 }
@@ -128,10 +180,10 @@ struct Quadrant<'a> {
     nqy: usize,
 }
 
-impl BitOutput {
-    const fn new() -> Self {
+impl<'a> BitOutput<'a> {
+    const fn new(out: &'a mut Vec<u8>) -> Self {
         Self {
-            out: Vec::new(),
+            out,
             buffer2: 0,
             bits_to_go2: 8,
         }
@@ -551,8 +603,8 @@ const fn low_byte(value: i32) -> u8 {
 fn tile_dimension(length: usize) -> Result<i32> {
     i32::try_from(length)
         .ok()
-        .ok_or_else(|| FitsError::UnsupportedCompression {
-            name: format!("HCOMPRESS_1 tile dimension {length}, past 2^31 - 1"),
+        .ok_or(FitsError::UnsupportedCompression {
+            feature: CompressionFeature::HcompressTileSide { length },
         })
 }
 
@@ -564,18 +616,16 @@ fn rounded_transform_value(value: i64, rounding: i64, mask: i64) -> Result<i64> 
     Ok(checked_transform_value(i128::from(value) + i128::from(rounding))? & mask)
 }
 
-fn transform_overflow() -> FitsError {
+const fn transform_overflow() -> FitsError {
     FitsError::UnsupportedCompression {
-        name: "HCOMPRESS_1 tile exceeds the signed 64-bit stream range".to_string(),
+        feature: CompressionFeature::HcompressRange,
     }
 }
 
 /// A decoded H-transform value as the `i64` the plane holds. A stream an encoder
 /// wrote never leaves that range, so one that does is corrupt.
 fn decoded_coefficient(value: i128) -> Result<i64> {
-    i64::try_from(value).map_err(|_| FitsError::CorruptCompressedData {
-        detail: "HCOMPRESS_1: a decoded coefficient exceeds 64 bits".to_string(),
-    })
+    i64::try_from(value).map_err(|_| HcompressDefect::CoefficientOverflow.into())
 }
 
 /// Group coefficients by order: de-interleave even/odd elements (the inverse of
@@ -936,66 +986,63 @@ impl<'a> BitInput<'a> {
     }
 }
 
-/// Top-level: header → quadtree decode → undigitize → inverse H-transform.
-fn hdecompress_into(
-    input: &[u8],
-    smoothing: Smoothing,
-    tile_elems: usize,
-    scratch: &mut HcompressScratch,
-) -> Result<()> {
-    let mut bi = BitInput::new(input);
-    if bi.read_bytes(2)? != MAGIC {
-        return Err(FitsError::CorruptCompressedData {
-            detail: "HCOMPRESS_1: bad magic".to_string(),
-        });
-    }
-    let nx = usize::try_from(bi.readint()?).map_err(|_| FitsError::CorruptCompressedData {
-        detail: "HCOMPRESS_1: negative tile dimension".to_string(),
-    })?;
-    let ny = usize::try_from(bi.readint()?).map_err(|_| FitsError::CorruptCompressedData {
-        detail: "HCOMPRESS_1: negative tile dimension".to_string(),
-    })?;
-    // nx/ny come from the untrusted stream; cross-check them against the tile's
-    // known element count before allocating/transforming. cfitsio sizes from these
-    // blindly — guarding here stops a hostile header from driving a wild `nx*ny`
-    // allocation (or an overflow, or an empty-buffer panic at `a[0]` below).
-    if tile_elems == 0 || nx.checked_mul(ny) != Some(tile_elems) {
-        return Err(FitsError::CorruptCompressedData {
-            detail: "HCOMPRESS_1: tile dimensions do not match the tile size".to_string(),
-        });
-    }
-    let scale = bi.readint()?;
-    let sumall = bi.readlonglong()?;
-    let nbitplanes: [u8; 3] = bi.read_bytes(3)?.try_into().unwrap();
-    if nbitplanes.iter().any(|&n| n > 63) {
-        return Err(FitsError::CorruptCompressedData {
-            detail: "HCOMPRESS_1: invalid bit-plane count".to_string(),
-        });
-    }
+impl Codec {
+    /// Top-level: header → quadtree decode → undigitize → inverse H-transform.
+    fn hdecompress_into(
+        self,
+        input: &[u8],
+        [tile_ny, tile_nx]: [usize; 2],
+        scratch: &mut HcompressScratch,
+    ) -> Result<()> {
+        let mut bi = BitInput::new(input);
+        if bi.read_bytes(2)? != MAGIC {
+            return Err(HcompressDefect::Magic.into());
+        }
+        let dimension = |value: i32| -> Result<usize> {
+            usize::try_from(value).map_err(|_| HcompressDefect::NegativeDimension.into())
+        };
+        let nx = dimension(bi.readint()?)?;
+        let ny = dimension(bi.readint()?)?;
+        // nx/ny come from the untrusted stream; cross-check them against the tile's
+        // known shape before allocating/transforming, so swapped axes do not decode
+        // transposed. cfitsio sizes from these blindly — guarding here stops a hostile
+        // header from driving a wild `nx*ny` allocation (or an empty-buffer panic at `a[0]`
+        // below).
+        if tile_nx * tile_ny == 0 || (nx, ny) != (tile_nx, tile_ny) {
+            return Err(HcompressDefect::TileDimensions.into());
+        }
+        let tile_elems = nx * ny;
+        let scale = bi.readint()?;
+        let sumall = bi.readlonglong()?;
+        let nbitplanes: [u8; 3] = bi.read_bytes(3)?.try_into().unwrap();
+        if nbitplanes.iter().any(|&n| n > 63) {
+            return Err(HcompressDefect::BitPlaneCount.into());
+        }
 
-    scratch.plane.clear();
-    scratch.plane.resize(tile_elems, 0);
-    dodecode(
-        &mut bi,
-        &mut scratch.plane,
-        nx,
-        ny,
-        &nbitplanes,
-        &mut scratch.coding.qtree,
-    )?;
-    scratch.plane[0] = sumall;
+        scratch.plane.clear();
+        scratch.plane.resize(tile_elems, 0);
+        dodecode(
+            &mut bi,
+            &mut scratch.plane,
+            nx,
+            ny,
+            &nbitplanes,
+            &mut scratch.coding.qtree,
+        )?;
+        scratch.plane[0] = sumall;
 
-    undigitize(&mut scratch.plane, scale)?;
-    hinv(
-        &mut scratch.plane,
-        nx,
-        ny,
-        scale,
-        smoothing,
-        &mut scratch.transform,
-        &mut scratch.rows,
-    )?;
-    Ok(())
+        undigitize(&mut scratch.plane, scale)?;
+        hinv(
+            &mut scratch.plane,
+            nx,
+            ny,
+            scale,
+            self.smoothing,
+            &mut scratch.transform,
+            &mut scratch.rows,
+        )?;
+        Ok(())
+    }
 }
 
 fn undigitize(a: &mut [i64], scale: i32) -> Result<()> {
@@ -1065,9 +1112,7 @@ fn dodecode(
     }
 
     if bi.input_nybble()? != 0 {
-        return Err(FitsError::CorruptCompressedData {
-            detail: "HCOMPRESS_1: bad bit plane values".to_string(),
-        });
+        return Err(HcompressDefect::BitPlaneEnd.into());
     }
     // Sign bits.
     bi.start_inputing_bits();
@@ -1100,9 +1145,7 @@ fn qtree_decode(
         if b == 0 {
             read_bdirect(bi, a, n, nqx, nqy, scratch, bit)?;
         } else if b != 0xf {
-            return Err(FitsError::CorruptCompressedData {
-                detail: "HCOMPRESS_1: bad format code".to_string(),
-            });
+            return Err(HcompressDefect::FormatCode.into());
         } else {
             scratch[0] = bi.input_huffman()?;
             let mut nx = 1usize;
@@ -1595,14 +1638,45 @@ fn unshuffle_rows(a: &mut [i64], nxtop: usize, nytop: usize, ny: usize, row_tmp:
 
 #[cfg(test)]
 mod tests {
+    use crate::compress::HcompressScale;
     use crate::compress::hcompress;
     use crate::compress::hcompress::Smoothing;
-    use crate::error::FitsError;
+    use crate::compress::plane::IntBitpix;
+    use crate::compress::tile_codec::Tile;
+    use crate::error::{CompressedDataDefect, FitsError, HcompressDefect};
+    use crate::internals::fixture::Fixture;
+
+    /// The lossless codec, read back with no smoothing.
+    const LOSSLESS: hcompress::Codec = hcompress::Codec {
+        scale: HcompressScale::Lossless,
+        smoothing: Smoothing::Off,
+    };
+
+    /// A tile of `shape`, whose samples' width an HCOMPRESS stream does not read.
+    fn tile(shape: &[usize]) -> Tile<'_> {
+        Tile {
+            shape,
+            width: IntBitpix::I64,
+            blank: None,
+        }
+    }
+
+    /// `values` of `tdims` as a lossless `HCOMPRESS_1` stream.
+    fn lossless(
+        values: &[i64],
+        tdims: &[usize],
+        scratch: &mut hcompress::HcompressScratch,
+    ) -> Vec<u8> {
+        LOSSLESS
+            .encode(values, tile(tdims), scratch)
+            .unwrap()
+            .to_vec()
+    }
 
     #[test]
     fn hcompress_64_bit_transform_matches_external_golden() {
-        const RAW: &[u8] = include_bytes!("../../test_resources/hcomp_wide_i32.raw");
-        const COMPRESSED: &[u8] = include_bytes!("../../test_resources/hcomp_wide_i32.huf");
+        const RAW: &[u8] = Fixture::HcompWideI32Raw.bytes();
+        const COMPRESSED: &[u8] = Fixture::HcompWideI32Huf.bytes();
 
         let values: Vec<i64> = RAW
             .as_chunks::<4>()
@@ -1621,58 +1695,61 @@ mod tests {
         );
 
         let mut scratch = hcompress::HcompressScratch::default();
-        let encoded =
-            hcompress::hcompress_tile_encode(&values, &[100, 100], 0, &mut scratch).unwrap();
+        let encoded = lossless(&values, &[100, 100], &mut scratch);
         assert_eq!(encoded, COMPRESSED);
 
         let mut decoded = Vec::new();
-        hcompress::hcompress_tile_into(
-            COMPRESSED,
-            Smoothing::Off,
-            values.len(),
-            &mut decoded,
-            &mut scratch,
-        )
-        .unwrap();
+        LOSSLESS
+            .decode(COMPRESSED, tile(&[100, 100]), &mut scratch)
+            .map(|plane| decoded.clone_from(plane))
+            .unwrap();
         assert_eq!(decoded, values);
     }
 
     #[test]
     fn tile_decode_rejects_dimension_mismatch() {
-        // Encode a valid 2×3 tile, then decode it claiming a different element count.
+        // Encode a valid tile of ny = 2 by nx = 3, then decode it claiming another shape.
         // The decoder reads nx/ny from the stream and must cross-check them against the
-        // tile size it was handed, not allocate and transform `nx*ny` blindly.
+        // tile shape it was handed, not allocate and transform `nx*ny` blindly, nor
+        // decode a transposed tile.
         let vals: Vec<i64> = vec![10, 20, 30, 40, 50, 60];
         let mut scratch = hcompress::HcompressScratch::default();
-        let bytes = hcompress::hcompress_tile_encode(&vals, &[2, 3], 0, &mut scratch).unwrap();
+        let bytes = lossless(&vals, &[2, 3], &mut scratch);
         // The correct element count round-trips losslessly (scale 0).
         let mut out = Vec::new();
-        hcompress::hcompress_tile_into(&bytes, Smoothing::Off, 6, &mut out, &mut scratch).unwrap();
+        LOSSLESS
+            .decode(&bytes, tile(&[2, 3]), &mut scratch)
+            .map(|plane| out.clone_from(plane))
+            .unwrap();
         assert_eq!(out, vals);
-        // A mismatched element count is rejected, not decoded.
-        assert!(
-            hcompress::hcompress_tile_into(&bytes, Smoothing::Off, 7, &mut out, &mut scratch)
-                .is_err()
-        );
-        assert!(
-            hcompress::hcompress_tile_into(&bytes, Smoothing::Off, 5, &mut out, &mut scratch)
-                .is_err()
-        );
+        // Another shape, the transposed one of the same count among them, is rejected.
+        for tdims in [[3, 2], [7, 1], [5, 1], [6, 1]] {
+            assert!(
+                matches!(
+                    LOSSLESS
+                        .decode(&bytes, tile(&tdims), &mut scratch)
+                        .map(|plane| out.clone_from(plane)),
+                    Err(FitsError::CorruptCompressedData {
+                        defect: CompressedDataDefect::Hcompress(HcompressDefect::TileDimensions),
+                    })
+                ),
+                "{tdims:?}"
+            );
+        }
 
-        let one = hcompress::hcompress_tile_encode(&[-7], &[1, 1], 0, &mut scratch).unwrap();
-        hcompress::hcompress_tile_into(&one, Smoothing::Off, 1, &mut out, &mut scratch).unwrap();
+        let one = lossless(&[-7], &[1, 1], &mut scratch);
+        LOSSLESS
+            .decode(&one, tile(&[1, 1]), &mut scratch)
+            .map(|plane| out.clone_from(plane))
+            .unwrap();
         assert_eq!(out, [-7], "a 1x1 tile must skip its empty quadrants");
 
         for end in 0..one.len() {
             assert!(
                 matches!(
-                    hcompress::hcompress_tile_into(
-                        &one[..end],
-                        Smoothing::Off,
-                        1,
-                        &mut out,
-                        &mut scratch
-                    ),
+                    LOSSLESS
+                        .decode(&one[..end], tile(&[1, 1]), &mut scratch)
+                        .map(|plane| out.clone_from(plane)),
                     Err(FitsError::UnexpectedEof | FitsError::CorruptCompressedData { .. })
                 ),
                 "strict HCOMPRESS prefix of length {end} was accepted"
@@ -1683,25 +1760,34 @@ mod tests {
         let mut negative_ny = one.clone();
         negative_ny[6..10].copy_from_slice(&(-1i32).to_be_bytes());
         assert!(matches!(
-            hcompress::hcompress_tile_into(&negative_ny, Smoothing::Off, 1, &mut out, &mut scratch),
-            Err(FitsError::CorruptCompressedData { detail })
-                if detail == "HCOMPRESS_1: negative tile dimension"
+            LOSSLESS
+                .decode(&negative_ny, tile(&[1, 1]), &mut scratch)
+                .map(|plane| out.clone_from(plane)),
+            Err(FitsError::CorruptCompressedData {
+                defect: CompressedDataDefect::Hcompress(HcompressDefect::NegativeDimension),
+            })
         ));
         // Scale 2 doubles the sum i64::MAX past 64 bits — no encoder writes that.
         let mut overflowing = one.clone();
         overflowing[10..14].copy_from_slice(&2i32.to_be_bytes());
         overflowing[14..22].copy_from_slice(&i64::MAX.to_be_bytes());
         assert!(matches!(
-            hcompress::hcompress_tile_into(&overflowing, Smoothing::Off, 1, &mut out, &mut scratch),
-            Err(FitsError::CorruptCompressedData { detail })
-                if detail == "HCOMPRESS_1: a decoded coefficient exceeds 64 bits"
+            LOSSLESS
+                .decode(&overflowing, tile(&[1, 1]), &mut scratch)
+                .map(|plane| out.clone_from(plane)),
+            Err(FitsError::CorruptCompressedData {
+                defect: CompressedDataDefect::Hcompress(HcompressDefect::CoefficientOverflow),
+            })
         ));
         let mut invalid_planes = one;
         invalid_planes[22] = 64;
         assert!(matches!(
-            hcompress::hcompress_tile_into(&invalid_planes, Smoothing::Off, 1, &mut out, &mut scratch),
-            Err(FitsError::CorruptCompressedData { detail })
-                if detail == "HCOMPRESS_1: invalid bit-plane count"
+            LOSSLESS
+                .decode(&invalid_planes, tile(&[1, 1]), &mut scratch)
+                .map(|plane| out.clone_from(plane)),
+            Err(FitsError::CorruptCompressedData {
+                defect: CompressedDataDefect::Hcompress(HcompressDefect::BitPlaneCount),
+            })
         ));
     }
 }

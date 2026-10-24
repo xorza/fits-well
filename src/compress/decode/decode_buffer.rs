@@ -1,12 +1,9 @@
 //! The caller's output plane, which selects the stored sample type tiles narrow into.
 
-use crate::bintable::table_view::TableView;
 use crate::bitpix::Bitpix;
 use crate::compress::decode::image_decode_plan::ImageDecodePlan;
-use crate::compress::decode::tiled_image::TileSection;
-use crate::compress::decode::tiled_image::TiledImage;
+use crate::compress::decode::tile_section::TileSection;
 use crate::error::Result;
-use crate::header_model::Header;
 use crate::image_model::data::Data;
 use crate::words;
 
@@ -36,27 +33,18 @@ impl<'a> DecodeBuffer<'a> {
     }
 
     pub(super) fn from_words(words: &'a mut [u64], bitpix: Bitpix, count: usize) -> Self {
-        unsafe {
-            match bitpix {
-                Bitpix::U8 => DecodeBuffer::U8(words::samples_mut(words, count)),
-                Bitpix::I16 => DecodeBuffer::I16(words::samples_mut(words, count)),
-                Bitpix::I32 => DecodeBuffer::I32(words::samples_mut(words, count)),
-                Bitpix::I64 => DecodeBuffer::I64(words::samples_mut(words, count)),
-                Bitpix::F32 => DecodeBuffer::F32(words::samples_mut(words, count)),
-                Bitpix::F64 => DecodeBuffer::F64(words::samples_mut(words, count)),
-            }
+        match bitpix {
+            Bitpix::U8 => DecodeBuffer::U8(words::samples_mut(words, count)),
+            Bitpix::I16 => DecodeBuffer::I16(words::samples_mut(words, count)),
+            Bitpix::I32 => DecodeBuffer::I32(words::samples_mut(words, count)),
+            Bitpix::I64 => DecodeBuffer::I64(words::samples_mut(words, count)),
+            Bitpix::F32 => DecodeBuffer::F32(words::samples_mut(words, count)),
+            Bitpix::F64 => DecodeBuffer::F64(words::samples_mut(words, count)),
         }
     }
 
-    /// Decode every tile of the image into this buffer.
-    pub(super) fn decode_image(
-        self,
-        header: &Header,
-        table: TableView<'_>,
-        tiled: &TiledImage<'_>,
-    ) -> Result<()> {
-        debug_assert_eq!(self.bitpix(), tiled.image.bitpix);
-        let plan = ImageDecodePlan::new(header, table, tiled)?;
+    /// Decode every tile of `plan`'s image into this buffer.
+    pub(super) fn decode_all(self, plan: &ImageDecodePlan<'_>) -> Result<()> {
         match self {
             DecodeBuffer::U8(out) => plan.decode_all_into(out),
             DecodeBuffer::I16(out) => plan.decode_all_into(out),
@@ -70,14 +58,9 @@ impl<'a> DecodeBuffer<'a> {
     /// Decode the tiles `section` intersects into this section-sized buffer.
     pub(super) fn decode_section(
         self,
-        header: &Header,
-        table: TableView<'_>,
-        tiled: &TiledImage<'_>,
+        plan: &ImageDecodePlan<'_>,
         section: TileSection<'_>,
     ) -> Result<()> {
-        debug_assert_eq!(self.bitpix(), tiled.image.bitpix);
-        debug_assert_eq!(table.row_count, section.rows.len());
-        let plan = ImageDecodePlan::new(header, table, tiled)?;
         match self {
             DecodeBuffer::U8(out) => plan.decode_region_into(section, out),
             DecodeBuffer::I16(out) => plan.decode_region_into(section, out),
@@ -90,7 +73,7 @@ impl<'a> DecodeBuffer<'a> {
 
     /// The sample type this buffer holds. Every constructor sizes it from `ZBITPIX`,
     /// and the tile decoder picks its plane from the same value.
-    const fn bitpix(&self) -> Bitpix {
+    pub(super) const fn bitpix(&self) -> Bitpix {
         match self {
             DecodeBuffer::U8(_) => Bitpix::U8,
             DecodeBuffer::I16(_) => Bitpix::I16,

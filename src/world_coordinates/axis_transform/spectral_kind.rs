@@ -4,9 +4,15 @@
 
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::error::{GrismDefect, WcsDefect};
 use crate::unit;
 use crate::world_coordinates::axis_transform::spectral_rest::ResolvedRest;
-use crate::world_coordinates::axis_transform::{PLANCK_CONSTANT, SPEED_OF_LIGHT};
+
+/// The speed of light in vacuum, m/s, exact in SI.
+pub(crate) const SPEED_OF_LIGHT: f64 = 2.997_924_58e8;
+/// wcslib's value (CODATA 1986), not the exact SI 6.626 070 15e-34, so energies
+/// match wcslib's.
+const PLANCK_CONSTANT: f64 = 6.626_075_5e-34;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SpectralKind {
@@ -102,15 +108,15 @@ impl SpectralKind {
             Self::Wavenumber | Self::Beta => value / SPEED_OF_LIGHT,
             Self::RadioVelocity => {
                 debug_assert!(rest.frequency != 0.0, "resolved rest frequency");
-                SPEED_OF_LIGHT * (1.0 - value / rest.frequency)
+                SPEED_OF_LIGHT * (rest.frequency - value) / rest.frequency
             }
             Self::OpticalVelocity => {
                 debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
-                SPEED_OF_LIGHT * (value / rest.wavelength - 1.0)
+                SPEED_OF_LIGHT * (value - rest.wavelength) / rest.wavelength
             }
             Self::Redshift => {
                 debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
-                value / rest.wavelength - 1.0
+                (value - rest.wavelength) / rest.wavelength
             }
         };
         finite(result)
@@ -248,9 +254,12 @@ pub(super) fn convert(
         }
         (Characteristic::Frequency, Characteristic::Velocity) => {
             debug_assert!(rest.frequency != 0.0, "resolved rest frequency");
-            let squared_rest = rest.frequency.powi(2);
-            let squared_value = value.powi(2);
-            finite(SPEED_OF_LIGHT * (squared_rest - squared_value) / (squared_rest + squared_value))
+            // (ν₀² − ν²) as (ν₀ − ν)(ν₀ + ν), which does not cancel next to the rest value.
+            let rest = rest.frequency;
+            finite(
+                SPEED_OF_LIGHT * (rest - value) * (rest + value)
+                    / rest.mul_add(rest, value * value),
+            )
         }
         (Characteristic::Velocity, Characteristic::Frequency) => {
             let value = subluminal(value)?;
@@ -259,9 +268,11 @@ pub(super) fn convert(
         }
         (Characteristic::Wavelength, Characteristic::Velocity) => {
             debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
-            let squared_rest = rest.wavelength.powi(2);
-            let squared_value = value.powi(2);
-            finite(SPEED_OF_LIGHT * (squared_value - squared_rest) / (squared_value + squared_rest))
+            let rest = rest.wavelength;
+            finite(
+                SPEED_OF_LIGHT * (value - rest) * (value + rest)
+                    / rest.mul_add(rest, value * value),
+            )
         }
         (Characteristic::Velocity, Characteristic::Wavelength) => {
             let value = subluminal(value)?;
@@ -433,9 +444,9 @@ pub(super) const fn finite(value: f64) -> Option<f64> {
     if value.is_finite() { Some(value) } else { None }
 }
 
-pub(super) fn invalid_reference(kind: SpectralKind) -> FitsError {
+pub(super) const fn invalid_reference(kind: SpectralKind) -> FitsError {
     FitsError::InvalidWcs {
-        detail: format!("{} has an invalid spectral reference value", kind.code()),
+        defect: WcsDefect::SpectralReference { kind: kind.code() },
     }
 }
 
@@ -448,14 +459,14 @@ pub(super) fn required_grism_parameter(
         Some(value) if value.is_finite() && value != 0.0 => Ok(value),
         _ => Err(invalid_grism(
             algorithm,
-            &format!("PV_i_{parameter} must be specified, finite, and non-zero"),
+            GrismDefect::MissingParameter { parameter },
         )),
     }
 }
 
-pub(super) fn invalid_grism(algorithm: &'static str, detail: &str) -> FitsError {
+pub(super) const fn invalid_grism(algorithm: &'static str, defect: GrismDefect) -> FitsError {
     FitsError::InvalidWcs {
-        detail: format!("{algorithm} {detail}"),
+        defect: WcsDefect::Grism { algorithm, defect },
     }
 }
 

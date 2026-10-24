@@ -3,10 +3,11 @@
 use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::error::WcsDefect;
 use crate::header_model::{Header, keywords};
 use crate::keyword::Keyword;
 use crate::world_coordinates::axis_transform::spectral_rest::SpectralRest;
-use crate::world_coordinates::{read_real, read_text};
+use crate::world_coordinates::header_read;
 
 /// A standard spectral reference system from FITS Table 27.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +36,7 @@ pub struct SpectralFrame {
 }
 
 impl SpectralReferenceFrame {
-    fn parse(keyword: &str, value: &str) -> Result<Self> {
+    fn parse(keyword: Keyword, value: &str) -> Result<Self> {
         match value.trim() {
             "TOPOCENT" => Ok(Self::Topocentric),
             "GEOCENTR" => Ok(Self::Geocentric),
@@ -48,7 +49,10 @@ impl SpectralReferenceFrame {
             "CMBDIPOL" => Ok(Self::CmbDipole),
             "SOURCE" => Ok(Self::Source),
             value => Err(FitsError::InvalidWcs {
-                detail: format!("{keyword} {value:?} is not a standard spectral reference frame"),
+                defect: WcsDefect::UnknownSpectralFrame {
+                    keyword,
+                    value: value.to_string(),
+                },
             }),
         }
     }
@@ -59,11 +63,11 @@ impl SpectralFrame {
     /// an image header.
     pub(super) fn from_header(header: &Header, alt: Alternate) -> Result<Self> {
         let rest = Self::rest(header, alt)?;
-        let coordinate = read_text(header, Keyword::fitting(format_args!("SPECSYS{alt}")))?
-            .map(|value| SpectralReferenceFrame::parse("SPECSYS", value))
+        let coordinate = header_read::text(header, Keyword::fitting(format_args!("SPECSYS{alt}")))?
+            .map(|value| SpectralReferenceFrame::parse(keywords::SPECSYS, value))
             .transpose()?;
-        let observer = read_text(header, Keyword::fitting(format_args!("SSYSOBS{alt}")))?
-            .map(|value| SpectralReferenceFrame::parse("SSYSOBS", value))
+        let observer = header_read::text(header, Keyword::fitting(format_args!("SSYSOBS{alt}")))?
+            .map(|value| SpectralReferenceFrame::parse(keywords::SSYSOBS, value))
             .transpose()?
             .unwrap_or(SpectralReferenceFrame::Topocentric);
         Ok(Self {
@@ -74,11 +78,12 @@ impl SpectralFrame {
     }
 
     fn rest(header: &Header, alt: Alternate) -> Result<SpectralRest> {
-        let mut frequency = read_real(header, Keyword::fitting(format_args!("RESTFRQ{alt}")))?;
+        let mut frequency =
+            header_read::real(header, Keyword::fitting(format_args!("RESTFRQ{alt}")))?;
         if frequency.is_none() && !alt.is_alternate() {
             frequency = header.get_real(keywords::RESTFREQ)?;
         }
-        let wavelength = read_real(header, Keyword::fitting(format_args!("RESTWAV{alt}")))?;
+        let wavelength = header_read::real(header, Keyword::fitting(format_args!("RESTWAV{alt}")))?;
         SpectralRest::new(frequency, wavelength)
     }
 }

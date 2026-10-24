@@ -1,6 +1,5 @@
 //! Binary-table writer schema, validation, and encoding.
 
-use std::io::Write;
 use std::ops::Range;
 
 use bitvec::order::Msb0;
@@ -10,45 +9,29 @@ use num_complex::Complex;
 
 use crate::bintable::character_field::CharacterField;
 use crate::bintable::column_data::ColumnData;
-use crate::bintable::descriptor::DescriptorWidth;
-#[cfg(feature = "compression")]
-use crate::bintable::descriptor::PqDescriptor;
+use crate::bintable::descriptor::{DescriptorWidth, PqDescriptor};
+use crate::bintable::element_kind::ElementKind;
 use crate::bintable::tdim;
-use crate::bintable::tform_kind::TformKind;
-use crate::block::ZERO_FILL;
+use crate::bitpix::Bitpix;
+use crate::column::validate_table_field_count;
 #[cfg(feature = "compression")]
 use crate::compress::CompressionConfig;
 #[cfg(feature = "compression")]
+use crate::compress::encoded_unit::EncodedUnit;
+#[cfg(feature = "compression")]
 use crate::compress::table::{self, TableCells};
-use crate::endian::{extend_be, validate_pq_descriptor, write_pq_descriptor};
-use crate::error::{FitsError, Result};
+use crate::error::{FitsError, Result, TextOrigin};
+use crate::fits_writer::column_scaling::{ColumnScaling, Scalable};
 #[cfg(feature = "compression")]
 use crate::fits_writer::merge_header_template;
-use crate::fits_writer::{
-    FitsWriter, Opening, ROW_COUNT_FIXED, Scalable, accept_row_count, validate_scaling,
-};
-use crate::hdu::validate_table_field_count;
+use crate::fits_writer::{ROW_COUNT_FIXED, accept_row_count};
+use crate::hdu::prologue::{Opening, Prologue, Xtension};
 use crate::header_model::card::validate_ascii;
 use crate::header_model::{Header, keywords, value};
 use crate::image_model::{U64_OFFSET, U64_OFFSET_INTEGER};
 use crate::ragged::Ragged;
 
-/// The element type of a binary-table writer column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ColumnType {
-    Logical,
-    U8,
-    I16,
-    I32,
-    I64,
-    F32,
-    F64,
-    ComplexF32,
-    ComplexF64,
-    Character,
-}
-
-/// The mutually exclusive payload layouts of a binary-table writer column.
+/// The values of a binary-table writer column, in its cells or in the heap.
 #[derive(Debug, Clone)]
 enum WriteColumnData {
     Fixed {
@@ -58,14 +41,6 @@ enum WriteColumnData {
     Vla {
         rows: Ragged<ColumnData>,
         width: DescriptorWidth,
-    },
-    VlaBits {
-        rows: Ragged<BitVec<u8, Msb0>>,
-        width: DescriptorWidth,
-    },
-    Bits {
-        bytes: Vec<u8>,
-        bit_count: usize,
     },
 }
 
@@ -78,8 +53,7 @@ pub struct WriteColumn {
     tdim: Option<Vec<usize>>,
     /// `TSCALn`/`TZEROn` to emit: `data` holds the stored values, and a reader's
     /// `ColumnReader::physical` recovers `TZEROn + TSCALn × stored`.
-    tscale: Option<f64>,
-    tzero: Option<f64>,
+    scaling: Option<ColumnScaling>,
     /// `TNULLn`: the stored integer marking an undefined element.
     tnull: Option<i64>,
 }
@@ -100,8 +74,7 @@ impl WriteColumn {
             unit: None,
             values: WriteColumnData::Fixed { data, repeat },
             tdim: None,
-            tscale: None,
-            tzero: None,
+            scaling: None,
             tnull: None,
         }
     }
@@ -131,20 +104,16 @@ impl WriteColumn {
         Ok(Self::fixed(name, ColumnData::Character(bytes), width))
     }
 
-    /// A variable-length `P` column: row `r` stores `rows.range(r)` of the values,
-    /// and the values' type is the heap element type. [`WriteColumn::with_wide_descriptors`] changes
-    /// the descriptors to `Q`.
-    pub fn vla(name: impl Into<String>, rows: Ragged<ColumnData>) -> Self {
+    /// A variable-length column of `width` descriptors, `P` or `Q`: row `r` stores
+    /// `rows.range(r)` of the values, and the values' type is the heap element type,
+    /// [`ColumnData::Bit`] for a `PX` or `QX` column.
+    pub fn vla(name: impl Into<String>, rows: Ragged<ColumnData>, width: DescriptorWidth) -> Self {
         Self {
             name: name.into(),
             unit: None,
-            values: WriteColumnData::Vla {
-                rows,
-                width: DescriptorWidth::P,
-            },
+            values: WriteColumnData::Vla { rows, width },
             tdim: None,
-            tscale: None,
-            tzero: None,
+            scaling: None,
             tnull: None,
         }
     }
@@ -157,8 +126,7 @@ impl WriteColumn {
         width: usize,
     ) -> Result<Self> {
         let name = name.into();
-        let row_bytes = width.div_ceil(8);
-        let mut bytes = Vec::new();
+        let mut values = BitVec::<u8, Msb0>::new();
         for (row, bits) in rows.into_iter().enumerate() {
             let bits = bits.as_ref();
             if bits.len() != width {
@@ -169,41 +137,9 @@ impl WriteColumn {
                     width,
                 });
             }
-            let start = bytes.len();
-            bytes.resize(start + row_bytes, 0);
-            BitSlice::<u8, Msb0>::from_slice_mut(&mut bytes[start..])[..width]
-                .copy_from_bitslice(bits);
+            values.extend_from_bitslice(bits);
         }
-        Ok(Self {
-            name,
-            unit: None,
-            values: WriteColumnData::Bits {
-                bytes,
-                bit_count: width,
-            },
-            tdim: None,
-            tscale: None,
-            tzero: None,
-            tnull: None,
-        })
-    }
-
-    /// A variable-length `PX` bit-array column: row `r` stores `rows.row(r)`,
-    /// MSB-first, and its bit length is the descriptor element count.
-    /// [`WriteColumn::with_wide_descriptors`] changes the descriptors to `QX`.
-    pub fn vla_bits(name: impl Into<String>, rows: Ragged<BitVec<u8, Msb0>>) -> Self {
-        Self {
-            name: name.into(),
-            unit: None,
-            values: WriteColumnData::VlaBits {
-                rows,
-                width: DescriptorWidth::P,
-            },
-            tdim: None,
-            tscale: None,
-            tzero: None,
-            tnull: None,
-        }
+        Ok(Self::fixed(name, ColumnData::Bit(values), width))
     }
 
     /// Attach a unit (`TUNITn`).
@@ -220,30 +156,11 @@ impl WriteColumn {
         self
     }
 
-    /// Use 64-bit `Q` descriptors for this VLA column.
-    ///
-    /// # Panics
-    /// Unless the column is variable-length — from [`WriteColumn::vla`] or
-    /// [`WriteColumn::vla_bits`].
-    #[must_use]
-    pub fn with_wide_descriptors(mut self) -> Self {
-        match &mut self.values {
-            WriteColumnData::Vla { width, .. } | WriteColumnData::VlaBits { width, .. } => {
-                *width = DescriptorWidth::Q;
-            }
-            WriteColumnData::Fixed { .. } | WriteColumnData::Bits { .. } => {
-                panic!("only a variable-length column takes `Q` descriptors")
-            }
-        }
-        self
-    }
-
     /// Emit `TSCALn`/`TZEROn` so the stored `data` reads back as
     /// `TZEROn + TSCALn × stored` physically.
     #[must_use]
     pub const fn with_scaling(mut self, tscale: f64, tzero: f64) -> Self {
-        self.tscale = Some(tscale);
-        self.tzero = Some(tzero);
+        self.scaling = Some(ColumnScaling { tscale, tzero });
         self
     }
 
@@ -255,10 +172,7 @@ impl WriteColumn {
     }
 
     const fn is_array(&self) -> bool {
-        matches!(
-            self.values,
-            WriteColumnData::Vla { .. } | WriteColumnData::VlaBits { .. }
-        )
+        matches!(self.values, WriteColumnData::Vla { .. })
     }
 
     /// The array of a variable-length column at `row`; `None` for a fixed-width column.
@@ -266,22 +180,17 @@ impl WriteColumn {
         match &self.values {
             WriteColumnData::Vla { rows, width } => {
                 let count = rows.range(row).len();
-                let element_size = ColumnType::from_data(rows.values()).elem_size();
                 Some(ArrayLen {
                     width: *width,
                     count,
-                    bytes: count * element_size,
+                    bytes: rows
+                        .values()
+                        .element_kind()
+                        .payload_len(count)
+                        .expect("an array's bytes fit in memory, as its values do"),
                 })
             }
-            WriteColumnData::VlaBits { rows, width } => {
-                let count = rows.range(row).len();
-                Some(ArrayLen {
-                    width: *width,
-                    count,
-                    bytes: count.div_ceil(8),
-                })
-            }
-            WriteColumnData::Fixed { .. } | WriteColumnData::Bits { .. } => None,
+            WriteColumnData::Fixed { .. } => None,
         }
     }
 
@@ -290,9 +199,7 @@ impl WriteColumn {
     fn inferred_rows(&self) -> Result<Option<usize>> {
         let (count, row_width) = match &self.values {
             WriteColumnData::Fixed { data, repeat } => (data.len(), *repeat),
-            WriteColumnData::Bits { bytes, bit_count } => (bytes.len(), bit_count.div_ceil(8)),
             WriteColumnData::Vla { rows, .. } => return Ok(Some(rows.len())),
-            WriteColumnData::VlaBits { rows, .. } => return Ok(Some(rows.len())),
         };
         match count.checked_rem(row_width) {
             Some(0) => Ok(Some(count / row_width)),
@@ -386,6 +293,16 @@ impl Builder {
             .flat_map(move |r| self.columns.iter().filter_map(move |col| col.array_len(r)))
     }
 
+    /// The heap bytes of row `row`'s arrays.
+    #[cfg(feature = "compression")]
+    fn row_heap_len(&self, row: usize) -> usize {
+        self.columns
+            .iter()
+            .filter_map(|col| col.array_len(row))
+            .map(|array| array.bytes)
+            .sum()
+    }
+
     /// The rows of `row_count` that put an array in the heap: all of them when a column is
     /// variable-length, else none, so a table of fixed-width columns walks no row.
     fn heap_rows(&self, row_count: usize) -> usize {
@@ -396,20 +313,56 @@ impl Builder {
         }
     }
 
-    /// The `BINTABLE` header of the table laid out as `layout`.
+    /// The `BINTABLE` extension header (§7.3.1) of the table laid out as `layout`.
     fn header(&self, layout: &TableLayout) -> Result<Header> {
-        bintable_header(
-            layout.row_count,
-            layout.row_len,
-            &self.columns,
-            &layout.columns,
-            layout.heap_len,
-        )
+        let mut header = Prologue {
+            opening: Opening::Extension(Xtension::BinTable),
+            bitpix: Bitpix::U8,
+            axes: &[layout.row_len, layout.row_count],
+            pcount: layout.heap_len,
+        }
+        .header()?;
+        header
+            .set_comment_internal(keywords::NAXIS.indexed(1)?, "width of table in bytes")
+            .set_comment_internal(keywords::NAXIS.indexed(2)?, "number of rows");
+        header
+            .set_internal(keywords::TFIELDS, value::fits_i64(self.columns.len())?)
+            .set_comment_internal(keywords::TFIELDS, "number of columns");
+        for (i, (col, column)) in self.columns.iter().zip(&layout.columns).enumerate() {
+            let n = i + 1;
+            header.set_internal(keywords::TFORM.indexed(n)?, column.tform.as_str());
+            header.set_internal(keywords::TTYPE.indexed(n)?, col.name.as_str());
+            if let Some(unit) = &col.unit {
+                header.set_internal(keywords::TUNIT.indexed(n)?, unit.as_str());
+            }
+            if let Some(shape) = &col.tdim {
+                let dims: Vec<String> = shape.iter().map(ToString::to_string).collect();
+                header.set_internal(keywords::TDIM.indexed(n)?, format!("({})", dims.join(",")));
+            }
+            if let Some(ColumnScaling { tscale, tzero }) = col.scaling {
+                header.set_internal(keywords::TSCAL.indexed(n)?, tscale);
+                let values = match &col.values {
+                    WriteColumnData::Fixed { data, .. } => data,
+                    WriteColumnData::Vla { rows, .. } => rows.values(),
+                };
+                let stores_i64 = matches!(values, ColumnData::I64(_));
+                if stores_i64 && tscale == 1.0 && tzero == U64_OFFSET {
+                    header.set_internal(keywords::TZERO.indexed(n)?, U64_OFFSET_INTEGER);
+                } else {
+                    header.set_internal(keywords::TZERO.indexed(n)?, tzero);
+                }
+            }
+            if let Some(tnull) = col.tnull {
+                header.set_internal(keywords::TNULL.indexed(n)?, tnull);
+            }
+        }
+        Ok(header)
     }
 
     /// The `BINTABLE` header, with the unpadded data unit (rows, then heap) written to
-    /// `out`.
-    fn encode(&self, out: &mut Vec<u8>) -> Result<Header> {
+    /// `out`. The main table is written column by column, each cell at its row's
+    /// stride, and the heap row by row, as it is laid out.
+    pub(super) fn encode(&self, out: &mut Vec<u8>) -> Result<Header> {
         let layout = self.layout()?;
         let TableLayout {
             row_count,
@@ -417,83 +370,77 @@ impl Builder {
             heap_len,
             ..
         } = layout;
-        let columns = &self.columns;
-        out.clear();
         let main_len = row_count
             .checked_mul(row_len)
             .ok_or(FitsError::DataUnitOverflow)?;
         let total_len = main_len
             .checked_add(heap_len)
             .ok_or(FitsError::DataUnitOverflow)?;
+        out.clear();
         out.reserve_exact(total_len);
-        for r in 0..row_count {
-            for col in columns {
-                match &col.values {
-                    WriteColumnData::Vla { width, .. } | WriteColumnData::VlaBits { width, .. } => {
-                        out.resize(out.len() + width.bytes(), 0);
-                    }
-                    _ => pack_cell(out, col, r),
-                }
+        out.resize(main_len, 0);
+        let mut offset = 0;
+        for (col, column) in self.columns.iter().zip(&layout.columns) {
+            // An array column's descriptors are written with the heap.
+            if let WriteColumnData::Fixed { data, repeat } = &col.values {
+                let cells = Cells {
+                    row_len,
+                    offset,
+                    row_count,
+                    repeat: *repeat,
+                };
+                let values = Values {
+                    data,
+                    range: 0..row_count * repeat,
+                };
+                cells.scatter(values, out);
             }
+            offset += column.row_width;
         }
-        debug_assert_eq!(out.len(), main_len, "main table layout");
         for r in 0..self.heap_rows(row_count) {
-            let mut column_offset = 0usize;
-            for (col, column) in columns.iter().zip(&layout.columns) {
-                match &col.values {
-                    WriteColumnData::Vla { rows, width } => {
-                        let range = rows.range(r);
-                        let descriptor_offset = r * row_len + column_offset;
-                        write_vla_descriptor(
-                            out,
-                            main_len,
-                            descriptor_offset,
-                            *width,
-                            range.len(),
-                        )?;
-                        append_cells(out, rows.values(), range);
-                    }
-                    WriteColumnData::VlaBits { rows, width } => {
-                        let bits = rows.row(r);
-                        let descriptor_offset = r * row_len + column_offset;
-                        write_vla_descriptor(out, main_len, descriptor_offset, *width, bits.len())?;
-                        append_bits(out, bits);
-                    }
-                    _ => {}
-                }
-                column_offset += column.row_width;
+            let mut at = r * row_len;
+            for (col, column) in self.columns.iter().zip(&layout.columns) {
+                let cell = at..at + column.row_width;
+                at = cell.end;
+                let WriteColumnData::Vla { rows, width } = &col.values else {
+                    continue;
+                };
+                let range = rows.range(r);
+                let descriptor = PqDescriptor {
+                    count: range.len(),
+                    offset: out.len() - main_len,
+                };
+                descriptor.write(*width, &mut out[cell])?;
+                let values = Values {
+                    data: rows.values(),
+                    range,
+                };
+                append_array(out, values);
             }
         }
+        debug_assert_eq!(out.len(), total_len, "the data unit's layout");
         self.header(&layout)
     }
 }
 
-pub(super) fn write_template<W: Write>(
-    writer: &mut FitsWriter<W>,
-    table: &Builder,
-    template: Option<&Header>,
-) -> Result<()> {
-    writer.ensure_writable()?;
-    let header = table.encode(&mut writer.scratch)?;
-    writer.finish_hdu(header, template, ZERO_FILL, Opening::EmptyPrimary)
-}
-
-/// Compress the table `write_template` would write, with `config`, straight from the
-/// builder's columns: no row-major copy of the table is made.
-#[cfg(feature = "compression")]
-pub(super) fn write_compressed<W: Write>(
-    writer: &mut FitsWriter<W>,
-    table: &Builder,
-    config: &CompressionConfig,
-    template: Option<&Header>,
-) -> Result<()> {
-    writer.ensure_writable()?;
-    let layout = table.layout()?;
-    let mut header = table.header(&layout)?;
-    merge_header_template(&mut header, template);
-    let cells = BuilderCells::new(table, layout.row_count);
-    let container = table::compress_table(&header, &cells, config, &mut writer.scratch)?;
-    writer.finish_hdu(container, None, ZERO_FILL, Opening::EmptyPrimary)
+impl Builder {
+    /// The table `FitsWriter::write_table` would write, with the non-structural cards of
+    /// `template`, compressed with `config` straight from the builder's columns: no
+    /// row-major copy of the table is made.
+    #[cfg(feature = "compression")]
+    pub(super) fn compress(
+        &self,
+        config: &CompressionConfig,
+        template: Option<&Header>,
+    ) -> Result<EncodedUnit> {
+        let layout = self.layout()?;
+        let mut header = self.header(&layout)?;
+        if let Some(template) = template {
+            merge_header_template(&mut header, template);
+        }
+        let cells = BuilderCells::new(self, layout.row_count);
+        table::compress_table(&header, &cells, config)
+    }
 }
 
 /// A builder's cells by column, and the heap offset each array has in the table
@@ -502,39 +449,24 @@ pub(super) fn write_compressed<W: Write>(
 #[derive(Debug)]
 struct BuilderCells<'a> {
     columns: &'a [WriteColumn],
-    /// For each column, its index among the variable-length ones.
-    arrays: Vec<Option<usize>>,
-    array_count: usize,
-    /// Row-major: each row's heap offset for each variable-length column.
-    heap_offsets: Vec<usize>,
+    /// Each row's heap offset: where the first of its arrays starts.
+    row_starts: Vec<usize>,
 }
 
 #[cfg(feature = "compression")]
 impl<'a> BuilderCells<'a> {
     /// The cells of `table`'s `row_count` rows, which [`Builder::layout`] checked.
     fn new(table: &'a Builder, row_count: usize) -> Self {
-        let mut array_count = 0;
-        let arrays: Vec<Option<usize>> = table
-            .columns
-            .iter()
-            .map(|col| {
-                col.is_array().then(|| {
-                    array_count += 1;
-                    array_count - 1
-                })
-            })
-            .collect();
-        let mut heap_offsets = Vec::with_capacity(row_count * array_count);
+        let rows = table.heap_rows(row_count);
+        let mut row_starts = Vec::with_capacity(rows);
         let mut heap_len = 0;
-        for array in table.heap_arrays(row_count) {
-            heap_offsets.push(heap_len);
-            heap_len += array.bytes;
+        for row in 0..rows {
+            row_starts.push(heap_len);
+            heap_len += table.row_heap_len(row);
         }
         Self {
             columns: &table.columns,
-            arrays,
-            array_count,
-            heap_offsets,
+            row_starts,
         }
     }
 }
@@ -542,96 +474,35 @@ impl<'a> BuilderCells<'a> {
 #[cfg(feature = "compression")]
 impl TableCells for BuilderCells<'_> {
     fn fixed(&self, column: usize, rows: Range<usize>, out: &mut Vec<u8>) {
-        let col = &self.columns[column];
-        match &col.values {
-            WriteColumnData::Fixed { data, repeat } => {
-                append_cells(out, data, rows.start * repeat..rows.end * repeat);
-            }
-            _ => rows.for_each(|r| pack_cell(out, col, r)),
-        }
+        let WriteColumnData::Fixed { data, repeat } = &self.columns[column].values else {
+            unreachable!("a variable-length column holds no fixed-width cell")
+        };
+        let values = Values {
+            data,
+            range: rows.start * repeat..rows.end * repeat,
+        };
+        append_cells(out, values, *repeat);
     }
 
     fn array(&self, column: usize, row: usize, out: &mut Vec<u8>) -> PqDescriptor {
-        let slot = self.arrays[column].expect("an array is read from a variable-length column");
-        let offset = self.heap_offsets[row * self.array_count + slot];
-        let count = match &self.columns[column].values {
-            WriteColumnData::Vla { rows, .. } => {
-                let range = rows.range(row);
-                let count = range.len();
-                append_cells(out, rows.values(), range);
-                count
-            }
-            WriteColumnData::VlaBits { rows, .. } => {
-                let bits = rows.row(row);
-                append_bits(out, bits);
-                bits.len()
-            }
-            WriteColumnData::Fixed { .. } | WriteColumnData::Bits { .. } => {
-                unreachable!("a fixed-width column holds no array")
-            }
+        let before: usize = self.columns[..column]
+            .iter()
+            .filter_map(|col| col.array_len(row))
+            .map(|array| array.bytes)
+            .sum();
+        let offset = self.row_starts[row] + before;
+        let WriteColumnData::Vla { rows, .. } = &self.columns[column].values else {
+            unreachable!("a fixed-width column holds no array")
         };
+        let range = rows.range(row);
+        let count = range.len();
+        let values = Values {
+            data: rows.values(),
+            range,
+        };
+        append_array(out, values);
         PqDescriptor { count, offset }
     }
-}
-
-/// `BINTABLE` extension header (§7.3.1) for the given columns.
-fn bintable_header(
-    row_count: usize,
-    row_len: usize,
-    columns: &[WriteColumn],
-    layouts: &[ColumnLayout],
-    heap_len: usize,
-) -> Result<Header> {
-    let mut header = Header::new();
-    header
-        .set_internal(keywords::XTENSION, "BINTABLE")
-        .set_comment_internal(keywords::XTENSION, "binary table extension");
-    header
-        .set_internal(keywords::BITPIX, 8)
-        .set_internal(keywords::NAXIS, 2);
-    header
-        .set_internal(keywords::NAXIS.indexed(1)?, value::fits_i64(row_len)?)
-        .set_comment_internal(keywords::NAXIS.indexed(1)?, "width of table in bytes");
-    header
-        .set_internal(keywords::NAXIS.indexed(2)?, value::fits_i64(row_count)?)
-        .set_comment_internal(keywords::NAXIS.indexed(2)?, "number of rows");
-    header
-        .set_internal(keywords::PCOUNT, value::fits_i64(heap_len)?)
-        .set_internal(keywords::GCOUNT, 1);
-    header
-        .set_internal(keywords::TFIELDS, value::fits_i64(columns.len())?)
-        .set_comment_internal(keywords::TFIELDS, "number of columns");
-    for (i, (col, layout)) in columns.iter().zip(layouts).enumerate() {
-        let n = i + 1;
-        header.set_internal(keywords::TFORM.indexed(n)?, layout.tform.as_str());
-        header.set_internal(keywords::TTYPE.indexed(n)?, col.name.as_str());
-        if let Some(unit) = &col.unit {
-            header.set_internal(keywords::TUNIT.indexed(n)?, unit.as_str());
-        }
-        if let Some(shape) = &col.tdim {
-            let dims: Vec<String> = shape.iter().map(ToString::to_string).collect();
-            header.set_internal(keywords::TDIM.indexed(n)?, format!("({})", dims.join(",")));
-        }
-        if let Some(tscale) = col.tscale {
-            header.set_internal(keywords::TSCAL.indexed(n)?, tscale);
-        }
-        if let Some(tzero) = col.tzero {
-            let stores_i64 = match &col.values {
-                WriteColumnData::Fixed { data, .. } => matches!(data, ColumnData::I64(_)),
-                WriteColumnData::Vla { rows, .. } => matches!(rows.values(), ColumnData::I64(_)),
-                WriteColumnData::VlaBits { .. } | WriteColumnData::Bits { .. } => false,
-            };
-            if stores_i64 && col.tscale.unwrap_or(1.0) == 1.0 && tzero == U64_OFFSET {
-                header.set_internal(keywords::TZERO.indexed(n)?, U64_OFFSET_INTEGER);
-            } else {
-                header.set_internal(keywords::TZERO.indexed(n)?, tzero);
-            }
-        }
-        if let Some(tnull) = col.tnull {
-            header.set_internal(keywords::TNULL.indexed(n)?, tnull);
-        }
-    }
-    Ok(header)
 }
 
 #[derive(Debug)]
@@ -649,57 +520,13 @@ struct TableLayout {
     columns: Vec<ColumnLayout>,
 }
 
-impl ColumnType {
-    const fn from_data(data: &ColumnData) -> Self {
-        match data {
-            ColumnData::Logical(_) => Self::Logical,
-            ColumnData::U8(_) => Self::U8,
-            ColumnData::I16(_) => Self::I16,
-            ColumnData::I32(_) => Self::I32,
-            ColumnData::I64(_) => Self::I64,
-            ColumnData::F32(_) => Self::F32,
-            ColumnData::F64(_) => Self::F64,
-            ColumnData::ComplexF32(_) => Self::ComplexF32,
-            ColumnData::ComplexF64(_) => Self::ComplexF64,
-            ColumnData::Character(_) => Self::Character,
-        }
-    }
-
-    /// The `TFORMn` element kind this writer type stores as. `ColumnType` is exactly
-    /// the subset of [`TformKind`] a caller may name as a *stored element* — it omits
-    /// `X` (bit arrays have their own constructors, which carry a bit count rather
-    /// than an element count) and the `P`/`Q` descriptors (a heap array cannot itself
-    /// be a descriptor). Widths and letters come from `TformKind` so the two cannot
-    /// drift.
-    const fn tform_kind(self) -> TformKind {
-        match self {
-            Self::Logical => TformKind::Logical,
-            Self::U8 => TformKind::U8,
-            Self::I16 => TformKind::I16,
-            Self::I32 => TformKind::I32,
-            Self::I64 => TformKind::I64,
-            Self::F32 => TformKind::F32,
-            Self::F64 => TformKind::F64,
-            Self::ComplexF32 => TformKind::ComplexF32,
-            Self::ComplexF64 => TformKind::ComplexF64,
-            Self::Character => TformKind::Character,
-        }
-    }
-
-    const fn letter(self) -> char {
-        self.tform_kind().code()
-    }
-
-    const fn elem_size(self) -> usize {
-        self.tform_kind().elem_size()
-    }
-}
-
 /// The heap's length after `array`, which its descriptor addresses at `heap_len`.
 fn next_vla_heap_len(heap_len: usize, array: ArrayLen) -> Result<usize> {
-    let count = u64::try_from(array.count).map_err(|_| FitsError::DataUnitOverflow)?;
-    let offset = u64::try_from(heap_len).map_err(|_| FitsError::DataUnitOverflow)?;
-    validate_pq_descriptor(array.width, count, offset)?;
+    PqDescriptor {
+        count: array.count,
+        offset: heap_len,
+    }
+    .validate(array.width)?;
     heap_len
         .checked_add(array.bytes)
         .ok_or(FitsError::DataUnitOverflow)
@@ -713,97 +540,49 @@ struct ArrayLen {
     bytes: usize,
 }
 
-fn write_vla_descriptor(
-    out: &mut [u8],
-    main_len: usize,
-    descriptor_offset: usize,
-    width: DescriptorWidth,
-    element_count: usize,
-) -> Result<()> {
-    let count = u64::try_from(element_count).map_err(|_| FitsError::DataUnitOverflow)?;
-    let heap_offset = out
-        .len()
-        .checked_sub(main_len)
-        .expect("VLA heap follows the complete main table");
-    let heap_offset = u64::try_from(heap_offset).map_err(|_| FitsError::DataUnitOverflow)?;
-    write_pq_descriptor(
-        &mut out[descriptor_offset..descriptor_offset + width.bytes()],
-        width,
-        count,
-        heap_offset,
-    )
-}
-
 /// The layout of `col`, the table's column `n`, after checking it.
 fn validate_column(col: &WriteColumn, row_count: usize, n: usize) -> Result<ColumnLayout> {
     let tdim_keyword = keywords::TDIM.indexed(n)?;
-    validate_ascii(&col.name, "binary column name")?;
+    validate_ascii(&col.name, || TextOrigin::ColumnName)?;
     if let Some(unit) = &col.unit {
-        validate_ascii(unit, "binary column unit")?;
+        validate_ascii(unit, || TextOrigin::ColumnUnit)?;
     }
     match &col.values {
         WriteColumnData::Fixed { data, repeat } => {
-            let kind = ColumnType::from_data(data);
-            validate_binary_metadata(col, kind.tform_kind(), n)?;
+            let kind = data.element_kind();
+            validate_binary_metadata(col, kind, n)?;
             assert_eq!(data.len(), row_count * repeat, "{ROW_COUNT_FIXED}");
             if let ColumnData::Character(bytes) = data
                 && *repeat > 0
             {
                 for field in bytes.chunks(*repeat) {
-                    validate_character(CharacterField::new(field), "binary character cell")?;
+                    validate_character(CharacterField::new(field))?;
                 }
             }
             tdim::validate_declared(col.tdim.as_deref(), *repeat, tdim_keyword)?;
             Ok(ColumnLayout {
-                row_width: repeat
-                    .checked_mul(kind.elem_size())
+                row_width: kind
+                    .payload_len(*repeat)
                     .ok_or(FitsError::DataUnitOverflow)?,
-                tform: format!("{repeat}{}", kind.letter()),
+                tform: format!("{repeat}{}", kind.code()),
             })
         }
         WriteColumnData::Vla { rows, width } => {
-            let kind = ColumnType::from_data(rows.values());
-            validate_binary_metadata(col, kind.tform_kind(), n)?;
+            let kind = rows.values().element_kind();
+            validate_binary_metadata(col, kind, n)?;
             assert_eq!(rows.len(), row_count, "{ROW_COUNT_FIXED}");
             let mut max_elements = 0usize;
             for r in 0..rows.len() {
                 let range = rows.range(r);
                 if let ColumnData::Character(bytes) = rows.values() {
-                    validate_character(
-                        CharacterField::new(&bytes[range.clone()]),
-                        "binary VLA character cell",
-                    )?;
+                    validate_character(CharacterField::new(&bytes[range.clone()]))?;
                 }
                 max_elements = max_elements.max(range.len());
                 tdim::validate_declared_vla(col.tdim.as_deref(), range.len(), tdim_keyword)?;
             }
             Ok(ColumnLayout {
                 row_width: width.bytes(),
-                tform: format!("1{}{}({max_elements})", width.letter(), kind.letter()),
-            })
-        }
-        WriteColumnData::VlaBits { rows, width } => {
-            validate_binary_metadata(col, TformKind::Bit, n)?;
-            assert_eq!(rows.len(), row_count, "{ROW_COUNT_FIXED}");
-            let mut max_bits = 0usize;
-            for r in 0..rows.len() {
-                let bits = rows.range(r).len();
-                max_bits = max_bits.max(bits);
-                tdim::validate_declared_vla(col.tdim.as_deref(), bits, tdim_keyword)?;
-            }
-            Ok(ColumnLayout {
-                row_width: width.bytes(),
-                tform: format!("1{}X({max_bits})", width.letter()),
-            })
-        }
-        WriteColumnData::Bits { bytes, bit_count } => {
-            validate_binary_metadata(col, TformKind::Bit, n)?;
-            let row_width = bit_count.div_ceil(8);
-            assert_eq!(bytes.len(), row_count * row_width, "{ROW_COUNT_FIXED}");
-            tdim::validate_declared(col.tdim.as_deref(), *bit_count, tdim_keyword)?;
-            Ok(ColumnLayout {
-                row_width,
-                tform: format!("{bit_count}X"),
+                tform: format!("1{}{}({max_elements})", width.letter(), kind.code()),
             })
         }
     }
@@ -811,33 +590,28 @@ fn validate_column(col: &WriteColumn, row_count: usize, n: usize) -> Result<Colu
 
 /// Errors when column `n`, stored as `kind`, sets a scaling or a `TNULLn` its values
 /// cannot take.
-fn validate_binary_metadata(col: &WriteColumn, kind: TformKind, n: usize) -> Result<()> {
+fn validate_binary_metadata(col: &WriteColumn, kind: ElementKind, n: usize) -> Result<()> {
     let scalable = match kind {
-        TformKind::Character | TformKind::Logical | TformKind::Bit => Scalable::Unscaled,
-        TformKind::U8
-        | TformKind::I16
-        | TformKind::I32
-        | TformKind::I64
-        | TformKind::F32
-        | TformKind::F64
-        | TformKind::ComplexF32
-        | TformKind::ComplexF64 => Scalable::Numeric,
-        TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
-            unreachable!("a stored element is no descriptor")
-        }
+        ElementKind::Character | ElementKind::Logical | ElementKind::Bit => Scalable::Unscaled,
+        ElementKind::U8
+        | ElementKind::I16
+        | ElementKind::I32
+        | ElementKind::I64
+        | ElementKind::F32
+        | ElementKind::F64
+        | ElementKind::ComplexF32
+        | ElementKind::ComplexF64 => Scalable::Numeric,
     };
-    validate_scaling(col.tscale, col.tzero, scalable, n)?;
+    if let Some(scaling) = col.scaling {
+        scaling.validate(scalable, n)?;
+    }
     let Some(tnull) = col.tnull else {
         return Ok(());
     };
-    let valid = match kind {
-        TformKind::U8 => u8::try_from(tnull).is_ok(),
-        TformKind::I16 => i16::try_from(tnull).is_ok(),
-        TformKind::I32 => i32::try_from(tnull).is_ok(),
-        TformKind::I64 => true,
-        _ => false,
-    };
-    if !valid {
+    if !kind
+        .bitpix()
+        .is_some_and(|bitpix| bitpix.holds_integer(tnull))
+    {
         return Err(FitsError::KeywordOutOfRange {
             keyword: keywords::TNULL.indexed(n)?,
         });
@@ -845,72 +619,137 @@ fn validate_binary_metadata(col: &WriteColumn, kind: TformKind, n: usize) -> Res
     Ok(())
 }
 
-/// Append `data[range]` to `out` as stored big-endian bytes.
-fn append_cells(out: &mut Vec<u8>, data: &ColumnData, range: Range<usize>) {
-    match data {
-        ColumnData::Logical(v) => out.extend(v[range].iter().map(|&b| match b {
-            Some(true) => b'T',
-            Some(false) => b'F',
-            None => 0, // §7.3.3 null
-        })),
-        ColumnData::U8(v) | ColumnData::Character(v) => out.extend_from_slice(&v[range]),
-        ColumnData::I16(v) => extend_be(out, &v[range], i16::to_be_bytes),
-        ColumnData::I32(v) => extend_be(out, &v[range], i32::to_be_bytes),
-        ColumnData::I64(v) => extend_be(out, &v[range], i64::to_be_bytes),
-        ColumnData::F32(v) => extend_be(out, &v[range], f32::to_be_bytes),
-        ColumnData::F64(v) => extend_be(out, &v[range], f64::to_be_bytes),
-        ColumnData::ComplexF32(v) => {
-            for &Complex { re, im } in &v[range] {
-                out.extend_from_slice(&re.to_be_bytes());
-                out.extend_from_slice(&im.to_be_bytes());
+/// Where a column's cells lie in a main table: `row_count` rows of `row_len` bytes,
+/// each cell at `offset` in its row and `repeat` values long.
+#[derive(Debug, Clone, Copy)]
+struct Cells {
+    row_len: usize,
+    offset: usize,
+    row_count: usize,
+    repeat: usize,
+}
+
+/// A run of a column's values: `data[range]`.
+#[derive(Debug, Clone)]
+struct Values<'a> {
+    data: &'a ColumnData,
+    range: Range<usize>,
+}
+
+impl Cells {
+    /// Write `values` as stored big-endian bytes, a cell a row.
+    fn scatter(self, values: Values<'_>, out: &mut [u8]) {
+        let Values { data, range } = values;
+        match data {
+            ColumnData::Bit(bits) => self.scatter_bits(&bits[range], out),
+            ColumnData::Logical(v) => self.scatter_with(&v[range], out, |value| {
+                [match value {
+                    Some(true) => b'T',
+                    Some(false) => b'F',
+                    None => 0, // §7.3.3 null
+                }]
+            }),
+            ColumnData::U8(v) | ColumnData::Character(v) => {
+                self.scatter_with(&v[range], out, |byte| [byte]);
+            }
+            ColumnData::I16(v) => self.scatter_with(&v[range], out, i16::to_be_bytes),
+            ColumnData::I32(v) => self.scatter_with(&v[range], out, i32::to_be_bytes),
+            ColumnData::I64(v) => self.scatter_with(&v[range], out, i64::to_be_bytes),
+            ColumnData::F32(v) => self.scatter_with(&v[range], out, f32::to_be_bytes),
+            ColumnData::F64(v) => self.scatter_with(&v[range], out, f64::to_be_bytes),
+            ColumnData::ComplexF32(v) => {
+                self.scatter_with(&v[range], out, |Complex { re, im }| {
+                    let mut bytes = [0; 8];
+                    bytes[..4].copy_from_slice(&re.to_be_bytes());
+                    bytes[4..].copy_from_slice(&im.to_be_bytes());
+                    bytes
+                });
+            }
+            ColumnData::ComplexF64(v) => {
+                self.scatter_with(&v[range], out, |Complex { re, im }| {
+                    let mut bytes = [0; 16];
+                    bytes[..8].copy_from_slice(&re.to_be_bytes());
+                    bytes[8..].copy_from_slice(&im.to_be_bytes());
+                    bytes
+                });
             }
         }
-        ColumnData::ComplexF64(v) => {
-            for &Complex { re, im } in &v[range] {
-                out.extend_from_slice(&re.to_be_bytes());
-                out.extend_from_slice(&im.to_be_bytes());
+    }
+
+    fn scatter_with<T: Copy, const N: usize>(
+        self,
+        values: &[T],
+        out: &mut [u8],
+        encode: impl Fn(T) -> [u8; N],
+    ) {
+        let repeat = self.repeat;
+        let cell_len = repeat * N;
+        if cell_len == 0 {
+            return;
+        }
+        debug_assert_eq!(
+            values.len(),
+            self.row_count * repeat,
+            "a value for each cell"
+        );
+        let rows = out.chunks_exact_mut(self.row_len);
+        for (row, cell) in rows.zip(values.chunks_exact(repeat)) {
+            let slots = row[self.offset..self.offset + cell_len]
+                .as_chunks_mut::<N>()
+                .0;
+            for (slot, &value) in slots.iter_mut().zip(cell) {
+                *slot = encode(value);
             }
+        }
+    }
+
+    /// Write `bits`, the cells' repeat to a cell, MSB-first; the zeroed cells keep the
+    /// unused low bits of their last byte zero.
+    fn scatter_bits(self, bits: &BitSlice<u8, Msb0>, out: &mut [u8]) {
+        let repeat = self.repeat;
+        if repeat == 0 {
+            return;
+        }
+        debug_assert_eq!(bits.len(), self.row_count * repeat, "a bit for each cell");
+        let cell_len = repeat.div_ceil(8);
+        let rows = out.chunks_exact_mut(self.row_len);
+        for (row, cell) in rows.zip(bits.chunks_exact(repeat)) {
+            let bytes = &mut row[self.offset..self.offset + cell_len];
+            BitSlice::<u8, Msb0>::from_slice_mut(bytes)[..repeat].copy_from_bitslice(cell);
         }
     }
 }
 
-fn append_bits(out: &mut Vec<u8>, bits: &BitSlice<u8, Msb0>) {
-    // Repacking semantic bits guarantees that unused low padding is zero.
-    for chunk in bits.chunks(8) {
-        let byte = chunk
-            .iter()
-            .by_vals()
-            .enumerate()
-            .fold(0, |byte, (bit, set)| byte | (u8::from(set) << (7 - bit)));
-        out.push(byte);
+/// Append `values` to `out` as stored cells of `repeat` values each, every cell padded to
+/// whole bytes.
+fn append_cells(out: &mut Vec<u8>, values: Values<'_>, repeat: usize) {
+    if repeat == 0 {
+        return;
     }
+    let cell_len = values
+        .data
+        .element_kind()
+        .payload_len(repeat)
+        .expect("a cell's bytes fit in memory, as its values do");
+    let row_count = values.range.len() / repeat;
+    let start = out.len();
+    out.resize(start + row_count * cell_len, 0);
+    let cells = Cells {
+        row_len: cell_len,
+        offset: 0,
+        row_count,
+        repeat,
+    };
+    cells.scatter(values, &mut out[start..]);
 }
 
-fn pack_cell(out: &mut Vec<u8>, col: &WriteColumn, r: usize) {
-    match &col.values {
-        WriteColumnData::Fixed { data, repeat } => {
-            let base = r * *repeat;
-            append_cells(out, data, base..base + *repeat);
-        }
-        WriteColumnData::Bits { bytes, bit_count } => {
-            let width = bit_count.div_ceil(8);
-            let start = r * width;
-            let cell = &bytes[start..start + width];
-            let trailing_bits = bit_count % 8;
-            if trailing_bits == 0 {
-                out.extend_from_slice(cell);
-            } else {
-                out.extend_from_slice(&cell[..width - 1]);
-                out.push(cell[width - 1] & (u8::MAX << (8 - trailing_bits)));
-            }
-        }
-        WriteColumnData::Vla { .. } | WriteColumnData::VlaBits { .. } => {
-            unreachable!("VLA cells are descriptors")
-        }
-    }
+/// Append the heap array `values` to `out`: one cell of all its values.
+fn append_array(out: &mut Vec<u8>, values: Values<'_>) {
+    let len = values.range.len();
+    append_cells(out, values, len);
 }
 
-fn validate_character(value: CharacterField<'_>, context: &'static str) -> Result<()> {
+fn validate_character(value: CharacterField<'_>) -> Result<()> {
     if value
         .members()
         .iter()
@@ -918,16 +757,8 @@ fn validate_character(value: CharacterField<'_>, context: &'static str) -> Resul
     {
         Ok(())
     } else {
-        Err(FitsError::InvalidAscii { context })
-    }
-}
-
-#[cfg(test)]
-pub(crate) mod internals {
-    use crate::fits_writer::builder::WriteColumn;
-
-    pub(crate) fn set_scaling(column: &mut WriteColumn, tscale: Option<f64>, tzero: Option<f64>) {
-        column.tscale = tscale;
-        column.tzero = tzero;
+        Err(FitsError::InvalidAscii {
+            text: TextOrigin::Cell,
+        })
     }
 }

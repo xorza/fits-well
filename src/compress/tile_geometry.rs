@@ -13,6 +13,38 @@ pub(super) struct TileGeometry {
     ntiles_axis: Vec<usize>,
 }
 
+/// The runs of an image that the tiles at each index along its slowest axis write,
+/// from [`TileGeometry::bands`]: `count` bands of `len` samples, the last one shorter,
+/// each written by `tiles` consecutive tiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Bands {
+    pub(super) count: usize,
+    pub(super) len: usize,
+    pub(super) tiles: usize,
+}
+
+impl Bands {
+    /// The tiles of band `band`.
+    pub(super) const fn tiles_of(self, band: usize) -> Range<usize> {
+        band * self.tiles..(band + 1) * self.tiles
+    }
+
+    /// The part `values` of the plane that band `band` fills.
+    pub(super) const fn part<D>(self, band: usize, values: &mut [D]) -> PlanePart<'_, D> {
+        PlanePart {
+            values,
+            start: band * self.len,
+        }
+    }
+}
+
+/// The part of an image plane from flat index `start` on, which one band of tiles fills.
+#[derive(Debug)]
+pub(super) struct PlanePart<'a, D> {
+    pub(super) values: &'a mut [D],
+    pub(super) start: usize,
+}
+
 /// Reusable per-tile scratch, filled by [`TileGeometry::tile_into`] each
 /// iteration so a tile loop allocates these buffers once instead of per tile
 /// (the `row_bases` buffer is `row_count` long — the dominant per-tile cost).
@@ -39,17 +71,18 @@ impl TileScratch {
         self.row_len * self.row_bases.len()
     }
 
-    /// Write this tile's `values` into the full image plane `out`, converting each as
-    /// it lands. Axis 0 has stride 1, so every row copies as a contiguous slice.
+    /// Write this tile's `values` into `out`, a part of the full image plane, converting
+    /// each as it lands. Axis 0 has stride 1, so every row copies as a contiguous slice.
     pub(super) fn scatter_rows_into<S: Copy, D>(
         &self,
-        out: &mut [D],
+        out: &mut PlanePart<'_, D>,
         values: &[S],
         convert: &impl Fn(S) -> D,
     ) {
         let mut offset = 0;
         for &base in &self.row_bases {
-            for (slot, &value) in out[base..base + self.row_len]
+            let base = base - out.start;
+            for (slot, &value) in out.values[base..base + self.row_len]
                 .iter_mut()
                 .zip(&values[offset..offset + self.row_len])
             {
@@ -138,6 +171,23 @@ impl TileGeometry {
         }
     }
 
+    /// The bands of the slowest axis: the tiles at one index along it write one
+    /// contiguous run of the image, and no other tile writes into it.
+    pub(super) fn bands(&self) -> Bands {
+        let Some(last) = self.dims.len().checked_sub(1) else {
+            return Bands {
+                count: 1,
+                len: 1,
+                tiles: 1,
+            };
+        };
+        Bands {
+            count: self.ntiles_axis[last],
+            len: self.tiles[last].min(self.dims[last]) * self.stride[last],
+            tiles: self.ntiles_axis[..last].iter().product(),
+        }
+    }
+
     #[cfg(any(feature = "parallel", test))]
     pub(super) fn max_tile_elements(&self) -> usize {
         if self.dims.is_empty() {
@@ -200,6 +250,46 @@ impl TileGeometry {
 mod tests {
 
     use crate::compress::tile_geometry::*;
+
+    /// dims [5, 4, 3] in tiles [2, 3, 2]: strides [1, 5, 20] and [3, 2, 2] tiles along the
+    /// axes. The slowest axis's two tile indices make two bands of 2·20 samples, the
+    /// last one 1·20, each written by the 3·2 tiles that share the index, and by no other.
+    #[test]
+    fn bands_are_the_runs_each_slowest_tile_index_writes() {
+        let geom = TileGeometry::new(&[5, 4, 3], &[2, 3, 2]);
+        let bands = geom.bands();
+        assert_eq!(
+            bands,
+            Bands {
+                count: 2,
+                len: 40,
+                tiles: 6
+            }
+        );
+        let mut scratch = TileScratch::default();
+        for tile in 0..geom.ntiles() {
+            geom.tile_into(tile, &mut scratch);
+            let band = tile / bands.tiles;
+            let run = band * bands.len..(band * bands.len + bands.len).min(60);
+            assert!(
+                scratch
+                    .row_bases
+                    .iter()
+                    .all(|&base| run.contains(&base) && run.contains(&(base + scratch.row_len - 1))),
+                "tile {tile}: {:?} outside {run:?}",
+                scratch.row_bases
+            );
+        }
+        // A 0-dimensional image is one band of its one sample.
+        assert_eq!(
+            TileGeometry::new(&[], &[]).bands(),
+            Bands {
+                count: 1,
+                len: 1,
+                tiles: 1
+            }
+        );
+    }
 
     #[test]
     fn tile_into_rows_match_layout() {

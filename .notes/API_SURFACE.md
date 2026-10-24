@@ -6,11 +6,59 @@ no features and one build per public feature; a tag names the builds an item nee
 loses. `internals` is the crate's own test surface and is left out.
 
 ```text
+CompressedDataDefect
+    #[non_exhaustive]
+    enum CompressedDataDefect: Debug, Display, Error
+        GzipStream(Error)
+        GzipOverrun
+        RiceBitField { bits: u32 }
+        Plio(PlioDefect)
+        Hcompress(HcompressDefect)
+        NullMask
+        EmptyTile
+        CellElement { cell: TileCell, element: ElementKind }
+        ValueOutOfRange
+        impl From<CompressedDataDefect> for FitsError
+
+CompressionFeature
+    #[non_exhaustive]
+    enum CompressionFeature: Clone, Debug, Display, Eq, Error, PartialEq
+        Codec { name: String }
+        Quantization { name: String }
+        HcompressDimensions
+        LossyHcompressNulls
+        HcompressNullMask
+        HcompressScale
+        HcompressTileSide { length: usize }
+        HcompressRange
+        PlioListLength { words: usize }
+        LosslessFloatCodec { codec: &'static str }
+        QuantizedFloatCodec { codec: &'static str }
+        TableCodec { codec: &'static str }
+        ColumnCodec { name: String }
+        RiceColumn { code: char }
+
+CompressionParameter
+    #[non_exhaustive]
+    enum CompressionParameter: Clone, Copy, Debug, Display, Error, PartialEq
+        GzipLevel { level: u32 }
+        HcompressScale { scale: f64 }
+        QuantizationLevel { level: f64 }
+        QuantizationStep { step: f64 }
+        DitherSeed { seed: u16 }
+        IntegerQuantization
+        TableQuantization
+        TableWithoutCodec
+        EmptyTile { axis: usize }
+        HcompressDither2
+
 FitsEditor
     struct FitsEditor<F>
         impl<F: Read + Write + Seek> FitsEditor<F>
             pub fn open(file: F) -> Result<Self>
             pub fn hdus(&self) -> &[Hdu]
+            pub fn hdu<'h>(&self, hdu: impl Into<HduSelector<'h>>) -> Result<&Hdu>
+            pub fn images(&self) -> impl Iterator<Item = &Hdu> + '_
             pub fn into_inner(self) -> F
             pub fn replace_header<'h>(&mut self, hdu: impl Into<HduSelector<'h>>, header: &Header) -> Result<()>
             pub fn replace_header_into<'h>(&mut self, hdu: impl Into<HduSelector<'h>>, header: &Header, sink: impl Write) -> Result<()>
@@ -19,36 +67,42 @@ FitsEditor
 
 FitsError
     #[non_exhaustive]
-    enum FitsError: Debug, Display, Error, From<Error>, From<Infallible>
+    enum FitsError: Debug, Display, Error, From<CompressedDataDefect>, From<Error>, From<HcompressDefect>, From<Infallible>, From<PlioDefect>
         Io(Error)
         WriterFailed
         PrimaryAlreadyWritten
         InvalidKeyword { name: String }
         InvalidAlternate { alternate: char }
         ReservedKeyword { keyword: Keyword }
-        InvalidHeaderValue { keyword: Keyword, reason: &'static str }
-        HeaderCardTooLong { keyword: String, length: usize }
-        InvalidValue { card: String }
-        InvalidWcs { detail: String }
-        InvalidTime { detail: String }
-        InvalidCompressionParameter { detail: String }
+        InvalidHeaderValue { name: RecordName, reason: NonFinite }
+        HeaderCardTooLong { name: RecordName, length: usize }
+        InvalidValue { name: Option<RecordName>, defect: Defect }
+        ValueTypeMismatch { name: RecordName, expected: ValueKind }
+        InvalidWcs { defect: WcsDefect }
+        InvalidDatetime { keyword: Option<Keyword> }
+        InvalidTimeScale { keyword: Option<Keyword> }
+        TimeOutOfRange
+        InvalidCompressionParameter { parameter: CompressionParameter }
         InvalidAsciiField { field: String }
         InvalidAsciiValue { reason: &'static str }
         ExternalTimeDataRequired { operation: &'static str }
+        ChunkTypeMismatch { expected: Bitpix, got: Bitpix }
         TypeMismatch { name: String, expected: &'static str }
-        InvalidAscii { context: &'static str }
+        InvalidAscii { text: TextOrigin }
         AsciiFieldTooWide { column: String, row: usize, width: usize, minimum_width: usize }
+        AsciiFloatFormatTooNarrow { column: String, width: usize, minimum_width: usize }
         CharacterFieldTooWide { column: String, row: usize, length: usize, width: usize }
         BitFieldLengthMismatch { column: String, row: usize, length: usize, width: usize }
         InvalidBitpix { code: i64 }
         MissingEnd
         MissingKeyword { keyword: Keyword }
         KeywordOutOfRange { keyword: Keyword }
-        IntegerOutOfRange { value: String, target: &'static str }
+        IntegerOutOfRange { keyword: Option<Keyword>, value: String, target: NumericTarget }
         UnexpectedEof
         DataUnitOverflow
         DataUnitTooLarge { bytes: u64 }
-        DataSizeMismatch { expected: usize, got: usize }
+        DataSizeMismatch { unit: SizeUnit, expected: u64, got: u64 }
+        DescriptorOutOfRange { width: DescriptorWidth, count: usize, offset: usize }
         InvalidPqDescriptor { field: &'static str, value: i64 }
         IndexOutOfBounds { indexed: Indexed, index: usize, len: usize }
         RankMismatch { ranked: Ranked, expected: usize, got: usize }
@@ -60,25 +114,26 @@ FitsError
         EmptyVlaNeedsType
         OneBasedIndexRequired { indexed: Indexed }
         HeaderDoesNotFit { needed: usize, available: usize }
-        FileOffBlockGrid { len: u64 }
+        InvalidColumnKeyword { keyword: Keyword, source: Arc<Self> }
+        TrailingContent { hdu_end: u64, file_len: u64 }
+        HduKindChange { from: HduKind, to: HduKind }
         HduNotFound { name: String, version: Option<i64>, level: Option<i64> }
         NotAnImage
         ImageHasGroups
         NotABinTable
-        NotATimeAxis { axis: usize }
         NotRandomGroups
         NotAnAsciiTable
-        ConflictingWcsKeywords { detail: &'static str }
+        ConflictingWcsKeywords { conflict: WcsConflict }
         UnsupportedWcsTransform { axes: Vec<usize> }
         WcsPixelOutOfDomain { projection: &'static str }
         WcsWorldOutOfDomain { projection: &'static str }
-        WcsInvalidPole { detail: &'static str }
+        WcsInvalidPole { defect: PoleDefect }
         InvalidUnit { unit: String, expected: &'static str }
         WcsCoordinateOutOfDomain { axis: usize, algorithm: &'static str }
         WcsNoConvergence { algorithm: &'static str }
         HcompressTileTooSmall { axis: usize, length: usize }
-        UnsupportedCompression { name: String }
-        CorruptCompressedData { detail: String }
+        UnsupportedCompression { feature: CompressionFeature }
+        CorruptCompressedData { defect: CompressedDataDefect }
         PlioValueOutOfRange { index: usize, value: i64 }
         InvalidTform { tform: String }
         NotAFixedColumn { code: char }
@@ -89,7 +144,6 @@ FitsError
         ColumnNotFound { name: String }
         GroupParameterNotFound { name: String }
         RowWidthMismatch { computed: usize, declared: usize }
-        TableMetadataMismatch { name: String }
 
 FitsReader
     struct FitsReader<S>
@@ -103,7 +157,7 @@ FitsReader
             pub fn hdus(&self) -> &[Hdu]
             pub fn hdu<'h>(&self, hdu: impl Into<HduSelector<'h>>) -> Result<&Hdu>
             pub fn images(&self) -> impl Iterator<Item = &Hdu> + '_
-            pub fn read_data_unit<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<DataUnit>
+            pub fn read_data_unit<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Vec<u8>>
             pub fn image<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<ImageReader<'_, S>>
             pub fn read_table<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Table>
             pub fn read_table_rows<'h>(&mut self, hdu: impl Into<HduSelector<'h>>, rows: Range<usize>) -> Result<Table>
@@ -132,6 +186,27 @@ FitsWriter  [shape differs by feature]
             pub fn stream_image(&mut self, layout: Metadata<'_>, header: Option<&Header>) -> Result<ImageWriter<'_, W>>
         impl<W: Debug> Debug for FitsWriter<W>
 
+GrismDefect
+    #[non_exhaustive]
+    enum GrismDefect: Clone, Copy, Debug, Display, Eq, Error, PartialEq
+        MissingParameter { parameter: usize }
+        NonFinite
+        PerpendicularTilt
+        ReferenceOutsideDomain
+        ZeroDispersion
+
+HcompressDefect
+    #[non_exhaustive]
+    enum HcompressDefect: Clone, Copy, Debug, Display, Eq, Error, PartialEq
+        Magic
+        NegativeDimension
+        TileDimensions
+        BitPlaneCount
+        BitPlaneEnd
+        FormatCode
+        CoefficientOverflow
+        impl From<HcompressDefect> for FitsError
+
 ImageReader
     struct ImageReader<'r, S>
         impl<'r, S: Source> ImageReader<'r, S>
@@ -159,6 +234,33 @@ Indexed
         Group
         WcsAxis
 
+NonFinite
+    #[non_exhaustive]
+    enum NonFinite: Clone, Copy, Debug, Display, Eq, PartialEq
+        Real
+        Complex
+
+NumericTarget
+    #[non_exhaustive]
+    enum NumericTarget: Clone, Copy, Debug, Display, Eq, PartialEq
+        I64
+        F64
+
+PlioDefect
+    #[non_exhaustive]
+    enum PlioDefect: Clone, Copy, Debug, Display, Eq, Error, PartialEq
+        ListBounds
+        NegativeHeader
+        Opcode
+        impl From<PlioDefect> for FitsError
+
+PoleDefect
+    #[non_exhaustive]
+    enum PoleDefect: Clone, Copy, Debug, Display, Eq, Error, PartialEq
+        EquatorialFiducial
+        FiducialLatitude
+        NoLatitude
+
 Ranked
     #[non_exhaustive]
     enum Ranked: Clone, Copy, Debug, Eq, PartialEq
@@ -170,11 +272,99 @@ Ranked
 Result
     type Result<T> = Result<T, FitsError>
 
+SizeUnit
+    enum SizeUnit: Clone, Copy, Debug, Display, Eq, PartialEq
+        Bytes
+        Samples
+        Rows
+
+TabularDefect
+    #[non_exhaustive]
+    enum TabularDefect: Clone, Copy, Debug, Display, Eq, Error, PartialEq
+        MissingExtension
+        MissingCoordinateColumn
+        NonPositiveParameter
+        TableAxisPastCount
+        NonFiniteReference
+        DuplicateTableAxis
+        IncompleteTableAxes
+        CoordinateShape
+        EmptyAxis
+        CoordinateArrayTooLarge
+        CoordinateCount
+        NonFiniteCoordinate
+        IndexLength
+        NonFiniteIndex
+        NonMonotonicIndex
+        ConstantIndex
+        TooManyAxes
+        EmptyTable
+
+TextOrigin
+    #[non_exhaustive]
+    enum TextOrigin: Clone, Debug, Display, Eq, PartialEq
+        Value(RecordName)
+        Comment(RecordName)
+        ColumnName
+        ColumnUnit
+        NullMarker
+        Cell
+        TableData
+
+TileCell
+    #[non_exhaustive]
+    enum TileCell: Clone, Copy, Debug, Display, Eq, Error, PartialEq
+        Compressed
+        Uncompressed
+
+ValueKind
+    #[non_exhaustive]
+    enum ValueKind: Clone, Copy, Debug, Display, Eq, PartialEq
+        Logical
+        Integer
+        Real
+        Text
+
+WcsConflict
+    #[non_exhaustive]
+    enum WcsConflict: Clone, Copy, Debug, Display, Eq, Error, PartialEq
+        PcAndCd
+        PcAndCrota
+        MismatchedProjections
+        SipAlternate
+        SipAxisCount
+        TableRadesys
+        TableEquinox
+
+WcsDefect
+    #[non_exhaustive]
+    enum WcsDefect: Clone, Debug, Display, Eq, Error, PartialEq
+        SingularMatrix
+        DegenerateProjection { projection: &'static str }
+        UnknownCelestialFrame { value: String }
+        InvalidEquinox
+        UnknownSpectralFrame { keyword: Keyword, value: String }
+        LogarithmicReference { ctype: String }
+        InconsistentSpectralAlgorithm { ctype: String }
+        SpectralReference { kind: &'static str }
+        RestValue { keyword: Keyword }
+        MissingRest
+        Grism { algorithm: &'static str, defect: GrismDefect }
+        Tabular(TabularDefect)
+
 header
     mod
 
+header::CommentaryName
+    struct CommentaryName: Clone, Copy, Debug, Display, Eq, Hash, PartialEq, TryFrom<&str>
+        pub const COMMENT: Self
+        pub const HISTORY: Self
+        pub const BLANK: Self
+        pub const CONTINUE: Self
+        pub const fn as_str(&self) -> &str
+
 header::Defect
-    enum Defect: Clone, Copy, Debug, Eq, PartialEq
+    enum Defect: Clone, Copy, Debug, Display, Eq, PartialEq
         Name
         Value
 
@@ -184,7 +374,7 @@ header::FitsInteger
         impl TryFrom<&FitsInteger> for i64
 
 header::Header
-    struct Header: Clone, Debug, Default
+    struct Header: Clone, Debug, Default, Extend<Record>, PartialEq
         pub fn parse(bytes: &[u8]) -> Result<Self>
         pub fn repairs(&self) -> &[Repair]
         pub fn get(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<&Value>>
@@ -202,18 +392,21 @@ header::Header
         pub fn contains(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<bool>
         pub fn index_of(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<usize>>
         pub fn iter(&self) -> Iter<'_>
-        pub fn history(&self) -> impl Iterator<Item = &str>
-        pub fn comments(&self) -> impl Iterator<Item = &str>
+        pub fn history_records(&self) -> impl Iterator<Item = &str>
+        pub fn comment_records(&self) -> impl Iterator<Item = &str>
         pub fn new() -> Self
         pub fn set(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, value: impl Into<Value>) -> Result<&mut Self>
         pub fn set_optional(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, value: Option<impl Into<Value>>) -> Result<&mut Self>
         pub fn append(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, value: impl Into<Value>) -> Result<&mut Self>
         pub fn insert(&mut self, index: usize, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, value: impl Into<Value>) -> Result<&mut Self>
+        pub fn insert_record(&mut self, index: usize, record: Record) -> Result<&mut Self>
         pub fn remove(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<Record>>
         pub fn remove_at(&mut self, index: usize) -> Result<Record>
         pub fn remove_all(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<usize>
         pub fn get_hierarch(&self, name: impl TryInto<HierarchName, Error: Into<FitsError>>) -> Result<Option<&Value>>
+        pub fn get_hierarch_comment(&self, name: impl TryInto<HierarchName, Error: Into<FitsError>>) -> Result<Option<&str>>
         pub fn set_hierarch(&mut self, name: impl TryInto<HierarchName, Error: Into<FitsError>>, value: impl Into<Value>) -> Result<&mut Self>
+        pub fn remove_hierarch(&mut self, name: impl TryInto<HierarchName, Error: Into<FitsError>>) -> Result<Option<Record>>
         pub fn set_comment(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, text: &str) -> Result<&mut Self>
         pub fn push_comment(&mut self, text: &str) -> Result<&mut Self>
         pub fn push_history(&mut self, text: &str) -> Result<&mut Self>
@@ -232,21 +425,31 @@ header::Keyword
         pub const fn new(name: &str) -> Self
         pub fn indexed(self, index: usize) -> Result<Self>
         pub const fn as_str(&self) -> &str
+        impl From<Keyword> for RecordName
 
 header::Record
     enum Record: Clone, Debug, PartialEq
         Valued { keyword: Keyword, value: Value, comment: Option<String> }
-        Commentary { name: String, text: Option<String> }
+        Commentary { name: CommentaryName, text: Option<String> }
         Hierarch { name: HierarchName, value: Value, comment: Option<String> }
-        Malformed { keyword: Option<Keyword>, raw: [u8; 80], defect: Defect }
+        Malformed { name: Option<RecordName>, raw: Box<[u8; 80]>, defect: Defect }
+        pub fn view(&self) -> RecordView<'_>
+        impl Extend<Record> for Header
+
+header::RecordName
+    enum RecordName: Clone, Debug, Display, Eq, From<Keyword>, Hash, PartialEq
+        Keyword(Keyword)
+        Hierarch(HierarchName)
+        Commentary(CommentaryName)
 
 header::RecordView
     enum RecordView<'a>: Clone, Copy, Debug, PartialEq
-        Valued { keyword: &'a Keyword, value: &'a Value, comment: Option<&'a str> }
-        Commentary { name: &'a str, text: Option<&'a str> }
+        Valued { keyword: Keyword, value: &'a Value, comment: Option<&'a str> }
+        Commentary { name: CommentaryName, text: Option<&'a str> }
         Hierarch { name: &'a HierarchName, value: &'a Value, comment: Option<&'a str> }
-        Malformed { keyword: Option<&'a Keyword>, raw: &'a [u8; 80], defect: Defect }
-        pub const fn name(self) -> &'a str
+        Malformed { name: Option<&'a RecordName>, raw: &'a [u8; 80], defect: Defect }
+        pub const fn keyword(self) -> Option<Keyword>
+        pub fn name(self) -> Option<RecordName>
 
 header::Repair
     struct Repair: Clone, Copy, Debug, Eq, PartialEq
@@ -258,6 +461,7 @@ header::RepairKind
         LowercaseName
         ValueIndicator
         NonAsciiText
+        EndText
 
 header::Value
     enum Value: Clone, Debug, From<&str>, From<FitsInteger>, From<String>, From<bool>, From<f32>, From<f64>, From<i128>, From<i32>, From<i64>, From<u128>, From<u16>, From<u32>, From<u64>, From<usize>, PartialEq
@@ -621,6 +825,9 @@ header::keywords::ZPCOUNT
 header::keywords::ZQUANTIZ
     const ZQUANTIZ: Keyword
 
+header::keywords::ZSCALE
+    const ZSCALE: Keyword
+
 header::keywords::ZSIMPLE
     const ZSIMPLE: Keyword
 
@@ -641,6 +848,9 @@ header::keywords::ZTILELEN
 
 header::keywords::ZVAL
     const ZVAL: Keyword
+
+header::keywords::ZZERO
+    const ZZERO: Keyword
 
 image
     mod
@@ -689,7 +899,7 @@ image::CompressionConfig  [features: compression or parallel]
         pub const fn with_quantization(self, quantization: Quantization) -> Self
 
 image::Data
-    enum Data: Clone, Debug, From<Vec<f32>>, From<Vec<f64>>, From<Vec<i16>>, From<Vec<i32>>, From<Vec<i64>>, From<Vec<u8>>, PartialEq
+    enum Data: Clone, Debug, PartialEq
         U8(Vec<u8>)
         I16(Vec<i16>)
         I32(Vec<i32>)
@@ -700,18 +910,14 @@ image::Data
         pub const fn len(&self) -> usize
         pub const fn is_empty(&self) -> bool
         pub const fn view(&self) -> View<'_>
-        pub const fn as_u8(&self) -> Option<&[u8]>
-        pub const fn as_i16(&self) -> Option<&[i16]>
-        pub const fn as_i32(&self) -> Option<&[i32]>
-        pub const fn as_i64(&self) -> Option<&[i64]>
-        pub const fn as_f32(&self) -> Option<&[f32]>
-        pub const fn as_f64(&self) -> Option<&[f64]>
-        impl TryFrom<Data> for Vec<f32>
-        impl TryFrom<Data> for Vec<f64>
-        impl TryFrom<Data> for Vec<i16>
-        impl TryFrom<Data> for Vec<i32>
-        impl TryFrom<Data> for Vec<i64>
-        impl TryFrom<Data> for Vec<u8>
+        pub fn as_u8(&self) -> Option<&[u8]>
+        pub fn as_i16(&self) -> Option<&[i16]>
+        pub fn as_i32(&self) -> Option<&[i32]>
+        pub fn as_i64(&self) -> Option<&[i64]>
+        pub fn as_f32(&self) -> Option<&[f32]>
+        pub fn as_f64(&self) -> Option<&[f64]>
+        impl<T: Sample> From<Vec<T>> for Data
+        impl<T: Sample> TryFrom<Data> for Vec<T>
 
 image::Dither  [features: compression or parallel]
     enum Dither: Clone, Copy, Debug, Default, Eq, PartialEq
@@ -749,6 +955,7 @@ image::Metadata
         pub shape: &'a [usize]
         pub bitpix: Bitpix
         pub scaling: Scaling
+        pub fn sample_type(&self) -> SampleType
 
 image::PhysicalSample
     trait PhysicalSample: Narrow
@@ -764,6 +971,14 @@ image::Region
         All
         Section(&'a [Range<usize>])
         impl<'a, const N: usize> From<&'a [Range<usize>; N]> for Region<'a>
+
+image::Sample
+    trait Sample: Raw + Copy + Send + Sync + 'static
+        const BITPIX: Bitpix
+        fn view(samples: &[Self]) -> View<'_>
+        fn of(view: View<'_>) -> Option<&[Self]>
+        fn data(samples: Vec<Self>) -> Data
+        fn of_data(data: Data) -> Result<Vec<Self>, Data>
 
 image::SampleType
     enum SampleType: Clone, Copy, Debug, Eq, Hash, PartialEq
@@ -791,11 +1006,36 @@ image::Scaling
         pub fn is_identity(&self) -> bool
 
 image::UnsignedData
-    enum UnsignedData: Clone, Debug, Eq, PartialEq
+    enum UnsignedData: Clone, Debug, Eq, From<Vec<i8>>, From<Vec<u16>>, From<Vec<u32>>, From<Vec<u64>>, PartialEq, RowValues
         I8(Vec<i8>)
         U16(Vec<u16>)
         U32(Vec<u32>)
         U64(Vec<u64>)
+        pub const fn len(&self) -> usize
+        pub const fn is_empty(&self) -> bool
+        pub const fn view(&self) -> UnsignedView<'_>
+        pub const fn as_i8(&self) -> Option<&[i8]>
+        pub const fn as_u16(&self) -> Option<&[u16]>
+        pub const fn as_u32(&self) -> Option<&[u32]>
+        pub const fn as_u64(&self) -> Option<&[u64]>
+        impl TryFrom<UnsignedData> for Vec<i8>
+        impl TryFrom<UnsignedData> for Vec<u16>
+        impl TryFrom<UnsignedData> for Vec<u32>
+        impl TryFrom<UnsignedData> for Vec<u64>
+
+image::UnsignedView
+    enum UnsignedView<'a>: Clone, Copy, Debug, Eq, PartialEq
+        I8(&'a [i8])
+        U16(&'a [u16])
+        U32(&'a [u32])
+        U64(&'a [u64])
+        pub const fn len(&self) -> usize
+        pub const fn is_empty(&self) -> bool
+        pub const fn as_i8(&self) -> Option<&'a [i8]>
+        pub const fn as_u16(&self) -> Option<&'a [u16]>
+        pub const fn as_u32(&self) -> Option<&'a [u32]>
+        pub const fn as_u64(&self) -> Option<&'a [u64]>
+        pub fn to_data(&self) -> UnsignedData
 
 image::View
     enum View<'a>: Clone, Copy, Debug, PartialEq
@@ -808,13 +1048,14 @@ image::View
         pub const fn bitpix(&self) -> Bitpix
         pub const fn len(&self) -> usize
         pub const fn is_empty(&self) -> bool
-        pub const fn as_u8(&self) -> Option<&'a [u8]>
-        pub const fn as_i16(&self) -> Option<&'a [i16]>
-        pub const fn as_i32(&self) -> Option<&'a [i32]>
-        pub const fn as_i64(&self) -> Option<&'a [i64]>
-        pub const fn as_f32(&self) -> Option<&'a [f32]>
-        pub const fn as_f64(&self) -> Option<&'a [f64]>
+        pub fn as_u8(&self) -> Option<&'a [u8]>
+        pub fn as_i16(&self) -> Option<&'a [i16]>
+        pub fn as_i32(&self) -> Option<&'a [i32]>
+        pub fn as_i64(&self) -> Option<&'a [i64]>
+        pub fn as_f32(&self) -> Option<&'a [f32]>
+        pub fn as_f64(&self) -> Option<&'a [f64]>
         pub fn to_data(&self) -> Data
+        impl<'a, T: Sample> From<&'a [T]> for View<'a>
 
 io
     mod
@@ -839,17 +1080,8 @@ io::ChecksumStatus
         Valid
         Invalid
 
-io::DataUnit
-    struct DataUnit: Clone, Debug
-        pub fn view(&self) -> DataUnitView<'_>
-        pub fn data(&self) -> &[u8]
-        pub fn into_data(self) -> Vec<u8>
-        pub fn into_padded(self) -> Vec<u8>
-
-io::DataUnitView
-    struct DataUnitView<'a>: Clone, Debug
-        pub padded: &'a [u8]
-        pub data_range: Range<usize>
+io::GroupParameter
+    struct GroupParameter: Clone, Debug, Eq, PartialEq
 
 io::Hdu
     struct Hdu: Debug
@@ -859,9 +1091,13 @@ io::Hdu
         pub data_bytes: u64
         pub fn is_image(&self) -> bool
         pub fn matches<'a>(&self, selector: impl Into<HduSelector<'a>>) -> Result<bool>
+        pub fn extname(&self) -> Option<&str>
+        pub fn extver(&self) -> Result<i64>
+        pub fn extlevel(&self) -> Result<i64>
         pub const fn padded_data_bytes(&self) -> u64
         pub fn image_metadata(&self) -> Result<Metadata<'_>>
         pub fn table_schema(&self) -> Result<&Schema>
+        pub fn ascii_schema(&self) -> Result<&AsciiSchema>
 
 io::HduKind
     #[non_exhaustive]
@@ -890,13 +1126,14 @@ io::RandomGroups
         pub fn metadata(&self) -> RandomGroupsMetadata<'_>
         pub const fn array_len(&self) -> usize
         pub fn group(&self, index: usize) -> Result<RandomGroupView<'_>>
-        pub fn parameters_physical(&self, group: usize) -> Result<Vec<f64>>
-        pub fn parameter_physical(&self, group: usize, name: &str) -> Result<f64>
-        pub fn array_physical(&self, group: usize) -> Result<Vec<f64>>
+        pub fn parameters_physical_into(&self, group: usize, out: &mut Vec<f64>) -> Result<()>
+        pub fn parameter(&self, name: &str) -> Result<GroupParameter>
+        pub fn parameter_physical(&self, group: usize, parameter: &GroupParameter) -> Result<f64>
+        pub fn array_physical_into<T: PhysicalSample>(&self, group: usize, out: &mut Vec<T>) -> Result<()>
 
 io::RandomGroupsMetadata
     struct RandomGroupsMetadata<'a>: Clone, Copy, Debug
-        pub parameter_names: &'a [String]
+        pub parameter_names: &'a [Option<String>]
         pub group_shape: &'a [usize]
         pub gcount: usize
         pub pcount: usize
@@ -938,17 +1175,24 @@ table::AsciiColumn
         pub start: usize
         pub width: usize
         pub decimals: usize
-        pub tscale: f64
-        pub tzero: f64
-        pub tnull: Option<String>
+        pub fn tscale(&self) -> Result<f64>
+        pub fn tzero(&self) -> Result<f64>
+        pub fn tnull(&self) -> Result<Option<&str>>
+        pub fn tdisp(&self) -> Result<Option<&str>>
 
 table::AsciiColumnData
-    enum AsciiColumnData: Clone, Debug, PartialEq
+    enum AsciiColumnData: Clone, Debug, From<AsciiText>, From<Vec<Option<f64>>>, From<Vec<Option<i64>>>, PartialEq
         Text(AsciiText)
         Integer(Vec<Option<i64>>)
         Float(Vec<Option<f64>>)
         pub const fn len(&self) -> usize
         pub const fn is_empty(&self) -> bool
+        pub const fn as_text(&self) -> Option<&AsciiText>
+        pub const fn as_integer(&self) -> Option<&[Option<i64>]>
+        pub const fn as_float(&self) -> Option<&[Option<f64>]>
+        impl TryFrom<AsciiColumnData> for AsciiText
+        impl TryFrom<AsciiColumnData> for Vec<Option<f64>>
+        impl TryFrom<AsciiColumnData> for Vec<Option<i64>>
 
 table::AsciiColumnReader
     struct AsciiColumnReader<'a>: Clone, Copy, Debug
@@ -956,42 +1200,61 @@ table::AsciiColumnReader
         pub fn raw(&self) -> Result<AsciiColumnData>
         pub fn physical(&self) -> Result<Vec<f64>>
 
+table::AsciiFloatFormat
+    enum AsciiFloatFormat: Clone, Copy, Debug, Eq, PartialEq
+        F { width: usize, decimals: usize }
+        E { width: usize, decimals: usize }
+        D { width: usize, decimals: usize }
+        pub const fn width(self) -> usize
+        pub const fn decimals(self) -> usize
+
 table::AsciiKind
     enum AsciiKind: Clone, Copy, Debug, Eq, PartialEq
         Text
         Integer
         Float
 
+table::AsciiRows
+    struct AsciiRows<'a>: Clone, Debug, ExactSizeIterator, Iterator
+
 table::AsciiSchema
     struct AsciiSchema: Clone, Debug
         pub row_count: usize
         pub row_len: usize
         pub columns: Vec<AsciiColumn>
+        pub fn parse(header: &Header) -> Result<Self>
         pub fn column_index(&self, name: &str) -> Option<usize>
 
 table::AsciiText
-    struct AsciiText: Clone, Debug, Default, Eq, PartialEq
+    struct AsciiText: Clone, Debug, Default, Eq, PartialEq, TryFrom<AsciiColumnData>
         pub const fn len(&self) -> usize
         pub const fn is_empty(&self) -> bool
-        pub fn get(&self, r: usize) -> Option<&str>
-        pub fn iter(&self) -> impl ExactSizeIterator<Item = Option<&str>>
+        pub fn row(&self, r: usize) -> Option<&str>
+        pub const fn iter(&self) -> AsciiRows<'_>
+        impl From<AsciiText> for AsciiColumnData
+        impl<'a> IntoIterator for &'a AsciiText
         impl<S: AsRef<str>> FromIterator<Option<S>> for AsciiText
 
 table::AsciiWriteColumn
     struct AsciiWriteColumn: Clone, Debug
-        pub fn new(name: impl Into<String>, data: AsciiColumnData, width: usize) -> Self
+        pub fn text(name: impl Into<String>, values: AsciiText, width: usize) -> Self
+        pub fn integer(name: impl Into<String>, values: impl IntoIterator<Item = Option<i64>>, width: usize) -> Self
+        pub fn float(name: impl Into<String>, values: impl IntoIterator<Item = Option<f64>>, format: AsciiFloatFormat) -> Self
         pub fn with_unit(self, unit: impl Into<String>) -> Self
-        pub const fn with_decimals(self, decimals: usize) -> Self
         pub const fn with_scaling(self, tscale: f64, tzero: f64) -> Self
         pub fn with_null(self, tnull: impl Into<String>) -> Self
 
 table::BitColumn
-    struct BitColumn<'a>: Clone, Copy, Debug, Index<(usize, usize)>, Index<usize>
+    struct BitColumn<'a>: Clone, Copy, Debug, Index<(usize, usize)>, Index<usize>, IntoIterator
         pub const fn len(&self) -> usize
         pub const fn is_empty(&self) -> bool
         pub fn row(&self, r: usize) -> &'a BitSlice<u8, Msb0>
         pub fn get(&self, row: usize, col: usize) -> Option<bool>
-        pub fn iter(&self) -> impl ExactSizeIterator<Item = &'a BitSlice<u8, Msb0>> + '_
+        pub const fn iter(&self) -> BitRows<'a>
+        impl<'a> IntoIterator for &BitColumn<'a>
+
+table::BitRows
+    struct BitRows<'a>: Clone, Debug, ExactSizeIterator, Iterator
 
 table::Builder
     struct Builder: Clone, Debug, Default
@@ -1012,16 +1275,17 @@ table::Column
         pub name: Option<String>
         pub unit: Option<String>
         pub tform: Tform
-        pub tscale: f64
-        pub tzero: f64
-        pub tnull: Option<i64>
-        pub tdim: Option<Vec<usize>>
-        pub tdisp: Option<String>
         pub const fn byte_offset(&self) -> usize
+        pub fn tscale(&self) -> Result<f64>
+        pub fn tzero(&self) -> Result<f64>
+        pub fn tnull(&self) -> Result<Option<i64>>
+        pub fn tdim(&self) -> Result<Option<&[usize]>>
+        pub fn tdisp(&self) -> Result<Option<&str>>
 
 table::ColumnData
-    enum ColumnData: Clone, Debug, From<Vec<Complex<f32>>>, From<Vec<Complex<f64>>>, From<Vec<Option<bool>>>, From<Vec<f32>>, From<Vec<f64>>, From<Vec<i16>>, From<Vec<i32>>, From<Vec<i64>>, From<Vec<u8>>, PartialEq
+    enum ColumnData: Clone, Debug, From<BitVec<u8, Msb0>>, From<Vec<Complex<f32>>>, From<Vec<Complex<f64>>>, From<Vec<Option<bool>>>, From<Vec<f32>>, From<Vec<f64>>, From<Vec<i16>>, From<Vec<i32>>, From<Vec<i64>>, From<Vec<u8>>, PartialEq, RowValues
         Logical(Vec<Option<bool>>)
+        Bit(BitVec<u8, Msb0>)
         U8(Vec<u8>)
         I16(Vec<i16>)
         I32(Vec<i32>)
@@ -1031,19 +1295,21 @@ table::ColumnData
         ComplexF32(Vec<Complex<f32>>)
         ComplexF64(Vec<Complex<f64>>)
         Character(Vec<u8>)
-        pub const fn len(&self) -> usize
-        pub const fn is_empty(&self) -> bool
-        pub const fn view(&self) -> ColumnView<'_>
-        pub const fn as_logical(&self) -> Option<&[Option<bool>]>
-        pub const fn as_u8(&self) -> Option<&[u8]>
-        pub const fn as_i16(&self) -> Option<&[i16]>
-        pub const fn as_i32(&self) -> Option<&[i32]>
-        pub const fn as_i64(&self) -> Option<&[i64]>
-        pub const fn as_f32(&self) -> Option<&[f32]>
-        pub const fn as_f64(&self) -> Option<&[f64]>
-        pub const fn as_complex_f32(&self) -> Option<&[Complex<f32>]>
-        pub const fn as_complex_f64(&self) -> Option<&[Complex<f64>]>
-        pub const fn as_character(&self) -> Option<&[u8]>
+        pub fn len(&self) -> usize
+        pub fn is_empty(&self) -> bool
+        pub fn view(&self) -> ColumnView<'_>
+        pub fn as_logical(&self) -> Option<&[Option<bool>]>
+        pub fn as_bit(&self) -> Option<&BitSlice<u8, Msb0>>
+        pub fn as_u8(&self) -> Option<&[u8]>
+        pub fn as_i16(&self) -> Option<&[i16]>
+        pub fn as_i32(&self) -> Option<&[i32]>
+        pub fn as_i64(&self) -> Option<&[i64]>
+        pub fn as_f32(&self) -> Option<&[f32]>
+        pub fn as_f64(&self) -> Option<&[f64]>
+        pub fn as_complex_f32(&self) -> Option<&[Complex<f32>]>
+        pub fn as_complex_f64(&self) -> Option<&[Complex<f64>]>
+        pub fn as_character(&self) -> Option<&[u8]>
+        impl TryFrom<ColumnData> for BitVec<u8, Msb0>
         impl TryFrom<ColumnData> for Vec<Complex<f32>>
         impl TryFrom<ColumnData> for Vec<Complex<f64>>
         impl TryFrom<ColumnData> for Vec<Option<bool>>
@@ -1076,6 +1342,7 @@ table::ColumnSelector
 table::ColumnView
     enum ColumnView<'a>: Clone, Copy, Debug, PartialEq
         Logical(&'a [Option<bool>])
+        Bit(&'a BitSlice<u8, Msb0>)
         U8(&'a [u8])
         I16(&'a [i16])
         I32(&'a [i32])
@@ -1085,9 +1352,10 @@ table::ColumnView
         ComplexF32(&'a [Complex<f32>])
         ComplexF64(&'a [Complex<f64>])
         Character(&'a [u8])
-        pub const fn len(&self) -> usize
-        pub const fn is_empty(&self) -> bool
+        pub fn len(&self) -> usize
+        pub fn is_empty(&self) -> bool
         pub const fn as_logical(&self) -> Option<&'a [Option<bool>]>
+        pub const fn as_bit(&self) -> Option<&'a BitSlice<u8, Msb0>>
         pub const fn as_u8(&self) -> Option<&'a [u8]>
         pub const fn as_i16(&self) -> Option<&'a [i16]>
         pub const fn as_i32(&self) -> Option<&'a [i32]>
@@ -1099,33 +1367,41 @@ table::ColumnView
         pub const fn as_character(&self) -> Option<&'a [u8]>
         pub fn to_data(&self) -> ColumnData
 
+table::DescriptorWidth
+    enum DescriptorWidth: Clone, Copy, Debug, Eq, PartialEq
+        P
+        Q
+
+table::ElementKind
+    enum ElementKind: Clone, Copy, Debug, Eq, PartialEq
+        Logical
+        Bit
+        U8
+        I16
+        I32
+        I64
+        Character
+        F32
+        F64
+        ComplexF32
+        ComplexF64
+        pub const fn code(self) -> char
+
 table::Ragged
     struct Ragged<V>
+        impl Ragged<ColumnData>
+            pub fn from_rows(rows: impl IntoIterator<Item = ColumnData>) -> Result<Self>
         pub const fn len(&self) -> usize
         pub const fn is_empty(&self) -> bool
         pub fn range(&self, r: usize) -> Range<usize>
         pub fn ends(&self) -> &[usize]
         pub const fn values(&self) -> &V
         pub fn into_values(self) -> V
-        impl<T> Ragged<Vec<T>>
-            pub fn new(values: Vec<T>, ends: Vec<usize>) -> Self
-            pub fn row(&self, r: usize) -> &[T]
-            pub fn rows(&self) -> impl ExactSizeIterator<Item = &[T]>
-        impl Ragged<String>
-            pub fn new(values: String, ends: Vec<usize>) -> Self
-            pub fn row(&self, r: usize) -> &str
-            pub fn rows(&self) -> impl ExactSizeIterator<Item = &str>
-        impl Ragged<BitVec<u8, Msb0>>
-            pub fn new(values: BitVec<u8, Msb0>, ends: Vec<usize>) -> Self
-            pub fn row(&self, r: usize) -> &BitSlice<u8, Msb0>
-            pub fn rows(&self) -> impl ExactSizeIterator<Item = &BitSlice<u8, Msb0>>
-        impl Ragged<ColumnData>
-            pub fn row(&self, r: usize) -> ColumnView<'_>
-            pub fn rows(&self) -> impl ExactSizeIterator<Item = ColumnView<'_>>
-            pub fn new(values: ColumnData, ends: Vec<usize>) -> Self
-            pub fn from_rows(rows: impl IntoIterator<Item = ColumnData>) -> Result<Self>
-        impl<B: AsRef<BitSlice<u8, Msb0>>> FromIterator<B> for Ragged<BitVec<u8, Msb0>>
-        impl<S: AsRef<str>> FromIterator<S> for Ragged<String>
+        impl<V: RowValues> Ragged<V>
+            pub fn new(values: V, ends: Vec<usize>) -> Self
+            pub fn row(&self, r: usize) -> V::Row<'_>
+            pub const fn iter(&self) -> Rows<'_, V>
+        impl<'r, V: RowValues> IntoIterator for &'r Ragged<V>
         impl<T, R: IntoIterator<Item = T>> FromIterator<R> for Ragged<Vec<T>>
         impl<V: Clone> Clone for Ragged<V>
         impl<V: Debug> Debug for Ragged<V>
@@ -1133,12 +1409,27 @@ table::Ragged
         impl<V: Eq> Eq for Ragged<V>
         impl<V: PartialEq> PartialEq for Ragged<V>
 
+table::RowValues
+    trait RowValues
+        type Row<'a>
+        fn len(&self) -> usize
+        fn is_empty(&self) -> bool { .. }
+        fn row(&self, range: Range<usize>) -> Self::Row<'_>
+        fn is_row_end(&self, end: usize) -> bool { .. }
+
+table::Rows
+    struct Rows<'r, V>
+        impl<'r, V: Clone> Clone for Rows<'r, V>
+        impl<'r, V: Debug> Debug for Rows<'r, V>
+        impl<'r, V: RowValues> Iterator for Rows<'r, V>
+        impl<V: RowValues> ExactSizeIterator for Rows<'_, V>
+
 table::Schema
     struct Schema: Clone, Debug
-        pub row_count: usize
-        pub row_len: usize
         pub columns: Vec<Column>
         pub fn parse(header: &Header) -> Result<Self>
+        pub const fn row_count(&self) -> usize
+        pub const fn row_len(&self) -> usize
         pub fn column_index(&self, name: &str) -> Option<usize>
 
 table::SelectedColumn
@@ -1158,6 +1449,11 @@ table::Selection
         pub columns: Vec<SelectedColumn>
         pub fn column<'c>(&self, column: impl Into<ColumnSelector<'c>>) -> Option<&SelectedColumn>
 
+table::Storage
+    enum Storage: Clone, Copy, Debug, Eq, PartialEq
+        Fixed
+        Array(DescriptorWidth)
+
 table::Table
     struct Table: Clone, Debug
         pub const fn schema(&self) -> &Schema
@@ -1165,57 +1461,45 @@ table::Table
 
 table::Tform
     struct Tform: Clone, Copy, Debug, Eq, FromStr, PartialEq
-        pub repeat: usize
-        pub kind: TformKind
-        pub vla_elem: Option<TformKind>
-        pub const fn byte_width(self) -> usize
-
-table::TformKind
-    enum TformKind: Clone, Copy, Debug, Eq, PartialEq
-        Logical
-        Bit
-        U8
-        I16
-        I32
-        I64
-        Character
-        F32
-        F64
-        ComplexF32
-        ComplexF64
-        ArrayDesc32
-        ArrayDesc64
+        pub const fn repeat(self) -> usize
+        pub const fn element(self) -> ElementKind
+        pub const fn storage(self) -> Storage
         pub const fn code(self) -> char
+        pub const fn descriptor_width(self) -> Option<DescriptorWidth>
+        pub const fn byte_width(self) -> usize
 
 table::WriteColumn
     struct WriteColumn: Clone, Debug
         pub fn scalar(name: impl Into<String>, data: ColumnData) -> Self
         pub fn fixed(name: impl Into<String>, data: ColumnData, repeat: usize) -> Self
         pub fn characters(name: impl Into<String>, fields: impl IntoIterator<Item = impl AsRef<[u8]>>, width: usize) -> Result<Self>
-        pub fn vla(name: impl Into<String>, rows: Ragged<ColumnData>) -> Self
+        pub fn vla(name: impl Into<String>, rows: Ragged<ColumnData>, width: DescriptorWidth) -> Self
         pub fn bits(name: impl Into<String>, rows: impl IntoIterator<Item = impl AsRef<BitSlice<u8, Msb0>>>, width: usize) -> Result<Self>
-        pub fn vla_bits(name: impl Into<String>, rows: Ragged<BitVec<u8, Msb0>>) -> Self
         pub fn with_unit(self, unit: impl Into<String>) -> Self
         pub fn with_tdim(self, shape: impl Into<Vec<usize>>) -> Self
-        pub fn with_wide_descriptors(self) -> Self
         pub const fn with_scaling(self, tscale: f64, tzero: f64) -> Self
         pub const fn with_null(self, tnull: i64) -> Self
 
 time
     mod
 
+time::Axis
+    struct Axis: Clone, Debug, PartialEq
+        pub const fn scale(&self) -> &Scale
+        pub fn mjd(&self, value: f64) -> Result<Mjd>
+
 time::Bounds
-    struct Bounds: Clone, Copy, Debug, PartialEq
-        pub start_mjd: Option<Mjd>
-        pub end_mjd: Option<Mjd>
-        pub mid_mjd: Option<Mjd>
-        pub exposure: Option<f64>
-        pub elapsed: Option<f64>
-        pub resolution: Option<f64>
-        pub pixel_position: f64
-        pub systematic_error: Option<f64>
-        pub random_error: Option<f64>
-        pub fn from_header(header: &Header) -> Result<Self>
+    struct Bounds<'a>: Clone, Copy, Debug
+        pub const fn new(header: &'a Header, frame: &'a Frame) -> Self
+        pub fn start(&self) -> Result<Option<Coordinate>>
+        pub fn end(&self) -> Result<Option<Coordinate>>
+        pub fn mid(&self) -> Result<Option<Coordinate>>
+        pub fn exposure(&self) -> Result<Option<f64>>
+        pub fn elapsed(&self) -> Result<Option<f64>>
+        pub fn resolution(&self) -> Result<Option<f64>>
+        pub fn pixel_position(&self) -> Result<f64>
+        pub fn systematic_error(&self) -> Result<Option<f64>>
+        pub fn random_error(&self) -> Result<Option<f64>>
 
 time::Coordinate
     struct Coordinate: Clone, Debug, PartialEq
@@ -1226,13 +1510,16 @@ time::Coordinate
 
 time::Datetime
     struct Datetime: Clone, Copy, Debug, FromStr, PartialEq
-        pub year: i64
-        pub month: u32
-        pub day: u32
-        pub hour: u32
-        pub minute: u32
-        pub second: f64
-        pub fn to_mjd(&self, scale: &Scale) -> Result<Mjd>
+        pub fn date(year: i64, month: u32, day: u32) -> Result<Self>
+        pub fn at(self, hour: u32, minute: u32, second: f64) -> Result<Self>
+        pub const fn year(self) -> i64
+        pub const fn month(self) -> u32
+        pub const fn day(self) -> u32
+        pub const fn hour(self) -> u32
+        pub const fn minute(self) -> u32
+        pub const fn second(self) -> u32
+        pub const fn second_fraction(self) -> f64
+        pub fn to_mjd(self) -> Result<Mjd>
 
 time::Frame
     struct Frame: Clone, Debug
@@ -1245,7 +1532,7 @@ time::Frame
         pub fn from_column(header: &Header, column: usize) -> Result<Self>
         pub fn unit_seconds(&self) -> Result<f64>
         pub fn relative_to_mjd(&self, value: f64) -> Result<Mjd>
-        pub fn time_axis_mjd(&self, wcs: &Wcs, axis: usize, pixel: &[f64]) -> Result<Coordinate>
+        pub fn time_axis(&self, ctype: &str, cunit: &str) -> Result<Option<Axis>>
 
 time::Mjd
     struct Mjd: Clone, Copy, Debug, PartialEq, PartialOrd
@@ -1321,6 +1608,11 @@ wcs::Axis
         pub crval: f64
         pub crpix: f64
         pub spectral_frame: Option<SpectralFrame>
+
+wcs::AxisWorld
+    struct AxisWorld<'a>: Clone, Copy, Debug, PartialEq
+        pub cunit: &'a str
+        pub value: f64
 
 wcs::CelestialFrame
     struct CelestialFrame: Clone, Copy, Debug, PartialEq
@@ -1422,6 +1714,8 @@ wcs::Wcs
         pub fn bin(&self, factors: &[usize]) -> Result<Self>
         pub fn write_into(&self, header: &mut Header, alt: impl TryInto<Alternate, Error: Into<FitsError>>) -> Result<()>
         pub fn metadata(&self) -> Metadata<'_>
+        pub fn world_unit(&self, axis: usize) -> &str
+        pub fn axis_world(&self, axis: usize, pixel: &[f64]) -> Result<AxisWorld<'_>>
         pub fn from_pixel_list(header: &Header, columns: &[usize], alt: impl TryInto<Alternate, Error: Into<FitsError>>) -> Result<Self>
         pub fn from_array_column(header: &Header, column: usize, alt: impl TryInto<Alternate, Error: Into<FitsError>>) -> Result<Self>
         pub fn pixel_to_world(&self, pixel: &[f64], world: &mut [f64]) -> Result<()>

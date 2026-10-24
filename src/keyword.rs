@@ -1,4 +1,4 @@
-//! [`Keyword`], its stack-allocated formatting, and the inverse index parse.
+//! [`Keyword`], its stack-allocated formatting, and the index of an indexed keyword.
 //!
 //! Indexed keywords (`NAXIS3`, `PV2_15`, `CD1_2`, `CTYPE1`) are looked up
 //! constantly while reading and writing. Building each with `format!` heap-
@@ -10,22 +10,6 @@ use core::fmt::{self, Write};
 use std::str;
 
 use crate::error::{FitsError, Result};
-
-/// The 1-based index of an indexed FITS keyword: `index("NAXIS3", "NAXIS")` is
-/// `Some(3)`. The suffix must be a non-empty digit run with no leading zero, so a
-/// card parses as at most one index (`NAXIS03` is not `NAXIS3`) — the same rule the
-/// structural-keyword, compressed-column, and `ZNAMEi` scans each need. Callers
-/// apply their own bound on the result.
-pub(crate) fn index(keyword: &str, prefix: &str) -> Option<usize> {
-    let suffix = keyword.strip_prefix(prefix)?;
-    if suffix.is_empty()
-        || suffix.starts_with('0')
-        || !suffix.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-    suffix.parse().ok()
-}
 
 /// A FITS keyword name: 1 to 8 bytes of `A`–`Z`, `0`–`9`, `-` and `_` (§4.1.2.1),
 /// held inline, so it is `Copy` and makes no allocation.
@@ -98,6 +82,21 @@ impl Keyword {
             Ok(text) => text,
             Err(_) => panic!("a keyword holds only ASCII"),
         }
+    }
+
+    /// The 1-based index of this keyword in the family of `root`: `NAXIS3` after `NAXIS`
+    /// is `Some(3)`. The suffix must be a non-empty digit run with no leading zero, so a
+    /// card parses as at most one index (`NAXIS03` is not `NAXIS3`). Callers apply their
+    /// own bound on the result.
+    pub(crate) fn index_after(self, root: Self) -> Option<usize> {
+        let suffix = self.as_str().strip_prefix(root.as_str())?;
+        if suffix.is_empty()
+            || suffix.starts_with('0')
+            || !suffix.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        suffix.parse().ok()
     }
 }
 

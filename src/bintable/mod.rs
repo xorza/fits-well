@@ -19,11 +19,13 @@ pub(crate) mod column_data;
 pub(crate) mod column_reader;
 pub(crate) mod column_view;
 pub(crate) mod descriptor;
+pub(crate) mod element_kind;
 pub(crate) mod schema;
+pub(crate) mod selection;
+pub(crate) mod table_extent;
 pub(crate) mod table_view;
 pub(crate) mod tdim;
 pub(crate) mod tform;
-pub(crate) mod tform_kind;
 pub(crate) mod vla_column;
 
 use crate::bintable::column_reader::ColumnReader;
@@ -81,11 +83,14 @@ impl Table {
 #[cfg(feature = "internals")]
 pub(crate) mod internals {
     use crate::bintable::Table;
+    #[cfg(all(test, feature = "compression"))]
+    use crate::bintable::element_kind::ElementKind;
     use crate::bintable::schema::Schema;
     #[cfg(all(test, feature = "compression"))]
-    use crate::bintable::tform_kind::TformKind;
+    use crate::bintable::tform;
     use crate::error::Result;
     use crate::header_model::{Header, keywords};
+    use crate::internals::cards;
 
     impl Table {
         /// Build a table from its header and owned data unit (`data` is the main
@@ -98,15 +103,9 @@ pub(crate) mod internals {
     /// A minimal `BINTABLE` header for `tforms`, sized by the caller — the fixture
     /// every read-path test builds its table from.
     pub(crate) fn table_header(naxis1: usize, naxis2: usize, tforms: &[&str]) -> Header {
-        let mut h = Header::new();
-        h.set_internal(keywords::XTENSION, "BINTABLE")
-            .set_internal(keywords::BITPIX, 8)
-            .set_internal(keywords::NAXIS, 2)
-            .set_internal("NAXIS1", i64::try_from(naxis1).unwrap())
-            .set_internal("NAXIS2", i64::try_from(naxis2).unwrap())
-            .set_internal(keywords::PCOUNT, 0)
-            .set_internal(keywords::GCOUNT, 1)
-            .set_internal(keywords::TFIELDS, i64::try_from(tforms.len()).unwrap());
+        let axes = [naxis1, naxis2].map(|length| i64::try_from(length).unwrap());
+        let mut h = cards::structural(Some("BINTABLE"), 8, &axes);
+        h.set_internal(keywords::TFIELDS, i64::try_from(tforms.len()).unwrap());
         for (i, tform) in tforms.iter().enumerate() {
             h.set_internal(keywords::TFORM.indexed(i + 1).unwrap(), *tform);
         }
@@ -114,8 +113,9 @@ pub(crate) mod internals {
     }
 
     #[cfg(all(test, feature = "compression"))]
-    pub(crate) fn set_column_kind(table: &mut Table, column: usize, kind: TformKind) {
-        table.schema.columns[column].tform.kind = kind;
+    pub(crate) fn set_column_kind(table: &mut Table, column: usize, kind: ElementKind) {
+        let tform = &mut table.schema.columns[column].tform;
+        *tform = tform::internals::tform(tform.repeat(), kind, tform.storage());
     }
 }
 

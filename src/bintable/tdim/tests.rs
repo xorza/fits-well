@@ -12,13 +12,33 @@ use bitvec::order::Msb0;
 fn tdim_accepts_subshapes_and_checks_vla_cells() {
     let mut fixed = table_header(16, 1, &["4J"]);
     fixed.set_internal("TDIM1", "(2)");
-    assert!(Table::from_data(&fixed, vec![0; 16]).is_ok());
+    assert_eq!(
+        Table::from_data(&fixed, vec![0; 16])
+            .unwrap()
+            .schema()
+            .columns[0]
+            .tdim()
+            .unwrap(),
+        Some(&[2][..])
+    );
+    // A shape the cell cannot hold is a defect of `TDIMn` alone: the stored values
+    // still read.
     for invalid in ["(5)", "(2,broken)", "()", "(0)"] {
         fixed.set_internal("TDIM1", invalid);
-        assert!(matches!(
-            Table::from_data(&fixed, vec![0; 16]),
-            Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "TDIM1"
-        ));
+        let table = Table::from_data(&fixed, vec![0; 16]).unwrap();
+        assert!(
+            matches!(
+                table.schema.columns[0].tdim(),
+                Err(FitsError::InvalidColumnKeyword { keyword, source })
+                    if keyword == "TDIM1"
+                        && matches!(*source, FitsError::KeywordOutOfRange { keyword } if keyword == "TDIM1")
+            ),
+            "{invalid}"
+        );
+        assert_eq!(
+            table.column(0).unwrap().raw().unwrap(),
+            ColumnData::I32(vec![0; 4])
+        );
     }
 
     let mut vla = table_header(8, 1, &["1PJ"]);
@@ -106,8 +126,10 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
 
     let mut malformed_empty = table_header(8, 1, &["1PJ"]);
     malformed_empty.set_internal("TDIM1", "(2,broken)");
+    // An unreadable shape fails the array read, an empty row included.
+    let table = Table::from_data(&malformed_empty, vec![0; 8]).unwrap();
     assert!(matches!(
-        Table::from_data(&malformed_empty, vec![0; 8]),
-        Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "TDIM1"
+        table.column(0).unwrap().vla(),
+        Err(FitsError::InvalidColumnKeyword { keyword, .. }) if keyword == "TDIM1"
     ));
 }

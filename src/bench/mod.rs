@@ -15,7 +15,6 @@
 //! the page cache, so a read times the decode, not the disk.
 
 pub(crate) mod fixture;
-pub(crate) mod scene;
 
 use criterion::Criterion;
 

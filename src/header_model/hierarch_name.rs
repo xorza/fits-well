@@ -97,9 +97,9 @@ mod tests {
             HashSet::from([lower.clone(), lower]).len()
         );
         // A token past 8 bytes, and characters outside the ESO token rule.
-        assert!("ESO INS OPTI-3 ID".parse::<HierarchName>().is_ok());
-        assert!("LONGKEYWORDNAME".parse::<HierarchName>().is_ok());
-        assert!("my.key #1".parse::<HierarchName>().is_ok());
+        for name in ["ESO INS OPTI-3 ID", "LONGKEYWORDNAME", "my.key #1"] {
+            assert_eq!(name.parse::<HierarchName>().unwrap().as_str(), name);
+        }
         for bad in ["", "   ", "A=B", "ESO DÉT"] {
             assert!(
                 matches!(bad.parse::<HierarchName>(), Err(FitsError::InvalidKeyword { name }) if name == bad),

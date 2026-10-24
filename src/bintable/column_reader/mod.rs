@@ -1,12 +1,15 @@
 //! A decode handle bound to one column of a binary table.
 
+use std::ops::Range;
+
 use num_complex::Complex;
 
 use crate::bintable::bit_column::BitColumn;
 use crate::bintable::column::Column;
 use crate::bintable::column_data::ColumnData;
+use crate::bintable::element_kind::{Cell, ElementKind};
 use crate::bintable::table_view::TableView;
-use crate::bintable::tform_kind::TformKind;
+use crate::bintable::tform::Storage;
 use crate::bintable::vla_column::VlaColumn;
 use crate::error::FitsError;
 use crate::error::Result;
@@ -45,12 +48,12 @@ impl<'a> ColumnReader<'a> {
     /// descriptors rather than values, so they go through [`ColumnReader::vla`].
     const fn fixed_descriptor(&self) -> Result<&'a Column> {
         let col = self.descriptor();
-        if col.tform.kind.is_descriptor() {
-            return Err(FitsError::NotAFixedColumn {
-                code: col.tform.kind.code(),
-            });
+        match col.tform.storage() {
+            Storage::Fixed => Ok(col),
+            Storage::Array(width) => Err(FitsError::NotAFixedColumn {
+                code: width.letter(),
+            }),
         }
-        Ok(col)
     }
 
     /// Decode a fixed-width column into a typed, row-flattened [`ColumnData`]: an `A`
@@ -60,14 +63,14 @@ impl<'a> ColumnReader<'a> {
     /// (`P`/`Q`) columns error here — use [`ColumnReader::vla`].
     pub fn raw(&self) -> Result<ColumnData> {
         let col = self.fixed_descriptor()?;
-        Ok(col.decode_cells(self.table.cells(col), self.table.row_count))
+        Ok(col.decode_cells(self.table.cells(col), self.table.extent.row_count))
     }
 
     /// [`ColumnReader::raw`] into `out`, whose buffer it reuses when `out` already holds
     /// values of this column's type.
     pub(crate) fn raw_into(&self, out: &mut ColumnData) -> Result<()> {
         let col = self.fixed_descriptor()?;
-        col.decode_cells_into(self.table.cells(col), self.table.row_count, out);
+        col.decode_cells_into(self.table.cells(col), self.table.extent.row_count, out);
         Ok(())
     }
 
@@ -76,10 +79,10 @@ impl<'a> ColumnReader<'a> {
     /// (`A`/`L`/`X`/`C`/`M`) and variable-length columns.
     pub fn physical(&self) -> Result<Vec<f64>> {
         let col = self.fixed_descriptor()?;
-        col.tform.kind.decode_physical(
+        col.tform.element().decode_physical(
             self.table.cells(col),
-            self.table.row_count * col.tform.repeat,
-            &col.scaling(),
+            self.table.extent.row_count * col.tform.repeat(),
+            &col.scaling()?,
         )
     }
 
@@ -90,12 +93,12 @@ impl<'a> ColumnReader<'a> {
     /// variable-length column. Mirrors [`crate::image::Borrowed::unsigned`].
     pub fn unsigned(&self) -> Result<Option<UnsignedData>> {
         let col = self.fixed_descriptor()?;
-        let Some(kind) = col.tform.kind.unsigned_kind(&col.scaling()) else {
+        let Some(kind) = col.tform.element().unsigned_kind(&col.scaling()?) else {
             return Ok(None);
         };
         Ok(Some(UnsignedData::from_be_cells(
             self.table.cells(col),
-            self.table.row_count * col.tform.repeat,
+            self.table.extent.row_count * col.tform.repeat(),
             kind,
         )))
     }
@@ -103,12 +106,12 @@ impl<'a> ColumnReader<'a> {
     /// A `C`/`M` complex column as [`Complex<f64>`] values, applying `TSCALn` to both
     /// components and `TZEROn` to the real component (§7.3.2). Errors on non-complex columns.
     pub fn complex(&self) -> Result<Vec<Complex<f64>>> {
-        let col = self.descriptor();
-        col.tform.kind.decode_complex(
+        let col = self.fixed_descriptor()?;
+        col.tform.element().decode_complex(
             self.table.cells(col),
-            self.table.row_count * col.tform.repeat,
-            col.tscale,
-            col.tzero,
+            self.table.extent.row_count * col.tform.repeat(),
+            col.tscale()?,
+            col.tzero()?,
         )
     }
 
@@ -117,9 +120,9 @@ impl<'a> ColumnReader<'a> {
     /// first byte, §7.3.2), with no per-row allocation. Errors on any non-`X` column.
     pub fn bits(&self) -> Result<BitColumn<'a>> {
         let col = self.descriptor();
-        if col.tform.kind != TformKind::Bit {
+        if col.tform.storage() != Storage::Fixed || col.tform.element() != ElementKind::Bit {
             return Err(FitsError::NotABitColumn {
-                code: col.tform.kind.code(),
+                code: col.tform.code(),
             });
         }
         Ok(BitColumn::new(self.table, self.index))
@@ -127,7 +130,7 @@ impl<'a> ColumnReader<'a> {
 
     /// Decode a variable-length (`P`/`Q`) column: every row's heap array, in one
     /// [`ColumnData`] with the row ends — a row may be empty. A `PX` row is its
-    /// packed bytes. Errors for fixed-width columns.
+    /// descriptor's count of bits. Errors for fixed-width columns.
     pub fn vla(&self) -> Result<Ragged<ColumnData>> {
         let mut out = Ragged::<ColumnData>::new(ColumnData::U8(Vec::new()), Vec::new());
         self.vla_into(&mut out)?;
@@ -138,18 +141,11 @@ impl<'a> ColumnReader<'a> {
     pub(crate) fn vla_into(&self, out: &mut Ragged<ColumnData>) -> Result<()> {
         let column = self.vla_column()?;
         out.refill(|values, ends| {
-            let count = vla_ends(column, self.table.row_count, ends)?;
-            let bytes = (0..ends.len()).map(|row| {
-                column
-                    .cell(row)
-                    .expect("vla_ends validated every row")
-                    .bytes
-            });
+            let mut cells = VlaCells::new(column, self.table.extent.row_count, ends);
             column
                 .element_type()
-                .heap_kind()
-                .decode_cells_into(bytes, count, values);
-            Ok(())
+                .decode_cells_into(&mut cells, 0, values);
+            cells.finish()
         })
     }
 
@@ -157,14 +153,16 @@ impl<'a> ColumnReader<'a> {
     /// element`, mapping integers equal to `TNULLn` to `NaN` (§6.4 — scaling applies to
     /// the heap values). Errors for fixed-width or non-numeric-heap columns.
     pub fn vla_physical(&self) -> Result<Ragged<Vec<f64>>> {
-        let col = self.descriptor();
-        let rows = self.vla_rows()?;
-        let values = rows.column.element_type().decode_physical(
-            rows.bytes(),
-            rows.count(),
-            &col.scaling(),
-        )?;
-        Ok(Ragged::<Vec<f64>>::new(values, rows.ends))
+        let column = self.vla_column()?;
+        let mut ends = Vec::new();
+        let mut cells = VlaCells::new(column, self.table.extent.row_count, &mut ends);
+        let values = column.element_type().decode_physical(
+            cells.by_ref().map(|cell| cell.bytes),
+            0,
+            &self.descriptor().scaling()?,
+        );
+        cells.finish()?;
+        Ok(Ragged::<Vec<f64>>::new(values?, ends))
     }
 
     /// Exact typed integers for each row of a `P`/`Q` heap array using the FITS
@@ -172,14 +170,18 @@ impl<'a> ColumnReader<'a> {
     /// and `TSCALn`/`TZEROn`/`TNULLn` metadata form that convention. Errors for
     /// fixed-width columns.
     pub fn vla_unsigned(&self) -> Result<Option<Ragged<UnsignedData>>> {
-        let col = self.descriptor();
         let column = self.vla_column()?;
-        let Some(kind) = column.element_type().unsigned_kind(&col.scaling()) else {
+        let Some(kind) = column
+            .element_type()
+            .unsigned_kind(&self.descriptor().scaling()?)
+        else {
             return Ok(None);
         };
-        let rows = self.vla_rows()?;
-        let values = UnsignedData::from_be_cells(rows.bytes(), rows.count(), kind);
-        Ok(Some(Ragged::<UnsignedData>::new(values, rows.ends)))
+        let mut ends = Vec::new();
+        let mut cells = VlaCells::new(column, self.table.extent.row_count, &mut ends);
+        let values = UnsignedData::from_be_cells(cells.by_ref().map(|cell| cell.bytes), 0, kind);
+        cells.finish()?;
+        Ok(Some(Ragged::<UnsignedData>::new(values, ends)))
     }
 
     /// Each row of a `PC`/`QC`/`PM`/`QM` heap array as [`Complex<f64>`], applying
@@ -188,13 +190,17 @@ impl<'a> ColumnReader<'a> {
     /// heap columns.
     pub fn vla_complex(&self) -> Result<Ragged<Vec<Complex<f64>>>> {
         let col = self.descriptor();
-        let rows = self.vla_rows()?;
-        let kind = rows.column.element_type();
-        if !matches!(kind, TformKind::ComplexF32 | TformKind::ComplexF64) {
-            return Err(FitsError::NotAComplexColumn { code: kind.code() });
-        }
-        let values = kind.decode_complex(rows.bytes(), rows.count(), col.tscale, col.tzero)?;
-        Ok(Ragged::<Vec<Complex<f64>>>::new(values, rows.ends))
+        let column = self.vla_column()?;
+        let mut ends = Vec::new();
+        let mut cells = VlaCells::new(column, self.table.extent.row_count, &mut ends);
+        let values = column.element_type().decode_complex(
+            cells.by_ref().map(|cell| cell.bytes),
+            0,
+            col.tscale()?,
+            col.tzero()?,
+        );
+        cells.finish()?;
+        Ok(Ragged::<Vec<Complex<f64>>>::new(values?, ends))
     }
 
     /// A variable-length `X` (`1PX`/`1QX`) column as a borrowed 2-D [`BitColumn`],
@@ -203,33 +209,27 @@ impl<'a> ColumnReader<'a> {
     /// row's width. Errors on any non-bit VLA.
     pub fn vla_bits(&self) -> Result<BitColumn<'a>> {
         let col = self.descriptor();
-        match (col.tform.kind, col.tform.vla_elem) {
-            (TformKind::ArrayDesc32 | TformKind::ArrayDesc64, Some(TformKind::Bit)) => {}
-            _ => {
-                return Err(FitsError::NotABitColumn {
-                    code: col.tform.kind.code(),
-                });
-            }
+        if !matches!(col.tform.storage(), Storage::Array(_))
+            || col.tform.element() != ElementKind::Bit
+        {
+            return Err(FitsError::NotABitColumn {
+                code: col.tform.code(),
+            });
         }
         // Validate every row's heap span up front (no allocation) so [`BitColumn::row`]
         // can resolve a row lazily and infallibly — the only place an overrun surfaces.
-        for r in 0..self.table.row_count {
-            let descriptor = self.table.pq_descriptor(col, r)?;
-            col.validate_vla_tdim(descriptor.count)?;
-            self.table.pq_payload(descriptor, TformKind::Bit)?;
+        let column = self.vla_column()?;
+        for row in 0..self.table.extent.row_count {
+            column.cell(row)?;
         }
         Ok(BitColumn::new(self.table, self.index))
     }
 
-    const fn vla_element_type(&self) -> Result<TformKind> {
-        let col = self.descriptor();
-        match (col.tform.kind, col.tform.vla_elem) {
-            (TformKind::ArrayDesc32 | TformKind::ArrayDesc64, Some(element_type)) => {
-                Ok(element_type)
-            }
-            _ => Err(FitsError::NotAVla {
-                code: col.tform.kind.code(),
-            }),
+    const fn vla_element_type(&self) -> Result<ElementKind> {
+        let tform = self.descriptor().tform;
+        match tform.storage() {
+            Storage::Array(_) => Ok(tform.element()),
+            Storage::Fixed => Err(FitsError::NotAVla { code: tform.code() }),
         }
     }
 
@@ -240,54 +240,62 @@ impl<'a> ColumnReader<'a> {
             self.vla_element_type()?,
         ))
     }
-
-    /// Every row's heap array, validated before any decode: descriptors in range and
-    /// `TDIMn` extents met, and where each row's elements end.
-    fn vla_rows(&self) -> Result<VlaRows<'a>> {
-        let column = self.vla_column()?;
-        let mut ends = Vec::new();
-        vla_ends(column, self.table.row_count, &mut ends)?;
-        Ok(VlaRows { column, ends })
-    }
 }
 
-/// Validate every one of the `row_count` rows of `column`, write where each row's decoded
-/// elements end to `ends`, cleared first, and give the element count.
-fn vla_ends(column: VlaColumn<'_>, row_count: usize, ends: &mut Vec<usize>) -> Result<usize> {
-    let element_size = column.element_type().heap_kind().elem_size();
-    ends.clear();
-    ends.reserve(row_count);
-    let mut end = 0usize;
-    for row in 0..row_count {
-        // A `PX` row is counted in bytes, the elements its values decode to.
-        end += column.cell(row)?.bytes.len() / element_size;
-        ends.push(end);
-    }
-    Ok(end)
-}
-
-/// A `P`/`Q` column whose every row was validated, with where each row's decoded
-/// elements end.
+/// The rows of a `P`/`Q` column in one pass, as a decode reads them: each row's cell
+/// validated, its end pushed to `ends`, and its bytes given. The first invalid row ends
+/// the pass and keeps its error for [`VlaCells::finish`].
 #[derive(Debug)]
-struct VlaRows<'a> {
+struct VlaCells<'e, 'a> {
     column: VlaColumn<'a>,
-    ends: Vec<usize>,
+    rows: Range<usize>,
+    end: usize,
+    ends: &'e mut Vec<usize>,
+    error: Option<FitsError>,
 }
 
-impl<'a> VlaRows<'a> {
-    fn count(&self) -> usize {
-        self.ends.last().copied().unwrap_or(0)
+impl<'e, 'a> VlaCells<'e, 'a> {
+    /// The `row_count` rows of `column`, their ends written to `ends`, cleared first.
+    fn new(column: VlaColumn<'a>, row_count: usize, ends: &'e mut Vec<usize>) -> Self {
+        ends.clear();
+        ends.reserve(row_count);
+        Self {
+            column,
+            rows: 0..row_count,
+            end: 0,
+            ends,
+            error: None,
+        }
     }
 
-    /// Each row's heap bytes, in row order.
-    fn bytes(&self) -> impl Iterator<Item = &'a [u8]> + use<'a> {
-        let column = self.column;
-        (0..self.ends.len()).map(move |row| {
-            column
-                .cell(row)
-                .expect("vla_rows validated every row")
-                .bytes
-        })
+    /// The error of the row that ended the pass, if one did.
+    fn finish(self) -> Result<()> {
+        self.error.map_or(Ok(()), Err)
+    }
+}
+
+impl<'a> Iterator for VlaCells<'_, 'a> {
+    type Item = Cell<'a>;
+
+    fn next(&mut self) -> Option<Cell<'a>> {
+        if self.error.is_some() {
+            return None;
+        }
+        let row = self.rows.next()?;
+        match self.column.cell(row) {
+            Ok(cell) => {
+                self.end += cell.element_count;
+                self.ends.push(self.end);
+                Some(Cell {
+                    bytes: cell.bytes,
+                    count: cell.element_count,
+                })
+            }
+            Err(error) => {
+                self.error = Some(error);
+                None
+            }
+        }
     }
 }
 

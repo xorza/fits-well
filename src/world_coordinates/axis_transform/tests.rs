@@ -1,13 +1,15 @@
+use crate::error::GrismDefect;
 use crate::header_model::{Header, keywords};
+use crate::internals::tolerance::{Tolerance, assert_close};
+use crate::internals::wcs_header::{WcsHeader, axis_header};
 use crate::world_coordinates::internals::{to_pixel, to_world};
 
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::axis_transform::spectral_kind::{
-    Characteristic, conversion_derivative, convert,
+    Characteristic, SPEED_OF_LIGHT, conversion_derivative, convert,
 };
 use crate::world_coordinates::axis_transform::spectral_rest::ResolvedRest;
 use crate::world_coordinates::axis_transform::*;
-use crate::world_coordinates::internals::axis_header;
 
 /// An in-domain value for each characteristic, all describing roughly the same
 /// 1 µm photon, so every conversion below stays well inside its domain.
@@ -68,22 +70,74 @@ fn conversion_derivatives_match_the_conversions_they_describe() {
     assert_eq!(checked, 12);
 }
 
+/// One ulp δ from the rest value a velocity is c·δ/ν₀ (or c·δ/λ₀) to a part in 1e16.
+/// The forms 1 − ν/ν₀ and ν₀² − ν² round the quotient or the squares first, which
+/// leaves δ at most a few ulps of 1 and moves the velocity by a third of itself; the
+/// differences ν₀ − ν and λ − λ₀ are exact there.
+#[test]
+fn velocities_next_to_the_rest_value_keep_their_digits() {
+    use crate::world_coordinates::axis_transform::spectral_kind::SpectralKind;
+    let rest = ResolvedRest {
+        frequency: 1_420_405_751.0,
+        wavelength: SPEED_OF_LIGHT / 1_420_405_751.0,
+    };
+    let assert_near = |got: Option<f64>, want: f64, context: &str| {
+        let got = got.unwrap();
+        assert!(
+            ((got - want) / want).abs() <= 4.0 * f64::EPSILON,
+            "{context}: {got:e}, want {want:e}"
+        );
+    };
+    let frequency = rest.frequency.next_down();
+    let frequency_offset = SPEED_OF_LIGHT * (rest.frequency - frequency) / rest.frequency;
+    let wavelength = rest.wavelength.next_up();
+    let wavelength_offset = (wavelength - rest.wavelength) / rest.wavelength;
+    assert_near(
+        SpectralKind::RadioVelocity.world_from_characteristic(frequency, rest),
+        frequency_offset,
+        "VRAD",
+    );
+    assert_near(
+        convert(
+            Characteristic::Frequency,
+            Characteristic::Velocity,
+            frequency,
+            rest,
+        ),
+        frequency_offset,
+        "F2V",
+    );
+    assert_near(
+        SpectralKind::OpticalVelocity.world_from_characteristic(wavelength, rest),
+        SPEED_OF_LIGHT * wavelength_offset,
+        "VOPT",
+    );
+    assert_near(
+        SpectralKind::Redshift.world_from_characteristic(wavelength, rest),
+        wavelength_offset,
+        "ZOPT",
+    );
+    assert_near(
+        convert(
+            Characteristic::Wavelength,
+            Characteristic::Velocity,
+            wavelength,
+            rest,
+        ),
+        SPEED_OF_LIGHT * wavelength_offset,
+        "W2V",
+    );
+}
+
 #[test]
 fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
     let build = |t3: &str| {
-        let mut h = Header::new();
-        h.set_internal(keywords::NAXIS, 3);
-        h.set_internal("CTYPE1", "RA---TAN")
-            .set_internal("CTYPE2", "DEC--TAN")
-            .set_internal("CTYPE3", t3);
-        h.set_internal("CRPIX1", 1.0)
-            .set_internal("CRPIX2", 1.0)
-            .set_internal("CRPIX3", 1.0);
-        h.set_internal("CRVAL1", 45.0)
-            .set_internal("CRVAL2", 30.0)
-            .set_internal("CRVAL3", 1.4e9);
-        h.set_internal("CDELT1", -1e-3)
-            .set_internal("CDELT2", 1e-3)
+        let mut h =
+            WcsHeader::celestial("TAN", [1.0, 1.0], [45.0, 30.0], [-1e-3, 1e-3]).image_header();
+        h.set_internal(keywords::NAXIS, 3)
+            .set_internal("CTYPE3", t3)
+            .set_internal("CRPIX3", 1.0)
+            .set_internal("CRVAL3", 1.4e9)
             .set_internal("CDELT3", 1e6);
         Wcs::from_header(&h, None).unwrap()
     };
@@ -124,7 +178,14 @@ fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
                 1.402e9
             };
             assert!((out[2] - expected).abs() < 1e-6, "{ctype}: {out:?}");
-            assert!((out[0] - 45.0).abs() < 1e-9 && (out[1] - 30.0).abs() < 1e-9);
+            // The reference pixel is the native pole, which the rotation takes to CRVAL
+            // through the sine and cosine of δ₀.
+            assert_close(
+                &out[..2],
+                &[45.0, 30.0],
+                Tolerance::ulps(1.0, "the rotation's roundings of δ₀"),
+                ctype,
+            );
         }
     }
 }
@@ -142,6 +203,7 @@ fn grism_wcs(ctype: &str, reference: f64) -> Wcs {
     Wcs::from_header(&header, None).unwrap()
 }
 
+/// wcslib 8.5 evaluates the KPNO MARS grism of [`grism_wcs`] at pixels −1, 1 and 4.
 #[test]
 fn grism_axes_match_wcslib_and_invert() {
     let cases = [
@@ -199,10 +261,17 @@ fn grism_axes_reject_incomplete_or_degenerate_detector_metadata() {
         if let Some(value) = value {
             header.set_internal(parameter, value);
         }
+        // PV1_0 is the groove density and PV1_1 the order.
+        let expected = usize::from(parameter == "PV1_1");
         assert!(
             matches!(
                 Wcs::from_header(&header, None),
-                Err(FitsError::InvalidWcs { .. })
+                Err(FitsError::InvalidWcs {
+                    defect: WcsDefect::Grism {
+                        algorithm: "GRI",
+                        defect: GrismDefect::MissingParameter { parameter }
+                    }
+                }) if parameter == expected
             ),
             "{parameter}={value:?}"
         );
@@ -216,15 +285,24 @@ struct SpectralGolden {
     reference: f64,
     increment: f64,
     world: f64,
-    /// The world change for a relative change of 1 in the sampled quantity: the
-    /// reference for a world proportional to it, c for a velocity, 1 for a redshift
-    /// or β. A rounding in the sampled quantity reaches the world scaled by this — a
-    /// velocity is a ratio minus 1, so there it is the digits the subtraction cancels.
-    scale: f64,
+}
+
+/// The world change of an axis of `ctype` for a relative change of 1 in the quantity it
+/// samples: `reference` for a world proportional to it, c for a velocity, 1 for a
+/// redshift or β. A rounding of the sampled quantity reaches the world scaled by this.
+fn rounding_scale(ctype: &str, reference: f64) -> f64 {
+    match &ctype[..4] {
+        "VELO" | "VRAD" | "VOPT" => SPEED_OF_LIGHT,
+        "ZOPT" | "BETA" => 1.0,
+        _ => reference.abs(),
+    }
 }
 
 /// Table 26's algorithms and the types derived from them (ENER, WAVN, VRAD, VOPT,
 /// ZOPT, BETA), each evaluated at pixel 3 by wcslib with RESTFRQ = 1420405751 Hz.
+/// wcslib's velocities lose digits to their differences of squares, VELO-F2V's
+/// 1.3e-8 m/s of the exact 2000.0066712779978 that `spectral_frame`'s tests hold this
+/// evaluation to; the bound of c·4ε = 2.7e-7 m/s covers both.
 #[test]
 fn spectral_algorithms_match_wcslib() {
     // A conversion chain is a few products, quotients and a square root, each
@@ -237,7 +315,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 0.211_061_140_655_716_77,
             increment: 1e-4,
             world: 0.211_261_330_354_017_17,
-            scale: 0.211_061_140_655_716_77,
         },
         SpectralGolden {
             ctype: "VELO-F2V",
@@ -245,7 +322,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 0.0,
             increment: 1e3,
             world: 2_000.006_671_265_423_6,
-            scale: SPEED_OF_LIGHT,
         },
         SpectralGolden {
             ctype: "AWAV-F2A",
@@ -253,7 +329,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 0.211_003_621_269_199_05,
             increment: 1e-4,
             world: 0.211_203_811_019_260_08,
-            scale: 0.211_003_621_269_199_05,
         },
         SpectralGolden {
             ctype: "FREQ-W2F",
@@ -261,7 +336,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 1_420_405_751.0,
             increment: 1e6,
             world: 1_422_408_571.067_528,
-            scale: 1_420_405_751.0,
         },
         SpectralGolden {
             ctype: "VELO-W2V",
@@ -269,7 +343,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 0.0,
             increment: 1e3,
             world: 1_999.993_328_738_271_7,
-            scale: SPEED_OF_LIGHT,
         },
         SpectralGolden {
             ctype: "AWAV-W2A",
@@ -277,7 +350,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 0.211_003_621_269_199_05,
             increment: 1e-4,
             world: 0.211_203_621_269_199_03,
-            scale: 0.211_003_621_269_199_05,
         },
         SpectralGolden {
             ctype: "FREQ-V2F",
@@ -285,7 +357,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 1_420_405_751.0,
             increment: 1e6,
             world: 1_422_407_161.033_065_3,
-            scale: 1_420_405_751.0,
         },
         SpectralGolden {
             ctype: "WAVE-V2W",
@@ -293,7 +364,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 0.211_061_140_655_716_77,
             increment: 1e-4,
             world: 0.211_261_235_504_845_66,
-            scale: 0.211_061_140_655_716_77,
         },
         SpectralGolden {
             ctype: "AWAV-V2A",
@@ -301,7 +371,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 0.211_003_621_269_199_05,
             increment: 1e-4,
             world: 0.211_203_716_144_208_21,
-            scale: 0.211_003_621_269_199_05,
         },
         SpectralGolden {
             ctype: "FREQ-A2F",
@@ -309,7 +378,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 1_420_405_751.0,
             increment: 1e6,
             world: 1_422_408_571.067_528,
-            scale: 1_420_405_751.0,
         },
         SpectralGolden {
             ctype: "WAVE-A2W",
@@ -317,7 +385,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 0.211_061_140_655_716_77,
             increment: 1e-4,
             world: 0.211_261_140_655_716_77,
-            scale: 0.211_061_140_655_716_77,
         },
         SpectralGolden {
             ctype: "VELO-A2V",
@@ -325,7 +392,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 0.0,
             increment: 1e3,
             world: 1_999.993_328_738_271_7,
-            scale: SPEED_OF_LIGHT,
         },
         SpectralGolden {
             ctype: "ENER-W2F",
@@ -333,7 +399,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 9.411_715_746_760_2e-25,
             increment: 6.626_075_5e-28,
             world: 9.424_986_583_740_556e-25,
-            scale: 9.411_715_746_760_2e-25,
         },
         SpectralGolden {
             ctype: "WAVN-W2F",
@@ -341,7 +406,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 4.737_963_591_465_666,
             increment: 0.003_335_640_951_981_520_5,
             world: 4.744_644_280_102_364,
-            scale: 4.737_963_591_465_666,
         },
         SpectralGolden {
             ctype: "VRAD-W2F",
@@ -349,7 +413,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 0.0,
             increment: 1e3,
             world: 1_999.986_657_561_148_6,
-            scale: SPEED_OF_LIGHT,
         },
         SpectralGolden {
             ctype: "VOPT-F2W",
@@ -357,7 +420,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 0.0,
             increment: 1e3,
             world: 2_000.013_342_678_547,
-            scale: SPEED_OF_LIGHT,
         },
         SpectralGolden {
             ctype: "ZOPT-F2W",
@@ -365,7 +427,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 0.0,
             increment: 1e-5,
             world: 2.000_040_000_793_568e-5,
-            scale: 1.0,
         },
         SpectralGolden {
             ctype: "BETA-F2V",
@@ -373,7 +434,6 @@ fn spectral_algorithms_match_wcslib() {
             reference: 0.0,
             increment: 3.335_640_951_981_520_5e-6,
             world: 6.671_304_156_909_189e-6,
-            scale: 1.0,
         },
     ];
     for case in cases {
@@ -383,14 +443,15 @@ fn spectral_algorithms_match_wcslib() {
         assert!(wcs.metadata().unsupported_axes.is_empty(), "{}", case.ctype);
         let world = to_world(&wcs, &[3.0]).unwrap()[0];
         assert!(
-            (world - case.world).abs() <= ROUNDING * case.scale,
+            (world - case.world).abs() <= ROUNDING * rounding_scale(case.ctype, case.reference),
             "{}: got {world:.17e}, wcslib {:.17e}",
             case.ctype,
             case.world
         );
         let pixel = to_pixel(&wcs, &[case.world]).unwrap()[0];
         assert!(
-            (pixel - 3.0).abs() <= ROUNDING * case.scale / case.increment.abs(),
+            (pixel - 3.0).abs()
+                <= ROUNDING * rounding_scale(case.ctype, case.reference) / case.increment.abs(),
             "{} inverse: {pixel:.17e}",
             case.ctype
         );
@@ -475,9 +536,12 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
             "{}",
             case.ctype
         );
+        // The unit's factor and its product with the reference round, and the world
+        // passes through the quantity the axis samples.
         let world = to_world(&wcs, &[1.0]).unwrap()[0];
+        let bound = 2.0 * f64::EPSILON * rounding_scale(case.ctype, case.canonical_reference);
         assert!(
-            (world - case.canonical_reference).abs() <= case.canonical_reference.abs() * 1e-10,
+            (world - case.canonical_reference).abs() <= bound,
             "{} reference: {world:.17e}",
             case.ctype
         );
@@ -531,7 +595,9 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
         .set_internal("CRVAL1", 0.0);
     assert!(matches!(
         Wcs::from_header(&invalid, None),
-        Err(FitsError::InvalidWcs { .. })
+        Err(FitsError::InvalidWcs {
+            defect: WcsDefect::LogarithmicReference { ctype }
+        }) if ctype == "ABCD-LOG"
     ));
 }
 
@@ -572,7 +638,9 @@ fn spectral_algorithm_codes_round_trip_and_check_their_variables() {
         assert!(
             matches!(
                 Wcs::from_header(&header, None),
-                Err(FitsError::InvalidWcs { detail }) if detail.contains("inconsistent variables")
+                Err(FitsError::InvalidWcs {
+                    defect: WcsDefect::InconsistentSpectralAlgorithm { ctype: got }
+                }) if got == ctype
             ),
             "{ctype}"
         );

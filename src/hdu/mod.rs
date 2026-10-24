@@ -5,29 +5,29 @@
 //! touches data to find the next HDU.
 
 pub(crate) mod image_geometry;
+pub(crate) mod prologue;
 
 use crate::block::padded_len;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::header_model::{Header, keywords};
-use crate::keyword::Keyword;
-
-pub(crate) const MAX_TABLE_FIELDS: usize = 999;
-
-pub(crate) const fn validate_table_field_count(count: usize) -> Result<()> {
-    if count > MAX_TABLE_FIELDS {
-        return Err(FitsError::KeywordOutOfRange {
-            keyword: keywords::TFIELDS,
-        });
-    }
-    Ok(())
-}
 
 /// An HDU's position-derived header form before its complete role is known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HduPosition {
     Primary,
     Extension,
+}
+
+impl HduPosition {
+    /// The position of the HDU at `index` in file order: the first is the primary.
+    pub(crate) const fn of_index(index: usize) -> Self {
+        if index == 0 {
+            Self::Primary
+        } else {
+            Self::Extension
+        }
+    }
 }
 
 /// The structural role already established by file position and mandatory header
@@ -84,7 +84,7 @@ pub enum HduKind {
     /// `FitsReader::image` reads it like any other image.
     CompressedImage,
     /// A tiled-compressed table (§10.3): structurally a `BINTABLE` with `ZTABLE = T`.
-    /// `read_compressed_table` uncompresses it.
+    /// `FitsReader::read_table` reads it like any other binary table.
     CompressedTable,
     /// Legacy random-groups primary (`GROUPS = T`, `NAXIS1 = 0`). Read-only.
     RandomGroups,
@@ -125,14 +125,12 @@ impl HduKind {
     }
 }
 
-/// The size of an HDU's data unit, both as the raw bit-count-derived byte length
-/// and rounded to the on-disk block grid.
+/// The size of an HDU's data unit, its length rounded up to the 2880-byte grid known to
+/// fit a `u64`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DataExtent {
     /// Unpadded data length (`Nbits / 8`).
     pub(crate) data_bytes: u64,
-    /// Length rounded up to the 2880-byte grid — the bytes occupied on disk.
-    pub(crate) padded_bytes: u64,
 }
 
 /// Compute the data-unit extent from a parsed, role-validated header (Eqs. 1, 2, 4).
@@ -145,16 +143,13 @@ pub(crate) fn data_extent(header: &Header, role: HduRole) -> Result<DataExtent> 
             .ok_or(FitsError::DataUnitOverflow)?,
         HduRole::Extension => grouped_data_bytes(elem, axis_product(&axes, 0)?, header)?,
         HduRole::RandomGroups => {
-            validate_random_groups_axes(&axes)?;
-            // NAXIS1 is the zero sentinel, so the array spans axes[1..] — and with no
+            // `HduRole::from_header` checked the axes. NAXIS1 is the zero sentinel, so the array spans axes[1..] — and with no
             // array axis at all each group still holds one element, not zero.
             grouped_data_bytes(elem, axis_product(&axes[1..], 1)?, header)?
         }
     };
-    Ok(DataExtent {
-        data_bytes,
-        padded_bytes: padded_len(data_bytes).ok_or(FitsError::DataUnitOverflow)?,
-    })
+    padded_len(data_bytes).ok_or(FitsError::DataUnitOverflow)?;
+    Ok(DataExtent { data_bytes })
 }
 
 /// Product of the axis lengths as the on-disk element count. Deliberately `u64`
@@ -221,7 +216,7 @@ fn grouped_data_bytes(elem: u64, array_elements: u64, header: &Header) -> Result
         .ok_or(FitsError::DataUnitOverflow)
 }
 
-const fn validate_random_groups_axes(axes: &[usize]) -> Result<()> {
+fn validate_random_groups_axes(axes: &[usize]) -> Result<()> {
     let Some(&first) = axes.first() else {
         return Err(FitsError::KeywordOutOfRange {
             keyword: keywords::NAXIS,
@@ -229,7 +224,7 @@ const fn validate_random_groups_axes(axes: &[usize]) -> Result<()> {
     };
     if first != 0 {
         return Err(FitsError::KeywordOutOfRange {
-            keyword: Keyword::new("NAXIS1"),
+            keyword: keywords::NAXIS.indexed(1)?,
         });
     }
     Ok(())

@@ -30,7 +30,7 @@ const fn base(symbol: &'static str, scale: f64, prefixes: Prefixes) -> BaseUnit 
     }
 }
 
-const SECONDS_PER_DAY: f64 = 86_400.0;
+pub(crate) const SECONDS_PER_DAY: f64 = 86_400.0;
 
 /// Angles, in degrees.
 pub(crate) const ANGLE: &[BaseUnit] = &[
@@ -97,7 +97,7 @@ pub(crate) struct ScaledUnit<'a> {
     pub(crate) base: &'a str,
 }
 
-pub(crate) const SI_PREFIXES: [(&str, f64); 20] = [
+const SI_PREFIXES: [(&str, f64); 20] = [
     ("da", 1e1),
     ("d", 1e-1),
     ("c", 1e-2),

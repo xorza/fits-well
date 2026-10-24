@@ -1,13 +1,12 @@
 //! The WCS cases: one row of pixels through each kind of axis, both ways.
 
 use std::hint::black_box;
-use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput};
 
 use crate::bench::fixture::{Kind, Scale};
-use crate::bench::scene::{self, HEIGHT, WIDTH};
 use crate::header_model::{Header, keywords};
+use crate::internals::scene::{self, HEIGHT, WIDTH};
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::tabular::internals::{INDEX_LENGTH, indexed_wcs};
 
@@ -21,7 +20,6 @@ pub(crate) fn atomic(c: &mut Criterion) {
     group.throughput(Throughput::Elements(WIDTH as u64));
     for axes in Axes::ALL {
         let mut built = None;
-        Scale::Frame.apply(&mut group);
         group.bench_function(BenchmarkId::new("to_world", axes.id()), |b| {
             let Fixture { wcs, pixels, .. } = built.get_or_insert_with(|| axes.fixture());
             let mut world = vec![0.0; wcs.axes.len()];
@@ -32,7 +30,6 @@ pub(crate) fn atomic(c: &mut Criterion) {
                 }
             });
         });
-        axes.inverse_scale().apply(&mut group);
         group.bench_function(BenchmarkId::new("to_pixel", axes.id()), |b| {
             let Fixture { wcs, worlds, .. } = built.get_or_insert_with(|| axes.fixture());
             let mut pixel = vec![0.0; wcs.axes.len()];
@@ -65,18 +62,6 @@ impl Axes {
             Self::Linear => "linear",
             Self::Spectral => "spectral",
             Self::Tabular => "tabular",
-        }
-    }
-
-    /// The sampling of the inverse: a `-TAB` axis searches its coordinates for the interval
-    /// holding each point, which costs 476 ms a row over the 100 000-entry index as measured on a
-    /// Ryzen 7 6800U.
-    const fn inverse_scale(self) -> Scale {
-        match self {
-            Self::Tabular => Scale::Set {
-                iteration: Duration::from_millis(480),
-            },
-            Self::Tan | Self::Linear | Self::Spectral => Scale::Frame,
         }
     }
 

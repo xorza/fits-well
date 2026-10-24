@@ -5,26 +5,36 @@ use std::mem;
 #[cfg(feature = "compression")]
 use std::ops::Range;
 
+use crate::allocation;
+#[cfg(feature = "compression")]
+use crate::bintable::selection::TableRows;
 #[cfg(feature = "compression")]
 use crate::bintable::table_view::TableView;
 use crate::bitpix::Bitpix;
+use crate::checksum::checksum_report::ChecksumReport;
 #[cfg(feature = "compression")]
-use crate::compress::decode::tiled_image::{TileSection, TiledImage};
-use crate::error::Result;
+use crate::compress::decode::tile_section::TileSection;
+#[cfg(feature = "compression")]
+use crate::compress::decode::tiled_image::TiledImage;
+use crate::error::{FitsError, Result};
 #[cfg(feature = "compression")]
 use crate::hdu::HduKind;
 use crate::hdu::image_geometry::ImageGeometry;
 use crate::header_model::Header;
 use crate::image_model::data::Data;
 use crate::image_model::physical_sample::PhysicalSample;
-use crate::image_model::region::Region;
+use crate::image_model::region::{ByteRun, Region, SectionRuns};
+use crate::image_model::sample::Sample;
 use crate::image_model::view::{Borrowed, View};
-use crate::image_model::{Image, Metadata, extend_physical_be, swap_into_words, view_words};
+use crate::image_model::{Image, Metadata};
+use crate::image_model::{shape_product, validate_image_region};
 use crate::reader::data_checksum::DataChecksum;
 use crate::reader::data_source::DataSource;
+use crate::reader::data_source::offset_at;
 use crate::reader::hdu::Hdu;
 use crate::reader::source::Source;
-use crate::reader::{ChecksumReport, DataLengths, Scratch};
+use crate::reader::{Scratch, data_len};
+use crate::words;
 
 /// One image HDU of an open file — a plain image or a tiled-compressed one alike —
 /// read a [`Region`] at a time, from
@@ -67,11 +77,212 @@ impl Tiles<'_> {
     }
 }
 
-/// The stored big-endian bytes a plain-image read covers, and the shape they hold.
+/// Where the stored bytes of a region of a plain image lie in its data unit: one run for
+/// the whole image, or the runs of a section.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StoredRuns<'a> {
+    All { len: usize, shape: &'a [usize] },
+    Section { runs: SectionRuns<'a>, len: usize },
+}
+
+/// A plain image and the length of its data unit.
+#[derive(Debug, Clone, Copy)]
+struct ImageUnit<'a> {
+    image: &'a ImageGeometry,
+    data_bytes: u64,
+}
+
+impl<'a> StoredRuns<'a> {
+    /// The runs of the stored bytes of `region` of the plain image of `unit`; a section's
+    /// shape is written to `section_shape`.
+    fn new(
+        unit: ImageUnit<'a>,
+        region: Region<'a>,
+        section_shape: &'a mut Vec<usize>,
+    ) -> Result<Self> {
+        let ImageUnit { image, data_bytes } = unit;
+        let element_size = image.bitpix.elem_size();
+        match region {
+            Region::All => {
+                let len = data_len(data_bytes)?;
+                // With PCOUNT = 0 and GCOUNT = 1, `data_extent` sized the unit as
+                // `elem · Π(axes)` — an invariant between the scan and the geometry, not a
+                // runtime failure mode.
+                debug_assert!(image.byte_len().is_ok_and(|image| image == len));
+                Ok(Self::All {
+                    len,
+                    shape: &image.shape,
+                })
+            }
+            Region::Section(ranges) => {
+                validate_image_region(ranges, &image.shape, section_shape)?;
+                let len = shape_product(section_shape)?
+                    .checked_mul(element_size)
+                    .ok_or(FitsError::DataUnitOverflow)?;
+                Ok(Self::Section {
+                    runs: SectionRuns {
+                        shape: &image.shape,
+                        ranges,
+                        selected_shape: section_shape,
+                        element_size,
+                    },
+                    len,
+                })
+            }
+        }
+    }
+
+    /// The stored bytes of the region.
+    const fn len(&self) -> usize {
+        match self {
+            Self::All { len, .. } | Self::Section { len, .. } => *len,
+        }
+    }
+
+    /// The shape of the region.
+    const fn shape(&self) -> &'a [usize] {
+        match self {
+            Self::All { shape, .. } => shape,
+            Self::Section { runs, .. } => runs.selected_shape,
+        }
+    }
+
+    /// Give `visit` each run, in order.
+    fn visit(self, mut visit: impl FnMut(ByteRun) -> Result<()>) -> Result<()> {
+        match self {
+            Self::All { len, .. } => visit(ByteRun { offset: 0, len }),
+            Self::Section { runs, .. } => runs.visit(visit),
+        }
+    }
+}
+
+/// A plain image's data unit read by runs, each fed to the checksum, when one is summed,
+/// as it is read.
 #[derive(Debug)]
-struct Stored<'a> {
-    bytes: &'a [u8],
-    shape: &'a [usize],
+pub(crate) struct PlainRead<'a, S> {
+    pub(crate) data: &'a mut DataSource<S>,
+    pub(crate) data_offset: u64,
+    pub(crate) sum: Option<&'a mut DataChecksum>,
+}
+
+impl<S: Source> PlainRead<'_, S> {
+    /// Fill `out` with the samples of `runs`, host-endian: decoded from the borrowed
+    /// bytes of a resident source, or read into `out` and swapped in place, with no
+    /// staging copy.
+    fn fill<T: Sample>(&mut self, runs: StoredRuns<'_>, out: &mut [T]) -> Result<()> {
+        let size = size_of::<T>();
+        debug_assert_eq!(size_of_val(out), runs.len(), "a sample for each stored one");
+        let resident = self.data.resident(0, 0).is_some();
+        let mut at = 0;
+        runs.visit(|run| {
+            let offset = offset_at(self.data_offset, run.offset)?;
+            let samples = &mut out[at..at + run.len / size];
+            at += samples.len();
+            if resident {
+                let bytes = self
+                    .data
+                    .resident(offset, run.len)
+                    .expect("a resident source")?;
+                if let Some(sum) = self.sum.as_deref_mut() {
+                    sum.feed(offset, bytes);
+                }
+                T::decode_be(bytes, samples);
+            } else {
+                let bytes = words::bytes_mut(samples);
+                self.data.read_into(offset, bytes)?;
+                if let Some(sum) = self.sum.as_deref_mut() {
+                    sum.feed(offset, bytes);
+                }
+            }
+            Ok(())
+        })?;
+        if !resident {
+            T::swap_be_in_place(out);
+        }
+        Ok(())
+    }
+
+    /// The samples of `runs`, of type `bitpix`, owned.
+    pub(crate) fn data(&mut self, runs: StoredRuns<'_>, bitpix: Bitpix) -> Result<Data> {
+        let count = runs.len() / bitpix.elem_size();
+        Ok(match bitpix {
+            Bitpix::U8 => Data::U8(self.filled(runs, count)?),
+            Bitpix::I16 => Data::I16(self.filled(runs, count)?),
+            Bitpix::I32 => Data::I32(self.filled(runs, count)?),
+            Bitpix::I64 => Data::I64(self.filled(runs, count)?),
+            Bitpix::F32 => Data::F32(self.filled(runs, count)?),
+            Bitpix::F64 => Data::F64(self.filled(runs, count)?),
+        })
+    }
+
+    /// The samples of `runs`, owned: decoded from the borrowed bytes of a resident source
+    /// with no fill first, or read into a zeroed buffer and swapped in place.
+    fn filled<T: Sample>(&mut self, runs: StoredRuns<'_>, count: usize) -> Result<Vec<T>> {
+        if self.data.resident(0, 0).is_none() {
+            let mut values = allocation::try_zeroed(T::default(), count)?;
+            self.fill(runs, &mut values)?;
+            return Ok(values);
+        }
+        let mut values = Vec::new();
+        allocation::try_reserve(&mut values, count)?;
+        runs.visit(|run| {
+            let offset = offset_at(self.data_offset, run.offset)?;
+            let bytes = self
+                .data
+                .resident(offset, run.len)
+                .expect("a resident source")?;
+            if let Some(sum) = self.sum.as_deref_mut() {
+                sum.feed(offset, bytes);
+            }
+            T::extend_from_be(bytes, &mut values);
+            Ok(())
+        })?;
+        Ok(values)
+    }
+
+    /// The samples of `runs`, of type `bitpix`, in `words`, viewed.
+    fn words<'w>(
+        &mut self,
+        runs: StoredRuns<'_>,
+        bitpix: Bitpix,
+        words: &'w mut Vec<u64>,
+    ) -> Result<View<'w>> {
+        let len = runs.len();
+        let count = len / bitpix.elem_size();
+        words.clear();
+        allocation::try_resize(words, len.div_ceil(8), 0)?;
+        match bitpix {
+            Bitpix::U8 => self.fill(runs, words::samples_mut::<u8>(words, count))?,
+            Bitpix::I16 => self.fill(runs, words::samples_mut::<i16>(words, count))?,
+            Bitpix::I32 => self.fill(runs, words::samples_mut::<i32>(words, count))?,
+            Bitpix::I64 => self.fill(runs, words::samples_mut::<i64>(words, count))?,
+            Bitpix::F32 => self.fill(runs, words::samples_mut::<f32>(words, count))?,
+            Bitpix::F64 => self.fill(runs, words::samples_mut::<f64>(words, count))?,
+        }
+        Ok(bitpix.view_words(words, len))
+    }
+
+    /// Append the physical values of `runs`, of type `bitpix`, to `out`, from the
+    /// borrowed bytes of a resident source or a bounded chunk at a time.
+    fn physical<O: PhysicalSample>(
+        &mut self,
+        runs: StoredRuns<'_>,
+        image: &ImageGeometry,
+        out: &mut Vec<O>,
+    ) -> Result<()> {
+        out.reserve(runs.len() / image.bitpix.elem_size());
+        runs.visit(|run| {
+            let offset = offset_at(self.data_offset, run.offset)?;
+            let sum = &mut self.sum;
+            self.data.chunks(offset, run.len, |offset, bytes| {
+                if let Some(sum) = sum.as_deref_mut() {
+                    sum.feed(offset, bytes);
+                }
+                image.bitpix.extend_physical_be(bytes, &image.scaling, out);
+                Ok(())
+            })
+        })
+    }
 }
 
 impl<'r, S: Source> ImageReader<'r, S> {
@@ -145,23 +356,38 @@ impl<'r, S: Source> ImageReader<'r, S> {
         let scaling = self.image.scaling;
         #[cfg(feature = "compression")]
         if let Some(tiled) = &self.tiled {
-            let header = &self.hdu.header;
             return match region {
                 Region::All => {
                     let table = self.data.table(self.hdu, self.sum.as_mut())?;
-                    Image::new(&*self.image.shape, tiled.decode(header, table)?, scaling)
+                    Ok(Image::of_geometry(
+                        self.image.shape.clone(),
+                        tiled.decode(table)?,
+                        scaling,
+                    ))
                 }
                 Region::Section(ranges) => {
                     let tiles = tiles(self.data, self.hdu, tiled, self.scratch, ranges)?;
                     let section = tiles.section(ranges);
-                    let samples = tiled.decode_section(header, tiles.table, section)?;
-                    Image::new(tiles.shape, samples, scaling)
+                    let samples = tiled.decode_section(tiles.table, section)?;
+                    Ok(Image::of_geometry(tiles.shape.to_vec(), samples, scaling))
                 }
             };
         }
-        let bitpix = self.image.bitpix;
-        let stored = self.plain(region)?;
-        Image::new(stored.shape, Data::decode(stored.bytes, bitpix), scaling)
+        let runs = StoredRuns::new(
+            ImageUnit {
+                image: self.image,
+                data_bytes: self.hdu.data_bytes,
+            },
+            region,
+            &mut self.scratch.section_shape,
+        )?;
+        let mut plain = PlainRead {
+            data: self.data,
+            data_offset: self.hdu.data_offset,
+            sum: self.sum.as_mut(),
+        };
+        let samples = plain.data(runs, self.image.bitpix)?;
+        Ok(Image::of_geometry(runs.shape().to_vec(), samples, scaling))
     }
 
     /// Append the physical values of `region` to `out`, as
@@ -183,10 +409,20 @@ impl<'r, S: Source> ImageReader<'r, S> {
             self.scratch.words = words;
             return converted;
         }
-        let (bitpix, scaling) = (self.image.bitpix, self.image.scaling);
-        let stored = self.plain(region)?;
-        extend_physical_be(stored.bytes, bitpix, &scaling, out);
-        Ok(())
+        let runs = StoredRuns::new(
+            ImageUnit {
+                image: self.image,
+                data_bytes: self.hdu.data_bytes,
+            },
+            region,
+            &mut self.scratch.section_shape,
+        )?;
+        let mut plain = PlainRead {
+            data: self.data,
+            data_offset: self.hdu.data_offset,
+            sum: self.sum.as_mut(),
+        };
+        plain.physical(runs, self.image, out)
     }
 
     /// Judge the HDU's `DATASUM` and `CHECKSUM`: the sum [`with_checksums`](Self::with_checksums)
@@ -206,21 +442,19 @@ impl<'r, S: Source> ImageReader<'r, S> {
         let scaling = self.image.scaling;
         #[cfg(feature = "compression")]
         if let Some(tiled) = &self.tiled {
-            let header = &self.hdu.header;
             return Ok(match region {
                 Region::All => {
                     let table = self.data.table(self.hdu, self.sum.as_mut())?;
                     Borrowed {
                         shape: &self.image.shape,
                         scaling,
-                        samples: tiled.decode_into_words(header, table, words)?,
+                        samples: tiled.decode_into_words(table, words)?,
                     }
                 }
                 Region::Section(ranges) => {
                     let tiles = tiles(self.data, self.hdu, tiled, self.scratch, ranges)?;
                     let section = tiles.section(ranges);
-                    let samples =
-                        tiled.decode_section_into_words(header, tiles.table, section, words)?;
+                    let samples = tiled.decode_section_into_words(tiles.table, section, words)?;
                     Borrowed {
                         shape: tiles.shape,
                         scaling,
@@ -230,60 +464,47 @@ impl<'r, S: Source> ImageReader<'r, S> {
             });
         }
         let bitpix = self.image.bitpix;
-        let stored = self.plain(region)?;
-        let samples = if bitpix == Bitpix::U8 {
-            View::U8(stored.bytes)
-        } else {
-            swap_into_words(stored.bytes, bitpix, words);
-            view_words(words, bitpix, stored.bytes.len())
+        let runs = StoredRuns::new(
+            ImageUnit {
+                image: self.image,
+                data_bytes: self.hdu.data_bytes,
+            },
+            region,
+            &mut self.scratch.section_shape,
+        )?;
+        // A whole `BITPIX = 8` image of a resident source needs no swap: it is viewed in
+        // place.
+        let in_place = matches!((region, bitpix), (Region::All, Bitpix::U8))
+            && self.data.resident(0, 0).is_some();
+        if in_place {
+            let bytes = self
+                .data
+                .resident(self.hdu.data_offset, runs.len())
+                .expect("a resident source")?;
+            if let Some(sum) = &mut self.sum {
+                sum.feed(self.hdu.data_offset, bytes);
+            }
+            return Ok(Borrowed {
+                shape: &self.image.shape,
+                scaling,
+                samples: View::U8(bytes),
+            });
+        }
+        let mut plain = PlainRead {
+            data: self.data,
+            data_offset: self.hdu.data_offset,
+            sum: self.sum.as_mut(),
+        };
+        let samples = plain.words(runs, bitpix, words)?;
+        let shape = match region {
+            Region::All => &self.image.shape,
+            Region::Section(_) => &self.scratch.section_shape,
         };
         Ok(Borrowed {
-            shape: stored.shape,
+            shape,
             scaling,
             samples,
         })
-    }
-
-    /// The stored bytes of `region` of a plain image, each fed to the checksum when one
-    /// is summed: the whole data unit viewed in place over the source (or its staging
-    /// buffer), or a section gathered into the reader's scratch, reading only its runs.
-    fn plain(&mut self, region: Region<'_>) -> Result<Stored<'_>> {
-        match region {
-            Region::All => {
-                let lengths = DataLengths::new(self.hdu.data_bytes)?;
-                // With PCOUNT = 0 and GCOUNT = 1, `data_extent` sized the unit as
-                // `elem · Π(axes)` — an invariant between the scan and the geometry, not a
-                // runtime failure mode.
-                debug_assert!(self.image.byte_len().is_ok_and(|len| len == lengths.data));
-                let unit = self.data.slice(self.hdu.data_offset, lengths.padded)?;
-                if let Some(sum) = &mut self.sum {
-                    sum.feed(self.hdu.data_offset, unit);
-                }
-                Ok(Stored {
-                    bytes: &unit[..lengths.data],
-                    shape: &self.image.shape,
-                })
-            }
-            Region::Section(ranges) => {
-                let Scratch {
-                    section_shape,
-                    section_bytes,
-                    ..
-                } = &mut *self.scratch;
-                self.data.plain_section(
-                    self.hdu,
-                    self.image,
-                    ranges,
-                    section_shape,
-                    section_bytes,
-                    self.sum.as_mut(),
-                )?;
-                Ok(Stored {
-                    bytes: section_bytes,
-                    shape: section_shape,
-                })
-            }
-        }
     }
 }
 
@@ -300,7 +521,6 @@ fn tiles<'a, S: Source>(
     let Scratch {
         section_shape,
         tile_rows,
-        selection,
         ..
     } = scratch;
     tiled.select(ranges, section_shape, tile_rows)?;
@@ -308,6 +528,6 @@ fn tiles<'a, S: Source>(
     Ok(Tiles {
         shape: section_shape,
         rows,
-        table: data.table_rows(hdu, rows, selection)?,
+        table: data.table_rows(hdu, TableRows::Picked(rows))?,
     })
 }

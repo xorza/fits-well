@@ -16,16 +16,17 @@ pub(super) mod table_wcs_resolver;
 use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::header_model::record::RecordView;
 use crate::header_model::{Header, keywords, value};
 use crate::keyword::Keyword;
 use crate::world_coordinates::axis_transform;
+use crate::world_coordinates::header_read;
+use crate::world_coordinates::header_read::MAX_PARAMETER_INDEX;
 use crate::world_coordinates::spectral_frame::SpectralFrame;
 use crate::world_coordinates::table_wcs::table_axis_keyword::TableAxisKeyword;
 use crate::world_coordinates::table_wcs::table_matrix_keyword::TableMatrixKeyword;
 use crate::world_coordinates::table_wcs::table_pole_keyword::TablePoleKeyword;
 use crate::world_coordinates::table_wcs::table_wcs_resolver::TableWcsResolver;
-use crate::world_coordinates::validated_axis_count;
-use crate::world_coordinates::{read_real, read_text};
 
 /// A Table 22 WCS description: how its axes are addressed, plus the resolver that
 /// spells each keyword family for the selected alternate.
@@ -79,7 +80,7 @@ impl<'a> TableWcs<'a> {
     ) -> Result<usize> {
         let resolver = TableWcsResolver::new(alt);
         let naxis = match resolver.vector_rank(header, column)? {
-            Some(value) => validated_axis_count(
+            Some(value) => header_read::axis_count(
                 value,
                 resolver
                     .column_key("WCAX", column)
@@ -162,7 +163,7 @@ impl<'a> TableWcs<'a> {
                 let source = self
                     .resolver
                     .vector_matrix_key(keyword, row + 1, input + 1, column);
-                read_real(header, source)
+                header_read::real(header, source)
             }
         }
     }
@@ -180,13 +181,17 @@ impl<'a> TableWcs<'a> {
         let mut spectral_frames = vec![None; naxis];
         for (index, spectral) in spectral_frames.iter_mut().enumerate() {
             let ax = index + 1;
-            if let Some(t) = read_text(header, self.axis_key(TableAxisKeyword::Type, index))? {
+            if let Some(t) =
+                header_read::text(header, self.axis_key(TableAxisKeyword::Type, index))?
+            {
                 h.set_internal(keywords::CTYPE.indexed(ax)?, t);
                 if axis_transform::is_spectral_type(t) {
                     *spectral = Some(self.resolver.spectral_frame(header, self.column(index))?);
                 }
             }
-            if let Some(t) = read_text(header, self.axis_key(TableAxisKeyword::Unit, index))? {
+            if let Some(t) =
+                header_read::text(header, self.axis_key(TableAxisKeyword::Unit, index))?
+            {
                 h.set_internal(keywords::CUNIT.indexed(ax)?, t);
             }
             for keyword in [
@@ -195,12 +200,12 @@ impl<'a> TableWcs<'a> {
                 TableAxisKeyword::Increment,
                 TableAxisKeyword::Rotation,
             ] {
-                if let Some(value) = read_real(header, self.axis_key(keyword, index))? {
+                if let Some(value) = header_read::real(header, self.axis_key(keyword, index))? {
                     h.set_internal(keyword.image_root().indexed(ax)?, value);
                 }
             }
             // `PVi_m` arrives as `TPVn_ma`/`TVn_ma`, or `iPVn_ma`/`iVn_ma`.
-            for m in 0..=20 {
+            for m in 0..=MAX_PARAMETER_INDEX {
                 if let Some(v) = self.parameter_real(header, index, m)? {
                     h.set_internal(Keyword::try_from(format_args!("PV{ax}_{m}"))?, v);
                 }
@@ -268,8 +273,8 @@ impl<'a> TableWcs<'a> {
 /// impossible by the substring argument above.
 fn candidate_vector_axes(header: &Header) -> Vec<usize> {
     let mut axes: Vec<usize> = Vec::new();
-    for record in header {
-        let name = record.name();
+    for keyword in header.iter().filter_map(RecordView::keyword) {
+        let name = keyword.as_str();
         let digits = name
             .find(|c: char| !c.is_ascii_digit())
             .map_or(name, |end| &name[..end]);

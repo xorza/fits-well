@@ -1,5 +1,6 @@
 //! [`Quantization`]: how a float image's tiles become integers before a codec (§10.2).
 
+use crate::error::CompressionParameter;
 use crate::error::FitsError;
 use crate::error::Result;
 
@@ -45,7 +46,9 @@ impl Quantization {
     /// positive number.
     pub fn relative(level: f64, dither: Dither) -> Result<Self> {
         Ok(Self(Spacing::Quantized(Levels {
-            step: QuantizationStep::Relative(positive(level, "relative quantization level")?),
+            step: QuantizationStep::Relative(positive(level, |level| {
+                CompressionParameter::QuantizationLevel { level }
+            })?),
             dither,
         })))
     }
@@ -53,7 +56,9 @@ impl Quantization {
     /// Levels spaced at `step` for every tile, a finite positive number.
     pub fn absolute(step: f64, dither: Dither) -> Result<Self> {
         Ok(Self(Spacing::Quantized(Levels {
-            step: QuantizationStep::Absolute(positive(step, "absolute quantization step")?),
+            step: QuantizationStep::Absolute(positive(step, |step| {
+                CompressionParameter::QuantizationStep { step }
+            })?),
             dither,
         })))
     }
@@ -126,7 +131,7 @@ impl DitherSeed {
     pub fn fixed(seed: u16) -> Result<Self> {
         if !(1..=10_000).contains(&seed) {
             return Err(FitsError::InvalidCompressionParameter {
-                detail: format!("dither seed {seed} is outside 1..=10000"),
+                parameter: CompressionParameter::DitherSeed { seed },
             });
         }
         Ok(Self(Seed::Fixed(seed)))
@@ -172,10 +177,10 @@ impl DitherMethod {
     }
 }
 
-fn positive(value: f64, what: &str) -> Result<f64> {
+fn positive(value: f64, parameter: impl FnOnce(f64) -> CompressionParameter) -> Result<f64> {
     if !value.is_finite() || value <= 0.0 {
         return Err(FitsError::InvalidCompressionParameter {
-            detail: format!("{what} {value} must be finite and positive"),
+            parameter: parameter(value),
         });
     }
     Ok(value)

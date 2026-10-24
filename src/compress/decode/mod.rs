@@ -18,37 +18,42 @@
 
 mod decode_buffer;
 mod decode_sample;
-mod float_quantization;
+pub(super) mod float_quantization;
+pub(super) mod float_sample;
 mod image_decode_plan;
 mod null_mask;
-mod tile_cells;
 mod tile_decoder;
 mod tile_scratch_set;
+pub(crate) mod tile_section;
 mod tile_sources;
+mod tile_value;
 pub(crate) mod tiled_image;
 mod wide_plane;
 
 #[cfg(feature = "parallel")]
 use crate::compress::tile_geometry::TileGeometry;
-use crate::error::FitsError;
 use crate::error::Result;
+use crate::error::SizeUnit;
 
 /// The memory one parallel decode wave's retained tiles may hold.
 #[cfg(feature = "parallel")]
 const DECODE_WAVE_BYTES: usize = 4 * 1024 * 1024;
 
-/// How many tiles one parallel decode wave may retain at once, from the memory a
-/// wave's *narrowed* per-tile vectors hold rather than the wide plane they decode in.
+/// How many tiles one parallel decode wave may hold at once: its one buffer has a slot
+/// of the largest tile's *narrowed* samples for each, rather than the wide plane they
+/// decode in.
 #[cfg(feature = "parallel")]
 pub(super) fn decode_wave_tile_count<D>(geom: &TileGeometry) -> usize {
-    let payload_bytes = geom.max_tile_elements().saturating_mul(size_of::<D>());
-    let retained_bytes = payload_bytes.saturating_add(size_of::<Vec<D>>()).max(1);
-    (DECODE_WAVE_BYTES / retained_bytes).max(1)
+    let slot_bytes = geom
+        .max_tile_elements()
+        .saturating_mul(size_of::<D>())
+        .max(1);
+    (DECODE_WAVE_BYTES / slot_bytes).max(1)
 }
 
 const fn ensure_tile_size(expected: usize, got: usize) -> Result<()> {
     if got != expected {
-        return Err(FitsError::DataSizeMismatch { expected, got });
+        return Err(SizeUnit::Samples.mismatch(expected, got));
     }
     Ok(())
 }

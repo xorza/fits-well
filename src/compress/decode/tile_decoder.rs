@@ -1,27 +1,40 @@
 //! The per-tile codec dispatch, fixed once for a whole tiled image.
 
+use crate::bintable::element_kind::ElementKind;
 use crate::bintable::vla_column::VlaCell;
 use crate::compress;
-use crate::compress::ImageCodec;
 use crate::compress::convert;
-use crate::compress::decode::decode_sample::Overshoot;
 use crate::compress::decode::float_quantization::FloatEncoding;
-use crate::compress::decode::float_quantization::LosslessCodec;
-use crate::compress::decode::tile_cells::TileCells;
-use crate::compress::decode::tile_cells::TileSource;
-use crate::compress::decode::tile_scratch_set::CodecScratch;
-use crate::compress::decode::tiled_image::TiledImage;
+use crate::compress::decode::float_sample::FloatSample;
+use crate::compress::decode::tile_scratch_set::TileScratchSet;
+use crate::compress::decode::tile_sources::TileSource;
 use crate::compress::gzip;
 use crate::compress::hcompress;
 use crate::compress::hcompress::Smoothing;
 use crate::compress::plane::{FloatBitpix, IntBitpix, Plane};
 use crate::compress::plio;
-use crate::compress::quantize;
 use crate::compress::rice;
+use crate::compress::tile_codec::{CodecScratch, Tile, TileCodec};
+use crate::compress::tile_geometry::TileScratch;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header_model::RecordView;
+use crate::error::SizeUnit;
+use crate::error::{CompressedDataDefect, TileCell};
+use crate::hdu::image_geometry::ImageGeometry;
+use crate::header_model::record::RecordView;
 use crate::header_model::{Header, keywords};
+use std::mem;
+
+/// What a decoded value outside the image's `BITPIX` range means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Overshoot {
+    /// A lossy codec's reconstruction may overshoot the range its original values lay
+    /// in, so the value clamps to the range, as cfitsio clips it.
+    Clamp,
+    /// A lossless stream an encoder wrote never leaves the range, so the value is
+    /// corrupt data (cfitsio `NUM_OVERFLOW`).
+    Refuse,
+}
 
 /// The decode parameters constant across all of a tiled image's tiles: the codec,
 /// the integer plane the tiles are stored in (and, for a float image, its float
@@ -29,67 +42,52 @@ use crate::header_model::{Header, keywords};
 /// the helpers take one decoder rather than a long parameter list.
 #[derive(Debug)]
 pub(super) struct TileDecoder {
-    codec: ImageCodec,
+    /// The `ZCMPTYPE` codec with its `ZNAMEi`/`ZVALi` parameters.
+    codec: TileCodec,
     int_bitpix: IntBitpix,
     /// `Some` exactly for a float image.
     float_bitpix: Option<FloatBitpix>,
-    params: CodecParams,
-    /// What a `PLIO_1` value exceeds the stored value by: 32768 for a u16 image, whose
-    /// stream holds the physical values, as PLIO takes no negative value; 0 otherwise.
-    plio_offset: i64,
 }
 
-/// The codec knobs from `ZNAMEi`/`ZVALi`, read in one pass: the Rice block size and
-/// pixel width, and the HCOMPRESS `SMOOTH` flag, with the Table 37 defaults of 32, 4
-/// and off. A codec reads only its own knobs, so a value another codec would refuse
-/// does not fail the image.
-#[derive(Debug, Clone, Copy)]
-struct CodecParams {
-    blocksize: usize,
-    bytepix: IntBitpix,
-    smoothing: Smoothing,
-}
-
-impl CodecParams {
-    fn read(header: &Header, codec: ImageCodec) -> Result<Self> {
-        let mut params = Self {
-            blocksize: rice::BLOCKSIZE,
-            bytepix: IntBitpix::I32,
-            smoothing: Smoothing::Off,
-        };
+/// `codec` with its knobs from `ZNAMEi`/`ZVALi`, read in one pass: the Rice block size
+/// and pixel width, and the HCOMPRESS `SMOOTH` flag, the Table 37 defaults until a
+/// keyword sets one. A codec reads only its own knobs, so a value another codec would
+/// refuse does not fail the image.
+fn read_parameters(header: &Header, mut codec: TileCodec) -> Result<TileCodec> {
+    {
         for record in header {
             let RecordView::Valued { keyword, .. } = record else {
                 continue;
             };
-            let Some(i) = compress::parameter_index(keyword.as_str()) else {
+            let Some(i) = compress::parameter_index(keyword) else {
                 continue;
             };
-            let Some(name) = header.get_text(*keyword)? else {
+            let Some(name) = header.get_text(keyword)? else {
                 continue;
             };
             let zval = keywords::ZVAL.indexed(i)?;
             let value = || header.get_integer(zval);
             let out_of_range = FitsError::KeywordOutOfRange { keyword: zval };
-            match (codec, name) {
-                (ImageCodec::Rice1, "BLOCKSIZE") => {
+            match (&mut codec, name) {
+                (TileCodec::Rice(rice::Codec { blocksize, .. }), "BLOCKSIZE") => {
                     if let Some(v) = value()? {
-                        params.blocksize = match v {
+                        *blocksize = match v {
                             16 => 16,
                             32 => 32,
                             _ => return Err(out_of_range),
                         };
                     }
                 }
-                (ImageCodec::Rice1, "BYTEPIX") => {
+                (TileCodec::Rice(rice::Codec { bytepix, .. }), "BYTEPIX") => {
                     if let Some(v) = value()? {
-                        params.bytepix = usize::try_from(v)
+                        *bytepix = usize::try_from(v)
                             .ok()
                             .and_then(IntBitpix::from_bytepix)
                             .ok_or(out_of_range)?;
                     }
                 }
-                (ImageCodec::Hcompress1, "SMOOTH") => {
-                    params.smoothing = if value()?.unwrap_or(0) == 0 {
+                (TileCodec::Hcompress(hcompress::Codec { smoothing, .. }), "SMOOTH") => {
+                    *smoothing = if value()?.unwrap_or(0) == 0 {
                         Smoothing::Off
                     } else {
                         Smoothing::On
@@ -98,205 +96,198 @@ impl CodecParams {
                 _ => {}
             }
         }
-        Ok(params)
     }
+    Ok(codec)
 }
 
 impl TileDecoder {
-    pub(super) fn new(header: &Header, tiled: &TiledImage<'_>) -> Result<Self> {
-        let params = CodecParams::read(header, tiled.codec)?;
+    pub(super) fn new(header: &Header, image: &ImageGeometry, codec: TileCodec) -> Result<Self> {
+        let codec = match read_parameters(header, codec)? {
+            TileCodec::Plio(_) => TileCodec::Plio(plio::Codec {
+                offset: compress::plio_offset(image.bitpix, image.scaling),
+            }),
+            codec => codec,
+        };
         // A float image's tiles arrive quantized, so they decode in whichever integer
         // width the codec stored them at — RICE_1 says so in `BYTEPIX`, the rest use
         // 32-bit — and only then dequantize to `ZBITPIX`.
-        let (int_bitpix, float_bitpix) = match Plane::of(tiled.image.bitpix) {
-            Plane::Int(bitpix) => (bitpix, None),
-            Plane::Float(bitpix) if tiled.codec == ImageCodec::Rice1 => {
-                (params.bytepix, Some(bitpix))
+        let (int_bitpix, float_bitpix) = match (Plane::of(image.bitpix), codec) {
+            (Plane::Int(bitpix), _) => (bitpix, None),
+            (Plane::Float(bitpix), TileCodec::Rice(rice::Codec { bytepix, .. })) => {
+                (bytepix, Some(bitpix))
             }
-            Plane::Float(bitpix) => (IntBitpix::I32, Some(bitpix)),
+            (Plane::Float(bitpix), _) => (IntBitpix::I32, Some(bitpix)),
         };
         Ok(Self {
-            codec: tiled.codec,
+            codec,
             int_bitpix,
             float_bitpix,
-            params,
-            plio_offset: compress::plio_offset(tiled.image.bitpix, tiled.image.scaling),
         })
     }
 
-    /// What a decoded value outside the image's range means for this codec: lossy
-    /// `HCOMPRESS_1` may overshoot the range of the image's values.
-    pub(super) const fn overshoot(&self) -> Overshoot {
-        match self.codec {
-            ImageCodec::Hcompress1 => Overshoot::Clamp,
-            ImageCodec::Gzip1
-            | ImageCodec::Gzip2
-            | ImageCodec::Rice1
-            | ImageCodec::Plio1
-            | ImageCodec::NoCompress => Overshoot::Refuse,
+    /// The codec of the tiles' `COMPRESSED_DATA` cells.
+    pub(super) const fn codec(&self) -> TileCodec {
+        self.codec
+    }
+
+    /// `tile` as the codec sees it: its integer samples' width, and no null value, which
+    /// matters only to an encode.
+    fn tile<'a>(&self, tile: &'a TileScratch) -> Tile<'a> {
+        Tile {
+            shape: &tile.tdims,
+            width: self.int_bitpix,
+            blank: None,
         }
     }
 
-    /// The float `ZBITPIX` of a float image.
-    const fn zbitpix(&self) -> FloatBitpix {
-        self.float_bitpix
-            .expect("only a float image decodes in the float plane")
+    /// What a decoded value outside the image's range means for a tile from `source`:
+    /// a lossy `HCOMPRESS_1` cell may overshoot the range of the image's values, and
+    /// a fallback cell, stored losslessly, never does.
+    const fn overshoot(&self, source: TileSource<'_>) -> Overshoot {
+        match (source, self.codec) {
+            (TileSource::Compressed(_), TileCodec::Hcompress(_)) => Overshoot::Clamp,
+            _ => Overshoot::Refuse,
+        }
     }
 
-    /// Decode one tile of an *integer* image into `out`.
+    /// Decode one tile of an *integer* image into `scratch`'s values, and say what a
+    /// value outside the image's range means for it.
     pub(super) fn decode_tile_into(
         &self,
-        cells: TileCells<'_>,
-        tile_elems: usize,
-        out: &mut Vec<i64>,
-        scratch: &mut CodecScratch,
-    ) -> Result<()> {
-        match cells.resolve()? {
-            TileSource::Compressed(cell) => self.decode_cell_into(cell, tile_elems, out, scratch),
-            TileSource::Gzip(cell) => gzip::gzip_tile_into(
-                convert::byte_cell(cell)?,
-                self.int_bitpix,
-                tile_elems,
-                out,
-                &mut scratch.gzip,
-            ),
-            TileSource::Uncompressed(cell) => convert::cell_to_i64_into(cell, out),
+        source: TileSource<'_>,
+        scratch: &mut TileScratchSet<i64>,
+    ) -> Result<Overshoot> {
+        match source {
+            TileSource::Compressed(cell) => {
+                let decoded = self.decode_cell(cell, &scratch.tile, &mut scratch.codecs)?;
+                mem::swap(&mut scratch.values, decoded);
+            }
+            TileSource::Gzip(cell) => {
+                let decoded = FALLBACK_GZIP.decode_ints(
+                    self.tile(&scratch.tile),
+                    convert::byte_cell(cell)?,
+                    &mut scratch.codecs,
+                )?;
+                mem::swap(&mut scratch.values, decoded);
+            }
+            TileSource::Uncompressed(cell) => convert::cell_to_i64_into(cell, &mut scratch.values)?,
         }
+        Ok(self.overshoot(source))
     }
 
-    /// Decode one tile of a *float* image into `out`. A primary `COMPRESSED_DATA` cell
-    /// holds quantized integers (decoded into the reused `ints` buffer, then dequantized
-    /// as `scale·int + zero`), or a lossless image's gzip'd floats; the
-    /// `GZIP_COMPRESSED_DATA`/`UNCOMPRESSED_DATA` fallbacks hold the raw float values.
-    pub(super) fn decode_float_tile_into(
+    /// Decode one tile of a *float* image into `scratch`'s values, in the image's stored
+    /// type `F`. A primary `COMPRESSED_DATA` cell holds quantized integers, dequantized
+    /// as `encoding` says, or a lossless image's gzip'd floats; the
+    /// `GZIP_COMPRESSED_DATA`/`UNCOMPRESSED_DATA` fallbacks hold the floats themselves.
+    pub(super) fn decode_float_tile_into<F: FloatSample>(
         &self,
-        cells: TileCells<'_>,
-        tile_elems: usize,
+        source: TileSource<'_>,
         encoding: FloatEncoding,
-        out: &mut Vec<f64>,
-        ints: &mut Vec<i64>,
-        scratch: &mut CodecScratch,
+        scratch: &mut TileScratchSet<F>,
     ) -> Result<()> {
-        match cells.resolve()? {
+        debug_assert_eq!(self.float_bitpix.map(FloatBitpix::elem_size), Some(F::SIZE));
+        let TileScratchSet {
+            tile,
+            values: out,
+            codecs,
+        } = scratch;
+        let tile_bytes = tile.nelem().saturating_mul(F::SIZE);
+        let floats = Tile {
+            shape: &tile.tdims,
+            width: self
+                .float_bitpix
+                .expect("a float tile of a float image")
+                .integer_width(),
+            blank: None,
+        };
+        match source {
             TileSource::Compressed(cell) => match encoding {
-                FloatEncoding::Quantized(dq) => {
-                    self.decode_cell_into(cell, tile_elems, ints, scratch)?;
-                    quantize::dequantize_into(
-                        ints, dq.scale, dq.zero, dq.method, dq.irow, dq.zblank, out,
-                    );
-                    Ok(())
+                FloatEncoding::Quantized(dequant) => {
+                    dequant.apply(self.decode_cell(cell, tile, codecs)?, out);
                 }
                 FloatEncoding::Lossless(codec) => {
-                    let zbitpix = self.zbitpix();
-                    let width = match codec {
-                        LosslessCodec::Gzip1 => 1,
-                        LosslessCodec::Gzip2 => zbitpix.elem_size(),
-                    };
-                    let floats = scratch.gzip.inflate(
-                        convert::byte_cell(cell)?,
-                        tile_elems.saturating_mul(zbitpix.elem_size()),
-                        width,
-                    )?;
-                    convert::be_floats_into(floats, zbitpix, out);
-                    Ok(())
+                    F::decode_be(
+                        codec.decode_bytes(floats, convert::byte_cell(cell)?, codecs)?,
+                        out,
+                    );
                 }
             },
             TileSource::Gzip(cell) => {
-                // Raw floats, bounded at the tile's known byte size (`tile_elems` floats).
-                let max = tile_elems.saturating_mul(self.zbitpix().elem_size());
-                let floats = scratch.gzip.inflate(convert::byte_cell(cell)?, max, 1)?;
-                convert::be_floats_into(floats, self.zbitpix(), out);
-                Ok(())
+                F::decode_be(
+                    FALLBACK_GZIP.decode_bytes(floats, convert::byte_cell(cell)?, codecs)?,
+                    out,
+                );
             }
-            TileSource::Uncompressed(cell) => convert::cell_to_f64_into(cell, self.zbitpix(), out),
+            TileSource::Uncompressed(cell) => match cell.element_type {
+                kind if kind == F::KIND => F::decode_be(cell.bytes, out),
+                ElementKind::F32 | ElementKind::F64 => F::decode_other_be(cell.bytes, out),
+                // The raw bytes of the floats.
+                ElementKind::U8 => {
+                    if cell.bytes.len() != tile_bytes {
+                        return Err(SizeUnit::Bytes.mismatch(tile_bytes, cell.bytes.len()));
+                    }
+                    F::decode_be(cell.bytes, out);
+                }
+                element => {
+                    return Err(CompressedDataDefect::CellElement {
+                        cell: TileCell::Uncompressed,
+                        element,
+                    }
+                    .into());
+                }
+            },
         }
+        Ok(())
     }
 
-    /// Decode one tile's primary `COMPRESSED_DATA` cell into `tile_elems` integer values
-    /// in `out`, per `ZCMPTYPE`. The cell is a byte array except for `PLIO_1` (i16).
-    fn decode_cell_into(
+    /// Decode one tile's primary `COMPRESSED_DATA` cell into the integer values of `tile`
+    /// per `ZCMPTYPE`, and lend them from `codecs`. The cell is a byte array except for
+    /// `PLIO_1` (i16).
+    fn decode_cell<'s>(
         &self,
         cell: VlaCell<'_>,
-        tile_elems: usize,
-        out: &mut Vec<i64>,
-        scratch: &mut CodecScratch,
-    ) -> Result<()> {
-        let params = self.params;
-        match self.codec {
-            ImageCodec::Gzip1 => gzip::gzip_tile_into(
-                convert::byte_cell(cell)?,
-                self.int_bitpix,
-                tile_elems,
-                out,
-                &mut scratch.gzip,
-            ),
-            ImageCodec::Gzip2 => gzip::gzip2_tile_into(
-                convert::byte_cell(cell)?,
-                self.int_bitpix,
-                tile_elems,
-                out,
-                &mut scratch.gzip,
-            ),
-            ImageCodec::Rice1 => rice::rice_decode_into(
-                convert::byte_cell(cell)?,
-                tile_elems,
-                params.bytepix,
-                params.blocksize,
-                out,
-            ),
-            ImageCodec::Plio1 => {
-                plio::plio_decode_be_into(convert::plio_cell(cell)?, tile_elems, out)?;
-                if self.plio_offset != 0 {
-                    for value in out.iter_mut() {
-                        *value -= self.plio_offset;
-                    }
-                }
-                Ok(())
-            }
-            ImageCodec::Hcompress1 => hcompress::hcompress_tile_into(
-                convert::byte_cell(cell)?,
-                params.smoothing,
-                tile_elems,
-                out,
-                &mut scratch.hcompress,
-            ),
-            // §10.4: a tile stored verbatim — the cell is the raw big-endian pixels.
-            ImageCodec::NoCompress => {
-                let bytes = convert::byte_cell(cell)?;
-                let expected = tile_elems
-                    .checked_mul(self.int_bitpix.elem_size())
-                    .ok_or(FitsError::DataUnitOverflow)?;
-                if bytes.len() != expected {
-                    return Err(FitsError::DataSizeMismatch {
-                        expected,
-                        got: bytes.len(),
-                    });
-                }
-                convert::be_to_i64_into(bytes, self.int_bitpix, out);
-                Ok(())
-            }
-        }
+        tile: &TileScratch,
+        codecs: &'s mut CodecScratch,
+    ) -> Result<&'s mut Vec<i64>> {
+        let stream = if self.codec.stream_element() == 2 {
+            convert::plio_cell(cell)?
+        } else {
+            convert::byte_cell(cell)?
+        };
+        self.codec.decode_ints(self.tile(tile), stream, codecs)
     }
 }
 
+/// The codec of a `GZIP_COMPRESSED_DATA` fallback cell, whose level a decode does not
+/// read.
+const FALLBACK_GZIP: TileCodec = TileCodec::Gzip1 {
+    level: gzip::DEFAULT_GZIP_LEVEL,
+};
+
 #[cfg(test)]
 mod tests {
-    use crate::compress::ImageCodec;
-    use crate::compress::decode::tile_decoder::CodecParams;
+    use crate::compress::decode::tile_decoder::read_parameters;
     use crate::compress::hcompress::Smoothing;
     use crate::compress::plane::IntBitpix;
-    use crate::error::FitsError;
+    use crate::compress::tile_codec::TileCodec;
+    use crate::compress::{hcompress, rice};
+    use crate::error::{FitsError, ValueKind};
     use crate::header_model::Header;
 
     /// Table 37's defaults, the parameters at any `ZNAMEi` index, and a value the
     /// codec refuses — which fails only the codec that reads it.
     #[test]
     fn codec_parameters_read_each_codecs_own_values() {
+        let rice = TileCodec::parse("RICE_1").unwrap();
+        let hcompress = TileCodec::parse("HCOMPRESS_1").unwrap();
+        let gzip = TileCodec::parse("GZIP_1").unwrap();
         let mut header = Header::new();
-        let defaults = CodecParams::read(&header, ImageCodec::Rice1).unwrap();
         assert_eq!(
-            (defaults.blocksize, defaults.bytepix, defaults.smoothing),
-            (32, IntBitpix::I32, Smoothing::Off)
+            read_parameters(&header, rice).unwrap(),
+            TileCodec::Rice(rice::Codec {
+                blocksize: 32,
+                bytepix: IntBitpix::I32
+            })
         );
         header
             .set_internal("ZNAME2", "BYTEPIX")
@@ -305,32 +296,35 @@ mod tests {
             .set_internal("ZVAL3", 16)
             .set_internal("ZNAME5", "SMOOTH")
             .set_internal("ZVAL5", 1);
-        let rice = CodecParams::read(&header, ImageCodec::Rice1).unwrap();
         assert_eq!(
-            (rice.blocksize, rice.bytepix, rice.smoothing),
-            (16, IntBitpix::I64, Smoothing::Off)
+            read_parameters(&header, rice).unwrap(),
+            TileCodec::Rice(rice::Codec {
+                blocksize: 16,
+                bytepix: IntBitpix::I64
+            })
         );
-        assert_eq!(
-            CodecParams::read(&header, ImageCodec::Hcompress1)
-                .unwrap()
-                .smoothing,
-            Smoothing::On
-        );
+        assert!(matches!(
+            read_parameters(&header, hcompress).unwrap(),
+            TileCodec::Hcompress(hcompress::Codec {
+                smoothing: Smoothing::On,
+                ..
+            })
+        ));
 
         for (name, value) in [("ZVAL3", 17), ("ZVAL2", 3)] {
             let mut refused = header.clone();
             refused.set_internal(name, value);
             assert!(matches!(
-                CodecParams::read(&refused, ImageCodec::Rice1),
+                read_parameters(&refused, rice),
                 Err(FitsError::KeywordOutOfRange { keyword }) if keyword == name
             ));
-            assert!(CodecParams::read(&refused, ImageCodec::Gzip1).is_ok());
+            assert!(read_parameters(&refused, gzip).is_ok());
         }
         header.set_internal("ZVAL2", "not an integer");
         assert!(matches!(
-            CodecParams::read(&header, ImageCodec::Rice1),
-            Err(FitsError::TypeMismatch { name, expected })
-                if name == "ZVAL2" && expected == "integer"
+            read_parameters(&header, rice),
+            Err(FitsError::ValueTypeMismatch { name, expected: ValueKind::Integer })
+                if name.to_string() == "ZVAL2"
         ));
     }
 }

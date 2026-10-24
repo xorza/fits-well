@@ -44,7 +44,7 @@ impl ImageGeometry {
     }
 
     /// The image a tiled-compression `BINTABLE` encodes, from its `ZNAXISn` and
-    /// `ZBITPIX` (§10.1.1).
+    /// `ZBITPIX` (§10.1.1), its null value `BLANK`, else `ZBLANK` for an integer image.
     fn compressed(header: &Header) -> Result<Self> {
         let bitpix = Bitpix::from_code(header.get_integer(keywords::ZBITPIX)?.ok_or(
             FitsError::MissingKeyword {
@@ -65,7 +65,14 @@ impl ImageGeometry {
         let shape = (1..=rank)
             .map(|axis| header.require_usize(keywords::ZNAXIS.indexed(axis)?))
             .collect::<Result<_>>()?;
-        Self::new(header, shape, bitpix)
+        let mut image = Self::new(header, shape, bitpix)?;
+        // An integer image's tiles store their nulls as `ZBLANK` (§10.1.1, Table 36), the
+        // image's null value when no `BLANK` names another one.
+        if !bitpix.is_float() && image.scaling.blank.is_none() {
+            image.scaling.blank = header.get_integer(keywords::ZBLANK)?;
+            image.scaling.validate(bitpix)?;
+        }
+        Ok(image)
     }
 
     /// Errors when the sample count does not fit a `usize`, so [`Self::len`] never has to.
@@ -74,7 +81,7 @@ impl ImageGeometry {
         Ok(Self {
             shape,
             bitpix,
-            scaling: Scaling::from_header(header)?,
+            scaling: Scaling::from_header(header, bitpix)?,
         })
     }
 

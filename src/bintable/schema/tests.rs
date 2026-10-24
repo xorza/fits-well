@@ -53,9 +53,27 @@ fn row_width_mismatch_is_an_error() {
     ));
 }
 
+/// §7.3.1 fixes `BITPIX = 8`, `NAXIS = 2` and `GCOUNT = 1`, which size the data unit, and
+/// caps `TFIELDS` at 999, which sizes the column list.
 #[test]
-fn tfields_beyond_999_is_rejected() {
-    // §7.3.1 caps TFIELDS at 999; an absurd value must error, not size a huge Vec.
+fn table_structure_out_of_range_is_rejected() {
+    for (keyword, value) in [
+        (keywords::BITPIX, 16),
+        (keywords::BITPIX, -32),
+        (keywords::NAXIS, 1),
+        (keywords::GCOUNT, 3),
+    ] {
+        let mut header = table_header(2, 1, &["1I"]);
+        header.set_internal(keyword, value);
+        assert!(
+            matches!(
+                Schema::parse(&header),
+                Err(FitsError::KeywordOutOfRange { keyword: got }) if got == keyword
+            ),
+            "{keyword} = {value}"
+        );
+    }
+
     let mut header = table_header(0, 0, &[]);
     header.set_internal(keywords::TFIELDS, 1000);
     assert!(matches!(

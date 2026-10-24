@@ -4,116 +4,180 @@
 //! current "high" value `pv`. PLIO is a *mask* codec: values must be non-negative
 //! and fit in 24 bits; the encoder rejects values outside that lossless domain.
 
+use crate::error::CompressionFeature;
 use crate::error::FitsError;
+use crate::error::PlioDefect;
 use crate::error::Result;
 
-/// Encode `values` (one tile of non-negative mask pixels) as an IRAF PLIO
-/// line list — a port of cfitsio's `pl_p2li` with `xs = 1`. The returned i16 list
-/// round-trips through [`plio_decode_be_into`]. Values outside `0..=0xFF_FFFF`
-/// are rejected because the format cannot preserve them.
-pub(super) fn plio_encode(values: &[i64]) -> Result<Vec<i16>> {
-    if let Some((index, &value)) = values
-        .iter()
-        .enumerate()
-        .find(|&(_, value)| !(0..=0xFF_FFFF).contains(value))
-    {
-        return Err(FitsError::PlioValueOutOfRange { index, value });
-    }
+/// A `PLIO_1` stream's parameter: the `offset` its stream adds to each sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Codec {
+    pub(super) offset: i64,
+}
 
-    // Header words (1-based lldst[1..=7]): the `-100` at index 3 selects the
-    // 30-bit-length form the decoder reads from words 4/5; index 2 (=7) is the
-    // header length, so instructions begin at word 8.
-    let mut ll: Vec<i16> = vec![0, 7, -100, 0, 0, 0, 0];
-    let npix = values.len();
-    if npix == 0 {
-        return Ok(ll);
-    }
-    let pix = |i1: usize| values[i1 - 1];
-
-    let xs = 1usize;
-    let xe = xs + npix - 1;
-    let mut pv = pix(xs);
-    let mut x1 = xs as i64;
-    let mut iz = xs as i64;
-    let mut hi: i64 = 1;
-    let mut nv: i64 = 0;
-
-    for ip in xs..=xe {
-        let mut flush = true;
-        if ip < xe {
-            nv = pix(ip + 1);
-            if nv == pv {
-                flush = false; // extend the current run
-            } else if pv == 0 {
-                pv = nv;
-                x1 = (ip + 1) as i64;
-                flush = false;
-            }
-        } else if pv == 0 {
-            x1 = xe as i64 + 1;
+impl Codec {
+    /// Encode `values` plus the offset (one tile of non-negative mask pixels) as an IRAF
+    /// PLIO line list — a port of cfitsio's `pl_p2li` with `xs = 1` — appending its
+    /// big-endian i16 words to `out`. The list round-trips through [`Self::decode`].
+    /// Values outside `0..=0xFF_FFFF` are rejected because the format cannot preserve
+    /// them.
+    pub(super) fn encode(self, values: &[i64], out: &mut Vec<u8>) -> Result<()> {
+        let offset = self.offset;
+        if let Some((index, value)) = values
+            .iter()
+            .map(|&value| value + offset)
+            .enumerate()
+            .find(|&(_, value)| !(0..=0xFF_FFFF).contains(&value))
+        {
+            return Err(FitsError::PlioValueOutOfRange { index, value });
         }
 
-        if flush {
-            let mut np = ip as i64 - x1 + 1; // high-pixel count in this segment
-            let mut nz = x1 - iz; // leading zero count
-            let mut done = false;
+        // Header words (1-based lldst[1..=7]): the `-100` at index 3 selects the
+        // 30-bit-length form the decoder reads from words 4/5; index 2 (=7) is the
+        // header length, so instructions begin at word 8.
+        let mut ll = Words::new(out);
+        for word in [0, 7, -100, 0, 0, 0, 0] {
+            ll.push(word);
+        }
+        let npix = values.len();
+        if npix == 0 {
+            return Ok(());
+        }
+        let pix = |i1: usize| values[i1 - 1] + offset;
 
-            if pv > 0 {
-                let dv = pv - hi; // change in the "high" value since last segment
-                if dv != 0 {
-                    hi = pv;
-                    if dv.abs() > 4095 {
-                        // Two-word absolute set: low 12 bits (opcode 1) then high bits.
-                        ll.push(((pv & 4095) + 4096) as i16);
-                        ll.push((pv / 4096) as i16);
-                    } else {
-                        // One-word relative adjust: opcode 2 (up) or 3 (down).
-                        ll.push(if dv < 0 {
-                            (-dv + 12288) as i16
+        let xs = 1usize;
+        let xe = xs + npix - 1;
+        let mut pv = pix(xs);
+        let mut x1 = xs as i64;
+        let mut iz = xs as i64;
+        let mut hi: i64 = 1;
+        let mut nv: i64 = 0;
+
+        for ip in xs..=xe {
+            let mut flush = true;
+            if ip < xe {
+                nv = pix(ip + 1);
+                if nv == pv {
+                    flush = false; // extend the current run
+                } else if pv == 0 {
+                    pv = nv;
+                    x1 = (ip + 1) as i64;
+                    flush = false;
+                }
+            } else if pv == 0 {
+                x1 = xe as i64 + 1;
+            }
+
+            if flush {
+                let mut np = ip as i64 - x1 + 1; // high-pixel count in this segment
+                let mut nz = x1 - iz; // leading zero count
+                let mut done = false;
+
+                if pv > 0 {
+                    let dv = pv - hi; // change in the "high" value since last segment
+                    if dv != 0 {
+                        hi = pv;
+                        if dv.abs() > 4095 {
+                            // Two-word absolute set: low 12 bits (opcode 1) then high bits.
+                            ll.push(((pv & 4095) + 4096) as i16);
+                            ll.push((pv / 4096) as i16);
                         } else {
-                            (dv + 8192) as i16
-                        });
-                        // A lone high pixel with no leading zeros folds into the
-                        // adjust word as opcode 6/7 (single high pixel).
-                        if np == 1 && nz == 0 {
-                            let last = ll.last_mut().unwrap();
-                            *last |= 16384;
-                            done = true;
+                            // One-word relative adjust: opcode 2 (up) or 3 (down).
+                            ll.push(if dv < 0 {
+                                (-dv + 12288) as i16
+                            } else {
+                                (dv + 8192) as i16
+                            });
+                            // A lone high pixel with no leading zeros folds into the
+                            // adjust word as opcode 6/7 (single high pixel).
+                            if np == 1 && nz == 0 {
+                                ll.update_last(|last| last | 16384);
+                                done = true;
+                            }
                         }
                     }
                 }
-            }
 
-            if !done && nz > 0 {
-                while nz > 0 {
-                    ll.push(nz.min(4095) as i16);
-                    nz -= 4095;
+                if !done && nz > 0 {
+                    while nz > 0 {
+                        ll.push(nz.min(4095) as i16);
+                        nz -= 4095;
+                    }
+                    // A lone high pixel after the zeros folds into the last zero word
+                    // as opcode 5 (zero run whose final pixel is set high).
+                    if np == 1 && pv > 0 {
+                        ll.update_last(|last| (i64::from(last) + 20481) as i16);
+                        done = true;
+                    }
                 }
-                // A lone high pixel after the zeros folds into the last zero word
-                // as opcode 5 (zero run whose final pixel is set high).
-                if np == 1 && pv > 0 {
-                    let last = ll.last_mut().unwrap();
-                    *last = (i64::from(*last) + 20481) as i16;
-                    done = true;
-                }
-            }
 
-            if !done {
-                while np > 0 {
-                    ll.push((np.min(4095) + 16384) as i16); // opcode 4: high run
-                    np -= 4095;
+                if !done {
+                    while np > 0 {
+                        ll.push((np.min(4095) + 16384) as i16); // opcode 4: high run
+                        np -= 4095;
+                    }
                 }
-            }
 
-            x1 = (ip + 1) as i64;
-            iz = x1;
-            pv = nv;
+                x1 = (ip + 1) as i64;
+                iz = x1;
+                pv = nv;
+            }
         }
+
+        // Total list length (= cfitsio's `op - 1`) split across words 4/5.
+        let [low, high] = length_words(ll.len())?;
+        ll.set(3, low);
+        ll.set(4, high);
+        Ok(())
     }
 
-    // Total list length (= cfitsio's `op - 1`) split across words 4/5.
-    [ll[3], ll[4]] = length_words(ll.len())?;
-    Ok(ll)
+    /// Decode the big-endian line list `bytes` into `npix` values, less the offset, in
+    /// `px`.
+    pub(super) fn decode(self, bytes: &[u8], npix: usize, px: &mut Vec<i64>) -> Result<()> {
+        if !bytes.len().is_multiple_of(2) {
+            return Err(FitsError::UnexpectedEof);
+        }
+        decode_words(BeWords(bytes), npix, px)?;
+        if self.offset != 0 {
+            for value in px.iter_mut() {
+                *value -= self.offset;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The big-endian i16 words of a line list, appended to a buffer from `start` on.
+#[derive(Debug)]
+struct Words<'a> {
+    out: &'a mut Vec<u8>,
+    start: usize,
+}
+
+impl<'a> Words<'a> {
+    const fn new(out: &'a mut Vec<u8>) -> Self {
+        let start = out.len();
+        Self { out, start }
+    }
+
+    fn push(&mut self, word: i16) {
+        self.out.extend_from_slice(&word.to_be_bytes());
+    }
+
+    const fn len(&self) -> usize {
+        (self.out.len() - self.start) / 2
+    }
+
+    fn set(&mut self, index: usize, word: i16) {
+        let at = self.start + 2 * index;
+        self.out[at..at + 2].copy_from_slice(&word.to_be_bytes());
+    }
+
+    fn update_last(&mut self, update: impl FnOnce(i16) -> i16) {
+        let at = self.out.len() - 2;
+        let last = i16::from_be_bytes([self.out[at], self.out[at + 1]]);
+        self.set((at - self.start) / 2, update(last));
+    }
 }
 
 /// A list length as the two 15-bit header words that hold it, low first; a list of
@@ -123,16 +187,9 @@ fn length_words(total: usize) -> Result<[i16; 2]> {
     match (word(total % 32768), word(total / 32768)) {
         (Some(low), Some(high)) => Ok([low, high]),
         _ => Err(FitsError::UnsupportedCompression {
-            name: format!("PLIO_1 line list of {total} words, 2^30 or more"),
+            feature: CompressionFeature::PlioListLength { words: total },
         }),
     }
-}
-
-pub(super) fn plio_decode_be_into(bytes: &[u8], npix: usize, px: &mut Vec<i64>) -> Result<()> {
-    if !bytes.len().is_multiple_of(2) {
-        return Err(FitsError::UnexpectedEof);
-    }
-    decode_words(BeWords(bytes), npix, px)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -176,7 +233,7 @@ fn decode_words(ll: BeWords<'_>, npix: usize, px: &mut Vec<i64>) -> Result<()> {
         return Err(FitsError::UnexpectedEof);
     }
     if lllen == 0 || llfirst > lllen + 1 {
-        return Err(invalid_stream("invalid list bounds"));
+        return Err(PlioDefect::ListBounds.into());
     }
 
     let xe = i64::try_from(npix).expect("a tile's pixel count fits i64"); // 1-based; xs = 1
@@ -243,7 +300,7 @@ fn decode_words(ll: BeWords<'_>, npix: usize, px: &mut Vec<i64>) -> Result<()> {
                 }
                 x1 += 1;
             }
-            _ => return Err(invalid_stream("invalid opcode")),
+            _ => return Err(PlioDefect::Opcode.into()),
         }
         if x1 > xe {
             break;
@@ -255,20 +312,14 @@ fn decode_words(ll: BeWords<'_>, npix: usize, px: &mut Vec<i64>) -> Result<()> {
 
 fn nonnegative_word(ll: BeWords<'_>, index: usize) -> Result<usize> {
     let value = ll.get(index).ok_or(FitsError::UnexpectedEof)?;
-    usize::try_from(value).map_err(|_| invalid_stream("negative list header value"))
-}
-
-fn invalid_stream(detail: &str) -> FitsError {
-    FitsError::CorruptCompressedData {
-        detail: format!("PLIO_1: {detail}"),
-    }
+    usize::try_from(value).map_err(|_| PlioDefect::NegativeHeader.into())
 }
 
 #[cfg(test)]
 mod tests {
     use crate::compress::plio;
 
-    use crate::error::FitsError;
+    use crate::error::{CompressedDataDefect, FitsError, PlioDefect};
 
     /// The two header words hold 15 bits each, low first: 2³⁰ − 1 is the longest
     /// list they can state.
@@ -293,12 +344,26 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        let encoded = plio::plio_encode(&[0, 0xFF_FFFF]).unwrap();
-        plio::plio_decode_be_into(&be(&encoded), 2, &mut out).unwrap();
+        let mut encoded = Vec::new();
+        plio::Codec { offset: 0 }
+            .encode(&[0, 0xFF_FFFF], &mut encoded)
+            .unwrap();
+        plio::Codec { offset: 0 }
+            .decode(&encoded, 2, &mut out)
+            .unwrap();
         assert_eq!(out, [0, 0xFF_FFFF]);
+        // The offset joins the value before the range check and leaves it again.
+        encoded.clear();
+        plio::Codec { offset: 32768 }
+            .encode(&[-32768, 32767], &mut encoded)
+            .unwrap();
+        plio::Codec { offset: 32768 }
+            .decode(&encoded, 2, &mut out)
+            .unwrap();
+        assert_eq!(out, [-32768, 32767]);
         for invalid in [-1, 0x100_0000] {
             assert!(matches!(
-                plio::plio_encode(&[0, invalid]),
+                plio::Codec { offset: 0 }.encode(&[0, invalid], &mut encoded),
                 Err(FitsError::PlioValueOutOfRange {
                     index: 1,
                     value,
@@ -307,20 +372,22 @@ mod tests {
         }
         let truncated_span = [0, 7, -100, 8, 0, 0, 0];
         assert!(matches!(
-            plio::plio_decode_be_into(&be(&truncated_span), 1, &mut out),
+            plio::Codec { offset: 0 }.decode(&be(&truncated_span), 1, &mut out),
             Err(FitsError::UnexpectedEof)
         ));
 
         let missing_absolute_high_word = [0, 0, 4, 0x1001];
         assert!(matches!(
-            plio::plio_decode_be_into(&be(&missing_absolute_high_word), 1, &mut out),
+            plio::Codec { offset: 0 }.decode(&be(&missing_absolute_high_word), 1, &mut out),
             Err(FitsError::UnexpectedEof)
         ));
 
         let invalid_opcode = [0, 0, 4, i16::MIN];
         assert!(matches!(
-            plio::plio_decode_be_into(&be(&invalid_opcode), 1, &mut out),
-            Err(FitsError::CorruptCompressedData { detail }) if detail == "PLIO_1: invalid opcode"
+            plio::Codec { offset: 0 }.decode(&be(&invalid_opcode), 1, &mut out),
+            Err(FitsError::CorruptCompressedData {
+                defect: CompressedDataDefect::Plio(PlioDefect::Opcode),
+            })
         ));
     }
 }

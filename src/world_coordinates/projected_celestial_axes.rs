@@ -2,6 +2,7 @@
 
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::error::WcsConflict;
 use crate::world_coordinates::celestial_axis::CelestialAxis;
 use crate::world_coordinates::ctype::Ctype;
 use crate::world_coordinates::distortion::Distortion;
@@ -69,7 +70,7 @@ impl ProjectedCelestialAxes {
         if (longitude.algorithm, longitude.distortion) != (latitude.algorithm, latitude.distortion)
         {
             return Err(FitsError::ConflictingWcsKeywords {
-                detail: "celestial longitude and latitude axes declare different projections",
+                conflict: WcsConflict::MismatchedProjections,
             });
         }
         Ok(longitude.projection().map(|(projection, distortion)| Self {

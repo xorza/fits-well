@@ -3,13 +3,13 @@
 //! work in, big-endian (de)serialization, and tile-cell accessors.
 
 use crate::allocation;
-use crate::bintable::tform_kind::TformKind;
+use crate::bintable::element_kind::ElementKind;
 use crate::bintable::vla_column::VlaCell;
 use crate::bitpix::Bitpix;
-use crate::compress::plane::{FloatBitpix, FloatSamples, IntBitpix, IntSamples};
+use crate::compress::plane::{FloatSamples, IntBitpix, IntSamples};
 use crate::endian;
-use crate::error::FitsError;
 use crate::error::Result;
+use crate::error::{CompressedDataDefect, TileCell};
 use crate::image_model::data::Data;
 
 /// Gather the tile rows starting at each of `row_bases` out of a typed sample plane
@@ -98,20 +98,6 @@ pub(super) fn i64_to_be_into(vals: &[i64], bitpix: IntBitpix, out: &mut Vec<u8>)
     }
 }
 
-/// Owning form of [`i64_to_be_into`], for the few sites that keep the bytes (the
-/// `NOCOMPRESS` cell is stored verbatim, so it can't share the reused scratch).
-pub(super) fn i64_to_be(vals: &[i64], bitpix: IntBitpix) -> Vec<u8> {
-    let mut out = Vec::new();
-    i64_to_be_into(vals, bitpix, &mut out);
-    out
-}
-
-/// Pack native-width quantized integers directly into reusable big-endian storage.
-pub(super) fn i32_to_be_into(vals: &[i32], out: &mut Vec<u8>) {
-    out.clear();
-    endian::extend_be(out, vals, i32::to_be_bytes);
-}
-
 /// Decode a big-endian buffer of `bitpix` integers into widened `i64` values in `out`
 /// (cleared first). Single pass — no intermediate narrowed `Vec`; the widening rides
 /// along in `decode_be_into`'s inlined, vectorizable per-chunk conversion.
@@ -124,65 +110,38 @@ pub(super) fn be_to_i64_into(bytes: &[u8], bitpix: IntBitpix, out: &mut Vec<i64>
     }
 }
 
-/// Decode a big-endian buffer of `bitpix` floats into `f64` in `out`, widening in one
-/// pass.
-pub(super) fn be_floats_into(bytes: &[u8], bitpix: FloatBitpix, out: &mut Vec<f64>) {
-    match bitpix {
-        FloatBitpix::F32 => {
-            endian::decode_be_into(bytes, out, |b| f64::from(f32::from_be_bytes(b)));
-        }
-        FloatBitpix::F64 => endian::decode_be_into(bytes, out, f64::from_be_bytes),
-    }
-}
-
 /// An integer image's `UNCOMPRESSED_DATA` cell, widened into `out`. Errors when the
 /// cell is not an integer array.
 pub(super) fn cell_to_i64_into(cell: VlaCell<'_>, out: &mut Vec<i64>) -> Result<()> {
-    let bitpix = IntBitpix::from_tform(cell.element_type).ok_or_else(|| {
-        FitsError::CorruptCompressedData {
-            detail: "uncompressed integer tile is not an integer array".to_string(),
-        }
-    })?;
+    let bitpix =
+        IntBitpix::from_tform(cell.element_type).ok_or(CompressedDataDefect::CellElement {
+            cell: TileCell::Uncompressed,
+            element: cell.element_type,
+        })?;
     be_to_i64_into(cell.bytes, bitpix, out);
-    Ok(())
-}
-
-/// A float image's `UNCOMPRESSED_DATA` cell — floats, or the raw bytes of `zbitpix`
-/// floats — widened into `out`. Errors for any other cell.
-pub(super) fn cell_to_f64_into(
-    cell: VlaCell<'_>,
-    zbitpix: FloatBitpix,
-    out: &mut Vec<f64>,
-) -> Result<()> {
-    let bitpix = match cell.element_type {
-        TformKind::F32 => FloatBitpix::F32,
-        TformKind::F64 => FloatBitpix::F64,
-        TformKind::U8 => zbitpix,
-        _ => {
-            return Err(FitsError::CorruptCompressedData {
-                detail: "uncompressed float tile is not a float array".to_string(),
-            });
-        }
-    };
-    be_floats_into(cell.bytes, bitpix, out);
     Ok(())
 }
 
 pub(super) fn byte_cell(cell: VlaCell<'_>) -> Result<&[u8]> {
     match cell.element_type {
-        TformKind::U8 => Ok(cell.bytes),
-        _ => Err(FitsError::CorruptCompressedData {
-            detail: "compressed cell is not a byte array".to_string(),
-        }),
+        ElementKind::U8 => Ok(cell.bytes),
+        element => Err(CompressedDataDefect::CellElement {
+            cell: TileCell::Compressed,
+            element,
+        }
+        .into()),
     }
 }
 
 pub(super) fn plio_cell(cell: VlaCell<'_>) -> Result<&[u8]> {
-    (cell.element_type == TformKind::I16)
-        .then_some(cell.bytes)
-        .ok_or_else(|| FitsError::CorruptCompressedData {
-            detail: "PLIO_1 data is not an i16 list".to_string(),
-        })
+    match cell.element_type {
+        ElementKind::I16 => Ok(cell.bytes),
+        element => Err(CompressedDataDefect::CellElement {
+            cell: TileCell::Compressed,
+            element,
+        }
+        .into()),
+    }
 }
 
 /// A zeroed typed sample buffer of `len` elements. Parallel decode narrows into
@@ -205,13 +164,19 @@ mod tests {
 
     use crate::compress::convert::*;
 
+    fn be(values: &[i64], bitpix: IntBitpix) -> Vec<u8> {
+        let mut out = Vec::new();
+        i64_to_be_into(values, bitpix, &mut out);
+        out
+    }
+
     #[test]
     fn i64_be_round_trip_and_buffer_reuse() {
         // I16: narrowing (`as i16`) then big-endian packing, hand-computed. -1 → 0xFFFF,
         // 258 → 0x0102, -2 → 0xFFFE.
         let vals = [0i64, 1, -1, 258, -2];
         let want = [0, 0, 0, 1, 0xFF, 0xFF, 0x01, 0x02, 0xFF, 0xFE];
-        assert_eq!(i64_to_be(&vals, IntBitpix::I16), want);
+        assert_eq!(be(&vals, IntBitpix::I16), want);
         // Decode is the exact inverse (sign-extending back to i64), into a reused buffer.
         let mut d = Vec::new();
         be_to_i64_into(&want, IntBitpix::I16, &mut d);
@@ -220,12 +185,9 @@ mod tests {
         // I32 packs four bytes/elem; 0x00010203 = 66051, -1 → all-ones.
         let i32_vals = [66051i64, -1];
         assert_eq!(
-            i64_to_be(&i32_vals, IntBitpix::I32),
+            be(&i32_vals, IntBitpix::I32),
             [0x00, 0x01, 0x02, 0x03, 0xFF, 0xFF, 0xFF, 0xFF]
         );
-        let mut native_i32 = Vec::new();
-        i32_to_be_into(&[66051, -1], &mut native_i32);
-        assert_eq!(native_i32, [0x00, 0x01, 0x02, 0x03, 0xFF, 0xFF, 0xFF, 0xFF]);
         be_to_i64_into(
             &[0, 1, 2, 3, 0xFF, 0xFF, 0xFF, 0xFF],
             IntBitpix::I32,
@@ -234,10 +196,10 @@ mod tests {
         assert_eq!(d, i32_vals);
 
         // U8 and I64 ends of the range.
-        assert_eq!(i64_to_be(&[255, 0], IntBitpix::U8), [0xFF, 0x00]);
+        assert_eq!(be(&[255, 0], IntBitpix::U8), [0xFF, 0x00]);
         be_to_i64_into(&[0xFF, 0x00], IntBitpix::U8, &mut d);
         assert_eq!(d, [255, 0]);
-        assert_eq!(i64_to_be(&[-1], IntBitpix::I64), [0xFF; 8]);
+        assert_eq!(be(&[-1], IntBitpix::I64), [0xFF; 8]);
 
         // `i64_to_be_into` clears + resizes its scratch: a long fill followed by a short
         // one must leave exactly the short result (no stale tail), matching the owning form.

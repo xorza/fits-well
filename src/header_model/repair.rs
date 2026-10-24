@@ -18,4 +18,6 @@ pub enum RepairKind {
     ValueIndicator,
     /// A non-ASCII byte in a comment or in commentary text read as `?`.
     NonAsciiText,
+    /// An `END` record with bytes other than blanks after its name, read as `END`.
+    EndText,
 }

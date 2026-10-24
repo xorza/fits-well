@@ -42,7 +42,7 @@ fn main() -> fits_well::Result<()> {
 
     println!(
         "{} rows, {} columns",
-        schema.row_count,
+        schema.row_count(),
         schema.columns.len()
     );
     // Address a column by index or by `TTYPEn` name; the handle decodes on demand.

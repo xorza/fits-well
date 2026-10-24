@@ -24,12 +24,15 @@ impl AsciiText {
     ///
     /// # Panics
     /// When `r` is not a row.
-    pub fn get(&self, r: usize) -> Option<&str> {
+    pub fn row(&self, r: usize) -> Option<&str> {
         self.defined[r].then(|| self.text.row(r))
     }
 
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = Option<&str>> {
-        (0..self.len()).map(|r| self.get(r))
+    pub const fn iter(&self) -> AsciiRows<'_> {
+        AsciiRows {
+            text: self,
+            next: 0,
+        }
     }
 
     /// Whether any row is undefined.
@@ -56,3 +59,38 @@ impl<S: AsRef<str>> FromIterator<Option<S>> for AsciiText {
         }
     }
 }
+
+impl<'a> IntoIterator for &'a AsciiText {
+    type Item = Option<&'a str>;
+    type IntoIter = AsciiRows<'a>;
+
+    fn into_iter(self) -> AsciiRows<'a> {
+        self.iter()
+    }
+}
+
+/// The rows of an [`AsciiText`], in row order, from [`AsciiText::iter`].
+#[derive(Debug, Clone)]
+pub struct AsciiRows<'a> {
+    text: &'a AsciiText,
+    next: usize,
+}
+
+impl<'a> Iterator for AsciiRows<'a> {
+    type Item = Option<&'a str>;
+
+    fn next(&mut self) -> Option<Option<&'a str>> {
+        if self.next == self.text.len() {
+            return None;
+        }
+        self.next += 1;
+        Some(self.text.row(self.next - 1))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.text.len() - self.next;
+        (left, Some(left))
+    }
+}
+
+impl ExactSizeIterator for AsciiRows<'_> {}

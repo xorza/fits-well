@@ -1,10 +1,22 @@
-use crate::fits_writer::render_header;
-
-use crate::header_model::internals::{from_card_lines, records};
+use crate::error::{NonFinite, NumericTarget};
 use crate::header_model::*;
+use crate::internals::cards::{from_card_lines, record_lines, records};
+use crate::internals::rng::SplitMix;
+
+/// The name of each record of `header`, as text; `""` for none.
+fn names(header: &Header) -> Vec<String> {
+    header
+        .iter()
+        .map(|record| {
+            record
+                .name()
+                .map_or_else(String::new, |name| name.to_string())
+        })
+        .collect()
+}
 
 fn sample() -> Header {
-    Header::parse(&records(&[
+    from_card_lines(&[
         "SIMPLE  =                    T",
         "BITPIX  =                   16",
         "NAXIS   =                    2",
@@ -13,9 +25,7 @@ fn sample() -> Header {
         "OBJECT  = 'Cygnus X-1'",
         "COMMENT  some annotation",
         "OBJECT  = 'shadowed'",
-        "END",
-    ]))
-    .unwrap()
+    ])
 }
 
 /// A valued record's text value; `None` for any other record.
@@ -53,12 +63,7 @@ fn keyword_lookup_returns_first_occurrence() {
     }
     // The inline comment reads like a value: the first card's, trimmed; `None` for a
     // card without one and for an absent card.
-    let commented = Header::parse(&records(&[
-        "OBJECT  = 'M31' /  the target  ",
-        "NAXIS   = 2",
-        "END",
-    ]))
-    .unwrap();
+    let commented = from_card_lines(&["OBJECT  = 'M31' /  the target  ", "NAXIS   = 2"]);
     assert_eq!(
         commented.get_comment(keywords::OBJECT).unwrap(),
         Some("the target")
@@ -77,13 +82,13 @@ fn strict_optional_getters_distinguish_absent_and_mistyped_values() {
     assert_eq!(h.get_real("MISSING").unwrap(), None);
     assert!(matches!(
         h.get_real(keywords::OBJECT),
-        Err(FitsError::TypeMismatch { name, expected })
-            if name == "OBJECT" && expected == "real"
+        Err(FitsError::ValueTypeMismatch { name: RecordName::Keyword(name), expected: ValueKind::Real })
+            if name == "OBJECT"
     ));
     assert!(matches!(
         h.get_logical(keywords::BITPIX),
-        Err(FitsError::TypeMismatch { name, expected })
-            if name == "BITPIX" && expected == "logical"
+        Err(FitsError::ValueTypeMismatch { name: RecordName::Keyword(name), expected: ValueKind::Logical })
+            if name == "BITPIX"
     ));
 
     // `require_*`: the value when present, `MissingKeyword` when absent, and the same
@@ -118,20 +123,19 @@ fn strict_optional_getters_distinguish_absent_and_mistyped_values() {
     ));
     assert!(matches!(
         h.require_text(keywords::BITPIX),
-        Err(FitsError::TypeMismatch { name, expected }) if name == "BITPIX" && expected == "text"
+        Err(FitsError::ValueTypeMismatch { name: RecordName::Keyword(name), expected: ValueKind::Text }) if name == "BITPIX"
     ));
 }
 
 #[test]
 fn bounded_integer_getter_rejects_exact_values_outside_i64() {
-    let h = Header::parse(&records(&[
+    let h = from_card_lines(&[
         "MIN     = -9223372036854775808",
         "MAX     =  9223372036854775807",
         "BELOW   = -9223372036854775809",
         "ABOVE   =  9223372036854775808",
-        "END",
-    ]))
-    .unwrap();
+        "SEVEN   =                    7",
+    ]);
     assert_eq!(h.get_integer("MIN").unwrap(), Some(i64::MIN));
     assert_eq!(h.get_integer("MAX").unwrap(), Some(i64::MAX));
     for (keyword, decimal) in [
@@ -140,11 +144,80 @@ fn bounded_integer_getter_rejects_exact_values_outside_i64() {
     ] {
         assert!(matches!(
             h.get_integer(keyword),
-            Err(FitsError::IntegerOutOfRange { value, target })
-                if value == decimal && target == "i64"
+            Err(FitsError::IntegerOutOfRange { value, target: NumericTarget::I64, .. })
+                if value == decimal
         ));
     }
     assert_eq!(h.get_real("ABOVE").unwrap(), Some(-(i64::MIN as f64)));
+
+    // The `usize` forms take 7, refuse a negative value as out of range and pass the
+    // i64 refusal on; an absent card is missing, or the default.
+    assert_eq!(h.require_usize("SEVEN").unwrap(), 7);
+    assert_eq!(h.optional_usize("SEVEN", 3).unwrap(), 7);
+    assert_eq!(h.optional_usize("ABSENT", 3).unwrap(), 3);
+    assert!(matches!(
+        h.require_usize("ABSENT"),
+        Err(FitsError::MissingKeyword { keyword }) if keyword == "ABSENT"
+    ));
+    for result in [h.require_usize("MIN"), h.optional_usize("MIN", 3)] {
+        assert!(matches!(
+            result,
+            Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "MIN"
+        ));
+    }
+    for result in [h.require_usize("ABOVE"), h.optional_usize("ABOVE", 3)] {
+        assert!(matches!(
+            result,
+            Err(FitsError::IntegerOutOfRange {
+                target: NumericTarget::I64,
+                ..
+            })
+        ));
+    }
+}
+
+/// `append_filtered_from` appends the records `keep` keeps and every one named by no
+/// keyword, in order, and the lookup finds the first record of each name after it.
+#[test]
+fn appending_a_filtered_header_keeps_order_and_lookup() {
+    let source = from_card_lines(&[
+        "OBJECT  = 'M31'",
+        "COMMENT  kept whatever keep says",
+        "EXPTIME =                   30 / seconds",
+        "OBJECT  = 'shadowed'",
+    ]);
+    let mut header = from_card_lines(&["INSTRUME= 'CCD'"]);
+    header.append_filtered_from(&source, |keyword| keyword != keywords::OBJECT);
+    assert_eq!(names(&header), ["INSTRUME", "COMMENT", "EXPTIME"]);
+    assert_eq!(header.get_integer("EXPTIME").unwrap(), Some(30));
+    assert_eq!(header.get(keywords::OBJECT).unwrap(), None);
+    header.append_filtered_from(&source, |_| true);
+    assert_eq!(header.get_integer("EXPTIME").unwrap(), Some(30));
+    assert_eq!(header.get_text(keywords::OBJECT).unwrap(), Some("M31"));
+}
+
+/// `rename_keywords` renames every valued record of a name in place, its value and
+/// comment kept, and the lookup follows the new name.
+#[cfg(feature = "compression")]
+#[test]
+fn renamed_keywords_keep_their_place_value_and_comment() {
+    let mut header = from_card_lines(&[
+        "ZTHEAP  =                    4 / heap start",
+        "OTHER   =                    1",
+        "ZTHEAP  =                    5",
+    ]);
+    header.rename_keywords(&[(keywords::ZTHEAP, keywords::THEAP)]);
+    assert_eq!(names(&header), ["THEAP", "OTHER", "THEAP"]);
+    assert_eq!(header.get(keywords::ZTHEAP).unwrap(), None);
+    assert_eq!(header.get_integer(keywords::THEAP).unwrap(), Some(4));
+    assert_eq!(
+        header.records[0],
+        Record::Valued {
+            keyword: keywords::THEAP,
+            value: Value::Integer(4.into()),
+            comment: Some("heap start".to_string()),
+        }
+    );
 }
 
 #[test]
@@ -154,7 +227,7 @@ fn iter_yields_every_record_in_order_with_duplicates() {
 
     // Every stored card; END is implicit and not stored.
     assert_eq!(entries.len(), 8);
-    let keywords: Vec<&str> = entries.iter().map(|record| record.name()).collect();
+    let keywords = names(&h);
     assert_eq!(
         keywords,
         [
@@ -167,7 +240,7 @@ fn iter_yields_every_record_in_order_with_duplicates() {
     assert_eq!(
         entries[0],
         RecordView::Valued {
-            keyword: &keywords::SIMPLE,
+            keyword: keywords::SIMPLE,
             value: &Value::Logical(true),
             comment: None,
         }
@@ -175,7 +248,7 @@ fn iter_yields_every_record_in_order_with_duplicates() {
     assert_eq!(
         entries[6],
         RecordView::Commentary {
-            name: "COMMENT",
+            name: CommentaryName::COMMENT,
             text: Some(" some annotation"),
         }
     );
@@ -196,19 +269,20 @@ fn iter_yields_every_record_in_order_with_duplicates() {
     assert_eq!(h.index_of(keywords::COMMENT).unwrap(), Some(6));
     assert!(h.contains(keywords::COMMENT).unwrap());
     assert!(!h.contains(keywords::EXTNAME).unwrap());
-    assert_eq!(h.comments().collect::<Vec<_>>(), [" some annotation"]);
-    assert_eq!(h.history().count(), 0);
+    assert_eq!(
+        h.comment_records().collect::<Vec<_>>(),
+        [" some annotation"]
+    );
+    assert_eq!(h.history_records().count(), 0);
 }
 
 #[test]
 fn continue_records_reassemble_a_long_string() {
-    let h = Header::parse(&records(&[
+    let h = from_card_lines(&[
         "WEATHER = 'Partly cloudy during the evening f&'",
         "CONTINUE  'ollowed by cloudy skies overnight.&'",
         "CONTINUE  ' Low 21C. Winds NNE at 5 to 10 mph.'",
-        "END",
-    ]))
-    .unwrap();
+    ]);
     assert_eq!(
         h.get_text("WEATHER").unwrap(),
         Some(
@@ -217,20 +291,18 @@ fn continue_records_reassemble_a_long_string() {
         )
     );
     // The two CONTINUE records are folded into the value card, not stored.
-    assert_eq!(h.cards.len(), 1);
+    assert_eq!(h.records.len(), 1);
 }
 
 #[test]
 fn continue_records_concatenate_the_normative_comment_fragments() {
-    let h = Header::parse(&records(&[
+    let h = from_card_lines(&[
         "STRKEY  = 'This keyword value is continued &'",
         "CONTINUE  ' over multiple keyword records.&'",
         "CONTINUE  '&' / The comment field for this",
         "CONTINUE  '&' / keyword is also continued",
         "CONTINUE  '' / over multiple records.",
-        "END",
-    ]))
-    .unwrap();
+    ]);
     let Some(RecordView::Valued { value, comment, .. }) = h.iter().next() else {
         panic!("the CONTINUE chain reads back as one valued record");
     };
@@ -242,32 +314,40 @@ fn continue_records_concatenate_the_normative_comment_fragments() {
         comment,
         Some("The comment field for this keyword is also continued over multiple records.")
     );
-    assert_eq!(h.cards.len(), 1);
+    assert_eq!(h.records.len(), 1);
 }
 
 #[test]
 fn trailing_ampersand_without_a_continue_is_a_literal() {
-    let h = Header::parse(&records(&["NOTE    = 'ends with amp &'", "END"])).unwrap();
+    let h = from_card_lines(&["NOTE    = 'ends with amp &'"]);
     assert_eq!(h.get_text("NOTE").unwrap(), Some("ends with amp &"));
 }
 
+/// A `CONTINUE` record no value card awaits is the commentary its bytes 9–80 spell, kept
+/// as they are: a record already 80 bytes long renders back to its 80 bytes.
 #[test]
 fn orphan_continue_is_demoted_to_commentary() {
-    let h = Header::parse(&records(&[
-        "CONTINUE  'no predecessor' / retained note",
-        "END",
-    ]))
-    .unwrap();
-    assert_eq!(h.cards.len(), 1);
-    assert!(matches!(h.cards[0], Card::Commentary { .. }));
+    let full = format!("CONTINUE  'abc'/{}", "x".repeat(64));
+    let h = from_card_lines(&[&full]);
+    let mut rendered = Vec::new();
+    h.render_into(Signing::Unsigned, Space::Spare(0), &mut rendered)
+        .unwrap();
+    assert_eq!(&rendered[..80], full.as_bytes());
+
+    let h = from_card_lines(&["CONTINUE  'no predecessor' / retained note"]);
+    assert_eq!(h.records.len(), 1);
     assert_eq!(
-        h.cards[0].comment(),
-        Some("  'no predecessor' / retained note")
+        h.records[0],
+        Record::Commentary {
+            name: CommentaryName::CONTINUE,
+            text: Some("  'no predecessor' / retained note".into()),
+        }
     );
     assert_eq!(h.get("CONTINUE").unwrap(), None);
 
     let mut rendered = Vec::new();
-    render_header(&h, 0, &mut rendered).unwrap();
+    h.render_into(Signing::Unsigned, Space::Spare(0), &mut rendered)
+        .unwrap();
     let expected = b"CONTINUE  'no predecessor' / retained note";
     assert_eq!(&rendered[..expected.len()], expected);
 }
@@ -288,21 +368,21 @@ fn builder_sets_replaces_and_indexes_keywords() {
     assert_eq!(h.get_logical(keywords::SIMPLE).unwrap(), Some(true));
     assert_eq!(h.get_integer(keywords::BITPIX).unwrap(), Some(16));
     assert_eq!(h.get_text(keywords::OBJECT).unwrap(), Some("NGC4151"));
-    assert_eq!(h.cards.len(), 3);
+    assert_eq!(h.records.len(), 3);
 
     // Re-setting a keyword replaces in place — no duplicate card, index stable.
     h.set_internal(keywords::BITPIX, -32);
     assert_eq!(h.get_integer(keywords::BITPIX).unwrap(), Some(-32));
-    assert_eq!(h.cards.len(), 3);
+    assert_eq!(h.records.len(), 3);
     // The attached comment survives on its card.
-    assert_eq!(h.cards[0].comment(), Some("conforms"));
+    assert_eq!(h.records[0].comment(), Some("conforms"));
 
     #[cfg(feature = "compression")]
     {
         h.set_internal("ZFORM1", "1J")
             .set_internal("ZCTYP1", "GZIP_1")
             .set_internal("KEEP", 7);
-        h.remove_where(|keyword| matches!(keyword, "ZFORM1" | "ZCTYP1"));
+        h.remove_where(|keyword| matches!(keyword.as_str(), "ZFORM1" | "ZCTYP1"));
         assert_eq!(h.get("ZFORM1").unwrap(), None);
         assert_eq!(h.get("ZCTYP1").unwrap(), None);
         assert_eq!(h.get_integer("KEEP").unwrap(), Some(7));
@@ -323,7 +403,7 @@ fn builder_rejects_nonstandard_keyword_names_without_mutating() {
             Err(FitsError::InvalidKeyword { name }) if name == keyword
         ));
     }
-    assert!(header.cards.is_empty());
+    assert!(header.records.is_empty());
 }
 
 #[test]
@@ -332,10 +412,9 @@ fn builder_appends_commentary_cards() {
     h.set_internal(keywords::SIMPLE, true);
     h.push_comment("made by fits").unwrap();
     h.push_history("step 1").unwrap();
-    assert_eq!(h.cards.len(), 3);
-    assert!(matches!(h.cards[1], Card::Commentary { .. }));
-    assert_eq!(h.cards[1].keyword(), "COMMENT");
-    assert_eq!(h.cards[2].keyword(), "HISTORY");
+    assert_eq!(h.records.len(), 3);
+    assert!(matches!(h.records[1], Record::Commentary { .. }));
+    assert_eq!(names(&h)[1..], ["COMMENT", "HISTORY"]);
     // Commentary cards are not keyword-indexed.
     assert_eq!(h.get(keywords::COMMENT).unwrap(), None);
 }
@@ -356,7 +435,7 @@ fn ordered_header_edits_preserve_duplicates_and_rebuild_lookup() {
     assert_eq!(header.get_real("EXPTIME").unwrap(), Some(30.0));
     assert_eq!(header.get_text(keywords::INSTRUME).unwrap(), Some("CCD-1"));
     assert_eq!(
-        header.iter().map(RecordView::name).collect::<Vec<_>>(),
+        names(&header),
         ["OBJECT", "EXPTIME", "OBJECT", "INSTRUME", ""]
     );
 
@@ -393,7 +472,7 @@ fn ordered_header_edits_preserve_duplicates_and_rebuild_lookup() {
             })
         ));
     }
-    assert_eq!(header.comments().collect::<Vec<_>>(), ["kept"]);
+    assert_eq!(header.comment_records().collect::<Vec<_>>(), ["kept"]);
     assert!(matches!(
         header.remove_at(99),
         Err(FitsError::IndexOutOfBounds {
@@ -439,8 +518,8 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         assert!(matches!(
             header.set("REAL", value),
-            Err(FitsError::InvalidHeaderValue { keyword, reason })
-                if keyword == "REAL" && reason == "real values must be finite"
+            Err(FitsError::InvalidHeaderValue { name, reason: NonFinite::Real })
+                if name.to_string() == "REAL"
         ));
     }
     assert!(matches!(
@@ -450,14 +529,12 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
                 im: f64::NAN,
             },
         ),
-        Err(FitsError::InvalidHeaderValue { keyword, reason })
-            if keyword == "COMPLEX" && reason == "complex real components must be finite"
+        Err(FitsError::InvalidHeaderValue { name, reason: NonFinite::Complex })
+            if name.to_string() == "COMPLEX"
     ));
     assert!(matches!(
         header.set(keywords::OBJECT, "Véga"),
-        Err(FitsError::InvalidAscii {
-            context: "header text value"
-        })
+        Err(FitsError::InvalidAscii { text: TextOrigin::Value(name) }) if name.to_string() == "OBJECT"
     ));
     assert!(matches!(
         header.set("COMPLEX",
@@ -467,11 +544,11 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
             },
         ),
         Err(FitsError::HeaderCardTooLong {
-            keyword,
+            name,
             length: 92,
-        }) if keyword == "COMPLEX"
+        }) if name.to_string() == "COMPLEX"
     ));
-    assert!(header.cards.is_empty());
+    assert!(header.records.is_empty());
 
     for keyword in ["", " ESO DET", "ESO DET ", "ESO=DET", "LONGER123"] {
         assert!(matches!(
@@ -483,51 +560,47 @@ fn fallible_header_mutation_rejects_invalid_inputs_without_changes() {
         header.set("ESO\nDET", 1),
         Err(FitsError::InvalidKeyword { name }) if name == "ESO\nDET"
     ));
-    assert!(header.cards.is_empty());
+    assert!(header.records.is_empty());
 
     header.set("VALUE", 1).unwrap();
     header.set_comment("VALUE", &"c".repeat(47)).unwrap();
     assert!(matches!(
         header.set_comment("VALUE", &"c".repeat(48)),
         Err(FitsError::HeaderCardTooLong {
-            keyword,
+            name,
             length: 81,
-        }) if keyword == "VALUE"
+        }) if name.to_string() == "VALUE"
     ));
-    assert_eq!(header.cards[0].comment(), Some("c".repeat(47).as_str()));
+    assert_eq!(header.records[0].comment(), Some("c".repeat(47).as_str()));
     assert!(matches!(
         header.set_comment("VALUE", "bad\ncomment"),
-        Err(FitsError::InvalidAscii {
-            context: "header comment"
-        })
+        Err(FitsError::InvalidAscii { text: TextOrigin::Comment(name) }) if name.to_string() == "VALUE"
     ));
     let before = header.clone();
     assert!(matches!(
         header.set_comment("ABSENT", "lost"),
         Err(FitsError::MissingKeyword { keyword }) if keyword == "ABSENT"
     ));
-    assert_eq!(header.cards, before.cards);
+    assert_eq!(header.records, before.records);
 
     header.push_comment(&"x".repeat(72)).unwrap();
     assert!(matches!(
         header.push_comment(&"x".repeat(73)),
         Err(FitsError::HeaderCardTooLong {
-            keyword,
+            name,
             length: 81,
-        }) if keyword == "COMMENT"
+        }) if name.to_string() == "COMMENT"
     ));
     assert!(matches!(
         header.push_history("history\nline"),
-        Err(FitsError::InvalidAscii {
-            context: "header comment"
-        })
+        Err(FitsError::InvalidAscii { text: TextOrigin::Comment(name) }) if name.to_string() == "HISTORY"
     ));
-    assert_eq!(header.cards.len(), 2);
+    assert_eq!(header.records.len(), 2);
 }
 
 #[test]
 fn missing_mandatory_keyword_is_reported() {
-    let h = Header::parse(&records(&["SIMPLE  =                    T", "END"])).unwrap();
+    let h = from_card_lines(&["SIMPLE  =                    T"]);
     assert!(matches!(
         h.bitpix(),
         Err(FitsError::MissingKeyword {
@@ -574,7 +647,7 @@ fn trailing_blank_records_are_space() {
     assert!(matches!(
         header.iter().nth(1),
         Some(RecordView::Commentary {
-            name: "",
+            name: CommentaryName::BLANK,
             text: None
         })
     ));
@@ -608,14 +681,10 @@ fn hierarch_records_are_found_and_set_by_name() {
     ));
 
     let mut bytes = Vec::new();
-    render_header(&header, 0, &mut bytes).unwrap();
-    let lines: Vec<&str> = bytes
-        .as_chunks::<80>()
-        .0
-        .iter()
-        .map(|record| str::from_utf8(record).unwrap().trim_end())
-        .take(6)
-        .collect();
+    header
+        .render_into(Signing::Unsigned, Space::Spare(0), &mut bytes)
+        .unwrap();
+    let lines: Vec<&str> = record_lines(&bytes).take(6).collect();
     // 80 − (9 + 12 + 3) − 3 = 53 characters fit the first record, 47 the next.
     assert_eq!(
         lines,
@@ -633,6 +702,161 @@ fn hierarch_records_are_found_and_set_by_name() {
         reread.get_hierarch("ESO OBS NAME").unwrap(),
         Some(&Value::Text(long))
     );
-    let names: Vec<&str> = reread.iter().map(RecordView::name).collect();
-    assert_eq!(names, ["SIMPLE", "HIERARCH", "OBJECT", "HIERARCH"]);
+    assert_eq!(
+        names(&reread),
+        [
+            "SIMPLE",
+            "HIERARCH ESO DET CHIP1 NAME",
+            "OBJECT",
+            "HIERARCH ESO OBS NAME"
+        ]
+    );
+}
+
+/// A HIERARCH record whose value does not parse keeps its name: its lookup fails as a
+/// keyword's does, `set_hierarch` replaces it in its place, and `remove_hierarch` removes
+/// it. Its comment reads with `get_hierarch_comment`.
+#[test]
+fn a_malformed_hierarch_record_keeps_its_name() {
+    let mut h = from_card_lines(&[
+        "HIERARCH ESO DET GAIN = 1.2.3",
+        "HIERARCH ESO DET NAME = 'CCD' / the chip",
+    ]);
+    assert!(matches!(
+        h.get_hierarch("ESO DET GAIN"),
+        Err(FitsError::InvalidValue { .. })
+    ));
+    assert_eq!(
+        h.get_hierarch_comment("eso det name").unwrap(),
+        Some("the chip")
+    );
+    h.set_hierarch("ESO DET GAIN", 1.5).unwrap();
+    assert_eq!(h.len(), 2);
+    assert_eq!(
+        h.get_hierarch("ESO DET GAIN").unwrap(),
+        Some(&Value::Real(1.5))
+    );
+    assert_eq!(names(&h)[0], "HIERARCH ESO DET GAIN");
+    assert!(matches!(
+        h.remove_hierarch("ESO DET NAME").unwrap(),
+        Some(Record::Hierarch { .. })
+    ));
+    assert_eq!(h.get_hierarch("ESO DET NAME").unwrap(), None);
+    assert_eq!(h.remove_hierarch("ESO DET NAME").unwrap(), None);
+}
+
+/// Each edit keeps both indexes on the first record of each name: after a seeded run of
+/// inserts and removals of duplicates, every lookup agrees with a scan of the records.
+#[test]
+fn edits_keep_the_indexes_on_the_first_record_of_each_name() {
+    let keywords = ["A", "B", "C"];
+    let hierarch = ["X Y", "Z"];
+    let mut h = Header::new();
+    let mut draws = SplitMix::new(3);
+    for step in 0..400 {
+        let len = h.len();
+        let at = usize::try_from(draws.next()).unwrap() % (len + 1);
+        match draws.next() % 4 {
+            0 if len > 0 => {
+                h.remove_at(at % len).unwrap();
+            }
+            1 => {
+                let name = hierarch[step % hierarch.len()];
+                h.insert_record(
+                    at,
+                    Record::Hierarch {
+                        name: name.parse().unwrap(),
+                        value: Value::Integer(i64::try_from(step).unwrap().into()),
+                        comment: None,
+                    },
+                )
+                .unwrap();
+            }
+            _ => {
+                let keyword = keywords[step % keywords.len()];
+                h.insert(at, keyword, i64::try_from(step).unwrap()).unwrap();
+            }
+        }
+        for keyword in keywords {
+            let first = h.iter().find_map(|record| match record {
+                RecordView::Valued {
+                    keyword: k, value, ..
+                } if k == keyword => Some(value),
+                _ => None,
+            });
+            assert_eq!(h.get(keyword).unwrap(), first, "step {step}: {keyword}");
+        }
+        for name in hierarch {
+            let wanted: HierarchName = name.parse().unwrap();
+            let first = h.iter().find_map(|record| match record {
+                RecordView::Hierarch { name, value, .. } if *name == wanted => Some(value),
+                _ => None,
+            });
+            assert_eq!(h.get_hierarch(name).unwrap(), first, "step {step}: {name}");
+        }
+    }
+}
+
+/// `insert_record` puts back what `remove_at` took, and `Extend` appends records as
+/// `insert_record` does: a header rebuilt from its own records equals it.
+#[test]
+fn insert_record_is_the_inverse_of_remove_at() {
+    let original = sample();
+    let mut h = original.clone();
+    let record = h.remove_at(3).unwrap();
+    assert_eq!(h.get_integer("NAXIS1").unwrap(), None);
+    h.insert_record(3, record).unwrap();
+    assert_eq!(h, original);
+    assert_eq!(h.get_integer("NAXIS1").unwrap(), Some(512));
+
+    let mut rebuilt = Header::new();
+    rebuilt.extend((0..original.len()).map(|_| h.remove_at(0).unwrap()));
+    assert_eq!(rebuilt, original);
+    assert_eq!(rebuilt.get_text("OBJECT").unwrap(), Some("Cygnus X-1"));
+    assert!(matches!(
+        Header::new().insert_record(1, Record::commentary(CommentaryName::COMMENT, "x")),
+        Err(FitsError::IndexOutOfBounds {
+            index: 1,
+            len: 0,
+            ..
+        })
+    ));
+}
+
+/// A signed render sets `CHECKSUM` and `DATASUM` in their place, keeping their comments,
+/// or after the records, and leaves the header as it is; the HDU it heads, with no data,
+/// sums to negative zero (Appendix J). Blank records fill the blocks asked, and a header
+/// that needs more is refused.
+#[test]
+fn a_signed_render_sets_the_checksums_in_place() {
+    let h = from_card_lines(&[
+        "SIMPLE  =                    T",
+        "CHECKSUM= 'stale' / old",
+        "BITPIX  =                    8",
+        "NAXIS   =                    0",
+    ]);
+    let mut out = Vec::new();
+    h.render_into(Signing::WithDataSum(0), Space::Blocks(1), &mut out)
+        .unwrap();
+    assert_eq!(out.len(), BLOCK_SIZE);
+    let lines: Vec<&str> = record_lines(&out).collect();
+    assert_eq!(lines[0], "SIMPLE  =                    T");
+    assert!(lines[1].starts_with("CHECKSUM= '") && lines[1].ends_with("' / old"));
+    assert_ne!(&lines[1][11..27], checksum::PLACEHOLDER);
+    assert_eq!(lines[4], "DATASUM = '0       '");
+    assert_eq!(lines[5..35], [""; 30]);
+    assert_eq!(lines[35], "END");
+    assert_eq!(checksum::accumulate(&out, 0), 0xFFFF_FFFF);
+    assert_eq!(h.get_text(keywords::CHECKSUM).unwrap(), Some("stale"));
+    assert_eq!(h.get(keywords::DATASUM).unwrap(), None);
+
+    // 36 records and `END` take two blocks.
+    let full = from_card_lines(&["COMMENT x"; 36]);
+    assert!(matches!(
+        full.render_into(Signing::Unsigned, Space::Blocks(1), &mut out),
+        Err(FitsError::HeaderDoesNotFit {
+            needed: 2,
+            available: 1
+        })
+    ));
 }

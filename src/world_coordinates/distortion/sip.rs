@@ -204,30 +204,3 @@ fn missing_order(root: &str) -> FitsError {
         keyword: order_keyword(root),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::error::FitsError;
-    use crate::header_model::Header;
-    use crate::world_coordinates::distortion::sip::Sip;
-
-    /// `U = u − 0.001·u²` peaks at `U = 250` (at `u = 500`): past the fold no `u` gives
-    /// `U = 300`, and the inverse refuses rather than return a wrong one.
-    #[test]
-    fn the_inverse_refuses_a_point_past_a_fold() {
-        let mut header = Header::new();
-        header
-            .set_internal("A_ORDER", 2)
-            .set_internal("A_2_0", -1e-3)
-            .set_internal("B_ORDER", 2);
-        let sip = Sip::from_header(&header).unwrap().unwrap();
-        assert!(matches!(
-            sip.inverse(300.0, 0.0),
-            Err(FitsError::WcsNoConvergence { algorithm: "SIP" })
-        ));
-        // The stop rule leaves a residual of at most 1e-13·240 in `U`, and `dU/du` is
-        // 0.2 at `u = 400`, so `u` is within 1.2e-10.
-        let [u, v] = sip.inverse(240.0, 0.0).unwrap();
-        assert!((u - 400.0).abs() <= 1.2e-10 && v == 0.0, "{u}");
-    }
-}

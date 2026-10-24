@@ -1,13 +1,13 @@
 //! A binary table's structure as the header alone determines it.
 
 use crate::bintable::column::Column;
+use crate::bintable::table_extent::TableExtent;
 use crate::bintable::tdim;
-use crate::bintable::tform::Tform;
+use crate::bintable::tform::{Storage, Tform};
 use crate::column;
-use crate::column::{ColumnLabels, ColumnScaling};
+use crate::column::{ColumnLabels, ColumnScaling, TableShape};
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::hdu::validate_table_field_count;
 use crate::header_model::{Header, keywords};
 
 /// Whether a schema reads the keywords that describe a column's values.
@@ -21,13 +21,7 @@ enum ValueKeywords {
 /// unit. Byte offsets are relative to the start of the data unit.
 #[derive(Debug, Clone)]
 pub struct Schema {
-    pub row_count: usize,
-    /// Byte width of one row (`NAXIS1`).
-    pub row_len: usize,
-    /// Where the heap starts (`THEAP`, else the end of the main table) and ends
-    /// (the main table plus `PCOUNT`) — derived and validated, so not public.
-    pub(crate) heap_offset: usize,
-    pub(crate) heap_end: usize,
+    pub(crate) extent: TableExtent,
     pub columns: Vec<Column>,
 }
 
@@ -45,12 +39,11 @@ impl Schema {
     }
 
     fn parse_columns(header: &Header, values: ValueKeywords) -> Result<Self> {
-        let row_len = header.require_usize(keywords::NAXIS.indexed(1)?)?;
-        let row_count = header.require_usize(keywords::NAXIS.indexed(2)?)?;
-        // §7.3.1: `0 ≤ TFIELDS ≤ 999` — also a guard, since `tfields` sizes the
-        // column `Vec` and drives the `TFORMn` loop (an absurd value would abort).
-        let tfields = header.require_usize(keywords::TFIELDS)?;
-        validate_table_field_count(tfields)?;
+        let TableShape {
+            row_len,
+            row_count,
+            field_count: tfields,
+        } = TableShape::read(header)?;
 
         let mut columns = Vec::with_capacity(tfields);
         let mut offset = 0;
@@ -58,28 +51,28 @@ impl Schema {
             let tform_value = header.require_text(keywords::TFORM.indexed(n)?)?;
             let tform = tform_value.parse::<Tform>()?;
             let tdim_keyword = keywords::TDIM.indexed(n)?;
-            let shape = match values {
-                ValueKeywords::Read => header
-                    .get_text(tdim_keyword)?
-                    .map(|value| tdim::parse(value, tdim_keyword))
-                    .transpose()?,
-                ValueKeywords::Skip => None,
-            };
-            let (scaling, tnull) = match values {
+            let tnull_keyword = keywords::TNULL.indexed(n)?;
+            let (tdim, scaling, tnull) = match values {
                 ValueKeywords::Read => (
+                    column::keyed(tdim_keyword, || {
+                        let Some(value) = header.get_text(tdim_keyword)? else {
+                            return Ok(None);
+                        };
+                        let shape = tdim::parse(value, tdim_keyword)?;
+                        // A fixed column's cell holds exactly `repeat` elements; a `P`/`Q`
+                        // cell's count is per-row and is checked as each row is read.
+                        if tform.storage() == Storage::Fixed {
+                            tdim::validate_extent(&shape, tform.repeat(), tdim_keyword)?;
+                        }
+                        Ok(Some(shape))
+                    }),
                     ColumnScaling::read(header, n)?,
-                    header.get_integer(keywords::TNULL.indexed(n)?)?,
+                    column::keyed(tnull_keyword, || header.get_integer(tnull_keyword)),
                 ),
-                ValueKeywords::Skip => (ColumnScaling::IDENTITY, None),
+                ValueKeywords::Skip => (Ok(None), ColumnScaling::IDENTITY, Ok(None)),
             };
+            let tdisp_keyword = keywords::TDISP.indexed(n)?;
             let labels = ColumnLabels::read(header, n)?;
-            // A fixed column's cell holds exactly `repeat` elements; a `P`/`Q` cell's
-            // count is per-row and is checked as each row's descriptor is read.
-            if let Some(dims) = &shape
-                && !tform.kind.is_descriptor()
-            {
-                tdim::validate_extent(dims, tform.repeat, tdim_keyword)?;
-            }
             columns.push(Column {
                 name: labels.name,
                 unit: labels.unit,
@@ -87,10 +80,10 @@ impl Schema {
                 tscale: scaling.tscale,
                 tzero: scaling.tzero,
                 tnull,
-                tdim: shape,
-                tdisp: header
-                    .get_text(keywords::TDISP.indexed(n)?)?
-                    .map(str::to_string),
+                tdim,
+                tdisp: column::keyed(tdisp_keyword, || {
+                    Ok(header.get_text(tdisp_keyword)?.map(str::to_string))
+                }),
                 number: n,
                 byte_offset: offset,
             });
@@ -127,12 +120,23 @@ impl Schema {
             });
         }
         Ok(Self {
-            row_count,
-            row_len,
-            heap_offset,
-            heap_end,
+            extent: TableExtent {
+                row_count,
+                row_len,
+                heap_offset,
+                heap_end,
+            },
             columns,
         })
+    }
+
+    pub const fn row_count(&self) -> usize {
+        self.extent.row_count
+    }
+
+    /// Byte width of one row (`NAXIS1`).
+    pub const fn row_len(&self) -> usize {
+        self.extent.row_len
     }
 
     /// The index of the first column whose `TTYPEn` matches `name`, compared
@@ -152,31 +156,8 @@ impl Schema {
     /// This schema for a compacted selection of `row_count` rows, whose heap follows the
     /// rows directly and ends at `data_len`.
     pub(crate) fn compacted(&self, row_count: usize, data_len: usize) -> Self {
-        let heap_offset = row_count * self.row_len;
-        assert!(
-            heap_offset <= data_len,
-            "a compacted selection holds its rows"
-        );
         Self {
-            row_count,
-            row_len: self.row_len,
-            heap_offset,
-            heap_end: data_len,
-            columns: self.columns.clone(),
-        }
-    }
-
-    /// This schema over `row_count` rows that the same heap follows, at the same gap: the
-    /// table that a run of this table's rows and its whole heap make.
-    #[cfg(feature = "compression")]
-    pub(crate) fn with_row_count(&self, row_count: usize) -> Self {
-        let main_len = self.row_count * self.row_len;
-        let shift = |offset: usize| offset - main_len + row_count * self.row_len;
-        Self {
-            row_count,
-            row_len: self.row_len,
-            heap_offset: shift(self.heap_offset),
-            heap_end: shift(self.heap_end),
+            extent: self.extent.compacted(row_count, data_len),
             columns: self.columns.clone(),
         }
     }

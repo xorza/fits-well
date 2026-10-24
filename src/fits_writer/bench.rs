@@ -6,8 +6,9 @@ use std::hint::black_box;
 use criterion::{BenchmarkId, Criterion};
 
 use crate::bench::fixture::{self, Kind, Scale, ScratchDir};
-use crate::bench::scene::{self, CATALOG_ROW_BYTES, CATALOG_ROWS, HEIGHT, TYPES, WIDTH};
 use crate::fits_writer::FitsWriter;
+use crate::internals::samples::BITPIXES;
+use crate::internals::scene::{self, CATALOG_ROW_BYTES, CATALOG_ROWS, HEIGHT, WIDTH};
 
 /// `integration/write_image/file/<type>` and `integration/write_table/file/catalog`, from
 /// creating the file to the last byte written.
@@ -23,7 +24,7 @@ pub(crate) fn integration(c: &mut Criterion) {
 fn write_image(c: &mut Criterion, dir: &ScratchDir) {
     let mut group = Kind::Integration.group(c, "write_image", Scale::Frame);
     let path = dir.file("frame.fits");
-    for bitpix in TYPES {
+    for bitpix in BITPIXES {
         let mut frame = None;
         group.throughput(fixture::throughput(WIDTH * HEIGHT, bitpix.elem_size()));
         group.bench_function(BenchmarkId::new("file", fixture::bitpix_id(bitpix)), |b| {

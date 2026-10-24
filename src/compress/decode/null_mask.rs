@@ -2,33 +2,45 @@
 
 use crate::bintable::table_view::TableView;
 use crate::bintable::vla_column::VlaColumn;
-use crate::compress::ImageCodec;
 use crate::compress::decode::ensure_tile_size;
-use crate::compress::decode::tile_scratch_set::CodecScratch;
-use crate::compress::decode::tiled_image::TiledImage;
-use crate::compress::gzip;
+use crate::compress::decode::float_sample::FloatSample;
+use crate::compress::decode::tile_scratch_set::TileScratchSet;
+use crate::compress::decode::tile_value::TileValue;
 use crate::compress::plane::IntBitpix;
-use crate::compress::plio;
 use crate::compress::rice;
+use crate::compress::tile_codec::{CodecScratch, Tile, TileCodec};
+use crate::error::CompressedDataDefect;
+use crate::error::CompressionFeature;
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::header_model::{Header, keywords};
+use crate::header_model::keywords;
 
-/// The optional null-pixel mask and everything applying it needs: the per-tile mask
-/// column, the `ZMASKCMP` codec that encodes it, and the `BLANK` value an integer
-/// image's masked pixels take (a float image's take `NaN`).
-#[derive(Debug, Clone, Copy)]
+/// How an image spells its nulls: the `BLANK` value an integer image's nulls take (a
+/// float image's take `NaN`), and the value an integer tile stores its nulls as.
+#[derive(Debug)]
+pub(super) struct NullValues {
+    pub(super) blank: Option<i64>,
+    /// An integer tile's stored null: `ZBLANK` as a keyword, else as a column, else
+    /// `BLANK`, as cfitsio resolves it. Absent for a float image, whose quantized nulls
+    /// the dequantization maps.
+    pub(super) stored: TileValue<i64>,
+}
+
+/// An image's nulls and everything applying them needs: the per-tile mask column, the
+/// `ZMASKCMP` codec that encodes it, and how the image spells its nulls.
+#[derive(Debug)]
 pub(super) struct NullMask<'a> {
     column: Option<VlaColumn<'a>>,
-    codec: Option<ImageCodec>,
-    blank: Option<i64>,
+    /// `ZMASKCMP`, its RICE samples a byte wide.
+    codec: Option<TileCodec>,
+    values: NullValues,
 }
 
 impl<'a> NullMask<'a> {
     pub(super) fn read(
-        header: &Header,
         table: TableView<'a>,
-        tiled: &TiledImage<'_>,
+        codec: Option<TileCodec>,
+        values: NullValues,
     ) -> Result<Self> {
         let column = first_column(
             table,
@@ -38,119 +50,96 @@ impl<'a> NullMask<'a> {
                 "NULL PIXEL MASK",
             ],
         )?;
-        let codec = header
-            .get_text(keywords::ZMASKCMP)?
-            .map(ImageCodec::parse)
-            .transpose()?;
-        if column.is_some() && codec == Some(ImageCodec::Hcompress1) {
+        if column.is_some() && matches!(codec, Some(TileCodec::Hcompress(_))) {
             return Err(FitsError::UnsupportedCompression {
-                name: "lossy HCOMPRESS_1 cannot encode a null-pixel mask".to_string(),
+                feature: CompressionFeature::HcompressNullMask,
             });
         }
         Ok(NullMask {
             column,
-            codec,
-            blank: tiled.image.scaling.blank,
+            codec: codec.map(|codec| match codec {
+                TileCodec::Rice(rice::Codec { blocksize, .. }) => TileCodec::Rice(rice::Codec {
+                    blocksize,
+                    bytepix: IntBitpix::U8,
+                }),
+                codec => codec,
+            }),
+            values,
         })
     }
 
-    /// Replace every masked element of an integer tile with `BLANK`.
+    /// Give every null of an integer tile in `scratch` the image's `BLANK`: an element
+    /// the tile stores as its null value, and an element the mask marks.
     pub(super) fn apply_integer(
         &self,
         table_row: usize,
-        tile_elems: usize,
-        values: &mut [i64],
-        mask: &mut Vec<i64>,
-        scratch: &mut CodecScratch,
+        scratch: &mut TileScratchSet<i64>,
     ) -> Result<()> {
-        if !self.decode_into(table_row, tile_elems, mask, scratch)? {
-            return Ok(());
+        let values = &mut scratch.values;
+        let NullValues {
+            blank: declared,
+            stored,
+        } = &self.values;
+        let blank = || {
+            declared.ok_or(FitsError::MissingKeyword {
+                keyword: keywords::BLANK,
+            })
+        };
+        if let Some(stored) = stored.at(table_row)
+            && Some(stored) != *declared
+            && values.contains(&stored)
+        {
+            let blank = blank()?;
+            for value in values.iter_mut().filter(|value| **value == stored) {
+                *value = blank;
+            }
         }
-        let blank = self.blank.ok_or(FitsError::MissingKeyword {
-            keyword: keywords::BLANK,
-        })?;
-        fill_masked(values, mask, blank);
+        if let Some(mask) = self.decode(table_row, scratch.tile.nelem(), &mut scratch.codecs)? {
+            fill_masked(values, mask, blank()?);
+        }
         Ok(())
     }
 
-    /// Replace every masked element of a float tile with `NaN`.
-    pub(super) fn apply_float(
+    /// Replace every masked element of a float tile in `scratch` with `NaN`.
+    pub(super) fn apply_float<F: FloatSample>(
         &self,
         table_row: usize,
-        tile_elems: usize,
-        values: &mut [f64],
-        mask: &mut Vec<i64>,
-        scratch: &mut CodecScratch,
+        scratch: &mut TileScratchSet<F>,
     ) -> Result<()> {
-        if !self.decode_into(table_row, tile_elems, mask, scratch)? {
-            return Ok(());
+        if let Some(mask) = self.decode(table_row, scratch.tile.nelem(), &mut scratch.codecs)? {
+            fill_masked(&mut scratch.values, mask, F::NAN);
         }
-        fill_masked(values, mask, f64::NAN);
         Ok(())
     }
 
-    /// Decode one tile's mask into `out`, reporting whether the tile has one at all.
-    fn decode_into(
+    /// One tile's mask, lent from `codecs`, or `None` when the tile has none.
+    fn decode<'s>(
         &self,
         table_row: usize,
         tile_elems: usize,
-        out: &mut Vec<i64>,
-        scratch: &mut CodecScratch,
-    ) -> Result<bool> {
+        codecs: &'s mut CodecScratch,
+    ) -> Result<Option<&'s [i64]>> {
         let Some(column) = self.column else {
-            return Ok(false);
+            return Ok(None);
         };
         let cell = column.cell(table_row)?;
         if cell.element_count == 0 {
-            return Ok(false);
+            return Ok(None);
         }
         let codec = self.codec.ok_or(FitsError::MissingKeyword {
             keyword: keywords::ZMASKCMP,
         })?;
-        match codec {
-            ImageCodec::Gzip1 => gzip::gzip_tile_into(
-                cell.bytes,
-                IntBitpix::U8,
-                tile_elems,
-                out,
-                &mut scratch.gzip,
-            )?,
-            ImageCodec::Gzip2 => gzip::gzip2_tile_into(
-                cell.bytes,
-                IntBitpix::U8,
-                tile_elems,
-                out,
-                &mut scratch.gzip,
-            )?,
-            ImageCodec::Rice1 => {
-                rice::rice_decode_into(
-                    cell.bytes,
-                    tile_elems,
-                    IntBitpix::U8,
-                    rice::BLOCKSIZE,
-                    out,
-                )?;
-            }
-            ImageCodec::Plio1 => plio::plio_decode_be_into(cell.bytes, tile_elems, out)?,
-            ImageCodec::NoCompress => {
-                if cell.bytes.len() != tile_elems {
-                    return Err(FitsError::DataSizeMismatch {
-                        expected: tile_elems,
-                        got: cell.bytes.len(),
-                    });
-                }
-                out.clear();
-                out.extend(cell.bytes.iter().map(|&value| i64::from(value)));
-            }
-            ImageCodec::Hcompress1 => unreachable!("rejected while building the decode plan"),
+        let tile = Tile {
+            shape: &[tile_elems],
+            width: IntBitpix::U8,
+            blank: None,
+        };
+        let mask = codec.decode_ints(tile, cell.bytes, codecs)?;
+        ensure_tile_size(tile_elems, mask.len())?;
+        if mask.iter().any(|&value| !matches!(value, 0 | 1)) {
+            return Err(CompressedDataDefect::NullMask.into());
         }
-        ensure_tile_size(tile_elems, out.len())?;
-        if out.iter().any(|&value| !matches!(value, 0 | 1)) {
-            return Err(FitsError::CorruptCompressedData {
-                detail: "null-pixel mask contains a value other than zero or one".to_string(),
-            });
-        }
-        Ok(true)
+        Ok(Some(mask))
     }
 }
 

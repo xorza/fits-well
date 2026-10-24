@@ -6,11 +6,11 @@ use std::io::Cursor;
 use criterion::{Criterion, Throughput};
 
 use crate::bench::fixture::{Kind, Scale};
-use crate::bench::scene;
 use crate::bitpix::Bitpix;
 use crate::block::CARD_SIZE;
 use crate::fits_writer::FitsWriter;
 use crate::header_model::Header;
+use crate::internals::scene;
 use crate::reader::FitsReader;
 
 /// `atomic/header/light`: the header unit of a light, as a capture program writes it, parsed into

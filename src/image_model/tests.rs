@@ -1,9 +1,13 @@
-use crate::header_model::internals::from_card_lines as header;
+use crate::error::NumericTarget;
+use crate::header_model::record_name::RecordName;
 use crate::header_model::{Header, keywords};
 use crate::image_model::internals::physical;
-use crate::image_model::sample_type::{SampleType, UnsignedKind};
+use crate::image_model::sample::Sample;
+use crate::image_model::sample_type::UnsignedKind;
 use crate::image_model::unsigned_data::UnsignedData;
+use crate::image_model::view::View;
 use crate::image_model::*;
+use crate::internals::cards::from_card_lines as header;
 
 fn image(samples: Data, scaling: Scaling) -> Image {
     Image {
@@ -61,6 +65,7 @@ fn image_constructor_enforces_geometry_for_every_bitpix() {
         assert!(matches!(
             Image::new(vec![2], samples, scaling),
             Err(FitsError::DataSizeMismatch {
+                unit: SizeUnit::Samples,
                 expected: 2,
                 got: 1
             })
@@ -86,6 +91,7 @@ fn image_constructor_accepts_empty_geometry_and_rejects_nonempty_samples() {
         assert!(matches!(
             Image::new(shape, Data::F64(vec![1.0]), scaling),
             Err(FitsError::DataSizeMismatch {
+                unit: SizeUnit::Samples,
                 expected: 0,
                 got: 1
             })
@@ -94,6 +100,7 @@ fn image_constructor_accepts_empty_geometry_and_rejects_nonempty_samples() {
     assert!(matches!(
         Image::from_u16(vec![2], &[1]),
         Err(FitsError::DataSizeMismatch {
+            unit: SizeUnit::Samples,
             expected: 2,
             got: 1
         })
@@ -144,10 +151,40 @@ fn decodes_big_endian_integers_and_floats() {
     );
 }
 
+/// A caller generic over the sample type converts through `Sample`: a slice views as its
+/// own variant, a view gives its samples back only as their own type, and `BITPIX`
+/// names the type.
+#[test]
+fn samples_convert_by_type() {
+    let view = View::from(&[1i16, -2][..]);
+    assert_eq!(view, View::I16(&[1, -2]));
+    assert_eq!(i16::of(view), Some(&[1, -2][..]));
+    assert_eq!(i32::of(view), None);
+    assert_eq!(<f32 as Sample>::BITPIX, Bitpix::F32);
+    assert_eq!(Data::from(vec![0.5f64]), Data::F64(vec![0.5]));
+    assert_eq!(f64::of_data(Data::F64(vec![0.5])), Ok(vec![0.5]));
+}
+
+/// The affine is one fused multiply-add: `BSCALE × raw` of 134217729² = 2⁵⁴ + 2²⁸ + 1
+/// needs 55 bits, and `BZERO` = −(2⁵⁴ + 2²⁸) leaves exactly 1. A product rounded first
+/// to its 53 bits loses the 1 and gives 0.
+#[test]
+fn physical_values_round_once() {
+    let scaling = Scaling {
+        bscale: 134_217_729.0,
+        bzero: -18_014_398_777_917_440.0,
+        blank: None,
+    };
+    let image = image(Data::I32(vec![134_217_729]), scaling);
+    assert_eq!(physical::<f64>(&image), [1.0]);
+    let product = 134_217_729.0f64 * 134_217_729.0;
+    assert_eq!(product + scaling.bzero, 0.0);
+}
+
 #[test]
 fn image_data_views_preserve_ranges_for_every_sample_type() {
     let u8_values = Data::U8(vec![1, 2, 3, 4]);
-    assert_eq!(u8_values.view_range(1..3), View::U8(&[2, 3]));
+    assert_eq!(u8_values.view().slice(1..3), View::U8(&[2, 3]));
     // The typed accessors give the samples only as their own type, as `View`'s do.
     assert_eq!(u8_values.as_u8(), Some(&[1, 2, 3, 4][..]));
     assert_eq!(u8_values.as_i16(), None);
@@ -155,19 +192,19 @@ fn image_data_views_preserve_ranges_for_every_sample_type() {
     assert_eq!(Data::F64(vec![0.5]).as_f32(), None);
 
     let i16_values = Data::I16(vec![-2, -1, 0, 1]);
-    assert_eq!(i16_values.view_range(1..3), View::I16(&[-1, 0]));
+    assert_eq!(i16_values.view().slice(1..3), View::I16(&[-1, 0]));
 
     let i32_values = Data::I32(vec![-20, -10, 0, 10]);
-    assert_eq!(i32_values.view_range(1..3), View::I32(&[-10, 0]));
+    assert_eq!(i32_values.view().slice(1..3), View::I32(&[-10, 0]));
 
     let i64_values = Data::I64(vec![i64::MIN, -1, 0, i64::MAX]);
-    assert_eq!(i64_values.view_range(1..3), View::I64(&[-1, 0]));
+    assert_eq!(i64_values.view().slice(1..3), View::I64(&[-1, 0]));
 
     let f32_values = Data::F32(vec![-2.5, -0.0, 0.0, 3.5]);
-    assert_eq!(f32_values.view_range(1..3), View::F32(&[-0.0, 0.0]));
+    assert_eq!(f32_values.view().slice(1..3), View::F32(&[-0.0, 0.0]));
 
     let f64_values = Data::F64(vec![-2.5, -0.0, 0.0, 3.5]);
-    assert_eq!(f64_values.view_range(1..3), View::F64(&[-0.0, 0.0]));
+    assert_eq!(f64_values.view().slice(1..3), View::F64(&[-0.0, 0.0]));
 
     // Each typed accessor answers for its own variant alone, and the owned data converts
     // back to its vector, or comes back whole for any other type.
@@ -210,6 +247,7 @@ fn a_borrowed_image_checks_its_sample_count_and_scaling() {
     assert!(matches!(
         Borrowed::new(&[4, 2], View::I16(&samples), Scaling::IDENTITY),
         Err(FitsError::DataSizeMismatch {
+            unit: SizeUnit::Samples,
             expected: 8,
             got: 6
         })
@@ -226,7 +264,12 @@ fn a_borrowed_image_checks_its_sample_count_and_scaling() {
             keyword: keywords::BLANK
         })
     ));
-    assert!(Borrowed::new(&[3, 2], View::I16(&samples), blank).is_ok());
+    assert_eq!(
+        Borrowed::new(&[3, 2], View::I16(&samples), blank)
+            .unwrap()
+            .scaling(),
+        blank
+    );
 }
 
 #[test]
@@ -269,8 +312,8 @@ fn swap_into_words_then_view_matches_decode_and_reuses_one_alloc() {
     let mut words: Vec<u64> = Vec::new();
     for data in &cases {
         let be = encoded(data);
-        swap_into_words(&be, data.bitpix(), &mut words);
-        let view = view_words(&words, data.bitpix(), be.len());
+        data.bitpix().swap_into_words(&be, &mut words);
+        let view = data.bitpix().view_words(&words, be.len());
         // The view's samples equal the owned decode (compare via a fresh Data).
         let owned = Data::decode(&be, data.bitpix());
         let view_owned = match view {
@@ -292,19 +335,19 @@ fn swap_into_words_then_view_matches_decode_and_reuses_one_alloc() {
     // Cross-BITPIX reuse: two equal-byte-length decodes of *different* types must
     // reuse the same u64 backing (no realloc) — the page-fault-free property the
     // reader's scratch relies on. 4096 bytes = 2048 i16 then 1024 i32.
-    let i16s = Data::I16((0..2048).map(|i| i as i16).collect());
+    let i16s = Data::I16((0..2048).collect());
     let i32s = Data::I32((0..1024).map(|i| i - 7).collect());
     let mut w: Vec<u64> = Vec::new();
-    swap_into_words(&encoded(&i16s), Bitpix::I16, &mut w);
+    Bitpix::I16.swap_into_words(&encoded(&i16s), &mut w);
     let ptr1 = w.as_ptr();
-    swap_into_words(&encoded(&i32s), Bitpix::I32, &mut w);
+    Bitpix::I32.swap_into_words(&encoded(&i32s), &mut w);
     let ptr2 = w.as_ptr();
     assert_eq!(
         ptr1, ptr2,
         "equal-length cross-type swap must reuse the scratch"
     );
     // ...and the i32 view is still correct after reusing the i16 scratch.
-    let view = view_words(&w, Bitpix::I32, encoded(&i32s).len());
+    let view = Bitpix::I32.view_words(&w, encoded(&i32s).len());
     assert_eq!(
         view,
         View::I32(&(0..1024).map(|i| i - 7).collect::<Vec<i32>>())
@@ -521,7 +564,7 @@ fn the_stored_byte_pass_gives_the_physical_plane_of_the_sample_pass() {
         let bitpix = samples.bitpix();
         let bytes = encoded(&samples);
         let mut from_bytes: Vec<f64> = Vec::new();
-        extend_physical_be(&bytes, bitpix, &scaling, &mut from_bytes);
+        bitpix.extend_physical_be(&bytes, &scaling, &mut from_bytes);
         assert_eq!(from_bytes.len(), expected.len());
         for (got, want) in from_bytes.iter().zip(&expected) {
             assert!(
@@ -531,7 +574,7 @@ fn the_stored_byte_pass_gives_the_physical_plane_of_the_sample_pass() {
             );
         }
         let mut from_bytes_f32: Vec<f32> = Vec::new();
-        extend_physical_be(&bytes, bitpix, &scaling, &mut from_bytes_f32);
+        bitpix.extend_physical_be(&bytes, &scaling, &mut from_bytes_f32);
         assert_eq!(from_bytes_f32.len(), expected.len());
         for (got, want) in from_bytes_f32.iter().zip(&expected) {
             assert!(
@@ -677,6 +720,7 @@ fn sample_type_predicates_and_image_accessor() {
         },
     );
     assert_eq!(unsigned.view().sample_type(), SampleType::U16);
+    assert_eq!(unsigned.view().metadata().sample_type(), SampleType::U16);
     let signed = image(Data::I16(vec![0, 1]), Scaling::IDENTITY);
     assert_eq!(signed.view().sample_type(), SampleType::I16);
 }
@@ -693,19 +737,15 @@ fn image_data_reports_its_bitpix() {
 
 #[test]
 fn scaling_defaults_to_the_identity_map() {
-    let s = Scaling::from_header(&header(&["SIMPLE  = T"])).unwrap();
+    let s = Scaling::from_header(&header(&["SIMPLE  = T"]), Bitpix::I16).unwrap();
     assert_eq!(s, Scaling::IDENTITY);
     assert!(s.is_identity());
 }
 
 #[test]
 fn scaling_reads_explicit_keywords() {
-    let s = Scaling::from_header(&header(&[
-        "BSCALE  = 2.5",
-        "BZERO   = -1000.0",
-        "BLANK   = -32768",
-    ]))
-    .unwrap();
+    let explicit = header(&["BSCALE  = 2.5", "BZERO   = -1000.0", "BLANK   = -32768"]);
+    let s = Scaling::from_header(&explicit, Bitpix::I16).unwrap();
     assert_eq!(
         s,
         Scaling {
@@ -715,28 +755,44 @@ fn scaling_reads_explicit_keywords() {
         }
     );
     assert!(!s.is_identity());
+    // A float array ignores `BLANK`; an integer one refuses a `BLANK` its type cannot
+    // hold: -32768 is no `u8`.
+    assert_eq!(
+        Scaling::from_header(&explicit, Bitpix::F32).unwrap().blank,
+        None
+    );
+    assert!(matches!(
+        Scaling::from_header(&explicit, Bitpix::U8),
+        Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::BLANK
+        })
+    ));
 
     for keyword in ["BSCALE", "BZERO", "BLANK"] {
         let mut malformed = Header::new();
         malformed.set_internal(keyword, "not numeric");
         assert!(matches!(
-            Scaling::from_header(&malformed),
-            Err(FitsError::TypeMismatch { name, .. }) if name == keyword
+            Scaling::from_header(&malformed, Bitpix::I32),
+            Err(FitsError::ValueTypeMismatch { name: RecordName::Keyword(name), .. }) if name == keyword
         ));
     }
 
     let oversized_blank = header(&["BITPIX  = 64", "BLANK   = 9223372036854775808"]);
     assert!(matches!(
-        Scaling::from_header(&oversized_blank),
-        Err(FitsError::IntegerOutOfRange { value, target })
-            if value == "9223372036854775808" && target == "i64"
+        Scaling::from_header(&oversized_blank, Bitpix::I64),
+        Err(FitsError::IntegerOutOfRange {
+            keyword: Some(keywords::BLANK),
+            value,
+            target: NumericTarget::I64,
+        }) if value == "9223372036854775808"
     ));
 }
 
 #[test]
 fn unsigned_16_bit_offset_is_not_an_identity_map() {
     // The unsigned-u16 trick: BSCALE=1, BZERO=32768.
-    let s = Scaling::from_header(&header(&["BSCALE  = 1", "BZERO   = 32768"])).unwrap();
+    let s =
+        Scaling::from_header(&header(&["BSCALE  = 1", "BZERO   = 32768"]), Bitpix::I16).unwrap();
     assert_eq!(s.bzero, 32768.0);
     assert!(!s.is_identity());
 }

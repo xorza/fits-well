@@ -61,8 +61,16 @@ pub trait Source: sealed::Sealed {
     /// Append the `len` bytes at `offset` to `out` — used where the bytes must outlive
     /// the read (a parsed table's storage, a table selection). Kept distinct from
     /// `slice` so a streaming source reads straight into `out` (one copy) instead of
-    /// staging through `scratch` first (two).
+    /// staging through `scratch` first (two). `out` grows as a `Vec` grows, so a run of
+    /// appends costs linear time.
     fn read_append(&mut self, offset: u64, len: usize, out: &mut Vec<u8>) -> Result<()>;
+
+    /// Fill `out` with the bytes at `offset`: a read that lands in the caller's buffer.
+    fn read_into(&mut self, offset: u64, out: &mut [u8]) -> Result<()>;
+
+    /// The whole source, borrowed, when it is resident in memory: a read then decodes
+    /// from these bytes and copies nothing first. `None` for a streaming source.
+    fn resident(&self) -> Option<&[u8]>;
 }
 
 /// Reject `[offset, offset+len)` that overflows or runs past `size`. A hostile
@@ -75,24 +83,47 @@ fn check_range(offset: u64, len: usize, size: u64) -> Result<()> {
     Ok(())
 }
 
-/// A streaming `Read + Seek` source. Each fetch seeks and copies the range out —
-/// there is no resident image to borrow, so reads cost one extra memory pass.
+/// A streaming `Read + Seek` source. Each fetch copies the range out — there is no
+/// resident image to borrow, so reads cost one extra memory pass — and seeks only when
+/// the range does not start where the last read ended.
 #[derive(Debug)]
 pub struct StreamSource<R> {
     inner: R,
     len: u64,
+    /// Where `inner` stands, when known: after a read, the end of what it read.
+    position: Option<u64>,
 }
 
 impl<R: Read + Seek> StreamSource<R> {
     /// Capture the source length once (a single seek to the end), so later reads
     /// bounds-check without re-seeking.
-    pub(super) fn new(mut inner: R) -> Result<Self> {
+    pub(crate) fn new(mut inner: R) -> Result<Self> {
         let len = inner.seek(SeekFrom::End(0))?;
-        Ok(Self { inner, len })
+        Ok(Self {
+            inner,
+            len,
+            position: Some(len),
+        })
     }
 
     pub(super) fn into_inner(self) -> R {
         self.inner
+    }
+
+    /// Append the `len` bytes at `offset` to `out`, with no fill of its new capacity.
+    fn read_at(&mut self, offset: u64, len: usize, out: &mut Vec<u8>) -> Result<()> {
+        check_range(offset, len, self.len)?;
+        if self.position != Some(offset) {
+            self.position = None;
+            self.inner.seek(SeekFrom::Start(offset))?;
+        }
+        allocation::try_reserve(out, len)?;
+        let read = (&mut self.inner).take(len as u64).read_to_end(out);
+        self.position = read.as_ref().ok().map(|&read| offset + read as u64);
+        if read? != len {
+            return Err(FitsError::UnexpectedEof);
+        }
+        Ok(())
     }
 }
 
@@ -107,23 +138,30 @@ impl<R: Read + Seek> Source for StreamSource<R> {
         len: usize,
         scratch: &'a mut Vec<u8>,
     ) -> Result<&'a [u8]> {
-        check_range(offset, len, self.len)?;
-        self.inner.seek(SeekFrom::Start(offset))?;
-        // Resize keeps `scratch`'s capacity across calls, so a reused buffer
+        // `clear` keeps `scratch`'s capacity across calls, so a reused buffer
         // reallocates only when a larger unit appears.
-        allocation::try_resize(scratch, len, 0)?;
-        self.inner.read_exact(scratch.as_mut_slice())?;
-        Ok(&scratch[..len])
+        scratch.clear();
+        self.read_at(offset, len, scratch)?;
+        Ok(scratch)
     }
 
     fn read_append(&mut self, offset: u64, len: usize, out: &mut Vec<u8>) -> Result<()> {
-        check_range(offset, len, self.len)?;
-        self.inner.seek(SeekFrom::Start(offset))?;
-        let start = out.len();
-        let end = start.checked_add(len).ok_or(FitsError::DataUnitOverflow)?;
-        allocation::try_resize(out, end, 0)?;
-        self.inner.read_exact(&mut out[start..])?;
-        Ok(())
+        self.read_at(offset, len, out)
+    }
+
+    fn read_into(&mut self, offset: u64, out: &mut [u8]) -> Result<()> {
+        check_range(offset, out.len(), self.len)?;
+        if self.position != Some(offset) {
+            self.position = None;
+            self.inner.seek(SeekFrom::Start(offset))?;
+        }
+        let read = self.inner.read_exact(out);
+        self.position = read.as_ref().ok().map(|()| offset + out.len() as u64);
+        Ok(read?)
+    }
+
+    fn resident(&self) -> Option<&[u8]> {
+        None
     }
 }
 
@@ -172,6 +210,15 @@ impl Source for SliceSource<'_> {
         out.extend_from_slice(bytes);
         Ok(())
     }
+
+    fn read_into(&mut self, offset: u64, out: &mut [u8]) -> Result<()> {
+        out.copy_from_slice(self.range(offset, out.len())?);
+        Ok(())
+    }
+
+    fn resident(&self) -> Option<&[u8]> {
+        Some(self.bytes)
+    }
 }
 
 #[cfg(test)]
@@ -180,15 +227,47 @@ pub(crate) mod internals {
     use std::rc::Rc;
 
     use crate::error::Result;
+    use crate::reader::FitsReader;
     use crate::reader::source::SliceSource;
     use crate::reader::source::Source;
     use crate::reader::source::sealed;
 
+    /// A reader of bytes whose source counts each byte it fetches.
+    #[derive(Debug)]
+    pub(crate) struct CountedReader<'a> {
+        pub(crate) reader: FitsReader<CountingSource<'a>>,
+        fetched: Rc<Cell<usize>>,
+        scanned: usize,
+    }
+
+    impl<'a> CountedReader<'a> {
+        /// The reader of `bytes`, scanned.
+        pub(crate) fn open(bytes: &'a [u8]) -> Self {
+            let fetched = Rc::new(Cell::new(0));
+            let source = CountingSource {
+                inner: SliceSource::new(bytes),
+                fetched: Rc::clone(&fetched),
+            };
+            let reader = FitsReader::from_source(source).unwrap();
+            let scanned = fetched.get();
+            Self {
+                reader,
+                fetched,
+                scanned,
+            }
+        }
+
+        /// The bytes fetched since the scan.
+        pub(crate) fn fetched(&self) -> usize {
+            self.fetched.get() - self.scanned
+        }
+    }
+
     #[derive(Debug)]
     pub(crate) struct CountingSource<'a> {
-        pub(crate) inner: SliceSource<'a>,
+        inner: SliceSource<'a>,
         /// The bytes fetched through either path.
-        pub(crate) fetched: Rc<Cell<usize>>,
+        fetched: Rc<Cell<usize>>,
     }
 
     impl sealed::Sealed for CountingSource<'_> {}
@@ -212,5 +291,70 @@ pub(crate) mod internals {
             self.fetched.set(self.fetched.get() + len);
             self.inner.read_append(offset, len, out)
         }
+
+        fn read_into(&mut self, offset: u64, out: &mut [u8]) -> Result<()> {
+            self.fetched.set(self.fetched.get() + out.len());
+            self.inner.read_into(offset, out)
+        }
+
+        /// Not resident, so every read is a fetch it counts.
+        fn resident(&self) -> Option<&[u8]> {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Cursor, Read, Seek, SeekFrom};
+
+    use crate::error::FitsError;
+    use crate::reader::source::{Source, StreamSource};
+
+    /// A cursor that counts its seeks and its reads.
+    #[derive(Debug)]
+    struct Counted {
+        inner: Cursor<Vec<u8>>,
+        seeks: usize,
+        reads: usize,
+    }
+
+    impl Read for Counted {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.reads += 1;
+            self.inner.read(out)
+        }
+    }
+
+    impl Seek for Counted {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            self.seeks += 1;
+            self.inner.seek(position)
+        }
+    }
+
+    fn source() -> StreamSource<Counted> {
+        StreamSource::new(Counted {
+            inner: Cursor::new((0..100).collect()),
+            seeks: 0,
+            reads: 0,
+        })
+        .unwrap()
+    }
+
+    /// A read that starts where the last one ended does not seek: the length probe at
+    /// the open seeks once, the read at 10 once, and the read at 15 not at all.
+    #[test]
+    fn a_read_after_a_read_does_not_seek() {
+        let mut source = source();
+        let mut out = Vec::new();
+        source.read_append(10, 5, &mut out).unwrap();
+        source.read_append(15, 5, &mut out).unwrap();
+        assert_eq!(out, (10..20).collect::<Vec<u8>>());
+        assert_eq!(source.inner.seeks, 2);
+        assert!(matches!(
+            source.read_append(98, 5, &mut out),
+            Err(FitsError::UnexpectedEof)
+        ));
     }
 }

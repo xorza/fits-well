@@ -46,12 +46,12 @@ fn main() -> fits_well::Result<()> {
         .parse::<Scale>()?;
 
     // The DATE-OBS string itself parses to a `Datetime`, then to an MJD: a whole day
-    // and the fraction of it.
+    // and the fraction of it, in the TIMESYS scale.
     let mjd = header
         .get_text("DATE-OBS")?
         .expect("example header sets DATE-OBS")
         .parse::<Datetime>()?
-        .to_mjd(&timesys)?;
+        .to_mjd()?;
     println!(
         "DATE-OBS -> MJD day {} + {:.9} in {timesys:?}",
         mjd.day(),

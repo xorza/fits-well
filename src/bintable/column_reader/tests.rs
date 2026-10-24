@@ -1,8 +1,10 @@
 use crate::bintable::Table;
+use crate::bintable::column::Column;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::internals::table_header;
 use crate::error::FitsError;
 use crate::error::Indexed;
+use crate::error::ValueKind;
 use crate::header_model::keywords;
 use crate::image_model::unsigned_data::UnsignedData;
 use crate::image_model::{I8_OFFSET, U16_OFFSET, U64_OFFSET};
@@ -24,12 +26,12 @@ fn decodes_fixed_width_columns_from_hand_built_data() {
 
     let table = Table::from_data(&header, data).unwrap();
     let schema = table.schema();
-    assert_eq!(schema.row_count, 2);
+    assert_eq!(schema.row_count(), 2);
     assert_eq!(
         schema
             .columns
             .iter()
-            .map(super::super::column::Column::byte_offset)
+            .map(Column::byte_offset)
             .collect::<Vec<_>>(),
         vec![0, 4, 12]
     );
@@ -101,18 +103,38 @@ fn read_column_physical_applies_tscal_tzero_and_tnull() {
         Err(FitsError::ColumnNotFound { .. })
     ));
 
+    // A bad optional keyword stays on its column: the reads that need it fail and
+    // name it, and the stored values and every other column read as they are.
+    let mut two = table_header(4, 1, &["1I", "1I"]);
+    two.set_internal("TSCAL1", 2.0)
+        .set_internal("TZERO1", 10.0)
+        .set_internal("TNULL1", 5);
     for (keyword, expected) in [
-        ("TSCAL1", "real"),
-        ("TZERO1", "real"),
-        ("TNULL1", "integer"),
+        ("TSCAL1", ValueKind::Real),
+        ("TZERO1", ValueKind::Real),
+        ("TNULL1", ValueKind::Integer),
     ] {
-        let mut malformed = header.clone();
+        let mut malformed = two.clone();
         malformed.set_internal(keyword, "not numeric");
-        assert!(matches!(
-            Table::from_data(&malformed, vec![0; 6]),
-            Err(FitsError::TypeMismatch { name, expected: actual })
-                if name == keyword && actual == expected
-        ));
+        let table = Table::from_data(&malformed, vec![0, 3, 0, 4]).unwrap();
+        let defect = |error: FitsError| {
+            matches!(
+                error,
+                FitsError::InvalidColumnKeyword { keyword: name, source }
+                    if name == keyword
+                        && matches!(*source, FitsError::ValueTypeMismatch { expected: actual, .. }
+                            if actual == expected)
+            )
+        };
+        let column = table.column(0).unwrap();
+        assert!(defect(column.physical().unwrap_err()), "{keyword}");
+        assert!(defect(column.unsigned().unwrap_err()), "{keyword}");
+        assert_eq!(column.raw().unwrap(), ColumnData::I16(vec![3]), "{keyword}");
+        assert_eq!(
+            table.column(1).unwrap().physical().unwrap(),
+            [4.0],
+            "{keyword}"
+        );
     }
 }
 
@@ -167,7 +189,7 @@ fn preserves_tdisp_without_making_it_part_of_data_decoding() {
     for display in ["I5", "Q5", "E12.5E3junk"] {
         header.set_internal("TDISP1", display);
         let table = Table::from_data(&header, vec![0u8; 4]).unwrap();
-        assert_eq!(table.schema.columns[0].tdisp.as_deref(), Some(display));
+        assert_eq!(table.schema.columns[0].tdisp().unwrap(), Some(display));
         assert_eq!(
             table.column(0).unwrap().raw().unwrap(),
             ColumnData::I32(vec![0])

@@ -7,7 +7,7 @@ use crate::error::Result;
 use crate::header_model::Header;
 use crate::keyword::Keyword;
 use crate::world_coordinates::distortion::{MAX_STEPS, converged};
-use crate::world_coordinates::read_real;
+use crate::world_coordinates::header_read;
 
 /// The registered terms, `PVi_0` to `PVi_39`.
 const TERM_COUNT: usize = 40;
@@ -66,7 +66,7 @@ impl Tpv {
             let mut coefficients = [0.0; TERM_COUNT];
             coefficients[1] = 1.0;
             for (m, coefficient) in coefficients.iter_mut().enumerate() {
-                if let Some(value) = read_real(
+                if let Some(value) = header_read::real(
                     header,
                     Keyword::fitting(format_args!("PV{}_{m}{alt}", axis + 1)),
                 )? {
