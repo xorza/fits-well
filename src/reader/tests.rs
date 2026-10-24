@@ -1796,6 +1796,48 @@ fn a_compressed_image_summed_through_its_reads_reads_its_unit_once() {
     assert_eq!(counted.fetched(), padded);
 }
 
+/// The reader keeps the tile index of each compressed image it opens: two images, the
+/// second opened between two handles on the first, fetch each index once — the main
+/// table, NAXIS1 × NAXIS2 bytes of each container — and a third handle on either fetches
+/// nothing.
+#[cfg(feature = "compression")]
+#[test]
+fn the_reader_keeps_the_tile_index_of_each_compressed_image() {
+    let image = Image {
+        shape: vec![9, 7],
+        samples: Data::I16((0..63).map(|value| value * 97 - 3000).collect()),
+        scaling: Scaling::IDENTITY,
+    };
+    let bytes = written(|w| {
+        for tiles in [[9, 1], [3, 7]] {
+            w.write_compressed_image(
+                image.view(),
+                &CompressionConfig::new(Compression::GZIP).with_tiles(tiles),
+                None,
+            )?;
+        }
+        Ok(())
+    });
+    let mut counted = CountedReader::open(&bytes);
+    let main = |hdu: &Hdu| {
+        let axis = |name| usize::try_from(hdu.header.get_integer(name).unwrap().unwrap()).unwrap();
+        axis("NAXIS1") * axis("NAXIS2")
+    };
+    let (first, second) = (
+        main(&counted.reader.hdus()[1]),
+        main(&counted.reader.hdus()[2]),
+    );
+    for (hdu, fetched) in [
+        (1, first),
+        (2, first + second),
+        (1, first + second),
+        (2, first + second),
+    ] {
+        counted.reader.image(hdu).unwrap();
+        assert_eq!(counted.fetched(), fetched, "HDU {hdu}");
+    }
+}
+
 /// `finish_bytes` bounds what the finish adds to the reader: for a stream, its staging
 /// buffer grown past the one block the header scan left in it to the padded unit, which
 /// is under the 1 MiB a finish reads at a time; nothing for a resident source, which the

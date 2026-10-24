@@ -14,7 +14,7 @@ use crate::fits_error::Result;
 #[derive(Debug, Default)]
 pub(crate) struct TileIndex {
     /// The data offset of the HDU whose rows these are, which a reopened image matches.
-    key: Option<u64>,
+    key: u64,
     rows: Vec<u8>,
     zscale: TileColumn<f64>,
     zzero: TileColumn<f64>,
@@ -22,25 +22,27 @@ pub(crate) struct TileIndex {
 }
 
 impl TileIndex {
-    /// Hold the rows of the container `schema` describes, the data unit at `key`, which
-    /// `read_rows` appends to the buffer it is given, unless they are held already.
-    pub(crate) fn load(
-        &mut self,
+    /// The rows of the container `schema` describes, the data unit at `key`, which
+    /// `read_rows` appends to the buffer it is given.
+    pub(super) fn read(
         key: u64,
         schema: &Schema,
         read_rows: impl FnOnce(usize, &mut Vec<u8>) -> Result<()>,
-    ) -> Result<()> {
-        if self.key == Some(key) {
-            return Ok(());
-        }
-        self.key = None;
+    ) -> Result<Self> {
         let len = main_len(schema)?;
-        self.rows.clear();
-        allocation::try_reserve_exact(&mut self.rows, len)?;
-        read_rows(len, &mut self.rows)?;
-        self.read_columns(schema)?;
-        self.key = Some(key);
-        Ok(())
+        let mut index = Self {
+            key,
+            ..Self::default()
+        };
+        allocation::try_reserve_exact(&mut index.rows, len)?;
+        read_rows(len, &mut index.rows)?;
+        index.read_columns(schema)?;
+        Ok(index)
+    }
+
+    /// The data offset of the HDU whose rows these are.
+    pub(super) const fn key(&self) -> u64 {
+        self.key
     }
 
     fn read_columns(&mut self, schema: &Schema) -> Result<()> {
