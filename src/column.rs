@@ -6,6 +6,9 @@
 //! once per model — and once more in the reader, which resolves names against a
 //! schema parsed without ever reading a table.
 
+use std::result;
+use std::sync::Arc;
+
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Result;
@@ -94,6 +97,54 @@ impl ColumnSelector<'_> {
     }
 }
 
+/// The most columns a table holds (§7.2.1, §7.3.1: `0 ≤ TFIELDS ≤ 999`).
+pub(crate) const MAX_TABLE_FIELDS: usize = 999;
+
+/// Errors when a table of `count` columns has more than [`MAX_TABLE_FIELDS`].
+pub(crate) const fn validate_table_field_count(count: usize) -> Result<()> {
+    if count > MAX_TABLE_FIELDS {
+        return Err(FitsError::KeywordOutOfRange {
+            keyword: keywords::TFIELDS,
+        });
+    }
+    Ok(())
+}
+
+/// The rows and the column count that both table forms read first: `NAXIS1`,
+/// `NAXIS2` and `TFIELDS`, once the structure both share is checked.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TableShape {
+    pub(crate) row_len: usize,
+    pub(crate) row_count: usize,
+    pub(crate) field_count: usize,
+}
+
+impl TableShape {
+    /// The shape of the table `header` describes. A table is bytes in two axes, one
+    /// group of them (§7.2.1, §7.3.1), so `BITPIX = 8`, `NAXIS = 2` and `GCOUNT = 1`, as
+    /// the data unit the scan sizes from them holds the table's rows. `TFIELDS` is
+    /// checked against [`MAX_TABLE_FIELDS`] here, as it sizes the column list and drives
+    /// the `TFORMn` loop.
+    pub(crate) fn read(header: &Header) -> Result<Self> {
+        for (keyword, required) in [
+            (keywords::BITPIX, 8),
+            (keywords::NAXIS, 2),
+            (keywords::GCOUNT, 1),
+        ] {
+            if header.require_integer(keyword)? != required {
+                return Err(FitsError::KeywordOutOfRange { keyword });
+            }
+        }
+        let field_count = header.require_usize(keywords::TFIELDS)?;
+        validate_table_field_count(field_count)?;
+        Ok(Self {
+            row_len: header.require_usize(keywords::NAXIS.indexed(1)?)?,
+            row_count: header.require_usize(keywords::NAXIS.indexed(2)?)?,
+            field_count,
+        })
+    }
+}
+
 /// The `TTYPEn` name and `TUNITn` unit of a column, which both table forms read the
 /// same way: an absent or empty card is `None`.
 #[derive(Debug)]
@@ -118,24 +169,57 @@ impl ColumnLabels {
     }
 }
 
+/// An optional column keyword whose value did not read, kept on its column, as cfitsio
+/// and astropy keep the column: a read that needs the keyword fails with
+/// [`FitsError::InvalidColumnKeyword`], and the other reads of the table do not.
+#[derive(Debug, Clone)]
+pub(crate) struct KeywordDefect {
+    keyword: Keyword,
+    error: Arc<FitsError>,
+}
+
+/// A column keyword's value, or its defect.
+pub(crate) type Keyed<T> = result::Result<T, KeywordDefect>;
+
+impl KeywordDefect {
+    /// The error a read that needs the keyword gives.
+    pub(crate) fn error(&self) -> FitsError {
+        FitsError::InvalidColumnKeyword {
+            keyword: self.keyword,
+            source: Arc::clone(&self.error),
+        }
+    }
+}
+
+/// The value `read` gives for `keyword`, or its defect.
+pub(crate) fn keyed<T>(keyword: Keyword, read: impl FnOnce() -> Result<T>) -> Keyed<T> {
+    read().map_err(|error| KeywordDefect {
+        keyword,
+        error: Arc::new(error),
+    })
+}
+
 /// The `TSCALn` and `TZEROn` of a column (§7.2.2, §7.3.2): 1 and 0 when absent.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct ColumnScaling {
-    pub(crate) tscale: f64,
-    pub(crate) tzero: f64,
+    pub(crate) tscale: Keyed<f64>,
+    pub(crate) tzero: Keyed<f64>,
 }
 
 impl ColumnScaling {
     pub(crate) const IDENTITY: Self = Self {
-        tscale: 1.0,
-        tzero: 0.0,
+        tscale: Ok(1.0),
+        tzero: Ok(0.0),
     };
 
     /// The scaling of column `n` (1-based).
     pub(crate) fn read(header: &Header, n: usize) -> Result<Self> {
+        let real = |keyword: Keyword, absent: f64| {
+            keyed(keyword, || Ok(header.get_real(keyword)?.unwrap_or(absent)))
+        };
         Ok(Self {
-            tscale: header.get_real(keywords::TSCAL.indexed(n)?)?.unwrap_or(1.0),
-            tzero: header.get_real(keywords::TZERO.indexed(n)?)?.unwrap_or(0.0),
+            tscale: real(keywords::TSCAL.indexed(n)?, 1.0),
+            tzero: real(keywords::TZERO.indexed(n)?, 0.0),
         })
     }
 }

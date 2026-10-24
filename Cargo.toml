@@ -2,14 +2,12 @@
 name = "fits-well"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.89"
 description = "A blazing-fast reader and writer for FITS (Flexible Image Transport System) files, targeting the full FITS 4.0 standard."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/xorza/fits-well"
 readme = "README.md"
 keywords = ["fits", "astronomy", "wcs", "image", "fileformat"]
 categories = ["science", "parser-implementations"]
-# Fixtures, the FITS standard's PDF and dev notes stay out of the package.
 exclude = [
     "docs/",
     "test_resources/",
@@ -27,7 +25,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 # The codec paths without `parallel`, and the bare reader. Benches measure every feature.
 [package.metadata.drive]
-version = "0.2.1"
+version = "0.2"
 lint = ["--all-features", "--no-default-features --features compression", "--no-default-features"]
 test = ["--all-features", "--no-default-features --features compression"]
 bench = "--all-features"

@@ -3,7 +3,9 @@
 
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::world_coordinates::axis_transform::SPEED_OF_LIGHT;
+use crate::error::WcsDefect;
+use crate::header_model::keywords;
+use crate::world_coordinates::axis_transform::spectral_kind::SPEED_OF_LIGHT;
 use crate::world_coordinates::axis_transform::spectral_kind::{Characteristic, SpectralKind};
 
 #[derive(Debug, Clone, Copy)]
@@ -34,10 +36,13 @@ impl SpectralRest {
     };
 
     pub(crate) fn new(frequency: Option<f64>, wavelength: Option<f64>) -> Result<Self> {
-        for (name, value) in [("RESTFRQ", frequency), ("RESTWAV", wavelength)] {
+        for (name, value) in [
+            (keywords::RESTFRQ, frequency),
+            (keywords::RESTWAV, wavelength),
+        ] {
             if value.is_some_and(|value| !value.is_finite() || value <= 0.0) {
                 return Err(FitsError::InvalidWcs {
-                    detail: format!("{name} must be finite and positive"),
+                    defect: WcsDefect::RestValue { keyword: name },
                 });
             }
         }
@@ -69,7 +74,7 @@ impl SpectralRest {
                 wavelength: 0.0,
             }),
             RestNeed::Required => Err(FitsError::InvalidWcs {
-                detail: "spectral CTYPE requires RESTFRQ or RESTWAV".to_string(),
+                defect: WcsDefect::MissingRest,
             }),
             RestNeed::Cancels => Ok(ResolvedRest {
                 frequency: SPEED_OF_LIGHT,

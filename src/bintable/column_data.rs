@@ -1,18 +1,30 @@
 //! A binary-table column decoded to typed values.
 
+use std::ops::Range;
+use std::result;
+
+use bitvec::order::Msb0;
+use bitvec::slice::BitSlice;
+use bitvec::vec::BitVec;
 use num_complex::Complex;
 
 use crate::bintable::column_view::ColumnView;
+use crate::bintable::element_kind::ElementKind;
+use crate::error::{FitsError, Result};
+use crate::ragged::{Ragged, RowValues};
 
 /// A decoded column, flattened across all rows in row order: each row contributes
 /// its `repeat` elements. Values are raw (big-endian decoded but not
 /// `TSCALn`/`TZEROn`-scaled). A `P`/`Q` column's rows vary in length, so its values
-/// come as a [`Ragged`](crate::table::Ragged) of one `ColumnData`.
+/// come as a [`Ragged`] of one `ColumnData`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColumnData {
     /// `L` — `Some(true)`/`Some(false)`, or `None` for the `0x00` null value (§7.3.3).
     Logical(Vec<Option<bool>>),
-    /// `B` (bytes) and `X` (packed bits).
+    /// `X` — bits, MSB-first (§7.3.2): a fixed column's row is its `repeat` bits, and
+    /// a `PX`/`QX` row its descriptor's count, with no padding between rows.
+    Bit(BitVec<u8, Msb0>),
+    /// `B`.
     U8(Vec<u8>),
     I16(Vec<i16>),
     I32(Vec<i32>),
@@ -41,7 +53,7 @@ macro_rules! impl_column_data_vec_conversions {
         impl TryFrom<ColumnData> for Vec<$type> {
             type Error = ColumnData;
 
-            fn try_from(data: ColumnData) -> core::result::Result<Self, ColumnData> {
+            fn try_from(data: ColumnData) -> result::Result<Self, ColumnData> {
                 match data {
                     ColumnData::$variant(values) => Ok(values),
                     other => Err(other),
@@ -61,20 +73,55 @@ impl_column_data_vec_conversions!(F64, f64);
 impl_column_data_vec_conversions!(ComplexF32, Complex<f32>);
 impl_column_data_vec_conversions!(ComplexF64, Complex<f64>);
 
+impl From<BitVec<u8, Msb0>> for ColumnData {
+    fn from(values: BitVec<u8, Msb0>) -> Self {
+        Self::Bit(values)
+    }
+}
+
+impl TryFrom<ColumnData> for BitVec<u8, Msb0> {
+    type Error = ColumnData;
+
+    fn try_from(data: ColumnData) -> result::Result<Self, ColumnData> {
+        match data {
+            ColumnData::Bit(values) => Ok(values),
+            other => Err(other),
+        }
+    }
+}
+
 impl ColumnData {
     /// Total element count across all rows (the backing `Vec`'s length).
-    pub const fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.view().len()
     }
 
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// The `TFORMn` element kind the values are stored as.
+    pub(crate) const fn element_kind(&self) -> ElementKind {
+        match self {
+            Self::Logical(_) => ElementKind::Logical,
+            Self::Bit(_) => ElementKind::Bit,
+            Self::U8(_) => ElementKind::U8,
+            Self::I16(_) => ElementKind::I16,
+            Self::I32(_) => ElementKind::I32,
+            Self::I64(_) => ElementKind::I64,
+            Self::F32(_) => ElementKind::F32,
+            Self::F64(_) => ElementKind::F64,
+            Self::ComplexF32(_) => ElementKind::ComplexF32,
+            Self::ComplexF64(_) => ElementKind::ComplexF64,
+            Self::Character(_) => ElementKind::Character,
+        }
+    }
+
     /// Every value, borrowed.
-    pub const fn view(&self) -> ColumnView<'_> {
+    pub fn view(&self) -> ColumnView<'_> {
         match self {
             Self::Logical(values) => ColumnView::Logical(values.as_slice()),
+            Self::Bit(values) => ColumnView::Bit(values.as_bitslice()),
             Self::U8(values) => ColumnView::U8(values.as_slice()),
             Self::I16(values) => ColumnView::I16(values.as_slice()),
             Self::I32(values) => ColumnView::I32(values.as_slice()),
@@ -87,49 +134,54 @@ impl ColumnData {
         }
     }
 
-    pub const fn as_logical(&self) -> Option<&[Option<bool>]> {
+    pub fn as_logical(&self) -> Option<&[Option<bool>]> {
         self.view().as_logical()
     }
 
-    pub const fn as_u8(&self) -> Option<&[u8]> {
+    pub fn as_bit(&self) -> Option<&BitSlice<u8, Msb0>> {
+        self.view().as_bit()
+    }
+
+    pub fn as_u8(&self) -> Option<&[u8]> {
         self.view().as_u8()
     }
 
-    pub const fn as_i16(&self) -> Option<&[i16]> {
+    pub fn as_i16(&self) -> Option<&[i16]> {
         self.view().as_i16()
     }
 
-    pub const fn as_i32(&self) -> Option<&[i32]> {
+    pub fn as_i32(&self) -> Option<&[i32]> {
         self.view().as_i32()
     }
 
-    pub const fn as_i64(&self) -> Option<&[i64]> {
+    pub fn as_i64(&self) -> Option<&[i64]> {
         self.view().as_i64()
     }
 
-    pub const fn as_f32(&self) -> Option<&[f32]> {
+    pub fn as_f32(&self) -> Option<&[f32]> {
         self.view().as_f32()
     }
 
-    pub const fn as_f64(&self) -> Option<&[f64]> {
+    pub fn as_f64(&self) -> Option<&[f64]> {
         self.view().as_f64()
     }
 
-    pub const fn as_complex_f32(&self) -> Option<&[Complex<f32>]> {
+    pub fn as_complex_f32(&self) -> Option<&[Complex<f32>]> {
         self.view().as_complex_f32()
     }
 
-    pub const fn as_complex_f64(&self) -> Option<&[Complex<f64>]> {
+    pub fn as_complex_f64(&self) -> Option<&[Complex<f64>]> {
         self.view().as_complex_f64()
     }
 
-    pub const fn as_character(&self) -> Option<&[u8]> {
+    pub fn as_character(&self) -> Option<&[u8]> {
         self.view().as_character()
     }
 
     pub(crate) fn extend_from(&mut self, other: &Self) -> bool {
         match (self, other) {
             (Self::Logical(a), Self::Logical(b)) => a.extend_from_slice(b),
+            (Self::Bit(a), Self::Bit(b)) => a.extend_from_bitslice(b),
             (Self::U8(a), Self::U8(b)) | (Self::Character(a), Self::Character(b)) => {
                 a.extend_from_slice(b);
             }
@@ -149,6 +201,7 @@ impl ColumnData {
     pub(crate) const fn type_name(&self) -> &'static str {
         match self {
             Self::Logical(_) => "logical column data",
+            Self::Bit(_) => "bit column data",
             Self::U8(_) => "byte column data",
             Self::I16(_) => "i16 column data",
             Self::I32(_) => "i32 column data",
@@ -159,5 +212,37 @@ impl ColumnData {
             Self::ComplexF64(_) => "complex-f64 column data",
             Self::Character(_) => "character column data",
         }
+    }
+}
+
+impl RowValues for ColumnData {
+    type Row<'a> = ColumnView<'a>;
+
+    fn len(&self) -> usize {
+        self.view().len()
+    }
+
+    fn row(&self, range: Range<usize>) -> ColumnView<'_> {
+        self.view().slice(range)
+    }
+}
+
+impl Ragged<ColumnData> {
+    /// Rows from one [`ColumnData`] per row, which must all hold one type. Errors
+    /// for an empty list, which has no type, and for a row of another type.
+    pub fn from_rows(rows: impl IntoIterator<Item = ColumnData>) -> Result<Self> {
+        let mut rows = rows.into_iter();
+        let mut values = rows.next().ok_or(FitsError::EmptyVlaNeedsType)?;
+        let mut ends = vec![values.len()];
+        for (row, data) in rows.enumerate() {
+            if !values.extend_from(&data) {
+                return Err(FitsError::TypeMismatch {
+                    name: format!("variable-length row {}", row + 1),
+                    expected: values.type_name(),
+                });
+            }
+            ends.push(values.len());
+        }
+        Ok(Self::new(values, ends))
     }
 }

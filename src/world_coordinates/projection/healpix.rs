@@ -1,14 +1,15 @@
 //! `HEALPix` projection from Calabretta & Roukema (2007).
 
 use crate::error::Result;
-use crate::world_coordinates::D2R;
-use crate::world_coordinates::DEGREE_TOLERANCE;
-use crate::world_coordinates::R2D;
+use crate::world_coordinates::angle::DEGREE_TOLERANCE;
+use crate::world_coordinates::angle::R2D;
+use crate::world_coordinates::native_coordinate::NativeCoordinate;
+use crate::world_coordinates::projection::ProjectedCoordinate;
 use crate::world_coordinates::projection::Projection;
-use crate::world_coordinates::projection::{NativeCoordinate, ProjectedCoordinate};
 
-#[derive(Debug, Clone, Copy)]
-struct Parameters {
+/// HEALPix's kernel: the constants of `H = PVi_1` and `K = PVi_2`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Healpix {
     k: f64,
     h_odd: i64,
     k_odd: bool,
@@ -20,8 +21,8 @@ struct Parameters {
     facet_index_scale: f64,
 }
 
-impl Parameters {
-    fn new(pv: &[f64; 21]) -> Self {
+impl Healpix {
+    pub(super) fn new(pv: &[f64; 21]) -> Self {
         let h = pv[1];
         let k = pv[2];
         debug_assert!(h.is_finite() && h > 0.0 && k.is_finite() && k > 0.0);
@@ -51,73 +52,81 @@ impl Parameters {
             delta + self.facet_half_width
         }
     }
-}
 
-pub(super) fn deproject(
-    projection: Projection,
-    x: f64,
-    y: f64,
-    pv: &[f64; 21],
-) -> Result<NativeCoordinate> {
-    if !x.is_finite() || !y.is_finite() {
-        return Err(projection.domain_error());
-    }
-    let parameters = Parameters::new(pv);
-    let abs_y = y.abs();
-    if abs_y <= parameters.transition_y + DEGREE_TOLERANCE {
-        let theta = projection.checked_asin(y / parameters.y_per_sine)? * R2D;
-        return projection.native_coordinate(x, theta);
-    }
-
-    let maximum_y = parameters.facet_half_width * parameters.polar_y0;
-    if abs_y > maximum_y + DEGREE_TOLERANCE {
-        return Err(projection.domain_error());
-    }
-
-    let sigma = (parameters.polar_y0 - abs_y / parameters.facet_half_width).max(0.0);
-    let mut delta = x - parameters.facet_center(x);
-    if !parameters.k_odd && y < 0.0 {
-        delta = parameters.offset_southern_facet(x, delta);
-    }
-
-    let phi = if sigma == 0.0 {
-        if delta.abs() > DEGREE_TOLERANCE {
+    pub(super) fn deproject(
+        self,
+        projection: Projection,
+        x: f64,
+        y: f64,
+    ) -> Result<NativeCoordinate> {
+        if !x.is_finite() || !y.is_finite() {
             return Err(projection.domain_error());
         }
-        x
-    } else {
-        let facet_position = delta / sigma;
-        if facet_position.abs() > parameters.facet_half_width + DEGREE_TOLERANCE {
+        let parameters = self;
+        let abs_y = y.abs();
+        if abs_y <= parameters.transition_y + DEGREE_TOLERANCE {
+            let theta = projection.checked_asin(y / parameters.y_per_sine)? * R2D;
+            return projection.native_coordinate(x, theta);
+        }
+
+        let maximum_y = parameters.facet_half_width * parameters.polar_y0;
+        if abs_y > maximum_y + DEGREE_TOLERANCE {
             return Err(projection.domain_error());
         }
-        x + facet_position - delta
-    };
-    let sin_theta = 1.0 - sigma * sigma / parameters.k;
-    let theta = projection.checked_asin(sin_theta)? * R2D * y.signum();
-    projection.native_coordinate(phi, theta)
-}
 
-pub(super) fn project(
-    projection: Projection,
-    phi: f64,
-    theta: f64,
-    pv: &[f64; 21],
-) -> Result<ProjectedCoordinate> {
-    let parameters = Parameters::new(pv);
-    let sin_theta = (theta * D2R).sin();
-    if sin_theta.abs() <= parameters.equatorial_sine {
-        return projection.projected_coordinate(phi, parameters.y_per_sine * sin_theta);
+        let sigma = (parameters.polar_y0 - abs_y / parameters.facet_half_width).max(0.0);
+        let mut delta = x - parameters.facet_center(x);
+        if !parameters.k_odd && y < 0.0 {
+            delta = parameters.offset_southern_facet(x, delta);
+        }
+
+        let phi = if sigma == 0.0 {
+            if delta.abs() > DEGREE_TOLERANCE {
+                return Err(projection.domain_error());
+            }
+            x
+        } else {
+            let facet_position = delta / sigma;
+            if facet_position.abs() > parameters.facet_half_width + DEGREE_TOLERANCE {
+                return Err(projection.domain_error());
+            }
+            x + facet_position - delta
+        };
+        // 1 − sin θ = σ²/K, so cos θ = (σ/√K)·√(2 − σ²/K): no cancellation next to the
+        // pole, where sin θ = 1 − σ²/K rounds.
+        let depth = sigma * sigma / parameters.k;
+        debug_assert!(depth <= 1.0, "the polar caps lie where σ ≤ 1: {depth}");
+        let cos_theta = sigma / parameters.k.sqrt() * (2.0 - depth).sqrt();
+        let phi = projection.native_longitude(phi)?;
+        Ok(NativeCoordinate::from_sin_cos(
+            phi,
+            (1.0 - depth).copysign(y),
+            cos_theta,
+        ))
     }
 
-    let sigma = (parameters.k * (1.0 - sin_theta.abs())).sqrt();
-    let mut delta = phi - parameters.facet_center(phi);
-    if !parameters.k_odd && theta < 0.0 {
-        delta = parameters.offset_southern_facet(phi, delta);
+    pub(super) fn project(
+        self,
+        projection: Projection,
+        native: NativeCoordinate,
+    ) -> Result<ProjectedCoordinate> {
+        let parameters = self;
+        let (phi, sin_theta, cos_theta) = (native.phi, native.sin_theta(), native.cos_theta());
+        if sin_theta.abs() <= parameters.equatorial_sine {
+            return projection.projected_coordinate(phi, parameters.y_per_sine * sin_theta);
+        }
+
+        // σ = √(K(1 − |sin θ|)) with 1 − |sin θ| = cos²θ / (1 + |sin θ|).
+        let sigma = cos_theta * (parameters.k / (1.0 + sin_theta.abs())).sqrt();
+        let mut delta = phi - parameters.facet_center(phi);
+        if !parameters.k_odd && sin_theta < 0.0 {
+            delta = parameters.offset_southern_facet(phi, delta);
+        }
+        let mut x = phi + delta * (sigma - 1.0);
+        let y = parameters.facet_half_width * (parameters.polar_y0 - sigma) * sin_theta.signum();
+        if x > 180.0 {
+            x = 360.0 - x;
+        }
+        projection.projected_coordinate(x, y)
     }
-    let mut x = phi + delta * (sigma - 1.0);
-    let y = parameters.facet_half_width * (parameters.polar_y0 - sigma) * theta.signum();
-    if x > 180.0 {
-        x = 360.0 - x;
-    }
-    projection.projected_coordinate(x, y)
 }

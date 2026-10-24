@@ -2,9 +2,10 @@
 
 use crate::bintable::column::Column;
 use crate::bintable::column_reader::ColumnReader;
-use crate::bintable::descriptor::{DescriptorWidth, PqDescriptor};
+use crate::bintable::descriptor::PqDescriptor;
+use crate::bintable::element_kind::ElementKind;
 use crate::bintable::schema::Schema;
-use crate::bintable::tform_kind::TformKind;
+use crate::bintable::table_extent::TableExtent;
 #[cfg(feature = "compression")]
 use crate::bintable::vla_column::VlaColumn;
 #[cfg(feature = "compression")]
@@ -21,11 +22,7 @@ use crate::error::Result;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TableView<'a> {
     pub(crate) columns: &'a [Column],
-    pub(crate) row_count: usize,
-    /// Byte width of one row (`NAXIS1`).
-    pub(crate) row_len: usize,
-    pub(crate) heap_offset: usize,
-    pub(crate) heap_end: usize,
+    pub(crate) extent: TableExtent,
     bytes: &'a [u8],
 }
 
@@ -33,49 +30,24 @@ impl<'a> TableView<'a> {
     /// The table `schema` describes, over its data unit `bytes`. Errors when the
     /// bytes end before the heap does.
     pub(crate) fn new(schema: &'a Schema, bytes: &'a [u8]) -> Result<Self> {
-        if bytes.len() < schema.heap_end {
+        if bytes.len() < schema.extent.heap_end {
             return Err(FitsError::UnexpectedEof);
         }
         Ok(TableView {
             columns: &schema.columns,
-            row_count: schema.row_count,
-            row_len: schema.row_len,
-            heap_offset: schema.heap_offset,
-            heap_end: schema.heap_end,
+            extent: schema.extent,
             bytes,
         })
     }
 
-    /// A compacted row selection: `row_count` rows of `row_len` bytes, then a heap that
-    /// runs to the end of `bytes`.
-    ///
-    /// # Panics
-    /// When `bytes` is shorter than the rows — the selection builds both together.
-    pub(crate) fn compact(
-        columns: &'a [Column],
-        row_count: usize,
-        row_len: usize,
-        bytes: &'a [u8],
-    ) -> Self {
-        let heap_offset = row_count * row_len;
-        assert!(
-            heap_offset <= bytes.len(),
-            "a compacted selection holds its rows"
-        );
+    /// A compacted selection of `row_count` rows of the table `schema` describes, then a
+    /// heap that runs to the end of `bytes`.
+    pub(crate) fn compact(schema: &'a Schema, row_count: usize, bytes: &'a [u8]) -> Self {
         TableView {
-            columns,
-            row_count,
-            row_len,
-            heap_offset,
-            heap_end: bytes.len(),
+            columns: &schema.columns,
+            extent: schema.extent.compacted(row_count, bytes.len()),
             bytes,
         }
-    }
-
-    /// The fixed-width main table (`row_count × NAXIS1` bytes), excluding the heap.
-    #[cfg(feature = "compression")]
-    pub(crate) fn raw_rows(&self) -> &'a [u8] {
-        &self.bytes[..self.row_count * self.row_len]
     }
 
     /// A handle to the variable-length column named `name`, or `None` when the table
@@ -97,9 +69,10 @@ impl<'a> TableView<'a> {
     pub(crate) fn pq_payload(
         &self,
         descriptor: PqDescriptor,
-        element_kind: TformKind,
+        element_kind: ElementKind,
     ) -> Result<&'a [u8]> {
-        let range = descriptor.heap_range(element_kind, self.heap_offset, self.heap_end)?;
+        let range =
+            descriptor.heap_range(element_kind, self.extent.heap_offset, self.extent.heap_end)?;
         Ok(&self.bytes[range])
     }
 
@@ -113,19 +86,36 @@ impl<'a> TableView<'a> {
 
     /// The raw bytes of column `col` in row `r`.
     pub(crate) fn cell(&self, col: &Column, r: usize) -> &'a [u8] {
-        let start = r * self.row_len + col.byte_offset;
+        let start = r * self.extent.row_len + col.byte_offset;
         &self.bytes[start..start + col.tform.byte_width()]
     }
 
+    /// The descriptor of array column `col` in row `row`.
     pub(crate) fn pq_descriptor(&self, col: &Column, row: usize) -> Result<PqDescriptor> {
-        if col.tform.repeat == 0 {
+        let width = col
+            .tform
+            .descriptor_width()
+            .expect("a descriptor is read from an array column");
+        if col.tform.repeat() == 0 {
             Ok(PqDescriptor::EMPTY)
         } else {
-            PqDescriptor::decode(self.cell(col, row), DescriptorWidth::of(col.tform.kind))
+            PqDescriptor::decode(self.cell(col, row), width)
         }
     }
 
     pub(crate) fn cells(self, col: &'a Column) -> impl ExactSizeIterator<Item = &'a [u8]> + 'a {
-        (0..self.row_count).map(move |row| self.cell(col, row))
+        (0..self.extent.row_count).map(move |row| self.cell(col, row))
+    }
+}
+
+#[cfg(all(test, feature = "compression"))]
+pub(crate) mod internals {
+    use crate::bintable::table_view::TableView;
+
+    impl<'a> TableView<'a> {
+        /// The fixed-width main table (`row_count × NAXIS1` bytes), excluding the heap.
+        pub(crate) fn raw_rows(&self) -> &'a [u8] {
+            &self.bytes[..self.extent.row_count * self.extent.row_len]
+        }
     }
 }

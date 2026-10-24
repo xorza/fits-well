@@ -1,41 +1,78 @@
-use crate::compress::quantization::{Dither, DitherSeed};
+use crate::compress::quantization::{Dither, DitherSeed, Seed};
 use crate::compress::*;
 
 #[test]
 fn typed_compression_configuration_rejects_impossible_values() {
-    assert!(Gzip::new(9).is_ok());
-    assert!(Gzip::shuffled(0).is_ok());
+    assert_eq!(
+        [Gzip::new(9).unwrap(), Gzip::shuffled(0).unwrap()],
+        [
+            Gzip {
+                form: GzipForm::Plain,
+                level: 9
+            },
+            Gzip {
+                form: GzipForm::Shuffled,
+                level: 0
+            }
+        ]
+    );
     assert!(matches!(
         Gzip::new(10),
-        Err(FitsError::InvalidCompressionParameter { detail }) if detail == "gzip compression level 10 is outside 0..=9"
+        Err(FitsError::InvalidCompressionParameter {
+            parameter: CompressionParameter::GzipLevel { level: 10 }
+        })
     ));
     for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert!(matches!(
             Hcompress::relative(value),
-            Err(FitsError::InvalidCompressionParameter { detail })
-                if detail == format!("HCOMPRESS scale {value} must be finite and positive")
+            Err(FitsError::InvalidCompressionParameter {
+                parameter: CompressionParameter::HcompressScale { scale }
+            }) if scale.to_bits() == value.to_bits()
         ));
-        assert!(Hcompress::absolute(value).is_err(), "{value}");
+        assert!(matches!(
+            Hcompress::absolute(value),
+            Err(FitsError::InvalidCompressionParameter {
+                parameter: CompressionParameter::HcompressScale { scale }
+            }) if scale.to_bits() == value.to_bits()
+        ));
         assert!(matches!(
             Quantization::relative(value, Dither::None),
-            Err(FitsError::InvalidCompressionParameter { detail })
-                if detail == format!("relative quantization level {value} must be finite and positive")
+            Err(FitsError::InvalidCompressionParameter {
+                parameter: CompressionParameter::QuantizationLevel { level }
+            }) if level.to_bits() == value.to_bits()
         ));
         assert!(matches!(
             Quantization::absolute(value, Dither::None),
-            Err(FitsError::InvalidCompressionParameter { detail })
-                if detail == format!("absolute quantization step {value} must be finite and positive")
+            Err(FitsError::InvalidCompressionParameter {
+                parameter: CompressionParameter::QuantizationStep { step }
+            }) if step.to_bits() == value.to_bits()
         ));
     }
-    assert!(Hcompress::relative(1.0).is_ok() && Hcompress::absolute(30.0).is_ok());
+    assert_eq!(
+        [
+            Hcompress::relative(1.0).unwrap(),
+            Hcompress::absolute(30.0).unwrap()
+        ],
+        [
+            Hcompress {
+                scale: HcompressScale::Relative(1.0)
+            },
+            Hcompress {
+                scale: HcompressScale::Absolute(30.0)
+            }
+        ]
+    );
     for seed in [0, 10_001] {
         assert!(matches!(
             DitherSeed::fixed(seed),
-            Err(FitsError::InvalidCompressionParameter { detail })
-                if detail == format!("dither seed {seed} is outside 1..=10000")
+            Err(FitsError::InvalidCompressionParameter {
+                parameter: CompressionParameter::DitherSeed { seed: got }
+            }) if got == seed
         ));
     }
-    assert!(DitherSeed::fixed(1).is_ok() && DitherSeed::fixed(10_000).is_ok());
+    for seed in [1, 10_000] {
+        assert_eq!(DitherSeed::fixed(seed).unwrap().source(), Seed::Fixed(seed));
+    }
     assert_eq!(
         Quantization::default(),
         Quantization::relative(4.0, Dither::Subtractive1(DitherSeed::FROM_SAMPLES)).unwrap()
@@ -53,10 +90,16 @@ fn table_tile_rows_follow_the_config_and_cfitsio_default() {
     assert_eq!(rice.table_tile_rows(1_000_000, 4000).unwrap(), 2500);
     // Rows of no bytes have no default height: the whole table is one tile.
     assert_eq!(rice.table_tile_rows(7, 0).unwrap(), 7);
-    // A set height is cut to 1..=row_count; an empty table still has a height of 1.
+    // A set height is cut to at most row_count, and an empty table still has a height
+    // of 1; a height of 0 is refused, as an image's tile of 0 is.
     let tiled = |rows: usize| rice.clone().with_tiles([rows]);
     assert_eq!(tiled(3).table_tile_rows(10, 8).unwrap(), 3);
-    assert_eq!(tiled(0).table_tile_rows(10, 8).unwrap(), 1);
+    assert!(matches!(
+        tiled(0).table_tile_rows(10, 8),
+        Err(FitsError::InvalidCompressionParameter {
+            parameter: CompressionParameter::EmptyTile { axis: 0 }
+        })
+    ));
     assert_eq!(tiled(30).table_tile_rows(10, 8).unwrap(), 10);
     assert_eq!(tiled(3).table_tile_rows(0, 8).unwrap(), 1);
 
@@ -71,16 +114,17 @@ fn table_tile_rows_follow_the_config_and_cfitsio_default() {
     assert!(matches!(
         rice.with_quantization(Quantization::relative(4.0, Dither::None).unwrap())
             .table_tile_rows(10, 8),
-        Err(FitsError::InvalidCompressionParameter { detail })
-            if detail == "a compressed table takes no float quantization"
+        Err(FitsError::InvalidCompressionParameter {
+            parameter: CompressionParameter::TableQuantization
+        })
     ));
 }
 
 #[test]
 fn compression_parameter_indices_use_the_standard_canonical_form() {
-    assert_eq!(parameter_index("ZNAME1"), Some(1));
-    assert_eq!(parameter_index("ZNAME999"), Some(999));
-    for keyword in ["ZNAME", "ZNAME0", "ZNAME01", "ZNAME1000", "ZNAMEA"] {
-        assert_eq!(parameter_index(keyword), None, "{keyword}");
+    assert_eq!(parameter_index(Keyword::new("ZNAME1")), Some(1));
+    assert_eq!(parameter_index(Keyword::new("ZNAME999")), Some(999));
+    for keyword in ["ZNAME", "ZNAME0", "ZNAME01", "ZNAMEA", "ZVAL1"] {
+        assert_eq!(parameter_index(Keyword::new(keyword)), None, "{keyword}");
     }
 }

@@ -1,30 +1,21 @@
 use std::ops::Range;
 
-use crate::bintable::tform_kind::TformKind;
+use crate::bintable::element_kind::ElementKind;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::error::SizeUnit;
 
 /// A variable-length array descriptor's integers: `P`'s two 32-bit ones, or `Q`'s two 64-bit
 /// ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DescriptorWidth {
+pub enum DescriptorWidth {
+    /// 32-bit integers, of a `P` column.
     P,
+    /// 64-bit integers, of a `Q` column.
     Q,
 }
 
 impl DescriptorWidth {
-    /// The descriptors of a column of `kind`.
-    ///
-    /// # Panics
-    /// When `kind` is no descriptor.
-    pub(crate) fn of(kind: TformKind) -> Self {
-        match kind {
-            TformKind::ArrayDesc32 => Self::P,
-            TformKind::ArrayDesc64 => Self::Q,
-            other => panic!("{other:?} is no array descriptor"),
-        }
-    }
-
     /// The narrower descriptor that addresses a heap of `heap_len` bytes and cells of up to
     /// `max_count` elements: `Q` once either is past the signed 32-bit range (§10.1.3).
     #[cfg(feature = "compression")]
@@ -60,7 +51,7 @@ pub(crate) struct PqDescriptor {
 }
 
 impl PqDescriptor {
-    pub(super) const EMPTY: Self = Self {
+    pub(crate) const EMPTY: Self = Self {
         count: 0,
         offset: 0,
     };
@@ -68,10 +59,7 @@ impl PqDescriptor {
     pub(crate) fn decode(bytes: &[u8], width: DescriptorWidth) -> Result<Self> {
         let expected = width.bytes();
         if bytes.len() != expected {
-            return Err(FitsError::DataSizeMismatch {
-                expected,
-                got: bytes.len(),
-            });
+            return Err(SizeUnit::Bytes.mismatch(expected, bytes.len()));
         }
         let (count, offset) = match width {
             DescriptorWidth::Q => (
@@ -83,19 +71,66 @@ impl PqDescriptor {
                 i64::from(i32::from_be_bytes(bytes[4..].try_into().unwrap())),
             ),
         };
-        Ok(Self {
-            count: nonnegative_field("count", count)?,
-            offset: nonnegative_field("offset", offset)?,
+        let count = nonnegative_field("count", count)?;
+        // §7.3.5: the offset of an array of no elements is undefined.
+        let offset = if count == 0 {
+            0
+        } else {
+            nonnegative_field("offset", offset)?
+        };
+        Ok(Self { count, offset })
+    }
+
+    /// Errors with [`FitsError::DescriptorOutOfRange`] when the signed integers of
+    /// `width` cannot hold the count or the offset.
+    pub(crate) fn validate(self, width: DescriptorWidth) -> Result<()> {
+        self.integers(width).map(|_| ())
+    }
+
+    /// Write this descriptor into `slot` as the big-endian count then offset of `width`
+    /// (§7.3.5), after [`PqDescriptor::validate`].
+    pub(crate) fn write(self, width: DescriptorWidth, slot: &mut [u8]) -> Result<()> {
+        debug_assert_eq!(slot.len(), width.bytes(), "a descriptor's slot");
+        match self.integers(width)? {
+            DescriptorIntegers::P(count, offset) => {
+                slot[..4].copy_from_slice(&count.to_be_bytes());
+                slot[4..].copy_from_slice(&offset.to_be_bytes());
+            }
+            DescriptorIntegers::Q(count, offset) => {
+                slot[..8].copy_from_slice(&count.to_be_bytes());
+                slot[8..].copy_from_slice(&offset.to_be_bytes());
+            }
+        }
+        Ok(())
+    }
+
+    fn integers(self, width: DescriptorWidth) -> Result<DescriptorIntegers> {
+        let overflow = |_| FitsError::DescriptorOutOfRange {
+            width,
+            count: self.count,
+            offset: self.offset,
+        };
+        Ok(match width {
+            DescriptorWidth::P => DescriptorIntegers::P(
+                i32::try_from(self.count).map_err(overflow)?,
+                i32::try_from(self.offset).map_err(overflow)?,
+            ),
+            DescriptorWidth::Q => DescriptorIntegers::Q(
+                i64::try_from(self.count).map_err(overflow)?,
+                i64::try_from(self.offset).map_err(overflow)?,
+            ),
         })
     }
 
     pub(crate) fn heap_range(
         self,
-        element_kind: TformKind,
+        element_kind: ElementKind,
         heap_start: usize,
         heap_end: usize,
     ) -> Result<Range<usize>> {
-        let byte_len = payload_len(element_kind, self.count)?;
+        let byte_len = element_kind
+            .payload_len(self.count)
+            .ok_or(FitsError::DataUnitOverflow)?;
         if byte_len == 0 {
             return Ok(heap_start..heap_start);
         }
@@ -112,14 +147,11 @@ impl PqDescriptor {
     }
 }
 
-pub(super) fn payload_len(element_kind: TformKind, count: usize) -> Result<usize> {
-    if element_kind == TformKind::Bit {
-        Ok(count.div_ceil(8))
-    } else {
-        count
-            .checked_mul(element_kind.elem_size())
-            .ok_or(FitsError::DataUnitOverflow)
-    }
+/// A descriptor's count then offset, as the signed integers of its width.
+#[derive(Debug, Clone, Copy)]
+enum DescriptorIntegers {
+    P(i32, i32),
+    Q(i64, i64),
 }
 
 fn nonnegative_field(field: &'static str, value: i64) -> Result<usize> {

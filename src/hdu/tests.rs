@@ -1,49 +1,55 @@
+use crate::error::ValueKind;
 use crate::hdu::*;
-use crate::header_model::internals::from_card_lines as header;
+use crate::header_model::record_name::RecordName;
+use crate::internals::cards::from_card_lines as header;
 
 #[test]
 fn classifies_by_mandatory_keywords() {
-    assert_eq!(
-        HduKind::classify(&header(&["SIMPLE  = T"]), HduRole::Primary).unwrap(),
-        HduKind::Primary
-    );
-    assert_eq!(
-        HduKind::classify(&header(&["XTENSION= 'IMAGE   '"]), HduRole::Extension).unwrap(),
-        HduKind::Image
-    );
-    assert_eq!(
-        HduKind::classify(&header(&["XTENSION= 'TABLE   '"]), HduRole::Extension).unwrap(),
-        HduKind::AsciiTable
-    );
-    assert_eq!(
-        HduKind::classify(&header(&["XTENSION= 'BINTABLE'"]), HduRole::Extension).unwrap(),
-        HduKind::BinTable
-    );
-    // A BINTABLE flagged ZIMAGE/ZTABLE is classified by its payload, not its container.
-    assert_eq!(
-        HduKind::classify(
-            &header(&["XTENSION= 'BINTABLE'", "ZIMAGE  = T"]),
-            HduRole::Extension
-        )
-        .unwrap(),
-        HduKind::CompressedImage
-    );
-    assert_eq!(
-        HduKind::classify(
-            &header(&["XTENSION= 'BINTABLE'", "ZTABLE  = T"]),
-            HduRole::Extension
-        )
-        .unwrap(),
-        HduKind::CompressedTable
-    );
-    assert_eq!(
-        HduKind::classify(&header(&["SIMPLE  = T"]), HduRole::RandomGroups).unwrap(),
-        HduKind::RandomGroups
-    );
-    assert_eq!(
-        HduKind::classify(&header(&["XTENSION= 'FOO     '"]), HduRole::Extension).unwrap(),
-        HduKind::Other
-    );
+    for (cards, role, kind) in [
+        (&["SIMPLE  = T"][..], HduRole::Primary, HduKind::Primary),
+        (
+            &["XTENSION= 'IMAGE   '"],
+            HduRole::Extension,
+            HduKind::Image,
+        ),
+        (
+            &["XTENSION= 'TABLE   '"],
+            HduRole::Extension,
+            HduKind::AsciiTable,
+        ),
+        (
+            &["XTENSION= 'BINTABLE'"],
+            HduRole::Extension,
+            HduKind::BinTable,
+        ),
+        // A BINTABLE flagged ZIMAGE/ZTABLE is classified by its payload, not its container.
+        (
+            &["XTENSION= 'BINTABLE'", "ZIMAGE  = T"],
+            HduRole::Extension,
+            HduKind::CompressedImage,
+        ),
+        (
+            &["XTENSION= 'BINTABLE'", "ZTABLE  = T"],
+            HduRole::Extension,
+            HduKind::CompressedTable,
+        ),
+        (
+            &["SIMPLE  = T"],
+            HduRole::RandomGroups,
+            HduKind::RandomGroups,
+        ),
+        (
+            &["XTENSION= 'FOO     '"],
+            HduRole::Extension,
+            HduKind::Other,
+        ),
+    ] {
+        assert_eq!(
+            HduKind::classify(&header(cards), role).unwrap(),
+            kind,
+            "{cards:?}"
+        );
+    }
 }
 
 #[test]
@@ -58,14 +64,14 @@ fn image_data_extent_matches_hand_computed_size() {
     ]);
     let e = data_extent(&h, HduRole::Primary).unwrap();
     assert_eq!(e.data_bytes, 524_288);
-    assert_eq!(e.padded_bytes, 527_040);
+    assert_eq!(padded_len(e.data_bytes), Some(527_040));
 }
 
 #[test]
 fn dataless_primary_has_no_data_unit() {
     let e = data_extent(&header(&["BITPIX  = 8", "NAXIS   = 0"]), HduRole::Primary).unwrap();
     assert_eq!(e.data_bytes, 0);
-    assert_eq!(e.padded_bytes, 0);
+    assert_eq!(padded_len(e.data_bytes), Some(0));
 }
 
 #[test]
@@ -104,8 +110,8 @@ fn rejects_negative_pcount_and_gcount_instead_of_clamping() {
     mistyped_pcount.set_internal(keywords::PCOUNT, "not an integer");
     assert!(matches!(
         data_extent(&mistyped_pcount, HduRole::Extension),
-        Err(FitsError::TypeMismatch { name, expected })
-            if name == "PCOUNT" && expected == "integer"
+        Err(FitsError::ValueTypeMismatch { name: RecordName::Keyword(name), expected: ValueKind::Integer })
+            if name == "PCOUNT"
     ));
 }
 
@@ -121,10 +127,7 @@ fn zero_gcount_describes_an_empty_grouped_data_unit() {
     ]);
     assert_eq!(
         data_extent(&extension, HduRole::Extension).unwrap(),
-        DataExtent {
-            data_bytes: 0,
-            padded_bytes: 0,
-        }
+        DataExtent { data_bytes: 0 }
     );
 }
 
@@ -165,7 +168,7 @@ fn random_groups_extent_skips_the_zero_first_axis() {
     ]);
     let e = data_extent(&h, HduRole::RandomGroups).unwrap();
     assert_eq!(e.data_bytes, 572_832);
-    assert_eq!(e.padded_bytes, 573_120);
+    assert_eq!(padded_len(e.data_bytes), Some(573_120));
 }
 
 #[test]
@@ -180,7 +183,7 @@ fn naxis1_random_groups_extent_uses_the_empty_product() {
     ]);
     let extent = data_extent(&h, HduRole::RandomGroups).unwrap();
     assert_eq!(extent.data_bytes, 2 * (1 + 1) * 4);
-    assert_eq!(extent.padded_bytes, 2880);
+    assert_eq!(padded_len(extent.data_bytes), Some(2880));
 }
 
 #[test]

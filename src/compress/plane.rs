@@ -1,7 +1,7 @@
 //! The integer and float sample planes, kept apart by type so that a codec routine
 //! for one plane cannot be handed the other.
 
-use crate::bintable::tform_kind::TformKind;
+use crate::bintable::element_kind::ElementKind;
 use crate::bitpix::Bitpix;
 use crate::image_model::view::View;
 
@@ -43,13 +43,10 @@ impl IntBitpix {
     }
 
     /// The integer a table column of `kind` stores, or `None` for any other kind.
-    pub(super) const fn from_tform(kind: TformKind) -> Option<Self> {
-        match kind {
-            TformKind::U8 => Some(Self::U8),
-            TformKind::I16 => Some(Self::I16),
-            TformKind::I32 => Some(Self::I32),
-            TformKind::I64 => Some(Self::I64),
-            _ => None,
+    pub(super) fn from_tform(kind: ElementKind) -> Option<Self> {
+        match Plane::of(kind.bitpix()?) {
+            Plane::Int(bitpix) => Some(bitpix),
+            Plane::Float(_) => None,
         }
     }
 
@@ -72,6 +69,15 @@ impl FloatBitpix {
         match self {
             Self::F32 => Bitpix::F32,
             Self::F64 => Bitpix::F64,
+        }
+    }
+
+    /// The integer type of the same width, which lays a float's big-endian bytes out
+    /// for a codec and shuffles them for `GZIP_2`.
+    pub(super) const fn integer_width(self) -> IntBitpix {
+        match self {
+            Self::F32 => IntBitpix::I32,
+            Self::F64 => IntBitpix::I64,
         }
     }
 

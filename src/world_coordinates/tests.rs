@@ -2,29 +2,29 @@ use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Ranked;
+use crate::error::WcsDefect;
 use crate::header_model::value::Value;
 use crate::header_model::{Header, keywords};
 use crate::image_model::region::Region;
-use crate::world_coordinates::internals::{to_pixel, to_world};
-
-use crate::reader::internals::{fixture_bytes, open_fixture};
-use crate::world_coordinates::R2D;
+use crate::internals::cards::{assert_absent, assert_cards};
+use crate::internals::fixture::Fixture;
+use crate::internals::tolerance::{Tolerance, assert_close};
+use crate::internals::wcs_header::{Family, WcsHeader};
 use crate::world_coordinates::Wcs;
+use crate::world_coordinates::angle;
+use crate::world_coordinates::angle::R2D;
 use crate::world_coordinates::axis::Axis;
 use crate::world_coordinates::celestial_pole::CelestialPole;
 use crate::world_coordinates::internals::TAN_GOLDEN;
 use crate::world_coordinates::internals::assert_astropy_golden;
-use crate::world_coordinates::internals::celestial_header;
+
+use crate::world_coordinates::internals::{to_pixel, to_world};
 use crate::world_coordinates::projection::Projection;
 
 /// Load the WCS from the primary header of a fixture.
-fn open_wcs(name: &str) -> Wcs {
-    Wcs::from_header(&open_fixture(name).hdus[0].header, None).unwrap()
-}
-
 #[test]
 fn parses_tan_header() {
-    let w = open_wcs("wcs_tan.fits");
+    let w = Fixture::WcsTan.wcs();
     assert_eq!(
         w.metadata().axes,
         [
@@ -47,7 +47,7 @@ fn parses_tan_header() {
     // Zenithal pole reduces to (CRVAL, LONPOLE=180).
     let c = w.celestial.expect("celestial");
     assert_eq!(
-        c.pole,
+        c.rotation.pole,
         CelestialPole {
             ra: 150.0,
             dec: 2.5,
@@ -58,31 +58,73 @@ fn parses_tan_header() {
 
 #[test]
 fn pixel_to_world_matches_astropy() {
-    let w = open_wcs("wcs_tan.fits");
+    let w = Fixture::WcsTan.wcs();
     assert_astropy_golden(&w, &TAN_GOLDEN, "TAN image");
 }
 
+/// A world coordinate holds α and δ in degrees, each rounded once, so a pixel → world
+/// → pixel round trip misses by about that rounding: an ulp of α, scaled by cos δ on the
+/// sky, and an ulp of δ, with as much again for the rotation and the projection, which
+/// each round too. The sweep covers each
+/// zenithal projection at the IRAC header's reference point, at 60°, and next to the
+/// celestial pole, at 1.2″ and at 3.6 mas a pixel, out to 20° or 1e5 pixels: there the
+/// latitude once came from `asin` of a value next to 1, which lost every offset under a
+/// pixel at 3.6 mas.
 #[test]
 fn world_to_pixel_inverts_pixel_to_world() {
-    // Round-trip our own full-precision forward output. The transform is accurate
-    // to ~1e-9° throughout; near the reference point the 1″/px scale amplifies that
-    // to ~1e-6 px, so test at 1e-5 px (≈ 10 nano-arcsec) — far tighter than any
-    // real use needs.
-    let w = open_wcs("wcs_tan.fits");
-    for &(px, py, _, _) in TAN_GOLDEN.points {
-        let world = to_world(&w, &[px, py]).unwrap();
-        let back = to_pixel(&w, &world).unwrap();
+    let ulp = |value: f64| value.abs().next_up() - value.abs();
+    let assert_round_trip = |wcs: &Wcs, pixel: [f64; 2], degrees_per_pixel: f64, context: &str| {
+        let world = to_world(wcs, &pixel).unwrap();
+        let back = to_pixel(wcs, &world).unwrap();
+        let rounding = ulp(world[0]) * world[1].to_radians().cos() + ulp(world[1]);
+        let miss = (back[0] - pixel[0]).hypot(back[1] - pixel[1]) * degrees_per_pixel;
         assert!(
-            (back[0] - px).abs() < 1e-5 && (back[1] - py).abs() < 1e-5,
-            "pixel→world→pixel at ({px},{py}): got {back:?}"
+            miss <= 2.0 * rounding,
+            "{context} at {pixel:?}: {back:?} misses by {miss:e}°, the rounding is {rounding:e}°"
         );
+    };
+    let tan = Fixture::WcsTan.wcs();
+    for &(px, py, _, _) in TAN_GOLDEN.points {
+        assert_round_trip(&tan, [px, py], 1.0 / 3600.0, "TAN fixture");
+    }
+    for projection in ["TAN", "SIN", "ARC", "STG", "ZEA"] {
+        for crval in [
+            [6.155_013_476_190_52, -2.072_307_988_889_38],
+            [150.0, 60.0],
+            [10.0, 89.95],
+        ] {
+            for degrees_per_pixel in [3.4e-4, 1e-6] {
+                let wcs = WcsHeader::celestial(
+                    projection,
+                    [0.0, 0.0],
+                    crval,
+                    [-degrees_per_pixel, degrees_per_pixel],
+                )
+                .image_header();
+                let wcs = Wcs::from_header(&wcs, None).unwrap();
+                for offset in [0.5, 37.0, 1e3, 1e5] {
+                    if offset * degrees_per_pixel > 20.0 {
+                        continue;
+                    }
+                    for [dx, dy] in [[1.0, 0.0], [0.0, 1.0], [0.7, -0.3], [-1.0, 1.0]] {
+                        assert_round_trip(
+                            &wcs,
+                            [dx * offset, dy * offset],
+                            degrees_per_pixel,
+                            &format!("{projection} at {crval:?}, {degrees_per_pixel}°/px"),
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
 #[test]
 fn transform_failures_return_errors() {
     let build = |projection: &str| {
-        let header = celestial_header(projection, [1.0, 1.0], [0.0, 0.0], [100.0, 100.0]);
+        let header =
+            WcsHeader::celestial(projection, [1.0, 1.0], [0.0, 0.0], [100.0, 100.0]).image_header();
         Wcs::from_header(&header, None)
     };
 
@@ -93,9 +135,14 @@ fn transform_failures_return_errors() {
     ));
 
     // A ZPN polynomial without coefficients maps every colatitude to the pole.
-    assert!(matches!(build("ZPN"), Err(FitsError::InvalidWcs { .. })));
+    assert!(matches!(
+        build("ZPN"),
+        Err(FitsError::InvalidWcs {
+            defect: WcsDefect::DegenerateProjection { projection: "ZPN" }
+        })
+    ));
 
-    let tan = open_wcs("wcs_tan.fits");
+    let tan = Fixture::WcsTan.wcs();
     assert!(matches!(
         to_pixel(&tan, &[150.0, 100.0]),
         Err(FitsError::WcsWorldOutOfDomain { projection: "TAN" })
@@ -127,7 +174,8 @@ fn transform_failures_return_errors() {
 
 #[test]
 fn public_wcs_metadata_exposes_units_and_celestial_projection_pair() {
-    let mut header = celestial_header("TAN", [1.0, 1.0], [45.0, 30.0], [-0.1, 0.1]);
+    let mut header =
+        WcsHeader::celestial("TAN", [1.0, 1.0], [45.0, 30.0], [-0.1, 0.1]).image_header();
     header
         .set_internal("CUNIT1", "deg")
         .set_internal("CUNIT2", "deg");
@@ -169,12 +217,11 @@ fn planetary_solar_lonlat_axes_are_celestial() {
         helio.celestial.is_some(),
         "HPLN/HPLT must be recognized as a celestial pair"
     );
-    for &(px, py) in &[(1.0, 1.0), (64.0, 64.0), (100.0, 30.0)] {
-        let a = to_world(&radec, &[px, py]).unwrap();
-        let b = to_world(&helio, &[px, py]).unwrap();
-        assert!(
-            (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
-            "RA/DEC {a:?} vs HPLN/HPLT {b:?}"
+    for pixel in [[1.0, 1.0], [64.0, 64.0], [100.0, 30.0]] {
+        assert_eq!(
+            to_world(&helio, &pixel).unwrap(),
+            to_world(&radec, &pixel).unwrap(),
+            "{pixel:?}"
         );
     }
 }
@@ -272,7 +319,7 @@ fn rejects_absurd_wcsaxes() {
 /// A celestial header at the default reference pixel, value and increment, then
 /// `keywords`.
 fn celestial_with(projection: &str, keywords: &[(&str, f64)]) -> Header {
-    let mut header = celestial_header(projection, [0.0; 2], [0.0; 2], [1.0; 2]);
+    let mut header = WcsHeader::celestial(projection, [0.0; 2], [0.0; 2], [1.0; 2]).image_header();
     for &(keyword, value) in keywords {
         header.set_internal(keyword, value);
     }
@@ -343,6 +390,40 @@ fn axis_world_of_a_celestial_axis_is_the_projected_value() {
         assert_eq!(world.value, value, "axis {axis}");
         assert_eq!(world.cunit, "deg", "axis {axis}");
     }
+    // Through SIP, which one point's offsets carry for both axes, the same bits.
+    let sip = Wcs::from_header(&Fixture::WcsIracSip.header(), None).unwrap();
+    let pixel = [200.0, 30.0];
+    let complete = to_world(&sip, &pixel).unwrap();
+    for (axis, &value) in complete.iter().enumerate() {
+        assert_eq!(
+            sip.axis_world(axis, &pixel).unwrap().value,
+            value,
+            "SIP axis {axis}"
+        );
+    }
+}
+
+/// Each axis says the unit its world coordinates come out in: degrees for a celestial
+/// axis in radians, the Table-25 default for a spectral algorithm, and the declared unit
+/// for a linear axis, spectral or not.
+#[test]
+fn each_axis_names_its_world_unit() {
+    let mut header = celestial_with("CAR", &[]);
+    header
+        .set_internal("CUNIT1", "rad")
+        .set_internal("CUNIT2", "rad")
+        .set_internal(keywords::NAXIS, 5)
+        .set_internal("CTYPE3", "FREQ-W2F")
+        .set_internal("CUNIT3", "MHz")
+        .set_internal("CRVAL3", 1420.0)
+        .set_internal(keywords::RESTFRQ, 1.42e9)
+        .set_internal("CTYPE4", "FREQ")
+        .set_internal("CUNIT4", "GHz")
+        .set_internal("CTYPE5", "LINEAR")
+        .set_internal("CUNIT5", "furlong");
+    let wcs = Wcs::from_header(&header, None).unwrap();
+    let units: Vec<&str> = (0..5).map(|axis| wcs.world_unit(axis)).collect();
+    assert_eq!(units, ["deg", "deg", "Hz", "GHz", "furlong"]);
 }
 
 /// Angle units resolve through one table — SI-prefixed radians, the unprefixed sexagesimal
@@ -411,12 +492,10 @@ fn the_view_keeps_crval_in_its_declared_unit() {
 /// `[0, 360)`: a tiny negative angle's remainder rounds to 360 itself, which is 0.
 #[test]
 fn norm360_stays_below_a_full_turn() {
-    use crate::world_coordinates::norm360;
-
-    assert_eq!(norm360(-1e-20), 0.0);
-    assert_eq!(norm360(-90.0), 270.0);
-    assert_eq!(norm360(720.0), 0.0);
-    assert_eq!(norm360(359.5), 359.5);
+    assert_eq!(angle::norm360(-1e-20), 0.0);
+    assert_eq!(angle::norm360(-90.0), 270.0);
+    assert_eq!(angle::norm360(720.0), 0.0);
+    assert_eq!(angle::norm360(359.5), 359.5);
 }
 
 /// `[−180, 180)`, exactly. One ulp below −180 is `−180 − 2⁻⁴⁵`, whose exact image is
@@ -424,8 +503,6 @@ fn norm360_stays_below_a_full_turn() {
 /// A tiny angle keeps every bit rather than vanishing into `180 − 180`.
 #[test]
 fn norm180_is_exact_and_stays_below_a_half_turn() {
-    use crate::world_coordinates::norm180;
-
     let ulp = 2f64.powi(-45);
     for (angle, normalized) in [
         (-180.0 - ulp, 180.0 - ulp),
@@ -437,7 +514,7 @@ fn norm180_is_exact_and_stays_below_a_half_turn() {
         (1e-20, 1e-20),
         (-1e-20, -1e-20),
     ] {
-        assert_eq!(norm180(angle), normalized, "{angle}");
+        assert_eq!(angle::norm180(angle), normalized, "{angle}");
     }
 }
 
@@ -478,32 +555,21 @@ fn assert_same_transform(a: &Wcs, b: &Wcs, what: &str) {
 /// alternate description, SIP and TPV.
 #[test]
 fn write_into_round_trips_every_description() {
-    for code in [
-        "TAN", "SIN", "ARC", "STG", "ZEA", "ZPN", "AIR", "AZP", "SZP", "COP", "COE", "COD", "COO",
-        "CAR", "CEA", "MER", "SFL", "AIT", "MOL", "CYP", "PAR", "BON", "PCO", "TSC", "CSC", "QSC",
-        "HPX",
-    ] {
-        let mut header = celestial_header(code, [50.5, 40.25], [30.0, 40.0], [-1e-3, 2e-3]);
+    for projection in Projection::all() {
+        let code = projection.code();
+        let mut header = WcsHeader::celestial(code, [50.5, 40.25], [30.0, 40.0], [-1e-3, 2e-3])
+            .pv(projection.test_parameters())
+            .image_header();
         header
             .set_internal("PC1_2", 0.25)
             .set_internal("CUNIT1", "deg")
             .set_internal("RADESYS", "FK5");
-        match code {
-            "COP" | "COE" | "COD" | "COO" | "BON" => {
-                header.set_internal("PV2_1", 45.0);
-            }
-            "ZPN" => {
-                header
-                    .set_internal("PV2_1", 1.0)
-                    .set_internal("PV2_3", 0.05);
-            }
-            _ => {}
-        }
         let wcs = Wcs::from_header(&header, None).unwrap();
         assert_same_transform(&wcs, &written_back(&wcs, None), code);
     }
 
-    let mut cube = celestial_header("TAN", [10.0, 10.0], [150.0, 2.0], [1e-3, 1e-3]);
+    let mut cube =
+        WcsHeader::celestial("TAN", [10.0, 10.0], [150.0, 2.0], [1e-3, 1e-3]).image_header();
     cube.set_internal(keywords::NAXIS, 3)
         .set_internal("CTYPE3", "VRAD")
         .set_internal("CUNIT3", "km/s")
@@ -515,49 +581,39 @@ fn write_into_round_trips_every_description() {
     let wcs = Wcs::from_header(&cube, None).unwrap();
     assert_same_transform(&wcs, &written_back(&wcs, None), "spectral cube");
 
-    let mut alternate = celestial_header("TAN", [10.0, 10.0], [150.0, 2.0], [1e-3, 1e-3]);
-    for (name, value) in [
-        ("CTYPE1A", "RA---SIN"),
-        ("CTYPE2A", "DEC--SIN"),
-        ("RADESYSA", "ICRS"),
-    ] {
-        alternate.set_internal(name, value);
-    }
-    for (name, value) in [
-        ("CRPIX1A", 5.0),
-        ("CRPIX2A", 6.0),
-        ("CRVAL1A", 10.0),
-        ("CRVAL2A", 20.0),
-        ("CD1_1A", 2e-3),
-        ("CD2_2A", 3e-3),
-        ("CD1_2A", 1e-4),
-    ] {
-        alternate.set_internal(name, value);
-    }
+    let mut alternate =
+        WcsHeader::celestial("TAN", [10.0, 10.0], [150.0, 2.0], [1e-3, 1e-3]).image_header();
+    WcsHeader::celestial("SIN", [5.0, 6.0], [10.0, 20.0], [1.0, 1.0])
+        .cd([2e-3, 1e-4, 0.0, 3e-3])
+        .write_into(&mut alternate, Family::Image, 'A');
+    alternate.set_internal("RADESYSA", "ICRS");
     let wcs = Wcs::from_header(&alternate, 'A').unwrap();
     assert_same_transform(&wcs, &written_back(&wcs, Some('A')), "alternate A");
 
     // The primary-only `RADECSYS` and `RESTFREQ` go back as `RADESYSA` and `RESTFRQA`,
     // as `RADECSYSA` and `RESTFREQA` exceed 8 bytes.
-    let mut legacy = celestial_header("TAN", [10.0, 10.0], [150.0, 2.0], [1e-3, 1e-3]);
+    let mut legacy =
+        WcsHeader::celestial("TAN", [10.0, 10.0], [150.0, 2.0], [1e-3, 1e-3]).image_header();
     legacy
         .set_internal("RADECSYS", "FK4")
         .set_internal("RESTFREQ", 1.4e9);
     let wcs = Wcs::from_header(&legacy, None).unwrap();
     let mut header = Header::new();
     wcs.write_into(&mut header, 'A').unwrap();
-    assert_eq!(header.get_text("RADESYSA").unwrap(), Some("FK4"));
-    assert_eq!(header.get_real("RESTFRQA").unwrap(), Some(1.4e9));
+    assert_cards(
+        &header,
+        &[("RADESYSA", "FK4".into()), ("RESTFRQA", 1.4e9.into())],
+    );
     assert_same_transform(
         &wcs,
         &Wcs::from_header(&header, 'A').unwrap(),
         "legacy spellings",
     );
 
-    for fixture in ["wcs_irac_sip.hdr", "wcs_tpvonly.hdr"] {
-        let header = Header::parse(&fixture_bytes(fixture)).unwrap();
+    for fixture in [Fixture::WcsIracSip, Fixture::WcsTpvOnly] {
+        let header = fixture.header();
         let wcs = Wcs::from_header(&header, None).unwrap();
-        assert_same_transform(&wcs, &written_back(&wcs, None), fixture);
+        assert_same_transform(&wcs, &written_back(&wcs, None), &format!("{fixture:?}"));
     }
 }
 
@@ -577,25 +633,29 @@ fn write_into_writes_the_matrix_in_wcslibs_form() {
             .unwrap();
         out
     };
-    let mut pc = celestial_header("TAN", [1.0, 1.0], [0.0, 0.0], [2.0, 3.0]);
+    let mut pc = WcsHeader::celestial("TAN", [1.0, 1.0], [0.0, 0.0], [2.0, 3.0]).image_header();
     pc.set_internal("PC1_2", 0.3);
     let out = written(&pc);
-    assert_eq!(out.get_real("PC1_2").unwrap(), Some(0.3));
-    assert_eq!(out.get_real("CDELT1").unwrap(), Some(2.0));
-    assert_eq!(out.get("PC1_1").unwrap(), None);
-    assert_eq!(out.get("PC2_1").unwrap(), None);
+    assert_cards(&out, &[("PC1_2", 0.3.into()), ("CDELT1", 2.0.into())]);
+    assert_absent(&out, &["PC1_1", "PC2_1"]);
 
-    let mut cd = celestial_header("TAN", [1.0, 1.0], [0.0, 0.0], [9.0, 9.0]);
+    let mut cd = WcsHeader::celestial("TAN", [1.0, 1.0], [0.0, 0.0], [9.0, 9.0]).image_header();
     cd.set_internal("CD1_1", 2e-3)
         .set_internal("CD1_2", 1e-4)
         .set_internal("CD2_2", 3e-3);
     let out = written(&cd);
-    assert_eq!(out.get_real("PC1_1").unwrap(), Some(2e-3));
-    assert_eq!(out.get_real("PC1_2").unwrap(), Some(1e-4));
-    assert_eq!(out.get_real("CDELT1").unwrap(), Some(1.0));
+    assert_cards(
+        &out,
+        &[
+            ("PC1_1", 2e-3.into()),
+            ("PC1_2", 1e-4.into()),
+            ("CDELT1", 1.0.into()),
+        ],
+    );
     assert_eq!(out.get("CD1_1").unwrap(), None);
 
-    let mut crota = celestial_header("TAN", [1.0, 1.0], [0.0, 0.0], [-2e-4, 3e-4]);
+    let mut crota =
+        WcsHeader::celestial("TAN", [1.0, 1.0], [0.0, 0.0], [-2e-4, 3e-4]).image_header();
     crota.set_internal("CROTA2", 30.0);
     let out = written(&crota);
     let cos30 = (30.0f64).to_radians().cos();
@@ -605,15 +665,19 @@ fn write_into_writes_the_matrix_in_wcslibs_form() {
         ("PC2_1", -1.0 / 3.0),
         ("PC2_2", cos30),
     ] {
-        let got = out.get_real(name).unwrap().unwrap();
-        assert!(
-            (got - value).abs() <= 2.0 * f64::EPSILON,
-            "{name} {got} {value}"
+        assert_close(
+            &[out.get_real(name).unwrap().unwrap()],
+            &[value],
+            Tolerance::abs(
+                2.0 * f64::EPSILON,
+                "two roundings of a unit-scale matrix entry",
+            ),
+            name,
         );
     }
     assert_eq!(out.get("CROTA2").unwrap(), None);
 
-    let mut target = celestial_header("TAN", [7.0, 7.0], [1.0, 1.0], [1.0, 1.0]);
+    let mut target = WcsHeader::celestial("TAN", [7.0, 7.0], [1.0, 1.0], [1.0, 1.0]).image_header();
     target
         .set_internal("CD1_1", 5.0)
         .set_internal("CTYPE1A", "RA---ARC")
@@ -623,16 +687,21 @@ fn write_into_writes_the_matrix_in_wcslibs_form() {
         .write_into(&mut target, None)
         .unwrap();
     assert_eq!(target.get("CD1_1").unwrap(), None);
-    assert_eq!(target.get_real("CRPIX1").unwrap(), Some(1.0));
-    assert_eq!(target.get_text("CTYPE1A").unwrap(), Some("RA---ARC"));
-    assert_eq!(target.get_real("CRVAL1A").unwrap(), Some(4.5));
+    assert_cards(
+        &target,
+        &[
+            ("CRPIX1", 1.0.into()),
+            ("CTYPE1A", "RA---ARC".into()),
+            ("CRVAL1A", 4.5.into()),
+        ],
+    );
 }
 
 /// A `-TAB` axis cannot be written, as its arrays live in another HDU, nor SIP as an
 /// alternate description.
 #[test]
 fn write_into_refuses_what_a_header_cannot_hold() {
-    let mut tab = celestial_header("TAN", [1.0, 1.0], [0.0, 0.0], [1.0, 1.0]);
+    let mut tab = WcsHeader::celestial("TAN", [1.0, 1.0], [0.0, 0.0], [1.0, 1.0]).image_header();
     tab.set_internal(keywords::NAXIS, 3)
         .set_internal("CTYPE3", "WAVE-TAB");
     let wcs = Wcs::from_header(&tab, None).unwrap();
@@ -640,11 +709,7 @@ fn write_into_refuses_what_a_header_cannot_hold() {
         wcs.write_into(&mut Header::new(), None),
         Err(FitsError::UnsupportedWcsTransform { axes }) if axes == [2]
     ));
-    let sip = Wcs::from_header(
-        &Header::parse(&fixture_bytes("wcs_irac_sip.hdr")).unwrap(),
-        None,
-    )
-    .unwrap();
+    let sip = Wcs::from_header(&Fixture::WcsIracSip.header(), None).unwrap();
     assert!(matches!(
         sip.write_into(&mut Header::new(), 'A'),
         Err(FitsError::ConflictingWcsKeywords { .. })
@@ -653,43 +718,34 @@ fn write_into_refuses_what_a_header_cannot_hold() {
 
 /// A SIP header with a rotated, sheared `PC`, for the crop and bin tests.
 fn rotated_sip_header() -> Header {
-    let mut header = celestial_header("TAN-SIP", [40.0, 30.0], [120.0, -30.0], [-1e-3, 1e-3]);
-    header
-        .set_internal("PC1_2", 0.2)
-        .set_internal("PC2_1", -0.1)
-        .set_internal("A_ORDER", 2)
-        .set_internal("A_2_0", 1e-3)
-        .set_internal("A_1_1", 2e-3)
-        .set_internal("B_ORDER", 2)
-        .set_internal("B_0_2", 3e-3);
-    header
+    WcsHeader::celestial("TAN-SIP", [40.0, 30.0], [120.0, -30.0], [-1e-3, 1e-3])
+        .pc([1.0, 0.2, -0.1, 1.0])
+        .sip()
+        .image_header()
 }
 
-/// The largest difference between two world coordinates, each axis on its own.
-fn world_distance(a: &[f64], b: &[f64]) -> f64 {
-    a.iter()
-        .zip(b)
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0, f64::max)
-}
+/// The world coordinates of a shifted or scaled pixel through a derived WCS, against the
+/// parent's: the offsets round, and the projection carries the rounding.
+const SHIFT_ROUNDING: Tolerance = Tolerance::abs(1e-12, "the rounding of the shifted offsets");
 
 /// A crop's pixel `p − start` is the parent's pixel `p`, for TAN and for TAN with SIP;
-/// `Region::All` gives the same WCS. 1e-12° bounds the rounding of the shifted offsets.
+/// `Region::All` gives the same WCS.
 #[test]
 fn crop_shifts_the_reference_pixel() {
     let ranges = [10..100, 20..200];
     for header in [
-        celestial_header("TAN", [40.0, 30.0], [120.0, -30.0], [-1e-3, 1e-3]),
+        WcsHeader::celestial("TAN", [40.0, 30.0], [120.0, -30.0], [-1e-3, 1e-3]).image_header(),
         rotated_sip_header(),
     ] {
         let parent = Wcs::from_header(&header, None).unwrap();
         let crop = parent.crop(Region::from(&ranges)).unwrap();
         assert_eq!(crop.metadata().distortion, parent.metadata().distortion);
         for p in [[11.0, 21.0], [57.5, 99.25], [99.0, 199.0]] {
-            let cropped = to_world(&crop, &[p[0] - 10.0, p[1] - 20.0]).unwrap();
-            assert!(
-                world_distance(&cropped, &to_world(&parent, &p).unwrap()) <= 1e-12,
-                "{p:?}"
+            assert_close(
+                &to_world(&crop, &[p[0] - 10.0, p[1] - 20.0]).unwrap(),
+                &to_world(&parent, &p).unwrap(),
+                SHIFT_ROUNDING,
+                &format!("{p:?}"),
             );
         }
         assert_same_transform(&parent, &parent.crop(Region::All).unwrap(), "Region::All");
@@ -708,11 +764,11 @@ fn crop_shifts_the_reference_pixel() {
 /// A bin's pixel `p'` is the parent's pixel `b·(p' − 0.5) + 0.5` on each axis: for a
 /// 2 × 2 bin of TAN, and a 2 × 3 bin of a rotated, sheared `PC` with SIP. The SIP terms of
 /// the 2 × 3 bin, worked by hand: `A_2_0 = 0.001·2²/2 = 0.002`,
-/// `A_1_1 = 0.002·2·3/2 = 0.006`, `B_0_2 = 0.003·3²/3 = 0.009`. 1e-12° bounds the rounding.
+/// `A_1_1 = 0.002·2·3/2 = 0.006`, `B_0_2 = 0.003·3²/3 = 0.009`.
 #[test]
 fn bin_scales_the_pixel_axes() {
     let tan = Wcs::from_header(
-        &celestial_header("TAN", [40.0, 30.0], [120.0, -30.0], [-1e-3, 1e-3]),
+        &WcsHeader::celestial("TAN", [40.0, 30.0], [120.0, -30.0], [-1e-3, 1e-3]).image_header(),
         None,
     )
     .unwrap();
@@ -729,10 +785,11 @@ fn bin_scales_the_pixel_axes() {
                 factors[0] as f64 * (p[0] - 0.5) + 0.5,
                 factors[1] as f64 * (p[1] - 0.5) + 0.5,
             ];
-            let world = to_world(&binned, &p).unwrap();
-            assert!(
-                world_distance(&world, &to_world(&parent, &parent_pixel).unwrap()) <= 1e-12,
-                "{factors:?} {p:?}"
+            assert_close(
+                &to_world(&binned, &p).unwrap(),
+                &to_world(&parent, &parent_pixel).unwrap(),
+                SHIFT_ROUNDING,
+                &format!("{factors:?} {p:?}"),
             );
         }
     }
@@ -744,17 +801,23 @@ fn bin_scales_the_pixel_axes() {
         .write_into(&mut header, None)
         .unwrap();
     for (name, value) in [("A_2_0", 2e-3), ("A_1_1", 6e-3), ("B_0_2", 9e-3)] {
-        let got = header.get_real(name).unwrap().unwrap();
-        assert!(
-            (got - value).abs() <= 2.0 * f64::EPSILON * value,
-            "{name} {got}"
+        assert_close(
+            &[header.get_real(name).unwrap().unwrap()],
+            &[value],
+            Tolerance::rel(
+                2.0 * f64::EPSILON,
+                "a product and a quotient of the parent's term",
+            ),
+            name,
         );
     }
     // CRPIX1 = (40 − 0.5)/2 + 0.5 = 20.25, CRPIX2 = (30 − 0.5)/3 + 0.5.
-    assert_eq!(header.get_real("CRPIX1").unwrap(), Some(20.25));
-    assert_eq!(
-        header.get_real("CRPIX2").unwrap(),
-        Some((30.0 - 0.5) / 3.0 + 0.5)
+    assert_cards(
+        &header,
+        &[
+            ("CRPIX1", 20.25.into()),
+            ("CRPIX2", ((30.0 - 0.5) / 3.0 + 0.5).into()),
+        ],
     );
     let parent = Wcs::from_header(&rotated_sip_header(), None).unwrap();
     assert!(matches!(

@@ -1,6 +1,7 @@
 //! [`SpectralTransform`]: how a spectral axis maps between its sampled and
 //! expressed characteristics.
 
+use crate::error::GrismDefect;
 use crate::error::Result;
 use crate::world_coordinates::axis_transform::spectral_kind::{
     conversion_derivative, convert, domain_error, finite, invalid_grism, invalid_reference,
@@ -164,34 +165,28 @@ impl Grism {
             detector_tilt,
         ];
         if values.iter().any(|value| !value.is_finite()) {
-            return Err(invalid_grism(algorithm, "parameters must be finite"));
+            return Err(invalid_grism(algorithm, GrismDefect::NonFinite));
         }
 
         let incidence_sine = incidence.to_radians().sin();
         let grating_cosine = grating_tilt.to_radians().cos();
         let detector_cosine = detector_tilt.to_radians().cos();
         if grating_cosine == 0.0 || detector_cosine == 0.0 {
-            return Err(invalid_grism(
-                algorithm,
-                "grating and detector tilts must have non-zero cosine",
-            ));
+            return Err(invalid_grism(algorithm, GrismDefect::PerpendicularTilt));
         }
         let ruling = density * order / grating_cosine;
         let beta_sine = ruling * reference - refractive_index * incidence_sine;
         if !(-1.0..=1.0).contains(&beta_sine) {
             return Err(invalid_grism(
                 algorithm,
-                "reference wavelength is outside the grism domain",
+                GrismDefect::ReferenceOutsideDomain,
             ));
         }
         let beta = beta_sine.asin();
         let dispersion = ruling - refractive_derivative * incidence_sine;
         let scale = derivative * dispersion / (beta.cos() * detector_cosine * detector_cosine);
         if !dispersion.is_finite() || dispersion == 0.0 || !scale.is_finite() || scale == 0.0 {
-            return Err(invalid_grism(
-                algorithm,
-                "detector parameters produce zero dispersion",
-            ));
+            return Err(invalid_grism(algorithm, GrismDefect::ZeroDispersion));
         }
         Ok(Self {
             offset: -detector_tilt.to_radians().tan(),

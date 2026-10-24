@@ -19,6 +19,12 @@ fn x_bit_column_unpacks_msb_first() {
         bits.row(0),
         bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0].as_bitslice()
     );
+    // The rows iterate from a column read in one expression, by value and by
+    // reference, with an exact count.
+    let rows: Vec<_> = table.column(0).unwrap().bits().unwrap().iter().collect();
+    assert_eq!(rows, [bits.row(0)]);
+    assert_eq!((&bits).into_iter().len(), 1);
+    assert_eq!(bits.into_iter().next(), Some(bits.row(0)));
     assert_eq!(bits.get(0, 0), Some(true)); // first bit (MSB)
     assert_eq!(bits.get(0, 1), Some(false));
     assert_eq!(bits.get(0, 12), None); // past the 12 bits
@@ -27,10 +33,10 @@ fn x_bit_column_unpacks_msb_first() {
     assert!(!bits[0][1]);
     assert!(bits[(0, 0)]);
     assert!(!bits[(0, 1)]);
-    // `raw()` still yields the packed bytes.
+    // `raw()` gives the row's 12 bits, without the padding of its last byte.
     assert_eq!(
         table.column(0).unwrap().raw().unwrap(),
-        ColumnData::U8(vec![0xAB, 0xC0])
+        ColumnData::Bit(bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0])
     );
 }
 

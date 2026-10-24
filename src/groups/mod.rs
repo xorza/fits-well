@@ -11,10 +11,9 @@ use crate::error::Indexed;
 use crate::error::Result;
 use crate::header_model::{Header, keywords};
 use crate::image_model::data::Data;
-use crate::image_model::physical_view;
+use crate::image_model::physical_sample::PhysicalSample;
 use crate::image_model::scaling::Scaling;
 use crate::image_model::view::View;
-use std::iter;
 
 /// The last parameter a `PTYPEn`/`PSCALn`/`PZEROn` keyword can describe: each root
 /// is five characters, which leaves three digits of an eight-character keyword. A
@@ -25,8 +24,9 @@ const LAST_DESCRIBED_PARAMETER: usize = 999;
 /// A decoded random-groups primary array.
 #[derive(Debug, Clone)]
 pub struct RandomGroups {
-    /// `PTYPEn` names of the first `min(pcount, 999)` parameters, in order.
-    parameter_names: Vec<String>,
+    /// `PTYPEn` names of the first `min(pcount, 999)` parameters, in order; `None` where
+    /// the keyword is absent or empty.
+    parameter_names: Vec<Option<String>>,
     /// The per-group array shape (`NAXIS2..NAXISm`; the `NAXIS1` zero sentinel is
     /// dropped).
     group_shape: Vec<usize>,
@@ -43,10 +43,10 @@ pub struct RandomGroups {
 /// Immutable geometry and representation metadata for a random-groups array.
 #[derive(Debug, Clone, Copy)]
 pub struct RandomGroupsMetadata<'a> {
-    /// `PTYPEn` names in parameter order, `""` where the keyword is absent. Only the
-    /// first 999 parameters have a `PTYPEn` keyword, so past that the slice is shorter
-    /// than `pcount`.
-    pub parameter_names: &'a [String],
+    /// `PTYPEn` names in parameter order, `None` where the keyword is absent or empty.
+    /// Only the first 999 parameters have a `PTYPEn` keyword, so past that the slice is
+    /// shorter than `pcount`.
+    pub parameter_names: &'a [Option<String>],
     /// Per-group array shape, with the `NAXIS1 = 0` sentinel omitted.
     pub group_shape: &'a [usize],
     /// Number of stored groups.
@@ -55,6 +55,12 @@ pub struct RandomGroupsMetadata<'a> {
     pub pcount: usize,
     /// Stored sample representation shared by parameters and arrays.
     pub bitpix: Bitpix,
+}
+
+/// The group parameters one `PTYPEn` name names, from [`RandomGroups::parameter`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupParameter {
+    indices: Vec<usize>,
 }
 
 /// `PSCALn`/`PZEROn` linear scaling for one group parameter
@@ -85,8 +91,11 @@ impl RandomGroups {
         }
     }
 
-    pub(crate) fn from_data(header: &Header, data: &[u8]) -> Result<Self> {
+    /// The random groups `header` describes, of the host-endian `samples` its data unit
+    /// holds.
+    pub(crate) fn from_samples(header: &Header, samples: Data) -> Result<Self> {
         let bitpix = header.bitpix()?;
+        debug_assert_eq!(samples.bitpix(), bitpix, "samples of the header's BITPIX");
         let axes = header.axes()?;
         // NAXIS1 is the zero sentinel; the per-group array spans the rest.
         let group_shape: Vec<usize> = axes.iter().skip(1).copied().collect();
@@ -102,10 +111,11 @@ impl RandomGroups {
             .checked_add(array_len)
             .and_then(|group_len| group_len.checked_mul(gcount))
             .ok_or(FitsError::DataUnitOverflow)?;
-        let got = data.len() / bitpix.elem_size();
-        if got != expected {
-            return Err(FitsError::DataSizeMismatch { expected, got });
-        }
+        debug_assert_eq!(
+            samples.len(),
+            expected,
+            "the scan sized the data unit from these keywords"
+        );
 
         let described = pcount.min(LAST_DESCRIBED_PARAMETER);
         let mut parameter_names = Vec::with_capacity(described);
@@ -114,8 +124,8 @@ impl RandomGroups {
             parameter_names.push(
                 header
                     .get_text(keywords::PTYPE.indexed(j)?)?
-                    .unwrap_or("")
-                    .to_string(),
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string),
             );
             param_scaling.push(ParamScale {
                 pscal: header.get_real(keywords::PSCAL.indexed(j)?)?.unwrap_or(1.0),
@@ -129,9 +139,9 @@ impl RandomGroups {
             gcount,
             pcount,
             array_len,
-            array_scaling: Scaling::from_header(header)?,
+            array_scaling: Scaling::from_header(header, bitpix)?,
             param_scaling,
-            samples: Data::decode(data, bitpix),
+            samples,
         })
     }
 
@@ -150,65 +160,78 @@ impl RandomGroups {
         let parameters_end = start + self.pcount;
         let group_end = start + group_len;
         Ok(RandomGroupView {
-            parameters: self.samples.view_range(start..parameters_end),
-            array: self.samples.view_range(parameters_end..group_end),
+            parameters: self.samples.view().slice(start..parameters_end),
+            array: self.samples.view().slice(parameters_end..group_end),
         })
     }
 
-    /// The physical parameter values of group `g`: `PZEROn + PSCALn × raw`.
-    pub fn parameters_physical(&self, group: usize) -> Result<Vec<f64>> {
+    /// Append the physical parameter values of group `group` to `out`:
+    /// `PZEROn + PSCALn × raw`, one fused multiply-add each.
+    pub fn parameters_physical_into(&self, group: usize, out: &mut Vec<f64>) -> Result<()> {
         let base = self.checked_group_base(group)?;
         // Widen the whole parameter run once (identity scaling is a plain widening),
         // then apply each described parameter's own `PSCALn`/`PZEROn`; a later one
         // keeps the identity its absent keywords mean.
-        let mut values = physical_view(
-            self.samples.view_range(base..base + self.pcount),
-            &Scaling::IDENTITY,
-        );
-        for (value, &ParamScale { pscal, pzero }) in values.iter_mut().zip(&self.param_scaling) {
-            *value = pzero + pscal * *value;
+        let start = out.len();
+        self.samples
+            .view()
+            .slice(base..base + self.pcount)
+            .extend_physical(&Scaling::IDENTITY, out);
+        for (value, &ParamScale { pscal, pzero }) in
+            out[start..].iter_mut().zip(&self.param_scaling)
+        {
+            *value = pscal.mul_add(*value, pzero);
         }
-        Ok(values)
+        Ok(())
     }
 
-    /// The physical value of the named group parameter (§6.3): when extra
-    /// precision splits one logical parameter into two or more group parameters
-    /// sharing a `PTYPEn` name, the value is the **sum** of those addends'
-    /// physical values. Errors with [`FitsError::GroupParameterNotFound`] if no
-    /// parameter has the name. (For the raw per-addend values, use
-    /// [`RandomGroups::parameters_physical`].)
-    pub fn parameter_physical(&self, group: usize, name: &str) -> Result<f64> {
-        let values = self.parameters_physical(group)?;
-        let mut sum = 0.0;
-        let mut found = false;
-        let names = self
+    /// The group parameters that `name` names, resolved once (§6.3): every parameter whose
+    /// `PTYPEn` is `name`. Errors with [`FitsError::GroupParameterNotFound`] if none is.
+    pub fn parameter(&self, name: &str) -> Result<GroupParameter> {
+        let indices: Vec<usize> = self
             .parameter_names
             .iter()
-            .map(String::as_str)
-            .chain(iter::repeat(""));
-        for (value, parameter) in values.iter().zip(names) {
-            if parameter == name {
-                found = true;
-                sum += value;
-            }
-        }
-        if found {
-            Ok(sum)
-        } else {
-            Err(FitsError::GroupParameterNotFound {
+            .enumerate()
+            .filter(|(_, parameter)| parameter.as_deref() == Some(name))
+            .map(|(index, _)| index)
+            .collect();
+        if indices.is_empty() {
+            return Err(FitsError::GroupParameterNotFound {
                 name: name.to_string(),
-            })
+            });
         }
+        Ok(GroupParameter { indices })
     }
 
-    /// The physical array values of group `g`: `BZERO + BSCALE × raw`, with integer
-    /// samples equal to `BLANK` mapped to `NaN`.
-    pub fn array_physical(&self, group: usize) -> Result<Vec<f64>> {
+    /// The physical value of `parameter` in group `group` (§6.3): when extra precision
+    /// splits one logical parameter into two or more group parameters sharing a `PTYPEn`
+    /// name, the value is the **sum** of those addends' physical values.
+    pub fn parameter_physical(&self, group: usize, parameter: &GroupParameter) -> Result<f64> {
+        let base = self.checked_group_base(group)?;
+        let parameters = self.samples.view().slice(base..base + self.pcount);
+        Ok(parameter
+            .indices
+            .iter()
+            .map(|&index| {
+                let ParamScale { pscal, pzero } = self.param_scaling[index];
+                pscal.mul_add(parameters.get_f64(index), pzero)
+            })
+            .sum())
+    }
+
+    /// Append the physical array values of group `group` to `out`: `BZERO + BSCALE ×
+    /// raw`, with integer samples equal to `BLANK` mapped to `NaN`.
+    pub fn array_physical_into<T: PhysicalSample>(
+        &self,
+        group: usize,
+        out: &mut Vec<T>,
+    ) -> Result<()> {
         let base = self.checked_group_base(group)? + self.pcount;
-        Ok(physical_view(
-            self.samples.view_range(base..base + self.array_len()),
-            &self.array_scaling,
-        ))
+        self.samples
+            .view()
+            .slice(base..base + self.array_len())
+            .extend_physical(&self.array_scaling, out);
+        Ok(())
     }
 
     const fn group_len(&self) -> usize {
@@ -224,6 +247,21 @@ impl RandomGroups {
             });
         }
         Ok(index * self.group_len())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod internals {
+    use crate::error::Result;
+    use crate::groups::RandomGroups;
+    use crate::header_model::Header;
+    use crate::image_model::data::Data;
+
+    impl RandomGroups {
+        /// The random groups `header` describes, of the stored big-endian `data`.
+        pub(crate) fn from_data(header: &Header, data: &[u8]) -> Result<Self> {
+            Self::from_samples(header, Data::decode(data, header.bitpix()?))
+        }
     }
 }
 

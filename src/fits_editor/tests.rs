@@ -2,16 +2,17 @@ use std::io::Cursor;
 
 use crate::bintable::column_data::ColumnData;
 use crate::block::BLOCK_SIZE;
-use crate::error::FitsError;
+use crate::error::{FitsError, SizeUnit};
 use crate::fits_editor::FitsEditor;
 use crate::fits_writer::FitsWriter;
 use crate::fits_writer::builder::{Builder, WriteColumn};
+use crate::hdu::HduKind;
 use crate::header_model::{Header, keywords};
 use crate::image_model::Image;
 use crate::image_model::data::Data;
 use crate::image_model::scaling::Scaling;
+use crate::internals::memory::read_whole;
 use crate::reader::FitsReader;
-use crate::reader::internals::read_whole;
 
 /// A primary image, a binary table and an image extension, written by `writer`.
 fn three_hdus(writer: FitsWriter<Cursor<Vec<u8>>>) -> Vec<u8> {
@@ -45,6 +46,13 @@ fn outside(file: &[u8], range: std::ops::Range<usize>) -> Vec<u8> {
 fn replace_header_writes_in_place() {
     let original = plain_file();
     let mut editor = FitsEditor::open(Cursor::new(original.clone())).unwrap();
+    // The editor selects and lists as the reader does: the primary and the last image
+    // extension are the images.
+    assert_eq!(editor.hdu(2).unwrap().index, 2);
+    assert_eq!(
+        editor.images().map(|hdu| hdu.index).collect::<Vec<_>>(),
+        [0, 2]
+    );
     let hdu = &editor.hdus()[1];
     let range =
         usize::try_from(hdu.header_offset).unwrap()..usize::try_from(hdu.data_offset).unwrap();
@@ -86,8 +94,23 @@ fn replace_header_writes_in_place() {
     assert!(matches!(
         editor.replace_header(1, &resized),
         Err(FitsError::DataSizeMismatch {
+            unit: SizeUnit::Bytes,
             expected: 12,
             got: 16
+        })
+    ));
+    // The same data unit as an ASCII `TABLE` would fill its last block with spaces.
+    let mut retyped = editor.hdus()[1].header.clone();
+    retyped.set(keywords::XTENSION, "TABLE").unwrap();
+    retyped
+        .set(keywords::TFORM.indexed(1).unwrap(), "I4")
+        .unwrap();
+    retyped.set(keywords::TBCOL.indexed(1).unwrap(), 1).unwrap();
+    assert!(matches!(
+        editor.replace_header(1, &retyped),
+        Err(FitsError::HduKindChange {
+            from: HduKind::BinTable,
+            to: HduKind::AsciiTable
         })
     ));
     assert_eq!(
@@ -116,7 +139,7 @@ fn spare_records_leave_room_for_an_edit() {
     }
     editor.replace_header(0, &grown).unwrap();
     let reread = editor.hdus()[0].header.clone();
-    assert_eq!(reread.history().count(), 40);
+    assert_eq!(reread.history_records().count(), 40);
     editor.replace_header(0, &reread).unwrap();
     let bytes = editor.into_inner().into_inner();
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
@@ -127,10 +150,12 @@ fn spare_records_leave_room_for_an_edit() {
 }
 
 /// A header that grows past its blocks writes the whole file to a second sink, every
-/// other HDU and every data unit as they were; the file itself is left as it was.
+/// other HDU and every data unit as they were; the file itself is left as it was. The
+/// new header keeps the free records of the old: 40 spare records before the edit give
+/// 40 after it, and a header 60 records longer takes `⌈(n + 60 + 40 + 1)/36⌉` blocks.
 #[test]
 fn replace_header_into_writes_a_whole_file() {
-    let original = plain_file();
+    let original = three_hdus(FitsWriter::new(Cursor::new(Vec::new())).with_spare_records(40));
     let mut editor = FitsEditor::open(Cursor::new(original.clone())).unwrap();
     let mut grown = editor.hdus()[1].header.clone();
     for n in 0..60 {
@@ -143,8 +168,12 @@ fn replace_header_into_writes_a_whole_file() {
     let old = FitsReader::from_bytes(&original).unwrap();
     let mut new = FitsReader::from_bytes(&copy).unwrap();
     assert_eq!(new.hdus().len(), 3);
-    assert_eq!(new.hdus()[1].header_blocks(), 2);
-    assert_eq!(new.hdus()[1].header.comments().count(), 60);
+    let records = old.hdus()[1].header.len();
+    assert_eq!(
+        new.hdus()[1].header_blocks(),
+        u64::try_from((records + 60 + 40 + 1).div_ceil(36)).unwrap()
+    );
+    assert_eq!(new.hdus()[1].header.comment_records().count(), 60);
     let primary_end = usize::try_from(old.hdus()[1].header_offset).unwrap();
     assert_eq!(copy[..primary_end], original[..primary_end]);
     let old_tail = usize::try_from(old.hdus()[1].data_offset).unwrap();
@@ -157,8 +186,8 @@ fn replace_header_into_writes_a_whole_file() {
 }
 
 /// A replaced header that holds `CHECKSUM` gets a valid one: from its `DATASUM`, or
-/// from the data unit when it holds none or a blank one. The editor's HDU records
-/// match a scan of the edited file.
+/// from the data unit when it holds none, or one that is blank, empty or no sum. The
+/// editor's HDU records match a scan of the edited file.
 #[test]
 fn replace_header_keeps_the_checksum_valid() {
     let file = three_hdus(FitsWriter::new(Cursor::new(Vec::new())).with_checksums());
@@ -170,9 +199,11 @@ fn replace_header_keeps_the_checksum_valid() {
     without_datasum.remove(keywords::DATASUM).unwrap();
     without_datasum.set("OBSERVER", "Leavitt").unwrap();
     editor.replace_header(1, &without_datasum).unwrap();
-    let mut blank_datasum = editor.hdus()[0].header.clone();
-    blank_datasum.set(keywords::DATASUM, "  ").unwrap();
-    editor.replace_header(0, &blank_datasum).unwrap();
+    for declared in ["  ", "", "not a sum"] {
+        let mut header = editor.hdus()[0].header.clone();
+        header.set(keywords::DATASUM, declared).unwrap();
+        editor.replace_header(0, &header).unwrap();
+    }
     let records: Vec<_> = editor
         .hdus()
         .iter()
@@ -210,10 +241,23 @@ fn append_adds_an_hdu() {
     );
     assert_eq!(read_whole(&mut reader, 3).samples, Data::U8(vec![7, 8, 9]));
 
-    let mut ragged = plain_file();
-    ragged.extend_from_slice(&[0; 10]);
-    let len = u64::try_from(ragged.len()).unwrap();
-    let editor = FitsEditor::open(Cursor::new(ragged)).unwrap();
-    assert!(matches!(editor.append(), Err(FitsError::FileOffBlockGrid { len: got }) if got == len));
-    assert_eq!(len % BLOCK_SIZE as u64, 10);
+    // A block of zeros after the last HDU stays on the block grid, and a reader stops at
+    // it: what follows it would not be read.
+    let file = plain_file();
+    let hdu_end = u64::try_from(file.len()).unwrap();
+    for trailing in [10, BLOCK_SIZE] {
+        let mut padded = file.clone();
+        padded.resize(file.len() + trailing, 0);
+        let file_len = u64::try_from(padded.len()).unwrap();
+        let editor = FitsEditor::open(Cursor::new(padded.clone())).unwrap();
+        assert!(matches!(
+            editor.append(),
+            Err(FitsError::TrailingContent { hdu_end: end, file_len: len })
+                if end == hdu_end && len == file_len
+        ));
+    }
+    let mut truncated = file;
+    truncated.truncate(truncated.len() - 1);
+    let editor = FitsEditor::open(Cursor::new(truncated)).unwrap();
+    assert!(matches!(editor.append(), Err(FitsError::UnexpectedEof)));
 }

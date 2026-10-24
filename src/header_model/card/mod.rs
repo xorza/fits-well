@@ -2,10 +2,13 @@ use std::fmt;
 use std::fmt::Write as _;
 
 use crate::block::CARD_SIZE;
-use crate::error::FitsError;
 use crate::error::Result;
+use crate::error::{FitsError, NonFinite, TextOrigin};
+use crate::header_model::commentary_name::CommentaryName;
 use crate::header_model::defect::Defect;
 use crate::header_model::hierarch_name::HierarchName;
+use crate::header_model::record::Record;
+use crate::header_model::record_name::RecordName;
 use crate::header_model::repair::{Repair, RepairKind};
 use crate::header_model::value::FitsInteger;
 use crate::header_model::value::Value;
@@ -15,52 +18,19 @@ use std::iter;
 use std::ops::Range;
 use std::str;
 
-/// One stored logical keyword record (§4.1).
-///
-/// A header is an *ordered* list of these; duplicates and order are significant,
-/// so the model never collapses cards into a map. Keywords have trailing spaces
-/// stripped; the blank keyword is empty.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Card {
-    /// `KEYWORD = value [/ comment]` — a value indicator sits in bytes 9–10.
-    Value {
-        keyword: Keyword,
-        value: Value,
-        /// Trailing spaces are not significant and are stripped.
-        comment: Option<String>,
-    },
-    /// `COMMENT`, `HISTORY`, the blank keyword, or any other record without a
-    /// value indicator — free text in bytes 9–80.
-    Commentary {
-        keyword: String,
-        /// Leading spaces are content; trailing spaces are stripped.
-        text: Option<String>,
-    },
-    /// `HIERARCH name = value [/ comment]` (ESO convention).
-    Hierarch {
-        name: HierarchName,
-        value: Value,
-        comment: Option<String>,
-    },
-    /// A record that does not parse, kept as its 80 bytes, with its keyword when the
-    /// name is one.
-    Malformed {
-        raw: Box<[u8; CARD_SIZE]>,
-        keyword: Option<Keyword>,
-        defect: Defect,
-    },
-}
-
 /// What one 80-byte record parses to.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum ParsedRecord {
-    Card(Card),
+    Record(Record),
     /// A `CONTINUE` record carrying a long-string substring (§4.2.1.2), which
     /// [`Header::parse`](crate::header_model::Header::parse) folds into the
     /// preceding value card.
     Continue {
         substring: String,
         comment: Option<String>,
+        /// Bytes 9–80 as free text: the commentary the record is when no value card
+        /// awaits it.
+        tail: Option<String>,
     },
     /// The `END` record that terminates a header unit.
     End,
@@ -68,17 +38,20 @@ pub(super) enum ParsedRecord {
 
 impl ParsedRecord {
     /// Parse the 80-byte record at 1-based position `record`, pushing each repair it
-    /// makes to `repairs`. A record that does not parse is a [`Card::Malformed`], so a
+    /// makes to `repairs`. A record that does not parse is a [`Record::Malformed`], so a
     /// parse never fails.
     pub(super) fn parse(raw: &[u8; CARD_SIZE], record: usize, repairs: &mut Vec<Repair>) -> Self {
         let mut repair = |kind| repairs.push(Repair { record, kind });
         if is_end_record(raw) {
+            if raw[8..].iter().any(|&byte| byte != b' ') {
+                repair(RepairKind::EndText);
+            }
             return Self::End;
         }
-        let malformed = |keyword, defect| {
-            Self::Card(Card::Malformed {
+        let malformed = |name, defect| {
+            Self::Record(Record::Malformed {
+                name,
                 raw: Box::new(*raw),
-                keyword,
                 defect,
             })
         };
@@ -92,31 +65,37 @@ impl ParsedRecord {
         let text = ascii_text(raw);
         let non_ascii_in = |range: Range<usize>| !raw[range].is_ascii();
         let keyword = text[..8].trim_end_matches(' ');
-        if keyword == "END" {
+        let Ok(commentary_name) = CommentaryName::try_from(keyword) else {
             return malformed(None, Defect::Name);
-        }
+        };
         let mut commentary = || {
             if non_ascii_in(8..CARD_SIZE) {
                 repair(RepairKind::NonAsciiText);
             }
-            Self::Card(Card::Commentary {
-                keyword: keyword.to_string(),
+            Self::Record(Record::Commentary {
+                name: commentary_name,
                 text: free_text(&text[8..]),
             })
         };
-        if keyword.is_empty() || keyword == "COMMENT" || keyword == "HISTORY" {
+        if [
+            CommentaryName::BLANK,
+            CommentaryName::COMMENT,
+            CommentaryName::HISTORY,
+        ]
+        .contains(&commentary_name)
+        {
             return commentary();
         }
         // A CONTINUE record (no value indicator; substring quoted from byte 11)
         // carries one piece of a long string. A malformed CONTINUE reads as
         // commentary.
-        if keyword == "CONTINUE" {
+        if commentary_name == CommentaryName::CONTINUE {
             let split = split_value_comment(&text[10..]);
             if &raw[8..10] == b"  " && split.value_token.starts_with('\'') {
                 let value_end = 10 + split.comment_start.unwrap_or(CARD_SIZE - 10);
                 let substring = parse_string(split.value_token);
                 let Some(substring) = substring.filter(|_| !non_ascii_in(10..value_end)) else {
-                    return malformed(None, Defect::Value);
+                    return malformed(Some(RecordName::Commentary(commentary_name)), Defect::Value);
                 };
                 if non_ascii_in(value_end..CARD_SIZE) {
                     repair(RepairKind::NonAsciiText);
@@ -124,6 +103,7 @@ impl ParsedRecord {
                 return Self::Continue {
                     substring,
                     comment: split.comment,
+                    tail: free_text(&text[8..]),
                 };
             }
             return commentary();
@@ -147,12 +127,12 @@ impl ParsedRecord {
             let value =
                 parse_value(split.value_token).filter(|_| !non_ascii_in(value_start..value_end));
             let Some(value) = value else {
-                return malformed(None, Defect::Value);
+                return malformed(Some(RecordName::Hierarch(name)), Defect::Value);
             };
             if non_ascii_in(value_end..CARD_SIZE) {
                 repair(RepairKind::NonAsciiText);
             }
-            return Self::Card(Card::Hierarch {
+            return Self::Record(Record::Hierarch {
                 name,
                 value,
                 comment: split.comment,
@@ -182,15 +162,15 @@ impl ParsedRecord {
         let split = split_value_comment(&text[value_start..]);
         let value_end = value_start + split.comment_start.unwrap_or(CARD_SIZE - value_start);
         if non_ascii_in(value_start..value_end) {
-            return malformed(Some(keyword), Defect::Value);
+            return malformed(Some(RecordName::Keyword(keyword)), Defect::Value);
         }
         let Some(value) = parse_value(split.value_token) else {
-            return malformed(Some(keyword), Defect::Value);
+            return malformed(Some(RecordName::Keyword(keyword)), Defect::Value);
         };
         if non_ascii_in(value_end..CARD_SIZE) {
             repair(RepairKind::NonAsciiText);
         }
-        Self::Card(Card::Value {
+        Self::Record(Record::Valued {
             keyword,
             value,
             comment: split.comment,
@@ -216,190 +196,164 @@ fn ascii_text(raw: &[u8; CARD_SIZE]) -> Cow<'_, str> {
     }
 }
 
-impl Card {
-    /// A commentary card (`COMMENT`/`HISTORY`/blank keyword) carrying free text; an
-    /// empty `text` is a physically blank record.
-    pub(super) fn commentary(keyword: &str, text: &str) -> Self {
-        Self::Commentary {
-            keyword: keyword.to_string(),
-            text: (!text.is_empty()).then(|| text.to_string()),
+/// Append one or more 80-byte records to `out`. A string value too long for a
+/// single record is split into a `CONTINUE` chain (§4.2.1.2) instead of being
+/// silently truncated; every other card renders to exactly one record.
+pub(crate) fn render_into(record: &Record, out: &mut Vec<u8>) -> Result<()> {
+    validate_contents(record)?;
+    if let Some(chain) = continuation_chain(record) {
+        let start = out.len();
+        let result = chain.render_into(out);
+        if result.is_err() {
+            out.truncate(start);
         }
+        result
+    } else {
+        out.extend_from_slice(&render_one(record)?);
+        Ok(())
     }
+}
 
-    /// The record's name: a valued record's keyword, a commentary record's name, or a
-    /// malformed record's keyword, or `""` when its name is none.
-    pub(crate) fn keyword(&self) -> &str {
-        match self {
-            Self::Value { keyword, .. } => keyword.as_str(),
-            Self::Commentary { keyword, .. } => keyword,
-            Self::Hierarch { .. } => "HIERARCH",
-            Self::Malformed { keyword, .. } => keyword.as_ref().map_or("", Keyword::as_str),
+/// A card is valid exactly when it renders. This runs the same checks without
+/// a heap allocation: a single record renders into a stack array, and a
+/// `CONTINUE` chain is valid when its final record holds the comment.
+pub(crate) fn validate(record: &Record) -> Result<()> {
+    validate_contents(record)?;
+    match continuation_chain(record) {
+        Some(chain) => chain.validate(),
+        None => render_one(record).map(|_| ()),
+    }
+}
+
+/// Serialize to one 80-byte record in fixed format (§4.2): logical, integer,
+/// real, and complex values are right-justified ending at column 30; character
+/// strings keep their opening quote at column 11.
+fn render_one(record: &Record) -> Result<[u8; CARD_SIZE]> {
+    if let Record::Hierarch {
+        name,
+        value,
+        comment,
+    } = record
+    {
+        return render_hierarch(name, value, comment.as_deref());
+    }
+    let mut buf = match record {
+        Record::Commentary { name, .. } => RecordBuf::new(Lead::Commentary(*name)),
+        Record::Valued { keyword, .. } => RecordBuf::new(Lead::Keyword(*keyword)),
+        Record::Malformed { .. } => unreachable!("validate_contents refuses a malformed record"),
+        Record::Hierarch { .. } => unreachable!("rendered above"),
+    };
+    match record {
+        Record::Commentary { text, .. } => {
+            if let Some(text) = text {
+                buf.write_str_at(8, text)?;
+            }
         }
-    }
-
-    /// The keyword the header's index finds this card by: a valued card's, or a
-    /// malformed card's, whose lookup then fails.
-    pub(crate) const fn indexed_keyword(&self) -> Option<Keyword> {
-        match self {
-            Self::Value { keyword, .. } => Some(*keyword),
-            Self::Malformed { keyword, .. } => *keyword,
-            Self::Commentary { .. } | Self::Hierarch { .. } => None,
-        }
-    }
-
-    /// A valued card's value; [`FitsError::InvalidValue`] for a malformed card.
-    pub(crate) fn value_or_defect(&self) -> Result<&Value> {
-        match self {
-            Self::Value { value, .. } => Ok(value),
-            Self::Malformed { raw, .. } => Err(FitsError::InvalidValue { card: label(raw) }),
-            Self::Commentary { .. } | Self::Hierarch { .. } => {
-                unreachable!("the keyword index holds valued and malformed cards only")
+        Record::Malformed { .. } | Record::Hierarch { .. } => unreachable!("matched above"),
+        Record::Valued { value, comment, .. } => {
+            buf.bytes[8] = b'=';
+            // astropy and cfitsio both warn on a non-fixed-format mandatory
+            // keyword (§4.2.3–4.2.4).
+            let end = match value {
+                Value::Text(_) | Value::Undefined => buf.write_value_at(10, value)?,
+                _ => {
+                    let len = rendered_len(value);
+                    let end = (10 + len).max(30);
+                    buf.write_value_at(end - len, value)?
+                }
+            };
+            if let Some(comment) = comment {
+                let end = buf.write_str_at(end, " / ")?;
+                buf.write_str_at(end, comment)?;
             }
         }
     }
+    Ok(buf.bytes)
+}
 
-    /// The inline `/`-comment of a value card, or the free text of a commentary
-    /// card.
-    pub(crate) fn comment(&self) -> Option<&str> {
-        match self {
-            Self::Value { comment, .. } | Self::Hierarch { comment, .. } => comment.as_deref(),
-            Self::Commentary { text, .. } => text.as_deref(),
-            Self::Malformed { .. } => None,
-        }
-    }
-
-    /// Append one or more 80-byte records to `out`. A string value too long for a
-    /// single record is split into a `CONTINUE` chain (§4.2.1.2) instead of being
-    /// silently truncated; every other card renders to exactly one record.
-    pub(crate) fn render_into(&self, out: &mut Vec<u8>) -> Result<()> {
-        self.validate_contents()?;
-        if let Some(chain) = self.continuation_chain() {
-            let start = out.len();
-            let result = chain.render_into(out);
-            if result.is_err() {
-                out.truncate(start);
-            }
-            result
-        } else {
-            out.extend_from_slice(&self.render_one()?);
-            Ok(())
-        }
-    }
-
-    /// A card is valid exactly when it renders. This runs the same checks without
-    /// a heap allocation: a single record renders into a stack array, and a
-    /// `CONTINUE` chain is valid when its final record holds the comment.
-    pub(super) fn validate(&self) -> Result<()> {
-        self.validate_contents()?;
-        match self.continuation_chain() {
-            Some(chain) => chain.validate(),
-            None => self.render_one().map(|_| ()),
-        }
-    }
-
-    /// Serialize to one 80-byte record in fixed format (§4.2): logical, integer,
-    /// real, and complex values are right-justified ending at column 30; character
-    /// strings keep their opening quote at column 11.
-    fn render_one(&self) -> Result<[u8; CARD_SIZE]> {
-        if let Self::Hierarch {
+/// The long text value that cannot fit one 80-byte record and so must be
+/// emitted as a `CONTINUE` chain (§4.2.1.2).
+fn continuation_chain(record: &Record) -> Option<LongString<'_>> {
+    let (lead, text, comment) = match record {
+        Record::Valued {
+            keyword,
+            value: Value::Text(text),
+            comment,
+        } => (Lead::Keyword(*keyword), text, comment),
+        Record::Hierarch {
             name,
+            value: Value::Text(text),
+            comment,
+        } => (Lead::Hierarch(name), text, comment),
+        _ => return None,
+    };
+    // The rendered value is the quoted text with each embedded quote doubled; the
+    // comment adds its ` / ` separator. A HIERARCH record first drops its blank
+    // before the `=`.
+    let value_len = 2 + escaped_len(text);
+    let comment_len = comment.as_ref().map_or(0, |c| 3 + c.len());
+    let tightest = match lead {
+        Lead::Keyword(_) | Lead::Commentary(_) => lead.value_start(),
+        Lead::Hierarch(_) => lead.value_start() - 1,
+    };
+    (tightest + value_len + comment_len > CARD_SIZE).then_some(LongString {
+        lead,
+        text,
+        comment: comment.as_deref(),
+    })
+}
+
+fn validate_contents(record: &Record) -> Result<()> {
+    let name = || {
+        record
+            .view()
+            .name()
+            .expect("a record that is not malformed has a name")
+    };
+    let value = match record {
+        Record::Malformed { name, defect, .. } => {
+            return Err(FitsError::InvalidValue {
+                name: name.clone(),
+                defect: *defect,
+            });
+        }
+        Record::Commentary { text, .. } => {
+            if let Some(text) = text {
+                validate_ascii(text, || TextOrigin::Comment(name()))?;
+            }
+            return Ok(());
+        }
+        Record::Valued {
+            keyword,
             value,
             comment,
-        } = self
-        {
-            return render_hierarch(name, value, comment.as_deref());
-        }
-        let mut record = RecordBuf::new(self.keyword());
-        match self {
-            Self::Commentary { text, .. } => {
-                if let Some(text) = text {
-                    record.write_str_at(8, text)?;
-                }
+        } => {
+            validate_valued_keyword(*keyword)?;
+            if let Some(comment) = comment {
+                validate_ascii(comment, || TextOrigin::Comment(name()))?;
             }
-            Self::Malformed { .. } => unreachable!("validate_contents refuses a malformed card"),
-            Self::Hierarch { .. } => unreachable!("rendered above"),
-            Self::Value { value, comment, .. } => {
-                record.bytes[8] = b'=';
-                // astropy and cfitsio both warn on a non-fixed-format mandatory
-                // keyword (§4.2.3–4.2.4).
-                let end = match value {
-                    Value::Text(_) | Value::Undefined => record.write_value_at(10, value)?,
-                    _ => {
-                        let len = rendered_len(value);
-                        let end = (10 + len).max(30);
-                        record.write_value_at(end - len, value)?
-                    }
-                };
-                if let Some(comment) = comment {
-                    let end = record.write_str_at(end, " / ")?;
-                    record.write_str_at(end, comment)?;
-                }
+            value
+        }
+        Record::Hierarch { value, comment, .. } => {
+            if let Some(comment) = comment {
+                validate_ascii(comment, || TextOrigin::Comment(name()))?;
             }
+            value
         }
-        Ok(record.bytes)
-    }
-
-    /// The long text value that cannot fit one 80-byte record and so must be
-    /// emitted as a `CONTINUE` chain (§4.2.1.2).
-    fn continuation_chain(&self) -> Option<LongString<'_>> {
-        let (lead, text, comment) = match self {
-            Self::Value {
-                keyword,
-                value: Value::Text(text),
-                comment,
-            } => (Lead::Keyword(keyword.as_str()), text, comment),
-            Self::Hierarch {
-                name,
-                value: Value::Text(text),
-                comment,
-            } => (Lead::Hierarch(name), text, comment),
-            _ => return None,
-        };
-        // The rendered value is the quoted text with each embedded quote doubled; the
-        // comment adds its ` / ` separator. A HIERARCH record first drops its blank
-        // before the `=`.
-        let value_len = 2 + escaped_len(text);
-        let comment_len = comment.as_ref().map_or(0, |c| 3 + c.len());
-        let tightest = match lead {
-            Lead::Keyword(_) => lead.value_start(),
-            Lead::Hierarch(_) => lead.value_start() - 1,
-        };
-        (tightest + value_len + comment_len > CARD_SIZE).then_some(LongString {
-            lead,
-            text,
-            comment: comment.as_deref(),
-        })
-    }
-
-    fn validate_contents(&self) -> Result<()> {
-        if let Self::Malformed { raw, .. } = self {
-            return Err(FitsError::InvalidValue { card: label(raw) });
+    };
+    match value {
+        Value::Text(text) => validate_ascii(text, || TextOrigin::Value(name())),
+        Value::Real(value) if !value.is_finite() => Err(FitsError::InvalidHeaderValue {
+            name: name(),
+            reason: NonFinite::Real,
+        }),
+        Value::ComplexReal { re, im } if !re.is_finite() || !im.is_finite() => {
+            Err(FitsError::InvalidHeaderValue {
+                name: name(),
+                reason: NonFinite::Complex,
+            })
         }
-        if let Some(comment) = self.comment() {
-            validate_ascii(comment, "header comment")?;
-        }
-        let (keyword, value) = match self {
-            Self::Value { keyword, value, .. } => {
-                validate_valued_keyword(*keyword)?;
-                (*keyword, value)
-            }
-            Self::Hierarch { value, .. } => (Keyword::new("HIERARCH"), value),
-            Self::Commentary { .. } | Self::Malformed { .. } => return Ok(()),
-        };
-        match value {
-            Value::Text(text) => validate_ascii(text, "header text value"),
-            Value::Real(value) if !value.is_finite() => Err(FitsError::InvalidHeaderValue {
-                keyword,
-                reason: "real values must be finite",
-            }),
-            Value::ComplexReal { re, im } if !re.is_finite() || !im.is_finite() => {
-                Err(FitsError::InvalidHeaderValue {
-                    keyword,
-                    reason: "complex real components must be finite",
-                })
-            }
-            _ => Ok(()),
-        }
+        _ => Ok(()),
     }
 }
 
@@ -557,16 +511,22 @@ pub(super) fn validate_valued_keyword(keyword: Keyword) -> Result<()> {
     }
 }
 
-pub(crate) fn validate_ascii(text: &str, context: &'static str) -> Result<()> {
+/// Errors with the `text` that `kind` names when it holds a byte outside FITS restricted
+/// ASCII.
+pub(crate) fn validate_ascii(text: &str, kind: impl FnOnce() -> TextOrigin) -> Result<()> {
     if text.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
         Ok(())
     } else {
-        Err(FitsError::InvalidAscii { context })
+        Err(FitsError::InvalidAscii { text: kind() })
     }
 }
 
+/// Whether `raw` is the `END` record: its name field is `END`. Bytes 9–80 should be
+/// blank (§4.4.1); a record with other bytes there still ends the header, as cfitsio,
+/// which compares only the name, and astropy, which warns, read it, and the parse
+/// reports the repair.
 pub(crate) fn is_end_record(raw: &[u8]) -> bool {
-    raw.len() == CARD_SIZE && &raw[..3] == b"END" && raw[3..].iter().all(|&byte| byte == b' ')
+    raw.len() == CARD_SIZE && &raw[..8] == b"END     "
 }
 
 /// Free text of a commentary card (bytes 9–80): leading spaces are content and
@@ -598,8 +558,7 @@ fn render_hierarch(
     value: &Value,
     comment: Option<&str>,
 ) -> Result<[u8; CARD_SIZE]> {
-    let label = Lead::Hierarch(name).label();
-    let mut record = RecordBuf::new(&label);
+    let mut record = RecordBuf::new(Lead::Hierarch(name));
     let comment_len = comment.map_or(0, |comment| 3 + comment.len());
     let spaced = Lead::Hierarch(name).value_start();
     let indicator = if spaced + rendered_len(value) + comment_len <= CARD_SIZE {
@@ -617,11 +576,13 @@ fn render_hierarch(
     Ok(record.bytes)
 }
 
-/// What a long string's first record holds before its value.
+/// What a record holds before its value: its name.
 #[derive(Debug, Clone, Copy)]
 enum Lead<'a> {
     /// `KEYWORD = ` in bytes 1–10.
-    Keyword(&'a str),
+    Keyword(Keyword),
+    /// A commentary record's name in bytes 1–8.
+    Commentary(CommentaryName),
     /// `HIERARCH name = `.
     Hierarch(&'a HierarchName),
 }
@@ -630,16 +591,17 @@ impl Lead<'_> {
     /// Where the value starts in the first record.
     fn value_start(self) -> usize {
         match self {
-            Self::Keyword(_) => 10,
+            Self::Keyword(_) | Self::Commentary(_) => 10,
             Self::Hierarch(name) => 9 + name.as_str().len() + 3,
         }
     }
 
     /// The name an error reports.
-    fn label(self) -> String {
+    fn name(self) -> RecordName {
         match self {
-            Self::Keyword(keyword) => keyword.to_string(),
-            Self::Hierarch(name) => format!("HIERARCH {name}"),
+            Self::Keyword(keyword) => RecordName::Keyword(keyword),
+            Self::Commentary(name) => RecordName::Commentary(name),
+            Self::Hierarch(name) => RecordName::Hierarch(name.clone()),
         }
     }
 }
@@ -697,7 +659,7 @@ impl<'a> LongString<'a> {
     fn comment_needs_own_record(self) -> Result<bool> {
         if self.first_width() == 0 {
             return Err(FitsError::HeaderCardTooLong {
-                keyword: self.lead.label(),
+                name: self.lead.name(),
                 length: self.lead.value_start() + 3,
             });
         }
@@ -716,7 +678,7 @@ impl<'a> LongString<'a> {
         let alone = 10 + 2 + 3 + comment.len();
         if alone > CARD_SIZE {
             return Err(FitsError::HeaderCardTooLong {
-                keyword: self.lead.label(),
+                name: self.lead.name(),
                 length: alone,
             });
         }
@@ -729,14 +691,13 @@ impl<'a> LongString<'a> {
 
     fn render_into(self, out: &mut Vec<u8>) -> Result<()> {
         let own_record = self.comment_needs_own_record()?;
-        let label = self.lead.label();
         let mut pieces = self.pieces().chain(own_record.then_some("")).peekable();
         let mut first = true;
         while let Some(piece) = pieces.next() {
             let (mut record, pos) = if first {
-                let mut record = RecordBuf::new(&label);
+                let mut record = RecordBuf::new(self.lead);
                 let pos = match self.lead {
-                    Lead::Keyword(_) => {
+                    Lead::Keyword(_) | Lead::Commentary(_) => {
                         record.bytes[8] = b'=';
                         10
                     }
@@ -747,7 +708,7 @@ impl<'a> LongString<'a> {
                 };
                 (record, pos)
             } else {
-                (RecordBuf::new("CONTINUE"), 10)
+                (RecordBuf::continuation(self.lead), 10)
             };
             first = false;
             let last = pieces.peek().is_none();
@@ -773,21 +734,34 @@ impl<'a> LongString<'a> {
 #[derive(Debug)]
 struct RecordBuf<'k> {
     bytes: [u8; CARD_SIZE],
-    keyword: &'k str,
+    /// The record an error names; a `CONTINUE` record names the one it continues.
+    lead: Lead<'k>,
 }
 
 impl<'k> RecordBuf<'k> {
-    fn new(keyword: &'k str) -> Self {
+    /// A record whose name field holds `lead`'s name.
+    fn new(lead: Lead<'k>) -> Self {
+        match lead {
+            Lead::Keyword(keyword) => Self::named(keyword.as_str(), lead),
+            Lead::Commentary(name) => Self::named(name.as_str(), lead),
+            Lead::Hierarch(_) => Self::named("HIERARCH", lead),
+        }
+    }
+
+    /// A `CONTINUE` record of `lead`'s long string.
+    fn continuation(lead: Lead<'k>) -> Self {
+        Self::named(CommentaryName::CONTINUE.as_str(), lead)
+    }
+
+    fn named(field: &str, lead: Lead<'k>) -> Self {
         let mut bytes = [b' '; CARD_SIZE];
-        let name = keyword.as_bytes();
-        let n = name.len().min(8);
-        bytes[..n].copy_from_slice(&name[..n]);
-        RecordBuf { bytes, keyword }
+        bytes[..field.len()].copy_from_slice(field.as_bytes());
+        RecordBuf { bytes, lead }
     }
 
     fn too_long(&self, length: usize) -> FitsError {
         FitsError::HeaderCardTooLong {
-            keyword: self.keyword.to_string(),
+            name: self.lead.name(),
             length,
         }
     }
@@ -864,6 +838,8 @@ fn write_value(out: &mut impl fmt::Write, value: &Value) -> fmt::Result {
         Value::Logical(false) => out.write_str("F"),
         Value::Integer(integer) => write!(out, "{integer}"),
         Value::Real(real) => write_real(out, *real),
+        // The null string has no padding, which would read back as one blank.
+        Value::Text(text) if text.is_empty() => out.write_str("''"),
         Value::Text(text) => {
             // Many writers pad a string to 8 characters; the padding parses away.
             let padding = 8usize.saturating_sub(escaped_len(text));
@@ -919,10 +895,6 @@ fn write_real(out: &mut impl fmt::Write, real: f64) -> fmt::Result {
         out.write_str(".0")?;
     }
     Ok(())
-}
-
-fn label(raw: &[u8; CARD_SIZE]) -> String {
-    String::from_utf8_lossy(raw).trim_end().to_string()
 }
 
 #[cfg(test)]

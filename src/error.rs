@@ -3,7 +3,14 @@ use std::fmt;
 use std::io;
 
 use std::result;
+use std::sync::Arc;
 
+use crate::bintable::descriptor::DescriptorWidth;
+use crate::bintable::element_kind::ElementKind;
+use crate::bitpix::Bitpix;
+use crate::hdu::HduKind;
+use crate::header_model::defect::Defect;
+use crate::header_model::record_name::RecordName;
 use crate::keyword::Keyword;
 use thiserror::Error;
 
@@ -69,6 +76,113 @@ impl Indexed {
     }
 }
 
+/// The type a header value was read as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ValueKind {
+    Logical,
+    Integer,
+    Real,
+    Text,
+}
+
+impl fmt::Display for ValueKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Logical => "a logical",
+            Self::Integer => "an integer",
+            Self::Real => "a real",
+            Self::Text => "a text",
+        })
+    }
+}
+
+/// The type an exact FITS integer was converted to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NumericTarget {
+    I64,
+    F64,
+}
+
+impl fmt::Display for NumericTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::I64 => "i64",
+            Self::F64 => "f64",
+        })
+    }
+}
+
+/// Why a header value has no FITS representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NonFinite {
+    /// A real that is infinite or NaN.
+    Real,
+    /// A complex real with an infinite or NaN part.
+    Complex,
+}
+
+impl fmt::Display for NonFinite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Real => "a real value must be finite",
+            Self::Complex => "the parts of a complex value must be finite",
+        })
+    }
+}
+
+/// Where the text that held a byte outside FITS restricted ASCII came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TextOrigin {
+    /// The text value of a header record.
+    Value(RecordName),
+    /// The inline comment of a header record, or the text of a commentary record.
+    Comment(RecordName),
+    /// A table column's name (`TTYPEn`).
+    ColumnName,
+    /// A table column's unit (`TUNITn`).
+    ColumnUnit,
+    /// An ASCII-table column's null marker (`TNULLn`).
+    NullMarker,
+    /// An ASCII-table text cell.
+    Cell,
+    /// An ASCII table's data unit.
+    TableData,
+}
+
+impl fmt::Display for TextOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Value(name) => write!(f, "the value of {name}"),
+            Self::Comment(name) => write!(f, "the comment of {name}"),
+            Self::ColumnName => f.write_str("a column name"),
+            Self::ColumnUnit => f.write_str("a column unit"),
+            Self::NullMarker => f.write_str("an ASCII null marker"),
+            Self::Cell => f.write_str("an ASCII text cell"),
+            Self::TableData => f.write_str("the ASCII-table data"),
+        }
+    }
+}
+
+#[expect(
+    clippy::ref_option,
+    clippy::trivially_copy_pass_by_ref,
+    reason = "thiserror's `fmt` hands every field by reference"
+)]
+fn fmt_invalid_value(
+    name: &Option<RecordName>,
+    defect: &Defect,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    match name {
+        Some(name) => write!(f, "header record {name} does not parse: {defect}"),
+        None => write!(f, "a header record does not parse: {defect}"),
+    }
+}
+
 /// Which of two axis counts disagreed — the thing the caller supplied, against the
 /// structure it had to match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +229,408 @@ impl Ranked {
     }
 }
 
+/// What a [`FitsError::DataSizeMismatch`] counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeUnit {
+    Bytes,
+    Samples,
+    Rows,
+}
+
+impl fmt::Display for SizeUnit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Bytes => "bytes",
+            Self::Samples => "samples",
+            Self::Rows => "rows",
+        })
+    }
+}
+
+impl SizeUnit {
+    /// The [`FitsError::DataSizeMismatch`] of `got` of these where `expected` are
+    /// declared.
+    pub(crate) const fn mismatch(self, expected: usize, got: usize) -> FitsError {
+        // A `usize` count always fits a `u64`.
+        FitsError::DataSizeMismatch {
+            unit: self,
+            expected: expected as u64,
+            got: got as u64,
+        }
+    }
+}
+
+/// A tiled-compression parameter outside its valid range, from
+/// [`FitsError::InvalidCompressionParameter`].
+#[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
+pub enum CompressionParameter {
+    /// A deflate level past 9.
+    #[error("gzip compression level {level} is outside 0..=9")]
+    GzipLevel { level: u32 },
+    /// An HCOMPRESS scale that is not finite and positive.
+    #[error("HCOMPRESS scale {scale} must be finite and positive")]
+    HcompressScale { scale: f64 },
+    /// A relative quantization level that is not finite and positive.
+    #[error("relative quantization level {level} must be finite and positive")]
+    QuantizationLevel { level: f64 },
+    /// An absolute quantization step that is not finite and positive.
+    #[error("absolute quantization step {step} must be finite and positive")]
+    QuantizationStep { step: f64 },
+    /// A dither seed outside `1..=10000`.
+    #[error("dither seed {seed} is outside 1..=10000")]
+    DitherSeed { seed: u16 },
+    /// A quantization for an integer image, which stores its values as they are.
+    #[error("an integer image takes no float quantization")]
+    IntegerQuantization,
+    /// A quantization for a table, which no table codec quantizes.
+    #[error("a compressed table takes no float quantization")]
+    TableQuantization,
+    /// `NOCOMPRESS` for a table: cfitsio cannot read `NOCOMPRESS` columns, and
+    /// `write_table` writes a table uncompressed.
+    #[error("a compressed table takes a codec")]
+    TableWithoutCodec,
+    /// A tile of 0 along `axis`, zero-based.
+    #[error("tile axis {axis} is 0")]
+    EmptyTile { axis: usize },
+    /// `HCOMPRESS_1` with `SUBTRACTIVE_DITHER_2`, whose exact zeros it cannot keep.
+    #[error("HCOMPRESS_1 cannot keep SUBTRACTIVE_DITHER_2's zeros")]
+    HcompressDither2,
+}
+
+/// What a tiled-compression read or write does not support, from
+/// [`FitsError::UnsupportedCompression`].
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum CompressionFeature {
+    /// A codec name this crate does not know.
+    #[error("{name}")]
+    Codec { name: String },
+    /// A `ZQUANTIZ` method this crate does not know.
+    #[error("float quantization {name}")]
+    Quantization { name: String },
+    /// `HCOMPRESS_1` of an image that is not two-dimensional.
+    #[error("HCOMPRESS_1 requires a two-dimensional image")]
+    HcompressDimensions,
+    /// Lossy `HCOMPRESS_1` of a tile with undefined pixels, which only a null mask keeps.
+    #[error("lossy HCOMPRESS_1 with undefined pixels requires a null mask")]
+    LossyHcompressNulls,
+    /// An `HCOMPRESS_1` null-pixel mask, which the lossy codec cannot encode.
+    #[error("lossy HCOMPRESS_1 cannot encode a null-pixel mask")]
+    HcompressNullMask,
+    /// An `HCOMPRESS_1` tile scale past the 32-bit stream range.
+    #[error("HCOMPRESS_1 tile scale exceeds the 32-bit stream range")]
+    HcompressScale,
+    /// An `HCOMPRESS_1` tile side past 2³¹ − 1.
+    #[error("HCOMPRESS_1 tile dimension {length}, past 2^31 - 1")]
+    HcompressTileSide { length: usize },
+    /// An `HCOMPRESS_1` transform past the signed 64-bit stream range.
+    #[error("HCOMPRESS_1 tile exceeds the signed 64-bit stream range")]
+    HcompressRange,
+    /// A `PLIO_1` line list of 2³⁰ words or more.
+    #[error("PLIO_1 line list of {words} words, 2^30 or more")]
+    PlioListLength { words: usize },
+    /// A lossless float image with a codec other than the gzip codecs.
+    #[error("{codec} for a lossless float image")]
+    LosslessFloatCodec { codec: &'static str },
+    /// A quantized float image written with `codec`.
+    #[error("{codec} for float images (write)")]
+    QuantizedFloatCodec { codec: &'static str },
+    /// A table compressed with `codec`.
+    #[error("{codec} for compressed tables")]
+    TableCodec { codec: &'static str },
+    /// A table column codec `ZCTYPn` that §10.3 does not allow.
+    #[error("table column codec {name}")]
+    ColumnCodec { name: String },
+    /// `RICE_1` on a column of `TFORMn` type `code`, which holds no `B`, `I` or `J`
+    /// value.
+    #[error("RICE_1 on a {code} column")]
+    RiceColumn { code: char },
+}
+
+/// Why a set of WCS keywords describes no valid transform (§8), from
+/// [`FitsError::InvalidWcs`].
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum WcsDefect {
+    /// The linear matrix, from `PCi_j` and `CDELTi`, `CDi_j` or `CROTAi`, is singular.
+    #[error("the transform matrix is singular")]
+    SingularMatrix,
+    /// A projection's `PVi_m` parameters admit no transform, as `CEA`'s λ = 0.
+    #[error("degenerate {projection} projection parameters")]
+    DegenerateProjection { projection: &'static str },
+    /// `RADESYSa` names no standard reference frame (§8.3).
+    #[error("RADESYS {value:?} is not a standard reference frame")]
+    UnknownCelestialFrame { value: String },
+    /// `EQUINOXa` is not finite and non-negative.
+    #[error("EQUINOX must be finite and non-negative")]
+    InvalidEquinox,
+    /// A spectral reference-frame keyword names no standard frame (§8.4).
+    #[error("{keyword} {value:?} is not a standard spectral reference frame")]
+    UnknownSpectralFrame { keyword: Keyword, value: String },
+    /// The `CRVALi` of a logarithmic axis of type `ctype` is not finite and positive.
+    #[error("{ctype} requires a finite, positive CRVAL")]
+    LogarithmicReference { ctype: String },
+    /// A spectral `X2P` code of `ctype` that does not express its coordinate type's own
+    /// characteristic, or converts one to itself.
+    #[error("spectral CTYPE {ctype:?} has inconsistent variables")]
+    InconsistentSpectralAlgorithm { ctype: String },
+    /// The reference value of a spectral axis of type `kind` lies outside its domain.
+    #[error("{kind} has an invalid spectral reference value")]
+    SpectralReference { kind: &'static str },
+    /// `RESTFRQa` or `RESTWAVa` is not finite and positive.
+    #[error("{keyword} must be finite and positive")]
+    RestValue { keyword: Keyword },
+    /// A spectral algorithm needs the rest frequency or wavelength, and neither is given.
+    #[error("spectral CTYPE requires RESTFRQ or RESTWAV")]
+    MissingRest,
+    /// A grism axis of `algorithm`, `GRI` or `GRA`, whose parameters describe no grism.
+    #[error("{algorithm} {defect}")]
+    Grism {
+        algorithm: &'static str,
+        defect: GrismDefect,
+    },
+    /// A `-TAB` axis and its coordinate table.
+    #[error("{0}")]
+    Tabular(TabularDefect),
+}
+
+/// Why a grism axis's parameters describe no grism, from [`WcsDefect::Grism`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum GrismDefect {
+    /// `PVi_m` of index `parameter`, the groove density or the order, is absent, not
+    /// finite, or 0.
+    #[error("PV_i_{parameter} must be specified, finite, and non-zero")]
+    MissingParameter { parameter: usize },
+    /// A parameter is not finite.
+    #[error("parameters must be finite")]
+    NonFinite,
+    /// The grating or the detector tilt has a zero cosine.
+    #[error("grating and detector tilts must have non-zero cosine")]
+    PerpendicularTilt,
+    /// The reference wavelength has no diffraction angle.
+    #[error("reference wavelength is outside the grism domain")]
+    ReferenceOutsideDomain,
+    /// The detector parameters give no dispersion.
+    #[error("detector parameters produce zero dispersion")]
+    ZeroDispersion,
+}
+
+/// Why a `-TAB` axis or its coordinate table describes no transform (§8.3.1), from
+/// [`WcsDefect::Tabular`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum TabularDefect {
+    /// `PSi_0`, the table's extension name, is absent or empty.
+    #[error("TAB requires PSi_0")]
+    MissingExtension,
+    /// `PSi_1`, the coordinate column, is absent or empty.
+    #[error("TAB requires PSi_1")]
+    MissingCoordinateColumn,
+    /// `PVi_1`, `PVi_2` or `PVi_3` is not a positive integer.
+    #[error("TAB PVi_1, PVi_2, and PVi_3 must be positive integers")]
+    NonPositiveParameter,
+    /// `PVi_3` names a table axis past the WCS axis count.
+    #[error("PVi_3 exceeds the WCS axis count")]
+    TableAxisPastCount,
+    /// `CRVALi` of a `-TAB` axis is not finite.
+    #[error("TAB CRVAL must be finite")]
+    NonFiniteReference,
+    /// Two axes map the same table axis.
+    #[error("TAB table-axis mapping is duplicated")]
+    DuplicateTableAxis,
+    /// A table axis that no image axis maps.
+    #[error("TAB table-axis mapping is incomplete")]
+    IncompleteTableAxes,
+    /// The coordinate column's `TDIMn` is not `(M,K1,...,KM)` for M table axes.
+    #[error("TAB coordinate TDIM must be (M,K1,...,KM)")]
+    CoordinateShape,
+    /// A coordinate axis of length 0.
+    #[error("TAB coordinate axes must be non-empty")]
+    EmptyAxis,
+    /// The coordinate array's element count overflows.
+    #[error("TAB coordinate array is too large")]
+    CoordinateArrayTooLarge,
+    /// The coordinate column's first row holds another count than its `TDIMn`.
+    #[error("TAB coordinate TDIM does not match its first-row element count")]
+    CoordinateCount,
+    /// A coordinate that is not finite.
+    #[error("TAB coordinate array must contain finite values")]
+    NonFiniteCoordinate,
+    /// An index vector whose length is not its coordinate axis's.
+    #[error("TAB index-vector length must match its coordinate axis")]
+    IndexLength,
+    /// An index value that is not finite.
+    #[error("TAB index vectors must contain finite values")]
+    NonFiniteIndex,
+    /// An index vector that rises and falls.
+    #[error("TAB index vectors must be monotonic")]
+    NonMonotonicIndex,
+    /// An index vector whose values are all equal.
+    #[error("TAB index vectors must not be constant")]
+    ConstantIndex,
+    /// More varying table axes than the interpolation's vertex count allows.
+    #[error("TAB interpolation dimensionality is too large")]
+    TooManyAxes,
+    /// The lookup table has no row.
+    #[error("TAB lookup table must contain a row")]
+    EmptyTable,
+}
+
+/// Which WCS keywords cannot hold together, from [`FitsError::ConflictingWcsKeywords`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum WcsConflict {
+    /// Both `PCi_j` and `CDi_j` (§8.1).
+    #[error("PC and CD conventions overlap")]
+    PcAndCd,
+    /// Both `PCi_j` and `CROTAi` (§8.1).
+    #[error("PC and CROTA conventions overlap")]
+    PcAndCrota,
+    /// The celestial longitude and latitude axes name different projections.
+    #[error("celestial longitude and latitude axes declare different projections")]
+    MismatchedProjections,
+    /// SIP keywords for an alternate description, which they have no form for.
+    #[error("SIP keywords have no alternate form")]
+    SipAlternate,
+    /// SIP on a WCS of fewer than two pixel axes.
+    #[error("SIP needs two pixel axes")]
+    SipAxisCount,
+    /// The celestial columns of a table WCS declare different `RADESYS` values.
+    #[error("table celestial axes declare different RADESYS values")]
+    TableRadesys,
+    /// The celestial columns of a table WCS declare different `EQUINOX` values.
+    #[error("table celestial axes declare different EQUINOX values")]
+    TableEquinox,
+}
+
+/// Why the fiducial point, `LONPOLE` and `LATPOLE` admit no celestial pole, from
+/// [`FitsError::WcsInvalidPole`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum PoleDefect {
+    /// `|φp − φ0| = 90°` with `θ0 = 0` leaves `δ0 = 0` the only latitude.
+    #[error("|φp − φ0| = 90° with θ0 = 0 needs δ0 = 0")]
+    EquatorialFiducial,
+    /// `|δ0|` is too large for `φp`, `φ0` and `θ0`.
+    #[error("|δ0| is too large for this φp, φ0 and θ0")]
+    FiducialLatitude,
+    /// Neither latitude solution lies within ±90°.
+    #[error("no pole latitude within ±90° fits φp, φ0 and θ0")]
+    NoLatitude,
+}
+
+/// Why a compressed stream or tile does not decode, from
+/// [`FitsError::CorruptCompressedData`].
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum CompressedDataDefect {
+    /// A gzip stream does not inflate: a bad header, block or checksum.
+    #[error("a gzip stream does not inflate: {0}")]
+    GzipStream(#[source] io::Error),
+    /// A gzip stream inflates past the size of its tile.
+    #[error("a gzip stream inflates past the size of its tile")]
+    GzipOverrun,
+    /// A Rice block declares a field wider than 64 bits.
+    #[error("a Rice block declares a {bits}-bit field")]
+    RiceBitField { bits: u32 },
+    /// A PLIO line list does not decode.
+    #[error("PLIO_1: {0}")]
+    Plio(PlioDefect),
+    /// An HCOMPRESS stream does not decode.
+    #[error("HCOMPRESS_1: {0}")]
+    Hcompress(HcompressDefect),
+    /// A null-pixel mask holds a value other than 0 and 1.
+    #[error("a null-pixel mask holds a value other than 0 and 1")]
+    NullMask,
+    /// A tile has neither a compressed nor an uncompressed cell.
+    #[error("a tile has neither a compressed nor an uncompressed cell")]
+    EmptyTile,
+    /// A tile's cell holds elements its decoder does not read: a compressed stream that
+    /// is not bytes, or PLIO's 16-bit words; uncompressed samples of another type.
+    #[error("a tile's {cell} cell holds {element:?} elements")]
+    CellElement {
+        cell: TileCell,
+        element: ElementKind,
+    },
+    /// A decoded integer lies outside the range of the image's `BITPIX`.
+    #[error("a decoded value lies outside the range of the image's BITPIX")]
+    ValueOutOfRange,
+}
+
+/// The cell of a tile that [`CompressedDataDefect::CellElement`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum TileCell {
+    /// The tile's compressed stream.
+    #[error("compressed")]
+    Compressed,
+    /// The tile's samples, stored as they are (`UNCOMPRESSED_DATA`).
+    #[error("uncompressed")]
+    Uncompressed,
+}
+
+/// Why a PLIO line list does not decode, from [`CompressedDataDefect::Plio`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum PlioDefect {
+    /// The list header's length or start lies outside the list.
+    #[error("the list bounds lie outside the list")]
+    ListBounds,
+    /// A list header value is negative.
+    #[error("a list header value is negative")]
+    NegativeHeader,
+    /// An instruction's opcode is not one of the eight.
+    #[error("an opcode is not one of the eight")]
+    Opcode,
+}
+
+/// Why an HCOMPRESS stream does not decode, from [`CompressedDataDefect::Hcompress`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum HcompressDefect {
+    /// The stream does not start with HCOMPRESS's two magic bytes.
+    #[error("the stream does not start with the magic bytes")]
+    Magic,
+    /// The stream declares a negative tile dimension.
+    #[error("the stream declares a negative tile dimension")]
+    NegativeDimension,
+    /// The stream's tile dimensions are not those of its tile.
+    #[error("the stream's tile dimensions are not those of its tile")]
+    TileDimensions,
+    /// A bit-plane count is past 63.
+    #[error("a bit-plane count is past 63")]
+    BitPlaneCount,
+    /// The bit planes do not end with a zero code.
+    #[error("the bit planes do not end with a zero code")]
+    BitPlaneEnd,
+    /// A quadrant's format code is neither 0 nor 15.
+    #[error("a quadrant format code is neither 0 nor 15")]
+    FormatCode,
+    /// A decoded H-transform coefficient does not fit 64 bits.
+    #[error("a decoded coefficient does not fit 64 bits")]
+    CoefficientOverflow,
+}
+
+impl From<CompressedDataDefect> for FitsError {
+    fn from(defect: CompressedDataDefect) -> Self {
+        Self::CorruptCompressedData { defect }
+    }
+}
+
+impl From<PlioDefect> for FitsError {
+    fn from(defect: PlioDefect) -> Self {
+        CompressedDataDefect::Plio(defect).into()
+    }
+}
+
+impl From<HcompressDefect> for FitsError {
+    fn from(defect: HcompressDefect) -> Self {
+        CompressedDataDefect::Hcompress(defect).into()
+    }
+}
+
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum FitsError {
@@ -137,29 +653,41 @@ pub enum FitsError {
     #[error("reserved keyword {keyword} cannot be used as a valued card")]
     ReservedKeyword { keyword: Keyword },
     /// A header value has no conforming FITS representation.
-    #[error("header keyword {keyword:?} has an invalid value: {reason}")]
-    InvalidHeaderValue {
-        keyword: Keyword,
-        reason: &'static str,
+    #[error("header record {name} has an invalid value: {reason}")]
+    InvalidHeaderValue { name: RecordName, reason: NonFinite },
+    /// A logical header record cannot fit one physical 80-byte record.
+    #[error("header record {name} needs {length} bytes but a FITS record holds 80")]
+    HeaderCardTooLong { name: RecordName, length: usize },
+    /// A header record that did not parse: a lookup of its name, or a write of its
+    /// header.
+    #[error(fmt = fmt_invalid_value)]
+    InvalidValue {
+        name: Option<RecordName>,
+        defect: Defect,
     },
-    /// A logical header card cannot fit one physical 80-byte record.
-    #[error("header card {keyword:?} needs {length} bytes but a FITS record holds 80")]
-    HeaderCardTooLong { keyword: String, length: usize },
-    /// A card's value field could not be parsed as any FITS value type.
-    #[error("cannot parse value field of card {card:?}")]
-    InvalidValue { card: String },
-    /// WCS keywords that describe no valid transform: a singular matrix, degenerate
-    /// projection parameters, an unknown reference frame, a spectral axis without what
-    /// its algorithm needs.
-    #[error("invalid WCS: {detail}")]
-    InvalidWcs { detail: String },
-    /// Time keywords that are malformed or out of range: a date, a time scale, a phase
-    /// axis.
-    #[error("invalid time metadata: {detail}")]
-    InvalidTime { detail: String },
-    /// A compression parameter outside its valid range.
-    #[error("invalid compression parameter: {detail}")]
-    InvalidCompressionParameter { detail: String },
+    /// A header record whose value is not of the type it was read as.
+    #[error("the value of {name} is not {expected}")]
+    ValueTypeMismatch {
+        name: RecordName,
+        expected: ValueKind,
+    },
+    /// WCS keywords that describe no valid transform; [`WcsDefect`] says which case.
+    #[error("invalid WCS: {defect}")]
+    InvalidWcs { defect: WcsDefect },
+    /// A datetime that is not a FITS ISO-8601 or legacy `DD/MM/YY` one, or names no
+    /// instant (§9.1.1, §4.4.2.1); its keyword when a header gave it.
+    #[error("invalid datetime{}", keyword.map_or(String::new(), |keyword| format!(" in {keyword}")))]
+    InvalidDatetime { keyword: Option<Keyword> },
+    /// A time-scale code that does not parse (§9.2.1); its keyword when a header gave it.
+    #[error("invalid time scale{}", keyword.map_or(String::new(), |keyword| format!(" in {keyword}")))]
+    InvalidTimeScale { keyword: Option<Keyword> },
+    /// A time whose MJD lies past the range an `Mjd` holds.
+    #[error("the time lies outside the MJD range")]
+    TimeOutOfRange,
+    /// A compression parameter outside its valid range; [`CompressionParameter`] says
+    /// which.
+    #[error("invalid compression parameter: {parameter}")]
+    InvalidCompressionParameter { parameter: CompressionParameter },
     /// An ASCII-table field that does not hold a number of its column's format.
     #[error("ASCII-table field {field:?} is not a valid number")]
     InvalidAsciiField { field: String },
@@ -170,6 +698,9 @@ pub enum FitsError {
     /// or ephemeris data that this format library does not provide.
     #[error("{operation} requires external astronomical time data")]
     ExternalTimeDataRequired { operation: &'static str },
+    /// A stream chunk whose samples are not of the stream's `BITPIX`.
+    #[error("a chunk of {got:?} samples was written to a stream of {expected:?} samples")]
+    ChunkTypeMismatch { expected: Bitpix, got: Bitpix },
     /// A named metadata value was present but could not be interpreted as the type
     /// required by its FITS role.
     #[error("value {name} is not a valid {expected}")]
@@ -177,9 +708,9 @@ pub enum FitsError {
         name: String,
         expected: &'static str,
     },
-    /// Text being written contains bytes outside FITS restricted ASCII (0x20–0x7e).
-    #[error("{context} contains characters outside FITS restricted ASCII")]
-    InvalidAscii { context: &'static str },
+    /// Text that holds bytes outside FITS restricted ASCII (0x20–0x7e).
+    #[error("{text} contains characters outside FITS restricted ASCII")]
+    InvalidAscii { text: TextOrigin },
     /// An ASCII-table value cannot fit the field width declared by its `TFORMn`.
     #[error(
         "ASCII column {column:?} row {row} needs at least {minimum_width} characters but its field width is {width}"
@@ -188,6 +719,16 @@ pub enum FitsError {
         column: String,
         /// Zero-based table row containing the value.
         row: usize,
+        width: usize,
+        minimum_width: usize,
+    },
+    /// An ASCII float column's `TFORMn` is narrower than its smallest cell: a digit, the
+    /// decimal point and the decimals, and an exponent form's `E+00`.
+    #[error(
+        "ASCII column {column:?} has a float field width of {width}, but its cells need at least {minimum_width} characters"
+    )]
+    AsciiFloatFormatTooNarrow {
+        column: String,
         width: usize,
         minimum_width: usize,
     },
@@ -226,9 +767,14 @@ pub enum FitsError {
     /// a negative `GCOUNT` or axis length, or a `THEAP` that precedes the heap).
     #[error("keyword {keyword} has an out-of-range value")]
     KeywordOutOfRange { keyword: Keyword },
-    /// An exact FITS integer cannot be represented by the requested bounded type.
+    /// An exact FITS integer cannot be represented by the requested bounded type; the
+    /// keyword it was read from when a header read it.
     #[error("FITS integer {value} is outside the {target} range")]
-    IntegerOutOfRange { value: String, target: &'static str },
+    IntegerOutOfRange {
+        keyword: Option<Keyword>,
+        value: String,
+        target: NumericTarget,
+    },
     /// The byte stream ended in the middle of a header or data unit.
     #[error("unexpected end of stream inside a FITS unit")]
     UnexpectedEof,
@@ -242,10 +788,23 @@ pub enum FitsError {
     /// than an out-of-memory process abort.
     #[error("header-implied data-unit size ({bytes} bytes) is too large to allocate")]
     DataUnitTooLarge { bytes: u64 },
-    /// A decoded data unit held a different element count than the header's
-    /// declared geometry — a corrupt or truncated data unit.
-    #[error("decoded data unit has {got} elements, header implies {expected}")]
-    DataSizeMismatch { expected: usize, got: usize },
+    /// A data unit, a part of one, or a buffer handed in held another size than its
+    /// header or its geometry declares — a corrupt or truncated unit, or a caller's
+    /// buffer of the wrong length.
+    #[error("{got} {unit} where {expected} are declared")]
+    DataSizeMismatch {
+        unit: SizeUnit,
+        expected: u64,
+        got: u64,
+    },
+    /// A `P`/`Q` descriptor's count or offset that the signed integers of its width
+    /// cannot hold (§7.3.5).
+    #[error("a {width:?} descriptor cannot hold the count {count} and the offset {offset}")]
+    DescriptorOutOfRange {
+        width: DescriptorWidth,
+        count: usize,
+        offset: usize,
+    },
     /// A signed `P`/`Q` heap-array descriptor contains a negative element count
     /// or byte offset.
     #[error("invalid P/Q descriptor {field}: {value}")]
@@ -316,9 +875,18 @@ pub enum FitsError {
     /// place holds.
     #[error("the header needs {needed} blocks but the file holds {available} for it")]
     HeaderDoesNotFit { needed: usize, available: usize },
-    /// A file to append to does not end on a 2880-byte block boundary.
-    #[error("the file is {len} bytes, which ends off the 2880-byte block grid")]
-    FileOffBlockGrid { len: u64 },
+    /// An optional column keyword (`TSCALn`, `TZEROn`, `TNULLn`, `TDIMn`, `TDISPn`) whose
+    /// value did not read: a read of its column that needs it fails, and the other
+    /// columns read as they are.
+    #[error("column keyword {keyword} is unusable: {source}")]
+    InvalidColumnKeyword { keyword: Keyword, source: Arc<Self> },
+    /// A file to append to holds bytes after its last HDU, such as special records,
+    /// which a reader stops at, so it would not see an appended HDU.
+    #[error("the last HDU ends at byte {hdu_end}, but the file is {file_len} bytes")]
+    TrailingContent { hdu_end: u64, file_len: u64 },
+    /// An edit changes the kind of an HDU, whose data unit is then of the wrong kind.
+    #[error("the header makes the {from:?} HDU a {to:?}")]
+    HduKindChange { from: HduKind, to: HduKind },
     /// No HDU carries the extension name, version and level a read named.
     #[error("no HDU named {name:?} (EXTVER {version:?}, EXTLEVEL {level:?})")]
     HduNotFound {
@@ -337,20 +905,15 @@ pub enum FitsError {
     /// `read_table` was called on an HDU that is not a binary table.
     #[error("HDU is not a binary table")]
     NotABinTable,
-    /// A time-axis evaluation was asked of WCS axis `axis` (1-based), whose `CTYPEn` is
-    /// no time axis (§9.6).
-    #[error("WCS axis {axis} is not a time axis")]
-    NotATimeAxis { axis: usize },
     /// `read_groups` was called on an HDU that is not a random-groups primary.
     #[error("HDU is not a random-groups primary")]
     NotRandomGroups,
     /// `read_ascii_table` was called on an HDU that is not an ASCII table.
     #[error("HDU is not an ASCII table")]
     NotAnAsciiTable,
-    /// Two mutually-exclusive WCS keyword conventions are both present (e.g. `PC`
-    /// and `CD`, or `CROTA` and `PC`); a conforming header uses only one (§8).
-    #[error("conflicting WCS keywords: {detail}")]
-    ConflictingWcsKeywords { detail: &'static str },
+    /// WCS keywords that cannot hold together; [`WcsConflict`] says which.
+    #[error("conflicting WCS keywords: {conflict}")]
+    ConflictingWcsKeywords { conflict: WcsConflict },
     /// A complete pixel↔world transform was requested for axes whose nonlinear
     /// algorithm is not implemented. The indices are zero-based, matching
     /// [`crate::world_coordinates::Metadata::unsupported_axes`].
@@ -367,8 +930,8 @@ pub enum FitsError {
     WcsWorldOutOfDomain { projection: &'static str },
     /// The fiducial point, `LONPOLE` and `LATPOLE` admit no celestial pole (CG 2002 §2.4,
     /// wcslib `celset`).
-    #[error("no celestial pole fits the WCS: {detail}")]
-    WcsInvalidPole { detail: &'static str },
+    #[error("no celestial pole fits the WCS: {defect}")]
+    WcsInvalidPole { defect: PoleDefect },
     /// A unit string is not a unit of the kind its keyword requires.
     #[error("unit {unit:?} is not {expected}")]
     InvalidUnit {
@@ -392,13 +955,13 @@ pub enum FitsError {
     /// tile's remainder included.
     #[error("HCOMPRESS_1 tile is {length} pixels along axis {axis}, under the minimum of 4")]
     HcompressTileTooSmall { axis: usize, length: usize },
-    /// A tiled-image compression algorithm or variant is not yet supported.
-    #[error("unsupported tiled compression: {name}")]
-    UnsupportedCompression { name: String },
-    /// A compressed stream or tile does not decode: a bad magic number, an invalid
-    /// code, a tile larger than declared, or a null mask outside 0 and 1.
-    #[error("corrupt compressed data: {detail}")]
-    CorruptCompressedData { detail: String },
+    /// A tiled-compression feature this crate does not support; [`CompressionFeature`]
+    /// says which.
+    #[error("unsupported tiled compression: {feature}")]
+    UnsupportedCompression { feature: CompressionFeature },
+    /// A compressed stream or tile does not decode; [`CompressedDataDefect`] says why.
+    #[error("corrupt compressed data: {defect}")]
+    CorruptCompressedData { defect: CompressedDataDefect },
     /// A PLIO tile sample cannot be represented losslessly in its unsigned 24-bit
     /// value domain.
     #[error("PLIO tile sample {index} has value {value}, outside 0..=16777215")]
@@ -432,10 +995,6 @@ pub enum FitsError {
     /// The summed column widths disagree with the declared row width (`NAXIS1`).
     #[error("column widths sum to {computed} bytes but NAXIS1 declares {declared}")]
     RowWidthMismatch { computed: usize, declared: usize },
-    /// Metadata supplied alongside a parsed binary table disagrees with the
-    /// table's validated structure.
-    #[error("header metadata {name} disagrees with the binary table")]
-    TableMetadataMismatch { name: String },
 }
 
 /// A conversion that cannot fail, such as a [`Keyword`] passed where a name is

@@ -1,45 +1,49 @@
+use crate::bintable::descriptor::DescriptorWidth;
+use crate::bintable::element_kind::ElementKind;
+use crate::bintable::tform::Storage;
 use crate::bintable::tform::Tform;
 use crate::bintable::tform::internals::tform;
-use crate::bintable::tform_kind::TformKind;
 use crate::error::FitsError;
 
 #[test]
 fn parses_tform_repeat_and_kind() {
     let cases = [
-        ("8A", tform(8, TformKind::Character, None)),
-        ("3D", tform(3, TformKind::F64, None)),
-        ("0D", tform(0, TformKind::F64, None)),
-        ("1J", tform(1, TformKind::I32, None)),
-        ("E", tform(1, TformKind::F32, None)), // bare code ⇒ repeat 1
-        ("16X", tform(16, TformKind::Bit, None)),
+        ("8A", tform(8, ElementKind::Character, Storage::Fixed)),
+        ("3D", tform(3, ElementKind::F64, Storage::Fixed)),
+        ("0D", tform(0, ElementKind::F64, Storage::Fixed)),
+        ("1J", tform(1, ElementKind::I32, Storage::Fixed)),
+        ("E", tform(1, ElementKind::F32, Storage::Fixed)), // bare code ⇒ repeat 1
+        ("16X", tform(16, ElementKind::Bit, Storage::Fixed)),
         // P/Q carry the heap element type.
         (
             "1PE(5)",
-            tform(1, TformKind::ArrayDesc32, Some(TformKind::F32)),
+            tform(1, ElementKind::F32, Storage::Array(DescriptorWidth::P)),
         ),
         (
             "1QD",
-            tform(1, TformKind::ArrayDesc64, Some(TformKind::F64)),
+            tform(1, ElementKind::F64, Storage::Array(DescriptorWidth::Q)),
+        ),
+        // The characters after a code, or after a P/Q's element type, are undefined
+        // and ignored (§7.3.1, §7.3.5).
+        ("60A10", tform(60, ElementKind::Character, Storage::Fixed)),
+        ("1Jjunk", tform(1, ElementKind::I32, Storage::Fixed)),
+        (
+            "1PE(5)junk",
+            tform(1, ElementKind::F32, Storage::Array(DescriptorWidth::P)),
+        ),
+        (
+            "1PE(5",
+            tform(1, ElementKind::F32, Storage::Array(DescriptorWidth::P)),
+        ),
+        (
+            "1QB()",
+            tform(1, ElementKind::U8, Storage::Array(DescriptorWidth::Q)),
         ),
     ];
     for (s, expected) in cases {
         assert_eq!(s.parse::<Tform>().unwrap(), expected, "{s}");
     }
-    for bad in [
-        "9Z",
-        "",
-        "1P",
-        "2PE(5)",
-        "3QD",
-        "1PP",
-        "1PQ",
-        "1QP",
-        "1QQ",
-        "1Jjunk",
-        "1PE(5)junk",
-        "1PE(5",
-        "1PE()",
-    ] {
+    for bad in ["9Z", "", "1P", "2PE(5)", "3QD", "1PP", "1PQ", "1QP", "1QQ"] {
         // "1P" lacks the heap element-type letter; "2PE"/"3QD" violate the §6.3
         // rule that a P/Q descriptor's repeat count is 0 or 1.
         assert!(

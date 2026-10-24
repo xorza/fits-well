@@ -6,8 +6,9 @@ use bitvec::order::Msb0;
 use bitvec::slice::BitSlice;
 use bitvec::view::BitView;
 
+use crate::bintable::element_kind::ElementKind;
 use crate::bintable::table_view::TableView;
-use crate::bintable::tform_kind::TformKind;
+use crate::bintable::tform::Storage;
 
 /// A binary table's `X` (bit-array) column as a borrowed, 2-D bit view — from
 /// [`ColumnReader::bits`](crate::table::ColumnReader::bits)
@@ -44,12 +45,12 @@ impl<'a> BitColumn<'a> {
 
     /// The number of rows.
     pub const fn len(&self) -> usize {
-        self.table.row_count
+        self.table.extent.row_count
     }
 
     /// Whether the column has no rows.
     pub const fn is_empty(&self) -> bool {
-        self.table.row_count == 0
+        self.table.extent.row_count == 0
     }
 
     /// Row `r`'s bits as a borrowed [`BitSlice`], MSB-first — resolved on demand from
@@ -57,14 +58,14 @@ impl<'a> BitColumn<'a> {
     /// `.to_bitvec()` to own it. Panics if `r >= len()`.
     pub fn row(&self, r: usize) -> &'a BitSlice<u8, Msb0> {
         assert!(
-            r < self.table.row_count,
+            r < self.table.extent.row_count,
             "row {r} out of bounds ({} rows)",
-            self.table.row_count
+            self.table.extent.row_count
         );
         let col = &self.table.columns[self.index];
-        if col.tform.kind == TformKind::Bit {
+        if col.tform.storage() == Storage::Fixed {
             // Fixed `rX`: the row's cell, truncated to `repeat` bits.
-            &self.table.cell(col, r).view_bits::<Msb0>()[..col.tform.repeat]
+            &self.table.cell(col, r).view_bits::<Msb0>()[..col.tform.repeat()]
         } else {
             // Variable-length `PX`/`QX`: follow the descriptor into the heap. The span
             // was bounds-checked by `vla_bits`, so the lookup can't fail here.
@@ -77,7 +78,7 @@ impl<'a> BitColumn<'a> {
             }
             let cell = self
                 .table
-                .pq_payload(descriptor, TformKind::Bit)
+                .pq_payload(descriptor, ElementKind::Bit)
                 .expect("vla_bits validated every heap span");
             &cell.view_bits::<Msb0>()[..descriptor.count]
         }
@@ -85,7 +86,7 @@ impl<'a> BitColumn<'a> {
 
     /// The bit at `(row, col)`, MSB-first — `None` if either index is out of range.
     pub fn get(&self, row: usize, col: usize) -> Option<bool> {
-        if row >= self.table.row_count {
+        if row >= self.table.extent.row_count {
             return None;
         }
         let bits = self.row(row);
@@ -93,10 +94,57 @@ impl<'a> BitColumn<'a> {
     }
 
     /// Iterate the rows, each a borrowed [`BitSlice`], resolved on demand.
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = &'a BitSlice<u8, Msb0>> + '_ {
-        (0..self.table.row_count).map(move |r| self.row(r))
+    pub const fn iter(&self) -> BitRows<'a> {
+        BitRows {
+            column: *self,
+            next: 0,
+        }
     }
 }
+
+impl<'a> IntoIterator for BitColumn<'a> {
+    type Item = &'a BitSlice<u8, Msb0>;
+    type IntoIter = BitRows<'a>;
+
+    fn into_iter(self) -> BitRows<'a> {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &BitColumn<'a> {
+    type Item = &'a BitSlice<u8, Msb0>;
+    type IntoIter = BitRows<'a>;
+
+    fn into_iter(self) -> BitRows<'a> {
+        self.iter()
+    }
+}
+
+/// The rows of a [`BitColumn`], in row order, from [`BitColumn::iter`].
+#[derive(Debug, Clone)]
+pub struct BitRows<'a> {
+    column: BitColumn<'a>,
+    next: usize,
+}
+
+impl<'a> Iterator for BitRows<'a> {
+    type Item = &'a BitSlice<u8, Msb0>;
+
+    fn next(&mut self) -> Option<&'a BitSlice<u8, Msb0>> {
+        if self.next == self.column.len() {
+            return None;
+        }
+        self.next += 1;
+        Some(self.column.row(self.next - 1))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.column.len() - self.next;
+        (left, Some(left))
+    }
+}
+
+impl ExactSizeIterator for BitRows<'_> {}
 
 /// `bits[row]` is row `row`'s [`BitSlice`] (panics out of range, like slice indexing);
 /// `bits[row][col]` is the bit. Use [`BitColumn::get`] for the checked element.

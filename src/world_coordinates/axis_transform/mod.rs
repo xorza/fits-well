@@ -9,6 +9,7 @@ pub(super) mod spectral_transform;
 
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::error::WcsDefect;
 use crate::world_coordinates::axis_transform::spectral_algorithm::SpectralAlgorithm;
 use crate::world_coordinates::axis_transform::spectral_kind::{SpectralKind, domain_error, finite};
 use crate::world_coordinates::axis_transform::spectral_rest::{
@@ -16,19 +17,21 @@ use crate::world_coordinates::axis_transform::spectral_rest::{
 };
 use crate::world_coordinates::axis_transform::spectral_transform::SpectralTransform;
 use crate::world_coordinates::ctype::Ctype;
+use crate::world_coordinates::world_unit::WorldUnit;
 
-pub(super) const SPEED_OF_LIGHT: f64 = 2.997_924_58e8;
-/// wcslib's value (CODATA 1986), not the exact SI 6.626 070 15e-34, so energies
-/// match wcslib's.
-const PLANCK_CONSTANT: f64 = 6.626_075_5e-34;
-
+/// An axis's own step between its intermediate and its world coordinate, with the
+/// reference value `CRVALi` it adds, in its world unit.
 #[derive(Debug, Clone)]
 pub(super) enum AxisTransform {
-    Linear,
+    Linear {
+        reference: f64,
+    },
     /// An axis the celestial or the tabular transform evaluates with its partners: the
     /// per-axis step passes its value through to that joint step.
     Joint,
-    Logarithmic,
+    Logarithmic {
+        reference: f64,
+    },
     Spectral(SpectralTransform),
     Unsupported,
 }
@@ -36,11 +39,8 @@ pub(super) enum AxisTransform {
 #[derive(Debug)]
 pub(super) struct AxisTransformSpec {
     pub(super) transform: AxisTransform,
-    /// The factor from the declared `CUNITi` to [`Self::world_unit`].
-    pub(super) unit_scale: f64,
-    /// The unit world coordinates of the axis come out in, when it is not the declared
-    /// one: a spectral quantity's Table-25 default unit.
-    pub(super) world_unit: Option<&'static str>,
+    /// The unit of the axis's world coordinates, from its declared `CUNITi`.
+    pub(super) unit: WorldUnit,
 }
 
 impl AxisTransform {
@@ -54,9 +54,8 @@ impl AxisTransform {
         let parsed = Ctype::parse(ctype);
         let Some(code) = parsed.algorithm else {
             return Ok(AxisTransformSpec {
-                transform: Self::Linear,
-                unit_scale: 1.0,
-                world_unit: None,
+                transform: Self::Linear { reference },
+                unit: WorldUnit::DECLARED,
             });
         };
         let kind = SpectralKind::from_code(parsed.head);
@@ -64,19 +63,18 @@ impl AxisTransform {
             if parsed.head.len() != 4 {
                 return Ok(unsupported());
             }
-            let unit_scale = kind
-                .map(|kind| kind.unit_scale(cunit))
-                .transpose()?
-                .unwrap_or(1.0);
-            if !reference.is_finite() || reference * unit_scale <= 0.0 {
+            let unit = WorldUnit::of(parsed, cunit)?;
+            let reference = reference * unit.scale;
+            if !reference.is_finite() || reference <= 0.0 {
                 return Err(FitsError::InvalidWcs {
-                    detail: format!("{ctype} requires a finite, positive CRVAL"),
+                    defect: WcsDefect::LogarithmicReference {
+                        ctype: ctype.to_string(),
+                    },
                 });
             }
             return Ok(AxisTransformSpec {
-                transform: Self::Logarithmic,
-                unit_scale,
-                world_unit: kind.map(SpectralKind::default_unit),
+                transform: Self::Logarithmic { reference },
+                unit,
             });
         }
         let Some(kind) = kind else {
@@ -91,42 +89,43 @@ impl AxisTransform {
             && (expressed != kind.characteristic() || sampled == expressed)
         {
             return Err(FitsError::InvalidWcs {
-                detail: format!("spectral CTYPE {ctype:?} has inconsistent variables"),
+                defect: WcsDefect::InconsistentSpectralAlgorithm {
+                    ctype: ctype.to_string(),
+                },
             });
         }
-        let unit_scale = kind.unit_scale(cunit)?;
+        let unit = WorldUnit::of(parsed, cunit)?;
         let rest = rest.resolve(RestNeed::of(kind, algorithm.sampled()))?;
         let transform =
-            SpectralTransform::new(kind, algorithm, reference * unit_scale, rest, parameters)?;
+            SpectralTransform::new(kind, algorithm, reference * unit.scale, rest, parameters)?;
         Ok(AxisTransformSpec {
             transform: Self::Spectral(transform),
-            unit_scale,
-            world_unit: Some(kind.default_unit()),
+            unit,
         })
     }
 
-    pub(super) fn to_world(&self, intermediate: f64, reference: f64, axis: usize) -> Result<f64> {
-        match self {
-            Self::Linear => Ok(reference + intermediate),
+    pub(super) fn to_world(&self, intermediate: f64, axis: usize) -> Result<f64> {
+        match *self {
+            Self::Linear { reference } => Ok(reference + intermediate),
             Self::Joint => Ok(intermediate),
-            Self::Logarithmic => finite(reference * (intermediate / reference).exp())
+            Self::Logarithmic { reference } => finite(reference * (intermediate / reference).exp())
                 .ok_or_else(|| domain_error(axis, "LOG")),
-            Self::Spectral(transform) => transform.to_world(intermediate, axis),
+            Self::Spectral(ref transform) => transform.to_world(intermediate, axis),
             Self::Unsupported => {
                 panic!("unsupported WCS transform passed completeness check")
             }
         }
     }
 
-    pub(super) fn to_intermediate(&self, world: f64, reference: f64, axis: usize) -> Result<f64> {
-        match self {
-            Self::Linear => Ok(world - reference),
+    pub(super) fn to_intermediate(&self, world: f64, axis: usize) -> Result<f64> {
+        match *self {
+            Self::Linear { reference } => Ok(world - reference),
             Self::Joint => Ok(world),
-            Self::Logarithmic if world.is_finite() && world > 0.0 => {
+            Self::Logarithmic { reference } if world.is_finite() && world > 0.0 => {
                 Ok(reference * (world / reference).ln())
             }
-            Self::Logarithmic => Err(domain_error(axis, "LOG")),
-            Self::Spectral(transform) => transform.to_intermediate(world, axis),
+            Self::Logarithmic { .. } => Err(domain_error(axis, "LOG")),
+            Self::Spectral(ref transform) => transform.to_intermediate(world, axis),
             Self::Unsupported => {
                 panic!("unsupported WCS transform passed completeness check")
             }
@@ -138,19 +137,23 @@ pub(super) fn is_spectral_type(ctype: &str) -> bool {
     SpectralKind::from_code(Ctype::parse(ctype).head).is_some()
 }
 
-/// The factor from `cunit` to a spectral axis's Table-25 default unit, or `None`
-/// when `head` names no spectral type.
-pub(super) fn spectral_unit_scale(head: &str, cunit: &str) -> Result<Option<f64>> {
+/// A spectral axis's Table-25 default unit and the factor to it from `cunit`, or
+/// `None` when `head` names no spectral type.
+pub(super) fn spectral_unit(head: &str, cunit: &str) -> Result<Option<WorldUnit>> {
     SpectralKind::from_code(head)
-        .map(|kind| kind.unit_scale(cunit))
+        .map(|kind| {
+            Ok(WorldUnit {
+                scale: kind.unit_scale(cunit)?,
+                unit: Some(kind.default_unit()),
+            })
+        })
         .transpose()
 }
 
 const fn unsupported() -> AxisTransformSpec {
     AxisTransformSpec {
         transform: AxisTransform::Unsupported,
-        unit_scale: 1.0,
-        world_unit: None,
+        unit: WorldUnit::DECLARED,
     }
 }
 

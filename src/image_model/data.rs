@@ -1,10 +1,7 @@
 //! [`Data`]: an owned image array in one of the six FITS sample types.
 
 use crate::bitpix::Bitpix;
-use crate::endian::decode_be;
-use crate::image_model::assert_whole_elements;
 use crate::image_model::view::View;
-use std::ops::Range;
 
 /// An owned, host-endian sample buffer, tagged by its `BITPIX` element type.
 #[derive(Debug, Clone, PartialEq)]
@@ -16,36 +13,6 @@ pub enum Data {
     F32(Vec<f32>),
     F64(Vec<f64>),
 }
-
-/// `Data` from a typed vector, and back: the reverse gives the data back when it holds
-/// another type.
-macro_rules! impl_data_vec_conversions {
-    ($variant:ident, $type:ty) => {
-        impl From<Vec<$type>> for Data {
-            fn from(values: Vec<$type>) -> Data {
-                Data::$variant(values)
-            }
-        }
-
-        impl TryFrom<Data> for Vec<$type> {
-            type Error = Data;
-
-            fn try_from(data: Data) -> core::result::Result<Self, Data> {
-                match data {
-                    Data::$variant(values) => Ok(values),
-                    other => Err(other),
-                }
-            }
-        }
-    };
-}
-
-impl_data_vec_conversions!(U8, u8);
-impl_data_vec_conversions!(I16, i16);
-impl_data_vec_conversions!(I32, i32);
-impl_data_vec_conversions!(I64, i64);
-impl_data_vec_conversions!(F32, f32);
-impl_data_vec_conversions!(F64, f64);
 
 impl Data {
     /// The `BITPIX` element kind backing this buffer.
@@ -74,47 +41,54 @@ impl Data {
         }
     }
 
-    pub const fn as_u8(&self) -> Option<&[u8]> {
+    pub fn as_u8(&self) -> Option<&[u8]> {
         self.view().as_u8()
     }
 
-    pub const fn as_i16(&self) -> Option<&[i16]> {
+    pub fn as_i16(&self) -> Option<&[i16]> {
         self.view().as_i16()
     }
 
-    pub const fn as_i32(&self) -> Option<&[i32]> {
+    pub fn as_i32(&self) -> Option<&[i32]> {
         self.view().as_i32()
     }
 
-    pub const fn as_i64(&self) -> Option<&[i64]> {
+    pub fn as_i64(&self) -> Option<&[i64]> {
         self.view().as_i64()
     }
 
-    pub const fn as_f32(&self) -> Option<&[f32]> {
+    pub fn as_f32(&self) -> Option<&[f32]> {
         self.view().as_f32()
     }
 
-    pub const fn as_f64(&self) -> Option<&[f64]> {
+    pub fn as_f64(&self) -> Option<&[f64]> {
         self.view().as_f64()
     }
+}
 
-    pub(crate) fn view_range(&self, range: Range<usize>) -> View<'_> {
-        self.view().slice(range)
-    }
+#[cfg(test)]
+pub(crate) mod internals {
+    use crate::bitpix::Bitpix;
+    use crate::image_model::data::Data;
+    use crate::image_model::sample::Sample;
 
-    /// Decode the raw, big-endian data unit into host-endian typed samples.
-    /// `bytes` is the unpadded data (a whole number of `bitpix` elements); the
-    /// fill past the data range must already be sliced off (see
-    /// [`crate::io::DataUnit::data`]).
-    pub(crate) fn decode(bytes: &[u8], bitpix: Bitpix) -> Self {
-        assert_whole_elements(bytes, bitpix);
-        match bitpix {
-            Bitpix::U8 => Self::U8(bytes.to_vec()),
-            Bitpix::I16 => Self::I16(decode_be(bytes, i16::from_be_bytes)),
-            Bitpix::I32 => Self::I32(decode_be(bytes, i32::from_be_bytes)),
-            Bitpix::I64 => Self::I64(decode_be(bytes, i64::from_be_bytes)),
-            Bitpix::F32 => Self::F32(decode_be(bytes, f32::from_be_bytes)),
-            Bitpix::F64 => Self::F64(decode_be(bytes, f64::from_be_bytes)),
+    impl Data {
+        /// The stored big-endian `bytes`, a whole number of `bitpix` samples, decoded.
+        pub(crate) fn decode(bytes: &[u8], bitpix: Bitpix) -> Self {
+            fn decoded<T: Sample>(bytes: &[u8]) -> Vec<T> {
+                assert_eq!(bytes.len() % size_of::<T>(), 0, "whole samples");
+                let mut values = vec![T::default(); bytes.len() / size_of::<T>()];
+                T::decode_be(bytes, &mut values);
+                values
+            }
+            match bitpix {
+                Bitpix::U8 => Self::U8(bytes.to_vec()),
+                Bitpix::I16 => Self::I16(decoded(bytes)),
+                Bitpix::I32 => Self::I32(decoded(bytes)),
+                Bitpix::I64 => Self::I64(decoded(bytes)),
+                Bitpix::F32 => Self::F32(decoded(bytes)),
+                Bitpix::F64 => Self::F64(decoded(bytes)),
+            }
         }
     }
 }

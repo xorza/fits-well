@@ -3,29 +3,36 @@
 #[cfg(feature = "internals")]
 pub(crate) mod bench;
 pub(crate) mod card;
+pub(crate) mod commentary_name;
 pub(crate) mod defect;
 pub(crate) mod hierarch_name;
 pub mod keywords;
+pub(crate) mod record;
+pub(crate) mod record_name;
 pub(crate) mod repair;
 pub(crate) mod value;
 
 use std::collections::HashMap;
 
 use crate::bitpix::Bitpix;
+use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
+use crate::block::RECORDS_PER_BLOCK;
+use crate::checksum;
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::Result;
-use crate::header_model::card::Card;
+use crate::error::{TextOrigin, ValueKind};
 use crate::header_model::card::ParsedRecord;
 use crate::header_model::card::validate_ascii;
 use crate::header_model::card::validate_valued_keyword;
-use crate::header_model::defect::Defect;
+use crate::header_model::commentary_name::CommentaryName;
 use crate::header_model::hierarch_name::HierarchName;
+use crate::header_model::record::{Record, RecordView};
+use crate::header_model::record_name::RecordName;
 use crate::header_model::repair::Repair;
 use crate::header_model::value::Value;
 use crate::keyword::Keyword;
-use std::mem;
 use std::slice;
 
 /// A parsed header unit: an *ordered* list of content cards plus a side index
@@ -40,130 +47,19 @@ use std::slice;
 /// split).
 #[derive(Debug, Clone, Default)]
 pub struct Header {
-    pub(crate) cards: Vec<Card>,
-    /// First occurrence of each valued keyword → index into `cards`.
+    records: Vec<Record>,
+    /// First occurrence of each valued keyword → index into `records`.
     ///
-    /// Invariant: every entry points at a [`Card::Value`], or a [`Card::Malformed`]
-    /// with that keyword, whose lookup fails.
-    /// Parsing builds the index alongside the card list; every mutation method
-    /// either maintains or rebuilds it. Raw card mutation stays private so the
-    /// two cannot be desynchronized.
+    /// Invariant: every entry points at the first [`Record::Valued`] with that keyword,
+    /// or a [`Record::Malformed`] so named, whose lookup fails. Parsing builds the index
+    /// alongside the records; an edit of one record maintains it, and a bulk edit
+    /// rebuilds it. The records stay private so the two cannot part.
     index: HashMap<Keyword, usize>,
-    /// First occurrence of each `HIERARCH` name → index into `cards`.
+    /// First occurrence of each `HIERARCH` name → index into `records`, under the same
+    /// invariant.
     hierarch_index: HashMap<HierarchName, usize>,
     /// The repairs the parse made, a report of the input that edits leave as it is.
     repairs: Vec<Repair>,
-}
-
-/// One stored header record, borrowed, as [`Header::iter`] yields it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum RecordView<'a> {
-    /// `KEYWORD = value [/ comment]`, with its inline comment.
-    Valued {
-        keyword: &'a Keyword,
-        value: &'a Value,
-        comment: Option<&'a str>,
-    },
-    /// `COMMENT`, `HISTORY`, the blank keyword, or any other record without a value
-    /// indicator: its name, which may be any 8 bytes (§4.1.2.1) and so is text, and
-    /// its free text.
-    Commentary {
-        name: &'a str,
-        text: Option<&'a str>,
-    },
-    /// `HIERARCH name = value [/ comment]` (ESO convention), with its inline comment.
-    Hierarch {
-        name: &'a HierarchName,
-        value: &'a Value,
-        comment: Option<&'a str>,
-    },
-    /// A record that did not parse: its 80 bytes, its keyword when its name is one,
-    /// and why.
-    Malformed {
-        keyword: Option<&'a Keyword>,
-        raw: &'a [u8; CARD_SIZE],
-        defect: Defect,
-    },
-}
-
-impl<'a> RecordView<'a> {
-    fn of(card: &'a Card) -> Self {
-        match card {
-            Card::Value {
-                keyword,
-                value,
-                comment,
-            } => Self::Valued {
-                keyword,
-                value,
-                comment: comment.as_deref(),
-            },
-            Card::Commentary { keyword, text } => Self::Commentary {
-                name: keyword,
-                text: text.as_deref(),
-            },
-            Card::Hierarch {
-                name,
-                value,
-                comment,
-            } => Self::Hierarch {
-                name,
-                value,
-                comment: comment.as_deref(),
-            },
-            Card::Malformed {
-                raw,
-                keyword,
-                defect,
-            } => Self::Malformed {
-                keyword: keyword.as_ref(),
-                raw,
-                defect: *defect,
-            },
-        }
-    }
-
-    /// The record's name: a valued record's keyword, a commentary record's name, or a
-    /// malformed record's keyword, `""` when its name is none.
-    pub const fn name(self) -> &'a str {
-        match self {
-            Self::Valued { keyword, .. } => keyword.as_str(),
-            Self::Commentary { name, .. } => name,
-            Self::Hierarch { .. } => "HIERARCH",
-            Self::Malformed {
-                keyword: Some(keyword),
-                ..
-            } => keyword.as_str(),
-            Self::Malformed { keyword: None, .. } => "",
-        }
-    }
-}
-
-/// One header record, owned: the owned twin of [`RecordView`], which the ordered
-/// removals return.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Record {
-    /// `KEYWORD = value [/ comment]`, with its inline comment.
-    Valued {
-        keyword: Keyword,
-        value: Value,
-        comment: Option<String>,
-    },
-    /// A record without a value indicator: its name and its free text.
-    Commentary { name: String, text: Option<String> },
-    /// `HIERARCH name = value [/ comment]` (ESO convention), with its inline comment.
-    Hierarch {
-        name: HierarchName,
-        value: Value,
-        comment: Option<String>,
-    },
-    /// A record that did not parse: its keyword when its name is one, its 80 bytes,
-    /// and why.
-    Malformed {
-        keyword: Option<Keyword>,
-        raw: [u8; CARD_SIZE],
-        defect: Defect,
-    },
 }
 
 impl Header {
@@ -171,45 +67,45 @@ impl Header {
     /// the reader supplies block-aligned input). Stops at the `END` record.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         // One record per card is the upper bound (CONTINUE folding only merges,
-        // never adds; commentary cards skip the index), so reserve both once and
+        // never adds; commentary records skip the index), so reserve both once and
         // let parsing fill them without the grow-reallocations a small header would
         // otherwise pay on every push.
         let ncards = bytes.len() / CARD_SIZE;
-        let mut cards: Vec<Card> = Vec::with_capacity(ncards);
-        let mut index = HashMap::with_capacity(ncards);
-        let mut hierarch_index = HashMap::new();
-        let mut repairs = Vec::new();
+        let mut header = Self {
+            records: Vec::with_capacity(ncards),
+            index: HashMap::with_capacity(ncards),
+            hierarch_index: HashMap::new(),
+            repairs: Vec::new(),
+        };
         for (position, chunk) in bytes.as_chunks::<CARD_SIZE>().0.iter().enumerate() {
-            let card = match ParsedRecord::parse(chunk, position + 1, &mut repairs) {
+            let record = match ParsedRecord::parse(chunk, position + 1, &mut header.repairs) {
                 ParsedRecord::End => {
                     // The blank records before `END` are space for later records, not
                     // content (cfitsio `ffhdef`, astropy `useblanks`).
-                    while matches!(cards.last(), Some(Card::Commentary { keyword, text: None }) if keyword.is_empty())
-                    {
-                        cards.pop();
+                    while matches!(
+                        header.records.last(),
+                        Some(Record::Commentary { name, text: None }) if *name == CommentaryName::BLANK
+                    ) {
+                        header.records.pop();
                     }
-                    return Ok(Self {
-                        cards,
-                        index,
-                        hierarch_index,
-                        repairs,
-                    });
+                    return Ok(header);
                 }
-                ParsedRecord::Continue { substring, comment } => {
-                    if fold_continuation(&mut cards, &substring, comment.as_deref()) {
+                ParsedRecord::Continue {
+                    substring,
+                    comment,
+                    tail,
+                } => {
+                    if fold_continuation(&mut header.records, &substring, comment.as_deref()) {
                         continue;
                     }
-                    demoted_continuation(&substring, comment.as_deref())
+                    Record::Commentary {
+                        name: CommentaryName::CONTINUE,
+                        text: tail,
+                    }
                 }
-                ParsedRecord::Card(card) => card,
+                ParsedRecord::Record(record) => record,
             };
-            if let Some(keyword) = card.indexed_keyword() {
-                index.entry(keyword).or_insert(cards.len());
-            }
-            if let Card::Hierarch { name, .. } = &card {
-                hierarch_index.entry(name.clone()).or_insert(cards.len());
-            }
-            cards.push(card);
+            header.push_record(record);
         }
         Err(FitsError::MissingEnd)
     }
@@ -235,7 +131,7 @@ impl Header {
         let Some(&i) = self.index.get(&keyword) else {
             return Ok(None);
         };
-        self.cards[i].value_or_defect().map(Some)
+        self.records[i].value_or_defect().map(Some)
     }
 
     /// The inline comment of the first valued card with this keyword; `None` when the
@@ -249,8 +145,8 @@ impl Header {
         let Some(&i) = self.index.get(&keyword) else {
             return Ok(None);
         };
-        self.cards[i].value_or_defect()?;
-        Ok(self.cards[i].comment())
+        self.records[i].value_or_defect()?;
+        Ok(self.records[i].comment())
     }
 
     /// Read an optional logical keyword without conflating absence with a wrong type.
@@ -258,7 +154,9 @@ impl Header {
         &self,
         keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
     ) -> Result<Option<bool>> {
-        self.typed_optional(checked(keyword)?, "logical", |value| Ok(value.as_logical()))
+        self.typed_optional(checked(keyword)?, ValueKind::Logical, |value| {
+            Ok(value.as_logical())
+        })
     }
 
     /// Read an optional integer keyword without conflating absence with a wrong type.
@@ -266,7 +164,7 @@ impl Header {
         &self,
         keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
     ) -> Result<Option<i64>> {
-        self.typed_optional(checked(keyword)?, "integer", Value::as_integer)
+        self.typed_optional(checked(keyword)?, ValueKind::Integer, Value::as_integer)
     }
 
     /// Read an optional real keyword without conflating absence with a wrong type.
@@ -274,7 +172,7 @@ impl Header {
         &self,
         keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
     ) -> Result<Option<f64>> {
-        self.typed_optional(checked(keyword)?, "real", Value::as_real)
+        self.typed_optional(checked(keyword)?, ValueKind::Real, Value::as_real)
     }
 
     /// Read an optional text keyword without conflating absence with a wrong type.
@@ -282,22 +180,34 @@ impl Header {
         &self,
         keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
     ) -> Result<Option<&str>> {
-        self.typed_optional(checked(keyword)?, "text", |value| Ok(value.as_text()))
+        self.typed_optional(checked(keyword)?, ValueKind::Text, |value| {
+            Ok(value.as_text())
+        })
     }
 
     fn typed_optional<'a, T>(
         &'a self,
         keyword: Keyword,
-        expected: &'static str,
+        expected: ValueKind,
         convert: impl FnOnce(&'a Value) -> Result<Option<T>>,
     ) -> Result<Option<T>> {
         let Some(value) = self.value(keyword)? else {
             return Ok(None);
         };
-        convert(value)?
+        convert(value)
+            .map_err(|error| match error {
+                FitsError::IntegerOutOfRange { value, target, .. } => {
+                    FitsError::IntegerOutOfRange {
+                        keyword: Some(keyword),
+                        value,
+                        target,
+                    }
+                }
+                other => other,
+            })?
             .map(Some)
-            .ok_or_else(|| FitsError::TypeMismatch {
-                name: keyword.to_string(),
+            .ok_or(FitsError::ValueTypeMismatch {
+                name: RecordName::Keyword(keyword),
                 expected,
             })
     }
@@ -373,11 +283,11 @@ impl Header {
 
     /// The number of records, commentary ones included.
     pub const fn len(&self) -> usize {
-        self.cards.len()
+        self.records.len()
     }
 
     pub const fn is_empty(&self) -> bool {
-        self.cards.is_empty()
+        self.records.is_empty()
     }
 
     /// Whether a record, valued or commentary, has this keyword.
@@ -391,10 +301,15 @@ impl Header {
         keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
     ) -> Result<Option<usize>> {
         let keyword = checked(keyword)?;
-        Ok(self
-            .cards
+        // The index holds the first valued record; a commentary record of the name can
+        // only come before it.
+        let end = self
+            .index
+            .get(&keyword)
+            .map_or(self.records.len(), |&i| i + 1);
+        Ok(self.records[..end]
             .iter()
-            .position(|card| card.keyword() == keyword.as_str()))
+            .position(|record| record.is_named(keyword)))
     }
 
     /// Every stored record in file order, as a [`RecordView`] — duplicates and order
@@ -404,26 +319,25 @@ impl Header {
     /// [`Keyword`].
     pub fn iter(&self) -> Iter<'_> {
         Iter {
-            cards: self.cards.iter(),
+            records: self.records.iter(),
         }
     }
 
     /// The text of each `HISTORY` record, in order; an empty record gives `""`.
-    pub fn history(&self) -> impl Iterator<Item = &str> {
-        self.commentary("HISTORY")
+    pub fn history_records(&self) -> impl Iterator<Item = &str> {
+        self.commentary(CommentaryName::HISTORY)
     }
 
     /// The text of each `COMMENT` record, in order; an empty record gives `""`.
-    pub fn comments(&self) -> impl Iterator<Item = &str> {
-        self.commentary("COMMENT")
+    pub fn comment_records(&self) -> impl Iterator<Item = &str> {
+        self.commentary(CommentaryName::COMMENT)
     }
 
-    fn commentary(&self, keyword: &'static str) -> impl Iterator<Item = &str> {
-        self.cards.iter().filter_map(move |card| match card {
-            Card::Commentary {
-                keyword: name,
-                text,
-            } if name == keyword => Some(text.as_deref().unwrap_or("")),
+    fn commentary(&self, wanted: CommentaryName) -> impl Iterator<Item = &str> {
+        self.records.iter().filter_map(move |record| match record {
+            Record::Commentary { name, text } if *name == wanted => {
+                Some(text.as_deref().unwrap_or(""))
+            }
             _ => None,
         })
     }
@@ -497,42 +411,64 @@ impl Header {
         value: impl Into<Value>,
     ) -> Result<&mut Self> {
         let keyword = checked(keyword)?;
-        let value = value.into();
         validate_valued_keyword(keyword)?;
-        if let Some(&i) = self.index.get(&keyword)
-            && matches!(self.cards[i], Card::Malformed { .. })
-        {
-            // A new value replaces a malformed record in its place.
-            let card = Card::Value {
-                keyword,
-                value,
-                comment: None,
-            };
-            card.validate()?;
-            self.cards[i] = card;
-        } else if let Some(&i) = self.index.get(&keyword) {
-            let Card::Value { value: slot, .. } = &mut self.cards[i] else {
-                unreachable!("the keyword index holds value and malformed cards only");
-            };
-            let previous = mem::replace(slot, value);
-            if let Err(error) = self.cards[i].validate() {
-                let Card::Value { value: slot, .. } = &mut self.cards[i] else {
-                    unreachable!("the card was a value card a moment ago");
-                };
-                *slot = previous;
-                return Err(error);
-            }
-        } else {
-            let card = Card::Value {
-                keyword,
-                value,
-                comment: None,
-            };
-            card.validate()?;
-            self.index.insert(keyword, self.cards.len());
-            self.cards.push(card);
-        }
+        let record = Record::Valued {
+            keyword,
+            value: value.into(),
+            comment: None,
+        };
+        let Some(&i) = self.index.get(&keyword) else {
+            card::validate(&record)?;
+            self.push_record(record);
+            return Ok(self);
+        };
+        let Record::Valued { value, .. } = record else {
+            unreachable!("built as a valued record above");
+        };
+        self.replace_value(i, value)?;
         Ok(self)
+    }
+
+    /// Give the indexed record at `i` the `value`: a valued or `HIERARCH` record keeps
+    /// its comment, and a malformed one is replaced in its place by a record of its name.
+    /// An error leaves the record as it was.
+    fn replace_value(&mut self, i: usize, value: Value) -> Result<()> {
+        let replacement = match &self.records[i] {
+            Record::Valued {
+                keyword, comment, ..
+            } => Record::Valued {
+                keyword: *keyword,
+                value,
+                comment: comment.clone(),
+            },
+            Record::Hierarch { name, comment, .. } => Record::Hierarch {
+                name: name.clone(),
+                value,
+                comment: comment.clone(),
+            },
+            Record::Malformed {
+                name: Some(RecordName::Keyword(keyword)),
+                ..
+            } => Record::Valued {
+                keyword: *keyword,
+                value,
+                comment: None,
+            },
+            Record::Malformed {
+                name: Some(RecordName::Hierarch(name)),
+                ..
+            } => Record::Hierarch {
+                name: name.clone(),
+                value,
+                comment: None,
+            },
+            Record::Commentary { .. } | Record::Malformed { .. } => {
+                unreachable!("the indexes hold valued, HIERARCH and named malformed records")
+            }
+        };
+        card::validate(&replacement)?;
+        self.records[i] = replacement;
+        Ok(())
     }
 
     /// [`Header::set`] for `Some`; for `None`, remove every record with this keyword,
@@ -568,7 +504,7 @@ impl Header {
         keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
         value: impl Into<Value>,
     ) -> Result<&mut Self> {
-        self.insert(self.cards.len(), keyword, value)
+        self.insert(self.records.len(), keyword, value)
     }
 
     /// Insert a valued card at a logical record position. Unlike [`Header::set`],
@@ -581,9 +517,9 @@ impl Header {
     ) -> Result<&mut Self> {
         let keyword = checked(keyword)?;
         validate_valued_keyword(keyword)?;
-        self.insert_card(
+        self.insert_record(
             index,
-            Card::Value {
+            Record::Valued {
                 keyword,
                 value: value.into(),
                 comment: None,
@@ -591,17 +527,24 @@ impl Header {
         )
     }
 
-    fn insert_card(&mut self, index: usize, card: Card) -> Result<&mut Self> {
-        if index > self.cards.len() {
+    /// Insert `record` at the logical position `index`: the inverse of
+    /// [`Header::remove_at`]. A malformed record goes in as it is, as a parse keeps one;
+    /// any other must render.
+    pub fn insert_record(&mut self, index: usize, record: Record) -> Result<&mut Self> {
+        if index > self.records.len() {
             return Err(FitsError::IndexOutOfBounds {
                 indexed: Indexed::HeaderRecord,
                 index,
-                len: self.cards.len(),
+                len: self.records.len(),
             });
         }
-        card.validate()?;
-        self.cards.insert(index, card);
-        self.reindex();
+        if let Record::Valued { keyword, .. } = &record {
+            validate_valued_keyword(*keyword)?;
+        }
+        if !matches!(record, Record::Malformed { .. }) {
+            card::validate(&record)?;
+        }
+        self.insert_at(index, record);
         Ok(self)
     }
 
@@ -618,88 +561,57 @@ impl Header {
 
     /// Remove one logical record by zero-based position.
     pub fn remove_at(&mut self, index: usize) -> Result<Record> {
-        if index >= self.cards.len() {
+        if index >= self.records.len() {
             return Err(FitsError::IndexOutOfBounds {
                 indexed: Indexed::HeaderRecord,
                 index,
-                len: self.cards.len(),
+                len: self.records.len(),
             });
         }
-        let card = self.cards.remove(index);
-        self.reindex();
-        Ok(match card {
-            Card::Value {
-                keyword,
-                value,
-                comment,
-            } => Record::Valued {
-                keyword,
-                value,
-                comment,
-            },
-            Card::Commentary { keyword, text } => Record::Commentary {
-                name: keyword,
-                text,
-            },
-            Card::Hierarch {
-                name,
-                value,
-                comment,
-            } => Record::Hierarch {
-                name,
-                value,
-                comment,
-            },
-            Card::Malformed {
-                raw,
-                keyword,
-                defect,
-            } => Record::Malformed {
-                keyword,
-                raw: *raw,
-                defect,
-            },
-        })
+        Ok(self.take_at(index))
     }
 
     /// Remove every logical record with `keyword`, returning the count removed.
-    ///
-    /// Each call that removes anything rebuilds the keyword index, so dropping
-    /// several keywords is one pass' worth of work per call.
     pub fn remove_all(
         &mut self,
         keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
     ) -> Result<usize> {
         let keyword = checked(keyword)?;
-        let old_len = self.cards.len();
-        self.remove_where(|card| card == keyword.as_str());
-        Ok(old_len - self.cards.len())
+        let old_len = self.records.len();
+        self.records.retain(|record| !record.is_named(keyword));
+        if self.records.len() != old_len {
+            self.reindex();
+        }
+        Ok(old_len - self.records.len())
     }
 
+    /// Append the records of `source` that are named by no keyword, and those whose
+    /// keyword `keep` keeps.
     pub(crate) fn append_filtered_from(
         &mut self,
         source: &Self,
-        mut keep: impl FnMut(&str) -> bool,
+        mut keep: impl FnMut(Keyword) -> bool,
     ) {
-        self.cards.extend(
+        self.records.extend(
             source
-                .cards
+                .records
                 .iter()
-                .filter(|card| keep(card.keyword()))
+                .filter(|record| record.keyword().is_none_or(&mut keep))
                 .cloned(),
         );
         self.reindex();
     }
 
-    /// Remove all cards matching `should_remove`, then rebuild the keyword index
-    /// once after the bulk structural edit.
+    /// Remove the records whose keyword `should_remove` names, then rebuild the indexes
+    /// once after the bulk edit. A record named by no keyword stays.
     pub(crate) fn remove_where(
         &mut self,
-        mut should_remove: impl FnMut(&str) -> bool,
+        mut should_remove: impl FnMut(Keyword) -> bool,
     ) -> &mut Self {
-        let old_len = self.cards.len();
-        self.cards.retain(|card| !should_remove(card.keyword()));
-        if self.cards.len() != old_len {
+        let old_len = self.records.len();
+        self.records
+            .retain(|record| !record.keyword().is_some_and(&mut should_remove));
+        if self.records.len() != old_len {
             self.reindex();
         }
         self
@@ -710,8 +622,8 @@ impl Header {
     #[cfg(feature = "compression")]
     pub(crate) fn rename_keywords(&mut self, renames: &[(Keyword, Keyword)]) {
         let mut changed = false;
-        for card in &mut self.cards {
-            let Card::Value { keyword, .. } = card else {
+        for record in &mut self.records {
+            let Record::Valued { keyword, .. } = record else {
                 continue;
             };
             if let Some(&(_, to)) = renames.iter().find(|(from, _)| keyword == from) {
@@ -724,39 +636,133 @@ impl Header {
         }
     }
 
-    /// Rebuild the keyword → first-card index after a structural edit.
+    /// Append `record`, indexing it where it is the first of its name.
+    fn push_record(&mut self, record: Record) {
+        self.insert_at(self.records.len(), record);
+    }
+
+    /// Insert `record` at `i`, shifting the indexed positions after it, and index it
+    /// where it is now the first of its name.
+    fn insert_at(&mut self, i: usize, record: Record) {
+        if i < self.records.len() {
+            for position in self
+                .index
+                .values_mut()
+                .chain(self.hierarch_index.values_mut())
+            {
+                if *position >= i {
+                    *position += 1;
+                }
+            }
+        }
+        if let Some(keyword) = record.keyword() {
+            let first = self.index.entry(keyword).or_insert(i);
+            *first = (*first).min(i);
+        }
+        if let Some(name) = record.hierarch_name() {
+            match self.hierarch_index.get_mut(name) {
+                Some(first) => *first = (*first).min(i),
+                None => {
+                    self.hierarch_index.insert(name.clone(), i);
+                }
+            }
+        }
+        self.records.insert(i, record);
+    }
+
+    /// Remove the record at `i`, shifting the indexed positions after it, and index the
+    /// next record of its name where it was the first.
+    fn take_at(&mut self, i: usize) -> Record {
+        let record = self.records.remove(i);
+        for position in self
+            .index
+            .values_mut()
+            .chain(self.hierarch_index.values_mut())
+        {
+            if *position > i {
+                *position -= 1;
+            }
+        }
+        if let Some(keyword) = record.keyword()
+            && self.index.get(&keyword) == Some(&i)
+        {
+            match self.records[i..]
+                .iter()
+                .position(|next| next.keyword() == Some(keyword))
+            {
+                Some(offset) => {
+                    self.index.insert(keyword, i + offset);
+                }
+                None => {
+                    self.index.remove(&keyword);
+                }
+            }
+        }
+        if let Some(name) = record.hierarch_name()
+            && self.hierarch_index.get(name) == Some(&i)
+        {
+            match self.records[i..]
+                .iter()
+                .position(|next| next.hierarch_name() == Some(name))
+            {
+                Some(offset) => {
+                    self.hierarch_index.insert(name.clone(), i + offset);
+                }
+                None => {
+                    self.hierarch_index.remove(name);
+                }
+            }
+        }
+        record
+    }
+
+    /// Rebuild both indexes after a bulk edit.
     fn reindex(&mut self) {
         self.index.clear();
         self.hierarch_index.clear();
-        for (i, card) in self.cards.iter().enumerate() {
-            if let Some(keyword) = card.indexed_keyword() {
+        for (i, record) in self.records.iter().enumerate() {
+            if let Some(keyword) = record.keyword() {
                 self.index.entry(keyword).or_insert(i);
             }
-            if let Card::Hierarch { name, .. } = card {
-                self.hierarch_index.entry(name.clone()).or_insert(i);
+            if let Some(name) = record.hierarch_name()
+                && !self.hierarch_index.contains_key(name)
+            {
+                self.hierarch_index.insert(name.clone(), i);
             }
         }
     }
 
     /// The value of the first `HIERARCH` record with `name`, compared without regard to
-    /// ASCII case.
+    /// ASCII case; [`FitsError::InvalidValue`] when that record is malformed.
     pub fn get_hierarch(
         &self,
         name: impl TryInto<HierarchName, Error: Into<FitsError>>,
     ) -> Result<Option<&Value>> {
         let name = name.try_into().map_err(Into::into)?;
-        Ok(self
-            .hierarch_index
+        self.hierarch_index
             .get(&name)
-            .map(|&i| match &self.cards[i] {
-                Card::Hierarch { value, .. } => value,
-                _ => unreachable!("the HIERARCH index holds HIERARCH cards only"),
-            }))
+            .map(|&i| self.records[i].value_or_defect())
+            .transpose()
     }
 
-    /// Set the value of the first `HIERARCH` record with `name`, or append one. Text
-    /// must use restricted ASCII, and a long one continues on `CONTINUE` records. An
-    /// error leaves the header unchanged.
+    /// The inline comment of the first `HIERARCH` record with `name`, as
+    /// [`Header::get_comment`] reads a keyword's.
+    pub fn get_hierarch_comment(
+        &self,
+        name: impl TryInto<HierarchName, Error: Into<FitsError>>,
+    ) -> Result<Option<&str>> {
+        let name = name.try_into().map_err(Into::into)?;
+        let Some(&i) = self.hierarch_index.get(&name) else {
+            return Ok(None);
+        };
+        self.records[i].value_or_defect()?;
+        Ok(self.records[i].comment())
+    }
+
+    /// Set the value of the first `HIERARCH` record with `name`, or append one; a
+    /// malformed record of the name is replaced in its place. Text must use restricted
+    /// ASCII, and a long one continues on `CONTINUE` records. An error leaves the header
+    /// unchanged.
     pub fn set_hierarch(
         &mut self,
         name: impl TryInto<HierarchName, Error: Into<FitsError>>,
@@ -765,28 +771,30 @@ impl Header {
         let name = name.try_into().map_err(Into::into)?;
         let value = value.into();
         if let Some(&i) = self.hierarch_index.get(&name) {
-            let Card::Hierarch { value: slot, .. } = &mut self.cards[i] else {
-                unreachable!("the HIERARCH index holds HIERARCH cards only");
-            };
-            let previous = mem::replace(slot, value);
-            if let Err(error) = self.cards[i].validate() {
-                let Card::Hierarch { value: slot, .. } = &mut self.cards[i] else {
-                    unreachable!("the card was a HIERARCH card a moment ago");
-                };
-                *slot = previous;
-                return Err(error);
-            }
+            self.replace_value(i, value)?;
         } else {
-            let card = Card::Hierarch {
-                name: name.clone(),
+            let record = Record::Hierarch {
+                name,
                 value,
                 comment: None,
             };
-            card.validate()?;
-            self.hierarch_index.insert(name, self.cards.len());
-            self.cards.push(card);
+            card::validate(&record)?;
+            self.push_record(record);
         }
         Ok(self)
+    }
+
+    /// Remove the first `HIERARCH` record with `name`, malformed or not.
+    pub fn remove_hierarch(
+        &mut self,
+        name: impl TryInto<HierarchName, Error: Into<FitsError>>,
+    ) -> Result<Option<Record>> {
+        let name = name.try_into().map_err(Into::into)?;
+        Ok(self
+            .hierarch_index
+            .get(&name)
+            .copied()
+            .map(|i| self.take_at(i)))
     }
 
     /// Attach (or replace) the inline comment of an existing valued keyword. Errors
@@ -798,22 +806,21 @@ impl Header {
         text: &str,
     ) -> Result<&mut Self> {
         let keyword = checked(keyword)?;
-        validate_ascii(text, "header comment")?;
+        validate_ascii(text, || TextOrigin::Comment(RecordName::Keyword(keyword)))?;
         let Some(&i) = self.index.get(&keyword) else {
             return Err(FitsError::MissingKeyword { keyword });
         };
-        self.cards[i].value_or_defect()?;
-        let Card::Value { comment, .. } = &mut self.cards[i] else {
-            unreachable!("the keyword index holds value and malformed cards only");
+        let Record::Valued { value, .. } = &self.records[i] else {
+            self.records[i].value_or_defect()?;
+            unreachable!("the keyword index holds valued and malformed records only");
         };
-        let previous = comment.replace(text.to_string());
-        if let Err(error) = self.cards[i].validate() {
-            let Card::Value { comment, .. } = &mut self.cards[i] else {
-                unreachable!("the card was a value card a moment ago");
-            };
-            *comment = previous;
-            return Err(error);
-        }
+        let record = Record::Valued {
+            keyword,
+            value: value.clone(),
+            comment: Some(text.to_string()),
+        };
+        card::validate(&record)?;
+        self.records[i] = record;
         Ok(self)
     }
 
@@ -830,28 +837,180 @@ impl Header {
     /// Append one restricted-ASCII `COMMENT` record. Text that cannot fit the
     /// record returns an error without changing the header.
     pub fn push_comment(&mut self, text: &str) -> Result<&mut Self> {
-        let card = Card::commentary("COMMENT", text);
-        card.validate()?;
-        self.cards.push(card);
-        Ok(self)
+        self.push_commentary(CommentaryName::COMMENT, text)
     }
 
     /// Append one restricted-ASCII `HISTORY` record. Text that cannot fit the
     /// record returns an error without changing the header.
     pub fn push_history(&mut self, text: &str) -> Result<&mut Self> {
-        let card = Card::commentary("HISTORY", text);
-        card.validate()?;
-        self.cards.push(card);
-        Ok(self)
+        self.push_commentary(CommentaryName::HISTORY, text)
     }
 
     /// Append a blank-keyword commentary record. `text = ""` produces a physically
     /// blank card; nonempty text uses the same restricted-ASCII rules.
     pub fn push_blank(&mut self, text: &str) -> Result<&mut Self> {
-        let card = Card::commentary("", text);
-        card.validate()?;
-        self.cards.push(card);
+        self.push_commentary(CommentaryName::BLANK, text)
+    }
+
+    fn push_commentary(&mut self, name: CommentaryName, text: &str) -> Result<&mut Self> {
+        let record = Record::commentary(name, text);
+        card::validate(&record)?;
+        self.records.push(record);
         Ok(self)
+    }
+
+    /// Serialize this header unit into `out`, cleared first: every record rendered to 80
+    /// bytes, blank records to fill `space`, the `END` record, then blank fill to the next
+    /// 2880-byte boundary. The blank records are space a later edit can fill in place, as
+    /// cfitsio's `ffhdef` reserves it. `signing` sets `DATASUM` and `CHECKSUM` in their
+    /// place, or after the records when the header has none, without changing `self`.
+    pub(crate) fn render_into(
+        &self,
+        signing: Signing,
+        space: Space,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        out.clear();
+        let checksum_at = self.render_records(signing, out)?;
+        let records = out.len() / CARD_SIZE;
+        let spare = match space {
+            Space::Spare(spare) => spare,
+            Space::Blocks(blocks) => {
+                let needed = (records + 1).div_ceil(RECORDS_PER_BLOCK);
+                if needed > blocks {
+                    return Err(FitsError::HeaderDoesNotFit {
+                        needed,
+                        available: blocks,
+                    });
+                }
+                blocks * RECORDS_PER_BLOCK - records - 1
+            }
+        };
+        let len = records
+            .checked_add(spare)
+            .and_then(|records| records.checked_add(1))
+            .and_then(|records| records.checked_mul(CARD_SIZE))
+            .ok_or(FitsError::DataUnitOverflow)?;
+        out.reserve(len.next_multiple_of(BLOCK_SIZE) - out.len());
+        out.resize(out.len() + spare * CARD_SIZE, b' ');
+        let mut end = [b' '; CARD_SIZE];
+        end[..3].copy_from_slice(b"END");
+        out.extend_from_slice(&end);
+        out.resize(out.len().next_multiple_of(BLOCK_SIZE), b' ');
+        if let (Signing::WithDataSum(data_sum), Some(at)) = (signing, checksum_at) {
+            let hdu_sum = checksum::combine(checksum::accumulate(out, 0), data_sum);
+            // The value of `CHECKSUM = '…'` sits in bytes 12–27 of its record.
+            out[at + 11..at + 27].copy_from_slice(&checksum::encode(hdu_sum));
+        }
+        Ok(())
+    }
+
+    /// The records a render of this header writes before its free records and `END`,
+    /// unsigned: a long string takes one record for each `CONTINUE` part.
+    pub(crate) fn rendered_records(&self) -> Result<usize> {
+        let mut out = Vec::new();
+        self.render_records(Signing::Unsigned, &mut out)?;
+        Ok(out.len() / CARD_SIZE)
+    }
+
+    /// Append every record rendered with `signing` to `out`; the offset of the `CHECKSUM`
+    /// record when `signing` signs.
+    fn render_records(&self, signing: Signing, out: &mut Vec<u8>) -> Result<Option<usize>> {
+        let signed = |keyword| match signing {
+            Signing::Unsigned => None,
+            Signing::Placeholder => Some(if keyword == keywords::DATASUM {
+                "0".to_string()
+            } else {
+                checksum::PLACEHOLDER.to_string()
+            }),
+            Signing::WithDataSum(sum) => Some(if keyword == keywords::DATASUM {
+                sum.to_string()
+            } else {
+                checksum::PLACEHOLDER.to_string()
+            }),
+        };
+        let mut checksum_at = None;
+        let mut render_signed =
+            |keyword: Keyword, comment: Option<&str>, out: &mut Vec<u8>| -> Result<()> {
+                let value = signed(keyword).expect("only a signed render signs");
+                if keyword == keywords::CHECKSUM {
+                    checksum_at = Some(out.len());
+                }
+                card::render_into(
+                    &Record::Valued {
+                        keyword,
+                        value: Value::Text(value),
+                        comment: comment.map(str::to_string),
+                    },
+                    out,
+                )
+            };
+        let signs = signing != Signing::Unsigned;
+        let datasum = self.index.get(&keywords::DATASUM).copied();
+        let checksum = self.index.get(&keywords::CHECKSUM).copied();
+        for (i, record) in self.records.iter().enumerate() {
+            match record.keyword() {
+                Some(keyword @ (keywords::DATASUM | keywords::CHECKSUM))
+                    if signs && [datasum, checksum].contains(&Some(i)) =>
+                {
+                    render_signed(keyword, record.comment(), out)?;
+                }
+                _ => card::render_into(record, out)?,
+            }
+        }
+        if signs {
+            for (keyword, at) in [(keywords::DATASUM, datasum), (keywords::CHECKSUM, checksum)] {
+                if at.is_none() {
+                    render_signed(keyword, None, out)?;
+                }
+            }
+        }
+        Ok(checksum_at)
+    }
+}
+
+/// How a rendered header carries its checksums (Appendix J).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Signing {
+    /// As the records hold them, or not at all.
+    Unsigned,
+    /// `DATASUM = '0'` and a placeholder `CHECKSUM`: the records a stream writes before
+    /// its data, the size of the signed header that replaces them.
+    Placeholder,
+    /// `DATASUM` is the data's sum, and `CHECKSUM` makes the HDU sum to negative zero.
+    WithDataSum(u32),
+}
+
+/// The blank records a rendered header holds before `END`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Space {
+    /// This many.
+    Spare(usize),
+    /// As many as fill exactly this many blocks; `HeaderDoesNotFit` when the records
+    /// need more.
+    Blocks(usize),
+}
+
+/// Two headers are equal when they hold the same records in the same order; the
+/// repairs that a parse reports are not content.
+impl PartialEq for Header {
+    fn eq(&self, other: &Self) -> bool {
+        self.records == other.records
+    }
+}
+
+/// Every record of `iter`, appended as [`Header::insert_record`] appends one.
+///
+/// # Panics
+/// When a record is not malformed and does not render: an invalid value or name, which
+/// a record taken from a header never has.
+impl Extend<Record> for Header {
+    fn extend<I: IntoIterator<Item = Record>>(&mut self, iter: I) {
+        for record in iter {
+            let len = self.records.len();
+            self.insert_record(len, record)
+                .expect("an appended record renders");
+        }
     }
 }
 
@@ -872,53 +1031,39 @@ impl<'a> IntoIterator for &'a Header {
 /// The records of a [`Header`], in order, as [`RecordView`] views.
 #[derive(Debug, Clone)]
 pub struct Iter<'a> {
-    cards: slice::Iter<'a, Card>,
+    records: slice::Iter<'a, Record>,
 }
 
 impl<'a> Iterator for Iter<'a> {
     type Item = RecordView<'a>;
 
     fn next(&mut self) -> Option<RecordView<'a>> {
-        self.cards.next().map(RecordView::of)
+        self.records.next().map(Record::view)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.cards.size_hint()
+        self.records.size_hint()
     }
 }
 
 impl ExactSizeIterator for Iter<'_> {}
 
-/// A `CONTINUE` record with no value card to extend, as the commentary record its
-/// bytes 9–80 spell.
-fn demoted_continuation(substring: &str, comment: Option<&str>) -> Card {
-    let mut text = format!("  '{}'", substring.replace('\'', "''"));
-    if let Some(comment) = comment {
-        text.push_str(" / ");
-        text.push_str(comment);
-    }
-    Card::Commentary {
-        keyword: "CONTINUE".to_string(),
-        text: Some(text),
-    }
-}
-
 /// Fold a `CONTINUE` substring into the preceding long-string value card,
 /// returning `false` when the previous card is not a value awaiting continuation
 /// (i.e. a [`Value::Text`] whose text ends with the `&` continuation flag).
-fn fold_continuation(cards: &mut [Card], substring: &str, fragment: Option<&str>) -> bool {
+fn fold_continuation(records: &mut [Record], substring: &str, fragment: Option<&str>) -> bool {
     let Some(
-        Card::Value {
+        Record::Valued {
             value: Value::Text(acc),
             comment,
             ..
         }
-        | Card::Hierarch {
+        | Record::Hierarch {
             value: Value::Text(acc),
             comment,
             ..
         },
-    ) = cards.last_mut()
+    ) = records.last_mut()
     else {
         return false;
     };
@@ -939,33 +1084,6 @@ fn fold_continuation(cards: &mut [Card], substring: &str, fragment: Option<&str>
         }
     }
     true
-}
-
-/// Card builders for the tests of every module that parses headers.
-#[cfg(test)]
-pub(crate) mod internals {
-    use crate::block::CARD_SIZE;
-    use crate::header_model::Header;
-
-    /// One record: `text` left-justified in 80 blank-filled columns.
-    pub(crate) fn card_bytes(text: &str) -> [u8; CARD_SIZE] {
-        assert!(text.len() <= CARD_SIZE, "{text:?} is longer than a card");
-        let mut card = [b' '; CARD_SIZE];
-        card[..text.len()].copy_from_slice(text.as_bytes());
-        card
-    }
-
-    /// The records of `lines`, in order.
-    pub(crate) fn records(lines: &[&str]) -> Vec<u8> {
-        lines.iter().flat_map(|line| card_bytes(line)).collect()
-    }
-
-    /// The header `lines` and an appended `END` record parse to.
-    pub(crate) fn from_card_lines(lines: &[&str]) -> Header {
-        let mut bytes = records(lines);
-        bytes.extend_from_slice(&card_bytes("END"));
-        Header::parse(&bytes).unwrap()
-    }
 }
 
 #[cfg(test)]

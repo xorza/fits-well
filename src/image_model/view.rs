@@ -2,15 +2,15 @@
 //! scaling it is read with.
 
 use crate::bitpix::Bitpix;
-use crate::endian::extend_be;
 use crate::error::Result;
 use crate::image_model::data::Data;
 use crate::image_model::physical_sample::PhysicalSample;
-use crate::image_model::sample_type::{SampleType, UnsignedKind};
+use crate::image_model::sample::Sample;
+use crate::image_model::sample::sealed::Raw;
+use crate::image_model::sample_type::SampleType;
 use crate::image_model::scaling::Scaling;
 use crate::image_model::unsigned_data::UnsignedData;
-use crate::image_model::{Image, Metadata, check_sample_count, extend_physical};
-use crate::image_model::{flip_i8, flip_u16, flip_u32, flip_u64};
+use crate::image_model::{Image, Metadata, check_sample_count};
 use std::ops::Range;
 
 /// A borrowed, host-endian view of FITS array samples, tagged by `BITPIX` — the
@@ -78,11 +78,11 @@ impl<'a> Borrowed<'a> {
 
     /// Append the physical-plane values to `out`: `BZERO + BSCALE × sample` for every
     /// sample (§3.4), integer samples equal to `BLANK` as `NaN`, float `NaN`/`Inf`
-    /// passed through. The arithmetic runs in `f64`; an `f32` buffer gets each value
-    /// correctly rounded. The unsigned-integer convention falls out for free — a
+    /// passed through. The arithmetic runs in `f64`, and an `f32` buffer narrows its
+    /// result, a second rounding. The unsigned-integer convention falls out for free — a
     /// signed-16 buffer with `BZERO = 32768` gives the `u16` value.
     pub fn physical_into<T: PhysicalSample>(&self, out: &mut Vec<T>) {
-        extend_physical(self.samples, &self.scaling, out);
+        self.samples.extend_physical(&self.scaling, out);
     }
 
     /// The samples as exact typed integers when the scaling is precisely a FITS
@@ -92,29 +92,13 @@ impl<'a> Borrowed<'a> {
     /// scaling or element type.
     pub fn unsigned(&self) -> Option<UnsignedData> {
         let kind = self.scaling.unsigned_kind(self.samples.bitpix())?;
-        // The kind is derived from these samples' own `BITPIX`, so the pairings below
-        // are the only reachable ones.
-        Some(match (self.samples, kind) {
-            (View::U8(v), UnsignedKind::I8) => {
-                UnsignedData::I8(v.iter().map(|&x| flip_i8(x)).collect())
-            }
-            (View::I16(v), UnsignedKind::U16) => {
-                UnsignedData::U16(v.iter().map(|&x| flip_u16(x)).collect())
-            }
-            (View::I32(v), UnsignedKind::U32) => {
-                UnsignedData::U32(v.iter().map(|&x| flip_u32(x)).collect())
-            }
-            (View::I64(v), UnsignedKind::U64) => {
-                UnsignedData::U64(v.iter().map(|&x| flip_u64(x)).collect())
-            }
-            _ => return None,
-        })
+        Some(UnsignedData::from_view(self.samples, kind))
     }
 
     /// The effective element type these samples represent, resolving the unsigned and
     /// signed-byte conventions from the stored `BITPIX` and the [`Scaling`].
     pub fn sample_type(&self) -> SampleType {
-        SampleType::from_scaling(self.samples.bitpix(), self.scaling)
+        self.metadata().sample_type()
     }
 
     /// The image, copied into owned storage.
@@ -171,66 +155,71 @@ impl<'a> View<'a> {
         }
     }
 
-    pub const fn as_u8(&self) -> Option<&'a [u8]> {
-        if let View::U8(values) = self {
-            Some(values)
-        } else {
-            None
-        }
+    pub fn as_u8(&self) -> Option<&'a [u8]> {
+        u8::of(*self)
     }
 
-    pub const fn as_i16(&self) -> Option<&'a [i16]> {
-        if let View::I16(values) = self {
-            Some(values)
-        } else {
-            None
-        }
+    pub fn as_i16(&self) -> Option<&'a [i16]> {
+        i16::of(*self)
     }
 
-    pub const fn as_i32(&self) -> Option<&'a [i32]> {
-        if let View::I32(values) = self {
-            Some(values)
-        } else {
-            None
-        }
+    pub fn as_i32(&self) -> Option<&'a [i32]> {
+        i32::of(*self)
     }
 
-    pub const fn as_i64(&self) -> Option<&'a [i64]> {
-        if let View::I64(values) = self {
-            Some(values)
-        } else {
-            None
-        }
+    pub fn as_i64(&self) -> Option<&'a [i64]> {
+        i64::of(*self)
     }
 
-    pub const fn as_f32(&self) -> Option<&'a [f32]> {
-        if let View::F32(values) = self {
-            Some(values)
-        } else {
-            None
-        }
+    pub fn as_f32(&self) -> Option<&'a [f32]> {
+        f32::of(*self)
     }
 
-    pub const fn as_f64(&self) -> Option<&'a [f64]> {
-        if let View::F64(values) = self {
-            Some(values)
-        } else {
-            None
-        }
+    pub fn as_f64(&self) -> Option<&'a [f64]> {
+        f64::of(*self)
     }
 
-    /// Append the samples to `out` in big-endian order — the inverse of
-    /// [`Data::decode`]. This is the unpadded data unit; the writer pads it to the
+    /// Append the samples to `out` in big-endian order — the inverse of a read's
+    /// decode. This is the unpadded data unit; the writer pads it to the
     /// 2880-byte block grid. Appends (never clears), so a writer reusing one buffer
     /// across HDUs clears it first and pays no per-image staging allocation.
     pub(crate) fn encode_into(&self, out: &mut Vec<u8>) {
         match self {
             View::U8(v) => out.extend_from_slice(v),
-            View::I16(v) => extend_be(out, v, i16::to_be_bytes),
-            View::I32(v) => extend_be(out, v, i32::to_be_bytes),
-            View::I64(v) => extend_be(out, v, i64::to_be_bytes),
-            View::F32(v) => extend_be(out, v, f32::to_be_bytes),
-            View::F64(v) => extend_be(out, v, f64::to_be_bytes),
+            View::I16(v) => i16::extend_be(v, out),
+            View::I32(v) => i32::extend_be(v, out),
+            View::I64(v) => i64::extend_be(v, out),
+            View::F32(v) => f32::extend_be(v, out),
+            View::F64(v) => f64::extend_be(v, out),
+        }
+    }
+
+    /// Append the physical plane of these samples to `out`, as
+    /// [`Scaling::extend_physical`] gives it. The `BITPIX` match runs once for the
+    /// whole view, so a caller wanting a sub-range slices the view, not the loop.
+    pub(crate) fn extend_physical<O: PhysicalSample>(self, scaling: &Scaling, out: &mut Vec<O>) {
+        match self {
+            View::U8(v) => scaling.extend_physical(v, out),
+            View::I16(v) => scaling.extend_physical(v, out),
+            View::I32(v) => scaling.extend_physical(v, out),
+            View::I64(v) => scaling.extend_physical(v, out),
+            View::F32(v) => scaling.extend_physical(v, out),
+            View::F64(v) => scaling.extend_physical(v, out),
+        }
+    }
+
+    /// The sample at `index` as an `f64`.
+    ///
+    /// # Panics
+    /// When `index` is past the view.
+    pub(crate) fn get_f64(self, index: usize) -> f64 {
+        match self {
+            View::U8(v) => v[index].to_f64(),
+            View::I16(v) => v[index].to_f64(),
+            View::I32(v) => v[index].to_f64(),
+            View::I64(v) => v[index].to_f64(),
+            View::F32(v) => v[index].to_f64(),
+            View::F64(v) => v[index].to_f64(),
         }
     }
 
@@ -243,6 +232,22 @@ impl<'a> View<'a> {
             View::I64(values) => Data::I64(values.to_vec()),
             View::F32(values) => Data::F32(values.to_vec()),
             View::F64(values) => Data::F64(values.to_vec()),
+        }
+    }
+}
+
+#[cfg(feature = "internals")]
+pub(crate) mod internals {
+    use crate::image_model::physical_sample::PhysicalSample;
+    use crate::image_model::scaling::Scaling;
+    use crate::image_model::view::View;
+
+    impl View<'_> {
+        /// [`View::extend_physical`] into a new `Vec`.
+        pub(crate) fn physical<O: PhysicalSample>(self, scaling: &Scaling) -> Vec<O> {
+            let mut out = Vec::new();
+            self.extend_physical(scaling, &mut out);
+            out
         }
     }
 }

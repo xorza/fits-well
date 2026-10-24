@@ -1,7 +1,7 @@
 use std::fmt;
 
-use crate::error::FitsError;
 use crate::error::Result;
+use crate::error::{FitsError, NumericTarget};
 
 /// A signed decimal FITS integer (§4.2.3).
 ///
@@ -53,13 +53,14 @@ impl FitsInteger {
                 .parse::<f64>()
                 .ok()
                 .filter(|value| value.is_finite())
-                .ok_or_else(|| self.out_of_range("f64"))?,
+                .ok_or_else(|| self.out_of_range(NumericTarget::F64))?,
         };
         Ok(value)
     }
 
-    fn out_of_range(&self, target: &'static str) -> FitsError {
+    fn out_of_range(&self, target: NumericTarget) -> FitsError {
         FitsError::IntegerOutOfRange {
+            keyword: None,
             value: self.to_string(),
             target,
         }
@@ -83,7 +84,7 @@ impl TryFrom<&FitsInteger> for i64 {
             IntegerRepr::I64(value) => Ok(*value),
             IntegerRepr::Decimal(decimal) => decimal
                 .parse::<Self>()
-                .map_err(|_| value.out_of_range("i64")),
+                .map_err(|_| value.out_of_range(NumericTarget::I64)),
         }
     }
 }
@@ -205,8 +206,9 @@ impl Value {
                     Ok(Some(*r as i64))
                 } else {
                     Err(FitsError::IntegerOutOfRange {
+                        keyword: None,
                         value: r.to_string(),
-                        target: "i64",
+                        target: NumericTarget::I64,
                     })
                 }
             }
@@ -276,14 +278,21 @@ impl From<f32> for Value {
     }
 }
 
+/// A text value as a record holds it (§4.2.1.1): trailing blanks are not significant,
+/// but a string of blanks keeps one, which tells it from the null string.
 impl From<&str> for Value {
     fn from(s: &str) -> Self {
-        Self::Text(s.to_string())
+        Self::from(s.to_string())
     }
 }
 
 impl From<String> for Value {
-    fn from(s: String) -> Self {
+    fn from(mut s: String) -> Self {
+        let blank = !s.is_empty();
+        s.truncate(s.trim_end_matches(' ').len());
+        if s.is_empty() && blank {
+            s.push(' ');
+        }
         Self::Text(s)
     }
 }
@@ -326,6 +335,10 @@ mod tests {
         assert_eq!(Value::from(1.5_f64), Value::Real(1.5));
         assert_eq!(Value::from("hi"), Value::Text("hi".into()));
         assert_eq!(Value::from(String::from("hi")), Value::Text("hi".into()));
+        // Trailing blanks go; leading ones stay, and a string of blanks keeps one.
+        for (text, held) in [("hi  ", "hi"), ("  hi ", "  hi"), ("   ", " "), ("", "")] {
+            assert_eq!(Value::from(text), Value::Text(held.into()), "{text:?}");
+        }
     }
 
     #[test]
@@ -342,8 +355,8 @@ mod tests {
                 Some(expected) => assert_eq!(i64::try_from(&value).unwrap(), expected),
                 None => assert!(matches!(
                     i64::try_from(&value),
-                    Err(FitsError::IntegerOutOfRange { value, target })
-                        if value == decimal && target == "i64"
+                    Err(FitsError::IntegerOutOfRange { keyword: None, value, target })
+                        if value == decimal && target == NumericTarget::I64
                 )),
             }
         }
@@ -354,7 +367,10 @@ mod tests {
         );
         assert!(matches!(
             Value::Real(-(i64::MIN as f64)).as_integer(),
-            Err(FitsError::IntegerOutOfRange { target: "i64", .. })
+            Err(FitsError::IntegerOutOfRange {
+                target: NumericTarget::I64,
+                ..
+            })
         ));
     }
 }

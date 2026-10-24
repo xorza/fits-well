@@ -3,15 +3,14 @@
 use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::error::{WcsConflict, WcsDefect};
 use crate::header_model::Header;
-use crate::header_model::RecordView;
+use crate::header_model::record::RecordView;
 use crate::keyword::Keyword;
-use crate::world_coordinates::D2R;
-use crate::world_coordinates::axis::Axis;
+use crate::world_coordinates::angle::D2R;
 use crate::world_coordinates::distortion::sip::Sip;
-use crate::world_coordinates::first_real;
+use crate::world_coordinates::header_read;
 use crate::world_coordinates::projected_celestial_axes::ProjectedCelestialAxes;
-use crate::world_coordinates::read_value;
 
 /// The matrix `A` mapping `(pixel − CRPIX)` to intermediate world coordinates, held
 /// beside its LU factors, which solve the inverse direction in place. Both are row-major
@@ -21,6 +20,8 @@ pub(super) struct LinearTransform {
     matrix: Vec<f64>,
     factors: LuFactors,
     naxis: usize,
+    /// `CRPIXi`, the 1-based reference pixel.
+    crpix: Vec<f64>,
     /// SIP, a prior distortion of the offsets of the first two pixel axes.
     sip: Option<Sip>,
 }
@@ -98,7 +99,7 @@ fn matrix_cells(header: &Header, root: &str, alt: Alternate, naxis: usize) -> Ve
                 .strip_suffix(alt.as_str())?;
             let (row, column) = rest.split_once('_')?;
             Some(MatrixCell {
-                keyword: *keyword,
+                keyword,
                 row: index(row)?,
                 column: index(column)?,
             })
@@ -129,16 +130,17 @@ impl LinearMatrix {
         let pc = matrix_cells(header, "PC", alt, naxis);
         let has_cd = !cd.is_empty();
         let has_pc = !pc.is_empty();
-        let has_crota = (1..=naxis)
-            .any(|i| read_value(header, Keyword::fitting(format_args!("CROTA{i}{alt}"))).is_some());
+        let has_crota = (1..=naxis).any(|i| {
+            header_read::value(header, Keyword::fitting(format_args!("CROTA{i}{alt}"))).is_some()
+        });
         if has_cd && has_pc {
             return Err(FitsError::ConflictingWcsKeywords {
-                detail: "PC and CD conventions overlap",
+                conflict: WcsConflict::PcAndCd,
             });
         }
         if has_pc && has_crota {
             return Err(FitsError::ConflictingWcsKeywords {
-                detail: "PC and CROTA conventions overlap",
+                conflict: WcsConflict::PcAndCrota,
             });
         }
         let mut values = vec![0.0; naxis * naxis];
@@ -174,7 +176,7 @@ impl LinearMatrix {
         if !has_pc && let Some(axes) = celestial_axes {
             let lng = axes.longitude;
             let lat = axes.latitude;
-            let rho = first_real(
+            let rho = header_read::first_real(
                 header,
                 Keyword::fitting(format_args!("CROTA{}{alt}", lat + 1)),
                 Keyword::fitting(format_args!("CROTA{}{alt}", lng + 1)),
@@ -213,22 +215,24 @@ impl LinearMatrix {
     pub(super) fn scaled(
         mut self,
         axis_scales: &[f64],
+        crpix: Vec<f64>,
         sip: Option<Sip>,
     ) -> Result<LinearTransform> {
         debug_assert_eq!(axis_scales.len(), self.naxis);
+        debug_assert_eq!(crpix.len(), self.naxis);
         for (axis, &scale) in axis_scales.iter().enumerate() {
             for column in 0..self.naxis {
                 self.values[axis * self.naxis + column] *= scale;
             }
         }
-        let factors =
-            LuFactors::new(&self.values, self.naxis).ok_or_else(|| FitsError::InvalidWcs {
-                detail: "singular WCS transform matrix".to_string(),
-            })?;
+        let factors = LuFactors::new(&self.values, self.naxis).ok_or(FitsError::InvalidWcs {
+            defect: WcsDefect::SingularMatrix,
+        })?;
         Ok(LinearTransform {
             matrix: self.values,
             factors,
             naxis: self.naxis,
+            crpix,
             sip,
         })
     }
@@ -237,62 +241,68 @@ impl LinearMatrix {
 impl LinearTransform {
     /// Write the intermediate world coordinate of the complete 1-based `pixel`
     /// coordinate to `out`.
-    pub(super) fn intermediate(&self, pixel: &[f64], axes: &[Axis], out: &mut [f64]) {
+    pub(super) fn intermediate(&self, pixel: &[f64], out: &mut [f64]) {
         debug_assert_eq!(out.len(), self.naxis);
-        let distorted = self.distorted(pixel, axes);
-        for (row, value) in self.matrix.chunks_exact(self.naxis).zip(out) {
-            *value = offset_row(row, pixel, axes, distorted);
+        let offsets = self.offsets(pixel);
+        for (axis, value) in out.iter_mut().enumerate() {
+            *value = self.intermediate_axis(axis, pixel, offsets);
         }
     }
 
-    /// One axis's intermediate world coordinate, without evaluating the others.
-    pub(super) fn intermediate_axis(&self, axis: usize, pixel: &[f64], axes: &[Axis]) -> f64 {
+    /// One axis's intermediate world coordinate, without evaluating the others; `offsets`
+    /// are [`Self::offsets`] of `pixel`, so each point evaluates SIP once.
+    pub(super) fn intermediate_axis(&self, axis: usize, pixel: &[f64], offsets: Offsets) -> f64 {
         let row = &self.matrix[axis * self.naxis..(axis + 1) * self.naxis];
-        offset_row(row, pixel, axes, self.distorted(pixel, axes))
+        row.iter()
+            .zip(pixel)
+            .zip(&self.crpix)
+            .enumerate()
+            .map(|(column, ((&coefficient, &value), &crpix))| {
+                let offset = match offsets.distorted {
+                    Some(distorted) if column < 2 => distorted[column],
+                    _ => value - crpix,
+                };
+                coefficient * offset
+            })
+            .sum()
+    }
+
+    /// The SIP-distorted offsets of `pixel`'s first two axes from `CRPIX`, when SIP
+    /// applies.
+    pub(super) fn offsets(&self, pixel: &[f64]) -> Offsets {
+        Offsets {
+            distorted: self
+                .sip
+                .as_ref()
+                .map(|sip| sip.forward(pixel[0] - self.crpix[0], pixel[1] - self.crpix[1])),
+        }
     }
 
     pub(super) const fn sip(&self) -> Option<&Sip> {
         self.sip.as_ref()
     }
 
-    /// The SIP-distorted offsets of the first two pixel axes, when SIP applies.
-    fn distorted(&self, pixel: &[f64], axes: &[Axis]) -> Option<[f64; 2]> {
-        let sip = self.sip.as_ref()?;
-        Some(sip.forward(pixel[0] - axes[0].crpix, pixel[1] - axes[1].crpix))
-    }
-
     /// Replace the complete intermediate world coordinate in `coordinates` with its
     /// 1-based pixel coordinate, the inverse of [`LinearTransform::intermediate`].
     /// Errors when the SIP inverse does not converge.
-    pub(super) fn pixel(&self, coordinates: &mut [f64], axes: &[Axis]) -> Result<()> {
+    pub(super) fn pixel(&self, coordinates: &mut [f64]) -> Result<()> {
         self.factors.solve(coordinates);
         if let Some(sip) = &self.sip {
             let [u, v] = sip.inverse(coordinates[0], coordinates[1])?;
             coordinates[0] = u;
             coordinates[1] = v;
         }
-        for (value, axis) in coordinates.iter_mut().zip(axes) {
-            *value += axis.crpix;
+        for (value, crpix) in coordinates.iter_mut().zip(&self.crpix) {
+            *value += crpix;
         }
         Ok(())
     }
 }
 
-/// One matrix row applied to `(pixel − CRPIX)`, the first two offsets replaced by their
-/// SIP-`distorted` ones when SIP applies.
-fn offset_row(row: &[f64], pixel: &[f64], axes: &[Axis], distorted: Option<[f64; 2]>) -> f64 {
-    row.iter()
-        .zip(pixel)
-        .zip(axes)
-        .enumerate()
-        .map(|(axis_index, ((&coefficient, &value), axis))| {
-            let offset = match distorted {
-                Some(distorted) if axis_index < 2 => distorted[axis_index],
-                _ => value - axis.crpix,
-            };
-            coefficient * offset
-        })
-        .sum()
+/// What SIP makes of a pixel's offsets, from [`LinearTransform::offsets`].
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Offsets {
+    distorted: Option<[f64; 2]>,
 }
 
 impl LuFactors {

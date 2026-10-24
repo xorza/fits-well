@@ -1,24 +1,43 @@
 use crate::error::FitsError;
+use crate::error::WcsDefect;
 use crate::header_model::{Header, keywords};
+use crate::internals::tolerance::Tolerance;
+use crate::internals::wcs_header::{assert_round_trip, axis_header};
 use crate::world_coordinates::internals::{to_pixel, to_world};
 
 use crate::world_coordinates::Wcs;
-use crate::world_coordinates::axis_transform::SPEED_OF_LIGHT;
+use crate::world_coordinates::axis_transform::spectral_kind::SPEED_OF_LIGHT;
 use crate::world_coordinates::axis_transform::spectral_rest::SpectralRest;
-use crate::world_coordinates::internals::axis_header;
+
 use crate::world_coordinates::spectral_frame::SpectralFrame;
 use crate::world_coordinates::spectral_frame::SpectralReferenceFrame;
+
+/// The `VELO-F2V` velocity two pixels of 1000 m/s from a reference of 0 at RESTFRQ =
+/// 1420405751 Hz. The pixels give ν = ν₀ − 2000·ν₀/c = 1420396275.072817 Hz in f64,
+/// whose exact velocity c(ν₀² − ν²)/(ν₀² + ν²) is 2000.0066712779978 m/s; the difference
+/// of squares lost 1.2e-8 m/s of it. (ν₀ − ν)(ν₀ + ν) keeps it to the four roundings
+/// after the exact ν₀ − ν: two ulps of 2.3e-13 m/s.
+fn assert_f2v_at_two_pixels(velocity: f64) {
+    assert!(
+        (velocity - 2_000.006_671_277_997_8).abs() <= 2.0 * 2.3e-13,
+        "{velocity:?}"
+    );
+}
 
 #[test]
 fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     let velocity_axis = |ctype: &str| axis_header(ctype, "m/s", 1.0, 0.0, 1_000.0);
     assert!(matches!(
         Wcs::from_header(&velocity_axis("VELO-F2V"), None),
-        Err(FitsError::InvalidWcs { detail }) if detail.contains("RESTFRQ or RESTWAV")
+        Err(FitsError::InvalidWcs {
+            defect: WcsDefect::MissingRest
+        })
     ));
     assert!(matches!(
         Wcs::from_header(&velocity_axis("VRAD-W2F"), None),
-        Err(FitsError::InvalidWcs { detail }) if detail.contains("RESTFRQ or RESTWAV")
+        Err(FitsError::InvalidWcs {
+            defect: WcsDefect::MissingRest
+        })
     ));
 
     let no_rest = Wcs::from_header(&velocity_axis("VRAD-V2F"), None).unwrap();
@@ -27,7 +46,16 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         SPEED_OF_LIGHT * ((SPEED_OF_LIGHT - 2_000.0) / (SPEED_OF_LIGHT + 2_000.0)).sqrt();
     let expected = SPEED_OF_LIGHT * (1.0 - frequency / SPEED_OF_LIGHT);
     assert!((world - expected).abs() < 1e-8);
-    assert!((to_pixel(&no_rest, &[world]).unwrap()[0] - 3.0).abs() < 1e-10);
+    // A velocity is c times a ratio less 1, which rounds at c·ε, and a pixel is 1000 m/s.
+    assert_round_trip(
+        &no_rest,
+        &[[3.0]],
+        Tolerance::abs(
+            SPEED_OF_LIGHT * f64::EPSILON / 1_000.0,
+            "c·ε in pixels of 1000 m/s",
+        ),
+        "VRAD-V2F",
+    );
 
     let mut by_frequency = velocity_axis("VELO-F2V");
     by_frequency
@@ -64,18 +92,19 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
 
     let mut deprecated = velocity_axis("VELO-F2V");
     deprecated.set_internal(keywords::RESTFREQ, 1_420_405_751.0);
-    assert!(
-        (to_world(&Wcs::from_header(&deprecated, None).unwrap(), &[3.0]).unwrap()[0]
-            - 2_000.006_671_265_423_6)
-            .abs()
-            < 1e-9
+    assert_f2v_at_two_pixels(
+        to_world(&Wcs::from_header(&deprecated, None).unwrap(), &[3.0]).unwrap()[0],
     );
 
     let mut invalid = velocity_axis("VELO-F2V");
     invalid.set_internal(keywords::RESTFRQ, 0.0);
     assert!(matches!(
         Wcs::from_header(&invalid, None),
-        Err(FitsError::InvalidWcs { detail }) if detail.contains(keywords::RESTFRQ.as_str())
+        Err(FitsError::InvalidWcs {
+            defect: WcsDefect::RestValue {
+                keyword: keywords::RESTFRQ
+            }
+        })
     ));
 
     let mut pixel_list = Header::new();
@@ -97,9 +126,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         .set_internal("SPEC4", "SOURCE")
         .set_internal("SOBS4", "HELIOCEN");
     let pixel_list = Wcs::from_pixel_list(&pixel_list, &[2, 4], None).unwrap();
-    assert!(
-        (to_world(&pixel_list, &[3.0, 1.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9
-    );
+    assert_f2v_at_two_pixels(to_world(&pixel_list, &[3.0, 1.0]).unwrap()[0]);
     assert_eq!(
         pixel_list.metadata().axes[0].spectral_frame,
         Some(SpectralFrame {
@@ -135,7 +162,7 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
         .set_internal("SPEC5A", "LSRK")
         .set_internal("SOBS5A", "TOPOCENT");
     let vector = Wcs::from_array_column(&vector, 5, 'A').unwrap();
-    assert!((to_world(&vector, &[3.0]).unwrap()[0] - 2_000.006_671_265_423_6).abs() < 1e-9);
+    assert_f2v_at_two_pixels(to_world(&vector, &[3.0]).unwrap()[0]);
     assert_eq!(
         vector.metadata().axes[0].spectral_frame,
         Some(SpectralFrame {
@@ -172,7 +199,9 @@ fn spectral_rest_metadata_is_required_resolved_and_table_aware() {
     alternate.set_internal("SPECSYSA", "UNKNOWN");
     assert!(matches!(
         Wcs::from_header(&alternate, 'A'),
-        Err(FitsError::InvalidWcs { detail }) if detail.contains(keywords::SPECSYS.as_str())
+        Err(FitsError::InvalidWcs {
+            defect: WcsDefect::UnknownSpectralFrame { keyword: keywords::SPECSYS, value }
+        }) if value == "UNKNOWN"
     ));
 
     for (value, expected) in [

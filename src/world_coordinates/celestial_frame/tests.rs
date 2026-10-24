@@ -1,6 +1,8 @@
 use crate::error::FitsError;
+use crate::error::WcsDefect;
 use crate::header_model::{Header, keywords};
 
+use crate::internals::wcs_header::WcsHeader;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::celestial_frame::CelestialFrame;
 use crate::world_coordinates::celestial_frame::CelestialReferenceFrame;
@@ -8,11 +10,8 @@ use crate::world_coordinates::celestial_frame::CelestialReferenceFrame;
 #[test]
 fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
     let image = |equinox: Option<f64>, radesys: Option<&str>| {
-        let mut header = Header::new();
-        header
-            .set_internal(keywords::NAXIS, 2)
-            .set_internal("CTYPE1", "RA---TAN")
-            .set_internal("CTYPE2", "DEC--TAN");
+        let mut header =
+            WcsHeader::celestial("TAN", [1.0, 1.0], [0.0, 0.0], [1.0, 1.0]).image_header();
         if let Some(equinox) = equinox {
             header.set_internal(keywords::EQUINOX, equinox);
         }
@@ -141,11 +140,13 @@ fn celestial_frame_metadata_resolves_defaults_alternates_and_table_forms() {
 
     assert!(matches!(
         Wcs::from_header(&image(None, Some("J2000")), None),
-        Err(FitsError::InvalidWcs { detail }) if detail.contains(keywords::RADESYS.as_str())
+        Err(FitsError::InvalidWcs { defect: WcsDefect::UnknownCelestialFrame { value } }) if value == "J2000"
     ));
     assert!(matches!(
         Wcs::from_header(&image(Some(-1.0), None), None),
-        Err(FitsError::InvalidWcs { detail }) if detail.contains(keywords::EQUINOX.as_str())
+        Err(FitsError::InvalidWcs {
+            defect: WcsDefect::InvalidEquinox
+        })
     ));
     pixel_list.set_internal("RADE3A", "FK4");
     assert!(matches!(

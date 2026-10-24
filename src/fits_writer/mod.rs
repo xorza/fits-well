@@ -8,73 +8,34 @@
 //! escape hatch for callers supplying a complete header and already-encoded data
 //! unit themselves.
 
-use std::io::{Seek, Write};
+use std::io::{Seek, SeekFrom, Write};
+use std::mem;
 
+use crate::bitpix::Bitpix;
 use crate::block;
-use crate::block::{CARD_SIZE, SPACE_FILL, ZERO_FILL};
-use crate::checksum;
+use crate::block::{BLOCK_SIZE, SPACE_FILL, ZERO_FILL};
+use crate::checksum::running::Running;
 #[cfg(feature = "compression")]
-use crate::compress::CompressionConfig;
-use crate::error::{FitsError, Result};
+use crate::compress::encoded_unit::EncodedUnit;
+#[cfg(feature = "compression")]
+use crate::compress::{CompressionConfig, encode};
+use crate::error::{FitsError, Result, SizeUnit};
 use crate::fits_writer::ascii_builder::AsciiBuilder;
 use crate::fits_writer::builder::Builder;
 use crate::fits_writer::image_writer::ImageWriter;
+use crate::hdu::prologue::{Opening, Prologue};
 use crate::hdu::{HduKind, HduPosition, HduRole, data_extent};
-use crate::header_model::{Header, keywords};
+use crate::header_model::{Header, Signing, Space, keywords};
 use crate::image_model::Metadata;
-use crate::image_model::view::Borrowed;
+use crate::image_model::view::{Borrowed, View};
 use crate::reserved_keywords;
 
 pub(crate) mod ascii_builder;
 #[cfg(feature = "internals")]
 pub(crate) mod bench;
 pub(crate) mod builder;
+mod column_scaling;
 pub(crate) mod image_writer;
-
-/// 16-zero `CHECKSUM` value written before the real checksum is solved and
-/// patched in (Appendix J.1).
-const PLACEHOLDER_CHECKSUM: &str = "0000000000000000";
-
-/// Serialize a header unit into reusable storage: every card rendered to 80 bytes,
-/// `spare_records` blank records, the `END` record, then space padding to the next
-/// 2880-byte boundary. The blank records are space a later edit can fill in place,
-/// as cfitsio's `ffhdef` reserves it.
-pub(crate) fn render_header(
-    header: &Header,
-    spare_records: usize,
-    buf: &mut Vec<u8>,
-) -> Result<()> {
-    let min_len = header
-        .cards
-        .len()
-        .checked_add(spare_records)
-        .and_then(|records| records.checked_add(1))
-        .and_then(|records| records.checked_mul(CARD_SIZE))
-        .ok_or(FitsError::DataUnitOverflow)?;
-    buf.clear();
-    buf.reserve(min_len);
-    for card in &header.cards {
-        card.render_into(buf)?;
-    }
-    buf.resize(buf.len() + spare_records * CARD_SIZE, SPACE_FILL);
-    let mut end = [SPACE_FILL; CARD_SIZE];
-    end[..3].copy_from_slice(b"END");
-    buf.extend_from_slice(&end);
-    pad_to_block(buf, SPACE_FILL)
-}
-
-/// Round `buf` up to a whole number of 2880-byte blocks using `fill`.
-fn pad_to_block(buf: &mut Vec<u8>, fill: u8) -> Result<()> {
-    let padding = block::padding(buf.len());
-    if padding != 0 {
-        let padded = buf
-            .len()
-            .checked_add(padding)
-            .ok_or(FitsError::DataUnitOverflow)?;
-        buf.resize(padded, fill);
-    }
-    Ok(())
-}
 
 /// Writes FITS HDUs to a byte sink. The first HDU written becomes the primary
 /// array; subsequent images/tables are written as extensions.
@@ -114,13 +75,28 @@ pub(crate) enum Checksums {
     On,
 }
 
-/// What a file starts with when an HDU is its first: the HDU itself, as its primary, or an
-/// empty primary it then follows, as a table or a compressed image is an extension only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Opening {
-    Itself,
-    EmptyPrimary,
+/// The data unit an HDU write commits, before its block fill.
+#[derive(Debug, Clone, Copy)]
+enum Body<'a> {
+    /// Bytes already encoded: a caller's raw unit, a table, a compressed container.
+    Bytes(&'a [u8]),
+    /// Samples, encoded to big-endian in bounded chunks as they are summed and written.
+    Samples(View<'a>),
+    /// A compressed container's main-table rows, then its heap's cells in order.
+    #[cfg(feature = "compression")]
+    Parts { rows: &'a [u8], heap: &'a [Vec<u8>] },
 }
+
+/// The samples a body encodes at a time: a bounded scratch, whatever the image's size.
+const CHUNK_SAMPLES: usize = 1 << 17;
+
+/// The bytes a compressed body's small cells gather to before one write.
+#[cfg(feature = "compression")]
+const PART_CHUNK: usize = 1 << 20;
+
+/// The block fill of each kind of data unit (§3.3.2, §7.2.3).
+const SPACES: [u8; BLOCK_SIZE] = [SPACE_FILL; BLOCK_SIZE];
+const ZEROS: [u8; BLOCK_SIZE] = [ZERO_FILL; BLOCK_SIZE];
 
 impl<W: Write> FitsWriter<W> {
     pub const fn new(sink: W) -> Self {
@@ -162,88 +138,277 @@ impl<W: Write> FitsWriter<W> {
 
     /// Write one complete raw HDU after validating the header's role and exact
     /// unpadded data length. The block fill is derived from the HDU kind: spaces
-    /// for an ASCII table and NULs for every other data unit.
+    /// for an ASCII table and NULs for every other data unit. An extension header
+    /// written first follows an empty primary, as a table written first does.
     pub fn write_raw_hdu(&mut self, header: &Header, raw: &[u8]) -> Result<()> {
-        self.ensure_writable()?;
-        let position = self.next_position();
-        let role = HduRole::from_header(header, position)?;
-        let kind = HduKind::classify(header, role)?;
-        let extent = data_extent(header, role)?;
+        let position = placed(header, self.next_position()?)?;
+        let extent = data_extent(header, HduRole::from_header(header, position)?)?;
         let expected =
             usize::try_from(extent.data_bytes).map_err(|_| FitsError::DataUnitTooLarge {
                 bytes: extent.data_bytes,
             })?;
         if raw.len() != expected {
-            return Err(FitsError::DataSizeMismatch {
-                expected,
-                got: raw.len(),
-            });
+            return Err(SizeUnit::Bytes.mismatch(expected, raw.len()));
         }
-        self.scratch.clear();
-        self.scratch.extend_from_slice(raw);
-        let fill = if kind == HduKind::AsciiTable {
-            SPACE_FILL
-        } else {
-            ZERO_FILL
-        };
         // No template: this is the escape hatch for a caller supplying a complete
         // header, so there is nothing to merge into it.
-        self.finish_hdu(header.clone(), None, fill, Opening::Itself)
+        self.finish_hdu(header, None, Body::Bytes(raw))
     }
 
     /// Where the next HDU goes: the primary of an empty file, an extension after it.
-    fn next_position(&self) -> HduPosition {
+    /// Errors with [`FitsError::WriterFailed`] after a failed write.
+    const fn next_position(&self) -> Result<HduPosition> {
         match self.state {
-            WriterState::Empty => HduPosition::Primary,
-            WriterState::Active => HduPosition::Extension,
-            WriterState::Failed => unreachable!("a failed writer writes nothing"),
+            WriterState::Empty => Ok(HduPosition::Primary),
+            WriterState::Active => Ok(HduPosition::Extension),
+            WriterState::Failed => Err(FitsError::WriterFailed),
         }
     }
 
-    fn ensure_writable(&self) -> Result<()> {
-        if self.state == WriterState::Failed {
-            return Err(FitsError::WriterFailed);
+    /// [`FitsError::WriterFailed`] after a failed write.
+    const fn ensure_usable(&self) -> Result<()> {
+        match self.state {
+            WriterState::Failed => Err(FitsError::WriterFailed),
+            WriterState::Empty | WriterState::Active => Ok(()),
+        }
+    }
+
+    /// Write `bytes` to the sink. Every byte the writer writes passes here: a failed
+    /// write poisons the writer, and a poisoned one writes nothing more.
+    fn emit(&mut self, bytes: &[u8]) -> Result<()> {
+        self.ensure_usable()?;
+        if let Err(error) = self.sink.write_all(bytes) {
+            self.state = WriterState::Failed;
+            return Err(FitsError::Io(error));
         }
         Ok(())
     }
 
-    /// Merge the caller's informational `template` into the synthesized `header`,
-    /// finish preflight for one HDU, then commit it and any required automatic
-    /// primary without another fallible validation or encoding step between them.
+    /// Mark the writer unusable: a stream dropped before its finish leaves a partial HDU.
+    const fn poison(&mut self) {
+        self.state = WriterState::Failed;
+    }
+
+    /// Commit one HDU: merge the caller's informational `template` into `header`, then
+    /// render everything fallible before the first byte, then write the empty primary an
+    /// extension written first needs, the header, `body` and its fill.
     ///
     /// The template merge lives here rather than in each header builder, so every
-    /// write that commits an HDU applies it and none of the four builders has to
-    /// remember to. The one write that does not commit through here is
-    /// [`ImageWriter`], which writes its header up front and rewrites it at
-    /// `finish`; it merges its own.
+    /// write that commits an HDU applies it and none of the builders has to remember
+    /// to. The one write that does not commit through here is [`ImageWriter`], which
+    /// writes its header up front and rewrites it at `finish`; it merges its own.
     fn finish_hdu(
         &mut self,
-        mut header: Header,
+        header: &Header,
         template: Option<&Header>,
-        fill: u8,
-        opening: Opening,
+        body: Body<'_>,
     ) -> Result<()> {
-        merge_header_template(&mut header, template);
-        pad_to_block(&mut self.scratch, fill)?;
-        prepare_header(header, &self.scratch, self.form, &mut self.header_scratch)?;
-
-        let primary_header =
-            if opening == Opening::EmptyPrimary && self.next_position() == HduPosition::Primary {
-                let mut primary_header = Vec::new();
-                prepare_header(empty_primary_header(), &[], self.form, &mut primary_header)?;
-                Some(primary_header)
-            } else {
-                None
+        let next = self.next_position()?;
+        let merged;
+        let header = match template {
+            Some(template) => {
+                let mut with_template = header.clone();
+                merge_header_template(&mut with_template, template);
+                merged = with_template;
+                &merged
+            }
+            None => header,
+        };
+        let position = placed(header, next)?;
+        let role = HduRole::from_header(header, position)?;
+        let kind = HduKind::classify(header, role)?;
+        debug_assert_eq!(
+            data_extent(header, role)
+                .ok()
+                .map(|extent| extent.data_bytes),
+            body.byte_len().ok().and_then(|len| u64::try_from(len).ok()),
+            "a header gives its body's length"
+        );
+        let fill = if kind == HduKind::AsciiTable {
+            &SPACES
+        } else {
+            &ZEROS
+        };
+        let fill = &fill[..block::padding(body.byte_len()?)];
+        let signing = match self.form.checksums {
+            Checksums::Off => Signing::Unsigned,
+            Checksums::On => {
+                let mut sum = Running::new();
+                self.sum_body(body, &mut sum);
+                sum.update(fill);
+                Signing::WithDataSum(sum.finish())
+            }
+        };
+        let space = Space::Spare(self.form.spare_records);
+        let primary = if next == HduPosition::Primary && position == HduPosition::Extension {
+            let signing = match self.form.checksums {
+                Checksums::Off => Signing::Unsigned,
+                Checksums::On => Signing::WithDataSum(0),
             };
-        if let Some(primary_header) = primary_header {
-            write_prepared(&mut self.sink, &mut self.state, &primary_header, &[])?;
+            let mut primary = Vec::new();
+            empty_primary_header()?.render_into(signing, space, &mut primary)?;
+            Some(primary)
+        } else {
+            None
+        };
+        let mut header_bytes = mem::take(&mut self.header_scratch);
+        let written = header
+            .render_into(signing, space, &mut header_bytes)
+            .and_then(|()| {
+                if let Some(primary) = &primary {
+                    self.emit(primary)?;
+                }
+                self.emit(&header_bytes)?;
+                self.emit_body(body)?;
+                self.emit(fill)
+            });
+        self.header_scratch = header_bytes;
+        written?;
+        self.state = WriterState::Active;
+        Ok(())
+    }
+
+    /// Add the bytes of `body` to `sum`.
+    fn sum_body(&mut self, body: Body<'_>, sum: &mut Running) {
+        match body {
+            Body::Bytes(bytes) => sum.update(bytes),
+            #[cfg(feature = "compression")]
+            Body::Parts { rows, heap } => {
+                sum.update(rows);
+                for cell in heap {
+                    sum.update(cell);
+                }
+            }
+            Body::Samples(samples) => self
+                .each_chunk(samples, |_, chunk| {
+                    sum.update(chunk);
+                    Ok(())
+                })
+                .expect("a sum fails on no chunk"),
         }
-        write_prepared(
-            &mut self.sink,
-            &mut self.state,
-            &self.header_scratch,
-            &self.scratch,
+    }
+
+    /// Write the bytes of `body`.
+    fn emit_body(&mut self, body: Body<'_>) -> Result<()> {
+        match body {
+            Body::Bytes(bytes) => self.emit(bytes),
+            #[cfg(feature = "compression")]
+            Body::Parts { rows, heap } => self.emit_parts(rows, heap),
+            Body::Samples(samples) => self.emit_samples(samples, None),
+        }
+    }
+
+    /// Write `rows`, then each cell of `heap`: small cells gather in the scratch buffer to
+    /// [`PART_CHUNK`] bytes before one write, so a heap of many small tiles makes few
+    /// writes, and a large cell goes out as it is.
+    #[cfg(feature = "compression")]
+    fn emit_parts(&mut self, rows: &[u8], heap: &[Vec<u8>]) -> Result<()> {
+        let mut chunk = mem::take(&mut self.scratch);
+        chunk.clear();
+        let mut result = Ok(());
+        for part in std::iter::once(rows).chain(heap.iter().map(Vec::as_slice)) {
+            if chunk.len() + part.len() > PART_CHUNK && !chunk.is_empty() {
+                result = self.emit(&chunk);
+                chunk.clear();
+            }
+            if result.is_ok() {
+                if part.len() >= PART_CHUNK {
+                    result = self.emit(part);
+                } else {
+                    chunk.extend_from_slice(part);
+                }
+            }
+            if result.is_err() {
+                break;
+            }
+        }
+        if result.is_ok() && !chunk.is_empty() {
+            result = self.emit(&chunk);
+        }
+        self.scratch = chunk;
+        result
+    }
+
+    /// Encode `samples` to big-endian in bounded chunks, add each to `sum` when given, and
+    /// write it.
+    fn emit_samples(&mut self, samples: View<'_>, mut sum: Option<&mut Running>) -> Result<()> {
+        self.each_chunk(samples, |writer, chunk| {
+            if let Some(sum) = sum.as_deref_mut() {
+                sum.update(chunk);
+            }
+            writer.emit(chunk)
+        })
+    }
+
+    /// Encode `samples` to big-endian in chunks of `scratch`, of `CHUNK_SAMPLES` each, and
+    /// give each to `each` until one fails.
+    fn each_chunk(
+        &mut self,
+        samples: View<'_>,
+        mut each: impl FnMut(&mut Self, &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        let mut chunk = mem::take(&mut self.scratch);
+        let mut result = Ok(());
+        for start in (0..samples.len()).step_by(CHUNK_SAMPLES) {
+            chunk.clear();
+            let end = (start + CHUNK_SAMPLES).min(samples.len());
+            samples.slice(start..end).encode_into(&mut chunk);
+            result = each(self, &chunk);
+            if result.is_err() {
+                break;
+            }
+        }
+        self.scratch = chunk;
+        result
+    }
+
+    /// Render `header` with `signing` and write it.
+    fn emit_header(&mut self, header: &Header, signing: Signing) -> Result<()> {
+        let mut header_bytes = mem::take(&mut self.header_scratch);
+        let written = header
+            .render_into(
+                signing,
+                Space::Spare(self.form.spare_records),
+                &mut header_bytes,
+            )
+            .and_then(|()| self.emit(&header_bytes));
+        self.header_scratch = header_bytes;
+        written
+    }
+
+    /// Write the compressed HDU that `encode` builds, as its parts: the container rows and
+    /// the heap cells.
+    #[cfg(feature = "compression")]
+    fn write_unit(
+        &mut self,
+        encode: impl FnOnce() -> Result<EncodedUnit>,
+        template: Option<&Header>,
+    ) -> Result<()> {
+        self.next_position()?;
+        let unit = encode()?;
+        self.finish_hdu(
+            &unit.header,
+            template,
+            Body::Parts {
+                rows: &unit.rows,
+                heap: &unit.heap,
+            },
         )
+    }
+
+    /// Write a table HDU whose data unit `encode` writes into the scratch, giving the
+    /// header that declares it.
+    fn write_encoded(
+        &mut self,
+        encode: impl FnOnce(&mut Vec<u8>) -> Result<Header>,
+        template: Option<&Header>,
+    ) -> Result<()> {
+        self.next_position()?;
+        let mut data = mem::take(&mut self.scratch);
+        let written = encode(&mut data)
+            .and_then(|header| self.finish_hdu(&header, template, Body::Bytes(&data)));
+        self.scratch = data;
+        written
     }
 
     /// Consume the writer and return the underlying sink. HDUs are written eagerly,
@@ -263,7 +428,7 @@ impl<W: Write> FitsWriter<W> {
         table: &AsciiBuilder,
         header: Option<&Header>,
     ) -> Result<()> {
-        ascii_builder::write_template(self, table, header)
+        self.write_encoded(|data| table.encode(data), header)
     }
 
     /// Write a binary table as a `BINTABLE` extension. A dataless primary HDU is
@@ -273,7 +438,7 @@ impl<W: Write> FitsWriter<W> {
     /// write a heap after the main table. The non-structural cards of `header` are
     /// kept; the table-layout and checksum cards are generated from `table`.
     pub fn write_table(&mut self, table: &Builder, header: Option<&Header>) -> Result<()> {
-        builder::write_template(self, table, header)
+        self.write_encoded(|data| table.encode(data), header)
     }
 
     /// Write `image` as the primary HDU (first call) or an `IMAGE` extension
@@ -291,12 +456,10 @@ impl<W: Write> FitsWriter<W> {
     /// other HDU. A table or a compressed image written first gets an empty primary
     /// without this call.
     pub fn write_empty_primary(&mut self, header: Option<&Header>) -> Result<()> {
-        self.ensure_writable()?;
-        if self.next_position() != HduPosition::Primary {
+        if self.next_position()? != HduPosition::Primary {
             return Err(FitsError::PrimaryAlreadyWritten);
         }
-        self.scratch.clear();
-        self.finish_hdu(empty_primary_header(), header, ZERO_FILL, Opening::Itself)
+        self.finish_hdu(&empty_primary_header()?, header, Body::Bytes(&[]))
     }
 
     /// Write `image` as a tiled-compressed `BINTABLE` extension (§10.1), with the
@@ -317,7 +480,7 @@ impl<W: Write> FitsWriter<W> {
         config: &CompressionConfig,
         header: Option<&Header>,
     ) -> Result<()> {
-        image_writer::write_compressed_template(self, image, config, header)
+        self.write_unit(|| encode::compress_image(image, config), header)
     }
 
     /// Write `table` as a tiled-compressed table (§10.3): the table [`Self::write_table`]
@@ -334,11 +497,62 @@ impl<W: Write> FitsWriter<W> {
         config: &CompressionConfig,
         header: Option<&Header>,
     ) -> Result<()> {
-        builder::write_compressed(self, table, config, header)
+        self.write_unit(|| table.compress(config, header), None)
     }
 }
 
 impl<W: Write + Seek> FitsWriter<W> {
+    /// The sink's position, where the next byte lands.
+    fn stream_position(&mut self) -> Result<u64> {
+        Ok(self.sink.stream_position()?)
+    }
+
+    /// Render a stream's header again with `signing` where it was written, then return to
+    /// the end of what is written. A failed seek or write poisons the writer.
+    fn rewrite_header(&mut self, header: &StreamHeader, signing: Signing) -> Result<()> {
+        let rewritten = (|| {
+            let end = self.sink.stream_position()?;
+            self.sink.seek(SeekFrom::Start(header.offset))?;
+            self.emit_header(&header.header, signing)?;
+            self.sink.seek(SeekFrom::Start(end))?;
+            Ok(())
+        })();
+        if rewritten.is_err() {
+            self.poison();
+        }
+        rewritten
+    }
+
+    /// Write the header of a stream at the sink's position, signed with placeholders when
+    /// the writer writes checksums, and give it with that position.
+    fn start_stream(&mut self, header: Header) -> Result<StreamHeader> {
+        let offset = self.stream_position()?;
+        let signing = match self.form.checksums {
+            Checksums::Off => Signing::Unsigned,
+            Checksums::On => Signing::Placeholder,
+        };
+        self.emit_header(&header, signing)?;
+        self.state = WriterState::Active;
+        Ok(StreamHeader { header, offset })
+    }
+
+    /// End a stream of `data_bytes` whose bytes `sum` holds: write the block fill, and
+    /// sign its header again when the writer writes checksums.
+    fn finish_stream(
+        &mut self,
+        header: &StreamHeader,
+        data_bytes: usize,
+        sum: &mut Running,
+    ) -> Result<()> {
+        let fill = &ZEROS[..block::padding(data_bytes)];
+        self.emit(fill)?;
+        sum.update(fill);
+        if self.form.checksums == Checksums::On {
+            self.rewrite_header(header, Signing::WithDataSum(sum.finish()))?;
+        }
+        Ok(())
+    }
+
     /// Begin a large image write of `layout`: its shape, `BITPIX` and scaling. The
     /// returned stream must receive exactly the axis-product sample count and be
     /// finished successfully. The non-structural cards of `header` are kept; the
@@ -352,68 +566,51 @@ impl<W: Write + Seek> FitsWriter<W> {
     }
 }
 
-fn prepare_header(
+/// A stream's header and the offset it is written at, which `finish` signs again.
+#[derive(Debug)]
+struct StreamHeader {
     header: Header,
-    padded_data: &[u8],
-    form: HeaderForm,
-    out: &mut Vec<u8>,
-) -> Result<()> {
-    match form.checksums {
-        Checksums::On => prepare_header_with_data_sum(
-            header,
-            checksum::accumulate(padded_data, 0),
-            form.spare_records,
-            out,
-        ),
-        Checksums::Off => render_header(&header, form.spare_records, out),
-    }
+    offset: u64,
 }
 
-/// Render `header` with `DATASUM` set to `data_sum` and a `CHECKSUM` that makes the
-/// whole HDU sum to negative zero (Appendix J), `spare_records` blank records before
-/// `END`.
-pub(crate) fn prepare_header_with_data_sum(
-    mut header: Header,
-    data_sum: u32,
-    spare_records: usize,
-    out: &mut Vec<u8>,
-) -> Result<()> {
-    header.set_internal(keywords::DATASUM, data_sum.to_string());
-    header.set_internal(keywords::CHECKSUM, PLACEHOLDER_CHECKSUM);
-    render_header(&header, spare_records, out)?;
-    let hdu_sum = checksum::combine(checksum::accumulate(out, 0), data_sum);
-    patch_checksum(out, &checksum::encode(hdu_sum));
-    Ok(())
-}
-
-fn write_prepared<W: Write>(
-    sink: &mut W,
-    state: &mut WriterState,
-    header: &[u8],
-    data: &[u8],
-) -> Result<()> {
-    if let Err(error) = sink.write_all(header).and_then(|()| sink.write_all(data)) {
-        *state = WriterState::Failed;
-        return Err(FitsError::Io(error));
+/// Where `header` goes, when the next HDU is at `next`: an extension header written first
+/// goes after an empty primary, as a table or a compressed image does.
+fn placed(header: &Header, next: HduPosition) -> Result<HduPosition> {
+    if next == HduPosition::Primary && header.get(keywords::XTENSION)?.is_some() {
+        Ok(HduPosition::Extension)
+    } else {
+        Ok(next)
     }
-    *state = WriterState::Active;
-    Ok(())
 }
 
 /// A dataless primary HDU (`NAXIS = 0`), written before extensions when the
 /// caller's first HDU is itself an extension.
-fn empty_primary_header() -> Header {
-    let mut header = Header::new();
-    header
-        .set_internal(keywords::SIMPLE, true)
-        .set_comment_internal(keywords::SIMPLE, "file conforms to FITS standard");
-    header
-        .set_internal(keywords::BITPIX, 8)
-        .set_internal(keywords::NAXIS, 0);
-    header
-        .set_internal(keywords::EXTEND, true)
-        .set_comment_internal(keywords::EXTEND, "extensions follow");
-    header
+fn empty_primary_header() -> Result<Header> {
+    Prologue {
+        opening: Opening::Primary,
+        bitpix: Bitpix::U8,
+        axes: &[],
+        pcount: 0,
+    }
+    .header()
+}
+
+impl Body<'_> {
+    /// The bytes of the unit, before its fill.
+    fn byte_len(&self) -> Result<usize> {
+        match self {
+            Self::Bytes(bytes) => Ok(bytes.len()),
+            #[cfg(feature = "compression")]
+            Self::Parts { rows, heap } => heap
+                .iter()
+                .try_fold(rows.len(), |len, cell| len.checked_add(cell.len()))
+                .ok_or(FitsError::DataUnitOverflow),
+            Self::Samples(samples) => samples
+                .len()
+                .checked_mul(samples.bitpix().elem_size())
+                .ok_or(FitsError::DataUnitOverflow),
+        }
+    }
 }
 
 /// Reconcile one column's implied row count with the table's — the inference rule
@@ -449,104 +646,11 @@ fn accept_row_count(
 /// [`accept_row_count`] holds every column a builder takes to the table's row count.
 const ROW_COUNT_FIXED: &str = "the table builder fixes every column's row count";
 
-/// Whether a column's values take `TSCALn` and `TZEROn` (§7.2.5, §7.3.2): numbers do,
-/// and text, logical and bit values do not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Scalable {
-    Numeric,
-    Unscaled,
-}
-
-/// Errors when column `n` sets a scaling its values take none of, or one that is not
-/// finite.
-fn validate_scaling(
-    tscale: Option<f64>,
-    tzero: Option<f64>,
-    scalable: Scalable,
-    n: usize,
-) -> Result<()> {
-    let refused = |value: f64| scalable == Scalable::Unscaled || !value.is_finite();
-    if tscale.is_some_and(refused) {
-        return Err(FitsError::KeywordOutOfRange {
-            keyword: keywords::TSCAL.indexed(n)?,
-        });
-    }
-    if tzero.is_some_and(refused) {
-        return Err(FitsError::KeywordOutOfRange {
-            keyword: keywords::TZERO.indexed(n)?,
-        });
-    }
-    Ok(())
-}
-
-/// Replace the 16 placeholder bytes of the rendered `CHECKSUM` card's value with
-/// the solved value. The value occupies bytes 12–27 (0-based 11–26) of its card.
-fn patch_checksum(header_bytes: &mut [u8], encoded: &[u8; 16]) {
-    let card = header_bytes
-        .as_chunks_mut::<CARD_SIZE>()
-        .0
-        .iter_mut()
-        .find(|card| &card[..8] == b"CHECKSUM")
-        .expect("the placeholder CHECKSUM card is rendered before it is patched");
-    card[11..27].copy_from_slice(encoded);
-}
-
-fn merge_header_template(header: &mut Header, template: Option<&Header>) {
-    let Some(template) = template else {
-        return;
-    };
+/// Append the records of `template` that `header`'s writer does not generate.
+fn merge_header_template(header: &mut Header, template: &Header) {
     header.append_filtered_from(template, |keyword| {
         !reserved_keywords::is_generated(keyword)
     });
-}
-
-/// In-memory writers and readers for the tests of every module that writes.
-#[cfg(test)]
-pub(crate) mod internals {
-    use std::io::Cursor;
-
-    use crate::error::{FitsError, Result};
-    use crate::fits_writer::FitsWriter;
-    use crate::fits_writer::ascii_builder::{AsciiBuilder, AsciiWriteColumn};
-    use crate::fits_writer::builder::{Builder, WriteColumn};
-    use crate::reader::{FitsReader, StreamReader};
-
-    pub(crate) type MemoryWriter = FitsWriter<Cursor<Vec<u8>>>;
-
-    pub(crate) fn binary_table(row_count: usize, columns: &[WriteColumn]) -> Builder {
-        Builder::with_columns(row_count, columns.iter().cloned()).unwrap()
-    }
-
-    pub(crate) fn ascii_table(row_count: usize, columns: &[AsciiWriteColumn]) -> AsciiBuilder {
-        AsciiBuilder::with_columns(row_count, columns.iter().cloned()).unwrap()
-    }
-
-    /// The file `write` produces in a fresh in-memory writer.
-    pub(crate) fn written(write: impl FnOnce(&mut MemoryWriter) -> Result<()>) -> Vec<u8> {
-        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-        write(&mut writer).unwrap();
-        writer.into_inner().into_inner()
-    }
-
-    /// The error `write` fails with, after asserting that it wrote nothing.
-    pub(crate) fn rejected_before_output(
-        write: impl FnOnce(&mut MemoryWriter) -> Result<()>,
-    ) -> FitsError {
-        let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-        let error = write(&mut writer).expect_err("the write must be refused");
-        assert!(
-            writer.into_inner().into_inner().is_empty(),
-            "a refused write must leave no output"
-        );
-        error
-    }
-
-    /// A reader over the file `write` produces.
-    pub(crate) fn round_trip(
-        write: impl FnOnce(&mut MemoryWriter) -> Result<()>,
-    ) -> StreamReader<Cursor<Vec<u8>>> {
-        FitsReader::open(Cursor::new(written(write))).unwrap()
-    }
 }
 
 #[cfg(test)]

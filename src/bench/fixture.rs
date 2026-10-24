@@ -48,22 +48,9 @@ pub(crate) enum Scale {
     /// A frame, or a row of points through a transform, up to 300 ms an iteration, so fewer and
     /// longer samples.
     Frame,
-    /// Past 300 ms an iteration: sampled flat at the fewest samples criterion takes, two
-    /// iterations each. `iteration` is the slowest case's as measured, which sets the
-    /// measurement time.
-    Set { iteration: Duration },
 }
 
 impl Scale {
-    /// The samples of a [`Scale::Set`] case: the fewest criterion takes.
-    const SET_SAMPLES: u32 = 10;
-
-    /// The iterations each sample of a [`Scale::Set`] case takes at the measured iteration.
-    /// Criterion's flat sampling warns of a sample of one iteration, which it takes wherever the
-    /// measurement time is at most the samples times the iteration: at two, only a case that
-    /// runs at twice the measured iteration or slower takes one.
-    const SET_ITERATIONS: u32 = 2;
-
     /// Sets the sampling of the cases `group` registers from here on.
     #[expect(
         clippy::disallowed_methods,
@@ -81,11 +68,6 @@ impl Scale {
                 .sampling_mode(SamplingMode::Auto)
                 .warm_up_time(Duration::from_secs(1))
                 .measurement_time(Duration::from_secs(3)),
-            Self::Set { iteration } => group
-                .sample_size(Self::SET_SAMPLES as usize)
-                .sampling_mode(SamplingMode::Flat)
-                .warm_up_time(Duration::from_secs(1))
-                .measurement_time(iteration * Self::SET_SAMPLES * Self::SET_ITERATIONS),
         };
     }
 }

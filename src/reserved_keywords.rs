@@ -3,36 +3,79 @@
 //! between a table and its container.
 
 use crate::header_model::keywords;
-use crate::keyword;
 use crate::keyword::Keyword;
 
 /// Fixed-name keywords of the HDU structure (§4.4), array scaling (§5.3), the
 /// checksums (Appendix J) and the binary-table heap (§7.3).
-const STRUCTURE: [&str; 16] = [
-    "SIMPLE", "XTENSION", "BITPIX", "NAXIS", "PCOUNT", "GCOUNT", "EXTEND", "GROUPS", "BLOCKED",
-    "BSCALE", "BZERO", "BLANK", "CHECKSUM", "DATASUM", "THEAP", "TFIELDS",
+const STRUCTURE: [Keyword; 16] = [
+    keywords::SIMPLE,
+    keywords::XTENSION,
+    keywords::BITPIX,
+    keywords::NAXIS,
+    keywords::PCOUNT,
+    keywords::GCOUNT,
+    keywords::EXTEND,
+    keywords::GROUPS,
+    keywords::BLOCKED,
+    keywords::BSCALE,
+    keywords::BZERO,
+    keywords::BLANK,
+    keywords::CHECKSUM,
+    keywords::DATASUM,
+    keywords::THEAP,
+    keywords::TFIELDS,
 ];
 
 /// Indexed roots of the array axes (§4.4) and table columns (§7.2, §7.3).
-const STRUCTURE_INDEXED: [&str; 9] = [
-    "NAXIS", "TFORM", "TTYPE", "TUNIT", "TDIM", "TSCAL", "TZERO", "TNULL", "TBCOL",
+const STRUCTURE_INDEXED: [Keyword; 9] = [
+    keywords::NAXIS,
+    keywords::TFORM,
+    keywords::TTYPE,
+    keywords::TUNIT,
+    keywords::TDIM,
+    keywords::TSCAL,
+    keywords::TZERO,
+    keywords::TNULL,
+    keywords::TBCOL,
 ];
 
 /// Fixed-name keywords of tiled image compression (§10.1, §10.2).
-const IMAGE_COMPRESSION: [&str; 14] = [
-    "ZIMAGE", "ZCMPTYPE", "ZBITPIX", "ZNAXIS", "ZQUANTIZ", "ZDITHER0", "ZBLANK", "ZMASKCMP",
-    "ZSIMPLE", "ZTENSION", "ZEXTEND", "ZBLOCKED", "ZGCOUNT", "ZHEAPPTR",
+const IMAGE_COMPRESSION: [Keyword; 14] = [
+    keywords::ZIMAGE,
+    keywords::ZCMPTYPE,
+    keywords::ZBITPIX,
+    keywords::ZNAXIS,
+    keywords::ZQUANTIZ,
+    keywords::ZDITHER0,
+    keywords::ZBLANK,
+    keywords::ZMASKCMP,
+    keywords::ZSIMPLE,
+    keywords::ZTENSION,
+    keywords::ZEXTEND,
+    keywords::ZBLOCKED,
+    keywords::ZGCOUNT,
+    keywords::ZHEAPPTR,
 ];
 
 /// Indexed roots of tiled image compression (§10.1).
-const IMAGE_COMPRESSION_INDEXED: [&str; 4] = ["ZNAXIS", "ZTILE", "ZNAME", "ZVAL"];
+const IMAGE_COMPRESSION_INDEXED: [Keyword; 4] = [
+    keywords::ZNAXIS,
+    keywords::ZTILE,
+    keywords::ZNAME,
+    keywords::ZVAL,
+];
 
 /// Fixed-name keywords a tiled-compressed table's header adds (§10.3.1).
-pub(crate) const TABLE_COMPRESSION: [&str; 5] =
-    ["ZTABLE", "ZTILELEN", "ZNAXIS1", "ZNAXIS2", "ZPCOUNT"];
+pub(crate) const TABLE_COMPRESSION: [Keyword; 5] = [
+    keywords::ZTABLE,
+    keywords::ZTILELEN,
+    Keyword::new("ZNAXIS1"),
+    Keyword::new("ZNAXIS2"),
+    keywords::ZPCOUNT,
+];
 
 /// Column-indexed roots a tiled-compressed table's header adds (§10.3.1).
-pub(crate) const TABLE_COMPRESSION_INDEXED: [&str; 2] = ["ZFORM", "ZCTYP"];
+pub(crate) const TABLE_COMPRESSION_INDEXED: [Keyword; 2] = [keywords::ZFORM, keywords::ZCTYP];
 
 /// The keywords table compression keeps under a `Z` name, as (table, container)
 /// pairs (§10.3.1).
@@ -43,16 +86,14 @@ pub(crate) const TABLE_PRESERVED: [(Keyword, Keyword); 3] = [
 ];
 
 /// Whether a writer generates `keyword` rather than copying it from a template.
-pub(crate) fn is_generated(keyword: &str) -> bool {
-    // A conforming keyword is at most 8 bytes; anything longer is not the indexed
-    // keyword it superficially resembles.
-    let indexed = |root: &&str| keyword.len() <= 8 && keyword::index(keyword, root).is_some();
+pub(crate) fn is_generated(keyword: Keyword) -> bool {
+    let indexed = |root: &Keyword| keyword.index_after(*root).is_some();
     STRUCTURE.contains(&keyword)
         || IMAGE_COMPRESSION.contains(&keyword)
         || TABLE_COMPRESSION.contains(&keyword)
         || TABLE_PRESERVED
             .iter()
-            .any(|&(_, container)| container.as_str() == keyword)
+            .any(|&(_, container)| container == keyword)
         || STRUCTURE_INDEXED.iter().any(indexed)
         || IMAGE_COMPRESSION_INDEXED.iter().any(indexed)
         || TABLE_COMPRESSION_INDEXED.iter().any(indexed)
@@ -61,9 +102,11 @@ pub(crate) fn is_generated(keyword: &str) -> bool {
 /// Whether `keyword` is one a compressed table's header adds for one of its
 /// `columns` columns.
 #[cfg(feature = "compression")]
-pub(crate) fn is_table_compression(keyword: &str, columns: usize) -> bool {
+pub(crate) fn is_table_compression(keyword: Keyword, columns: usize) -> bool {
     TABLE_COMPRESSION.contains(&keyword)
-        || TABLE_COMPRESSION_INDEXED.iter().any(|root| {
-            keyword::index(keyword, root).is_some_and(|column| (1..=columns).contains(&column))
+        || TABLE_COMPRESSION_INDEXED.iter().any(|&root| {
+            keyword
+                .index_after(root)
+                .is_some_and(|column| (1..=columns).contains(&column))
         })
 }

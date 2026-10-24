@@ -4,16 +4,17 @@ use std::f64::consts::FRAC_1_SQRT_2;
 use std::f64::consts::PI;
 
 use crate::error::Result;
-use crate::world_coordinates::D2R;
-use crate::world_coordinates::R2D;
-use crate::world_coordinates::UNIT_TOLERANCE;
+use crate::world_coordinates::angle::D2R;
+use crate::world_coordinates::angle::R2D;
+use crate::world_coordinates::angle::UNIT_TOLERANCE;
+use crate::world_coordinates::native_coordinate::NativeCoordinate;
+use crate::world_coordinates::projection::ProjectedCoordinate;
 use crate::world_coordinates::projection::Projection;
-use crate::world_coordinates::projection::{NativeCoordinate, ProjectedCoordinate};
 
 const FACE_SCALE: f64 = 45.0;
 
 /// The spherical cube projections.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum Cube {
     Tsc,
     Csc,
@@ -27,6 +28,54 @@ impl Cube {
             Self::Csc => Projection::Csc,
             Self::Qsc => Projection::Qsc,
         }
+    }
+
+    pub(super) fn deproject(self, x: f64, y: f64) -> Result<NativeCoordinate> {
+        let projection = self.projection();
+        let face = face_coordinate(projection, x, y)?;
+        let direction = match self {
+            Self::Tsc => direction_from_ratios(face.face, face.x, face.y),
+            Self::Csc => {
+                let ratios = csc_inverse(face.x, face.y);
+                direction_from_csc_ratios(face.face, ratios)
+            }
+            Self::Qsc => qsc_inverse(projection, face)?,
+        };
+        native_coordinate(projection, direction)
+    }
+
+    pub(super) fn project(self, phi: f64, theta: f64) -> Result<ProjectedCoordinate> {
+        let projection = self.projection();
+        if matches!(self, Self::Qsc) && theta.abs() == 90.0 {
+            return projection.projected_coordinate(0.0, theta.signum() * 90.0);
+        }
+
+        let face = face_direction(phi, theta);
+        let coordinate = match self {
+            Self::Tsc => FaceCoordinate {
+                face: face.face,
+                x: face.xi / face.zeta,
+                y: face.eta / face.zeta,
+            },
+            Self::Csc => {
+                let chi = (face.xi / face.zeta) as f32;
+                let psi = (face.eta / face.zeta) as f32;
+                FaceCoordinate {
+                    face: face.face,
+                    x: f64::from(csc_forward_axis(chi, psi)),
+                    y: f64::from(csc_forward_axis(psi, chi)),
+                }
+            }
+            Self::Qsc => qsc_forward(face, theta),
+        };
+        // CSC evaluates its polynomial in f32, as wcslib does, so its face coordinates
+        // carry f32 rounding: 2⁻²³ ≈ 1.2e-7 of a face.
+        let tolerance = if matches!(self, Self::Csc) {
+            1e-7
+        } else {
+            UNIT_TOLERANCE
+        };
+        projected_coordinate(self, coordinate, face.x0, face.y0, tolerance)
     }
 }
 
@@ -69,54 +118,6 @@ struct FaceCoordinate {
 struct FaceRatios {
     chi: f32,
     psi: f32,
-}
-
-pub(super) fn deproject(cube: Cube, x: f64, y: f64) -> Result<NativeCoordinate> {
-    let projection = cube.projection();
-    let face = face_coordinate(projection, x, y)?;
-    let direction = match cube {
-        Cube::Tsc => direction_from_ratios(face.face, face.x, face.y),
-        Cube::Csc => {
-            let ratios = csc_inverse(face.x, face.y);
-            direction_from_csc_ratios(face.face, ratios)
-        }
-        Cube::Qsc => qsc_inverse(projection, face)?,
-    };
-    native_coordinate(projection, direction)
-}
-
-pub(super) fn project(cube: Cube, phi: f64, theta: f64) -> Result<ProjectedCoordinate> {
-    let projection = cube.projection();
-    if matches!(cube, Cube::Qsc) && theta.abs() == 90.0 {
-        return projection.projected_coordinate(0.0, theta.signum() * 90.0);
-    }
-
-    let face = face_direction(phi, theta);
-    let coordinate = match cube {
-        Cube::Tsc => FaceCoordinate {
-            face: face.face,
-            x: face.xi / face.zeta,
-            y: face.eta / face.zeta,
-        },
-        Cube::Csc => {
-            let chi = (face.xi / face.zeta) as f32;
-            let psi = (face.eta / face.zeta) as f32;
-            FaceCoordinate {
-                face: face.face,
-                x: f64::from(csc_forward_axis(chi, psi)),
-                y: f64::from(csc_forward_axis(psi, chi)),
-            }
-        }
-        Cube::Qsc => qsc_forward(face, theta),
-    };
-    // CSC evaluates its polynomial in f32, as wcslib does, so its face coordinates
-    // carry f32 rounding: 2⁻²³ ≈ 1.2e-7 of a face.
-    let tolerance = if matches!(cube, Cube::Csc) {
-        1e-7
-    } else {
-        UNIT_TOLERANCE
-    };
-    projected_coordinate(cube, coordinate, face.x0, face.y0, tolerance)
 }
 
 fn face_coordinate(projection: Projection, x: f64, y: f64) -> Result<FaceCoordinate> {
@@ -268,8 +269,20 @@ fn native_coordinate(projection: Projection, direction: Direction) -> Result<Nat
     } else {
         direction.m.atan2(direction.l) * R2D
     };
-    let theta = projection.checked_asin(direction.n)? * R2D;
-    projection.native_coordinate(phi, theta)
+    if !direction.n.is_finite() || direction.n.abs() > 1.0 + UNIT_TOLERANCE {
+        return Err(projection.domain_error());
+    }
+    let n = direction.n.clamp(-1.0, 1.0);
+    // CSC's direction has unit length only to the f32 sum in its scale, and wcslib takes
+    // θ = asin n from it; the others are unit vectors, whose (l, m) keep cos θ exact
+    // next to the pole.
+    let cos_theta = if projection == Projection::Csc {
+        ((1.0 - n) * (1.0 + n)).sqrt()
+    } else {
+        direction.l.hypot(direction.m)
+    };
+    let phi = projection.native_longitude(phi)?;
+    Ok(NativeCoordinate::from_sin_cos(phi, n, cos_theta))
 }
 
 fn projected_coordinate(

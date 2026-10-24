@@ -1,7 +1,7 @@
 //! A variable-length (`P`/`Q`) column's per-row heap arrays.
 
+use crate::bintable::element_kind::ElementKind;
 use crate::bintable::table_view::TableView;
-use crate::bintable::tform_kind::TformKind;
 use crate::error::FitsError;
 use crate::error::Result;
 
@@ -11,7 +11,7 @@ use crate::error::Result;
 pub(crate) struct VlaColumn<'a> {
     table: TableView<'a>,
     index: usize,
-    element_type: TformKind,
+    element_type: ElementKind,
 }
 
 /// One row's heap array: the bytes the row's descriptor addresses, the element count
@@ -19,14 +19,13 @@ pub(crate) struct VlaColumn<'a> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct VlaCell<'a> {
     pub(crate) bytes: &'a [u8],
-    #[cfg(feature = "compression")]
     pub(crate) element_count: usize,
     #[cfg(feature = "compression")]
-    pub(crate) element_type: TformKind,
+    pub(crate) element_type: ElementKind,
 }
 
 impl<'a> VlaColumn<'a> {
-    pub(crate) const fn new(table: TableView<'a>, index: usize, element_type: TformKind) -> Self {
+    pub(crate) const fn new(table: TableView<'a>, index: usize, element_type: ElementKind) -> Self {
         VlaColumn {
             table,
             index,
@@ -34,12 +33,12 @@ impl<'a> VlaColumn<'a> {
         }
     }
 
-    pub(crate) const fn element_type(&self) -> TformKind {
+    pub(crate) const fn element_type(&self) -> ElementKind {
         self.element_type
     }
 
     pub(crate) fn cell(&self, row: usize) -> Result<VlaCell<'a>> {
-        if row >= self.table.row_count {
+        if row >= self.table.extent.row_count {
             return Err(FitsError::UnexpectedEof);
         }
         let col = &self.table.columns[self.index];
@@ -48,7 +47,6 @@ impl<'a> VlaColumn<'a> {
         let bytes = self.table.pq_payload(descriptor, self.element_type)?;
         Ok(VlaCell {
             bytes,
-            #[cfg(feature = "compression")]
             element_count: descriptor.count,
             #[cfg(feature = "compression")]
             element_type: self.element_type,

@@ -4,11 +4,12 @@ use crate::bintable::column_reader::ColumnReader;
 use crate::bintable::table_view::TableView;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::error::{TabularDefect, WcsDefect};
 use crate::header_model::Header;
 use crate::keyword::Keyword;
 use crate::world_coordinates::ctype::Ctype;
-use crate::world_coordinates::world_unit_scale;
-use crate::world_coordinates::{read_integer, read_real, read_text};
+use crate::world_coordinates::header_read;
+use crate::world_coordinates::world_unit::WorldUnit;
 use std::iter;
 
 const MAX_INTERPOLATION_VERTICES: usize = 1 << 20;
@@ -72,6 +73,38 @@ pub(crate) struct TabularTransform {
     vertex_count: usize,
     indices: Vec<Option<IndexVector>>,
     coordinates: Vec<f64>,
+    inverse: InverseIndex,
+}
+
+/// What the inverse searches, built with the transform.
+#[derive(Debug, Clone)]
+enum InverseIndex {
+    /// One table axis: the coordinate array's maximal strictly monotonic runs, in order.
+    Runs(Vec<MonotonicRun>),
+    /// More: the cells along each table axis, and for each cell and coordinate axis the
+    /// least and the greatest of its extended corners and their rounding tolerance,
+    /// `[min, max, tolerance]`, which the search's first level tests.
+    Cells {
+        cell_lengths: Vec<usize>,
+        bounds: Vec<f64>,
+    },
+}
+
+/// Nodes `start..=end` of a one-axis coordinate array, which rise or fall strictly and
+/// whose intervals all have distinct index values.
+#[derive(Debug, Clone, Copy)]
+struct MonotonicRun {
+    start: usize,
+    end: usize,
+    direction: IndexDirection,
+}
+
+/// Where a point lies along one table axis: the zero-based node below it, and the
+/// fraction of the interval past that node, in [−0.5, 1.5] at the ends.
+#[derive(Debug, Clone, Copy)]
+struct Interval {
+    position: usize,
+    fraction: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -93,7 +126,7 @@ pub(crate) fn descriptors(
 ) -> Result<Vec<TabularDescriptor>> {
     let mut descriptors = Vec::<PendingDescriptor>::new();
     for axis in 0..axis_count {
-        let ctype = read_text(
+        let ctype = header_read::text(
             header,
             Keyword::fitting(format_args!("CTYPE{}{alt}", axis + 1)),
         )?
@@ -104,12 +137,12 @@ pub(crate) fn descriptors(
         let extension_name = required_text(
             header,
             Keyword::try_from(format_args!("PS{}_0{alt}", axis + 1))?,
-            "TAB requires PSi_0",
+            TabularDefect::MissingExtension,
         )?;
         let coordinate_column = required_text(
             header,
             Keyword::try_from(format_args!("PS{}_1{alt}", axis + 1))?,
-            "TAB requires PSi_1",
+            TabularDefect::MissingCoordinateColumn,
         )?;
         let reference = TabularReference {
             extension_name,
@@ -121,19 +154,19 @@ pub(crate) fn descriptors(
         let table_axis = usize::try_from(table_axis)
             .ok()
             .and_then(|value| value.checked_sub(1))
-            .ok_or_else(|| invalid("PVi_3 must be a positive table-axis number"))?;
+            .ok_or_else(|| invalid(TabularDefect::NonPositiveParameter))?;
         if table_axis >= axis_count {
-            return Err(invalid("PVi_3 exceeds the WCS axis count"));
+            return Err(invalid(TabularDefect::TableAxisPastCount));
         }
-        let reference_index = read_real(
+        let reference_index = header_read::real(
             header,
             Keyword::fitting(format_args!("CRVAL{}{alt}", axis + 1)),
         )?
         .unwrap_or(0.0);
         if !reference_index.is_finite() {
-            return Err(invalid("TAB CRVAL must be finite"));
+            return Err(invalid(TabularDefect::NonFiniteReference));
         }
-        let index_column = read_text(
+        let index_column = header_read::text(
             header,
             Keyword::fitting(format_args!("PS{}_2{alt}", axis + 1)),
         )?
@@ -153,14 +186,14 @@ pub(crate) fn descriptors(
         };
         let required_len = table_axis
             .checked_add(1)
-            .ok_or_else(|| invalid("TAB table-axis number is too large"))?;
+            .ok_or_else(|| invalid(TabularDefect::TableAxisPastCount))?;
         if descriptor.axes.len() < required_len {
             descriptor.axes.resize_with(required_len, || None);
         }
         if descriptor.axes[table_axis].is_some() {
-            return Err(invalid("TAB table-axis mapping is duplicated"));
+            return Err(invalid(TabularDefect::DuplicateTableAxis));
         }
-        let cunit = read_text(
+        let cunit = header_read::text(
             header,
             Keyword::fitting(format_args!("CUNIT{}{alt}", axis + 1)),
         )?
@@ -169,7 +202,7 @@ pub(crate) fn descriptors(
             image_axis: axis,
             reference_index,
             index_column,
-            world_scale: world_unit_scale(Ctype::parse(ctype), cunit)?,
+            world_scale: WorldUnit::of(Ctype::parse(ctype), cunit)?.scale,
         });
     }
     descriptors
@@ -180,7 +213,7 @@ pub(crate) fn descriptors(
                 axes: axes
                     .into_iter()
                     .collect::<Option<_>>()
-                    .ok_or_else(|| invalid("TAB table-axis mapping is incomplete"))?,
+                    .ok_or_else(|| invalid(TabularDefect::IncompleteTableAxes))?,
             })
         })
         .collect()
@@ -200,17 +233,17 @@ impl TabularTransform {
     pub(crate) fn from_table(descriptor: &TabularDescriptor, table: TableView<'_>) -> Result<Self> {
         let dimensions = descriptor.axes.len();
         let coordinate = table.column(&descriptor.reference.coordinate_column)?;
-        let coordinate_shape = first_row_shape_and_values(table.row_count, coordinate)?;
+        let coordinate_shape = first_row_shape_and_values(table.extent.row_count, coordinate)?;
         let mut shape = coordinate_shape.shape;
         if dimensions == 1 && shape.len() == 1 {
             shape.insert(0, 1);
         }
         if shape.len() != dimensions + 1 || shape[0] != dimensions {
-            return Err(invalid("TAB coordinate TDIM must be (M,K1,...,KM)"));
+            return Err(invalid(TabularDefect::CoordinateShape));
         }
         let lengths = shape[1..].to_vec();
         if lengths.contains(&0) {
-            return Err(invalid("TAB coordinate axes must be non-empty"));
+            return Err(invalid(TabularDefect::EmptyAxis));
         }
         let variable_axes: Vec<usize> = lengths
             .iter()
@@ -221,18 +254,16 @@ impl TabularTransform {
         let coordinate_count = lengths
             .iter()
             .try_fold(dimensions, |count, &length| count.checked_mul(length))
-            .ok_or_else(|| invalid("TAB coordinate array is too large"))?;
+            .ok_or_else(|| invalid(TabularDefect::CoordinateArrayTooLarge))?;
         if coordinate_shape.values.len() != coordinate_count {
-            return Err(invalid(
-                "TAB coordinate TDIM does not match its first-row element count",
-            ));
+            return Err(invalid(TabularDefect::CoordinateCount));
         }
         if coordinate_shape
             .values
             .iter()
             .any(|value| !value.is_finite())
         {
-            return Err(invalid("TAB coordinate array must contain finite values"));
+            return Err(invalid(TabularDefect::NonFiniteCoordinate));
         }
         let mut coordinates = coordinate_shape.values;
         for point in coordinates.chunks_exact_mut(dimensions) {
@@ -248,11 +279,9 @@ impl TabularTransform {
                 continue;
             };
             let reader = table.column(column)?;
-            let index = first_row_shape_and_values(table.row_count, reader)?;
+            let index = first_row_shape_and_values(table.extent.row_count, reader)?;
             if index.shape.len() > 1 || index.values.len() != lengths[table_axis] {
-                return Err(invalid(
-                    "TAB index-vector length must match its coordinate axis",
-                ));
+                return Err(invalid(TabularDefect::IndexLength));
             }
             let direction = validate_index(&index.values)?;
             indices.push(Some(IndexVector {
@@ -260,7 +289,7 @@ impl TabularTransform {
                 direction,
             }));
         }
-        Ok(Self {
+        let mut transform = Self {
             axes: descriptor.axes.iter().map(|axis| axis.image_axis).collect(),
             reference_indices: descriptor
                 .axes
@@ -272,12 +301,99 @@ impl TabularTransform {
             vertex_count,
             indices,
             coordinates,
+            inverse: InverseIndex::Runs(Vec::new()),
+        };
+        transform.inverse = if dimensions == 1 {
+            InverseIndex::Runs(transform.monotonic_runs())
+        } else {
+            transform.cell_bounds()?
+        };
+        Ok(transform)
+    }
+
+    /// The maximal strictly monotonic runs of a one-axis array. A run ends where two
+    /// neighbours are equal, where their index values are, and where the array turns.
+    fn monotonic_runs(&self) -> Vec<MonotonicRun> {
+        let coordinates = &self.coordinates;
+        let usable = |position: usize| {
+            coordinates[position] != coordinates[position + 1]
+                && self.indices[0]
+                    .as_ref()
+                    .is_none_or(|index| index.values[position] != index.values[position + 1])
+        };
+        let mut runs = Vec::new();
+        let mut position = 0;
+        while position + 1 < coordinates.len() {
+            if !usable(position) {
+                position += 1;
+                continue;
+            }
+            let rising = coordinates[position] < coordinates[position + 1];
+            let start = position;
+            while position + 1 < coordinates.len()
+                && usable(position)
+                && (coordinates[position] < coordinates[position + 1]) == rising
+            {
+                position += 1;
+            }
+            runs.push(MonotonicRun {
+                start,
+                end: position,
+                direction: if rising {
+                    IndexDirection::Increasing
+                } else {
+                    IndexDirection::Decreasing
+                },
+            });
+        }
+        runs
+    }
+
+    /// Each cell's level-0 corners, as the search evaluates them first: the bounds that
+    /// let it pass over a cell that cannot hold the point without spending its budget.
+    fn cell_bounds(&self) -> Result<InverseIndex> {
+        let cell_lengths: Vec<usize> = self
+            .lengths
+            .iter()
+            .map(|&length| length.saturating_sub(1).max(1))
+            .collect();
+        let cell_count = cell_lengths
+            .iter()
+            .try_fold(1usize, |count, &length| count.checked_mul(length))
+            .ok_or_else(|| invalid(TabularDefect::CoordinateArrayTooLarge))?;
+        let dimensions = self.axes.len();
+        let mut bounds = Vec::new();
+        allocation::try_reserve(&mut bounds, cell_count.saturating_mul(3 * dimensions))?;
+        let mut buffers = SearchBuffers::new(dimensions, self.vertex_count)?;
+        // The corners alone, no search: no node spends the budget.
+        let mut search = buffers.search(self, 0);
+        for cell in 0..cell_count {
+            search.enter_cell(cell, &cell_lengths);
+            search.fill_corners(0, 1.0);
+            for axis in 0..dimensions {
+                let corners =
+                    (0..self.vertex_count).map(|vertex| search.corners[vertex * dimensions + axis]);
+                let (min, max) = corners
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), value| {
+                        (min.min(value), max.max(value))
+                    });
+                bounds.extend([min, max, search.tolerance[axis]]);
+            }
+        }
+        Ok(InverseIndex::Cells {
+            cell_lengths,
+            bounds,
         })
     }
 
     /// Replace the intermediate world coordinate of this transform's axes in
     /// `coordinates` with their world coordinate.
     pub(super) fn to_world(&self, coordinates: &mut [f64]) -> Result<()> {
+        if self.axes.len() == 1 {
+            let image_axis = self.axes[0];
+            coordinates[image_axis] = self.world_one_dimensional(coordinates[image_axis])?;
+            return Ok(());
+        }
         let mut location = self.interpolation_location(|_, image_axis| coordinates[image_axis])?;
         for &image_axis in &self.axes {
             coordinates[image_axis] = 0.0;
@@ -294,35 +410,69 @@ impl TabularTransform {
         Ok(())
     }
 
-    pub(super) fn to_world_axis(&self, image_axis: usize, intermediate: &[f64]) -> Result<f64> {
-        debug_assert_eq!(intermediate.len(), self.axes.len());
+    /// The world coordinate of `image_axis` alone, from the intermediate coordinate
+    /// `intermediate` gives each image axis of the transform.
+    pub(super) fn to_world_axis(
+        &self,
+        image_axis: usize,
+        intermediate: impl Fn(usize) -> f64,
+    ) -> Result<f64> {
+        if self.axes.len() == 1 {
+            return self.world_one_dimensional(intermediate(self.axes[0]));
+        }
         let table_axis = self
             .axes
             .iter()
             .position(|&axis| axis == image_axis)
             .expect("requested TAB axis belongs to the transform");
-        let mut location = self.interpolation_location(|table_axis, _| intermediate[table_axis])?;
-        Ok(self.interpolate_axis(&mut location.base, &location.delta, table_axis))
+        let mut location = self.interpolation_location(|_, image_axis| intermediate(image_axis))?;
+        let mut result = 0.0;
+        self.for_each_interpolation_vertex(
+            &mut location.base,
+            &location.delta,
+            |offset, weight| {
+                result += self.coordinates[offset + table_axis] * weight;
+            },
+        );
+        Ok(result)
     }
 
     /// Replace the world coordinate of this transform's axes in `coordinates` with
     /// their intermediate world coordinate.
     pub(super) fn to_intermediate(&self, coordinates: &mut [f64]) -> Result<()> {
-        let location = if self.axes.len() == 1 {
-            self.locate_one_dimensional(coordinates[self.axes[0]])?
-        } else {
-            let target: Vec<f64> = self.axes.iter().map(|&axis| coordinates[axis]).collect();
-            self.locate_multidimensional(&target)?
-        };
-        for table_axis in 0..self.axes.len() {
-            let upsilon = location.base[table_axis] as f64 + 1.0 + location.delta[table_axis];
-            if !(0.5..=self.lengths[table_axis] as f64 + 0.5).contains(&upsilon) {
-                return Err(domain(self.axes[table_axis]));
+        match &self.inverse {
+            InverseIndex::Runs(runs) => {
+                let image_axis = self.axes[0];
+                let interval = self.locate_one_dimensional(runs, coordinates[image_axis])?;
+                coordinates[image_axis] = self.intermediate(0, interval)?;
+                Ok(())
             }
-            let psi = self.array_to_index(table_axis, upsilon);
-            coordinates[self.axes[table_axis]] = psi - self.reference_indices[table_axis];
+            InverseIndex::Cells {
+                cell_lengths,
+                bounds,
+            } => self.invert_multidimensional(cell_lengths, bounds, coordinates),
         }
-        Ok(())
+    }
+
+    /// The intermediate coordinate of `interval` along `table_axis`.
+    fn intermediate(&self, table_axis: usize, interval: Interval) -> Result<f64> {
+        let upsilon = interval.position as f64 + 1.0 + interval.fraction;
+        if !(0.5..=self.lengths[table_axis] as f64 + 0.5).contains(&upsilon) {
+            return Err(domain(self.axes[table_axis]));
+        }
+        Ok(self.array_to_index(table_axis, upsilon) - self.reference_indices[table_axis])
+    }
+
+    /// The world coordinate of a one-axis table at `intermediate`: the vertex loop's two
+    /// weights, so the same bits as [`Self::for_each_interpolation_vertex`] gives.
+    fn world_one_dimensional(&self, intermediate: f64) -> Result<f64> {
+        let interval = self.axis_interval(0, intermediate)?;
+        if self.lengths[0] == 1 {
+            return Ok(self.coordinates[0]);
+        }
+        let Interval { position, fraction } = interval;
+        Ok(self.coordinates[position] * (1.0 - fraction)
+            + self.coordinates[position + 1] * fraction)
     }
 
     fn interpolation_location(
@@ -332,29 +482,39 @@ impl TabularTransform {
         let mut base = Vec::with_capacity(self.axes.len());
         let mut delta = Vec::with_capacity(self.axes.len());
         for table_axis in 0..self.axes.len() {
-            let image_axis = self.axes[table_axis];
-            let psi = intermediate(table_axis, image_axis) + self.reference_indices[table_axis];
-            let upsilon = self.index_to_array(table_axis, psi)?;
-            let length = self.lengths[table_axis];
-            if !(0.5..=length as f64 + 0.5).contains(&upsilon) {
-                return Err(domain(image_axis));
-            }
-            let one_relative = upsilon.floor() as isize;
-            let mut zero_relative = one_relative - 1;
-            let mut fraction = upsilon - one_relative as f64;
-            if one_relative == 0 {
-                zero_relative += 1;
-                fraction -= 1.0;
-            } else if one_relative == isize::try_from(length).expect("a table axis fits isize")
-                && length > 1
-            {
-                zero_relative -= 1;
-                fraction += 1.0;
-            }
-            base.push(usize::try_from(zero_relative).expect("TAB base index"));
-            delta.push(fraction);
+            let interval =
+                self.axis_interval(table_axis, intermediate(table_axis, self.axes[table_axis]))?;
+            base.push(interval.position);
+            delta.push(interval.fraction);
         }
         Ok(TabularLocation { base, delta })
+    }
+
+    /// Where the intermediate coordinate `intermediate` lies along `table_axis`: the
+    /// interval below its array coordinate, the first or the last one past an end.
+    fn axis_interval(&self, table_axis: usize, intermediate: f64) -> Result<Interval> {
+        let psi = intermediate + self.reference_indices[table_axis];
+        let upsilon = self.index_to_array(table_axis, psi)?;
+        let length = self.lengths[table_axis];
+        if !(0.5..=length as f64 + 0.5).contains(&upsilon) {
+            return Err(domain(self.axes[table_axis]));
+        }
+        let one_relative = upsilon.floor() as isize;
+        let mut zero_relative = one_relative - 1;
+        let mut fraction = upsilon - one_relative as f64;
+        if one_relative == 0 {
+            zero_relative += 1;
+            fraction -= 1.0;
+        } else if one_relative == isize::try_from(length).expect("a table axis fits isize")
+            && length > 1
+        {
+            zero_relative -= 1;
+            fraction += 1.0;
+        }
+        Ok(Interval {
+            position: usize::try_from(zero_relative).expect("TAB base index"),
+            fraction,
+        })
     }
 
     fn index_to_array(&self, table_axis: usize, psi: f64) -> Result<f64> {
@@ -476,14 +636,6 @@ impl TabularTransform {
         }
     }
 
-    fn interpolate_axis(&self, indices: &mut [usize], delta: &[f64], table_axis: usize) -> f64 {
-        let mut result = 0.0;
-        self.for_each_interpolation_vertex(indices, delta, |offset, weight| {
-            result += self.coordinates[offset + table_axis] * weight;
-        });
-        result
-    }
-
     fn coordinate_offset(&self, indices: &[usize]) -> usize {
         let mut point = 0;
         for table_axis in (0..self.axes.len()).rev() {
@@ -492,103 +644,101 @@ impl TabularTransform {
         point * self.axes.len()
     }
 
-    fn locate_one_dimensional(&self, target: f64) -> Result<TabularLocation> {
+    /// The interval of a one-axis array that holds `target`: the first one in array
+    /// order, as wcslib's `tabx2s` scan takes it, which the standard asks of an array
+    /// that need not be monotonic. A binary search in each strictly monotonic run, in
+    /// order, finds it: a run holds the target once, the lower of two intervals at a
+    /// node. Past the ends, the half-interval extrapolations.
+    fn locate_one_dimensional(&self, runs: &[MonotonicRun], target: f64) -> Result<Interval> {
         if !target.is_finite() {
             return Err(domain(self.axes[0]));
         }
-        if target == self.coordinates[0] {
-            return Ok(TabularLocation {
-                base: vec![0],
-                delta: vec![0.0],
+        let coordinates = &self.coordinates;
+        if target == coordinates[0] {
+            return Ok(Interval {
+                position: 0,
+                fraction: 0.0,
             });
         }
-        for position in 0..self.lengths[0].saturating_sub(1) {
-            let first = self.coordinates[position];
-            let second = self.coordinates[position + 1];
-            let usable_index = self.indices[0]
-                .as_ref()
-                .is_none_or(|index| index.values[position] != index.values[position + 1]);
-            if usable_index
-                && first != second
-                && (first.min(second)..=first.max(second)).contains(&target)
-            {
-                return Ok(TabularLocation {
-                    base: vec![position],
-                    delta: vec![(target - first) / (second - first)],
-                });
-            }
+        for run in runs {
+            let nodes = &coordinates[run.start..=run.end];
+            let (first, last) = (nodes[0], nodes[nodes.len() - 1]);
+            let below = match run.direction {
+                IndexDirection::Increasing if (first..=last).contains(&target) => {
+                    nodes.partition_point(|&value| value < target)
+                }
+                IndexDirection::Decreasing if (last..=first).contains(&target) => {
+                    nodes.partition_point(|&value| value > target)
+                }
+                IndexDirection::Increasing | IndexDirection::Decreasing => continue,
+            };
+            let position = run.start + below.saturating_sub(1);
+            let (first, second) = (coordinates[position], coordinates[position + 1]);
+            return Ok(Interval {
+                position,
+                fraction: (target - first) / (second - first),
+            });
         }
         if self.lengths[0] > 1 {
             for position in [0, self.lengths[0] - 2] {
-                let first = self.coordinates[position];
-                let second = self.coordinates[position + 1];
+                let first = coordinates[position];
+                let second = coordinates[position + 1];
                 if first == second {
                     continue;
                 }
                 let fraction = (target - first) / (second - first);
                 let allowed = if position == 0 { -0.5..=0.0 } else { 1.0..=1.5 };
                 if allowed.contains(&fraction) {
-                    return Ok(TabularLocation {
-                        base: vec![position],
-                        delta: vec![fraction],
-                    });
+                    return Ok(Interval { position, fraction });
                 }
             }
         }
         Err(domain(self.axes[0]))
     }
 
-    fn locate_multidimensional(&self, target: &[f64]) -> Result<TabularLocation> {
-        if target.iter().any(|value| !value.is_finite()) {
+    /// Replace the world coordinates of this transform's axes in `coordinates` with
+    /// their intermediate coordinates: the first cell in array order whose sub-voxel
+    /// search holds them, past each cell whose `bounds` cannot.
+    fn invert_multidimensional(
+        &self,
+        cell_lengths: &[usize],
+        bounds: &[f64],
+        coordinates: &mut [f64],
+    ) -> Result<()> {
+        let dimensions = self.axes.len();
+        let node_work = inverse_node_work(dimensions, self.vertex_count)?;
+        let mut buffers = SearchBuffers::new(dimensions, self.vertex_count)?;
+        let mut search = buffers.search(self, node_work);
+        for (target, &image_axis) in search.target.iter_mut().zip(&self.axes) {
+            *target = coordinates[image_axis];
+        }
+        if search.target.iter().any(|value| !value.is_finite()) {
             return Err(domain(self.axes[0]));
         }
-        let cell_lengths: Vec<usize> = self
-            .lengths
-            .iter()
-            .map(|&length| length.saturating_sub(1).max(1))
-            .collect();
-        let cell_count = cell_lengths
-            .iter()
-            .try_fold(1usize, |count, &length| count.checked_mul(length))
-            .ok_or_else(|| invalid("TAB coordinate array is too large"))?;
-        let dimensions = self.axes.len();
-        let mut base = vec![0; dimensions];
-        let mut start = vec![0.0; dimensions];
-        let mut extent = vec![0.0; dimensions];
-        let mut solution = vec![0.0; dimensions];
-        let mut scratch = TabularSearchScratch::new(dimensions, self.vertex_count)?;
-        for cell in 0..cell_count {
-            let mut remainder = cell;
-            for (position, &length) in base.iter_mut().zip(&cell_lengths) {
-                *position = remainder % length;
-                remainder /= length;
-            }
-            for (table_axis, &position) in base.iter().enumerate() {
-                let length = self.lengths[table_axis];
-                let first = if position == 0 { -0.5 } else { 0.0 };
-                let last = if length == 1 || position == length - 2 {
-                    1.5
-                } else {
-                    1.0
-                };
-                start[table_axis] = first;
-                extent[table_axis] = if length == 1 { 1.0 } else { last - first };
-            }
-            scratch.voxel.fill(0);
-            let mut search = SubvoxelSearch {
-                transform: self,
-                target,
-                base: &base,
-                start: &start,
-                extent: &extent,
-                solution: &mut solution,
-                scratch: &mut scratch,
-            };
-            if search.locate(0)? {
-                return Ok(TabularLocation {
-                    base,
-                    delta: solution,
+        for (cell, cell_bounds) in bounds.chunks_exact(3 * dimensions).enumerate() {
+            // The search's first level, with its corners known: no corner within
+            // tolerance of the target, and none on its other side.
+            let outside = cell_bounds
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(search.target.iter())
+                .any(|(&[min, max, tolerance], &target)| {
+                    max - target < -tolerance || min - target > tolerance
                 });
+            if outside {
+                continue;
+            }
+            search.enter_cell(cell, cell_lengths);
+            if search.locate(0)? {
+                for table_axis in 0..dimensions {
+                    let interval = Interval {
+                        position: search.base[table_axis],
+                        fraction: search.solution[table_axis],
+                    };
+                    coordinates[self.axes[table_axis]] = self.intermediate(table_axis, interval)?;
+                }
+                return Ok(());
             }
         }
         Err(domain(self.axes[0]))
@@ -596,12 +746,11 @@ impl TabularTransform {
 }
 
 fn interpolation_vertex_count(variable_axes: usize) -> Result<usize> {
-    let shift = u32::try_from(variable_axes)
-        .map_err(|_| invalid("TAB interpolation dimensionality is too large"))?;
+    let shift = u32::try_from(variable_axes).map_err(|_| invalid(TabularDefect::TooManyAxes))?;
     1usize
         .checked_shl(shift)
         .filter(|&count| count <= MAX_INTERPOLATION_VERTICES)
-        .ok_or_else(|| invalid("TAB interpolation dimensionality is too large"))
+        .ok_or_else(|| invalid(TabularDefect::TooManyAxes))
 }
 
 #[derive(Debug)]
@@ -616,80 +765,143 @@ struct TabularLocation {
     delta: Vec<f64>,
 }
 
+/// The state of one point's sub-voxel search in three buffers, which
+/// [`SearchBuffers::search`] splits into its parts: per table axis the target, the
+/// cell's box start and extent, the solution, the box offset and the rounding
+/// tolerance, then the corners; the cell base, the voxel and a corner's index; and
+/// whether a corner lies below, above or on the target.
 #[derive(Debug)]
-struct TabularSearchScratch {
-    lower: Vec<bool>,
-    upper: Vec<bool>,
-    equal: Vec<bool>,
-    delta: Vec<f64>,
-    indices: Vec<usize>,
-    corners: Vec<f64>,
-    /// Per coordinate axis, how far an interpolated corner may sit from the
-    /// exact value through rounding alone — see [`SubvoxelSearch::evaluate_corners`].
-    tolerance: Vec<f64>,
-    voxel: Vec<usize>,
-    node_work: usize,
-    remaining_work: usize,
+struct SearchBuffers {
+    reals: Vec<f64>,
+    counts: Vec<usize>,
+    flags: Vec<bool>,
 }
 
-impl TabularSearchScratch {
+impl SearchBuffers {
     fn new(dimensions: usize, vertex_count: usize) -> Result<Self> {
-        let node_work = inverse_node_work(dimensions, vertex_count)?;
-        let corner_count = dimensions
+        let reals = dimensions
             .checked_mul(vertex_count)
+            .and_then(|corners| corners.checked_add(6 * dimensions))
             .ok_or(FitsError::DataUnitOverflow)?;
         Ok(Self {
-            lower: allocation::try_zeroed(false, dimensions)?,
-            upper: allocation::try_zeroed(false, dimensions)?,
-            equal: allocation::try_zeroed(false, dimensions)?,
-            delta: allocation::try_zeroed(0.0, dimensions)?,
-            indices: allocation::try_zeroed(0, dimensions)?,
-            corners: allocation::try_zeroed(0.0, corner_count)?,
-            tolerance: allocation::try_zeroed(0.0, dimensions)?,
-            voxel: allocation::try_zeroed(0, dimensions)?,
+            reals: allocation::try_zeroed(0.0, reals)?,
+            counts: allocation::try_zeroed(0, 3 * dimensions)?,
+            flags: allocation::try_zeroed(false, 3 * dimensions)?,
+        })
+    }
+
+    /// The search of `transform`'s cells, each of whose nodes costs `node_work` of its
+    /// budget.
+    fn search<'a>(
+        &'a mut self,
+        transform: &'a TabularTransform,
+        node_work: usize,
+    ) -> SubvoxelSearch<'a> {
+        let dimensions = transform.axes.len();
+        let (target, reals) = self.reals.split_at_mut(dimensions);
+        let (start, reals) = reals.split_at_mut(dimensions);
+        let (extent, reals) = reals.split_at_mut(dimensions);
+        let (solution, reals) = reals.split_at_mut(dimensions);
+        let (delta, reals) = reals.split_at_mut(dimensions);
+        let (tolerance, corners) = reals.split_at_mut(dimensions);
+        let (base, counts) = self.counts.split_at_mut(dimensions);
+        let (voxel, indices) = counts.split_at_mut(dimensions);
+        let (lower, flags) = self.flags.split_at_mut(dimensions);
+        let (upper, equal) = flags.split_at_mut(dimensions);
+        SubvoxelSearch {
+            transform,
+            target,
+            start,
+            extent,
+            solution,
+            delta,
+            tolerance,
+            corners,
+            base,
+            voxel,
+            indices,
+            lower,
+            upper,
+            equal,
             node_work,
             remaining_work: MAX_INVERSE_WORK,
-        })
+        }
     }
 }
 
 #[derive(Debug)]
 struct SubvoxelSearch<'a> {
     transform: &'a TabularTransform,
-    target: &'a [f64],
-    base: &'a [usize],
-    start: &'a [f64],
-    extent: &'a [f64],
+    target: &'a mut [f64],
+    start: &'a mut [f64],
+    extent: &'a mut [f64],
     solution: &'a mut [f64],
-    scratch: &'a mut TabularSearchScratch,
+    delta: &'a mut [f64],
+    /// Per coordinate axis, how far an interpolated corner may sit from the
+    /// exact value through rounding alone — see [`SubvoxelSearch::fill_corners`].
+    tolerance: &'a mut [f64],
+    corners: &'a mut [f64],
+    base: &'a mut [usize],
+    voxel: &'a mut [usize],
+    indices: &'a mut [usize],
+    lower: &'a mut [bool],
+    upper: &'a mut [bool],
+    equal: &'a mut [bool],
+    node_work: usize,
+    remaining_work: usize,
 }
 
 impl SubvoxelSearch<'_> {
+    /// Start on cell `cell` of the grid of `cell_lengths`, in array order: its base node
+    /// and the box it searches, half a cell past each end of the array.
+    fn enter_cell(&mut self, cell: usize, cell_lengths: &[usize]) {
+        let mut remainder = cell;
+        for (table_axis, &cell_length) in cell_lengths.iter().enumerate() {
+            let position = remainder % cell_length;
+            remainder /= cell_length;
+            let length = self.transform.lengths[table_axis];
+            let first = if position == 0 { -0.5 } else { 0.0 };
+            let last = if length == 1 || position == length - 2 {
+                1.5
+            } else {
+                1.0
+            };
+            self.base[table_axis] = position;
+            self.start[table_axis] = first;
+            self.extent[table_axis] = if length == 1 { 1.0 } else { last - first };
+        }
+        self.voxel.fill(0);
+    }
+
     fn locate(&mut self, level: usize) -> Result<bool> {
         let dimensions = self.transform.axes.len();
         let size = 2.0f64.powi(-i32::try_from(level).expect("the search depth fits i32"));
-        self.evaluate_corners(level, size)?;
-        self.scratch.lower.fill(false);
-        self.scratch.upper.fill(false);
-        self.scratch.equal.fill(false);
+        if self.node_work > self.remaining_work {
+            return Err(FitsError::WcsNoConvergence { algorithm: "TAB" });
+        }
+        self.remaining_work -= self.node_work;
+        self.fill_corners(level, size);
+        self.lower.fill(false);
+        self.upper.fill(false);
+        self.equal.fill(false);
         for vertex in 0..self.transform.vertex_count {
             let mut exact = true;
             for table_axis in 0..dimensions {
-                let difference = self.scratch.corners[vertex * dimensions + table_axis]
-                    - self.target[table_axis];
-                if difference.abs() <= self.scratch.tolerance[table_axis] {
-                    self.scratch.equal[table_axis] = true;
+                let difference =
+                    self.corners[vertex * dimensions + table_axis] - self.target[table_axis];
+                if difference.abs() <= self.tolerance[table_axis] {
+                    self.equal[table_axis] = true;
                 } else {
                     exact = false;
                     if difference < 0.0 {
-                        self.scratch.lower[table_axis] = true;
+                        self.lower[table_axis] = true;
                     } else {
-                        self.scratch.upper[table_axis] = true;
+                        self.upper[table_axis] = true;
                     }
                 }
             }
             if exact {
-                self.solution.copy_from_slice(&self.scratch.delta);
+                self.solution.copy_from_slice(self.delta);
                 for (bit, &table_axis) in self.transform.variable_axes.iter().enumerate() {
                     if vertex & (1 << bit) != 0 {
                         self.solution[table_axis] += size * self.extent[table_axis];
@@ -698,9 +910,8 @@ impl SubvoxelSearch<'_> {
                 return Ok(true);
             }
         }
-        let possible = (0..dimensions).all(|axis| {
-            self.scratch.equal[axis] || (self.scratch.lower[axis] && self.scratch.upper[axis])
-        });
+        let possible =
+            (0..dimensions).all(|axis| self.equal[axis] || (self.lower[axis] && self.upper[axis]));
         if !possible {
             return Ok(false);
         }
@@ -708,9 +919,7 @@ impl SubvoxelSearch<'_> {
             let half = size / 2.0;
             for table_axis in 0..dimensions {
                 self.solution[table_axis] = self.start[table_axis]
-                    + half
-                        * self.extent[table_axis]
-                        * (2 * self.scratch.voxel[table_axis] + 1) as f64;
+                    + half * self.extent[table_axis] * (2 * self.voxel[table_axis] + 1) as f64;
             }
             return Ok(true);
         }
@@ -719,50 +928,46 @@ impl SubvoxelSearch<'_> {
                 let parent = if level == 0 {
                     0
                 } else {
-                    2 * self.scratch.voxel[table_axis]
+                    2 * self.voxel[table_axis]
                 };
-                self.scratch.voxel[table_axis] =
-                    parent + usize::from(subdivision & (1 << bit) != 0);
+                self.voxel[table_axis] = parent + usize::from(subdivision & (1 << bit) != 0);
             }
             if self.locate(level + 1)? {
                 return Ok(true);
             }
             for &table_axis in &self.transform.variable_axes {
-                self.scratch.voxel[table_axis] = if level == 0 {
+                self.voxel[table_axis] = if level == 0 {
                     0
                 } else {
-                    self.scratch.voxel[table_axis] / 2
+                    self.voxel[table_axis] / 2
                 };
             }
         }
         Ok(false)
     }
 
-    fn evaluate_corners(&mut self, level: usize, size: f64) -> Result<()> {
+    /// The corners of the current voxel at `level`, of side `size` of the cell's box,
+    /// and their rounding tolerance.
+    fn fill_corners(&mut self, level: usize, size: f64) {
         let dimensions = self.transform.axes.len();
-        if self.scratch.node_work > self.scratch.remaining_work {
-            return Err(FitsError::WcsNoConvergence { algorithm: "TAB" });
-        }
-        self.scratch.remaining_work -= self.scratch.node_work;
-
         for table_axis in 0..dimensions {
-            self.scratch.delta[table_axis] = if level == 0 {
+            self.delta[table_axis] = if level == 0 {
                 self.start[table_axis]
             } else {
                 self.start[table_axis]
-                    + size * self.extent[table_axis] * self.scratch.voxel[table_axis] as f64
+                    + size * self.extent[table_axis] * self.voxel[table_axis] as f64
             };
         }
         for vertex in 0..self.transform.vertex_count {
-            self.scratch.indices.copy_from_slice(self.base);
+            self.indices.copy_from_slice(self.base);
             for (bit, &table_axis) in self.transform.variable_axes.iter().enumerate() {
                 if vertex & (1 << bit) != 0 {
-                    self.scratch.indices[table_axis] += 1;
+                    self.indices[table_axis] += 1;
                 }
             }
-            let source = self.transform.coordinate_offset(&self.scratch.indices);
+            let source = self.transform.coordinate_offset(self.indices);
             let destination = vertex * dimensions;
-            self.scratch.corners[destination..destination + dimensions]
+            self.corners[destination..destination + dimensions]
                 .copy_from_slice(&self.transform.coordinates[source..source + dimensions]);
         }
         // A corner is M linear interpolations of the voxel's coordinates, one per
@@ -773,14 +978,14 @@ impl SubvoxelSearch<'_> {
         // Relative to the coordinates, the test means the same in metres as in Hz.
         let passes = self.transform.variable_axes.len() as f64;
         let rounding = 3.0 * passes * self.transform.vertex_count as f64 * f64::EPSILON;
-        for (table_axis, tolerance) in self.scratch.tolerance.iter_mut().enumerate() {
+        for (table_axis, tolerance) in self.tolerance.iter_mut().enumerate() {
             let largest = (0..self.transform.vertex_count)
-                .map(|vertex| self.scratch.corners[vertex * dimensions + table_axis].abs())
+                .map(|vertex| self.corners[vertex * dimensions + table_axis].abs())
                 .fold(0.0, f64::max);
             *tolerance = rounding * largest;
         }
         for (bit, &table_axis) in self.transform.variable_axes.iter().enumerate() {
-            let lower = self.scratch.delta[table_axis];
+            let lower = self.delta[table_axis];
             let upper = lower + size * self.extent[table_axis];
             let stride = 1usize << bit;
             let block = 2 * stride;
@@ -791,15 +996,14 @@ impl SubvoxelSearch<'_> {
                     for coordinate_axis in 0..dimensions {
                         let lower_index = lower_vertex * dimensions + coordinate_axis;
                         let upper_index = upper_vertex * dimensions + coordinate_axis;
-                        let first = self.scratch.corners[lower_index];
-                        let second = self.scratch.corners[upper_index];
-                        self.scratch.corners[lower_index] = first * (1.0 - lower) + second * lower;
-                        self.scratch.corners[upper_index] = first * (1.0 - upper) + second * upper;
+                        let first = self.corners[lower_index];
+                        let second = self.corners[upper_index];
+                        self.corners[lower_index] = first * (1.0 - lower) + second * lower;
+                        self.corners[upper_index] = first * (1.0 - upper) + second * upper;
                     }
                 }
             }
         }
-        Ok(())
     }
 }
 
@@ -816,25 +1020,24 @@ fn inverse_node_work(dimensions: usize, vertex_count: usize) -> Result<usize> {
 
 fn first_row_shape_and_values(row_count: usize, reader: ColumnReader<'_>) -> Result<FirstRow> {
     if row_count == 0 {
-        return Err(invalid("TAB lookup table must contain a row"));
+        return Err(invalid(TabularDefect::EmptyTable));
     }
     let descriptor = reader.descriptor();
-    let values = if descriptor.tform.kind.is_descriptor() {
+    let values = if descriptor.tform.descriptor_width().is_some() {
         reader.vla_physical()?.row(0).to_vec()
     } else {
         let values = reader.physical()?;
-        values[..descriptor.tform.repeat].to_vec()
+        values[..descriptor.tform.repeat()].to_vec()
     };
     let shape = descriptor
-        .tdim
-        .clone()
-        .unwrap_or_else(|| vec![values.len()]);
+        .tdim()?
+        .map_or_else(|| vec![values.len()], <[usize]>::to_vec);
     Ok(FirstRow { shape, values })
 }
 
 fn validate_index(index: &[f64]) -> Result<IndexDirection> {
     if index.iter().any(|value| !value.is_finite()) {
-        return Err(invalid("TAB index vectors must contain finite values"));
+        return Err(invalid(TabularDefect::NonFiniteIndex));
     }
     if index.len() < 2 {
         return Ok(IndexDirection::Increasing);
@@ -850,13 +1053,13 @@ fn validate_index(index: &[f64]) -> Result<IndexDirection> {
         };
         if comparison != 0 {
             if direction != 0 && direction != comparison {
-                return Err(invalid("TAB index vectors must be monotonic"));
+                return Err(invalid(TabularDefect::NonMonotonicIndex));
             }
             direction = comparison;
         }
     }
     if direction == 0 {
-        return Err(invalid("TAB index vectors must not be constant"));
+        return Err(invalid(TabularDefect::ConstantIndex));
     }
     Ok(if direction > 0 {
         IndexDirection::Increasing
@@ -873,26 +1076,24 @@ fn integer_parameter(
     default: i64,
 ) -> Result<i64> {
     let key = Keyword::fitting(format_args!("PV{}_{parameter}{alt}", axis + 1));
-    match read_integer(header, key)? {
+    match header_read::integer(header, key)? {
         None => Ok(default),
         Some(value) if value >= 1 => Ok(value),
-        Some(_) => Err(invalid(
-            "TAB PVi_1, PVi_2, and PVi_3 must be positive integers",
-        )),
+        Some(_) => Err(invalid(TabularDefect::NonPositiveParameter)),
     }
 }
 
-fn required_text(header: &Header, keyword: Keyword, detail: &'static str) -> Result<String> {
+fn required_text(header: &Header, keyword: Keyword, defect: TabularDefect) -> Result<String> {
     header
         .get_text(keyword)?
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| invalid(detail))
+        .ok_or_else(|| invalid(defect))
 }
 
-fn invalid(detail: impl Into<String>) -> FitsError {
+const fn invalid(defect: TabularDefect) -> FitsError {
     FitsError::InvalidWcs {
-        detail: detail.into(),
+        defect: WcsDefect::Tabular(defect),
     }
 }
 
@@ -954,21 +1155,31 @@ pub(crate) mod internals {
     }
 
     /// An image header of `axis_count` `-TAB` axes, axis i reading table axis i of
-    /// the `coordinate` column in `WCS-TABLE`, with unit pixels and no offsets.
-    pub(crate) fn tab_header(axis_count: usize, coordinate: &str) -> Header {
+    /// the `COORD` column in `WCS-TABLE`.
+    pub(crate) fn tab_header(axis_count: usize) -> Header {
         let mut header = Header::new();
         header.set_internal(keywords::NAXIS, i64::try_from(axis_count).unwrap());
         for axis in 1..=axis_count {
-            header
-                .set_internal(format!("CTYPE{axis}").as_str(), format!("AX{axis:02}-TAB"))
+            header.set_tab_axis(axis, "COORD", axis);
+        }
+        header
+    }
+
+    impl Header {
+        /// Make image axis `axis` a `-TAB` axis that reads table axis `table_axis` of the
+        /// `column` column in `WCS-TABLE`, with unit pixels and no offsets.
+        pub(crate) fn set_tab_axis(&mut self, axis: usize, column: &str, table_axis: usize) {
+            self.set_internal(format!("CTYPE{axis}").as_str(), format!("AX{axis:02}-TAB"))
                 .set_internal(format!("CRPIX{axis}").as_str(), 0.0)
                 .set_internal(format!("CRVAL{axis}").as_str(), 0.0)
                 .set_internal(format!("CDELT{axis}").as_str(), 1.0)
                 .set_internal(format!("PS{axis}_0").as_str(), "WCS-TABLE")
-                .set_internal(format!("PS{axis}_1").as_str(), coordinate)
-                .set_internal(format!("PV{axis}_3").as_str(), i64::try_from(axis).unwrap());
+                .set_internal(format!("PS{axis}_1").as_str(), column)
+                .set_internal(
+                    format!("PV{axis}_3").as_str(),
+                    i64::try_from(table_axis).unwrap(),
+                );
         }
-        header
     }
 
     /// Entries in the [`indexed_wcs`] lookup.
@@ -986,7 +1197,7 @@ pub(crate) mod internals {
                 ("COORD", &coordinates, Some(shape.as_str())),
                 ("INDEX", &index, None),
             ]);
-            let mut header = tab_header(1, "COORD");
+            let mut header = tab_header(1);
             header
                 .set_internal("CTYPE1", "WAVE-TAB")
                 .set_internal("CUNIT1", "m")
@@ -1000,7 +1211,7 @@ pub(crate) mod internals {
         static WCS: OnceLock<Wcs> = OnceLock::new();
         WCS.get_or_init(|| {
             let table = lookup_table(&[("COORD", &COUPLED_GRID, Some("(2,2,2)"))]);
-            resolved_wcs(&tab_header(2, "COORD"), &table)
+            resolved_wcs(&tab_header(2), &table)
         })
     }
 

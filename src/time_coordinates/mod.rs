@@ -9,6 +9,7 @@
 //! frames requires external ephemeris and Earth-orientation data and is outside
 //! this crate.
 
+pub(crate) mod axis;
 pub(crate) mod bounds;
 pub(crate) mod coordinate;
 pub(crate) mod datetime;
@@ -19,8 +20,3 @@ pub(crate) mod reference_position;
 pub(crate) mod scale;
 pub(crate) mod time_axis_kind;
 pub(crate) mod unit;
-
-const SEC_PER_DAY: f64 = 86_400.0;
-
-#[cfg(test)]
-mod tests;

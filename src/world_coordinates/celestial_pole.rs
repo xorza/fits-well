@@ -1,13 +1,10 @@
 //! The native→celestial rotation: the celestial pole and the spherical rotation
 //! through it (Calabretta & Greisen 2002, §2).
 
-use crate::error::{FitsError, Result};
-use crate::world_coordinates::D2R;
-use crate::world_coordinates::R2D;
-use crate::world_coordinates::norm180;
-use crate::world_coordinates::norm360;
-use crate::world_coordinates::projection::NativeCoordinate;
-use crate::world_coordinates::{cosd, sind};
+use crate::error::{FitsError, PoleDefect, Result};
+use crate::world_coordinates::angle;
+use crate::world_coordinates::angle::R2D;
+use crate::world_coordinates::native_rotation::CelestialCoordinate;
 
 /// The rotation from native to celestial coordinates: the celestial pole
 /// `(α_p, δ_p)` and the native longitude of the pole `φ_p` (LONPOLE), all degrees.
@@ -22,11 +19,13 @@ pub struct CelestialPole {
     pub lonpole: f64,
 }
 
-/// A celestial coordinate pair in degrees, as [`CelestialPole::to_celestial`] yields.
+/// The fiducial point of a projection: its native coordinates `(φ₀, θ₀)` and the
+/// celestial ones `(α₀, δ₀)` it maps to, all degrees.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct CelestialCoordinate {
-    pub(super) ra: f64,
-    pub(super) dec: f64,
+pub(super) struct Fiducial {
+    pub(super) phi: f64,
+    pub(super) theta: f64,
+    pub(super) celestial: CelestialCoordinate,
 }
 
 impl CelestialPole {
@@ -39,16 +38,14 @@ impl CelestialPole {
     /// `v = acos(sin δ₀ / z)`, `z = √(sin²θ₀ + cos²θ₀ cos²(φ_p − φ₀))`. Each is wrapped to
     /// `[−180°, 180°]`; LATPOLE picks the nearer of those within ±90°, and with none
     /// there is no pole. When `z = 0` LATPOLE alone fixes `δ_p`.
-    pub(super) fn from_fiducial(
-        phi0: f64,
-        theta0: f64,
-        a0: f64,
-        d0: f64,
-        phip: f64,
-        latpole: f64,
-    ) -> Result<Self> {
+    pub(super) fn from_fiducial(fiducial: Fiducial, phip: f64, latpole: f64) -> Result<Self> {
         /// wcslib's `celset` tolerance on the pole latitude and on `|sin δ₀ / z|`.
         const TOLERANCE: f64 = 1e-10;
+        let Fiducial {
+            phi: phi0,
+            theta: theta0,
+            celestial: CelestialCoordinate { ra: a0, dec: d0 },
+        } = fiducial;
         if theta0 == 90.0 {
             return Ok(Self {
                 ra: a0,
@@ -56,12 +53,12 @@ impl CelestialPole {
                 lonpole: phip,
             });
         }
-        let (sin_theta0, cos_theta0) = (sind(theta0), cosd(theta0));
-        let sin_d0 = sind(d0);
+        let (sin_theta0, cos_theta0) = (angle::sind(theta0), angle::cosd(theta0));
+        let sin_d0 = angle::sind(d0);
         let (sin_dphi, cos_dphi) = if phip == phi0 {
             (0.0, 1.0)
         } else {
-            (sind(phip - phi0), cosd(phip - phi0))
+            (angle::sind(phip - phi0), angle::cosd(phip - phi0))
         };
         let x = cos_theta0 * cos_dphi;
         let y = sin_theta0;
@@ -69,7 +66,7 @@ impl CelestialPole {
         let dp = if z == 0.0 {
             if sin_d0 != 0.0 {
                 return Err(FitsError::WcsInvalidPole {
-                    detail: "|φp − φ0| = 90° with θ0 = 0 needs δ0 = 0",
+                    defect: PoleDefect::EquatorialFiducial,
                 });
             }
             latpole.clamp(-90.0, 90.0)
@@ -81,7 +78,7 @@ impl CelestialPole {
                 if ratio.abs() > 1.0 {
                     if ratio.abs() - 1.0 >= TOLERANCE {
                         return Err(FitsError::WcsInvalidPole {
-                            detail: "|δ0| is too large for this φp, φ0 and θ0",
+                            defect: PoleDefect::FiducialLatitude,
                         });
                     }
                     ratio = ratio.signum();
@@ -112,13 +109,13 @@ impl CelestialPole {
             };
             if !valid(dp) {
                 return Err(FitsError::WcsInvalidPole {
-                    detail: "no pole latitude within ±90° fits φp, φ0 and θ0",
+                    defect: PoleDefect::NoLatitude,
                 });
             }
             dp.clamp(-90.0, 90.0)
         };
-        let cos_d0 = cosd(d0);
-        let z = cosd(dp) * cos_d0;
+        let cos_d0 = angle::cosd(d0);
+        let z = angle::cosd(dp) * cos_d0;
         let ap = if z.abs() < TOLERANCE {
             if cos_d0.abs() < TOLERANCE {
                 // The celestial pole is the fiducial point.
@@ -131,50 +128,94 @@ impl CelestialPole {
                 a0 - phip + phi0
             }
         } else {
-            let x = (sin_theta0 - sind(dp) * sin_d0) / z;
+            let x = (sin_theta0 - angle::sind(dp) * sin_d0) / z;
             let y = sin_dphi * cos_theta0 / cos_d0;
             a0 - y.atan2(x) * R2D
         };
         Ok(Self {
-            ra: norm360(ap),
+            ra: angle::norm360(ap),
             dec: dp,
             lonpole: phip,
         })
     }
+}
 
-    /// Native spherical (φ, θ) → celestial (α, δ), all degrees (CG 2002 eq. 2).
-    pub(super) fn to_celestial(self, phi: f64, theta: f64) -> CelestialCoordinate {
-        let Self {
-            ra: ap,
-            dec: dp,
-            lonpole: fp,
-        } = self;
-        let (tr, dpr, dphi) = (theta * D2R, dp * D2R, (phi - fp) * D2R);
-        let sin_d = tr.sin() * dpr.sin() + tr.cos() * dpr.cos() * dphi.cos();
-        let dec = sin_d.clamp(-1.0, 1.0).asin() * R2D;
-        let y = -tr.cos() * dphi.sin();
-        let x = tr.sin() * dpr.cos() - tr.cos() * dpr.sin() * dphi.cos();
-        CelestialCoordinate {
-            ra: norm360(ap + y.atan2(x) * R2D),
-            dec,
+#[cfg(test)]
+mod tests {
+    use crate::error::{FitsError, PoleDefect};
+    use crate::world_coordinates::celestial_pole::{CelestialPole, Fiducial};
+    use crate::world_coordinates::native_rotation::CelestialCoordinate;
+
+    /// The fiducial point `(φ₀, θ₀) = (0, theta)` at `(α₀, δ₀) = (45°, dec)`.
+    fn fiducial(theta: f64, dec: f64) -> Fiducial {
+        Fiducial {
+            phi: 0.0,
+            theta,
+            celestial: CelestialCoordinate { ra: 45.0, dec },
         }
     }
 
-    /// Celestial (α, δ) → native spherical (φ, θ), all degrees (CG 2002 eq. 5).
-    pub(super) fn to_native(self, ra: f64, dec: f64) -> NativeCoordinate {
-        let Self {
-            ra: ap,
-            dec: dp,
-            lonpole: fp,
-        } = self;
-        let (dr, dpr, dalpha) = (dec * D2R, dp * D2R, (ra - ap) * D2R);
-        let sin_t = dr.sin() * dpr.sin() + dr.cos() * dpr.cos() * dalpha.cos();
-        let theta = sin_t.clamp(-1.0, 1.0).asin() * R2D;
-        let y = -dr.cos() * dalpha.sin();
-        let x = dr.sin() * dpr.cos() - dr.cos() * dpr.sin() * dalpha.cos();
-        NativeCoordinate {
-            phi: norm180(fp + y.atan2(x) * R2D),
-            theta,
-        }
+    /// A zenithal fiducial point is the native pole. A cylindrical one at (φ₀, θ₀) = (0, 0)
+    /// with `φ_p = φ₀` puts the native pole 90° along the meridian from (α₀, δ₀) =
+    /// (45°, 30°): δ_p = 0 ± (90° − 30°), LATPOLE 90° picks 60° and α_p = 45° − 180°, and
+    /// LATPOLE −90° picks −60° and α_p = 45°.
+    #[test]
+    fn the_pole_follows_the_fiducial_point_and_latpole() {
+        let pole = |theta0, phip, latpole| {
+            CelestialPole::from_fiducial(fiducial(theta0, 30.0), phip, latpole).unwrap()
+        };
+        assert_eq!(
+            pole(90.0, 180.0, 90.0),
+            CelestialPole {
+                ra: 45.0,
+                dec: 30.0,
+                lonpole: 180.0
+            }
+        );
+        assert_eq!(
+            pole(0.0, 0.0, 90.0),
+            CelestialPole {
+                ra: 225.0,
+                dec: 60.0,
+                lonpole: 0.0
+            }
+        );
+        assert_eq!(
+            pole(0.0, 0.0, -90.0),
+            CelestialPole {
+                ra: 45.0,
+                dec: -60.0,
+                lonpole: 0.0
+            }
+        );
+    }
+
+    /// θ₀ = 0 with φ_p − φ₀ = 90° gives z = 0, where only δ₀ = 0 has a pole, and LATPOLE
+    /// is its latitude. With φ_p − φ₀ = 60°, z = cos 60° = 0.5 and sin 45° / z = √2 has no
+    /// arccosine. With φ_p − φ₀ = 180°, u = 180° and v = 60°, so both 240° → −120° and
+    /// 120° lie past ±90°.
+    #[test]
+    fn a_fiducial_point_without_a_pole_is_refused() {
+        let pole =
+            |d0, phip, latpole| CelestialPole::from_fiducial(fiducial(0.0, d0), phip, latpole);
+        assert!(matches!(
+            pole(30.0, 90.0, 90.0),
+            Err(FitsError::WcsInvalidPole {
+                defect: PoleDefect::EquatorialFiducial
+            })
+        ));
+        assert_eq!(pole(0.0, 90.0, 40.0).unwrap().dec, 40.0);
+        assert!(matches!(
+            pole(45.0, 60.0, 90.0),
+            Err(FitsError::WcsInvalidPole {
+                defect: PoleDefect::FiducialLatitude
+            })
+        ));
+        assert!(matches!(
+            pole(30.0, 180.0, 90.0),
+            Err(FitsError::WcsInvalidPole {
+                defect: PoleDefect::NoLatitude
+            })
+        ));
     }
 }

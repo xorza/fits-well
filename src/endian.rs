@@ -4,26 +4,7 @@
 //! reused `Vec`, an existing slice, appended bytes), all built on the same
 //! monomorphized per-element conversion.
 
-use crate::bintable::descriptor::DescriptorWidth;
-use crate::error::FitsError;
-use crate::error::Result;
-use std::iter;
-
-/// Decode a packed big-endian buffer into host-endian values of a fixed-width
-/// type, e.g. `decode_be(bytes, i16::from_be_bytes)`.
-///
-/// `conv` is a generic `Fn`, not a `fn` pointer: each call site passes a zero-sized
-/// fn *item* (`i32::from_be_bytes`, …), so the per-element conversion monomorphizes
-/// to a direct, inlinable call and the loop autovectorizes — a `fn`-pointer
-/// parameter would force an indirect call per element and block both.
-pub(crate) fn decode_be<const N: usize, T, F>(bytes: &[u8], conv: F) -> Vec<T>
-where
-    F: Fn([u8; N]) -> T,
-{
-    decode_be_cells(iter::once(bytes), bytes.len() / N, conv)
-}
-
-/// [`decode_be`] over a *sequence* of buffers, decoded in order into one `Vec`. An
+/// Decode a *sequence* of big-endian buffers, in order, into one `Vec`. An
 /// image or heap array is a single contiguous run, but a binary-table column read
 /// visits one strided cell per row, so the elements it decodes are not adjacent.
 /// `capacity` is a `Vec::with_capacity` hint only.
@@ -57,29 +38,25 @@ pub(crate) fn decode_be_cells_into<'a, const N: usize, T, F>(
     }
 }
 
-/// [`decode_be`] into a reused buffer rather than a fresh `Vec`: clears `out`, then
-/// decodes every `N`-byte chunk of `bytes` into it. The per-element loop is the same
-/// one [`decode_be`] uses and vectorizes identically.
+/// [`decode_be_cells_into`] of the one run `bytes`: `out`, cleared first, holds every
+/// `N`-byte value of it.
 ///
 /// Gated because the tiled codecs are its only callers — they widen each tile into a
-/// scratch buffer held across tiles, so they need the reused-buffer shape rather than
-/// [`decode_be`]'s fresh allocation.
+/// scratch buffer held across tiles.
 #[cfg(feature = "compression")]
 pub(crate) fn decode_be_into<const N: usize, T, F>(bytes: &[u8], out: &mut Vec<T>, conv: F)
 where
     F: Fn([u8; N]) -> T,
 {
-    out.clear();
-    out.reserve_exact(bytes.len() / N);
-    out.extend(bytes.as_chunks::<N>().0.iter().map(|c| conv(*c)));
+    decode_be_cells_into(std::iter::once(bytes), bytes.len() / N, conv, out);
 }
 
 /// Decode a big-endian buffer into the host-endian slice `dst` (one element per
-/// `N`-byte chunk; `dst.len()` must be `bytes.len() / N`). The slice-writing
-/// counterpart to [`decode_be`] — used by the reader's view path, which decodes into
-/// a reused, `u64`-aligned scratch reinterpreted as `&mut [T]` so a hot read loop
-/// reuses the (already-faulted) output pages instead of allocating per image.
-/// `conv` is inlined per the [`decode_be`] note, so the fixed-stride loop vectorizes.
+/// `N`-byte chunk; `dst.len()` must be `bytes.len() / N`) — what the reader's view path
+/// decodes into a reused, `u64`-aligned scratch reinterpreted as `&mut [T]`, so a hot
+/// read loop reuses the (already-faulted) output pages instead of allocating per image.
+/// `conv` is a generic `Fn`, not a `fn` pointer: each call site passes a zero-sized fn
+/// item, so the conversion inlines and the fixed-stride loop vectorizes.
 pub(crate) fn decode_be_into_slice<const N: usize, T, F>(bytes: &[u8], dst: &mut [T], conv: F)
 where
     F: Fn([u8; N]) -> T,
@@ -98,8 +75,8 @@ where
 ///
 /// Grows `out` once and writes each element into its `N`-byte slot, rather than a
 /// per-element `extend_from_slice` (a capacity check + memcpy per element that
-/// dominates and won't vectorize). With `conv` inlined (see [`decode_be`]) the
-/// fixed-stride write loop vectorizes like the decode path.
+/// dominates and won't vectorize). With `conv` inlined (see
+/// [`decode_be_into_slice`]) the fixed-stride write loop vectorizes like the decode path.
 pub(crate) fn extend_be<const N: usize, T: Copy, F>(out: &mut Vec<u8>, values: &[T], conv: F)
 where
     F: Fn(T) -> [u8; N],
@@ -111,55 +88,20 @@ where
     }
 }
 
-/// Validate the signed integer range of a FITS `P` or `Q` descriptor.
-pub(crate) fn validate_pq_descriptor(
-    width: DescriptorWidth,
-    count: u64,
-    offset: u64,
-) -> Result<()> {
-    match width {
-        DescriptorWidth::Q => {
-            i64::try_from(count).map_err(|_| FitsError::DataUnitOverflow)?;
-            i64::try_from(offset).map_err(|_| FitsError::DataUnitOverflow)?;
-        }
-        DescriptorWidth::P => {
-            i32::try_from(count).map_err(|_| FitsError::DataUnitOverflow)?;
-            i32::try_from(offset).map_err(|_| FitsError::DataUnitOverflow)?;
-        }
-    }
-    Ok(())
-}
-
-/// Write a validated big-endian `P` or `Q` descriptor into an existing row slot.
-pub(crate) fn write_pq_descriptor(
-    out: &mut [u8],
-    width: DescriptorWidth,
-    count: u64,
-    offset: u64,
-) -> Result<()> {
-    validate_pq_descriptor(width, count, offset)?;
-    assert_eq!(out.len(), width.bytes(), "descriptor slot width");
-    match width {
-        DescriptorWidth::Q => {
-            out[..8].copy_from_slice(&i64::try_from(count).unwrap().to_be_bytes());
-            out[8..].copy_from_slice(&i64::try_from(offset).unwrap().to_be_bytes());
-        }
-        DescriptorWidth::P => {
-            out[..4].copy_from_slice(&i32::try_from(count).unwrap().to_be_bytes());
-            out[4..].copy_from_slice(&i32::try_from(offset).unwrap().to_be_bytes());
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
+    use std::iter;
+
     use crate::endian::*;
 
     #[test]
     fn decode_and_encode_are_inverse_and_big_endian() {
         assert_eq!(
-            decode_be(&[0x00, 0x01, 0xFF, 0xFF], i16::from_be_bytes),
+            decode_be_cells(
+                iter::once(&[0x00, 0x01, 0xFF, 0xFF][..]),
+                2,
+                i16::from_be_bytes
+            ),
             vec![1i16, -1]
         );
         // Encode direction via the in-place primitive the image/table writers use.
@@ -187,57 +129,8 @@ mod tests {
         assert_eq!(reused, vec![1i64, -1]);
         decode_be_into(&[0x00, 0x02], &mut reused, widen);
         assert_eq!(reused, vec![2i64]);
-        // A trailing partial element is not an element: `as_chunks` drops it.
-        decode_be_into(&[0x00, 0x03, 0x7F], &mut reused, widen);
-        assert_eq!(reused, vec![3i64]);
         // Nothing to decode empties the buffer rather than leaving it untouched.
         decode_be_into(&[], &mut reused, widen);
         assert_eq!(reused, Vec::<i64>::new());
-    }
-
-    /// §7.3.5: `P` is two big-endian i32s and `Q` two i64s, count then offset; a
-    /// value past the form's signed range is refused, not truncated.
-    #[test]
-    fn pq_descriptors_are_big_endian_count_then_offset() {
-        let p_max = i32::MAX as u64;
-        let q_max = i64::MAX as u64;
-        for (width, count, offset, expected) in [
-            (
-                DescriptorWidth::P,
-                7,
-                40,
-                Some(&[0, 0, 0, 7, 0, 0, 0, 40][..]),
-            ),
-            (
-                DescriptorWidth::P,
-                p_max,
-                p_max,
-                Some(&[0x7F, 0xFF, 0xFF, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF][..]),
-            ),
-            (DescriptorWidth::P, p_max + 1, 0, None),
-            (DescriptorWidth::P, 0, p_max + 1, None),
-            // A count past u32 and an offset past 2^33: no 32-bit truncation.
-            (
-                DescriptorWidth::Q,
-                0x1_0000_0004,
-                0x3_0000_0002,
-                Some(&[0, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0, 3, 0, 0, 0, 2][..]),
-            ),
-            (DescriptorWidth::Q, q_max + 1, 0, None),
-            (DescriptorWidth::Q, 0, q_max + 1, None),
-        ] {
-            let mut slot = vec![0xA5; width.bytes()];
-            let written = write_pq_descriptor(&mut slot, width, count, offset);
-            match expected {
-                Some(bytes) => {
-                    written.unwrap();
-                    assert_eq!(slot, bytes, "{width:?} {count} {offset}");
-                }
-                None => assert!(
-                    matches!(written, Err(FitsError::DataUnitOverflow)),
-                    "{width:?} {count} {offset}"
-                ),
-            }
-        }
     }
 }

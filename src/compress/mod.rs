@@ -4,9 +4,8 @@
 //! (`ZBITPIX`, `ZNAXISn`) is split into `ZTILEn` tiles, each compressed and stored
 //! in `COMPRESSED_DATA` (with `GZIP_COMPRESSED_DATA`/`UNCOMPRESSED_DATA` fallbacks).
 //! This module holds the shared pieces — the write-time [`Compression`] and
-//! [`CompressionConfig`], the
-//! [`ImageCodec`] dispatch, the per-tile [`map_tiles`] fan-out, and the `P`-vs-`Q`
-//! descriptor threshold — while the directions live in [`decode`]
+//! [`CompressionConfig`], the [`tile_codec::TileCodec`] dispatch, and the
+//! per-tile [`map_tiles`] fan-out — while the directions live in [`decode`]
 //! ([`TiledImage::decode`]) and [`encode`] ([`encode::compress_image`], all five codecs:
 //! `GZIP_1`, `GZIP_2`, `RICE_1`, `PLIO_1`, `HCOMPRESS_1` with `SMOOTH=1` decode).
 //! Float images are quantized per-tile (`ZSCALE`/`ZZERO`) with `NO_DITHER`,
@@ -21,36 +20,51 @@ pub(crate) mod bench;
 mod convert;
 pub(crate) mod decode;
 pub(crate) mod encode;
+pub(crate) mod encoded_unit;
 mod gzip;
 mod hcompress;
+mod nocompress;
 mod plane;
 mod plio;
 pub(crate) mod quantization;
 mod quantize;
 mod rice;
 pub(crate) mod table;
+mod tile_codec;
 mod tile_geometry;
 
 use crate::bitpix::Bitpix;
+use crate::compress::hcompress::Smoothing;
+use crate::compress::plane::IntBitpix;
 use crate::compress::quantization::Quantization;
+use crate::compress::tile_codec::TileCodec;
+use crate::error::CompressionParameter;
 use crate::error::FitsError;
 use crate::error::Ranked;
 use crate::error::Result;
+use crate::header_model::keywords;
 use crate::image_model::scaling::Scaling;
-use crate::keyword;
+use crate::keyword::Keyword;
 
 /// Validated GZIP configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Gzip {
-    shuffle: bool,
+    form: GzipForm,
     level: u32,
+}
+
+/// Whether a gzip codec shuffles its bytes first: `GZIP_1` or `GZIP_2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GzipForm {
+    Plain,
+    Shuffled,
 }
 
 impl Gzip {
     /// Standard `GZIP_1` at a validated deflate level.
     pub fn new(level: u32) -> Result<Self> {
         Ok(Self {
-            shuffle: false,
+            form: GzipForm::Plain,
             level: Self::checked_level(level)?,
         })
     }
@@ -58,15 +72,15 @@ impl Gzip {
     /// Byte-shuffled `GZIP_2` at a validated deflate level.
     pub fn shuffled(level: u32) -> Result<Self> {
         Ok(Self {
-            shuffle: true,
+            form: GzipForm::Shuffled,
             level: Self::checked_level(level)?,
         })
     }
 
-    fn checked_level(level: u32) -> Result<u32> {
+    const fn checked_level(level: u32) -> Result<u32> {
         if level > 9 {
             return Err(FitsError::InvalidCompressionParameter {
-                detail: format!("gzip compression level {level} is outside 0..=9"),
+                parameter: CompressionParameter::GzipLevel { level },
             });
         }
         Ok(level)
@@ -76,7 +90,7 @@ impl Gzip {
 impl Default for Gzip {
     fn default() -> Self {
         Self {
-            shuffle: false,
+            form: GzipForm::Plain,
             level: gzip::DEFAULT_GZIP_LEVEL,
         }
     }
@@ -119,7 +133,7 @@ impl Hcompress {
     fn positive(scale: f64) -> Result<f64> {
         if !scale.is_finite() || scale <= 0.0 {
             return Err(FitsError::InvalidCompressionParameter {
-                detail: format!("HCOMPRESS scale {scale} must be finite and positive"),
+                parameter: CompressionParameter::HcompressScale { scale },
             });
         }
         Ok(scale)
@@ -127,31 +141,6 @@ impl Hcompress {
 }
 
 impl HcompressScale {
-    /// The integer scale one tile of `values`, of `dimensions`, is compressed at:
-    /// cfitsio rounds a relative scale times the tile's noise, or an absolute one
-    /// (`imcomp_compress_tile`).
-    fn tile_scale(
-        self,
-        values: &[i64],
-        dimensions: &[usize],
-        scratch: &mut quantize::QuantizeScratch,
-    ) -> Result<i32> {
-        let scale = match self {
-            Self::Lossless => return Ok(0),
-            Self::Absolute(scale) => scale.round(),
-            Self::Relative(factor) => {
-                let noise = scratch.integer_noise(values, dimensions[0]);
-                (factor * noise).round()
-            }
-        };
-        if scale > f64::from(i32::MAX) {
-            return Err(FitsError::UnsupportedCompression {
-                name: "HCOMPRESS_1 tile scale exceeds the 32-bit stream range".to_string(),
-            });
-        }
-        Ok(scale as i32)
-    }
-
     /// The `ZVAL1` cfitsio writes for `ZNAME1 = 'SCALE'`: an absolute scale negated.
     const fn keyword_value(self) -> f64 {
         match self {
@@ -175,13 +164,45 @@ pub enum Compression {
 
 impl Compression {
     pub const GZIP: Self = Self::Gzip(Gzip {
-        shuffle: false,
+        form: GzipForm::Plain,
         level: gzip::DEFAULT_GZIP_LEVEL,
     });
     pub const GZIP_SHUFFLED: Self = Self::Gzip(Gzip {
-        shuffle: true,
+        form: GzipForm::Shuffled,
         level: gzip::DEFAULT_GZIP_LEVEL,
     });
+
+    /// The tile codec of this choice for samples whose integer type is `bytepix`, the
+    /// one `RICE_1` writes, and whose `PLIO_1` stream holds each plus `plio_offset`.
+    const fn tile_codec(self, bytepix: IntBitpix, plio_offset: i64) -> TileCodec {
+        match self {
+            Self::Gzip(Gzip {
+                form: GzipForm::Plain,
+                level,
+            }) => TileCodec::Gzip1 { level },
+            Self::Gzip(Gzip {
+                form: GzipForm::Shuffled,
+                level,
+            }) => TileCodec::Gzip2 { level },
+            Self::Rice => TileCodec::Rice(rice::Codec {
+                blocksize: rice::BLOCKSIZE,
+                bytepix,
+            }),
+            Self::Plio => TileCodec::Plio(plio::Codec {
+                offset: plio_offset,
+            }),
+            Self::Hcompress(Hcompress { scale }) => TileCodec::Hcompress(hcompress::Codec {
+                scale,
+                smoothing: Smoothing::Off,
+            }),
+            Self::None => TileCodec::NoCompress,
+        }
+    }
+
+    /// FITS `ZCMPTYPE` name written for this choice.
+    pub const fn name(self) -> &'static str {
+        self.tile_codec(IntBitpix::I32, 0).name()
+    }
 }
 
 /// A tiled-compression write: the codec, the tiles, and a float image's quantization.
@@ -232,13 +253,18 @@ impl CompressionConfig {
     fn table_tile_rows(&self, row_count: usize, row_len: usize) -> Result<usize> {
         if self.quantization.is_some() {
             return Err(FitsError::InvalidCompressionParameter {
-                detail: "a compressed table takes no float quantization".to_string(),
+                parameter: CompressionParameter::TableQuantization,
             });
         }
         let rows = match *self.tiles.as_slice() {
             [] => DEFAULT_TABLE_TILE_BYTES
                 .checked_div(row_len)
                 .unwrap_or(row_count),
+            [0] => {
+                return Err(FitsError::InvalidCompressionParameter {
+                    parameter: CompressionParameter::EmptyTile { axis: 0 },
+                });
+            }
             [rows] => rows,
             ref tiles => {
                 return Err(FitsError::RankMismatch {
@@ -250,18 +276,6 @@ impl CompressionConfig {
         };
         Ok(rows.clamp(1, row_count.max(1)))
     }
-}
-
-/// The tiled-image codec selected by `ZCMPTYPE`, parsed once from the keyword string
-/// then matched exhaustively — the image-path counterpart to the table path's `Algo`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ImageCodec {
-    Gzip1,
-    Gzip2,
-    Rice1,
-    Plio1,
-    Hcompress1,
-    NoCompress,
 }
 
 /// The offset between a `PLIO_1` stream's values and an image's stored values: 32768
@@ -276,73 +290,8 @@ fn plio_offset(bitpix: Bitpix, scaling: Scaling) -> i64 {
     }
 }
 
-fn parameter_index(keyword: &str) -> Option<usize> {
-    keyword::index(keyword, "ZNAME").filter(|index| (1..=999).contains(index))
-}
-
-impl ImageCodec {
-    fn parse(s: &str) -> Result<Self> {
-        Ok(match s {
-            "GZIP_1" => Self::Gzip1,
-            "GZIP_2" => Self::Gzip2,
-            "RICE_1" => Self::Rice1,
-            "PLIO_1" => Self::Plio1,
-            "HCOMPRESS_1" => Self::Hcompress1,
-            "NOCOMPRESS" => Self::NoCompress,
-            other => {
-                return Err(FitsError::UnsupportedCompression {
-                    name: other.to_string(),
-                });
-            }
-        })
-    }
-
-    /// The `ZCMPTYPE` (image) / `ZCTYPn` (table column) keyword spelling — the
-    /// inverse of [`ImageCodec::parse`], and the only place these names are written.
-    /// The table path's narrower `Algo` and the public [`Compression`] both read
-    /// them from here.
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Gzip1 => "GZIP_1",
-            Self::Gzip2 => "GZIP_2",
-            Self::Rice1 => "RICE_1",
-            Self::Plio1 => "PLIO_1",
-            Self::Hcompress1 => "HCOMPRESS_1",
-            Self::NoCompress => "NOCOMPRESS",
-        }
-    }
-}
-
-impl Compression {
-    const fn image_codec(self) -> ImageCodec {
-        match self {
-            Self::Gzip(config) if config.shuffle => ImageCodec::Gzip2,
-            Self::Gzip(_) => ImageCodec::Gzip1,
-            Self::Rice => ImageCodec::Rice1,
-            Self::Plio => ImageCodec::Plio1,
-            Self::Hcompress(_) => ImageCodec::Hcompress1,
-            Self::None => ImageCodec::NoCompress,
-        }
-    }
-
-    /// FITS `ZCMPTYPE` name written for this choice.
-    pub const fn name(self) -> &'static str {
-        self.image_codec().name()
-    }
-
-    const fn gzip_level(self) -> u32 {
-        match self {
-            Self::Gzip(config) => config.level,
-            _ => gzip::DEFAULT_GZIP_LEVEL,
-        }
-    }
-
-    const fn hcompress_scale(self) -> HcompressScale {
-        match self {
-            Self::Hcompress(config) => config.scale,
-            _ => HcompressScale::Lossless,
-        }
-    }
+fn parameter_index(keyword: Keyword) -> Option<usize> {
+    keyword.index_after(keywords::ZNAME)
 }
 
 /// Map `f` over each tile index `0..ntiles`, collecting the per-tile results in
@@ -393,6 +342,14 @@ pub(crate) mod internals {
     /// value(x, y) = (x + y) mod 7 over 24×16: the PLIO fixture, a non-negative mask.
     pub(crate) fn mask() -> Vec<i32> {
         (0..24 * 16).map(|i| (i % 24 + i / 24) % 7).collect()
+    }
+
+    /// `count` values of `(7919·i + 13) mod 2001 − 1000`: rough data whose HCOMPRESS
+    /// transform has odd halves at every level of a 17×17 tile.
+    pub(crate) fn odd_plane(count: usize) -> Vec<i16> {
+        (0..count)
+            .map(|i| i16::try_from((i * 7919 + 13) % 2001).unwrap() - 1000)
+            .collect()
     }
 }
 

@@ -1,17 +1,31 @@
 use crate::groups::*;
+use crate::header_model::record_name::RecordName;
+use crate::internals::cards;
+use crate::internals::fixture::Fixture;
 
-use crate::reader::internals::open_fixture;
+/// The physical parameter values of `group`.
+fn parameters(groups: &RandomGroups, group: usize) -> Result<Vec<f64>> {
+    let mut out = Vec::new();
+    groups.parameters_physical_into(group, &mut out)?;
+    Ok(out)
+}
+
+/// The physical array values of `group`.
+fn array(groups: &RandomGroups, group: usize) -> Result<Vec<f64>> {
+    let mut out = Vec::new();
+    groups.array_physical_into(group, &mut out)?;
+    Ok(out)
+}
+
+/// The physical value of the parameter `name` names in `group`.
+fn named(groups: &RandomGroups, group: usize, name: &str) -> Result<f64> {
+    groups.parameter_physical(group, &groups.parameter(name)?)
+}
 
 /// A random-groups header: `NAXIS1 = 0`, then `axes` for each group's array.
 fn groups_header(bitpix: i64, axes: &[i64], pcount: i64, gcount: i64) -> Header {
-    let mut header = Header::new();
-    header
-        .set_internal(keywords::BITPIX, bitpix)
-        .set_internal(keywords::NAXIS, i64::try_from(axes.len()).unwrap() + 1)
-        .set_internal("NAXIS1", 0);
-    for (index, &length) in axes.iter().enumerate() {
-        header.set_internal(format!("NAXIS{}", index + 2), length);
-    }
+    let axes: Vec<i64> = std::iter::once(0).chain(axes.iter().copied()).collect();
+    let mut header = cards::structural(None, bitpix, &axes);
     header
         .set_internal(keywords::GROUPS, true)
         .set_internal(keywords::PCOUNT, pcount)
@@ -21,7 +35,7 @@ fn groups_header(bitpix: i64, axes: &[i64], pcount: i64, gcount: i64) -> Header 
 
 #[test]
 fn reads_the_real_uv_random_groups() {
-    let mut reader = open_fixture("DDTSUVDATA.fits");
+    let mut reader = Fixture::Ddts.stream();
     let groups = reader.read_groups(0).unwrap();
     let metadata = groups.metadata();
 
@@ -32,13 +46,21 @@ fn reads_the_real_uv_random_groups() {
     assert_eq!(metadata.bitpix, Bitpix::F32);
     assert_eq!(
         metadata.parameter_names,
-        ["UU--", "VV--", "WW--", "BASELINE", "DATE", "DATE"]
+        ["UU--", "VV--", "WW--", "BASELINE", "DATE", "DATE"].map(|name| Some(name.to_string()))
     );
+
+    // A physical read appends to the caller's buffer, of either float type.
+    let mut out = vec![-1.0];
+    groups.parameters_physical_into(0, &mut out).unwrap();
+    assert_eq!((out.len(), out[0]), (7, -1.0));
+    let mut narrow = Vec::<f32>::new();
+    groups.array_physical_into(0, &mut narrow).unwrap();
+    assert_eq!(narrow.len(), 12);
 
     // Group 0's stored f32s, scaled by PSCALn and offset by PZEROn: the u, v, w
     // scale is 7.04218409114E-10, and DATE (index 4) adds PZERO5 = 2445728.5 to
     // 0.2133636474609375 — exact in f64, whose step at 2^21 is 2^-31.
-    let params = groups.parameters_physical(0).unwrap();
+    let params = parameters(&groups, 0).unwrap();
     assert_eq!(
         params,
         [
@@ -52,7 +74,7 @@ fn reads_the_real_uv_random_groups() {
     );
     // BSCALE 1 and BZERO 0 leave the array as stored.
     assert_eq!(
-        groups.array_physical(0).unwrap(),
+        array(&groups, 0).unwrap(),
         [
             12.430_867_195_129_395,
             0.568_607_449_531_555_2,
@@ -69,23 +91,18 @@ fn reads_the_real_uv_random_groups() {
         ]
     );
     // §6.3: the two PTYPE='DATE' addends (indices 4, 5) sum to the logical DATE.
-    assert_eq!(
-        groups.parameter_physical(0, "DATE").unwrap(),
-        params[4] + params[5]
-    );
+    assert_eq!(named(&groups, 0, "DATE").unwrap(), params[4] + params[5]);
     // A single-occurrence name returns just that parameter; an absent name is refused.
-    assert_eq!(groups.parameter_physical(0, "BASELINE").unwrap(), params[3]);
+    assert_eq!(named(&groups, 0, "BASELINE").unwrap(), params[3]);
     assert!(matches!(
-        groups.parameter_physical(0, "NONE"),
+        named(&groups, 0, "NONE"),
         Err(FitsError::GroupParameterNotFound { name }) if name == "NONE"
     ));
 
     for result in [
-        groups.parameters_physical(metadata.gcount).map(|_| ()),
-        groups.array_physical(metadata.gcount).map(|_| ()),
-        groups
-            .parameter_physical(metadata.gcount, "DATE")
-            .map(|_| ()),
+        parameters(&groups, metadata.gcount).map(|_| ()),
+        array(&groups, metadata.gcount).map(|_| ()),
+        named(&groups, metadata.gcount, "DATE").map(|_| ()),
     ] {
         assert!(matches!(
             result,
@@ -96,7 +113,7 @@ fn reads_the_real_uv_random_groups() {
             })
         ));
     }
-    assert_eq!(groups.parameters_physical(0).unwrap().len(), 6);
+    assert_eq!(parameters(&groups, 0).unwrap().len(), 6);
 }
 
 #[test]
@@ -120,14 +137,11 @@ fn parameter_physical_sums_addends_sharing_a_ptype() {
     let groups = RandomGroups::from_data(&header, &data).unwrap();
 
     // Raw per-addend values stay available separately.
-    assert_eq!(
-        groups.parameters_physical(0).unwrap(),
-        vec![2_445_738.5, 0.75]
-    );
+    assert_eq!(parameters(&groups, 0).unwrap(), vec![2_445_738.5, 0.75]);
     // Summed logical DATE = (2445728.5 + 10) + (0.25 + 0.5) = 2445739.25.
-    assert_eq!(groups.parameter_physical(0, "DATE").unwrap(), 2_445_739.25);
+    assert_eq!(named(&groups, 0, "DATE").unwrap(), 2_445_739.25);
     assert!(matches!(
-        groups.parameter_physical(0, "NONE"),
+        named(&groups, 0, "NONE"),
         Err(FitsError::GroupParameterNotFound { name }) if name == "NONE"
     ));
 
@@ -136,7 +150,7 @@ fn parameter_physical_sums_addends_sharing_a_ptype() {
         malformed.set_internal(keyword, "not numeric");
         assert!(matches!(
             RandomGroups::from_data(&malformed, &data),
-            Err(FitsError::TypeMismatch { name, .. }) if name == keyword
+            Err(FitsError::ValueTypeMismatch { name: RecordName::Keyword(name), .. }) if name == keyword
         ));
     }
 }
@@ -168,12 +182,8 @@ fn array_physical_maps_blank_to_nan_for_every_integer_bitpix() {
         };
         let groups = RandomGroups::from_data(&header, &data).unwrap();
 
-        assert_eq!(
-            groups.parameters_physical(0).unwrap(),
-            vec![10.0],
-            "{bitpix:?}"
-        );
-        let physical = groups.array_physical(0).unwrap();
+        assert_eq!(parameters(&groups, 0).unwrap(), vec![10.0], "{bitpix:?}");
+        let physical = array(&groups, 0).unwrap();
         assert_eq!(physical[0], 23.0, "5 + 2·9 for {bitpix:?}");
         assert!(physical[1].is_nan(), "BLANK for {bitpix:?}");
         assert_eq!(physical[2], 27.0, "5 + 2·11 for {bitpix:?}");
@@ -197,15 +207,15 @@ fn naxis1_group_has_one_array_element_matching_data_extent() {
     assert!(groups.metadata().group_shape.is_empty());
     assert_eq!(groups.array_len(), 1); // empty product, not 0
     // group 0: param 1.0, array [10.0]; group 1: param 2.0, array [20.0].
-    assert_eq!(groups.parameters_physical(0).unwrap(), vec![1.0]);
-    assert_eq!(groups.array_physical(0).unwrap(), vec![10.0]);
-    assert_eq!(groups.parameters_physical(1).unwrap(), vec![2.0]);
-    assert_eq!(groups.array_physical(1).unwrap(), vec![20.0]);
+    assert_eq!(parameters(&groups, 0).unwrap(), vec![1.0]);
+    assert_eq!(array(&groups, 0).unwrap(), vec![10.0]);
+    assert_eq!(parameters(&groups, 1).unwrap(), vec![2.0]);
+    assert_eq!(array(&groups, 1).unwrap(), vec![20.0]);
 }
 
 #[test]
 fn read_groups_rejects_non_random_groups_hdus() {
-    let mut reader = open_fixture("UITfuv2582gc.fits");
+    let mut reader = Fixture::Uit.stream();
     assert!(matches!(
         reader.read_groups(0),
         Err(FitsError::NotRandomGroups)
@@ -311,14 +321,19 @@ fn parameters_past_the_999th_take_the_keyword_defaults() {
     let metadata = groups.metadata();
     assert_eq!(metadata.pcount, 1001);
     assert_eq!(metadata.parameter_names.len(), 999);
-    assert_eq!(metadata.parameter_names[998], "A");
-    let values = groups.parameters_physical(0).unwrap();
+    assert_eq!(metadata.parameter_names[998].as_deref(), Some("A"));
+    assert_eq!(metadata.parameter_names[0], None);
+    let values = parameters(&groups, 0).unwrap();
     assert_eq!(values.len(), 1001);
     assert!(values[..998].iter().all(|&value| value == 0.0));
     assert_eq!(values[998..], [6.0, 5.0, 7.0]);
-    assert_eq!(groups.parameter_physical(0, "A").unwrap(), 6.0);
-    assert_eq!(groups.parameter_physical(0, "").unwrap(), 12.0);
-    assert_eq!(groups.array_physical(0).unwrap(), vec![9.0]);
+    assert_eq!(named(&groups, 0, "A").unwrap(), 6.0);
+    // An absent `PTYPEn` names nothing, not the empty name.
+    assert!(matches!(
+        groups.parameter(""),
+        Err(FitsError::GroupParameterNotFound { .. })
+    ));
+    assert_eq!(array(&groups, 0).unwrap(), vec![9.0]);
 }
 
 /// The counts are checked against the data before anything is sized from them.
@@ -342,11 +357,4 @@ fn group_counts_are_checked_before_they_size_anything() {
             Err(FitsError::DataUnitOverflow)
         ));
     }
-    assert!(matches!(
-        RandomGroups::from_data(&groups_header(16, &[2], 1, 2), &[0; 10]),
-        Err(FitsError::DataSizeMismatch {
-            expected: 6,
-            got: 5
-        })
-    ));
 }

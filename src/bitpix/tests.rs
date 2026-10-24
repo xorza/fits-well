@@ -1,15 +1,9 @@
 use crate::bitpix::*;
+use crate::internals::samples::BITPIXES;
 
 #[test]
 fn code_round_trips_for_every_variant() {
-    for bp in [
-        Bitpix::U8,
-        Bitpix::I16,
-        Bitpix::I32,
-        Bitpix::I64,
-        Bitpix::F32,
-        Bitpix::F64,
-    ] {
+    for bp in BITPIXES {
         assert_eq!(Bitpix::from_code(bp.code()).unwrap(), bp);
     }
 }

@@ -118,31 +118,36 @@ fn celestial_and_spectral_transforms_allocate_nothing() {
     );
 }
 
-/// A one-dimensional `-TAB` transform allocates two vectors each way, the
-/// interpolation location's base and fraction.
+/// A one-dimensional `-TAB` transform allocates nothing either way: its interval is
+/// a position and a fraction, and its runs are built with the transform.
 #[test]
-fn one_dimensional_tabular_transforms_allocate_two_vectors() {
+fn one_dimensional_tabular_transforms_allocate_nothing() {
     let pixel = 12_345.25;
     // The first call builds the cached fixture.
     let world = tabular_forward_at_pixel(pixel);
     assert_eq!(
         allocations(|| tabular_forward_at_pixel(black_box(pixel))),
-        2
+        0
     );
     assert_eq!(
         allocations(|| tabular_inverse_at_world(black_box(world))),
-        2
+        0
     );
 }
 
-/// The two-dimensional inverse bisects sub-voxels in a scratch it sizes once, so a
-/// fraction that takes 20 halvings to reach allocates as much as one that takes one.
+/// The two-dimensional inverse bisects sub-voxels in three buffers it sizes once, its
+/// reals, counts and flags, so a fraction that takes 20 halvings to reach allocates as
+/// much as one that takes one.
 #[test]
 fn tabular_inverse_allocations_do_not_grow_with_search_depth() {
     let deep = 0.5 + 2.0_f64.powi(-20);
     black_box(tabular_inverse_at_fraction(0.5));
     assert_eq!(
         allocations(|| tabular_inverse_at_fraction(black_box(0.5))),
-        allocations(|| tabular_inverse_at_fraction(black_box(deep)))
+        3
+    );
+    assert_eq!(
+        allocations(|| tabular_inverse_at_fraction(black_box(deep))),
+        3
     );
 }

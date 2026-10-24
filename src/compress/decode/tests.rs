@@ -1,64 +1,38 @@
 use crate::bintable::Table;
+use crate::bintable::element_kind::ElementKind;
 use crate::bintable::internals;
-use crate::bintable::internals::table_header;
-use crate::bintable::tform_kind::TformKind;
-use crate::compress::decode::decode_sample::{DecodeSample, Overshoot};
+use crate::compress::decode::decode_sample::DecodeSample;
 #[cfg(feature = "parallel")]
 use crate::compress::decode::decode_wave_tile_count;
+use crate::compress::decode::tile_decoder::Overshoot;
 use crate::compress::decode::tiled_image::TiledImage;
-use crate::compress::internals::{mask, ramp};
-use crate::compress::plane::IntBitpix;
+use crate::compress::internals::{mask, odd_plane, ramp};
 #[cfg(feature = "parallel")]
 use crate::compress::tile_geometry::TileGeometry;
 use crate::compress::*;
+use crate::error::CompressedDataDefect;
+use crate::error::CompressionFeature;
+use crate::error::SizeUnit;
+use crate::error::ValueKind;
 use crate::hdu::HduKind;
 use crate::hdu::HduRole;
 use crate::hdu::image_geometry::ImageGeometry;
-use crate::header_model::{Header, keywords};
+use crate::header_model::Header;
+use crate::header_model::record_name::RecordName;
 use crate::image_model::Image;
 use crate::image_model::data::Data;
-
-use crate::reader::internals::open_fixture;
-use crate::reader::internals::read_whole;
+use crate::internals::container::{OneTile, be};
+use crate::internals::fixture::Fixture;
+use crate::internals::memory::read_whole;
+use crate::internals::samples::{assert_same_bits, nan_blind_bits};
 
 /// Decode the tiled image `header` describes from its container `table`, resolving
 /// the kind and geometry the way the reader's scan does.
 fn decompress_image(header: &Header, table: &Table) -> Result<Image> {
     let kind = HduKind::classify(header, HduRole::Extension)?;
     let image = ImageGeometry::from_header(header, kind)?;
-    let samples = TiledImage::new(header, &image)?.decode(header, table.view())?;
+    let samples = TiledImage::new(header, &image)?.decode(table.view())?;
     Image::new(image.shape.clone(), samples, image.scaling)
-}
-
-/// A one-tile compressed image's container: `columns` as (`TTYPEn`, `TFORMn`) over a
-/// row of `naxis1` bytes and a heap of `heap` bytes, encoding a `zbitpix` image of
-/// `shape` in tiles of `tile` (no `ZTILEn` when it is empty).
-fn compressed_image_header(
-    cmptype: &str,
-    zbitpix: i64,
-    shape: &[i64],
-    tile: &[i64],
-    columns: &[(&str, &str)],
-    naxis1: usize,
-    heap: i64,
-) -> Header {
-    let tforms: Vec<&str> = columns.iter().map(|&(_, tform)| tform).collect();
-    let mut h = table_header(naxis1, 1, &tforms);
-    h.set_internal(keywords::PCOUNT, heap);
-    for (index, &(ttype, _)) in columns.iter().enumerate() {
-        h.set_internal(format!("TTYPE{}", index + 1), ttype);
-    }
-    h.set_internal(keywords::ZIMAGE, true)
-        .set_internal(keywords::ZCMPTYPE, cmptype)
-        .set_internal(keywords::ZBITPIX, zbitpix)
-        .set_internal(keywords::ZNAXIS, i64::try_from(shape.len()).unwrap());
-    for (index, &length) in shape.iter().enumerate() {
-        h.set_internal(format!("ZNAXIS{}", index + 1), length);
-    }
-    for (index, &length) in tile.iter().enumerate() {
-        h.set_internal(format!("ZTILE{}", index + 1), length);
-    }
-    h
 }
 
 /// Each integer fixture decodes to the plane it was written from.
@@ -66,22 +40,20 @@ fn compressed_image_header(
 fn decompresses_the_integer_codec_fixtures() {
     // `fpack -h -s 0 -t 17,17` (CFITSIO 4.070) of the plane `(7919·i + 13) mod 2001 − 1000`:
     // both halves odd at every level of the inverse transform, the corner case 24×16 never reaches.
-    let odd: Vec<i16> = (0..17 * 17)
-        .map(|i| i16::try_from((i * 7919 + 13) % 2001).unwrap() - 1000)
-        .collect();
+    let odd = odd_plane(17 * 17);
     for (name, shape, want) in [
-        ("comp_gzip_i16.fits", [24, 16], Data::I16(ramp())),
-        ("comp_gzip2_i16.fits", [24, 16], Data::I16(ramp())),
-        ("comp_rice_i16.fits", [24, 16], Data::I16(ramp())),
+        (Fixture::CompGzipI16, [24, 16], Data::I16(ramp())),
+        (Fixture::CompGzip2I16, [24, 16], Data::I16(ramp())),
+        (Fixture::CompRiceI16, [24, 16], Data::I16(ramp())),
         // Lossless HCOMPRESS (SCALE=0), one 24×16 tile.
-        ("comp_hcomp_i16.fits", [24, 16], Data::I16(ramp())),
-        ("comp_hcomp_odd_i16.fits", [17, 17], Data::I16(odd)),
-        ("comp_plio_i32.fits", [24, 16], Data::I32(mask())),
+        (Fixture::CompHcompI16, [24, 16], Data::I16(ramp())),
+        (Fixture::CompHcompOddI16, [17, 17], Data::I16(odd)),
+        (Fixture::CompPlioI32, [24, 16], Data::I32(mask())),
     ] {
-        let mut reader = open_fixture(name);
+        let mut reader = name.stream();
         let image = read_whole(&mut reader, 1);
-        assert_eq!(image.shape, shape, "{name}");
-        assert_eq!(image.samples, want, "{name}");
+        assert_eq!(image.shape, shape, "{name:?}");
+        assert_eq!(image.samples, want, "{name:?}");
     }
 }
 
@@ -89,51 +61,30 @@ fn decompresses_the_integer_codec_fixtures() {
 /// reconstruction, stored as a plain image beside it; a NaN matches any NaN.
 #[test]
 fn decompresses_to_the_reference_reconstructions() {
-    fn samples(data: Data) -> Vec<Option<u32>> {
-        match data {
-            Data::I16(values) => values
-                .into_iter()
-                .map(|v| Some(i32::from(v).cast_unsigned()))
-                .collect(),
-            Data::I32(values) => values
-                .into_iter()
-                .map(|v| Some(v.cast_unsigned()))
-                .collect(),
-            Data::F32(values) => values
-                .into_iter()
-                .map(|v| (!v.is_nan()).then(|| v.to_bits()))
-                .collect(),
-            other => panic!("expected I16, I32 or F32, got {other:?}"),
-        }
-    }
     for (compressed, reference, nulls) in [
         // Lossy HCOMPRESS, SCALE=4: undigitize multiplies by the scale.
-        ("comp_hcomp_lossy.fits", "comp_ref_hcomp_lossy.fits", 0),
+        (Fixture::CompHcompLossy, Fixture::CompRefHcompLossy, 0),
         // `fpack -h -s 4` of the 17×17 lossless fixture's plane against `funpack`'s
         // reconstruction (CFITSIO 4.070): the odd-on-both-axes corner under a scale.
-        (
-            "comp_hcomp_lossy_odd.fits",
-            "comp_ref_hcomp_lossy_odd.fits",
-            0,
-        ),
+        (Fixture::CompHcompLossyOdd, Fixture::CompRefHcompLossyOdd, 0),
         // SMOOTH=1 smooths during the inverse transform.
-        ("comp_hcomp_smooth.fits", "comp_ref_hcomp_smooth.fits", 0),
+        (Fixture::CompHcompSmooth, Fixture::CompRefHcompSmooth, 0),
         // Smooth data stored losslessly: ZSCALE=0, the floats gzip'd in
         // GZIP_COMPRESSED_DATA.
-        ("comp_ricef_nodither.fits", "comp_ref_f32.fits", 0),
+        (Fixture::CompRicefNodither, Fixture::CompRefF32, 0),
         // Noisy data quantized per tile, RICE-packed, read as ZSCALE·int + ZZERO.
-        ("comp_ricef_quant.fits", "comp_ref_quant_f32.fits", 0),
-        ("comp_dither2_f32.fits", "comp_ref_dither2_f32.fits", 0),
+        (Fixture::CompRicefQuant, Fixture::CompRefQuantF32, 0),
+        (Fixture::CompDither2F32, Fixture::CompRefDither2F32, 0),
         // SUBTRACTIVE_DITHER_1 with ZBLANK: two pixels are null.
-        ("comp_nan_f32.fits", "comp_ref_nan_f32.fits", 2),
+        (Fixture::CompNanF32, Fixture::CompRefNanF32, 2),
     ] {
-        let got = samples(read_whole(&mut open_fixture(compressed), 1).samples);
-        let want = samples(read_whole(&mut open_fixture(reference), 0).samples);
-        assert_eq!(got, want, "{compressed}");
+        let got = nan_blind_bits(&read_whole(&mut compressed.stream(), 1).samples);
+        let want = nan_blind_bits(&read_whole(&mut reference.stream(), 0).samples);
+        assert_eq!(got, want, "{compressed:?}");
         assert_eq!(
             got.iter().filter(|v| v.is_none()).count(),
             nulls,
-            "{compressed}"
+            "{compressed:?}"
         );
     }
 }
@@ -142,22 +93,12 @@ fn decompresses_to_the_reference_reconstructions() {
 fn decompresses_nocompress_tile_verbatim() {
     // A 2×2 i16 image as a single NOCOMPRESS tile: the COMPRESSED_DATA cell holds
     // the four pixels verbatim as big-endian i16.
-    let h = compressed_image_header(
-        "NOCOMPRESS",
-        16,
-        &[2, 2],
-        &[2, 2],
-        &[("COMPRESSED_DATA", "1PB(8)")],
-        8, // one 1P descriptor
-        8, // heap = 8 raw bytes
+    let tile = OneTile::new("NOCOMPRESS", 16, &[2, 2]).heap(
+        "COMPRESSED_DATA",
+        'B',
+        &be(&[1i16, 2, 3, 4], i16::to_be_bytes),
     );
-    let mut data = Vec::new();
-    data.extend_from_slice(&8i32.to_be_bytes()); // descriptor nelem = 8 bytes
-    data.extend_from_slice(&0i32.to_be_bytes()); // descriptor offset = 0
-    for x in [1i16, 2, 3, 4] {
-        data.extend_from_slice(&x.to_be_bytes());
-    }
-    let table = Table::from_data(&h, data).unwrap();
+    let (h, table) = (tile.header(), tile.table());
     let img = decompress_image(&h, &table).unwrap();
     assert_eq!(img.shape, vec![2, 2]);
     assert_eq!(img.samples, Data::I16(vec![1, 2, 3, 4]));
@@ -169,8 +110,9 @@ fn decompresses_nocompress_tile_verbatim() {
         .set_internal("ZNAXIS1", 4);
     assert!(matches!(
         decompress_image(&invalid_hcompress, &table),
-        Err(FitsError::UnsupportedCompression { name })
-            if name == "HCOMPRESS_1 requires a two-dimensional image"
+        Err(FitsError::UnsupportedCompression {
+            feature: CompressionFeature::HcompressDimensions
+        })
     ));
 }
 
@@ -182,112 +124,78 @@ fn decompresses_nocompress_tile_verbatim() {
 #[test]
 fn decoded_values_fit_the_image_bitpix() {
     let values = [40_000i64, -40_000, 7, 8];
-    let uncompressed = compressed_image_header(
-        "RICE_1",
-        16,
-        &[2, 2],
-        &[2, 2],
-        &[("UNCOMPRESSED_DATA", "1PJ(4)")],
-        8,
-        16,
+    let tile = OneTile::new("RICE_1", 16, &[2, 2]).heap(
+        "UNCOMPRESSED_DATA",
+        'J',
+        &be(&[40_000i32, -40_000, 7, 8], i32::to_be_bytes),
     );
-    let mut data = Vec::new();
-    data.extend_from_slice(&4i32.to_be_bytes());
-    data.extend_from_slice(&0i32.to_be_bytes());
-    for value in values {
-        data.extend_from_slice(&i32::try_from(value).unwrap().to_be_bytes());
-    }
-    let table = Table::from_data(&uncompressed, data).unwrap();
+    let (uncompressed, table) = (tile.header(), tile.table());
     assert!(matches!(
         decompress_image(&uncompressed, &table),
-        Err(FitsError::CorruptCompressedData { detail })
-            if detail == "a decoded tile value is outside the image's BITPIX range"
+        Err(FitsError::CorruptCompressedData {
+            defect: CompressedDataDefect::ValueOutOfRange,
+        })
     ));
 
-    let mut scratch = hcompress::HcompressScratch::default();
-    let stream = hcompress::hcompress_tile_encode(&values, &[2, 2], 0, &mut scratch).unwrap();
-    let length = i64::try_from(stream.len()).unwrap();
-    let hcompressed = compressed_image_header(
-        "HCOMPRESS_1",
-        16,
-        &[2, 2],
-        &[2, 2],
-        &[("COMPRESSED_DATA", &format!("1PB({length})"))],
-        8,
-        length,
-    );
-    let mut data = Vec::new();
-    data.extend_from_slice(&i32::try_from(length).unwrap().to_be_bytes());
-    data.extend_from_slice(&0i32.to_be_bytes());
-    data.extend_from_slice(&stream);
-    let table = Table::from_data(&hcompressed, data).unwrap();
+    let stream =
+        TileCodec::named("HCOMPRESS_1", IntBitpix::I16).encoded(&[2, 2], IntBitpix::I16, &values);
+    let tile = OneTile::new("HCOMPRESS_1", 16, &[2, 2]).heap("COMPRESSED_DATA", 'B', &stream);
+    let (hcompressed, table) = (tile.header(), tile.table());
     assert_eq!(
         decompress_image(&hcompressed, &table).unwrap().samples,
         Data::I16(vec![i16::MAX, i16::MIN, 7, 8])
     );
 
+    // A fallback cell of the same image is stored losslessly: out of range, it is
+    // corrupt rather than clamped.
+    let tile = OneTile::new("HCOMPRESS_1", 16, &[2, 2])
+        .heap("COMPRESSED_DATA", 'B', &[])
+        .heap(
+            "UNCOMPRESSED_DATA",
+            'J',
+            &be(&[40_000i32, -40_000, 7, 8], i32::to_be_bytes),
+        );
+    assert!(matches!(
+        decompress_image(&tile.header(), &tile.table()),
+        Err(FitsError::CorruptCompressedData {
+            defect: CompressedDataDefect::ValueOutOfRange,
+        })
+    ));
+
     // The bounds themselves fit; one past them clamps, or is refused.
     let mut bytes = [-1, 0, 255, 256];
     <u8 as DecodeSample>::fit(&mut bytes, Overshoot::Clamp).unwrap();
     assert_eq!(bytes, [0, 0, 255, 255]);
-    assert!(<u8 as DecodeSample>::fit(&mut [0, 256], Overshoot::Refuse).is_err());
+    assert!(matches!(
+        <u8 as DecodeSample>::fit(&mut [0, 256], Overshoot::Refuse),
+        Err(FitsError::CorruptCompressedData {
+            defect: CompressedDataDefect::ValueOutOfRange
+        })
+    ));
     let mut words = [i64::from(i32::MIN), i64::from(i32::MAX)];
     <i32 as DecodeSample>::fit(&mut words, Overshoot::Refuse).unwrap();
-    assert!(<i32 as DecodeSample>::fit(&mut [i64::from(i32::MAX) + 1], Overshoot::Refuse).is_err());
+    assert!(matches!(
+        <i32 as DecodeSample>::fit(&mut [i64::from(i32::MAX) + 1], Overshoot::Refuse),
+        Err(FitsError::CorruptCompressedData {
+            defect: CompressedDataDefect::ValueOutOfRange
+        })
+    ));
 }
 
 #[test]
 fn compressed_integer_null_mask_restores_blank_pixels() {
-    let gzip2 = gzip::gzip2_encode(
-        &[0, 1],
-        1,
-        gzip::DEFAULT_GZIP_LEVEL,
-        &mut gzip::GzipScratch::default(),
-    );
-    let rice = rice::rice_encode(
-        &[0i64, 1],
-        IntBitpix::U8,
-        32,
-        &mut rice::RiceScratch::default(),
-    );
-    let plio = plio::plio_encode(&[0i64, 1])
-        .unwrap()
-        .into_iter()
-        .flat_map(i16::to_be_bytes)
-        .collect();
-    for (codec, mask) in [
+    for (codec, mask) in ["GZIP_1", "GZIP_2", "RICE_1", "PLIO_1", "NOCOMPRESS"].map(|codec| {
         (
-            "GZIP_1",
-            gzip::gzip_encode(&[0, 1], gzip::DEFAULT_GZIP_LEVEL),
-        ),
-        ("GZIP_2", gzip2),
-        ("RICE_1", rice),
-        ("PLIO_1", plio),
-        ("NOCOMPRESS", vec![0, 1]),
-    ] {
-        let mut h = compressed_image_header(
-            "NOCOMPRESS",
-            16,
-            &[2, 1],
-            &[2, 1],
-            &[
-                ("COMPRESSED_DATA", "1PB(4)"),
-                ("NULL PIXEL MASK", format!("1PB({})", mask.len()).as_str()),
-            ],
-            16,
-            4 + i64::try_from(mask.len()).unwrap(),
-        );
+            codec,
+            TileCodec::named(codec, IntBitpix::U8).encoded(&[2], IntBitpix::U8, &[0, 1]),
+        )
+    }) {
+        let tile = OneTile::new("NOCOMPRESS", 16, &[2, 1])
+            .heap("COMPRESSED_DATA", 'B', &be(&[10i16, 20], i16::to_be_bytes))
+            .heap("NULL PIXEL MASK", 'B', &mask);
+        let (mut h, table) = (tile.header(), tile.table());
         h.set_internal(keywords::ZMASKCMP, codec)
             .set_internal(keywords::BLANK, -999);
-        let mut data = Vec::new();
-        data.extend_from_slice(&4i32.to_be_bytes());
-        data.extend_from_slice(&0i32.to_be_bytes());
-        data.extend_from_slice(&i32::try_from(mask.len()).unwrap().to_be_bytes());
-        data.extend_from_slice(&4i32.to_be_bytes());
-        data.extend_from_slice(&10i16.to_be_bytes());
-        data.extend_from_slice(&20i16.to_be_bytes());
-        data.extend_from_slice(&mask);
-        let table = Table::from_data(&h, data).unwrap();
         assert_eq!(
             decompress_image(&h, &table).unwrap().samples,
             Data::I16(vec![10, -999]),
@@ -306,45 +214,34 @@ fn compressed_integer_null_mask_restores_blank_pixels() {
 }
 
 /// `fpack -g1 -q 0` and `fpack -g2 -q 0` (CFITSIO 4.070) of a 24×16 plane
-/// `((7919·i + 13) mod 2001) / 7 − 100`, NaN where `i mod 97 = 5`: `ZQUANTIZ = 'NONE'`,
-/// no `ZSCALE`/`ZZERO` column, each tile's floats gzip'd (and shuffled for `GZIP_2`).
+/// `((7919·i + 13) mod 2001) / 7 − 100`, which is `(odd_plane + 1000) / 7 − 100`, NaN
+/// where `i mod 97 = 5`: `ZQUANTIZ = 'NONE'`, no `ZSCALE`/`ZZERO` column, each tile's
+/// floats gzip'd (and shuffled for `GZIP_2`).
 #[test]
 fn decompresses_the_lossless_float_fixtures() {
     let plane = || {
-        (0..24 * 16)
-            .map(|i: u32| (i % 97 != 5).then(|| f64::from((i * 7919 + 13) % 2001) / 7.0 - 100.0))
+        odd_plane(24 * 16)
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| (i % 97 != 5).then(|| f64::from(v + 1000) / 7.0 - 100.0))
     };
     let want: Vec<Option<u64>> = plane().map(|v| v.map(f64::to_bits)).collect();
     #[expect(
         clippy::cast_possible_truncation,
         reason = "the f32 fixtures hold the f64 plane rounded to f32"
     )]
-    let want_f32: Vec<Option<u32>> = plane().map(|v| v.map(|v| (v as f32).to_bits())).collect();
-    for name in [
-        "comp_lossless_gzip1_f64.fits",
-        "comp_lossless_gzip2_f64.fits",
+    let want_f32: Vec<Option<u64>> = plane()
+        .map(|v| v.map(|v| u64::from((v as f32).to_bits())))
+        .collect();
+    for (fixture, bitpix, want) in [
+        (Fixture::CompLosslessGzip1F64, Bitpix::F64, &want),
+        (Fixture::CompLosslessGzip2F64, Bitpix::F64, &want),
+        (Fixture::CompLosslessGzip1F32, Bitpix::F32, &want_f32),
+        (Fixture::CompLosslessGzip2F32, Bitpix::F32, &want_f32),
     ] {
-        let Data::F64(got) = read_whole(&mut open_fixture(name), 1).samples else {
-            panic!("{name}: expected F64")
-        };
-        let got: Vec<Option<u64>> = got
-            .iter()
-            .map(|v| (!v.is_nan()).then(|| v.to_bits()))
-            .collect();
-        assert_eq!(got, want, "{name}");
-    }
-    for name in [
-        "comp_lossless_gzip1_f32.fits",
-        "comp_lossless_gzip2_f32.fits",
-    ] {
-        let Data::F32(got) = read_whole(&mut open_fixture(name), 1).samples else {
-            panic!("{name}: expected F32")
-        };
-        let got: Vec<Option<u32>> = got
-            .iter()
-            .map(|v| (!v.is_nan()).then(|| v.to_bits()))
-            .collect();
-        assert_eq!(got, want_f32, "{name}");
+        let got = read_whole(&mut fixture.stream(), 1).samples;
+        assert_eq!(got.bitpix(), bitpix, "{fixture:?}");
+        assert_eq!(&nan_blind_bits(&got), want, "{fixture:?}");
     }
 }
 
@@ -354,22 +251,9 @@ fn decompresses_the_lossless_float_fixtures() {
 fn a_float_image_without_scale_columns_is_lossless() {
     let values = [1.5f32, -2.25, 3.0, 100.125, 0.0, 7.75, -8.5, 42.0];
     let raw: Vec<u8> = values.iter().flat_map(|v| v.to_be_bytes()).collect();
-    let heap = gzip::gzip_encode(&raw, 6);
-    let heap_len = i64::try_from(heap.len()).unwrap();
-    let h = compressed_image_header(
-        "GZIP_1",
-        -32,
-        &[4, 2],
-        &[4, 2],
-        &[("COMPRESSED_DATA", &format!("1PB({heap_len})"))],
-        8,
-        heap_len,
-    );
-    let mut data = Vec::new();
-    data.extend_from_slice(&i32::try_from(heap.len()).unwrap().to_be_bytes());
-    data.extend_from_slice(&0i32.to_be_bytes());
-    data.extend_from_slice(&heap);
-    let table = Table::from_data(&h, data).unwrap();
+    let heap = TileCodec::Gzip1 { level: 6 }.encoded_bytes(&raw);
+    let tile = OneTile::new("GZIP_1", -32, &[4, 2]).heap("COMPRESSED_DATA", 'B', &heap);
+    let (h, table) = (tile.header(), tile.table());
     let mut dithered = h.clone();
     dithered.set_internal(keywords::ZQUANTIZ, "SUBTRACTIVE_DITHER_1");
     for header in [&h, &dithered] {
@@ -383,7 +267,9 @@ fn a_float_image_without_scale_columns_is_lossless() {
     rice.set_internal(keywords::ZCMPTYPE, "RICE_1");
     assert!(matches!(
         decompress_image(&rice, &table),
-        Err(FitsError::UnsupportedCompression { name }) if name == "RICE_1 for a lossless float image"
+        Err(FitsError::UnsupportedCompression {
+            feature: CompressionFeature::LosslessFloatCodec { codec: "RICE_1" }
+        })
     ));
 }
 
@@ -393,28 +279,17 @@ fn a_float_image_without_scale_columns_is_lossless() {
 #[test]
 fn plio_of_a_u16_image_holds_its_physical_values() {
     let plio_image = |physical: &[i64], bzero: Option<i64>| {
-        let stream = plio::plio_encode(physical).unwrap();
-        let width = i64::try_from(physical.len()).unwrap();
-        let count = i64::try_from(stream.len()).unwrap();
-        let mut h = compressed_image_header(
-            "PLIO_1",
-            16,
-            &[width, 1],
-            &[width, 1],
-            &[("COMPRESSED_DATA", &format!("1PI({count})"))],
-            8,
-            2 * count,
+        let stream = TileCodec::Plio(plio::Codec { offset: 0 }).encoded(
+            &[physical.len()],
+            IntBitpix::I16,
+            physical,
         );
+        let width = i64::try_from(physical.len()).unwrap();
+        let tile = OneTile::new("PLIO_1", 16, &[width, 1]).heap("COMPRESSED_DATA", 'I', &stream);
+        let (mut h, table) = (tile.header(), tile.table());
         if let Some(bzero) = bzero {
             h.set_internal(keywords::BZERO, bzero);
         }
-        let mut data = Vec::new();
-        data.extend_from_slice(&i32::try_from(count).unwrap().to_be_bytes());
-        data.extend_from_slice(&0i32.to_be_bytes());
-        for word in stream {
-            data.extend_from_slice(&word.to_be_bytes());
-        }
-        let table = Table::from_data(&h, data).unwrap();
         decompress_image(&h, &table).unwrap().samples
     };
     // Stored = physical − 32768.
@@ -428,32 +303,13 @@ fn plio_of_a_u16_image_holds_its_physical_values() {
 
 #[test]
 fn compressed_float_null_mask_restores_nan_pixels() {
-    let mut h = compressed_image_header(
-        "NOCOMPRESS",
-        -32,
-        &[2, 1],
-        &[2, 1],
-        &[
-            ("COMPRESSED_DATA", "1PB(8)"),
-            ("NULL_PIXEL_MASK", "1PB(2)"),
-            ("ZSCALE", "1D"),
-            ("ZZERO", "1D"),
-        ],
-        32,
-        10,
-    );
+    let tile = OneTile::new("NOCOMPRESS", -32, &[2, 1])
+        .heap("COMPRESSED_DATA", 'B', &be(&[10i32, 20], i32::to_be_bytes))
+        .heap("NULL_PIXEL_MASK", 'B', &[1, 0])
+        .fixed("ZSCALE", "1D", &1.0f64.to_be_bytes())
+        .fixed("ZZERO", "1D", &0.0f64.to_be_bytes());
+    let (mut h, table) = (tile.header(), tile.table());
     h.set_internal(keywords::ZMASKCMP, "NOCOMPRESS");
-    let mut data = Vec::new();
-    data.extend_from_slice(&8i32.to_be_bytes());
-    data.extend_from_slice(&0i32.to_be_bytes());
-    data.extend_from_slice(&2i32.to_be_bytes());
-    data.extend_from_slice(&8i32.to_be_bytes());
-    data.extend_from_slice(&1.0f64.to_be_bytes());
-    data.extend_from_slice(&0.0f64.to_be_bytes());
-    data.extend_from_slice(&10i32.to_be_bytes());
-    data.extend_from_slice(&20i32.to_be_bytes());
-    data.extend_from_slice(&[1, 0]);
-    let table = Table::from_data(&h, data).unwrap();
     let Data::F32(values) = decompress_image(&h, &table).unwrap().samples else {
         panic!("expected F32")
     };
@@ -462,33 +318,16 @@ fn compressed_float_null_mask_restores_nan_pixels() {
 }
 
 #[test]
-fn zblank_column_overrides_keyword_per_tile() {
+fn zblank_column_marks_each_tiles_nulls() {
     // A 2×1 float image, one NOCOMPRESS tile of quantized i32 [10, 99]. ZSCALE=2,
     // ZZERO=5 ⇒ pixel 0 = 25.0; pixel 1's quantized int equals the per-tile ZBLANK
     // *column* value (99), so it decodes to NaN — proving the column drives nulls.
-    let h = compressed_image_header(
-        "NOCOMPRESS",
-        -32,
-        &[2, 1],
-        &[2, 1],
-        &[
-            ("COMPRESSED_DATA", "1PB(8)"),
-            ("ZSCALE", "1D"),
-            ("ZZERO", "1D"),
-            ("ZBLANK", "1J"),
-        ],
-        28, // 1P(8) + 1D + 1D + 1J
-        8,
-    );
-    let mut data = Vec::new();
-    data.extend_from_slice(&8i32.to_be_bytes()); // descriptor nelem
-    data.extend_from_slice(&0i32.to_be_bytes()); // descriptor offset
-    data.extend_from_slice(&2.0f64.to_be_bytes()); // ZSCALE
-    data.extend_from_slice(&5.0f64.to_be_bytes()); // ZZERO
-    data.extend_from_slice(&99i32.to_be_bytes()); // ZBLANK column value
-    data.extend_from_slice(&10i32.to_be_bytes()); // heap: quantized int 0
-    data.extend_from_slice(&99i32.to_be_bytes()); // heap: quantized int 1 (== ZBLANK)
-    let table = Table::from_data(&h, data).unwrap();
+    let tile = OneTile::new("NOCOMPRESS", -32, &[2, 1])
+        .heap("COMPRESSED_DATA", 'B', &be(&[10i32, 99], i32::to_be_bytes))
+        .fixed("ZSCALE", "1D", &2.0f64.to_be_bytes())
+        .fixed("ZZERO", "1D", &5.0f64.to_be_bytes())
+        .fixed("ZBLANK", "1J", &99i32.to_be_bytes());
+    let (h, table) = (tile.header(), tile.table());
     let img = decompress_image(&h, &table).unwrap();
     let Data::F32(px) = img.samples else {
         panic!("expected F32")
@@ -496,11 +335,19 @@ fn zblank_column_overrides_keyword_per_tile() {
     assert_eq!(px[0], 25.0);
     assert!(px[1].is_nan());
 
+    // `ZDITHER0` seeds a dither, so it is checked only where one is applied.
     for invalid in [0, 10_001] {
-        let mut invalid_dither = h.clone();
-        invalid_dither.set_internal(keywords::ZDITHER0, invalid);
+        let mut undithered = h.clone();
+        undithered.set_internal(keywords::ZDITHER0, invalid);
+        assert_same_bits(
+            &decompress_image(&undithered, &table).unwrap().samples,
+            &decompress_image(&h, &table).unwrap().samples,
+            &format!("ZDITHER0 = {invalid} without a dither"),
+        );
+        let mut dithered = undithered;
+        dithered.set_internal(keywords::ZQUANTIZ, "SUBTRACTIVE_DITHER_1");
         assert!(matches!(
-            decompress_image(&invalid_dither, &table),
+            decompress_image(&dithered, &table),
             Err(FitsError::KeywordOutOfRange {
                 keyword: keywords::ZDITHER0
             })
@@ -511,8 +358,8 @@ fn zblank_column_overrides_keyword_per_tile() {
     mistyped_header.set_internal(keywords::ZBITPIX, "not an integer");
     assert!(matches!(
         decompress_image(&mistyped_header, &table),
-        Err(FitsError::TypeMismatch { name, expected })
-            if name == "ZBITPIX" && expected == "integer"
+        Err(FitsError::ValueTypeMismatch { name: RecordName::Keyword(name), expected: ValueKind::Integer })
+            if name == "ZBITPIX"
     ));
 
     let mut out_of_range_header = h.clone();
@@ -522,10 +369,12 @@ fn zblank_column_overrides_keyword_per_tile() {
         Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "ZTILE1"
     ));
 
+    // A scale or zero column of any real or integer type is read as cfitsio reads it, as
+    // doubles; a complex one is not a number, and an integer null not a float.
     for (column, name, kind) in [
-        (1, "ZSCALE", TformKind::I64),
-        (2, "ZZERO", TformKind::I64),
-        (3, "ZBLANK", TformKind::F32),
+        (1, "ZSCALE", ElementKind::ComplexF32),
+        (2, "ZZERO", ElementKind::ComplexF32),
+        (3, "ZBLANK", ElementKind::F32),
     ] {
         let mut malformed = table.clone();
         internals::set_column_kind(&mut malformed, column, kind);
@@ -534,12 +383,166 @@ fn zblank_column_overrides_keyword_per_tile() {
             Err(FitsError::TypeMismatch { name: actual, .. }) if actual == name
         ));
     }
+    let single = OneTile::new("NOCOMPRESS", -32, &[2, 1])
+        .heap("COMPRESSED_DATA", 'B', &be(&[10i32, 99], i32::to_be_bytes))
+        .fixed("ZSCALE", "1E", &2.0f32.to_be_bytes())
+        .fixed("ZZERO", "1I", &5i16.to_be_bytes());
+    assert_eq!(
+        decompress_image(&single.header(), &single.table())
+            .unwrap()
+            .samples,
+        Data::F32(vec![25.0, 203.0])
+    );
+}
+
+/// `ZSCALE` and `ZZERO` resolve each on its own, as cfitsio's
+/// `imcomp_get_compressed_image_par` resolves them: the keyword fixes the value for every
+/// tile, else the column gives it per tile, else the default (1 and 0). The quantized
+/// integers [10, 99] with a scale of 2 and a zero of 5 are 25 and 203.
+#[test]
+fn scale_and_zero_keywords_fix_every_tile() {
+    let quantized = be(&[10i32, 99], i32::to_be_bytes);
+    let decoded = |h: &Header, table: &Table| decompress_image(h, table).unwrap().samples;
+
+    // A `ZSCALE` keyword beside a `ZZERO` column.
+    let tile = OneTile::new("NOCOMPRESS", -32, &[2, 1])
+        .heap("COMPRESSED_DATA", 'B', &quantized)
+        .fixed("ZZERO", "1D", &5.0f64.to_be_bytes());
+    let mut h = tile.header();
+    h.set_internal(keywords::ZSCALE, 2.0);
+    assert_eq!(decoded(&h, &tile.table()), Data::F32(vec![25.0, 203.0]));
+
+    // The keyword wins over a column of the same parameter: 10·2 + 5, not 10·3 + 5.
+    let tile = OneTile::new("NOCOMPRESS", -32, &[2, 1])
+        .heap("COMPRESSED_DATA", 'B', &quantized)
+        .fixed("ZSCALE", "1D", &3.0f64.to_be_bytes())
+        .fixed("ZZERO", "1D", &5.0f64.to_be_bytes());
+    let mut h = tile.header();
+    h.set_internal(keywords::ZSCALE, 2.0);
+    assert_eq!(decoded(&h, &tile.table()), Data::F32(vec![25.0, 203.0]));
+
+    // Both as keywords: the image is quantized, not lossless. Stored with GZIP_1, the
+    // quantized integers are as long as the floats, so a lossless read would have taken
+    // their bits for floats; with `ZBLANK = 99` the second is a null.
+    let tile = OneTile::new("GZIP_1", -32, &[2, 1]).heap(
+        "COMPRESSED_DATA",
+        'B',
+        &TileCodec::named("GZIP_1", IntBitpix::U8).encoded_bytes(&quantized),
+    );
+    let mut h = tile.header();
+    h.set_internal(keywords::ZSCALE, 2.0)
+        .set_internal(keywords::ZZERO, 5.0);
+    assert_eq!(decoded(&h, &tile.table()), Data::F32(vec![25.0, 203.0]));
+    h.set_internal(keywords::ZBLANK, 99);
+    assert_eq!(
+        nan_blind_bits(&decoded(&h, &tile.table())),
+        [Some(u64::from(25.0f32.to_bits())), None]
+    );
+    // With neither, the same cell is the floats themselves.
+    let h = tile.header();
+    assert_eq!(
+        nan_blind_bits(&decoded(&h, &tile.table())),
+        nan_blind_bits(&Data::F32(vec![f32::from_bits(10), f32::from_bits(99)]))
+    );
+}
+
+/// An integer image's tiles store their nulls as `ZBLANK`: as a keyword, else as a
+/// column, else `BLANK`. The image's null value is `BLANK`, else the `ZBLANK` keyword,
+/// and a stored null of another value reads as the image's.
+#[test]
+fn an_integer_image_maps_its_stored_nulls_to_blank() {
+    let tile = OneTile::new("NOCOMPRESS", 16, &[2, 1]).heap(
+        "COMPRESSED_DATA",
+        'B',
+        &be(&[10i16, -32768], i16::to_be_bytes),
+    );
+    let table = tile.table();
+    // `ZBLANK` alone is the image's null value; the samples are the stored ones.
+    let mut h = tile.header();
+    h.set_internal(keywords::ZBLANK, -32768);
+    let image = decompress_image(&h, &table).unwrap();
+    assert_eq!(image.scaling.blank, Some(-32768));
+    assert_eq!(image.samples, Data::I16(vec![10, -32768]));
+    // A `BLANK` of another value names the image's null; the stored ones take it.
+    h.set_internal(keywords::BLANK, -999);
+    let image = decompress_image(&h, &table).unwrap();
+    assert_eq!(image.scaling.blank, Some(-999));
+    assert_eq!(image.samples, Data::I16(vec![10, -999]));
+
+    // A `ZBLANK` column gives each tile's stored null.
+    let tile = OneTile::new("NOCOMPRESS", 16, &[2, 1])
+        .heap("COMPRESSED_DATA", 'B', &be(&[10i16, 20], i16::to_be_bytes))
+        .fixed("ZBLANK", "1I", &20i16.to_be_bytes());
+    let mut h = tile.header();
+    assert!(matches!(
+        decompress_image(&h, &tile.table()),
+        Err(FitsError::MissingKeyword {
+            keyword: keywords::BLANK
+        })
+    ));
+    h.set_internal(keywords::BLANK, -999);
+    assert_eq!(
+        decompress_image(&h, &tile.table()).unwrap().samples,
+        Data::I16(vec![10, -999])
+    );
+}
+
+/// A tile takes the first non-empty of its three cells, and reads a fallback only when
+/// the cells before it are empty: a broken `GZIP_COMPRESSED_DATA` descriptor fails no
+/// tile whose `COMPRESSED_DATA` holds it.
+#[test]
+fn a_fallback_cell_is_read_only_when_needed() {
+    let tile = OneTile::new("NOCOMPRESS", 16, &[2, 1])
+        .heap("COMPRESSED_DATA", 'B', &be(&[1i16, 2], i16::to_be_bytes))
+        .heap("GZIP_COMPRESSED_DATA", 'B', &[0]);
+    let h = tile.header();
+    let mut data = tile.data();
+    // The second descriptor's offset, past the heap.
+    data[12..16].copy_from_slice(&1000i32.to_be_bytes());
+    let table = Table::from_data(&h, data).unwrap();
+    assert_eq!(
+        decompress_image(&h, &table).unwrap().samples,
+        Data::I16(vec![1, 2])
+    );
+}
+
+/// A float tile stored as is keeps every bit, a signaling NaN's included: it decodes in
+/// the image's stored type. Its raw bytes must be a whole tile.
+#[test]
+fn an_uncompressed_float_tile_keeps_its_bits() {
+    let values = [f32::from_bits(0x7F80_0001), -0.0, f32::from_bits(1)];
+    let raw = be(&values, f32::to_be_bytes);
+    for cell in ['E', 'B'] {
+        let tile = OneTile::new("GZIP_1", -32, &[3, 1])
+            .heap("COMPRESSED_DATA", 'B', &[])
+            .heap("UNCOMPRESSED_DATA", cell, &raw);
+        assert_same_bits(
+            &decompress_image(&tile.header(), &tile.table())
+                .unwrap()
+                .samples,
+            &Data::F32(values.to_vec()),
+            &format!("1P{cell}"),
+        );
+    }
+    let mut long = raw;
+    long.push(0);
+    let tile = OneTile::new("GZIP_1", -32, &[3, 1])
+        .heap("COMPRESSED_DATA", 'B', &[])
+        .heap("UNCOMPRESSED_DATA", 'B', &long);
+    assert!(matches!(
+        decompress_image(&tile.header(), &tile.table()),
+        Err(FitsError::DataSizeMismatch {
+            unit: SizeUnit::Bytes,
+            expected: 12,
+            got: 13
+        })
+    ));
 }
 
 #[test]
 fn reading_a_plain_bintable_as_an_image_is_rejected() {
     // DDTSUVDATA hdu 1 is an ordinary BINTABLE (no ZIMAGE).
-    let mut f = open_fixture("DDTSUVDATA.fits");
+    let mut f = Fixture::Ddts.stream();
     // Public path: `image` sees a non-ZIMAGE bintable and rejects it as a
     // non-image (it never reaches the decompressor).
     assert!(matches!(f.image(1), Err(FitsError::NotAnImage)));
@@ -553,50 +556,25 @@ fn reading_a_plain_bintable_as_an_image_is_rejected() {
 
 #[test]
 fn compressed_image_rejects_short_tiles() {
-    let h = compressed_image_header(
-        "NOCOMPRESS",
-        16,
-        &[2],
-        &[2],
-        &[("COMPRESSED_DATA", "1PB(1)")],
-        8,
-        1,
-    );
-    let mut data = Vec::new();
-    data.extend_from_slice(&1i32.to_be_bytes());
-    data.extend_from_slice(&0i32.to_be_bytes());
-    data.push(0);
-    let table = Table::from_data(&h, data).unwrap();
+    let tile = OneTile::new("NOCOMPRESS", 16, &[2]).heap("COMPRESSED_DATA", 'B', &[0]);
+    let (h, table) = (tile.header(), tile.table());
     assert!(matches!(
         decompress_image(&h, &table),
         Err(FitsError::DataSizeMismatch {
+            unit: SizeUnit::Bytes,
             expected: 4,
             got: 1
         })
     ));
 
-    let h = compressed_image_header(
-        "GZIP_1",
-        16,
-        &[2],
-        &[2],
-        &[
-            ("COMPRESSED_DATA", "1PB(0)"),
-            ("UNCOMPRESSED_DATA", "1PI(1)"),
-        ],
-        16,
-        2,
-    );
-    let mut data = Vec::new();
-    data.extend_from_slice(&0i32.to_be_bytes());
-    data.extend_from_slice(&0i32.to_be_bytes());
-    data.extend_from_slice(&1i32.to_be_bytes());
-    data.extend_from_slice(&0i32.to_be_bytes());
-    data.extend_from_slice(&1i16.to_be_bytes());
-    let table = Table::from_data(&h, data).unwrap();
+    let tile = OneTile::new("GZIP_1", 16, &[2])
+        .heap("COMPRESSED_DATA", 'B', &[])
+        .heap("UNCOMPRESSED_DATA", 'I', &1i16.to_be_bytes());
+    let (h, table) = (tile.header(), tile.table());
     assert!(matches!(
         decompress_image(&h, &table),
         Err(FitsError::DataSizeMismatch {
+            unit: SizeUnit::Samples,
             expected: 2,
             got: 1
         })
@@ -608,19 +586,10 @@ fn decompress_image_rejects_overflowing_znaxis_product() {
     // ZNAXIS1·ZNAXIS2 = 5e9·5e9 = 2.5e19 overflows usize; decode must reject the
     // header up front (before allocating the output plane), not wrap to a small
     // buffer and then scatter out of bounds.
-    let h = compressed_image_header(
-        "GZIP_1",
-        16,
-        &[5_000_000_000i64, 5_000_000_000i64],
-        &[],
-        &[("COMPRESSED_DATA", "1PB(0)")],
-        8,
-        0,
-    );
-    let mut data = Vec::new();
-    data.extend_from_slice(&0i32.to_be_bytes()); // empty P descriptor: nelem
-    data.extend_from_slice(&0i32.to_be_bytes()); // offset
-    let table = Table::from_data(&h, data).unwrap();
+    let tile = OneTile::new("GZIP_1", 16, &[5_000_000_000, 5_000_000_000])
+        .without_tiles()
+        .heap("COMPRESSED_DATA", 'B', &[]);
+    let (h, table) = (tile.header(), tile.table());
     assert!(matches!(
         decompress_image(&h, &table),
         Err(FitsError::DataUnitOverflow)
@@ -632,19 +601,11 @@ fn decompress_image_rejects_oversized_znaxis_product() {
     // ZNAXIS1 = 2^60 does NOT overflow usize (so the overflow guard passes), but
     // allocating that many bytes would abort the process. The output plane is
     // allocated fallibly (`try_reserve`), so decode must return a recoverable error.
-    let h = compressed_image_header(
-        "GZIP_1",
-        8,
-        &[1i64 << 60],
-        &[],
-        &[("COMPRESSED_DATA", "1PB(0)")],
-        8,
-        0,
-    );
-    let mut data = Vec::new();
-    data.extend_from_slice(&0i32.to_be_bytes()); // empty P descriptor: nelem
-    data.extend_from_slice(&0i32.to_be_bytes()); // offset
-    let table = Table::from_data(&h, data).unwrap();
+    let tile =
+        OneTile::new("GZIP_1", 8, &[1 << 60])
+            .without_tiles()
+            .heap("COMPRESSED_DATA", 'B', &[]);
+    let (h, table) = (tile.header(), tile.table());
     assert!(matches!(
         decompress_image(&h, &table),
         Err(FitsError::DataUnitTooLarge { .. })
@@ -653,12 +614,12 @@ fn decompress_image_rejects_oversized_znaxis_product() {
 
 #[cfg(feature = "parallel")]
 #[test]
-fn parallel_decode_wave_budget_counts_per_tile_vectors() {
-    // A tile retains its samples and its 24-byte `Vec`: 25 bytes for one u8 and 32
-    // for one i64, so the 4 MiB budget holds ⌊4194304 / 25⌋ and 4194304 / 32 tiles.
+fn parallel_decode_wave_budget_counts_slot_bytes() {
+    // A wave's one buffer holds a slot of the largest tile for each: 1 byte for one u8
+    // and 8 for one i64, so the 4 MiB budget holds 4194304 and 4194304 / 8 tiles.
     let single = TileGeometry::new(&[1, 4_194_304], &[1, 1]);
-    assert_eq!(decode_wave_tile_count::<u8>(&single), 167_772);
-    assert_eq!(decode_wave_tile_count::<i64>(&single), 131_072);
+    assert_eq!(decode_wave_tile_count::<u8>(&single), 4_194_304);
+    assert_eq!(decode_wave_tile_count::<i64>(&single), 524_288);
     // One tile larger than the whole budget still makes a wave of one.
     let whole = TileGeometry::new(&[1, 4_194_304], &[1, 4_194_304]);
     assert_eq!(decode_wave_tile_count::<u8>(&whole), 1);

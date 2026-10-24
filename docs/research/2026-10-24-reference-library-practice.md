@@ -56,9 +56,3 @@ the wcslib bundled at `astropy/cextern/wcslib`. Each fact is from a source read.
 
 - **`ZQUANTIZ`.** cfitsio treats an absent `ZQUANTIZ` as `NO_DITHER`, and `'NONE'` as
   no quantization (`imcompress.c`).
-
-## World coordinates
-
-- **ZPN inverse.** wcslib `zpnx2s` (`prj.c`) brackets the root and runs at most 100
-  false-position steps with λ clamped to [0.1, 0.9] and a tolerance of 1e-13. After the
-  loop, it uses the last ζ with no error. fits-well copies this loop.

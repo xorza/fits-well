@@ -4,12 +4,14 @@ use crate::alternate::Alternate;
 use crate::error::Result;
 use crate::header_model::Header;
 use crate::keyword::Keyword;
-use crate::world_coordinates::celestial_pole::CelestialPole;
+use crate::world_coordinates::angle::DEGREE_TOLERANCE;
+use crate::world_coordinates::celestial_pole::{CelestialPole, Fiducial};
 use crate::world_coordinates::distortion::Distortion;
 use crate::world_coordinates::distortion::tpv::Tpv;
+use crate::world_coordinates::header_read;
+use crate::world_coordinates::native_rotation::{CelestialCoordinate, NativeRotation};
 use crate::world_coordinates::projected_celestial_axes::ProjectedCelestialAxes;
-use crate::world_coordinates::projection::{Projection, ProjectionParameters};
-use crate::world_coordinates::read_real;
+use crate::world_coordinates::projection::ProjectionParameters;
 
 /// The celestial half of a WCS once the header is resolved: which axes carry the
 /// longitude and latitude, the projection and its `PVi_m` parameters, and the
@@ -18,32 +20,50 @@ use crate::world_coordinates::read_real;
 pub(super) struct CelestialTransform {
     pub(super) lng: usize,
     pub(super) lat: usize,
-    pub(super) projection: Projection,
-    /// The native→celestial pole, computed from the fiducial point.
-    pub(super) pole: CelestialPole,
+    /// The rotation through the celestial pole computed from the fiducial point.
+    pub(super) rotation: NativeRotation,
     pub(super) parameters: ProjectionParameters,
     /// The TPV polynomials between the matrix and the projection, for a `-TPV` pair.
     pub(super) tpv: Option<Tpv>,
 }
 
+/// The celestial pair a description declares: its axes, the reference point
+/// `(α₀, δ₀)` its `CRVALia` give in degrees, and what its `PVi_m` carry.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CelestialPair {
+    pub(super) axes: ProjectedCelestialAxes,
+    pub(super) reference: CelestialCoordinate,
+    pub(super) pv_meaning: PvMeaning,
+}
+
+/// What a celestial pair resolves to.
+#[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a return value its one caller unpacks at once, as an `Option` of the \
+              transform is as large; a box would add an allocation"
+)]
+pub(super) enum CelestialResolution {
+    Transform(CelestialTransform),
+    /// A conic whose mid-latitude θ_a = `PVi_1` is 0, absent or explicitly: a cone of
+    /// `1/tan 0`, which the projection cannot evaluate, so its axes are unsupported and
+    /// a complete transform refuses rather than returning `NaN`.
+    DegenerateCone,
+}
+
 impl CelestialTransform {
-    /// Resolve the celestial pair's projection parameters and its native→celestial
-    /// pole (CG 2002 §2.4), or `None` when the header declares no complete celestial
-    /// pair.
-    ///
-    /// `unsupported_axes` gains the pair when the projection is present but cannot be
-    /// evaluated, so a complete transform refuses rather than returning `NaN`.
+    /// Resolve the projection parameters of `pair` and its native→celestial pole
+    /// (CG 2002 §2.4).
     pub(super) fn from_header(
         header: &Header,
         alt: Alternate,
-        celestial_axes: Option<ProjectedCelestialAxes>,
-        crval: &[f64],
-        pv_meaning: PvMeaning,
-        unsupported_axes: &mut Vec<usize>,
-    ) -> Result<Option<Self>> {
-        let Some(axes) = celestial_axes else {
-            return Ok(None);
-        };
+        pair: CelestialPair,
+    ) -> Result<CelestialResolution> {
+        let CelestialPair {
+            axes,
+            reference,
+            pv_meaning,
+        } = pair;
         let lng = axes.longitude;
         let lat = axes.latitude;
         let proj = axes.projection;
@@ -54,7 +74,7 @@ impl CelestialTransform {
         // beside SIP; either way they set no projection parameter, fiducial point or pole.
         let read_pv = |keyword: Option<Keyword>| -> Result<Option<f64>> {
             match pv_meaning {
-                PvMeaning::Projection if tpv.is_none() => read_real(header, keyword),
+                PvMeaning::Projection if tpv.is_none() => header_read::real(header, keyword),
                 PvMeaning::Projection | PvMeaning::Distortion => Ok(None),
             }
         };
@@ -67,44 +87,45 @@ impl CelestialTransform {
             }
         }
         let parameters = proj.parameters(pv)?;
-        // A conic's mid-latitude θ_a = PVi_1 is mandatory and must be non-zero; θ_a = 0
-        // (absent, or explicitly 0) is alt degenerate cone (`1/tan 0`). Treat it like an
-        // unimplemented projection — flag the axes so complete transforms fail rather
-        // than returning NaN.
         if proj.is_conic() && pv[1] == 0.0 {
-            unsupported_axes.push(lng);
-            unsupported_axes.push(lat);
-            unsupported_axes.sort_unstable();
-            return Ok(None);
+            return Ok(CelestialResolution::DegenerateCone);
         }
         // Fiducial point: projection default, overridable by PVi_1a/PVi_2a on the
         // longitude axis (§8.3).
-        let reference = proj.reference_point(&pv);
-        let (mut phi0, mut theta0) = (reference.phi, reference.theta);
+        let (mut phi0, mut theta0) = (0.0, proj.reference_latitude(&pv));
         if let Some(v) = read_pv(Keyword::fitting(format_args!("PV{}_1{alt}", lng + 1)))? {
             phi0 = v;
         }
         if let Some(v) = read_pv(Keyword::fitting(format_args!("PV{}_2{alt}", lng + 1)))? {
             theta0 = v;
         }
-        let (alpha0, delta0) = (crval[lng], crval[lat]);
         // LONPOLE (= LONPOLEa or PVi_3a): default φ0 if δ0 ≥ θ0, else φ0 + 180°.
-        let phip = match read_real(header, Keyword::fitting(format_args!("LONPOLE{alt}")))? {
+        let phip = match header_read::real(header, Keyword::fitting(format_args!("LONPOLE{alt}")))?
+        {
             Some(value) => Some(value),
             None => read_pv(Keyword::fitting(format_args!("PV{}_3{alt}", lng + 1)))?,
         }
-        .unwrap_or(if delta0 >= theta0 { phi0 } else { phi0 + 180.0 });
+        .unwrap_or(if reference.dec >= theta0 {
+            phi0
+        } else {
+            phi0 + 180.0
+        });
         // LATPOLE (= LATPOLEa or PVi_4a): default 90°.
-        let thetap = match read_real(header, Keyword::fitting(format_args!("LATPOLE{alt}")))? {
-            Some(value) => Some(value),
-            None => read_pv(Keyword::fitting(format_args!("PV{}_4{alt}", lng + 1)))?,
-        }
-        .unwrap_or(90.0);
-        Ok(Some(Self {
+        let thetap =
+            match header_read::real(header, Keyword::fitting(format_args!("LATPOLE{alt}")))? {
+                Some(value) => Some(value),
+                None => read_pv(Keyword::fitting(format_args!("PV{}_4{alt}", lng + 1)))?,
+            }
+            .unwrap_or(90.0);
+        let fiducial = Fiducial {
+            phi: phi0,
+            theta: theta0,
+            celestial: reference,
+        };
+        Ok(CelestialResolution::Transform(Self {
             lng,
             lat,
-            projection: proj,
-            pole: CelestialPole::from_fiducial(phi0, theta0, alpha0, delta0, phip, thetap)?,
+            rotation: CelestialPole::from_fiducial(fiducial, phip, thetap)?.into(),
             parameters,
             tpv,
         }))
@@ -112,17 +133,30 @@ impl CelestialTransform {
 }
 
 impl CelestialTransform {
-    /// The intermediate coordinates the projection takes: `(x, y)` through TPV on a
-    /// `-TPV` pair, as they are otherwise.
-    pub(super) fn distort(&self, x: f64, y: f64) -> [f64; 2] {
-        self.tpv.as_ref().map_or([x, y], |tpv| tpv.forward(x, y))
+    /// The celestial coordinate of the pair's intermediate coordinates `(x, y)` (deg):
+    /// through TPV on a `-TPV` pair, the projection's inverse and the rotation.
+    pub(super) fn to_world(&self, x: f64, y: f64) -> Result<CelestialCoordinate> {
+        let [x, y] = self.tpv.as_ref().map_or([x, y], |tpv| tpv.forward(x, y));
+        let native = self.parameters.deproject(x, y)?;
+        Ok(self.rotation.to_celestial(native))
     }
 
-    /// The inverse of [`Self::distort`].
-    pub(super) fn undistort(&self, x: f64, y: f64) -> Result<[f64; 2]> {
+    /// The intermediate coordinates of the celestial coordinate `(ra, dec)` (deg), the
+    /// inverse of [`Self::to_world`]. Errors with
+    /// [`FitsError::WcsWorldOutOfDomain`](crate::error::FitsError::WcsWorldOutOfDomain)
+    /// for a coordinate that is not finite or whose
+    /// latitude lies past ±90°.
+    pub(super) fn to_intermediate(&self, ra: f64, dec: f64) -> Result<[f64; 2]> {
+        if !ra.is_finite() || !(-90.0 - DEGREE_TOLERANCE..=90.0 + DEGREE_TOLERANCE).contains(&dec) {
+            return Err(self.parameters.projection().world_domain_error());
+        }
+        let native = self.rotation.to_native(ra, dec.clamp(-90.0, 90.0));
+        let projected = self.parameters.project(native)?;
         self.tpv
             .as_ref()
-            .map_or(Ok([x, y]), |tpv| tpv.inverse(x, y))
+            .map_or(Ok([projected.x, projected.y]), |tpv| {
+                tpv.inverse(projected.x, projected.y)
+            })
     }
 }
 
@@ -133,4 +167,86 @@ impl CelestialTransform {
 pub(super) enum PvMeaning {
     Projection,
     Distortion,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::error::FitsError;
+    use crate::internals::tolerance::{Tolerance, assert_close};
+    use crate::internals::wcs_header::WcsHeader;
+    use crate::world_coordinates::Wcs;
+    use crate::world_coordinates::celestial_pole::CelestialPole;
+    use crate::world_coordinates::celestial_transform::CelestialTransform;
+
+    fn transform(projection: &str, keywords: &[(&str, f64)]) -> CelestialTransform {
+        let mut header =
+            WcsHeader::celestial(projection, [1.0, 1.0], [45.0, 30.0], [1e-3, 1e-3]).image_header();
+        for &(keyword, value) in keywords {
+            header.set_internal(keyword, value);
+        }
+        Wcs::from_header(&header, None).unwrap().celestial.unwrap()
+    }
+
+    /// LONPOLE defaults to φ₀ when δ₀ ≥ θ₀ and to φ₀ + 180° otherwise: a zenithal
+    /// fiducial point (θ₀ = 90° > δ₀ = 30°) takes 180°, a cylindrical one (θ₀ = 0) 0°.
+    /// `LONPOLE` wins over `PV1_3`, which stands in for it; `PV1_4` stands in for
+    /// `LATPOLE` and picks the southern pole of CAR, (45°, −60°).
+    #[test]
+    fn the_pole_keywords_and_their_pv_forms_set_the_rotation() {
+        let pole = |projection, keywords| transform(projection, keywords).rotation.pole;
+        assert_eq!(pole("TAN", &[]).lonpole, 180.0);
+        assert_eq!(pole("CAR", &[]).lonpole, 0.0);
+        assert_eq!(pole("TAN", &[("PV1_3", 170.0)]).lonpole, 170.0);
+        assert_eq!(
+            pole("TAN", &[("PV1_3", 170.0), ("LONPOLE", 160.0)]).lonpole,
+            160.0
+        );
+        assert_eq!(
+            pole("CAR", &[("PV1_4", -90.0)]),
+            CelestialPole {
+                ra: 45.0,
+                dec: -60.0,
+                lonpole: 0.0
+            }
+        );
+        // `PV1_1` and `PV1_2` move the fiducial point: TAN's at θ₀ = 0 is the CAR case.
+        assert_eq!(
+            pole("TAN", &[("PV1_2", 0.0), ("LONPOLE", 0.0)]),
+            pole("CAR", &[])
+        );
+    }
+
+    /// A latitude past ±90° by more than the degree tolerance, or a coordinate that is not
+    /// finite, has no intermediate point; one within the tolerance is the pole.
+    #[test]
+    fn intermediate_coordinates_take_latitudes_to_the_poles() {
+        let tan = transform("TAN", &[]);
+        let pole = tan.to_intermediate(45.0, 90.0).unwrap();
+        assert_eq!(tan.to_intermediate(45.0, 90.0 + 1e-13).unwrap(), pole);
+        for [ra, dec] in [
+            [45.0, 90.0 + 1e-11],
+            [45.0, -90.0 - 1e-11],
+            [f64::NAN, 30.0],
+            [f64::INFINITY, 30.0],
+        ] {
+            assert!(
+                matches!(
+                    tan.to_intermediate(ra, dec),
+                    Err(FitsError::WcsWorldOutOfDomain { projection: "TAN" })
+                ),
+                "({ra}, {dec})"
+            );
+        }
+        // Each world coordinate is below 64°, whose ulp is 32 ε.
+        let world = tan.to_world(0.25, -0.5).unwrap();
+        assert_close(
+            &tan.to_intermediate(world.ra, world.dec).unwrap(),
+            &[0.25, -0.5],
+            Tolerance::abs(
+                2.0 * 32.0 * f64::EPSILON,
+                "two ulps of the world coordinate",
+            ),
+            "round trip",
+        );
+    }
 }

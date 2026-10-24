@@ -3,8 +3,10 @@
 use crate::alternate::Alternate;
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::error::WcsConflict;
+use crate::header_model::Header;
+use crate::header_model::record::RecordView;
 use crate::header_model::value::Value;
-use crate::header_model::{Header, RecordView};
 use crate::keyword::Keyword;
 use crate::world_coordinates::axis::Axis;
 use crate::world_coordinates::distortion::sip::Sip;
@@ -104,11 +106,12 @@ impl Declared {
     ) -> Result<()> {
         if sip.is_some() && alt != Alternate::PRIMARY {
             return Err(FitsError::ConflictingWcsKeywords {
-                detail: "SIP keywords have no alternate form",
+                conflict: WcsConflict::SipAlternate,
             });
         }
         let primary = alt == Alternate::PRIMARY;
-        header.remove_where(|name| {
+        header.remove_where(|keyword| {
+            let name = keyword.as_str();
             is_description_keyword(name, alt) || primary && is_sip_keyword(name)
         });
         let naxis = axes.len();

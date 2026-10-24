@@ -22,8 +22,8 @@
 //!   (an internal `Card` list)
 //!   whose logical records round-trip with a side index for O(1) keyword lookup;
 //!   physical card layout is normalized on write rather than retained.
-//! - [`io::HduKind`] — HDU classification and the data-unit sizing formula that makes
-//!   boundaries computable from headers alone (no data read required).
+//! - [`io::HduKind`] — HDU classification; the reader sizes each data unit from its
+//!   header, so the boundaries are known with no data read.
 //! - [`FitsReader`] — lazy, seeking access to the HDU sequence of a file.
 //!
 //! # Status
@@ -70,7 +70,11 @@ mod unit;
 mod words;
 mod world_coordinates;
 
-pub use error::{FitsError, Indexed, Ranked, Result};
+pub use error::{
+    CompressedDataDefect, CompressionFeature, CompressionParameter, FitsError, GrismDefect,
+    HcompressDefect, Indexed, NonFinite, NumericTarget, PlioDefect, PoleDefect, Ranked, Result,
+    SizeUnit, TabularDefect, TextOrigin, TileCell, ValueKind, WcsConflict, WcsDefect,
+};
 pub use fits_editor::FitsEditor;
 pub use fits_writer::FitsWriter;
 pub use fits_writer::image_writer::ImageWriter;
@@ -87,21 +91,26 @@ pub mod image {
     pub use crate::image_model::data::Data;
     pub use crate::image_model::physical_sample::PhysicalSample;
     pub use crate::image_model::region::Region;
+    pub use crate::image_model::sample::Sample;
     pub use crate::image_model::sample_type::SampleType;
     pub use crate::image_model::scaling::Scaling;
     pub use crate::image_model::unsigned_data::UnsignedData;
+    pub use crate::image_model::unsigned_view::UnsignedView;
     pub use crate::image_model::view::{Borrowed, View};
     pub use crate::image_model::{Image, Metadata};
 }
 
 /// The ordered header model: keyword records and their typed values.
 pub mod header {
+    pub use crate::header_model::commentary_name::CommentaryName;
     pub use crate::header_model::defect::Defect;
     pub use crate::header_model::hierarch_name::HierarchName;
     pub use crate::header_model::keywords;
+    pub use crate::header_model::record::{Record, RecordView};
+    pub use crate::header_model::record_name::RecordName;
     pub use crate::header_model::repair::{Repair, RepairKind};
     pub use crate::header_model::value::{FitsInteger, Value};
-    pub use crate::header_model::{Header, Iter, Record, RecordView};
+    pub use crate::header_model::{Header, Iter};
     pub use crate::keyword::Keyword;
 }
 
@@ -157,12 +166,13 @@ pub mod wcs {
     pub use crate::world_coordinates::distortion::Distortion;
     pub use crate::world_coordinates::projection::Projection;
     pub use crate::world_coordinates::spectral_frame::{SpectralFrame, SpectralReferenceFrame};
-    pub use crate::world_coordinates::{CelestialProjection, Metadata, Wcs};
+    pub use crate::world_coordinates::{AxisWorld, CelestialProjection, Metadata, Wcs};
 }
 
 /// Typed time coordinates (§9): calendar datetimes, time scales, and a
 /// header's time frame.
 pub mod time {
+    pub use crate::time_coordinates::axis::Axis;
     pub use crate::time_coordinates::bounds::Bounds;
     pub use crate::time_coordinates::coordinate::Coordinate;
     pub use crate::time_coordinates::datetime::Datetime;
@@ -177,25 +187,26 @@ pub mod time {
 /// Binary and ASCII table values, schema and selection metadata, and write
 /// builders.
 pub mod table {
-    pub use crate::ascii::ascii_text::AsciiText;
+    pub use crate::ascii::ascii_text::{AsciiRows, AsciiText};
     pub use crate::ascii::{
         Ascii, AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiSchema,
     };
     pub use crate::bintable::Table;
-    pub use crate::bintable::bit_column::BitColumn;
+    pub use crate::bintable::bit_column::{BitColumn, BitRows};
     pub use crate::bintable::character_field::CharacterField;
     pub use crate::bintable::column::Column;
     pub use crate::bintable::column_data::ColumnData;
     pub use crate::bintable::column_reader::ColumnReader;
     pub use crate::bintable::column_view::ColumnView;
+    pub use crate::bintable::descriptor::DescriptorWidth;
+    pub use crate::bintable::element_kind::ElementKind;
     pub use crate::bintable::schema::Schema;
-    pub use crate::bintable::tform::Tform;
-    pub use crate::bintable::tform_kind::TformKind;
+    pub use crate::bintable::selection::{SelectedColumn, SelectedData, Selection};
+    pub use crate::bintable::tform::{Storage, Tform};
     pub use crate::column::ColumnSelector;
-    pub use crate::fits_writer::ascii_builder::{AsciiBuilder, AsciiWriteColumn};
+    pub use crate::fits_writer::ascii_builder::{AsciiBuilder, AsciiFloatFormat, AsciiWriteColumn};
     pub use crate::fits_writer::builder::{Builder, WriteColumn};
-    pub use crate::ragged::Ragged;
-    pub use crate::reader::{SelectedColumn, SelectedData, Selection};
+    pub use crate::ragged::{Ragged, RowValues, Rows};
 }
 
 /// Lazy FITS source access and HDU-bound operations. Concrete source wrappers
@@ -203,23 +214,44 @@ pub mod table {
 /// is sealed and is not an extension point.
 pub mod io {
     pub use crate::block::{BLOCK_SIZE, CARD_SIZE};
-    pub use crate::groups::{RandomGroupView, RandomGroups, RandomGroupsMetadata};
+    pub use crate::checksum::checksum_report::{ChecksumReport, ChecksumStatus};
+    pub use crate::groups::{GroupParameter, RandomGroupView, RandomGroups, RandomGroupsMetadata};
     pub use crate::hdu::HduKind;
     pub use crate::reader::hdu::Hdu;
     pub use crate::reader::hdu_selector::HduSelector;
     pub use crate::reader::source::{SliceSource, StreamSource};
-    pub use crate::reader::{
-        ChecksumReport, ChecksumStatus, DataUnit, DataUnitView, SliceReader, StreamReader,
-    };
+    pub use crate::reader::{SliceReader, StreamReader};
 }
 
-/// Entry points for the allocation-counting integration test. They wrap
-/// crate-private fixtures; they are **not** a stable API.
+/// The fixtures that tests and benches share, and the entry points of the
+/// allocation-counting integration test; they are **not** a stable API.
 #[cfg(feature = "internals")]
 pub mod internals {
+    #![cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a bench or the allocation test uses part of the fixtures"
+        )
+    )]
+
     pub use crate::world_coordinates::tabular::internals::{
         tabular_forward_at_pixel, tabular_inverse_at_fraction, tabular_inverse_at_world,
     };
+
+    pub(crate) mod cards;
+    #[cfg(all(test, feature = "compression"))]
+    pub(crate) mod container;
+    #[cfg(test)]
+    pub(crate) mod fixture;
+    pub(crate) mod memory;
+    pub(crate) mod rng;
+    pub(crate) mod samples;
+    pub(crate) mod scene;
+    #[cfg(test)]
+    pub(crate) mod tolerance;
+    #[cfg(test)]
+    pub(crate) mod wcs_header;
 }
 
 #[cfg(feature = "internals")]

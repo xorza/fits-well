@@ -30,4 +30,6 @@ inverse ran twice on each tree and gave the same figures to 0.3%.
   dependent divisions, where the product with the inverse was one multiply-add pass.
   The other inverses solve one or two axes, where the difference does not show.
 - `tests/wcs_allocations.rs` counts the allocations: none for a celestial or a
-  spectral point, two vectors for a `-TAB` one.
+  spectral point, two vectors for a one-axis `-TAB` point either way, and about 13 for
+  the inverse of a coupled `-TAB` point, which the test compared only between two search
+  depths. `2026-10-24-tab-inverse-runs.md` has the figures after the TAB search change.

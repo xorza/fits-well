@@ -1,36 +1,29 @@
 //! One binary-table column descriptor and the decode its `TFORMn` selects.
 
 use crate::bintable::column_data::ColumnData;
-use crate::bintable::descriptor;
+use crate::bintable::element_kind::Cell;
 use crate::bintable::tdim;
-use crate::bintable::tform::Tform;
-use crate::bintable::tform_kind::TformKind;
-use crate::column::Named;
+use crate::bintable::tform::{Storage, Tform};
+use crate::column::{Keyed, Named};
 use crate::error::Result;
 use crate::header_model::keywords;
 use crate::image_model::scaling::Scaling;
 use std::iter;
 
 /// One column of a binary table: its `TFORMn` format, optional name/unit, the
-/// `TSCALn`/`TZEROn`/`TNULLn` metadata, and its byte offset within a row.
+/// `TSCALn`/`TZEROn`/`TNULLn`/`TDIMn`/`TDISPn` keywords, and its byte offset within a
+/// row. A keyword whose value did not read is kept as its defect: its accessor and
+/// each read that needs it fail, and the column's other reads do not.
 #[derive(Debug)]
 pub struct Column {
     pub name: Option<String>,
     pub unit: Option<String>,
     pub tform: Tform,
-    /// `TSCALn` (default 1.0); applied by
-    /// [`ColumnReader::physical`](crate::table::ColumnReader::physical).
-    pub tscale: f64,
-    /// `TZEROn` (default 0.0); applied by
-    /// [`ColumnReader::physical`](crate::table::ColumnReader::physical).
-    pub tzero: f64,
-    /// `TNULLn`, the integer value denoting an undefined element, if declared.
-    pub tnull: Option<i64>,
-    /// `TDIMn` array shape (e.g. `'(4,4)'` → `[4, 4]`), if declared — reshapes the
-    /// `repeat` elements of each row into a multidimensional array (§7.3.2).
-    pub tdim: Option<Vec<usize>>,
-    /// Raw `TDISPn` display recommendation (§7.3.4), if declared.
-    pub tdisp: Option<String>,
+    pub(crate) tscale: Keyed<f64>,
+    pub(crate) tzero: Keyed<f64>,
+    pub(crate) tnull: Keyed<Option<i64>>,
+    pub(crate) tdim: Keyed<Option<Vec<usize>>>,
+    pub(crate) tdisp: Keyed<Option<String>>,
     /// The column's 1-based number, the `n` of its keywords.
     pub(crate) number: usize,
     /// Byte offset of this column from the start of a row: the sum of the widths
@@ -46,9 +39,9 @@ impl Clone for Column {
             name: self.name.clone(),
             unit: self.unit.clone(),
             tform: self.tform,
-            tscale: self.tscale,
-            tzero: self.tzero,
-            tnull: self.tnull,
+            tscale: self.tscale.clone(),
+            tzero: self.tzero.clone(),
+            tnull: self.tnull.clone(),
             tdim: self.tdim.clone(),
             tdisp: self.tdisp.clone(),
             number: self.number,
@@ -72,9 +65,9 @@ impl Clone for Column {
         self.name.clone_from(name);
         self.unit.clone_from(unit);
         self.tform = *tform;
-        self.tscale = *tscale;
-        self.tzero = *tzero;
-        self.tnull = *tnull;
+        self.tscale.clone_from(tscale);
+        self.tzero.clone_from(tzero);
+        self.tnull.clone_from(tnull);
         self.tdim.clone_from(tdim);
         self.tdisp.clone_from(tdisp);
         self.number = *number;
@@ -94,14 +87,48 @@ impl Column {
         self.byte_offset
     }
 
+    /// `TSCALn`, 1 when absent; applied by
+    /// [`ColumnReader::physical`](crate::table::ColumnReader::physical).
+    pub fn tscale(&self) -> Result<f64> {
+        self.tscale.clone().map_err(|defect| defect.error())
+    }
+
+    /// `TZEROn`, 0 when absent; applied by
+    /// [`ColumnReader::physical`](crate::table::ColumnReader::physical).
+    pub fn tzero(&self) -> Result<f64> {
+        self.tzero.clone().map_err(|defect| defect.error())
+    }
+
+    /// `TNULLn`, the integer value denoting an undefined element, if declared.
+    pub fn tnull(&self) -> Result<Option<i64>> {
+        self.tnull.clone().map_err(|defect| defect.error())
+    }
+
+    /// The `TDIMn` array shape (e.g. `'(4,4)'` → `[4, 4]`), if declared — reshapes the
+    /// `repeat` elements of each row into a multidimensional array (§7.3.2).
+    pub fn tdim(&self) -> Result<Option<&[usize]>> {
+        match &self.tdim {
+            Ok(shape) => Ok(shape.as_deref()),
+            Err(defect) => Err(defect.error()),
+        }
+    }
+
+    /// The raw `TDISPn` display recommendation (§7.3.4), if declared.
+    pub fn tdisp(&self) -> Result<Option<&str>> {
+        match &self.tdisp {
+            Ok(tdisp) => Ok(tdisp.as_deref()),
+            Err(defect) => Err(defect.error()),
+        }
+    }
+
     /// `TSCALn`/`TZEROn`/`TNULLn` as the [`Scaling`] they mean — exactly what an
     /// image's `BSCALE`/`BZERO`/`BLANK` do.
-    pub(super) const fn scaling(&self) -> Scaling {
-        Scaling {
-            bscale: self.tscale,
-            bzero: self.tzero,
-            blank: self.tnull,
-        }
+    pub(super) fn scaling(&self) -> Result<Scaling> {
+        Ok(Scaling {
+            bscale: self.tscale()?,
+            bzero: self.tzero()?,
+            blank: self.tnull()?,
+        })
     }
 
     /// Decode `row_count` fixed-width cells of this column into a typed,
@@ -124,17 +151,13 @@ impl Column {
         row_count: usize,
         out: &mut ColumnData,
     ) {
-        match self.tform.kind {
-            TformKind::ArrayDesc32 | TformKind::ArrayDesc64 => {
-                unreachable!("raw rejects VLA columns before fixed decode")
-            }
-            // `X` packs `repeat` bits into `byte_width` bytes, so its element count is
-            // the byte width rather than the repeat.
-            kind @ (TformKind::U8 | TformKind::Bit) => {
-                kind.decode_cells_into(cells, row_count * self.tform.byte_width(), out);
-            }
-            kind => kind.decode_cells_into(cells, row_count * self.tform.repeat, out),
-        }
+        debug_assert_eq!(self.tform.storage(), Storage::Fixed, "a fixed-width column");
+        let count = self.tform.repeat();
+        self.tform.element().decode_cells_into(
+            cells.map(|bytes| Cell { bytes, count }),
+            row_count * count,
+            out,
+        );
     }
 
     /// Decode one fixed-width cell of this column — the single-row form of
@@ -144,22 +167,18 @@ impl Column {
         self.decode_cells(iter::once(bytes), 1)
     }
 
-    /// Decode one `P`/`Q` row's heap array, whose length the row's descriptor gave.
-    pub(crate) fn decode_vla_cell(&self, bytes: &[u8], element_count: usize) -> Result<ColumnData> {
-        self.validate_vla_tdim(element_count)?;
-        let element_type = self
-            .tform
-            .vla_elem
-            .expect("validated VLA format carries an element type");
-        let expected_len = descriptor::payload_len(element_type, element_count)?;
-        debug_assert_eq!(bytes.len(), expected_len);
-        let kind = element_type.heap_kind();
-        Ok(kind.decode_cells(iter::once(bytes), bytes.len() / kind.elem_size()))
+    /// Decode one `P`/`Q` row's heap array of `count` elements, whose bytes the row's
+    /// descriptor gave.
+    pub(crate) fn decode_vla_cell(&self, bytes: &[u8], count: usize) -> Result<ColumnData> {
+        self.validate_vla_tdim(count)?;
+        let element = self.tform.element();
+        debug_assert_eq!(Some(bytes.len()), element.payload_len(count));
+        Ok(element.decode_cells(iter::once(Cell { bytes, count }), count))
     }
 
     /// The `TDIMn` extent check for this column's `P`/`Q` heap array.
     pub(super) fn validate_vla_tdim(&self, element_count: usize) -> Result<()> {
-        match &self.tdim {
+        match self.tdim()? {
             Some(dims) => {
                 tdim::validate_vla_extent(dims, element_count, keywords::TDIM.indexed(self.number)?)
             }

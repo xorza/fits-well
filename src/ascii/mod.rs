@@ -8,16 +8,15 @@
 pub(crate) mod ascii_text;
 
 use std::io::{self, Write};
-use std::{fmt, str};
+use std::{fmt, result, str};
 
 use crate::ascii::ascii_text::AsciiText;
 use crate::column;
 use crate::column::ColumnSelector;
 use crate::column::Named;
-use crate::column::{ColumnLabels, ColumnScaling};
-use crate::error::FitsError;
+use crate::column::{ColumnLabels, ColumnScaling, Keyed, TableShape};
 use crate::error::Result;
-use crate::hdu::validate_table_field_count;
+use crate::error::{FitsError, TextOrigin};
 use crate::header_model::{Header, keywords};
 
 /// The value type of an ASCII-table column.
@@ -58,15 +57,57 @@ impl AsciiColumnData {
         self.len() == 0
     }
 
-    /// Whether any row is undefined, and so needs a `TNULLn` marker to be writable.
-    pub(crate) fn has_null(&self) -> bool {
-        match self {
-            Self::Text(values) => values.has_null(),
-            Self::Integer(values) => values.iter().any(Option::is_none),
-            Self::Float(values) => values.iter().any(Option::is_none),
+    pub const fn as_text(&self) -> Option<&AsciiText> {
+        if let Self::Text(values) = self {
+            Some(values)
+        } else {
+            None
+        }
+    }
+
+    pub const fn as_integer(&self) -> Option<&[Option<i64>]> {
+        if let Self::Integer(values) = self {
+            Some(values.as_slice())
+        } else {
+            None
+        }
+    }
+
+    pub const fn as_float(&self) -> Option<&[Option<f64>]> {
+        if let Self::Float(values) = self {
+            Some(values.as_slice())
+        } else {
+            None
         }
     }
 }
+
+/// `AsciiColumnData` from its values, and back: the reverse gives the data back when it
+/// holds another type.
+macro_rules! impl_ascii_column_data_conversions {
+    ($variant:ident, $type:ty) => {
+        impl From<$type> for AsciiColumnData {
+            fn from(values: $type) -> Self {
+                Self::$variant(values)
+            }
+        }
+
+        impl TryFrom<AsciiColumnData> for $type {
+            type Error = AsciiColumnData;
+
+            fn try_from(data: AsciiColumnData) -> result::Result<Self, AsciiColumnData> {
+                match data {
+                    AsciiColumnData::$variant(values) => Ok(values),
+                    other => Err(other),
+                }
+            }
+        }
+    };
+}
+
+impl_ascii_column_data_conversions!(Text, AsciiText);
+impl_ascii_column_data_conversions!(Integer, Vec<Option<i64>>);
+impl_ascii_column_data_conversions!(Float, Vec<Option<f64>>);
 
 /// One ASCII-table column.
 #[derive(Debug, Clone)]
@@ -79,11 +120,10 @@ pub struct AsciiColumn {
     pub width: usize,
     /// Digits after the decimal point (`Fw.d`); 0 for non-floats.
     pub decimals: usize,
-    /// `TSCALn` / `TZEROn` for the physical plane (`physical = TZERO + TSCAL·raw`).
-    pub tscale: f64,
-    pub tzero: f64,
-    /// `TNULLn`: the exact field text that marks an undefined value (§7.2.5).
-    pub tnull: Option<String>,
+    tscale: Keyed<f64>,
+    tzero: Keyed<f64>,
+    tnull: Keyed<Option<String>>,
+    tdisp: Keyed<Option<String>>,
 }
 
 /// A parsed ASCII table plus its row text.
@@ -107,26 +147,19 @@ pub struct AsciiSchema {
 }
 
 impl AsciiSchema {
-    /// The index of the first column whose `TTYPEn` matches `name`, compared
-    /// case-insensitively per §7.2.2.
-    pub fn column_index(&self, name: &str) -> Option<usize> {
-        column::index_of(&self.columns, name)
-    }
-}
-
-impl Ascii {
-    /// The table's structure: its row count, row width and validated columns.
-    pub const fn schema(&self) -> &AsciiSchema {
-        &self.schema
-    }
-
-    pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<Self> {
-        let row_len = header.require_usize(keywords::NAXIS.indexed(1)?)?;
-        let row_count = header.require_usize(keywords::NAXIS.indexed(2)?)?;
-        // §7.2.1: `0 ≤ TFIELDS ≤ 999` — also a guard, since `tfields` sizes the
-        // column `Vec` and drives the `TFORMn` loop (an absurd value would abort).
-        let tfields = header.require_usize(keywords::TFIELDS)?;
-        validate_table_field_count(tfields)?;
+    /// Parse the complete ASCII-table schema from its header, without its data unit.
+    pub fn parse(header: &Header) -> Result<Self> {
+        let TableShape {
+            row_len,
+            row_count,
+            field_count: tfields,
+        } = TableShape::read(header)?;
+        // §7.2.1: an ASCII table has no heap.
+        if header.require_integer(keywords::PCOUNT)? != 0 {
+            return Err(FitsError::KeywordOutOfRange {
+                keyword: keywords::PCOUNT,
+            });
+        }
 
         let mut columns = Vec::with_capacity(tfields);
         for n in 1..=tfields {
@@ -147,6 +180,8 @@ impl Ascii {
             }
             let labels = ColumnLabels::read(header, n)?;
             let scaling = ColumnScaling::read(header, n)?;
+            let tnull_keyword = keywords::TNULL.indexed(n)?;
+            let tdisp_keyword = keywords::TDISP.indexed(n)?;
             columns.push(AsciiColumn {
                 name: labels.name,
                 unit: labels.unit,
@@ -156,16 +191,44 @@ impl Ascii {
                 decimals: fmt.decimals,
                 tscale: scaling.tscale,
                 tzero: scaling.tzero,
-                tnull: header
-                    .get_text(keywords::TNULL.indexed(n)?)?
-                    .map(|s| s.trim().to_string()),
+                tnull: column::keyed(tnull_keyword, || {
+                    Ok(header
+                        .get_text(tnull_keyword)?
+                        .map(|tnull| tnull.trim().to_string()))
+                }),
+                tdisp: column::keyed(tdisp_keyword, || {
+                    Ok(header.get_text(tdisp_keyword)?.map(str::to_string))
+                }),
             });
         }
+        Ok(Self {
+            row_count,
+            row_len,
+            columns,
+        })
+    }
 
+    /// The index of the first column whose `TTYPEn` matches `name`, compared
+    /// case-insensitively per §7.2.2.
+    pub fn column_index(&self, name: &str) -> Option<usize> {
+        column::index_of(&self.columns, name)
+    }
+}
+
+impl Ascii {
+    /// The table's structure: its row count, row width and validated columns.
+    pub const fn schema(&self) -> &AsciiSchema {
+        &self.schema
+    }
+
+    /// The table `schema` describes, over its data unit `data`. Errors when the data
+    /// ends before the rows do, and when the rows are not ASCII text.
+    pub(crate) fn new(schema: AsciiSchema, data: Vec<u8>) -> Result<Self> {
         // `row_count · row_len` from untrusted axes: check the product can't overflow
         // (a 32-bit-usize hazard `data_extent`'s u64 math wouldn't catch).
-        let total = row_count
-            .checked_mul(row_len)
+        let total = schema
+            .row_count
+            .checked_mul(schema.row_len)
             .ok_or(FitsError::DataUnitOverflow)?;
         if data.len() < total {
             return Err(FitsError::UnexpectedEof);
@@ -179,15 +242,11 @@ impl Ascii {
         data.truncate(total);
         if !data.is_ascii() {
             return Err(FitsError::InvalidAscii {
-                context: "ASCII-table data",
+                text: TextOrigin::TableData,
             });
         }
         Ok(Self {
-            schema: AsciiSchema {
-                row_count,
-                row_len,
-                columns,
-            },
+            schema,
             rows: String::from_utf8(data).expect("ASCII bytes are valid UTF-8"),
         })
     }
@@ -236,12 +295,13 @@ impl<'a> AsciiColumnReader<'a> {
     pub fn raw(&self) -> Result<AsciiColumnData> {
         let table = self.table;
         let col = self.descriptor();
+        let tnull = col.tnull()?;
         match col.kind {
             AsciiKind::Text => Ok(AsciiColumnData::Text(
                 (0..table.schema.row_count)
                     .map(|r| {
                         let field = table.field(col, r);
-                        (!col.is_null(field.trim())).then_some(field)
+                        (tnull != Some(field.trim())).then_some(field)
                     })
                     .collect(),
             )),
@@ -249,7 +309,8 @@ impl<'a> AsciiColumnReader<'a> {
                 let mut out = Vec::with_capacity(table.schema.row_count);
                 for r in 0..table.schema.row_count {
                     out.push(
-                        defined_field(table, col, r)
+                        table
+                            .defined_field(col, tnull, r)
                             .map(parse_integer)
                             .transpose()?,
                     );
@@ -259,7 +320,8 @@ impl<'a> AsciiColumnReader<'a> {
             AsciiKind::Float => {
                 let mut out = Vec::with_capacity(table.schema.row_count);
                 for r in 0..table.schema.row_count {
-                    let value = defined_field(table, col, r)
+                    let value = table
+                        .defined_field(col, tnull, r)
                         .map(|field| parse_float(field, col.decimals))
                         .transpose()?;
                     out.push(value);
@@ -277,15 +339,16 @@ impl<'a> AsciiColumnReader<'a> {
         if col.kind == AsciiKind::Text {
             return Err(FitsError::NotANumericColumn { code: 'A' });
         }
+        let (tscale, tzero, tnull) = (col.tscale()?, col.tzero()?, col.tnull()?);
         let mut out = Vec::with_capacity(self.table.schema.row_count);
         for row in 0..self.table.schema.row_count {
-            let value = match defined_field(self.table, col, row) {
+            let value = match self.table.defined_field(col, tnull, row) {
                 // §7.2.5: an undefined field has no value to scale.
                 None => f64::NAN,
                 Some(field) if col.kind == AsciiKind::Integer => {
-                    col.tzero + col.tscale * parse_integer(field)? as f64
+                    tzero + tscale * parse_integer(field)? as f64
                 }
-                Some(field) => col.tzero + col.tscale * parse_float(field, col.decimals)?,
+                Some(field) => tzero + tscale * parse_float(field, col.decimals)?,
             };
             out.push(value);
         }
@@ -293,15 +356,17 @@ impl<'a> AsciiColumnReader<'a> {
     }
 }
 
-/// The trimmed text of one field, or `None` when it is the column's `TNULLn` marker
-/// and so carries no value at all (§7.2.5).
-fn defined_field<'a>(table: &'a Ascii, col: &AsciiColumn, row: usize) -> Option<&'a str> {
-    let field = table.field(col, row).trim();
-    (!col.is_null(field)).then_some(field)
+impl Ascii {
+    /// The trimmed text of the field of `col` in `row`, or `None` when it is the column's
+    /// `TNULLn` marker `tnull` and so carries no value at all (§7.2.5).
+    fn defined_field(&self, col: &AsciiColumn, tnull: Option<&str>, row: usize) -> Option<&str> {
+        let field = self.field(col, row).trim();
+        (tnull != Some(field)).then_some(field)
+    }
 }
 
 /// Parse an `Iw` field. A blank one is a genuine zero, not an undefined value
-/// (§7.2.5) — only `TNULLn` marks undefined, and [`defined_field`] filtered it.
+/// (§7.2.5) — only `TNULLn` marks undefined, and [`Ascii::defined_field`] filtered it.
 fn parse_integer(field: &str) -> Result<i64> {
     if field.is_empty() {
         return Ok(0);
@@ -322,9 +387,30 @@ fn parse_float(field: &str, decimals: usize) -> Result<f64> {
 }
 
 impl AsciiColumn {
-    /// Whether the trimmed field text marks an undefined value (`TNULLn`).
-    fn is_null(&self, field: &str) -> bool {
-        self.tnull.as_deref() == Some(field)
+    /// `TSCALn`, 1 when absent: `physical = TZERO + TSCAL × field`.
+    pub fn tscale(&self) -> Result<f64> {
+        self.tscale.clone().map_err(|defect| defect.error())
+    }
+
+    /// `TZEROn`, 0 when absent.
+    pub fn tzero(&self) -> Result<f64> {
+        self.tzero.clone().map_err(|defect| defect.error())
+    }
+
+    /// `TNULLn`, trimmed: the field text that marks an undefined value (§7.2.5).
+    pub fn tnull(&self) -> Result<Option<&str>> {
+        match &self.tnull {
+            Ok(tnull) => Ok(tnull.as_deref()),
+            Err(defect) => Err(defect.error()),
+        }
+    }
+
+    /// The raw `TDISPn` display recommendation (§7.2.2), if declared.
+    pub fn tdisp(&self) -> Result<Option<&str>> {
+        match &self.tdisp {
+            Ok(tdisp) => Ok(tdisp.as_deref()),
+            Err(defect) => Err(defect.error()),
+        }
     }
 }
 
@@ -437,8 +523,18 @@ fn parse_ascii_tform(value: &str) -> Result<AsciiFormat> {
 
 #[cfg(test)]
 pub(crate) mod internals {
+    use crate::ascii::{Ascii, AsciiSchema};
+    use crate::error::Result;
     use crate::header_model::Header;
     use crate::header_model::keywords;
+    use crate::internals::cards;
+
+    impl Ascii {
+        /// The table `header` describes, over its data unit `data`.
+        pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<Self> {
+            Self::new(AsciiSchema::parse(header)?, data)
+        }
+    }
 
     /// A minimal ASCII `TABLE` header: rows of `naxis1` characters, and each column
     /// at its 1-based `TBCOLn` with its `TFORMn`.
@@ -447,16 +543,9 @@ pub(crate) mod internals {
         naxis2: usize,
         columns: &[(usize, &str)],
     ) -> Header {
-        let mut header = Header::new();
-        header
-            .set_internal(keywords::XTENSION, "TABLE")
-            .set_internal(keywords::BITPIX, 8)
-            .set_internal(keywords::NAXIS, 2)
-            .set_internal("NAXIS1", i64::try_from(naxis1).unwrap())
-            .set_internal("NAXIS2", i64::try_from(naxis2).unwrap())
-            .set_internal(keywords::PCOUNT, 0)
-            .set_internal(keywords::GCOUNT, 1)
-            .set_internal(keywords::TFIELDS, i64::try_from(columns.len()).unwrap());
+        let axes = [naxis1, naxis2].map(|length| i64::try_from(length).unwrap());
+        let mut header = cards::structural(Some("TABLE"), 8, &axes);
+        header.set_internal(keywords::TFIELDS, i64::try_from(columns.len()).unwrap());
         for (index, &(tbcol, tform)) in columns.iter().enumerate() {
             header
                 .set_internal(format!("TBCOL{}", index + 1), i64::try_from(tbcol).unwrap())

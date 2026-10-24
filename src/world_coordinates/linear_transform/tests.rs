@@ -1,22 +1,26 @@
-use crate::header_model::keywords;
+use crate::error::ValueKind;
+use crate::header_model::record_name::RecordName;
+use crate::internals::tolerance::{Tolerance, assert_close};
+use crate::internals::wcs_header::WcsHeader;
 use crate::world_coordinates::internals::to_world;
 
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::internals::CROTA_GOLDEN;
 use crate::world_coordinates::internals::assert_astropy_golden;
-use crate::world_coordinates::internals::celestial_header;
+
 use crate::world_coordinates::linear_transform::internals as linear;
 use crate::world_coordinates::linear_transform::*;
 
 /// A transform built straight from a matrix, skipping the header read. The
 /// factors are still computed here, so the fixture obeys the same invariant a
 /// parsed transform does.
-fn from_matrix(matrix: Vec<f64>, naxis: usize) -> LinearTransform {
+fn from_matrix(matrix: Vec<f64>, naxis: usize, crpix: Vec<f64>) -> LinearTransform {
     let factors = LuFactors::new(&matrix, naxis).expect("non-singular fixture");
     LinearTransform {
         matrix,
         factors,
         naxis,
+        crpix,
         sip: None,
     }
 }
@@ -26,16 +30,6 @@ fn solved(a: &[f64], n: usize, b: &[f64]) -> Vec<f64> {
     let mut x = b.to_vec();
     LuFactors::new(a, n).unwrap().solve(&mut x);
     x
-}
-
-fn axis_at(crpix: f64) -> Axis {
-    Axis {
-        ctype: String::new(),
-        cunit: String::new(),
-        crval: 0.0,
-        crpix,
-        spectral_frame: None,
-    }
 }
 
 /// The solve gives the columns of the inverse, independent of any fixture.
@@ -53,18 +47,22 @@ fn lu_solve_inverts_the_matrix() {
 
 #[test]
 fn matrix_product_applies_reference_pixel_offsets_while_accumulating() {
-    let axes = [axis_at(10.0), axis_at(-2.0), axis_at(4.0)];
-    let transform = from_matrix(vec![2.0, -1.0, 0.5, 0.0, 3.0, 4.0, -2.0, 1.0, 1.5], 3);
+    let transform = from_matrix(
+        vec![2.0, -1.0, 0.5, 0.0, 3.0, 4.0, -2.0, 1.0, 1.5],
+        3,
+        vec![10.0, -2.0, 4.0],
+    );
     let pixel = [13.0, 3.0, 2.0];
     let mut intermediate = [f64::NAN; 3];
-    transform.intermediate(&pixel, &axes, &mut intermediate);
+    transform.intermediate(&pixel, &mut intermediate);
     assert_eq!(intermediate, [0.0, 7.0, -4.0]);
     // Every row of the batch form agrees with the single-axis form.
+    let offsets = transform.offsets(&pixel);
     for (axis, &value) in intermediate.iter().enumerate() {
-        assert_eq!(transform.intermediate_axis(axis, &pixel, &axes), value);
+        assert_eq!(transform.intermediate_axis(axis, &pixel, offsets), value);
     }
     // The inverse direction returns the pixel the intermediate came from, in place.
-    transform.pixel(&mut intermediate, &axes).unwrap();
+    transform.pixel(&mut intermediate).unwrap();
     for (got, want) in intermediate.iter().zip(&pixel) {
         assert!((got - want).abs() < 1e-12, "{got} vs {want}");
     }
@@ -73,7 +71,8 @@ fn matrix_product_applies_reference_pixel_offsets_while_accumulating() {
 #[test]
 fn legacy_crota_rotation_matches_astropy() {
     // CDELT + CROTA2 (no PC/CD) — the legacy rotation convention.
-    let mut h = celestial_header("TAN", [128.0, 128.0], [83.6, 22.0], [-0.0005, 0.0005]);
+    let mut h =
+        WcsHeader::celestial("TAN", [128.0, 128.0], [83.6, 22.0], [-0.0005, 0.0005]).image_header();
     h.set_internal("CROTA2", 25.0);
     let w = Wcs::from_header(&h, None).unwrap();
     assert_astropy_golden(&w, &CROTA_GOLDEN, "CROTA");
@@ -81,19 +80,7 @@ fn legacy_crota_rotation_matches_astropy() {
 
 #[test]
 fn conflicting_linear_keywords_are_rejected() {
-    let base = || {
-        let mut h = Header::new();
-        h.set_internal(keywords::NAXIS, 2)
-            .set_internal("CTYPE1", "RA---TAN")
-            .set_internal("CTYPE2", "DEC--TAN")
-            .set_internal("CRPIX1", 1.0)
-            .set_internal("CRPIX2", 1.0)
-            .set_internal("CRVAL1", 0.0)
-            .set_internal("CRVAL2", 0.0)
-            .set_internal("CDELT1", 1.0)
-            .set_internal("CDELT2", 1.0);
-        h
-    };
+    let base = || WcsHeader::celestial("TAN", [1.0, 1.0], [0.0, 0.0], [1.0, 1.0]).image_header();
     // PC and CD are mutually exclusive; CROTA must not accompany PC.
     let mut pc_cd = base();
     pc_cd.set_internal("PC1_1", 1.0).set_internal("CD1_1", 1.0);
@@ -123,14 +110,17 @@ fn conflicting_linear_keywords_are_rejected() {
     cd_only
         .set_internal("CD1_1", 1.0)
         .set_internal("CD2_2", 1.0);
-    assert!(Wcs::from_header(&cd_only, None).is_ok());
+    assert_eq!(
+        linear::matrix(&Wcs::from_header(&cd_only, None).unwrap().linear),
+        [1.0, 0.0, 0.0, 1.0]
+    );
 
     let mut malformed = base();
     malformed.set_internal("CRVAL1", "not numeric");
     assert!(matches!(
         Wcs::from_header(&malformed, None),
-        Err(FitsError::TypeMismatch { name, expected })
-            if name == "CRVAL1" && expected == "real"
+        Err(FitsError::ValueTypeMismatch { name: RecordName::Keyword(name), expected: ValueKind::Real })
+            if name == "CRVAL1"
     ));
 }
 
@@ -139,12 +129,13 @@ fn cunit_scales_celestial_axes_to_degrees() {
     // §8.2: CRVAL/CDELT are in CUNITia units. The same physical TAN WCS expressed
     // in degrees and in arcseconds must yield identical world coordinates.
     let build = |scale: f64, unit: Option<&str>| {
-        let mut h = celestial_header(
+        let mut h = WcsHeader::celestial(
             "TAN",
             [50.0, 50.0],
             [150.0 * scale, 30.0 * scale],
             [-5e-4 * scale, 5e-4 * scale],
-        );
+        )
+        .image_header();
         if let Some(u) = unit {
             h.set_internal("CUNIT1", u).set_internal("CUNIT2", u);
         }
@@ -162,10 +153,11 @@ fn cunit_scales_celestial_axes_to_degrees() {
     }
     // The reference pixel maps exactly to CRVAL = (150°, 30°) — proving the arcsec
     // CRVAL was scaled to degrees, not taken literally.
-    let r = to_world(&w_asec, &[50.0, 50.0]).unwrap();
-    assert!(
-        (r[0] - 150.0).abs() < 1e-9 && (r[1] - 30.0).abs() < 1e-9,
-        "{r:?}"
+    assert_close(
+        &to_world(&w_asec, &[50.0, 50.0]).unwrap(),
+        &[150.0, 30.0],
+        Tolerance::ulps(1.0, "the rotation's roundings of δ₀"),
+        "arcsec CRVAL",
     );
 }
 
