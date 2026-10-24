@@ -1,6 +1,6 @@
 //! [`WorldUnit`]: the unit an axis's world coordinates come out in.
 
-use crate::error::{FitsError, Result};
+use crate::error::{FitsError, Result, UnitKind};
 use crate::unit;
 use crate::world_coordinates::axis_transform;
 use crate::world_coordinates::ctype::Ctype;
@@ -44,6 +44,6 @@ fn angle_scale(unit: &str) -> Result<f64> {
     }
     unit::resolve(unit, unit::ANGLE).ok_or_else(|| FitsError::InvalidUnit {
         unit: unit.to_string(),
-        expected: "an angle unit",
+        expected: UnitKind::Angle,
     })
 }

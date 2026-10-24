@@ -5,6 +5,7 @@
 //! file.
 
 use std::f64::consts::PI;
+use std::fmt;
 
 use crate::error::{FitsError, Result, WcsDefect};
 use crate::world_coordinates::angle::D2R;
@@ -154,6 +155,12 @@ const TABLE: [Entry; 27] = {
     table
 };
 
+impl fmt::Display for Projection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
 impl Projection {
     pub(super) fn from_code(code: &str) -> Option<Self> {
         TABLE
@@ -162,7 +169,8 @@ impl Projection {
             .map(|entry| entry.projection)
     }
 
-    pub(super) const fn code(self) -> &'static str {
+    /// The three-letter `CTYPEi` code, `TAN` for `Tan`.
+    pub const fn code(self) -> &'static str {
         TABLE[self as usize].code
     }
 
@@ -206,9 +214,7 @@ impl Projection {
     /// Validates `pv` for this projection and builds its kernel's constants from it once.
     pub(super) fn parameters(self, pv: [f64; 21]) -> Result<ProjectionParameters> {
         let degenerate = || FitsError::InvalidWcs {
-            defect: WcsDefect::DegenerateProjection {
-                projection: self.code(),
-            },
+            defect: WcsDefect::DegenerateProjection { projection: self },
         };
         let invalid = match self {
             Self::Cea => pv[1] == 0.0,
@@ -274,15 +280,11 @@ impl Projection {
     }
 
     pub(super) const fn domain_error(self) -> FitsError {
-        FitsError::WcsPixelOutOfDomain {
-            projection: self.code(),
-        }
+        FitsError::WcsPixelOutOfDomain { projection: self }
     }
 
     pub(super) const fn world_domain_error(self) -> FitsError {
-        FitsError::WcsWorldOutOfDomain {
-            projection: self.code(),
-        }
+        FitsError::WcsWorldOutOfDomain { projection: self }
     }
 
     fn checked_asin(self, value: f64) -> Result<f64> {

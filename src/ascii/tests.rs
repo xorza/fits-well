@@ -1,5 +1,7 @@
 use crate::ascii::internals::ascii_table_header;
 use crate::ascii::*;
+use crate::error::AsciiValueDefect;
+use crate::error::ExpectedHdu;
 use crate::fits_writer::FitsWriter;
 use crate::fits_writer::ascii_builder::{AsciiFloatFormat, AsciiWriteColumn};
 use crate::header_model::record_name::RecordName;
@@ -205,7 +207,10 @@ fn ascii_table_round_trips_through_write_and_read() {
     assert_eq!(schema.column_index("x"), Some(2));
     assert!(matches!(
         r.hdus[0].ascii_schema(),
-        Err(FitsError::NotAnAsciiTable)
+        Err(FitsError::HduKindMismatch {
+            expected: ExpectedHdu::AsciiTable,
+            got: HduKind::Primary
+        })
     ));
     assert_eq!(&r.read_data_unit(1).unwrap()[..6], b"  AB  ");
     let t = r.read_ascii_table(1).unwrap();
@@ -389,8 +394,10 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     assert!(matches!(
         rejected_before_output(|w| w.write_ascii_table(&ascii_table(1, &collision), None)),
         FitsError::InvalidAsciiValue {
-            reason: "the value equals its column's TNULLn marker"
-        }
+            column,
+            row: 0,
+            defect: AsciiValueDefect::NullMarker,
+        } if column == "BAD"
     ));
 
     let nonfinite = [AsciiWriteColumn::float(
@@ -405,8 +412,10 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     assert!(matches!(
         rejected_before_output(|w| w.write_ascii_table(&ascii_table(1, &nonfinite), None)),
         FitsError::InvalidAsciiValue {
-            reason: "float cells must be finite; use None for null"
-        }
+            column,
+            row: 0,
+            defect: AsciiValueDefect::NonFinite,
+        } if column == "BAD"
     ));
 }
 

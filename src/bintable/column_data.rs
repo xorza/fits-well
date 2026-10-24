@@ -226,23 +226,6 @@ impl ColumnData {
         }
         true
     }
-
-    /// What a value of this type is called in a type-mismatch error.
-    pub(crate) const fn type_name(&self) -> &'static str {
-        match self {
-            Self::Logical(_) => "logical column data",
-            Self::Bit(_) => "bit column data",
-            Self::U8(_) => "byte column data",
-            Self::I16(_) => "i16 column data",
-            Self::I32(_) => "i32 column data",
-            Self::I64(_) => "i64 column data",
-            Self::F32(_) => "f32 column data",
-            Self::F64(_) => "f64 column data",
-            Self::ComplexF32(_) => "complex-f32 column data",
-            Self::ComplexF64(_) => "complex-f64 column data",
-            Self::Character(_) => "character column data",
-        }
-    }
 }
 
 impl RowValues for ColumnData {
@@ -266,9 +249,10 @@ impl Ragged<ColumnData> {
         let mut ends = vec![values.len()];
         for (row, data) in rows.enumerate() {
             if !values.extend_from(&data) {
-                return Err(FitsError::TypeMismatch {
-                    name: format!("variable-length row {}", row + 1),
-                    expected: values.type_name(),
+                return Err(FitsError::MixedArrayRows {
+                    row: row + 1,
+                    expected: values.element_kind(),
+                    got: data.element_kind(),
                 });
             }
             ends.push(values.len());

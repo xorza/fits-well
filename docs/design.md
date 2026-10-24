@@ -114,6 +114,17 @@ and the dated measurements in `docs/research/`.
   and a reader-level `table_schema`, second ways to the same fact; an `Option`
   result for a missing name; `first_image()`, which is `images().next()`; and an
   `extname()` that read a bad `EXTNAME` as none.
+- **A read of the wrong kind names what it asked for.** `HduKindMismatch { expected:
+  ExpectedHdu, got: HduKind }` refuses an image read of a table and a table read of an
+  image, and `ColumnKindMismatch { column, expected: ExpectedColumn }` a column read its
+  format does not take, the column by its zero-based index; `ImageHasGroups` stays its
+  own case, which no kind names. A failed text or unit check carries an enum too:
+  `AsciiValueDefect`, `UnitKind`, `DescriptorField`. A defect enum, which says why a
+  value fails, is an `Error`; an enum that names a kind or a field has `Display`
+  alone, as `ValueKind`. Refused: a variant for each kind
+  (`NotAnImage`, `NotABitColumn`, …), nine where two say the same, and
+  `TypeMismatch { expected: &'static str }`, a message. Names a FITS format defines, a
+  codec's or an algorithm's, stay its spelling.
 - **`Hdu::is_image` classifies by rank alone.** An HDU is an image when it is a
   primary array, an image extension or a tiled-compressed image whose `NAXIS`
   (`ZNAXIS`) is above 0. Refused: the kind alone, which counted an image
@@ -184,7 +195,7 @@ and the dated measurements in `docs/research/`.
 - **A tiled-compressed table reads as the table it restores.** `read_table`,
   `read_table_rows`, `read_table_columns`, `read_table_cell` and `Hdu::table_schema`
   give the logical table, as an image read gives a compressed image's pixels. A
-  compressed image is `NotABinTable` to each. Refused: a separate
+  compressed image is `HduKindMismatch` to each. Refused: a separate
   `read_compressed_table`, which made a caller check the kind first, and the
   container, a table of compressed cells that reads quietly wrong. Source: §10.3.
 - **A partial read decodes only the tiles its rows touch, and only the columns it
@@ -487,8 +498,9 @@ and the dated measurements in `docs/research/`.
 - **A WCS error names its case.** `InvalidWcs` carries a `WcsDefect`, with the grism
   and `-TAB` cases in `GrismDefect` and `TabularDefect`; `ConflictingWcsKeywords`
   carries a `WcsConflict` and `WcsInvalidPole` a `PoleDefect`. A case holds the header
-  text that names it, a `CTYPE` or a frame value, where one does. Refused: a formatted
-  `detail`, about 35 messages a caller could tell apart only by their text.
+  text that names it, a `CTYPE` or a frame value, where one does, and a projection's
+  errors its `Projection`, which prints as its code. Refused: a formatted `detail`,
+  about 35 messages a caller could tell apart only by their text.
 - **A transform writes one point into the caller's slice.** `pixel_to_world` and
   `world_to_pixel` take the input and the output as slices of one value per
   axis, so a caller loops over its points with one buffer and a point makes no
@@ -838,8 +850,9 @@ and the dated measurements in `docs/research/`.
 
 - **Time errors name their case and their keyword:** `InvalidDatetime { keyword }`,
   `InvalidTimeScale { keyword }`, `TimeOutOfRange`, and `MissingKeyword` for a phase
-  axis without `CZPHSi`. Refused: `InvalidTime { detail }`, a message that said `DATE`
-  for every date keyword.
+  axis without `CZPHSi`; a conversion that needs data from outside the file is
+  `ExternalTimeDataRequired` with its `TimeConversion`. Refused: `InvalidTime
+  { detail }`, a message that said `DATE` for every date keyword.
 
 ## Crate boundary
 

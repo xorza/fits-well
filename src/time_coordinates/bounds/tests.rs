@@ -1,4 +1,5 @@
 use crate::error::FitsError;
+use crate::error::TimeConversion;
 use crate::header_model::keywords;
 use crate::internals::cards::header_of;
 
@@ -61,7 +62,9 @@ fn reads_bound_duration_and_error_keywords() {
         ));
         assert!(matches!(
             b.start(),
-            Err(FitsError::ExternalTimeDataRequired { .. })
+            Err(FitsError::ExternalTimeDataRequired {
+                conversion: TimeConversion::LeapSecond
+            })
         ));
         assert_eq!(b.end().unwrap(), tt(Mjd::new(58002, 0.0)));
         assert_eq!(b.exposure().unwrap(), Some(1200.0));

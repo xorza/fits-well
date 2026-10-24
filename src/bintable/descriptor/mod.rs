@@ -1,6 +1,7 @@
 use std::ops::Range;
 
 use crate::bintable::element_kind::ElementKind;
+use crate::error::DescriptorField;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::error::SizeUnit;
@@ -71,12 +72,12 @@ impl PqDescriptor {
                 i64::from(i32::from_be_bytes(bytes[4..].try_into().unwrap())),
             ),
         };
-        let count = nonnegative_field("count", count)?;
+        let count = nonnegative_field(DescriptorField::Count, count)?;
         // §7.3.5: the offset of an array of no elements is undefined.
         let offset = if count == 0 {
             0
         } else {
-            nonnegative_field("offset", offset)?
+            nonnegative_field(DescriptorField::Offset, offset)?
         };
         Ok(Self { count, offset })
     }
@@ -154,7 +155,7 @@ enum DescriptorIntegers {
     Q(i64, i64),
 }
 
-fn nonnegative_field(field: &'static str, value: i64) -> Result<usize> {
+fn nonnegative_field(field: DescriptorField, value: i64) -> Result<usize> {
     if value < 0 {
         return Err(FitsError::InvalidPqDescriptor { field, value });
     }
@@ -164,14 +165,14 @@ fn nonnegative_field(field: &'static str, value: i64) -> Result<usize> {
 #[cfg(test)]
 pub(crate) mod internals {
     use crate::bintable::descriptor::DescriptorWidth;
-    use crate::error::FitsError;
+    use crate::error::{DescriptorField, FitsError};
 
     #[derive(Debug)]
     pub(crate) struct MalformedDescriptorCase {
         name: &'static str,
         pub(crate) width: DescriptorWidth,
         pub(crate) bytes: Vec<u8>,
-        field: &'static str,
+        field: DescriptorField,
         value: i64,
     }
 
@@ -192,13 +193,19 @@ pub(crate) mod internals {
     pub(crate) fn malformed_descriptor_cases() -> Vec<MalformedDescriptorCase> {
         let mut cases = Vec::new();
         for (name, count, offset, field, value) in [
-            ("P negative count", -1i32, 0i32, "count", -1i64),
-            ("P negative offset", 1, -1, "offset", -1),
+            (
+                "P negative count",
+                -1i32,
+                0i32,
+                DescriptorField::Count,
+                -1i64,
+            ),
+            ("P negative offset", 1, -1, DescriptorField::Offset, -1),
             (
                 "P one past signed maximum",
                 i32::MIN,
                 0,
-                "count",
+                DescriptorField::Count,
                 i64::from(i32::MIN),
             ),
         ] {
@@ -214,9 +221,21 @@ pub(crate) mod internals {
             });
         }
         for (name, count, offset, field, value) in [
-            ("Q negative count", -1i64, 0i64, "count", -1i64),
-            ("Q negative offset", 1, -1, "offset", -1),
-            ("Q one past signed maximum", i64::MIN, 0, "count", i64::MIN),
+            (
+                "Q negative count",
+                -1i64,
+                0i64,
+                DescriptorField::Count,
+                -1i64,
+            ),
+            ("Q negative offset", 1, -1, DescriptorField::Offset, -1),
+            (
+                "Q one past signed maximum",
+                i64::MIN,
+                0,
+                DescriptorField::Count,
+                i64::MIN,
+            ),
         ] {
             let mut bytes = Vec::with_capacity(16);
             bytes.extend_from_slice(&count.to_be_bytes());

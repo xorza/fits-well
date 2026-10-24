@@ -2,7 +2,9 @@ use crate::bintable::column_data::ColumnData;
 use crate::bintable::element_kind::ElementKind;
 use crate::bintable::tform::Storage;
 use crate::bintable::tform::internals::tform;
+use crate::error::ExpectedHdu;
 use crate::error::FitsError;
+use crate::hdu::HduKind;
 use crate::internals::fixture::Fixture;
 
 #[test]
@@ -74,5 +76,11 @@ fn reads_the_real_aips_antenna_table() {
 fn read_table_rejects_non_bintable_hdus() {
     let mut reader = Fixture::Ddts.stream();
     // HDU 0 is a random-groups primary, not a binary table.
-    assert!(matches!(reader.read_table(0), Err(FitsError::NotABinTable)));
+    assert!(matches!(
+        reader.read_table(0),
+        Err(FitsError::HduKindMismatch {
+            expected: ExpectedHdu::BinTable,
+            got: HduKind::RandomGroups
+        })
+    ));
 }

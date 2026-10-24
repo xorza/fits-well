@@ -583,8 +583,11 @@ fn writes_and_reads_back_variable_length_arrays() {
 fn vla_constructor_rejects_mixed_element_types() {
     assert!(matches!(
         Ragged::from_rows([ColumnData::I16(vec![1]), ColumnData::I32(vec![2])]),
-        Err(FitsError::TypeMismatch { name, expected })
-            if name == "variable-length row 1" && expected == "i16 column data"
+        Err(FitsError::MixedArrayRows {
+            row: 1,
+            expected: ElementKind::I16,
+            got: ElementKind::I32
+        })
     ));
     assert!(matches!(
         Ragged::from_rows(Vec::new()),

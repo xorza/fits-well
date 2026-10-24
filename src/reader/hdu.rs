@@ -5,6 +5,7 @@ use crate::bintable::schema::Schema;
 use crate::block::{BLOCK_SIZE, padded_len};
 #[cfg(feature = "compression")]
 use crate::compress::table::TiledTable;
+use crate::error::ExpectedHdu;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::HduKind;
@@ -194,7 +195,7 @@ impl Hdu {
 
     /// The shape, stored element type and scaling of the image this HDU holds — for a
     /// tiled-compressed image, those of the image it encodes. Errors with
-    /// [`FitsError::NotAnImage`] for any other kind, with
+    /// [`FitsError::HduKindMismatch`] for any other kind, with
     /// [`FitsError::ImageHasGroups`] for a plain image with group structure, and with
     /// the header's own error when its image keywords are malformed.
     pub fn image_metadata(&self) -> Result<Metadata<'_>> {
@@ -210,16 +211,19 @@ impl Hdu {
     }
 
     /// A plain image's geometry: [`Hdu::image_geometry`], refusing a tiled-compressed
-    /// image with [`FitsError::NotAnImage`].
+    /// image with [`FitsError::HduKindMismatch`].
     pub(crate) fn plain_image_geometry(&self) -> Result<&ImageGeometry> {
         if self.kind == HduKind::CompressedImage {
-            return Err(FitsError::NotAnImage);
+            return Err(FitsError::HduKindMismatch {
+                expected: ExpectedHdu::Image,
+                got: self.kind,
+            });
         }
         self.image_geometry()
     }
 
     /// The schema of the binary table this HDU holds: a plain `BINTABLE`'s, or the table a
-    /// tiled-compressed one restores to. Errors with [`FitsError::NotABinTable`] for any
+    /// tiled-compressed one restores to. Errors with [`FitsError::HduKindMismatch`] for any
     /// other kind — a tiled-compressed image among them, and a compressed table without
     /// the `compression` feature — and with the header's own error when its table
     /// keywords are malformed.
@@ -232,22 +236,31 @@ impl Hdu {
                 .expect("a compressed table has a tile layout")
                 .schema),
             #[cfg(not(feature = "compression"))]
-            HduKind::CompressedTable => Err(FitsError::NotABinTable),
+            HduKind::CompressedTable => Err(FitsError::HduKindMismatch {
+                expected: ExpectedHdu::BinTable,
+                got: self.kind,
+            }),
             HduKind::Primary
             | HduKind::Image
             | HduKind::AsciiTable
             | HduKind::CompressedImage
             | HduKind::RandomGroups
-            | HduKind::Other => Err(FitsError::NotABinTable),
+            | HduKind::Other => Err(FitsError::HduKindMismatch {
+                expected: ExpectedHdu::BinTable,
+                got: self.kind,
+            }),
         }
     }
 
     /// The structure of an ASCII `TABLE`, parsed from its header when the file was
-    /// opened. Errors with [`FitsError::NotAnAsciiTable`] for any other HDU, and with
+    /// opened. Errors with [`FitsError::HduKindMismatch`] for any other HDU, and with
     /// the header's own error when its table keywords are malformed.
     pub fn ascii_schema(&self) -> Result<&AsciiSchema> {
         if self.kind != HduKind::AsciiTable {
-            return Err(FitsError::NotAnAsciiTable);
+            return Err(FitsError::HduKindMismatch {
+                expected: ExpectedHdu::AsciiTable,
+                got: self.kind,
+            });
         }
         match &self.ascii {
             Some(schema) => Ok(schema),
@@ -292,6 +305,9 @@ fn table_schema(header: &Header, kind: HduKind) -> Result<Schema> {
         | HduKind::Image
         | HduKind::AsciiTable
         | HduKind::RandomGroups
-        | HduKind::Other => Err(FitsError::NotABinTable),
+        | HduKind::Other => Err(FitsError::HduKindMismatch {
+            expected: ExpectedHdu::BinTable,
+            got: kind,
+        }),
     }
 }

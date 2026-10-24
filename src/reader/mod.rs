@@ -14,6 +14,7 @@ use crate::checksum::checksum_report::ChecksumReport;
 use crate::column::ColumnSelector;
 #[cfg(feature = "compression")]
 use crate::compress::table::{ContainerTiles, DecodedRows};
+use crate::error::ExpectedHdu;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::groups::RandomGroups;
@@ -152,7 +153,7 @@ impl<S: Source> FitsReader<S> {
     }
 
     /// The image HDU `index` holds, plain or tiled-compressed alike, ready to read a
-    /// region at a time. Errors with [`FitsError::NotAnImage`] for tables, random
+    /// region at a time. Errors with [`FitsError::HduKindMismatch`] for tables, random
     /// groups and unmodelled extensions, a compressed image among them without the
     /// `compression` feature.
     pub fn image<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<ImageReader<'_, S>> {
@@ -345,7 +346,7 @@ impl<S: Source> FitsReader<S> {
     }
 
     /// Read an `TABLE` (ASCII table) extension and parse its column structure.
-    /// Errors with [`FitsError::NotAnAsciiTable`] for any other HDU.
+    /// Errors with [`FitsError::HduKindMismatch`] for any other HDU.
     pub fn read_ascii_table<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Ascii> {
         let hdu = self.hdus.select(hdu.into())?;
         let schema = hdu.ascii_schema()?.clone();
@@ -353,11 +354,14 @@ impl<S: Source> FitsReader<S> {
     }
 
     /// Read and decode a random-groups primary array (§6). Errors with
-    /// [`FitsError::NotRandomGroups`] for any other HDU.
+    /// [`FitsError::HduKindMismatch`] for any other HDU.
     pub fn read_groups<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<RandomGroups> {
         let hdu = self.hdus.select(hdu.into())?;
         if hdu.kind != HduKind::RandomGroups {
-            return Err(FitsError::NotRandomGroups);
+            return Err(FitsError::HduKindMismatch {
+                expected: ExpectedHdu::RandomGroups,
+                got: hdu.kind,
+            });
         }
         let runs = StoredRuns::All {
             len: data_len(hdu.data_bytes)?,

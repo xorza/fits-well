@@ -9,8 +9,6 @@ use std::mem;
 use crate::bintable::column_data::ColumnData;
 use crate::bitpix::Bitpix;
 use crate::endian::{decode_be_cells, decode_be_cells_into};
-use crate::error::FitsError;
-use crate::error::Result;
 use crate::image_model::sample_type::UnsignedKind;
 use crate::image_model::scaling::Scaling;
 
@@ -232,51 +230,50 @@ impl ElementKind {
     }
 
     /// Decode `cells` to the physical `f64` plane, as an image's samples decode:
-    /// `TZEROn + TSCALn × raw`, mapping integers equal to `TNULLn` to `NaN`. Errors for
+    /// `TZEROn + TSCALn × raw`, mapping integers equal to `TNULLn` to `NaN`; `None` for
     /// the non-numeric kinds.
     pub(super) fn decode_physical<'a>(
         self,
         cells: impl Iterator<Item = &'a [u8]>,
         capacity: usize,
         scaling: &Scaling,
-    ) -> Result<Vec<f64>> {
-        let bitpix = self
-            .bitpix()
-            .ok_or_else(|| FitsError::NotANumericColumn { code: self.code() })?;
+    ) -> Option<Vec<f64>> {
+        let bitpix = self.bitpix()?;
         let mut out = Vec::with_capacity(capacity);
         for cell in cells {
             bitpix.extend_physical_be(cell, scaling, &mut out);
         }
-        Ok(out)
+        Some(out)
     }
 
     /// Decode `cells` as `C`/`M` complex values, applying `TSCALn` to both
-    /// components and `TZEROn` to the real component (§7.3.2).
+    /// components and `TZEROn` to the real component (§7.3.2); `None` for the other
+    /// kinds.
     pub(super) fn decode_complex<'a>(
         self,
         cells: impl Iterator<Item = &'a [u8]>,
         capacity: usize,
         tscale: f64,
         tzero: f64,
-    ) -> Result<Vec<Complex<f64>>> {
+    ) -> Option<Vec<Complex<f64>>> {
         let scale = |re: f64, im: f64| Complex {
             re: tzero + tscale * re,
             im: tscale * im,
         };
         match self {
-            Self::ComplexF32 => Ok(decode_be_cells(cells, capacity, |bytes: [u8; 8]| {
+            Self::ComplexF32 => Some(decode_be_cells(cells, capacity, |bytes: [u8; 8]| {
                 scale(
                     f64::from(f32::from_be_bytes(bytes[..4].try_into().unwrap())),
                     f64::from(f32::from_be_bytes(bytes[4..].try_into().unwrap())),
                 )
             })),
-            Self::ComplexF64 => Ok(decode_be_cells(cells, capacity, |bytes: [u8; 16]| {
+            Self::ComplexF64 => Some(decode_be_cells(cells, capacity, |bytes: [u8; 16]| {
                 scale(
                     f64::from_be_bytes(bytes[..8].try_into().unwrap()),
                     f64::from_be_bytes(bytes[8..].try_into().unwrap()),
                 )
             })),
-            _ => Err(FitsError::NotAComplexColumn { code: self.code() }),
+            _ => None,
         }
     }
 }

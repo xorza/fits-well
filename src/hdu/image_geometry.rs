@@ -1,6 +1,7 @@
 //! What an image HDU's header says its array is.
 
 use crate::bitpix::Bitpix;
+use crate::error::ExpectedHdu;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::hdu::HduKind;
@@ -21,7 +22,7 @@ pub(crate) struct ImageGeometry {
 }
 
 impl ImageGeometry {
-    /// The geometry of an HDU of `kind`. Errors with [`FitsError::NotAnImage`] for a
+    /// The geometry of an HDU of `kind`. Errors with [`FitsError::HduKindMismatch`] for a
     /// table, random groups or an unmodelled extension, and with
     /// [`FitsError::ImageHasGroups`] for a plain image with group structure.
     pub(crate) fn from_header(header: &Header, kind: HduKind) -> Result<Self> {
@@ -39,7 +40,10 @@ impl ImageGeometry {
             | HduKind::BinTable
             | HduKind::CompressedTable
             | HduKind::RandomGroups
-            | HduKind::Other => Err(FitsError::NotAnImage),
+            | HduKind::Other => Err(FitsError::HduKindMismatch {
+                expected: ExpectedHdu::Image,
+                got: kind,
+            }),
         }
     }
 

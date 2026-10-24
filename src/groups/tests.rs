@@ -1,4 +1,6 @@
+use crate::error::ExpectedHdu;
 use crate::groups::*;
+use crate::hdu::HduKind;
 use crate::header_model::record_name::RecordName;
 use crate::internals::cards;
 use crate::internals::fixture::Fixture;
@@ -218,7 +220,10 @@ fn read_groups_rejects_non_random_groups_hdus() {
     let mut reader = Fixture::Uit.stream();
     assert!(matches!(
         reader.read_groups(0),
-        Err(FitsError::NotRandomGroups)
+        Err(FitsError::HduKindMismatch {
+            expected: ExpectedHdu::RandomGroups,
+            got: HduKind::Primary
+        })
     ));
 }
 

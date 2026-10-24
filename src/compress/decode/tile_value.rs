@@ -3,6 +3,7 @@
 
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::table_view::TableView;
+use crate::error::ExpectedColumn;
 use crate::error::FitsError;
 use crate::error::Result;
 
@@ -51,10 +52,10 @@ impl<T: Copy> TileValue<T> {
 /// The column `name` of `table`, any numeric `TFORM` widened to `f64` as cfitsio reads it
 /// (`TDOUBLE`), or `None` when the table has no such column.
 pub(super) fn real_column(table: TableView<'_>, name: &str) -> Result<Option<Vec<f64>>> {
-    let Some(data) = column(table, name)? else {
+    let Some(index) = table.column_index(name) else {
         return Ok(None);
     };
-    let values = match data {
+    let values = match table.column(index)?.raw()? {
         ColumnData::U8(v) => v.into_iter().map(f64::from).collect(),
         ColumnData::I16(v) => v.into_iter().map(f64::from).collect(),
         ColumnData::I32(v) => v.into_iter().map(f64::from).collect(),
@@ -62,9 +63,9 @@ pub(super) fn real_column(table: TableView<'_>, name: &str) -> Result<Option<Vec
         ColumnData::F32(v) => v.into_iter().map(f64::from).collect(),
         ColumnData::F64(v) => v,
         _ => {
-            return Err(FitsError::TypeMismatch {
-                name: name.to_string(),
-                expected: "numeric column",
+            return Err(FitsError::ColumnKindMismatch {
+                column: index,
+                expected: ExpectedColumn::Numeric,
             });
         }
     };
@@ -74,27 +75,20 @@ pub(super) fn real_column(table: TableView<'_>, name: &str) -> Result<Option<Vec
 /// The column `name` of `table`, any integer `TFORM` widened to `i64`, or `None` when the
 /// table has no such column.
 pub(super) fn integer_column(table: TableView<'_>, name: &str) -> Result<Option<Vec<i64>>> {
-    let Some(data) = column(table, name)? else {
+    let Some(index) = table.column_index(name) else {
         return Ok(None);
     };
-    let values = match data {
+    let values = match table.column(index)?.raw()? {
         ColumnData::U8(v) => v.into_iter().map(i64::from).collect(),
         ColumnData::I16(v) => v.into_iter().map(i64::from).collect(),
         ColumnData::I32(v) => v.into_iter().map(i64::from).collect(),
         ColumnData::I64(v) => v,
         _ => {
-            return Err(FitsError::TypeMismatch {
-                name: name.to_string(),
-                expected: "integer column",
+            return Err(FitsError::ColumnKindMismatch {
+                column: index,
+                expected: ExpectedColumn::Integer,
             });
         }
     };
     Ok(Some(values))
-}
-
-fn column(table: TableView<'_>, name: &str) -> Result<Option<ColumnData>> {
-    table
-        .column_index(name)
-        .map(|index| table.column(index)?.raw())
-        .transpose()
 }

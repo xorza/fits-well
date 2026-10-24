@@ -673,26 +673,34 @@ fn degenerate_projection_parameters_are_rejected() {
     assert!(matches!(
         parse("CEA", &[0.0, 0.0]),
         Err(FitsError::InvalidWcs {
-            defect: WcsDefect::DegenerateProjection { projection: "CEA" }
+            defect: WcsDefect::DegenerateProjection {
+                projection: Projection::Cea
+            }
         })
     ));
     assert!(matches!(
         parse("CYP", &[0.0, 1.0, 0.0]),
         Err(FitsError::InvalidWcs {
-            defect: WcsDefect::DegenerateProjection { projection: "CYP" }
+            defect: WcsDefect::DegenerateProjection {
+                projection: Projection::Cyp
+            }
         })
     ));
     assert!(matches!(
         parse("CYP", &[0.0, -1.0, 1.0]),
         Err(FitsError::InvalidWcs {
-            defect: WcsDefect::DegenerateProjection { projection: "CYP" }
+            defect: WcsDefect::DegenerateProjection {
+                projection: Projection::Cyp
+            }
         })
     ));
     for theta_b in [-90.0, -100.0] {
         assert!(matches!(
             parse("AIR", &[0.0, theta_b]),
             Err(FitsError::InvalidWcs {
-                defect: WcsDefect::DegenerateProjection { projection: "AIR" }
+                defect: WcsDefect::DegenerateProjection {
+                    projection: Projection::Air
+                }
             })
         ));
     }
@@ -705,7 +713,9 @@ fn degenerate_projection_parameters_are_rejected() {
         assert!(matches!(
             parse("HPX", &parameters),
             Err(FitsError::InvalidWcs {
-                defect: WcsDefect::DegenerateProjection { projection: "HPX" }
+                defect: WcsDefect::DegenerateProjection {
+                    projection: Projection::Hpx
+                }
             })
         ));
     }
@@ -944,7 +954,7 @@ fn deprojections_past_a_half_turn_of_longitude_are_refused() {
             matches!(
                 raw(projection, &[]).deproject(x, y),
                 Err(FitsError::WcsPixelOutOfDomain { projection: code })
-                    if code == projection.code()
+                    if code == projection
             ),
             "{projection:?} ({x}, {y})"
         );
@@ -958,7 +968,7 @@ fn cube_projection_domains_reject_points_outside_the_face_cross() {
         assert!(matches!(
             pv.deproject(100.0, 100.0),
             Err(FitsError::WcsPixelOutOfDomain { projection: code })
-                if code == projection.code()
+                if code == projection
         ));
         // (315, 45) is the top-right corner of face 4, which is the cube vertex
         // (1, −1, 1)/√3: φ = −45°, θ = atan(1/√2). The tolerance allows the few
@@ -986,7 +996,9 @@ fn hpx_poles_and_parameters() {
     assert_eq!(default_pv.deproject(45.0, 90.0).unwrap().theta(), 90.0);
     assert!(matches!(
         default_pv.deproject(0.0, 90.0),
-        Err(FitsError::WcsPixelOutOfDomain { projection: "HPX" })
+        Err(FitsError::WcsPixelOutOfDomain {
+            projection: Projection::Hpx
+        })
     ));
 
     // In the polar cap 1 − sin θ = σ²/K. At y = 90° − 45°·2⁻³⁰, exact in f64, σ = 2⁻³⁰,
@@ -1061,7 +1073,9 @@ fn equatorial_poles_are_finite_and_have_canonical_longitude() {
     let y = (2.0f64 * (1.0 + 2e-9)).sqrt() * R2D;
     assert!(matches!(
         raw(Projection::Ait, &[]).deproject(0.0, y),
-        Err(FitsError::WcsPixelOutOfDomain { projection: "AIT" })
+        Err(FitsError::WcsPixelOutOfDomain {
+            projection: Projection::Ait
+        })
     ));
 }
 
@@ -1133,7 +1147,7 @@ fn world_points_without_an_image_are_refused() {
             );
         } else {
             assert!(
-                matches!(result, Err(FitsError::WcsWorldOutOfDomain { projection: code }) if code == projection.code()),
+                matches!(result, Err(FitsError::WcsWorldOutOfDomain { projection: code }) if code == projection),
                 "{projection:?} {pv:?} ({phi}, {theta}): {result:?}"
             );
         }
@@ -1151,7 +1165,9 @@ fn zpn_inverts_only_inside_its_inflection() {
     let peak = (2.0f64 / 3.0).sqrt() * 2.0 / 3.0 * R2D;
     assert!(matches!(
         parameters.deproject(0.0, -(peak + 0.01)),
-        Err(FitsError::WcsPixelOutOfDomain { projection: "ZPN" })
+        Err(FitsError::WcsPixelOutOfDomain {
+            projection: Projection::Zpn
+        })
     ));
     for theta in [80.0, 60.0, 45.0] {
         let projected = parameters
@@ -1187,7 +1203,9 @@ fn zpn_inverts_only_inside_its_inflection() {
     assert!(matches!(
         Projection::Zpn.parameters([0.0; 21]),
         Err(FitsError::InvalidWcs {
-            defect: WcsDefect::DegenerateProjection { projection: "ZPN" }
+            defect: WcsDefect::DegenerateProjection {
+                projection: Projection::Zpn
+            }
         })
     ));
     let mut falling = [0.0; 21];
@@ -1195,7 +1213,9 @@ fn zpn_inverts_only_inside_its_inflection() {
     assert!(matches!(
         Projection::Zpn.parameters(falling),
         Err(FitsError::InvalidWcs {
-            defect: WcsDefect::DegenerateProjection { projection: "ZPN" }
+            defect: WcsDefect::DegenerateProjection {
+                projection: Projection::Zpn
+            }
         })
     ));
 }
@@ -1246,4 +1266,15 @@ fn near_limit_projection_formulas_keep_their_precision() {
         "{}",
         projected.y
     );
+}
+
+/// Each projection prints as its `CTYPEi` code, which names it back.
+#[test]
+fn a_projection_prints_its_code() {
+    assert_eq!(Projection::Tan.to_string(), "TAN");
+    for projection in Projection::all() {
+        let code = projection.to_string();
+        assert_eq!(code, projection.code());
+        assert_eq!(Projection::from_code(&code), Some(projection));
+    }
 }

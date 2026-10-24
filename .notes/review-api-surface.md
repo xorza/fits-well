@@ -140,8 +140,7 @@ moves.
 
 1. **Solid edges and convenience** (done).
 2. **Twins agree** (done).
-3. **Errors by case**: `ColumnKindMismatch`, `HduKindMismatch`, `Projection` in the
-   projection errors, enums for the string reasons.
+3. **Errors by case** (done).
 4. **Header names**: one name type for keyed methods; the commentary API.
 5. **`Display` for the `FromStr` types.**
 6. **Namespaces**: `error` and `compress` modules, the WCS renames.

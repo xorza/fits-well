@@ -12,6 +12,8 @@ use crate::compress::tile_geometry::TileGeometry;
 use crate::compress::*;
 use crate::error::CompressedDataDefect;
 use crate::error::CompressionFeature;
+use crate::error::ExpectedColumn;
+use crate::error::ExpectedHdu;
 use crate::error::SizeUnit;
 use crate::error::ValueKind;
 use crate::hdu::HduKind;
@@ -380,7 +382,13 @@ fn zblank_column_marks_each_tiles_nulls() {
         internals::set_column_kind(&mut malformed, column, kind);
         assert!(matches!(
             decompress_image(&h, &malformed),
-            Err(FitsError::TypeMismatch { name: actual, .. }) if actual == name
+            Err(FitsError::ColumnKindMismatch { column: got, expected })
+                if got == column
+                    && expected == if name == "ZBLANK" {
+                        ExpectedColumn::Integer
+                    } else {
+                        ExpectedColumn::Numeric
+                    }
         ));
     }
     let single = OneTile::new("NOCOMPRESS", -32, &[2, 1])
@@ -545,12 +553,21 @@ fn reading_a_plain_bintable_as_an_image_is_rejected() {
     let mut f = Fixture::Ddts.stream();
     // Public path: `image` sees a non-ZIMAGE bintable and rejects it as a
     // non-image (it never reaches the decompressor).
-    assert!(matches!(f.image(1), Err(FitsError::NotAnImage)));
+    assert!(matches!(
+        f.image(1),
+        Err(FitsError::HduKindMismatch {
+            expected: ExpectedHdu::Image,
+            got: HduKind::BinTable
+        })
+    ));
     // The decoder reads the geometry the same classification resolves.
     let table = f.read_table(1).unwrap();
     assert!(matches!(
         decompress_image(&f.hdus[1].header, &table),
-        Err(FitsError::NotAnImage)
+        Err(FitsError::HduKindMismatch {
+            expected: ExpectedHdu::Image,
+            got: HduKind::BinTable
+        })
     ));
 }
 

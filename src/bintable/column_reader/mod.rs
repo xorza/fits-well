@@ -11,6 +11,7 @@ use crate::bintable::element_kind::{Cell, ElementKind};
 use crate::bintable::table_view::TableView;
 use crate::bintable::tform::Storage;
 use crate::bintable::vla_column::VlaColumn;
+use crate::error::ExpectedColumn;
 use crate::error::FitsError;
 use crate::error::Result;
 use crate::image_model::unsigned_data::UnsignedData;
@@ -50,9 +51,15 @@ impl<'a> ColumnReader<'a> {
         let col = self.descriptor();
         match col.tform.storage() {
             Storage::Fixed => Ok(col),
-            Storage::Array(width) => Err(FitsError::NotAFixedColumn {
-                code: width.letter(),
-            }),
+            Storage::Array(_) => Err(self.mismatch(ExpectedColumn::Fixed)),
+        }
+    }
+
+    /// The refusal of a read that wanted `expected` of this column.
+    const fn mismatch(&self, expected: ExpectedColumn) -> FitsError {
+        FitsError::ColumnKindMismatch {
+            column: self.index,
+            expected,
         }
     }
 
@@ -79,11 +86,14 @@ impl<'a> ColumnReader<'a> {
     /// (`A`/`L`/`X`/`C`/`M`) and variable-length columns.
     pub fn physical(&self) -> Result<Vec<f64>> {
         let col = self.fixed_descriptor()?;
-        col.tform.element().decode_physical(
-            self.table.cells(col),
-            self.table.extent.row_count * col.tform.repeat(),
-            &col.scaling()?,
-        )
+        col.tform
+            .element()
+            .decode_physical(
+                self.table.cells(col),
+                self.table.extent.row_count * col.tform.repeat(),
+                &col.scaling()?,
+            )
+            .ok_or_else(|| self.mismatch(ExpectedColumn::Numeric))
     }
 
     /// Exact typed integers when the column uses the FITS unsigned (or signed-byte)
@@ -107,12 +117,15 @@ impl<'a> ColumnReader<'a> {
     /// components and `TZEROn` to the real component (§7.3.2). Errors on non-complex columns.
     pub fn complex(&self) -> Result<Vec<Complex<f64>>> {
         let col = self.fixed_descriptor()?;
-        col.tform.element().decode_complex(
-            self.table.cells(col),
-            self.table.extent.row_count * col.tform.repeat(),
-            col.tscale()?,
-            col.tzero()?,
-        )
+        col.tform
+            .element()
+            .decode_complex(
+                self.table.cells(col),
+                self.table.extent.row_count * col.tform.repeat(),
+                col.tscale()?,
+                col.tzero()?,
+            )
+            .ok_or_else(|| self.mismatch(ExpectedColumn::Complex))
     }
 
     /// An `X` (bit-array) column as a borrowed 2-D [`BitColumn`] — `row_count × repeat`
@@ -121,9 +134,7 @@ impl<'a> ColumnReader<'a> {
     pub fn bits(&self) -> Result<BitColumn<'a>> {
         let col = self.descriptor();
         if col.tform.storage() != Storage::Fixed || col.tform.element() != ElementKind::Bit {
-            return Err(FitsError::NotABitColumn {
-                code: col.tform.code(),
-            });
+            return Err(self.mismatch(ExpectedColumn::Bits));
         }
         Ok(BitColumn::new(self.table, self.index))
     }
@@ -162,7 +173,8 @@ impl<'a> ColumnReader<'a> {
             &self.descriptor().scaling()?,
         );
         cells.finish()?;
-        Ok(Ragged::<Vec<f64>>::new(values?, ends))
+        let values = values.ok_or_else(|| self.mismatch(ExpectedColumn::Numeric))?;
+        Ok(Ragged::<Vec<f64>>::new(values, ends))
     }
 
     /// Exact typed integers for each row of a `P`/`Q` heap array using the FITS
@@ -200,7 +212,8 @@ impl<'a> ColumnReader<'a> {
             col.tzero()?,
         );
         cells.finish()?;
-        Ok(Ragged::<Vec<Complex<f64>>>::new(values?, ends))
+        let values = values.ok_or_else(|| self.mismatch(ExpectedColumn::Complex))?;
+        Ok(Ragged::<Vec<Complex<f64>>>::new(values, ends))
     }
 
     /// A variable-length `X` (`1PX`/`1QX`) column as a borrowed 2-D [`BitColumn`],
@@ -212,9 +225,7 @@ impl<'a> ColumnReader<'a> {
         if !matches!(col.tform.storage(), Storage::Array(_))
             || col.tform.element() != ElementKind::Bit
         {
-            return Err(FitsError::NotABitColumn {
-                code: col.tform.code(),
-            });
+            return Err(self.mismatch(ExpectedColumn::Bits));
         }
         // Validate every row's heap span up front (no allocation) so [`BitColumn::row`]
         // can resolve a row lazily and infallibly — the only place an overrun surfaces.
@@ -229,7 +240,7 @@ impl<'a> ColumnReader<'a> {
         let tform = self.descriptor().tform;
         match tform.storage() {
             Storage::Array(_) => Ok(tform.element()),
-            Storage::Fixed => Err(FitsError::NotAVla { code: tform.code() }),
+            Storage::Fixed => Err(self.mismatch(ExpectedColumn::Array)),
         }
     }
 

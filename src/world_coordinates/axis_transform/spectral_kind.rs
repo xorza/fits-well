@@ -4,7 +4,7 @@
 
 use crate::error::FitsError;
 use crate::error::Result;
-use crate::error::{GrismDefect, WcsDefect};
+use crate::error::{GrismDefect, UnitKind, WcsDefect};
 use crate::unit;
 use crate::world_coordinates::axis_transform::spectral_rest::ResolvedRest;
 
@@ -180,16 +180,16 @@ impl SpectralKind {
     }
 
     /// The kind of unit this quantity is measured in, for error messages.
-    const fn unit_kind(self) -> &'static str {
+    const fn unit_kind(self) -> UnitKind {
         match self {
-            Self::Frequency => "a frequency unit",
-            Self::Energy => "an energy unit",
-            Self::Wavenumber => "an inverse length unit",
+            Self::Frequency => UnitKind::Frequency,
+            Self::Energy => UnitKind::Energy,
+            Self::Wavenumber => UnitKind::InverseLength,
             Self::RadioVelocity | Self::OpticalVelocity | Self::RelativisticVelocity => {
-                "a velocity unit"
+                UnitKind::Velocity
             }
-            Self::Wavelength | Self::AirWavelength => "a length unit",
-            Self::Redshift | Self::Beta => "dimensionless",
+            Self::Wavelength | Self::AirWavelength => UnitKind::Length,
+            Self::Redshift | Self::Beta => UnitKind::Dimensionless,
         }
     }
 }

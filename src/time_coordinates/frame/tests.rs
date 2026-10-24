@@ -1,5 +1,7 @@
 use crate::error::FitsError;
 use crate::error::Indexed;
+use crate::error::TimeConversion;
+use crate::error::UnitKind;
 use crate::error::ValueKind;
 use crate::header_model::record_name::RecordName;
 use crate::header_model::{Header, keywords};
@@ -47,15 +49,21 @@ fn header_datetimes_use_the_declared_scale() {
         .set_internal(keywords::DATE_END, "2016-12-31T23:59:60");
     assert!(matches!(
         Frame::from_header(&header),
-        Err(FitsError::ExternalTimeDataRequired { .. })
+        Err(FitsError::ExternalTimeDataRequired {
+            conversion: TimeConversion::LeapSecond
+        })
     ));
     assert!(matches!(
         Coordinate::observation(&header),
-        Err(FitsError::ExternalTimeDataRequired { .. })
+        Err(FitsError::ExternalTimeDataRequired {
+            conversion: TimeConversion::LeapSecond
+        })
     ));
     assert!(matches!(
         Bounds::new(&header, &time).end(),
-        Err(FitsError::ExternalTimeDataRequired { .. })
+        Err(FitsError::ExternalTimeDataRequired {
+            conversion: TimeConversion::LeapSecond
+        })
     ));
 }
 
@@ -148,7 +156,7 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
     assert!(matches!(
         t.wcs_time(&invalid_unit, 0, &[1.0]),
         Err(FitsError::InvalidUnit {
-            expected: "a time unit",
+            expected: UnitKind::Time,
             ..
         })
     ));

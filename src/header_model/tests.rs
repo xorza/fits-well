@@ -92,7 +92,7 @@ fn strict_optional_getters_distinguish_absent_and_mistyped_values() {
     ));
 
     // `require_*`: the value when present, `MissingKeyword` when absent, and the same
-    // `TypeMismatch` as `get_*` when it holds another type.
+    // `ValueTypeMismatch` as `get_*` when it holds another type.
     assert!(h.require_logical(keywords::SIMPLE).unwrap());
     assert_eq!(h.require_integer(keywords::BITPIX).unwrap(), 16);
     assert_eq!(h.require_real(keywords::BITPIX).unwrap(), 16.0);
