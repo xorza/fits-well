@@ -101,9 +101,8 @@ Some items are not supported on purpose:
 
 ## Install
 
-```toml
-[dependencies]
-fits-well = "0.3"
+```sh
+cargo add fits-well
 ```
 
 | Feature | Default | Adds |
