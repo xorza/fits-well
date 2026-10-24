@@ -41,7 +41,9 @@ fn parses_ascii_tform_codes() {
     ));
 }
 
-/// A text column's rows are read by index and in order, an undefined row as `None`.
+/// A text column's rows are read by index and in order, an undefined row as `None`. A
+/// field keeps its leading blanks and drops its trailing ones, so an all-blank field is
+/// `""`, which a null is not.
 #[test]
 fn ascii_text_reads_each_row() {
     let fields: AsciiText = [Some("x"), None, Some("yz")].into_iter().collect();
@@ -51,6 +53,14 @@ fn ascii_text_reads_each_row() {
         [Some("x"), None, Some("yz")]
     );
     assert_eq!((&fields).into_iter().len(), 3);
+
+    let padded: AsciiText = [Some(" a  "), Some("   "), None, Some("b\t ")]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        padded.iter().collect::<Vec<_>>(),
+        [Some(" a"), Some(""), None, Some("b\t")]
+    );
 }
 
 #[test]
@@ -67,9 +77,12 @@ fn decodes_hand_built_ascii_rows() {
     assert_eq!(schema.row_len(), 10);
     assert_eq!(schema.columns[1].byte_offset(), 4);
     assert_eq!(schema.column_index("count"), Some(1));
+    let AsciiColumnData::Text(names) = table.column(0).unwrap().raw().unwrap() else {
+        panic!("NAME is a text column");
+    };
     assert_eq!(
-        table.column(0).unwrap().raw().unwrap(),
-        AsciiColumnData::Text([Some("  AB"), Some("def ")].into_iter().collect())
+        names.iter().collect::<Vec<_>>(),
+        [Some("  AB"), Some("def")]
     );
     assert_eq!(
         table.column(1).unwrap().raw().unwrap(),
@@ -214,9 +227,13 @@ fn ascii_table_round_trips_through_write_and_read() {
     ));
     assert_eq!(&r.read_data_unit(1).unwrap()[..6], b"  AB  ");
     let t = r.read_ascii_table(1).unwrap();
+    // The field pads to its width of 6 and reads back as it was written.
+    let AsciiColumnData::Text(names) = t.column(0).unwrap().raw().unwrap() else {
+        panic!("NAME is a text column");
+    };
     assert_eq!(
-        t.column(0).unwrap().raw().unwrap(),
-        AsciiColumnData::Text([Some("  AB  "), Some("beta  ")].into_iter().collect())
+        names.iter().collect::<Vec<_>>(),
+        [Some("  AB"), Some("beta")]
     );
     assert_eq!(
         t.column(1).unwrap().raw().unwrap(),

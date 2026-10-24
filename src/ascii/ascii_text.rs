@@ -3,7 +3,9 @@
 use crate::ragged::Ragged;
 
 /// The fields of an ASCII-table `Aw` column, in row order: every row's text in one
-/// buffer, and which rows are undefined (`TNULLn`). An undefined row has no text.
+/// buffer, and which rows are undefined (`TNULLn`). An undefined row has no text. A
+/// field's trailing blanks pad it to its width and are dropped when it is made, as
+/// cfitsio and astropy drop them; its leading blanks are text.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AsciiText {
     text: Ragged<String>,
@@ -48,7 +50,7 @@ impl<S: AsRef<str>> FromIterator<Option<S>> for AsciiText {
         let mut defined = Vec::new();
         for row in rows {
             if let Some(row) = &row {
-                text.push_str(row.as_ref());
+                text.push_str(row.as_ref().trim_end_matches(' '));
             }
             ends.push(text.len());
             defined.push(row.is_some());
