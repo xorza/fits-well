@@ -192,7 +192,7 @@ fn an_ascii_table_reads_back_with_its_nulls() {
     let names: AsciiText = [Some("Vega"), None].into_iter().collect();
     let mut table = AsciiBuilder::new();
     table
-        .push(AsciiWriteColumn::text("NAME", names, 8).with_null("-"))
+        .push(AsciiWriteColumn::text("NAME", names.clone(), 8).with_null("-"))
         .unwrap()
         .push(
             AsciiWriteColumn::float(
@@ -210,11 +210,10 @@ fn an_ascii_table_reads_back_with_its_nulls() {
 
     let mut reader = FitsReader::from_bytes(&bytes).unwrap();
     let read = reader.read_ascii_table(1).unwrap();
-    let AsciiColumnData::Text(read_names) = read.column("NAME").unwrap().raw().unwrap() else {
-        unreachable!("NAME is a text column");
-    };
-    assert_eq!(read_names.row(0).map(str::trim_end), Some("Vega"));
-    assert_eq!(read_names.row(1), None);
+    assert_eq!(
+        read.column("NAME").unwrap().raw().unwrap(),
+        AsciiColumnData::Text(names)
+    );
     assert_eq!(
         read.column("MAG").unwrap().raw().unwrap(),
         AsciiColumnData::Float(vec![Some(0.03), None])

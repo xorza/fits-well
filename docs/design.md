@@ -628,6 +628,13 @@ and the dated measurements in `docs/research/`.
   `AsciiFloatFormatTooNarrow`. Refused: a default of `F` with 0 decimals, which wrote
   cells with no point, and astropy's default widths. Source:
   `docs/research/2026-10-24-reference-library-practice.md`.
+- **An ASCII text field drops its trailing blanks and keeps its leading ones,** when
+  an `AsciiText` is made, from a file or by a caller, so a written column reads back
+  equal. An all-blank field is `""`, and a null is `None`. Sources: cfitsio
+  `cfitsio.tex` "Dealing with Character Strings", astropy `fitsrec.py`
+  `_rstrip_inplace`. Refused: the padded field, which read `"Vega"` back as
+  `"Vega    "`, and cfitsio's single blank for an all-blank field, which only a C
+  string, with no null of its own, needs.
 - **A variable-length column takes its descriptor width as an argument:**
   `WriteColumn::vla(name, rows, DescriptorWidth::P)`. Refused:
   `with_wide_descriptors`, which panicked on a fixed-width column.
