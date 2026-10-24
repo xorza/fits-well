@@ -6,7 +6,7 @@ use std::iter;
 use crate::ascii::ascii_text::AsciiText;
 use crate::bitpix::Bitpix;
 use crate::column::validate_table_field_count;
-use crate::error::{FitsError, Result, TextOrigin};
+use crate::error::{AsciiValueDefect, FitsError, Result, TextOrigin};
 use crate::fits_writer::column_scaling::{ColumnScaling, Scalable};
 use crate::fits_writer::{ROW_COUNT_FIXED, accept_row_count};
 use crate::hdu::prologue::{Opening, Prologue, Xtension};
@@ -293,7 +293,9 @@ impl AsciiWriteColumn {
             AsciiCells::Float { values, format } => match values[row] {
                 Some(value) if !value.is_finite() => {
                     return Err(FitsError::InvalidAsciiValue {
-                        reason: "float cells must be finite; use None for null",
+                        column: self.name.clone(),
+                        row,
+                        defect: AsciiValueDefect::NonFinite,
                     });
                 }
                 Some(value) => {
@@ -318,7 +320,9 @@ impl AsciiWriteColumn {
             && self.tnull.as_deref().map(str::trim) == Some(field.text().trim())
         {
             return Err(FitsError::InvalidAsciiValue {
-                reason: "the value equals its column's TNULLn marker",
+                column: self.name.clone(),
+                row,
+                defect: AsciiValueDefect::NullMarker,
             });
         }
         Ok(field)

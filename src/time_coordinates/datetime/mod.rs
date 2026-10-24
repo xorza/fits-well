@@ -2,6 +2,7 @@
 
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::error::TimeConversion;
 use crate::header_model::Header;
 use crate::keyword::Keyword;
 use crate::time_coordinates::mjd::{Expansion, Mjd};
@@ -132,7 +133,7 @@ impl Datetime {
     pub fn to_mjd(self) -> Result<Mjd> {
         if self.second >= 60 {
             return Err(FitsError::ExternalTimeDataRequired {
-                operation: "convert a UTC leap-second label to MJD",
+                conversion: TimeConversion::LeapSecond,
             });
         }
         // The JDN counts from noon and the MJD from the midnight 2400000.5 days later.

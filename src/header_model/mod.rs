@@ -213,7 +213,7 @@ impl Header {
     }
 
     /// A mandatory logical keyword: [`FitsError::MissingKeyword`] when it is absent,
-    /// [`FitsError::TypeMismatch`] when it holds another type.
+    /// [`FitsError::ValueTypeMismatch`] when it holds another type.
     pub fn require_logical(
         &self,
         keyword: impl TryInto<Keyword, Error: Into<FitsError>>,

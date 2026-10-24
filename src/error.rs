@@ -12,6 +12,7 @@ use crate::hdu::HduKind;
 use crate::header_model::defect::Defect;
 use crate::header_model::record_name::RecordName;
 use crate::keyword::Keyword;
+use crate::world_coordinates::projection::Projection;
 use thiserror::Error;
 
 pub type Result<T> = result::Result<T, FitsError>;
@@ -115,22 +116,15 @@ impl fmt::Display for NumericTarget {
 }
 
 /// Why a header value has no FITS representation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum NonFinite {
     /// A real that is infinite or NaN.
+    #[error("a real value must be finite")]
     Real,
     /// A complex real with an infinite or NaN part.
+    #[error("the parts of a complex value must be finite")]
     Complex,
-}
-
-impl fmt::Display for NonFinite {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Real => "a real value must be finite",
-            Self::Complex => "the parts of a complex value must be finite",
-        })
-    }
 }
 
 /// Where the text that held a byte outside FITS restricted ASCII came from.
@@ -358,7 +352,7 @@ pub enum WcsDefect {
     SingularMatrix,
     /// A projection's `PVi_m` parameters admit no transform, as `CEA`'s λ = 0.
     #[error("degenerate {projection} projection parameters")]
-    DegenerateProjection { projection: &'static str },
+    DegenerateProjection { projection: Projection },
     /// `RADESYSa` names no standard reference frame (§8.3).
     #[error("RADESYS {value:?} is not a standard reference frame")]
     UnknownCelestialFrame { value: String },
@@ -560,15 +554,22 @@ pub enum CompressedDataDefect {
 }
 
 /// The cell of a tile that [`CompressedDataDefect::CellElement`] names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TileCell {
     /// The tile's compressed stream.
-    #[error("compressed")]
     Compressed,
     /// The tile's samples, stored as they are (`UNCOMPRESSED_DATA`).
-    #[error("uncompressed")]
     Uncompressed,
+}
+
+impl fmt::Display for TileCell {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Compressed => "compressed",
+            Self::Uncompressed => "uncompressed",
+        })
+    }
 }
 
 /// Why a PLIO line list does not decode, from [`CompressedDataDefect::Plio`].
@@ -628,6 +629,144 @@ impl From<PlioDefect> for FitsError {
 impl From<HcompressDefect> for FitsError {
     fn from(defect: HcompressDefect) -> Self {
         CompressedDataDefect::Hcompress(defect).into()
+    }
+}
+
+/// The HDU a read asks for, from [`FitsError::HduKindMismatch`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExpectedHdu {
+    /// A primary or `IMAGE` array, or, with the `compression` feature, a tiled-compressed
+    /// one.
+    Image,
+    /// A `BINTABLE`, or, with the `compression` feature, a tiled-compressed table.
+    BinTable,
+    AsciiTable,
+    /// A random-groups primary.
+    RandomGroups,
+}
+
+impl fmt::Display for ExpectedHdu {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Image => "an image",
+            Self::BinTable => "a binary table",
+            Self::AsciiTable => "an ASCII table",
+            Self::RandomGroups => "random groups",
+        })
+    }
+}
+
+/// What a column read asks of the column's format, from
+/// [`FitsError::ColumnKindMismatch`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExpectedColumn {
+    Fixed,
+    /// A `P` or `Q` variable-length array column.
+    Array,
+    /// An `X` bit column.
+    Bits,
+    /// A `C` or `M` complex column.
+    Complex,
+    /// A column with a numeric physical value.
+    Numeric,
+    Integer,
+}
+
+impl fmt::Display for ExpectedColumn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Fixed => "a fixed-width column",
+            Self::Array => "a variable-length array column",
+            Self::Bits => "a bit column",
+            Self::Complex => "a complex column",
+            Self::Numeric => "a numeric column",
+            Self::Integer => "an integer column",
+        })
+    }
+}
+
+/// Why an ASCII-table cell cannot hold a value, from [`FitsError::InvalidAsciiValue`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum AsciiValueDefect {
+    /// A float that is not finite, which a field cannot spell; a null is `None`.
+    #[error("a float cell must be finite; a null is None")]
+    NonFinite,
+    /// A value that reads as the column's `TNULLn` marker.
+    #[error("the value equals the column's TNULLn marker")]
+    NullMarker,
+}
+
+/// A time conversion that needs data from outside the file, from
+/// [`FitsError::ExternalTimeDataRequired`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TimeConversion {
+    /// A UTC leap-second label to an MJD, which needs a leap-second table.
+    LeapSecond,
+    /// A tropical year outside TDB, which needs ephemeris data.
+    TropicalYear,
+    /// A Besselian year outside TT or ET, which needs ephemeris data.
+    BesselianYear,
+}
+
+impl fmt::Display for TimeConversion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::LeapSecond => "converting a UTC leap-second label to MJD",
+            Self::TropicalYear => "a tropical year outside TDB",
+            Self::BesselianYear => "a Besselian year outside TT and ET",
+        })
+    }
+}
+
+/// The kind of unit a keyword needs, from [`FitsError::InvalidUnit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnitKind {
+    Angle,
+    Time,
+    Frequency,
+    Energy,
+    /// A wavenumber's unit.
+    InverseLength,
+    Velocity,
+    Length,
+    /// A redshift's or a velocity ratio's unit, `1`.
+    Dimensionless,
+}
+
+impl fmt::Display for UnitKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Angle => "an angle unit",
+            Self::Time => "a time unit",
+            Self::Frequency => "a frequency unit",
+            Self::Energy => "an energy unit",
+            Self::InverseLength => "an inverse length unit",
+            Self::Velocity => "a velocity unit",
+            Self::Length => "a length unit",
+            Self::Dimensionless => "dimensionless",
+        })
+    }
+}
+
+/// The field of a `P`/`Q` descriptor, from [`FitsError::InvalidPqDescriptor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DescriptorField {
+    Count,
+    Offset,
+}
+
+impl fmt::Display for DescriptorField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Count => "element count",
+            Self::Offset => "heap offset",
+        })
     }
 }
 
@@ -691,22 +830,30 @@ pub enum FitsError {
     /// An ASCII-table field that does not hold a number of its column's format.
     #[error("ASCII-table field {field:?} is not a valid number")]
     InvalidAsciiField { field: String },
-    /// A value an ASCII-table cell cannot hold.
-    #[error("invalid ASCII-table cell value: {reason}")]
-    InvalidAsciiValue { reason: &'static str },
+    /// A value the cell of ASCII-table column `column` in `row` cannot hold;
+    /// [`AsciiValueDefect`] says why.
+    #[error("ASCII-table column {column:?}, row {row}: {defect}")]
+    InvalidAsciiValue {
+        column: String,
+        /// Zero-based table row containing the value.
+        row: usize,
+        defect: AsciiValueDefect,
+    },
     /// Interpreting a valid FITS time value requires leap-second, Earth-orientation,
-    /// or ephemeris data that this format library does not provide.
-    #[error("{operation} requires external astronomical time data")]
-    ExternalTimeDataRequired { operation: &'static str },
+    /// or ephemeris data that this format library does not provide;
+    /// [`TimeConversion`] says which conversion needs it.
+    #[error("{conversion} requires external astronomical time data")]
+    ExternalTimeDataRequired { conversion: TimeConversion },
     /// A stream chunk whose samples are not of the stream's `BITPIX`.
     #[error("a chunk of {got:?} samples was written to a stream of {expected:?} samples")]
     ChunkTypeMismatch { expected: Bitpix, got: Bitpix },
-    /// A named metadata value was present but could not be interpreted as the type
-    /// required by its FITS role.
-    #[error("value {name} is not a valid {expected}")]
-    TypeMismatch {
-        name: String,
-        expected: &'static str,
+    /// The variable-length rows built into one column hold two element types: the
+    /// zero-based `row` holds `got`, where the rows before it hold `expected`.
+    #[error("variable-length row {row} holds {got:?} elements, not {expected:?}")]
+    MixedArrayRows {
+        row: usize,
+        expected: ElementKind,
+        got: ElementKind,
     },
     /// Text that holds bytes outside FITS restricted ASCII (0x20–0x7e).
     #[error("{text} contains characters outside FITS restricted ASCII")]
@@ -808,7 +955,7 @@ pub enum FitsError {
     /// A signed `P`/`Q` heap-array descriptor contains a negative element count
     /// or byte offset.
     #[error("invalid P/Q descriptor {field}: {value}")]
-    InvalidPqDescriptor { field: &'static str, value: i64 },
+    InvalidPqDescriptor { field: DescriptorField, value: i64 },
     /// An index named something beyond the bound of whatever it addressed —
     /// [`Indexed`] says which.
     #[error(fmt = Indexed::fmt_out_of_bounds)]
@@ -894,23 +1041,14 @@ pub enum FitsError {
         version: Option<i64>,
         level: Option<i64>,
     },
-    /// `FitsReader::image` was called on an HDU that is not an image array (a table,
-    /// random-groups, or unmodelled extension).
-    #[error("HDU is not an image array")]
-    NotAnImage,
+    /// A read of an HDU of another kind than it reads: an image read of a table, a
+    /// table read of an image, as [`ExpectedHdu`] says.
+    #[error("the HDU is {got:?}, not {expected}")]
+    HduKindMismatch { expected: ExpectedHdu, got: HduKind },
     /// An IMAGE/primary HDU carries group structure (`PCOUNT ≠ 0` or `GCOUNT ≠ 1`),
     /// which a plain image array must not have (§4.3).
     #[error("image HDU has group structure (PCOUNT ≠ 0 or GCOUNT ≠ 1)")]
     ImageHasGroups,
-    /// `read_table` was called on an HDU that is not a binary table.
-    #[error("HDU is not a binary table")]
-    NotABinTable,
-    /// `read_groups` was called on an HDU that is not a random-groups primary.
-    #[error("HDU is not a random-groups primary")]
-    NotRandomGroups,
-    /// `read_ascii_table` was called on an HDU that is not an ASCII table.
-    #[error("HDU is not an ASCII table")]
-    NotAnAsciiTable,
     /// WCS keywords that cannot hold together; [`WcsConflict`] says which.
     #[error("conflicting WCS keywords: {conflict}")]
     ConflictingWcsKeywords { conflict: WcsConflict },
@@ -922,23 +1060,19 @@ pub enum FitsError {
     /// An intermediate (projection-plane) coordinate lies outside the region its WCS
     /// projection maps back onto the sphere (wcslib `PRJERR_BAD_PIX`).
     #[error("coordinate is outside the {projection} projection domain")]
-    WcsPixelOutOfDomain { projection: &'static str },
+    WcsPixelOutOfDomain { projection: Projection },
     /// A native spherical coordinate has no image under its WCS projection: it lies
     /// behind a zenithal projection's horizon, past a perspective projection's limb, or
     /// at a pole a projection sends to infinity (wcslib `PRJERR_BAD_WORLD`).
     #[error("world coordinate has no image under the {projection} projection")]
-    WcsWorldOutOfDomain { projection: &'static str },
+    WcsWorldOutOfDomain { projection: Projection },
     /// The fiducial point, `LONPOLE` and `LATPOLE` admit no celestial pole (CG 2002 §2.4,
     /// wcslib `celset`).
     #[error("no celestial pole fits the WCS: {defect}")]
     WcsInvalidPole { defect: PoleDefect },
     /// A unit string is not a unit of the kind its keyword requires.
     #[error("unit {unit:?} is not {expected}")]
-    InvalidUnit {
-        unit: String,
-        /// The kind of unit the keyword needs, e.g. "an angle unit".
-        expected: &'static str,
-    },
+    InvalidUnit { unit: String, expected: UnitKind },
     /// A world or intermediate coordinate lies outside a non-celestial WCS
     /// algorithm's mathematical domain.
     #[error("coordinate on zero-based axis {axis} is outside the {algorithm} WCS domain")]
@@ -969,23 +1103,14 @@ pub enum FitsError {
     /// A `TFORMn` value could not be parsed as a binary-table column format.
     #[error("invalid column format {tform:?}")]
     InvalidTform { tform: String },
-    /// `ColumnReader::raw` was called on a variable-length-array (`P`/`Q`) column;
-    /// use `ColumnReader::vla` instead.
-    #[error("column format '{code}' is a variable-length array; use the column reader's vla()")]
-    NotAFixedColumn { code: char },
-    /// `ColumnReader::vla` was called on a fixed-width column.
-    #[error("column format '{code}' is not a variable-length array")]
-    NotAVla { code: char },
-    /// `ColumnReader::bits` was called on a column that is not an `X` bit array.
-    #[error("column format '{code}' is not an X bit array")]
-    NotABitColumn { code: char },
-    /// `ColumnReader::complex` was called on a column that is not `C`/`M` complex.
-    #[error("column format '{code}' is not a C/M complex column")]
-    NotAComplexColumn { code: char },
-    /// `ColumnReader::physical` was called on a column with no numeric physical
-    /// value (`A`/`L`/`X`/`C`/`M`).
-    #[error("column format '{code}' has no numeric physical value")]
-    NotANumericColumn { code: char },
+    /// A read of the zero-based `column` that its format does not take, as
+    /// [`ExpectedColumn`] says: a fixed-width read of an array column, a bit read of
+    /// another type.
+    #[error("column {column} is not {expected}")]
+    ColumnKindMismatch {
+        column: usize,
+        expected: ExpectedColumn,
+    },
     /// No column with the requested `TTYPEn` name exists in the table.
     #[error("no column named {name:?} in the table")]
     ColumnNotFound { name: String },

@@ -1,6 +1,7 @@
 use crate::bintable::Table;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::internals::table_header;
+use crate::error::ExpectedColumn;
 use crate::error::FitsError;
 use crate::header_model::keywords;
 
@@ -46,7 +47,10 @@ fn read_bit_column_on_a_non_bit_column_errors() {
     let table = Table::from_data(&header, vec![0u8; 4]).unwrap();
     assert!(matches!(
         table.column(0).unwrap().bits(),
-        Err(FitsError::NotABitColumn { code: 'J' })
+        Err(FitsError::ColumnKindMismatch {
+            column: 0,
+            expected: ExpectedColumn::Bits
+        })
     ));
 }
 

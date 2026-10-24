@@ -71,9 +71,10 @@ mod words;
 mod world_coordinates;
 
 pub use error::{
-    CompressedDataDefect, CompressionFeature, CompressionParameter, FitsError, GrismDefect,
-    HcompressDefect, Indexed, NonFinite, NumericTarget, PlioDefect, PoleDefect, Ranked, Result,
-    SizeUnit, TabularDefect, TextOrigin, TileCell, ValueKind, WcsConflict, WcsDefect,
+    AsciiValueDefect, CompressedDataDefect, CompressionFeature, CompressionParameter,
+    DescriptorField, ExpectedColumn, ExpectedHdu, FitsError, GrismDefect, HcompressDefect, Indexed,
+    NonFinite, NumericTarget, PlioDefect, PoleDefect, Ranked, Result, SizeUnit, TabularDefect,
+    TextOrigin, TileCell, TimeConversion, UnitKind, ValueKind, WcsConflict, WcsDefect,
 };
 pub use fits_editor::FitsEditor;
 pub use fits_writer::FitsWriter;

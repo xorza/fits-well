@@ -1,4 +1,5 @@
 use crate::error::GrismDefect;
+use crate::error::UnitKind;
 use crate::header_model::{Header, keywords};
 use crate::internals::tolerance::{Tolerance, assert_close};
 use crate::internals::wcs_header::{WcsHeader, axis_header};
@@ -555,7 +556,7 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
         .set_internal("CRVAL1", 1.0);
     assert!(matches!(
         Wcs::from_header(&invalid, None),
-        Err(FitsError::InvalidUnit { unit, expected: "a length unit" }) if unit == "Hz"
+        Err(FitsError::InvalidUnit { unit, expected: UnitKind::Length }) if unit == "Hz"
     ));
     invalid.set_internal("CUNIT1", "qHz");
     assert!(matches!(

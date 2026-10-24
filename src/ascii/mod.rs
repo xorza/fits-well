@@ -16,7 +16,7 @@ use crate::column::ColumnSelector;
 use crate::column::Named;
 use crate::column::{ColumnLabels, ColumnScaling, Keyed, TableShape};
 use crate::error::Result;
-use crate::error::{FitsError, TextOrigin};
+use crate::error::{ExpectedColumn, FitsError, TextOrigin};
 use crate::header_model::{Header, keywords};
 
 /// The value type of an ASCII-table column.
@@ -344,7 +344,10 @@ impl<'a> AsciiColumnReader<'a> {
     pub fn physical(&self) -> Result<Vec<f64>> {
         let col = self.descriptor();
         if col.kind == AsciiKind::Text {
-            return Err(FitsError::NotANumericColumn { code: 'A' });
+            return Err(FitsError::ColumnKindMismatch {
+                column: self.index,
+                expected: ExpectedColumn::Numeric,
+            });
         }
         let (tscale, tzero, tnull) = (col.tscale()?, col.tzero()?, col.tnull()?);
         let mut out = Vec::with_capacity(self.table.schema.row_count);

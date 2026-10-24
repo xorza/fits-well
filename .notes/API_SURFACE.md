@@ -6,6 +6,12 @@ no features and one build per public feature; a tag names the builds an item nee
 loses. `internals` is the crate's own test surface and is left out.
 
 ```text
+AsciiValueDefect
+    #[non_exhaustive]
+    enum AsciiValueDefect: Clone, Copy, Debug, Display, Eq, Error, PartialEq
+        NonFinite
+        NullMarker
+
 CompressedDataDefect
     #[non_exhaustive]
     enum CompressedDataDefect: Debug, Display, Error
@@ -52,6 +58,30 @@ CompressionParameter
         EmptyTile { axis: usize }
         HcompressDither2
 
+DescriptorField
+    #[non_exhaustive]
+    enum DescriptorField: Clone, Copy, Debug, Display, Eq, PartialEq
+        Count
+        Offset
+
+ExpectedColumn
+    #[non_exhaustive]
+    enum ExpectedColumn: Clone, Copy, Debug, Display, Eq, PartialEq
+        Fixed
+        Array
+        Bits
+        Complex
+        Numeric
+        Integer
+
+ExpectedHdu
+    #[non_exhaustive]
+    enum ExpectedHdu: Clone, Copy, Debug, Display, Eq, PartialEq
+        Image
+        BinTable
+        AsciiTable
+        RandomGroups
+
 FitsEditor
     struct FitsEditor<F>
         impl<F: Read + Write + Seek> FitsEditor<F>
@@ -84,10 +114,10 @@ FitsError
         TimeOutOfRange
         InvalidCompressionParameter { parameter: CompressionParameter }
         InvalidAsciiField { field: String }
-        InvalidAsciiValue { reason: &'static str }
-        ExternalTimeDataRequired { operation: &'static str }
+        InvalidAsciiValue { column: String, row: usize, defect: AsciiValueDefect }
+        ExternalTimeDataRequired { conversion: TimeConversion }
         ChunkTypeMismatch { expected: Bitpix, got: Bitpix }
-        TypeMismatch { name: String, expected: &'static str }
+        MixedArrayRows { row: usize, expected: ElementKind, got: ElementKind }
         InvalidAscii { text: TextOrigin }
         AsciiFieldTooWide { column: String, row: usize, width: usize, minimum_width: usize }
         AsciiFloatFormatTooNarrow { column: String, width: usize, minimum_width: usize }
@@ -103,7 +133,7 @@ FitsError
         DataUnitTooLarge { bytes: u64 }
         DataSizeMismatch { unit: SizeUnit, expected: u64, got: u64 }
         DescriptorOutOfRange { width: DescriptorWidth, count: usize, offset: usize }
-        InvalidPqDescriptor { field: &'static str, value: i64 }
+        InvalidPqDescriptor { field: DescriptorField, value: i64 }
         IndexOutOfBounds { indexed: Indexed, index: usize, len: usize }
         RankMismatch { ranked: Ranked, expected: usize, got: usize }
         ImageRegionOutOfBounds { axis: usize, start: usize, end: usize, len: usize }
@@ -118,17 +148,14 @@ FitsError
         TrailingContent { hdu_end: u64, file_len: u64 }
         HduKindChange { from: HduKind, to: HduKind }
         HduNotFound { name: String, version: Option<i64>, level: Option<i64> }
-        NotAnImage
+        HduKindMismatch { expected: ExpectedHdu, got: HduKind }
         ImageHasGroups
-        NotABinTable
-        NotRandomGroups
-        NotAnAsciiTable
         ConflictingWcsKeywords { conflict: WcsConflict }
         UnsupportedWcsTransform { axes: Vec<usize> }
-        WcsPixelOutOfDomain { projection: &'static str }
-        WcsWorldOutOfDomain { projection: &'static str }
+        WcsPixelOutOfDomain { projection: Projection }
+        WcsWorldOutOfDomain { projection: Projection }
         WcsInvalidPole { defect: PoleDefect }
-        InvalidUnit { unit: String, expected: &'static str }
+        InvalidUnit { unit: String, expected: UnitKind }
         WcsCoordinateOutOfDomain { axis: usize, algorithm: &'static str }
         WcsNoConvergence { algorithm: &'static str }
         HcompressTileTooSmall { axis: usize, length: usize }
@@ -136,11 +163,7 @@ FitsError
         CorruptCompressedData { defect: CompressedDataDefect }
         PlioValueOutOfRange { index: usize, value: i64 }
         InvalidTform { tform: String }
-        NotAFixedColumn { code: char }
-        NotAVla { code: char }
-        NotABitColumn { code: char }
-        NotAComplexColumn { code: char }
-        NotANumericColumn { code: char }
+        ColumnKindMismatch { column: usize, expected: ExpectedColumn }
         ColumnNotFound { name: String }
         GroupParameterNotFound { name: String }
         RowWidthMismatch { computed: usize, declared: usize }
@@ -236,7 +259,7 @@ Indexed
 
 NonFinite
     #[non_exhaustive]
-    enum NonFinite: Clone, Copy, Debug, Display, Eq, PartialEq
+    enum NonFinite: Clone, Copy, Debug, Display, Eq, Error, PartialEq
         Real
         Complex
 
@@ -313,9 +336,28 @@ TextOrigin
 
 TileCell
     #[non_exhaustive]
-    enum TileCell: Clone, Copy, Debug, Display, Eq, Error, PartialEq
+    enum TileCell: Clone, Copy, Debug, Display, Eq, PartialEq
         Compressed
         Uncompressed
+
+TimeConversion
+    #[non_exhaustive]
+    enum TimeConversion: Clone, Copy, Debug, Display, Eq, PartialEq
+        LeapSecond
+        TropicalYear
+        BesselianYear
+
+UnitKind
+    #[non_exhaustive]
+    enum UnitKind: Clone, Copy, Debug, Display, Eq, PartialEq
+        Angle
+        Time
+        Frequency
+        Energy
+        InverseLength
+        Velocity
+        Length
+        Dimensionless
 
 ValueKind
     #[non_exhaustive]
@@ -340,7 +382,7 @@ WcsDefect
     #[non_exhaustive]
     enum WcsDefect: Clone, Debug, Display, Eq, Error, PartialEq
         SingularMatrix
-        DegenerateProjection { projection: &'static str }
+        DegenerateProjection { projection: Projection }
         UnknownCelestialFrame { value: String }
         InvalidEquinox
         UnknownSpectralFrame { keyword: Keyword, value: String }
@@ -1659,7 +1701,7 @@ wcs::Metadata
         pub distortion: Option<Distortion>
 
 wcs::Projection
-    enum Projection: Clone, Copy, Debug, Eq, PartialEq
+    enum Projection: Clone, Copy, Debug, Display, Eq, PartialEq
         Tan
         Sin
         Arc
@@ -1687,6 +1729,7 @@ wcs::Projection
         Csc
         Qsc
         Hpx
+        pub const fn code(self) -> &'static str
 
 wcs::SpectralFrame
     struct SpectralFrame: Clone, Copy, Debug, PartialEq

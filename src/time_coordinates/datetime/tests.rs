@@ -1,4 +1,5 @@
 use crate::error::FitsError;
+use crate::error::TimeConversion;
 use crate::header_model::{Header, keywords};
 
 use crate::time_coordinates::coordinate::Coordinate;
@@ -238,6 +239,8 @@ fn leap_second_labels_require_external_time_data() {
     assert_eq!(leap.second(), 60);
     assert!(matches!(
         leap.to_mjd(),
-        Err(FitsError::ExternalTimeDataRequired { .. })
+        Err(FitsError::ExternalTimeDataRequired {
+            conversion: TimeConversion::LeapSecond
+        })
     ));
 }

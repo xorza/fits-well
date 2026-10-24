@@ -131,21 +131,27 @@ fn transform_failures_return_errors() {
     let sin = build("SIN").unwrap();
     assert!(matches!(
         to_world(&sin, &[2.0, 1.0]),
-        Err(FitsError::WcsPixelOutOfDomain { projection: "SIN" })
+        Err(FitsError::WcsPixelOutOfDomain {
+            projection: Projection::Sin
+        })
     ));
 
     // A ZPN polynomial without coefficients maps every colatitude to the pole.
     assert!(matches!(
         build("ZPN"),
         Err(FitsError::InvalidWcs {
-            defect: WcsDefect::DegenerateProjection { projection: "ZPN" }
+            defect: WcsDefect::DegenerateProjection {
+                projection: Projection::Zpn
+            }
         })
     ));
 
     let tan = Fixture::WcsTan.wcs();
     assert!(matches!(
         to_pixel(&tan, &[150.0, 100.0]),
-        Err(FitsError::WcsWorldOutOfDomain { projection: "TAN" })
+        Err(FitsError::WcsWorldOutOfDomain {
+            projection: Projection::Tan
+        })
     ));
     for result in [
         to_world(&tan, &[1.0]),

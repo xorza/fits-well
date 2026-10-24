@@ -2,6 +2,7 @@ use crate::bintable::Table;
 use crate::bintable::column::Column;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::internals::table_header;
+use crate::error::ExpectedColumn;
 use crate::error::FitsError;
 use crate::error::Indexed;
 use crate::error::ValueKind;
@@ -144,7 +145,10 @@ fn read_column_physical_rejects_non_numeric_columns() {
     let table = Table::from_data(&header, b"abc".to_vec()).unwrap();
     assert!(matches!(
         table.column(0).unwrap().physical(),
-        Err(FitsError::NotANumericColumn { code: 'A' })
+        Err(FitsError::ColumnKindMismatch {
+            column: 0,
+            expected: ExpectedColumn::Numeric
+        })
     ));
 }
 
@@ -154,7 +158,10 @@ fn read_column_on_a_vla_directs_to_read_vla_column() {
     let table = Table::from_data(&header, vec![0u8; 8]).unwrap();
     assert!(matches!(
         table.column(0).unwrap().raw(),
-        Err(FitsError::NotAFixedColumn { code: 'P' })
+        Err(FitsError::ColumnKindMismatch {
+            column: 0,
+            expected: ExpectedColumn::Fixed
+        })
     ));
 }
 
@@ -225,7 +232,10 @@ fn read_column_complex_widens_and_scales() {
     let t2 = Table::from_data(&h2, vec![0u8; 4]).unwrap();
     assert!(matches!(
         t2.column(0).unwrap().complex(),
-        Err(FitsError::NotAComplexColumn { code: 'J' })
+        Err(FitsError::ColumnKindMismatch {
+            column: 0,
+            expected: ExpectedColumn::Complex
+        })
     ));
 }
 
@@ -410,7 +420,10 @@ fn read_vla_on_a_fixed_column_is_an_error() {
     let table = Table::from_data(&header, vec![0u8; 4]).unwrap();
     assert!(matches!(
         table.column(0).unwrap().vla(),
-        Err(FitsError::NotAVla { code: 'J' })
+        Err(FitsError::ColumnKindMismatch {
+            column: 0,
+            expected: ExpectedColumn::Array
+        })
     ));
 }
 

@@ -1,5 +1,6 @@
 use crate::error::CompressedDataDefect;
 use crate::error::CompressionFeature;
+use crate::error::ExpectedHdu;
 use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
 use std::ops::Range;
@@ -570,7 +571,16 @@ fn table_reads_give_a_compressed_table_as_the_table_it_restores() {
             .unwrap_err(),
     ];
     for error in errors {
-        assert!(matches!(error, FitsError::NotABinTable), "{error:?}");
+        assert!(
+            matches!(
+                error,
+                FitsError::HduKindMismatch {
+                    expected: ExpectedHdu::BinTable,
+                    got: HduKind::CompressedImage
+                }
+            ),
+            "{error:?}"
+        );
     }
 }
 

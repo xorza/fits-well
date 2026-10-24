@@ -2,6 +2,8 @@
 
 use crate::error::FitsError;
 use crate::error::Result;
+use crate::error::TimeConversion;
+use crate::error::UnitKind;
 use crate::time_coordinates::mjd::Mjd;
 use crate::time_coordinates::scale::{Scale, ScaleKind};
 use crate::unit;
@@ -48,7 +50,7 @@ impl FromStr for Unit {
     fn from_str(text: &str) -> Result<Self> {
         let invalid = || FitsError::InvalidUnit {
             unit: text.to_string(),
-            expected: "a time unit",
+            expected: UnitKind::Time,
         };
         if let Some(seconds) = unit::resolve(text, unit::TIME) {
             return Ok(Self::Seconds(seconds));
@@ -65,7 +67,7 @@ impl FromStr for Unit {
 fn tropical_year_days(reference_mjd: f64, scale: &Scale) -> Result<f64> {
     if scale.kind() != Some(ScaleKind::Tdb) {
         return Err(FitsError::ExternalTimeDataRequired {
-            operation: "evaluate a tropical year outside the TDB frame",
+            conversion: TimeConversion::TropicalYear,
         });
     }
     let centuries = (reference_mjd - 51_544.5) / 36_525.0;
@@ -78,7 +80,7 @@ fn tropical_year_days(reference_mjd: f64, scale: &Scale) -> Result<f64> {
 fn besselian_year_days(reference_mjd: f64, scale: &Scale) -> Result<f64> {
     if scale.kind() != Some(ScaleKind::Tt) {
         return Err(FitsError::ExternalTimeDataRequired {
-            operation: "evaluate a Besselian year outside the TT/ET frame",
+            conversion: TimeConversion::BesselianYear,
         });
     }
     let centuries = (reference_mjd - 15_019.5) / 36_525.0;

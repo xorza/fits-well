@@ -286,11 +286,11 @@ impl<S: Source> PlainRead<'_, S> {
 }
 
 impl<'r, S: Source> ImageReader<'r, S> {
-    /// The image `hdu` holds. Errors with [`FitsError::NotAnImage`] for any other kind,
+    /// The image `hdu` holds. Errors with [`FitsError::HduKindMismatch`] for any other kind,
     /// a tiled-compressed image among them without the `compression` feature, and with
     /// the header's own error when its image keywords do not resolve.
     ///
-    /// [`FitsError::NotAnImage`]: crate::FitsError::NotAnImage
+    /// [`FitsError::HduKindMismatch`]: crate::FitsError::HduKindMismatch
     pub(crate) fn new(
         hdu: &'r Hdu,
         data: &'r mut DataSource<S>,

@@ -1,4 +1,6 @@
 use crate::error::FitsError;
+use crate::error::TimeConversion;
+use crate::error::UnitKind;
 use crate::header_model::{Header, keywords};
 use crate::internals::cards::header_of;
 
@@ -63,21 +65,24 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
         assert!(
             matches!(
                 Frame::from_header(&invalid),
-                Err(FitsError::InvalidUnit { unit, expected: "a time unit" }) if unit == value
+                Err(FitsError::InvalidUnit { unit, expected: UnitKind::Time }) if unit == value
             ),
             "{value:?} should not be accepted as a time unit"
         );
     }
 
     let mut frame_dependent = Header::new();
-    for (unit, scale) in [("ta", "UTC"), ("Ba", "TDB")] {
+    for (unit, scale, needs) in [
+        ("ta", "UTC", TimeConversion::TropicalYear),
+        ("Ba", "TDB", TimeConversion::BesselianYear),
+    ] {
         frame_dependent
             .set_internal(keywords::TIMEUNIT, unit)
             .set_internal(keywords::TIMESYS, scale);
         let time = Frame::from_header(&frame_dependent).unwrap();
         assert!(matches!(
             time.unit_seconds(),
-            Err(FitsError::ExternalTimeDataRequired { .. })
+            Err(FitsError::ExternalTimeDataRequired { conversion }) if conversion == needs
         ));
     }
 }

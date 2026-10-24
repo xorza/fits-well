@@ -177,6 +177,7 @@ mod tests {
     use crate::world_coordinates::Wcs;
     use crate::world_coordinates::celestial_pole::CelestialPole;
     use crate::world_coordinates::celestial_transform::CelestialTransform;
+    use crate::world_coordinates::projection::Projection;
 
     fn transform(projection: &str, keywords: &[(&str, f64)]) -> CelestialTransform {
         let mut header =
@@ -232,7 +233,9 @@ mod tests {
             assert!(
                 matches!(
                     tan.to_intermediate(ra, dec),
-                    Err(FitsError::WcsWorldOutOfDomain { projection: "TAN" })
+                    Err(FitsError::WcsWorldOutOfDomain {
+                        projection: Projection::Tan
+                    })
                 ),
                 "({ra}, {dec})"
             );

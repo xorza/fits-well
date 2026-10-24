@@ -49,8 +49,7 @@ fn main() -> Result<(), FitsError> {
 
     // `open` reads only the headers. A tile-compressed image reads the same way.
     let mut reader = FitsReader::open(File::open("out.fits")?)?;
-    let first = reader.images().next().ok_or(FitsError::NotAnImage)?.index;
-    let mut image = reader.image(first)?;
+    let mut image = reader.image(0)?;
     println!("{:?}", image.metadata().shape);
     let mut physical: Vec<f32> = Vec::new();
     image.physical_into(.., &mut physical)?; // BSCALE/BZERO applied, BLANK as NaN

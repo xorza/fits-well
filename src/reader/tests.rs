@@ -1,4 +1,5 @@
 use crate::checksum::checksum_report::ChecksumStatus;
+use crate::error::DescriptorField;
 use bitvec::bitvec;
 use bitvec::order::Msb0;
 
@@ -555,7 +556,10 @@ fn malformed_image_pcount_is_rejected_not_panicked() {
     ));
     assert!(matches!(
         r.hdus()[0].table_schema(),
-        Err(FitsError::NotABinTable)
+        Err(FitsError::HduKindMismatch {
+            expected: ExpectedHdu::BinTable,
+            got: HduKind::Primary
+        })
     ));
 }
 
@@ -579,10 +583,19 @@ fn data_unit_larger_than_the_file_is_rejected_not_allocated() {
         r.image(0).unwrap().read(Region::All),
         Err(FitsError::UnexpectedEof)
     ));
-    assert!(matches!(r.read_table(0), Err(FitsError::NotABinTable)));
+    assert!(matches!(
+        r.read_table(0),
+        Err(FitsError::HduKindMismatch {
+            expected: ExpectedHdu::BinTable,
+            got: HduKind::Primary
+        })
+    ));
     assert!(matches!(
         r.read_ascii_table(0),
-        Err(FitsError::NotAnAsciiTable)
+        Err(FitsError::HduKindMismatch {
+            expected: ExpectedHdu::AsciiTable,
+            got: HduKind::Primary
+        })
     ));
 }
 
@@ -816,8 +829,20 @@ fn image_samples_match_a_manual_big_endian_decode() {
 fn image_rejects_non_image_hdus() {
     // hdu[0] is random groups, hdu[1] is a binary table — neither is an image.
     let mut f = Fixture::Ddts.stream();
-    assert!(matches!(f.image(0), Err(FitsError::NotAnImage)));
-    assert!(matches!(f.image(1), Err(FitsError::NotAnImage)));
+    assert!(matches!(
+        f.image(0),
+        Err(FitsError::HduKindMismatch {
+            expected: ExpectedHdu::Image,
+            got: HduKind::RandomGroups
+        })
+    ));
+    assert!(matches!(
+        f.image(1),
+        Err(FitsError::HduKindMismatch {
+            expected: ExpectedHdu::Image,
+            got: HduKind::BinTable
+        })
+    ));
 }
 
 #[test]
@@ -1570,7 +1595,7 @@ fn ranged_table_access_matches_whole_table_for_special_column_kinds() {
     assert!(matches!(
         selective.read_table_rows(1, 1..2),
         Err(FitsError::InvalidPqDescriptor {
-            field: "count",
+            field: DescriptorField::Count,
             value: -1
         })
     ));
