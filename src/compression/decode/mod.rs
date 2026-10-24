@@ -25,6 +25,7 @@ mod image_decode_plan;
 mod null_mask;
 mod tile_decoder;
 pub(crate) mod tile_index;
+pub(crate) mod tile_indexes;
 mod tile_scratch_set;
 pub(crate) mod tile_section;
 mod tile_sources;

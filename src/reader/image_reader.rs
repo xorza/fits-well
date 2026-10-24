@@ -297,7 +297,7 @@ impl<'r, S: Source> ImageReader<'r, S> {
             let image = hdu.image_geometry()?;
             let tiled = TiledImage::new(&hdu.header, image)?;
             scratch
-                .tile_index
+                .tile_indexes
                 .load(hdu.data_offset, hdu.container_schema()?, |len, rows| {
                     data.unit(hdu).append(0..len, rows)
                 })?;
@@ -348,7 +348,10 @@ impl<'r, S: Source> ImageReader<'r, S> {
         let sum = {
             let mut sum = DataChecksum::of(self.hdu);
             if self.tiled.is_some() {
-                sum.feed(self.hdu.data_offset, self.scratch.tile_index.rows());
+                sum.feed(
+                    self.hdu.data_offset,
+                    self.scratch.tile_indexes.get(self.hdu.data_offset).rows(),
+                );
             }
             sum
         };
@@ -395,7 +398,7 @@ impl<'r, S: Source> ImageReader<'r, S> {
         if let Some(tiled) = &self.tiled {
             return match region {
                 Region::All => {
-                    let index = &self.scratch.tile_index;
+                    let index = self.scratch.tile_indexes.get(self.hdu.data_offset);
                     let table = self.data.tiled_table(self.hdu, index, self.sum.as_mut())?;
                     Ok(Image::of_geometry(
                         self.image.shape.clone(),
@@ -481,13 +484,15 @@ impl<'r, S: Source> ImageReader<'r, S> {
 
     /// The most heap the reader and this handle hold viewing each of `regions` in turn
     /// with [`view`](Self::view), beside the samples, which land in the caller's words:
-    /// a bound, never below the peak, which it equals on a pool of one worker.
+    /// a bound, never below the peak, which it equals on a pool of one worker when the
+    /// reader opened no other compressed image.
     ///
-    /// The reader keeps a compressed image's tile index, read when the handle was made,
-    /// and what its buffers grow to — a section's shape and tile rows, the rows and heap
-    /// cells of the tiles a section touches, a stream's copy of the whole data unit —
-    /// each to the largest read's, counted whole where it must grow past what it holds
-    /// now, as a buffer that grows holds its old block while it moves. The handle holds a
+    /// The reader keeps the tile index of each compressed image it opened, this one's
+    /// read when the handle was made, and what its buffers grow to — a section's shape
+    /// and tile rows, the rows and heap cells of the tiles a section touches, a stream's
+    /// copy of the whole data unit — each to the largest read's, counted whole where it
+    /// must grow past what it holds now, as a buffer that grows holds its old block while
+    /// it moves. The handle holds a
     /// compressed image's tile grid, and while a read runs its decode: a wave of
     /// narrowed tiles and a set of tile buffers for each worker that takes a run of the
     /// tiles. A plain image's view holds no more than its section's shape. The figure
@@ -544,7 +549,7 @@ impl<'r, S: Source> ImageReader<'r, S> {
             held.compacted.bytes::<u8>(),
             held.unit.bytes::<u8>(),
         ];
-        let kept = self.scratch.tile_index.heap_bytes()
+        let kept = self.scratch.tile_indexes.heap_bytes()
             + buffers.iter().map(|buffer| buffer.kept).sum::<usize>();
         let moving = buffers
             .iter()
@@ -593,7 +598,7 @@ impl<'r, S: Source> ImageReader<'r, S> {
         if let Some(tiled) = &self.tiled {
             return Ok(match region {
                 Region::All => {
-                    let index = &self.scratch.tile_index;
+                    let index = self.scratch.tile_indexes.get(self.hdu.data_offset);
                     let table = self.data.tiled_table(self.hdu, index, self.sum.as_mut())?;
                     Borrowed {
                         shape: &self.image.shape,
@@ -677,8 +682,8 @@ impl<'r, S: Source> ImageReader<'r, S> {
 /// The most heap a run of views holds, by owner, from [`ImageReader::view_bytes`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ViewBytes {
-    /// What the reader keeps once the handle is gone: a compressed image's tile index, and
-    /// what its buffers grew to.
+    /// What the reader keeps once the handle is gone: the tile index of each compressed
+    /// image it opened, and what its buffers grew to.
     pub kept: u64,
     /// What the handle holds beside, freed with it: a compressed image's tile grid, and
     /// the most one read's decode holds while it runs.
@@ -732,7 +737,7 @@ impl HeldBytes {
         region: Region<'_>,
     ) -> Result<()> {
         let schema = reader.hdu.container_schema()?;
-        let index = &reader.scratch.tile_index;
+        let index = reader.scratch.tile_indexes.get(reader.hdu.data_offset);
         let count = match region {
             Region::All => {
                 if reader.data.resident(0, 0).is_none() {
@@ -819,12 +824,12 @@ fn tiles<'a, S: Source>(
         section_shape,
         tile_rows,
         tile_coordinates,
-        tile_index,
+        tile_indexes,
         ..
     } = scratch;
     tiled.select(ranges, section_shape, tile_rows, tile_coordinates)?;
     let rows: &'a [usize] = tile_rows;
-    let index: &'a TileIndex = tile_index;
+    let index = tile_indexes.get(hdu.data_offset);
     Ok(Tiles {
         shape: section_shape,
         rows,

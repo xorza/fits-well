@@ -137,11 +137,14 @@ its doc comments show how each one works. Sources: the FITS 4.0 standard
 
 ## Compression
 
-- **A compressed image's tile index is read once, when its handle opens,** and kept by
-  the reader for the image it opened last. A section then fetches only its tiles' heap
-  cells, a whole read only the heap, and what a read holds is known before it starts.
-  Refused: the tile rows read with each section and the parameter columns parsed for
-  each read; and a bound from `PCOUNT` alone, loose by the tile count.
+- **A compressed image's tile index is read once, when its handle first opens,** and
+  the reader keeps the index of each image it opens. A section then fetches only its
+  tiles' heap cells, a whole read only the heap, and what a read holds is known before
+  it starts. Refused: the tile rows read with each section and the parameter columns
+  parsed for each read; a bound from `PCOUNT` alone, loose by the tile count; and one
+  index for the image opened last, which made a caller that plans an image's
+  extensions read the image's index again. The cost: a reader holds each index it read
+  until it is dropped, a row of a few bytes a tile, which `view_bytes` counts.
 - **A compressed table's tile layout is read once, when the file opens,** and a partial
   read of a table with no arrays fetches only its tiles' container rows. A table with
   arrays reads its whole container, as a tile's descriptors address the container heap.
