@@ -2,8 +2,8 @@
 
 Every item the crate exports, rendered as its declaration from rustdoc JSON
 (`cargo drive surface`), sorted by path. The surface is the union of a build with
-no features and one build per public feature; a tag names the builds an item needs or
-loses. `internals` is the crate's own test surface and is left out.
+no features and one build per public feature; a tag names the builds an item or a
+line needs or loses. `internals` is the crate's own test surface and is left out.
 
 ```text
 FitsEditor
@@ -118,7 +118,7 @@ FitsReader
             pub fn verify_checksum<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<ChecksumReport>
         impl<S: Debug> Debug for FitsReader<S>
 
-FitsWriter  [shape differs by feature]
+FitsWriter
     struct FitsWriter<W>
         impl<W: Write> FitsWriter<W>
             pub const fn new(sink: W) -> Self
@@ -130,6 +130,8 @@ FitsWriter  [shape differs by feature]
             pub fn write_table(&mut self, table: &Builder, header: Option<&Header>) -> Result<()>
             pub fn write_image(&mut self, image: Borrowed<'_>, header: Option<&Header>) -> Result<()>
             pub fn write_empty_primary(&mut self, header: Option<&Header>) -> Result<()>
+            pub fn write_compressed_image(&mut self, image: Borrowed<'_>, config: &CompressionConfig, header: Option<&Header>) -> Result<()>  [features: compression or parallel]
+            pub fn write_compressed_table(&mut self, table: &Builder, config: &CompressionConfig, header: Option<&Header>) -> Result<()>  [features: compression or parallel]
         impl<W: Write + Seek> FitsWriter<W>
             pub fn stream_image(&mut self, layout: Metadata<'_>, header: Option<&Header>) -> Result<ImageWriter<'_, W>>
         impl<W: Debug> Debug for FitsWriter<W>
