@@ -143,7 +143,8 @@ impl<'a> View<'a> {
     ///
     /// # Panics
     /// When `range` runs past the view.
-    pub(crate) fn slice(self, range: Range<usize>) -> Self {
+    #[must_use]
+    pub fn slice(self, range: Range<usize>) -> Self {
         match self {
             View::U8(values) => View::U8(&values[range]),
             View::I16(values) => View::I16(&values[range]),
