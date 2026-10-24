@@ -8,25 +8,17 @@ use crate::image_model::view::View;
 /// One of the six sample types that `BITPIX` names (§4.4.1.1), in host order: what a
 /// [`View`] and a [`Data`] hold. Sealed: exactly `u8`, `i16`, `i32`, `i64`, `f32` and
 /// `f64` implement it. A caller generic over the type takes `T: Sample` and converts
-/// with `View::from`, `Data::from` and `T::of`.
+/// with the std traits: `View::from`, `Data::from`, `<&[T]>::try_from(view)` and
+/// `Vec::<T>::try_from(data)`.
 pub trait Sample: sealed::Raw + Copy + Send + Sync + 'static {
     /// The `BITPIX` of the type.
     const BITPIX: Bitpix;
-
-    /// `samples`, viewed.
-    fn view(samples: &[Self]) -> View<'_>;
-
-    /// The samples of `view` when they are of this type.
-    fn of(view: View<'_>) -> Option<&[Self]>;
-
-    /// `samples`, owned.
-    fn data(samples: Vec<Self>) -> Data;
-
-    /// The samples of `data` when they are of this type, and `data` back otherwise.
-    fn of_data(data: Data) -> Result<Vec<Self>, Data>;
 }
 
 pub(crate) mod sealed {
+    use crate::image_model::data::Data;
+    use crate::image_model::view::View;
+
     /// The sample operations the crate's loops share.
     ///
     /// # Safety
@@ -40,6 +32,18 @@ pub(crate) mod sealed {
         reason = "sealed: outside code may use it, never name it"
     )]
     pub unsafe trait Raw: Copy + Default + PartialEq {
+        /// `samples`, viewed.
+        fn view(samples: &[Self]) -> View<'_>;
+
+        /// The samples of `view` when they are of this type.
+        fn of(view: View<'_>) -> Option<&[Self]>;
+
+        /// `samples`, owned.
+        fn data(samples: Vec<Self>) -> Data;
+
+        /// The samples of `data` when they are of this type, and `data` back otherwise.
+        fn of_data(data: Data) -> Result<Vec<Self>, Data>;
+
         /// The value as an `f64`: exact for every type, but for an `i64` past 2⁵³,
         /// which rounds to the nearest.
         fn to_f64(self) -> f64;
@@ -67,7 +71,11 @@ macro_rules! impl_sample {
     ($type:ty, $variant:ident, $to_f64:expr, $integer:expr) => {
         impl Sample for $type {
             const BITPIX: Bitpix = Bitpix::$variant;
+        }
 
+        // SAFETY: a primitive number: every bit pattern is a value, and its alignment
+        // is at most 8.
+        unsafe impl sealed::Raw for $type {
             fn view(samples: &[Self]) -> View<'_> {
                 View::$variant(samples)
             }
@@ -89,11 +97,7 @@ macro_rules! impl_sample {
                     other => Err(other),
                 }
             }
-        }
 
-        // SAFETY: a primitive number: every bit pattern is a value, and its alignment
-        // is at most 8.
-        unsafe impl sealed::Raw for $type {
             fn to_f64(self) -> f64 {
                 $to_f64(self)
             }
@@ -145,6 +149,15 @@ impl<'a, T: Sample> From<&'a [T]> for View<'a> {
 impl<T: Sample> From<Vec<T>> for Data {
     fn from(samples: Vec<T>) -> Self {
         T::data(samples)
+    }
+}
+
+/// The samples of `view` when they are of type `T`, and `view` back otherwise.
+impl<'a, T: Sample> TryFrom<View<'a>> for &'a [T] {
+    type Error = View<'a>;
+
+    fn try_from(view: View<'a>) -> Result<Self, View<'a>> {
+        T::of(view).ok_or(view)
     }
 }
 

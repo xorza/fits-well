@@ -57,6 +57,22 @@ impl TryFrom<&str> for HierarchName {
     }
 }
 
+impl TryFrom<&String> for HierarchName {
+    type Error = FitsError;
+
+    fn try_from(name: &String) -> Result<Self> {
+        Self::try_from(name.as_str())
+    }
+}
+
+impl TryFrom<String> for HierarchName {
+    type Error = FitsError;
+
+    fn try_from(name: String) -> Result<Self> {
+        Self::try_from(name.as_str())
+    }
+}
+
 impl PartialEq for HierarchName {
     fn eq(&self, other: &Self) -> bool {
         self.0.eq_ignore_ascii_case(&other.0)
@@ -98,7 +114,9 @@ mod tests {
         );
         // A token past 8 bytes, and characters outside the ESO token rule.
         for name in ["ESO INS OPTI-3 ID", "LONGKEYWORDNAME", "my.key #1"] {
-            assert_eq!(name.parse::<HierarchName>().unwrap().as_str(), name);
+            let parsed = name.parse::<HierarchName>().unwrap();
+            assert_eq!(parsed.as_str(), name);
+            assert_eq!(HierarchName::try_from(name.to_string()).unwrap(), parsed);
         }
         for bad in ["", "   ", "A=B", "ESO DÉT"] {
             assert!(

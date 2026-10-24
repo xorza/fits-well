@@ -87,11 +87,9 @@ solidity, convenience, canonical and idiomatic Rust (the API Guidelines, std).
   - `AsciiSchema` takes `Schema`'s shape: private fields, `row_count()`, `row_len()`,
     `columns`.
   - `AsciiColumn::byte_offset()` beside `width`, as `Column`.
-  - `Selection::column` errors with `ColumnNotFound`, as `Table::column`.
   - `const` on every `as_*` that compiles so.
   - All three name types implement `FromStr`, `TryFrom<&str>` and `TryFrom<String>`.
-- **Conversions as traits.** `TryFrom<i64> for Bitpix` (with `From<Bitpix> for i64`),
-  `TryFrom<u16> for DitherSeed`; `Display` for `Tform`, `Datetime`, `Scale` and `Unit`,
+- **Conversions as traits.** `TryFrom<i64> for Bitpix`; `Display` for `Tform`, `Datetime`, `Scale` and `Unit`,
   each the inverse of its `FromStr`, as `Keyword` already does, with a round-trip test
   for each.
 - **Namespaces.**
@@ -126,6 +124,11 @@ solidity, convenience, canonical and idiomatic Rust (the API Guidelines, std).
 - **No `FromIterator<Record>` for `Header`, and no `Extend<Record>`.** A record
   must render, so a `collect` would panic on caller data; `insert_record` refuses
   it. The `Extend` that panicked is removed.
+- **No `Result` from `Selection::column`.** It is a lookup in the columns the caller
+  selected, as `Schema::column_index` is, and no error case fits an index the table
+  holds and the selection does not.
+- **No `TryFrom<u16>` for `DitherSeed`.** `DitherSeed::fixed(17)` names the kind of
+  seed beside `DitherSeed::FROM_SAMPLES`, which `try_from(17)` would not.
 - **No change to `write_raw_hdu(header, raw)` argument order.** Its header is the
   HDU's own, not a template, which the other writes take last as an `Option`.
 
@@ -136,9 +139,7 @@ decisions, regenerates `.notes/API_SURFACE.md`, and lists the lumos call sites i
 moves.
 
 1. **Solid edges and convenience** (done).
-2. **Twins agree** (no decision): `AsciiSchema`, `AsciiColumn::byte_offset`,
-   `Selection::column`, name-type conversions, `TryFrom` for `Bitpix` and
-   `DitherSeed`, `Sample` methods sealed.
+2. **Twins agree** (done).
 3. **Errors by case**: `ColumnKindMismatch`, `HduKindMismatch`, `Projection` in the
    projection errors, enums for the string reasons.
 4. **Header names**: one name type for keyed methods; the commentary API.

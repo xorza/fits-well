@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::str;
+use std::str::FromStr;
 
 use crate::error::{FitsError, Result};
 
@@ -72,6 +73,30 @@ impl TryFrom<&str> for CommentaryName {
     }
 }
 
+impl TryFrom<&String> for CommentaryName {
+    type Error = FitsError;
+
+    fn try_from(name: &String) -> Result<Self> {
+        Self::try_from(name.as_str())
+    }
+}
+
+impl TryFrom<String> for CommentaryName {
+    type Error = FitsError;
+
+    fn try_from(name: String) -> Result<Self> {
+        Self::try_from(name.as_str())
+    }
+}
+
+impl FromStr for CommentaryName {
+    type Err = FitsError;
+
+    fn from_str(name: &str) -> Result<Self> {
+        Self::try_from(name)
+    }
+}
+
 impl fmt::Debug for CommentaryName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self.as_str(), f)
@@ -94,7 +119,10 @@ mod tests {
     #[test]
     fn a_name_is_up_to_eight_bytes_of_printable_ascii() {
         for name in ["", "COMMENT", "ab cd", "a=b/'x'", "CONTINUE"] {
-            assert_eq!(CommentaryName::try_from(name).unwrap().as_str(), name);
+            let parsed = CommentaryName::try_from(name).unwrap();
+            assert_eq!(parsed.as_str(), name);
+            assert_eq!(name.parse::<CommentaryName>().unwrap(), parsed);
+            assert_eq!(CommentaryName::try_from(name.to_string()).unwrap(), parsed);
         }
         for bad in ["ABCDEFGHI", "TRAIL ", "tab\t", "caf\u{e9}"] {
             assert!(

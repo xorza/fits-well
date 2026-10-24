@@ -9,7 +9,7 @@
 
 use std::fs::File;
 
-use fits_well::image::{Data, Image, Region, Scaling, View};
+use fits_well::image::{Data, Image, Scaling, View};
 use fits_well::{FitsReader, FitsWriter};
 use std::env;
 
@@ -53,9 +53,9 @@ fn main() -> fits_well::Result<()> {
     let metadata = image.metadata();
     println!("hdu 0: shape {:?}, {:?}", metadata.shape, metadata.bitpix);
     let mut physical: Vec<f64> = Vec::new();
-    image.physical_into(Region::All, &mut physical)?;
+    image.physical_into(.., &mut physical)?;
     println!("  physical {physical:?}");
-    if let Data::I16(pixels) = image.read(Region::All)?.into_samples() {
+    if let Data::I16(pixels) = image.read(..)?.into_samples() {
         println!("  pixels   {pixels:?}");
     }
 
@@ -68,7 +68,7 @@ fn main() -> fits_well::Result<()> {
         // The view borrows the reader + scratch, so use it before the next read. For
         // samples you need past the loop, use the owned `read` above.
         let mut image = reader.image(idx)?;
-        let view = image.view(Region::All, &mut scratch)?;
+        let view = image.view(.., &mut scratch)?;
         match view.samples() {
             View::I16(v) => println!("hdu {idx}: i16 view {v:?}"),
             View::F32(v) => println!("hdu {idx}: f32 view {v:?}"),

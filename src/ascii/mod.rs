@@ -115,8 +115,7 @@ pub struct AsciiColumn {
     pub name: Option<String>,
     pub unit: Option<String>,
     pub kind: AsciiKind,
-    /// 0-based byte offset of the field within a row (`TBCOLn − 1`).
-    pub start: usize,
+    pub(crate) byte_offset: usize,
     pub width: usize,
     /// Digits after the decimal point (`Fw.d`); 0 for non-floats.
     pub decimals: usize,
@@ -139,9 +138,8 @@ pub struct Ascii {
 /// counterpart of a binary table's [`Schema`](crate::table::Schema).
 #[derive(Debug, Clone)]
 pub struct AsciiSchema {
-    pub row_count: usize,
-    /// Byte width of one row (`NAXIS1`).
-    pub row_len: usize,
+    pub(crate) row_count: usize,
+    pub(crate) row_len: usize,
     /// Validated column descriptors in `TFIELDS` order.
     pub columns: Vec<AsciiColumn>,
 }
@@ -186,7 +184,7 @@ impl AsciiSchema {
                 name: labels.name,
                 unit: labels.unit,
                 kind: fmt.kind,
-                start,
+                byte_offset: start,
                 width: fmt.width,
                 decimals: fmt.decimals,
                 tscale: scaling.tscale,
@@ -206,6 +204,15 @@ impl AsciiSchema {
             row_len,
             columns,
         })
+    }
+
+    pub const fn row_count(&self) -> usize {
+        self.row_count
+    }
+
+    /// Byte width of one row (`NAXIS1`).
+    pub const fn row_len(&self) -> usize {
+        self.row_len
     }
 
     /// The index of the first column whose `TTYPEn` matches `name`, compared
@@ -269,7 +276,7 @@ impl Ascii {
     /// boundary. `from_data` rejected the non-ASCII bytes that could otherwise
     /// masquerade as a blank field and silently decode to 0 in a numeric column.
     fn field(&self, col: &AsciiColumn, r: usize) -> &str {
-        let start = r * self.schema.row_len + col.start;
+        let start = r * self.schema.row_len + col.byte_offset;
         &self.rows[start..start + col.width]
     }
 }
@@ -387,6 +394,11 @@ fn parse_float(field: &str, decimals: usize) -> Result<f64> {
 }
 
 impl AsciiColumn {
+    /// Byte offset of this column from the start of a row (`TBCOLn − 1`).
+    pub const fn byte_offset(&self) -> usize {
+        self.byte_offset
+    }
+
     /// `TSCALn`, 1 when absent: `physical = TZERO + TSCAL × field`.
     pub fn tscale(&self) -> Result<f64> {
         self.tscale.clone().map_err(|defect| defect.error())

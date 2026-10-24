@@ -38,7 +38,7 @@ With `default-features = false`, the only dependencies are `bitvec`,
 
 ```rust no_run
 use std::fs::File;
-use fits_well::image::{Data, Image, Region, Scaling};
+use fits_well::image::{Data, Image, Scaling};
 use fits_well::{FitsError, FitsReader, FitsWriter};
 
 fn main() -> Result<(), FitsError> {
@@ -53,8 +53,8 @@ fn main() -> Result<(), FitsError> {
     let mut image = reader.image(first)?;
     println!("{:?}", image.metadata().shape);
     let mut physical: Vec<f32> = Vec::new();
-    image.physical_into(Region::All, &mut physical)?; // BSCALE/BZERO applied, BLANK as NaN
-    if let Data::I16(pixels) = image.read(Region::All)?.into_samples() {
+    image.physical_into(.., &mut physical)?; // BSCALE/BZERO applied, BLANK as NaN
+    if let Data::I16(pixels) = image.read(..)?.into_samples() {
         println!("{pixels:?}"); // stored values, host-endian
     }
     Ok(())

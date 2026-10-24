@@ -46,7 +46,7 @@ impl ImageGeometry {
     /// The image a tiled-compression `BINTABLE` encodes, from its `ZNAXISn` and
     /// `ZBITPIX` (§10.1.1), its null value `BLANK`, else `ZBLANK` for an integer image.
     fn compressed(header: &Header) -> Result<Self> {
-        let bitpix = Bitpix::from_code(header.get_integer(keywords::ZBITPIX)?.ok_or(
+        let bitpix = Bitpix::try_from(header.get_integer(keywords::ZBITPIX)?.ok_or(
             FitsError::MissingKeyword {
                 keyword: keywords::ZBITPIX,
             },

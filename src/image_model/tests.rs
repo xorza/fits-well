@@ -158,11 +158,15 @@ fn decodes_big_endian_integers_and_floats() {
 fn samples_convert_by_type() {
     let view = View::from(&[1i16, -2][..]);
     assert_eq!(view, View::I16(&[1, -2]));
-    assert_eq!(i16::of(view), Some(&[1, -2][..]));
-    assert_eq!(i32::of(view), None);
+    assert_eq!(<&[i16]>::try_from(view), Ok(&[1, -2][..]));
+    assert_eq!(<&[i32]>::try_from(view), Err(view));
     assert_eq!(<f32 as Sample>::BITPIX, Bitpix::F32);
     assert_eq!(Data::from(vec![0.5f64]), Data::F64(vec![0.5]));
-    assert_eq!(f64::of_data(Data::F64(vec![0.5])), Ok(vec![0.5]));
+    assert_eq!(Vec::<f64>::try_from(Data::F64(vec![0.5])), Ok(vec![0.5]));
+    assert_eq!(
+        Vec::<f32>::try_from(Data::F64(vec![0.5])),
+        Err(Data::F64(vec![0.5]))
+    );
 }
 
 /// The affine is one fused multiply-add: `BSCALE × raw` of 134217729² = 2⁵⁴ + 2²⁸ + 1
