@@ -1,0 +1,5 @@
+# One checkout on every OS: text keeps LF, so a Windows runner builds the bytes Linux does.
+* text=auto eol=lf
+# FITS bytes, many with no NUL in their first 8000 bytes, which git would take for text and
+# convert on checkout.
+test_resources/** binary

@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# master keeps a status per commit; a pull request needs only its latest push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# No RUSTFLAGS: it would replace the x86-64-v3 flags of `.cargo/config.toml`.
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  # The driver's commit that the drive table's `version` takes, as a local install has it.
+  DRIVE_REV: 58666cd214bb85bc657f0d98369e7be33cb7164d
+
+jobs:
+  gate:
+    name: gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # GitHub hosts no x64 Windows 11 runner; Windows Server 2025 shares its kernel.
+        os: [ubuntu-24.04, macos-26, windows-2025]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Every hosted runner has rustup, so no action is needed to install the toolchain.
+      - run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Only master writes, so a pull request cannot evict what master reads.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-nextest
+      # The cache keeps `~/.cargo/bin`, so this builds the driver only when `DRIVE_REV` moves.
+      - run: cargo install --locked --git https://github.com/xorza/drive --rev "$DRIVE_REV"
+        shell: bash
+      # `--ci` formats nothing and runs past a failure: fmt --check, each lint set, the build
+      # that ships, the tests of each test set, rustdoc and the doc tests.
+      - run: cargo drive gate --ci
+      - run: cargo drive run examples
+
+  api-surface:
+    name: public API surface
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - run: cargo install --locked --git https://github.com/xorza/drive --rev "$DRIVE_REV"
+      # The committed surface must be what the tree renders: a change to the public API shows
+      # here as a diff until `.notes/API_SURFACE.md` is rendered again with it.
+      - run: cargo drive surface
+      - run: git diff --exit-code -- .notes/API_SURFACE.md
