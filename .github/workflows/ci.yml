@@ -21,7 +21,7 @@ env:
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
   # The driver's commit that the drive table's `version` takes, as a local install has it.
-  DRIVE_REV: 58666cd214bb85bc657f0d98369e7be33cb7164d
+  DRIVE_REV: 2c6fd5a1285ca493e404e0d28e0cce5a15fab2a2
 
 jobs:
   gate:
