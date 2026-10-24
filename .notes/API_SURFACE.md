@@ -374,7 +374,7 @@ header::FitsInteger
         impl TryFrom<&FitsInteger> for i64
 
 header::Header
-    struct Header: Clone, Debug, Default, Extend<Record>, PartialEq
+    struct Header: Clone, Debug, Default, PartialEq
         pub fn parse(bytes: &[u8]) -> Result<Self>
         pub fn repairs(&self) -> &[Repair]
         pub fn get(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<&Value>>
@@ -434,7 +434,6 @@ header::Record
         Hierarch { name: HierarchName, value: Value, comment: Option<String> }
         Malformed { name: Option<RecordName>, raw: Box<[u8; 80]>, defect: Defect }
         pub fn view(&self) -> RecordView<'_>
-        impl Extend<Record> for Header
 
 header::RecordName
     enum RecordName: Clone, Debug, Display, Eq, From<Keyword>, Hash, PartialEq
@@ -910,12 +909,12 @@ image::Data
         pub const fn len(&self) -> usize
         pub const fn is_empty(&self) -> bool
         pub const fn view(&self) -> View<'_>
-        pub fn as_u8(&self) -> Option<&[u8]>
-        pub fn as_i16(&self) -> Option<&[i16]>
-        pub fn as_i32(&self) -> Option<&[i32]>
-        pub fn as_i64(&self) -> Option<&[i64]>
-        pub fn as_f32(&self) -> Option<&[f32]>
-        pub fn as_f64(&self) -> Option<&[f64]>
+        pub const fn as_u8(&self) -> Option<&[u8]>
+        pub const fn as_i16(&self) -> Option<&[i16]>
+        pub const fn as_i32(&self) -> Option<&[i32]>
+        pub const fn as_i64(&self) -> Option<&[i64]>
+        pub const fn as_f32(&self) -> Option<&[f32]>
+        pub const fn as_f64(&self) -> Option<&[f64]>
         impl<T: Sample> From<Vec<T>> for Data
         impl<T: Sample> TryFrom<Data> for Vec<T>
 
@@ -944,7 +943,11 @@ image::Image
     struct Image: Clone, Debug
         pub fn new(shape: impl Into<Vec<usize>>, samples: impl Into<Data>, scaling: Scaling) -> Result<Self>
         pub fn view(&self) -> Borrowed<'_>
+        pub const fn shape(&self) -> &[usize]
+        pub const fn samples(&self) -> &Data
+        pub const fn scaling(&self) -> Scaling
         pub fn into_samples(self) -> Data
+        pub fn into_parts(self) -> Parts
         pub fn from_u16(shape: impl Into<Vec<usize>>, data: &[u16]) -> Result<Self>
         pub fn from_u32(shape: impl Into<Vec<usize>>, data: &[u32]) -> Result<Self>
         pub fn from_u64(shape: impl Into<Vec<usize>>, data: &[u64]) -> Result<Self>
@@ -957,6 +960,12 @@ image::Metadata
         pub scaling: Scaling
         pub fn sample_type(&self) -> SampleType
 
+image::Parts
+    struct Parts: Clone, Debug
+        pub shape: Vec<usize>
+        pub samples: Data
+        pub scaling: Scaling
+
 image::PhysicalSample
     trait PhysicalSample: Narrow
 
@@ -967,7 +976,7 @@ image::Quantization  [features: compression or parallel]
         pub fn absolute(step: f64, dither: Dither) -> Result<Self>
 
 image::Region
-    enum Region<'a>: Clone, Copy, Debug, Eq, From<&'a [Range<usize>]>, PartialEq
+    enum Region<'a>: Clone, Copy, Debug, Eq, From<&'a [Range<usize>]>, From<RangeFull>, PartialEq
         All
         Section(&'a [Range<usize>])
         impl<'a, const N: usize> From<&'a [Range<usize>; N]> for Region<'a>
@@ -1048,12 +1057,12 @@ image::View
         pub const fn bitpix(&self) -> Bitpix
         pub const fn len(&self) -> usize
         pub const fn is_empty(&self) -> bool
-        pub fn as_u8(&self) -> Option<&'a [u8]>
-        pub fn as_i16(&self) -> Option<&'a [i16]>
-        pub fn as_i32(&self) -> Option<&'a [i32]>
-        pub fn as_i64(&self) -> Option<&'a [i64]>
-        pub fn as_f32(&self) -> Option<&'a [f32]>
-        pub fn as_f64(&self) -> Option<&'a [f64]>
+        pub const fn as_u8(&self) -> Option<&'a [u8]>
+        pub const fn as_i16(&self) -> Option<&'a [i16]>
+        pub const fn as_i32(&self) -> Option<&'a [i32]>
+        pub const fn as_i64(&self) -> Option<&'a [i64]>
+        pub const fn as_f32(&self) -> Option<&'a [f32]>
+        pub const fn as_f64(&self) -> Option<&'a [f64]>
         pub fn to_data(&self) -> Data
         impl<'a, T: Sample> From<&'a [T]> for View<'a>
 
@@ -1091,7 +1100,7 @@ io::Hdu
         pub data_bytes: u64
         pub fn is_image(&self) -> bool
         pub fn matches<'a>(&self, selector: impl Into<HduSelector<'a>>) -> Result<bool>
-        pub fn extname(&self) -> Option<&str>
+        pub fn extname(&self) -> Result<Option<&str>>
         pub fn extver(&self) -> Result<i64>
         pub fn extlevel(&self) -> Result<i64>
         pub const fn padded_data_bytes(&self) -> u64
@@ -1298,17 +1307,17 @@ table::ColumnData
         pub fn len(&self) -> usize
         pub fn is_empty(&self) -> bool
         pub fn view(&self) -> ColumnView<'_>
-        pub fn as_logical(&self) -> Option<&[Option<bool>]>
+        pub const fn as_logical(&self) -> Option<&[Option<bool>]>
         pub fn as_bit(&self) -> Option<&BitSlice<u8, Msb0>>
-        pub fn as_u8(&self) -> Option<&[u8]>
-        pub fn as_i16(&self) -> Option<&[i16]>
-        pub fn as_i32(&self) -> Option<&[i32]>
-        pub fn as_i64(&self) -> Option<&[i64]>
-        pub fn as_f32(&self) -> Option<&[f32]>
-        pub fn as_f64(&self) -> Option<&[f64]>
-        pub fn as_complex_f32(&self) -> Option<&[Complex<f32>]>
-        pub fn as_complex_f64(&self) -> Option<&[Complex<f64>]>
-        pub fn as_character(&self) -> Option<&[u8]>
+        pub const fn as_u8(&self) -> Option<&[u8]>
+        pub const fn as_i16(&self) -> Option<&[i16]>
+        pub const fn as_i32(&self) -> Option<&[i32]>
+        pub const fn as_i64(&self) -> Option<&[i64]>
+        pub const fn as_f32(&self) -> Option<&[f32]>
+        pub const fn as_f64(&self) -> Option<&[f64]>
+        pub const fn as_complex_f32(&self) -> Option<&[Complex<f32>]>
+        pub const fn as_complex_f64(&self) -> Option<&[Complex<f64>]>
+        pub const fn as_character(&self) -> Option<&[u8]>
         impl TryFrom<ColumnData> for BitVec<u8, Msb0>
         impl TryFrom<ColumnData> for Vec<Complex<f32>>
         impl TryFrom<ColumnData> for Vec<Complex<f64>>
@@ -1611,7 +1620,7 @@ wcs::Axis
 
 wcs::AxisWorld
     struct AxisWorld<'a>: Clone, Copy, Debug, PartialEq
-        pub cunit: &'a str
+        pub unit: &'a str
         pub value: f64
 
 wcs::CelestialFrame
@@ -1714,7 +1723,7 @@ wcs::Wcs
         pub fn bin(&self, factors: &[usize]) -> Result<Self>
         pub fn write_into(&self, header: &mut Header, alt: impl TryInto<Alternate, Error: Into<FitsError>>) -> Result<()>
         pub fn metadata(&self) -> Metadata<'_>
-        pub fn world_unit(&self, axis: usize) -> &str
+        pub fn world_unit(&self, axis: usize) -> Result<&str>
         pub fn axis_world(&self, axis: usize, pixel: &[f64]) -> Result<AxisWorld<'_>>
         pub fn from_pixel_list(header: &Header, columns: &[usize], alt: impl TryInto<Alternate, Error: Into<FitsError>>) -> Result<Self>
         pub fn from_array_column(header: &Header, column: usize, alt: impl TryInto<Alternate, Error: Into<FitsError>>) -> Result<Self>

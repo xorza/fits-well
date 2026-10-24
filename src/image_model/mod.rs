@@ -142,6 +142,14 @@ pub struct Image {
     pub(crate) scaling: Scaling,
 }
 
+/// An image taken apart: its axis lengths, its stored samples and their scaling.
+#[derive(Debug, Clone)]
+pub struct Parts {
+    pub shape: Vec<usize>,
+    pub samples: Data,
+    pub scaling: Scaling,
+}
+
 /// An immutable view of an image's geometry and stored representation metadata.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Metadata<'a> {
@@ -201,9 +209,38 @@ impl Image {
         }
     }
 
+    /// The axis lengths, fastest axis first.
+    pub const fn shape(&self) -> &[usize] {
+        self.shape.as_slice()
+    }
+
+    /// The host-endian stored samples.
+    pub const fn samples(&self) -> &Data {
+        &self.samples
+    }
+
+    /// The map from the stored samples to physical values.
+    pub const fn scaling(&self) -> Scaling {
+        self.scaling
+    }
+
     /// Consume the image and return its host-endian stored samples.
     pub fn into_samples(self) -> Data {
         self.samples
+    }
+
+    /// Consume the image and return its parts, with no copy of the samples.
+    pub fn into_parts(self) -> Parts {
+        let Self {
+            shape,
+            samples,
+            scaling,
+        } = self;
+        Parts {
+            shape,
+            samples,
+            scaling,
+        }
     }
 
     /// Build an image storing a `u16` buffer via the FITS unsigned convention

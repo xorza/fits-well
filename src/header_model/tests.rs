@@ -810,7 +810,11 @@ fn insert_record_is_the_inverse_of_remove_at() {
     assert_eq!(h.get_integer("NAXIS1").unwrap(), Some(512));
 
     let mut rebuilt = Header::new();
-    rebuilt.extend((0..original.len()).map(|_| h.remove_at(0).unwrap()));
+    for index in 0..original.len() {
+        rebuilt
+            .insert_record(index, h.remove_at(0).unwrap())
+            .unwrap();
+    }
     assert_eq!(rebuilt, original);
     assert_eq!(rebuilt.get_text("OBJECT").unwrap(), Some("Cygnus X-1"));
     assert!(matches!(

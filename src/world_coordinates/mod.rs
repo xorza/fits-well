@@ -89,7 +89,7 @@ pub struct Metadata<'a> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AxisWorld<'a> {
     /// The unit of `value`, as [`Wcs::world_unit`] gives it.
-    pub cunit: &'a str,
+    pub unit: &'a str,
     pub value: f64,
 }
 
@@ -495,11 +495,17 @@ impl Wcs {
 
     /// The unit the world coordinates of the zero-based `axis` come out in: degrees for a
     /// celestial axis, the Table-25 default unit for a spectral one, also where a table
-    /// holds its coordinates, and the declared `CUNITi` for any other.
-    pub fn world_unit(&self, axis: usize) -> &str {
-        self.plans[axis]
-            .world_unit
-            .unwrap_or(&self.axes[axis].cunit)
+    /// holds its coordinates, and the declared `CUNITi` for any other. Errors with
+    /// [`FitsError::IndexOutOfBounds`] past the last axis.
+    pub fn world_unit(&self, axis: usize) -> Result<&str> {
+        let (Some(plan), Some(declared)) = (self.plans.get(axis), self.axes.get(axis)) else {
+            return Err(FitsError::IndexOutOfBounds {
+                indexed: Indexed::WcsAxis,
+                index: axis.saturating_add(1),
+                len: self.axes.len(),
+            });
+        };
+        Ok(plan.world_unit.unwrap_or(&declared.cunit))
     }
 
     /// The world coordinate of the zero-based `axis` at `pixel`, with the unit it is in.
@@ -507,14 +513,7 @@ impl Wcs {
     /// transform another axis lacks does not stop it. A time axis's value goes on to
     /// [`time::Axis::mjd`](crate::time::Axis::mjd).
     pub fn axis_world(&self, axis: usize, pixel: &[f64]) -> Result<AxisWorld<'_>> {
-        let naxis = self.axes.len();
-        if axis >= naxis {
-            return Err(FitsError::IndexOutOfBounds {
-                indexed: Indexed::WcsAxis,
-                index: axis.saturating_add(1),
-                len: naxis,
-            });
-        }
+        let unit = self.world_unit(axis)?;
         self.require_point(pixel)?;
         if self.unsupported_axes.contains(&axis) {
             return Err(FitsError::UnsupportedWcsTransform { axes: vec![axis] });
@@ -539,10 +538,7 @@ impl Wcs {
             }
             AxisKind::Other => plan.transform.to_world(intermediate(axis), axis)?,
         };
-        Ok(AxisWorld {
-            cunit: self.world_unit(axis),
-            value,
-        })
+        Ok(AxisWorld { unit, value })
     }
 
     /// Build a WCS for a binary-table **pixel list** (event list, §8.5, Table 22):

@@ -106,9 +106,11 @@ and the dated measurements in `docs/research/`.
   so a caller does not compare `EXTNAME` by hand. A name no HDU carries is
   `HduNotFound`, and `images()` iterates the image HDUs as `&Hdu`, as `hdus()`
   gives them. A fact about an HDU is read from the `Hdu` that `hdu()` gives: its
-  `index`, its `table_schema()`. Refused: `hdu_index` and a reader-level
-  `table_schema`, second ways to the same fact; an `Option` result for a missing
-  name; and `first_image()`, which is `images().next()`.
+  `index`, its `table_schema()`. `extname()` errors for an `EXTNAME` that is no
+  text, as `extver()` does, and a lookup passes over that HDU. Refused: `hdu_index`
+  and a reader-level `table_schema`, second ways to the same fact; an `Option`
+  result for a missing name; `first_image()`, which is `images().next()`; and an
+  `extname()` that read a bad `EXTNAME` as none.
 - **`Hdu::is_image` classifies by rank alone.** An HDU is an image when it is a
   primary array, an image extension or a tiled-compressed image whose `NAXIS`
   (`ZNAXIS`) is above 0. Refused: the kind alone, which counted an image
@@ -488,7 +490,9 @@ and the dated measurements in `docs/research/`.
   axis, so a caller loops over its points with one buffer and a point makes no
   allocation unless an axis is `-TAB`. Refused: a new `Vec` for each point, and
   a batch API, which the loop makes unnecessary. wcslib also writes into the
-  caller's arrays. Source: `docs/research/2026-10-24-wcs-into-slice.md`.
+  caller's arrays. An axis past the last is `IndexOutOfBounds` for every per-axis
+  call, `world_unit` and `axis_world` alike. Source:
+  `docs/research/2026-10-24-wcs-into-slice.md`.
 - **The inverse linear step solves with the matrix's LU factors,** in place in
   the output slice. Refused: the explicit inverse, whose product needs its input
   kept apart from its output, so a buffer for each point. Solving is as accurate
@@ -598,7 +602,9 @@ and the dated measurements in `docs/research/`.
   each write.
 - **An owned image is built as the borrowed one is,** from a shape, samples and a
   `Scaling` (`Scaling::IDENTITY` for none): `Image::new` mirrors `Borrowed::new`.
-  Refused: `new` and `new_scaled`, two constructors where one takes the scaling.
+  `shape()`, `samples()` and `scaling()` read it, `into_parts()` takes it apart into
+  `image::Parts`, and a read of the whole image takes `..` as std ranges do. Refused:
+  `new` and `new_scaled`, two constructors where one takes the scaling.
 - **The unsigned constructors stay four.** `Image::from_u16`, `from_u32`,
   `from_u64` and `from_i8` take any shape `Image::new` takes. Refused: one
   `from_unsigned` over a borrowed view; the write converts the samples to signed
@@ -747,7 +753,9 @@ and the dated measurements in `docs/research/`.
   the render that fills the blocks.
 - **Each edit maintains the header's indexes.** `append` adds one entry, and an
   insert or a removal shifts the positions after it; only a bulk edit rebuilds them.
-  Refused: a rebuild on every insert, which made a header built by `append` O(n²).
+  Refused: a rebuild on every insert, which made a header built by `append` O(n²);
+  and `Extend<Record>` or `FromIterator<Record>`, which must panic on a record that
+  does not render, where `insert_record` refuses it.
 
 ## Scope
 

@@ -24,11 +24,11 @@ use crate::header_model::record::RecordView;
 use crate::header_model::record_name::RecordName;
 use crate::header_model::repair::{Repair, RepairKind};
 use crate::header_model::{Header, Signing, Space};
-use crate::image_model::Image;
 use crate::image_model::data::Data;
 use crate::image_model::region::Region;
 use crate::image_model::scaling::Scaling;
 use crate::image_model::view::View;
+use crate::image_model::{Image, Parts};
 use crate::internals::cards;
 use crate::internals::cards::{assert_cards, fits_file, from_card_lines, records};
 use crate::internals::fixture::Fixture;
@@ -875,7 +875,10 @@ fn hdu_selectors_find_hdus_by_index_name_version_and_level() {
     // An `EXTNAME` that is no text names nothing, not even the primary's default, and
     // fails no lookup.
     let malformed = FitsReader::from_bytes(&bytes).unwrap();
-    assert_eq!(malformed.hdus()[0].extname(), None);
+    assert!(matches!(
+        malformed.hdus()[0].extname(),
+        Err(FitsError::ValueTypeMismatch { .. })
+    ));
     assert!(matches!(
         malformed.hdu("SCI"),
         Err(FitsError::HduNotFound { .. })
@@ -903,7 +906,7 @@ fn hdu_selectors_find_hdus_by_index_name_version_and_level() {
     let hdu = &reader.hdus()[index];
     assert_eq!(
         (
-            hdu.extname(),
+            hdu.extname().unwrap(),
             hdu.extver().unwrap(),
             hdu.extlevel().unwrap()
         ),
@@ -921,14 +924,20 @@ fn hdu_selectors_find_hdus_by_index_name_version_and_level() {
         read_whole(&mut reader, index).samples,
         Data::I16(vec![10, 20, 30])
     );
+    // `..` reads the whole image, and its parts come apart as the accessors give them.
+    let image = reader.image(("SCI", 2)).unwrap().read(..).unwrap();
     assert_eq!(
-        reader
-            .image(("SCI", 2))
-            .unwrap()
-            .read(Region::All)
-            .unwrap()
-            .into_samples(),
-        Data::I16(vec![10, 20, 30])
+        (image.shape(), image.samples(), image.scaling()),
+        (&[3][..], &Data::I16(vec![10, 20, 30]), Scaling::IDENTITY)
+    );
+    let Parts {
+        shape,
+        samples,
+        scaling,
+    } = image.into_parts();
+    assert_eq!(
+        (shape, samples, scaling),
+        (vec![3], Data::I16(vec![10, 20, 30]), Scaling::IDENTITY)
     );
     assert_eq!(reader.hdus()[0].kind, HduKind::Primary);
     assert!(matches!(

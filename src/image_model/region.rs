@@ -1,6 +1,6 @@
 //! [`Region`]: the part of an image a read covers.
 
-use std::ops::Range;
+use std::ops::{Range, RangeFull};
 
 use crate::error::{FitsError, Result};
 
@@ -10,6 +10,13 @@ use crate::error::{FitsError, Result};
 pub enum Region<'a> {
     All,
     Section(&'a [Range<usize>]),
+}
+
+/// `..`, the whole image, as a range of every element is in std.
+impl From<RangeFull> for Region<'_> {
+    fn from(_: RangeFull) -> Self {
+        Self::All
+    }
 }
 
 impl<'a> From<&'a [Range<usize>]> for Region<'a> {

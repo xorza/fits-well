@@ -999,21 +999,6 @@ impl PartialEq for Header {
     }
 }
 
-/// Every record of `iter`, appended as [`Header::insert_record`] appends one.
-///
-/// # Panics
-/// When a record is not malformed and does not render: an invalid value or name, which
-/// a record taken from a header never has.
-impl Extend<Record> for Header {
-    fn extend<I: IntoIterator<Item = Record>>(&mut self, iter: I) {
-        for record in iter {
-            let len = self.records.len();
-            self.insert_record(len, record)
-                .expect("an appended record renders");
-        }
-    }
-}
-
 /// The keyword `name` names: a [`Keyword`] as it is, a `&str` checked into one.
 fn checked(name: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Keyword> {
     name.try_into().map_err(Into::into)

@@ -41,27 +41,27 @@ impl Data {
         }
     }
 
-    pub fn as_u8(&self) -> Option<&[u8]> {
+    pub const fn as_u8(&self) -> Option<&[u8]> {
         self.view().as_u8()
     }
 
-    pub fn as_i16(&self) -> Option<&[i16]> {
+    pub const fn as_i16(&self) -> Option<&[i16]> {
         self.view().as_i16()
     }
 
-    pub fn as_i32(&self) -> Option<&[i32]> {
+    pub const fn as_i32(&self) -> Option<&[i32]> {
         self.view().as_i32()
     }
 
-    pub fn as_i64(&self) -> Option<&[i64]> {
+    pub const fn as_i64(&self) -> Option<&[i64]> {
         self.view().as_i64()
     }
 
-    pub fn as_f32(&self) -> Option<&[f32]> {
+    pub const fn as_f32(&self) -> Option<&[f32]> {
         self.view().as_f32()
     }
 
-    pub fn as_f64(&self) -> Option<&[f64]> {
+    pub const fn as_f64(&self) -> Option<&[f64]> {
         self.view().as_f64()
     }
 }

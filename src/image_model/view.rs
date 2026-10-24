@@ -5,7 +5,6 @@ use crate::bitpix::Bitpix;
 use crate::error::Result;
 use crate::image_model::data::Data;
 use crate::image_model::physical_sample::PhysicalSample;
-use crate::image_model::sample::Sample;
 use crate::image_model::sample::sealed::Raw;
 use crate::image_model::sample_type::SampleType;
 use crate::image_model::scaling::Scaling;
@@ -155,28 +154,46 @@ impl<'a> View<'a> {
         }
     }
 
-    pub fn as_u8(&self) -> Option<&'a [u8]> {
-        u8::of(*self)
+    pub const fn as_u8(&self) -> Option<&'a [u8]> {
+        match *self {
+            Self::U8(values) => Some(values),
+            _ => None,
+        }
     }
 
-    pub fn as_i16(&self) -> Option<&'a [i16]> {
-        i16::of(*self)
+    pub const fn as_i16(&self) -> Option<&'a [i16]> {
+        match *self {
+            Self::I16(values) => Some(values),
+            _ => None,
+        }
     }
 
-    pub fn as_i32(&self) -> Option<&'a [i32]> {
-        i32::of(*self)
+    pub const fn as_i32(&self) -> Option<&'a [i32]> {
+        match *self {
+            Self::I32(values) => Some(values),
+            _ => None,
+        }
     }
 
-    pub fn as_i64(&self) -> Option<&'a [i64]> {
-        i64::of(*self)
+    pub const fn as_i64(&self) -> Option<&'a [i64]> {
+        match *self {
+            Self::I64(values) => Some(values),
+            _ => None,
+        }
     }
 
-    pub fn as_f32(&self) -> Option<&'a [f32]> {
-        f32::of(*self)
+    pub const fn as_f32(&self) -> Option<&'a [f32]> {
+        match *self {
+            Self::F32(values) => Some(values),
+            _ => None,
+        }
     }
 
-    pub fn as_f64(&self) -> Option<&'a [f64]> {
-        f64::of(*self)
+    pub const fn as_f64(&self) -> Option<&'a [f64]> {
+        match *self {
+            Self::F64(values) => Some(values),
+            _ => None,
+        }
     }
 
     /// Append the samples to `out` in big-endian order — the inverse of a read's
