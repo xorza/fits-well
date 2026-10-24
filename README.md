@@ -1,5 +1,6 @@
 # fits-well
 
+[![CI](https://github.com/xorza/fits-well/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/xorza/fits-well/actions/workflows/ci.yml?query=branch%3Amaster)
 [![crates.io](https://img.shields.io/crates/v/fits-well.svg)](https://crates.io/crates/fits-well)
 [![docs.rs](https://img.shields.io/docsrs/fits-well)](https://docs.rs/fits-well)
 [![license](https://img.shields.io/crates/l/fits-well.svg)](https://github.com/xorza/fits-well#license)
