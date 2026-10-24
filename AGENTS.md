@@ -15,8 +15,8 @@ A reader and writer for **FITS**, the standard file format of astronomy.
   format allows, one pass for the byte swap and the scaling, and parallel codecs.
   A section or row read touches only the data it needs.
 - **Efficient memory.** The caller owns the large buffers and reuses them across
-  reads; the reader keeps nothing image-sized. A hot path allocates nothing per
-  row, tile or point.
+  reads; the reader keeps staging no larger than its largest read. A hot path
+  allocates nothing per row, tile or point.
 - **Safe on untrusted files.** Every size, count and offset from a file is checked
   before use, so a bad file is an error, never a panic or an oversized allocation.
 - **Interoperable.** Files read and write as cfitsio, fpack and astropy read and
