@@ -1,11 +1,13 @@
-use crate::error::FitsError;
-use crate::error::TimeConversion;
-use crate::error::UnitKind;
+use crate::fits_error::FitsError;
+use crate::fits_error::TimeConversion;
+use crate::fits_error::UnitKind;
 use crate::header_model::{Header, keywords};
 use crate::internals::cards::header_of;
 
 use crate::time_coordinates::frame::Frame;
+use crate::time_coordinates::mjd::Mjd;
 use crate::time_coordinates::unit::Unit;
+use crate::unit;
 use crate::unit::SECONDS_PER_DAY;
 
 #[test]
@@ -51,10 +53,10 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
     );
 
     // A year unit keeps its multiple; its length waits for the frame's epoch and scale.
-    assert_eq!(tropical.unit, Unit::TropicalYears(1.0));
+    assert_eq!(tropical.unit, "ta".parse().unwrap());
     assert_eq!(
-        "10**2 Ba".parse::<Unit>().unwrap(),
-        Unit::BesselianYears(100.0)
+        "10+2 Ba".parse::<Unit>().unwrap(),
+        "10**2 Ba".parse::<Unit>().unwrap()
     );
 
     let mut invalid = Header::new();
@@ -85,4 +87,57 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
             Err(FitsError::ExternalTimeDataRequired { conversion }) if conversion == needs
         ));
     }
+}
+
+/// A unit prints as it is spelled, its multiplier as `10**k`, and parses back to the same
+/// unit of the same length: every base of the time table with each prefix it takes, and
+/// each year, at three multipliers.
+#[test]
+fn a_unit_prints_as_it_is_spelled() {
+    for (text, printed) in [
+        ("s", "s"),
+        ("ks", "ks"),
+        ("Ma", "Ma"),
+        ("10**3 s", "10**3 s"),
+        ("(10**12) s", "10**12 s"),
+        ("10^-3 d", "10**-3 d"),
+        ("10+2 Ba", "10**2 Ba"),
+        ("10**0 min", "min"),
+        ("ta", "ta"),
+    ] {
+        assert_eq!(text.parse::<Unit>().unwrap().to_string(), printed, "{text}");
+    }
+    let prefixes = [
+        "", "da", "d", "c", "m", "u", "n", "p", "f", "a", "z", "y", "h", "k", "M", "G", "T", "P",
+        "E", "Z", "Y",
+    ];
+    let tdb = "TDB".parse().unwrap();
+    let tt = "TT".parse().unwrap();
+    let epoch = Mjd::new(51_544, 0.5);
+    let mut spellings = 0;
+    for multiplier in ["", "10**3 ", "10**-3 "] {
+        let symbols = unit::TIME
+            .iter()
+            .flat_map(|base| prefixes.map(|prefix| format!("{prefix}{}", base.symbol)))
+            .chain(["ta".to_string(), "Ba".to_string()]);
+        for symbol in symbols {
+            let text = format!("{multiplier}{symbol}");
+            let Ok(unit) = text.parse::<Unit>() else {
+                continue;
+            };
+            spellings += 1;
+            assert_eq!(unit.to_string(), text);
+            let reread = text.parse::<Unit>().unwrap();
+            assert_eq!(reread, unit, "{text}");
+            let scale = if symbol == "Ba" { &tt } else { &tdb };
+            assert_eq!(
+                reread.seconds(epoch, scale).unwrap(),
+                unit.seconds(epoch, scale).unwrap(),
+                "{text}"
+            );
+        }
+    }
+    // Per multiplier: `s` with all 20 prefixes, `a` and `yr` with the 10 multiples, the
+    // 7 bases bare, and the two years: 49.
+    assert_eq!(spellings, 3 * 49);
 }

@@ -1,4 +1,4 @@
-use crate::error::ExpectedHdu;
+use crate::fits_error::ExpectedHdu;
 use crate::groups::*;
 use crate::hdu::HduKind;
 use crate::header_model::record_name::RecordName;

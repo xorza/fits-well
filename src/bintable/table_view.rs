@@ -11,8 +11,8 @@ use crate::bintable::vla_column::VlaColumn;
 #[cfg(feature = "compression")]
 use crate::column;
 use crate::column::ColumnSelector;
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 
 /// A binary table's columns and extent over a data unit it borrows — the reader's
 /// in-place source bytes, a reused selection buffer, or an owned [`Table`]'s

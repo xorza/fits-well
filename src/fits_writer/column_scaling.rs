@@ -1,6 +1,6 @@
 //! [`ColumnScaling`]: the `TSCALn` and `TZEROn` a written table column declares.
 
-use crate::error::{FitsError, Result};
+use crate::fits_error::{FitsError, Result};
 use crate::header_model::keywords;
 
 /// The `TSCALn` and `TZEROn` a written column declares (§7.2.2, §7.3.2): its cells hold

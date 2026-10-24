@@ -1,7 +1,7 @@
 //! The native→celestial rotation: the celestial pole and the spherical rotation
 //! through it (Calabretta & Greisen 2002, §2).
 
-use crate::error::{FitsError, PoleDefect, Result};
+use crate::fits_error::{FitsError, PoleDefect, Result};
 use crate::world_coordinates::angle;
 use crate::world_coordinates::angle::R2D;
 use crate::world_coordinates::native_rotation::CelestialCoordinate;
@@ -142,7 +142,7 @@ impl CelestialPole {
 
 #[cfg(test)]
 mod tests {
-    use crate::error::{FitsError, PoleDefect};
+    use crate::fits_error::{FitsError, PoleDefect};
     use crate::world_coordinates::celestial_pole::{CelestialPole, Fiducial};
     use crate::world_coordinates::native_rotation::CelestialCoordinate;
 

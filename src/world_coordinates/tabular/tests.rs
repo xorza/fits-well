@@ -1,6 +1,6 @@
 use crate::alternate::Alternate;
-use crate::error::FitsError;
-use crate::error::{TabularDefect, WcsDefect};
+use crate::fits_error::FitsError;
+use crate::fits_error::{TabularDefect, WcsDefect};
 use crate::header_model::{Header, keywords};
 use crate::internals::tolerance::Tolerance;
 use crate::internals::wcs_header::assert_round_trip;

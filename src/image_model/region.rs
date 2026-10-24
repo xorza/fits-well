@@ -2,7 +2,7 @@
 
 use std::ops::{Range, RangeFull};
 
-use crate::error::{FitsError, Result};
+use crate::fits_error::{FitsError, Result};
 
 /// The part of an image a read covers: all of it, or one zero-based, half-open range
 /// per axis, fastest axis first.

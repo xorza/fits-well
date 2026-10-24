@@ -1,5 +1,5 @@
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 use crate::image_model::physical_sample::PhysicalSample;
 use crate::image_model::scaling::Scaling;
 use crate::image_model::view::View;

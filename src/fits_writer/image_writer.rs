@@ -4,7 +4,7 @@ use std::io::{Seek, Write};
 
 use crate::bitpix::Bitpix;
 use crate::checksum::running::Running;
-use crate::error::{FitsError, Result, SizeUnit};
+use crate::fits_error::{FitsError, Result, SizeUnit};
 use crate::fits_writer::{Body, FitsWriter, StreamHeader, merge_header_template};
 use crate::hdu::HduPosition;
 use crate::hdu::prologue::{Opening, Prologue, Xtension};

@@ -15,7 +15,7 @@ pub(crate) enum Prefixes {
 
 /// One base unit of a kind of quantity: its symbol, its size in the kind's reference unit,
 /// and the SI prefixes it takes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct BaseUnit {
     pub(crate) symbol: &'static str,
     pub(crate) scale: f64,
@@ -71,53 +71,129 @@ pub(crate) const ENERGY: &[BaseUnit] = &[
 ];
 
 /// `unit` — `[multiplier] [prefix] base` — as a multiple of the reference unit of the
+/// kind `bases` tabulates, or `None` when it names no unit of that kind.
+pub(crate) fn resolve(unit: &str, bases: &'static [BaseUnit]) -> Option<f64> {
+    split(unit, bases).map(UnitParts::scale)
+}
+
+/// The parts of `unit` — `[multiplier] [prefix] base` — against the base units of the
 /// kind `bases` tabulates, or `None` when it names no unit of that kind. A symbol that is
 /// itself a base unit (`min`, `mas`, `cy`) is never read as a prefixed one.
-pub(crate) fn resolve(unit: &str, bases: &[BaseUnit]) -> Option<f64> {
+pub(crate) fn split(unit: &str, bases: &'static [BaseUnit]) -> Option<UnitParts> {
     let scaled = split_numeric_multiplier(unit)?;
     let symbol = scaled.base;
-    if let Some(unit) = bases.iter().find(|unit| unit.symbol == symbol) {
-        return Some(scaled.factor * unit.scale);
+    if let Some(base) = bases.iter().find(|base| base.symbol == symbol) {
+        return Some(UnitParts {
+            multiplier: scaled.multiplier,
+            prefix: None,
+            base,
+        });
     }
-    SI_PREFIXES.into_iter().find_map(|(prefix, factor)| {
-        let rest = symbol.strip_prefix(prefix)?;
-        let unit = bases.iter().find(|unit| unit.symbol == rest)?;
-        let admitted = match unit.prefixes {
+    SI_PREFIXES.iter().find_map(|prefix| {
+        let rest = symbol.strip_prefix(prefix.symbol)?;
+        let base = bases.iter().find(|base| base.symbol == rest)?;
+        let admitted = match base.prefixes {
             Prefixes::All => true,
-            Prefixes::Multiples => factor > 1.0,
+            Prefixes::Multiples => prefix.factor > 1.0,
             Prefixes::None => false,
         };
-        admitted.then_some(scaled.factor * factor * unit.scale)
+        admitted.then_some(UnitParts {
+            multiplier: scaled.multiplier,
+            prefix: Some(prefix),
+            base,
+        })
     })
+}
+
+/// A unit as it is spelled: its multiplier, its SI prefix and its base unit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct UnitParts {
+    pub(crate) multiplier: PowerOfTen,
+    pub(crate) prefix: Option<&'static SiPrefix>,
+    pub(crate) base: &'static BaseUnit,
+}
+
+impl UnitParts {
+    /// The unit as a multiple of its kind's reference unit.
+    pub(crate) fn scale(self) -> f64 {
+        let factor = self.multiplier.factor();
+        match self.prefix {
+            None => factor * self.base.scale,
+            Some(prefix) => factor * prefix.factor * self.base.scale,
+        }
+    }
+}
+
+/// The power of ten `10**exponent` that multiplies a unit, and the `f64` nearest it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PowerOfTen {
+    exponent: i32,
+    factor: f64,
+}
+
+impl PowerOfTen {
+    pub(crate) const ONE: Self = Self {
+        exponent: 0,
+        factor: 1.0,
+    };
+
+    /// `10**exponent`; `None` when it lies outside the positive finite `f64`s.
+    fn new(exponent: i32) -> Option<Self> {
+        // `1e<exponent>` parses to the f64 nearest the power of ten; `powi` multiplies its
+        // way there and is a few ULP off below 10⁻²².
+        let factor: f64 = format!("1e{exponent}")
+            .parse()
+            .expect("`1e` and an integer is a float literal");
+        (factor.is_finite() && factor > 0.0).then_some(Self { exponent, factor })
+    }
+
+    pub(crate) const fn exponent(self) -> i32 {
+        self.exponent
+    }
+
+    pub(crate) const fn factor(self) -> f64 {
+        self.factor
+    }
+}
+
+/// An SI prefix: its symbol and its factor.
+#[derive(Debug, PartialEq)]
+pub(crate) struct SiPrefix {
+    pub(crate) symbol: &'static str,
+    factor: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ScaledUnit<'a> {
-    pub(crate) factor: f64,
+    pub(crate) multiplier: PowerOfTen,
     pub(crate) base: &'a str,
 }
 
-const SI_PREFIXES: [(&str, f64); 20] = [
-    ("da", 1e1),
-    ("d", 1e-1),
-    ("c", 1e-2),
-    ("m", 1e-3),
-    ("u", 1e-6),
-    ("n", 1e-9),
-    ("p", 1e-12),
-    ("f", 1e-15),
-    ("a", 1e-18),
-    ("z", 1e-21),
-    ("y", 1e-24),
-    ("h", 1e2),
-    ("k", 1e3),
-    ("M", 1e6),
-    ("G", 1e9),
-    ("T", 1e12),
-    ("P", 1e15),
-    ("E", 1e18),
-    ("Z", 1e21),
-    ("Y", 1e24),
+const fn prefix(symbol: &'static str, factor: f64) -> SiPrefix {
+    SiPrefix { symbol, factor }
+}
+
+static SI_PREFIXES: [SiPrefix; 20] = [
+    prefix("da", 1e1),
+    prefix("d", 1e-1),
+    prefix("c", 1e-2),
+    prefix("m", 1e-3),
+    prefix("u", 1e-6),
+    prefix("n", 1e-9),
+    prefix("p", 1e-12),
+    prefix("f", 1e-15),
+    prefix("a", 1e-18),
+    prefix("z", 1e-21),
+    prefix("y", 1e-24),
+    prefix("h", 1e2),
+    prefix("k", 1e3),
+    prefix("M", 1e6),
+    prefix("G", 1e9),
+    prefix("T", 1e12),
+    prefix("P", 1e15),
+    prefix("E", 1e18),
+    prefix("Z", 1e21),
+    prefix("Y", 1e24),
 ];
 
 pub(crate) fn split_numeric_multiplier(unit: &str) -> Option<ScaledUnit<'_>> {
@@ -125,33 +201,33 @@ pub(crate) fn split_numeric_multiplier(unit: &str) -> Option<ScaledUnit<'_>> {
     if let Some(wrapped) = unit.strip_prefix('(') {
         let close = wrapped.find(')')?;
         let expression = &wrapped[..close];
-        let factor = parse_multiplier_expression(expression)?;
+        let multiplier = parse_multiplier_expression(expression)?;
         let base = wrapped[close + 1..].trim();
-        return (!base.is_empty()).then_some(ScaledUnit { factor, base });
+        return (!base.is_empty()).then_some(ScaledUnit { multiplier, base });
     }
     if !unit.starts_with("10") {
         return Some(ScaledUnit {
-            factor: 1.0,
+            multiplier: PowerOfTen::ONE,
             base: unit,
         });
     }
     let parsed = parse_multiplier_prefix(unit)?;
     let base = unit[parsed.length..].trim();
     (!base.is_empty()).then_some(ScaledUnit {
-        factor: parsed.factor,
+        multiplier: parsed.multiplier,
         base,
     })
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ParsedMultiplier {
-    factor: f64,
+    multiplier: PowerOfTen,
     length: usize,
 }
 
-fn parse_multiplier_expression(expression: &str) -> Option<f64> {
+fn parse_multiplier_expression(expression: &str) -> Option<PowerOfTen> {
     let parsed = parse_multiplier_prefix(expression.trim())?;
-    (parsed.length == expression.trim().len()).then_some(parsed.factor)
+    (parsed.length == expression.trim().len()).then_some(parsed.multiplier)
 }
 
 fn parse_multiplier_prefix(expression: &str) -> Option<ParsedMultiplier> {
@@ -185,20 +261,16 @@ fn parse_multiplier_prefix(expression: &str) -> Option<ParsedMultiplier> {
     if position == digit_start {
         return None;
     }
-    let exponent = &expression[exponent_start..position];
+    // An exponent past `i32` is past the `f64` range too.
+    let exponent: i32 = expression[exponent_start..position].parse().ok()?;
     if parenthesized {
         if bytes.get(position) != Some(&b')') {
             return None;
         }
         position += 1;
     }
-    // `1e<exponent>` parses to the f64 nearest the power of ten; `powi` multiplies its way
-    // there and is a few ULP off below 10⁻²².
-    let factor: f64 = format!("1e{exponent}")
-        .parse()
-        .expect("`1e` and an integer is a float literal");
-    (factor.is_finite() && factor > 0.0).then_some(ParsedMultiplier {
-        factor,
+    Some(ParsedMultiplier {
+        multiplier: PowerOfTen::new(exponent)?,
         length: position,
     })
 }
@@ -248,7 +320,7 @@ mod tests {
         ];
         for (source, factor, base) in cases {
             let parsed = split_numeric_multiplier(source).unwrap();
-            assert_eq!(parsed.factor, factor, "{source}");
+            assert_eq!(parsed.multiplier.factor(), factor, "{source}");
             assert_eq!(parsed.base, base, "{source}");
         }
         for invalid in ["10Hz", "10** Hz", "10**999 Hz", "(10**9 Hz", "10**9"] {

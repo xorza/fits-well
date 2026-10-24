@@ -1,9 +1,9 @@
 //! Reference-frame and rest-value metadata for a spectral WCS axis (§8.4).
 
 use crate::alternate::Alternate;
-use crate::error::FitsError;
-use crate::error::Result;
-use crate::error::WcsDefect;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
+use crate::fits_error::WcsDefect;
 use crate::header_model::{Header, keywords};
 use crate::keyword::Keyword;
 use crate::world_coordinates::axis_transform::spectral_rest::SpectralRest;

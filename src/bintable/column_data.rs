@@ -10,7 +10,7 @@ use num_complex::Complex;
 
 use crate::bintable::column_view::ColumnView;
 use crate::bintable::element_kind::ElementKind;
-use crate::error::{FitsError, Result};
+use crate::fits_error::{FitsError, Result};
 use crate::ragged::{Ragged, RowValues};
 
 /// A decoded column, flattened across all rows in row order: each row contributes

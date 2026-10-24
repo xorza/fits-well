@@ -1,10 +1,11 @@
 //! What an image HDU's header says its array is.
 
 use crate::bitpix::Bitpix;
-use crate::error::ExpectedHdu;
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::ExpectedHdu;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 use crate::hdu::HduKind;
+use crate::header_model::record_name::RecordName;
 use crate::header_model::{Header, keywords};
 use crate::image_model::Metadata;
 use crate::image_model::scaling::Scaling;
@@ -52,13 +53,13 @@ impl ImageGeometry {
     fn compressed(header: &Header) -> Result<Self> {
         let bitpix = Bitpix::try_from(header.get_integer(keywords::ZBITPIX)?.ok_or(
             FitsError::MissingKeyword {
-                keyword: keywords::ZBITPIX,
+                name: RecordName::Keyword(keywords::ZBITPIX),
             },
         )?)?;
         let rank = header
             .get_integer(keywords::ZNAXIS)?
             .ok_or(FitsError::MissingKeyword {
-                keyword: keywords::ZNAXIS,
+                name: RecordName::Keyword(keywords::ZNAXIS),
             })?;
         let rank = usize::try_from(rank)
             .ok()

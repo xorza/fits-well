@@ -1,8 +1,8 @@
 //! [`SpectralTransform`]: how a spectral axis maps between its sampled and
 //! expressed characteristics.
 
-use crate::error::GrismDefect;
-use crate::error::Result;
+use crate::fits_error::GrismDefect;
+use crate::fits_error::Result;
 use crate::world_coordinates::axis_transform::spectral_kind::{
     conversion_derivative, convert, domain_error, finite, invalid_grism, invalid_reference,
     required_grism_parameter,

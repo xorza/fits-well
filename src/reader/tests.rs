@@ -1,5 +1,5 @@
 use crate::checksum::checksum_report::ChecksumStatus;
-use crate::error::DescriptorField;
+use crate::fits_error::DescriptorField;
 use bitvec::bitvec;
 use bitvec::order::Msb0;
 
@@ -12,11 +12,11 @@ use crate::block::BLOCK_SIZE;
 use crate::block::padded_len;
 use crate::checksum;
 #[cfg(feature = "compression")]
-use crate::compress::table::internals::mixed_columns;
+use crate::compression::table::internals::mixed_columns;
 #[cfg(feature = "compression")]
-use crate::compress::{Compression, CompressionConfig};
-use crate::error::Indexed;
-use crate::error::Ranked;
+use crate::compression::{Compression, CompressionConfig};
+use crate::fits_error::Indexed;
+use crate::fits_error::Ranked;
 use crate::fits_writer::FitsWriter;
 use crate::fits_writer::builder::{Builder, WriteColumn};
 use crate::header_model::defect::Defect;
@@ -606,7 +606,7 @@ fn content_before_any_valid_hdu_is_rejected() {
     assert!(matches!(
         FitsReader::open(Cursor::new(bytes)),
         Err(FitsError::MissingKeyword {
-            keyword: keywords::SIMPLE
+            name: RecordName::Keyword(keywords::SIMPLE)
         })
     ));
 }
@@ -631,7 +631,7 @@ fn role_aware_scanning_rejects_invalid_file_starts_and_group_signatures() {
     assert!(matches!(
         FitsReader::open(Cursor::new(extension_only)),
         Err(FitsError::MissingKeyword {
-            keyword: keywords::SIMPLE
+            name: RecordName::Keyword(keywords::SIMPLE)
         })
     ));
 
@@ -695,7 +695,7 @@ fn extensions_require_pcount_and_gcount_for_boundary_sizing() {
     assert!(matches!(
         FitsReader::open(Cursor::new(bytes)),
         Err(FitsError::MissingKeyword {
-            keyword: keywords::PCOUNT
+            name: RecordName::Keyword(keywords::PCOUNT)
         })
     ));
 }

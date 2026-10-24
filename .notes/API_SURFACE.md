@@ -6,82 +6,6 @@ no features and one build per public feature; a tag names the builds an item nee
 loses. `internals` is the crate's own test surface and is left out.
 
 ```text
-AsciiValueDefect
-    #[non_exhaustive]
-    enum AsciiValueDefect: Clone, Copy, Debug, Display, Eq, Error, PartialEq
-        NonFinite
-        NullMarker
-
-CompressedDataDefect
-    #[non_exhaustive]
-    enum CompressedDataDefect: Debug, Display, Error
-        GzipStream(Error)
-        GzipOverrun
-        RiceBitField { bits: u32 }
-        Plio(PlioDefect)
-        Hcompress(HcompressDefect)
-        NullMask
-        EmptyTile
-        CellElement { cell: TileCell, element: ElementKind }
-        ValueOutOfRange
-        impl From<CompressedDataDefect> for FitsError
-
-CompressionFeature
-    #[non_exhaustive]
-    enum CompressionFeature: Clone, Debug, Display, Eq, Error, PartialEq
-        Codec { name: String }
-        Quantization { name: String }
-        HcompressDimensions
-        LossyHcompressNulls
-        HcompressNullMask
-        HcompressScale
-        HcompressTileSide { length: usize }
-        HcompressRange
-        PlioListLength { words: usize }
-        LosslessFloatCodec { codec: &'static str }
-        QuantizedFloatCodec { codec: &'static str }
-        TableCodec { codec: &'static str }
-        ColumnCodec { name: String }
-        RiceColumn { code: char }
-
-CompressionParameter
-    #[non_exhaustive]
-    enum CompressionParameter: Clone, Copy, Debug, Display, Error, PartialEq
-        GzipLevel { level: u32 }
-        HcompressScale { scale: f64 }
-        QuantizationLevel { level: f64 }
-        QuantizationStep { step: f64 }
-        DitherSeed { seed: u16 }
-        IntegerQuantization
-        TableQuantization
-        TableWithoutCodec
-        EmptyTile { axis: usize }
-        HcompressDither2
-
-DescriptorField
-    #[non_exhaustive]
-    enum DescriptorField: Clone, Copy, Debug, Display, Eq, PartialEq
-        Count
-        Offset
-
-ExpectedColumn
-    #[non_exhaustive]
-    enum ExpectedColumn: Clone, Copy, Debug, Display, Eq, PartialEq
-        Fixed
-        Array
-        Bits
-        Complex
-        Numeric
-        Integer
-
-ExpectedHdu
-    #[non_exhaustive]
-    enum ExpectedHdu: Clone, Copy, Debug, Display, Eq, PartialEq
-        Image
-        BinTable
-        AsciiTable
-        RandomGroups
-
 FitsEditor
     struct FitsEditor<F>
         impl<F: Read + Write + Seek> FitsEditor<F>
@@ -103,7 +27,8 @@ FitsError
         PrimaryAlreadyWritten
         InvalidKeyword { name: String }
         InvalidAlternate { alternate: char }
-        ReservedKeyword { keyword: Keyword }
+        ReservedName { name: RecordName }
+        AmbiguousCommentary { name: CommentaryName }
         InvalidHeaderValue { name: RecordName, reason: NonFinite }
         HeaderCardTooLong { name: RecordName, length: usize }
         InvalidValue { name: Option<RecordName>, defect: Defect }
@@ -125,9 +50,9 @@ FitsError
         BitFieldLengthMismatch { column: String, row: usize, length: usize, width: usize }
         InvalidBitpix { code: i64 }
         MissingEnd
-        MissingKeyword { keyword: Keyword }
+        MissingKeyword { name: RecordName }
         KeywordOutOfRange { keyword: Keyword }
-        IntegerOutOfRange { keyword: Option<Keyword>, value: String, target: NumericTarget }
+        IntegerOutOfRange { name: Option<RecordName>, value: String, target: NumericTarget }
         UnexpectedEof
         DataUnitOverflow
         DataUnitTooLarge { bytes: u64 }
@@ -209,27 +134,6 @@ FitsWriter  [shape differs by feature]
             pub fn stream_image(&mut self, layout: Metadata<'_>, header: Option<&Header>) -> Result<ImageWriter<'_, W>>
         impl<W: Debug> Debug for FitsWriter<W>
 
-GrismDefect
-    #[non_exhaustive]
-    enum GrismDefect: Clone, Copy, Debug, Display, Eq, Error, PartialEq
-        MissingParameter { parameter: usize }
-        NonFinite
-        PerpendicularTilt
-        ReferenceOutsideDomain
-        ZeroDispersion
-
-HcompressDefect
-    #[non_exhaustive]
-    enum HcompressDefect: Clone, Copy, Debug, Display, Eq, Error, PartialEq
-        Magic
-        NegativeDimension
-        TileDimensions
-        BitPlaneCount
-        BitPlaneEnd
-        FormatCode
-        CoefficientOverflow
-        impl From<HcompressDefect> for FitsError
-
 ImageReader
     struct ImageReader<'r, S>
         impl<'r, S: Source> ImageReader<'r, S>
@@ -248,7 +152,157 @@ ImageWriter
         pub fn finish(self) -> Result<()>
         impl<'a, W: Debug + Write + Seek> Debug for ImageWriter<'a, W>
 
-Indexed
+Result
+    type Result<T> = Result<T, FitsError>
+
+compress  [features: compression or parallel]
+    mod
+
+compress::Compression  [features: compression or parallel]
+    enum Compression: Clone, Copy, Debug, PartialEq
+        Gzip(Gzip)
+        Rice
+        Plio
+        Hcompress(Hcompress)
+        None
+        pub const GZIP: Self
+        pub const GZIP_SHUFFLED: Self
+        pub const fn name(self) -> &'static str
+
+compress::CompressionConfig  [features: compression or parallel]
+    struct CompressionConfig: Clone, Debug, PartialEq
+        pub const fn new(compression: Compression) -> Self
+        pub fn with_tiles(self, tiles: impl Into<Vec<usize>>) -> Self
+        pub const fn with_quantization(self, quantization: Quantization) -> Self
+
+compress::Dither  [features: compression or parallel]
+    enum Dither: Clone, Copy, Debug, Default, Eq, PartialEq
+        None
+        Subtractive1(DitherSeed)
+        Subtractive2(DitherSeed)
+
+compress::DitherSeed  [features: compression or parallel]
+    struct DitherSeed: Clone, Copy, Debug, Eq, PartialEq
+        pub const FROM_SAMPLES: Self
+        pub fn fixed(seed: u16) -> Result<Self>
+
+compress::Gzip  [features: compression or parallel]
+    struct Gzip: Clone, Copy, Debug, Default, Eq, PartialEq
+        pub fn new(level: u32) -> Result<Self>
+        pub fn shuffled(level: u32) -> Result<Self>
+
+compress::Hcompress  [features: compression or parallel]
+    struct Hcompress: Clone, Copy, Debug, Default, PartialEq
+        pub fn relative(scale: f64) -> Result<Self>
+        pub fn absolute(scale: f64) -> Result<Self>
+
+compress::Quantization  [features: compression or parallel]
+    struct Quantization: Clone, Copy, Debug, Default, PartialEq
+        pub const NONE: Self
+        pub fn relative(level: f64, dither: Dither) -> Result<Self>
+        pub fn absolute(step: f64, dither: Dither) -> Result<Self>
+
+error
+    mod
+
+error::AsciiValueDefect
+    #[non_exhaustive]
+    enum AsciiValueDefect: Clone, Copy, Debug, Display, Eq, Error, PartialEq
+        NonFinite
+        NullMarker
+
+error::CompressedDataDefect
+    #[non_exhaustive]
+    enum CompressedDataDefect: Debug, Display, Error
+        GzipStream(Error)
+        GzipOverrun
+        RiceBitField { bits: u32 }
+        Plio(PlioDefect)
+        Hcompress(HcompressDefect)
+        NullMask
+        EmptyTile
+        CellElement { cell: TileCell, element: ElementKind }
+        ValueOutOfRange
+        impl From<CompressedDataDefect> for FitsError
+
+error::CompressionFeature
+    #[non_exhaustive]
+    enum CompressionFeature: Clone, Debug, Display, Eq, Error, PartialEq
+        Codec { name: String }
+        Quantization { name: String }
+        HcompressDimensions
+        LossyHcompressNulls
+        HcompressNullMask
+        HcompressScale
+        HcompressTileSide { length: usize }
+        HcompressRange
+        PlioListLength { words: usize }
+        LosslessFloatCodec { codec: &'static str }
+        QuantizedFloatCodec { codec: &'static str }
+        TableCodec { codec: &'static str }
+        ColumnCodec { name: String }
+        RiceColumn { code: char }
+
+error::CompressionParameter
+    #[non_exhaustive]
+    enum CompressionParameter: Clone, Copy, Debug, Display, Error, PartialEq
+        GzipLevel { level: u32 }
+        HcompressScale { scale: f64 }
+        QuantizationLevel { level: f64 }
+        QuantizationStep { step: f64 }
+        DitherSeed { seed: u16 }
+        IntegerQuantization
+        TableQuantization
+        TableWithoutCodec
+        EmptyTile { axis: usize }
+        HcompressDither2
+
+error::DescriptorField
+    #[non_exhaustive]
+    enum DescriptorField: Clone, Copy, Debug, Display, Eq, PartialEq
+        Count
+        Offset
+
+error::ExpectedColumn
+    #[non_exhaustive]
+    enum ExpectedColumn: Clone, Copy, Debug, Display, Eq, PartialEq
+        Fixed
+        Array
+        Bits
+        Complex
+        Numeric
+        Integer
+
+error::ExpectedHdu
+    #[non_exhaustive]
+    enum ExpectedHdu: Clone, Copy, Debug, Display, Eq, PartialEq
+        Image
+        BinTable
+        AsciiTable
+        RandomGroups
+
+error::GrismDefect
+    #[non_exhaustive]
+    enum GrismDefect: Clone, Copy, Debug, Display, Eq, Error, PartialEq
+        MissingParameter { parameter: usize }
+        NonFinite
+        PerpendicularTilt
+        ReferenceOutsideDomain
+        ZeroDispersion
+
+error::HcompressDefect
+    #[non_exhaustive]
+    enum HcompressDefect: Clone, Copy, Debug, Display, Eq, Error, PartialEq
+        Magic
+        NegativeDimension
+        TileDimensions
+        BitPlaneCount
+        BitPlaneEnd
+        FormatCode
+        CoefficientOverflow
+        impl From<HcompressDefect> for FitsError
+
+error::Indexed
     #[non_exhaustive]
     enum Indexed: Clone, Copy, Debug, Eq, PartialEq
         Hdu
@@ -257,19 +311,19 @@ Indexed
         Group
         WcsAxis
 
-NonFinite
+error::NonFinite
     #[non_exhaustive]
     enum NonFinite: Clone, Copy, Debug, Display, Eq, Error, PartialEq
         Real
         Complex
 
-NumericTarget
+error::NumericTarget
     #[non_exhaustive]
     enum NumericTarget: Clone, Copy, Debug, Display, Eq, PartialEq
         I64
         F64
 
-PlioDefect
+error::PlioDefect
     #[non_exhaustive]
     enum PlioDefect: Clone, Copy, Debug, Display, Eq, Error, PartialEq
         ListBounds
@@ -277,14 +331,14 @@ PlioDefect
         Opcode
         impl From<PlioDefect> for FitsError
 
-PoleDefect
+error::PoleDefect
     #[non_exhaustive]
     enum PoleDefect: Clone, Copy, Debug, Display, Eq, Error, PartialEq
         EquatorialFiducial
         FiducialLatitude
         NoLatitude
 
-Ranked
+error::Ranked
     #[non_exhaustive]
     enum Ranked: Clone, Copy, Debug, Eq, PartialEq
         ImageRegion
@@ -292,16 +346,13 @@ Ranked
         WcsCoordinate
         BinFactors
 
-Result
-    type Result<T> = Result<T, FitsError>
-
-SizeUnit
+error::SizeUnit
     enum SizeUnit: Clone, Copy, Debug, Display, Eq, PartialEq
         Bytes
         Samples
         Rows
 
-TabularDefect
+error::TabularDefect
     #[non_exhaustive]
     enum TabularDefect: Clone, Copy, Debug, Display, Eq, Error, PartialEq
         MissingExtension
@@ -323,7 +374,7 @@ TabularDefect
         TooManyAxes
         EmptyTable
 
-TextOrigin
+error::TextOrigin
     #[non_exhaustive]
     enum TextOrigin: Clone, Debug, Display, Eq, PartialEq
         Value(RecordName)
@@ -334,20 +385,20 @@ TextOrigin
         Cell
         TableData
 
-TileCell
+error::TileCell
     #[non_exhaustive]
     enum TileCell: Clone, Copy, Debug, Display, Eq, PartialEq
         Compressed
         Uncompressed
 
-TimeConversion
+error::TimeConversion
     #[non_exhaustive]
     enum TimeConversion: Clone, Copy, Debug, Display, Eq, PartialEq
         LeapSecond
         TropicalYear
         BesselianYear
 
-UnitKind
+error::UnitKind
     #[non_exhaustive]
     enum UnitKind: Clone, Copy, Debug, Display, Eq, PartialEq
         Angle
@@ -359,7 +410,7 @@ UnitKind
         Length
         Dimensionless
 
-ValueKind
+error::ValueKind
     #[non_exhaustive]
     enum ValueKind: Clone, Copy, Debug, Display, Eq, PartialEq
         Logical
@@ -367,7 +418,7 @@ ValueKind
         Real
         Text
 
-WcsConflict
+error::WcsConflict
     #[non_exhaustive]
     enum WcsConflict: Clone, Copy, Debug, Display, Eq, Error, PartialEq
         PcAndCd
@@ -378,7 +429,7 @@ WcsConflict
         TableRadesys
         TableEquinox
 
-WcsDefect
+error::WcsDefect
     #[non_exhaustive]
     enum WcsDefect: Clone, Debug, Display, Eq, Error, PartialEq
         SingularMatrix
@@ -404,6 +455,7 @@ header::CommentaryName
         pub const BLANK: Self
         pub const CONTINUE: Self
         pub const fn as_str(&self) -> &str
+        impl From<CommentaryName> for RecordName
 
 header::Defect
     enum Defect: Clone, Copy, Debug, Display, Eq, PartialEq
@@ -419,45 +471,39 @@ header::Header
     struct Header: Clone, Debug, Default, PartialEq
         pub fn parse(bytes: &[u8]) -> Result<Self>
         pub fn repairs(&self) -> &[Repair]
-        pub fn get(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<&Value>>
-        pub fn get_comment(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<&str>>
-        pub fn get_logical(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<bool>>
-        pub fn get_integer(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<i64>>
-        pub fn get_real(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<f64>>
-        pub fn get_text(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<&str>>
-        pub fn require_logical(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<bool>
-        pub fn require_integer(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<i64>
-        pub fn require_real(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<f64>
-        pub fn require_text(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<&str>
+        pub fn get(&self, name: impl TryInto<RecordName, Error: Into<FitsError>>) -> Result<Option<&Value>>
+        pub fn get_comment(&self, name: impl TryInto<RecordName, Error: Into<FitsError>>) -> Result<Option<&str>>
+        pub fn get_logical(&self, name: impl TryInto<RecordName, Error: Into<FitsError>>) -> Result<Option<bool>>
+        pub fn get_integer(&self, name: impl TryInto<RecordName, Error: Into<FitsError>>) -> Result<Option<i64>>
+        pub fn get_real(&self, name: impl TryInto<RecordName, Error: Into<FitsError>>) -> Result<Option<f64>>
+        pub fn get_text(&self, name: impl TryInto<RecordName, Error: Into<FitsError>>) -> Result<Option<&str>>
+        pub fn require_logical(&self, name: impl TryInto<RecordName, Error: Into<FitsError>>) -> Result<bool>
+        pub fn require_integer(&self, name: impl TryInto<RecordName, Error: Into<FitsError>>) -> Result<i64>
+        pub fn require_real(&self, name: impl TryInto<RecordName, Error: Into<FitsError>>) -> Result<f64>
+        pub fn require_text(&self, name: impl TryInto<RecordName, Error: Into<FitsError>>) -> Result<&str>
         pub const fn len(&self) -> usize
         pub const fn is_empty(&self) -> bool
-        pub fn contains(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<bool>
-        pub fn index_of(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<usize>>
+        pub fn contains(&self, name: impl TryInto<RecordName, Error: Into<FitsError>>) -> Result<bool>
+        pub fn index_of(&self, name: impl TryInto<RecordName, Error: Into<FitsError>>) -> Result<Option<usize>>
         pub fn iter(&self) -> Iter<'_>
-        pub fn history_records(&self) -> impl Iterator<Item = &str>
-        pub fn comment_records(&self) -> impl Iterator<Item = &str>
+        pub fn commentary(&self, name: CommentaryName) -> impl Iterator<Item = &str>
         pub fn new() -> Self
-        pub fn set(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, value: impl Into<Value>) -> Result<&mut Self>
-        pub fn set_optional(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, value: Option<impl Into<Value>>) -> Result<&mut Self>
-        pub fn append(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, value: impl Into<Value>) -> Result<&mut Self>
-        pub fn insert(&mut self, index: usize, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, value: impl Into<Value>) -> Result<&mut Self>
+        pub fn set(&mut self, name: impl TryInto<RecordName, Error: Into<FitsError>>, value: impl Into<Value>) -> Result<&mut Self>
+        pub fn set_optional(&mut self, name: impl TryInto<RecordName, Error: Into<FitsError>>, value: Option<impl Into<Value>>) -> Result<&mut Self>
+        pub fn append(&mut self, name: impl TryInto<RecordName, Error: Into<FitsError>>, value: impl Into<Value>) -> Result<&mut Self>
+        pub fn insert(&mut self, index: usize, name: impl TryInto<RecordName, Error: Into<FitsError>>, value: impl Into<Value>) -> Result<&mut Self>
         pub fn insert_record(&mut self, index: usize, record: Record) -> Result<&mut Self>
-        pub fn remove(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Option<Record>>
+        pub fn remove(&mut self, name: impl TryInto<RecordName, Error: Into<FitsError>>) -> Result<Option<Record>>
         pub fn remove_at(&mut self, index: usize) -> Result<Record>
-        pub fn remove_all(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<usize>
-        pub fn get_hierarch(&self, name: impl TryInto<HierarchName, Error: Into<FitsError>>) -> Result<Option<&Value>>
-        pub fn get_hierarch_comment(&self, name: impl TryInto<HierarchName, Error: Into<FitsError>>) -> Result<Option<&str>>
-        pub fn set_hierarch(&mut self, name: impl TryInto<HierarchName, Error: Into<FitsError>>, value: impl Into<Value>) -> Result<&mut Self>
-        pub fn remove_hierarch(&mut self, name: impl TryInto<HierarchName, Error: Into<FitsError>>) -> Result<Option<Record>>
-        pub fn set_comment(&mut self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>, text: &str) -> Result<&mut Self>
-        pub fn push_comment(&mut self, text: &str) -> Result<&mut Self>
-        pub fn push_history(&mut self, text: &str) -> Result<&mut Self>
-        pub fn push_blank(&mut self, text: &str) -> Result<&mut Self>
+        pub fn remove_all(&mut self, name: impl TryInto<RecordName, Error: Into<FitsError>>) -> Result<usize>
+        pub fn set_comment(&mut self, name: impl TryInto<RecordName, Error: Into<FitsError>>, text: &str) -> Result<&mut Self>
+        pub fn push_commentary(&mut self, name: impl TryInto<CommentaryName, Error: Into<FitsError>>, text: &str) -> Result<&mut Self>
         impl<'a> IntoIterator for &'a Header
 
 header::HierarchName
     struct HierarchName: Clone, Debug, Display, Eq, FromStr, Hash, PartialEq, TryFrom<&String>, TryFrom<&str>, TryFrom<String>
         pub fn as_str(&self) -> &str
+        impl From<HierarchName> for RecordName
 
 header::Iter
     struct Iter<'a>: Clone, Debug, ExactSizeIterator, Iterator
@@ -478,7 +524,7 @@ header::Record
         pub fn view(&self) -> RecordView<'_>
 
 header::RecordName
-    enum RecordName: Clone, Debug, Display, Eq, From<Keyword>, Hash, PartialEq
+    enum RecordName: Clone, Debug, Display, Eq, From<CommentaryName>, From<HierarchName>, From<Keyword>, FromStr, Hash, PartialEq, TryFrom<&String>, TryFrom<&str>, TryFrom<String>
         Keyword(Keyword)
         Hierarch(HierarchName)
         Commentary(CommentaryName)
@@ -921,23 +967,6 @@ image::Borrowed
         pub fn sample_type(&self) -> SampleType
         pub fn to_image(&self) -> Image
 
-image::Compression  [features: compression or parallel]
-    enum Compression: Clone, Copy, Debug, PartialEq
-        Gzip(Gzip)
-        Rice
-        Plio
-        Hcompress(Hcompress)
-        None
-        pub const GZIP: Self
-        pub const GZIP_SHUFFLED: Self
-        pub const fn name(self) -> &'static str
-
-image::CompressionConfig  [features: compression or parallel]
-    struct CompressionConfig: Clone, Debug, PartialEq
-        pub const fn new(compression: Compression) -> Self
-        pub fn with_tiles(self, tiles: impl Into<Vec<usize>>) -> Self
-        pub const fn with_quantization(self, quantization: Quantization) -> Self
-
 image::Data
     enum Data: Clone, Debug, PartialEq
         U8(Vec<u8>)
@@ -958,27 +987,6 @@ image::Data
         pub const fn as_f64(&self) -> Option<&[f64]>
         impl<T: Sample> From<Vec<T>> for Data
         impl<T: Sample> TryFrom<Data> for Vec<T>
-
-image::Dither  [features: compression or parallel]
-    enum Dither: Clone, Copy, Debug, Default, Eq, PartialEq
-        None
-        Subtractive1(DitherSeed)
-        Subtractive2(DitherSeed)
-
-image::DitherSeed  [features: compression or parallel]
-    struct DitherSeed: Clone, Copy, Debug, Eq, PartialEq
-        pub const FROM_SAMPLES: Self
-        pub fn fixed(seed: u16) -> Result<Self>
-
-image::Gzip  [features: compression or parallel]
-    struct Gzip: Clone, Copy, Debug, Default, Eq, PartialEq
-        pub fn new(level: u32) -> Result<Self>
-        pub fn shuffled(level: u32) -> Result<Self>
-
-image::Hcompress  [features: compression or parallel]
-    struct Hcompress: Clone, Copy, Debug, Default, PartialEq
-        pub fn relative(scale: f64) -> Result<Self>
-        pub fn absolute(scale: f64) -> Result<Self>
 
 image::Image
     struct Image: Clone, Debug
@@ -1009,12 +1017,6 @@ image::Parts
 
 image::PhysicalSample
     trait PhysicalSample: Narrow
-
-image::Quantization  [features: compression or parallel]
-    struct Quantization: Clone, Copy, Debug, Default, PartialEq
-        pub const NONE: Self
-        pub fn relative(level: f64, dither: Dither) -> Result<Self>
-        pub fn absolute(step: f64, dither: Dither) -> Result<Self>
 
 image::Region
     enum Region<'a>: Clone, Copy, Debug, Eq, From<&'a [Range<usize>]>, From<RangeFull>, PartialEq
@@ -1507,7 +1509,7 @@ table::Table
         pub fn column<'n>(&self, column: impl Into<ColumnSelector<'n>>) -> Result<ColumnReader<'_>>
 
 table::Tform
-    struct Tform: Clone, Copy, Debug, Eq, FromStr, PartialEq
+    struct Tform: Clone, Copy, Debug, Display, Eq, FromStr, PartialEq
         pub const fn repeat(self) -> usize
         pub const fn element(self) -> ElementKind
         pub const fn storage(self) -> Storage
@@ -1556,7 +1558,7 @@ time::Coordinate
         pub fn epoch(header: &Header) -> Result<Option<Self>>
 
 time::Datetime
-    struct Datetime: Clone, Copy, Debug, FromStr, PartialEq
+    struct Datetime: Clone, Copy, Debug, Display, FromStr, PartialEq
         pub fn date(year: i64, month: u32, day: u32) -> Result<Self>
         pub fn at(self, hour: u32, minute: u32, second: f64) -> Result<Self>
         pub const fn year(self) -> i64
@@ -1616,13 +1618,13 @@ time::ReferencePosition
         Other(String)
 
 time::Scale
-    enum Scale: Clone, Debug, Eq, FromStr, PartialEq
+    enum Scale: Clone, Debug, Display, Eq, FromStr, PartialEq
         Known { kind: ScaleKind, realization: Option<String> }
         Local(String)
         pub const fn known(kind: ScaleKind) -> Self
 
 time::ScaleKind
-    enum ScaleKind: Clone, Copy, Debug, Eq, PartialEq
+    enum ScaleKind: Clone, Copy, Debug, Display, Eq, PartialEq
         Utc
         Ut1
         Tai
@@ -1633,10 +1635,7 @@ time::ScaleKind
         Gps
 
 time::Unit
-    enum Unit: Clone, Copy, Debug, FromStr, PartialEq
-        Seconds(f64)
-        TropicalYears(f64)
-        BesselianYears(f64)
+    struct Unit: Clone, Copy, Debug, Display, FromStr, PartialEq
         pub fn seconds(self, reference_mjd: Mjd, scale: &Scale) -> Result<f64>
 
 wcs
@@ -1648,8 +1647,8 @@ wcs::Alternate
         pub const fn new(letter: char) -> Self
         pub const fn letter(self) -> Option<char>
 
-wcs::Axis
-    struct Axis: Clone, Debug, PartialEq
+wcs::AxisDescription
+    struct AxisDescription: Clone, Debug, PartialEq
         pub ctype: String
         pub cunit: String
         pub crval: f64
@@ -1687,18 +1686,18 @@ wcs::CelestialReferenceFrame
         Fk4NoE
         Gappt
 
-wcs::Distortion
-    enum Distortion: Clone, Copy, Debug, Eq, PartialEq
-        Sip
-        Tpv
-
-wcs::Metadata
-    struct Metadata<'a>: Clone, Copy, Debug
-        pub axes: &'a [Axis]
+wcs::Description
+    struct Description<'a>: Clone, Copy, Debug
+        pub axes: &'a [AxisDescription]
         pub celestial_frame: Option<CelestialFrame>
         pub celestial_projection: Option<CelestialProjection>
         pub unsupported_axes: &'a [usize]
         pub distortion: Option<Distortion>
+
+wcs::Distortion
+    enum Distortion: Clone, Copy, Debug, Eq, PartialEq
+        Sip
+        Tpv
 
 wcs::Projection
     enum Projection: Clone, Copy, Debug, Display, Eq, PartialEq
@@ -1761,7 +1760,7 @@ wcs::Wcs
         pub fn crop(&self, region: Region<'_>) -> Result<Self>
         pub fn bin(&self, factors: &[usize]) -> Result<Self>
         pub fn write_into(&self, header: &mut Header, alt: impl TryInto<Alternate, Error: Into<FitsError>>) -> Result<()>
-        pub fn metadata(&self) -> Metadata<'_>
+        pub fn description(&self) -> Description<'_>
         pub fn world_unit(&self, axis: usize) -> Result<&str>
         pub fn axis_world(&self, axis: usize, pixel: &[f64]) -> Result<AxisWorld<'_>>
         pub fn from_pixel_list(header: &Header, columns: &[usize], alt: impl TryInto<Alternate, Error: Into<FitsError>>) -> Result<Self>

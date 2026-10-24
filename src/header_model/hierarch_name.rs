@@ -4,8 +4,8 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 
 /// The name of a `HIERARCH name = value` record: one or more tokens of printable ASCII
 /// other than `=`, kept joined by one blank, as the blanks between tokens carry no
@@ -97,7 +97,7 @@ impl fmt::Display for HierarchName {
 
 #[cfg(test)]
 mod tests {
-    use crate::error::FitsError;
+    use crate::fits_error::FitsError;
     use crate::header_model::hierarch_name::HierarchName;
     use std::collections::HashSet;
 

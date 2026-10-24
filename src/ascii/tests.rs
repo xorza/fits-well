@@ -1,7 +1,7 @@
 use crate::ascii::internals::ascii_table_header;
 use crate::ascii::*;
-use crate::error::AsciiValueDefect;
-use crate::error::ExpectedHdu;
+use crate::fits_error::AsciiValueDefect;
+use crate::fits_error::ExpectedHdu;
 use crate::fits_writer::FitsWriter;
 use crate::fits_writer::ascii_builder::{AsciiFloatFormat, AsciiWriteColumn};
 use crate::header_model::record_name::RecordName;

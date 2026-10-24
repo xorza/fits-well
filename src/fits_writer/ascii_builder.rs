@@ -6,7 +6,7 @@ use std::iter;
 use crate::ascii::ascii_text::AsciiText;
 use crate::bitpix::Bitpix;
 use crate::column::validate_table_field_count;
-use crate::error::{AsciiValueDefect, FitsError, Result, TextOrigin};
+use crate::fits_error::{AsciiValueDefect, FitsError, Result, TextOrigin};
 use crate::fits_writer::column_scaling::{ColumnScaling, Scalable};
 use crate::fits_writer::{ROW_COUNT_FIXED, accept_row_count};
 use crate::hdu::prologue::{Opening, Prologue, Xtension};

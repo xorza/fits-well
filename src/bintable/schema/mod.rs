@@ -6,8 +6,8 @@ use crate::bintable::tdim;
 use crate::bintable::tform::{Storage, Tform};
 use crate::column;
 use crate::column::{ColumnLabels, ColumnScaling, TableShape};
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 use crate::header_model::{Header, keywords};
 
 /// Whether a schema reads the keywords that describe a column's values.

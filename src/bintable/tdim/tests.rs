@@ -1,7 +1,7 @@
 use crate::bintable::Table;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::internals::table_header;
-use crate::error::FitsError;
+use crate::fits_error::FitsError;
 use crate::header_model::keywords;
 
 use crate::ragged::Ragged;

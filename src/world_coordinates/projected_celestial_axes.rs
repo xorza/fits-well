@@ -1,8 +1,8 @@
 //! The celestial longitude/latitude axis pair and the projection they share.
 
-use crate::error::FitsError;
-use crate::error::Result;
-use crate::error::WcsConflict;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
+use crate::fits_error::WcsConflict;
 use crate::world_coordinates::celestial_axis::CelestialAxis;
 use crate::world_coordinates::ctype::Ctype;
 use crate::world_coordinates::distortion::Distortion;

@@ -52,10 +52,10 @@ mod block;
 mod checksum;
 mod column;
 #[cfg(feature = "compression")]
-mod compress;
+mod compression;
 mod endian;
-mod error;
 mod fits_editor;
+mod fits_error;
 mod fits_writer;
 mod groups;
 mod hdu;
@@ -70,25 +70,35 @@ mod unit;
 mod words;
 mod world_coordinates;
 
-pub use error::{
-    AsciiValueDefect, CompressedDataDefect, CompressionFeature, CompressionParameter,
-    DescriptorField, ExpectedColumn, ExpectedHdu, FitsError, GrismDefect, HcompressDefect, Indexed,
-    NonFinite, NumericTarget, PlioDefect, PoleDefect, Ranked, Result, SizeUnit, TabularDefect,
-    TextOrigin, TileCell, TimeConversion, UnitKind, ValueKind, WcsConflict, WcsDefect,
-};
 pub use fits_editor::FitsEditor;
+pub use fits_error::{FitsError, Result};
 pub use fits_writer::FitsWriter;
 pub use fits_writer::image_writer::ImageWriter;
 pub use reader::FitsReader;
 pub use reader::image_reader::ImageReader;
 
-/// Typed image values, scratch-backed views, compression, and incremental output.
+/// The cases a [`FitsError`] variant carries: what was indexed, ranked or expected,
+/// and why a value, a WCS or a compressed tile fails.
+pub mod error {
+    pub use crate::fits_error::{
+        AsciiValueDefect, CompressedDataDefect, CompressionFeature, CompressionParameter,
+        DescriptorField, ExpectedColumn, ExpectedHdu, GrismDefect, HcompressDefect, Indexed,
+        NonFinite, NumericTarget, PlioDefect, PoleDefect, Ranked, SizeUnit, TabularDefect,
+        TextOrigin, TileCell, TimeConversion, UnitKind, ValueKind, WcsConflict, WcsDefect,
+    };
+}
+
+/// Tiled compression (§10): the codec, its quantization and dither, and the tile
+/// shape, for images and binary tables alike.
+#[cfg(feature = "compression")]
+pub mod compress {
+    pub use crate::compression::quantization::{Dither, DitherSeed, Quantization};
+    pub use crate::compression::{Compression, CompressionConfig, Gzip, Hcompress};
+}
+
+/// Typed image values, scratch-backed views, and incremental output.
 pub mod image {
     pub use crate::bitpix::Bitpix;
-    #[cfg(feature = "compression")]
-    pub use crate::compress::quantization::{Dither, DitherSeed, Quantization};
-    #[cfg(feature = "compression")]
-    pub use crate::compress::{Compression, CompressionConfig, Gzip, Hcompress};
     pub use crate::image_model::data::Data;
     pub use crate::image_model::physical_sample::PhysicalSample;
     pub use crate::image_model::region::Region;
@@ -141,11 +151,11 @@ pub mod wcs {
     //! `astropy.wcs`, wcslib, or exact interpolation fixtures. The SIP polynomial (a
     //! prior distortion of the pixel offsets) and the TPV polynomial (a sequent
     //! distortion of the celestial intermediate coordinates) are evaluated in both
-    //! directions; [`Metadata::distortion`] names the one that applies.
+    //! directions; [`Description::distortion`] names the one that applies.
     //! [`Wcs::write_into`] writes a description back into a header, in wcslib's form,
     //! and [`Wcs::crop`] and [`Wcs::bin`] derive the WCS of a cut-out or a binned image.
     //! Convention-only `XPH`
-    //! transforms remain readable in [`Metadata::unsupported_axes`]; complete transforms
+    //! transforms remain readable in [`Description::unsupported_axes`]; complete transforms
     //! then return
     //! [`FitsError::UnsupportedWcsTransform`](crate::FitsError::UnsupportedWcsTransform).
     //!
@@ -153,21 +163,21 @@ pub mod wcs {
     //! ([`Wcs::from_pixel_list`]) and vector-cell ([`Wcs::from_array_column`]) forms.
     //!
     //! Pixel↔world yields celestial coordinates in the frame the file declares;
-    //! [`Metadata::celestial_frame`] and [`Axis::spectral_frame`] expose that typed
+    //! [`Description::celestial_frame`] and [`AxisDescription::spectral_frame`] expose that typed
     //! `RADESYS`/`EQUINOX` and spectral frame/rest metadata. Converting *between*
     //! reference frames is astrometry beyond the FITS standard and is intentionally
     //! out of scope. Transform methods return explicit errors for invalid projection
     //! domains or failed iterations.
 
     pub use crate::alternate::Alternate;
-    pub use crate::world_coordinates::axis::Axis;
+    pub use crate::world_coordinates::axis_description::AxisDescription;
     pub use crate::world_coordinates::axis_transform::spectral_rest::SpectralRest;
     pub use crate::world_coordinates::celestial_frame::{CelestialFrame, CelestialReferenceFrame};
     pub use crate::world_coordinates::celestial_pole::CelestialPole;
     pub use crate::world_coordinates::distortion::Distortion;
     pub use crate::world_coordinates::projection::Projection;
     pub use crate::world_coordinates::spectral_frame::{SpectralFrame, SpectralReferenceFrame};
-    pub use crate::world_coordinates::{AxisWorld, CelestialProjection, Metadata, Wcs};
+    pub use crate::world_coordinates::{AxisWorld, CelestialProjection, Description, Wcs};
 }
 
 /// Typed time coordinates (§9): calendar datetimes, time scales, and a

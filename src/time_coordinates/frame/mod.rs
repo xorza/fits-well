@@ -1,8 +1,8 @@
 //! [`Frame`]: a header's time coordinate frame.
 
-use crate::error::FitsError;
-use crate::error::Indexed;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Indexed;
+use crate::fits_error::Result;
 use crate::header_model::{Header, keywords};
 use crate::keyword::Keyword;
 use crate::time_coordinates::axis::Axis;
@@ -180,7 +180,7 @@ fn resolve_split_ref(
 
 #[cfg(test)]
 pub(crate) mod internals {
-    use crate::error::Result;
+    use crate::fits_error::Result;
     use crate::time_coordinates::coordinate::Coordinate;
     use crate::time_coordinates::frame::Frame;
     use crate::world_coordinates::Wcs;
@@ -195,7 +195,8 @@ pub(crate) mod internals {
             pixel: &[f64],
         ) -> Result<Option<Coordinate>> {
             let world = wcs.axis_world(axis, pixel)?;
-            let Some(time) = self.time_axis(&wcs.metadata().axes[axis].ctype, world.unit)? else {
+            let Some(time) = self.time_axis(&wcs.description().axes[axis].ctype, world.unit)?
+            else {
                 return Ok(None);
             };
             Ok(Some(Coordinate {

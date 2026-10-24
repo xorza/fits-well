@@ -9,9 +9,9 @@
 use std::result;
 use std::sync::Arc;
 
-use crate::error::FitsError;
-use crate::error::Indexed;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Indexed;
+use crate::fits_error::Result;
 use crate::header_model::{Header, keywords};
 use crate::keyword::Keyword;
 

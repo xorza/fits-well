@@ -1,4 +1,4 @@
-use crate::error::FitsError;
+use crate::fits_error::FitsError;
 use crate::header_model::Header;
 use crate::header_model::record_name::RecordName;
 use crate::header_model::value::Value;
@@ -72,7 +72,7 @@ fn table_wcs_matches_the_equivalent_image_wcs() {
         let context = format!("{family:?}");
         let table = ROTATED_TAN.wcs(family, None);
         assert_eq!(
-            table.metadata().axes.len(),
+            table.description().axes.len(),
             2,
             "{context}: rank from the keywords"
         );
@@ -286,7 +286,7 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
         assert_eq!(
             Wcs::from_array_column(h, 5, None)
                 .unwrap()
-                .metadata()
+                .description()
                 .axes
                 .len(),
             3
@@ -315,7 +315,7 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
         assert_eq!(
             Wcs::from_array_column(header, 5, 'A')
                 .unwrap()
-                .metadata()
+                .description()
                 .axes
                 .len(),
             3
@@ -325,7 +325,7 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
     let invalid_long_alternate = build("3CTYP5A", Value::Text("LINEAR".to_string()));
     assert!(matches!(
         Wcs::from_array_column(&invalid_long_alternate, 5, 'A'),
-        Err(FitsError::MissingKeyword { keyword }) if keyword == "1CTY5A"
+        Err(FitsError::MissingKeyword { name: RecordName::Keyword(keyword) }) if keyword == "1CTY5A"
     ));
 
     // A two-digit array axis: the whole leading digit run is the axis, where in
@@ -335,7 +335,7 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
     assert_eq!(
         Wcs::from_array_column(&two_digit, 5, None)
             .unwrap()
-            .metadata()
+            .description()
             .axes
             .len(),
         12
@@ -346,7 +346,7 @@ fn vector_cell_rank_uses_every_supported_keyword_family() {
     let padded_index = build("03CTYP5", Value::Text("LINEAR".to_string()));
     assert!(matches!(
         Wcs::from_array_column(&padded_index, 5, None),
-        Err(FitsError::MissingKeyword { keyword }) if keyword == "1CTYP5"
+        Err(FitsError::MissingKeyword { name: RecordName::Keyword(keyword) }) if keyword == "1CTYP5"
     ));
 
     // A column number too wide for any keyword finds no card and errors, not panics.

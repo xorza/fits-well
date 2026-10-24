@@ -6,10 +6,11 @@ use std::slice;
 use crate::allocation;
 use crate::block::{BLOCK_SIZE, CARD_SIZE};
 use crate::checksum;
-use crate::error::{FitsError, Indexed, Result};
+use crate::fits_error::{FitsError, Indexed, Result};
 use crate::hdu::HduPosition;
 use crate::header_model::card::is_end_record;
 use crate::header_model::keywords;
+use crate::header_model::record_name::RecordName;
 use crate::reader::hdu::{Hdu, HeaderUnit};
 use crate::reader::hdu_selector::HduSelector;
 use crate::reader::source::Source;
@@ -187,7 +188,7 @@ impl<S: Source> Scan<'_, S> {
                 match position {
                     HduPosition::Primary if keyword != b"SIMPLE  " => {
                         return Err(FitsError::MissingKeyword {
-                            keyword: keywords::SIMPLE,
+                            name: RecordName::Keyword(keywords::SIMPLE),
                         });
                     }
                     // §3.5: a post-HDU block whose first card is not XTENSION begins

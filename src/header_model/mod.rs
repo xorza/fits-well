@@ -19,10 +19,10 @@ use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
 use crate::block::RECORDS_PER_BLOCK;
 use crate::checksum;
-use crate::error::FitsError;
-use crate::error::Indexed;
-use crate::error::Result;
-use crate::error::{TextOrigin, ValueKind};
+use crate::fits_error::FitsError;
+use crate::fits_error::Indexed;
+use crate::fits_error::Result;
+use crate::fits_error::{TextOrigin, ValueKind};
 use crate::header_model::card::ParsedRecord;
 use crate::header_model::card::validate_ascii;
 use crate::header_model::card::validate_valued_keyword;
@@ -115,164 +115,165 @@ impl Header {
         &self.repairs
     }
 
-    /// The value of the first valued card with this keyword. Every method that names a
-    /// keyword takes a [`Keyword`], such as a [`keywords`] preset, or a `&str`, which
-    /// errors with [`FitsError::InvalidKeyword`] when it is no keyword.
+    /// The value of the first valued record with this name. Every method that names a
+    /// record takes a [`RecordName`]: a [`Keyword`], such as a [`keywords`] preset, a
+    /// [`HierarchName`], or a `&str`, `"EXPTIME"` or `"HIERARCH ESO DET DIT"`, which
+    /// errors with [`FitsError::InvalidKeyword`] when it names neither.
     pub fn get(
         &self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
     ) -> Result<Option<&Value>> {
-        self.value(checked(keyword)?)
+        self.value(&named(name)?)
     }
 
-    /// The value of the first record with `keyword`; [`FitsError::InvalidValue`] when
-    /// that record is malformed.
-    fn value(&self, keyword: Keyword) -> Result<Option<&Value>> {
-        let Some(&i) = self.index.get(&keyword) else {
-            return Ok(None);
-        };
-        self.records[i].value_or_defect().map(Some)
+    /// The first valued or `HIERARCH` record with `name`, or a malformed one so named;
+    /// `None` for a commentary name, which no such record has.
+    fn first(&self, name: &RecordName) -> Option<usize> {
+        match name {
+            RecordName::Keyword(keyword) => self.index.get(keyword).copied(),
+            RecordName::Hierarch(name) => self.hierarch_index.get(name).copied(),
+            RecordName::Commentary(_) => None,
+        }
     }
 
-    /// The inline comment of the first valued card with this keyword; `None` when the
-    /// card has none or the header holds no such card. The read twin of
+    /// The value of the first record with `name`; [`FitsError::InvalidValue`] when that
+    /// record is malformed.
+    fn value(&self, name: &RecordName) -> Result<Option<&Value>> {
+        self.first(name)
+            .map(|i| self.records[i].value_or_defect())
+            .transpose()
+    }
+
+    /// The inline comment of the first valued record with this name; `None` when the
+    /// record has none or the header holds no such record. The read twin of
     /// [`Header::set_comment`].
     pub fn get_comment(
         &self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
     ) -> Result<Option<&str>> {
-        let keyword = checked(keyword)?;
-        let Some(&i) = self.index.get(&keyword) else {
+        let Some(i) = self.first(&named(name)?) else {
             return Ok(None);
         };
         self.records[i].value_or_defect()?;
         Ok(self.records[i].comment())
     }
 
-    /// Read an optional logical keyword without conflating absence with a wrong type.
+    /// Read an optional logical record without conflating absence with a wrong type.
     pub fn get_logical(
         &self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
     ) -> Result<Option<bool>> {
-        self.typed_optional(checked(keyword)?, ValueKind::Logical, |value| {
+        self.typed_optional(&named(name)?, ValueKind::Logical, |value| {
             Ok(value.as_logical())
         })
     }
 
-    /// Read an optional integer keyword without conflating absence with a wrong type.
+    /// Read an optional integer record without conflating absence with a wrong type.
     pub fn get_integer(
         &self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
     ) -> Result<Option<i64>> {
-        self.typed_optional(checked(keyword)?, ValueKind::Integer, Value::as_integer)
+        self.typed_optional(&named(name)?, ValueKind::Integer, Value::as_integer)
     }
 
-    /// Read an optional real keyword without conflating absence with a wrong type.
+    /// Read an optional real record without conflating absence with a wrong type.
     pub fn get_real(
         &self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
     ) -> Result<Option<f64>> {
-        self.typed_optional(checked(keyword)?, ValueKind::Real, Value::as_real)
+        self.typed_optional(&named(name)?, ValueKind::Real, Value::as_real)
     }
 
-    /// Read an optional text keyword without conflating absence with a wrong type.
+    /// Read an optional text record without conflating absence with a wrong type.
     pub fn get_text(
         &self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
     ) -> Result<Option<&str>> {
-        self.typed_optional(checked(keyword)?, ValueKind::Text, |value| {
-            Ok(value.as_text())
-        })
+        self.typed_optional(&named(name)?, ValueKind::Text, |value| Ok(value.as_text()))
     }
 
     fn typed_optional<'a, T>(
         &'a self,
-        keyword: Keyword,
+        name: &RecordName,
         expected: ValueKind,
         convert: impl FnOnce(&'a Value) -> Result<Option<T>>,
     ) -> Result<Option<T>> {
-        let Some(value) = self.value(keyword)? else {
+        let Some(value) = self.value(name)? else {
             return Ok(None);
         };
-        convert(value)
-            .map_err(|error| match error {
-                FitsError::IntegerOutOfRange { value, target, .. } => {
-                    FitsError::IntegerOutOfRange {
-                        keyword: Some(keyword),
-                        value,
-                        target,
-                    }
-                }
-                other => other,
-            })?
-            .map(Some)
-            .ok_or(FitsError::ValueTypeMismatch {
-                name: RecordName::Keyword(keyword),
+        match convert(value) {
+            Ok(Some(value)) => Ok(Some(value)),
+            Ok(None) => Err(FitsError::ValueTypeMismatch {
+                name: name.clone(),
                 expected,
-            })
+            }),
+            Err(FitsError::IntegerOutOfRange { value, target, .. }) => {
+                Err(FitsError::IntegerOutOfRange {
+                    name: Some(name.clone()),
+                    value,
+                    target,
+                })
+            }
+            Err(other) => Err(other),
+        }
     }
 
-    /// A mandatory logical keyword: [`FitsError::MissingKeyword`] when it is absent,
+    fn typed_required<'a, T>(
+        &'a self,
+        name: RecordName,
+        expected: ValueKind,
+        convert: impl FnOnce(&'a Value) -> Result<Option<T>>,
+    ) -> Result<T> {
+        self.typed_optional(&name, expected, convert)?
+            .ok_or(FitsError::MissingKeyword { name })
+    }
+
+    /// A mandatory logical record: [`FitsError::MissingKeyword`] when it is absent,
     /// [`FitsError::ValueTypeMismatch`] when it holds another type.
     pub fn require_logical(
         &self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
     ) -> Result<bool> {
-        let keyword = checked(keyword)?;
-        self.get_logical(keyword)?
-            .ok_or(FitsError::MissingKeyword { keyword })
+        self.typed_required(named(name)?, ValueKind::Logical, |value| {
+            Ok(value.as_logical())
+        })
     }
 
-    /// A mandatory integer keyword, as [`Header::require_logical`].
+    /// A mandatory integer record, as [`Header::require_logical`].
     pub fn require_integer(
         &self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
     ) -> Result<i64> {
-        let keyword = checked(keyword)?;
-        self.get_integer(keyword)?
-            .ok_or(FitsError::MissingKeyword { keyword })
+        self.typed_required(named(name)?, ValueKind::Integer, Value::as_integer)
     }
 
-    /// A mandatory real keyword, as [`Header::require_logical`].
+    /// A mandatory real record, as [`Header::require_logical`].
     pub fn require_real(
         &self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
     ) -> Result<f64> {
-        let keyword = checked(keyword)?;
-        self.get_real(keyword)?
-            .ok_or(FitsError::MissingKeyword { keyword })
+        self.typed_required(named(name)?, ValueKind::Real, Value::as_real)
     }
 
-    /// A mandatory text keyword, as [`Header::require_logical`].
+    /// A mandatory text record, as [`Header::require_logical`].
     pub fn require_text(
         &self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
     ) -> Result<&str> {
-        let keyword = checked(keyword)?;
-        self.get_text(keyword)?
-            .ok_or(FitsError::MissingKeyword { keyword })
+        self.typed_required(named(name)?, ValueKind::Text, |value| Ok(value.as_text()))
     }
 
     /// A mandatory integer keyword narrowed to `usize`. A negative or oversized
     /// value is [`FitsError::KeywordOutOfRange`], keeping untrusted sizes from
     /// wrapping into a plausible-looking length.
-    pub(crate) fn require_usize(
-        &self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
-    ) -> Result<usize> {
-        let keyword = checked(keyword)?;
+    pub(crate) fn require_usize(&self, keyword: Keyword) -> Result<usize> {
         usize::try_from(self.require_integer(keyword)?)
             .map_err(|_| FitsError::KeywordOutOfRange { keyword })
     }
 
     /// An optional integer keyword narrowed to `usize`, or `default` when the card is
     /// absent. A present but out-of-range value still errors.
-    pub(crate) fn optional_usize(
-        &self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
-        default: usize,
-    ) -> Result<usize> {
-        let keyword = checked(keyword)?;
+    pub(crate) fn optional_usize(&self, keyword: Keyword, default: usize) -> Result<usize> {
         match self.get_integer(keyword)? {
             Some(value) => {
                 usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { keyword })
@@ -290,26 +291,23 @@ impl Header {
         self.records.is_empty()
     }
 
-    /// Whether a record, valued or commentary, has this keyword.
-    pub fn contains(&self, keyword: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<bool> {
-        Ok(self.index_of(keyword)?.is_some())
+    /// Whether a record has this name, as [`Header::index_of`] finds one.
+    pub fn contains(&self, name: impl TryInto<RecordName, Error: Into<FitsError>>) -> Result<bool> {
+        Ok(self.index_of(name)?.is_some())
     }
 
-    /// The position of the first record, valued or commentary, with this keyword.
+    /// The position of the first record with this name. A keyword names a commentary
+    /// record of its text too, so `"HISTORY"` finds the first `HISTORY` record.
     pub fn index_of(
         &self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
     ) -> Result<Option<usize>> {
-        let keyword = checked(keyword)?;
-        // The index holds the first valued record; a commentary record of the name can
-        // only come before it.
-        let end = self
-            .index
-            .get(&keyword)
-            .map_or(self.records.len(), |&i| i + 1);
+        let name = named(name)?;
+        // The first record of the name is the indexed one or a commentary record before it.
+        let end = self.first(&name).map_or(self.records.len(), |i| i + 1);
         Ok(self.records[..end]
             .iter()
-            .position(|record| record.is_named(keyword)))
+            .position(|record| record.is_named(&name)))
     }
 
     /// Every stored record in file order, as a [`RecordView`] — duplicates and order
@@ -323,19 +321,11 @@ impl Header {
         }
     }
 
-    /// The text of each `HISTORY` record, in order; an empty record gives `""`.
-    pub fn history_records(&self) -> impl Iterator<Item = &str> {
-        self.commentary(CommentaryName::HISTORY)
-    }
-
-    /// The text of each `COMMENT` record, in order; an empty record gives `""`.
-    pub fn comment_records(&self) -> impl Iterator<Item = &str> {
-        self.commentary(CommentaryName::COMMENT)
-    }
-
-    fn commentary(&self, wanted: CommentaryName) -> impl Iterator<Item = &str> {
+    /// The text of each commentary record with this name, in order; an empty record
+    /// gives `""`.
+    pub fn commentary(&self, name: CommentaryName) -> impl Iterator<Item = &str> {
         self.records.iter().filter_map(move |record| match record {
-            Record::Commentary { name, text } if *name == wanted => {
+            Record::Commentary { name: own, text } if *own == name => {
                 Some(text.as_deref().unwrap_or(""))
             }
             _ => None,
@@ -401,31 +391,26 @@ impl Header {
         Self::default()
     }
 
-    /// Insert a valued keyword, or replace the value of an existing one, keeping
-    /// the keyword index in sync. The keyword must not be a control or commentary
-    /// keyword. Text must use restricted ASCII and numeric values must have a
-    /// finite FITS representation. An error leaves the header unchanged.
+    /// Set the value of the first valued or `HIERARCH` record with this name, keeping
+    /// its comment, or append one; a malformed record of the name is replaced in its
+    /// place. [`FitsError::ReservedName`] for a control or commentary name. Text must use
+    /// restricted ASCII, and a long one continues on `CONTINUE` records; numeric values
+    /// must have a finite FITS representation. An error leaves the header unchanged.
     pub fn set(
         &mut self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
         value: impl Into<Value>,
     ) -> Result<&mut Self> {
-        let keyword = checked(keyword)?;
-        validate_valued_keyword(keyword)?;
-        let record = Record::Valued {
-            keyword,
-            value: value.into(),
-            comment: None,
-        };
-        let Some(&i) = self.index.get(&keyword) else {
+        let name = named(name)?;
+        name.validate_valued()?;
+        let value = value.into();
+        if let Some(i) = self.first(&name) {
+            self.replace_value(i, value)?;
+        } else {
+            let record = Record::valued(name, value)?;
             card::validate(&record)?;
             self.push_record(record);
-            return Ok(self);
-        };
-        let Record::Valued { value, .. } = record else {
-            unreachable!("built as a valued record above");
-        };
-        self.replace_value(i, value)?;
+        }
         Ok(self)
     }
 
@@ -471,60 +456,52 @@ impl Header {
         Ok(())
     }
 
-    /// [`Header::set`] for `Some`; for `None`, remove every record with this keyword,
-    /// so the header holds `value` or nothing.
+    /// [`Header::set`] for `Some`; for `None`, remove every record with this name, so
+    /// the header holds `value` or nothing.
     pub fn set_optional(
         &mut self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
         value: Option<impl Into<Value>>,
     ) -> Result<&mut Self> {
-        let keyword = checked(keyword)?;
-        validate_valued_keyword(keyword)?;
+        let name = named(name)?;
+        name.validate_valued()?;
         let Some(value) = value else {
-            self.remove_all(keyword)?;
+            self.remove_all(name)?;
             return Ok(self);
         };
-        self.set(keyword, value)
+        self.set(name, value)
     }
 
     #[track_caller]
     pub(crate) fn set_internal(
         &mut self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
         value: impl Into<Value>,
     ) -> &mut Self {
-        self.set(keyword, value)
+        self.set(name, value)
             .expect("internal FITS header metadata must be valid")
     }
 
-    /// Append a duplicate valued card without replacing an earlier occurrence.
+    /// Append a duplicate valued record without replacing an earlier occurrence.
     /// Lookup continues to return the first occurrence, matching parsed headers.
     pub fn append(
         &mut self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
         value: impl Into<Value>,
     ) -> Result<&mut Self> {
-        self.insert(self.records.len(), keyword, value)
+        self.insert(self.records.len(), name, value)
     }
 
-    /// Insert a valued card at a logical record position. Unlike [`Header::set`],
-    /// this never replaces an existing card and can deliberately create duplicates.
+    /// Insert a valued record at a logical record position. Unlike [`Header::set`],
+    /// this never replaces an existing record and can deliberately create duplicates.
     pub fn insert(
         &mut self,
         index: usize,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
         value: impl Into<Value>,
     ) -> Result<&mut Self> {
-        let keyword = checked(keyword)?;
-        validate_valued_keyword(keyword)?;
-        self.insert_record(
-            index,
-            Record::Valued {
-                keyword,
-                value: value.into(),
-                comment: None,
-            },
-        )
+        let record = Record::valued(named(name)?, value.into())?;
+        self.insert_record(index, record)
     }
 
     /// Insert `record` at the logical position `index`: the inverse of
@@ -548,12 +525,12 @@ impl Header {
         Ok(self)
     }
 
-    /// Remove the first logical record with `keyword`.
+    /// Remove the first logical record with this name, as [`Header::index_of`] finds it.
     pub fn remove(
         &mut self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
     ) -> Result<Option<Record>> {
-        let Some(index) = self.index_of(keyword)? else {
+        let Some(index) = self.index_of(name)? else {
             return Ok(None);
         };
         self.remove_at(index).map(Some)
@@ -571,14 +548,15 @@ impl Header {
         Ok(self.take_at(index))
     }
 
-    /// Remove every logical record with `keyword`, returning the count removed.
+    /// Remove every logical record with this name, as [`Header::index_of`] finds them,
+    /// returning the count removed.
     pub fn remove_all(
         &mut self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
     ) -> Result<usize> {
-        let keyword = checked(keyword)?;
+        let name = named(name)?;
         let old_len = self.records.len();
-        self.records.retain(|record| !record.is_named(keyword));
+        self.records.retain(|record| !record.is_named(&name));
         if self.records.len() != old_len {
             self.reindex();
         }
@@ -732,93 +710,22 @@ impl Header {
         }
     }
 
-    /// The value of the first `HIERARCH` record with `name`, compared without regard to
-    /// ASCII case; [`FitsError::InvalidValue`] when that record is malformed.
-    pub fn get_hierarch(
-        &self,
-        name: impl TryInto<HierarchName, Error: Into<FitsError>>,
-    ) -> Result<Option<&Value>> {
-        let name = name.try_into().map_err(Into::into)?;
-        self.hierarch_index
-            .get(&name)
-            .map(|&i| self.records[i].value_or_defect())
-            .transpose()
-    }
-
-    /// The inline comment of the first `HIERARCH` record with `name`, as
-    /// [`Header::get_comment`] reads a keyword's.
-    pub fn get_hierarch_comment(
-        &self,
-        name: impl TryInto<HierarchName, Error: Into<FitsError>>,
-    ) -> Result<Option<&str>> {
-        let name = name.try_into().map_err(Into::into)?;
-        let Some(&i) = self.hierarch_index.get(&name) else {
-            return Ok(None);
-        };
-        self.records[i].value_or_defect()?;
-        Ok(self.records[i].comment())
-    }
-
-    /// Set the value of the first `HIERARCH` record with `name`, or append one; a
-    /// malformed record of the name is replaced in its place. Text must use restricted
-    /// ASCII, and a long one continues on `CONTINUE` records. An error leaves the header
-    /// unchanged.
-    pub fn set_hierarch(
-        &mut self,
-        name: impl TryInto<HierarchName, Error: Into<FitsError>>,
-        value: impl Into<Value>,
-    ) -> Result<&mut Self> {
-        let name = name.try_into().map_err(Into::into)?;
-        let value = value.into();
-        if let Some(&i) = self.hierarch_index.get(&name) {
-            self.replace_value(i, value)?;
-        } else {
-            let record = Record::Hierarch {
-                name,
-                value,
-                comment: None,
-            };
-            card::validate(&record)?;
-            self.push_record(record);
-        }
-        Ok(self)
-    }
-
-    /// Remove the first `HIERARCH` record with `name`, malformed or not.
-    pub fn remove_hierarch(
-        &mut self,
-        name: impl TryInto<HierarchName, Error: Into<FitsError>>,
-    ) -> Result<Option<Record>> {
-        let name = name.try_into().map_err(Into::into)?;
-        Ok(self
-            .hierarch_index
-            .get(&name)
-            .copied()
-            .map(|i| self.take_at(i)))
-    }
-
-    /// Attach (or replace) the inline comment of an existing valued keyword. Errors
-    /// with [`FitsError::MissingKeyword`] for a keyword the header does not hold.
-    /// An error leaves the header unchanged.
+    /// Attach (or replace) the inline comment of the first valued or `HIERARCH` record
+    /// with this name. Errors with [`FitsError::MissingKeyword`] for a record the header
+    /// does not hold, and with [`FitsError::ReservedName`] for a control or commentary
+    /// name, whose records carry no inline comment. An error leaves the header unchanged.
     pub fn set_comment(
         &mut self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
         text: &str,
     ) -> Result<&mut Self> {
-        let keyword = checked(keyword)?;
-        validate_ascii(text, || TextOrigin::Comment(RecordName::Keyword(keyword)))?;
-        let Some(&i) = self.index.get(&keyword) else {
-            return Err(FitsError::MissingKeyword { keyword });
+        let name = named(name)?;
+        name.validate_valued()?;
+        validate_ascii(text, || TextOrigin::Comment(name.clone()))?;
+        let Some(i) = self.first(&name) else {
+            return Err(FitsError::MissingKeyword { name });
         };
-        let Record::Valued { value, .. } = &self.records[i] else {
-            self.records[i].value_or_defect()?;
-            unreachable!("the keyword index holds valued and malformed records only");
-        };
-        let record = Record::Valued {
-            keyword,
-            value: value.clone(),
-            comment: Some(text.to_string()),
-        };
+        let record = self.records[i].with_comment(text)?;
         card::validate(&record)?;
         self.records[i] = record;
         Ok(self)
@@ -827,33 +734,24 @@ impl Header {
     #[track_caller]
     pub(crate) fn set_comment_internal(
         &mut self,
-        keyword: impl TryInto<Keyword, Error: Into<FitsError>>,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
         text: &str,
     ) -> &mut Self {
-        self.set_comment(keyword, text)
+        self.set_comment(name, text)
             .expect("internal FITS header comments must be valid")
     }
 
-    /// Append one restricted-ASCII `COMMENT` record. Text that cannot fit the
-    /// record returns an error without changing the header.
-    pub fn push_comment(&mut self, text: &str) -> Result<&mut Self> {
-        self.push_commentary(CommentaryName::COMMENT, text)
-    }
-
-    /// Append one restricted-ASCII `HISTORY` record. Text that cannot fit the
-    /// record returns an error without changing the header.
-    pub fn push_history(&mut self, text: &str) -> Result<&mut Self> {
-        self.push_commentary(CommentaryName::HISTORY, text)
-    }
-
-    /// Append a blank-keyword commentary record. `text = ""` produces a physically
-    /// blank card; nonempty text uses the same restricted-ASCII rules.
-    pub fn push_blank(&mut self, text: &str) -> Result<&mut Self> {
-        self.push_commentary(CommentaryName::BLANK, text)
-    }
-
-    fn push_commentary(&mut self, name: CommentaryName, text: &str) -> Result<&mut Self> {
-        let record = Record::commentary(name, text);
+    /// Append a commentary record of this name. `text = ""` makes a physically blank
+    /// record; other text must use restricted ASCII and fit the record. Errors with
+    /// [`FitsError::AmbiguousCommentary`] for a name and text that would read back as
+    /// another record, as `"SIMPLE"` and `"= T"` would. An error leaves the header
+    /// unchanged.
+    pub fn push_commentary(
+        &mut self,
+        name: impl TryInto<CommentaryName, Error: Into<FitsError>>,
+        text: &str,
+    ) -> Result<&mut Self> {
+        let record = Record::commentary(name.try_into().map_err(Into::into)?, text);
         card::validate(&record)?;
         self.records.push(record);
         Ok(self)
@@ -999,8 +897,9 @@ impl PartialEq for Header {
     }
 }
 
-/// The keyword `name` names: a [`Keyword`] as it is, a `&str` checked into one.
-fn checked(name: impl TryInto<Keyword, Error: Into<FitsError>>) -> Result<Keyword> {
+/// The record `name` names: a [`RecordName`] or a [`Keyword`] as it is, a `&str` parsed
+/// into one.
+fn named(name: impl TryInto<RecordName, Error: Into<FitsError>>) -> Result<RecordName> {
     name.try_into().map_err(Into::into)
 }
 

@@ -12,15 +12,16 @@ use crate::bintable::column_data::ColumnData;
 use crate::bintable::descriptor::{DescriptorWidth, PqDescriptor};
 use crate::bintable::element_kind::ElementKind;
 use crate::bintable::tdim;
+use crate::bintable::tform::{Storage, Tform};
 use crate::bitpix::Bitpix;
 use crate::column::validate_table_field_count;
 #[cfg(feature = "compression")]
-use crate::compress::CompressionConfig;
+use crate::compression::CompressionConfig;
 #[cfg(feature = "compression")]
-use crate::compress::encoded_unit::EncodedUnit;
+use crate::compression::encoded_unit::EncodedUnit;
 #[cfg(feature = "compression")]
-use crate::compress::table::{self, TableCells};
-use crate::error::{FitsError, Result, TextOrigin};
+use crate::compression::table::{self, TableCells};
+use crate::fits_error::{FitsError, Result, TextOrigin};
 use crate::fits_writer::column_scaling::{ColumnScaling, Scalable};
 #[cfg(feature = "compression")]
 use crate::fits_writer::merge_header_template;
@@ -564,7 +565,7 @@ fn validate_column(col: &WriteColumn, row_count: usize, n: usize) -> Result<Colu
                 row_width: kind
                     .payload_len(*repeat)
                     .ok_or(FitsError::DataUnitOverflow)?,
-                tform: format!("{repeat}{}", kind.code()),
+                tform: Tform::new(*repeat, kind, Storage::Fixed).to_string(),
             })
         }
         WriteColumnData::Vla { rows, width } => {
@@ -582,7 +583,10 @@ fn validate_column(col: &WriteColumn, row_count: usize, n: usize) -> Result<Colu
             }
             Ok(ColumnLayout {
                 row_width: width.bytes(),
-                tform: format!("1{}{}({max_elements})", width.letter(), kind.code()),
+                tform: format!(
+                    "{}({max_elements})",
+                    Tform::new(1, kind, Storage::Array(*width))
+                ),
             })
         }
     }

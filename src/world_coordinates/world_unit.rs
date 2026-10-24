@@ -1,6 +1,6 @@
 //! [`WorldUnit`]: the unit an axis's world coordinates come out in.
 
-use crate::error::{FitsError, Result, UnitKind};
+use crate::fits_error::{FitsError, Result, UnitKind};
 use crate::unit;
 use crate::world_coordinates::axis_transform;
 use crate::world_coordinates::ctype::Ctype;

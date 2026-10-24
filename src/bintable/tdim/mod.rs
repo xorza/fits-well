@@ -1,7 +1,7 @@
 //! `TDIMn` array-shape parsing and the two validity rules it must satisfy (§7.3.2).
 
-use crate::error::FitsError;
-use crate::error::Result;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
 use crate::keyword::Keyword;
 
 /// Parse the value of the `TDIMn` card `keyword`, `'(d1,d2,…)'`, into axis lengths

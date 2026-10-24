@@ -32,7 +32,7 @@ use crate::bintable::column_reader::ColumnReader;
 use crate::bintable::schema::Schema;
 use crate::bintable::table_view::TableView;
 use crate::column::ColumnSelector;
-use crate::error::Result;
+use crate::fits_error::Result;
 
 /// A binary table's structure plus its data unit.
 #[derive(Debug, Clone)]
@@ -87,8 +87,8 @@ pub(crate) mod internals {
     use crate::bintable::element_kind::ElementKind;
     use crate::bintable::schema::Schema;
     #[cfg(all(test, feature = "compression"))]
-    use crate::bintable::tform;
-    use crate::error::Result;
+    use crate::bintable::tform::Tform;
+    use crate::fits_error::Result;
     use crate::header_model::{Header, keywords};
     use crate::internals::cards;
 
@@ -115,7 +115,7 @@ pub(crate) mod internals {
     #[cfg(all(test, feature = "compression"))]
     pub(crate) fn set_column_kind(table: &mut Table, column: usize, kind: ElementKind) {
         let tform = &mut table.schema.columns[column].tform;
-        *tform = tform::internals::tform(tform.repeat(), kind, tform.storage());
+        *tform = Tform::new(tform.repeat(), kind, tform.storage());
     }
 }
 

@@ -1,7 +1,7 @@
 //! Reading WCS keywords from a header: a keyword that a formatted name cannot fit has
 //! no card, and an axis-indexed family reads as one value per axis.
 
-use crate::error::{FitsError, Result};
+use crate::fits_error::{FitsError, Result};
 use crate::header_model::Header;
 use crate::header_model::value::Value;
 use crate::keyword::Keyword;

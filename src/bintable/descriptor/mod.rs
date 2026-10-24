@@ -1,10 +1,10 @@
 use std::ops::Range;
 
 use crate::bintable::element_kind::ElementKind;
-use crate::error::DescriptorField;
-use crate::error::FitsError;
-use crate::error::Result;
-use crate::error::SizeUnit;
+use crate::fits_error::DescriptorField;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
+use crate::fits_error::SizeUnit;
 
 /// A variable-length array descriptor's integers: `P`'s two 32-bit ones, or `Q`'s two 64-bit
 /// ones.
@@ -165,7 +165,7 @@ fn nonnegative_field(field: DescriptorField, value: i64) -> Result<usize> {
 #[cfg(test)]
 pub(crate) mod internals {
     use crate::bintable::descriptor::DescriptorWidth;
-    use crate::error::{DescriptorField, FitsError};
+    use crate::fits_error::{DescriptorField, FitsError};
 
     #[derive(Debug)]
     pub(crate) struct MalformedDescriptorCase {

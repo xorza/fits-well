@@ -1,16 +1,17 @@
 //! The World Coordinate System parse and transforms, published as [`crate::wcs`].
 
 use crate::alternate::Alternate;
-use crate::error::FitsError;
-use crate::error::Indexed;
-use crate::error::Ranked;
-use crate::error::Result;
-use crate::error::WcsConflict;
+use crate::fits_error::FitsError;
+use crate::fits_error::Indexed;
+use crate::fits_error::Ranked;
+use crate::fits_error::Result;
+use crate::fits_error::WcsConflict;
 use crate::header_model::record::RecordView;
+use crate::header_model::record_name::RecordName;
 use crate::header_model::{Header, keywords};
 use crate::image_model::region::Region;
 use crate::keyword::Keyword;
-use crate::world_coordinates::axis::Axis;
+use crate::world_coordinates::axis_description::AxisDescription;
 use crate::world_coordinates::axis_plan::{AxisKind, AxisPlan};
 use crate::world_coordinates::axis_transform::AxisTransform;
 use crate::world_coordinates::axis_transform::spectral_rest::SpectralParameters;
@@ -36,7 +37,7 @@ use crate::world_coordinates::table_wcs::TableWcs;
 use crate::world_coordinates::world_unit::WorldUnit;
 
 mod angle;
-pub(crate) mod axis;
+pub(crate) mod axis_description;
 mod axis_plan;
 pub(crate) mod axis_transform;
 #[cfg(feature = "internals")]
@@ -73,8 +74,8 @@ pub struct CelestialProjection {
 
 /// A read-only snapshot of a parsed WCS's source metadata and support status.
 #[derive(Debug, Clone, Copy)]
-pub struct Metadata<'a> {
-    pub axes: &'a [Axis],
+pub struct Description<'a> {
+    pub axes: &'a [AxisDescription],
     /// The resolved `RADESYSa`/`EQUINOXa` metadata when applicable.
     pub celestial_frame: Option<CelestialFrame>,
     /// Resolved celestial axes, projection, and native pole.
@@ -96,7 +97,7 @@ pub struct AxisWorld<'a> {
 /// A parsed world coordinate system for one (optionally alternate) axis set.
 #[derive(Debug, Clone)]
 pub struct Wcs {
-    axes: Vec<Axis>,
+    axes: Vec<AxisDescription>,
     plans: Vec<AxisPlan>,
     /// The linear layer `(pixel − CRPIX) → intermediate world coordinate`, and its
     /// inverse.
@@ -283,7 +284,7 @@ impl Wcs {
         };
         if code == Some(Distortion::Sip) && alt == Alternate::PRIMARY && sip.is_none() {
             return Err(FitsError::MissingKeyword {
-                keyword: Keyword::new("A_ORDER"),
+                name: RecordName::Keyword(Keyword::new("A_ORDER")),
             });
         }
         if sip.is_some() && naxis < 2 {
@@ -325,7 +326,7 @@ impl Wcs {
         let axes = ctype
             .into_iter()
             .enumerate()
-            .map(|(i, ctype)| Axis {
+            .map(|(i, ctype)| AxisDescription {
                 ctype,
                 cunit: cunit[i].clone(),
                 crval: declared_crval[i],
@@ -461,10 +462,10 @@ impl Wcs {
             .write(header, Alternate::of(alt)?, &self.axes, self.linear.sip())
     }
 
-    /// Borrow the parsed axis metadata and unsupported-axis flags without exposing
+    /// Borrow the parsed axis descriptions and unsupported-axis flags without exposing
     /// the transform's invariant-bearing owned state for mutation.
-    pub fn metadata(&self) -> Metadata<'_> {
-        Metadata {
+    pub fn description(&self) -> Description<'_> {
+        Description {
             axes: &self.axes,
             celestial_frame: self.celestial_frame,
             celestial_projection: self
@@ -689,7 +690,7 @@ impl Wcs {
                 None if inferred != 0 => inferred,
                 None => {
                     return Err(FitsError::MissingKeyword {
-                        keyword: keywords::WCSAXES,
+                        name: RecordName::Keyword(keywords::WCSAXES),
                     });
                 }
             }
@@ -740,7 +741,7 @@ fn has_scamp_terms(header: &Header, alt: Alternate, axes: ProjectedCelestialAxes
 /// assembled from, not just by [`Wcs`]'s own.
 #[cfg(test)]
 pub(crate) mod internals {
-    use crate::error::Result;
+    use crate::fits_error::Result;
     use crate::world_coordinates::Wcs;
     use crate::world_coordinates::angle::DEGREE_TOLERANCE;
 

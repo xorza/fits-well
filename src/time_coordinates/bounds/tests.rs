@@ -1,5 +1,5 @@
-use crate::error::FitsError;
-use crate::error::TimeConversion;
+use crate::fits_error::FitsError;
+use crate::fits_error::TimeConversion;
 use crate::header_model::keywords;
 use crate::internals::cards::header_of;
 

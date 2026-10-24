@@ -1,6 +1,5 @@
-use crate::error::ValueKind;
+use crate::fits_error::ValueKind;
 use crate::hdu::*;
-use crate::header_model::record_name::RecordName;
 use crate::internals::cards::from_card_lines as header;
 
 #[test]
@@ -208,7 +207,7 @@ fn role_specific_extents_require_counts_and_ignore_groups_on_extensions() {
     assert!(matches!(
         data_extent(&missing_counts, HduRole::Extension),
         Err(FitsError::MissingKeyword {
-            keyword: keywords::PCOUNT
+            name: RecordName::Keyword(keywords::PCOUNT)
         })
     ));
 
@@ -222,7 +221,7 @@ fn role_specific_extents_require_counts_and_ignore_groups_on_extensions() {
     assert!(matches!(
         data_extent(&missing_gcount, HduRole::Extension),
         Err(FitsError::MissingKeyword {
-            keyword: keywords::GCOUNT
+            name: RecordName::Keyword(keywords::GCOUNT)
         })
     ));
 

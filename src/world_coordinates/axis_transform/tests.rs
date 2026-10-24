@@ -1,5 +1,5 @@
-use crate::error::GrismDefect;
-use crate::error::UnitKind;
+use crate::fits_error::GrismDefect;
+use crate::fits_error::UnitKind;
 use crate::header_model::{Header, keywords};
 use crate::internals::tolerance::{Tolerance, assert_close};
 use crate::internals::wcs_header::{WcsHeader, axis_header};
@@ -159,7 +159,7 @@ fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
     for (ctype, unsupported) in cases {
         let wcs = build(ctype);
         let expected: &[usize] = if unsupported { &[2] } else { &[] };
-        assert_eq!(wcs.metadata().unsupported_axes, expected, "{ctype}");
+        assert_eq!(wcs.description().unsupported_axes, expected, "{ctype}");
         assert!(wcs.celestial.is_some(), "{ctype} must retain the TAN pair");
 
         if unsupported {
@@ -229,7 +229,7 @@ fn grism_axes_match_wcslib_and_invert() {
     ];
     for (ctype, reference, goldens) in cases {
         let wcs = grism_wcs(ctype, reference);
-        assert!(wcs.metadata().unsupported_axes.is_empty(), "{ctype}");
+        assert!(wcs.description().unsupported_axes.is_empty(), "{ctype}");
         for (expected_world, pixel) in goldens {
             let world = to_world(&wcs, &[pixel]).unwrap();
             assert!(
@@ -441,7 +441,11 @@ fn spectral_algorithms_match_wcslib() {
         let mut header = axis_header(case.ctype, case.unit, 1.0, case.reference, case.increment);
         header.set_internal(keywords::RESTFRQ, 1_420_405_751.0);
         let wcs = Wcs::from_header(&header, None).unwrap();
-        assert!(wcs.metadata().unsupported_axes.is_empty(), "{}", case.ctype);
+        assert!(
+            wcs.description().unsupported_axes.is_empty(),
+            "{}",
+            case.ctype
+        );
         let world = to_world(&wcs, &[3.0]).unwrap()[0];
         assert!(
             (world - case.world).abs() <= ROUNDING * rounding_scale(case.ctype, case.reference),
@@ -530,9 +534,9 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
         header.set_internal(keywords::RESTFRQ, 1_420_405_751.0);
         let wcs = Wcs::from_header(&header, None).unwrap();
         // The view reports the axis as declared; the world coordinate is in the default unit.
-        assert_eq!(wcs.metadata().axes[0].cunit, case.unit);
+        assert_eq!(wcs.description().axes[0].cunit, case.unit);
         assert_eq!(
-            wcs.metadata().axes[0].crval,
+            wcs.description().axes[0].crval,
             case.reference,
             "{}",
             case.ctype
@@ -570,7 +574,7 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
     let generic = axis_header("TIME-LOG", "d", 1.0, 100.0, 10.0);
     let generic = Wcs::from_header(&generic, None).unwrap();
     let expected = 100.0 * 0.2_f64.exp();
-    assert_eq!(generic.metadata().axes[0].cunit, "d");
+    assert_eq!(generic.description().axes[0].cunit, "d");
     assert!((to_world(&generic, &[3.0]).unwrap()[0] - expected).abs() < 1e-13);
     assert!((to_pixel(&generic, &[expected]).unwrap()[0] - 3.0).abs() < 1e-13);
     assert!(matches!(
@@ -584,8 +588,8 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
     let frequency = axis_header("FREQ-LOG", "GHz", 1.0, 1.4, 0.001);
     let frequency = Wcs::from_header(&frequency, None).unwrap();
     let expected = 1.4e9 * (2.0e6_f64 / 1.4e9).exp();
-    assert_eq!(frequency.metadata().axes[0].cunit, "GHz");
-    assert_eq!(frequency.metadata().axes[0].crval, 1.4);
+    assert_eq!(frequency.description().axes[0].cunit, "GHz");
+    assert_eq!(frequency.description().axes[0].crval, 1.4);
     assert!((to_world(&frequency, &[3.0]).unwrap()[0] - expected).abs() < 1e-6);
     assert!((to_pixel(&frequency, &[expected]).unwrap()[0] - 3.0).abs() < 1e-12);
 

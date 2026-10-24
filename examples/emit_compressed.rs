@@ -23,7 +23,8 @@ use std::path::Path;
 use std::process;
 
 use fits_well::FitsWriter;
-use fits_well::image::{Compression, CompressionConfig, Data, Hcompress, Image, Scaling};
+use fits_well::compress::{Compression, CompressionConfig, Hcompress};
+use fits_well::image::{Data, Image, Scaling};
 use fits_well::table::{Builder, ColumnData, WriteColumn};
 
 fn main() -> fits_well::Result<()> {

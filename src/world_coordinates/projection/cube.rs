@@ -3,7 +3,7 @@
 use std::f64::consts::FRAC_1_SQRT_2;
 use std::f64::consts::PI;
 
-use crate::error::Result;
+use crate::fits_error::Result;
 use crate::world_coordinates::angle::D2R;
 use crate::world_coordinates::angle::R2D;
 use crate::world_coordinates::angle::UNIT_TOLERANCE;

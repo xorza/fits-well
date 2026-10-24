@@ -2,7 +2,7 @@
 //! scaling it is read with.
 
 use crate::bitpix::Bitpix;
-use crate::error::Result;
+use crate::fits_error::Result;
 use crate::image_model::data::Data;
 use crate::image_model::physical_sample::PhysicalSample;
 use crate::image_model::sample::sealed::Raw;

@@ -16,10 +16,10 @@ use crate::block;
 use crate::block::{BLOCK_SIZE, SPACE_FILL, ZERO_FILL};
 use crate::checksum::running::Running;
 #[cfg(feature = "compression")]
-use crate::compress::encoded_unit::EncodedUnit;
+use crate::compression::encoded_unit::EncodedUnit;
 #[cfg(feature = "compression")]
-use crate::compress::{CompressionConfig, encode};
-use crate::error::{FitsError, Result, SizeUnit};
+use crate::compression::{CompressionConfig, encode};
+use crate::fits_error::{FitsError, Result, SizeUnit};
 use crate::fits_writer::ascii_builder::AsciiBuilder;
 use crate::fits_writer::builder::Builder;
 use crate::fits_writer::image_writer::ImageWriter;

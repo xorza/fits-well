@@ -2,47 +2,62 @@ use crate::bintable::descriptor::DescriptorWidth;
 use crate::bintable::element_kind::ElementKind;
 use crate::bintable::tform::Storage;
 use crate::bintable::tform::Tform;
-use crate::bintable::tform::internals::tform;
-use crate::error::FitsError;
+use crate::fits_error::FitsError;
 
 #[test]
 fn parses_tform_repeat_and_kind() {
     let cases = [
-        ("8A", tform(8, ElementKind::Character, Storage::Fixed)),
-        ("3D", tform(3, ElementKind::F64, Storage::Fixed)),
-        ("0D", tform(0, ElementKind::F64, Storage::Fixed)),
-        ("1J", tform(1, ElementKind::I32, Storage::Fixed)),
-        ("E", tform(1, ElementKind::F32, Storage::Fixed)), // bare code ⇒ repeat 1
-        ("16X", tform(16, ElementKind::Bit, Storage::Fixed)),
+        ("8A", Tform::new(8, ElementKind::Character, Storage::Fixed)),
+        ("3D", Tform::new(3, ElementKind::F64, Storage::Fixed)),
+        ("0D", Tform::new(0, ElementKind::F64, Storage::Fixed)),
+        ("1J", Tform::new(1, ElementKind::I32, Storage::Fixed)),
+        ("E", Tform::new(1, ElementKind::F32, Storage::Fixed)), // bare code ⇒ repeat 1
+        ("16X", Tform::new(16, ElementKind::Bit, Storage::Fixed)),
         // P/Q carry the heap element type.
         (
             "1PE(5)",
-            tform(1, ElementKind::F32, Storage::Array(DescriptorWidth::P)),
+            Tform::new(1, ElementKind::F32, Storage::Array(DescriptorWidth::P)),
         ),
         (
             "1QD",
-            tform(1, ElementKind::F64, Storage::Array(DescriptorWidth::Q)),
+            Tform::new(1, ElementKind::F64, Storage::Array(DescriptorWidth::Q)),
         ),
         // The characters after a code, or after a P/Q's element type, are undefined
         // and ignored (§7.3.1, §7.3.5).
-        ("60A10", tform(60, ElementKind::Character, Storage::Fixed)),
-        ("1Jjunk", tform(1, ElementKind::I32, Storage::Fixed)),
+        (
+            "60A10",
+            Tform::new(60, ElementKind::Character, Storage::Fixed),
+        ),
+        ("1Jjunk", Tform::new(1, ElementKind::I32, Storage::Fixed)),
         (
             "1PE(5)junk",
-            tform(1, ElementKind::F32, Storage::Array(DescriptorWidth::P)),
+            Tform::new(1, ElementKind::F32, Storage::Array(DescriptorWidth::P)),
         ),
         (
             "1PE(5",
-            tform(1, ElementKind::F32, Storage::Array(DescriptorWidth::P)),
+            Tform::new(1, ElementKind::F32, Storage::Array(DescriptorWidth::P)),
         ),
         (
             "1QB()",
-            tform(1, ElementKind::U8, Storage::Array(DescriptorWidth::Q)),
+            Tform::new(1, ElementKind::U8, Storage::Array(DescriptorWidth::Q)),
         ),
     ];
     for (s, expected) in cases {
         assert_eq!(s.parse::<Tform>().unwrap(), expected, "{s}");
+        assert_eq!(
+            expected.to_string().parse::<Tform>().unwrap(),
+            expected,
+            "{s}"
+        );
     }
+    // The repeat count is always written, and the ignored characters never are.
+    let printed = cases.map(|(_, tform)| tform.to_string());
+    assert_eq!(
+        printed,
+        [
+            "8A", "3D", "0D", "1J", "1E", "16X", "1PE", "1QD", "60A", "1J", "1PE", "1PE", "1QB"
+        ]
+    );
     for bad in ["9Z", "", "1P", "2PE(5)", "3QD", "1PP", "1PQ", "1QP", "1QQ"] {
         // "1P" lacks the heap element-type letter; "2PE"/"3QD" violate the §6.3
         // rule that a P/Q descriptor's repeat count is 0 or 1.

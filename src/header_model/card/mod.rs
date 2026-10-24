@@ -2,8 +2,8 @@ use std::fmt;
 use std::fmt::Write as _;
 
 use crate::block::CARD_SIZE;
-use crate::error::Result;
-use crate::error::{FitsError, NonFinite, TextOrigin};
+use crate::fits_error::Result;
+use crate::fits_error::{FitsError, NonFinite, TextOrigin};
 use crate::header_model::commentary_name::CommentaryName;
 use crate::header_model::defect::Defect;
 use crate::header_model::hierarch_name::HierarchName;
@@ -214,15 +214,25 @@ pub(crate) fn render_into(record: &Record, out: &mut Vec<u8>) -> Result<()> {
     }
 }
 
-/// A card is valid exactly when it renders. This runs the same checks without
-/// a heap allocation: a single record renders into a stack array, and a
-/// `CONTINUE` chain is valid when its final record holds the comment.
+/// A card is valid exactly when it renders, and a commentary record when it also reads
+/// back as itself. This runs the same checks without a heap allocation: a single
+/// record renders into a stack array, and a `CONTINUE` chain is valid when its final
+/// record holds the comment.
 pub(crate) fn validate(record: &Record) -> Result<()> {
     validate_contents(record)?;
-    match continuation_chain(record) {
-        Some(chain) => chain.validate(),
-        None => render_one(record).map(|_| ()),
+    if let Some(chain) = continuation_chain(record) {
+        return chain.validate();
     }
+    let raw = render_one(record)?;
+    if let Record::Commentary { name, .. } = record
+        && !matches!(
+            ParsedRecord::parse(&raw, 1, &mut Vec::new()),
+            ParsedRecord::Record(parsed) if parsed == *record
+        )
+    {
+        return Err(FitsError::AmbiguousCommentary { name: *name });
+    }
+    Ok(())
 }
 
 /// Serialize to one 80-byte record in fixed format (§4.2): logical, integer,
@@ -505,7 +515,9 @@ fn parse_real(token: &str) -> Option<f64> {
 /// cannot carry.
 pub(super) fn validate_valued_keyword(keyword: Keyword) -> Result<()> {
     if matches!(keyword.as_str(), "END" | "CONTINUE" | "COMMENT" | "HISTORY") {
-        Err(FitsError::ReservedKeyword { keyword })
+        Err(FitsError::ReservedName {
+            name: RecordName::Keyword(keyword),
+        })
     } else {
         Ok(())
     }

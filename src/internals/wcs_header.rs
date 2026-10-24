@@ -1,7 +1,7 @@
 //! WCS headers for tests: one celestial description, written into any keyword family.
 
 use crate::alternate::Alternate;
-use crate::error::FitsError;
+use crate::fits_error::FitsError;
 use crate::header_model::{Header, keywords};
 use crate::internals::tolerance::{Tolerance, assert_close};
 use crate::world_coordinates::Wcs;

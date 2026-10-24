@@ -4,7 +4,7 @@ use std::fmt;
 use std::str;
 use std::str::FromStr;
 
-use crate::error::{FitsError, Result};
+use crate::fits_error::{FitsError, Result};
 
 /// The name of a record with no value indicator: bytes 1–8 of the record with their
 /// trailing blanks dropped. The standard lets such a record start with any 8 bytes of
@@ -111,7 +111,7 @@ impl fmt::Display for CommentaryName {
 
 #[cfg(test)]
 mod tests {
-    use crate::error::FitsError;
+    use crate::fits_error::FitsError;
     use crate::header_model::commentary_name::CommentaryName;
 
     /// Any printable ASCII up to 8 bytes names a commentary record, the blank name

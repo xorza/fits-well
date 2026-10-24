@@ -1,7 +1,7 @@
 //! The resolved celestial pair of a WCS: its axes, projection, parameters, and pole.
 
 use crate::alternate::Alternate;
-use crate::error::Result;
+use crate::fits_error::Result;
 use crate::header_model::Header;
 use crate::keyword::Keyword;
 use crate::world_coordinates::angle::DEGREE_TOLERANCE;
@@ -143,7 +143,7 @@ impl CelestialTransform {
 
     /// The intermediate coordinates of the celestial coordinate `(ra, dec)` (deg), the
     /// inverse of [`Self::to_world`]. Errors with
-    /// [`FitsError::WcsWorldOutOfDomain`](crate::error::FitsError::WcsWorldOutOfDomain)
+    /// [`FitsError::WcsWorldOutOfDomain`](crate::fits_error::FitsError::WcsWorldOutOfDomain)
     /// for a coordinate that is not finite or whose
     /// latitude lies past ±90°.
     pub(super) fn to_intermediate(&self, ra: f64, dec: f64) -> Result<[f64; 2]> {
@@ -171,7 +171,7 @@ pub(super) enum PvMeaning {
 
 #[cfg(test)]
 mod tests {
-    use crate::error::FitsError;
+    use crate::fits_error::FitsError;
     use crate::internals::tolerance::{Tolerance, assert_close};
     use crate::internals::wcs_header::WcsHeader;
     use crate::world_coordinates::Wcs;

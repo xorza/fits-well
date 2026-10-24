@@ -11,9 +11,9 @@ use crate::checksum;
 use crate::checksum::checksum_report::{ChecksumReport, ChecksumStatus};
 use crate::column::MAX_TABLE_FIELDS;
 #[cfg(feature = "compression")]
-use crate::compress::{Compression, CompressionConfig, Hcompress};
-use crate::error::TextOrigin;
-use crate::error::{FitsError, SizeUnit};
+use crate::compression::{Compression, CompressionConfig, Hcompress};
+use crate::fits_error::TextOrigin;
+use crate::fits_error::{FitsError, SizeUnit};
 use crate::fits_writer::ascii_builder::{AsciiBuilder, AsciiFloatFormat, AsciiWriteColumn};
 use crate::fits_writer::builder::{Builder, WriteColumn};
 use crate::fits_writer::{CHUNK_SAMPLES, FitsWriter, WriterState};
@@ -119,9 +119,15 @@ fn informational_header_template() -> Header {
         ("TIMESYS", "UTC".into()),
         ("MJDREF", 60_000.0.into()),
     ]);
-    header.push_comment("first preserved comment").unwrap();
-    header.push_history("preserved history").unwrap();
-    header.push_comment("second preserved comment").unwrap();
+    header
+        .push_commentary(CommentaryName::COMMENT, "first preserved comment")
+        .unwrap();
+    header
+        .push_commentary(CommentaryName::HISTORY, "preserved history")
+        .unwrap();
+    header
+        .push_commentary(CommentaryName::COMMENT, "second preserved comment")
+        .unwrap();
     header
 }
 

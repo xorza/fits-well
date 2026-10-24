@@ -3,7 +3,7 @@
 use std::fmt;
 use std::str;
 
-use crate::error::{FitsError, Result};
+use crate::fits_error::{FitsError, Result};
 
 /// Which coordinate description a read selects (§8.2): the primary one, or an
 /// alternate one named by a letter `A` to `Z`, the `a` that ends each keyword of that

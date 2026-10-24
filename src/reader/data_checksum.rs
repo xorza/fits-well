@@ -3,7 +3,7 @@
 use crate::checksum::checksum_report::ChecksumReport;
 use crate::checksum::declared::Declared;
 use crate::checksum::running::Running;
-use crate::error::Result;
+use crate::fits_error::Result;
 use crate::reader::data_source::DataSource;
 use crate::reader::hdu::Hdu;
 use crate::reader::source::Source;
