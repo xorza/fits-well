@@ -58,6 +58,10 @@ its doc comments show how each one works. Sources: the FITS 4.0 standard
 - **`Hdus` owns the HDU list** — the scan, the selection and the image list — for the
   reader and the editor alike. Refused: a free function over a slice of `Hdu` in each
   caller.
+- **A bad header after the primary ends the HDU list, and the reader keeps its error:**
+  a select of that index returns it. A bad primary fails the open. Refused: failing the
+  open, which lost every good HDU that cfitsio and astropy read, and `HduNotFound` for the
+  bad index, which hid the damage. Research: `2026-10-25-review-interop.md`.
 - **A read names its HDU with an `HduSelector`:** an index, or an `EXTNAME` with
   `EXTVER` and `EXTLEVEL`, a primary with none being `PRIMARY`, as in astropy. A name no
   HDU carries is `HduNotFound`. Refused: a second way to each fact about an HDU, and an
@@ -114,6 +118,10 @@ its doc comments show how each one works. Sources: the FITS 4.0 standard
 - **The characters after a `TFORMn` code are ignored,** as §7.3.1 leaves them undefined
   and cfitsio and astropy skip them. Refused: a refusal, which lost a table that
   carried a writer's suffix.
+- **An ASCII real field with no point takes its implied point, with or without an
+  exponent** (§7.2.5), as cfitsio's `fffstrr8` does: `1E5` in `E10.2` is 1000. Refused:
+  the point only without an exponent, which matched no reader, and astropy's literal
+  read, which ignores the standard's rule. Research: `2026-10-25-review-interop.md`.
 - **A `Tform` is a repeat, an element kind and a storage.** Refused: one kind enum
   with the descriptors beside the element types, which needed an `unreachable!` in each
   decode.
@@ -207,6 +215,10 @@ its doc comments show how each one works. Sources: the FITS 4.0 standard
 - **A quantized float image takes HCOMPRESS_1,** on the quantized integers, and refuses
   `SUBTRACTIVE_DITHER_2` with it, as fpack does. Refused: cfitsio's library change of the
   method with a warning, and `PLIO_1` for floats, whose 24 bits a tile seldom fits.
+- **HCOMPRESS_1 takes a tile of any rank with exactly two extents above 1,** on read and
+  write, the first as `nx`, the second as `ny`, as cfitsio and astropy tile a cube.
+  Refused: `ZNAXIS = 2` alone, which refused fpack's own cubes, and a read-only form,
+  which refused on write the files fpack writes. Research: `2026-10-25-review-interop.md`.
 - **A lossless float write gathers the samples as bytes,** so a NaN's payload comes
   back. Refused: the quantizer's `f64` gather.
 - **The float container widens its descriptors to `Q`** past the 32-bit range, as the
@@ -269,6 +281,13 @@ its doc comments show how each one works. Sources: the FITS 4.0 standard
 - **The inverse linear step solves with the matrix's LU factors,** in place. Its cost:
   four coupled axes invert 34 % slower. Refused: the explicit inverse, which needs a
   buffer for each point. Source: Higham §14.1.
+- **Two linear forms that disagree are refused; a form with no effect is ignored.** `PC`
+  with `CD`, or either with a nonzero `CROTA` of the latitude axis, is
+  `ConflictingWcsKeywords`; a zero `CROTA`, or one on another axis, is not read, as
+  wcslib never reads it (Paper II §6.2 forbids writing the mix). Refused: wcslib's
+  silent precedence of `PC`, then `CD`, then `CROTA`, which reads a conflict with no
+  signal, and a refusal of any `CROTA` beside `PC`, which refused files astropy reads.
+  Research: `2026-10-25-review-interop.md`.
 - **A WCS or time read selects its description with `impl TryInto<Alternate>`** (§8.2).
   Refused: `Option<char>`, which let a digit spell another keyword, and a public enum.
 - **A WCS error names its case.** Refused: a formatted detail, about 35 messages a caller
