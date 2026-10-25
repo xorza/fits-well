@@ -2,6 +2,7 @@ use crate::bintable::Table;
 use crate::bintable::character_field::CharacterField;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::internals::table_header;
+use crate::internals::whole_column::WholeColumn;
 
 #[test]
 fn character_columns_preserve_members_terminators_and_null_strings() {

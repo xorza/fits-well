@@ -1,46 +1,47 @@
 //! [`ImageReader`]: one image HDU of an open file, read a region at a time.
 
 #[cfg(feature = "compression")]
-use std::mem;
-#[cfg(feature = "compression")]
-use std::ops::Range;
-
 use crate::allocation;
 #[cfg(feature = "compression")]
 use crate::bintable::selection::Fetch;
 #[cfg(feature = "compression")]
 use crate::bintable::table_view::TableView;
-use crate::bitpix::Bitpix;
 use crate::checksum::checksum_report::ChecksumReport;
+#[cfg(feature = "compression")]
+use crate::compression::decode::decode_buffer::DecodeBuffer;
 #[cfg(feature = "compression")]
 use crate::compression::decode::decode_capacities::DecodeCapacities;
 #[cfg(feature = "compression")]
 use crate::compression::decode::tile_index::TileIndex;
 #[cfg(feature = "compression")]
+use crate::compression::decode::tile_indexes::{LoadedIndex, TileIndexes};
+#[cfg(feature = "compression")]
 use crate::compression::decode::tile_section::TileSection;
 #[cfg(feature = "compression")]
 use crate::compression::decode::tiled_image::TiledImage;
-use crate::fits_error::{FitsError, Result};
 #[cfg(feature = "compression")]
-use crate::hdu::HduKind;
+use crate::fits_error::FitsError;
+use crate::fits_error::Result;
+use crate::hdu::Hdu;
+#[cfg(feature = "compression")]
+use crate::hdu::hdu_kind::HduKind;
 use crate::hdu::image_geometry::ImageGeometry;
 use crate::header_model::Header;
+use crate::image_model::bitpix::Bitpix;
+#[cfg(feature = "compression")]
 use crate::image_model::data::Data;
 use crate::image_model::physical_sample::PhysicalSample;
-use crate::image_model::region::{ByteRun, Region, SectionRuns};
-use crate::image_model::sample::Sample;
-use crate::image_model::view::{Borrowed, View};
-use crate::image_model::{Image, Metadata};
-use crate::image_model::{check_image_region, shape_product, validate_image_region};
-use crate::reader::data_checksum::{DataChecksum, FINISH_CHUNK};
+use crate::image_model::region::Region;
 #[cfg(feature = "compression")]
+use crate::image_model::shape_product;
+use crate::image_model::view::{Borrowed, View};
+use crate::image_model::{Image, Metadata, check_image_region};
+use crate::reader::Scratch;
+use crate::reader::data_checksum::DataChecksum;
 use crate::reader::data_source;
 use crate::reader::data_source::DataSource;
-use crate::reader::data_source::offset_at;
-use crate::reader::hdu::Hdu;
+use crate::reader::plain_read::{PlainRead, StoredRuns};
 use crate::reader::source::Source;
-use crate::reader::{Scratch, data_len};
-use crate::words;
 
 /// One image HDU of an open file — a plain image or a tiled-compressed one alike —
 /// read a [`Region`] at a time, from
@@ -54,231 +55,46 @@ use crate::words;
 pub struct ImageReader<'r, S> {
     hdu: &'r Hdu,
     image: &'r ImageGeometry,
+    /// The length of the data unit, bounded by the source when the handle was made.
+    unit_len: usize,
+    fetcher: Fetcher<'r, S>,
+    #[cfg(feature = "compression")]
+    compressed: Option<Compressed<'r>>,
+}
+
+/// What a read changes: the source and its staging, the reader's reused buffers, and the
+/// checksum the reads feed, when one is summed.
+#[derive(Debug)]
+struct Fetcher<'r, S> {
     data: &'r mut DataSource<S>,
     scratch: &'r mut Scratch,
-    #[cfg(feature = "compression")]
-    tiled: Option<TiledImage<'r>>,
     sum: Option<DataChecksum>,
 }
 
-/// The tiles a section of a compressed image covers: the shape the section selects,
-/// the container rows of its tiles, and their compacted table; with the image's tile
-/// index.
+/// A compressed image's codec and tiles, and the tile index the reader holds for it.
 #[cfg(feature = "compression")]
 #[derive(Debug)]
-struct Tiles<'a> {
-    shape: &'a [usize],
-    rows: &'a [usize],
-    table: TableView<'a>,
-    index: &'a TileIndex,
+struct Compressed<'r> {
+    tiled: TiledImage<'r>,
+    index: &'r TileIndex,
+    /// The heap of every tile index the reader holds, this one's among them.
+    indexes_bytes: usize,
 }
 
-/// Where the stored bytes of a region of a plain image lie in its data unit: one run for
-/// the whole image, or the runs of a section.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum StoredRuns<'a> {
-    All { len: usize, shape: &'a [usize] },
-    Section { runs: SectionRuns<'a>, len: usize },
-}
-
-/// A plain image and the length of its data unit.
-#[derive(Debug, Clone, Copy)]
-struct ImageUnit<'a> {
-    image: &'a ImageGeometry,
-    data_bytes: u64,
-}
-
-impl<'a> StoredRuns<'a> {
-    /// The runs of the stored bytes of `region` of the plain image of `unit`; a section's
-    /// shape is written to `section_shape`.
-    fn new(
-        unit: ImageUnit<'a>,
-        region: Region<'a>,
-        section_shape: &'a mut Vec<usize>,
-    ) -> Result<Self> {
-        let ImageUnit { image, data_bytes } = unit;
-        let element_size = image.bitpix.elem_size();
-        match region {
-            Region::All => {
-                let len = data_len(data_bytes)?;
-                // With PCOUNT = 0 and GCOUNT = 1, `data_extent` sized the unit as
-                // `elem · Π(axes)` — an invariant between the scan and the geometry, not a
-                // runtime failure mode.
-                debug_assert!(image.byte_len().is_ok_and(|image| image == len));
-                Ok(Self::All {
-                    len,
-                    shape: &image.shape,
-                })
-            }
-            Region::Section(ranges) => {
-                validate_image_region(ranges, &image.shape, section_shape)?;
-                let len = shape_product(section_shape)?
-                    .checked_mul(element_size)
-                    .ok_or(FitsError::DataUnitOverflow)?;
-                Ok(Self::Section {
-                    runs: SectionRuns {
-                        shape: &image.shape,
-                        ranges,
-                        selected_shape: section_shape,
-                        element_size,
-                    },
-                    len,
-                })
-            }
-        }
-    }
-
-    /// The stored bytes of the region.
-    const fn len(&self) -> usize {
-        match self {
-            Self::All { len, .. } | Self::Section { len, .. } => *len,
-        }
-    }
-
-    /// The shape of the region.
-    const fn shape(&self) -> &'a [usize] {
-        match self {
-            Self::All { shape, .. } => shape,
-            Self::Section { runs, .. } => runs.selected_shape,
-        }
-    }
-
-    /// Give `visit` each run, in order.
-    fn visit(self, mut visit: impl FnMut(ByteRun) -> Result<()>) -> Result<()> {
-        match self {
-            Self::All { len, .. } => visit(ByteRun { offset: 0, len }),
-            Self::Section { runs, .. } => runs.visit(visit),
-        }
-    }
-}
-
-/// A plain image's data unit read by runs, each fed to the checksum, when one is summed,
-/// as it is read.
+/// The stored runs of a region of a plain image, and the read that fetches them.
 #[derive(Debug)]
-pub(crate) struct PlainRead<'a, S> {
-    pub(crate) data: &'a mut DataSource<S>,
-    pub(crate) data_offset: u64,
-    pub(crate) sum: Option<&'a mut DataChecksum>,
+struct Plain<'a, S> {
+    runs: StoredRuns<'a>,
+    read: PlainRead<'a, S>,
 }
 
-impl<S: Source> PlainRead<'_, S> {
-    /// Fill `out` with the samples of `runs`, host-endian: decoded from the borrowed
-    /// bytes of a resident source, or read into `out` and swapped in place, with no
-    /// staging copy.
-    fn fill<T: Sample>(&mut self, runs: StoredRuns<'_>, out: &mut [T]) -> Result<()> {
-        let size = size_of::<T>();
-        debug_assert_eq!(size_of_val(out), runs.len(), "a sample for each stored one");
-        let resident = self.data.resident(0, 0).is_some();
-        let mut at = 0;
-        runs.visit(|run| {
-            let offset = offset_at(self.data_offset, run.offset)?;
-            let samples = &mut out[at..at + run.len / size];
-            at += samples.len();
-            if resident {
-                let bytes = self
-                    .data
-                    .resident(offset, run.len)
-                    .expect("a resident source")?;
-                if let Some(sum) = self.sum.as_deref_mut() {
-                    sum.feed(offset, bytes);
-                }
-                T::decode_be(bytes, samples);
-            } else {
-                let bytes = words::bytes_mut(samples);
-                self.data.read_into(offset, bytes)?;
-                if let Some(sum) = self.sum.as_deref_mut() {
-                    sum.feed(offset, bytes);
-                }
-            }
-            Ok(())
-        })?;
-        if !resident {
-            T::swap_be_in_place(out);
-        }
-        Ok(())
-    }
-
-    /// The samples of `runs`, of type `bitpix`, owned.
-    pub(crate) fn data(&mut self, runs: StoredRuns<'_>, bitpix: Bitpix) -> Result<Data> {
-        let count = runs.len() / bitpix.elem_size();
-        Ok(match bitpix {
-            Bitpix::U8 => Data::U8(self.filled(runs, count)?),
-            Bitpix::I16 => Data::I16(self.filled(runs, count)?),
-            Bitpix::I32 => Data::I32(self.filled(runs, count)?),
-            Bitpix::I64 => Data::I64(self.filled(runs, count)?),
-            Bitpix::F32 => Data::F32(self.filled(runs, count)?),
-            Bitpix::F64 => Data::F64(self.filled(runs, count)?),
-        })
-    }
-
-    /// The samples of `runs`, owned: decoded from the borrowed bytes of a resident source
-    /// with no fill first, or read into a zeroed buffer and swapped in place.
-    fn filled<T: Sample>(&mut self, runs: StoredRuns<'_>, count: usize) -> Result<Vec<T>> {
-        if self.data.resident(0, 0).is_none() {
-            let mut values = allocation::try_zeroed(T::default(), count)?;
-            self.fill(runs, &mut values)?;
-            return Ok(values);
-        }
-        let mut values = Vec::new();
-        allocation::try_reserve(&mut values, count)?;
-        runs.visit(|run| {
-            let offset = offset_at(self.data_offset, run.offset)?;
-            let bytes = self
-                .data
-                .resident(offset, run.len)
-                .expect("a resident source")?;
-            if let Some(sum) = self.sum.as_deref_mut() {
-                sum.feed(offset, bytes);
-            }
-            T::extend_from_be(bytes, &mut values);
-            Ok(())
-        })?;
-        Ok(values)
-    }
-
-    /// The samples of `runs`, of type `bitpix`, in `words`, viewed.
-    fn words<'w>(
-        &mut self,
-        runs: StoredRuns<'_>,
-        bitpix: Bitpix,
-        words: &'w mut Vec<u64>,
-    ) -> Result<View<'w>> {
-        let len = runs.len();
-        let count = len / bitpix.elem_size();
-        words.clear();
-        allocation::try_resize(words, len.div_ceil(8), 0)?;
-        match bitpix {
-            Bitpix::U8 => self.fill(runs, words::samples_mut::<u8>(words, count))?,
-            Bitpix::I16 => self.fill(runs, words::samples_mut::<i16>(words, count))?,
-            Bitpix::I32 => self.fill(runs, words::samples_mut::<i32>(words, count))?,
-            Bitpix::I64 => self.fill(runs, words::samples_mut::<i64>(words, count))?,
-            Bitpix::F32 => self.fill(runs, words::samples_mut::<f32>(words, count))?,
-            Bitpix::F64 => self.fill(runs, words::samples_mut::<f64>(words, count))?,
-        }
-        Ok(bitpix.view_words(words, len))
-    }
-
-    /// Append the physical values of `runs`, of type `bitpix`, to `out`, from the
-    /// borrowed bytes of a resident source or a bounded chunk at a time.
-    fn physical<O: PhysicalSample>(
-        &mut self,
-        runs: StoredRuns<'_>,
-        image: &ImageGeometry,
-        out: &mut Vec<O>,
-    ) -> Result<()> {
-        out.reserve(runs.len() / image.bitpix.elem_size());
-        runs.visit(|run| {
-            let offset = offset_at(self.data_offset, run.offset)?;
-            let sum = &mut self.sum;
-            self.data.chunks(offset, run.len, |offset, bytes| {
-                if let Some(sum) = sum.as_deref_mut() {
-                    sum.feed(offset, bytes);
-                }
-                image.bitpix.extend_physical_be(bytes, &image.scaling, out);
-                Ok(())
-            })
-        })
-    }
+/// The container rows of the tiles a region of a compressed image covers, fetched, and the
+/// section they hold; `None` for the whole image.
+#[cfg(feature = "compression")]
+#[derive(Debug)]
+struct Fetched<'a> {
+    table: TableView<'a>,
+    section: Option<TileSection<'a>>,
 }
 
 impl<'r, S: Source> ImageReader<'r, S> {
@@ -287,21 +103,29 @@ impl<'r, S: Source> ImageReader<'r, S> {
     /// the header's own error when its image keywords do not resolve.
     ///
     /// [`FitsError::HduKindMismatch`]: crate::FitsError::HduKindMismatch
-    pub(crate) fn new(
+    pub(super) fn new(
         hdu: &'r Hdu,
         data: &'r mut DataSource<S>,
         scratch: &'r mut Scratch,
+        #[cfg(feature = "compression")] tile_indexes: &'r mut TileIndexes,
     ) -> Result<Self> {
+        let unit_len = data.unit_len(hdu)?;
         #[cfg(feature = "compression")]
-        let (image, tiled) = if hdu.kind == HduKind::CompressedImage {
+        let (image, compressed) = if hdu.kind == HduKind::CompressedImage {
             let image = hdu.image_geometry()?;
             let tiled = TiledImage::new(&hdu.header, image)?;
-            scratch
-                .tile_indexes
-                .load(hdu.data_offset, hdu.container_schema()?, |len, rows| {
-                    data.unit(hdu).append(0..len, rows)
-                })?;
-            (image, Some(tiled))
+            let LoadedIndex {
+                index,
+                indexes_bytes,
+            } = tile_indexes.load(hdu.index, hdu.container_schema()?, |len, rows| {
+                data.unit(hdu).append(0..len, rows)
+            })?;
+            let compressed = Compressed {
+                tiled,
+                index,
+                indexes_bytes,
+            };
+            (image, Some(compressed))
         } else {
             (hdu.plain_image_geometry()?, None)
         };
@@ -310,11 +134,14 @@ impl<'r, S: Source> ImageReader<'r, S> {
         Ok(Self {
             hdu,
             image,
-            data,
-            scratch,
+            unit_len,
+            fetcher: Fetcher {
+                data,
+                scratch,
+                sum: None,
+            },
             #[cfg(feature = "compression")]
-            tiled,
-            sum: None,
+            compressed,
         })
     }
 
@@ -344,20 +171,19 @@ impl<'r, S: Source> ImageReader<'r, S> {
         )
     )]
     pub fn with_checksums(mut self) -> Self {
+        #[cfg_attr(
+            not(feature = "compression"),
+            expect(
+                unused_mut,
+                reason = "only a compressed image's tile index feeds the sum here"
+            )
+        )]
+        let mut sum = DataChecksum::of(self.hdu);
         #[cfg(feature = "compression")]
-        let sum = {
-            let mut sum = DataChecksum::of(self.hdu);
-            if self.tiled.is_some() {
-                sum.feed(
-                    self.hdu.data_offset,
-                    self.scratch.tile_indexes.get(self.hdu.data_offset).rows(),
-                );
-            }
-            sum
-        };
-        #[cfg(not(feature = "compression"))]
-        let sum = DataChecksum::of(self.hdu);
-        self.sum = Some(sum);
+        if let Some(compressed) = &self.compressed {
+            sum.feed(self.hdu.data_offset, compressed.index.rows());
+        }
+        self.fetcher.sum = Some(sum);
         self
     }
 
@@ -372,15 +198,15 @@ impl<'r, S: Source> ImageReader<'r, S> {
     )]
     pub fn tiles(&self) -> Option<&[usize]> {
         #[cfg(feature = "compression")]
-        if let Some(tiled) = &self.tiled {
-            return Some(tiled.tiles());
+        if let Some(compressed) = &self.compressed {
+            return Some(compressed.tiled.tiles());
         }
         None
     }
 
-    /// The samples of `region`, host-endian, borrowed from `words` — or, for
-    /// `BITPIX = 8`, from the source or the reader's scratch, which need no swap. A
-    /// loop that passes the same `words` to every read allocates only while it grows;
+    /// The samples of `region`, host-endian, in `words` — or, for a whole `BITPIX = 8`
+    /// image of a resident source, borrowed from the source's bytes, which need no swap.
+    /// A loop that passes the same `words` to every read allocates only while it grows;
     /// `words` is `u64` so the samples stay aligned for every type.
     pub fn view<'a, 'g>(
         &'a mut self,
@@ -395,62 +221,28 @@ impl<'r, S: Source> ImageReader<'r, S> {
         let region = region.into();
         let scaling = self.image.scaling;
         #[cfg(feature = "compression")]
-        if let Some(tiled) = &self.tiled {
-            return match region {
-                Region::All => {
-                    let index = self.scratch.tile_indexes.get(self.hdu.data_offset);
-                    let table = self.data.tiled_table(self.hdu, index, self.sum.as_mut())?;
-                    Ok(Image::of_geometry(
-                        self.image.shape.clone(),
-                        tiled.decode(table, index)?,
-                        scaling,
-                    ))
-                }
-                Region::Section(ranges) => {
-                    let Tiles {
-                        shape,
-                        rows,
-                        table,
-                        index,
-                    } = tiles(
-                        self.data,
-                        self.hdu,
-                        tiled,
-                        self.scratch,
-                        self.sum.as_mut(),
-                        ranges,
-                    )?;
-                    let section = TileSection {
-                        ranges,
-                        shape,
-                        rows,
-                    };
-                    let samples = tiled.decode_section(table, index, section)?;
-                    Ok(Image::of_geometry(shape.to_vec(), samples, scaling))
-                }
-            };
+        if let Some(compressed) = &self.compressed {
+            let Fetched { table, section } = self.fetcher.fetch(self.hdu, compressed, region)?;
+            let shape = section
+                .as_ref()
+                .map_or(&*self.image.shape, |section| section.shape);
+            let mut samples = Data::zeroed(self.image.bitpix, shape_product(shape)?)?;
+            let out = DecodeBuffer::from_samples(&mut samples);
+            compressed
+                .tiled
+                .decode_into(table, compressed.index, section, out)?;
+            return Ok(Image::of_geometry(shape.to_vec(), samples, scaling));
         }
-        let runs = StoredRuns::new(
-            ImageUnit {
-                image: self.image,
-                data_bytes: self.hdu.data_bytes,
-            },
-            region,
-            &mut self.scratch.section_shape,
-        )?;
-        let mut plain = PlainRead {
-            data: self.data,
-            data_offset: self.hdu.data_offset,
-            sum: self.sum.as_mut(),
-        };
-        let samples = plain.data(runs, self.image.bitpix)?;
+        let bitpix = self.image.bitpix;
+        let Plain { runs, mut read } = self.plain(region)?;
+        let samples = read.data(runs, bitpix)?;
         Ok(Image::of_geometry(runs.shape().to_vec(), samples, scaling))
     }
 
     /// Append the physical values of `region` to `out`, as
     /// [`Borrowed::physical_into`] does. A plain image converts straight from its
-    /// stored big-endian bytes, in one pass; a compressed one decodes into the reader's
-    /// scratch first.
+    /// stored big-endian bytes, in one pass; a compressed one converts each tile as it
+    /// decodes it.
     pub fn physical_into<'g, T: PhysicalSample>(
         &mut self,
         region: impl Into<Region<'g>>,
@@ -458,28 +250,15 @@ impl<'r, S: Source> ImageReader<'r, S> {
     ) -> Result<()> {
         let region = region.into();
         #[cfg(feature = "compression")]
-        if self.tiled.is_some() {
-            let mut words = mem::take(&mut self.scratch.words);
-            let converted = self
-                .view_region(region, &mut words)
-                .map(|view| view.physical_into(out));
-            self.scratch.words = words;
-            return converted;
+        if let Some(compressed) = &self.compressed {
+            let Fetched { table, section } = self.fetcher.fetch(self.hdu, compressed, region)?;
+            return compressed
+                .tiled
+                .physical_into(table, compressed.index, section, out);
         }
-        let runs = StoredRuns::new(
-            ImageUnit {
-                image: self.image,
-                data_bytes: self.hdu.data_bytes,
-            },
-            region,
-            &mut self.scratch.section_shape,
-        )?;
-        let mut plain = PlainRead {
-            data: self.data,
-            data_offset: self.hdu.data_offset,
-            sum: self.sum.as_mut(),
-        };
-        plain.physical(runs, self.image, out)
+        let image = self.image;
+        let Plain { runs, mut read } = self.plain(region)?;
+        read.physical(runs, image, out)
     }
 
     /// The most heap the reader and this handle hold viewing each of `regions` in turn
@@ -510,8 +289,8 @@ impl<'r, S: Source> ImageReader<'r, S> {
                 held.section_shape.need(axes);
             }
             #[cfg(feature = "compression")]
-            if let Some(tiled) = &self.tiled {
-                held.add_tiled(self, tiled, region)?;
+            if let Some(compressed) = &self.compressed {
+                held.add_tiled(self, compressed, region)?;
                 continue;
             }
             if let Region::Section(ranges) = region {
@@ -520,45 +299,13 @@ impl<'r, S: Source> ImageReader<'r, S> {
         }
         let shape = held.section_shape.bytes::<usize>();
         #[cfg(feature = "compression")]
-        if let Some(tiled) = &self.tiled {
-            return Ok(self.tiled_bytes(tiled, &held, shape));
+        if let Some(compressed) = &self.compressed {
+            return Ok(compressed.held_bytes(&held, shape));
         }
         Ok(ViewBytes {
             kept: shape.kept as u64,
             handle: shape.moving as u64,
         })
-    }
-
-    /// What the compressed image `tiled` holds for a run of views that needs `held`, its
-    /// section shape `shape`. The reader keeps the tile index and what the kept buffers
-    /// add. The handle holds the tile grid and, while a read runs, the larger of the
-    /// largest decode and the largest old block a kept buffer holds while it grows: a read
-    /// fetches its cells before it decodes them, and the decode of the read before is gone,
-    /// so the two never meet.
-    #[cfg(feature = "compression")]
-    fn tiled_bytes(
-        &self,
-        tiled: &TiledImage<'_>,
-        held: &HeldBytes,
-        shape: GrowthBytes,
-    ) -> ViewBytes {
-        let buffers = [
-            shape,
-            held.tile_rows.bytes::<usize>(),
-            held.coordinates.bytes::<usize>(),
-            held.compacted.bytes::<u8>(),
-            held.unit.bytes::<u8>(),
-        ];
-        let kept = self.scratch.tile_indexes.heap_bytes()
-            + buffers.iter().map(|buffer| buffer.kept).sum::<usize>();
-        let moving = buffers
-            .iter()
-            .map(|buffer| buffer.moving)
-            .fold(held.decode, usize::max);
-        ViewBytes {
-            kept: kept as u64,
-            handle: (tiled.heap_bytes() + moving) as u64,
-        }
     }
 
     /// The most heap [`finish`](Self::finish) adds to the reader, a bound: a stream's
@@ -567,13 +314,14 @@ impl<'r, S: Source> ImageReader<'r, S> {
     /// buffer that grows holds its old block while it moves; nothing for a resident
     /// source, which the finish borrows.
     pub fn finish_bytes(&self) -> u64 {
-        if self.data.resident(0, 0).is_some() {
+        let data = &self.fetcher.data;
+        if data.is_resident() {
             return 0;
         }
         let chunk = usize::try_from(self.hdu.padded_data_bytes())
             .unwrap_or(usize::MAX)
-            .min(FINISH_CHUNK);
-        let mut staging = Growth::from(self.data.staging_capacity());
+            .min(data_source::CHUNK);
+        let mut staging = Growth::from(data.staging_capacity());
         staging.need(chunk);
         let growth = staging.bytes::<u8>();
         (growth.kept + growth.moving) as u64
@@ -584,8 +332,9 @@ impl<'r, S: Source> ImageReader<'r, S> {
     /// data unit read now — the report of
     /// [`FitsReader::verify_checksum`](crate::FitsReader::verify_checksum).
     pub fn finish(self) -> Result<ChecksumReport> {
-        let sum = self.sum.unwrap_or_else(|| DataChecksum::of(self.hdu));
-        sum.finish(self.hdu, self.data)
+        let Fetcher { data, sum, .. } = self.fetcher;
+        let sum = sum.unwrap_or_else(|| DataChecksum::of(self.hdu));
+        sum.finish(self.hdu, data)
     }
 
     fn view_region<'a>(
@@ -594,88 +343,166 @@ impl<'r, S: Source> ImageReader<'r, S> {
         words: &'a mut Vec<u64>,
     ) -> Result<Borrowed<'a>> {
         let scaling = self.image.scaling;
+        let bitpix = self.image.bitpix;
+        let image_shape: &'r [usize] = &self.image.shape;
         #[cfg(feature = "compression")]
-        if let Some(tiled) = &self.tiled {
-            return Ok(match region {
-                Region::All => {
-                    let index = self.scratch.tile_indexes.get(self.hdu.data_offset);
-                    let table = self.data.tiled_table(self.hdu, index, self.sum.as_mut())?;
-                    Borrowed {
-                        shape: &self.image.shape,
-                        scaling,
-                        samples: tiled.decode_into_words(table, index, words)?,
-                    }
-                }
-                Region::Section(ranges) => {
-                    let Tiles {
-                        shape,
-                        rows,
-                        table,
-                        index,
-                    } = tiles(
-                        self.data,
-                        self.hdu,
-                        tiled,
-                        self.scratch,
-                        self.sum.as_mut(),
-                        ranges,
-                    )?;
-                    let section = TileSection {
-                        ranges,
-                        shape,
-                        rows,
-                    };
-                    let samples = tiled.decode_section_into_words(table, index, section, words)?;
-                    Borrowed {
-                        shape,
-                        scaling,
-                        samples,
-                    }
-                }
+        if let Some(compressed) = &self.compressed {
+            let Fetched { table, section } = self.fetcher.fetch(self.hdu, compressed, region)?;
+            let count = shape_product(
+                section
+                    .as_ref()
+                    .map_or(image_shape, |section| section.shape),
+            )?;
+            let len = count
+                .checked_mul(bitpix.elem_size())
+                .ok_or(FitsError::DataUnitOverflow)?;
+            allocation::try_resize(words, len.div_ceil(8), 0)?;
+            let out = DecodeBuffer::from_words(words, bitpix, count);
+            compressed
+                .tiled
+                .decode_into(table, compressed.index, section, out)?;
+            return Ok(Borrowed {
+                shape: self.region_shape(region),
+                scaling,
+                samples: bitpix.view_words(words, len),
             });
         }
-        let bitpix = self.image.bitpix;
-        let runs = StoredRuns::new(
-            ImageUnit {
-                image: self.image,
-                data_bytes: self.hdu.data_bytes,
-            },
-            region,
-            &mut self.scratch.section_shape,
-        )?;
         // A whole `BITPIX = 8` image of a resident source needs no swap: it is viewed in
         // place.
-        let in_place = matches!((region, bitpix), (Region::All, Bitpix::U8))
-            && self.data.resident(0, 0).is_some();
-        if in_place {
-            let bytes = self
-                .data
-                .resident(self.hdu.data_offset, runs.len())
-                .expect("a resident source")?;
-            if let Some(sum) = &mut self.sum {
+        if matches!((region, bitpix), (Region::All, Bitpix::U8)) && self.fetcher.data.is_resident()
+        {
+            let Fetcher { data, sum, .. } = &mut self.fetcher;
+            let bytes = data.resident_range(self.hdu.data_offset, self.unit_len)?;
+            if let Some(sum) = sum {
                 sum.feed(self.hdu.data_offset, bytes);
             }
             return Ok(Borrowed {
-                shape: &self.image.shape,
+                shape: image_shape,
                 scaling,
                 samples: View::U8(bytes),
             });
         }
-        let mut plain = PlainRead {
-            data: self.data,
-            data_offset: self.hdu.data_offset,
-            sum: self.sum.as_mut(),
-        };
-        let samples = plain.words(runs, bitpix, words)?;
-        let shape = match region {
-            Region::All => &self.image.shape,
-            Region::Section(_) => &self.scratch.section_shape,
-        };
+        let Plain { runs, mut read } = self.plain(region)?;
+        let samples = read.words(runs, bitpix, words)?;
         Ok(Borrowed {
-            shape,
+            shape: self.region_shape(region),
             scaling,
             samples,
         })
+    }
+
+    /// The shape of `region` after a read of it: the image's, or the section's the read
+    /// wrote to the reader's buffer.
+    fn region_shape(&self, region: Region<'_>) -> &[usize] {
+        match region {
+            Region::All => &self.image.shape,
+            Region::Section(_) => &self.fetcher.scratch.section_shape,
+        }
+    }
+
+    /// The stored runs of `region` of this plain image, and the read that fetches them and
+    /// feeds the sum.
+    fn plain<'a>(&'a mut self, region: Region<'a>) -> Result<Plain<'a, S>> {
+        let Fetcher { data, scratch, sum } = &mut self.fetcher;
+        let runs = match region {
+            Region::All => {
+                // With PCOUNT = 0 and GCOUNT = 1, `HduKind::data_bytes` sized the unit as
+                // `elem · Π(axes)` — an invariant between the scan and the geometry, not a
+                // runtime failure mode.
+                debug_assert!(
+                    self.image
+                        .byte_len()
+                        .is_ok_and(|image| image == self.unit_len)
+                );
+                StoredRuns::All {
+                    len: self.unit_len,
+                    shape: &self.image.shape,
+                }
+            }
+            Region::Section(ranges) => {
+                StoredRuns::section(self.image, ranges, &mut scratch.section_shape)?
+            }
+        };
+        Ok(Plain {
+            runs,
+            read: PlainRead {
+                data,
+                data_offset: self.hdu.data_offset,
+                sum: sum.as_mut(),
+            },
+        })
+    }
+}
+
+impl<S: Source> Fetcher<'_, S> {
+    /// The container rows of the tiles of `compressed`, the image `hdu` holds, that
+    /// `region` covers: the whole container, or a section's tiles with their heap cells
+    /// compacted into the reader's buffers. The bytes are fed to the sum where they
+    /// continue what it summed.
+    #[cfg(feature = "compression")]
+    fn fetch<'a>(
+        &'a mut self,
+        hdu: &'a Hdu,
+        compressed: &Compressed<'_>,
+        region: Region<'a>,
+    ) -> Result<Fetched<'a>> {
+        let Region::Section(ranges) = region else {
+            let table = self
+                .data
+                .tiled_table(hdu, compressed.index, self.sum.as_mut())?;
+            return Ok(Fetched {
+                table,
+                section: None,
+            });
+        };
+        let Scratch {
+            section_shape,
+            tile_rows,
+            tile_coordinates,
+            ..
+        } = &mut *self.scratch;
+        compressed
+            .tiled
+            .select(ranges, section_shape, tile_rows, tile_coordinates)?;
+        let table =
+            self.data
+                .tile_rows(hdu, compressed.index.rows(), tile_rows, self.sum.as_mut())?;
+        Ok(Fetched {
+            table,
+            section: Some(TileSection {
+                ranges,
+                shape: section_shape,
+                rows: tile_rows,
+            }),
+        })
+    }
+}
+
+#[cfg(feature = "compression")]
+impl Compressed<'_> {
+    /// What the compressed image holds for a run of views that needs `held`, its
+    /// section shape `shape`. The reader keeps the tile index and what the kept buffers
+    /// add. The handle holds the tile grid and, while a read runs, the larger of the
+    /// largest decode and the largest old block a kept buffer holds while it grows: a read
+    /// fetches its cells before it decodes them, and the decode of the read before is gone,
+    /// so the two never meet.
+    fn held_bytes(&self, held: &HeldBytes, shape: GrowthBytes) -> ViewBytes {
+        let buffers = [
+            shape,
+            held.tile_rows.bytes::<usize>(),
+            held.coordinates.bytes::<usize>(),
+            held.compacted.bytes::<u8>(),
+            held.unit.bytes::<u8>(),
+        ];
+        let kept = self.indexes_bytes + buffers.iter().map(|buffer| buffer.kept).sum::<usize>();
+        let moving = buffers
+            .iter()
+            .map(|buffer| buffer.moving)
+            .fold(held.decode, usize::max);
+        ViewBytes {
+            kept: kept as u64,
+            handle: (self.tiled.heap_bytes() + moving) as u64,
+        }
     }
 }
 
@@ -711,16 +538,17 @@ struct HeldBytes {
 impl HeldBytes {
     /// The buffers of `reader` as they stand, before the views.
     const fn new<S: Source>(reader: &ImageReader<'_, S>) -> Self {
+        let fetcher = &reader.fetcher;
         Self {
-            section_shape: Growth::from(reader.scratch.section_shape.capacity()),
+            section_shape: Growth::from(fetcher.scratch.section_shape.capacity()),
             #[cfg(feature = "compression")]
-            tile_rows: Growth::from(reader.scratch.tile_rows.capacity()),
+            tile_rows: Growth::from(fetcher.scratch.tile_rows.capacity()),
             #[cfg(feature = "compression")]
-            coordinates: Growth::from(reader.scratch.tile_coordinates.capacity()),
+            coordinates: Growth::from(fetcher.scratch.tile_coordinates.capacity()),
             #[cfg(feature = "compression")]
-            compacted: Growth::from(reader.data.rows_capacity()),
+            compacted: Growth::from(fetcher.data.rows_capacity()),
             #[cfg(feature = "compression")]
-            unit: Growth::from(reader.data.staging_capacity()),
+            unit: Growth::from(fetcher.data.staging_capacity()),
             #[cfg(feature = "compression")]
             decode: 0,
         }
@@ -729,19 +557,19 @@ impl HeldBytes {
 
 #[cfg(feature = "compression")]
 impl HeldBytes {
-    /// Grow to what `reader` needs viewing `region` of its compressed image `tiled`.
+    /// Grow to what `reader` needs viewing `region` of its compressed image `compressed`.
     fn add_tiled<S: Source>(
         &mut self,
         reader: &ImageReader<'_, S>,
-        tiled: &TiledImage<'_>,
+        compressed: &Compressed<'_>,
         region: Region<'_>,
     ) -> Result<()> {
         let schema = reader.hdu.container_schema()?;
-        let index = reader.scratch.tile_indexes.get(reader.hdu.data_offset);
+        let Compressed { tiled, index, .. } = compressed;
         let count = match region {
             Region::All => {
-                if reader.data.resident(0, 0).is_none() {
-                    self.unit.need(data_len(reader.hdu.data_bytes)?);
+                if !reader.fetcher.data.is_resident() {
+                    self.unit.need(reader.unit_len);
                 }
                 None
             }
@@ -806,34 +634,4 @@ impl Growth {
             moving: self.old * size_of::<T>(),
         }
     }
-}
-
-/// The tiles of `tiled` that `ranges` covers, their heap cells read into the reader's
-/// scratch, and fed to `sum` where they continue what it summed: the section's shape,
-/// its tiles' rows, and their compacted table.
-#[cfg(feature = "compression")]
-fn tiles<'a, S: Source>(
-    data: &'a mut DataSource<S>,
-    hdu: &'a Hdu,
-    tiled: &TiledImage<'_>,
-    scratch: &'a mut Scratch,
-    sum: Option<&mut DataChecksum>,
-    ranges: &[Range<usize>],
-) -> Result<Tiles<'a>> {
-    let Scratch {
-        section_shape,
-        tile_rows,
-        tile_coordinates,
-        tile_indexes,
-        ..
-    } = scratch;
-    tiled.select(ranges, section_shape, tile_rows, tile_coordinates)?;
-    let rows: &'a [usize] = tile_rows;
-    let index = tile_indexes.get(hdu.data_offset);
-    Ok(Tiles {
-        shape: section_shape,
-        rows,
-        table: data.tile_rows(hdu, index.rows(), rows, sum)?,
-        index,
-    })
 }

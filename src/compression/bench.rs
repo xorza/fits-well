@@ -1,343 +1,256 @@
-//! The compression cases: each codec on one tile, and compressed images and tables written to
-//! and read from files. The inputs are the scene's, never random bytes, as a codec's speed
-//! follows its data: the light for the integer codecs, its defect mask for `PLIO_1`, the float
-//! frame for quantized compression, the source catalog for tables.
+//! The codec cases: each codec of the storage table on one tile, its encoder and its decoder,
+//! and the quantizer and dequantizer of a float row. The inputs are the scene's, never random
+//! bytes, as a codec's speed follows its data. Compressed files are read and written by the
+//! read and write cases, beside the plain ones, in every storage.
 
-use std::fs::File;
 use std::hint::black_box;
-use std::mem;
-use std::path::PathBuf;
 
-use criterion::{BenchmarkId, Criterion};
+use criterion::Criterion;
 
-use crate::bench::fixture::{self, Kind, Reading, SECTION_ROWS, Scale, ScratchDir, SourceKind};
-use crate::bintable::Table;
-use crate::bitpix::Bitpix;
-use crate::checksum::checksum_report::ChecksumReport;
+use crate::bench::policy::{self, Kind, Scale};
+use crate::bench::scene_file::Storage;
+use crate::compression::decode::float_quantization::Dequant;
 use crate::compression::encode::hcompress_default_rows;
-use crate::compression::plane::IntBitpix;
+use crate::compression::half_step::assert_within_half_step;
+use crate::compression::plane::{FloatSamples, IntBitpix};
+use crate::compression::quantization::{Quantization, Spacing};
+use crate::compression::quantize::{self, Precision, QuantizeScratch, Quantizer, TileValues};
 use crate::compression::tile_codec::{CodecScratch, Tile, TileCodec, TileSamples};
-use crate::compression::{Compression, CompressionConfig, Hcompress};
-use crate::fits_writer::FitsWriter;
-use crate::image_model::Image;
+use crate::image_model::bitpix::Bitpix;
 use crate::image_model::data::Data;
-use crate::image_model::region::Region;
-use crate::internals::scene::{self, CATALOG_ROW_BYTES, CATALOG_ROWS, HEIGHT, WIDTH};
-use crate::reader::FitsReader;
-use crate::reader::source::Source;
+use crate::internals::scene;
+use crate::internals::scene::{HEIGHT, WIDTH};
 
-/// The codecs an image case compresses with, and the `BITPIX` of the scene image each takes:
-/// the integer codecs the light, `PLIO_1` the mask, the float-capable ones the float frame.
-/// `HCOMPRESS_1` at its default, lossless scale.
-fn image_codecs() -> [(Compression, Bitpix); 8] {
-    [
-        (Compression::GZIP, Bitpix::I16),
-        (Compression::GZIP_SHUFFLED, Bitpix::I16),
-        (Compression::Rice, Bitpix::I16),
-        (Compression::Hcompress(Hcompress::default()), Bitpix::I16),
-        (Compression::Plio, Bitpix::U8),
-        (Compression::GZIP, Bitpix::F32),
-        (Compression::GZIP_SHUFFLED, Bitpix::F32),
-        (Compression::Rice, Bitpix::F32),
-    ]
-}
-
-/// The codecs a table case compresses with.
-const TABLE_CODECS: [Compression; 3] = [
-    Compression::GZIP,
-    Compression::GZIP_SHUFFLED,
-    Compression::Rice,
-];
-
-/// The rows of one table tile: a chunk of the catalog, so it splits into 25 tiles.
-const ROWS_PER_TILE: usize = 4096;
-
-/// `atomic/compress/<codec>/<type>` and `atomic/decompress/<codec>/<type>`: one tile of the
-/// default tiling of the standard frame ([`tile_rows`] rows), through each integer codec's
-/// tile encoder and decoder, into reused buffers. A decode case first checks that the tile
-/// round-trips, as each codec is lossless here. Per sample, in the stored bytes.
+/// `atomic/compress/<storage>/<input>` and `atomic/decompress/<storage>/<input>`: one tile of
+/// each codec's default tiling of the standard frame ([`tile_rows`] rows) through its tile
+/// encoder and decoder, into reused buffers. The integer codecs take the light at i16 and the
+/// float frame quantized to i32, as a quantized float reaches them; `plio_1` the mask; and
+/// `gzip_2_lossless` the float frame's bytes. A decode case first checks that the tile
+/// round-trips, as each codec is lossless on its integers. Per sample, in the stored bytes.
+///
+/// `atomic/quantize/f32` and `atomic/dequantize/f32`: one row of the float frame at the
+/// default quantization, to its integers and back, checked once to be within half a step.
+/// Per sample.
 pub(crate) fn atomic(c: &mut Criterion) {
-    let codecs = image_codecs()
-        .into_iter()
-        .filter(|(_, bitpix)| bitpix.is_integer());
-    let mut group = Kind::Atomic.group(c, "compress", Scale::Sample);
-    for (compression, bitpix) in codecs.clone() {
-        group.throughput(fixture::throughput(
-            WIDTH * tile_rows(compression),
-            bitpix.elem_size(),
-        ));
-        group.bench_function(case_id(compression, bitpix), |b| {
-            let mut tile = CodecTile::new(compression, bitpix);
+    let mut group = Kind::Atomic.group(c, "compress", Scale::Row);
+    for (storage, input) in codec_cases() {
+        let rows = tile_rows(storage);
+        group.throughput(policy::throughput(WIDTH * rows, input.elem_size()));
+        group.bench_function(format!("{}/{}", storage.id(), input.id()), |b| {
+            let mut tile = CodecTile::new(storage, input);
             b.iter(|| tile.encode());
         });
     }
     group.finish();
 
-    let mut group = Kind::Atomic.group(c, "decompress", Scale::Sample);
-    for (compression, bitpix) in codecs {
-        group.throughput(fixture::throughput(
-            WIDTH * tile_rows(compression),
-            bitpix.elem_size(),
-        ));
-        group.bench_function(case_id(compression, bitpix), |b| {
-            let mut tile = CodecTile::new(compression, bitpix);
+    let mut group = Kind::Atomic.group(c, "decompress", Scale::Row);
+    for (storage, input) in codec_cases() {
+        let rows = tile_rows(storage);
+        group.throughput(policy::throughput(WIDTH * rows, input.elem_size()));
+        group.bench_function(format!("{}/{}", storage.id(), input.id()), |b| {
+            let mut tile = CodecTile::new(storage, input);
             tile.encode();
-            tile.decode();
-            assert_eq!(tile.decoded, tile.values, "the codec round-trips the tile");
+            tile.assert_round_trips();
             b.iter(|| tile.decode());
         });
     }
     group.finish();
-}
 
-/// `integration/write_compressed/file/<codec>/<type>`,
-/// `integration/read_compressed/<source>/<codec>/<type>`,
-/// `integration/read_compressed_section/<source>/<codec>/<type>`,
-/// `integration/write_compressed_table/file/<codec>` and
-/// `integration/read_compressed_table/<source>/<codec>`, from creating or opening the file to
-/// the last byte or sample.
-pub(crate) fn integration(c: &mut Criterion) {
-    let dir = ScratchDir::new("compress");
-    let mut images = image_codecs().map(|_| None);
-    write_compressed(c, &dir);
-    read_compressed(c, &dir, &mut images);
-    read_compressed_section(c, &dir, &mut images);
-    write_compressed_table(c, &dir);
-    read_compressed_table(c, &dir);
-}
+    let float_id = policy::bitpix_id(Bitpix::F32);
+    let mut group = Kind::Atomic.group(c, "quantize", Scale::Row);
+    group.throughput(policy::throughput(WIDTH, Bitpix::F32.elem_size()));
+    group.bench_function(float_id, |b| {
+        let mut row = QuantizedRow::new();
+        b.iter(|| black_box(row.quantize()));
+    });
+    group.finish();
 
-/// `integration/write_compressed/file/<codec>/<type>`: the standard frame under the light
-/// header with its checksums, in each codec's default tiles, a float frame quantized. Per sample,
-/// uncompressed.
-fn write_compressed(c: &mut Criterion, dir: &ScratchDir) {
-    let mut group = Kind::Integration.group(c, "write_compressed", Scale::Frame);
-    let path = dir.file("frame.fits");
-    for (compression, bitpix) in image_codecs() {
-        let mut image = None;
-        group.throughput(fixture::throughput(WIDTH * HEIGHT, bitpix.elem_size()));
-        let id = BenchmarkId::new("file", case_id(compression, bitpix));
-        group.bench_function(id, |b| {
-            let image = image.get_or_insert_with(|| scene_image(compression, bitpix, HEIGHT));
-            let header = scene::light_header();
-            b.iter(|| {
-                let mut writer = FitsWriter::new(File::create(&path).unwrap()).with_checksums();
-                writer
-                    .write_compressed_image(
-                        image.view(),
-                        &CompressionConfig::new(compression),
-                        Some(&header),
-                    )
-                    .unwrap();
-            });
+    let mut group = Kind::Atomic.group(c, "dequantize", Scale::Row);
+    group.throughput(policy::throughput(WIDTH, Bitpix::F32.elem_size()));
+    group.bench_function(float_id, |b| {
+        let row = QuantizedRow::new();
+        let mut dequantized = row.dequantize();
+        row.assert_within_half_step(&dequantized);
+        b.iter(|| {
+            row.dequant.apply(&row.ints, &mut dequantized);
+            black_box(&dequantized);
         });
-    }
+    });
     group.finish();
 }
 
-/// `integration/read_compressed/<source>/<codec>/<type>`: the file of [`write_compressed`]
-/// decoded into owned samples. Per sample, uncompressed.
-fn read_compressed(c: &mut Criterion, dir: &ScratchDir, images: &mut [Option<PathBuf>]) {
-    let mut group = Kind::Integration.group(c, "read_compressed", Scale::Frame);
-    for ((compression, bitpix), path) in image_codecs().into_iter().zip(images) {
-        group.throughput(fixture::throughput(WIDTH * HEIGHT, bitpix.elem_size()));
-        for source in SourceKind::all() {
-            let id = BenchmarkId::new(source.id(), case_id(compression, bitpix));
-            group.bench_function(id, |b| {
-                source.bench(
-                    b,
-                    image_path(path, dir, compression, bitpix),
-                    ReadCompressed,
-                );
-            });
+/// What a codec case codes: a tile of a scene image as the write path hands it to the codec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TileInput {
+    /// The light, i16.
+    Light,
+    /// The float frame quantized at the default quantization, i32.
+    Quantized,
+    /// The defect mask, u8.
+    Mask,
+    /// The float frame's big-endian bytes, for a lossless float codec.
+    FloatBytes,
+}
+
+impl TileInput {
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Light => "i16",
+            Self::Quantized => "i32",
+            Self::Mask => "mask",
+            Self::FloatBytes => "f32",
         }
     }
-    group.finish();
-}
 
-/// `integration/read_compressed_section/<source>/<codec>/<type>`: the file of
-/// [`write_compressed`] as `read_section` takes the plain frame, ten rows a section into one
-/// reused buffer, each section decoding only the tiles it touches, and the checksum judged. Per
-/// sample, uncompressed.
-fn read_compressed_section(c: &mut Criterion, dir: &ScratchDir, images: &mut [Option<PathBuf>]) {
-    let mut group = Kind::Integration.group(c, "read_compressed_section", Scale::Frame);
-    for ((compression, bitpix), path) in image_codecs().into_iter().zip(images) {
-        group.throughput(fixture::throughput(WIDTH * HEIGHT, bitpix.elem_size()));
-        for source in SourceKind::all() {
-            let id = BenchmarkId::new(source.id(), case_id(compression, bitpix));
-            group.bench_function(id, |b| {
-                let reading = ReadCompressedSections { words: Vec::new() };
-                source.bench(b, image_path(path, dir, compression, bitpix), reading);
-            });
+    /// The integer width the codec takes the samples at.
+    const fn width(self) -> IntBitpix {
+        match self {
+            Self::Light => IntBitpix::I16,
+            Self::Quantized | Self::FloatBytes => IntBitpix::I32,
+            Self::Mask => IntBitpix::U8,
         }
     }
-    group.finish();
-}
 
-/// The file of [`compressed_file`], written the first time a case needs it.
-fn image_path<'a>(
-    path: &'a mut Option<PathBuf>,
-    dir: &ScratchDir,
-    compression: Compression,
-    bitpix: Bitpix,
-) -> &'a PathBuf {
-    path.get_or_insert_with(|| {
-        let name = format!("{}.fits", case_id(compression, bitpix).replace('/', "_"));
-        dir.write(&name, &compressed_file(compression, bitpix))
-    })
-}
-
-/// `integration/write_compressed_table/file/<codec>`: the source catalog in tiles of
-/// [`ROWS_PER_TILE`] rows. Per row, uncompressed.
-fn write_compressed_table(c: &mut Criterion, dir: &ScratchDir) {
-    let mut group = Kind::Integration.group(c, "write_compressed_table", Scale::Frame);
-    group.throughput(fixture::throughput(CATALOG_ROWS, CATALOG_ROW_BYTES));
-    let path = dir.file("catalog.fits");
-    let mut catalog = None;
-    for compression in TABLE_CODECS {
-        group.bench_function(BenchmarkId::new("file", codec_id(compression)), |b| {
-            let catalog = catalog.get_or_insert_with(scene::catalog);
-            let config = table_config(compression);
-            b.iter(|| {
-                let mut writer = FitsWriter::new(File::create(&path).unwrap());
-                writer
-                    .write_compressed_table(catalog, &config, None)
-                    .unwrap();
-            });
-        });
-    }
-    group.finish();
-}
-
-/// `integration/read_compressed_table/<source>/<codec>`: the file of
-/// [`write_compressed_table`] decoded into a table. Per row, uncompressed.
-fn read_compressed_table(c: &mut Criterion, dir: &ScratchDir) {
-    let mut group = Kind::Integration.group(c, "read_compressed_table", Scale::Frame);
-    group.throughput(fixture::throughput(CATALOG_ROWS, CATALOG_ROW_BYTES));
-    for compression in TABLE_CODECS {
-        let mut path: Option<PathBuf> = None;
-        for source in SourceKind::all() {
-            group.bench_function(BenchmarkId::new(source.id(), codec_id(compression)), |b| {
-                let path = path.get_or_insert_with(|| {
-                    let mut writer = FitsWriter::new(Vec::new());
-                    writer
-                        .write_compressed_table(&scene::catalog(), &table_config(compression), None)
-                        .unwrap();
-                    let name = format!("catalog_{}.fits", codec_id(compression));
-                    dir.write(&name, &writer.into_inner())
-                });
-                source.bench(b, path, ReadCompressedTable);
-            });
-        }
-    }
-    group.finish();
-}
-
-/// The first `height` rows of the scene image `compression` takes in `bitpix`: the defect mask
-/// for `PLIO_1`, else the standard frame.
-fn scene_image(compression: Compression, bitpix: Bitpix, height: usize) -> Image {
-    if matches!(compression, Compression::Plio) {
-        scene::mask(WIDTH, height, 1)
-    } else {
-        scene::sky(bitpix, WIDTH, height, 1)
+    const fn elem_size(self) -> usize {
+        self.width().elem_size()
     }
 }
 
-/// The bytes of a file holding [`scene_image`] compressed by `compression` under the light
-/// header, with its checksums.
-fn compressed_file(compression: Compression, bitpix: Bitpix) -> Vec<u8> {
-    let mut writer = FitsWriter::new(Vec::new()).with_checksums();
-    writer
-        .write_compressed_image(
-            scene_image(compression, bitpix, HEIGHT).view(),
-            &CompressionConfig::new(compression),
-            Some(&scene::light_header()),
-        )
-        .unwrap();
-    writer.into_inner()
-}
-
-/// The catalog's tiles of [`ROWS_PER_TILE`] rows, compressed by `compression`.
-fn table_config(compression: Compression) -> CompressionConfig {
-    CompressionConfig::new(compression).with_tiles([ROWS_PER_TILE])
-}
-
-fn codec_id(compression: Compression) -> String {
-    compression.name().to_lowercase()
-}
-
-fn case_id(compression: Compression, bitpix: Bitpix) -> String {
-    format!("{}/{}", codec_id(compression), fixture::bitpix_id(bitpix))
+/// Each codec of the storage table and the inputs it takes.
+fn codec_cases() -> Vec<(Storage, TileInput)> {
+    let mut cases = Vec::new();
+    for storage in [
+        Storage::Gzip1,
+        Storage::Gzip2,
+        Storage::Rice1,
+        Storage::Hcompress1,
+    ] {
+        cases.push((storage, TileInput::Light));
+        cases.push((storage, TileInput::Quantized));
+    }
+    cases.push((Storage::Plio1, TileInput::Mask));
+    cases.push((Storage::Gzip2Lossless, TileInput::FloatBytes));
+    cases
 }
 
 /// The rows of one default tile of the standard frame: one, or cfitsio's `HCOMPRESS_1` height.
-const fn tile_rows(compression: Compression) -> usize {
-    match compression {
-        Compression::Hcompress(_) => hcompress_default_rows(HEIGHT),
+const fn tile_rows(storage: Storage) -> usize {
+    match storage {
+        Storage::Hcompress1 => hcompress_default_rows(HEIGHT),
         _ => 1,
     }
 }
 
-/// One tile of the light, or of its mask for `PLIO_1`, through the tile codec a write
-/// and a read take, and the reused buffers it writes.
+/// The samples of a tile, as the codec takes them.
+#[derive(Debug)]
+enum Samples {
+    Ints(Vec<i64>),
+    Bytes(Vec<u8>),
+}
+
+/// One tile of a scene image through the tile codec a write and a read take, and the
+/// reused buffers it writes.
 #[derive(Debug)]
 struct CodecTile {
     codec: TileCodec,
-    bitpix: IntBitpix,
+    width: IntBitpix,
     shape: [usize; 2],
-    values: Vec<i64>,
+    samples: Samples,
     encoded: Vec<u8>,
-    decoded: Vec<i64>,
     scratch: CodecScratch,
 }
 
 impl CodecTile {
-    fn new(compression: Compression, bitpix: Bitpix) -> Self {
-        let plane = scene_image(compression, bitpix, tile_rows(compression));
-        let values = match plane.samples {
-            Data::U8(values) => values.into_iter().map(i64::from).collect(),
-            Data::I16(values) => values.into_iter().map(i64::from).collect(),
-            _ => unreachable!("the integer codecs take u8 and i16 tiles"),
+    fn new(storage: Storage, input: TileInput) -> Self {
+        let rows = tile_rows(storage);
+        let samples = match input {
+            TileInput::Light => match scene::sky(Bitpix::I16, WIDTH, rows, 1).samples {
+                Data::I16(values) => Samples::Ints(values.into_iter().map(i64::from).collect()),
+                _ => unreachable!("the light is i16"),
+            },
+            TileInput::Mask => match scene::mask(WIDTH, rows, 1).samples {
+                Data::U8(values) => Samples::Ints(values.into_iter().map(i64::from).collect()),
+                _ => unreachable!("the mask is u8"),
+            },
+            TileInput::Quantized => {
+                let mut quantizer = QuantizedTile::new(rows);
+                quantizer.quantize().expect("the float frame quantizes");
+                let ints = quantizer.scratch.ints.iter().map(|&v| i64::from(v));
+                Samples::Ints(ints.collect())
+            }
+            TileInput::FloatBytes => {
+                let mut bytes = Vec::new();
+                float_rows(rows).view().encode_into(&mut bytes);
+                Samples::Bytes(bytes)
+            }
         };
-        let bitpix = match bitpix {
-            Bitpix::U8 => IntBitpix::U8,
-            _ => IntBitpix::I16,
-        };
+        let config = storage.config().expect("a codec storage");
+        let codec = config.compression.tile_codec(input.width(), 0);
         Self {
-            codec: compression.tile_codec(bitpix, 0),
-            bitpix,
-            shape: [WIDTH, tile_rows(compression)],
-            values,
+            codec,
+            width: input.width(),
+            shape: [WIDTH, rows],
+            samples,
             encoded: Vec::new(),
-            decoded: Vec::new(),
             scratch: CodecScratch::default(),
         }
     }
 
     /// Encodes the tile into [`Self::encoded`], as the tile encoder of `compress_image` does.
     fn encode(&mut self) {
+        let samples = match &self.samples {
+            Samples::Ints(values) => TileSamples::Ints(values),
+            Samples::Bytes(bytes) => TileSamples::Bytes(bytes),
+        };
         let stream = self
             .codec
-            .encode(
-                tile(&self.shape, self.bitpix),
-                TileSamples::Ints(&self.values),
-                &mut self.scratch,
-            )
+            .encode(tile(&self.shape, self.width), samples, &mut self.scratch)
             .unwrap();
         self.encoded.clear();
         self.encoded.extend_from_slice(stream);
     }
 
-    /// Decodes [`Self::encoded`] into [`Self::decoded`], as the tile decoder of a read does.
+    /// Decodes [`Self::encoded`] into the codec's reused buffers, as the tile decoder of a
+    /// read does.
     fn decode(&mut self) {
-        let decoded = self
-            .codec
-            .decode_ints(
-                tile(&self.shape, self.bitpix),
-                &self.encoded,
-                &mut self.scratch,
-            )
-            .unwrap();
-        mem::swap(&mut self.decoded, decoded);
+        let tile = tile(&self.shape, self.width);
+        match self.samples {
+            Samples::Ints(_) => {
+                black_box(
+                    self.codec
+                        .decode_ints(tile, &self.encoded, &mut self.scratch)
+                        .unwrap(),
+                );
+            }
+            Samples::Bytes(_) => {
+                black_box(
+                    self.codec
+                        .decode_bytes(tile, &self.encoded, &mut self.scratch)
+                        .unwrap(),
+                );
+            }
+        }
+    }
+
+    /// Asserts that [`Self::encoded`] decodes to the tile's samples.
+    fn assert_round_trips(&mut self) {
+        let tile = tile(&self.shape, self.width);
+        match &self.samples {
+            Samples::Ints(values) => {
+                let decoded = self
+                    .codec
+                    .decode_ints(tile, &self.encoded, &mut self.scratch)
+                    .unwrap();
+                assert_eq!(decoded, values, "the codec round-trips the tile");
+            }
+            Samples::Bytes(bytes) => {
+                let decoded = self
+                    .codec
+                    .decode_bytes(tile, &self.encoded, &mut self.scratch)
+                    .unwrap();
+                assert_eq!(decoded, bytes.as_slice(), "the codec round-trips the tile");
+            }
+        }
     }
 }
 
@@ -350,48 +263,104 @@ const fn tile(shape: &[usize; 2], width: IntBitpix) -> Tile<'_> {
     }
 }
 
-#[derive(Debug)]
-struct ReadCompressed;
-
-impl Reading for ReadCompressed {
-    type Output = Data;
-
-    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> Data {
-        reader
-            .image(1)
-            .unwrap()
-            .read(Region::All)
-            .unwrap()
-            .into_samples()
-    }
+/// The first `rows` rows of the float frame.
+fn float_rows(rows: usize) -> Data {
+    scene::sky(Bitpix::F32, WIDTH, rows, 1).samples
 }
 
+/// The first tile of the float frame, `rows` rows, its values widened as the encoder gathers
+/// them, and the quantizer of the default quantization with the seed the tile takes.
 #[derive(Debug)]
-struct ReadCompressedTable;
-
-impl Reading for ReadCompressedTable {
-    type Output = Table;
-
-    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> Table {
-        reader.read_table(1).unwrap()
-    }
+struct QuantizedTile {
+    floats: Vec<f32>,
+    values: Vec<f64>,
+    quantizer: Quantizer,
+    scratch: QuantizeScratch,
 }
 
-#[derive(Debug)]
-struct ReadCompressedSections {
-    words: Vec<u64>,
-}
-
-impl Reading for ReadCompressedSections {
-    type Output = ChecksumReport;
-
-    fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> ChecksumReport {
-        let mut image = reader.image(1).unwrap().with_checksums();
-        for top in (0..HEIGHT).step_by(SECTION_ROWS) {
-            let ranges = [0..WIDTH, top..(top + SECTION_ROWS).min(HEIGHT)];
-            let section = image.view(&ranges, &mut self.words).unwrap();
-            black_box(&section);
+impl QuantizedTile {
+    fn new(rows: usize) -> Self {
+        let Data::F32(floats) = float_rows(rows) else {
+            unreachable!("the float frame is f32")
+        };
+        let Spacing::Quantized(levels) = Quantization::default().spacing() else {
+            unreachable!("the default quantization quantizes")
+        };
+        let quantizer = Quantizer {
+            precision: Precision::Single,
+            step: levels.step,
+            method: levels.dither.method(),
+            zdither0: quantize::sample_seed(FloatSamples::F32(&floats)),
+        };
+        Self {
+            values: floats.iter().map(|&v| f64::from(v)).collect(),
+            floats,
+            quantizer,
+            scratch: QuantizeScratch::default(),
         }
-        image.finish().unwrap()
+    }
+
+    /// Quantizes the tile into the scratch's integers, as the encoder does; its `ZSCALE` and
+    /// `ZZERO`.
+    fn quantize(&mut self) -> Option<quantize::Quantized> {
+        let tile = TileValues {
+            values: &self.values,
+            width: WIDTH,
+            index: 0,
+        };
+        self.quantizer.quantize(tile, &mut self.scratch)
+    }
+}
+
+/// The first row of the float frame as the first tile, its integers at the default
+/// quantization, and the dequantization a read takes them back with.
+#[derive(Debug)]
+struct QuantizedRow {
+    tile: QuantizedTile,
+    ints: Vec<i64>,
+    dequant: Dequant,
+}
+
+impl QuantizedRow {
+    fn new() -> Self {
+        let mut tile = QuantizedTile::new(1);
+        let quantized = tile.quantize().expect("the float frame quantizes");
+        let ints = tile.scratch.ints.iter().map(|&v| i64::from(v)).collect();
+        let dequant = Dequant {
+            scale: quantized.bscale,
+            zero: quantized.bzero,
+            method: tile.quantizer.method,
+            irow: tile.quantizer.zdither0,
+            zblank: None,
+        };
+        Self {
+            tile,
+            ints,
+            dequant,
+        }
+    }
+
+    fn quantize(&mut self) -> Option<quantize::Quantized> {
+        self.tile.quantize()
+    }
+
+    fn dequantize(&self) -> Vec<f32> {
+        let mut out = Vec::new();
+        self.dequant.apply(&self.ints, &mut out);
+        out
+    }
+
+    /// Asserts that each of `dequantized` is within half a step of the row's float.
+    fn assert_within_half_step(&self, dequantized: &[f32]) {
+        assert_eq!(dequantized.len(), self.tile.floats.len());
+        for (&back, &original) in dequantized.iter().zip(&self.tile.floats) {
+            assert_within_half_step(
+                f64::from(original),
+                f64::from(back),
+                self.dequant.scale,
+                Bitpix::F32,
+                "the default quantization",
+            );
+        }
     }
 }

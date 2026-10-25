@@ -6,14 +6,14 @@
 //! This module holds the shared pieces — the write-time [`Compression`] and
 //! [`CompressionConfig`], the [`tile_codec::TileCodec`] dispatch, and the
 //! per-tile [`map_tiles`] fan-out — while the directions live in [`decode`]
-//! ([`TiledImage::decode`]) and [`encode`] ([`encode::compress_image`], all five codecs:
+//! ([`TiledImage::decode_into`]) and [`encode`] ([`encode::compress_image`], all five codecs:
 //! `GZIP_1`, `GZIP_2`, `RICE_1`, `PLIO_1`, `HCOMPRESS_1` with `SMOOTH=1` decode).
 //! Float images are quantized per-tile (`ZSCALE`/`ZZERO`) with `NO_DITHER`,
 //! `SUBTRACTIVE_DITHER_1`, or `SUBTRACTIVE_DITHER_2`. The per-codec work lives in
 //! [`gzip`], [`rice`], [`plio`], and [`hcompress`]; tiled *table* compression
 //! (§10.3) lives in [`table`] ([`table::compress_table`] and [`table::TiledTable`]).
 //!
-//! [`TiledImage::decode`]: decode::tiled_image::TiledImage::decode
+//! [`TiledImage::decode_into`]: decode::tiled_image::TiledImage::decode_into
 
 #[cfg(feature = "internals")]
 pub(crate) mod bench;
@@ -21,6 +21,8 @@ mod convert;
 pub(crate) mod decode;
 pub(crate) mod encode;
 pub(crate) mod encoded_unit;
+#[cfg(feature = "parallel")]
+mod first_failure;
 pub(crate) mod gzip;
 mod hcompress;
 mod nocompress;
@@ -33,16 +35,16 @@ pub(crate) mod table;
 mod tile_codec;
 mod tile_geometry;
 
-use crate::bitpix::Bitpix;
 use crate::compression::hcompress::Smoothing;
 use crate::compression::plane::IntBitpix;
-use crate::compression::quantization::Quantization;
+use crate::compression::quantization::{Quantization, Spacing};
 use crate::compression::tile_codec::TileCodec;
 use crate::fits_error::CompressionParameter;
 use crate::fits_error::FitsError;
 use crate::fits_error::Ranked;
 use crate::fits_error::Result;
 use crate::header_model::keywords;
+use crate::image_model::bitpix::Bitpix;
 use crate::image_model::scaling::Scaling;
 use crate::keyword::Keyword;
 
@@ -194,6 +196,7 @@ impl Compression {
             Self::Hcompress(Hcompress { scale }) => TileCodec::Hcompress(hcompress::Codec {
                 scale,
                 smoothing: Smoothing::Off,
+                plane: hcompress::Codec::PLANE_2D,
             }),
             Self::None => TileCodec::NoCompress,
         }
@@ -215,7 +218,8 @@ pub struct CompressionConfig {
     /// leaves a last band of 1 to 3, which moves to cfitsio's next candidate height);
     /// for a table cfitsio's tiles of about [`DEFAULT_TABLE_TILE_BYTES`].
     tiles: Vec<usize>,
-    /// `None` until set, which a float image reads as the default and a table refuses.
+    /// `None` until set, which a float image reads as [`Quantization::default`]. An
+    /// integer image and a table refuse a set level.
     quantization: Option<Quantization>,
 }
 
@@ -240,18 +244,26 @@ impl CompressionConfig {
         self
     }
 
-    /// A float image's quantization; [`Quantization::default`] when it is not set. A
-    /// table write refuses it.
+    /// A float image's quantization; [`Quantization::default`] when it is not set. An
+    /// integer image's and a table's write refuse a level, and take [`Quantization::NONE`],
+    /// as they keep their values.
     #[must_use]
     pub const fn with_quantization(mut self, quantization: Quantization) -> Self {
         self.quantization = Some(quantization);
         self
     }
 
+    /// Whether a quantization level is set, relative or absolute: what an integer image
+    /// and a table refuse. Unset, the config quantizes a float image alone.
+    fn quantizes(&self) -> bool {
+        self.quantization
+            .is_some_and(|quantization| matches!(quantization.spacing(), Spacing::Quantized(_)))
+    }
+
     /// Rows per tile of a table of `row_count` rows of `row_len` bytes, in `1..=row_count`.
-    /// Errors when the tiles have more than one axis or quantization is set.
+    /// Errors when the tiles have more than one axis or the config quantizes.
     fn table_tile_rows(&self, row_count: usize, row_len: usize) -> Result<usize> {
-        if self.quantization.is_some() {
+        if self.quantizes() {
             return Err(FitsError::InvalidCompressionParameter {
                 parameter: CompressionParameter::TableQuantization,
             });
@@ -312,11 +324,7 @@ where
     I: Fn() -> S + Sync + Send,
     F: Fn(&mut S, usize) -> Result<T> + Sync + Send,
 {
-    use rayon::prelude::*;
-    (0..ntiles)
-        .into_par_iter()
-        .map_init(init, |scratch, t| f(scratch, t))
-        .collect()
+    first_failure::try_map_init(0..ntiles, init, f)
 }
 
 #[cfg(not(feature = "parallel"))]
@@ -330,17 +338,67 @@ where
 }
 
 /// The synthetic planes the codec fixtures in `test_resources/comp_*` encode.
+/// The check of a quantized read that tests and benches share.
+#[cfg(feature = "internals")]
+pub(crate) mod half_step {
+    use crate::image_model::bitpix::Bitpix;
+    use crate::internals::tolerance::{Tolerance, assert_within};
+
+    /// Assert that `back` is within half the quantization step `zscale` of `original`,
+    /// plus the roundings of the dither arithmetic and of storing a sample of `bitpix`: an
+    /// ulp of an f32, or four roundings of f64 arithmetic, relative to the sample.
+    #[track_caller]
+    pub(crate) fn assert_within_half_step(
+        original: f64,
+        back: f64,
+        zscale: f64,
+        bitpix: Bitpix,
+        context: &str,
+    ) {
+        let rounding = match bitpix {
+            Bitpix::F32 => f64::from(f32::EPSILON),
+            _ => 4.0 * f64::EPSILON,
+        };
+        assert_within(
+            back,
+            original,
+            Tolerance::abs(
+                0.5 * zscale + rounding * original.abs(),
+                "half a quantization step, and the roundings of the dither and the stored sample",
+            ),
+            context,
+        );
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod internals {
+    use crate::bintable::Table;
+    use crate::compression::decode::tiled_image::TiledImage;
+    use crate::fits_error::Result;
+    use crate::hdu::hdu_kind::{HduKind, HduPosition};
+    use crate::hdu::image_geometry::ImageGeometry;
+    use crate::header_model::Header;
+    use crate::image_model::Image;
+
+    /// Decode the tiled image `header` describes from its container `table`, resolving
+    /// the kind and geometry the way the reader's scan does.
+    pub(crate) fn decompress_image(header: &Header, table: &Table) -> Result<Image> {
+        let kind = HduKind::from_header(header, HduPosition::Extension)?;
+        let image = ImageGeometry::from_header(header, kind)?;
+        let samples = TiledImage::new(header, &image)?.decode_table(table)?;
+        Image::new(image.shape.clone(), samples, image.scaling)
+    }
+
     /// value(x, y) = 7x − 5y over 24×16, row-major: the integer codec fixtures.
-    pub(crate) fn ramp() -> Vec<i16> {
+    pub(crate) fn fixture_plane() -> Vec<i16> {
         (0..24 * 16)
             .map(|i| (i % 24) as i16 * 7 - (i / 24) as i16 * 5)
             .collect()
     }
 
     /// value(x, y) = (x + y) mod 7 over 24×16: the PLIO fixture, a non-negative mask.
-    pub(crate) fn mask() -> Vec<i32> {
+    pub(crate) fn fixture_mask() -> Vec<i32> {
         (0..24 * 16).map(|i| (i % 24 + i / 24) % 7).collect()
     }
 

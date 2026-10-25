@@ -37,6 +37,25 @@ impl AsciiText {
         }
     }
 
+    /// This column refilled with `rows`, as [`FromIterator`] makes one, its buffers reused.
+    pub(crate) fn refill<S: AsRef<str>>(&mut self, rows: impl IntoIterator<Item = Option<S>>) {
+        let Self { text, defined } = self;
+        defined.clear();
+        text.refill(|text, ends| {
+            text.clear();
+            ends.clear();
+            for row in rows {
+                if let Some(row) = &row {
+                    text.push_str(row.as_ref().trim_end_matches(' '));
+                }
+                ends.push(text.len());
+                defined.push(row.is_some());
+            }
+            Ok(())
+        })
+        .expect("a refill that fails on no row");
+    }
+
     /// Whether any row is undefined.
     pub(crate) fn has_null(&self) -> bool {
         self.defined.contains(&false)

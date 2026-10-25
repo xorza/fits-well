@@ -121,9 +121,9 @@ impl TileScratch {
     }
 
     /// Write only this tile's intersection with `ranges` into a section plane of
-    /// `selected_shape`. Rows outside the region are skipped whole; the surviving row
+    /// `selected_shape`. Rows outside the section are skipped whole; the surviving row
     /// is clipped on axis 0 and copied as one contiguous run.
-    pub(super) fn scatter_region_into<S: Copy, D: Copy>(
+    pub(super) fn scatter_section_into<S: Copy, D: Copy>(
         &self,
         ranges: &[Range<usize>],
         selected_shape: &[usize],
@@ -227,8 +227,9 @@ impl TileGeometry {
         &self.tiles
     }
 
+    /// The tiles of the grid: none for an image with no pixels, a `NAXIS = 0` one too.
     pub(super) fn ntiles(&self) -> usize {
-        if self.ntiles_axis.contains(&0) {
+        if self.ntiles_axis.is_empty() || self.ntiles_axis.contains(&0) {
             0
         } else {
             self.ntiles_axis.iter().product()

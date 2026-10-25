@@ -13,6 +13,8 @@ use crate::compression::decode::tile_scratch_set::{SetCapacities, TileScratchSet
 use crate::compression::decode::tile_section::TileSection;
 use crate::compression::decode::tile_sources::TileSources;
 use crate::compression::decode::wide_plane::{TileJob, WidePlane};
+#[cfg(feature = "parallel")]
+use crate::compression::first_failure;
 use crate::compression::tile_geometry::{PlanePart, TileGeometry, TileScratch};
 use crate::fits_error::Result;
 use std::ops::Range;
@@ -33,8 +35,8 @@ pub(super) struct ImageDecodePlan<'a> {
 
 /// Where a tile lies: its row of the compressed table, and its row of the image's tile
 /// grid, which drives the dither sequence and the scatter. They coincide for a
-/// whole-image decode and differ for a section, which reads only the table rows its
-/// region intersects.
+/// whole-image decode and differ for a section, which reads only the table rows it
+/// intersects.
 #[derive(Debug, Clone, Copy)]
 struct TileRows {
     table: usize,
@@ -137,13 +139,32 @@ impl ImageDecodePlan<'_> {
         }
     }
 
+    /// Decode the tiles of `section`, or every tile for `None`, as stored samples `D`, and
+    /// write each through `convert` into `out`, which holds the section's values or the
+    /// image's.
+    pub(super) fn decode_into<D: DecodeSample, O: Copy + Send>(
+        &self,
+        section: Option<TileSection<'_>>,
+        out: &mut [O],
+        convert: &(impl Fn(D) -> O + Sync),
+    ) -> Result<()> {
+        match section {
+            Some(section) => self.decode_section_into(section, out, convert),
+            None => self.decode_image_into(out, convert),
+        }
+    }
+
     /// Decode every tile and scatter it into the full image plane.
     ///
     /// The tiles at one index along the slowest axis write one band of the plane and
     /// nothing else, so with enough bands for the workers each takes whole bands and
     /// narrows its tiles straight into its own part of `out`. An image of fewer bands
     /// decodes in waves.
-    pub(super) fn decode_all_into<D: DecodeSample>(&self, out: &mut [D]) -> Result<()> {
+    fn decode_image_into<D: DecodeSample, O: Copy + Send>(
+        &self,
+        out: &mut [O],
+        convert: &(impl Fn(D) -> O + Sync),
+    ) -> Result<()> {
         let geom = self.geometry;
         if let Layout::Waves { .. } = self.layout::<D>(None) {
             let mut scatter = TileScratch::default();
@@ -154,28 +175,35 @@ impl ImageDecodePlan<'_> {
                     table: tile,
                     grid: tile,
                 },
-                |tile, values| {
+                |tile, values: &[D]| {
                     geom.tile_into(tile, &mut scatter);
                     let mut whole = PlanePart {
                         values: &mut *out,
                         start: 0,
                     };
-                    scatter.scatter_rows_into(&mut whole, values, &|value: D| value);
+                    scatter.scatter_rows_into(&mut whole, values, convert);
                 },
             );
         }
         let set = self.set_capacities::<D::Wide>()?;
         let bands = geom.bands();
-        let band = |scratch: &mut TileScratchSet<D::Wide>, (band, part): (usize, &mut [D])| {
+        let band = |scratch: &mut TileScratchSet<D::Wide>, (band, part): (usize, &mut [O])| {
             scratch.reserve(&set)?;
-            self.decode_band(scratch, bands.tiles_of(band), bands.part(band, part))
+            self.decode_band(
+                scratch,
+                bands.tiles_of(band),
+                bands.part(band, part),
+                convert,
+            )
         };
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            out.par_chunks_mut(bands.len)
-                .enumerate()
-                .try_for_each_init(TileScratchSet::default, band)
+            first_failure::try_for_each_init(
+                out.par_chunks_mut(bands.len),
+                TileScratchSet::default,
+                band,
+            )
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -186,13 +214,14 @@ impl ImageDecodePlan<'_> {
         }
     }
 
-    /// Decode the `tiles` of one band, narrowing each into `part`, the band's run of the
-    /// image plane.
-    fn decode_band<D: DecodeSample>(
+    /// Decode the `tiles` of one band, narrowing each and writing it through `convert`
+    /// into `part`, the band's run of the image plane.
+    fn decode_band<D: DecodeSample, O>(
         &self,
         scratch: &mut TileScratchSet<D::Wide>,
         tiles: Range<usize>,
-        mut part: PlanePart<'_, D>,
+        mut part: PlanePart<'_, O>,
+        convert: &impl Fn(D) -> O,
     ) -> Result<()> {
         for tile in tiles {
             self.decode_tile::<D>(
@@ -204,17 +233,18 @@ impl ImageDecodePlan<'_> {
             )?;
             scratch
                 .tile
-                .scatter_rows_into(&mut part, &scratch.values, &D::narrow);
+                .scatter_rows_into(&mut part, &scratch.values, &|wide| convert(D::narrow(wide)));
         }
         Ok(())
     }
 
-    /// Decode only the tiles intersecting a requested region, scattering each tile's
-    /// intersection into the section plane.
-    pub(super) fn decode_region_into<D: DecodeSample>(
+    /// Decode only the tiles intersecting `section`, scattering each tile's intersection
+    /// into the section plane.
+    fn decode_section_into<D: DecodeSample, O: Copy>(
         &self,
         section: TileSection<'_>,
-        out: &mut [D],
+        out: &mut [O],
+        convert: &impl Fn(D) -> O,
     ) -> Result<()> {
         let mut scatter = TileScratch::default();
         scatter.reserve(&self.geometry.tile_capacities())?;
@@ -224,15 +254,9 @@ impl ImageDecodePlan<'_> {
                 table: table_row,
                 grid: section.rows[table_row],
             },
-            |tile_row, values| {
+            |tile_row, values: &[D]| {
                 self.geometry.tile_into(tile_row, &mut scatter);
-                scatter.scatter_region_into(
-                    section.ranges,
-                    section.shape,
-                    values,
-                    out,
-                    &|value: D| value,
-                );
+                scatter.scatter_section_into(section.ranges, section.shape, values, out, convert);
             },
         )
     }
@@ -270,11 +294,13 @@ impl ImageDecodePlan<'_> {
             #[cfg(feature = "parallel")]
             {
                 use rayon::prelude::*;
-                wave[..tiles * slot]
-                    .par_chunks_mut(slot)
-                    .zip(&mut lengths[..tiles])
-                    .enumerate()
-                    .try_for_each_init(TileScratchSet::default, decode)?;
+                first_failure::try_for_each_init(
+                    wave[..tiles * slot]
+                        .par_chunks_mut(slot)
+                        .zip(&mut lengths[..tiles]),
+                    TileScratchSet::default,
+                    decode,
+                )?;
             }
             #[cfg(not(feature = "parallel"))]
             {

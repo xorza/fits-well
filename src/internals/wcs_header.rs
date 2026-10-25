@@ -3,7 +3,8 @@
 use crate::alternate::Alternate;
 use crate::fits_error::FitsError;
 use crate::header_model::{Header, keywords};
-use crate::internals::tolerance::{Tolerance, assert_close};
+use crate::internals::tolerance;
+use crate::internals::tolerance::Tolerance;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::internals::{to_pixel, to_world};
 
@@ -198,6 +199,15 @@ impl<'a> WcsHeader<'a> {
         self.header(Family::Image, None)
     }
 
+    /// [`WcsHeader::image_header`] with the real keywords `extra` set over it.
+    pub(crate) fn image_header_with(&self, extra: &[(&str, f64)]) -> Header {
+        let mut header = self.image_header();
+        for &(keyword, value) in extra {
+            header.set_internal(keyword, value);
+        }
+        header
+    }
+
     pub(crate) fn wcs(
         &self,
         family: Family,
@@ -226,7 +236,7 @@ pub(crate) fn assert_round_trip(
         let pixel = pixel.as_ref();
         let world = to_world(wcs, pixel).unwrap();
         let back = to_pixel(wcs, &world).unwrap();
-        assert_close(&back, pixel, tolerance, &format!("{context} at {pixel:?}"));
+        tolerance::assert_close(&back, pixel, tolerance, &format!("{context} at {pixel:?}"));
     }
 }
 

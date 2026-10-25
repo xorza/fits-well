@@ -2,14 +2,20 @@ use crate::bintable::Table;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::internals::table_header;
 use crate::fits_error::FitsError;
+use crate::fits_error::KeywordDefect;
 use crate::header_model::keywords;
+use crate::internals::whole_column::WholeColumn;
+use std::assert_matches;
 
 use crate::ragged::Ragged;
 use bitvec::bitvec;
 use bitvec::order::Msb0;
 
+/// A shape the cell cannot hold is a defect of `TDIMn` alone: the stored values still
+/// read. Text that is no shape, an empty one among them, is a syntax defect, a shape past
+/// the cell's four elements a structure one, and a zero axis a range one.
 #[test]
-fn tdim_accepts_subshapes_and_checks_vla_cells() {
+fn fixed_cell_takes_a_subshape_and_reports_each_defect() {
     let mut fixed = table_header(16, 1, &["4J"]);
     fixed.set_internal("TDIM1", "(2)");
     assert_eq!(
@@ -21,18 +27,19 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
             .unwrap(),
         Some(&[2][..])
     );
-    // A shape the cell cannot hold is a defect of `TDIMn` alone: the stored values
-    // still read.
-    for invalid in ["(5)", "(2,broken)", "()", "(0)"] {
+    for (invalid, expected) in [
+        ("(5)", KeywordDefect::Structure),
+        ("(2,broken)", KeywordDefect::Syntax),
+        ("()", KeywordDefect::Syntax),
+        ("(0)", KeywordDefect::Range),
+    ] {
         fixed.set_internal("TDIM1", invalid);
         let table = Table::from_data(&fixed, vec![0; 16]).unwrap();
-        assert!(
-            matches!(
-                table.schema.columns[0].tdim(),
-                Err(FitsError::InvalidColumnKeyword { keyword, source })
-                    if keyword == "TDIM1"
-                        && matches!(*source, FitsError::KeywordOutOfRange { keyword } if keyword == "TDIM1")
-            ),
+        assert_matches!(
+            table.schema.columns[0].tdim(),
+            Err(FitsError::InvalidColumnKeyword { keyword, source })
+                if keyword == "TDIM1"
+                    && matches!(*source, FitsError::InvalidKeywordValue { keyword, defect } if keyword == "TDIM1" && defect == expected),
             "{invalid}"
         );
         assert_eq!(
@@ -40,7 +47,11 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
             ColumnData::I32(vec![0; 4])
         );
     }
+}
 
+/// A row of 3 values does not fill a `(2,2)` shape.
+#[test]
+fn vla_row_must_fill_its_shape() {
     let mut vla = table_header(8, 1, &["1PJ"]);
     vla.set_internal(keywords::PCOUNT, 12)
         .set_internal("TDIM1", "(2,2)");
@@ -51,18 +62,22 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
         data.extend_from_slice(&value.to_be_bytes());
     }
     let table = Table::from_data(&vla, data).unwrap();
-    assert!(matches!(
+    assert_matches!(
         table.column(0).unwrap().vla(),
-        Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "TDIM1"
-    ));
+        Err(FitsError::InvalidKeywordValue { keyword, .. }) if keyword == "TDIM1"
+    );
+}
 
+/// An empty row of a shaped array column reads empty from its descriptor alone: the
+/// out-of-heap offsets prove it does not consult the heap.
+#[test]
+fn empty_shaped_row_does_not_read_the_heap() {
     let mut mixed = table_header(24, 2, &["1PJ", "1QI"]);
     mixed
         .set_internal(keywords::PCOUNT, 24)
         .set_internal("TDIM1", "(2,2)")
         .set_internal("TDIM2", "(2,2)");
     let mut data = Vec::new();
-    // The out-of-heap offsets prove empty descriptors do not consult the heap.
     data.extend_from_slice(&0i32.to_be_bytes());
     data.extend_from_slice(&9999i32.to_be_bytes());
     data.extend_from_slice(&0i64.to_be_bytes());
@@ -94,7 +109,11 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
         ])
         .unwrap()
     );
+}
 
+/// The bit columns read as the others do: an empty row from its descriptor alone.
+#[test]
+fn empty_shaped_bit_row_does_not_read_the_heap() {
     let mut mixed_bits = table_header(24, 2, &["1PX", "1QX"]);
     mixed_bits
         .set_internal(keywords::PCOUNT, 4)
@@ -123,13 +142,16 @@ fn tdim_accepts_subshapes_and_checks_vla_cells() {
         q_bits.row(1),
         bitvec![u8, Msb0; 0, 1, 0, 1, 0, 1, 0, 1, 0].as_bitslice()
     );
+}
 
+/// An unreadable shape fails the array read, an empty row included.
+#[test]
+fn unreadable_shape_fails_an_empty_row() {
     let mut malformed_empty = table_header(8, 1, &["1PJ"]);
     malformed_empty.set_internal("TDIM1", "(2,broken)");
-    // An unreadable shape fails the array read, an empty row included.
     let table = Table::from_data(&malformed_empty, vec![0; 8]).unwrap();
-    assert!(matches!(
+    assert_matches!(
         table.column(0).unwrap().vla(),
         Err(FitsError::InvalidColumnKeyword { keyword, .. }) if keyword == "TDIM1"
-    ));
+    );
 }

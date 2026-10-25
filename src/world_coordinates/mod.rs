@@ -16,11 +16,10 @@ use crate::world_coordinates::axis_plan::{AxisKind, AxisPlan};
 use crate::world_coordinates::axis_transform::AxisTransform;
 use crate::world_coordinates::axis_transform::spectral_rest::SpectralParameters;
 use crate::world_coordinates::axis_transform::spectral_rest::SpectralRest;
+use crate::world_coordinates::celestial_coordinate::CelestialCoordinate;
 use crate::world_coordinates::celestial_frame::CelestialFrame;
 use crate::world_coordinates::celestial_pole::CelestialPole;
-use crate::world_coordinates::celestial_transform::{
-    CelestialPair, CelestialResolution, CelestialTransform, PvMeaning,
-};
+use crate::world_coordinates::celestial_transform::{CelestialPair, CelestialTransform, PvMeaning};
 use crate::world_coordinates::ctype::Ctype;
 use crate::world_coordinates::declared::Declared;
 use crate::world_coordinates::distortion::Distortion;
@@ -28,7 +27,6 @@ use crate::world_coordinates::distortion::sip::Sip;
 use crate::world_coordinates::header_read::AxisValues;
 use crate::world_coordinates::linear_transform::LinearMatrix;
 use crate::world_coordinates::linear_transform::LinearTransform;
-use crate::world_coordinates::native_rotation::CelestialCoordinate;
 use crate::world_coordinates::projected_celestial_axes::CelestialAxisPair;
 use crate::world_coordinates::projected_celestial_axes::ProjectedCelestialAxes;
 use crate::world_coordinates::projection::Projection;
@@ -43,6 +41,7 @@ pub(crate) mod axis_transform;
 #[cfg(feature = "internals")]
 pub(crate) mod bench;
 mod celestial_axis;
+mod celestial_coordinate;
 pub(crate) mod celestial_frame;
 pub(crate) mod celestial_pole;
 mod celestial_transform;
@@ -77,7 +76,7 @@ pub struct CelestialProjection {
 pub struct Description<'a> {
     pub axes: &'a [AxisDescription],
     /// The resolved `RADESYSa`/`EQUINOXa` metadata when applicable.
-    pub celestial_frame: Option<CelestialFrame>,
+    pub celestial_frame: Option<&'a CelestialFrame>,
     /// Resolved celestial axes, projection, and native pole.
     pub celestial_projection: Option<CelestialProjection>,
     /// Zero-based axes whose non-linear transform is not evaluated.
@@ -172,21 +171,26 @@ impl Wcs {
                     .map(|value| value.unwrap_or("").to_string())
             })
             .collect::<Result<_>>()?;
-        let celestial_pair = CelestialAxisPair::find(&ctype);
-        let celestial_axes = ProjectedCelestialAxes::find(&ctype)?;
-        let celestial_frame = CelestialFrame::from_header(header, alt, &ctype)?;
+        let ctypes: Vec<Ctype<'_>> = ctype.iter().map(|value| Ctype::parse(value)).collect();
+        let celestial_pair = CelestialAxisPair::find(&ctypes);
+        let celestial_axes = ProjectedCelestialAxes::find(&ctypes)?;
+        let celestial_frame = CelestialFrame::from_header(header, alt, &ctypes)?;
         let spectral_frames = if let SpectralFrames::Columns(frames) = spectral_frames {
             assert_eq!(frames.len(), naxis, "spectral frame count");
             frames
         } else {
-            let frame = ctype
+            let frame = ctypes
                 .iter()
-                .any(|ctype| axis_transform::is_spectral_type(ctype))
+                .any(|&ctype| axis_transform::is_spectral_type(ctype))
                 .then(|| SpectralFrame::from_header(header, alt))
                 .transpose()?;
-            ctype
+            ctypes
                 .iter()
-                .map(|ctype| frame.filter(|_| axis_transform::is_spectral_type(ctype)))
+                .map(|&ctype| {
+                    frame
+                        .clone()
+                        .filter(|_| axis_transform::is_spectral_type(ctype))
+                })
                 .collect()
         };
 
@@ -205,7 +209,7 @@ impl Wcs {
         let mut plans = Vec::with_capacity(naxis);
         let mut unsupported_axes = Vec::new();
         for axis in 0..naxis {
-            let parsed_ctype = Ctype::parse(&ctype[axis]);
+            let parsed_ctype = ctypes[axis];
             let tabular_axis = parsed_ctype.algorithm == Some("TAB");
             // A `-TAB` axis whose coordinate array was resolved from its BINTABLE is
             // evaluated by the tabular transform, so its own algorithm is never
@@ -219,14 +223,18 @@ impl Wcs {
                 });
                 continue;
             }
+            // A celestial name with no algorithm code (`'RA'`, `'DEC'`) names no
+            // projection: wcslib reads it as a linear axis about its `CRVAL`.
+            let celestial =
+                parsed_ctype.celestial_axis().is_some() && parsed_ctype.algorithm.is_some();
             let kind = if tabular_axis {
                 AxisKind::Tabular
-            } else if parsed_ctype.celestial_axis().is_some() {
+            } else if celestial {
                 AxisKind::Celestial
             } else {
                 AxisKind::Other
             };
-            if parsed_ctype.celestial_axis().is_some() {
+            if celestial {
                 // A projection this crate does not evaluate, or an axis with no partner
                 // of its own system, has no transform.
                 let unpaired = !celestial_pair.is_some_and(|pair| pair.contains(axis));
@@ -260,9 +268,11 @@ impl Wcs {
                 )?;
             }
             let parameters = SpectralParameters::new(spectral_parameters);
-            let rest = spectral_frames[axis].map_or(SpectralRest::NONE, |frame| frame.rest);
+            let rest = spectral_frames[axis]
+                .as_ref()
+                .map_or(SpectralRest::NONE, |frame| frame.rest);
             let spec =
-                AxisTransform::parse(&ctype[axis], &cunit[axis], crval[axis], rest, parameters)?;
+                AxisTransform::parse(parsed_ctype, &cunit[axis], crval[axis], rest, parameters)?;
             axis_scales[axis] = spec.unit.scale;
             if matches!(&spec.transform, AxisTransform::Unsupported) {
                 unsupported_axes.push(axis);
@@ -282,6 +292,13 @@ impl Wcs {
         } else {
             None
         };
+        // A `-SIP` code names a distortion an alternate description has no keywords for,
+        // so it is refused rather than evaluated as the plain projection.
+        if code == Some(Distortion::Sip) && alt != Alternate::PRIMARY {
+            return Err(FitsError::ConflictingWcsKeywords {
+                conflict: WcsConflict::SipAlternate,
+            });
+        }
         if code == Some(Distortion::Sip) && alt == Alternate::PRIMARY && sip.is_none() {
             return Err(FitsError::MissingKeyword {
                 name: RecordName::Keyword(Keyword::new("A_ORDER")),
@@ -298,7 +315,8 @@ impl Wcs {
             }
             _ => PvMeaning::Projection,
         };
-        let declared = Declared::read(header, alt, naxis, matrix.declared())?;
+        let mut declared = Declared::read(header, alt, naxis, matrix.declared())?;
+        declared.carry_spectral(&spectral_frames);
         let linear = matrix.scaled(&axis_scales, crpix.clone(), sip)?;
 
         let celestial = match celestial_axes {
@@ -312,14 +330,7 @@ impl Wcs {
                     },
                     pv_meaning,
                 };
-                match CelestialTransform::from_header(header, alt, pair)? {
-                    CelestialResolution::Transform(transform) => Some(transform),
-                    CelestialResolution::DegenerateCone => {
-                        unsupported_axes.extend([axes.longitude, axes.latitude]);
-                        unsupported_axes.sort_unstable();
-                        None
-                    }
-                }
+                Some(CelestialTransform::from_header(header, alt, pair)?)
             }
         };
 
@@ -331,7 +342,7 @@ impl Wcs {
                 cunit: cunit[i].clone(),
                 crval: declared_crval[i],
                 crpix: crpix[i],
-                spectral_frame: spectral_frames[i],
+                spectral_frame: spectral_frames[i].clone(),
             })
             .collect();
         Ok(Self {
@@ -467,7 +478,7 @@ impl Wcs {
     pub fn description(&self) -> Description<'_> {
         Description {
             axes: &self.axes,
-            celestial_frame: self.celestial_frame,
+            celestial_frame: self.celestial_frame.as_ref(),
             celestial_projection: self
                 .celestial
                 .as_ref()
@@ -568,7 +579,8 @@ impl Wcs {
             .collect::<Result<Vec<_>>>()?;
         // Each axis is its own column, so the pole and frame keywords are those of the
         // celestial columns — and mean nothing until a longitude/latitude pair exists.
-        if let Some(pair) = CelestialAxisPair::find(&ctype) {
+        let ctypes: Vec<Ctype<'_>> = ctype.iter().map(|value| Ctype::parse(value)).collect();
+        if let Some(pair) = CelestialAxisPair::find(&ctypes) {
             let celestial_columns = [columns[pair.longitude], columns[pair.latitude]];
             table.copy_celestial_keywords(header, &mut h, &celestial_columns)?;
         }
@@ -734,14 +746,14 @@ fn has_scamp_terms(header: &Header, alt: Alternate, axes: ProjectedCelestialAxes
     })
 }
 
-/// Read `PREFIX1..PREFIXn` (with alternate suffix) into a vector, defaulting
-/// missing entries.
 /// Golden pixel→world sets from `astropy.wcs` for the shared fixtures, and the
 /// assertion over them — used by the test modules of the layers a transform is
 /// assembled from, not just by [`Wcs`]'s own.
 #[cfg(test)]
 pub(crate) mod internals {
     use crate::fits_error::Result;
+    use crate::internals::tolerance;
+    use crate::internals::tolerance::Tolerance;
     use crate::world_coordinates::Wcs;
     use crate::world_coordinates::angle::DEGREE_TOLERANCE;
 
@@ -804,12 +816,16 @@ pub(crate) mod internals {
     pub(crate) fn assert_astropy_golden(wcs: &Wcs, golden: &AstropyGolden<'_>, context: &str) {
         // A printed value lies within half a unit in its last place of wcslib's
         // answer, and DEGREE_TOLERANCE covers where this evaluation and wcslib's part.
-        let tolerance = 0.5 * 10f64.powi(-golden.decimals) + DEGREE_TOLERANCE;
+        let tolerance = Tolerance::abs(
+            0.5 * 10f64.powi(-golden.decimals) + DEGREE_TOLERANCE,
+            "half a unit in astropy's last printed place, and the degree tolerance",
+        );
         for &(px, py, ra, dec) in golden.points {
-            let world = to_world(wcs, &[px, py]).unwrap();
-            assert!(
-                (world[0] - ra).abs() <= tolerance && (world[1] - dec).abs() <= tolerance,
-                "{context} at ({px},{py}): got {world:?}, want ({ra},{dec})"
+            tolerance::assert_close(
+                &to_world(wcs, &[px, py]).unwrap(),
+                &[ra, dec],
+                tolerance,
+                &format!("{context} at ({px}, {py})"),
             );
         }
     }

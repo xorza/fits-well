@@ -13,8 +13,6 @@ use crate::fits_error::Result;
 /// holds are known before it starts.
 #[derive(Debug, Default)]
 pub(crate) struct TileIndex {
-    /// The data offset of the HDU whose rows these are, which a reopened image matches.
-    key: u64,
     rows: Vec<u8>,
     zscale: TileColumn<f64>,
     zzero: TileColumn<f64>,
@@ -22,27 +20,18 @@ pub(crate) struct TileIndex {
 }
 
 impl TileIndex {
-    /// The rows of the container `schema` describes, the data unit at `key`, which
-    /// `read_rows` appends to the buffer it is given.
+    /// The rows of the container `schema` describes, which `read_rows` appends to the
+    /// buffer it is given.
     pub(super) fn read(
-        key: u64,
         schema: &Schema,
         read_rows: impl FnOnce(usize, &mut Vec<u8>) -> Result<()>,
     ) -> Result<Self> {
         let len = main_len(schema)?;
-        let mut index = Self {
-            key,
-            ..Self::default()
-        };
+        let mut index = Self::default();
         allocation::try_reserve_exact(&mut index.rows, len)?;
         read_rows(len, &mut index.rows)?;
         index.read_columns(schema)?;
         Ok(index)
-    }
-
-    /// The data offset of the HDU whose rows these are.
-    pub(super) const fn key(&self) -> u64 {
-        self.key
     }
 
     fn read_columns(&mut self, schema: &Schema) -> Result<()> {
@@ -51,7 +40,6 @@ impl TileIndex {
             zscale,
             zzero,
             zblank,
-            ..
         } = self;
         let table = TableView::compact(schema, schema.extent.row_count, rows);
         zscale.read_real(table, "ZSCALE")?;

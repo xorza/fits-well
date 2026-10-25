@@ -1,8 +1,9 @@
 //! A binary table's row and column selection: the data unit of a table that holds just
 //! the selected rows, read through a [`Fetch`] from the file or from decoded tiles.
 
-use std::ops::Range;
+use std::ops::{Bound, Range};
 
+use crate::allocation;
 use crate::bintable::column::Column;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::column_reader::ColumnReader;
@@ -33,9 +34,13 @@ impl SelectedColumn {
     fn new(column: &ColumnReader<'_>) -> Result<Self> {
         let descriptor = column.descriptor().clone();
         let data = if descriptor.tform.descriptor_width().is_some() {
-            SelectedData::Variable(column.vla()?)
+            let mut rows = Ragged::<ColumnData>::new(ColumnData::U8(Vec::new()), Vec::new());
+            column.vla_into(&mut rows)?;
+            SelectedData::Variable(rows)
         } else {
-            SelectedData::Fixed(column.raw()?)
+            let mut values = ColumnData::U8(Vec::new());
+            column.raw_into(&mut values)?;
+            SelectedData::Fixed(values)
         };
         Ok(Self { descriptor, data })
     }
@@ -57,7 +62,7 @@ impl SelectedColumn {
 }
 
 impl Named for SelectedColumn {
-    fn name(&self) -> Option<&str> {
+    fn name(&self) -> Result<Option<&str>> {
         self.descriptor.name()
     }
 }
@@ -93,17 +98,20 @@ impl Selection {
 
     /// The selected column that `column` names: an index of the table's columns, or a
     /// `TTYPEn` name compared case-insensitively. `None` when the selection does not
-    /// hold it.
-    pub fn column<'c>(&self, column: impl Into<ColumnSelector<'c>>) -> Option<&SelectedColumn> {
-        match column.into() {
+    /// hold it; the defect of a `TTYPEn` that does not read, met before the match.
+    pub fn column<'c>(
+        &self,
+        column: impl Into<ColumnSelector<'c>>,
+    ) -> Result<Option<&SelectedColumn>> {
+        Ok(match column.into() {
             ColumnSelector::Index(index) => self
                 .columns
                 .iter()
                 .find(|selected| selected.descriptor.number == index + 1),
             ColumnSelector::Name(name) => {
-                index_of(&self.columns, name).map(|pos| &self.columns[pos])
+                index_of(&self.columns, name)?.map(|pos| &self.columns[pos])
             }
-        }
+        })
     }
 }
 
@@ -192,6 +200,14 @@ impl TableRows<'_> {
             TableRows::Picked(rows) => rows.len(),
         }
     }
+
+    /// The table row of the `index`th row these select.
+    const fn get(&self, index: usize) -> usize {
+        match self {
+            TableRows::Range(rows) => rows.start + index,
+            TableRows::Picked(rows) => rows[index],
+        }
+    }
 }
 
 /// The rows and columns of the table `schema` describes that a selection copies; every
@@ -215,36 +231,30 @@ impl TableSelection<'_> {
             columns,
         } = self;
         let row_len = schema.extent.row_len;
-        let mut len = rows
+        let main_len = rows
             .len()
             .checked_mul(row_len)
             .ok_or(FitsError::DataUnitOverflow)?;
-        let mut add = |row: usize| -> Result<()> {
-            validate_row(row, schema.extent.row_count)?;
-            for (index, column) in schema.columns.iter().enumerate() {
-                if column.tform.descriptor_width().is_none()
-                    || column.tform.repeat() == 0
-                    || columns.is_some_and(|columns| !columns[index])
-                {
-                    continue;
-                }
-                let slot = row * row_len + column.byte_offset;
-                let descriptor = &main[slot..slot + column.tform.byte_width()];
-                let span = VlaCellSpan::new(schema, column, descriptor)?;
-                len = len
-                    .checked_add(span.heap_range.len())
-                    .ok_or(FitsError::DataUnitOverflow)?;
-            }
-            Ok(())
-        };
-        match rows {
+        let row = |row: usize| &main[row * row_len..(row + 1) * row_len];
+        let heap_len = match rows {
             TableRows::Range(rows) => {
                 validate_row_range(rows, schema.extent.row_count)?;
-                rows.clone().try_for_each(&mut add)?;
+                heap_len(schema, *columns, rows.clone().map(|r| (r, row(r))))?
             }
-            TableRows::Picked(rows) => rows.iter().try_for_each(|&row| add(row))?,
-        }
-        Ok(len)
+            TableRows::Picked(rows) => {
+                for &picked in *rows {
+                    validate_row(picked, schema.extent.row_count)?;
+                }
+                heap_len(
+                    schema,
+                    *columns,
+                    rows.iter().map(|&picked| (picked, row(picked))),
+                )?
+            }
+        };
+        main_len
+            .checked_add(heap_len)
+            .ok_or(FitsError::DataUnitOverflow)
     }
 
     /// Replace `out` with the selected rows, followed by the heap arrays those rows
@@ -265,6 +275,7 @@ impl TableSelection<'_> {
             .checked_mul(row_len)
             .ok_or(FitsError::DataUnitOverflow)?;
         let mut reads = Merged::new(fetch);
+        let table_rows = rows.clone();
         match rows {
             TableRows::Range(rows) => {
                 validate_row_range(&rows, schema.extent.row_count)?;
@@ -278,6 +289,17 @@ impl TableSelection<'_> {
             }
         }
         reads.flush(out)?;
+        debug_assert_eq!(out.len(), main_len, "the selected rows, fetched");
+        let heap = if row_len == 0 {
+            0
+        } else {
+            let rows = out
+                .chunks_exact(row_len)
+                .enumerate()
+                .map(|(index, bytes)| (table_rows.get(index), bytes));
+            heap_len(schema, columns, rows)?
+        };
+        allocation::try_reserve_exact(out, heap)?;
         for row in 0..row_count {
             for (index, column) in schema.columns.iter().enumerate() {
                 let Some(width) = column.tform.descriptor_width() else {
@@ -292,7 +314,11 @@ impl TableSelection<'_> {
                     PqDescriptor::EMPTY.write(width, &mut out[slot])?;
                     continue;
                 }
-                let span = VlaCellSpan::new(schema, column, &out[slot.clone()])?;
+                let cell = DescriptorCell {
+                    row: table_rows.get(row),
+                    bytes: &out[slot.clone()],
+                };
+                let span = VlaCellSpan::new(schema, column, cell)?;
                 let heap_offset = reads.next_offset(out) - main_len;
                 reads.push(span.heap_range, out)?;
                 PqDescriptor {
@@ -304,6 +330,37 @@ impl TableSelection<'_> {
         }
         reads.flush(out)
     }
+}
+
+/// The bytes of the heap arrays that the selected `columns` of `rows`, each a row of the
+/// table `schema` describes, address: what a copy of those rows appends after them. Each
+/// array lies inside the heap, but arrays may overlap (§7.3.5), so the sum is no bound
+/// the file's size sets, and a copy reserves it fallibly before it fetches any.
+fn heap_len<'r>(
+    schema: &Schema,
+    columns: Option<&[bool]>,
+    rows: impl Iterator<Item = (usize, &'r [u8])>,
+) -> Result<usize> {
+    let mut len = 0usize;
+    for (table_row, row) in rows {
+        for (index, column) in schema.columns.iter().enumerate() {
+            if column.tform.descriptor_width().is_none()
+                || column.tform.repeat() == 0
+                || columns.is_some_and(|columns| !columns[index])
+            {
+                continue;
+            }
+            let cell = DescriptorCell {
+                row: table_row,
+                bytes: &row[column.byte_offset..column.byte_offset + column.tform.byte_width()],
+            };
+            let span = VlaCellSpan::new(schema, column, cell)?;
+            len = len
+                .checked_add(span.heap_range.len())
+                .ok_or(FitsError::DataUnitOverflow)?;
+        }
+    }
+    Ok(len)
 }
 
 /// One cell of the table `schema` describes.
@@ -328,12 +385,12 @@ impl TableCell<'_> {
         let start = row * schema.extent.row_len + column.byte_offset;
         let cell = fetch.bytes(start..start + column.tform.byte_width())?;
         if column.tform.descriptor_width().is_none() {
-            return Ok(column.decode_cell(cell));
+            return column.decode_cell(cell);
         }
         if column.tform.repeat() == 0 {
             return column.decode_vla_cell(&[], 0);
         }
-        let span = VlaCellSpan::new(schema, column, cell)?;
+        let span = VlaCellSpan::new(schema, column, DescriptorCell { row, bytes: cell })?;
         let bytes = fetch.bytes(span.heap_range)?;
         column.decode_vla_cell(bytes, span.count)
     }
@@ -347,21 +404,34 @@ struct VlaCellSpan {
     heap_range: Range<usize>,
 }
 
+/// The descriptor bytes of an array column's cell, and the table row it is in.
+#[derive(Debug, Clone, Copy)]
+struct DescriptorCell<'a> {
+    row: usize,
+    bytes: &'a [u8],
+}
+
 impl VlaCellSpan {
-    /// The span the descriptor `descriptor_bytes` of the array `column` gives.
-    fn new(schema: &Schema, column: &Column, descriptor_bytes: &[u8]) -> Result<Self> {
+    /// The span the descriptor of `cell`, of the array `column`, gives.
+    fn new(schema: &Schema, column: &Column, cell: DescriptorCell<'_>) -> Result<Self> {
         let width = column
             .tform
             .descriptor_width()
             .expect("a span is read from an array column");
-        let descriptor = PqDescriptor::decode(descriptor_bytes, width)?;
-        Ok(Self {
-            count: descriptor.count,
-            heap_range: descriptor.heap_range(
+        let descriptor = PqDescriptor::decode(cell.bytes, width)?;
+        let heap_range = descriptor
+            .heap_range(
                 column.tform.element(),
                 schema.extent.heap_offset,
                 schema.extent.heap_end,
-            )?,
+            )
+            .ok_or(FitsError::DescriptorPastHeap {
+                column: column.number - 1,
+                row: cell.row,
+            })?;
+        Ok(Self {
+            count: descriptor.count,
+            heap_range,
         })
     }
 }
@@ -375,6 +445,24 @@ const fn validate_row(row: usize, len: usize) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// The rows `rows` bounds in a table of `len` rows, an unbounded end at the table's.
+/// Errors as [`validate_row_range`] does for rows that run backwards or past the table.
+pub(crate) fn row_range(rows: (Bound<usize>, Bound<usize>), len: usize) -> Result<Range<usize>> {
+    let start = match rows.0 {
+        Bound::Included(start) => start,
+        Bound::Excluded(start) => start.saturating_add(1),
+        Bound::Unbounded => 0,
+    };
+    let end = match rows.1 {
+        Bound::Included(end) => end.saturating_add(1),
+        Bound::Excluded(end) => end,
+        Bound::Unbounded => len,
+    };
+    let rows = start..end;
+    validate_row_range(&rows, len)?;
+    Ok(rows)
 }
 
 pub(crate) const fn validate_row_range(rows: &Range<usize>, len: usize) -> Result<()> {

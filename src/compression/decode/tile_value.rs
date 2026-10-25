@@ -113,7 +113,7 @@ impl<T> TileColumn<T> {
         value: impl Fn(ElementKind, &[u8]) -> Option<T>,
     ) -> Result<()> {
         self.values.clear();
-        let Some(index) = table.column_index(name) else {
+        let Some(index) = table.column_index(name)? else {
             self.present = false;
             return Ok(());
         };
@@ -124,6 +124,10 @@ impl<T> TileColumn<T> {
             column: index,
             expected,
         };
+        // One value a tile: a cell of any other repeat holds no single tile's value.
+        if column.tform.repeat() != 1 {
+            return Err(refused);
+        }
         let size = match kind {
             ElementKind::U8
             | ElementKind::I16

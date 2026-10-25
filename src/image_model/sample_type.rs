@@ -1,6 +1,6 @@
 //! [`SampleType`]: which of the six FITS sample types an array holds.
 
-use crate::bitpix::Bitpix;
+use crate::image_model::bitpix::Bitpix;
 use crate::image_model::scaling::Scaling;
 use crate::image_model::{I8_OFFSET, U16_OFFSET, U32_OFFSET, U64_OFFSET};
 

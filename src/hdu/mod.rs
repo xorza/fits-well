@@ -1,235 +1,322 @@
-//! HDU role validation, classification, and data-unit sizing.
-//!
-//! Boundaries are computable from the header alone using the primary-array,
-//! extension, or random-groups formula, rounded up to a block, so the reader never
-//! touches data to find the next HDU.
+//! [`Hdu`]: one header and data unit as a scan of the headers found it, the record the
+//! reader and the editor share, with its kind, its list and its selector.
 
+pub(crate) mod hdu_kind;
+pub(crate) mod hdu_selector;
+pub(crate) mod hdus;
 pub(crate) mod image_geometry;
 pub(crate) mod prologue;
 
-use crate::block::padded_len;
+use crate::ascii::AsciiSchema;
+use crate::bintable::schema::Schema;
+use crate::block::{BLOCK_SIZE, padded_len};
+#[cfg(feature = "compression")]
+use crate::compression::table::TiledTable;
+use crate::fits_error::ExpectedHdu;
 use crate::fits_error::FitsError;
 use crate::fits_error::Result;
-use crate::header_model::record_name::RecordName;
+use crate::hdu::hdu_kind::{HduKind, HduPosition};
+use crate::hdu::hdu_selector::HduSelector;
+use crate::hdu::image_geometry::ImageGeometry;
 use crate::header_model::{Header, keywords};
+use crate::image_model::Metadata;
 
-/// An HDU's position-derived header form before its complete role is known.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HduPosition {
-    Primary,
-    Extension,
+/// One Header/Data Unit located by a scan of the headers.
+///
+/// The data unit itself is read lazily via [`FitsReader::read_data_unit`]; this
+/// record carries the parsed header, the inferred [`HduKind`], the data unit's byte
+/// range within the source, and the image geometry or table schema the header
+/// declares, resolved once when the file is opened.
+///
+/// [`FitsReader::read_data_unit`]: crate::FitsReader::read_data_unit
+#[derive(Debug)]
+pub struct Hdu {
+    /// The HDU's 0-based position in the file.
+    pub index: usize,
+    pub header: Header,
+    pub kind: HduKind,
+    /// One's-complement sum of the exact block-padded header bytes as read.
+    pub(crate) header_sum: u32,
+    /// Byte offset of the header from the start of the source; the header fills the
+    /// whole blocks up to `data_offset`.
+    pub(crate) header_offset: u64,
+    /// Byte offset of the data unit from the start of the source.
+    pub(crate) data_offset: u64,
+    /// The 2880-byte blocks the header fills.
+    header_blocks: usize,
+    /// Unpadded data length (`Nbits / 8`) — where the meaningful data ends within
+    /// the padded unit. The on-disk length rounds it up to the block grid.
+    pub data_bytes: u64,
+    /// `data_bytes` rounded up to the block grid.
+    padded_data_bytes: u64,
+    /// `None` when the HDU is not an image, or its header does not resolve to one;
+    /// [`Hdu::image_geometry`] then reports why.
+    image: Option<ImageGeometry>,
+    /// `None` when the HDU is not structurally a binary table, or its header does not
+    /// resolve to one; [`Hdu::container_schema`] then reports why.
+    table: Option<Schema>,
+    /// `None` when the HDU is not an ASCII table, or its header does not resolve to
+    /// one; [`Hdu::ascii_schema`] then reports why.
+    ascii: Option<AsciiSchema>,
+    /// `None` when the HDU is not a tiled-compressed table, or its header does not
+    /// resolve to one; [`Hdu::tiled_table`] then reports why.
+    #[cfg(feature = "compression")]
+    tiled_table: Option<TiledTable>,
 }
 
-impl HduPosition {
-    /// The position of the HDU at `index` in file order: the first is the primary.
-    pub(crate) const fn of_index(index: usize) -> Self {
-        if index == 0 {
-            Self::Primary
-        } else {
-            Self::Extension
-        }
-    }
+/// A header unit as a scan reads it: its bytes, their checksum sum, and the file offset
+/// it starts at.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HeaderUnit<'a> {
+    pub(crate) bytes: &'a [u8],
+    pub(crate) sum: u32,
+    pub(crate) offset: u64,
 }
 
-/// The structural role already established by file position and mandatory header
-/// signatures. Extent calculation uses this instead of interpreting reserved cards
-/// such as `GROUPS` outside the role where the standard defines them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HduRole {
-    Primary,
-    Extension,
-    RandomGroups,
-}
-
-impl HduRole {
-    pub(crate) fn from_header(header: &Header, position: HduPosition) -> Result<Self> {
-        match position {
-            HduPosition::Primary => {
-                header
-                    .get_logical(keywords::SIMPLE)?
-                    .ok_or(FitsError::MissingKeyword {
-                        name: RecordName::Keyword(keywords::SIMPLE),
-                    })?;
-                if header.get_logical(keywords::GROUPS)? == Some(true) {
-                    validate_random_groups_axes(&header.axes()?)?;
-                    Ok(Self::RandomGroups)
-                } else {
-                    Ok(Self::Primary)
-                }
-            }
-            HduPosition::Extension => {
-                header
-                    .get_text(keywords::XTENSION)?
-                    .ok_or(FitsError::MissingKeyword {
-                        name: RecordName::Keyword(keywords::XTENSION),
-                    })?;
-                Ok(Self::Extension)
-            }
-        }
-    }
-}
-
-/// The structural kind of an HDU, inferred from its mandatory keywords.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum HduKind {
-    /// Primary array (`SIMPLE = T`), possibly empty (`NAXIS = 0`).
-    Primary,
-    /// `XTENSION = 'IMAGE'` — same data model as the primary array.
-    Image,
-    /// `XTENSION = 'TABLE'` — ASCII table.
-    AsciiTable,
-    /// `XTENSION = 'BINTABLE'` — binary table (with optional heap).
-    BinTable,
-    /// A tiled-compressed image (§10.1): structurally a `BINTABLE` with `ZIMAGE = T`.
-    /// `FitsReader::image` reads it like any other image.
-    CompressedImage,
-    /// A tiled-compressed table (§10.3): structurally a `BINTABLE` with `ZTABLE = T`.
-    /// `FitsReader::read_table` reads it like any other binary table.
-    CompressedTable,
-    /// Legacy random-groups primary (`GROUPS = T`, `NAXIS1 = 0`). Read-only.
-    RandomGroups,
-    /// A conforming extension whose `XTENSION` value this crate does not model.
-    Other,
-}
-
-impl HduKind {
-    pub(crate) fn classify(header: &Header, role: HduRole) -> Result<Self> {
-        if role == HduRole::Primary {
-            return Ok(Self::Primary);
-        }
-        if role == HduRole::RandomGroups {
-            return Ok(Self::RandomGroups);
-        }
-
-        // `Value::Text` already stripped the trailing spaces of `'IMAGE   '` etc.
-        let xtension = header
-            .get_text(keywords::XTENSION)?
-            .ok_or(FitsError::MissingKeyword {
-                name: RecordName::Keyword(keywords::XTENSION),
-            })?;
-        Ok(match xtension {
-            "IMAGE" => Self::Image,
-            "TABLE" => Self::AsciiTable,
-            // §10: a tiled-compressed image/table rides inside a BINTABLE,
-            // flagged by ZIMAGE/ZTABLE — classify by the payload, not the
-            // container, so callers see what they can actually read.
-            "BINTABLE" if header.get_logical(keywords::ZIMAGE)? == Some(true) => {
-                Self::CompressedImage
-            }
-            "BINTABLE" if header.get_logical(keywords::ZTABLE)? == Some(true) => {
-                Self::CompressedTable
-            }
-            "BINTABLE" => Self::BinTable,
-            _ => Self::Other,
+impl Hdu {
+    /// The HDU at `index` whose header unit is `unit`; its data unit follows the header.
+    /// Resolves the image geometry and table schema the header declares. A header that
+    /// does not resolve leaves its HDU readable for what it does hold — the rest of the
+    /// file, and the header itself.
+    pub(crate) fn parse(index: usize, unit: HeaderUnit<'_>) -> Result<Self> {
+        let HeaderUnit {
+            bytes,
+            sum: header_sum,
+            offset: header_offset,
+        } = unit;
+        let position = HduPosition::of_index(index);
+        let header = Header::parse(bytes)?;
+        let kind = HduKind::from_header(&header, position)?;
+        let data_bytes = kind.data_bytes(&header)?;
+        let table = table_schema(&header, kind).ok();
+        Ok(Self {
+            index,
+            image: ImageGeometry::from_header(&header, kind).ok(),
+            #[cfg(feature = "compression")]
+            tiled_table: match (&table, kind) {
+                (Some(_), HduKind::CompressedTable) => TiledTable::new(&header).ok(),
+                _ => None,
+            },
+            table,
+            ascii: if kind == HduKind::AsciiTable {
+                AsciiSchema::parse(&header).ok()
+            } else {
+                None
+            },
+            header,
+            kind,
+            header_sum,
+            header_offset,
+            data_offset: header_offset + bytes.len() as u64,
+            header_blocks: bytes.len() / BLOCK_SIZE,
+            data_bytes,
+            padded_data_bytes: padded_len(data_bytes).expect("`data_bytes` bounds the padding"),
         })
     }
-}
 
-/// The size of an HDU's data unit, its length rounded up to the 2880-byte grid known to
-/// fit a `u64`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DataExtent {
-    /// Unpadded data length (`Nbits / 8`).
-    pub(crate) data_bytes: u64,
-}
+    /// The number of 2880-byte blocks the header fills.
+    pub(crate) const fn header_blocks(&self) -> usize {
+        self.header_blocks
+    }
 
-/// Compute the data-unit extent from a parsed, role-validated header (Eqs. 1, 2, 4).
-pub(crate) fn data_extent(header: &Header, role: HduRole) -> Result<DataExtent> {
-    let elem = header.bitpix()?.elem_size() as u64;
-    let axes = header.axes()?;
-    let data_bytes = match role {
-        HduRole::Primary => elem
-            .checked_mul(axis_product(&axes, 0)?)
-            .ok_or(FitsError::DataUnitOverflow)?,
-        HduRole::Extension => grouped_data_bytes(elem, axis_product(&axes, 0)?, header)?,
-        HduRole::RandomGroups => {
-            // `HduRole::from_header` checked the axes. NAXIS1 is the zero sentinel, so the array spans axes[1..] — and with no
-            // array axis at all each group still holds one element, not zero.
-            grouped_data_bytes(elem, axis_product(&axes[1..], 1)?, header)?
+    /// Whether this HDU holds an image array of at least one axis: a primary array, an
+    /// image extension or a tiled-compressed image whose `NAXIS` (`ZNAXIS` for a
+    /// compressed image) is above 0. `NAXIS = 0` holds no array, whatever the kind; a
+    /// rank that does not parse is none either. The other image keywords are not
+    /// judged: [`Hdu::image_metadata`] reports why they do not resolve.
+    pub fn is_image(&self) -> bool {
+        let rank = match self.kind {
+            HduKind::Primary | HduKind::Image => self.header.get_integer(keywords::NAXIS),
+            #[cfg(feature = "compression")]
+            HduKind::CompressedImage => self.header.get_integer(keywords::ZNAXIS),
+            #[cfg(not(feature = "compression"))]
+            HduKind::CompressedImage => return false,
+            HduKind::AsciiTable
+            | HduKind::BinTable
+            | HduKind::CompressedTable
+            | HduKind::RandomGroups
+            | HduKind::Other => return false,
+        };
+        rank.is_ok_and(|rank| rank.is_some_and(|rank| rank > 0))
+    }
+
+    /// Whether `selector` names this HDU, as [`HduSelector`] states. `EXTVER` and
+    /// `EXTLEVEL` are read only once the name matches, so a malformed version card on
+    /// an unrelated HDU cannot fail a lookup.
+    pub fn matches<'a>(&self, selector: impl Into<HduSelector<'a>>) -> Result<bool> {
+        self.matches_selector(selector.into())
+    }
+
+    fn matches_selector(&self, selector: HduSelector<'_>) -> Result<bool> {
+        let (name, version, level) = match selector {
+            HduSelector::Index(index) => return Ok(index == self.index),
+            HduSelector::Extension {
+                name,
+                version,
+                level,
+            } => (name, version, level),
+        };
+        // An `EXTNAME` that is no text names nothing, so a lookup passes over its HDU
+        // rather than failing for a name it does not ask for.
+        let own_name = match self.extname() {
+            Ok(Some(own_name)) => own_name,
+            Ok(None) if self.index == 0 => "PRIMARY",
+            Ok(None) | Err(_) => return Ok(false),
+        };
+        if !own_name.eq_ignore_ascii_case(name) {
+            return Ok(false);
         }
-    };
-    padded_len(data_bytes).ok_or(FitsError::DataUnitOverflow)?;
-    Ok(DataExtent { data_bytes })
-}
-
-/// Product of the axis lengths as the on-disk element count. Deliberately `u64`
-/// rather than the `usize` of [`crate::image_model::shape_product`]: this sizes a data unit
-/// on disk, which a 32-bit `usize` must not cap.
-///
-/// A zero-length axis always gives 0 (no data). `empty` is the count for an axis list
-/// with *no entries*, which differs by role — `NAXIS = 0` means an image has no data
-/// array at all (0), while a random group with no array axis still carries one array
-/// element per group (the empty product, 1).
-fn axis_product(axes: &[usize], empty: u64) -> Result<u64> {
-    if axes.contains(&0) {
-        return Ok(0);
+        if let Some(version) = version
+            && self.extver()? != version
+        {
+            return Ok(false);
+        }
+        if let Some(level) = level
+            && self.extlevel()? != level
+        {
+            return Ok(false);
+        }
+        Ok(true)
     }
-    if axes.is_empty() {
-        return Ok(empty);
+
+    /// The `EXTNAME` of this HDU (§4.4.2.6), `None` when absent. Errors when it is no
+    /// text, which no name lookup then matches.
+    pub fn extname(&self) -> Result<Option<&str>> {
+        self.header.get_text(keywords::EXTNAME)
     }
-    axes.iter()
-        .try_fold(1u64, |product, &length| product.checked_mul(length as u64))
-        .ok_or(FitsError::DataUnitOverflow)
-}
 
-#[derive(Debug, Clone, Copy)]
-struct GroupCounts {
-    pcount: u64,
-    gcount: u64,
-}
-
-fn required_group_counts(header: &Header) -> Result<GroupCounts> {
-    let pcount = header
-        .get_integer(keywords::PCOUNT)?
-        .ok_or(FitsError::MissingKeyword {
-            name: RecordName::Keyword(keywords::PCOUNT),
-        })?;
-    if pcount < 0 {
-        return Err(FitsError::KeywordOutOfRange {
-            keyword: keywords::PCOUNT,
-        });
+    /// The `EXTVER` of this HDU, 1 when absent (§4.4.2.6). Errors when it is no integer.
+    pub fn extver(&self) -> Result<i64> {
+        Ok(self.header.get_integer(keywords::EXTVER)?.unwrap_or(1))
     }
-    let gcount = header
-        .get_integer(keywords::GCOUNT)?
-        .ok_or(FitsError::MissingKeyword {
-            name: RecordName::Keyword(keywords::GCOUNT),
-        })?;
-    if gcount < 0 {
-        return Err(FitsError::KeywordOutOfRange {
-            keyword: keywords::GCOUNT,
-        });
+
+    /// The `EXTLEVEL` of this HDU, 1 when absent (§4.4.2.6). Errors when it is no
+    /// integer.
+    pub fn extlevel(&self) -> Result<i64> {
+        Ok(self.header.get_integer(keywords::EXTLEVEL)?.unwrap_or(1))
     }
-    Ok(GroupCounts {
-        pcount: pcount.cast_unsigned(),
-        gcount: gcount.cast_unsigned(),
-    })
-}
 
-fn grouped_data_bytes(elem: u64, array_elements: u64, header: &Header) -> Result<u64> {
-    let counts = required_group_counts(header)?;
-    let group_size = counts
-        .pcount
-        .checked_add(array_elements)
-        .ok_or(FitsError::DataUnitOverflow)?;
-    elem.checked_mul(counts.gcount)
-        .and_then(|bytes| bytes.checked_mul(group_size))
-        .ok_or(FitsError::DataUnitOverflow)
-}
-
-fn validate_random_groups_axes(axes: &[usize]) -> Result<()> {
-    let Some(&first) = axes.first() else {
-        return Err(FitsError::KeywordOutOfRange {
-            keyword: keywords::NAXIS,
-        });
-    };
-    if first != 0 {
-        return Err(FitsError::KeywordOutOfRange {
-            keyword: keywords::NAXIS.indexed(1)?,
-        });
+    /// The data unit's length on disk: [`Hdu::data_bytes`](Hdu#structfield.data_bytes)
+    /// rounded up to the 2880-byte block grid.
+    pub const fn padded_data_bytes(&self) -> u64 {
+        self.padded_data_bytes
     }
-    Ok(())
+
+    /// The shape, stored element type and scaling of the image this HDU holds — for a
+    /// tiled-compressed image, those of the image it encodes. Errors with
+    /// [`FitsError::HduKindMismatch`] for any other kind, with
+    /// [`FitsError::ImageHasGroups`] for a plain image with group structure, and with
+    /// the header's own error when its image keywords are malformed.
+    pub fn image_metadata(&self) -> Result<Metadata<'_>> {
+        self.image_geometry().map(ImageGeometry::metadata)
+    }
+
+    pub(crate) fn image_geometry(&self) -> Result<&ImageGeometry> {
+        match &self.image {
+            Some(geometry) => Ok(geometry),
+            None => Err(ImageGeometry::from_header(&self.header, self.kind)
+                .expect_err("the scan could not resolve this header")),
+        }
+    }
+
+    /// A plain image's geometry: [`Hdu::image_geometry`], refusing a tiled-compressed
+    /// image with [`FitsError::HduKindMismatch`].
+    pub(crate) fn plain_image_geometry(&self) -> Result<&ImageGeometry> {
+        if self.kind == HduKind::CompressedImage {
+            return Err(FitsError::HduKindMismatch {
+                expected: ExpectedHdu::Image,
+                got: self.kind,
+            });
+        }
+        self.image_geometry()
+    }
+
+    /// The schema of the binary table this HDU holds: a plain `BINTABLE`'s, or the table a
+    /// tiled-compressed one restores to. Errors with [`FitsError::HduKindMismatch`] for any
+    /// other kind — a tiled-compressed image among them, and a compressed table without
+    /// the `compression` feature — and with the header's own error when its table
+    /// keywords are malformed.
+    pub fn table_schema(&self) -> Result<&Schema> {
+        match self.kind {
+            HduKind::BinTable => self.container_schema(),
+            #[cfg(feature = "compression")]
+            HduKind::CompressedTable => Ok(&self
+                .tiled_table()?
+                .expect("a compressed table has a tile layout")
+                .schema),
+            #[cfg(not(feature = "compression"))]
+            HduKind::CompressedTable => Err(FitsError::HduKindMismatch {
+                expected: ExpectedHdu::BinTable,
+                got: self.kind,
+            }),
+            HduKind::Primary
+            | HduKind::Image
+            | HduKind::AsciiTable
+            | HduKind::CompressedImage
+            | HduKind::RandomGroups
+            | HduKind::Other => Err(FitsError::HduKindMismatch {
+                expected: ExpectedHdu::BinTable,
+                got: self.kind,
+            }),
+        }
+    }
+
+    /// The structure of an ASCII `TABLE`, parsed from its header when the file was
+    /// opened. Errors with [`FitsError::HduKindMismatch`] for any other HDU, and with
+    /// the header's own error when its table keywords are malformed.
+    pub fn ascii_schema(&self) -> Result<&AsciiSchema> {
+        if self.kind != HduKind::AsciiTable {
+            return Err(FitsError::HduKindMismatch {
+                expected: ExpectedHdu::AsciiTable,
+                got: self.kind,
+            });
+        }
+        match &self.ascii {
+            Some(schema) => Ok(schema),
+            None => Err(AsciiSchema::parse(&self.header)
+                .expect_err("the scan could not resolve this header")),
+        }
+    }
+
+    /// The tile layout of a tiled-compressed table; `None` for any other HDU.
+    #[cfg(feature = "compression")]
+    pub(crate) fn tiled_table(&self) -> Result<Option<&TiledTable>> {
+        if self.kind != HduKind::CompressedTable {
+            return Ok(None);
+        }
+        if let Some(tiled) = &self.tiled_table {
+            return Ok(Some(tiled));
+        }
+        self.container_schema()?;
+        Err(TiledTable::new(&self.header).expect_err("the scan could not resolve this header"))
+    }
+
+    /// The schema of the `BINTABLE` this HDU is stored as: a plain table's own, or the
+    /// container of a tiled-compressed image or table, which the compression layer
+    /// reads through the binary-table path.
+    pub(crate) fn container_schema(&self) -> Result<&Schema> {
+        match &self.table {
+            Some(schema) => Ok(schema),
+            None => Err(table_schema(&self.header, self.kind)
+                .expect_err("the scan could not resolve this header")),
+        }
+    }
 }
 
-#[cfg(test)]
-mod tests;
+/// The schema a binary-table path reads an HDU of `kind` with. A tiled-compressed
+/// image or table is structurally a `BINTABLE`, and the compression layer reads its
+/// container through the same path.
+fn table_schema(header: &Header, kind: HduKind) -> Result<Schema> {
+    match kind {
+        HduKind::BinTable | HduKind::CompressedImage => Schema::parse(header),
+        HduKind::CompressedTable => Schema::parse_container(header),
+        HduKind::Primary
+        | HduKind::Image
+        | HduKind::AsciiTable
+        | HduKind::RandomGroups
+        | HduKind::Other => Err(FitsError::HduKindMismatch {
+            expected: ExpectedHdu::BinTable,
+            got: kind,
+        }),
+    }
+}

@@ -1,10 +1,10 @@
 //! [`CommentaryName`]: the name of a header record with no value indicator.
 
 use std::fmt;
-use std::str;
 use std::str::FromStr;
 
 use crate::fits_error::{FitsError, Result};
+use crate::inline_name::{InlineName, NameRule};
 
 /// The name of a record with no value indicator: bytes 1–8 of the record with their
 /// trailing blanks dropped. The standard lets such a record start with any 8 bytes of
@@ -13,8 +13,7 @@ use crate::fits_error::{FitsError, Result};
 /// and makes no allocation.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommentaryName {
-    bytes: [u8; 8],
-    len: u8,
+    name: InlineName,
 }
 
 impl CommentaryName {
@@ -36,30 +35,14 @@ impl CommentaryName {
 
     /// `name` when it is at most 8 bytes of printable ASCII with no trailing blank.
     const fn checked(name: &str) -> Option<Self> {
-        let name = name.as_bytes();
-        if name.len() > 8 || (!name.is_empty() && name[name.len() - 1] == b' ') {
-            return None;
+        match InlineName::checked(name, NameRule::Commentary) {
+            Some(name) => Some(Self { name }),
+            None => None,
         }
-        let mut bytes = [0; 8];
-        let mut i = 0;
-        while i < name.len() {
-            if !matches!(name[i], 0x20..=0x7e) {
-                return None;
-            }
-            bytes[i] = name[i];
-            i += 1;
-        }
-        Some(Self {
-            bytes,
-            len: name.len() as u8,
-        })
     }
 
     pub const fn as_str(&self) -> &str {
-        match str::from_utf8(self.bytes.split_at(self.len as usize).0) {
-            Ok(text) => text,
-            Err(_) => panic!("a commentary name holds only ASCII"),
-        }
+        self.name.as_str()
     }
 }
 
@@ -113,11 +96,12 @@ impl fmt::Display for CommentaryName {
 mod tests {
     use crate::fits_error::FitsError;
     use crate::header_model::commentary_name::CommentaryName;
+    use std::assert_matches;
 
     /// Any printable ASCII up to 8 bytes names a commentary record, the blank name
     /// included; trailing blanks, a 9th byte and other bytes do not.
     #[test]
-    fn a_name_is_up_to_eight_bytes_of_printable_ascii() {
+    fn name_is_up_to_eight_bytes_of_printable_ascii() {
         for name in ["", "COMMENT", "ab cd", "a=b/'x'", "CONTINUE"] {
             let parsed = CommentaryName::try_from(name).unwrap();
             assert_eq!(parsed.as_str(), name);
@@ -125,8 +109,7 @@ mod tests {
             assert_eq!(CommentaryName::try_from(name.to_string()).unwrap(), parsed);
         }
         for bad in ["ABCDEFGHI", "TRAIL ", "tab\t", "caf\u{e9}"] {
-            assert!(
-                matches!(CommentaryName::try_from(bad), Err(FitsError::InvalidKeyword { name }) if name == bad),
+            assert_matches!(CommentaryName::try_from(bad), Err(FitsError::InvalidKeyword { name }) if name == bad,
                 "{bad:?}"
             );
         }

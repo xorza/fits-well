@@ -12,6 +12,7 @@
 
 #[cfg(feature = "internals")]
 pub(crate) mod bench;
+pub(crate) mod bitpix;
 pub(crate) mod data;
 pub(crate) mod physical_sample;
 pub(crate) mod region;
@@ -19,14 +20,16 @@ pub(crate) mod sample;
 pub(crate) mod sample_type;
 pub(crate) mod scaling;
 pub(crate) mod unsigned_data;
+pub(crate) mod unsigned_element;
 pub(crate) mod unsigned_view;
 pub(crate) mod view;
+pub(crate) mod words;
 
-use crate::bitpix::Bitpix;
 use crate::fits_error::FitsError;
 use crate::fits_error::Ranked;
 use crate::fits_error::Result;
 use crate::fits_error::SizeUnit;
+use crate::image_model::bitpix::Bitpix;
 use crate::image_model::data::Data;
 use crate::image_model::sample_type::SampleType;
 use crate::image_model::scaling::Scaling;
@@ -252,7 +255,7 @@ impl Image {
 
     /// Build an image storing a `u16` buffer via the FITS unsigned convention
     /// (`BITPIX = 16`, `BZERO = 2¹⁵`, `BSCALE = 1`) — the inverse of
-    /// [`Borrowed::unsigned`]. The writer emits the `BZERO` keyword so it round-trips.
+    /// [`Borrowed::unsigned_into`]. The writer emits the `BZERO` keyword so it round-trips.
     pub fn from_u16(shape: impl Into<Vec<usize>>, data: &[u16]) -> Result<Self> {
         Self::offset_image(
             shape,

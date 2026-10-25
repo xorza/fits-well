@@ -2,8 +2,10 @@
 
 use std::ops::Range;
 
-use crate::endian::decode_be_cells;
+use crate::endian::decode_be_cells_into;
+use crate::fits_error::Result;
 use crate::image_model::sample_type::UnsignedKind;
+use crate::image_model::unsigned_element::UnsignedElement;
 use crate::image_model::unsigned_view::UnsignedView;
 use crate::image_model::view::View;
 use crate::image_model::{flip_i8, flip_u16, flip_u32, flip_u64};
@@ -12,9 +14,9 @@ use crate::ragged::RowValues;
 /// A typed integer realization of the FITS unsigned (and signed-byte) storage
 /// conventions — `BSCALE`/`BZERO` for images or `TSCALn`/`TZEROn` for table
 /// columns, with unit scale and the matching sign-bit offset. Values are exact (no
-/// `f64` rounding), recovered by flipping the stored sign bit. Returned directly
-/// for images and fixed columns, and once per jagged row by
-/// [`crate::table::ColumnReader::vla_unsigned`].
+/// `f64` rounding), recovered by flipping the stored sign bit. Filled for images and
+/// fixed columns, and held as the values of the one [`Ragged`](crate::table::Ragged)
+/// [`crate::table::ColumnReader::vla_unsigned`] gives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsignedData {
     /// `BITPIX = 8`, `BZERO = -128`: stored `u8` → `i8`.
@@ -62,28 +64,10 @@ impl UnsignedData {
         self.view().as_u64()
     }
 
-    /// Recover exact values from the host-endian stored `view`, of the `BITPIX` that
-    /// `kind` was resolved from, by flipping the stored sign bit.
-    pub(crate) fn from_view(view: View<'_>, kind: UnsignedKind) -> Self {
-        match (view, kind) {
-            (View::U8(v), UnsignedKind::I8) => Self::I8(v.iter().map(|&x| flip_i8(x)).collect()),
-            (View::I16(v), UnsignedKind::U16) => {
-                Self::U16(v.iter().map(|&x| flip_u16(x)).collect())
-            }
-            (View::I32(v), UnsignedKind::U32) => {
-                Self::U32(v.iter().map(|&x| flip_u32(x)).collect())
-            }
-            (View::I64(v), UnsignedKind::U64) => {
-                Self::U64(v.iter().map(|&x| flip_u64(x)).collect())
-            }
-            (view, kind) => unreachable!("{kind:?} resolves from no {:?} view", view.bitpix()),
-        }
-    }
-
     /// Recover exact values from big-endian sign-bit-offset storage (the §5.2.5 /
     /// Table 19 convention) by flipping the stored sign bit. `cells` is one contiguous
     /// run for an image or heap array, or one strided cell per row for a table column;
-    /// `capacity` is a `Vec::with_capacity` hint.
+    /// `capacity` is the elements the cells hold in all, reserved fallibly.
     ///
     /// This is exact across the whole 64-bit range, unlike routing the same values
     /// through the `f64` physical plane.
@@ -91,20 +75,76 @@ impl UnsignedData {
         cells: impl Iterator<Item = &'a [u8]>,
         capacity: usize,
         kind: UnsignedKind,
-    ) -> Self {
-        match kind {
-            UnsignedKind::I8 => Self::I8(decode_be_cells(cells, capacity, |[x]| flip_i8(x))),
-            UnsignedKind::U16 => Self::U16(decode_be_cells(cells, capacity, |b| {
-                flip_u16(i16::from_be_bytes(b))
-            })),
-            UnsignedKind::U32 => Self::U32(decode_be_cells(cells, capacity, |b| {
-                flip_u32(i32::from_be_bytes(b))
-            })),
-            UnsignedKind::U64 => Self::U64(decode_be_cells(cells, capacity, |b| {
-                flip_u64(i64::from_be_bytes(b))
-            })),
+    ) -> Result<Self> {
+        let mut out = Self::empty(kind);
+        out.fill_from_be_cells(cells, capacity)?;
+        Ok(out)
+    }
+
+    /// [`UnsignedData::from_be_cells`] into this buffer, of the kind it holds, which it
+    /// refills.
+    pub(crate) fn fill_from_be_cells<'a>(
+        &mut self,
+        cells: impl Iterator<Item = &'a [u8]>,
+        capacity: usize,
+    ) -> Result<()> {
+        match self {
+            Self::I8(out) => decode_be_cells_into(cells, capacity, |[x]| flip_i8(x), out),
+            Self::U16(out) => {
+                decode_be_cells_into(cells, capacity, |b| flip_u16(i16::from_be_bytes(b)), out)
+            }
+            Self::U32(out) => {
+                decode_be_cells_into(cells, capacity, |b| flip_u32(i32::from_be_bytes(b)), out)
+            }
+            Self::U64(out) => {
+                decode_be_cells_into(cells, capacity, |b| flip_u64(i64::from_be_bytes(b)), out)
+            }
         }
     }
+
+    /// An empty buffer of `kind`.
+    pub(crate) const fn empty(kind: UnsignedKind) -> Self {
+        match kind {
+            UnsignedKind::I8 => Self::I8(Vec::new()),
+            UnsignedKind::U16 => Self::U16(Vec::new()),
+            UnsignedKind::U32 => Self::U32(Vec::new()),
+            UnsignedKind::U64 => Self::U64(Vec::new()),
+        }
+    }
+
+    /// The kind this buffer holds.
+    pub(crate) const fn kind(&self) -> UnsignedKind {
+        match self {
+            Self::I8(_) => UnsignedKind::I8,
+            Self::U16(_) => UnsignedKind::U16,
+            Self::U32(_) => UnsignedKind::U32,
+            Self::U64(_) => UnsignedKind::U64,
+        }
+    }
+
+    /// This buffer refilled with the exact values of `view`, of the `BITPIX` that `kind`
+    /// was resolved from, by flipping the stored sign bit: its storage reused when it
+    /// holds `kind`.
+    pub(crate) fn fill_from_view(&mut self, view: View<'_>, kind: UnsignedKind) {
+        if self.kind() != kind {
+            *self = Self::empty(kind);
+        }
+        match (view, self) {
+            (View::U8(v), Self::I8(out)) => refill(out, v.iter().map(|&x| flip_i8(x))),
+            (View::I16(v), Self::U16(out)) => refill(out, v.iter().map(|&x| flip_u16(x))),
+            (View::I32(v), Self::U32(out)) => refill(out, v.iter().map(|&x| flip_u32(x))),
+            (View::I64(v), Self::U64(out)) => refill(out, v.iter().map(|&x| flip_u64(x))),
+            (view, out) => {
+                unreachable!("{:?} resolves from no {:?} view", out.kind(), view.bitpix())
+            }
+        }
+    }
+}
+
+/// `out` cleared and filled with `values`.
+fn refill<T>(out: &mut Vec<T>, values: impl ExactSizeIterator<Item = T>) {
+    out.clear();
+    out.extend(values);
 }
 
 impl RowValues for UnsignedData {
@@ -121,28 +161,16 @@ impl RowValues for UnsignedData {
 
 /// `UnsignedData` from a typed vector, and back: the reverse gives the data back when
 /// it holds another type.
-macro_rules! impl_unsigned_data_vec_conversions {
-    ($variant:ident, $type:ty) => {
-        impl From<Vec<$type>> for UnsignedData {
-            fn from(values: Vec<$type>) -> Self {
-                Self::$variant(values)
-            }
-        }
-
-        impl TryFrom<UnsignedData> for Vec<$type> {
-            type Error = UnsignedData;
-
-            fn try_from(data: UnsignedData) -> Result<Self, UnsignedData> {
-                match data {
-                    UnsignedData::$variant(values) => Ok(values),
-                    other => Err(other),
-                }
-            }
-        }
-    };
+impl<T: UnsignedElement> From<Vec<T>> for UnsignedData {
+    fn from(values: Vec<T>) -> Self {
+        T::into_data(values)
+    }
 }
 
-impl_unsigned_data_vec_conversions!(I8, i8);
-impl_unsigned_data_vec_conversions!(U16, u16);
-impl_unsigned_data_vec_conversions!(U32, u32);
-impl_unsigned_data_vec_conversions!(U64, u64);
+impl<T: UnsignedElement> TryFrom<UnsignedData> for Vec<T> {
+    type Error = UnsignedData;
+
+    fn try_from(data: UnsignedData) -> std::result::Result<Self, UnsignedData> {
+        T::from_data(data)
+    }
+}

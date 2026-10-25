@@ -83,7 +83,7 @@ impl Tpv {
 
     /// The corrected coordinates `(ξ, η)` of the intermediate coordinates `(x, y)`.
     pub(crate) fn forward(&self, x: f64, y: f64) -> [f64; 2] {
-        [evaluate(&self.xi, x, y)[0], evaluate(&self.eta, y, x)[0]]
+        [value(&self.xi, x, y), value(&self.eta, y, x)]
     }
 
     /// The intermediate coordinates `(x, y)` whose corrected coordinates are `(ξ, η)`:
@@ -108,15 +108,50 @@ impl Tpv {
     }
 }
 
+/// The powers `x⁰` to `x⁷` and `y⁰` to `y⁷`, and `r`, that the terms take.
+#[derive(Debug, Clone, Copy)]
+struct Powers {
+    x: [f64; 8],
+    y: [f64; 8],
+    r: f64,
+}
+
+impl Powers {
+    fn new(x: f64, y: f64) -> Self {
+        let mut xp = [1.0; 8];
+        let mut yp = [1.0; 8];
+        for i in 1..8 {
+            xp[i] = xp[i - 1] * x;
+            yp[i] = yp[i - 1] * y;
+        }
+        Self {
+            x: xp,
+            y: yp,
+            r: x.hypot(y),
+        }
+    }
+}
+
+/// One polynomial's value at `(x, y)`, the terms summed as [`evaluate`] sums them, so the
+/// two agree bit for bit.
+fn value(coefficients: &[f64; TERM_COUNT], x: f64, y: f64) -> f64 {
+    let Powers { x: xp, y: yp, r } = Powers::new(x, y);
+    let mut value = 0.0;
+    for (&c, term) in coefficients.iter().zip(TERMS) {
+        if c == 0.0 {
+            continue;
+        }
+        value += match term {
+            Term::Monomial { x: p, y: q } => c * xp[p] * yp[q],
+            Term::Radial(k) => c * r.powi(k),
+        };
+    }
+    value
+}
+
 /// One polynomial's value at `(x, y)` and its partial derivatives in `x` and `y`.
 fn evaluate(coefficients: &[f64; TERM_COUNT], x: f64, y: f64) -> [f64; 3] {
-    let mut xp = [1.0; 8];
-    let mut yp = [1.0; 8];
-    for i in 1..8 {
-        xp[i] = xp[i - 1] * x;
-        yp[i] = yp[i - 1] * y;
-    }
-    let r = x.hypot(y);
+    let Powers { x: xp, y: yp, r } = Powers::new(x, y);
     let (mut value, mut dx, mut dy) = (0.0, 0.0, 0.0);
     for (&c, term) in coefficients.iter().zip(TERMS) {
         if c == 0.0 {
@@ -149,12 +184,32 @@ fn evaluate(coefficients: &[f64; TERM_COUNT], x: f64, y: f64) -> [f64; 3] {
 
 #[cfg(test)]
 mod tests {
-    use crate::world_coordinates::distortion::tpv::{TERMS, Term};
+    use crate::world_coordinates::distortion::tpv::{TERM_COUNT, TERMS, Term, evaluate, value};
+
+    /// The value-only evaluation is the full one's value, bit for bit, over a grid that
+    /// takes in `r = 0`, for every term set.
+    #[test]
+    fn value_matches_the_evaluation_with_partials() {
+        let mut coefficients = [0.0; TERM_COUNT];
+        for (m, coefficient) in coefficients.iter_mut().enumerate() {
+            *coefficient = (m as f64 * 0.37).sin() * 10f64.powi(-(m as i32 % 5));
+        }
+        for i in -4..=4 {
+            for j in -4..=4 {
+                let (x, y) = (f64::from(i) * 0.6, f64::from(j) * 0.45);
+                assert_eq!(
+                    value(&coefficients, x, y).to_bits(),
+                    evaluate(&coefficients, x, y)[0].to_bits(),
+                    "({x}, {y})"
+                );
+            }
+        }
+    }
 
     /// The registered layout: PV1_4 is x², PV1_8 x²y, PV1_11 r³, PV1_23 r⁵, PV1_30 y⁶,
     /// PV1_31 x⁷ and PV1_39 r⁷.
     #[test]
-    fn the_terms_follow_the_registered_order() {
+    fn terms_follow_the_registered_order() {
         let monomial = |index: usize| match TERMS[index] {
             Term::Monomial { x, y } => Some((x, y)),
             Term::Radial(_) => None,

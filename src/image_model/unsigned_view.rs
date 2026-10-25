@@ -3,6 +3,7 @@
 use std::ops::Range;
 
 use crate::image_model::unsigned_data::UnsignedData;
+use crate::image_model::unsigned_element::UnsignedElement;
 
 /// Borrowed unsigned values, the twin of [`UnsignedData`] as
 /// [`ColumnView`](crate::table::ColumnView) is of
@@ -63,7 +64,8 @@ impl<'a> UnsignedView<'a> {
     }
 
     /// The values in `range`.
-    pub(crate) fn slice(self, range: Range<usize>) -> Self {
+    #[must_use]
+    pub fn slice(self, range: Range<usize>) -> Self {
         match self {
             Self::I8(values) => Self::I8(&values[range]),
             Self::U16(values) => Self::U16(&values[range]),
@@ -80,5 +82,14 @@ impl<'a> UnsignedView<'a> {
             Self::U32(values) => UnsignedData::U32(values.to_vec()),
             Self::U64(values) => UnsignedData::U64(values.to_vec()),
         }
+    }
+}
+
+/// The values of a view of `T`; the view back when it holds another type.
+impl<'a, T: UnsignedElement> TryFrom<UnsignedView<'a>> for &'a [T] {
+    type Error = UnsignedView<'a>;
+
+    fn try_from(view: UnsignedView<'a>) -> Result<Self, UnsignedView<'a>> {
+        T::from_view(view).ok_or(view)
     }
 }

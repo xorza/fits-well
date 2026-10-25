@@ -69,3 +69,14 @@ pub(crate) fn assert_close(got: &[f64], want: &[f64], tolerance: Tolerance, cont
         );
     }
 }
+
+/// Assert that `got` is within `tolerance` of `want`.
+#[track_caller]
+pub(crate) fn assert_within(got: f64, want: f64, tolerance: Tolerance, context: &str) {
+    assert!(
+        tolerance.admits(got, want),
+        "{context}: {got} is not within {:?} of {want}: {}",
+        tolerance.bound,
+        tolerance.why
+    );
+}

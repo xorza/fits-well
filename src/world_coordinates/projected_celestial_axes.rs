@@ -29,11 +29,15 @@ pub(super) struct ProjectedCelestialAxes {
 impl CelestialAxisPair {
     /// The first longitude axis of `ctype` that has a latitude axis of its own system,
     /// paired with the first such latitude axis — or `None`. A celestial axis left over
-    /// is a coordinate the WCS cannot evaluate.
-    pub(super) fn find(ctype: &[String]) -> Option<Self> {
+    /// is a coordinate the WCS cannot evaluate. A celestial name with no algorithm code is
+    /// a linear axis, so it takes no part.
+    pub(super) fn find(ctype: &[Ctype<'_>]) -> Option<Self> {
         let systems: Vec<_> = ctype
             .iter()
-            .map(|ctype| Ctype::parse(ctype).celestial_system())
+            .map(|ctype| {
+                ctype.algorithm?;
+                ctype.celestial_system()
+            })
             .collect();
         systems.iter().enumerate().find_map(|(longitude, system)| {
             let system = (*system)?;
@@ -61,12 +65,11 @@ impl ProjectedCelestialAxes {
     /// Locate the celestial longitude/latitude axis pair and their shared projection,
     /// or `None` if the header has no complete supported pair. Errors if the two axes
     /// declare different projection codes.
-    pub(super) fn find(ctype: &[String]) -> Result<Option<Self>> {
+    pub(super) fn find(ctype: &[Ctype<'_>]) -> Result<Option<Self>> {
         let Some(pair) = CelestialAxisPair::find(ctype) else {
             return Ok(None);
         };
-        let longitude = Ctype::parse(&ctype[pair.longitude]);
-        let latitude = Ctype::parse(&ctype[pair.latitude]);
+        let (longitude, latitude) = (ctype[pair.longitude], ctype[pair.latitude]);
         if (longitude.algorithm, longitude.distortion) != (latitude.algorithm, latitude.distortion)
         {
             return Err(FitsError::ConflictingWcsKeywords {

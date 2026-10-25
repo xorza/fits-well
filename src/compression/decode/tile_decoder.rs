@@ -17,6 +17,7 @@ use crate::compression::rice;
 use crate::compression::tile_codec::{CodecCapacities, CodecScratch, Tile, TileCodec};
 use crate::compression::tile_geometry::TileScratch;
 use crate::fits_error::FitsError;
+use crate::fits_error::KeywordDefect;
 use crate::fits_error::Result;
 use crate::fits_error::SizeUnit;
 use crate::fits_error::{CompressedDataDefect, TileCell};
@@ -67,7 +68,10 @@ fn read_parameters(header: &Header, mut codec: TileCodec) -> Result<TileCodec> {
             };
             let zval = keywords::ZVAL.indexed(i)?;
             let value = || header.get_integer(zval);
-            let out_of_range = FitsError::KeywordOutOfRange { keyword: zval };
+            let out_of_range = FitsError::InvalidKeywordValue {
+                keyword: zval,
+                defect: KeywordDefect::Range,
+            };
             match (&mut codec, name) {
                 (TileCodec::Rice(rice::Codec { blocksize, .. }), "BLOCKSIZE") => {
                     if let Some(v) = value()? {
@@ -200,7 +204,7 @@ impl TileDecoder {
             TileSource::Gzip(cell) => {
                 let decoded = FALLBACK_GZIP.decode_ints(
                     self.tile(&scratch.tile),
-                    convert::byte_cell(cell)?,
+                    convert::stream_cell(cell, ElementKind::U8)?,
                     &mut scratch.codecs,
                 )?;
                 mem::swap(&mut scratch.values, decoded);
@@ -242,14 +246,22 @@ impl TileDecoder {
                 }
                 FloatEncoding::Lossless(codec) => {
                     F::decode_be(
-                        codec.decode_bytes(floats, convert::byte_cell(cell)?, codecs)?,
+                        codec.decode_bytes(
+                            floats,
+                            convert::stream_cell(cell, ElementKind::U8)?,
+                            codecs,
+                        )?,
                         out,
                     );
                 }
             },
             TileSource::Gzip(cell) => {
                 F::decode_be(
-                    FALLBACK_GZIP.decode_bytes(floats, convert::byte_cell(cell)?, codecs)?,
+                    FALLBACK_GZIP.decode_bytes(
+                        floats,
+                        convert::stream_cell(cell, ElementKind::U8)?,
+                        codecs,
+                    )?,
                     out,
                 );
             }
@@ -284,11 +296,7 @@ impl TileDecoder {
         tile: &TileScratch,
         codecs: &'s mut CodecScratch,
     ) -> Result<&'s mut Vec<i64>> {
-        let stream = if self.codec.stream_element() == 2 {
-            convert::plio_cell(cell)?
-        } else {
-            convert::byte_cell(cell)?
-        };
+        let stream = convert::stream_cell(cell, self.codec.stream_kind())?;
         self.codec.decode_ints(self.tile(tile), stream, codecs)
     }
 }
@@ -308,6 +316,9 @@ mod tests {
     use crate::compression::{hcompress, rice};
     use crate::fits_error::{FitsError, ValueKind};
     use crate::header_model::Header;
+    use crate::header_model::record_name::RecordName;
+    use crate::keyword::Keyword;
+    use std::assert_matches;
 
     /// Table 37's defaults, the parameters at any `ZNAMEi` index, and a value the
     /// codec refuses — which fails only the codec that reads it.
@@ -338,28 +349,29 @@ mod tests {
                 bytepix: IntBitpix::I64
             })
         );
-        assert!(matches!(
+        assert_matches!(
             read_parameters(&header, hcompress).unwrap(),
             TileCodec::Hcompress(hcompress::Codec {
                 smoothing: Smoothing::On,
                 ..
             })
-        ));
+        );
 
         for (name, value) in [("ZVAL3", 17), ("ZVAL2", 3)] {
             let mut refused = header.clone();
             refused.set_internal(name, value);
-            assert!(matches!(
+            assert_matches!(
                 read_parameters(&refused, rice),
-                Err(FitsError::KeywordOutOfRange { keyword }) if keyword == name
-            ));
-            assert!(read_parameters(&refused, gzip).is_ok());
+                Err(FitsError::InvalidKeywordValue { keyword, .. }) if keyword == name
+            );
+            // GZIP reads no `ZVALn`, so none of them refuses it.
+            assert_eq!(read_parameters(&refused, gzip).unwrap(), gzip);
         }
         header.set_internal("ZVAL2", "not an integer");
-        assert!(matches!(
+        assert_matches!(
             read_parameters(&header, rice),
             Err(FitsError::ValueTypeMismatch { name, expected: ValueKind::Integer })
-                if name.to_string() == "ZVAL2"
-        ));
+                if name == RecordName::Keyword(Keyword::new("ZVAL2"))
+        );
     }
 }

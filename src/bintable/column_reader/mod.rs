@@ -14,14 +14,16 @@ use crate::bintable::vla_column::VlaColumn;
 use crate::fits_error::ExpectedColumn;
 use crate::fits_error::FitsError;
 use crate::fits_error::Result;
+use crate::image_model::physical_sample::PhysicalSample;
 use crate::image_model::unsigned_data::UnsignedData;
 use crate::ragged::Ragged;
 
-/// A handle to one column of a [`Table`], from [`Table::column`]. Decode through it without re-passing the column
-/// descriptor: [`raw`](Self::raw) for the typed values, [`physical`](Self::physical)
-/// for the scaled `f64` plane, [`unsigned`](Self::unsigned)/[`complex`](Self::complex)/
-/// [`bits`](Self::bits) for the special kinds, and [`vla`](Self::vla) (+
-/// [`vla_physical`](Self::vla_physical)/[`vla_unsigned`](Self::vla_unsigned)/
+/// A handle to one column of a [`Table`], from [`Table::column`]. Decode through it without
+/// re-passing the column descriptor, into buffers the caller keeps across reads:
+/// [`raw_into`](Self::raw_into) for the typed values, [`physical_into`](Self::physical_into)
+/// for the scaled plane, [`unsigned_into`](Self::unsigned_into)/[`complex`](Self::complex)/
+/// [`bits`](Self::bits) for the special kinds, and [`vla_into`](Self::vla_into) (+
+/// [`vla_physical_into`](Self::vla_physical_into)/[`vla_unsigned`](Self::vla_unsigned)/
 /// [`vla_complex`](Self::vla_complex)/[`vla_bits`](Self::vla_bits)) for variable-length
 /// `P`/`Q` columns. Borrows the table, so it cannot outlive it.
 ///
@@ -46,7 +48,7 @@ impl<'a> ColumnReader<'a> {
 
     /// The column descriptor, rejecting a variable-length (`P`/`Q`) column — the
     /// shared precondition of every fixed-width decode. Those columns carry heap
-    /// descriptors rather than values, so they go through [`ColumnReader::vla`].
+    /// descriptors rather than values, so they go through [`ColumnReader::vla_into`].
     const fn fixed_descriptor(&self) -> Result<&'a Column> {
         let col = self.descriptor();
         match col.tform.storage() {
@@ -63,69 +65,70 @@ impl<'a> ColumnReader<'a> {
         }
     }
 
-    /// Decode a fixed-width column into a typed, row-flattened [`ColumnData`]: an `A`
-    /// column keeps every row's field bytes exactly, padding and terminator included —
-    /// read one through [`CharacterField`](crate::table::CharacterField) — and every
-    /// other fixed kind decodes from the concatenated cell bytes. Variable-length
-    /// (`P`/`Q`) columns error here — use [`ColumnReader::vla`].
-    pub fn raw(&self) -> Result<ColumnData> {
+    /// Decode a fixed-width column into `out` as a typed, row-flattened [`ColumnData`],
+    /// whose buffer it reuses when `out` already holds values of this column's type: an
+    /// `A` column keeps every row's field bytes exactly, padding and terminator included —
+    /// read one through [`CharacterField`](crate::table::CharacterField) — and every other
+    /// fixed kind decodes from the concatenated cell bytes. Variable-length (`P`/`Q`)
+    /// columns error here — use [`ColumnReader::vla_into`].
+    pub fn raw_into(&self, out: &mut ColumnData) -> Result<()> {
         let col = self.fixed_descriptor()?;
-        Ok(col.decode_cells(self.table.cells(col), self.table.extent.row_count))
+        col.decode_cells_into(self.table.cells(col), self.table.extent.row_count, out)
     }
 
-    /// [`ColumnReader::raw`] into `out`, whose buffer it reuses when `out` already holds
-    /// values of this column's type.
-    pub(crate) fn raw_into(&self, out: &mut ColumnData) -> Result<()> {
-        let col = self.fixed_descriptor()?;
-        col.decode_cells_into(self.table.cells(col), self.table.extent.row_count, out);
-        Ok(())
-    }
-
-    /// The numeric column scaled to its physical `f64` plane: `TZEROn + TSCALn × raw`,
-    /// mapping integers equal to `TNULLn` to `NaN`. Errors for the non-numeric kinds
+    /// Append the numeric column scaled to its physical plane to `out`: `TZEROn + TSCALn ×
+    /// raw`, mapping integers equal to `TNULLn` to `NaN`. The arithmetic runs in `f64`, and
+    /// an `f32` buffer narrows its result. Errors for the non-numeric kinds
     /// (`A`/`L`/`X`/`C`/`M`) and variable-length columns.
-    pub fn physical(&self) -> Result<Vec<f64>> {
+    pub fn physical_into<T: PhysicalSample>(&self, out: &mut Vec<T>) -> Result<()> {
         let col = self.fixed_descriptor()?;
-        col.tform
-            .element()
-            .decode_physical(
-                self.table.cells(col),
-                self.table.extent.row_count * col.tform.repeat(),
-                &col.scaling()?,
-            )
-            .ok_or_else(|| self.mismatch(ExpectedColumn::Numeric))
-    }
-
-    /// Exact typed integers when the column uses the FITS unsigned (or signed-byte)
-    /// convention — `TSCALn == 1`, no `TNULLn`, `TZEROn` the matching sign-bit offset
-    /// on a `B`/`I`/`J`/`K` column — without the `f64` rounding of
-    /// [`physical`](Self::physical). `Ok(None)` for any other column; errors only for a
-    /// variable-length column. Mirrors [`crate::image::Borrowed::unsigned`].
-    pub fn unsigned(&self) -> Result<Option<UnsignedData>> {
-        let col = self.fixed_descriptor()?;
-        let Some(kind) = col.tform.element().unsigned_kind(&col.scaling()?) else {
-            return Ok(None);
-        };
-        Ok(Some(UnsignedData::from_be_cells(
+        let element = col.tform.element();
+        if element.bitpix().is_none() {
+            return Err(self.mismatch(ExpectedColumn::Numeric));
+        }
+        element.decode_physical_into(
             self.table.cells(col),
             self.table.extent.row_count * col.tform.repeat(),
-            kind,
-        )))
+            &col.scaling()?,
+            out,
+        )
+    }
+
+    /// Exact typed integers into `out` when the column uses the FITS unsigned (or
+    /// signed-byte) convention — `TSCALn == 1`, no `TNULLn`, `TZEROn` the matching sign-bit
+    /// offset on a `B`/`I`/`J`/`K` column — without the `f64` rounding of
+    /// [`physical_into`](Self::physical_into); `out`'s storage is reused when it holds the
+    /// column's kind. `Ok(false)`, and `out` as it was, for any other column; errors only
+    /// for a variable-length column. Mirrors [`crate::image::Borrowed::unsigned_into`].
+    pub fn unsigned_into(&self, out: &mut UnsignedData) -> Result<bool> {
+        let col = self.fixed_descriptor()?;
+        let Some(kind) = col.tform.element().unsigned_kind(&col.scaling()?) else {
+            return Ok(false);
+        };
+        if out.kind() != kind {
+            *out = UnsignedData::empty(kind);
+        }
+        out.fill_from_be_cells(
+            self.table.cells(col),
+            self.table.extent.row_count * col.tform.repeat(),
+        )?;
+        Ok(true)
     }
 
     /// A `C`/`M` complex column as [`Complex<f64>`] values, applying `TSCALn` to both
     /// components and `TZEROn` to the real component (§7.3.2). Errors on non-complex columns.
     pub fn complex(&self) -> Result<Vec<Complex<f64>>> {
         let col = self.fixed_descriptor()?;
-        col.tform
-            .element()
-            .decode_complex(
-                self.table.cells(col),
-                self.table.extent.row_count * col.tform.repeat(),
-                col.tscale()?,
-                col.tzero()?,
-            )
-            .ok_or_else(|| self.mismatch(ExpectedColumn::Complex))
+        let element = col.tform.element();
+        if !element.is_complex() {
+            return Err(self.mismatch(ExpectedColumn::Complex));
+        }
+        element.decode_complex(
+            self.table.cells(col),
+            self.table.extent.row_count * col.tform.repeat(),
+            col.tscale()?,
+            col.tzero()?,
+        )
     }
 
     /// An `X` (bit-array) column as a borrowed 2-D [`BitColumn`] — `row_count × repeat`
@@ -139,42 +142,48 @@ impl<'a> ColumnReader<'a> {
         Ok(BitColumn::new(self.table, self.index))
     }
 
-    /// Decode a variable-length (`P`/`Q`) column: every row's heap array, in one
-    /// [`ColumnData`] with the row ends — a row may be empty. A `PX` row is its
-    /// descriptor's count of bits. Errors for fixed-width columns.
-    pub fn vla(&self) -> Result<Ragged<ColumnData>> {
-        let mut out = Ragged::<ColumnData>::new(ColumnData::U8(Vec::new()), Vec::new());
-        self.vla_into(&mut out)?;
-        Ok(out)
-    }
-
-    /// [`ColumnReader::vla`] into `out`, whose buffers it reuses.
-    pub(crate) fn vla_into(&self, out: &mut Ragged<ColumnData>) -> Result<()> {
+    /// Decode a variable-length (`P`/`Q`) column into `out`, whose buffers it reuses:
+    /// every row's heap array, in one [`ColumnData`] with the row ends — a row may be
+    /// empty. A `PX` row is its descriptor's count of bits. Errors for fixed-width columns.
+    pub fn vla_into(&self, out: &mut Ragged<ColumnData>) -> Result<()> {
         let column = self.vla_column()?;
+        let row_count = self.table.extent.row_count;
+        let total = VlaCells::element_total(column, row_count)?;
         out.refill(|values, ends| {
-            let mut cells = VlaCells::new(column, self.table.extent.row_count, ends);
-            column
+            let mut cells = VlaCells::new(column, row_count, ends);
+            let decoded = column
                 .element_type()
-                .decode_cells_into(&mut cells, 0, values);
-            cells.finish()
+                .decode_cells_into(&mut cells, total, values);
+            cells.finish()?;
+            decoded
         })
     }
 
-    /// Scale each row of a `P`/`Q` column to its physical plane: `TZEROn + TSCALn ×
-    /// element`, mapping integers equal to `TNULLn` to `NaN` (§6.4 — scaling applies to
-    /// the heap values). Errors for fixed-width or non-numeric-heap columns.
-    pub fn vla_physical(&self) -> Result<Ragged<Vec<f64>>> {
+    /// Each row of a `P`/`Q` column scaled to its physical plane into `out`, whose buffers
+    /// it reuses: `TZEROn + TSCALn × element`, mapping integers equal to `TNULLn` to `NaN`
+    /// (§6.4 — scaling applies to the heap values). Errors for fixed-width or
+    /// non-numeric-heap columns.
+    pub fn vla_physical_into<T: PhysicalSample>(&self, out: &mut Ragged<Vec<T>>) -> Result<()> {
         let column = self.vla_column()?;
-        let mut ends = Vec::new();
-        let mut cells = VlaCells::new(column, self.table.extent.row_count, &mut ends);
-        let values = column.element_type().decode_physical(
-            cells.by_ref().map(|cell| cell.bytes),
-            0,
-            &self.descriptor().scaling()?,
-        );
-        cells.finish()?;
-        let values = values.ok_or_else(|| self.mismatch(ExpectedColumn::Numeric))?;
-        Ok(Ragged::<Vec<f64>>::new(values, ends))
+        let element = column.element_type();
+        if element.bitpix().is_none() {
+            return Err(self.mismatch(ExpectedColumn::Numeric));
+        }
+        let scaling = self.descriptor().scaling()?;
+        let row_count = self.table.extent.row_count;
+        let total = VlaCells::element_total(column, row_count)?;
+        out.refill(|values, ends| {
+            values.clear();
+            let mut cells = VlaCells::new(column, row_count, ends);
+            let decoded = element.decode_physical_into(
+                cells.by_ref().map(|cell| cell.bytes),
+                total,
+                &scaling,
+                values,
+            );
+            cells.finish()?;
+            decoded
+        })
     }
 
     /// Exact typed integers for each row of a `P`/`Q` heap array using the FITS
@@ -189,11 +198,14 @@ impl<'a> ColumnReader<'a> {
         else {
             return Ok(None);
         };
+        let row_count = self.table.extent.row_count;
+        let total = VlaCells::element_total(column, row_count)?;
         let mut ends = Vec::new();
-        let mut cells = VlaCells::new(column, self.table.extent.row_count, &mut ends);
-        let values = UnsignedData::from_be_cells(cells.by_ref().map(|cell| cell.bytes), 0, kind);
+        let mut cells = VlaCells::new(column, row_count, &mut ends);
+        let values =
+            UnsignedData::from_be_cells(cells.by_ref().map(|cell| cell.bytes), total, kind);
         cells.finish()?;
-        Ok(Some(Ragged::<UnsignedData>::new(values, ends)))
+        Ok(Some(Ragged::<UnsignedData>::new(values?, ends)))
     }
 
     /// Each row of a `PC`/`QC`/`PM`/`QM` heap array as [`Complex<f64>`], applying
@@ -203,17 +215,19 @@ impl<'a> ColumnReader<'a> {
     pub fn vla_complex(&self) -> Result<Ragged<Vec<Complex<f64>>>> {
         let col = self.descriptor();
         let column = self.vla_column()?;
+        let element = column.element_type();
+        if !element.is_complex() {
+            return Err(self.mismatch(ExpectedColumn::Complex));
+        }
+        let (tscale, tzero) = (col.tscale()?, col.tzero()?);
+        let row_count = self.table.extent.row_count;
+        let total = VlaCells::element_total(column, row_count)?;
         let mut ends = Vec::new();
-        let mut cells = VlaCells::new(column, self.table.extent.row_count, &mut ends);
-        let values = column.element_type().decode_complex(
-            cells.by_ref().map(|cell| cell.bytes),
-            0,
-            col.tscale()?,
-            col.tzero()?,
-        );
+        let mut cells = VlaCells::new(column, row_count, &mut ends);
+        let values =
+            element.decode_complex(cells.by_ref().map(|cell| cell.bytes), total, tscale, tzero);
         cells.finish()?;
-        let values = values.ok_or_else(|| self.mismatch(ExpectedColumn::Complex))?;
-        Ok(Ragged::<Vec<Complex<f64>>>::new(values, ends))
+        Ok(Ragged::<Vec<Complex<f64>>>::new(values?, ends))
     }
 
     /// A variable-length `X` (`1PX`/`1QX`) column as a borrowed 2-D [`BitColumn`],
@@ -277,6 +291,16 @@ impl<'e, 'a> VlaCells<'e, 'a> {
             ends,
             error: None,
         }
+    }
+
+    /// The elements the heap arrays of the `row_count` rows of `column` hold in all,
+    /// summed from their descriptors before any of them is decoded.
+    fn element_total(column: VlaColumn<'a>, row_count: usize) -> Result<usize> {
+        (0..row_count).try_fold(0usize, |total, row| {
+            total
+                .checked_add(column.cell(row)?.element_count)
+                .ok_or(FitsError::DataUnitOverflow)
+        })
     }
 
     /// The error of the row that ended the pass, if one did.

@@ -2,9 +2,10 @@ use crate::bintable::descriptor;
 use crate::bintable::descriptor::{DescriptorWidth, PqDescriptor};
 use crate::bintable::element_kind::ElementKind;
 use crate::fits_error::{FitsError, SizeUnit};
+use std::assert_matches;
 
 #[test]
-fn decodes_signed_boundaries_and_rejects_malformed_widths() {
+fn decodes_signed_boundaries_and_refuses_malformed_widths() {
     let mut narrow = Vec::new();
     narrow.extend_from_slice(&i32::MAX.to_be_bytes());
     narrow.extend_from_slice(&i32::MAX.to_be_bytes());
@@ -29,7 +30,7 @@ fn decodes_signed_boundaries_and_rejects_malformed_widths() {
             }
         );
     } else {
-        assert!(matches!(decoded, Err(FitsError::DataUnitOverflow)));
+        assert_matches!(decoded, Err(FitsError::DataUnitOverflow));
     }
     assert_eq!(
         PqDescriptor::decode(&[0; 8], DescriptorWidth::P).unwrap(),
@@ -56,11 +57,11 @@ fn decodes_signed_boundaries_and_rejects_malformed_widths() {
         (&[0u8; 7][..], DescriptorWidth::P, 8),
         (&[0u8; 15], DescriptorWidth::Q, 16),
     ] {
-        assert!(matches!(
+        assert_matches!(
             PqDescriptor::decode(bytes, width),
             Err(FitsError::DataSizeMismatch { unit: SizeUnit::Bytes, expected: got, got: len })
                 if got == expected && len == bytes.len() as u64
-        ));
+        );
     }
 }
 
@@ -109,29 +110,30 @@ fn payload_lengths_and_heap_ranges_cover_boundaries() {
         .unwrap(),
         usize::MAX - 1..usize::MAX
     );
-    assert!(matches!(
+    // A span too large for `usize` runs past the heap as one past its end does.
+    assert_eq!(
         PqDescriptor {
             count: 2,
             offset: usize::MAX - 1,
         }
         .heap_range(ElementKind::U8, 0, usize::MAX),
-        Err(FitsError::DataUnitOverflow)
-    ));
-    assert!(matches!(
+        None
+    );
+    assert_eq!(
         PqDescriptor {
             count: 2,
             offset: 3,
         }
         .heap_range(ElementKind::U8, 10, 14),
-        Err(FitsError::UnexpectedEof)
-    ));
+        None
+    );
 }
 
 /// §10.1.3: a 32-bit `P` descriptor holds a signed 32-bit offset and count, so a heap or a cell
 /// count past `i32::MAX` needs a 64-bit `Q`; exactly `i32::MAX` still fits a `P`.
 #[cfg(feature = "compression")]
 #[test]
-fn a_descriptor_widens_past_the_32_bit_range() {
+fn descriptor_widens_past_the_32_bit_range() {
     let max = i32::MAX as usize;
     for (heap_len, max_count, width) in [
         (0, 0, DescriptorWidth::P),
@@ -180,23 +182,23 @@ fn pq_descriptors_are_big_endian_count_then_offset() {
     ] {
         let mut slot = vec![0xA5; width.bytes()];
         let written = PqDescriptor { count, offset }.write(width, &mut slot);
-        assert_eq!(
-            PqDescriptor { count, offset }.validate(width).is_ok(),
-            expected.is_some()
-        );
+        let validated = PqDescriptor { count, offset }.validate(width);
         match expected {
             Some(bytes) => {
                 written.unwrap();
+                validated.unwrap();
                 assert_eq!(slot, bytes, "{width:?} {count} {offset}");
             }
-            None => assert!(
-                matches!(
-                    written,
-                    Err(FitsError::DescriptorOutOfRange { width: w, count: c, offset: o })
-                        if w == width && c == count && o == offset
-                ),
-                "{width:?} {count} {offset}"
-            ),
+            None => {
+                for refused in [written, validated] {
+                    assert_matches!(
+                        refused,
+                        Err(FitsError::DescriptorOutOfRange { width: w, count: c, offset: o })
+                            if w == width && c == count && o == offset,
+                        "{width:?} {count} {offset}"
+                    );
+                }
+            }
         }
     }
 }

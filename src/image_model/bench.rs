@@ -3,16 +3,19 @@
 
 use std::hint::black_box;
 
-use criterion::{BenchmarkId, Criterion};
+use criterion::{Bencher, BenchmarkId, Criterion};
 
-use crate::bench::fixture::{self, Kind, Scale};
-use crate::bitpix::Bitpix;
+use crate::bench::policy::{self, Kind, Scale};
+use crate::image_model::bitpix::Bitpix;
+use crate::image_model::physical_sample::PhysicalSample;
 use crate::image_model::scaling::Scaling;
+use crate::image_model::unsigned_data::UnsignedData;
 use crate::image_model::view::Borrowed;
 use crate::internals::samples::BITPIXES;
-use crate::internals::scene::{self, WIDTH};
+use crate::internals::scene;
+use crate::internals::scene::WIDTH;
 
-/// `atomic/decode/<type>`, `atomic/encode/<type>`, `atomic/physical/<scaling>/<type>` and
+/// `atomic/decode/<type>`, `atomic/encode/<type>`, `atomic/physical/<output>/<scaling>-<type>` and
 /// `atomic/unsigned/<type>`, each on one row of the standard frame. Per sample, in the stored
 /// bytes.
 pub(crate) fn atomic(c: &mut Criterion) {
@@ -25,11 +28,11 @@ pub(crate) fn atomic(c: &mut Criterion) {
 /// `atomic/decode/<type>`: the big-endian row swapped into a reused buffer of words, as a view
 /// read decodes. `u8` has no swap, so no case.
 fn decode(c: &mut Criterion) {
-    let mut group = Kind::Atomic.group(c, "decode", Scale::Sample);
+    let mut group = Kind::Atomic.group(c, "decode", Scale::Row);
     let mut words = Vec::new();
     for bitpix in swapped_types() {
-        group.throughput(fixture::throughput(WIDTH, bitpix.elem_size()));
-        group.bench_function(fixture::bitpix_id(bitpix), |b| {
+        group.throughput(policy::throughput(WIDTH, bitpix.elem_size()));
+        group.bench_function(policy::bitpix_id(bitpix), |b| {
             let mut row = Vec::new();
             scene::sky(bitpix, WIDTH, 1, 1)
                 .samples
@@ -44,11 +47,11 @@ fn decode(c: &mut Criterion) {
 /// `atomic/encode/<type>`: the row appended big-endian to a reused buffer, as the writer stages
 /// a data unit. `u8` is a copy, so no case.
 fn encode(c: &mut Criterion) {
-    let mut group = Kind::Atomic.group(c, "encode", Scale::Sample);
+    let mut group = Kind::Atomic.group(c, "encode", Scale::Row);
     let mut out = Vec::new();
     for bitpix in swapped_types() {
-        group.throughput(fixture::throughput(WIDTH, bitpix.elem_size()));
-        group.bench_function(fixture::bitpix_id(bitpix), |b| {
+        group.throughput(policy::throughput(WIDTH, bitpix.elem_size()));
+        group.bench_function(policy::bitpix_id(bitpix), |b| {
             let row = scene::sky(bitpix, WIDTH, 1, 1);
             b.iter(|| {
                 out.clear();
@@ -59,11 +62,12 @@ fn encode(c: &mut Criterion) {
     group.finish();
 }
 
-/// `atomic/physical/<scaling>/<type>`: `BZERO + BSCALE × sample` into a new `f64` row, under the
-/// frame's own scaling (`stored`) and, for an integer, with a `BLANK` sentinel too (`blank`),
-/// the branch a sentinel adds.
+/// `atomic/physical/<output>/<scaling>-<type>`: `BZERO + BSCALE × sample` straight from the
+/// big-endian row into a reused row of `f32` or `f64`, the one pass a physical read makes,
+/// under the frame's own scaling (`stored`) and, for an integer, with a `BLANK` sentinel too
+/// (`blank`), the branch a sentinel adds.
 fn physical(c: &mut Criterion) {
-    let mut group = Kind::Atomic.group(c, "physical", Scale::Sample);
+    let mut group = Kind::Atomic.group(c, "physical", Scale::Row);
     for bitpix in BITPIXES {
         let scalings: &[(&str, Option<i64>)] = if bitpix.is_integer() {
             &[("stored", None), ("blank", Some(0))]
@@ -71,28 +75,45 @@ fn physical(c: &mut Criterion) {
             &[("stored", None)]
         };
         for &(name, blank) in scalings {
-            group.throughput(fixture::throughput(WIDTH, bitpix.elem_size()));
-            let id = BenchmarkId::new(name, fixture::bitpix_id(bitpix));
-            group.bench_function(id, |b| {
-                let row = scene::sky(bitpix, WIDTH, 1, 1);
-                let scaling = Scaling {
-                    blank,
-                    ..row.scaling
-                };
-                b.iter(|| black_box(row.samples.view()).physical::<f64>(&scaling));
+            group.throughput(policy::throughput(WIDTH, bitpix.elem_size()));
+            let input = format!("{name}-{}", policy::bitpix_id(bitpix));
+            group.bench_function(BenchmarkId::new("f32", &input), |b| {
+                physical_case::<f32>(b, bitpix, blank);
+            });
+            group.bench_function(BenchmarkId::new("f64", &input), |b| {
+                physical_case::<f64>(b, bitpix, blank);
             });
         }
     }
     group.finish();
 }
 
+/// Times one row of the standard frame of `bitpix`, under its scaling with `blank`, to
+/// physical values of `O`.
+fn physical_case<O: PhysicalSample>(b: &mut Bencher<'_>, bitpix: Bitpix, blank: Option<i64>) {
+    let row = scene::sky(bitpix, WIDTH, 1, 1);
+    let scaling = Scaling {
+        blank,
+        ..row.scaling
+    };
+    let mut bytes = Vec::new();
+    row.samples.view().encode_into(&mut bytes);
+    let mut out: Vec<O> = Vec::new();
+    b.iter(|| {
+        out.clear();
+        bitpix.extend_physical_be(black_box(&bytes), &scaling, &mut out);
+    });
+}
+
 /// `atomic/unsigned/<type>`: the exact reinterpretation of a stored signed integer as its
-/// unsigned type under the FITS sign-bit `BZERO` (a `u8` as signed bytes), into a new row.
+/// unsigned type under the FITS sign-bit `BZERO` (a `u8` as signed bytes), into a new row:
+/// the case times that row's allocation too, until the unsigned read fills the caller's
+/// buffer.
 fn unsigned(c: &mut Criterion) {
-    let mut group = Kind::Atomic.group(c, "unsigned", Scale::Sample);
+    let mut group = Kind::Atomic.group(c, "unsigned", Scale::Row);
     for bitpix in BITPIXES.into_iter().filter(|bitpix| bitpix.is_integer()) {
-        group.throughput(fixture::throughput(WIDTH, bitpix.elem_size()));
-        group.bench_function(fixture::bitpix_id(bitpix), |b| {
+        group.throughput(policy::throughput(WIDTH, bitpix.elem_size()));
+        group.bench_function(policy::bitpix_id(bitpix), |b| {
             let row = scene::sky(bitpix, WIDTH, 1, 1);
             let scaling = Scaling {
                 bscale: 1.0,
@@ -104,7 +125,11 @@ fn unsigned(c: &mut Criterion) {
                 scaling,
                 samples: row.samples.view(),
             };
-            b.iter(|| black_box(view).unsigned().unwrap());
+            let mut unsigned = UnsignedData::U16(Vec::new());
+            b.iter(|| {
+                assert!(black_box(view).unsigned_into(&mut unsigned));
+                black_box(&unsigned);
+            });
         });
     }
     group.finish();

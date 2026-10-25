@@ -1,8 +1,12 @@
 use crate::compression::quantization::{Dither, DitherSeed, Seed};
 use crate::compression::*;
+use crate::image_model::Image;
+use crate::image_model::data::Data;
+use crate::internals::memory;
+use std::assert_matches;
 
 #[test]
-fn typed_compression_configuration_rejects_impossible_values() {
+fn typed_compression_configuration_refuses_impossible_values() {
     assert_eq!(
         [Gzip::new(9).unwrap(), Gzip::shuffled(0).unwrap()],
         [
@@ -16,37 +20,37 @@ fn typed_compression_configuration_rejects_impossible_values() {
             }
         ]
     );
-    assert!(matches!(
+    assert_matches!(
         Gzip::new(10),
         Err(FitsError::InvalidCompressionParameter {
             parameter: CompressionParameter::GzipLevel { level: 10 }
         })
-    ));
+    );
     for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-        assert!(matches!(
+        assert_matches!(
             Hcompress::relative(value),
             Err(FitsError::InvalidCompressionParameter {
                 parameter: CompressionParameter::HcompressScale { scale }
             }) if scale.to_bits() == value.to_bits()
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             Hcompress::absolute(value),
             Err(FitsError::InvalidCompressionParameter {
                 parameter: CompressionParameter::HcompressScale { scale }
             }) if scale.to_bits() == value.to_bits()
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             Quantization::relative(value, Dither::None),
             Err(FitsError::InvalidCompressionParameter {
                 parameter: CompressionParameter::QuantizationLevel { level }
             }) if level.to_bits() == value.to_bits()
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             Quantization::absolute(value, Dither::None),
             Err(FitsError::InvalidCompressionParameter {
                 parameter: CompressionParameter::QuantizationStep { step }
             }) if step.to_bits() == value.to_bits()
-        ));
+        );
     }
     assert_eq!(
         [
@@ -63,12 +67,12 @@ fn typed_compression_configuration_rejects_impossible_values() {
         ]
     );
     for seed in [0, 10_001] {
-        assert!(matches!(
+        assert_matches!(
             DitherSeed::fixed(seed),
             Err(FitsError::InvalidCompressionParameter {
                 parameter: CompressionParameter::DitherSeed { seed: got }
             }) if got == seed
-        ));
+        );
     }
     for seed in [1, 10_000] {
         assert_eq!(DitherSeed::fixed(seed).unwrap().source(), Seed::Fixed(seed));
@@ -94,30 +98,59 @@ fn table_tile_rows_follow_the_config_and_cfitsio_default() {
     // of 1; a height of 0 is refused, as an image's tile of 0 is.
     let tiled = |rows: usize| rice.clone().with_tiles([rows]);
     assert_eq!(tiled(3).table_tile_rows(10, 8).unwrap(), 3);
-    assert!(matches!(
+    assert_matches!(
         tiled(0).table_tile_rows(10, 8),
         Err(FitsError::InvalidCompressionParameter {
             parameter: CompressionParameter::EmptyTile { axis: 0 }
         })
-    ));
+    );
     assert_eq!(tiled(30).table_tile_rows(10, 8).unwrap(), 10);
     assert_eq!(tiled(3).table_tile_rows(0, 8).unwrap(), 1);
 
-    assert!(matches!(
-        rice.clone().with_tiles([3, 2]).table_tile_rows(10, 8),
-        Err(FitsError::RankMismatch {
-            ranked: Ranked::TileShape,
-            expected: 1,
-            got: 2,
-        })
-    ));
-    assert!(matches!(
+    // `NONE` keeps the values, as a table write does: the rows are the unset config's.
+    assert_eq!(
+        rice.clone()
+            .with_quantization(Quantization::NONE)
+            .table_tile_rows(10, 8)
+            .unwrap(),
+        rice.table_tile_rows(10, 8).unwrap()
+    );
+    assert_matches!(
         rice.with_quantization(Quantization::relative(4.0, Dither::None).unwrap())
             .table_tile_rows(10, 8),
         Err(FitsError::InvalidCompressionParameter {
             parameter: CompressionParameter::TableQuantization
         })
-    ));
+    );
+}
+
+/// A tile shape has one extent per image axis, or one for a table's rows: another rank is
+/// refused, not taken as row tiles. An empty shape is the default.
+#[test]
+fn tile_shape_of_another_rank_is_refused() {
+    let image = Image::new(vec![4, 3], Data::I16(vec![0; 12]), Scaling::IDENTITY).unwrap();
+    assert_matches!(
+        memory::refused_before_output(|w| w.write_compressed_image(
+            image.view(),
+            &CompressionConfig::new(Compression::Rice).with_tiles([2, 2, 2]),
+            None,
+        )),
+        FitsError::RankMismatch {
+            ranked: Ranked::TileShape,
+            expected: 2,
+            got: 3,
+        }
+    );
+    assert_matches!(
+        CompressionConfig::new(Compression::Rice)
+            .with_tiles([3, 2])
+            .table_tile_rows(10, 8),
+        Err(FitsError::RankMismatch {
+            ranked: Ranked::TileShape,
+            expected: 1,
+            got: 2,
+        })
+    );
 }
 
 #[test]

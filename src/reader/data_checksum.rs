@@ -3,9 +3,9 @@
 use crate::checksum::checksum_report::ChecksumReport;
 use crate::checksum::declared::Declared;
 use crate::checksum::running::Running;
-use crate::fits_error::Result;
+use crate::fits_error::{FitsError, Result};
+use crate::hdu::Hdu;
 use crate::reader::data_source::DataSource;
-use crate::reader::hdu::Hdu;
 use crate::reader::source::Source;
 
 /// The 32-bit ones'-complement sum of one HDU's block-padded data unit, accumulated as its bytes
@@ -25,10 +25,6 @@ pub(crate) struct DataChecksum {
     sum: Running,
 }
 
-/// The bytes [`DataChecksum::finish`] reads at a time: a bounded scratch, whatever the
-/// unit's size.
-pub(crate) const FINISH_CHUNK: usize = 1 << 20;
-
 impl DataChecksum {
     /// An empty sum of `hdu`'s data unit.
     pub(crate) const fn of(hdu: &Hdu) -> Self {
@@ -47,7 +43,7 @@ impl DataChecksum {
     ///
     /// If this is not [`DataChecksum::of`] `hdu`.
     pub(crate) fn finish<S: Source>(
-        mut self,
+        self,
         hdu: &Hdu,
         data: &mut DataSource<S>,
     ) -> Result<ChecksumReport> {
@@ -55,17 +51,21 @@ impl DataChecksum {
             self.covers(hdu.data_offset, hdu.padded_data_bytes()),
             "a data checksum of another HDU"
         );
-        Declared::read(&hdu.header).report(hdu.header_sum, || {
-            while self.remaining() > 0 {
-                let offset = self.next;
-                let len = usize::try_from(self.remaining().min(FINISH_CHUNK as u64))
-                    .expect("a chunk fits usize");
-                let bytes = data.slice(offset, len)?;
-                self.feed(offset, bytes);
-            }
-            debug_assert_eq!(self.next, self.end);
-            Ok(self.sum.finish())
-        })
+        Declared::read(&hdu.header).report(hdu.header_sum, || self.sum(data))
+    }
+
+    /// The sum of the whole unit: what this has not summed read from `data` in bounded
+    /// chunks, borrowed in place from a resident source.
+    pub(crate) fn sum<S: Source>(mut self, data: &mut DataSource<S>) -> Result<u32> {
+        let remaining = self.end - self.next;
+        let len = usize::try_from(remaining)
+            .map_err(|_| FitsError::DataUnitTooLarge { bytes: remaining })?;
+        data.chunks(self.next, len, |offset, bytes| {
+            self.feed(offset, bytes);
+            Ok(())
+        })?;
+        debug_assert_eq!(self.next, self.end);
+        Ok(self.sum.finish())
     }
 
     /// Sum the part of `bytes`, read from file offset `offset`, that continues what is
@@ -92,10 +92,5 @@ impl DataChecksum {
     /// Whether this sums the unit of `padded` bytes from `start`.
     const fn covers(&self, start: u64, padded: u64) -> bool {
         self.end == start + padded && self.next >= start
-    }
-
-    /// The bytes still to be read, from [`Self::next`].
-    const fn remaining(&self) -> u64 {
-        self.end - self.next
     }
 }

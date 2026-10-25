@@ -1,18 +1,24 @@
 use crate::alternate::Alternate;
 use crate::fits_error::FitsError;
+use crate::fits_error::NumericTarget;
+use crate::fits_error::ValueKind;
 use crate::fits_error::{TabularDefect, WcsDefect};
+use crate::header_model::record_name::RecordName;
 use crate::header_model::{Header, keywords};
+use crate::internals::tolerance;
 use crate::internals::tolerance::Tolerance;
-use crate::internals::wcs_header::assert_round_trip;
+use crate::internals::wcs_header;
 use crate::world_coordinates::internals::{to_pixel, to_world};
+use std::assert_matches;
 
 use crate::time_coordinates::frame::Frame;
 use crate::time_coordinates::mjd::Mjd;
+use crate::world_coordinates::Wcs;
 use crate::world_coordinates::tabular;
-use crate::world_coordinates::tabular::TabularTransform;
 use crate::world_coordinates::tabular::internals::{
-    COUPLED_GRID, lookup_table, resolved_wcs, tab_header,
+    COUPLED_GRID, from_table, lookup_table, resolved_wcs, tab_header,
 };
+use crate::world_coordinates::tabular::{TableArray, TabularArrays, TabularTransform};
 use std::iter;
 use std::panic;
 
@@ -55,18 +61,32 @@ fn one_dimensional_tab_supports_nonmonotonic_coordinates_and_boundaries() {
         (3.5, 22.5),
         (4.5, 37.5),
     ];
+    // The transform takes the arrays alone: built from them with no table, it maps each
+    // case as the one the table gives.
+    let descriptors = tabular::descriptors(&header, 1, Alternate::PRIMARY).unwrap();
+    let arrays = TabularArrays {
+        coordinates: TableArray {
+            shape: vec![1, 4],
+            values: vec![10.0, 20.0, 15.0, 30.0],
+        },
+        indices: vec![None],
+    };
+    let transform = TabularTransform::from_arrays(&descriptors[0], arrays).unwrap();
+    let from_arrays =
+        Wcs::from_header_with_tabular(&header, Alternate::PRIMARY, vec![transform]).unwrap();
     for (pixel, expected) in cases {
         assert_eq!(to_world(&wcs, &[pixel]).unwrap(), [expected]);
+        assert_eq!(to_world(&from_arrays, &[pixel]).unwrap(), [expected]);
     }
     assert_eq!(to_pixel(&wcs, &[17.5]).unwrap(), [1.75]);
     assert_eq!(to_pixel(&wcs, &[37.5]).unwrap(), [4.5]);
-    assert!(matches!(
+    assert_matches!(
         to_world(&wcs, &[0.49]),
         Err(FitsError::WcsCoordinateOutOfDomain {
             axis: 0,
             algorithm: "TAB"
         })
-    ));
+    );
 }
 
 /// The binary search of the monotonic runs returns the interval the plain scan does —
@@ -103,7 +123,7 @@ fn run_search_matches_the_first_interval_scan() {
             header.set_internal("PS1_2", "INDEX");
         }
         let descriptor = &tabular::descriptors(&header, 1, Alternate::PRIMARY).unwrap()[0];
-        let transform = TabularTransform::from_table(descriptor, table.view()).unwrap();
+        let transform = from_table(descriptor, table.view()).unwrap();
         let tabular::InverseIndex::Runs(runs) = &transform.inverse else {
             panic!("a one-axis table searches runs");
         };
@@ -137,7 +157,7 @@ fn run_search_matches_the_first_interval_scan() {
 /// budget of 2²² work units, 16 for each cell of a two-axis table, no longer runs out
 /// at 2¹⁸ = 262 144 cells: here a point in the last of 512 × 512.
 #[test]
-fn multidimensional_tab_inverse_reaches_past_the_budget_of_every_cell() {
+fn coupled_inverse_reaches_past_the_budget_of_every_cell() {
     const NODES: usize = 513;
     let coordinates: Vec<f64> = (0..NODES * NODES)
         .flat_map(|node| [(node % NODES) as f64, (node / NODES) as f64 * 2.0])
@@ -149,7 +169,7 @@ fn multidimensional_tab_inverse_reaches_past_the_budget_of_every_cell() {
     let pixel = [512.25, 512.75];
     let world = to_world(&wcs, &pixel).unwrap();
     assert_eq!(world, [511.25, 1023.5]);
-    assert_round_trip(
+    wcs_header::assert_round_trip(
         &wcs,
         &[pixel],
         Tolerance::abs(
@@ -161,7 +181,7 @@ fn multidimensional_tab_inverse_reaches_past_the_budget_of_every_cell() {
 }
 
 #[test]
-fn tab_index_vectors_may_decrease_and_change_sampling() {
+fn index_vectors_may_decrease_and_change_sampling() {
     let table = lookup_table(&[
         ("COORD", &[100.0, 200.0, 400.0, 800.0], Some("(1,4)")),
         ("INDEX", &[40.0, 30.0, 10.0, 0.0], None),
@@ -175,11 +195,11 @@ fn tab_index_vectors_may_decrease_and_change_sampling() {
     assert_eq!(to_world(&wcs, &[0.0]).unwrap(), [200.0]);
     assert_eq!(to_world(&wcs, &[5.0]).unwrap(), [150.0]);
     assert_eq!(to_world(&wcs, &[-22.5]).unwrap(), [500.0]);
-    assert_round_trip(&wcs, &[[5.0], [0.0], [-22.5]], Tolerance::EXACT, "INDEX");
+    wcs_header::assert_round_trip(&wcs, &[[5.0], [0.0], [-22.5]], Tolerance::EXACT, "INDEX");
 }
 
 #[test]
-fn tab_index_binary_search_preserves_duplicate_and_exact_hit_rules() {
+fn index_search_keeps_the_duplicate_and_exact_hit_rules() {
     for (index, reference, expected) in [
         (&[0.0, 0.0, 10.0, 20.0][..], 0.0, 200.0),
         (&[0.0, 10.0, 10.0, 20.0], 10.0, 200.0),
@@ -201,7 +221,7 @@ fn tab_index_binary_search_preserves_duplicate_and_exact_hit_rules() {
 }
 
 #[test]
-fn multidimensional_tab_interpolates_and_inverts_coupled_axes() {
+fn coupled_axes_interpolate_and_invert() {
     let table = lookup_table(&[("COORD", &COUPLED_GRID, Some("(2,2,2)"))]);
     let mut header = tab_header(2);
     header
@@ -210,7 +230,7 @@ fn multidimensional_tab_interpolates_and_inverts_coupled_axes() {
     let wcs = resolved_wcs(&header, &table);
 
     assert_eq!(to_world(&wcs, &[1.25, 1.5]).unwrap(), [102.5, 210.0]);
-    assert_round_trip(
+    wcs_header::assert_round_trip(
         &wcs,
         &[[1.25, 1.5], [0.5, 1.5], [1.25, 2.5], [0.5, 2.5]],
         SEARCH,
@@ -225,31 +245,38 @@ fn multidimensional_tab_interpolates_and_inverts_coupled_axes() {
         let wcs = resolved_wcs(&header, &table);
         let pixel = vec![1.25; dimensions];
         let world = to_world(&wcs, &pixel).unwrap();
-        for (axis, &value) in world.iter().enumerate() {
-            let expected = 100.0 * axis as f64 + 0.25 * (axis + 1) as f64;
-            assert!((value - expected).abs() < 1e-12, "{dimensions}: {world:?}");
-        }
-        assert_round_trip(&wcs, &[pixel], SEARCH, &format!("{dimensions} axes"));
+        let expected: Vec<f64> = (0..dimensions)
+            .map(|axis| 100.0 * axis as f64 + 0.25 * (axis + 1) as f64)
+            .collect();
+        tolerance::assert_close(
+            &world,
+            &expected,
+            Tolerance::abs(
+                1e-12,
+                "multilinear interpolation, a few ulps of coordinates to 1300",
+            ),
+            &format!("{dimensions} axes"),
+        );
+        wcs_header::assert_round_trip(&wcs, &[pixel], SEARCH, &format!("{dimensions} axes"));
     }
 }
 
 #[test]
-fn multidimensional_tab_inverse_has_a_bounded_work_budget() {
-    let dimensions = 14;
+fn coupled_inverse_takes_the_most_axes() {
+    // Seven coupled axes, the most a transform takes, invert in their fixed arrays: the
+    // affine table maps 1.25 on each axis and back exactly.
+    let dimensions = 7;
     let coordinates = affine_coordinates(dimensions);
     let shape = coordinate_shape(dimensions);
     let table = lookup_table(&[("COORD", &coordinates, Some(&shape))]);
     let header = tab_header(dimensions);
     let wcs = resolved_wcs(&header, &table);
     let world = to_world(&wcs, &vec![1.25; dimensions]).unwrap();
-    assert!(matches!(
-        to_pixel(&wcs, &world),
-        Err(FitsError::WcsNoConvergence { algorithm: "TAB" })
-    ));
+    assert_eq!(to_pixel(&wcs, &world).unwrap(), vec![1.25; dimensions]);
 }
 
 #[test]
-fn tabular_time_axes_feed_the_typed_time_layer() {
+fn time_axes_feed_the_typed_time_layer() {
     let table = lookup_table(&[("COORD", &[0.0, 2.0], Some("(1,2)"))]);
     let mut header = tab_header(1);
     header
@@ -299,7 +326,7 @@ fn tabular_time_axes_feed_the_typed_time_layer() {
 }
 
 #[test]
-fn tabular_spectral_coordinates_normalize_declared_units() {
+fn spectral_coordinates_normalize_declared_units() {
     let table = lookup_table(&[("COORD", &[500.0, 600.0], Some("(1,2)"))]);
     let mut header = tab_header(1);
     header
@@ -307,8 +334,16 @@ fn tabular_spectral_coordinates_normalize_declared_units() {
         .set_internal("CUNIT1", "nm");
     let wcs = resolved_wcs(&header, &table);
     let world = to_world(&wcs, &[1.5]).unwrap();
-    assert!((world[0] - 5.5e-7).abs() < 1e-20, "{world:?}");
-    assert_round_trip(
+    tolerance::assert_within(
+        world[0],
+        5.5e-7,
+        Tolerance::abs(
+            1e-20,
+            "the nm factor and the interpolation, ulps of 5.5e-7 m (1.1e-22)",
+        ),
+        "WAVE-TAB in metres",
+    );
+    wcs_header::assert_round_trip(
         &wcs,
         &[[1.5]],
         Tolerance::ulps(
@@ -324,30 +359,30 @@ fn tabular_spectral_coordinates_normalize_declared_units() {
 }
 
 #[test]
-fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
+fn missing_references_bad_shapes_and_nonmonotonic_indices_are_refused() {
     let mut missing = Header::new();
     missing
         .set_internal(keywords::NAXIS, 1)
         .set_internal("CTYPE1", "AX01-TAB")
         .set_internal("PS1_1", "COORD");
-    assert!(matches!(
+    assert_matches!(
         tabular::descriptors(&missing, 1, Alternate::PRIMARY),
         Err(FitsError::InvalidWcs {
             defect: WcsDefect::Tabular(TabularDefect::MissingExtension)
         })
-    ));
+    );
 
     let bad_shape = lookup_table(&[("COORD", &[1.0, 2.0, 3.0, 4.0], Some("(2,2)"))]);
     let header = tab_header(1);
     let descriptor = tabular::descriptors(&header, 1, Alternate::PRIMARY)
         .unwrap()
         .remove(0);
-    assert!(matches!(
-        TabularTransform::from_table(&descriptor, bad_shape.view()),
+    assert_matches!(
+        from_table(&descriptor, bad_shape.view()),
         Err(FitsError::InvalidWcs {
             defect: WcsDefect::Tabular(TabularDefect::CoordinateShape)
         })
-    ));
+    );
 
     let bad_index = lookup_table(&[
         ("COORD", &[1.0, 2.0, 3.0], Some("(1,3)")),
@@ -358,58 +393,76 @@ fn tab_rejects_missing_references_bad_shapes_and_nonmonotonic_indices() {
     let descriptor = tabular::descriptors(&header, 1, Alternate::PRIMARY)
         .unwrap()
         .remove(0);
-    assert!(matches!(
-        TabularTransform::from_table(&descriptor, bad_index.view()),
+    assert_matches!(
+        from_table(&descriptor, bad_index.view()),
         Err(FitsError::InvalidWcs {
             defect: WcsDefect::Tabular(TabularDefect::NonMonotonicIndex)
         })
-    ));
+    );
 
     let mut oversized_axis = tab_header(1);
     oversized_axis.set_internal("PV1_3", i64::MAX);
-    let oversized =
-        panic::catch_unwind(|| tabular::descriptors(&oversized_axis, 1, Alternate::PRIMARY));
-    assert!(matches!(
-        oversized,
-        Ok(Err(FitsError::InvalidWcs {
+    assert_matches!(
+        tabular::descriptors(&oversized_axis, 1, Alternate::PRIMARY),
+        Err(FitsError::InvalidWcs {
             defect: WcsDefect::Tabular(TabularDefect::TableAxisPastCount)
-        }))
-    ));
+        })
+    );
 
     // An EXTVER is a positive integer: zero is refused, a fraction is no integer, and
     // 2⁶³, the first real past i64::MAX, is no EXTVER rather than a saturated one.
-    for (value, refused) in [(0.0, "zero"), (1.5, "fraction"), (2f64.powi(63), "2^63")] {
+    let refusal = |value: f64| {
         let mut header = tab_header(1);
         header.set_internal("PV1_1", value);
-        let error = tabular::descriptors(&header, 1, Alternate::PRIMARY).unwrap_err();
-        assert!(
-            matches!(
-                (refused, &error),
-                (
-                    "zero",
-                    FitsError::InvalidWcs {
-                        defect: WcsDefect::Tabular(TabularDefect::NonPositiveParameter)
-                    }
-                ) | ("fraction", FitsError::ValueTypeMismatch { .. })
-                    | ("2^63", FitsError::IntegerOutOfRange { .. })
-            ),
-            "{refused}: {error:?}"
-        );
-    }
+        tabular::descriptors(&header, 1, Alternate::PRIMARY).unwrap_err()
+    };
+    assert_matches!(
+        refusal(0.0),
+        FitsError::InvalidWcs {
+            defect: WcsDefect::Tabular(TabularDefect::NonPositiveParameter)
+        }
+    );
+    assert_matches!(
+        refusal(1.5),
+        FitsError::ValueTypeMismatch {
+            name: RecordName::Keyword(name),
+            expected: ValueKind::Integer
+        } if name == "PV1_1"
+    );
+    // f64's shortest form of 2⁶³ is the text the error keeps.
+    assert_matches!(
+        refusal(2f64.powi(63)),
+        FitsError::IntegerOutOfRange {
+            name: Some(RecordName::Keyword(name)),
+            value,
+            target: NumericTarget::I64
+        } if name == "PV1_1" && value == "9223372036854776000"
+    );
 
-    assert_eq!(tabular::interpolation_vertex_count(20).unwrap(), 1 << 20);
-    assert!(matches!(
-        tabular::interpolation_vertex_count(21),
+    // A coupled table of seven axes is the most a transform takes; one of eight is
+    // refused at parse, so a point never needs more than its fixed arrays.
+    let coupled = |axes: usize| {
+        let values = vec![1.0; axes];
+        let shape = format!("({axes}{})", ",1".repeat(axes));
+        let table = lookup_table(&[("COORD", &values, Some(shape.as_str()))]);
+        let descriptors =
+            tabular::descriptors(&tab_header(axes), axes, Alternate::PRIMARY).unwrap();
+        assert_eq!(descriptors.len(), 1, "one coupled table");
+        from_table(&descriptors[0], table.view()).map(|_| ())
+    };
+    coupled(7).unwrap();
+    assert_matches!(
+        coupled(8),
         Err(FitsError::InvalidWcs {
             defect: WcsDefect::Tabular(TabularDefect::TooManyAxes)
         })
-    ));
+    );
 }
 
 /// A one-element index vector Ψ = (100) takes ψ ∈ [99.5, 100.5] to Υ = ψ − Ψ₁ + 1 on the
 /// one coordinate, and back: the coordinate 42 is ψ = 100.
 #[test]
-fn a_one_element_index_vector_maps_onto_its_value() {
+fn one_element_index_vector_maps_onto_its_value() {
     let table = lookup_table(&[("COORD", &[42.0], Some("(1,1)")), ("INDEX", &[100.0], None)]);
     let mut header = tab_header(1);
     header
@@ -421,14 +474,12 @@ fn a_one_element_index_vector_maps_onto_its_value() {
         assert_eq!(to_world(&wcs, &[pixel]).unwrap(), [42.0], "pixel {pixel}");
     }
     for pixel in [-0.6, 0.6, 100.0] {
-        assert!(
-            matches!(
-                to_world(&wcs, &[pixel]),
-                Err(FitsError::WcsCoordinateOutOfDomain {
-                    axis: 0,
-                    algorithm: "TAB"
-                })
-            ),
+        assert_matches!(
+            to_world(&wcs, &[pixel]),
+            Err(FitsError::WcsCoordinateOutOfDomain {
+                axis: 0,
+                algorithm: "TAB"
+            }),
             "pixel {pixel}"
         );
     }
@@ -446,6 +497,6 @@ fn tab_inverse_is_scale_free() {
         let coordinates = COUPLED_GRID.map(|value: f64| value * scale);
         let table = lookup_table(&[("COORD", &coordinates, Some("(2,2,2)"))]);
         let wcs = resolved_wcs(&tab_header(2), &table);
-        assert_round_trip(&wcs, &[[1.3, 1.7]], SEARCH, &format!("scale {scale}"));
+        wcs_header::assert_round_trip(&wcs, &[[1.3, 1.7]], SEARCH, &format!("scale {scale}"));
     }
 }

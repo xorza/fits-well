@@ -1,10 +1,11 @@
 //! ASCII-table writer schema, validation, and encoding.
 
+use crate::fits_error::KeywordDefect;
 use std::fmt::Write as _;
 use std::iter;
 
 use crate::ascii::ascii_text::AsciiText;
-use crate::bitpix::Bitpix;
+use crate::ascii::ascii_tform::{AsciiFloatFormat, AsciiTform};
 use crate::column::validate_table_field_count;
 use crate::fits_error::{AsciiValueDefect, FitsError, Result, TextOrigin};
 use crate::fits_writer::column_scaling::{ColumnScaling, Scalable};
@@ -12,6 +13,7 @@ use crate::fits_writer::{ROW_COUNT_FIXED, accept_row_count};
 use crate::hdu::prologue::{Opening, Prologue, Xtension};
 use crate::header_model::card::validate_ascii;
 use crate::header_model::{Header, keywords, value};
+use crate::image_model::bitpix::Bitpix;
 
 /// One column to write into an ASCII table: its name, its nullable values and the
 /// `TFORMn` they are written with.
@@ -42,87 +44,6 @@ enum AsciiCells {
         values: Vec<Option<f64>>,
         format: AsciiFloatFormat,
     },
-}
-
-/// The `TFORMn` of an ASCII float column (§7.2.5): the field width and the digits after
-/// the decimal point, which every cell holds. A value is rounded to `decimals` digits,
-/// and one too wide for `width` is refused. The cells are written as cfitsio writes
-/// them through C's `%w.df` and `%w.dE`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AsciiFloatFormat {
-    /// `Fw.d`: fixed point, as `-12.50`.
-    F { width: usize, decimals: usize },
-    /// `Ew.d`: one digit before the point and a signed exponent of two digits or more,
-    /// as `-1.25E+01`.
-    E { width: usize, decimals: usize },
-    /// `Dw.d`: as `Ew.d`, with the exponent letter `D`.
-    D { width: usize, decimals: usize },
-}
-
-impl AsciiFloatFormat {
-    pub const fn width(self) -> usize {
-        match self {
-            Self::F { width, .. } | Self::E { width, .. } | Self::D { width, .. } => width,
-        }
-    }
-
-    pub const fn decimals(self) -> usize {
-        match self {
-            Self::F { decimals, .. } | Self::E { decimals, .. } | Self::D { decimals, .. } => {
-                decimals
-            }
-        }
-    }
-
-    const fn letter(self) -> char {
-        match self {
-            Self::F { .. } => 'F',
-            Self::E { .. } => 'E',
-            Self::D { .. } => 'D',
-        }
-    }
-
-    /// The width of the narrowest positive cell: `0.` and the decimals, and for an
-    /// exponent form `E+00` too; `None` past `usize::MAX`.
-    const fn minimum_width(self) -> Option<usize> {
-        let point = match self {
-            Self::F { .. } => 2,
-            Self::E { .. } | Self::D { .. } => 6,
-        };
-        self.decimals().checked_add(point)
-    }
-
-    /// Append `value`, which is finite, to `out`.
-    fn write(self, value: f64, out: &mut String) {
-        debug_assert!(value.is_finite(), "a float cell is finite");
-        let start = out.len();
-        let decimals = self.decimals();
-        match self {
-            Self::F { .. } => {
-                write!(out, "{value:.decimals$}").expect("a `String` takes every write");
-                if decimals == 0 {
-                    out.push('.');
-                }
-            }
-            Self::E { .. } | Self::D { .. } => {
-                write!(out, "{value:.decimals$E}").expect("a `String` takes every write");
-                let at = start
-                    + out[start..]
-                        .find('E')
-                        .expect("the exponent form writes an `E`");
-                let exponent: i32 = out[at + 1..]
-                    .parse()
-                    .expect("the exponent form writes an integer exponent");
-                out.truncate(at);
-                if decimals == 0 {
-                    out.push('.');
-                }
-                let sign = if exponent < 0 { '-' } else { '+' };
-                write!(out, "{}{sign}{:02}", self.letter(), exponent.unsigned_abs())
-                    .expect("a `String` takes every write");
-            }
-        }
-    }
 }
 
 impl AsciiCells {
@@ -156,18 +77,11 @@ impl AsciiCells {
         }
     }
 
-    fn tform(&self) -> String {
+    const fn tform(&self) -> AsciiTform {
         match self {
-            Self::Text { width, .. } => format!("A{width}"),
-            Self::Integer { width, .. } => format!("I{width}"),
-            Self::Float { format, .. } => {
-                format!(
-                    "{}{}.{}",
-                    format.letter(),
-                    format.width(),
-                    format.decimals()
-                )
-            }
+            Self::Text { width, .. } => AsciiTform::Text { width: *width },
+            Self::Integer { width, .. } => AsciiTform::Integer { width: *width },
+            Self::Float { format, .. } => AsciiTform::Float(*format),
         }
     }
 }
@@ -238,8 +152,9 @@ impl AsciiWriteColumn {
 
     /// Errors when this column, the table's column `n`, cannot be written.
     fn validate(&self, n: usize) -> Result<()> {
-        let tnull = FitsError::KeywordOutOfRange {
+        let tnull = FitsError::InvalidKeywordValue {
             keyword: keywords::TNULL.indexed(n)?,
+            defect: KeywordDefect::Range,
         };
         validate_ascii(&self.name, || TextOrigin::ColumnName)?;
         if let Some(unit) = &self.unit {
@@ -465,7 +380,7 @@ impl AsciiBuilder {
         for (i, (col, &tbcol)) in self.columns.iter().zip(&layout.tbcols).enumerate() {
             let n = i + 1;
             header.set_internal(keywords::TBCOL.indexed(n)?, value::fits_i64(tbcol)?);
-            header.set_internal(keywords::TFORM.indexed(n)?, col.cells.tform());
+            header.set_internal(keywords::TFORM.indexed(n)?, col.cells.tform().to_string());
             header.set_internal(keywords::TTYPE.indexed(n)?, col.name.as_str());
             if let Some(unit) = &col.unit {
                 header.set_internal(keywords::TUNIT.indexed(n)?, unit.as_str());
@@ -494,10 +409,22 @@ impl AsciiBuilder {
         );
         let mut number = String::new();
         for row in 0..layout.row_count {
-            for col in &self.columns {
-                col.append_field(row, &mut number, out)?;
-            }
+            self.encode_row(row, &mut number, out)?;
         }
         Ok(header)
+    }
+
+    /// Append row `row`, each column's field padded to its width, to `out`, with `number`
+    /// the scratch a number renders into.
+    pub(crate) fn encode_row(
+        &self,
+        row: usize,
+        number: &mut String,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        for col in &self.columns {
+            col.append_field(row, number, out)?;
+        }
+        Ok(())
     }
 }

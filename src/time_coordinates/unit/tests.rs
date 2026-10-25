@@ -2,7 +2,8 @@ use crate::fits_error::FitsError;
 use crate::fits_error::TimeConversion;
 use crate::fits_error::UnitKind;
 use crate::header_model::{Header, keywords};
-use crate::internals::cards::header_of;
+use crate::internals::cards;
+use std::assert_matches;
 
 use crate::time_coordinates::frame::Frame;
 use crate::time_coordinates::mjd::Mjd;
@@ -17,18 +18,23 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
         h.set_internal(keywords::TIMEUNIT, u);
         Frame::from_header(&h).unwrap().unit_seconds().unwrap()
     };
-    assert_eq!(unit("min"), 60.0);
-    assert_eq!(unit("h"), 3600.0);
-    assert_eq!(unit("d"), 86400.0);
-    assert_eq!(unit("a"), 365.25 * 86400.0); // Julian year
-    assert_eq!(unit("cy"), 36525.0 * 86400.0); // Julian century
-    assert_eq!(unit("s"), 1.0);
-    assert_eq!(unit("ms"), 1e-3);
-    assert_eq!(unit("ks"), 1e3);
-    assert_eq!(unit("Ma"), 1e6 * 365.25 * 86400.0);
-    assert_eq!(unit("10**3 s"), 1e3);
+    // `a` is the Julian year and `cy` the Julian century.
+    for (text, seconds) in [
+        ("s", 1.0),
+        ("ms", 1e-3),
+        ("ks", 1e3),
+        ("10**3 s", 1e3),
+        ("min", 60.0),
+        ("h", 3600.0),
+        ("d", 86400.0),
+        ("a", 365.25 * 86400.0),
+        ("Ma", 1e6 * 365.25 * 86400.0),
+        ("cy", 36525.0 * 86400.0),
+    ] {
+        assert_eq!(unit(text), seconds, "{text}");
+    }
 
-    let tropical = header_of(&[
+    let tropical = cards::header_of(&[
         ("TIMESYS", "TDB".into()),
         ("MJDREF", 51544.5.into()),
         ("TIMEUNIT", "ta".into()),
@@ -40,7 +46,7 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
         365.242_190_402_112_4 * SECONDS_PER_DAY
     );
 
-    let besselian = header_of(&[
+    let besselian = cards::header_of(&[
         ("TIMESYS", "TT".into()),
         ("MJDREF", 15019.5.into()),
         ("TIMEUNIT", "Ba".into()),
@@ -64,11 +70,10 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
     // The unit is parsed with the frame, so a bad one refuses the frame.
     for value in ["", "m", "Hz", "day", "bogus", "Mmin", "kd", "ma"] {
         invalid.set_internal(keywords::TIMEUNIT, value);
-        assert!(
-            matches!(
+        assert_matches!(
                 Frame::from_header(&invalid),
                 Err(FitsError::InvalidUnit { unit, expected: UnitKind::Time }) if unit == value
-            ),
+            ,
             "{value:?} should not be accepted as a time unit"
         );
     }
@@ -82,10 +87,10 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
             .set_internal(keywords::TIMEUNIT, unit)
             .set_internal(keywords::TIMESYS, scale);
         let time = Frame::from_header(&frame_dependent).unwrap();
-        assert!(matches!(
+        assert_matches!(
             time.unit_seconds(),
             Err(FitsError::ExternalTimeDataRequired { conversion }) if conversion == needs
-        ));
+        );
     }
 }
 
@@ -93,7 +98,7 @@ fn time_units_parse_prefixes_and_epoch_dependent_years() {
 /// unit of the same length: every base of the time table with each prefix it takes, and
 /// each year, at three multipliers.
 #[test]
-fn a_unit_prints_as_it_is_spelled() {
+fn unit_prints_as_it_is_spelled() {
     for (text, printed) in [
         ("s", "s"),
         ("ks", "ks"),

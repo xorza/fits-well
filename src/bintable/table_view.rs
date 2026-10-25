@@ -55,25 +55,27 @@ impl<'a> TableView<'a> {
     /// compressed image are all addressed this way.
     #[cfg(feature = "compression")]
     pub(crate) fn optional_vla_column(&self, name: &str) -> Result<Option<VlaColumn<'a>>> {
-        match self.column_index(name) {
+        match self.column_index(name)? {
             Some(index) => Ok(Some(self.column(index)?.vla_column()?)),
             None => Ok(None),
         }
     }
 
     #[cfg(feature = "compression")]
-    pub(crate) fn column_index(&self, name: &str) -> Option<usize> {
+    pub(crate) fn column_index(&self, name: &str) -> Result<Option<usize>> {
         column::index_of(self.columns, name)
     }
 
+    /// The heap bytes `descriptor`'s array of `element_kind` spans; `None` when it runs
+    /// past the heap.
     pub(crate) fn pq_payload(
         &self,
         descriptor: PqDescriptor,
         element_kind: ElementKind,
-    ) -> Result<&'a [u8]> {
+    ) -> Option<&'a [u8]> {
         let range =
             descriptor.heap_range(element_kind, self.extent.heap_offset, self.extent.heap_end)?;
-        Ok(&self.bytes[range])
+        Some(&self.bytes[range])
     }
 
     pub(crate) fn column<'n>(

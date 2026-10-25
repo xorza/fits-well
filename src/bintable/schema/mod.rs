@@ -5,8 +5,9 @@ use crate::bintable::table_extent::TableExtent;
 use crate::bintable::tdim;
 use crate::bintable::tform::{Storage, Tform};
 use crate::column;
-use crate::column::{ColumnLabels, ColumnScaling, TableShape};
+use crate::column::{ColumnKeywords, TableShape};
 use crate::fits_error::FitsError;
+use crate::fits_error::KeywordDefect;
 use crate::fits_error::Result;
 use crate::header_model::{Header, keywords};
 
@@ -51,8 +52,7 @@ impl Schema {
             let tform_value = header.require_text(keywords::TFORM.indexed(n)?)?;
             let tform = tform_value.parse::<Tform>()?;
             let tdim_keyword = keywords::TDIM.indexed(n)?;
-            let tnull_keyword = keywords::TNULL.indexed(n)?;
-            let (tdim, scaling, tnull) = match values {
+            let (tdim, column_keywords) = match values {
                 ValueKeywords::Read => (
                     column::keyed(tdim_keyword, || {
                         let Some(value) = header.get_text(tdim_keyword)? else {
@@ -66,24 +66,14 @@ impl Schema {
                         }
                         Ok(Some(shape))
                     }),
-                    ColumnScaling::read(header, n)?,
-                    column::keyed(tnull_keyword, || header.get_integer(tnull_keyword)),
+                    ColumnKeywords::read(header, n, |tnull| header.get_integer(tnull))?,
                 ),
-                ValueKeywords::Skip => (Ok(None), ColumnScaling::IDENTITY, Ok(None)),
+                ValueKeywords::Skip => (Ok(None), ColumnKeywords::labels(header, n)?),
             };
-            let tdisp_keyword = keywords::TDISP.indexed(n)?;
-            let labels = ColumnLabels::read(header, n)?;
             columns.push(Column {
-                name: labels.name,
-                unit: labels.unit,
                 tform,
-                tscale: scaling.tscale,
-                tzero: scaling.tzero,
-                tnull,
+                keywords: column_keywords,
                 tdim,
-                tdisp: column::keyed(tdisp_keyword, || {
-                    Ok(header.get_text(tdisp_keyword)?.map(str::to_string))
-                }),
                 number: n,
                 byte_offset: offset,
             });
@@ -97,15 +87,16 @@ impl Schema {
         }
 
         // `row_count · row_len` from untrusted axes: check once (guards a 32-bit-usize
-        // overflow that `data_extent`'s u64 math wouldn't catch) and reuse.
+        // overflow that `HduKind::data_bytes`' u64 math wouldn't catch) and reuse.
         let main_table = row_count
             .checked_mul(row_len)
             .ok_or(FitsError::DataUnitOverflow)?;
         let heap_offset = header.optional_usize(keywords::THEAP, main_table)?;
         // §6.6: the heap follows the main table, so THEAP must be ≥ its size.
         if heap_offset < main_table {
-            return Err(FitsError::KeywordOutOfRange {
+            return Err(FitsError::InvalidKeywordValue {
                 keyword: keywords::THEAP,
+                defect: KeywordDefect::Structure,
             });
         }
         // PCOUNT counts the gap-plus-heap bytes after the main table, so the real
@@ -115,8 +106,9 @@ impl Schema {
             .checked_add(pcount)
             .ok_or(FitsError::DataUnitOverflow)?;
         if heap_offset > heap_end {
-            return Err(FitsError::KeywordOutOfRange {
+            return Err(FitsError::InvalidKeywordValue {
                 keyword: keywords::THEAP,
+                defect: KeywordDefect::Structure,
             });
         }
         Ok(Self {
@@ -143,7 +135,7 @@ impl Schema {
     /// case-insensitively per §6.7. Resolvable from the header alone, so a caller
     /// holding only a [`Hdu::table_schema`](crate::io::Hdu::table_schema) can locate a column
     /// without reading the data unit.
-    pub fn column_index(&self, name: &str) -> Option<usize> {
+    pub fn column_index(&self, name: &str) -> Result<Option<usize>> {
         column::index_of(&self.columns, name)
     }
 

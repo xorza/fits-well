@@ -21,20 +21,16 @@ pub struct PhaseAxis {
 }
 
 impl PhaseAxis {
-    /// The §9.6 `'PHASE'` parameters for an image WCS `axis` (1-based), or `None`
-    /// when that axis is not a phase axis.
+    /// The §9.6 `'PHASE'` parameters for an image WCS `axis`, zero-based as
+    /// [`Wcs::axis_world`](crate::wcs::Wcs::axis_world) counts axes, or `None` when that
+    /// axis is not a phase axis.
     pub fn from_header(
         header: &Header,
         axis: usize,
         alt: impl TryInto<Alternate, Error: Into<FitsError>>,
     ) -> Result<Option<Self>> {
         let alt = Alternate::of(alt)?;
-        if axis == 0 {
-            return Err(FitsError::OneBasedIndexRequired {
-                indexed: Indexed::WcsAxis,
-            });
-        }
-        Self::from_keywords(header, PhaseAxisKeywords::image(axis, alt))
+        Self::from_keywords(header, PhaseAxisKeywords::image(axis + 1, alt))
     }
 
     /// The §9.6 `'PHASE'` parameters for a binary-table pixel-list `column` (1-based).
@@ -52,8 +48,8 @@ impl PhaseAxis {
         Self::from_keywords(header, PhaseAxisKeywords::pixel_list(column, alt))
     }
 
-    /// The §9.6 `'PHASE'` parameters for `axis` of an array-valued table `column`
-    /// (both 1-based).
+    /// The §9.6 `'PHASE'` parameters for `axis`, zero-based, of an array-valued table
+    /// `column`, 1-based as its keywords number it.
     pub fn from_array_column(
         header: &Header,
         axis: usize,
@@ -61,17 +57,15 @@ impl PhaseAxis {
         alt: impl TryInto<Alternate, Error: Into<FitsError>>,
     ) -> Result<Option<Self>> {
         let alt = Alternate::of(alt)?;
-        if axis == 0 {
-            return Err(FitsError::OneBasedIndexRequired {
-                indexed: Indexed::WcsAxis,
-            });
-        }
         if column == 0 {
             return Err(FitsError::OneBasedIndexRequired {
                 indexed: Indexed::Column,
             });
         }
-        Self::from_keywords(header, PhaseAxisKeywords::array_column(axis, column, alt))
+        Self::from_keywords(
+            header,
+            PhaseAxisKeywords::array_column(axis + 1, column, alt),
+        )
     }
 
     /// The axis `keywords` name; `None` when they are no FITS keywords, as a wide axis or

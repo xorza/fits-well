@@ -2,15 +2,12 @@
 //! gathering a tile's pixels, widening to/narrowing from the `i64`/`f64` the codecs
 //! work in, big-endian (de)serialization, and tile-cell accessors.
 
-use crate::allocation;
 use crate::bintable::element_kind::ElementKind;
 use crate::bintable::vla_column::VlaCell;
-use crate::bitpix::Bitpix;
 use crate::compression::plane::{FloatSamples, IntBitpix, IntSamples};
 use crate::endian;
 use crate::fits_error::Result;
 use crate::fits_error::{CompressedDataDefect, TileCell};
-use crate::image_model::data::Data;
 
 /// Gather the tile rows starting at each of `row_bases` out of a typed sample plane
 /// into `out`, widening each element with `widen`. Axis 0 has stride 1, so a row is
@@ -122,41 +119,20 @@ pub(super) fn cell_to_i64_into(cell: VlaCell<'_>, out: &mut Vec<i64>) -> Result<
     Ok(())
 }
 
-pub(super) fn byte_cell(cell: VlaCell<'_>) -> Result<&[u8]> {
-    match cell.element_type {
-        ElementKind::U8 => Ok(cell.bytes),
-        element => Err(CompressedDataDefect::CellElement {
+/// The bytes of a compressed stream `cell`, whose array must hold elements of `kind`: a
+/// codec's [`TileCodec::stream_kind`], or bytes for a gzip fallback.
+///
+/// [`TileCodec::stream_kind`]: crate::compression::tile_codec::TileCodec::stream_kind
+pub(super) fn stream_cell(cell: VlaCell<'_>, kind: ElementKind) -> Result<&[u8]> {
+    if cell.element_type == kind {
+        Ok(cell.bytes)
+    } else {
+        Err(CompressedDataDefect::CellElement {
             cell: TileCell::Compressed,
-            element,
+            element: cell.element_type,
         }
-        .into()),
+        .into())
     }
-}
-
-pub(super) fn plio_cell(cell: VlaCell<'_>) -> Result<&[u8]> {
-    match cell.element_type {
-        ElementKind::I16 => Ok(cell.bytes),
-        element => Err(CompressedDataDefect::CellElement {
-            cell: TileCell::Compressed,
-            element,
-        }
-        .into()),
-    }
-}
-
-/// A zeroed typed sample buffer of `len` elements. Parallel decode narrows into
-/// per-tile buffers before scattering, so there is no whole-image `i64` or `f64`
-/// intermediate. `len` comes from untrusted dimension keywords, so allocation is
-/// fallible.
-pub(super) fn zeroed_samples(bitpix: Bitpix, len: usize) -> Result<Data> {
-    Ok(match bitpix {
-        Bitpix::U8 => Data::U8(allocation::try_zeroed(0u8, len)?),
-        Bitpix::I16 => Data::I16(allocation::try_zeroed(0i16, len)?),
-        Bitpix::I32 => Data::I32(allocation::try_zeroed(0i32, len)?),
-        Bitpix::I64 => Data::I64(allocation::try_zeroed(0i64, len)?),
-        Bitpix::F32 => Data::F32(allocation::try_zeroed(0.0f32, len)?),
-        Bitpix::F64 => Data::F64(allocation::try_zeroed(0.0f64, len)?),
-    })
 }
 
 #[cfg(test)]
@@ -164,7 +140,7 @@ mod tests {
 
     use crate::compression::convert::*;
 
-    fn be(values: &[i64], bitpix: IntBitpix) -> Vec<u8> {
+    fn i64_to_be(values: &[i64], bitpix: IntBitpix) -> Vec<u8> {
         let mut out = Vec::new();
         i64_to_be_into(values, bitpix, &mut out);
         out
@@ -176,7 +152,7 @@ mod tests {
         // 258 → 0x0102, -2 → 0xFFFE.
         let vals = [0i64, 1, -1, 258, -2];
         let want = [0, 0, 0, 1, 0xFF, 0xFF, 0x01, 0x02, 0xFF, 0xFE];
-        assert_eq!(be(&vals, IntBitpix::I16), want);
+        assert_eq!(i64_to_be(&vals, IntBitpix::I16), want);
         // Decode is the exact inverse (sign-extending back to i64), into a reused buffer.
         let mut d = Vec::new();
         be_to_i64_into(&want, IntBitpix::I16, &mut d);
@@ -185,7 +161,7 @@ mod tests {
         // I32 packs four bytes/elem; 0x00010203 = 66051, -1 → all-ones.
         let i32_vals = [66051i64, -1];
         assert_eq!(
-            be(&i32_vals, IntBitpix::I32),
+            i64_to_be(&i32_vals, IntBitpix::I32),
             [0x00, 0x01, 0x02, 0x03, 0xFF, 0xFF, 0xFF, 0xFF]
         );
         be_to_i64_into(
@@ -196,10 +172,10 @@ mod tests {
         assert_eq!(d, i32_vals);
 
         // U8 and I64 ends of the range.
-        assert_eq!(be(&[255, 0], IntBitpix::U8), [0xFF, 0x00]);
+        assert_eq!(i64_to_be(&[255, 0], IntBitpix::U8), [0xFF, 0x00]);
         be_to_i64_into(&[0xFF, 0x00], IntBitpix::U8, &mut d);
         assert_eq!(d, [255, 0]);
-        assert_eq!(be(&[-1], IntBitpix::I64), [0xFF; 8]);
+        assert_eq!(i64_to_be(&[-1], IntBitpix::I64), [0xFF; 8]);
 
         // `i64_to_be_into` clears + resizes its scratch: a long fill followed by a short
         // one must leave exactly the short result (no stale tail), matching the owning form.

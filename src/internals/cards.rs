@@ -1,15 +1,19 @@
 //! Header records for tests: cards from text, files from cards, and lookups in rendered bytes.
 
+use std::ops::Range;
+
 use crate::block::{BLOCK_SIZE, CARD_SIZE};
 use crate::checksum::checksum_report::{ChecksumReport, ChecksumStatus};
 use crate::header_model::value::Value;
-use crate::header_model::{Header, keywords};
+use crate::header_model::{Header, Signing, Space, keywords};
 
 /// The report of an HDU whose `DATASUM` and `CHECKSUM` both verify.
-pub(crate) const VALID: ChecksumReport = ChecksumReport {
-    datasum: ChecksumStatus::Valid,
-    checksum: ChecksumStatus::Valid,
-};
+pub(crate) const VALID: ChecksumReport = report(ChecksumStatus::Valid, ChecksumStatus::Valid);
+
+/// The report of `DATASUM` and `CHECKSUM` statuses `datasum` and `checksum`.
+pub(crate) const fn report(datasum: ChecksumStatus, checksum: ChecksumStatus) -> ChecksumReport {
+    ChecksumReport { datasum, checksum }
+}
 
 /// One record: `text` left-justified in 80 blank-filled columns.
 pub(crate) fn card_bytes(text: &str) -> [u8; CARD_SIZE] {
@@ -90,6 +94,15 @@ pub(crate) fn fits_file(cards: &[&str], data: &[u8]) -> Vec<u8> {
     file
 }
 
+/// The records `header` renders to, with no checksum and no spare record.
+pub(crate) fn rendered(header: &Header) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    header
+        .render_into(Signing::Unsigned, Space::Spare(0), &mut bytes)
+        .unwrap();
+    bytes
+}
+
 /// The records of rendered `bytes` as text, trailing blanks dropped.
 pub(crate) fn record_lines(bytes: &[u8]) -> impl Iterator<Item = &str> {
     bytes
@@ -116,7 +129,19 @@ pub(crate) fn card_index(bytes: &[u8], keyword: &str) -> usize {
         .unwrap_or_else(|| panic!("no {keyword} record"))
 }
 
-/// The first record of `bytes` whose name field is `keyword`.
-pub(crate) fn find_card<'a>(bytes: &'a [u8], keyword: &str) -> &'a [u8; CARD_SIZE] {
-    &bytes.as_chunks::<CARD_SIZE>().0[card_index(bytes, keyword)]
+/// The fixed-format value field of a record, columns 11 to 30 (§4.2.1).
+const VALUE_COLUMNS: Range<usize> = 10..30;
+
+/// The bytes of rendered `bytes` that the value field of the first record named
+/// `keyword` takes.
+pub(crate) fn value_field(bytes: &[u8], keyword: &str) -> Range<usize> {
+    let at = card_index(bytes, keyword) * CARD_SIZE;
+    at + VALUE_COLUMNS.start..at + VALUE_COLUMNS.end
+}
+
+/// The bytes of rendered `bytes` that `len` characters of the string value of the first
+/// record named `keyword` take, inside its opening quote in column 11.
+pub(crate) fn quoted_field(bytes: &[u8], keyword: &str, len: usize) -> Range<usize> {
+    let at = card_index(bytes, keyword) * CARD_SIZE + VALUE_COLUMNS.start + 1;
+    at..at + len
 }

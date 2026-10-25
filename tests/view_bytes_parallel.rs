@@ -15,7 +15,7 @@ mod support;
 use crate::support::peak;
 
 #[test]
-fn a_run_of_views_on_four_workers_peaks_within_its_view_bytes() {
+fn run_of_views_on_four_workers_peaks_within_its_view_bytes() {
     #[cfg(feature = "parallel")]
     {
         rayon::ThreadPoolBuilder::new()

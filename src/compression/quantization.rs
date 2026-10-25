@@ -39,7 +39,8 @@ pub(super) enum QuantizationStep {
 }
 
 impl Quantization {
-    /// Lossless: the floats themselves, gzip'd.
+    /// Lossless: a float image's samples themselves, gzip'd. An integer image and a table
+    /// take it too, as they keep their values.
     pub const NONE: Self = Self(Spacing::None);
 
     /// Levels spaced at each tile's noise estimate divided by `level`, a finite

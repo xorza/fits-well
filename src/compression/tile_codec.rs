@@ -1,6 +1,7 @@
 //! [`TileCodec`]: the one dispatch between a tile's samples and its compressed stream.
 
 use crate::allocation;
+use crate::bintable::element_kind::ElementKind;
 use crate::compression::HcompressScale;
 use crate::compression::convert;
 use crate::compression::hcompress::Smoothing;
@@ -162,6 +163,7 @@ impl TileCodec {
             "HCOMPRESS_1" => Self::Hcompress(hcompress::Codec {
                 scale: HcompressScale::Lossless,
                 smoothing: Smoothing::Off,
+                plane: hcompress::Codec::PLANE_2D,
             }),
             "NOCOMPRESS" => Self::NoCompress,
             other => {
@@ -192,19 +194,34 @@ impl TileCodec {
         matches!(self, Self::Gzip1 { .. } | Self::Gzip2 { .. })
     }
 
-    /// The bytes of one element of the stream's array: PLIO's are i16 words.
-    pub(super) const fn stream_element(self) -> usize {
+    /// This codec for an image of `dims` in tiles of `tiles`: HCOMPRESS's plane in the
+    /// two tile axes whose extent is above 1. An image with no pixels has no tiles to fit.
+    pub(super) fn fitted(self, dims: &[usize], tiles: &[usize]) -> Result<Self> {
         match self {
-            Self::Plio(_) => 2,
-            _ => 1,
+            Self::Hcompress(codec) if !dims.is_empty() && !dims.contains(&0) => {
+                let extents = dims.iter().zip(tiles).map(|(&dim, &tile)| dim.min(tile));
+                codec.fitted(extents).map(Self::Hcompress)
+            }
+            _ => Ok(self),
         }
     }
 
-    /// Encode `samples`, one tile `tile` describes, and lend its stream from `scratch`.
+    /// The element type of the stream's array, its `TFORMn` letter and size: PLIO's are
+    /// i16 words, every other codec's bytes.
+    pub(super) const fn stream_kind(self) -> ElementKind {
+        match self {
+            Self::Plio(_) => ElementKind::I16,
+            _ => ElementKind::U8,
+        }
+    }
+
+    /// Encode `samples`, one tile `tile` describes, and lend its stream from `scratch`,
+    /// or for `NOCOMPRESS`, whose stream is the samples' big-endian bytes, the bytes
+    /// themselves.
     pub(super) fn encode<'s>(
         self,
         tile: Tile<'_>,
-        samples: TileSamples<'_>,
+        samples: TileSamples<'s>,
         scratch: &'s mut CodecScratch,
     ) -> Result<&'s [u8]> {
         match self {
@@ -232,14 +249,7 @@ impl TileCodec {
                 let values = samples.ints(tile.width, &mut scratch.ints);
                 codec.encode(values, tile, &mut scratch.hcompress)
             }
-            Self::NoCompress => {
-                scratch.stream.clear();
-                nocompress::encode(
-                    samples.bytes(tile.width, &mut scratch.bytes),
-                    &mut scratch.stream,
-                );
-                Ok(&scratch.stream)
-            }
+            Self::NoCompress => Ok(samples.bytes(tile.width, &mut scratch.bytes)),
         }
     }
 
@@ -251,10 +261,8 @@ impl TileCodec {
                 decoded: count,
                 ..CodecCapacities::default()
             },
-            Self::Hcompress(_) => {
-                let &[ny, nx] = tile.shape else {
-                    unreachable!("an HCOMPRESS_1 tile is two-dimensional");
-                };
+            Self::Hcompress(codec) => {
+                let [ny, nx] = codec.extents(tile.shape);
                 CodecCapacities {
                     hcompress: hcompress::HcompressCapacities::decode(ny, nx),
                     ..CodecCapacities::default()

@@ -1,13 +1,14 @@
 //! What an image HDU's header says its array is.
 
-use crate::bitpix::Bitpix;
 use crate::fits_error::ExpectedHdu;
 use crate::fits_error::FitsError;
+use crate::fits_error::KeywordDefect;
 use crate::fits_error::Result;
-use crate::hdu::HduKind;
+use crate::hdu::hdu_kind::HduKind;
 use crate::header_model::record_name::RecordName;
 use crate::header_model::{Header, keywords};
 use crate::image_model::Metadata;
+use crate::image_model::bitpix::Bitpix;
 use crate::image_model::scaling::Scaling;
 use crate::image_model::shape_product;
 
@@ -64,8 +65,9 @@ impl ImageGeometry {
         let rank = usize::try_from(rank)
             .ok()
             .filter(|rank| *rank <= 999)
-            .ok_or(FitsError::KeywordOutOfRange {
+            .ok_or(FitsError::InvalidKeywordValue {
                 keyword: keywords::ZNAXIS,
+                defect: KeywordDefect::Range,
             })?;
         let shape = (1..=rank)
             .map(|axis| header.require_usize(keywords::ZNAXIS.indexed(axis)?))

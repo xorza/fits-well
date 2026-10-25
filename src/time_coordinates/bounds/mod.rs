@@ -1,6 +1,7 @@
 //! [`Bounds`]: a header's observation bounds, durations and time errors.
 
 use crate::fits_error::FitsError;
+use crate::fits_error::KeywordDefect;
 use crate::fits_error::Result;
 use crate::header_model::{Header, keywords};
 use crate::keyword::Keyword;
@@ -25,14 +26,22 @@ impl<'a> Bounds<'a> {
         Self { header, frame }
     }
 
-    /// The observation start: `MJD-BEG`, else `DATE-BEG`.
+    /// The observation start: `MJD-BEG`, else `DATE-BEG`, else `TSTART`, a time past
+    /// `MJDREF` in `TIMEUNIT` (Table 35).
     pub fn start(&self) -> Result<Option<Coordinate>> {
-        self.mjd_or_date(keywords::MJD_BEG, keywords::DATE_BEG)
+        match self.mjd_or_date(keywords::MJD_BEG, keywords::DATE_BEG)? {
+            Some(start) => Ok(Some(start)),
+            None => self.relative(keywords::TSTART),
+        }
     }
 
-    /// The observation end: `MJD-END`, else `DATE-END`.
+    /// The observation end: `MJD-END`, else `DATE-END`, else `TSTOP`, a time past
+    /// `MJDREF` in `TIMEUNIT` (Table 35).
     pub fn end(&self) -> Result<Option<Coordinate>> {
-        self.mjd_or_date(keywords::MJD_END, keywords::DATE_END)
+        match self.mjd_or_date(keywords::MJD_END, keywords::DATE_END)? {
+            Some(end) => Ok(Some(end)),
+            None => self.relative(keywords::TSTOP),
+        }
     }
 
     /// The observation midpoint: `MJD-AVG`, else `DATE-AVG` (§9.5, Table 35).
@@ -56,12 +65,13 @@ impl<'a> Bounds<'a> {
     }
 
     /// `TIMEPIXR`: the position of a time stamp in its bin, 0 to 1, 0.5 by default.
-    /// Errors with [`FitsError::KeywordOutOfRange`] for a value outside `[0, 1]`.
+    /// Errors with [`FitsError::InvalidKeywordValue`] for a value outside `[0, 1]`.
     pub fn pixel_position(&self) -> Result<f64> {
         let position = self.header.get_real(keywords::TIMEPIXR)?.unwrap_or(0.5);
         if !(0.0..=1.0).contains(&position) {
-            return Err(FitsError::KeywordOutOfRange {
+            return Err(FitsError::InvalidKeywordValue {
                 keyword: keywords::TIMEPIXR,
+                defect: KeywordDefect::Range,
             });
         }
         Ok(position)
@@ -77,9 +87,23 @@ impl<'a> Bounds<'a> {
         self.header.get_real(keywords::TIMRDER)
     }
 
+    /// The time `keyword` holds, relative to the frame's reference epoch.
+    fn relative(&self, keyword: Keyword) -> Result<Option<Coordinate>> {
+        let Some(value) = self.header.get_real(keyword)? else {
+            return Ok(None);
+        };
+        Ok(Some(Coordinate {
+            mjd: self.frame.relative_axis()?.mjd(value)?,
+            scale: self.frame.scale.clone(),
+        }))
+    }
+
     fn mjd_or_date(&self, mjd: Keyword, date: Keyword) -> Result<Option<Coordinate>> {
         let mjd = if let Some(value) = self.header.get_real(mjd)? {
-            Mjd::from_days(value, 0.0).ok_or(FitsError::KeywordOutOfRange { keyword: mjd })?
+            Mjd::from_days(value, 0.0).ok_or(FitsError::InvalidKeywordValue {
+                keyword: mjd,
+                defect: KeywordDefect::Range,
+            })?
         } else if let Some(datetime) = Datetime::from_keyword(self.header, date)? {
             datetime.to_mjd()?
         } else {

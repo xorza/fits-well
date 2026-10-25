@@ -1,6 +1,7 @@
 //! [`Coordinate`]: an absolute time with its scale.
 
 use crate::fits_error::FitsError;
+use crate::fits_error::KeywordDefect;
 use crate::fits_error::Result;
 use crate::header_model::{Header, keywords};
 use crate::time_coordinates::datetime::Datetime;
@@ -46,8 +47,9 @@ impl Coordinate {
     pub fn observation(header: &Header) -> Result<Option<Self>> {
         if let Some(mjd) = header.get_real(keywords::MJD_OBS)? {
             return Ok(Some(Self {
-                mjd: Mjd::from_days(mjd, 0.0).ok_or(FitsError::KeywordOutOfRange {
+                mjd: Mjd::from_days(mjd, 0.0).ok_or(FitsError::InvalidKeywordValue {
                     keyword: keywords::MJD_OBS,
+                    defect: KeywordDefect::Range,
                 })?,
                 scale: Scale::declared(header)?,
             }));
@@ -69,8 +71,9 @@ impl Coordinate {
             return Ok(Some(Self {
                 mjd: Epoch::Julian(j)
                     .to_mjd()
-                    .ok_or(FitsError::KeywordOutOfRange {
+                    .ok_or(FitsError::InvalidKeywordValue {
                         keyword: keywords::JEPOCH,
+                        defect: KeywordDefect::Range,
                     })?,
                 scale: Scale::known(ScaleKind::Tdb),
             }));
@@ -81,8 +84,9 @@ impl Coordinate {
         Ok(Some(Self {
             mjd: Epoch::Besselian(b)
                 .to_mjd()
-                .ok_or(FitsError::KeywordOutOfRange {
+                .ok_or(FitsError::InvalidKeywordValue {
                     keyword: keywords::BEPOCH,
+                    defect: KeywordDefect::Range,
                 })?,
             scale: Scale::known(ScaleKind::Tt),
         }))

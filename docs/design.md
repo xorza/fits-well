@@ -47,6 +47,10 @@ its doc comments show how each one works. Sources: the FITS 4.0 standard
 - **A physical read appends to the caller's `Vec`,** so chunks append to one plane, and
   random groups do the same. Refused: a slice the caller sizes and zeroes, and a new
   `Vec` for each call.
+- **A column read fills the caller's buffer** (`raw_into`, `physical_into`,
+  `unsigned_into`, `vla_into`), as an image's physical read does. Refused: an allocating
+  form beside each, which only tests and benches used; they read whole columns through
+  the `internals` traits `WholeColumn`, `WholeAsciiColumn` and `WholeView`.
 - **`Borrowed` is the borrowed image, the twin of `Image`,** and the conversions live on
   it alone. Refused: the same conversions on each image type.
 - **The six sample types are one sealed trait,** and a generic caller converts with the
@@ -125,6 +129,13 @@ its doc comments show how each one works. Sources: the FITS 4.0 standard
 - **A `Tform` is a repeat, an element kind and a storage.** Refused: one kind enum
   with the descriptors beside the element types, which needed an `unreachable!` in each
   decode.
+- **`AsciiTform` is the one ASCII format the reader and the writer share,** text,
+  integer or a float `AsciiFloatFormat`; `AsciiWriteColumn` keeps typed constructors and
+  writes its `TFORMn` through `AsciiTform`'s `Display`. Refused: a reader-only kind enum,
+  and a format beside values of another type, a mismatch a typed constructor cannot have.
+- **Typed column conversions go through the sealed `ColumnElement` and
+  `UnsignedElement`.** Refused: `Sample`, which holds the six `BITPIX` types and none of
+  the logical, complex and unsigned ones.
 - **`X` and `PX` decode to bits.** Refused: the packed bytes, which gave a 3-bit and an
   8-bit row one length.
 - **A tiled-compressed table reads as the table it restores** (§10.3). Refused: a
@@ -134,6 +145,9 @@ its doc comments show how each one works. Sources: the FITS 4.0 standard
   through the plain selection. Its cost: a table with arrays restores its whole heap,
   as each descriptor addresses the heap absolutely. Refused: a second selection path,
   and a buffer of the whole restored table.
+- **The data source keeps the rows a tiled read decoded,** beside the compacted rows it
+  keeps, so a second cell or selection of the same tiles decodes nothing. Refused: a cache
+  in each read path, which changed their signatures.
 - **A column is named by one `ColumnSelector`,** an index or a `TTYPEn` name compared
   case-insensitively (§7.2.2). Refused: a pair of methods on each type, and an owned
   name, which allocated on each read.
@@ -145,6 +159,14 @@ its doc comments show how each one works. Sources: the FITS 4.0 standard
 
 ## Compression
 
+- **A compressed table decode copies the heap once,** into one buffer sized from a first
+  pass over the descriptor blocks, which lists the array columns once. Its gain is the
+  peak, main + heap where it was main + 2× heap; the time is unchanged. Refused: a heap
+  copy per tile, then a join.
+- **A codec scratch lives for one rayon split or one call,** and holds one integer buffer
+  that the rice, PLIO, gzip and `NOCOMPRESS` decodes share, so a data codec and a mask
+  codec decoding in one set keep one plane. Refused: a scratch kept across calls, which
+  needs a pool per worker the crate does not have, and a buffer per codec.
 - **A compressed image's tile index is read once, when its handle first opens,** and
   the reader keeps the index of each image it opens. A section then fetches only its
   tiles' heap cells, a whole read only the heap, and what a read holds is known before
@@ -227,9 +249,22 @@ its doc comments show how each one works. Sources: the FITS 4.0 standard
   cfitsio writes and reads it; only the 16-bit case is offset. Refused: astropy's
   refusal of the write and its read with no offset, which misreads cfitsio's files.
   Sources: cfitsio `imcomp_convert_tile_tshort`; astropy `_tiled_compression.py`.
+- **A `PLIO_1` write checks the whole image before its tiles,** and names the first sample
+  out of the 24-bit range by its index in the image. Refused: a check per tile, as cfitsio
+  makes, whose first failing tile is not the first sample in image order with 2-D tiles,
+  and an error that names no sample, as cfitsio's and astropy's do.
+- **A parallel tile loop reports the failure of the lowest tile,** as rayon's
+  `find_first` keeps its leftmost match: a tile past a failure seen skips, a tile before
+  it runs. So a read or write fails as the serial build does, on every run. Refused:
+  rayon's `try_for_each` and `collect` into a `Result`, whose error among several is
+  unspecified, and collecting every result, which decodes each tile of a corrupt file.
+  Source: rayon `FromParallelIterator for Result`, `find_first_last`.
 - **A compression error names its case, and a write refuses what it would not keep:**
-  a quantization on an integer image, a tile of 0. Refused: messages, and a setting a
-  write ignored with no notice.
+  a quantization level on an integer image or a table, a tile of 0. `Quantization::NONE`
+  passes there, as those writes keep their values. Refused: messages, a setting a write
+  ignored with no notice, as cfitsio and astropy ignore a level on an integer image, and a
+  refusal of `NONE`, which kept one lossless config from writing a file of float and
+  integer images.
 
 ## World coordinates
 
@@ -267,11 +302,17 @@ its doc comments show how each one works. Sources: the FITS 4.0 standard
   digits. Refused: wcslib's form, 2.3e6 ε off at 1e-5° from the pole.
 - **AIT's domain is its ellipse, the poles on its edge,** as wcslib's `aitx2s` takes it.
 - **A formula next to its own zero computes the difference first** — a velocity, MER,
-  SFL, BON. Refused: wcslib's forms, 32 % off one ulp from the rest value.
+  SFL, BON — and an inverse adds its offset to the rest value in one fused rounding.
+  Refused: wcslib's forms, 32 % off one ulp from the rest value, and `ν₀·(1 ± x)`, which
+  rounds `1 ± x` to whole ulps of 1 and doubles an offset of one ulp.
 - **A 1-D `-TAB` inverse searches the array's monotonic runs,** which the standard
   does not require to be monotonic, in the scan's order. Refused: the scan, 79 µs a
   point over 100 000 entries, and a last-hit cache, which a shared `&self` cannot hold.
   Research: `2026-10-24-tab-inverse-runs.md`.
+- **A coupled `-TAB` takes 7 table axes at most,** so the inverse search's 2⁷ corners of
+  7 coordinates sit in a stack array, within clippy's bound on a local array, and a point
+  allocates nothing. Refused: a vertex cap and a work budget, which no node within 7 axes
+  can pass, and corners on the heap.
 - **One plan for each axis holds its kind, its transform and its world unit,** parsed
   once. Refused: parallel vectors indexed by axis, and `CTYPE` text compared after the
   parse.
@@ -299,7 +340,13 @@ its doc comments show how each one works. Sources: the FITS 4.0 standard
   caller copy a buffer it held.
 - **A data unit is written from a typed body and never staged;** with checksums, a
   first pass sums, the signed header is written, and a second pass writes, as cfitsio
-  signs after its data. Refused: a copy of the unit, 96 MB for a 24 MP f32 frame.
+  signs after its data. Refused: a copy of the unit, 96 MB for a 24 MP f32 frame. An
+  ASCII table is the one staged unit, as each cell is checked as it is formatted and a
+  stream would put out bytes before a bad cell; a binary table makes every check in its
+  layout, before its first byte, and streams.
+- **Every write checks its body against its header's data unit,** in release, the raw
+  write included, so each write classifies its header once. Refused: a debug assert for
+  the builders and a second classification in `write_raw_hdu`.
 - **A stream needs `Seek`, even without checksums.** Refused: a type state for
   checksums, a second type parameter on every method for a sink no caller has.
 - **A failed write poisons the writer.** Refused: a retry, which puts the next bytes
@@ -308,7 +355,7 @@ its doc comments show how each one works. Sources: the FITS 4.0 standard
   follows an empty primary, which `write_empty_primary` writes with the caller's cards.
   Refused: an `EXTNAME` argument on each write.
 - **One `CompressionConfig` holds the codec, the tiles and the quantization.** A table
-  takes one tile axis and no quantization. Refused: the codec as a separate argument.
+  takes one tile axis and no quantization level. Refused: the codec as a separate argument.
 - **A table with no tile height uses cfitsio's tiles of about 10 MB of rows.** Refused:
   one row a tile, which compresses badly. Source: cfitsio `fits_compress_table`.
 - **`write_compressed_table` takes the `Builder` that `write_table` takes,** and
@@ -349,6 +396,9 @@ its doc comments show how each one works. Sources: the FITS 4.0 standard
 
 ## Header
 
+- **A keyword value that does not read names its defect:** `InvalidKeywordValue
+  { keyword, defect }`, a defect of syntax, of range or of structure. Refused: one
+  out-of-range case for all three, which called a syntax defect a range one.
 - **A keyword is a checked, inline, `Copy` `Keyword`,** and the index keys on it, so a
   lookup cannot miss on its spelling and a parse makes no `String`. Refused: `&str`
   keys, which made `get("naxis")` quietly `None`.

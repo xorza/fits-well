@@ -1,9 +1,10 @@
 //! The zenithal perspective projections, `AZP`, `SZP` and `SIN` (CG 2002 §5.1.1, §5.1.2,
 //! §5.1.5): rays from a point of projection to a plane through the native pole.
 
-use std::f64::consts::{FRAC_PI_2, PI};
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::fits_error::Result;
+use crate::world_coordinates::angle;
 use crate::world_coordinates::angle::D2R;
 use crate::world_coordinates::angle::R2D;
 use crate::world_coordinates::angle::UNIT_TOLERANCE;
@@ -82,17 +83,18 @@ impl Perspective {
 
 impl Azp {
     pub(super) fn new(pv: &[f64; 21]) -> Self {
-        let (mu, gamma) = (pv[1], pv[2] * D2R);
+        let (mu, gamma) = (pv[1], pv[2]);
+        let cos_gamma = angle::cosd(gamma);
         Self {
             mu,
-            cos_gamma: gamma.cos(),
-            tan_gamma: gamma.tan(),
+            cos_gamma,
+            tan_gamma: angle::sind(gamma) / cos_gamma,
             overlap: if mu.abs() > 1.0 {
                 (-1.0 / mu).asin() * R2D
             } else {
                 -90.0
             },
-            diverges: (mu * gamma.cos()).abs() < 1.0,
+            diverges: (mu * cos_gamma).abs() < 1.0,
         }
     }
 
@@ -119,8 +121,8 @@ impl Azp {
         projection.projected_coordinate(r * pr.sin(), -r * pr.cos() / self.cos_gamma)
     }
 
-    /// Undo the γ shear, then solve A·sinθ + B·cosθ = C for θ, the root nearest the
-    /// native pole.
+    /// Undo the γ shear, then solve A·sinθ + B·cosθ = C for θ: each root past the native
+    /// pole taken round by −360°, the larger kept, as wcslib's `azpx2s` does.
     fn deproject(self, projection: Projection, x: f64, y: f64) -> Result<NativeCoordinate> {
         let yc = y * self.cos_gamma;
         let r = x.hypot(yc) / R2D;
@@ -134,8 +136,8 @@ impl Azp {
         let base = projection.checked_asin(c / a.hypot(b))?;
         let theta = [base - psi, PI - base - psi]
             .into_iter()
-            .min_by(|p, q| (p - FRAC_PI_2).abs().total_cmp(&(q - FRAC_PI_2).abs()))
-            .expect("two roots");
+            .map(|root| if root > FRAC_PI_2 { root - TAU } else { root })
+            .fold(f64::NEG_INFINITY, f64::max);
         projection.native_coordinate(phi * R2D, theta * R2D)
     }
 }
@@ -143,11 +145,11 @@ impl Azp {
 impl Szp {
     pub(super) fn new(pv: &[f64; 21]) -> Self {
         let mu = pv[1];
-        let (phic, thetac) = (pv[2] * D2R, pv[3] * D2R);
-        let z = mu * thetac.sin() + 1.0;
+        let (phic, thetac) = (pv[2], pv[3]);
+        let z = mu * angle::sind(thetac) + 1.0;
         Self {
-            x: -mu * thetac.cos() * phic.sin(),
-            y: mu * thetac.cos() * phic.cos(),
+            x: -mu * angle::cosd(thetac) * angle::sind(phic),
+            y: mu * angle::cosd(thetac) * angle::cosd(phic),
             z,
             divergence: if (z - 1.0).abs() < 1.0 {
                 (1.0 - z).asin() * R2D

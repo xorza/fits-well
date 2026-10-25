@@ -110,11 +110,12 @@ mod tests {
     use crate::header_model::keywords;
     use crate::header_model::record_name::RecordName;
     use crate::keyword::Keyword;
+    use std::assert_matches;
 
     /// A string names a keyword, or a `HIERARCH` record after the prefix and a blank;
     /// each prints back as it parsed.
     #[test]
-    fn a_string_names_a_keyword_or_a_hierarch_record() {
+    fn string_names_a_keyword_or_a_hierarch_record() {
         let exptime: RecordName = "EXPTIME".parse().unwrap();
         assert_eq!(
             exptime,
@@ -131,13 +132,12 @@ mod tests {
             hierarch
         );
         // `HIERARCH` alone is a keyword the standard leaves free.
-        assert!(matches!(
+        assert_matches!(
             "HIERARCH".parse::<RecordName>(),
             Ok(RecordName::Keyword(keyword)) if keyword == "HIERARCH"
-        ));
+        );
         for bad in ["HIERARCH ", "HIERARCH A=B", "exptime", "TOOLONGKEY"] {
-            assert!(
-                matches!(bad.parse::<RecordName>(), Err(FitsError::InvalidKeyword { name }) if name == bad),
+            assert_matches!(bad.parse::<RecordName>(), Err(FitsError::InvalidKeyword { name }) if name == bad,
                 "{bad:?}"
             );
         }
@@ -145,8 +145,7 @@ mod tests {
             RecordName::from(CommentaryName::try_from("ab cd").unwrap()),
             RecordName::from(keywords::HISTORY),
         ] {
-            assert!(
-                matches!(reserved.validate_valued(), Err(FitsError::ReservedName { name }) if name == reserved),
+            assert_matches!(reserved.validate_valued(), Err(FitsError::ReservedName { name }) if name == reserved,
                 "{reserved}"
             );
         }

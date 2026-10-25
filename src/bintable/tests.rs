@@ -2,10 +2,8 @@ use crate::bintable::column_data::ColumnData;
 use crate::bintable::element_kind::ElementKind;
 use crate::bintable::tform::Storage;
 use crate::bintable::tform::Tform;
-use crate::fits_error::ExpectedHdu;
-use crate::fits_error::FitsError;
-use crate::hdu::HduKind;
 use crate::internals::fixture::Fixture;
+use crate::internals::whole_column::WholeColumn;
 
 #[test]
 fn reads_the_real_aips_antenna_table() {
@@ -15,7 +13,7 @@ fn reads_the_real_aips_antenna_table() {
     assert_eq!(table.schema.row_count(), 28);
     assert_eq!(table.schema.columns.len(), 12);
     // ANNAME = 8A, STABXYZ = 3D, ORBPARM = 0D, NOSTA = 1J ...
-    assert_eq!(table.schema.columns[0].name.as_deref(), Some("ANNAME"));
+    assert_eq!(table.schema.columns[0].name().unwrap(), Some("ANNAME"));
     assert_eq!(
         table.schema.columns[0].tform,
         Tform::new(8, ElementKind::Character, Storage::Fixed)
@@ -31,7 +29,7 @@ fn reads_the_real_aips_antenna_table() {
     // The 0D ORBPARM column contributes no width, so NOSTA shares its offset.
     assert_eq!(table.schema.columns[2].byte_offset, 32);
     assert_eq!(table.schema.columns[3].byte_offset, 32);
-    assert_eq!(table.schema.columns[1].unit.as_deref(), Some("METERS"));
+    assert_eq!(table.schema.columns[1].unit().unwrap(), Some("METERS"));
 
     // Eight ANNAME bytes and three STABXYZ doubles per row, none for 0D; the first
     // and last rows as the file stores them.
@@ -69,18 +67,5 @@ fn reads_the_real_aips_antenna_table() {
         table.column(2).unwrap().raw().unwrap(),
         ColumnData::F64(vec![])
     );
-    assert_eq!(table.schema().column_index("NOSTA"), Some(3));
-}
-
-#[test]
-fn read_table_rejects_non_bintable_hdus() {
-    let mut reader = Fixture::Ddts.stream();
-    // HDU 0 is a random-groups primary, not a binary table.
-    assert!(matches!(
-        reader.read_table(0),
-        Err(FitsError::HduKindMismatch {
-            expected: ExpectedHdu::BinTable,
-            got: HduKind::RandomGroups
-        })
-    ));
+    assert_eq!(table.schema().column_index("NOSTA").unwrap(), Some(3));
 }

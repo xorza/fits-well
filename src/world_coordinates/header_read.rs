@@ -1,6 +1,7 @@
 //! Reading WCS keywords from a header: a keyword that a formatted name cannot fit has
 //! no card, and an axis-indexed family reads as one value per axis.
 
+use crate::fits_error::KeywordDefect;
 use crate::fits_error::{FitsError, Result};
 use crate::header_model::Header;
 use crate::header_model::value::Value;
@@ -42,10 +43,21 @@ pub(super) fn inferred_axis_count(header: &Header, alt: &str) -> i64 {
         .iter()
         .filter_map(|record| image_wcs_axis_index(record.keyword()?.as_str(), alt))
         .max()
-        .unwrap_or(0)
+        .map_or(0, |index| {
+            i64::try_from(index).expect("an index of an 8-byte name")
+        })
 }
 
-fn image_wcs_axis_index(keyword: &str, alt: &str) -> Option<i64> {
+/// A keyword index as a name spells it: decimal digits with no leading zero, so
+/// `CTYPE0009` names no axis 9, as a reader that asks for `CTYPE9` by name never finds it.
+pub(super) fn index(digits: &str) -> Option<usize> {
+    let canonical = !digits.is_empty()
+        && !digits.starts_with('0')
+        && digits.bytes().all(|byte| byte.is_ascii_digit());
+    digits.parse().ok().filter(|_| canonical)
+}
+
+fn image_wcs_axis_index(keyword: &str, alt: &str) -> Option<usize> {
     let keyword = if alt.is_empty() {
         keyword
     } else {
@@ -55,7 +67,7 @@ fn image_wcs_axis_index(keyword: &str, alt: &str) -> Option<i64> {
         "CTYPE", "CUNIT", "CRVAL", "CDELT", "CRPIX", "CROTA", "CNAME", "CRDER", "CSYER", "CZPHS",
         "CPERI",
     ] {
-        if let Some(index) = keyword.strip_prefix(prefix).and_then(parse_wcs_index) {
+        if let Some(index) = keyword.strip_prefix(prefix).and_then(index) {
             return Some(index);
         }
     }
@@ -63,29 +75,33 @@ fn image_wcs_axis_index(keyword: &str, alt: &str) -> Option<i64> {
         if let Some(indices) = keyword.strip_prefix(prefix)
             && let Some((i, j)) = indices.split_once('_')
         {
-            return Some(parse_wcs_index(i)?.max(parse_wcs_index(j)?));
+            return Some(index(i)?.max(index(j)?));
         }
     }
     for prefix in ["PV", "PS"] {
         if let Some(indices) = keyword.strip_prefix(prefix)
             && let Some((i, m)) = indices.split_once('_')
         {
-            m.parse::<u64>().ok()?;
-            return parse_wcs_index(i);
+            if m != "0" {
+                index(m)?;
+            }
+            return index(i);
         }
     }
     None
 }
 
-fn parse_wcs_index(value: &str) -> Option<i64> {
-    value.parse().ok().filter(|&index| index > 0)
-}
-
 /// A declared axis count, checked against the standard's `1..=999` range.
 pub(super) fn axis_count(value: i64, keyword: Keyword) -> Result<usize> {
-    let count = usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { keyword })?;
+    let count = usize::try_from(value).map_err(|_| FitsError::InvalidKeywordValue {
+        keyword,
+        defect: KeywordDefect::Range,
+    })?;
     if !(1..=999).contains(&count) {
-        return Err(FitsError::KeywordOutOfRange { keyword });
+        return Err(FitsError::InvalidKeywordValue {
+            keyword,
+            defect: KeywordDefect::Range,
+        });
     }
     Ok(count)
 }

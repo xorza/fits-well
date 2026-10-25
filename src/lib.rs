@@ -47,7 +47,6 @@ mod allocation;
 mod alternate;
 mod ascii;
 mod bintable;
-mod bitpix;
 mod block;
 mod checksum;
 mod column;
@@ -61,13 +60,13 @@ mod groups;
 mod hdu;
 mod header_model;
 mod image_model;
+mod inline_name;
 mod keyword;
 mod ragged;
 mod reader;
 mod reserved_keywords;
 mod time_coordinates;
 mod unit;
-mod words;
 mod world_coordinates;
 
 pub use fits_editor::FitsEditor;
@@ -83,8 +82,9 @@ pub mod error {
     pub use crate::fits_error::{
         AsciiValueDefect, CompressedDataDefect, CompressionFeature, CompressionParameter,
         DescriptorField, ExpectedColumn, ExpectedHdu, GrismDefect, HcompressDefect, Indexed,
-        NonFinite, NumericTarget, PlioDefect, PoleDefect, Ranked, SizeUnit, TabularDefect,
-        TextOrigin, TileCell, TimeConversion, UnitKind, ValueKind, WcsConflict, WcsDefect,
+        KeywordDefect, NonFinite, NumericTarget, PlioDefect, PoleDefect, Ranked, SizeUnit,
+        TabularDefect, TextOrigin, TileCell, TimeConversion, UnitKind, ValueKind, WcsConflict,
+        WcsDefect,
     };
 }
 
@@ -98,7 +98,7 @@ pub mod compress {
 
 /// Typed image values, scratch-backed views, and incremental output.
 pub mod image {
-    pub use crate::bitpix::Bitpix;
+    pub use crate::image_model::bitpix::Bitpix;
     pub use crate::image_model::data::Data;
     pub use crate::image_model::physical_sample::PhysicalSample;
     pub use crate::image_model::region::Region;
@@ -106,6 +106,7 @@ pub mod image {
     pub use crate::image_model::sample_type::SampleType;
     pub use crate::image_model::scaling::Scaling;
     pub use crate::image_model::unsigned_data::UnsignedData;
+    pub use crate::image_model::unsigned_element::UnsignedElement;
     pub use crate::image_model::unsigned_view::UnsignedView;
     pub use crate::image_model::view::{Borrowed, View};
     pub use crate::image_model::{Image, Metadata, Parts};
@@ -199,14 +200,14 @@ pub mod time {
 /// builders.
 pub mod table {
     pub use crate::ascii::ascii_text::{AsciiRows, AsciiText};
-    pub use crate::ascii::{
-        Ascii, AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiKind, AsciiSchema,
-    };
+    pub use crate::ascii::ascii_tform::{AsciiFloatFormat, AsciiTform};
+    pub use crate::ascii::{Ascii, AsciiColumn, AsciiColumnData, AsciiColumnReader, AsciiSchema};
     pub use crate::bintable::Table;
     pub use crate::bintable::bit_column::{BitColumn, BitRows};
     pub use crate::bintable::character_field::CharacterField;
     pub use crate::bintable::column::Column;
     pub use crate::bintable::column_data::ColumnData;
+    pub use crate::bintable::column_element::ColumnElement;
     pub use crate::bintable::column_reader::ColumnReader;
     pub use crate::bintable::column_view::ColumnView;
     pub use crate::bintable::descriptor::DescriptorWidth;
@@ -215,7 +216,7 @@ pub mod table {
     pub use crate::bintable::selection::{SelectedColumn, SelectedData, Selection};
     pub use crate::bintable::tform::{Storage, Tform};
     pub use crate::column::ColumnSelector;
-    pub use crate::fits_writer::ascii_builder::{AsciiBuilder, AsciiFloatFormat, AsciiWriteColumn};
+    pub use crate::fits_writer::ascii_builder::{AsciiBuilder, AsciiWriteColumn};
     pub use crate::fits_writer::builder::{Builder, WriteColumn};
     pub use crate::ragged::{Ragged, RowValues, Rows};
 }
@@ -227,9 +228,9 @@ pub mod io {
     pub use crate::block::{BLOCK_SIZE, CARD_SIZE};
     pub use crate::checksum::checksum_report::{ChecksumReport, ChecksumStatus};
     pub use crate::groups::{GroupParameter, RandomGroupView, RandomGroups, RandomGroupsMetadata};
-    pub use crate::hdu::HduKind;
-    pub use crate::reader::hdu::Hdu;
-    pub use crate::reader::hdu_selector::HduSelector;
+    pub use crate::hdu::Hdu;
+    pub use crate::hdu::hdu_kind::HduKind;
+    pub use crate::hdu::hdu_selector::HduSelector;
     pub use crate::reader::source::{SliceSource, StreamSource};
     pub use crate::reader::{SliceReader, StreamReader};
 }
@@ -253,8 +254,10 @@ pub mod internals {
     #[cfg(feature = "compression")]
     pub const INFLATE_STATE_BYTES: usize = gzip::INFLATE_STATE_BYTES;
 
+    pub use crate::internals::whole_column::{WholeAsciiColumn, WholeColumn, WholeView};
     pub use crate::world_coordinates::tabular::internals::{
-        tabular_forward_at_pixel, tabular_inverse_at_fraction, tabular_inverse_at_world,
+        tabular_forward_at_fraction, tabular_forward_at_pixel, tabular_inverse_at_fraction,
+        tabular_inverse_at_world,
     };
 
     pub(crate) mod cards;
@@ -263,13 +266,14 @@ pub mod internals {
     #[cfg(test)]
     pub(crate) mod fixture;
     pub(crate) mod memory;
+    pub(crate) mod raw_table;
     pub(crate) mod rng;
     pub(crate) mod samples;
     pub(crate) mod scene;
-    #[cfg(test)]
     pub(crate) mod tolerance;
     #[cfg(test)]
     pub(crate) mod wcs_header;
+    pub(crate) mod whole_column;
 }
 
 #[cfg(feature = "internals")]

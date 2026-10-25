@@ -15,7 +15,7 @@ pub(crate) const SPEED_OF_LIGHT: f64 = 2.997_924_58e8;
 const PLANCK_CONSTANT: f64 = 6.626_075_5e-34;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SpectralKind {
+pub(crate) enum SpectralKind {
     Frequency,
     Energy,
     Wavenumber,
@@ -29,7 +29,7 @@ pub(super) enum SpectralKind {
 }
 
 impl SpectralKind {
-    pub(super) fn from_code(code: &str) -> Option<Self> {
+    pub(crate) fn from_code(code: &str) -> Option<Self> {
         match code {
             "FREQ" => Some(Self::Frequency),
             "ENER" => Some(Self::Energy),
@@ -75,21 +75,27 @@ impl SpectralKind {
         if !value.is_finite() {
             return None;
         }
+        // ν₀ + ν₀·x in one rounding, not ν₀·(1 + x): next to the rest value 1 + x rounds
+        // to a multiple of 2⁻⁵², and the offset from ν₀ to whole ulps of 1.
         let result = match self {
             Self::Frequency | Self::Wavelength | Self::AirWavelength => nonzero(value)?,
             Self::Energy => nonzero(value)? / PLANCK_CONSTANT,
             Self::Wavenumber => nonzero(value)? * SPEED_OF_LIGHT,
             Self::RadioVelocity => {
                 debug_assert!(rest.frequency != 0.0, "resolved rest frequency");
-                rest.frequency * (1.0 - value / SPEED_OF_LIGHT)
+                rest.frequency
+                    .mul_add(-value / SPEED_OF_LIGHT, rest.frequency)
             }
             Self::OpticalVelocity => {
                 debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
-                nonzero(rest.wavelength * (1.0 + value / SPEED_OF_LIGHT))?
+                nonzero(
+                    rest.wavelength
+                        .mul_add(value / SPEED_OF_LIGHT, rest.wavelength),
+                )?
             }
             Self::Redshift => {
                 debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
-                nonzero(rest.wavelength * (1.0 + value))?
+                nonzero(rest.wavelength.mul_add(value, rest.wavelength))?
             }
             Self::RelativisticVelocity => subluminal(value)?,
             Self::Beta => subluminal(value * SPEED_OF_LIGHT)?,
@@ -147,7 +153,7 @@ impl SpectralKind {
 
     /// The factor from `unit` to this kind's Table-25 default unit; an absent unit is the
     /// default unit itself.
-    pub(super) fn unit_scale(self, unit: &str) -> Result<f64> {
+    pub(crate) fn unit_scale(self, unit: &str) -> Result<f64> {
         if unit.trim().is_empty() {
             return Ok(1.0);
         }
@@ -168,7 +174,7 @@ impl SpectralKind {
     }
 
     /// The Table-25 default unit the transform evaluates this quantity in.
-    pub(super) const fn default_unit(self) -> &'static str {
+    pub(crate) const fn default_unit(self) -> &'static str {
         match self {
             Self::Frequency => "Hz",
             Self::Energy => "J",
@@ -264,7 +270,7 @@ pub(super) fn convert(
         (Characteristic::Velocity, Characteristic::Frequency) => {
             let value = subluminal(value)?;
             debug_assert!(rest.frequency != 0.0, "resolved rest frequency");
-            finite(rest.frequency * ((SPEED_OF_LIGHT - value) / (SPEED_OF_LIGHT + value)).sqrt())
+            finite(doppler(rest.frequency, -value))
         }
         (Characteristic::Wavelength, Characteristic::Velocity) => {
             debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
@@ -277,7 +283,7 @@ pub(super) fn convert(
         (Characteristic::Velocity, Characteristic::Wavelength) => {
             let value = subluminal(value)?;
             debug_assert!(rest.wavelength != 0.0, "resolved rest wavelength");
-            finite(rest.wavelength * ((SPEED_OF_LIGHT + value) / (SPEED_OF_LIGHT - value)).sqrt())
+            finite(doppler(rest.wavelength, value))
         }
         (Characteristic::AirWavelength, Characteristic::Velocity) => convert(
             Characteristic::Wavelength,
@@ -293,6 +299,16 @@ pub(super) fn convert(
         )?),
         _ => unreachable!("all characteristic conversions are covered"),
     }
+}
+
+/// `rest·√((c + v)/(c − v))`, the relativistic Doppler shift of a wavelength receding at
+/// `v`, or with `−v` of a frequency. It is `rest + rest·r` in one rounding, with
+/// `r = √q − 1 = (q − 1)/(√q + 1)` and `q − 1 = 2v/(c − v)`: neither difference cancels, so
+/// the offset from `rest` keeps its digits next to it, where `√q` rounds to whole ulps of 1.
+fn doppler(rest: f64, v: f64) -> f64 {
+    let q_less_one = 2.0 * v / (SPEED_OF_LIGHT - v);
+    let r = q_less_one / ((1.0 + q_less_one).sqrt() + 1.0);
+    rest.mul_add(r, rest)
 }
 
 pub(super) fn conversion_derivative(

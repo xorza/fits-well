@@ -1,13 +1,17 @@
 //! `TDIMn` array-shape parsing and the two validity rules it must satisfy (§7.3.2).
 
 use crate::fits_error::FitsError;
+use crate::fits_error::KeywordDefect;
 use crate::fits_error::Result;
 use crate::keyword::Keyword;
 
 /// Parse the value of the `TDIMn` card `keyword`, `'(d1,d2,…)'`, into axis lengths
 /// (fastest-varying first).
 pub(super) fn parse(value: &str, keyword: Keyword) -> Result<Vec<usize>> {
-    let invalid = || FitsError::KeywordOutOfRange { keyword };
+    let invalid = || FitsError::InvalidKeywordValue {
+        keyword,
+        defect: KeywordDefect::Syntax,
+    };
     let inner = value
         .trim()
         .strip_prefix('(')
@@ -25,7 +29,10 @@ pub(super) fn parse(value: &str, keyword: Keyword) -> Result<Vec<usize>> {
 /// both the parsed (`TDIMn` card) and supplied (writer) shapes obey.
 fn validate_shape(dims: &[usize], keyword: Keyword) -> Result<()> {
     if dims.is_empty() || dims.contains(&0) {
-        return Err(FitsError::KeywordOutOfRange { keyword });
+        return Err(FitsError::InvalidKeywordValue {
+            keyword,
+            defect: KeywordDefect::Range,
+        });
     }
     Ok(())
 }
@@ -40,9 +47,15 @@ pub(super) fn validate_extent(
     let product = dims
         .iter()
         .try_fold(1usize, |product, &len| product.checked_mul(len))
-        .ok_or(FitsError::KeywordOutOfRange { keyword })?;
+        .ok_or(FitsError::InvalidKeywordValue {
+            keyword,
+            defect: KeywordDefect::Structure,
+        })?;
     if product > element_count {
-        return Err(FitsError::KeywordOutOfRange { keyword });
+        return Err(FitsError::InvalidKeywordValue {
+            keyword,
+            defect: KeywordDefect::Structure,
+        });
     }
     Ok(())
 }

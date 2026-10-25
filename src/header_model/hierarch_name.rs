@@ -99,10 +99,11 @@ impl fmt::Display for HierarchName {
 mod tests {
     use crate::fits_error::FitsError;
     use crate::header_model::hierarch_name::HierarchName;
+    use std::assert_matches;
     use std::collections::HashSet;
 
     #[test]
-    fn a_name_is_its_tokens_equal_without_regard_to_case() {
+    fn name_is_its_tokens_equal_without_regard_to_case() {
         let name: HierarchName = "  ESO  DET\tCHIP1 NAME ".parse().unwrap();
         assert_eq!(name.as_str(), "ESO DET CHIP1 NAME");
         let lower: HierarchName = "eso det chip1 name".parse().unwrap();
@@ -119,8 +120,7 @@ mod tests {
             assert_eq!(HierarchName::try_from(name.to_string()).unwrap(), parsed);
         }
         for bad in ["", "   ", "A=B", "ESO DÉT"] {
-            assert!(
-                matches!(bad.parse::<HierarchName>(), Err(FitsError::InvalidKeyword { name }) if name == bad),
+            assert_matches!(bad.parse::<HierarchName>(), Err(FitsError::InvalidKeyword { name }) if name == bad,
                 "{bad:?}"
             );
         }

@@ -10,6 +10,8 @@
 //! this crate.
 
 pub(crate) mod axis;
+#[cfg(feature = "internals")]
+pub(crate) mod bench;
 pub(crate) mod bounds;
 pub(crate) mod coordinate;
 pub(crate) mod datetime;

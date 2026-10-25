@@ -1,7 +1,7 @@
 //! [`Sample`]: the six FITS sample types, by type rather than by tag.
 
-use crate::bitpix::Bitpix;
 use crate::endian::{decode_be_into_slice, extend_be};
+use crate::image_model::bitpix::Bitpix;
 use crate::image_model::data::Data;
 use crate::image_model::view::View;
 
@@ -25,7 +25,7 @@ pub(crate) mod sealed {
     ///
     /// Implementors must be plain-data scalars with no invalid bit patterns and an
     /// alignment of at most 8. Both properties are what let
-    /// [`words::samples`](crate::words::samples) reinterpret `u64` storage as the type
+    /// [`words::samples`](crate::image_model::words::samples) reinterpret `u64` storage as the type
     /// with a length check alone.
     #[expect(
         unnameable_types,

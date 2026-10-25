@@ -1,9 +1,12 @@
 use crate::fits_error::GrismDefect;
 use crate::fits_error::UnitKind;
 use crate::header_model::{Header, keywords};
-use crate::internals::tolerance::{Tolerance, assert_close};
-use crate::internals::wcs_header::{WcsHeader, axis_header};
+use crate::internals::tolerance;
+use crate::internals::tolerance::Tolerance;
+use crate::internals::wcs_header;
+use crate::internals::wcs_header::WcsHeader;
 use crate::world_coordinates::internals::{to_pixel, to_world};
+use std::assert_matches;
 
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::axis_transform::spectral_kind::{
@@ -74,60 +77,76 @@ fn conversion_derivatives_match_the_conversions_they_describe() {
 /// One ulp δ from the rest value a velocity is c·δ/ν₀ (or c·δ/λ₀) to a part in 1e16.
 /// The forms 1 − ν/ν₀ and ν₀² − ν² round the quotient or the squares first, which
 /// leaves δ at most a few ulps of 1 and moves the velocity by a third of itself; the
-/// differences ν₀ − ν and λ − λ₀ are exact there.
+/// differences ν₀ − ν and λ − λ₀ are exact there. Each inverse gives back the
+/// characteristic one ulp from the rest value exactly, where ν₀·(1 − x) and λ₀·(1 + x)
+/// would round `1 ± x` to whole ulps of 1 first.
 #[test]
 fn velocities_next_to_the_rest_value_keep_their_digits() {
     use crate::world_coordinates::axis_transform::spectral_kind::SpectralKind;
+    use Characteristic::{Frequency, Velocity, Wavelength};
     let rest = ResolvedRest {
         frequency: 1_420_405_751.0,
         wavelength: SPEED_OF_LIGHT / 1_420_405_751.0,
     };
     let assert_near = |got: Option<f64>, want: f64, context: &str| {
-        let got = got.unwrap();
-        assert!(
-            ((got - want) / want).abs() <= 4.0 * f64::EPSILON,
-            "{context}: {got:e}, want {want:e}"
+        tolerance::assert_within(
+            got.unwrap(),
+            want,
+            Tolerance::ulps(
+                4.0,
+                "a product, a quotient and a conversion, half an ulp each",
+            ),
+            context,
         );
     };
     let frequency = rest.frequency.next_down();
     let frequency_offset = SPEED_OF_LIGHT * (rest.frequency - frequency) / rest.frequency;
     let wavelength = rest.wavelength.next_up();
     let wavelength_offset = (wavelength - rest.wavelength) / rest.wavelength;
-    assert_near(
-        SpectralKind::RadioVelocity.world_from_characteristic(frequency, rest),
-        frequency_offset,
-        "VRAD",
-    );
-    assert_near(
-        convert(
-            Characteristic::Frequency,
-            Characteristic::Velocity,
+    let velocity_offset = SPEED_OF_LIGHT * wavelength_offset;
+    // Each row: the characteristic one ulp from the rest value, the world value it is,
+    // and the two directions.
+    let rows = [
+        (
+            "VRAD",
             frequency,
-            rest,
+            frequency_offset,
+            SpectralKind::RadioVelocity.world_from_characteristic(frequency, rest),
+            SpectralKind::RadioVelocity.to_characteristic(frequency_offset, rest),
         ),
-        frequency_offset,
-        "F2V",
-    );
-    assert_near(
-        SpectralKind::OpticalVelocity.world_from_characteristic(wavelength, rest),
-        SPEED_OF_LIGHT * wavelength_offset,
-        "VOPT",
-    );
-    assert_near(
-        SpectralKind::Redshift.world_from_characteristic(wavelength, rest),
-        wavelength_offset,
-        "ZOPT",
-    );
-    assert_near(
-        convert(
-            Characteristic::Wavelength,
-            Characteristic::Velocity,
+        (
+            "F2V",
+            frequency,
+            frequency_offset,
+            convert(Frequency, Velocity, frequency, rest),
+            convert(Velocity, Frequency, frequency_offset, rest),
+        ),
+        (
+            "VOPT",
             wavelength,
-            rest,
+            velocity_offset,
+            SpectralKind::OpticalVelocity.world_from_characteristic(wavelength, rest),
+            SpectralKind::OpticalVelocity.to_characteristic(velocity_offset, rest),
         ),
-        SPEED_OF_LIGHT * wavelength_offset,
-        "W2V",
-    );
+        (
+            "ZOPT",
+            wavelength,
+            wavelength_offset,
+            SpectralKind::Redshift.world_from_characteristic(wavelength, rest),
+            SpectralKind::Redshift.to_characteristic(wavelength_offset, rest),
+        ),
+        (
+            "W2V",
+            wavelength,
+            velocity_offset,
+            convert(Wavelength, Velocity, wavelength, rest),
+            convert(Velocity, Wavelength, velocity_offset, rest),
+        ),
+    ];
+    for (context, characteristic, world, forward, inverse) in rows {
+        assert_near(forward, world, context);
+        assert_eq!(inverse.unwrap(), characteristic, "{context} inverse");
+    }
 }
 
 #[test]
@@ -163,14 +182,14 @@ fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
         assert!(wcs.celestial.is_some(), "{ctype} must retain the TAN pair");
 
         if unsupported {
-            assert!(matches!(
+            assert_matches!(
                 to_world(&wcs, &[1.0, 1.0, 3.0]),
                 Err(FitsError::UnsupportedWcsTransform { axes }) if axes == [2]
-            ));
-            assert!(matches!(
+            );
+            assert_matches!(
                 to_pixel(&wcs, &[45.0, 30.0, 1.402e9]),
                 Err(FitsError::UnsupportedWcsTransform { axes }) if axes == [2]
-            ));
+            );
         } else {
             let out = to_world(&wcs, &[1.0, 1.0, 3.0]).unwrap();
             let expected = if ctype.ends_with("-LOG") {
@@ -178,10 +197,15 @@ fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
             } else {
                 1.402e9
             };
-            assert!((out[2] - expected).abs() < 1e-6, "{ctype}: {out:?}");
+            tolerance::assert_within(
+                out[2],
+                expected,
+                Tolerance::abs(1e-6, "a few ulps of the 1.4e9 Hz frequency (2.4e-7)"),
+                ctype,
+            );
             // The reference pixel is the native pole, which the rotation takes to CRVAL
             // through the sine and cosine of δ₀.
-            assert_close(
+            tolerance::assert_close(
                 &out[..2],
                 &[45.0, 30.0],
                 Tolerance::ulps(1.0, "the rotation's roundings of δ₀"),
@@ -192,7 +216,7 @@ fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
 }
 
 fn grism_wcs(ctype: &str, reference: f64) -> Wcs {
-    let mut header = axis_header(ctype, "m", 1.0, reference, 1.0e-7);
+    let mut header = wcs_header::axis_header(ctype, "m", 1.0, reference, 1.0e-7);
     header
         .set_internal("PV1_0", 4.5e5)
         .set_internal("PV1_1", 1.0)
@@ -232,21 +256,27 @@ fn grism_axes_match_wcslib_and_invert() {
         assert!(wcs.description().unsupported_axes.is_empty(), "{ctype}");
         for (expected_world, pixel) in goldens {
             let world = to_world(&wcs, &[pixel]).unwrap();
-            assert!(
-                (world[0] - expected_world).abs() < 1e-18,
-                "{ctype} pixel {pixel}: {world:?}"
+            tolerance::assert_within(
+                world[0],
+                expected_world,
+                Tolerance::abs(
+                    1e-18,
+                    "a few ulps of a wavelength of order 1e-6 m (2.1e-22)",
+                ),
+                &format!("{ctype} pixel {pixel}"),
             );
-            let round_trip = to_pixel(&wcs, &world).unwrap();
-            assert!(
-                (round_trip[0] - pixel).abs() < 1e-12,
-                "{ctype} pixel {pixel}: {round_trip:?}"
+            tolerance::assert_within(
+                to_pixel(&wcs, &world).unwrap()[0],
+                pixel,
+                Tolerance::abs(1e-12, "the grism inverse back to pixels of order 10"),
+                &format!("{ctype} pixel {pixel} round trip"),
             );
         }
     }
 }
 
 #[test]
-fn grism_axes_reject_incomplete_or_degenerate_detector_metadata() {
+fn grism_axes_refuse_incomplete_or_degenerate_detector_metadata() {
     for (parameter, value) in [("PV1_0", None), ("PV1_1", None), ("PV1_0", Some(0.0))] {
         let mut header = Header::new();
         header
@@ -264,8 +294,7 @@ fn grism_axes_reject_incomplete_or_degenerate_detector_metadata() {
         }
         // PV1_0 is the groove density and PV1_1 the order.
         let expected = usize::from(parameter == "PV1_1");
-        assert!(
-            matches!(
+        assert_matches!(
                 Wcs::from_header(&header, None),
                 Err(FitsError::InvalidWcs {
                     defect: WcsDefect::Grism {
@@ -273,7 +302,7 @@ fn grism_axes_reject_incomplete_or_degenerate_detector_metadata() {
                         defect: GrismDefect::MissingParameter { parameter }
                     }
                 }) if parameter == expected
-            ),
+            ,
             "{parameter}={value:?}"
         );
     }
@@ -438,7 +467,8 @@ fn spectral_algorithms_match_wcslib() {
         },
     ];
     for case in cases {
-        let mut header = axis_header(case.ctype, case.unit, 1.0, case.reference, case.increment);
+        let mut header =
+            wcs_header::axis_header(case.ctype, case.unit, 1.0, case.reference, case.increment);
         header.set_internal(keywords::RESTFRQ, 1_420_405_751.0);
         let wcs = Wcs::from_header(&header, None).unwrap();
         assert!(
@@ -447,11 +477,14 @@ fn spectral_algorithms_match_wcslib() {
             case.ctype
         );
         let world = to_world(&wcs, &[3.0]).unwrap()[0];
-        assert!(
-            (world - case.world).abs() <= ROUNDING * rounding_scale(case.ctype, case.reference),
-            "{}: got {world:.17e}, wcslib {:.17e}",
+        tolerance::assert_within(
+            world,
+            case.world,
+            Tolerance::abs(
+                ROUNDING * rounding_scale(case.ctype, case.reference),
+                "a rounding of the sampled quantity, scaled to the world",
+            ),
             case.ctype,
-            case.world
         );
         let pixel = to_pixel(&wcs, &[case.world]).unwrap()[0];
         assert!(
@@ -524,7 +557,7 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
         },
     ];
     for case in cases {
-        let mut header = axis_header(
+        let mut header = wcs_header::axis_header(
             case.ctype,
             case.unit,
             1.0,
@@ -545,10 +578,26 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
         // passes through the quantity the axis samples.
         let world = to_world(&wcs, &[1.0]).unwrap()[0];
         let bound = 2.0 * f64::EPSILON * rounding_scale(case.ctype, case.canonical_reference);
-        assert!(
-            (world - case.canonical_reference).abs() <= bound,
-            "{} reference: {world:.17e}",
-            case.ctype
+        tolerance::assert_within(
+            world,
+            case.canonical_reference,
+            Tolerance::abs(
+                bound,
+                "the unit's factor and its product with the reference",
+            ),
+            case.ctype,
+        );
+        // And back: at CRPIX the axis's slope is the canonical CDELT, so the world's
+        // rounding over it bounds the pixel, doubled for the inverse's own roundings.
+        let pixel = to_pixel(&wcs, &[case.canonical_reference]).unwrap()[0];
+        tolerance::assert_within(
+            pixel,
+            1.0,
+            Tolerance::abs(
+                2.0 * bound / (case.canonical_reference / 100.0).abs(),
+                "the world's rounding over the canonical CDELT, both ways",
+            ),
+            case.ctype,
         );
     }
 
@@ -558,52 +607,79 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
         .set_internal("CTYPE1", "WAVE-F2W")
         .set_internal("CUNIT1", "Hz")
         .set_internal("CRVAL1", 1.0);
-    assert!(matches!(
+    assert_matches!(
         Wcs::from_header(&invalid, None),
         Err(FitsError::InvalidUnit { unit, expected: UnitKind::Length }) if unit == "Hz"
-    ));
+    );
     invalid.set_internal("CUNIT1", "qHz");
-    assert!(matches!(
+    assert_matches!(
         Wcs::from_header(&invalid, None),
-        Err(FitsError::InvalidUnit { unit, .. }) if unit == "qHz"
-    ));
+        Err(FitsError::InvalidUnit { unit, expected: UnitKind::Length }) if unit == "qHz"
+    );
 }
 
 #[test]
 fn logarithmic_axes_apply_domains_units_and_inverse() {
-    let generic = axis_header("TIME-LOG", "d", 1.0, 100.0, 10.0);
+    let generic = wcs_header::axis_header("TIME-LOG", "d", 1.0, 100.0, 10.0);
     let generic = Wcs::from_header(&generic, None).unwrap();
     let expected = 100.0 * 0.2_f64.exp();
     assert_eq!(generic.description().axes[0].cunit, "d");
-    assert!((to_world(&generic, &[3.0]).unwrap()[0] - expected).abs() < 1e-13);
-    assert!((to_pixel(&generic, &[expected]).unwrap()[0] - 3.0).abs() < 1e-13);
-    assert!(matches!(
+    let exp_rounding = Tolerance::abs(1e-13, "an exp and a ln, a few ulps of 122 d (1.4e-14)");
+    tolerance::assert_within(
+        to_world(&generic, &[3.0]).unwrap()[0],
+        expected,
+        exp_rounding,
+        "TIME-LOG",
+    );
+    tolerance::assert_within(
+        to_pixel(&generic, &[expected]).unwrap()[0],
+        3.0,
+        exp_rounding,
+        "TIME-LOG back",
+    );
+    assert_matches!(
         to_pixel(&generic, &[0.0]),
         Err(FitsError::WcsCoordinateOutOfDomain {
             axis: 0,
             algorithm: "LOG"
         })
-    ));
+    );
 
-    let frequency = axis_header("FREQ-LOG", "GHz", 1.0, 1.4, 0.001);
+    let frequency = wcs_header::axis_header("FREQ-LOG", "GHz", 1.0, 1.4, 0.001);
     let frequency = Wcs::from_header(&frequency, None).unwrap();
     let expected = 1.4e9 * (2.0e6_f64 / 1.4e9).exp();
     assert_eq!(frequency.description().axes[0].cunit, "GHz");
     assert_eq!(frequency.description().axes[0].crval, 1.4);
-    assert!((to_world(&frequency, &[3.0]).unwrap()[0] - expected).abs() < 1e-6);
-    assert!((to_pixel(&frequency, &[expected]).unwrap()[0] - 3.0).abs() < 1e-12);
+    tolerance::assert_within(
+        to_world(&frequency, &[3.0]).unwrap()[0],
+        expected,
+        Tolerance::abs(
+            1e-6,
+            "an exp of the GHz scale, a few ulps of 1.4e9 Hz (2.4e-7)",
+        ),
+        "FREQ-LOG",
+    );
+    tolerance::assert_within(
+        to_pixel(&frequency, &[expected]).unwrap()[0],
+        3.0,
+        Tolerance::abs(
+            1e-12,
+            "a ln back, its 1e-16 relative error over a 1.4e-6 step",
+        ),
+        "FREQ-LOG back",
+    );
 
     let mut invalid = Header::new();
     invalid
         .set_internal(keywords::NAXIS, 1)
         .set_internal("CTYPE1", "ABCD-LOG")
         .set_internal("CRVAL1", 0.0);
-    assert!(matches!(
+    assert_matches!(
         Wcs::from_header(&invalid, None),
         Err(FitsError::InvalidWcs {
             defect: WcsDefect::LogarithmicReference { ctype }
         }) if ctype == "ABCD-LOG"
-    ));
+    );
 }
 
 /// Every code parses to the algorithm that names it back, and an `X2P` code must
@@ -640,13 +716,12 @@ fn spectral_algorithm_codes_round_trip_and_check_their_variables() {
             .set_internal("CTYPE1", ctype)
             .set_internal("CRVAL1", 1.4e9)
             .set_internal(keywords::RESTFRQ, 1.4e9);
-        assert!(
-            matches!(
+        assert_matches!(
                 Wcs::from_header(&header, None),
                 Err(FitsError::InvalidWcs {
                     defect: WcsDefect::InconsistentSpectralAlgorithm { ctype: got }
                 }) if got == ctype
-            ),
+            ,
             "{ctype}"
         );
     }

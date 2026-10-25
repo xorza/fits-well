@@ -1,6 +1,7 @@
 //! [`TimeAxisKind`]: the time-related WCS axis types.
 
 use crate::time_coordinates::scale::Scale;
+use crate::world_coordinates::ctype::Ctype;
 
 /// A time-related WCS axis type (§9.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,7 +20,11 @@ impl TimeAxisKind {
     /// Classify a `CTYPE` as a time-related axis (§9.6), or `None` if it is not one. The
     /// head matches with no regard to case, as a time-scale name does.
     pub(crate) fn from_ctype(ctype: &str) -> Option<Self> {
-        let head = Self::head(ctype);
+        Self::from_head(Ctype::parse(ctype).head)
+    }
+
+    /// [`TimeAxisKind::from_ctype`] of a `CTYPE` whose head is `head`.
+    pub(crate) fn from_head(head: &str) -> Option<Self> {
         let named = |name: &str| head.eq_ignore_ascii_case(name);
         if named("TIME") {
             Some(Self::Time)
@@ -36,11 +41,6 @@ impl TimeAxisKind {
                 .map(|_| Self::Time)
         }
     }
-
-    /// The head of `ctype`: the name before its first `-`, blanks trimmed.
-    pub(crate) fn head(ctype: &str) -> &str {
-        ctype.split('-').next().unwrap_or("").trim()
-    }
 }
 
 #[cfg(test)]
@@ -48,20 +48,24 @@ mod tests {
 
     use crate::time_coordinates::time_axis_kind::TimeAxisKind;
 
+    /// Each head names its kind with no regard to case, and a scale name is a time axis.
     #[test]
     fn classifies_time_related_axes() {
-        use TimeAxisKind::*;
-        assert_eq!(TimeAxisKind::from_ctype("TIME"), Some(Time));
-        assert_eq!(TimeAxisKind::from_ctype("time"), Some(Time));
-        assert_eq!(TimeAxisKind::from_ctype("UTC"), Some(Time)); // a scale name is a time axis
-        assert_eq!(TimeAxisKind::from_ctype("PHASE"), Some(Phase));
-        assert_eq!(TimeAxisKind::from_ctype("TIMELAG"), Some(Timelag));
-        assert_eq!(TimeAxisKind::from_ctype("FREQUENCY"), Some(Frequency));
-        // Every head matches with no regard to case, as `TIME` and the scale names do.
-        assert_eq!(TimeAxisKind::from_ctype("phase"), Some(Phase));
-        assert_eq!(TimeAxisKind::from_ctype("TimeLag"), Some(Timelag));
-        assert_eq!(TimeAxisKind::from_ctype("frequency"), Some(Frequency));
-        assert_eq!(TimeAxisKind::from_ctype("tai-LOG"), Some(Time));
-        assert_eq!(TimeAxisKind::from_ctype("RA---TAN"), None);
+        use TimeAxisKind::{Frequency, Phase, Time, Timelag};
+        for (ctype, kind) in [
+            ("TIME", Some(Time)),
+            ("time", Some(Time)),
+            ("UTC", Some(Time)),
+            ("tai-LOG", Some(Time)),
+            ("PHASE", Some(Phase)),
+            ("phase", Some(Phase)),
+            ("TIMELAG", Some(Timelag)),
+            ("TimeLag", Some(Timelag)),
+            ("FREQUENCY", Some(Frequency)),
+            ("frequency", Some(Frequency)),
+            ("RA---TAN", None),
+        ] {
+            assert_eq!(TimeAxisKind::from_ctype(ctype), kind, "{ctype}");
+        }
     }
 }

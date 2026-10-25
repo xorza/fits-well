@@ -8,7 +8,6 @@
 
 use crate::allocation;
 use crate::bintable::descriptor::{DescriptorWidth, PqDescriptor};
-use crate::bitpix::Bitpix;
 use crate::compression;
 use crate::compression::Compression;
 use crate::compression::convert;
@@ -23,8 +22,10 @@ use crate::compression::tile_geometry::TileGeometry;
 use crate::compression::tile_geometry::TileScratch;
 use crate::compression::{CompressionConfig, map_tiles};
 use crate::compression::{gzip, quantize};
+use crate::fits_error::KeywordDefect;
 use crate::hdu::prologue::{Opening, Prologue, Xtension};
 use crate::header_model::{Header, keywords, value};
+use crate::image_model::bitpix::Bitpix;
 
 use crate::column::TableShape;
 use crate::fits_error::FitsError;
@@ -60,22 +61,18 @@ pub(crate) fn compress_image(
     config: &CompressionConfig,
 ) -> Result<EncodedUnit> {
     if image.shape.len() > 999 {
-        return Err(FitsError::KeywordOutOfRange {
+        return Err(FitsError::InvalidKeywordValue {
             keyword: keywords::NAXIS,
+            defect: KeywordDefect::Range,
         });
     }
     let total = image.samples.len();
     let compression = config.compression;
-    if matches!(compression, Compression::Hcompress(_)) && image.shape.len() != 2 {
-        return Err(FitsError::UnsupportedCompression {
-            feature: CompressionFeature::HcompressDimensions,
-        });
-    }
     let samples = match Samples::of(image.samples) {
         Samples::Float(samples) => {
             return compress_float_image(FloatImage { image, samples }, config);
         }
-        Samples::Int(_) if config.quantization.is_some() => {
+        Samples::Int(_) if config.quantizes() => {
             return Err(FitsError::InvalidCompressionParameter {
                 parameter: CompressionParameter::IntegerQuantization,
             });
@@ -89,6 +86,10 @@ pub(crate) fn compress_image(
     );
     let dims = image.shape;
     let tiles = resolve_tile_shape(dims, &config.tiles, codec)?;
+    let codec = codec.fitted(dims, &tiles)?;
+    if let TileCodec::Plio(plio) = codec {
+        plio.check(samples)?;
+    }
 
     let geom = TileGeometry::new(dims, tiles.as_slice());
     let ntiles = tile_count(total, &geom);
@@ -119,10 +120,9 @@ pub(crate) fn compress_image(
     Ok(unit)
 }
 
-/// The tiles of an image of `sample_count` samples. A `NAXIS = 0` image has no data
-/// array; `geom.ntiles()` would otherwise be the empty product (1) and fabricate a
-/// phantom one-pixel tile that indexes the empty sample buffer. Zero tiles yields an
-/// empty `NAXIS2 = 0` table, which the decoder's matching `ZNAXIS = 0` guard turns back
+/// The tiles of an image of `sample_count` samples: none for an image of no samples,
+/// whose shape the grid does not count over, so a shape whose product overflows makes no
+/// tile list. Zero tiles yields an empty `NAXIS2 = 0` table, which the decoder turns back
 /// into the empty image.
 fn tile_count(sample_count: usize, geom: &TileGeometry) -> usize {
     if sample_count == 0 { 0 } else { geom.ntiles() }
@@ -138,7 +138,8 @@ fn lay_out_cells(cells: Vec<Vec<u8>>, codec: TileCodec) -> Result<EncodedUnit> {
         len.checked_add(cell.len())
             .ok_or(FitsError::DataUnitOverflow)
     })?;
-    let element = codec.stream_element();
+    let kind = codec.stream_kind();
+    let element = kind.elem_size();
     let maxnelem = cells
         .iter()
         .map(|cell| cell.len() / element)
@@ -161,7 +162,6 @@ fn lay_out_cells(cells: Vec<Vec<u8>>, codec: TileCodec) -> Result<EncodedUnit> {
         offset += cell.len();
     }
 
-    let tform_letter = if element == 2 { 'I' } else { 'B' };
     let shape = TableShape {
         row_len: descriptor_width,
         row_count: ntiles,
@@ -171,7 +171,7 @@ fn lay_out_cells(cells: Vec<Vec<u8>>, codec: TileCodec) -> Result<EncodedUnit> {
     header.set_internal(keywords::TTYPE.indexed(1)?, "COMPRESSED_DATA");
     header.set_internal(
         keywords::TFORM.indexed(1)?,
-        format!("1{}{tform_letter}({maxnelem})", width.letter()),
+        format!("1{}{}({maxnelem})", width.letter(), kind.code()),
     );
     Ok(EncodedUnit {
         header,
@@ -282,6 +282,7 @@ fn compress_lossless_float_image(
     }
     let dims = image.shape;
     let tiles = resolve_tile_shape(dims, &config.tiles, codec)?;
+    let codec = codec.fitted(dims, &tiles)?;
     let geom = TileGeometry::new(dims, tiles.as_slice());
     let ntiles = tile_count(image.samples.len(), &geom);
     let cells = map_tiles(ntiles, EncodeScratch::default, |s, t| -> Result<Vec<u8>> {
@@ -356,10 +357,11 @@ impl<'a> QuantizedFloatImage<'a> {
         Levels { step, dither }: Levels,
     ) -> Result<Self> {
         let method = dither.method();
-        let codec = quantized_codec(config.compression, method)?;
         let zbitpix = samples.bitpix();
         let shape = image.shape;
+        let codec = quantized_codec(config.compression, method)?;
         let tile_shape = resolve_tile_shape(shape, &config.tiles, codec)?;
+        let codec = codec.fitted(shape, &tile_shape)?;
         let geom = TileGeometry::new(shape, tile_shape.as_slice());
         let ntiles = tile_count(image.samples.len(), &geom);
         let zdither0 = dither.seed().map(|seed| match seed.source() {
@@ -568,8 +570,8 @@ impl<'a> QuantizedFloatImage<'a> {
 /// (the first axis whole, the rest 1), or for `HCOMPRESS_1` to cfitsio's default (see
 /// [`hcompress_default_rows`]); a non-empty one is used as given (each axis clamped to
 /// ≥1) and must match the image rank, else [`FitsError::RankMismatch`]. An
-/// `HCOMPRESS_1` tiling with a side under 4 pixels, the last tile's included, is
-/// refused rather than adjusted.
+/// `HCOMPRESS_1` tiling with a side of its plane under 4 pixels, the last tile's
+/// included, is refused rather than adjusted; an axis of extent 1 lies outside the plane.
 fn resolve_tile_shape(
     dims: &[usize],
     tile_shape: &[usize],
@@ -602,6 +604,9 @@ fn resolve_tile_shape(
     if hcompress && !dims.contains(&0) {
         for (axis, (&length, &tile)) in dims.iter().zip(&tiles).enumerate() {
             let tile = tile.min(length);
+            if tile == 1 {
+                continue;
+            }
             let shortest = match length % tile {
                 0 => tile,
                 remainder => remainder,

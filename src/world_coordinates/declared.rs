@@ -10,7 +10,9 @@ use crate::header_model::value::Value;
 use crate::keyword::Keyword;
 use crate::world_coordinates::axis_description::AxisDescription;
 use crate::world_coordinates::distortion::sip::Sip;
+use crate::world_coordinates::header_read;
 use crate::world_coordinates::linear_transform::DeclaredMatrix;
+use crate::world_coordinates::spectral_frame::{SpectralFrame, SpectralReferenceFrame};
 
 /// The per-description keywords a WCS carries besides its axes and matrix, written back
 /// as they were read: the pole, the frames, and the spectral references (§8.2, §8.4).
@@ -41,6 +43,8 @@ const PAIR_FAMILIES: [&str; 4] = ["PC", "CD", "PV", "PS"];
 pub(super) struct Declared {
     pub(super) matrix: DeclaredMatrix,
     carried: Vec<(String, Value)>,
+    /// Why one image description cannot hold the parsed model, which a write refuses.
+    unwritable: Option<WcsConflict>,
 }
 
 impl Declared {
@@ -91,7 +95,54 @@ impl Declared {
                 }
             }
         }
-        Ok(Self { matrix, carried })
+        Ok(Self {
+            matrix,
+            carried,
+            unwritable: None,
+        })
+    }
+
+    /// Carry the spectral frame and rest values of the parsed model, the `frames` of each
+    /// axis, so a write holds them whatever form the header gave them in: a table WCS
+    /// reads them from its columns, not from the image keywords this description is made
+    /// of. Spectral axes of different frames have no one image form.
+    pub(super) fn carry_spectral(&mut self, frames: &[Option<SpectralFrame>]) {
+        let mut spectral = frames.iter().flatten();
+        let Some(frame) = spectral.next() else {
+            return;
+        };
+        if spectral.any(|other| other != frame) {
+            self.unwritable = Some(WcsConflict::TableSpectralFrames);
+            return;
+        }
+        if let Some(coordinate) = &frame.coordinate {
+            self.carry("SPECSYS", coordinate.code().into());
+        }
+        if frame.observer != SpectralReferenceFrame::Topocentric {
+            self.carry("SSYSOBS", frame.observer.code().into());
+        }
+        if let Some(frequency) = frame.rest.frequency {
+            self.carry("RESTFRQ", frequency.into());
+        }
+        if let Some(wavelength) = frame.rest.wavelength {
+            self.carry("RESTWAV", wavelength.into());
+        }
+    }
+
+    /// Set the carried keyword `name`, one of [`CARRIED`], to `value`, in the order a read
+    /// gives the carried keywords.
+    fn carry(&mut self, name: &str, value: Value) {
+        if let Some((_, carried)) = self.carried.iter_mut().find(|(carried, _)| carried == name) {
+            *carried = value;
+            return;
+        }
+        let rank = |name: &str| CARRIED.iter().position(|&carried| carried == name);
+        let at = self
+            .carried
+            .iter()
+            .position(|(carried, _)| rank(carried).is_none_or(|carried| Some(carried) > rank(name)))
+            .unwrap_or(self.carried.len());
+        self.carried.insert(at, (name.to_string(), value));
     }
 
     /// Replace the description `alt` in `header` with this one of `axes` and `sip`, in
@@ -108,6 +159,9 @@ impl Declared {
             return Err(FitsError::ConflictingWcsKeywords {
                 conflict: WcsConflict::SipAlternate,
             });
+        }
+        if let Some(conflict) = self.unwritable {
+            return Err(FitsError::ConflictingWcsKeywords { conflict });
         }
         let primary = alt == Alternate::PRIMARY;
         header.remove_where(|keyword| {
@@ -175,19 +229,15 @@ fn stem(name: &str, alt: Alternate) -> Option<&str> {
     }
 }
 
-/// A keyword index as a name spells it: decimal digits with no leading zero.
-fn index(digits: &str) -> Option<usize> {
-    let canonical = !digits.is_empty()
-        && !digits.starts_with('0')
-        && digits.bytes().all(|byte| byte.is_ascii_digit());
-    digits.parse().ok().filter(|_| canonical)
-}
-
 /// The indices of a `{root}i_m` name (`PC1_2`, `PV2_0`); `m` may be 0 for `PV`/`PS`.
 fn pair_index(stem: &str, root: &str) -> Option<[usize; 2]> {
     let (i, m) = stem.strip_prefix(root)?.split_once('_')?;
-    let m = if m == "0" { Some(0) } else { index(m) };
-    Some([index(i)?, m?])
+    let m = if m == "0" {
+        Some(0)
+    } else {
+        header_read::index(m)
+    };
+    Some([header_read::index(i)?, m?])
 }
 
 /// Whether `name` is a record of the description `alt`.
@@ -198,9 +248,11 @@ fn is_description_keyword(name: &str, alt: Alternate) -> bool {
     CARRIED.contains(&stem)
         || alt == Alternate::PRIMARY && LEGACY.iter().any(|&(legacy, _)| legacy == stem)
         || stem == "WCSAXES"
-        || AXIS_FAMILIES
-            .iter()
-            .any(|root| stem.strip_prefix(root).and_then(index).is_some())
+        || AXIS_FAMILIES.iter().any(|root| {
+            stem.strip_prefix(root)
+                .and_then(header_read::index)
+                .is_some()
+        })
         || PAIR_FAMILIES
             .iter()
             .any(|root| pair_index(stem, root).is_some())

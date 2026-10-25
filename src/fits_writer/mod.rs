@@ -11,7 +11,6 @@
 use std::io::{Seek, SeekFrom, Write};
 use std::mem;
 
-use crate::bitpix::Bitpix;
 use crate::block;
 use crate::block::{BLOCK_SIZE, SPACE_FILL, ZERO_FILL};
 use crate::checksum::running::Running;
@@ -21,13 +20,14 @@ use crate::compression::encoded_unit::EncodedUnit;
 use crate::compression::{CompressionConfig, encode};
 use crate::fits_error::{FitsError, Result, SizeUnit};
 use crate::fits_writer::ascii_builder::AsciiBuilder;
-use crate::fits_writer::builder::Builder;
+use crate::fits_writer::builder::{Builder, LaidOut, TableLayout};
 use crate::fits_writer::image_writer::ImageWriter;
+use crate::hdu::hdu_kind::{HduKind, HduPosition};
 use crate::hdu::prologue::{Opening, Prologue};
-use crate::hdu::{HduKind, HduPosition, HduRole, data_extent};
 use crate::header_model::{Header, Signing, Space, keywords};
-use crate::image_model::Metadata;
+use crate::image_model::bitpix::Bitpix;
 use crate::image_model::view::{Borrowed, View};
+use crate::image_model::{Metadata, check_sample_count};
 use crate::reserved_keywords;
 
 pub(crate) mod ascii_builder;
@@ -82,6 +82,11 @@ enum Body<'a> {
     Bytes(&'a [u8]),
     /// Samples, encoded to big-endian in bounded chunks as they are summed and written.
     Samples(View<'a>),
+    /// A binary table, encoded in bounded chunks as it is summed and written.
+    Table {
+        table: &'a Builder,
+        layout: &'a TableLayout,
+    },
     /// A compressed container's main-table rows, then its heap's cells in order.
     #[cfg(feature = "compression")]
     Parts { rows: &'a [u8], heap: &'a [Vec<u8>] },
@@ -90,9 +95,9 @@ enum Body<'a> {
 /// The samples a body encodes at a time: a bounded scratch, whatever the image's size.
 const CHUNK_SAMPLES: usize = 1 << 17;
 
-/// The bytes a compressed body's small cells gather to before one write.
-#[cfg(feature = "compression")]
-const PART_CHUNK: usize = 1 << 20;
+/// The bytes a body gathers to before one write: a binary table's bands of rows and its
+/// arrays, a compressed body's small cells.
+const CHUNK_BYTES: usize = 1 << 20;
 
 /// The block fill of each kind of data unit (§3.3.2, §7.2.3).
 const SPACES: [u8; BLOCK_SIZE] = [SPACE_FILL; BLOCK_SIZE];
@@ -141,15 +146,6 @@ impl<W: Write> FitsWriter<W> {
     /// for an ASCII table and NULs for every other data unit. An extension header
     /// written first follows an empty primary, as a table written first does.
     pub fn write_raw_hdu(&mut self, header: &Header, raw: &[u8]) -> Result<()> {
-        let position = placed(header, self.next_position()?)?;
-        let extent = data_extent(header, HduRole::from_header(header, position)?)?;
-        let expected =
-            usize::try_from(extent.data_bytes).map_err(|_| FitsError::DataUnitTooLarge {
-                bytes: extent.data_bytes,
-            })?;
-        if raw.len() != expected {
-            return Err(SizeUnit::Bytes.mismatch(expected, raw.len()));
-        }
         // No template: this is the escape hatch for a caller supplying a complete
         // header, so there is nothing to merge into it.
         self.finish_hdu(header, None, Body::Bytes(raw))
@@ -197,6 +193,9 @@ impl<W: Write> FitsWriter<W> {
     /// write that commits an HDU applies it and none of the builders has to remember
     /// to. The one write that does not commit through here is [`ImageWriter`], which
     /// writes its header up front and rewrites it at `finish`; it merges its own.
+    ///
+    /// Errors with [`FitsError::DataSizeMismatch`] when the header's data unit is not
+    /// `body`'s length, which only a raw write's caller can give.
     fn finish_hdu(
         &mut self,
         header: &Header,
@@ -215,21 +214,20 @@ impl<W: Write> FitsWriter<W> {
             None => header,
         };
         let position = placed(header, next)?;
-        let role = HduRole::from_header(header, position)?;
-        let kind = HduKind::classify(header, role)?;
-        debug_assert_eq!(
-            data_extent(header, role)
-                .ok()
-                .map(|extent| extent.data_bytes),
-            body.byte_len().ok().and_then(|len| u64::try_from(len).ok()),
-            "a header gives its body's length"
-        );
+        let kind = HduKind::from_header(header, position)?;
+        let data_bytes = kind.data_bytes(header)?;
+        let body_len = body.byte_len()?;
+        if u64::try_from(body_len).ok() != Some(data_bytes) {
+            let expected = usize::try_from(data_bytes)
+                .map_err(|_| FitsError::DataUnitTooLarge { bytes: data_bytes })?;
+            return Err(SizeUnit::Bytes.mismatch(expected, body_len));
+        }
         let fill = if kind == HduKind::AsciiTable {
             &SPACES
         } else {
             &ZEROS
         };
-        let fill = &fill[..block::padding(body.byte_len()?)];
+        let fill = &fill[..block::padding(body_len)];
         let signing = match self.form.checksums {
             Checksums::Off => Signing::Unsigned,
             Checksums::On => {
@@ -285,6 +283,16 @@ impl<W: Write> FitsWriter<W> {
                     Ok(())
                 })
                 .expect("a sum fails on no chunk"),
+            Body::Table { table, layout } => {
+                let mut chunk = mem::take(&mut self.scratch);
+                table
+                    .encode_chunks(layout, CHUNK_BYTES, &mut chunk, |bytes| {
+                        sum.update(bytes);
+                        Ok(())
+                    })
+                    .expect("the layout checked each descriptor, and a sum fails on no chunk");
+                self.scratch = chunk;
+            }
         }
     }
 
@@ -295,11 +303,18 @@ impl<W: Write> FitsWriter<W> {
             #[cfg(feature = "compression")]
             Body::Parts { rows, heap } => self.emit_parts(rows, heap),
             Body::Samples(samples) => self.emit_samples(samples, None),
+            Body::Table { table, layout } => {
+                let mut chunk = mem::take(&mut self.scratch);
+                let written =
+                    table.encode_chunks(layout, CHUNK_BYTES, &mut chunk, |bytes| self.emit(bytes));
+                self.scratch = chunk;
+                written
+            }
         }
     }
 
     /// Write `rows`, then each cell of `heap`: small cells gather in the scratch buffer to
-    /// [`PART_CHUNK`] bytes before one write, so a heap of many small tiles makes few
+    /// [`CHUNK_BYTES`] bytes before one write, so a heap of many small tiles makes few
     /// writes, and a large cell goes out as it is.
     #[cfg(feature = "compression")]
     fn emit_parts(&mut self, rows: &[u8], heap: &[Vec<u8>]) -> Result<()> {
@@ -307,12 +322,12 @@ impl<W: Write> FitsWriter<W> {
         chunk.clear();
         let mut result = Ok(());
         for part in std::iter::once(rows).chain(heap.iter().map(Vec::as_slice)) {
-            if chunk.len() + part.len() > PART_CHUNK && !chunk.is_empty() {
+            if chunk.len() + part.len() > CHUNK_BYTES && !chunk.is_empty() {
                 result = self.emit(&chunk);
                 chunk.clear();
             }
             if result.is_ok() {
-                if part.len() >= PART_CHUNK {
+                if part.len() >= CHUNK_BYTES {
                     result = self.emit(part);
                 } else {
                     chunk.extend_from_slice(part);
@@ -438,7 +453,16 @@ impl<W: Write> FitsWriter<W> {
     /// write a heap after the main table. The non-structural cards of `header` are
     /// kept; the table-layout and checksum cards are generated from `table`.
     pub fn write_table(&mut self, table: &Builder, header: Option<&Header>) -> Result<()> {
-        self.write_encoded(|data| table.encode(data), header)
+        self.next_position()?;
+        let LaidOut {
+            header: table_header,
+            layout,
+        } = table.laid_out()?;
+        let body = Body::Table {
+            table,
+            layout: &layout,
+        };
+        self.finish_hdu(&table_header, header, body)
     }
 
     /// Write `image` as the primary HDU (first call) or an `IMAGE` extension
@@ -448,7 +472,12 @@ impl<W: Write> FitsWriter<W> {
     /// of `header` are kept; the image-layout and checksum cards are generated from
     /// `image`. An owned [`Image`](crate::image::Image) lends one with `view`.
     pub fn write_image(&mut self, image: Borrowed<'_>, header: Option<&Header>) -> Result<()> {
-        image_writer::write_template(self, image, header)
+        debug_assert!(
+            check_sample_count(image.shape, image.samples.len()).is_ok(),
+            "a borrowed image's shape fixes its sample count"
+        );
+        let image_header = image_writer::image_header(image.metadata(), self.next_position()?)?;
+        self.finish_hdu(&image_header, header, Body::Samples(image.samples))
     }
 
     /// Write a primary HDU with no data (`NAXIS = 0`) that carries the non-structural
@@ -562,7 +591,7 @@ impl<W: Write + Seek> FitsWriter<W> {
         layout: Metadata<'_>,
         header: Option<&Header>,
     ) -> Result<ImageWriter<'_, W>> {
-        image_writer::stream_template(self, layout, header)
+        ImageWriter::new(self, layout, header)
     }
 }
 
@@ -609,6 +638,7 @@ impl Body<'_> {
                 .len()
                 .checked_mul(samples.bitpix().elem_size())
                 .ok_or(FitsError::DataUnitOverflow),
+            Self::Table { layout, .. } => Ok(layout.data_len()),
         }
     }
 }
@@ -651,6 +681,18 @@ fn merge_header_template(header: &mut Header, template: &Header) {
     header.append_filtered_from(template, |keyword| {
         !reserved_keywords::is_generated(keyword)
     });
+}
+
+#[cfg(feature = "internals")]
+pub(crate) mod internals {
+    use crate::fits_writer::{FitsWriter, WriterState};
+
+    impl<W> FitsWriter<W> {
+        /// Whether the writer has written nothing, so its next write makes the primary.
+        pub(crate) const fn is_empty(&self) -> bool {
+            matches!(self.state, WriterState::Empty)
+        }
+    }
 }
 
 #[cfg(test)]

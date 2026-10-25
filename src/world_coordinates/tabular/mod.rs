@@ -1,7 +1,5 @@
 use crate::allocation;
 use crate::alternate::Alternate;
-use crate::bintable::column_reader::ColumnReader;
-use crate::bintable::table_view::TableView;
 use crate::fits_error::FitsError;
 use crate::fits_error::Result;
 use crate::fits_error::{TabularDefect, WcsDefect};
@@ -12,8 +10,13 @@ use crate::world_coordinates::header_read;
 use crate::world_coordinates::world_unit::WorldUnit;
 use std::iter;
 
-const MAX_INTERPOLATION_VERTICES: usize = 1 << 20;
+/// The table axes a transform takes, so a point's interpolation and its inverse search
+/// work in fixed arrays on the stack: 2⁷ corners of 7 coordinates, 7.5 KB, at most,
+/// within clippy's 16 KiB bound on a local array.
+const MAX_TABLE_AXES: usize = 7;
 const MAX_INVERSE_WORK: usize = 1 << 22;
+/// The reals a point's search holds at most: six per table axis, then the corners.
+const MAX_SEARCH_REALS: usize = MAX_TABLE_AXES * (1 << MAX_TABLE_AXES) + 6 * MAX_TABLE_AXES;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TabularReference {
@@ -44,6 +47,14 @@ pub(crate) struct TabularDescriptor {
     pub(crate) reference: TabularReference,
     /// Each table axis, in order.
     axes: Vec<TableAxis>,
+}
+
+impl TabularDescriptor {
+    /// The column of each table axis's index vector, in order: `None` for an axis that
+    /// declares none.
+    pub(crate) fn index_columns(&self) -> impl Iterator<Item = Option<&str>> {
+        self.axes.iter().map(|axis| axis.index_column.as_deref())
+    }
 }
 
 /// One axis of a `-TAB` table: the image axis it maps, its reference index (`CRVAL`), the
@@ -230,10 +241,21 @@ impl TabularDescriptor {
 }
 
 impl TabularTransform {
-    pub(crate) fn from_table(descriptor: &TabularDescriptor, table: TableView<'_>) -> Result<Self> {
+    /// The transform `descriptor` declares over `arrays`, its table's first-row arrays,
+    /// checked against the declaration.
+    pub(crate) fn from_arrays(
+        descriptor: &TabularDescriptor,
+        arrays: TabularArrays,
+    ) -> Result<Self> {
         let dimensions = descriptor.axes.len();
-        let coordinate = table.column(&descriptor.reference.coordinate_column)?;
-        let coordinate_shape = first_row_shape_and_values(table.extent.row_count, coordinate)?;
+        if dimensions > MAX_TABLE_AXES {
+            return Err(invalid(TabularDefect::TooManyAxes));
+        }
+        let TabularArrays {
+            coordinates: coordinate_shape,
+            indices: index_arrays,
+        } = arrays;
+        debug_assert_eq!(index_arrays.len(), dimensions, "an index slot a table axis");
         let mut shape = coordinate_shape.shape;
         if dimensions == 1 && shape.len() == 1 {
             shape.insert(0, 1);
@@ -250,7 +272,7 @@ impl TabularTransform {
             .enumerate()
             .filter_map(|(axis, &length)| (length > 1).then_some(axis))
             .collect();
-        let vertex_count = interpolation_vertex_count(variable_axes.len())?;
+        let vertex_count = 1 << variable_axes.len();
         let coordinate_count = lengths
             .iter()
             .try_fold(dimensions, |count, &length| count.checked_mul(length))
@@ -273,13 +295,11 @@ impl TabularTransform {
         }
 
         let mut indices = Vec::with_capacity(dimensions);
-        for (table_axis, axis) in descriptor.axes.iter().enumerate() {
-            let Some(column) = &axis.index_column else {
+        for (table_axis, index) in index_arrays.into_iter().enumerate() {
+            let Some(index) = index else {
                 indices.push(None);
                 continue;
             };
-            let reader = table.column(column)?;
-            let index = first_row_shape_and_values(table.extent.row_count, reader)?;
             if index.shape.len() > 1 || index.values.len() != lengths[table_axis] {
                 return Err(invalid(TabularDefect::IndexLength));
             }
@@ -364,7 +384,7 @@ impl TabularTransform {
         let dimensions = self.axes.len();
         let mut bounds = Vec::new();
         allocation::try_reserve(&mut bounds, cell_count.saturating_mul(3 * dimensions))?;
-        let mut buffers = SearchBuffers::new(dimensions, self.vertex_count)?;
+        let mut buffers = SearchBuffers::new();
         // The corners alone, no search: no node spends the budget.
         let mut search = buffers.search(self, 0);
         for cell in 0..cell_count {
@@ -479,15 +499,17 @@ impl TabularTransform {
         &self,
         mut intermediate: impl FnMut(usize, usize) -> f64,
     ) -> Result<TabularLocation> {
-        let mut base = Vec::with_capacity(self.axes.len());
-        let mut delta = Vec::with_capacity(self.axes.len());
+        let mut location = TabularLocation {
+            base: [0; MAX_TABLE_AXES],
+            delta: [0.0; MAX_TABLE_AXES],
+        };
         for table_axis in 0..self.axes.len() {
             let interval =
                 self.axis_interval(table_axis, intermediate(table_axis, self.axes[table_axis]))?;
-            base.push(interval.position);
-            delta.push(interval.fraction);
+            location.base[table_axis] = interval.position;
+            location.delta[table_axis] = interval.fraction;
         }
-        Ok(TabularLocation { base, delta })
+        Ok(location)
     }
 
     /// Where the intermediate coordinate `intermediate` lies along `table_axis`: the
@@ -706,8 +728,8 @@ impl TabularTransform {
         coordinates: &mut [f64],
     ) -> Result<()> {
         let dimensions = self.axes.len();
-        let node_work = inverse_node_work(dimensions, self.vertex_count)?;
-        let mut buffers = SearchBuffers::new(dimensions, self.vertex_count)?;
+        let node_work = inverse_node_work(dimensions, self.vertex_count);
+        let mut buffers = SearchBuffers::new();
         let mut search = buffers.search(self, node_work);
         for (target, &image_axis) in search.target.iter_mut().zip(&self.axes) {
             *target = coordinates[image_axis];
@@ -745,24 +767,27 @@ impl TabularTransform {
     }
 }
 
-fn interpolation_vertex_count(variable_axes: usize) -> Result<usize> {
-    let shift = u32::try_from(variable_axes).map_err(|_| invalid(TabularDefect::TooManyAxes))?;
-    1usize
-        .checked_shl(shift)
-        .filter(|&count| count <= MAX_INTERPOLATION_VERTICES)
-        .ok_or_else(|| invalid(TabularDefect::TooManyAxes))
-}
-
+/// One array of a `-TAB` table's first row, with its `TDIMn` shape.
 #[derive(Debug)]
-struct FirstRow {
-    shape: Vec<usize>,
-    values: Vec<f64>,
+pub(crate) struct TableArray {
+    pub(crate) shape: Vec<usize>,
+    pub(crate) values: Vec<f64>,
 }
 
+/// The first-row arrays a `-TAB` transform reads from its table: the coordinate array,
+/// and each table axis's index vector, `None` where its axis declares none.
+#[derive(Debug)]
+pub(crate) struct TabularArrays {
+    pub(crate) coordinates: TableArray,
+    pub(crate) indices: Vec<Option<TableArray>>,
+}
+
+/// Where a point lies in the table: each table axis's interval below it and its fraction
+/// past the interval's start, in the first entries, one a table axis.
 #[derive(Debug)]
 struct TabularLocation {
-    base: Vec<usize>,
-    delta: Vec<f64>,
+    base: [usize; MAX_TABLE_AXES],
+    delta: [f64; MAX_TABLE_AXES],
 }
 
 /// The state of one point's sub-voxel search in three buffers, which
@@ -772,22 +797,18 @@ struct TabularLocation {
 /// whether a corner lies below, above or on the target.
 #[derive(Debug)]
 struct SearchBuffers {
-    reals: Vec<f64>,
-    counts: Vec<usize>,
-    flags: Vec<bool>,
+    reals: [f64; MAX_SEARCH_REALS],
+    counts: [usize; 3 * MAX_TABLE_AXES],
+    flags: [bool; 3 * MAX_TABLE_AXES],
 }
 
 impl SearchBuffers {
-    fn new(dimensions: usize, vertex_count: usize) -> Result<Self> {
-        let reals = dimensions
-            .checked_mul(vertex_count)
-            .and_then(|corners| corners.checked_add(6 * dimensions))
-            .ok_or(FitsError::DataUnitOverflow)?;
-        Ok(Self {
-            reals: allocation::try_zeroed(0.0, reals)?,
-            counts: allocation::try_zeroed(0, 3 * dimensions)?,
-            flags: allocation::try_zeroed(false, 3 * dimensions)?,
-        })
+    const fn new() -> Self {
+        Self {
+            reals: [0.0; MAX_SEARCH_REALS],
+            counts: [0; 3 * MAX_TABLE_AXES],
+            flags: [false; 3 * MAX_TABLE_AXES],
+        }
     }
 
     /// The search of `transform`'s cells, each of whose nodes costs `node_work` of its
@@ -798,15 +819,16 @@ impl SearchBuffers {
         node_work: usize,
     ) -> SubvoxelSearch<'a> {
         let dimensions = transform.axes.len();
-        let (target, reals) = self.reals.split_at_mut(dimensions);
+        let reals = &mut self.reals[..dimensions * transform.vertex_count + 6 * dimensions];
+        let (target, reals) = reals.split_at_mut(dimensions);
         let (start, reals) = reals.split_at_mut(dimensions);
         let (extent, reals) = reals.split_at_mut(dimensions);
         let (solution, reals) = reals.split_at_mut(dimensions);
         let (delta, reals) = reals.split_at_mut(dimensions);
         let (tolerance, corners) = reals.split_at_mut(dimensions);
-        let (base, counts) = self.counts.split_at_mut(dimensions);
+        let (base, counts) = self.counts[..3 * dimensions].split_at_mut(dimensions);
         let (voxel, indices) = counts.split_at_mut(dimensions);
-        let (lower, flags) = self.flags.split_at_mut(dimensions);
+        let (lower, flags) = self.flags[..3 * dimensions].split_at_mut(dimensions);
         let (upper, equal) = flags.split_at_mut(dimensions);
         SubvoxelSearch {
             transform,
@@ -1007,32 +1029,8 @@ impl SubvoxelSearch<'_> {
     }
 }
 
-fn inverse_node_work(dimensions: usize, vertex_count: usize) -> Result<usize> {
-    let work = dimensions
-        .checked_mul(dimensions)
-        .and_then(|work| work.checked_mul(vertex_count))
-        .unwrap_or(usize::MAX);
-    if work > MAX_INVERSE_WORK {
-        return Err(FitsError::WcsNoConvergence { algorithm: "TAB" });
-    }
-    Ok(work)
-}
-
-fn first_row_shape_and_values(row_count: usize, reader: ColumnReader<'_>) -> Result<FirstRow> {
-    if row_count == 0 {
-        return Err(invalid(TabularDefect::EmptyTable));
-    }
-    let descriptor = reader.descriptor();
-    let values = if descriptor.tform.descriptor_width().is_some() {
-        reader.vla_physical()?.row(0).to_vec()
-    } else {
-        let values = reader.physical()?;
-        values[..descriptor.tform.repeat()].to_vec()
-    };
-    let shape = descriptor
-        .tdim()?
-        .map_or_else(|| vec![values.len()], <[usize]>::to_vec);
-    Ok(FirstRow { shape, values })
+const fn inverse_node_work(dimensions: usize, vertex_count: usize) -> usize {
+    dimensions * dimensions * vertex_count
 }
 
 fn validate_index(index: &[f64]) -> Result<IndexDirection> {
@@ -1108,11 +1106,16 @@ const fn domain(axis: usize) -> FitsError {
 #[cfg(feature = "internals")]
 pub(crate) mod internals {
     use crate::alternate::Alternate;
+    use crate::bintable::table_view::TableView;
+    use crate::fits_error::Result;
     use crate::header_model::{Header, keywords};
+    use crate::reader;
+    use crate::world_coordinates::tabular::TabularDescriptor;
     use std::sync::OnceLock;
 
     use crate::bintable::Table;
-    use crate::bintable::internals::table_header;
+    use crate::internals::raw_table::RawTable;
+    use crate::internals::samples;
     use crate::world_coordinates::Wcs;
     use crate::world_coordinates::tabular;
     use crate::world_coordinates::tabular::TabularTransform;
@@ -1122,21 +1125,27 @@ pub(crate) mod internals {
     pub(crate) const COUPLED_GRID: [f64; 8] =
         [100.0, 200.0, 110.0, 200.0, 100.0, 220.0, 110.0, 220.0];
 
-    /// The header of a one-row lookup table: each column (`TTYPEn`, values,
-    /// optional `TDIMn`) is `nD` doubles.
-    pub(crate) fn lookup_header(columns: &[(&str, &[f64], Option<&str>)]) -> Header {
-        let row_len = columns.iter().map(|(_, values, _)| values.len() * 8).sum();
-        let tforms: Vec<String> = columns
+    /// A one-row lookup table: each column (`TTYPEn`, values, optional `TDIMn`) is `nD`
+    /// doubles.
+    fn lookup_raw(columns: &[(&str, &[f64], Option<&str>)]) -> RawTable {
+        columns
             .iter()
-            .map(|(_, values, _)| format!("{}D", values.len()))
-            .collect();
-        let tforms: Vec<&str> = tforms.iter().map(String::as_str).collect();
-        let mut header = table_header(row_len, 1, &tforms);
-        for (index, (name, _, shape)) in columns.iter().enumerate() {
-            let column = index + 1;
-            header.set_internal(format!("TTYPE{column}").as_str(), *name);
+            .fold(RawTable::new(1), |raw, &(name, values, _)| {
+                let tform = format!("{}D", values.len());
+                raw.fixed(
+                    Some(name),
+                    &tform,
+                    &[&samples::be(values, f64::to_be_bytes)],
+                )
+            })
+    }
+
+    /// The header of [`lookup_raw`], with each column's `TDIMn`.
+    pub(crate) fn lookup_header(columns: &[(&str, &[f64], Option<&str>)]) -> Header {
+        let mut header = lookup_raw(columns).header();
+        for (index, &(_, _, shape)) in columns.iter().enumerate() {
             if let Some(shape) = shape {
-                header.set_internal(format!("TDIM{column}").as_str(), *shape);
+                header.set_internal(format!("TDIM{}", index + 1).as_str(), shape);
             }
         }
         header
@@ -1144,10 +1153,7 @@ pub(crate) mod internals {
 
     /// The row [`lookup_header`] describes.
     pub(crate) fn lookup_bytes(columns: &[(&str, &[f64], Option<&str>)]) -> Vec<u8> {
-        columns
-            .iter()
-            .flat_map(|(_, values, _)| values.iter().flat_map(|value| value.to_be_bytes()))
-            .collect()
+        lookup_raw(columns).data()
     }
 
     pub(crate) fn lookup_table(columns: &[(&str, &[f64], Option<&str>)]) -> Table {
@@ -1229,6 +1235,14 @@ pub(crate) mod internals {
         pixel[0]
     }
 
+    /// The pixel point at `fraction` along the diagonal of the coupled grid, to world.
+    pub fn tabular_forward_at_fraction(fraction: f64) -> f64 {
+        let pixel = [0.5 + fraction, 0.5 + fraction];
+        let mut world = [0.0; 2];
+        coupled_wcs().pixel_to_world(&pixel, &mut world).unwrap();
+        world.into_iter().sum()
+    }
+
     /// The world point at `fraction` along the diagonal of the coupled grid, inverted;
     /// a dyadic fraction sets how deep the sub-voxel search goes.
     pub fn tabular_inverse_at_fraction(fraction: f64) -> f64 {
@@ -1238,6 +1252,14 @@ pub(crate) mod internals {
         pixel.into_iter().sum()
     }
 
+    /// The transform `descriptor` declares over the arrays the reader reads from `table`.
+    pub(crate) fn from_table(
+        descriptor: &TabularDescriptor,
+        table: TableView<'_>,
+    ) -> Result<TabularTransform> {
+        TabularTransform::from_arrays(descriptor, reader::tabular_arrays(descriptor, table)?)
+    }
+
     /// The transform `header` declares, with every `-TAB` axis read from `table`.
     pub(crate) fn resolved_wcs(header: &Header, table: &Table) -> Wcs {
         let axis_count =
@@ -1245,7 +1267,7 @@ pub(crate) mod internals {
         let transforms = tabular::descriptors(header, axis_count, Alternate::PRIMARY)
             .unwrap()
             .into_iter()
-            .map(|descriptor| TabularTransform::from_table(&descriptor, table.view()).unwrap())
+            .map(|descriptor| from_table(&descriptor, table.view()).unwrap())
             .collect();
         Wcs::from_header_with_tabular(header, Alternate::PRIMARY, transforms).unwrap()
     }

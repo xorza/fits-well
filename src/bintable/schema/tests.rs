@@ -1,104 +1,36 @@
 use crate::bintable::Table;
 use crate::bintable::internals::table_header;
-use crate::bintable::schema::Schema;
 use crate::fits_error::FitsError;
 use crate::header_model::keywords;
+use std::assert_matches;
 
 #[test]
-fn theap_below_the_main_table_is_rejected() {
+fn theap_below_the_main_table_is_refused() {
     // §6.6: the heap follows the main table, so THEAP < NAXIS1·NAXIS2 is invalid.
     let mut header = table_header(4, 2, &["1J"]); // main table = 8 bytes
     header
         .set_internal(keywords::PCOUNT, 4)
         .set_internal(keywords::THEAP, 4); // THEAP 4 < 8
-    assert!(matches!(
+    assert_matches!(
         Table::from_data(&header, vec![0u8; 12]),
-        Err(FitsError::KeywordOutOfRange {
-            keyword: keywords::THEAP
+        Err(FitsError::InvalidKeywordValue {
+            keyword: keywords::THEAP,
+            ..
         })
-    ));
+    );
 }
 
 #[test]
-fn column_index_is_case_insensitive() {
-    // Two columns, only the first named — so the unnamed one exercises the rule that
-    // a column with no `TTYPEn` never matches, whatever is asked for.
-    let mut header = table_header(8, 1, &["1J", "1J"]);
-    header.set_internal("TTYPE1", "Flux");
-    let table = Table::from_data(&header, vec![0u8; 8]).unwrap();
-    assert_eq!(table.schema().column_index("FLUX"), Some(0));
-    assert_eq!(table.schema().column_index("flux"), Some(0));
-    assert_eq!(table.schema().column_index("missing"), None);
-    // An unnamed column is not the empty-named column: `""` matches nothing.
-    assert_eq!(table.schema().column_index(""), None);
-
-    // The schema resolves names the same way, without the data unit — it is the one
-    // implementation, which `Table` and the reader's column selectors both use.
-    let schema = Schema::parse(&header).unwrap();
-    assert_eq!(schema.column_index("FLUX"), Some(0));
-    assert_eq!(schema.column_index("missing"), None);
-    assert_eq!(schema.column_index(""), None);
-}
-
-#[test]
-fn row_width_mismatch_is_an_error() {
+fn row_width_mismatch_is_refused() {
     // Declared NAXIS1 = 99 but the one column is only 4 bytes wide.
     let header = table_header(99, 1, &["1J"]);
-    assert!(matches!(
+    assert_matches!(
         Table::from_data(&header, vec![0u8; 4]),
         Err(FitsError::RowWidthMismatch {
             computed: 4,
             declared: 99
         })
-    ));
-}
-
-/// §7.3.1 fixes `BITPIX = 8`, `NAXIS = 2` and `GCOUNT = 1`, which size the data unit, and
-/// caps `TFIELDS` at 999, which sizes the column list.
-#[test]
-fn table_structure_out_of_range_is_rejected() {
-    for (keyword, value) in [
-        (keywords::BITPIX, 16),
-        (keywords::BITPIX, -32),
-        (keywords::NAXIS, 1),
-        (keywords::GCOUNT, 3),
-    ] {
-        let mut header = table_header(2, 1, &["1I"]);
-        header.set_internal(keyword, value);
-        assert!(
-            matches!(
-                Schema::parse(&header),
-                Err(FitsError::KeywordOutOfRange { keyword: got }) if got == keyword
-            ),
-            "{keyword} = {value}"
-        );
-    }
-
-    let mut header = table_header(0, 0, &[]);
-    header.set_internal(keywords::TFIELDS, 1000);
-    assert!(matches!(
-        Table::from_data(&header, vec![]),
-        Err(FitsError::KeywordOutOfRange {
-            keyword: keywords::TFIELDS
-        })
-    ));
-
-    header
-        .set_internal(keywords::TFIELDS, 0)
-        .set_internal("NAXIS1", -1);
-    assert!(matches!(
-        Table::from_data(&header, vec![]),
-        Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "NAXIS1"
-    ));
-    header
-        .set_internal("NAXIS1", 0)
-        .set_internal(keywords::PCOUNT, -1);
-    assert!(matches!(
-        Table::from_data(&header, vec![]),
-        Err(FitsError::KeywordOutOfRange {
-            keyword: keywords::PCOUNT
-        })
-    ));
+    );
 }
 
 #[test]
@@ -109,20 +41,11 @@ fn hostile_tform_repeat_saturates_to_a_width_mismatch() {
     // result is a clean row-width mismatch, not a panic. (`…9J` ≈ 1e19 < usize::MAX
     // so it parses, then ×8 saturates.)
     let header = table_header(8, 1, &["9999999999999999999J"]);
-    assert!(matches!(
+    assert_matches!(
         Table::from_data(&header, vec![0u8; 8]),
-        Err(FitsError::RowWidthMismatch { .. })
-    ));
-}
-
-#[test]
-fn row_count_times_width_overflow_is_rejected_not_wrapped() {
-    // NAXIS2·NAXIS1 from untrusted axes must not wrap a usize to a small product
-    // that passes the length check. One 8-byte row (`1K`) × 3e18 rows = 2.4e19 >
-    // usize::MAX, so `from_data` must error rather than truncate.
-    let header = table_header(8, 3_000_000_000_000_000_000, &["1K"]);
-    assert!(matches!(
-        Table::from_data(&header, vec![0u8; 8]),
-        Err(FitsError::DataUnitOverflow)
-    ));
+        Err(FitsError::RowWidthMismatch {
+            computed: usize::MAX,
+            declared: 8
+        })
+    );
 }

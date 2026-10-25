@@ -4,7 +4,7 @@
 use crate::fits_error::{FitsError, PoleDefect, Result};
 use crate::world_coordinates::angle;
 use crate::world_coordinates::angle::R2D;
-use crate::world_coordinates::native_rotation::CelestialCoordinate;
+use crate::world_coordinates::celestial_coordinate::CelestialCoordinate;
 
 /// The rotation from native to celestial coordinates: the celestial pole
 /// `(α_p, δ_p)` and the native longitude of the pole `φ_p` (LONPOLE), all degrees.
@@ -143,8 +143,9 @@ impl CelestialPole {
 #[cfg(test)]
 mod tests {
     use crate::fits_error::{FitsError, PoleDefect};
+    use crate::world_coordinates::celestial_coordinate::CelestialCoordinate;
     use crate::world_coordinates::celestial_pole::{CelestialPole, Fiducial};
-    use crate::world_coordinates::native_rotation::CelestialCoordinate;
+    use std::assert_matches;
 
     /// The fiducial point `(φ₀, θ₀) = (0, theta)` at `(α₀, δ₀) = (45°, dec)`.
     fn fiducial(theta: f64, dec: f64) -> Fiducial {
@@ -160,7 +161,7 @@ mod tests {
     /// (45°, 30°): δ_p = 0 ± (90° − 30°), LATPOLE 90° picks 60° and α_p = 45° − 180°, and
     /// LATPOLE −90° picks −60° and α_p = 45°.
     #[test]
-    fn the_pole_follows_the_fiducial_point_and_latpole() {
+    fn pole_follows_the_fiducial_point_and_latpole() {
         let pole = |theta0, phip, latpole| {
             CelestialPole::from_fiducial(fiducial(theta0, 30.0), phip, latpole).unwrap()
         };
@@ -195,27 +196,27 @@ mod tests {
     /// arccosine. With φ_p − φ₀ = 180°, u = 180° and v = 60°, so both 240° → −120° and
     /// 120° lie past ±90°.
     #[test]
-    fn a_fiducial_point_without_a_pole_is_refused() {
+    fn fiducial_point_without_a_pole_is_refused() {
         let pole =
             |d0, phip, latpole| CelestialPole::from_fiducial(fiducial(0.0, d0), phip, latpole);
-        assert!(matches!(
+        assert_matches!(
             pole(30.0, 90.0, 90.0),
             Err(FitsError::WcsInvalidPole {
                 defect: PoleDefect::EquatorialFiducial
             })
-        ));
+        );
         assert_eq!(pole(0.0, 90.0, 40.0).unwrap().dec, 40.0);
-        assert!(matches!(
+        assert_matches!(
             pole(45.0, 60.0, 90.0),
             Err(FitsError::WcsInvalidPole {
                 defect: PoleDefect::FiducialLatitude
             })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             pole(30.0, 180.0, 90.0),
             Err(FitsError::WcsInvalidPole {
                 defect: PoleDefect::NoLatitude
             })
-        ));
+        );
     }
 }

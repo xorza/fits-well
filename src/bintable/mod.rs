@@ -4,18 +4,21 @@
 //! occupies a fixed byte range in every row, typed by its `TFORMn` code. That
 //! structure parses into a [`Schema`] of [`Column`] descriptors; decoding goes
 //! through a [`ColumnReader`] (from [`Table::column`]), whose methods yield typed [`ColumnData`]
-//! ([`ColumnReader::raw`]), the `TSCALn`/`TZEROn` physical plane
-//! ([`ColumnReader::physical`]), and `P`/`Q` variable-length arrays out of the heap
-//! ([`ColumnReader::vla`]), including their numeric, complex, and exact unsigned
+//! ([`ColumnReader::raw_into`]), the `TSCALn`/`TZEROn` physical plane
+//! ([`ColumnReader::physical_into`]), and `P`/`Q` variable-length arrays out of the heap
+//! ([`ColumnReader::vla_into`]), including their numeric, complex, and exact unsigned
 //! physical views.
 //!
 //! [`Column`]: crate::bintable::column::Column
 //! [`ColumnData`]: crate::bintable::column_data::ColumnData
 
+#[cfg(feature = "internals")]
+pub(crate) mod bench;
 pub(crate) mod bit_column;
 pub(crate) mod character_field;
 pub(crate) mod column;
 pub(crate) mod column_data;
+pub(crate) mod column_element;
 pub(crate) mod column_reader;
 pub(crate) mod column_view;
 pub(crate) mod descriptor;

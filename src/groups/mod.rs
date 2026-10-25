@@ -5,11 +5,11 @@
 //! array of `NAXIS2 × … × NAXISm` elements. Per "once FITS, always FITS" this is
 //! decoded but never written.
 
-use crate::bitpix::Bitpix;
 use crate::fits_error::FitsError;
 use crate::fits_error::Indexed;
 use crate::fits_error::Result;
 use crate::header_model::{Header, keywords};
+use crate::image_model::bitpix::Bitpix;
 use crate::image_model::data::Data;
 use crate::image_model::physical_sample::PhysicalSample;
 use crate::image_model::scaling::Scaling;
@@ -186,13 +186,17 @@ impl RandomGroups {
     }
 
     /// The group parameters that `name` names, resolved once (§6.3): every parameter whose
-    /// `PTYPEn` is `name`. Errors with [`FitsError::GroupParameterNotFound`] if none is.
+    /// `PTYPEn` is `name`, compared without regard to case, as a column's `TTYPEn` is. Errors with [`FitsError::GroupParameterNotFound`] if none is.
     pub fn parameter(&self, name: &str) -> Result<GroupParameter> {
         let indices: Vec<usize> = self
             .parameter_names
             .iter()
             .enumerate()
-            .filter(|(_, parameter)| parameter.as_deref() == Some(name))
+            .filter(|(_, parameter)| {
+                parameter
+                    .as_deref()
+                    .is_some_and(|parameter| parameter.eq_ignore_ascii_case(name))
+            })
             .map(|(index, _)| index)
             .collect();
         if indices.is_empty() {

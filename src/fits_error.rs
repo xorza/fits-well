@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use crate::bintable::descriptor::DescriptorWidth;
 use crate::bintable::element_kind::ElementKind;
-use crate::bitpix::Bitpix;
-use crate::hdu::HduKind;
+use crate::hdu::hdu_kind::HduKind;
 use crate::header_model::commentary_name::CommentaryName;
 use crate::header_model::defect::Defect;
 use crate::header_model::record_name::RecordName;
+use crate::image_model::bitpix::Bitpix;
 use crate::keyword::Keyword;
 use crate::world_coordinates::projection::Projection;
 use thiserror::Error;
@@ -86,6 +86,7 @@ pub enum ValueKind {
     Integer,
     Real,
     Text,
+    Complex,
 }
 
 impl fmt::Display for ValueKind {
@@ -95,6 +96,7 @@ impl fmt::Display for ValueKind {
             Self::Integer => "an integer",
             Self::Real => "a real",
             Self::Text => "a text",
+            Self::Complex => "a complex",
         })
     }
 }
@@ -104,6 +106,8 @@ impl fmt::Display for ValueKind {
 #[non_exhaustive]
 pub enum NumericTarget {
     I64,
+    U64,
+    I128,
     F64,
 }
 
@@ -111,7 +115,33 @@ impl fmt::Display for NumericTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::I64 => "i64",
+            Self::U64 => "u64",
+            Self::I128 => "i128",
             Self::F64 => "f64",
+        })
+    }
+}
+
+/// Why a keyword's value is refused, from [`FitsError::InvalidKeywordValue`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeywordDefect {
+    /// The value does not follow the keyword's grammar, as a `TDIMn` that is no
+    /// `(d1,d2,…)`.
+    Syntax,
+    /// The value lies outside the range the standard or its type allows, as a negative
+    /// `PCOUNT`, a `NAXIS` past 999 or a non-finite `BSCALE`.
+    Range,
+    /// The value contradicts the HDU's structure, as a `TBCOLn` past `NAXIS1`, a `TDIMn`
+    /// larger than its cell, or a table whose `NAXIS` is not 2.
+    Structure,
+}
+
+impl fmt::Display for KeywordDefect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Syntax => "its value does not follow the keyword's grammar",
+            Self::Range => "its value lies outside the range it may take",
+            Self::Structure => "its value contradicts the HDU's structure",
         })
     }
 }
@@ -275,11 +305,11 @@ pub enum CompressionParameter {
     /// A dither seed outside `1..=10000`.
     #[error("dither seed {seed} is outside 1..=10000")]
     DitherSeed { seed: u16 },
-    /// A quantization for an integer image, which stores its values as they are.
-    #[error("an integer image takes no float quantization")]
+    /// A quantization level for an integer image, which stores its values as they are.
+    #[error("an integer image takes no quantization level")]
     IntegerQuantization,
-    /// A quantization for a table, which no table codec quantizes.
-    #[error("a compressed table takes no float quantization")]
+    /// A quantization level for a table, which no table codec quantizes.
+    #[error("a compressed table takes no quantization level")]
     TableQuantization,
     /// `NOCOMPRESS` for a table: cfitsio cannot read `NOCOMPRESS` columns, and
     /// `write_table` writes a table uncompressed.
@@ -354,15 +384,9 @@ pub enum WcsDefect {
     /// A projection's `PVi_m` parameters admit no transform, as `CEA`'s λ = 0.
     #[error("degenerate {projection} projection parameters")]
     DegenerateProjection { projection: Projection },
-    /// `RADESYSa` names no standard reference frame (§8.3).
-    #[error("RADESYS {value:?} is not a standard reference frame")]
-    UnknownCelestialFrame { value: String },
     /// `EQUINOXa` is not finite and non-negative.
     #[error("EQUINOX must be finite and non-negative")]
     InvalidEquinox,
-    /// A spectral reference-frame keyword names no standard frame (§8.4).
-    #[error("{keyword} {value:?} is not a standard spectral reference frame")]
-    UnknownSpectralFrame { keyword: Keyword, value: String },
     /// The `CRVALi` of a logarithmic axis of type `ctype` is not finite and positive.
     #[error("{ctype} requires a finite, positive CRVAL")]
     LogarithmicReference { ctype: String },
@@ -480,9 +504,12 @@ pub enum WcsConflict {
     /// Both `PCi_j` and `CDi_j` (§8.1).
     #[error("PC and CD conventions overlap")]
     PcAndCd,
-    /// Both `PCi_j` and `CROTAi` (§8.1).
+    /// Both `PCi_j` and a nonzero `CROTAi` of the latitude axis (§8.1).
     #[error("PC and CROTA conventions overlap")]
     PcAndCrota,
+    /// Both `CDi_j` and a nonzero `CROTAi` of the latitude axis (§8.1).
+    #[error("CD and CROTA conventions overlap")]
+    CdAndCrota,
     /// The celestial longitude and latitude axes name different projections.
     #[error("celestial longitude and latitude axes declare different projections")]
     MismatchedProjections,
@@ -498,6 +525,10 @@ pub enum WcsConflict {
     /// The celestial columns of a table WCS declare different `EQUINOX` values.
     #[error("table celestial axes declare different EQUINOX values")]
     TableEquinox,
+    /// The spectral columns of a table WCS declare different frames or rest values, which
+    /// one image description cannot hold.
+    #[error("table spectral axes declare different frames or rest values")]
+    TableSpectralFrames,
 }
 
 /// Why the fiducial point, `LONPOLE` and `LATPOLE` admit no celestial pole, from
@@ -844,9 +875,14 @@ pub enum FitsError {
     /// which.
     #[error("invalid compression parameter: {parameter}")]
     InvalidCompressionParameter { parameter: CompressionParameter },
-    /// An ASCII-table field that does not hold a number of its column's format.
-    #[error("ASCII-table field {field:?} is not a valid number")]
-    InvalidAsciiField { field: String },
+    /// The field of an ASCII table's `column` (zero-based) in `row` does not hold a number
+    /// of its column's format.
+    #[error("ASCII-table column {column}, row {row}: field {field:?} is not a valid number")]
+    InvalidAsciiField {
+        column: usize,
+        row: usize,
+        field: String,
+    },
     /// A value the cell of ASCII-table column `column` in `row` cannot hold;
     /// [`AsciiValueDefect`] says why.
     #[error("ASCII-table column {column:?}, row {row}: {defect}")]
@@ -926,11 +962,12 @@ pub enum FitsError {
     /// record a read or an edit names.
     #[error("missing keyword {name}")]
     MissingKeyword { name: RecordName },
-    /// A keyword was present and well-typed but its value lies outside the range
-    /// the standard permits for its role (e.g. `NAXIS > 999`, `PCOUNT < 0`,
-    /// a negative `GCOUNT` or axis length, or a `THEAP` that precedes the heap).
-    #[error("keyword {keyword} has an out-of-range value")]
-    KeywordOutOfRange { keyword: Keyword },
+    /// A keyword's value is refused: [`KeywordDefect`] says why.
+    #[error("keyword {keyword}: {defect}")]
+    InvalidKeywordValue {
+        keyword: Keyword,
+        defect: KeywordDefect,
+    },
     /// An exact FITS integer cannot be represented by the requested bounded type; the
     /// record it was read from when a header read it.
     #[error("FITS integer {value} is outside the {target} range")]
@@ -969,6 +1006,10 @@ pub enum FitsError {
         count: usize,
         offset: usize,
     },
+    /// The `P`/`Q` descriptor of a table's `column` (zero-based) in `row` addresses bytes
+    /// past the table's heap.
+    #[error("the descriptor of column {column} in row {row} points past the heap")]
+    DescriptorPastHeap { column: usize, row: usize },
     /// A signed `P`/`Q` heap-array descriptor contains a negative element count
     /// or byte offset.
     #[error("invalid P/Q descriptor {field}: {value}")]
@@ -1044,6 +1085,11 @@ pub enum FitsError {
     /// columns read as they are.
     #[error("column keyword {keyword} is unusable: {source}")]
     InvalidColumnKeyword { keyword: Keyword, source: Arc<Self> },
+    /// The header at HDU `index` did not read, which ended the HDU list there: the HDUs
+    /// before it read as they are (design.md, "A bad header after the primary ends the HDU
+    /// list").
+    #[error("HDU {index} has a header that does not read: {source}")]
+    DefectiveHdu { index: usize, source: Arc<Self> },
     /// A file to append to holds bytes after its last HDU, such as special records,
     /// which a reader stops at, so it would not see an appended HDU.
     #[error("the last HDU ends at byte {hdu_end}, but the file is {file_len} bytes")]
@@ -1113,9 +1159,13 @@ pub enum FitsError {
     /// A compressed stream or tile does not decode; [`CompressedDataDefect`] says why.
     #[error("corrupt compressed data: {defect}")]
     CorruptCompressedData { defect: CompressedDataDefect },
-    /// A PLIO tile sample cannot be represented losslessly in its unsigned 24-bit
-    /// value domain.
-    #[error("PLIO tile sample {index} has value {value}, outside 0..=16777215")]
+    /// A sample a `PLIO_1` stream cannot hold: its stream value, the sample plus the
+    /// stream's offset, is outside the unsigned 24 bits of the format. `index` is the first
+    /// such sample's index in the image's samples, axis 0 fastest, and `value` the stored
+    /// sample.
+    #[error(
+        "PLIO cannot hold sample {index} of value {value}: its stream value is outside 0..=16777215"
+    )]
     PlioValueOutOfRange { index: usize, value: i64 },
     /// A `TFORMn` value could not be parsed as a binary-table column format.
     #[error("invalid column format {tform:?}")]
@@ -1149,6 +1199,7 @@ impl From<Infallible> for FitsError {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::error::Error;
 
     use crate::fits_error::*;
@@ -1225,10 +1276,24 @@ mod tests {
     }
 
     #[test]
+    fn too_wide_character_field_names_its_column_row_and_width() {
+        assert_eq!(
+            FitsError::CharacterFieldTooWide {
+                column: "BAD".into(),
+                row: 1,
+                length: 5,
+                width: 4,
+            }
+            .to_string(),
+            "character column \"BAD\" row 1 holds 5 bytes but its field width is 4"
+        );
+    }
+
+    #[test]
     fn io_error_is_preserved_as_source() {
         let io_err = io::Error::new(io::ErrorKind::UnexpectedEof, "boom");
         let err = FitsError::from(io_err);
-        assert!(matches!(err, FitsError::Io(_)));
+        assert_matches!(err, FitsError::Io(_));
         assert!(Error::source(&err).is_some());
     }
 }

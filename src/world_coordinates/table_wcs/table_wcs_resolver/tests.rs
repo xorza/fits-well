@@ -1,7 +1,9 @@
 use crate::world_coordinates::table_wcs::table_wcs_resolver::*;
+use std::assert_matches;
 
+/// The axis keys of Table 22, and the type keyword a vector cell starts from.
 #[test]
-fn table_wcs_resolver_matches_table_22() {
+fn axis_keys_match_table_22() {
     let primary = TableWcsResolver::new(Alternate::PRIMARY);
     let alternate = TableWcsResolver::new(Alternate::new('A'));
     let axis_cases = [
@@ -98,84 +100,48 @@ fn table_wcs_resolver_matches_table_22() {
     );
     assert_eq!(primary.first_vector_type(17).unwrap().as_str(), "1CTYP17");
     assert_eq!(alternate.first_vector_type(17).unwrap().as_str(), "1CTY17A");
-    assert!(matches!(
+    assert_matches!(
         primary.first_vector_type(1000),
         Err(FitsError::InvalidKeyword { name }) if name == "1CTYP1000"
-    ));
+    );
+}
 
-    assert_eq!(
-        alternate
-            .pixel_matrix_key(TableMatrixKeyword::Pc, 2, 3, KeywordSpelling::Full)
-            .unwrap()
-            .as_str(),
-        "TPC2_3A"
-    );
-    assert_eq!(
-        alternate
-            .pixel_matrix_key(TableMatrixKeyword::Pc, 2, 3, KeywordSpelling::Short)
-            .unwrap()
-            .as_str(),
-        "TP2_3A"
-    );
-    assert_eq!(
-        alternate
-            .pixel_matrix_key(TableMatrixKeyword::Cd, 2, 3, KeywordSpelling::Full)
-            .unwrap()
-            .as_str(),
-        "TCD2_3A"
-    );
-    assert_eq!(
-        alternate
-            .pixel_matrix_key(TableMatrixKeyword::Cd, 2, 3, KeywordSpelling::Short)
-            .unwrap()
-            .as_str(),
-        "TC2_3A"
-    );
-    assert_eq!(
-        alternate
-            .vector_matrix_key(TableMatrixKeyword::Pc, 2, 3, 17)
-            .unwrap()
-            .as_str(),
-        "23PC17A"
-    );
-    assert_eq!(
-        alternate
-            .pixel_parameter_key(2, 1, KeywordSpelling::Full)
-            .unwrap()
-            .as_str(),
-        "TPV2_1A"
-    );
-    assert_eq!(
-        alternate
-            .pixel_parameter_key(2, 1, KeywordSpelling::Short)
-            .unwrap()
-            .as_str(),
-        "TV2_1A"
-    );
-    assert_eq!(
-        alternate
-            .vector_parameter_key(2, 17, 1, KeywordSpelling::Full)
-            .unwrap()
-            .as_str(),
-        "2PV17_1A"
-    );
-    assert_eq!(
-        alternate
-            .vector_parameter_key(2, 17, 1, KeywordSpelling::Short)
-            .unwrap()
-            .as_str(),
-        "2V17_1A"
-    );
-    assert_eq!(
-        alternate.column_key("LONP", 17).unwrap().as_str(),
-        "LONP17A"
-    );
-    assert_eq!(
-        alternate.column_key("LATP", 17).unwrap().as_str(),
-        "LATP17A"
-    );
-    assert_eq!(
-        alternate.column_key("WCAX", 17).unwrap().as_str(),
-        "WCAX17A"
-    );
+/// A key of one description of a table WCS.
+type Key = fn(TableWcsResolver) -> Option<Keyword>;
+
+/// The matrix, parameter and column keys of Table 22, for the primary description and an
+/// alternate, in the full and the short spelling.
+#[test]
+fn matrix_parameter_and_column_keys_match_table_22() {
+    use KeywordSpelling::{Full, Short};
+    use TableMatrixKeyword::{Cd, Pc};
+    let primary = TableWcsResolver::new(Alternate::PRIMARY);
+    let alternate = TableWcsResolver::new(Alternate::new('A'));
+    let keys: [(Key, &str, &str); 13] = [
+        (|r| r.pixel_matrix_key(Pc, 2, 3, Full), "TPC2_3", "TPC2_3A"),
+        (|r| r.pixel_matrix_key(Pc, 2, 3, Short), "TP2_3", "TP2_3A"),
+        (|r| r.pixel_matrix_key(Cd, 2, 3, Full), "TCD2_3", "TCD2_3A"),
+        (|r| r.pixel_matrix_key(Cd, 2, 3, Short), "TC2_3", "TC2_3A"),
+        (|r| r.vector_matrix_key(Pc, 2, 3, 17), "23PC17", "23PC17A"),
+        (|r| r.vector_matrix_key(Cd, 2, 3, 17), "23CD17", "23CD17A"),
+        (|r| r.pixel_parameter_key(2, 1, Full), "TPV2_1", "TPV2_1A"),
+        (|r| r.pixel_parameter_key(2, 1, Short), "TV2_1", "TV2_1A"),
+        (
+            |r| r.vector_parameter_key(2, 17, 1, Full),
+            "2PV17_1",
+            "2PV17_1A",
+        ),
+        (
+            |r| r.vector_parameter_key(2, 17, 1, Short),
+            "2V17_1",
+            "2V17_1A",
+        ),
+        (|r| r.column_key("LONP", 17), "LONP17", "LONP17A"),
+        (|r| r.column_key("LATP", 17), "LATP17", "LATP17A"),
+        (|r| r.column_key("WCAX", 17), "WCAX17", "WCAX17A"),
+    ];
+    for (key, primary_key, alternate_key) in keys {
+        assert_eq!(key(primary).unwrap().as_str(), primary_key);
+        assert_eq!(key(alternate).unwrap().as_str(), alternate_key);
+    }
 }

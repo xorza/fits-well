@@ -1,9 +1,31 @@
 //! Sample planes for tests: every `BITPIX`, a closed-form ramp of each, and bit-exact
 //! comparison.
 
-use crate::bitpix::Bitpix;
+use crate::image_model::bitpix::Bitpix;
 use crate::image_model::data::Data;
+use crate::image_model::scaling::Scaling;
 use std::ops::{Range, RangeInclusive};
+
+/// The big-endian bytes of `values`, as FITS stores them.
+pub(crate) fn be<T: Copy, const N: usize>(values: &[T], to_be: impl Fn(T) -> [u8; N]) -> Vec<u8> {
+    values.iter().flat_map(|&v| to_be(v)).collect()
+}
+
+/// `count` bytes of `37·i mod 256`: 37 is coprime with 256, so each run of 256 holds
+/// every byte value once.
+#[cfg(feature = "compression")]
+pub(crate) fn byte_plane(count: usize) -> Vec<u8> {
+    (0..count).map(|i| i.wrapping_mul(37) as u8).collect()
+}
+
+/// The scaling `BZERO + BSCALE × stored`, with no `BLANK`.
+pub(crate) const fn linear(bscale: f64, bzero: f64) -> Scaling {
+    Scaling {
+        bscale,
+        bzero,
+        blank: None,
+    }
+}
 
 /// Every `BITPIX`.
 pub(crate) const BITPIXES: [Bitpix; 6] = [
@@ -95,21 +117,81 @@ pub(crate) fn gather(data: &Data, idxs: &[usize]) -> Data {
     }
 }
 
-/// The bit pattern of each sample of `data`, zero-extended.
+/// A sample whose bit pattern a test compares, zero-extended, so a NaN's payload counts.
+pub(crate) trait Bits: Copy {
+    fn bits(self) -> u64;
+
+    fn is_nan(self) -> bool {
+        false
+    }
+}
+
+impl Bits for u8 {
+    fn bits(self) -> u64 {
+        u64::from(self)
+    }
+}
+
+impl Bits for i16 {
+    fn bits(self) -> u64 {
+        u64::from(self.cast_unsigned())
+    }
+}
+
+impl Bits for i32 {
+    fn bits(self) -> u64 {
+        u64::from(self.cast_unsigned())
+    }
+}
+
+impl Bits for i64 {
+    fn bits(self) -> u64 {
+        self.cast_unsigned()
+    }
+}
+
+impl Bits for f32 {
+    fn bits(self) -> u64 {
+        u64::from(self.to_bits())
+    }
+
+    fn is_nan(self) -> bool {
+        self.is_nan()
+    }
+}
+
+impl Bits for f64 {
+    fn bits(self) -> u64 {
+        self.to_bits()
+    }
+
+    fn is_nan(self) -> bool {
+        self.is_nan()
+    }
+}
+
+/// The bit pattern of each of `values`, `None` for a NaN, so any NaN matches any other.
+pub(crate) fn nan_blind_of<T: Bits>(values: &[T]) -> Vec<Option<u64>> {
+    values
+        .iter()
+        .map(|&value| (!value.is_nan()).then(|| value.bits()))
+        .collect()
+}
+
+/// The bit pattern of each of `values`.
+pub(crate) fn bits_of<T: Bits>(values: &[T]) -> Vec<u64> {
+    values.iter().map(|&value| value.bits()).collect()
+}
+
+/// The bit pattern of each sample of `data`.
 fn bits(data: &Data) -> Vec<u64> {
     match data {
-        Data::U8(values) => values.iter().map(|&v| u64::from(v)).collect(),
-        Data::I16(values) => values
-            .iter()
-            .map(|&v| u64::from(v.cast_unsigned()))
-            .collect(),
-        Data::I32(values) => values
-            .iter()
-            .map(|&v| u64::from(v.cast_unsigned()))
-            .collect(),
-        Data::I64(values) => values.iter().map(|&v| v.cast_unsigned()).collect(),
-        Data::F32(values) => values.iter().map(|&v| u64::from(v.to_bits())).collect(),
-        Data::F64(values) => values.iter().map(|&v| v.to_bits()).collect(),
+        Data::U8(values) => bits_of(values),
+        Data::I16(values) => bits_of(values),
+        Data::I32(values) => bits_of(values),
+        Data::I64(values) => bits_of(values),
+        Data::F32(values) => bits_of(values),
+        Data::F64(values) => bits_of(values),
     }
 }
 
@@ -124,14 +206,12 @@ pub(crate) fn assert_same_bits(actual: &Data, expected: &Data, label: &str) {
 /// The bit pattern of each sample of `data`, `None` for a NaN, so any NaN matches any other.
 #[cfg(feature = "compression")]
 pub(crate) fn nan_blind_bits(data: &Data) -> Vec<Option<u64>> {
-    let is_nan = |i: usize| match data {
-        Data::F32(values) => values[i].is_nan(),
-        Data::F64(values) => values[i].is_nan(),
-        Data::U8(_) | Data::I16(_) | Data::I32(_) | Data::I64(_) => false,
-    };
-    bits(data)
-        .into_iter()
-        .enumerate()
-        .map(|(i, bits)| (!is_nan(i)).then_some(bits))
-        .collect()
+    match data {
+        Data::U8(values) => nan_blind_of(values),
+        Data::I16(values) => nan_blind_of(values),
+        Data::I32(values) => nan_blind_of(values),
+        Data::I64(values) => nan_blind_of(values),
+        Data::F32(values) => nan_blind_of(values),
+        Data::F64(values) => nan_blind_of(values),
+    }
 }

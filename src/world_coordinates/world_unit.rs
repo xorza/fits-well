@@ -2,7 +2,7 @@
 
 use crate::fits_error::{FitsError, Result, UnitKind};
 use crate::unit;
-use crate::world_coordinates::axis_transform;
+use crate::world_coordinates::axis_transform::spectral_kind::SpectralKind;
 use crate::world_coordinates::ctype::Ctype;
 
 /// The unit an axis's world coordinates come out in, and the factor to it from the
@@ -25,7 +25,7 @@ impl WorldUnit {
     /// celestial axis (§8.2), the Table-25 default for a spectral one (§8.4), and the
     /// declared unit for any other.
     pub(super) fn of(ctype: Ctype<'_>, cunit: &str) -> Result<Self> {
-        if let Some(unit) = axis_transform::spectral_unit(ctype.head, cunit)? {
+        if let Some(unit) = Self::spectral(ctype.head, cunit)? {
             return Ok(unit);
         }
         if ctype.celestial_axis().is_some() {
@@ -35,6 +35,19 @@ impl WorldUnit {
             });
         }
         Ok(Self::DECLARED)
+    }
+
+    /// A spectral axis's Table-25 default unit and the factor to it from `cunit`, or
+    /// `None` when `head` names no spectral type.
+    fn spectral(head: &str, cunit: &str) -> Result<Option<Self>> {
+        SpectralKind::from_code(head)
+            .map(|kind| {
+                Ok(Self {
+                    scale: kind.unit_scale(cunit)?,
+                    unit: Some(kind.default_unit()),
+                })
+            })
+            .transpose()
     }
 }
 

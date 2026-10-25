@@ -1,8 +1,9 @@
 //! [`Prologue`]: the structural records an HDU's header opens with.
 
-use crate::bitpix::Bitpix;
+use crate::fits_error::KeywordDefect;
 use crate::fits_error::{FitsError, Result};
 use crate::header_model::{Header, keywords, value};
+use crate::image_model::bitpix::Bitpix;
 
 /// What an HDU's header opens with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,8 +38,9 @@ impl Prologue<'_> {
     /// A header that holds these records.
     pub(crate) fn header(&self) -> Result<Header> {
         if self.axes.len() > 999 {
-            return Err(FitsError::KeywordOutOfRange {
+            return Err(FitsError::InvalidKeywordValue {
                 keyword: keywords::NAXIS,
+                defect: KeywordDefect::Range,
             });
         }
         let mut header = Header::new();

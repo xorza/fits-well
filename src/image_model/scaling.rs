@@ -1,10 +1,11 @@
 //! [`Scaling`]: the `BSCALE`/`BZERO` linear transform between stored and
 //! physical values.
 
-use crate::bitpix::Bitpix;
 use crate::fits_error::FitsError;
+use crate::fits_error::KeywordDefect;
 use crate::fits_error::Result;
 use crate::header_model::{Header, keywords};
+use crate::image_model::bitpix::Bitpix;
 use crate::image_model::physical_sample::PhysicalSample;
 use crate::image_model::sample::Sample;
 use crate::image_model::sample_type::{SampleType, UnsignedKind};
@@ -64,6 +65,29 @@ impl Scaling {
             return None;
         }
         SampleType::from_scaling(bitpix, *self).unsigned_kind()
+    }
+
+    /// The physical value of one stored sample, as [`Scaling::extend_physical`] gives it,
+    /// for a decode that converts each tile as it lands; the `BLANK` and identity tests
+    /// run for each sample, a branch the data does not change.
+    #[cfg(feature = "compression")]
+    pub(crate) fn physical<T: Sample, O: PhysicalSample>(&self) -> impl Fn(T) -> O + Sync {
+        let Self {
+            bscale,
+            bzero,
+            blank,
+        } = *self;
+        let blank = blank.and_then(T::integer);
+        let identity = self.is_identity();
+        move |sample| {
+            if blank == Some(sample) {
+                O::from_f64(f64::NAN)
+            } else if identity {
+                O::from_f64(sample.to_f64())
+            } else {
+                O::from_f64(bscale.mul_add(sample.to_f64(), bzero))
+            }
+        }
     }
 
     /// Append the physical values of `samples` to `out`: `BZERO + BSCALE × sample`
@@ -128,21 +152,24 @@ impl Scaling {
 
     pub(crate) fn validate(&self, bitpix: Bitpix) -> Result<()> {
         if !self.bscale.is_finite() {
-            return Err(FitsError::KeywordOutOfRange {
+            return Err(FitsError::InvalidKeywordValue {
                 keyword: keywords::BSCALE,
+                defect: KeywordDefect::Range,
             });
         }
         if !self.bzero.is_finite() {
-            return Err(FitsError::KeywordOutOfRange {
+            return Err(FitsError::InvalidKeywordValue {
                 keyword: keywords::BZERO,
+                defect: KeywordDefect::Range,
             });
         }
         let Some(blank) = self.blank else {
             return Ok(());
         };
         if !bitpix.holds_integer(blank) {
-            return Err(FitsError::KeywordOutOfRange {
+            return Err(FitsError::InvalidKeywordValue {
                 keyword: keywords::BLANK,
+                defect: KeywordDefect::Range,
             });
         }
         Ok(())

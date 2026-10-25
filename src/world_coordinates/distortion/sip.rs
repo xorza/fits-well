@@ -2,6 +2,7 @@
 //! first two pixel axes.
 
 use crate::fits_error::FitsError;
+use crate::fits_error::KeywordDefect;
 use crate::fits_error::Result;
 use crate::header_model::Header;
 use crate::header_model::record_name::RecordName;
@@ -35,7 +36,7 @@ struct Polynomial {
 impl Sip {
     /// The SIP polynomials `header` declares, or `None` when it declares none. A header
     /// with one of `A_ORDER` and `B_ORDER`, or one of `AP_ORDER` and `BP_ORDER`, without
-    /// the other is `MissingKeyword`; an order past 9 is `KeywordOutOfRange`.
+    /// the other is `MissingKeyword`; an order past 9 is `InvalidKeywordValue`.
     pub(crate) fn from_header(header: &Header) -> Result<Option<Self>> {
         let Some([a, b]) = Polynomial::pair(header, ["A", "B"])? else {
             return Ok(None);
@@ -121,8 +122,9 @@ impl Polynomial {
         let order = usize::try_from(order)
             .ok()
             .filter(|&order| order <= MAX_ORDER)
-            .ok_or(FitsError::KeywordOutOfRange {
+            .ok_or(FitsError::InvalidKeywordValue {
                 keyword: order_keyword,
+                defect: KeywordDefect::Range,
             })?;
         let width = order + 1;
         let mut coefficients = vec![0.0; width * width];

@@ -29,4 +29,10 @@ impl SplitMix {
         let (u, v) = (1.0 - self.unit(), self.unit());
         (-2.0 * u.ln()).sqrt() * (TAU * v).cos()
     }
+
+    /// A draw of a power law of index `alpha` on `[1, ∞)`: `P(X > x) = x^−alpha`, by inverse
+    /// sampling of a draw on `(0, 1]`.
+    pub(crate) fn power_law(&mut self, alpha: f64) -> f64 {
+        (1.0 - self.unit()).powf(-1.0 / alpha)
+    }
 }

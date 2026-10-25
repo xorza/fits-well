@@ -2,13 +2,22 @@ use crate::fits_error::FitsError;
 use crate::fits_error::Indexed;
 use crate::header_model::Header;
 use crate::header_model::record_name::RecordName;
-use crate::internals::cards::header_of;
-
+use crate::internals::cards;
 use crate::time_coordinates::phase_axis::PhaseAxis;
+use std::assert_matches;
 
+const fn phase(zero_phase: f64, period: f64) -> PhaseAxis {
+    PhaseAxis {
+        zero_phase,
+        period: Some(period),
+    }
+}
+
+/// The image, pixel-list and array-column forms, primary and alternate, each read their own
+/// zero phase and period.
 #[test]
-fn reads_phase_axis_metadata() {
-    let mut h = header_of(&[
+fn each_keyword_form_reads_its_own_zero_phase_and_period() {
+    let h = cards::header_of(&[
         ("CTYPE2", "PHASE".into()),
         ("CZPHS2", 5.0.into()),
         ("CPERI2", 2.0.into()),
@@ -28,94 +37,86 @@ fn reads_phase_axis_metadata() {
         ("1CZP5A", 19.0.into()),
         ("1CPR5A", 10.0.into()),
     ]);
+    for (read, expected) in [
+        (PhaseAxis::from_header(&h, 1, None), phase(5.0, 2.0)),
+        (PhaseAxis::from_header(&h, 1, 'A'), phase(7.0, 4.0)),
+        (PhaseAxis::from_pixel_list(&h, 3, None), phase(11.0, 5.0)),
+        (PhaseAxis::from_pixel_list(&h, 3, 'A'), phase(13.0, 6.0)),
+        (
+            PhaseAxis::from_array_column(&h, 0, 5, None),
+            phase(17.0, 8.0),
+        ),
+        (
+            PhaseAxis::from_array_column(&h, 0, 5, 'A'),
+            phase(19.0, 10.0),
+        ),
+    ] {
+        assert_eq!(read.unwrap(), Some(expected));
+    }
+}
 
-    let image = PhaseAxis::from_header(&h, 2, None).unwrap().unwrap();
-    assert_eq!(image.zero_phase, 5.0);
-    assert_eq!(image.period, Some(2.0));
+#[test]
+fn axis_of_another_type_is_no_phase_axis() {
+    let h = cards::header_of(&[("CTYPE1", "RA---TAN".into())]);
+    assert_eq!(PhaseAxis::from_header(&h, 0, None).unwrap(), None);
+}
 
-    let alternate = PhaseAxis::from_header(&h, 2, 'A').unwrap().unwrap();
-    assert_eq!(
-        alternate,
-        PhaseAxis {
-            zero_phase: 7.0,
-            period: Some(4.0),
-        }
-    );
-    assert_eq!(
-        PhaseAxis::from_pixel_list(&h, 3, None).unwrap().unwrap(),
-        PhaseAxis {
-            zero_phase: 11.0,
-            period: Some(5.0),
-        }
-    );
-    assert_eq!(
-        PhaseAxis::from_pixel_list(&h, 3, 'A').unwrap().unwrap(),
-        PhaseAxis {
-            zero_phase: 13.0,
-            period: Some(6.0),
-        }
-    );
-    assert_eq!(
-        PhaseAxis::from_array_column(&h, 1, 5, None)
-            .unwrap()
-            .unwrap(),
-        PhaseAxis {
-            zero_phase: 17.0,
-            period: Some(8.0),
-        }
-    );
-    assert_eq!(
-        PhaseAxis::from_array_column(&h, 1, 5, 'A')
-            .unwrap()
-            .unwrap(),
-        PhaseAxis {
-            zero_phase: 19.0,
-            period: Some(10.0),
-        }
-    );
+/// An absent period, or a zero one, is a phase that does not repeat, in each family.
+#[test]
+fn absent_or_zero_period_is_none() {
+    type Read = fn(&Header) -> Option<PhaseAxis>;
+    let unrepeated = PhaseAxis {
+        zero_phase: 23.0,
+        period: None,
+    };
+    let families: [([&str; 3], Read); 3] = [
+        (["CTYPE4", "CZPHS4", "CPERI4"], |h| {
+            PhaseAxis::from_header(h, 3, None).unwrap()
+        }),
+        (["TCTYP4", "TCZPH4", "TCPER4"], |h| {
+            PhaseAxis::from_pixel_list(h, 4, None).unwrap()
+        }),
+        (["1CTYP5", "1CZPH5", "1CPER5"], |h| {
+            PhaseAxis::from_array_column(h, 0, 5, None).unwrap()
+        }),
+    ];
+    for ([ctype, zero_phase, period], read) in families {
+        let mut h = cards::header_of(&[(ctype, "PHASE".into()), (zero_phase, 23.0.into())]);
+        assert_eq!(read(&h), Some(unrepeated), "{ctype}");
+        h.set_internal(period, 0.0);
+        assert_eq!(read(&h), Some(unrepeated), "{period}");
+    }
+}
 
-    h.set_internal("CTYPE1", "RA---TAN");
-    assert_eq!(PhaseAxis::from_header(&h, 1, None).unwrap(), None);
-
-    h.set_internal("CTYPE4", "PHASE")
-        .set_internal("CZPHS4", 23.0);
-    let varying = PhaseAxis::from_header(&h, 4, None).unwrap().unwrap();
-    assert_eq!(varying.period, None);
-    h.set_internal("CPERI4", 0.0);
-    assert_eq!(
-        PhaseAxis::from_header(&h, 4, None).unwrap().unwrap().period,
-        None
-    );
-
-    h.set_internal("CTYPE6", "PHASE");
-    assert!(matches!(
-        PhaseAxis::from_header(&h, 6, None),
+#[test]
+fn phase_axis_without_its_zero_phase_is_refused() {
+    let h = cards::header_of(&[("CTYPE6", "PHASE".into())]);
+    assert_matches!(
+        PhaseAxis::from_header(&h, 5, None),
         Err(FitsError::MissingKeyword { name: RecordName::Keyword(keyword) }) if keyword.as_str() == "CZPHS6"
-    ));
+    );
+}
 
+/// Axes count from zero, as `Wcs::axis_world` counts them: axis 0 names `CTYPE1`. The
+/// columns count from one, as their keywords do.
+#[test]
+fn axes_count_from_zero_and_columns_from_one() {
     let empty = Header::new();
-    assert!(matches!(
-        PhaseAxis::from_header(&empty, 0, None),
-        Err(FitsError::OneBasedIndexRequired {
-            indexed: Indexed::WcsAxis
-        })
-    ));
-    assert!(matches!(
+    assert_eq!(PhaseAxis::from_header(&empty, 0, None).unwrap(), None);
+    assert_matches!(
         PhaseAxis::from_pixel_list(&empty, 0, None),
         Err(FitsError::OneBasedIndexRequired {
             indexed: Indexed::Column
         })
-    ));
-    assert!(matches!(
-        PhaseAxis::from_array_column(&empty, 0, 1, None),
-        Err(FitsError::OneBasedIndexRequired {
-            indexed: Indexed::WcsAxis
-        })
-    ));
-    assert!(matches!(
-        PhaseAxis::from_array_column(&empty, 1, 0, None),
+    );
+    assert_eq!(
+        PhaseAxis::from_array_column(&empty, 0, 1, None).unwrap(),
+        None
+    );
+    assert_matches!(
+        PhaseAxis::from_array_column(&empty, 0, 0, None),
         Err(FitsError::OneBasedIndexRequired {
             indexed: Indexed::Column
         })
-    ));
+    );
 }

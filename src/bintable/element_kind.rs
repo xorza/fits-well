@@ -6,9 +6,12 @@ use bitvec::view::BitView;
 use num_complex::Complex;
 use std::mem;
 
+use crate::allocation;
 use crate::bintable::column_data::ColumnData;
-use crate::bitpix::Bitpix;
 use crate::endian::{decode_be_cells, decode_be_cells_into};
+use crate::fits_error::Result;
+use crate::image_model::bitpix::Bitpix;
+use crate::image_model::physical_sample::PhysicalSample;
 use crate::image_model::sample_type::UnsignedKind;
 use crate::image_model::scaling::Scaling;
 
@@ -106,15 +109,16 @@ impl ElementKind {
     }
 
     /// Decode `cells`, which hold `capacity` elements in all, as a flat run of this
-    /// kind's values.
+    /// kind's values. The run is reserved once, fallibly: heap arrays may overlap
+    /// (§7.3.5), so their total is no bound the file's size sets.
     pub(super) fn decode_cells<'a>(
         self,
         cells: impl Iterator<Item = Cell<'a>>,
         capacity: usize,
-    ) -> ColumnData {
+    ) -> Result<ColumnData> {
         let mut out = ColumnData::U8(Vec::new());
-        self.decode_cells_into(cells, capacity, &mut out);
-        out
+        self.decode_cells_into(cells, capacity, &mut out)?;
+        Ok(out)
     }
 
     /// [`ElementKind::decode_cells`] into `out`, whose buffer it reuses when `out` already
@@ -124,20 +128,22 @@ impl ElementKind {
         cells: I,
         capacity: usize,
         out: &mut ColumnData,
-    ) {
+    ) -> Result<()> {
         let bytes = |cells: I| cells.map(|cell: Cell<'a>| cell.bytes);
         match self {
             Self::Bit => {
-                let mut bits = match mem::replace(out, ColumnData::U8(Vec::new())) {
-                    ColumnData::Bit(bits) => bits,
-                    _ => BitVec::new(),
+                let mut storage = match mem::replace(out, ColumnData::U8(Vec::new())) {
+                    ColumnData::Bit(bits) => bits.into_vec(),
+                    _ => Vec::new(),
                 };
-                bits.clear();
-                bits.reserve(capacity);
+                storage.clear();
+                allocation::try_reserve_exact(&mut storage, capacity.div_ceil(8))?;
+                let mut bits = BitVec::<u8, Msb0>::from_vec(storage);
                 for cell in cells {
                     bits.extend_from_bitslice(&cell.bytes.view_bits::<Msb0>()[..cell.count]);
                 }
                 *out = ColumnData::Bit(bits);
+                Ok(())
             }
             Self::Logical => refill(
                 out,
@@ -152,8 +158,9 @@ impl ElementKind {
                     ColumnData::Character(values) => values,
                     _ => Vec::new(),
                 };
-                decode_be_cells_into(bytes(cells), capacity, |[byte]| byte, &mut values);
+                decode_be_cells_into(bytes(cells), capacity, |[byte]| byte, &mut values)?;
                 *out = ColumnData::Character(values);
+                Ok(())
             }
             Self::I16 => refill(
                 out,
@@ -229,51 +236,64 @@ impl ElementKind {
         }
     }
 
-    /// Decode `cells` to the physical `f64` plane, as an image's samples decode:
-    /// `TZEROn + TSCALn × raw`, mapping integers equal to `TNULLn` to `NaN`; `None` for
-    /// the non-numeric kinds.
-    pub(super) fn decode_physical<'a>(
+    /// Whether this kind is `C` or `M`.
+    pub(super) const fn is_complex(self) -> bool {
+        matches!(self, Self::ComplexF32 | Self::ComplexF64)
+    }
+
+    /// Decode `cells`, which hold `capacity` elements in all, to the physical `f64`
+    /// plane, as an image's samples decode: `TZEROn + TSCALn × raw`, mapping integers
+    /// equal to `TNULLn` to `NaN`.
+    ///
+    /// # Panics
+    /// For a non-numeric kind, which the caller refuses first.
+    pub(super) fn decode_physical_into<'a, T: PhysicalSample>(
         self,
         cells: impl Iterator<Item = &'a [u8]>,
         capacity: usize,
         scaling: &Scaling,
-    ) -> Option<Vec<f64>> {
-        let bitpix = self.bitpix()?;
-        let mut out = Vec::with_capacity(capacity);
+        out: &mut Vec<T>,
+    ) -> Result<()> {
+        let bitpix = self
+            .bitpix()
+            .expect("the caller refuses a non-numeric kind");
+        allocation::try_reserve(out, capacity)?;
         for cell in cells {
-            bitpix.extend_physical_be(cell, scaling, &mut out);
+            bitpix.extend_physical_be(cell, scaling, out);
         }
-        Some(out)
+        Ok(())
     }
 
-    /// Decode `cells` as `C`/`M` complex values, applying `TSCALn` to both
-    /// components and `TZEROn` to the real component (§7.3.2); `None` for the other
-    /// kinds.
+    /// Decode `cells`, which hold `capacity` elements in all, as `C`/`M` complex values,
+    /// applying `TSCALn` to both components and `TZEROn` to the real component (§7.3.2).
+    ///
+    /// # Panics
+    /// For a kind that is not complex, which the caller refuses first.
     pub(super) fn decode_complex<'a>(
         self,
         cells: impl Iterator<Item = &'a [u8]>,
         capacity: usize,
         tscale: f64,
         tzero: f64,
-    ) -> Option<Vec<Complex<f64>>> {
+    ) -> Result<Vec<Complex<f64>>> {
         let scale = |re: f64, im: f64| Complex {
-            re: tzero + tscale * re,
+            re: tscale.mul_add(re, tzero),
             im: tscale * im,
         };
         match self {
-            Self::ComplexF32 => Some(decode_be_cells(cells, capacity, |bytes: [u8; 8]| {
+            Self::ComplexF32 => decode_be_cells(cells, capacity, |bytes: [u8; 8]| {
                 scale(
                     f64::from(f32::from_be_bytes(bytes[..4].try_into().unwrap())),
                     f64::from(f32::from_be_bytes(bytes[4..].try_into().unwrap())),
                 )
-            })),
-            Self::ComplexF64 => Some(decode_be_cells(cells, capacity, |bytes: [u8; 16]| {
+            }),
+            Self::ComplexF64 => decode_be_cells(cells, capacity, |bytes: [u8; 16]| {
                 scale(
                     f64::from_be_bytes(bytes[..8].try_into().unwrap()),
                     f64::from_be_bytes(bytes[8..].try_into().unwrap()),
                 )
-            })),
-            _ => None,
+            }),
+            _ => unreachable!("the caller refuses a kind that is not complex"),
         }
     }
 }
@@ -304,11 +324,13 @@ fn refill<'a, const N: usize, T>(
     capacity: usize,
     conv: impl Fn([u8; N]) -> T,
     wrap: fn(Vec<T>) -> ColumnData,
-) where
+) -> Result<()>
+where
     Vec<T>: TryFrom<ColumnData>,
 {
     let mut values =
         Vec::<T>::try_from(mem::replace(out, ColumnData::U8(Vec::new()))).unwrap_or_default();
-    decode_be_cells_into(cells, capacity, conv, &mut values);
+    let decoded = decode_be_cells_into(cells, capacity, conv, &mut values);
     *out = wrap(values);
+    decoded
 }

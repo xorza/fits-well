@@ -11,6 +11,8 @@ use crate::world_coordinates::projection::Projection;
 /// value with no hyphen-delimited suffix is a bare coordinate type.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Ctype<'a> {
+    /// The whole value, as the header holds it.
+    pub(crate) value: &'a str,
     /// The coordinate-type name, blanks trimmed.
     pub(crate) head: &'a str,
     /// The trailing algorithm code; `None` for a bare head.
@@ -28,6 +30,7 @@ impl<'a> Ctype<'a> {
             (value, None)
         };
         Ctype {
+            value,
             head: base.split('-').next().unwrap_or("").trim(),
             algorithm: base
                 .rsplit_once('-')

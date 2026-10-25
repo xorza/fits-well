@@ -1,10 +1,17 @@
 use crate::alternate::Alternate;
 use crate::fits_error::FitsError;
+use crate::fits_error::KeywordDefect;
+use crate::fits_error::ValueKind;
+use crate::fits_error::WcsConflict;
 use crate::header_model::Header;
 use crate::header_model::record_name::RecordName;
+use crate::header_model::value::Value;
+use crate::internals::cards;
 use crate::internals::fixture::Fixture;
-use crate::internals::tolerance::{Tolerance, assert_close, max_abs_diff};
+use crate::internals::tolerance;
+use crate::internals::tolerance::Tolerance;
 use crate::internals::wcs_header::{Family, WcsHeader};
+use crate::keyword::Keyword;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::ctype::Ctype;
 use crate::world_coordinates::distortion::Distortion;
@@ -12,6 +19,7 @@ use crate::world_coordinates::distortion::sip::Sip;
 use crate::world_coordinates::distortion::tpv::Tpv;
 use crate::world_coordinates::internals::{to_pixel, to_world};
 use crate::world_coordinates::projection::Projection;
+use std::assert_matches;
 
 /// `header` with its distortion removed: plain TAN, no SIP keyword and no `PV`. Its round
 /// trip is the projection's own error, which the present TAN pipeline makes larger than
@@ -31,7 +39,7 @@ fn without_distortion(header: &Header) -> Wcs {
 
 /// How far `pixel` lands from itself through world coordinates and back.
 fn round_trip_error(wcs: &Wcs, pixel: &[f64]) -> f64 {
-    max_abs_diff(
+    tolerance::max_abs_diff(
         &to_pixel(wcs, &to_world(wcs, pixel).unwrap()).unwrap(),
         pixel,
     )
@@ -65,10 +73,12 @@ fn ctype_distortion_codes() {
     let wcs = Wcs::from_header(&header, None).unwrap();
     assert_eq!(wcs.description().unsupported_axes, [0, 1]);
     header.set_internal("CTYPE1", "RA---TAN");
-    assert!(matches!(
+    assert_matches!(
         Wcs::from_header(&header, None),
-        Err(FitsError::ConflictingWcsKeywords { .. })
-    ));
+        Err(FitsError::ConflictingWcsKeywords {
+            conflict: WcsConflict::MismatchedProjections
+        })
+    );
 }
 
 /// An order-2 SIP worked by hand: `A_2_0 = 0.001`, `A_1_1 = 0.002`, `B_0_2 = 0.003`
@@ -82,9 +92,15 @@ fn sip_is_a_prior_distortion_worked_by_hand() {
         .image_header();
     let sip = Sip::from_header(&header).unwrap().unwrap();
     let [u, v] = sip.forward(3.0, -2.0);
-    // Within the rounding of a three-term sum.
-    assert!((u - 2.997).abs() <= 4.0 * f64::EPSILON * 3.0, "{u}");
-    assert!((v + 1.988).abs() <= 4.0 * f64::EPSILON * 2.0, "{v}");
+    tolerance::assert_close(
+        &[u, v],
+        &[2.997, -1.988],
+        Tolerance::ulps(
+            4.0 * 1.5,
+            "the rounding of a three-term sum, of terms up to 3",
+        ),
+        "SIP forward",
+    );
 
     let wcs = Wcs::from_header(&header, None).unwrap();
     assert_eq!(wcs.description().distortion, Some(Distortion::Sip));
@@ -95,7 +111,7 @@ fn sip_is_a_prior_distortion_worked_by_hand() {
     .unwrap();
     let distorted = to_world(&wcs, &[13.0, 18.0]).unwrap();
     let shifted = to_world(&plain, &[10.0 + 2.997, 20.0 - 1.988]).unwrap();
-    assert_close(
+    tolerance::assert_close(
         &distorted,
         &shifted,
         Tolerance::abs(1e-12, "the rounding of the offsets and of the projection"),
@@ -115,8 +131,24 @@ fn sip_on_astropys_irac_header() {
         .unwrap()
         .forward(72.0, 72.0);
     let expected_u = 72.0 + (6.666e-6 + 1.801e-5 - 2.353e-5) * 72.0 * 72.0;
-    assert!((u / 72.0 - 1.0).abs() <= 1e-3 && (v / 72.0 - 1.0).abs() <= 1e-3);
-    assert!((u - expected_u).abs() <= 1e-12, "{u} {expected_u}");
+    tolerance::assert_close(
+        &[u, v],
+        &[72.0, 72.0],
+        Tolerance::rel(
+            1e-3,
+            "astropy's IRAC SIP moves a pixel 72 from CRPIX by under 0.1 %",
+        ),
+        "IRAC SIP near the reference",
+    );
+    tolerance::assert_within(
+        u,
+        expected_u,
+        Tolerance::abs(
+            1e-12,
+            "the three SIP terms of order 0.1, each rounded, beside 72",
+        ),
+        "IRAC SIP u",
+    );
 
     let wcs = Wcs::from_header(&header, None).unwrap();
     assert_eq!(wcs.description().distortion, Some(Distortion::Sip));
@@ -134,7 +166,7 @@ fn sip_on_astropys_irac_header() {
         );
     }
 
-    let mut no_code = header.clone();
+    let mut no_code = header;
     no_code
         .set_internal("CTYPE1", "RA---TAN")
         .set_internal("CTYPE2", "DEC--TAN");
@@ -144,34 +176,23 @@ fn sip_on_astropys_irac_header() {
         to_world(&uncoded, &[17.0, 230.0]).unwrap(),
         to_world(&wcs, &[17.0, 230.0]).unwrap()
     );
-
-    let mut no_keywords = header.clone();
-    no_keywords
-        .remove_where(|name| name.as_str().starts_with("A_") || name.as_str().starts_with("B_"));
-    assert!(matches!(
-        Wcs::from_header(&no_keywords, None),
-        Err(FitsError::MissingKeyword { name: RecordName::Keyword(keyword) }) if keyword == "A_ORDER"
-    ));
-    let mut too_high = header.clone();
-    too_high.set_internal("A_ORDER", 10);
-    assert!(matches!(
-        Wcs::from_header(&too_high, None),
-        Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "A_ORDER"
-    ));
-    let mut b_alone = header;
-    b_alone.remove_where(|name| name.as_str().starts_with("A_"));
-    assert!(matches!(
-        Wcs::from_header(&b_alone, None),
-        Err(FitsError::MissingKeyword { name: RecordName::Keyword(keyword) }) if keyword == "A_ORDER"
-    ));
 }
 
-/// SIP keywords carry no alternate letter, so an alternate description takes no SIP.
+/// SIP keywords carry no alternate letter, so an alternate description takes no SIP: a
+/// plain `TAN` alternate beside the primary's SIP evaluates without it, and a `TAN-SIP`
+/// alternate, which names a distortion it has no keywords for, is refused rather than
+/// evaluated as plain `TAN`. TPV's `PVi_ma` carry the letter, so each description takes
+/// its own: `PV1_4 = 0.5` and `PV1_4A = 0.25` give `ξ = 0.3 + c·0.09` at `(0.3, 0.4)`,
+/// 0.345 and 0.3225.
 #[test]
-fn an_alternate_description_takes_no_sip() {
+fn each_description_takes_only_its_own_distortion_keywords() {
     let description = WcsHeader::celestial("TAN-SIP", [10.0, 20.0], [30.0, 40.0], [1e-3, 1e-3]);
     let mut header = description.sip().image_header();
-    description.write_into(&mut header, Family::Image, 'A');
+    WcsHeader {
+        projection: "TAN",
+        ..description
+    }
+    .write_into(&mut header, Family::Image, 'A');
     let alternate = Wcs::from_header(&header, 'A').unwrap();
     assert_eq!(alternate.description().distortion, None);
     assert_eq!(
@@ -181,13 +202,31 @@ fn an_alternate_description_takes_no_sip() {
             .distortion,
         Some(Distortion::Sip)
     );
+    description.write_into(&mut header, Family::Image, 'A');
+    assert_matches!(
+        Wcs::from_header(&header, 'A'),
+        Err(FitsError::ConflictingWcsKeywords {
+            conflict: WcsConflict::SipAlternate
+        })
+    );
+
+    let tpv = cards::header_of(&[("PV1_4", 0.5.into()), ("PV1_4A", 0.25.into())]);
+    for (alt, xi) in [(Alternate::PRIMARY, 0.345), (Alternate::new('A'), 0.3225)] {
+        let [got, eta] = Tpv::from_header(&tpv, alt, 0, 1).unwrap().forward(0.3, 0.4);
+        tolerance::assert_close(
+            &[got, eta],
+            &[xi, 0.4],
+            Tolerance::abs(2.0 * f64::EPSILON, "the rounding of a two-term sum below 1"),
+            "TPV of each description",
+        );
+    }
 }
 
 /// Pixel offsets of 1e5 have a spacing of 1.5e-11, which an absolute 1e-13 can never
 /// meet; the relative stop rule lets the inverse converge, and SIP adds no more than
 /// 1e-9 pixel to the whole round trip.
 #[test]
-fn the_sip_inverse_converges_far_from_crpix() {
+fn sip_inverse_converges_far_from_crpix() {
     let mut header =
         WcsHeader::celestial("TAN-SIP", [1.0, 1.0], [0.0, 0.0], [1e-6, 1e-6]).image_header();
     header
@@ -198,9 +237,20 @@ fn the_sip_inverse_converges_far_from_crpix() {
     let sip = Sip::from_header(&header).unwrap().unwrap();
     let [u, v] = sip.forward(1e5, 1.0);
     let [back_u, back_v] = sip.inverse(u, v).unwrap();
-    assert!(
-        (back_u - 1e5).abs() <= 1e-8 && (back_v - 1.0).abs() <= 1e-13,
-        "{back_u} {back_v}"
+    tolerance::assert_within(
+        back_u,
+        1e5,
+        Tolerance::abs(
+            1e-8,
+            "the relative stop rule at offsets of 1e5, whose ulp is 1.5e-11",
+        ),
+        "SIP inverse u",
+    );
+    tolerance::assert_within(
+        back_v,
+        1.0,
+        Tolerance::abs(1e-13, "the stop rule's residual of at most 1e-13"),
+        "SIP inverse v",
     );
     let wcs = Wcs::from_header(&header, None).unwrap();
     let pixel = [1e5 + 1.0, 2.0];
@@ -223,7 +273,7 @@ fn sip_and_tpv_forms_of_one_header_agree() {
     assert_eq!(tpv.description().distortion, Some(Distortion::Tpv));
     let crpix = [-3925.16, 4360.23];
     assert!(
-        max_abs_diff(
+        tolerance::max_abs_diff(
             &to_world(&sip, &crpix).unwrap(),
             &to_world(&tpv, &crpix).unwrap()
         ) < 5e-7
@@ -236,7 +286,7 @@ fn sip_and_tpv_forms_of_one_header_agree() {
                 to_world(&sip, &[x, y]).unwrap(),
                 to_world(&tpv, &[x, y]).unwrap(),
             );
-            largest = largest.max(max_abs_diff(&a, &b));
+            largest = largest.max(tolerance::max_abs_diff(&a, &b));
             let bound = round_trip_error(&undistorted, &[x, y]) + 1e-9;
             assert!(
                 round_trip_error(&tpv, &[x, y]) <= bound,
@@ -273,34 +323,113 @@ fn tpv_is_a_sequent_distortion_worked_by_hand() {
         .set_internal("PV2_3", 0.25);
     let tpv = Tpv::from_header(&header, Alternate::PRIMARY, 0, 1).unwrap();
     let [xi, eta] = tpv.forward(0.3, 0.4);
-    // Within the rounding of a two-term sum.
-    assert!((xi - 0.345).abs() <= 2.0 * f64::EPSILON, "{xi}");
-    assert!((eta - 0.525).abs() <= 2.0 * f64::EPSILON, "{eta}");
+    tolerance::assert_close(
+        &[xi, eta],
+        &[0.345, 0.525],
+        Tolerance::abs(2.0 * f64::EPSILON, "the rounding of a two-term sum below 1"),
+        "TPV forward",
+    );
     // The stop rule leaves residuals of at most 1e-13, and the Jacobian's diagonal,
     // `1 + x = 1.3` and `1 + 0.25·y/r = 1.2`, is above 1, so each error is smaller.
     let [x, y] = tpv.inverse(xi, eta).unwrap();
-    assert!(
-        (x - 0.3).abs() <= 1e-13 && (y - 0.4).abs() <= 1e-13,
-        "{x} {y}"
+    tolerance::assert_close(
+        &[x, y],
+        &[0.3, 0.4],
+        Tolerance::abs(
+            1e-13,
+            "the stop rule's residual, through a Jacobian diagonal above 1",
+        ),
+        "TPV inverse",
     );
 }
 
-/// `U = u − 0.001·u²` peaks at `U = 250` (at `u = 500`): past the fold no `u` gives
-/// `U = 300`, and the inverse refuses rather than return a wrong one.
+/// `U = u − 0.001·u²`, SIP's `A_2_0` or TPV's `PV1_4` of `−0.001`, peaks at `U = 250`
+/// (at `u = 500`): past the fold no `u` gives `U = 300`, and each inverse refuses rather
+/// than return a wrong one. The stop rule leaves a residual of at most 1e-13·240 in `U`,
+/// and `dU/du` is 0.2 at `u = 400`, so `u` is within 1.2e-10.
 #[test]
-fn the_inverse_refuses_a_point_past_a_fold() {
-    let mut header = Header::new();
-    header
-        .set_internal("A_ORDER", 2)
-        .set_internal("A_2_0", -1e-3)
-        .set_internal("B_ORDER", 2);
-    let sip = Sip::from_header(&header).unwrap().unwrap();
-    assert!(matches!(
-        sip.inverse(300.0, 0.0),
-        Err(FitsError::WcsNoConvergence { algorithm: "SIP" })
-    ));
-    // The stop rule leaves a residual of at most 1e-13·240 in `U`, and `dU/du` is
-    // 0.2 at `u = 400`, so `u` is within 1.2e-10.
-    let [u, v] = sip.inverse(240.0, 0.0).unwrap();
-    assert!((u - 400.0).abs() <= 1.2e-10 && v == 0.0, "{u}");
+fn each_inverse_refuses_a_point_past_a_fold() {
+    let sip = Sip::from_header(&cards::header_of(&[
+        ("A_ORDER", 2.into()),
+        ("A_2_0", (-1e-3).into()),
+        ("B_ORDER", 2.into()),
+    ]))
+    .unwrap()
+    .unwrap();
+    let tpv = Tpv::from_header(
+        &cards::header_of(&[("PV1_4", (-1e-3).into())]),
+        Alternate::PRIMARY,
+        0,
+        1,
+    )
+    .unwrap();
+    for (algorithm, past, within) in [
+        ("SIP", sip.inverse(300.0, 0.0), sip.inverse(240.0, 0.0)),
+        ("TPV", tpv.inverse(300.0, 0.0), tpv.inverse(240.0, 0.0)),
+    ] {
+        assert_matches!(
+            past,
+            Err(FitsError::WcsNoConvergence { algorithm: refused }) if refused == algorithm
+        );
+        let [u, v] = within.unwrap();
+        tolerance::assert_within(
+            u,
+            400.0,
+            Tolerance::abs(1.2e-10, "a residual of 1e-13·240 in U over dU/du = 0.2"),
+            algorithm,
+        );
+        assert_eq!(v, 0.0, "{algorithm}");
+    }
+}
+
+/// A defective distortion keyword fails the description by name: SIP with neither
+/// order, one order alone, an order past 9, or a coefficient that is no number; TPV with
+/// a coefficient that is no number.
+#[test]
+fn defective_distortion_keyword_is_refused_by_name() {
+    let sip = || {
+        WcsHeader::celestial("TAN-SIP", [10.0, 20.0], [30.0, 40.0], [1e-3, 1e-3])
+            .sip()
+            .image_header()
+    };
+    let tpv =
+        || WcsHeader::celestial("TPV", [10.0, 20.0], [30.0, 40.0], [1e-3, 1e-3]).image_header();
+    let removed = |mut header: Header, prefixes: &[&str]| {
+        header.remove_where(|name| {
+            prefixes
+                .iter()
+                .any(|prefix| name.as_str().starts_with(prefix))
+        });
+        header
+    };
+    let set = |mut header: Header, keyword: &str, value: Value| {
+        header.set_internal(keyword, value);
+        header
+    };
+    let missing = |keyword: &str| FitsError::MissingKeyword {
+        name: RecordName::Keyword(Keyword::try_from(keyword).unwrap()),
+    };
+    let mistyped = |keyword: &str| FitsError::ValueTypeMismatch {
+        name: RecordName::Keyword(Keyword::try_from(keyword).unwrap()),
+        expected: ValueKind::Real,
+    };
+    for (header, expected) in [
+        (removed(sip(), &["A_", "B_"]), missing("A_ORDER")),
+        (removed(sip(), &["A_"]), missing("A_ORDER")),
+        (removed(sip(), &["B_"]), missing("B_ORDER")),
+        (
+            set(sip(), "A_ORDER", 10.into()),
+            FitsError::InvalidKeywordValue {
+                keyword: Keyword::new("A_ORDER"),
+                defect: KeywordDefect::Range,
+            },
+        ),
+        (set(sip(), "A_2_0", "text".into()), mistyped("A_2_0")),
+        (set(tpv(), "PV1_4", "text".into()), mistyped("PV1_4")),
+    ] {
+        assert_eq!(
+            format!("{:?}", Wcs::from_header(&header, None).map(drop)),
+            format!("{:?}", Err::<(), _>(expected))
+        );
+    }
 }
