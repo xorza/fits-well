@@ -129,3 +129,42 @@ fn stored_byte_pass_gives_the_physical_plane_of_the_sample_pass() {
         );
     }
 }
+
+/// Cells of 1 sample, which take their own step, and of 3, 600 samples in each case, cross
+/// the blocks of 256 the gathered pass scales in: the values equal those of the cells
+/// scaled one at a time, bit for bit, in both planes.
+#[test]
+fn the_cells_pass_gives_the_cell_by_cell_physical_values() {
+    let scaling = Scaling {
+        bscale: 2.0,
+        bzero: 10.0,
+        blank: Some(-2),
+    };
+    let samples: Vec<i16> = (0..600).map(|i| (i % 7) as i16 - 3).collect();
+    let bytes = Data::I16(samples).encode();
+    for per_cell in [1, 3] {
+        let cells = || bytes.chunks(per_cell * 2);
+        let mut whole: Vec<f64> = Vec::new();
+        Bitpix::I16.extend_physical_be_cells(cells(), &scaling, &mut whole);
+        let mut each: Vec<f64> = Vec::new();
+        for cell in cells() {
+            Bitpix::I16.extend_physical_be(cell, &scaling, &mut each);
+        }
+        assert_eq!(
+            samples::bits_of(&whole),
+            samples::bits_of(&each),
+            "{per_cell}"
+        );
+        let mut whole: Vec<f32> = Vec::new();
+        Bitpix::I16.extend_physical_be_cells(cells(), &scaling, &mut whole);
+        let mut each: Vec<f32> = Vec::new();
+        for cell in cells() {
+            Bitpix::I16.extend_physical_be(cell, &scaling, &mut each);
+        }
+        assert_eq!(
+            samples::bits_of(&whole),
+            samples::bits_of(&each),
+            "{per_cell}"
+        );
+    }
+}

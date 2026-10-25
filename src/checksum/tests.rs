@@ -7,6 +7,7 @@ use crate::header_model::keywords;
 use crate::internals::cards;
 use crate::internals::cards::VALID;
 use crate::internals::fixture::Fixture;
+use crate::internals::rng::SplitMix;
 
 #[test]
 fn accumulate_folds_end_around_carry() {
@@ -202,4 +203,41 @@ fn report_is_valid_only_when_both_sums_are() {
             (ChecksumStatus::Invalid, ChecksumStatus::Invalid),
         ]
     );
+}
+
+/// The deferred-carry sum equals the sum that folds each word's carry at once, over random
+/// bytes and seeds, all-ones words that wrap on every add, and zeros.
+#[test]
+fn deferred_carries_give_the_word_by_word_sum() {
+    let word_by_word = |bytes: &[u8], seed: u32| {
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .fold(seed, |sum, word| combine(sum, u32::from_be_bytes(*word)))
+    };
+    let mut rng = SplitMix::new(0xc4ec_5e5d);
+    for round in 0..200 {
+        let len = 4 * (rng.next() % 2000) as usize;
+        let bytes: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+        let seed = rng.next() as u32;
+        assert_eq!(
+            accumulate(&bytes, seed),
+            word_by_word(&bytes, seed),
+            "round {round}"
+        );
+    }
+    for (bytes, seed) in [
+        (vec![0xFF; 4096], 0xFFFF_FFFF),
+        (vec![0xFF; 4096], 0),
+        (vec![0; 4096], 0),
+        (vec![0; 4096], 0xFFFF_FFFF),
+        (vec![0xFF, 0xFF, 0xFF, 0xFE], 1),
+    ] {
+        assert_eq!(
+            accumulate(&bytes, seed),
+            word_by_word(&bytes, seed),
+            "{seed:#x}"
+        );
+    }
 }

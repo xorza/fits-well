@@ -897,7 +897,7 @@ impl SubvoxelSearch<'_> {
 
     fn locate(&mut self, level: usize) -> Result<bool> {
         let dimensions = self.transform.axes.len();
-        let size = 2.0f64.powi(-i32::try_from(level).expect("the search depth fits i32"));
+        let size = subvoxel_size(level);
         if self.node_work > self.remaining_work {
             return Err(FitsError::WcsNoConvergence { algorithm: "TAB" });
         }
@@ -1099,6 +1099,17 @@ const fn domain(axis: usize) -> FitsError {
     FitsError::WcsCoordinateOutOfDomain {
         axis,
         algorithm: "TAB",
+    }
+}
+
+/// `2^-level`, the side of a subvoxel at `level`, exactly, from its bits: normal to 1022,
+/// subnormal to 1074, then 0. Refused: `powi`, a library call on each node whose precision
+/// is unspecified, and which past 1023 gives 0 on Linux and a subnormal on Windows.
+const fn subvoxel_size(level: usize) -> f64 {
+    match level {
+        0..=1022 => f64::from_bits(((1023 - level) as u64) << 52),
+        1023..=1074 => f64::from_bits(1 << (1074 - level)),
+        _ => 0.0,
     }
 }
 

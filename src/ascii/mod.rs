@@ -10,6 +10,7 @@ pub(crate) mod ascii_tform;
 #[cfg(feature = "internals")]
 pub(crate) mod bench;
 
+use crate::blank;
 use crate::fits_error::KeywordDefect;
 use std::io::{self, Write};
 use std::{fmt, mem, result, str};
@@ -294,7 +295,7 @@ impl<'a> AsciiColumnReader<'a> {
                 };
                 text.refill(rows.map(|r| {
                     let field = table.field(col, r);
-                    (tnull != Some(field.trim())).then_some(field)
+                    (tnull != Some(blank::trim(field))).then_some(field)
                 }));
                 *out = AsciiColumnData::Text(text);
             }
@@ -407,7 +408,7 @@ impl Ascii {
     /// The trimmed text of the field of `col` in `row`, or `None` when it is the column's
     /// `TNULLn` marker `tnull` and so carries no value at all (§7.2.5).
     fn defined_field(&self, col: &AsciiColumn, tnull: Option<&str>, row: usize) -> Option<&str> {
-        let field = self.field(col, row).trim();
+        let field = blank::trim(self.field(col, row));
         (tnull != Some(field)).then_some(field)
     }
 }
@@ -490,6 +491,19 @@ impl Named for AsciiColumn {
 /// value is the f64 nearest the decimal the field spells — what strtod gives cfitsio —
 /// rather than a parsed mantissa times a rounded power of ten.
 fn parse_ascii_float(field: &str, decimals: usize) -> Option<f64> {
+    // A field with a point that parses as a Rust literal has the point in its mantissa
+    // and an `E` exponent, or none, so it names the decimal the rebuilt text would: the
+    // same value, with no split first. An exponent of over 18 characters, which `i64` may
+    // not hold, takes the rebuilt text, which refuses it.
+    if field.as_bytes().contains(&b'.')
+        && let Ok(value) = field.parse::<f64>()
+        && field
+            .bytes()
+            .rposition(|byte| byte | 0x20 == b'e')
+            .is_none_or(|separator| field.len() - separator - 1 <= 18)
+    {
+        return value.is_finite().then_some(value);
+    }
     let Scientific { mantissa, exponent } = split_mantissa_exponent(field).unwrap_or(Scientific {
         mantissa: field,
         exponent: "",

@@ -83,6 +83,10 @@ pub(super) struct PlainRead<'a, S> {
     pub(super) sum: Option<&'a mut DataChecksum>,
 }
 
+/// The bytes a stream read swaps at a time: half of a core's 512 KiB L2, so a chunk is
+/// still cached when it swaps.
+const SWAP_CHUNK: usize = 256 * 1024;
+
 impl<S: Source> PlainRead<'_, S> {
     /// Fill `out` with the samples of `runs`, host-endian: decoded from the borrowed
     /// bytes of a resident source, or read into `out` and swapped in place, with no
@@ -103,18 +107,21 @@ impl<S: Source> PlainRead<'_, S> {
                 }
                 T::decode_be(bytes, samples);
             } else {
-                let bytes = words::bytes_mut(samples);
-                self.data.read_into(offset, bytes)?;
-                if let Some(sum) = self.sum.as_deref_mut() {
-                    sum.feed(offset, bytes);
+                // A chunk swaps as soon as it lands, while the cache still holds it, not in a
+                // second pass over the whole run.
+                let mut chunk_offset = offset;
+                for chunk in samples.chunks_mut(SWAP_CHUNK / size) {
+                    let bytes = words::bytes_mut(chunk);
+                    self.data.read_into(chunk_offset, bytes)?;
+                    if let Some(sum) = self.sum.as_deref_mut() {
+                        sum.feed(chunk_offset, bytes);
+                    }
+                    chunk_offset = offset_at(chunk_offset, bytes.len())?;
+                    T::swap_be_in_place(chunk);
                 }
             }
             Ok(())
-        })?;
-        if !resident {
-            T::swap_be_in_place(out);
-        }
-        Ok(())
+        })
     }
 
     /// The samples of `runs`, of type `bitpix`, owned.

@@ -12,14 +12,33 @@ pub(crate) mod running;
 /// The `CHECKSUM` value a header renders with before its sum is known (Appendix J.1).
 pub(crate) const PLACEHOLDER: &str = "0000000000000000";
 
-/// Accumulate the 32-bit ones'-complement checksum of `bytes` into `seed`.
+/// The words one 64-bit total adds before it folds: with the seed, at most
+/// (2³¹ + 1)(2³² − 1), below 2⁶⁴.
+const WORDS_PER_FOLD: usize = 1 << 31;
+
+/// Accumulate the 32-bit ones'-complement checksum of `bytes` into `seed`. The words add
+/// in a 64-bit total whose carries fold in once, as RFC 1071 defers them, not one at a
+/// time: the same sum, as each is the representative of the total modulo 2³² − 1 that is
+/// 0 only for a total of 0, and the adds no longer wait on each other's carry.
 pub(crate) fn accumulate(bytes: &[u8], seed: u32) -> u32 {
     debug_assert_eq!(bytes.len() % 4, 0, "checksum input must be word-aligned");
     let mut sum = seed;
-    for word in bytes.as_chunks::<4>().0 {
-        sum = combine(sum, u32::from_be_bytes(*word));
+    for block in bytes.as_chunks::<4>().0.chunks(WORDS_PER_FOLD) {
+        let total = block.iter().fold(u64::from(sum), |total, word| {
+            total + u64::from(u32::from_be_bytes(*word))
+        });
+        sum = fold(total);
     }
     sum
+}
+
+/// `total` modulo 2³² − 1, its end-around carries added back: 0 only for 0, and
+/// 0xFFFF_FFFF for another multiple of 2³² − 1, as [`combine`] gives.
+const fn fold(mut total: u64) -> u32 {
+    while total > 0xFFFF_FFFF {
+        total = (total & 0xFFFF_FFFF) + (total >> 32);
+    }
+    total as u32
 }
 
 pub(crate) const fn combine(left: u32, right: u32) -> u32 {

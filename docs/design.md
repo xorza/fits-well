@@ -17,8 +17,10 @@ its doc comments show how each one works. Sources: the FITS 4.0 standard
   index; the decode's buffers live only while a read runs. Refused: a staging copy of
   the unit or the section, which never shrank.
 - **A plain read lands in the buffer it returns.** A stream reads the stored samples
-  straight into it and swaps them in place, and a resident source decodes from its
-  borrowed bytes. Refused: a staging copy, measured 7–25 % slower from a stream.
+  straight into it and swaps each 256 KiB as it lands, while the cache holds it, and a
+  resident source decodes from its borrowed bytes. Refused: a staging copy, measured
+  7–25 % slower from a stream, and one swap of the whole run after its read, a second
+  pass through memory, 16 % slower for a whole frame (`.notes/PERF.md`).
 - **A stream reads adjacent ranges as one, and does not seek between them.** A
   selection's buffer grows as a `Vec` grows. Refused: a seek and an exact reservation
   for each range, which made a selection of n rows O(n²).

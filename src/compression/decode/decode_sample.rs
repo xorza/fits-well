@@ -86,7 +86,11 @@ fn fit_integers(values: &mut [i64], min: i64, max: i64, overshoot: Overshoot) ->
             }
         }
         Overshoot::Refuse => {
-            if values.iter().any(|value| !(min..=max).contains(value)) {
+            // A fold without an early exit vectorizes: a refused tile is rare, and
+            // `any` scans a sound one a value at a time.
+            if values.iter().fold(false, |outside, value| {
+                outside | !(min..=max).contains(value)
+            }) {
                 return Err(CompressedDataDefect::ValueOutOfRange.into());
             }
         }

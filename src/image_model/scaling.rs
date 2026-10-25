@@ -150,6 +150,45 @@ impl Scaling {
         }
     }
 
+    /// [`Scaling::extend_physical_be`] over the big-endian samples of `cells`, which each
+    /// hold whole samples: the cells' samples gather in one block, so a column of one
+    /// sample a row scales a block at a time, not a call a cell.
+    pub(crate) fn extend_physical_be_cells<'a, T: Sample, O: PhysicalSample>(
+        &self,
+        cells: impl Iterator<Item = &'a [u8]>,
+        out: &mut Vec<O>,
+    ) {
+        const BLOCK: usize = 256;
+        let size = size_of::<T>();
+        let mut block = [T::default(); BLOCK];
+        let mut len = 0;
+        for mut cell in cells {
+            debug_assert_eq!(cell.len() % size, 0, "whole big-endian samples");
+            // A column of one sample a row, the common case, takes its cell whole.
+            if cell.len() == size {
+                T::decode_be(cell, &mut block[len..=len]);
+                len += 1;
+                if len == BLOCK {
+                    self.extend_physical(&block, out);
+                    len = 0;
+                }
+                continue;
+            }
+            while !cell.is_empty() {
+                let take = ((BLOCK - len) * size).min(cell.len());
+                let (bytes, rest) = cell.split_at(take);
+                T::decode_be(bytes, &mut block[len..len + take / size]);
+                len += take / size;
+                cell = rest;
+                if len == BLOCK {
+                    self.extend_physical(&block, out);
+                    len = 0;
+                }
+            }
+        }
+        self.extend_physical(&block[..len], out);
+    }
+
     pub(crate) fn validate(&self, bitpix: Bitpix) -> Result<()> {
         if !self.bscale.is_finite() {
             return Err(FitsError::InvalidKeywordValue {

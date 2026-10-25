@@ -139,12 +139,82 @@ pub(super) struct QuantizeScratch {
     /// An integer tile widened for its noise estimate.
     floats: Vec<f64>,
     row: Vec<f64>,
-    differences2: Vec<f64>,
-    differences3: Vec<f64>,
-    differences5: Vec<f64>,
-    medians2: Vec<f64>,
-    medians3: Vec<f64>,
-    medians5: Vec<f64>,
+    /// A row of an f32 image, its differences taken in `f32`.
+    row_single: Vec<f32>,
+    /// The differences and the per-row medians, each a non-negative float as its bit
+    /// pattern, whose integer order is the floats' `total_cmp` order.
+    differences: Differences,
+    medians2: Vec<u64>,
+    medians3: Vec<u64>,
+    medians5: Vec<u64>,
+}
+
+/// The absolute 2nd, 3rd and 5th order differences of a row, as bit patterns.
+#[derive(Debug, Default)]
+struct Differences {
+    second: Vec<u64>,
+    third: Vec<u64>,
+    fifth: Vec<u64>,
+}
+
+impl Differences {
+    /// The differences of the windows of 9 of `row` (cfitsio `FnNoise5_float`), each step
+    /// rounded in `F`, a window of equal values skipped as cfitsio skips it.
+    fn take<F: NoiseFloat>(&mut self, row: &[F]) {
+        self.second.clear();
+        self.third.clear();
+        self.fifth.clear();
+        let [two, four, six] = [2.0, 4.0, 6.0].map(F::of);
+        for w in row.windows(9) {
+            let [v1, _, v3, v4, v5, v6, v7, _, v9] = *w else {
+                unreachable!("a window of 9")
+            };
+            if !(v5 == v6 && v6 == v7) {
+                self.second.push((v5 - v7).abs_bits());
+            }
+            if !(v3 == v4 && v4 == v5 && v5 == v6 && v6 == v7) {
+                self.third.push((two * v5 - v3 - v7).abs_bits());
+                self.fifth
+                    .push((six * v5 - four * v3 - four * v7 + v1 + v9).abs_bits());
+            }
+        }
+    }
+}
+
+/// The float a tile's differences are taken in. Each step rounds once in it, as cfitsio's
+/// `float` and `double` do; for an f32 image that is the `f64` step rounded to `f32`, as
+/// 53 ≥ 2·24 + 2 bits make the double rounding innocuous for `+`, `−` and `×` (Figueroa,
+/// "When is double rounding innocuous?", 1995), without two conversions a step.
+trait NoiseFloat:
+    Copy
+    + PartialEq
+    + std::ops::Add<Output = Self>
+    + std::ops::Sub<Output = Self>
+    + std::ops::Mul<Output = Self>
+{
+    fn of(value: f64) -> Self;
+    /// `|self|` widened to `f64`, as its bit pattern.
+    fn abs_bits(self) -> u64;
+}
+
+impl NoiseFloat for f32 {
+    fn of(value: f64) -> Self {
+        value as Self
+    }
+
+    fn abs_bits(self) -> u64 {
+        f64::from(self.abs()).to_bits()
+    }
+}
+
+impl NoiseFloat for f64 {
+    fn of(value: f64) -> Self {
+        value
+    }
+
+    fn abs_bits(self) -> u64 {
+        self.abs().to_bits()
+    }
 }
 
 /// The arithmetic a tile's differences are taken in, as cfitsio's estimator for its
@@ -155,16 +225,6 @@ pub(super) struct QuantizeScratch {
 pub(super) enum Precision {
     Single,
     Double,
-}
-
-impl Precision {
-    /// `x`, rounded as this arithmetic stores it.
-    fn round(self, x: f64) -> f64 {
-        match self {
-            Self::Single => f64::from(x as f32),
-            Self::Double => x,
-        }
-    }
 }
 
 impl QuantizeScratch {
@@ -204,9 +264,8 @@ impl QuantizeScratch {
         }
         let Self {
             row,
-            differences2,
-            differences3,
-            differences5,
+            row_single,
+            differences,
             medians2,
             medians3,
             medians5,
@@ -215,26 +274,28 @@ impl QuantizeScratch {
         medians2.clear();
         medians3.clear();
         medians5.clear();
-        let p = |x: f64| precision.round(x);
         for pixels in data[..nx * ny].chunks_exact(nx) {
-            row.clear();
-            row.extend(pixels.iter().copied().filter(|v| v.is_finite()));
-            differences2.clear();
-            differences3.clear();
-            differences5.clear();
-            for w in row.windows(9) {
-                let [v1, _, v3, v4, v5, v6, v7, _, v9] = *w else {
-                    unreachable!("a window of 9")
-                };
-                if !(v5 == v6 && v6 == v7) {
-                    differences2.push(p(v5 - v7).abs());
+            let finite = pixels.iter().copied().filter(|v| v.is_finite());
+            match precision {
+                Precision::Single => {
+                    row_single.clear();
+                    row_single.extend(finite.map(|value| {
+                        debug_assert_eq!(f64::from(value as f32), value, "an f32 image's value");
+                        value as f32
+                    }));
+                    differences.take(row_single);
                 }
-                if !(v3 == v4 && v4 == v5 && v5 == v6 && v6 == v7) {
-                    differences3.push(p(p(p(2.0 * v5) - v3) - v7).abs());
-                    let five = p(p(p(p(p(6.0 * v5) - p(4.0 * v3)) - p(4.0 * v7)) + v1) + v9);
-                    differences5.push(five.abs());
+                Precision::Double => {
+                    row.clear();
+                    row.extend(finite);
+                    differences.take(row);
                 }
             }
+            let Differences {
+                second: differences2,
+                third: differences3,
+                fifth: differences5,
+            } = &mut *differences;
             // Each median runs over its own differences. cfitsio takes noise2's over the
             // noise3 count (`quantize.c:1828`), which reads entries left from earlier rows
             // when a run of three equal values drops a noise2 difference that noise3 keeps;
@@ -273,25 +334,31 @@ impl QuantizeScratch {
 }
 
 /// Lower median (element at index `(n−1)/2` of the sorted values), matching
-/// cfitsio's per-row `quick_select_float`. Quickselect, O(n); `total_cmp` orders a NaN
-/// that overflowing differences of huge values make, where `partial_cmp` would panic.
-fn lower_median(v: &mut [f64]) -> f64 {
+/// cfitsio's per-row `quick_select_float`. Quickselect, O(n), on the bit patterns of
+/// non-negative floats, whose integer order is `total_cmp`'s: a NaN that overflowing
+/// differences of huge values make sorts above every number.
+fn lower_median(v: &mut [u64]) -> u64 {
     let k = (v.len() - 1) / 2;
-    *v.select_nth_unstable_by(k, f64::total_cmp).1
+    *v.select_nth_unstable(k).1
 }
 
 /// Proper median (average of the two middle values for an even count), matching
 /// cfitsio's final cross-row `qsort` median; 0 for no value.
-fn proper_median(v: &mut [f64]) -> f64 {
+fn proper_median(v: &mut [u64]) -> f64 {
     let n = v.len();
     if n == 0 {
         return 0.0;
     }
-    let (below, &mut upper, _) = v.select_nth_unstable_by(n / 2, f64::total_cmp);
+    let (below, &mut upper, _) = v.select_nth_unstable(n / 2);
+    let upper = f64::from_bits(upper);
     if n % 2 == 1 {
         upper
     } else {
-        let lower = below.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let lower = below
+            .iter()
+            .copied()
+            .max()
+            .map_or(f64::NEG_INFINITY, f64::from_bits);
         f64::midpoint(lower, upper)
     }
 }

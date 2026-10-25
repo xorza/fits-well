@@ -963,24 +963,25 @@ impl<'a> BitInput<'a> {
         }
     }
 
+    // The error is built on its own path: an eager `ok_or(FitsError::…)` builds and drops
+    // one on every byte, 5 % of a decode.
     fn byte(&mut self) -> Result<i32> {
-        let b = i32::from(
-            self.data
-                .get(self.pos)
-                .copied()
-                .ok_or(FitsError::UnexpectedEof)?,
-        );
+        let Some(&b) = self.data.get(self.pos) else {
+            return Err(FitsError::UnexpectedEof);
+        };
         self.pos += 1;
-        Ok(b)
+        Ok(i32::from(b))
     }
 
     fn read_bytes(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end = self.pos.checked_add(n).ok_or(FitsError::UnexpectedEof)?;
-        let out = self
-            .data
-            .get(self.pos..end)
-            .ok_or(FitsError::UnexpectedEof)?;
-        self.pos = end;
+        let Some(out) = self
+            .pos
+            .checked_add(n)
+            .and_then(|end| self.data.get(self.pos..end))
+        else {
+            return Err(FitsError::UnexpectedEof);
+        };
+        self.pos += n;
         Ok(out)
     }
 

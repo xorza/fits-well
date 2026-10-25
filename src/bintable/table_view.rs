@@ -106,7 +106,13 @@ impl<'a> TableView<'a> {
     }
 
     pub(crate) fn cells(self, col: &'a Column) -> impl ExactSizeIterator<Item = &'a [u8]> + 'a {
-        (0..self.extent.row_count).map(move |row| self.cell(col, row))
+        // The width once for the column, not from the `TFORMn` again for each row.
+        let width = col.tform.byte_width();
+        let (bytes, row_len, offset) = (self.bytes, self.extent.row_len, col.byte_offset);
+        (0..self.extent.row_count).map(move |row| {
+            let start = row * row_len + offset;
+            &bytes[start..start + width]
+        })
     }
 }
 

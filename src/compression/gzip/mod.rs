@@ -215,14 +215,23 @@ fn shuffle_bytes_into(raw: &[u8], width: usize, out: &mut Vec<u8>) {
 fn unshuffle_bytes_into(shuffled: &[u8], width: usize, out: &mut Vec<u8>) {
     out.clear();
     out.resize(shuffled.len(), 0);
-    if width <= 1 {
-        out.copy_from_slice(shuffled);
-        return;
+    match width {
+        2 => interleave::<2>(shuffled, out),
+        4 => interleave::<4>(shuffled, out),
+        8 => interleave::<8>(shuffled, out),
+        _ => out.copy_from_slice(shuffled),
     }
-    let n = shuffled.len() / width;
-    for p in 0..width {
-        for i in 0..n {
-            out[i * width + p] = shuffled[p * n + i];
+}
+
+/// The elements of `W` bytes whose byte `p` is plane `p` of `planes`, into `out`: an
+/// element at a time from the `W` planes, which the compiler keeps in registers and
+/// vectorizes, where a plane at a time strides through `out`.
+fn interleave<const W: usize>(planes: &[u8], out: &mut [u8]) {
+    let n = planes.len() / W;
+    let planes: [&[u8]; W] = std::array::from_fn(|p| &planes[p * n..(p + 1) * n]);
+    for (i, element) in out.as_chunks_mut::<W>().0.iter_mut().enumerate() {
+        for (byte, plane) in element.iter_mut().zip(planes) {
+            *byte = plane[i];
         }
     }
 }

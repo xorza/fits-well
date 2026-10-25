@@ -1,6 +1,7 @@
 use std::fmt;
 use std::fmt::Write as _;
 
+use crate::blank;
 use crate::block::CARD_SIZE;
 use crate::fits_error::Result;
 use crate::fits_error::{FitsError, NonFinite, TextOrigin};
@@ -394,7 +395,7 @@ fn split_value_comment(field: &str) -> Split<'_> {
             }
             b'/' if !in_string => {
                 return Split {
-                    value_token: field[..i].trim(),
+                    value_token: blank::trim(&field[..i]),
                     comment: comment_text(&field[i + 1..]),
                     comment_start: Some(i),
                 };
@@ -404,7 +405,7 @@ fn split_value_comment(field: &str) -> Split<'_> {
         i += 1;
     }
     Split {
-        value_token: field.trim(),
+        value_token: blank::trim(field),
         comment: None,
         comment_start: None,
     }
@@ -477,7 +478,10 @@ fn parse_complex(token: &str) -> Option<Value> {
             .expect("a value field of 70 bytes holds no integer past the range of f64")
             .expect("a scalar is a real or an integer")
     };
-    match (parse_scalar(re.trim())?, parse_scalar(im.trim())?) {
+    match (
+        parse_scalar(blank::trim(re))?,
+        parse_scalar(blank::trim(im))?,
+    ) {
         (Value::Integer(re), Value::Integer(im)) => Some(Value::ComplexInteger { re, im }),
         (re, im) => Some(Value::ComplexReal {
             re: real(&re),
@@ -567,7 +571,7 @@ fn free_text(field: &str) -> Option<String> {
 /// The `/`-comment of a value card: the separator space is not part of the
 /// comment, so both ends are trimmed to a canonical form.
 fn comment_text(field: &str) -> Option<String> {
-    let trimmed = field.trim();
+    let trimmed = blank::trim(field);
     if trimmed.is_empty() {
         None
     } else {

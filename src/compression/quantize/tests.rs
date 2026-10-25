@@ -168,3 +168,128 @@ fn sample_seed_sums_every_sample_byte() {
     let all_ones = vec![f32::from_bits(u32::MAX); 2500];
     assert_eq!(sample_seed(FloatSamples::F32(&all_ones)), 1);
 }
+
+/// The estimator before it took an f32 image's differences in `f32` and selected medians
+/// on bit patterns, kept to cross-check it.
+fn reference_noise5(data: &[f64], width: usize, precision: Precision) -> Option<TileStatistics> {
+    let mut nx = width.max(1);
+    let mut ny = data.len() / nx;
+    if nx < 9 {
+        nx *= ny;
+        ny = 1;
+    }
+    let finite = || data[..nx * ny].iter().copied().filter(|v| v.is_finite());
+    let min = finite().fold(f64::INFINITY, f64::min);
+    let max = finite().fold(f64::NEG_INFINITY, f64::max);
+    if min > max {
+        return None;
+    }
+    if nx < 9 {
+        return Some(TileStatistics {
+            min,
+            max,
+            noise2: 0.0,
+            noise3: 0.0,
+            noise5: 0.0,
+        });
+    }
+    let (mut row, mut differences2, mut differences3, mut differences5) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut medians2, mut medians3, mut medians5) = (Vec::new(), Vec::new(), Vec::new());
+    let p = |x: f64| match precision {
+        Precision::Single => f64::from(x as f32),
+        Precision::Double => x,
+    };
+    for pixels in data[..nx * ny].chunks_exact(nx) {
+        row.clear();
+        row.extend(pixels.iter().copied().filter(|v| v.is_finite()));
+        differences2.clear();
+        differences3.clear();
+        differences5.clear();
+        for w in row.windows(9) {
+            let [v1, _, v3, v4, v5, v6, v7, _, v9] = *w else {
+                unreachable!("a window of 9")
+            };
+            if !(v5 == v6 && v6 == v7) {
+                differences2.push(p(v5 - v7).abs());
+            }
+            if !(v3 == v4 && v4 == v5 && v5 == v6 && v6 == v7) {
+                differences3.push(p(p(p(2.0 * v5) - v3) - v7).abs());
+                let five = p(p(p(p(p(6.0 * v5) - p(4.0 * v3)) - p(4.0 * v7)) + v1) + v9);
+                differences5.push(five.abs());
+            }
+        }
+        // Each median runs over its own differences. cfitsio takes noise2's over the
+        // noise3 count (`quantize.c:1828`), which reads entries left from earlier rows
+        // when a run of three equal values drops a noise2 difference that noise3 keeps;
+        // on such rows a step can differ from fpack's.
+        for (differences, medians) in [
+            (&mut differences2, &mut medians2),
+            (&mut differences3, &mut medians3),
+            (&mut differences5, &mut medians5),
+        ] {
+            if !differences.is_empty() {
+                medians.push(reference_lower_median(differences));
+            }
+        }
+    }
+    Some(TileStatistics {
+        min,
+        max,
+        noise2: 1.048_357_9 * reference_proper_median(&mut medians2),
+        noise3: 0.605_269_7 * reference_proper_median(&mut medians3),
+        noise5: 0.177_204_8 * reference_proper_median(&mut medians5),
+    })
+}
+
+fn reference_lower_median(v: &mut [f64]) -> f64 {
+    let k = (v.len() - 1) / 2;
+    *v.select_nth_unstable_by(k, f64::total_cmp).1
+}
+
+/// Proper median (average of the two middle values for an even count), matching
+/// cfitsio's final cross-row `qsort` median; 0 for no value.
+fn reference_proper_median(v: &mut [f64]) -> f64 {
+    let n = v.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let (below, &mut upper, _) = v.select_nth_unstable_by(n / 2, f64::total_cmp);
+    if n % 2 == 1 {
+        upper
+    } else {
+        let lower = below.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        f64::midpoint(lower, upper)
+    }
+}
+
+/// The estimate gives the reference estimate's values, for random rows of f32 values
+/// in single precision and of f64 values in double: equal runs, nulls, huge values that
+/// overflow, and widths under 9 among them.
+#[test]
+fn noise5_matches_the_reference_estimate() {
+    let mut rng = SplitMix::new(0x0015_e5ed);
+    let mut scratch = QuantizeScratch::default();
+    for round in 0..300 {
+        let width = 1 + (rng.next() % 40) as usize;
+        let len = width * (1 + (rng.next() % 8) as usize);
+        let scale = [1.0, 1e-3, 3e38, 1e300][round % 4];
+        let data: Vec<f64> = (0..len)
+            .map(|i| match rng.next() % 16 {
+                0 => f64::NAN,
+                1 => 7.0,
+                _ => (rng.unit() - 0.5) * scale + i as f64,
+            })
+            .collect();
+        let single: Vec<f64> = data.iter().map(|&v| f64::from(v as f32)).collect();
+        for (precision, data) in [(Precision::Single, &single), (Precision::Double, &data)] {
+            let got = scratch.noise5(data, width, precision);
+            let want = reference_noise5(data, width, precision);
+            assert_eq!(
+                format!("{got:?}"),
+                format!("{want:?}"),
+                "round {round}, {precision:?}"
+            );
+        }
+    }
+}

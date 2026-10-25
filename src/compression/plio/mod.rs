@@ -27,22 +27,42 @@ impl Codec {
     /// without `parallel`.
     pub(super) fn check(self, samples: IntSamples<'_>) -> Result<()> {
         match samples {
-            IntSamples::U8(values) => self.check_values(values),
-            IntSamples::I16(values) => self.check_values(values),
-            IntSamples::I32(values) => self.check_values(values),
-            IntSamples::I64(values) => self.check_values(values),
+            IntSamples::U8(values) => self.check_values(values, u8::MIN.into()..=u8::MAX.into()),
+            IntSamples::I16(values) => self.check_values(values, i16::MIN.into()..=i16::MAX.into()),
+            IntSamples::I32(values) => self.check_values(values, i32::MIN.into()..=i32::MAX.into()),
+            IntSamples::I64(values) => self.check_values(values, i64::MIN..=i64::MAX),
         }
     }
 
-    fn check_values<T: Copy + Into<i64>>(self, values: &[T]) -> Result<()> {
-        let outside = |&value: &T| !STREAM_RANGE.contains(&(value.into() + self.offset));
-        match values.iter().position(outside) {
-            Some(index) => Err(FitsError::PlioValueOutOfRange {
-                index,
-                value: values[index].into(),
-            }),
-            None => Ok(()),
+    /// The check of `values`, of a type that holds `held`: when the stream holds each
+    /// value of the type, no sample is read.
+    fn check_values<T: Copy + Into<i64>>(
+        self,
+        values: &[T],
+        held: RangeInclusive<i64>,
+    ) -> Result<()> {
+        let streamed = |value: i64| {
+            value
+                .checked_add(self.offset)
+                .is_some_and(|value| STREAM_RANGE.contains(&value))
+        };
+        if streamed(*held.start()) && streamed(*held.end()) {
+            return Ok(());
         }
+        let outside = |&value: &T| !streamed(value.into());
+        // A fold without an early exit vectorizes; `position` runs only to name the
+        // sample of an image already refused.
+        if !values
+            .iter()
+            .fold(false, |found, value| found | outside(value))
+        {
+            return Ok(());
+        }
+        let index = values.iter().position(outside).unwrap();
+        Err(FitsError::PlioValueOutOfRange {
+            index,
+            value: values[index].into(),
+        })
     }
 
     /// Encode `values` plus the offset (one tile of non-negative mask pixels) as an IRAF
@@ -79,7 +99,11 @@ impl Codec {
         let mut hi: i64 = 1;
         let mut nv: i64 = 0;
 
-        for ip in xs..=xe {
+        let mut ip = xs;
+        while ip <= xe {
+            // A pixel equal to the one before it only extends the run, so a run is
+            // passed whole.
+            ip += run_len(&values[ip..], pv - offset);
             let mut flush = true;
             if ip < xe {
                 nv = pix(ip + 1);
@@ -148,6 +172,7 @@ impl Codec {
                 iz = x1;
                 pv = nv;
             }
+            ip += 1;
         }
 
         // Total list length (= cfitsio's `op - 1`) split across words 4/5.
@@ -206,6 +231,22 @@ impl<'a> Words<'a> {
     }
 }
 
+/// The count of leading `values` equal to `value`. Whole chunks compare without an early
+/// exit, which vectorizes; the first chunk that differs is searched one value at a time.
+#[expect(
+    clippy::needless_bitwise_bool,
+    reason = "a lazy `&&` puts a branch in each compare, which stops the vectorizing"
+)]
+fn run_len(values: &[i64], value: i64) -> usize {
+    let (chunks, _) = values.as_chunks::<16>();
+    let whole = chunks
+        .iter()
+        .take_while(|chunk| chunk.iter().fold(true, |same, &v| same & (v == value)))
+        .count()
+        * 16;
+    whole + values[whole..].iter().take_while(|&&v| v == value).count()
+}
+
 /// A list length as the two 15-bit header words that hold it, low first; a list of
 /// 2³⁰ words or more has no such form.
 fn length_words(total: usize) -> Result<[i16; 2]> {
@@ -226,11 +267,16 @@ impl BeWords<'_> {
         self.0.len() / 2
     }
 
-    fn get(self, index: usize) -> Option<i16> {
-        let start = index.checked_mul(2)?;
-        Some(i16::from_be_bytes(
-            self.0.get(start..start + 2)?.try_into().unwrap(),
-        ))
+    /// The word at `index`, or the end of the stream: the error is built on its own path,
+    /// not on each word an eager `ok_or` would build and drop.
+    fn word(self, index: usize) -> Result<i16> {
+        let Some(bytes) = index
+            .checked_mul(2)
+            .and_then(|start| self.0.get(start..)?.first_chunk::<2>())
+        else {
+            return Err(FitsError::UnexpectedEof);
+        };
+        Ok(i16::from_be_bytes(*bytes))
     }
 }
 
@@ -246,7 +292,7 @@ fn decode_words(ll: BeWords<'_>, npix: usize, px: &mut Vec<i64>) -> Result<()> {
     }
     // List header: a positive ll[2] gives the length directly (older form); else
     // the length is a 30-bit value in ll[3..5] and instructions start at ll[1]+1.
-    let v3 = i32::from(ll.get(2).ok_or(FitsError::UnexpectedEof)?);
+    let v3 = i32::from(ll.word(2)?);
     let (lllen, llfirst) = if v3 > 0 {
         (usize::try_from(v3).unwrap(), 4usize)
     } else {
@@ -274,7 +320,7 @@ fn decode_words(ll: BeWords<'_>, npix: usize, px: &mut Vec<i64>) -> Result<()> {
             ip += 1;
             continue;
         }
-        let word = ll.get(ip - 1).ok_or(FitsError::UnexpectedEof)?;
+        let word = ll.word(ip - 1)?;
         let word = i64::from(word.cast_unsigned());
         let opcode = word >> 12;
         let data = word & 4095;
@@ -303,7 +349,7 @@ fn decode_words(ll: BeWords<'_>, npix: usize, px: &mut Vec<i64>) -> Result<()> {
                 if ip >= lllen {
                     return Err(FitsError::UnexpectedEof);
                 }
-                let next = i64::from(ll.get(ip).ok_or(FitsError::UnexpectedEof)?.cast_unsigned());
+                let next = i64::from(ll.word(ip)?.cast_unsigned());
                 pv = (next << 12) + data;
                 skip_word = true;
             }
@@ -337,101 +383,9 @@ fn decode_words(ll: BeWords<'_>, npix: usize, px: &mut Vec<i64>) -> Result<()> {
 }
 
 fn nonnegative_word(ll: BeWords<'_>, index: usize) -> Result<usize> {
-    let value = ll.get(index).ok_or(FitsError::UnexpectedEof)?;
+    let value = ll.word(index)?;
     usize::try_from(value).map_err(|_| PlioDefect::NegativeHeader.into())
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::compression::plane::IntSamples;
-    use crate::compression::plio;
-    use crate::internals::samples;
-    use std::assert_matches;
-
-    use crate::fits_error::{CompressedDataDefect, CompressionFeature, FitsError, PlioDefect};
-
-    /// The two header words hold 15 bits each, low first: 2³⁰ − 1 is the longest
-    /// list they can state.
-    #[test]
-    fn list_length_splits_into_two_fifteen_bit_words() {
-        assert_eq!(plio::length_words(0).unwrap(), [0, 0]);
-        assert_eq!(plio::length_words(32_768 + 5).unwrap(), [5, 1]);
-        assert_eq!(plio::length_words((1 << 30) - 1).unwrap(), [32_767, 32_767]);
-        assert_matches!(
-            plio::length_words(1 << 30),
-            Err(FitsError::UnsupportedCompression {
-                // 2³⁰ words, one past the longest list two 15-bit words state.
-                feature: CompressionFeature::PlioListLength {
-                    words: 1_073_741_824
-                }
-            })
-        );
-    }
-
-    #[test]
-    fn validates_encoding_and_refuses_malformed_streams() {
-        let mut out = Vec::new();
-
-        let mut encoded = Vec::new();
-        plio::Codec { offset: 0 }
-            .encode(&[0, 0xFF_FFFF], &mut encoded)
-            .unwrap();
-        plio::Codec { offset: 0 }
-            .decode(&encoded, 2, &mut out)
-            .unwrap();
-        assert_eq!(out, [0, 0xFF_FFFF]);
-        // The offset joins the value before the range check and leaves it again.
-        encoded.clear();
-        plio::Codec { offset: 32768 }
-            .encode(&[-32768, 32767], &mut encoded)
-            .unwrap();
-        plio::Codec { offset: 32768 }
-            .decode(&encoded, 2, &mut out)
-            .unwrap();
-        assert_eq!(out, [-32768, 32767]);
-        // The check names the stored sample, the offset left out: −32769 plus 32768 is −1.
-        for (offset, invalid) in [(0, -1), (0, 0x100_0000), (32768, -32769)] {
-            assert_matches!(
-                plio::Codec { offset }.check(IntSamples::I64(&[0, invalid])),
-                Err(FitsError::PlioValueOutOfRange {
-                    index: 1,
-                    value,
-                }) if value == invalid
-            );
-        }
-        plio::Codec { offset: 32768 }
-            .check(IntSamples::I16(&[i16::MIN, i16::MAX]))
-            .unwrap();
-        let truncated_span = [0, 7, -100, 8, 0, 0, 0];
-        assert_matches!(
-            plio::Codec { offset: 0 }.decode(
-                &samples::be(&truncated_span, i16::to_be_bytes),
-                1,
-                &mut out
-            ),
-            Err(FitsError::UnexpectedEof)
-        );
-
-        let missing_absolute_high_word = [0, 0, 4, 0x1001];
-        assert_matches!(
-            plio::Codec { offset: 0 }.decode(
-                &samples::be(&missing_absolute_high_word, i16::to_be_bytes),
-                1,
-                &mut out
-            ),
-            Err(FitsError::UnexpectedEof)
-        );
-
-        let invalid_opcode = [0, 0, 4, i16::MIN];
-        assert_matches!(
-            plio::Codec { offset: 0 }.decode(
-                &samples::be(&invalid_opcode, i16::to_be_bytes),
-                1,
-                &mut out
-            ),
-            Err(FitsError::CorruptCompressedData {
-                defect: CompressedDataDefect::Plio(PlioDefect::Opcode),
-            })
-        );
-    }
-}
+mod tests;
