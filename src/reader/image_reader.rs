@@ -188,7 +188,8 @@ impl<'r, S: Source> ImageReader<'r, S> {
     }
 
     /// The `ZTILEn` tile extents of a compressed image, an extent an axis; `None` for a
-    /// plain image.
+    /// plain image. A run of sections that each hold whole tiles decodes each tile once; a
+    /// tile two sections cut decodes for each of them.
     #[cfg_attr(
         not(feature = "compression"),
         expect(

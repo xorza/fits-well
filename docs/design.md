@@ -177,6 +177,12 @@ its doc comments show how each one works. Sources: the FITS 4.0 standard
   index for the image opened last, which made a caller that plans an image's
   extensions read the image's index again. The cost: a reader holds each index it read
   until it is dropped, a row of a few bytes a tile, which `view_bytes` counts.
+- **A section decodes the tiles it touches and keeps none for the next.** A caller that
+  reads an image in sections aligns them to whole tiles, which `ImageReader::tiles`
+  gives, as lumos's reader does, and each tile decodes once. Refused: the decoded tiles
+  kept for the next section, a band held between calls that `view_bytes` would count,
+  for a gain a caller gets by aligning: 10-row sections of 16-row HCOMPRESS tiles decode
+  2.4× the tiles of a whole read (`.notes/PERF.md`).
 - **A compressed table's tile layout is read once, when the file opens,** and a partial
   read of a table with no arrays fetches only its tiles' container rows. A table with
   arrays reads its whole container, as a tile's descriptors address the container heap.
