@@ -7,7 +7,7 @@ use crate::fits_error::{WcsConflict, WcsDefect};
 use crate::header_model::Header;
 use crate::header_model::record::RecordView;
 use crate::keyword::Keyword;
-use crate::world_coordinates::angle::D2R;
+use crate::world_coordinates::angle;
 use crate::world_coordinates::distortion::sip::Sip;
 use crate::world_coordinates::header_read;
 use crate::world_coordinates::projected_celestial_axes::ProjectedCelestialAxes;
@@ -81,11 +81,8 @@ impl MatrixCell {
 /// asks for `PC1_2` by name.
 fn matrix_cells(header: &Header, root: &str, alt: Alternate, naxis: usize) -> Vec<MatrixCell> {
     let index = |digits: &str| -> Option<usize> {
-        let canonical = !digits.is_empty()
-            && !digits.starts_with('0')
-            && digits.bytes().all(|byte| byte.is_ascii_digit());
-        let value: usize = digits.parse().ok().filter(|_| canonical)?;
-        (1..=naxis).contains(&value).then_some(value - 1)
+        let value = header_read::index(digits)?;
+        (value <= naxis).then_some(value - 1)
     };
     let mut cells: Vec<MatrixCell> = header
         .iter()
@@ -114,11 +111,11 @@ fn matrix_cells(header: &Header, root: &str, alt: Alternate, naxis: usize) -> Ve
 impl LinearMatrix {
     /// Read the header's linear keywords.
     ///
-    /// Precedence (§8.1): `CDi_j` if present, else `PCi_j × CDELTi`, else the legacy
-    /// `CROTAi` rotation of the celestial pair, else a bare `CDELT` diagonal. `PC` with
-    /// `CD`, or `PC` with `CROTA`, is rejected rather than resolved. A `CROTAi` beside a
-    /// `CD` matrix is ignored, as wcslib ignores it: legacy headers often keep a
-    /// redundant `CROTA2` next to the matrix that supersedes it.
+    /// The forms (§8.1): `CDi_j`, `PCi_j × CDELTi`, the legacy `CROTAi` rotation of the
+    /// celestial pair, or a bare `CDELT` diagonal. Two forms that disagree are refused
+    /// (design.md, "Two linear forms that disagree are refused"): `PC` with `CD`, or either
+    /// with a nonzero `CROTA` of the latitude axis. A zero `CROTA`, or one on another axis,
+    /// has no effect and is not read.
     pub(super) fn from_header(
         header: &Header,
         alt: Alternate,
@@ -130,18 +127,22 @@ impl LinearMatrix {
         let pc = matrix_cells(header, "PC", alt, naxis);
         let has_cd = !cd.is_empty();
         let has_pc = !pc.is_empty();
-        let has_crota = (1..=naxis).any(|i| {
-            header_read::value(header, Keyword::fitting(format_args!("CROTA{i}{alt}"))).is_some()
-        });
-        if has_cd && has_pc {
-            return Err(FitsError::ConflictingWcsKeywords {
-                conflict: WcsConflict::PcAndCd,
-            });
-        }
-        if has_pc && has_crota {
-            return Err(FitsError::ConflictingWcsKeywords {
-                conflict: WcsConflict::PcAndCrota,
-            });
+        let rotation = match celestial_axes {
+            Some(axes) => header_read::real(
+                header,
+                Keyword::fitting(format_args!("CROTA{}{alt}", axes.latitude + 1)),
+            )?
+            .filter(|&rho| rho != 0.0),
+            None => None,
+        };
+        let conflict = match (has_pc, has_cd, rotation.is_some()) {
+            (true, true, _) => Some(WcsConflict::PcAndCd),
+            (true, false, true) => Some(WcsConflict::PcAndCrota),
+            (false, true, true) => Some(WcsConflict::CdAndCrota),
+            _ => None,
+        };
+        if let Some(conflict) = conflict {
+            return Err(FitsError::ConflictingWcsKeywords { conflict });
         }
         let mut values = vec![0.0; naxis * naxis];
         if has_cd {
@@ -171,27 +172,22 @@ impl LinearMatrix {
             values[cell.index(naxis)] = cdelt[cell.row] * value;
             declared.pc[cell.index(naxis)] = value;
         }
-        // Legacy CROTA: rotate the celestial 2-axis sub-block (only when no PC was
-        // given, per the convention that CROTA and PC are exclusive).
-        if !has_pc && let Some(axes) = celestial_axes {
-            let lng = axes.longitude;
-            let lat = axes.latitude;
-            let rho = header_read::first_real(
-                header,
-                Keyword::fitting(format_args!("CROTA{}{alt}", lat + 1)),
-                Keyword::fitting(format_args!("CROTA{}{alt}", lng + 1)),
-            )?
-            .unwrap_or(0.0);
-            if rho != 0.0 {
-                let (c, s) = ((rho * D2R).cos(), (rho * D2R).sin());
-                values[lng * naxis + lng] = cdelt[lng] * c;
-                values[lng * naxis + lat] = -cdelt[lat] * s;
-                values[lat * naxis + lng] = cdelt[lng] * s;
-                values[lat * naxis + lat] = cdelt[lat] * c;
-                declared.pc[lng * naxis + lng] = c;
-                declared.pc[lng * naxis + lat] = -s * cdelt[lat] / cdelt[lng];
-                declared.pc[lat * naxis + lng] = s * cdelt[lng] / cdelt[lat];
-                declared.pc[lat * naxis + lat] = c;
+        // Legacy CROTA: rotate the celestial 2-axis sub-block, which no other form holds.
+        // The matrix is built from the `PC` it declares, `CDELT` times each row, as a read
+        // of that `PC` builds it, so a written CROTA header reads back bit for bit. The
+        // sine and cosine are exact at multiples of 90°, so `CROTA2 = 90` writes no
+        // cross term of 6e-17.
+        if let (Some(rho), Some(axes)) = (rotation, celestial_axes) {
+            let (lng, lat) = (axes.longitude, axes.latitude);
+            let (c, s) = (angle::cosd(rho), angle::sind(rho));
+            declared.pc[lng * naxis + lng] = c;
+            declared.pc[lng * naxis + lat] = -s * cdelt[lat] / cdelt[lng];
+            declared.pc[lat * naxis + lng] = s * cdelt[lng] / cdelt[lat];
+            declared.pc[lat * naxis + lat] = c;
+            for row in [lng, lat] {
+                for column in [lng, lat] {
+                    values[row * naxis + column] = cdelt[row] * declared.pc[row * naxis + column];
+                }
             }
         }
         Ok(Self {
@@ -306,29 +302,35 @@ pub(super) struct Offsets {
 }
 
 impl LuFactors {
-    /// Factor `m` by Gaussian elimination with partial pivoting. Returns `None` if `m` is
-    /// singular: when a pivot is no larger than the rounding elimination leaves in an
-    /// entry, about `n·ε` of the largest one (Higham, §9.3, for the typical growth of
-    /// partial pivoting). The test is relative, so a matrix in tiny units is not
-    /// singular.
+    /// Factor `m` by Gaussian elimination with scaled partial pivoting. Returns `None` if
+    /// `m` is singular: when a pivot is no larger than the rounding elimination leaves in
+    /// its row, about `n·ε` of the row's largest entry (Higham, §9.3, for the typical
+    /// growth of partial pivoting). Each row is measured against its own scale (row
+    /// equilibration, Higham §9.8), as wcslib's `matinv` does, so a cube whose axes hold
+    /// 3e-8 degrees and 3e8 hertz a pixel is not singular.
     fn new(m: &[f64], n: usize) -> Option<Self> {
-        let singular = n as f64 * f64::EPSILON * m.iter().fold(0.0f64, |max, &x| max.max(x.abs()));
         let mut lu = m.to_vec();
+        let mut scales: Vec<f64> = lu
+            .chunks_exact(n)
+            .map(|row| row.iter().fold(0.0f64, |max, &x| max.max(x.abs())))
+            .collect();
         let mut swaps = Vec::with_capacity(n);
         for col in 0..n {
+            let scaled = |r: usize| lu[r * n + col].abs() / scales[r];
             let mut pivot = col;
             for r in (col + 1)..n {
-                if lu[r * n + col].abs() > lu[pivot * n + col].abs() {
+                if scaled(r) > scaled(pivot) {
                     pivot = r;
                 }
             }
-            if lu[pivot * n + col].abs() <= singular {
+            if lu[pivot * n + col].abs() <= n as f64 * f64::EPSILON * scales[pivot] {
                 return None;
             }
             if pivot != col {
                 for k in 0..n {
                     lu.swap(col * n + k, pivot * n + k);
                 }
+                scales.swap(col, pivot);
             }
             swaps.push(pivot);
             let d = lu[col * n + col];

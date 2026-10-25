@@ -1,12 +1,11 @@
 //! A tiled-compressed image ready to decode.
 
+use crate::fits_error::KeywordDefect;
 use std::ops::Range;
 
 use crate::allocation;
 use crate::bintable::schema::Schema;
 use crate::bintable::table_view::TableView;
-use crate::bitpix::Bitpix;
-use crate::compression::convert;
 use crate::compression::decode::decode_buffer::DecodeBuffer;
 use crate::compression::decode::decode_capacities::DecodeCapacities;
 use crate::compression::decode::float_quantization::FloatKeywords;
@@ -19,16 +18,15 @@ use crate::compression::decode::tile_sources::TileSources;
 use crate::compression::decode::tile_value::TileValue;
 use crate::compression::tile_codec::TileCodec;
 use crate::compression::tile_geometry::TileGeometry;
-use crate::fits_error::CompressionFeature;
 use crate::fits_error::FitsError;
 use crate::fits_error::Result;
+use crate::fits_error::SizeUnit;
 use crate::hdu::image_geometry::ImageGeometry;
 use crate::header_model::record_name::RecordName;
 use crate::header_model::{Header, keywords};
-use crate::image_model::data::Data;
-use crate::image_model::shape_product;
-use crate::image_model::validate_image_region;
-use crate::image_model::view::View;
+use crate::image_model::bitpix::Bitpix;
+use crate::image_model::physical_sample::PhysicalSample;
+use crate::image_model::{shape_product, validate_image_region};
 
 /// The image a tiled-compression `BINTABLE` encodes, with what its header says of the
 /// codec, the tiles, the nulls and the quantization — everything a decode needs from the
@@ -55,14 +53,17 @@ impl<'a> TiledImage<'a> {
                 name: RecordName::Keyword(keywords::ZCMPTYPE),
             },
         )?)?;
-        if matches!(codec, TileCodec::Hcompress(_)) && image.shape.len() != 2 {
-            return Err(FitsError::UnsupportedCompression {
-                feature: CompressionFeature::HcompressDimensions,
-            });
+        let tiles = tile_shape(header, &image.shape)?;
+        let codec = codec.fitted(&image.shape, &tiles)?;
+        let geometry = TileGeometry::new(&image.shape, tiles);
+        // §10.1.2: the container holds one row a tile, so its `NAXIS2` is the tile count.
+        let container_rows = header.require_usize(keywords::NAXIS.indexed(2)?)?;
+        if container_rows != geometry.ntiles() {
+            return Err(SizeUnit::Rows.mismatch(geometry.ntiles(), container_rows));
         }
         Ok(TiledImage {
             image,
-            geometry: TileGeometry::new(&image.shape, tile_shape(header, &image.shape)?),
+            geometry,
             decoder: TileDecoder::new(header, image, codec)?,
             mask_codec: header
                 .get_text(keywords::ZMASKCMP)?
@@ -87,7 +88,7 @@ impl<'a> TiledImage<'a> {
         self.geometry.tiles()
     }
 
-    /// The tiles `ranges`, a valid region of the image, intersects.
+    /// The tiles `ranges`, a valid section of the image, intersects.
     pub(crate) fn tile_count(&self, ranges: &[Range<usize>]) -> Result<usize> {
         if ranges.iter().any(Range::is_empty) || ranges.is_empty() {
             return Ok(0);
@@ -153,66 +154,64 @@ impl<'a> TiledImage<'a> {
         Ok(())
     }
 
-    /// Decode every tile of the image from its container `table`, whose rows `index`
-    /// holds.
-    pub(crate) fn decode(&self, table: TableView<'_>, index: &TileIndex) -> Result<Data> {
-        let mut samples = convert::zeroed_samples(self.image.bitpix, self.image.len())?;
-        if self.image.len() != 0 {
-            self.decode_all(table, index, DecodeBuffer::from_samples(&mut samples))?;
-        }
-        Ok(samples)
-    }
-
-    /// [`TiledImage::decode`] into the caller's reused `words`.
-    pub(crate) fn decode_into_words<'w>(
+    /// Decode the tiles of `section`, or of the whole image for `None`, from their
+    /// container `table`, whose rows `index` holds, into `out`, which holds the section's
+    /// samples or the image's.
+    pub(crate) fn decode_into(
         &self,
         table: TableView<'_>,
         index: &TileIndex,
-        words: &'w mut Vec<u64>,
-    ) -> Result<View<'w>> {
-        let nbytes = self.image.byte_len()?;
-        allocation::try_resize(words, nbytes.div_ceil(8), 0)?;
-        if self.image.len() != 0 {
-            let buffer = DecodeBuffer::from_words(words, self.image.bitpix, self.image.len());
-            self.decode_all(table, index, buffer)?;
+        section: Option<TileSection<'_>>,
+        out: DecodeBuffer<'_>,
+    ) -> Result<()> {
+        debug_assert_eq!(out.bitpix(), self.image.bitpix);
+        if out.is_empty() {
+            return Ok(());
         }
-        Ok(self.image.bitpix.view_words(words, nbytes))
+        if let Some(section) = &section {
+            debug_assert_eq!(table.extent.row_count, section.rows.len());
+        }
+        out.decode(&self.plan(table, index)?, section)
     }
 
-    /// Decode `section` from a `table` that holds just its tiles' rows.
-    pub(crate) fn decode_section(
+    /// Append the physical values of `section`, or of the whole image for `None`, to
+    /// `out`, each tile converted as it is decoded from its container `table`, whose rows
+    /// `index` holds: no plane of stored samples is held.
+    pub(crate) fn physical_into<O: PhysicalSample>(
         &self,
         table: TableView<'_>,
         index: &TileIndex,
-        section: TileSection<'_>,
-    ) -> Result<Data> {
-        let len = shape_product(section.shape)?;
-        let mut samples = convert::zeroed_samples(self.image.bitpix, len)?;
-        if len != 0 {
-            let buffer = DecodeBuffer::from_samples(&mut samples);
-            self.decode_section_into(table, index, section, buffer)?;
+        section: Option<TileSection<'_>>,
+        out: &mut Vec<O>,
+    ) -> Result<()> {
+        let count = match &section {
+            Some(section) => {
+                debug_assert_eq!(table.extent.row_count, section.rows.len());
+                shape_product(section.shape)?
+            }
+            None => self.image.len(),
+        };
+        if count == 0 {
+            return Ok(());
         }
-        Ok(samples)
-    }
-
-    /// [`TiledImage::decode_section`] into the caller's reused `words`.
-    pub(crate) fn decode_section_into_words<'w>(
-        &self,
-        table: TableView<'_>,
-        index: &TileIndex,
-        section: TileSection<'_>,
-        words: &'w mut Vec<u64>,
-    ) -> Result<View<'w>> {
-        let len = shape_product(section.shape)?;
-        let nbytes = len
-            .checked_mul(self.image.bitpix.elem_size())
-            .ok_or(FitsError::DataUnitOverflow)?;
-        allocation::try_resize(words, nbytes.div_ceil(8), 0)?;
-        if len != 0 {
-            let buffer = DecodeBuffer::from_words(words, self.image.bitpix, len);
-            self.decode_section_into(table, index, section, buffer)?;
+        let start = out.len();
+        allocation::try_resize(out, start + count, O::from_f64(0.0))?;
+        let plane = &mut out[start..];
+        let decoded = self.plan(table, index).and_then(|plan| {
+            let scaling = self.image.scaling;
+            match self.image.bitpix {
+                Bitpix::U8 => plan.decode_into(section, plane, &scaling.physical::<u8, O>()),
+                Bitpix::I16 => plan.decode_into(section, plane, &scaling.physical::<i16, O>()),
+                Bitpix::I32 => plan.decode_into(section, plane, &scaling.physical::<i32, O>()),
+                Bitpix::I64 => plan.decode_into(section, plane, &scaling.physical::<i64, O>()),
+                Bitpix::F32 => plan.decode_into(section, plane, &scaling.physical::<f32, O>()),
+                Bitpix::F64 => plan.decode_into(section, plane, &scaling.physical::<f64, O>()),
+            }
+        });
+        if decoded.is_err() {
+            out.truncate(start);
         }
-        Ok(self.image.bitpix.view_words(words, nbytes))
+        decoded
     }
 
     /// The most a decode holds: of `count` tiles a section touches, or of the whole image
@@ -269,28 +268,6 @@ impl<'a> TiledImage<'a> {
             quantization,
         })
     }
-
-    fn decode_all(
-        &self,
-        table: TableView<'_>,
-        index: &TileIndex,
-        buffer: DecodeBuffer<'_>,
-    ) -> Result<()> {
-        debug_assert_eq!(buffer.bitpix(), self.image.bitpix);
-        buffer.decode_all(&self.plan(table, index)?)
-    }
-
-    fn decode_section_into(
-        &self,
-        table: TableView<'_>,
-        index: &TileIndex,
-        section: TileSection<'_>,
-        buffer: DecodeBuffer<'_>,
-    ) -> Result<()> {
-        debug_assert_eq!(buffer.bitpix(), self.image.bitpix);
-        debug_assert_eq!(table.extent.row_count, section.rows.len());
-        buffer.decode_section(&self.plan(table, index)?, section)
-    }
 }
 
 /// The index of the first tile along an axis past the non-empty `range`.
@@ -309,7 +286,10 @@ fn tile_shape(header: &Header, dims: &[usize]) -> Result<Vec<usize>> {
                 Some(value) => usize::try_from(value)
                     .ok()
                     .filter(|&value| value > 0)
-                    .ok_or(FitsError::KeywordOutOfRange { keyword }),
+                    .ok_or(FitsError::InvalidKeywordValue {
+                        keyword,
+                        defect: KeywordDefect::Range,
+                    }),
                 None => Ok(default),
             }
         })
@@ -319,6 +299,7 @@ fn tile_shape(header: &Header, dims: &[usize]) -> Result<Vec<usize>> {
 #[cfg(test)]
 pub(crate) mod internals {
     use crate::bintable::Table;
+    use crate::compression::decode::decode_buffer::DecodeBuffer;
     use crate::compression::decode::tile_index::TileIndex;
     use crate::compression::decode::tiled_image::TiledImage;
     use crate::fits_error::Result;
@@ -328,7 +309,10 @@ pub(crate) mod internals {
         /// Decode every tile of the image from its container `table`, held in memory.
         pub(crate) fn decode_table(&self, table: &Table) -> Result<Data> {
             let index = TileIndex::of_table(table.schema(), table.view())?;
-            self.decode(table.view(), &index)
+            let mut samples = Data::zeroed(self.image.bitpix, self.image.len())?;
+            let out = DecodeBuffer::from_samples(&mut samples);
+            self.decode_into(table.view(), &index, None, out)?;
+            Ok(samples)
         }
     }
 }

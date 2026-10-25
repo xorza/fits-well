@@ -7,6 +7,7 @@ use crate::fits_error::{FitsError, NonFinite, TextOrigin};
 use crate::header_model::commentary_name::CommentaryName;
 use crate::header_model::defect::Defect;
 use crate::header_model::hierarch_name::HierarchName;
+use crate::header_model::keywords;
 use crate::header_model::record::Record;
 use crate::header_model::record_name::RecordName;
 use crate::header_model::repair::{Repair, RepairKind};
@@ -427,7 +428,9 @@ fn parse_value(token: &str) -> Option<Value> {
 }
 
 /// Parse a `'...'` literal: unescape `''` → `'` and drop insignificant trailing
-/// spaces (leading spaces are significant and kept); `None` for an unterminated one.
+/// spaces (leading spaces are significant and kept); `None` for an unterminated one, or
+/// one followed by anything but blanks before its comment (§4.2.1.1: the value field is
+/// the string alone).
 fn parse_string(token: &str) -> Option<String> {
     let bytes = token.as_bytes();
     let mut out = String::new();
@@ -439,8 +442,10 @@ fn parse_string(token: &str) -> Option<String> {
                 if bytes.get(i + 1) == Some(&b'\'') {
                     out.push('\'');
                     i += 2;
-                } else {
+                } else if bytes[i + 1..].iter().all(|&b| b == b' ') {
                     break; // closing quote
+                } else {
+                    return None;
                 }
             }
             Some(&c) => {
@@ -514,7 +519,14 @@ fn parse_real(token: &str) -> Option<f64> {
 /// Errors when `keyword` is a control or commentary keyword, which a valued card
 /// cannot carry.
 pub(super) fn validate_valued_keyword(keyword: Keyword) -> Result<()> {
-    if matches!(keyword.as_str(), "END" | "CONTINUE" | "COMMENT" | "HISTORY") {
+    if [
+        keywords::END,
+        keywords::CONTINUE,
+        keywords::COMMENT,
+        keywords::HISTORY,
+    ]
+    .contains(&keyword)
+    {
         Err(FitsError::ReservedName {
             name: RecordName::Keyword(keyword),
         })

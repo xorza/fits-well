@@ -14,6 +14,8 @@ pub const PCOUNT: Keyword = Keyword::new("PCOUNT");
 pub const GCOUNT: Keyword = Keyword::new("GCOUNT");
 pub const GROUPS: Keyword = Keyword::new("GROUPS");
 pub const BLOCKED: Keyword = Keyword::new("BLOCKED");
+pub const END: Keyword = Keyword::new("END");
+pub const CONTINUE: Keyword = Keyword::new("CONTINUE");
 
 pub const DATE: Keyword = Keyword::new("DATE");
 pub const ORIGIN: Keyword = Keyword::new("ORIGIN");
@@ -95,6 +97,8 @@ pub const DATE_END: Keyword = Keyword::new("DATE-END");
 pub const DATE_AVG: Keyword = Keyword::new("DATE-AVG");
 pub const MJD_BEG: Keyword = Keyword::new("MJD-BEG");
 pub const MJD_END: Keyword = Keyword::new("MJD-END");
+pub const TSTART: Keyword = Keyword::new("TSTART");
+pub const TSTOP: Keyword = Keyword::new("TSTOP");
 pub const MJD_AVG: Keyword = Keyword::new("MJD-AVG");
 pub const XPOSURE: Keyword = Keyword::new("XPOSURE");
 pub const TELAPSE: Keyword = Keyword::new("TELAPSE");

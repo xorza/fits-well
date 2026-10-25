@@ -1,7 +1,10 @@
 use crate::block::padded_len;
+use crate::checksum::checksum_report::ChecksumStatus;
+use crate::checksum::declared::Declared;
 use crate::checksum::running::Running;
 use crate::checksum::*;
 use crate::header_model::keywords;
+use crate::internals::cards;
 use crate::internals::cards::VALID;
 use crate::internals::fixture::Fixture;
 
@@ -81,13 +84,7 @@ fn encoding_reproduces_cfitsio_checksums() {
             assert_eq!(datasum.trim_start().parse::<u32>(), Ok(data_sum));
 
             let mut header = bytes[header_start..data_start].to_vec();
-            let card = header
-                .as_chunks::<80>()
-                .0
-                .iter()
-                .position(|card| card.starts_with(b"CHECKSUM= '"))
-                .unwrap();
-            let field = card * 80 + 11..card * 80 + 27;
+            let field = cards::quoted_field(&header, "CHECKSUM", 16);
             let written: [u8; 16] = header[field.clone()].try_into().unwrap();
             header[field].copy_from_slice(b"0000000000000000");
             let sum = combine(accumulate(&header, 0), data_sum);
@@ -105,7 +102,7 @@ fn encoding_reproduces_cfitsio_checksums() {
 /// A running sum fed in pieces of any length, words split between them, equals the sum
 /// of the whole: 4 KiB of bytes cut at a seeded set of points.
 #[test]
-fn a_running_sum_of_pieces_equals_the_whole() {
+fn running_sum_of_pieces_equals_the_whole() {
     let bytes: Vec<u8> = (0u32..4096)
         .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
         .collect();
@@ -117,4 +114,92 @@ fn a_running_sum_of_pieces_equals_the_whole() {
         }
         assert_eq!(sum.finish(), whole, "pieces of {step}");
     }
+}
+
+/// The status of each keyword value, over an empty data unit, whose sum is 0. An empty or
+/// all-blank value is unknown (§4.4.2.7), as cfitsio `ffvcks` reads it. A `CHECKSUM` is
+/// valid when the header sum completes the data sum to negative zero, `0xFFFF_FFFF`.
+#[test]
+fn declared_values_give_absent_unknown_valid_and_invalid() {
+    use ChecksumStatus::{Absent, Invalid, Unknown, Valid};
+    for (datasum, checksum, header_sum, expected) in [
+        (None, None, 0, cards::report(Absent, Absent)),
+        (Some(" "), None, 0, cards::report(Unknown, Absent)),
+        (Some(""), None, 0, cards::report(Unknown, Absent)),
+        (Some("0"), None, 0, cards::report(Valid, Absent)),
+        (Some("1"), None, 0, cards::report(Invalid, Absent)),
+        (
+            Some("not-a-number"),
+            None,
+            0,
+            cards::report(Invalid, Absent),
+        ),
+        (None, Some(" "), 0, cards::report(Absent, Unknown)),
+        (None, Some(""), 0, cards::report(Absent, Unknown)),
+        (
+            None,
+            Some("not-a-checksum"),
+            0,
+            cards::report(Absent, Invalid),
+        ),
+        (
+            None,
+            Some("not-a-checksum"),
+            0xFFFF_FFFF,
+            cards::report(Absent, Valid),
+        ),
+    ] {
+        let mut header = cards::structural(None, 8, &[]);
+        if let Some(value) = datasum {
+            header.set_internal(keywords::DATASUM, value);
+        }
+        if let Some(value) = checksum {
+            header.set_internal(keywords::CHECKSUM, value);
+        }
+        let report = Declared::read(&header)
+            .report(header_sum, || Ok(0))
+            .unwrap();
+        assert_eq!(
+            report, expected,
+            "DATASUM={datasum:?} CHECKSUM={checksum:?}"
+        );
+    }
+}
+
+/// Of the 16 pairs, only (Valid, Valid) is valid, and the 7 with an `Invalid` side have
+/// one.
+#[test]
+fn report_is_valid_only_when_both_sums_are() {
+    let statuses = [
+        ChecksumStatus::Absent,
+        ChecksumStatus::Unknown,
+        ChecksumStatus::Valid,
+        ChecksumStatus::Invalid,
+    ];
+    let mut valid = Vec::new();
+    let mut invalid = Vec::new();
+    for datasum in statuses {
+        for checksum in statuses {
+            let report = cards::report(datasum, checksum);
+            if report.is_valid() {
+                valid.push((datasum, checksum));
+            }
+            if report.has_invalid() {
+                invalid.push((datasum, checksum));
+            }
+        }
+    }
+    assert_eq!(valid, [(ChecksumStatus::Valid, ChecksumStatus::Valid)]);
+    assert_eq!(
+        invalid,
+        [
+            (ChecksumStatus::Absent, ChecksumStatus::Invalid),
+            (ChecksumStatus::Unknown, ChecksumStatus::Invalid),
+            (ChecksumStatus::Valid, ChecksumStatus::Invalid),
+            (ChecksumStatus::Invalid, ChecksumStatus::Absent),
+            (ChecksumStatus::Invalid, ChecksumStatus::Unknown),
+            (ChecksumStatus::Invalid, ChecksumStatus::Valid),
+            (ChecksumStatus::Invalid, ChecksumStatus::Invalid),
+        ]
+    );
 }

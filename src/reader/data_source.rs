@@ -14,13 +14,18 @@ use crate::bintable::selection::{TableRows, TableSelection};
 use crate::bintable::table_view::TableView;
 #[cfg(feature = "compression")]
 use crate::compression::decode::tile_index::TileIndex;
+#[cfg(feature = "compression")]
+use crate::compression::table::{ContainerTiles, DecodedRows, TiledTable};
 use crate::fits_error::FitsError;
 use crate::fits_error::Result;
+use crate::hdu::Hdu;
 #[cfg(feature = "compression")]
 use crate::reader::data_checksum::DataChecksum;
-use crate::reader::data_len;
-use crate::reader::hdu::Hdu;
-use crate::reader::source::Source;
+use crate::reader::source::{Source, check_range};
+
+/// The bytes a chunked read takes at a time, [`DataSource::chunks`]: a bounded staging
+/// buffer, whatever the unit's size.
+pub(crate) const CHUNK: usize = 1 << 20;
 
 /// A [`Source`] and its staging buffer. Kept apart from the HDU records so a read can
 /// borrow a header or schema while it fetches bytes.
@@ -35,15 +40,43 @@ pub(crate) struct DataSource<S> {
     /// selected, compacted.
     #[cfg(feature = "compression")]
     rows: Vec<u8>,
+    /// The rows a read of a tiled-compressed table last decoded, kept for a later read
+    /// of the same tiles and columns, as a loop over the cells of one tile reads them.
+    #[cfg(feature = "compression")]
+    decoded: Option<DecodedTiles>,
+}
+
+/// A read of some rows and columns of the table a tiled-compressed HDU holds: the HDU, its
+/// tile layout, the rows, and the columns, every column when `None`.
+#[cfg(feature = "compression")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TiledRead<'a> {
+    pub(crate) hdu: &'a Hdu,
+    pub(crate) tiled: &'a TiledTable,
+    pub(crate) rows: &'a Range<usize>,
+    pub(crate) columns: Option<&'a [bool]>,
+}
+
+/// The rows a read decoded: the HDU, its tiles and the columns it decoded, every column
+/// when `None`.
+#[cfg(feature = "compression")]
+#[derive(Debug)]
+struct DecodedTiles {
+    hdu: usize,
+    tiles: Range<usize>,
+    columns: Option<Vec<bool>>,
+    rows: DecodedRows,
 }
 
 impl<S: Source> DataSource<S> {
-    pub(crate) const fn new(source: S, scratch: Vec<u8>) -> Self {
+    pub(crate) const fn new(source: S) -> Self {
         Self {
             source,
-            scratch,
+            scratch: Vec::new(),
             #[cfg(feature = "compression")]
             rows: Vec::new(),
+            #[cfg(feature = "compression")]
+            decoded: None,
         }
     }
 
@@ -56,19 +89,19 @@ impl<S: Source> DataSource<S> {
         self.source.read_into(offset, out)
     }
 
-    /// The `len` bytes at `offset` of a resident source, borrowed; `None` for a streaming
-    /// one — see [`Source::resident`]. Errors when the range runs past the source.
-    pub(crate) fn resident(&self, offset: u64, len: usize) -> Option<Result<&[u8]>> {
-        let bytes = self.source.resident()?;
-        let range = usize::try_from(offset)
-            .ok()
-            .and_then(|start| Some(start..start.checked_add(len)?))
-            .filter(|range| range.end <= bytes.len());
-        Some(
-            range
-                .map(|range| &bytes[range])
-                .ok_or(FitsError::UnexpectedEof),
-        )
+    /// Whether the source is resident in memory — see [`Source::resident`]: a read borrows
+    /// its bytes, where a stream copies them through the staging buffer first.
+    pub(crate) fn is_resident(&self) -> bool {
+        self.source.resident().is_some()
+    }
+
+    /// The `len` bytes at `offset` of a resident source, borrowed. Errors when the range
+    /// runs past the source.
+    pub(crate) fn resident_range(&self, offset: u64, len: usize) -> Result<&[u8]> {
+        let bytes = self.source.resident().expect("a resident source");
+        check_range(offset, len, bytes.len() as u64)?;
+        let start = usize::try_from(offset).expect("an offset inside a slice");
+        Ok(&bytes[start..start + len])
     }
 
     /// The bytes at `offset`, read a bounded chunk at a time into this source's staging
@@ -80,10 +113,8 @@ impl<S: Source> DataSource<S> {
         len: usize,
         mut each: impl FnMut(u64, &[u8]) -> Result<()>,
     ) -> Result<()> {
-        /// The bytes read at a time: a bounded scratch, whatever the run's size.
-        const CHUNK: usize = 1 << 20;
-        if let Some(bytes) = self.resident(offset, len) {
-            return each(offset, bytes?);
+        if self.is_resident() {
+            return each(offset, self.resident_range(offset, len)?);
         }
         let mut at = 0;
         while at < len {
@@ -101,6 +132,17 @@ impl<S: Source> DataSource<S> {
         self.source.slice(offset, len, &mut self.scratch)
     }
 
+    /// The length of `hdu`'s data unit, once it is known to lie inside the source: a size
+    /// the header claims past the end is `UnexpectedEof` here, before any read sizes a
+    /// buffer from it.
+    pub(crate) fn unit_len(&self, hdu: &Hdu) -> Result<usize> {
+        let len = usize::try_from(hdu.data_bytes).map_err(|_| FitsError::DataUnitTooLarge {
+            bytes: hdu.data_bytes,
+        })?;
+        check_range(hdu.data_offset, len, self.source.size())?;
+        Ok(len)
+    }
+
     /// A [`Fetch`] of `hdu`'s data unit.
     pub(crate) const fn unit(&mut self, hdu: &Hdu) -> UnitFetch<'_, S> {
         UnitFetch {
@@ -112,28 +154,76 @@ impl<S: Source> DataSource<S> {
     /// The data bytes of `hdu`'s data unit, without its fill, in a fresh owned buffer.
     pub(crate) fn data_unit(&mut self, hdu: &Hdu) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
-        self.source
-            .read_append(hdu.data_offset, data_len(hdu.data_bytes)?, &mut bytes)?;
+        let len = self.unit_len(hdu)?;
+        self.source.read_append(hdu.data_offset, len, &mut bytes)?;
         Ok(bytes)
     }
 
     /// The binary table `hdu` holds, viewed in place over the source (or this
-    /// source's staging buffer), its bytes fed to `sum`, when given, as they are read.
+    /// source's staging buffer).
     #[cfg(feature = "compression")]
-    pub(crate) fn table<'a>(
-        &'a mut self,
-        hdu: &'a Hdu,
-        sum: Option<&mut DataChecksum>,
-    ) -> Result<TableView<'a>> {
+    pub(crate) fn table<'a>(&'a mut self, hdu: &'a Hdu) -> Result<TableView<'a>> {
         let schema = hdu.container_schema()?;
-        let len = usize::try_from(hdu.data_bytes).map_err(|_| FitsError::DataUnitTooLarge {
-            bytes: hdu.data_bytes,
-        })?;
-        let bytes = self.slice(hdu.data_offset, len)?;
-        if let Some(sum) = sum {
-            sum.feed(hdu.data_offset, bytes);
+        let len = self.unit_len(hdu)?;
+        TableView::new(schema, self.slice(hdu.data_offset, len)?)
+    }
+
+    /// The tiles of the table `read` names that its rows touch, decoded into `buffer` with
+    /// the heap arrays they reference, of the columns it selects. A tile's arrays have
+    /// descriptors that address the whole container heap, and a read of every tile reads
+    /// the whole container: then the container is read whole, else only the touched tiles.
+    #[cfg(feature = "compression")]
+    pub(crate) fn decode(&mut self, read: TiledRead<'_>, buffer: Vec<u8>) -> Result<DecodedRows> {
+        let TiledRead {
+            hdu,
+            tiled,
+            rows,
+            columns,
+        } = read;
+        let tiles = tiled.tiles(rows);
+        let all = 0..hdu.container_schema()?.extent.row_count;
+        let container = if tiled.has_arrays(columns) || tiles == all {
+            ContainerTiles {
+                view: self.table(hdu)?,
+                first_tile: 0,
+            }
+        } else {
+            ContainerTiles {
+                first_tile: tiles.start,
+                view: self.table_rows(hdu, TableRows::Range(tiles))?,
+            }
+        };
+        tiled.decode(container, rows, columns, buffer)
+    }
+
+    /// [`Self::decode`] of `read`, the rows the last decode gave when it read the same
+    /// tiles and columns, else decoded now into their buffer and kept.
+    #[cfg(feature = "compression")]
+    pub(crate) fn decoded(&mut self, read: TiledRead<'_>) -> Result<&DecodedRows> {
+        let tiles = read.tiled.tiles(read.rows);
+        let hit = self.decoded.as_ref().is_some_and(|held| {
+            held.hdu == read.hdu.index
+                && held.tiles == tiles
+                && held.columns.as_deref() == read.columns
+        });
+        if !hit {
+            let buffer = self
+                .decoded
+                .take()
+                .map(|held| held.rows.data)
+                .unwrap_or_default();
+            let rows = self.decode(read, buffer)?;
+            self.decoded = Some(DecodedTiles {
+                hdu: read.hdu.index,
+                tiles,
+                columns: read.columns.map(<[bool]>::to_vec),
+                rows,
+            });
         }
-        TableView::new(schema, bytes)
+        let Some(held) = &self.decoded else {
+            unreachable!("held or decoded above")
+        };
+        Ok(&held.rows)
     }
 
     /// The tiles `rows` of the tiled image `hdu` holds, whose container's main table is
@@ -156,11 +246,7 @@ impl<S: Source> DataSource<S> {
         let mut out = mem::take(&mut self.rows);
         out.clear();
         let copied = allocation::try_grow_to(&mut out, len).and_then(|()| {
-            let sum = if self.source.resident().is_some() {
-                None
-            } else {
-                sum
-            };
+            let sum = if self.is_resident() { None } else { sum };
             let mut fetch = IndexedUnit {
                 main,
                 unit: self.unit(hdu),
@@ -190,22 +276,24 @@ impl<S: Source> DataSource<S> {
         sum: Option<&mut DataChecksum>,
     ) -> Result<TableView<'a>> {
         let schema = hdu.container_schema()?;
-        let len = data_len(hdu.data_bytes)?;
+        let len = self.unit_len(hdu)?;
         let main = index.rows();
         let heap_len = len
             .checked_sub(main.len())
             .ok_or(FitsError::UnexpectedEof)?;
         let heap_offset = offset_at(hdu.data_offset, main.len())?;
-        if self.source.resident().is_none() {
+        let resident = self.is_resident();
+        if !resident {
             self.scratch.clear();
             allocation::try_grow_to(&mut self.scratch, len)?;
             self.scratch.extend_from_slice(main);
             self.source
                 .read_append(heap_offset, heap_len, &mut self.scratch)?;
         }
-        let bytes = match self.resident(hdu.data_offset, len) {
-            Some(bytes) => bytes?,
-            None => &self.scratch,
+        let bytes = if resident {
+            self.resident_range(hdu.data_offset, len)?
+        } else {
+            &self.scratch
         };
         if let Some(sum) = sum {
             sum.feed(heap_offset, &bytes[main.len()..]);

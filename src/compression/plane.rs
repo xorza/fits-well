@@ -2,7 +2,7 @@
 //! for one plane cannot be handed the other.
 
 use crate::bintable::element_kind::ElementKind;
-use crate::bitpix::Bitpix;
+use crate::image_model::bitpix::Bitpix;
 use crate::image_model::view::View;
 
 /// An integer `BITPIX`: the plane the lossless codecs work in, and the one a float

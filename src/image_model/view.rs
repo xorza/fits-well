@@ -1,8 +1,8 @@
 //! [`View`]: a borrowed image array, and [`Borrowed`], the view plus the shape and
 //! scaling it is read with.
 
-use crate::bitpix::Bitpix;
 use crate::fits_error::Result;
+use crate::image_model::bitpix::Bitpix;
 use crate::image_model::data::Data;
 use crate::image_model::physical_sample::PhysicalSample;
 use crate::image_model::sample::sealed::Raw;
@@ -84,14 +84,18 @@ impl<'a> Borrowed<'a> {
         self.samples.extend_physical(&self.scaling, out);
     }
 
-    /// The samples as exact typed integers when the scaling is precisely a FITS
-    /// unsigned-integer (or signed-byte) convention: `BSCALE == 1`, no `BLANK`, and
-    /// `BZERO` the matching sign-bit offset. Unlike [`Self::physical_into`], this is
-    /// exact for all 64-bit values (no `f64` rounding past 2⁵³). `None` for any other
-    /// scaling or element type.
-    pub fn unsigned(&self) -> Option<UnsignedData> {
-        let kind = self.scaling.unsigned_kind(self.samples.bitpix())?;
-        Some(UnsignedData::from_view(self.samples, kind))
+    /// The samples as exact typed integers into `out` when the scaling is precisely a
+    /// FITS unsigned-integer (or signed-byte) convention: `BSCALE == 1`, no `BLANK`, and
+    /// `BZERO` the matching sign-bit offset; `out`'s storage is reused when it holds that
+    /// kind. Unlike [`Self::physical_into`], this is exact for all 64-bit values (no `f64`
+    /// rounding past 2⁵³). `false`, and `out` as it was, for any other scaling or element
+    /// type.
+    pub fn unsigned_into(&self, out: &mut UnsignedData) -> bool {
+        let Some(kind) = self.scaling.unsigned_kind(self.samples.bitpix()) else {
+            return false;
+        };
+        out.fill_from_view(self.samples, kind);
+        true
     }
 
     /// The effective element type these samples represent, resolving the unsigned and
@@ -250,22 +254,6 @@ impl<'a> View<'a> {
             View::I64(values) => Data::I64(values.to_vec()),
             View::F32(values) => Data::F32(values.to_vec()),
             View::F64(values) => Data::F64(values.to_vec()),
-        }
-    }
-}
-
-#[cfg(feature = "internals")]
-pub(crate) mod internals {
-    use crate::image_model::physical_sample::PhysicalSample;
-    use crate::image_model::scaling::Scaling;
-    use crate::image_model::view::View;
-
-    impl View<'_> {
-        /// [`View::extend_physical`] into a new `Vec`.
-        pub(crate) fn physical<O: PhysicalSample>(self, scaling: &Scaling) -> Vec<O> {
-            let mut out = Vec::new();
-            self.extend_physical(scaling, &mut out);
-            out
         }
     }
 }

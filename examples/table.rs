@@ -70,22 +70,31 @@ fn main() -> fits_well::Result<()> {
         schema.columns.len()
     );
     for column in &schema.columns {
-        println!("  {:?}: {}", column.name, column.tform);
+        println!("  {:?}: {}", column.name()?, column.tform);
     }
 
-    println!("ID     {:?}", table.column(0)?.raw()?);
+    // Each read fills a buffer the caller keeps and reuses from column to column.
+    let mut values = ColumnData::U8(Vec::new());
+    table.column(0)?.raw_into(&mut values)?;
+    println!("ID     {values:?}");
     let name = table.column("NAME")?;
-    if let ColumnData::Character(bytes) = name.raw()? {
+    name.raw_into(&mut values)?;
+    if let ColumnData::Character(bytes) = &values {
         let names: Vec<String> = bytes
             .chunks(name.descriptor().tform.repeat())
             .map(|field| String::from_utf8_lossy(field).trim_end().to_owned())
             .collect();
         println!("NAME   {names:?}");
     }
-    // `physical` applies TSCALn and TZEROn and maps TNULLn to NaN.
-    println!("MAG    {:?}", table.column("MAG")?.physical()?);
-    println!("POS    {:?}", table.column("POS")?.physical()?);
-    let fluxes = table.column("FLUXES")?.vla_physical()?;
+    // `physical_into` applies TSCALn and TZEROn, maps TNULLn to NaN, and appends.
+    let mut physical: Vec<f64> = Vec::new();
+    table.column("MAG")?.physical_into(&mut physical)?;
+    println!("MAG    {physical:?}");
+    physical.clear();
+    table.column("POS")?.physical_into(&mut physical)?;
+    println!("POS    {physical:?}");
+    let mut fluxes = Ragged::<Vec<f64>>::new(Vec::new(), Vec::new());
+    table.column("FLUXES")?.vla_physical_into(&mut fluxes)?;
     println!("FLUXES {:?}", fluxes.iter().collect::<Vec<_>>());
     let flags = table.column("FLAGS")?.bits()?;
     println!(
@@ -95,10 +104,12 @@ fn main() -> fits_well::Result<()> {
 
     // A large table reads in parts: rows 1 and 2, two columns of row 2, one cell.
     let rows = reader.read_table_rows(1, 1..3)?;
-    println!("rows 1..3, MAG {:?}", rows.column("MAG")?.physical()?);
+    physical.clear();
+    rows.column("MAG")?.physical_into(&mut physical)?;
+    println!("rows 1..3, MAG {physical:?}");
     let selection = reader.read_table_columns(1, 2..3, ["ID", "MAG"])?;
     for column in &selection.columns {
-        println!("row 2, {:?}: {:?}", column.descriptor.name, column.data);
+        println!("row 2, {:?}: {:?}", column.descriptor.name()?, column.data);
     }
     println!("cell (0, ID): {:?}", reader.read_table_cell(1, 0, "ID")?);
     Ok(())

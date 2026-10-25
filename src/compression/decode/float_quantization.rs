@@ -8,6 +8,7 @@ use crate::compression::quantize::{DitherSequence, ZERO_VALUE};
 use crate::compression::tile_codec::TileCodec;
 use crate::fits_error::CompressionFeature;
 use crate::fits_error::FitsError;
+use crate::fits_error::KeywordDefect;
 use crate::fits_error::Result;
 use crate::header_model::{Header, keywords};
 
@@ -36,9 +37,9 @@ enum Quantiz<'a> {
 #[derive(Debug)]
 pub(super) enum FloatQuantization<'a> {
     /// No `ZSCALE` and no `ZZERO`, as a keyword or a column, or `ZQUANTIZ = 'NONE'`: each
-    /// primary cell holds the floats themselves, gzip'd, as cfitsio reads it whatever
-    /// `ZQUANTIZ` says (`imcompress.c`, `imcomp_get_compressed_image_par`).
-    /// The floats gzip'd with a codec that [`TileCodec::stores_lossless_floats`].
+    /// primary cell holds the floats themselves, gzip'd with a codec that
+    /// [`TileCodec::stores_lossless_floats`], as cfitsio reads it whatever `ZQUANTIZ`
+    /// says (`imcompress.c`, `imcomp_get_compressed_image_par`).
     Lossless(TileCodec),
     Quantized(Quantized<'a>),
 }
@@ -82,8 +83,9 @@ impl<'a> FloatKeywords<'a> {
         if matches!(quantiz, Quantiz::Method(method) if method.dithered())
             && !(1..=10_000).contains(&zdither0)
         {
-            return Err(FitsError::KeywordOutOfRange {
+            return Err(FitsError::InvalidKeywordValue {
                 keyword: keywords::ZDITHER0,
+                defect: KeywordDefect::Range,
             });
         }
         Ok(Self {

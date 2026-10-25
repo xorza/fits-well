@@ -21,6 +21,7 @@ use crate::header_model::record_name::RecordName;
 use crate::header_model::{Header, keywords, value};
 use crate::keyword::Keyword;
 use crate::world_coordinates::axis_transform;
+use crate::world_coordinates::ctype::Ctype;
 use crate::world_coordinates::header_read;
 use crate::world_coordinates::header_read::MAX_PARAMETER_INDEX;
 use crate::world_coordinates::spectral_frame::SpectralFrame;
@@ -186,7 +187,7 @@ impl<'a> TableWcs<'a> {
                 header_read::text(header, self.axis_key(TableAxisKeyword::Type, index))?
             {
                 h.set_internal(keywords::CTYPE.indexed(ax)?, t);
-                if axis_transform::is_spectral_type(t) {
+                if axis_transform::is_spectral_type(Ctype::parse(t)) {
                     *spectral = Some(self.resolver.spectral_frame(header, self.column(index))?);
                 }
             }
@@ -281,13 +282,8 @@ fn candidate_vector_axes(header: &Header) -> Vec<usize> {
             .map_or(name, |end| &name[..end]);
         for start in 0..digits.len() {
             for end in start + 1..=digits.len() {
-                let text = &digits[start..end];
-                // A FITS index never carries a leading zero, so `03` is not axis 3.
-                if text.starts_with('0') {
-                    continue;
-                }
-                match text.parse::<usize>() {
-                    Ok(axis) if (1..=99).contains(&axis) && !axes.contains(&axis) => {
+                match header_read::index(&digits[start..end]) {
+                    Some(axis) if axis <= 99 && !axes.contains(&axis) => {
                         axes.push(axis);
                     }
                     _ => {}

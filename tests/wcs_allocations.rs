@@ -1,63 +1,28 @@
-//! Allocation counts of the WCS transforms, under an allocator that counts the
-//! calling thread's allocations only, so the harness's other threads do not reach
-//! the count.
+//! Allocation counts of the WCS transforms, under the counting allocator's count of the
+//! calling thread's allocations, which the harness's other threads do not reach.
 
 #![expect(
     clippy::disallowed_types,
     reason = "a global allocator has no owner to carry its counters"
 )]
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
 
 use fits_well::header::{Header, Value};
 use fits_well::internals::{
-    tabular_forward_at_pixel, tabular_inverse_at_fraction, tabular_inverse_at_world,
+    tabular_forward_at_fraction, tabular_forward_at_pixel, tabular_inverse_at_fraction,
+    tabular_inverse_at_world,
 };
 use fits_well::wcs::Wcs;
 
-thread_local! {
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
+#[path = "support/counting.rs"]
+#[expect(dead_code, reason = "these tests count calls, not the bytes held")]
+mod counting;
 
-#[derive(Debug)]
-struct CountingAllocator;
-
-#[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
-
-fn count() {
-    // A const-initialized `Cell` has no destructor to register, so this access
-    // cannot allocate.
-    let _ = ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        count();
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        count();
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        count();
-        unsafe { System.realloc(pointer, layout, new_size) }
-    }
-}
+use crate::counting::ALLOCATOR;
 
 fn allocations(run: impl FnOnce() -> f64) -> usize {
-    ALLOCATIONS.with(|count| count.set(0));
-    black_box(run());
-    ALLOCATIONS.with(Cell::get)
+    ALLOCATOR.calls(run)
 }
 
 /// A celestial pair beside a frequency axis sampled in wavelength writes into the
@@ -123,19 +88,23 @@ fn one_dimensional_tabular_transforms_allocate_nothing() {
     );
 }
 
-/// The two-dimensional inverse bisects sub-voxels in three buffers it sizes once, its
-/// reals, counts and flags, so a fraction that takes 20 halvings to reach allocates as
-/// much as one that takes one.
+/// The two-dimensional inverse bisects sub-voxels in fixed arrays on the stack, so a
+/// fraction that takes 20 halvings to reach allocates nothing, as one that takes one does,
+/// and the forward point through the same coupled table allocates nothing either.
 #[test]
 fn tabular_inverse_allocations_do_not_grow_with_search_depth() {
     let deep = 0.5 + 2.0_f64.powi(-20);
     black_box(tabular_inverse_at_fraction(0.5));
     assert_eq!(
         allocations(|| tabular_inverse_at_fraction(black_box(0.5))),
-        3
+        0
     );
     assert_eq!(
         allocations(|| tabular_inverse_at_fraction(black_box(deep))),
-        3
+        0
+    );
+    assert_eq!(
+        allocations(|| tabular_forward_at_fraction(black_box(0.5))),
+        0
     );
 }

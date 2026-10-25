@@ -3,7 +3,7 @@
 //! characteristic with an expressed one, and the conversions between them.
 
 pub(super) mod spectral_algorithm;
-pub(super) mod spectral_kind;
+pub(crate) mod spectral_kind;
 pub(crate) mod spectral_rest;
 pub(super) mod spectral_transform;
 
@@ -45,13 +45,12 @@ pub(super) struct AxisTransformSpec {
 
 impl AxisTransform {
     pub(super) fn parse(
-        ctype: &str,
+        parsed: Ctype<'_>,
         cunit: &str,
         reference: f64,
         rest: SpectralRest,
         parameters: SpectralParameters,
     ) -> Result<AxisTransformSpec> {
-        let parsed = Ctype::parse(ctype);
         let Some(code) = parsed.algorithm else {
             return Ok(AxisTransformSpec {
                 transform: Self::Linear { reference },
@@ -68,7 +67,7 @@ impl AxisTransform {
             if !reference.is_finite() || reference <= 0.0 {
                 return Err(FitsError::InvalidWcs {
                     defect: WcsDefect::LogarithmicReference {
-                        ctype: ctype.to_string(),
+                        ctype: parsed.value.to_string(),
                     },
                 });
             }
@@ -90,7 +89,7 @@ impl AxisTransform {
         {
             return Err(FitsError::InvalidWcs {
                 defect: WcsDefect::InconsistentSpectralAlgorithm {
-                    ctype: ctype.to_string(),
+                    ctype: parsed.value.to_string(),
                 },
             });
         }
@@ -133,21 +132,8 @@ impl AxisTransform {
     }
 }
 
-pub(super) fn is_spectral_type(ctype: &str) -> bool {
-    SpectralKind::from_code(Ctype::parse(ctype).head).is_some()
-}
-
-/// A spectral axis's Table-25 default unit and the factor to it from `cunit`, or
-/// `None` when `head` names no spectral type.
-pub(super) fn spectral_unit(head: &str, cunit: &str) -> Result<Option<WorldUnit>> {
-    SpectralKind::from_code(head)
-        .map(|kind| {
-            Ok(WorldUnit {
-                scale: kind.unit_scale(cunit)?,
-                unit: Some(kind.default_unit()),
-            })
-        })
-        .transpose()
+pub(super) fn is_spectral_type(ctype: Ctype<'_>) -> bool {
+    SpectralKind::from_code(ctype.head).is_some()
 }
 
 const fn unsupported() -> AxisTransformSpec {

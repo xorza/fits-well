@@ -8,7 +8,6 @@
 //! quantized and are stored as raw gzip'd floats instead.
 
 use std::mem;
-use std::sync::OnceLock;
 
 use crate::compression::plane::FloatSamples;
 use crate::compression::quantization::{DitherMethod, QuantizationStep};
@@ -22,27 +21,32 @@ pub(super) const NULL_VALUE: i32 = -2_147_483_647;
 /// Quantized integer reserved by `SUBTRACTIVE_DITHER_2` to mark exact zero.
 pub(super) const ZERO_VALUE: i32 = -2_147_483_646;
 
-/// The shared dither sequence (cfitsio `fits_init_randoms`): a Park–Miller
-/// minstd generator (`a = 16807`, `m = 2³¹−1`) seeded at 1, scaled to `[0, 1)`.
-fn random_values() -> &'static [f32] {
-    static VALUES: OnceLock<Vec<f32>> = OnceLock::new();
-    VALUES.get_or_init(|| {
-        let a = 16807.0f64;
-        let m = 2_147_483_647.0_f64;
-        let mut seed = 1.0f64;
-        let mut v = Vec::with_capacity(N_RANDOM);
-        for _ in 0..N_RANDOM {
-            let temp = a * seed;
-            seed = temp - m * ((temp / m) as i64 as f64);
-            v.push((seed / m) as f32);
-        }
-        // cfitsio invariant: the final seed must be exactly 1043618065.
-        debug_assert_eq!(seed as i64, 1_043_618_065);
-        v
-    })
+/// The shared dither sequence (cfitsio `fits_init_randoms`): a Park–Miller minstd
+/// generator (`a = 16807`, `m = 2³¹−1`) seeded at 1, scaled to `[0, 1)`, built at compile
+/// time. A static, as the 40 KB table is read by address, not copied to each use.
+static RANDOM: [f32; N_RANDOM] = random_values();
+
+#[expect(
+    clippy::large_stack_arrays,
+    reason = "evaluated at compile time into the static, never on a stack"
+)]
+const fn random_values() -> [f32; N_RANDOM] {
+    let a = 16807.0f64;
+    let m = 2_147_483_647.0_f64;
+    let mut seed = 1.0f64;
+    let mut values = [0.0f32; N_RANDOM];
+    let mut i = 0;
+    while i < N_RANDOM {
+        let temp = a * seed;
+        seed = temp - m * ((temp / m) as i64 as f64);
+        values[i] = (seed / m) as f32;
+        i += 1;
+    }
+    assert!(seed as i64 == 1_043_618_065, "cfitsio's final seed");
+    values
 }
 
-/// `(row − 1) mod N_RANDOM` → the starting index into [`random_values`] for a
+/// `(row − 1) mod N_RANDOM` → the starting index into [`RANDOM`] for a
 /// tile, and the first `nextrand` cursor (cfitsio's `iseed`/`nextrand` setup).
 #[derive(Debug)]
 pub(super) struct DitherSequence {
@@ -57,7 +61,7 @@ pub(super) struct DitherSequence {
 )]
 impl DitherSequence {
     pub(super) fn new(irow: i64) -> Self {
-        let rand = random_values();
+        let rand = &RANDOM;
         let period = i64::try_from(N_RANDOM).unwrap();
         let iseed = usize::try_from((irow - 1).rem_euclid(period)).unwrap();
         let nextrand = (rand[iseed] * 500.0) as usize;

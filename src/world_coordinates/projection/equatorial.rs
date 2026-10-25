@@ -343,6 +343,8 @@ fn pco_theta(x: f64, y: f64) -> Result<f64> {
 
 #[cfg(test)]
 mod tests {
+    use crate::internals::tolerance;
+    use crate::internals::tolerance::Tolerance;
     use crate::world_coordinates::projection::equatorial::h;
 
     /// The series meets `u − sin u` at 1, where the closed form loses at most
@@ -352,16 +354,19 @@ mod tests {
     fn u_minus_sin_u_keeps_its_digits_below_one() {
         let below = h(1.0_f64.next_down());
         let closed = 1.0 - 1.0_f64.sin();
-        assert!(
-            (below - closed).abs() <= 8.0 * f64::EPSILON * closed,
-            "{below} vs {closed}, the closed form's cancellation"
+        tolerance::assert_within(
+            below,
+            closed,
+            Tolerance::ulps(8.0, "the closed form's cancellation"),
+            "u − sin u just below 1",
         );
         let u = 1e-3_f64;
         let terms = u.powi(3) / 6.0 * (1.0 - u * u / 20.0 * (1.0 - u * u / 42.0));
-        assert!(
-            (h(u) - terms).abs() <= 2.0 * f64::EPSILON * terms,
-            "{} vs {terms}, two roundings of each",
-            h(u)
+        tolerance::assert_within(
+            h(u),
+            terms,
+            Tolerance::ulps(2.0, "two roundings of each"),
+            "u − sin u at 1e-3",
         );
         assert_eq!(h(0.0), 0.0);
     }

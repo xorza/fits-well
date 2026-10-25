@@ -8,6 +8,7 @@ use bitvec::slice::BitSlice;
 use bitvec::vec::BitVec;
 use num_complex::Complex;
 
+use crate::bintable::column_element::ColumnElement;
 use crate::bintable::column_view::ColumnView;
 use crate::bintable::element_kind::ElementKind;
 use crate::fits_error::{FitsError, Result};
@@ -42,36 +43,19 @@ pub enum ColumnData {
 /// `ColumnData` from a typed vector, and back: the reverse gives the data back when it
 /// holds another type. An `A` column's bytes are [`ColumnData::Character`], which neither
 /// direction reaches, as `Vec<u8>` is a `B` column's.
-macro_rules! impl_column_data_vec_conversions {
-    ($variant:ident, $type:ty) => {
-        impl From<Vec<$type>> for ColumnData {
-            fn from(values: Vec<$type>) -> ColumnData {
-                ColumnData::$variant(values)
-            }
-        }
-
-        impl TryFrom<ColumnData> for Vec<$type> {
-            type Error = ColumnData;
-
-            fn try_from(data: ColumnData) -> result::Result<Self, ColumnData> {
-                match data {
-                    ColumnData::$variant(values) => Ok(values),
-                    other => Err(other),
-                }
-            }
-        }
-    };
+impl<T: ColumnElement> From<Vec<T>> for ColumnData {
+    fn from(values: Vec<T>) -> Self {
+        T::into_data(values)
+    }
 }
 
-impl_column_data_vec_conversions!(Logical, Option<bool>);
-impl_column_data_vec_conversions!(U8, u8);
-impl_column_data_vec_conversions!(I16, i16);
-impl_column_data_vec_conversions!(I32, i32);
-impl_column_data_vec_conversions!(I64, i64);
-impl_column_data_vec_conversions!(F32, f32);
-impl_column_data_vec_conversions!(F64, f64);
-impl_column_data_vec_conversions!(ComplexF32, Complex<f32>);
-impl_column_data_vec_conversions!(ComplexF64, Complex<f64>);
+impl<T: ColumnElement> TryFrom<ColumnData> for Vec<T> {
+    type Error = ColumnData;
+
+    fn try_from(data: ColumnData) -> result::Result<Self, ColumnData> {
+        T::from_data(data)
+    }
+}
 
 impl From<BitVec<u8, Msb0>> for ColumnData {
     fn from(values: BitVec<u8, Msb0>) -> Self {
@@ -258,5 +242,36 @@ impl Ragged<ColumnData> {
             ends.push(values.len());
         }
         Ok(Self::new(values, ends))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::bintable::column_data::ColumnData;
+    use crate::bintable::element_kind::ElementKind;
+    use crate::fits_error::FitsError;
+    use crate::ragged::Ragged;
+    use std::assert_matches;
+
+    /// Rows of 1 and 2 values end at 1 and 3. Rows of two types, or no row, which fixes
+    /// no type, are refused.
+    #[test]
+    fn rows_of_one_type_join_and_others_are_refused() {
+        let ragged =
+            Ragged::from_rows([ColumnData::I16(vec![1]), ColumnData::I16(vec![2, 3])]).unwrap();
+        assert_eq!(ragged.values(), &ColumnData::I16(vec![1, 2, 3]));
+        assert_eq!(ragged.ends(), [1, 3]);
+        assert_matches!(
+            Ragged::from_rows([ColumnData::I16(vec![1]), ColumnData::I32(vec![2])]),
+            Err(FitsError::MixedArrayRows {
+                row: 1,
+                expected: ElementKind::I16,
+                got: ElementKind::I32
+            })
+        );
+        assert_matches!(
+            Ragged::from_rows(Vec::new()),
+            Err(FitsError::EmptyVlaNeedsType)
+        );
     }
 }

@@ -12,9 +12,11 @@ pub(crate) mod record_name;
 pub(crate) mod repair;
 pub(crate) mod value;
 
+use crate::fits_error::KeywordDefect;
 use std::collections::HashMap;
 
-use crate::bitpix::Bitpix;
+use num_complex::Complex;
+
 use crate::block::BLOCK_SIZE;
 use crate::block::CARD_SIZE;
 use crate::block::RECORDS_PER_BLOCK;
@@ -32,6 +34,7 @@ use crate::header_model::record::{Record, RecordView};
 use crate::header_model::record_name::RecordName;
 use crate::header_model::repair::Repair;
 use crate::header_model::value::Value;
+use crate::image_model::bitpix::Bitpix;
 use crate::keyword::Keyword;
 use std::slice;
 
@@ -184,6 +187,15 @@ impl Header {
         self.typed_optional(&named(name)?, ValueKind::Real, Value::as_real)
     }
 
+    /// Read an optional complex record, integer or real, without conflating absence with a
+    /// wrong type.
+    pub fn get_complex(
+        &self,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
+    ) -> Result<Option<Complex<f64>>> {
+        self.typed_optional(&named(name)?, ValueKind::Complex, Value::as_complex)
+    }
+
     /// Read an optional text record without conflating absence with a wrong type.
     pub fn get_text(
         &self,
@@ -255,6 +267,14 @@ impl Header {
         self.typed_required(named(name)?, ValueKind::Real, Value::as_real)
     }
 
+    /// A mandatory complex record, as [`Header::require_logical`].
+    pub fn require_complex(
+        &self,
+        name: impl TryInto<RecordName, Error: Into<FitsError>>,
+    ) -> Result<Complex<f64>> {
+        self.typed_required(named(name)?, ValueKind::Complex, Value::as_complex)
+    }
+
     /// A mandatory text record, as [`Header::require_logical`].
     pub fn require_text(
         &self,
@@ -264,20 +284,25 @@ impl Header {
     }
 
     /// A mandatory integer keyword narrowed to `usize`. A negative or oversized
-    /// value is [`FitsError::KeywordOutOfRange`], keeping untrusted sizes from
+    /// value is [`FitsError::InvalidKeywordValue`], keeping untrusted sizes from
     /// wrapping into a plausible-looking length.
     pub(crate) fn require_usize(&self, keyword: Keyword) -> Result<usize> {
-        usize::try_from(self.require_integer(keyword)?)
-            .map_err(|_| FitsError::KeywordOutOfRange { keyword })
+        usize::try_from(self.require_integer(keyword)?).map_err(|_| {
+            FitsError::InvalidKeywordValue {
+                keyword,
+                defect: KeywordDefect::Range,
+            }
+        })
     }
 
     /// An optional integer keyword narrowed to `usize`, or `default` when the card is
     /// absent. A present but out-of-range value still errors.
     pub(crate) fn optional_usize(&self, keyword: Keyword, default: usize) -> Result<usize> {
         match self.get_integer(keyword)? {
-            Some(value) => {
-                usize::try_from(value).map_err(|_| FitsError::KeywordOutOfRange { keyword })
-            }
+            Some(value) => usize::try_from(value).map_err(|_| FitsError::InvalidKeywordValue {
+                keyword,
+                defect: KeywordDefect::Range,
+            }),
             None => Ok(default),
         }
     }
@@ -345,8 +370,9 @@ impl Header {
         // conformance and a guard — `axes()` reserves `Vec::with_capacity(NAXIS)`,
         // so an absurd `NAXIS` from an untrusted header would otherwise abort.
         if n > 999 {
-            return Err(FitsError::KeywordOutOfRange {
+            return Err(FitsError::InvalidKeywordValue {
                 keyword: keywords::NAXIS,
+                defect: KeywordDefect::Range,
             });
         }
         Ok(n)
@@ -367,8 +393,9 @@ impl Header {
     /// sizing requires the keyword explicitly.
     pub(crate) fn pcount(&self) -> Result<u64> {
         match self.get_integer(keywords::PCOUNT)? {
-            Some(p) if p < 0 => Err(FitsError::KeywordOutOfRange {
+            Some(p) if p < 0 => Err(FitsError::InvalidKeywordValue {
                 keyword: keywords::PCOUNT,
+                defect: KeywordDefect::Range,
             }),
             Some(p) => Ok(p.cast_unsigned()),
             None => Ok(0),
@@ -378,8 +405,9 @@ impl Header {
     /// `GCOUNT` (default 1), rejecting a negative value (§4.4.1) — see [`Header::pcount`].
     pub(crate) fn gcount(&self) -> Result<u64> {
         match self.get_integer(keywords::GCOUNT)? {
-            Some(g) if g < 0 => Err(FitsError::KeywordOutOfRange {
+            Some(g) if g < 0 => Err(FitsError::InvalidKeywordValue {
                 keyword: keywords::GCOUNT,
+                defect: KeywordDefect::Range,
             }),
             Some(g) => Ok(g.cast_unsigned()),
             None => Ok(1),

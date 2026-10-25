@@ -1,5 +1,5 @@
 use crate::header_model::keywords;
-use crate::internals::cards::header_of;
+use crate::internals::cards;
 
 use crate::time_coordinates::frame::Frame;
 use crate::time_coordinates::mjd::Mjd;
@@ -10,7 +10,7 @@ use crate::unit::SECONDS_PER_DAY;
 fn timeoffs_stays_in_timeunit_on_an_axis_of_another_unit() {
     // TIMEUNIT = s, CUNIT1 = d and TIMEOFFS = 10: the offset is 10 s, not 10 days, so
     // a world value of 1 d lands 1 d + 10 s past MJDREF (§9.4.1).
-    let mut h = header_of(&[
+    let mut h = cards::header_of(&[
         ("MJDREF", 58000.0.into()),
         ("TIMEUNIT", "s".into()),
         ("TIMEOFFS", 10.0.into()),

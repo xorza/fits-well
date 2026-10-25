@@ -1,5 +1,6 @@
 use crate::fits_error::FitsError;
 use crate::header_model::{Header, keywords};
+use std::assert_matches;
 
 use crate::time_coordinates::frame::Frame;
 use crate::time_coordinates::scale::{Scale, ScaleKind};
@@ -65,11 +66,9 @@ fn time_scale_preserves_realizations_and_local_names() {
         assert_eq!(printed.parse::<Scale>().unwrap(), scale, "{text}");
     }
     for malformed in ["UTC(", "UTC()", "UTC(NIST))"] {
-        assert!(
-            matches!(
-                malformed.parse::<Scale>(),
-                Err(FitsError::InvalidTimeScale { keyword: None })
-            ),
+        assert_matches!(
+            malformed.parse::<Scale>(),
+            Err(FitsError::InvalidTimeScale { keyword: None }),
             "{malformed}"
         );
     }

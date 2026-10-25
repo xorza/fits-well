@@ -68,3 +68,37 @@ pub(super) fn norm180(a: f64) -> f64 {
         r
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::world_coordinates::angle;
+
+    /// `[0, 360)`: a tiny negative angle's remainder rounds to 360 itself, which is 0.
+    #[test]
+    fn norm360_stays_below_a_full_turn() {
+        assert_eq!(angle::norm360(-1e-20), 0.0);
+        assert_eq!(angle::norm360(-90.0), 270.0);
+        assert_eq!(angle::norm360(720.0), 0.0);
+        assert_eq!(angle::norm360(359.5), 359.5);
+    }
+
+    /// `[−180, 180)`, exactly. One ulp below −180 is `−180 − 2⁻⁴⁵`, whose exact image is
+    /// `180 − 2⁻⁴⁵`; rounding `a + 180` through `rem_euclid` would instead land on 180 itself.
+    /// A tiny angle keeps every bit rather than vanishing into `180 − 180`.
+    #[test]
+    fn norm180_is_exact_and_stays_below_a_half_turn() {
+        let ulp = 2f64.powi(-45);
+        for (angle, normalized) in [
+            (-180.0 - ulp, 180.0 - ulp),
+            (180.0, -180.0),
+            (-180.0, -180.0),
+            (190.0, -170.0),
+            (-190.0, 170.0),
+            (540.0, -180.0),
+            (1e-20, 1e-20),
+            (-1e-20, -1e-20),
+        ] {
+            assert_eq!(angle::norm180(angle), normalized, "{angle}");
+        }
+    }
+}

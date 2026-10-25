@@ -1,7 +1,11 @@
 use std::fmt;
+use std::str::FromStr;
+
+use num_complex::Complex;
 
 use crate::fits_error::Result;
 use crate::fits_error::{FitsError, NumericTarget};
+use crate::header_model::defect::Defect;
 
 /// A signed decimal FITS integer (§4.2.3).
 ///
@@ -72,6 +76,48 @@ impl fmt::Display for FitsInteger {
         match &self.repr {
             IntegerRepr::I64(value) => value.fmt(f),
             IntegerRepr::Decimal(decimal) => decimal.fmt(f),
+        }
+    }
+}
+
+impl FromStr for FitsInteger {
+    type Err = FitsError;
+
+    /// The integer a decimal string spells, as a header value holds one: a sign, then
+    /// digits, of any length, blanks around it trimmed. Errors with
+    /// [`FitsError::InvalidValue`] for any other text.
+    fn from_str(text: &str) -> Result<Self> {
+        Self::parse(text.trim()).ok_or(FitsError::InvalidValue {
+            name: None,
+            defect: Defect::Value,
+        })
+    }
+}
+
+impl TryFrom<&FitsInteger> for u64 {
+    type Error = FitsError;
+
+    fn try_from(value: &FitsInteger) -> Result<Self> {
+        match &value.repr {
+            IntegerRepr::I64(integer) => {
+                Self::try_from(*integer).map_err(|_| value.out_of_range(NumericTarget::U64))
+            }
+            IntegerRepr::Decimal(decimal) => decimal
+                .parse::<Self>()
+                .map_err(|_| value.out_of_range(NumericTarget::U64)),
+        }
+    }
+}
+
+impl TryFrom<&FitsInteger> for i128 {
+    type Error = FitsError;
+
+    fn try_from(value: &FitsInteger) -> Result<Self> {
+        match &value.repr {
+            IntegerRepr::I64(integer) => Ok(Self::from(*integer)),
+            IntegerRepr::Decimal(decimal) => decimal
+                .parse::<Self>()
+                .map_err(|_| value.out_of_range(NumericTarget::I128)),
         }
     }
 }
@@ -230,6 +276,21 @@ impl Value {
         }
     }
 
+    /// The value as a complex `f64` pair, converting the parts of an exact
+    /// [`Value::ComplexInteger`] to reals.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FitsError::IntegerOutOfRange`] if an exact integer part is too large
+    /// for a finite `f64`.
+    pub fn as_complex(&self) -> Result<Option<Complex<f64>>> {
+        match self {
+            Self::ComplexReal { re, im } => Ok(Some(Complex::new(*re, *im))),
+            Self::ComplexInteger { re, im } => Ok(Some(Complex::new(re.to_f64()?, im.to_f64()?))),
+            _ => Ok(None),
+        }
+    }
+
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Self::Text(s) => Some(s),
@@ -300,6 +361,7 @@ impl From<String> for Value {
 #[cfg(test)]
 mod tests {
     use crate::header_model::value::*;
+    use std::assert_matches;
 
     #[test]
     fn accessors_only_match_their_own_variant() {
@@ -332,7 +394,15 @@ mod tests {
             Value::from(9_223_372_036_854_775_808_u64),
             Value::Integer(9_223_372_036_854_775_808_u64.into())
         );
+        assert_eq!(Value::from(7_u16), Value::Integer(7_i64.into()));
+        assert_eq!(Value::from(42_usize), Value::Integer(42_i64.into()));
+        assert_eq!(
+            Value::from(usize::MAX),
+            Value::Integer(FitsInteger::parse(&usize::MAX.to_string()).unwrap())
+        );
         assert_eq!(Value::from(1.5_f64), Value::Real(1.5));
+        // An f32 widens to the same f64, which 0.1 shows: its f32 is not the f64 0.1.
+        assert_eq!(Value::from(0.1_f32), Value::Real(f64::from(0.1_f32)));
         assert_eq!(Value::from("hi"), Value::Text("hi".into()));
         assert_eq!(Value::from(String::from("hi")), Value::Text("hi".into()));
         // Trailing blanks go; leading ones stay, and a string of blanks keeps one.
@@ -353,24 +423,64 @@ mod tests {
             assert_eq!(value.to_string(), decimal);
             match expected {
                 Some(expected) => assert_eq!(i64::try_from(&value).unwrap(), expected),
-                None => assert!(matches!(
+                None => assert_matches!(
                     i64::try_from(&value),
                     Err(FitsError::IntegerOutOfRange { name: None, value, target })
                         if value == decimal && target == NumericTarget::I64
-                )),
+                ),
             }
+        }
+
+        // u64 takes 0 to 2⁶⁴ − 1, i128 every value within ±(2¹²⁷ − 1); the text of each
+        // bound parses, its sign and blanks around it included.
+        for (decimal, unsigned, wide) in [
+            ("0", Some(0u64), Some(0i128)),
+            ("-1", None, Some(-1)),
+            (
+                "18446744073709551615",
+                Some(u64::MAX),
+                Some(i128::from(u64::MAX)),
+            ),
+            ("18446744073709551616", None, Some(i128::from(u64::MAX) + 1)),
+            (
+                "-170141183460469231731687303715884105728",
+                None,
+                Some(i128::MIN),
+            ),
+            ("170141183460469231731687303715884105728", None, None),
+        ] {
+            let value: FitsInteger = format!(" +{decimal} ").replace("+-", "-").parse().unwrap();
+            assert_eq!(u64::try_from(&value).ok(), unsigned, "{decimal}");
+            assert_eq!(i128::try_from(&value).ok(), wide, "{decimal}");
+        }
+        assert_matches!(
+            u64::try_from(&FitsInteger::from(-1_i64)),
+            Err(FitsError::IntegerOutOfRange {
+                target: NumericTarget::U64,
+                ..
+            })
+        );
+        for text in ["", "1.5", "0x10", "1 2"] {
+            assert_matches!(
+                text.parse::<FitsInteger>(),
+                Err(FitsError::InvalidValue {
+                    name: None,
+                    defect: Defect::Value
+                }),
+                "{text:?}"
+            );
         }
 
         assert_eq!(
             Value::Real(i64::MIN as f64).as_integer().unwrap(),
             Some(i64::MIN)
         );
-        assert!(matches!(
+        assert_matches!(
             Value::Real(-(i64::MIN as f64)).as_integer(),
             Err(FitsError::IntegerOutOfRange {
                 target: NumericTarget::I64,
                 ..
             })
-        ));
+        );
     }
 }

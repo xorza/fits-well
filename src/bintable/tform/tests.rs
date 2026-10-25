@@ -3,6 +3,7 @@ use crate::bintable::element_kind::ElementKind;
 use crate::bintable::tform::Storage;
 use crate::bintable::tform::Tform;
 use crate::fits_error::FitsError;
+use std::assert_matches;
 
 #[test]
 fn parses_tform_repeat_and_kind() {
@@ -61,8 +62,9 @@ fn parses_tform_repeat_and_kind() {
     for bad in ["9Z", "", "1P", "2PE(5)", "3QD", "1PP", "1PQ", "1QP", "1QQ"] {
         // "1P" lacks the heap element-type letter; "2PE"/"3QD" violate the §6.3
         // rule that a P/Q descriptor's repeat count is 0 or 1.
-        assert!(
-            matches!(bad.parse::<Tform>(), Err(FitsError::InvalidTform { .. })),
+        assert_matches!(
+            bad.parse::<Tform>(),
+            Err(FitsError::InvalidTform { tform }) if tform == bad,
             "{bad}"
         );
     }

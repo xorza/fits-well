@@ -16,7 +16,7 @@
 //!
 //! [`Image`]: crate::image_model::Image
 
-mod decode_buffer;
+pub(crate) mod decode_buffer;
 pub(crate) mod decode_capacities;
 mod decode_sample;
 pub(super) mod float_quantization;

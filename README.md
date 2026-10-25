@@ -190,7 +190,9 @@ fn main() -> Result<(), FitsError> {
 
     let mut reader = FitsReader::open(File::open("table.fits")?)?;
     let table = reader.read_table(1)?; // HDU 0 is the empty primary
-    println!("{:?}", table.column("MAG")?.physical()?);
+    let mut magnitudes: Vec<f64> = Vec::new(); // a buffer the caller keeps across reads
+    table.column("MAG")?.physical_into(&mut magnitudes)?;
+    println!("{magnitudes:?}");
     Ok(())
 }
 ```

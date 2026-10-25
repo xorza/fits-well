@@ -1,5 +1,6 @@
 //! [`ColumnScaling`]: the `TSCALn` and `TZEROn` a written table column declares.
 
+use crate::fits_error::KeywordDefect;
 use crate::fits_error::{FitsError, Result};
 use crate::header_model::keywords;
 
@@ -23,15 +24,20 @@ impl ColumnScaling {
     /// Errors when column `n`, whose values `scalable` describes, takes no scaling, or
     /// when a value is not finite.
     pub(super) fn validate(self, scalable: Scalable, n: usize) -> Result<()> {
-        let refused = |value: f64| scalable == Scalable::Unscaled || !value.is_finite();
-        if refused(self.tscale) {
-            return Err(FitsError::KeywordOutOfRange {
-                keyword: keywords::TSCAL.indexed(n)?,
-            });
-        }
-        if refused(self.tzero) {
-            return Err(FitsError::KeywordOutOfRange {
-                keyword: keywords::TZERO.indexed(n)?,
+        for (value, keyword) in [
+            (self.tscale, keywords::TSCAL),
+            (self.tzero, keywords::TZERO),
+        ] {
+            let defect = if scalable == Scalable::Unscaled {
+                KeywordDefect::Structure
+            } else if !value.is_finite() {
+                KeywordDefect::Range
+            } else {
+                continue;
+            };
+            return Err(FitsError::InvalidKeywordValue {
+                keyword: keyword.indexed(n)?,
+                defect,
             });
         }
         Ok(())

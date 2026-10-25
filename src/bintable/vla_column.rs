@@ -38,13 +38,16 @@ impl<'a> VlaColumn<'a> {
     }
 
     pub(crate) fn cell(&self, row: usize) -> Result<VlaCell<'a>> {
-        if row >= self.table.extent.row_count {
-            return Err(FitsError::UnexpectedEof);
-        }
+        debug_assert!(row < self.table.extent.row_count, "a row of the table");
         let col = &self.table.columns[self.index];
         let descriptor = self.table.pq_descriptor(col, row)?;
         col.validate_vla_tdim(descriptor.count)?;
-        let bytes = self.table.pq_payload(descriptor, self.element_type)?;
+        let bytes = self.table.pq_payload(descriptor, self.element_type).ok_or(
+            FitsError::DescriptorPastHeap {
+                column: self.index,
+                row,
+            },
+        )?;
         Ok(VlaCell {
             bytes,
             element_count: descriptor.count,

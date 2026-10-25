@@ -8,6 +8,7 @@ use std::f64::consts::PI;
 use std::fmt;
 
 use crate::fits_error::{FitsError, Result, WcsDefect};
+use crate::world_coordinates::angle;
 use crate::world_coordinates::angle::D2R;
 use crate::world_coordinates::angle::DEGREE_TOLERANCE;
 use crate::world_coordinates::angle::UNIT_TOLERANCE;
@@ -178,10 +179,6 @@ impl Projection {
         TABLE[self as usize].family
     }
 
-    pub(super) const fn is_conic(self) -> bool {
-        matches!(self.family(), Family::Conic)
-    }
-
     pub(super) const fn parameter_defaults(self) -> [f64; 21] {
         let mut pv = [0.0; 21];
         match self {
@@ -217,7 +214,13 @@ impl Projection {
             defect: WcsDefect::DegenerateProjection { projection: self },
         };
         let invalid = match self {
-            Self::Cea => pv[1] == 0.0,
+            // wcslib's `ceaset`: 0 < λ ≤ 1.
+            Self::Cea => !(pv[1] > 0.0 && pv[1] <= 1.0),
+            // A conic's mid-latitude θ_a = `PVi_1` must be nonzero, a cone of `1/tan 0`
+            // having no apex; COE's constant (sinθ₁ + sinθ₂)/2 = sinθ_a·cosη is 0 at
+            // η = ±90° too (wcslib's `coeset`).
+            Self::Cop | Self::Cod | Self::Coo => pv[1] == 0.0,
+            Self::Coe => pv[1] == 0.0 || angle::cosd(pv[2]) == 0.0,
             Self::Cyp => pv[2] == 0.0 || pv[1] + pv[2] == 0.0,
             Self::Hpx => !pv[1].is_finite() || pv[1] <= 0.0 || !pv[2].is_finite() || pv[2] <= 0.0,
             // wcslib's `airset`: at θ_b = −90° the constant K is 0 and the radius has no

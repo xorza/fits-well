@@ -123,28 +123,22 @@ impl PqDescriptor {
         })
     }
 
+    /// The bytes this descriptor's array of `element_kind` spans in a heap from
+    /// `heap_start` to `heap_end`; `None` when it runs past the heap's end, which a span
+    /// too large for `usize` does too.
     pub(crate) fn heap_range(
         self,
         element_kind: ElementKind,
         heap_start: usize,
         heap_end: usize,
-    ) -> Result<Range<usize>> {
-        let byte_len = element_kind
-            .payload_len(self.count)
-            .ok_or(FitsError::DataUnitOverflow)?;
+    ) -> Option<Range<usize>> {
+        let byte_len = element_kind.payload_len(self.count)?;
         if byte_len == 0 {
-            return Ok(heap_start..heap_start);
+            return Some(heap_start..heap_start);
         }
-        let start = heap_start
-            .checked_add(self.offset)
-            .ok_or(FitsError::DataUnitOverflow)?;
-        let end = start
-            .checked_add(byte_len)
-            .ok_or(FitsError::DataUnitOverflow)?;
-        if end > heap_end {
-            return Err(FitsError::UnexpectedEof);
-        }
-        Ok(start..end)
+        let start = heap_start.checked_add(self.offset)?;
+        let end = start.checked_add(byte_len)?;
+        (end <= heap_end).then_some(start..end)
     }
 }
 
@@ -166,6 +160,7 @@ fn nonnegative_field(field: DescriptorField, value: i64) -> Result<usize> {
 pub(crate) mod internals {
     use crate::bintable::descriptor::DescriptorWidth;
     use crate::fits_error::{DescriptorField, FitsError};
+    use std::assert_matches;
 
     #[derive(Debug)]
     pub(crate) struct MalformedDescriptorCase {
@@ -178,13 +173,11 @@ pub(crate) mod internals {
 
     impl MalformedDescriptorCase {
         pub(crate) fn assert_error(&self, error: &FitsError) {
-            assert!(
-                matches!(
-                    error,
-                    FitsError::InvalidPqDescriptor { field, value }
-                        if *field == self.field && *value == self.value
-                ),
-                "{}: {error:?}",
+            assert_matches!(
+                error,
+                FitsError::InvalidPqDescriptor { field, value }
+                    if *field == self.field && *value == self.value,
+                "{}",
                 self.name
             );
         }

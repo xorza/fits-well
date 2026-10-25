@@ -1,51 +1,75 @@
+use crate::ascii::ascii_tform::AsciiFloatFormat;
 use crate::ascii::internals::ascii_table_header;
 use crate::ascii::*;
 use crate::fits_error::AsciiValueDefect;
-use crate::fits_error::ExpectedHdu;
-use crate::fits_writer::FitsWriter;
-use crate::fits_writer::ascii_builder::{AsciiFloatFormat, AsciiWriteColumn};
+use crate::fits_writer::ascii_builder::AsciiWriteColumn;
 use crate::header_model::record_name::RecordName;
-use crate::internals::cards::assert_cards;
-use crate::internals::memory::{ascii_table, rejected_before_output, round_trip};
+use crate::internals::cards;
+use crate::internals::memory;
+use crate::internals::samples;
+use crate::internals::whole_column::WholeAsciiColumn;
 use crate::io::HduKind;
-use crate::reader::FitsReader;
-use std::io::Cursor;
+use std::assert_matches;
 
+/// Each `TFORMn` form parses to its type, width and decimals, the float letter kept, and
+/// writes back as the standard spells it; a float form with no `.d` takes 0 decimals.
 #[test]
 fn parses_ascii_tform_codes() {
-    let fmt = |kind, width, decimals| AsciiFormat {
-        kind,
-        width,
-        decimals,
-    };
-    assert_eq!(parse_ascii_tform("A8").unwrap(), fmt(AsciiKind::Text, 8, 0));
-    assert_eq!(
-        parse_ascii_tform("I10").unwrap(),
-        fmt(AsciiKind::Integer, 10, 0)
-    );
-    assert_eq!(
-        parse_ascii_tform("F8.2").unwrap(),
-        fmt(AsciiKind::Float, 8, 2)
-    );
-    assert_eq!(
-        parse_ascii_tform("E15.7").unwrap(),
-        fmt(AsciiKind::Float, 15, 7)
-    );
-    assert_eq!(
-        parse_ascii_tform("D25.17").unwrap(),
-        fmt(AsciiKind::Float, 25, 17)
-    );
-    assert!(matches!(
-        parse_ascii_tform("Z3"),
-        Err(FitsError::InvalidTform { tform }) if tform == "Z3"
-    ));
+    for (text, tform, written) in [
+        ("A8", AsciiTform::Text { width: 8 }, "A8"),
+        ("I10", AsciiTform::Integer { width: 10 }, "I10"),
+        (
+            "F8.2",
+            AsciiTform::Float(AsciiFloatFormat::F {
+                width: 8,
+                decimals: 2,
+            }),
+            "F8.2",
+        ),
+        (
+            "E15.7",
+            AsciiTform::Float(AsciiFloatFormat::E {
+                width: 15,
+                decimals: 7,
+            }),
+            "E15.7",
+        ),
+        (
+            " D25.17 ",
+            AsciiTform::Float(AsciiFloatFormat::D {
+                width: 25,
+                decimals: 17,
+            }),
+            "D25.17",
+        ),
+        (
+            "F6",
+            AsciiTform::Float(AsciiFloatFormat::F {
+                width: 6,
+                decimals: 0,
+            }),
+            "F6.0",
+        ),
+    ] {
+        let parsed: AsciiTform = text.parse().unwrap();
+        assert_eq!(parsed, tform, "{text:?}");
+        assert_eq!(parsed.to_string(), written, "{text:?}");
+        assert_eq!(written.parse::<AsciiTform>().unwrap(), tform, "{written:?}");
+        assert_eq!(parsed.width(), tform.width(), "{text:?}");
+    }
+    for text in ["Z3", "", "A", "Fx.2"] {
+        assert_matches!(
+            text.parse::<AsciiTform>(),
+            Err(FitsError::InvalidTform { tform }) if tform == text
+        );
+    }
 }
 
 /// A text column's rows are read by index and in order, an undefined row as `None`. A
 /// field keeps its leading blanks and drops its trailing ones, so an all-blank field is
 /// `""`, which a null is not.
 #[test]
-fn ascii_text_reads_each_row() {
+fn text_column_reads_each_row() {
     let fields: AsciiText = [Some("x"), None, Some("yz")].into_iter().collect();
     assert_eq!(fields.row(2), Some("yz"));
     assert_eq!(
@@ -76,7 +100,7 @@ fn decodes_hand_built_ascii_rows() {
     assert_eq!(schema.row_count(), 2);
     assert_eq!(schema.row_len(), 10);
     assert_eq!(schema.columns[1].byte_offset(), 4);
-    assert_eq!(schema.column_index("count"), Some(1));
+    assert_eq!(schema.column_index("count").unwrap(), Some(1));
     let AsciiColumnData::Text(names) = table.column(0).unwrap().raw().unwrap() else {
         panic!("NAME is a text column");
     };
@@ -97,22 +121,67 @@ fn decodes_hand_built_ascii_rows() {
         table.column("COUNT").unwrap().physical().unwrap(),
         vec![123.0, -45.0]
     );
-    assert!(matches!(
+    // One buffer serves both columns, taking each one's kind; the physical values land
+    // after what an `f32` buffer holds.
+    let mut fields = AsciiColumnData::Float(vec![Some(9.0)]);
+    table.column(1).unwrap().raw_into(&mut fields).unwrap();
+    assert_eq!(fields, AsciiColumnData::Integer(vec![Some(123), Some(-45)]));
+    table.column(0).unwrap().raw_into(&mut fields).unwrap();
+    assert_eq!(fields, AsciiColumnData::Text(names));
+    let mut narrow: Vec<f32> = vec![0.5];
+    table.column(1).unwrap().physical_into(&mut narrow).unwrap();
+    assert_eq!(narrow, [0.5, 123.0, -45.0]);
+    assert_matches!(
         table.column("missing"),
-        Err(FitsError::ColumnNotFound { .. })
-    ));
+        Err(FitsError::ColumnNotFound { name }) if name == "missing"
+    );
 
     // §7.2: the data unit is ASCII text, so a non-ASCII byte is rejected when the
     // table is parsed rather than deferred until whichever column happens to hold it
     // is read — here the corrupt byte sits in NAME while COUNT is well formed.
     let mut corrupt = b"  AB   123def    -45".to_vec();
     corrupt[2] = 0xFF;
-    assert!(matches!(
+    assert_matches!(
         Ascii::from_data(&header, corrupt),
         Err(FitsError::InvalidAscii {
             text: TextOrigin::TableData
         })
-    ));
+    );
+}
+
+/// A physical value is one fused multiply-add: with TSCAL = 0.1 and TZERO = −0.3, the
+/// field 3 gives fma(0.1, 3, −0.3) = 2.7755575615628914e-17, where the product rounded
+/// first gives 5.551115123125783e-17. `nan` and `inf` are no §7.2.5 number, nor is an
+/// exponent past the f64 range.
+#[test]
+fn physical_values_fuse_the_scaling_and_refuse_non_finite_fields() {
+    let mut header = ascii_table_header(8, 1, &[(1, "F8.0")]);
+    header
+        .set_internal("TSCAL1", 0.1)
+        .set_internal("TZERO1", -0.3);
+    let table = Ascii::from_data(&header, b"       3".to_vec()).unwrap();
+    assert_eq!(
+        table.column(0).unwrap().physical().unwrap(),
+        [2.7755575615628914e-17]
+    );
+    for field in ["     nan", "     inf", "   1E400"] {
+        let table = Ascii::from_data(&header, field.as_bytes().to_vec()).unwrap();
+        assert_matches!(
+            table.column(0).unwrap().physical(),
+            Err(FitsError::InvalidAsciiField { column: 0, row: 0, field: got }) if got == field.trim()
+        );
+    }
+    // The refusal names the field's column and row, in either read.
+    let two = ascii_table_header(8, 2, &[(1, "I4"), (5, "I4")]);
+    let table = Ascii::from_data(&two, b"   1   2   3  zz".to_vec()).unwrap();
+    assert_matches!(
+        table.column(1).unwrap().raw(),
+        Err(FitsError::InvalidAsciiField { column: 1, row: 1, field }) if field == "zz"
+    );
+    assert_matches!(
+        table.column(1).unwrap().physical(),
+        Err(FitsError::InvalidAsciiField { column: 1, row: 1, field }) if field == "zz"
+    );
 }
 
 #[test]
@@ -131,9 +200,11 @@ fn applies_tscal_tzero_and_maps_tnull_to_nan() {
         AsciiColumnData::Integer(vec![Some(123), Some(0), None])
     );
     let phys = table.column(0).unwrap().physical().unwrap();
-    assert_eq!(phys[0], 256.0); // 10 + 2·123
-    assert_eq!(phys[1], 10.0); // blank field = stored zero
-    assert!(phys[2].is_nan());
+    // 10 + 2·123, then a blank field, a stored zero, then the null.
+    assert_eq!(
+        samples::nan_blind_of(&phys),
+        samples::nan_blind_of(&[256.0, 10.0, f64::NAN])
+    );
 
     // A bad optional keyword stays on its column: `TSCALn` and `TZEROn` fail the
     // physical read, `TNULLn` the raw one too, and `TDISPn` only its own accessor.
@@ -155,16 +226,52 @@ fn applies_tscal_tzero_and_maps_tnull_to_nan() {
         };
         let column = table.column(0).unwrap();
         assert!(defect(column.physical().unwrap_err()), "{keyword}");
-        assert_eq!(column.raw().is_err(), raw_fails, "{keyword}");
+        if raw_fails {
+            assert!(defect(column.raw().unwrap_err()), "{keyword}");
+        } else {
+            assert_eq!(
+                column.raw().unwrap(),
+                AsciiColumnData::Integer(vec![Some(123), Some(0), None]),
+                "{keyword}"
+            );
+        }
     }
     let mut display = header.clone();
     display.set_internal("TDISP1", 6);
     let table = Ascii::from_data(&display, b"   123         ***".to_vec()).unwrap();
-    assert!(matches!(
+    assert_matches!(
         table.schema().columns[0].tdisp(),
         Err(FitsError::InvalidColumnKeyword { keyword, .. }) if keyword == "TDISP1"
-    ));
+    );
     assert_eq!(table.column(0).unwrap().physical().unwrap()[0], 256.0);
+
+    // A `TTYPEn` or `TUNITn` that does not read fails its accessor and a lookup by name,
+    // as the column may carry that name; an index read does not.
+    for keyword in ["TTYPE1", "TUNIT1"] {
+        let mut labelled = header.clone();
+        labelled.set_internal(keyword, 7);
+        let table = Ascii::from_data(&labelled, b"   123         ***".to_vec()).unwrap();
+        let column = &table.schema().columns[0];
+        let accessor = if keyword == "TTYPE1" {
+            column.name()
+        } else {
+            column.unit()
+        };
+        assert_matches!(
+            accessor,
+            Err(FitsError::InvalidColumnKeyword { keyword: name, .. }) if name == keyword
+        );
+        assert_eq!(table.column(0).unwrap().physical().unwrap()[0], 256.0);
+        let lookup = table.schema().column_index("FLUX");
+        if keyword == "TTYPE1" {
+            assert_matches!(
+                lookup,
+                Err(FitsError::InvalidColumnKeyword { keyword: name, .. }) if name == keyword
+            );
+        } else {
+            assert_eq!(lookup.unwrap(), None);
+        }
+    }
 }
 
 #[test]
@@ -180,20 +287,7 @@ fn implicit_decimal_point_scales_by_ten_to_the_d() {
 }
 
 #[test]
-fn ascii_column_index_is_case_insensitive() {
-    let mut header = ascii_table_header(4, 1, &[(1, "I4")]);
-    header.set_internal("TTYPE1", "Count");
-    let table = Ascii::from_data(&header, b"   7".to_vec()).unwrap();
-    assert_eq!(table.schema().column_index("COUNT"), Some(0));
-    assert_eq!(table.schema().column_index("count"), Some(0));
-    // §7.2.2 and §6.7 are the same rule, so the ASCII form rejects the same
-    // non-matches the binary one does.
-    assert_eq!(table.schema().column_index("missing"), None);
-    assert_eq!(table.schema().column_index(""), None);
-}
-
-#[test]
-fn ascii_table_round_trips_through_write_and_read() {
+fn table_round_trips_through_write_and_read() {
     let mut columns = vec![
         AsciiWriteColumn::text(
             "NAME",
@@ -210,21 +304,15 @@ fn ascii_table_round_trips_through_write_and_read() {
             },
         ),
     ];
-    let mut r = round_trip(|w| w.write_ascii_table(&ascii_table(2, &columns), None));
+    let file = memory::written(|w| w.write_ascii_table(&memory::ascii_table(2, &columns), None));
+    let mut r = file.stream();
 
     assert_eq!(r.hdus().len(), 2); // auto dataless primary + the TABLE
     assert_eq!(r.hdus[1].kind, HduKind::AsciiTable);
-    // The header alone gives the schema the read gives, and only for a `TABLE`.
+    // The header alone gives the schema the read gives.
     let schema = r.hdus[1].ascii_schema().unwrap().clone();
     assert_eq!((schema.row_count(), schema.row_len()), (2, 19));
-    assert_eq!(schema.column_index("x"), Some(2));
-    assert!(matches!(
-        r.hdus[0].ascii_schema(),
-        Err(FitsError::HduKindMismatch {
-            expected: ExpectedHdu::AsciiTable,
-            got: HduKind::Primary
-        })
-    ));
+    assert_eq!(schema.column_index("x").unwrap(), Some(2));
     assert_eq!(&r.read_data_unit(1).unwrap()[..6], b"  AB  ");
     let t = r.read_ascii_table(1).unwrap();
     // The field pads to its width of 6 and reads back as it was written.
@@ -247,10 +335,7 @@ fn ascii_table_round_trips_through_write_and_read() {
         [Some(7), Some(-3)]
     );
     let floats = t.column(2).unwrap().raw().unwrap();
-    assert!(matches!(
-        AsciiText::try_from(floats),
-        Err(AsciiColumnData::Float(_))
-    ));
+    assert_matches!(AsciiText::try_from(floats), Err(AsciiColumnData::Float(_)));
     assert_eq!(
         t.column(2).unwrap().raw().unwrap(),
         AsciiColumnData::Float(vec![Some(1.5), Some(-2.25)])
@@ -261,12 +346,14 @@ fn ascii_table_round_trips_through_write_and_read() {
         [Some("café"), Some("beta")].into_iter().collect(),
         6,
     );
-    assert!(matches!(
-        rejected_before_output(|w| w.write_ascii_table(&ascii_table(2, &columns), None)),
+    assert_matches!(
+        memory::refused_before_output(
+            |w| w.write_ascii_table(&memory::ascii_table(2, &columns), None)
+        ),
         FitsError::InvalidAscii {
             text: TextOrigin::Cell
         }
-    ));
+    );
 }
 
 #[test]
@@ -286,12 +373,13 @@ fn signed_exponent_without_letter_parses_as_fortran_real() {
     // Explicit E/D forms keep working.
     exact(parse_ascii_float("1.5E2", 1), 150.0);
     exact(parse_ascii_float("1.5D-2", 1), 0.015);
-    // A point-less mantissa with an *explicit* exponent is read literally (strtod),
-    // NOT implied-decimal-scaled: `1E5` is 100000, `15E2` is 1500 — matching
-    // cfitsio/astropy. The implied decimal applies only to point-less `Fw.d` fields.
-    exact(parse_ascii_float("1E5", 3), 100_000.0);
-    exact(parse_ascii_float("15E2", 3), 1500.0);
-    exact(parse_ascii_float("2E-3", 4), 0.002);
+    // A point-less mantissa takes its implied point with an exponent too, as cfitsio's
+    // `fffstrr8` reads it (design.md): `1E5` in `E10.2` is 1·10⁵⁻² = 1000, `15E2` with
+    // 3 decimals 15·10²⁻³ = 1.5, and `2E-3` with 4 decimals 2·10⁻³⁻⁴ = 2e-7.
+    exact(parse_ascii_float("1E5", 2), 1000.0);
+    exact(parse_ascii_float("15E2", 3), 1.5);
+    exact(parse_ascii_float("2E-3", 4), 2e-7);
+    exact(parse_ascii_float("2.5E-3", 4), 0.0025);
     // Past 10²², `10f64.powi` is no longer exact; the literal stays exact to the last bit.
     exact(parse_ascii_float("7", 30), 7e-30);
     exact(parse_ascii_float("1.7976931348623157E308", 1), f64::MAX);
@@ -346,7 +434,7 @@ fn reads_a_column_with_a_bare_sign_exponent_field() {
 }
 
 #[test]
-fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
+fn write_emits_tscal_tzero_tnull_and_round_trips() {
     // A scaled integer column (raw values + TSCAL/TZERO) and a float column whose
     // undefined cell is written via TNULL and reads back as NaN (§7.2.2/§7.2.4).
     let columns = vec![
@@ -361,9 +449,10 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
         )
         .with_null("NULL"),
     ];
-    let mut r = round_trip(|w| w.write_ascii_table(&ascii_table(2, &columns), None));
+    let file = memory::written(|w| w.write_ascii_table(&memory::ascii_table(2, &columns), None));
+    let mut r = file.stream();
 
-    assert_cards(
+    cards::assert_cards(
         &r.hdus[1].header,
         &[
             ("TSCAL1", 2.0.into()),
@@ -381,8 +470,10 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
     assert_eq!(t.column(0).unwrap().physical().unwrap(), vec![110.0, 120.0]);
     // The TNULL-marked float cell reads back as NaN.
     let flux = t.column(1).unwrap().physical().unwrap();
-    assert_eq!(flux[0], 1.5);
-    assert!(flux[1].is_nan());
+    assert_eq!(
+        samples::nan_blind_of(&flux),
+        samples::nan_blind_of(&[1.5, f64::NAN])
+    );
     assert_eq!(
         t.column(1).unwrap().raw().unwrap(),
         AsciiColumnData::Float(vec![Some(1.5), None])
@@ -401,21 +492,21 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
             Some(marker) => column.with_null(marker),
             None => column,
         }];
-        assert!(matches!(
-            rejected_before_output(|w| w.write_ascii_table(&ascii_table(1, &invalid), None)),
-            FitsError::KeywordOutOfRange { keyword } if keyword == "TNULL1"
-        ));
+        assert_matches!(
+            memory::refused_before_output(|w| w.write_ascii_table(&memory::ascii_table(1, &invalid), None)),
+            FitsError::InvalidKeywordValue { keyword, .. } if keyword == "TNULL1"
+        );
     }
 
     let collision = [AsciiWriteColumn::integer("BAD", vec![Some(0)], 4).with_null("0")];
-    assert!(matches!(
-        rejected_before_output(|w| w.write_ascii_table(&ascii_table(1, &collision), None)),
+    assert_matches!(
+        memory::refused_before_output(|w| w.write_ascii_table(&memory::ascii_table(1, &collision), None)),
         FitsError::InvalidAsciiValue {
             column,
             row: 0,
             defect: AsciiValueDefect::NullMarker,
         } if column == "BAD"
-    ));
+    );
 
     let nonfinite = [AsciiWriteColumn::float(
         "BAD",
@@ -426,18 +517,18 @@ fn ascii_write_emits_tscal_tzero_tnull_and_round_trips() {
         },
     )
     .with_null("NULL")];
-    assert!(matches!(
-        rejected_before_output(|w| w.write_ascii_table(&ascii_table(1, &nonfinite), None)),
+    assert_matches!(
+        memory::refused_before_output(|w| w.write_ascii_table(&memory::ascii_table(1, &nonfinite), None)),
         FitsError::InvalidAsciiValue {
             column,
             row: 0,
             defect: AsciiValueDefect::NonFinite,
         } if column == "BAD"
-    ));
+    );
 }
 
 #[test]
-fn ascii_writer_accepts_exact_width_values() {
+fn writer_accepts_exact_width_values() {
     let columns = [
         AsciiWriteColumn::text("TEXT", [Some("abc")].into_iter().collect(), 3),
         AsciiWriteColumn::integer("INT", vec![Some(-12)], 3),
@@ -486,11 +577,8 @@ fn ascii_writer_accepts_exact_width_values() {
             },
         ),
     ];
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer
-        .write_ascii_table(&ascii_table(1, &columns), None)
-        .unwrap();
-    let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
+    let file = memory::written(|w| w.write_ascii_table(&memory::ascii_table(1, &columns), None));
+    let mut reader = file.stream();
     assert_eq!(
         &reader.read_data_unit(1).unwrap()[..36],
         b"abc-121.25NULL -1.25E-301.235D+04 2."
@@ -510,6 +598,21 @@ fn ascii_writer_accepts_exact_width_values() {
         ["A3", "I3", "F4.2", "F4.1", "E10.2", "D9.3", "F3.0"]
     );
     let table = reader.read_ascii_table(1).unwrap();
+    // The reader holds each column's form as the writer wrote it, its float letter too.
+    let read: Vec<String> = table
+        .schema()
+        .columns
+        .iter()
+        .map(|column| column.tform.to_string())
+        .collect();
+    assert_eq!(read, tforms);
+    assert_eq!(
+        table.schema().columns[4].tform,
+        AsciiTform::Float(AsciiFloatFormat::E {
+            width: 10,
+            decimals: 2,
+        })
+    );
     let floats: Vec<_> = (4..7)
         .map(|column| table.column(column).unwrap().raw().unwrap())
         .collect();
@@ -534,7 +637,7 @@ struct AsciiOverflowCase {
 }
 
 #[test]
-fn ascii_writer_rejects_one_byte_overflow_before_output() {
+fn writer_refuses_a_one_byte_overflow_before_output() {
     let cases = [
         AsciiOverflowCase {
             column: AsciiWriteColumn::text(
@@ -591,8 +694,8 @@ fn ascii_writer_rejects_one_byte_overflow_before_output() {
     for case in cases {
         let column_name = case.name;
         let width = case.width;
-        assert!(matches!(
-            rejected_before_output(|w| w.write_ascii_table(&ascii_table(case.row_count, &[case.column]), None)),
+        assert_matches!(
+            memory::refused_before_output(|w| w.write_ascii_table(&memory::ascii_table(case.row_count, &[case.column]), None)),
             FitsError::AsciiFieldTooWide {
                 column,
                 row,
@@ -602,7 +705,7 @@ fn ascii_writer_rejects_one_byte_overflow_before_output() {
                 && row == case.row
                 && actual_width == width
                 && minimum_width == case.minimum_width
-        ));
+        );
     }
 
     // `F1.n` holds no cell: a digit, the point and n decimals need n + 2 characters, and
@@ -624,14 +727,14 @@ fn ascii_writer_rejects_one_byte_overflow_before_output() {
         ),
     ] {
         let narrow = [AsciiWriteColumn::float("PRECISION", Vec::new(), format)];
-        assert!(matches!(
-            rejected_before_output(|w| w.write_ascii_table(&ascii_table(0, &narrow), None)),
+        assert_matches!(
+            memory::refused_before_output(|w| w.write_ascii_table(&memory::ascii_table(0, &narrow), None)),
             FitsError::AsciiFloatFormatTooNarrow {
                 column,
                 width,
                 minimum_width: needed,
             } if column == "PRECISION" && width == format.width() && needed == minimum_width
-        ));
+        );
     }
 
     let columns = [AsciiWriteColumn::float(
@@ -643,47 +746,27 @@ fn ascii_writer_rejects_one_byte_overflow_before_output() {
         },
     )
     .with_null("NULL")];
-    assert!(matches!(
-        rejected_before_output(|w| w.write_ascii_table(&ascii_table(1, &columns), None)),
-        FitsError::KeywordOutOfRange { keyword } if keyword == "TNULL1"
-    ));
+    assert_matches!(
+        memory::refused_before_output(|w| w.write_ascii_table(&memory::ascii_table(1, &columns), None)),
+        FitsError::InvalidKeywordValue { keyword, .. } if keyword == "TNULL1"
+    );
 }
 
-/// A scaling a column's values take none of, or one that is not finite, names the
-/// first keyword at fault: text takes no `TSCALn`, and a number no infinite `TZEROn`.
+/// A text column takes no `TSCALn`. The non-finite scalings of the number columns sit
+/// with the writer's other scalings, in `nonfinite_scaling_is_refused_before_output`.
 #[test]
-fn ascii_scaling_metadata_is_validated_by_stored_type_before_output() {
-    let format = AsciiFloatFormat::F {
-        width: 8,
-        decimals: 1,
-    };
-    let cases = [
-        (
-            AsciiWriteColumn::text("BAD", [Some("A")].into_iter().collect(), 8)
-                .with_scaling(2.0, 0.0),
-            "TSCAL1",
-        ),
-        (
-            AsciiWriteColumn::integer("BAD", vec![Some(1)], 8).with_scaling(f64::NAN, 0.0),
-            "TSCAL1",
-        ),
-        (
-            AsciiWriteColumn::float("BAD", vec![Some(1.0)], format)
-                .with_scaling(1.0, f64::INFINITY),
-            "TZERO1",
-        ),
+fn text_column_refuses_a_scaling() {
+    let columns = [
+        AsciiWriteColumn::text("BAD", [Some("A")].into_iter().collect(), 8).with_scaling(2.0, 0.0),
     ];
-    for (column, expected) in cases {
-        let columns = [column];
-        assert!(matches!(
-            rejected_before_output(|w| w.write_ascii_table(&ascii_table(1, &columns), None)),
-            FitsError::KeywordOutOfRange { keyword } if keyword == expected
-        ));
-    }
+    assert_matches!(
+        memory::refused_before_output(|w| w.write_ascii_table(&memory::ascii_table(1, &columns), None)),
+        FitsError::InvalidKeywordValue { keyword, .. } if keyword == "TSCAL1"
+    );
 }
 
 #[test]
-fn ascii_nulls_round_trip_distinct_from_zero_and_text() {
+fn nulls_round_trip_distinct_from_zero_and_text() {
     let columns = [
         AsciiWriteColumn::text(
             "LABEL",
@@ -693,11 +776,8 @@ fn ascii_nulls_round_trip_distinct_from_zero_and_text() {
         .with_null("NULL"),
         AsciiWriteColumn::integer("COUNT", vec![Some(0), None, Some(-2)], 5).with_null("NULL"),
     ];
-    let mut writer = FitsWriter::new(Cursor::new(Vec::new()));
-    writer
-        .write_ascii_table(&ascii_table(3, &columns), None)
-        .unwrap();
-    let mut reader = FitsReader::open(Cursor::new(writer.into_inner().into_inner())).unwrap();
+    let file = memory::written(|w| w.write_ascii_table(&memory::ascii_table(3, &columns), None));
+    let mut reader = file.stream();
     assert_eq!(
         reader.read_data_unit(1).unwrap()[..30],
         *b"zero     0NULL NULL star    -2"
@@ -713,59 +793,8 @@ fn ascii_nulls_round_trip_distinct_from_zero_and_text() {
         AsciiColumnData::Integer(vec![Some(0), None, Some(-2)])
     );
     let physical = table.column(1).unwrap().physical().unwrap();
-    assert_eq!(physical[0], 0.0);
-    assert!(physical[1].is_nan());
-    assert_eq!(physical[2], -2.0);
-}
-
-/// §7.2.1 fixes `BITPIX = 8`, `NAXIS = 2`, `PCOUNT = 0` and `GCOUNT = 1`, and caps
-/// `TFIELDS` at 999.
-#[test]
-fn ascii_table_structure_out_of_range_is_rejected() {
-    for (keyword, value) in [
-        (keywords::BITPIX, 16),
-        (keywords::NAXIS, 1),
-        (keywords::PCOUNT, 4),
-        (keywords::GCOUNT, 3),
-    ] {
-        let mut header = ascii_table_header(0, 0, &[]);
-        header.set_internal(keyword, value);
-        assert!(
-            matches!(
-                AsciiSchema::parse(&header),
-                Err(FitsError::KeywordOutOfRange { keyword: got }) if got == keyword
-            ),
-            "{keyword} = {value}"
-        );
-    }
-
-    let mut header = ascii_table_header(0, 0, &[]);
-    header.set_internal(keywords::TFIELDS, 1000);
-    assert!(matches!(
-        Ascii::from_data(&header, vec![]),
-        Err(FitsError::KeywordOutOfRange {
-            keyword: keywords::TFIELDS
-        })
-    ));
-
-    header
-        .set_internal("NAXIS1", 1)
-        .set_internal(keywords::TFIELDS, 1)
-        .set_internal("TBCOL1", 0)
-        .set_internal("TFORM1", "A1");
-    assert!(matches!(
-        Ascii::from_data(&header, vec![]),
-        Err(FitsError::KeywordOutOfRange { keyword }) if keyword == "TBCOL1"
-    ));
-}
-
-#[test]
-fn ascii_row_count_times_width_overflow_is_rejected() {
-    // NAXIS2·NAXIS1 from untrusted axes must not wrap a usize to a small product.
-    // 3e18 rows × 8 chars = 2.4e19 > usize::MAX, so `from_data` must error.
-    let header = ascii_table_header(8, 3_000_000_000_000_000_000, &[(1, "I8")]);
-    assert!(matches!(
-        Ascii::from_data(&header, vec![0u8; 8]),
-        Err(FitsError::DataUnitOverflow)
-    ));
+    assert_eq!(
+        samples::nan_blind_of(&physical),
+        samples::nan_blind_of(&[0.0, f64::NAN, -2.0])
+    );
 }

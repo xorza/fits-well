@@ -2,15 +2,15 @@
 
 use std::io::{Seek, Write};
 
-use crate::bitpix::Bitpix;
 use crate::checksum::running::Running;
 use crate::fits_error::{FitsError, Result, SizeUnit};
-use crate::fits_writer::{Body, FitsWriter, StreamHeader, merge_header_template};
-use crate::hdu::HduPosition;
+use crate::fits_writer::{FitsWriter, StreamHeader, merge_header_template};
+use crate::hdu::hdu_kind::HduPosition;
 use crate::hdu::prologue::{Opening, Prologue, Xtension};
 use crate::header_model::Header;
-use crate::image_model::view::{Borrowed, View};
-use crate::image_model::{Metadata, check_sample_count, shape_product};
+use crate::image_model::bitpix::Bitpix;
+use crate::image_model::view::View;
+use crate::image_model::{Metadata, shape_product};
 
 /// Incremental image-HDU write for outputs too large to stage in memory. Chunks
 /// are typed host-endian samples; the stream encodes and writes each one
@@ -26,41 +26,32 @@ pub struct ImageWriter<'a, W: Write + Seek> {
     finished: bool,
 }
 
-pub(super) fn write_template<W: Write>(
-    writer: &mut FitsWriter<W>,
-    image: Borrowed<'_>,
-    template: Option<&Header>,
-) -> Result<()> {
-    debug_assert!(
-        check_sample_count(image.shape, image.samples.len()).is_ok(),
-        "a borrowed image's shape fixes its sample count"
-    );
-    let header = image_header(image.metadata(), writer.next_position()?)?;
-    writer.finish_hdu(&header, template, Body::Samples(image.samples))
-}
-
-pub(super) fn stream_template<'a, W: Write + Seek>(
-    writer: &'a mut FitsWriter<W>,
-    layout: Metadata<'_>,
-    template: Option<&Header>,
-) -> Result<ImageWriter<'a, W>> {
-    let expected_samples = shape_product(layout.shape)?;
-    // A stream writes its header up front and rewrites it at `finish`, so it
-    // never reaches `finish_hdu` — it applies the template merge itself.
-    let mut header = image_header(layout, writer.next_position()?)?;
-    if let Some(template) = template {
-        merge_header_template(&mut header, template);
+impl<'a, W: Write + Seek> ImageWriter<'a, W> {
+    /// The stream of an image of `layout`, its header written by `writer` with the
+    /// non-structural cards of `template`. A stream writes its header up front and
+    /// rewrites it at `finish`, so it never reaches `finish_hdu`: it merges the template
+    /// itself.
+    pub(super) fn new(
+        writer: &'a mut FitsWriter<W>,
+        layout: Metadata<'_>,
+        template: Option<&Header>,
+    ) -> Result<Self> {
+        let expected_samples = shape_product(layout.shape)?;
+        let mut header = image_header(layout, writer.next_position()?)?;
+        if let Some(template) = template {
+            merge_header_template(&mut header, template);
+        }
+        let header = writer.start_stream(header)?;
+        Ok(Self {
+            writer,
+            header,
+            expected_samples,
+            written_samples: 0,
+            bitpix: layout.bitpix,
+            checksum: Running::new(),
+            finished: false,
+        })
     }
-    let header = writer.start_stream(header)?;
-    Ok(ImageWriter {
-        writer,
-        header,
-        expected_samples,
-        written_samples: 0,
-        bitpix: layout.bitpix,
-        checksum: Running::new(),
-        finished: false,
-    })
 }
 
 impl<W: Write + Seek> ImageWriter<'_, W> {
@@ -114,7 +105,7 @@ impl<W: Write + Seek> Drop for ImageWriter<'_, W> {
 /// Image header at `position`: the primary array (§4.4.1), or an `IMAGE` extension
 /// (§7.1). The two differ only in the prologue (`SIMPLE`+`EXTEND` vs
 /// `XTENSION`+`PCOUNT`/`GCOUNT`); the axes and scaling keywords are identical.
-fn image_header(layout: Metadata<'_>, position: HduPosition) -> Result<Header> {
+pub(super) fn image_header(layout: Metadata<'_>, position: HduPosition) -> Result<Header> {
     let opening = match position {
         HduPosition::Primary => Opening::Primary,
         HduPosition::Extension => Opening::Extension(Xtension::Image),

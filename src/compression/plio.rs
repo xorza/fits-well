@@ -4,10 +4,12 @@
 //! current "high" value `pv`. PLIO is a *mask* codec: values must be non-negative
 //! and fit in 24 bits; the encoder rejects values outside that lossless domain.
 
+use crate::compression::plane::IntSamples;
 use crate::fits_error::CompressionFeature;
 use crate::fits_error::FitsError;
 use crate::fits_error::PlioDefect;
 use crate::fits_error::Result;
+use std::ops::RangeInclusive;
 
 /// A `PLIO_1` stream's parameter: the `offset` its stream adds to each sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,22 +17,46 @@ pub(super) struct Codec {
     pub(super) offset: i64,
 }
 
+/// The values a PLIO stream holds: unsigned, in 24 bits.
+const STREAM_RANGE: RangeInclusive<i64> = 0..=0xFF_FFFF;
+
 impl Codec {
+    /// Refuses the first sample of an image, in the order of its samples, whose stream
+    /// value, the sample plus the offset, the format cannot hold. The whole image is checked
+    /// before its tiles, so the sample named is the same for any tiling, and with or
+    /// without `parallel`.
+    pub(super) fn check(self, samples: IntSamples<'_>) -> Result<()> {
+        match samples {
+            IntSamples::U8(values) => self.check_values(values),
+            IntSamples::I16(values) => self.check_values(values),
+            IntSamples::I32(values) => self.check_values(values),
+            IntSamples::I64(values) => self.check_values(values),
+        }
+    }
+
+    fn check_values<T: Copy + Into<i64>>(self, values: &[T]) -> Result<()> {
+        let outside = |&value: &T| !STREAM_RANGE.contains(&(value.into() + self.offset));
+        match values.iter().position(outside) {
+            Some(index) => Err(FitsError::PlioValueOutOfRange {
+                index,
+                value: values[index].into(),
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// Encode `values` plus the offset (one tile of non-negative mask pixels) as an IRAF
     /// PLIO line list — a port of cfitsio's `pl_p2li` with `xs = 1` — appending its
     /// big-endian i16 words to `out`. The list round-trips through [`Self::decode`].
-    /// Values outside `0..=0xFF_FFFF` are rejected because the format cannot preserve
-    /// them.
+    /// The values are within the format's range, as [`Self::check`] made sure.
     pub(super) fn encode(self, values: &[i64], out: &mut Vec<u8>) -> Result<()> {
         let offset = self.offset;
-        if let Some((index, value)) = values
-            .iter()
-            .map(|&value| value + offset)
-            .enumerate()
-            .find(|&(_, value)| !(0..=0xFF_FFFF).contains(&value))
-        {
-            return Err(FitsError::PlioValueOutOfRange { index, value });
-        }
+        debug_assert!(
+            values
+                .iter()
+                .all(|&value| STREAM_RANGE.contains(&(value + offset))),
+            "PLIO samples checked before the tiles"
+        );
 
         // Header words (1-based lldst[1..=7]): the `-100` at index 3 selects the
         // 30-bit-length form the decoder reads from words 4/5; index 2 (=7) is the
@@ -131,13 +157,13 @@ impl Codec {
         Ok(())
     }
 
-    /// Decode the big-endian line list `bytes` into `npix` values, less the offset, in
+    /// Decode the big-endian line list `bytes` into `count` values, less the offset, in
     /// `px`.
-    pub(super) fn decode(self, bytes: &[u8], npix: usize, px: &mut Vec<i64>) -> Result<()> {
+    pub(super) fn decode(self, bytes: &[u8], count: usize, px: &mut Vec<i64>) -> Result<()> {
         if !bytes.len().is_multiple_of(2) {
             return Err(FitsError::UnexpectedEof);
         }
-        decode_words(BeWords(bytes), npix, px)?;
+        decode_words(BeWords(bytes), count, px)?;
         if self.offset != 0 {
             for value in px.iter_mut() {
                 *value -= self.offset;
@@ -317,9 +343,12 @@ fn nonnegative_word(ll: BeWords<'_>, index: usize) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
+    use crate::compression::plane::IntSamples;
     use crate::compression::plio;
+    use crate::internals::samples;
+    use std::assert_matches;
 
-    use crate::fits_error::{CompressedDataDefect, FitsError, PlioDefect};
+    use crate::fits_error::{CompressedDataDefect, CompressionFeature, FitsError, PlioDefect};
 
     /// The two header words hold 15 bits each, low first: 2³⁰ − 1 is the longest
     /// list they can state.
@@ -328,21 +357,20 @@ mod tests {
         assert_eq!(plio::length_words(0).unwrap(), [0, 0]);
         assert_eq!(plio::length_words(32_768 + 5).unwrap(), [5, 1]);
         assert_eq!(plio::length_words((1 << 30) - 1).unwrap(), [32_767, 32_767]);
-        assert!(matches!(
+        assert_matches!(
             plio::length_words(1 << 30),
-            Err(FitsError::UnsupportedCompression { .. })
-        ));
+            Err(FitsError::UnsupportedCompression {
+                // 2³⁰ words, one past the longest list two 15-bit words state.
+                feature: CompressionFeature::PlioListLength {
+                    words: 1_073_741_824
+                }
+            })
+        );
     }
 
     #[test]
-    fn validates_encoding_and_rejects_malformed_streams() {
+    fn validates_encoding_and_refuses_malformed_streams() {
         let mut out = Vec::new();
-        let be = |words: &[i16]| {
-            words
-                .iter()
-                .flat_map(|word| word.to_be_bytes())
-                .collect::<Vec<_>>()
-        };
 
         let mut encoded = Vec::new();
         plio::Codec { offset: 0 }
@@ -361,33 +389,49 @@ mod tests {
             .decode(&encoded, 2, &mut out)
             .unwrap();
         assert_eq!(out, [-32768, 32767]);
-        for invalid in [-1, 0x100_0000] {
-            assert!(matches!(
-                plio::Codec { offset: 0 }.encode(&[0, invalid], &mut encoded),
+        // The check names the stored sample, the offset left out: −32769 plus 32768 is −1.
+        for (offset, invalid) in [(0, -1), (0, 0x100_0000), (32768, -32769)] {
+            assert_matches!(
+                plio::Codec { offset }.check(IntSamples::I64(&[0, invalid])),
                 Err(FitsError::PlioValueOutOfRange {
                     index: 1,
                     value,
                 }) if value == invalid
-            ));
+            );
         }
+        plio::Codec { offset: 32768 }
+            .check(IntSamples::I16(&[i16::MIN, i16::MAX]))
+            .unwrap();
         let truncated_span = [0, 7, -100, 8, 0, 0, 0];
-        assert!(matches!(
-            plio::Codec { offset: 0 }.decode(&be(&truncated_span), 1, &mut out),
+        assert_matches!(
+            plio::Codec { offset: 0 }.decode(
+                &samples::be(&truncated_span, i16::to_be_bytes),
+                1,
+                &mut out
+            ),
             Err(FitsError::UnexpectedEof)
-        ));
+        );
 
         let missing_absolute_high_word = [0, 0, 4, 0x1001];
-        assert!(matches!(
-            plio::Codec { offset: 0 }.decode(&be(&missing_absolute_high_word), 1, &mut out),
+        assert_matches!(
+            plio::Codec { offset: 0 }.decode(
+                &samples::be(&missing_absolute_high_word, i16::to_be_bytes),
+                1,
+                &mut out
+            ),
             Err(FitsError::UnexpectedEof)
-        ));
+        );
 
         let invalid_opcode = [0, 0, 4, i16::MIN];
-        assert!(matches!(
-            plio::Codec { offset: 0 }.decode(&be(&invalid_opcode), 1, &mut out),
+        assert_matches!(
+            plio::Codec { offset: 0 }.decode(
+                &samples::be(&invalid_opcode, i16::to_be_bytes),
+                1,
+                &mut out
+            ),
             Err(FitsError::CorruptCompressedData {
                 defect: CompressedDataDefect::Plio(PlioDefect::Opcode),
             })
-        ));
+        );
     }
 }

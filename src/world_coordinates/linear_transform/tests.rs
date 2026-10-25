@@ -1,8 +1,11 @@
 use crate::fits_error::ValueKind;
 use crate::header_model::record_name::RecordName;
-use crate::internals::tolerance::{Tolerance, assert_close};
+use crate::internals::cards;
+use crate::internals::tolerance;
+use crate::internals::tolerance::Tolerance;
 use crate::internals::wcs_header::WcsHeader;
 use crate::world_coordinates::internals::to_world;
+use std::assert_matches;
 
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::internals::CROTA_GOLDEN;
@@ -63,9 +66,15 @@ fn matrix_product_applies_reference_pixel_offsets_while_accumulating() {
     }
     // The inverse direction returns the pixel the intermediate came from, in place.
     transform.pixel(&mut intermediate).unwrap();
-    for (got, want) in intermediate.iter().zip(&pixel) {
-        assert!((got - want).abs() < 1e-12, "{got} vs {want}");
-    }
+    tolerance::assert_close(
+        &intermediate,
+        &pixel,
+        Tolerance::abs(
+            1e-12,
+            "an LU solve back to pixels of order 10², a few ulps of each",
+        ),
+        "inverse",
+    );
 }
 
 #[test]
@@ -76,35 +85,62 @@ fn legacy_crota_rotation_matches_astropy() {
     h.set_internal("CROTA2", 25.0);
     let w = Wcs::from_header(&h, None).unwrap();
     assert_astropy_golden(&w, &CROTA_GOLDEN, "CROTA");
+
+    // The matrix is CDELT times the PC the rotation declares, as a read of that PC builds
+    // it, so the written description reads back to the same matrix, bit for bit.
+    let mut written = Header::new();
+    w.write_into(&mut written, None).unwrap();
+    let reread = Wcs::from_header(&written, None).unwrap();
+    assert_eq!(linear::matrix(&reread.linear), linear::matrix(&w.linear));
+
+    // A quarter turn is exact: CROTA2 = 90° rotates (−0.0005, 0.0005) into a matrix of
+    // two cross terms, −CDELT2·sin = −0.0005 and CDELT1·sin = −0.0005, and no residue.
+    h.set_internal("CROTA2", 90.0);
+    let quarter = Wcs::from_header(&h, None).unwrap();
+    assert_eq!(
+        linear::matrix(&quarter.linear),
+        [0.0, -0.0005, -0.0005, 0.0]
+    );
 }
 
 #[test]
-fn conflicting_linear_keywords_are_rejected() {
+fn conflicting_linear_keywords_are_refused() {
     let base = || WcsHeader::celestial("TAN", [1.0, 1.0], [0.0, 0.0], [1.0, 1.0]).image_header();
-    // PC and CD are mutually exclusive; CROTA must not accompany PC.
-    let mut pc_cd = base();
-    pc_cd.set_internal("PC1_1", 1.0).set_internal("CD1_1", 1.0);
-    assert!(matches!(
-        Wcs::from_header(&pc_cd, None),
-        Err(FitsError::ConflictingWcsKeywords { .. })
-    ));
-    let mut crota_pc = base();
-    crota_pc
-        .set_internal("PC1_1", 1.0)
-        .set_internal("CROTA2", 30.0);
-    assert!(matches!(
-        Wcs::from_header(&crota_pc, None),
-        Err(FitsError::ConflictingWcsKeywords { .. })
-    ));
+    // Two forms that disagree are refused: PC with CD, or either with a nonzero CROTA of
+    // the latitude axis (axis 2).
+    let conflict = |cards: &[(&str, f64)]| {
+        let header = WcsHeader::celestial("TAN", [1.0, 1.0], [0.0, 0.0], [1.0, 1.0])
+            .image_header_with(cards);
+        match Wcs::from_header(&header, None) {
+            Err(FitsError::ConflictingWcsKeywords { conflict }) => Some(conflict),
+            Err(error) => panic!("{cards:?}: {error}"),
+            Ok(_) => None,
+        }
+    };
+    assert_eq!(
+        conflict(&[("PC1_1", 1.0), ("CD1_1", 1.0)]),
+        Some(WcsConflict::PcAndCd)
+    );
+    assert_eq!(
+        conflict(&[("PC1_1", 1.0), ("CROTA2", 30.0)]),
+        Some(WcsConflict::PcAndCrota)
+    );
+    assert_eq!(
+        conflict(&[("CD1_1", 2.0), ("CROTA2", 30.0)]),
+        Some(WcsConflict::CdAndCrota)
+    );
+    // A zero CROTA, or one on the longitude axis, has no effect and is not read.
     let mut crota_cd = base();
     crota_cd
         .set_internal("CDELT1", 11.0)
         .set_internal("CDELT2", 13.0)
         .set_internal("CD1_1", 2.0)
         .set_internal("CD2_2", 3.0)
-        .set_internal("CROTA2", 30.0);
+        .set_internal("CROTA2", 0.0)
+        .set_internal("CROTA1", 30.0);
     let w = Wcs::from_header(&crota_cd, None).unwrap();
     assert_eq!(linear::matrix(&w.linear), [2.0, 0.0, 0.0, 3.0]);
+    assert_eq!(conflict(&[("PC1_2", 0.5), ("CROTA1", 30.0)]), None);
     // A single convention (CD alone) is accepted.
     let mut cd_only = base();
     cd_only
@@ -117,11 +153,11 @@ fn conflicting_linear_keywords_are_rejected() {
 
     let mut malformed = base();
     malformed.set_internal("CRVAL1", "not numeric");
-    assert!(matches!(
+    assert_matches!(
         Wcs::from_header(&malformed, None),
         Err(FitsError::ValueTypeMismatch { name: RecordName::Keyword(name), expected: ValueKind::Real })
             if name == "CRVAL1"
-    ));
+    );
 }
 
 #[test]
@@ -146,14 +182,19 @@ fn cunit_scales_celestial_axes_to_degrees() {
     for &(px, py) in &[(1.0, 1.0), (50.0, 50.0), (80.0, 20.0), (33.0, 77.0)] {
         let a = to_world(&w_deg, &[px, py]).unwrap();
         let b = to_world(&w_asec, &[px, py]).unwrap();
-        assert!(
-            (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
-            "deg {a:?} vs arcsec {b:?} at ({px},{py})"
+        tolerance::assert_close(
+            &b,
+            &a,
+            Tolerance::abs(
+                1e-12,
+                "the arcsec CDELT scaled to degrees rounds once more, ulps of 150° (2.8e-14)",
+            ),
+            &format!("arcsec against degrees at ({px}, {py})"),
         );
     }
     // The reference pixel maps exactly to CRVAL = (150°, 30°) — proving the arcsec
     // CRVAL was scaled to degrees, not taken literally.
-    assert_close(
+    tolerance::assert_close(
         &to_world(&w_asec, &[50.0, 50.0]).unwrap(),
         &[150.0, 30.0],
         Tolerance::ulps(1.0, "the rotation's roundings of δ₀"),
@@ -173,6 +214,15 @@ fn matrix_factoring_detects_singularity_relative_to_the_entries() {
     assert!(LuFactors::new(&[1.0, 2.0, 2.0, 4.0], 2).is_none());
     assert!(LuFactors::new(&[1e-300, 2e-300, 2e-300, 4e-300], 2).is_none());
     assert!(LuFactors::new(&[0.1, 0.7, 0.3, 2.1], 2).is_none());
+    // Each row against its own scale: a cube of 2.8e-8° and 2.56e8 Hz a pixel is not
+    // singular, though its smallest pivot lies far below n·ε of its largest entry
+    // (3·ε·2.56e8 = 1.7e-7). Diagonal, so each solve is one exact division.
+    let cube = [2.8e-8, 0.0, 0.0, 0.0, 2.8e-8, 0.0, 0.0, 0.0, 2.56e8];
+    assert_eq!(
+        solved(&cube, 3, &[5.6e-8, -2.8e-8, 7.68e8]),
+        [5.6e-8 / 2.8e-8, -2.8e-8 / 2.8e-8, 7.68e8 / 2.56e8]
+    );
+    assert!(LuFactors::new(&[2.8e-8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.56e8], 3).is_none());
 }
 
 /// Matrix keywords are matched by their exact names: two-digit indices, the selected alternate
@@ -182,13 +232,13 @@ fn matrix_factoring_detects_singularity_relative_to_the_entries() {
 fn matrix_keywords_are_matched_by_exact_name() {
     let naxis = 12;
     let cdelt: Vec<f64> = (1..=naxis).map(|i| i as f64).collect();
-    let mut header = Header::new();
-    header
-        .set_internal("PC10_12", 0.5)
-        .set_internal("PC2_1", 0.25)
-        .set_internal("PC1_1A", 7.0)
-        .set_internal("PC13_1", 9.0)
-        .set_internal("PC01_02", 3.0);
+    let header = cards::header_of(&[
+        ("PC10_12", 0.5.into()),
+        ("PC2_1", 0.25.into()),
+        ("PC1_1A", 7.0.into()),
+        ("PC13_1", 9.0.into()),
+        ("PC01_02", 3.0.into()),
+    ]);
     let primary =
         LinearMatrix::from_header(&header, Alternate::PRIMARY, naxis, &cdelt, None).unwrap();
     let mut expected = vec![0.0; naxis * naxis];

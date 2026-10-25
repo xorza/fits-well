@@ -92,6 +92,8 @@ fn main() -> fits_well::Result<()> {
 
     // The compressed table reads as the table it holds, here only its rows 10 to 12.
     let table = reader.read_table_rows(4, 10..13)?;
-    println!("FLUX rows 10..13: {:?}", table.column("FLUX")?.physical()?);
+    let mut flux: Vec<f64> = Vec::new();
+    table.column("FLUX")?.physical_into(&mut flux)?;
+    println!("FLUX rows 10..13: {flux:?}");
     Ok(())
 }

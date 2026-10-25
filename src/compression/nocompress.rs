@@ -2,11 +2,6 @@
 
 use crate::fits_error::{Result, SizeUnit};
 
-/// Append the tile's big-endian bytes `raw` to `out`.
-pub(super) fn encode(raw: &[u8], out: &mut Vec<u8>) {
-    out.extend_from_slice(raw);
-}
-
 /// The tile's bytes from `stream`, which holds exactly the `expected` bytes of its
 /// samples.
 pub(super) const fn decode(stream: &[u8], expected: usize) -> Result<&[u8]> {

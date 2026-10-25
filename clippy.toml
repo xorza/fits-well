@@ -13,7 +13,7 @@ disallowed-types = [
     { path = "std::thread::LocalKey", reason = "state lives on an owner and travels by parameter" },
 ]
 
-# A group's sampling is set through `Scale` (`src/bench/fixture.rs`), the one
+# A group's sampling is set through `Scale` (`src/bench/policy.rs`), the one
 # policy every case shares; `Scale::apply` alone calls these.
 disallowed-methods = [
     { path = "criterion::BenchmarkGroup::sample_size", reason = "set a group's sampling through `Scale`" },

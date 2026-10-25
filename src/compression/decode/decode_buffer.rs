@@ -1,17 +1,17 @@
 //! The caller's output plane, which selects the stored sample type tiles narrow into.
 
-use crate::bitpix::Bitpix;
 use crate::compression::decode::image_decode_plan::ImageDecodePlan;
 use crate::compression::decode::tile_section::TileSection;
 use crate::fits_error::Result;
+use crate::image_model::bitpix::Bitpix;
 use crate::image_model::data::Data;
-use crate::words;
+use crate::image_model::words;
 
 /// A typed mutable view of the samples a decode writes into — owned [`Data`] or
 /// a caller's word-aligned scratch. Its variant, not the plan, picks the narrowing
 /// each tile's values go through on their way to the plane.
 #[derive(Debug)]
-pub(super) enum DecodeBuffer<'a> {
+pub(crate) enum DecodeBuffer<'a> {
     U8(&'a mut [u8]),
     I16(&'a mut [i16]),
     I32(&'a mut [i32]),
@@ -21,7 +21,7 @@ pub(super) enum DecodeBuffer<'a> {
 }
 
 impl<'a> DecodeBuffer<'a> {
-    pub(super) fn from_samples(samples: &'a mut Data) -> Self {
+    pub(crate) fn from_samples(samples: &'a mut Data) -> Self {
         match samples {
             Data::U8(values) => DecodeBuffer::U8(values),
             Data::I16(values) => DecodeBuffer::I16(values),
@@ -32,7 +32,7 @@ impl<'a> DecodeBuffer<'a> {
         }
     }
 
-    pub(super) fn from_words(words: &'a mut [u64], bitpix: Bitpix, count: usize) -> Self {
+    pub(crate) fn from_words(words: &'a mut [u64], bitpix: Bitpix, count: usize) -> Self {
         match bitpix {
             Bitpix::U8 => DecodeBuffer::U8(words::samples_mut(words, count)),
             Bitpix::I16 => DecodeBuffer::I16(words::samples_mut(words, count)),
@@ -43,31 +43,32 @@ impl<'a> DecodeBuffer<'a> {
         }
     }
 
-    /// Decode every tile of `plan`'s image into this buffer.
-    pub(super) fn decode_all(self, plan: &ImageDecodePlan<'_>) -> Result<()> {
+    /// Decode the tiles of `section`, or every tile of `plan`'s image for `None`, into this
+    /// buffer, which holds the section's samples or the image's.
+    pub(super) fn decode(
+        self,
+        plan: &ImageDecodePlan<'_>,
+        section: Option<TileSection<'_>>,
+    ) -> Result<()> {
         match self {
-            DecodeBuffer::U8(out) => plan.decode_all_into(out),
-            DecodeBuffer::I16(out) => plan.decode_all_into(out),
-            DecodeBuffer::I32(out) => plan.decode_all_into(out),
-            DecodeBuffer::I64(out) => plan.decode_all_into(out),
-            DecodeBuffer::F32(out) => plan.decode_all_into(out),
-            DecodeBuffer::F64(out) => plan.decode_all_into(out),
+            DecodeBuffer::U8(out) => plan.decode_into(section, out, &|value| value),
+            DecodeBuffer::I16(out) => plan.decode_into(section, out, &|value| value),
+            DecodeBuffer::I32(out) => plan.decode_into(section, out, &|value| value),
+            DecodeBuffer::I64(out) => plan.decode_into(section, out, &|value| value),
+            DecodeBuffer::F32(out) => plan.decode_into(section, out, &|value| value),
+            DecodeBuffer::F64(out) => plan.decode_into(section, out, &|value| value),
         }
     }
 
-    /// Decode the tiles `section` intersects into this section-sized buffer.
-    pub(super) fn decode_section(
-        self,
-        plan: &ImageDecodePlan<'_>,
-        section: TileSection<'_>,
-    ) -> Result<()> {
+    /// Whether this buffer holds no sample.
+    pub(super) const fn is_empty(&self) -> bool {
         match self {
-            DecodeBuffer::U8(out) => plan.decode_region_into(section, out),
-            DecodeBuffer::I16(out) => plan.decode_region_into(section, out),
-            DecodeBuffer::I32(out) => plan.decode_region_into(section, out),
-            DecodeBuffer::I64(out) => plan.decode_region_into(section, out),
-            DecodeBuffer::F32(out) => plan.decode_region_into(section, out),
-            DecodeBuffer::F64(out) => plan.decode_region_into(section, out),
+            DecodeBuffer::U8(out) => out.is_empty(),
+            DecodeBuffer::I16(out) => out.is_empty(),
+            DecodeBuffer::I32(out) => out.is_empty(),
+            DecodeBuffer::I64(out) => out.is_empty(),
+            DecodeBuffer::F32(out) => out.is_empty(),
+            DecodeBuffer::F64(out) => out.is_empty(),
         }
     }
 

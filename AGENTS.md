@@ -65,3 +65,18 @@ crate's own unit tests call is gated `#[cfg(test)]`. Never
 `tests/` holds what must use the public API alone, or a binary of its own:
 the round trips through `fits_well::` paths, and the allocation counts under a
 global allocator.
+
+A test name states the behavior: the subject first, the present tense, no
+leading article, and no prefix that repeats the module path. A refusal is
+`…_refuses_…`, or `…_is_refused` when the subject is the input, as
+`docs/design.md` says "Refused". A name covers all that its test checks, or
+the test splits.
+
+A test reads through `slice()`. It reads through `stream()` only where it pins
+a streaming behavior: staging, seeks or `finish_bytes`. A property that both
+sources hold is one generic `fn check<S: Source>(reader: &mut FitsReader<S>)`
+that the test calls with each.
+
+A test spells the keywords it expects by hand, as the standard's tables name them:
+its independent record. Generating them with the code under test checks that code
+against itself.

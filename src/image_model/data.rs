@@ -1,6 +1,10 @@
 //! [`Data`]: an owned image array in one of the six FITS sample types.
 
-use crate::bitpix::Bitpix;
+#[cfg(feature = "compression")]
+use crate::allocation;
+#[cfg(feature = "compression")]
+use crate::fits_error::Result;
+use crate::image_model::bitpix::Bitpix;
 use crate::image_model::view::View;
 
 /// An owned, host-endian sample buffer, tagged by its `BITPIX` element type.
@@ -15,6 +19,19 @@ pub enum Data {
 }
 
 impl Data {
+    /// `len` zero samples of `bitpix`, the plane a compressed read decodes into.
+    #[cfg(feature = "compression")]
+    pub(crate) fn zeroed(bitpix: Bitpix, len: usize) -> Result<Self> {
+        Ok(match bitpix {
+            Bitpix::U8 => Self::U8(allocation::try_zeroed(0u8, len)?),
+            Bitpix::I16 => Self::I16(allocation::try_zeroed(0i16, len)?),
+            Bitpix::I32 => Self::I32(allocation::try_zeroed(0i32, len)?),
+            Bitpix::I64 => Self::I64(allocation::try_zeroed(0i64, len)?),
+            Bitpix::F32 => Self::F32(allocation::try_zeroed(0.0f32, len)?),
+            Bitpix::F64 => Self::F64(allocation::try_zeroed(0.0f64, len)?),
+        })
+    }
+
     /// The `BITPIX` element kind backing this buffer.
     pub const fn bitpix(&self) -> Bitpix {
         self.view().bitpix()
@@ -68,11 +85,18 @@ impl Data {
 
 #[cfg(test)]
 pub(crate) mod internals {
-    use crate::bitpix::Bitpix;
+    use crate::image_model::bitpix::Bitpix;
     use crate::image_model::data::Data;
     use crate::image_model::sample::Sample;
 
     impl Data {
+        /// The big-endian bytes the samples are stored as, the inverse of [`Data::decode`].
+        pub(crate) fn encode(&self) -> Vec<u8> {
+            let mut out = Vec::new();
+            self.view().encode_into(&mut out);
+            out
+        }
+
         /// The stored big-endian `bytes`, a whole number of `bitpix` samples, decoded.
         pub(crate) fn decode(bytes: &[u8], bitpix: Bitpix) -> Self {
             fn decoded<T: Sample>(bytes: &[u8]) -> Vec<T> {

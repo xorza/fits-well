@@ -52,11 +52,18 @@ fn main() -> fits_well::Result<()> {
         table.schema().row_count(),
         table.schema().row_len()
     );
-    if let AsciiColumnData::Text(names) = table.column("NAME")?.raw()? {
+    // Each read fills a buffer the caller keeps, here one for the fields and one for the
+    // physical values.
+    let mut fields = AsciiColumnData::Integer(Vec::new());
+    table.column("NAME")?.raw_into(&mut fields)?;
+    if let AsciiColumnData::Text(names) = &fields {
         println!("NAME {:?}", names.iter().collect::<Vec<_>>());
     }
-    println!("ID   {:?}", table.column("ID")?.raw()?);
+    table.column("ID")?.raw_into(&mut fields)?;
+    println!("ID   {fields:?}");
     // A null field reads as NaN on the physical plane.
-    println!("MAG  {:?}", table.column("MAG")?.physical()?);
+    let mut magnitudes: Vec<f64> = Vec::new();
+    table.column("MAG")?.physical_into(&mut magnitudes)?;
+    println!("MAG  {magnitudes:?}");
     Ok(())
 }

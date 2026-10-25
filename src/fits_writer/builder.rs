@@ -1,5 +1,6 @@
 //! Binary-table writer schema, validation, and encoding.
 
+use crate::fits_error::KeywordDefect;
 use std::ops::Range;
 
 use bitvec::order::Msb0;
@@ -13,7 +14,6 @@ use crate::bintable::descriptor::{DescriptorWidth, PqDescriptor};
 use crate::bintable::element_kind::ElementKind;
 use crate::bintable::tdim;
 use crate::bintable::tform::{Storage, Tform};
-use crate::bitpix::Bitpix;
 use crate::column::validate_table_field_count;
 #[cfg(feature = "compression")]
 use crate::compression::CompressionConfig;
@@ -29,6 +29,7 @@ use crate::fits_writer::{ROW_COUNT_FIXED, accept_row_count};
 use crate::hdu::prologue::{Opening, Prologue, Xtension};
 use crate::header_model::card::validate_ascii;
 use crate::header_model::{Header, keywords, value};
+use crate::image_model::bitpix::Bitpix;
 use crate::image_model::{U64_OFFSET, U64_OFFSET_INTEGER};
 use crate::ragged::Ragged;
 
@@ -53,7 +54,7 @@ pub struct WriteColumn {
     values: WriteColumnData,
     tdim: Option<Vec<usize>>,
     /// `TSCALn`/`TZEROn` to emit: `data` holds the stored values, and a reader's
-    /// `ColumnReader::physical` recovers `TZEROn + TSCALn × stored`.
+    /// `ColumnReader::physical_into` recovers `TZEROn + TSCALn × stored`.
     scaling: Option<ColumnScaling>,
     /// `TNULLn`: the stored integer marking an undefined element.
     tnull: Option<i64>,
@@ -360,67 +361,95 @@ impl Builder {
         Ok(header)
     }
 
-    /// The `BINTABLE` header, with the unpadded data unit (rows, then heap) written to
-    /// `out`. The main table is written column by column, each cell at its row's
-    /// stride, and the heap row by row, as it is laid out.
-    pub(super) fn encode(&self, out: &mut Vec<u8>) -> Result<Header> {
+    /// The `BINTABLE` header of the table, and its layout, which [`Builder::encode_chunks`]
+    /// writes the data unit by.
+    pub(super) fn laid_out(&self) -> Result<LaidOut> {
         let layout = self.layout()?;
+        let header = self.header(&layout)?;
+        Ok(LaidOut { header, layout })
+    }
+
+    /// Encode the unpadded data unit laid out as `layout`, a bounded chunk at a time, into
+    /// `chunk`, and hand each to `each`: the main table in bands of whole rows up to
+    /// `chunk_bytes`, each column at its row's stride and each array's descriptor in its
+    /// row, then the heap, arrays in row order, gathered to `chunk_bytes`. A chunk is
+    /// larger only for a row or an array larger than it.
+    pub(super) fn encode_chunks(
+        &self,
+        layout: &TableLayout,
+        chunk_bytes: usize,
+        chunk: &mut Vec<u8>,
+        mut each: impl FnMut(&[u8]) -> Result<()>,
+    ) -> Result<()> {
         let TableLayout {
-            row_count,
-            row_len,
-            heap_len,
-            ..
-        } = layout;
-        let main_len = row_count
-            .checked_mul(row_len)
-            .ok_or(FitsError::DataUnitOverflow)?;
-        let total_len = main_len
-            .checked_add(heap_len)
-            .ok_or(FitsError::DataUnitOverflow)?;
-        out.clear();
-        out.reserve_exact(total_len);
-        out.resize(main_len, 0);
-        let mut offset = 0;
-        for (col, column) in self.columns.iter().zip(&layout.columns) {
-            // An array column's descriptors are written with the heap.
-            if let WriteColumnData::Fixed { data, repeat } = &col.values {
-                let cells = Cells {
-                    row_len,
-                    offset,
-                    row_count,
-                    repeat: *repeat,
-                };
-                let values = Values {
-                    data,
-                    range: 0..row_count * repeat,
-                };
-                cells.scatter(values, out);
-            }
-            offset += column.row_width;
-        }
-        for r in 0..self.heap_rows(row_count) {
-            let mut at = r * row_len;
+            row_count, row_len, ..
+        } = *layout;
+        let band = (chunk_bytes / row_len.max(1)).max(1);
+        let has_arrays = self.heap_rows(row_count) > 0;
+        let mut heap_at = 0;
+        for start in (0..row_count).step_by(band) {
+            let end = (start + band).min(row_count);
+            chunk.clear();
+            chunk.resize((end - start) * row_len, 0);
+            let mut offset = 0;
             for (col, column) in self.columns.iter().zip(&layout.columns) {
-                let cell = at..at + column.row_width;
-                at = cell.end;
-                let WriteColumnData::Vla { rows, width } = &col.values else {
+                if let WriteColumnData::Fixed { data, repeat } = &col.values {
+                    let cells = Cells {
+                        row_len,
+                        offset,
+                        row_count: end - start,
+                        repeat: *repeat,
+                    };
+                    let values = Values {
+                        data,
+                        range: start * repeat..end * repeat,
+                    };
+                    cells.scatter(values, chunk);
+                }
+                offset += column.row_width;
+            }
+            if has_arrays {
+                for (row, cells) in (start..end).zip(chunk.chunks_exact_mut(row_len)) {
+                    let mut at = 0;
+                    for (col, column) in self.columns.iter().zip(&layout.columns) {
+                        let cell = at..at + column.row_width;
+                        at = cell.end;
+                        let Some(array) = col.array_len(row) else {
+                            continue;
+                        };
+                        let descriptor = PqDescriptor {
+                            count: array.count,
+                            offset: heap_at,
+                        };
+                        descriptor.write(array.width, &mut cells[cell])?;
+                        heap_at += array.bytes;
+                    }
+                }
+            }
+            each(chunk)?;
+        }
+        debug_assert_eq!(heap_at, layout.heap_len, "the heap's layout");
+        chunk.clear();
+        for row in 0..self.heap_rows(row_count) {
+            for col in &self.columns {
+                let WriteColumnData::Vla { rows, .. } = &col.values else {
                     continue;
                 };
-                let range = rows.range(r);
-                let descriptor = PqDescriptor {
-                    count: range.len(),
-                    offset: out.len() - main_len,
-                };
-                descriptor.write(*width, &mut out[cell])?;
                 let values = Values {
                     data: rows.values(),
-                    range,
+                    range: rows.range(row),
                 };
-                append_array(out, values);
+                append_array(chunk, values);
+                if chunk.len() >= chunk_bytes {
+                    each(chunk)?;
+                    chunk.clear();
+                }
             }
         }
-        debug_assert_eq!(out.len(), total_len, "the data unit's layout");
-        self.header(&layout)
+        if !chunk.is_empty() {
+            each(chunk)?;
+        }
+        Ok(())
     }
 }
 
@@ -514,11 +543,25 @@ struct ColumnLayout {
 
 /// The extent of the table a [`Builder`] writes.
 #[derive(Debug)]
-struct TableLayout {
+pub(super) struct TableLayout {
     row_count: usize,
     row_len: usize,
     heap_len: usize,
     columns: Vec<ColumnLayout>,
+}
+
+impl TableLayout {
+    /// The bytes of the unpadded data unit: the rows, then the heap.
+    pub(super) const fn data_len(&self) -> usize {
+        self.row_count * self.row_len + self.heap_len
+    }
+}
+
+/// A table's header and the layout its data unit is written by.
+#[derive(Debug)]
+pub(super) struct LaidOut {
+    pub(super) header: Header,
+    pub(super) layout: TableLayout,
 }
 
 /// The heap's length after `array`, which its descriptor addresses at `heap_len`.
@@ -616,8 +659,9 @@ fn validate_binary_metadata(col: &WriteColumn, kind: ElementKind, n: usize) -> R
         .bitpix()
         .is_some_and(|bitpix| bitpix.holds_integer(tnull))
     {
-        return Err(FitsError::KeywordOutOfRange {
+        return Err(FitsError::InvalidKeywordValue {
             keyword: keywords::TNULL.indexed(n)?,
+            defect: KeywordDefect::Range,
         });
     }
     Ok(())

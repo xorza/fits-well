@@ -1,9 +1,8 @@
 use crate::bintable::Table;
 use crate::bintable::column_data::ColumnData;
 use crate::bintable::internals::table_header;
-use crate::fits_error::ExpectedColumn;
-use crate::fits_error::FitsError;
 use crate::header_model::keywords;
+use crate::internals::whole_column::WholeColumn;
 
 use bitvec::bitvec;
 use bitvec::order::Msb0;
@@ -39,19 +38,6 @@ fn x_bit_column_unpacks_msb_first() {
         table.column(0).unwrap().raw().unwrap(),
         ColumnData::Bit(bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0])
     );
-}
-
-#[test]
-fn read_bit_column_on_a_non_bit_column_errors() {
-    let header = table_header(4, 1, &["1J"]);
-    let table = Table::from_data(&header, vec![0u8; 4]).unwrap();
-    assert!(matches!(
-        table.column(0).unwrap().bits(),
-        Err(FitsError::ColumnKindMismatch {
-            column: 0,
-            expected: ExpectedColumn::Bits
-        })
-    ));
 }
 
 #[test]

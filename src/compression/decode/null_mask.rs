@@ -2,6 +2,7 @@
 
 use crate::bintable::table_view::TableView;
 use crate::bintable::vla_column::VlaColumn;
+use crate::compression::convert;
 use crate::compression::decode::ensure_tile_size;
 use crate::compression::decode::float_sample::FloatSample;
 use crate::compression::decode::tile_scratch_set::TileScratchSet;
@@ -115,7 +116,6 @@ impl<'a> NullMask<'a> {
         Ok(())
     }
 
-    /// One tile's mask, lent from `codecs`, or `None` when the tile has none.
     /// What decoding the mask of a tile of `tile_elems` elements fills of a set's codec
     /// buffers: nothing for an image without a mask column.
     pub(super) fn capacities(&self, tile_elems: usize) -> Result<CodecCapacities> {
@@ -129,6 +129,7 @@ impl<'a> NullMask<'a> {
         })
     }
 
+    /// One tile's mask, lent from `codecs`, or `None` when the tile has none.
     fn decode<'s>(
         &self,
         table_row: usize,
@@ -150,7 +151,8 @@ impl<'a> NullMask<'a> {
             width: IntBitpix::U8,
             blank: None,
         };
-        let mask = codec.decode_ints(tile, cell.bytes, codecs)?;
+        let stream = convert::stream_cell(cell, codec.stream_kind())?;
+        let mask = codec.decode_ints(tile, stream, codecs)?;
         ensure_tile_size(tile_elems, mask.len())?;
         if mask.iter().any(|&value| !matches!(value, 0 | 1)) {
             return Err(CompressedDataDefect::NullMask.into());

@@ -2,6 +2,7 @@
 
 use crate::fits_error::FitsError;
 use crate::fits_error::Indexed;
+use crate::fits_error::KeywordDefect;
 use crate::fits_error::Result;
 use crate::header_model::{Header, keywords};
 use crate::keyword::Keyword;
@@ -13,6 +14,7 @@ use crate::time_coordinates::scale::Scale;
 use crate::time_coordinates::time_axis_kind::TimeAxisKind;
 use crate::time_coordinates::unit::Unit;
 use crate::unit::SECONDS_PER_DAY;
+use crate::world_coordinates::ctype::Ctype;
 
 /// A header's time coordinate frame (§9): the reference epoch, scale, unit, and
 /// the resolved global time keywords.
@@ -84,21 +86,22 @@ impl Frame {
         self.unit.seconds(self.reference_mjd, &self.scale)
     }
 
-    /// Resolve a time value measured *relative* to `MJDREF` (e.g. `TSTART`,
-    /// `TSTOP`), in `TIMEUNIT`, to an absolute MJD in the frame's own scale, with the
-    /// `TIMEOFFS` clock correction (§9.4.1) added.
-    pub fn relative_to_mjd(&self, value: f64) -> Result<Mjd> {
-        self.axis(self.scale.clone(), self.unit)?.mjd(value)
+    /// The axis of time values measured *relative* to `MJDREF` (e.g. `TSTART`,
+    /// `TSTOP`), in `TIMEUNIT`, in the frame's own scale, with the `TIMEOFFS` clock
+    /// correction (§9.4.1): resolved once, so [`Axis::mjd`] of each value allocates
+    /// nothing.
+    pub fn relative_axis(&self) -> Result<Axis> {
+        self.axis(self.scale.clone(), self.unit)
     }
 
     /// The time axis a WCS axis of `ctype` and `cunit` declares in this frame (§9.6),
     /// resolved once: a `TIME` axis takes `TIMESYS`, a time-scale head its own scale, and
     /// an empty `cunit` `TIMEUNIT`. `None` for any other axis type.
     pub fn time_axis(&self, ctype: &str, cunit: &str) -> Result<Option<Axis>> {
-        if TimeAxisKind::from_ctype(ctype) != Some(TimeAxisKind::Time) {
+        let head = Ctype::parse(ctype).head;
+        if TimeAxisKind::from_head(head) != Some(TimeAxisKind::Time) {
             return Ok(None);
         }
-        let head = TimeAxisKind::head(ctype);
         let scale = if head.eq_ignore_ascii_case("TIME") {
             self.scale.clone()
         } else {
@@ -174,7 +177,10 @@ fn resolve_split_ref(
         },
     };
     Mjd::from_days(whole, fraction)
-        .ok_or(FitsError::KeywordOutOfRange { keyword })
+        .ok_or(FitsError::InvalidKeywordValue {
+            keyword,
+            defect: KeywordDefect::Range,
+        })
         .map(Some)
 }
 

@@ -1,11 +1,8 @@
-//! What the read-bytes tests share: an allocator that counts the live bytes and their
-//! peak, the images they write, and the run of views they measure.
+//! What the read-bytes tests share: the images they write, and the run of views they
+//! measure against the counting allocator's live bytes and peak.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::io::Cursor;
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use fits_well::compress::{Compression, CompressionConfig, Dither, Hcompress, Quantization};
 use fits_well::image::{Data, Image, Region, Scaling};
@@ -13,96 +10,7 @@ use fits_well::internals::INFLATE_STATE_BYTES;
 use fits_well::io::{BLOCK_SIZE, SliceSource, StreamSource};
 use fits_well::{FitsReader, FitsWriter, ImageReader, ViewBytes};
 
-/// [`System`], with the bytes the allocations of every thread but the harness's hold, and
-/// the most they held since [`Counting::restart_peak`].
-/// The harness's thread — libtest's main thread, which runs the test on a thread of its
-/// own and waits for it — is the first to allocate, and the one left out.
-#[derive(Debug)]
-struct Counting {
-    live: AtomicIsize,
-    peak: AtomicIsize,
-    harness_seen: AtomicBool,
-}
-
-thread_local! {
-    /// Whether this thread's allocations are counted, once its first one decided it.
-    static COUNTED: Cell<Option<bool>> = const { Cell::new(None) };
-}
-
-#[global_allocator]
-static ALLOCATOR: Counting = Counting {
-    live: AtomicIsize::new(0),
-    peak: AtomicIsize::new(0),
-    harness_seen: AtomicBool::new(false),
-};
-
-impl Counting {
-    fn counts_this_thread(&self) -> bool {
-        // A thread whose locals are gone is counted: a count can over-read, never under.
-        COUNTED
-            .try_with(|counted| {
-                let decided = counted
-                    .get()
-                    .unwrap_or_else(|| self.harness_seen.swap(true, Ordering::Relaxed));
-                counted.set(Some(decided));
-                decided
-            })
-            .unwrap_or(true)
-    }
-
-    fn grow(&self, bytes: usize) {
-        if self.counts_this_thread() {
-            let live = self.live.fetch_add(bytes as isize, Ordering::Relaxed) + bytes as isize;
-            self.peak.fetch_max(live, Ordering::Relaxed);
-        }
-    }
-
-    fn shrink(&self, bytes: usize) {
-        if self.counts_this_thread() {
-            self.live.fetch_sub(bytes as isize, Ordering::Relaxed);
-        }
-    }
-
-    fn live(&self) -> isize {
-        self.live.load(Ordering::Relaxed)
-    }
-
-    /// Count the peak again from what is live now, which this returns.
-    fn restart_peak(&self) -> isize {
-        let live = self.live();
-        self.peak.store(live, Ordering::Relaxed);
-        live
-    }
-
-    fn peak(&self) -> isize {
-        self.peak.load(Ordering::Relaxed)
-    }
-}
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        self.grow(layout.size());
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        self.grow(layout.size());
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        self.shrink(layout.size());
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    /// The new block counts before the old one goes: a block that moves is copied
-    /// while both are held.
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        self.grow(new_size);
-        self.shrink(layout.size());
-        unsafe { System.realloc(pointer, layout, new_size) }
-    }
-}
+use crate::support::counting::ALLOCATOR;
 
 /// The image every case writes: 61 × 47, so no tiling divides it, of values that keep
 /// each codec's tiles of unequal sizes.

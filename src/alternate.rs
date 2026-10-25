@@ -102,9 +102,10 @@ impl TryFrom<Option<char>> for Alternate {
 #[cfg(test)]
 mod tests {
     use crate::alternate::*;
+    use std::assert_matches;
 
     #[test]
-    fn an_alternate_is_the_primary_description_or_one_letter_a_to_z() {
+    fn alternate_is_the_primary_description_or_one_letter_a_to_z() {
         for letter in ['A', 'M', 'Z'] {
             let alt = Alternate::try_from(letter).unwrap();
             assert_eq!(alt, Alternate::new(letter));
@@ -129,8 +130,7 @@ mod tests {
                 Alternate::try_from(letter),
                 Alternate::try_from(Some(letter)),
             ] {
-                assert!(
-                    matches!(result, Err(FitsError::InvalidAlternate { alternate }) if alternate == letter),
+                assert_matches!(result, Err(FitsError::InvalidAlternate { alternate }) if alternate == letter,
                     "{letter:?}"
                 );
             }

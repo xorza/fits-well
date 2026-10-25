@@ -4,6 +4,7 @@
 use crate::world_coordinates::angle;
 use crate::world_coordinates::angle::D2R;
 use crate::world_coordinates::angle::R2D;
+use crate::world_coordinates::celestial_coordinate::CelestialCoordinate;
 use crate::world_coordinates::celestial_pole::CelestialPole;
 use crate::world_coordinates::native_coordinate::NativeCoordinate;
 
@@ -17,13 +18,6 @@ pub(super) struct NativeRotation {
     pub(super) pole: CelestialPole,
     sin_dec: f64,
     cos_dec: f64,
-}
-
-/// A celestial coordinate pair in degrees, as [`NativeRotation::to_celestial`] yields.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct CelestialCoordinate {
-    pub(super) ra: f64,
-    pub(super) dec: f64,
 }
 
 impl From<CelestialPole> for NativeRotation {

@@ -7,6 +7,7 @@ use bitvec::slice::BitSlice;
 use num_complex::Complex;
 
 use crate::bintable::column_data::ColumnData;
+use crate::bintable::column_element::ColumnElement;
 
 /// Borrowed column values, the twin of [`ColumnData`] as [`View`](crate::image::View) is
 /// of [`Data`](crate::image::Data): what [`ColumnData::view`] lends, and one row of a
@@ -136,7 +137,8 @@ impl<'a> ColumnView<'a> {
     }
 
     /// The values in `range`.
-    pub(crate) fn slice(self, range: Range<usize>) -> Self {
+    #[must_use]
+    pub fn slice(self, range: Range<usize>) -> Self {
         match self {
             Self::Logical(values) => Self::Logical(&values[range]),
             Self::Bit(values) => Self::Bit(&values[range]),
@@ -167,5 +169,14 @@ impl<'a> ColumnView<'a> {
             Self::ComplexF64(values) => ColumnData::ComplexF64(values.to_vec()),
             Self::Character(values) => ColumnData::Character(values.to_vec()),
         }
+    }
+}
+
+/// The values of a view of `T`; the view back when it holds another type.
+impl<'a, T: ColumnElement> TryFrom<ColumnView<'a>> for &'a [T] {
+    type Error = ColumnView<'a>;
+
+    fn try_from(view: ColumnView<'a>) -> Result<Self, ColumnView<'a>> {
+        T::from_view(view).ok_or(view)
     }
 }

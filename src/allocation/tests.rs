@@ -1,17 +1,18 @@
 use crate::allocation::*;
+use std::assert_matches;
 
 #[test]
 fn oversized_allocations_return_the_requested_byte_count() {
     let mut values = Vec::<u64>::new();
     let bytes = (usize::MAX as u64).saturating_mul(8);
-    assert!(matches!(
+    assert_matches!(
         try_reserve(&mut values, usize::MAX),
         Err(FitsError::DataUnitTooLarge { bytes: got }) if got == bytes
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         try_resize(&mut values, usize::MAX, 0),
         Err(FitsError::DataUnitTooLarge { bytes: got }) if got == bytes
-    ));
+    );
 }
 
 #[test]

@@ -16,7 +16,7 @@ pub(crate) mod sealed {
         unnameable_types,
         reason = "sealed: outside code may use it, never name it"
     )]
-    pub trait Narrow: Copy {
+    pub trait Narrow: Copy + Send + Sync {
         fn from_f64(value: f64) -> Self;
     }
 

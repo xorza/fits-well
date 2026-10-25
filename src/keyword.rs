@@ -6,11 +6,11 @@
 //! ~90 of them. A conforming keyword is at most 8 bytes, so `Keyword::try_from` on
 //! `format_args!` formats it into a fixed stack buffer and checks it instead.
 
-use core::fmt::{self, Write};
-use std::str;
+use core::fmt;
 use std::str::FromStr;
 
 use crate::fits_error::{FitsError, Result};
+use crate::inline_name::{InlineName, NameRule};
 
 /// A FITS keyword name: 1 to 8 bytes of `A`–`Z`, `0`–`9`, `-` and `_` (§4.1.2.1),
 /// held inline, so it is `Copy` and makes no allocation.
@@ -21,8 +21,7 @@ use crate::fits_error::{FitsError, Result};
 /// indexed one, such as `NAXIS3`, with [`Keyword::indexed`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Keyword {
-    bytes: [u8; 8],
-    len: u8,
+    name: InlineName,
 }
 
 impl Keyword {
@@ -38,25 +37,10 @@ impl Keyword {
     }
 
     const fn checked(name: &str) -> Option<Self> {
-        let name = name.as_bytes();
-        if name.is_empty() || name.len() > 8 {
-            return None;
+        match InlineName::checked(name, NameRule::Keyword) {
+            Some(name) => Some(Self { name }),
+            None => None,
         }
-        let mut bytes = [0; 8];
-        let mut i = 0;
-        while i < name.len() {
-            let byte = name[i];
-            if !(byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_')
-            {
-                return None;
-            }
-            bytes[i] = byte;
-            i += 1;
-        }
-        Some(Self {
-            bytes,
-            len: name.len() as u8,
-        })
     }
 
     /// This root with the decimal `index` after it: `CTYPE` and 2 give `CTYPE2`. Errors
@@ -72,17 +56,13 @@ impl Keyword {
     /// When the name fits but holds a byte no keyword has: the pattern that formats it
     /// is wrong, which no header can cause.
     pub(crate) fn fitting(name: fmt::Arguments<'_>) -> Option<Self> {
-        let mut buf = KeyBuf::new();
-        buf.write_fmt(name).ok()?;
-        let text = buf.as_str();
+        let formatted = InlineName::formatted(name)?;
+        let text = formatted.as_str();
         Some(Self::checked(text).unwrap_or_else(|| panic!("{text:?} is no keyword")))
     }
 
     pub const fn as_str(&self) -> &str {
-        match str::from_utf8(self.bytes.split_at(self.len as usize).0) {
-            Ok(text) => text,
-            Err(_) => panic!("a keyword holds only ASCII"),
-        }
+        self.name.as_str()
     }
 
     /// The 1-based index of this keyword in the family of `root`: `NAXIS3` after `NAXIS`
@@ -154,13 +134,12 @@ impl TryFrom<fmt::Arguments<'_>> for Keyword {
     type Error = FitsError;
 
     fn try_from(text: fmt::Arguments<'_>) -> Result<Self> {
-        let mut buf = KeyBuf::new();
-        if buf.write_fmt(text).is_err() {
+        let Some(formatted) = InlineName::formatted(text) else {
             return Err(FitsError::InvalidKeyword {
                 name: text.to_string(),
             });
-        }
-        Self::try_from(buf.as_str())
+        };
+        Self::try_from(formatted.as_str())
     }
 }
 
@@ -176,45 +155,10 @@ impl fmt::Debug for Keyword {
     }
 }
 
-/// A stack buffer a keyword is formatted into — no heap allocation. It holds the 8 bytes
-/// of the longest keyword; longer text is no keyword, so a write past them fails.
-#[derive(Debug)]
-struct KeyBuf {
-    buf: [u8; 8],
-    len: usize,
-}
-
-impl KeyBuf {
-    const fn new() -> Self {
-        Self {
-            buf: [0; 8],
-            len: 0,
-        }
-    }
-
-    const fn as_str(&self) -> &str {
-        match str::from_utf8(self.buf.split_at(self.len).0) {
-            Ok(text) => text,
-            Err(_) => panic!("KeyBuf holds only whole `&str` writes"),
-        }
-    }
-}
-
-impl Write for KeyBuf {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let end = self.len + s.len();
-        if end > self.buf.len() {
-            return Err(fmt::Error);
-        }
-        self.buf[self.len..end].copy_from_slice(s.as_bytes());
-        self.len = end;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::keyword::*;
+    use std::assert_matches;
 
     #[test]
     fn formats_keywords_without_allocating() {
@@ -241,14 +185,14 @@ mod tests {
             "CD1_2A"
         );
         // The long table-WCS spelling with a wide column is 9 bytes: no keyword.
-        assert!(matches!(
+        assert_matches!(
             Keyword::try_from(format_args!("TPV{}_{m}", 123)),
             Err(FitsError::InvalidKeyword { name }) if name == "TPV123_15"
-        ));
+        );
     }
 
     #[test]
-    fn a_keyword_is_one_to_eight_bytes_of_the_fits_set() {
+    fn keyword_is_one_to_eight_bytes_of_the_fits_set() {
         for name in ["NAXIS", "DATE-OBS", "CD1_1", "A", "12345678"] {
             let keyword = Keyword::try_from(name).unwrap();
             assert_eq!(keyword.as_str(), name);
@@ -257,8 +201,7 @@ mod tests {
             assert_eq!(name.parse::<Keyword>().unwrap(), keyword);
         }
         for name in ["", "naxis", "NAXIS1234", "CCD TEMP", "A.B", "\u{c4}"] {
-            assert!(
-                matches!(Keyword::try_from(name), Err(FitsError::InvalidKeyword { name: n }) if n == name),
+            assert_matches!(Keyword::try_from(name), Err(FitsError::InvalidKeyword { name: n }) if n == name,
                 "{name:?}"
             );
         }
@@ -275,10 +218,10 @@ mod tests {
             Keyword::new("NAXIS999")
         );
         // `NAXIS1000` is 9 bytes.
-        assert!(matches!(
+        assert_matches!(
             Keyword::new("NAXIS").indexed(1000),
             Err(FitsError::InvalidKeyword { name }) if name == "NAXIS1000"
-        ));
+        );
     }
 
     #[test]
@@ -298,18 +241,22 @@ mod tests {
         );
         let column = 1000;
         assert_eq!(Keyword::fitting(format_args!("TCTYP{column}")), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "\"tctyp17\" is no keyword")]
+    fn fitting_panics_on_a_pattern_of_no_keyword() {
         let column = 17;
-        let pattern = std::panic::catch_unwind(|| Keyword::fitting(format_args!("tctyp{column}")));
-        assert!(pattern.is_err());
+        let _ = Keyword::fitting(format_args!("tctyp{column}"));
     }
 
     #[test]
     fn overlong_formatted_text_is_no_keyword() {
         // A caller's column number can make the text any length: 27 bytes here.
         let column = usize::MAX;
-        assert!(matches!(
+        assert_matches!(
             Keyword::try_from(format_args!("1CTYP{column}A")),
             Err(FitsError::InvalidKeyword { name }) if name == format!("1CTYP{column}A")
-        ));
+        );
     }
 }

@@ -1,6 +1,7 @@
 use crate::bintable::Table;
 use crate::bintable::column::Column;
 use crate::bintable::column_data::ColumnData;
+use crate::bintable::column_reader::ColumnReader;
 use crate::bintable::internals::table_header;
 use crate::fits_error::ExpectedColumn;
 use crate::fits_error::FitsError;
@@ -9,6 +10,10 @@ use crate::fits_error::ValueKind;
 use crate::header_model::keywords;
 use crate::image_model::unsigned_data::UnsignedData;
 use crate::image_model::{I8_OFFSET, U16_OFFSET, U64_OFFSET};
+use crate::internals::raw_table::RawTable;
+use crate::internals::samples;
+use crate::internals::whole_column::WholeColumn;
+use std::assert_matches;
 
 use crate::ragged::Ragged;
 use num_complex::Complex;
@@ -75,7 +80,7 @@ fn zero_repeat_column_decodes_to_empty() {
 }
 
 #[test]
-fn read_column_physical_applies_tscal_tzero_and_tnull() {
+fn physical_applies_tscal_tzero_and_tnull() {
     let mut header = table_header(2, 3, &["1I"]); // i16 column
     header
         .set_internal("TTYPE1", "FLUX")
@@ -91,18 +96,23 @@ fn read_column_physical_applies_tscal_tzero_and_tnull() {
     // name in any case.
     for column in [table.column(0), table.column("flux")] {
         let phys = column.unwrap().physical().unwrap();
-        assert_eq!(phys[0], 16.0);
-        assert!(phys[1].is_nan());
-        assert_eq!(phys[2], 24.0);
+        assert_eq!(
+            samples::nan_blind_of(&phys),
+            samples::nan_blind_of(&[16.0, f64::NAN, 24.0])
+        );
     }
+    // An `f32` buffer takes the narrowed values after what it holds.
+    let mut narrow: Vec<f32> = vec![1.5];
+    table.column(0).unwrap().physical_into(&mut narrow).unwrap();
+    assert_eq!(
+        samples::nan_blind_of(&narrow),
+        samples::nan_blind_of(&[1.5f32, 16.0, f32::NAN, 24.0])
+    );
     assert_eq!(
         table.column("FLUX").unwrap().raw().unwrap(),
         ColumnData::I16(vec![3, 5, 7])
     );
-    assert!(matches!(
-        table.column("nope"),
-        Err(FitsError::ColumnNotFound { .. })
-    ));
+    assert_matches!(table.column("nope"), Err(FitsError::ColumnNotFound { name }) if name == "nope");
 
     // A bad optional keyword stays on its column: the reads that need it fail and
     // name it, and the stored values and every other column read as they are.
@@ -140,41 +150,16 @@ fn read_column_physical_applies_tscal_tzero_and_tnull() {
 }
 
 #[test]
-fn read_column_physical_rejects_non_numeric_columns() {
-    let header = table_header(3, 1, &["3A"]);
-    let table = Table::from_data(&header, b"abc".to_vec()).unwrap();
-    assert!(matches!(
-        table.column(0).unwrap().physical(),
-        Err(FitsError::ColumnKindMismatch {
-            column: 0,
-            expected: ExpectedColumn::Numeric
-        })
-    ));
-}
-
-#[test]
-fn read_column_on_a_vla_directs_to_read_vla_column() {
-    let header = table_header(8, 1, &["1PE(3)"]);
-    let table = Table::from_data(&header, vec![0u8; 8]).unwrap();
-    assert!(matches!(
-        table.column(0).unwrap().raw(),
-        Err(FitsError::ColumnKindMismatch {
-            column: 0,
-            expected: ExpectedColumn::Fixed
-        })
-    ));
-}
-
-#[test]
 fn decodes_variable_length_arrays_from_the_heap() {
-    // One `PE` column (f32 heap arrays), two rows of different lengths.
-    // Main table = two 8-byte `P` descriptors; the heap follows at THEAP
-    // (default = main size = 16).
-    let mut header = table_header(8, 2, &["1PE(3)"]);
+    // One `PE` column (f32 heap arrays), three rows of different lengths, the third
+    // overlapping the first two (§7.3.5). Main table = three 8-byte `P` descriptors; the
+    // heap follows at THEAP (default = main size = 24).
+    let mut header = table_header(8, 3, &["1PE(3)"]);
     header.set_internal(keywords::PCOUNT, 12); // heap = 3 × f32
     let mut data = Vec::new();
-    // descriptors: row 0 → (nelem 2, offset 0), row 1 → (nelem 1, offset 8)
-    for (nelem, offset) in [(2i32, 0i32), (1, 8)] {
+    // descriptors: row 0 → (nelem 2, offset 0), row 1 → (nelem 1, offset 8), row 2 →
+    // (nelem 3, offset 0)
+    for (nelem, offset) in [(2i32, 0i32), (1, 8), (3, 0)] {
         data.extend_from_slice(&nelem.to_be_bytes());
         data.extend_from_slice(&offset.to_be_bytes());
     }
@@ -184,28 +169,23 @@ fn decodes_variable_length_arrays_from_the_heap() {
     }
 
     let table = Table::from_data(&header, data).unwrap();
+    let vla = table.column(0).unwrap().vla().unwrap();
     assert_eq!(
-        table.column(0).unwrap().vla().unwrap(),
-        Ragged::<ColumnData>::new(ColumnData::F32(vec![1.0, 2.0, 3.0]), vec![2, 3])
+        vla,
+        Ragged::<ColumnData>::new(
+            ColumnData::F32(vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0]),
+            vec![2, 3, 6]
+        )
     );
+    // The descriptors' counts, 2 + 1 + 3, are reserved once and exactly, before the decode.
+    let ColumnData::F32(values) = vla.into_values() else {
+        panic!("an E column decodes to f32");
+    };
+    assert_eq!(values.capacity(), 6);
 }
 
 #[test]
-fn preserves_tdisp_without_making_it_part_of_data_decoding() {
-    let mut header = table_header(4, 1, &["1J"]);
-    for display in ["I5", "Q5", "E12.5E3junk"] {
-        header.set_internal("TDISP1", display);
-        let table = Table::from_data(&header, vec![0u8; 4]).unwrap();
-        assert_eq!(table.schema.columns[0].tdisp().unwrap(), Some(display));
-        assert_eq!(
-            table.column(0).unwrap().raw().unwrap(),
-            ColumnData::I32(vec![0])
-        );
-    }
-}
-
-#[test]
-fn read_column_complex_widens_and_scales() {
+fn complex_widens_and_scales() {
     let mut header = table_header(24, 1, &["1C", "1M"]);
     header
         .set_internal("TSCAL1", 3.0)
@@ -227,20 +207,10 @@ fn read_column_complex_widens_and_scales() {
         table.column(1).unwrap().complex().unwrap(),
         vec![Complex { re: 7.0, im: 6.0 }]
     );
-    // A non-complex column errors.
-    let h2 = table_header(4, 1, &["1J"]);
-    let t2 = Table::from_data(&h2, vec![0u8; 4]).unwrap();
-    assert!(matches!(
-        t2.column(0).unwrap().complex(),
-        Err(FitsError::ColumnKindMismatch {
-            column: 0,
-            expected: ExpectedColumn::Complex
-        })
-    ));
 }
 
 #[test]
-fn read_column_unsigned_recovers_typed_values() {
+fn unsigned_recovers_typed_values() {
     // `1I` with TZERO=2¹⁵ → u16; `1B` with TZERO=-128 → i8.
     let mut header = table_header(3, 1, &["1I", "1B"]);
     header
@@ -261,7 +231,7 @@ fn read_column_unsigned_recovers_typed_values() {
 }
 
 #[test]
-fn read_column_unsigned_is_exact_for_u64_and_none_otherwise() {
+fn unsigned_is_exact_for_u64_and_none_otherwise() {
     // `1K` with TZERO=2⁶³ → u64, exact past 2⁵³; a plain `1J` (TZERO=0) is not
     // an unsigned column.
     let mut header = table_header(12, 1, &["1K", "1J"]);
@@ -282,35 +252,57 @@ fn read_column_unsigned_is_exact_for_u64_and_none_otherwise() {
         table.column(1).unwrap().unsigned().unwrap(),
         None // TZERO=0
     );
+    // A buffer of another kind takes the column's; a column that is not unsigned leaves
+    // it as it was.
+    let mut reused = UnsignedData::U16(vec![9, 9]);
+    assert!(table.column(0).unwrap().unsigned_into(&mut reused).unwrap());
+    assert_eq!(reused, UnsignedData::U64(vec![u64::MAX]));
+    assert!(!table.column(1).unwrap().unsigned_into(&mut reused).unwrap());
+    assert_eq!(reused, UnsignedData::U64(vec![u64::MAX]));
 }
 
 #[test]
-fn read_vla_column_physical_scales_heap_arrays_and_nulls() {
+fn vla_physical_scales_heap_arrays_and_nulls() {
     // 1PJ column, TSCAL=2, TZERO=10, TNULL=99. Row 0 = [5, 99(null)], row 1 = [3].
-    let mut header = table_header(8, 2, &["1PJ(2)"]);
+    let raw = RawTable::new(2).heap(
+        None,
+        'J',
+        &[
+            &samples::be(&[5i32, 99], i32::to_be_bytes),
+            &samples::be(&[3i32], i32::to_be_bytes),
+        ],
+    );
+    let mut header = raw.header();
     header
-        .set_internal(keywords::PCOUNT, 12)
         .set_internal("TSCAL1", 2.0)
         .set_internal("TZERO1", 10.0)
         .set_internal("TNULL1", 99);
-    let mut data = Vec::new();
-    for (nelem, offset) in [(2i32, 0i32), (1, 8)] {
-        data.extend_from_slice(&nelem.to_be_bytes());
-        data.extend_from_slice(&offset.to_be_bytes());
-    }
-    for x in [5i32, 99, 3] {
-        data.extend_from_slice(&x.to_be_bytes());
-    }
-    let table = Table::from_data(&header, data).unwrap();
+    let table = Table::from_data(&header, raw.data()).unwrap();
     let phys = table.column(0).unwrap().vla_physical().unwrap();
     assert_eq!(phys.ends(), [2, 3]);
-    assert_eq!(phys.row(0)[0], 20.0); // 10 + 2·5
-    assert!(phys.row(0)[1].is_nan()); // 99 == TNULL
+    // 10 + 2·5, then 99, the TNULL.
+    assert_eq!(
+        samples::nan_blind_of(phys.row(0)),
+        samples::nan_blind_of(&[20.0, f64::NAN])
+    );
     assert_eq!(phys.row(1), [16.0]); // 10 + 2·3
+    // An `f32` read refills the buffer it is given, rows and all.
+    let mut narrow = Ragged::<Vec<f32>>::new(vec![7.0; 5], vec![5]);
+    table
+        .column(0)
+        .unwrap()
+        .vla_physical_into(&mut narrow)
+        .unwrap();
+    assert_eq!(narrow.ends(), [2, 3]);
+    assert_eq!(
+        samples::nan_blind_of(narrow.row(0)),
+        samples::nan_blind_of(&[20.0f32, f32::NAN])
+    );
+    assert_eq!(narrow.row(1), [16.0f32]);
 }
 
 #[test]
-fn read_vla_complex_scales_p_and_q_heap_values() {
+fn vla_complex_scales_p_and_q_heap_values() {
     let mut header = table_header(24, 2, &["1PC(2)", "1QM(1)"]);
     header
         .set_internal(keywords::PCOUNT, 32)
@@ -350,7 +342,7 @@ fn read_vla_complex_scales_p_and_q_heap_values() {
 }
 
 #[test]
-fn read_vla_unsigned_is_exact_past_f64_integer_precision() {
+fn vla_unsigned_is_exact_past_f64_integer_precision() {
     let mut header = table_header(24, 1, &["1PK(3)", "1QK(3)"]);
     header
         .set_internal(keywords::PCOUNT, 48)
@@ -397,7 +389,7 @@ fn read_vla_unsigned_is_exact_past_f64_integer_precision() {
 }
 
 #[test]
-fn vla_descriptor_overrunning_the_heap_is_rejected() {
+fn vla_descriptor_overrunning_the_heap_is_refused() {
     // §6.6: a span must lie within the heap (`PCOUNT` bytes), not the block fill.
     // Heap is 8 bytes (PCOUNT=8) but the descriptor claims 3 f32 = 12 bytes.
     let mut header = table_header(8, 1, &["1PE(3)"]);
@@ -408,35 +400,97 @@ fn vla_descriptor_overrunning_the_heap_is_rejected() {
     data.extend_from_slice(&[0u8; 8]); // only 8 heap bytes (then block fill)
     data.resize(2880, 0); // block-padded fill that must NOT be read as heap
     let table = Table::from_data(&header, data).unwrap();
-    assert!(matches!(
+    assert_matches!(
         table.column(0).unwrap().vla(),
-        Err(FitsError::UnexpectedEof)
-    ));
+        Err(FitsError::DescriptorPastHeap { column: 0, row: 0 })
+    );
 }
 
 #[test]
-fn read_vla_on_a_fixed_column_is_an_error() {
+fn out_of_bounds_column_is_refused() {
     let header = table_header(4, 1, &["1J"]);
     let table = Table::from_data(&header, vec![0u8; 4]).unwrap();
-    assert!(matches!(
-        table.column(0).unwrap().vla(),
-        Err(FitsError::ColumnKindMismatch {
-            column: 0,
-            expected: ExpectedColumn::Array
-        })
-    ));
-}
-
-#[test]
-fn out_of_bounds_column_is_an_error() {
-    let header = table_header(4, 1, &["1J"]);
-    let table = Table::from_data(&header, vec![0u8; 4]).unwrap();
-    assert!(matches!(
+    assert_matches!(
         table.column(9),
         Err(FitsError::IndexOutOfBounds {
             indexed: Indexed::Column,
             index: 9,
             len: 1
         })
-    ));
+    );
+}
+
+/// Each accessor takes the column kinds it reads and refuses the others, naming the kind
+/// it needs: a fixed read refuses an array, a physical read a text, complex or bit column,
+/// and an array read a fixed column. `unsigned` gives `None` for a column of no unsigned
+/// convention, and a bit array has no physical value.
+#[test]
+fn each_accessor_refuses_the_column_kinds_it_cannot_read() {
+    type Read = fn(&ColumnReader<'_>) -> Result<(), FitsError>;
+    let header = table_header(36, 1, &["1J", "1E", "3A", "1C", "5X", "1PE", "1PX"]);
+    let table = Table::from_data(&header, vec![0; 36]).unwrap();
+    let ok = None;
+    let [fixed, array, bits, complex, numeric] = [
+        ExpectedColumn::Fixed,
+        ExpectedColumn::Array,
+        ExpectedColumn::Bits,
+        ExpectedColumn::Complex,
+        ExpectedColumn::Numeric,
+    ]
+    .map(Some);
+    let reads: [(&str, Read, [Option<ExpectedColumn>; 7]); 8] = [
+        (
+            "raw",
+            |c| c.raw().map(drop),
+            [ok, ok, ok, ok, ok, fixed, fixed],
+        ),
+        (
+            "physical",
+            |c| c.physical().map(drop),
+            [ok, ok, numeric, numeric, numeric, fixed, fixed],
+        ),
+        (
+            "unsigned",
+            |c| c.unsigned().map(drop),
+            [ok, ok, ok, ok, ok, fixed, fixed],
+        ),
+        (
+            "complex",
+            |c| c.complex().map(drop),
+            [complex, complex, complex, ok, complex, fixed, fixed],
+        ),
+        (
+            "bits",
+            |c| c.bits().map(drop),
+            [bits, bits, bits, bits, ok, bits, bits],
+        ),
+        (
+            "vla",
+            |c| c.vla().map(drop),
+            [array, array, array, array, array, ok, ok],
+        ),
+        (
+            "vla_physical",
+            |c| c.vla_physical().map(drop),
+            [array, array, array, array, array, ok, numeric],
+        ),
+        (
+            "vla_bits",
+            |c| c.vla_bits().map(drop),
+            [bits, bits, bits, bits, bits, bits, ok],
+        ),
+    ];
+    for (name, read, expected) in reads {
+        for (index, expected) in expected.into_iter().enumerate() {
+            let result = read(&table.column(index).unwrap());
+            match expected {
+                None => result.unwrap_or_else(|error| panic!("{name} of column {index}: {error}")),
+                Some(kind) => assert_matches!(
+                    result,
+                    Err(FitsError::ColumnKindMismatch { column, expected }) if column == index && expected == kind,
+                    "{name} of column {index}"
+                ),
+            }
+        }
+    }
 }

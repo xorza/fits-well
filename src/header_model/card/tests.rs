@@ -1,9 +1,14 @@
 use crate::header_model::card::*;
 use crate::header_model::{Header, RecordView};
-use crate::internals::cards::card_bytes;
+use crate::internals::cards;
+use std::assert_matches;
+
+use num_complex::Complex;
+
+use crate::fits_error::ValueKind;
 
 fn parse(text: &str) -> Record {
-    reparse(&card_bytes(text))
+    reparse(&cards::card_bytes(text))
 }
 
 fn reparse(bytes: &[u8; CARD_SIZE]) -> Record {
@@ -21,7 +26,7 @@ fn record(bytes: &[u8; CARD_SIZE]) -> ParsedRecord {
 /// The repairs the parse of `text` makes.
 fn repairs(text: &str) -> Vec<RepairKind> {
     let mut repairs = Vec::new();
-    ParsedRecord::parse(&card_bytes(text), 1, &mut repairs);
+    ParsedRecord::parse(&cards::card_bytes(text), 1, &mut repairs);
     repairs.into_iter().map(|repair| repair.kind).collect()
 }
 
@@ -62,123 +67,11 @@ fn render_records(card: &Record) -> Vec<[u8; CARD_SIZE]> {
     bytes.as_chunks::<CARD_SIZE>().0.to_vec()
 }
 
+/// Complex integer parts past `i64` keep their exact decimals. A header reads both
+/// complex forms as a pair, the integer parts as reals, and refuses another type by name;
+/// an absent one is absent, unless it is required.
 #[test]
-fn parses_a_logical_card_with_comment() {
-    let card = parse("SIMPLE  =                    T / file does conform");
-    assert_eq!(card.name_text(), "SIMPLE");
-    assert!(matches!(card, Record::Valued { .. }));
-    assert_eq!(card.value(), Some(&Value::Logical(true)));
-    assert_eq!(card.text(), Some("file does conform"));
-}
-
-#[test]
-fn parses_integers_reals_and_fortran_double_exponent() {
-    assert_eq!(
-        parse("BITPIX  =                   16").value(),
-        Some(&Value::from(16_i64))
-    );
-    assert_eq!(
-        parse("NEG     =                   -5").value(),
-        Some(&Value::from(-5_i64))
-    );
-    assert_eq!(
-        parse("EQUINOX =              1950.00").value(),
-        Some(&Value::Real(1950.0))
-    );
-    assert_eq!(
-        parse("UVCVOLT =                 -5.0").value(),
-        Some(&Value::Real(-5.0))
-    );
-    assert_eq!(
-        parse("SCALED  =                2.0D3").value(),
-        Some(&Value::Real(2000.0))
-    );
-    assert_eq!(
-        parse("EXP     =               3.14E2").value(),
-        Some(&Value::Real(314.0))
-    );
-}
-
-#[test]
-fn string_unescapes_quotes_and_trims_only_trailing_spaces() {
-    assert_eq!(
-        parse("OBJECT  = 'Cygnus X-1'").value(),
-        Some(&Value::Text("Cygnus X-1".into()))
-    );
-    assert_eq!(
-        parse("NAME    = 'O''Brien  '").value(),
-        Some(&Value::Text("O'Brien".into()))
-    );
-    assert_eq!(
-        parse("LEAD    = '   keep'").value(),
-        Some(&Value::Text("   keep".into()))
-    );
-    // §4.2.1.1: `''` is the null string (length 0); an all-blank string keeps one
-    // significant space (length 1), and the two must compare unequal.
-    let null = parse("EMPTY   = ''").value().cloned();
-    assert_eq!(null, Some(Value::Text(String::new())));
-    let blank = parse("BLANKS  = '      '").value().cloned();
-    assert_eq!(blank, Some(Value::Text(" ".into())));
-    assert_ne!(null, blank);
-}
-
-#[test]
-fn large_magnitude_real_renders_with_exponent_and_round_trips() {
-    // Display would expand 1e300 to 301 digits and overflow the 80-byte card;
-    // format_real must use the §4.2.4 uppercase-`E` form instead (no truncation).
-    for &r in &[1e300_f64, -1e300, 1e-300, 2.5e123] {
-        let card = Record::Valued {
-            keyword: Keyword::new("BIG"),
-            value: Value::Real(r),
-            comment: None,
-        };
-        let rendered = render(&card).unwrap();
-        let text = str::from_utf8(&rendered).unwrap();
-        assert!(
-            text.contains('E') && !text.contains('e'),
-            "expected uppercase exponent, got {text:?}"
-        );
-        let reparsed = reparse(&rendered);
-        assert_eq!(reparsed.value(), Some(&Value::Real(r)), "round-trip {r}");
-    }
-}
-
-#[test]
-fn slash_inside_a_string_is_not_a_comment_boundary() {
-    let card = parse("PATH    = 'a/b/c' / the real comment");
-    assert_eq!(card.value(), Some(&Value::Text("a/b/c".into())));
-    assert_eq!(card.text(), Some("the real comment"));
-}
-
-#[test]
-fn blank_value_field_is_undefined() {
-    let card = parse("DARKCORR= ");
-    assert_eq!(card.value(), Some(&Value::Undefined));
-}
-
-#[test]
-fn parses_complex_integer_and_real() {
-    assert_eq!(
-        parse("CPLXI   = (3, 4)").value(),
-        Some(&Value::ComplexInteger {
-            re: 3_i64.into(),
-            im: 4_i64.into()
-        })
-    );
-    assert_eq!(
-        parse("CPLXR   = (1.0, -2.5)").value(),
-        Some(&Value::ComplexReal { re: 1.0, im: -2.5 })
-    );
-    // An integer part beside a real one widens, in either position.
-    assert_eq!(
-        parse("CPLXM   = (3, -2.5)").value(),
-        Some(&Value::ComplexReal { re: 3.0, im: -2.5 })
-    );
-    assert_eq!(
-        parse("CPLXM   = (1.5, -4)").value(),
-        Some(&Value::ComplexReal { re: 1.5, im: -4.0 })
-    );
-
+fn complex_values_keep_exact_parts_and_read_as_pairs() {
     let exact = parse("CPLXBIG = (9223372036854775808, -9223372036854775809)");
     let Some(Value::ComplexInteger { re, im }) = exact.value() else {
         panic!("large complex integer components lost their exact representation");
@@ -186,31 +79,64 @@ fn parses_complex_integer_and_real() {
     assert_eq!(re.to_string(), "9223372036854775808");
     assert_eq!(im.to_string(), "-9223372036854775809");
     assert_eq!(reparse(&render(&exact).unwrap()), exact);
+
+    let header = cards::header_of(&[
+        (
+            "CPLXI",
+            Value::ComplexInteger {
+                re: 3_i64.into(),
+                im: 4_i64.into(),
+            },
+        ),
+        ("CPLXR", Value::ComplexReal { re: 1.0, im: -2.5 }),
+        ("REAL", 1.5.into()),
+    ]);
+    assert_eq!(
+        header.get_complex("CPLXI").unwrap(),
+        Some(Complex::new(3.0, 4.0))
+    );
+    assert_eq!(
+        header.require_complex("CPLXR").unwrap(),
+        Complex::new(1.0, -2.5)
+    );
+    assert_eq!(header.get_complex("NONE").unwrap(), None);
+    assert_matches!(
+        header.get_complex("REAL"),
+        Err(FitsError::ValueTypeMismatch {
+            expected: ValueKind::Complex,
+            ..
+        })
+    );
+    assert_matches!(
+        header.require_complex("NONE"),
+        Err(FitsError::MissingKeyword { .. })
+    );
+    assert_eq!(Value::Real(1.5).as_complex().unwrap(), None);
 }
 
 #[test]
 fn classifies_end_and_commentary_cards() {
-    assert_eq!(record(&card_bytes("END")), ParsedRecord::End);
+    assert_eq!(record(&cards::card_bytes("END")), ParsedRecord::End);
 
     let comment = parse("COMMENT  this file is great");
-    assert!(matches!(comment, Record::Commentary { .. }));
+    assert_matches!(comment, Record::Commentary { .. });
     assert_eq!(comment.name_text(), "COMMENT");
     assert_eq!(comment.text(), Some(" this file is great"));
 
     let history = parse("HISTORY processed 2026-05-31");
-    assert!(matches!(history, Record::Commentary { .. }));
+    assert_matches!(history, Record::Commentary { .. });
     assert_eq!(history.name_text(), "HISTORY");
 
     // Blank-keyword commentary card.
     let blank = parse("         free annotation");
-    assert!(matches!(blank, Record::Commentary { .. }));
+    assert_matches!(blank, Record::Commentary { .. });
     assert_eq!(blank.name_text(), "");
 }
 
 #[test]
 fn commentary_text_starting_with_equals_is_not_misread_as_a_value() {
     let card = parse("COMMENT = not a value indicator");
-    assert!(matches!(card, Record::Commentary { .. }));
+    assert_matches!(card, Record::Commentary { .. });
     assert!(card.value().is_none());
 }
 
@@ -224,21 +150,21 @@ fn non_ascii_bytes_mark_or_repair_a_record_by_their_place() {
     bytes[..7].copy_from_slice(b"OBJECT ");
     bytes[7] = 0xC3;
     bytes[8] = 0xA9;
-    assert!(matches!(
+    assert_matches!(
         reparse(&bytes),
         Record::Malformed {
             name: None,
             defect: Defect::Name,
             ..
         }
-    ));
-    let mut in_value = card_bytes("OBJECT  = 'x'");
+    );
+    let mut in_value = cards::card_bytes("OBJECT  = 'x'");
     in_value[11] = 0xFF;
-    assert!(matches!(
+    assert_matches!(
         reparse(&in_value),
         Record::Malformed { name: Some(RecordName::Keyword(keyword)), defect: Defect::Value, .. } if keyword == "OBJECT"
-    ));
-    let mut in_comment = card_bytes("OBJECT  = 'x' / caf");
+    );
+    let mut in_comment = cards::card_bytes("OBJECT  = 'x' / caf");
     in_comment[19] = 0xE9;
     let mut log = Vec::new();
     let ParsedRecord::Record(card) = ParsedRecord::parse(&in_comment, 7, &mut log) else {
@@ -252,7 +178,7 @@ fn non_ascii_bytes_mark_or_repair_a_record_by_their_place() {
             kind: RepairKind::NonAsciiText
         }]
     );
-    let mut in_history = card_bytes("HISTORY reduced");
+    let mut in_history = cards::card_bytes("HISTORY reduced");
     in_history[15] = 0x80;
     assert_eq!(reparse(&in_history).text(), Some("reduced?"));
 }
@@ -272,25 +198,37 @@ fn repairs_a_lowercase_name_and_a_misplaced_value_indicator() {
     );
     assert_eq!(repairs("OBJECT  = 'M31'"), []);
     // A name with a character no keyword takes, and a value that does not parse.
-    assert!(matches!(
+    assert_matches!(
         parse("GA!N    = 1"),
         Record::Malformed {
             name: None,
             defect: Defect::Name,
             ..
         }
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         parse("GAIN    = 1.2.3"),
         Record::Malformed { name: Some(RecordName::Keyword(keyword)), defect: Defect::Value, .. } if keyword == "GAIN"
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         parse("OBJECT  = 'open"),
         Record::Malformed {
             defect: Defect::Value,
             ..
         }
-    ));
+    );
+    // Only blanks may follow a closing quote: a second token is no part of the string.
+    assert_matches!(
+        parse("OBJECT  = 'abc' 123 / c"),
+        Record::Malformed {
+            defect: Defect::Value,
+            ..
+        }
+    );
+    assert_matches!(
+        parse("OBJECT  = 'abc'     / c"),
+        Record::Valued { value: Value::Text(text), .. } if text == "abc"
+    );
 }
 
 /// `HIERARCH name = value` reads its name to the `=` and its value and comment in free
@@ -328,29 +266,29 @@ fn reads_hierarch_records() {
         }
     );
     assert_eq!(card.name_text(), "HIERARCH ESO DET CHIP1 NAME");
-    assert!(matches!(
+    assert_matches!(
         parse("HIERARCH LONGKEYWORDNAME.X = 1"),
         Record::Hierarch { .. }
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         parse("HIERARCH without a value indicator"),
         Record::Commentary { .. }
-    ));
+    );
     assert_eq!(repairs("hierarch ESO X = 1"), [RepairKind::LowercaseName]);
-    assert!(matches!(
+    assert_matches!(
         parse("HIERARCH  = 1"),
         Record::Malformed {
             defect: Defect::Name,
             ..
         }
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         parse("HIERARCH ESO X = 1.2.3"),
         Record::Malformed {
             defect: Defect::Value,
             ..
         }
-    ));
+    );
 }
 
 /// A HIERARCH record keeps the blank before its `=` unless the record needs that byte,
@@ -393,38 +331,16 @@ fn writes_hierarch_records() {
     );
 
     let long_comment = card("ESO X", Value::Integer(1.into()), Some(&"c".repeat(70)));
-    assert!(matches!(
+    assert_matches!(
         render(&long_comment),
-        Err(FitsError::HeaderCardTooLong { name, .. }) if name.to_string() == "HIERARCH ESO X"
-    ));
-}
-
-#[test]
-fn integer_boundaries_round_trip_without_real_coercion() {
-    for decimal in [
-        "-9223372036854775809",
-        "-9223372036854775808",
-        "9223372036854775807",
-        "9223372036854775808",
-    ] {
-        let card = parse(&format!("EXACT   = {decimal}"));
-        let Value::Integer(value) = card.value().unwrap() else {
-            panic!("{decimal} was not parsed as an exact integer");
-        };
-        assert_eq!(value.to_string(), decimal);
-        let rendered = render(&card).unwrap();
-        assert!(
-            str::from_utf8(&rendered).unwrap().contains(decimal),
-            "rendered card changed {decimal}"
-        );
-        assert_eq!(reparse(&rendered), card);
-    }
+        Err(FitsError::HeaderCardTooLong { name, .. }) if name == RecordName::Hierarch("ESO X".parse().unwrap())
+    );
 }
 
 #[test]
 fn parses_a_continue_record() {
     assert_eq!(
-        record(&card_bytes("CONTINUE  'ollowed by more text&'")),
+        record(&cards::card_bytes("CONTINUE  'ollowed by more text&'")),
         ParsedRecord::Continue {
             substring: "ollowed by more text&".into(),
             comment: None,
@@ -437,10 +353,10 @@ fn parses_a_continue_record() {
 /// repair, as cfitsio and astropy read it.
 #[test]
 fn end_ends_the_header_and_its_stray_bytes_are_a_repair() {
-    assert_eq!(record(&card_bytes("END")), ParsedRecord::End);
+    assert_eq!(record(&cards::card_bytes("END")), ParsedRecord::End);
     assert_eq!(repairs("END"), []);
     assert_eq!(
-        record(&card_bytes("END     =                    T")),
+        record(&cards::card_bytes("END     =                    T")),
         ParsedRecord::End
     );
     assert_eq!(
@@ -448,7 +364,7 @@ fn end_ends_the_header_and_its_stray_bytes_are_a_repair() {
         [RepairKind::EndText]
     );
     // A longer name is another keyword.
-    assert!(matches!(parse("ENDX    = 1"), Record::Valued { .. }));
+    assert_matches!(parse("ENDX    = 1"), Record::Valued { .. });
 }
 
 #[test]
@@ -480,13 +396,13 @@ fn long_string_splits_into_a_continue_chain() {
 
     // The chain reassembles to the original value (comment on the last record).
     let mut with_end: Vec<u8> = render_records(&card).into_iter().flatten().collect();
-    with_end.extend_from_slice(&card_bytes("END"));
+    with_end.extend_from_slice(&cards::card_bytes("END"));
     let h = Header::parse(&with_end).unwrap();
     assert_eq!(h.get_text("LONGSTR").unwrap(), Some(value.as_str()));
 }
 
 #[test]
-fn long_string_comment_boundary_is_lossless_or_rejected() {
+fn long_string_comment_boundary_is_lossless_or_refused() {
     let exact_comment = "c".repeat(65);
     let exact = Record::Valued {
         keyword: Keyword::new("TEXT"),
@@ -497,7 +413,7 @@ fn long_string_comment_boundary_is_lossless_or_rejected() {
     assert_eq!(records.len(), 2);
     assert_eq!(&records[1][..15], b"CONTINUE  '' / ");
     let mut bytes: Vec<u8> = records.iter().flatten().copied().collect();
-    bytes.extend_from_slice(&card_bytes("END"));
+    bytes.extend_from_slice(&cards::card_bytes("END"));
     let parsed = Header::parse(&bytes).unwrap();
     let Some(RecordView::Valued { value, comment, .. }) = parsed.iter().next() else {
         panic!("the folded card reads back as one valued record");
@@ -511,13 +427,13 @@ fn long_string_comment_boundary_is_lossless_or_rejected() {
         comment: Some("c".repeat(66)),
     };
     let mut output = vec![1, 2, 3];
-    assert!(matches!(
+    assert_matches!(
         render_into(&overflow, &mut output),
         Err(FitsError::HeaderCardTooLong {
             name,
             length: 81,
-        }) if name.to_string() == "TEXT"
-    ));
+        }) if name == RecordName::Keyword(Keyword::new("TEXT"))
+    );
     assert_eq!(output, vec![1, 2, 3]);
 }
 
@@ -528,38 +444,17 @@ fn short_string_renders_to_a_single_record() {
 }
 
 #[test]
-fn render_then_parse_round_trips_the_model() {
-    let originals = [
-        "SIMPLE  =                    T / file does conform",
-        "BITPIX  =                  -32 / bits per pixel",
-        "NAXIS   =                    2",
-        "EQUINOX =              1950.00 / epoch",
-        "OBJECT  = 'O''Brien' / observer",
-        "DARKCORR= ",
-        "CPLXR   = (1.0, -2.5)",
-        "COMMENT  some words here",
-    ];
-    for text in originals {
-        let card = parse(text);
-        let reparsed = reparse(&render(&card).unwrap());
-        assert_eq!(card, reparsed, "round-trip failed for {text:?}");
-    }
-}
-
-#[test]
-fn non_finite_reals_are_rejected_on_read() {
+fn non_finite_reals_are_refused_on_read() {
     // §4.2.4 has no inf/NaN value form; Rust's float parser would accept them (and
     // an overflowing magnitude yields inf), so the reader must reject them.
     for token in ["inf", "Infinity", "nan", "-inf", "1E400"] {
         let card = format!("BADREAL = {token}");
-        assert!(
-            matches!(
-                parse(&card),
-                Record::Malformed {
-                    defect: Defect::Value,
-                    ..
-                }
-            ),
+        assert_matches!(
+            parse(&card),
+            Record::Malformed {
+                defect: Defect::Value,
+                ..
+            },
             "expected {token:?} to be rejected, not parsed as a real"
         );
     }
@@ -567,44 +462,71 @@ fn non_finite_reals_are_rejected_on_read() {
 }
 
 #[test]
-fn rendering_a_non_finite_real_returns_an_error() {
+fn render_refuses_a_non_finite_real() {
     let card = Record::Valued {
         keyword: Keyword::new("BAD"),
         value: Value::Real(f64::INFINITY),
         comment: None,
     };
-    assert!(matches!(
+    assert_matches!(
         render(&card),
         Err(FitsError::InvalidHeaderValue { name, reason: NonFinite::Real })
-            if name.to_string() == "BAD"
-    ));
+            if name == RecordName::Keyword(Keyword::new("BAD"))
+    );
 }
 
-/// The value field of each kind, exactly: right-justified to column 30 except
-/// strings, an integral real gains `.0`, an extreme real takes the `E` form, a
-/// string pads to 8 characters once its quotes are doubled, and the null string and a
-/// string of blanks keep apart.
-#[test]
-fn every_value_kind_renders_its_fixed_format_field() {
+/// The value field of each kind as a render spells it, exactly: right-justified to column
+/// 30 except strings, an integral real gains `.0`, an extreme real takes the `E` form, an
+/// integer past `i64` keeps its exact decimal, a string pads to 8 characters once its quotes
+/// are doubled, and the null string and a string of blanks keep apart.
+fn canonical_fields() -> Vec<(Value, String)> {
     let right = |text: &str| format!("{text:>20}");
-    let cases = [
+    let integer = |text: &str| Value::Integer(FitsInteger::parse(text).unwrap());
+    let mut fields = vec![
         (Value::Logical(true), right("T")),
-        (Value::Integer((-5_i64).into()), right("-5")),
+        (Value::Logical(false), right("F")),
+        (integer("-5"), right("-5")),
         (Value::Real(5.0), right("5.0")),
         (Value::Real(-0.0), right("-0.0")),
         (Value::Real(0.1), right("0.1")),
         (Value::Real(1e300), right("1E300")),
+        (Value::Real(-1e300), right("-1E300")),
+        (Value::Real(1e-300), right("1E-300")),
+        (Value::Real(-1e-300), right("-1E-300")),
+        (Value::Real(2.5e123), right("2.5E123")),
         (
             Value::ComplexReal { re: 1.0, im: -2.5 },
             right("(1.0, -2.5)"),
         ),
+        (
+            Value::ComplexInteger {
+                re: 3_i64.into(),
+                im: (-4_i64).into(),
+            },
+            right("(3, -4)"),
+        ),
         (Value::Text("ab".into()), "'ab      '".to_string()),
         (Value::Text("O'Brien".into()), "'O''Brien'".to_string()),
+        (Value::Text("a/b/c".into()), "'a/b/c   '".to_string()),
         (Value::Text(String::new()), "''".to_string()),
         (Value::Text(" ".into()), "'        '".to_string()),
         (Value::Undefined, String::new()),
     ];
-    for (value, field) in cases {
+    for decimal in [
+        "-9223372036854775809",
+        "-9223372036854775808",
+        "9223372036854775807",
+        "9223372036854775808",
+    ] {
+        fields.push((integer(decimal), right(decimal)));
+    }
+    fields
+}
+
+/// A render writes each value in its canonical field, which parses back to the record.
+#[test]
+fn every_value_kind_renders_its_fixed_format_field() {
+    for (value, field) in canonical_fields() {
         let card = Record::Valued {
             keyword: Keyword::new("KEY"),
             value: value.clone(),
@@ -620,11 +542,39 @@ fn every_value_kind_renders_its_fixed_format_field() {
     }
 }
 
+/// Each canonical field parses to its value, and so does each other spelling the standard
+/// allows: a real's trailing zeros, a `D` or `E` exponent, an unpadded string, a string's
+/// leading blanks, and a complex pair of an integer and a real, which widens. A slash in a
+/// string is no comment boundary, and the comment after the value is kept.
+#[test]
+fn every_value_field_parses_to_its_value() {
+    let other_spellings = [
+        ("1950.00", Value::Real(1950.0)),
+        ("2.0D3", Value::Real(2000.0)),
+        ("3.14E2", Value::Real(314.0)),
+        ("'Cygnus X-1'", Value::Text("Cygnus X-1".into())),
+        ("'   keep'", Value::Text("   keep".into())),
+        ("(3, -2.5)", Value::ComplexReal { re: 3.0, im: -2.5 }),
+        ("(1.5, -4)", Value::ComplexReal { re: 1.5, im: -4.0 }),
+    ];
+    let fields = canonical_fields()
+        .into_iter()
+        .map(|(value, field)| (field, value))
+        .chain(other_spellings.map(|(field, value)| (field.to_string(), value)));
+    for (field, value) in fields {
+        let card = parse(&format!("KEY     = {field} / the comment"));
+        assert_eq!(card.value(), Some(&value), "{field:?}");
+        assert_eq!(card.text(), Some("the comment"), "{field:?}");
+    }
+    let commentary = parse("COMMENT  some words here");
+    assert_eq!(reparse(&render(&commentary).unwrap()), commentary);
+}
+
 /// Each substring holds at most 67 characters once quotes are doubled, and a
 /// doubled quote never straddles two: 66 letters and a quote need 68, so the quote
 /// opens the next substring.
 #[test]
-fn a_long_string_splits_at_67_escaped_characters() {
+fn long_string_splits_at_67_escaped_characters() {
     let pieces = |text: &str| -> Vec<String> {
         LongString {
             lead: Lead::Keyword(Keyword::new("LONGSTR")),

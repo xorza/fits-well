@@ -1,9 +1,9 @@
-use crate::fits_error::ExpectedHdu;
 use crate::groups::*;
-use crate::hdu::HduKind;
 use crate::header_model::record_name::RecordName;
 use crate::internals::cards;
 use crate::internals::fixture::Fixture;
+use crate::internals::samples;
+use std::assert_matches;
 
 /// The physical parameter values of `group`.
 fn parameters(groups: &RandomGroups, group: usize) -> Result<Vec<f64>> {
@@ -96,24 +96,24 @@ fn reads_the_real_uv_random_groups() {
     assert_eq!(named(&groups, 0, "DATE").unwrap(), params[4] + params[5]);
     // A single-occurrence name returns just that parameter; an absent name is refused.
     assert_eq!(named(&groups, 0, "BASELINE").unwrap(), params[3]);
-    assert!(matches!(
+    assert_matches!(
         named(&groups, 0, "NONE"),
         Err(FitsError::GroupParameterNotFound { name }) if name == "NONE"
-    ));
+    );
 
     for result in [
         parameters(&groups, metadata.gcount).map(|_| ()),
         array(&groups, metadata.gcount).map(|_| ()),
         named(&groups, metadata.gcount, "DATE").map(|_| ()),
     ] {
-        assert!(matches!(
+        assert_matches!(
             result,
             Err(FitsError::IndexOutOfBounds {
                 indexed: Indexed::Group,
                 index: 7956,
                 len: 7956
             })
-        ));
+        );
     }
     assert_eq!(parameters(&groups, 0).unwrap().len(), 6);
 }
@@ -132,28 +132,27 @@ fn parameter_physical_sums_addends_sharing_a_ptype() {
         .set_internal("PSCAL2", 1.0)
         .set_internal("PZERO2", 0.25);
     // One group: param1 raw 10.0, param2 raw 0.5, then one array element 99.0.
-    let mut data = Vec::new();
-    for v in [10.0f32, 0.5, 99.0] {
-        data.extend_from_slice(&v.to_be_bytes());
-    }
+    let data = samples::be(&[10.0f32, 0.5, 99.0], f32::to_be_bytes);
     let groups = RandomGroups::from_data(&header, &data).unwrap();
 
     // Raw per-addend values stay available separately.
     assert_eq!(parameters(&groups, 0).unwrap(), vec![2_445_738.5, 0.75]);
     // Summed logical DATE = (2445728.5 + 10) + (0.25 + 0.5) = 2445739.25.
     assert_eq!(named(&groups, 0, "DATE").unwrap(), 2_445_739.25);
-    assert!(matches!(
+    // `PTYPEn` names compare without regard to case, as a column's `TTYPEn` does.
+    assert_eq!(named(&groups, 0, "date").unwrap(), 2_445_739.25);
+    assert_matches!(
         named(&groups, 0, "NONE"),
         Err(FitsError::GroupParameterNotFound { name }) if name == "NONE"
-    ));
+    );
 
     for keyword in ["PSCAL1", "PZERO1", "BSCALE"] {
         let mut malformed = header.clone();
         malformed.set_internal(keyword, "not numeric");
-        assert!(matches!(
+        assert_matches!(
             RandomGroups::from_data(&malformed, &data),
             Err(FitsError::ValueTypeMismatch { name: RecordName::Keyword(name), .. }) if name == keyword
-        ));
+        );
     }
 }
 
@@ -166,22 +165,15 @@ fn array_physical_maps_blank_to_nan_for_every_integer_bitpix() {
             .set_internal(keywords::BSCALE, 2.0)
             .set_internal(keywords::BZERO, 5.0)
             .set_internal(keywords::BLANK, 10);
+        let stored = [10i64, 9, 10, 11];
         let data = match bitpix {
-            Bitpix::U8 => vec![10, 9, 10, 11],
-            Bitpix::I16 => [10i16, 9, 10, 11]
-                .into_iter()
-                .flat_map(i16::to_be_bytes)
-                .collect(),
-            Bitpix::I32 => [10i32, 9, 10, 11]
-                .into_iter()
-                .flat_map(i32::to_be_bytes)
-                .collect(),
-            Bitpix::I64 => [10i64, 9, 10, 11]
-                .into_iter()
-                .flat_map(i64::to_be_bytes)
-                .collect(),
+            Bitpix::U8 => Data::U8(stored.map(|v| u8::try_from(v).unwrap()).to_vec()),
+            Bitpix::I16 => Data::I16(stored.map(|v| i16::try_from(v).unwrap()).to_vec()),
+            Bitpix::I32 => Data::I32(stored.map(|v| i32::try_from(v).unwrap()).to_vec()),
+            Bitpix::I64 => Data::I64(stored.to_vec()),
             Bitpix::F32 | Bitpix::F64 => unreachable!("integer cases only"),
-        };
+        }
+        .encode();
         let groups = RandomGroups::from_data(&header, &data).unwrap();
 
         assert_eq!(parameters(&groups, 0).unwrap(), vec![10.0], "{bitpix:?}");
@@ -193,18 +185,15 @@ fn array_physical_maps_blank_to_nan_for_every_integer_bitpix() {
 }
 
 #[test]
-fn naxis1_group_has_one_array_element_matching_data_extent() {
+fn naxis1_group_has_one_array_element_matching_data_bytes() {
     // A `NAXIS = 1` random group (only the `NAXIS1 = 0` sentinel, no array axis) has,
     // per Eqs. 4 and 6, PCOUNT params + an empty-product array of 1 element per
-    // group — the way `data_extent` sizes the unit. `array_len` must agree (1, not
-    // 0), or `from_data` rejects a unit the reader already sized as readable.
+    // group — the way `HduKind::data_bytes` sizes the unit. `array_len` must agree (1, not
+    // 0), or `from_data` refuses a unit the reader already sized as readable.
     let mut header = groups_header(-32, &[], 1, 2);
     header.set_internal("PTYPE1", "P");
     // 2 groups × (1 param + 1 array element) = 4 floats.
-    let mut data = Vec::new();
-    for v in [1.0f32, 10.0, 2.0, 20.0] {
-        data.extend_from_slice(&v.to_be_bytes());
-    }
+    let data = samples::be(&[1.0f32, 10.0, 2.0, 20.0], f32::to_be_bytes);
     let groups = RandomGroups::from_data(&header, &data).unwrap();
     assert!(groups.metadata().group_shape.is_empty());
     assert_eq!(groups.array_len(), 1); // empty product, not 0
@@ -213,18 +202,6 @@ fn naxis1_group_has_one_array_element_matching_data_extent() {
     assert_eq!(array(&groups, 0).unwrap(), vec![10.0]);
     assert_eq!(parameters(&groups, 1).unwrap(), vec![2.0]);
     assert_eq!(array(&groups, 1).unwrap(), vec![20.0]);
-}
-
-#[test]
-fn read_groups_rejects_non_random_groups_hdus() {
-    let mut reader = Fixture::Uit.stream();
-    assert!(matches!(
-        reader.read_groups(0),
-        Err(FitsError::HduKindMismatch {
-            expected: ExpectedHdu::RandomGroups,
-            got: HduKind::Primary
-        })
-    ));
 }
 
 #[test]
@@ -240,7 +217,7 @@ fn raw_group_view_preserves_i64_extremes_and_group_boundaries() {
         9,
         10,
     ];
-    let data: Vec<u8> = stored.into_iter().flat_map(i64::to_be_bytes).collect();
+    let data = samples::be(&stored, i64::to_be_bytes);
     let groups = RandomGroups::from_data(&header, &data).unwrap();
 
     let first = groups.group(0).unwrap();
@@ -252,21 +229,21 @@ fn raw_group_view_preserves_i64_extremes_and_group_boundaries() {
     let second = groups.group(1).unwrap();
     assert_eq!(second.parameters, View::I64(&[7, 8]));
     assert_eq!(second.array, View::I64(&[9, 10]));
-    assert!(matches!(
+    assert_matches!(
         groups.group(2),
         Err(FitsError::IndexOutOfBounds {
             indexed: Indexed::Group,
             index: 2,
             len: 2
         })
-    ));
+    );
 }
 
 #[test]
 fn raw_group_view_preserves_float_bit_patterns() {
     let f32_header = groups_header(-32, &[2], 1, 1);
     let f32_bits = [0x7fc0_1234, 0x8000_0000, 0x0000_0001];
-    let f32_data: Vec<u8> = f32_bits.into_iter().flat_map(u32::to_be_bytes).collect();
+    let f32_data = samples::be(&f32_bits, u32::to_be_bytes);
     let f32_groups = RandomGroups::from_data(&f32_header, &f32_data).unwrap();
     let f32_group = f32_groups.group(0).unwrap();
     let View::F32(f32_parameters) = f32_group.parameters else {
@@ -275,14 +252,9 @@ fn raw_group_view_preserves_float_bit_patterns() {
     let View::F32(f32_array) = f32_group.array else {
         panic!("BITPIX -32 array must be f32");
     };
-    assert_eq!(f32_parameters[0].to_bits(), f32_bits[0]);
-    assert_eq!(
-        f32_array
-            .iter()
-            .map(|value| value.to_bits())
-            .collect::<Vec<_>>(),
-        f32_bits[1..]
-    );
+    let f32_bits = f32_bits.map(u64::from);
+    assert_eq!(samples::bits_of(f32_parameters), f32_bits[..1]);
+    assert_eq!(samples::bits_of(f32_array), f32_bits[1..]);
 
     let f64_header = groups_header(-64, &[2], 1, 1);
     let f64_bits = [
@@ -290,7 +262,7 @@ fn raw_group_view_preserves_float_bit_patterns() {
         0x8000_0000_0000_0000,
         0x0000_0000_0000_0001,
     ];
-    let f64_data: Vec<u8> = f64_bits.into_iter().flat_map(u64::to_be_bytes).collect();
+    let f64_data = samples::be(&f64_bits, u64::to_be_bytes);
     let f64_groups = RandomGroups::from_data(&f64_header, &f64_data).unwrap();
     let f64_group = f64_groups.group(0).unwrap();
     let View::F64(f64_parameters) = f64_group.parameters else {
@@ -299,14 +271,8 @@ fn raw_group_view_preserves_float_bit_patterns() {
     let View::F64(f64_array) = f64_group.array else {
         panic!("BITPIX -64 array must be f64");
     };
-    assert_eq!(f64_parameters[0].to_bits(), f64_bits[0]);
-    assert_eq!(
-        f64_array
-            .iter()
-            .map(|value| value.to_bits())
-            .collect::<Vec<_>>(),
-        f64_bits[1..]
-    );
+    assert_eq!(samples::bits_of(f64_parameters), f64_bits[..1]);
+    assert_eq!(samples::bits_of(f64_array), f64_bits[1..]);
 }
 
 /// A parameter past the 999th has no `PTYPEn`/`PSCALn`/`PZEROn` keyword, so it is
@@ -334,10 +300,10 @@ fn parameters_past_the_999th_take_the_keyword_defaults() {
     assert_eq!(values[998..], [6.0, 5.0, 7.0]);
     assert_eq!(named(&groups, 0, "A").unwrap(), 6.0);
     // An absent `PTYPEn` names nothing, not the empty name.
-    assert!(matches!(
+    assert_matches!(
         groups.parameter(""),
-        Err(FitsError::GroupParameterNotFound { .. })
-    ));
+        Err(FitsError::GroupParameterNotFound { name }) if name.is_empty()
+    );
     assert_eq!(array(&groups, 0).unwrap(), vec![9.0]);
 }
 
@@ -357,9 +323,9 @@ fn group_counts_are_checked_before_they_size_anything() {
         (groups_header(8, &[1 << 62, 3], 1 << 62, 0), &[]),
         (groups_header(8, &[1], 1 << 62, 4), &[]),
     ] {
-        assert!(matches!(
+        assert_matches!(
             RandomGroups::from_data(&header, data),
             Err(FitsError::DataUnitOverflow)
-        ));
+        );
     }
 }

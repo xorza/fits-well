@@ -1,4 +1,6 @@
 use crate::compression::decode::float_quantization::Dequant;
+use crate::compression::half_step::assert_within_half_step;
+use crate::image_model::bitpix::Bitpix;
 use crate::internals::rng::SplitMix;
 
 use crate::compression::quantize::*;
@@ -54,12 +56,7 @@ fn dither2_quantize_round_trips() {
         if o == 0.0 {
             assert_eq!(b, 0.0, "zero pixel {i} must decode to exactly 0.0");
         } else {
-            // Half a quantization step, plus the few roundings of the scale
-            // division and the reconstruction, each within an ulp of the value.
-            assert!(
-                (o - b).abs() <= 0.5 * q.bscale + 4.0 * f64::EPSILON * o.abs(),
-                "pixel {i}: {o} vs {b}"
-            );
+            assert_within_half_step(o, b, q.bscale, Bitpix::F64, &format!("pixel {i}"));
         }
     }
 }
@@ -134,12 +131,17 @@ fn noise5_takes_the_three_median_differences() {
         f64::MAX,
         0.0,
     ];
-    assert!(scratch.noise5(&huge, 10, Precision::Double).is_some());
+    // The range is the finite extremes; the second-order differences cancel to 0, the
+    // third-order ones overflow to an infinity, and the fifth-order ones to a NaN.
+    let stats = scratch.noise5(&huge, 10, Precision::Double).unwrap();
+    assert_eq!([stats.min, stats.max], [-f64::MAX, f64::MAX]);
+    assert_eq!([stats.noise2, stats.noise3], [0.0, f64::INFINITY]);
+    assert!(stats.noise5.is_nan());
 }
 
 /// The nulls are skipped; an absolute step is the scale, whatever the noise.
 #[test]
-fn an_absolute_step_is_the_scale() {
+fn absolute_step_is_the_scale() {
     let mut values: Vec<f64> = (0..16).map(|k| f64::from((k * 37) % 11)).collect();
     values[3] = f64::NAN;
     values[9] = f64::INFINITY;
@@ -158,7 +160,7 @@ fn an_absolute_step_is_the_scale() {
 /// 1.0f32 is 0x3F800000 (0x3F + 0x80 = 191) and −2.0f32 is 0xC0000000 (192): 383 + 1.
 /// 1.0f64 is 0x3FF0000000000000 (0x3F + 0xF0 = 303): 304.
 #[test]
-fn the_sample_seed_sums_every_sample_byte() {
+fn sample_seed_sums_every_sample_byte() {
     assert_eq!(sample_seed(FloatSamples::F32(&[1.0, -2.0])), 384);
     assert_eq!(sample_seed(FloatSamples::F64(&[1.0])), 304);
     assert_eq!(sample_seed(FloatSamples::F32(&[])), 1);
