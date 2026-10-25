@@ -258,9 +258,7 @@ impl ElementKind {
             .bitpix()
             .expect("the caller refuses a non-numeric kind");
         allocation::try_reserve(out, capacity)?;
-        for cell in cells {
-            bitpix.extend_physical_be(cell, scaling, out);
-        }
+        bitpix.extend_physical_be_cells(cells, scaling, out);
         Ok(())
     }
 

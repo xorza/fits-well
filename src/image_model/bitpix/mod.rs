@@ -109,6 +109,24 @@ impl Bitpix {
         }
     }
 
+    /// [`Bitpix::extend_physical_be`] over the samples of `cells`, which each hold whole
+    /// samples of this type, the type matched once for them all.
+    pub(crate) fn extend_physical_be_cells<'a, O: PhysicalSample>(
+        self,
+        cells: impl Iterator<Item = &'a [u8]>,
+        scaling: &Scaling,
+        out: &mut Vec<O>,
+    ) {
+        match self {
+            Self::U8 => scaling.extend_physical_be_cells::<u8, O>(cells, out),
+            Self::I16 => scaling.extend_physical_be_cells::<i16, O>(cells, out),
+            Self::I32 => scaling.extend_physical_be_cells::<i32, O>(cells, out),
+            Self::I64 => scaling.extend_physical_be_cells::<i64, O>(cells, out),
+            Self::F32 => scaling.extend_physical_be_cells::<f32, O>(cells, out),
+            Self::F64 => scaling.extend_physical_be_cells::<f64, O>(cells, out),
+        }
+    }
+
     /// The first `nbytes` of the host-endian scratch `words`, which a read or the
     /// compressed-image decoder wrote, as a view of this type.
     pub(crate) fn view_words(self, words: &[u64], nbytes: usize) -> View<'_> {

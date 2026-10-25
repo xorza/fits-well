@@ -386,6 +386,11 @@ fn signed_exponent_without_letter_parses_as_fortran_real() {
     exact(parse_ascii_float("1.0E+308", 1), 1e308);
     // A subnormal reads exactly too, where a scale by a power of ten would round twice.
     exact(parse_ascii_float("1.0E-320", 1), 1e-320);
+    // A field that is a Rust literal reads as one, yet an overflow is refused, and so is an
+    // exponent past `i64`, which a literal parse would take as 0.
+    assert_eq!(parse_ascii_float("1.0E+309", 1), None);
+    assert_eq!(parse_ascii_float("1.0E-99999999999999999999", 1), None);
+    assert_eq!("1.0E-99999999999999999999".parse::<f64>(), Ok(0.0));
 
     assert_eq!(
         split_mantissa_exponent("3.14159-2"),

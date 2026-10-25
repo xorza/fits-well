@@ -500,3 +500,18 @@ fn tab_inverse_is_scale_free() {
         wcs_header::assert_round_trip(&wcs, &[[1.3, 1.7]], SEARCH, &format!("scale {scale}"));
     }
 }
+
+/// The subvoxel side is `2^-level` exactly: 1 halved `level` times, each halving exact
+/// through the subnormals, the last of which, `2^-1074`, halves to 0.
+#[test]
+fn subvoxel_size_is_the_exact_power_of_two() {
+    let mut size = 1.0f64;
+    for level in 0..1100 {
+        assert_eq!(
+            tabular::subvoxel_size(level).to_bits(),
+            size.to_bits(),
+            "{level}"
+        );
+        size /= 2.0;
+    }
+}

@@ -62,33 +62,46 @@ impl Codec {
         let signed = bytepix != IntBitpix::U8;
         let mut br = BitReader::new(bytes);
         let mut lastpix = br.read(nbits_pp)?; // literal first pixel (big-endian)
-        out.reserve_exact(count);
-        let mut i = 0;
-        while i < count {
+        let output = |pixel: u64| {
+            if signed {
+                sign_extend(pixel, nbits_pp)
+            } else {
+                pixel.cast_signed()
+            }
+        };
+        // Undo the zigzag mapping, then the differencing (modular at pixel width).
+        let next = |lastpix: u64, diff: u64| {
+            let d = if diff & 1 == 1 {
+                !(diff >> 1)
+            } else {
+                diff >> 1
+            };
+            lastpix.wrapping_add(d) & mask
+        };
+        // The output is sized once and filled a block at a time, with no length to store
+        // and no capacity to check a sample.
+        out.resize(count, 0);
+        for block in out.chunks_mut(blocksize) {
             // The block's code is its split + 1, so 0 marks an all-zero block; a field
             // of `fsbits` bits keeps the split below 64.
             let split = br.read(fsbits)?.checked_sub(1);
-            let imax = (i + blocksize).min(count);
-            for _ in i..imax {
-                let diff = match split {
-                    None => 0,
-                    Some(fs) if fs == u64::from(fsmax) => br.read(nbits_pp)?, // uncompressed block
-                    Some(fs) => (br.read_zeros()? << fs) | br.read(fs as u32)?,
-                };
-                // Undo the zigzag mapping, then the differencing (modular at pixel width).
-                let d = if diff & 1 == 1 {
-                    !(diff >> 1)
-                } else {
-                    diff >> 1
-                };
-                lastpix = lastpix.wrapping_add(d) & mask;
-                out.push(if signed {
-                    sign_extend(lastpix, nbits_pp)
-                } else {
-                    lastpix.cast_signed()
-                });
+            match split {
+                None => block.fill(output(lastpix)),
+                Some(fs) if fs == u64::from(fsmax) => {
+                    for slot in block {
+                        lastpix = next(lastpix, br.read(nbits_pp)?);
+                        *slot = output(lastpix);
+                    }
+                }
+                Some(fs) => {
+                    let fs = fs as u32;
+                    for slot in block {
+                        let diff = (br.read_zeros()? << fs) | br.read(fs)?;
+                        lastpix = next(lastpix, diff);
+                        *slot = output(lastpix);
+                    }
+                }
             }
-            i = imax;
         }
         Ok(())
     }
@@ -139,14 +152,7 @@ impl Codec {
                 lastpix = next;
             }
 
-            let block = thisblock as u128;
-            let quotient = pixelsum / block;
-            let remainder = pixelsum % block;
-            let dpsum = if quotient > 0 && remainder < block / 2 + 1 {
-                quotient - 1
-            } else {
-                quotient
-            };
+            let dpsum = mean_less_one(pixelsum, thisblock);
             let mut psum = dpsum >> 1;
             let mut fs = 0u32;
             while psum > 0 {
@@ -188,81 +194,113 @@ pub(super) struct RiceScratch {
     stream: Vec<u8>,
 }
 
-/// MSB-first bit output appended to a buffer, mirroring cfitsio's
-/// `Buffer`/`output_nbits`: bits gather in a word and leave a byte at a time, and
-/// [`BitOutput::finish`] pads the last byte with zero bits.
+/// The block's mean difference, less one unless the remainder is past half the block, as
+/// cfitsio rounds it. A sum that fits `u64`, as every width to 32 bits gives, divides there,
+/// not through the 128-bit division's library call.
+fn mean_less_one(pixelsum: u128, block: usize) -> u128 {
+    let (quotient, remainder, block) = if let Ok(sum) = u64::try_from(pixelsum) {
+        let block = block as u64;
+        (
+            u128::from(sum / block),
+            u128::from(sum % block),
+            u128::from(block),
+        )
+    } else {
+        let block = block as u128;
+        (pixelsum / block, pixelsum % block, block)
+    };
+    if quotient > 0 && remainder < block / 2 + 1 {
+        quotient - 1
+    } else {
+        quotient
+    }
+}
+
+/// A MSB-first bit writer: the pending bits sit at the top of `acc`, fewer than 32 of them
+/// between calls, and leave 32 at a time.
 #[derive(Debug)]
 struct BitOutput<'a> {
     out: &'a mut Vec<u8>,
-    /// Pending bits, right-aligned: the low `pending` bits of `word`.
-    word: u64,
-    /// Fewer than 8 between calls, so a call may add up to 56 bits.
+    acc: u64,
     pending: u32,
 }
 
 impl<'a> BitOutput<'a> {
-    /// The most bits one [`BitOutput::push`] takes: the word holds at most 7 pending.
-    const CHUNK: u32 = 56;
-
     const fn new(out: &'a mut Vec<u8>) -> Self {
         BitOutput {
             out,
-            word: 0,
+            acc: 0,
             pending: 0,
         }
     }
 
     /// Append the low `n` bits of `bits` (`n ≤ 64`), most significant first.
     fn output_nbits(&mut self, bits: u64, n: u32) {
-        if n > Self::CHUNK {
-            self.push(bits >> Self::CHUNK, n - Self::CHUNK);
-            self.push(bits, Self::CHUNK);
+        if n > 32 {
+            self.put((bits >> 32) & low_bits(n - 32), n - 32);
+            self.put(bits & low_bits(32), 32);
         } else {
-            self.push(bits, n);
+            self.put(bits & low_bits(n), n);
+        }
+    }
+
+    /// Append `bits`, which hold `n ≤ 32` bits.
+    #[inline]
+    fn put(&mut self, bits: u64, n: u32) {
+        debug_assert!(n <= 32 && self.pending < 32 && bits >> n == 0);
+        if n == 0 {
+            return;
+        }
+        self.acc |= bits << (64 - self.pending - n);
+        self.pending += n;
+        if self.pending >= 32 {
+            self.out
+                .extend_from_slice(&((self.acc >> 32) as u32).to_be_bytes());
+            self.acc <<= 32;
+            self.pending -= 32;
         }
     }
 
     fn output_zeros(&mut self, mut n: u64) {
         while n > 0 {
-            let chunk = n.min(u64::from(Self::CHUNK));
-            self.push(0, chunk as u32);
+            let chunk = n.min(32);
+            self.put(0, chunk as u32);
             n -= chunk;
         }
     }
 
-    fn push(&mut self, bits: u64, n: u32) {
-        debug_assert!(n <= Self::CHUNK && self.pending < 8);
-        if n == 0 {
+    /// Output one Rice-coded value: `top = v >> fs` zero bits, a 1, then the low
+    /// `fs` bits of `v`, in one put where they fit 32 bits.
+    fn output_rice_value(&mut self, v: u64, fs: u32, fsmask: u64) {
+        let top = v >> fs;
+        if top + 1 + u64::from(fs) <= 32 {
+            self.put((1 << fs) | (v & fsmask), top as u32 + 1 + fs);
             return;
         }
-        self.word = (self.word << n) | (bits & (u64::MAX >> (64 - n)));
-        self.pending += n;
-        while self.pending >= 8 {
-            self.pending -= 8;
-            self.out.push((self.word >> self.pending) as u8);
-        }
-    }
-
-    /// Output one Rice-coded value: `top = v >> fs` zero bits, a 1, then the low
-    /// `fs` bits of `v`.
-    fn output_rice_value(&mut self, v: u64, fs: u32, fsmask: u64) {
-        self.output_zeros(v >> fs);
-        self.push(1, 1);
+        self.output_zeros(top);
+        self.put(1, 1);
         self.output_nbits(v & fsmask, fs);
     }
 
-    /// Flush the last partial byte, its unused low bits zero.
+    /// Flush the last bits, the partial byte's unused low bits zero.
     fn finish(self) {
-        if self.pending > 0 {
-            self.out.push((self.word << (8 - self.pending)) as u8);
-        }
+        let bytes = self.pending.div_ceil(8) as usize;
+        self.out.extend_from_slice(&self.acc.to_be_bytes()[..bytes]);
     }
 }
 
-/// A MSB-first bit reader over a compressed byte stream.
+/// The low `n ≤ 64` bits set.
+const fn low_bits(n: u32) -> u64 {
+    if n == 64 { u64::MAX } else { (1 << n) - 1 }
+}
+
+/// A MSB-first bit reader over a compressed byte stream. The next bit is the top bit of
+/// `acc`, which holds `nbits` of them; the bits below are zeros or the stream's next bits,
+/// which the next refill writes again.
 #[derive(Debug)]
 struct BitReader<'a> {
     bytes: &'a [u8],
+    /// The byte the next refill loads from: the stream bit `8·pos − nbits` is the next.
     pos: usize,
     acc: u64,
     nbits: u32,
@@ -278,82 +316,86 @@ impl<'a> BitReader<'a> {
         }
     }
 
+    /// Top up the accumulator to at least 56 bits, or to every bit the stream has left:
+    /// one unaligned load where 8 bytes remain, as Fabian Giesen's "variant 4" refill.
+    #[inline]
+    fn refill(&mut self) {
+        debug_assert!(self.nbits < 64, "a refill below a full accumulator");
+        if let Some(word) = self.bytes.get(self.pos..self.pos + 8) {
+            self.acc |= u64::from_be_bytes(word.try_into().unwrap()) >> self.nbits;
+            let added = (63 - self.nbits) / 8;
+            self.pos += added as usize;
+            self.nbits += 8 * added;
+            return;
+        }
+        while self.nbits <= 56 {
+            let Some(&byte) = self.bytes.get(self.pos) else {
+                return;
+            };
+            self.acc |= u64::from(byte) << (56 - self.nbits);
+            self.pos += 1;
+            self.nbits += 8;
+        }
+    }
+
     /// Read `n` bits (MSB-first, `n ≤ 64`).
+    #[inline]
     fn read(&mut self, n: u32) -> Result<u64> {
-        if n > 64 {
-            return Err(CompressedDataDefect::RiceBitField { bits: n }.into());
+        if n <= 56 {
+            self.read_short(n)
+        } else {
+            self.read_wide(n)
         }
-        let mut remaining = n;
-        let mut value = 0u64;
-        while remaining != 0 {
-            if self.nbits == 0 {
-                self.fill(1)?;
+    }
+
+    /// Read `n ≤ 56` bits, which one refill holds. `(acc >> 1) >> (63 − n)` is the top `n`
+    /// bits, 0 for `n = 0`, with no shift by 64.
+    #[inline]
+    fn read_short(&mut self, n: u32) -> Result<u64> {
+        if self.nbits < n {
+            self.refill();
+            if self.nbits < n {
+                return Err(FitsError::UnexpectedEof);
             }
-            let take = remaining.min(self.nbits);
-            self.nbits -= take;
-            let mask = if take == 64 {
-                u64::MAX
-            } else {
-                (1u64 << take) - 1
-            };
-            let part = (self.acc >> self.nbits) & mask;
-            value = if take == 64 {
-                part
-            } else {
-                (value << take) | part
-            };
-            remaining -= take;
         }
+        let value = (self.acc >> 1) >> (63 - n);
+        self.acc <<= n;
+        self.nbits -= n;
         Ok(value)
     }
 
-    /// Top up the accumulator to `needed` bits, loading a whole word in the common
-    /// aligned case.
-    #[inline]
-    fn fill(&mut self, needed: u32) -> Result<()> {
-        if self.nbits == 0 && self.pos + 8 <= self.bytes.len() {
-            let word = self.bytes[self.pos..self.pos + 8].try_into().unwrap();
-            self.acc = u64::from_be_bytes(word);
-            self.pos += 8;
-            self.nbits = 64;
-            return Ok(());
+    /// Read `n` bits past 56, as two reads; past 64, the stream is malformed.
+    #[cold]
+    #[inline(never)]
+    fn read_wide(&mut self, n: u32) -> Result<u64> {
+        if n > 64 {
+            return Err(CompressedDataDefect::RiceBitField { bits: n }.into());
         }
-        while self.nbits < needed {
-            let byte = self
-                .bytes
-                .get(self.pos)
-                .copied()
-                .ok_or(FitsError::UnexpectedEof)?;
-            self.pos += 1;
-            self.acc = (self.acc << 8) | u64::from(byte);
-            self.nbits += 8;
-        }
-        Ok(())
+        let high = self.read_short(n - 32)?;
+        Ok((high << 32) | self.read_short(32)?)
     }
 
-    /// Count and consume leading zero bits up to (and including) the next 1.
-    ///
-    /// Scans the zero run a whole word at a time via `leading_zeros` rather than one
-    /// `read(1)` per bit — the unary quotient decode is the hot path of Rice decode.
+    /// Count and consume leading zero bits up to (and including) the next 1, a whole
+    /// accumulator at a time: the unary quotient decode is the hot path of Rice decode.
     fn read_zeros(&mut self) -> Result<u64> {
         let mut z = 0u64;
         loop {
             if self.nbits == 0 {
-                self.fill(1)?;
+                self.refill();
+                if self.nbits == 0 {
+                    return Err(FitsError::UnexpectedEof);
+                }
             }
-            // Left-align the valid low `nbits` bits so the next-to-read bit is the
-            // MSB, then count zeros up to the first 1 (capped at the valid bits, since
-            // the shifted-in low bits read as zero).
-            let run = (self.acc << (64 - self.nbits))
-                .leading_zeros()
-                .min(self.nbits);
+            let run = self.acc.leading_zeros();
             if run < self.nbits {
-                // Terminating 1 found within the valid bits: consume the zeros + the 1.
+                self.acc <<= run + 1;
                 self.nbits -= run + 1;
                 return Ok(z + u64::from(run));
             }
-            // All valid bits were zero: consume them and refill on the next pass.
+            // Every valid bit is zero: drop them, and the bits past them, which the next
+            // refill loads again from `pos`.
             z += u64::from(self.nbits);
+            self.acc = 0;
             self.nbits = 0;
         }
     }

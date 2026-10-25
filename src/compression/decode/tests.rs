@@ -157,12 +157,18 @@ fn decoded_values_fit_the_image_bitpix() {
     let mut bytes = [-1, 0, 255, 256];
     <u8 as DecodeSample>::fit(&mut bytes, Overshoot::Clamp).unwrap();
     assert_eq!(bytes, [0, 0, 255, 255]);
-    assert_matches!(
-        <u8 as DecodeSample>::fit(&mut [0, 256], Overshoot::Refuse),
-        Err(FitsError::CorruptCompressedData {
-            defect: CompressedDataDefect::ValueOutOfRange
-        })
-    );
+    <u8 as DecodeSample>::fit(&mut [0, 255, 7], Overshoot::Refuse).unwrap();
+    for (at, outside) in [(0, -1), (1, 256), (2, -1), (2, 256)] {
+        let mut tile = [0, 255, 7];
+        tile[at] = outside;
+        assert_matches!(
+            <u8 as DecodeSample>::fit(&mut tile, Overshoot::Refuse),
+            Err(FitsError::CorruptCompressedData {
+                defect: CompressedDataDefect::ValueOutOfRange
+            }),
+            "{outside} at {at}"
+        );
+    }
     let mut words = [i64::from(i32::MIN), i64::from(i32::MAX)];
     <i32 as DecodeSample>::fit(&mut words, Overshoot::Refuse).unwrap();
     assert_matches!(
