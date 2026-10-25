@@ -9,7 +9,7 @@ use std::path::Path;
 use criterion::{BenchmarkId, Criterion, Throughput};
 
 use crate::ascii::Ascii;
-use crate::bench::policy::{self, Kind, Reading, SECTION_ROWS, Scale, SourceKind};
+use crate::bench::policy::{self, Kind, Reading, Scale, SourceKind};
 use crate::bench::scene_file::{SceneFile, SceneFiles, SceneInput};
 use crate::bintable::Table;
 use crate::bintable::selection::Selection;
@@ -111,8 +111,8 @@ fn read_image(c: &mut Criterion, files: &mut SceneFiles) {
 }
 
 /// `integration/read_section/<source>/<storage>/<input>`: the image as the lumos light reader
-/// takes it, ten rows a section into one reused buffer, each section fed to the data
-/// checksum, then the checksum judged. Per sample, uncompressed.
+/// takes it, a section of [`policy::section_rows`] rows into one reused buffer, each section
+/// fed to the data checksum, then the checksum judged. Per sample, uncompressed.
 fn read_section(c: &mut Criterion, files: &mut SceneFiles) {
     let mut group = Kind::Integration.group(c, "read_section", Scale::Frame);
     for file in SceneFile::images() {
@@ -131,8 +131,8 @@ fn read_section(c: &mut Criterion, files: &mut SceneFiles) {
 }
 
 /// `integration/read_physical/<source>/<storage>/<input>`: the image's physical values as
-/// `f32`, ten rows a section into one reused buffer, as a stacker takes a light. Per sample,
-/// uncompressed.
+/// `f32`, a section of [`policy::section_rows`] rows into one reused buffer, as a stacker
+/// takes a light. Per sample, uncompressed.
 fn read_physical(c: &mut Criterion, files: &mut SceneFiles) {
     let mut group = Kind::Integration.group(c, "read_physical", Scale::Frame);
     for file in SceneFile::images() {
@@ -311,8 +311,9 @@ impl Reading for ReadSections {
 
     fn read<S: Source>(&mut self, mut reader: FitsReader<S>) -> ChecksumReport {
         let mut image = reader.image(self.hdu).unwrap().with_checksums();
-        for top in (0..HEIGHT).step_by(SECTION_ROWS) {
-            let ranges = [0..WIDTH, top..(top + SECTION_ROWS).min(HEIGHT)];
+        let rows = policy::section_rows(image.tiles());
+        for top in (0..HEIGHT).step_by(rows) {
+            let ranges = [0..WIDTH, top..(top + rows).min(HEIGHT)];
             let section = image.view(&ranges, &mut self.words).unwrap();
             black_box(&section);
         }
@@ -348,8 +349,9 @@ impl Reading for ReadPhysical {
 
     fn read<S: Source>(&mut self, mut reader: FitsReader<S>) {
         let mut image = reader.image(self.hdu).unwrap();
-        for top in (0..HEIGHT).step_by(SECTION_ROWS) {
-            let ranges = [0..WIDTH, top..(top + SECTION_ROWS).min(HEIGHT)];
+        let rows = policy::section_rows(image.tiles());
+        for top in (0..HEIGHT).step_by(rows) {
+            let ranges = [0..WIDTH, top..(top + rows).min(HEIGHT)];
             self.values.clear();
             image.physical_into(&ranges, &mut self.values).unwrap();
             black_box(&self.values);

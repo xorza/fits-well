@@ -17,9 +17,20 @@ use crate::internals::scene::WIDTH;
 use crate::reader::FitsReader;
 use crate::reader::source::Source;
 
-/// The rows a section read takes at a time, as the lumos light reader does: 64 Ki samples,
-/// whole rows of the standard frame, so ten rows a section.
+/// The rows a section takes at a time, as lumos reads a light and writes a master: 64 Ki
+/// samples, whole rows of the standard frame, so ten rows a section. A read of a tiled
+/// image rounds them to whole tiles, [`section_rows`].
 pub(crate) const SECTION_ROWS: usize = (64 * 1024) / WIDTH;
+
+/// The rows a section read of an image tiled in `tiles` takes at a time: [`SECTION_ROWS`],
+/// or the whole rows of tiles they hold, one at least, as the lumos light reader rounds
+/// them, so a section never cuts a tile and each tile decodes once.
+pub(crate) fn section_rows(tiles: Option<&[usize]>) -> usize {
+    match tiles {
+        Some(tiles) => (SECTION_ROWS / tiles[1]).max(1) * tiles[1],
+        None => SECTION_ROWS,
+    }
+}
 
 /// What a case times, the first part of its id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
