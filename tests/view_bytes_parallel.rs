@@ -14,6 +14,32 @@ mod support;
 
 use crate::support::peak;
 
+/// Make every worker of the pool block once in rayon's sleep, so the pool holds what that makes
+/// before a run is measured. On macOS std allocates a `Condvar`'s `pthread_cond_t`, 48 B, the
+/// first time it waits (rust-lang/rust#93740), and each rayon worker sleeps on a `Condvar` of its
+/// own; a worker first blocking mid-run put 48, 96 or 144 B past the figure, which the trace of a
+/// loaded Mac caught in `Sleep::sleep`. The calling thread, a worker by `use_current_thread`,
+/// waits on the others while they nap, then the others idle while it naps. A nap far longer than
+/// rayon's spin before it sleeps.
+#[cfg(feature = "parallel")]
+fn block_every_worker_once() {
+    use std::thread;
+    use std::time::Duration;
+
+    const NAP: Duration = Duration::from_millis(50);
+    let caller = rayon::current_thread_index().expect("the calling thread is a worker");
+    rayon::broadcast(|ctx| {
+        if ctx.index() != caller {
+            thread::sleep(NAP);
+        }
+    });
+    rayon::broadcast(|ctx| {
+        if ctx.index() == caller {
+            thread::sleep(NAP);
+        }
+    });
+}
+
 #[test]
 fn run_of_views_on_four_workers_peaks_within_its_view_bytes() {
     #[cfg(feature = "parallel")]
@@ -23,7 +49,7 @@ fn run_of_views_on_four_workers_peaks_within_its_view_bytes() {
             .use_current_thread()
             .build_global()
             .unwrap();
-        rayon::broadcast(|_| ());
+        block_every_worker_once();
     }
     peak::check(&peak::cases());
 }
