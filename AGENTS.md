@@ -40,7 +40,7 @@ hand, which builds another copy of the crates.
 
 ```
 cargo drive check          # after each change: fmt, then clippy on every target
-cargo drive test [args]    # the tests; an argument picks some by name
+cargo drive test [args]    # the tests with default features; an argument picks some by name
 cargo drive gate           # every check CI runs, the docs and doc tests included
 cargo drive bench [args]   # the benches; --test runs each case once
 cargo drive run examples   # each example, run once

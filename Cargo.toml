@@ -80,6 +80,7 @@ required-features = ["compression"]
 [profile.dev]
 opt-level = 1
 debug = "line-tables-only"
+lto = "off"
 
 [profile.dev.package."*"]
 opt-level = 3
