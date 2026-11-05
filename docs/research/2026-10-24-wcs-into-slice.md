@@ -1,6 +1,6 @@
 # WCS transforms into the caller's slice
 
-Measured 2026-10-24 on an AMD CPU, rustc 1.99.1, with `cargo drive bench
+Measured 2026-10-24 on a mobile AMD CPU, rustc 1.99.1, with `cargo drive bench
 'atomic/wcs/'` (the `bench` profile, `--all-features`). The cases are
 `src/world_coordinates/bench.rs`: one 6000-point row a sample, one call a point.
 

@@ -1,6 +1,6 @@
 # The `-TAB` inverse over monotonic runs and pruned cells
 
-Measured 2026-10-24 on an AMD CPU with `cargo drive bench
+Measured 2026-10-24 on a mobile AMD CPU with `cargo drive bench
 'atomic/wcs/to_(world|pixel)/tabular'`: one 6000-point row a sample through the
 `indexed_wcs` fixture, a `WAVE-TAB` axis over a 100 000-entry monotonic index.
 

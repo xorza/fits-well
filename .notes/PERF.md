@@ -6,10 +6,10 @@ kept idea is in its commit, with its numbers.
 
 ## Setup
 
-- Host: AMD CPU (Zen 3+, 8 cores, 16 threads), 27 GB, Linux, governor
+- Host: a mobile AMD CPU, Linux, governor
   `performance`, boost on (cannot be turned off without root). `target-cpu=x86-64-v3`
   from `.cargo/config.toml`.
-- Runs: the bench binary pinned to CPU 2 (`taskset -c 2`), its SMT sibling CPU 3 left idle,
+- Runs: the bench binary pinned to one core with `taskset`, its SMT sibling left idle,
   so `parallel` cases run on one thread; one shared `CRITERION_HOME`, base
   `--save-baseline base`, cand `--baseline base`.
 

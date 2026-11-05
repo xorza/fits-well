@@ -1,6 +1,6 @@
 # What a compressed read holds, and what it costs
 
-Measured 2026-10-24 on an AMD CPU, rustc 1.99.1, flate2 1.1.10 with
+Measured 2026-10-24 on a mobile AMD CPU, rustc 1.99.1, flate2 1.1.10 with
 miniz_oxide 0.9.1, with `cargo drive bench` (the `bench` profile, `--all-features`).
 The cases are `src/compression/bench.rs`: the standard frame in each codec's default
 tiles, read whole or ten rows a section with the checksum judged, from memory (`slice`)
