@@ -66,10 +66,14 @@ impl Counting {
         self.live.load(Ordering::Relaxed)
     }
 
-    /// Count the peak again from what is live now, which this returns.
+    /// Count the peak again from what is live now, which this returns. The peak falls to the
+    /// floor before `live` is read, and takes it by `fetch_max`: an allocation of another thread
+    /// after the fall raises the peak past it, where a store of `live` read first would
+    /// overwrite a higher peak set between the read and the store.
     pub(crate) fn restart_peak(&self) -> isize {
+        self.peak.store(isize::MIN, Ordering::Relaxed);
         let live = self.live();
-        self.peak.store(live, Ordering::Relaxed);
+        self.peak.fetch_max(live, Ordering::Relaxed);
         live
     }
 

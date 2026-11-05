@@ -1,60 +1,16 @@
 //! The failure of the lowest index among the items of a parallel run, as rayon's
-//! `find_first` keeps its leftmost match: rayon's own `try_for_each` and `collect` into a
+//! `find_map_first` keeps its leftmost match: rayon's own `try_for_each` and `collect` into a
 //! `Result` return whichever failure a worker meets first in time.
 
 use crate::fits_error::{FitsError, Result};
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use std::ops::Range;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// The failing item of the lowest index seen so far. An item past it can skip, as its
-/// failure could not be the first; an item before it runs, as it could. So the failure
-/// kept at the end is the first in item order, whichever worker meets it.
-#[derive(Debug)]
-struct FirstFailure {
-    /// The index of `failure`, or `usize::MAX` for none: a hint that only falls.
-    index: AtomicUsize,
-    failure: Mutex<Option<Failure>>,
-}
-
-#[derive(Debug)]
-struct Failure {
-    index: usize,
-    error: FitsError,
-}
-
-impl FirstFailure {
-    const fn new() -> Self {
-        Self {
-            index: AtomicUsize::new(usize::MAX),
-            failure: Mutex::new(None),
-        }
-    }
-
-    /// Whether item `index` comes after a failure already seen.
-    fn skips(&self, index: usize) -> bool {
-        index > self.index.load(Ordering::Relaxed)
-    }
-
-    fn record(&self, index: usize, error: FitsError) {
-        let mut failure = self.failure.lock().unwrap();
-        if failure.as_ref().is_none_or(|kept| index < kept.index) {
-            *failure = Some(Failure { index, error });
-            self.index.fetch_min(index, Ordering::Relaxed);
-        }
-    }
-
-    fn into_result(self) -> Result<()> {
-        match self.failure.into_inner().unwrap() {
-            Some(Failure { error, .. }) => Err(error),
-            None => Ok(()),
-        }
-    }
-}
 
 /// Run `f` on each item of `items` with its index and a scratch from `init`, as rayon's
 /// `enumerate().try_for_each_init(…)` does, and return the failure of the lowest index.
+/// `find_map_first` skips the work to the right of a failure it found, as no failure there
+/// could be the first.
 pub(super) fn try_for_each_init<I, S, F>(
     items: I,
     init: impl Fn() -> S + Sync + Send,
@@ -64,49 +20,56 @@ where
     I: IndexedParallelIterator,
     F: Fn(&mut S, (usize, I::Item)) -> Result<()> + Sync + Send,
 {
-    let first = FirstFailure::new();
-    items
+    let failure = items
         .enumerate()
-        .for_each_init(init, |scratch, (index, item)| {
-            if !first.skips(index)
-                && let Err(error) = f(scratch, (index, item))
-            {
-                first.record(index, error);
-            }
-        });
-    first.into_result()
+        .map_init(init, |scratch, item| f(scratch, item).err())
+        .find_map_first(|failure| failure);
+    failure.map_or(Ok(()), Err)
 }
+
+/// What an item of [`try_map_init`] leaves: `None` where it skipped. The error is boxed, as a
+/// `FitsError` is 64 B and every item holds the slot: a slot of a 24 B value stays 24 B, as
+/// before an item kept its error.
+type Slot<T> = Option<std::result::Result<T, Box<FitsError>>>;
 
 /// `f` of each index of `indices` with a scratch from `init`, in order, as rayon's
 /// `map_init(…).collect()` into a `Result` gives them, and the failure of the lowest
 /// index.
+///
+/// An index past the lowest failure seen so far skips, as its failure could not be the first:
+/// the hint only falls, so every skipped index comes after the failure the ordered collect
+/// stops at.
 pub(super) fn try_map_init<S, T: Send>(
     indices: Range<usize>,
     init: impl Fn() -> S + Sync + Send,
     f: impl Fn(&mut S, usize) -> Result<T> + Sync + Send,
 ) -> Result<Vec<T>> {
-    let first = FirstFailure::new();
-    let values: Vec<Option<T>> = indices
+    let lowest_failure = AtomicUsize::new(usize::MAX);
+    let slots: Vec<Slot<T>> = indices
         .into_par_iter()
         .map_init(init, |scratch, index| {
-            if first.skips(index) {
+            if index > lowest_failure.load(Ordering::Relaxed) {
                 return None;
             }
-            f(scratch, index)
-                .map_err(|error| first.record(index, error))
-                .ok()
+            let result = f(scratch, index).map_err(Box::new);
+            if result.is_err() {
+                lowest_failure.fetch_min(index, Ordering::Relaxed);
+            }
+            Some(result)
         })
         .collect();
-    first.into_result()?;
-    Ok(values
+    slots
         .into_iter()
-        .map(|value| value.expect("every item ran, as none failed"))
-        .collect())
+        .map(|slot| {
+            slot.expect("an index skips only past a failure, which comes first")
+                .map_err(|error| *error)
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::compression::first_failure;
+    use crate::compression::first_failure::{self, Slot};
     use crate::fits_error::{FitsError, Indexed};
     use rayon::iter::IntoParallelRefMutIterator;
     use std::assert_matches;
@@ -150,5 +113,14 @@ mod tests {
         }
         let doubled = first_failure::try_map_init(0..10, || (), |(), index| Ok(index * 2)).unwrap();
         assert_eq!(doubled, (0..10).map(|index| index * 2).collect::<Vec<_>>());
+    }
+
+    /// A slot costs what a value alone did, the error boxed: 24 B for a tile's compressed bytes,
+    /// where an unboxed 64 B `FitsError` made it 64 B.
+    #[test]
+    fn a_slot_is_as_small_as_its_value() {
+        assert_eq!(size_of::<FitsError>(), 64);
+        assert_eq!(size_of::<Slot<Vec<u8>>>(), size_of::<Option<Vec<u8>>>());
+        assert_eq!(size_of::<Slot<Vec<u8>>>(), 24);
     }
 }

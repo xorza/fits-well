@@ -36,10 +36,10 @@ use crate::image_model::scaling::Scaling;
 use crate::image_model::view::Borrowed;
 use crate::keyword::Keyword;
 
-/// Per-worker tile-encode scratch, reused across the tiles one rayon worker
-/// handles (via `map_tiles`'s `init`): the tile geometry plus the gather and codec
-/// workspaces. Reusing them means steady-state tile compression allocates only each
-/// tile's retained compressed output.
+/// Tile-encode scratch, reused across the run of tiles one rayon job handles (via
+/// `map_tiles`'s `init`): the tile geometry plus the gather and codec workspaces. Reusing
+/// them means a run of tiles allocates its scratch once, beside each tile's retained
+/// compressed output.
 #[derive(Debug, Default)]
 struct EncodeScratch {
     tile: TileScratch,

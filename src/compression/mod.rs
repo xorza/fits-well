@@ -307,9 +307,11 @@ fn parameter_index(keyword: Keyword) -> Option<usize> {
 }
 
 /// Map `f` over each tile index `0..ntiles`, collecting the per-tile results in
-/// tile order and short-circuiting on the first error. `init` builds the reusable
-/// per-worker scratch `f` writes through (one per thread under `parallel`, reused
-/// across that worker's tiles; a single one serially).
+/// tile order and short-circuiting on the first error. `init` builds the scratch `f`
+/// writes through, reused across a run of tiles: under `parallel`, one for each rayon job,
+/// which rayon splits as it balances, so at most one alive for each worker, as `f` starts no
+/// parallel work; a single one serially. One read of a 4096² image in 4096 tiles of a row
+/// ran `init` 855 times on 10 workers and 48 times on 4, with never more alive than workers.
 ///
 /// Tiles (de)compress independently and the codecs are compute-bound, so with the
 /// `parallel` feature this fans the per-tile work across the rayon pool for a
