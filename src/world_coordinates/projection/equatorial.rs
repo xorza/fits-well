@@ -2,6 +2,7 @@
 //! cylindrical `CAR`, `CEA`, `MER` and `CYP`, the pseudo-cylindrical `SFL`, `PAR`, `AIT`
 //! and `MOL`, the polyconic `PCO` and Bonne's `BON` (CG 2002 §5.2, §5.3, §5.5, §5.6).
 
+use crate::libm_ext::Libm;
 use crate::world_coordinates::angle;
 use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, FRAC_PI_4, PI, SQRT_2};
 
@@ -50,7 +51,7 @@ impl Bon {
         let theta1 = theta1_degrees * D2R;
         Self {
             theta1: theta1_degrees,
-            y0: theta1 + 1.0 / theta1.tan(),
+            y0: theta1 + 1.0 / theta1.libm_tan(),
         }
     }
 }
@@ -69,13 +70,13 @@ impl Equatorial {
             // The poles are at infinity.
             Self::Mer if cos_theta == 0.0 => return Err(projection.world_domain_error()),
             // ln tan(45° + θ/2) as asinh(tan θ), which does not cancel near the equator.
-            Self::Mer => [phi, R2D * (sin_theta / cos_theta).asinh()],
+            Self::Mer => [phi, R2D * (sin_theta / cos_theta).libm_asinh()],
             Self::Sfl => [phi * cos_theta, native.theta()],
             Self::Ait => {
                 let pr = phi * D2R;
-                let gamma = R2D * (2.0 / (1.0 + cos_theta * (pr / 2.0).cos())).sqrt();
+                let gamma = R2D * (2.0 / (1.0 + cos_theta * (pr / 2.0).libm_cos())).sqrt();
                 [
-                    2.0 * gamma * cos_theta * (pr / 2.0).sin(),
+                    2.0 * gamma * cos_theta * (pr / 2.0).libm_sin(),
                     gamma * sin_theta,
                 ]
             }
@@ -97,8 +98,8 @@ impl Equatorial {
             Self::Par => {
                 let t = native.theta() * D2R;
                 [
-                    phi * (2.0 * (2.0 * t / 3.0).cos() - 1.0),
-                    180.0 * (t / 3.0).sin(),
+                    phi * (2.0 * (2.0 * t / 3.0).libm_cos() - 1.0),
+                    180.0 * (t / 3.0).libm_sin(),
                 ]
             }
             // §5.5.1: BON degenerates to the sinusoidal SFL at θ₁ = 0.
@@ -106,7 +107,10 @@ impl Equatorial {
             Self::Bon(bon) => {
                 let r = bon.y0 - native.theta() * D2R;
                 let aphi = phi * D2R * cos_theta / r;
-                [R2D * r * aphi.sin(), R2D * (bon.y0 - r * aphi.cos())]
+                [
+                    R2D * r * aphi.libm_sin(),
+                    R2D * (bon.y0 - r * aphi.libm_cos()),
+                ]
             }
             Self::Pco if sin_theta == 0.0 => [phi, 0.0],
             Self::Pco => {
@@ -115,8 +119,8 @@ impl Equatorial {
                 let omega = phi * D2R * sin_theta;
                 let cot = cos_theta / sin_theta;
                 [
-                    R2D * cot * omega.sin(),
-                    native.theta() + R2D * cot * 2.0 * (omega / 2.0).sin().powi(2),
+                    R2D * cot * omega.libm_sin(),
+                    native.theta() + R2D * cot * 2.0 * (omega / 2.0).libm_sin().libm_powi(2),
                 ]
             }
         };
@@ -135,7 +139,7 @@ impl Equatorial {
             Self::Cea { lambda } => [x, projection.checked_asin(lambda * y / R2D)? * R2D],
             // The Gudermannian: no cancellation near the equator, as 2 atan(eʸ) − 90°
             // has.
-            Self::Mer => [x, (y / R2D).sinh().atan() * R2D],
+            Self::Mer => [x, (y / R2D).libm_sinh().libm_atan() * R2D],
             Self::Sfl => [sfl_longitude(projection, x, y)?, y],
             // Hammer–Aitoff inverse (CG 2002 eq. 51). The map's edge, the image of
             // φ = ±180°, is z² = 1/2, and the native poles lie on it; z² within rounding
@@ -143,7 +147,7 @@ impl Equatorial {
             // arguments vanish at a pole and φ is 0, as in SFL.
             Self::Ait => {
                 let (u, v) = (x * D2R, y * D2R);
-                let z2 = 1.0 - (u / 4.0).powi(2) - (v / 2.0).powi(2);
+                let z2 = 1.0 - (u / 4.0).libm_powi(2) - (v / 2.0).libm_powi(2);
                 if z2.is_nan() || z2 < 0.5 - UNIT_TOLERANCE {
                     return Err(projection.domain_error());
                 }
@@ -153,7 +157,7 @@ impl Equatorial {
                 let phi = if sine == 0.0 && cosine == 0.0 {
                     0.0
                 } else {
-                    2.0 * sine.atan2(cosine) * R2D
+                    2.0 * sine.libm_atan2(cosine) * R2D
                 };
                 [phi, projection.checked_asin(v * z)? * R2D]
             }
@@ -172,36 +176,40 @@ impl Equatorial {
                     }
                 };
                 if sin_gamma.abs() <= FRAC_1_SQRT_2 {
-                    let gamma = sin_gamma.asin();
-                    let theta =
-                        projection.checked_asin((2.0 * gamma + (2.0 * gamma).sin()) / PI)? * R2D;
-                    [longitude(gamma.cos()), theta]
+                    let gamma = sin_gamma.libm_asin();
+                    let theta = projection
+                        .checked_asin((2.0 * gamma + (2.0 * gamma).libm_sin()) / PI)?
+                        * R2D;
+                    [longitude(gamma.libm_cos()), theta]
                 } else {
                     let gap = 1.0 - sin_gamma.abs();
                     if gap.is_nan() || gap < -UNIT_TOLERANCE {
                         return Err(projection.domain_error());
                     }
-                    let beta = 2.0 * (gap.max(0.0) / 2.0).sqrt().asin();
+                    let beta = 2.0 * (gap.max(0.0) / 2.0).sqrt().libm_asin();
                     let colatitude =
                         2.0 * projection.checked_asin((h(2.0 * beta) / (2.0 * PI)).sqrt())?;
                     return Ok(NativeCoordinate::from_sin_cos(
-                        projection.native_longitude(longitude(beta.sin()))?,
-                        colatitude.cos().copysign(sin_gamma),
-                        colatitude.sin(),
+                        projection.native_longitude(longitude(beta.libm_sin()))?,
+                        colatitude.libm_cos().copysign(sin_gamma),
+                        colatitude.libm_sin(),
                     ));
                 }
             }
             // φ = x/λ; θ from η = (y/(180/π))/(μ+λ).
             Self::Cyp { mu, lambda } => {
                 let eta = (y / R2D) / (mu + lambda);
-                let theta = eta.atan2(1.0)
+                let theta = eta.libm_atan2(1.0)
                     + projection.checked_asin(eta * mu / (1.0 + eta * eta).sqrt())?;
                 [x / lambda, theta * R2D]
             }
             // PAR inverse (CG 2002 eq. 49).
             Self::Par => {
                 let theta = 3.0 * projection.checked_asin(y / 180.0)?;
-                [x / (2.0 * (2.0 * theta / 3.0).cos() - 1.0), theta * R2D]
+                [
+                    x / (2.0 * (2.0 * theta / 3.0).libm_cos() - 1.0),
+                    theta * R2D,
+                ]
             }
             // Polyconic inverse (CG 2002 §5.6.1): Newton on
             // f(θ) = X² + (Y−θ)² − 2(Y−θ)cotθ = 0, then recover φ; at the equator, wcslib's
@@ -211,9 +219,9 @@ impl Equatorial {
                 let (xr, yr) = (x * D2R, y * D2R);
                 let th = pco_theta(xr, yr)?;
                 let d = yr - th;
-                let tanth = th.tan();
-                let omega = (xr * tanth).atan2(1.0 - d * tanth);
-                [omega / th.sin() * R2D, th * R2D]
+                let tanth = th.libm_tan();
+                let omega = (xr * tanth).libm_atan2(1.0 - d * tanth);
+                [omega / th.libm_sin() * R2D, th * R2D]
             }
             // §5.5.1: BON degenerates to the sinusoidal SFL at θ₁ = 0 (avoiding the
             // `1/tan 0` singularity below).
@@ -222,10 +230,10 @@ impl Equatorial {
             Self::Bon(bon) => {
                 let s = bon.theta1.signum();
                 let yc = bon.y0 - y * D2R;
-                let r = s * (x * D2R).hypot(yc);
+                let r = s * (x * D2R).libm_hypot(yc);
                 let tr = bon.y0 - r;
-                let aphi = (s * x * D2R).atan2(s * yc);
-                [aphi * r / tr.cos() * R2D, tr * R2D]
+                let aphi = (s * x * D2R).libm_atan2(s * yc);
+                [aphi * r / tr.libm_cos() * R2D, tr * R2D]
             }
         };
         projection.native_coordinate(phi, theta)
@@ -266,30 +274,30 @@ fn mollweide_auxiliary(native: NativeCoordinate) -> Result<SinCos> {
         let bracket = Bracket {
             negative: -FRAC_PI_4,
             positive: FRAC_PI_4,
-            start: sin_theta.asin(),
+            start: sin_theta.libm_asin(),
         };
         let gamma = solve_newton(Projection::Mol, bracket, |gamma| NewtonEvaluation {
-            residual: 2.0 * gamma + (2.0 * gamma).sin() - target,
-            derivative: 2.0 + 2.0 * (2.0 * gamma).cos(),
+            residual: 2.0 * gamma + (2.0 * gamma).libm_sin() - target,
+            derivative: 2.0 + 2.0 * (2.0 * gamma).libm_cos(),
         })?;
         return Ok(SinCos {
-            sin: gamma.sin(),
-            cos: gamma.cos(),
+            sin: gamma.libm_sin(),
+            cos: gamma.libm_cos(),
         });
     }
     let target = PI * cos_theta * cos_theta / (1.0 + sin_theta.abs());
     let bracket = Bracket {
         negative: 0.0,
         positive: FRAC_PI_2,
-        start: (0.75 * target).cbrt(),
+        start: (0.75 * target).libm_cbrt(),
     };
     let beta = solve_newton(Projection::Mol, bracket, |beta| NewtonEvaluation {
         residual: h(2.0 * beta) - target,
-        derivative: 4.0 * beta.sin().powi(2),
+        derivative: 4.0 * beta.libm_sin().libm_powi(2),
     })?;
     Ok(SinCos {
-        sin: beta.cos().copysign(sin_theta),
-        cos: beta.sin(),
+        sin: beta.libm_cos().copysign(sin_theta),
+        cos: beta.libm_sin(),
     })
 }
 
@@ -311,7 +319,7 @@ fn h(u: f64) -> f64 {
         coefficients
     };
     if u >= 1.0 {
-        return u - u.sin();
+        return u - u.libm_sin();
     }
     let u2 = u * u;
     let series = COEFFICIENTS
@@ -333,10 +341,12 @@ fn pco_theta(x: f64, y: f64) -> Result<f64> {
     };
     solve_newton(Projection::Pco, bracket, |theta| {
         let delta = y - theta;
-        let cotangent = 1.0 / theta.tan();
+        let cotangent = 1.0 / theta.libm_tan();
         NewtonEvaluation {
             residual: x * x + delta * delta - 2.0 * delta * cotangent,
-            derivative: -2.0 * delta + 2.0 * cotangent + 2.0 * delta / theta.sin().powi(2),
+            derivative: -2.0 * delta
+                + 2.0 * cotangent
+                + 2.0 * delta / theta.libm_sin().libm_powi(2),
         }
     })
 }
@@ -345,6 +355,7 @@ fn pco_theta(x: f64, y: f64) -> Result<f64> {
 mod tests {
     use crate::internals::tolerance;
     use crate::internals::tolerance::Tolerance;
+    use crate::libm_ext::Libm;
     use crate::world_coordinates::projection::equatorial::h;
 
     /// The series meets `u − sin u` at 1, where the closed form loses at most
@@ -353,7 +364,7 @@ mod tests {
     #[test]
     fn u_minus_sin_u_keeps_its_digits_below_one() {
         let below = h(1.0_f64.next_down());
-        let closed = 1.0 - 1.0_f64.sin();
+        let closed = 1.0 - 1.0_f64.libm_sin();
         tolerance::assert_within(
             below,
             closed,
@@ -361,7 +372,7 @@ mod tests {
             "u − sin u just below 1",
         );
         let u = 1e-3_f64;
-        let terms = u.powi(3) / 6.0 * (1.0 - u * u / 20.0 * (1.0 - u * u / 42.0));
+        let terms = u.libm_powi(3) / 6.0 * (1.0 - u * u / 20.0 * (1.0 - u * u / 42.0));
         tolerance::assert_within(
             h(u),
             terms,

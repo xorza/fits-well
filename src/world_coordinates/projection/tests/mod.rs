@@ -6,6 +6,7 @@ use crate::internals::tolerance;
 use crate::internals::tolerance::Tolerance;
 use crate::internals::wcs_header;
 use crate::internals::wcs_header::WcsHeader;
+use crate::libm_ext::Libm;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::angle;
 use crate::world_coordinates::angle::{D2R, R2D};
@@ -556,7 +557,7 @@ fn chord(a: NativeCoordinate, b: NativeCoordinate) -> f64 {
     let [a, b] = [unit(a), unit(b)];
     a.iter()
         .zip(&b)
-        .map(|(a, b)| (a - b).powi(2))
+        .map(|(a, b)| (a - b).libm_powi(2))
         .sum::<f64>()
         .sqrt()
 }
@@ -956,7 +957,7 @@ fn near_limit_projection_formulas_keep_their_precision() {
     let coo = Conic::new(ConicKind::Coo, &pv);
     tolerance::assert_within(
         coo.c,
-        45f64.to_radians().sin(),
+        45f64.to_radians().libm_sin(),
         Tolerance::abs(
             2.0 * f64::EPSILON,
             "the η → 0 limit's two roundings, below 1",
@@ -987,7 +988,7 @@ fn near_limit_projection_formulas_keep_their_precision() {
         .raw_parameters([0.0; 21])
         .project(NativeCoordinate::from_degrees(90.0, t * R2D))
         .unwrap();
-    let expected = t * R2D + R2D * FRAC_PI_2.powi(2) * t / 2.0;
+    let expected = t * R2D + R2D * FRAC_PI_2.libm_powi(2) * t / 2.0;
     tolerance::assert_within(
         projected.y,
         expected,

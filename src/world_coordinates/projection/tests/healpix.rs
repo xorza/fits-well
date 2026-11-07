@@ -18,7 +18,7 @@ fn hpx_poles_and_parameters() {
     // In the polar cap 1 − sin θ = σ²/K. At y = 90° − 45°·2⁻³⁰, exact in f64, σ = 2⁻³⁰,
     // and sin θ = 1 − 2⁻⁶⁰/3 rounds to 1, which once gave θ = 90°; cos θ =
     // √(σ²/K·(2 − σ²/K)) = 2⁻³⁰·√(2/3) to 1e-19 keeps the point.
-    let sigma = 2f64.powi(-30);
+    let sigma = 2f64.libm_powi(-30);
     let cap = default_pv.deproject(45.0, 90.0 - 45.0 * sigma).unwrap();
     let expected = sigma * (2.0f64 / 3.0).sqrt();
     tolerance::assert_within(

@@ -63,6 +63,7 @@ mod header_model;
 mod image_model;
 mod inline_name;
 mod keyword;
+mod libm_ext;
 mod ragged;
 mod reader;
 mod reserved_keywords;

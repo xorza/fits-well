@@ -1,5 +1,6 @@
 //! A seeded generator for tests and benches, so two runs draw the same values.
 
+use crate::libm_ext::Libm;
 use std::f64::consts::TAU;
 
 /// Steele, Lea and Flood's SplitMix64: one 64-bit state, a fresh output per call.
@@ -27,12 +28,12 @@ impl SplitMix {
     /// A draw of a unit normal, by Box–Muller.
     pub(crate) fn gaussian(&mut self) -> f64 {
         let (u, v) = (1.0 - self.unit(), self.unit());
-        (-2.0 * u.ln()).sqrt() * (TAU * v).cos()
+        (-2.0 * u.libm_ln()).sqrt() * (TAU * v).libm_cos()
     }
 
     /// A draw of a power law of index `alpha` on `[1, ∞)`: `P(X > x) = x^−alpha`, by inverse
     /// sampling of a draw on `(0, 1]`.
     pub(crate) fn power_law(&mut self, alpha: f64) -> f64 {
-        (1.0 - self.unit()).powf(-1.0 / alpha)
+        (1.0 - self.unit()).libm_powf(-1.0 / alpha)
     }
 }

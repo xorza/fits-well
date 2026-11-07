@@ -1,6 +1,7 @@
 //! [`NativeCoordinate`]: a point on the native sphere, between the rotation and the
 //! projection.
 
+use crate::libm_ext::Libm;
 use crate::world_coordinates::angle;
 use crate::world_coordinates::angle::R2D;
 
@@ -28,7 +29,7 @@ impl NativeCoordinate {
 
     /// The point at longitude `phi` (degrees) and colatitude `zeta` (radians).
     pub(super) fn from_colatitude(phi: f64, zeta: f64) -> Self {
-        let (sin_zeta, cos_zeta) = zeta.sin_cos();
+        let (sin_zeta, cos_zeta) = zeta.libm_sin_cos();
         Self {
             phi,
             sin_theta: cos_zeta,
@@ -64,13 +65,13 @@ impl NativeCoordinate {
         if self.cos_theta == 0.0 {
             90.0_f64.copysign(self.sin_theta)
         } else {
-            self.sin_theta.atan2(self.cos_theta) * R2D
+            self.sin_theta.libm_atan2(self.cos_theta) * R2D
         }
     }
 
     /// The colatitude ζ = 90° − θ in radians, well conditioned at both poles.
     pub(super) fn zeta(self) -> f64 {
-        self.cos_theta.atan2(self.sin_theta)
+        self.cos_theta.libm_atan2(self.sin_theta)
     }
 
     pub(super) const fn is_finite(self) -> bool {

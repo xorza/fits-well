@@ -3,6 +3,7 @@
 
 use crate::fits_error::GrismDefect;
 use crate::fits_error::Result;
+use crate::libm_ext::Libm;
 use crate::world_coordinates::axis_transform::spectral_kind::{
     conversion_derivative, convert, domain_error, finite, invalid_grism, invalid_reference,
     required_grism_parameter,
@@ -168,9 +169,9 @@ impl Grism {
             return Err(invalid_grism(algorithm, GrismDefect::NonFinite));
         }
 
-        let incidence_sine = incidence.to_radians().sin();
-        let grating_cosine = grating_tilt.to_radians().cos();
-        let detector_cosine = detector_tilt.to_radians().cos();
+        let incidence_sine = incidence.to_radians().libm_sin();
+        let grating_cosine = grating_tilt.to_radians().libm_cos();
+        let detector_cosine = detector_tilt.to_radians().libm_cos();
         if grating_cosine == 0.0 || detector_cosine == 0.0 {
             return Err(invalid_grism(algorithm, GrismDefect::PerpendicularTilt));
         }
@@ -182,14 +183,14 @@ impl Grism {
                 GrismDefect::ReferenceOutsideDomain,
             ));
         }
-        let beta = beta_sine.asin();
+        let beta = beta_sine.libm_asin();
         let dispersion = ruling - refractive_derivative * incidence_sine;
-        let scale = derivative * dispersion / (beta.cos() * detector_cosine * detector_cosine);
+        let scale = derivative * dispersion / (beta.libm_cos() * detector_cosine * detector_cosine);
         if !dispersion.is_finite() || dispersion == 0.0 || !scale.is_finite() || scale == 0.0 {
             return Err(invalid_grism(algorithm, GrismDefect::ZeroDispersion));
         }
         Ok(Self {
-            offset: -detector_tilt.to_radians().tan(),
+            offset: -detector_tilt.to_radians().libm_tan(),
             scale,
             beta_reference: beta + detector_tilt.to_radians(),
             refractive_term: (refractive_index - refractive_derivative * reference)
@@ -200,8 +201,8 @@ impl Grism {
 
     fn to_sampled(self, intermediate: f64) -> Option<f64> {
         let grism_parameter = finite(self.offset + intermediate * self.scale)?;
-        let beta = grism_parameter.atan() + self.beta_reference;
-        finite((beta.sin() + self.refractive_term) * self.wavelength_scale)
+        let beta = grism_parameter.libm_atan() + self.beta_reference;
+        finite((beta.libm_sin() + self.refractive_term) * self.wavelength_scale)
     }
 
     pub(super) fn to_intermediate(self, sampled: f64) -> Option<f64> {
@@ -209,7 +210,7 @@ impl Grism {
         if !sine.is_finite() || !(-1.0..=1.0).contains(&sine) {
             return None;
         }
-        let grism_parameter = (sine.asin() - self.beta_reference).tan();
+        let grism_parameter = (sine.libm_asin() - self.beta_reference).libm_tan();
         finite((grism_parameter - self.offset) / self.scale)
     }
 }

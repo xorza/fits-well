@@ -193,7 +193,7 @@ fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
         } else {
             let out = to_world(&wcs, &[1.0, 1.0, 3.0]).unwrap();
             let expected = if ctype.ends_with("-LOG") {
-                1.4e9 * (2.0e6_f64 / 1.4e9).exp()
+                1.4e9 * (2.0e6_f64 / 1.4e9).libm_exp()
             } else {
                 1.402e9
             };
@@ -208,7 +208,10 @@ fn nonlinear_algorithms_are_classified_independently_of_coordinate_type() {
             tolerance::assert_close(
                 &out[..2],
                 &[45.0, 30.0],
-                Tolerance::ulps(1.0, "the rotation's roundings of δ₀"),
+                Tolerance::ulps(
+                    2.0,
+                    "the rotation's roundings of δ₀, 2 ulps through `libm`'s trigonometry",
+                ),
                 ctype,
             );
         }
@@ -622,7 +625,7 @@ fn spectral_units_are_normalized_to_table_25_defaults() {
 fn logarithmic_axes_apply_domains_units_and_inverse() {
     let generic = wcs_header::axis_header("TIME-LOG", "d", 1.0, 100.0, 10.0);
     let generic = Wcs::from_header(&generic, None).unwrap();
-    let expected = 100.0 * 0.2_f64.exp();
+    let expected = 100.0 * 0.2_f64.libm_exp();
     assert_eq!(generic.description().axes[0].cunit, "d");
     let exp_rounding = Tolerance::abs(1e-13, "an exp and a ln, a few ulps of 122 d (1.4e-14)");
     tolerance::assert_within(
@@ -647,7 +650,7 @@ fn logarithmic_axes_apply_domains_units_and_inverse() {
 
     let frequency = wcs_header::axis_header("FREQ-LOG", "GHz", 1.0, 1.4, 0.001);
     let frequency = Wcs::from_header(&frequency, None).unwrap();
-    let expected = 1.4e9 * (2.0e6_f64 / 1.4e9).exp();
+    let expected = 1.4e9 * (2.0e6_f64 / 1.4e9).libm_exp();
     assert_eq!(frequency.description().axes[0].cunit, "GHz");
     assert_eq!(frequency.description().axes[0].crval, 1.4);
     tolerance::assert_within(

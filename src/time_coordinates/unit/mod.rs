@@ -4,6 +4,7 @@ use crate::fits_error::FitsError;
 use crate::fits_error::Result;
 use crate::fits_error::TimeConversion;
 use crate::fits_error::UnitKind;
+use crate::libm_ext::Libm;
 use crate::time_coordinates::mjd::Mjd;
 use crate::time_coordinates::scale::{Scale, ScaleKind};
 use crate::unit;
@@ -108,10 +109,10 @@ fn tropical_year_days(reference_mjd: f64, scale: &Scale) -> Result<f64> {
         });
     }
     let centuries = (reference_mjd - 51_544.5) / 36_525.0;
-    Ok(
-        365.242_190_402_112_4 - 0.000_006_152_513_49 * centuries - 6.0921e-10 * centuries.powi(2)
-            + 2.6525e-10 * centuries.powi(3),
-    )
+    Ok(365.242_190_402_112_4
+        - 0.000_006_152_513_49 * centuries
+        - 6.0921e-10 * centuries.libm_powi(2)
+        + 2.6525e-10 * centuries.libm_powi(3))
 }
 
 fn besselian_year_days(reference_mjd: f64, scale: &Scale) -> Result<f64> {

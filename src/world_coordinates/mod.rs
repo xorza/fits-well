@@ -11,6 +11,7 @@ use crate::header_model::record_name::RecordName;
 use crate::header_model::{Header, keywords};
 use crate::image_model::region::Region;
 use crate::keyword::Keyword;
+use crate::libm_ext::Libm;
 use crate::world_coordinates::axis_description::AxisDescription;
 use crate::world_coordinates::axis_plan::{AxisKind, AxisPlan};
 use crate::world_coordinates::axis_transform::AxisTransform;
@@ -429,7 +430,10 @@ impl Wcs {
                     let value = value.as_real().ok().flatten()?;
                     // `A` and `AP` correct the first axis, `B` and `BP` the second.
                     let divisor = if root.starts_with('A') { b[0] } else { b[1] };
-                    Some((keyword, value * b[0].powi(p) * b[1].powi(q) / divisor))
+                    Some((
+                        keyword,
+                        value * b[0].libm_powi(p) * b[1].libm_powi(q) / divisor,
+                    ))
                 })
                 .collect();
             for (keyword, value) in sip_terms {
@@ -754,6 +758,7 @@ pub(crate) mod internals {
     use crate::fits_error::Result;
     use crate::internals::tolerance;
     use crate::internals::tolerance::Tolerance;
+    use crate::libm_ext::Libm;
     use crate::world_coordinates::Wcs;
     use crate::world_coordinates::angle::DEGREE_TOLERANCE;
 
@@ -817,7 +822,7 @@ pub(crate) mod internals {
         // A printed value lies within half a unit in its last place of wcslib's
         // answer, and DEGREE_TOLERANCE covers where this evaluation and wcslib's part.
         let tolerance = Tolerance::abs(
-            0.5 * 10f64.powi(-golden.decimals) + DEGREE_TOLERANCE,
+            0.5 * 10f64.libm_powi(-golden.decimals) + DEGREE_TOLERANCE,
             "half a unit in astropy's last printed place, and the degree tolerance",
         );
         for &(px, py, ra, dec) in golden.points {

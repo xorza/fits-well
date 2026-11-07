@@ -5,6 +5,7 @@
 use crate::fits_error::FitsError;
 use crate::fits_error::Result;
 use crate::fits_error::{GrismDefect, UnitKind, WcsDefect};
+use crate::libm_ext::Libm;
 use crate::unit;
 use crate::world_coordinates::axis_transform::spectral_rest::ResolvedRest;
 
@@ -377,14 +378,14 @@ fn wavelength_derivative_from_velocity(value: f64, rest: ResolvedRest) -> Option
 
 fn lorentz_factor(value: f64) -> Option<f64> {
     let value = subluminal(value)?;
-    finite(1.0 / (1.0 - (value / SPEED_OF_LIGHT).powi(2)).sqrt())
+    finite(1.0 / (1.0 - (value / SPEED_OF_LIGHT).libm_powi(2)).sqrt())
 }
 
 fn wave_to_air(wave: f64) -> Option<f64> {
     let wave = nonzero(wave)?;
     let mut index = 1.0;
     for _ in 0..4 {
-        let inverse_square = (index / wave).powi(2);
+        let inverse_square = (index / wave).libm_powi(2);
         index = refractive_index(inverse_square)?;
     }
     finite(wave / index)
@@ -392,19 +393,24 @@ fn wave_to_air(wave: f64) -> Option<f64> {
 
 fn air_to_wave(air: f64) -> Option<f64> {
     let air = nonzero(air)?;
-    finite(air * refractive_index((1.0 / air).powi(2))?)
+    finite(air * refractive_index((1.0 / air).libm_powi(2))?)
 }
 
 fn wave_derivative_from_air(air: f64) -> Option<f64> {
     let air = nonzero(air)?;
-    let inverse_square = (1.0 / air).powi(2);
+    let inverse_square = (1.0 / air).libm_powi(2);
     let first = 0.41e14 - inverse_square;
     let second = 1.46e14 - inverse_square;
     if first == 0.0 || second == 0.0 {
         return None;
     }
     let index = refractive_index(inverse_square)?;
-    finite(index - 2.0 * inverse_square * (2.554e8 / first.powi(2) + 294.981e8 / second.powi(2)))
+    finite(
+        index
+            - 2.0
+                * inverse_square
+                * (2.554e8 / first.libm_powi(2) + 294.981e8 / second.libm_powi(2)),
+    )
 }
 
 pub(super) fn refractive_index(inverse_square: f64) -> Option<f64> {

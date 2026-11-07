@@ -30,7 +30,7 @@ fn mask() -> Vec<i32> {
 
 fn floats() -> Vec<f32> {
     (0..SHAPE[0] * SHAPE[1])
-        .map(|i| (i as f32 * 0.37).sin() * 100.0)
+        .map(|i| libm::sinf(i as f32 * 0.37) * 100.0)
         .collect()
 }
 

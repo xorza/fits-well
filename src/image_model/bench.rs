@@ -1,6 +1,7 @@
 //! The sample cases, on one row of the standard frame: the big-endian swap both ways, the
 //! physical scaling, and the unsigned reinterpretation.
 
+use crate::libm_ext::Libm;
 use std::hint::black_box;
 
 use criterion::{Bencher, BenchmarkId, Criterion};
@@ -145,8 +146,8 @@ fn sign_bit_offset(bitpix: Bitpix) -> f64 {
     match bitpix {
         Bitpix::U8 => -128.0,
         Bitpix::I16 => 32768.0,
-        Bitpix::I32 => 2f64.powi(31),
-        Bitpix::I64 => 2f64.powi(63),
+        Bitpix::I32 => 2f64.libm_powi(31),
+        Bitpix::I64 => 2f64.libm_powi(63),
         Bitpix::F32 | Bitpix::F64 => unreachable!("a float has no unsigned convention"),
     }
 }

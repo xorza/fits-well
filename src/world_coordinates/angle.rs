@@ -1,6 +1,7 @@
 //! Angles in degrees: the conversions, the trigonometry exact at multiples of 90°, the
 //! normalizations, and the rounding a bound in degrees allows.
 
+use crate::libm_ext::Libm;
 use std::f64::consts::PI;
 
 pub(super) const R2D: f64 = 180.0 / PI;
@@ -35,7 +36,7 @@ pub(super) fn sind(degrees: f64) -> f64 {
         Some(0 | 2) => 0.0,
         Some(1) => 1.0,
         Some(_) => -1.0,
-        None => (degrees * D2R).sin(),
+        None => (degrees * D2R).libm_sin(),
     }
 }
 
@@ -45,7 +46,7 @@ pub(super) fn cosd(degrees: f64) -> f64 {
         Some(0) => 1.0,
         Some(1 | 3) => 0.0,
         Some(_) => -1.0,
-        None => (degrees * D2R).cos(),
+        None => (degrees * D2R).libm_cos(),
     }
 }
 
@@ -71,6 +72,7 @@ pub(super) fn norm180(a: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use crate::libm_ext::Libm;
     use crate::world_coordinates::angle;
 
     /// `[0, 360)`: a tiny negative angle's remainder rounds to 360 itself, which is 0.
@@ -87,7 +89,7 @@ mod tests {
     /// A tiny angle keeps every bit rather than vanishing into `180 − 180`.
     #[test]
     fn norm180_is_exact_and_stays_below_a_half_turn() {
-        let ulp = 2f64.powi(-45);
+        let ulp = 2f64.libm_powi(-45);
         for (angle, normalized) in [
             (-180.0 - ulp, 180.0 - ulp),
             (180.0, -180.0),

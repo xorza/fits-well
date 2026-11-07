@@ -18,6 +18,7 @@ use crate::fits_error::CompressionFeature;
 use crate::fits_error::FitsError;
 use crate::fits_error::HcompressDefect;
 use crate::fits_error::Result;
+use crate::libm_ext::Libm;
 
 const MAGIC: [u8; 2] = [0xDD, 0x99];
 
@@ -236,7 +237,7 @@ const NCODE: [i32; 16] = [6, 3, 3, 4, 3, 4, 5, 5, 3, 5, 4, 5, 4, 5, 6, 4];
 /// `> 1<<k` correction). Kept in floating point — not `usize::ilog2` — to stay
 /// bit-for-bit identical to the reference codec the golden tests check against.
 fn log2_ceil(n: usize) -> i32 {
-    let mut log2n = ((n as f64).ln() / 2f64.ln() + 0.5) as i32;
+    let mut log2n = ((n as f64).libm_ln() / 2f64.libm_ln() + 0.5) as i32;
     if n > (1 << log2n) {
         log2n += 1;
     }

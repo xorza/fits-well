@@ -9,6 +9,7 @@ use crate::header_model::{Header, keywords};
 use crate::internals::cards;
 use crate::internals::tolerance;
 use crate::internals::tolerance::Tolerance;
+use crate::libm_ext::Libm;
 use std::assert_matches;
 
 use crate::time_coordinates::bounds::Bounds;
@@ -91,13 +92,13 @@ fn relative_times_keep_their_precision_and_range() {
         seconds,
         1e-6,
         Tolerance::abs(
-            2.0_f64.powi(-53) * SECONDS_PER_DAY,
+            2.0_f64.libm_powi(-53) * SECONDS_PER_DAY,
             "an ulp of the day's fraction near 0.5, in seconds",
         ),
         "relative time at MJDREF + 0.5",
     );
     let one_f64 = (60_000.5 + 1e-6 / SECONDS_PER_DAY - 60_000.5) * SECONDS_PER_DAY;
-    assert_eq!(one_f64, 2.0 * 2.0_f64.powi(-37) * SECONDS_PER_DAY);
+    assert_eq!(one_f64, 2.0 * 2.0_f64.libm_powi(-37) * SECONDS_PER_DAY);
 
     // 12 h before the reference's noon is the midnight that starts its day, and 1 s
     // more is the day before, 86399 s into it.
@@ -200,7 +201,7 @@ fn time_axis_uses_complete_wcs_row_unit_and_scale() {
         .set_internal("CD1_1A", 2.0);
     let logarithmic = Wcs::from_header(&h, 'A').unwrap();
     let coordinate = t.wcs_time(&logarithmic, 0, &[2.0]).unwrap().unwrap();
-    let expected_days = 10.0 * 0.2_f64.exp();
+    let expected_days = 10.0 * 0.2_f64.libm_exp();
     assert_eq!(coordinate.mjd, Mjd::new(58000, expected_days));
 
     let mut non_time = Header::new();

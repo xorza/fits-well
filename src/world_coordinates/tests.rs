@@ -12,6 +12,7 @@ use crate::internals::fixture::Fixture;
 use crate::internals::tolerance;
 use crate::internals::tolerance::Tolerance;
 use crate::internals::wcs_header::{Family, WcsHeader};
+use crate::libm_ext::Libm;
 use crate::world_coordinates::Wcs;
 use crate::world_coordinates::angle::R2D;
 use crate::world_coordinates::axis_description::AxisDescription;
@@ -78,8 +79,8 @@ fn world_to_pixel_inverts_pixel_to_world() {
     let assert_round_trip = |wcs: &Wcs, pixel: [f64; 2], degrees_per_pixel: f64, context: &str| {
         let world = to_world(wcs, &pixel).unwrap();
         let back = to_pixel(wcs, &world).unwrap();
-        let rounding = ulp(world[0]) * world[1].to_radians().cos() + ulp(world[1]);
-        let miss = (back[0] - pixel[0]).hypot(back[1] - pixel[1]) * degrees_per_pixel;
+        let rounding = ulp(world[0]) * world[1].to_radians().libm_cos() + ulp(world[1]);
+        let miss = (back[0] - pixel[0]).libm_hypot(back[1] - pixel[1]) * degrees_per_pixel;
         assert!(
             miss <= 2.0 * rounding,
             "{context} at {pixel:?}: {back:?} misses by {miss:e}°, the rounding is {rounding:e}°"
@@ -634,7 +635,7 @@ fn write_into_writes_the_matrix_in_wcslibs_form() {
         WcsHeader::celestial("TAN", [1.0, 1.0], [0.0, 0.0], [-2e-4, 3e-4]).image_header();
     crota.set_internal("CROTA2", 30.0);
     let out = written(&crota);
-    let cos30 = (30.0f64).to_radians().cos();
+    let cos30 = (30.0f64).to_radians().libm_cos();
     for (name, value) in [
         ("PC1_1", cos30),
         ("PC1_2", 0.75),

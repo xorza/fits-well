@@ -2,6 +2,7 @@
 //! through it (Calabretta & Greisen 2002, §2).
 
 use crate::fits_error::{FitsError, PoleDefect, Result};
+use crate::libm_ext::Libm;
 use crate::world_coordinates::angle;
 use crate::world_coordinates::angle::R2D;
 use crate::world_coordinates::celestial_coordinate::CelestialCoordinate;
@@ -62,7 +63,7 @@ impl CelestialPole {
         };
         let x = cos_theta0 * cos_dphi;
         let y = sin_theta0;
-        let z = x.hypot(y);
+        let z = x.libm_hypot(y);
         let dp = if z == 0.0 {
             if sin_d0 != 0.0 {
                 return Err(FitsError::WcsInvalidPole {
@@ -83,7 +84,7 @@ impl CelestialPole {
                     }
                     ratio = ratio.signum();
                 }
-                (y.atan2(x) * R2D, ratio.acos() * R2D)
+                (y.libm_atan2(x) * R2D, ratio.libm_acos() * R2D)
             };
             let wrap = |angle: f64| {
                 if angle > 180.0 {
@@ -130,7 +131,7 @@ impl CelestialPole {
         } else {
             let x = (sin_theta0 - angle::sind(dp) * sin_d0) / z;
             let y = sin_dphi * cos_theta0 / cos_d0;
-            a0 - y.atan2(x) * R2D
+            a0 - y.libm_atan2(x) * R2D
         };
         Ok(Self {
             ra: angle::norm360(ap),

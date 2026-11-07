@@ -1,6 +1,7 @@
 //! The zenithal perspective projections, `AZP`, `SZP` and `SIN` (CG 2002 §5.1.1, §5.1.2,
 //! §5.1.5): rays from a point of projection to a plane through the native pole.
 
+use crate::libm_ext::Libm;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::fits_error::Result;
@@ -90,7 +91,7 @@ impl Azp {
             cos_gamma,
             tan_gamma: angle::sind(gamma) / cos_gamma,
             overlap: if mu.abs() > 1.0 {
-                (-1.0 / mu).asin() * R2D
+                (-1.0 / mu).libm_asin() * R2D
             } else {
                 -90.0
             },
@@ -106,34 +107,34 @@ impl Azp {
         let theta = native.theta();
         let (sin_theta, cos_theta) = (native.sin_theta(), native.cos_theta());
         let pr = native.phi * D2R;
-        let tilt = self.tan_gamma * pr.cos();
+        let tilt = self.tan_gamma * pr.libm_cos();
         let denom = (self.mu + sin_theta) + cos_theta * tilt;
         if denom == 0.0 || theta < self.overlap {
             return Err(projection.world_domain_error());
         }
         if self.diverges {
             let t = self.mu / (1.0 + tilt * tilt).sqrt();
-            if t.abs() <= 1.0 && theta < limb(-tilt.atan() * R2D, t.asin() * R2D) {
+            if t.abs() <= 1.0 && theta < limb(-tilt.libm_atan() * R2D, t.libm_asin() * R2D) {
                 return Err(projection.world_domain_error());
             }
         }
         let r = R2D * (self.mu + 1.0) * cos_theta / denom;
-        projection.projected_coordinate(r * pr.sin(), -r * pr.cos() / self.cos_gamma)
+        projection.projected_coordinate(r * pr.libm_sin(), -r * pr.libm_cos() / self.cos_gamma)
     }
 
     /// Undo the γ shear, then solve A·sinθ + B·cosθ = C for θ: each root past the native
     /// pole taken round by −360°, the larger kept, as wcslib's `azpx2s` does.
     fn deproject(self, projection: Projection, x: f64, y: f64) -> Result<NativeCoordinate> {
         let yc = y * self.cos_gamma;
-        let r = x.hypot(yc) / R2D;
-        let phi = x.atan2(-yc);
+        let r = x.libm_hypot(yc) / R2D;
+        let phi = x.libm_atan2(-yc);
         let (a, b, c) = (
             r,
-            r * phi.cos() * self.tan_gamma - (self.mu + 1.0),
+            r * phi.libm_cos() * self.tan_gamma - (self.mu + 1.0),
             -r * self.mu,
         );
-        let psi = b.atan2(a);
-        let base = projection.checked_asin(c / a.hypot(b))?;
+        let psi = b.libm_atan2(a);
+        let base = projection.checked_asin(c / a.libm_hypot(b))?;
         let theta = [base - psi, PI - base - psi]
             .into_iter()
             .map(|root| if root > FRAC_PI_2 { root - TAU } else { root })
@@ -152,7 +153,7 @@ impl Szp {
             y: mu * angle::cosd(thetac) * angle::cosd(phic),
             z,
             divergence: if (z - 1.0).abs() < 1.0 {
-                (1.0 - z).asin() * R2D
+                (1.0 - z).libm_asin() * R2D
             } else {
                 -90.0
             },
@@ -181,14 +182,14 @@ impl Szp {
             // R² = (z_p − 1)·z_p − 1 + s², which for θc = 90° misses the AZP limb
             // sinθ = −1/μ of the same geometry (−26.57° against −30° at μ = 2) and
             // refuses points that do have an image.
-            let s = self.x * pr.sin() - self.y * pr.cos();
-            let t = 1.0 / (self.z - 1.0).hypot(s);
-            if t <= 1.0 && theta < limb(s.atan2(self.z - 1.0) * R2D, t.asin() * R2D) {
+            let s = self.x * pr.libm_sin() - self.y * pr.libm_cos();
+            let t = 1.0 / (self.z - 1.0).libm_hypot(s);
+            if t <= 1.0 && theta < limb(s.libm_atan2(self.z - 1.0) * R2D, t.libm_asin() * R2D) {
                 return Err(projection.world_domain_error());
             }
         }
-        let x = R2D * (self.z * cos_theta * pr.sin() - self.x * sigma) / denom;
-        let y = R2D * (-self.z * cos_theta * pr.cos() - self.y * sigma) / denom;
+        let x = R2D * (self.z * cos_theta * pr.libm_sin() - self.x * sigma) / denom;
+        let y = R2D * (-self.z * cos_theta * pr.libm_cos() - self.y * sigma) / denom;
         projection.projected_coordinate(x, y)
     }
 
@@ -204,7 +205,7 @@ impl Szp {
             c: a0 * a0 + b0 * b0,
         };
         let sigma = depth.visible_sigma(projection)?;
-        let phi = (a0 + a1 * sigma).atan2(b0 + b1 * sigma);
+        let phi = (a0 + a1 * sigma).libm_atan2(b0 + b1 * sigma);
         projection.native_depth(phi * R2D, sigma)
     }
 }
@@ -229,15 +230,15 @@ impl Sin {
         let hidden = if self.xi == 0.0 && self.eta == 0.0 {
             sin_theta < 0.0
         } else {
-            native.theta() < -(self.xi * pr.sin() - self.eta * pr.cos()).atan() * R2D
+            native.theta() < -(self.xi * pr.libm_sin() - self.eta * pr.libm_cos()).libm_atan() * R2D
         };
         if hidden {
             return Err(projection.world_domain_error());
         }
         // 1 − sin θ = cos²θ / (1 + sin θ), which does not cancel next to the pole.
         let sigma = cos_theta * cos_theta / (1.0 + sin_theta);
-        let x = R2D * (cos_theta * pr.sin() + self.xi * sigma);
-        let y = R2D * (-cos_theta * pr.cos() + self.eta * sigma);
+        let x = R2D * (cos_theta * pr.libm_sin() + self.xi * sigma);
+        let y = R2D * (-cos_theta * pr.libm_cos() + self.eta * sigma);
         projection.projected_coordinate(x, y)
     }
 
@@ -254,7 +255,7 @@ impl Sin {
         let phi = if a == 0.0 && b == 0.0 {
             0.0
         } else {
-            a.atan2(-b) * R2D
+            a.libm_atan2(-b) * R2D
         };
         projection.native_depth(phi, sigma)
     }

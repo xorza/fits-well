@@ -41,7 +41,7 @@ fn cube_corner_deprojects_to_its_vertex() {
         // (1, −1, 1)/√3: φ = −45°, θ = atan(1/√2). The tolerance allows the few
         // roundings of the face equations, which differ by projection.
         let corner = pv.deproject(315.0, 45.0).unwrap();
-        let vertex_theta = (1.0 / SQRT_2).atan() * R2D;
+        let vertex_theta = (1.0 / SQRT_2).libm_atan() * R2D;
         tolerance::assert_close(
             &[corner.phi, corner.theta()],
             &[-45.0, vertex_theta],

@@ -93,7 +93,7 @@ fn one_dimensional_tabular_transforms_allocate_nothing() {
 /// and the forward point through the same coupled table allocates nothing either.
 #[test]
 fn tabular_inverse_allocations_do_not_grow_with_search_depth() {
-    let deep = 0.5 + 2.0_f64.powi(-20);
+    let deep = 0.5 + libm::ldexp(1.0, -20);
     black_box(tabular_inverse_at_fraction(0.5));
     assert_eq!(
         allocations(|| tabular_inverse_at_fraction(black_box(0.5))),

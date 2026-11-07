@@ -1,5 +1,6 @@
 //! Spherical cube projections from FITS WCS Paper II, §§5.6–5.8.
 
+use crate::libm_ext::Libm;
 use std::f64::consts::FRAC_1_SQRT_2;
 use std::f64::consts::PI;
 
@@ -171,9 +172,9 @@ fn face_direction(phi: f64, theta: f64) -> FaceDirection {
     let longitude = phi * D2R;
     let latitude = theta * D2R;
     let direction = Direction {
-        l: latitude.cos() * longitude.cos(),
-        m: latitude.cos() * longitude.sin(),
-        n: latitude.sin(),
+        l: latitude.libm_cos() * longitude.libm_cos(),
+        m: latitude.libm_cos() * longitude.libm_sin(),
+        n: latitude.libm_sin(),
     };
 
     let mut face = CubeFace::North;
@@ -267,7 +268,7 @@ fn native_coordinate(projection: Projection, direction: Direction) -> Result<Nat
     let phi = if direction.l == 0.0 && direction.m == 0.0 {
         0.0
     } else {
-        direction.m.atan2(direction.l) * R2D
+        direction.m.libm_atan2(direction.l) * R2D
     };
     if !direction.n.is_finite() || direction.n.abs() > 1.0 + UNIT_TOLERANCE {
         return Err(projection.domain_error());
@@ -279,7 +280,7 @@ fn native_coordinate(projection: Projection, direction: Direction) -> Result<Nat
     let cos_theta = if projection == Projection::Csc {
         ((1.0 - n) * (1.0 + n)).sqrt()
     } else {
-        direction.l.hypot(direction.m)
+        direction.l.libm_hypot(direction.m)
     };
     let phi = projection.native_longitude(phi)?;
     Ok(NativeCoordinate::from_sin_cos(phi, n, cos_theta))
@@ -404,7 +405,7 @@ fn qsc_inverse(projection: Projection, face: FaceCoordinate) -> Result<Direction
         (0.0, 1.0, 0.0)
     } else {
         let angle = 15.0 * secondary / primary * D2R;
-        let omega = angle.sin() / (angle.cos() - FRAC_1_SQRT_2);
+        let omega = angle.libm_sin() / (angle.libm_cos() - FRAC_1_SQRT_2);
         let tau = 1.0 + omega * omega;
         let zeco = primary * primary * (1.0 - 1.0 / (1.0 + tau).sqrt());
         (omega, tau, zeco)
@@ -520,17 +521,23 @@ fn qsc_forward(face: FaceDirection, theta: f64) -> FaceCoordinate {
 }
 
 fn qsc_small_angle_zeco(face: FaceDirection, theta: f64) -> f64 {
-    let longitude = face.direction.m.atan2(face.direction.l);
+    let longitude = face.direction.m.libm_atan2(face.direction.l);
     match face.face {
-        CubeFace::Front => f64::midpoint(longitude * longitude, (theta * D2R).powi(2)),
-        CubeFace::Right => f64::midpoint((longitude - PI / 2.0).powi(2), (theta * D2R).powi(2)),
+        CubeFace::Front => f64::midpoint(longitude * longitude, (theta * D2R).libm_powi(2)),
+        CubeFace::Right => f64::midpoint(
+            (longitude - PI / 2.0).libm_powi(2),
+            (theta * D2R).libm_powi(2),
+        ),
         CubeFace::Back => {
             let offset = longitude - PI.copysign(longitude);
-            f64::midpoint(offset * offset, (theta * D2R).powi(2))
+            f64::midpoint(offset * offset, (theta * D2R).libm_powi(2))
         }
-        CubeFace::Left => f64::midpoint((longitude + PI / 2.0).powi(2), (theta * D2R).powi(2)),
-        CubeFace::South => ((theta + 90.0) * D2R).powi(2) / 2.0,
-        CubeFace::North => ((90.0 - theta) * D2R).powi(2) / 2.0,
+        CubeFace::Left => f64::midpoint(
+            (longitude + PI / 2.0).libm_powi(2),
+            (theta * D2R).libm_powi(2),
+        ),
+        CubeFace::South => ((theta + 90.0) * D2R).libm_powi(2) / 2.0,
+        CubeFace::North => ((90.0 - theta) * D2R).libm_powi(2) / 2.0,
     }
 }
 
@@ -541,5 +548,5 @@ fn qsc_primary(omega: f64, zeco: f64) -> f64 {
 
 fn qsc_secondary(primary: f64, omega: f64) -> f64 {
     let tau = 1.0 + omega * omega;
-    primary / 15.0 * (omega.atan() * R2D - (omega / (2.0 * tau).sqrt()).asin() * R2D)
+    primary / 15.0 * (omega.libm_atan() * R2D - (omega / (2.0 * tau).sqrt()).libm_asin() * R2D)
 }

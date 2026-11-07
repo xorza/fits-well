@@ -1,5 +1,7 @@
 //! [`Mjd`]: a Modified Julian Date as a whole day and a fraction.
 
+use crate::libm_ext::Libm;
+
 /// A Modified Julian Date (`JD − 2400000.5`) as an integer day and a fraction of a day
 /// in [0, 1), as `MJDREFI` and `MJDREFF` split it (§9.2.2). The fraction has a spacing
 /// of at most 2⁻⁵³ day ≈ 1e-11 s at every date, where one `f64` MJD has 2⁻³⁷ day ≈
@@ -84,7 +86,7 @@ impl Mjd {
 /// The integral `whole` as an `i64`, `None` when it is not below 2⁵³ in size or not
 /// finite.
 fn whole_days(whole: f64) -> Option<i64> {
-    (whole.abs() < 2.0_f64.powi(53)).then_some(whole as i64)
+    (whole.abs() < 2.0_f64.libm_powi(53)).then_some(whole as i64)
 }
 
 impl Expansion {
@@ -169,7 +171,7 @@ mod tests {
 
     /// `value` in units of 2⁻¹⁰⁴: exact for a multiple of 2⁻¹⁰⁴ below 2²³ in size.
     fn fixed(value: f64) -> i128 {
-        let scaled = value * 2f64.powi(104);
+        let scaled = value * 2f64.libm_powi(104);
         debug_assert_eq!(scaled.fract(), 0.0, "{value:e} is not a multiple of 2⁻¹⁰⁴");
         scaled as i128
     }
@@ -180,7 +182,7 @@ mod tests {
         let span = u64::try_from(exponents.end - exponents.start).unwrap();
         let exponent = exponents.start + i32::try_from(draws.next() % span).unwrap();
         let sign = if draws.next() & 1 == 0 { 1.0 } else { -1.0 };
-        sign * (1.0 + draws.unit()) * 2f64.powi(exponent)
+        sign * (1.0 + draws.unit()) * 2f64.libm_powi(exponent)
     }
 
     /// Two-sum and two-product are exact, checked in i128 at 2⁻¹⁰⁴: for addends of size
@@ -214,7 +216,7 @@ mod tests {
     fn plus_rounds_once() {
         let mut draws = SplitMix::new(11);
         for _ in 0..10_000 {
-            let start = Mjd::new(60_000, (draws.next() >> 12) as f64 * 2f64.powi(-52));
+            let start = Mjd::new(60_000, (draws.next() >> 12) as f64 * 2f64.libm_powi(-52));
             let days = Expansion {
                 hi: draw(&mut draws, -40..20),
                 lo: draw(&mut draws, -52..-48),
@@ -224,8 +226,8 @@ mod tests {
                 + fixed(start.fraction())
                 + fixed(days.hi)
                 + fixed(days.lo);
-            let got =
-                (i128::from(sum.day()) << 104) + (sum.fraction() * 2f64.powi(104)).round() as i128;
+            let got = (i128::from(sum.day()) << 104)
+                + (sum.fraction() * 2f64.libm_powi(104)).round() as i128;
             assert!(
                 (got - exact).abs() <= 1 << 50,
                 "{start:?} + {days:?} = {sum:?}: off by {} × 2⁻¹⁰⁴",

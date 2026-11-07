@@ -13,6 +13,7 @@ use crate::image_model::bitpix::Bitpix;
 use crate::image_model::data::Data;
 use crate::image_model::scaling::Scaling;
 use crate::internals::rng::SplitMix;
+use crate::libm_ext::Libm;
 use crate::ragged::Ragged;
 use crate::world_coordinates::Wcs;
 use std::f64::consts::TAU;
@@ -57,7 +58,7 @@ pub(crate) struct Star {
 /// pixels, uniform in position, their fluxes a power law above the faintest.
 pub(crate) fn stars(width: usize, height: usize, seed: u64) -> Vec<Star> {
     let mut draws = SplitMix::new(seed ^ 0x5741_5253);
-    let sigma = FWHM / (8.0 * 2f64.ln()).sqrt();
+    let sigma = FWHM / (8.0 * 2f64.libm_ln()).sqrt();
     let faintest = FAINTEST_PEAK * TAU * sigma * sigma;
     (0..(width * height).div_ceil(PIXELS_PER_STAR))
         .map(|_| Star {
@@ -72,7 +73,7 @@ pub(crate) fn stars(width: usize, height: usize, seed: u64) -> Vec<Star> {
 /// pixel: the sky and each star as a Gaussian of [`FWHM`], cut at 4σ.
 fn signal(width: usize, height: usize, seed: u64) -> Vec<f64> {
     let mut plane = vec![SKY; width * height];
-    let sigma = FWHM / (8.0 * 2f64.ln()).sqrt();
+    let sigma = FWHM / (8.0 * 2f64.libm_ln()).sqrt();
     let reach = (4.0 * sigma).ceil() as isize;
     for star in stars(width, height, seed) {
         let peak = star.flux / (TAU * sigma * sigma);
@@ -81,7 +82,8 @@ fn signal(width: usize, height: usize, seed: u64) -> Vec<f64> {
             for x in (cx - reach).max(0)..(cx + reach + 1).min(width as isize) {
                 let (dx, dy) = (x as f64 + 0.5 - star.x, y as f64 + 0.5 - star.y);
                 let r2 = (dx * dx + dy * dy) / (sigma * sigma);
-                plane[y.cast_unsigned() * width + x.cast_unsigned()] += peak * (-0.5 * r2).exp();
+                plane[y.cast_unsigned() * width + x.cast_unsigned()] +=
+                    peak * (-0.5 * r2).libm_exp();
             }
         }
     }
@@ -117,7 +119,11 @@ pub(crate) fn sky(bitpix: Bitpix, width: usize, height: usize, seed: u64) -> Ima
                 .map(|v| (v * f64::from(i32::MAX)).round() as i32)
                 .collect(),
         ),
-        Bitpix::I64 => Data::I64(units.map(|v| (v * 2f64.powi(53)).round() as i64).collect()),
+        Bitpix::I64 => Data::I64(
+            units
+                .map(|v| (v * 2f64.libm_powi(53)).round() as i64)
+                .collect(),
+        ),
         Bitpix::F32 => Data::F32(units.map(|v| v as f32).collect()),
         Bitpix::F64 => Data::F64(units.collect()),
     };

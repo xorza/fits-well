@@ -197,7 +197,10 @@ fn cunit_scales_celestial_axes_to_degrees() {
     tolerance::assert_close(
         &to_world(&w_asec, &[50.0, 50.0]).unwrap(),
         &[150.0, 30.0],
-        Tolerance::ulps(1.0, "the rotation's roundings of δ₀"),
+        Tolerance::ulps(
+            2.0,
+            "the rotation's roundings of δ₀, 2 ulps through `libm`'s trigonometry",
+        ),
         "arcsec CRVAL",
     );
 }

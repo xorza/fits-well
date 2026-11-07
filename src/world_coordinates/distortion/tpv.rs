@@ -6,6 +6,7 @@ use crate::fits_error::FitsError;
 use crate::fits_error::Result;
 use crate::header_model::Header;
 use crate::keyword::Keyword;
+use crate::libm_ext::Libm;
 use crate::world_coordinates::distortion::{MAX_STEPS, converged};
 use crate::world_coordinates::header_read;
 
@@ -127,7 +128,7 @@ impl Powers {
         Self {
             x: xp,
             y: yp,
-            r: x.hypot(y),
+            r: x.libm_hypot(y),
         }
     }
 }
@@ -143,7 +144,7 @@ fn value(coefficients: &[f64; TERM_COUNT], x: f64, y: f64) -> f64 {
         }
         value += match term {
             Term::Monomial { x: p, y: q } => c * xp[p] * yp[q],
-            Term::Radial(k) => c * r.powi(k),
+            Term::Radial(k) => c * r.libm_powi(k),
         };
     }
     value
@@ -168,11 +169,11 @@ fn evaluate(coefficients: &[f64; TERM_COUNT], x: f64, y: f64) -> [f64; 3] {
                 }
             }
             Term::Radial(k) => {
-                value += c * r.powi(k);
+                value += c * r.libm_powi(k);
                 // ∂(r^k)/∂x = k·r^(k−2)·x, which tends to k·x/r at r = 0 for k = 1;
                 // 0 there by symmetry of the limit.
                 if r > 0.0 {
-                    let scale = c * f64::from(k) * r.powi(k - 2);
+                    let scale = c * f64::from(k) * r.libm_powi(k - 2);
                     dx += scale * x;
                     dy += scale * y;
                 }
@@ -184,6 +185,7 @@ fn evaluate(coefficients: &[f64; TERM_COUNT], x: f64, y: f64) -> [f64; 3] {
 
 #[cfg(test)]
 mod tests {
+    use crate::libm_ext::Libm;
     use crate::world_coordinates::distortion::tpv::{TERM_COUNT, TERMS, Term, evaluate, value};
 
     /// The value-only evaluation is the full one's value, bit for bit, over a grid that
@@ -192,7 +194,7 @@ mod tests {
     fn value_matches_the_evaluation_with_partials() {
         let mut coefficients = [0.0; TERM_COUNT];
         for (m, coefficient) in coefficients.iter_mut().enumerate() {
-            *coefficient = (m as f64 * 0.37).sin() * 10f64.powi(-(m as i32 % 5));
+            *coefficient = (m as f64 * 0.37).libm_sin() * 10f64.libm_powi(-(m as i32 % 5));
         }
         for i in -4..=4 {
             for j in -4..=4 {

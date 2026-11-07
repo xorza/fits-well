@@ -10,6 +10,7 @@ pub(super) mod spectral_transform;
 use crate::fits_error::FitsError;
 use crate::fits_error::Result;
 use crate::fits_error::WcsDefect;
+use crate::libm_ext::Libm;
 use crate::world_coordinates::axis_transform::spectral_algorithm::SpectralAlgorithm;
 use crate::world_coordinates::axis_transform::spectral_kind::{SpectralKind, domain_error, finite};
 use crate::world_coordinates::axis_transform::spectral_rest::{
@@ -107,8 +108,10 @@ impl AxisTransform {
         match *self {
             Self::Linear { reference } => Ok(reference + intermediate),
             Self::Joint => Ok(intermediate),
-            Self::Logarithmic { reference } => finite(reference * (intermediate / reference).exp())
-                .ok_or_else(|| domain_error(axis, "LOG")),
+            Self::Logarithmic { reference } => {
+                finite(reference * (intermediate / reference).libm_exp())
+                    .ok_or_else(|| domain_error(axis, "LOG"))
+            }
             Self::Spectral(ref transform) => transform.to_world(intermediate, axis),
             Self::Unsupported => {
                 panic!("unsupported WCS transform passed completeness check")
@@ -121,7 +124,7 @@ impl AxisTransform {
             Self::Linear { reference } => Ok(world - reference),
             Self::Joint => Ok(world),
             Self::Logarithmic { reference } if world.is_finite() && world > 0.0 => {
-                Ok(reference * (world / reference).ln())
+                Ok(reference * (world / reference).libm_ln())
             }
             Self::Logarithmic { .. } => Err(domain_error(axis, "LOG")),
             Self::Spectral(ref transform) => transform.to_intermediate(world, axis),

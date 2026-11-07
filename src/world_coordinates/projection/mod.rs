@@ -4,6 +4,7 @@
 //! [`Projection::parameters`], and its forward and inverse sit side by side in its
 //! file.
 
+use crate::libm_ext::Libm;
 use std::f64::consts::PI;
 use std::fmt;
 
@@ -294,7 +295,7 @@ impl Projection {
         if !value.is_finite() || !(-1.0 - UNIT_TOLERANCE..=1.0 + UNIT_TOLERANCE).contains(&value) {
             return Err(self.domain_error());
         }
-        Ok(value.clamp(-1.0, 1.0).asin())
+        Ok(value.clamp(-1.0, 1.0).libm_asin())
     }
 
     /// The root of `value`, a difference of terms of size `scale`: a value that

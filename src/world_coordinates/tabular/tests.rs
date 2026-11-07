@@ -8,6 +8,7 @@ use crate::header_model::{Header, keywords};
 use crate::internals::tolerance;
 use crate::internals::tolerance::Tolerance;
 use crate::internals::wcs_header;
+use crate::libm_ext::Libm;
 use crate::world_coordinates::internals::{to_pixel, to_world};
 use std::assert_matches;
 
@@ -431,7 +432,7 @@ fn missing_references_bad_shapes_and_nonmonotonic_indices_are_refused() {
     );
     // f64's shortest form of 2⁶³ is the text the error keeps.
     assert_matches!(
-        refusal(2f64.powi(63)),
+        refusal(2f64.libm_powi(63)),
         FitsError::IntegerOutOfRange {
             name: Some(RecordName::Keyword(name)),
             value,

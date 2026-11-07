@@ -2,6 +2,7 @@
 //! `ZEA`, `ZPN` and `AIR` (CG 2002 §5.1): radial in the colatitude ζ about the native
 //! pole.
 
+use crate::libm_ext::Libm;
 use std::f64::consts::PI;
 
 use crate::fits_error::Result;
@@ -72,7 +73,7 @@ impl Zenithal {
             Self::Stg if 1.0 + sin_theta == 0.0 => return Err(projection.world_domain_error()),
             Self::Stg => 2.0 * R2D * cos_theta / (1.0 + sin_theta),
             Self::Arc => R2D * native.zeta(),
-            Self::Zea => 2.0 * R2D * (native.zeta() / 2.0).sin(),
+            Self::Zea => 2.0 * R2D * (native.zeta() / 2.0).libm_sin(),
             Self::Zpn(zpn) => {
                 let zeta = native.zeta();
                 if zeta > zpn.branch.zeta_max {
@@ -89,7 +90,7 @@ impl Zenithal {
             }
         };
         let p = native.phi * D2R;
-        projection.projected_coordinate(r * p.sin(), -r * p.cos())
+        projection.projected_coordinate(r * p.libm_sin(), -r * p.libm_cos())
     }
 
     /// Deproject `(x, y)` (deg): the colatitude ζ (rad) from the radius, per projection.
@@ -99,8 +100,12 @@ impl Zenithal {
         x: f64,
         y: f64,
     ) -> Result<NativeCoordinate> {
-        let r = x.hypot(y);
-        let phi = if r == 0.0 { 0.0 } else { x.atan2(-y) * R2D };
+        let r = x.libm_hypot(y);
+        let phi = if r == 0.0 {
+            0.0
+        } else {
+            x.libm_atan2(-y) * R2D
+        };
         let u = r / R2D;
         let zeta = match self {
             // tan ζ = u gives sin θ and cos θ with no trigonometry.
@@ -114,7 +119,7 @@ impl Zenithal {
             }
             Self::Arc => u,
             Self::Zea => 2.0 * projection.checked_asin(u / 2.0)?,
-            Self::Stg => 2.0 * (u / 2.0).atan(),
+            Self::Stg => 2.0 * (u / 2.0).libm_atan(),
             Self::Zpn(zpn) => zpn.zeta(projection, u)?,
             Self::Air(air) => air.zeta(u)?,
         };
@@ -243,11 +248,11 @@ impl Air {
     /// so `K = −ln_1p(t_b²)/(2t_b²)`, which keeps its precision as `t_b → 0` and has the
     /// limit `−1/2` there.
     pub(super) fn new(theta_b: f64) -> Self {
-        let t_squared = ((90.0 - theta_b) * D2R / 2.0).tan().powi(2);
+        let t_squared = ((90.0 - theta_b) * D2R / 2.0).libm_tan().libm_powi(2);
         let k = if t_squared == 0.0 {
             -0.5
         } else {
-            -t_squared.ln_1p() / (2.0 * t_squared)
+            -t_squared.libm_ln_1p() / (2.0 * t_squared)
         };
         Self { k }
     }
@@ -255,7 +260,7 @@ impl Air {
     /// The radius `R/(180/π)` at colatitude `ζ` (rad): `−2[ln(cos ξ)/tan ξ + K tan ξ]`,
     /// `ξ = ζ/2`, in `t = tan ξ`.
     pub(super) fn radius(self, zeta: f64) -> f64 {
-        self.radius_t((zeta / 2.0).tan())
+        self.radius_t((zeta / 2.0).libm_tan())
     }
 
     /// The radius in `t = tan ξ`: `ln(1 + t²)/t − 2Kt`, with `ln cos ξ = −ln(1 + t²)/2`.
@@ -264,7 +269,7 @@ impl Air {
         if t == 0.0 {
             return 0.0;
         }
-        (t * t).ln_1p() / t - 2.0 * self.k * t
+        (t * t).libm_ln_1p() / t - 2.0 * self.k * t
     }
 
     /// `d/dt` of [`Self::radius_t`]: `(2t²/(1 + t²) − ln(1 + t²))/t² − 2K`.
@@ -273,7 +278,7 @@ impl Air {
             return 1.0 - 2.0 * self.k;
         }
         let t_squared = t * t;
-        (2.0 * t_squared / (1.0 + t_squared) - t_squared.ln_1p()) / t_squared - 2.0 * self.k
+        (2.0 * t_squared / (1.0 + t_squared) - t_squared.libm_ln_1p()) / t_squared - 2.0 * self.k
     }
 
     /// The colatitude ζ (rad) of `u = R/(180/π)`, solved in `t = tan(ζ/2)`, where the
@@ -291,7 +296,7 @@ impl Air {
             residual: self.radius_t(t) - u,
             derivative: self.radius_t_derivative(t),
         })?;
-        Ok(2.0 * t.atan())
+        Ok(2.0 * t.libm_atan())
     }
 }
 
