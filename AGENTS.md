@@ -51,6 +51,12 @@ output with `.notes/API_SURFACE.md`.
 The gate builds three feature sets: all features, `compression` without `parallel`, and no codec at
 all. Code must build in each, and its tests pass in the first two.
 
+- **CI runs on [`xorza/rust-ci`](https://github.com/xorza/rust-ci)**: the same lane on every OS, and a failure that
+  names its crashes and failed tests. Its README holds the decisions it shares with its other callers.
+- **The gate is plain cargo aliases**, as palantir and Darkroom have. Refused: `cargo drive gate`,
+  which leaves one repository different and makes CI build the driver first. The driver serves
+  `cargo drive surface` alone.
+
 ## Test code
 
 `internals` is the one feature for what only tests and benches build; the
