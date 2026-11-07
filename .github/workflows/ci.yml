@@ -15,19 +15,23 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# No RUSTFLAGS: it would replace the x86-64-v3 flags of `.cargo/config.toml`.
+# No RUSTFLAGS: it would replace the x86-64-v3 flags of `.cargo/config.toml`. The driver's commit is
+# the one the drive table's `version` takes.
 env:
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
-  RUST_BACKTRACE: 1
-  # The driver's commit that the drive table's `version` takes, as a local install has it.
-  DRIVE_REV: 2c6fd5a1285ca493e404e0d28e0cce5a15fab2a2
+  DRIVE_REV: 271baf137770ad5ff14c3089bf82eee70025fcb6
+
+# `xorza/rust-ci` holds the steps each repository and OS shares. Its actions read bash, and a `run`
+# gets `pipefail` only from a named shell.
+defaults:
+  run:
+    shell: bash
 
 jobs:
   gate:
     name: gate (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # A hang in the tests ends at its step's limit.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -37,22 +41,47 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Every hosted runner has rustup, so no action is needed to install the toolchain.
-      - run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: xorza/rust-ci/setup@9629682b748c30f471b2904c9c85a520765cb542 # master
+      - uses: xorza/rust-ci/crash-capture@9629682b748c30f471b2904c9c85a520765cb542 # master
+      # The gate of AGENTS.md, one step per command, each run past an earlier failure, so one run
+      # reports every lane. The build apart from the run, so each shows its own time.
+      - run: cargo fmt --all --check
+      - if: ${{ !cancelled() }}
+        run: cargo --locked gate-lint
+      - if: ${{ !cancelled() }}
+        run: cargo --locked gate-lint-compression
+      - if: ${{ !cancelled() }}
+        run: cargo --locked gate-lint-bare
+      - if: ${{ !cancelled() }}
+        run: cargo --locked gate-ship
+      - if: ${{ !cancelled() }}
+        run: cargo --locked gate-test --no-run
+      - uses: xorza/rust-ci/test@9629682b748c30f471b2904c9c85a520765cb542 # master
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
         with:
-          # Only master writes, so a pull request cannot evict what master reads.
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+          command: cargo --locked gate-test
+      - if: ${{ !cancelled() }}
+        run: cargo --locked gate-test-compression --no-run
+      - uses: xorza/rust-ci/test@9629682b748c30f471b2904c9c85a520765cb542 # master
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
         with:
-          tool: cargo-nextest
-      # The cache keeps `~/.cargo/bin`, so this builds the driver only when `DRIVE_REV` moves.
-      - run: cargo install --locked --git https://github.com/xorza/drive --rev "$DRIVE_REV"
-        shell: bash
-      # `--ci` formats nothing and runs past a failure: fmt --check, each lint set, the build
-      # that ships, the tests of each test set, rustdoc and the doc tests.
-      - run: cargo drive gate --ci
-      - run: cargo drive run examples
+          command: cargo --locked gate-test-compression
+      - if: ${{ !cancelled() }}
+        run: cargo --locked gate-doc
+      - uses: xorza/rust-ci/test@9629682b748c30f471b2904c9c85a520765cb542 # master
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
+        with:
+          command: cargo --locked gate-doctest
+      - uses: xorza/rust-ci/test@9629682b748c30f471b2904c9c85a520765cb542 # master
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
+        with:
+          command: bash scripts/examples.sh
+      - uses: xorza/rust-ci/failure-report@9629682b748c30f471b2904c9c85a520765cb542 # master
+        if: failure()
 
   api-surface:
     name: public API surface
@@ -62,12 +91,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: rustup toolchain install stable --profile minimal && rustup default stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - uses: xorza/rust-ci/setup@9629682b748c30f471b2904c9c85a520765cb542 # master
       - run: cargo install --locked --git https://github.com/xorza/drive --rev "$DRIVE_REV"
       # The committed surface must be what the tree renders: a change to the public API shows
       # here as a diff until `.notes/API_SURFACE.md` is rendered again with it.
       - run: cargo drive surface
       - run: git diff --exit-code -- .notes/API_SURFACE.md
+
+  workflows:
+    name: workflow checks
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: xorza/rust-ci/workflow-check@9629682b748c30f471b2904c9c85a520765cb542 # master

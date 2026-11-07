@@ -12,6 +12,7 @@ exclude = [
     "docs/",
     "test_resources/",
     "tests/",
+    "scripts/",
     ".claude/",
     "AGENTS.md",
     "CLAUDE.md",
@@ -23,28 +24,10 @@ exclude = [
 features = ["compression", "parallel"]
 rustdoc-args = ["--cfg", "docsrs"]
 
-# The codec paths without `parallel`, and the bare reader. Benches measure every feature.
+# The driver serves `cargo drive surface` alone, which writes `.notes/API_SURFACE.md` for CI to
+# compare with the tree; the gate is plain cargo (AGENTS.md "Verification").
 [package.metadata.drive]
-version = "0.2"
-lint = ["--all-features", "--no-default-features --features compression", "--no-default-features"]
-test = ["--all-features", "--no-default-features --features compression"]
-bench = "--all-features"
-docs = true
-
-# Each example, run once: `cargo drive run examples`. `inspect` reads a sample file.
-[package.metadata.drive.commands.examples]
-steps = [
-    { cargo = "run --example image" },
-    { cargo = "run --example compression" },
-    { cargo = "run --example table" },
-    { cargo = "run --example ascii_table" },
-    { cargo = "run --example header" },
-    { cargo = "run --example edit" },
-    { cargo = "run --example stream" },
-    { cargo = "run --example wcs" },
-    { cargo = "run --example time" },
-    { cargo = "run --example inspect -- test_resources/UITfuv2582gc.fits" },
-]
+version = "0.2.7"
 
 [dependencies]
 bitvec = "1"

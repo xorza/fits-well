@@ -1,17 +1,16 @@
-//! `cargo drive run examples` runs each example in `examples/`, as the drive table of the
-//! manifest lists them by hand.
+//! `scripts/examples.sh` runs each example in `examples/`, as it lists them by hand.
 
 use std::fs;
 use std::path::Path;
 
 #[test]
-fn examples_command_runs_every_example() {
+fn examples_script_runs_every_example() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
-    let mut listed: Vec<&str> = manifest
+    let script = fs::read_to_string(root.join("scripts/examples.sh")).unwrap();
+    let mut listed: Vec<&str> = script
         .split("--example ")
         .skip(1)
-        .map(|rest| rest.split([' ', '"']).next().unwrap())
+        .map(|rest| rest.split([' ', '\n']).next().unwrap())
         .collect();
     let mut examples: Vec<String> = fs::read_dir(root.join("examples"))
         .unwrap()

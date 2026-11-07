@@ -35,24 +35,21 @@ A reader and writer for **FITS**, the standard file format of astronomy.
 
 ## Verification
 
-`cargo drive` runs every check; run it from the root, and never run cargo by
-hand, which builds another copy of the crates.
+The gate is one chain of plain cargo commands, run from the root. Each is an alias in
+`.cargo/config.toml`, and the chain stops at the first that fails:
 
 ```
-cargo drive check          # after each change: fmt, then clippy on every target
-cargo drive test [args]    # the tests with default features; an argument picks some by name
-cargo drive gate           # every check CI runs, the docs and doc tests included
-cargo drive bench [args]   # the benches; --test runs each case once
-cargo drive run examples   # each example, run once
+cargo fmt --all && cargo gate-lint && cargo gate-lint-compression && cargo gate-lint-bare && cargo gate-ship && cargo gate-test && cargo gate-test-compression && cargo gate-doc && cargo gate-doctest && scripts/examples.sh
 ```
 
-Each command ends on one line, `ok` or `FAIL` with the file that holds the
-details, so `| tail -1` is enough; on a failure, read that file rather than run
-the command again. A change to bench code adds `cargo drive bench --test`.
+Run the aliases rather than cargo with flags of your own: another flag set builds another copy of
+the crates. A filtered `cargo gate-test <name>` is the cheapest way to see an edit work. CI runs
+the same lanes on three OSes. A change to bench code adds `cargo bench-once`, and `cargo bench-all`
+runs the benches. A change to the public API also runs `cargo drive surface`, as CI compares its
+output with `.notes/API_SURFACE.md`.
 
-`gate` builds three feature sets: all features, `compression` without
-`parallel`, and no codec at all. Code must build in each, and its tests pass in
-the first two.
+The gate builds three feature sets: all features, `compression` without `parallel`, and no codec at
+all. Code must build in each, and its tests pass in the first two.
 
 ## Test code
 

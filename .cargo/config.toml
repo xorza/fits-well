@@ -4,3 +4,19 @@
 # so non-x86 targets aren't handed a CPU they aren't.
 [target.'cfg(target_arch = "x86_64")']
 rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+# The gate of AGENTS.md. Three feature sets: all features, `compression` without `parallel`, and no
+# codec at all. Each builds, and the tests pass in the first two. No `--workspace`: one crate.
+[alias]
+gate-lint = "clippy --all-targets --all-features --keep-going -- -D warnings"
+gate-lint-compression = "clippy --all-targets --no-default-features --features compression --keep-going -- -D warnings"
+gate-lint-bare = "clippy --all-targets --no-default-features --keep-going -- -D warnings"
+gate-ship = "clippy --keep-going -- -D warnings"
+gate-test = "test --tests --no-fail-fast --all-features"
+gate-test-compression = "test --tests --no-fail-fast --no-default-features --features compression"
+# `-D warnings` through a `cfg(all())` entry, as an env `RUSTDOCFLAGS` would replace the one Darkroom's
+# config holds for x86-64-v3.
+gate-doc = 'doc --no-deps --document-private-items --all-features --keep-going --config target."cfg(all())".rustdocflags=["-D","warnings"]'
+gate-doctest = "test --doc --no-fail-fast --all-features"
+bench-all = "bench --bench fits_well --all-features"
+bench-once = "test --bench fits_well --all-features"

@@ -3,7 +3,7 @@
 //! compressed. Run it on request:
 //!
 //! ```sh
-//! cargo drive test -- --ignored writes_files_for_the_reference_readers
+//! cargo gate-test -- --ignored writes_files_for_the_reference_readers
 //! ```
 //!
 //! Then read each image with astropy (`astropy.io.fits.open(path)[1].data`) and compare
