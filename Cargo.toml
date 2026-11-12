@@ -72,7 +72,7 @@ debug = false
 
 # Full debug info, which `darkroom/packaging` splits out of the shipped binary.
 [profile.release]
-lto = "fat"
+lto = "thin"
 codegen-units = 1
 panic = "abort"
 debug = "full"
@@ -84,7 +84,6 @@ strip = "none"
 
 [profile.release-dev]
 inherits = "release"
-lto = "thin"
 codegen-units = 16
 incremental = true
 debug = "line-tables-only"
